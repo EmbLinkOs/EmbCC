@@ -154,9 +154,16 @@ while IFS="|" read -r t ours gcc rest; do
             { echo "$t $a:"; cat "$out/said.err"; } >> "$out/said-bad.txt"
     done
 done < "$out/said.txt"
+# an EmbCC option the target has no use for, and a pass no pass is
 "$E" --pass=bogus "$out/t.c" > "$out/said.err" 2>&1
-grep -qF "unknown argument '--pass=bogus'" "$out/said.err" ||
+grep -qF "embcc: error: --pass=bogus: no optimizer pass has that name; the passes are mem2reg," "$out/said.err" ||
     { echo "--pass=bogus:"; cat "$out/said.err"; } >> "$out/said-bad.txt"
+"$E" --target=x86_64-elf --isa=x86-64 "$out/t.c" > "$out/said.err" 2>&1
+grep -qF "embcc: error: --isa=x86-64 is not an option for x86_64-elf" "$out/said.err" ||
+    { echo "--isa=x86-64:"; cat "$out/said.err"; } >> "$out/said-bad.txt"
+"$E" -fbogus-flag "$out/t.c" > "$out/said.err" 2>&1
+grep -qF "embcc: error: unknown argument '-fbogus-flag'" "$out/said.err" ||
+    { echo "-fbogus-flag:"; cat "$out/said.err"; } >> "$out/said-bad.txt"
 [ ! -s "$out/said-bad.txt" ] ||
     { cat "$out/said-bad.txt"; fail "a message does not quote the option as it was typed"; }
 echo "options-table: every message quotes the option as it was typed"

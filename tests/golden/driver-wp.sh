@@ -45,6 +45,6 @@ grep -q 'int v = 3 + 5;' "$out/inc.i" && grep -q 'int line = 2;' "$out/inc.i" ||
 if "$EMBCC" -include "$out/nosuch.h" -c "$out/wp.c" -o "$out/x.o" 2> "$out/ni.err"; then
     echo "FAIL: a missing -include file was ignored"; exit 1
 fi
-grep -q 'cannot find -include file' "$out/ni.err" || {
+grep -q 'which --include names to read before the source' "$out/ni.err" || {
     echo "FAIL: the missing -include file is not named:"; cat "$out/ni.err"; exit 1; }
 echo "driver-wp: -include reads its file first, from the working directory or the include path"

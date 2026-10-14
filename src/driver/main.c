@@ -5569,8 +5569,30 @@ int main(int argc, char **argv)
             if (!input)
                 input = argv[i];
         } else {
+            /* --pass=NAME with a NAME no pass has: list the passes. */
+            const char *ty = opt_typed(argv[i]);
+            if (strncmp(ty, "--pass=", 7) == 0 ||
+                strncmp(ty, "--no-pass=", 10) == 0) {
+                const char *const *names;
+                int n = opt_pass_names(&names);
+                fprintf(stderr, "embcc: error: %s: no optimizer pass has "
+                        "that name; the passes are", ty);
+                for (int k = 0; k < n; k++)
+                    fprintf(stderr, "%s %s", k ? (k + 1 == n ? " and" : ",")
+                                              : "", names[k]);
+                fprintf(stderr, "\n");
+                return 1;
+            }
+            /* One of EmbCC's own options that this target has no use
+             * for (--isa= on x86-64) is not unknown: say which. */
+            if (strcmp(ty, argv[i]) != 0) {
+                fprintf(stderr, "embcc: error: %s is not an option for %s "
+                        "(embcc --help lists each option's targets)\n",
+                        ty, target_triple_now());
+                return 1;
+            }
             fprintf(stderr, "embcc: error: unknown argument '%s'\n",
-                    opt_typed(argv[i]));
+                    argv[i]);
             print_usage(stderr);
             return 1;
         }
