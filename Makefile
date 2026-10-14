@@ -280,7 +280,7 @@ $(EMBDBG_CORE): tools/embdbg/embdbg.c tools/embdbg/embdbg_core.h
 	$(CC) $(CFLAGS) $(TOOLCORE_CFLAGS) -c -o $@ $<
 
 all: embcc embread embld embas embls embidx embar embsvd embmap embpack embrt embsim \
-     embflash embtrace binutils-names
+     embflash embtrace embdoc binutils-names
 
 # The binutils a build names, answered by EmbCC's own tools under the
 # names CMake and a Makefile call them by: embar is ar and ranlib, embpack
@@ -371,6 +371,21 @@ embtrace: tools/embtrace/embtrace.c
 # ISO C and standalone, like embar.
 embrt: tools/embrt/embrt.c
 	$(CC) $(CFLAGS) -o $@ tools/embrt/embrt.c
+
+# embdoc -- the documentation as a website: README.md, docs/ and each
+# tools/X/README.md rendered from their Markdown as GitHub renders it,
+# with the navigation, an "On this page" list and a search index, and
+# every relative link and #anchor checked (tools/embdoc). ISO C but for
+# host.c, which lists and makes directories with POSIX's calls.
+EMBDOC_SRCS := tools/embdoc/embdoc.c tools/embdoc/md.c tools/embdoc/assets.c \
+               tools/embdoc/host.c
+embdoc: $(EMBDOC_SRCS) tools/embdoc/embdoc.h
+	$(CC) $(CFLAGS) -o $@ $(EMBDOC_SRCS)
+
+# The site itself, in build/site: never committed (.github/workflows/
+# site.yml publishes it from main). `./embdoc check` lists broken links.
+site: embdoc
+	./embdoc site --out $(BUILD)/site
 
 # embsim -- a simulator (Cortex-M, RISC-V, AVR): runs an image on a model of the board
 # QEMU models, counting instructions and estimating cycles with the
@@ -581,7 +596,7 @@ check: embcc libc-x86_64 libcxx-x86_64
 # without it in this list the suite passes from a dirty tree and fails
 # from a clean one -- which is the wrong way round.
 test: embcc embread embld embdbg embls embas embar embsvd embmap embpack \
-      embrt embsim embflash embtrace libc-x86_64 \
+      embrt embsim embflash embtrace embdoc libc-x86_64 \
       libcxx-x86_64 libc-linux-x86_64 libcxx-linux-x86_64
 	tests/run.sh
 
@@ -955,9 +970,9 @@ libcxx-embedded: embcc embar
 	done
 
 clean:
-	rm -rf $(BUILD) embcc embread embld embdbg embas embls embidx embar embsvd
+	rm -rf $(BUILD) embcc embread embld embdbg embas embls embidx embar embsvd embdoc
 
-.PHONY: all check test test-arm64 test-libstdcxx libc libc-x86_64 libc-aarch64 \
+.PHONY: all check test test-arm64 test-libstdcxx site libc libc-x86_64 libc-aarch64 \
         libc-emblinkos libc-linux libc-linux-x86_64 libc-linux-aarch64 \
         libcxx libcxx-x86_64 libcxx-aarch64 \
         libcxx-linux-x86_64 libcxx-linux-aarch64 libcxx-embedded \

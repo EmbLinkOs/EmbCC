@@ -568,7 +568,7 @@ GNU89 semantics apply instead with `-fgnu89-inline`, with `-std=c89`,
 a function with `__attribute__((gnu_inline))`. Under them a definition
 that says `inline` alone is an external definition, and one that says
 `extern inline` is used only for inlining and never emitted. See
-[`-fgnu89-inline`](invoking.md#-fgnu89-inline).
+[`-fgnu89-inline`](invoking.md#-fgnu89-inline--fno-gnu89-inline).
 
 Whether a call is inlined is decided by the optimizer; see
 [Optimization](optimization.md).
