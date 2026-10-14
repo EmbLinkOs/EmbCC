@@ -4167,7 +4167,14 @@ static void gen_func(struct ir_func *fn, struct code *text,
                  * tests/exec/complex.c caught it: `scalef` loaded the
                  * imaginary part into eax and then multiplied whatever
                  * was still in xmm8, which was the real part's product. */
-                if (!addr_fold_ok(nx)) {
+                /* ...and base+index has no displacement here: an access
+                 * with a folded field offset (memoff) materialises the
+                 * address instead. It dropped the offset -- `t->far[i] +=
+                 * t->notify[i]` read notify[i] at 0 past the struct
+                 * (tests/exec/addr-reassoc.c). */
+                if (!addr_fold_ok(nx) ||
+                    (!i->imm_b && (nx->op == IR_LOAD || nx->op == IR_STORE) &&
+                     nx->memoff)) {
                     /* fall through to materialise the address */
                 } else if (nx->op == IR_LOAD && nx->a == i->dst &&
                            cmpmem_defer(fn, n + 1, usecnt, base,
@@ -4191,7 +4198,8 @@ static void gen_func(struct ir_func *fn, struct code *text,
                      * fusion fires on nearly every field access. */
                     int D = in_reg(nx->dst) ? g_loc[nx->dst] : REG_RAX;
                     if (i->imm_b)
-                        x86_load_reg_basedisp(text, D, base, (int)i->imm,
+                        x86_load_reg_basedisp(text, D, base,
+                                              (int)i->imm + nx->memoff,
                                               nx->size, nx->sign, nx->w);
                     else
                         x86_load_reg_baseindex(text, D, base, index, scale,
@@ -4212,7 +4220,8 @@ static void gen_func(struct ir_func *fn, struct code *text,
                         Sv = REG_RAX;
                     }
                     if (i->imm_b)
-                        x86_store_basedisp_reg(text, base, (int)i->imm, Sv,
+                        x86_store_basedisp_reg(text, base,
+                                               (int)i->imm + nx->memoff, Sv,
                                                nx->size);
                     else
                         x86_store_baseindex_reg(text, base, index, scale, Sv,
@@ -4370,9 +4379,13 @@ static void gen_func(struct ir_func *fn, struct code *text,
                 struct ir_ins *ad = &fn->ins[n + 1];
                 struct ir_ins *mem = &fn->ins[n + 2];
                 int rmw_dummy;
+                /* (the add's half refuses base+index for an access with
+                 * a folded field offset, so this one must too: a shift
+                 * skipped for it was a scale nothing applied) */
                 if (ad->op == IR_ADD && !ad->flt && !ad->imm_b &&
                     ad->b == i->dst && in_reg(ad->a) && ad->dst >= 0 &&
                     ((usecnt[ad->dst] == 1 && addr_fold_ok(mem) &&
+                      !mem->memoff &&
                       ((mem->op == IR_LOAD && mem->a == ad->dst) ||
                        (mem->op == IR_STORE && mem->a == ad->dst))) ||
                      rmw_addr_load(fn, n + 1, usecnt, g_loc[i->a],
