@@ -203,7 +203,7 @@ fi
 # Without -mcmse the attributes are ignored, with a warning, as clang does
 printf 'int __attribute__((cmse_nonsecure_entry)) f(int a) { return a; }\n' > "$out/plain.c"
 "$EMBCC" --target=$M -c "$out/plain.c" -o "$out/plain.o" 2> "$out/plain.err" &&
-grep -q "ignored without -mcmse" "$out/plain.err" || {
+grep -q "ignored without --cmse" "$out/plain.err" || {
     echo "without -mcmse, cmse_nonsecure_entry is not ignored with a warning"
     fail=1; }
 [ "$fail" = 0 ] && echo "what CMSE forbids and what EmbCC does not do are refused by name"

@@ -3581,7 +3581,7 @@ static struct cexpr *dynamic_cast_to(struct cty *t, struct cexpr *e,
                                      const struct ctok *at)
 {
     if (!cx_rtti)
-        cx_error(at, "dynamic_cast with -fno-rtti");
+        cx_error(at, "dynamic_cast with %s", opt_typed("-fno-rtti"));
     int ref = ct_is_ref(t);
     struct cty *tt = ref ? t->to : ct_unqual(t)->k == CT_PTR ? t->to : NULL;
     if (!tt || (tt->k != CT_CLASS && !(tt->k == CT_VOID && !ref)))
@@ -5093,7 +5093,7 @@ static struct cexpr *parse_primary(void)
         cx_advance();
         struct cty *ti = type_info_type(at);
         if (!cx_rtti)
-            cx_error(at, "typeid with -fno-rtti");
+            cx_error(at, "typeid with %s", opt_typed("-fno-rtti"));
         struct cexpr *e = ex_new(E_TYPEID, ct_qual(ti, CQ_CONST), VC_LVALUE);
         if (is_type) {
             e->alloc_t = ct_unqual(ct_strip_ref(parse_type_id()));
@@ -5901,7 +5901,8 @@ static struct cexpr *parse_throw(void)
     const struct ctok *at = cx_cur();
     cx_advance();
     if (!cx_exceptions)
-        cx_error(at, "'throw' with exceptions disabled (-fno-exceptions)");
+        cx_error(at, "'throw' with exceptions disabled (%s)",
+                 opt_typed("-fno-exceptions"));
     struct cexpr *r = ex_new(E_THROW, ct_basic(CT_VOID), VC_PRVALUE);
     r->line = at->t.line;
     r->file = at->file;

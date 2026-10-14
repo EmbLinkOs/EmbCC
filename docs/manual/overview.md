@@ -100,10 +100,10 @@ the file depends on the file name suffix (see
 Without `-c`, `-S` or `-E`, `embcc` compiles the file and then links it
 in the same process, adding the target's start-up file and libraries.
 The driver links the x86-64 ELF targets, and ARM, RISC-V, MIPS32 and
-AVR firmware given its memory map (`-T board.ld`, or `-Wl,-Ttext`/`-Tdata`):
+AVR firmware given its memory map (`--link-script=board.ld`, or `-Wl,-Ttext`/`-Tdata`):
 
 ```text
-embcc --target=thumbv7em-none-eabi -T board.ld startup.o main.o -o fw.elf
+embcc --target=thumbv7em-none-eabi --link-script=board.ld startup.o main.o -o fw.elf
 ```
 
 For AArch64 ELF, macOS and Windows targets it stops with
@@ -115,7 +115,7 @@ objects.
 preprocessed source, syntax tree, symbols, struct layout, EmbIR, control
 flow graph or call graph) instead of producing an object, and
 `embcc why` reports an optimizer decision. See
-[Developer and inspection options](invoking.md#developer-and-inspection-options).
+[Asking EmbCC](invoking.md#asking-embcc).
 The design of each stage is described in [Architecture](../internals/architecture.md),
 [Front end](../internals/front-end.md), [EmbIR](../internals/ir.md),
 [Optimizer](../internals/optimizer.md) and
@@ -146,7 +146,7 @@ each file with `embcc -c` and linking the objects with `embld`:
 
 ```sh
 embcc --target=thumbv7m-none-eabi -c boot.c -o boot.o
-embcc --target=thumbv7m-none-eabi -O2 -g -c main.c -o main.o
+embcc --target=thumbv7m-none-eabi --opt=speed -g -c main.c -o main.o
 embld -e reset -Ttext 0x0 -Tdata 0x20000000 boot.o main.o -o fw.elf
 ```
 
@@ -172,7 +172,7 @@ detail of each target's ABI, options and predefined macros.
 | RISC-V RV64 | `riscv64-unknown-elf` | ELF64 | LP64 | Bare metal, RV64IMAC; linked by `embld`. |
 | AVR | `avr` | ELF32 | 16-bit `int` and pointers, 32-bit `long`, 4-byte `double` | Bare metal, ATmega328P; linked by `embld`. |
 | macOS | `x86_64-apple-darwin`, `aarch64-apple-darwin` | Mach-O | LP64 | Objects for the system linker. `-g` and `__thread` are refused. |
-| Windows | `x86_64-windows-gnu` | COFF | LP64 | Objects only, not yet the Microsoft x64 ABI; every compile warns (`-Wwindows-abi`). No C library. |
+| Windows | `x86_64-windows-gnu` | COFF | LP64 | Objects only, not yet the Microsoft x64 ABI; every compile warns (`--warn=windows-abi`). No C library. |
 
 `x86_64-elf` and `x86_64-emblink` produce the same code and differ only
 in their predefined macros: `x86_64-emblink` defines `__emblink__`,
@@ -193,21 +193,21 @@ embcc:   x86_64-elf
 
 ## Language levels at a glance
 
-| Language | What EmbCC parses | `-std=` | Predefined level |
+| Language | What EmbCC parses | `--std=` | Predefined level |
 |---|---|---|---|
 | C | One dialect: C11 with the GNU extensions, plus C23 features such as `nullptr`, `[[...]]` attributes, `auto` type inference, enumerations with a fixed underlying type, and `#embed` | Every C standard name from `c89` to `gnu23` is accepted and changes nothing; one older than C11 draws a warning | `__STDC_VERSION__` is `201710L` |
 | C++ | C++20 with GNU extensions and some C++23 features, compiled by lowering it to C | `c++98` to `c++26` and the `gnu++` forms set `__cplusplus` and the feature-test macros; the parser still reads C++20 | `__cplusplus` is `202002L` by default (`-std=gnu++20`) |
 
-`-std=` never makes EmbCC reject a construct of a newer standard. The
+`--std=` never makes EmbCC reject a construct of a newer standard. The
 exact list of accepted names is under
-[`-std=STANDARD`](invoking.md#-stdstandard).
+[`--std=STANDARD`](invoking.md#--stdstandard).
 
 C is supported on every target. C++ is supported on the x86-64 and
 AArch64 targets, with restrictions on macOS and Windows, and on 32-bit
 ARM (Cortex-M and ARM state) and RV32 without exceptions, with
 a small runtime (`make libcxx-embedded`). On AVR, MIPS32, Xtensa and
 TriCore EmbCC refuses to generate code for a C++ unit
-(`embcc: error: C++ is not yet supported for TRIPLE: ...`); `-fsyntax-only`
+(`embcc: error: C++ is not yet supported for TRIPLE: ...`); `--syntax-only`
 still checks one. On RV64 a C++ unit compiles when exceptions are
 turned off, but C++ is not supported or tested there. See
 [Targets](cxx.md#targets) in the C++ page.

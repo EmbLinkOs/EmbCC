@@ -14,9 +14,9 @@ described in [C language](c-language.md), C++ in [C++](cxx.md), and the
 ### Extensions are always enabled
 
 Every extension on this page is available in every compilation.
-[`-std=`](invoking.md#-stdstandard) does not change what the parser
-accepts, and no warning reports the use of an extension. `-pedantic` and
-`-pedantic-errors` are accepted, turn nothing on, and say so:
+[`--std=`](invoking.md#--stdstandard) does not change what the parser
+accepts, and no warning reports the use of an extension. `--pedantic` and
+`--pedantic-errors` are accepted, turn nothing on, and say so:
 
 ```text
 embcc: warning: -pedantic: EmbCC has no diagnostics for extensions to ISO C, so this turns nothing on
@@ -390,15 +390,15 @@ Every attribute name EmbCC knows has one of four dispositions:
   does not perform. It is accepted without a diagnostic.
 - **Accepted with a warning**: `error` and `warning`. Ignoring them is
   not a miscompilation, but the check they ask for does not happen, so
-  EmbCC says so under [`-Wattributes`](diagnostics.md#-wattributes).
+  EmbCC says so under [`--warn=attributes`](diagnostics.md#--warnattributes).
 - **Refused**: ignoring it would generate different code from what the
   program asks for, so it is an error that names the attribute.
 
 An attribute EmbCC does not know is ignored with a warning, which
-`-Wno-attributes` silences:
+`--no-warn=attributes` silences:
 
 ```text
-embcc: attr.c:1: warning: attribute 'frobnicate' is not one EmbCC knows, and is ignored [-Wattributes]
+embcc: attr.c:1: warning: attribute 'frobnicate' is not one EmbCC knows, and is ignored [--warn=attributes]
 ```
 
 ### Function attributes
@@ -406,22 +406,22 @@ embcc: attr.c:1: warning: attribute 'frobnicate' is not one EmbCC knows, and is 
 | Attribute | Effect |
 |---|---|
 | `alias("target")` | The function is another name for `target`, which must be a function defined in the same file and not itself an alias. The declaration with `alias` cannot have a body. Combine with `weak` for a weak alias. ELF only; see [Object formats](#object-formats) |
-| `always_inline` | Lifts the inliner's size limit for calls to this function, at every level including `-O0`; see [Inlining](optimization.md#inlining) |
+| `always_inline` | Lifts the inliner's size limit for calls to this function, at every level including `--opt=none`; see [Inlining](optimization.md#inlining) |
 | `constructor`, `destructor` | The function's address is placed in `.init_array` or `.fini_array`, for the startup code to call before `main` or at exit. On a bare-metal target the program's own startup code walks the tables; see [Startup code](embedded.md#startup-code-and-the-linkers-symbols). A `static` one is kept although nothing calls it. ELF only |
-| `deprecated`, `deprecated("message")` | A call, a read, or taking the address warns under [`-Wdeprecated-declarations`](diagnostics.md#-wdeprecated-declarations), on by default. The message text is not printed |
+| `deprecated`, `deprecated("message")` | A call, a read, or taking the address warns under [`--warn=deprecated-declarations`](diagnostics.md#--warndeprecated-declarations), on by default. The message text is not printed |
 | `embcc_sret` | EmbCC's own. On the first parameter, before its type, it marks that parameter as the address of the returned aggregate, passed where the target's ABI passes it. EmbCC's C++ lowering writes it; hand-written C has no need of it |
-| `format(archetype, string-index, first-to-check)` | Calls are checked under [`-Wformat`](diagnostics.md#-wformat), which `-Wall` enables. The archetypes checked are `printf`, `gnu_printf`, `scanf` and `gnu_scanf`; any other (`strftime`, `strfmon`) is accepted and not checked. Both indexes are 1-based; `first-to-check` is 0 for a function that takes a `va_list` |
+| `format(archetype, string-index, first-to-check)` | Calls are checked under [`--warn=format`](diagnostics.md#--warnformat), which `--warn=all` enables. The archetypes checked are `printf`, `gnu_printf`, `scanf` and `gnu_scanf`; any other (`strftime`, `strfmon`) is accepted and not checked. Both indexes are 1-based; `first-to-check` is 0 for a function that takes a `va_list` |
 | `gnu_inline` | GNU89 `inline` semantics for this function: a definition that says `extern inline` is used only for inlining and never emitted, and one that says `inline` alone is an external definition. See [Inline functions](c-language.md#inline-functions) |
 | `noinline` | The function is never inlined |
-| `no_instrument_function` | `-finstrument-functions` leaves the function alone. It counts on any declaration: a plain prototype followed by a definition with it works |
+| `no_instrument_function` | `--instrument-functions` leaves the function alone. It counts on any declaration: a plain prototype followed by a definition with it works |
 | `noreturn`, `_Noreturn`, `[[noreturn]]` | The function does not return. A call to it ends a path for EmbCC's check that every path through a non-`void` function returns a value ([E0008](diagnostics.md#diagnostic-ids)). EmbCC does not check that the function itself never returns |
 | `nothrow` | The function throws no C++ exception: a call to it inside a C++ `try` region gets no landing pad |
 | `pcs("aapcs")`, `pcs("aapcs-vfp")` | ARM only. See [`pcs`](#pcs) |
 | `section("name")` | The function's code is placed in section `name`. See [`section`](#section) |
-| `unused` | Suppresses [`-Wunused-function`](diagnostics.md#-wunused-function) for this function |
+| `unused` | Suppresses [`--warn=unused-function`](diagnostics.md#--warnunused-function) for this function |
 | `used` | The function is emitted even if nothing in the translation unit refers to it, as for a handler reached only from a table or from assembly |
 | `visibility("default" \| "hidden" \| "protected" \| "internal")` | Sets the symbol's ELF visibility. Any other value is refused: `visibility attribute wants "default", "hidden", "protected" or "internal"` |
-| `warn_unused_result`, `[[nodiscard]]` | Discarding the result warns under [`-Wunused-result`](diagnostics.md#-wunused-result), on by default |
+| `warn_unused_result`, `[[nodiscard]]` | Discarding the result warns under [`--warn=unused-result`](diagnostics.md#--warnunused-result), on by default |
 | `weak` | On a definition, the symbol is weak and another definition overrides it at link time. On a declaration, the reference is weak: the function's address is null if no definition is linked. `weak` on any declaration of a function makes it weak |
 | `interrupt`, `signal` | Interrupt handlers. See [Interrupt handlers](#interrupt-handlers) |
 | `keep_interrupts_masked` | MIPS32 only, with `interrupt`: interrupts stay disabled in the handler. See [Interrupt handlers](#interrupt-handlers) |
@@ -451,9 +451,9 @@ different `pcs` conventions.
 | Attribute | Effect |
 |---|---|
 | `aligned(N)`, `aligned` | The object is aligned to at least `N` bytes; with no argument, to 16 bytes on every target. Applies to file-scope and local variables. See [`aligned`](#aligned) |
-| `deprecated` | A use of the variable warns under `-Wdeprecated-declarations` |
+| `deprecated` | A use of the variable warns under `--warn=deprecated-declarations` |
 | `section("name")` | The object is placed in section `name`. File scope only. See [`section`](#section) |
-| `unused` | Suppresses [`-Wunused-variable`](diagnostics.md#-wunused-variable) |
+| `unused` | Suppresses [`--warn=unused-variable`](diagnostics.md#--warnunused-variable) |
 | `used` | A `static` variable is emitted even if nothing refers to it |
 | `visibility("...")` | As for functions |
 | `weak` | As for functions: a weak definition, or a weak reference whose address is null when nothing defines it |
@@ -589,14 +589,14 @@ standard for one function, whatever `-mfloat-abi` selects for the rest
 of the program: `aapcs` passes floating-point values in core registers,
 and `aapcs-vfp` in VFP registers. Runtime libraries put `pcs("aapcs")`
 on helpers that must keep the base convention under
-`-mfloat-abi=hard`. See [Calling convention:
+`--float-abi=hard`. See [Calling convention:
 AAPCS32](targets.md#calling-convention-aapcs32).
 
 | Condition | Diagnostic |
 |---|---|
 | Not an ARM target | `__attribute__((pcs)) names an ARM calling convention, and this is not an ARM target` |
 | Any other value | `pcs wants "aapcs" or "aapcs-vfp"` |
-| `aapcs-vfp` without an FPU | `pcs("aapcs-vfp") passes floating point in VFP registers, and this part has no FPU: add -mfpu=` |
+| `aapcs-vfp` without an FPU | `pcs("aapcs-vfp") passes floating point in VFP registers, and this part has no FPU: add --fpu=` |
 | On a variable, parameter, member or `typedef` | `pcs is only supported on a function declaration, not on a variable` (or `a parameter`, `a member`, `a typedef`) |
 | On a function pointer that is a structure member | `pcs is only supported on a function declaration, not on a pointer to one: a call through the pointer would use the default convention` |
 | Two declarations disagree | `'f' is declared with a different pcs than on line 3` |
@@ -635,7 +635,7 @@ records for each.
 | `tls_model` | EmbCC emits one thread-local model |
 
 `returns_twice` is accepted because newlib's `<setjmp.h>` puts it on
-`setjmp`, and is not acted on. Above `-O0`, a local variable that the
+`setjmp`, and is not acted on. Above `--opt=none`, a local variable that the
 optimizer keeps in a register across a call to such a function can hold
 a stale value after the second return. A `volatile` local is kept in
 memory at every optimization level, so a value stored in it between the
@@ -648,7 +648,7 @@ because GCC reports a call to such a function only after optimization,
 and EmbCC does not:
 
 ```text
-embcc: e.c:1: warning: __attribute__((error)) is accepted but does nothing here: it makes a CALL to this function a compile error unless the optimizer removes the call, so the diagnostic has to wait until after optimisation and EmbCC issues its own before then; a build-time assertion written with it will not fire [-Wattributes]
+embcc: e.c:1: warning: __attribute__((error)) is accepted but does nothing here: it makes a CALL to this function a compile error unless the optimizer removes the call, so the diagnostic has to wait until after optimisation and EmbCC issues its own before then; a build-time assertion written with it will not fire [--warn=attributes]
 ```
 
 A build-time assertion written with `error` therefore does not fail the
@@ -774,7 +774,7 @@ refused by name. `__memx` is not defined. `__attribute__((progmem))`
 (avr-libc's `PROGMEM`) places a `const` static object in `.progmem.data`
 on AVR, without changing its type; it is read with `pgm_read_byte()` and
 the rest of `<avr/pgmspace.h>`. On other targets it is ignored with a
-`-Wattributes` warning.
+`--warn=attributes` warning.
 
 The predefined macros `__BUILTIN_AVR_CLI`, `__BUILTIN_AVR_SEI`,
 `__BUILTIN_AVR_NOP`, `__BUILTIN_AVR_SLEEP`, `__BUILTIN_AVR_SWAP` and
@@ -790,7 +790,7 @@ assembly, for example `__asm__ volatile("sei")`.
 A name is a builtin only in its `__builtin_` spelling (and, for the
 atomics, its `__atomic_` or `__sync_` spelling). EmbCC treats no library
 function name, such as `memcpy` or `printf`, as a builtin, with or without
-[`-fno-builtin`](invoking.md#-fno-builtin).
+[`--no-builtins`](invoking.md#--no-builtins---no-builtinname).
 
 A `__builtin_` name EmbCC does not implement is an undeclared function:
 
@@ -902,8 +902,8 @@ is that instruction, and its result is correctly rounded:
 |---|---|
 | x86-64 | `float`, `double` (`sqrtss`, `sqrtsd`) |
 | AArch64 | `float`, `double` (`fsqrt`) |
-| Cortex-M with the FPU enabled (`-eabihf` triples, or `-mfpu=` with `-mfloat-abi=softfp` or `hard`) | `float` (`vsqrt.f32`) |
-| Cortex-M7 with `-mfpu=fpv5-d16` (or `-mcpu=cortex-m7` with an `-eabihf` triple) | `float`, `double` (`vsqrt.f32`, `vsqrt.f64`) |
+| Cortex-M with the FPU enabled (`-eabihf` triples, or `--fpu=` with `--float-abi=softfp` or `hard`) | `float` (`vsqrt.f32`) |
+| Cortex-M7 with `--fpu=fpv5-d16` (or `--cpu=cortex-m7` with an `-eabihf` triple) | `float`, `double` (`vsqrt.f32`, `vsqrt.f64`) |
 
 Everywhere else -- a `double` on a single-precision Cortex-M FPU, soft-float Cortex-M,
 RISC-V, AVR, and a 16-byte `long double` -- the builtin is a call to
@@ -1145,7 +1145,7 @@ embcc: v.c:1: error: __attribute__((vector_size)) is not supported: the type wou
 Clang's `ext_vector_type` is not recognized; it draws the unknown
 attribute warning, and the type stays a scalar. `__builtin_shufflevector`
 is not implemented. The optimizer's automatic vectorization is described
-in [Optimization](optimization.md#-fvectorize--fno-vectorize).
+in [Optimization](optimization.md#--passvectorize---no-passvectorize).
 
 ## Feature-test operators
 
@@ -1349,7 +1349,7 @@ after the `#include` unless the header pops it.
 
 A pragma that names a warning EmbCC does not have is ignored without a
 diagnostic; EmbCC never reports that warning, so the pragma would change
-nothing. Other kinds, such as `ignored_attributes`, are ignored. `-w`
+nothing. Other kinds, such as `ignored_attributes`, are ignored. `--no-warnings`
 and the suppression of warnings in system headers apply whatever the
 pragmas say. A warning located in a header that is included more than
 once is decided at the header's last inclusion.

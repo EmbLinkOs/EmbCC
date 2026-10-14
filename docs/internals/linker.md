@@ -1102,7 +1102,7 @@ The driver compiles to `OUT.embcc-tmp.o` beside the output and calls
 at `0x400000`. `apply_wl` accepts the options that change nothing about
 an image EmbLD makes (`-s`, `--build-id`, `-z now` and the others
 listed in
-[Invoking EmbCC](../manual/invoking.md#-wlargs--xlinker-arg)) and refuses
+[Invoking EmbCC](../manual/invoking.md#--linker-argarg)) and refuses
 any other (`embcc: error: linker option 'OPT' is not one EmbLD has ...`);
 the driver then removes the temporary object and links nothing.
 

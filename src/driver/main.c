@@ -32,6 +32,7 @@
 #include <setjmp.h>
 
 #include "asmout.h"
+#include "options.h"
 #include "iface.h"
 #include "inspect.h"
 #include "remark.h"
@@ -72,100 +73,13 @@ static void print_version(void)
 static void print_usage(FILE *out)
 {
     fprintf(out,
-            "usage: embcc [-c|-S|-E] FILE.c|FILE.cc|FILE.s|FILE.S|FILE.asm..."
-            " [-o FILE] [-j N]\n"
-            "             [--target=TRIPLE] [-x c|c++]\n"
-            "             [-std=...] [--emit-c]\n"
-            "             [-I DIR]... [-isystem DIR]... [-nostdinc] [-g]\n"
-            "             [-O0|-O1|-O2|-O3|-Os]\n"
-            "             [-mcpu=CPU] [-mno-sse] [-mno-red-zone] ...\n"
-            "       embcc [FILE] OBJ.o|LIB.a|-lLIB... [-L DIR] [-T SCRIPT.ld]\n"
-            "             [-nostdlib|-nodefaultlibs|-nostartfiles] -o OUT"
-            "   (link)\n"
-            "       embcc --version | --dump-predef"
-            " | --emit-empty-object FILE\n");
-}
-
-/* What --help prints under the usage line: the options EmbCC takes, in the
- * spellings GCC and Clang use, so a build system's flags land as expected. */
-static void print_options(FILE *out)
-{
-    fputs(
-      "\nwhat to do\n"
-      "  -c                     compile to an object\n"
-      "  -E                     preprocess only\n"
-      "  -S                     write assembly (NAME.s) instead of an object\n"
-      "  -fsyntax-only          check, write nothing\n"
-      "  -j N, -jN, -j          several sources: compile N at once (-j: one\n"
-      "                         per processor); one at a time by default\n"
-      "  --emit-c               print the C a C++ unit lowers to\n"
-      "  -o FILE                where to write it\n"
-      "\nthe language\n"
-      "  -x c|c++               treat the input as this language\n"
-      "  -std=...               accepted; EmbCC has one dialect per language\n"
-      "  -I DIR, -isystem DIR   header search paths\n"
-      "  -nostdinc              do not search EmbCC's own headers\n"
-      "  --print-search-dirs    where EmbCC found its own files\n"
-      "  -D NAME[=VALUE], -U NAME  define and undefine macros\n"
-      "  -include FILE          include it before the file\n"
-      "  -Wp,-D...,-U...,-I...  the same, for the preprocessor\n"
-      "  -O0/-O1/-O2/-O3/-Os          optimization level (-Os: no size growth)\n"
-      "  -f<pass>, -fno-<pass>        turn one optimizer pass on or off\n"
-      "  -fstack-usage                write FILE.su: each function's frame\n"
-      "  -fno-exceptions, -fno-rtti   C++ without them\n"
-      "  -fno-access-control          do not enforce private/protected\n"
-      "  -fno-jump-tables             no switch through a table of addresses\n"
-      "  -fno-inline-functions        inline only what is declared inline\n"
-      "  -fcommon                     tentative definitions are COMMON (C, ELF)\n"
-      "  -fsingle-precision-constant  1.0 is a float (C)\n"
-      "  -save-temps[=cwd|obj]        keep the .i and the .s\n"
-      "\nthe target\n"
-      "  --target=TRIPLE        x86_64-elf, aarch64-elf, thumbv7m-none-eabi,\n"
-      "                         thumbv7em-none-eabi[hf], thumbv8m.main-none-eabi[hf],\n"
-      "                         armv7a-none-eabi, riscv32/riscv64-unknown-elf, avr,\n",
-      out);
-    /* (two literals: one string this long passes the IR's text form's
-     * limit, and tests/golden/ir-roundtrip.sh prints main.c's) */
-    fputs(
-      "                         thumbv6m-none-eabi, thumbv8m.base-none-eabi,\n"
-      "                         mipsel-none-elf, mips-none-elf,\n"
-      "                         loongarch64-unknown-elf, xtensa-none-elf,\n"
-      "                         powerpc-none-eabi, rx-none-elf, sparc-none-elf,\n"
-      "                         m68k-none-elf,\n"
-      "                         and the\n"
-      "                         -emblink, -linux-gnu, -apple-darwin and\n"
-      "                         -windows-gnu spellings; an unknown one lists\n"
-      "                         them all\n",
-      out);
-    fprintf(out,
-      "                         with none, this compiler emits for %s\n",
-      target_default_name() ? target_default_name() : "x86_64-elf");
-    fputs(
-      "  -dumpmachine           print that target\n"
-      "  -g                     debug information (DWARF)\n"
-      "  -mcpu=CPU -mfpu=FPU -mfloat-abi=ABI   Cortex-M part and float ABI\n"
-      "  -mno-sse -mno-red-zone -mcmodel=kernel -mgeneral-regs-only\n"
-      "\ndiagnostics (docs/manual/diagnostics.md)\n"
-      "  -fdiagnostics-format=text|json   caret output, or GCC's JSON\n"
-      "  -fdiagnostics-color=auto|always|never\n"
-      "  -fmax-errors=N         stop after N\n"
-      "  -w                     no warnings;  -Werror  warnings are errors\n"
-      "  -Wall, -Wextra, -Wname, -Wno-name (see --help-warnings)\n"
-      "\nthe link (docs/manual/invoking.md#linking)\n"
-      "  OBJ.o, LIB.a           linked as they are, with the sources if any\n"
-      "  -lNAME, -L DIR         libNAME.a from the -L directories\n"
-      "  -T SCRIPT.ld           GNU ld linker script (ARM and RISC-V firmware)\n"
-      "  -nostdlib, -nodefaultlibs, -nostartfiles   leave out crt1/libc/librt\n"
-      "  -e SYM, -u SYM         entry symbol; a symbol to pull from archives\n"
-      "  -Wl,ARGS, -Xlinker ARG options for EmbLD (-Ttext, -Tdata, ...)\n"
-      "\ndependencies\n"
-      "  -M, -MM                write the make rule instead of compiling\n"
-      "  -MD, -MMD              write it beside the object\n"
-      "  -MF FILE, -MT TARGET, -MP\n"
-      "\nreporting\n"
-      "  --version, --help, --dump-predef\n"
-      "  --explain ID           what a diagnostic means, and the fix\n"
-      "  --fix                  apply the fix-its it proposes\n", out);
+            "usage: embcc [-c|-S|-E] SOURCE... [-o FILE] [-j N]"
+            " [--target=TARGET] [--opt=GOAL] [OPTION]...\n"
+            "       embcc OBJECT.o|LIBRARY.a|-lNAME... [-L DIR]"
+            " [--link-script=FILE] -o IMAGE   (link)\n"
+            "       embcc inspect STAGE SOURCE        (what each stage made)\n"
+            "       embcc --version | --help[=gcc] | --explain=ID"
+            " | --reference=options|warnings|targets|man\n");
 }
 
 /* Where this target's runtime and C library live, under the library
@@ -994,9 +908,11 @@ static int compile_and_link(const char *in, const char *out)
             snprintf(nm, sizeof nm, "%s.ld", mcu->name);
             if (!paths_target_file(lib_triple(), nm, avr_script,
                                    sizeof avr_script)) {
-                fprintf(stderr, "embcc: error: no %s for avr (-mmcu=%s): "
+                char mm[96];
+                snprintf(mm, sizeof mm, "-mmcu=%s", mcu->name);
+                fprintf(stderr, "embcc: error: no %s for avr (%s): "
                         "the AVR runtime is not built or not installed "
-                        "(make rt-embedded)\n", nm, mcu->name);
+                        "(make rt-embedded)\n", nm, opt_typed(mm));
                 return 1;
             }
             lo.script = avr_script;
@@ -1007,9 +923,11 @@ static int compile_and_link(const char *in, const char *out)
             snprintf(nm, sizeof nm, "crt%s.o", mcu->name);
             if (!paths_target_file(lib_triple(), nm, avr_crt,
                                    sizeof avr_crt)) {
-                fprintf(stderr, "embcc: error: no %s for avr (-mmcu=%s): "
+                char mm[96];
+                snprintf(mm, sizeof mm, "-mmcu=%s", mcu->name);
+                fprintf(stderr, "embcc: error: no %s for avr (%s): "
                         "the AVR runtime is not built or not installed "
-                        "(make rt-embedded)\n", nm, mcu->name);
+                        "(make rt-embedded)\n", nm, opt_typed(mm));
                 return 1;
             }
             have_avr_crt = 1;
@@ -1025,8 +943,9 @@ static int compile_and_link(const char *in, const char *out)
         int scripts = backend_get(target_get())->ld_scripts;
         fprintf(stderr,
                 "embcc: error: linking a %s image needs its memory map: %s"
-                "-Wl,-Ttext=FLASH and -Wl,-Tdata=RAM\n", target_triple_now(),
-                scripts ? "a linker script (-T FILE.ld), or " : "");
+                "--linker-arg=-Ttext=FLASH and --linker-arg=-Tdata=RAM\n",
+                target_triple_now(),
+                scripts ? "a linker script (--link-script=FILE.ld), or " : "");
         return 1;
     }
     if (!fw && lo.script) {
@@ -1954,7 +1873,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
          * into landing pads nothing would reach. */
         fprintf(stderr,
                 "embcc: error: C++ exceptions are not supported for %s yet: "
-                "EmbCC writes no %s; compile with -fno-exceptions\n",
+                "EmbCC writes no %s; compile with --no-exceptions\n",
                 target_triple_now(), cxx_unwind_tables_name());
         return 1;
     }
@@ -2813,12 +2732,11 @@ static int compile_unit(const char *in, const char *out, int pp_only)
      * row). eh_emit would write an x86-64 CIE into the object. */
     if (unwind && unwritten)
         diag_fatal(NULL, 0, "unwind tables are not supported for "
-                            "%s yet (-funwind-tables, "
-                            "-fasynchronous-unwind-tables, -fexceptions%s): "
+                            "%s yet (--unwind-tables, --exceptions%s): "
                             "EmbCC writes no %s",
                    target_triple_now(),
                    lang_cxx && want_exceptions
-                       ? ", and C++ without -fno-exceptions" : "",
+                       ? ", and C++ without --no-exceptions" : "",
                    unwritten);
     if (unwind)
         eh_emit(iu, ta == TARGET_AARCH64, &eh);
@@ -4312,7 +4230,8 @@ static int expand_wp(int *argcp, char ***argvp)
                                                t[1] != 'I') || !t[2])) {
                 fprintf(stderr, "embcc: error: preprocessor option '%s' in "
                         "%s is not supported; pass -D, -U or -I with its "
-                        "value, or give the option directly\n", t, argv[i]);
+                        "value, or give the option directly\n",
+                        t, opt_typed(argv[i]));
                 return 1;
             }
             if (*t || !list) {
@@ -4335,6 +4254,10 @@ int main(int argc, char **argv)
 {
     plat_set_argv0(argc > 0 ? argv[0] : NULL);   /* where this program is */
     if (expand_wp(&argc, &argv))
+        return 1;
+    /* EmbCC's own spellings into the ones the loops below read
+     * (options.def): before anything looks at an argument */
+    if (opts_normalize(&argc, &argv))
         return 1;
     g_child_skip = xcalloc((size_t)(argc > 0 ? argc : 1), 1);
 
@@ -4581,18 +4504,51 @@ int main(int argc, char **argv)
         }
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             print_usage(stdout);
-            print_options(stdout);
+            opts_print_help(stdout);
+            return 0;
+        }
+        /* the same table: GCC's spellings, the reference the manual
+         * includes, and every spelling for tests/golden/options-table.sh */
+        if (strcmp(argv[i], "--help=gcc") == 0) {
+            opts_print_gcc(stdout);
+            return 0;
+        }
+        /* the reference pages the documentation includes, each from
+         * the table it describes */
+        if (strcmp(argv[i], "--reference=options") == 0) {
+            opts_print_markdown(stdout);
+            return 0;
+        }
+        if (strcmp(argv[i], "--reference=warnings") == 0)
+            return diag_print_reference(stdout);
+        if (strcmp(argv[i], "--reference=targets") == 0)
+            return target_print_reference(stdout);
+        if (strcmp(argv[i], "--reference=man") == 0) {
+            /* dated as reproducible builds ask: SOURCE_DATE_EPOCH when
+             * the build sets it (make install does, from git), else now */
+            const char *e = getenv("SOURCE_DATE_EPOCH");
+            time_t when = e && *e ? (time_t)strtoll(e, NULL, 10) : time(NULL);
+            char date[16];
+            if (!strftime(date, sizeof date, "%Y-%m-%d", gmtime(&when)))
+                strcpy(date, "1970-01-01");
+            opts_print_man(stdout, EMBCC_VERSION, date);
+            return 0;
+        }
+        if (strcmp(argv[i], "--help=spellings") == 0) {
+            opts_print_spellings(stdout);
             return 0;
         }
         if (strcmp(argv[i], "--help-warnings") == 0) {
-            printf("the warnings EmbCC has, and the group each is in:\n\n");
+            printf("the warnings EmbCC has, and the set each is in:\n\n");
             for (int k = 0; k < diag_warning_count(); k++) {
                 int g = diag_warning_group(k);
-                printf("  -W%-22s %s\n", diag_warning_name(k),
-                       g == 1 ? "(-Wall)" : g == 2 ? "(-Wextra)" : "");
+                printf("  --warn=%-22s %s\n", diag_warning_name(k),
+                       g == 1 ? "(--warn=all)" : g == 2 ? "(--warn=extra)" : "");
             }
-            printf("\nEach can be turned off with -Wno-NAME, and every one\n"
-                   "prints its name, so a diagnostic says what controls it.\n");
+            printf("\nEach is turned off with --no-warn=NAME and made an error\n"
+                   "with --error=NAME, and every one prints its name, so a\n"
+                   "diagnostic says what controls it. (GCC's -WNAME and\n"
+                   "-Wno-NAME work too.)\n");
             return 0;
         }
         if (strcmp(argv[i], "--explain") == 0)
@@ -4670,7 +4626,7 @@ int main(int argc, char **argv)
                            : !strcmp(y, "26") || !strcmp(y, "2c") ? 2026 : 0;
                 if (!year) {
                     fprintf(stderr, "embcc: error: unknown C++ standard "
-                                    "'%s'\n", argv[i]);
+                                    "'%s'\n", opt_typed(argv[i]));
                     return 1;
                 }
                 cpp_set_cxx_std(year, strict);
@@ -4683,7 +4639,7 @@ int main(int argc, char **argv)
                     fprintf(stderr, "embcc: warning: %s sets the standard "
                                     "macros but is not enforced; EmbCC "
                                     "parses C++20 and will accept newer "
-                                    "constructs\n", argv[i]);
+                                    "constructs\n", opt_typed(argv[i]));
             } else {
                 /* A C standard. EmbCC has ONE C dialect -- C11 with the
                  * GNU extensions -- and says so rather than nodding:
@@ -4703,7 +4659,7 @@ int main(int argc, char **argv)
                     if (strcmp(v, known[k]) == 0) { ok = 1; break; }
                 if (!ok) {
                     fprintf(stderr, "embcc: error: unknown standard '%s'\n",
-                            argv[i]);
+                            opt_typed(argv[i]));
                     return 1;
                 }
                 std_gnu89 = !strcmp(v, "c89") || !strcmp(v, "c90") ||
@@ -4718,7 +4674,7 @@ int main(int argc, char **argv)
                                     "enforced; EmbCC has one C dialect, C11 "
                                     "with the GNU extensions, and will "
                                     "compile newer constructs anyway\n",
-                            argv[i]);
+                            opt_typed(argv[i]));
             }
         } else if (strcmp(argv[i], "--emit-c") == 0) {
             emit_c_only = 1;
@@ -4748,7 +4704,7 @@ int main(int argc, char **argv)
                    strcmp(argv[i], "-gz") == 0) {
             fprintf(stderr, "embcc: error: %s is not supported; EmbCC "
                             "emits DWARF 4, uncompressed and in one "
-                            "piece\n", argv[i]);
+                            "piece\n", opt_typed(argv[i]));
             return 1;
         } else if (strcmp(argv[i], "-g") == 0) {
             want_debug = 1;
@@ -4802,7 +4758,8 @@ int main(int argc, char **argv)
                    strcmp(argv[i], "-MQ") == 0) {
             int mf = argv[i][2] == 'F';
             if (i + 1 >= argc) {
-                fprintf(stderr, "embcc: %s needs a file name\n", argv[i]);
+                fprintf(stderr, "embcc: %s needs a file name\n",
+                        opt_typed(argv[i]));
                 return 1;
             }
             if (mf) dep_file = argv[++i]; else dep_target = argv[++i];
@@ -4822,7 +4779,7 @@ int main(int argc, char **argv)
         } else if (strncmp(argv[i], "-fstack-protector", 17) == 0) {
             fprintf(stderr, "embcc: '%s' is not supported (EmbCC emits no "
                             "stack protection); -fno-stack-protector is\n",
-                    argv[i]);
+                    opt_typed(argv[i]));
             return 1;
         } else if (strcmp(argv[i], "-fno-rtti") == 0) {
             want_rtti = 0;
@@ -4895,11 +4852,11 @@ int main(int argc, char **argv)
                 if (!on)
                     fprintf(stderr, "embcc: warning: %s: an implicit "
                                     "function declaration is always an "
-                                    "error in EmbCC\n", argv[i]);
+                                    "error in EmbCC\n", opt_typed(argv[i]));
             } else if (!diag_set_werror_for(nm, on))
                 fprintf(stderr, "embcc: warning: %s names no warning EmbCC "
                                 "has (--help-warnings lists them)\n",
-                        argv[i]);
+                        opt_typed(argv[i]));
         } else if (strcmp(argv[i], "-Werror-implicit-function-"
                                    "declaration") == 0) {
             /* GCC's old spelling of -Werror=implicit-function-declaration,
@@ -4914,7 +4871,7 @@ int main(int argc, char **argv)
              * pass it out of habit. */
             fprintf(stderr, "embcc: warning: %s: EmbCC has no diagnostics "
                             "for extensions to ISO C, so this turns "
-                            "nothing on\n", argv[i]);
+                            "nothing on\n", opt_typed(argv[i]));
         } else if (strncmp(argv[i], "-fdiagnostics-format=", 21) == 0) {
             const char *f = argv[i] + 21;
             if (strcmp(f, "json") == 0)
@@ -4965,7 +4922,8 @@ int main(int argc, char **argv)
                 !diag_always_error(argv[i] + 2))
                 fprintf(stderr, "embcc: warning: %s is not a warning EmbCC "
                                 "has, so it turns nothing on "
-                                "(--help-warnings lists them)\n", argv[i]);
+                                "(--help-warnings lists them)\n",
+                                opt_typed(argv[i]));
         } else if (strncmp(argv[i], "-O", 2) == 0) {
             /* -O/-O1, -O2, -O3 and -Os. -O0 turns the optimizer off,
              * which is what keeps the self-host fixed point. */
@@ -4993,7 +4951,7 @@ int main(int argc, char **argv)
                 { opt_level = 3; opt_for_size = 0; }
             else {
                 fprintf(stderr, "embcc: unknown optimization flag '%s'\n",
-                        argv[i]);
+                        opt_typed(argv[i]));
                 return 1;
             }
         } else if (strcmp(argv[i], "-fsigned-char") == 0 ||
@@ -5249,8 +5207,8 @@ int main(int argc, char **argv)
             fprintf(stderr, "embcc: error: %s is not supported: it dumps "
                             "GCC's internal representation, which EmbCC "
                             "does not have; `embcc inspect ir|cfg|callgraph` "
-                            "shows EmbCC's, and -fstack-usage its frames\n",
-                    argv[i]);
+                            "shows EmbCC's, and --stack-usage its frames\n",
+                    opt_typed(argv[i]));
             return 1;
         } else if (strcmp(argv[i], "-mbig-endian") == 0 ||
                    strcmp(argv[i], "-mlittle-endian") == 0) {
@@ -5263,7 +5221,7 @@ int main(int argc, char **argv)
             int be = argv[i][2] == 'b';
             if (be != target_big_endian()) {
                 fprintf(stderr, "embcc: error: %s is not supported for %s, "
-                                "which is %s-endian%s\n", argv[i],
+                                "which is %s-endian%s\n", opt_typed(argv[i]),
                         target_triple_now(),
                         target_big_endian() ? "big" : "little",
                         target_get() == TARGET_MIPS32
@@ -5343,11 +5301,12 @@ int main(int argc, char **argv)
                    strcmp(argv[i], "-munaligned-access") == 0 ||
                    strcmp(argv[i], "-mno-unaligned-access") == 0) {
             diag_fatal(NULL, 0, "%s is an ARM option, and the target "
-                       "is %s", argv[i], target_triple_now());
+                       "is %s", opt_typed(argv[i]), target_triple_now());
         } else if (strncmp(argv[i], "-mmcu=", 6) == 0) {
             /* AVR's own (src/arch/avr/options.c), asked above */
             diag_fatal(NULL, 0, "%s is an AVR option, and the target is %s "
-                       "(--target=avr)", argv[i], target_triple_now());
+                       "(--target=avr)",
+                       opt_typed(argv[i]), target_triple_now());
         } else if (strncmp(argv[i], "-fsanitize=", 11) == 0 ||
                    strncmp(argv[i], "-fno-sanitize=", 14) == 0 ||
                    strncmp(argv[i], "-fsanitize-trap", 15) == 0 ||
@@ -5388,12 +5347,14 @@ int main(int argc, char **argv)
                     bit = 0;       /* -fsanitize-trap=... names checks */
                 else
                     diag_fatal(NULL, 0,
-                        "-fsanitize=%.*s is not supported: EmbCC's "
+                        "%s%.*s is not supported: EmbCC's "
                         "sanitizer inserts checks that TRAP, and this one "
                         "needs a runtime library to report through. The "
                         "ones it has are undefined, "
                         "signed-integer-overflow, integer-divide-by-zero "
-                        "and shift", (int)n, p);
+                        "and shift",
+                        strncmp(opt_typed(argv[i]), "--", 2) == 0
+                            ? "--sanitize=" : "-fsanitize=", (int)n, p);
                 if (off) san_mask &= ~bit; else san_mask |= bit;
                 if (!e) break;
                 p = e + 1;
@@ -5428,12 +5389,13 @@ int main(int argc, char **argv)
              */
             fprintf(stderr, "embcc: error: %s is not supported; EmbCC "
                             "would emit ordinary code and the flag's "
-                            "promise would not hold\n", argv[i]);
+                            "promise would not hold\n", opt_typed(argv[i]));
             return 1;
         } else if (strcmp(argv[i], "-shared") == 0 ||
                    strcmp(argv[i], "-static-pie") == 0) {
             fprintf(stderr, "embcc: error: %s needs position-independent "
-                            "code, which EmbCC does not emit\n", argv[i]);
+                            "code, which EmbCC does not emit\n",
+                            opt_typed(argv[i]));
             return 1;
         } else if (strcmp(argv[i], "-mno-sse") == 0 ||
                    strcmp(argv[i], "-mno-sse2") == 0 ||
@@ -5618,6 +5580,27 @@ int main(int argc, char **argv)
             if (!input)
                 input = argv[i];
         } else {
+            /* --pass=NAME with a NAME no pass has: list the passes. */
+            const char *ty = opt_typed(argv[i]);
+            if (strncmp(ty, "--pass=", 7) == 0 ||
+                strncmp(ty, "--no-pass=", 10) == 0) {
+                const char *const *names;
+                int n = opt_pass_names(&names);
+                fprintf(stderr, "embcc: error: %s: no optimizer pass has "
+                        "that name; the passes are", ty);
+                for (int k = 0; k < n; k++)
+                    fprintf(stderr, "%s %s", k ? (k + 1 == n ? " and" : ",")
+                                              : "", names[k]);
+                fprintf(stderr, "\n");
+                return 1;
+            }
+            /* One of EmbCC's own options that this target has no use
+             * for (--isa= on x86-64) is not unknown: say which. */
+            if (strcmp(ty, argv[i]) != 0) {
+                fprintf(stderr, "embcc: error: %s is not an option for %s\n",
+                        ty, target_triple_now());
+                return 1;
+            }
             fprintf(stderr, "embcc: error: unknown argument '%s'\n",
                     argv[i]);
             print_usage(stderr);
@@ -5647,9 +5630,10 @@ int main(int argc, char **argv)
      * build that needs two of them merged would be told so only by its
      * linker. */
     if (g_fcommon && target_fmt_get() != TGT_FMT_ELF) {
-        fprintf(stderr, "embcc: error: -fcommon is not supported for %s: "
+        fprintf(stderr, "embcc: error: %s is not supported for %s: "
                         "EmbCC writes COMMON symbols into ELF objects only, "
-                        "and this target's are %s\n", target_triple_now(),
+                        "and this target's are %s\n", opt_typed("-fcommon"),
+                target_triple_now(),
                 target_fmt_name(target_fmt_get()));
         return 1;
     }
@@ -5713,9 +5697,10 @@ int main(int argc, char **argv)
         /* the C parser sizes each enum (parse.c enum_pack); an ARM object
          * says so in Tag_ABI_enum_size (1), and ACLE's macro moves too */
         if (lang >= 0 ? lang : has_cxx_suffix(input)) {
-            fprintf(stderr, "embcc: error: -fshort-enums is supported for "
+            fprintf(stderr, "embcc: error: %s is supported for "
                             "C, not C++: the C++ front end sizes its own "
-                            "enums, and a struct both see would differ\n");
+                            "enums, and a struct both see would differ\n",
+                    opt_typed("-fshort-enums"));
             return 1;
         }
         target_set_short_enums(1);
@@ -5729,9 +5714,10 @@ int main(int argc, char **argv)
      * C, so the flag would reach one and not the other. */
     if (g_single_prec) {
         if (lang_cxx) {
-            fprintf(stderr, "embcc: error: -fsingle-precision-constant is "
+            fprintf(stderr, "embcc: error: %s is "
                             "supported for C, not C++: the C++ front end "
-                            "would still type 1.0 as double\n");
+                            "would still type 1.0 as double\n",
+                    opt_typed("-fsingle-precision-constant"));
             return 1;
         }
         parse_set_single_precision_constant(1);

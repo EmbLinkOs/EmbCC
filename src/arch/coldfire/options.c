@@ -62,33 +62,33 @@ int coldfire_target_option(const char *arg)
                     strcmp(c, "5204") == 0))
             diag_fatal(NULL, 0, "%s is not supported: that core has "
                        "no hardware divide, and EmbCC's ColdFire "
-                       "code divides with divs.l/divu.l", arg);
+                       "code divides with divs.l/divu.l", opt_typed(arg));
         if (!ok && strncmp(c, "547", 3) != 0 &&
             strncmp(c, "548", 3) != 0)
             diag_fatal(NULL, 0, "%s is not a ColdFire core EmbCC "
                        "emits for: its code is ColdFire ISA_A with the "
                        "hardware divide (5208, 5213, 5235, 5282, 5329, "
                        "5407, 54455, ...); the 68000 family proper is "
-                       "not a target", arg);
+                       "not a target", opt_typed(arg));
         if (!ok)
             diag_fatal(NULL, 0, "%s is not supported: that core's "
                        "FPU makes GCC pass and return floating point "
                        "in its registers, and EmbCC's ColdFire code "
-                       "is soft float", arg);
+                       "is soft float", opt_typed(arg));
     } else if (strncmp(arg, "-march=", 7) == 0) {
         if (strcmp(v, "isaa") != 0 && strcmp(v, "isaaplus") != 0 &&
             strcmp(v, "isab") != 0 && strcmp(v, "isac") != 0)
             diag_fatal(NULL, 0, "%s is not supported: EmbCC emits "
-                       "ColdFire ISA_A (-march=isaa), which isaaplus, "
-                       "isab and isac cores also run", arg);
+                       "ColdFire ISA_A (--isa=isaa), which isaaplus, "
+                       "isab and isac cores also run", opt_typed(arg));
     } else if (strncmp(arg, "-m68", 4) == 0 ||
                strncmp(arg, "-mc68", 5) == 0 ||
                strncmp(arg, "-mcpu32", 7) == 0 ||
                strncmp(arg, "-mcfv", 5) == 0) {
         diag_fatal(NULL, 0, "%s is not supported: EmbCC's m68k "
-                   "target is ColdFire ISA_A (-mcpu=5208 and its "
+                   "target is ColdFire ISA_A (--cpu=5208 and its "
                    "kin); the 68000 family proper is not a target",
-                   arg);
+                   opt_typed(arg));
     } else if (strcmp(arg, "-mhard-float") == 0) {
         diag_fatal(NULL, 0, "-mhard-float is not supported: EmbCC "
                    "emits soft-float ColdFire code, which passes "
@@ -111,7 +111,7 @@ int coldfire_target_option(const char *arg)
                strcmp(arg, "-msep-data") == 0 ||
                strcmp(arg, "-mxgot") == 0) {
         diag_fatal(NULL, 0, "%s is not supported: EmbCC's ColdFire "
-                   "code takes every address absolutely", arg);
+                   "code takes every address absolutely", opt_typed(arg));
     }
     return 1;
 }

@@ -113,7 +113,7 @@ What they do not do:
 
 ## Linking
 
-A bare-metal link needs a memory map: a linker script (`-T FILE.ld`,
+A bare-metal link needs a memory map: a linker script (`--link-script=FILE.ld`,
 `-TFILE.ld`) or `-Wl,-Ttext=` and `-Wl,-Tdata=`. GNU ld scripts are read
 by embld; see [embld](tools/embld.md). `--specs=nano.specs` and
 `--specs=nosys.specs` are accepted and ignored, because EmbCC's C library

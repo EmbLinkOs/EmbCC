@@ -28,10 +28,10 @@ the system's libraries, and the Windows triple has no C library.
 ### When the driver links at all
 
 `embcc [FILE] [OBJECTS...] -o OUT` (no `-c`, `-S`, `-E` or
-`-fsyntax-only`) compiles the source, if there is one, and links in the
+`--syntax-only`) compiles the source, if there is one, and links in the
 same process with [EmbLD](tools/embld.md). The driver links the x86-64 ELF
 targets (`x86_64-elf`, `x86_64-emblink`, `x86_64-linux-gnu`) and, given a
-memory map (`-T board.ld`, or `-Wl,-Ttext`/`-Tdata`), the ARM, RISC-V and
+memory map (`--link-script=board.ld`, or `-Wl,-Ttext`/`-Tdata`), the ARM, RISC-V and
 AVR firmware targets; for AArch64 ELF, Mach-O and COFF targets it stops
 with `embcc: error: cannot link for TRIPLE`. The details are in
 [Invoking](invoking.md#linking).
@@ -89,7 +89,7 @@ for the installation itself, and `EMBCC_PREFIX`, are described in
 
 ### Opting out
 
-The driver has no `-nostdlib`, `-nodefaultlibs` or `-nostartfiles`, and no
+The driver has no `--no-stdlib`, `--no-default-libs` or `--no-start-files`, and no
 `-l` or `-L`; each is rejected as an unknown argument:
 
 ```text
@@ -97,23 +97,23 @@ embcc: error: unknown argument '-nostdlib'
 ```
 
 The driver's link takes EmbLD's own options through `-Wl,` and
-`-Xlinker` (`-e`, `-Ttext`, `-Tdata`, `-Tstack`, `--rom-limit`,
-`--lma-offset`; see [Invoking](invoking.md#-wlargs--xlinker-arg)), but not
+`--linker-arg` (`--entry`, `-Ttext`, `-Tdata`, `-Tstack`, `--rom-limit`,
+`--lma-offset`; see [Invoking](invoking.md#--linker-argarg)), but not
 other inputs. To link without EmbCC's libraries, or with others, compile
 with `-c` and run `embld` with exactly the inputs wanted:
 
 ```sh
-embcc -c -O2 kernel.c -o kernel.o
+embcc -c --opt=speed kernel.c -o kernel.o
 embld -e _start -Ttext 0xFFFFFFFF80100000 -o kernel.elf entry.o kernel.o
 ```
 
-`-ffreestanding` and `-fno-builtin` are accepted and change neither the
-link line nor the header search. `-nostdinc` removes EmbCC's header
-directories from the search (see [Invoking](invoking.md#-nostdinc)).
+`--freestanding` and `--no-builtins` are accepted and change neither the
+link line nor the header search. `--no-std-include` removes EmbCC's header
+directories from the search (see [Invoking](invoking.md#--no-std-include)).
 
 ### Header directories
 
-EmbCC's own headers are searched after every `-I` and `-isystem`
+EmbCC's own headers are searched after every `-I` and `--system-include`
 directory, as system directories:
 
 | Headers | Build tree | Installation |
@@ -440,20 +440,20 @@ scratch.
 
 | Target | Builds | Output |
 |---|---|---|
-| `make libc-x86_64` | C library, posixlike backend, `x86_64-elf`, `-O1` | `build/libc/x86_64/libc.a` |
+| `make libc-x86_64` | C library, posixlike backend, `x86_64-elf`, `--opt=basic` | `build/libc/x86_64/libc.a` |
 | `make libc-aarch64` | the same for `aarch64-elf` | `build/libc/aarch64/libc.a` |
 | `make libc` | both of the above | |
 | `make libc-linux-x86_64` | C library with the Linux backend, `crt1.o`, and `librt.a`, for `x86_64-linux-gnu` | `build/libc/linux-x86_64/{libc.a,crt1.o,librt.a}` |
 | `make libc-linux-aarch64` | the same for `aarch64-linux-gnu` | `build/libc/linux-aarch64/{libc.a,crt1.o,librt.a}` |
 | `make libc-linux` | both Linux C libraries | |
-| `make libc-embedded` | C library with the bare-metal backend, `-Os`, for each embedded target it builds on (all but `avr`) | `build/libc/TRIPLE/libc.a` |
-| `make libc-emblinkos EMBLINKOS=DIR` | C library with the EmbLinkOS backend, `-O2`; needs `DIR/user/lib/embk.h` (default `DIR` is `$HOME/EmbLinkOs`) | `build/libc/emblinkos/libc.a` |
-| `make libcxx-x86_64`, `make libcxx-aarch64` | C++ library for `x86_64-elf`, `aarch64-elf`, `-O2` | `build/libcxx/x86_64/libcxx.a`, `build/libcxx/aarch64/libcxx.a` |
+| `make libc-embedded` | C library with the bare-metal backend, `--opt=size`, for each embedded target it builds on (all but `avr`) | `build/libc/TRIPLE/libc.a` |
+| `make libc-emblinkos EMBLINKOS=DIR` | C library with the EmbLinkOS backend, `--opt=speed`; needs `DIR/user/lib/embk.h` (default `DIR` is `$HOME/EmbLinkOs`) | `build/libc/emblinkos/libc.a` |
+| `make libcxx-x86_64`, `make libcxx-aarch64` | C++ library for `x86_64-elf`, `aarch64-elf`, `--opt=speed` | `build/libcxx/x86_64/libcxx.a`, `build/libcxx/aarch64/libcxx.a` |
 | `make libcxx` | both of the above | |
 | `make libcxx-linux-x86_64`, `make libcxx-linux-aarch64` | C++ library for the Linux triples | `build/libcxx/linux-x86_64/libcxx.a`, `build/libcxx/linux-aarch64/libcxx.a` |
-| `make libcxx-embedded` | the C++ runtime for the 32-bit ARM triples and `riscv32-unknown-elf`, `-Os -fno-exceptions -fno-rtti`, through `tools/build-libcxx.sh`: `operator new`/`delete` (weak), the guard functions, `__cxa_pure_virtual`, `__aeabi_atexit`, `__dso_handle`, the RTTI classes and `__dynamic_cast` | `build/libcxx/TRIPLE/libcxx.a` |
+| `make libcxx-embedded` | the C++ runtime for the 32-bit ARM triples and `riscv32-unknown-elf`, `--opt=size --no-exceptions --no-rtti`, through `tools/build-libcxx.sh`: `operator new`/`delete` (weak), the guard functions, `__cxa_pure_virtual`, `__aeabi_atexit`, `__dso_handle`, the RTTI classes and `__dynamic_cast` | `build/libcxx/TRIPLE/libcxx.a` |
 | `make libc-linux-all` | `libc-linux` and both Linux C++ libraries | |
-| `make rt-embedded` | `librt.a` for `avr`, the five Cortex-M triples and `riscv32-unknown-elf`, `-Os`, through `tools/build-rt.sh` | `build/libc/TRIPLE/librt.a` |
+| `make rt-embedded` | `librt.a` for `avr`, the five Cortex-M triples and `riscv32-unknown-elf`, `--opt=size`, through `tools/build-rt.sh` | `build/libc/TRIPLE/librt.a` |
 
 The archiver is a cross `ar`: `x86_64-elf-ar` and `aarch64-elf-ar` by
 default, overridden with `EMBCC_X86_AR` and `EMBCC_AARCH64_AR`.
@@ -477,7 +477,7 @@ the first loadable segment (the C library finds thread-local storage
 through them):
 
 ```sh
-embcc --target=aarch64-linux-gnu -O2 -c prog.c -o prog.o
+embcc --target=aarch64-linux-gnu --opt=speed -c prog.c -o prog.o
 aarch64-elf-ld -static -T link.ld -o prog crt1.o prog.o libc.a librt.a
 ```
 

@@ -99,6 +99,7 @@ echo "-fsyntax-only: no object, and errors still reported"
 #    the driver takes.
 [ "$("$EMBCC" --target="$TARGET" -dumpmachine)" = "$TARGET" ] || {
     echo "-dumpmachine disagrees with --target"; exit 1; }
-"$EMBCC" --help | grep -q -- "-fsyntax-only" || { echo "--help omits -fsyntax-only"; exit 1; }
-"$EMBCC" --help | grep -q -- "-fdiagnostics-format" || { echo "--help omits the diagnostics options"; exit 1; }
+"$EMBCC" --help | grep -q -- "--syntax-only" || { echo "--help omits --syntax-only"; exit 1; }
+"$EMBCC" --help | grep -q -- "--diagnostics=" || { echo "--help omits the diagnostics options"; exit 1; }
+"$EMBCC" --help=gcc | grep -q -- "-fsyntax-only" || { echo "--help=gcc omits -fsyntax-only"; exit 1; }
 echo "-dumpmachine and --help agree with the driver"

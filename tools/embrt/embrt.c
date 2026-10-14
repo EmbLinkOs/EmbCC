@@ -432,8 +432,8 @@ static long long worst(int fi)
     int bad = 0;
     if (f->frame == UNKNOWN) {
         f->why = f->obj < 0 ? "no object defines it (a library without "
-                              "-fstack-usage?)"
-                            : "no frame size (compile it with -fstack-usage)";
+                              "--stack-usage?)"
+                            : "no frame size (compile it with --stack-usage)";
         bad = 1;
     } else if (f->dynamic) {
         f->why = "its frame grows at run time (a variable-length array or "

@@ -2,6 +2,7 @@
 
 #include "../platform/platform.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #include "../elf/elf.h"
@@ -663,6 +664,110 @@ static const char *canonical_name(enum target_arch a, enum target_os o,
             g_triples[i].flag == flag)
             return g_triples[i].name;
     return NULL;
+}
+
+/* ---- the targets reference ---------------------------------------------
+ *
+ * `embcc --reference=targets`: every target --target accepts, printed
+ * from the same rows target_from_triple reads, so the list in the
+ * documentation is the list the compiler has. One section per
+ * architecture, in the database's order; each canonical name with what
+ * it runs on and the other spellings of it. */
+static const struct { enum target_arch arch; const char *family; } g_families[] = {
+    { TARGET_X86_64, "x86-64" }, { TARGET_AARCH64, "AArch64" },
+    { TARGET_THUMB, "ARM: Cortex-M and ARMv7-A" },
+    { TARGET_RISCV32, "RISC-V, 32-bit" }, { TARGET_RISCV64, "RISC-V, 64-bit" },
+    { TARGET_AVR, "AVR" }, { TARGET_MIPS32, "MIPS32" }, { TARGET_MIPS64, "MIPS64" },
+    { TARGET_LOONGARCH64, "LoongArch64" }, { TARGET_TRICORE, "TriCore" },
+    { TARGET_XTENSA, "Xtensa (ESP32)" }, { TARGET_PPC32, "PowerPC, 32-bit" },
+    { TARGET_RX, "Renesas RX" }, { TARGET_SPARC32, "SPARC V8 (LEON)" },
+    { TARGET_COLDFIRE, "ColdFire (m68k)" },
+};
+
+static const char *os_words(enum target_os o)
+{
+    switch (o) {
+    case TGT_OS_NONE:    return "bare metal";
+    case TGT_OS_EMBLINK: return "EmbLinkOS";
+    case TGT_OS_LINUX:   return "Linux";
+    case TGT_OS_DARWIN:  return "macOS";
+    case TGT_OS_WINDOWS: return "Windows";
+    }
+    return "?";
+}
+
+static const char *sub_words(enum triple_sub s, enum target_arch a)
+{
+    switch (s) {
+    case SUB_BASE:         return a == TARGET_THUMB ? ", ARMv7-M (Cortex-M3)" : "";
+    case SUB_ARM_V7EM:     return ", ARMv7E-M (Cortex-M4, M7)";
+    case SUB_ARM_V8M_MAIN: return ", ARMv8-M Mainline (Cortex-M33, M55)";
+    case SUB_ARM_V6M:      return ", ARMv6-M (Cortex-M0, M0+)";
+    case SUB_ARM_V8M_BASE: return ", ARMv8-M Baseline (Cortex-M23)";
+    case SUB_ARM_V7A:      return ", ARMv7-A in ARM state";
+    }
+    return "";
+}
+
+int target_print_reference(FILE *out)
+{
+    int nfam = (int)(sizeof g_families / sizeof g_families[0]);
+    /* every architecture with a target is in the list above */
+    for (int i = 0; i < g_ntriples; i++) {
+        int f;
+        for (f = 0; f < nfam && g_families[f].arch != g_triples[i].arch; f++)
+            ;
+        if (f == nfam) {
+            fprintf(stderr, "embcc: target '%s' has no family in "
+                            "src/arch/target.c (g_families)\n",
+                    g_triples[i].name);
+            return 1;
+        }
+    }
+    fprintf(out,
+        "# Target reference\n\n"
+        "Every target `--target=` accepts, generated from EmbCC's target "
+        "database (`src/targets/`) by `embcc --reference=targets`. The "
+        "first name in each row is the one EmbCC prints back "
+        "(`--print-target`); the others are accepted too. "
+        "[Targets](targets.md) covers each family in depth.\n");
+    for (int f = 0; f < nfam; f++) {
+        enum target_arch a = g_families[f].arch;
+        const struct data_model *m = &g_model[a];
+        fprintf(out, "\n## %s\n\n", g_families[f].family);
+        fprintf(out, "`int` is %d bytes, `long` %d, a pointer %d, `double` %d "
+                     "and `long double` %d. Plain `char` is %s. %s%s\n\n",
+                m->it, m->lng, m->ptr, m->dbl, m->ldbl,
+                m->char_uns ? "unsigned" : "signed",
+                m->big_endian ? "Big-endian" : a == TARGET_MIPS32 ||
+                    a == TARGET_MIPS64 ? "Either byte order (the target "
+                    "names it)" : "Little-endian",
+                m->int128 ? "; `__int128` exists." : ".");
+        fputs("| Target | Runs on | Object format | Also spelled |\n"
+              "|---|---|---|---|\n", out);
+        for (int i = 0; i < g_ntriples; i++) {
+            const struct triple *t = &g_triples[i];
+            if (t->arch != a || !t->canonical)
+                continue;
+            fprintf(out, "| `%s` | %s%s%s%s | %s | ", t->name,
+                    os_words(t->os), sub_words(t->sub, a),
+                    t->flag == TFLAG_HF ? ", hardware float" : "",
+                    t->flag == TFLAG_BE ? ", big-endian" : "",
+                    t->fmt == TGT_FMT_ELF ? "ELF" :
+                    t->fmt == TGT_FMT_MACHO ? "Mach-O" : "COFF");
+            int any = 0;
+            for (int j = 0; j < g_ntriples; j++) {
+                const struct triple *u = &g_triples[j];
+                if (u->canonical || u->arch != a || u->os != t->os ||
+                    u->sub != t->sub || u->flag != t->flag)
+                    continue;
+                fprintf(out, "%s`%s`", any ? ", " : "", u->name);
+                any = 1;
+            }
+            fputs(" |\n", out);
+        }
+    }
+    return 0;
 }
 
 const char *target_triple_of(enum target_arch a, enum target_os o)

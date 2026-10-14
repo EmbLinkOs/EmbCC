@@ -130,7 +130,7 @@ writer exists:"; cat "$out/err.txt"; exit 1; }
 #    rsi, rdi and xmm6-7 not preserved) are said out loud on every
 #    compile, because emitting them under a Windows triple is exactly
 #    the silent fallback this rule forbids.
-grep -q 'Wwindows-abi' "$out/err.txt" || {
+grep -q '\[--warn=windows-abi\]' "$out/err.txt" || {
     echo "FAIL: nothing warned that the ABI is not yet Microsoft's:"
     cat "$out/err.txt"; exit 1; }
 

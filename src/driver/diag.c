@@ -324,13 +324,18 @@ static int caret_end(const struct diag *d, const char *ln, int len)
 static void render_text(const struct diag *d)
 {
     fprintf(stderr, "embcc: ");
-    fprintf(stderr, "%s%s", cc("\033[1m"), d->file ? d->file : "<embcc>");
-    if (d->line > 0) fprintf(stderr, ":%d", d->line);
-    if (d->col > 0)  fprintf(stderr, ":%d", d->col);
-    fprintf(stderr, ":%s %s%s:%s %s%s", cc("\033[0m"), cc(level_sgr(d->level)),
+    /* a diagnostic about the command line has no place to name */
+    if (d->file) {
+        fprintf(stderr, "%s%s", cc("\033[1m"), d->file);
+        if (d->line > 0) fprintf(stderr, ":%d", d->line);
+        if (d->col > 0)  fprintf(stderr, ":%d", d->col);
+        fprintf(stderr, ":%s ", cc("\033[0m"));
+    }
+    fprintf(stderr, "%s%s:%s %s%s", cc(level_sgr(d->level)),
             level_name(d->level), cc("\033[0m"), cc("\033[1m"), d->msg);
+    /* the warning, as EmbCC's option that controls it */
     if (d->option)
-        fprintf(stderr, " [%s]", d->option);
+        fprintf(stderr, " [--warn=%s]", d->option);
     if (d->id)
         fprintf(stderr, " [%s]", d->id);
     fprintf(stderr, "%s\n", cc("\033[0m"));
@@ -403,9 +408,14 @@ static void render_json(FILE *f, const struct diag *d, int indent)
     json_str(f, level_name(d->level));
     fprintf(f, ", \"message\": ");
     json_str(f, d->msg);
+    /* GCC's JSON format, which tools read: its "option" is GCC's
+     * spelling (docs/internals/identity.md: a contract) */
     if (d->option) {
+        char *g = xmalloc(strlen(d->option) + 3);
+        sprintf(g, "-W%s", d->option);
         fprintf(f, ", \"option\": ");
-        json_str(f, d->option);
+        json_str(f, g);
+        free(g);
     }
     if (d->id) {
         fprintf(f, ", \"id\": ");
@@ -991,11 +1001,16 @@ static int warn_is_error(const char *name)
     return f ? f > 0 : g_werror;
 }
 
-/* -Wall / -Wextra: the groups, as GCC draws them. */
+/* -Wall / -Wextra: the groups, as GCC draws them. A warning named on its
+ * own (-Wno-unused-variable, or -Wunused-variable) keeps that setting
+ * whether it came before the group or after, as in GCC: a Makefile's
+ * `-Wno-unused-parameter $(WARNINGS)` must not turn it back on, which
+ * under -Werror broke a build GCC accepts. */
 void diag_enable_group(int wall, int wextra)
 {
     for (int i = 0; i < g_nwarns; i++)
-        if ((wall && g_warns[i].in_wall) || (wextra && g_warns[i].in_wextra))
+        if (((wall && g_warns[i].in_wall) || (wextra && g_warns[i].in_wextra)) &&
+            !g_named[i])
             g_warns[i].on = 1;
 }
 
@@ -1017,6 +1032,132 @@ const char *diag_warning_name(int i) { return g_warns[i].name; }
 int diag_warning_group(int i)
 {
     return g_warns[i].in_wall ? 1 : g_warns[i].in_wextra ? 2 : 0;
+}
+int diag_warning_default_on(int i) { return g_warns[i].on; }
+
+/* What each warning diagnoses, and the option besides --warn=all and
+ * --warn=extra that turns it on: the warnings reference
+ * (`embcc --reference=warnings`) is printed from these and the table
+ * above, and refuses to print if a warning has no line here. */
+static const struct { const char *name, *implied, *what; } g_warn_doc[] = {
+    { "address", NULL, "a function name tested in an `if` condition, or compared with a null pointer constant" },
+    { "arith-conversion", NULL, "as `--warn=conversion`, also for arithmetic whose operands each fit the target type" },
+    { "attributes", NULL, "an attribute EmbCC does not know, or one it accepts but does not implement" },
+    { "cast-qual", NULL, "a cast that removes `const` or `volatile` from the type a pointer points to" },
+    { "conversion", NULL, "an implicit conversion that may change an integer's value, or an integer converted to a floating type that cannot hold all its values" },
+    { "deprecated-declarations", NULL, "a use of a function or variable declared `deprecated`" },
+    { "discarded-qualifiers", NULL, "a pointer conversion that drops the pointed-to type's `const`" },
+    { "div-by-zero", NULL, "integer division or remainder by a constant zero" },
+    { "double-promotion", NULL, "a `float` implicitly converted to `double`: an operand, a `double` parameter, a variadic argument" },
+    { "float-conversion", "conversion", "an implicit conversion from a floating type to an integer or to a narrower floating type that may change the value" },
+    { "format", NULL, "a `printf`- or `scanf`-style format that disagrees with its arguments" },
+    { "format-nonliteral", "format=2", "a format that is not a string literal, with arguments after it (not for a `va_list` function such as `vprintf`)" },
+    { "format-security", "format=2", "a format that is not a string literal, with no arguments after it" },
+    { "implicit-fallthrough", NULL, "a `case` whose statements can run into the next label with no `__attribute__((fallthrough));`, `[[fallthrough]];` or fall-through comment" },
+    { "logical-op", NULL, "`a && a` or `a || a` with identical operands" },
+    { "maybe-uninitialized", NULL, "a local variable read on a path where only some paths wrote it" },
+    { "missing-declarations", NULL, "a function with external linkage defined with no declaration before it (when `--warn=missing-prototypes` is off)" },
+    { "missing-prototypes", NULL, "a function with external linkage defined with no prototype before it" },
+    { "multichar", NULL, "a character constant of more than one character, `'ab'`" },
+    { "nested-externs", NULL, "an `extern` declaration inside a function body" },
+    { "old-style-declaration", NULL, "a storage class or `inline` after the type specifiers: `const static int t[]`, `int static n`" },
+    { "overflow", NULL, "an integer constant converted to a type that cannot hold it as a signed or as an unsigned value: `unsigned char c = 300;`" },
+    { "parentheses", NULL, "a comparison as an unparenthesized operand of `&`, `|` or `^`: `reg & MASK == 0`" },
+    { "prio-ctor-dtor", NULL, "a `constructor` or `destructor` priority from 0 to 100, which the implementation reserves" },
+    { "redundant-decls", NULL, "a second declaration of a function or `extern` object in the same scope" },
+    { "shadow", NULL, "a local declaration that hides a local variable, a parameter or a file-scope variable" },
+    { "shift-count-overflow", NULL, "a constant shift count that is negative or not less than the operand width" },
+    { "sign-compare", NULL, "a comparison that converts a possibly negative signed operand to unsigned" },
+    { "sign-conversion", "conversion", "an implicit conversion between signed and unsigned integer types that may change the sign of the value" },
+    { "strict-prototypes", NULL, "a function declarator with `()` instead of `(void)`" },
+    { "switch-default", NULL, "a `switch` with no `default` label" },
+    { "type-limits", NULL, "an unsigned value compared `< 0` or `>= 0`" },
+    { "undef", NULL, "an identifier in `#if` that no macro defines (evaluated as 0), outside an operand `&&`, `||` or `?:` skips" },
+    { "uninitialized", NULL, "a local variable read before any path wrote it" },
+    { "unused-function", NULL, "a `static` function that is defined and never used" },
+    { "unused-parameter", NULL, "a function parameter the body never uses" },
+    { "unused-result", NULL, "a discarded result of a function declared `warn_unused_result` or `[[nodiscard]]`" },
+    { "unused-variable", NULL, "a local variable that is never used" },
+    { "vla", NULL, "a variable length array, or a `typedef` of one" },
+    { "windows-abi", NULL, "a compile for a Windows target, whose ABI EmbCC does not yet fully implement" },
+};
+
+static int warn_doc(const char *name)
+{
+    for (int k = 0; k < (int)(sizeof g_warn_doc / sizeof g_warn_doc[0]); k++)
+        if (!strcmp(g_warn_doc[k].name, name))
+            return k;
+    return -1;
+}
+
+/* A Markdown cell's text: '|' escaped. */
+static void md_text(FILE *out, const char *s)
+{
+    for (; *s; s++) {
+        if (*s == '|')
+            fputs("\\|", out);
+        else
+            fputc(*s, out);
+    }
+}
+
+int diag_print_reference(FILE *out)
+{
+    for (int i = 0; i < g_nwarns; i++)
+        if (warn_doc(g_warns[i].name) < 0) {
+            fprintf(stderr, "embcc: warning '%s' has no description in "
+                            "src/driver/diag.c (g_warn_doc)\n",
+                    g_warns[i].name);
+            return 1;
+        }
+    fprintf(out,
+        "# Warning reference\n\n"
+        "Every warning EmbCC has, generated from the compiler's own table "
+        "by `embcc --reference=warnings`. A warning names the option that "
+        "controls it, `[--warn=NAME]`; `--no-warn=NAME` turns it off and "
+        "`--error=NAME` makes it an error. [Diagnostics](diagnostics.md) "
+        "says how they are reported and shows each one.\n\n"
+        "**On by default** means on unless `--no-warn=NAME` or "
+        "`--no-warnings` is given. A warning in **neither set** is on "
+        "only when named.\n\n"
+        "| Warning | Diagnoses | Turned on by |\n|---|---|---|\n");
+    /* in name order, as a reader looks one up */
+    int *ord = xmalloc((size_t)(g_nwarns ? g_nwarns : 1) * sizeof *ord);
+    for (int i = 0; i < g_nwarns; i++)
+        ord[i] = i;
+    for (int i = 1; i < g_nwarns; i++)
+        for (int j = i; j > 0 &&
+             strcmp(g_warns[ord[j - 1]].name, g_warns[ord[j]].name) > 0; j--) {
+            int t = ord[j]; ord[j] = ord[j - 1]; ord[j - 1] = t;
+        }
+    for (int n = 0; n < g_nwarns; n++) {
+        const struct warn_opt *w = &g_warns[ord[n]];
+        int d = warn_doc(w->name);
+        fprintf(out, "| `--warn=%s` | ", w->name);
+        const char *what = g_warn_doc[d].what;     /* a sentence: capital */
+        if (*what >= 'a' && *what <= 'z') {
+            fputc(*what - 'a' + 'A', out);
+            what++;
+        }
+        md_text(out, what);
+        fputs(" | ", out);
+        if (w->on)
+            fputs("on by default", out);
+        else if (w->in_wall)
+            fputs("`--warn=all`", out);
+        else if (w->in_wextra)
+            fputs("`--warn=extra`", out);
+        else if (g_warn_doc[d].implied)
+            fprintf(out, "`--warn=%s`", g_warn_doc[d].implied);
+        else
+            fputs("neither set", out);
+        fputs(" |\n", out);
+    }
+    free(ord);
+    fprintf(out, "\nGCC's spellings work too: `-WNAME`, `-Wno-NAME`, "
+                 "`-Werror=NAME` ([Migrating from GCC]"
+                 "(migrating-from-gcc.md)).\n");
+    return 0;
 }
 
 /* ---- the API the front ends call ---- */
@@ -1104,13 +1245,16 @@ EMBCC_NORETURN static void leave(void)
     exit(1);
 }
 
-/* -fmax-errors=N: stop once N errors are out, as GCC does. */
+/* --max-errors=N: stop once N errors are out, as GCC does. The option
+ * is named as the user typed it. */
 static void check_max_errors(void)
 {
     if (g_max_errors && g_errors >= g_max_errors) {
+        char n[24];
         diag_flush();
-        fprintf(stderr, "embcc: compilation terminated due to -fmax-errors=%d\n",
-                g_max_errors);
+        snprintf(n, sizeof n, "%d", g_max_errors);
+        fprintf(stderr, "embcc: compilation terminated due to %s\n",
+                opt_said("-fmax-errors=", n));
         leave();
     }
 }
@@ -1169,7 +1313,8 @@ void diag_warn_at(const char *file, int line, int col, const char *fmt, ...)
 }
 
 /* A warning the option `name` controls: silent unless it is on, and
- * printed with "[-Wname]" so the reader knows which it is. */
+ * printed with "[--warn=name]" so the reader knows which it is and what
+ * turns it off. */
 int diag_warn_opt(const char *file, int line, int col, const char *name,
                   const char *fmt, ...)
 {
@@ -1188,9 +1333,9 @@ int diag_warn_opt(const char *file, int line, int col, const char *name,
     int err = st == 4 ? 1 : st == 3 ? 0 : warn_is_error(name);
     struct diag *d = new_diag(err ? DIAG_ERROR : DIAG_WARNING, file,
                               line, col, msg);
-    /* the option as the reader would type it */
-    char *opt = xmalloc(strlen(name) + 4);
-    sprintf(opt, "-W%s", name);
+    /* the bare name; each printer spells it */
+    char *opt = xmalloc(strlen(name) + 1);
+    strcpy(opt, name);
     d->option = opt;
     if (err)
         check_max_errors();

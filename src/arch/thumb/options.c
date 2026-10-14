@@ -11,6 +11,7 @@
 #include "../target.h"
 #include "../../driver/util.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -46,15 +47,20 @@ static const char *g_arm_march_fpu;
  *
  * The object says which it was built for (Tag_FP_arch, Tag_ABI_HardFP_use,
  * Tag_ABI_VFP_args) and the predefined macros say so to the program
- * (__ARM_FP, __ARM_VFPV4__, __SOFTFP__); both follow from what is set here. */
+ * (__ARM_FP, __ARM_VFPV4__, __SOFTFP__); both follow from what is set here.
+ *
+ * A message quotes an option as the user typed it (opt_said:
+ * "--fpu=fpv5-d16" or "-mfpu=fpv5-d16") and suggests one in EmbCC's
+ * spelling. */
+
 void thumb_options_done(void)
 {
     /* -mcmse needs the security extension, which only ARMv8-M has. */
     if (g_arm_cmse && !target_thumb_v8m())
-        diag_fatal(NULL, 0, "-mcmse is the Secure side of ARMv8-M's "
+        diag_fatal(NULL, 0, "%s is the Secure side of ARMv8-M's "
                    "security extension, and %s is not ARMv8-M: use "
                    "thumbv8m.main-none-eabi or thumbv8m.base-none-eabi",
-                   target_triple_now());
+                   opt_typed("-mcmse"), target_triple_now());
     /* ARMv7-A: VFPv3 or VFPv4, D16 or D32 -- every Cortex-A's unit but
      * NEON's SIMD, which nothing here emits and so nothing may claim. The
      * code is the Cortex-M7's (single and double precision on d0-d15),
@@ -73,21 +79,24 @@ void thumb_options_done(void)
         int named = u && strcmp(u, "none") && strcmp(u, "soft") &&
                     strcmp(u, "auto");
         if (strcmp(a, "soft") && strcmp(a, "softfp") && strcmp(a, "hard"))
-            diag_fatal(NULL, 0, "-mfloat-abi=%s is not an ARM float ABI: it "
-                       "is one of soft, softfp and hard", a);
+            diag_fatal(NULL, 0, "%s is not an ARM float ABI: it "
+                       "is one of soft, softfp and hard",
+                       opt_said("-mfloat-abi=", a));
         for (int k = 0; named && units[k].name; k++)
             if (!strcmp(u, units[k].name))
                 unit = k;
         if (named && unit < 0)
-            diag_fatal(NULL, 0, "-mfpu=%s is not supported on %s: EmbCC "
-                       "emits VFPv3 or VFPv4 (-mfpu=vfpv3-d16, vfpv3, "
+            diag_fatal(NULL, 0, "%s is not supported on %s: EmbCC "
+                       "emits VFPv3 or VFPv4 (--fpu=vfpv3-d16, vfpv3, "
                        "vfpv4-d16, vfpv4) there, and no NEON (Advanced SIMD) "
-                       "instruction", u, target_triple_now());
+                       "instruction", opt_said("-mfpu=", u),
+                       target_triple_now());
         if (!strcmp(a, "soft"))
             return;                    /* no FPU instructions, as GCC reads it */
         if (!named)
-            diag_fatal(NULL, 0, "-mfloat-abi=%s needs an FPU to use: add "
-                       "-mfpu=vfpv3-d16 (or vfpv3, vfpv4-d16, vfpv4)", a);
+            diag_fatal(NULL, 0, "%s needs an FPU to use: add "
+                       "--fpu=vfpv3-d16 (or vfpv3, vfpv4-d16, vfpv4)",
+                       opt_said("-mfloat-abi=", a));
         target_set_thumb_hard_abi(!strcmp(a, "hard"));
         target_set_thumb_fpu(1);
         target_set_thumb_fpu_dp(1);
@@ -110,14 +119,16 @@ void thumb_options_done(void)
     if (!g_arm_fpu && !g_arm_float_abi)
         return;
     if (strcmp(abi, "soft") && strcmp(abi, "softfp") && strcmp(abi, "hard"))
-        diag_fatal(NULL, 0, "-mfloat-abi=%s is not an ARM float ABI: it is "
-                   "one of soft, softfp and hard", abi);
+        diag_fatal(NULL, 0, "%s is not an ARM float ABI: it is "
+                   "one of soft, softfp and hard",
+                   opt_said("-mfloat-abi=", abi));
     /* No ARMv6-M part has an FPU: only the base standard means anything. */
     if (target_thumb_arch() == 6 && (fpu_named || strcmp(abi, "soft")))
-        diag_fatal(NULL, 0, "%s%s on %s: %s has no FPU, so floating point "
+        diag_fatal(NULL, 0, "%s on %s: %s has no FPU, so floating point "
                    "is soft and travels in the core registers",
-                   fpu_named ? "-mfpu=" : "-mfloat-abi=",
-                   fpu_named ? g_arm_fpu : abi, target_triple_now(),
+                   fpu_named ? opt_said("-mfpu=", g_arm_fpu)
+                             : opt_said("-mfloat-abi=", abi),
+                   target_triple_now(),
                    target_thumb_v8m_base()
                    ? "an ARMv8-M Baseline core (Cortex-M23)"
                    : "an ARMv6-M core (Cortex-M0, M0+, M1)");
@@ -129,31 +140,35 @@ void thumb_options_done(void)
          * FPv5, and its attributes and tables are the only ones checked. */
         if (v8 ? strcmp(g_arm_fpu, "fpv5-sp-d16") != 0
                : strcmp(g_arm_fpu, "fpv4-sp-d16") != 0 && !dp)
-            diag_fatal(NULL, 0, "-mfpu=%s is not supported on %s: EmbCC "
+            diag_fatal(NULL, 0, "%s is not supported on %s: EmbCC "
                        "emits VFP for %s and nothing else: another unit's "
                        "instruction set and attributes are unchecked here",
-                       g_arm_fpu, target_triple_now(),
-                       v8 ? "the Cortex-M33's unit (-mfpu=fpv5-sp-d16)"
-                          : "the Cortex-M4F's unit (-mfpu=fpv4-sp-d16) and "
-                            "the Cortex-M7's (-mfpu=fpv5-d16)");
+                       opt_said("-mfpu=", g_arm_fpu), target_triple_now(),
+                       v8 ? "the Cortex-M33's unit (--fpu=fpv5-sp-d16)"
+                          : "the Cortex-M4F's unit (--fpu=fpv4-sp-d16) and "
+                            "the Cortex-M7's (--fpu=fpv5-d16)");
         if (!v8 && !target_thumb_em())
-            diag_fatal(NULL, 0, "-mfpu=%s is an ARMv7E-M unit, and the part "
-                       "is ARMv7-M (a Cortex-M3 has no FPU); add -mcpu=%s",
-                       g_arm_fpu, dp ? "cortex-m7" : "cortex-m4");
+            diag_fatal(NULL, 0, "%s is an ARMv7E-M unit, and the part "
+                       "is ARMv7-M (a Cortex-M3 has no FPU); add --cpu=%s",
+                       opt_said("-mfpu=", g_arm_fpu),
+                       dp ? "cortex-m7" : "cortex-m4");
         /* The double-precision unit is the M7's and no other part's: an
          * M4 told it has one would run .f64 instructions it does not
          * implement, which is a UsageFault at the first double. */
         if (dp && g_arm_cpu && !m7)
-            diag_fatal(NULL, 0, "-mfpu=fpv5-d16 is the Cortex-M7's "
-                       "double-precision unit, and -mcpu=%s does not have "
-                       "it; the Cortex-M4F's is -mfpu=fpv4-sp-d16", g_arm_cpu);
+            diag_fatal(NULL, 0, "%s is the Cortex-M7's "
+                       "double-precision unit, and %s does not have "
+                       "it; the Cortex-M4F's is --fpu=fpv4-sp-d16",
+                       opt_said("-mfpu=", "fpv5-d16"),
+                       opt_said("-mcpu=", g_arm_cpu));
     }
     if (!strcmp(abi, "soft"))
         return;                        /* no FPU instructions, as GCC reads it */
     if (!fpu_named)
-        diag_fatal(NULL, 0, "-mfloat-abi=%s needs an FPU to use: add "
-                   "-mfpu=fpv4-sp-d16 (Cortex-M4F), -mfpu=fpv5-d16 "
-                   "(Cortex-M7) or -mfpu=fpv5-sp-d16 (Cortex-M33)", abi);
+        diag_fatal(NULL, 0, "%s needs an FPU to use: add "
+                   "--fpu=fpv4-sp-d16 (Cortex-M4F), --fpu=fpv5-d16 "
+                   "(Cortex-M7) or --fpu=fpv5-sp-d16 (Cortex-M33)",
+                   opt_said("-mfloat-abi=", abi));
     /* hard: the FPU's arithmetic, and floating point passed and
      * returned in s0-s15 / d0-d7 (AAPCS-VFP). The runtime helpers keep the
      * base convention either way, as the RTABI requires. The convention
@@ -169,11 +184,11 @@ void thumb_options_done(void)
      * Neither is emitted, so the combination is refused rather than
      * leaking a Secure float into the Non-secure state. */
     if (g_arm_cmse && target_thumb_fpu())
-        diag_fatal(NULL, 0, "-mcmse with an FPU (-mfpu=, -mfloat-abi=softfp "
-                   "or hard, or an -eabihf triple) is not supported: EmbCC "
+        diag_fatal(NULL, 0, "%s with an FPU (--fpu=, --float-abi=softfp "
+                   "or hard, or an -eabihf target) is not supported: EmbCC "
                    "does not clear the floating-point registers a "
                    "cmse_nonsecure_entry function must clear; build the "
-                   "Secure side with -mfloat-abi=soft");
+                   "Secure side with --float-abi=soft", opt_typed("-mcmse"));
 }
 
 int thumb_target_option(const char *arg)
@@ -224,24 +239,25 @@ int thumb_target_option(const char *arg)
             if (strncmp(arg, "-march=", 7) == 0) {
                 if (strncmp(v, "armv7-a", 7) != 0 &&
                     strncmp(v, "armv7ve", 7) != 0)
-                    diag_fatal(NULL, 0, "-march=%s is not supported on "
+                    diag_fatal(NULL, 0, "%s is not supported on "
                                "%s: EmbCC emits ARMv7-A code there "
-                               "(-march=armv7-a)", v, target_triple_now());
+                               "(--isa=armv7-a)", opt_said("-march=", v),
+                               target_triple_now());
                 return 1;
             }
             if (strncmp(arg, "-mtune=", 7) == 0) {
                 if (strncmp(v, "cortex-a", 8) != 0 &&
                     strcmp(v, "generic-armv7-a") != 0)
-                    diag_fatal(NULL, 0, "-mtune=%s is not a Cortex-A core",
-                               v);
+                    diag_fatal(NULL, 0, "%s is not a Cortex-A core",
+                               opt_said("-mtune=", v));
                 return 1;
             }
             if (strcmp(arg, "-mthumb") == 0)
-                diag_fatal(NULL, 0, "-mthumb is not supported on %s: "
+                diag_fatal(NULL, 0, "%s is not supported on %s: "
                            "EmbCC emits ARM (A32) code for a Cortex-A; "
                            "Thumb-2 is for the Cortex-M targets "
                            "(thumbv7m-none-eabi and the others)",
-                           target_triple_now());
+                           opt_typed("-mthumb"), target_triple_now());
             if (strncmp(arg, "-mcpu=", 6) == 0) {
                 /* The ARMv7-A cores. All of them run what is emitted:
                  * no divide instruction is used (the A7, A12, A15 and
@@ -256,19 +272,20 @@ int thumb_target_option(const char *arg)
                 for (int k = 0; a7cores[k]; k++)
                     known |= strcmp(v, a7cores[k]) == 0;
                 if (!known)
-                    diag_fatal(NULL, 0, "-mcpu=%s is not supported on %s: "
+                    diag_fatal(NULL, 0, "%s is not supported on %s: "
                                "EmbCC emits ARMv7-A (cortex-a5, a7, a8, "
                                "a9, a12, a15, a17) here; a Cortex-M is "
                                "one of the thumb targets, and an ARMv7-R "
-                               "core's profile is not this one", v,
-                               target_triple_now());
+                               "core's profile is not this one",
+                               opt_said("-mcpu=", v), target_triple_now());
                 g_arm_cpu = v;
                 return 1;
             }
         }
         if (strcmp(arg, "-marm") == 0)
-            diag_fatal(NULL, 0, "-marm is not supported: a Cortex-M "
-                       "has no ARM instruction set, only Thumb");
+            diag_fatal(NULL, 0, "%s is not supported: a Cortex-M "
+                       "has no ARM instruction set, only Thumb",
+                       opt_typed("-marm"));
         if (strcmp(arg, "-mthumb") == 0)
             return 1;          /* the only state there is */
         /* Interworking is between ARM and Thumb code, and a
@@ -291,11 +308,11 @@ int thumb_target_option(const char *arg)
          * then disagrees with its callers. */
         if (strncmp(arg, "-mabi=", 6) == 0) {
             if (strcmp(v, "aapcs") && strcmp(v, "aapcs-linux"))
-                diag_fatal(NULL, 0, "-mabi=%s is not supported: EmbCC "
-                           "emits the AAPCS (-mabi=aapcs, or "
+                diag_fatal(NULL, 0, "%s is not supported: EmbCC "
+                           "emits the AAPCS (--abi=aapcs, or "
                            "aapcs-linux, whose int-sized enums are "
                            "EmbCC's too); %s passes arguments and lays "
-                           "out data differently", v, v);
+                           "out data differently", opt_said("-mabi=", v), v);
             return 1;
         }
         /* ARMv7-M and ARMv8-M Mainline load and store a word or a
@@ -314,12 +331,13 @@ int thumb_target_option(const char *arg)
          * flag the same image faults wherever unaligned accesses
          * trap (CCR.UNALIGN_TRP, or Device memory on an M7). */
         if (strcmp(arg, "-mno-unaligned-access") == 0)
-            diag_fatal(NULL, 0, "-mno-unaligned-access is not "
+            diag_fatal(NULL, 0, "%s is not "
                        "supported: EmbCC's ARMv7-M code uses word and "
                        "halfword loads and stores at unaligned addresses "
                        "(packed struct members; copies and by-value "
                        "passing of structs aligned below 4), which the "
-                       "architecture allows and this flag forbids");
+                       "architecture allows and this flag forbids",
+                       opt_typed("-mno-unaligned-access"));
         /* -mtune= picks a core to schedule for, which EmbCC does
          * not do: any Cortex-M part is accepted, and changes nothing. */
         if (strncmp(arg, "-mtune=", 7) == 0) {
@@ -333,7 +351,8 @@ int thumb_target_option(const char *arg)
             for (int k = 0; parts[k]; k++)
                 ok |= !strcmp(v, parts[k]);
             if (!ok)
-                diag_fatal(NULL, 0, "-mtune=%s is not a Cortex-M core", v);
+                diag_fatal(NULL, 0, "%s is not a Cortex-M core",
+                           opt_said("-mtune=", v));
             return 1;
         }
         /* -march= selects the level as -mcpu= does, with GCC's
@@ -356,10 +375,10 @@ int thumb_target_option(const char *arg)
             else if (bl == 12 && !strncmp(v, "armv8-m.main", 12))
                 arch = 8;
             else
-                diag_fatal(NULL, 0, "-march=%.*s is not an architecture "
+                diag_fatal(NULL, 0, "%s is not an architecture "
                            "EmbCC emits for a Cortex-M: armv6-m, "
                            "armv6s-m, armv7-m, armv7e-m, armv8-m.base, "
-                           "armv8-m.main", (int)bl, v);
+                           "armv8-m.main", opt_said("-march=", v));
             for (const char *x = plus; x && *x; ) {
                 const char *e = strchr(x + 1, '+');
                 size_t n = e ? (size_t)(e - x) : strlen(x);
@@ -375,10 +394,11 @@ int thumb_target_option(const char *arg)
                 else if (n == 6 && !strncmp(x, "+nodsp", 6) && arch == 8)
                     em = 0;
                 else
-                    diag_fatal(NULL, 0, "-march=%s: the extension '%.*s' "
+                    diag_fatal(NULL, 0, "%s: the extension '%.*s' "
                                "is not one EmbCC emits for that "
                                "architecture (+fp, +fp.dp, +nofp, and +dsp "
-                               "or +nodsp on armv8-m.main)", v, (int)n, x);
+                               "or +nodsp on armv8-m.main)",
+                               opt_said("-march=", v), (int)n, x);
                 x = e;
             }
             if (base8) {
@@ -434,11 +454,11 @@ int thumb_target_option(const char *arg)
                      !strcmp(v, "cortex-m33"))
                 target_set_thumb_em(1);
             else
-                diag_fatal(NULL, 0, "-mcpu=%s is not a part EmbCC knows: "
+                diag_fatal(NULL, 0, "%s is not a part EmbCC knows: "
                            "it emits ARMv6-M (cortex-m0, m0plus, m1), "
                            "ARMv8-M Baseline (cortex-m23), ARMv7-M and "
                            "ARMv7E-M (cortex-m3, m4, m7) and ARMv8-M "
-                           "Mainline (cortex-m33)", v);
+                           "Mainline (cortex-m33)", opt_said("-mcpu=", v));
             /* Kept for thumb_options_done: which unit the part's
              * -eabihf name implies depends on which part it is. */
             g_arm_cpu = v;

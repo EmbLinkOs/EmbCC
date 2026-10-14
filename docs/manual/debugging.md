@@ -24,7 +24,7 @@ bytes in any directory; an absolute file name is recorded as such.
 generated code (see [`-g` does not change the generated
 code](#-g-does-not-change-the-generated-code)). See
 [Optimized code](#optimized-code) for what a debugger can rely on above
-`-O0` and `-Og`.
+`--opt=none` and `--opt=debug`.
 
 ### `-ggdb`, `-g1`, `-g2`, `-g3`, `-gdwarf`, `-gdwarf-2`, `-gdwarf-3`, `-gdwarf-4`
 
@@ -112,7 +112,7 @@ Each function defined in the unit is a `DW_TAG_subprogram` with its
 name, return type and address range. There is no
 `DW_AT_external`, `DW_AT_decl_file` or `DW_AT_decl_line`, and no
 description of inlined calls (`DW_TAG_inlined_subroutine`): code inlined
-at `-O2` is part of its caller.
+at `--opt=speed` is part of its caller.
 
 The frame base, against which every variable's location is given:
 
@@ -194,7 +194,7 @@ embcc: d.c: error: -g is not supported for a Windows target yet: its debug infor
 ```
 
 A unit whose code is in more than one section, by
-`-ffunction-sections` or `__attribute__((section("NAME")))`, gives its
+`--sections=functions` or `__attribute__((section("NAME")))`, gives its
 compile unit a `DW_AT_ranges` list (in `.debug_ranges`) instead of one
 `DW_AT_low_pc`..`DW_AT_high_pc` span, and each function's addresses are
 relocated in its own section, so the debug information stays right
@@ -221,16 +221,16 @@ the target:
   float registers included. `tests/golden/debug-frame.sh` backtraces
   through such frames with gdb. A RISC-V interrupt handler has no
   entry.
-- **x86-64 and AArch64: frame records.** At `-O0` and `-Og` every
+- **x86-64 and AArch64: frame records.** At `--opt=none` and `--opt=debug` every
   function keeps a frame record (`rbp`, or `x29` and `x30`), so the chain
   of frame pointers leads from each frame to its caller. Optimized, a
   leaf may have no frame record; the debugger then analyzes the
   function's prologue.
 - **`.eh_frame`.** When unwind tables are enabled, each function has an
   `.eh_frame` entry describing its frame, which a debugger also uses.
-  Unwind tables are on for C++, with `-funwind-tables`,
-  `-fasynchronous-unwind-tables` or `-fexceptions`, and by default for a
-  Linux target. `-fno-unwind-tables` and
+  Unwind tables are on for C++, with `--unwind-tables`,
+  `-fasynchronous-unwind-tables` or `--exceptions`, and by default for a
+  Linux target. `--no-unwind-tables` and
   `-fno-asynchronous-unwind-tables` turn them off. They describe frames
   correctly only on x86-64 and AArch64 (see
   [Known problems](#known-problems)).
@@ -242,13 +242,13 @@ the target:
 
 ## Frame pointers
 
-`-fomit-frame-pointer` and `-fno-omit-frame-pointer` are accepted and
+`--no-frame-pointer` and `--frame-pointer` are accepted and
 have no effect.
 
 | Target | Without `-g` | With `-g` |
 |---|---|---|
-| x86-64 | `rbp` frame in every function at `-O0`; from `-O1`, frameless leaf functions and push-only frames have none | `rbp` frame in every function |
-| AArch64 | `x29`/`x30` frame record at `-O0`; from `-O1`, frameless leaf functions have none | Frame record in every function |
+| x86-64 | `rbp` frame in every function at `--opt=none`; from `--opt=basic`, frameless leaf functions and push-only frames have none | `rbp` frame in every function |
+| AArch64 | `x29`/`x30` frame record at `--opt=none`; from `--opt=basic`, frameless leaf functions have none | Frame record in every function |
 | Thumb | None (`r7` only in a function with `alloca`, a variable-length array, or a local aligned beyond 8 bytes) | Same |
 | RISC-V | None (`s0` only in a function with `alloca`, a variable-length array, or a local aligned beyond 16 bytes) | Same |
 
@@ -263,18 +263,18 @@ ship: build once with `-g`, flash the stripped copy, and debug it with
 the unstripped ELF.
 
 `tests/golden/g-same-code.sh` checks this. It compiles programs for
-every target at `-O0`, `-O1`, `-O2`, `-Os` and `-Og`, with and without
+every target at `--opt=none`, `--opt=basic`, `--opt=speed`, `--opt=size` and `--opt=debug`, with and without
 `-g`, and requires the two objects to be identical once their debug
 sections are stripped.
 
 ## Optimized code
 
-At `-O0` and `-Og`, every variable lives in its stack slot for its whole
-lifetime, and the debug information names that slot. `-Og` is `-O1`
+At `--opt=none` and `--opt=debug`, every variable lives in its stack slot for its whole
+lifetime, and the debug information names that slot. `--opt=debug` is `--opt=basic`
 with this one difference: the optimizer still removes work, but every
 source variable stays in memory, where a debugger reads it.
 
-At `-O1` and above, the optimizer keeps many variables in registers, or
+At `--opt=basic` and above, the optimizer keeps many variables in registers, or
 turns them into temporaries that no longer exist as one value. Such a
 variable's location is empty, which the debugger prints as
 `<optimized out>`. Variables that remain in their slot have that slot's
@@ -291,7 +291,7 @@ location, which is always right:
 There are no location lists yet: a variable in a register is described
 as optimized out, rather than as being in that register.
 
-Also, at `-O1` and above:
+Also, at `--opt=basic` and above:
 
 - Inlined functions have no frame of their own: a backtrace shows the
   caller, and the line table moves between the caller's lines and the
@@ -302,7 +302,7 @@ Also, at `-O1` and above:
   loop's lines in an order that does not match the source.
 
 Line-table breakpoints and backtraces remain usable in optimized code.
-For variable values, debug at `-O0` or `-Og`, or use
+For variable values, debug at `--opt=none` or `--opt=debug`, or use
 [`embcc inspect ir`](optimization.md#seeing-what-the-optimizer-did)
 to see what became of a variable.
 
@@ -351,7 +351,7 @@ For a Linux target, compile and link with `-g` and run the debugger on
 the executable:
 
 ```sh
-embcc --target=x86_64-linux-gnu -g -O0 prog.c -o prog
+embcc --target=x86_64-linux-gnu -g --opt=none prog.c -o prog
 gdb ./prog
 ```
 
@@ -364,7 +364,7 @@ halted (`-S`) with the stub listening on a TCP port (`-gdb tcp::PORT`),
 then connect:
 
 ```sh
-embcc --target=riscv32-unknown-elf -g -O0 -c prog.c -o prog.o
+embcc --target=riscv32-unknown-elf -g --opt=none -c prog.c -o prog.o
 # link prog.o with startup code into prog.elf (see Embedded programming)
 qemu-system-riscv32 -M virt -bios none -nographic -kernel prog.elf -S -gdb tcp::3333 &
 gdb prog.elf -ex 'set architecture riscv:rv32' -ex 'target remote :3333'
@@ -421,7 +421,7 @@ embdbg fw.elf remote :3333
 
 These are defects in the current implementation, not intended behavior.
 
-- **Unwind tables on Thumb, RISC-V and AVR.** `-funwind-tables` (and C++
+- **Unwind tables on Thumb, RISC-V and AVR.** `--unwind-tables` (and C++
   at RV64, the one of these targets that compiles C++) produce an
   `.eh_frame` in the x86-64 layout on these targets, which does not
   describe their frames. Do not rely on it for unwinding. On MIPS32 the

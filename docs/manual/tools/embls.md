@@ -105,7 +105,7 @@ only the include directories: `-IDIR`, `-isystemDIR`, and `-I` or
 For the diagnostics, `embls` runs this command through `/bin/sh`:
 
 ```text
-EMBCC -fsyntax-only -fdiagnostics-format=json -I 'DIR' 'FLAG'... -c 'TEMP' 2>&1
+EMBCC --syntax-only --diagnostics=json -I 'DIR' 'FLAG'... -c 'TEMP' 2>&1
 ```
 
 - `EMBCC` is the value of `EMBLS_EMBCC`. When that variable is unset or
@@ -566,7 +566,7 @@ In the project root, `compile_flags.txt` holds:
 
 Have the editor start `embls` with the project root as its working
 directory, so that `include` is resolved against it. The diagnostics are then those of
-`embcc --target=thumbv7m-none-eabi -Iinclude -Wall`. The index still uses
+`embcc --target=thumbv7m-none-eabi -Iinclude --warn=all`. The index still uses
 the x86-64 predefined macros, as described under
 [The index](#the-index).
 
@@ -620,6 +620,6 @@ Content-Length: 126
 
 [Diagnostics](../diagnostics.md) (the diagnostic format, the JSON form
 `embls` reads, and [the language server](../diagnostics.md#t5)),
-[Invoking EmbCC](../invoking.md#-fsyntax-only),
+[Invoking EmbCC](../invoking.md#--syntax-only),
 [C++ support](../cxx.md), [Targets](../targets.md),
 [`embidx`](embidx.md), [Getting started](../getting-started.md)

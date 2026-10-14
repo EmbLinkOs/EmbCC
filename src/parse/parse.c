@@ -1117,7 +1117,7 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
                 int entry = attr_is(name, "cmse_nonsecure_entry");
                 if (!target_thumb_cmse())
                     diag_warn_opt(ps->lx.file, aline, 0, "attributes",
-                        "__attribute__((%s)) is ignored without -mcmse "
+                        "__attribute__((%s)) is ignored without --cmse "
                         "(the Secure side of an ARMv8-M build)", name);
                 else if (entry && !out)
                     parse_error_line(ps, aline,
@@ -1143,7 +1143,7 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
                 if (v == 2 && !target_thumb_fpu())
                     parse_error_line(ps, aline,
                         "pcs(\"aapcs-vfp\") passes floating point in VFP "
-                        "registers, and this part has no FPU: add -mfpu=");
+                        "registers, and this part has no FPU: add --fpu=");
                 if (!out)
                     parse_error_line(ps, aline,
                         "pcs is only supported on a function declaration");
@@ -3335,7 +3335,7 @@ static double single_value(struct parser *ps, const struct token *t)
         if (d - d == 0)        /* finite as a double: the flag made it inf */
             diag_warn_at(ps->lx.file, t->line, t->col,
                          "floating constant exceeds the range of 'float' "
-                         "(-fsingle-precision-constant)");
+                         "(%s)", opt_typed("-fsingle-precision-constant"));
         memcpy(&d, &bits, sizeof d);
         return d;
     }
@@ -3343,7 +3343,7 @@ static double single_value(struct parser *ps, const struct token *t)
     if (f == 0 && d != 0)
         diag_warn_at(ps->lx.file, t->line, t->col,
                      "floating constant truncated to zero "
-                     "(-fsingle-precision-constant)");
+                     "(%s)", opt_typed("-fsingle-precision-constant"));
     return (double)f;
 }
 

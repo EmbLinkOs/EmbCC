@@ -41,7 +41,7 @@ sed "s|$out/||" "$out/bad.txt"
 for spec in "3:uninitialized:y" "8:maybe-uninitialized:x" \
             "13:maybe-uninitialized:v" "18:maybe-uninitialized:s"; do
     line=${spec%%:*}; rest=${spec#*:}; opt=${rest%%:*}; var=${rest#*:}
-    grep -q "bad.c:$line:.*'$var' .*uninitialized \[-W$opt\]" "$out/bad.txt" ||
+    grep -q "bad.c:$line:.*'$var' .*uninitialized \[--warn=$opt\]" "$out/bad.txt" ||
         { echo "FAIL: expected '$var' at line $line as -W$opt"; exit 1; }
 done
 # A definite read and a conditional one are not the same claim, and the
@@ -237,7 +237,7 @@ EOF2
 for spec in "2:maybe-uninitialized" "3:maybe-uninitialized" \
             "4:maybe-uninitialized" "5:uninitialized"; do
     line=${spec%%:*}; opt=${spec#*:}
-    grep -q "loops-bad.c:$line:.*'s' .*uninitialized \[-W$opt\]" "$out/loops-bad.txt" ||
+    grep -q "loops-bad.c:$line:.*'s' .*uninitialized \[--warn=$opt\]" "$out/loops-bad.txt" ||
         { sed "s|$out/||" "$out/loops-bad.txt"
           echo "FAIL: expected 's' at line $line as -W$opt"; exit 1; }
 done

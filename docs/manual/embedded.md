@@ -28,12 +28,12 @@ The aliases each triple accepts are listed in [Targets](targets.md).
 A firmware build compiles each file with `-c` and links the objects, as
 a Makefile written for `arm-none-eabi-gcc` does. The driver links them,
 adding the target's `librt.a` (and `libc.a`, if built) itself; the memory
-map is a linker script (`-T`) or `-Wl,-Ttext`/`-Wl,-Tdata`:
+map is a linker script (`--link-script`) or `-Wl,-Ttext`/`-Wl,-Tdata`:
 
 ```sh
-embcc --target=thumbv7m-none-eabi -Os -c startup.c -o startup.o
-embcc --target=thumbv7m-none-eabi -Os -c main.c    -o main.o
-embcc --target=thumbv7m-none-eabi -T board.ld startup.o main.o -o fw.elf
+embcc --target=thumbv7m-none-eabi --opt=size -c startup.c -o startup.o
+embcc --target=thumbv7m-none-eabi --opt=size -c main.c    -o main.o
+embcc --target=thumbv7m-none-eabi --link-script=board.ld startup.o main.o -o fw.elf
 ```
 
 or, naming every input to `embld` explicitly:
@@ -51,21 +51,23 @@ map`).
 AArch64 objects; a bare-metal AArch64 image is linked with another
 toolchain's linker (see [Running images under QEMU](#running-images-under-qemu)).
 
-`-nostdlib`, `-nodefaultlibs` and `-nostartfiles` mean what they mean to
+`--no-stdlib`, `--no-default-libs` and `--no-start-files` mean what they mean to
 gcc, and `-lc`, `-lm` and `-lgcc` name EmbCC's own `libc.a` and
 `librt.a`. `-Wl,` options are ignored by a compile with `-c`, so a build
 system that passes them to every command still compiles. See [Libraries](libraries.md#how-the-driver-links-the-libraries).
 
 ## Freestanding compilation
 
-### `-ffreestanding` and `-fno-builtin`
+### `--freestanding` and `--no-builtins`
+
+GCC: `-ffreestanding`, `-fno-builtin`.
 
 Both are accepted and change nothing. EmbCC makes no hosted assumptions to
 drop: it recognises no library function by name, only the `__builtin_`
 spellings, and it never turns a loop into a call to `memset` or `memcpy`.
 
 `__STDC_HOSTED__` is defined as `1` on every target, with or without
-`-ffreestanding`. Code that tests it to detect a freestanding build gets
+`--freestanding`. Code that tests it to detect a freestanding build gets
 the hosted answer.
 
 ### Headers
@@ -85,8 +87,8 @@ and `int64_t` is `long long` on every 32-bit and 16-bit target.
 The other C library headers (`<stdio.h>`, `<stdlib.h>`, `<math.h>` and the
 rest) also resolve, but no C library is built for the embedded targets:
 a firmware image that calls `printf` or `malloc` has to supply them.
-`-nostdinc` removes EmbCC's directories from the search; see
-[Invoking](invoking.md#-nostdinc).
+`--no-std-include` removes EmbCC's directories from the search; see
+[Invoking](invoking.md#--no-std-include).
 
 ### What the compiler emits calls to
 
@@ -107,7 +109,7 @@ program in exactly these cases:
 It emits no stack-protector calls (`-fstack-protector` is refused), no
 `__aeabi_*` calls, no `__atomic_*` or `__sync_*` library calls (atomic
 operations are inline or refused; see each board's section), no
-profiling or sanitizer runtime calls (`-fsanitize=` checks trap in place),
+profiling or sanitizer runtime calls (`--sanitize=` checks trap in place),
 and no `abort`: `__builtin_trap()` is `udf #0` on ARM, `unimp` on
 RISC-V and `break` on MIPS32, and on AVR a jump to itself.
 
@@ -134,7 +136,7 @@ from another ARM compiler that calls them must bring its own.
 ### The runtime archive
 
 `make rt-embedded` builds one `librt.a` per embedded triple with
-`tools/build-rt.sh`, at `-Os`, into `build/libc/TRIPLE/librt.a`:
+`tools/build-rt.sh`, at `--opt=size`, into `build/libc/TRIPLE/librt.a`:
 `avr`, `thumbv6m-none-eabi`, `thumbv7m-none-eabi`, `thumbv7em-none-eabi`,
 `thumbv7em-none-eabihf`, `thumbv8m.main-none-eabi`,
 `thumbv8m.main-none-eabihf`, `riscv32-unknown-elf` and
@@ -154,8 +156,8 @@ use 128-bit integers, which the RV64 backend does not lower. An RV64
 image compiles the files it needs itself:
 
 ```sh
-embcc --target=riscv64-unknown-elf -Os -c lib/rt/softfp.c  -o softfp.o
-embcc --target=riscv64-unknown-elf -Os -c lib/rt/complex.c -o complex.o
+embcc --target=riscv64-unknown-elf --opt=size -c lib/rt/softfp.c  -o softfp.o
+embcc --target=riscv64-unknown-elf --opt=size -c lib/rt/complex.c -o complex.o
 ```
 
 Put the archive after the objects that use it. A helper missing from the
@@ -283,17 +285,17 @@ void put(char c)
 
 See [Optimization](optimization.md#volatile).
 
-### Sizing the stack: `-fstack-usage`
+### Sizing the stack: `--stack-usage`
 
 A microcontroller has no guard page and no room to grow a stack, so the
 deepest call path has to be added up before the image runs.
-`-fstack-usage` writes one line per emitted function to a `.su` file
+`--stack-usage` writes one line per emitted function to a `.su` file
 beside the object (the output name with its extension replaced), in
 GCC's format: `FILE:LINE:FUNCTION`, a tab, the frame size in bytes, a
 tab, `static`.
 
 ```sh
-embcc --target=thumbv7m-none-eabi -Os -fstack-usage -c su.c -o su.o
+embcc --target=thumbv7m-none-eabi --opt=size --stack-usage -c su.c -o su.o
 ```
 
 ```text
@@ -321,7 +323,7 @@ level, more with an active FPU context).
 ### Leaving out what is never called: `--gc-sections`
 
 Flash is the limit a firmware build meets first. Compile with
-`-ffunction-sections -fdata-sections`, so each function and object is a
+`--sections=functions --sections=data`, so each function and object is a
 section of its own, and link with `--gc-sections`: the linker keeps what
 the program can reach and drops the rest -- a driver's functions the
 program never calls, a table nothing reads.
@@ -330,7 +332,7 @@ program never calls, a table nothing reads.
 CF="--target=thumbv7em-none-eabi -O2 -ffunction-sections -fdata-sections"
 embcc $CF -c main.c -o main.o
 embcc $CF -c drivers.c -o drivers.o
-embcc --target=thumbv7em-none-eabi -T board.ld \
+embcc --target=thumbv7em-none-eabi --link-script=board.ld \
       -Wl,--gc-sections,--print-memory-usage,-Map=fw.map \
       startup.o main.o drivers.o -o fw.elf
 ```
@@ -368,19 +370,19 @@ table above, region by region. The details are in
 
 | Part | Triple | Notes |
 |---|---|---|
-| Cortex-M0, M0+, M1 | `thumbv6m-none-eabi`, or `-mcpu=cortex-m0` (`m0plus`, `m1`) on any ARM triple | Thumb-1; divide, 64-bit multiply and atomics are `librt.a` calls |
-| Cortex-M23 | `thumbv8m.base-none-eabi`, or `-mcpu=cortex-m23` on any ARM triple | Thumb-1 with `sdiv`/`udiv` and exclusives; 64-bit multiply and shifts are `librt.a` calls; TrustZone with `-mcmse` |
+| Cortex-M0, M0+, M1 | `thumbv6m-none-eabi`, or `--cpu=cortex-m0` (`m0plus`, `m1`) on any ARM triple | Thumb-1; divide, 64-bit multiply and atomics are `librt.a` calls |
+| Cortex-M23 | `thumbv8m.base-none-eabi`, or `--cpu=cortex-m23` on any ARM triple | Thumb-1 with `sdiv`/`udiv` and exclusives; 64-bit multiply and shifts are `librt.a` calls; TrustZone with `--cmse` |
 | Cortex-M3 | `thumbv7m-none-eabi` | no FPU |
 | Cortex-M4, M7 without FPU use | `thumbv7em-none-eabi` | soft-float |
-| Cortex-M4F | `thumbv7em-none-eabihf`, or `thumbv7em-none-eabi -mfpu=fpv4-sp-d16 -mfloat-abi=hard` | single-precision FPU, hard-float convention |
-| Cortex-M7 | `thumbv7em-none-eabihf -mcpu=cortex-m7`, or `thumbv7em-none-eabi -mfpu=fpv5-d16 -mfloat-abi=hard` | double-precision FPU (FPv5-D16), hard-float convention |
-| Cortex-M33 | `thumbv8m.main-none-eabi`; `thumbv8m.main-none-eabihf` for the FPU | FPv5-SP-D16; TrustZone with `-mcmse` (soft float) |
+| Cortex-M4F | `thumbv7em-none-eabihf`, or `thumbv7em-none-eabi --fpu=fpv4-sp-d16 --float-abi=hard` | single-precision FPU, hard-float convention |
+| Cortex-M7 | `thumbv7em-none-eabihf --cpu=cortex-m7`, or `thumbv7em-none-eabi --fpu=fpv5-d16 --float-abi=hard` | double-precision FPU (FPv5-D16), hard-float convention |
+| Cortex-M33 | `thumbv8m.main-none-eabi`; `thumbv8m.main-none-eabihf` for the FPU | FPv5-SP-D16; TrustZone with `--cmse` (soft float) |
 
-`-mcpu=cortex-m0`, `cortex-m0plus`, `cortex-m1`, `cortex-m23`,
+`--cpu=cortex-m0`, `cortex-m0plus`, `cortex-m1`, `cortex-m23`,
 `cortex-m3`, `cortex-m4`, `cortex-m7` and `cortex-m33` select the
 sub-architecture as GCC's options do. The Secure side of a TrustZone-M
-build is `-mcmse` ([Targets](targets.md#trustzone-m-cmse)). `-mthumb` is
-accepted and has no effect; `-marm` is
+build is `--cmse` ([Targets](targets.md#trustzone-m-cmse)). `--isa=thumb` is
+accepted and has no effect; `--isa=arm` is
 refused (`-marm is not supported: a Cortex-M has no ARM instruction set,
 only Thumb`). Plain `char` is unsigned, `long double` is 8 bytes, and an
 `enum` is `int`-sized unless its values need a wider type, or the
@@ -496,28 +498,28 @@ instruction takes a UsageFault.
 
 ### The float ABI
 
-`-mfpu=` and `-mfloat-abi=` are read together after the whole command
+`--fpu=` and `--float-abi=` are read together after the whole command
 line, in either order:
 
 | Option | Meaning |
 |---|---|
-| `-mfloat-abi=soft` | the default: no FPU instructions, even with an `-mfpu=` |
-| `-mfloat-abi=softfp` | FPU instructions; floating-point arguments and results in core registers, so the objects link with soft-float ones |
-| `-mfloat-abi=hard` | FPU instructions; floating-point arguments and results in `s0`-`s15`/`d0`-`d7` (AAPCS-VFP) |
-| `-mfpu=fpv4-sp-d16` | the Cortex-M4F unit; needs an ARMv7E-M target or `-mcpu=cortex-m4` |
-| `-mfpu=fpv5-d16` | the Cortex-M7 unit, with double precision; needs an ARMv7E-M target, and `-mcpu=` other than `cortex-m7` is refused |
-| `-mfpu=fpv5-sp-d16` | the Cortex-M33 unit; needs `thumbv8m.main` |
-| `-mfpu=none`, `-mfpu=auto`, `-mfpu=soft` | no unit named |
+| `--float-abi=soft` | the default: no FPU instructions, even with an `--fpu=` |
+| `--float-abi=softfp` | FPU instructions; floating-point arguments and results in core registers, so the objects link with soft-float ones |
+| `--float-abi=hard` | FPU instructions; floating-point arguments and results in `s0`-`s15`/`d0`-`d7` (AAPCS-VFP) |
+| `--fpu=fpv4-sp-d16` | the Cortex-M4F unit; needs an ARMv7E-M target or `--cpu=cortex-m4` |
+| `--fpu=fpv5-d16` | the Cortex-M7 unit, with double precision; needs an ARMv7E-M target, and `--cpu=` other than `cortex-m7` is refused |
+| `--fpu=fpv5-sp-d16` | the Cortex-M33 unit; needs `thumbv8m.main` |
+| `--fpu=none`, `--fpu=auto`, `--fpu=soft` | no unit named |
 
-The `-eabihf` triples mean the part's unit with `-mfloat-abi=hard`: the
+The `-eabihf` triples mean the part's unit with `--float-abi=hard`: the
 Cortex-M4F's for `thumbv7em-none-eabihf`, or the Cortex-M7's when
-`-mcpu=cortex-m7` is given too. An explicit `-mfloat-abi=` overrides
-that, and `-dumpmachine` reports the result
-(`thumbv7em-none-eabihf -mfloat-abi=soft` prints `thumbv7em-none-eabi`).
+`--cpu=cortex-m7` is given too. An explicit `--float-abi=` overrides
+that, and `--print-target` reports the result
+(`thumbv7em-none-eabihf --float-abi=soft` prints `thumbv7em-none-eabi`).
 
 The Cortex-M4F and M33 units are single-precision: `float` arithmetic
 becomes VFP instructions and `double` arithmetic stays a call into
-`librt.a`. The Cortex-M7's computes both. With `-mfpu=fpv5-d16`,
+`librt.a`. The Cortex-M7's computes both. With `--fpu=fpv5-d16`,
 `double` addition, subtraction, multiplication, division, negation,
 `fabs`, `__builtin_sqrt`, comparisons, and conversions to and from
 `float` and 32-bit integers are VFP `.f64` instructions, and a double
@@ -536,10 +538,10 @@ hardware half-precision conversion, which it does not emit.)
 Invalid combinations are refused:
 
 ```text
-embcc: <embcc>: error: -mfloat-abi=hard needs an FPU to use: add -mfpu=fpv4-sp-d16 (Cortex-M4F), -mfpu=fpv5-d16 (Cortex-M7) or -mfpu=fpv5-sp-d16 (Cortex-M33)
-embcc: <embcc>: error: -mfpu=fpv4-sp-d16 is an ARMv7E-M unit, and the part is ARMv7-M (a Cortex-M3 has no FPU); add -mcpu=cortex-m4
-embcc: <embcc>: error: -mfpu=fpv5-d16 is the Cortex-M7's double-precision unit, and -mcpu=cortex-m4 does not have it; the Cortex-M4F's is -mfpu=fpv4-sp-d16
-embcc: <embcc>: error: -mfloat-abi=bogus is not an ARM float ABI: it is one of soft, softfp and hard
+embcc: error: --float-abi=hard needs an FPU to use: add --fpu=fpv4-sp-d16 (Cortex-M4F), --fpu=fpv5-d16 (Cortex-M7) or --fpu=fpv5-sp-d16 (Cortex-M33)
+embcc: error: --fpu=fpv4-sp-d16 is an ARMv7E-M unit, and the part is ARMv7-M (a Cortex-M3 has no FPU); add --cpu=cortex-m4
+embcc: error: --fpu=fpv5-d16 is the Cortex-M7's double-precision unit, and --cpu=cortex-m4 does not have it; the Cortex-M4F's is --fpu=fpv4-sp-d16
+embcc: error: --float-abi=bogus is not an ARM float ABI: it is one of soft, softfp and hard
 ```
 
 Each object records its FPU (`Tag_FP_arch`: VFPv4-D16 for the M4F's
@@ -557,7 +559,7 @@ That includes the runtime archive: link `-eabihf` objects with the
 Cortex-M4F's, and links with Cortex-M7 objects -- the convention is the
 same, and the M7 runs every M4F instruction -- but an image for the M7
 that converts a 64-bit integer then carries the whole of software
-binary64. `lib/rt/softfp.c` compiled with `-mcpu=cortex-m7` is the eight
+binary64. `lib/rt/softfp.c` compiled with `--cpu=cortex-m7` is the eight
 conversion routines alone.
 
 ### Linking for a memory map
@@ -602,7 +604,7 @@ CF="-O2 -ICMSIS/Core/Include -Icmsis-device-f4/Include -DSTM32F405xx -fgnuc-vers
 embcc --target=thumbv7em-none-eabi $CF -c system_stm32f4xx.c -o system.o
 embcc --target=thumbv7em-none-eabi $CF -c main.c -o main.o
 embcc --target=thumbv7em-none-eabi -c startup_stm32f405xx.s -o startup.o
-embcc --target=thumbv7em-none-eabi -T STM32F405RGTx_FLASH.ld \
+embcc --target=thumbv7em-none-eabi --link-script=STM32F405RGTx_FLASH.ld \
       startup.o system.o main.o -o fw.elf
 qemu-system-arm -M netduinoplus2 -nographic -kernel fw.elf
 ```
@@ -670,22 +672,22 @@ EmbCC provides it:
 | A context switch with no prologue (PendSV) | `__attribute__((naked))` with a basic `asm` body, or file-scope `asm`; see [Naked functions](inline-asm.md#naked-functions) |
 | Critical sections on `BASEPRI` or `PRIMASK` | extended `asm` with `msr`/`mrs`; an `always_inline` wrapper inlines, and its operands live in registers |
 | Handlers for SysTick, PendSV and SVC | ordinary functions (see [Interrupt handlers](#interrupt-handlers)) in the vector table |
-| The vector table at the reset address | a `const` array with `__attribute__((section(".isr_vector"), used))` and a linker script (`-T`) |
+| The vector table at the reset address | a `const` array with `__attribute__((section(".isr_vector"), used))` and a linker script (`--link-script`) |
 | 64-bit division (tick conversions) | the compiler runtime, `librt.a`, which the driver links |
-| A stack size for each task | `-fstack-usage` (see [Sizing the stack](#sizing-the-stack--fstack-usage)) |
+| A stack size for each task | `--stack-usage` (see [Sizing the stack](#sizing-the-stack---stack-usage)) |
 
 #### FreeRTOS as the worked example
 
 FreeRTOS's kernel and its GCC Cortex-M ports compile unmodified, and run
-on QEMU at `-O0`, `-O1`, `-O2` and `-Os` (tasks, a queue, a mutex, a
+on QEMU at `--opt=none`, `--opt=basic`, `--opt=speed` and `--opt=size` (tasks, a queue, a mutex, a
 software timer and time slicing; on the FPU parts, two tasks doing
 floating-point arithmetic through every switch):
 
 | Port | Target | QEMU board | Test |
 |---|---|---|---|
 | `ARM_CM3` | `thumbv7m-none-eabi` | `lm3s6965evb` | `freertos-cm3.sh` |
-| `ARM_CM4F` | `thumbv7em-none-eabihf -mfpu=fpv4-sp-d16` | `mps2-an386` | `freertos-ports.sh` |
-| `ARM_CM7/r0p1` | `thumbv7em-none-eabihf -mfpu=fpv4-sp-d16` | `mps2-an500` | `freertos-ports.sh` |
+| `ARM_CM4F` | `thumbv7em-none-eabihf --fpu=fpv4-sp-d16` | `mps2-an386` | `freertos-ports.sh` |
+| `ARM_CM7/r0p1` | `thumbv7em-none-eabihf --fpu=fpv4-sp-d16` | `mps2-an500` | `freertos-ports.sh` |
 | `ARM_CM33_NTZ/non_secure` | `thumbv8m.main-none-eabihf` | `mps2-an505` | `freertos-ports.sh` |
 | `RISC-V` (CLINT timer) | `riscv32-unknown-elf`, `riscv64-unknown-elf` | `virt` | `freertos-ports.sh` |
 
@@ -709,11 +711,11 @@ for f in board/startup.c main.c $K/tasks.c $K/queue.c $K/list.c $K/timers.c \
          $K/portable/MemMang/heap_4.c $K/portable/GCC/ARM_CM3/port.c; do
     embcc $CF -c "$f" -o "$(basename "$f" .c).o"
 done
-embcc --target=thumbv7m-none-eabi -T board/lm3s.ld *.o -o fw.elf
+embcc --target=thumbv7m-none-eabi --link-script=board/lm3s.ld *.o -o fw.elf
 qemu-system-arm -M lm3s6965evb -cpu cortex-m3 -nographic -kernel fw.elf
 ```
 
-For a Cortex-M4F, use `--target=thumbv7em-none-eabihf -mfpu=fpv4-sp-d16`
+For a Cortex-M4F, use `--target=thumbv7em-none-eabihf --fpu=fpv4-sp-d16`
 and the `ARM_CM4F` port, whose PendSV handler also saves `s16`-`s31`; the
 startup code must enable the FPU (`CPACR`) before `main` when anything
 before the scheduler may use it. The ARMv8-M ports name their handlers
@@ -770,10 +772,10 @@ The port's three hard parts are the same for any kernel:
 
 `riscv32-unknown-elf` and `riscv64-unknown-elf` generate code for the
 RV32IMAC and RV64IMAC instruction sets with the soft-float ABIs (`ilp32`
-and `lp64`) and the `medany` code model by default. `-march=` and
-`-mabi=` select the F and D extensions and their calling conventions --
-`-march=rv32imafc -mabi=ilp32f` for an ESP32-P4 or CH32V3 class part,
-`-march=rv64gc -mabi=lp64d` -- or leave out C; M and A are always used,
+and `lp64`) and the `medany` code model by default. `--isa=` and
+`--abi=` select the F and D extensions and their calling conventions --
+`--isa=rv32imafc --abi=ilp32f` for an ESP32-P4 or CH32V3 class part,
+`--isa=rv64gc --abi=lp64d` -- or leave out C; M and A are always used,
 so EmbCC's output does not run on a core without them. A program built
 for F or D must turn the FPU on before its first floating-point
 instruction (`mstatus.FS`, which is 0 at reset: `csrs mstatus, 0x2000`
@@ -817,7 +819,7 @@ void _start(void)
 ```
 
 ```sh
-embcc --target=riscv32-unknown-elf -Os -c boot.c -o boot.o
+embcc --target=riscv32-unknown-elf --opt=size -c boot.c -o boot.o
 embld -e _start -Ttext 0x80000000 -Tstack 0x80800000 boot.o main.o \
       build/libc/riscv32-unknown-elf/librt.a -o fw.elf
 ```
@@ -1066,7 +1068,7 @@ the start of the image that loads `ADDR` into `sp` and jumps to the `-e`
 symbol through `t9`. The startup is then C:
 
 ```sh
-embcc --target=mipsel-none-elf -Os -c boot.c -o boot.o
+embcc --target=mipsel-none-elf --opt=size -c boot.c -o boot.o
 embld -e _start -Ttext 0x80100000 -Tstack 0x80800000 boot.o main.o \
       build/libc/mipsel-none-elf/libc.a build/libc/mipsel-none-elf/librt.a \
       -o fw.elf
@@ -1240,7 +1242,7 @@ function the program overrides to reach its UART) for `mipsel-none-elf`.
 ### The target and its data model
 
 `--target=avr` generates code for the ATmega328P (`__AVR_ATmega328P__`,
-AVR architecture 5). `-mmcu=atmega328p` names it, and `-mmcu=atmega328`,
+AVR architecture 5). `--mcu=atmega328p` names it, and `--mcu=atmega328`,
 `atmega168p` and `atmega168` the other parts of its family with the same
 core ([Targets](targets.md#avr) lists their memories); any other part is
 refused by name.
@@ -1272,7 +1274,7 @@ for a pointer dereference read data space only. EmbLD therefore puts
 `.rodata` in the writable segment on AVR: string literals and `const`
 data are stored in flash after the text, copied to SRAM by the startup,
 and occupy SRAM for the life of the program. `.data`, `.rodata`, `.bss`
-and the stack all share the 2 KiB; `-fstack-usage` and `llvm-size` are
+and the stack all share the 2 KiB; `--stack-usage` and `llvm-size` are
 how to keep track. `--rom-limit` counts the stored copy of `.data` and
 `.rodata` as well as the text.
 
@@ -1281,11 +1283,11 @@ how to keep track. `--rom-limit` counts the stored copy of `.data` and
 With `-mmcu=`, the driver links what avr-gcc's does for the part:
 
 ```sh
-embcc --target=avr -mmcu=atmega328p -Os main.c -o fw.elf
+embcc --target=avr --mcu=atmega328p --opt=size main.c -o fw.elf
 ```
 
 - **The startup**, `crt<part>.o` (`lib/avr/crt.S`), first, unless
-  `-nostartfiles` or `-nostdlib`. It has avr-libc's and libgcc's names
+  `--no-start-files` or `--no-stdlib`. It has avr-libc's and libgcc's names
   and sections, so a program written for avr-gcc, and its own `.S` files,
   find what they expect:
   - `.vectors`: `__vectors` at address 0, the part's 26-entry table, one
@@ -1323,17 +1325,17 @@ embcc --target=avr -mmcu=atmega328p -Os main.c -o fw.elf
   region starts at `0x800060`, under the ATmega328P's extended I/O).
 
 A script of the program's own works as with avr-gcc
-(`-T arduino_uno.ld`); `-Wl,-Ttext=`, `-Wl,-Tdata=` and
+(`--link-script=arduino_uno.ld`); `-Wl,-Ttext=`, `-Wl,-Tdata=` and
 `-Wl,--rom-limit=` apply over it. `tests/golden/avr-crt.sh` links one
 program by the part's script, by an avr5-style one, and by that with
 the flags, and runs all three on QEMU's ATmega328P.
 
-Without `-mmcu=`, nothing is added: the program brings its startup, as
+Without `--mcu=`, nothing is added: the program brings its startup, as
 `tests/harness/avr/boot.S` is, and its memory map:
 
 ```sh
 embcc --target=avr -c tests/harness/avr/boot.S -o boot.o
-embcc --target=avr -Os -c main.c -o main.o
+embcc --target=avr --opt=size -c main.c -o main.o
 embld -e __vectors -Ttext 0x0 -Tdata 0x100 --rom-limit 32768 \
       boot.o main.o build/libc/avr/librt.a -o fw.elf
 ```
@@ -1373,7 +1375,7 @@ the include path for `--target=avr` alone (installed under
 
 | Header | What it has |
 |---|---|
-| `<avr/io.h>` | The part's registers, bits, vectors and memories, by the datasheet's names: every register and bit of the ATmega328P datasheet's register summary (`PORTB`, `UCSR0B`, `TCNT1`, `WDTCSR`...), `PB5` and the other pin names, the vector names (`TIMER1_COMPA_vect` is `__vector_11`) with `*_vect_num`, `FLASHEND`, `RAMSTART`, `RAMEND`, `E2END`, `SPM_PAGESIZE`, `SIGNATURE_0`..`2`. The part is the one `-mmcu=` names. |
+| `<avr/io.h>` | The part's registers, bits, vectors and memories, by the datasheet's names: every register and bit of the ATmega328P datasheet's register summary (`PORTB`, `UCSR0B`, `TCNT1`, `WDTCSR`...), `PB5` and the other pin names, the vector names (`TIMER1_COMPA_vect` is `__vector_11`) with `*_vect_num`, `FLASHEND`, `RAMSTART`, `RAMEND`, `E2END`, `SPM_PAGESIZE`, `SIGNATURE_0`..`2`. The part is the one `--mcu=` names. |
 | `<avr/sfr_defs.h>` | `_SFR_IO8`, `_SFR_MEM8`, `_SFR_MEM16`, `_SFR_IO_ADDR`, `_SFR_MEM_ADDR`, `_BV`, `bit_is_set`, `bit_is_clear`, `loop_until_bit_is_set`, `loop_until_bit_is_clear`, `_VECTOR(N)` |
 | `<avr/common.h>` | `SP`, `SPL`, `SPH`, `SREG` and `SREG_C`..`SREG_I` |
 | `<avr/interrupt.h>` | `ISR(vector, ...)` with `ISR_BLOCK`, `ISR_NOBLOCK`, `ISR_NAKED`, `ISR_ALIASOF(v)`; `ISR_ALIAS`, `EMPTY_INTERRUPT`, `SIGNAL`, `BADISR_vect`; `sei()`, `cli()`, `reti()` |
@@ -1398,8 +1400,8 @@ Where they differ from avr-libc's:
   are single `asm` statements, so they hold at every optimisation level.
 - `_delay_ms` and `_delay_us` count loops of four cycles
   (`_delay_loop_2`) and wait at least the time asked. With a constant
-  argument the count is worked out at compile time from `-O1` up; at
-  `-O0` it is computed at run time in software floating point, which
+  argument the count is worked out at compile time from `--opt=basic` up; at
+  `--opt=none` it is computed at run time in software floating point, which
   makes the delay longer. avr-libc's use `__builtin_avr_delay_cycles`,
   which EmbCC does not have.
 - `<avr/io.h>` in a `.S` file gives each register as its data-space
@@ -1509,7 +1511,7 @@ Not there: streams (`printf`, `puts`, `FILE`, `fdevopen`), `malloc`,
 declarations come from the C library's headers, and a program that calls
 one gets an undefined symbol at the link.
 
-`-Wformat` compares a `printf` argument with the conversion by the
+`--warn=format` compares a `printf` argument with the conversion by the
 target's own sizes: on AVR `%d` reads 2 bytes and `%ld` 4.
 
 ### Runtime helpers
@@ -1556,10 +1558,10 @@ userland.
 
 | Option | Effect |
 |---|---|
-| `-mno-sse`, `-mno-sse2`, `-mgeneral-regs-only` | never emit an SSE instruction; any floating-point operation is then an error (`floating point needs SSE, which -mno-sse forbids`). The `__SSE__` and `__SSE2__` macros stay defined. |
+| `--no-sse`, `-mno-sse2`, `--general-regs-only` | never emit an SSE instruction; any floating-point operation is then an error (`floating point needs SSE, which --no-sse forbids`). The `__SSE__` and `__SSE2__` macros stay defined. |
 | `-mno-mmx`, `-mno-80387` | accepted; EmbCC emits no MMX |
-| `-mno-red-zone` | accepted; EmbCC never uses the red zone |
-| `-mcmodel=kernel` | accepted; the default code model already suits a higher-half link, and `__code_model_small__` stays defined |
+| `--no-red-zone` | accepted; EmbCC never uses the red zone |
+| `--code-model=kernel` | accepted; the default code model already suits a higher-half link, and `__code_model_small__` stays defined |
 
 Most kernel code needs no runtime routines. `__int128` multiply, divide
 and shifts, conversions between `__int128` and floating point, and
@@ -1619,7 +1621,7 @@ C++ is compiled for the 32-bit ARM targets (the Cortex-M triples and
 with or without RTTI. A firmware build looks like this:
 
 ```sh
-embcc --target=thumbv7em-none-eabihf -Os -fno-exceptions -fno-rtti \
+embcc --target=thumbv7em-none-eabihf --opt=size --no-exceptions --no-rtti \
       -c driver.cc -o driver.o
 embld -e reset -Ttext 0x0 -Tdata 0x20000000 boot.o driver.o \
       build/libcxx/thumbv7em-none-eabihf/libcxx.a \
@@ -1646,7 +1648,7 @@ C++ unit:
 embcc: error: C++ is not yet supported for avr: the C++ front end follows the C++ ABI of x86-64, AArch64, 32-bit ARM and riscv32, and this target's (2-byte pointers) is not implemented
 ```
 
-`-fsyntax-only`, `-E`, `-M` and `-MM` still accept C++ there. See
+`--syntax-only`, `-E`, `-M` and `--deps-only` still accept C++ there. See
 [C++ targets](cxx.md#targets) for what the ABI is on each target.
 
 C++ compiles for `riscv64-unknown-elf`, but no C++ runtime is built for
@@ -1658,7 +1660,7 @@ compile:
 embcc: cx.cc:7: error: the RV64 backend cannot lower this operation yet (function _Z1gi) [landing w=8 size=4]
 ```
 
-Compile with `-fno-exceptions`, and with `-fno-rtti` unless the program
+Compile with `--no-exceptions`, and with `--no-rtti` unless the program
 supplies the `__cxxabiv1` type-information vtables. The program must then
 define what the compiled code refers to: `operator new` and `operator
 delete` if it uses them, `__cxa_pure_virtual` for abstract classes, and
