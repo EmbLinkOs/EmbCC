@@ -86,7 +86,7 @@ The other C library headers (`<stdio.h>`, `<stdlib.h>`, `<math.h>` and the
 rest) also resolve, but no C library is built for the embedded targets:
 a firmware image that calls `printf` or `malloc` has to supply them.
 `-nostdinc` removes EmbCC's directories from the search; see
-[Invoking](invoking.md#-nostdinc).
+[Invoking](invoking.md#--no-std-include).
 
 ### What the compiler emits calls to
 

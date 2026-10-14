@@ -1239,7 +1239,7 @@ rules above, with these consequences:
 | `-Wno-NAME` for a name not in the summary (`-Wno-unused`, `-Wno-system-headers`, ...) | Accepted silently; no effect. `-Wno-unused` does **not** turn off the `-Wunused-*` warnings. |
 | `-Werror=NAME`, `-Wno-error=NAME` for a name not in the summary | Accepted; prints `embcc: warning: -Werror=NAME names no warning EmbCC has (--help-warnings lists them)`; no effect. |
 | `-Wp,ARGS` | Not passed to the preprocessor. Treated as an unknown warning name: the `is not a warning EmbCC has` message is printed and the arguments are ignored. |
-| `-Wl,ARGS`, `-Wa,ARGS` | Options for the link and the assembler, not warnings; see [Invoking EmbCC](invoking.md#assembler-and-linker-options). |
+| `-Wl,ARGS`, `-Wa,ARGS` | Options for the link and the assembler, not warnings; see [Invoking EmbCC](invoking.md#assembling-and-linking). |
 | `-pedantic`, `-pedantic-errors` | Accepted; prints `embcc: warning: -pedantic: EmbCC has no diagnostics for extensions to ISO C, so this turns nothing on`; no effect. |
 
 <a id="remarks"></a>

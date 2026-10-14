@@ -115,7 +115,7 @@ objects.
 preprocessed source, syntax tree, symbols, struct layout, EmbIR, control
 flow graph or call graph) instead of producing an object, and
 `embcc why` reports an optimizer decision. See
-[Developer and inspection options](invoking.md#developer-and-inspection-options).
+[Asking EmbCC](invoking.md#asking-embcc).
 The design of each stage is described in [Architecture](../internals/architecture.md),
 [Front end](../internals/front-end.md), [EmbIR](../internals/ir.md),
 [Optimizer](../internals/optimizer.md) and
@@ -200,7 +200,7 @@ embcc:   x86_64-elf
 
 `-std=` never makes EmbCC reject a construct of a newer standard. The
 exact list of accepted names is under
-[`-std=STANDARD`](invoking.md#-stdstandard).
+[`-std=STANDARD`](invoking.md#--stdstandard).
 
 C is supported on every target. C++ is supported on the x86-64 and
 AArch64 targets, with restrictions on macOS and Windows, and on 32-bit

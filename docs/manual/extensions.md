@@ -14,7 +14,7 @@ described in [C language](c-language.md), C++ in [C++](cxx.md), and the
 ### Extensions are always enabled
 
 Every extension on this page is available in every compilation.
-[`-std=`](invoking.md#-stdstandard) does not change what the parser
+[`-std=`](invoking.md#--stdstandard) does not change what the parser
 accepts, and no warning reports the use of an extension. `-pedantic` and
 `-pedantic-errors` are accepted, turn nothing on, and say so:
 
@@ -790,7 +790,7 @@ assembly, for example `__asm__ volatile("sei")`.
 A name is a builtin only in its `__builtin_` spelling (and, for the
 atomics, its `__atomic_` or `__sync_` spelling). EmbCC treats no library
 function name, such as `memcpy` or `printf`, as a builtin, with or without
-[`-fno-builtin`](invoking.md#-fno-builtin--fno-builtin-name).
+[`-fno-builtin`](invoking.md#--no-builtins---no-builtinname).
 
 A `__builtin_` name EmbCC does not implement is an undeclared function:
 

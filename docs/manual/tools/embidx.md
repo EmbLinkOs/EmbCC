@@ -466,6 +466,6 @@ diff before.embidx after.embidx
 ## SEE ALSO
 
 [Invoking EmbCC](../invoking.md#--emit-interfaces) (`--emit-interfaces`,
-[`-MD`](../invoking.md#-md--mmd)), [`embld`](embld.md),
+[`-MD`](../invoking.md#--depsfile---deps-allfile)), [`embld`](embld.md),
 [Getting started](../getting-started.md),
 [Testing](../../internals/testing.md)

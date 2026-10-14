@@ -199,7 +199,7 @@ representation, and behavior as "plain" `char` (C17 6.2.5, 6.3.1.1).*
 `-funsigned-char` and `-fsigned-char` override the default for the whole
 translation unit, and `__CHAR_UNSIGNED__` is defined exactly when plain
 `char` is unsigned (see
-[Invoking EmbCC](invoking.md#-fsigned-char--funsigned-char)). The choice
+[Invoking EmbCC](invoking.md#--charsigned---charunsigned)). The choice
 also decides the value of character constants (below), of `#if`
 expressions that use them, and the signedness of plain `char`
 bit-fields.
@@ -652,7 +652,7 @@ whose value fits `int` has type `int`, whatever the enumeration's type
 (C17 6.4.4.3, C23 6.7.2.2), so `A - 1 < 0` is true; a constant that does
 not fit has the enumerated type. With `-fshort-enums` or
 `__attribute__((packed))` the type is the smallest integer type that
-holds every value ([Invoking](invoking.md#-fshort-enums--fno-short-enums)).
+holds every value ([Invoking](invoking.md#--enumsshort---enumsint)).
 A wider enumeration has the type
 GCC and Clang give it: one with no negative value that needs more than
 32 bits is `unsigned long` on x86-64, Apple arm64, AArch64 and RV64, and

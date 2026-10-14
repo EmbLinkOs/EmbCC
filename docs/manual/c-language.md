@@ -95,7 +95,7 @@ embcc: warning: -pedantic: EmbCC has no diagnostics for extensions to ISO C, so 
 See [Diagnostics](diagnostics.md).
 
 The C++ values (`c++20`, `gnu++17`, ...) are described in
-[Invoking EmbCC](invoking.md#-stdstandard) and [C++ support](cxx.md).
+[Invoking EmbCC](invoking.md#--stdstandard) and [C++ support](cxx.md).
 
 ### Keywords
 
@@ -851,7 +851,7 @@ language-related declarations they do not provide:
 The preprocessor is integrated in `embcc`; `-E` writes its output. The
 command-line options that control it (`-D`, `-U`, `-I`, `-isystem`, the
 dependency options) are in
-[Invoking EmbCC](invoking.md#preprocessor-options). The GNU directives and
+[Invoking EmbCC](invoking.md#headers-and-macros). The GNU directives and
 operators (`#include_next`, `__has_include_next`, `__has_builtin`,
 `__has_attribute`, `#pragma pack`, ...) are in [Extensions](extensions.md).
 

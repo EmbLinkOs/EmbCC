@@ -98,7 +98,7 @@ embcc: error: unknown argument '-nostdlib'
 
 The driver's link takes EmbLD's own options through `-Wl,` and
 `-Xlinker` (`-e`, `-Ttext`, `-Tdata`, `-Tstack`, `--rom-limit`,
-`--lma-offset`; see [Invoking](invoking.md#-wlargs--xlinker-arg)), but not
+`--lma-offset`; see [Invoking](invoking.md#--linker-argarg)), but not
 other inputs. To link without EmbCC's libraries, or with others, compile
 with `-c` and run `embld` with exactly the inputs wanted:
 
@@ -109,7 +109,7 @@ embld -e _start -Ttext 0xFFFFFFFF80100000 -o kernel.elf entry.o kernel.o
 
 `-ffreestanding` and `-fno-builtin` are accepted and change neither the
 link line nor the header search. `-nostdinc` removes EmbCC's header
-directories from the search (see [Invoking](invoking.md#-nostdinc)).
+directories from the search (see [Invoking](invoking.md#--no-std-include)).
 
 ### Header directories
 

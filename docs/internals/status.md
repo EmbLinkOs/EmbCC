@@ -562,7 +562,7 @@ embcc: error: linker option '-T' is not one EmbLD has (it takes -e, -Ttext, -Tda
 and refuses any other
 (`embcc: error: assembler option '-al' is not one the integrated assembler has`).
 The full rules are in
-[Invoking EmbCC](../manual/invoking.md#-wlargs--xlinker-arg).
+[Invoking EmbCC](../manual/invoking.md#--linker-argarg).
 
 `-pedantic` and `-pedantic-errors` are accepted and turn nothing on:
 

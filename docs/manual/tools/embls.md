@@ -620,6 +620,6 @@ Content-Length: 126
 
 [Diagnostics](../diagnostics.md) (the diagnostic format, the JSON form
 `embls` reads, and [the language server](../diagnostics.md#t5)),
-[Invoking EmbCC](../invoking.md#-fsyntax-only),
+[Invoking EmbCC](../invoking.md#--syntax-only),
 [C++ support](../cxx.md), [Targets](../targets.md),
 [`embidx`](embidx.md), [Getting started](../getting-started.md)
