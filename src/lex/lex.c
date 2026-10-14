@@ -211,6 +211,7 @@ static const struct {
     { "_Generic", TOK_KW_GENERIC },
     { "_Alignof", TOK_KW_ALIGNOF },
     { "_Countof", TOK_KW_COUNTOF },
+    { "_BitInt", TOK_KW_BITINT },
     { "__alignof__", TOK_KW_ALIGNOF },
     { "__alignof", TOK_KW_ALIGNOF },
     { "_Alignas", TOK_KW_ALIGNAS },
@@ -667,6 +668,42 @@ long lit_char_value(struct litch c, int pfx, int *uns, const char *file,
  *   Nothing checked any of it against a reference.
  *
  * tests/golden/int-literals.sh now does, for every target. */
+/* C23's wb and uwb suffixes after an integer constant's digits, at *pp:
+ * the constant is a _BitInt of the fewest bits that hold v (and its sign
+ * bit, when signed). 1 when there was one, *pp past it. */
+static int bitint_suffix(struct lexer *lx, struct token *t, const char **pp,
+                         unsigned long v, int has_u, int has_l)
+{
+    const char *q = *pp;
+    if (lx->cxx || !((q[0] == 'w' && q[1] == 'b') || (q[0] == 'W' && q[1] == 'B')))
+        return 0;
+    q += 2;
+    if (!has_u && (*q == 'u' || *q == 'U')) {
+        has_u = 1;
+        q++;
+    }
+    if (has_l)
+        diag_fatal(lx->file, lx->line, "a constant cannot be both long and "
+                   "a _BitInt (wb)");
+    int n = 0;
+    while (n < 64 && (v >> n))
+        n++;
+    n = has_u ? (n ? n : 1) : n + 1 < 2 ? 2 : n + 1;
+    if (n > 64)
+        diag_fatal(lx->file, lx->line, "this constant needs a _BitInt(%d), "
+                   "wider than BITINT_MAXWIDTH, which is 64 here", n);
+    lex_pedantic(lx->file, t->line, t->col, lex_quiet(lx), 2023,
+                 "a _BitInt constant (wb)");
+    t->kind = TOK_NUM;
+    t->num = (long)v;
+    t->num_bitint = n;
+    t->num_uns = has_u;
+    t->num_long = t->num_llong = 0;
+    t->char_lit = 0;
+    *pp = q;
+    return 1;
+}
+
 static void num_classify(struct token *t, unsigned long v, int has_u,
                          int has_l, int decimal)
 {
@@ -977,6 +1014,7 @@ static void lex_raw(struct lexer *lx)
     t->col = (int)(lx->p - lx->line_start) + 1;
     t->text = NULL;
     t->num = 0;
+    t->num_bitint = 0;
     t->str_width = 1;
     t->str_prefix = 0;
     t->ud_suffix = NULL;
@@ -1016,8 +1054,9 @@ static void lex_raw(struct lexer *lx)
         }
         if (adv) {
             lx->p += adv;
-            /* u8 is plain char in C; C++20 makes it char8_t, marked '8' */
-            pfx = adv == 1 ? q[0] : lx->cxx ? '8' : 0;
+            /* a u8 string is plain char in C, a u8 character unsigned
+             * char (C23); C++20 makes both char8_t. Marked '8'. */
+            pfx = adv == 1 ? q[0] : lx->cxx || q[2] == '\'' ? '8' : 0;
             if (*lx->p == '"') {
                 t->str_width = w;
                 t->str_prefix = (char)pfx;
@@ -1068,9 +1107,14 @@ static void lex_raw(struct lexer *lx)
                 has_l = 1;
             q++;
         }
+        int wb = bitint_suffix(lx, t, &q, v, has_u, has_l);
         if (isalnum((unsigned char)*q) || *q == '_' || *q == '.')
             diag_fatal(lx->file, lx->line, "malformed %s constant",
                        radix == 2 ? "binary" : "octal");
+        if (wb) {
+            lx->p = q;
+            return;
+        }
         t->kind = TOK_NUM;
         t->num = (long)v;
         num_classify(t, v, has_u, has_l, 0);   /* never decimal */
@@ -1161,6 +1205,13 @@ static void lex_raw(struct lexer *lx)
                 has_l = 1;
             end++;
         }
+        if (bitint_suffix(lx, t, (const char **)&end, v, has_u, has_l)) {
+            if (isalnum((unsigned char)*end) || *end == '_' || *end == '.')
+                diag_fatal(lx->file, lx->line,
+                           "malformed integer constant");
+            lx->p = end;
+            return;
+        }
         if (*end == 'i' || *end == 'I' || *end == 'j' || *end == 'J')
             diag_fatal(lx->file, lx->line,
                        "an integer imaginary constant (GNU _Complex int) is "
@@ -1212,7 +1263,8 @@ static void lex_raw(struct lexer *lx)
                             strcmp(keywords[i].word, "alignof") == 0 ||
                             strcmp(keywords[i].word, "alignas") == 0 ||
                             strcmp(keywords[i].word, "thread_local") == 0 ||
-                            strcmp(keywords[i].word, "_Countof") == 0))
+                            strcmp(keywords[i].word, "_Countof") == 0 ||
+                            strcmp(keywords[i].word, "_BitInt") == 0))
                 continue;        /* identifiers in C++, or its own */
             if (strlen(keywords[i].word) == n &&
                 memcmp(keywords[i].word, start, n) == 0) {
@@ -1474,6 +1526,7 @@ const char *tok_describe(const struct token *t)
     case TOK_KW_GENERIC: return "'_Generic'";
     case TOK_KW_ALIGNOF: return "'_Alignof'";
     case TOK_KW_COUNTOF: return "'_Countof'";
+    case TOK_KW_BITINT: return "'_BitInt'";
     case TOK_KW_ALIGNAS: return "'_Alignas'";
     case TOK_KW_TYPEOF: return "'typeof'";
     case TOK_KW_ATOMIC: return "'_Atomic'";

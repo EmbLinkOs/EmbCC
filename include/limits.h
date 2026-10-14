@@ -90,4 +90,22 @@
 #define ULONG_LONG_MAX (LONG_LONG_MAX * 2ULL + 1ULL)
 #endif
 
+/* C23: each integer type's width, and the widest _BitInt */
+#if defined(__STDC_VERSION__) && __STDC_VERSION__ > 201710L && \
+    !defined(BITINT_MAXWIDTH)
+#define BOOL_WIDTH 1
+#define CHAR_WIDTH __CHAR_BIT__
+#define SCHAR_WIDTH __CHAR_BIT__
+#define UCHAR_WIDTH __CHAR_BIT__
+#define SHRT_WIDTH (__SIZEOF_SHORT__ * __CHAR_BIT__)
+#define USHRT_WIDTH SHRT_WIDTH
+#define INT_WIDTH (__SIZEOF_INT__ * __CHAR_BIT__)
+#define UINT_WIDTH INT_WIDTH
+#define LONG_WIDTH (__SIZEOF_LONG__ * __CHAR_BIT__)
+#define ULONG_WIDTH LONG_WIDTH
+#define LLONG_WIDTH (__SIZEOF_LONG_LONG__ * __CHAR_BIT__)
+#define ULLONG_WIDTH LLONG_WIDTH
+#define BITINT_MAXWIDTH __BITINT_MAXWIDTH__
+#endif
+
 #endif /* _GCC_LIMITS_H_ */

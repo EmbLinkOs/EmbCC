@@ -562,7 +562,7 @@ static struct cvt cvt_type(const struct type *t, int bits, int enum_ok)
     } else if (ty_is_integer(t) && t->kind != TY_BOOL &&
                (!t->is_enum || enum_ok)) {
         c.cls = 1;
-        c.prec = bits ? bits : ty_size(t) * 8;
+        c.prec = bits ? bits : t->bitint ? t->bitint : ty_size(t) * 8;
         c.uns = t->is_unsigned;
     }
     return c;
@@ -3751,17 +3751,18 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
  * is the one _Static_assert uses. */
 static long cast_fold_value(const struct type *t, long v)
 {
-    int sz;
+    int bits;
     if (!t || !ty_is_integer(t))
         return v;
-    sz = ty_size(t);
-    if (sz <= 0 || sz >= (int)sizeof(long))
+    /* a _BitInt(N) keeps N bits, whatever it is stored in */
+    bits = t->bitint ? t->bitint : ty_size(t) * 8;
+    if (bits <= 0 || bits >= (int)sizeof(long) * 8)
         return v;
     {
-        unsigned long mask = (~0UL) >> ((sizeof(unsigned long) - (size_t)sz) * 8);
+        unsigned long mask = (~0UL) >> (sizeof(unsigned long) * 8 - (size_t)bits);
         unsigned long u = (unsigned long)v & mask;
         if (!t->is_unsigned) {
-            unsigned long sign = 1UL << (sz * 8 - 1);
+            unsigned long sign = 1UL << (bits - 1);
             if (u & sign)
                 u |= ~mask;
         }
@@ -3925,7 +3926,8 @@ static int const_fold(const struct expr *e, long *out)
             unsigned long ua = (unsigned long)a, ub = (unsigned long)b;
             int cmp = e->op >= B_EQ && e->op <= B_GE;
             int u = is_uns64(cmp ? e->lhs->ty : e->ty);
-            int wbits = e->ty && ty_is_integer(e->ty) ? 8 * ty_size(e->ty) : 64;
+            int wbits = e->ty && ty_is_integer(e->ty)
+                      ? e->ty->bitint ? e->ty->bitint : 8 * ty_size(e->ty) : 64;
             switch (e->op) {
             case B_ADD: *out = in_type(e, (long)(ua + ub)); return 1;
             case B_SUB: *out = in_type(e, (long)(ua - ub)); return 1;

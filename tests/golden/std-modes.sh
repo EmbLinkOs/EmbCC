@@ -51,6 +51,18 @@ for pair in c89:none c90:none gnu89:none iso9899:199409:199409L c99:199901L \
 done
 echo "std-modes: __STDC_VERSION__ and __STRICT_ANSI__ under each standard"
 
+# C23's types for its new constants: u8'a' is an unsigned char, 5wb the
+# narrowest _BitInt that holds 5, and BITINT_MAXWIDTH is <limits.h>'s
+cat > "$out/c23types.c" <<'EOF'
+#include <limits.h>
+_Static_assert(_Generic(u8'a', unsigned char: 1, default: 0), "u8'a'");
+_Static_assert(_Generic(5wb, _BitInt(4): 1, default: 0), "5wb");
+_Static_assert(_Generic(5uwb, unsigned _BitInt(3): 1, default: 0), "5uwb");
+_Static_assert(BITINT_MAXWIDTH >= ULLONG_WIDTH, "BITINT_MAXWIDTH");
+EOF
+"$EMBCC" --target=x86_64-elf -std=c23 -fsyntax-only "$out/c23types.c" ||
+    fail "C23's constants have the wrong types"
+
 # ---- programs, run ---------------------------------------------------------
 # run NAME MODE EXIT: compile $out/NAME.c under -std=MODE, run, expect EXIT
 run() {

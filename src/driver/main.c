@@ -1836,7 +1836,11 @@ static int compile_unit(const char *in, const char *out, int pp_only)
      * caller's problem. */
     incdirs_with_defaults();
     time_mark("startup");
+    /* text compiled marks what system macros expanded to, for -pedantic;
+     * text printed (-E) is the text */
+    int mark = cpp_set_mark_system(!pp_only);
     char *pp = cpp_process(in, src, incdirs, nincdirs);
+    cpp_set_mark_system(mark);
     time_mark("preprocess");
     if (dep_mode && dep_only) {       /* -M/-MM: the rule is the output */
         write_deps(in, out);
@@ -5775,9 +5779,6 @@ int main(int argc, char **argv)
     }
     if (why_decision)
         compile_mode = 1;         /* a question, not an object */
-    /* compiled text marks what system macros expanded to, for -pedantic;
-     * printed text (-E) is the text */
-    cpp_set_mark_system(!pp_only);
 
     /* A `.ir` input is EmbIR's own textual form: parse it and print it back
      * (§9.1). That is the round-trip -- `print | parse | print` must produce

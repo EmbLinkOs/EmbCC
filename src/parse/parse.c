@@ -374,7 +374,7 @@ static int tok_is_type_start(enum tok_kind k)
            k == TOK_KW_CONST || k == TOK_KW_VOLATILE ||
            k == TOK_KW_FLOAT || k == TOK_KW_DOUBLE || k == TOK_KW_BOOL ||
            k == TOK_KW_FLOAT128 || k == TOK_KW_FLOAT16 ||
-           k == TOK_KW_COMPLEX ||
+           k == TOK_KW_COMPLEX || k == TOK_KW_BITINT ||
            k == TOK_KW_ALIGNAS || k == TOK_KW_TYPEOF || k == TOK_KW_ATOMIC ||
            /* __auto_type begins a declaration even though it names no
             * type -- the type comes from the initializer, and the
@@ -1333,17 +1333,18 @@ static struct expr *parse_cond(struct parser *ps);
  * which is what returning the operand unchanged already did. */
 static long cast_fold_value(const struct type *t, long v)
 {
-    int sz;
+    int bits;
     if (!t || !ty_is_integer(t))
         return v;
-    sz = ty_size(t);
-    if (sz <= 0 || sz >= (int)sizeof(long))
+    /* a _BitInt(N) keeps N bits, whatever it is stored in */
+    bits = t->bitint ? t->bitint : ty_size(t) * 8;
+    if (bits <= 0 || bits >= (int)sizeof(long) * 8)
         return v;
     {
-        unsigned long mask = (~0UL) >> ((sizeof(unsigned long) - (size_t)sz) * 8);
+        unsigned long mask = (~0UL) >> (sizeof(unsigned long) * 8 - (size_t)bits);
         unsigned long u = (unsigned long)v & mask;
         if (!t->is_unsigned) {
-            unsigned long sign = 1UL << (sz * 8 - 1);
+            unsigned long sign = 1UL << (bits - 1);
             if (u & sign)
                 u |= ~mask;            /* sign-extend back to long */
         }
@@ -2161,9 +2162,25 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
     int uns = -1, nlong = 0, nshort = 0, nchar = 0, nint = 0, nvoid = 0;
     int nfloat = 0, ndouble = 0, nbool = 0, ncomplex = 0, n128 = 0;
     int nf128 = 0, nf16 = 0;
-    int any = 0;
+    int any = 0, nbitint = 0, bline = 0, bcol = 0;
+    long bits = 0;
     for (;;) {
         enum tok_kind k = cur(ps)->kind;
+        if (k == TOK_KW_BITINT) {
+            /* C23's _BitInt(N): N a constant expression */
+            bline = cur(ps)->line;
+            bcol = cur(ps)->col;
+            advance(ps);
+            expect(ps, TOK_LPAREN, "'(' after _BitInt");
+            struct expr *ne = parse_cond(ps);
+            if (!size_fold(ne, &bits))
+                parse_error_at(ps, bline, bcol,
+                           "_BitInt's width must be an integer constant");
+            expect(ps, TOK_RPAREN, "')' to close _BitInt's width");
+            nbitint++;
+            any++;
+            continue;
+        }
         if (k == TOK_KW_FLOAT) nfloat++;
         else if (k == TOK_KW_COMPLEX) ncomplex++;
         else if (k == TOK_KW_BOOL) nbool++;
@@ -2208,6 +2225,24 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
     }
     if (!any)
         return NULL;
+    if (nbitint) {
+        if (nbitint > 1 || any > nbitint + (uns >= 0))
+            parse_error_at(ps, bline, bcol,
+                       "_BitInt cannot combine with other type specifiers "
+                       "than signed and unsigned");
+        struct type *bt = bits >= 1 && bits <= TY_BITINT_MAXWIDTH
+                        ? ty_bitint((int)bits, uns == 1) : NULL;
+        if (!bt && bits > TY_BITINT_MAXWIDTH)
+            parse_error_at(ps, bline, bcol,
+                       "_BitInt(%ld) is wider than BITINT_MAXWIDTH, which "
+                       "is %d here", bits, TY_BITINT_MAXWIDTH);
+        if (!bt)
+            parse_error_at(ps, bline, bcol,
+                       "_BitInt(%ld): a%s _BitInt needs at least %d bit%s",
+                       bits, uns == 1 ? "n unsigned" : " signed",
+                       uns == 1 ? 1 : 2, uns == 1 ? "" : "s");
+        return bt;
+    }
     if (nlong >= 2)
         ped_at(ps, cur(ps)->line, cur(ps)->col, 1999, "`long long`");
     if (nbool) {
@@ -3484,7 +3519,9 @@ static struct expr *parse_primary(struct parser *ps)
     case TOK_NUM:
         e = new_expr(EXPR_NUM, t->line, t->col);
         e->num = t->num;
-        e->ty = t->num_llong ? ty_llong(t->num_uns)
+        e->ty = t->num_bitint ? ty_bitint(t->num_bitint, t->num_uns)
+              : t->char_lit && t->str_prefix == '8' ? ty_base(TY_CHAR, 1)
+              : t->num_llong ? ty_llong(t->num_uns)
                              : ty_base(t->num_long ? TY_LONG : TY_INT,
                                        t->num_uns);
         advance(ps);

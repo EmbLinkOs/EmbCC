@@ -33,6 +33,7 @@ enum tok_kind {
     TOK_KW_GENERIC,
     TOK_KW_ALIGNOF,
     TOK_KW_COUNTOF,       /* C2y _Countof: an array's element count */
+    TOK_KW_BITINT,        /* C23 _BitInt(N) */
     TOK_KW_ALIGNAS,
     TOK_KW_TYPEOF,
     TOK_KW_AUTOTYPE,
@@ -195,6 +196,7 @@ struct token {
     int char_lit;  /* TOK_NUM from a character constant; str_prefix holds its
                     * encoding prefix (C++ types 'a' as char, not int) */
     int num_uns;   /* TOK_NUM: type is unsigned (U suffix or hex range) */
+    int num_bitint; /* TOK_NUM with C23's wb suffix: its _BitInt's width */
     double fnum;   /* TOK_FNUM */
     int fnum_is_float; /* TOK_FNUM: an 'f' suffix -> float, else double */
     int fnum_is_imag;  /* TOK_FNUM: a GNU imaginary constant (an i/j

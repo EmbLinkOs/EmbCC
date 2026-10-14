@@ -260,9 +260,9 @@ C17's value, `201710L`.
 | `true` and `false` in `#if` | Supported | |
 | Binary constants `0b1010` | Supported | Also in `#if`. |
 | Digit separators `1'000'000` | Supported | In integer and floating constants, and in `#if`. |
-| `u8` character constants `u8'a'` | Not supported | Read as the identifier `u8` followed by `'a'`, which is a syntax error such as `expected ';' before number 97 [E0002]`. |
+| `u8` character constants `u8'a'` | Supported | Of type `unsigned char`. |
 | `char8_t`; `u8"..."` of type `unsigned char[]` | Not supported | `u8"..."` has C17's type, `char[]`. `<uchar.h>` does not declare `char8_t`. |
-| `_BitInt(N)`, the `wb` and `uwb` suffixes | Not supported | `expected a type before '_BitInt'`; a `3wb` constant gives `malformed integer constant`. |
+| `_BitInt(N)`, the `wb` and `uwb` suffixes | Partial | N up to 64, which is `BITINT_MAXWIDTH`; wider is refused: `_BitInt(65) is wider than BITINT_MAXWIDTH, which is 64 here`. Arithmetic in the type wraps at N bits, a `_BitInt` is not promoted to `int`, and conversions rank it by its width. Laid out and passed as the x86-64, AArch64 and RISC-V ABIs say, so calls between EmbCC and GCC agree. See [Integers](implementation-defined.md). |
 | Enumerations with a fixed underlying type, `enum E : unsigned char` | Partial | The enumeration and its constants have the underlying type, and `enum E : short;` declares it ahead of its definition. A value the underlying type cannot represent is not diagnosed. See [Enumeration constants](#enumeration-constants). A non-integer type: `an enum's underlying type must be an integer type`. |
 | Enumeration constants outside the range of `int` | Partial | The enumeration and its constants take a type that can represent every value. A value of 2^63 or more is read as negative. See [Enumeration constants](#enumeration-constants). |
 | Empty initializer `= {}` | Partial | Zero-initializes any object except a VLA, which is refused: `variable length array 'a' cannot be initialized`. See [Initializers](#initializers). |

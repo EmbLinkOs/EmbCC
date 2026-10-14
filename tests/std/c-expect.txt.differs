@@ -50,22 +50,3 @@ kw-typeof_unqual-ident gnu11 plain
 kw-typeof_unqual-ident gnu17 plain
 kw-typeof_unqual-ident gnu89 plain
 kw-typeof_unqual-ident gnu99 plain
-
-# _BitInt(N), C23's bit-precise integers, which GCC accepts in every mode:
-# not implemented yet.
-c23-bitint c11 plain
-c23-bitint c17 plain
-c23-bitint c23 pedantic
-c23-bitint c23 plain
-c23-bitint c2y pedantic
-c23-bitint c2y plain
-c23-bitint c89 plain
-c23-bitint c99 plain
-c23-bitint gnu11 plain
-c23-bitint gnu17 plain
-c23-bitint gnu23 pedantic
-c23-bitint gnu23 plain
-c23-bitint gnu2y pedantic
-c23-bitint gnu2y plain
-c23-bitint gnu89 plain
-c23-bitint gnu99 plain

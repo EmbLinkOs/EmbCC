@@ -546,7 +546,12 @@ static int dynamic_macro(struct src *s, const char *name, size_t n,
 /* cpp_set_mark_system; g_marking while a line is expanded for the
  * compiler, and g_sys_depth inside a marked expansion (marked once) */
 static int g_mark_system, g_marking, g_sys_depth;
-void cpp_set_mark_system(int on) { g_mark_system = on; }
+int cpp_set_mark_system(int on)
+{
+    int was = g_mark_system;
+    g_mark_system = on;
+    return was;
+}
 
 static int sys_mark_open(struct src *s, struct macro *m, struct tbuf *out)
 {
@@ -2561,6 +2566,10 @@ char *cpp_process(const char *path, const char *src,
     define_macro(&boot, "__restrict__");
     defining_builtins = 0;
     define_macro(&boot, "__STDC__ 1");
+    /* C's _BitInt goes up to 64 bits (sema/type.h TY_BITINT_MAXWIDTH);
+     * <limits.h> makes it BITINT_MAXWIDTH */
+    if (!predef_is_cxx())
+        define_macro(&boot, "__BITINT_MAXWIDTH__ 64");
     /* C17: the language EmbCC compiles is C11's (with C17's fixes),
      * _Atomic operators included, and much of C23's. It said C99, which
      * sent headers to their pre-C11 fallbacks -- newlib emulates
