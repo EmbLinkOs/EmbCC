@@ -224,3 +224,26 @@ refuse "an unknown convention" '__attribute__((pcs("fast"))) void g(void);' \
     "" "aapcs"
 echo "pcs(\"aapcs\") moves floats to the core registers at the call, and is
 refused by name wherever it could be dropped"
+
+# ---- a leaf's floats in s4-s15 --------------------------------------------
+# The float pool was s16-s31 only, the callee-saved half, so `a * b + c`
+# pushed and popped four registers it had no call to survive: 36 bytes
+# where clang's is 10. In a leaf -- no call, no runtime helper, no asm --
+# nothing can change s4-s15, so a value lives there first; s0-s3 stay the
+# scratch pairs, and the incoming arguments below the pool. A value that
+# lives across a call still takes s16 and up, and is saved.
+command -v llvm-objdump > /dev/null 2>&1 || { echo "SKIP the leaf check: no llvm-objdump"; exit 0; }
+fail() { echo "FAIL: $*"; exit 1; }
+cat > "$out/leaf.c" << 'EOF2'
+float madd(float a, float b, float c) { return a * b + c; }
+float g(float);
+float across(float a, float b) { float t = a * b; return g(t) + t; }
+EOF2
+"$EMBCC" --target=thumbv7em-none-eabihf -O2 -c "$out/leaf.c" -o "$out/leaf.o" || fail "leaf.c"
+llvm-objdump -d "$out/leaf.o" > "$out/leaf.dis"
+sed -n '/<madd>:/,/^$/p' "$out/leaf.dis" > "$out/madd.dis"
+sed -n '/<across>:/,/^$/p' "$out/leaf.dis" > "$out/across.dis"
+grep -q 'vpush' "$out/madd.dis" && { cat "$out/madd.dis"; fail "a leaf saves FP registers"; }
+grep -qE 's(1[6-9]|2[0-9]|3[01])\b' "$out/madd.dis" && { cat "$out/madd.dis"; fail "a leaf used a callee-saved FP register"; }
+grep -q 'vpush' "$out/across.dis" || { cat "$out/across.dis"; fail "a value live across a call is not in a saved register"; }
+echo "a leaf's floats are in s4-s15 with no vpush; one live across a call is saved"

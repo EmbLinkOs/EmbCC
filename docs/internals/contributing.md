@@ -29,7 +29,7 @@ The rule applies everywhere a promise is made:
   where: `the RV32 backend cannot lower a 128-bit value yet (function f)`.
   It never falls through to another target's code generator.
 - **Options.** A flag that promises something about the code (`-fPIC`,
-  `-flto`, `-fshort-enums`, `-fsanitize=address`) is refused by name if
+  `-flto`, `-fsanitize=address`) is refused by name if
   EmbCC would emit ordinary code instead. A flag is accepted silently only
   when EmbCC already behaves that way (`-fwrapv`, `-fno-strict-aliasing`),
   and the reason is written next to the code that accepts it.

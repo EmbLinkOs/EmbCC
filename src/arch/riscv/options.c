@@ -30,6 +30,16 @@ static const char *g_rv_march, *g_rv_mabi;
  * The default is today's: rv32imac/ilp32 and rv64imac/lp64. */
 void riscv_options_done(void)
 {
+    /* GCC's bare-metal riscv64-unknown-elf toolchain is multilib: it
+     * builds RV32 under -march=rv32..., which is how a CMake toolchain
+     * file written for it (and the SiFive and xPack toolchains' docs)
+     * spells an RV32 build. So for that freestanding triple -march=rv32
+     * picks RV32. The other way is not GCC's -- a riscv32 toolchain is
+     * RV32 only -- and a hosted triple (Linux) is one width; both keep
+     * the refusal below. */
+    if (g_rv_march && target_os_get() == TGT_OS_NONE &&
+        target_get() == TARGET_RISCV64 && strncmp(g_rv_march, "rv32", 4) == 0)
+        target_set(TARGET_RISCV32);
     int rv64 = target_get() == TARGET_RISCV64;
     int f = 0, d = 0, c = 1, m = 1, a = 1, zifencei = 0, abi;
     if (!rv64 && target_get() != TARGET_RISCV32)

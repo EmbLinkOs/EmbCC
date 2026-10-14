@@ -71,6 +71,35 @@ then
         head -10 "$out/v.diff"; exit 1
     fi
     echo "$n asm statements encode as llvm-mc does"
+
+    # Strings, alignments to four, data and %c in a template (tests/
+    # harness/asmdir.sh) -- Linux's asm-offsets and EmbLinkRTOS's layout
+    # probes -- against llvm-mc's bytes
+    . tests/harness/asmdir.sh
+    cat > "$out/dirs.txt" <<'EOF'
+.ascii "->EMB_PROBE s %c1 %c0"
+.p2align 2
+.ascii "abc"
+.align 2
+.asciz "hi", "x"
+.byte 0x55
+.balign 4
+.string "\t\"q\\\101\x42\0z"
+.p2align 2, 0x5a
+.byte 1, 255, -128, %c0, %c1
+.p2align 2,,2
+.byte 7
+.p2align 2,,3
+.ascii "a;b#c//d"
+.half 0x1234, %c0
+.short 7
+.word 0x12345678
+.4byte 1
+.dword -2
+.8byte 3
+.p2align 2
+EOF
+    asmdir_referee "$out" $T "-triple=loongarch64" nop 4 "$out/dirs.txt" || exit 1
 else
     echo "SKIP the encoding half: no llvm-mc with a LoongArch target"
 fi
@@ -205,8 +234,12 @@ refc "an instruction outside the vocabulary" 'is not in the LoongArch vocabulary
     'void f(void){ __asm__ volatile("fadd.d $fa0, $fa0, $fa0"); }'
 refc "an immediate out of range" 'does not fit' \
     'void f(void){ __asm__ volatile("addi.d $t0, $t0, %0" :: "i"(5000)); }'
+refc "%c of a register operand" 'names a register operand' \
+    'long f(long x){ __asm__ volatile(".byte %c0" : : "r"(x)); return x; }'
+refc "an alignment past an instruction's four" 'does not do yet' \
+    'void f(void){ __asm__ volatile(".ascii \"abc\"; .p2align 3"); }'
 printf '\tbeq $a0, $a1, nowhere\n' > "$out/u.s"
 if "$EMBCC" --target=$T -c "$out/u.s" -o /dev/null 2> "$out/u.err"; then
     echo "a conditional branch to an undefined symbol was accepted"; exit 1
 fi
-echo "$nr statements and 7 asm statements in C are refused by name"
+echo "$nr statements and 9 asm statements in C are refused by name"

@@ -2,6 +2,14 @@
  *
  *     embar rcs libfoo.a a.o b.o ...   create or update, with a symbol index
  *     embar t   libfoo.a               list the members
+ *     embar x   libfoo.a [a.o ...]     extract members
+ *     embar d   libfoo.a a.o ...       delete members
+ *     embar s   libfoo.a               (re)write the symbol index
+ *
+ * Called by a name ending in `ranlib` (embcc-ranlib, arm-none-eabi-ranlib)
+ * it is ranlib: each argument is an archive whose index is rewritten. A
+ * build written for binutils runs `ar qc` and then `ranlib`, and CMake
+ * does exactly that.
  *
  * Building a C library needs an archiver, and the one every build used was
  * binutils' `ar`: a host with no GCC toolchain could compile EmbCC's
@@ -257,6 +265,10 @@ static void usage(void)
     fprintf(stderr,
         "usage: embar [-]{r|q}[cs] ARCHIVE FILE...   create or update\n"
         "       embar [-]t ARCHIVE                  list the members\n"
+        "       embar [-]x ARCHIVE [MEMBER...]      extract (all, or those)\n"
+        "       embar [-]d ARCHIVE MEMBER...        delete members\n"
+        "       embar [-]s ARCHIVE                  rewrite the symbol index\n"
+        "  (as ranlib: embar-ranlib ARCHIVE..., the index of each)\n"
         "  r  insert FILEs, replacing members of the same name\n"
         "  q  append FILEs\n"
         "  c  do not say that the archive was created\n"
@@ -266,26 +278,99 @@ static void usage(void)
     exit(2);
 }
 
+/* An archive the operation reads must be there: only r and q create. */
+static void must_exist(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        die("%s: no such archive", path);
+    fclose(f);
+}
+
 int main(int argc, char **argv)
 {
     const char *ops, *arch;
     int op = 0, index = 1, quiet = 0;
+    size_t n0 = strlen(base_name(argv[0]));
+    if (n0 >= 6 && strcmp(base_name(argv[0]) + n0 - 6, "ranlib") == 0) {
+        /* ranlib ARCHIVE...: each archive's index, written again */
+        int k = 1;
+        while (k < argc && argv[k][0] == '-' && argv[k][1])
+            k++;                       /* -D, -t, -U: nothing to do here */
+        if (k >= argc) {
+            fprintf(stderr, "usage: %s ARCHIVE...\n", base_name(argv[0]));
+            exit(2);
+        }
+        for (; k < argc; k++) {
+            g_nmem = 0;
+            must_exist(argv[k]);
+            load_archive(argv[k]);
+            write_archive(argv[k], 1);
+        }
+        return 0;
+    }
     if (argc < 3) usage();
     ops = argv[1][0] == '-' ? argv[1] + 1 : argv[1];
     for (const char *p = ops; *p; p++)
         switch (*p) {
-        case 'r': case 'q': case 't': op = *p; break;
+        case 'r': case 'q': case 't': case 'x': case 'd': op = *p; break;
         case 'c': quiet = 1; break;
-        case 's': index = 1; break;
+        case 's': index = 1; if (!op) op = 's'; break;
         case 'S': index = 0; break;
-        case 'D': case 'u': case 'v': break;     /* deterministic already */
+        case 'D': case 'u': case 'v': case 'o': break;  /* deterministic already */
         default: usage();
         }
+    if (op == 's' && strpbrk(ops, "rqtxd"))
+        for (const char *p = ops; *p; p++)
+            if (strchr("rqtxd", *p))
+                op = *p;
     if (!op) usage();
     arch = argv[2];
+    if (op != 'r' && op != 'q')
+        must_exist(arch);
     load_archive(arch);
     if (op == 't') {
         for (int i = 0; i < g_nmem; i++) printf("%s\n", g_mem[i].name);
+        return 0;
+    }
+    if (op == 's') {
+        write_archive(arch, 1);
+        return 0;
+    }
+    if (op == 'x') {
+        int found = 0;
+        for (int i = 0; i < g_nmem; i++) {
+            int want = argc == 3;
+            for (int k = 3; k < argc; k++)
+                if (strcmp(base_name(argv[k]), g_mem[i].name) == 0)
+                    want = 1;
+            if (!want)
+                continue;
+            FILE *f = fopen(g_mem[i].name, "wb");
+            if (!f || fwrite(g_mem[i].data, 1, (size_t)g_mem[i].size, f) !=
+                          (size_t)g_mem[i].size || fclose(f) != 0)
+                die("cannot write %s", g_mem[i].name);
+            found++;
+        }
+        if (argc > 3 && found < argc - 3)
+            die("%s: a member named there is not in the archive", arch);
+        return 0;
+    }
+    if (op == 'd') {
+        for (int k = 3; k < argc; k++) {
+            int j = 0, gone = 0;
+            for (int i = 0; i < g_nmem; i++) {
+                if (!gone && strcmp(g_mem[i].name, base_name(argv[k])) == 0) {
+                    gone = 1;
+                    continue;
+                }
+                g_mem[j++] = g_mem[i];
+            }
+            if (!gone)
+                die("no member %s", argv[k]);
+            g_nmem = j;
+        }
+        write_archive(arch, index);
         return 0;
     }
     if (!g_nmem && !quiet && argc > 3)

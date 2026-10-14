@@ -248,6 +248,7 @@ struct linker {
     Elf64_Addr data_base;      /* firmware: the writable segment's VMA (0 = off) */
     Elf64_Addr data_lma;       /* ... and where its bytes are STORED */
     unsigned long rom_limit;   /* bytes of flash the image may occupy, 0 = any */
+    int have_base;             /* -Ttext was given (with -T: .text's address) */
     int elf32;                 /* ELFCLASS32 output, from the inputs */
     int machine;               /* e_machine, one across every input */
     int big_endian;            /* the byte order, one across every input */
@@ -295,6 +296,7 @@ struct linker {
     int gc_nundefs;
 };
 
+EMBCC_NORETURN static void die(const char *fmt, ...);
 static void die(const char *fmt, ...)
 {
     va_list ap;
@@ -456,7 +458,10 @@ static void arm_attrs_scan(struct object *o,
                 }
                 unsigned long v = arm_uleb(&b, bend);
                 if (t == ARM_TAG_VFP_ARGS)  { o->arm_vfp = (int)v + 1; }
-                if (t == ARM_TAG_ENUM_SIZE) { o->arm_enum = (int)v + 1; }
+                /* 0 claims nothing about an enum's size: an object that
+                 * uses none, or a library whose interface passes none
+                 * (EmbCC's, -fenum-size-neutral) -- it links with both */
+                if (t == ARM_TAG_ENUM_SIZE) { o->arm_enum = v ? (int)v + 1 : 0; }
                 if (t == ARM_TAG_CPU_ARCH)  { o->arm_arch = (int)v + 1; }
             }
         }
@@ -473,23 +478,30 @@ static void arm_attrs_scan(struct object *o,
  * must not be treated as claiming the base standard. */
 static void arm_attrs_check(struct linker *l)
 {
-    struct object *ref = NULL;
+    /* a reference per attribute: the first object that states each, so
+     * one that states only the other is not the yardstick */
+    struct object *ref = NULL, *refe = NULL;
     for (int i = 0; i < l->nobj; i++) {
         struct object *o = l->objs[i];
-        if (!o->arm_vfp && !o->arm_enum)
+        if (o->arm_enum) {
+            if (!refe)
+                refe = o;
+            else if (refe->arm_enum != o->arm_enum)
+                die("'%s' and '%s' disagree about the size of an enum, "
+                    "which changes the layout of every struct that holds "
+                    "one", refe->name ? refe->name : "?",
+                    o->name ? o->name : "?");
+        }
+        if (!o->arm_vfp)
             continue;
         if (!ref) { ref = o; continue; }
-        if (ref->arm_vfp && o->arm_vfp && ref->arm_vfp != o->arm_vfp)
+        if (ref->arm_vfp != o->arm_vfp)
             die("'%s' and '%s' disagree about where floating-point "
                 "arguments go: one passes them in the core registers "
                 "(-mfloat-abi=soft) and the other in s0-s15 "
                 "(-mfloat-abi=hard). Linking them would leave every "
                 "float argument read from a register the caller never "
                 "wrote",
-                ref->name ? ref->name : "?", o->name ? o->name : "?");
-        if (ref->arm_enum && o->arm_enum && ref->arm_enum != o->arm_enum)
-            die("'%s' and '%s' disagree about the size of an enum, which "
-                "changes the layout of every struct that holds one",
                 ref->name ? ref->name : "?", o->name ? o->name : "?");
     }
 }
@@ -1295,7 +1307,7 @@ static void add_entry_stub(struct linker *l)
 
 static void fill_entry_stub(struct linker *l, Elf64_Addr entry)
 {
-    struct code c = { l->stub, 0, (int)l->stub_size, NULL, 0, 0 };
+    struct code c = { l->stub, 0, (int)l->stub_size, NULL, 0, 0, NULL, 0, 0 };
     struct insec *s = &l->insecs[l->stub_sec];
     int xlen = l->elf32 ? 32 : 64;
     if (l->machine == EM_ARM) {
@@ -2408,6 +2420,34 @@ static void define_end_symbols(struct linker *l, Elf64_Addr image_end)
     define_linker_symbol(l, "end", image_end);
     define_linker_symbol(l, "__bss_end", image_end);
     define_linker_symbol(l, "__kernel_end", image_end);
+}
+
+/* `end` and `_end` under a linker script, for a C library's sbrk: newlib's
+ * reads `end`, EmbCC's own `_end`, and a script often names only the one
+ * its libc wanted. Each stands in for the other; a script naming neither
+ * gets the end of its last writable output section, where .bss ends. Only
+ * a name something refers to and nothing defines is given a value. */
+static void ls_end_symbols(struct linker *l, const struct ls_script *sc)
+{
+    struct symbol *a = sym_find(l, "_end"), *b = sym_find(l, "end");
+    int ad = a && a->defined, bd = b && b->defined;
+    struct symbol *want = !ad && a ? a : !bd && b ? b : NULL;
+    if (!want)
+        return;
+    Elf64_Addr v = 0;
+    if (ad || bd) {
+        v = (ad ? a : b)->value;
+    } else {
+        for (int k = 0; k < sc->nosec; k++) {
+            const struct ls_osec *o = &sc->osecs[k];
+            if (o->laid && !o->discard && o->write &&
+                (Elf64_Addr)(o->vma + o->size) > v)
+                v = (Elf64_Addr)(o->vma + o->size);
+        }
+    }
+    define_linker_symbol(l, want->name, v);
+    if (want == a && b && !b->defined)
+        define_linker_symbol(l, "end", v);
 }
 
 /* What a firmware startup needs to bring RAM up, provided by the linker
@@ -5250,6 +5290,8 @@ static int ls_sort_cmp(const void *pa, const void *pb)
         c = strcmp(a->name, b->name);
     } else if (g_ls_sort_kind == LSORT_ALIGN) {
         c = a->align > b->align ? -1 : a->align < b->align;
+    } else if (g_ls_sort_kind == LSORT_FILE) {
+        c = strcmp(a->obj ? a->obj->name : "", b->obj ? b->obj->name : "");
     } else {
         unsigned long pa2 = ls_init_priority(a->name);
         unsigned long pb2 = ls_init_priority(b->name);
@@ -5283,7 +5325,7 @@ static void ls_claim(struct linker *l, struct ls_script *sc)
                     continue;
                 for (int i = 0; i < obj->nsh; i++) {
                     int si = obj->sec_out[i];
-                    if (si < 0 || l->insecs[si].sosec != -1)
+                    if (si < 0)
                         continue;
                     struct insec *is = &l->insecs[si];
                     for (int j = 0; j < s->in.nsec; j++) {
@@ -5292,6 +5334,16 @@ static void ls_claim(struct linker *l, struct ls_script *sc)
                                              obj->name) ||
                             !ls_glob(s->in.sec[j], is->name))
                             continue;
+                        if (is->sosec != -1) {
+                            /* placed by an earlier description: a KEEP
+                             * that also matches still keeps it, as ld's
+                             * does -- avr-ld's scripts write `*(.init0)
+                             * KEEP(*(.init0))`, the first to place and the
+                             * second to keep */
+                            if (s->in.keep && is->sosec >= 0)
+                                is->keep = 1;
+                            break;
+                        }
                         is->sosec = o->discard ? -2 : k;
                         is->discarded = o->discard;
                         is->keep = s->in.keep;
@@ -5319,6 +5371,13 @@ static void ls_claim(struct linker *l, struct ls_script *sc)
                         break;
                     }
                 }
+            }
+            if (s->in.fsort && s->nlist > 1) {
+                /* by file first; a section sort inside it then orders
+                 * the whole list, as ld's does when both are given */
+                g_ls_sort_l = l;
+                g_ls_sort_kind = LSORT_FILE;
+                qsort(s->list, (size_t)s->nlist, sizeof *s->list, ls_sort_cmp);
             }
             if (sort && s->nlist > 1) {
                 g_ls_sort_l = l;
@@ -5435,6 +5494,28 @@ static void ls_region_check(struct ls_state *st, const struct ls_osec *o,
                (unsigned long long)(rg->origin + rg->length));
 }
 
+/* -Ttext and -Tdata with a script: the address of the output section
+ * called .text or .data, whatever the script says, as ld's do. On AVR the
+ * data space is at 0x800000 in the linker's view, so -Tdata 0x100 (the
+ * spelling embld's own layout takes) is 0x800100 here, the same as the
+ * -Tdata 0x800100 avr-gcc passes. */
+static int ls_start_override(const struct linker *l, const char *name,
+                             long long *start)
+{
+    if (l->have_base && strcmp(name, ".text") == 0) {
+        *start = (long long)l->base;
+        return 1;
+    }
+    if (l->data_base && strcmp(name, ".data") == 0) {
+        Elf64_Addr d = l->data_base;
+        if (l->machine == EM_AVR && d < 0x800000)
+            d += 0x800000;
+        *start = (long long)d;
+        return 1;
+    }
+    return 0;
+}
+
 static void ls_layout_osec(struct ls_state *st, int k)
 {
     struct linker *l = st->l;
@@ -5502,7 +5583,9 @@ static void ls_layout_osec(struct ls_state *st, int k)
             ls_die(st, "section %s: there is no memory region %s", o->name,
                    o->lregion);
     }
-    if (o->addr) {
+    if (ls_start_override(l, o->name, &start)) {
+        /* -Ttext / -Tdata: ld's --section-start, over the script */
+    } else if (o->addr) {
         int rel;
         start = ls_eval(st, o->addr, &rel);
     } else {
@@ -5709,6 +5792,33 @@ static void ls_layout(struct linker *l, struct ls_script *sc, int orphan_mode)
                 "another branch out of reach");
     }
     ls_layout_pass(l, sc, 1);        /* the same again, now reporting */
+    /* --rom-limit with a script: what is STORED in flash -- every loaded
+     * output section by its load address, from the start of the code --
+     * must fit, as without one. On AVR that is program space, below the
+     * data space at 0x800000 (and .eeprom, at 0x810000, is not flash). */
+    if (l->rom_limit) {
+        long long lo = -1, hi = 0, text = 0, init = 0;
+        for (int k = 0; k < sc->nosec; k++) {
+            const struct ls_osec *o = &sc->osecs[k];
+            if (o->discard || !o->laid || o->nobits || !o->size ||
+                (l->machine == EM_AVR && o->lma >= 0x800000))
+                continue;
+            if (lo < 0 || o->lma < lo)
+                lo = o->lma;
+            if (o->lma + o->size > hi)
+                hi = o->lma + o->size;
+            if (o->vma == o->lma)
+                text += o->size;
+            else
+                init += o->size;
+        }
+        if (l->have_base)
+            lo = (long long)l->base;
+        if (lo >= 0 && hi - lo > (long long)l->rom_limit)
+            die("the image needs %lld bytes of flash and the part has %lu "
+                "(--rom-limit): %lld of text, %lld of initial data",
+                hi - lo, l->rom_limit, text, init);
+    }
     /* AVR is a Harvard machine and EmbCC reads read-only data with
      * data-space loads (ld, lds), like avr-gcc without __flash or
      * PROGMEM. A .rodata left in program space -- run where it is stored,
@@ -6891,6 +7001,7 @@ int embld_link(const char **inputs, int ninputs, const char *out,
     l.lma_offset = (opts) ? opts->lma_offset : 0;
     l.data_base = (opts) ? opts->data_base : 0;
     l.rom_limit = (opts) ? opts->rom_limit : 0;
+    l.have_base = opts && opts->have_base;
     l.stack_top = (opts && opts->have_stack) ? opts->stack_top : 0;
     l.stub_sec = -1;
     l.gc_sections = opts && opts->gc_sections;
@@ -6906,11 +7017,13 @@ int embld_link(const char **inputs, int ninputs, const char *out,
     const char **all = inputs;
     int nall = ninputs;
     if (opts && opts->script) {
-        if (opts->have_base || opts->data_base || opts->rom_limit ||
-            opts->lma_offset || opts->have_stack || opts->emit_embx)
-            die("-T %s lays the image out, so -Ttext, -Tdata, -Tstack, "
-                "--rom-limit, --lma-offset and --embx cannot be given with "
-                "it", opts->script);
+        /* -Ttext and -Tdata place .text and .data, as ld's do with a
+         * script (avr-gcc passes -Tdata for the part beside its script),
+         * and --rom-limit bounds what is stored in flash; the others
+         * describe a layout of embld's own */
+        if (opts->lma_offset || opts->have_stack || opts->emit_embx)
+            die("-T %s lays the image out, so -Tstack, --lma-offset and "
+                "--embx cannot be given with it", opts->script);
         sc = ls_parse_file(opts->script);
         l.sc = sc;
         for (int k = 0; k < opts->nlibdirs; k++)
@@ -6983,6 +7096,7 @@ int embld_link(const char **inputs, int ninputs, const char *out,
             define_linker_symbol(&l, xstrndup(sym, strlen(sym)),
                                  (Elf64_Addr)(o->vma + o->size));
         }
+        ls_end_symbols(&l, sc);
         arm_attrs_check(&l);
         Elf64_Addr ev = 0;
         struct symbol *e = sym_find(&l, l.entry);

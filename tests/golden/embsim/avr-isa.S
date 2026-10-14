@@ -339,6 +339,9 @@ k_movw:
 	ret
 
 ; ---- Timer/Counter1's compare-match A interrupt, and SEI/CLI --------------------
+; The fifth tick turns the interrupt off (TIMSK1 = 0). QEMU's timer runs on
+; the host's clock, so a sixth match could land between the main loop
+; seeing five and its CLI, and QEMU then printed 6 where EmbSim printed 5.
 	.globl __vector_11
 __vector_11:
 	push r24
@@ -347,7 +350,11 @@ __vector_11:
 	lds r24, ticks
 	inc r24
 	sts ticks, r24
-	pop r24
+	cpi r24, 5
+	brlo 1f
+	clr r24
+	sts 0x6f, r24
+1:	pop r24
 	out 0x3f, r24
 	pop r24
 	reti

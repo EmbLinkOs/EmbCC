@@ -2023,15 +2023,9 @@ int tasm_assemble(const char *text, struct code *out, char *err, int errlen)
     while (*p) {
         const char *start = p;
         int len;
-        while (*p && *p != ';' && *p != '\n')
-            p++;
-        len = (int)(p - start);
-        for (int i = 0; i < len; i++)
-            if (start[i] == '@' || (start[i] == '/' && i + 1 < len &&
-                                    start[i + 1] == '/')) {
-                len = i;
-                break;
-            }
+        /* a `;` or an `@` inside a .ascii string is the string's */
+        p += asm_stmt_len(p, ";");
+        len = asm_cut_comment(start, (int)(p - start), "@", 1);
         /* Mnemonics are not case-sensitive in GNU as -- CMSIS writes
          * `MRS %0, primask` -- so the statement's first word is taken in
          * lower case; operands keep theirs (a symbol's case matters). */
@@ -2053,6 +2047,18 @@ int tasm_assemble(const char *text, struct code *out, char *err, int errlen)
              * past thumb1_bad, which would read a `.short` of a Thumb-2
              * halfword as an instruction ARMv6-M lacks */
             r = data_stmt(st, len, out, err, errlen);
+            if (!r) {
+                /* .ascii/.asciz/.string, and the alignments, whose
+                 * padding the backend decides where the bytes land */
+                static const struct asm_dirs dirs = { NULL, 0, 0 };
+                int w = 0;
+                while (w < len && isspace((unsigned char)st[w]))
+                    w++;
+                if (w < len && st[w] == '.' && tasm_open())
+                    FAIL("%.*s inside an IT block: its slots are for "
+                         "instructions", len - w, st + w);
+                r = code_asm_directive(st, len, out, &dirs, err, errlen);
+            }
             if (r) {
                 if (r < 0)
                     return -1;

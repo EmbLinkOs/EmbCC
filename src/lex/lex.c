@@ -383,6 +383,33 @@ static struct litch decode_source(const char **p)
     return c;
 }
 
+/* The bytes of one plain character-constant element: an escape is its
+ * low byte, a source character its UTF-8 encoding. */
+static int lit_bytes(struct litch c, unsigned char *out)
+{
+    unsigned long v = c.v;
+    if (c.raw || v < 0x80) {
+        out[0] = (unsigned char)v;
+        return 1;
+    }
+    if (v < 0x800) {
+        out[0] = (unsigned char)(0xC0 | v >> 6);
+        out[1] = (unsigned char)(0x80 | (v & 0x3F));
+        return 2;
+    }
+    if (v < 0x10000) {
+        out[0] = (unsigned char)(0xE0 | v >> 12);
+        out[1] = (unsigned char)(0x80 | ((v >> 6) & 0x3F));
+        out[2] = (unsigned char)(0x80 | (v & 0x3F));
+        return 3;
+    }
+    out[0] = (unsigned char)(0xF0 | v >> 18);
+    out[1] = (unsigned char)(0x80 | ((v >> 12) & 0x3F));
+    out[2] = (unsigned char)(0x80 | ((v >> 6) & 0x3F));
+    out[3] = (unsigned char)(0x80 | (v & 0x3F));
+    return 4;
+}
+
 struct litch lit_decode(const char **p, int esc, const char *file, int line)
 {
     return esc ? decode_escape(p, file, line) : decode_source(p);
@@ -710,6 +737,75 @@ static void cxx_lit_suffix(struct lexer *lx, struct token *t)
         q++;
     t->ud_suffix = xstrndup(lx->p, (size_t)(q - lx->p));
     lx->p = q;
+}
+
+/* 'ab', 'RIFF': GCC's multi-character constant, an int whose bytes are
+ * the characters' with the last one lowest, as GCC computes it (libcpp
+ * narrow_str_to_charconst): each byte shifted in, the result truncated
+ * to an int and read as signed. More characters than an int holds keep
+ * the last ones, with GCC's warning. The value is implementation-defined
+ * (C17 6.4.4.4p10); this is GCC's and clang's choice. -Wmultichar, on by
+ * default, says so. *pq is just past the first element, and is left at what ends
+ * the constant (its closing quote, if it has one). */
+long lit_multichar(const char **pq, struct litch first, const char *file,
+                   int line, int col)
+{
+    unsigned char b[4];
+    unsigned int r = 0;     /* GCC's cppchar_t: 32 bits */
+    int n = 0, k = lit_bytes(first, b);
+    for (int i = 0; i < k; i++, n++)
+        r = (r << 8) | b[i];
+    const char *q = *pq;
+    while (*q && *q != '\'' && *q != '\n') {
+        struct litch c;
+        if (*q == '\\') {
+            q++;
+            c = lit_decode(&q, 1, file, line);
+        } else {
+            c = lit_decode(&q, 0, file, line);
+        }
+        if (c.raw && c.v > 0xFF)
+            diag_warn_at(file, line, col, "escape sequence out of range for "
+                         "a character constant; truncated, as gcc does");
+        k = lit_bytes(c, b);
+        for (int i = 0; i < k; i++, n++)
+            r = (r << 8) | b[i];
+    }
+    *pq = q;
+    int width = 8 * target_int_size(), max = width / 8;
+    if (n > max)
+        diag_warn_at(file, line, col,
+                     "character constant too long for its type");
+    else if (n > 1)
+        diag_warn_opt(file, line, col, "multichar",
+                      "multi-character character constant");
+    if (n == 1) {           /* a single character after all */
+        long v = (long)(r & 0xFF);
+        return !target_char_unsigned() && v > 0x7F ? v - 0x100 : v;
+    }
+    if (width >= 32)
+        return (long)(int)r;
+    unsigned int m = (1u << width) - 1;
+    r &= m;
+    return r >> (width - 1) ? (long)r - (1L << width) : (long)r;
+}
+
+static void lex_multichar(struct lexer *lx, struct token *t,
+                          struct litch first)
+{
+    const char *q = lx->p;
+    long v = lit_multichar(&q, first, lx->file, t->line, t->col);
+    if (*q != '\'')
+        diag_fatal(lx->file, lx->line, "unterminated character constant");
+    t->kind = TOK_NUM;
+    t->num = v;
+    t->num_long = 0;
+    t->num_llong = 0;
+    t->num_uns = 0;
+    t->char_lit = 1;
+    t->str_prefix = 0;
+    lx->p = q + 1;
+    cxx_lit_suffix(lx, t);
 }
 
 void lex_next(struct lexer *lx)
@@ -1096,10 +1192,15 @@ void lex_next(struct lexer *lx)
             return;
         }
         lx->p = q;
+        /* 'ab', or 'é', which is two bytes in UTF-8 */
+        if (pfx == 0 && ((*lx->p != '\'' && *lx->p && *lx->p != '\n') ||
+                         (!c.raw && c.v > 0x7F))) {
+            lex_multichar(lx, t, c);
+            return;
+        }
         if (*lx->p != '\'')
             diag_fatal(lx->file, lx->line, *lx->p && *lx->p != '\n'
-                       ? "a character constant holds one character "
-                         "(multi-character constants are not supported)"
+                       ? "a wide character constant holds one character"
                        : "unterminated character constant");
         int uns;
         t->kind = TOK_NUM; /* a character constant is an int (or wide) value */

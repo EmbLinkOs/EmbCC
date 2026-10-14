@@ -17,8 +17,10 @@
 #   -g 2   (default) integers, floating point, structs, unions, bitfields,
 #          pointers, function-pointer tables; every board
 #   -g 3   gen 2 plus __int128 operands; the 64-bit boards only
-#   -b     a comma-separated subset of: x86 a64 m4 rv32 rv64
-#          (default: x86,a64,m4,rv32 for gen 2; x86,a64,rv64 for gen 3)
+#   -b     a comma-separated subset of: x86 a64 m4 m0 rv32 rv64
+#          (default: x86,a64,m4,rv32 for gen 2; x86,a64,rv64 for gen 3);
+#          m0 is ARMv6-M (src/arch/thumb/v6m.c) on QEMU's micro:bit, its
+#          SRAM raised to 64 KiB as thumb-v6m-exec.sh runs it
 #   -O     the levels (default "-O0 -O2")
 #
 # Run from the tree root, after `make embcc embld rt-embedded`. EMBCC and
@@ -95,6 +97,19 @@ board() {   # board NAME OPT FILE
             "$d/drv.o" build/libc/$T/librt.a > /dev/null 2>&1 || { echo "link failed"; return; }
         sh tests/harness/qrun.sh 60 qemu-system-arm -M mps2-an386 -cpu cortex-m4 \
             -semihosting -nographic -kernel "$d/p.elf" > /dev/null 2>&1; echo "exit $?" ;;
+    m0)
+        T=thumbv6m-none-eabi
+        [ -f "$d/boot.o" ] || {
+            for f in boot io; do
+                "$EMBCC" --target=$T -O1 -DSRAM_TOP=0x20010000u \
+                    -c tests/harness/thumb-m0/$f.c -o "$d/$f.o" || return
+            done; }
+        "$EMBCC" --target=$T $o -Ilib/libc/include -c "$src" -o "$d/p.o" ||
+            { echo "compile failed"; return; }
+        EMBCC_THUMB_M0_HARNESS=$d sh tests/harness/thumb-m0/link.sh "$d/p.elf" \
+            "$d/p.o" build/libc/$T/librt.a > /dev/null 2>&1 || { echo "link failed"; return; }
+        EMBCC_M0_SRAM=65536 EMBCC_QEMU_TIMEOUT=60 \
+            sh tests/harness/thumb-m0/run.sh "$d/p.elf" > /dev/null 2>&1; echo "exit $?" ;;
     rv32|rv64)
         X=${b#rv}; T=riscv$X-unknown-elf
         [ -f "$d/boot.o" ] || {

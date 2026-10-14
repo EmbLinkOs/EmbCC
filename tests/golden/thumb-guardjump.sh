@@ -215,6 +215,13 @@ EOF
 opt pos
 grep -q 'brz' "$out/pos.out" && { cat "$out/pos.out"; fail "pos: the guard is still there"; }
 grep -q 'jmp L' "$out/pos.out" || { cat "$out/pos.out"; fail "pos: no jump to the test"; }
+# ...on every target: the pass rewrites EmbIR and was gated to ARM
+for t in riscv32-unknown-elf x86_64-elf avr aarch64-elf; do
+    "$EMBCC" inspect ir -Os --target=$t "$out/pos.ir" > "$out/pos-$t.out" 2>&1 ||
+        { cat "$out/pos-$t.out"; fail "pos on $t: inspect"; }
+    grep -q 'brz' "$out/pos-$t.out" && { cat "$out/pos-$t.out"; fail "pos on $t: the guard is still there"; }
+    grep -q 'jmp L' "$out/pos-$t.out" || { cat "$out/pos-$t.out"; fail "pos on $t: no jump to the test"; }
+done
 n=0
 for c in g1 g2 g3 g5 d1 d2 d3 d4 n1; do
     opt $c

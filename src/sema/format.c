@@ -91,18 +91,30 @@ static const char *read_conv(const char *p, const char *end, int scanf_like,
         else while (p < end && *p >= '0' && *p <= '9') p++;
     }
 
-    /* Length modifiers. long and long long are one type on both targets,
-     * so they want the same size and are not distinguished. */
-    int len_long = 0, len_ldouble = 0, len_short = 0;
+    /* Length modifiers, each the size of ITS type on the target: long is
+     * 8 bytes on x86-64 and AArch64 and 4 on the 32-bit targets and AVR,
+     * where int is 2 -- so `%ld` and `%d` are compared against the
+     * argument by the target's sizes, not by LP64's. */
+    enum { LM_NONE, LM_HH, LM_H, LM_L, LM_LL, LM_J, LM_Z, LM_T, LM_BIGL } lm = LM_NONE;
     for (;;) {
-        if (p + 1 < end && p[0] == 'h' && p[1] == 'h') { len_short = 2; p += 2; }
-        else if (p < end && *p == 'h') { len_short = 1; p++; }
-        else if (p + 1 < end && p[0] == 'l' && p[1] == 'l') { len_long = 1; p += 2; }
-        else if (p < end && *p == 'l') { len_long = 1; p++; }
-        else if (p < end && (*p == 'j' || *p == 'z' || *p == 't')) { len_long = 1; p++; }
-        else if (p < end && *p == 'L') { len_ldouble = 1; len_long = 1; p++; }
+        if (p + 1 < end && p[0] == 'h' && p[1] == 'h') { lm = LM_HH; p += 2; }
+        else if (p < end && *p == 'h') { lm = LM_H; p++; }
+        else if (p + 1 < end && p[0] == 'l' && p[1] == 'l') { lm = LM_LL; p += 2; }
+        else if (p < end && *p == 'l') { lm = LM_L; p++; }
+        else if (p < end && *p == 'j') { lm = LM_J; p++; }
+        else if (p < end && *p == 'z') { lm = LM_Z; p++; }
+        else if (p < end && *p == 't') { lm = LM_T; p++; }
+        else if (p < end && *p == 'L') { lm = LM_BIGL; p++; }
         else break;
     }
+    int sz_int = ty_size(ty_base(TY_INT, 0));
+    int sz_l = ty_size(ty_base(TY_LONG, 0));
+    int sz_ll = ty_size(ty_llong(0));
+    int sz_int_l = lm == LM_L ? sz_l
+                 : lm == LM_LL || lm == LM_J ? sz_ll
+                 : lm == LM_Z ? ty_size(ty_size_t())
+                 : lm == LM_T ? ty_size(ty_ptrdiff_t())
+                 : 0;
     if (p >= end) { cv->bad = 1; cv->c = '?'; return p; }
 
     char c = *p++;
@@ -112,26 +124,31 @@ static const char *read_conv(const char *p, const char *end, int scanf_like,
         cv->w = W_INT;
         /* Promotion has already widened hh and h to an int; only the
          * long forms change what the tail reads. */
-        cv->size = len_long ? 8 : 4;
+        cv->size = sz_int_l ? sz_int_l : sz_int;
         if (scanf_like) {
             cv->w = W_PTR;
             cv->pclass = 1;
-            cv->size = len_long ? 8 : len_short == 2 ? 1 : len_short ? 2 : 4;
+            cv->size = sz_int_l ? sz_int_l
+                     : lm == LM_HH ? 1
+                     : lm == LM_H ? ty_size(ty_base(TY_SHORT, 0))
+                     : sz_int;
         }
         break;
     case 'f': case 'F': case 'e': case 'E': case 'g': case 'G':
     case 'a': case 'A':
-        cv->w = scanf_like ? W_PTR : (len_ldouble ? W_LDOUBLE : W_DOUBLE);
+        cv->w = scanf_like ? W_PTR : (lm == LM_BIGL ? W_LDOUBLE : W_DOUBLE);
         /* scanf is the mirror of printf here: there is no promotion, so
          * plain %f writes a FLOAT and %lf a double. Passing &a_double to
          * %f is the classic version of this bug. */
-        cv->size = len_ldouble ? 16 : len_long ? 8 : 4;
+        cv->size = ty_size(ty_base(lm == LM_BIGL ? TY_LDOUBLE
+                                   : lm == LM_L || lm == LM_LL ? TY_DOUBLE
+                                   : TY_FLOAT, 0));
         if (scanf_like)
             cv->pclass = 2;
         break;
     case 'c':
         cv->w = scanf_like ? W_PTR : W_INT;
-        cv->size = 4;
+        cv->size = sz_int;
         break;
     case 's':
         cv->w = scanf_like ? W_PTR : W_STR;
@@ -195,13 +212,27 @@ void format_check(const char *file, struct expr *call, const struct func *fn)
     if (fi >= call->nargs)
         return;
 
-    /* Only a literal can be read. A format built at run time is not a
-     * defect and not checkable, so nothing is said about it. */
+    /* Only a literal can be read. A format built at run time is not
+     * checkable, and by default nothing is said about it; -Wformat=2
+     * says two things, as gcc does. With nothing after it, a format from
+     * outside is a hole -- printf(msg) prints msg's %n too
+     * (-Wformat-security). With arguments, they go unchecked
+     * (-Wformat-nonliteral) -- but not where the callee takes a va_list
+     * (vprintf), which is how a printf-like wrapper hands its format on. */
     struct expr *fmt = call->args[fi];
     while (fmt && fmt->kind == EXPR_CAST)
         fmt = fmt->rhs;
-    if (!fmt || fmt->kind != EXPR_STR || fmt->str_width != 1 || !fmt->name)
+    if (!fmt || fmt->kind != EXPR_STR || fmt->str_width != 1 || !fmt->name) {
+        if (fn->fmt_first > 0 && call->nargs <= fn->fmt_first - 1)
+            diag_warn_opt(file, call->line, call->col, "format-security",
+                          "format not a string literal and no format "
+                          "arguments");
+        else if (fn->fmt_first > 0)
+            diag_warn_opt(file, call->line, call->col, "format-nonliteral",
+                          "format not a string literal, argument types not "
+                          "checked");
         return;
+    }
 
     /* `num` counts the NUL; the bytes may contain their own. */
     const char *s = fmt->name;

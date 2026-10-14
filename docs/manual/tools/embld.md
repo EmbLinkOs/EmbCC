@@ -280,10 +280,19 @@ On ARM, the entry symbol's Thumb bit is kept in the ELF entry point.
 RISC-V and AVR images (another machine is refused: `embld: -T: a linker
 script is supported for ARM, RISC-V and AVR images only (this one is
 machine 8)`): the script a CMSIS, STM32CubeMX, vendor SDK, avr-libc or
-RTOS project already has. It replaces `-Ttext`, `-Tdata`, `-Tstack`,
-`--rom-limit` and `--lma-offset`, which are refused with it, and the
-linker defines no bracket symbols of its own except `__start_NAME` and
-`__stop_NAME` for an output section whose name is a C identifier.
+RTOS project already has. It replaces `-Tstack` and `--lma-offset`,
+which are refused with it, and the linker defines no bracket symbols of
+its own except `__start_NAME` and `__stop_NAME` for an output section
+whose name is a C identifier. `-Ttext`, `-Tdata` and `--rom-limit` may
+be given with it, as ld's may: `-Ttext ADDR` and `-Tdata ADDR` are the
+start addresses of the output sections called `.text` and `.data`,
+whatever the script says (ld's `--section-start`; on AVR an address
+below `0x800000` is in the data space, so `-Tdata 0x100` is `0x800100`,
+the same as the `-Tdata 0x800100` avr-gcc passes), and `--rom-limit`
+refuses an image whose loaded sections, from the start of the code to
+the end of the last one stored in flash, need more bytes (`the image
+needs N bytes of flash and the part has M (--rom-limit): ...`; on AVR
+the data space and `.eeprom` are not flash).
 
 ```sh
 embld -T STM32F407VGTx_FLASH.ld startup.o main.o librt.a -o fw.elf
@@ -295,7 +304,11 @@ The layout follows ld's rules:
   matches it, in script order. Within one description, inputs are taken
   in command-line order and each object's sections in their own order,
   unless `SORT`, `SORT_BY_NAME`, `SORT_BY_ALIGNMENT` or
-  `SORT_BY_INIT_PRIORITY` says otherwise.
+  `SORT_BY_INIT_PRIORITY` says otherwise; `SORT(*)(...)` around the
+  file pattern takes the files in name order. A later `KEEP()` that
+  also matches a section an earlier description placed keeps it under
+  `--gc-sections`, as ld's does: avr-ld's scripts write `*(.init0)
+  KEEP(*(.init0))`.
 - An output section starts at its address if it gives one, else at the
   next free byte of its `> REGION`, else at `.`. Its load address is
   `AT(ADDR)`, or the next free byte of its `AT> REGION`, or its run
@@ -719,8 +732,9 @@ is no limit. See [Firmware layout](#firmware-layout).
 ### `-T SCRIPT`, `-TSCRIPT`, `--script=SCRIPT`
 
 Lay the image out by the GNU ld linker script `SCRIPT`. See
-[Linker scripts](#linker-scripts). ARM and RISC-V only; refused with
-`-Ttext`, `-Tdata`, `-Tstack`, `--rom-limit`, `--lma-offset` and `--embx`.
+[Linker scripts](#linker-scripts). ARM, RISC-V and AVR only; refused with
+`-Tstack`, `--lma-offset` and `--embx`. `-Ttext`, `-Tdata` and
+`--rom-limit` apply over it.
 
 ### `-L DIR`, `-LDIR`
 

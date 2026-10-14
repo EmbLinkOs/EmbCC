@@ -1,4 +1,4 @@
-/* ==== -Os on Cortex-M: enter a rotated loop at its test ======================
+/* ==== -Os: enter a rotated loop at its test ==================================
  *
  * Rotation (rotate.c) leaves the loop's test twice: the original as a guard
  * in front of the body, the copy at the bottom.
@@ -35,7 +35,9 @@
  *
  * Only a run of plain computations and loads (not volatile, which is the
  * access itself): the guard runs where the copy now runs, once, on the
- * same values. Runs last, at -Os, on ARM targets (pass_guardjump's caller):
+ * same values. Runs last, at -Os, on every target (pass_guardjump's
+ * caller; written on ARM and gated to it, lib/libc then lost 162-504 bytes
+ * on each of RV32, RV64, AVR, x86-64 and AArch64 when the gate went):
  * every loop pass is done, and the bottom-tested shape they match on is
  * gone afterwards -- the loop's header is now its test. */
 

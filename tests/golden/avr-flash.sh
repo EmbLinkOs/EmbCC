@@ -84,3 +84,42 @@ refuse space2 "address space 2 is not supported" 'const __attribute__((address_s
 refuse structcopy "copying a whole __flash" 'struct p { int a, b; }; const __flash struct p t[1] = { { 1, 2 } }; int f(void) { struct p x = t[0]; return x.a; }'
 refuse other "address space 1 is not supported for thumbv7m" 'const __attribute__((address_space(1))) char t[] = "a";' thumbv7m-none-eabi
 echo "  refused: not const, not static, a store, an implicit conversion either way, a whole-struct copy, address space 2, another target"
+
+# 4. avr-libc's PROGMEM, __attribute__((progmem)): the object goes to
+#    .progmem.data -- in any position, on a sibling declarator, on a static
+#    local, and over a section() as avr-gcc has it -- and nothing else does.
+#    A static local __flash table is in flash too (it once landed in .rodata,
+#    in SRAM, and was read with lpm from flash at the same number).
+cat > "$out/pm.c" <<'EOF'
+const unsigned char t1[] __attribute__((__progmem__)) = { 1, 2, 3 };
+__attribute__((progmem)) const unsigned char t2[] = { 4 };
+const unsigned char t3[] __attribute__((section(".foo"), progmem)) = { 5 };
+const char *const names[] __attribute__((progmem)) = { "a", "b" };
+const int plain = 1, sib[] __attribute__((progmem)) = { 7 };
+static const __attribute__((progmem)) char t4[] = "x";
+const char __attribute__((progmem)) t5[] = "y";
+const char *u4(void) { return t4; }
+const char *const __attribute__((progmem)) pp[] = { "q" };
+const char *const *s3(void) { static const char *const __attribute__((progmem)) x[] = { "a" }; return x; }
+const char *s1(void) { static const char s[] __attribute__((progmem)) = "hi"; return s; }
+char s2(int i) { static const __flash char f[] = "flash"; return f[i]; }
+EOF
+"$EMBCC" --target=avr -Os -Wall -Werror -c "$out/pm.c" -o "$out/pm.o" || fail "progmem does not compile"
+pmsec=$(llvm-readelf -S "$out/pm.o" | sed -n 's/^ *\[ *\([0-9]*\)\] \.progmem\.data .*/\1/p')
+[ -n "$pmsec" ] || fail "no .progmem.data for progmem"
+for v in t1 t2 t3 t4 t5 names pp sib s1.s s2.f s3.x; do
+    llvm-readelf -s "$out/pm.o" | awk -v v=$v -v n=$pmsec '$8==v && $7==n { f=1 } END { exit !f }' ||
+        { llvm-readelf -s "$out/pm.o" | grep " $v\$"; fail "$v is not in .progmem.data"; }
+done
+llvm-readelf -s "$out/pm.o" | awk -v n=$pmsec '$8=="plain" && $7==n { f=1 } END { exit f }' ||
+    fail "a const without progmem went to .progmem.data"
+refuse pmconst "is in program memory (progmem, section .progmem.data) and must be const" \
+    'unsigned char x[] __attribute__((progmem)) = { 1 };'
+refuse pmauto "progmem on 'x', which is on the stack" \
+    'int f(void) { const char x[] __attribute__((progmem)) = "a"; return x[0]; }'
+printf 'const char t[] __attribute__((progmem)) = "a";\n' > "$out/pmarm.c"
+"$EMBCC" --target=thumbv7m-none-eabi -c "$out/pmarm.c" -o "$out/pmarm.o" 2> "$out/pmarm.err" ||
+    fail "progmem on ARM is refused"
+grep -q "attribute 'progmem' is not one EmbCC knows, and is ignored" "$out/pmarm.err" ||
+    { cat "$out/pmarm.err"; fail "progmem off AVR is not the unknown-attribute warning"; }
+echo "  progmem puts an object in .progmem.data (before or after the type, after a star, over section(), on a sibling and on a static local), refuses non-const and automatic ones; a static local __flash is in flash"

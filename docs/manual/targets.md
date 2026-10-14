@@ -213,8 +213,8 @@ and AArch64.
 | `-mcmodel=MODEL` | Accepted with any value; no effect. Each target uses the single code model described in its section. |
 
 Any other `-m` option not listed in a target's section is an error:
-`embcc: error: unknown argument '-mfoo'`. In particular `-m32`, `-m64`
-and `-mmcu=` are not accepted, and `-march=` and `-mabi=` only on MIPS
+`embcc: error: unknown argument '-mfoo'`. In particular `-m32` and `-m64`
+are not accepted, `-mmcu=` only on [AVR](#avr), and `-march=` and `-mabi=` only on MIPS
 and LoongArch (see [MIPS32](#mips32) and [LoongArch64](#loongarch64)).
 and (`-mabi=`) Xtensa (see [MIPS32](#mips32) and [Xtensa](#xtensa)).
 
@@ -320,7 +320,7 @@ Darwin triples, each with its own diagnostic:
 
 | Construct | Diagnostic |
 |---|---|
-| `-g` | `-g is not supported for a Darwin target yet: its DWARF goes in a __DWARF segment this does not write, and emitting the ELF layout under a Mach-O name would be worse than refusing` |
+| `-g` | Warning, and the object is compiled without debug information: `-g: no debug information for aarch64-apple-darwin yet; d.c is compiled without it` |
 | `__thread` | `__thread is not supported for a Darwin target yet: Mach-O addresses a thread-local through a __thread_vars descriptor, which this writer does not emit` |
 | `__attribute__((constructor))`, `destructor` | `__attribute__((constructor)) is not supported for a Darwin target yet: it needs a __DATA,__mod_init_func section this Mach-O writer does not emit` |
 | file-scope `__asm__` with labels or symbols | `a file-scope asm block with labels or symbol references is not supported for a Darwin target yet: its bytes would be emitted but its symbols and relocations dropped` |
@@ -2177,8 +2177,29 @@ the entry.
 |---|---|
 | `avr` | `avr-none-elf`, `avr-elf`, `avr-unknown-none` |
 
-The part is the ATmega328P (the AVR5 architecture, as on the Arduino
-Uno). There is no option to choose another; `-mmcu=` is not accepted.
+The code is for the ATmega328P's core (the AVR5 architecture, as on
+the Arduino Uno), and without `-mmcu=` the part is the ATmega328P.
+
+### Options
+
+| Option | What it does |
+|---|---|
+| `-mmcu=atmega328p`, `atmega328`, `atmega168p`, `atmega168` | Selects the part: its predefined macro (`__AVR_ATmega168__` and so on) replaces `__AVR_ATmega328P__`. These four are the avr5 parts of the ATmega328P's datasheet family; they differ only in their memories. |
+| `-mmcu=atmega48`, `atmega88` and their `a`, `p`, `pa` forms | Refused: `-mmcu=atmega88 is not supported: the atmega88 is an avr4 part, with no jmp or call instruction, and EmbCC's AVR code calls with `call` ...` |
+| `-mmcu=` any other part | Refused: `-mmcu=atmega2560 is not supported: EmbCC's AVR backend generates code for the ATmega328P's avr5 core, and knows the memories and vectors of atmega328p, atmega328, atmega168p and atmega168 alone` |
+| `-mrelax`, `-mno-relax` | Accepted, and declined: EmbLD does not shorten `call` and `jmp` to `rcall` and `rjmp`, so the image is the same program, larger than avr-gcc's relaxed one. |
+| `-mcall-prologues`, `-mno-call-prologues` | Accepted, and declined: every prologue and epilogue is written in its function rather than shared through `__prologue_saves__`. The calling convention is the same either way. |
+| `-mdouble=32`, `-mlong-double=32` | Accepted: what EmbCC does. |
+| `-mdouble=64`, `-mlong-double=64` | Refused: `-mdouble=64 is not supported: double and long double are binary32 on this target, the same type as float, and a 64-bit double changes the ABI of every one` |
+| `-mint8` | Refused: `-mint8 is not supported: int is 16 bits on this target, ...` |
+
+| Part | Flash | SRAM | EEPROM | Vectors |
+|---|---|---|---|---|
+| ATmega328P, ATmega328 | 32 KB | 2 KB, `0x0100`-`0x08FF` | 1 KB | 26 |
+| ATmega168P, ATmega168 | 16 KB | 1 KB, `0x0100`-`0x04FF` | 512 bytes | 26 |
+
+`-mmcu=` on another target is refused: `-mmcu=atmega328p is an AVR
+option, and the target is x86_64-elf (--target=avr)`.
 
 ### Data model
 
@@ -2232,7 +2253,10 @@ From `clang --target=avr -mmcu=atmega328p`: `__AVR__`, `__AVR`, `AVR`,
 `__AVR_ATmega328P__`, `__AVR_ARCH__` (5), `__AVR_HAVE_MUL__`,
 `__AVR_HAVE_MOVW__`, `__AVR_HAVE_LPMX__`, `__AVR_HAVE_JMP_CALL__`,
 `__AVR_2_BYTE_PC__`, `__SIZEOF_INT__` (2), `__SIZEOF_POINTER__` (2),
-`__SIZEOF_DOUBLE__` (4).
+`__SIZEOF_DOUBLE__` (4). With `-mmcu=` for another part, the part's
+macro (`__AVR_ATmega328__`, `__AVR_ATmega168P__`, `__AVR_ATmega168__`)
+stands in place of `__AVR_ATmega328P__`, as clang's table for that part
+does; nothing else in the table changes.
 
 The table also defines `__flash`, as
 `__attribute__((__address_space__(1)))`, which EmbCC implements: `const`
@@ -2243,10 +2267,19 @@ defines `__BUILTIN_AVR_CLI`, `__BUILTIN_AVR_SEI`, `__BUILTIN_AVR_NOP`,
 the `__builtin_avr_*` functions are undeclared. Use inline assembly
 (`cli`, `sei`, `sleep`, `wdr`, `swap`) instead.
 
+### Headers
+
+`<avr/io.h>`, `<avr/interrupt.h>`, `<avr/pgmspace.h>`, `<avr/wdt.h>`,
+`<avr/sleep.h>`, `<avr/eeprom.h>`, `<avr/cpufunc.h>`, `<avr/common.h>`,
+`<avr/sfr_defs.h>` and `<util/delay.h>`, with avr-libc's interface, are
+on the include path for this target alone; see
+[avr-libc-compatible headers](embedded.md#avr-libc-compatible-headers).
+
 ### Interrupt handlers
 
 `__attribute__((signal))` and `__attribute__((interrupt))` make a
-function an interrupt handler: it saves `SREG`, `r0`, `r1` and every
+function an interrupt handler (both together are `interrupt`, as with
+avr-gcc: avr-libc's `ISR_NOBLOCK` writes them so); it saves `SREG`, `r0`, `r1` and every
 register the backend uses, clears `r1`, and returns with `reti`. See
 [Embedded programming](embedded.md).
 
@@ -2256,7 +2289,11 @@ Integer multiplication and division are helper calls with libgcc's names
 (`__mulsi3`, `__divsi3`, `__umodsi3`, `__muldi3`, `__divdi3`, ...), from
 `lib/rt/avr.c` and `avr64.c`; floating-point arithmetic calls the
 binary32 helpers (`__addsf3`, ...) in `lib/rt/avrfp*.c`. `make
-rt-embedded` builds `librt.a` for `avr`.
+rt-embedded` builds `librt.a` for `avr`, and for each `-mmcu=` part its
+startup `crt<part>.o` and linker script `<part>.ld`, which the driver
+links under `-mmcu=`, and the AVR library, `libc.a` from `lib/avr`
+([The AVR library](embedded.md#the-avr-library)) (see
+[Startup and the interrupt vector table](embedded.md#startup-and-the-interrupt-vector-table)).
 
 ### Debugging
 
@@ -2313,6 +2350,14 @@ The stub's register layout, which EmbDBG uses: `r0`–`r31` one byte each,
 
 Code compiled at `-O0` is large; an ordinary program may not fit the
 part's 32 KB of flash unless built with `-O1` or above.
+
+At `-Os` EmbCC's AVR code is larger than clang's for the same source
+(EmbLinkRTOS's conformance images: 21.8 KB to 44.8 KB, against clang's
+16.3 KB to 33.9 KB), and its stack frames are several times larger
+(`-fstack-usage`, EmbCC against clang: 77 and 6 bytes for a test function
+that only sleeps, 30 and 5 for the kernel's `embk_wait_commit`). Stack
+sizes chosen for avr-gcc can overflow under EmbCC; measure with
+`-fstack-usage`.
 
 <!-- UNVERIFIED: the -O0 size remark comes from a commit message ("-O0 does not fit the part" for one test), not from a measurement made for this page. -->
 

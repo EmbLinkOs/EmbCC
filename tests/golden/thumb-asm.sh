@@ -84,6 +84,47 @@ then
         esac
     done
     echo "data directives in a template are llvm-mc's bytes at ARMv7E-M, ARMv6-M and ARMv8-M Baseline"
+
+    # Strings, alignments and %c (tests/harness/asmdir.sh): .ascii,
+    # .asciz/.string, .p2align/.balign/.align with and without a fill and
+    # a maximum, and constants written in with %c0 -- Linux's asm-offsets
+    # and EmbLinkRTOS's layout probes. llvm-mc's bytes at every halfword
+    # phase in the section: the padding is decided where the template
+    # lands, and a template padded as if it started on 16 fails at seven
+    # of the eight. ARM state's nops are words, so it gets its own run.
+    . tests/harness/asmdir.sh
+    cat > "$out/dirs.txt" <<'EOF'
+.ascii "->EMB_PROBE s %c1 %c0"
+.p2align 2
+.ascii "abc"
+.align 3
+.asciz "hi", "x"
+.byte 0x55
+.p2align 4
+.string "\t\"q\\\101\x42\0z"
+.balign 8
+.byte 1, 255, -128, %c0, %c1
+.p2align 3, 0x5a
+.byte 7
+.p2align 4,,5
+.byte 9
+.p2align 4,,15
+.ascii "a;b@c#d//e"
+.hword 0x1234, %c0
+.word 0x12345678
+.quad -2
+.p2align 2
+EOF
+    asmdir_referee "$out" thumbv7em-none-eabi "-triple=thumbv7em" nop 2 \
+        "$out/dirs.txt" || exit 1
+    asmdir_referee "$out" armv7a-none-eabi "-triple=armv7a" nop 4 \
+        "$out/dirs.txt" || exit 1
+    # ARMv6-M and ARMv8-M Baseline: their own backend (v6m.c), and their
+    # own nop, mov r8, r8
+    for t in thumbv6m thumbv8m.base; do
+        asmdir_referee "$out" $t-none-eabi "-triple=$t" nop 2 \
+            "$out/dirs.txt" || exit 1
+    done
 else
     echo "SKIP the encoding half: llvm-mc/llvm-objcopy not found"
 fi
@@ -227,6 +268,43 @@ printf 'void f(void){ __asm__ volatile(".byte -128, 255; .short -32768, 65535; .
     echo "inline asm refused data at the ends of its range"; exit 1; }
 echo "inline data: a symbol, an out-of-range value, .half and data in an IT block are refused"
 
+# %c prints a constant, and a register operand is not one; a string or an
+# alignment is not an instruction an IT block's condition can apply to;
+printf 'int f(int x){ __asm__ volatile(".byte %%c0" : : "r"(x)); return x; }\n' > "$out/c.c"
+if "$EMBCC" --target=$T -c "$out/c.c" -o /dev/null 2> "$out/c.err"; then
+    echo "%c of a register operand was accepted"; exit 1
+fi
+grep -q "names a register operand" "$out/c.err" || {
+    echo "the refusal of %c on a register does not say why:"; cat "$out/c.err"; exit 1; }
+printf 'void f(void){ __asm__ volatile("it eq; .ascii \\"ab\\""); }\n' > "$out/c.c"
+if "$EMBCC" --target=$T -c "$out/c.c" -o /dev/null 2> "$out/c.err"; then
+    echo "a string inside an IT block was accepted"; exit 1
+fi
+grep -q "inside an IT block" "$out/c.err" || {
+    echo "the refusal of a string in an IT block does not say why:"; cat "$out/c.err"; exit 1; }
+# more than .text's sixteen, a byte count that is no power of two, an
+# escape no assembler reads, a string that is not one
+cat > "$out/c.c" <<'CEOF'
+void a(void) { __asm__ volatile(".p2align 5"); }
+CEOF
+cat > "$out/c2.c" <<'CEOF'
+void a(void) { __asm__ volatile(".balign 3"); }
+CEOF
+cat > "$out/c3.c" <<'CEOF'
+void a(void) { __asm__ volatile(".ascii \"\\q\""); }
+CEOF
+cat > "$out/c4.c" <<'CEOF'
+void a(void) { __asm__ volatile(".asciz 5"); }
+CEOF
+for c in c c2 c3 c4; do
+    if "$EMBCC" --target=$T -c "$out/$c.c" -o /dev/null 2> "$out/c.err"; then
+        echo "inline asm accepted:"; cat "$out/$c.c"; exit 1
+    fi
+    grep -q 'at most 16\|not a power of two\|not an escape\|not a quoted string' "$out/c.err" || {
+        echo "the refusal of $(cat "$out/$c.c") does not say why:"; cat "$out/c.err"; exit 1; }
+done
+echo "%c on a register, a string in an IT block, more than 16, a bad escape are refused"
+
 # x86's constraint letters mean nothing here: "S" pinned the operand to
 # x86 register 6, r6, which is callee-saved and was not saved; and a
 # register variable on r4-r11 would be loaded without being saved.
@@ -261,3 +339,21 @@ if "$EMBCC" --target=$T -c "$out/movs-big.c" -o /dev/null 2>/dev/null; then
     echo "movs of an immediate no MOVS encodes was accepted"; exit 1
 fi
 echo "movs and mvns set the flags, or are refused"
+
+# Data in a template is data in the object: a $d mapping symbol where it
+# starts and $t where the code resumes, on ARMv7-M as on ARMv6-M -- or a
+# disassembler and a debugger read the word as instructions.
+printf 'int raw(int x){ __asm__ volatile("adds %%0, #1\\n .word 0x12345678\\n adds %%0, #2" : "+r"(x)); return x; }\n' \
+    > "$out/dmap.c"
+for tt in thumbv7em-none-eabi thumbv6m-none-eabi; do
+    "$EMBCC" --target=$tt -O2 -c "$out/dmap.c" -o "$out/dmap.o" || {
+        echo "$tt: the data template does not compile"; exit 1; }
+    llvm-objdump -d "$out/dmap.o" > "$out/dmap.dis"
+    grep -q '\.word.*0x12345678' "$out/dmap.dis" || {
+        echo "$tt: the template's .word is not marked as data:"
+        cat "$out/dmap.dis"; exit 1; }
+    grep -qE 'adds[[:space:]]+r[0-7], #0x2' "$out/dmap.dis" || {
+        echo "$tt: the code after the template's data is not marked as code:"
+        cat "$out/dmap.dis"; exit 1; }
+done
+echo "a template's data is \$d in the object and the code after it \$t, on ARMv7-M and ARMv6-M"

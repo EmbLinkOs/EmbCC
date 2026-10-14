@@ -152,3 +152,12 @@ CEOF
     done
     echo "a literal pool right after a switch table is one run of data"
 fi
+
+# a compare lowered in an attempt whose roles could not all be had: the
+# attempt is retried, not reported as a compiler bug
+for O in -O1 -O2 -Os; do
+    "$EMBCC" --target=thumbv6m-none-eabi $O -c tests/golden/thumbv6m-role-retry.c \
+        -o "${out:-/tmp}/rr.o" 2> "${out:-/tmp}/rr.err" || {
+        cat "${out:-/tmp}/rr.err"; echo "FAIL: thumbv6m-role-retry.c $O"; exit 1; }
+done
+echo "a compare in an attempt without its roles is retried, not an internal error"

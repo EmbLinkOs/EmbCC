@@ -384,6 +384,12 @@ int target_char_unsigned(void)
     return g_char_uns_override >= 0 ? g_char_uns_override
            : darwin_a64() ? 0 : g_model[g_arch].char_uns;
 }
+static int g_enum_neutral;
+void target_set_enum_neutral(int on) { g_enum_neutral = on; }
+int target_enum_neutral(void) { return g_enum_neutral; }
+static int g_short_enums;
+void target_set_short_enums(int on) { g_short_enums = on; }
+int target_short_enums(void) { return g_short_enums; }
 static int g_short_wchar;
 void target_set_short_wchar(int on) { g_short_wchar = on; }
 int target_short_wchar(void) { return g_short_wchar; }

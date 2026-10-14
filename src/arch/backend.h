@@ -314,6 +314,7 @@ int tricore_target_option(const char *arg);
 int thumb_target_option(const char *arg);
 void thumb_options_done(void);
 int riscv_target_option(const char *arg);
+int avr_target_option(const char *arg);
 void riscv_options_done(void);
 
 #endif

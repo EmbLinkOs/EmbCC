@@ -848,8 +848,339 @@ static void usage(void)
     exit(2);
 }
 
+/* ---- as `size` ----------------------------------------------------------
+ *
+ * Called by a name ending in `size` (embcc-size, arm-none-eabi-size), embmap
+ * prints binutils' size table, so a build's post-link `size --format=berkeley
+ * app.elf` (CMake's and every vendor Makefile's) runs unchanged. Berkeley:
+ * text is every allocated section that is code or read-only, data the
+ * writable ones with contents, bss the writable ones without -- binutils'
+ * rule. SysV (-A): every allocated section with its size and address. Any
+ * ELF, object or image, 32- or 64-bit, either byte order. */
+static unsigned long long sz_rd(const unsigned char *b, size_t o, int n,
+                                int be)
+{
+    unsigned long long v = 0;
+    for (int k = 0; k < n; k++)
+        v |= (unsigned long long)b[o + (size_t)(be ? n - 1 - k : k)] << (8 * k);
+    return v;
+}
+
+static int size_one(const char *path, int sysv, int radix,
+                    unsigned long long tot[3])
+{
+    FILE *f = fopen(path, "rb");
+    unsigned char *b;
+    long len;
+    if (!f) {
+        fprintf(stderr, "size: '%s': no such file\n", path);
+        return 1;
+    }
+    fseek(f, 0, SEEK_END);
+    len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    b = malloc((size_t)len + 1);
+    if (!b || fread(b, 1, (size_t)len, f) != (size_t)len) {
+        fclose(f);
+        fprintf(stderr, "size: %s: cannot read it\n", path);
+        return 1;
+    }
+    fclose(f);
+    if (len < 52 || memcmp(b, "\177ELF", 4) != 0) {
+        fprintf(stderr, "size: %s: file format not recognized (an ELF object "
+                        "or image is)\n", path);
+        free(b);
+        return 1;
+    }
+    int is64 = b[4] == 2, be = b[5] == 2, w = is64 ? 8 : 4;
+    size_t shoff = (size_t)sz_rd(b, is64 ? 40 : 32, w, be);
+    unsigned shes = (unsigned)sz_rd(b, is64 ? 58 : 46, 2, be);
+    unsigned shn = (unsigned)sz_rd(b, is64 ? 60 : 48, 2, be);
+    unsigned shstrndx = (unsigned)sz_rd(b, is64 ? 62 : 50, 2, be);
+    if (shoff + (size_t)shn * shes > (size_t)len || shstrndx >= shn) {
+        fprintf(stderr, "size: %s: the section headers run past the end\n",
+                path);
+        free(b);
+        return 1;
+    }
+    size_t strs = (size_t)sz_rd(b, shoff + (size_t)shstrndx * shes +
+                                       (is64 ? 24 : 16), w, be);
+    unsigned long long t = 0, d = 0, z = 0, sv = 0;
+    const char *fmt = radix == 8 ? "%-18s %10llo %10llo\n"
+                    : radix == 16 ? "%-18s %#10llx %#10llx\n"
+                    : "%-18s %10llu %10llu\n";
+    if (sysv)
+        printf("%s  :\n%-18s %10s %10s\n", path, "section", "size", "addr");
+    for (unsigned k = 0; k < shn; k++) {
+        size_t o = shoff + (size_t)k * shes;
+        unsigned type = (unsigned)sz_rd(b, o + 4, 4, be);
+        unsigned long long fl = sz_rd(b, o + 8, w, be);
+        unsigned long long addr = sz_rd(b, o + (is64 ? 16 : 12), w, be);
+        unsigned long long size = sz_rd(b, o + (is64 ? 32 : 20), w, be);
+        if (type == 0)
+            continue;
+        if (sysv) {                           /* every section, as binutils */
+            size_t no = strs + (size_t)sz_rd(b, o, 4, be);
+            printf(fmt, no < (size_t)len ? (const char *)b + no : "?", size,
+                   addr);
+            sv += size;
+        }
+        if (!(fl & 2))                        /* SHF_ALLOC */
+            continue;
+        if ((fl & 4) || !(fl & 1))            /* exec, or not writable */
+            t += size;
+        else if (type != 8)                   /* SHT_NOBITS */
+            d += size;
+        else
+            z += size;
+    }
+    if (sysv) {
+        const char *tf = radix == 8 ? "%-18s %10llo\n\n"
+                       : radix == 16 ? "%-18s %#10llx\n\n"
+                       : "%-18s %10llu\n\n";
+        printf(tf, "Total", sv);
+    } else {
+        const char *bf = radix == 8 ? "%7llo\t%7llo\t%7llo\t"
+                       : radix == 16 ? "%#7llx\t%#7llx\t%#7llx\t"
+                       : "%7llu\t%7llu\t%7llu\t";
+        printf(bf, t, d, z);
+        printf(radix == 8 ? "%7llo\t%7llx\t%s\n" : "%7llu\t%7llx\t%s\n",
+               t + d + z, t + d + z, path);
+    }
+    tot[0] += t; tot[1] += d; tot[2] += z;
+    free(b);
+    return 0;
+}
+
+static int size_main(int argc, char **argv)
+{
+    int sysv = 0, radix = 10, totals = 0, nfiles = 0, bad = 0;
+    unsigned long long tot[3] = { 0, 0, 0 };
+    for (int i = 1; i < argc; i++) {
+        const char *a = argv[i];
+        if (!strcmp(a, "-A") || !strcmp(a, "--format=sysv") ||
+            !strcmp(a, "--format=SysV"))
+            sysv = 1;
+        else if (!strcmp(a, "-B") || !strcmp(a, "--format=berkeley") ||
+                 !strcmp(a, "--format=Berkeley") || !strcmp(a, "-G") ||
+                 !strcmp(a, "--format=gnu"))
+            sysv = 0;
+        else if (!strcmp(a, "-d") || !strcmp(a, "--radix=10"))
+            radix = 10;
+        else if (!strcmp(a, "-o") || !strcmp(a, "--radix=8"))
+            radix = 8;
+        else if (!strcmp(a, "-x") || !strcmp(a, "--radix=16"))
+            radix = 16;
+        else if (!strcmp(a, "-t") || !strcmp(a, "--totals"))
+            totals = 1;
+        else if (!strcmp(a, "--version")) {
+            printf("size (EmbCC embmap)\n");
+            return 0;
+        } else if (a[0] == '-' && a[1]) {
+            fprintf(stderr, "size: %s: an option this size does not take "
+                            "(-A, -B, -d, -o, -x, -t)\n", a);
+            return 1;
+        } else
+            nfiles++;
+    }
+    if (!sysv)
+        printf("   text\t   data\t    bss\t    dec\t    hex\tfilename\n");
+    for (int i = 1; i < argc; i++)
+        if (argv[i][0] != '-' || !argv[i][1])
+            bad |= size_one(argv[i], sysv, radix, tot);
+    if (!nfiles)
+        bad |= size_one("a.out", sysv, radix, tot);
+    if (totals && !sysv)
+        printf("%7llu\t%7llu\t%7llu\t%7llu\t%7llx\t(TOTALS)\n", tot[0],
+               tot[1], tot[2], tot[0] + tot[1] + tot[2],
+               tot[0] + tot[1] + tot[2]);
+    return bad;
+}
+
+/* ---- as `nm` --------------------------------------------------------------
+ *
+ * Called by a name ending in `nm`: binutils' symbol listing -- value, (with
+ * -S) size, type letter, name -- sorted by name (-n by value, -p not at
+ * all). The letter is binutils': U undefined, A absolute, C common, W/w
+ * and V/v weak, then by section: T code, R read-only, D data, B bss,
+ * lowercase for a local. -g external only, -u undefined only,
+ * --defined-only, -S/--print-size, -n/-v, -p, -r. */
+struct nm_sym { unsigned long long val, size; char type; const char *name; };
+static int g_nm_rev;
+static int nm_by_name(const void *x, const void *y)
+{
+    const struct nm_sym *a = x, *b = y;
+    int c = strcmp(a->name, b->name);
+    return g_nm_rev ? -c : c;
+}
+static int nm_by_val(const void *x, const void *y)
+{
+    const struct nm_sym *a = x, *b = y;
+    int c = a->val < b->val ? -1 : a->val > b->val ? 1 : strcmp(a->name, b->name);
+    return g_nm_rev ? -c : c;
+}
+
+static int nm_one(const char *path, int many, int pr_size, int ext_only,
+                  int undef_only, int def_only, int sort)
+{
+    FILE *f = fopen(path, "rb");
+    unsigned char *b;
+    long len;
+    if (!f) {
+        fprintf(stderr, "nm: '%s': no such file\n", path);
+        return 1;
+    }
+    fseek(f, 0, SEEK_END);
+    len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    b = malloc((size_t)len + 1);
+    if (!b || fread(b, 1, (size_t)len, f) != (size_t)len) {
+        fclose(f);
+        fprintf(stderr, "nm: %s: cannot read it\n", path);
+        return 1;
+    }
+    fclose(f);
+    if (len < 52 || memcmp(b, "\177ELF", 4) != 0) {
+        fprintf(stderr, "nm: %s: file format not recognized (an ELF object "
+                        "or image is)\n", path);
+        free(b);
+        return 1;
+    }
+    int is64 = b[4] == 2, be = b[5] == 2, w = is64 ? 8 : 4;
+    int arm = sz_rd(b, 18, 2, be) == 40;              /* EM_ARM */
+    size_t shoff = (size_t)sz_rd(b, is64 ? 40 : 32, w, be);
+    unsigned shes = (unsigned)sz_rd(b, is64 ? 58 : 46, 2, be);
+    unsigned shn = (unsigned)sz_rd(b, is64 ? 60 : 48, 2, be);
+    if (shoff + (size_t)shn * shes > (size_t)len) {
+        fprintf(stderr, "nm: %s: the section headers run past the end\n", path);
+        free(b);
+        return 1;
+    }
+    struct nm_sym *v = NULL;
+    size_t nv = 0;
+    for (unsigned k = 0; k < shn; k++) {
+        size_t o = shoff + (size_t)k * shes;
+        if (sz_rd(b, o + 4, 4, be) != 2)              /* SHT_SYMTAB */
+            continue;
+        size_t off = (size_t)sz_rd(b, o + (is64 ? 24 : 16), w, be);
+        size_t size = (size_t)sz_rd(b, o + (is64 ? 32 : 20), w, be);
+        unsigned link = (unsigned)sz_rd(b, o + (is64 ? 40 : 24), 4, be);
+        size_t ent = is64 ? 24 : 16;
+        size_t so = shoff + (size_t)link * shes;
+        size_t stroff = (size_t)sz_rd(b, so + (is64 ? 24 : 16), w, be);
+        if (off + size > (size_t)len || link >= shn)
+            continue;
+        v = realloc(v, (nv + size / ent + 1) * sizeof *v);
+        for (size_t e = ent; e + ent <= size; e += ent) {
+            size_t q = off + e;
+            unsigned name = (unsigned)sz_rd(b, q, 4, be);
+            unsigned info = is64 ? b[q + 4] : b[q + 12];
+            unsigned shndx = (unsigned)sz_rd(b, q + (is64 ? 6 : 14), 2, be);
+            unsigned long long val = sz_rd(b, q + (is64 ? 8 : 4), w, be);
+            unsigned long long sz = sz_rd(b, q + (is64 ? 16 : 8), w, be);
+            unsigned bind = info >> 4, type = info & 15;
+            const char *nm = (const char *)b + stroff + name;
+            if (!name || type == 3 || type == 4)     /* SECTION, FILE */
+                continue;
+            /* a Thumb function's address, without the Thumb bit, as
+             * binutils and LLVM print it */
+            if (arm && type == 2)
+                val &= ~1ull;
+            if (nm[0] == '$' && (nm[1] == 'a' || nm[1] == 't' ||
+                                 nm[1] == 'd' || nm[1] == 'x'))
+                continue;                            /* ARM mapping symbols */
+            char c;
+            if (shndx == 0)
+                c = bind == 2 ? (type == 1 ? 'v' : 'w') : 'U';
+            else if (shndx == 0xfff1)
+                c = 'A';
+            else if (shndx == 0xfff2)
+                c = 'C';
+            else {
+                size_t h = shoff + (size_t)shndx * shes;
+                unsigned long long fl = shndx < shn ? sz_rd(b, h + 8, w, be) : 0;
+                unsigned st = shndx < shn ? (unsigned)sz_rd(b, h + 4, 4, be) : 0;
+                c = (fl & 4) ? 'T' : !(fl & 2) ? 'N' : !(fl & 1) ? 'R'
+                  : st == 8 ? 'B' : 'D';
+                if (bind == 2)
+                    c = type == 1 ? 'V' : 'W';
+                else if (bind == 0)
+                    c = (char)(c - 'A' + 'a');
+            }
+            if (ext_only && bind == 0)
+                continue;
+            if (undef_only && shndx != 0)
+                continue;
+            if (def_only && shndx == 0)
+                continue;
+            v[nv].val = val; v[nv].size = sz; v[nv].type = c; v[nv].name = nm;
+            nv++;
+        }
+    }
+    if (sort == 1)
+        qsort(v, nv, sizeof *v, nm_by_name);
+    else if (sort == 2)
+        qsort(v, nv, sizeof *v, nm_by_val);
+    if (many)
+        printf("\n%s:\n", path);
+    int dw = is64 ? 16 : 8;
+    for (size_t k = 0; k < nv; k++) {
+        int und = v[k].type == 'U' || v[k].type == 'w' || v[k].type == 'v';
+        if (und)
+            printf("%*s ", dw, "");
+        else
+            printf("%0*llx ", dw, v[k].val);
+        if (pr_size && !und)
+            printf("%0*llx ", dw, v[k].size);
+        printf("%c %s\n", v[k].type, v[k].name);
+    }
+    free(v);
+    free(b);
+    return 0;
+}
+
+static int nm_main(int argc, char **argv)
+{
+    int pr_size = 0, ext = 0, undef = 0, def = 0, sort = 1, nfiles = 0, bad = 0;
+    for (int i = 1; i < argc; i++) {
+        const char *a = argv[i];
+        if (!strcmp(a, "-S") || !strcmp(a, "--print-size")) pr_size = 1;
+        else if (!strcmp(a, "-g") || !strcmp(a, "--extern-only")) ext = 1;
+        else if (!strcmp(a, "-u") || !strcmp(a, "--undefined-only")) undef = 1;
+        else if (!strcmp(a, "--defined-only") || !strcmp(a, "-U")) def = 1;
+        else if (!strcmp(a, "-n") || !strcmp(a, "-v") ||
+                 !strcmp(a, "--numeric-sort")) sort = 2;
+        else if (!strcmp(a, "-p") || !strcmp(a, "--no-sort")) sort = 0;
+        else if (!strcmp(a, "-r") || !strcmp(a, "--reverse-sort")) g_nm_rev = 1;
+        else if (!strcmp(a, "-C") || !strcmp(a, "--demangle") ||
+                 !strcmp(a, "--no-demangle") || !strcmp(a, "-a") ||
+                 !strcmp(a, "--debug-syms")) {}
+        else if (!strcmp(a, "--version")) {
+            printf("nm (EmbCC embmap)\n");
+            return 0;
+        } else if (a[0] == '-' && a[1]) {
+            fprintf(stderr, "nm: %s: an option this nm does not take (-S, -g, "
+                            "-u, --defined-only, -n, -p, -r)\n", a);
+            return 1;
+        } else
+            nfiles++;
+    }
+    for (int i = 1; i < argc; i++)
+        if (argv[i][0] != '-' || !argv[i][1])
+            bad |= nm_one(argv[i], nfiles > 1, pr_size, ext, undef, def, sort);
+    if (!nfiles)
+        bad |= nm_one("a.out", 0, pr_size, ext, undef, def, sort);
+    return bad;
+}
+
 int main(int argc, char **argv)
 {
+    size_t n0 = strlen(argv[0]);
+    if (n0 >= 4 && !strcmp(argv[0] + n0 - 4, "size"))
+        return size_main(argc, argv);
+    if (n0 >= 2 && !strcmp(argv[0] + n0 - 2, "nm") &&
+        (n0 == 2 || argv[0][n0 - 3] == '-' || argv[0][n0 - 3] == '/'))
+        return nm_main(argc, argv);
     const char *image = NULL, *mapfile = NULL, *diff = NULL;
     int top = 0, want_top = 0;
     u64 max_flash = 0, max_ram = 0;

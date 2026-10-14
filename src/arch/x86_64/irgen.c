@@ -12,6 +12,7 @@
 #include "../../sema/sema.h"
 #include "../../sema/type.h"
 #include "../target.h"
+#include "../code.h"
 
 /* va_arg of a struct (SysV 3.5.7): classified like an argument. When
  * every eightbyte finds a register of its class still unread, it is
@@ -490,6 +491,130 @@ static int asm_alu_lookup(const char *m, int mlen, int *rr, int *ext, int *w)
     return 0;
 }
 
+/* ---- directives in a template ----------------------------------------
+ *
+ * `.ascii "->SIZE %c0"`, `.p2align 2`, `.byte 7`: data and alignment
+ * beside the instructions, as Linux's asm-offsets and EmbLinkRTOS's
+ * layout probes write them. The operands are written into the text the
+ * way gcc prints them -- %c0 as the constant alone, %0 of a constant as
+ * `$5` (which no directive takes: write %c0) -- and the statement goes to
+ * the directives every inline assembler shares (src/arch/code.c). */
+
+/* Which operands the template names plainly (%0, %[x]) and which only as
+ * a constant (%c0, %c[x]): one named only so needs no register. */
+static void asm_operand_uses(const char *tmpl, const char *const *names,
+                             int nops, int *plain, int *bare)
+{
+    for (const char *p = tmpl; *p; p++) {
+        if (*p != '%')
+            continue;
+        if (p[1] == '%') {
+            p++;
+            continue;
+        }
+        const char *q = p + 1;
+        int c = *q == 'c' && (q[1] == '[' || (q[1] >= '0' && q[1] <= '9'));
+        int k = -1;
+        if (c)
+            q++;
+        if (*q == '[') {
+            const char *e = strchr(q, ']');
+            for (int i = 0; e && i < nops; i++)
+                if (names[i] && strlen(names[i]) == (size_t)(e - q - 1) &&
+                    !strncmp(names[i], q + 1, (size_t)(e - q - 1)))
+                    k = i;
+        } else if (*q >= '0' && *q <= '9') {
+            k = 0;
+            while (*q >= '0' && *q <= '9')
+                k = k * 10 + (*q++ - '0');
+        }
+        if (k >= 0 && k < nops)
+            (c ? bare : plain)[k] = 1;
+    }
+}
+
+static void asm_directive_x86(const char *file, int line,
+                              const struct asm_stmt *a,
+                              const char *const *opnames, int nops,
+                              const char **pp, struct code *acc)
+{
+    const char *p = *pp;
+    int len = asm_stmt_len(p, ";");
+    int cut = asm_cut_comment(p, len, "#", 0);
+    size_t cap = (size_t)cut + 64, n = 0;
+    char *buf = xmalloc(cap);
+    for (int i = 0; i < cut; ) {
+        if (n + 32 >= cap) {
+            cap *= 2;
+            buf = xrealloc(buf, cap);
+        }
+        if (p[i] != '%') {
+            buf[n++] = p[i++];
+            continue;
+        }
+        i++;
+        if (i < cut && p[i] == '%') {
+            buf[n++] = '%';
+            i++;
+            continue;
+        }
+        int bare = i + 1 < cut && p[i] == 'c' &&
+                   (p[i + 1] == '[' || (p[i + 1] >= '0' && p[i + 1] <= '9'));
+        int k = -1;
+        if (bare)
+            i++;
+        if (i < cut && p[i] == '[') {
+            int e = i + 1;
+            while (e < cut && p[e] != ']')
+                e++;
+            for (int j = 0; j < nops; j++)
+                if (opnames[j] && strlen(opnames[j]) == (size_t)(e - i - 1) &&
+                    !strncmp(opnames[j], p + i + 1, (size_t)(e - i - 1)))
+                    k = j;
+            if (e >= cut || k < 0)
+                diag_fatal(file, line, "asm: unknown operand %%%.*s in "
+                           "\"%.*s\"", e - i + 1, p + i, cut, p);
+            i = e + 1;
+        } else if (i < cut && p[i] >= '0' && p[i] <= '9') {
+            k = 0;
+            while (i < cut && p[i] >= '0' && p[i] <= '9')
+                k = k * 10 + (p[i++] - '0');
+            if (k >= nops)
+                diag_fatal(file, line, "asm operand %%%d out of range in "
+                           "\"%.*s\"", k, cut, p);
+        } else {
+            diag_fatal(file, line, "asm template modifier '%%%c' is not "
+                       "supported in a directive (%%c0 prints a constant)",
+                       i < cut ? p[i] : ' ');
+        }
+        const struct asm_operand *op = k < a->nout ? &a->out[k]
+                                                   : &a->in[k - a->nout];
+        if (!op->is_imm)
+            diag_fatal(file, line, "%%%s%d names a register operand, which a "
+                       "directive cannot hold; %%c prints a constant, and "
+                       "wants an \"i\" or \"n\" operand", bare ? "c" : "",
+                       k);
+        n += (size_t)snprintf(buf + n, cap - n, bare ? "%ld" : "$%ld",
+                              op->imm);
+    }
+    {
+        /* .align is a byte count in an ELF or COFF object, as GNU as and
+         * llvm-mc read it there; a power of two in a Mach-O one */
+        struct asm_dirs dirs = { asm_data_x86, 0, 0 };
+        char err[512];
+        int r;
+        dirs.align_bytes = target_fmt_get() != TGT_FMT_MACHO;
+        r = code_asm_directive(buf, (int)n, acc, &dirs, err, sizeof err);
+        if (r < 0)
+            diag_fatal(file, line, "%s", err);
+        if (!r)
+            diag_fatal(file, line, "asm directive \"%.*s\" is not supported",
+                       (int)n, buf);
+    }
+    free(buf);
+    *pp = p + len;
+}
+
 /* Assemble an extended-asm template into machine bytes, now that every
  * operand has a register (opregs[N] is the register of %N — outputs first,
  * then inputs, as gcc numbers them). EmbCC has no general text assembler,
@@ -510,6 +635,9 @@ static void asm_assemble(struct ir_func *fn, struct stmt *s,
      * reference them — resolved within this block after assembling it. */
     struct { int num, off; } labels[16]; int nlab = 0;
     struct { int num, patch; } fixups[16]; int nfix = 0;
+    /* the directives' data ranges and alignments (code.h) */
+    struct code acc;
+    memset(&acc, 0, sizeof acc);
 
     while (*p) {
         while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' ||
@@ -517,6 +645,16 @@ static void asm_assemble(struct ir_func *fn, struct stmt *s,
             p++;
         if (!*p)
             break;
+        if (*p == '.') {
+            acc.p = code;
+            acc.len = n;
+            acc.cap = cap;
+            asm_directive_x86(file, line, s->asm_s, opnames, nops, &p, &acc);
+            code = acc.p;
+            n = acc.len;
+            cap = acc.cap;
+            continue;
+        }
         const char *m = p;
         while (*p && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r' &&
                *p != ';')
@@ -1072,11 +1210,23 @@ static void asm_assemble(struct ir_func *fn, struct stmt *s,
             diag_fatal(file, line, "asm: local label %d not defined in "
                        "\"%s\"", fixups[i].num, tmpl);
         int disp = off - (fixups[i].patch + 4);
+        /* an alignment between the two pads by where the template lands,
+         * which the displacement cannot follow */
+        for (int k = 0; k + 3 < acc.narange; k += 4)
+            if ((acc.arange[k] > off && acc.arange[k] <= fixups[i].patch) ||
+                (acc.arange[k] > fixups[i].patch && acc.arange[k] <= off))
+                diag_fatal(file, line, "asm: an alignment between local "
+                           "label %d and the leaq that addresses it is not "
+                           "supported in \"%s\"", fixups[i].num, tmpl);
         for (int b = 0; b < 4; b++)
             code[fixups[i].patch + b] = (unsigned char)(disp >> (8 * b));
     }
     ia->code = code;
     ia->codelen = n;
+    ia->drange = acc.drange;
+    ia->ndrange = acc.ndrange;
+    ia->arange = acc.arange;
+    ia->narange = acc.narange;
 }
 
 /* Map a hard-register spelling (any width: rax/eax/ax/al/ah, r8/r8d/r8w/r8b,
@@ -1194,6 +1344,15 @@ void irg_asm_x86(struct ir_func *fn, struct stmt *s)
     asm_mark_template_regs(a->tmpl, used);
     int opregs[2 * MAX_PARAMS], nops = 0;
     const char *opnames[2 * MAX_PARAMS];
+    /* A constant input the template names only as %c0 is text, and needs
+     * no register: it is neither allocated nor loaded. */
+    int plain[2 * MAX_PARAMS] = { 0 }, bare[2 * MAX_PARAMS] = { 0 };
+    {
+        const char *nm[2 * MAX_PARAMS];
+        for (int i = 0; i < a->nout + a->nin; i++)
+            nm[i] = i < a->nout ? a->out[i].name : a->in[i - a->nout].name;
+        asm_operand_uses(a->tmpl, nm, a->nout + a->nin, plain, bare);
+    }
     for (int i = 0; i < a->nout; i++) {
         int r = a->out[i].reg;
         if (r == -2)      r = asm_alloc_reg(used, fn->file, s->line);
@@ -1204,7 +1363,9 @@ void irg_asm_x86(struct ir_func *fn, struct stmt *s)
     }
     for (int i = 0; i < a->nin; i++) {
         int r = a->in[i].reg;
-        if (r == -2)      r = asm_alloc_reg(used, fn->file, s->line);
+        if (a->in[i].is_imm && bare[a->nout + i] && !plain[a->nout + i])
+            r = -1;                               /* only %c0: text */
+        else if (r == -2) r = asm_alloc_reg(used, fn->file, s->line);
         else if (r == -3) r = asm_alloc_xmm(xused, fn->file, s->line);
         ia->in[i].reg = r;
         opnames[nops] = a->in[i].name;
@@ -1215,6 +1376,8 @@ void irg_asm_x86(struct ir_func *fn, struct stmt *s)
      * lvalue. An xmm ('x') input is moved with movss/movsd, so its
      * size is the operand's own float width. */
     for (int i = 0; i < a->nin; i++) {
+        if (ia->in[i].reg < 0)
+            continue;                    /* a %c0 constant, compacted below */
         /* An "m" input names MEMORY, so what the register carries is its
          * ADDRESS -- the template dereferences it. Passing the value
          * happened to work for a struct, whose "value" in this IR is
@@ -1225,6 +1388,13 @@ void irg_asm_x86(struct ir_func *fn, struct stmt *s)
                                        : gen_expr(fn, a->in[i].expr);
         ia->in[i].size = ia->in[i].reg >= 16
                        ? ty_size(a->in[i].expr->ty) : 8;
+    }
+    {
+        int j = 0;
+        for (int i = 0; i < a->nin; i++)
+            if (ia->in[i].reg >= 0)
+                ia->in[j++] = ia->in[i];
+        ia->nin = j;
     }
     for (int i = 0; i < a->nout; i++) {
         ia->out[i].temp = gen_addr(fn, a->out[i].expr);

@@ -38,40 +38,63 @@ s64_ __muldi3(s64_ a, s64_ b)
     return (s64_)r;
 }
 
-static u64_ udivmod64(u64_ n, u64_ d, u64_ *rem)
-{
-    u64_ q = 0, r = 0;
-    int i;
+/* Division, in assembly: restoring division, one quotient bit per step, the
+ * dividend shifting into the remainder as the quotient shifts in behind it.
+ * The C version of the same loop moved eight-byte values through memory a
+ * byte at a time and took some 23000 cycles a division -- 1.4 ms at 16 MHz,
+ * which an RTOS converting a timeout pays on every call; this is about 2500.
+ *
+ * libgcc's interface and avr-gcc's convention: the dividend in r18-r25, the
+ * divisor in r10-r17 (call-saved, so read and left alone), the result in
+ * r18-r25. The remainder is built in r2-r9, saved and restored here; it
+ * cannot carry out of r9, being below 2^k after the k-th of 64 steps.
+ * Dividing by 0 gives all ones and the dividend as the remainder, as the C
+ * version did. */
+u64_ __udivdi3(u64_ a, u64_ b);
+u64_ __umoddi3(u64_ a, u64_ b);
 
-    if (d == 0) {
-        if (rem)
-            *rem = n;
-        return ~(u64_)0;
-    }
-    for (i = 0; i < 64; i++) {
-        r += r;
-        if (n & 0x8000000000000000ULL)
-            r |= 1;
-        n += n;
-        q += q;
-        if (r >= d) {
-            r -= d;
-            q |= 1;
-        }
-    }
-    if (rem)
-        *rem = r;
-    return q;
-}
-
-u64_ __udivdi3(u64_ a, u64_ b) { return udivmod64(a, b, 0); }
-
-u64_ __umoddi3(u64_ a, u64_ b)
-{
-    u64_ r;
-    udivmod64(a, b, &r);
-    return r;
-}
+__asm__(
+    "    .globl  __udivdi3\n"
+    "__udivdi3:\n"
+    "    push r2\n    push r3\n    push r4\n    push r5\n"
+    "    push r6\n    push r7\n    push r8\n    push r9\n"
+    "    rcall   __emb_udivmod64\n"
+    "    rjmp    __emb_udivmod64_out\n"
+    "    .globl  __umoddi3\n"
+    "__umoddi3:\n"
+    "    push r2\n    push r3\n    push r4\n    push r5\n"
+    "    push r6\n    push r7\n    push r8\n    push r9\n"
+    "    rcall   __emb_udivmod64\n"
+    "    movw    r18, r2\n"
+    "    movw    r20, r4\n"
+    "    movw    r22, r6\n"
+    "    movw    r24, r8\n"
+    "__emb_udivmod64_out:\n"
+    "    pop r9\n    pop r8\n    pop r7\n    pop r6\n"
+    "    pop r5\n    pop r4\n    pop r3\n    pop r2\n"
+    "    ret\n"
+    "__emb_udivmod64:\n"
+    "    clr     r2\n"
+    "    clr     r3\n"
+    "    movw    r4, r2\n"
+    "    movw    r6, r2\n"
+    "    movw    r8, r2\n"
+    "    ldi     r26, 64\n"
+    "1:\n"
+    "    lsl r18\n    rol r19\n    rol r20\n    rol r21\n"
+    "    rol r22\n    rol r23\n    rol r24\n    rol r25\n"
+    "    rol r2\n    rol r3\n    rol r4\n    rol r5\n"
+    "    rol r6\n    rol r7\n    rol r8\n    rol r9\n"
+    "    cp r2, r10\n    cpc r3, r11\n    cpc r4, r12\n    cpc r5, r13\n"
+    "    cpc r6, r14\n    cpc r7, r15\n    cpc r8, r16\n    cpc r9, r17\n"
+    "    brcs    3f\n"
+    "    sub r2, r10\n    sbc r3, r11\n    sbc r4, r12\n    sbc r5, r13\n"
+    "    sbc r6, r14\n    sbc r7, r15\n    sbc r8, r16\n    sbc r9, r17\n"
+    "    ori     r18, 1\n"
+    "3:\n"
+    "    dec     r26\n"
+    "    brne    1b\n"
+    "    ret\n");
 
 static u64_ mag64(s64_ v, int *neg)
 {
@@ -86,16 +109,15 @@ s64_ __divdi3(s64_ a, s64_ b)
 {
     int neg = 0;
     u64_ ua = mag64(a, &neg), ub = mag64(b, &neg);
-    u64_ q = udivmod64(ua, ub, 0);
+    u64_ q = __udivdi3(ua, ub);
     return neg ? -(s64_)q : (s64_)q;
 }
 
 s64_ __moddi3(s64_ a, s64_ b)
 {
     int dneg = 0, bneg = 0;
-    u64_ r;
     u64_ ua = mag64(a, &dneg), ub = mag64(b, &bneg);
-    udivmod64(ua, ub, &r);
+    u64_ r = __umoddi3(ua, ub);
     return dneg ? -(s64_)r : (s64_)r;    /* the DIVIDEND's sign */
 }
 

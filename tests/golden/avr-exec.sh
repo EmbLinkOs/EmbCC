@@ -185,12 +185,31 @@ __attribute__((noinline)) static struct s80 mk80(int k)
 { struct s80 r; for (int i = 0; i < 80; i++) r.b[i] = (char)(i + k); return r; }
 int (*volatile fp)(int);
 
+/* Parameters nothing reads: no slot, no store, no frame -- in registers,
+ * past them on the stack, and beside one whose address IS taken, which
+ * must still be stored. And a handle-like struct, passed and returned as
+ * the integer it holds. */
+__attribute__((noinline)) static int un_reg(char c, int v, long w)
+{ return v + 1; }
+__attribute__((noinline)) static long un_stk(long a, long b, long c, long d,
+                                             long e, int f, int g)
+{ return a + c + g; }
+__attribute__((noinline)) static int un_deref(const int *p) { return *p; }
+__attribute__((noinline)) static int un_addr(int x, int y)
+{ return un_deref(&y) * 2; }
+typedef struct { unsigned raw; } hnd;
+__attribute__((noinline)) static hnd hnd_mk(unsigned v) { hnd h = { v }; return h; }
+__attribute__((noinline)) static unsigned hnd_get(char c, hnd h) { return h.raw ^ 0x8001u; }
 void run(void)
 {
     int i;
     int arr[5];
     struct pt a;
 
+    putn(un_reg('x', 41, 7L));
+    putn(un_stk(1L, 2L, 3L, 4L, 5L, 6, 7));
+    putn(un_addr(9, 21));
+    putn((long)hnd_get('q', hnd_mk(0x7ffeu)));
     /* widths and extension */
     putn(addi(1000, 234));
     putn(subl(100000L, 1L));

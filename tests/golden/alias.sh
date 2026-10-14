@@ -183,12 +183,18 @@ int f(int i, int n)
     return s;
 }
 EOF
-l=$("$EMBCC" --target=x86_64-linux-gnu -O2 -fremarks -c "$out/l.c" \
-      -o /dev/null 2>&1 | sed -n 's/.*, \([0-9]*\) load reuse.*/\1/p' |
-    awk '{s+=$1} END {print s+0}')
-[ "$l" -ge 1 ] || { echo "FAIL: a load from g1 was not reused across a
+# What must hold is that g1 is read ONCE -- reused after the store, or
+# (since the tail merge and value numbering got there first) hoisted out
+# of the loop altogether. Which pass does it is not the point: counting
+# load-CSE's "load reuse" remark read 0 once the hoist took it, with the
+# code better than before.
+"$EMBCC" inspect ir --target=x86_64-linux-gnu -O2 "$out/l.c" > "$out/l.ir" 2>&1 ||
+    { cat "$out/l.ir"; echo "FAIL: inspect l.c"; exit 1; }
+l=$(sed -n '/^func @f /,/^}/p' "$out/l.ir" | grep -c 'load\.')
+[ "$l" = 1 ] || { sed -n '/^func @f /,/^}/p' "$out/l.ir"
+    echo "FAIL: g1 is loaded $l times: the load was not reused across a
 store to g2, so the alias analysis is not being consulted"; exit 1; }
-echo "a load survives a store to a different global ($l reused)"
+echo "a load survives a store to a different global (g1 read once)"
 
 # ---- 4. -fno- turns them off -------------------------------------------
 z=$("$EMBCC" --target=x86_64-linux-gnu -O2 -fno-dse -fremarks -c "$out/d.c" \

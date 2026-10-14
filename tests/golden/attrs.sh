@@ -229,3 +229,21 @@ for spec in thumbv7m-none-eabi:8:R_ARM_ABS32 riscv32-unknown-elf:8:R_RISCV_32 \
 done
 echo "and constructor slots are pointer-wide, with the target's pointer
 relocation, on Thumb, RISC-V, AVR and x86-64"
+
+# A string argument is every adjacent literal, as anywhere in C:
+# EmbLinkRTOS names a table's section `".progmem." "emb_test_table"` through
+# a macro, and taking the first piece alone put every table in ".progmem.".
+cat > "$out/cat.c" <<'EOF'
+#define SECT(name) ".progmem." name
+const int t __attribute__((section(SECT("emb_tab")))) = 1;
+void f(void) __attribute__((section(".text." "x" "y")));
+void f(void) {}
+EOF
+for t in avr thumbv7m-none-eabi x86_64-elf; do
+    "$EMBCC" --target=$t -c "$out/cat.c" -o "$out/cat.o" || { echo "FAIL: $t: cat.c"; exit 1; }
+    for s in .progmem.emb_tab .text.xy; do
+        llvm-readelf -S "$out/cat.o" | grep -q " $s " ||
+            { echo "FAIL: $t: no section $s from adjacent literals"; exit 1; }
+    done
+done
+echo "and a section name written as adjacent literals is the whole of them"

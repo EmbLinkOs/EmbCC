@@ -277,10 +277,6 @@ check nonstatic-then-static \
 static int f(void) { return 1; }
 int main(void) { return f(); }' \
     "static declaration of 'f' follows non-static"
-check unnamed-param-in-definition \
-    'int f(int) { return 1; }
-int main(void) { return f(1); }' \
-    "needs a name in a definition"
 # main alone may reach its closing brace (it returns 0, C99 5.1.2.2.3)
 check fallthrough \
     'static int f(void) { int x = 1; }
@@ -668,6 +664,15 @@ check const-increment 'void f(void) { const int x = 1; x++; }' "increment of rea
 check const-compound 'void f(void) { const int x = 1; x += 2; }' "read-only 'x'"
 check const-asm-output \
     'void f(void) { const int x = 1; __asm__("" : "=r"(x)); }' "an asm output of read-only"
+# a parameter `int a[const 4]` is `int *const a`
+check const-array-parameter \
+    'int g(int a[const 4]) { a = 0; return 0; }' "read-only 'a'"
+# the storage classes a parameter cannot have, and a bound's `static`
+# where it is not a parameter's
+check parameter-storage-class 'int f(static int x);' "no storage class but 'register'"
+check parameter-storage-class-late 'int f(int extern x);' "no storage class but 'register'"
+check array-static-not-parameter \
+    'void f(void) { int a[static 3]; (void)a; }' "expected an expression, got 'static'"
 
 # The COFF writer has no named data sections. A variable with one was
 # put at offset 0 of .data, on top of the first variable there.

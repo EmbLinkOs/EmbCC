@@ -72,6 +72,47 @@ then
         cmp -s "$out/$tag-data.bin" "$out/$tag-data.ref" || {
             echo "$tag: a .s file's data directives differ from llvm-mc's"; exit 1; }
     done
+
+    # Strings, alignments and %c (tests/harness/asmdir.sh): .ascii,
+    # .asciz/.string, .p2align/.balign/.align with and without a fill and
+    # a maximum, and constants written in with %c0 -- Linux's asm-offsets
+    # and EmbLinkRTOS's layout probes. llvm-mc's bytes at every phase in
+    # the section an instruction can start on: halfwords with the C
+    # extension, words without, where a template padded as if it started
+    # on 16 fails at all but one.
+    . tests/harness/asmdir.sh
+    cat > "$out/dirs.txt" <<'EOF'
+.ascii "->EMB_PROBE s %c1 %c0"
+.p2align 2
+.ascii "abc"
+.align 3
+.asciz "hi", "x"
+.byte 0x55
+.p2align 4
+.string "\t\"q\\\101\x42\0z"
+.balign 8
+.byte 1, 255, -128, %c0, %c1
+.p2align 3, 0x5a
+.byte 7
+.p2align 4,,5
+.byte 9
+.p2align 4,,15
+.ascii "a;b#c//d"
+.half 0x1234, %c0
+.word 0x12345678
+.dword -2
+.p2align 2
+EOF
+    for w in 32 64; do
+        asmdir_referee "$out" riscv$w-unknown-elf "-triple=riscv$w -mattr=+c" \
+            ".2byte 1" 2 "$out/dirs.txt" || exit 1
+        # (set and cleared: an assignment before a function call outlives
+        # the call in a POSIX shell)
+        ASMDIR_CFLAGS=-march=rv${w}ima
+        asmdir_referee "$out" riscv$w-unknown-elf "-triple=riscv$w" nop 4 \
+            "$out/dirs.txt" || exit 1
+        ASMDIR_CFLAGS=
+    done
 else
     echo "SKIP the encoding half: llvm-mc/llvm-objcopy not found"
 fi
@@ -216,6 +257,15 @@ printf 'void f(void){ __asm__ volatile(".byte -128, 255; .dword -1"); }\n' > "$o
 "$EMBCC" --target=riscv32-unknown-elf -c "$out/data.c" -o /dev/null || {
     echo "inline asm refused data at the ends of its range"; exit 1; }
 echo "inline data: a symbol and an out-of-range value are refused, the ends of the range taken"
+
+# %c prints a constant, and a register operand is not one
+printf 'int f(int x){ __asm__ volatile(".byte %%c0" : : "r"(x)); return x; }\n' > "$out/c.c"
+if "$EMBCC" --target=riscv32-unknown-elf -c "$out/c.c" -o /dev/null 2> "$out/c.err"; then
+    echo "%c of a register operand was accepted"; exit 1
+fi
+grep -q "names a register operand" "$out/c.err" || {
+    echo "the refusal of %c on a register does not say why:"; cat "$out/c.err"; exit 1; }
+echo "%c of a register operand is refused"
 
 # x86's constraint letters mean nothing here. "=a" pinned the output to
 # x86 register 0 -- x0, the zero register -- and the result was lost

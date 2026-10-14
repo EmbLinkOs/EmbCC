@@ -270,6 +270,7 @@ int tcg_regalloc(void);
  * is thrown away. */
 int tcg_ext(void);
 void tcg_role_fail(void);
+int tcg_role_failed(void);   /* this attempt's code will be thrown away */
 /* Per instruction, the registers holding a value live into or out of it
  * (lo_busy_map), and those over n..n+span with its operands (t_busy); and
  * whether the instruction's lowering names no low register of its own

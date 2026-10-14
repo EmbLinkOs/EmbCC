@@ -384,9 +384,19 @@ static void ex(struct ctx *c, struct state *st, struct expr *e)
         stm(c, st, e->body);
 }
 
+/* A loop that leaves only by `break`: `for (;;)`, `while (1)`. */
+static int always_true(const struct expr *cond)
+{
+    while (cond && cond->kind == EXPR_CAST)
+        cond = cond->rhs;
+    return !cond || (cond->kind == EXPR_NUM && cond->num != 0);
+}
+
 /* A loop body, run to a fixed point: once with warnings suppressed so that
  * what the body writes is known at its own top, then once for real. Three
- * values deep, the lattice settles in that one extra pass. */
+ * values deep, the lattice settles in that one extra pass. A do-while
+ * (at_least_once) tests its condition here, after the body: the test sees
+ * what the body wrote, and a `break` skips it. */
 static void loop_body(struct ctx *c, struct state *st, struct stmt *body,
                       struct expr *step, struct expr *cond, int at_least_once)
 {
@@ -406,12 +416,15 @@ static void loop_body(struct ctx *c, struct state *st, struct stmt *body,
         stm(c, &cur, body);
         st_join(c, &cur, &t.cont);
         ex(c, &cur, step);
+        if (at_least_once)
+            ex(c, &cur, cond);
         if (pass == 0) {
             c->quiet--;
             /* what the top of the loop can see on a later iteration */
             struct state top = st_copy(c, &entry);
             st_join(c, &top, &cur);
-            ex(c, &top, cond);
+            if (!at_least_once)
+                ex(c, &top, cond);
             /* Which slots the back edge alone raised to MAYBE. */
             c->backedge = xmalloc((size_t)(c->nvars ? c->nvars : 1));
             for (int k = 0; k < c->nvars; k++)
@@ -437,9 +450,12 @@ static void loop_body(struct ctx *c, struct state *st, struct stmt *body,
     c->targets = t.up;
 
     /* Leaving: either the body ran and fell out, or a break did, or -- for
-     * a loop whose condition is tested first -- it never ran at all. */
+     * a loop whose condition is tested first -- it never ran at all. A
+     * loop whose condition is always true leaves only by a break. */
+    if (always_true(cond))
+        st->reach = 0;
     st_join(c, st, &t.brk);
-    if (!at_least_once)
+    if (!at_least_once && !always_true(cond))
         st_join(c, st, &entry);
     st_free(&entry);
     free(c->backedge);
@@ -488,7 +504,6 @@ static void stm(struct ctx *c, struct state *st, struct stmt *s)
             break;
         case STMT_DO:
             loop_body(c, st, s->body, NULL, s->cond, 1);
-            ex(c, st, s->cond);
             break;
         case STMT_FOR:
             stm(c, st, s->initdecl);

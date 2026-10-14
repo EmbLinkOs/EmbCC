@@ -203,6 +203,13 @@ static char *rv_subst(const char *file, int line, const char *tmpl,
             p++;
             continue;
         }
+        /* %c0: the constant alone, as gcc prints it -- how every
+         * immediate is written here anyway */
+        int bare = 0;
+        if (*p == 'c' && (p[1] == '[' || isdigit((unsigned char)p[1]))) {
+            bare = 1;
+            p++;
+        }
         int k = -1;
         if (*p == '[') {
             const char *e = strchr(p, ']');
@@ -227,6 +234,10 @@ static char *rv_subst(const char *file, int line, const char *tmpl,
             diag_fatal(file, line, "asm template modifier '%%%c' is not "
                                    "supported for RISC-V", *p ? *p : ' ');
         }
+        if (bare && !isimm[k])
+            diag_fatal(file, line, "%%c%d names a register operand; %%c "
+                       "prints a constant, and wants an \"i\" or \"n\" "
+                       "operand", k);
         if (isimm[k])
             len += (size_t)snprintf(out + len, cap - len, "%ld", imms[k]);
         else
@@ -323,7 +334,9 @@ void irg_asm_riscv(struct ir_func *fn, struct stmt *s)
                           names, nops);
     struct code c = { 0 };
     char err[512];
-    if (rvasm_assemble(text, &c, err, sizeof err) != 0)
+    if (rvasm_assemble(text, &c, err, sizeof err) != 0 ||
+        code_asm_settle(&c, target_riscv_rvc() ? 2 : 4, CODE_FILL_RISCV,
+                        err, sizeof err) < 0)
         diag_fatal(file, s->line, "%s", err);
     int calls = rv_template_calls(text);
     free(text);
@@ -333,6 +346,10 @@ void irg_asm_riscv(struct ir_func *fn, struct stmt *s)
     struct ir_asm *ia = xcalloc(1, sizeof *ia);
     ia->code = c.p;
     ia->codelen = c.len;
+    ia->drange = c.drange;
+    ia->ndrange = c.ndrange;
+    ia->arange = c.arange;
+    ia->narange = c.narange;
     ia->out = xcalloc((size_t)(a->nout ? a->nout : 1), sizeof *ia->out);
     ia->in = xcalloc((size_t)(a->nin ? a->nin : 1), sizeof *ia->in);
     for (int i = 0; i < a->nin; i++) {

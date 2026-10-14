@@ -37,6 +37,7 @@ What the files share is declared in `src/opt/opt_int.h`, which only
 | `divmagic.c` | Division by a constant, the widening multiply, divisibility tests, a remainder from its quotient |
 | `ifconv.c` | If-conversion to selects |
 | `cfgclean.c` | Jump threading and block merging |
+| `cfgclean.c` (`pass_brdom`) | a branch on a value a dominating branch decided, where its edge is the only way in |
 | `tailrec.c` | Tail recursion into a loop |
 | `attrs.c` | Inferring which functions are `pure` or `const`, so a call to one stops being a barrier |
 | `dse.c` | Dead-store elimination |
@@ -44,8 +45,8 @@ What the files share is declared in `src/opt/opt_int.h`, which only
 | `pre.c` | Partial redundancy elimination |
 | `licm.c` | Loop-invariant code motion, memory promotion in loops |
 | `rotate.c` | Loop rotation |
-| `guardjump.c` | -Os on Cortex-M: entering a rotated loop at its test |
-| `tailmerge.c` | -Os on ARM: one copy of identical block tails |
+| `guardjump.c` | -Os, every target: entering a rotated loop at its test |
+| `tailmerge.c` | -Os, every target: one copy of block tails alike but for values a merge temp carries in |
 | `vectorize.c` | Automatic vectorization |
 | `idiom.c` | Copy and clear loops, recognised as `memcpy` and `memzero` |
 | `ivsr.c` | Induction-variable strength reduction |

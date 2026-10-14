@@ -160,7 +160,8 @@ define `__GNUC__` when compiling C.
 | Reaching the `}` of a non-`void` function | Not supported | An error even when the value is never used, except in `main`: `control may reach the end of 'f' — every path must end in a return statement [E0008]`. See [Functions that can reach their closing brace](#functions-that-can-reach-their-closing-brace). |
 | `return;` in a non-`void` function | Not supported | `'g' returns int; 'return' needs a value`. A constraint violation since C99. |
 | `auto` storage class | Supported | `auto int x;` |
-| `register` storage class | Partial | Accepted on block-scope objects. On a parameter or at file scope: `'register' is not supported yet (see docs/manual/c-language.md)`. Taking the address of a `register` object is not diagnosed. |
+| `register` storage class | Partial | Accepted on block-scope objects and on parameters, where it is a hint the allocator does not need. At file scope, which C does not allow: `'register' is not supported yet (see docs/manual/c-language.md)`. Taking the address of a `register` object is not diagnosed. Any other storage class on a parameter: `a parameter can have no storage class but 'register'`. |
+| Storage class after the type, `const static int t[]`, `int static n`, `long typedef L` | Partial | Obsolescent (C17 6.11.5), and `-Wold-style-declaration` (`-Wextra`) reports it, as in GCC. At block scope `extern` and `typedef` must come first: `at block scope, write 'extern' first in the declaration`. |
 | `const` | Supported | See [Const qualification](#const-qualification). |
 | `volatile` | Supported | |
 | Scopes | Partial | Objects, functions and labels follow the standard's rules. Tags, typedef names and enumeration constants do not. See [Scope of tags, typedefs and enumeration constants](#scope-of-tags-typedefs-and-enumeration-constants). |
@@ -170,7 +171,7 @@ define `__GNUC__` when compiling C.
 | `goto`, labels, `switch` | Supported | |
 | Adjacent string literal concatenation | Supported | A prefixed and an unprefixed literal concatenate: `L"wi" "de"` is `L"wide"`. |
 | Wide literals `L"..."`, `L'x'` | Supported | |
-| Multi-character constants `'ab'` | Not supported | `a character constant holds one character (multi-character constants are not supported)` |
+| Multi-character constants `'ab'` | Supported | GCC's value, reported by `-Wmultichar` as in GCC. See [Implementation-defined behaviour](implementation-defined.md). A wide one, `L'ab'`, is refused: `a wide character constant holds one character`. |
 | Trigraphs `??=` `??(` ... | Not supported | Not replaced: `"??="` is a three-character string. C23 removed them. |
 
 ### C95 (Amendment 1)
@@ -193,7 +194,7 @@ define `__GNUC__` when compiling C.
 | `restrict` | Supported | Accepted. EmbCC does not use it for optimization. |
 | Variable length arrays | Partial | See [Variable length arrays](#variable-length-arrays). Not available on AVR. |
 | Variably modified types: pointers to VLAs, VLA parameters `int a[n][m]`, `[*]` | Supported | |
-| `static` and qualifiers in array parameters, `int a[static 4]` | Not supported | `expected an expression, got 'static'` (likewise `got 'const'`, `got 'restrict'`). |
+| `static` and qualifiers in array parameters, `int a[static 4]` | Supported | The qualifiers apply to the pointer the parameter becomes: `int a[const 4]` is `int *const a`. `static` promises at least that many elements and changes no code. Outside a parameter: `expected an expression, got 'static'`. |
 | Flexible array members | Supported | An initializer for the flexible member is accepted only on a static object, which is a GNU extension. On an automatic object: `'l' is not static, so its flexible array member 'd' cannot be initialized: the object has no room for the elements`. |
 | Designated initializers | Supported | |
 | Compound literals | Partial | At file scope, an array compound literal that converts to a pointer is refused: `int *p = (int[]){ 1, 2, 3 };` gives `a scalar takes exactly one initializer`. `&(int){ 3 }` at file scope, structure compound literals and array compound literals in a block work. Storage-class specifiers in a compound literal are C23; see the [C23](#c23) table. |
@@ -271,7 +272,7 @@ C17's value, `201710L`.
 | Enumeration constants outside the range of `int` | Partial | The enumeration and its constants take a type that can represent every value. A value of 2^63 or more is read as negative. See [Enumeration constants](#enumeration-constants). |
 | Empty initializer `= {}` | Partial | Zero-initializes any object except a VLA, which is refused: `variable length array 'a' cannot be initialized`. See [Initializers](#initializers). |
 | Labels before declarations and at the end of a compound statement | Supported | |
-| Unnamed parameters in a function definition | Not supported | `parameter 1 of 'f' needs a name in a definition` |
+| Unnamed parameters in a function definition | Supported | `void on_tick(void *) { ... }`. The parameter takes its argument's place and has no name in the debug information; `-Wunused-parameter` does not report it. |
 | Redefinition of a tag with the same content | Not supported | `redefinition of 'P'` |
 | Storage-class specifiers in compound literals, `(static int[]){ 1 }` | Not supported | `expected an expression, got 'static'` |
 | `()` means `(void)`; K&R definitions removed | Supported | See [Empty parameter lists](#empty-parameter-lists). |
@@ -279,7 +280,7 @@ C17's value, `201710L`.
 | `_Decimal32`, `_Decimal64`, `_Decimal128` | Not supported | `expected a type before '_Decimal32'` |
 | `_Float32`, `_Float64` | Partial | The same types as `float` and `double`. The `f32` and `f64` constant suffixes are refused: `malformed floating constant`. |
 | `_Float128` | Partial | The same type as `long double` where that is IEEE binary128. See [Target-dependent features](#target-dependent-features). |
-| `_Float16` | Not supported | `` _Float16/__fp16 is not supported: EmbCC has no 16-bit floating-point type, and widening it to `float` would give 24 bits of mantissa where the program asked for 11 `` |
+| `_Float16` | Partial | An incomplete type: a declaration may name it (macOS's `<math.h>` declares `__fabsf16` and its kin), but there is no 16-bit floating-point value. An object, `sizeof`, a cast or a call is refused: `'h' has incomplete type _Float16`. Widening it to `float` would give 24 bits of mantissa where the program asked for 11. |
 | `_Float32x`, `_Float64x` | Not supported | `expected a type before '_Float32x'` |
 | `unreachable()` in `<stddef.h>` | Not supported | Not defined: `'unreachable' is not declared in 'f' — for a call, add a prototype or define it first [E0001]`. `__builtin_unreachable()` is available. |
 | Width macros `INT_WIDTH`, `INT8_WIDTH`, ... | Not supported | Not defined by `<limits.h>` or `<stdint.h>`. |
@@ -878,7 +879,7 @@ error: unknown escape '\
 | Directive | Status | Notes |
 |---|---|---|
 | `#include "file"`, `#include <file>` | Supported | The search order is in [Invoking EmbCC](invoking.md#search-order). |
-| `#include` with a macro-expanded name, `#include HEADER` | Not supported | `malformed #include` |
+| `#include` with a macro-expanded name, `#include HEADER` | Supported | The replacement must be one of the two forms, `"name"` or `<name>`: `#include CMSIS_device_header`. |
 | `#define`, `#undef` | Supported | Redefining a macro with a body that differs only in white space is accepted with a warning, `macro 'NAME' redefined`; the standard allows it silently. |
 | `#if`, `#ifdef`, `#ifndef`, `#elif`, `#else`, `#endif` | Partial | See [Conditional expressions](#conditional-expressions). |
 | `#elifdef`, `#elifndef` | Supported | |
@@ -903,10 +904,7 @@ standard:
 
 | Case | Behavior |
 |---|---|
-| The conditional operator, `#if A ? B : C` | Not supported: `trailing junk in #if expression` |
 | Unsigned arithmetic | Every value is a signed 64-bit integer; a `u` suffix is ignored. `#if -1 < 0u` is true; the standard makes it false. |
-| Division or remainder by zero | An error even in an operand that `&&`, `\|\|` does not evaluate: `#if 0 && (1/0)` gives `division by zero in #if`. |
-| A multi-character constant | `bad character constant in #if` |
 
 ### Macro expansion
 

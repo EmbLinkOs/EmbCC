@@ -149,6 +149,12 @@ struct litch {
     int raw;
 };
 
+/* A plain character constant of more than one byte ('ab', or 'é' in
+ * UTF-8): GCC's int value, with its warnings. *p is past the first
+ * element and is left at the closing quote. */
+long lit_multichar(const char **p, struct litch first, const char *file,
+                   int line, int col);
+
 /* Decodes one element at *p — a source character or a backslash escape (with
  * *p just past the backslash if esc) — and advances *p past it. */
 struct litch lit_decode(const char **p, int esc, const char *file, int line);

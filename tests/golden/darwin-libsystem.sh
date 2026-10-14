@@ -1,6 +1,9 @@
 #!/bin/sh
-# A Darwin program EmbCC compiles links against Apple's C library, with
-# EmbCC's headers. Those have to describe THAT library, not EmbCC's own:
+# A Darwin program EmbCC compiles links against Apple's C library, and
+# reads the SDK's headers for it (with EmbCC's fixes in include/darwin:
+# NAN, which the SDK spells as an x86-only function for a compiler without
+# __GNUC__). Until 2026-10 they were EmbCC's own, made to match; either
+# way the headers have to describe THAT library, not EmbCC's own:
 # its stream and errno names (`stderr` did not link), its errno numbers
 # (EAGAIN is 35), and the size of every object it writes into -- a
 # 12-byte mbstate_t, a 36-byte struct tm and an 8-byte fenv_t were

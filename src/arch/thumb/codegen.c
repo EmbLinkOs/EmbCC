@@ -556,11 +556,50 @@ int t_op_calls_helper(const struct ir_ins *i)
  * Empty without an FPU: then a float is bits in a core register. */
 static const int T_FPOOL[16] = { 16, 17, 18, 19, 20, 21, 22, 23,
                                  24, 25, 26, 27, 28, 29, 30, 31 };
+
+/* ...except in a LEAF -- no call, no runtime helper, no asm -- where
+ * nothing can change s4-s15 behind the code's back, so a float can live
+ * there with no vpush/vpop: `a * b + c` is three instructions, not ten.
+ * The incoming arguments are below: the first register after them, and
+ * never below s4, which keeps s0-s3 (d0/d1, the scratch pairs) out too.
+ * The parameters are counted by size, every one, which covers a struct of
+ * floats AAPCS-VFP passes in s registers. Returns the first free S
+ * register, or 16 when the function is no leaf. */
+static int t_fp_leaf_start(const struct ir_func *fn)
+{
+    for (int k = 0; k < fn->nins; k++) {
+        const struct ir_ins *i = &fn->ins[k];
+        if (i->op == IR_CALL || i->op == IR_ASM || t_op_calls_helper(i))
+            return 16;
+    }
+    int words = 0;
+    const struct func *f = fn->src;
+    for (int k = 0; f && k < f->nparams; k++) {
+        int sz = f->param_tys[k] ? ty_size(f->param_tys[k]) : 8;
+        words += sz > 0 ? (sz + 3) / 4 : 2;
+    }
+    if (!f)
+        words = 16;
+    words = (words + 1) & ~1;            /* a double's pair stays aligned */
+    return words < 4 ? 4 : words > 16 ? 16 : words;
+}
+
 static const int *t_fp_pool_for(const struct ir_func *fn, int *n)
 {
-    (void)fn;
-    *n = target_thumb_fpu() ? 16 : 0;
-    return T_FPOOL;
+    static int pool[32];
+    int k = 0;
+    if (!target_thumb_fpu()) {
+        *n = 0;
+        return T_FPOOL;
+    }
+    for (int r = t_fp_leaf_start(fn); r < 16; r++)
+        pool[k++] = r;
+    /* the allocator takes RA_MAXPOOL at most: a leaf's callee-saved tail
+     * is cut there, which still leaves it more registers than before */
+    for (int r = 0; r < 16 && k < RA_MAXPOOL; r++)
+        pool[k++] = T_FPOOL[r];
+    *n = k;
+    return pool;
 }
 static int t_fp_callee_saved(int reg) { return reg >= 16; }
 
@@ -581,9 +620,19 @@ static int t_fp_callee_saved(int reg) { return reg >= 16; }
 static const int T_DPOOL[8] = { 16, 18, 20, 22, 24, 26, 28, 30 };
 static const int *t_dp_pool_for(const struct ir_func *fn, int *n)
 {
-    (void)fn;
-    *n = target_thumb_fpu_dp() ? 8 : 0;
-    return T_DPOOL;
+    /* in a leaf, d2-d7 first, as the singles' s4-s15 (t_fp_leaf_start) */
+    static int pool[16];
+    int k = 0;
+    if (!target_thumb_fpu_dp()) {
+        *n = 0;
+        return T_DPOOL;
+    }
+    for (int r = t_fp_leaf_start(fn); r < 16; r += 2)
+        pool[k++] = r;
+    for (int r = 0; r < 8; r++)
+        pool[k++] = T_DPOOL[r];
+    *n = k;
+    return pool;
 }
 /* A copy of a double local into a temporary is a plain move in the D
  * class: both are the whole eight bytes. */
@@ -600,7 +649,10 @@ static void t_abi_hints(const struct ir_func *fn, int *hint);
 /* REMATERIALIZATION: a constant one flagless instruction makes (movw,
  * or mov/mvn of a modified immediate) is made again at each read when it
  * has no register, rather than stored to a slot and loaded back. Flagless
- * because a read may come after a lowering's own compare. */
+ * because a read may come after a lowering's own compare. On ARMv6-M
+ * (v6m.c) every 32-bit constant is, and a symbol's address: each is a
+ * literal load there, flagless, one instruction, and the size of the
+ * slot load it replaces. */
 static int g_t_noremat = -1;
 
 static int t_remat_ok(const struct ir_ins *i)
@@ -608,9 +660,16 @@ static int t_remat_ok(const struct ir_ins *i)
     unsigned long v = (unsigned long)i->imm & 0xffffffffUL;
     if (g_t_noremat < 0)
         g_t_noremat = getenv("EMBCC_T_NOREMAT") != NULL;
-    /* ARMv6-M (v6m.c) shares the allocator and makes no constant again */
-    return !g_t_noremat && target_thumb_arch() != 6 && i->op == IR_CONST && !i->flt && i->w <= 4 &&
-           (v <= 0xffff || t_it_imm_ok((long)i->imm));
+    if (g_t_noremat)
+        return 0;
+    if (target_thumb_arch() == 6 &&
+        (i->op == IR_GADDR || i->op == IR_STRADDR || i->op == IR_FADDR))
+        return 1;
+    if (i->op != IR_CONST || i->flt || i->w > 4)
+        return 0;
+    if (target_thumb_arch() == 6)
+        return 1;
+    return v <= 0xffff || t_it_imm_ok((long)i->imm);
 }
 
 /* An indirect call's target in a register: IR_CALL reads it before the
@@ -4001,12 +4060,20 @@ static int fp_vfp_arith(struct t_fn *F, const struct ir_ins *i)
  *      dmb
  *
  * which is what GCC and clang emit for a sequentially consistent one on a
- * Cortex-M. The barriers are always full: the IR does not carry the memory
- * order, and the strongest one is right for every weaker request.
+ * Cortex-M. The barriers follow the memory order the IR carries (ir_ins.mo),
+ * as GCC's do: a release or stronger order has the one before, an acquire
+ * or stronger the one after, a relaxed one neither -- the fence-based
+ * mapping irgen's atomic loads and stores use, so the two agree. An RTOS
+ * takes a lock with an acquire exchange and releases it with a release
+ * store, and every lock paid two barriers for one.
  *
  * Five values are live in the loop -- address, operand, old, new and the
- * store's status -- and the backend's scratch set is four, so the status
- * goes in lr: every prologue saves it, and nothing in the loop calls.
+ * store's status. The status takes a low register free across the
+ * instruction when there is one (lo_free_at: `cmp r1, #0` is two bytes,
+ * `cmp.w lr, #0` four, and a leaf then keeps lr out of its prologue),
+ * else lr, which every other prologue saves. The old value lands in the
+ * result's own register when that is low and not an operand's, which
+ * saves the move out of r12 after the loop.
  *
  * The byte and halfword forms zero-extend, so a compare-and-swap compares
  * against its expected value zero-extended to the same width, and a signed
@@ -4015,6 +4082,29 @@ static int fp_vfp_arith(struct t_fn *F, const struct ir_ins *i)
 static void set_cc(struct t_fn *F, int dst, int cond);
 static void cmse_entry_return(struct t_fn *F);
 static void cmse_call(struct t_fn *F, int ncrn);
+
+static int t_is_atomic(const struct ir_ins *i)
+{
+    return i->op == IR_XCHG || i->op == IR_XADD || i->op == IR_ARMW ||
+           i->op == IR_CAS || i->op == IR_CMPXCHG;
+}
+
+/* The low register the atomic at instruction n keeps its store status
+ * in: one free across it that holds none of its operands or its result,
+ * else -1 for lr. The leaf test asks the same question. */
+static int t_atomic_status_reg(const struct t_fn *F, int n)
+{
+    const struct ir_ins *i = &F->fn->ins[n];
+    unsigned lo = lo_free_at(F, n);
+    int v[4] = { i->a, i->b, i->c, i->dst };
+    for (int k = 0; k < 4; k++)
+        if (v[k] >= 0 && F->loc && in_reg(F, v[k]) && F->loc[v[k]] < 8)
+            lo &= ~(1u << F->loc[v[k]]);
+    for (int k = 0; k < 8; k++)
+        if (lo >> k & 1)
+            return k;
+    return -1;
+}
 
 static void thumb_atomic(struct t_fn *F, const struct ir_ins *i)
 {
@@ -4028,26 +4118,37 @@ static void thumb_atomic(struct t_fn *F, const struct ir_ins *i)
                    "doubleword exclusive; GCC calls libatomic for these)");
 #define LDX(rt) (sz == 4 ? t_ldrex(t, (rt), addr, 0) \
                          : t_ldrexbh(t, (rt), addr, sz))
-#define STX(rt) (sz == 4 ? t_strex(t, T_LR, (rt), addr, 0) \
-                         : t_strexbh(t, T_LR, (rt), addr, sz))
+#define STX(rt) (sz == 4 ? t_strex(t, st, (rt), addr, 0) \
+                         : t_strexbh(t, st, (rt), addr, sz))
+    int n = (int)(i - F->fn->ins);
+    int before = i->mo != IR_MO_RELAXED && i->mo != IR_MO_ACQUIRE;
+    int after = i->mo != IR_MO_RELAXED && i->mo != IR_MO_RELEASE;
+    int st = n >= 0 && n < F->fn->nins ? t_atomic_status_reg(F, n) : -1;
+    int old = T_ACC;
+    if (st < 0)
+        st = T_LR;
     addr = rdr(F, i->a, T_ADDR);
-    t_barrier(t, T_BAR_DMB);
+    if (before)
+        t_barrier(t, T_BAR_DMB);
     if (i->op == IR_XCHG || i->op == IR_XADD || i->op == IR_ARMW) {
         int val = rdr(F, i->b, T_TMP), nw;
+        if (i->dst >= 0 && in_reg(F, i->dst) && F->loc[i->dst] < 8 &&
+            F->loc[i->dst] != addr && F->loc[i->dst] != val)
+            old = F->loc[i->dst];
         top = t->len;
-        LDX(T_ACC);
+        LDX(old);
         if (i->op == IR_XCHG) {
             nw = val;
         } else {
             nw = T_SCR;
             if (i->op == IR_XADD)
-                t_alu_reg(t, T_OP_ADD, nw, T_ACC, val, 0);
+                t_alu_reg(t, T_OP_ADD, nw, old, val, 0);
             else if (i->imm == '&' || i->imm == 'n')
-                t_alu_reg(t, T_OP_AND, nw, T_ACC, val, 0);
+                t_alu_reg(t, T_OP_AND, nw, old, val, 0);
             else if (i->imm == '|')
-                t_alu_reg(t, T_OP_ORR, nw, T_ACC, val, 0);
+                t_alu_reg(t, T_OP_ORR, nw, old, val, 0);
             else if (i->imm == '^')
-                t_alu_reg(t, T_OP_EOR, nw, T_ACC, val, 0);
+                t_alu_reg(t, T_OP_EOR, nw, old, val, 0);
             else
                 t_refuse(F->fn, i, "an atomic read-modify-write of this "
                                    "operation");
@@ -4055,7 +4156,7 @@ static void thumb_atomic(struct t_fn *F, const struct ir_ins *i)
                 t_mvn_reg(t, nw, nw, 0);
         }
         STX(nw);
-        t_cmp_imm(t, T_LR, 0);
+        t_cmp_imm(t, st, 0);
         br = t_bcond16(t, T_NE);
         if (!t_patch_bcond16(t, br, top))
             internal_error("thumb: an atomic's retry loop is out of reach");
@@ -4072,12 +4173,16 @@ static void thumb_atomic(struct t_fn *F, const struct ir_ins *i)
             ldst_must(t, T_TMP, p, 0, sz, 0, 0);    /* zero-extended */
         }
         des = rdr(F, i->c, T_SCR);
+        if (i->op == IR_CAS && i->dst >= 0 && in_reg(F, i->dst) &&
+            F->loc[i->dst] < 8 && F->loc[i->dst] != addr &&
+            F->loc[i->dst] != exp && F->loc[i->dst] != des)
+            old = F->loc[i->dst];
         top = t->len;
-        LDX(T_ACC);
-        t_cmp_reg(t, T_ACC, exp);
+        LDX(old);
+        t_cmp_reg(t, old, exp);
         fail = t_bcond16(t, T_NE);
         STX(des);
-        t_cmp_imm(t, T_LR, 0);
+        t_cmp_imm(t, st, 0);
         br = t_bcond16(t, T_NE);
         done = t_b16(t);
         if (!t_patch_bcond16(t, br, top) ||
@@ -4090,18 +4195,20 @@ static void thumb_atomic(struct t_fn *F, const struct ir_ins *i)
             /* *b = the value seen; the result is whether it matched --
              * set_cc's IT block when it has a low register. */
             int p = rdr(F, i->b, T_SCR);
-            ldst_must(t, T_ACC, p, 0, sz, 0, 1);
-            t_barrier(t, T_BAR_DMB);
-            t_cmp_reg(t, T_ACC, exp);
+            ldst_must(t, old, p, 0, sz, 0, 1);
+            if (after)
+                t_barrier(t, T_BAR_DMB);
+            t_cmp_reg(t, old, exp);
             set_cc(F, i->dst, T_EQ);
             return;
         }
     }
-    t_barrier(t, T_BAR_DMB);
+    if (after)
+        t_barrier(t, T_BAR_DMB);
     if (i->dst >= 0) {
         if (sz < 4 && i->sign)
-            t_ext(t, T_ACC, T_ACC, sz, 1);
-        wr(F, i->dst, T_ACC);
+            t_ext(t, old, old, sz, 1);
+        wr(F, i->dst, old);
     }
 #undef LDX
 #undef STX
@@ -6033,8 +6140,11 @@ static void gen_ins(struct t_fn *F, int n)
                     ldst_must(t, o->reg, o->reg, 0, o->size, 0, 0);
             }
         }
-        for (int k = 0; k < ia->codelen; k++)
-            code_byte(t, ia->code[k]);
+        /* the bytes, padded at each alignment for where they land, and
+         * their data marked: ARM's $d and $t mapping symbols */
+        code_put_asm(t, ia->code, ia->codelen, ia->drange, ia->ndrange,
+                     ia->arange, ia->narange,
+                     t_isa_a32 ? CODE_FILL_A32 : CODE_FILL_THUMB2);
         /* Out, through an address: the address is live across the asm
          * (regalloc.c counts it as crossing), so it is still there. An
          * "m" output was written BY the template through the address its
@@ -6994,10 +7104,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
              !fn->ins[i].asm_ir->cont &&
              (!fn->ins[i].asm_ir->clob ||
               (fn->ins[i].asm_ir->clob >> 14 & 1))) ||
-            t_op_calls_helper(&fn->ins[i]) ||
-            fn->ins[i].op == IR_XCHG || fn->ins[i].op == IR_XADD ||
-            fn->ins[i].op == IR_ARMW || fn->ins[i].op == IR_CAS ||
-            fn->ins[i].op == IR_CMPXCHG)
+            t_op_calls_helper(&fn->ins[i]))
             F.leaf = 0;
     /* The constants with no register that are made where they are read:
      * temps only, and not at -O0 or -Og, where every value has a slot. */
@@ -7030,6 +7137,12 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     layout(&F);
     if (F.loc && fn->nins && fn->nvregs && !getenv("EMBCC_T_NOLO"))
         F.lv_busy = lo_busy_map(&F);
+    /* An atomic's store status is a low register free across it when
+     * there is one (thumb_atomic), else lr -- and only lr makes the
+     * function no leaf. Decided here, where the busy map exists. */
+    for (i = 0; i < fn->nins; i++)
+        if (t_is_atomic(&fn->ins[i]) && t_atomic_status_reg(&F, i) < 0)
+            F.leaf = 0;
     /* Not at -O0 or -Og, where a debugger may write a variable's slot
      * between two reads. */
     if (F.lv_busy && !F.keep_vars && !getenv("EMBCC_T_NORC")) {
@@ -7065,6 +7178,15 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     int nshortb = 0;
     F.no_tbh = xcalloc((size_t)fn->nins + 1, 1);
     int restarted = 0;           /* a first pass made again: reset as for a later one */
+    /* An asm that aligns its bytes (`.p2align 3`) pads by where it lands,
+     * so when the code before it shrinks it can GROW: a distance measured
+     * across it on the first pass may be longer on the next by this much,
+     * and a branch made short has to reach anyway. 0 without one. */
+    int asm_sl = 0;
+    for (i = 0; i < fn->nins; i++)
+        if (fn->ins[i].op == IR_ASM && fn->ins[i].asm_ir)
+            asm_sl += code_asm_align_slack(fn->ins[i].asm_ir->arange,
+                                           fn->ins[i].asm_ir->narange);
     for (int pass = 0; pass < 3; pass++) {
     int redo0 = 0;
     if (!F.lp_planned)
@@ -7111,8 +7233,16 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     {
         int al = t_isa_a32 ? 3 : 1;
         for (int k = 0; k < fn->nins; k++)
-            if (fn->ins[k].op == IR_ASM)
-                al = 3;
+            if (fn->ins[k].op == IR_ASM) {
+                /* ...and one that aligns its own bytes (`.p2align 3`)
+                 * starts on that, so that in a section of its own the
+                 * buffer's offsets are the section's */
+                const struct ir_asm *ia = fn->ins[k].asm_ir;
+                int m = ia ? code_asm_align_max(ia->arange, ia->narange) : 0;
+                al |= 3;
+                if (m - 1 > al)
+                    al = m - 1;
+            }
         while (t->len & al)
             t_nop(t);
         f->code_align = al + 1;
@@ -7564,7 +7694,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
             free(pair.drange);
         } else if (F.fix[i].cond == T_TBB) {
             long d = (long)target - F.fix[i].cz_at;
-            if (d < 0 || d > 2L * 255 || (d & 1)) {
+            if (d < 0 || d > 2L * 255 - (pass ? 0 : asm_sl) || (d & 1)) {
                 /* tbh for that switch, from a first pass made again: 4
                  * while this pass's other entries for it land here */
                 if (pass == 0 && F.fix[i].ins >= 0 &&
@@ -7580,7 +7710,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
             t->p[F.fix[i].at] = (unsigned char)(d / 2);
         } else if (F.fix[i].cond == T_TBH) {
             long d = (long)target - F.fix[i].cz_at;
-            if (d < 0 || d > 2L * 65535 || (d & 1)) {
+            if (d < 0 || d > 2L * 65535 - (pass ? 0 : asm_sl) || (d & 1)) {
                 /* A tbh entry is a halfword count: 128 KB forward and no
                  * more, which a large function at -O0 passes. On the
                  * first pass that switch is marked for the word table and
@@ -7649,8 +7779,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         shortb = xcalloc((size_t)(nshortb ? nshortb : 1), 1);
         for (i = 0; i < F.nfix; i++) {
             long d = (long)F.label_off[F.fix[i].label] - F.fix[i].at - 4;
-            shortb[i] = F.fix[i].cond < 0 ? (d >= -2048 && d <= 2046)
-                                          : (d >= -256 && d <= 254);
+            shortb[i] = F.fix[i].cond < 0
+                ? (d >= -2048 + asm_sl && d <= 2046 - asm_sl)
+                : (d >= -256 + asm_sl && d <= 254 - asm_sl);
             /* ARM state: one branch form, and no cbz */
             if (t_isa_a32) {
                 shortb[i] = 0;
@@ -7669,7 +7800,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
                           F.fix[i].cz_at - 4;
                 long gap = (long)F.label_off[F.fix[i].label] -
                            (F.fix[i].at + F.fix[i].sz);
-                if (dz >= 0 && dz <= 126 && gap >= 2)
+                if (dz >= 0 && dz <= 126 - asm_sl && gap >= 2 + asm_sl)
                     shortb[i] = 2;
             }
             any |= shortb[i];
@@ -8132,6 +8263,7 @@ const struct ra_target *tcg_ra(void) { return &THUMB_RA; }
 int tcg_regalloc(void) { return g_t_regalloc; }
 int tcg_ext(void) { return g_t_ext; }
 void tcg_role_fail(void) { g_t_role_fail = 1; }
+int tcg_role_failed(void) { return g_t_role_fail; }
 unsigned *tcg_lo_busy_map(const struct t_fn *F) { return lo_busy_map(F); }
 unsigned tcg_busy(const struct t_fn *F, int n, int span) { return t_busy(F, n, span); }
 int tcg_lo_op_ok(const struct t_fn *F, const struct ir_ins *i) { return lo_op_ok(F, i); }

@@ -72,10 +72,15 @@ command -v "$qemu" > /dev/null 2>&1 || exit 126
 # twentieth of a second. Everywhere else the emulator does the work,
 # which for a program that prints a line and exits is still under two
 # seconds.
+#
+# EMBCC_QEMU_ACCEL overrides the choice: on macOS 27.2 with QEMU 11.1.1,
+# an hvf guest prints nothing and never ends, and every aarch64 run
+# timed out until "-accel tcg -cpu max" was given here.
 accel="-accel tcg -cpu max"
 if [ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = "$native" ]; then
     accel="-accel hvf -cpu host"
 fi
+accel=${EMBCC_QEMU_ACCEL:-$accel}
 
 # The initramfs: one file, mode 755, named /init.
 work=${TMPDIR:-/tmp}/embcc-linux-$$

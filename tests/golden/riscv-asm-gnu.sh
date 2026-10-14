@@ -125,3 +125,53 @@ grep -q 'fsd needs the D extension' "$out/fp32.err" ||
     fail "the refusal of fsd without D does not say why: $(head -1 "$out/fp32.err")"
 
 echo "riscv-asm-gnu: a .S with an -I header, .extern, expressions, spaced addresses, csr immediates, loads from symbols and an FPU context save assemble as llvm-mc and clang do"
+
+# ---- jumps and branches to another section ---------------------------------
+# EmbLinkRTOS's RISC-V context switch puts each routine in a section of its
+# own (.text.<name>, for --gc-sections) and jumps between them: `j
+# embn_rv_restore`. A label in another section is a relocation, not a
+# displacement, and only call/la/lw had one -- the .S stopped with "names
+# 'embn_rv_restore', which is in another section". j, jal and `jal rd` now
+# carry R_RISCV_JAL and tail is call's pair through t1, as clang writes them.
+# (R_RISCV_CALL and clang's R_RISCV_CALL_PLT are the same pair to a linker.)
+# A conditional branch carries R_RISCV_BRANCH, as GNU as writes it (clang
+# instead inverts it around a j); the linker checks its 4 KiB reach.
+cat > "$out/xs.S" <<'EOF2'
+        .section .text.a, "ax"
+        .globl f
+f:      j       g
+        jal     g
+        jal     t0, g
+        tail    g
+        call    g
+        j       1f
+1:      ret
+        .section .text.b, "ax"
+        .globl g
+g:      ret
+EOF2
+"$EMBCC" --target=riscv32-unknown-elf -c "$out/xs.S" -o "$out/xs.o" 2> "$out/xs.err" ||
+    { cat "$out/xs.err"; fail "a jump to another section's label"; }
+clang --target=riscv32-unknown-elf -march=rv32i -mno-relax -c "$out/xs.S" -o "$out/xs-clang.o" ||
+    fail "clang rejected xs.S"
+rel() { "$OBJDUMP" -dr "$1" | sed -n '/<f>:/,/^$/p' | sed 's/^ *[0-9a-f]*: *//; s/<f+0x[0-9a-f]*>//; s/<f>//' |
+        sed 's/R_RISCV_CALL_PLT/R_RISCV_CALL/' | awk -F'\t' '{ $1 = $1; print }'; }
+rel "$out/xs.o" > "$out/xs.dis"; rel "$out/xs-clang.o" > "$out/xs-clang.dis"
+diff "$out/xs-clang.dis" "$out/xs.dis" || fail "a cross-section jump differs from clang's"
+printf '        .section .text.a, "ax"\nf:      beq a0, a1, g\n        bgtu a0, a1, g\n        .section .text.b, "ax"\n        .globl g\ng:      ret\n' \
+    > "$out/xb.S"
+"$EMBCC" --target=riscv32-unknown-elf -c "$out/xb.S" -o "$out/xb.o" 2> "$out/xb.err" ||
+    { cat "$out/xb.err"; fail "a branch to another section's label"; }
+[ "$("$OBJDUMP" -r "$out/xb.o" | grep -c 'R_RISCV_BRANCH *g$')" = 2 ] ||
+    { "$OBJDUMP" -dr "$out/xb.o"; fail "a cross-section branch is not R_RISCV_BRANCH"; }
+
+# bgt, ble, bgtu and bleu: blt/bge with the operands swapped
+printf 'f: bgt a0, a1, 1f\n ble a2, a3, 1f\n bgtu a4, a5, 1f\n bleu t0, t1, 1f\n1: ret\n' > "$out/sw.S"
+"$EMBCC" --target=riscv32-unknown-elf -c "$out/sw.S" -o "$out/sw.o" 2> "$out/sw.err" ||
+    { cat "$out/sw.err"; fail "bgt/ble/bgtu/bleu"; }
+clang --target=riscv32-unknown-elf -march=rv32i -mno-relax -c "$out/sw.S" -o "$out/sw-clang.o" ||
+    fail "clang rejected sw.S"
+"$OBJDUMP" -d "$out/sw.o" | grep -E '^ +[0-9a-f]+:' > "$out/sw.dis"
+"$OBJDUMP" -d "$out/sw-clang.o" | grep -E '^ +[0-9a-f]+:' > "$out/sw-clang.dis"
+diff "$out/sw-clang.dis" "$out/sw.dis" || fail "a swapped-operand branch differs from clang's"
+echo "riscv-asm-gnu: j, jal, jal rd, tail and call to another section relocate as clang's; branches carry R_RISCV_BRANCH; bgt/ble/bgtu/bleu as clang"

@@ -21,6 +21,63 @@ command -v "$AS" >/dev/null 2>&1 || {
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
 
+# Strings, alignments, data and %c in a template, against llvm-mc for an
+# ELF and a Mach-O object: .ascii/.asciz/.string, .p2align/.balign/.align
+# with and without a fill and a maximum, .byte to .xword, and constants
+# written in with %c0, as Linux's asm-offsets and EmbLinkRTOS's layout
+# probes write them -- each was ".ascii is not supported" and "modifier
+# '%c' is not supported". llvm-mc's bytes at every word phase in the
+# section (tests/harness/asmdir.sh): the padding is decided where the
+# template lands.
+MC=${EMBCC_LLVM_MC:-llvm-mc}
+LOBJCOPY=${EMBCC_LLVM_OBJCOPY:-llvm-objcopy}
+EMBCC=${EMBCC:-$PWD/embcc}
+if command -v "$MC" >/dev/null 2>&1 && command -v "$LOBJCOPY" >/dev/null 2>&1
+then
+    cat > "$out/dirs.txt" <<'EOF'
+.ascii "->EMB_PROBE s %c1 %c0"
+.p2align 2
+.ascii "abc"
+.align 3
+.asciz "hi", "x"
+.byte 0x55
+.p2align 4
+.string "\t\"q\\\101\x42\0z"
+.balign 8
+.byte 1, 255, -128, %c0, %c1
+.p2align 3, 0x5a
+.byte 7
+.p2align 4,,5
+.byte 9
+.p2align 4,,15
+.ascii "a;b#c//d"
+.hword 0x1234, %c0
+.short 7
+.2byte 9
+.word 0x12345678
+.4byte 1
+.xword -2
+.dword 3
+.8byte 4
+.p2align 2
+EOF
+    ( OBJCOPY=$LOBJCOPY
+      . tests/harness/asmdir.sh
+      asmdir_referee "$out" aarch64-elf "-triple=aarch64" nop 4 "$out/dirs.txt" &&
+      asmdir_referee "$out" arm64-apple-darwin "-triple=aarch64-apple-darwin" \
+          nop 4 "$out/dirs.txt" __TEXT,__text ) || exit 1
+    printf 'int f(int x){ __asm__ volatile(".byte %%c0" : : "r"(x)); return x; }\n' \
+        > "$out/c.c"
+    if "$EMBCC" --target=aarch64-elf -c "$out/c.c" -o /dev/null 2> "$out/c.err"; then
+        echo "arm64-asm: %c of a register operand was accepted"; exit 1
+    fi
+    grep -q "names a register operand" "$out/c.err" || {
+        echo "arm64-asm: the refusal of %c on a register does not say why:"
+        cat "$out/c.err"; exit 1; }
+else
+    echo "arm64-asm: SKIP the directives against llvm-mc: llvm-mc not found"
+fi
+
 $CC -std=c99 -Wall -Wextra -Werror -o "$out/check" \
     tools/a64check/a64asmcheck.c src/arch/aarch64/asm.c \
     src/arch/aarch64/emit.c src/arch/code.c src/driver/util.c \

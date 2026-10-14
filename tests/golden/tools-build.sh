@@ -26,6 +26,16 @@ tools=$(awk '/^all:/ { f = 1 }
              f { l = l " " $0; if ($0 !~ /\\$/) { print l; exit } }' \
             "$EMBCC_ROOT/Makefile" | sed 's/\\//g; s/^ *all: *//')
 [ -n "$tools" ] || { echo "FAIL: could not read the `all` target"; exit 1; }
+# ...less the .PHONY ones, which make no file of their name to link:
+# binutils-names is ar, ranlib, objcopy, size and nm as symlinks
+phony=$(awk '/^\.PHONY:/ { f = 1 }
+             f { sub(/#.*/, ""); l = l " " $0; if ($0 !~ /\\$/) f = 0 }
+             END { print l }' "$EMBCC_ROOT/Makefile" | sed 's/\\//g; s/\.PHONY://g')
+keep=
+for t in $tools; do
+    case " $phony " in *" $t "*) ;; *) keep="$keep $t" ;; esac
+done
+tools=$keep
 
 # The link commands come from the Makefile so there is one source of
 # truth, but they must NOT be run as-is: `make embcc` writes ./embcc in

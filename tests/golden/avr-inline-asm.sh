@@ -162,6 +162,81 @@ for O in -O0 -O1 -O2 -Os; do
         echo "  got:  $got"; exit 1; }
 done
 
+# ---- strings, alignments, data and %c, against llvm-mc ----------------
+# .ascii/.asciz/.string, .p2align/.balign/.align with and without a fill
+# and a maximum, the data directives -- .word is the MACHINE's word, two
+# bytes, as GNU as has it -- and constants written in with %c0, as
+# Linux's asm-offsets and EmbLinkRTOS's layout probes write them. All
+# were "does not begin with an instruction". llvm-mc's bytes at every
+# halfword phase in the section (tests/harness/asmdir.sh). `.align 3` is
+# eight bytes, as GNU as reads it for AVR; llvm-mc reads a byte count
+# there, so its copy says .p2align.
+MC=${EMBCC_LLVM_MC:-llvm-mc}
+OBJCOPY=${EMBCC_LLVM_OBJCOPY:-llvm-objcopy}
+if command -v "$MC" >/dev/null 2>&1 && command -v "$OBJCOPY" >/dev/null 2>&1
+then
+    . tests/harness/asmdir.sh
+    cat > "$out/dirs.txt" <<'EOF'
+.ascii "->EMB_PROBE s %c1 %c0"
+.p2align 2
+.ascii "abc"
+.align 3
+.asciz "hi", "x"
+.byte 0x55
+.p2align 4
+.string "\t\"q\\\101\x42\0z"
+.balign 8
+.byte 1, 255, -128, %c0, %c1
+.p2align 3, 0x5a
+.byte 7
+.p2align 4,,5
+.byte 9
+.p2align 4,,15
+.ascii "a;b#c//d"
+.word 0x1234, %c0
+.short -2
+.long 0x12345678
+.quad -2
+.p2align 1
+EOF
+    ASMDIR_MC_SED='s/^\.align /.p2align /'
+    asmdir_referee "$out" avr "-triple=avr -mcpu=atmega328p" nop 2 \
+        "$out/dirs.txt" || exit 1
+    ASMDIR_MC_SED=
+else
+    echo "SKIP the directives against llvm-mc: llvm-mc/llvm-objcopy not found"
+fi
+refuses "%c of a register operand" "names a register operand" \
+    'int f(int x){ __asm__ volatile(".byte %c0" : : "r"(x)); return x; }'
+
+# ---- avr-gcc's __SREG__, __SP_L__ and __SP_H__ -------------------------
+# avr-gcc writes `__SREG__ = 0x3f` (and SPH, SPL) at the top of the assembly
+# it generates, so inline asm, a naked function's body and a file-scope asm
+# block name them -- an RTOS port's context switch is written that way. Each
+# must assemble to the same bytes as the I/O address written as a number.
+io_src() {
+    cat <<IOEOF
+unsigned char lk(void) { unsigned char s;
+    __asm__ __volatile__("in %0, $1\n\tcli" : "=r"(s) :: "memory"); return s; }
+void ul(unsigned char k) { __asm__ __volatile__("out $1, %0" :: "r"(k) : "memory"); }
+void sw(void) __attribute__((naked));
+void sw(void) { __asm__ __volatile__("in r0, $1\n\tpush r0\n\tin r0, $2\n\tin r0, $3\n\t"
+                                     "out $3, r0\n\tout $2, r0\n\tpop r0\n\tout $1, r0\n\tret"); }
+__asm__(".globl q\nq:\n\tin r24, $1\n\tin r22, $2\n\tin r23, $3\n\tret\n");
+IOEOF
+}
+io_src __SREG__ __SP_L__ __SP_H__ > "$out/ioname.c"
+io_src 0x3f 0x3d 0x3e > "$out/ionum.c"
+for v in ioname ionum; do
+    "$EMBCC" --target=avr -Os -c "$out/$v.c" -o "$out/$v.o" 2> "$out/$v.err" ||
+        { cat "$out/$v.err"; echo "the I/O register names do not assemble ($v)"; exit 1; }
+    llvm-objdump -d "$out/$v.o" | grep -E '^ +[0-9a-f]+:' > "$out/$v.dis"
+done
+cmp -s "$out/ioname.dis" "$out/ionum.dis" ||
+    { diff "$out/ionum.dis" "$out/ioname.dis"; echo "__SREG__/__SP_L__/__SP_H__ are not 0x3f/0x3d/0x3e"; exit 1; }
+grep -q 'in	r0, 0x3f' "$out/ioname.dis" || { echo "no in r0, SREG in the naked body"; exit 1; }
+echo "  __SREG__, __SP_L__, __SP_H__ are 0x3f, 0x3d, 0x3e in inline asm, a naked body and file-scope asm"
+
 echo "inline asm works on a real ATmega328P at four optimisation levels: a
 critical section through SREG, the machine's own mul with the clr r1 the
 compiler will not emit for itself, %A/%B naming the bytes of a 16-bit

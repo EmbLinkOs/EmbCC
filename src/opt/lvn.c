@@ -60,7 +60,14 @@ int vn_key(struct ir_ins *i, int memver, struct vn *k)
     case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV: case IR_MOD:
     case IR_AND: case IR_OR: case IR_XOR: case IR_SHL: case IR_SHR:
     case IR_MULH: case IR_MULW:
-        k->a = i->a; k->b = i->b; k->w = i->w; k->sign = i->sign; return 1;
+        k->a = i->a; k->b = i->b; k->w = i->w; k->sign = i->sign;
+        /* `add x, #1` and `add x, #2` share their operands' temps and
+         * differ in the immediate alone */
+        if (i->imm_b) {
+            k->b = -2;
+            k->imm = i->imm;
+        }
+        return 1;
     case IR_CMP:
         k->a = i->a; k->b = i->b; k->w = i->w; k->sign = i->sign;
         k->pred = i->pred; return 1;

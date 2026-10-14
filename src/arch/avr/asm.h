@@ -44,6 +44,9 @@ int avrasm_assemble(const char *text, struct code *out, char *err, int errlen);
  * __SREG__ (which is not a register and answers -1). -1 for anything that
  * is not a register, which is how the assembler tells `r20` from a label. */
 int avrasm_gpr(const char *name, int len);
+/* Is W, in statement STMT, a word that names no symbol: avr-gcc's
+ * __SREG__, __SP_H__ and __SP_L__ (src/as/gas.c's is_word). */
+int avrasm_is_word(const char *stmt, const char *w, int len);
 
 /* ---- the forms that name a symbol ------------------------------------ */
 

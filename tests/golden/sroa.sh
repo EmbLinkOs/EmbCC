@@ -203,6 +203,23 @@ for r in two-accesses-overlap-at-different-widths address-escapes \
 done
 echo "the union, the escaping address and the volatile object each named why"
 
+# The same decisions where an address is narrower than 8 bytes. The pass
+# followed `address + constant` only at width 8, so on every 32-bit
+# target and on AVR no field past the first was ever split -- and this
+# file asked x86-64 alone.
+for t in thumbv7em-none-eabi riscv32-unknown-elf avr; do
+    "$EMBCC" --target=$t -O2 -fremarks -c "$out/a.c" -o /dev/null \
+        > "$out/rem-$t.txt" 2>&1
+    for f in rem rem-$t; do
+        grep -o "split-into-scalars '[a-z]*'" "$out/$f.txt" | sort > "$out/$f.split"
+    done
+    cmp -s "$out/rem.split" "$out/rem-$t.split" || {
+        echo "FAIL: $t splits differently from x86-64:"
+        diff "$out/rem.split" "$out/rem-$t.split" | sed 's/^/      /'
+        exit 1; }
+done
+echo "and the same five are split on Cortex-M, RV32 and AVR, where an address is narrower"
+
 # ---- 3. -fno-sroa turns it off -----------------------------------------
 z=$("$EMBCC" --target=x86_64-linux-gnu -O2 -fno-sroa -fremarks -c "$out/a.c" \
       -o /dev/null 2>&1 | grep -c "split-into-scalars" || true)

@@ -159,6 +159,12 @@ static char *tc_subst(const char *file, int line, const char *tmpl,
             continue;
         }
         int k = -1;
+        /* %c0: the constant alone, as gcc prints it */
+        int bare = 0;
+        if (*p == 'c' && (p[1] == '[' || isdigit((unsigned char)p[1]))) {
+            bare = 1;
+            p++;
+        }
         if (*p == '[') {
             const char *e = strchr(p, ']');
             if (!e)
@@ -182,6 +188,10 @@ static char *tc_subst(const char *file, int line, const char *tmpl,
             diag_fatal(file, line, "asm template modifier '%%%c' is not "
                                    "supported for TriCore", *p ? *p : ' ');
         }
+        if (bare && !isimm[k])
+            diag_fatal(file, line, "%%c%d names a register operand; %%c "
+                       "prints a constant, and wants an \"i\" or \"n\" "
+                       "operand", k);
         if (isimm[k])
             len += (size_t)snprintf(out + len, cap - len, "%ld", imms[k]);
         else
