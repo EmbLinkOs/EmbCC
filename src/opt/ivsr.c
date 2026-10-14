@@ -253,6 +253,57 @@ static int vchains_read_outside(const struct vchains *c, int v, int lo, int hi)
     return 0;
 }
 
+/* Is the index's value after the loop read: a path from a block the loop
+ * exits to that reads iv before anything outside redefines it? The exit
+ * test's rewrite gives the index a name of its own inside the loop and
+ * leaves the old one holding the value from BEFORE the loop -- right for
+ * the guard, wrong for a read after it: `while (k < 9 && isdigit(t[k]))
+ * k++; return k;` returned 0. A redefinition ends a path (the `k = 0` of
+ * an enclosing loop's next trip), so a nested loop's counter still goes. */
+static int iv_read_after(const struct ir_func *fn, const struct bb *bb,
+                         int nbb, const char *in, int iv)
+{
+    char *seen = xcalloc((size_t)(nbb ? nbb : 1), 1);
+    int *work = xmalloc((size_t)(nbb ? nbb : 1) * sizeof *work), nw = 0;
+    for (int b = 0; b < nbb; b++) {
+        if (!in[b])
+            continue;
+        for (int s = 0; s < bb[b].nsucc; s++) {
+            int t = bb[b].succ[s];
+            if (t >= 0 && t < nbb && !in[t] && !seen[t]) {
+                seen[t] = 1;
+                work[nw++] = t;
+            }
+        }
+    }
+    int live = 0;
+    while (nw > 0 && !live) {
+        int b = work[--nw], killed = 0;
+        for (int n = bb[b].start; n < bb[b].end && !killed && !live; n++) {
+            struct ir_ins c = fn->ins[n];     /* (ins_reads takes no const) */
+            if (ins_reads(&c, iv)) {
+                VDBG("ivsr: %%%d is read after the loop, at %d (op %d)\n",
+                     iv, n, (int)fn->ins[n].op);
+                live = 1;
+            }
+            else if (def_target(&fn->ins[n]) == iv)
+                killed = 1;
+        }
+        if (killed || live)
+            continue;
+        for (int s = 0; s < bb[b].nsucc; s++) {
+            int t = bb[b].succ[s];
+            if (t >= 0 && t < nbb && !in[t] && !seen[t]) {
+                seen[t] = 1;
+                work[nw++] = t;
+            }
+        }
+    }
+    free(seen);
+    free(work);
+    return live;
+}
+
 static int ivsr_one(struct ir_func *fn)
 {
     if (fn->nins == 0)
@@ -458,8 +509,9 @@ static int ivsr_one(struct ir_func *fn)
          *
          * Only for a CONSTANT bound, because T is otherwise a division
          * by step in the preheader, and only when the index is dead
-         * outside the loop, because otherwise the counter stays and the
-         * two extra instructions here are all that happens. */
+         * after the loop (iv_read_after): the rewrite leaves the old name
+         * holding the value from before the loop, and a read after it
+         * would get that. */
         int lftr_lim = -1, lftr_k = -1, lftr_iv = -1;
         long lftr_off = 0;
         {
@@ -468,6 +520,7 @@ static int ivsr_one(struct ir_func *fn)
             long scale = cscale[0], dv = scale * step;
             if (cmpi->op == IR_CMP && cmpi->pred == B_LT &&
                 cmpi->sign && !cmpi->flt && cmpi->a == iv &&
+                !iv_read_after(fn, bb, nbb, in, iv) &&
                 const_b(fn, &d, cmpi, &bound) &&
                 bound > 0 && bound <= (1L << 40) &&
                 scale > 0 && scale <= (1L << 20) && step <= (1L << 20)) {
