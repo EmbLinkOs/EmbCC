@@ -51,7 +51,13 @@ def compile_ok(cc, extra, mode, src, cxx):
         if cxx:
             cmd += ['-x', 'c++']
         cmd.append(p)
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        except subprocess.TimeoutExpired:
+            # a compiler that does not finish has not accepted the case
+            print('%s: hung under %s' % (os.path.basename(cc[0]),
+                                         ' '.join(cmd[1:-1])), file=sys.stderr)
+            return False
         return r.returncode == 0
     finally:
         os.unlink(p)

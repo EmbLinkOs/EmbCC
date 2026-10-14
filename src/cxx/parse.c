@@ -9203,8 +9203,14 @@ void cx_parse_unit(void)
         jmp_buf jb;
         void *save = cx_recover;
         cx_recover = &jb;
+        int before = cx_pos;
         if (!setjmp(jb)) {
             parse_declaration(1, NULL);
+            /* a declaration that read nothing and said nothing would be
+             * read again, forever (C++26's `T...[0]` was one) */
+            if (cx_pos == before)
+                cx_error(cx_cur(), "expected a declaration, found %s",
+                         tok_describe(&cx_cur()->t));
         } else {
             int at = cx_pos;
             parse_restore(st);
