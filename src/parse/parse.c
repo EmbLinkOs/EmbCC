@@ -18,7 +18,7 @@
  * its own. */
 static int c23_words(void)
 {
-    return lex_c_year() >= 2023 || lex_c_gnu();
+    return lex_c23_ext();
 }
 #include "../sema/type.h"
 
@@ -192,6 +192,7 @@ struct parser {
     const char *fn_pnames[MAX_PARAMS]; /* the parameter names of the last
                            * function declarator inside parentheses
                            * (`(*f(int a))[3]`) */
+    int in_members;       /* inside a struct or union body (nesting) */
 };
 
 static struct token *cur(struct parser *ps) { return &ps->lx.tok; }
@@ -238,6 +239,14 @@ static struct type *find_typedef(struct parser *ps, const char *name)
  * point — the enclosing statement, or the next external declaration — so one
  * run reports every independent problem (docs/manual/diagnostics.md T2). Where no
  * recovery point is set, it stops the compile, as every error once did. */
+/* -pedantic for what the parser meets at line:col: C<since>'s, or since
+ * 0 GNU's (lex_pedantic; nothing under __extension__) */
+static void ped_at(struct parser *ps, int line, int col, int since,
+                   const char *what)
+{
+    lex_pedantic(ps->lx.file, line, col, lex_quiet(&ps->lx), since, what);
+}
+
 static void parse_error_at(struct parser *ps, int line, int col,
                            const char *fmt, ...)
 {
@@ -561,11 +570,29 @@ static int at_type_start(struct parser *ps)
             (c23_words() &&
              (strcmp(cur(ps)->text, "auto") == 0 ||
               strcmp(cur(ps)->text, "constexpr") == 0)) ||
+            /* C89's storage class, before an implicit int */
+            (lex_c_year() < 1999 && strcmp(cur(ps)->text, "auto") == 0) ||
             /* C23 `bool`, when the unit has not named a type that */
             (c23_words() && strcmp(cur(ps)->text, "bool") == 0) ||
             strcmp(cur(ps)->text, "__builtin_va_list") == 0 ||
             strcmp(cur(ps)->text, "__int128_t") == 0 ||
             strcmp(cur(ps)->text, "__uint128_t") == 0);
+}
+
+/* Whether a block item starts here that is a declaration -- for
+ * -pedantic, which reports one after a statement before C99 and one
+ * after a label before C23 */
+static int at_declaration(struct parser *ps)
+{
+    enum tok_kind k = cur(ps)->kind;
+    if (k == TOK_KW_STATIC || k == TOK_KW_THREAD || k == TOK_KW_TYPEDEF ||
+        k == TOK_KW_EXTERN || k == TOK_KW_STATIC_ASSERT ||
+        k == TOK_KW_AUTOTYPE)
+        return 1;
+    if (k == TOK_IDENT && (strcmp(cur(ps)->text, "register") == 0 ||
+                           strcmp(cur(ps)->text, "auto") == 0))
+        return 1;
+    return at_type_start(ps);
 }
 
 static struct type *parse_fn_params(struct parser *ps, struct type *ret);
@@ -994,6 +1021,7 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
                 break;
             }
             c23 = 1;
+            ped_at(ps, cur(ps)->line, cur(ps)->col, 2023, "a [[...]] attribute");
             advance(ps);
         } else {
             break;
@@ -1750,6 +1778,8 @@ static struct type *parse_tagged(struct parser *ps, enum tag_kind kind,
      * integer type. */
     if (kind == TAG_ENUM && cur(ps)->kind == TOK_COLON) {
         struct type *under;
+        ped_at(ps, cur(ps)->line, cur(ps)->col, 2023,
+               "an enum's fixed underlying type");
         advance(ps);
         under = parse_type_name(ps, parse_type_spec(ps, 0));
         if (!under || !ty_is_integer(under))
@@ -1864,6 +1894,22 @@ static struct type *parse_tagged(struct parser *ps, enum tag_kind kind,
 static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
                                           int *vol);
 
+/* C89's implicit int (C90 6.5.2): declaration specifiers without a type
+ * specifier mean int -- `static x;`, `const c = 1;`, `f() { ... }`. C99
+ * removed it; NULL there, and where nothing says a declaration starts. */
+static struct type *c89_implicit_int(struct parser *ps, int had_specifier)
+{
+    if (lex_c_year() >= 1999)
+        return NULL;
+    if (!had_specifier && cur(ps)->kind == TOK_IDENT) {
+        struct lexer save = ps->lx;
+        advance(ps);
+        had_specifier = cur(ps)->kind == TOK_LPAREN;   /* `main() {` */
+        ps->lx = save;
+    }
+    return had_specifier ? ty_base(TY_INT, 0) : NULL;
+}
+
 static struct type *parse_type_spec(struct parser *ps, int allow_body)
 {
     int q = 0;
@@ -1887,6 +1933,8 @@ static struct type *parse_type_spec(struct parser *ps, int allow_body)
     ps->spec_sc = 0;
     struct type *t = parse_type_spec_inner(ps, allow_body, &q2);
     q |= q2;
+    if (!t && (q & (Q_CONST | Q_VOL)))
+        t = c89_implicit_int(ps, 1);    /* `const c = 1;` in C89 */
     ps->spec_out = ps->spec_slot;
     ps->spec_slot = outer;
     ps->spec_on = outer_on;
@@ -2160,6 +2208,8 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
     }
     if (!any)
         return NULL;
+    if (nlong >= 2)
+        ped_at(ps, cur(ps)->line, cur(ps)->col, 1999, "`long long`");
     if (nbool) {
         if (any > 1)
             parse_error_at(ps, cur(ps)->line, cur(ps)->col,
@@ -2735,6 +2785,12 @@ static int size_fold(const struct expr *e, long *out)
     }
     case EXPR_SIZEOF: {
         struct type *t = e->cast_ty ? e->cast_ty : ce_type(e->rhs);
+        if (e->countof) {   /* sema refuses what is not an array */
+            if (!t || t->kind != TY_ARRAY || ty_is_vla(t) || ty_incomplete(t))
+                return 0;
+            *out = t->count;
+            return 1;
+        }
         if (!t || ty_size(t) == 0)
             return 0;   /* sizeof(expr) whose type this pass cannot resolve */
         *out = ty_size(t);
@@ -2936,11 +2992,16 @@ static struct type *parse_array_dims(struct parser *ps, struct type *t)
                 ps->lx = save;
             }
         }
+        if (!de && cur(ps)->kind == TOK_RBRACKET && ps->in_members &&
+            !ps->in_param)
+            ped_at(ps, cur(ps)->line, cur(ps)->col, 1999,
+                   "a flexible array member");
         if (!de && cur(ps)->kind != TOK_RBRACKET) {
             int dline = cur(ps)->line;
             de = parse_cond(ps);
             long dv;
             if (!size_fold(de, &dv)) {
+                ped_at(ps, dline, 0, 1999, "a variable-length array");
                 if (!ps->vla_ok)
                     parse_error_line(ps, dline,
                                "array size must be a constant expression "
@@ -2952,6 +3013,8 @@ static struct type *parse_array_dims(struct parser *ps, struct type *t)
                     parse_error_line(ps, dline,
                                "array size cannot be negative");
                 dim = (int)dv; /* 0 is the extern/flexible form */
+                if (dv == 0)
+                    ped_at(ps, dline, 0, 0, "an array of size 0");
             }
         }
         if (ndims >= 4)
@@ -2990,9 +3053,11 @@ static struct type *parse_struct_body(struct parser *ps, struct type *t,
      * after a `*`, so inside a struct body the refusal stands. */
     ps->attr_carry_on = 0;
 
+    int bline = cur(ps)->line, bcol = cur(ps)->col;
     expect(ps, TOK_LBRACE, "'{'");
     int saved_vla_ok = ps->vla_ok;
     ps->vla_ok = 0;   /* a member cannot be variably modified (6.7.2.1p9) */
+    ps->in_members++;
     struct member *ms = NULL;
     int n = 0, cap = 0;
 
@@ -3070,6 +3135,9 @@ static struct type *parse_struct_body(struct parser *ps, struct type *t,
                 parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                            "expected a member name before %s",
                            tok_describe(cur(ps)));
+            if (!mname && !is_bf)
+                ped_at(ps, mline, 0, 2011,
+                       "an anonymous struct or union member");
             /* (an array of no elements — `T m[]`, C99's flexible array
              * member, or GNU's `T m[0]` — takes no room: its elements are
              * what follows the struct) */
@@ -3113,6 +3181,9 @@ static struct type *parse_struct_body(struct parser *ps, struct type *t,
     }
     advance(ps); /* '}' */
     ps->vla_ok = saved_vla_ok;
+    ps->in_members--;
+    if (n == 0)
+        ped_at(ps, bline, bcol, 0, "a struct or union with no members");
     struct attrs at = *lead;     /* struct __attribute__((packed)) {...} */
     parse_attributes(ps, &at);   /* struct {...} __attribute__((packed)) */
     /* `struct E { };`: GNU C's, of size 0 (ISO C wants a member) */
@@ -3499,6 +3570,7 @@ static struct expr *parse_primary(struct parser *ps)
         if (cur(ps)->kind == TOK_LBRACE) {
             /* GNU statement expression `({ ... })`: the block's value is its
              * last statement when that is an expression statement. */
+            ped_at(ps, t->line, t->col, 0, "a statement expression");
             e = new_expr(EXPR_STMTEXPR, t->line, t->col);
             e->body = parse_block(ps);
             expect(ps, TOK_RPAREN, "')' to close a statement expression");
@@ -3813,6 +3885,7 @@ static struct expr *parse_unary(struct parser *ps)
         if (cur(ps)->kind != TOK_IDENT)
             parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                     "expected a label name after '&&'");
+        ped_at(ps, t->line, t->col, 0, "a label's address");
         e = new_expr(EXPR_LABELADDR, t->line, t->col);
         e->name = cur(ps)->text;
         advance(ps);
@@ -3835,10 +3908,12 @@ static struct expr *parse_unary(struct parser *ps)
         e->rhs = parse_unary(ps);
         return e;
     }
-    case TOK_KW_SIZEOF: {
-        int line = t->line;
+    case TOK_KW_SIZEOF:
+    case TOK_KW_COUNTOF: {
+        int line = t->line, countof = t->kind == TOK_KW_COUNTOF;
         advance(ps);
         e = new_expr(EXPR_SIZEOF, line, 0);
+        e->countof = countof;
         if (cur(ps)->kind == TOK_LPAREN) {
             struct lexer save = ps->lx;
             advance(ps);
@@ -3887,6 +3962,7 @@ static struct expr *parse_unary(struct parser *ps)
             /* `(type){ ... }` is a compound literal (an unnamed object),
              * not a cast — it can even take postfix operators. */
             if (cur(ps)->kind == TOK_LBRACE) {
+                ped_at(ps, t->line, t->col, 1999, "a compound literal");
                 e = new_expr(EXPR_COMPLIT, t->line, t->col);
                 e->cast_ty = ct;
                 e->lhs = parse_initializer(ps);
@@ -4083,8 +4159,10 @@ static struct expr *parse_cond(struct parser *ps)
     advance(ps);
     r->args[0] = e;
     r->nargs = 1;
-    if (cur(ps)->kind == TOK_COLON)
+    if (cur(ps)->kind == TOK_COLON) {
+        ped_at(ps, r->line, r->col, 0, "`?:` with no middle operand");
         return gnu_elvis(ps, r);
+    }
     r->lhs = parse_comma(ps); /* the then-branch is a FULL expression */
     expect(ps, TOK_COLON, "':'");
     r->rhs = parse_cond(ps); /* right-associative, as in C */
@@ -4361,6 +4439,8 @@ static struct expr *parse_initializer(struct parser *ps)
     struct expr *e = new_expr(EXPR_INITLIST, cur(ps)->line, cur(ps)->col);
     int cap = 0;
     advance(ps);
+    if (cur(ps)->kind == TOK_RBRACE)
+        ped_at(ps, e->line, e->col, 2023, "an empty initializer `{}`");
     while (cur(ps)->kind != TOK_RBRACE) {
         if (cur(ps)->kind == TOK_EOF)
             parse_error_at(ps, cur(ps)->line, cur(ps)->col,
@@ -4370,6 +4450,9 @@ static struct expr *parse_initializer(struct parser *ps)
         const char *field = NULL;
         long index = -1, index_hi = -1;
         struct desig *dnext = NULL, **dtail = &dnext;
+        if (cur(ps)->kind == TOK_LBRACKET || cur(ps)->kind == TOK_DOT)
+            ped_at(ps, cur(ps)->line, cur(ps)->col, 1999,
+                   "a designated initializer");
         if (cur(ps)->kind == TOK_LBRACKET) {
             int iline = cur(ps)->line;
             advance(ps);
@@ -4379,6 +4462,8 @@ static struct expr *parse_initializer(struct parser *ps)
                            "an array designator [index] must be a constant "
                            ">= 0");
             if (cur(ps)->kind == TOK_ELLIPSIS) {  /* GNU range `[lo ... hi]` */
+                ped_at(ps, cur(ps)->line, cur(ps)->col, 0,
+                       "a designator range");
                 advance(ps);
                 struct expr *he = parse_cond(ps);
                 if (!size_fold(he, &index_hi) || index_hi < index)
@@ -4473,7 +4558,15 @@ static struct stmt *parse_block(struct parser *ps)
     tmark = ps->tags;
     ps->tag_blk = ++ps->tag_blk_seq;
     struct stmt **volatile tail = &s->body;
+    volatile int seen_stmt = 0;
     while (cur(ps)->kind != TOK_RBRACE) {
+        if (at_declaration(ps)) {
+            if (seen_stmt)
+                ped_at(ps, cur(ps)->line, cur(ps)->col, 1999,
+                       "a declaration after a statement");
+        } else {
+            seen_stmt = 1;
+        }
         if (cur(ps)->kind == TOK_EOF) {
             /* Reported once: recovery cannot make more tokens, so the
              * block ends here whatever else was expected. */
@@ -4848,7 +4941,7 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
                       strcmp(t->text, "register") == 0;
     if (t->kind == TOK_KW_STATIC || t->kind == TOK_KW_THREAD ||
         is_register || at_type_start(ps)) {
-        int local_static = 0, local_tls = 0;
+        int local_static = 0, local_tls = 0, auto89 = 0;
         if (is_register)
             advance(ps);
         /* `static __thread` and `__thread static` are the same
@@ -4894,7 +4987,7 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
                cur(ps)->kind == TOK_KW_NORETURN)   /* on a local prototype */
             advance(ps);
         if ((t->kind == TOK_KW_STATIC || t->kind == TOK_KW_THREAD ||
-             is_register) && !at_type_start(ps))
+             is_register) && !at_type_start(ps) && lex_c_year() >= 1999)
             parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                        "expected a type after the storage specifier");
         /* C11 §6.7.1: at block scope _Thread_local must be accompanied
@@ -4939,7 +5032,9 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
             struct token atok = *cur(ps);
             advance(ps);
             if (cur(ps)->kind == TOK_IDENT && !at_type_start(ps) &&
-                c23_words()) {        /* C23's (and GNU's): else a storage class */
+                c23_words() && lex_c_year() >= 1999) {
+                /* C23's (and GNU's): else a storage class -- in C89, before
+                 * an implicit int (`auto x = 1.5;` is an int) */
                 struct lexer nsave = ps->lx;
                 advance(ps);
                 if (cur(ps)->kind == TOK_ASSIGN) {
@@ -4951,6 +5046,10 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
             /* the C89 storage class: nothing to do with it */
             if (at_type_start(ps))
                 goto after_auto_kw;
+            if (lex_c_year() < 1999 && cur(ps)->kind == TOK_IDENT) {
+                auto89 = 1;
+                goto after_auto_kw;
+            }
             ps->lx = asave;
             (void)atok;
         }
@@ -5022,10 +5121,14 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
          * the first */
         int decl_alignas = ps->alignas_out;
         ps->alignas_out = 0;
-        /* No type specifier at all. Implicit int is not C99 and guessing
-         * one here would compile a declaration nobody wrote; the old
-         * behaviour was worse still, since every use below dereferences
-         * this. Say what is missing and stop. */
+        /* No type specifier at all: C89's implicit int, when a storage
+         * class said a declaration starts. From C99 on there is none,
+         * and guessing one would compile a declaration nobody wrote; the
+         * old behaviour was worse still, since every use below
+         * dereferences this. Say what is missing and stop. */
+        if (!base)
+            base = c89_implicit_int(ps, local_static || local_tls ||
+                                        is_register || auto89);
         if (!base)
             parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                        "expected a type in this declaration, found %s",
@@ -5203,7 +5306,12 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
             advance(ps);                       /* consume ':' */
             s = new_stmt(STMT_LABEL, lline, 0);
             s->name = label_map(ps, lname);
-            /* C23: a label may end a block, `out: }`, labelling nothing */
+            /* C23: a label may end a block, `out: }`, labelling nothing,
+             * or a declaration */
+            if (cur(ps)->kind == TOK_RBRACE)
+                ped_at(ps, lline, 0, 2023, "a label at the end of a block");
+            else if (at_declaration(ps))
+                ped_at(ps, lline, 0, 2023, "a label before a declaration");
             s->body = cur(ps)->kind == TOK_RBRACE
                     ? new_stmt(STMT_BLOCK, lline, 0)
                     : parse_stmt(ps, allow_decl);
@@ -5223,6 +5331,7 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
         if (cur(ps)->kind == TOK_STAR) {
             /* GNU computed goto: `goto *expr` jumps to the label address in
              * expr (a void*). s->expr set, s->name NULL marks the indirect form. */
+            ped_at(ps, t->line, t->col, 0, "a computed goto");
             advance(ps);
             s->expr = parse_expr(ps);
             expect(ps, TOK_SEMI, "';'");
@@ -5270,6 +5379,10 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
         advance(ps);
         expect(ps, TOK_LPAREN, "'('");
         if (at_type_start(ps)) {
+            if (lex_c_year() < 1999)
+                parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                        "a declaration in a for loop's first clause is "
+                        "C99's, and the standard here is C89");
             /* `for (int i = 0; ...)`. One flat scope per function means
              * the variable simply outlives the loop — which ACCEPTS
              * fewer programs than C (a second loop reusing the name is
@@ -5332,6 +5445,7 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
         if (cur(ps)->kind == TOK_ELLIPSIS) {
             int line = cur(ps)->line;
             long lo = 0, hi = 0;
+            ped_at(ps, line, cur(ps)->col, 2025, "a case range");   /* GNU's, then C2y's */
             struct expr *hie;
             struct stmt *tail = s;
             advance(ps);
@@ -5493,6 +5607,8 @@ static void parse_static_assert(struct parser *ps)
     if (cur(ps)->kind == TOK_COMMA) {
         advance(ps);
         msg = parse_str_literal(ps, "a _Static_assert message string");
+    } else {
+        ped_at(ps, line, 0, 2023, "a static assertion with no message");
     }
     expect(ps, TOK_RPAREN, "')' to close _Static_assert");
     expect(ps, TOK_SEMI, "';'");
@@ -5918,6 +6034,7 @@ static void parse_top(struct parser *ps, struct unit *u,
     int is_static = 0, is_extern = 0, is_tls = 0, is_inline = 0;
     struct attrs at = { 0 };
     ps->seq = seq;
+    ps->in_members = 0;     /* a struct body an error left */
 
     /* A file-scope `__asm__("...")` block (crt0's _start stub). Basic asm
      * only — a template, no operands — assembled later by topasm.c. */
@@ -6013,6 +6130,9 @@ static void parse_top(struct parser *ps, struct unit *u,
         reject_reserved(ps, cur(ps)->text, cur(ps)->line, cur(ps)->col);
     struct type *base = parse_type_spec_attrs(ps, 1, &at);
     int spec_const = ps->spec_const;
+    if (!base)
+        base = c89_implicit_int(ps, is_static || is_extern || is_inline ||
+                                    is_tls || at.noreturn);
     if (!base)
         parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                    "expected a type before %s", tok_describe(cur(ps)));
@@ -6253,6 +6373,9 @@ static void parse_top(struct parser *ps, struct unit *u,
     if (cur(ps)->kind == TOK_RPAREN && lex_c_year() < 2023)
         f->noproto = 1;
     int knr = knr_names(ps, f);
+    if (knr)
+        lex_pedantic_removed(ps->lx.file, f->line, 0, lex_quiet(&ps->lx), 2023,
+                             "an old-style (K&R) parameter list");
     if (cur(ps)->kind == TOK_RPAREN && !knr)
         warn_no_prototype(ps);
     if (cur(ps)->kind == TOK_KW_VOID) {
@@ -6444,6 +6567,8 @@ fn_tail:
          * such names, as GCC does: there is nothing to use. */
         for (int i = 0; i < f->nparams; i++)
             if (!f->params[i]) {
+                ped_at(ps, f->param_lines[i], f->param_cols[i], 2023,
+                       "a parameter with no name in a definition");
                 char nm[32];
                 snprintf(nm, sizeof nm, "<parameter %d>", i + 1);
                 f->params[i] = xstrndup(nm, strlen(nm));

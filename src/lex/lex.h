@@ -32,6 +32,7 @@ enum tok_kind {
     TOK_KW_STATIC_ASSERT,
     TOK_KW_GENERIC,
     TOK_KW_ALIGNOF,
+    TOK_KW_COUNTOF,       /* C2y _Countof: an array's element count */
     TOK_KW_ALIGNAS,
     TOK_KW_TYPEOF,
     TOK_KW_AUTOTYPE,
@@ -216,7 +217,25 @@ struct lexer {
     const char *line_start;   /* start of the current line, for columns */
     int line;
     struct token tok; /* current token */
+    /* GNU's __extension__ (C only; a macro in C++): no -pedantic
+     * diagnostic from here to the end of the declaration or expression
+     * it begins -- the `;` or `,` at its nesting, or the bracket that
+     * closes around it. ext_depth counts the brackets opened since. */
+    int ext_on, ext_depth;
+    /* inside text a system header's macro expanded to (LEX_SYS_ON ..
+     * LEX_SYS_OFF, which the preprocessor writes around it): -pedantic
+     * has nothing to say about it either, as GCC has not */
+    int sys_depth;
 };
+
+/* The two bytes the preprocessor brackets a system macro's expansion
+ * with when it is compiled rather than printed (cpp_set_mark_system);
+ * the lexer reads them as space. */
+#define LEX_SYS_ON  '\x01'
+#define LEX_SYS_OFF '\x02'
+/* whether -pedantic is quiet at the current token: __extension__, or a
+ * system macro's text */
+int lex_quiet(const struct lexer *lx);
 
 /* The C standard a unit is read under (-std=): its year -- 1989, 1994,
  * 1999, 2011, 2017, 2023, or 2025 for C2y -- and whether GNU's
@@ -227,6 +246,21 @@ struct lexer {
 void lex_set_c_std(int year, int gnu);
 int lex_c_year(void);
 int lex_c_gnu(void);
+/* -pedantic (or -pedantic-errors): diagnose what the standard -std= names
+ * does not have. It also takes away EmbCC's own extension of a GNU
+ * dialect before C23 -- C23's keywords and syntax -- so that the dialect
+ * is GCC's: lex_c23_ext() says whether they are on. */
+void lex_set_pedantic(int on);
+int lex_c23_ext(void);
+/* -pedantic's diagnostic at file:line:col: `what` (a noun phrase: "a
+ * binary constant") is C<since>'s and the standard here is earlier, or,
+ * since 0, a GNU extension in every standard. Nothing when the standard
+ * has it, without -pedantic, or under __extension__ (pass lx->ext_on). */
+void lex_pedantic(const char *file, int line, int col, int ext_on,
+                  int since, const char *what);
+/* the same for what a standard REMOVED: `what` is not C<removed>'s */
+void lex_pedantic_removed(const char *file, int line, int col, int ext_on,
+                          int removed, const char *what);
 void lex_init(struct lexer *lx, const char *file, const char *src);
 /* lex_init, choosing C (cxx 0) or C++ (cxx 1) keywords and punctuators. */
 void lex_init_mode(struct lexer *lx, const char *file, const char *src,

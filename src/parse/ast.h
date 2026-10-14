@@ -73,6 +73,8 @@ struct expr {
      * Without it the warning fires fifteen times on EmbCC's own
      * correct code. */
     int parens;
+    int countof;          /* EXPR_SIZEOF spelled _Countof (C2y): the
+                           * operand's element count, not its bytes */
     struct func *fref;    /* EXPR_VAR: a function used as a value —
                            * decays to pointer-to-function (sema) */
     int str_index;        /* EXPR_STR: unit string table slot (irgen) */

@@ -4675,6 +4675,11 @@ int main(int argc, char **argv)
                 lex_set_c_std(cstd[k].year, cstd[k].gnu);
                 std_gnu89 = cstd[k].year < 1999;
             }
+        } else if (strcmp(argv[i], "-ansi") == 0) {
+            /* GCC's name for the first standard of each language */
+            lex_set_c_std(1989, 0);
+            std_gnu89 = 1;
+            cpp_set_cxx_std(1998, 1);
         } else if (strcmp(argv[i], "--emit-c") == 0) {
             emit_c_only = 1;
         } else if (strcmp(argv[i], "-dM") == 0) {
@@ -4862,15 +4867,11 @@ int main(int argc, char **argv)
              * and as that one, what EmbCC always does */
         } else if (strcmp(argv[i], "-w") == 0) {
             diag_set_no_warnings(1);
-        } else if (strcmp(argv[i], "-pedantic") == 0 ||
-                   strcmp(argv[i], "-pedantic-errors") == 0) {
-            /* Said, as an unknown -Wname is: EmbCC has no warnings about
-             * extensions to ISO C, so this turns nothing on. It was
-             * refused as an unknown argument, which stopped builds that
-             * pass it out of habit. */
-            fprintf(stderr, "embcc: warning: %s: EmbCC has no diagnostics "
-                            "for extensions to ISO C, so this turns "
-                            "nothing on\n", opt_typed(argv[i]));
+        } else if (strcmp(argv[i], "-pedantic") == 0) {
+            /* what the standard -std= names does not have (lex_pedantic) */
+            diag_enable_warning("pedantic", 1);
+        } else if (strcmp(argv[i], "-pedantic-errors") == 0) {
+            diag_set_werror_for("pedantic", 1);
         } else if (strncmp(argv[i], "-fdiagnostics-format=", 21) == 0) {
             const char *f = argv[i] + 21;
             if (strcmp(f, "json") == 0)
@@ -5620,6 +5621,9 @@ int main(int argc, char **argv)
     if (backend_get(target_get())->options_done)
         backend_get(target_get())->options_done();
     sema_set_gnu89_inline(gnu89_inline || std_gnu89);
+    /* -pedantic, -pedantic-errors or -Wpedantic: the dialect is the
+     * standard's, without EmbCC's C23 extensions of a GNU one */
+    lex_set_pedantic(diag_warning_enabled("pedantic"));
     /* -fno-jump-tables for a whole test suite, whose scripts spell their
      * own command lines: every dense switch takes the compare tree. */
     if (plat_getenv("EMBCC_NO_JUMP_TABLES"))
@@ -5771,6 +5775,9 @@ int main(int argc, char **argv)
     }
     if (why_decision)
         compile_mode = 1;         /* a question, not an object */
+    /* compiled text marks what system macros expanded to, for -pedantic;
+     * printed text (-E) is the text */
+    cpp_set_mark_system(!pp_only);
 
     /* A `.ir` input is EmbIR's own textual form: parse it and print it back
      * (§9.1). That is the round-trip -- `print | parse | print` must produce

@@ -102,6 +102,11 @@ def main():
         if k in want and got[k] != want[k] and k not in differs:
             print('%s %s %s: referee %s, EmbCC %s' % (k[0], k[1], k[2], want[k], got[k]))
             bad += 1
+        elif k in want and got[k] == want[k] and k in differs:
+            # a difference that went away: the list must say only what is
+            print('%s %s %s: listed in %s.differs, but EmbCC agrees now'
+                  % (k[0], k[1], k[2], os.path.basename(expect)))
+            bad += 1
     total = len([k for k in got if k in want])
     print('%d of %d outcomes agree with the referee (%d known differences)'
           % (total - bad, total, len(differs)))

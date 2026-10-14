@@ -13,14 +13,12 @@ described in [C language](c-language.md), C++ in [C++](cxx.md), and the
 
 ### Extensions are always enabled
 
-Every extension on this page is available in every compilation.
-[`--std=`](invoking.md#--stdstandard) does not change what the parser
-accepts, and no warning reports the use of an extension. `--pedantic` and
-`--pedantic-errors` are accepted, turn nothing on, and say so:
-
-```text
-embcc: warning: -pedantic: EmbCC has no diagnostics for extensions to ISO C, so this turns nothing on
-```
+Every extension on this page is available under every
+[`--std=`](invoking.md#--stdstandard) standard, as in GCC: under a strict
+`cNN` standard only the keywords `asm` and `typeof` are names, and
+`__asm__` and `__typeof__` still work. [`--pedantic`](invoking.md#--pedantic---pedantic-errors)
+reports each use of an extension, and `--pedantic-errors` refuses it,
+except in a system header or after `__extension__`.
 
 When EmbCC does not implement an extension, it refuses the program with
 an error that names the construct, rather than compiling it to do

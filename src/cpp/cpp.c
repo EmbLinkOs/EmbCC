@@ -57,6 +57,7 @@ struct macro {
     const char *body;      /* spliced, comment-stripped replacement text */
     int expanding;         /* self-reference guard */
     int builtin;           /* predefined: a header may redefine it */
+    int sysdef;            /* defined in a system header, or built in */
     struct macro *next;
 };
 
@@ -224,6 +225,10 @@ static size_t collect_arg(struct src *s, const char *p, struct tbuf *arg)
         }
         if (c == ',' && depth == 0)
             break;
+        if (c == LEX_SYS_ON || c == LEX_SYS_OFF) {
+            i++;       /* an argument is its spelling: # and ## see that */
+            continue;
+        }
         size_t pn = pp_number(p + i, i ? p[i - 1] : 0);
         if (pn) {
             tb_putn(arg, p + i, pn);
@@ -538,6 +543,29 @@ static int dynamic_macro(struct src *s, const char *name, size_t n,
 }
 
 /* Expands `text` (already comment-stripped and spliced) into out. */
+/* cpp_set_mark_system; g_marking while a line is expanded for the
+ * compiler, and g_sys_depth inside a marked expansion (marked once) */
+static int g_mark_system, g_marking, g_sys_depth;
+void cpp_set_mark_system(int on) { g_mark_system = on; }
+
+static int sys_mark_open(struct src *s, struct macro *m, struct tbuf *out)
+{
+    (void)s;
+    if (!g_marking || g_sys_depth || !m->sysdef)
+        return 0;
+    tb_putc(out, LEX_SYS_ON);
+    g_sys_depth++;
+    return 1;
+}
+
+static void sys_mark_close(int opened, struct tbuf *out)
+{
+    if (!opened)
+        return;
+    g_sys_depth--;
+    tb_putc(out, LEX_SYS_OFF);
+}
+
 static void expand_text(struct src *s, const char *text, struct tbuf *out)
 {
     const char *p = text;
@@ -628,9 +656,12 @@ static void expand_text(struct src *s, const char *text, struct tbuf *out)
             }
             p = q;
             diag_register_expansion(s->file, s->line, m->name);
+            int mk = sys_mark_open(s, m, out);
             expand_funclike(s, m, &p, out);
+            sys_mark_close(mk, out);
         } else {
             diag_register_expansion(s->file, s->line, m->name);
+            int mk = sys_mark_open(s, m, out);
             struct tbuf tmp = { 0, 0, 0 };
             m->expanding = 1;
             expand_text(s, m->body, &tmp);
@@ -652,6 +683,7 @@ static void expand_text(struct src *s, const char *text, struct tbuf *out)
                     tb_putn(out, tmp.p, tn);
                     p = q2;
                     expand_funclike(s, fm, &p, out);
+                    sys_mark_close(mk, out);
                     free(tmp.p);
                     continue;
                 }
@@ -660,6 +692,7 @@ static void expand_text(struct src *s, const char *text, struct tbuf *out)
                 tb_putn(out, tmp.p, tmp.len);
                 free(tmp.p);
             }
+            sys_mark_close(mk, out);
         }
     }
 }
@@ -1526,8 +1559,12 @@ static int read_logical_line(struct src *s, struct tbuf *out, int *nl)
             (*nl)++;
             continue;
         }
-        if (c == '/' && s->p[1] == '/') {
+        /* `//` is C99's comment; strict C89 reads two slashes */
+        if (c == '/' && s->p[1] == '/' &&
+            (predef_is_cxx() || lex_c_gnu() || lex_c_year() >= 1999)) {
             const char *cb = s->p + 2;
+            if (!predef_is_cxx())
+                lex_pedantic(s->file, s->line, 0, 0, 1999, "a // comment");
             while (*s->p && *s->p != '\n')
                 s->p++;
             if (fallthrough_comment(cb, s->p))
@@ -1562,7 +1599,33 @@ static int read_logical_line(struct src *s, struct tbuf *out, int *nl)
             continue;
         }
         if (c == '"' || c == '\'') {
-            s->p += copy_literal(s->p, out);
+            /* a literal, spliced as the rest of the line is (phase 2
+             * comes before any literal exists): `"a\<newline>b"` is "ab",
+             * and so is the same written with C89's trigraph ??/ */
+            tb_putc(out, c);
+            s->p++;
+            while (*s->p) {
+                if (s->p[0] == '\\' && s->p[1] == '\n') {
+                    s->p += 2;
+                    (*nl)++;
+                    continue;
+                }
+                char ch = *s->p;
+                if (ch == '\n')
+                    break;          /* unterminated: the lexer says so */
+                tb_putc(out, ch);
+                s->p++;
+                if (ch == c)
+                    break;
+                if (ch == '\\') {   /* the escaped character, spliced too */
+                    while (s->p[0] == '\\' && s->p[1] == '\n') {
+                        s->p += 2;
+                        (*nl)++;
+                    }
+                    if (*s->p && *s->p != '\n')
+                        tb_putc(out, *s->p++);
+                }
+            }
             continue;
         }
         tb_putc(out, c);
@@ -1866,6 +1929,7 @@ static void define_macro(struct src *s, const char *line)
         }
     }
     m->builtin = defining_builtins;
+    m->sysdef = m->builtin || diag_in_system_header(s->file);
     m->next = s->cpp->macros;
     s->cpp->macros = m;
 }
@@ -2078,6 +2142,32 @@ static void do_pragma(struct src *s, const char *text, size_t n,
 #undef PRAGMA_IS
 }
 
+/* Trigraphs, ISO C's phase 1 (5.2.1.1): ??= ??( ??/ ??) ??' ??< ??! ??>
+ * ??- are # [ \ ] ^ { | } ~ everywhere, string literals included, before
+ * a line is spliced -- so `??/` at the end of a line continues it. A
+ * strict standard before C23 has them (-std=c99, c17); GNU's dialects and
+ * C23, which removed them, read `??=` as the three characters, as GCC
+ * does. src unchanged when there is nothing to replace. */
+static const char *trigraphs(const char *src)
+{
+    if (predef_is_cxx() || lex_c_gnu() || lex_c_year() >= 2023 ||
+        !strstr(src, "??"))
+        return src;
+    static const char from[] = "=(/)'<!>-", to[] = "#[\\]^{|}~";
+    char *out = xmalloc(strlen(src) + 1), *o = out;
+    for (const char *p = src; *p; ) {
+        const char *k;
+        if (p[0] == '?' && p[1] == '?' && p[2] && (k = strchr(from, p[2]))) {
+            *o++ = to[k - from];
+            p += 3;
+        } else {
+            *o++ = *p++;
+        }
+    }
+    *o = 0;
+    return out;
+}
+
 static void process_file(struct cpp *cpp, const char *path,
                          const char *src, struct tbuf *out, int incdir_idx)
 {
@@ -2088,6 +2178,7 @@ static void process_file(struct cpp *cpp, const char *path,
     if ((unsigned char)src[0] == 0xEF && (unsigned char)src[1] == 0xBB &&
         (unsigned char)src[2] == 0xBF)
         src += 3;
+    src = trigraphs(src);
     s.p = src;
     s.base = src;
     s.line = 1;
@@ -2159,6 +2250,9 @@ static void process_file(struct cpp *cpp, const char *path,
                         !(predef_is_cxx() && cxx_strict && cxx_std < 2023))) {
                 /* (#elifdef/#elifndef: C23, C++23 — and GNU's before, as
                  * g++ has them but for a strict -std=c++20) */
+                if (!DIR("elif") && !predef_is_cxx())
+                    lex_pedantic(s.file, startline, 0, 0, 2023,
+                                 DIR("elifdef") ? "#elifdef" : "#elifndef");
                 if (!ncond)
                     cerr(&s, "#elif without #if", NULL);
                 if (cond[ncond - 1] == COND_LIVE)
@@ -2206,6 +2300,8 @@ static void process_file(struct cpp *cpp, const char *path,
                     cerr(&s, "#undef needs a name", NULL);
                 undef_macro(cpp, arg, idn);
             } else if (DIR("include") || DIR("include_next")) {
+                if (DIR("include_next") && !predef_is_cxx())
+                    lex_pedantic(s.file, startline, 0, 0, 0, "#include_next");
                 do_include(&s, arg, out, DIR("include_next"));
                 s.line = startline + nl;
                 snprintf(marker, sizeof marker, "# %d \"%s\"\n",
@@ -2217,6 +2313,8 @@ static void process_file(struct cpp *cpp, const char *path,
             } else if (DIR("error")) {
                 cerr(&s, "#error: %s", arg);
             } else if (DIR("warning")) {
+                if (!predef_is_cxx())
+                    lex_pedantic(s.file, startline, 0, 0, 2023, "#warning");
                 diag_warn_at(s.file, startline, 0, "#warning: %s", arg);
             } else if (DIR("pragma")) {
                 /* The ones that change the program are acted on
@@ -2275,7 +2373,9 @@ static void process_file(struct cpp *cpp, const char *path,
             s.line = startline;
             {
                 struct tbuf expb = { 0, 0, 0 };
+                g_marking = g_mark_system && !predef_is_cxx();
                 expand_text(&s, lineb.p ? lineb.p : "", &expb);
+                g_marking = 0;
                 if (!expb.p) tb_putc(&expb, '\0'), expb.len = 0;
                 /* Expanded into a buffer of its own first, because
                  * _Pragma usually ARRIVES from a macro -- that is the
@@ -2425,6 +2525,7 @@ static void load_predefined(struct cpp *cpp)
         }
         m->body = predefs[i].value;
         m->builtin = 1;
+        m->sysdef = 1;
         m->next = cpp->macros;
         cpp->macros = m;
     }
@@ -2452,7 +2553,10 @@ char *cpp_process(const char *path, const char *src,
     /* gcc-isms real headers use unconditionally; semantically no-ops.
      * (Not __inline and __inline__: they are `inline`, which decides
      * linkage, and the lexer reads them as that keyword.) */
-    define_macro(&boot, "__extension__");
+    /* C's __extension__ is the lexer's: it marks what -pedantic leaves
+     * alone */
+    if (predef_is_cxx())
+        define_macro(&boot, "__extension__");
     define_macro(&boot, "__restrict");
     define_macro(&boot, "__restrict__");
     defining_builtins = 0;

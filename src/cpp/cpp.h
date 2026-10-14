@@ -34,6 +34,9 @@ void cpp_cmdline_define(const char *text, int undef);
 /* -dM: cpp_process returns the macros defined at the end of the file, a
  * #define each, instead of the preprocessed text (GCC's -E -dM) */
 void cpp_set_dump_macros(int on);
+/* Compiling C (not -E): bracket what a system header's macro expands to
+ * with LEX_SYS_ON/OFF, so -pedantic stays quiet about it (lex.h) */
+void cpp_set_mark_system(int on);
 /* -include FILE: read as if the main file began with #include "FILE",
  * looked for in the working directory and then on the include path. */
 void cpp_preinclude(const char *file);

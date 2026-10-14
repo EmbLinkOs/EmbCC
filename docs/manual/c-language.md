@@ -59,40 +59,33 @@ prefix. The format is described in [Diagnostics](diagnostics.md).
 
 GCC: `-std=STANDARD`.
 
-Name a C standard. The option is accepted so that existing build systems
-work; it does not change what EmbCC accepts or the macros it defines.
+Name a C standard. Each is compiled as it is: its keywords, its
+`__STDC_VERSION__`, C89's implicit `int` and C99's `//` comments, the
+unprototyped `int f()` before C23, and trigraphs under a strict standard
+before C23. The full rules are under
+[`--std=`](invoking.md#--stdstandard).
 
-| `--std=` value | Standard | Result |
+| `--std=` value | Standard | `__STDC_VERSION__` |
 |---|---|---|
-| `c89`, `c90`, `iso9899:1990`, `gnu89`, `gnu90` | C89/C90 | Accepted with a warning |
-| `c99`, `c9x`, `iso9899:1999`, `gnu99`, `gnu9x` | C99 | Accepted with a warning |
-| `c11`, `c1x`, `iso9899:2011`, `gnu11`, `gnu1x` | C11 | Accepted |
-| `c17`, `c18`, `iso9899:2017`, `gnu17`, `gnu18` | C17 | Accepted |
-| `c23`, `c2x`, `gnu23`, `gnu2x` | C23 | Accepted |
+| `c89`, `c90`, `iso9899:1990`, `gnu89`, `gnu90` | C89/C90 | not defined |
+| `iso9899:199409` | C94 | `199409L` |
+| `c99`, `c9x`, `iso9899:1999`, `gnu99`, `gnu9x` | C99 | `199901L` |
+| `c11`, `c1x`, `iso9899:2011`, `gnu11`, `gnu1x` | C11 | `201112L` |
+| `c17`, `c18`, `iso9899:2017`, `iso9899:2018`, `gnu17`, `gnu18` | C17 | `201710L` |
+| `c23`, `c2x`, `iso9899:2024`, `gnu23`, `gnu2x` | C23 | `202311L` |
+| `c2y`, `gnu2y` | C2y | `202500L` |
 | any other value | | Error |
 
-A standard older than C11 prints:
+The default is `gnu17`. A `cNN` value defines `__STRICT_ANSI__`. `-ansi`
+is `--std=c89`. Any other value is an error:
 
 ```text
-embcc: warning: -std=c99 is accepted but not enforced; EmbCC has one C dialect, C11 with the GNU extensions, and will compile newer constructs anyway
+embcc: error: unknown standard '-std=c3x'
 ```
 
-Any other value is an error, for example `--std=c2y`, `--std=gnu2y`,
-`--std=iso9899:199409` and `--std=iso9899:2018`:
-
-```text
-embcc: error: unknown standard '-std=c2y'
-```
-
-Whatever the value, `__STDC_VERSION__` is `201710L` and `__STRICT_ANSI__`
-is not defined. With no `--std=` option the dialect is the same. EmbCC has
-no mode that diagnoses extensions. `-ansi` is refused as an unknown
-argument. `--pedantic` and `--pedantic-errors` are accepted, turn nothing
-on, and print a warning that says so:
-
-```text
-embcc: warning: -pedantic: EmbCC has no diagnostics for extensions to ISO C, so this turns nothing on
-```
+[`--pedantic` and `--pedantic-errors`](invoking.md#--pedantic---pedantic-errors)
+report, as a warning or an error, what the standard does not have: a
+later standard's feature, or a GNU extension.
 
 See [Diagnostics](diagnostics.md).
 

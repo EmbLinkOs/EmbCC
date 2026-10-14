@@ -339,6 +339,31 @@ static struct global *find_global(struct unit *u, const char *name)
     return NULL;
 }
 
+/* C89's implicit declaration (C90 6.3.2.2): a call to a name nothing
+ * declares declares it `extern int name();` at file scope. C99 removed
+ * it, and E0001 refuses such a call; -std=c89 and gnu89 have it. */
+static int c89_implicit_call(struct unit *u, struct scope *sc,
+                             const struct expr *callee)
+{
+    if (lex_c_year() >= 1999 || callee->kind != EXPR_VAR || !callee->name ||
+        scope_find(sc, callee->name) >= 0 || find_global(u, callee->name))
+        return 0;
+    if (find_func(u, callee->name))
+        return 1;           /* declared or defined later in the file */
+    struct func *fd = xcalloc(1, sizeof *fd);
+    fd->name = callee->name;
+    fd->file = u->file;
+    fd->seq = -1;
+    fd->declared = 1;
+    fd->noproto = 1;
+    fd->ret_ty = ty_base(TY_INT, 0);
+    struct func **pp = &u->funcs;
+    while (*pp)
+        pp = &(*pp)->next;
+    *pp = fd;
+    return 1;
+}
+
 /* ---- conversions ---- */
 
 static int is_null_const(const struct expr *e)
@@ -1798,6 +1823,57 @@ static void vla_prepare(struct unit *u, struct func *f, struct scope *sc,
     t->vla_size = scope_add(sc, "<vla size>", ty_base(TY_LONG, 1), NULL);
 }
 
+/* C2y's _Countof: how many elements an array has, of a type name or of
+ * an expression, which is not evaluated. A constant, folded as sizeof is;
+ * of a variable-length array, its run-time size over its element's, both
+ * read from the size slots its declaration filled rather than by
+ * evaluating the length again -- `n` may have changed since. */
+static void check_countof(struct unit *u, struct func *f, struct scope *sc,
+                          struct expr *e)
+{
+    struct type *at = e->cast_ty;
+    if (at) {
+        if (ty_is_vm(at))
+            vla_prepare(u, f, sc, at);
+    } else {
+        check_expr(u, f, sc, e->rhs);
+        at = e->rhs->undecayed ? e->rhs->undecayed : e->rhs->ty;
+    }
+    if (at->kind != TY_ARRAY)
+        sema_error_at(u, e->line, e->col,
+                "_Countof of %s, which is not an array", ty_name(at));
+    e->countof = 0;
+    if (!ty_is_vla(at)) {
+        if (ty_incomplete(at))
+            sema_error_at(u, e->line, e->col, "_Countof of incomplete %s",
+                    ty_name(at));
+        e->kind = EXPR_NUM;
+        e->num = at->count;
+        e->rhs = NULL;
+        e->cast_ty = NULL;
+        e->ty = ty_size_t();
+        return;
+    }
+    struct expr *whole = cx_node(EXPR_SIZEOF, e->line, ty_size_t());
+    whole->cast_ty = e->cast_ty;
+    whole->rhs = e->rhs;
+    struct expr *elem;
+    if (ty_is_vla(at->pointee)) {
+        /* irgen reads a VLA sizeof's slot from its operand's type */
+        elem = cx_node(EXPR_SIZEOF, e->line, ty_size_t());
+        elem->rhs = cx_node(EXPR_NUM, e->line, at->pointee);
+    } else {
+        elem = cx_node(EXPR_NUM, e->line, ty_size_t());
+        elem->num = ty_size(at->pointee);
+    }
+    e->kind = EXPR_BINOP;
+    e->op = B_DIV;
+    e->lhs = whole;
+    e->rhs = elem;
+    e->cast_ty = NULL;
+    e->ty = ty_size_t();
+}
+
 
 /* -Waddress in a TRUTH test: `if (f)` rather than `if (f())`. The name
  * decays to its address, which is never null, so the branch is always
@@ -2277,7 +2353,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                 e->str_width = 1;
                 e->str_prefix = 0;
                 check_expr(u, f, sc, e);   /* give it the array/pointer type */
-            } else if ((lex_c_year() >= 2023 || lex_c_gnu()) &&
+            } else if (lex_c23_ext() &&
                        (strcmp(e->name, "true") == 0 ||
                         strcmp(e->name, "false") == 0)) {
                 /* C23 makes `true` and `false` keywords: constants of type
@@ -2867,6 +2943,10 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
     }
     case EXPR_SIZEOF: {
         long size;
+        if (e->countof) {
+            check_countof(u, f, sc, e);
+            break;
+        }
         /* sizeof a VLA is a run-time value: irgen reads its size slot (for
          * a type name, after computing it). Stays EXPR_SIZEOF. The operand
          * EXPRESSION is not evaluated even so — C evaluates it only when
@@ -3555,13 +3635,24 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
          * function-pointer value. */
         struct type *ft = NULL;
         e->callee = NULL;
+        int implicit = c89_implicit_call(u, sc, e->lhs);
         int si = e->lhs->kind == EXPR_VAR ? scope_find(sc, e->lhs->name) : -1;
         struct func *blkfn = si >= 0 ? sc->vars[si].fdecl : NULL;
         if (blkfn || (e->lhs->kind == EXPR_VAR && si < 0 &&
                       !find_global(u, e->lhs->name) &&
                       find_func(u, e->lhs->name))) {
             struct func *callee = blkfn ? blkfn : find_func(u, e->lhs->name);
-            if (!blkfn && callee->seq > cur_body_seq)
+            /* in C89 the call declared it `int name()`, which a later
+             * declaration must agree with */
+            if (!blkfn && callee->seq > cur_body_seq && implicit &&
+                !(callee->ret_ty && callee->ret_ty->kind == TY_INT &&
+                  !callee->ret_ty->is_unsigned))
+                sema_error_at(u, e->line, e->col,
+                           "call to '%s' before its declaration, which C89 "
+                           "takes as `int %s()`; it returns %s",
+                           e->lhs->name, e->lhs->name,
+                           ty_name(callee->ret_ty));
+            if (!blkfn && callee->seq > cur_body_seq && !implicit)
                 sema_error_at(u, e->line, e->col,
                            "call to '%s' before its declaration — "
                            "declare or define functions before their "
