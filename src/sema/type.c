@@ -451,6 +451,19 @@ static void ms_struct_layout(struct type *t, struct member *members, int n,
     *bits_out = bitpos;
 }
 
+int ty_incomplete(const struct type *t)
+{
+    if (t->kind == TY_VOID)
+        return 1;
+    if (ty_size((struct type *)t) != 0)
+        return 0;
+    if (t->kind == TY_STRUCT && t->complete)
+        return 0;
+    if (t->kind == TY_ARRAY && t->count > 0)
+        return ty_incomplete(t->pointee);
+    return 1;
+}
+
 void ty_struct_layout(struct type *t, struct member *members, int n,
                       int packed, int user_align, int pack)
 {

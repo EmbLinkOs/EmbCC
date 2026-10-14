@@ -3108,9 +3108,7 @@ static struct type *parse_struct_body(struct parser *ps, struct type *t,
     ps->vla_ok = saved_vla_ok;
     struct attrs at = *lead;     /* struct __attribute__((packed)) {...} */
     parse_attributes(ps, &at);   /* struct {...} __attribute__((packed)) */
-    if (n == 0)
-        parse_error_at(ps, cur(ps)->line, cur(ps)->col,
-                   "a struct/union needs at least one member");
+    /* `struct E { };`: GNU C's, of size 0 (ISO C wants a member) */
     ty_struct_layout(t, ms, n, at.packed, at.aligned, ps->pack_cur);
     return t;
 }
@@ -3986,6 +3984,89 @@ static struct expr *parse_comma(struct parser *ps)
     return e;
 }
 
+static struct stmt *new_stmt(enum stmt_kind kind, int line, int col);
+
+/* An expression that reads the same twice and does nothing else: no
+ * call, assignment, increment or statement inside it, and no volatile
+ * object read. GNU's `x ?: y` (parse_cond) may then repeat x. */
+static int expr_repeatable(const struct expr *e)
+{
+    if (!e)
+        return 1;
+    switch (e->kind) {
+    case EXPR_NUM: case EXPR_FNUM: case EXPR_STR: case EXPR_SIZEOF:
+    case EXPR_ALIGNOF:
+        return 1;
+    case EXPR_VAR: case EXPR_MEMBER: case EXPR_DEREF: {
+        struct type *t = ce_type(e);
+        if (!t || t->is_volatile)
+            return 0;
+        return expr_repeatable(e->lhs) && expr_repeatable(e->rhs);
+    }
+    case EXPR_BINOP: case EXPR_NOT: case EXPR_NEG: case EXPR_BNOT:
+    case EXPR_CAST: case EXPR_ADDR:
+        return expr_repeatable(e->lhs) && expr_repeatable(e->rhs);
+    default:
+        return 0;
+    }
+}
+
+/* A copy of an expr_repeatable expression, node by node. */
+static struct expr *expr_dup(const struct expr *e)
+{
+    if (!e)
+        return NULL;
+    struct expr *c = xmalloc(sizeof *c);
+    *c = *e;
+    c->lhs = expr_dup(e->lhs);
+    c->rhs = expr_dup(e->rhs);
+    return c;
+}
+
+/* GNU's `x ?: y`: x when x is true, else y, with x evaluated once. A
+ * repeatable x is simply repeated (`x ? x : y`), which is also what a
+ * constant expression at file scope needs; any other is held in a
+ * temporary, `({ __auto_type t = x; t ? t : y; })`, whose name no source
+ * can spell. r is the conditional, its condition already parsed. */
+static struct expr *gnu_elvis(struct parser *ps, struct expr *r)
+{
+    struct expr *x = r->args[0];
+    int line = cur(ps)->line, col = cur(ps)->col;
+    advance(ps);                                /* ':' */
+    r->rhs = parse_cond(ps);
+    if (expr_repeatable(x)) {
+        r->lhs = expr_dup(x);
+        return r;
+    }
+    struct type *at = ps->blkdepth ? ce_type(x) : NULL;
+    if (!at)
+        parse_error_at(ps, line, col,
+                       "GNU's `?:` needs its condition's type here, to hold "
+                       "its value: write `x ? x : y`");
+    if (at->kind == TY_ARRAY)
+        at = ty_ptr(at->pointee);
+    at = ty_unqual(at);
+    static int seq;
+    char *nm = xmalloc(32);
+    snprintf(nm, 32, "elvis.%d", seq++);
+    struct stmt *d = new_stmt(STMT_DECL, line, 0);
+    d->dty = at;
+    d->name = nm;
+    d->expr = x;
+    struct expr *v = new_expr(EXPR_VAR, line, col);
+    v->name = nm;
+    r->args[0] = v;
+    r->lhs = expr_dup(v);
+    struct stmt *es = new_stmt(STMT_EXPR, line, 0);
+    es->expr = r;
+    d->next = es;
+    struct stmt *blk = new_stmt(STMT_BLOCK, line, col);
+    blk->body = d;
+    struct expr *se = new_expr(EXPR_STMTEXPR, line, col);
+    se->body = blk;
+    return se;
+}
+
 static struct expr *parse_cond(struct parser *ps)
 {
     struct expr *e = parse_lor(ps);
@@ -3995,6 +4076,8 @@ static struct expr *parse_cond(struct parser *ps)
     advance(ps);
     r->args[0] = e;
     r->nargs = 1;
+    if (cur(ps)->kind == TOK_COLON)
+        return gnu_elvis(ps, r);
     r->lhs = parse_comma(ps); /* the then-branch is a FULL expression */
     expect(ps, TOK_COLON, "':'");
     r->rhs = parse_cond(ps); /* right-associative, as in C */
@@ -5067,7 +5150,7 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
              * takes its size from the literal */
             /* an omitted array size is filled in by sema from the
              * initializer, so only an UNINITIALIZED one is incomplete */
-            if (ty_size(s->dty) == 0 && !s->expr && !ty_is_vla(s->dty)) {
+            if (ty_incomplete(s->dty) && !s->expr && !ty_is_vla(s->dty)) {
                 diag_error_at(ps->lx.file, s->line, 0,
                               "'%s' has incomplete type %s", s->name,
                               ty_name(s->dty));

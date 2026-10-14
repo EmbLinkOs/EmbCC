@@ -2890,7 +2890,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
         if (e->cast_ty) {
             if (e->cast_ty->kind == TY_VOID)
                 sema_error_at(u, e->line, e->col, "sizeof(void)");
-            if (ty_size(e->cast_ty) == 0)
+            if (ty_incomplete(e->cast_ty))
                 sema_error_at(u, e->line, e->col, "sizeof of incomplete %s",
                            ty_name(e->cast_ty));
             size = ty_size(e->cast_ty);
@@ -2919,7 +2919,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             check_expr(u, f, sc, e->rhs);
             t = e->rhs->undecayed ? e->rhs->undecayed : e->rhs->ty;
         }
-        if (t->kind == TY_VOID || (ty_size(t) == 0 && !ty_is_vla(t)))
+        if (ty_incomplete(t) && !ty_is_vla(t))
             sema_error_at(u, e->line, e->col, "_Alignof of incomplete %s",
                     ty_name(t));
         e->kind = EXPR_NUM;                 /* folds to a size_t constant */

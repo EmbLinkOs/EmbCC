@@ -111,6 +111,11 @@ void ir_locals_fill(struct ir_func *fn, struct func *f, int nvars)
         if (!t)
             continue;
         L->size = ty_size(t);
+        /* GNU's empty struct is size 0, and still an object with an
+         * address: a slot of one byte, which a store of nothing never
+         * touches (with none, `&e` asked for a slot it did not have) */
+        if (L->size == 0 && t->kind == TY_STRUCT)
+            L->size = 1;
         /* a parameter's slot is the calling convention's, and its value
          * arrives as a whole register: a typedef's alignment is a local's
          * only (sema's var_indirect skips parameters likewise) */

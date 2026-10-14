@@ -239,6 +239,10 @@ struct type *ty_func(struct type *ret, struct type **ptypes, int n,
                      int is_varargs);
 /* Assigns member offsets and the struct's size/align per SysV, and
  * marks the type complete. Members must already have complete types. */
+/* A type whose size is not known: an incomplete struct or union, void,
+ * an array of unknown bound or of an incomplete element. Size 0 does not
+ * say so: GNU's empty struct is complete at size 0. */
+int ty_incomplete(const struct type *t);
 void ty_struct_layout(struct type *t, struct member *members, int n,
                       int packed, int user_align, int pack);
 struct member *ty_find_member(struct type *t, const char *name);
