@@ -300,8 +300,7 @@ static struct cnorm *norm_primary(int end, struct ctarg *map, int nmap,
         if (cx_pos + ntok >= end || after == TOK_ANDAND ||
             after == TOK_OROR) {
             /* a concept-id alone: its normal form, its arguments bound */
-            struct ctarg *args = NULL;
-            int n = 0, next = cx_pos + ntok;
+            int next = cx_pos + ntok;
             jmp_buf jb;
             void *saved = cx_sfinae;
             struct parse_state *st = parse_save();
@@ -310,6 +309,10 @@ static struct cnorm *norm_primary(int end, struct ctarg *map, int nmap,
                 cx_sfinae = saved;
                 c = NULL;             /* (an atom, then) */
             } else {
+                /* set only on this side of the setjmp, so a longjmp back
+                 * leaves nothing in them to read */
+                struct ctarg *args = NULL;
+                int n = 0;
                 cx_sfinae = &jb;
                 if (args_tok >= 0) {
                     cx_pos = args_tok;

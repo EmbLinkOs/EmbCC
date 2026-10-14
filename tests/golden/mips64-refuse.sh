@@ -119,6 +119,10 @@ if "$EMBCC" --target=$T -c "$out/la.s" -o /dev/null 2> "$out/la.err"; then
 fi
 grep -q 'la loads a 32-bit address' "$out/la.err" || {
     echo "la was refused, but not by name:"; cat "$out/la.err"; exit 1; }
+# ...and the whole sentence: a refusal rode in a 128-byte buffer and was
+# cut at "load it from a .dwor"
+grep -q 'load it from a \.dword holding the symbol$' "$out/la.err" || {
+    echo "la's refusal was cut short:"; cat "$out/la.err"; exit 1; }
 printf 'int f(int x) { return x; }\n' > "$out/c.cc"
 # C++ compiles here without exceptions (tests/golden/cxx-embedded.sh runs
 # it); exceptions, on by default, are refused by name: there are no

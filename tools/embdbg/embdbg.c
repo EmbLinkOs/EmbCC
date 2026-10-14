@@ -252,7 +252,7 @@ static const char *fb_label(struct img *m, const struct dfunc *d)
         "s0",   "s1", "a0", "a1", "a2", "a3", "a4", "a5",
         "a6",   "a7", "s2", "s3", "s4", "s5", "s6", "s7",
         "s8",   "s9", "s10", "s11", "t3", "t4", "t5", "t6" };
-    static char buf[8];
+    static char buf[16];                 /* "r" and any int */
     Elf64_Ehdr *e = (Elf64_Ehdr *)m->b;
     int n = d ? d->fb_reg : -1;
     if (n < 0 || m->len < 20 || memcmp(m->b, "\177ELF", 4) != 0)

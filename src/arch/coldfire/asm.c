@@ -1664,11 +1664,19 @@ int cfasm_symform(const char *stmt, struct asm_symform *f)
             struct code c = { 0 };
             char err[160];
             int at = -1;
-            snprintf(text, sizeof text, "%.*s%s0x%lx%s", (int)(b - stmt), stmt,
-                     imm ? "" : "(", RELOC_MARK, imm ? q : ").l");
+            /* a statement too long for the buffers is not cut short (it
+             * would encode as some other instruction): it is left to the
+             * plain encoder, which names it */
+            int tl = snprintf(text, sizeof text, "%.*s%s0x%lx%s",
+                              (int)(b - stmt), stmt, imm ? "" : "(",
+                              RELOC_MARK, imm ? q : ").l");
+            if (tl < 0 || (size_t)tl >= sizeof text)
+                return 0;
             if (!imm) {
-                int t = (int)strlen(text);
-                snprintf(text + t, sizeof text - (size_t)t, "%s", q);
+                size_t t = strlen(text);
+                if ((size_t)snprintf(text + t, sizeof text - t, "%s", q) >=
+                    sizeof text - t)
+                    return 0;
             }
             if (cfasm_encode(text, &c, err, (int)sizeof err) == 0)
                 for (int k = 0; k + 4 <= c.len; k += 2)
@@ -1683,7 +1691,9 @@ int cfasm_symform(const char *stmt, struct asm_symform *f)
             f->sym_at = (int)(b - stmt);
             f->sym_len = slen;
             f->addend = add;
-            snprintf(f->encode, sizeof f->encode, "\003%s", text);
+            if ((size_t)snprintf(f->encode, sizeof f->encode, "\003%s", text) >=
+                sizeof f->encode)
+                return 0;
             f->site[0].off = at;
             f->site[0].reloc = R_68K_32;
             f->nsites = 1;

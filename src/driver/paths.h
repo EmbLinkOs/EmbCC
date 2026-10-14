@@ -52,6 +52,9 @@
  * Callers must treat NULL as "no defaults", not as an error: an
  * explicit -I still works and is how EmbCC has always been used. */
 const char *paths_lib_dir(void);
+/* 1 when the support files are a build tree's (the binary at its root),
+ * 0 when installed or not found: what a missing file's message advises. */
+int paths_is_build_tree(void);
 
 /* The default system include directories, in search order, or NULL when
  * there are none. `*n` receives the count. These are added as if by

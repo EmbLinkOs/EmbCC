@@ -4,6 +4,11 @@
  * every host shares. A host without <unistd.h> builds platform_iso.c
  * instead (`make PLATFORM=iso`); a host with more to say gets its own file
  * beside these -- chosen by the build, not an #ifdef in one of them. */
+/* POSIX.1-2008's names, asked for: under -std=c99 glibc declares only
+ * ISO C's, and readlink was an implicit declaration -- an error to GCC
+ * 14 -- on every Linux build. macOS declares them unasked. */
+#define _POSIX_C_SOURCE 200809L
+
 #include "platform.h"
 
 #include <stdio.h>

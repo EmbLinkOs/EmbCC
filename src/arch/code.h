@@ -51,7 +51,9 @@ struct asm_symform {
      * so the load went to buf[0] and the object assembled and linked
      * cleanly. */
     long addend;
-    char encode[128];            /* the statement with a zero operand */
+    /* the statement with a zero operand -- or "\001" and a refusal,
+     * whose sentences run to 160 characters: at 128 they were cut short */
+    char encode[256];
     struct asm_symsite site[2];
     int nsites;
 };

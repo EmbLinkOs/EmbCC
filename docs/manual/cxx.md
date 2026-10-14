@@ -237,7 +237,7 @@ targets only), it adds `libcxx.a` before `libc.a`; when the target's
 `libcxx.a` is missing it stops with:
 
 ```text
-embcc: error: no libcxx.a for TRIPLE -- a C++ program needs the C++ runtime, and this target's is not built or not installed
+embcc: error: no libcxx.a for x86_64-linux-gnu: its C++ runtime is not built; `make libcxx-linux-x86_64` in /path/to/EmbCC builds it
 ```
 
 **Darwin.** Objects follow the platform's C++ ABI and link with the

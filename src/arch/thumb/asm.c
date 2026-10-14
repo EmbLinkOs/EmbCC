@@ -876,7 +876,7 @@ static int dsp_stmt(const struct tok *t, int n, struct code *out,
                     char *err, int errlen)
 {
     const struct dsp_ent *e = NULL;
-    int par_k = -1, par_o = -1, r[4], nreg;
+    int par_k = -1, par_o = -1, r[4] = { -1, -1, -1, -1 }, nreg;
     long imm = 0, amt = 0;
     for (int k = 0; par_kind[k].name && par_o < 0; k++) {
         int pl = (int)strlen(par_kind[k].name);

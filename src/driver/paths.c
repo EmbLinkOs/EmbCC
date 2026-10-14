@@ -1,5 +1,6 @@
 #include "paths.h"
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -39,11 +40,26 @@ static void dirname_of(const char *p, char *out, size_t cap)
     out[n] = 0;
 }
 
+/* A path made from fmt into out: 1 when it fits, 0 (and out empty) when
+ * it does not. A path cut short names some other file, so a caller treats
+ * one that does not fit as not found rather than looking there. */
+static int pjoin(char *out, size_t cap, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(out, cap, fmt, ap);
+    va_end(ap);
+    if (n < 0 || (size_t)n >= cap) {
+        out[0] = 0;
+        return 0;
+    }
+    return 1;
+}
+
 static int has(const char *dir, const char *rel)
 {
     char p[MAXP];
-    snprintf(p, sizeof p, "%s/%s", dir, rel);
-    return plat_file_exists(p);
+    return pjoin(p, sizeof p, "%s/%s", dir, rel) && plat_file_exists(p);
 }
 
 static void resolve(void)
@@ -57,9 +73,9 @@ static void resolve(void)
     const char *env = plat_getenv("EMBCC_PREFIX");
     if (env && *env) {
         char cand[MAXP];
-        snprintf(cand, sizeof cand, "%s/lib/embcc/%s", env, EMBCC_VERSION);
-        if (has(cand, "include/stdio.h")) {
-            snprintf(g_lib, sizeof g_lib, "%s", cand);
+        if (pjoin(cand, sizeof cand, "%s/lib/embcc/%s", env, EMBCC_VERSION) &&
+            has(cand, "include/stdio.h") &&
+            pjoin(g_lib, sizeof g_lib, "%s", cand)) {
             g_kind = 1;
             return;
         }
@@ -77,12 +93,11 @@ static void resolve(void)
          * the driver relies on what it was told on the command line. */
 #ifdef EMBCC_DEFAULT_PREFIX
         char cand[MAXP];
-        snprintf(cand, sizeof cand, "%s/lib/embcc/%s", EMBCC_DEFAULT_PREFIX,
-                 EMBCC_VERSION);
-        if (has(cand, "include/stdio.h")) {
-            snprintf(g_lib, sizeof g_lib, "%s", cand);
+        if (pjoin(cand, sizeof cand, "%s/lib/embcc/%s", EMBCC_DEFAULT_PREFIX,
+                  EMBCC_VERSION) &&
+            has(cand, "include/stdio.h") &&
+            pjoin(g_lib, sizeof g_lib, "%s", cand))
             g_kind = 1;
-        }
 #endif
         return;
     }
@@ -94,25 +109,30 @@ static void resolve(void)
      * FIRST so that working on EmbCC uses the tree being worked on,
      * never a copy installed earlier -- which is the kind of confusion
      * that costs an afternoon. */
-    if (has(bin, "lib/libc/include/stdio.h")) {
-        snprintf(g_lib, sizeof g_lib, "%s", bin);
+    if (has(bin, "lib/libc/include/stdio.h") &&
+        pjoin(g_lib, sizeof g_lib, "%s", bin)) {
         g_kind = 2;
         return;
     }
 
     /* Installed: <prefix>/bin/embcc, so the prefix is one level up. */
     dirname_of(bin, up, sizeof up);
-    snprintf(cand, sizeof cand, "%s/lib/embcc/%s", up, EMBCC_VERSION);
-    if (has(cand, "include/stdio.h")) {
-        snprintf(g_lib, sizeof g_lib, "%s", cand);
+    if (pjoin(cand, sizeof cand, "%s/lib/embcc/%s", up, EMBCC_VERSION) &&
+        has(cand, "include/stdio.h") &&
+        pjoin(g_lib, sizeof g_lib, "%s", cand))
         g_kind = 1;
-    }
 }
 
 const char *paths_lib_dir(void)
 {
     resolve();
     return g_lib[0] ? g_lib : NULL;
+}
+
+int paths_is_build_tree(void)
+{
+    resolve();
+    return g_lib[0] && g_kind == 2;
 }
 
 const char *const *paths_default_includes(int *n)
@@ -144,17 +164,14 @@ const char *const *paths_default_includes(int *n)
      *                directory also holds a declarations-only
      *                <string.h> for freestanding use, which must not
      *                shadow the hosted one. */
-    if (g_kind == 1) {
-        snprintf(inc[0], sizeof inc[0], "%s/include/c++", g_lib);
-        snprintf(inc[1], sizeof inc[1], "%s/include", g_lib);
-        snprintf(inc[2], sizeof inc[2], "%s/freestanding", g_lib);
-    } else {
-        snprintf(inc[0], sizeof inc[0], "%s/lib/libcxx/include", g_lib);
-        snprintf(inc[1], sizeof inc[1], "%s/lib/libc/include", g_lib);
-        snprintf(inc[2], sizeof inc[2], "%s/include", g_lib);
-    }
+    static const char *const sub[2][3] = {
+        { "lib/libcxx/include", "lib/libc/include", "include" },   /* tree */
+        { "include/c++", "include", "freestanding" },             /* installed */
+    };
     for (int i = 0; i < 3; i++)
-        v[cached++] = inc[i];
+        if (pjoin(inc[i], sizeof inc[i], "%s/%s", g_lib,
+                  sub[g_kind == 1][i]))
+            v[cached++] = inc[i];
     *n = cached;
     return v;
 }
@@ -166,9 +183,10 @@ int paths_target_file(const char *triple, const char *name,
     resolve();
     if (!g_lib[0] || !triple || !name)
         return 0;
-    if (g_kind == 1)
-        snprintf(p, sizeof p, "%s/%s/%s", g_lib, triple, name);
-    else {
+    if (g_kind == 1) {
+        if (!pjoin(p, sizeof p, "%s/%s/%s", g_lib, triple, name))
+            return 0;
+    } else {
         /* The build tree keeps these where make put them, under names
          * that predate any install layout. Translating here is what
          * lets the same driver code serve both.
@@ -189,14 +207,12 @@ int paths_target_file(const char *triple, const char *name,
             : strncmp(triple, "aarch64", 7) == 0 ? "aarch64"
             : strncmp(triple, "x86_64", 6) == 0 ? "x86_64"
             : triple;
-        snprintf(p, sizeof p, "%s/build/%s/%s/%s", g_lib,
-                 strcmp(name, "libcxx.a") == 0 ? "libcxx" : "libc",
-                 dir, name);
+        if (!pjoin(p, sizeof p, "%s/build/%s/%s/%s", g_lib,
+                   strcmp(name, "libcxx.a") == 0 ? "libcxx" : "libc",
+                   dir, name))
+            return 0;
     }
-    if (!plat_file_exists(p))
-        return 0;
-    snprintf(out, cap, "%s", p);
-    return 1;
+    return plat_file_exists(p) && pjoin(out, cap, "%s", p);
 }
 
 void paths_print_search_dirs(void)

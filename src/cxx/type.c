@@ -5,6 +5,7 @@
  * and long double's format, which is emit.c's business. */
 #include "cxx.h"
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -538,6 +539,18 @@ static const char *basic_name(enum cty_kind k)
     }
 }
 
+/* A piece of a type's name, for a message: cut at cap when it does not
+ * fit, which a name built from nested types may not. */
+static void tname_put(char *buf, size_t cap, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, cap, fmt, ap);
+    va_end(ap);
+}
+
+static void name_into(char *buf, size_t cap, const struct cty *t);
+
 static void name_into(char *buf, size_t cap, const struct cty *t)
 {
     char inner[256];
@@ -547,18 +560,18 @@ static void name_into(char *buf, size_t cap, const struct cty *t)
     switch (t->k) {
     case CT_COMPLEX:
         name_into(inner, sizeof inner, t->to);
-        snprintf(buf, cap, "%s__complex__ %s", cv, inner);
+        tname_put(buf, cap, "%s__complex__ %s", cv, inner);
         return;
     case CT_PTR: case CT_LREF: case CT_RREF:
         name_into(inner, sizeof inner, t->to);
-        snprintf(buf, cap, "%s%s%s", inner,
+        tname_put(buf, cap, "%s%s%s", inner,
                  t->k == CT_PTR ? "*" : t->k == CT_LREF ? "&" : "&&",
                  (t->q & CQ_CONST) ? " const" : "");
         return;
     case CT_ARRAY:
         name_into(inner, sizeof inner, t->to);
-        if (t->n >= 0) snprintf(buf, cap, "%s[%ld]", inner, t->n);
-        else snprintf(buf, cap, "%s[]", inner);
+        if (t->n >= 0) tname_put(buf, cap, "%s[%ld]", inner, t->n);
+        else tname_put(buf, cap, "%s[]", inner);
         return;
     case CT_FUNC: {
         name_into(inner, sizeof inner, t->to);
@@ -573,7 +586,7 @@ static void name_into(char *buf, size_t cap, const struct cty *t)
         return;
     }
     case CT_CLASS:
-        snprintf(buf, cap, "%s%s", cv, t->cls->name ? t->cls->name
+        tname_put(buf, cap, "%s%s", cv, t->cls->name ? t->cls->name
                                                    : "<anonymous>");
         return;
     case CT_MPTR: {
@@ -581,26 +594,26 @@ static void name_into(char *buf, size_t cap, const struct cty *t)
         name_into(inner, sizeof inner, t->to);
         if (t->mclass)
             name_into(cn, sizeof cn, t->mclass);
-        snprintf(buf, cap, "%s %s::*", inner, t->mclass ? cn
+        tname_put(buf, cap, "%s %s::*", inner, t->mclass ? cn
                                               : t->cls->name ? t->cls->name
                                               : "<anonymous>");
         return;
     }
     case CT_TPARAM:
-        snprintf(buf, cap, "%s%s", cv, t->tpname ? t->tpname : "T");
+        tname_put(buf, cap, "%s%s", cv, t->tpname ? t->tpname : "T");
         return;
     case CT_TID:
-        snprintf(buf, cap, "%s%s<...>", cv, t->tmpl->name);
+        tname_put(buf, cap, "%s%s<...>", cv, t->tmpl->name);
         return;
     case CT_DEP:
-        snprintf(buf, cap, "%s<dependent type>", cv);
+        tname_put(buf, cap, "%s<dependent type>", cv);
         return;
     case CT_ENUM:
-        snprintf(buf, cap, "%s%s", cv, t->en->name ? t->en->name
+        tname_put(buf, cap, "%s%s", cv, t->en->name ? t->en->name
                                                   : "<anonymous enum>");
         return;
     default:
-        snprintf(buf, cap, "%s%s", cv, basic_name(t->k));
+        tname_put(buf, cap, "%s%s", cv, basic_name(t->k));
     }
 }
 
