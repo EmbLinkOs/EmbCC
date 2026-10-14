@@ -10,6 +10,16 @@
 #include "../lex/lex.h"
 #include "../sema/ldfloat.h"
 #include "../arch/target.h"
+
+/* C23's words that EmbCC reads as names of last resort -- `bool`, `auto`
+ * (a deduced type) and `constexpr` -- under C23 and EmbCC's GNU dialects,
+ * which have C23's keywords; not under a strict earlier standard
+ * (lex_set_c_std), where `auto x = 1;` is C89's implicit int. C++ has
+ * its own. */
+static int c23_words(void)
+{
+    return lex_c_year() >= 2023 || lex_c_gnu();
+}
 #include "../sema/type.h"
 
 /* Tags (struct/union/enum) live in their own namespace; typedef names
@@ -540,11 +550,15 @@ static int at_type_start(struct parser *ps)
             /* C23 `auto`, which begins a declaration although it names
              * no type -- the type comes from the initializer. It
              * lexes as an identifier in C, and is reserved, so no
-             * variable can be called that. */
-            strcmp(cur(ps)->text, "auto") == 0 ||
-            strcmp(cur(ps)->text, "constexpr") == 0 ||
+             * variable can be called that. With `constexpr` and
+             * `bool`, C23's -- and GNU's dialects', where they are
+             * names of last resort -- and not a strict earlier
+             * standard's, where `auto x = 1;` is C89's implicit int. */
+            (c23_words() &&
+             (strcmp(cur(ps)->text, "auto") == 0 ||
+              strcmp(cur(ps)->text, "constexpr") == 0)) ||
             /* C23 `bool`, when the unit has not named a type that */
-            strcmp(cur(ps)->text, "bool") == 0 ||
+            (c23_words() && strcmp(cur(ps)->text, "bool") == 0) ||
             strcmp(cur(ps)->text, "__builtin_va_list") == 0 ||
             strcmp(cur(ps)->text, "__int128_t") == 0 ||
             strcmp(cur(ps)->text, "__uint128_t") == 0);
@@ -1464,6 +1478,15 @@ static struct type *declarator(struct parser *ps, struct type *base,
         ps->lx = open; /* not a parenthesized declarator */
     }
     if (cur(ps)->kind == TOK_IDENT) {
+        /* C23's keywords that EmbCC reads as names of last resort (the
+         * others are the lexer's): under C23 they name nothing else */
+        if (lex_c_year() >= 2023 &&
+            (!strcmp(cur(ps)->text, "bool") || !strcmp(cur(ps)->text, "true") ||
+             !strcmp(cur(ps)->text, "false") ||
+             !strcmp(cur(ps)->text, "constexpr")))
+            parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                           "'%s' is a keyword in C23, and cannot be declared",
+                           cur(ps)->text);
         *name_out = cur(ps)->text;
         if (obj_const)
             *obj_const = top;
@@ -2064,7 +2087,7 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
         /* C23's `bool` keyword: _Bool. A typedef of that name -- old code's
          * `typedef int bool;` -- was looked up first and wins, and with
          * <stdbool.h> the macro has already made it _Bool. */
-        if (!td && strcmp(cur(ps)->text, "bool") == 0) {
+        if (!td && c23_words() && strcmp(cur(ps)->text, "bool") == 0) {
             advance(ps);
             return ty_base(TY_BOOL, 0);
         }
@@ -4810,7 +4833,7 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
          * typeof and sizeof use, so the whole of it is: record the
          * value under the name. A non-constant initializer is
          * refused, which is what makes it constexpr and not const. */
-        if (cur(ps)->kind == TOK_IDENT &&
+        if (cur(ps)->kind == TOK_IDENT && c23_words() &&
             strcmp(cur(ps)->text, "constexpr") == 0) {
             int kline = cur(ps)->line;
             if (parse_constexpr(ps))
@@ -4825,7 +4848,8 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
             struct lexer asave = ps->lx;
             struct token atok = *cur(ps);
             advance(ps);
-            if (cur(ps)->kind == TOK_IDENT && !at_type_start(ps)) {
+            if (cur(ps)->kind == TOK_IDENT && !at_type_start(ps) &&
+                c23_words()) {        /* C23's (and GNU's): else a storage class */
                 struct lexer nsave = ps->lx;
                 advance(ps);
                 if (cur(ps)->kind == TOK_ASSIGN) {
@@ -5726,8 +5750,8 @@ static void parse_top(struct parser *ps, struct unit *u,
         }
     }
     /* C23 `constexpr int N = 4;` at file scope, `static` or not */
-    if (cur(ps)->kind == TOK_IDENT && !strcmp(cur(ps)->text, "constexpr") &&
-        parse_constexpr(ps))
+    if (cur(ps)->kind == TOK_IDENT && c23_words() &&
+        !strcmp(cur(ps)->text, "constexpr") && parse_constexpr(ps))
         return;
     if (cur(ps)->kind == TOK_KW_TYPEDEF) {
         if (is_static || is_extern)

@@ -2462,8 +2462,23 @@ char *cpp_process(const char *path, const char *src,
      * sent headers to their pre-C11 fallbacks -- newlib emulates
      * _Alignof with a struct in offsetof -- and withheld C11's macros
      * (FLT_TRUE_MIN) from its own <float.h>. */
-    if (!predef_is_cxx())      /* C++ has __cplusplus instead */
-        define_macro(&boot, "__STDC_VERSION__ 201710L");
+    /* -std= picks the value, as GCC's: none for C89, 199409L for its
+     * amendment, and 202500L for C2y as the draft stands. A cNN (not
+     * gnuNN) standard is strict: __STRICT_ANSI__, which headers read to
+     * leave out what the standard does not name. */
+    if (!predef_is_cxx()) {    /* C++ has __cplusplus instead */
+        int y = lex_c_year();
+        const char *v = y >= 2025 ? "202500L" : y >= 2023 ? "202311L"
+                      : y >= 2017 ? "201710L" : y >= 2011 ? "201112L"
+                      : y >= 1999 ? "199901L" : y >= 1994 ? "199409L" : NULL;
+        if (v) {
+            char m[48];
+            snprintf(m, sizeof m, "__STDC_VERSION__ %s", v);
+            define_macro(&boot, m);
+        }
+        if (!lex_c_gnu())
+            define_macro(&boot, "__STRICT_ANSI__ 1");
+    }
     if (!predef_is_cxx() && g_gnuc[0] > 0) {
         char m[64];
         snprintf(m, sizeof m, "__GNUC__ %d", g_gnuc[0]);

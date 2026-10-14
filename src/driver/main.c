@@ -14,6 +14,7 @@
 #include "../arch/x86_64/topasm.h"
 #include "../arch/backend.h"
 #include "../cpp/cpp.h"
+#include "../lex/lex.h"
 #include "../cxx/translate.h"
 #include "../debug/dwarf.h"
 #include "../debug/eh.h"
@@ -4641,40 +4642,38 @@ int main(int argc, char **argv)
                                     "parses C++20 and will accept newer "
                                     "constructs\n", opt_typed(argv[i]));
             } else {
-                /* A C standard. EmbCC has ONE C dialect -- C11 with the
-                 * GNU extensions -- and says so rather than nodding:
-                 * `-std=c89` used to be accepted and then compile
-                 * `for (int i = ...)` happily, which is a build
-                 * believing it checked something it did not. An
-                 * unknown name is refused outright. */
-                static const char *const known[] = {
-                    "c89", "c90", "iso9899:1990", "gnu89", "gnu90",
-                    "c99", "c9x", "iso9899:1999", "gnu99", "gnu9x",
-                    "c11", "c1x", "iso9899:2011", "gnu11", "gnu1x",
-                    "c17", "c18", "iso9899:2017", "gnu17", "gnu18",
-                    "c23", "c2x", "gnu23", "gnu2x"
+                /* A C standard, as GCC names them: its year sets
+                 * __STDC_VERSION__ and the keywords (lex_set_c_std), and
+                 * cNN is strict where gnuNN has GNU's extensions. */
+                static const struct { const char *name; int year, gnu; }
+                    cstd[] = {
+                    { "c89", 1989, 0 }, { "c90", 1989, 0 },
+                    { "iso9899:1990", 1989, 0 }, { "gnu89", 1989, 1 },
+                    { "gnu90", 1989, 1 }, { "iso9899:199409", 1994, 0 },
+                    { "c99", 1999, 0 }, { "c9x", 1999, 0 },
+                    { "iso9899:1999", 1999, 0 }, { "gnu99", 1999, 1 },
+                    { "gnu9x", 1999, 1 },
+                    { "c11", 2011, 0 }, { "c1x", 2011, 0 },
+                    { "iso9899:2011", 2011, 0 }, { "gnu11", 2011, 1 },
+                    { "gnu1x", 2011, 1 },
+                    { "c17", 2017, 0 }, { "c18", 2017, 0 },
+                    { "iso9899:2017", 2017, 0 }, { "iso9899:2018", 2017, 0 },
+                    { "gnu17", 2017, 1 }, { "gnu18", 2017, 1 },
+                    { "c23", 2023, 0 }, { "c2x", 2023, 0 },
+                    { "iso9899:2024", 2023, 0 }, { "gnu23", 2023, 1 },
+                    { "gnu2x", 2023, 1 },
+                    { "c2y", 2025, 0 }, { "gnu2y", 2025, 1 },
                 };
-                int ok = 0;
-                for (size_t k = 0; k < sizeof known / sizeof known[0]; k++)
-                    if (strcmp(v, known[k]) == 0) { ok = 1; break; }
-                if (!ok) {
+                int k = 0, n = (int)(sizeof cstd / sizeof cstd[0]);
+                while (k < n && strcmp(v, cstd[k].name) != 0)
+                    k++;
+                if (k == n) {
                     fprintf(stderr, "embcc: error: unknown standard '%s'\n",
                             opt_typed(argv[i]));
                     return 1;
                 }
-                std_gnu89 = !strcmp(v, "c89") || !strcmp(v, "c90") ||
-                            !strcmp(v, "iso9899:1990") ||
-                            !strcmp(v, "gnu89") || !strcmp(v, "gnu90");
-                if (strncmp(v, "c1", 2) != 0 && strncmp(v, "gnu1", 4) != 0 &&
-                    strcmp(v, "iso9899:2011") != 0 &&
-                    strcmp(v, "iso9899:2017") != 0 &&
-                    strncmp(v, "c2", 2) != 0 && strncmp(v, "gnu2", 4) != 0 &&
-                    strcmp(v, "c17") != 0 && strcmp(v, "c18") != 0)
-                    fprintf(stderr, "embcc: warning: %s is accepted but not "
-                                    "enforced; EmbCC has one C dialect, C11 "
-                                    "with the GNU extensions, and will "
-                                    "compile newer constructs anyway\n",
-                            opt_typed(argv[i]));
+                lex_set_c_std(cstd[k].year, cstd[k].gnu);
+                std_gnu89 = cstd[k].year < 1999;
             }
         } else if (strcmp(argv[i], "--emit-c") == 0) {
             emit_c_only = 1;

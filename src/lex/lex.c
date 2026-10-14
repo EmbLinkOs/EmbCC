@@ -259,6 +259,44 @@ static const struct {
     { "default", TOK_KW_DEFAULT },
 };
 
+static int g_c_year = 2017, g_c_gnu = 1;
+
+void lex_set_c_std(int year, int gnu)
+{
+    g_c_year = year;
+    g_c_gnu = gnu;
+}
+
+int lex_c_year(void) { return g_c_year; }
+int lex_c_gnu(void) { return g_c_gnu; }
+
+/* Whether the C keyword w is one under the standard in force. Under a
+ * strict standard (cNN), as that standard says: the ones a later standard
+ * added are names -- `int restrict;` is C89, `int nullptr;` C17 -- and
+ * GNU's `asm` and `typeof` are names too (`__asm__` and `__typeof__`
+ * stay keywords). EmbCC's GNU dialects (gnuNN, and the default gnu17)
+ * have C23's keywords as well, as EmbCC always has: code built with it
+ * uses them unasked. */
+static int c_keyword_on(const char *w)
+{
+    static const char *const c23[] = {
+        "static_assert", "alignof", "alignas", "thread_local",
+        "typeof_unqual", "nullptr",
+    };
+    for (size_t k = 0; k < sizeof c23 / sizeof c23[0]; k++)
+        if (strcmp(w, c23[k]) == 0)
+            return g_c_year >= 2023 || g_c_gnu;
+    if (strcmp(w, "typeof") == 0)
+        return g_c_gnu || g_c_year >= 2023;
+    if (strcmp(w, "asm") == 0)
+        return g_c_gnu;
+    if (strcmp(w, "inline") == 0)
+        return g_c_gnu || g_c_year >= 1999;
+    if (strcmp(w, "restrict") == 0)
+        return g_c_year >= 1999;
+    return 1;
+}
+
 static int hex_val(int c)
 {
     if (c >= '0' && c <= '9') return c - '0';
@@ -847,8 +885,9 @@ void lex_next(struct lexer *lx)
              * L"xyz" read the high half of 'x'. */
             w = q[0] == 'L' ? target_wchar_size() : 4; adv = 1;
         } else if (q[0] == 'u' && q[1] == '8' && (q[2] == '"' ||
-                   (q[2] == '\'' && lx->cxx))) {
-            /* u8'c' is C++17's (char8_t from C++20): one UTF-8 code unit */
+                   (q[2] == '\'' && (lx->cxx || g_c_year >= 2023 || g_c_gnu)))) {
+            /* u8'c' is C++17's (char8_t from C++20) and C23's (unsigned
+             * char): one UTF-8 code unit */
             w = 1; adv = 2;
         } else if (q[0] == 'u' && (q[1] == '"' || q[1] == '\'')) {
             w = 2; adv = 1;
@@ -867,7 +906,7 @@ void lex_next(struct lexer *lx)
     /* C++: a pp-number with digit separators (1'000) or a user-defined
      * suffix (5_km, 1.5_m, 10ms), and binary literals: read from a
      * cleaned copy, the suffix kept apart. */
-    if ((lx->cxx || has_digit_separator(lx->p)) &&
+    if ((lx->cxx || ((g_c_year >= 2023 || g_c_gnu) && has_digit_separator(lx->p))) &&
         (isdigit((unsigned char)*lx->p) ||
          (*lx->p == '.' && isdigit((unsigned char)lx->p[1])))) {
         if (cxx_number(lx, t)) {
@@ -1043,6 +1082,8 @@ void lex_next(struct lexer *lx)
                 continue;        /* identifiers in C++, or its own */
             if (strlen(keywords[i].word) == n &&
                 memcmp(keywords[i].word, start, n) == 0) {
+                if (!lx->cxx && !c_keyword_on(keywords[i].word))
+                    break;                      /* a name in this standard */
                 t->kind = keywords[i].kind;
                 return;
             }

@@ -5,6 +5,7 @@
  */
 #include <setjmp.h>
 #include <stdarg.h>
+#include "../lex/lex.h"
 #include "sema.h"
 
 #include <stdio.h>
@@ -2276,8 +2277,9 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                 e->str_width = 1;
                 e->str_prefix = 0;
                 check_expr(u, f, sc, e);   /* give it the array/pointer type */
-            } else if (strcmp(e->name, "true") == 0 ||
-                       strcmp(e->name, "false") == 0) {
+            } else if ((lex_c_year() >= 2023 || lex_c_gnu()) &&
+                       (strcmp(e->name, "true") == 0 ||
+                        strcmp(e->name, "false") == 0)) {
                 /* C23 makes `true` and `false` keywords: constants of type
                  * bool. gcc 15 and later default to C23, and code written
                  * against them -- EmbLinkOs among it -- uses both without

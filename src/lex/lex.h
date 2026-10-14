@@ -218,6 +218,15 @@ struct lexer {
     struct token tok; /* current token */
 };
 
+/* The C standard a unit is read under (-std=): its year -- 1989, 1994,
+ * 1999, 2011, 2017, 2023, or 2025 for C2y -- and whether GNU's
+ * extensions come with it (gnuNN, not cNN). gnu17 unless the driver says
+ * otherwise. The keywords a standard does not have are identifiers under
+ * it: `bool` and `nullptr` before C23, `asm` and `typeof` outside GNU's
+ * modes (as GCC reads them). */
+void lex_set_c_std(int year, int gnu);
+int lex_c_year(void);
+int lex_c_gnu(void);
 void lex_init(struct lexer *lx, const char *file, const char *src);
 /* lex_init, choosing C (cxx 0) or C++ (cxx 1) keywords and punctuators. */
 void lex_init_mode(struct lexer *lx, const char *file, const char *src,
