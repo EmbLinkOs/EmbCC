@@ -536,10 +536,10 @@ hardware half-precision conversion, which it does not emit.)
 Invalid combinations are refused:
 
 ```text
-embcc: <embcc>: error: -mfloat-abi=hard needs an FPU to use: add -mfpu=fpv4-sp-d16 (Cortex-M4F), -mfpu=fpv5-d16 (Cortex-M7) or -mfpu=fpv5-sp-d16 (Cortex-M33)
-embcc: <embcc>: error: -mfpu=fpv4-sp-d16 is an ARMv7E-M unit, and the part is ARMv7-M (a Cortex-M3 has no FPU); add -mcpu=cortex-m4
-embcc: <embcc>: error: -mfpu=fpv5-d16 is the Cortex-M7's double-precision unit, and -mcpu=cortex-m4 does not have it; the Cortex-M4F's is -mfpu=fpv4-sp-d16
-embcc: <embcc>: error: -mfloat-abi=bogus is not an ARM float ABI: it is one of soft, softfp and hard
+embcc: error: --float-abi=hard needs an FPU to use: add --fpu=fpv4-sp-d16 (Cortex-M4F), --fpu=fpv5-d16 (Cortex-M7) or --fpu=fpv5-sp-d16 (Cortex-M33)
+embcc: error: --fpu=fpv4-sp-d16 is an ARMv7E-M unit, and the part is ARMv7-M (a Cortex-M3 has no FPU); add --cpu=cortex-m4
+embcc: error: --fpu=fpv5-d16 is the Cortex-M7's double-precision unit, and --cpu=cortex-m4 does not have it; the Cortex-M4F's is --fpu=fpv4-sp-d16
+embcc: error: --float-abi=bogus is not an ARM float ABI: it is one of soft, softfp and hard
 ```
 
 Each object records its FPU (`Tag_FP_arch`: VFPv4-D16 for the M4F's

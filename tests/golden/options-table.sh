@@ -126,3 +126,37 @@ done > "$out/unlisted.txt"
 [ ! -s "$out/unlisted.txt" ] ||
     { cat "$out/unlisted.txt"; fail "spellings missing from --reference=options"; }
 echo "options-table: the reference lists every EmbCC spelling"
+
+# ---- 5. a message quotes the option as it was typed ------------------------
+# Each line: target|EmbCC's spelling|GCC's|what follows the option in
+# the message. The message must open with whichever was typed,
+# and a message about the command line names no file.
+cat > "$out/said.txt" <<'LIST'
+thumbv7em-none-eabi|--isa=arm|-marm| is not supported
+x86_64-elf|--cpu=cortex-m4|-mcpu=cortex-m4| is an ARM option
+thumbv7em-none-eabi|--float-abi=hard|-mfloat-abi=hard| needs an FPU
+thumbv7em-none-eabi|--abi=apcs-gnu|-mabi=apcs-gnu| is not supported
+thumbv7em-none-eabi|--cpu=cortex-m55|-mcpu=cortex-m55| is not a part
+riscv32-unknown-elf|--isa=rv32imafcv|-march=rv32imafcv|: the 'v' extension
+riscv32-unknown-elf|--abi=ilp32e|-mabi=ilp32e| is not supported
+mipsel-none-elf|--cpu=mips32r6|-mcpu=mips32r6| is not a MIPS32
+mipsel-none-elf|--abi=n32|-mabi=n32| is not supported
+avr|--mcu=atmega8|-mmcu=atmega8| is not supported
+xtensa-none-elf|--abi=call0|-mabi=call0| is not supported
+xtensa-none-elf|--endian=big|-mbig-endian| is not supported
+x86_64-elf|--sanitize=address|-fsanitize=address| is not supported
+LIST
+: > "$out/said-bad.txt"
+while IFS="|" read -r t ours gcc rest; do
+    for a in "$ours" "$gcc"; do
+        "$E" --target=$t --syntax-only "$a" "$out/t.c" > "$out/said.err" 2>&1
+        grep -qF "embcc: error: $a$rest" "$out/said.err" ||
+            { echo "$t $a:"; cat "$out/said.err"; } >> "$out/said-bad.txt"
+    done
+done < "$out/said.txt"
+"$E" --pass=bogus "$out/t.c" > "$out/said.err" 2>&1
+grep -qF "unknown argument '--pass=bogus'" "$out/said.err" ||
+    { echo "--pass=bogus:"; cat "$out/said.err"; } >> "$out/said-bad.txt"
+[ ! -s "$out/said-bad.txt" ] ||
+    { cat "$out/said-bad.txt"; fail "a message does not quote the option as it was typed"; }
+echo "options-table: every message quotes the option as it was typed"

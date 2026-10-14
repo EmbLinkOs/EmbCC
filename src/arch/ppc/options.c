@@ -49,13 +49,13 @@ int ppc_target_option(const char *arg)
                        "EmbCC emits for: its code is 32-bit Book E "
                        "PowerPC without SPE (e500, 8548, e500v1, "
                        "e500v2, e200z0-z7, ppc, 603, 750, 440, ...)",
-                       arg);
+                       opt_typed(arg));
     } else if (strcmp(arg, "-mhard-float") == 0 ||
                (strncmp(arg, "-mfloat-abi=", 12) == 0 &&
                 strcmp(v, "soft") != 0)) {
         diag_fatal(NULL, 0, "%s is not supported: EmbCC emits "
                    "soft-float PowerPC code, which passes floating "
-                   "point in the general registers", arg);
+                   "point in the general registers", opt_typed(arg));
     } else if (strcmp(arg, "-mspe") == 0) {
         diag_fatal(NULL, 0, "-mspe is not supported: EmbCC emits no "
                    "SPE (signal processing engine) instructions; its "
@@ -70,12 +70,12 @@ int ppc_target_option(const char *arg)
     } else if (strcmp(arg, "-mno-eabi") == 0 ||
                strcmp(arg, "-msecure-plt") == 0) {
         diag_fatal(NULL, 0, "%s is not supported: EmbCC emits the "
-                   "embedded ABI (-meabi) for bare metal", arg);
+                   "embedded ABI (-meabi) for bare metal", opt_typed(arg));
     } else if (strncmp(arg, "-mabi=", 6) == 0 &&
                strcmp(v, "ibmlongdouble") != 0 &&
                strcmp(v, "no-spe") != 0) {
         diag_fatal(NULL, 0, "%s is not supported: EmbCC emits the "
-                   "PowerPC EABI with soft float", arg);
+                   "PowerPC EABI with soft float", opt_typed(arg));
     } else if ((strncmp(arg, "-msdata", 7) == 0 &&
                 strcmp(arg, "-msdata=none") != 0) ||
                (strncmp(arg, "-G", 2) == 0 &&
@@ -83,7 +83,7 @@ int ppc_target_option(const char *arg)
         diag_fatal(NULL, 0, "%s is not supported: EmbCC puts no "
                    "data in small-data sections and addresses "
                    "nothing through r2 or r13 (-msdata=none, -G0)",
-                   arg);
+                   opt_typed(arg));
     }
     return 1;
 }

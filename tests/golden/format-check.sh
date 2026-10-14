@@ -87,14 +87,14 @@ lines() {  # lines() <file> -> the line numbers warned about
 
 # 1. Silent unless asked: a warning nobody asked for is noise.
 n=$("$EMBCC" --target="$TARGET" -c "$out/bad.c" -o "$out/t.o" 2>&1 |
-        grep -c 'Wformat' || true)
+        grep -c 'warn=format' || true)
 [ "$n" = 0 ] || { echo "FAIL: -Wformat fired without -Wall"; exit 1; }
 
 # 2. In -Wall, as gcc has it, and off again with -Wno-format.
 lines bad.c > "$out/mine"
 [ -s "$out/mine" ] || { echo "FAIL: -Wall did not enable -Wformat"; exit 1; }
 n=$("$EMBCC" --target="$TARGET" -Wall -Wno-format -c "$out/bad.c" \
-        -o "$out/t.o" 2>&1 | grep -c 'Wformat' || true)
+        -o "$out/t.o" 2>&1 | grep -c 'warn=format' || true)
 [ "$n" = 0 ] || { echo "FAIL: -Wno-format did not turn it off"; exit 1; }
 echo "silent by default, in -Wall, and off again"
 
@@ -110,7 +110,7 @@ lines good.c > "$out/goodwarns"
 [ -s "$out/goodwarns" ] &&
     { echo "FAIL: reported a correct call:"
       "$EMBCC" --target="$TARGET" -Wall -c "$out/good.c" -o "$out/t.o" 2>&1 |
-          grep 'Wformat'
+          grep 'warn=format'
       exit 1; }
 echo "and none of the 20 correct ones is"
 

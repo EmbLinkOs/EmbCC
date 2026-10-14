@@ -324,10 +324,14 @@ static int caret_end(const struct diag *d, const char *ln, int len)
 static void render_text(const struct diag *d)
 {
     fprintf(stderr, "embcc: ");
-    fprintf(stderr, "%s%s", cc("\033[1m"), d->file ? d->file : "<embcc>");
-    if (d->line > 0) fprintf(stderr, ":%d", d->line);
-    if (d->col > 0)  fprintf(stderr, ":%d", d->col);
-    fprintf(stderr, ":%s %s%s:%s %s%s", cc("\033[0m"), cc(level_sgr(d->level)),
+    /* a diagnostic about the command line has no place to name */
+    if (d->file) {
+        fprintf(stderr, "%s%s", cc("\033[1m"), d->file);
+        if (d->line > 0) fprintf(stderr, ":%d", d->line);
+        if (d->col > 0)  fprintf(stderr, ":%d", d->col);
+        fprintf(stderr, ":%s ", cc("\033[0m"));
+    }
+    fprintf(stderr, "%s%s:%s %s%s", cc(level_sgr(d->level)),
             level_name(d->level), cc("\033[0m"), cc("\033[1m"), d->msg);
     /* the warning, as EmbCC's option that controls it */
     if (d->option)

@@ -49,7 +49,7 @@ The parts are, in order:
 | Part | Meaning |
 |---|---|
 | `embcc:` | Every diagnostic line starts with the program name. |
-| `area.c:4:16:` | File, line and column. Columns count bytes from 1. The column is omitted when it is not known (some diagnostics are tied to a whole line); the line is omitted when the diagnostic is about the file as a whole. A diagnostic with no file names `<embcc>`. |
+| `area.c:4:16:` | File, line and column. Columns count bytes from 1. The column is omitted when it is not known (some diagnostics are tied to a whole line); the line is omitted when the diagnostic is about the file as a whole. A diagnostic about the command line has no location: `embcc: error: ...`. |
 | `error:` | The severity: `error`, `warning` or `note`. |
 | message | What is wrong. |
 | `[--warn=name]` | Printed after a diagnostic that a warning option controls (a warning, or an error under `--warnings-are-errors` or `--error=name`): the option that turns it on, so `--no-warn=name` turns it off. JSON output names it as GCC does (`"option": "-Wname"`), for the tools that read GCC's format. |
@@ -143,8 +143,8 @@ With `--fix`, the status is 0 whenever at least one fix-it was applied
 An inconsistency inside the compiler is reported as
 
 ```text
-embcc: <embcc>: error: internal error: ...
-embcc: <embcc>: note: this is a bug in EmbCC, not in the program being compiled
+embcc: error: internal error: ...
+embcc: note: this is a bug in EmbCC, not in the program being compiled
 ```
 
 with no source location, because the problem is in EmbCC's state rather

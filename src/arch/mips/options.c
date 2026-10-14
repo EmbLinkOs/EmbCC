@@ -38,11 +38,11 @@ int mips64_target_option(const char *arg)
         if (!ok)
             diag_fatal(NULL, 0, "%s is not a MIPS64 Release 2 core: "
                        "EmbCC emits MIPS64r2 (mips64r2, 5kc, 5kf, "
-                       "5kec, 5kef, octeon)", arg);
+                       "5kec, 5kef, octeon)", opt_typed(arg));
     } else if (strncmp(arg, "-mabi=", 6) == 0) {
         if (strcmp(v, "64") != 0)
             diag_fatal(NULL, 0, "%s is not supported: EmbCC emits "
-                       "the n64 ABI (-mabi=64) only", arg);
+                       "the n64 ABI (--abi=64) only", opt_typed(arg));
     } else if (strcmp(arg, "-mhard-float") == 0) {
         diag_fatal(NULL, 0, "-mhard-float is not supported: EmbCC "
                    "emits soft-float n64, which passes floating "
@@ -64,7 +64,7 @@ int mips64_target_option(const char *arg)
                strcmp(arg, "-G0") != 0) {
         diag_fatal(NULL, 0, "%s is not supported: EmbCC puts no "
                    "data in .sdata and addresses nothing through "
-                   "$gp (-G0)", arg);
+                   "$gp (-G0)", opt_typed(arg));
     }
     return 1;
 }
@@ -104,11 +104,11 @@ int mips32_target_option(const char *arg)
             diag_fatal(NULL, 0, "%s is not a MIPS32 Release 2 core: "
                        "EmbCC emits MIPS32r2 (mips32r2, m4k, m14k, "
                        "m14kc, 24kc, 24kf, 24kec, 24kef, 34kc, 74kc)",
-                       arg);
+                       opt_typed(arg));
     } else if (strncmp(arg, "-mabi=", 6) == 0) {
         if (strcmp(v, "32") != 0)
             diag_fatal(NULL, 0, "%s is not supported: EmbCC emits "
-                       "the o32 ABI (-mabi=32) only", arg);
+                       "the o32 ABI (--abi=32) only", opt_typed(arg));
     } else if (strcmp(arg, "-mhard-float") == 0) {
         diag_fatal(NULL, 0, "-mhard-float is not supported: EmbCC "
                    "emits soft-float o32, which passes floating "
@@ -129,7 +129,7 @@ int mips32_target_option(const char *arg)
                strcmp(arg, "-G0") != 0) {
         diag_fatal(NULL, 0, "%s is not supported: EmbCC puts no "
                    "data in .sdata and addresses nothing through "
-                   "$gp (-G0)", arg);
+                   "$gp (-G0)", opt_typed(arg));
     }
     return 1;
 }

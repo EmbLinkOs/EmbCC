@@ -1678,11 +1678,11 @@ GCC's own placement and costs, are accepted; the rest are refused by name.
 
 | Option | Accepted | Refused with |
 |---|---|---|
-| `-mabi=` | `windowed` | `-mabi=call0 is not supported: EmbCC emits the windowed ABI (call8/entry/retw), which ESP-IDF uses` |
+| `--abi=` (`-mabi=`) | `windowed` | `--abi=call0 is not supported: EmbCC emits the windowed ABI (call8/entry/retw), which ESP-IDF uses` |
 | `-mlongcalls`, `-mno-longcalls` | both: calls are direct; `embld` refuses one beyond `call8`'s 512 KiB | |
 | `-mtext-section-literals`, `-mauto-litpools` (and `-mno-`) | yes | |
 | `-mserialize-volatile`, `-mno-serialize-volatile` | yes; `memw` is emitted either way | |
-| `-mlittle-endian` | yes | `-mbig-endian is not supported: every target EmbCC emits for is little-endian` |
+| `--endian=little` (`-mlittle-endian`) | yes | `--endian=big is not supported for xtensa-none-elf, which is little-endian` |
 | `-mdynconfig=` | `xtensa_esp32.so`, `xtensa_esp32s3.so` | `-mdynconfig=xtensa_esp32s2.so is not supported for xtensa-none-elf: ...` |
 | `-mtarget-align`, `-mforce-no-pic`, `-mstrict-align`, `-mextra-l32r-costs=`, `-mno-const16` | yes | |
 | `-mconst16`, `-mforce-l32`, `-mfix-esp32-psram-cache-issue` | | refused by name |

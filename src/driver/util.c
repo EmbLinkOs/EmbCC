@@ -130,3 +130,38 @@ const char *opt_typed(const char *internal)
             return g_opt_typed[k].typed;
     return internal;
 }
+
+/* The strings opt_said returns: a message may name a few options at
+ * once, and each must outlive the next call. */
+static const char *opt_ring(char *s)
+{
+    static char *ring[16];
+    static int at;
+    free(ring[at]);
+    ring[at] = s;
+    at = (at + 1) % 16;
+    return s;
+}
+
+static char *opt_join(const char *prefix, const char *value)
+{
+    size_t n = strlen(prefix) + (value ? strlen(value) : 0) + 1;
+    char *s = xmalloc(n);
+    strcpy(s, prefix);
+    if (value)
+        strcat(s, value);
+    return s;
+}
+
+/* The option PREFIX VALUE as the user typed it: opt_said("-mfpu=",
+ * "fpv5-d16") is "--fpu=fpv5-d16" when that is how it came. */
+const char *opt_said(const char *prefix, const char *value)
+{
+    char *s = opt_join(prefix, value);
+    const char *t = opt_typed(s);
+    if (t != s) {
+        free(s);
+        return t;
+    }
+    return opt_ring(s);
+}

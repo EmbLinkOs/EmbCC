@@ -48,7 +48,7 @@ int tricore_target_option(const char *arg)
             diag_fatal(NULL, 0, "%s is not a TriCore 1.6 core: EmbCC "
                        "emits TriCore 1.6.1 code, for the AURIX "
                        "TC2xx and TC3xx (tc16, tc161, tc162, tc27xx, "
-                       "tc37xx, ...)", arg);
+                       "tc37xx, ...)", opt_typed(arg));
     }
     return 1;
 }

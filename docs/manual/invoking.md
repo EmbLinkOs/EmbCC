@@ -446,7 +446,7 @@ definition, as in GCC. A linker script must place `*(COMMON)` (in
 `.bss`, where the startup code zeroes it); `embld` says so if it does
 not. `-S` writes `.comm NAME,SIZE,ALIGN`. C++ has no tentative
 definitions, so the option changes nothing there. For a Mach-O or COFF
-target it is refused: `embcc: error: -fcommon is not supported for
+target it is refused: `embcc: error: --common is not supported for
 x86_64-apple-darwin: EmbCC writes COMMON symbols into ELF objects only,
 and this target's are Mach-O`.
 
@@ -712,10 +712,16 @@ uses, and `embcc --print-target` prints the target in effect.
 
 ### Options for every target
 
-#### `--endian=little`
+#### `--endian=little`, `--endian=big`
 
-Accepted: every target EmbCC emits for is little-endian.
-`--endian=big` is [refused](#refused-options).
+GCC: `-mlittle-endian`, `-mbig-endian`.
+
+A target has one byte order, which its triple names, so either option is
+accepted when it says what the target is and refused when it does not:
+`embcc: error: --endian=big is not supported for x86_64-elf, which is
+little-endian`. The big-endian targets are PowerPC, SPARC, ColdFire, and
+MIPS under the `mips-none-elf` and `mips64-none-elf` triples; the others
+are little-endian ([Target list](target-list.md)).
 
 ### x86-64 options
 
@@ -725,10 +731,10 @@ GCC: `-mno-sse`, `-mno-sse2`, `-mgeneral-regs-only`.
 
 Generate no SSE instructions, for code that runs before the kernel has
 enabled SSE. Floating-point arithmetic needs SSE on x86-64, so a unit
-that uses it is refused: `floating point needs SSE, which -mno-sse
+that uses it is refused: `floating point needs SSE, which --no-sse
 forbids`. On AArch64, `--general-regs-only` (and `--no-sse`) similarly
 keeps code out of the floating-point registers, and floating point is
-refused with `floating point used under -mgeneral-regs-only (in 'f')`.
+refused with `floating point used under --general-regs-only (in 'f')`.
 On the other targets these options are accepted and have no effect.
 
 #### `--no-red-zone`
@@ -756,7 +762,7 @@ Accepted. Thumb is the only instruction set a Cortex-M has.
 
 #### `--isa=arm`
 
-Refused: `-marm is not supported: a Cortex-M has no ARM instruction set,
+Refused: `--isa=arm is not supported: a Cortex-M has no ARM instruction set,
 only Thumb`.
 
 #### `--cpu=CPU`
@@ -799,7 +805,7 @@ Cortex-M core is accepted and changes nothing; anything else is refused.
 On `armv7a-none-eabi`, `--isa=armv7-a` and any `--tune=cortex-a*` are
 accepted.
 
-Any other `CPU` is refused: `-mcpu=cortex-m55 is not a part EmbCC knows:
+Any other `CPU` is refused: `--cpu=cortex-m55 is not a part EmbCC knows:
 it emits ARMv6-M (cortex-m0, m0plus, m1), ARMv8-M Baseline (cortex-m23),
 ARMv7-M and ARMv7E-M (cortex-m3, m4, m7) and ARMv8-M Mainline
 (cortex-m33)`.
@@ -824,10 +830,10 @@ ARMv6-M part has no FPU, so every unit, and `--float-abi=softfp` or
 `hard`, is refused there:
 
 ```text
--mfpu=fpv4-sp-d16 is an ARMv7E-M unit, and the part is ARMv7-M (a Cortex-M3 has no FPU); add -mcpu=cortex-m4
--mfpu=fpv5-d16 is the Cortex-M7's double-precision unit, and -mcpu=cortex-m4 does not have it; the Cortex-M4F's is -mfpu=fpv4-sp-d16
--mfpu=fpv5-d16 is not supported on thumbv8m.main-none-eabi: EmbCC emits VFP for the Cortex-M33's unit (-mfpu=fpv5-sp-d16) and nothing else: ...
--mfpu=fpv5-d16 on thumbv6m-none-eabi: an ARMv6-M core (Cortex-M0, M0+, M1) has no FPU, so floating point is soft and travels in the core registers
+--fpu=fpv4-sp-d16 is an ARMv7E-M unit, and the part is ARMv7-M (a Cortex-M3 has no FPU); add --cpu=cortex-m4
+--fpu=fpv5-d16 is the Cortex-M7's double-precision unit, and --cpu=cortex-m4 does not have it; the Cortex-M4F's is --fpu=fpv4-sp-d16
+--fpu=fpv5-d16 is not supported on thumbv8m.main-none-eabi: EmbCC emits VFP for the Cortex-M33's unit (--fpu=fpv5-sp-d16) and nothing else: ...
+--fpu=fpv5-d16 on thumbv6m-none-eabi: an ARMv6-M core (Cortex-M0, M0+, M1) has no FPU, so floating point is soft and travels in the core registers
 ```
 
 With a single-precision unit, `float` arithmetic is VFP instructions and
@@ -849,10 +855,10 @@ that, as in GCC.
 | `softfp` | FPU instructions; floating-point arguments and results passed in core registers. Links with `soft` objects. |
 | `hard` | FPU instructions; floating-point arguments and results passed in `s0`-`s15`/`d0`-`d7` (AAPCS-VFP). Does not link with `soft` objects. |
 
-`softfp` and `hard` need an FPU (`-mfloat-abi=hard needs an FPU to use:
-add -mfpu=fpv4-sp-d16 (Cortex-M4F), -mfpu=fpv5-d16 (Cortex-M7) or
--mfpu=fpv5-sp-d16 (Cortex-M33)`). Any other value is refused:
-`-mfloat-abi=ABI is not an ARM float ABI: it is one of soft, softfp and
+`softfp` and `hard` need an FPU (`--float-abi=hard needs an FPU to use:
+add --fpu=fpv4-sp-d16 (Cortex-M4F), --fpu=fpv5-d16 (Cortex-M7) or
+--fpu=fpv5-sp-d16 (Cortex-M33)`). Any other value is refused:
+`--float-abi=ABI is not an ARM float ABI: it is one of soft, softfp and
 hard`.
 
 `--fpu=` and `--float-abi=` are resolved together after the whole command
@@ -888,7 +894,7 @@ because EmbCC cannot keep it: a packed structure's `int` member is one
 from wherever it lies.
 
 ```text
--mno-unaligned-access is not supported: EmbCC's ARMv7-M code uses word and halfword loads and stores at unaligned addresses (packed struct members; copies and by-value passing of structs aligned below 4), which the architecture allows and this flag forbids
+--no-unaligned-access is not supported: EmbCC's ARMv7-M code uses word and halfword loads and stores at unaligned addresses (packed struct members; copies and by-value passing of structs aligned below 4), which the architecture allows and this flag forbids
 ```
 
 #### `-mslow-flash-data`
@@ -913,8 +919,8 @@ and `_zifencei`. EmbCC emits I, M, A, F, D and C:
   run on the FPU, and D the same for `double`; D needs F;
 - without C nothing is compressed and `EF_RISCV_RVC` is clear.
 
-Anything else is refused by name: `-march=rv32imafcv: the 'v' extension
-is not supported`, `-march=rv32imadc: the D extension needs F`. The
+Anything else is refused by name: `--isa=rv32imafcv: the 'v' extension
+is not supported`, `--isa=rv32imadc: the D extension needs F`. The
 default is `rv32imac` and `rv64imac`. The predefined macros follow
 (`__riscv_f`, `__riscv_d`, `__riscv_flen`, `__riscv_fdiv`,
 `__riscv_fsqrt`, `__riscv_zicsr`, `__riscv_zcf`, `__riscv_zcd`, and the
@@ -929,8 +935,8 @@ too (`__riscv_float_abi_double`) -- with the psABI's flattening of small
 structs into floating-point registers. Without `--abi=` it follows
 `--isa=` as clang's does: D gives the double ABI, F alone the single
 one. A float ABI wider than the `--isa=` has FPU is refused
-(`-mabi=ilp32d passes doubles in floating-point registers, and
--march=rv32imafc has no D extension`), as are `ilp32e` and the other
+(`--abi=ilp32d passes doubles in floating-point registers, and
+--isa=rv32imafc has no D extension`), as are `ilp32e` and the other
 width's ABIs. Objects of two float ABIs do not link (embld refuses them),
 and the driver links a hard-float ABI's `librt.a` and `libc.a` from
 `<triple>/<abi>` (`riscv32-unknown-elf/ilp32f`), which `make rt-embedded
@@ -949,7 +955,7 @@ that and refused by name when it asks for anything else.
 Accepted for a MIPS32 Release 2 core: `mips32r2`, `m4k`, `m14k`,
 `m14kc`, `24kc`, `24kf`, `24kec`, `24kef`, `34kc` and `74kc`. The code is
 the same for every one. Any other value, Release 6 and the pre-Release 2
-ISAs included, is refused: `-mcpu=mips32r6 is not a MIPS32 Release 2 core:
+ISAs included, is refused: `--cpu=mips32r6 is not a MIPS32 Release 2 core:
 EmbCC emits MIPS32r2 (mips32r2, m4k, m14k, m14kc, 24kc, 24kf, 24kec,
 24kef, 34kc, 74kc)`.
 
@@ -960,7 +966,7 @@ GCC: `-mabi=32`, `-msoft-float`, `-EL`, `-mno-abicalls`, `-G0`.
 Accepted; each names what EmbCC does anyway. Their opposites are refused:
 
 ```text
--mabi=n32 is not supported: EmbCC emits the o32 ABI (-mabi=32) only
+--abi=n32 is not supported: EmbCC emits the o32 ABI (--abi=32) only
 -mhard-float is not supported: EmbCC emits soft-float o32, which passes floating point in the integer registers
 -EB is not supported: the MIPS target is little-endian (mipsel) only
 -mabicalls is not supported: EmbCC's MIPS code takes addresses absolutely (lui/addiu) and keeps no $gp; it is -mno-abicalls code
@@ -2133,7 +2139,8 @@ fix-it:"bad.c":{2:36-2:36}:";"
 
 These options are refused because each is a promise about the generated
 code that EmbCC would not keep. The driver stops with status 1 and a
-message that names the option.
+message that names the option as it was typed; the messages below are
+what EmbCC's spellings get.
 
 | Option | Message |
 |---|---|
@@ -2142,22 +2149,22 @@ message that names the option.
 | `-fprofile-*`, `--coverage`, `-fcoverage-mapping`, `-pg` | (same form) |
 | `-fstack-clash-protection`, `-fcf-protection`, `-fcf-protection=...` | (same form) |
 | `-fsanitize*` other than the forms in [`--sanitize`](#--sanitizelist---no-sanitizelist) | (same form) |
-| `-fsanitize=NAME` for a check EmbCC does not have | `-fsanitize=NAME is not supported: EmbCC's sanitizer inserts checks that TRAP ...` |
+| `--sanitize=NAME` for a check EmbCC does not have | `--sanitize=NAME is not supported: EmbCC's sanitizer inserts checks that TRAP ...` |
 | `-fstack-protector`, `-fstack-protector-all`, `-fstack-protector-strong`, `-fstack-protector-explicit` | `embcc: '-fstack-protector...' is not supported (EmbCC emits no stack protection); -fno-stack-protector is` |
 | `-shared`, `-static-pie` | `embcc: error: -shared needs position-independent code, which EmbCC does not emit` |
 | `-gdwarf-5` (any version but 2 to 4), `-gsplit-dwarf`, `-gz` | `embcc: error: -gdwarf-5 is not supported; EmbCC emits DWARF 4, uncompressed and in one piece` |
-| `-marm` | `-marm is not supported: a Cortex-M has no ARM instruction set, only Thumb` |
-| `-mno-unaligned-access` (ARM) | `-mno-unaligned-access is not supported: EmbCC's ARMv7-M code uses word and halfword loads and stores at unaligned addresses ...` |
-| `-mabi=apcs-gnu`, `-mabi=atpcs`, `-mabi=iwmmxt` (ARM) | `-mabi=apcs-gnu is not supported: EmbCC emits the AAPCS ...` |
-| `-mabi=ilp32e`, `lp64e` (RISC-V), or a float ABI the `-march=` has no FPU for | `embcc: error: -mabi=ilp32e is not supported for riscv32-unknown-elf: EmbCC emits ilp32, ilp32f and ilp32d` |
-| `-march=` with an extension other than I, M, A, F, D, C, Zicsr, Zifencei, or without M or A (RISC-V) | `embcc: error: -march=rv32imafcv: the 'v' extension is not supported: EmbCC emits I, M, A, F, D and C` |
-| `-mbig-endian` | `embcc: error: -mbig-endian is not supported: every target EmbCC emits for is little-endian` |
+| `--isa=arm` | `--isa=arm is not supported: a Cortex-M has no ARM instruction set, only Thumb` |
+| `--no-unaligned-access` (ARM) | `--no-unaligned-access is not supported: EmbCC's ARMv7-M code uses word and halfword loads and stores at unaligned addresses ...` |
+| `--abi=apcs-gnu`, `--abi=atpcs`, `--abi=iwmmxt` (ARM) | `--abi=apcs-gnu is not supported: EmbCC emits the AAPCS ...` |
+| `--abi=ilp32e`, `lp64e` (RISC-V), or a float ABI the `--isa=` has no FPU for | `embcc: error: --abi=ilp32e is not supported for riscv32-unknown-elf: EmbCC emits ilp32, ilp32f and ilp32d (not the E base's)` |
+| `--isa=` with an extension other than I, M, A, F, D, C, Zicsr, Zifencei, or without M or A (RISC-V) | `embcc: error: --isa=rv32imafcv: the 'v' extension is not supported: EmbCC emits I, M, A, F, D and C` |
+| `--endian=big` or `--endian=little` against the target's byte order | `embcc: error: --endian=big is not supported for x86_64-elf, which is little-endian` |
 | `-fdump-rtl-*`, `-fdump-tree-*` and every other `-fdump-`; `-fcallgraph-info=` with anything but `su` | `embcc: error: -fdump-rtl-expand is not supported: it dumps GCC's internal representation, which EmbCC does not have; ...` |
-| `-fcommon` for a Mach-O or COFF target | `embcc: error: -fcommon is not supported for x86_64-apple-darwin: ...` |
+| `--common` for a Mach-O or COFF target | `embcc: error: --common is not supported for x86_64-apple-darwin: ...` |
 | `-fsingle-precision-constant` for C++ | `embcc: error: -fsingle-precision-constant is supported for C, not C++: ...` |
 | `-O4` and other `-O` forms not listed | `embcc: unknown optimization flag '-O4'` |
-| `-Wl,OPTION` or `-Xlinker OPTION`, for a linker option not listed under [`-Wl,`](#--linker-argarg) | `embcc: error: linker option 'OPTION' is not one EmbLD has (it takes -e, -Ttext, -Tdata, -Tstack, --rom-limit and --lma-offset); dropping it could build a different image from the one asked for` |
-| `-Wa,OPTION`, for an option not listed under [`-Wa,`](#--assembler-argarg) | `embcc: error: assembler option 'OPTION' is not one the integrated assembler has` |
+| `-Wl,OPTION` or `-Xlinker OPTION`, for a linker option not listed under [`--linker-arg`](#--linker-argarg) | `embcc: error: linker option 'OPTION' is not one EmbLD has (it takes -e, -Ttext, -Tdata, -Tstack, --rom-limit and --lma-offset); dropping it could build a different image from the one asked for` |
+| `-Wa,OPTION`, for an option not listed under [`--assembler-arg`](#--assembler-argarg) | `embcc: error: assembler option 'OPTION' is not one the integrated assembler has` |
 
 ## Environment variables
 

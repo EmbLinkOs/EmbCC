@@ -880,7 +880,7 @@ default.
 Any other name is refused, by name:
 
 ```text
-embcc: <embcc>: error: -fsanitize=address is not supported: EmbCC's sanitizer inserts checks that TRAP, and this one needs a runtime library to report through. The ones it has are undefined, signed-integer-overflow, integer-divide-by-zero and shift
+embcc: error: -fsanitize=address is not supported: EmbCC's sanitizer inserts checks that TRAP, and this one needs a runtime library to report through. The ones it has are undefined, signed-integer-overflow, integer-divide-by-zero and shift
 ```
 
 This includes `-fsanitize=all`, `null`, `alignment`, `bounds`,

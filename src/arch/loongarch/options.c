@@ -45,18 +45,18 @@ int loongarch_target_option(const char *arg)
             diag_fatal(NULL, 0, "%s is not an LA64 architecture: "
                        "EmbCC emits the LA64 base integer ISA "
                        "(loongarch64, la64v1.0, la64v1.1, la464, "
-                       "la664)", arg);
+                       "la664)", opt_typed(arg));
     } else if (strncmp(arg, "-mabi=", 6) == 0) {
         if (strcmp(v, "lp64s") != 0)
             diag_fatal(NULL, 0, "%s is not supported: EmbCC emits "
                        "the soft-float LP64S convention "
-                       "(-mabi=lp64s), which passes floating point "
-                       "in the integer registers", arg);
+                       "(--abi=lp64s), which passes floating point "
+                       "in the integer registers", opt_typed(arg));
     } else if (strncmp(arg, "-mfpu=", 6) == 0) {
         if (strcmp(v, "none") != 0 && strcmp(v, "0") != 0)
             diag_fatal(NULL, 0, "%s is not supported: EmbCC's "
-                       "LoongArch code uses no FPU (-mfpu=none)",
-                       arg);
+                       "LoongArch code uses no FPU (--fpu=none)",
+                       opt_typed(arg));
     } else if (strncmp(arg, "-mcmodel=", 9) == 0) {
         /* normal: bl and pcalau12i reach +-128 MiB and +-2 GiB;
          * a medium program fits in that too, and one that does
@@ -64,11 +64,11 @@ int loongarch_target_option(const char *arg)
         if (strcmp(v, "normal") != 0 && strcmp(v, "medium") != 0)
             diag_fatal(NULL, 0, "%s is not supported: EmbCC emits "
                        "the normal code model (bl, pcalau12i + "
-                       "addi.d)", arg);
+                       "addi.d)", opt_typed(arg));
     } else if (strcmp(arg, "-msingle-float") == 0 ||
                strcmp(arg, "-mdouble-float") == 0) {
         diag_fatal(NULL, 0, "%s is not supported: EmbCC emits "
-                   "soft-float LP64S code (-msoft-float)", arg);
+                   "soft-float LP64S code (-msoft-float)", opt_typed(arg));
     } else if (strcmp(arg, "-mstrict-align") == 0) {
         diag_fatal(NULL, 0, "-mstrict-align is not supported: "
                    "EmbCC's LoongArch code may access a packed "
@@ -76,7 +76,7 @@ int loongarch_target_option(const char *arg)
     } else if (strcmp(arg, "-mlsx") == 0 ||
                strcmp(arg, "-mlasx") == 0) {
         diag_fatal(NULL, 0, "%s is not supported: EmbCC emits no "
-                   "LSX or LASX vector instructions", arg);
+                   "LSX or LASX vector instructions", opt_typed(arg));
     }
     return 1;
 }

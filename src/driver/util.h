@@ -94,6 +94,9 @@ int diag_print_reference(FILE *out);                  /* --reference=warnings */
  * rewrote into `internal`, or `internal` when that is what was typed. */
 void opt_remember_typed(const char *internal, const char *typed);
 const char *opt_typed(const char *internal);
+/* The option PREFIX VALUE as the user typed it: "--fpu=fpv5-d16" for
+ * "-mfpu=" "fpv5-d16" when that is what came. Lasts 16 more calls. */
+const char *opt_said(const char *prefix, const char *value);
 /* A GCC warning name whose diagnostic is always an ERROR here (an
  * implicit function declaration): -WNAME and -Werror=NAME ask for what
  * EmbCC already does. 1 = such a name. */

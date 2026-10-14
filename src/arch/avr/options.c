@@ -64,12 +64,12 @@ static void set_mcu(const char *arg, const char *v)
         diag_fatal(NULL, 0, "%s is not supported: the %s is an avr4 part, "
                    "with no jmp or call instruction, and EmbCC's AVR code "
                    "calls with `call` (it generates for the avr5 core: "
-                   "-mmcu=atmega328p, atmega328, atmega168p or atmega168)",
-                   arg, v);
+                   "--mcu=atmega328p, atmega328, atmega168p or atmega168)",
+                   opt_typed(arg), v);
     diag_fatal(NULL, 0, "%s is not supported: EmbCC's AVR backend generates "
                "code for the ATmega328P's avr5 core, and knows the memories "
                "and vectors of atmega328p, atmega328, atmega168p and "
-               "atmega168 alone", arg);
+               "atmega168 alone", opt_typed(arg));
 }
 
 int avr_target_option(const char *arg)
@@ -96,7 +96,8 @@ int avr_target_option(const char *arg)
     if (!strcmp(arg, "-mdouble=64") || !strcmp(arg, "-mlong-double=64"))
         diag_fatal(NULL, 0, "%s is not supported: double and long double "
                    "are binary32 on this target, the same type as float, "
-                   "and a 64-bit double changes the ABI of every one", arg);
+                   "and a 64-bit double changes the ABI of every one",
+                   opt_typed(arg));
     if (!strcmp(arg, "-mint8"))
         diag_fatal(NULL, 0, "-mint8 is not supported: int is 16 bits on "
                    "this target, and an 8-bit int changes the type of every "
