@@ -8,9 +8,10 @@
 #
 # The property is not "faster", it is "does not run out". So the test is
 # a recursion deep enough that the ordinary lowering CANNOT survive it,
-# run at both -O1 (where sibling calls are off) and -O2 (where they are
-# on). -O1 must die and -O2 must produce the answer; a test where both
-# pass would be measuring nothing.
+# run at both -O0 (where sibling calls are off) and -O2 (where they are
+# on). -O0 must die and -O2 must produce the answer; a test where both
+# pass would be measuring nothing. (-O1 was the reference until sibling
+# calls followed the register allocator down to -O1, as clang's do.)
 #
 # And the correctness half: every guard in tail_call_ok exists because
 # some frame is still referenced after the jump, so each one is a
@@ -65,14 +66,14 @@ run "$out/deep2"
     exit 1; }
 deep_answer=$(cat "$out/run.txt")
 
-build "$out/deep.c" "$out/deep1" -O1
-run "$out/deep1"
+build "$out/deep.c" "$out/deep0" -O0
+run "$out/deep0"
 [ "$rc" != 42 ] || {
-    echo "FAIL: -O1 survived three million frames too, so this test is"
+    echo "FAIL: -O0 survived three million frames too, so this test is"
     echo "      not measuring the transform -- either sibling calls came"
-    echo "      on at -O1 or the recursion is no longer deep enough"
+    echo "      on at -O0 or the recursion is no longer deep enough"
     exit 1; }
-echo "3000000 frames deep: -O2 returns $deep_answer, -O1 runs out of stack"
+echo "3000000 frames deep: -O2 returns $deep_answer, -O0 runs out of stack"
 
 # ---- 2. and the guards ---------------------------------------------------
 #
