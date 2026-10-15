@@ -1460,6 +1460,18 @@ static void parse_label_decl(struct parser *ps)
 
 static struct stmt *parse_block(struct parser *ps);
 
+/* At a `(` that opens a parameter list rather than an expression's
+ * parentheses: `()`, `(...)`, or a parameter's type next. */
+static int fn_suffix_follows(struct parser *ps)
+{
+    struct lexer save = ps->lx;
+    advance(ps);
+    int yes = cur(ps)->kind == TOK_RPAREN || cur(ps)->kind == TOK_ELLIPSIS ||
+              cur(ps)->kind == TOK_KW_ATTRIBUTE || at_type_start(ps);
+    ps->lx = save;
+    return yes;
+}
+
 /* Declarator over a base type (C11 6.7.6): pointers, then a name — or a
  * parenthesized declarator — then array and function suffixes. The
  * parenthesized one binds looser than the suffixes after it (`int
@@ -1582,6 +1594,13 @@ static struct type *declarator(struct parser *ps, struct type *base,
     }
     if (nested && cur(ps)->kind == TOK_LPAREN)
         return parse_fn_params_named(ps, base, ps->fn_pnames);
+    /* a parameter of function type, `int f(int)` (adjusted to a
+     * pointer), and an abstract declarator's parameter list: `void
+     * (void)` and `int *(char, ...)` are type names for function types
+     * (`sizeof(void (void))`, a parameter `int (int)`) */
+    if ((ps->in_param || !*name_out) && cur(ps)->kind == TOK_LPAREN &&
+        fn_suffix_follows(ps))
+        return parse_fn_params(ps, base);
     return parse_array_dims(ps, base);
 }
 
@@ -5625,6 +5644,14 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
     case TOK_MINUSMINUS:
     case TOK_KW_REAL:   /* __real__ z = ...; */
     case TOK_KW_IMAG:
+    case TOK_KW_GENERIC:        /* _Generic(x, ...)(y); -- tgmath style */
+    case TOK_KW_SIZEOF:         /* the rest begin expressions too, which */
+    case TOK_KW_ALIGNOF:        /* a statement may be (to no effect) */
+    case TOK_KW_COUNTOF:
+    case TOK_KW_NULLPTR:
+    case TOK_PLUS:
+    case TOK_STR:
+    case TOK_ANDAND:
         /* expression statement: assignment, call, or ++/-- */
         if (t->kind == TOK_IDENT)
             reject_reserved(ps, t->text, t->line, t->col);
