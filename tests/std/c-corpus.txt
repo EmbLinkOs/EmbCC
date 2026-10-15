@@ -146,3 +146,45 @@ struct E { };
 void f(void) { asm("nop"); }
 == gnu-dunder-asm
 void f(void) { __asm__("nop"); }
+== gnu-void-ptr-arith
+void *f(void *p) { return p + 1; }
+== gnu-void-ptr-diff
+long f(void *a, void *b) { return a - b; }
+== gnu-void-ptr-incdec
+void f(void *p) { p++; --p; p += 2; p -= 1; }
+== gnu-func-ptr-arith
+void g(void); void (*f(void))(void) { return g + 1; }
+== gnu-sizeof-void
+int n = sizeof(void);
+== gnu-sizeof-func
+void g(void); int n = sizeof g; int m = sizeof(void (void));
+== gnu-sizeof-void-expr
+void g(void); int n = sizeof(g());
+== gnu-return-void-expr
+void g(void); void f(void) { return g(); }
+== return-value-from-void
+void f(void) { return 1; }
+== gnu-dollar-ident
+int a$b = 1; int $c(void) { return a$b; }
+== gnu-union-cast
+union u { int i; float f; }; union u f(int x) { return (union u)x; }
+== gnu-union-cast-init
+union u { int i; float f; }; union u g = (union u)1.5f;
+== gnu-struct-cast-same
+struct s { int a; }; struct s f(struct s v) { return (struct s)v; }
+== union-cast-no-member
+union u { int i; }; union u f(double x) { return (union u)x; }
+== union-cast-not-lvalue
+union u { int i; }; void f(int x) { (union u)x = (union u)1; }
+== union-cast-member-not-lvalue
+union u { int i; }; int *f(int x) { return &((union u)x).i; }
+== abstract-fn-type
+typedef int F(int); int n = __builtin_types_compatible_p(int (int), F);
+== param-fn-type
+int apply(int f(int), int v) { return f(v); }
+== stmt-starts-generic
+int g(int); void f(int x) { _Generic(x, int: g)(x); }
+== stmt-starts-sizeof
+void f(int x) { sizeof x; +x; "s"; }
+== c89-bare-return
+int f(void) { return; }

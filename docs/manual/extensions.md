@@ -87,7 +87,8 @@ operators](#feature-test-operators), with the limits described there.
 | Conditional with the middle operand omitted, `x ?: y` | Supported; `x` is evaluated once |
 | A structure or union with no members | Supported; its size is 0 |
 | An asm label, `int f(void) __asm__("name");` | Supported |
-| [Constructs EmbCC does not support](#gnu-extensions-that-are-not-supported) | Nested functions, arithmetic on `void *`, cast to a union, integer complex types, `$` in identifiers, `return` of a `void` expression |
+| [Arithmetic on `void *`, casts to a union and other small forms](#smaller-gnu-c-forms) | Supported |
+| [Constructs EmbCC does not support](#gnu-extensions-that-are-not-supported) | Nested functions, integer complex types, a conditional or cast as an lvalue, vector types |
 
 ### Statement expressions
 
@@ -205,8 +206,8 @@ sub:
 ```
 
 Arithmetic on a label address -- `&&b - &&a`, `&&a + n` -- is in bytes,
-as on a `char *` (on AVR, in words, since the address is one); `void *`
-arithmetic is still refused anywhere else (`arithmetic on void *`). A
+as on a `char *` (on AVR, in words, since the address is one), the way
+arithmetic on a `void *` is (see [Smaller GNU C forms](#smaller-gnu-c-forms)). A
 label address cannot initialize an object outside its function: at
 file scope it is refused with `a static initializer must be a constant,
 a string literal, or the address of a global`. A label whose address is
@@ -308,6 +309,23 @@ headers written for `-ansi` work:
 | `__const__`, `__const` | `const` |
 | `__extension__` | Nothing; it is predefined as an empty macro |
 
+### Smaller GNU C forms
+
+| Form | Meaning |
+|---|---|
+| Arithmetic on a `void *` or a function pointer (`p + 1`, `p++`, `p - q`) | In bytes, as on a `char *` |
+| `sizeof(void)`; `sizeof` of a function type, of a function's name, or of a `void` expression | 1 |
+| `return f();` in a `void` function, where `f` returns `void` | `f` is called, and nothing is returned |
+| `$` in an identifier | Part of the name, at its start, middle or end |
+| A cast to a union type, `(union u)x` | The union `u` with `x` in its first member of `x`'s type. The result is a value, not an lvalue. An `x` whose type no member has is refused: `cannot cast double to union u: no member has that type` |
+| A cast of a structure to its own type, `(struct s)x` | `x`'s value |
+
+`--pedantic` warns about each of these (`... is a GNU extension, not ISO
+C`), except in system headers and after `__extension__`;
+`--pedantic-errors` refuses them. `$` gets the warning under `--std=c89`
+and `gnu89` only, as in GCC: C99 allows an implementation to accept
+other characters in identifiers.
+
 ### GNU extensions that are not supported
 
 Each of these is refused with the diagnostic shown.
@@ -315,17 +333,9 @@ Each of these is refused with the diagnostic shown.
 | Construct | Diagnostic |
 |---|---|
 | Nested function definitions | `expected ';' before '{' [E0002]`, at the inner function's body |
-| Arithmetic on `void *` | `arithmetic on void *`, and `++/-- on void *` |
-| Arithmetic on a function pointer | `arithmetic on function *` |
-| `sizeof(void)` | `sizeof(void)` |
-| Cast to a union type, `(union u)x` | `cannot cast to union u` |
-| `$` in an identifier | `character '$' is not supported yet` |
-| `return f();` in a `void` function, where `f` returns `void` | `returning a value from void 'g'` |
+| Integer complex types (`_Complex int`) | `invalid _Complex type (only float, double and long double _Complex are supported)` |
 | A conditional or cast as an lvalue | `assignment target must be a variable, *pointer, or member` |
 | Vector types; see [Vector extensions](#vector-extensions) | |
-
-`sizeof` applied to a function designator gives the size of a pointer
-to the function, not 1 as in GCC.
 
 ## Attributes
 

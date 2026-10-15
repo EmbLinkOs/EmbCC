@@ -32,6 +32,7 @@ Every warning EmbCC has, generated from the compiler's own table by `embcc --ref
 | `--warn=pedantic` | A construct the C standard `--std` names does not have: a later standard's (`0b101` before C23, `_Bool` in C89) or a GNU extension (`({ ... })`, `case 1 ... 3`, `x ?: y`), except after `__extension__`. `--pedantic` turns it on and `--pedantic-errors` makes it an error; either also takes C23's keywords away from a GNU dialect before C23 | neither set |
 | `--warn=prio-ctor-dtor` | A `constructor` or `destructor` priority from 0 to 100, which the implementation reserves | on by default |
 | `--warn=redundant-decls` | A second declaration of a function or `extern` object in the same scope | neither set |
+| `--warn=return-mismatch` | A `return` with a value in a `void` function, under `--std=c89` or `gnu89` (from C99 on, and under `--pedantic-errors`, it is an error) | on by default |
 | `--warn=shadow` | A local declaration that hides a local variable, a parameter or a file-scope variable | neither set |
 | `--warn=shift-count-overflow` | A constant shift count that is negative or not less than the operand width | `--warn=all` |
 | `--warn=sign-compare` | A comparison that converts a possibly negative signed operand to unsigned | `--warn=extra` |
