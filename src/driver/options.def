@@ -48,7 +48,8 @@ OPT(BUILD, "--emit-interfaces", NULL, NULL, "write the unit's interface record i
 OPT(BUILD, "--emit-empty-object", "FILE", NULL, "write an empty object for this target (it must come first)")
 
 /* ---- the language ---------------------------------------------------- */
-OPT(LANG, "--std=",         "STD",  "-std=%", "the language standard's macros (EmbCC reads one dialect per language)")
+OPT(LANG, "--std=",         "STD",  "-std=%", "the language standard: c89 to c2y, gnu17 by default (C++'s, c++98 to c++26, set its macros)")
+GCCONLY(LANG, "-ansi", "--std=c89 for C, and --std=c++98's macros for C++")
 OPT(LANG, "-D",             "NAME[=VALUE]", NULL, "define a macro")
 OPT(LANG, "-U",             "NAME", NULL,   "undefine a macro")
 OPT(LANG, "-I",             "DIR",  NULL,   "search DIR for headers")
@@ -146,7 +147,7 @@ OPT(DIAG, "--no-warnings-are-errors", NULL, "-Wno-error", "they are not")
 OPT(DIAG, "--error=",       "NAME", "-Werror=%", "this warning is an error")
 OPT(DIAG, "--no-error=",    "NAME", "-Wno-error=%", "this one is a warning again")
 OPT(DIAG, "--no-warnings",  NULL,   "-w", "no warnings at all")
-OPT(DIAG, "--pedantic",     NULL,   "-pedantic", "warn for every extension of ISO C")
+OPT(DIAG, "--pedantic",     NULL,   "-pedantic", "warn for what the --std standard does not have")
 OPT(DIAG, "--pedantic-errors", NULL, "-pedantic-errors", "...as errors")
 OPT(DIAG, "--warn-in-system-headers", NULL, "-Wsystem-headers", "warn in system headers too")
 OPT(DIAG, "--diagnostics=", "FORMAT", "-fdiagnostics-format=%", "text, or json for tools")

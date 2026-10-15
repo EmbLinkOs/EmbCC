@@ -59,40 +59,33 @@ prefix. The format is described in [Diagnostics](diagnostics.md).
 
 GCC: `-std=STANDARD`.
 
-Name a C standard. The option is accepted so that existing build systems
-work; it does not change what EmbCC accepts or the macros it defines.
+Name a C standard. Each is compiled as it is: its keywords, its
+`__STDC_VERSION__`, C89's implicit `int` and C99's `//` comments, the
+unprototyped `int f()` before C23, and trigraphs under a strict standard
+before C23. The full rules are under
+[`--std=`](invoking.md#--stdstandard).
 
-| `--std=` value | Standard | Result |
+| `--std=` value | Standard | `__STDC_VERSION__` |
 |---|---|---|
-| `c89`, `c90`, `iso9899:1990`, `gnu89`, `gnu90` | C89/C90 | Accepted with a warning |
-| `c99`, `c9x`, `iso9899:1999`, `gnu99`, `gnu9x` | C99 | Accepted with a warning |
-| `c11`, `c1x`, `iso9899:2011`, `gnu11`, `gnu1x` | C11 | Accepted |
-| `c17`, `c18`, `iso9899:2017`, `gnu17`, `gnu18` | C17 | Accepted |
-| `c23`, `c2x`, `gnu23`, `gnu2x` | C23 | Accepted |
+| `c89`, `c90`, `iso9899:1990`, `gnu89`, `gnu90` | C89/C90 | not defined |
+| `iso9899:199409` | C94 | `199409L` |
+| `c99`, `c9x`, `iso9899:1999`, `gnu99`, `gnu9x` | C99 | `199901L` |
+| `c11`, `c1x`, `iso9899:2011`, `gnu11`, `gnu1x` | C11 | `201112L` |
+| `c17`, `c18`, `iso9899:2017`, `iso9899:2018`, `gnu17`, `gnu18` | C17 | `201710L` |
+| `c23`, `c2x`, `iso9899:2024`, `gnu23`, `gnu2x` | C23 | `202311L` |
+| `c2y`, `gnu2y` | C2y | `202500L` |
 | any other value | | Error |
 
-A standard older than C11 prints:
+The default is `gnu17`. A `cNN` value defines `__STRICT_ANSI__`. `-ansi`
+is `--std=c89`. Any other value is an error:
 
 ```text
-embcc: warning: -std=c99 is accepted but not enforced; EmbCC has one C dialect, C11 with the GNU extensions, and will compile newer constructs anyway
+embcc: error: unknown standard '-std=c3x'
 ```
 
-Any other value is an error, for example `--std=c2y`, `--std=gnu2y`,
-`--std=iso9899:199409` and `--std=iso9899:2018`:
-
-```text
-embcc: error: unknown standard '-std=c2y'
-```
-
-Whatever the value, `__STDC_VERSION__` is `201710L` and `__STRICT_ANSI__`
-is not defined. With no `--std=` option the dialect is the same. EmbCC has
-no mode that diagnoses extensions. `-ansi` is refused as an unknown
-argument. `--pedantic` and `--pedantic-errors` are accepted, turn nothing
-on, and print a warning that says so:
-
-```text
-embcc: warning: -pedantic: EmbCC has no diagnostics for extensions to ISO C, so this turns nothing on
-```
+[`--pedantic` and `--pedantic-errors`](invoking.md#--pedantic---pedantic-errors)
+report, as a warning or an error, what the standard does not have: a
+later standard's feature, or a GNU extension.
 
 See [Diagnostics](diagnostics.md).
 
@@ -267,9 +260,9 @@ C17's value, `201710L`.
 | `true` and `false` in `#if` | Supported | |
 | Binary constants `0b1010` | Supported | Also in `#if`. |
 | Digit separators `1'000'000` | Supported | In integer and floating constants, and in `#if`. |
-| `u8` character constants `u8'a'` | Not supported | Read as the identifier `u8` followed by `'a'`, which is a syntax error such as `expected ';' before number 97 [E0002]`. |
+| `u8` character constants `u8'a'` | Supported | Of type `unsigned char`. |
 | `char8_t`; `u8"..."` of type `unsigned char[]` | Not supported | `u8"..."` has C17's type, `char[]`. `<uchar.h>` does not declare `char8_t`. |
-| `_BitInt(N)`, the `wb` and `uwb` suffixes | Not supported | `expected a type before '_BitInt'`; a `3wb` constant gives `malformed integer constant`. |
+| `_BitInt(N)`, the `wb` and `uwb` suffixes | Partial | N up to 64, which is `BITINT_MAXWIDTH`; wider is refused: `_BitInt(65) is wider than BITINT_MAXWIDTH, which is 64 here`. Arithmetic in the type wraps at N bits, a `_BitInt` is not promoted to `int`, and conversions rank it by its width. Laid out and passed as the x86-64, AArch64 and RISC-V ABIs say, so calls between EmbCC and GCC agree. See [Integers](implementation-defined.md). |
 | Enumerations with a fixed underlying type, `enum E : unsigned char` | Partial | The enumeration and its constants have the underlying type, and `enum E : short;` declares it ahead of its definition. A value the underlying type cannot represent is not diagnosed. See [Enumeration constants](#enumeration-constants). A non-integer type: `an enum's underlying type must be an integer type`. |
 | Enumeration constants outside the range of `int` | Partial | The enumeration and its constants take a type that can represent every value. A value of 2^63 or more is read as negative. See [Enumeration constants](#enumeration-constants). |
 | Empty initializer `= {}` | Partial | Zero-initializes any object except a VLA, which is refused: `variable length array 'a' cannot be initialized`. See [Initializers](#initializers). |

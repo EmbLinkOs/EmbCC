@@ -73,6 +73,8 @@ struct expr {
      * Without it the warning fires fifteen times on EmbCC's own
      * correct code. */
     int parens;
+    int countof;          /* EXPR_SIZEOF spelled _Countof (C2y): the
+                           * operand's element count, not its bytes */
     struct func *fref;    /* EXPR_VAR: a function used as a value —
                            * decays to pointer-to-function (sema) */
     int str_index;        /* EXPR_STR: unit string table slot (irgen) */
@@ -443,6 +445,7 @@ struct func {
      * 2 scanf, 0 none. Both indices are 1-based, as GCC defines them. */
     int fmt_kind, fmt_idx, fmt_first;
     int is_varargs;       /* declared with a trailing ", ..." */
+    int noproto;          /* no prototype: `f()` before C23, or K&R (type.h) */
     int pcs;              /* __attribute__((pcs)): 1 "aapcs", 2 "aapcs-vfp",
                            * 0 whatever -mfloat-abi says (ARM only) */
     int sret_first;       /* param 0 is the indirect-result pointer

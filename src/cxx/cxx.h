@@ -54,6 +54,17 @@ void cx_skip_balanced(void);         /* past a ( [ { group and its close */
 
 /* diagnostics at a token (exit) */
 void cx_error(const struct ctok *at, const char *fmt, ...);
+/* The C++ standard the code at t is read under: -std='s (lex_cxx_year),
+ * or all of EmbCC's in a system header (lex.h). cx_need_std: `what` is
+ * C++YEAR's, an error at t under an earlier standard, as GCC has it. */
+int cx_std_at(const struct ctok *t);
+void cx_need_std(const struct ctok *t, int year, const char *what);
+/* -pedantic: `what` is C++SINCE's and the code at t older (since 0: a GNU
+ * extension, in every standard), or (cx_pedantic_removed) a standard
+ * REMOVED it; a warning, an error under -pedantic-errors, and nothing in
+ * a system header */
+void cx_pedantic(const struct ctok *t, int since, const char *what);
+void cx_pedantic_removed(const struct ctok *t, int removed, const char *what);
 /* Where an error resumes (a jmp_buf *, NULL to stop the compile) and how
  * many have been reported. */
 extern void *cx_recover;
@@ -563,6 +574,10 @@ int ct_dependent(const struct cty *t);
 void pack_push(struct csym *pack, int index);
 void pack_pop(int n);
 struct csym *pack_current(struct csym *y);   /* the element, or y itself */
+struct csym *pack_elem_sym(struct csym *y, int i);
+/* C++26's pack indexing at the cursor, NAME...[N] (parse.c): the element
+ * of the bound pack NAME, as a symbol; the cursor past the `]` */
+struct csym *cx_pack_index(void);
 int pack_length(struct csym *y);
 /* The expansion at the cursor, if the element up to its `,` or closer ends
  * in `...` (angles: `<` `>` nest, in template arguments): the packs its
@@ -621,6 +636,7 @@ struct cfunc {
     int is_explicit, is_virtual, is_constexpr;
     int is_consteval;         /* an immediate function (7.7) */
     int is_deleted, is_defaulted;
+    const char *delete_msg;   /* C++26's `= delete("why")`: why */
     int is_implicit;          /* declared by the compiler */
     int special;              /* an implicit one's kind: SP_* */
     int trivial;              /* ... and it runs no code (a C struct copy,

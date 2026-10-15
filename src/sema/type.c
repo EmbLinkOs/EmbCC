@@ -113,6 +113,22 @@ struct type *ty_llong(int is_unsigned)
     return &llongs[is_unsigned ? 1 : 0];
 }
 
+struct type *ty_bitint(int n, int is_unsigned)
+{
+    static struct type *made[2][TY_BITINT_MAXWIDTH + 1];
+    if (n < (is_unsigned ? 1 : 2) || n > TY_BITINT_MAXWIDTH)
+        return NULL;
+    struct type **slot = &made[is_unsigned ? 1 : 0][n];
+    if (!*slot) {
+        struct type *t = xcalloc(1, sizeof *t);
+        *t = *ty_int_of_size(n <= 8 ? 1 : n <= 16 ? 2 : n <= 32 ? 4 : 8,
+                             is_unsigned);
+        t->bitint = n;
+        *slot = t;
+    }
+    return *slot;
+}
+
 struct type *ty_size_t(void)
 {
     return ty_base(target_int_size() == target_ptr_size() &&
@@ -451,6 +467,19 @@ static void ms_struct_layout(struct type *t, struct member *members, int n,
     *bits_out = bitpos;
 }
 
+int ty_incomplete(const struct type *t)
+{
+    if (t->kind == TY_VOID)
+        return 1;
+    if (ty_size((struct type *)t) != 0)
+        return 0;
+    if (t->kind == TY_STRUCT && t->complete)
+        return 0;
+    if (t->kind == TY_ARRAY && t->count > 0)
+        return ty_incomplete(t->pointee);
+    return 1;
+}
+
 void ty_struct_layout(struct type *t, struct member *members, int n,
                       int packed, int user_align, int pack)
 {
@@ -683,7 +712,8 @@ int ty_own_align(const struct type *t)
 
 int ty_equal(const struct type *a, const struct type *b)
 {
-    if (a->kind != b->kind || a->is_unsigned != b->is_unsigned)
+    if (a->kind != b->kind || a->is_unsigned != b->is_unsigned ||
+        a->bitint != b->bitint)
         return 0;
     /* `long` against `long long`. C says they are distinct types
      * whatever the target, but this compiler has always let them
@@ -714,6 +744,9 @@ int ty_equal(const struct type *a, const struct type *b)
     if (a->kind == TY_FUNC) {
         /* a cmse_nonsecure_call is a different way to call: a pointer to
          * one is not a pointer to the other (as clang has it) */
+        /* one with no prototype goes with any of the same return */
+        if ((a->noproto || b->noproto) && a->cmse_ns_call == b->cmse_ns_call)
+            return ty_equal(a->ret, b->ret);
         if (a->nptypes != b->nptypes || a->is_varargs != b->is_varargs ||
             a->sret_first != b->sret_first ||
             a->cmse_ns_call != b->cmse_ns_call || !ty_equal(a->ret, b->ret))
@@ -942,7 +975,11 @@ const char *ty_name(const struct type *t)
         t = t->pointee;
     }
     char structbuf[48];
-    switch (t->kind) {
+    if (t->bitint) {
+        snprintf(structbuf, sizeof structbuf, "%s_BitInt(%d)",
+                 t->is_unsigned ? "unsigned " : "", t->bitint);
+        base = structbuf;
+    } else switch (t->kind) {
     case TY_VOID: base = "void"; break;
     case TY_BOOL: base = "_Bool"; break;
     case TY_CHAR: base = t->is_unsigned ? "unsigned char" : "char"; break;
@@ -1079,6 +1116,8 @@ struct type *ty_promote(struct type *t)
     /* The value of an expression has no qualifiers: `x + 1` on a const
      * long is a long, and typeof of it can be assigned. */
     t = ty_unqual(t);
+    if (t->bitint)      /* C23 6.3.1.1: a _BitInt is not promoted */
+        return t;
     if (t->kind == TY_CHAR || t->kind == TY_SHORT)
         return ty_base(TY_INT, t->is_unsigned &&
                                ty_size(t) >= ty_size(ty_base(TY_INT, 0)));
@@ -1099,6 +1138,39 @@ struct type *ty_promote(struct type *t)
  * wide branch was right while long was always eight bytes and is a
  * silent NARROWING where it is four: `a + b` on two long longs came out
  * as a 32-bit add. */
+/* An integer type's width, and whether a's rank is above b's: by width
+ * (C23 6.3.1.1), a standard type above a _BitInt of its own width, and
+ * of two standard types of one width (int and long on ILP32) the later */
+static int int_width(const struct type *t)
+{
+    return t->bitint ? t->bitint : ty_size(t) * 8;
+}
+
+static int rank_above(const struct type *a, const struct type *b)
+{
+    int wa = int_width(a), wb = int_width(b);
+    if (wa != wb)
+        return wa > wb;
+    if (a->bitint || b->bitint)
+        return !a->bitint && b->bitint;
+    return a->kind > b->kind || (a->is_llong && !b->is_llong);
+}
+
+/* The usual arithmetic conversions with a _BitInt among the (promoted)
+ * operands: C11 6.3.1.8's rules, by rank */
+static struct type *bitint_common(struct type *a, struct type *b)
+{
+    if (!a->is_unsigned == !b->is_unsigned)
+        return rank_above(b, a) ? b : a;
+    struct type *u = a->is_unsigned ? a : b, *s = a->is_unsigned ? b : a;
+    if (!rank_above(s, u))
+        return u;
+    if (int_width(s) > int_width(u))
+        return s;
+    return s->bitint ? ty_bitint(s->bitint, 1)
+         : s->is_llong ? ty_llong(1) : ty_base(s->kind, 1);
+}
+
 struct type *ty_arith_common(struct type *a, struct type *b)
 {
     /* Floating types outrank every integer, and long double > double >
@@ -1111,6 +1183,8 @@ struct type *ty_arith_common(struct type *a, struct type *b)
         return ty_base(TY_FLOAT, 0);
     a = ty_promote(a);
     b = ty_promote(b);
+    if (a->bitint || b->bitint)
+        return bitint_common(a, b);
     int qa = a->kind == TY_INT128, qb = b->kind == TY_INT128;
     if (qa || qb)       /* __int128 outranks long, holds all its values */
         return ty_base(TY_INT128, qa && qb ? a->is_unsigned || b->is_unsigned

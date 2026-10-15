@@ -1,0 +1,52 @@
+# Where EmbCC differs from the referee on purpose: EmbCC's GNU dialects
+# (gnu89 to gnu17, and the default) have C23's keywords and syntax as
+# extensions, as EmbCC always has -- code built with it uses them
+# unasked -- where GCC's have them only from gnu23. -pedantic-errors
+# still refuses them there, so only the plain outcomes are listed.
+c23-auto gnu11 plain
+c23-auto gnu17 plain
+c23-auto gnu99 plain
+c23-bool-kw gnu11 plain
+c23-bool-kw gnu17 plain
+c23-bool-kw gnu89 plain
+c23-bool-kw gnu99 plain
+c23-constexpr gnu11 plain
+c23-constexpr gnu17 plain
+c23-constexpr gnu89 plain
+c23-constexpr gnu99 plain
+c23-digit-sep gnu11 plain
+c23-digit-sep gnu17 plain
+c23-digit-sep gnu89 plain
+c23-digit-sep gnu99 plain
+c23-nullptr gnu11 plain
+c23-nullptr gnu17 plain
+c23-nullptr gnu89 plain
+c23-nullptr gnu99 plain
+c23-static-assert-nomsg gnu11 plain
+c23-static-assert-nomsg gnu17 plain
+c23-static-assert-nomsg gnu89 plain
+c23-static-assert-nomsg gnu99 plain
+c23-u8-char gnu11 plain
+c23-u8-char gnu17 plain
+c23-u8-char gnu89 plain
+c23-u8-char gnu99 plain
+kw-alignas-ident gnu11 plain
+kw-alignas-ident gnu17 plain
+kw-alignas-ident gnu89 plain
+kw-alignas-ident gnu99 plain
+kw-nullptr-ident gnu11 plain
+kw-nullptr-ident gnu17 plain
+kw-nullptr-ident gnu89 plain
+kw-nullptr-ident gnu99 plain
+kw-static_assert-ident gnu11 plain
+kw-static_assert-ident gnu17 plain
+kw-static_assert-ident gnu89 plain
+kw-static_assert-ident gnu99 plain
+kw-thread_local-ident gnu11 plain
+kw-thread_local-ident gnu17 plain
+kw-thread_local-ident gnu89 plain
+kw-thread_local-ident gnu99 plain
+kw-typeof_unqual-ident gnu11 plain
+kw-typeof_unqual-ident gnu17 plain
+kw-typeof_unqual-ident gnu89 plain
+kw-typeof_unqual-ident gnu99 plain
