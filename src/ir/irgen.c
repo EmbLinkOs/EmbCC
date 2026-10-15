@@ -3746,6 +3746,17 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
         int cw;
         int c = truth(fn, gen_expr(fn, e->args[0]), e->args[0]->ty, &cw);
         emit_brz(fn, c, cw, l_else);
+        /* A void conditional -- `c ? f() : (void)x` -- has no value to
+         * merge: the arms run for their effects. Merging them moved from
+         * what a void call never defined. */
+        if (e->ty->kind == TY_VOID) {
+            gen_expr(fn, e->lhs);
+            emit_jmp(fn, l_end);
+            emit_label(fn, l_else);
+            gen_expr(fn, e->rhs);
+            emit_label(fn, l_end);
+            return -1;
+        }
         /* The two merges carry the conditional's OWN width. They were
          * emitted with none, which cost nothing while a register held
          * any scalar and is half a `long long` on a 32-bit machine. */
