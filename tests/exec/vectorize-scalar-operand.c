@@ -1,9 +1,9 @@
 /* Loops the vectorizer looks at where one operand of the lane op is a
- * scalar: loop-invariant (`g[i] += n`, `7 - g[i]`) or different in every
- * lane (`n * (i + 1) + g[i]`). Only the form with the scalar second was
- * refused; with it first -- where canonical operand order puts a lower-
- * numbered temp -- the scalar was handed to a vector add, and x86-64's
- * lowering stopped with an internal error at -O2. */
+ * scalar: loop-invariant (`g[i] += n`, `7 - g[i]`, `p[i] += c` over a
+ * run-time count) or different in every lane (`n * (i + 1) + g[i]`).
+ * The scalar was handed to a vector op as it was -- x86-64's lowering
+ * stopped with an internal error at -O2 -- where an invariant is now
+ * broadcast before the loop and a per-lane value refuses it. */
 // expect-exit: 42
 
 int g[24];
@@ -36,6 +36,25 @@ __attribute__((noinline)) static void ramp_second(int n)
 {
     for (int k = 0; k < 24; k++)
         g[k] = g[k] + n * (k + 1);
+}
+
+__attribute__((noinline)) static void mask_or(int n, int m)
+{
+    for (int k = 0; k < 24; k++)
+        g[k] = (g[k] & n) | m;
+}
+
+/* a run-time count: the vector loop and its scalar remainder */
+__attribute__((noinline)) static void p_minus(int *p, int n, int c)
+{
+    for (int k = 0; k < n; k++)
+        p[k] = c - p[k];
+}
+
+__attribute__((noinline)) static void p_plus(int *p, int n, int c)
+{
+    for (int k = 0; k < n; k++)
+        p[k] += c;
 }
 
 /* what nrvo.c does: a compound assignment, whose right operand C
@@ -76,5 +95,17 @@ int main(void)
     struct big b = ramp_struct(4);
     for (int k = 0; k < 24; k++)
         if (b.v[k] != k + 4 * (k + 1)) bad |= 32;
+    for (int k = 0; k < 24; k++)
+        g[k] = k * 37;
+    mask_or(0xf0, 3);
+    for (int k = 0; k < 24; k++)
+        if (g[k] != (((k * 37) & 0xf0) | 3)) bad |= 64;
+    int p[23];                          /* five vectors and a remainder */
+    for (int k = 0; k < 23; k++)
+        p[k] = k;
+    p_minus(p, 23, 50);
+    p_plus(p, 21, 1000);                /* and with two left over */
+    for (int k = 0; k < 23; k++)
+        if (p[k] != (k < 21 ? 1050 - k : 50 - k)) bad |= 128;
     return bad ? bad : 42;
 }

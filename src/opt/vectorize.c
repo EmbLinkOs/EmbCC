@@ -60,6 +60,15 @@ static int defined_outside(struct ir_func *fn, struct defs *d, int v,
     return def < 0 || def < lo || def >= hi;   /* < 0: a parameter */
 }
 
+/* ...and set BEFORE the loop, so a broadcast of it in front of the
+ * header reads the value: a parameter, or a temp defined above it. */
+static int set_before(struct ir_func *fn, struct defs *d, int v, int lo)
+{
+    if (v < 0 || v >= fn->nvregs || d->cnt[v] != 1)
+        return 0;
+    return d->ins[v] < lo;                     /* < 0: a parameter */
+}
+
 /* Does the address in temp `p` read `base + iv * scale`, with base a
  * global's address defined outside the loop? Returns the base temp, or
  * -1. The chain irgen builds is add(gaddr, shl(ext(iv), log2 scale)),
@@ -192,8 +201,11 @@ static int vec_rewrite_runtime(struct ir_func *fn, struct defs *d,
 {
     int nv0 = fn->nvregs;
     int *map = xmalloc((size_t)nv0 * sizeof *map);
+    int *spl = xmalloc((size_t)(L->ninv ? L->ninv : 1) * sizeof *spl);
     for (int v = 0; v < nv0; v++)
         map[v] = -1;
+    for (int v = 0; v < L->ninv; v++)
+        spl[v] = -1;            /* each L->inv register's broadcast */
 
     int vi = fn->nvregs++, vin = fn->nvregs++, nvec = fn->nvregs++;
     int kmask = fn->nvregs++, kzero = fn->nvregs++, kstep = fn->nvregs++;
@@ -254,6 +266,14 @@ static int vec_rewrite_runtime(struct ir_func *fn, struct defs *d,
                 src->c = fn->nvregs + 1;
                 fn->nvregs += 2;
             }
+            /* ...and of the registers set before the loop it reads as
+             * scalars (L->inv) */
+            for (int v = 0; v < L->ninv; v++)
+                if (L->inv[v]) {
+                    { EM(sp); sp->op = IR_VSPLAT; sp->dst = fn->nvregs;
+                      sp->a = v; sp->size = L->esize; sp->w = 8; }
+                    spl[v] = fn->nvregs++;
+                }
             if (L->red_acc >= 0) {
                 { EM(z); z->op = IR_CONST; z->dst = vzero; z->w = L->esize; }
                 { EM(sp); sp->op = IR_VSPLAT; sp->dst = vacc; sp->a = vzero;
@@ -338,10 +358,16 @@ static int vec_rewrite_runtime(struct ir_func *fn, struct defs *d,
                         }
                         continue;
                     }
+                    /* an L->inv operand is its broadcast; in the address
+                     * chain below it stays the scalar it is */
+                    if (src->a >= 0 && src->a < nv0 && !vec[src->a])
+                        ra = spl[src->a];
+                    if (!hask && src->b >= 0 && src->b < nv0 && !vec[src->b])
+                        rb = spl[src->b];
                     EM(v);
                     if (!vec_build(v, src, nt, ra, rb, src->c, kb, hask,
                                    L->esize)) {
-                        free(map); free(nb.p); free(newpos);
+                        free(map); free(spl); free(nb.p); free(newpos);
                         return 0;       /* the recognizer let one through */
                     }
                     continue;
@@ -396,6 +422,7 @@ static int vec_rewrite_runtime(struct ir_func *fn, struct defs *d,
     free(fn->ins);
     fn->ins = nb.p; fn->nins = nb.n; fn->cap = nb.cap;
     free(map);
+    free(spl);
     return 1;
 }
 
@@ -435,6 +462,8 @@ static int vectorize_one(struct ir_func *fn)
     struct defs d;
     compute_defs(fn, &d);
     char *in = xmalloc((size_t)nbb);
+    /* (one rewrite at most per call, so nvregs holds until it) */
+    char *inv = xmalloc((size_t)(fn->nvregs ? fn->nvregs : 1));
     int done = 0;
 
     for (int oi = norder - 1; oi >= 0 && !done; oi--) {
@@ -546,6 +575,9 @@ static int vectorize_one(struct ir_func *fn)
          * arithmetic spreads it; anything else reading a vector temp,
          * or any op that is not lane-wise, refuses the loop. */
         char *vec = xcalloc((size_t)fn->nvregs, 1);
+        memset(inv, 0, (size_t)(fn->nvregs ? fn->nvregs : 1));
+        L.inv = inv;
+        L.ninv = fn->nvregs;
         L.esize = 0;
         int nmem = 0, nbase = 0, bases[8];
         for (int n = L.lo; n < L.hi && ok; n++) {
@@ -663,6 +695,16 @@ static int vectorize_one(struct ir_func *fn)
                  * already refused a float sum; a copy, being only loads
                  * and stores, is still vectorized. */
                 if (i->flt) { ok = 0; break; }
+                /* A commutative op with its scalar first takes it second,
+                 * where the lane op has a constant's broadcast */
+                if ((i->op == IR_ADD || i->op == IR_AND || i->op == IR_OR ||
+                     i->op == IR_XOR) && i->a >= 0 && i->a < fn->nvregs &&
+                    !vec[i->a] && i->b >= 0 && i->b < fn->nvregs &&
+                    vec[i->b]) {
+                    int x = i->a;
+                    i->a = i->b;
+                    i->b = x;
+                }
                 /* A multiply by a constant becomes shifts and adds; any
                  * other multiply, and anything not lane-wise, stops us. */
                 int c = vec_op_char(i->op);
@@ -687,19 +729,26 @@ static int vectorize_one(struct ir_func *fn)
                      * not an error at all. */
                     ok = 0; break;
                 } else if (!hask && (i->b < 0 || i->b >= fn->nvregs ||
-                                     !vec[i->b])) {
-                    ok = 0; break;          /* a scalar in b */
+                                     (!vec[i->b] &&
+                                      !set_before(fn, &d, i->b, L.lo)))) {
+                    ok = 0; break;          /* a scalar that varies per lane */
                 }
-                /* The lane op reads `a` as a vector and `b` as one or as
-                 * a constant it broadcasts (vec_build); a scalar in
-                 * either place -- loop-invariant or not -- has no lane
-                 * form here. Only b was checked, and only for a value
-                 * that varies, so `g[i] += n`, `n - g[i]` and
-                 * `n * (i + 1) + g[i]`, where canonical order puts the
-                 * scalar in a, handed it to a vector add: x86-64's
-                 * lowering stopped on it. */
-                if (i->a < 0 || i->a >= fn->nvregs || !vec[i->a])
-                    { ok = 0; break; }
+                /* The lane op reads each operand as a vector, a constant's
+                 * broadcast, or the broadcast of a register set before
+                 * the loop (L.inv) -- `g[i] += n`, `n - g[i]`. A scalar
+                 * that varies per lane has no lane form here. Only b was
+                 * checked, so `n * (i + 1) + g[i]`, where canonical order
+                 * put the scalar in a, handed it to a vector add, and so
+                 * did every invariant: x86-64's lowering stopped on it. */
+                if (i->a < 0 || i->a >= fn->nvregs) { ok = 0; break; }
+                if (!vec[i->a]) {
+                    if (i->op == IR_MUL || i->op == IR_SHL ||
+                        i->op == IR_SHR || !set_before(fn, &d, i->a, L.lo))
+                        { ok = 0; break; }
+                    L.inv[i->a] = 1;
+                }
+                if (!hask && !vec[i->b])
+                    L.inv[i->b] = 1;
                 if (t < 0 || t >= fn->nvregs) { ok = 0; break; }
                 if (i->w != L.esize && i->op != IR_SHL && i->op != IR_SHR)
                     { ok = 0; break; }      /* a widening op changes lanes */
@@ -950,6 +999,9 @@ static int vectorize_one(struct ir_func *fn)
         int *newpos = fn->var_scope_lo
             ? xmalloc((size_t)(fn->nins + 1) * sizeof *newpos) : NULL;
         int vfk = fn->nvregs++;      /* the new induction step, VF */
+        int *spl = xmalloc((size_t)(L.ninv ? L.ninv : 1) * sizeof *spl);
+        for (int v = 0; v < L.ninv; v++)
+            spl[v] = -1;            /* each L.inv register's broadcast */
         int vacc = -1, vzero = -1, redtmp = -1, vacc2 = -1, wlo = -1, whi = -1;
         int wsize = L.esize;            /* the accumulator's lane width */
         if (L.red_acc >= 0) {
@@ -1016,6 +1068,18 @@ static int vectorize_one(struct ir_func *fn)
                     sp->line = s->line; sp->col = s->col;
                     s->c = fn->nvregs + 1;  /* remember the splat for below */
                     fn->nvregs += 2;
+                }
+                /* ...and every register set before the loop that it reads
+                 * as a scalar (L.inv) */
+                for (int v = 0; v < L.ninv; v++) {
+                    if (!L.inv[v])
+                        continue;
+                    int sl = fn->ins[L.lo].line, scol = fn->ins[L.lo].col;
+                    struct ir_ins *sp = ib_push(&nb);
+                    sp->op = IR_VSPLAT; sp->dst = fn->nvregs; sp->a = v;
+                    sp->size = L.esize; sp->w = 8;
+                    sp->line = sl; sp->col = scol;
+                    spl[v] = fn->nvregs++;
                 }
             }
             if (newpos) newpos[n] = nb.n;
@@ -1119,7 +1183,8 @@ static int vectorize_one(struct ir_func *fn)
                 }
                 struct ir_ins *v = ib_push(&nb);
                 memset(v, 0, sizeof *v);
-                v->op = IR_VBIN; v->dst = t; v->a = i->a;
+                v->op = IR_VBIN; v->dst = t;
+                v->a = vec[i->a] ? i->a : spl[i->a];    /* (L.inv) */
                 v->size = L.esize; v->w = 8;
                 v->imm = c;
                 v->line = i->line; v->col = i->col;
@@ -1130,7 +1195,7 @@ static int vectorize_one(struct ir_func *fn)
                 } else if (hask) {
                     v->b = i->c;              /* the splat made above */
                 } else {
-                    v->b = i->b;
+                    v->b = vec[i->b] ? i->b : spl[i->b];
                 }
                 continue;
             }
@@ -1175,6 +1240,7 @@ static int vectorize_one(struct ir_func *fn)
         free(fn->ins);
         fn->ins = nb.p; fn->nins = nb.n; fn->cap = nb.cap;
         free(vec);
+        free(spl);
         if (remarks_on() && fn->src)
             remark_add("opt", "vectorized", fn->name, "vec/constant-trip-count",
                        fn->file, fn->line,
@@ -1185,6 +1251,7 @@ static int vectorize_one(struct ir_func *fn)
     }
 
     free(in);
+    free(inv);
     free_defs(&d);
     free(order); free(l2b);
     free_cfg(bb, nbb);
