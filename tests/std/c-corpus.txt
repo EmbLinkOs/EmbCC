@@ -146,3 +146,15 @@ struct E { };
 void f(void) { asm("nop"); }
 == gnu-dunder-asm
 void f(void) { __asm__("nop"); }
+== stray-semicolon-file-scope
+int f(void) { return 0; };
+== falls-off-end
+int f(int x) { if (x) return 1; }
+== gnu-zero-length-local
+int f(void) { int a[0]; return sizeof a; }
+== gnu-empty-init-array
+int f(void) { int a[] = {}; return sizeof a; }
+== gnu-lib-builtin
+void f(int x) { if (x) __builtin_abort(); __builtin_printf("%d\n", x); }
+== gnu-fortify-builtin
+void f(char *d, const char *s) { __builtin___memcpy_chk(d, s, 4, __builtin_object_size(d, 0)); }
