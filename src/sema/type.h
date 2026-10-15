@@ -15,11 +15,12 @@
 #ifndef EMBCC_SEMA_TYPE_H
 #define EMBCC_SEMA_TYPE_H
 
-/* The most parameters/arguments a function type, prototype, or call carries.
- * Defined here (not ast.h) because struct type's ptypes[] lives here and
- * ast.h includes this header — the two must agree or a >N-param function
- * type overflows ptypes[]. */
-#define MAX_PARAMS 32
+/* The most parameters/arguments a function type, prototype, or call
+ * carries: C17 5.2.4.1 asks for 127 of each. A function type's ptypes and
+ * a call's args are allocated to their count; this bounds the per-
+ * parameter arrays of a definition (struct func) and of each backend's
+ * argument lowering. */
+#define MAX_PARAMS 128
 
 struct expr;
 
@@ -144,7 +145,7 @@ struct type {
     int nat_align;
     /* TY_FUNC (always behind a pointer in this subset): */
     struct type *ret;
-    struct type *ptypes[MAX_PARAMS];
+    struct type **ptypes;   /* nptypes of them (ty_func's own copy) */
     int nptypes;
     int is_varargs;
     /* TY_FUNC declared with no prototype: `int f()` before C23, or a K&R

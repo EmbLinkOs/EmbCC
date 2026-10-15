@@ -4031,6 +4031,8 @@ static struct expr *parse_postfix_ops(struct parser *ps, struct expr *e)
             int line = cur(ps)->line;
             advance(ps);
             struct expr *call = new_expr(EXPR_CALL, line, e->col);
+            int cap = 4;
+            call->args = xcalloc((size_t)cap, sizeof *call->args);
             call->lhs = e;
             if (e->kind == EXPR_VAR)
                 call->name = e->name;
@@ -4040,6 +4042,13 @@ static struct expr *parse_postfix_ops(struct parser *ps, struct expr *e)
                         parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                                    "more than %d call arguments",
                                    MAX_PARAMS);
+                    if (call->nargs == cap) {
+                        call->args = xrealloc(call->args, 2 * (size_t)cap *
+                                              sizeof *call->args);
+                        memset(call->args + cap, 0,
+                               (size_t)cap * sizeof *call->args);
+                        cap *= 2;
+                    }
                     call->args[call->nargs++] = parse_expr(ps);
                     if (cur(ps)->kind != TOK_COMMA)
                         break;
@@ -4352,6 +4361,11 @@ static struct expr *expr_dup(const struct expr *e)
     *c = *e;
     c->lhs = expr_dup(e->lhs);
     c->rhs = expr_dup(e->rhs);
+    if (e->args) {          /* its own array: sema rewrites it in place */
+        int n = e->nargs > 4 ? e->nargs : 4;
+        c->args = xcalloc((size_t)n, sizeof *c->args);
+        memcpy(c->args, e->args, (size_t)e->nargs * sizeof *c->args);
+    }
     return c;
 }
 
@@ -4406,6 +4420,7 @@ static struct expr *parse_cond(struct parser *ps)
         return e;
     struct expr *r = new_expr(EXPR_COND, cur(ps)->line, cur(ps)->col);
     advance(ps);
+    r->args = xcalloc(4, sizeof *r->args);
     r->args[0] = e;
     r->nargs = 1;
     if (cur(ps)->kind == TOK_COLON) {

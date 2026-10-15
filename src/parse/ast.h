@@ -95,8 +95,10 @@ struct expr {
      * memb is resolved by sema (offset + type). */
     int is_arrow;
     struct member *memb;
-    struct expr *args[MAX_PARAMS]; /* EXPR_CALL; lhs is the callee
-                           * expression (a VAR for direct calls) */
+    struct expr **args;   /* EXPR_CALL; lhs is the callee expression (a
+                           * VAR for direct calls). Allocated, at least four
+                           * and zeroed past nargs; an expr_dup has its own.
+                           * EXPR_COND's condition is args[0]. */
     int nargs;
     int atomic_mo;        /* EXPR_CALL of an atomic builtin: its memory
                            * order when sema could fold it, as 1 + the

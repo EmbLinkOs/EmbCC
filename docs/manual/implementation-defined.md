@@ -873,11 +873,9 @@ that a build can be reproduced. `__TIMESTAMP__` is not defined.
 | Limit | EmbCC | C17 minimum |
 |---|---|---|
 | Nesting of parenthesized expressions, blocks and statements, structure definitions, unary operators and casts | About 2,000 levels on a host with an 8 MB stack: deeper is `this nests too deeply to compile`, an error rather than a stack overflow | 63 expressions, 127 blocks, 63 structures |
-| Parameters in one function definition, arguments in one call | 32: `more than 32 parameters`, `more than 32 call arguments` | 127 |
+| Parameters in one function definition, arguments in one call | 128: `more than 128 parameters`, `more than 128 call arguments` | 127 |
 | Dimensions in one array declarator | 16: `more than 16 array dimensions` | 12 declarators of any kind |
 | Bytes in one object | 2147483647: `... is too large: EmbCC's objects hold at most 2147483647 bytes` | 65535 |
-
-The parameter limit is below the standard's minimum.
 
 ### Predefined macros that describe the implementation
 
