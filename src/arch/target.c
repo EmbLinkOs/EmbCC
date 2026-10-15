@@ -368,6 +368,25 @@ int target_int_size(void)       { return g_model[g_arch].it; }
 int target_xlen(void)           { return g_model[g_arch].ptr * 8; }
 int target_long_size(void)      { return g_model[g_arch].lng; }
 int target_max_scalar_align(void) { return g_model[g_arch].maxal; }
+/* What a function's address is aligned to with nothing said about it --
+ * the instruction set's unit, GCC's FUNCTION_BOUNDARY -- and so what
+ * __alignof__ of one answers, as GCC does: not the sixteen a backend may
+ * pad to for the fetch unit, which -Os drops. */
+int target_fn_align(void)
+{
+    switch (g_arch) {
+    case TARGET_X86_64: case TARGET_AVR: case TARGET_RX:
+        return 1;
+    case TARGET_THUMB:
+        return g_arm_a32 ? 4 : 2;
+    case TARGET_RISCV32: case TARGET_RISCV64:
+        return target_riscv_rvc() ? 2 : 4;
+    case TARGET_COLDFIRE: case TARGET_TRICORE:
+        return 2;
+    default:    /* AArch64, MIPS, LoongArch, PowerPC, SPARC, Xtensa */
+        return 4;
+    }
+}
 int target_default_new_align(void)
 {
     switch (g_arch) {

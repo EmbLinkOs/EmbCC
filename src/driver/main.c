@@ -568,6 +568,10 @@ static struct tgroup { const char *name; long start, end; int ndx, sym,
     *g_tg;
 static int g_ntg, g_captg;
 static long g_plain_end, g_groups_end;
+/* .text's own alignment: the sixteen it always had, or the strictest
+ * start among its functions -- aligned(256) on one is 256 only if the
+ * section is */
+static int g_text_align = 16;
 
 /* The group (1-based) holding code-buffer offset off, or 0 for .text;
  * *noff gets the offset within that section. */
@@ -2710,8 +2714,12 @@ static int compile_unit(const char *in, const char *out, int pp_only)
 
     /* The groups, as codegen laid them out (the sort above). */
     g_plain_end = g_groups_end = (long)text.len;
+    g_text_align = 16;
     for (int i = 0; i < iu->nfuncs; i++) {
         struct func *f = iu->funcs[i].src;
+        if (f && !f->section && f->code_len > 0 &&
+            f->code_align > g_text_align)
+            g_text_align = f->code_align;
         if (!f || !f->section || f->code_len <= 0)
             continue;
         if (!g_ntg || strcmp(g_tg[g_ntg - 1].name, f->section)) {
@@ -3360,10 +3368,13 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         /* ---- 2. every section, before any symbol ---------------------
          * A symbol's n_value is an ADDRESS, so the section it sits in
          * has to have one first. */
+        unsigned m_text_al = 4;             /* an exponent: 16 */
+        while ((1 << m_text_al) < g_text_align)
+            m_text_al++;
         int m_text = machow_add_section(mw, "__TEXT", "__text",
                                         S_REGULAR | S_ATTR_PURE_INSTRUCTIONS |
                                         S_ATTR_SOME_INSTRUCTIONS,
-                                        text.p, text.len, 4);
+                                        text.p, text.len, m_text_al);
         int m_rodata = 0, m_data = 0, m_bss = 0, m_lsda = 0, m_cu = 0;
         if (rodata)
             m_rodata = machow_add_section(mw, "__TEXT", "__const", S_REGULAR,
@@ -3749,7 +3760,8 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                                        IMAGE_SCN_CNT_CODE |
                                        IMAGE_SCN_MEM_EXECUTE |
                                        IMAGE_SCN_MEM_READ,
-                                       text.p, (unsigned)text.len, 16);
+                                       text.p, (unsigned)text.len,
+                                       g_text_align);
         int c_rdata = 0, c_data = 0, c_bss = 0;
         if (rodata)
             c_rdata = coffw_add_section(cw, ".rdata",
@@ -3885,7 +3897,8 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     }
     int text_ndx = elfw_add_section(w, ".text", SHT_PROGBITS,
                                     SHF_ALLOC | SHF_EXECINSTR,
-                                    tbytes, (Elf64_Xword)tlen, 16);
+                                    tbytes, (Elf64_Xword)tlen,
+                                    (Elf64_Xword)g_text_align);
     for (int k = 0; k < g_ntg; k++)
         g_tg[k].ndx = elfw_add_section(
             w, g_tg[k].name, SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR,

@@ -4213,13 +4213,10 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         while (t->len & 3)
             t_nop(t);
         f->code_align = 4;
-        /* ...or more, for an asm that aligns its own bytes (`.p2align
-         * 3`): in a section of its own the buffer's offsets are then the
-         * section's */
-        for (int k = 0; k < fn->nins; k++) {
-            const struct ir_asm *ia = fn->ins[k].op == IR_ASM
-                                    ? fn->ins[k].asm_ir : NULL;
-            int m = ia ? code_asm_align_max(ia->arange, ia->narange) : 0;
+        /* ...or more, for aligned(N) or an asm that aligns its own
+         * bytes (`.p2align 3`) */
+        {
+            int m = cg_fn_align(fn);
             while (m > f->code_align && t->len % m)
                 t_nop(t);
             if (m > f->code_align)

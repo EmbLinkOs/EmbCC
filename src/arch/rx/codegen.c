@@ -2471,6 +2471,15 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rx_sites *st,
     F.fb = RX_SP;
     F.level = level;
     F.nlevel = nlevel;
+    /* aligned(N), or an asm that aligns its own bytes (`.p2align 3`):
+     * the function starts on that. The padding before it is never run. */
+    {
+        int m = cg_fn_align(fn);
+        if (m > f->code_align) {
+            code_fill(t, CODE_FILL_ZERO, (m - t->len % m) % m);
+            f->code_align = m;
+        }
+    }
     f->code_off = t->len;
 
     /* The prologue: push the callee-saved range, then the frame. */

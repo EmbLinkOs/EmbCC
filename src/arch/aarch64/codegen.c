@@ -2020,13 +2020,10 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
     if (!target_opt_size())
         align16(t);
     f->code_align = target_opt_size() ? 4 : 16;
-    /* ...and at -Os, an asm that aligns its own bytes (`.p2align 3`)
-     * starts the function on that, so that in a section of its own the
-     * buffer's offsets are the section's. The padding is never run. */
-    for (int k = 0; k < fn->nins; k++) {
-        const struct ir_asm *ia = fn->ins[k].op == IR_ASM ? fn->ins[k].asm_ir
-                                                          : NULL;
-        int m = ia ? code_asm_align_max(ia->arange, ia->narange) : 0;
+    /* ...or more: aligned(N), or an asm that aligns its own bytes
+     * (`.p2align 5`). The padding is never run. */
+    {
+        int m = cg_fn_align(fn);
         if (m > f->code_align) {
             while (t->len % m)
                 code_u32(t, 0xd503201fUL);               /* nop */

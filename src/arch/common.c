@@ -432,3 +432,16 @@ static char *float_vregs(struct ir_func *fn, int by_cost)
     if (!any) { free(w); return NULL; }
     return w;
 }
+
+int cg_fn_align(const struct ir_func *fn)
+{
+    int m = fn->src ? fn->src->user_align : 0;
+    for (int k = 0; k < fn->nins; k++) {
+        const struct ir_asm *ia = fn->ins[k].op == IR_ASM ? fn->ins[k].asm_ir
+                                                          : NULL;
+        int a = ia ? code_asm_align_max(ia->arange, ia->narange) : 0;
+        if (a > m)
+            m = a;
+    }
+    return m;
+}

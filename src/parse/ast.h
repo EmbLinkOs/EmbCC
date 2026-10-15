@@ -526,6 +526,9 @@ struct func {
      * function's section has to claim when it is a section of its own
      * (-ffunction-sections). 0 is "not said", taken as 16. */
     int code_align;
+    /* __attribute__((aligned(N))) on any declaration: the least its first
+     * instruction is aligned to, beyond the target's own; 0 for none */
+    int user_align;
     /* How many bytes of stack this function's own frame takes — the
      * prologue's saved registers plus its locals, temporaries and
      * outgoing-argument area, and NOT what it calls. `-fstack-usage`

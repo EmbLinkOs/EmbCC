@@ -3410,6 +3410,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct xt_sites *st,
     int se0 = F.st->next, ss0 = F.st->nstr, sg0 = F.st->ng, sf0 = F.st->nf;
     char *longb = NULL;
     int nlongb = 0;
+    /* aligned(N), or an asm that aligns its own bytes: the ENTRY is on
+     * it, after the pool, so the pad before the pool is sized per attempt */
+    int fal = cg_fn_align(fn);
     code_align(t, 4, 0);
     len0 = t->len;
     for (;;) {
@@ -3426,6 +3429,10 @@ static void gen_func(struct ir_func *fn, struct code *t, struct xt_sites *st,
     F.fb = XT_SP;
     F.longb = longb;
     F.nlongb = nlongb;
+    while (fal > 4 && (t->len + 4 * F.npool) % fal)
+        code_byte(t, 0);
+    if (fal > f->code_align)
+        f->code_align = fal;
     F.pool_at = t->len;
     for (i = 0; i < 4 * F.npool; i++)
         code_byte(t, 0);

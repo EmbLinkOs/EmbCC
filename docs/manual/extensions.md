@@ -401,6 +401,7 @@ embcc: attr.c:1: warning: attribute 'frobnicate' is not one EmbCC knows, and is 
 
 | Attribute | Effect |
 |---|---|
+| `aligned(N)`, `aligned` | The function's first instruction is at an address that is a multiple of `N` (16 with no argument). It counts on any declaration, and the strictest wins. `__alignof__` of the function gives `N`, or without the attribute the instruction set's own boundary: 1 on x86-64, AVR and RX, 2 on Thumb, ColdFire, TriCore and RISC-V with compressed instructions, and 4 elsewhere, as GCC answers |
 | `alias("target")` | The function is another name for `target`, which must be a function defined in the same file and not itself an alias. The declaration with `alias` cannot have a body. Combine with `weak` for a weak alias. ELF only; see [Object formats](#object-formats) |
 | `always_inline` | Lifts the inliner's size limit for calls to this function, at every level including `--opt=none`; see [Inlining](optimization.md#inlining) |
 | `constructor`, `destructor` | The function's address is placed in `.init_array` or `.fini_array`, for the startup code to call before `main` or at exit. On a bare-metal target the program's own startup code walks the tables; see [Startup code](embedded.md#startup-code-and-the-linkers-symbols). A `static` one is kept although nothing calls it. ELF only |
