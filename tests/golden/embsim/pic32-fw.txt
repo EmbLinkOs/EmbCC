@@ -12,9 +12,11 @@ timer3 after the wrap 00000000
 taken in order 000e0104
 vector 213 taken 00000001
 INTSTAT 000005d5
+ANSELA at reset 00000623
 PORTA 00000055
 LATA after PORTA=0x0f 0000000f
 S4 (RF8) 00000000
+S6 (RD13) 00000001
 AN4 000003e0
 AN45 (ADC0's alternate) 00000800
 AN6 (ADC7 off) ffffffff

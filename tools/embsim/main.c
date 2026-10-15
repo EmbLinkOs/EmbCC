@@ -58,13 +58,15 @@ static void usage(void)
           "boards: lm3s6965evb (default), mps2-an385, mps2-an386,\n"
           "        mps2-an500, microbit, stm32f405 (its SVD: --svd or\n"
           "        EMBSIM_SVD_PATH), virt (RISC-V), uno (AVR), malta (MIPS),\n"
-          "        pic32mz2048efh100, explorer16-32 (PIC32MZ: its ATDF, from\n"
-          "        --dfp DIR, --svd FILE.atdf or EMBSIM_SVD_PATH)\n"
+          "        pic32mz2048efh100, explorer16-32, curiosity-pic32mz-ef-2\n"
+          "        (PIC32MZ: its ATDF, from --dfp DIR, --svd FILE.atdf or\n"
+          "        EMBSIM_SVD_PATH)\n"
           "cpus:   cortex-m0, cortex-m0plus, cortex-m3, cortex-m4, cortex-m7;\n"
           "        rv32, rv64 (virt's default: the image's width); atmega328p;\n"
           "        24kc, pic32mz\n"
-          "--set:  explorer16-32: temperature=DEGREES, pot=VOLTS or PERCENT%%,\n"
-          "        S4, S5, S6=pressed or released\n",
+          "--set:  explorer16-32: temperature=DEGREES, pot=VOLTS or PERCENT%,\n"
+          "        S4, S5, S6=pressed or released; curiosity-pic32mz-ef-2:\n"
+          "        SW1, SW2, SW3, SW4=pressed or released\n",
           stderr);
     exit(2);
 }

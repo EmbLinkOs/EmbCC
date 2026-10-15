@@ -21,7 +21,9 @@
  *     which a PIC32's EVIC model finds by name (TIMER_2, UART1_TX...).
  * A PIC32 (architecture MIPS) has each 32-bit register followed by its
  * CLR, SET and INV registers, which the file leaves out: the register
- * file makes them (svd_device.clr_set_inv). */
+ * file makes them (svd_device.clr_set_inv), those the pack's processor
+ * module lists. And the file gives each ANSELx sixteen analog pins,
+ * which the pack's device header corrects. */
 #include <stdlib.h>
 #include <string.h>
 
@@ -366,6 +368,68 @@ static void read_sci(struct svd_device *d, const char *path)
     qsort(d->sci_at, (size_t)d->nsci, sizeof *d->sci_at, ull_cmp);
 }
 
+/* A PIC32's ANSELx: the ATDF gives every one sixteen fields, where the
+ * part has an analog function on a few pins only -- the pack's device
+ * header (include/proc/p<part>.h, beside atdf/) names those, and the
+ * others are left out, so ANSELx resets to the analog pins alone (as the
+ * part's does) and a digital-only pin is never analog. Without the
+ * header, the ATDF's fields stand. */
+static void ansel_from_header(struct svd_device *d, const char *path)
+{
+    const char *slash = strrchr(path, '/');
+    size_t dl = slash ? (size_t)(slash - path) : 0;
+    const char *part = d->name && !strncmp(d->name, "PIC", 3) ? d->name + 3
+                                                               : d->name;
+    if (!part)
+        return;
+    size_t l = dl + strlen(part) + 40;
+    char *p = svd_alloc(l);
+    int n = snprintf(p, l, "%.*s%s../include/proc/p", (int)dl, path,
+                     dl ? "/" : "");
+    for (const char *c = part; *c && (size_t)n + 1 < l; c++)
+        p[n++] = (char)(*c >= 'A' && *c <= 'Z' ? *c - 'A' + 'a' : *c);
+    snprintf(p + n, l - (size_t)n, ".h");
+    FILE *f = fopen(p, "rb");
+    if (!f) {
+        free(p);
+        return;
+    }
+    fclose(f);
+    const char *file = svd_file;
+    char *text = svd_read_all(p);
+    svd_file = file;
+    free(p);
+    unsigned long long an[26] = { 0 };
+    int any = 0;
+    for (char *q = text; (q = strstr(q, "#define _ANSEL")) != NULL; q++) {
+        char port = q[14];
+        if (port < 'A' || port > 'Z' || strncmp(q + 15, "_ANS", 4) || q[19] != port)
+            continue;
+        char *e = q + 20;
+        long bit = strtol(e, &e, 10);
+        if (strncmp(e, "_MASK", 5) || bit < 0 || bit > 31)
+            continue;
+        an[port - 'A'] |= 1ull << bit;
+        any = 1;
+    }
+    free(text);
+    if (!any)
+        return;
+    for (int i = 0; i < d->np; i++)
+        for (int k = 0; k < d->p[i].nkid; k++) {
+            struct svd_node *r = &d->p[i].kid[k];
+            if (strncmp(r->name, "ANSEL", 5) || strlen(r->name) != 6 ||
+                r->name[5] < 'A' || r->name[5] > 'Z')
+                continue;
+            unsigned long long m = an[r->name[5] - 'A'];
+            int keep = 0;
+            for (int f2 = 0; f2 < r->nf; f2++)
+                if (r->f[f2].width == 1 && (m >> r->f[f2].lsb & 1))
+                    r->f[keep++] = r->f[f2];
+            r->nf = keep;
+        }
+}
+
 struct svd_device *atdf_load(const char *path)
 {
     const struct xnode *root = svd_xml_read(path);
@@ -436,7 +500,9 @@ struct svd_device *atdf_load(const char *path)
     }
     if (!d->np)
         svd_die("the device %s has no peripheral on the bus", d->name);
-    if (d->clr_set_inv)
+    if (d->clr_set_inv) {
         read_sci(d, path);
+        ansel_from_header(d, path);
+    }
     return d;
 }

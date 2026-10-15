@@ -63,8 +63,9 @@ void *pic32_uart_create(struct sim *s, struct rf_periph *p);
 void *pic32_pmp_create(struct sim *s, struct rf_periph *p);
 void *pic32_adc_create(struct sim *s, struct rf_periph *p);
 
-/* the boards' own: the Explorer 16/32's LEDs, buttons, sensors and LCD */
-extern const struct dev_ops explorer_ops;
-void *explorer_create(struct sim *s, const struct dev_desc *d);
+/* the PIC32 boards' own: LEDs, buttons, the Explorer 16/32's sensors and
+ * LCD (a dev_desc's type names the board) */
+extern const struct dev_ops pic32_board_ops;
+void *pic32_board_create(struct sim *s, const struct dev_desc *d);
 
 #endif

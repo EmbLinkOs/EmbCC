@@ -68,8 +68,9 @@ built for QEMU runs unchanged.
 | `virt` | RISC-V, RV32 or RV64 with IMAFDC | 128 MiB RAM at `0x80000000` | NS16550A at `0x10000000` |
 | `uno` | ATmega328P (AVR5) | 32 KiB flash, 2 KiB SRAM at data `0x100` | USART0 at data `0xC0` |
 | `malta` | MIPS32r2 (24Kc), little-endian | 64 MiB RAM at 0 (`0x80000000` in kseg0) | NS16550A at `0x1F000900`, registers 8 bytes apart |
-| `pic32mz2048efh100` | PIC32MZ EF (MIPS32r2, EIC mode, shadow sets) | 512 KiB RAM at 0, 2 MiB flash at `0x1D000000`, boot flash at `0x1FC00000` | UART1-6, of the part's ATDF ([below](#pic32-parts-and-the-explorer-1632)) |
+| `pic32mz2048efh100` | PIC32MZ EF (MIPS32r2, EIC mode, shadow sets) | 512 KiB RAM at 0, 2 MiB flash at `0x1D000000`, boot flash at `0x1FC00000` | UART1-6, of the part's ATDF ([below](#pic32-parts-the-explorer-1632-and-the-curiosity)) |
 | `explorer16-32` | the same part, on Microchip's Explorer 16/32 | as `pic32mz2048efh100` | the same, and the board's LEDs, buttons, sensors and LCD |
+| `curiosity-pic32mz-ef-2` | PIC32MZ2048EFM144, on Microchip's Curiosity PIC32MZ EF 2.0 | as `pic32mz2048efh100` | the same, and the board's LEDs and switches |
 
 - `--cpu` runs another core on the board: `cortex-m0`, `cortex-m0plus`,
   `cortex-m3`, `cortex-m4` or `cortex-m7` on the Cortex-M boards; `rv32`
@@ -382,10 +383,10 @@ cycles, whatever the PLL is set to.
   interrupt's entry four, and four more when it wakes SLEEP. The part
   has no wait states, so this is the count the silicon takes.
 
-## PIC32 parts, and the Explorer 16/32
+## PIC32 parts, the Explorer 16/32 and the Curiosity
 
 QEMU has no PIC32 board; EmbSim's are where EmbCC's PIC32 output runs
-(`embcc --mcu=32MZ2048EFH100`, [PIC32](../pic32.md)). A PIC32 board is
+(`embcc --mcu=32MZ2048EFH100`, [MIPS32](../embedded.md#mips32)). A PIC32 board is
 built from the part's device pack -- Microchip's
 `Microchip.PIC32MZ-EF_DFP`, which MPLAB X installs and
 packs.download.microchip.com serves -- found with `--dfp DIR` (the
@@ -452,9 +453,11 @@ EmbCC build.
   and the interrupt flag. Timer2 to Timer9 pair into 32-bit timers
   (T32), with the odd timer's interrupt. PRx is 0xFFFF out of reset.
 - **Ports A-K.** All inputs and every analog-capable pin analog out of
-  reset (TRISx, ANSELx). PORTx reads the pins -- an output what LATx
-  drives, an input what the board drives on it or its pull-up (CNPUx),
-  an analog pin 0 -- and a write to PORTx writes LATx.
+  reset (TRISx, ANSELx: the pins the pack's device header names, as the
+  data sheet's reset values have them; the ATDF lists all sixteen).
+  PORTx reads the pins -- an output what LATx drives, an input what the
+  board drives on it or its pull-up (CNPUx), an analog pin 0 -- and a
+  write to PORTx writes LATx.
 - **UART1-6.** A byte written to UxTXREG with ON and UTXEN goes to
   stdout at once (TRMT stays set); the transmit interrupt is persistent
   while there is room; the run's input (`--input`) arrives at the first
@@ -505,6 +508,28 @@ lines, the CGRAM and DDRAM addresses), its 80-byte display RAM with line
 `--set NAME=VALUE` gives the board's inputs: `temperature=DEGREES` (25
 by default), `pot=VOLTS` or `pot=PERCENT%` (1.65 V by default), and
 `S4`, `S5` or `S6` `=pressed` or `=released`.
+
+**The `curiosity-pic32mz-ef-2` board** is Microchip's Curiosity PIC32MZ
+EF 2.0 (DM320209), with a PIC32MZ2048EFM144 (`embcc
+--mcu=32MZ2048EFM144`, the same pack). Its pins are those of Harmony 3's
+board support package for it:
+
+| | Pin | |
+|---|---|---|
+| LED1, LED2, LED3 | RJ7, RK7, RJ3 | lit when the pin drives low |
+| RGB LED: red, green, blue | RB7, RB8, RB9 | lit when the pin drives low |
+| switches SW1-SW4 | RJ4, RJ5, RJ6, RC14 | low when pressed; the board has no pull-ups, so a released switch reads its pin's own (CNPUx), else 0 |
+| USB-UART | the UART the program uses | every UART's output is stdout |
+
+An LED lit low is off while its pin is an input or an open drain let
+go. `--set SW1=pressed` (to `SW4`, `=pressed` or `=released`) gives the
+switches:
+
+```text
+$ embsim fw.elf --board curiosity-pic32mz-ef-2 --dfp $DFP --set SW1=pressed
+curiosity-pic32mz-ef-2: LED LED1 on (RJ7) at 0.052 ms
+curiosity-pic32mz-ef-2: LED RGB green on (RB8) at 0.052 ms
+```
 
 **Not modelled on the PIC32:** microMIPS (`-mmicromips` code), the
 DSP ASE beyond its registers, the MCU ASE's IRET, the peripherals other

@@ -48,7 +48,7 @@ file but the network one compiles with EmbCC itself. Everything is in
 | `atdf.c` | a Microchip ATDF file (a device pack's PIC32, SAM or AVR part) read into the SVD reader's `struct svd_device`, for the register file |
 | `pic32.h` | what a PIC32's models share: interrupts through the EVIC, the peripheral bus dividers |
 | `pic32-evic.c`, `pic32-cru.c`, `pic32-tmr.c`, `pic32-gpio.c`, `pic32-uart.c`, `pic32-pmp.c`, `pic32-adc.c` | a PIC32MZ's models over its ATDF's registers: the EVIC (and the core's EIC mode), CFG's SYSKEY and the oscillator, Timer1-9, ports A-K, UART1-6, the PMP, ADCHS |
-| `explorer.c` | the Explorer 16/32 board around the part (`struct board_io`): LEDs, buttons, the potentiometer and temperature sensor, the HD44780 LCD |
+| `pic32-boards.c` | the boards around a PIC32 (`struct board_io`): the Explorer 16/32's and the Curiosity PIC32MZ EF 2.0's LEDs and buttons, the Explorer's potentiometer, temperature sensor and HD44780 LCD |
 | `svd-map.h`, `svd-map.c` | an SVD file's peripherals as a register file on the bus (`--svd`), `--trace-periph`, `--svd-map`, and the interface of the models over it |
 | `../embsvd/svd.h`, `../embsvd/svd.c` | the CMSIS-SVD reader, embsvd's |
 | `stm32-rcc.c`, `stm32-gpio.c`, `stm32-usart.c`, `stm32-tim.c` | the STM32's peripheral models, over its SVD's registers |
@@ -309,7 +309,7 @@ struct board_io {
 ```
 
 `s->io` is what the board wires to its part's pins: a board's own
-device (`explorer.c`, a `dev` entry of size 0) fills it in at its
+device (`pic32-boards.c`, a `dev` entry of size 0) fills it in at its
 creation, and the part's models call it -- the GPIO model when a pin's
 driven level changes and when a port is read, the ADC for an input's
 voltage, the PMP for its bus cycles. `--set NAME=VALUE` goes to `set`,
@@ -422,6 +422,27 @@ bit as the hardware's: a model makes its status bits read-only with
 `rf_set_acc`, and corrects reset values (`rf_set_reset`) the file leaves
 at 0 -- PRx at 0xFFFF, TRISx all ones, UxSTA's TRMT.
 
+One correction is the reader's: the ATDF gives every ANSELx sixteen
+fields, where the part has an analog function on a few of its pins, so
+`atdf.c` keeps only the fields the pack's device header names
+(`include/proc/p<part>.h`, its `_ANSELx_ANSxn_MASK`), and the GPIO model
+resets ANSELx to its fields -- 0x0B00 for a PIC32MZ2048EFM144's ANSELJ,
+as the data sheet has it. A digital-only pin then reads its button
+without the program writing ANSELx, as on the part.
+
+### A PIC32's boards
+
+`pic32-boards.c` is one device for every board around a PIC32MZ: a
+`struct board` names its LEDs (port, pin, lit high or low), its buttons
+(and whether the board pulls them up), and whether it is the Explorer
+(the TC1047A, the potentiometer, the LCD). The GPIO model tells it each
+pin driven high, driven low or let go (1, 0, -1), so an LED lit low is
+off while its pin is an input or an open drain let go. To add a board:
+its tables, an entry in `boards_[]`, its line in `boards[]` and
+`dev_types[]` in `boards.c` with the part's ATDF, `--help`, the manual,
+and a program in `tests/golden/embsim-pic32.sh` that drives each LED
+and reads each button.
+
 ## Adding a board
 
 An entry in `boards[]` in `boards.c`: the name, the core and its model,
@@ -502,8 +523,10 @@ or with its own file for the six functions of `net.h`.
   and CLR/SET/INV at its address), and an EmbCC program on the Explorer
   16/32 (`pic32-fw.c`: the DSP ASE after EmbCC's startup, the EVIC's
   priorities, order and shadow sets, the timers, OFF213, the ports, the
-  ADC, the LCD on the PMP, SYSKEY) against its record. Skipped, saying
-  so, without the pack (`PIC32MZ_EF_DFP`, tools/hostpaths.sh).
+  ADC, the LCD on the PMP, SYSKEY) against its record, and one on the
+  Curiosity PIC32MZ EF 2.0 (`pic32-curiosity.c`: ANSELx out of reset,
+  the switches with and without pull-ups, the LEDs lit low). Skipped,
+  saying so, without the pack (`PIC32MZ_EF_DFP`, tools/hostpaths.sh).
 - `tests/golden/embsim-coverage.sh`: `--coverage` against a program
   whose lines carry the counts they must get, on the four cores and
   from clang's DWARF 5.

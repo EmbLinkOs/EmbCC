@@ -298,10 +298,11 @@ struct rx_port {
 /* What a board wires to its part's pins, beyond the part: LEDs and
  * buttons on the GPIO, voltages on the analog inputs, a display on a
  * parallel bus. The part's peripheral models call these (each may be
- * 0); the board's device fills them in (explorer.c). */
+ * 0); the board's device fills them in (pic32-boards.c). */
 struct board_io {
     void *ctx;
-    /* an output pin's level changed (port 0 is A): what the part drives */
+    /* a pin's driven level changed (port 0 is A): 1 high, 0 low, -1 let
+     * go (an input, an open drain at 1) */
     void (*pin_out)(void *ctx, int port, int bit, int level);
     /* 1 and the level when something outside drives the pin, else 0 */
     int (*pin_in)(void *ctx, int port, int bit, int *level);
@@ -361,7 +362,7 @@ struct sim {
     int rx_on;
     /* the record of the run's inputs, or its replay (record.c), or 0 */
     struct rec *rec;
-    /* what the board has outside the part (explorer.c's), or zeros */
+    /* what the board has outside the part (pic32-boards.c's), or zeros */
     struct board_io io;
 };
 

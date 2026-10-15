@@ -442,7 +442,7 @@ EMBSIM_SRCS := tools/embsim/main.c tools/embsim/run.c tools/embsim/bus.c \
                tools/embsim/pic32-cru.c tools/embsim/pic32-tmr.c \
                tools/embsim/pic32-gpio.c tools/embsim/pic32-uart.c \
                tools/embsim/pic32-pmp.c tools/embsim/pic32-adc.c \
-               tools/embsim/explorer.c tools/embsim/ieee754.c \
+               tools/embsim/pic32-boards.c tools/embsim/ieee754.c \
                tools/embsim/mips-fpu.c $(EMBSIM_NET)
 EMBSIM_HDRS := tools/embsim/sim.h tools/embsim/cortexm.h tools/embsim/riscv.h \
                tools/embsim/avr.h \

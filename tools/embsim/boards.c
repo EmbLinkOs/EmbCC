@@ -123,10 +123,15 @@ const struct board_desc boards[] = {
       "PIC32MZ2048EFH100.atdf", pic32mz_models },
     /* Microchip's Explorer 16/32 with the PIC32MZ EF PIM: the part, and
      * the board's LEDs, buttons, potentiometer, temperature sensor and
-     * LCD (explorer.c) */
+     * LCD (pic32-boards.c) */
     { "explorer16-32", "mips", "pic32mz", 0, PIC32MZ_MEM,
       { { "explorer16-32", 0, 0 } }, { { 0, 0, 0 } },
       "PIC32MZ2048EFH100.atdf", pic32mz_models },
+    /* Microchip's Curiosity PIC32MZ EF 2.0, a PIC32MZ2048EFM144: its LEDs
+     * and switches (pic32-boards.c) */
+    { "curiosity-pic32mz-ef-2", "mips", "pic32mz", 0, PIC32MZ_MEM,
+      { { "curiosity-pic32mz-ef-2", 0, 0 } }, { { 0, 0, 0 } },
+      "PIC32MZ2048EFM144.atdf", pic32mz_models },
 };
 const int nboards = (int)(sizeof boards / sizeof boards[0]);
 
@@ -175,7 +180,8 @@ static const struct dev_type dev_types[] = {
     { "ns16550a-8", &ns16550a_8_ops, ns16550a_create },
     { "malta-fpga", &malta_fpga_ops, malta_fpga_create },
     { "malta-rom", &malta_rom_ops, malta_rom_create },
-    { "explorer16-32", &explorer_ops, explorer_create },
+    { "explorer16-32", &pic32_board_ops, pic32_board_create },
+    { "curiosity-pic32mz-ef-2", &pic32_board_ops, pic32_board_create },
 };
 
 /* ---- the peripheral models, over an SVD's registers (svd-map.h) -------- */

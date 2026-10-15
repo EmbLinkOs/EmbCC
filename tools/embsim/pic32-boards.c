@@ -1,11 +1,12 @@
-/* explorer.c -- Microchip's Explorer 16/32 board (DM240001-3) with the
- * PIC32MZ EF plug-in module (MA320019): what is on the board around the
- * part, wired to its pins (struct board_io).
+/* pic32-boards.c -- the boards around a PIC32: what is wired to the
+ * part's pins (struct board_io), each board a table of LEDs and buttons,
+ * and the Explorer 16/32's sensors and LCD.
  *
- * The pins are the PIM's: its information sheet maps each pin of the
- * Explorer's 100-pin socket to the PIC32MZ2048EFH100's (DS50002218,
- * written for the EC PIM, whose part has the EF's pinout), and Harmony's
- * BSP for the PIM agrees on the LEDs:
+ * Microchip's Explorer 16/32 (DM240001-3) with the PIC32MZ EF plug-in
+ * module (MA320019). The pins are the PIM's: its information sheet maps
+ * each pin of the Explorer's 100-pin socket to the PIC32MZ2048EFH100's
+ * (DS50002218, written for the EC PIM, whose part has the EF's pinout),
+ * and Harmony's BSP for the PIM agrees on the LEDs:
  *   - LEDs D3-D10 (lit when the pin drives high): D3 RA0, D4 RA1, D5 RA2,
  *     D6 RA3, D7 RF13, D8 RF12, D9 RA6, D10 RA7;
  *   - push buttons, low when pressed and pulled up by the board: S4 RF8,
@@ -19,12 +20,20 @@
  *   - the USB-UART is whichever UART the program uses: every UART's
  *     output is the run's stdout (pic32-uart.c).
  *
+ * Microchip's Curiosity PIC32MZ EF 2.0 (DM320209, a PIC32MZ2048EFM144),
+ * by Harmony 3's BSP for it (bsp/boards/pic32mz_ef_curiosity_v2):
+ *   - LED1 RJ7, LED2 RK7, LED3 RJ3, and the RGB LED's red RB7, green RB8
+ *     and blue RB9, each lit when the pin drives low;
+ *   - switches SW1 RJ4, SW2 RJ5, SW3 RJ6, SW4 RC14, low when pressed,
+ *     with no pull-up on the board: released, a pin reads its own
+ *     pull-up (CNPUx), else 0.
+ *
  * What the run's user sees, on stderr: each LED that goes on or off, and
  * the LCD's two lines each time the program clears the display or sends
  * the cursor home -- the frame it had drawn -- and when the run ends.
- * What they set (--set NAME=VALUE): temperature=DEGREES (25 by default),
- * pot=VOLTS or pot=PERCENT% (half way by default), S4, S5 or S6 =pressed
- * or =released.
+ * What they set (--set NAME=VALUE): a button =pressed or =released, and
+ * on the Explorer temperature=DEGREES (25 by default) and pot=VOLTS or
+ * pot=PERCENT% (half way by default).
  *
  * The LCD controller: the HD44780's instruction set -- clear, home,
  * entry mode (increment or decrement, display shift), display on/off,
@@ -39,18 +48,49 @@
 #include "devices.h"
 #include "pic32.h"
 
-enum { PA = 0, PD = 3, PF = 5 };
+enum { PA = 0, PB, PC, PD, PE, PF, PG, PH, PJ, PK };
 
-static const struct { int port, bit; const char *name; } leds[] = {
-    { PA, 0, "D3" }, { PA, 1, "D4" }, { PA, 2, "D5" }, { PA, 3, "D6" },
-    { PF, 13, "D7" }, { PF, 12, "D8" }, { PA, 6, "D9" }, { PA, 7, "D10" },
-};
-#define NLED (int)(sizeof leds / sizeof leds[0])
+/* an LED: lit when its pin drives high, or (active_low) low */
+struct led { int port, bit; const char *name; int active_low; };
+/* a button: low when pressed; released, the board pulls it up (pull),
+ * or nothing drives it */
+struct button { int port, bit; const char *name; int pull; };
 
-static const struct { int port, bit; const char *name; } buttons[] = {
-    { PF, 8, "S4" }, { PA, 7, "S5" }, { PD, 13, "S6" },
+struct board {
+    const char *name;
+    const struct led *led;
+    int nled;
+    const struct button *button;
+    int nbutton;
+    int explorer;                   /* the TC1047A, the potentiometer, the LCD */
 };
-#define NBUTTON (int)(sizeof buttons / sizeof buttons[0])
+
+static const struct led e16_leds[] = {
+    { PA, 0, "D3", 0 }, { PA, 1, "D4", 0 }, { PA, 2, "D5", 0 },
+    { PA, 3, "D6", 0 }, { PF, 13, "D7", 0 }, { PF, 12, "D8", 0 },
+    { PA, 6, "D9", 0 }, { PA, 7, "D10", 0 },
+};
+static const struct button e16_buttons[] = {
+    { PF, 8, "S4", 1 }, { PA, 7, "S5", 1 }, { PD, 13, "S6", 1 },
+};
+static const struct led cur_leds[] = {
+    { PJ, 7, "LED1", 1 }, { PK, 7, "LED2", 1 }, { PJ, 3, "LED3", 1 },
+    { PB, 7, "RGB red", 1 }, { PB, 8, "RGB green", 1 }, { PB, 9, "RGB blue", 1 },
+};
+static const struct button cur_buttons[] = {
+    { PJ, 4, "SW1", 0 }, { PJ, 5, "SW2", 0 }, { PJ, 6, "SW3", 0 },
+    { PC, 14, "SW4", 0 },
+};
+
+#define N(a) (int)(sizeof a / sizeof a[0])
+static const struct board boards_[] = {
+    { "explorer16-32", e16_leds, N(e16_leds), e16_buttons, N(e16_buttons), 1 },
+    { "curiosity-pic32mz-ef-2", cur_leds, N(cur_leds), cur_buttons,
+      N(cur_buttons), 0 },
+};
+
+#define NLED 8
+#define NBUTTON 4
 
 struct lcd {
     u8 ddram[0x80];
@@ -64,51 +104,62 @@ struct lcd {
     int drawn;                      /* written since then */
 };
 
-struct explorer {
+struct pboard {
     struct sim *s;
+    const struct board *b;
     int led[NLED];
     int pressed[NBUTTON];
     double temperature, pot;
     struct lcd lcd;
 };
 
-static double now_ms(const struct explorer *x)
+static double now_ms(const struct pboard *x)
 {
     return (double)x->s->cycles / (PIC32_SYSCLK / 1000.0);
 }
 
-static void say(const struct explorer *x, const char *fmt, const char *a,
+static void say(const struct pboard *x, const char *fmt, const char *a,
                 const char *b)
 {
     fflush(stdout);
-    fprintf(stderr, "explorer16-32: ");
+    fprintf(stderr, "%s: ", x->b->name);
     fprintf(stderr, fmt, a, b);
     fprintf(stderr, " at %.3f ms\n", now_ms(x));
 }
 
 /* ---- the LEDs and buttons ------------------------------------------------ */
 
+/* port K is the eleventh: there is no port I */
+static char port_letter(int port)
+{
+    return (char)('A' + port + (port >= 8));
+}
+
 static void pin_out(void *ctx, int port, int bit, int level)
 {
-    struct explorer *x = ctx;
+    struct pboard *x = ctx;
     char pin[8];
-    for (int i = 0; i < NLED; i++)
-        if (leds[i].port == port && leds[i].bit == bit && x->led[i] != level) {
-            x->led[i] = level;
-            snprintf(pin, sizeof pin, "R%c%d", 'A' + port, bit);
-            say(x, level ? "LED %s on (%s)" : "LED %s off (%s)", leds[i].name,
-                pin);
+    for (int i = 0; i < x->b->nled; i++) {
+        const struct led *l = &x->b->led[i];
+        int on = l->active_low ? level == 0 : level == 1;
+        if (l->port == port && l->bit == bit && x->led[i] != on) {
+            x->led[i] = on;
+            snprintf(pin, sizeof pin, "R%c%d", port_letter(port), bit);
+            say(x, on ? "LED %s on (%s)" : "LED %s off (%s)", l->name, pin);
         }
+    }
 }
 
 static int pin_in(void *ctx, int port, int bit, int *level)
 {
-    struct explorer *x = ctx;
-    for (int i = 0; i < NBUTTON; i++)
-        if (buttons[i].port == port && buttons[i].bit == bit) {
+    struct pboard *x = ctx;
+    for (int i = 0; i < x->b->nbutton; i++) {
+        const struct button *b = &x->b->button[i];
+        if (b->port == port && b->bit == bit && (x->pressed[i] || b->pull)) {
             *level = !x->pressed[i];
             return 1;
         }
+    }
     return 0;
 }
 
@@ -116,7 +167,9 @@ static int pin_in(void *ctx, int port, int bit, int *level)
 
 static double analog(void *ctx, int n)
 {
-    struct explorer *x = ctx;
+    struct pboard *x = ctx;
+    if (!x->b->explorer)
+        return -1;
     if (n == 4)                     /* TC1047A */
         return 0.5 + 0.01 * x->temperature;
     if (n == 45)                    /* R6 */
@@ -146,7 +199,7 @@ static void frame(struct lcd *l, char out[2][17])
 }
 
 /* the frame drawn since the last one shown, if it is new */
-static void show(struct explorer *x)
+static void show(struct pboard *x)
 {
     struct lcd *l = &x->lcd;
     char f[2][17];
@@ -158,8 +211,8 @@ static void show(struct explorer *x)
         return;
     memcpy(l->shown, f, sizeof f);
     fflush(stdout);
-    fprintf(stderr, "explorer16-32: LCD |%s| at %.3f ms\n"
-                    "explorer16-32:     |%s|\n", f[0], now_ms(x), f[1]);
+    fprintf(stderr, "%s: LCD |%s| at %.3f ms\n%s:     |%s|\n", x->b->name,
+            f[0], now_ms(x), x->b->name, f[1]);
 }
 
 /* the address counter after a character: in two-line mode 0x27 goes on
@@ -185,7 +238,7 @@ static void lcd_step(struct lcd *l)
         l->shift += l->inc ? 1 : -1;
 }
 
-static void lcd_command(struct explorer *x, u8 c)
+static void lcd_command(struct pboard *x, u8 c)
 {
     struct lcd *l = &x->lcd;
     if (c & 0x80) {                                 /* DDRAM address */
@@ -225,7 +278,7 @@ static void lcd_command(struct explorer *x, u8 c)
     }
 }
 
-static void lcd_data(struct explorer *x, u8 d)
+static void lcd_data(struct pboard *x, u8 d)
 {
     struct lcd *l = &x->lcd;
     if (!l->cgram) {
@@ -239,7 +292,7 @@ static void lcd_data(struct explorer *x, u8 d)
  * interface, a byte comes in two writes, its high half first, on DB7-4 */
 static void pmp_write(void *ctx, u32 addr, u32 data)
 {
-    struct explorer *x = ctx;
+    struct pboard *x = ctx;
     struct lcd *l = &x->lcd;
     u8 b = (u8)data;
     if (!l->bits8) {
@@ -259,7 +312,7 @@ static void pmp_write(void *ctx, u32 addr, u32 data)
 
 static u32 pmp_read(void *ctx, u32 addr)
 {
-    struct explorer *x = ctx;
+    struct pboard *x = ctx;
     struct lcd *l = &x->lcd;
     if (!(addr & 1))
         return l->ac & 0x7f;                       /* BF 0 */
@@ -270,10 +323,29 @@ static u32 pmp_read(void *ctx, u32 addr)
 
 /* ---- the user's inputs, and the end --------------------------------------- */
 
+/* an input changed from outside: a port's next read sees it */
+static void s_changed(struct pboard *x)
+{
+    x->s->bus.touched = 1;
+}
+
 static int set(void *ctx, const char *name, const char *value)
 {
-    struct explorer *x = ctx;
+    struct pboard *x = ctx;
     char *e;
+    for (int i = 0; i < x->b->nbutton; i++)
+        if (!strcmp(name, x->b->button[i].name)) {
+            if (!strcmp(value, "pressed") || !strcmp(value, "1"))
+                x->pressed[i] = 1;
+            else if (!strcmp(value, "released") || !strcmp(value, "0"))
+                x->pressed[i] = 0;
+            else
+                die("--set %s=%s: a button is pressed or released", name, value);
+            s_changed(x);
+            return 0;
+        }
+    if (!x->b->explorer)
+        return -1;
     if (!strcmp(name, "temperature")) {
         double t = strtod(value, &e);
         if (e == value || *e)
@@ -290,16 +362,6 @@ static int set(void *ctx, const char *name, const char *value)
             die("--set pot=%s: the potentiometer gives 0 to 3.3 V", value);
         return 0;
     }
-    for (int i = 0; i < NBUTTON; i++)
-        if (!strcmp(name, buttons[i].name)) {
-            if (!strcmp(value, "pressed") || !strcmp(value, "1"))
-                x->pressed[i] = 1;
-            else if (!strcmp(value, "released") || !strcmp(value, "0"))
-                x->pressed[i] = 0;
-            else
-                die("--set %s=%s: a button is pressed or released", name, value);
-            return 0;
-        }
     if (!strcmp(name, "S3"))
         die("--set S3: S3 is not wired to the PIC32MZ EF plug-in module");
     return -1;
@@ -307,14 +369,16 @@ static int set(void *ctx, const char *name, const char *value)
 
 static void end(void *ctx)
 {
-    struct explorer *x = ctx;
+    struct pboard *x = ctx;
+    if (!x->b->explorer)
+        return;
     x->lcd.drawn = 1;
     show(x);
 }
 
-static void explorer_reset(void *ctx)
+static void board_reset(void *ctx)
 {
-    struct explorer *x = ctx;
+    struct pboard *x = ctx;
     struct lcd *l = &x->lcd;
     memset(l->ddram, ' ', sizeof l->ddram);
     l->ac = 0;
@@ -333,26 +397,34 @@ static void explorer_reset(void *ctx)
         x->led[i] = 0;
 }
 
-const struct dev_ops explorer_ops = {
-    "explorer16-32", 0, 0, explorer_reset, 0, 0,
+const struct dev_ops pic32_board_ops = {
+    "pic32-board", 0, 0, board_reset, 0, 0,
 };
 
-void *explorer_create(struct sim *s, const struct dev_desc *d)
+void *pic32_board_create(struct sim *s, const struct dev_desc *d)
 {
-    (void)d;
-    struct explorer *x = calloc(1, sizeof *x);
+    const struct board *b = 0;
+    for (int i = 0; i < N(boards_); i++)
+        if (!strcmp(boards_[i].name, d->type))
+            b = &boards_[i];
+    if (!b)
+        die("no PIC32 board named %s", d->type);
+    struct pboard *x = calloc(1, sizeof *x);
     if (!x)
         die("out of memory");
     x->s = s;
+    x->b = b;
     x->temperature = 25.0;
     x->pot = 1.65;
-    explorer_reset(x);
+    board_reset(x);
     s->io.ctx = x;
     s->io.pin_out = pin_out;
     s->io.pin_in = pin_in;
     s->io.analog = analog;
-    s->io.bus_write = pmp_write;
-    s->io.bus_read = pmp_read;
+    if (b->explorer) {
+        s->io.bus_write = pmp_write;
+        s->io.bus_read = pmp_read;
+    }
     s->io.set = set;
     s->io.end = end;
     return x;

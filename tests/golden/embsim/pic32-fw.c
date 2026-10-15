@@ -13,8 +13,11 @@
  *   - an interrupt's priority against Status.IPL: a request at the
  *     current level waits; requests at one priority taken by
  *     subpriority, then in the natural order;
- *   - the ports: LATA's LEDs, PORTA reading what is driven, a write to
- *     PORTA landing in LATA, a button read on RF8 (S4);
+ *   - the ports: ANSELA out of reset (the pins with an analog function:
+ *     RA0, RA1, RA5, RA9, RA10), LATA's LEDs, PORTA reading what is
+ *     driven, a write to PORTA landing in LATA, the buttons read on RF8
+ *     (S4, pressed) and RD13 (S6, released: a digital-only pin, so no
+ *     ANSELD write is needed);
  *   - the ADC: AN4, the TC1047A at the temperature the run sets, and
  *     AN45, the potentiometer, as ADC0's alternate input; an input of
  *     the shared ADC, which is off, is not converted;
@@ -212,6 +215,7 @@ int main(void)
     line("INTSTAT", INTSTAT);
 
     /* the ports */
+    line("ANSELA at reset", ANSELA);
     ANSELA = 0;
     TRISA = 0xff00u;
     LATA = 0x55u;
@@ -221,6 +225,7 @@ int main(void)
     LATA = 0;
     TRISFSET = 1u << 8;
     line("S4 (RF8)", PORTF >> 8 & 1);
+    line("S6 (RD13)", PORTD >> 13 & 1);
 
     /* the ADC: the TC1047A on AN4, the potentiometer on AN45 */
     ADCCON1 = 0x600000u;                        /* 12 bits, shared ADC */

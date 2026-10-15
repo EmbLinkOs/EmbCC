@@ -2,15 +2,17 @@
  * registers (ANSELx, TRISx, PORTx, LATx, ODCx, CNPUx, CNPDx...).
  *
  *   - Out of reset every pin is an input (TRISx all ones) and every pin
- *     that has an analog function is analog (ANSELx: the bits the file
- *     gives it), as on the part.
+ *     that has an analog function is analog (ANSELx: its fields, which
+ *     atdf.c takes from the pack's device header -- the ATDF gives every
+ *     ANSELx sixteen), as on the part.
  *   - PORTx reads the pins: an output (TRISx 0) what LATx drives -- an
  *     open-drain one (ODCx) at 1 lets go, and reads as an input does; an
  *     analog pin 0 (its digital input is off); an input what the board
  *     drives on it (a button), else its pull-up (CNPUx) as 1, else 0.
  *   - A write to PORTx writes LATx, as on the part.
- *   - The board is told each pin whose driven level changes (an LED),
- *     and asked for the pins it drives (struct board_io).
+ *   - The board is told each pin whose driven level changes -- high,
+ *     low, or let go (an LED, either way round) -- and asked for the
+ *     pins it drives (struct board_io).
  * PORTx's value shows in --trace-periph when a read changes it. Not
  * modelled: the change notification interrupts (CNx), the slew rate. */
 #include <stdlib.h>
@@ -20,12 +22,12 @@
 #include "pic32.h"
 #include "svd-map.h"
 
-#define NPORTS 11                   /* A to K */
+#define NPORTS 10                   /* A to K, without I */
 
 struct port {
     struct rf_reg *ansel, *tris, *port, *lat, *odc, *cnpu;
     u32 pins;                       /* the pins the port has */
-    u32 driven;                     /* the levels the board was last told */
+    u32 high, low;                  /* driven high and low, as the board was told */
 };
 
 struct gpio {
@@ -34,12 +36,14 @@ struct gpio {
     struct port pt[NPORTS];
 };
 
-/* the bits driven high: outputs at 1 (not an open drain let go) */
-static u32 drives(const struct port *q)
+/* the bits driven high (outputs at 1, not an open drain let go) and
+ * driven low (outputs at 0) */
+static u32 drives(const struct port *q, u32 *low)
 {
     u32 out = ~(u32)q->tris->value & q->pins;
     u32 lat = (u32)q->lat->value;
     u32 od = q->odc ? (u32)q->odc->value : 0;
+    *low = out & ~lat;
     return out & lat & ~od;
 }
 
@@ -74,11 +78,12 @@ static void tell_board(struct gpio *g)
         struct port *q = &g->pt[i];
         if (!q->port)
             continue;
-        u32 d = drives(q), ch = d ^ q->driven;
-        q->driven = d;
+        u32 lo, hi = drives(q, &lo), ch = (hi ^ q->high) | (lo ^ q->low);
+        q->high = hi;
+        q->low = lo;
         for (int b = 0; ch && b < 32; b++)
             if ((ch >> b & 1) && io->pin_out)
-                io->pin_out(io->ctx, i, b, (int)(d >> b & 1));
+                io->pin_out(io->ctx, i, b, hi >> b & 1 ? 1 : lo >> b & 1 ? 0 : -1);
     }
 }
 
@@ -121,7 +126,7 @@ static void gpio_reset(void *ctx)
 {
     struct gpio *g = ctx;
     for (int i = 0; i < NPORTS; i++)
-        g->pt[i].driven = 0;
+        g->pt[i].high = g->pt[i].low = 0;
 }
 
 const struct dev_ops pic32_gpio_ops = {
@@ -139,7 +144,7 @@ void *pic32_gpio_create(struct sim *s, struct rf_periph *p)
     g->p = p;
     for (int i = 0; i < NPORTS; i++) {
         struct port *q = &g->pt[i];
-        char l = (char)('A' + i);
+        char l = (char)('A' + i + (i >= 8));    /* no port I */
 #define REG(f, name) snprintf(nm, sizeof nm, name "%c", l); q->f = rf_reg(p, nm)
         REG(ansel, "ANSEL");
         REG(tris, "TRIS");

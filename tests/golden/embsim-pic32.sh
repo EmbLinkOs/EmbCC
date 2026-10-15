@@ -1,5 +1,5 @@
 #!/bin/sh
-# embsim-pic32: EmbSim's PIC32MZ2048EFH100 and Explorer 16/32 boards,
+# embsim-pic32: EmbSim's PIC32MZ2048EFH100, Explorer 16/32 and Curiosity boards,
 # built from Microchip's device pack (PIC32MZ_EF_DFP, tools/hostpaths.sh).
 # No QEMU models a PIC32, so the referees are the pack itself and the
 # part's documentation.
@@ -18,6 +18,9 @@
 #     PMP, SYSKEY's lock. Its output must be the record
 #     (tests/golden/embsim/pic32-fw.txt), and the board's report -- the
 #     LEDs and the LCD's lines -- what the program drove.
+#     And a program on curiosity-pic32mz-ef-2 (its PIC32MZ2048EFM144):
+#     ANSELx out of reset, its switches, its LEDs
+#     (tests/golden/embsim/pic32-curiosity.c, .txt).
 #  3. The ends: a PIC32 board without its pack names what to give it.
 #  4. With EMBSIM_THERMO_ELF, a Harmony 3 + FreeRTOS thermometer built by
 #     EmbCC: the LCD's temperature at three temperatures, its LEDs.
@@ -162,6 +165,32 @@ grep -q '^explorer16-32: LCD |EmbSim          | at' "$out/fw.err" &&
     grep -q '^explorer16-32:     |PIC32MZ EF      |$' "$out/fw.err" ||
     { cat "$out/fw.err"; fail "the LCD's two lines are not what the program wrote"; }
 echo "embsim-pic32: an EmbCC program on explorer16-32: $(wc -l < "$out/fw.out" | tr -d ' ') results as the record has them (DSP, EVIC, shadow sets, timers, OFF213, ports, ADC, PMP, SYSKEY), the LEDs and the LCD reported"
+
+# ---- 2b. a program on the Curiosity PIC32MZ EF 2.0 -------------------------------
+# Its PIC32MZ2048EFM144, from the same pack: ANSELx out of reset only on
+# the pins with an analog function (the ATDF gives every ANSELx sixteen),
+# the switches (no pull-ups on the board) and the LEDs (lit low).
+if [ -f "$DFP/atdf/PIC32MZ2048EFM144.atdf" ]; then
+    "$EMBCC" --target=mipsel-none-elf --mcu=32MZ2048EFM144 --dfp="$DFP" -O1 \
+        tests/golden/embsim/pic32-curiosity.c -o "$out/cur.elf" 2> "$out/cur-build.err" ||
+        { cat "$out/cur-build.err"; fail "pic32-curiosity.c does not build"; }
+    "$EMBSIM" "$out/cur.elf" --board curiosity-pic32mz-ef-2 --dfp "$DFP" --until '==DONE==' \
+        --set SW1=pressed --max-insns 1000000 > "$out/cur.out" 2> "$out/cur.err"; st=$?
+    [ $st = 0 ] || { cat "$out/cur.out" "$out/cur.err"; fail "pic32-curiosity.c on curiosity-pic32mz-ef-2 exits $st"; }
+    cmp -s "$out/cur.out" tests/golden/embsim/pic32-curiosity.txt || {
+        diff tests/golden/embsim/pic32-curiosity.txt "$out/cur.out" | head -20
+        fail "pic32-curiosity.c's output is not pic32-curiosity.txt"; }
+    for l in 'LED1 on (RJ7)' 'LED2 on (RK7)' 'LED3 on (RJ3)' 'LED3 off (RJ3)' \
+             'RGB red on (RB7)' 'RGB green on (RB8)' 'RGB blue on (RB9)'; do
+        grep -q "^curiosity-pic32mz-ef-2: LED $l at" "$out/cur.err" ||
+            { cat "$out/cur.err"; fail "the board does not report LED $l"; }
+    done
+    [ "$(grep -c " LED " "$out/cur.err")" = 7 ] ||
+        { cat "$out/cur.err"; fail "the board reports LEDs the program did not drive"; }
+    echo "embsim-pic32: an EmbCC program on curiosity-pic32mz-ef-2: ANSELx out of reset, the four switches, the six LEDs lit low"
+else
+    echo "SKIP: embsim-pic32: no PIC32MZ2048EFM144.atdf in the pack: the Curiosity board was not run"
+fi
 
 # ---- 4. a real project: EMBSIM_THERMO_ELF -----------------------------------------
 # A Harmony 3 + FreeRTOS thermometer (the TC1047A read every 500 ms, its
