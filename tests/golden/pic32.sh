@@ -68,6 +68,13 @@ EOF
         'CVALUE:00000000:DIV_1:Divide by 1' \
         'CVALUE:00000002:DIV_3:Divide by 3' \
         > "$1/xc32/32MZ2048EFH100/configuration.data"
+    # the processor module: every SFR an absolute symbol, under a `#`
+    # comment header that a .S file's preprocessing leaves to the assembler
+    printf '%s\n' ' #-------------------------------------------------------' \
+        ' # MPLAB XC Compiler -  PIC32MZ2048EFH100 processor definition module' \
+        ' #' 'LATBSET = 0xBF860138' '  .global LATBSET' \
+        'OFF000 = 0xBF810540' '  .global OFF000' \
+        > "$1/xc32/32MZ2048EFH100/p32MZ2048EFH100.S"
 }
 mkpack "$out/pack" 1
 P="--target=mipsel-none-elf --mcu=32MZ2048EFH100"
@@ -191,6 +198,14 @@ printf '    .section .x, address(0x9d000000)\n' > "$out/addr.S"
 grep -q "section attribute 'address' is not one" "$out/addr.err" ||
     { cat "$out/addr.err"; fail "address() is not refused by name"; }
 echo "pic32: a .S sees __LANGUAGE_ASSEMBLY__ and _CP0_EPC as \$14, 0, a C file after it C's; add/sub/addi, rddsp/wrdsp, \$ac0-3, and .section NAME, code, keep"
+
+# the pack's processor module: its `#` comment lines are the assembler's
+# shellcheck disable=SC2086
+"$EMBCC" $P --dfp="$out/pack" -c "$out/pack/xc32/32MZ2048EFH100/p32MZ2048EFH100.S" \
+    -o "$out/proc.o" || fail "the pack's processor module does not assemble"
+[ "$(llvm-nm "$out/proc.o" | awk '$3 == "LATBSET" { print $1, $2 }')" = "bf860138 A" ] ||
+    fail "LATBSET is not the absolute symbol 0xbf860138"
+echo "pic32: the pack's processor module assembles, its SFRs absolute symbols"
 
 # ---- 5. #pragma config ---------------------------------------------------------
 # each word a unit sets: its default, the settings' fields replaced, one

@@ -1980,6 +1980,10 @@ static const char *g_config_data;
 
 void cpp_set_config_data(const char *path) { g_config_data = path; }
 
+/* Preprocessing a .S file: see the `#` lines it leaves alone */
+static int g_asm_mode;
+void cpp_set_asm(int on) { g_asm_mode = on; }
+
 static char *cfg_field(char **p)        /* the next ':'-separated field */
 {
     char *f = *p, *c = strchr(f, ':');
@@ -2516,6 +2520,19 @@ static void process_file(struct cpp *cpp, const char *path,
                 continue;
             } else if (dn == 0) {
                 /* '#' alone: the null directive */
+            } else if (g_asm_mode) {
+                /* assembly's own `#` line -- a MIPS or x86 comment (the
+                 * PIC32 device pack's processor modules begin with
+                 * ` # MPLAB XC Compiler -`) -- left for the assembler,
+                 * as GCC's preprocessor leaves it in a .S file */
+                if (live) {
+                    tb_puts(out, lineb.p);
+                    tb_putc(out, '\n');
+                    for (int i = 1; i < nl; i++)
+                        tb_putc(out, '\n');
+                    s.line = startline + nl;
+                    continue;
+                }
             } else {
                 cerr(&s, "unknown directive '#%s'",
                      xstrndup(lp, dn));

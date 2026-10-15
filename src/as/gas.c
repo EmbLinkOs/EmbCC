@@ -4106,7 +4106,9 @@ int gas_assemble(const char *in_path, const char *out_path, int preprocess,
     }
     /* `.S` is preprocessed and `.s` is not, which is the whole of the
      * difference between them. */
+    cpp_set_asm(1);
     text = preprocess ? cpp_process(in_path, src, incdirs, nincdirs) : src;
+    cpp_set_asm(0);
 
     memset(&g, 0, sizeof g);
     g.path = in_path;
