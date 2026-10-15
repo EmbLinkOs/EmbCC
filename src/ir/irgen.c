@@ -5191,7 +5191,8 @@ static void gen_func(struct ir_func *fn, struct func *f)
      * thing every time. A floating or aggregate result is left undefined.
      * After a body whose every path returned this is unreachable, and
      * goes. */
-    if ((ty_is_integer(f->ret_ty) || f->ret_ty->kind == TY_PTR) &&
+    if ((!strcmp(f->name, "main") || f->falls_off) &&
+        (ty_is_integer(f->ret_ty) || f->ret_ty->kind == TY_PTR) &&
         ty_size(f->ret_ty) <= 8 && !f->is_naked) {
         int z = emit_const(fn, 0, ty_size(f->ret_ty) > 4 ? 8 : 4);
         struct ir_ins *r = emit(fn);

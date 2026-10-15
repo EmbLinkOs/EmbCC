@@ -381,6 +381,8 @@ struct func {
     const char *section;  /* __attribute__((section("s"))): its code goes
                            * to section s rather than .text */
     int is_noreturn;      /* __attribute__((noreturn)) / _Noreturn */
+    int falls_off;        /* sema: returns a value, and control can reach
+                           * its closing brace (--warn=return-type) */
     int is_nothrow;       /* __attribute__((nothrow)): no exception leaves it
                            * (a call of it needs no landing pad) */
     /* __attribute__((constructor)) / ((destructor)): its address goes in

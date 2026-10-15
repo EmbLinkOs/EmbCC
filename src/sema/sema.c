@@ -7045,8 +7045,9 @@ static void check_func(struct unit *u, struct func *f)
      * whatever the register held. main is the exception the language
      * makes: reaching its brace returns 0 (C99 5.1.2.2.3). A naked
      * function's asm returns, with its value where the ABI puts it. */
-    if (f->ret_ty->kind != TY_VOID && !list_returns(f->body) &&
-        strcmp(f->name, "main") != 0 && !f->is_naked &&
+    f->falls_off = f->ret_ty->kind != TY_VOID && !list_returns(f->body) &&
+                   !f->is_naked;
+    if (f->falls_off && strcmp(f->name, "main") != 0 &&
         diag_warn_opt(f->file ? f->file : u->file, f->line, 0, "return-type",
                       "control may reach the end of '%s', which returns %s",
                       f->name, ty_name(f->ret_ty)))
