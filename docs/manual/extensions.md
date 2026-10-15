@@ -791,7 +791,7 @@ function name, such as `memcpy` or `printf`, as a builtin, with or without
 A `__builtin_` name EmbCC does not implement is an undeclared function:
 
 ```text
-embcc: f.c:1:29: error: '__builtin_fma' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
+embcc: f.c:1:29: error: '__builtin_shufflevector' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
 ```
 
 Whether a builtin is available does not depend on the target, but its
@@ -909,7 +909,7 @@ EmbCC's own `sqrtl` computes in `double` (see
 [Libraries](libraries.md)). On RISC-V, `__builtin_sqrtl` is refused
 with every other `long double` operation.
 
-### Memory and string functions
+### Library functions
 
 `__builtin_memcpy`, `__builtin_memmove`, `__builtin_memset`,
 `__builtin_memcmp`, `__builtin_memchr`, `__builtin_strlen`,
@@ -919,6 +919,21 @@ library functions under another name: each becomes a call to the
 function without the prefix, which the program must provide at link
 time. `memcpy`, `memmove` and `memset` may also be expanded inline. See
 [What the compiler emits calls to](embedded.md#what-the-compiler-emits-calls-to).
+
+The other C and POSIX library functions GCC has a builtin for are the
+same, without the inline expansion: `__builtin_abort`, `__builtin_exit`,
+`__builtin_printf`, `__builtin_malloc`, `__builtin_stpcpy`,
+`__builtin_isdigit`, `__builtin_sin` and `__builtin_sinf`, among the
+functions of `<stdlib.h>`, `<stdio.h>`, `<string.h>`, `<strings.h>`,
+`<ctype.h>`, `<math.h>` (each with its `f` and `l` variant) and
+`<complex.h>`. When the program has no declaration of the function,
+EmbCC declares it with its C prototype, so `__builtin_printf` needs no
+`<stdio.h>`. `__builtin_memcmp_eq` is `memcmp`.
+
+The `_FORTIFY_SOURCE` forms, such as `__builtin___memcpy_chk(d, s, n,
+size)` and `__builtin___sprintf_chk(s, flag, size, fmt, ...)`, are the
+call without the object-size arguments. They are what GCC calls when the
+size is unknown, and EmbCC has no sizes to check.
 
 ### Object size
 
@@ -1024,10 +1039,10 @@ A function that calls `alloca` is never inlined.
 ### Builtins that are not supported
 
 These are refused as undeclared functions, as shown in [General
-rules](#general-rules): `__builtin_abs`, `__builtin_assume`,
+rules](#general-rules): `__builtin_assume`,
 `__builtin_bitreverse32` and the other widths,
 `__builtin_rotateleft32` and the other rotates, `__builtin_complex`,
-`__builtin_fma`, `__builtin_fpclassify`, `__builtin_isgreater` and the
+`__builtin_fpclassify`, `__builtin_isgreater` and the
 other comparison macros' builtins, `__builtin_setjmp`,
 `__builtin___clear_cache`, `__builtin_FUNCTION`,
 `__builtin_speculation_safe_value`, `__builtin_shufflevector`, the
