@@ -1894,6 +1894,121 @@ static struct type *cx_common(struct type *a, struct type *b)
                         ty_is_complex(b) ? b->celem : b);
 }
 
+static void check_expr(struct unit *u, struct func *f, struct scope *sc,
+                       struct expr *e);
+
+/* __builtin_isgreater and the rest of C's quiet comparisons (<math.h>'s
+ * isgreater...isunordered, and C23's iseqsig): the two operands in their
+ * common real type, compared -- each evaluated once. 1 when bn was one. */
+static int fp_compare_builtin(struct unit *u, struct func *f,
+                              struct scope *sc, struct expr *e,
+                              const char *bn)
+{
+    static const struct { const char *name; enum binop op; } cmps[] = {
+        { "isgreater", B_GT }, { "isgreaterequal", B_GE },
+        { "isless", B_LT }, { "islessequal", B_LE },
+        { "islessgreater", B_NE }, { "isunordered", B_NE },
+        { "iseqsig", B_EQ },
+    };
+    size_t k = 0;
+    while (k < sizeof cmps / sizeof cmps[0] && strcmp(bn, cmps[k].name))
+        k++;
+    if (k == sizeof cmps / sizeof cmps[0])
+        return 0;
+    if (e->nargs != 2)
+        sema_error_at(u, e->line, e->col, "%s takes two arguments",
+                      e->lhs->name);
+    for (int i = 0; i < 2; i++) {
+        check_expr(u, f, sc, e->args[i]);
+        if (!ty_is_arith(e->args[i]->ty) || ty_is_complex(e->args[i]->ty))
+            sema_error_at(u, e->args[i]->line, e->args[i]->col,
+                          "%s: operand %d must be a real number, got %s",
+                          e->lhs->name, i + 1, ty_name(e->args[i]->ty));
+    }
+    if (!cx_lowering())
+        sema_error_at(u, e->line, e->col,
+                      "%s is not supported in a static initializer",
+                      e->lhs->name);
+    struct type *T = arith_common(e->args[0]->ty, e->args[1]->ty);
+    struct type *in = ty_base(TY_INT, 0);
+    struct expr *pa = NULL, *pb = NULL;
+    struct expr *a = mk_cast(e->args[0], T), *b = mk_cast(e->args[1], T);
+    int twice = cmps[k].op == B_NE;     /* islessgreater, isunordered */
+    if (twice) {
+        a = cx_stable(a, &pa);
+        b = cx_stable(b, &pb);
+    }
+    struct expr *r;
+    if (!strcmp(bn, "isunordered") || !strcmp(bn, "islessgreater")) {
+        int un = !strcmp(bn, "isunordered");
+        struct expr *x = cx_node(EXPR_BINOP, e->line, in);
+        x->op = un ? B_NE : B_LT;
+        x->lhs = a;
+        x->rhs = un ? a : b;
+        struct expr *y = cx_node(EXPR_BINOP, e->line, in);
+        y->op = un ? B_NE : B_GT;
+        y->lhs = un ? b : a;
+        y->rhs = b;
+        r = cx_node(EXPR_BINOP, e->line, in);
+        r->op = B_LOR;
+        r->lhs = x;
+        r->rhs = y;
+    } else {
+        r = cx_node(EXPR_BINOP, e->line, in);
+        r->op = cmps[k].op;
+        r->lhs = a;
+        r->rhs = b;
+    }
+    *e = *cx_comma(pa, cx_comma(pb, r));
+    return 1;
+}
+
+/* __builtin_add_overflow_p(a, b, c) and the sub and mul forms: whether
+ * a op b overflows c's type -- the plain builtin's answer, its result
+ * written to a temporary of that type, after c is evaluated for its
+ * effects alone. 1 when bn was one. */
+static int overflow_p_builtin(struct unit *u, struct func *f,
+                              struct scope *sc, struct expr *e,
+                              const char *bn)
+{
+    static const char *const plain[][2] = {
+        { "add_overflow_p", "__builtin_add_overflow" },
+        { "sub_overflow_p", "__builtin_sub_overflow" },
+        { "mul_overflow_p", "__builtin_mul_overflow" },
+    };
+    size_t k = 0;
+    while (k < 3 && strcmp(bn, plain[k][0]))
+        k++;
+    if (k == 3)
+        return 0;
+    if (e->nargs != 3)
+        sema_error_at(u, e->line, e->col, "%s takes three arguments",
+                      e->lhs->name);
+    for (int i = 0; i < 3; i++) {
+        check_expr(u, f, sc, e->args[i]);
+        if (!ty_is_integer(e->args[i]->ty))
+            sema_error_at(u, e->args[i]->line, e->args[i]->col,
+                          "%s: operand %d must be an integer, got %s",
+                          e->lhs->name, i + 1, ty_name(e->args[i]->ty));
+    }
+    if (!cx_lowering())
+        sema_error_at(u, e->line, e->col,
+                      "%s is not supported in a static initializer",
+                      e->lhs->name);
+    struct type *rt = ty_unqual(e->args[2]->ty);
+    int t = scope_add(g_cx_sc, "<overflow>", rt, NULL);
+    struct expr *addr = cx_node(EXPR_ADDR, e->line, ty_ptr(rt));
+    addr->rhs = cx_var(t, e->line);
+    struct expr *side = e->args[2];
+    struct expr *call = cx_node(EXPR_CALL, e->line, ty_base(TY_INT, 0));
+    *call = *e;
+    call->args[2] = addr;
+    call->name = plain[k][1];
+    call->ty = ty_base(TY_INT, 0);
+    *e = *cx_comma(side, call);
+    return 1;
+}
+
 /* x != 0 for a complex x: either part nonzero (an int). */
 static struct expr *cx_truth(struct expr *x)
 {
@@ -3573,6 +3688,45 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
         if (e->lhs->kind == EXPR_VAR && e->lhs->name &&
             strncmp(e->lhs->name, "__builtin_", 10) == 0) {
             const char *bn = e->lhs->name + 10;
+            /* GCC's per-type spellings of the type-generic tests */
+            {
+                static const char *const same[][2] = {
+                    { "isinff", "__builtin_isinf" }, { "isinfl", "__builtin_isinf" },
+                    { "isnanf", "__builtin_isnan" }, { "isnanl", "__builtin_isnan" },
+                    { "finite", "__builtin_isfinite" },
+                    { "finitef", "__builtin_isfinite" },
+                    { "finitel", "__builtin_isfinite" },
+                };
+                for (size_t k = 0; k < sizeof same / sizeof same[0]; k++)
+                    if (strcmp(bn, same[k][0]) == 0) {
+                        e->lhs->name = same[k][1];
+                        bn = e->lhs->name + 10;
+                    }
+            }
+            if (fp_compare_builtin(u, f, sc, e, bn) ||
+                overflow_p_builtin(u, f, sc, e, bn))
+                break;
+            if (strcmp(bn, "classify_type") == 0) {
+                /* GCC's type classes, of the argument after its array or
+                 * function decays and its integer promotion (an enum and
+                 * a _Bool are integers here, as in GCC); it is not
+                 * evaluated */
+                if (e->nargs != 1)
+                    sema_error_at(u, e->line, e->col,
+                                  "__builtin_classify_type takes one argument");
+                check_expr(u, f, sc, e->args[0]);
+                struct type *t = e->args[0]->ty;
+                e->num = t->kind == TY_VOID ? 0
+                       : ty_is_complex(t) ? 9
+                       : t->kind == TY_STRUCT ? (t->is_union ? 13 : 12)
+                       : t->kind == TY_PTR ? 5
+                       : ty_is_float(t) ? 8
+                       : ty_is_integer(t) ? 1 : -1;
+                e->kind = EXPR_NUM;
+                e->ty = ty_base(TY_INT, 0);
+                e->nargs = 0;
+                break;
+            }
             int is_inf = strcmp(bn, "inf") == 0 || strcmp(bn, "huge_val") == 0;
             int is_inff = strcmp(bn, "inff") == 0 || strcmp(bn, "huge_valf") == 0;
             int is_nan = strcmp(bn, "nan") == 0;
