@@ -208,6 +208,11 @@ struct cpu_ops {
     /* the ELF classes its images may be: 1 for ELFCLASS32, 2 for
      * ELFCLASS64, or both (RISC-V) */
     int elf_classes;
+    /* the bus address of a program address, for a core whose addresses
+     * are not the bus's (MIPS: kseg0 and kseg1 are physical memory's
+     * windows), or 0: the loader's segments and a debugger's accesses go
+     * through it */
+    u32 (*phys)(struct cpu *c, u32 a);
 };
 
 struct cpu {

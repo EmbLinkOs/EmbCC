@@ -1,4 +1,5 @@
-/* uart-16550.c -- the NS16550A of QEMU's virt board, at 0x10000000: a
+/* uart-16550.c -- the NS16550A of QEMU's virt board, at 0x10000000 (and
+ * of its malta, with the registers eight bytes apart): a
  * byte written to THR is sent, LSR says the transmitter is always empty,
  * and the receiver never has anything. The other registers keep what is
  * written to them, and LCR's DLAB switches the first two to the divisor
@@ -93,6 +94,22 @@ static void u16550_put(void *ctx, int c)
 
 const struct dev_ops ns16550a_ops = {
     "ns16550a", u16550_read, u16550_write, u16550_reset, 0, 0,
+};
+
+/* QEMU malta's FPGA UART: the same registers, eight bytes apart */
+static u32 u16550_8_read(void *ctx, u32 off, int n)
+{
+    return (off & 7) ? 0 : u16550_read(ctx, off >> 3, n);
+}
+
+static void u16550_8_write(void *ctx, u32 off, int n, u32 v)
+{
+    if (!(off & 7))
+        u16550_write(ctx, off >> 3, n, v);
+}
+
+const struct dev_ops ns16550a_8_ops = {
+    "ns16550a-8", u16550_8_read, u16550_8_write, u16550_reset, 0, 0,
 };
 
 void *ns16550a_create(struct sim *s, const struct dev_desc *d)

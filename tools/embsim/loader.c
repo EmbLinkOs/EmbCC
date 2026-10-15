@@ -1,5 +1,6 @@
 /* loader.c -- the ELF image: every PT_LOAD segment at its physical
- * (load) address, as QEMU's -kernel and a flash programmer place it. A
+ * (load) address, as QEMU's -kernel and a flash programmer place it (a
+ * MIPS image's, which is in kseg0 or kseg1, at its physical address). A
  * segment outside the board's memory gets a region of its own, so a link
  * script for a slightly different part still runs. ELFCLASS32, and
  * ELFCLASS64 for a core that takes it (RV64); the entry point, the class
@@ -79,6 +80,8 @@ void load_elf(struct sim *s, const char *path)
             die("%s: a segment at 0x%llx is beyond the 32-bit bus", path,
                 (unsigned long long)pa64);
         u32 pa = (u32)pa64, fsz = (u32)fsz64;
+        if (s->cpu->ops->phys)
+            pa = s->cpu->ops->phys(s->cpu, pa);
         if (!bus_region(&s->bus, pa, fsz)) {
             u32 base = pa & ~0xfffu, end = (pa + fsz + 0xfffu) & ~0xfffu;
             bus_add_region(&s->bus, base, end - base, MEM_RAM);

@@ -1,8 +1,8 @@
 # embsim — run a firmware image without a board
 
 `embsim` runs a linked ELF image the way the part does: a Cortex-M
-(ARMv6-M, ARMv7-M), a RISC-V core (RV32 and RV64, IMAFDC) or an AVR
-(the ATmega328P). It is ISO C with no dependencies, so it builds on any
+(ARMv6-M, ARMv7-M), a RISC-V core (RV32 and RV64, IMAFDC), an AVR
+(the ATmega328P) or a MIPS32 Release 2 core (QEMU malta's 24Kc). It is ISO C with no dependencies, so it builds on any
 machine, including one without QEMU. It counts the instructions it executes and estimates the
 cycles they take, and gdb, lldb or embdbg can debug the image while it
 runs. Given the part's CMSIS-SVD file, it puts every peripheral register
@@ -63,11 +63,12 @@ built for QEMU runs unchanged.
 | `stm32f405` | Cortex-M4 with FPv4-SP | 1 MiB flash at `0x08000000` (and at 0), 128 KiB SRAM at `0x20000000`, 64 KiB CCM at `0x10000000` | the USARTs of its SVD ([below](#the-stm32f405)) |
 | `virt` | RISC-V, RV32 or RV64 with IMAFDC | 128 MiB RAM at `0x80000000` | NS16550A at `0x10000000` |
 | `uno` | ATmega328P (AVR5) | 32 KiB flash, 2 KiB SRAM at data `0x100` | USART0 at data `0xC0` |
+| `malta` | MIPS32r2 (24Kc), little-endian | 64 MiB RAM at 0 (`0x80000000` in kseg0) | NS16550A at `0x1F000900`, registers 8 bytes apart |
 
 - `--cpu` runs another core on the board: `cortex-m0`, `cortex-m0plus`,
   `cortex-m3`, `cortex-m4` or `cortex-m7` on the Cortex-M boards; `rv32`
   or `rv64` on `virt`, which otherwise takes the image's width (an
-  ELFCLASS64 image is RV64); `atmega328p` on `uno`.
+  ELFCLASS64 image is RV64); `atmega328p` on `uno`; `24kc` on `malta`.
 - `--ram-size` changes the size of the SRAM at `0x20000000`, or of
   virt's RAM (the harness's QEMU runs give it `-m 8`, so
   `--ram-size 8M` is the same machine).
@@ -79,6 +80,11 @@ built for QEMU runs unchanged.
   `0x800020`, the SRAM from `0x800100` (`--ram-size` resizes it), and
   flash at 0. Timer/Counter1 is there too, and the other I/O registers
   keep what is written.
+- On `malta` the core starts at `0xBFC00000`, in a boot ROM that jumps
+  to the image's entry, as QEMU's `-kernel` does; SOFTRES (`0x1F000500`)
+  written with `0x42` resets the board, which ends the run, as QEMU's
+  `-no-reboot` does. A MIPS image's segments are loaded at the physical
+  address of their kseg0 or kseg1 address.
 - A segment of the image outside the board's memory gets memory of its
   own, so a link script for a similar part still runs.
 - Flash on the lm3s6965, the micro:bit and the STM32F405 ignores
@@ -369,6 +375,44 @@ cycles, whatever the PLL is set to.
   interrupt's entry four, and four more when it wakes SLEEP. The part
   has no wait states, so this is the count the silicon takes.
 
+## What it models: the MIPS32 core
+
+- **The instruction set.** MIPS32 Release 2, little-endian: every
+  integer instruction, the branches and jumps with their delay slots
+  (the likely branches skip theirs when not taken), mul, madd, msub and
+  the HI/LO multiplies and divides, clz and clo, ext and ins, seb, seh,
+  wsbh, rotr and rotrv, the traps, ll and sc, lwl, lwr, swl and swr,
+  rdhwr; cache, pref, sync and synci do nothing. A divide by zero, or
+  of INT_MIN by -1, leaves LO the dividend and HI 0, as QEMU's does (the
+  architecture leaves them unpredictable). A floating-point instruction
+  is a Coprocessor Unusable exception (the 24Kc has no FPU); an encoding
+  no MIPS32r2 core has is a Reserved Instruction exception.
+- **Coprocessor 0.** Status, Cause, EPC, ErrorEPC, BadVAddr, EBase,
+  IntCtl, SRSCtl, SRSMap, Count and Compare, Config to Config3, PRId,
+  HWREna, UserLocal, LLAddr, the TLB's registers and the debug ones;
+  di, ei, eret, deret, wait, rdpgpr and wrpgpr.
+- **Exceptions** are the privileged architecture's: EPC and Cause.BD
+  for an instruction in a delay slot, Status.EXL and ERL, the boot
+  vectors at `0xBFC00200` while Status.BEV is set and EBase's after,
+  the TLB refill vector, BadVAddr, Cause.CE for a coprocessor that is
+  not usable.
+- **Memory.** kseg0 and kseg1 reach the bus's low 512 MiB unmapped;
+  kuseg, kseg2 and kseg3 go through a 16-entry TLB (tlbr, tlbwi, tlbwr,
+  tlbp), and kuseg is unmapped while Status.ERL is set. Loads and
+  stores must be aligned (but for lwl, lwr, swl, swr): an address error
+  otherwise. An access to nothing is a bus error exception. sc succeeds
+  when ll's address still holds the value ll read (QEMU's rule), and
+  eret clears the link.
+- **Interrupts.** Compatibility mode (Cause.IP against Status.IM, the
+  timer on IP7) and vectored mode (IntCtl.VS), the hardware lines
+  IP2-IP7, and the two software interrupts. Count counts every other
+  cycle; Compare's match sets Cause.TI. wait sleeps until an interrupt:
+  it skips ahead to the device that will raise one, and ends the run
+  when nothing can.
+- **sdbbp** enters debug mode, which needs a probe: with none, the run
+  ends as a lockup at the breakpoint (startups put one in a default
+  handler, for a debugger to stop at).
+
 ## Counting
 
 Each instruction gets the cost in `tools/bench/cost.h`, the table
@@ -382,7 +426,12 @@ taken branch or jump.
 - `--count FILE` writes them as two lines, the format of the bench's
   QEMU plugin, so either can feed `tools/bench`.
 
-On the Cortex-M and RISC-V the estimate is a model, not a
+On the MIPS32 core (a microAptiv-class pipeline): 1, a load 2, a
+multiply into HI and LO or `mul` 2, a divide 18, and nothing more for a
+taken branch -- the delay slot hides it, and its instruction counts as
+any other.
+
+On the Cortex-M, RISC-V and MIPS the estimate is a model, not a
 cycle-accurate core: there are no wait states and no pipeline stalls. It
 charges the things a compiler chooses between. On the AVR it is the
 datasheet's count (above). On the AVR `--count`'s file has a third
@@ -392,7 +441,8 @@ not in the count (QEMU's plugin counts them; see below).
 `--trace FILE` writes the address and halfwords of every instruction
 executed (`-` for stderr); on RISC-V, the instruction as one word, or
 as one halfword for a compressed one; on the AVR, its one or two
-words, at the byte address.
+words, at the byte address; on MIPS, the instruction as one word, at
+its virtual address.
 
 ## Output, and the end of a run
 
@@ -414,11 +464,12 @@ On the Cortex-M, semihosting (`bkpt 0xab`) is on unless
 | the image calls SYS_EXIT | 0 for ADP_Stopped_ApplicationExit, else 1 |
 | the image stores 0x5555 to virt's test device | 0 |
 | the image stores 0x3333 to the test device | the upper halfword stored |
+| the image writes 0x42 to malta's SOFTRES | 0 |
 | the image requests a reset (AIRCR.SYSRESETREQ) | 0 |
-| a branch to itself, or a WFI, that no exception or interrupt can interrupt | 0 |
+| a branch to itself, or a WFI or MIPS wait, that no exception or interrupt can interrupt | 0 |
 | an AVR SLEEP that nothing can wake (the AVR harness ends in such a loop) | 0 |
 | the output contains `--until`'s string | 0 |
-| the core locks up (a RISC-V trap whose vector cannot be fetched; an AVR instruction the part does not have) | 3 |
+| the core locks up (a RISC-V trap or MIPS exception whose vector cannot be fetched; an AVR instruction the part does not have; a MIPS sdbbp with no debugger; an instruction EmbSim does not model) | 3 |
 | the stack overflows, with `--stack-report` or `--stack-limit` | 3 |
 | `--max-insns` instructions have run | 4 |
 | `--replay`: the run is not the recording's | 5 |

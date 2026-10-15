@@ -83,6 +83,16 @@ const struct board_desc boards[] = {
       { { "avr-usart", 0x8000c0u, 7 }, { "avr-timer16", 0x800080u, 12 },
         { "avr-io", 0x800020u, 0xe0 }, { "zero", 0x800900u, 0xf700 } },
       { { 0, 0, 0 } }, 0, 0 },
+    /* QEMU's malta with a 24Kc, as tests/harness/mips runs it: 64 MiB of
+     * RAM at 0 (0x80000000 in kseg0), the FPGA's UART with its registers
+     * eight bytes apart and its SOFTRES, and the boot ROM where the core
+     * starts, jumping to the image as QEMU's -kernel does */
+    { "malta", "mips", "24kc", 0,
+      { { 0, MB(64), MEM_RAM, 1, 0 } },
+      { { "ns16550a-8", 0x1f000900u, 0x40 },
+        { "malta-fpga", 0x1f000000u, 0x100000 },
+        { "malta-rom", 0x1fc00000u, 0x400000 } },
+      { { 0, 0, 0 } }, 0, 0 },
 };
 const int nboards = (int)(sizeof boards / sizeof boards[0]);
 
@@ -90,6 +100,7 @@ const struct core_type cores[] = {
     { "cortex-m", cortexm_create },
     { "riscv", riscv_create },
     { "avr", avr_create },
+    { "mips", mips_create },
 };
 const int ncores = (int)(sizeof cores / sizeof cores[0]);
 
@@ -127,6 +138,9 @@ static const struct dev_type dev_types[] = {
     { "avr-io", &avr_io_ops, avr_io_create },
     { "avr-usart", &avr_usart_ops, avr_usart_create },
     { "avr-timer16", &avr_timer16_ops, avr_timer16_create },
+    { "ns16550a-8", &ns16550a_8_ops, ns16550a_create },
+    { "malta-fpga", &malta_fpga_ops, malta_fpga_create },
+    { "malta-rom", &malta_rom_ops, malta_rom_create },
 };
 
 /* ---- the peripheral models, over an SVD's registers (svd-map.h) -------- */

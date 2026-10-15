@@ -15,6 +15,8 @@ int riscv_is(const struct cpu *c);
 struct cpu *avr_create(struct sim *s, const char *model,
                        const struct board_desc *bd);
 int avr_is(const struct cpu *c);
+struct cpu *mips_create(struct sim *s, const char *model,
+                        const struct board_desc *bd);
 
 /* devices */
 extern const struct dev_ops pl011_ops, cmsdk_uart_ops, nrf51_uart_ops;
@@ -35,6 +37,9 @@ extern const struct dev_ops avr_io_ops, avr_usart_ops, avr_timer16_ops;
 void *avr_io_create(struct sim *s, const struct dev_desc *d);
 void *avr_usart_create(struct sim *s, const struct dev_desc *d);
 void *avr_timer16_create(struct sim *s, const struct dev_desc *d);
+extern const struct dev_ops ns16550a_8_ops, malta_fpga_ops, malta_rom_ops;
+void *malta_fpga_create(struct sim *s, const struct dev_desc *d);
+void *malta_rom_create(struct sim *s, const struct dev_desc *d);
 
 /* the STM32's peripheral models, over its SVD's registers (svd-map.h) */
 struct rf_periph;

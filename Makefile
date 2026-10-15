@@ -436,13 +436,14 @@ EMBSIM_SRCS := tools/embsim/main.c tools/embsim/run.c tools/embsim/bus.c \
                tools/embsim/image.c tools/embsim/analysis.c \
                tools/embsim/coverage.c tools/embsim/profile.c \
                tools/embsim/stack.c tools/embsim/fault.c \
-               tools/embsim/disasm.c tools/embsim/record.c $(EMBSIM_NET)
+               tools/embsim/disasm.c tools/embsim/record.c \
+               tools/embsim/mips.c tools/embsim/malta.c $(EMBSIM_NET)
 EMBSIM_HDRS := tools/embsim/sim.h tools/embsim/cortexm.h tools/embsim/riscv.h \
                tools/embsim/avr.h \
                tools/embsim/devices.h tools/embsim/net.h tools/bench/cost.h \
                tools/embsim/svd-map.h tools/embsvd/svd.h \
                tools/embsim/image.h tools/embsim/analysis.h \
-               tools/embsim/disasm.h
+               tools/embsim/disasm.h tools/embsim/mips.h
 # Optimized, unlike the other tools: a simulator's speed is the tests'
 # and the user's time, and -O2 runs a busy loop 2.5 (M3) to 3.6 (AVR)
 # times as fast as no -O. -g stays (it is in CFLAGS); `make EMBSIM_OPT=`

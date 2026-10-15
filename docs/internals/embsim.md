@@ -40,6 +40,9 @@ file but the network one compiles with EmbCC itself. Everything is in
 | `avr.h` | the AVR core's state, and the interrupt-source interface of its peripherals |
 | `avr.c` | the AVR core: the instruction set, SREG, the data space, interrupts, SLEEP, step, reset, its CPU interface |
 | `avr-io.c`, `avr-usart.c`, `avr-timer16.c` | the ATmega328P's I/O registers, USART0, Timer/Counter1 |
+| `mips.h` | the MIPS32 core's state, and the interface of an external interrupt controller (EIC mode) |
+| `mips.c` | the MIPS32r2 core: the instruction set with its delay slots, coprocessor 0, exceptions and interrupts, the TLB, shadow register sets, Count and Compare, the DSP ASE's registers, step, reset, its CPU interface |
+| `malta.c` | QEMU malta's FPGA (SOFTRES) and boot ROM; its UART is `uart-16550.c`'s, eight bytes apart |
 | `svd-map.h`, `svd-map.c` | an SVD file's peripherals as a register file on the bus (`--svd`), `--trace-periph`, `--svd-map`, and the interface of the models over it |
 | `../embsvd/svd.h`, `../embsvd/svd.c` | the CMSIS-SVD reader, embsvd's |
 | `stm32-rcc.c`, `stm32-gpio.c`, `stm32-usart.c`, `stm32-tim.c` | the STM32's peripheral models, over its SVD's registers |
@@ -159,6 +162,7 @@ struct cpu_ops {
     void (*interrupt)(struct cpu *c, int n);   /* make exception n pending */
     int pc_regnum;                  /* the pc's GDB number: `c ADDR` sets it */
     int elf_classes;                /* 1: ELFCLASS32, 2: ELFCLASS64, 3: both */
+    u32 (*phys)(struct cpu *c, u32 a);  /* a program address's on the bus, or 0 */
 };
 ```
 
@@ -263,6 +267,24 @@ vector requested. The exact cycles are the table (`avr_cost`) plus what
 `step` adds for a taken branch, a skip and an interrupt's entry; an
 instruction a skip passes over goes into `s->skipped` (a core that
 skips sets `s->count_skips`, and --count's file gets a third line).
+
+The MIPS core's is `struct mips_state` (`mips.h`), reached through
+`ms`. Its addresses are virtual: kseg0 and kseg1 are windows on the
+bus's low 512 MiB, and the rest goes through the TLB, so the loader
+places an image's segments through the core's `phys` hook, as the GDB
+server's memory accesses go. A delay slot is the instruction after a
+branch: while one executes, `nx` is where execution goes next and
+`nnx` after that, so a branch sets `nnx` to its target and the slot
+runs before it; a likely branch not taken skips the slot by moving
+`nx`. An instruction raises an exception with `raise_exc` and writes
+nothing after it (every register write comes after the access that
+could fault), and `step` enters it with EPC the branch's when the
+instruction was its delay slot. The register set executing is `ms->r`,
+one of `gpr`'s eight (the shadow sets). In EIC mode an interrupt
+controller (a PIC32's EVIC) attaches a `struct mips_eic`: the core
+tells it its own requests -- the timer's and the two software
+interrupts -- and takes the level, vector offset and register set it
+presents.
 
 ## Adding a peripheral
 
@@ -416,6 +438,10 @@ or with its own file for the six functions of `net.h`.
 - `tests/golden/embsim-avr.sh`: the AVR core on uno: some 580 corpus
   programs to the instruction, `avr-isa`'s edges against QEMU,
   `avr-cycles.S`'s cycles against the datasheet, the ends of a run.
+- `tests/golden/embsim-mips.sh`: the MIPS32 core on malta: the exec
+  corpus at -O0, -O2 and -Os against QEMU's malta (output and exit
+  status), `mips-isa.c`'s instruction edges against QEMU and the record,
+  the ends of a run.
 - `tests/golden/embsim-coverage.sh`: `--coverage` against a program
   whose lines carry the counts they must get, on the three cores and
   from clang's DWARF 5.

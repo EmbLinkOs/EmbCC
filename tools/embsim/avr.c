@@ -835,7 +835,7 @@ static const struct dev_ops spsreg_ops = { "avr-sp-sreg", spsreg_read, spsreg_wr
 static const struct cpu_ops avr_ops = {
     "avr", 83, "an AVR image",
     cpu_reset, step, cpu_pc, cpu_reg_read, cpu_reg_write,
-    cpu_gdb_g_regs, cpu_gdb_xml, 2, cpu_interrupt, 34, 1,
+    cpu_gdb_g_regs, cpu_gdb_xml, 2, cpu_interrupt, 34, 1, 0,
 };
 
 int avr_is(const struct cpu *c)
