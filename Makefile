@@ -436,8 +436,9 @@ embcc: $(OBJS) $(EMBDBG_CORE) $(PLATFORM_CHANGED)
 # different host compilers, and it runs in parallel with every other
 # test -- so it must not replace the ./embcc those tests are running.
 # With BUILD= pointing somewhere private, this target is entirely its
-# own: `make CC=clang BUILD=/tmp/x /tmp/x/embcc`.
-$(BUILD)/embcc: $(OBJS) $(EMBDBG_CORE)
+# own: `make CC=clang BUILD=/tmp/x /tmp/x/embcc`. The stamp too, so a
+# second TARGETS= into the same BUILD relinks it.
+$(BUILD)/embcc: $(OBJS) $(EMBDBG_CORE) $(PLATFORM_CHANGED)
 	$(CC) $(CFLAGS) -o $@ $(OBJS) $(EMBDBG_CORE)
 
 # embas — the standalone NASM/Intel-syntax assembler (A1, ARCHITECTURE §4). Reads
