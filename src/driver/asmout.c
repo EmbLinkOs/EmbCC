@@ -748,6 +748,15 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
                arm_thumb() ? "thumb_set" : "set",
                asym(f->name), asym(f->alias_of));
     }
+    for (struct global *g = u->globals; g; g = g->next) {
+        if (g->absorbed || !g->alias_of)
+            continue;
+        if (!g->is_static)
+            ob_fmt(b, "\t.%s\t%s\n", g->is_weak ? "weak" : "globl",
+                   asym(g->name));
+        ob_fmt(b, "\t.type\t%s, %sobject\n", asym(g->name), type_sigil());
+        ob_fmt(b, "\t.set\t%s, %s\n", asym(g->name), asym(g->alias_of));
+    }
 
     /* .rodata: the string literals, each under the label the code refers
      * to. Emitted as bytes, because a string may hold anything. */

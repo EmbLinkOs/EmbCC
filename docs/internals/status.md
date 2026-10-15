@@ -277,7 +277,6 @@ RISC-V).
 | `asm goto` | `` `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that `` |
 | Nested function definitions | A syntax error: `expected ';' before '{'` |
 | K&R (old-style) function definitions | A syntax error: `expected a parameter type before 'a'` |
-| `$` in identifiers | `character '$' is not supported yet` |
 | C23 `u8` character constants (`u8'a'`) | A syntax error |
 | C23 storage-class specifiers in a compound literal (`(static int[]){1, 2}`) | `expected an expression, got 'static'` |
 | A range designator followed by further designators (`[0 ... 1].a = 5`) | `a range designator [lo ... hi] followed by more designators is not supported` |
@@ -328,7 +327,6 @@ implement, so they are errors:
 | `weakref` | `__attribute__((weakref)) is not supported: the symbol would be emitted as an ordinary reference, so a missing target would fail to link instead of being null` |
 | `ifunc` | `__attribute__((ifunc)) is not supported: the resolver would never run and calls would go to it rather than to the implementation it picks` |
 | `aligned` on an enum | `an aligned enum is not supported (an enum here is int, or the type its values need)` |
-| `alias` on a variable | `alias attribute on variable 'b' is not supported (functions take it)` |
 | `section` on an automatic variable | `section attribute on 'x', which is on the stack: only a static local can be placed in a section` (GCC refuses it too) |
 
 `error` and `warning` are accepted with a warning that the check they

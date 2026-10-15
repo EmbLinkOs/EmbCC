@@ -41,6 +41,9 @@ char  *strerror(int errnum);
 size_t strnlen(const char *s, size_t n);
 char  *strdup(const char *s);
 char  *strndup(const char *s, size_t n);
+char  *stpcpy(char *__restrict d, const char *__restrict s);
+char  *stpncpy(char *__restrict d, const char *__restrict s, size_t n);
+void  *mempcpy(void *__restrict d, const void *__restrict s, size_t n);
 
 #ifdef __cplusplus
 }

@@ -336,6 +336,15 @@ struct type *ty_array(struct type *elem, int count)
     return t;
 }
 
+/* An array whose count the program gave, by a dimension or an
+ * initializer: 0 elements is then GNU C's complete zero-length array. */
+struct type *ty_array_sized(struct type *elem, int count)
+{
+    struct type *t = ty_array(elem, count);
+    t->zero_len = count == 0;
+    return t;
+}
+
 struct type *ty_vla(struct type *elem, struct expr *len)
 {
     struct type *t = ty_array(elem, 0);
@@ -476,7 +485,7 @@ int ty_incomplete(const struct type *t)
         return 0;
     if (t->kind == TY_STRUCT && t->complete)
         return 0;
-    if (t->kind == TY_ARRAY && t->count > 0)
+    if (t->kind == TY_ARRAY && (t->count > 0 || t->zero_len))
         return ty_incomplete(t->pointee);
     return 1;
 }
