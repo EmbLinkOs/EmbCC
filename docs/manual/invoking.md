@@ -695,7 +695,9 @@ With no `--target=`, the target is chosen in this order:
 2. the `DEFAULT_TARGET` the compiler was built with
    (`make DEFAULT_TARGET=riscv32-unknown-elf`; see
    [Getting started](getting-started.md#choosing-the-default-target));
-3. `x86_64-elf`.
+3. `x86_64-elf`, or in a compiler built without x86 (`make TARGETS=`; see
+   [Choosing the targets](getting-started.md#choosing-the-targets)) the
+   first family it has: `thumbv7m-none-eabi` for `TARGETS=arm`.
 
 `--target=` on the command line overrides both. A default that is not an
 accepted triple stops every invocation, naming where it came from:
@@ -1821,17 +1823,26 @@ by `SOURCE_DATE_EPOCH` when that is set, as reproducible builds ask.
 ### `--version`
 
 Print the version, the target in effect, the default target, the
-targets and languages supported, which images `embld` links, and what is
-not supported yet, then exit with status 0. Recognized anywhere on the
-command line; a `--target=` on the same command line changes the target
-it reports:
+target families this compiler was built with, the languages supported,
+which images `embld` links, and what is not supported yet, then exit with
+status 0. Recognized anywhere on the command line; a `--target=` on the
+same command line changes the target it reports:
 
 ```text
-EmbCC 1.0.0-m2.complete (a C and C++ compiler for EmbLinkOS and embedded boards)
+EmbCC 1.0.0-m2.complete (the Emb toolchain's C and C++ compiler, for embedded systems and operating systems)
 Target: x86_64-elf
 Default target: x86_64-elf
+Targets (every family; make TARGETS= builds fewer):
+  x86        x86-64: bare metal, EmbLinkOS, Linux, Darwin and Windows
+  aarch64    AArch64: bare metal, EmbLinkOS, Linux and Darwin
+  arm        Cortex-M (ARMv6-M, ARMv7-M, ARMv7E-M, ARMv8-M Baseline and Mainline) and ARMv7-A
 ...
 ```
+
+A compiler built with `make TARGETS=` (see
+[Choosing the targets](getting-started.md#choosing-the-targets)) lists
+only its own families, then the others under `Not built:`. A `--target=`
+from a family it lacks is refused rather than reported.
 
 ### `--print-target`
 
