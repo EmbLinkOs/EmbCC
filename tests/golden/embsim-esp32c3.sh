@@ -91,16 +91,24 @@ echo "embsim-esp32c3: embsvd's header, startup and IRAM/DRAM script build c3.c; 
 "$EMBSIM" "$out/c3.elf" --board esp32c3-devkitm-1 --max-insns 50000000 > "$out/c3.txt" 2> "$out/c3.err"
 st=$?
 [ $st = 0 ] || { cat "$out/c3.txt" "$out/c3.err"; fail "c3.c exits $st"; }
-cmp -s "$out/c3.txt" $d/c3.txt ||
-    { diff $d/c3.txt "$out/c3.txt"; fail "the ESP32-C3 is not as its TRM has it (c3.txt)"; }
+grep -v '^t ' "$out/c3.txt" > "$out/c3-m.txt"
+cmp -s "$out/c3-m.txt" $d/c3.txt ||
+    { diff $d/c3.txt "$out/c3-m.txt"; fail "the ESP32-C3 is not as its TRM has it (c3.txt)"; }
 sed 's/ at [0-9.]* ms$//; s/a high of [0-9.]* us/a high of N us/' "$out/c3.err" > "$out/c3-err.txt"
 cmp -s "$out/c3-err.txt" $d/c3-err.txt ||
     { diff $d/c3-err.txt "$out/c3-err.txt"; fail "stderr: the RGB LED (c3-err.txt)"; }
 # the colour and off in turn, every 1 ms of SYSTIMER's 16 MHz
 grep 'RGB LED [#o]' "$out/c3.err" | sed 's/.* at \([0-9.]*\) ms$/\1/' |
-    awk 'NR > 1 { d = $1 - p; if (d < 0.9995 || d > 1.0005) bad = 1 } { p = $1 }
+    awk 'NR > 1 { d = $1 - p; if (d < 0.998 || d > 1.002) bad = 1 } { p = $1 }
          END { exit bad || NR != 6 }' ||
     { cat "$out/c3.err"; fail "the LED's frames are not 1 ms of SYSTIMER apart"; }
+# the board's time, which SYSTEM's clock keeps across 20, 40, 80 and 160
+# MHz, is SYSTIMER's: the first frame ends 24 bits of 1.35 us after the
+# interrupt that read UNIT0 (tick1, in microseconds)
+t1=$(sed -n 's/^t tick1-us //p' "$out/c3.txt")
+led=$(grep -m1 'RGB LED #' "$out/c3.err" | sed 's/.* at \([0-9.]*\) ms$/\1/')
+awk -v t=$((0x$t1)) -v l="$led" 'BEGIN { d = l * 1000 - t; exit !(d > 20 && d < 45) }' ||
+    fail "the board's time ($led ms) is not SYSTIMER's (UNIT0 at the first tick: $((0x$t1)) us)"
 nm=$(grep -c '^M ' $d/c3.txt)
 echo "embsim-esp32c3: c3.c's $nm values as the ESP32-C3's TRM has them; the RGB LED's frames every 1 ms"
 

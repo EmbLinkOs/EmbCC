@@ -2385,7 +2385,7 @@ cycle.
 
 **The ESP32-C3-DevKitM-1.** `tests/golden/embsim-esp32c3.sh` builds
 `embsim-esp32c3/c3.c` from embsvd's files for Espressif's SVD (its
-vector table must be 256-aligned in the image) and holds 114 values to
+vector table must be 256-aligned in the image) and holds 118 values to
 the TRM: the core's CSRs, the exceptions with mcause and mtval, UART0's
 reset values and interrupt bits, the clocks at 20, 40, 80 and 160 MHz
 against SYSTIMER's 16 MHz, SYSTIMER's loads and comparators (once in
@@ -2394,7 +2394,8 @@ matrix's priorities, threshold and order, an edge type's capture and
 clearing, a level type taken again, WFI woken with MIE off, the pads'
 reset values pin by pin, GPIO in and out, inverted and open drain; the
 RGB LED's frames 1 ms apart from SYSTIMER's period interrupt, decoded
-from GPIO8; UART0's input; the BOOT button. QEMU has no ESP32-C3, but
+from GPIO8, the first at the time SYSTIMER's UNIT0 gives (the board's
+time across four clock changes); UART0's input; the BOOT button. QEMU has no ESP32-C3, but
 its virt with an rv32i,m,c,zicsr,zifencei core has the C3's instruction
 set: the exec corpus linked for each (RISC-V semihosting for the output
 and the exit) runs some 240 programs to the instruction and the cycle;

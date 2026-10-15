@@ -117,14 +117,19 @@ static void led_rgb(uint32_t rgb)
         led_bit((int)(grb >> i & 1));
 }
 
-static volatile uint32_t ticks;
+static volatile uint32_t ticks, tick1;
+static uint32_t unit_lo(int u);
 
-/* SYSTIMER's comparator 0, every 1 ms: the LED on and off */
+/* SYSTIMER's comparator 0, every 1 ms: the LED on and off; UNIT0 at the
+ * first, which the test holds the board's time to */
 __attribute__((interrupt)) void CPU_INT1_Handler(void)
 {
     SYSTIMER->INT_CLR = 1;
-    ticks++;
+    if (++ticks == 1)
+        tick1 = unit_lo(0);
     led_rgb(ticks & 1 ? 0x201008u : 0);
+    if (ticks == 1)
+        led_rgb(0x0000ffu);                     /* DOUT's, for a next LED */
 }
 
 /* ---- SYSTIMER -------------------------------------------------------------- */
@@ -177,9 +182,8 @@ int main(void)
     UART0->INT_CLR = 0x4002;
     M("uart-int-raw-cleared", UART0->INT_RAW);  /* TXFIFO_EMPTY again */
     UART0->CONF1 = 0xc060u & ~(0x1ffu << 9);    /* TXFIFO_EMPTY_THRHD 0 */
-    UART0->INT_CLR = 0x4002;
     UART0->INT_RAW = 0x4002;                    /* the putc's TX_DONE, by W1C */
-    M("uart-int-raw-thrhd0", UART0->INT_RAW & 0x2);
+    M("uart-int-raw-thrhd0", UART0->INT_RAW);
     UART0->CONF1 = 0xc060u;
     UART0->INT_ENA = 1u << 14;                  /* TX_DONE */
     putc_('\n');
@@ -249,6 +253,14 @@ int main(void)
     M("exc-ecall-cause", exc_cause);
     __asm__ volatile("ebreak");
     M("exc-ebreak-cause", exc_cause);
+    /* half a semihosting call is a breakpoint: an ebreak needs both its
+     * markers to be one */
+    exc_cause = 0;
+    __asm__ volatile("ebreak\n\tsrai x0, x0, 7");
+    M("exc-ebreak-no-slli-cause", exc_cause);
+    exc_cause = 0;
+    __asm__ volatile("slli x0, x0, 0x1f\n\tebreak");
+    M("exc-ebreak-no-srai-cause", exc_cause);
     M("exc-count", exc_n);
 
     /* SYSTEM, the clock */
@@ -312,6 +324,8 @@ int main(void)
     M("eip", INTERRUPT_CORE0->CPU_INT_EIP_STATUS);
     INTERRUPT_CORE0->CPU_INT_THRESH = 6;
     M("eip-thresh6", INTERRUPT_CORE0->CPU_INT_EIP_STATUS);
+    INTERRUPT_CORE0->CPU_INT_THRESH = 5;
+    M("eip-thresh5", INTERRUPT_CORE0->CPU_INT_EIP_STATUS);
     INTERRUPT_CORE0->CPU_INT_THRESH = 0;
     INTERRUPT_CORE0->CPU_INT_PRI_4 = 0;
     M("eip-pri0", INTERRUPT_CORE0->CPU_INT_EIP_STATUS);
@@ -373,10 +387,19 @@ int main(void)
     CSRW(0x7e2, 0);
     __asm__ volatile("wfi");
     uint32_t idle = CSRR(0x7e2);
-    CSRW(0x7e0, 1);
     M("wfi-woke", (unit_lo(0) - now) >= 16000);
     M("wfi-eip", INTERRUPT_CORE0->CPU_INT_EIP_STATUS);
     M("wfi-idle-k-cycles", idle / 1000);        /* ~1 ms at 20 MHz */
+    /* CYCLE does not count WFI's: another 1 ms */
+    SYSTIMER->INT_CLR = 4;
+    now = unit_lo(0);
+    SYSTIMER->TARGET2_HI = SYSTIMER->UNIT0_VALUE_HI;
+    SYSTIMER->TARGET2_LO = now + 16000;
+    SYSTIMER->COMP2_LOAD = 1;
+    CSRW(0x7e0, 1);
+    CSRW(0x7e2, 0);
+    __asm__ volatile("wfi");
+    M("wfi-cycle-k-cycles", CSRR(0x7e2) / 1000);
     SYSTIMER->INT_CLR = 4;
     SYSTIMER->INT_ENA = 0;
     SYSTIMER->CONF &= ~(1u << 22);
@@ -454,6 +477,7 @@ int main(void)
         __asm__ volatile("wfi");
     __asm__ volatile("csrc mstatus, 8");
     M("ticks", ticks);
+    line("t", "tick1-us", tick1 / 16);
 
     /* UART0's receiver: the run's --input */
     uint32_t cnt = UART0->STATUS & 0x3ff;
@@ -475,6 +499,7 @@ int main(void)
 
     puts_("end\n");
     RTC_CNTL->OPTIONS0 = 1u << 31;              /* SW_SYS_RST */
+    puts_("not reset\n");
     for (;;)
         ;
 }

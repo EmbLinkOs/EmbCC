@@ -36,7 +36,9 @@ M exc-amo-cause 00000002
 M exc-amo-tval-op 0000202f
 M exc-ecall-cause 0000000b
 M exc-ebreak-cause 00000003
-M exc-count 00000007
+M exc-ebreak-no-slli-cause 00000003
+M exc-ebreak-no-srai-cause 00000003
+M exc-count 00000009
 M sysclk-conf 00000001
 M cpu-per-conf 0000000c
 M systimer-k-20mhz 00000010
@@ -58,6 +60,7 @@ M st-alarm-100-cycles 00000014
 M intr-status1 001c0000
 M eip 0000001c
 M eip-thresh6 00000004
+M eip-thresh5 0000001c
 M eip-pri0 0000000c
 M eip-disabled 00000014
 M order 00000234
@@ -72,6 +75,7 @@ M level-taken 00000003
 M wfi-woke 00000001
 M wfi-eip 00000080
 M wfi-idle-k-cycles 00000013
+M wfi-cycle-k-cycles 00000000
 M gpio-in 0013f240
 M iomux-gpio00 00000800
 M iomux-gpio01 00000800
