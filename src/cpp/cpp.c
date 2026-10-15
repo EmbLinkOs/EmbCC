@@ -58,6 +58,8 @@ struct macro {
     int expanding;         /* self-reference guard */
     int builtin;           /* predefined: a header may redefine it */
     struct macro *next;
+    size_t nlen;           /* strlen(name) */
+    struct macro *hnext;   /* the next in its hash chain (struct cpp) */
 };
 
 /* A file that said `#pragma once`: its path, and its text, so the same
@@ -75,8 +77,15 @@ struct pushed_macro {
     struct pushed_macro *next;
 };
 
+/* Macros are found by name through a hash table: a device header
+ * defines thousands (a PIC32MZ's has 12,000), and a search of the whole
+ * list for every identifier made preprocessing it take seconds. The list
+ * keeps the order, newest first, for what walks every macro. */
+#define MACRO_HASH 4096
+
 struct cpp {
     struct macro *macros;
+    struct macro *mhash[MACRO_HASH];
     const char **incdirs;
     int nincdirs;
     int depth;             /* include nesting */
@@ -128,20 +137,50 @@ static void add_param(struct macro *m, const char *name)
     m->params[m->nparams++] = name;
 }
 
+static unsigned macro_hash(const char *name, size_t n)
+{
+    unsigned h = 2166136261u;           /* FNV-1a */
+    for (size_t i = 0; i < n; i++)
+        h = (h ^ (unsigned char)name[i]) * 16777619u;
+    return h & (MACRO_HASH - 1);
+}
+
+/* m becomes the newest definition of its name, in the list and its chain */
+static void add_macro(struct cpp *cpp, struct macro *m)
+{
+    m->nlen = strlen(m->name);
+    m->next = cpp->macros;
+    cpp->macros = m;
+    unsigned h = macro_hash(m->name, m->nlen);
+    m->hnext = cpp->mhash[h];
+    cpp->mhash[h] = m;
+}
+
 static struct macro *find_macro(struct cpp *cpp, const char *name, size_t n)
 {
-    for (struct macro *m = cpp->macros; m; m = m->next)
-        if (strlen(m->name) == n && memcmp(m->name, name, n) == 0)
+    for (struct macro *m = cpp->mhash[macro_hash(name, n)]; m; m = m->hnext)
+        if (m->nlen == n && memcmp(m->name, name, n) == 0)
             return m;
     return NULL;
 }
 
+/* The newest definition of the name goes, from both: it is the first of
+ * its name in the list and in the chain alike. */
 static void undef_macro(struct cpp *cpp, const char *name, size_t n)
 {
+    struct macro *m = find_macro(cpp, name, n);
+    if (!m)
+        return;
+    for (struct macro **pm = &cpp->mhash[macro_hash(name, n)]; *pm;
+         pm = &(*pm)->hnext)
+        if (*pm == m) {
+            *pm = m->hnext;
+            break;
+        }
     for (struct macro **pm = &cpp->macros; *pm; pm = &(*pm)->next)
-        if (strlen((*pm)->name) == n && !memcmp((*pm)->name, name, n)) {
-            *pm = (*pm)->next;
-            return;
+        if (*pm == m) {
+            *pm = m->next;
+            break;
         }
 }
 
@@ -1866,8 +1905,7 @@ static void define_macro(struct src *s, const char *line)
         }
     }
     m->builtin = defining_builtins;
-    m->next = s->cpp->macros;
-    s->cpp->macros = m;
+    add_macro(s->cpp, m);
 }
 
 /* Conditional stack entry state. */
@@ -2062,10 +2100,8 @@ static void do_pragma(struct src *s, const char *text, size_t n,
                 continue;
             *pp = pm->next;
             undef_macro(s->cpp, name, strlen(name));
-            if (pm->def) {
-                pm->def->next = s->cpp->macros;
-                s->cpp->macros = pm->def;
-            }
+            if (pm->def)
+                add_macro(s->cpp, pm->def);
             free(pm);
             break;          /* with no push to match, gcc does nothing */
         }
@@ -2440,8 +2476,7 @@ static void load_predefined(struct cpp *cpp)
         }
         m->body = predefs[i].value;
         m->builtin = 1;
-        m->next = cpp->macros;
-        cpp->macros = m;
+        add_macro(cpp, m);
     }
 }
 
