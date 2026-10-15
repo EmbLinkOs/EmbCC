@@ -55,6 +55,7 @@ struct region {
     u8 *mem;
     int rom;                        /* stores are ignored */
     int kind;                       /* MEM_RAM or MEM_FLASH */
+    u32 erased;                     /* each word of it before the image (bus_erase) */
 };
 
 /* A memory-mapped device. `off` is the offset of the access from the
@@ -121,6 +122,8 @@ struct bus {
 };
 
 void bus_add_region(struct bus *b, u32 base, u32 size, int kind);
+/* the region as before an image: every 4 bytes its `erased` word */
+void bus_erase(struct region *r);
 /* the region holding all `n` bytes at `a`, or 0: memory's fast path, so
  * inline (the core fetches through it, and reads and writes memory
  * through it when no watchpoint is set) */
@@ -226,6 +229,10 @@ struct mem_desc {
     int kind;                       /* MEM_RAM, MEM_FLASH or MEM_ALIAS */
     int main_ram;                   /* the one --ram-size resizes */
     u32 target;                     /* MEM_ALIAS: the region it names */
+    /* what each word of erased flash reads, little-endian: a PIC32's
+     * 0xffffffff, a PIC24's 0x00ffffff (three bytes and the phantom); 0
+     * where the board's reference (QEMU) has zeros */
+    u32 erased;
 };
 
 struct dev_desc {

@@ -12,7 +12,10 @@
  *     calls; JR may be a return. Each transfers after its delay slot, so
  *     the step that makes the call or the return is the slot's: its
  *     instruction counts to the caller, and the frame is pushed (or
- *     popped) when the next pc is not the slot's fall-through.
+ *     popped) when the next pc is not the slot's fall-through. microMIPS
+ *     adds JALS, JALX, JALRS and the 16-bit JALR16 and JALRS16 as calls,
+ *     JR16 as a return, and the compact JRC and JRADDIUSP, returns with
+ *     no delay slot, which transfer at their own step.
  * A call that was taken pushes a frame, which returns to the instruction
  * after it. A transfer that may be a return is one when it lands where a
  * frame returns to: that frame and every frame above it are popped, so a
@@ -133,6 +136,42 @@ static int kind_mips(struct sim *s, u32 pc, int *size)
         return (i >> 11) & 31 ? K_CALL : K_RET;
     if (op == 0 && (i & 0x3f) == 8)                 /* JR */
         return K_RET;
+    return K_OTHER;
+}
+
+/* a microMIPS instruction's kind and size; `compact`: it transfers at
+ * its own step, having no delay slot */
+static int kind_micro(struct sim *s, u32 pc, int *size, int *compact)
+{
+    u32 h, h2;
+    *size = 2;
+    *compact = 0;
+    if (!fetch16(s, pc, &h))
+        return K_OTHER;
+    u32 op = (h >> 10) & 0x3f;
+    if (mips_micro_size(h) == 2) {
+        if (op != 0x11)
+            return K_OTHER;
+        switch ((h >> 4) & 0x3f) {
+        case 0x18: case 0x19: return K_RET;                         /* JR16 */
+        case 0x1a: case 0x1b: case 0x30: case 0x31:                 /* JRC, JRADDIUSP */
+            *compact = 1;
+            return K_RET;
+        case 0x1c: case 0x1d: case 0x1e: case 0x1f: return K_CALL;  /* JALR16, JALRS16 */
+        }
+        return K_OTHER;
+    }
+    *size = 4;
+    if (!fetch16(s, pc + 2, &h2))
+        return K_OTHER;
+    u32 i = h << 16 | h2, minor = (i >> 21) & 31;
+    if (op == 0x3d || op == 0x1d || op == 0x3c)                     /* JAL, JALS, JALX */
+        return K_CALL;
+    if (op == 0x10 && (minor == 0x01 || minor == 0x03 || minor == 0x11 || minor == 0x13))
+        return K_CALL;                                              /* BLTZAL(S), BGEZAL(S) */
+    if (op == 0 && (i & 0x3f) == 0x3c && ((i >> 6) & 0x3f) == 0x3c &&
+        ((i >> 12) & 0xb) <= 1)                                     /* JALR(S)(.HB) */
+        return minor ? K_CALL : K_RET;
     return K_OTHER;
 }
 
@@ -376,11 +415,19 @@ void an_step(struct sim *s)
         case AN_RV: a->kind = kind_riscv(s, pc0, &a->size); break;
         case AN_MIPS: {
             /* the branch's kind is its delay slot's step's: the transfer
-             * comes after the slot */
-            int k = kind_mips(s, pc0, &a->size);
+             * comes after the slot (but a compact one's, which has none) */
+            struct mips_state *m = (struct mips_state *)c;
+            int compact = 0;
+            int k = m->isa ? kind_micro(s, pc0, &a->size, &compact)
+                           : kind_mips(s, pc0, &a->size);
+            if (compact) {
+                a->kind = k;
+                a->slot_kind = K_OTHER;
+                break;
+            }
             a->kind = a->slot_kind;
-            a->slot_kind = ((struct mips_state *)c)->slot ? K_OTHER : k;
-            if (((struct mips_state *)c)->slot == 0)
+            a->slot_kind = m->slot ? K_OTHER : k;
+            if (m->slot == 0)
                 a->kind = K_OTHER;
             break;
         }

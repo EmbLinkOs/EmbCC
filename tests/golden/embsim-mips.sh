@@ -27,7 +27,9 @@
 #     the DSP ASE's (tests/golden/embsim/mips-dsp.c), Revision 2, on the
 #     pic32mz core against QEMU's 74Kf: each instruction over a table of
 #     operands, accumulators and DSPControl states, the masks of rddsp
-#     and wrdsp, bposge32, the indexed loads, Status.MX clear.
+#     and wrdsp, bposge32, the indexed loads, Status.MX clear. And
+#     microMIPS (tests/golden/embsim/mips-micro.s, assembled by llvm-mc)
+#     on the pic32mz core against QEMU's M14Kc.
 set -u
 echo "TEST-MARKER embsim-mips"
 . "$(dirname "$0")/../lib.sh"
@@ -183,6 +185,41 @@ if "$CLANG" -print-targets 2>/dev/null | grep -q mipsel; then
     echo "embsim-mips: the DSP ASE's edges ($(wc -l < "$x/dsp.sim" | tr -d ' ') results: every instruction over the lanes' extremes, the accumulators, DSPControl's flags, the exceptions) as QEMU's 74Kf and the record have them"
 else
     echo "embsim-mips: no clang for mipsel: the instruction-edge programs were not built"
+fi
+# microMIPS (the pic32mz core's), against QEMU's M14Kc: assembled by
+# llvm-mc, the 16- and 32-bit instructions, the branches and their delay
+# slots, the ISA switches, the exceptions
+MC=${EMBCC_LLVM_MC:-llvm-mc}
+if command -v "$MC" >/dev/null 2>&1; then
+    "$MC" -triple=mipsel-none-elf -mcpu=mips32r2 -filetype=obj \
+        tests/golden/embsim/mips-micro.s -o "$x/micro.o" 2>"$x/micro.err" ||
+        { cat "$x/micro.err"; fail "mips-micro.s does not assemble"; }
+    "$EMBLD" -e _start -Ttext 0x80100000 "$x/micro.o" -o "$x/micro.elf" ||
+        fail "mips-micro.s does not link"
+    "$EMBSIM" "$x/micro.elf" --board malta --cpu pic32mz --max-insns 50000000 \
+        > "$x/micro.sim" 2>&1; st=$?
+    [ $st = 0 ] || { tail -5 "$x/micro.sim"; fail "mips-micro.s: EmbSim exits $st"; }
+    cmp -s "$x/micro.sim" tests/golden/embsim/mips-micro.txt || {
+        diff tests/golden/embsim/mips-micro.txt "$x/micro.sim" | head -20
+        fail "mips-micro.s: EmbSim's output is not mips-micro.txt"; }
+    if [ $have_qemu = 1 ]; then
+        sh tests/harness/qrun.sh 30 "$QEMU" -M malta -cpu M14Kc -m 64 \
+            -display none -monitor none -serial null -serial null \
+            -serial stdio -no-reboot -kernel "$x/micro.elf" > "$x/micro.qemu" 2>/dev/null
+        cmp -s "$x/micro.qemu" "$x/micro.sim" || {
+            diff "$x/micro.qemu" "$x/micro.sim" | head -20
+            fail "mips-micro.s: EmbSim's output is not QEMU's (M14Kc)"; }
+    fi
+    # the analyses follow microMIPS's calls (bals, its 16-bit-slot form, to
+    # the printing routine) and leave the run as it was
+    "$EMBSIM" "$x/micro.elf" --board malta --cpu pic32mz --max-insns 50000000 \
+        --profile="$x/micro.prof" > "$x/micro.an" 2>&1
+    cmp -s "$x/micro.an" "$x/micro.sim" || fail "--profile changes mips-micro.s's run"
+    calls=$(awk '$NF == "_start" { print $(NF - 1) }' "$x/micro.prof")
+    [ "${calls:-0}" -ge 200 ] || { cat "$x/micro.prof"; fail "--profile does not see microMIPS's calls"; }
+    echo "embsim-mips: microMIPS ($(wc -l < "$x/micro.sim" | tr -d ' ') results: the 16- and 32-bit instructions, the delay slots and their sizes, the compact branches, the ISA switches, the exceptions' EPC and BD) as QEMU's M14Kc and the record have them; --profile counts its $calls calls"
+else
+    echo "embsim-mips: no llvm-mc: mips-micro.s was not assembled"
 fi
 
 # ---- 1. the exec corpus -----------------------------------------------------

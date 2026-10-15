@@ -82,6 +82,11 @@ static void raise_cpu(u32 unit)
     ms->exc_ce = unit;
 }
 
+void mips_raise_cpu(u32 unit)
+{
+    raise_cpu(unit);
+}
+
 static void reserved(void)
 {
     raise_exc(EXC_RI);
@@ -93,8 +98,13 @@ static void unmodelled(const char *what)
     if (ms->exc)
         return;
     raise_exc(EXC_RI);
-    sim_end(ms->sim, END_LOCKUP, "%s (0x%08x at 0x%08x) is not modelled",
-            what, ms->insn, ms->pc);
+    sim_end(ms->sim, END_LOCKUP, "%s (0x%0*x at 0x%08x) is not modelled",
+            what, ms->isa && ms->insn < 0x10000 ? 4 : 8, ms->insn, ms->pc);
+}
+
+void mips_unmodelled(const char *what)
+{
+    unmodelled(what);
 }
 
 static int kernel(void)
@@ -120,12 +130,14 @@ static void switch_set(int css)
 
 /* Exception entry: EPC (and Cause.BD) for the instruction at pc unless
  * one is in progress (Status.EXL), Cause's code, the vector. `intoff`
- * is an interrupt's offset from the vector base, or 0 for an exception. */
+ * is an interrupt's offset from the vector base, or 0 for an exception.
+ * EPC's bit 0 is the ISA mode (1: microMIPS), and the handler runs in
+ * the one Config3.ISAOnExc names. */
 static void enter(u32 code, u32 intoff, int newset)
 {
     struct sim *s = ms->sim;
     u32 st = ms->status, off;
-    u32 ret = ms->slot ? ms->pc - 4 : ms->pc;
+    u32 ret = ms->slot ? ms->bpc : ms->pc | (u32)ms->isa;
     ms->exc_regs = ms->r;
     if (!(st & ST_EXL)) {
         ms->epc = ret;
@@ -148,8 +160,9 @@ static void enter(u32 code, u32 intoff, int newset)
     ms->pc = base + off;
     ms->npc = ms->pc + 4;
     ms->slot = 0;
+    ms->isa = ms->micromips && (ms->config3 >> 16 & 1);
     if (s->an)
-        an_exc_entry(s, code, ret);
+        an_exc_entry(s, code, ret & ~1u);
 }
 
 /* ---- the core timer and the interrupt lines ------------------------------ */
@@ -587,6 +600,10 @@ static void cp0_write(u32 rd, u32 sel, u32 v)
         ms->ebase = (ms->ebase & ~0x3ffff000u) | (v & 0x3ffff000u);
         return;
     case 16 << 3: ms->config0 = (ms->config0 & ~7u) | (v & 7); return;
+    case 16 << 3 | 3:                   /* ISAOnExc */
+        if (ms->micromips)
+            ms->config3 = (ms->config3 & ~(1u << 16)) | (v & (1u << 16));
+        return;
     case 18 << 3: ms->watchlo = v; return;
     case 19 << 3: ms->watchhi = v & ~7u; return;
     case 23 << 3: ms->debug = (ms->debug & DBG_DM) | (v & ~DBG_DM); return;
@@ -758,6 +775,9 @@ static void branch(int taken, u32 target)
     if (taken)
         ms->nnx = target;
     ms->nslot = 1;
+    ms->nbpc = ms->pc;
+    ms->nds = 0;
+    ms->nbtaken = taken;
 }
 
 static void branch_likely(int taken, u32 target)
@@ -765,6 +785,9 @@ static void branch_likely(int taken, u32 target)
     if (taken) {
         ms->nnx = target;
         ms->nslot = 1;
+        ms->nbpc = ms->pc;
+        ms->nds = 0;
+        ms->nbtaken = 1;
     } else {
         ms->nx = ms->pc + 8;
         ms->nnx = ms->pc + 12;
@@ -788,19 +811,25 @@ static u32 peek(u32 a)
     return v;
 }
 
-/* An unconditional branch to itself: if its delay slot does nothing (a
- * nop, ssnop or ehb), the run is over unless an interrupt can come. */
-static void self_loop(u32 target)
+/* An unconditional branch to itself (`target` with the ISA bit): if
+ * its delay slot does nothing, the run is over unless an interrupt can
+ * come. */
+void mips_self_loop(u32 target, int slot_nop)
 {
     struct sim *s = ms->sim;
-    if (target != ms->pc || ms->slot || s->state != RUN)
-        return;
-    u32 d = peek(ms->pc + 4);
-    if (d != 0 && d != 0x40 && d != 0xc0)
+    if (target != (ms->pc | (u32)ms->isa) || ms->slot || s->state != RUN ||
+        !slot_nop)
         return;
     if (interrupts_on() && (interrupt_ready() || sim_event_coming(s)))
         return;
     sim_end(s, END_IDLE, "a loop at 0x%08x that nothing can interrupt", ms->pc);
+}
+
+/* a MIPS32 branch's: a nop, ssnop or ehb in the slot */
+static void self_loop(u32 target)
+{
+    u32 d = peek(ms->pc + 4);
+    mips_self_loop(target, d == 0 || d == 0x40 || d == 0xc0);
 }
 
 static void trap_if(int c)
@@ -1113,6 +1142,8 @@ static void special3(u32 i)
     reserved();
 }
 
+void mips_exec32(u32 i);
+
 static void exec(u32 i)
 {
     u32 op = i >> 26, rs = (i >> 21) & 31, rt = (i >> 16) & 31;
@@ -1168,10 +1199,12 @@ static void exec(u32 i)
     case 0x17: branch_likely((s32)a > 0, t); return;            /* BGTZL */
     case 0x1c: special2(i); return;
     case 0x1d:                                                  /* JALX */
-        if (ms->pic32)
-            unmodelled("jalx, to microMIPS,");
-        else
+        if (!ms->micromips) {
             reserved();
+            return;
+        }
+        W(31, ms->pc + 8);
+        branch(1, ((ms->pc + 4) & 0xf0000000u) | (i & 0x03ffffffu) << 2 | 1);
         return;
     case 0x1f: special3(i); return;
     case 0x20: v = (u32)(s32)(s8)load(va, 1); break;            /* LB */
@@ -1244,6 +1277,36 @@ static void exec(u32 i)
 
 /* ---- the run ------------------------------------------------------------- */
 
+/* n bytes of the instruction at va (a halfword of a microMIPS one, or
+ * a MIPS32 word): 0, or -1 with its exception entered, or the run ended
+ * when the exception vector itself cannot be fetched */
+static int fetch(u32 va, int n, u32 *w)
+{
+    struct sim *s = ms->sim;
+    u32 pa;
+    if (xlate(va, 2, &pa)) {
+        enter(ms->exc_code, 0, (int)((ms->srsctl >> 12) & 15));
+        return -1;
+    }
+    struct region *r = bus_region(&s->bus, pa, (u32)n);
+    if (r) {
+        *w = mem_rd_le(r->mem + (pa - r->base), n);
+        return 0;
+    }
+    if (!bus_read(&s->bus, pa, n, w))
+        return 0;
+    u32 base = (ms->status & ST_BEV) ? 0xbfc00380u
+                                     : (ms->ebase & 0xfffff000u) + 0x180;
+    if ((va & ~3u) == base) {
+        sim_end(s, END_LOCKUP, "lockup: the exception vector 0x%08x "
+                "cannot be fetched", base);
+        return -1;
+    }
+    raise_exc(EXC_IBE);
+    enter(EXC_IBE, 0, (int)((ms->srsctl >> 12) & 15));
+    return -1;
+}
+
 static void step(struct cpu *c)
 {
     ms = (struct mips_state *)c;
@@ -1256,43 +1319,54 @@ static void step(struct cpu *c)
     }
     ms->exc = 0;
     ms->watch_stop = 0;
-    u32 pc = ms->pc, pa, w;
-    if (pc & 3) {
-        raise_addr(EXC_ADEL, pc);
-        enter(ms->exc_code, 0, (int)((ms->srsctl >> 12) & 15));
-        return;
-    }
-    if (xlate(pc, 2, &pa)) {
-        enter(ms->exc_code, 0, (int)((ms->srsctl >> 12) & 15));
-        return;
-    }
-    struct region *r = bus_region(&s->bus, pa, 4);
-    if (r) {
-        w = mem_rd_le(r->mem + (pa - r->base), 4);
-    } else if (bus_read(&s->bus, pa, 4, &w)) {
-        u32 base = (ms->status & ST_BEV) ? 0xbfc00380u
-                                         : (ms->ebase & 0xfffff000u) + 0x180;
-        if (pc == base) {
-            sim_end(s, END_LOCKUP, "lockup: the exception vector 0x%08x "
-                    "cannot be fetched", pc);
+    u32 pc = ms->pc, w, h2 = 0, cost;
+    int size = 4;
+    if (ms->isa) {
+        /* microMIPS: a halfword, and a second when the first's major
+         * opcode is a 32-bit instruction's */
+        if (fetch(pc, 2, &w))
+            return;
+        size = mips_micro_size(w);
+        if (size == 4) {
+            if (fetch(pc + 2, 2, &h2))
+                return;
+            w = w << 16 | h2;
+        }
+        cost = (u32)mips_micro_cost(w, size);
+    } else {
+        if (pc & 3) {
+            raise_addr(EXC_ADEL, pc);
+            enter(ms->exc_code, 0, (int)((ms->srsctl >> 12) & 15));
             return;
         }
-        raise_exc(EXC_IBE);
-        enter(EXC_IBE, 0, (int)((ms->srsctl >> 12) & 15));
-        return;
+        if (fetch(pc, 4, &w))
+            return;
+        u8 b[4] = { (u8)w, (u8)(w >> 8), (u8)(w >> 16), (u8)(w >> 24) };
+        int br;
+        cost = (u32)mips_cost(b, 4, &br);
     }
-    u8 b[4] = { (u8)w, (u8)(w >> 8), (u8)(w >> 16), (u8)(w >> 24) };
-    int br;
-    u32 cost = (u32)mips_cost(b, 4, &br);
     s->insns++;
     s->cycles += cost;
-    if (s->trace)
-        trace_insn(s, pc, &w, 1, 4);
+    if (s->trace) {
+        if (ms->isa) {
+            u32 u[2] = { size == 4 ? w >> 16 : w, h2 };
+            trace_insn(s, pc, u, size / 2, 2);
+        } else {
+            trace_insn(s, pc, &w, 1, 4);
+        }
+    }
     ms->insn = w;
+    if (ms->isa && (!ms->slot || !ms->btaken))
+        ms->npc = (pc + (u32)size) | 1;     /* microMIPS: past this one */
     ms->nx = ms->npc;
     ms->nnx = ms->npc + 4;
     ms->nslot = 0;
-    exec(w);
+    if (!ms->isa)
+        exec(w);
+    else if (ms->slot && ms->ds && ms->ds != size)
+        reserved();             /* a slot whose branch wants the other size */
+    else
+        mips_micro_exec(w, size);
     if (ms->exc) {
         if (ms->watch_stop) {
             s->insns--;
@@ -1309,6 +1383,21 @@ static void step(struct cpu *c)
     ms->pc = ms->nx;
     ms->npc = ms->nnx;
     ms->slot = ms->nslot;
+    if (ms->nslot) {
+        ms->bpc = ms->nbpc | (u32)ms->isa;
+        ms->ds = ms->nds;
+        ms->btaken = ms->nbtaken;
+    }
+    /* a jump's target carries the ISA mode it runs in */
+    if (ms->micromips) {
+        ms->isa = ms->pc & 1;
+        ms->pc &= ~1u;
+    }
+}
+
+void mips_exec32(u32 i)
+{
+    exec(i);
 }
 
 /* ---- the CPU interface --------------------------------------------------- */
@@ -1350,6 +1439,15 @@ static void cpu_reset(struct cpu *c)
     k->pc = 0xbfc00000u;
     k->npc = k->pc + 4;
     k->slot = 0;
+    /* a PIC32MZ boots in the ISA DEVCFG0.BOOTISA names (bit 6: 1 MIPS32,
+     * 0 microMIPS), which is Config3.ISAOnExc's reset value too */
+    k->config3 &= ~(1u << 16);
+    if (k->bootcfg) {
+        u32 cfg0;
+        if (!bus_debug_read(&k->sim->bus, 0x1fc0ffccu, 4, &cfg0) && !(cfg0 & 0x40))
+            k->config3 |= 1u << 16;
+    }
+    k->isa = k->micromips && (k->config3 >> 16 & 1);
 }
 
 static u32 cpu_pc(struct cpu *c)
@@ -1396,7 +1494,7 @@ static int cpu_reg_read(struct cpu *c, int n, u8 *buf)
     case 34: return put32(buf, ms->hi[0]);
     case 35: return put32(buf, ms->badvaddr);
     case 36: return put32(buf, cp0_read(13, 0));
-    case 37: return put32(buf, ms->pc);
+    case 37: return put32(buf, ms->pc | (u32)ms->isa);
     }
     if (n >= 38 && n <= 69)
         return put32(buf, (u32)ms->fpr[n - 38]);
@@ -1426,8 +1524,9 @@ static int cpu_reg_write(struct cpu *c, int n, const u8 *buf)
     case 35: ms->badvaddr = v; return 4;
     case 36: ms->cause = (ms->cause & ~0x0300u) | (v & 0x0300u); return 4;
     case 37:
-        ms->pc = v;
-        ms->npc = v + 4;
+        ms->pc = ms->micromips ? v & ~1u : v;
+        ms->isa = ms->micromips && (v & 1);
+        ms->npc = ms->pc + 4;
         ms->slot = 0;
         return 4;
     }
@@ -1479,7 +1578,6 @@ int mips_is(const struct cpu *c)
 struct cpu *mips_create(struct sim *s, const char *model,
                         const struct board_desc *bd)
 {
-    (void)bd;
     int pic32 = !strcmp(model, "pic32mz");
     if (!pic32 && strcmp(model, "24kc"))
         return 0;
@@ -1505,6 +1603,8 @@ struct cpu *mips_create(struct sim *s, const char *model,
                      1u << 10 | 1u << 6 | 1u << 5;
         k->dsp = 1;
         k->fpu = 1;
+        k->micromips = 1;
+        k->bootcfg = bd && bd->svd;     /* a PIC32 board: its DEVCFG0 */
     } else {
         /* the 24Kc: 64 KiB caches... as QEMU's PRId and Config have it */
         k->prid = 0x00019300u;

@@ -42,6 +42,7 @@ file but the network one compiles with EmbCC itself. Everything is in
 | `avr-io.c`, `avr-usart.c`, `avr-timer16.c` | the ATmega328P's I/O registers, USART0, Timer/Counter1 |
 | `mips.h` | the MIPS32 core's state, and the interface of an external interrupt controller (EIC mode) |
 | `mips.c` | the MIPS32r2 core: the instruction set with its delay slots, coprocessor 0, exceptions and interrupts, the TLB, shadow register sets, Count and Compare, the DSP ASE's registers, step, reset, its CPU interface |
+| `mips-micro.c` | microMIPS32: the 16-bit forms, and each 32-bit instruction executed as the MIPS32 one it encodes the same operation as (`mips_exec32`, its fields moved), the branches, delay-slot sizes, compact jumps, lwm/swm/lwp/swp; the ISA mode rides in bit 0 of `nx`/`nnx`, as a jump's target does |
 | `mips-dsp.c` | the DSP ASE's arithmetic (Revision 2, MIPS32 encodings): SPECIAL3's DSP groups, DSPControl's flags as each instruction sets them; `mips.c` checks Status.MX and keeps the accumulators' moves, rddsp, wrdsp and the indexed loads |
 | `mips-fpu.c` | the MIPS32r2 FPU (coprocessor 1), a PIC32MZ EF's: FR 0 and 1, single and double, the 2008 modes |
 | `ieee754.h`, `ieee754.c` | IEEE 754 arithmetic in integers, which the RISC-V and MIPS FPUs share |
@@ -241,7 +242,8 @@ no watchpoints, no exclusive monitor, and a write to flash goes in.
 struct board_desc {
     const char *name, *core, *cpu;  /* "lm3s6965evb", "cortex-m", "cortex-m3" */
     int prio_bits;                  /* NVIC priority bits */
-    struct mem_desc mem[4];         /* base, size, MEM_RAM or MEM_FLASH, main_ram */
+    struct mem_desc mem[4];         /* base, size, MEM_RAM or MEM_FLASH, main_ram,
+                                       target, erased */
     struct dev_desc dev[6];         /* type, base, size */
     struct alias bitband[2];        /* base, size, target */
     const char *svd;                /* "STM32F405.svd", or 0 */
@@ -252,7 +254,11 @@ struct board_desc {
 `main_ram` marks the region `--ram-size` resizes. `MEM_FLASH` is read-only
 to the core after loading, and is flash in the memory map the GDB server
 gives (gdb then programs it with `load`). `MEM_ALIAS` is a second address
-for the region at `target`: the STM32's flash at 0.
+for the region at `target`: the STM32's flash at 0. `erased` is the word
+each four bytes of the region hold before the image goes in (and again
+on a debugger's reload, `bus_erase`): a PIC32's flash 0xFFFFFFFF, a
+PIC24's 0x00FFFFFF (three bytes of ones and the phantom byte); 0, the
+zeros QEMU's boards have, elsewhere.
 
 The RISC-V core's is `struct rv_state` (`riscv.h`), reached through
 `rs` the same way. Registers hold XLEN bits (an RV32 value zero-extended
@@ -553,7 +559,10 @@ or with its own file for the six functions of `net.h`.
   corpus at -O0, -O2 and -Os against QEMU's malta (output and exit
   status), `mips-isa.c`'s instruction edges against QEMU and the record,
   `mips-fpu.c`'s FPU edges against QEMU's P5600, `mips-dsp.c`'s DSP ASE
-  edges against QEMU's 74Kf, the ends of a run.
+  edges against QEMU's 74Kf, `mips-micro.s`'s microMIPS edges (llvm-mc
+  assembles them; its forward label differences and 16-bit branches are
+  `.hword`s, which llvm-mc gets wrong in an instruction) against QEMU's
+  M14Kc, the ends of a run.
 - `tests/golden/embsim-pic32.sh`: the PIC32MZ2048EFH100's register file
   from the device pack's ATDF against the pack's own header (every SFR
   and CLR/SET/INV at its address), and an EmbCC program on the Explorer

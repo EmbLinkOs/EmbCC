@@ -84,9 +84,20 @@ struct mips_state {
     u32 npc;                        /* the one after it: a branch's target */
     int slot;                       /* pc is a branch's delay slot */
     /* while an instruction executes: where execution goes after it, the
-     * one after that, and whether the next is a delay slot */
+     * one after that, and whether the next is a delay slot. These three
+     * addresses carry the ISA mode in bit 0 (1: microMIPS), as a jump's
+     * target does; pc does not. */
     u32 nx, nnx;
     int nslot;
+    int isa;                        /* executing microMIPS, not MIPS32 */
+    int micromips;                  /* the core has microMIPS (Config3.ISA) */
+    int bootcfg;                    /* a PIC32's: DEVCFG0.BOOTISA at reset */
+    /* the delay slot's branch (its address, the ISA bit in bit 0) for
+     * EPC, and the size the slot's instruction must be (2 or 4, or 0 for
+     * either: microMIPS's jals, jalr and the linking branches) */
+    u32 bpc, nbpc;
+    int ds, nds;
+    int btaken, nbtaken;            /* the slot's branch was taken */
 
     /* coprocessor 0 */
     u32 status, cause, epc, errorepc, badvaddr, ebase, intctl, srsctl;
@@ -128,6 +139,21 @@ struct mips_state {
 extern struct mips_state *ms;
 
 int mips_is(const struct cpu *c);
+
+/* mips.c, for mips-micro.c: a MIPS32 instruction, executed for the
+ * microMIPS one it encodes the same operation as; the Coprocessor
+ * Unusable exception; an instruction the part has and EmbSim does not
+ * model; an unconditional branch to itself, which ends the run when
+ * nothing can interrupt it (`slot_nop`: its delay slot does nothing) */
+void mips_exec32(u32 i);
+void mips_raise_cpu(u32 unit);
+void mips_unmodelled(const char *what);
+void mips_self_loop(u32 target, int slot_nop);
+/* mips-micro.c: a microMIPS instruction (a 16-bit one in the low half,
+ * or both halves, the first in bits 31:16), its size, its cost */
+int mips_micro_size(u32 first);
+void mips_micro_exec(u32 i, int size);
+int mips_micro_cost(u32 i, int size);
 
 /* mips.c, for mips-fpu.c: the instruction's memory accesses, its branch,
  * and its exceptions */

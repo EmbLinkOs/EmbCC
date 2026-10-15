@@ -440,8 +440,11 @@ traces them by these names.
 core](#what-it-models-the-mips32-core), a PIC32MZ EF's: PRId 0x0001A700
 (the M5150), Config1 with a 16-entry TLB, 16 KiB and 4 KiB 4-way caches
 of 16-byte lines (`cache` does nothing), Config3 with EIC and vectored
-interrupts, DSP and DSPr2, MIPS32 and microMIPS (MIPS32 at reset); seven
-shadow register sets (SRSCtl.HSS 7); Status.MX and CU1 writable. The
+interrupts, DSP and DSPr2, MIPS32 and microMIPS; seven shadow register
+sets (SRSCtl.HSS 7); Status.MX and CU1 writable. The part boots in the
+ISA DEVCFG0's BOOTISA bit names (1, as erased flash reads, MIPS32; 0
+microMIPS), which is Config3.ISAOnExc's value out of reset too (the
+mode exception handlers run in; writable). The
 interrupts come from the EVIC in EIC mode. Its FPU is modelled: XC32's
 hard-float (FP64) images run as EmbCC's soft-float ones do -- the
 Thermometre's XC32 build shows the same temperature on the LCD as its
@@ -547,8 +550,11 @@ curiosity-pic32mz-ef-2: LED LED1 on (RJ7) at 0.052 ms
 curiosity-pic32mz-ef-2: LED RGB green on (RB8) at 0.052 ms
 ```
 
-**Not modelled on the PIC32:** microMIPS (`-mmicromips` code), the
-MCU ASE's IRET, the peripherals other
+Flash an image leaves out reads as erased flash does: 0xFFFFFFFF.
+
+**Not modelled on the PIC32:** the FPU's and the DSP ASE's microMIPS
+encodings (`-mmicromips` with hard float or the DSP), the MCU ASE's
+IRET, the peripherals other
 than these (their registers keep what is written), change-notification
 interrupts, the external interrupt pins, conversion and baud-rate
 timing, DMA, the watchdog and deadman timer, the prefetch cache, PMD's
@@ -566,6 +572,22 @@ module disables, sleep and idle.
   architecture leaves them unpredictable). A floating-point instruction
   is a Coprocessor Unusable exception on the 24Kc, which has no FPU; an
   encoding no MIPS32r2 core has is a Reserved Instruction exception.
+- **microMIPS** (`pic32mz`): the compressed instruction set XC32's and
+  clang's `-mmicromips` produce, 16- and 32-bit instructions mixed --
+  the 16-bit forms with their three-bit registers and encoded
+  immediates, lwm and swm, lwp and swp, lwxs, addiupc, movep; the
+  branches with offsets in halfwords and delay slots of either size
+  (jals, jalrs, jalrs16, bgezals and bltzals want a 16-bit one, jal,
+  jalr, jalr16, bal and jalx a 32-bit one: the other is a Reserved
+  Instruction), and the compact beqzc, bnezc, jrc and jraddiusp. The
+  ISA mode is bit 0 of a jump's target, as on the part: jr and jalr to
+  an even address switch to MIPS32, jalx switches either way, a link
+  register gets the mode to return to; an exception saves it in EPC's
+  bit 0 (EPC the branch's address for its delay slot) and eret goes
+  back to it. A branch in a delay slot is a Reserved Instruction, as on
+  QEMU. The FPU's and the DSP ASE's microMIPS encodings end the run as
+  a lockup that names them. `--trace` shows the halfwords;
+  `--fault-report` names a microMIPS instruction by its halfwords.
 - **The FPU** (`pic32mz`, which `--cpu pic32mz` puts on malta too):
   coprocessor 1 with 64-bit registers (Status.FR) or paired 32-bit ones,
   single and double precision and the word and long-word conversions,
@@ -1327,8 +1349,8 @@ On the AVR:
 - The sleep modes beyond Idle.
 
 On MIPS:
-- microMIPS, MIPS16e and the MCU ASE (each ends the run as a lockup
-  naming the instruction); paired singles.
+- MIPS16e, the MCU ASE, microMIPS's FPU and DSP encodings (each ends
+  the run as a lockup naming the instruction); paired singles.
 - Big-endian images (mips-none-elf): EmbSim's MIPS core is
   little-endian.
 - The caches (`cache` is a no-op), the watch registers (kept, not
@@ -1484,8 +1506,9 @@ AVR against QEMU's uno stub.
 
 **MIPS.** `tests/golden/embsim-mips.sh` runs the exec corpus at -O0,
 -O2 and -Os on QEMU's malta and on EmbSim's (the output and the exit
-status), `mips-isa.c`'s instruction edges, `mips-fpu.c`'s FPU edges and
-`mips-dsp.c`'s DSP ASE edges against QEMU's 24Kc, P5600 and 74Kf, and
+status), `mips-isa.c`'s instruction edges, `mips-fpu.c`'s FPU edges,
+`mips-dsp.c`'s DSP ASE edges and `mips-micro.s`'s microMIPS ones
+(assembled by llvm-mc) against QEMU's 24Kc, P5600, 74Kf and M14Kc, and
 the ends of a run.
 
 **PIC32.** No QEMU has a PIC32. `tests/golden/embsim-pic32.sh` holds the

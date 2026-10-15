@@ -74,6 +74,34 @@ extra=$(join -v 1 "$out/map.names" "$out/hdr.names" | awk '{ print $1 }' | tr '\
     fail "registers the header has not: $extra"
 echo "embsim-pic32: the ATDF's register file: $both registers at the header's addresses ($sci of them CLR, SET and INV), USBCRCON the files' one disagreement"
 
+# ---- the boot ISA and erased flash --------------------------------------------
+# Intel HEX images of the boot flash (physical 0x1FC00000): DEVCFG0's
+# BOOTISA (bit 6) 0 boots microMIPS, where b16 to itself is an idle
+# loop; erased flash reads ones, so with no DEVCFG0 the part boots
+# MIPS32, and a lw of DEVCFG0 there gets 0xffffffff (the loop at 0x1c,
+# not 0x14)
+hexrec() {      # lines "ADDR TYPE BYTES" to records, with their checksums
+    awk 'function hx(t,  v, i) { v = 0
+             for (i = 1; i <= length(t); i++)
+                 v = v * 16 + index("0123456789ABCDEF", substr(t, i, 1)) - 1
+             return v }
+         { n = length($3) / 2; s = n + hx(substr($1, 1, 2)) + hx(substr($1, 3, 2)) + $2
+           for (i = 0; i < n; i++) s += hx(substr($3, 2 * i + 1, 2))
+           printf ":%02X%s%02X%s%02X\n", n, $1, $2, $3, (256 - s % 256) % 256 }'
+}
+printf '0000 4 1FC0\n0000 0 FFCF000C\nFFCC 0 BFFFFFFF\n0000 1 \n' | hexrec > "$out/umips.hex"
+printf '0000 4 1FC0\n0000 0 C1BF083CCCFF098D0100292503002011\n0010 0 00000000FFFF001000000000FFFF0010\n0020 0 00000000\n0000 1 \n' |
+    hexrec > "$out/erased.hex"
+"$EMBSIM" "$out/umips.hex" --board pic32mz2048efh100 --dfp "$DFP" --stats \
+    --max-insns 10000 > "$out/umips.out" 2>&1
+grep -q 'a loop at 0xbfc00000 that nothing can interrupt' "$out/umips.out" ||
+    { cat "$out/umips.out"; fail "DEVCFG0.BOOTISA 0 does not boot microMIPS"; }
+"$EMBSIM" "$out/erased.hex" --board pic32mz2048efh100 --dfp "$DFP" --stats \
+    --max-insns 10000 > "$out/erased.out" 2>&1
+grep -q 'a loop at 0xbfc0001c that nothing can interrupt' "$out/erased.out" ||
+    { cat "$out/erased.out"; fail "erased flash does not read ones (or BOOTISA 1 does not boot MIPS32)"; }
+echo "embsim-pic32: DEVCFG0.BOOTISA boots microMIPS or MIPS32; erased flash reads ones"
+
 # ---- 2. a program on the Explorer 16/32 ----------------------------------------
 crt=$(dirname "$EMBCC")/build/libc/mipsel-none-elf/pic32-crt0.o
 if [ ! -f "$crt" ]; then

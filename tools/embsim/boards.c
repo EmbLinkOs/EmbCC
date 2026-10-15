@@ -25,9 +25,9 @@
 #define PERIPHERALS { "zero", 0x40000000u, 0x20000000u }
 #define BITBAND { { 0x22000000u, 0x02000000u, 0x20000000u }, \
                   { 0x42000000u, 0x02000000u, 0x40000000u } }
-#define MPS2_MEM { { 0, MB(4), MEM_RAM, 0, 0 }, \
-                   { 0x20000000u, MB(4), MEM_RAM, 1, 0 }, \
-                   { 0x60000000u, MB(16), MEM_RAM, 0, 0 } }
+#define MPS2_MEM { { 0, MB(4), MEM_RAM, 0, 0, 0 }, \
+                   { 0x20000000u, MB(4), MEM_RAM, 1, 0, 0 }, \
+                   { 0x60000000u, MB(16), MEM_RAM, 0, 0, 0 } }
 
 /* the STM32's models, over ST's SVD (svd-map.h) */
 static const struct model_desc stm32_models[] = {
@@ -74,20 +74,20 @@ static const struct model_desc pic24f_models[] = {
  * its last page) at twice its address, the configuration memory at
  * 0x800000 (FBOOT), and 32 KiB of RAM at data address 0x0800 to 0x87FF
  * (its top 2 KiB EDS page 1's) */
-#define PIC24FJ1024_MEM { { 0, 2 * 0xac000u, MEM_FLASH, 0, 0 }, \
-                          { 2 * 0x800000u, 0x4000, MEM_FLASH, 0, 0 }, \
-                          { 0x2000800u, KB(32), MEM_RAM, 1, 0 } }
+#define PIC24FJ1024_MEM { { 0, 2 * 0xac000u, MEM_FLASH, 0, 0, 0x00ffffffu }, \
+                          { 2 * 0x800000u, 0x4000, MEM_FLASH, 0, 0, 0x00ffffffu }, \
+                          { 0x2000800u, KB(32), MEM_RAM, 1, 0, 0 } }
 
 /* the PIC32MZ2048EFH100's memory: 512 KiB of RAM at 0, 2 MiB of program
  * flash at 0x1D000000 and the boot flash at 0x1FC00000 (the physical
  * addresses kseg0 and kseg1 reach) */
-#define PIC32MZ_MEM { { 0, KB(512), MEM_RAM, 1, 0 }, \
-                      { 0x1d000000u, MB(2), MEM_FLASH, 0, 0 }, \
-                      { 0x1fc00000u, 0x74000, MEM_FLASH, 0, 0 } }
+#define PIC32MZ_MEM { { 0, KB(512), MEM_RAM, 1, 0, 0 }, \
+                      { 0x1d000000u, MB(2), MEM_FLASH, 0, 0, 0xffffffffu }, \
+                      { 0x1fc00000u, 0x74000, MEM_FLASH, 0, 0, 0xffffffffu } }
 
 const struct board_desc boards[] = {
     { "lm3s6965evb", "cortex-m", "cortex-m3", 3,
-      { { 0, KB(256), MEM_FLASH, 0, 0 }, { 0x20000000u, KB(64), MEM_RAM, 1, 0 } },
+      { { 0, KB(256), MEM_FLASH, 0, 0, 0 }, { 0x20000000u, KB(64), MEM_RAM, 1, 0, 0 } },
       { { "pl011", 0x4000C000u, 0x1000 }, PERIPHERALS },
       BITBAND, 0, 0 },
     { "mps2-an385", "cortex-m", "cortex-m3", 3, MPS2_MEM,
@@ -97,7 +97,7 @@ const struct board_desc boards[] = {
     { "mps2-an500", "cortex-m", "cortex-m7", 3, MPS2_MEM,
       { { "cmsdk-uart", 0x40004000u, 0x1000 }, PERIPHERALS }, BITBAND, 0, 0 },
     { "microbit", "cortex-m", "cortex-m0", 2,
-      { { 0, KB(256), MEM_FLASH, 0, 0 }, { 0x20000000u, KB(16), MEM_RAM, 1, 0 } },
+      { { 0, KB(256), MEM_FLASH, 0, 0, 0 }, { 0x20000000u, KB(16), MEM_RAM, 1, 0, 0 } },
       { { "nrf51-uart", 0x40002000u, 0x1000 }, PERIPHERALS },
       { { 0, 0, 0 } }, 0, 0 },
     /* an STM32F405, as QEMU's netduinoplus2 has it: 1 MiB of flash at
@@ -105,17 +105,17 @@ const struct board_desc boards[] = {
      * 128 KiB of SRAM and 64 KiB of CCM RAM. The peripherals are ST's
      * SVD's, with models for RCC, GPIO, the USARTs and the timers */
     { "stm32f405", "cortex-m", "cortex-m4", 4,
-      { { 0x08000000u, MB(1), MEM_FLASH, 0, 0 },
-        { 0, MB(1), MEM_ALIAS, 0, 0x08000000u },
-        { 0x20000000u, KB(128), MEM_RAM, 1, 0 },
-        { 0x10000000u, KB(64), MEM_RAM, 0, 0 } },
+      { { 0x08000000u, MB(1), MEM_FLASH, 0, 0, 0 },
+        { 0, MB(1), MEM_ALIAS, 0, 0x08000000u, 0 },
+        { 0x20000000u, KB(128), MEM_RAM, 1, 0, 0 },
+        { 0x10000000u, KB(64), MEM_RAM, 0, 0, 0 } },
       { { 0, 0, 0 } },
       BITBAND, "STM32F405.svd", stm32_models },
     /* QEMU's virt, RV32 or RV64 by the image: the reset ROM where the
      * core starts, the test device that ends a run, the CLINT, the
      * NS16550A, and the PLIC's space reading as zero */
     { "virt", "riscv", "riscv", 0,
-      { { 0x80000000u, MB(128), MEM_RAM, 1, 0 } },
+      { { 0x80000000u, MB(128), MEM_RAM, 1, 0, 0 } },
       { { "virt-rom", 0x1000, 0xf000 }, { "sifive-test", 0x100000, 0x1000 },
         { "clint", 0x2000000, 0x10000 }, { "ns16550a", 0x10000000u, 0x100 },
         { "zero", 0x0c000000u, 0x600000 } },
@@ -125,7 +125,7 @@ const struct board_desc boards[] = {
      * USART0, Timer/Counter1, the I/O registers that keep their values,
      * and nothing above RAMEND */
     { "uno", "avr", "atmega328p", 0,
-      { { 0, KB(32), MEM_FLASH, 0, 0 }, { 0x800100u, KB(2), MEM_RAM, 1, 0 } },
+      { { 0, KB(32), MEM_FLASH, 0, 0, 0 }, { 0x800100u, KB(2), MEM_RAM, 1, 0, 0 } },
       { { "avr-usart", 0x8000c0u, 7 }, { "avr-timer16", 0x800080u, 12 },
         { "avr-io", 0x800020u, 0xe0 }, { "zero", 0x800900u, 0xf700 } },
       { { 0, 0, 0 } }, 0, 0 },
@@ -134,7 +134,7 @@ const struct board_desc boards[] = {
      * eight bytes apart and its SOFTRES, and the boot ROM where the core
      * starts, jumping to the image as QEMU's -kernel does */
     { "malta", "mips", "24kc", 0,
-      { { 0, MB(64), MEM_RAM, 1, 0 } },
+      { { 0, MB(64), MEM_RAM, 1, 0, 0 } },
       { { "ns16550a-8", 0x1f000900u, 0x40 },
         { "malta-fpga", 0x1f000000u, 0x100000 },
         { "malta-rom", 0x1fc00000u, 0x400000 } },

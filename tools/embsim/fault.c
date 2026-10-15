@@ -389,7 +389,24 @@ static void mips_fault(struct analysis *a, u32 code, u32 epc)
     if (code == EXC_CPU)
         fprintf(o, "  coprocessor %u (Cause.CE)%s\n", (cause >> 28) & 3,
                 (cause >> 28 & 3) == 1 ? ": the FPU, with Status.CU1 clear" : "");
-    insn_line(a, cause & CA_BD ? epc + 4 : epc, b, sizeof b);
+    if (m->epc == (epc | 1)) {
+        /* microMIPS (EPC's bit 0): the halfwords, and the slot past a
+         * branch of 2 or 4 bytes */
+        u32 at = epc, h1 = 0, h2 = 0;
+        if (cause & CA_BD) {
+            bus_debug_read(&a->s->bus, mips_phys(at), 2, &h1);
+            at += (u32)mips_micro_size(h1);
+        }
+        bus_debug_read(&a->s->bus, mips_phys(at), 2, &h1);
+        if (mips_micro_size(h1) == 4) {
+            bus_debug_read(&a->s->bus, mips_phys(at + 2), 2, &h2);
+            snprintf(b, sizeof b, "0x%08x: %04x %04x  (microMIPS)", at, h1, h2);
+        } else {
+            snprintf(b, sizeof b, "0x%08x: %04x       (microMIPS)", at, h1);
+        }
+    } else {
+        insn_line(a, cause & CA_BD ? epc + 4 : epc, b, sizeof b);
+    }
     fprintf(o, "  instruction %s\n", b);
     u32 *r = m->exc_regs ? m->exc_regs : m->r;
     fprintf(o, "  registers:\n");

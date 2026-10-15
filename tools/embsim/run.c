@@ -173,11 +173,14 @@ void sim_load(struct sim *s, u32 ram_size, const char *image)
     for (int i = 0; i < 4 && bd->mem[i].size; i++)
         if (bd->mem[i].kind == MEM_ALIAS)
             bus_add_mirror(&s->bus, bd->mem[i].base, bd->mem[i].target);
-        else
+        else {
             bus_add_region(&s->bus, bd->mem[i].base,
                            bd->mem[i].main_ram && ram_size ? ram_size
                                                            : bd->mem[i].size,
                            bd->mem[i].kind);
+            s->bus.rg[s->bus.nrg - 1].erased = bd->mem[i].erased;
+            bus_erase(&s->bus.rg[s->bus.nrg - 1]);
+        }
     s->image = image;
     load(s);
 }
@@ -186,7 +189,7 @@ void sim_reset(struct sim *s, int reload)
 {
     if (reload)
         for (int i = 0; i < s->bus.nrg; i++)
-            memset(s->bus.rg[i].mem, 0, s->bus.rg[i].size);
+            bus_erase(&s->bus.rg[i]);
     for (int i = 0; i < s->bus.ndev; i++)
         if (s->bus.dev[i].ops->reset)
             s->bus.dev[i].ops->reset(s->bus.dev[i].ctx);
