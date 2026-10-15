@@ -112,6 +112,7 @@ struct parser {
      * typedef or a union is defined; anywhere else the declaration would
      * keep its written type, so attrs_unapplied() says so. */
     int mode_line, tu_line;
+    int type_mode;        /* a mode(M) among a type name's specifiers */
     /* GNU `__label__ n;`: a label LOCAL to the enclosing block, so a
      * macro that declares one can be expanded twice in a function
      * without the second `n:` being a duplicate. That is the only
@@ -1410,6 +1411,7 @@ static const struct expr *generic_choice(const struct expr *e);
 static struct type *parse_array_dims(struct parser *ps, struct type *t);
 static struct expr *new_expr(enum expr_kind kind, int line, int col);
 static struct type *parse_type_spec(struct parser *ps, int allow_body);
+static struct type *apply_mode(struct parser *ps, struct type *t, int bytes);
 static struct type *parse_type_spec_attrs(struct parser *ps, int allow_body,
                                           struct attrs *a);
 static void parse_static_assert(struct parser *ps);
@@ -1982,10 +1984,21 @@ static struct type *parse_type_spec(struct parser *ps, int allow_body)
         ps->lead_flash = 0;
         q |= Q_FLASH;
     }
-    int q2 = 0, outer_sc = ps->spec_sc;
+    int q2 = 0, outer_sc = ps->spec_sc, outer_mode = ps->type_mode;
     ps->spec_sc = 0;
+    ps->type_mode = 0;
     struct type *t = parse_type_spec_inner(ps, allow_body, &q2);
     q |= q2;
+    /* __attribute__((mode(M))) before or among the specifiers changes the
+     * type they name, whatever is declared with it: `typedef int
+     * __attribute__((mode(SI))) int_t;`, a member `E
+     * __attribute__((mode(byte))) a;`, a cast */
+    int mode = ps->spec_on ? ps->spec_slot.mode : ps->type_mode;
+    ps->type_mode = outer_mode;
+    if (t && mode) {
+        t = apply_mode(ps, t, mode);
+        ps->spec_slot.mode = 0;
+    }
     if (!t && (q & (Q_CONST | Q_VOL)))
         t = c89_implicit_int(ps, 1);    /* `const c = 1;` in C89 */
     ps->spec_out = ps->spec_slot;
@@ -2073,6 +2086,8 @@ static void spec_attr(struct parser *ps)
         return;
     }
     parse_attributes(ps, &a);
+    if (a.mode)
+        ps->type_mode = a.mode;   /* `(int __attribute__((mode(DI))))x` */
     if (a.packed || a.aligned || a.weak || a.noreturn || a.section || a.pcs)
         parse_error_at(ps, at_tok->line, at_tok->col,
                 "__attribute__((%s)) is not supported in a type name: "
@@ -2445,6 +2460,7 @@ static void take_carried(struct parser *ps, struct attrs *a)
 
 static struct type *parse_stars(struct parser *ps, struct type *t)
 {
+    int stars = 0;
     for (;;) {
         /* A qualifier here belongs to the type built so far: before the
          * first `*` to what the specifiers named, after a `*` to that
@@ -2475,6 +2491,11 @@ static struct type *parse_stars(struct parser *ps, struct type *t)
             parse_attributes(ps, &a);
             if (a.unused)
                 ps->stars_unused = 1;
+            /* mode(M) before any `*` changes the type the specifiers
+             * named: `typedef int __attribute__((mode(SI))) int_t;`, a
+             * member `E __attribute__((mode(byte))) a;` */
+            if (a.mode && !stars)
+                t = apply_mode(ps, t, a.mode);
             if (ps->attr_carry_on) {
                 /* The enclosing declaration will take them. */
                 if (a.weak)     ps->attr_slot.weak = 1;
@@ -2514,6 +2535,7 @@ static struct type *parse_stars(struct parser *ps, struct type *t)
         if (cur(ps)->kind != TOK_STAR)
             return t;
         t = ty_ptr(t);
+        stars++;
         ps->q_top = 0;          /* a new pointer, unqualified so far */
         advance(ps);
     }
@@ -6399,6 +6421,10 @@ static void parse_top(struct parser *ps, struct unit *u,
      * `*`, where there is nothing to carry them. */
     if (at_attribute(ps))
         parse_attributes(ps, &at);
+    if (at.mode) {                  /* `int __attribute__((mode(DI))) w;` */
+        base = apply_mode(ps, base, at.mode);
+        at.mode = 0;
+    }
     /* Open the slot for this declaration's declarators, including the
      * rewind below: an attribute after a `*` belongs to what is being
      * declared. */
@@ -6520,6 +6546,10 @@ static void parse_top(struct parser *ps, struct unit *u,
                            "did you mean a function pointer (*)?");
             ps->decl_name = gname;
             parse_attributes(ps, &at); /* int x __attribute__((weak)) = ... */
+            if (at.mode) {             /* int w __attribute__((mode(DI))) */
+                gt = apply_mode(ps, gt, at.mode);
+                at.mode = 0;
+            }
             int gnl = ps->decl_name_line, gnc = ps->decl_name_col;
             struct global *g = parse_global(ps, gt, gname, gline,
                                             is_static, is_extern);
@@ -6749,6 +6779,10 @@ fn_tail:
                 struct type *vty = parse_array_dims(ps, dty);
                 ps->decl_name = dname;
                 parse_attributes(ps, &at);
+                if (at.mode) {
+                    vty = apply_mode(ps, vty, at.mode);
+                    at.mode = 0;
+                }
                 struct global *g = parse_global(ps, vty, dname, dline,
                                                 is_static, is_extern);
                 g->name_line = dline;
