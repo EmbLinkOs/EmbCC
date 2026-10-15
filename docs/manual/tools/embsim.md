@@ -515,25 +515,27 @@ EMBSIM_SVD_PATH=$HOME/svd embsim fw.elf --board bluepill
 The models are [the STM32F405's](#the-stm32f405) with the F1's own:
 
 - **RCC**, as the F405's (ready bits, the clock gates), and the F1's
-  rules (RM0008 7.2): a clock source is used once it is ready -- CFGR's
-  SWS takes SW's value only when the source's ready bit is set, and
-  switches when it becomes so --; PLLRDY sets when PLLON is set and the
-  PLL's source (HSI / 2, or HSE, halved with PLLXTPRE) is ready. The
-  clocks have frequencies: HSI 8 MHz, HSE the board's 8 MHz crystal, the
-  PLL its source times PLLMUL's factor, SYSCLK the source in use, HCLK
-  SYSCLK over HPRE's divisor. The core runs at HCLK, and the board
-  reports its time at it. A GPIO port's clock enable is IOPxEN.
-- **GPIOA-G**, the F1's layout (RM0008 9.1, 9.2): BSRR sets and resets
-  ODR's bits (set wins), BRR resets them; IDR is each pin from its
-  configuration: an analog input 0; a floating input what the board
-  drives, else 0 (EmbSim's choice); an input with a pull what the board
-  drives, else ODR's bit (1 up, 0 down); a push-pull output ODR's bit; an
-  open-drain one 0, or let go at 1 (floating); an alternate-function
-  output 1 on a USART's TX pin (the line idle, as AFIO's MAPR places it),
-  else 0. The debug port's pins are its while AFIO's MAPR.SWJ_CFG keeps
-  them -- out of reset all five --, whatever CRL and CRH say: PA13 and
-  PA15 pulled up, PA14 down, PB4 up (RM0008 9.1.1), PB3 0; SWJ_CFG 001
-  gives PB4 back, 010 PA15, PB3 and PB4, 100 all five.
+  rules (RM0008, "Reset and clock control"): a clock source is used once
+  it is ready -- CFGR's SWS takes SW's value only when the source's
+  ready bit is set, and switches when it becomes so --; PLLRDY sets when
+  PLLON is set and the PLL's source (HSI / 2, or HSE, halved with
+  PLLXTPRE) is ready. The clocks have frequencies: HSI 8 MHz, HSE the
+  board's 8 MHz crystal, the PLL its source times PLLMUL's factor,
+  SYSCLK the source in use, HCLK SYSCLK over HPRE's divisor. The core
+  runs at HCLK, and the board reports its time at it. A GPIO port's
+  clock enable is IOPxEN.
+- **GPIOA-G**, the F1's layout (RM0008, "General-purpose and
+  alternate-function I/Os"): BSRR sets and resets ODR's bits (set wins),
+  BRR resets them; IDR is each pin from its configuration: an analog
+  input 0; a floating input what the board drives, else 0 (EmbSim's
+  choice); an input with a pull what the board drives, else ODR's bit (1
+  up, 0 down); a push-pull output ODR's bit; an open-drain one 0, or let
+  go at 1 (floating); an alternate-function output 1 on a USART's TX pin
+  (the line idle, as AFIO's MAPR places it), else 0. The debug port's
+  pins are its while AFIO's MAPR.SWJ_CFG keeps them -- out of reset all
+  five --, whatever CRL and CRH say: PA13 and PA15 pulled up, PA14 down,
+  PB4 up (RM0008, "General-purpose I/O"), PB3 0; SWJ_CFG 001 gives PB4
+  back, 010 PA15, PB3 and PB4, 100 all five.
 - **USART1-3** as the F405's, and USART1's receiver is the run's input
   (`--input`): a byte comes in while UE and RE are set and RXNE is
   clear, and a read of DR takes it.

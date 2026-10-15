@@ -1,6 +1,6 @@
 /* stm32f1-gpio.c -- an STM32F1 GPIO port (CRL, CRH, IDR, ODR, BSRR, BRR,
- * LCKR: RM0008's chapter 9 -- 7 in its earlier revisions), over the SVD's
- * registers.
+ * LCKR: RM0008's "General-purpose and alternate-function I/Os"), over
+ * the SVD's registers.
  *
  *   - BSRR's low half sets ODR's bits and its high half resets them (set
  *     wins); BRR resets them;

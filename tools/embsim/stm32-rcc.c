@@ -16,9 +16,10 @@
  *     driver that forgot its clock says so instead of hanging.
  *
  * The F1's (an RCC whose CFGR has PLLMUL: RM0008's) more:
- *   - a clock source is used once it is ready (RM0008 7.2.6): CFGR's SWS
- *     takes SW's value when that source's ready bit is set, and else
- *     keeps the source in use, switching when it becomes ready; PLLRDY
+ *   - a clock source is used once it is ready (RM0008, "System clock
+ *     (SYSCLK) selection"): CFGR's SWS takes SW's value when that
+ *     source's ready bit is set, and else keeps the source in use,
+ *     switching when it becomes ready; PLLRDY
  *     sets when PLLON is set and its source (PLLSRC: HSI / 2, or HSE,
  *     halved with PLLXTPRE) is ready;
  *   - the clocks' frequencies: HSI 8 MHz, HSE the board's 8 MHz crystal
