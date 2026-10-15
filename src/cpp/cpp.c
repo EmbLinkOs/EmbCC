@@ -2088,8 +2088,23 @@ static void process_file(struct cpp *cpp, const char *path,
     if ((unsigned char)src[0] == 0xEF && (unsigned char)src[1] == 0xBB &&
         (unsigned char)src[2] == 0xBF)
         src += 3;
-    s.p = src;
     s.base = src;
+    /* Windows' line end, CR LF, and a lone CR are each one newline, as GCC
+     * reads them. A CR left in the line ended up in a #define's body, so
+     * that a FreeRTOSConfig.h saved by MPLAB on Windows made `#if
+     * (configUSE_16_BIT_TICKS == 1)` an error. The copy is kept as the
+     * text itself is (#pragma once compares that, s.base). */
+    if (strchr(src, '\r')) {
+        char *c = xmalloc(strlen(src) + 1), *d = c;
+        for (const char *q = src; *q; q++) {
+            *d++ = *q == '\r' ? '\n' : *q;
+            if (*q == '\r' && q[1] == '\n')
+                q++;
+        }
+        *d = 0;
+        src = c;
+    }
+    s.p = src;
     s.line = 1;
     s.incdir_idx = incdir_idx;
 
