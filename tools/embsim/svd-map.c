@@ -849,40 +849,24 @@ static struct rf_reg *atomic_alias(struct svdmap *m, u32 a, int n, int *kind)
     return r;
 }
 
-/* the RP2040's bus interposer, in front of the peripherals that have no
- * atomic aliases of their own (its datasheet, 2.1.2) */
-static int interposed(const struct rf_periph *p)
-{
-    static const char *const names[] = { "UART", "SPI", "I2C", "SSI" };
-    for (size_t i = 0; i < sizeof names / sizeof names[0]; i++)
-        if (!strncmp(p->name, names[i], strlen(names[i])))
-            return 1;
-    return 0;
-}
-
 /* A write of `v` through an atomic alias of r: the bits set in v are
- * XORed, set or cleared. Natively the other bits are not written at all:
- * the model is given a whole word in which each of them is what a write
- * leaves alone -- a plain field's value as it is, 0 for oneToClear and
- * its like, 1 for zeroToClear and its. Through the interposer, the
- * register is read (as the program would, with what that does) and the
- * result written whole. */
+ * XORed, set or cleared, and the others are not written at all -- the
+ * model is given a whole word in which each of them is what a write
+ * leaves alone: a plain field's value as it is, 0 for oneToClear and its
+ * like, 1 for zeroToClear and its. (The datasheet's bus interposer in
+ * front of the UARTs, SPI, I2C and SSI reads the register and writes the
+ * result whole, which differs only for a register a read changes, a
+ * FIFO's: EmbSim does not tell them apart.) */
 static void alias_write(struct svdmap *m, struct rf_reg *r, int kind, u32 v)
 {
     struct rf_periph *p = r->p;
     u32 off = r->addr - p->base;
-    u64 old;
-    if (interposed(p))
-        old = p->ops->read ? p->ops->read(p->ctx, off, 4) : 0;
-    else
-        old = r->value;
+    u64 old = r->value;
     u64 hit = v, w = 0;
     for (int i = 0; i < r->nf; i++) {
         const struct rf_field *f = &r->f[i];
         u64 fm = field_mask(f), keep;
-        if (interposed(p))
-            keep = old & fm;
-        else if (f->mwv == MWV_MODIFY)
+        if (f->mwv == MWV_MODIFY)
             keep = f->acc == ACC_WO || f->acc == ACC_W1 ? 0 : old & fm;
         else
             keep = f->mwv >= MWV_0CLR && f->mwv <= MWV_0TOG ? fm : 0;

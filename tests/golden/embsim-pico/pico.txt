@@ -1,4 +1,4 @@
-pico
+<pico
 rom.00 20041f00
 rom.04 00000021
 rom.08 00000029
@@ -37,6 +37,7 @@ boot.TICK 00000600
 boot.PSM.DONE 0001ffff
 held.UARTCR 00000300
 held.UARTIBRD 00000000
+uart.FR-no-clk_peri 00000018
 resets.RESET_DONE 00601360
 xosc.STATUS-starting 00001000
 xosc.startup-1ms 00000001
@@ -75,9 +76,11 @@ narrow.8-read efbeadde
 narrow.8-at-0 a5a5a5a5
 narrow.8-at-1 3c3c3c3c
 narrow.16-at-0 f00df00d
-timer.set-hi 00000001
 timer.set-lo-near 00000001
+timer.latched-hi 00000001
 timer.carried 00000002
+timer.unlatched-hi 00000002
+wd.counts-twice 00000001
 timer.ARMED 00000001
 timer.fired-at-target 00000001
 timer.ARMED-after 00000000

@@ -20,9 +20,9 @@
 #     an edge's interrupt, the SIO's divider, spinlocks and FIFOs, and
 #     the flash's JEDEC ID, unique ID, status and data through the SSI.
 #     Its output must be pico.txt, the values the datasheet gives (and the
-#     SDK where the datasheet quotes it); stderr the LED's changes at their
-#     times (pico-led.txt) and the warnings of a peripheral read while
-#     held in reset.
+#     SDK where the datasheet quotes it); stderr the LED's changes
+#     (pico-led.txt), its blinks 500 us of the timer apart at the board's
+#     time, and the warnings of a peripheral read while held in reset.
 #  3. The board's inputs: BOOTSEL pressed (--set), bytes on UART0's
 #     receiver (--input).
 #  4. A flash with no valid boot2 is refused as the bootrom refuses it; the
@@ -122,13 +122,18 @@ EOF
 fi
 cmp -s "$out/pico.txt" $d/pico.txt ||
     { diff $d/pico.txt "$out/pico.txt"; fail "the Pico is not as the RP2040's datasheet has it (pico.txt)"; }
-grep '^pico: ' "$out/pico.err" > "$out/pico-led.txt"
+grep '^pico: ' "$out/pico.err" | sed 's/ at [0-9.]* ms$//' > "$out/pico-led.txt"
 cmp -s "$out/pico-led.txt" $d/pico-led.txt ||
     { diff $d/pico-led.txt "$out/pico-led.txt"; fail "the LED's changes (pico-led.txt)"; }
+# the three blinks: each change 500 us of the timer after the one before
+grep '^pico: ' "$out/pico.err" | sed -n '1,7s/.* at \([0-9.]*\) ms$/\1/p' |
+    awk 'NR > 1 { d = $1 - p; if (d < 0.4995 || d > 0.5005) bad = 1 } { p = $1 }
+         END { exit bad || NR != 7 }' ||
+    { grep '^pico: ' "$out/pico.err"; fail "the LED's blinks are not 500 us apart"; }
 sed 's/pc 0x[0-9a-f]*/pc/' "$out/pico.err" | grep '^embsim: warning' > "$out/pico-warn.txt"
 cmp -s "$out/pico-warn.txt" $d/pico-warn.txt ||
     { diff $d/pico-warn.txt "$out/pico-warn.txt"; fail "a read of a peripheral held in reset does not warn"; }
-echo "embsim-pico: pico.c's $(grep -c ' ' $d/pico.txt) values as the RP2040's datasheet has them, the LED's $(grep -c . $d/pico-led.txt) changes at their times"
+echo "embsim-pico: pico.c's $(grep -c ' ' $d/pico.txt) values as the RP2040's datasheet has them, the LED's $(grep -c . $d/pico-led.txt) changes, its blinks 500 us apart"
 
 # ---- 3. the board's inputs ------------------------------------------------------
 run bootsel "$out/pico.elf" --set BOOTSEL=pressed

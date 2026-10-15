@@ -134,6 +134,11 @@ int main(void)
 
     unreset(R_IO_BANK0 | R_PLL_SYS | R_TIMER | R_UART0);
     uint32_t done1 = RESETS->RESET_DONE;
+    /* a byte written before clk_peri runs waits in the FIFO */
+    UART0->UARTLCR_H = (3u << 5) | (1u << 4);   /* 8 bits, FIFOs */
+    UART0->UARTCR = (1u << 0) | (1u << 8);      /* UARTEN, TXE */
+    UART0->UARTDR = '<';
+    uint32_t fr_noclk = UART0->UARTFR;
 
     /* ---- the crystal's startup delay, timed on the ring oscillator ---- */
     /* the tick from clk_ref, the ROSC at 6.5 MHz: / 6 */
@@ -238,6 +243,7 @@ int main(void)
     line("boot.PSM.DONE", psm_done);
     line("held.UARTCR", held_cr);
     line("held.UARTIBRD", held_ibrd);
+    line("uart.FR-no-clk_peri", fr_noclk);
     line("resets.RESET_DONE", done1);
     line("xosc.STATUS-starting", stable0);
     /* 47 x 256 crystal cycles, 1.0027 ms: 1086 ticks of 6.5 MHz / 6 */
@@ -308,11 +314,20 @@ int main(void)
     /* ---- the timer: 64 bits, latched, and an alarm --------------------- */
     TIMER->TIMELW = 0xfffffff0u;
     TIMER->TIMEHW = 1;
-    uint32_t lo = TIMER->TIMELR, hi = TIMER->TIMEHR;
-    line("timer.set-hi", hi);
+    uint32_t lo = TIMER->TIMELR;                /* latches the high half */
+    delay_us(20);                               /* the low half wraps */
+    uint32_t hi = TIMER->TIMEHR;
     line("timer.set-lo-near", lo - 0xfffffff0u < 4);
-    delay_us(20);
+    line("timer.latched-hi", hi);
     line("timer.carried", TIMER->TIMERAWH);
+    line("timer.unlatched-hi", TIMER->TIMEHR);
+    /* the watchdog's counter: two a tick (RP2040-E1) */
+    WATCHDOG->LOAD = 0x10000;
+    WATCHDOG->CTRL = 1u << 30;
+    delay_us(100);
+    uint32_t wd = WATCHDOG->CTRL & 0xffffff;
+    WATCHDOG->CTRL = 0;
+    line("wd.counts-twice", 0x10000 - wd >= 198 && 0x10000 - wd <= 206);
     TIMER->INTE = 1;
     NVIC_ICPR = 1u << 0;
     NVIC_ISER = 1u << 0;

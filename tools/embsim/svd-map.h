@@ -30,12 +30,10 @@ struct svdmap;
 /* A part's bus rules beyond the SVD's (struct board_desc's `rules`):
  *   RF_ATOMIC_ALIASES  each peripheral's registers again at +0x1000, where
  *                      a write XORs its bits into the register, +0x2000
- *                      (sets them) and +0x3000 (clears them); a read there
- *                      reads the register. The RP2040's, outside the SIO
- *                      (its datasheet, 2.1.2): natively, a bit the write
- *                      does not name is not written at all; through the
- *                      bus interposer of its UARTs, SPI, I2C and SSI, a
- *                      read of the register and a write of the result;
+ *                      (sets them) and +0x3000 (clears them), a bit the
+ *                      write does not name not written at all; a read
+ *                      there reads the register. The RP2040's, outside the
+ *                      SIO (its datasheet, 2.1.2);
  *   RF_WIDE_WRITES     a byte or halfword write to a 32-bit register writes
  *                      all of it, with the data repeated across the bus's
  *                      four bytes, as the RP2040's IO registers do (2.1.4):
