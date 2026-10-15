@@ -189,7 +189,7 @@ define `__GNUC__` when compiling C.
 | `inline` | Yes | See [Inline functions](#inline-functions). |
 | `restrict` | Supported | Accepted. EmbCC does not use it for optimization. |
 | Variable length arrays | Partial | See [Variable length arrays](#variable-length-arrays). Not available on AVR. |
-| Variably modified types: pointers to VLAs, VLA parameters `int a[n][m]`, `[*]` | Supported | |
+| Variably modified types: pointers to VLAs, VLA parameters `int a[n][m]`, `[*]` | Supported | A definition evaluates its parameters' lengths on entry, the outermost too, though the parameter is a pointer: `int a[i++]` increments `i`. A length is an assignment-expression, so `int a[i += 2]` is one. |
 | `static` and qualifiers in array parameters, `int a[static 4]` | Supported | The qualifiers apply to the pointer the parameter becomes: `int a[const 4]` is `int *const a`. `static` promises at least that many elements and changes no code. Outside a parameter: `expected an expression, got 'static'`. |
 | Flexible array members | Supported | An initializer for the flexible member is accepted only on a static object, which is a GNU extension. On an automatic object: `'l' is not static, so its flexible array member 'd' cannot be initialized: the object has no room for the elements`. |
 | Designated initializers | Supported | |
