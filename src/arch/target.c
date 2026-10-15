@@ -368,6 +368,17 @@ int target_int_size(void)       { return g_model[g_arch].it; }
 int target_xlen(void)           { return g_model[g_arch].ptr * 8; }
 int target_long_size(void)      { return g_model[g_arch].lng; }
 int target_max_scalar_align(void) { return g_model[g_arch].maxal; }
+/* The most a GNU vector type is aligned to, 0 for its own size: GCC's 16
+ * on x86-64 (without AVX) and AArch64, AAPCS's 8 on Arm, and clang's
+ * uncapped size on the rest. */
+int target_vector_align_cap(void)
+{
+    switch (g_arch) {
+    case TARGET_X86_64: case TARGET_AARCH64: return 16;
+    case TARGET_THUMB: return 8;
+    default: return 0;
+    }
+}
 int target_default_new_align(void)
 {
     switch (g_arch) {
