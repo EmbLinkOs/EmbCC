@@ -147,17 +147,17 @@ const struct board_desc boards[] = {
     { "lm3s6965evb", "cortex-m", "cortex-m3", 3,
       { { 0, KB(256), MEM_FLASH, 0, 0, 0 }, { 0x20000000u, KB(64), MEM_RAM, 1, 0, 0 } },
       { { "pl011", 0x4000C000u, 0x1000 }, PERIPHERALS },
-      BITBAND, 0, 0 },
+      BITBAND, 0, 0, 0 },
     { "mps2-an385", "cortex-m", "cortex-m3", 3, MPS2_MEM,
-      { { "cmsdk-uart", 0x40004000u, 0x1000 }, PERIPHERALS }, BITBAND, 0, 0 },
+      { { "cmsdk-uart", 0x40004000u, 0x1000 }, PERIPHERALS }, BITBAND, 0, 0, 0 },
     { "mps2-an386", "cortex-m", "cortex-m4", 3, MPS2_MEM,
-      { { "cmsdk-uart", 0x40004000u, 0x1000 }, PERIPHERALS }, BITBAND, 0, 0 },
+      { { "cmsdk-uart", 0x40004000u, 0x1000 }, PERIPHERALS }, BITBAND, 0, 0, 0 },
     { "mps2-an500", "cortex-m", "cortex-m7", 3, MPS2_MEM,
-      { { "cmsdk-uart", 0x40004000u, 0x1000 }, PERIPHERALS }, BITBAND, 0, 0 },
+      { { "cmsdk-uart", 0x40004000u, 0x1000 }, PERIPHERALS }, BITBAND, 0, 0, 0 },
     { "microbit", "cortex-m", "cortex-m0", 2,
       { { 0, KB(256), MEM_FLASH, 0, 0, 0 }, { 0x20000000u, KB(16), MEM_RAM, 1, 0, 0 } },
       { { "nrf51-uart", 0x40002000u, 0x1000 }, PERIPHERALS },
-      { { 0, 0, 0 } }, 0, 0 },
+      { { 0, 0, 0 } }, 0, 0, 0 },
     /* an STM32F405, as QEMU's netduinoplus2 has it: 1 MiB of flash at
      * 0x08000000, seen at 0 too, where the core finds its vector table;
      * 128 KiB of SRAM and 64 KiB of CCM RAM. The peripherals are ST's
@@ -168,7 +168,7 @@ const struct board_desc boards[] = {
         { 0x20000000u, KB(128), MEM_RAM, 1, 0, 0 },
         { 0x10000000u, KB(64), MEM_RAM, 0, 0, 0 } },
       { { 0, 0, 0 } },
-      BITBAND, "STM32F405.svd", stm32_models },
+      BITBAND, "STM32F405.svd", stm32_models, 0 },
     /* QEMU's virt, RV32 or RV64 by the image: the reset ROM where the
      * core starts, the test device that ends a run, the CLINT, the
      * NS16550A, and the PLIC's space reading as zero */
@@ -177,7 +177,7 @@ const struct board_desc boards[] = {
       { { "virt-rom", 0x1000, 0xf000 }, { "sifive-test", 0x100000, 0x1000 },
         { "clint", 0x2000000, 0x10000 }, { "ns16550a", 0x10000000u, 0x100 },
         { "zero", 0x0c000000u, 0x600000 } },
-      { { 0, 0, 0 } }, 0, 0 },
+      { { 0, 0, 0 } }, 0, 0, 0 },
     /* QEMU's uno, the ATmega328P: 32 KiB of flash at 0, and the data
      * space at 0x800000 (gdb's numbering): 2 KiB of SRAM at 0x100,
      * USART0, Timer/Counter1, the I/O registers that keep their values,
@@ -186,7 +186,7 @@ const struct board_desc boards[] = {
       { { 0, KB(32), MEM_FLASH, 0, 0, 0 }, { 0x800100u, KB(2), MEM_RAM, 1, 0, 0 } },
       { { "avr-usart", 0x8000c0u, 7 }, { "avr-timer16", 0x800080u, 12 },
         { "avr-io", 0x800020u, 0xe0 }, { "zero", 0x800900u, 0xf700 } },
-      { { 0, 0, 0 } }, 0, 0 },
+      { { 0, 0, 0 } }, 0, 0, 0 },
     /* QEMU's malta with a 24Kc, as tests/harness/mips runs it: 64 MiB of
      * RAM at 0 (0x80000000 in kseg0), the FPGA's UART with its registers
      * eight bytes apart and its SOFTRES, and the boot ROM where the core
@@ -196,47 +196,47 @@ const struct board_desc boards[] = {
       { { "ns16550a-8", 0x1f000900u, 0x40 },
         { "malta-fpga", 0x1f000000u, 0x100000 },
         { "malta-rom", 0x1fc00000u, 0x400000 } },
-      { { 0, 0, 0 } }, 0, 0 },
+      { { 0, 0, 0 } }, 0, 0, 0 },
     /* the PIC32MZ2048EFH100 alone: the core in EIC mode, the memory, and
      * every register the device pack's ATDF describes, with the models
      * of its EVIC, oscillator, timers, ports, UARTs, PMP and ADC */
     { "pic32mz2048efh100", "mips", "pic32mz", 0, PIC32MZ_MEM,
       { { 0, 0, 0 } }, { { 0, 0, 0 } },
-      "PIC32MZ2048EFH100.atdf", pic32mz_models },
+      "PIC32MZ2048EFH100.atdf", pic32mz_models, 0 },
     /* Microchip's Explorer 16/32 with the PIC32MZ EF PIM: the part, and
      * the board's LEDs, buttons, potentiometer, temperature sensor and
      * LCD (pic-boards.c) */
     { "explorer16-32", "mips", "pic32mz", 0, PIC32MZ_MEM,
       { { "explorer16-32", 0, 0 } }, { { 0, 0, 0 } },
-      "PIC32MZ2048EFH100.atdf", pic32mz_models },
+      "PIC32MZ2048EFH100.atdf", pic32mz_models, 0 },
     /* Microchip's Curiosity PIC32MZ EF 2.0, a PIC32MZ2048EFM144: its LEDs
      * and switches (pic-boards.c) */
     { "curiosity-pic32mz-ef-2", "mips", "pic32mz", 0, PIC32MZ_MEM,
       { { "curiosity-pic32mz-ef-2", 0, 0 } }, { { 0, 0, 0 } },
-      "PIC32MZ2048EFM144.atdf", pic32mz_models },
+      "PIC32MZ2048EFM144.atdf", pic32mz_models, 0 },
     /* the Explorer 16/32 with the PIC32MX795F512L PIM: the part (its EDC),
      * and the board's LEDs, buttons, sensors, LCD and EEPROM */
     { "explorer16-32-pic32mx", "mips", "pic32mx", 0, PIC32MX795_MEM,
       { { "explorer16-32-pic32mx", 0, 0 } }, { { 0, 0, 0 } },
-      "PIC32MX795F512L.PIC", pic32mx_models },
+      "PIC32MX795F512L.PIC", pic32mx_models, 0 },
     /* the PIC24FJ1024GB610 alone: the core, the memory, and every register
      * the device pack's EDC describes, with the models of its interrupt
      * controller, oscillator, PPS lock, timers, UARTs, ports, EPMP, ADC
      * and SPI */
     { "pic24fj1024gb610", "pic24", "pic24fj1024gb610", 0, PIC24FJ1024_MEM,
       { { 0, 0, 0 } }, { { 0, 0, 0 } },
-      "PIC24FJ1024GB610.PIC", pic24f_models },
+      "PIC24FJ1024GB610.PIC", pic24f_models, 0 },
     /* the Explorer 16/32 with the PIC24FJ1024GB610 PIM: its LEDs, buttons,
      * potentiometer, temperature sensor, LCD and serial EEPROM
      * (pic-boards.c) */
     { "explorer16-32-pic24", "pic24", "pic24fj1024gb610", 0, PIC24FJ1024_MEM,
       { { "explorer16-32-pic24", 0, 0 } }, { { 0, 0, 0 } },
-      "PIC24FJ1024GB610.PIC", pic24f_models },
+      "PIC24FJ1024GB610.PIC", pic24f_models, 0 },
     /* the Explorer 16/32 with the dsPIC33EP512MU810 PIM: the part (its
      * EDC), and the board's LEDs, buttons, sensors, LCD and EEPROM */
     { "explorer16-32-dspic33", "pic24", "dspic33ep512mu810", 0, DSPIC33EP512_MEM,
       { { "explorer16-32-dspic33", 0, 0 } }, { { 0, 0, 0 } },
-      "DSPIC33EP512MU810.PIC", pic24e_models },
+      "DSPIC33EP512MU810.PIC", pic24e_models, 0 },
 };
 const int nboards = (int)(sizeof boards / sizeof boards[0]);
 

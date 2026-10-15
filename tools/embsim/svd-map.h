@@ -27,6 +27,21 @@ struct svd_periph;
 struct svd_field;
 struct svdmap;
 
+/* A part's bus rules beyond the SVD's (struct board_desc's `rules`):
+ *   RF_ATOMIC_ALIASES  each peripheral's registers again at +0x1000, where
+ *                      a write XORs its bits into the register, +0x2000
+ *                      (sets them) and +0x3000 (clears them); a read there
+ *                      reads the register. The RP2040's, outside the SIO
+ *                      (its datasheet, 2.1.2): natively, a bit the write
+ *                      does not name is not written at all; through the
+ *                      bus interposer of its UARTs, SPI, I2C and SSI, a
+ *                      read of the register and a write of the result;
+ *   RF_WIDE_WRITES     a byte or halfword write to a 32-bit register writes
+ *                      all of it, with the data repeated across the bus's
+ *                      four bytes, as the RP2040's IO registers do (2.1.4):
+ *                      a strb of 0xa5 writes 0xa5a5a5a5. */
+enum { RF_ATOMIC_ALIASES = 1, RF_WIDE_WRITES = 2 };
+
 /* a field's access, its modifiedWriteValues and its readAction */
 enum { ACC_RW, ACC_RO, ACC_WO, ACC_W1, ACC_RW1 };   /* W1: writeOnce */
 enum {
@@ -71,11 +86,14 @@ struct rf_periph {
     void *ctx;
     /* its clock: while `gate`'s `gate_mask` bits are clear, a read gives 0
      * and a write is ignored, as the part's peripherals do with their
-     * clock off (a model sets it: stm32-rcc's) */
+     * clock off (a model sets it: stm32-rcc's). With `gate_held`, its
+     * reset instead: while the bits are set the peripheral is held in
+     * reset, a read gives the registers' reset values and a write is
+     * ignored (the RP2040's RESETS: rp2040.c) */
     struct rf_reg *gate;
     u64 gate_mask;
     const char *gate_name;          /* RCC.APB1ENR.USART2EN */
-    int gate_warned;
+    int gate_warned, gate_held;
 };
 
 /* a model type: the catalogue is in boards.c */
@@ -110,6 +128,11 @@ extern const char *svd_dfp;
 
 /* ---- for the models --------------------------------------------------- */
 
+/* the peripheral is reset: its registers to their reset values, and its
+ * model's reset hook (a part's reset controller: rp2040.c's RESETS) */
+void rf_periph_reset(struct rf_periph *p);
+/* whether the peripheral is gated: its clock off, or held in reset */
+int rf_gated(const struct rf_periph *p);
 /* the peripheral of that name, or 0 */
 struct rf_periph *rf_periph(struct svdmap *m, const char *name);
 /* the i'th peripheral mapped, or 0 past the last */

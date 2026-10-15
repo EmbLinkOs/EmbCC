@@ -52,6 +52,7 @@ struct svdmap {
     struct device tk[MAX_TICKERS];  /* the models whose clock runs */
     int ntk;
     int faults;                     /* bus faults reported */
+    int rules;                      /* the board's RF_* */
 };
 
 static const struct dev_ops rf_plain_ops;
@@ -286,6 +287,7 @@ struct svdmap *svdmap_create(struct sim *s, const char *path)
         die("out of memory");
     m->s = s;
     m->path = path;
+    m->rules = s->board ? s->board->rules : 0;
     size_t pl = strlen(path);
     m->d = pl > 5 && !strcmp(path + pl - 5, ".atdf") ? atdf_load(path)
          : pl > 4 && !strcmp(path + pl - 4, ".PIC") ? edc_load(path)
@@ -784,13 +786,24 @@ static void hole(struct svdmap *m, u32 a, int n, int write)
         fprintf(stderr, "no peripheral of %s is there\n", m->d->name);
 }
 
-static int gated(const struct rf_periph *p)
+int rf_gated(const struct rf_periph *p)
 {
-    return p->gate && !(p->gate->value & p->gate_mask);
+    return p->gate && (!(p->gate->value & p->gate_mask)) != p->gate_held;
 }
 
-/* an access to a peripheral whose clock is off: the trace says so, and
- * the first one is a warning */
+void rf_periph_reset(struct rf_periph *p)
+{
+    for (int i = 0; i < p->nreg; i++) {
+        p->reg[i]->value = p->reg[i]->reset;
+        p->reg[i]->once = 0;
+    }
+    if (p->ops->reset)
+        p->ops->reset(p->ctx);
+}
+
+/* An access to a peripheral whose clock is off, or that is held in
+ * reset: the trace says so, and the first one is a warning. A read gives
+ * 0 with the clock off, the registers' reset values in reset (`v`). */
 static void gated_access(struct svdmap *m, struct rf_periph *p, u32 a, int n,
                          int write, u32 v)
 {
@@ -798,38 +811,107 @@ static void gated_access(struct svdmap *m, struct rf_periph *p, u32 a, int n,
     if (s->bus.debug)
         return;
     struct rf_reg *r = reg_at(m, a, n);
+    const char *why = p->gate_held ? "it is held in reset" : "its clock is off";
     if (r->traced) {
         tr_head(s, write ? 'W' : 'R');
         if (write)
-            fprintf(stderr, "%s.%s 0x%08x ignored: its clock is off (%s)\n",
-                    p->name, r->name, v, p->gate_name);
+            fprintf(stderr, "%s.%s 0x%08x ignored: %s (%s)\n", p->name,
+                    r->name, v, why, p->gate_name);
         else
-            fprintf(stderr, "%s.%s 0x00000000: its clock is off (%s)\n",
-                    p->name, r->name, p->gate_name);
+            fprintf(stderr, "%s.%s 0x%08x: %s (%s)\n", p->name, r->name, v,
+                    why, p->gate_name);
     }
     if (!p->gate_warned) {
         p->gate_warned = 1;
         fflush(stdout);
         fprintf(stderr, "embsim: warning: %s at pc 0x%08x: %s.%s %s while "
-                "its clock is off (%s is 0)\n", write ? "a write" : "a read",
+                "%s (%s is %d)\n", write ? "a write" : "a read",
                 s->cpu->ops->pc(s->cpu), p->name, r->name,
-                write ? "is ignored" : "reads as 0", p->gate_name);
+                write ? "is ignored" : p->gate_held ? "reads its reset value"
+                                                    : "reads as 0",
+                why, p->gate_name, p->gate_held);
     }
+}
+
+/* RF_ATOMIC_ALIASES: the register an address at +0x1000, +0x2000 or
+ * +0x3000 from it names, and which alias (1 XOR, 2 set, 3 clear); 0 for
+ * an address that is not an alias -- one of the file's own registers, or
+ * the SIO's space (0xD0000000 up), which has none */
+static struct rf_reg *atomic_alias(struct svdmap *m, u32 a, int n, int *kind)
+{
+    if (!(m->rules & RF_ATOMIC_ALIASES) || !(a & 0x3000u) || a >= 0xd0000000u ||
+        reg_at(m, a, n))
+        return 0;
+    struct rf_reg *r = reg_at(m, a & ~0x3000u, n);
+    if (!r || r->base || (r->p->base & ~0x3fffu) != (a & ~0x3fffu))
+        return 0;
+    *kind = (int)(a >> 12 & 3);
+    return r;
+}
+
+/* the RP2040's bus interposer, in front of the peripherals that have no
+ * atomic aliases of their own (its datasheet, 2.1.2) */
+static int interposed(const struct rf_periph *p)
+{
+    static const char *const names[] = { "UART", "SPI", "I2C", "SSI" };
+    for (size_t i = 0; i < sizeof names / sizeof names[0]; i++)
+        if (!strncmp(p->name, names[i], strlen(names[i])))
+            return 1;
+    return 0;
+}
+
+/* A write of `v` through an atomic alias of r: the bits set in v are
+ * XORed, set or cleared. Natively the other bits are not written at all:
+ * the model is given a whole word in which each of them is what a write
+ * leaves alone -- a plain field's value as it is, 0 for oneToClear and
+ * its like, 1 for zeroToClear and its. Through the interposer, the
+ * register is read (as the program would, with what that does) and the
+ * result written whole. */
+static void alias_write(struct svdmap *m, struct rf_reg *r, int kind, u32 v)
+{
+    struct rf_periph *p = r->p;
+    u32 off = r->addr - p->base;
+    u64 old;
+    if (interposed(p))
+        old = p->ops->read ? p->ops->read(p->ctx, off, 4) : 0;
+    else
+        old = r->value;
+    u64 hit = v, w = 0;
+    for (int i = 0; i < r->nf; i++) {
+        const struct rf_field *f = &r->f[i];
+        u64 fm = field_mask(f), keep;
+        if (interposed(p))
+            keep = old & fm;
+        else if (f->mwv == MWV_MODIFY)
+            keep = f->acc == ACC_WO || f->acc == ACC_W1 ? 0 : old & fm;
+        else
+            keep = f->mwv >= MWV_0CLR && f->mwv <= MWV_0TOG ? fm : 0;
+        u64 to = kind == 1 ? ~old : kind == 2 ? ~0ULL : 0;
+        w |= (keep & ~hit) | (to & hit & fm);
+    }
+    (void)m;
+    if (p->ops->write)
+        p->ops->write(p->ctx, off, 4, (u32)w);
 }
 
 static u32 map_read(void *ctx, u32 off, int n)
 {
     struct svdmap *m = ctx;
     u32 a = m->lo + off, v = 0;
+    int kind;
+    if (atomic_alias(m, a, n, &kind))
+        a &= ~0x3000u;              /* a read there is the register's */
     struct rf_reg *r = reg_at(m, a, n);
     if (!r) {
         hole(m, a, n, 0);
         return 0;
     }
     struct rf_periph *p = r->p;
-    if (gated(p)) {
-        gated_access(m, p, a, n, 0, 0);
-        return 0;
+    if (rf_gated(p)) {
+        if (p->gate_held)
+            access(m, a, n, &v, 0, 0);
+        gated_access(m, p, a, n, 0, v);
+        return v;
     }
     if (r->base)
         return 0;                   /* CLR, SET, INV read as 0 */
@@ -863,14 +945,31 @@ static void map_write(void *ctx, u32 off, int n, u32 v)
 {
     struct svdmap *m = ctx;
     u32 a = m->lo + off;
-    struct rf_reg *r = reg_at(m, a, n);
+    int kind = 0;
+    struct rf_reg *r = atomic_alias(m, a, n, &kind);
+    if (r)
+        a &= ~0x3000u;              /* the register the alias names */
+    else
+        r = reg_at(m, a, n);
+    if (r && n < 4 && r->bytes == 4 && (m->rules & RF_WIDE_WRITES)) {
+        /* the byte or halfword across the bus's four lanes, to the
+         * whole register */
+        v &= n == 1 ? 0xffu : 0xffffu;
+        v = n == 1 ? v * 0x01010101u : v * 0x00010001u;
+        a &= ~3u;
+        n = 4;
+    }
     if (!r) {
         hole(m, a, n, 1);
         return;
     }
     struct rf_periph *p = r->p;
-    if (gated(p)) {
+    if (rf_gated(p)) {
         gated_access(m, p, a, n, 1, v);
+        return;
+    }
+    if (kind) {
+        alias_write(m, r, kind, v);
         return;
     }
     if (r->base) {

@@ -139,7 +139,7 @@ void sim_init(struct sim *s, const struct board_desc *bd, const char *model,
                 bd->name, bd->svd);
     }
     struct svdmap *m = svd ? svdmap_create(s, svd) : 0;
-    for (int i = 0; i < 6 && bd->dev[i].type; i++) {
+    for (int i = 0; i < BOARD_DEVS && bd->dev[i].type; i++) {
         if (m && !strcmp(bd->dev[i].type, "zero")) {
             svdmap_add(s, m);
             m = 0;
@@ -170,7 +170,7 @@ static void load(struct sim *s)
 void sim_load(struct sim *s, u32 ram_size, const char *image)
 {
     const struct board_desc *bd = s->board;
-    for (int i = 0; i < 4 && bd->mem[i].size; i++)
+    for (int i = 0; i < BOARD_MEMS && bd->mem[i].size; i++)
         if (bd->mem[i].kind == MEM_ALIAS)
             bus_add_mirror(&s->bus, bd->mem[i].base, bd->mem[i].target);
         else {

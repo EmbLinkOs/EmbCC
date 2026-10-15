@@ -94,8 +94,8 @@ struct watch {
     int kind;
 };
 
-#define BUS_REGIONS 8
-#define BUS_DEVICES 16
+#define BUS_REGIONS 12
+#define BUS_DEVICES 24
 #define BUS_ALIASES 4
 #define BUS_WATCHES 32
 
@@ -240,13 +240,16 @@ struct dev_desc {
     u32 base, size;
 };
 
+#define BOARD_MEMS 8
+#define BOARD_DEVS 8
+
 struct board_desc {
     const char *name;
     const char *core;               /* a name in boards.c's core list */
     const char *cpu;                /* the core's model */
     int prio_bits;                  /* NVIC priority bits implemented */
-    struct mem_desc mem[4];         /* ends with a size of 0 */
-    struct dev_desc dev[6];         /* ends with a type of 0 */
+    struct mem_desc mem[BOARD_MEMS];   /* ends with a size of 0 */
+    struct dev_desc dev[BOARD_DEVS];   /* ends with a type of 0 */
     struct alias bitband[2];        /* ends with a size of 0 */
     /* the part's CMSIS-SVD file, by its name: its peripherals' registers
      * are on the bus (svd-map.c), found with --svd or EMBSIM_SVD_PATH */
@@ -254,6 +257,9 @@ struct board_desc {
     /* the behavioural models layered over those registers, by the SVD's
      * peripheral names; ends with a name of 0 */
     const struct model_desc *models;
+    /* how the part's bus treats those registers, beyond the SVD: RF_*
+     * (svd-map.h), 0 for the plain rules */
+    int rules;
 };
 
 /* a model for the SVD's peripherals whose names match `periph` (a `*`
