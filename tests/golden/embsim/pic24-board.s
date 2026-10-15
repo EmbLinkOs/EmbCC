@@ -7,6 +7,8 @@
 ;   - Timer1's interrupt, three times: the controller, the vector, RETFIE;
 ;   - LATA's LEDs on and off;
 ;   - S3 (RD6) pressed and S6 (RD7) released, pulled up by the board;
+;   - program memory the image leaves out, read by TBLRDL and TBLRDH:
+;     erased flash, 0xFFFFFF (and the phantom byte 0);
 ;   - the TC1047A on AN4 and the potentiometer on AN5, converted at 10
 ;     and 12 bits, the sample ended by the program (SSRC 0);
 ;   - the LCD on the EPMP: its chip select 1 at EDS 0x20000, the command
@@ -18,6 +20,7 @@
 ;     ignored.
         .equ SR, 0x42
         .equ DSWPAG, 0x34
+        .equ TBLPAG, 0x54
         .equ IFS0, 0x88
         .equ IEC0, 0x98
         .equ OSCCON, 0x100
@@ -101,6 +104,16 @@ wait1:  mov COUNT, w0
         lsr w0, #6, w0
         .word 0x6000e3                  ; and w0, #3, w1 -> W1
         mov w1, w0
+        rcall print
+        rcall newline
+
+; ---- program memory the image leaves out: erased ------------------------------
+        mov #0, w0
+        mov w0, TBLPAG
+        mov #0x8000, w2
+        .word 0xba0012                  ; tblrdl [w2], w0
+        rcall print
+        .word 0xba8012                  ; tblrdh [w2], w0
         rcall print
         rcall newline
 

@@ -784,7 +784,9 @@ and the UART's bit timing.
   address error, as is a word access at an odd address. W15 as a
   pointer below 0x0800 or above SPLIM is a stack error.
 - **Table reads** of program and configuration memory (TBLPAG); table
-  writes go to the flash's latches, which are not modelled.
+  writes go to the flash's latches, which are not modelled. Program
+  memory an image leaves out reads as erased flash does: 0xFFFFFF
+  (NOPR, if it is run), the phantom byte 0.
 - **Exceptions.** Traps (address, stack and math errors, the hard and
   soft ones) and interrupts through the vector table at 0x000004: the
   PC and SR's low byte with IPL3 pushed, the priority raised (IPL3 for

@@ -15,7 +15,8 @@
 #     tests/golden/embsim/pic24-asm.awk into an Intel HEX image).
 #  4. The peripherals and the board (pic24-board.s), on explorer16-32-pic24
 #     at 30 degrees with S3 pressed: Timer1's interrupt, the LEDs, the
-#     buttons, the ADC's conversions of the sensors, the LCD on the EPMP,
+#     buttons, erased program memory (0xFFFFFF) through TBLRDL and TBLRDH,
+#     the ADC's conversions of the sensors, the LCD on the EPMP,
 #     the 25LC256 on SPI1 behind the Peripheral Pin Select and its lock;
 #     and its run recorded and replayed, the board's inputs with it.
 #  5. With EMBSIM_THERMO24_ELF, an XC16 build of a thermometer project for
@@ -94,7 +95,7 @@ awk -f "$ASM" tests/golden/embsim/pic24-board.s tests/golden/embsim/pic24-board.
 "$EMBSIM" "$out/board.hex" --board explorer16-32-pic24 --dfp "$DFP" --max-insns 2000000 \
     --set temperature=30 --set S3=pressed > "$out/board.out" 2> "$out/board.err"; st=$?
 [ $st = 0 ] || { cat "$out/board.out" "$out/board.err"; fail "pic24-board.s exits $st"; }
-printf 'B\n 0003\n 0002\n 00F8 0200 03E0\nW 005A\n.\n' > "$out/board.want"
+printf 'B\n 0003\n 0002\n FFFF 00FF\n 00F8 0200 03E0\nW 005A\n.\n' > "$out/board.want"
 cmp -s "$out/board.out" "$out/board.want" || {
     diff "$out/board.want" "$out/board.out"
     fail "the peripherals' results are not the program's expected ones"; }
