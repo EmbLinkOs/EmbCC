@@ -49,7 +49,9 @@ struct svdmap {
     struct rf_reg **reg;            /* their registers, by address */
     int nreg;
     u32 lo, hi;                     /* the span the device covers */
-    struct device tk[MAX_TICKERS];  /* the models whose clock runs */
+    /* the peripherals whose model's clock runs: their hooks are looked up
+     * at each tick, so a model may start its clock while it is created */
+    struct rf_periph *tk[MAX_TICKERS];
     int ntk;
     int faults;                     /* bus faults reported */
     int rules;                      /* the board's RF_* */
@@ -364,6 +366,12 @@ static struct rf_reg *reg_at(struct svdmap *m, u32 a, int n)
     if (lo < m->nreg && m->reg[lo]->addr < (u64)a + (u64)n)
         return m->reg[lo];
     return 0;
+}
+
+struct rf_reg *rf_reg_at(struct svdmap *m, u32 addr)
+{
+    struct rf_reg *r = reg_at(m, addr, 1);
+    return r && r->addr == addr ? r : 0;
 }
 
 static int reg_index(struct svdmap *m, const struct rf_reg *r)
@@ -974,12 +982,11 @@ void rf_clock(struct rf_periph *p, int *running, int on)
     if (on) {
         if (m->ntk == MAX_TICKERS)
             die("too many peripheral clocks running");
-        m->tk[m->ntk].ops = p->ops;
-        m->tk[m->ntk++].ctx = p->ctx;
+        m->tk[m->ntk++] = p;
         return;
     }
     for (int i = 0; i < m->ntk; i++)
-        if (m->tk[i].ctx == p->ctx) {
+        if (m->tk[i] == p) {
             m->tk[i] = m->tk[--m->ntk];
             break;
         }
@@ -1005,8 +1012,8 @@ static void map_tick(void *ctx, u32 cycles)
 {
     struct svdmap *m = ctx;
     for (int i = 0; i < m->ntk; i++)
-        if (m->tk[i].ops->tick)
-            m->tk[i].ops->tick(m->tk[i].ctx, cycles);
+        if (m->tk[i]->ops->tick)
+            m->tk[i]->ops->tick(m->tk[i]->ctx, cycles);
 }
 
 static int map_next_event(void *ctx, u32 *cycles)
@@ -1015,7 +1022,7 @@ static int map_next_event(void *ctx, u32 *cycles)
     int any = 0;
     for (int i = 0; i < m->ntk; i++) {
         u32 c;
-        if (m->tk[i].ops->next_event && m->tk[i].ops->next_event(m->tk[i].ctx, &c) &&
+        if (m->tk[i]->ops->next_event && m->tk[i]->ops->next_event(m->tk[i]->ctx, &c) &&
             (!any || c < *cycles)) {
             *cycles = c;
             any = 1;

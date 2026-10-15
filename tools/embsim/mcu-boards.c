@@ -16,7 +16,11 @@
  *     chip select low (port 1, bit 1), which the program reads with the
  *     select let go (rp2040-io.c);
  *   - bluepill: the STM32F103C8 board sold as the "Blue Pill": its LED on
- *     PC13, lit low (to 3.3 V through a resistor); no user button. */
+ *     PC13, lit low (to 3.3 V through a resistor); no user button;
+ *   - nrf52840dk: Nordic's nRF52840 DK (its pins as Zephyr's board file
+ *     has them): LED1-4 on P0.13-16, lit low; BUTTON1-4 on P0.11, P0.12,
+ *     P0.24, P0.25, low when pressed, with no pull-up on the board (the
+ *     program enables the pin's own). */
 #include <stdlib.h>
 #include <string.h>
 
@@ -44,12 +48,22 @@ static const struct mled pico_leds[] = { { 0, 25, "LED", "GP25", 0 } };
 static const struct mbutton pico_buttons[] = { { 1, 1, "BOOTSEL", 1 } };
 static const struct mfixed pico_fixed[] = { { 0, 24, 1 } };
 static const struct mled bluepill_leds[] = { { 2, 13, "LED", "PC13", 1 } };
+static const struct mled dk_leds[] = {
+    { 0, 13, "LED1", "P0.13", 1 }, { 0, 14, "LED2", "P0.14", 1 },
+    { 0, 15, "LED3", "P0.15", 1 }, { 0, 16, "LED4", "P0.16", 1 },
+};
+static const struct mbutton dk_buttons[] = {
+    { 0, 11, "BUTTON1", 0 }, { 0, 12, "BUTTON2", 0 },
+    { 0, 24, "BUTTON3", 0 }, { 0, 25, "BUTTON4", 0 },
+};
 
 #define N(a) (int)(sizeof a / sizeof a[0])
 static const struct mboard mboards[] = {
     { "pico", pico_leds, N(pico_leds), pico_buttons, N(pico_buttons),
       pico_fixed, N(pico_fixed), 0, rp2040_pins_changed },
     { "bluepill", bluepill_leds, N(bluepill_leds), 0, 0, 0, 0, 0, stm32f1_pins_changed },
+    { "nrf52840dk", dk_leds, N(dk_leds), dk_buttons, N(dk_buttons), 0, 0, 0,
+      nrf_pins_changed },
 };
 
 #define MAXLED 8

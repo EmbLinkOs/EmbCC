@@ -137,6 +137,10 @@ struct rf_periph *rf_periph(struct svdmap *m, const char *name);
 struct rf_periph *rf_periph_at(struct svdmap *m, int i);
 /* the register of that name in the peripheral, or 0 */
 struct rf_reg *rf_reg(struct rf_periph *p, const char *name);
+/* the register mapped at that address (its first byte), whichever
+ * peripheral it is, or 0: for parts whose peripherals share their space
+ * (Nordic's UART0 and UARTE0) */
+struct rf_reg *rf_reg_at(struct svdmap *m, u32 addr);
 /* the bits of the register's field of that name, or 0 when it has none */
 u64 rf_mask(const struct rf_reg *r, const char *field);
 /* the program's read and write, as the SVD says the fields behave */

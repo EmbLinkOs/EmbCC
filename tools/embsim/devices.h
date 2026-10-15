@@ -167,6 +167,17 @@ void *rp2040_sio_create(struct sim *s, struct rf_periph *p);
 void *rp2040_uart_create(struct sim *s, struct rf_periph *p);
 void *rp2040_ssi_create(struct sim *s, struct rf_periph *p);
 
+/* the nRF52840's models over nrf52840.svd, and its FICR (nrf52.c) */
+extern const struct dev_ops nrf_clock_ops, nrf_gpio_ops, nrf_uart_ops;
+extern const struct dev_ops nrf_timer_ops, nrf_rtc_ops, nrf52_ficr_ops;
+void *nrf_clock_create(struct sim *s, struct rf_periph *p);
+void *nrf_gpio_create(struct sim *s, struct rf_periph *p);
+void *nrf_uart_create(struct sim *s, struct rf_periph *p);
+void *nrf_timer_create(struct sim *s, struct rf_periph *p);
+void *nrf_rtc_create(struct sim *s, struct rf_periph *p);
+void *nrf52_ficr_create(struct sim *s, const struct dev_desc *d);
+void nrf_pins_changed(struct sim *s);
+
 /* the boards around the microcontrollers: LEDs and buttons (mcu-boards.c;
  * a dev_desc's type names the board) */
 extern const struct dev_ops mcu_board_ops;

@@ -52,6 +52,19 @@ static const struct model_desc stm32f1_models[] = {
     { 0, 0 },
 };
 
+/* the nRF52840's (nrf52.c): CLOCK first, whose LFCLK the RTCs count on;
+ * UARTE0 before UART0, whose space it shares and model too */
+static const struct model_desc nrf52_models[] = {
+    { "CLOCK", "nrf-clock" },
+    { "P0", "nrf-gpio" },
+    { "P1", "nrf-gpio" },
+    { "UARTE*", "nrf-uart" },
+    { "UART0", "nrf-uart" },
+    { "TIMER*", "nrf-timer" },
+    { "RTC*", "nrf-rtc" },
+    { 0, 0 },
+};
+
 /* a PIC32MZ's models, over its ATDF (pic32.h); the EVIC first, which
  * the others raise their interrupts through, and the oscillator's, whose
  * bus dividers the timers read */
@@ -209,6 +222,17 @@ const struct board_desc boards[] = {
         { 0x20000000u, KB(20), MEM_RAM, 1, 0, 0 } },
       { { "bluepill", 0, 0 } },
       BITBAND, "STM32F103xx.svd", stm32f1_models, 0 },
+    /* Nordic's nRF52840 DK (PCA10056): the nRF52840, a Cortex-M4 with
+     * FPv4-SP and 3 NVIC priority bits at 64 MHz, 1 MiB of flash at 0,
+     * 256 KiB of RAM at 0x20000000 (and as code RAM at 0x00800000), its
+     * FICR; the peripherals Nordic's nrf52840.svd's; the DK's LEDs and
+     * buttons */
+    { "nrf52840dk", "cortex-m", "cortex-m4", 3,
+      { { 0, MB(1), MEM_FLASH, 0, 0, 0xffffffffu },
+        { 0x20000000u, KB(256), MEM_RAM, 1, 0, 0 },
+        { 0x00800000u, KB(256), MEM_ALIAS, 0, 0x20000000u, 0 } },
+      { { "nrf52840-ficr", 0x10000000u, 0x1000 }, { "nrf52840dk", 0, 0 } },
+      { { 0, 0, 0 } }, "nrf52840.svd", nrf52_models, 0 },
     /* QEMU's virt, RV32 or RV64 by the image: the reset ROM where the
      * core starts, the test device that ends a run, the CLINT, the
      * NS16550A, and the PLIC's space reading as zero */
@@ -350,6 +374,8 @@ static const struct dev_type dev_types[] = {
     { "rp2040-rom", &rp2040_rom_ops, rp2040_rom_create },
     { "pico", &mcu_board_ops, mcu_board_create },
     { "bluepill", &mcu_board_ops, mcu_board_create },
+    { "nrf52840dk", &mcu_board_ops, mcu_board_create },
+    { "nrf52840-ficr", &nrf52_ficr_ops, nrf52_ficr_create },
 };
 
 /* ---- the peripheral models, over an SVD's registers (svd-map.h) -------- */
@@ -360,6 +386,11 @@ static const struct model_type model_types[] = {
     { "stm32-usart", &stm32_usart_ops, stm32_usart_create },
     { "stm32-tim", &stm32_tim_ops, stm32_tim_create },
     { "stm32f1-gpio", &stm32f1_gpio_ops, stm32f1_gpio_create },
+    { "nrf-clock", &nrf_clock_ops, nrf_clock_create },
+    { "nrf-gpio", &nrf_gpio_ops, nrf_gpio_create },
+    { "nrf-uart", &nrf_uart_ops, nrf_uart_create },
+    { "nrf-timer", &nrf_timer_ops, nrf_timer_create },
+    { "nrf-rtc", &nrf_rtc_ops, nrf_rtc_create },
     { "pic32-evic", &pic32_evic_ops, pic32_evic_create },
     { "pic32-cfg", &pic32_cfg_ops, pic32_cfg_create },
     { "pic32-cru", &pic32_cru_ops, pic32_cru_create },
