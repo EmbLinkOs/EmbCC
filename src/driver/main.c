@@ -961,6 +961,49 @@ static int link_bounded(const char **inputs, int n, const char *exe,
     return lrc;
 }
 
+/* A hosted target's library is missing: which file, and what to do -- in
+ * a build tree, the make target that builds it (a plain `make` builds
+ * every one); installed, the install that puts it beside the compiler. */
+static void missing_runtime(const char *file, const char *triple, int cxx)
+{
+    int lin64 = !strncmp(triple, "x86_64-linux", 12);
+    int lina64 = !strncmp(triple, "aarch64-linux", 13);
+    const char *mk =
+        lin64 ? (cxx ? "libcxx-linux-x86_64" : "libc-linux-x86_64")
+        : lina64 ? (cxx ? "libcxx-linux-aarch64" : "libc-linux-aarch64")
+        : !strncmp(triple, "x86_64", 6) ? (cxx ? "libcxx-x86_64" : "libc-x86_64")
+        : !strncmp(triple, "aarch64-elf", 11) ? (cxx ? "libcxx-aarch64"
+                                                      : "libc-aarch64")
+        : cxx ? "libcxx-embedded" : NULL;
+    const char *lib = cxx ? "C++ runtime" : "C library";
+    if (paths_is_build_tree())
+        fprintf(stderr, "embcc: error: no %s for %s: its %s is not built; "
+                "`make%s%s` in %s builds it\n", file, triple, lib,
+                mk ? " " : "", mk ? mk : "", paths_lib_dir());
+    else
+        fprintf(stderr, "embcc: error: no %s for %s: its %s is not "
+                "installed; `make install` from EmbCC's source installs "
+                "every target's\n", file, triple, lib);
+    fprintf(stderr, "embcc: --print-search-dirs says where it looked\n");
+}
+
+/* embld inside a boundary: its refusals unwind to here (util.h), where
+ * with none they ended the process and left OUT.embcc-tmp.o behind for
+ * every undefined symbol or --rom-limit overflow. A function of its own,
+ * so that no local of the caller lives across the setjmp. */
+static int link_bounded(const char **inputs, int n, const char *exe,
+                        struct link_opts *lo)
+{
+    jmp_buf lb;
+    volatile int lrc = 1;
+    if (setjmp(lb) == 0) {
+        fatal_set_boundary(&lb);
+        lrc = embld_link(inputs, n, exe, lo);
+    }
+    fatal_set_boundary(NULL);
+    return lrc;
+}
+
 static int compile_and_link(const char *in, const char *out)
 {
     if (target_os_get() == TGT_OS_DARWIN)

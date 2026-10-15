@@ -243,3 +243,33 @@ for spec in "2:maybe-uninitialized" "3:maybe-uninitialized" \
 done
 echo "silent on a seqlock do-while and on loops left only by break; still
 warns when a break or a continue goes around the write"
+
+# A condition splits the state by its outcome. `if (a || (n = f()) < 0)
+# return; use(n);` writes n on the side that falls through -- the
+# condition false, both operands run -- and GCC is silent on it; EmbCC
+# said "may be used uninitialized", and EmbCC's own sources had to avoid
+# the shape. The same for &&, !, ?: and a three-operand chain. The sides
+# where the assignment may not have run still warn, as GCC's do.
+cat > "$out/conds.c" << 'EOF2'
+int g(void); int h(int);
+int a1(void) { int n; if (g() || (n = g()) < 0) return -1; return n; }
+int a2(void) { int n; if (g() && (n = g()) > 0) return n; return 0; }
+int a3(void) { int n; if (!(g() && (n = g()))) return 0; return n; }
+int a4(void) { int n; return (g() || (n = g()) < 0) ? -1 : n; }
+int a5(void) { int n, m; if (g() || (n = g()) < 0 || (m = h(n)) < 0) return -1; return n + m; }
+int b1(void) { int n; if (g() || (n = g()) < 0) return n; return 0; }
+int b2(void) { int n; if (g() && (n = g()) > 0) return 0; return n; }
+EOF2
+"$EMBCC" -fsyntax-only -Wall "$out/conds.c" 2> "$out/conds.txt" || true
+for line in 2 3 4 5 6; do
+    grep -q "conds.c:$line:" "$out/conds.txt" &&
+        { sed "s|$out/||" "$out/conds.txt"
+          echo "FAIL: a warning at line $line, where the condition's outcome writes n"; exit 1; }
+done
+for line in 7 8; do
+    grep -q "conds.c:$line:.*'n' may be used uninitialized" "$out/conds.txt" ||
+        { sed "s|$out/||" "$out/conds.txt"
+          echo "FAIL: no warning at line $line, where the assignment may not have run"; exit 1; }
+done
+echo "a condition is split by its outcome: || and && write on the side
+that ran both operands, and still warn on the side that may not have"
