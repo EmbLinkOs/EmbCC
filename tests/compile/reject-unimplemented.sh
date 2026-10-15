@@ -488,13 +488,11 @@ check vla-static \
 check vla-initialized \
     'int f(int n) { int a[n] = { 1 }; return a[0]; }' \
     "variable length array 'a' cannot be initialized"
-# the C99 complex types are floating; GNU's integer ones are refused
-check complex-int \
-    'int main(void) { _Complex int z; return 0; }' \
-    "only float, double and long double _Complex are supported"
-check imaginary-int \
-    'int main(void) { double _Complex z = 2i; return 0; }' \
-    "integer imaginary constant"
+# GNU's integer complex types are taken (tests/exec/complex-int.c); a
+# _Complex of _Bool is no type at all
+check complex-bool \
+    'int main(void) { _Complex _Bool z; return 0; }' \
+    "_Bool cannot combine with other specifiers"
 
 # ---- attributes that change code generation ------------------------------
 #

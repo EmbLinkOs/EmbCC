@@ -199,6 +199,8 @@ struct token {
     int num_bitint; /* TOK_NUM with C23's wb suffix: its _BitInt's width */
     double fnum;   /* TOK_FNUM */
     int fnum_is_float; /* TOK_FNUM: an 'f' suffix -> float, else double */
+    int num_is_imag;   /* TOK_NUM: GNU's integer imaginary constant, 2i:
+                        * 0 + 2*i, a _Complex int */
     int fnum_is_imag;  /* TOK_FNUM: a GNU imaginary constant (an i/j
                         * suffix, before or after f/l): 0 + this*i */
     int fnum_is_ld;    /* TOK_FNUM: an 'l' suffix -> long double; `text`

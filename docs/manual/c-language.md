@@ -605,11 +605,14 @@ supported, with all arithmetic operators. A bare `_Complex` is
 and declares the library functions. `long double _Complex` depends on
 the target; see [Target-dependent features](#target-dependent-features).
 
-The GNU integer complex types are refused:
-
-```text
-error: invalid _Complex type (only float, double and long double _Complex are supported)
-```
+GNU's integer complex types, `_Complex int`, `short _Complex`,
+`unsigned long long _Complex` and the rest, are supported too, and so is
+an integer imaginary constant, `2i`, which is a `_Complex int`. `*` and
+`/` of two of them are computed in the integer type, as GCC computes
+them: `(ac - bd) + (ad + bc)i`, and `((ac + bd) + (bc - ad)i) / (cc +
+dd)` with each part a truncating division. On MIPS a function cannot
+return one yet: `the MIPS32 backend cannot lower returning a _Complex of
+integers yet`.
 
 A complex object with static storage duration takes an initializer that
 EmbCC can fold. Otherwise:

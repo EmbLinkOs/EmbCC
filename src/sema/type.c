@@ -956,9 +956,13 @@ int ty_x87_ret(const struct type *t)
 
 struct type *ty_complex(struct type *elem)
 {
-    static struct type *made[3];
-    int k = elem->kind == TY_FLOAT ? 0 : elem->kind == TY_DOUBLE ? 1 : 2;
-    if (made[k]) return made[k];
+    /* one per element type: float, double, long double, and GNU's
+     * integer ones */
+    static struct { struct type *elem, *t; } made[32];
+    static int nmade;
+    for (int k = 0; k < nmade; k++)
+        if (made[k].elem == elem)
+            return made[k].t;
     struct type *t = ty_struct(NULL, 0);
     struct member *ms = xcalloc(2, sizeof *ms);
     ms[0].name = "__real__";
@@ -968,7 +972,10 @@ struct type *ty_complex(struct type *elem)
     ty_struct_layout(t, ms, 2, 0, 0, 0);
     t->is_complex = 1;
     t->celem = elem;
-    made[k] = t;
+    if (nmade < (int)(sizeof made / sizeof made[0])) {
+        made[nmade].elem = elem;
+        made[nmade++].t = t;
+    }
     return t;
 }
 
@@ -1133,9 +1140,9 @@ const char *ty_name(const struct type *t)
             break;
         }
         if (t->is_complex) {
-            snprintf(structbuf, sizeof structbuf, "%s _Complex",
-                     t->celem->kind == TY_FLOAT ? "float"
-                     : t->celem->kind == TY_DOUBLE ? "double" : "long double");
+            char eb[64];
+            snprintf(eb, sizeof eb, "%s", ty_name(t->celem));
+            snprintf(structbuf, sizeof structbuf, "%s _Complex", eb);
             base = structbuf;
             break;
         }

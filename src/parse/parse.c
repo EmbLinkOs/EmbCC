@@ -2445,14 +2445,30 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
                        "_Bool cannot combine with other specifiers");
         return ty_base(TY_BOOL, 0);
     }
+    if (ncomplex && !nfloat && !ndouble &&
+        (nchar || nshort || nint || nlong || uns != -1)) {
+        /* GNU's integer complex types: `_Complex int`, `short _Complex`,
+         * `unsigned long long _Complex`, a pair of the integer */
+        if (ncomplex > 1 || nvoid || nbool || nlong > 2 ||
+            (nshort && nlong) || (nchar && (nshort || nlong || nint)))
+            parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                       "invalid _Complex type");
+        ped_at(ps, cur(ps)->line, cur(ps)->col, 0,
+               "an integer complex type");
+        struct type *it = nchar ? (uns == -1 ? ty_plain_char()
+                                             : ty_base(TY_CHAR, uns == 1))
+                        : nshort ? ty_base(TY_SHORT, uns == 1)
+                        : nlong == 2 ? ty_llong(uns == 1)
+                        : ty_base(nlong ? TY_LONG : TY_INT, uns == 1);
+        return ty_complex(it);
+    }
     if (ncomplex) {
         /* `T _Complex` for a floating T; a bare _Complex means double, as
-         * in gcc. The GNU integer complex types are not supported. */
+         * in gcc */
         if (ncomplex > 1 || uns != -1 || nchar || nshort || nint || nvoid ||
             nbool || (nfloat && ndouble) || nlong > 1 || (nlong && nfloat))
             parse_error_at(ps, cur(ps)->line, cur(ps)->col,
-                       "invalid _Complex type (only float, double and long "
-                       "double _Complex are supported)");
+                       "invalid _Complex type");
         struct type *el = ty_base(nfloat ? TY_FLOAT
                                   : nlong ? TY_LDOUBLE : TY_DOUBLE, 0);
         return ty_complex(el);
@@ -3799,6 +3815,11 @@ static struct expr *parse_primary(struct parser *ps)
               : t->num_llong ? ty_llong(t->num_uns)
                              : ty_base(t->num_long ? TY_LONG : TY_INT,
                                        t->num_uns);
+        if (t->num_is_imag) {           /* 2i: a _Complex int, 0 + 2*i */
+            ped_at(ps, t->line, t->col, 0, "an imaginary constant");
+            e->imag = 1;
+            e->ty = ty_complex(e->ty);
+        }
         advance(ps);
         return e;
     case TOK_KW_NULLPTR: {
