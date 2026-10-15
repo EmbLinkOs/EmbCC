@@ -41,6 +41,15 @@ void diag_register_expansion(const char *file, int line, const char *macro);
  * exit(1). line 0 omits the line; a registered source adds the line + caret. */
 EMBCC_NORETURN void diag_fatal(const char *file, int line, const char *fmt, ...);
 
+/* A deep recursion's check (plat_stack_size): when the compile has used
+ * more than `share` eighths of the stack since main() noted its frame
+ * (stack_note_base), an error at file:line that the code nests too
+ * deeply, instead of an overflow. Parsing and the passes after it each
+ * start again from main's frame, so each may take most of it; the rest
+ * is for whatever a checked recursion calls. */
+void stack_note_base(const void *base);
+void stack_check(const char *file, int line, int share);
+
 /* As diag_fatal, but with a column for the caret. */
 EMBCC_NORETURN void diag_at(const char *file, int line, int col, const char *fmt, ...);
 

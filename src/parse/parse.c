@@ -3148,6 +3148,7 @@ static struct type *parse_struct_body(struct parser *ps, struct type *t,
     expect(ps, TOK_LBRACE, "'{'");
     int saved_vla_ok = ps->vla_ok;
     ps->vla_ok = 0;   /* a member cannot be variably modified (6.7.2.1p9) */
+    stack_check(ps->lx.file, bline, 6);         /* structures in structures */
     ps->in_members++;
     struct member *ms = NULL;
     int n = 0, cap = 0;
@@ -3942,6 +3943,7 @@ static struct expr *parse_unary(struct parser *ps)
     struct token *t = cur(ps);
     struct expr *e;
 
+    stack_check(ps->lx.file, cur(ps)->line, 6);  /* `- - - x`, `(int)(int)x` */
     switch (t->kind) {
     case TOK_BANG:
         e = new_expr(EXPR_NOT, t->line, t->col);
@@ -4269,6 +4271,7 @@ static struct expr *parse_expr(struct parser *ps)
     struct expr *e = parse_cond(ps);
     enum tok_kind k = cur(ps)->kind;
     int line = cur(ps)->line;
+    stack_check(ps->lx.file, cur(ps)->line, 6);  /* `((((x))))`, deep */
 
     int comp = -1;
     for (size_t i = 0;
@@ -4900,6 +4903,7 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
     struct token *t = cur(ps);
     struct stmt *s;
 
+    stack_check(ps->lx.file, cur(ps)->line, 6);  /* `{{{ }}}`, `if if if` */
     if (t->kind == TOK_KW_ASM)
         return parse_asm_stmt(ps);
     if (t->kind == TOK_IDENT && strcmp(t->text, "__builtin_eh_region") == 0)

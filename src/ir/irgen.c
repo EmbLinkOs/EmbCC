@@ -2945,6 +2945,7 @@ int gen_expr(struct ir_func *fn, struct expr *e)
 {
     /* Every instruction this expression lowers to is attributed to the
      * expression, not to the statement containing it -- so `a[i] + b[j]`
+    stack_check(fn->file, e->line, 6);
      * blames the right subscript. Saved and restored, because lowering
      * recurses and the caller's position must survive it. */
     int save_line = g_cur_line, save_col = g_cur_col;
@@ -4502,6 +4503,7 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
 {
     for (; s; s = s->next) {
         if (s->line) {
+    stack_check(fn->file, s ? s->line : 0, 6);
             g_cur_line = s->line;   /* -g: rows key off statement lines */
             g_cur_col = s->col;
         }

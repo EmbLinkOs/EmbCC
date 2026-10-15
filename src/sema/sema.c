@@ -2507,6 +2507,7 @@ static int sc_nonneg(const struct expr *e)
 static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                        struct expr *e)
 {
+    stack_check(diag_file(u), e->line, 6);   /* `x + x + ... + x`, deep */
     switch (e->kind) {
     case EXPR_NUM:
     case EXPR_FNUM:
@@ -6248,6 +6249,7 @@ static int case_cmp(const void *x, const void *y)
 static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                        struct stmt *s_in, int in_loop, int in_switch)
 {
+    stack_check(diag_file(u), s_in ? s_in->line : 0, 6);
     /* Each statement is a recovery point: an error in one is reported and
      * the next is still checked. What a failed statement already added to
      * the scope stays — dropping it would turn one error into several

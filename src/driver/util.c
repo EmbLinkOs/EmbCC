@@ -1,9 +1,11 @@
 #include "util.h"
+#include "../platform/platform.h"
 
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 
 /* The one place in a library that still ends the process (R6's exception):
  * under out-of-memory, building and rendering a diagnostic would itself
@@ -164,4 +166,28 @@ const char *opt_said(const char *prefix, const char *value)
         return t;
     }
     return opt_ring(s);
+}
+
+/* ---- the stack ---- */
+
+static uintptr_t g_stack_base;
+
+void stack_note_base(const void *base)
+{
+    g_stack_base = (uintptr_t)base;
+}
+
+void stack_check(const char *file, int line, int share)
+{
+    char here;
+    uintptr_t h = (uintptr_t)&here;
+    if (!g_stack_base)
+        return;
+    unsigned long used = (unsigned long)(h < g_stack_base ? g_stack_base - h
+                                                          : h - g_stack_base);
+    unsigned long budget = plat_stack_size() / 8 * (unsigned long)share;
+    if (used > budget)
+        diag_fatal(file, line, "this nests too deeply to compile: it took "
+                   "more than %lu KB of the %lu KB stack",
+                   budget >> 10, plat_stack_size() >> 10);
 }
