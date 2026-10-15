@@ -868,6 +868,13 @@ that a build can be reproduced. `__TIMESTAMP__` is not defined.
 | Nesting of conditional inclusion | 64: `conditionals nested too deeply` | 63 |
 | Parameters in one macro definition | 127: `more than 127 macro parameters` | 127 |
 
+### Function limits
+
+| Limit | EmbCC | C17 minimum |
+|---|---|---|
+| Parameters in one function definition | 128: `more than 128 parameters` | 127 |
+| Arguments in one function call | 128: `more than 128 call arguments` | 127 |
+
 ### Predefined macros that describe the implementation
 
 | Macro | Value |

@@ -1667,6 +1667,7 @@ static struct expr *cx_call(int div, struct type *T, struct expr *a,
     struct func *h = cx_helper(div, T);
     struct expr *call = cx_node(EXPR_CALL, a->line, h->ret_ty);
     call->callee = h;
+    call->args = xcalloc(4, sizeof *call->args);
     call->args[0] = mk_cast(a, T);
     call->args[1] = mk_cast(b, T);
     call->args[2] = mk_cast(c, T);

@@ -1898,9 +1898,10 @@ static int libatomic_call(struct ir_func *fn, const char *name,
                           struct type *ret, int n, const int *vals,
                           struct type *const *tys, int line)
 {
-    struct expr e, a[5];
+    struct expr e, a[5], *av[5] = { 0 };
     memset(&e, 0, sizeof e);
     memset(a, 0, sizeof a);
+    e.args = av;
     e.kind = EXPR_CALL;
     e.line = line;
     e.ty = ret;
