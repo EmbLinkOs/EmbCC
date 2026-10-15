@@ -3714,6 +3714,11 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
         int local = e->lhs->kind == EXPR_VAR && !e->lhs->gref;
         int is_bf = expr_is_bitfield(e->lhs);
         int addr = local ? -1 : gen_addr(fn, e->lhs);
+        /* The right operand first, then the target's value: `x |= f()`
+         * where f changes x reads x as f left it. C leaves the two
+         * unsequenced against the call; GCC and clang read after it, and
+         * code relying on that (GCC's pr58943.c) gets their answer. */
+        int rv = gen_expr(fn, e->rhs);
         int cur;
         if (local) {
             cur = emit_ldvar(fn, e->lhs->var_index, lt);
@@ -3723,7 +3728,6 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             cur = emit_load(fn, addr, lt);     /* aligned as x++'s is */
             mark_natural(fn, e->lhs);
         }
-        int rv = gen_expr(fn, e->rhs);
         int res = compound_value(fn, e, cur, rv);
         if (local) {
             emit_stvar(fn, e->lhs->var_index, res, lt);
