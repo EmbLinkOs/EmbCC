@@ -272,10 +272,104 @@ static void warn_shadow(struct unit *u, struct scope *sc, const char *name,
     warn_shadow_global(u, name, line, col);
 }
 
+/* ---- the unit's functions and globals by name -------------------------
+ *
+ * find_func and find_global walked their list with strcmp, from every name
+ * check_expr resolves: quadratic in the declarations, so GCC's
+ * limits-externdecl.c -- 100,000 extern functions, all referenced -- ran
+ * for most of an hour (10,000 took 5 seconds). Each list now has a table of
+ * the first node of each name. The lists only grow at the tail -- sema
+ * appends implicit declarations, compound literals and static locals there
+ * -- so a lookup first takes in what was appended since; a new unit, or a
+ * list whose head moved, starts the table again (sema_check also clears
+ * it). A node merged into its canonical one (absorbed) is never the first
+ * of its name, so the slow walk that skips one is all but never taken. */
+struct name_ix {
+    const struct unit *u;
+    const void *head, *tail;         /* the list as far as it is indexed */
+    const char **names;
+    void **nodes;
+    size_t cap, n;
+};
+static struct name_ix g_func_ix, g_glob_ix;
+
+static size_t ix_hash(const char *s)
+{
+    unsigned long long h = 1469598103934665603ULL;      /* FNV-1a */
+    while (*s) {
+        h ^= (unsigned char)*s++;
+        h *= 1099511628211ULL;
+    }
+    return (size_t)(h ^ (h >> 32));
+}
+
+static void ix_clear(struct name_ix *x)
+{
+    free(x->names);
+    free(x->nodes);
+    memset(x, 0, sizeof *x);
+}
+
+/* name -> node, unless the name has a node already: the first one wins */
+static void ix_put(struct name_ix *x, const char *name, void *node)
+{
+    if (2 * (x->n + 1) > x->cap) {
+        size_t oc = x->cap, nc = oc ? 2 * oc : 64;
+        const char **on = x->names;
+        void **od = x->nodes;
+        x->names = xcalloc(nc, sizeof *x->names);
+        x->nodes = xcalloc(nc, sizeof *x->nodes);
+        x->cap = nc;
+        x->n = 0;
+        for (size_t k = 0; k < oc; k++)
+            if (on[k])
+                ix_put(x, on[k], od[k]);
+        free(on);
+        free(od);
+    }
+    size_t m = x->cap - 1, i = ix_hash(name) & m;
+    while (x->names[i]) {
+        if (strcmp(x->names[i], name) == 0)
+            return;
+        i = (i + 1) & m;
+    }
+    x->names[i] = name;
+    x->nodes[i] = node;
+    x->n++;
+}
+
+static void *ix_get(const struct name_ix *x, const char *name)
+{
+    if (!x->cap)
+        return NULL;
+    size_t m = x->cap - 1, i = ix_hash(name) & m;
+    while (x->names[i]) {
+        if (strcmp(x->names[i], name) == 0)
+            return x->nodes[i];
+        i = (i + 1) & m;
+    }
+    return NULL;
+}
+
 /* Returns the canonical node for a name: the first declaration, into
  * which any later declarations have been merged. */
 static struct func *find_func(struct unit *u, const char *name)
 {
+    struct name_ix *x = &g_func_ix;
+    if (x->u != u || x->head != u->funcs) {
+        ix_clear(x);
+        x->u = u;
+        x->head = u->funcs;
+    }
+    for (struct func *f = x->tail ? ((const struct func *)x->tail)->next
+                                  : u->funcs; f; f = f->next) {
+        if (f->name)
+            ix_put(x, f->name, f);
+        x->tail = f;
+    }
+    struct func *hit = ix_get(x, name);
+    if (!hit || !hit->absorbed)
+        return hit;
     for (struct func *f = u->funcs; f; f = f->next)
         if (!f->absorbed && strcmp(f->name, name) == 0)
             return f;
@@ -375,8 +469,24 @@ static void implicit_float_decl(struct unit *u, const char *name,
 
 static struct global *find_global(struct unit *u, const char *name)
 {
+    struct name_ix *x = &g_glob_ix;
+    if (x->u != u || x->head != u->globals) {
+        ix_clear(x);
+        x->u = u;
+        x->head = u->globals;
+    }
+    for (struct global *g = x->tail
+                            ? ((const struct global *)x->tail)->next
+                            : u->globals; g; g = g->next) {
+        if (g->name)
+            ix_put(x, g->name, g);
+        x->tail = g;
+    }
+    struct global *hit = ix_get(x, name);
+    if (!hit || !hit->absorbed)
+        return hit;
     for (struct global *g = u->globals; g; g = g->next)
-        if (!g->absorbed && strcmp(g->name, name) == 0)
+        if (!g->absorbed && g->name && strcmp(g->name, name) == 0)
             return g;
     return NULL;
 }
@@ -7354,6 +7464,8 @@ static void apply_pragma_weak(struct unit *u)
 
 void sema_check(struct unit *u)
 {
+    ix_clear(&g_func_ix);           /* a new unit's names (find_func) */
+    ix_clear(&g_glob_ix);
     g_cast_unit = u;
     /* -Wconversion takes -Wsign-conversion with it in C, not in C++
      * (GCC's grouping); a warning named on its own is on in both */
