@@ -2848,6 +2848,155 @@ static int gen_bitop(struct ir_func *fn, struct expr *e, int kind, int rank)
  * appear in bounds checks on hot paths, where a mispredicted branch
  * costs more than the arithmetic.
  */
+/* An overflow builtin's operand as its 64 bits (extended by its own
+ * signedness) and, in *neg, 1 when it is negative (64-bit 0/1). */
+static int ovf_operand(struct ir_func *fn, struct expr *x, int *neg)
+{
+    struct type *t = x->ty->canon ? x->ty->canon : x->ty;
+    int uns = t->is_unsigned || t->kind == TY_BOOL;
+    int v = gen_convert(fn, gen_expr(fn, x), t, ty_int_of_size(8, uns));
+    *neg = uns ? bk(fn, 0, 8)
+               : gen_convert(fn, emit_cmp(fn, B_LT, v, bk(fn, 0, 8), 8, 1),
+                             ty_base(TY_INT, 0), ty_int_of_size(8, 1));
+    return v;
+}
+
+/* x ^ m - m: x negated when the mask m is all ones, kept when it is 0 */
+static int ovf_cneg(struct ir_func *fn, int x, int m, int w)
+{
+    return emit_bin(fn, IR_SUB, emit_bin(fn, IR_XOR, x, m, w, 0), m, w, 0);
+}
+
+/* The builtins' exact meaning, for operands of any signedness up to 64
+ * bits and a result T of any width up to 128: the mathematical a op b,
+ * stored into *res wrapped to T, and 1 when it does not fit T. Each
+ * operand is its 64 bits u and a sign n, its value u - n * 2^64.
+ *  + and -: s = ua op ub wraps by k = carry - na - nb (or nb - na -
+ *    borrow), so the exact value is s + k * 2^64, k in -2..1;
+ *  *: |a| * |b| as hi:lo from 32-bit limbs (no 128-bit arithmetic on a
+ *    32-bit target), and the product's sign.
+ * GCC's own semantics; the fast paths below are this for operands that
+ * T or 64 bits already hold. */
+static int gen_overflow_exact(struct ir_func *fn, struct expr *e, char op,
+                              int addr, struct type *rt)
+{
+    struct type *U = ty_int_of_size(8, 1), *I = ty_base(TY_INT, 0);
+    int sz = ty_size(rt), n = sz * 8, uns = rt->is_unsigned;
+    unsigned long umax = n >= 64 ? ~0UL : (1UL << n) - 1;
+    unsigned long smax = n >= 64 ? (~0UL >> 1) : (1UL << (n - 1)) - 1;
+    int na, nb;
+    int ua = ovf_operand(fn, e->args[0], &na);
+    int ub = ovf_operand(fn, e->args[1], &nb);
+    int zero = bk(fn, 0, 8), fits, lo, hi;
+    if (op != 'm') {
+        int s = emit_bin(fn, op == 'a' ? IR_ADD : IR_SUB, ua, ub, 8, 0);
+        int cb = op == 'a' ? emit_cmp(fn, B_LT, s, ua, 8, 0)
+                           : emit_cmp(fn, B_LT, ua, ub, 8, 0);
+        int cb64 = gen_convert(fn, cb, I, U);
+        int k = op == 'a'
+              ? emit_bin(fn, IR_SUB, emit_bin(fn, IR_SUB, cb64, na, 8, 0),
+                         nb, 8, 0)
+              : emit_bin(fn, IR_SUB, emit_bin(fn, IR_SUB, nb, na, 8, 0),
+                         cb64, 8, 0);
+        lo = s;
+        hi = k;                         /* S's upper word, two's complement */
+        if (sz == 16) {
+            fits = uns ? emit_cmp(fn, B_GE, k, zero, 8, 1) : bk(fn, 1, 4);
+        } else {
+            int k0 = emit_cmp(fn, B_EQ, k, zero, 8, 1);
+            int low = emit_cmp(fn, B_LE, s, bk(fn, uns ? umax : smax, 8),
+                               8, 0);
+            fits = emit_bin(fn, IR_AND, k0, low, 4, 0);
+            if (!uns) {                 /* or S = s - 2^64 >= T's minimum */
+                int km1 = emit_cmp(fn, B_EQ, k, bk(fn, ~0UL, 8), 8, 1);
+                int ge = emit_cmp(fn, B_GE, s,
+                                  bk(fn, 0UL - (smax + 1), 8), 8, 0);
+                fits = emit_bin(fn, IR_OR, fits,
+                                emit_bin(fn, IR_AND, km1, ge, 4, 0), 4, 0);
+            }
+        }
+    } else {
+        int ma = ovf_cneg(fn, ua, emit_bin(fn, IR_SUB, zero, na, 8, 0), 8);
+        int mb = ovf_cneg(fn, ub, emit_bin(fn, IR_SUB, zero, nb, 8, 0), 8);
+        int m32 = bk(fn, 0xffffffffUL, 8), s32 = bk(fn, 32, 8);
+        int a0 = emit_bin(fn, IR_AND, ma, m32, 8, 0);
+        int a1 = emit_bin(fn, IR_SHR, ma, s32, 8, 0);
+        int b0 = emit_bin(fn, IR_AND, mb, m32, 8, 0);
+        int b1 = emit_bin(fn, IR_SHR, mb, s32, 8, 0);
+        int p00 = emit_bin(fn, IR_MUL, a0, b0, 8, 0);
+        int p01 = emit_bin(fn, IR_MUL, a0, b1, 8, 0);
+        int p10 = emit_bin(fn, IR_MUL, a1, b0, 8, 0);
+        int p11 = emit_bin(fn, IR_MUL, a1, b1, 8, 0);
+        int mid = emit_bin(fn, IR_ADD,
+                           emit_bin(fn, IR_ADD,
+                                    emit_bin(fn, IR_SHR, p00, s32, 8, 0),
+                                    emit_bin(fn, IR_AND, p01, m32, 8, 0),
+                                    8, 0),
+                           emit_bin(fn, IR_AND, p10, m32, 8, 0), 8, 0);
+        lo = emit_bin(fn, IR_OR, emit_bin(fn, IR_SHL, mid, s32, 8, 0),
+                      emit_bin(fn, IR_AND, p00, m32, 8, 0), 8, 0);
+        hi = emit_bin(fn, IR_ADD,
+                      emit_bin(fn, IR_ADD, p11,
+                               emit_bin(fn, IR_SHR, p01, s32, 8, 0), 8, 0),
+                      emit_bin(fn, IR_ADD,
+                               emit_bin(fn, IR_SHR, p10, s32, 8, 0),
+                               emit_bin(fn, IR_SHR, mid, s32, 8, 0), 8, 0),
+                      8, 0);
+        int nz = emit_cmp(fn, B_NE, emit_bin(fn, IR_OR, lo, hi, 8, 0), zero,
+                          8, 0);
+        int sgn = emit_cmp(fn, B_NE, emit_bin(fn, IR_XOR, na, nb, 8, 0), zero,
+                           8, 0);
+        int negp = emit_bin(fn, IR_AND, sgn, nz, 4, 0);        /* int 0/1 */
+        int negp64 = gen_convert(fn, negp, I, U);
+        if (sz == 16) {
+            if (uns) {
+                fits = emit_bin(fn, IR_XOR, negp, bk(fn, 1, 4), 4, 0);
+            } else {                    /* |P| < 2^127, or -2^127 exactly */
+                int top = bk(fn, 1UL << 63, 8);
+                int hok = emit_cmp(fn, B_LT, hi, top, 8, 0);
+                int edge = emit_bin(fn, IR_AND,
+                                    emit_bin(fn, IR_AND, negp,
+                                             emit_cmp(fn, B_EQ, hi, top, 8, 0),
+                                             4, 0),
+                                    emit_cmp(fn, B_EQ, lo, zero, 8, 0), 4, 0);
+                fits = emit_bin(fn, IR_OR, hok, edge, 4, 0);
+            }
+            /* the two's complement of a negative product, across words:
+             * -(hi:lo) is ~hi:-lo, plus one in hi when lo is 0 */
+            int m = emit_bin(fn, IR_SUB, zero, negp64, 8, 0);
+            int nlo = ovf_cneg(fn, lo, m, 8);
+            int carry = emit_bin(fn, IR_AND,
+                                 emit_cmp(fn, B_EQ, lo, zero, 8, 0), negp, 4,
+                                 0);
+            hi = emit_bin(fn, IR_ADD, emit_bin(fn, IR_XOR, hi, m, 8, 0),
+                          gen_convert(fn, carry, I, U), 8, 0);
+            lo = nlo;
+        } else {
+            int h0 = emit_cmp(fn, B_EQ, hi, zero, 8, 0);
+            int lim = uns ? bk(fn, umax, 8)
+                          : emit_bin(fn, IR_ADD, bk(fn, smax, 8), negp64, 8, 0);
+            fits = emit_bin(fn, IR_AND, h0, emit_cmp(fn, B_LE, lo, lim, 8, 0),
+                            4, 0);
+            if (uns)
+                fits = emit_bin(fn, IR_AND, fits,
+                                emit_bin(fn, IR_XOR, negp, bk(fn, 1, 4), 4, 0),
+                                4, 0);
+            lo = ovf_cneg(fn, lo, emit_bin(fn, IR_SUB, zero, negp64, 8, 0), 8);
+        }
+    }
+    if (sz == 16) {
+        struct type *U2 = ty_int_of_size(16, 1);
+        int v = emit_bin(fn, IR_OR,
+                         emit_bin(fn, IR_SHL, gen_convert(fn, hi, U, U2),
+                                  bk(fn, 64, 16), 16, 0),
+                         gen_convert(fn, lo, U, U2), 16, 0);
+        emit_store(fn, addr, v, rt);
+    } else {
+        emit_store(fn, addr, gen_convert(fn, lo, U, rt), rt);
+    }
+    return emit_bin(fn, IR_XOR, fits, bk(fn, 1, 4), 4, 0);
+}
+
 static int gen_overflow(struct ir_func *fn, struct expr *e, char op)
 {
     /* `volatile int *` is an ordinary destination here; the volatile
@@ -2859,6 +3008,24 @@ static int gen_overflow(struct ir_func *fn, struct expr *e, char op)
     int uns = rt->is_unsigned;
     enum ir_op iop = op == 'a' ? IR_ADD : op == 's' ? IR_SUB : IR_MUL;
     int addr = gen_expr(fn, e->args[2]);
+
+    /* The two fast paths below are exact only where their arithmetic
+     * holds every operand: 32-bit ones into a narrower T (exact in 64
+     * bits), or ones T's own 64-bit type holds. Anything else -- an
+     * operand of the other signedness, a 64-bit one into a narrower T,
+     * a 128-bit T -- takes the exact form: `-1 + 1` into an unsigned
+     * long was an overflow, and UINT64_MAX + 0 into a long was not. */
+    {
+        struct type *ta = e->args[0]->ty, *tb = e->args[1]->ty;
+        int sa = ty_size(ta), sb = ty_size(tb);
+        int ua = ta->is_unsigned || ta->kind == TY_BOOL;
+        int ub = tb->is_unsigned || tb->kind == TY_BOOL;
+        int small = sz < 8 && sa <= 4 && sb <= 4;
+        int in64 = sz == 8 && (ua == uns || (!uns && ua && sa < 8)) &&
+                   (ub == uns || (!uns && ub && sb < 8));
+        if (!small && !in64)
+            return gen_overflow_exact(fn, e, op, addr, rt);
+    }
 
     if (sz < 8) {
         /* Exact in 64 bits, then "does it still say the same thing
