@@ -1277,12 +1277,15 @@ static void lex_raw(struct lexer *lx)
         return;
     }
 
-    if (isalpha((unsigned char)*lx->p) || *lx->p == '_' ||
+    /* `$` is an identifier's, as GCC takes it by default (VMS-style and
+     * generated names: `a$b`) */
+    if (isalpha((unsigned char)*lx->p) || *lx->p == '_' || *lx->p == '$' ||
         lex_ident_utf8(lx->p, 1)) {
         const char *start = lx->p;
         for (;;) {
             int u8;
-            if (isalnum((unsigned char)*lx->p) || *lx->p == '_')
+            if (isalnum((unsigned char)*lx->p) || *lx->p == '_' ||
+                *lx->p == '$')
                 lx->p++;
             else if ((u8 = lex_ident_utf8(lx->p, 0)) > 0)
                 lx->p += u8;

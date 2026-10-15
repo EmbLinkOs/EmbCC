@@ -4629,6 +4629,10 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
         case STMT_RETURN: {
             struct ir_ins *i;
             int v = s->expr ? gen_expr(fn, s->expr) : -1;
+            /* GNU C's `return f();` of a void f, in a void function: the
+             * call is made, and nothing comes back */
+            if (s->expr && s->expr->ty->kind == TY_VOID)
+                v = -1;
             if (g_instr_this)           /* after the value, before leaving */
                 emit_instr_call(fn, g_instr_fn, "__cyg_profile_func_exit",
                                 s->line);

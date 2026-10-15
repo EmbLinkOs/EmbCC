@@ -2826,6 +2826,10 @@ static int size_fold(const struct expr *e, long *out)
             *out = t->count;
             return 1;
         }
+        if (t && (t->kind == TY_VOID || t->kind == TY_FUNC)) {
+            *out = 1;           /* GNU C's size of void and of a function */
+            return 1;
+        }
         if (!t || ty_incomplete(t))
             return 0;   /* sizeof(expr) whose type this pass cannot resolve */
         *out = ty_size(t);      /* (0 for a GNU empty struct) */
@@ -3433,12 +3437,16 @@ static struct type *parse_enum_body(struct parser *ps, struct type *fixed,
 
 /* ---- expressions ---- */
 
+/* The lexer of the unit being parsed, for new_expr's `quiet` */
+static struct lexer *g_expr_lx;
+
 static struct expr *new_expr(enum expr_kind kind, int line, int col)
 {
     struct expr *e = xcalloc(1, sizeof *e);
     e->kind = kind;
     e->line = line;
     e->col = col;
+    e->quiet = g_expr_lx && lex_quiet(g_expr_lx);
     e->desig_index = -1;      /* positional unless a [i] designator sets it */
     e->desig_index_hi = -1;
     return e;
@@ -6669,6 +6677,7 @@ struct unit *parse_unit(const char *file, const char *src)
     ps.alignas_out = 0;
     ps.vla_ok = 0;            /* file scope */
     lex_init(&ps.lx, file, src);
+    g_expr_lx = &ps.lx;
     struct func **ftail = &u->funcs;
     struct global **gtail = &u->globals;
     volatile int seq = 0;      /* written between setjmp and longjmp */
@@ -6688,5 +6697,6 @@ struct unit *parse_unit(const char *file, const char *src)
      * valid C — EmbCC's own predef macro table is exactly that. An entirely
      * empty unit is legal too (a header-only .c, a fully #if'd-out file);
      * it yields a valid, empty object. */
+    g_expr_lx = NULL;           /* ps, and its lexer, end here */
     return u;
 }

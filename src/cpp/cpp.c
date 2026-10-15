@@ -154,7 +154,7 @@ static void undef_macro(struct cpp *cpp, const char *name, size_t n)
 static int is_id0(char c)
 {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' ||
-           (unsigned char)c >= 0x80;
+           c == '$' || (unsigned char)c >= 0x80;
 }
 
 static int is_idc(char c) { return is_id0(c) || (c >= '0' && c <= '9'); }
