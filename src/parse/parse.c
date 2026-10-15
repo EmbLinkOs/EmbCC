@@ -107,6 +107,11 @@ struct parser {
      * gets (0: none), and the values `push` saved */
     int pack_cur, npack;
     int pack_stack[32];
+    /* The line of a mode or transparent_union attribute parsed and not
+     * yet applied (0: none). They change a TYPE, and are applied where a
+     * typedef or a union is defined; anywhere else the declaration would
+     * keep its written type, so attrs_unapplied() says so. */
+    int mode_line, tu_line;
     /* GNU `__label__ n;`: a label LOCAL to the enclosing block, so a
      * macro that declares one can be expanded twice in a function
      * without the second `n:` being a duplicate. That is the only
@@ -1093,12 +1098,13 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
                                                : modes[k].b;
                     if (!b)
                         parse_error_line(ps, aline,
-                            "__attribute__((mode(%s))): EmbCC takes the "
-                            "integer modes QI, HI, SI, DI, TI, byte, word "
-                            "and pointer", cur(ps)->kind == TOK_IDENT
-                                           ? cur(ps)->text : "?");
+                            "__attribute__((mode(%s))) is not supported: "
+                            "EmbCC takes the integer modes QI, HI, SI, DI, "
+                            "TI, byte, word and pointer",
+                            cur(ps)->kind == TOK_IDENT ? cur(ps)->text : "?");
                     if (out)
                         out->mode = b;
+                    ps->mode_line = aline;
                 }
                 if (name && attr_is(name, "format") &&
                     cur(ps)->kind == TOK_IDENT) {
@@ -1234,8 +1240,10 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
             }
             if (name && out) {
                 if (attr_is(name, "packed")) out->packed = 1;
-                else if (attr_is(name, "transparent_union"))
+                else if (attr_is(name, "transparent_union")) {
                     out->transparent = 1;
+                    ps->tu_line = aline;
+                }
                 else if (attr_is(name, "weak")) out->weak = 1;
                 else if (attr_is(name, "signal")) {
                     /* signal and interrupt together are interrupt on AVR,
@@ -4633,6 +4641,26 @@ static void close_tags(struct parser *ps, struct tagdef *mark, int outer)
     ps->tag_blk = outer;
 }
 
+/* A mode or transparent_union written where nothing applies it: on a
+ * variable, a parameter or a member. GCC changes that declaration's type;
+ * EmbCC takes mode on a typedef, as glibc and Linux write it, and refuses
+ * it elsewhere rather than leave the written type. transparent_union is
+ * ignored with a warning off a union type, as in GCC. */
+static void attrs_unapplied(struct parser *ps)
+{
+    int ml = ps->mode_line, tl = ps->tu_line;
+    ps->mode_line = ps->tu_line = 0;
+    if (ml)
+        parse_error_line(ps, ml, "__attribute__((mode)) is not supported "
+                         "here: EmbCC applies it to a typedef (typedef int "
+                         "T __attribute__((mode(DI)));), and this "
+                         "declaration would keep its written type");
+    if (tl)
+        diag_warn_opt(ps->lx.file, tl, 0, "attributes",
+                      "__attribute__((transparent_union)) is ignored: it "
+                      "applies to a union type");
+}
+
 static struct stmt *parse_block(struct parser *ps)
 {
     struct stmt *s = new_stmt(STMT_BLOCK, cur(ps)->line, cur(ps)->col);
@@ -4673,6 +4701,7 @@ static struct stmt *parse_block(struct parser *ps)
             *tail = parse_stmt(ps, 1);
             while (*tail) /* a declaration may be a chain: int a, b; */
                 tail = &(*tail)->next;
+            attrs_unapplied(ps);
         } else {
             *tail = NULL;          /* half a statement is no statement */
             resync(ps, 0);
@@ -5940,6 +5969,7 @@ static int float_n_typedef(struct parser *ps, struct type *tbase)
  * __attribute__((__mode__(__word__)))` */
 static struct type *apply_mode(struct parser *ps, struct type *t, int bytes)
 {
+    ps->mode_line = 0;
     struct type *m = ty_is_integer(t) && t->kind != TY_BOOL
                    ? ty_int_of_size(bytes, t->is_unsigned) : NULL;
     if (!m)
@@ -5952,6 +5982,7 @@ static struct type *apply_mode(struct parser *ps, struct type *t, int bytes)
 /* __attribute__((transparent_union)) on a union: see struct type */
 static void mark_transparent(struct parser *ps, struct type *t)
 {
+    ps->tu_line = 0;
     if (t->canon)
         t = t->canon;
     if (t->kind != TY_STRUCT || !t->is_union || !t->complete ||
@@ -6780,9 +6811,10 @@ struct unit *parse_unit(const char *file, const char *src)
     while (cur(&ps)->kind != TOK_EOF) {
         jmp_buf jb, *save = ps.recover;
         ps.recover = &jb;
-        if (!setjmp(jb))
+        if (!setjmp(jb)) {
             parse_top(&ps, u, &ftail, &gtail, seq++);
-        else
+            attrs_unapplied(&ps);
+        } else
             resync(&ps, 1);
         ps.recover = save;
     }

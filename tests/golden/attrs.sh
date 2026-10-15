@@ -131,8 +131,7 @@ where the use is correct, and each is switched off by the name it prints"
 # which is every second line here.
 cat > "$out/known.txt" <<'EOF'
 vector_size(16)|refuse
-mode(DI)|refuse
-transparent_union|refuse
+mode(V4SI)|refuse
 target("sse4.2")|refuse
 weakref("other")|refuse
 ifunc("pick")|refuse
@@ -196,12 +195,28 @@ while IFS='|' read -r spec want; do
         ;;
     esac
 done < "$out/known.txt"
-echo "sixteen attributes that used to be dropped now each have a stated
-disposition: six refused by name, eight silent no-ops, two accepted with
+echo "fifteen attributes that used to be dropped now each have a stated
+disposition: five refused by name, eight silent no-ops, two accepted with
 the loss named"
 
+# mode and transparent_union change a type, and are applied where a typedef
+# or a union is defined (tests/golden/gnu-header-forms.sh runs them).
+# Anywhere else the declaration would keep its written type: mode there is
+# refused, and transparent_union is ignored with a warning, as GCC does.
+printf 'int __attribute__((mode(DI))) wide;\n' > "$out/m.c"
+if "$EMBCC" --target="$TARGET" -fsyntax-only "$out/m.c" > "$out/m.log" 2>&1
+then echo "FAIL: mode on a variable was accepted, and it kept int's size"; exit 1; fi
+grep -q 'mode)) is not supported here' "$out/m.log" || {
+    echo "FAIL: mode on a variable is not refused by name:"; cat "$out/m.log"; exit 1; }
+printf 'int __attribute__((transparent_union)) thing;\n' > "$out/t.c"
+"$EMBCC" --target="$TARGET" -Wattributes -fsyntax-only "$out/t.c" > "$out/t.log" 2>&1 || {
+    echo "FAIL: transparent_union on an int was refused:"; cat "$out/t.log"; exit 1; }
+grep -q 'transparent_union)) is ignored: it applies to a union type' "$out/t.log" || {
+    echo "FAIL: transparent_union on an int is not warned about:"; cat "$out/t.log"; exit 1; }
+echo "mode on a variable refused, transparent_union on an int ignored with a warning"
+
 # An attribute nobody has decided about still warns -- the path all
-# sixteen just left. Without this the loop above could pass for the
+# fifteen just left. Without this the loop above could pass for the
 # wrong reason.
 printf 'int __attribute__((no_such_attribute_here)) z;\n' > "$out/u.c"
 "$EMBCC" --target="$TARGET" -Wattributes -fsyntax-only "$out/u.c" \
