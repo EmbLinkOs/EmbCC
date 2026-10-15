@@ -686,11 +686,20 @@ static int vectorize_one(struct ir_func *fn)
                      * error, and a loop we simply do not vectorize is
                      * not an error at all. */
                     ok = 0; break;
-                } else if (!hask && i->b >= 0 && i->b < fn->nvregs &&
-                           !vec[i->b] &&
-                           !defined_outside(fn, &d, i->b, L.lo, L.hi)) {
-                    ok = 0; break;          /* a scalar that varies per lane */
+                } else if (!hask && (i->b < 0 || i->b >= fn->nvregs ||
+                                     !vec[i->b])) {
+                    ok = 0; break;          /* a scalar in b */
                 }
+                /* The lane op reads `a` as a vector and `b` as one or as
+                 * a constant it broadcasts (vec_build); a scalar in
+                 * either place -- loop-invariant or not -- has no lane
+                 * form here. Only b was checked, and only for a value
+                 * that varies, so `g[i] += n`, `n - g[i]` and
+                 * `n * (i + 1) + g[i]`, where canonical order puts the
+                 * scalar in a, handed it to a vector add: x86-64's
+                 * lowering stopped on it. */
+                if (i->a < 0 || i->a >= fn->nvregs || !vec[i->a])
+                    { ok = 0; break; }
                 if (t < 0 || t >= fn->nvregs) { ok = 0; break; }
                 if (i->w != L.esize && i->op != IR_SHL && i->op != IR_SHR)
                     { ok = 0; break; }      /* a widening op changes lanes */
