@@ -30,6 +30,9 @@
 #     target description gdb received, a lockup reported as SIGSEGV,
 #     detach (the target runs on to its end) and kill.
 #
+#  7-9. The same session on RISC-V (virt) and MIPS (malta) against
+#     QEMU's stubs, and on the AVR (uno) against what gdb expects.
+#
 # Every QEMU runs under tests/harness/qrun.sh; every QEMU, EmbSim and
 # debugger is bounded by a timeout and killed when the test ends, however
 # it ends.
@@ -665,4 +668,57 @@ if command -v "$QAVR" >/dev/null 2>&1 &&
     echo "embsim-gdb: avr: a write watchpoint stops twice, after each store"
 else
     echo "embsim-gdb: no qemu-system-avr or no AVR gdb: the AVR checks did not run"
+fi
+
+# ---- 9. MIPS --------------------------------------------------------------------------
+# gdb-fw.c for mipsel on malta (QEMU's -kernel, a 24Kc), entered from
+# embld's -Tstack stub, printing main's result on the UART and ending at
+# SOFTRES: the same session, with the registers the boot does not touch
+# (QEMU's loader leaves k0, k1 and the argument registers its own way)
+# in place of the ARM's, against QEMU's stub. EmbSim gives MIPS no memory
+# map and no target description, as QEMU does: gdb describes the core
+# itself, and compares a map's addresses with kseg0's sign-extended.
+QM=${EMBCC_QEMU_MIPS:-qemu-system-mipsel}
+if command -v "$QM" >/dev/null 2>&1 &&
+   "$GDB" -nx -batch -ex 'set architecture mips:isa32r2' 2>&1 | grep -q 'mips:isa32r2'; then
+    "$EMBCC" --target=mipsel-none-elf -g -O0 -c $src/gdb-fw.c -o "$out/mips.o" &&
+    "$EMBLD" -e reset -Ttext 0x80100000 -Tstack 0x80800000 "$out/mips.o" -o "$out/mips.elf" ||
+        fail "the MIPS image does not build"
+    [ "$("$EMBSIM" "$out/mips.elf" --board malta 2>/dev/null)" = 71 ] ||
+        fail "mips.elf does not print 71 without a debugger"
+    sed -e 's/^info registers$/info registers a0 a1 v0 sp ra pc sr lo hi/' \
+        -e 's/^info all-registers$/info registers a0 a1 sp pc sr/' \
+        -e 's/^print \$xpsr$/print $sr/' -e 's/^print \$msp$/print $cause/' \
+        -e 's/^print \$psp$/print $bad/' -e 's/^print \$control$/print $lo/' \
+        -e 's/^print \$primask$/print $hi\
+set $lo = 0x1234\
+print\/x $lo\
+print\/x $hi/' -e 's/\$r12/$t4/g' \
+        "$out/session.gdb" > "$out/mips-session.gdb"
+    next_port; qp=$port; next_port; ep=$port
+    sh tests/harness/qrun.sh 120 "$QM" -M malta -cpu 24Kc -m 64 -display none \
+        -monitor none -serial null -serial null -serial "file:$out/mips.quart" \
+        -no-reboot -kernel "$out/mips.elf" -S -gdb "tcp::$qp" > /dev/null 2>&1 &
+    pids="$pids $!"
+    sim_at $ep "$out/mips.elf" --board malta
+    gdb_run $qp "$out/mips.elf" "$out/mips-session.gdb" "$out/mips.gdb-qemu"
+    gdb_run $ep "$out/mips.elf" "$out/mips-session.gdb" "$out/mips.gdb-embsim"
+    same mips.gdb "$out/mips.gdb-qemu" $qp "$out/mips.gdb-embsim" $ep
+    t=$out/mips.gdb-embsim
+    want "$t" '^0xbfc00000 in ?? ()' "mips: not stopped at the boot ROM"
+    want "$t" '^Breakpoint 1, compute (a=0, b=2)' "mips: no stop at compute(0, 2)"
+    want "$t" '^Value returned is \$1 = 1' "mips: finish did not return 1"
+    want "$t" '^\$3 = {x = 10, y = -4}' "mips: the variable was not changed"
+    want "$t" '^New value = 11' "mips: the write watchpoint did not stop twice"
+    want "$t" '^Hardware read watchpoint 3: table\[3\]' "mips: no read watchpoint stop"
+    want "$t" '^Value = 4' "mips: the read watchpoint's value"
+    want "$t" '^Hardware access (read/write) watchpoint 5: scale' "mips: no access watchpoint stop"
+    want "$t" '^sr: 0x400000' "mips: no Status register"
+    want "$t" '^\$[0-9]* = 0x1234$' "mips: LO not written"
+    want "$t" 'exited normally\]' "mips: the program did not run on to SOFTRES"
+    [ "$(sim_status $ep)" = 0 ] && [ "$(cat "$out/sim.$ep.out")" = 92 ] ||
+        fail "mips: EmbSim's run printed $(cat "$out/sim.$ep.out") and exits $(sim_status $ep), not 92 and 0"
+    echo "embsim-gdb: mips: gdb's session on EmbSim is its session on QEMU ($(wc -l < "$out/mips.gdb.qemu" | tr -d ' ') lines): breakpoints, steps, registers, memory, a variable written (92), write, read and access watchpoints"
+else
+    echo "embsim-gdb: no $QM or no MIPS gdb: the MIPS checks did not run"
 fi

@@ -4,9 +4,9 @@
  * makes its exit, and tests/harness/mips's _exit writes after the
  * sentinel -- and the boot ROM at 0x1fc00000, where the core starts
  * (0xbfc00000 in kseg1): QEMU's -kernel puts a loader there that jumps
- * to the image's entry, and so does this, in four instructions (lui,
- * ori, jr and its delay slot's nop). The rest of the FPGA's space reads
- * as zero and ignores writes. */
+ * to the image's entry, with Status.ERL cleared, and so does this, in
+ * six instructions. The rest of the FPGA's space reads as zero and
+ * ignores writes. */
 #include <stdlib.h>
 
 #include "devices.h"
@@ -47,16 +47,20 @@ void *malta_fpga_create(struct sim *s, const struct dev_desc *d)
     return m;
 }
 
-/* the loader: lui $25, %hi(entry); ori $25, $25, %lo(entry); jr $25; nop */
+/* The loader: Status with BEV alone -- QEMU clears ERL at the reset of
+ * a board it boots a -kernel on -- and the jump: lui $26, 0x40; mtc0
+ * $26, $12; lui $25, %hi(entry); ori $25, $25, %lo(entry); jr $25; nop */
 static u32 rom_read(void *ctx, u32 off, int n)
 {
     struct sim *s = ((struct malta *)ctx)->sim;
     u32 e = (u32)s->entry, w;
     (void)n;
     switch (off & ~3u) {
-    case 0: w = 0x3c190000u | e >> 16; break;
-    case 4: w = 0x37390000u | (e & 0xffff); break;
-    case 8: w = 0x03200008u; break;
+    case 0: w = 0x3c1a0040u; break;
+    case 4: w = 0x409a6000u; break;
+    case 8: w = 0x3c190000u | e >> 16; break;
+    case 12: w = 0x37390000u | (e & 0xffff); break;
+    case 16: w = 0x03200008u; break;
     default: w = 0; break;
     }
     return w >> (8 * (off & 3));

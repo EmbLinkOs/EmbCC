@@ -1109,7 +1109,11 @@ On MIPS:
   enforced), the performance counters, EJTAG's debug mode (sdbbp ends
   the run).
 - The analyses (`--coverage`, `--profile`, `--stack-report`,
-  `--fault-report`) and the GDB server's target description.
+  `--fault-report`). The GDB server gives a MIPS core no target
+  description and no memory map, as QEMU's stub does: gdb describes the
+  core itself (registers 0-72: the GPRs, Status, LO, HI, BadVAddr,
+  Cause, PC, the FPU's as 0), and would compare a map's kseg0 addresses
+  with its own sign-extended ones.
 
 On RISC-V:
 - Supervisor mode and virtual memory, and the hypervisor.

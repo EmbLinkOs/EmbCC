@@ -516,7 +516,7 @@ or with its own file for the six functions of `net.h`.
   nothing can interrupt them, whatever took the interrupt away: the
   program, a timer stopping itself, or a debugger.
 - `tests/golden/embsim-gdb.sh`: the GDB server against QEMU's stub, on
-  the Cortex-M, on RISC-V and on the AVR.
+  the Cortex-M, on RISC-V, on MIPS (malta) and on the AVR.
 - `tests/golden/embsim-svd.sh`: the register file over a test SVD,
   against the specification's values; the STM32F405's models against
   QEMU's netduinoplus2 and RM0090. `embsim-svd-all.sh`: every SVD in
