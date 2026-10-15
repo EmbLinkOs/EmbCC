@@ -704,7 +704,11 @@ PCH, DSRPAG, DSWPAG, RCOUNT, SR, CORCON, DISICNT, TBLPAG) are the core's.
   256), their flag at the match with PRx; Timer2/3 and Timer4/5 pair
   into 32-bit timers (T32), TMR3HLD and TMR5HLD latched by a read of
   the low half.
-- **Ports A-G**, as the PIC32's (ANSx and IOCPUx for ANSELx and CNPUx).
+- **Ports A-G**, as the PIC32's (ANSx and IOCPUx for ANSELx and CNPUx),
+  and their interrupt-on-change: with PADCON.IOCON, a pin's rising edge
+  (IOCPx) or falling one (IOCNx) sets its IOCFx bit, IOCSTAT's port bit
+  and the IOC interrupt's flag; the program clears IOCFx bits (a 1
+  written keeps one, never sets it), and IOCSTAT follows.
 - **UART1-6.** A byte written to UxTXREG with UARTEN and UTXEN goes to
   stdout at once; the transmit interrupt is flagged as the buffer has
   room again; the run's input arrives at the first UART on.
@@ -723,6 +727,42 @@ PCH, DSRPAG, DSWPAG, RCOUNT, SR, CORCON, DISICNT, TBLPAG) are the core's.
 - **SPI1-3**, as masters: a byte written to SPIxBUFL is exchanged at
   once with the slave the board has on the unit's pins, and read back
   from SPIxBUFL (SPIRBE, SPIRBF, SPIROV).
+- **The flash controller (NVM)**: TBLWTL and TBLWTH at TBLPAG 0xFA
+  write its 128 latches (they read back by TBLRDL and TBLRDH there, and
+  are 0xFFFFFF after a reset); NVMCON's operations -- two words (0001),
+  a row (0010), a page's erase (0011), the user memory's (1110) -- run
+  when WR is set right after NVMKEY's unlock (0x55 then 0xAA) with WREN:
+  a program clears bits (an AND, as flash does), an erase sets the
+  words to 0xFFFFFF. The core stalls for the data sheet's time (20 us a
+  word pair, 1.5 ms a row, 20 ms an erase), then WR is cleared and the
+  NVM interrupt flagged. WR without the unlock or WREN, or an operation
+  the part has not, sets WRERR instead.
+- **The RTCC**, in BCD: TIMEH/TIMEL (hours, minutes, seconds) and
+  DATEH/DATEL (year, month, day, weekday) with their carries through
+  leap years, from the secondary oscillator, the LPRC or the system
+  clock (CLKSEL) over PS and DIV, while RTCEN; the alarm (ALMTIMEx,
+  ALMDATEx, AMASK, CHIME, ALMRPT) flags ALMEVT and the RTCC interrupt;
+  WRLOCK keeps the time and the control registers from the program, and
+  is cleared only right after NVMKEY's unlock; a 1 written to TSAEVT
+  takes a timestamp (TSATIMEx, TSADATEx) and the RTCCTS interrupt.
+- **The DMA controller**, channels 0-7 (DMACHn, DMAINTn, DMASRCn,
+  DMADSTn, DMACNTn): a byte or a word from source to destination in the
+  data space, RAM or a register, each time the channel's trigger comes --
+  the interrupt CHSEL names (any of the data sheet's Table 5-1) or CHREQ
+  set by the program; one transaction a trigger (one-shot) or the whole
+  count (continuous), the repeated modes reloading the addresses and the
+  count; SAMODE and DAMODE keep, increment or decrement the addresses;
+  DONEIF and the DMAn interrupt at the end, HALFIF half way (the
+  interrupt too with HALFEN); RAM outside DMAL-DMAH stops the channel
+  with LOWIF or HIGHIF. A transfer takes no time.
+- **I2C1-3**, as masters, on a bus with no slave on it (the Explorer
+  16/32's I2C goes to the MCP2221A's own master and to empty headers):
+  SEN, RSEN, PEN and ACKEN take a bit time, (I2CxBRG + 2) instruction
+  cycles, then clear and flag the MI2Cx interrupt (S, P); a byte written
+  to I2CxTRN is sent in nine (TBF, TRSTAT) and is not acknowledged
+  (ACKSTAT 1); one written while the module is busy is a collision
+  (IWCOL); RCEN receives 0xFF, the bus's pull-ups, in eight (RBF; I2COV
+  when RBF was still set), and reading I2CxRCV clears RBF.
 
 **The `explorer16-32-pic24` board** is the Explorer 16/32 with the
 PIC24FJ1024GB610 PIM (MA240023). The board's schematic names the socket
@@ -748,10 +788,12 @@ LEDs and the LCD as the PIC32 Explorer does; `--set` gives
 `=pressed` or `=released`.
 
 **Not modelled on the PIC24:** the other peripherals' behaviour (their
-registers keep what is written: RTCC, DMA, I2C, the CCPs, input capture
-and output compare, CRC, CLC, CTMU, USB, the comparators, the NVM
-controller and so self-programming), the change-notification
-interrupts, the external interrupt pins, the alternate vector table,
+registers keep what is written: the CCPs, input capture and output
+compare, CRC, CLC, CTMU, USB, the comparators), I2C's slave mode and a
+slave on the bus, the DMA's peripheral indirect and null write modes,
+the RTCC's power control, its fine division and its pins, the NVM's
+dual partitions, the external interrupt
+pins, the alternate vector table,
 the watchdog and deadman timer, Sleep and Idle beyond waiting for an
 interrupt, the EPMP's slave modes and its wait states' time, the SPI's
 and the UART's bit timing.
@@ -1590,4 +1632,10 @@ prints -- the examples that contradict their own instruction's
 description are left out, and named. `pic24-board.s` drives the
 peripherals and the Explorer 16/32's PIC24 PIM: Timer1's interrupt, the
 LEDs, the buttons, the sensors through ADC1, the LCD through the EPMP,
-the EEPROM through SPI1 and the Peripheral Pin Select.
+the EEPROM through SPI1 and the Peripheral Pin Select. `pic24-periph.s`
+holds the part's other peripherals to the data sheet: the
+interrupt-on-change, the flash controller (its latches, the unlock, a
+program and an erase read back by TBLRD, WRERR), the RTCC (its carries
+from 23:59:58 on 31 December 2099 to 2000, its alarm, WRLOCK, a
+timestamp), the DMA controller (a copy on CHREQ, DMAH's limit, a channel
+Timer2 triggers) and I2C1 on an empty bus.

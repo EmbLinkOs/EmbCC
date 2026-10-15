@@ -14,8 +14,15 @@
  *   - The board is told each pin whose driven level changes -- high,
  *     low, or let go (an LED, either way round) -- and asked for the
  *     pins it drives (struct board_io).
+ *   - A PIC24's interrupt-on-change: with PADCON.IOCON set, a pin whose
+ *     level rises (IOCPx) or falls (IOCNx) sets its IOCFx bit, its port's
+ *     IOCSTAT bit and the IOC interrupt's flag; the program clears IOCFx
+ *     bits (it cannot set them), and IOCSTAT follows. As the data sheet
+ *     says, an output's LATx is what changes a pin in a test (the board's
+ *     inputs are set when the run starts).
  * PORTx's value shows in --trace-periph when a read changes it. Not
- * modelled: the change notification interrupts (CNx), the slew rate. */
+ * modelled: a PIC32's change notification interrupts (CNx), the slew
+ * rate. */
 #include <stdlib.h>
 #include <string.h>
 
@@ -27,14 +34,18 @@
 
 struct port {
     struct rf_reg *ansel, *tris, *port, *lat, *odc, *cnpu;
+    struct rf_reg *iocp, *iocn, *iocf;      /* a PIC24's interrupt-on-change */
     u32 pins;                       /* the pins the port has */
     u32 high, low;                  /* driven high and low, as the board was told */
+    u32 level;                      /* the pins' levels, as last looked at */
 };
 
 struct gpio {
     struct sim *s;
     struct rf_periph *p;
     struct port pt[NPORTS];
+    struct rf_reg *padcon, *iocstat;        /* PAD's: IOCON, the ports' flags */
+    int ioc_irq;
 };
 
 /* the bits driven high (outputs at 1, not an open drain let go) and
@@ -88,6 +99,30 @@ static void tell_board(struct gpio *g)
     }
 }
 
+/* the interrupt-on-change: each port's pins against their last levels */
+static void ioc_check(struct gpio *g)
+{
+    int on = g->padcon && (g->padcon->value >> 15 & 1);
+    for (int i = 0; i < NPORTS; i++) {
+        struct port *q = &g->pt[i];
+        if (!q->port || !q->iocf)
+            continue;
+        u32 lv = pins_read(g, i), was = q->level;
+        q->level = lv;
+        if (!on)
+            continue;
+        u32 ch = (lv & ~was & (q->iocp ? (u32)q->iocp->value : 0)) |
+                 (~lv & was & (q->iocn ? (u32)q->iocn->value : 0));
+        if (!ch)
+            continue;
+        rf_hw(q->iocf, q->iocf->value | ch);
+        if (g->iocstat)
+            rf_hw(g->iocstat, g->iocstat->value | 1u << i);
+        if (g->ioc_irq >= 0)
+            pic24_irq(g->s, g->ioc_irq);
+    }
+}
+
 static int port_of(struct gpio *g, u32 off)
 {
     for (int i = 0; i < NPORTS; i++)
@@ -118,16 +153,33 @@ static void gpio_write(void *ctx, u32 off, int n, u32 v)
         struct rf_reg *lat = g->pt[i].lat;
         rf_write(g->p, rf_off(lat), n, v);
     } else {
-        rf_write(g->p, off, n, v);
+        int f = -1;
+        for (int k = 0; k < NPORTS; k++)
+            if (g->pt[k].iocf && off == rf_off(g->pt[k].iocf))
+                f = k;
+        if (f >= 0) {
+            /* IOCFx: its bits cleared, never set, by the program */
+            struct rf_reg *r = g->pt[f].iocf;
+            u64 old = r->value;
+            rf_write(g->p, off, n, v);
+            rf_hw(r, r->value & old);
+            if (g->iocstat && !r->value)
+                rf_hw(g->iocstat, g->iocstat->value & ~(1u << f));
+        } else {
+            rf_write(g->p, off, n, v);
+        }
     }
     tell_board(g);
+    ioc_check(g);
 }
 
 static void gpio_reset(void *ctx)
 {
     struct gpio *g = ctx;
-    for (int i = 0; i < NPORTS; i++)
+    for (int i = 0; i < NPORTS; i++) {
         g->pt[i].high = g->pt[i].low = 0;
+        g->pt[i].level = g->pt[i].port ? pins_read(g, i) : 0;
+    }
 }
 
 const struct dev_ops pic32_gpio_ops = {
@@ -157,6 +209,9 @@ void *pic32_gpio_create(struct sim *s, struct rf_periph *p)
         REG(cnpu, "CNPU");
         if (!q->cnpu)
             REG(cnpu, "IOCPU");                 /* a PIC24's */
+        REG(iocp, "IOCP");
+        REG(iocn, "IOCN");
+        REG(iocf, "IOCF");
 #undef REG
         if (!q->port || !q->tris || !q->lat) {
             q->port = 0;
@@ -172,5 +227,9 @@ void *pic32_gpio_create(struct sim *s, struct rf_periph *p)
         free(g);
         return 0;
     }
+    struct rf_periph *pad = s->svd ? rf_periph(s->svd, "PAD") : 0;
+    g->padcon = pad ? rf_reg(pad, "PADCON") : 0;
+    g->iocstat = pad ? rf_reg(pad, "IOCSTAT") : 0;
+    g->ioc_irq = g->padcon ? pic24_irq_named(s, "IOC") : -1;
     return g;
 }

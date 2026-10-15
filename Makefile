@@ -449,7 +449,10 @@ EMBSIM_SRCS := tools/embsim/main.c tools/embsim/run.c tools/embsim/bus.c \
                tools/embsim/pic24-spi.c tools/embsim/pic24-uart.c \
                tools/embsim/pic24-tmr.c tools/embsim/pic24-osc.c \
                tools/embsim/mips-dsp.c tools/embsim/mips-micro.c \
-               tools/embsim/mips16.c $(EMBSIM_NET)
+               tools/embsim/mips16.c tools/embsim/pic24-nvm.c \
+               tools/embsim/pic24-rtcc.c tools/embsim/pic24-dma.c \
+               tools/embsim/pic24-i2c.c \
+               $(EMBSIM_NET)
 EMBSIM_HDRS := tools/embsim/sim.h tools/embsim/cortexm.h tools/embsim/riscv.h \
                tools/embsim/avr.h \
                tools/embsim/devices.h tools/embsim/net.h tools/bench/cost.h \

@@ -66,6 +66,9 @@ static struct bus *bus(void)
 u32 pic24_prog(struct sim *s, u32 addr)
 {
     u32 a = 2 * (addr & ~1u), v;
+    struct pic24_state *k = (struct pic24_state *)s->cpu;
+    if ((addr & 0xffff00u) == PIC24_LATCHES && pic24_is(s->cpu) && k->nvm)
+        return k->nvm->latch_read(k->nvm->ctx, addr) & 0xffffff;
     struct region *r = bus_region(&s->bus, a, 3);
     if (r)
         return (u32)r->mem[a - r->base] | (u32)r->mem[a - r->base + 1] << 8 |
@@ -832,8 +835,8 @@ static int table_read(u32 i, int high)
     return 1;
 }
 
-/* TBLWTL, TBLWTH: the flash latches are not modelled; the operands'
- * address modifications are made */
+/* TBLWTL, TBLWTH: to the flash controller's write latches (TBLPAG
+ * 0xFA); elsewhere nothing, but the operands' address modifications */
 static int table_write(u32 i)
 {
     int n = F(14, 14) ? 1 : 2, qm = (int)F(13, 11), d = (int)F(10, 7);
@@ -844,7 +847,11 @@ static int table_write(u32 i)
         return 1;
     if (!qm)
         return bad_opcode();
-    ea_of(qm, d, -1, n, &ea);
+    if (ea_of(qm, d, -1, n, &ea))
+        return 1;
+    u32 p = (u32)ps->tblpag << 16 | ea;
+    if ((p & 0xffff00u) == PIC24_LATCHES && ps->nvm)
+        ps->nvm->latch_write(ps->nvm->ctx, p, (int)F(15, 15), n, v);
     return 1;
 }
 
@@ -1564,6 +1571,7 @@ static void cpu_reset(struct cpu *c)
     k->pc = 0;
     k->traps = 0;
     k->trap = 0;
+    k->key_step = 0;
     k->sleeping = 0;
     memset(k->sw, 0, sizeof k->sw);
     k->ssr = 0;
@@ -1708,6 +1716,36 @@ void pic24_intc_attach(struct sim *s, struct pic24_intc *ic)
 {
     if (pic24_is(s->cpu))
         ((struct pic24_state *)s->cpu)->intc = ic;
+}
+
+void pic24_nvm_attach(struct sim *s, struct pic24_nvm *n)
+{
+    if (pic24_is(s->cpu))
+        ((struct pic24_state *)s->cpu)->nvm = n;
+}
+
+void pic24_nvmkey(struct sim *s, u16 v)
+{
+    struct pic24_state *k = (struct pic24_state *)s->cpu;
+    if (!pic24_is(s->cpu))
+        return;
+    if ((v & 0xff) == 0x55) {
+        k->key_step = 1;
+    } else if ((v & 0xff) == 0xaa && k->key_step == 1) {
+        k->key_step = 2;
+        k->key_at = s->insns;
+    } else {
+        k->key_step = 0;
+    }
+}
+
+int pic24_unlocked(struct sim *s)
+{
+    struct pic24_state *k = (struct pic24_state *)s->cpu;
+    if (!pic24_is(s->cpu) || k->key_step != 2 || s->insns - k->key_at > 2)
+        return 0;
+    k->key_step = 0;                /* one use */
+    return 1;
 }
 
 /* The core's clock. FNOSC (FOSCSEL<2:0>) chooses the oscillator at reset

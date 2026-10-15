@@ -24,6 +24,14 @@
 #     with S3 pressed the temperature its own formula gives; and the
 #     analyses on it (its functions, its stack from __SP_init, its source
 #     lines when the build has them).
+#  7. The part's other peripherals (tests/golden/embsim/pic24-periph.s),
+#     by the data sheet: the interrupt-on-change, the flash controller
+#     (the write latches, NVMKEY's unlock, a program and an erase, WRERR),
+#     the RTCC (its BCD carries from 23:59:58 on 31 December 2099, its
+#     alarm, WRLOCK and its unlock, a timestamp), the DMA controller (a
+#     copy on CHREQ, DMAH's limit, a channel Timer2 triggers) and I2C1 as
+#     a master on a bus with no slave (start, NACK, collision, overflow,
+#     stop).
 #  6. The analyses on the PIC24 core (python3 builds the ELF file they
 #     read, of tests/golden/embsim/pic24-calls.s, with pic24-elf.py):
 #     --profile's calls (CALL, RCALL, an interrupt, a trap), --stack-report
@@ -116,6 +124,24 @@ grep -q '^explorer16-32-pic24: LCD |PIC24           | at' "$out/board.err" ||
 cmp -s "$out/replay.out" "$out/board.want" ||
     { cat "$out/replay.out" "$out/replay.err"; fail "the replay's output is not the run's"; }
 echo "embsim-pic24: the Explorer 16/32: Timer1's interrupt, the LEDs, S3 and S6, the TC1047A and the potentiometer at 10 and 12 bits, the LCD on the EPMP, the 25LC256 behind the PPS; recorded with its inputs, and replayed"
+
+# ---- 7. the peripherals beyond the board's ------------------------------------------
+awk -f "$ASM" tests/golden/embsim/pic24-periph.s tests/golden/embsim/pic24-periph.s \
+    > "$out/periph.hex" || fail "pic24-periph.s does not assemble"
+"$EMBSIM" "$out/periph.hex" --board pic24fj1024gb610 --dfp "$DFP" --max-insns 2000000 \
+    > "$out/periph.out" 2> "$out/periph.err" ||
+    { cat "$out/periph.err"; fail "pic24-periph.s ends with status $?"; }
+printf '%s\n' \
+    'I 0001 0001 0008 0000 0000 0001' \
+    'N 3456 0012 CDEF 00AB 4001 0001 6001 FFFF 00FF' \
+    'R 0000 0100 0106 0001 0020 0300 0000 8800 8000 0008 0000' \
+    'D 1111 4444 0000 0030 0058 0080 0001 0000 0002 1111 0022 0000 6230 0052 4010' \
+    'C 0008 0002 4009 8088 800A 804A 00FF 8048 8050' \
+    '.' > "$out/periph.want"
+cmp -s "$out/periph.out" "$out/periph.want" || {
+    diff "$out/periph.want" "$out/periph.out"; cat "$out/periph.err"
+    fail "pic24-periph.s: not the data sheet's"; }
+echo "embsim-pic24: the interrupt-on-change, the flash controller (latches, unlock, program, erase, WRERR), the RTCC (its carries to 2000, its alarm, WRLOCK, a timestamp), DMA (CHREQ, DMAH, Timer2's trigger), I2C1 on an empty bus"
 
 # ---- 6. the analyses ------------------------------------------------------------------
 # --disassemble: each example of the manual beside what EmbSim makes of it

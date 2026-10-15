@@ -32,6 +32,9 @@ struct intc {
     struct rf_reg *ifs[16], *iec[16], *ipc[64];
     int nw;
     struct pic24_intc ic;
+    /* told of every interrupt event (the DMA's triggers) */
+    void (*listen)(void *ctx, int irq);
+    void *listen_ctx;
 };
 
 static struct intc *intc_of(struct sim *s)
@@ -121,6 +124,17 @@ void pic24_irq(struct sim *s, int irq)
     struct rf_reg *r = c->ifs[irq / 16];
     if (!(r->value >> (irq % 16) & 1))
         rf_hw(r, r->value | 1u << (irq % 16));
+    if (c->listen)
+        c->listen(c->listen_ctx, irq);
+}
+
+void pic24_irq_listen(struct sim *s, void (*fn)(void *ctx, int irq), void *ctx)
+{
+    struct intc *c = intc_of(s);
+    if (c) {
+        c->listen = fn;
+        c->listen_ctx = ctx;
+    }
 }
 
 int pic24_irq_flag(struct sim *s, int irq)

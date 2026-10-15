@@ -66,6 +66,10 @@ static const struct model_desc pic24f_models[] = {
     { "PMP", "pic24-epmp" },
     { "ADC1", "pic24-adc" },
     { "SPI", "pic24-spi" },
+    { "NVM", "pic24-nvm" },
+    { "RTCC", "pic24-rtcc" },
+    { "DMA", "pic24-dma" },
+    { "I2C", "pic24-i2c" },
     { 0, 0 },
 };
 
@@ -244,6 +248,10 @@ static const struct model_type model_types[] = {
     { "pic24-spi", &pic24_spi_ops, pic24_spi_create },
     { "pic24-uart", &pic24_uart_ops, pic24_uart_create },
     { "pic24-tmr", &pic24_tmr_ops, pic24_tmr_create },
+    { "pic24-nvm", &pic24_nvm_ops, pic24_nvm_create },
+    { "pic24-rtcc", &pic24_rtcc_ops, pic24_rtcc_create },
+    { "pic24-dma", &pic24_dma_ops, pic24_dma_create },
+    { "pic24-i2c", &pic24_i2c_ops, pic24_i2c_create },
     { "pic24-osc", &pic24_osc_ops, pic24_osc_create },
     { "pic24-pps", &pic24_pps_ops, pic24_pps_create },
     { 0, 0, 0 },

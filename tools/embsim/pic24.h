@@ -61,6 +61,17 @@ struct pic24_intc {
     void *ctx;
 };
 
+/* What the flash controller (pic24-nvm.c) gives the core: its write
+ * latches, which TBLWTL and TBLWTH write and the table reads read at
+ * 0xFA0000 (TBLPAG 0xFA) */
+struct pic24_nvm {
+    u32 (*latch_read)(void *ctx, u32 addr);
+    void (*latch_write)(void *ctx, u32 addr, int high, int n, u16 v);
+    void *ctx;
+};
+
+#define PIC24_LATCHES 0xfa0000u
+
 struct pic24_state {
     struct cpu cpu;                 /* the interface; first */
     struct sim *sim;
@@ -84,11 +95,21 @@ struct pic24_state {
     u32 prog_end;                   /* past the last program address */
     u64 disi_at;                    /* the cycle DISICNT was last counted at */
     struct pic24_intc *intc;
+    struct pic24_nvm *nvm;
+    /* NVMKEY's unlock: 0x55 then 0xAA (key_step 2) at instruction key_at */
+    int key_step;
+    u64 key_at;
 };
 
 extern struct pic24_state *ps;
 
 int pic24_is(const struct cpu *c);
+void pic24_nvm_attach(struct sim *s, struct pic24_nvm *n);
+/* NVMKEY written (the flash controller tells the core), and whether the
+ * unlock it makes is open: 0x55 and 0xAA, the instruction just before
+ * (or the one before that, as Microchip's sequences allow) */
+void pic24_nvmkey(struct sim *s, u16 v);
+int pic24_unlocked(struct sim *s);
 /* a trap's name ("an address error"), by its number (TRAP_*) */
 const char *pic24_trap_name(int n);
 /* the controller drives the core */
