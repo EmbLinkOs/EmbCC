@@ -4428,6 +4428,15 @@ static void gen_func(struct ir_func *fn, struct code *t, struct mips_sites *st,
     F.fb = MIPS_SP;
     F.longb = longb;
     F.nlongb = nlongb;
+    /* aligned(N), or an asm that aligns its own bytes (`.p2align 3`):
+     * the function starts on that. The padding before it is never run. */
+    {
+        int m = cg_fn_align(fn);
+        if (m > f->code_align) {
+            code_fill(t, CODE_FILL_ZERO, (m - t->len % m) % m);
+            f->code_align = m;
+        }
+    }
     f->code_off = t->len;
     F.barrier = t->len;
     F.fill = !keep_vars && !getenv("EMBCC_MIPS_NO_FILL");

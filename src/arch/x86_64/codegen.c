@@ -2839,16 +2839,9 @@ static void gen_func(struct ir_func *fn, struct code *text,
      * address was called through its vtable instead (clang aligns member
      * functions to 2 for this; every function of a C++ unit is, here). */
     int falign = !target_opt_size() ? 16 : predef_is_cxx() ? 2 : 1;
-    /* An asm that aligns its own bytes (`.p2align 3`) starts the function
-     * on that, so that in a section of its own the buffer's offsets are
-     * the section's. */
-    for (int k = 0; k < fn->nins; k++) {
-        const struct ir_asm *ia = fn->ins[k].op == IR_ASM ? fn->ins[k].asm_ir
-                                                          : NULL;
-        int m = ia ? code_asm_align_max(ia->arange, ia->narange) : 0;
-        if (m > falign)
-            falign = m;
-    }
+    /* ...or more: aligned(N), or an asm that aligns its own bytes */
+    if (cg_fn_align(fn) > falign)
+        falign = cg_fn_align(fn);
     if (falign > 1)
         code_align(text, falign, 0x90);
     f->code_off = text->len;
