@@ -2113,7 +2113,14 @@ static void gen_call(struct t_fn *F, int n)
      * r0-r3 are loaded only r6 and r7 are left. A struct's words are read
      * at its type's alignment only where irgen promises the address has it
      * (ir_arg.natural): a packed struct's member may be anywhere, and LDR
-     * faults on a misaligned address here. */
+     * faults on a misaligned address here.
+     * A temporary these need beyond r6/r7 -- a byte-gathered word, an
+     * offset past 1020 -- may be a register holding another argument:
+     * tmp_get pushes it and tmp_put pops it, and nothing reads the others
+     * meanwhile. With them all off limits (ins_mask), a 2-aligned struct
+     * after four words of arguments had none. */
+    unsigned held = F->ins_mask;
+    F->ins_mask = 0;
     for (int k = 0; k < i->nargs; k++) {
         struct ir_arg *a = &i->argv[k];
         if (pl[k].vfp >= 0 && pl[k].nvfp)
@@ -2141,6 +2148,7 @@ static void gen_call(struct t_fn *F, int n)
             sp_st(F, S0, pl[k].stk, 0);
         }
     }
+    F->ins_mask = held;
     /* The register-resident scalars, as ONE parallel move. */
     {
         int pd[8], ps[8], npm = 0;
