@@ -4306,6 +4306,38 @@ static int addr_fold(const struct expr *lv, long *out)
     }
 }
 
+static int resolve_addr(struct expr *e, struct global **gt,
+                        struct func **ft, long *add);
+static const char *g_addr_label;
+
+/* a - b where both are addresses in the same object: a constant, the
+ * distance between them -- `(char *)&v.c - (char *)&v`, the offsetof
+ * of old code -- in elements of a pointer difference, bytes otherwise.
+ * A label's address is left to the code that knows label differences. */
+static int addr_diff_fold(const struct expr *e, long *out)
+{
+    struct global *ga = NULL, *gb = NULL;
+    struct func *fa = NULL, *fb = NULL;
+    long oa = 0, ob = 0;
+    const char *save = g_addr_label;
+    g_addr_label = NULL;
+    int ok = resolve_addr(e->lhs, &ga, &fa, &oa) && !g_addr_label &&
+             resolve_addr(e->rhs, &gb, &fb, &ob) && !g_addr_label &&
+             ((ga && ga == gb) || (fa && fa == fb && !ga && !gb));
+    g_addr_label = save;
+    if (!ok)
+        return 0;
+    long esz = 1;
+    if (e->lhs->ty && e->lhs->ty->kind == TY_PTR && e->lhs->ty->pointee &&
+        e->lhs->ty->pointee->kind != TY_VOID &&
+        e->lhs->ty->pointee->kind != TY_FUNC)
+        esz = ty_size(e->lhs->ty->pointee);
+    if (esz <= 0)
+        esz = 1;
+    *out = (oa - ob) / esz;
+    return 1;
+}
+
 static int const_fold(const struct expr *e, long *out)
 {
     long a, b;
@@ -4370,6 +4402,8 @@ static int const_fold(const struct expr *e, long *out)
             *out = !!b;
             return 1;
         }
+        if (e->op == B_SUB && addr_diff_fold(e, out))
+            return 1;
         if (!const_fold(e->lhs, &a) || !const_fold(e->rhs, &b))
             return 0;
         if ((e->op == B_ADD || e->op == B_SUB) && e->lhs->ty && e->rhs->ty &&
@@ -5177,6 +5211,18 @@ static int resolve_addr(struct expr *e, struct global **gt,
         int esz = e->ty && e->ty->kind == TY_PTR
                 ? ty_size(e->ty->pointee) : 1;
         long k;
+        /* an address less an ADDRESS is a distance, not an address
+         * (addr_diff_fold): `(long)&a[3] - (long)&a[1]` */
+        if (e->op == B_SUB) {
+            struct global *g2 = NULL;
+            struct func *f2 = NULL;
+            long o2 = 0;
+            const char *save = g_addr_label;
+            int rhs_addr = resolve_addr(e->rhs, &g2, &f2, &o2);
+            g_addr_label = save;
+            if (rhs_addr)
+                return 0;
+        }
         if (resolve_addr(e->lhs, gt, ft, add) && const_fold(e->rhs, &k)) {
             *add += (e->op == B_SUB ? -k : k) * esz;
             return 1;
