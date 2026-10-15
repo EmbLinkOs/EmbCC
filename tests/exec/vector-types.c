@@ -11,6 +11,7 @@ typedef unsigned U __attribute__((vector_size(4 * sizeof(unsigned))));
 typedef float F __attribute__((vector_size(4 * sizeof(float))));
 typedef short S __attribute__((vector_size(4 * sizeof(short))));
 typedef unsigned char C __attribute__((vector_size(8)));
+typedef signed char SC __attribute__((vector_size(4)));
 typedef long long L __attribute__((vector_size(16)));
 typedef __INT32_TYPE__ V2 __attribute__((vector_size(8)));
 typedef __INT32_TYPE__ I4 __attribute__((vector_size(16)));  /* F's < */
@@ -98,6 +99,12 @@ int main(void)
     C ch = {250, 251, 252, 253, 254, 255, 0, 1};
     ch += 10;
     if (ch[0] != 4 || ch[5] != 9 || ch[6] != 10)
+        bad |= 64;
+    /* a scalar shifted by a vector is a lane first: (signed char)0x1f0 */
+    int n = 0x1f0;
+    SC sc = {1, 2, 3, 4};
+    SC r = n >> sc;
+    if (r[0] != -8 || r[1] != -4 || r[3] != -1)
         bad |= 64;
     L l = {1LL << 40, -5};
     l = l * 3;

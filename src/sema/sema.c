@@ -2343,10 +2343,10 @@ static void vec_binop(struct unit *u, struct expr *e)
                       "initializer");
     struct type *calc = vec_calc(elem);
     struct expr *pa, *pb;
-    /* a scalar operand is a lane's value, evaluated once; a shift's count
-     * keeps its own promoted type, as C's shifts do */
-    struct expr *A = vec_stable(lv ? L : mk_cast(L, shift && !lv
-                                ? promote(L->ty) : elem), &pa);
+    /* a scalar operand is a lane's value -- broadcast, so converted to
+     * the lanes' type first, `n >> v` included -- evaluated once; only a
+     * shift's count keeps its own promoted type, as C's shifts do */
+    struct expr *A = vec_stable(lv ? L : mk_cast(L, elem), &pa);
     struct expr *B = vec_stable(rv ? R : mk_cast(R, shift
                                 ? promote(R->ty) : elem), &pb);
     struct type *rt = vt;
