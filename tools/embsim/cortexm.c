@@ -487,6 +487,23 @@ int cm_wfx_idle(void)
     return 1;
 }
 
+/* A halfword of code: from memory, or from a device that answers there (a
+ * ROM: the RP2040's, rp2040.c). 0 when nothing does. */
+static int fetch16(struct sim *s, u32 a, u8 *b)
+{
+    struct region *r = bus_region(&s->bus, a, 2);
+    if (r) {
+        memcpy(b, r->mem + (a - r->base), 2);
+        return 1;
+    }
+    u32 v;
+    if (bus_read(&s->bus, a, 2, &v))
+        return 0;
+    b[0] = (u8)v;
+    b[1] = (u8)(v >> 8);
+    return 1;
+}
+
 static void step(struct cpu *c)
 {
     cs = (struct cm_state *)c;
@@ -508,23 +525,19 @@ static void step(struct cpu *c)
         return;
     }
     u8 b[4];
-    struct region *r = bus_region(&s->bus, cs->pc, 2);
-    if (!r) {
+    if (!fetch16(s, cs->pc, b)) {
         take_sync(EXC_BUS, BFSR_IBUSERR, cs->pc);
         return;
     }
-    memcpy(b, r->mem + (cs->pc - r->base), 2);
     u32 h[2];
     h[0] = (u32)b[0] | (u32)b[1] << 8;
     h[1] = 0;
     int size = 2;
     if ((h[0] >> 11) >= 0x1d) {
-        struct region *r2 = bus_region(&s->bus, cs->pc + 2, 2);
-        if (!r2) {
+        if (!fetch16(s, cs->pc + 2, b + 2)) {
             take_sync(EXC_BUS, BFSR_IBUSERR, cs->pc);
             return;
         }
-        memcpy(b + 2, r2->mem + (cs->pc + 2 - r2->base), 2);
         h[1] = (u32)b[2] | (u32)b[3] << 8;
         size = 4;
     }

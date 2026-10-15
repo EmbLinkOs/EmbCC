@@ -47,6 +47,92 @@
 
 #include "svd.h"
 
+/* ---- a part's boot stage: the RP2040's boot2 ---------------------------- */
+
+/* The RP2040 boots from flash through boot2, the flash's first 256 bytes:
+ * its bootrom copies them to SRAM if the CRC-32 of the first 252 is the
+ * last word, and runs them; boot2 sets up the XIP and goes to the vector
+ * table at flash + 0x100 (the datasheet's 2.8.1). So for the RP2040 the
+ * startup holds a boot2, in .boot2, and the linker script puts it first.
+ * This one sets the XIP up for 03h serial reads, which any SPI flash
+ * answers -- the settings of the Pico SDK's boot2_generic_03h --
+ * assembled (llvm-mc --triple=thumbv6m) from:
+ *
+ *         push {lr}
+ *         ldr r3, =0x18000000          @ XIP_SSI_BASE
+ *         movs r1, #0
+ *         str r1, [r3, #8]             @ SSIENR: off, to set it up
+ *         movs r1, #4
+ *         str r1, [r3, #0x14]          @ BAUDR: SCK at clk_sys / 4
+ *         ldr r1, =0x001f0300          @ CTRLR0: 32-bit frames, EEPROM read
+ *         str r1, [r3, #0]
+ *         ldr r1, =0x03000218          @ SPI_CTRLR0: 03h, 8-bit instruction,
+ *         ldr r0, =0x180000f4          @   24-bit address
+ *         str r1, [r0]
+ *         movs r1, #0
+ *         str r1, [r3, #4]             @ CTRLR1: one frame
+ *         movs r1, #1
+ *         str r1, [r3, #8]             @ SSIENR: on
+ *         pop {r0}                     @ the bootrom's lr is 0; a caller's
+ *         cmp r0, #0                   @   returns there
+ *         beq 1f
+ *         bx r0
+ *     1:  ldr r0, =0x10000100          @ the vector table, after boot2
+ *         ldr r1, =0xe000ed08          @ VTOR
+ *         str r0, [r1]
+ *         ldmia r0, {r0, r1}
+ *         msr msp, r0
+ *         bx r1
+ *
+ * and padded with zeros; embsvd adds the CRC (tests/golden/embsim-pico.sh
+ * holds these bytes to the assembler's). */
+static const unsigned char rp2040_boot2[] = {
+    0x00, 0xb5, 0x0c, 0x4b, 0x00, 0x21, 0x99, 0x60, 0x04, 0x21, 0x59, 0x61,
+    0x0a, 0x49, 0x19, 0x60, 0x0a, 0x49, 0x0b, 0x48, 0x01, 0x60, 0x00, 0x21,
+    0x59, 0x60, 0x01, 0x21, 0x99, 0x60, 0x01, 0xbc, 0x00, 0x28, 0x00, 0xd0,
+    0x00, 0x47, 0x07, 0x48, 0x07, 0x49, 0x08, 0x60, 0x03, 0xc8, 0x80, 0xf3,
+    0x08, 0x88, 0x08, 0x47, 0x00, 0x00, 0x00, 0x18, 0x00, 0x03, 0x1f, 0x00,
+    0x18, 0x02, 0x00, 0x03, 0xf4, 0x00, 0x00, 0x18, 0x00, 0x01, 0x00, 0x10,
+    0x08, 0xed, 0x00, 0xe0,
+};
+
+static int is_rp2040(const struct svd_device *d)
+{
+    return d->name && !strcmp(d->name, "RP2040");
+}
+
+/* the bootrom's checksum: CRC-32 with polynomial 0x04c11db7, seed
+ * 0xffffffff, not reflected, no final XOR */
+static unsigned long crc32_mpeg2(const unsigned char *p, int n)
+{
+    unsigned long c = 0xffffffffUL;
+    for (int i = 0; i < n; i++) {
+        c ^= (unsigned long)p[i] << 24;
+        for (int k = 0; k < 8; k++)
+            c = (c & 0x80000000UL ? c << 1 ^ 0x04c11db7UL : c << 1) & 0xffffffffUL;
+    }
+    return c;
+}
+
+static void write_boot2(FILE *f)
+{
+    unsigned char b[256] = { 0 };
+    memcpy(b, rp2040_boot2, sizeof rp2040_boot2);
+    unsigned long crc = crc32_mpeg2(b, 252);
+    for (int i = 0; i < 4; i++)
+        b[252 + i] = (unsigned char)(crc >> (8 * i));
+    fprintf(f, "/* boot2: the flash's first 256 bytes, which the RP2040's bootrom\n"
+               " * checks (the CRC-32 of the first 252 is the last word), copies to\n"
+               " * SRAM and runs: it sets the XIP up for 03h reads, as the Pico\n"
+               " * SDK's boot2_generic_03h does, and goes to the vector table\n"
+               " * after it (embsvd's tools/embsvd/embsvd.c has its source). */\n"
+               "__attribute__((section(\".boot2\"), used))\n"
+               "const unsigned char __boot2[256] = {");
+    for (int i = 0; i < 256; i++)
+        fprintf(f, "%s0x%02x,", i % 12 ? " " : "\n    ", b[i]);
+    fprintf(f, "\n};\n\n");
+}
+
 /* ---- the header -------------------------------------------------------- */
 
 static void comment(FILE *f, const char *s)
@@ -336,6 +422,8 @@ static void write_startup(FILE *f, const struct svd_device *d)
                "void Reset_Handler(void);\n\n"
                "void Default_Handler(void)\n{\n    for (;;)\n        ;\n}\n\n"
                "__attribute__((weak)) void SystemInit(void)\n{\n}\n\n");
+    if (is_rp2040(d))
+        write_boot2(f);
     for (size_t i = 0; i < sizeof core_excs / sizeof core_excs[0]; i++)
         if (!base || core_excs[i].m0)
             fprintf(f, "void %s(void) __attribute__((weak, alias(\"Default_Handler\")));\n",
@@ -405,8 +493,16 @@ static void write_ld(FILE *f, const struct svd_device *d, const char *flash,
                "  FLASH (rx)  : ORIGIN = 0x%08llx, LENGTH = 0x%llx\n"
                "  RAM   (xrw) : ORIGIN = 0x%08llx, LENGTH = 0x%llx\n}\n\n",
             d->name, fo, fl, ro, rl);
-    fputs("SECTIONS\n{\n"
-          "  .isr_vector : { . = ALIGN(4); KEEP(*(.isr_vector)) . = ALIGN(4); } >FLASH\n"
+    fputs("SECTIONS\n{\n", f);
+    if (is_rp2040(d)) {
+        if (fo != 0x10000000ULL)
+            svd_die("the RP2040 boots from the flash at 0x10000000, not from "
+                    "--flash 0x%08llx", fo);
+        /* boot2, then the vector table at 0x10000100, where boot2 goes */
+        fputs("  .boot2 : { __boot2_start__ = .; KEEP(*(.boot2)) "
+              "__boot2_end__ = .; } >FLASH\n", f);
+    }
+    fputs("  .isr_vector : { . = ALIGN(4); KEEP(*(.isr_vector)) . = ALIGN(4); } >FLASH\n"
           "  .text : { . = ALIGN(4); *(.text) *(.text*) KEEP(*(.init)) KEEP(*(.fini))\n"
           "            . = ALIGN(4); _etext = .; } >FLASH\n"
           "  .rodata : { . = ALIGN(4); *(.rodata) *(.rodata*) . = ALIGN(4); } >FLASH\n"

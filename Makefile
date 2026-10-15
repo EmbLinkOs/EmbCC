@@ -456,6 +456,10 @@ EMBSIM_SRCS := tools/embsim/main.c tools/embsim/run.c tools/embsim/bus.c \
                tools/embsim/pic32-spi.c tools/embsim/pic32-adc10.c \
                tools/embsim/pic24-dsp.c tools/embsim/pic24e-spi.c \
                tools/embsim/pic24e-adc.c \
+               tools/embsim/rp2040.c tools/embsim/rp2040-timer.c \
+               tools/embsim/rp2040-io.c tools/embsim/rp2040-sio.c \
+               tools/embsim/rp2040-uart.c tools/embsim/rp2040-ssi.c \
+               tools/embsim/mcu-boards.c \
                $(EMBSIM_NET)
 EMBSIM_HDRS := tools/embsim/sim.h tools/embsim/cortexm.h tools/embsim/riscv.h \
                tools/embsim/avr.h \
@@ -463,7 +467,7 @@ EMBSIM_HDRS := tools/embsim/sim.h tools/embsim/cortexm.h tools/embsim/riscv.h \
                tools/embsim/svd-map.h tools/embsvd/svd.h \
                tools/embsim/image.h tools/embsim/analysis.h \
                tools/embsim/disasm.h tools/embsim/mips.h tools/embsim/pic32.h \
-               tools/embsim/ieee754.h tools/embsim/pic24.h
+               tools/embsim/ieee754.h tools/embsim/pic24.h tools/embsim/rp2040.h
 # Optimized, unlike the other tools: a simulator's speed is the tests'
 # and the user's time, and -O2 runs a busy loop 2.5 (M3) to 3.6 (AVR)
 # times as fast as no -O. -g stays (it is in CFLAGS); `make EMBSIM_OPT=`

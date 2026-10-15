@@ -142,4 +142,30 @@ void *pic24_ccp_create(struct sim *s, struct rf_periph *p);
 extern const struct dev_ops pic_board_ops;
 void *pic_board_create(struct sim *s, const struct dev_desc *d);
 
+/* the RP2040's ROM (its boot), and its models over RP2040.svd (rp2040.h) */
+extern const struct dev_ops rp2040_rom_ops, rp2040_resets_ops, rp2040_clocks_ops;
+extern const struct dev_ops rp2040_xosc_ops, rp2040_rosc_ops, rp2040_pll_ops;
+extern const struct dev_ops rp2040_psm_ops, rp2040_watchdog_ops, rp2040_timer_ops;
+extern const struct dev_ops rp2040_io_ops, rp2040_pads_ops, rp2040_sio_ops;
+extern const struct dev_ops rp2040_uart_ops, rp2040_ssi_ops;
+void *rp2040_rom_create(struct sim *s, const struct dev_desc *d);
+void *rp2040_resets_create(struct sim *s, struct rf_periph *p);
+void *rp2040_clocks_create(struct sim *s, struct rf_periph *p);
+void *rp2040_xosc_create(struct sim *s, struct rf_periph *p);
+void *rp2040_rosc_create(struct sim *s, struct rf_periph *p);
+void *rp2040_pll_create(struct sim *s, struct rf_periph *p);
+void *rp2040_psm_create(struct sim *s, struct rf_periph *p);
+void *rp2040_watchdog_create(struct sim *s, struct rf_periph *p);
+void *rp2040_timer_create(struct sim *s, struct rf_periph *p);
+void *rp2040_io_create(struct sim *s, struct rf_periph *p);
+void *rp2040_pads_create(struct sim *s, struct rf_periph *p);
+void *rp2040_sio_create(struct sim *s, struct rf_periph *p);
+void *rp2040_uart_create(struct sim *s, struct rf_periph *p);
+void *rp2040_ssi_create(struct sim *s, struct rf_periph *p);
+
+/* the boards around the microcontrollers: LEDs and buttons (mcu-boards.c;
+ * a dev_desc's type names the board) */
+extern const struct dev_ops mcu_board_ops;
+void *mcu_board_create(struct sim *s, const struct dev_desc *d);
+
 #endif

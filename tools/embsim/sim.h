@@ -383,6 +383,9 @@ struct sim {
     struct rec *rec;
     /* what the board has outside the part (pic-boards.c's), or zeros */
     struct board_io io;
+    /* the time since reset in ns, from a part that models its clocks (the
+     * RP2040's: its core runs at the clk_sys the program sets), or 0 */
+    double (*now_ns)(struct sim *s);
 };
 
 /* build the board with its core (`model`, or 0 for the board's own),

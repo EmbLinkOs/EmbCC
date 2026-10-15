@@ -112,6 +112,26 @@ static const struct model_desc pic24e_models[] = {
     { 0, 0 },
 };
 
+/* the RP2040's models, over RP2040.svd (rp2040.h): RESETS first, which
+ * holds the others in reset, then the clocks the rest run on */
+static const struct model_desc rp2040_models[] = {
+    { "RESETS", "rp2040-resets" },
+    { "CLOCKS", "rp2040-clocks" },
+    { "XOSC", "rp2040-xosc" },
+    { "ROSC", "rp2040-rosc" },
+    { "PLL_*", "rp2040-pll" },
+    { "PSM", "rp2040-psm" },
+    { "WATCHDOG", "rp2040-watchdog" },
+    { "TIMER", "rp2040-timer" },
+    { "PADS_BANK0", "rp2040-pads" },
+    { "IO_QSPI", "rp2040-pads" },
+    { "IO_BANK0", "rp2040-io" },
+    { "SIO", "rp2040-sio" },
+    { "UART*", "rp2040-uart" },
+    { "SSI", "rp2040-ssi" },
+    { 0, 0 },
+};
+
 /* the PIC24FJ1024GB610's memory, on the bus as pic24.h places it:
  * program flash to program address 0xABFFF (the configuration words in
  * its last page) at twice its address, the configuration memory at
@@ -237,6 +257,22 @@ const struct board_desc boards[] = {
     { "explorer16-32-dspic33", "pic24", "dspic33ep512mu810", 0, DSPIC33EP512_MEM,
       { { "explorer16-32-dspic33", 0, 0 } }, { { 0, 0, 0 } },
       "DSPIC33EP512MU810.PIC", pic24e_models, 0 },
+    /* the Raspberry Pi Pico: an RP2040 (core 0, a Cortex-M0+ with two NVIC
+     * priority bits), its ROM at 0 (rp2040.c), 2 MiB of flash at
+     * 0x10000000 and the XIP window's three other aliases, 264 KiB of SRAM,
+     * the XIP cache's 16 KiB as SRAM and the USB DPRAM; the peripherals
+     * RP2040.svd's (the Pico SDK's) with the part's atomic aliases and
+     * whole-register writes; the LED on GP25 */
+    { "pico", "cortex-m", "cortex-m0plus", 2,
+      { { 0x10000000u, MB(2), MEM_FLASH, 0, 0, 0xffffffffu },
+        { 0x11000000u, MB(2), MEM_ALIAS, 0, 0x10000000u, 0 },
+        { 0x12000000u, MB(2), MEM_ALIAS, 0, 0x10000000u, 0 },
+        { 0x13000000u, MB(2), MEM_ALIAS, 0, 0x10000000u, 0 },
+        { 0x20000000u, KB(264), MEM_RAM, 1, 0, 0 },
+        { 0x15000000u, KB(16), MEM_RAM, 0, 0, 0 },
+        { 0x50100000u, KB(4), MEM_RAM, 0, 0, 0 } },
+      { { "rp2040-rom", 0, 0x4000 }, { "pico", 0, 0 } }, { { 0, 0, 0 } },
+      "RP2040.svd", rp2040_models, RF_ATOMIC_ALIASES | RF_WIDE_WRITES },
 };
 const int nboards = (int)(sizeof boards / sizeof boards[0]);
 
@@ -291,6 +327,8 @@ static const struct dev_type dev_types[] = {
     { "explorer16-32-pic24", &pic_board_ops, pic_board_create },
     { "explorer16-32-pic32mx", &pic_board_ops, pic_board_create },
     { "explorer16-32-dspic33", &pic_board_ops, pic_board_create },
+    { "rp2040-rom", &rp2040_rom_ops, rp2040_rom_create },
+    { "pico", &mcu_board_ops, mcu_board_create },
 };
 
 /* ---- the peripheral models, over an SVD's registers (svd-map.h) -------- */
@@ -328,6 +366,19 @@ static const struct model_type model_types[] = {
     { "pic24-ccp", &pic24_ccp_ops, pic24_ccp_create },
     { "pic24-osc", &pic24_osc_ops, pic24_osc_create },
     { "pic24-pps", &pic24_pps_ops, pic24_pps_create },
+    { "rp2040-resets", &rp2040_resets_ops, rp2040_resets_create },
+    { "rp2040-clocks", &rp2040_clocks_ops, rp2040_clocks_create },
+    { "rp2040-xosc", &rp2040_xosc_ops, rp2040_xosc_create },
+    { "rp2040-rosc", &rp2040_rosc_ops, rp2040_rosc_create },
+    { "rp2040-pll", &rp2040_pll_ops, rp2040_pll_create },
+    { "rp2040-psm", &rp2040_psm_ops, rp2040_psm_create },
+    { "rp2040-watchdog", &rp2040_watchdog_ops, rp2040_watchdog_create },
+    { "rp2040-timer", &rp2040_timer_ops, rp2040_timer_create },
+    { "rp2040-pads", &rp2040_pads_ops, rp2040_pads_create },
+    { "rp2040-io", &rp2040_io_ops, rp2040_io_create },
+    { "rp2040-sio", &rp2040_sio_ops, rp2040_sio_create },
+    { "rp2040-uart", &rp2040_uart_ops, rp2040_uart_create },
+    { "rp2040-ssi", &rp2040_ssi_ops, rp2040_ssi_create },
     { 0, 0, 0 },
 };
 
