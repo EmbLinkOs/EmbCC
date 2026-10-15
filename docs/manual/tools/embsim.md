@@ -588,6 +588,15 @@ module disables, sleep and idle.
   QEMU. The FPU's and the DSP ASE's microMIPS encodings end the run as
   a lockup that names them. `--trace` shows the halfwords;
   `--fault-report` names a microMIPS instruction by its halfwords.
+- **MIPS16e** (`24kc`, malta's core, Config1.CA): the 16-bit
+  instructions and the EXTENDed ones with 16-bit immediates, t8 for the
+  compares, save and restore with their argument, static and extra s
+  registers, addiupc and lwpc, the sign and zero extensions; b, beqz,
+  bnez, bteqz, btnez, jrc and jalrc with no delay slot, jal, jalx, jr and
+  jalr with a 16-bit one. The ISA mode is bit 0 of a jump's target, as
+  for microMIPS (handlers run in MIPS32). As on QEMU, a branch in a
+  delay slot, an extended addiupc or lwpc in one, an instruction EXTEND
+  cannot extend and the 64-bit ones are Reserved Instructions.
 - **The FPU** (`pic32mz`, which `--cpu pic32mz` puts on malta too):
   coprocessor 1 with 64-bit registers (Status.FR) or paired 32-bit ones,
   single and double precision and the word and long-word conversions,
@@ -1349,8 +1358,8 @@ On the AVR:
 - The sleep modes beyond Idle.
 
 On MIPS:
-- MIPS16e, the MCU ASE, microMIPS's FPU and DSP encodings (each ends
-  the run as a lockup naming the instruction); paired singles.
+- The MCU ASE, microMIPS's FPU and DSP encodings (each ends the run as
+  a lockup naming the instruction); paired singles.
 - Big-endian images (mips-none-elf): EmbSim's MIPS core is
   little-endian.
 - The caches (`cache` is a no-op), the watch registers (kept, not
@@ -1507,9 +1516,10 @@ AVR against QEMU's uno stub.
 **MIPS.** `tests/golden/embsim-mips.sh` runs the exec corpus at -O0,
 -O2 and -Os on QEMU's malta and on EmbSim's (the output and the exit
 status), `mips-isa.c`'s instruction edges, `mips-fpu.c`'s FPU edges,
-`mips-dsp.c`'s DSP ASE edges and `mips-micro.s`'s microMIPS ones
-(assembled by llvm-mc) against QEMU's 24Kc, P5600, 74Kf and M14Kc, and
-the ends of a run.
+`mips-dsp.c`'s DSP ASE edges, `mips-micro.s`'s microMIPS ones
+(assembled by llvm-mc) and `mips-mips16.s`'s MIPS16e ones (built of
+`.hword`s by its macros: llvm-mc has no MIPS16 assembler) against QEMU's
+24Kc, P5600, 74Kf, M14Kc and 24Kc, and the ends of a run.
 
 **PIC32.** No QEMU has a PIC32. `tests/golden/embsim-pic32.sh` holds the
 register file the PIC32MZ2048EFH100's ATDF gives to the pack's own

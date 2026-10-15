@@ -89,8 +89,9 @@ struct mips_state {
      * target does; pc does not. */
     u32 nx, nnx;
     int nslot;
-    int isa;                        /* executing microMIPS, not MIPS32 */
-    int micromips;                  /* the core has microMIPS (Config3.ISA) */
+    int isa;                        /* executing the compressed ISA, not MIPS32 */
+    int micromips;                  /* that is microMIPS (Config3.ISA) */
+    int mips16;                     /* that is MIPS16e (Config1.CA) */
     int bootcfg;                    /* a PIC32's: DEVCFG0.BOOTISA at reset */
     /* the delay slot's branch (its address, the ISA bit in bit 0) for
      * EPC, and the size the slot's instruction must be (2 or 4, or 0 for
@@ -154,6 +155,11 @@ void mips_self_loop(u32 target, int slot_nop);
 int mips_micro_size(u32 first);
 void mips_micro_exec(u32 i, int size);
 int mips_micro_cost(u32 i, int size);
+/* mips16.c: the same for MIPS16e (an EXTENDed instruction, or jal and
+ * jalx, in both halves) */
+int mips16_size(u32 first);
+void mips16_exec(u32 i, int size);
+int mips16_cost(u32 i, int size);
 
 /* mips.c, for mips-fpu.c: the instruction's memory accesses, its branch,
  * and its exceptions */

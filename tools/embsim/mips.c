@@ -12,9 +12,11 @@
  * (Revision 2, the `pic32mz` core's, with Status.MX): HI and LO of
  * $ac1-$ac3 for mfhi, mflo, mthi, mtlo and the multiplies, rddsp and
  * wrdsp, lwx, lhx and lbux, bposge32 here, and the rest in mips-dsp.c.
- * A microMIPS instruction ends the run as a lockup that names it, rather
- * than doing what no part does; an encoding no MIPS32r2 core has is a
- * Reserved Instruction exception, as on the part.
+ * The compressed ISAs -- microMIPS (`pic32mz`, mips-micro.c) and MIPS16e
+ * (`24kc`, mips16.c) -- are fetched here, a halfword at a time, while
+ * the ISA mode is set: bit 0 of a jump's target, jalx's switch. An
+ * encoding no MIPS32r2 core has is a Reserved Instruction exception, as
+ * on the part.
  *
  * Exceptions are the privileged architecture's: EPC and Cause.BD for an
  * instruction in a delay slot, Status.EXL and ERL, the boot vectors
@@ -1199,7 +1201,7 @@ static void exec(u32 i)
     case 0x17: branch_likely((s32)a > 0, t); return;            /* BGTZL */
     case 0x1c: special2(i); return;
     case 0x1d:                                                  /* JALX */
-        if (!ms->micromips) {
+        if (!ms->micromips && !ms->mips16) {
             reserved();
             return;
         }
@@ -1326,13 +1328,13 @@ static void step(struct cpu *c)
          * opcode is a 32-bit instruction's */
         if (fetch(pc, 2, &w))
             return;
-        size = mips_micro_size(w);
+        size = ms->micromips ? mips_micro_size(w) : mips16_size(w);
         if (size == 4) {
             if (fetch(pc + 2, 2, &h2))
                 return;
             w = w << 16 | h2;
         }
-        cost = (u32)mips_micro_cost(w, size);
+        cost = (u32)(ms->micromips ? mips_micro_cost(w, size) : mips16_cost(w, size));
     } else {
         if (pc & 3) {
             raise_addr(EXC_ADEL, pc);
@@ -1365,8 +1367,10 @@ static void step(struct cpu *c)
         exec(w);
     else if (ms->slot && ms->ds && ms->ds != size)
         reserved();             /* a slot whose branch wants the other size */
-    else
+    else if (ms->micromips)
         mips_micro_exec(w, size);
+    else
+        mips16_exec(w, size);
     if (ms->exc) {
         if (ms->watch_stop) {
             s->insns--;
@@ -1389,7 +1393,7 @@ static void step(struct cpu *c)
         ms->btaken = ms->nbtaken;
     }
     /* a jump's target carries the ISA mode it runs in */
-    if (ms->micromips) {
+    if (ms->micromips || ms->mips16) {
         ms->isa = ms->pc & 1;
         ms->pc &= ~1u;
     }
@@ -1524,8 +1528,8 @@ static int cpu_reg_write(struct cpu *c, int n, const u8 *buf)
     case 35: ms->badvaddr = v; return 4;
     case 36: ms->cause = (ms->cause & ~0x0300u) | (v & 0x0300u); return 4;
     case 37:
-        ms->pc = ms->micromips ? v & ~1u : v;
-        ms->isa = ms->micromips && (v & 1);
+        ms->pc = ms->micromips || ms->mips16 ? v & ~1u : v;
+        ms->isa = (ms->micromips || ms->mips16) && (v & 1);
         ms->npc = ms->pc + 4;
         ms->slot = 0;
         return 4;
@@ -1571,9 +1575,9 @@ int mips_is(const struct cpu *c)
 }
 
 /* The cores: `pic32mz`, a PIC32MZ EF's (M-class: shadow sets, EIC mode
- * with the EVIC, the DSP ASE's registers, an FPU's CU1 -- the FPU itself
- * not yet), and `24kc`, QEMU malta's (MIPS32r2, no FPU, no DSP, the
- * timer on IP7). The IDs are the parts': PRId and Config1's caches and
+ * with the EVIC, the DSP ASE Revision 2, the FPU, microMIPS), and
+ * `24kc`, QEMU malta's (MIPS32r2 and MIPS16e, no FPU, no DSP, the timer
+ * on IP7). The IDs are the parts': PRId and Config1's caches and
  * TLB, which a startup reads to set the caches up. */
 struct cpu *mips_create(struct sim *s, const char *model,
                         const struct board_desc *bd)
@@ -1610,7 +1614,8 @@ struct cpu *mips_create(struct sim *s, const char *model,
         k->prid = 0x00019300u;
         k->config0 = 0x80000000u | 1u << 10 | 1u << 7;
         k->config1 = 0x80000000u | 15u << 25 | 2u << 22 | 3u << 19 | 3u << 16 |
-                     2u << 13 | 3u << 10 | 3u << 7 | 1u << 3 | 1u << 1;
+                     2u << 13 | 3u << 10 | 3u << 7 | 1u << 3 | 1u << 2 | 1u << 1;
+        k->mips16 = 1;
         k->config2 = 0x80000000u;
         k->config3 = 0;
     }

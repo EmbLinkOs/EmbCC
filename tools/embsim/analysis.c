@@ -15,7 +15,8 @@
  *     popped) when the next pc is not the slot's fall-through. microMIPS
  *     adds JALS, JALX, JALRS and the 16-bit JALR16 and JALRS16 as calls,
  *     JR16 as a return, and the compact JRC and JRADDIUSP, returns with
- *     no delay slot, which transfer at their own step.
+ *     no delay slot, which transfer at their own step; MIPS16e has JAL,
+ *     JALX and JALR, the compact JALRC, and JR and JRC.
  * A call that was taken pushes a frame, which returns to the instruction
  * after it. A transfer that may be a return is one when it lands where a
  * frame returns to: that frame and every frame above it are popped, so a
@@ -172,6 +173,24 @@ static int kind_micro(struct sim *s, u32 pc, int *size, int *compact)
     if (op == 0 && (i & 0x3f) == 0x3c && ((i >> 6) & 0x3f) == 0x3c &&
         ((i >> 12) & 0xb) <= 1)                                     /* JALR(S)(.HB) */
         return minor ? K_CALL : K_RET;
+    return K_OTHER;
+}
+
+/* a MIPS16e instruction's kind and size */
+static int kind_mips16(struct sim *s, u32 pc, int *size, int *compact)
+{
+    u32 h;
+    *size = 2;
+    *compact = 0;
+    if (!fetch16(s, pc, &h))
+        return K_OTHER;
+    *size = mips16_size(h);
+    if (((h >> 11) & 0x1f) == 0x03)                                 /* JAL, JALX */
+        return K_CALL;
+    if (((h >> 11) & 0x1f) == 0x1d && (h & 0x1f) == 0) {           /* JR, JRC, JALR, JALRC */
+        *compact = (h >> 7) & 1;
+        return (h >> 6) & 1 ? K_CALL : K_RET;
+    }
     return K_OTHER;
 }
 
@@ -418,8 +437,9 @@ void an_step(struct sim *s)
              * comes after the slot (but a compact one's, which has none) */
             struct mips_state *m = (struct mips_state *)c;
             int compact = 0;
-            int k = m->isa ? kind_micro(s, pc0, &a->size, &compact)
-                           : kind_mips(s, pc0, &a->size);
+            int k = !m->isa ? kind_mips(s, pc0, &a->size)
+                    : m->micromips ? kind_micro(s, pc0, &a->size, &compact)
+                    : kind_mips16(s, pc0, &a->size, &compact);
             if (compact) {
                 a->kind = k;
                 a->slot_kind = K_OTHER;

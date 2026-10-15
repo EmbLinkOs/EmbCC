@@ -29,7 +29,8 @@
 #     operands, accumulators and DSPControl states, the masks of rddsp
 #     and wrdsp, bposge32, the indexed loads, Status.MX clear. And
 #     microMIPS (tests/golden/embsim/mips-micro.s, assembled by llvm-mc)
-#     on the pic32mz core against QEMU's M14Kc.
+#     on the pic32mz core against QEMU's M14Kc, and MIPS16e
+#     (tests/golden/embsim/mips-mips16.s) on the 24kc core against QEMU's.
 set -u
 echo "TEST-MARKER embsim-mips"
 . "$(dirname "$0")/../lib.sh"
@@ -218,8 +219,30 @@ if command -v "$MC" >/dev/null 2>&1; then
     calls=$(awk '$NF == "_start" { print $(NF - 1) }' "$x/micro.prof")
     [ "${calls:-0}" -ge 200 ] || { cat "$x/micro.prof"; fail "--profile does not see microMIPS's calls"; }
     echo "embsim-mips: microMIPS ($(wc -l < "$x/micro.sim" | tr -d ' ') results: the 16- and 32-bit instructions, the delay slots and their sizes, the compact branches, the ISA switches, the exceptions' EPC and BD) as QEMU's M14Kc and the record have them; --profile counts its $calls calls"
+    # MIPS16e (the 24kc core's), against QEMU's 24Kc: .hwords the
+    # macros in mips-mips16.s build, llvm-mc having no MIPS16 assembler
+    "$MC" -triple=mipsel-none-elf -mcpu=mips32r2 -filetype=obj \
+        tests/golden/embsim/mips-mips16.s -o "$x/m16.o" 2>"$x/m16.err" ||
+        { cat "$x/m16.err"; fail "mips-mips16.s does not assemble"; }
+    "$EMBLD" -e _start -Ttext 0x80100000 "$x/m16.o" -o "$x/m16.elf" ||
+        fail "mips-mips16.s does not link"
+    "$EMBSIM" "$x/m16.elf" --board malta --max-insns 50000000 \
+        --profile="$x/m16.prof" > "$x/m16.sim" 2>&1; st=$?
+    [ $st = 0 ] || { tail -5 "$x/m16.sim"; fail "mips-mips16.s: EmbSim exits $st"; }
+    cmp -s "$x/m16.sim" tests/golden/embsim/mips-mips16.txt || {
+        diff tests/golden/embsim/mips-mips16.txt "$x/m16.sim" | head -20
+        fail "mips-mips16.s: EmbSim's output is not mips-mips16.txt"; }
+    if [ $have_qemu = 1 ]; then
+        qemu_run "$x/m16.elf" > "$x/m16.qemu"
+        cmp -s "$x/m16.qemu" "$x/m16.sim" || {
+            diff "$x/m16.qemu" "$x/m16.sim" | head -20
+            fail "mips-mips16.s: EmbSim's output is not QEMU's (24Kc)"; }
+    fi
+    calls=$(awk '$NF == "_start" { print $(NF - 1) }' "$x/m16.prof")
+    [ "${calls:-0}" -ge 100 ] || { cat "$x/m16.prof"; fail "--profile does not see MIPS16e's calls"; }
+    echo "embsim-mips: MIPS16e ($(wc -l < "$x/m16.sim" | tr -d ' ') results: the 16-bit and EXTENDed instructions, save and restore, the compact branches and the delay slots, jalx, the exceptions) as QEMU's 24Kc and the record have them; --profile counts its $calls calls"
 else
-    echo "embsim-mips: no llvm-mc: mips-micro.s was not assembled"
+    echo "embsim-mips: no llvm-mc: mips-micro.s and mips-mips16.s were not assembled"
 fi
 
 # ---- 1. the exec corpus -----------------------------------------------------
