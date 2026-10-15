@@ -8,13 +8,13 @@
  * msub, clz and clo, ext and ins, seb, seh and wsbh, rotr, the traps,
  * ll and sc, lwl, lwr, swl and swr, rdhwr; coprocessor 0's mfc0 and mtc0,
  * di and ei, rdpgpr and wrpgpr, eret, deret, wait and the TLB's
- * instructions; cache, pref, sync and synci as no-ops. Of the DSP ASE,
- * what an RTOS saves and restores: HI and LO of $ac0-$ac3 (mfhi, mflo,
- * mthi, mtlo and the multiplies, with Status.MX), rddsp and wrdsp,
- * lwx, lhx and lbux, and bposge32. A floating-point, DSP or microMIPS
- * instruction outside that ends the run as a lockup that names it,
- * rather than doing what no part does; an encoding no MIPS32r2 core has
- * is a Reserved Instruction exception, as on the part.
+ * instructions; cache, pref, sync and synci as no-ops. The DSP ASE
+ * (Revision 2, the `pic32mz` core's, with Status.MX): HI and LO of
+ * $ac1-$ac3 for mfhi, mflo, mthi, mtlo and the multiplies, rddsp and
+ * wrdsp, lwx, lhx and lbux, bposge32 here, and the rest in mips-dsp.c.
+ * A microMIPS instruction ends the run as a lockup that names it, rather
+ * than doing what no part does; an encoding no MIPS32r2 core has is a
+ * Reserved Instruction exception, as on the part.
  *
  * Exceptions are the privileged architecture's: EPC and Cause.BD for an
  * instruction in a delay slot, Status.EXL and ERL, the boot vectors
@@ -746,7 +746,7 @@ static u32 dsp_fields(u32 mask)
     if (mask & 2) m |= 0x3fu << 7;
     if (mask & 4) m |= 1u << 13;
     if (mask & 8) m |= 0xffu << 16;
-    if (mask & 16) m |= 0xffu << 24;
+    if (mask & 16) m |= 0x0fu << 24;
     if (mask & 32) m |= 1u << 14;
     return m;
 }
@@ -1057,7 +1057,7 @@ static void special3(u32 i)
         case 0x00: v = load(va, 4); break;
         case 0x04: v = (u32)(s32)(s16)load(va, 2); break;
         case 0x06: v = load(va, 1); break;
-        default: unmodelled("a DSP instruction"); return;
+        default: reserved(); return;
         }
         if (!ms->exc)
             W(rd, v);
@@ -1085,10 +1085,13 @@ static void special3(u32 i)
             }
             return;
         }
-        if (ms->dsp)
-            unmodelled("a DSP instruction");
-        else
-            reserved();
+        if (dsp_ok())
+            mips_dsp_exec(i);
+        return;
+    case 0x0c: case 0x10: case 0x11: case 0x12: case 0x13:     /* the DSP's */
+    case 0x18: case 0x30: case 0x31:
+        if (dsp_ok())
+            mips_dsp_exec(i);
         return;
     case 0x3b:                                                  /* RDHWR */
         if (!kernel() && !(ms->hwrena >> rd & 1)) {
@@ -1105,16 +1108,9 @@ static void special3(u32 i)
         reserved();
         return;
     }
-    /* the rest of SPECIAL3 is the DSP ASE's (and MT's, EVA's, which a
-     * PIC32 does not have) */
-    if (ms->dsp && ((i & 0x3f) == 0x10 || (i & 0x3f) == 0x11 ||
-                    (i & 0x3f) == 0x12 || (i & 0x3f) == 0x13 ||
-                    (i & 0x3f) == 0x0c || (i & 0x3f) == 0x18 ||
-                    (i & 0x3f) == 0x19 || (i & 0x3f) == 0x30 ||
-                    (i & 0x3f) == 0x31))
-        unmodelled("a DSP instruction");
-    else
-        reserved();
+    /* the rest of SPECIAL3 is MT's and EVA's, which a PIC32 does not
+     * have */
+    reserved();
 }
 
 static void exec(u32 i)

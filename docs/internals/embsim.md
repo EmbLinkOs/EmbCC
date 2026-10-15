@@ -42,6 +42,7 @@ file but the network one compiles with EmbCC itself. Everything is in
 | `avr-io.c`, `avr-usart.c`, `avr-timer16.c` | the ATmega328P's I/O registers, USART0, Timer/Counter1 |
 | `mips.h` | the MIPS32 core's state, and the interface of an external interrupt controller (EIC mode) |
 | `mips.c` | the MIPS32r2 core: the instruction set with its delay slots, coprocessor 0, exceptions and interrupts, the TLB, shadow register sets, Count and Compare, the DSP ASE's registers, step, reset, its CPU interface |
+| `mips-dsp.c` | the DSP ASE's arithmetic (Revision 2, MIPS32 encodings): SPECIAL3's DSP groups, DSPControl's flags as each instruction sets them; `mips.c` checks Status.MX and keeps the accumulators' moves, rddsp, wrdsp and the indexed loads |
 | `mips-fpu.c` | the MIPS32r2 FPU (coprocessor 1), a PIC32MZ EF's: FR 0 and 1, single and double, the 2008 modes |
 | `ieee754.h`, `ieee754.c` | IEEE 754 arithmetic in integers, which the RISC-V and MIPS FPUs share |
 | `malta.c` | QEMU malta's FPGA (SOFTRES) and boot ROM; its UART is `uart-16550.c`'s, eight bytes apart |
@@ -551,7 +552,8 @@ or with its own file for the six functions of `net.h`.
 - `tests/golden/embsim-mips.sh`: the MIPS32 core on malta: the exec
   corpus at -O0, -O2 and -Os against QEMU's malta (output and exit
   status), `mips-isa.c`'s instruction edges against QEMU and the record,
-  `mips-fpu.c`'s FPU edges against QEMU's P5600, the ends of a run.
+  `mips-fpu.c`'s FPU edges against QEMU's P5600, `mips-dsp.c`'s DSP ASE
+  edges against QEMU's 74Kf, the ends of a run.
 - `tests/golden/embsim-pic32.sh`: the PIC32MZ2048EFH100's register file
   from the device pack's ATDF against the pack's own header (every SFR
   and CLR/SET/INV at its address), and an EmbCC program on the Explorer

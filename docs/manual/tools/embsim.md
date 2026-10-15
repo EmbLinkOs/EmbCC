@@ -548,7 +548,7 @@ curiosity-pic32mz-ef-2: LED RGB green on (RB8) at 0.052 ms
 ```
 
 **Not modelled on the PIC32:** microMIPS (`-mmicromips` code), the
-DSP ASE beyond its registers, the MCU ASE's IRET, the peripherals other
+MCU ASE's IRET, the peripherals other
 than these (their registers keep what is written), change-notification
 interrupts, the external interrupt pins, conversion and baud-rate
 timing, DMA, the watchdog and deadman timer, the prefetch cache, PMD's
@@ -604,11 +604,19 @@ module disables, sleep and idle.
   SRSCtl.CSS in PSS and switches to ESS (an exception), the EVIC's set
   (EIC mode) or SRSMap's (vectored mode); eret switches back; rdpgpr
   and wrpgpr reach the previous set.
-- **The DSP ASE** (`pic32mz`), what an RTOS saves and restores: HI and
-  LO of $ac1-$ac3 (mfhi, mflo, mthi, mtlo, the multiplies), rddsp and
-  wrdsp, lwx, lhx, lbux and bposge32, each a DSP State Disabled
-  exception while Status.MX is clear; the rest of the ASE ends the run
-  naming the instruction. Count counts every other
+- **The DSP ASE** (`pic32mz`), Revision 2 in its MIPS32 encodings: the
+  accumulators $ac1-$ac3 (mfhi, mflo, mthi, mtlo, the multiplies and
+  accumulates), DSPControl (rddsp, wrdsp, bposge32), and the arithmetic
+  on bytes, halfwords and words -- the wrapping, saturating and halving
+  adds and subtracts, the shifts, the multiplies, the dot products and
+  multiply-accumulates into an accumulator, the precision changes, the
+  compares and picks, the extracts (extr, extp, extpdp), shilo, mthlip,
+  insv, append, prepend, balign, the replicates, the indexed loads --
+  with DSPControl's overflow flags, carry, ccond, pos and EFI as each
+  instruction sets them. Each is a DSP State Disabled exception while
+  Status.MX is clear. Where the manual leaves a result open (extp's with
+  EFI set, insv's past bit 32, balign by 2) it is QEMU's.
+- **The core timer.** Count counts every other
   cycle; Compare's match sets Cause.TI. wait sleeps until an interrupt:
   it skips ahead to the device that will raise one, and ends the run
   when nothing can.
@@ -1319,8 +1327,8 @@ On the AVR:
 - The sleep modes beyond Idle.
 
 On MIPS:
-- microMIPS, MIPS16e, the MCU ASE and the DSP ASE's arithmetic (each
-  ends the run as a lockup naming the instruction); paired singles.
+- microMIPS, MIPS16e and the MCU ASE (each ends the run as a lockup
+  naming the instruction); paired singles.
 - Big-endian images (mips-none-elf): EmbSim's MIPS core is
   little-endian.
 - The caches (`cache` is a no-op), the watch registers (kept, not
@@ -1476,8 +1484,9 @@ AVR against QEMU's uno stub.
 
 **MIPS.** `tests/golden/embsim-mips.sh` runs the exec corpus at -O0,
 -O2 and -Os on QEMU's malta and on EmbSim's (the output and the exit
-status), `mips-isa.c`'s instruction edges and `mips-fpu.c`'s FPU edges
-against QEMU's 24Kc and P5600, and the ends of a run.
+status), `mips-isa.c`'s instruction edges, `mips-fpu.c`'s FPU edges and
+`mips-dsp.c`'s DSP ASE edges against QEMU's 24Kc, P5600 and 74Kf, and
+the ends of a run.
 
 **PIC32.** No QEMU has a PIC32. `tests/golden/embsim-pic32.sh` holds the
 register file the PIC32MZ2048EFH100's ATDF gives to the pack's own

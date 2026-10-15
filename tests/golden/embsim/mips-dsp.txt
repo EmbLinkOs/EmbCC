@@ -1,0 +1,248 @@
+addu.qb fcc897aed4fc371f
+addu_s.qb 797a634094c7fd49
+subu.qb df612ad978572247
+subu_s.qb dadb902e020e2688
+addu.ph 0eec79084c862e7b
+addu_s.ph 18631826b8365a44
+subu.ph b0d74d1ad61d3ebd
+subu_s.ph afee990f1c88bba8
+addq.ph c1a400d9eb5d00eb
+addq_s.ph ab0840fa9711cbaa
+subq.ph 113ef50e46c4a7ad
+subq_s.ph 2b96a1310acf6b4c
+addq_s.w 6bbdf09a3850728e
+subq_s.w 8b8371b9bc580aef
+addsc 6981b428c30a5922
+addwc d06b67c8ac0bdf3a
+modsub 9ea038ed2b6aea7b
+adduh.qb 52d7c6a4e700448c
+adduh_r.qb 165a8b74572fa158
+subuh.qb de5f202dd544bce8
+subuh_r.qb 2c3580dd500522de
+addqh.ph a400f282f17e93e8
+addqh_r.ph ba892239b9766be0
+subqh.ph c3b8d02478040a95
+subqh_r.ph aeabb1e5380aba28
+addqh.w 45f8659c777d98fc
+addqh_r.w 1f71a8d7e7a48bcc
+subqh.w c4597f5d51be6c8b
+subqh_r.w 7f70805224790d1b
+muleu_s.ph.qbl e918307605ca20a8
+muleu_s.ph.qbr 6cc1b794f8b50320
+mulq_rs.ph ef03c968ec550683
+mulq_s.ph 22380d2983dc9f52
+muleq_s.w.phl e5cee7266b199f95
+muleq_s.w.phr 9d8f789f352f1789
+mul.ph b2eb0952d18c93f7
+mul_s.ph 948acbb03d18788d
+mulq_s.w c9a06acea2ee8e00
+mulq_rs.w c0d2fdd52df5e090
+precrq.qb.ph dd839dc2ccd924d1
+precr.qb.ph 985cf057a99184c1
+precrq.ph.w e6712f36cd1c8905
+precrq_rs.ph.w 74d3523bfb851115
+precrqu_s.qb.ph b68c52eb92ed85bd
+packrl.ph f1e4f710e6960ebd
+pick.qb 07e221e23e438309
+pick.ph 26acb501c2098f91
+cmpgu.eq.qb 98d4ce0a3ca0bf61
+cmpgu.lt.qb c0e4db84b2dc8d30
+cmpgu.le.qb d168709cac24123c
+cmpgdu.eq.qb 9a0659c9377bcad5
+cmpgdu.lt.qb 65a51f17b28aefab
+cmpgdu.le.qb 59d402f0857bf647
+cmpu.eq.qb 15025b1fc462fea9
+cmpu.lt.qb b2cef50e3b5694ee
+cmpu.le.qb d052fe1298c16622
+cmp.eq.ph 498d1b465bbd1841
+cmp.lt.ph 316a8cde7dc43ef0
+cmp.le.ph 41a1e6db3f93b764
+shllv.qb 47c6060503d9ccee
+shrlv.qb b55493dc59d55566
+shrav.qb 39c9fed6a74ca072
+shrav_r.qb 645340fc0f47194a
+shllv.ph 3d9d836df643f350
+shllv_s.ph 1cafe3f233647525
+shrlv.ph 3994f4b1e45c1f79
+shrav.ph 686aea5195eacea9
+shrav_r.ph 4f7ef0b14ffe1fea
+shllv_s.w 17bae6d911b5d719
+shrav_r.w b5cd021c601dd4f5
+shll.qb 0 fd13ed2715df61e8
+shll.qb 1 c745be752db33037
+shll.qb 4 352d80bd39b4b775
+shll.qb 7 853f6a7b4fcb0e65
+shrl.qb 0 fd13ed2715df61e8
+shrl.qb 1 832c195e8942247b
+shrl.qb 4 87838978fe36cdd7
+shrl.qb 7 155bbd7ed66fc969
+shra.qb 0 fd13ed2715df61e8
+shra.qb 1 db6c719331cda37b
+shra.qb 4 7e62e307eaf5fc37
+shra.qb 7 11dfb42b76a87cf9
+shra_r.qb 0 fd13ed2715df61e8
+shra_r.qb 1 e23926b99f37bd12
+shra_r.qb 4 b97f87c1859ad9d2
+shra_r.qb 7 44d59570b85a2cf5
+shll.ph 0 fd13ed2715df61e8
+shll.ph 1 849f697cf7c58c13
+shll.ph 8 9085d18c96702cb8
+shll.ph 15 b8036b51c3a7ffe5
+shll_s.ph 0 fd13ed2715df61e8
+shll_s.ph 1 1bb06b9e0c2be8aa
+shll_s.ph 8 96a08aaca35f2c0d
+shll_s.ph 15 a8cc11779b293ff1
+shrl.ph 0 fd13ed2715df61e8
+shrl.ph 1 d60989c76b843e7b
+shrl.ph 8 2db17533016ec303
+shrl.ph 15 d4c4142fbb7db071
+shra.ph 0 fd13ed2715df61e8
+shra.ph 1 b54d0d6ca17b5f7b
+shra.ph 8 42eb58cbd2c3523f
+shra.ph 15 1098ed8c234aeddd
+shra_r.ph 0 fd13ed2715df61e8
+shra_r.ph 1 5aee699a94db15c4
+shra_r.ph 8 6473f6b27cb446fd
+shra_r.ph 15 c29d7dd566502b7b
+shll_s.w 0 fd13ed2715df61e8
+shll_s.w 1 1d39266c05138bb6
+shll_s.w 16 28ef7eef7875d7b6
+shll_s.w 31 98f4c0f32050f5e5
+shra_r.w 0 fd13ed2715df61e8
+shra_r.w 1 2eb632c23d4235ee
+shra_r.w 16 2e587083989e9227
+shra_r.w 31 5e61f0145864364d
+absq_s.qb 43e2bdc3ff9254a5
+absq_s.ph 19026585e1536020
+absq_s.w faa14b179326e294
+raddu.w.qb 898d255d2f9ae65e
+preceq.w.phl f18bac7762a14b62
+preceq.w.phr 1b4ae4fd944fb887
+precequ.ph.qbl a3eeeea9bbb17ac7
+precequ.ph.qbr 230288e51c6c9293
+precequ.ph.qbla b91d024ef091d87c
+precequ.ph.qbra c4bfb070f95d5a20
+preceu.ph.qbl 63fa4dabbaafe890
+preceu.ph.qbr 6c65622c57e9e4c9
+preceu.ph.qbla 2db17533016ec303
+preceu.ph.qbra 40b5f202def6dd92
+bitrev 6e7b828f82858d56
+replv.qb 57a0602458f4aa61
+replv.ph 3e0aeea8f68c76d9
+repl 1c7732f995311cb1
+precr_sra.ph.w 0 446dd9b99d71df8d
+precr_sra.ph.w 1 5fb16dd6bca862a1
+precr_sra.ph.w 31 4d391b0e0a933545
+precr_sra_r.ph.w 0 446dd9b99d71df8d
+precr_sra_r.ph.w 1 b158cb2056d4e17d
+precr_sra_r.ph.w 16 df9d6bf8f22329b1
+append 0 620537dfe950a285
+append 1 5e6d6da1376f8af9
+append 31 ba72dfca25e790e5
+prepend 0 620537dfe950a285
+prepend 1 d0d1573ca7d70085
+prepend 31 3d28deaa5ae2b245
+balign 0 620537dfe950a285
+balign 1 7f22ad00c7fa0b41
+balign 2 620537dfe950a285
+balign 3 28586f889ef88da1
+insv a90788a4ddf11a7d
+dpau.h.qbl 7698863cd351bd14
+dpau.h.qbr 5e0ecd530dfe42e1
+dpsu.h.qbl 9c76a09069f470cf
+dpsu.h.qbr 1b71bc37d1f38636
+dpa.w.ph f742e1bbd516cf4d
+dpax.w.ph ffe4b0ea91c53e24
+dps.w.ph c581eab85b05827b
+dpsx.w.ph 001d65c164574916
+dpaq_s.w.ph a1ffa3d929c0c57d
+dpaqx_s.w.ph 29016aca9f9b39a7
+dpsq_s.w.ph ca9a1b2b3b3f3b3c
+dpsqx_s.w.ph 6033cf0705a98647
+dpaqx_sa.w.ph 7e30bc1123764014
+dpsqx_sa.w.ph c7297e7414873699
+dpaq_sa.l.w 6ddfe49639fb557a
+dpsq_sa.l.w b7066a18466082cc
+mulsaq_s.w.ph 4b3c49d8e42d9940
+mulsa.w.ph cad6d6cab607e640
+maq_s.w.phl 3dd1138fa786c541
+maq_s.w.phr 466e7da72cac424b
+maq_sa.w.phl 62b04b6dd8b26c07
+maq_sa.w.phr 866ca37fe1f2fee3
+madd b101dae6f139e229
+maddu 252792ccda957a2e
+msub 9b5729ec4bec1a6d
+msubu 5d335ff2a7a85da2
+mult 666430a526876095
+multu 54f21331ef7b96d5
+extr.w 0 3e26894be656c6e5
+extr.w 1 d0d20c0081e7d425
+extr.w 15 9ffefb83e5334de5
+extr.w 31 232c6d4cff44a6a5
+extr_r.w 0 3e26894be656c6e5
+extr_r.w 1 ff110268de410ba5
+extr_r.w 15 9af17673fdd211e5
+extr_r.w 31 93c2adc23c56e9a5
+extr_rs.w 0 3587f5d265da7365
+extr_rs.w 1 fe6eb5fd416695a5
+extr_rs.w 15 74518ad0786e7de5
+extr_rs.w 31 ea29f06d7f1517e5
+extr_s.h 0 69f37f4a25a5e565
+extr_s.h 1 b4e5af00ba8e2f65
+extr_s.h 16 77b98245dd03c165
+extr_s.h 31 0a76b664647510e5
+extp 0 e01e6344fe628425
+extp 1 c5a743b5595bc0a5
+extp 7 1b2f1e0cc15b0aa5
+extp 31 92d885af4f5cbde5
+extpdp 0 980b042ab1c93c25
+extpdp 1 9f47554e389aa1a5
+extpdp 7 e7cae1bc0306d1a5
+extpdp 31 aee0bf13814642e5
+extrv.w f550bc1cdd40a135
+extrv_r.w 1dca50dd4a8f3f6d
+extrv_rs.w 1202cecfb1d8ae05
+extrv_s.h f5b80d11f1657a15
+extpv 15877fe13c4fae41
+extpdpv 7b29d46a8764cded
+shilo -32 480d99133f044b65
+shilo -1 12f4d862aa997c65
+shilo 1 a1bf944917d63925
+shilo 31 0979d0e9a3b32c25
+shilov 4ffb7e197e01ee65
+mthlip 9ab6a3a150630205
+dpaq_s.w.ph $ac flags 00010000
+dpaq_s.w.ph $ac flags 00020000
+dpaq_s.w.ph $ac flags 00040000
+dpaq_s.w.ph $ac flags 00080000
+wrdsp 1 0000003f
+rddsp 1 0000003f
+wrdsp 2 00001f80
+rddsp 2 00001f80
+wrdsp 4 00002000
+rddsp 4 00002000
+wrdsp 8 00ff0000
+rddsp 8 00ff0000
+wrdsp 16 0f000000
+rddsp 16 0f000000
+wrdsp 32 00004000
+rddsp 32 00004000
+wrdsp 0x3f 0fff7fbf
+rddsp 0x3f 0fff7fbf
+bposge32 0
+bposge32 0
+bposge32 1
+bposge32 1
+bposge32 1
+lx 12345678
+lx ffff80ff
+lx 0000007f
+lx 80ff7f01
+lx 00001234
+lx 00000080
+addu.qb group op 2 code 0a
+addu.qb without MX code 1a
+mfhi $ac1 without MX code 1a
+mfhi $ac0 without MX none
+rddsp without MX code 1a
+done

@@ -23,7 +23,11 @@
 #     the FPU's (tests/golden/embsim/mips-fpu.c) on the pic32mz core,
 #     against QEMU's P5600 (FR 1, the 2008 modes): each operation over a
 #     table of values in the four rounding modes, the flags, the
-#     compares, the moves and loads, the floating-point exception.
+#     compares, the moves and loads, the floating-point exception. And
+#     the DSP ASE's (tests/golden/embsim/mips-dsp.c), Revision 2, on the
+#     pic32mz core against QEMU's 74Kf: each instruction over a table of
+#     operands, accumulators and DSPControl states, the masks of rddsp
+#     and wrdsp, bposge32, the indexed loads, Status.MX clear.
 set -u
 echo "TEST-MARKER embsim-mips"
 . "$(dirname "$0")/../lib.sh"
@@ -155,6 +159,28 @@ if "$CLANG" -print-targets 2>/dev/null | grep -q mipsel; then
             fail "mips-fpu.c: EmbSim's output is not QEMU's (P5600)"; }
     fi
     echo "embsim-mips: the FPU's edges ($(wc -l < "$x/fpu.sim" | tr -d ' ') results: every operation in every rounding mode, the flags, compares, moves, the exceptions) as QEMU's P5600 and the record have them"
+    # the DSP ASE's (Revision 2, the pic32mz core's), against QEMU's 74Kf
+    "$CLANG" --target=mipsel-none-elf -march=mips32r2 -mabi=32 -mdspr2 \
+        -fno-pic -mno-abicalls -G0 -msoft-float -O1 -ffreestanding \
+        -fno-builtin -nostdlib -c tests/golden/embsim/mips-dsp.c -o "$x/dsp.o" 2>"$x/dsp.err" ||
+        { cat "$x/dsp.err"; fail "mips-dsp.c does not compile"; }
+    "$EMBLD" -e _start -Ttext 0x80100000 -Tstack 0x80800000 "$x/dsp.o" \
+        -o "$x/dsp.elf" || fail "mips-dsp.c does not link"
+    "$EMBSIM" "$x/dsp.elf" --board malta --cpu pic32mz --max-insns 500000000 \
+        > "$x/dsp.sim" 2>&1; st=$?
+    [ $st = 0 ] || { tail -5 "$x/dsp.sim"; fail "mips-dsp.c: EmbSim exits $st"; }
+    cmp -s "$x/dsp.sim" tests/golden/embsim/mips-dsp.txt || {
+        diff tests/golden/embsim/mips-dsp.txt "$x/dsp.sim" | head -20
+        fail "mips-dsp.c: EmbSim's output is not mips-dsp.txt"; }
+    if [ $have_qemu = 1 ]; then
+        sh tests/harness/qrun.sh 60 "$QEMU" -M malta -cpu 74Kf -m 64 \
+            -display none -monitor none -serial null -serial null \
+            -serial stdio -no-reboot -kernel "$x/dsp.elf" > "$x/dsp.qemu" 2>/dev/null
+        cmp -s "$x/dsp.qemu" "$x/dsp.sim" || {
+            diff "$x/dsp.qemu" "$x/dsp.sim" | head -20
+            fail "mips-dsp.c: EmbSim's output is not QEMU's (74Kf)"; }
+    fi
+    echo "embsim-mips: the DSP ASE's edges ($(wc -l < "$x/dsp.sim" | tr -d ' ') results: every instruction over the lanes' extremes, the accumulators, DSPControl's flags, the exceptions) as QEMU's 74Kf and the record have them"
 else
     echo "embsim-mips: no clang for mipsel: the instruction-edge programs were not built"
 fi

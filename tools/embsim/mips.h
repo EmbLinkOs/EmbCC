@@ -139,6 +139,10 @@ void mips_raise(u32 code);
  * with Status.CU1 set */
 void mips_fp_exec(u32 i);
 void mips_fp_reset(struct mips_state *k);
+/* mips-dsp.c: a SPECIAL3 instruction of the DSP ASE (function 0x0c,
+ * 0x10-0x13, 0x18, 0x30, 0x31, or 0x38 but rddsp and wrdsp), with the
+ * DSP present and Status.MX set */
+void mips_dsp_exec(u32 i);
 /* an image's address, as the bus has it: kseg0 and kseg1 unmapped, the
  * rest as it is (the loader's segments, a debugger's accesses) */
 u32 mips_phys(u32 va);
