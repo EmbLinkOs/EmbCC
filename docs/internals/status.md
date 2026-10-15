@@ -565,8 +565,7 @@ The full rules are in
 [Invoking EmbCC](../manual/invoking.md#--linker-argarg).
 
 `-pedantic` and `-pedantic-errors` report what the `-std=` standard does
-not have, for C ([Invoking EmbCC](../manual/invoking.md#--pedantic---pedantic-errors));
-for C++ they report nothing yet.
+not have, for C and C++ ([Invoking EmbCC](../manual/invoking.md#--pedantic---pedantic-errors)).
 
 Any `-W` name that is not one of EmbCC's warnings
 (`--help-warnings` lists them) is accepted with:

@@ -1368,8 +1368,15 @@ members, designator ranges, computed `goto`, a label's address,
 parameter list.
 
 Nothing is reported in a system header, or after `__extension__`, up to
-the end of the declaration or expression it begins, as in GCC. For C++,
-the two options report nothing yet.
+the end of the declaration or expression it begins, as in GCC.
+
+For C++ the same options report what the `--std=` C++ standard does not
+have, from C++11's lambdas, `long long`, `[[...]]` attributes and
+`= default` in C++98 to C++23's `if consteval` and explicit object
+parameters and C++26's `= delete("why")`; `register` from C++17, which
+removed it; and GNU's statement expressions, case ranges, `?:` with no
+middle operand, variable-length and zero-length arrays, flexible array
+members and `__int128`. As for C, not in a system header.
 
 ### The warnings
 

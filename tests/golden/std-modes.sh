@@ -1,5 +1,6 @@
 #!/bin/sh
-# -std= and -pedantic for C. Every case of tests/std/c-corpus.txt under
+# -std= and -pedantic for C and C++. Every case of tests/std/c-corpus.txt
+# (and of cxx-corpus.txt, against g++) under
 # every C standard, as it is and with -pedantic-errors, must be accepted
 # or refused as GCC 16 decided (tests/std/c-expect.txt, recorded with
 # tools/std-check.py record; the deliberate differences, with why, in
@@ -28,7 +29,12 @@ if command -v python3 >/dev/null 2>&1; then
         python3 tools/std-check.py check tests/std/c-corpus.txt \
             tests/std/c-expect.txt > "$out/corpus.log" 2>&1 ||
         { cat "$out/corpus.log"; fail "EmbCC and GCC disagree on the C corpus"; }
-    echo "std-modes: $(tail -1 "$out/corpus.log")"
+    echo "std-modes: C: $(tail -1 "$out/corpus.log")"
+    EMBCC=$EMBCC STD_EMBCC_FLAGS=--target=x86_64-elf \
+        python3 tools/std-check.py check tests/std/cxx-corpus.txt \
+            tests/std/cxx-expect.txt > "$out/cxx-corpus.log" 2>&1 ||
+        { cat "$out/cxx-corpus.log"; fail "EmbCC and g++ disagree on the C++ corpus"; }
+    echo "std-modes: C++: $(tail -1 "$out/cxx-corpus.log")"
 else
     echo "std-modes: no python3, the corpus check skipped"
 fi

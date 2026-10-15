@@ -834,6 +834,11 @@ static int cxx_number(struct lexer *lx, struct token *t)
     buf[k] = 0;
     int hex = buf[0] == '0' && (buf[1] == 'x' || buf[1] == 'X');
     int bin = buf[0] == '0' && (buf[1] == 'b' || buf[1] == 'B');
+    /* -pedantic: C++14's (GCC's extension before); C is said elsewhere */
+    if (bin && lx->cxx && g_c_pedantic && lex_cxx_year_here(lx) < 2014)
+        diag_warn_opt(lx->file, t->line, t->col, "pedantic",
+                      "a binary constant is new in C++14, and the standard "
+                      "here is C++%02d", g_cxx_year % 100);
     /* where the digits end: the suffix after */
     const char *d = buf;
     int is_float = 0;

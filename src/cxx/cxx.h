@@ -59,6 +59,12 @@ void cx_error(const struct ctok *at, const char *fmt, ...);
  * C++YEAR's, an error at t under an earlier standard, as GCC has it. */
 int cx_std_at(const struct ctok *t);
 void cx_need_std(const struct ctok *t, int year, const char *what);
+/* -pedantic: `what` is C++SINCE's and the code at t older (since 0: a GNU
+ * extension, in every standard), or (cx_pedantic_removed) a standard
+ * REMOVED it; a warning, an error under -pedantic-errors, and nothing in
+ * a system header */
+void cx_pedantic(const struct ctok *t, int since, const char *what);
+void cx_pedantic_removed(const struct ctok *t, int removed, const char *what);
 /* Where an error resumes (a jmp_buf *, NULL to stop the compile) and how
  * many have been reported. */
 extern void *cx_recover;

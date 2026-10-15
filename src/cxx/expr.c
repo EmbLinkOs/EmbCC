@@ -2352,6 +2352,7 @@ struct cexpr *il_make(struct cty *ilt, struct cexpr *list,
 static struct cexpr *designated_init(struct cty *t, struct cexpr *list,
                                      const struct ctok *at)
 {
+    cx_pedantic(at, 2020, "a designated initializer");
     if (t->k != CT_CLASS || !t->cls->aggregate)
         cx_error(at, "designated initializers for '%s', not an aggregate "
                      "class", ct_name(t));
@@ -4918,6 +4919,7 @@ static struct cexpr *fold_operand(int from, int to)
 static struct cexpr *parse_fold(int ell)
 {
     const struct ctok *at = cx_cur();
+    cx_pedantic(at, 2017, "a fold expression");
     int open = cx_pos, close = cx_pos;
     cx_skip_balanced();
     close = cx_pos - 1;
@@ -5053,6 +5055,7 @@ static struct cexpr *parse_primary(void)
         }
         if (cx_kind_at(1) == TOK_LBRACE) {
             /* GNU statement expression */
+            cx_pedantic(at, 0, "a statement expression");
             cx_advance();
             struct cstmt *b = parse_compound();
             cx_expect(TOK_RPAREN, "')' to close a statement expression");
@@ -5121,6 +5124,7 @@ static struct cexpr *parse_primary(void)
     case TOK_CX_THROW:
         return parse_throw();
     case TOK_CX_AUTO:
+        cx_pedantic(cx_cur(), 2023, "auto(x)");
         /* C++23 auto(x) / auto{x}: a prvalue copy of x, of x's type
          * decayed -- the type an `auto` variable initialized from it
          * would have. */
@@ -5923,8 +5927,10 @@ struct cexpr *expr_parse_cond(void)
     const struct ctok *qat = cx_cur();
     if (!cx_accept(TOK_QUESTION))
         return c;
-    if (cx_accept(TOK_COLON))
+    if (cx_accept(TOK_COLON)) {
+        cx_pedantic(qat, 0, "'?:' with no middle operand");
         return gnu_elvis(c, qat);
+    }
     struct cexpr *a = expr_parse();
     cx_expect(TOK_COLON, "':' in ?:");
     struct cexpr *b = expr_parse_assign();

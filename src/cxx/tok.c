@@ -172,6 +172,48 @@ void cx_need_std(const struct ctok *t, int year, const char *what)
                  what, year % 100, lex_cxx_year() % 100);
 }
 
+/* each place said once: a template's body is read again for each
+ * instance */
+static int pedantic_once(const struct ctok *t)
+{
+    static const struct ctok *seen[256];
+    static unsigned next;
+    for (int i = 0; i < 256; i++)
+        if (seen[i] == t)
+            return 0;
+    seen[next++ % 256] = t;
+    return 1;
+}
+
+static int pedantic_here(const struct ctok *t)
+{
+    return t && diag_warning_enabled("pedantic") &&
+           !(t->file && diag_in_system_header(t->file));
+}
+
+void cx_pedantic(const struct ctok *t, int since, const char *what)
+{
+    if (!pedantic_here(t) || (since && cx_std_at(t) >= since) ||
+        !pedantic_once(t))
+        return;
+    if (since)
+        diag_warn_opt(t->file, t->t.line, t->t.col, "pedantic",
+                      "%s is new in C++%02d, and the standard here is C++%02d",
+                      what, since % 100, lex_cxx_year() % 100);
+    else
+        diag_warn_opt(t->file, t->t.line, t->t.col, "pedantic",
+                      "%s is a GNU extension, not ISO C++", what);
+}
+
+void cx_pedantic_removed(const struct ctok *t, int removed, const char *what)
+{
+    if (!pedantic_here(t) || cx_std_at(t) < removed || !pedantic_once(t))
+        return;
+    diag_warn_opt(t->file, t->t.line, t->t.col, "pedantic",
+                  "%s is not C++%02d: that standard removed it", what,
+                  removed % 100);
+}
+
 char *cx_strdup(const char *s)
 {
     return xstrndup(s, strlen(s));

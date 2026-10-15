@@ -2262,6 +2262,12 @@ static void process_file(struct cpp *cpp, const char *path,
                 if (!DIR("elif") && !predef_is_cxx())
                     lex_pedantic(s.file, startline, 0, 0, 2023,
                                  DIR("elifdef") ? "#elifdef" : "#elifndef");
+                else if (!DIR("elif") && cxx_std < 2023 &&
+                         diag_warning_enabled("pedantic"))
+                    diag_warn_opt(s.file, startline, 0, "pedantic",
+                                  "%s is new in C++23, and the standard "
+                                  "here is C++%02d", DIR("elifdef")
+                                  ? "#elifdef" : "#elifndef", cxx_std % 100);
                 if (!ncond)
                     cerr(&s, "#elif without #if", NULL);
                 if (cond[ncond - 1] == COND_LIVE)
