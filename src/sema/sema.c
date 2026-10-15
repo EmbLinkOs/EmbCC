@@ -5628,6 +5628,13 @@ static const char *const g_named_builtins[] = {
     "trap", "unreachable",
     "va_arg", "va_copy", "va_end", "va_start",
     "add_overflow", "sub_overflow", "mul_overflow",
+    "add_overflow_p", "sub_overflow_p", "mul_overflow_p",
+    /* <math.h>'s comparison macros' builtins (fp_compare_builtin), the
+     * per-type spellings of the tests, and GCC's type classes */
+    "isgreater", "isgreaterequal", "isless", "islessequal",
+    "islessgreater", "isunordered", "iseqsig",
+    "isinff", "isinfl", "isnanf", "isnanl", "finite", "finitef", "finitel",
+    "classify_type", "memcmp_eq",
 };
 
 int sema_has_builtin(const char *name)
@@ -5655,6 +5662,18 @@ int sema_has_builtin(const char *name)
         struct type *real;
         if (lib_builtin(bn, &real))
             return 1;
+        /* the _FORTIFY_SOURCE forms, __builtin___memcpy_chk and kin */
+        size_t n = strlen(bn);
+        if (n > 6 && strncmp(bn, "__", 2) == 0 &&
+            strcmp(bn + n - 4, "_chk") == 0) {
+            char base[64];
+            if (n - 6 < sizeof base) {
+                memcpy(base, bn + 2, n - 6);
+                base[n - 6] = 0;
+                if (mem_builtin(base) || lib_builtin(base, &real))
+                    return 1;
+            }
+        }
     }
     return 0;
 }
