@@ -1789,9 +1789,14 @@ options:
 | `--no-stdlib` | no `crt1.o`, `libc.a` or `librt.a` |
 | `--no-default-libs` | no `libc.a` or `librt.a` |
 | `--no-start-files` | no `crt1.o` |
-| `--static` | accepted: every image EmbLD writes is static |
+| `--static` | accepted: every image EmbLD writes is static; with `--libc=system`, glibc's `libc.a` |
+| `--libc=embcc\|system` | the C library: EmbCC's own (the default), or for a Linux target the system's glibc, its headers and shared objects linked by the system's linker ([The C library](libraries.md#glibc-instead---libcsystem)) |
+| `--sysroot=DIR` | the system's root, where `--libc=system` finds glibc (default `/`) |
+| `--linker=PATH`, `--ld-path=PATH`, `-fuse-ld=NAME` | the linker `--libc=system` runs |
+| `FILE.so`, `FILE.so.N` | a shared object, linked with `--libc=system`; otherwise refused: `embcc: error: x.so is a shared object, which EmbLD does not link; --libc=system links a Linux program against the system's` |
 | `-specs=FILE`, `--specs=FILE` | accepted: `nano.specs` and `nosys.specs` choose GCC's newlib and its system-call stubs, and EmbCC links its own C library and runtime; a link notes once `embcc: note: -specs=nano.specs is ignored: EmbCC links its own C library and runtime, not newlib`, and a compile says nothing |
-| `-pthread`, `-rdynamic`, `-no-pie` | unknown argument |
+| `-pthread` | with `--libc=system`, `_REENTRANT` and `-lpthread`; otherwise nothing (EmbCC's C library has no threads, macOS's libSystem has them) |
+| `-rdynamic`, `-no-pie` | unknown argument |
 | `-shared`, `-static-pie` | refused: `embcc: error: -shared needs position-independent code, which EmbCC does not emit` |
 
 ## Asking EmbCC

@@ -224,6 +224,12 @@ static const struct {
     { "_Atomic", TOK_KW_ATOMIC },
     { "unsigned", TOK_KW_UNSIGNED },
     { "signed", TOK_KW_SIGNED },
+    /* GCC's reserved spellings, which the Linux UAPI and glibc headers
+     * use: asm-generic/int-ll64.h's `typedef __signed__ char __s8;` */
+    { "__signed__", TOK_KW_SIGNED },
+    { "__signed", TOK_KW_SIGNED },
+    { "__const__", TOK_KW_CONST },
+    { "__const", TOK_KW_CONST },
     { "void", TOK_KW_VOID },
     { "sizeof", TOK_KW_SIZEOF },
     { "return", TOK_KW_RETURN },
@@ -1044,6 +1050,11 @@ void lex_next(struct lexer *lx)
             if (strlen(keywords[i].word) == n &&
                 memcmp(keywords[i].word, start, n) == 0) {
                 t->kind = keywords[i].kind;
+                /* a _FloatN keyword keeps its spelling: glibc, for a
+                 * compiler before GCC 7, declares `typedef float
+                 * _Float32;`, which the parser lets pass (parse.c) */
+                if (n > 6 && !memcmp(start, "_Float", 6))
+                    t->text = xstrndup(start, n);
                 return;
             }
         }

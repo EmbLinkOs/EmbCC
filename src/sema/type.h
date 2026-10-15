@@ -121,6 +121,9 @@ struct type {
     const char *tag;        /* NULL for anonymous */
     int is_union;
     int complete;           /* body seen; size/align/members valid */
+    int transparent_union;  /* union __attribute__((transparent_union)):
+                             * a parameter of it takes any member's type,
+                             * passed as the first member is (sema) */
     int is_complex;         /* a C99 `T _Complex`: laid out, passed and
                              * returned as struct { T __real__, __imag__; }
                              * — which is exactly its ABI on both targets —

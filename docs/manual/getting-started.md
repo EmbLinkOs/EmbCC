@@ -230,6 +230,27 @@ To make `x86_64-linux-gnu` the default, see
 [Choosing the default target](#choosing-the-default-target). C++ programs
 also need `make libcxx-linux-x86_64`.
 
+#### Against the system's glibc: `--libc=system`
+
+EmbCC's own C library has no POSIX threads and few POSIX interfaces. A
+program written for Linux -- `<pthread.h>`, `<unistd.h>`, sockets -- is
+compiled against the system's C library instead, glibc, as GCC compiles
+it: glibc's headers, its start files and its shared objects, linked by
+the system's linker.
+
+```sh
+./embcc --target=x86_64-linux-gnu --libc=system -pthread app.c -o app
+./app
+```
+
+This needs glibc's development files (Debian's `libc6-dev`, Fedora's
+`glibc-devel`) and a linker: `x86_64-linux-gnu-ld`, `ld.lld` or, on Linux
+itself, `ld` (binutils). It works the same for `aarch64-linux-gnu`. To
+build for another machine, name its root with `--sysroot=DIR`, and the
+linker with `--linker=PATH` when it is not one of those;
+`tools/glibc-sysroot.sh amd64|arm64 DIR` makes such a root from Debian
+12's packages. See [The C library](libraries.md#glibc-instead---libcsystem).
+
 ### macOS
 
 On macOS, EmbCC writes Mach-O objects and links them with Apple's
