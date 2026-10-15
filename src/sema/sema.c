@@ -2887,7 +2887,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
              * initializer lowers to a relocation like any `&global`). */
             struct initbuf ib = { 0, 0, 0 };
             if (sized_by_init)
-                ty = ty_array(ty->pointee,
+                ty = ty_array_sized(ty->pointee,
                               flatten_sized(u, f, sc, e->lhs, ty, &ib));
             else
                 flatten_init(u, f, sc, e->lhs, ty, 0, &ib);
@@ -2927,7 +2927,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
         e->var_index = scope_add(sc, "<compound literal>", ty, NULL);
         struct initbuf ib = { 0, 0, 0 };
         if (sized_by_init) {
-            ty = ty_array(ty->pointee,
+            ty = ty_array_sized(ty->pointee,
                           flatten_sized(u, f, sc, e->lhs, ty, &ib));
             sc->vars[e->var_index].ty = ty;
             e->cast_ty = ty;
@@ -6547,7 +6547,7 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                 struct initbuf ib = { 0, 0, 0 };
                 if (sized_by_init) {
                     int n = flatten_sized(u, f, sc, s->expr, s->dty, &ib);
-                    s->dty = ty_array(s->dty->pointee, n);
+                    s->dty = ty_array_sized(s->dty->pointee, n);
                     sc->vars[s->var_index].ty = s->dty;
                 } else
                     flatten_init(u, f, sc, s->expr, s->dty, 0, &ib);

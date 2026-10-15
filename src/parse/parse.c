@@ -3044,9 +3044,10 @@ static int size_fold(const struct expr *e, long *out)
  * into (nested) array types. Sizes are constant expressions. */
 static struct type *parse_array_dims(struct parser *ps, struct type *t)
 {
-    int dims[4];
-    struct expr *dexpr[4];   /* each dimension's expression (NULL for []) */
-    int dvar[4];             /* 1 = not a constant: a VLA dimension */
+    /* C99 5.2.4.1 asks for 12 declarators on a type, arrays among them */
+    int dims[16];
+    struct expr *dexpr[16];  /* each dimension's expression (NULL for []) */
+    int dvar[16];            /* 1 = not a constant: a VLA dimension */
     int ndims = 0;
     while (cur(ps)->kind == TOK_LBRACKET) {
         advance(ps);
@@ -3108,9 +3109,9 @@ static struct type *parse_array_dims(struct parser *ps, struct type *t)
                     ped_at(ps, dline, 0, 0, "an array of size 0");
             }
         }
-        if (ndims >= 4)
+        if (ndims >= 16)
             parse_error_at(ps, cur(ps)->line, cur(ps)->col,
-                       "more than 4 array dimensions");
+                       "more than 16 array dimensions");
         dims[ndims] = dim;
         dexpr[ndims] = de;
         dvar[ndims] = var;
@@ -3131,6 +3132,8 @@ static struct type *parse_array_dims(struct parser *ps, struct type *t)
     for (int i = ndims - 1; i >= 0; i--) {
         if (dvar[i] || (ty_is_vla(t) && dexpr[i]))
             t = ty_vla(t, dexpr[i]);
+        else if (dexpr[i])
+            t = ty_array_sized(t, dims[i]);   /* `[0]`: complete, size 0 */
         else
             t = ty_array(t, dims[i]);
     }
@@ -3145,10 +3148,10 @@ static struct type *parse_struct_body(struct parser *ps, struct type *t,
     ps->attr_carry_on = 0;
 
     int bline = cur(ps)->line, bcol = cur(ps)->col;
+    stack_check(ps->lx.file, bline, 6);         /* structures in structures */
     expect(ps, TOK_LBRACE, "'{'");
     int saved_vla_ok = ps->vla_ok;
     ps->vla_ok = 0;   /* a member cannot be variably modified (6.7.2.1p9) */
-    stack_check(ps->lx.file, bline, 6);         /* structures in structures */
     ps->in_members++;
     struct member *ms = NULL;
     int n = 0, cap = 0;
@@ -3940,10 +3943,10 @@ static struct expr *parse_postfix(struct parser *ps)
 
 static struct expr *parse_unary(struct parser *ps)
 {
+    stack_check(ps->lx.file, cur(ps)->line, 6);  /* `- - - x`, `(int)(int)x` */
     struct token *t = cur(ps);
     struct expr *e;
 
-    stack_check(ps->lx.file, cur(ps)->line, 6);  /* `- - - x`, `(int)(int)x` */
     switch (t->kind) {
     case TOK_BANG:
         e = new_expr(EXPR_NOT, t->line, t->col);
@@ -4268,10 +4271,10 @@ static struct expr *parse_cond(struct parser *ps)
 
 static struct expr *parse_expr(struct parser *ps)
 {
+    stack_check(ps->lx.file, cur(ps)->line, 6);  /* `((((x))))`, deep */
     struct expr *e = parse_cond(ps);
     enum tok_kind k = cur(ps)->kind;
     int line = cur(ps)->line;
-    stack_check(ps->lx.file, cur(ps)->line, 6);  /* `((((x))))`, deep */
 
     int comp = -1;
     for (size_t i = 0;
@@ -4900,10 +4903,10 @@ static struct stmt *parse_eh_region(struct parser *ps)
 
 static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
 {
+    stack_check(ps->lx.file, cur(ps)->line, 6);  /* `{{{ }}}`, `if if if` */
     struct token *t = cur(ps);
     struct stmt *s;
 
-    stack_check(ps->lx.file, cur(ps)->line, 6);  /* `{{{ }}}`, `if if if` */
     if (t->kind == TOK_KW_ASM)
         return parse_asm_stmt(ps);
     if (t->kind == TOK_IDENT && strcmp(t->text, "__builtin_eh_region") == 0)
@@ -5371,7 +5374,7 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
                                                       ps->unit->econsts,
                                                       &guessed);
                         if (!guessed)
-                            ft = ty_array(ft->pointee, n);
+                            ft = ty_array_sized(ft->pointee, n);
                     }
                 }
                 fold_local_add(dname, ft);
@@ -5679,7 +5682,7 @@ static struct global *parse_global(struct parser *ps, struct type *ty,
                     ty_size(g->ty->pointee) == (ie->str_width ? ie->str_width : 1))
                     g->ty = ty_array(g->ty->pointee, (int)ie->num);
                 else if (ie->kind == EXPR_INITLIST) {
-                    g->ty = ty_array(g->ty->pointee,
+                    g->ty = ty_array_sized(g->ty->pointee,
                                      initlist_elided_count(ie, g->ty,
                                                     ps->unit->econsts,
                                                     NULL));
@@ -6813,9 +6816,6 @@ struct unit *parse_unit(const char *file, const char *src)
     struct global **gtail = &u->globals;
     volatile int seq = 0;      /* written between setjmp and longjmp */
     while (cur(&ps)->kind != TOK_EOF) {
-        jmp_buf jb, *save = ps.recover;
-        ps.recover = &jb;
-        if (!setjmp(jb)) {
         /* `};` after a function, a macro that ends in its own `;`: an
          * empty declaration, which GCC lets through */
         if (cur(&ps)->kind == TOK_SEMI) {
@@ -6824,6 +6824,9 @@ struct unit *parse_unit(const char *file, const char *src)
             advance(&ps);
             continue;
         }
+        jmp_buf jb, *save = ps.recover;
+        ps.recover = &jb;
+        if (!setjmp(jb)) {
             parse_top(&ps, u, &ftail, &gtail, seq++);
             attrs_unapplied(&ps);
         } else

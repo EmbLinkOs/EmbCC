@@ -111,10 +111,12 @@ void ir_locals_fill(struct ir_func *fn, struct func *f, int nvars)
         if (!t)
             continue;
         L->size = ty_size(t);
-        /* GNU's empty struct is size 0, and still an object with an
-         * address: a slot of one byte, which a store of nothing never
-         * touches (with none, `&e` asked for a slot it did not have) */
-        if (L->size == 0 && t->kind == TY_STRUCT)
+        /* GNU's empty struct and zero-length array are size 0, and still
+         * objects with an address: a slot of one byte, which a store of
+         * nothing never touches (with none, `&e` asked for a slot it did
+         * not have) */
+        if (L->size == 0 && !t->vla_len &&
+            (t->kind == TY_STRUCT || t->kind == TY_ARRAY))
             L->size = 1;
         /* a parameter's slot is the calling convention's, and its value
          * arrives as a whole register: a typedef's alignment is a local's
@@ -2943,9 +2945,9 @@ static int eh_type_index(struct ir_func *fn, struct global *ti);
 
 int gen_expr(struct ir_func *fn, struct expr *e)
 {
+    stack_check(fn->file, e->line, 6);
     /* Every instruction this expression lowers to is attributed to the
      * expression, not to the statement containing it -- so `a[i] + b[j]`
-    stack_check(fn->file, e->line, 6);
      * blames the right subscript. Saved and restored, because lowering
      * recurses and the caller's position must survive it. */
     int save_line = g_cur_line, save_col = g_cur_col;
@@ -4501,9 +4503,9 @@ static void switch_tree(struct ir_func *fn, int v, int w, int sign,
 static void gen_stmt(struct ir_func *fn, struct stmt *s,
                      const struct loopctx *loop)
 {
+    stack_check(fn->file, s ? s->line : 0, 6);
     for (; s; s = s->next) {
         if (s->line) {
-    stack_check(fn->file, s ? s->line : 0, 6);
             g_cur_line = s->line;   /* -g: rows key off statement lines */
             g_cur_col = s->col;
         }
