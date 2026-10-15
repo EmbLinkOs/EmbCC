@@ -32,11 +32,11 @@ meaning other than the standard's. Check these first when porting code:
   declared in a block remain visible to the end of the translation unit.
   See [Scope of tags, typedefs and enumeration constants](#scope-of-tags-typedefs-and-enumeration-constants).
 
-EmbCC is also stricter than the standard in two places that commonly
-affect existing code: a non-`void` function other than `main` that can
-reach its closing brace is an error ([details](#functions-that-can-reach-their-closing-brace)),
-and an empty parameter list `()` always means "no parameters"
-([details](#empty-parameter-lists)).
+EmbCC is also stricter than the standard in one place that commonly
+affects existing code: an empty parameter list `()` always means "no
+parameters" ([details](#empty-parameter-lists)). A non-`void` function
+that can reach its closing brace gets a warning that is on by default
+([details](#functions-that-can-reach-their-closing-brace)).
 
 Features whose availability depends on the target (variable length
 arrays on AVR, `long double`, `__int128`, atomic sizes, thread-local
@@ -152,7 +152,7 @@ define `__GNUC__` when compiling C.
 | Old-style (K&R) function definitions | Not supported | `int add(a, b) int a, b; { ... }` gives `expected a parameter type before 'a'`. C23 removed them. |
 | Implicit `int` | Not supported | `static x = 3;` gives `expected a type before 'x'`. C99 removed it. |
 | Implicit function declarations | Not supported | `'foo' is not declared in 'main' — for a call, add a prototype or define it first [E0001]`. C99 removed them. |
-| Reaching the `}` of a non-`void` function | Not supported | An error even when the value is never used, except in `main`: `control may reach the end of 'f' — every path must end in a return statement [E0008]`. See [Functions that can reach their closing brace](#functions-that-can-reach-their-closing-brace). |
+| Reaching the `}` of a non-`void` function | Supported | A warning, on by default, except in `main`: `control may reach the end of 'f', which returns int [--warn=return-type] [E0008]`. See [Functions that can reach their closing brace](#functions-that-can-reach-their-closing-brace). |
 | `return;` in a non-`void` function | Not supported | `'g' returns int; 'return' needs a value`. A constraint violation since C99. |
 | `auto` storage class | Supported | `auto int x;` |
 | `register` storage class | Partial | Accepted on block-scope objects and on parameters, where it is a hint the allocator does not need. At file scope, which C does not allow: `'register' is not supported yet (see docs/manual/c-language.md)`. Taking the address of a `register` object is not diagnosed. Any other storage class on a parameter: `a parameter can have no storage class but 'register'`. |
@@ -344,17 +344,23 @@ be lowered.
 
 ### Functions that can reach their closing brace
 
-A function with a non-`void` return type, other than `main`, must end
-every path with a `return` statement. The standard allows control to
-reach the closing brace as long as the caller does not use the value;
-EmbCC refuses it:
+A function with a non-`void` return type should end every path with a
+`return` statement. The standard allows control to reach the closing
+brace as long as the caller does not use the value, so EmbCC accepts it,
+with a warning that is on by default (`--error=return-type` makes it an
+error):
 
 ```text
-error: control may reach the end of 'f' — every path must end in a return statement [E0008]
+warning: control may reach the end of 'f', which returns int [--warn=return-type] [E0008]
 ```
 
+The function returns 0 when control reaches the brace, if its result is
+an integer or a pointer, rather than whatever its return register held.
+A caller that uses the value then reads the same thing every time. A
+floating or aggregate result is undefined there.
+
 `main` is the exception the standard makes: reaching its closing brace
-returns 0.
+returns 0, without a warning.
 
 A path also ends at an infinite loop, at a call to a function declared
 `_Noreturn`, `[[noreturn]]` or `__attribute__((noreturn))`, and at a call

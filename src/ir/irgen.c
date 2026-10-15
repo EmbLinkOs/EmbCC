@@ -5180,9 +5180,15 @@ static void gen_func(struct ir_func *fn, struct func *f)
     if (g_instr_this)
         emit_instr_call(fn, f, "__cyg_profile_func_exit", f->line);
     g_instr_this = 0;               /* nothing after this function is it */
-    /* main that reaches its closing brace returns 0 (C99 5.1.2.2.3). After
-     * a body whose every path returned this is unreachable, and goes. */
-    if (!strcmp(f->name, "main") && ty_is_integer(f->ret_ty)) {
+    /* main that reaches its closing brace returns 0 (C99 5.1.2.2.3), and so
+     * does any function returning an integer or a pointer whose brace can
+     * be reached (--warn=return-type) -- 0 rather than whatever the
+     * register held, so a caller that uses the value anyway reads the same
+     * thing every time. A floating or aggregate result is left undefined.
+     * After a body whose every path returned this is unreachable, and
+     * goes. */
+    if ((ty_is_integer(f->ret_ty) || f->ret_ty->kind == TY_PTR) &&
+        ty_size(f->ret_ty) <= 8 && !f->is_naked) {
         int z = emit_const(fn, 0, ty_size(f->ret_ty) > 4 ? 8 : 4);
         struct ir_ins *r = emit(fn);
         r->op = IR_RET;

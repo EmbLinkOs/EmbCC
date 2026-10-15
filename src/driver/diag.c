@@ -766,6 +766,10 @@ static struct warn_opt g_warns[] = {
     /* 'ab': an int of implementation-defined value (GCC's and clang's
      * is computed here), on by default as in GCC */
     { "multichar",            1,  0,    0 },
+    /* control reaching the closing brace of a function that returns a
+     * value: on by default (clang's choice; GCC's -Wall), since C allows
+     * it only while no caller uses the value */
+    { "return-type",          1,  1,    0 },
     /* -pedantic: what the C standard -std= names does not have -- a
      * later standard's feature, or a GNU extension (lex_pedantic);
      * -pedantic-errors makes each an error */
@@ -1072,6 +1076,7 @@ static const struct { const char *name, *implied, *what; } g_warn_doc[] = {
     { "parentheses", NULL, "a comparison as an unparenthesized operand of `&`, `|` or `^`: `reg & MASK == 0`" },
     { "prio-ctor-dtor", NULL, "a `constructor` or `destructor` priority from 0 to 100, which the implementation reserves" },
     { "redundant-decls", NULL, "a second declaration of a function or `extern` object in the same scope" },
+    { "return-type", NULL, "control that can reach the closing brace of a function returning a value, which C allows while no caller uses the value: the function returns 0 there (an integer or pointer result; a floating or aggregate one is undefined) [E0008]" },
     { "shadow", NULL, "a local declaration that hides a local variable, a parameter or a file-scope variable" },
     { "shift-count-overflow", NULL, "a constant shift count that is negative or not less than the operand width" },
     { "sign-compare", NULL, "a comparison that converts a possibly negative signed operand to unsigned" },

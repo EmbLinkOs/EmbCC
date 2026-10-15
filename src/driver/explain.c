@@ -142,9 +142,12 @@ static const struct explain g_explains[] = {
 "C99 6.3.2.1p1, 6.5.16p2."
 },
 { "E0008", "control reaches the end of a function that must return a value",
-"A function whose return type is not void must return a value on every path\n"
-"that leaves it. EmbCC refuses rather than returning whatever happens to be\n"
-"in the register, which is what makes such a bug so hard to find later.\n"
+"A function whose return type is not void should return a value on every\n"
+"path that leaves it. C allows a path to reach the closing brace as long as\n"
+"no caller uses the value, so this is a warning (--warn=return-type, on by\n"
+"default; --error=return-type refuses it). The function returns 0 there --\n"
+"for an integer or pointer result -- rather than whatever happens to be in\n"
+"the register, which is what makes such a bug so hard to find later.\n"
 "\n"
 "    int sign(int n)\n"
 "    {\n"
