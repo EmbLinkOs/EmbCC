@@ -8068,11 +8068,27 @@ static void check_func(struct unit *u, struct func *f)
     }
     /* `int a[n][m]` arrives as int (*)[m]: its row size is computed at
      * entry from the parameters before it */
-    for (int i = 0; i < f->nparams; i++)
+    for (int i = 0; i < f->nparams; i++) {
+        struct expr *b = i < MAX_PARAMS ? f->param_bound[i] : NULL;
         if (ty_is_vm(f->param_tys[i])) {
             vla_prepare(u, f, &sc, f->param_tys[i]);
             f->has_vm_params = 1;
         }
+        /* `int a[i++]`: the length the adjustment dropped is evaluated
+         * all the same, so its effect happens -- and only one with an
+         * effect is kept, so `int a[n]` costs nothing */
+        if (b) {
+            check_expr(u, f, &sc, b);
+            if (!ty_is_integer(b->ty))
+                sema_error_at(u, b->line, b->col,
+                        "size of array has non-integer type %s",
+                        ty_name(b->ty));
+            if (side_effect_free(b))
+                f->param_bound[i] = NULL;
+            else
+                f->has_vm_params = 1;
+        }
+    }
 
     check_stmt(u, f, &sc, f->body, 0, 0);
 
