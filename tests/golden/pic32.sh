@@ -92,8 +92,11 @@ MEMORY
 }
 SECTIONS { .text : { } >kseg0_program_mem ONLY_IF_RO }
 EOF
+    # (in runs, as the real one has them: no OFF003 or OFF004 here)
     printf '%s\n' '  .section .__vector_offset_BF810540_data,data,keep,address(0xBF810540)' \
         '  .word __vector_offset_0' '  .word __vector_offset_1' '  .word __vector_offset_2' \
+        '  .section .__vector_offset_BF810554_data,data,keep,address(0xBF810554)' \
+        '  .word __vector_offset_5' \
         > "$1/xc32/32MZ2048EFH100/p32MZ2048EFH100_voff_init.S"
 }
 mkpack "$out/pack" 1
@@ -261,14 +264,21 @@ echo "pic32: #pragma config sets its words' fields (a value or a number), and na
 # ---- 6. linking -------------------------------------------------------------------
 # EmbCC's startup (lib/pic32/crt0.S), the pack's processor module, and a
 # script made from the pack: the reset vector at 0xBFC00000; vector 1's
-# offset from EBASE in the table the startup copies into OFFn, the others
-# the default's; .data run from RAM and stored in flash; the configuration
-# word in place; and a HEX of physical addresses (embpack --physical)
+# and vector 5's offsets from EBASE in the table the startup copies into
+# OFFn, from OFF000 to the last vector the pack names (5, past the hole
+# of 3 and 4), the others the default's; .data run from RAM and stored in
+# flash; the configuration word in place; and a HEX of physical addresses
+# (embpack --physical)
 if [ -f "$(dirname "$EMBCC")/build/libc/mipsel-none-elf/pic32-crt0.o" ]; then
     cat > "$out/isr.S" <<'EOF'
     .section .vector_1, code, keep
     .globl __vector_dispatch_1
 __vector_dispatch_1:
+    eret
+    nop
+    .section .vector_5, code, keep
+    .globl __vector_dispatch_5
+__vector_dispatch_5:
     eret
     nop
 EOF
@@ -283,8 +293,10 @@ EOF
     tab=$(sym __vector_offset_table)
     llvm-objcopy -O binary --only-section=.vector_offsets "$out/app.elf" "$out/off.bin"
     got=$(od -An -tx4 "$out/off.bin" | tr -s ' \n' ' ' | sed 's/^ //; s/ $//')
-    d1=$(sym __vector_dispatch_1); def=$(sym __vector_offset_default)
-    want=$(printf '%08x %08x %08x' "0x$def" "$((0x$d1 - 0x9d000000))" "0x$def")
+    d1=$(sym __vector_dispatch_1); d5=$(sym __vector_dispatch_5)
+    def=$(sym __vector_offset_default)
+    want=$(printf '%08x %08x %08x %08x %08x %08x' "0x$def" "$((0x$d1 - 0x9d000000))" \
+           "0x$def" "0x$def" "0x$def" "$((0x$d5 - 0x9d000000))")
     [ "$got" = "$want" ] || fail "the OFFn table is '$got', not '$want' (table at $tab)"
     llvm-objcopy -O binary --only-section=.config_BFC0FFC4 "$out/app.elf" "$out/cw.bin"
     [ "$(od -An -tx4 "$out/cw.bin" | tr -d ' ')" = fffffffa ] ||
@@ -294,7 +306,7 @@ EOF
     grep -q '^:020000041FC0' "$out/app.hex" && grep -q '^:020000041D00' "$out/app.hex" &&
         ! grep -q '^:020000049D00\|^:02000004BFC0' "$out/app.hex" ||
         fail "the HEX is not at the physical 0x1D000000 and 0x1FC00000"
-    echo "pic32: linked by a script from the pack: reset at 0xBFC00000, OFFn's table, .data from flash, the config word, a physical HEX"
+    echo "pic32: linked by a script from the pack: reset at 0xBFC00000, OFFn's table to the last vector, .data from flash, the config word, a physical HEX"
 else
     echo "pic32: linking not tried: no build/libc/mipsel-none-elf/pic32-crt0.o (make rt-embedded)"
 fi

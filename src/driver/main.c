@@ -1856,9 +1856,13 @@ static int pic32_script(const char *path)
     q = strstr(ld, "_vector_spacing = ");
     if (q)
         spacing = strtoul(q + 18, NULL, 0);
-    /* the OFFn registers: the address the init module's table is placed
-     * at, and its .word count; none on a part whose vectors are spaced
-     * evenly (PIC32MX) */
+    /* the OFFn registers: where OFF000 is, and how many vectors there
+     * are to the last the init module names; none on a part whose
+     * vectors are spaced evenly (PIC32MX). The module places its table
+     * in runs, one section a run of implemented vectors (a PIC32MZ EF
+     * has none for 94-101, 107-108...), each at its first vector's
+     * register, OFF000 + 4n: the startup copies the whole span, the
+     * holes' words too, as XC32's image writes them. */
     unsigned long offregs = 0;
     int nvec = 0;
     snprintf(p, sizeof p, "%s/xc32/%s/p%s_voff_init.S", dfp, part, part);
@@ -1867,8 +1871,25 @@ static int pic32_script(const char *path)
         q = strstr(vo, "address(");
         if (q)
             offregs = strtoul(q + 8, NULL, 0);
-        for (q = vo; (q = strstr(q, ".word __vector_offset_")) != NULL; q++)
-            nvec++;
+        for (q = vo; (q = strstr(q, ".word __vector_offset_")) != NULL; q++) {
+            long v = strtol(q + 22, NULL, 10);
+            if (v + 1 > nvec)
+                nvec = (int)v + 1;
+        }
+        /* each run's section is where OFF000 + 4n says, or the table the
+         * startup copies would put offsets in the wrong registers */
+        for (q = vo; offregs && (q = strstr(q, "address(")) != NULL; q++) {
+            unsigned long at = strtoul(q + 8, NULL, 0);
+            char *w = strstr(q, ".word __vector_offset_");
+            if (w && at != offregs + 4 * (unsigned long)strtol(w + 22, NULL, 10)) {
+                fprintf(stderr, "embcc: error: %s places a vector's offset "
+                        "at 0x%08lX, not at OFF000 + 4 times its number\n",
+                        p, at);
+                free(vo);
+                free(ld);
+                return 1;
+            }
+        }
         free(vo);
     }
     FILE *f = fopen(path, "w");
