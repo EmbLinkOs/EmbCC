@@ -116,6 +116,8 @@ struct parser {
     int mode_line, tu_line, vec_line;
     int type_mode;        /* a mode(M) among a type name's specifiers */
     int type_vecsize;     /* ...and a vector_size(N) */
+    int param_vec;        /* a vector_size before a parameter's type,
+                           * which param_sret_attr read */
     /* GNU `__label__ n;`: a label LOCAL to the enclosing block, so a
      * macro that declares one can be expanded twice in a function
      * without the second `n:` being a duplicate. That is the only
@@ -1747,6 +1749,7 @@ static int param_sret_attr(struct parser *ps, int index, int *unused)
     struct token *at = cur(ps);
     struct attrs a = { 0 };
     parse_attributes(ps, &a);
+    ps->param_vec = a.vecsize;          /* `vector int t` */
     if (a.sret && index != 0)
         parse_error_at(ps, at->line, at->col,
                 "embcc_sret marks the first parameter only");
@@ -1822,14 +1825,22 @@ static struct type *parse_fn_params_named(struct parser *ps, struct type *ret,
             skip_param_register(ps);
             while (cur(ps)->kind == TOK_KW_ATTRIBUTE && addr_space_qual(ps))
                 ps->lead_flash = 1;    /* `__flash char *p` */
+            int pvec = ps->param_vec;
+            ps->param_vec = 0;
             if (at_attribute(ps)) {
                 struct attrs pat = { 0 };
                 parse_attributes(ps, &pat);
                 pcs_not_here(ps, &pat, "a parameter");
                 unused |= pat.unused;
+                if (pat.vecsize)
+                    pvec = pat.vecsize;
             }
             struct attrs sat = { 0 };
             struct type *spec = parse_type_spec_attrs(ps, 0, &sat);
+            /* `vector int t`: a vector_size before the type or among
+             * its specifiers is the parameter's type */
+            if (spec && (pvec || sat.vecsize))
+                spec = apply_vec(ps, spec, sat.vecsize ? sat.vecsize : pvec);
             param_storage(ps);
             pcs_not_here(ps, &sat, "a parameter");
             unused |= sat.unused;
@@ -1844,6 +1855,8 @@ static struct type *parse_fn_params_named(struct parser *ps, struct type *ret,
                 parse_attributes(ps, &pat);
                 pcs_not_here(ps, &pat, "a parameter");
                 unused |= pat.unused;
+                if (pat.vecsize)        /* `int t __attribute__((vector_size(16)))` */
+                    t = apply_vec(ps, t, pat.vecsize);
             }
             unused |= ps->stars_unused;
             ps->stars_unused = 0;
@@ -6936,14 +6949,22 @@ static void parse_top(struct parser *ps, struct unit *u,
             ps->stars_unused = 0;
             while (cur(ps)->kind == TOK_KW_ATTRIBUTE && addr_space_qual(ps))
                 ps->lead_flash = 1;    /* `__flash char *p` */
+            int pvec = ps->param_vec;
+            ps->param_vec = 0;
             if (at_attribute(ps)) {
                 struct attrs pat = { 0 };
                 parse_attributes(ps, &pat);
                 pcs_not_here(ps, &pat, "a parameter");
                 unused |= pat.unused;
+                if (pat.vecsize)
+                    pvec = pat.vecsize;
             }
             struct attrs sat = { 0 };
             struct type *spec = parse_type_spec_attrs(ps, 0, &sat);
+            /* `vector int t`: a vector_size before the type or among
+             * its specifiers is the parameter's type */
+            if (spec && (pvec || sat.vecsize))
+                spec = apply_vec(ps, spec, sat.vecsize ? sat.vecsize : pvec);
             param_storage(ps);
             pcs_not_here(ps, &sat, "a parameter");
             unused |= sat.unused;
@@ -6958,6 +6979,8 @@ static void parse_top(struct parser *ps, struct unit *u,
                 parse_attributes(ps, &pat);
                 pcs_not_here(ps, &pat, "a parameter");
                 unused |= pat.unused;
+                if (pat.vecsize)
+                    pt = apply_vec(ps, pt, pat.vecsize);
             }
             unused |= ps->stars_unused;
             ps->stars_unused = 0;
