@@ -24,6 +24,13 @@
  *
  * __APPLE__ / __linux__ inside THIS file is what the seam is for --
  * the rule is that no file above it may ask. */
+/* opendir, for plat_list_dir: macOS's and Linux's. EmbLinkOS builds this
+ * file against newlib, whose <dirent.h> is an #error; there a directory
+ * cannot be listed, and a PIC32 pack is named with --dfp=. */
+#if defined(__APPLE__) || defined(__linux__)
+#define PLAT_HAS_DIRENT 1
+#include <dirent.h>
+#endif
 #include <unistd.h>            /* isatty, readlink */
 #if defined(__APPLE__)
 #include <mach-o/dyld.h>
@@ -74,3 +81,39 @@ const char *plat_self_path(void)
     }
     return buf[0] ? buf : NULL;
 }
+
+#ifndef PLAT_HAS_DIRENT
+char **plat_list_dir(const char *path)
+{
+    (void)path;
+    return NULL;
+}
+#else
+char **plat_list_dir(const char *path)
+{
+    DIR *d = opendir(path);
+    if (!d)
+        return NULL;
+    size_t n = 0, cap = 16;
+    char **v = malloc(cap * sizeof *v);
+    struct dirent *e;
+    while (v && (e = readdir(d)) != NULL) {
+        if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
+            continue;
+        if (n + 1 >= cap) {
+            char **w = realloc(v, (cap *= 2) * sizeof *v);
+            if (!w)
+                break;
+            v = w;
+        }
+        v[n] = malloc(strlen(e->d_name) + 1);
+        if (!v[n])
+            break;
+        strcpy(v[n++], e->d_name);
+    }
+    closedir(d);
+    if (v)
+        v[n] = NULL;
+    return v;
+}
+#endif

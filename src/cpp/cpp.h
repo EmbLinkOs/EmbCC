@@ -52,6 +52,15 @@ void cpp_set_tolerant(int on);
  * indexed as incdirs is, and must outlive the preprocessing. */
 void cpp_set_system_dirs(const int *flags, int n);
 
+/* A PIC32 part's configuration words: the device pack's
+ * xc32/<part>/configuration.data, which `#pragma config NAME = VALUE`
+ * looks its settings up in (NULL: none, and the pragma is refused). */
+void cpp_set_config_data(const char *path);
+
+/* A .S file's preprocessing: a `#` line that is not a directive is the
+ * assembler's (a comment), and passes through as it does in GCC */
+void cpp_set_asm(int on);
+
 /* The headers the last cpp_process opened, in order (-M and friends). */
 int cpp_dep_count(void);
 const char *cpp_dep_path(int i);

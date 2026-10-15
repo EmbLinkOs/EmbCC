@@ -29,6 +29,7 @@ static int c23_words(void)
  * tool that answers questions about a unit needs to walk them.) */
 
 struct attrs { int packed; int aligned; int weak; int noreturn;
+               int address;     /* the line of an address(N), or 0 */
                int fallthrough;       /* a statement attribute */
                const char *section;
                const char *asm_name; /* a renaming asm label (asm_label) */
@@ -806,6 +807,34 @@ static const struct attr_entry attr_table[] = {
      * then computes something else and says so only in passing. Each is
      * now either refused by name or a no-op with a reason. */
 
+    /* XC32's PIC32 attributes (<sys/attribs.h>). Placing a handler at
+     * its vector is what __ISR(v, ...) is for; ignoring it compiled a
+     * handler nothing ever reached. */
+    /* a PIC32 SFR's: `extern volatile uint32_t LATB
+     * __attribute__((address(0xBF860130)))`. The device pack's processor
+     * module (xc32/<part>/p<part>.S) defines each SFR's symbol there, and
+     * a --mcu= link includes it; a DEFINITION at an address is refused
+     * where it is written. */
+    { "address",     ATTR_HONOURED, NULL },
+    { "vector",      ATTR_REFUSED,
+      "the handler would not be placed at its PIC32 interrupt vector "
+      "(EmbCC does not place them yet: write the vector's stub in "
+      "assembly, in section .vector_N, as Harmony's interrupts_a.S does)" },
+    { "at_vector",   ATTR_REFUSED,
+      "the function would not be placed at its PIC32 interrupt vector "
+      "(EmbCC does not place them yet)" },
+    { "coherent",    ATTR_REFUSED,
+      "the object would be reached through the data cache, which a DMA "
+      "transfer does not see (EmbCC does not place objects in uncached "
+      "memory yet)" },
+    { "nomips16",    ATTR_NOOP, "EmbCC emits MIPS32 code only" },
+    { "nomicromips", ATTR_NOOP, "EmbCC emits MIPS32 code only" },
+    { "mips16",      ATTR_WARNED,
+      "EmbCC emits MIPS32 code only, so the function is larger than "
+      "MIPS16e code would be" },
+    { "micromips",   ATTR_WARNED,
+      "EmbCC emits MIPS32 code only, so the function is larger than "
+      "microMIPS code would be" },
     { "vector_size", ATTR_REFUSED,
       "the type would stay a scalar: EmbCC's vector IR comes from the "
       "auto-vectorizer and only x86-64 lowers it, so a vector TYPE has "
@@ -1241,6 +1270,7 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
             }
             if (name && out) {
                 if (attr_is(name, "packed")) out->packed = 1;
+                else if (attr_is(name, "address")) out->address = aline;
                 else if (attr_is(name, "transparent_union")) {
                     out->transparent = 1;
                     ps->tu_line = aline;
@@ -6643,6 +6673,14 @@ static void parse_top(struct parser *ps, struct unit *u,
             g->is_const = gconst;
             g->section = at.progmem ? ".progmem.data" : at.section;
             g->alias_of = at.alias;
+            if (at.address && !is_extern)
+                parse_error_line(ps, at.address, "__attribute__((address)) on the definition of '%s' is not "
+                       "supported: EmbCC does not place a variable at a "
+                       "fixed address (an extern declaration takes it, as "
+                       "a PIC32 SFR's does)", gname);
+            if (at.alias)
+                parse_error_line(ps, gline, "alias attribute on variable '%s' "
+                           "is not supported (functions take it)", gname);
             g->seq = seq;
             g->def_seq = seq;
             **gtail = g;
@@ -6816,6 +6854,10 @@ fn_tail:
     f->attr_warn_unused_result = at.warn_unused_result;
     f->vis = at.vis;
     f->section = at.section;
+    if (at.address)
+        parse_error_line(ps, at.address, "__attribute__((address)) on "
+                         "function '%s' is not supported: EmbCC does not "
+                         "place a function at a fixed address", f->name);
     f->alias_of = at.alias;
     if (at.alias && cur(ps)->kind == TOK_LBRACE)
         parse_error_line(ps, line,
@@ -6872,6 +6914,15 @@ fn_tail:
                 g->is_tls = is_tls;
                 g->section = at.progmem ? ".progmem.data" : at.section;
                 g->alias_of = at.alias;
+                if (at.address && !is_extern)
+                    parse_error_line(ps, at.address, "__attribute__((address)) on the definition of '%s' is not "
+                       "supported: EmbCC does not place a variable at a "
+                       "fixed address (an extern declaration takes it, as "
+                       "a PIC32 SFR's does)", dname);
+                if (at.alias)
+                    parse_error_line(ps, dline, "alias attribute on variable "
+                               "'%s' is not supported (functions take it)",
+                               dname);
                 g->seq = seq;
                 g->def_seq = seq;
                 **gtail = g;

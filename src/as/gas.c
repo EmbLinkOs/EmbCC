@@ -118,8 +118,9 @@ struct gas {
     int nfix, capfix;
     const struct gas_target *tgt;
     /* How many times each numeric local label has been DEFINED so far in
-     * this pass. Reset between passes so both agree. */
-    int local_n[10];
+     * this pass. Reset between passes so both agree. (NLOCAL of them: GNU
+     * as takes any number, and a startup file counts past 9.) */
+    int local_n[100];
     int cur;                /* current section */
     int npcrel;             /* .Lpcrel_hiN counter */
     int line;               /* for diagnostics */
@@ -578,7 +579,7 @@ static long parse_string(struct gas *g, const char *p, unsigned char *buf,
  * disagree about which `1:` a forward reference means, and the difference
  * shows up as a jump to the wrong loop.
  */
-#define NLOCAL 10
+#define NLOCAL ((int)(sizeof ((struct gas *)0)->local_n / sizeof (int)))
 
 static void local_name(char *buf, size_t n, int digit, int inst)
 {
@@ -2668,6 +2669,42 @@ static int directive(struct gas *g, char *p, int pass)
             free(tmp);
         }
         e = skip_ws(e);
+        /* Microchip's assembler (XC32's, for PIC32) spells the kind in
+         * words: `.section .vector_9, code, keep` -- Harmony's and
+         * FreeRTOS's interrupt stubs. code is "ax", data "aw", bss "aw"
+         * @nobits; keep asks the linker to keep it, which the device
+         * pack's script does for these sections by KEEP(). A word EmbCC
+         * does not place (address(), persist, ramfunc...) is refused
+         * rather than left to make a section with no flags at all. */
+        if (*e == ',' && isalpha((unsigned char)*skip_ws(e + 1))) {
+            explicit_flags = explicit_type = 1;
+            fl = 0;
+            ty = SHT_PROGBITS;
+            while (*e == ',') {
+                char *w = skip_ws(e + 1), *we = w;
+                while (*we && is_symc((unsigned char)*we)) we++;
+#define WD(s) ((size_t)(we - w) == strlen(s) && !strncmp(w, s, strlen(s)))
+                if (WD("code")) fl |= SHF_ALLOC | SHF_EXECINSTR;
+                else if (WD("data")) fl |= SHF_ALLOC | SHF_WRITE;
+                else if (WD("bss")) {
+                    fl |= SHF_ALLOC | SHF_WRITE;
+                    ty = SHT_NOBITS;
+                } else if (WD("keep")) {
+                    /* kept by the linker script's KEEP() */
+                } else {
+                    gerr(g, "section attribute '%.*s' is not one EmbCC's "
+                            "assembler places (code, data, bss, keep)",
+                         (int)(we - w), w);
+                    return 1;
+                }
+#undef WD
+                e = skip_ws(we);
+            }
+            if (*e) {
+                gerr(g, "unexpected '%s' after the section's attributes", e);
+                return 1;
+            }
+        }
         if (*e == ',') {
             e = skip_ws(e + 1);
             if (*e == '"') {
@@ -4143,9 +4180,12 @@ int gas_assemble(const char *in_path, const char *out_path, int preprocess,
     /* `.S` is preprocessed and `.s` is not, which is the whole of the
      * difference between them. */
     if (preprocess) {
-        /* for this assembler, not the C lexer: no -pedantic marks */
+        /* for this assembler, not the C lexer: no -pedantic marks, and a
+         * `#` line that is not a directive is the assembler's */
         int mark = cpp_set_mark_system(0);
+        cpp_set_asm(1);
         text = cpp_process(in_path, src, incdirs, nincdirs);
+        cpp_set_asm(0);
         cpp_set_mark_system(mark);
     } else {
         text = src;

@@ -109,3 +109,12 @@ int src_exists(const char *path)
     free(b);
     return b != NULL;
 }
+
+void plat_free_list(char **names)
+{
+    if (!names)
+        return;
+    for (char **p = names; *p; p++)
+        free(*p);
+    free(names);
+}

@@ -118,12 +118,23 @@ static const char *strat(size_t off)
 }
 
 /* An address's load address: through the load segment it runs in. */
+/* --physical: a MIPS kernel-segment address (KSEG0 0x80000000, KSEG1
+ * 0xA0000000) written as the physical address it reaches -- its top three
+ * bits cleared -- as a PIC32's programmers and MPLAB read an image: flash
+ * at 0x1D000000, boot flash at 0x1FC00000 */
+static int g_physical;
+
 static u64 to_lma(u64 vaddr)
 {
+    u64 a = vaddr;
     for (int j = 0; j < g_nph; j++)
-        if (vaddr >= g_phv[j] && vaddr - g_phv[j] < g_phm[j])
-            return vaddr - g_phv[j] + g_php[j];
-    return vaddr;
+        if (vaddr >= g_phv[j] && vaddr - g_phv[j] < g_phm[j]) {
+            a = vaddr - g_phv[j] + g_php[j];
+            break;
+        }
+    if (g_physical && a >= 0x80000000u && a < 0xC0000000u)
+        a &= 0x1FFFFFFFu;
+    return a;
 }
 
 static int seg_by_lma(const void *a, const void *b)
@@ -572,7 +583,8 @@ static void usage(void)
         "usage: embpack IMAGE -o OUT [--format bin|hex|srec|uf2] "
         "[--fill BYTE]\n"
         "               [--pad-to SIZE] [--crc32 SYMBOL] [--append-crc32]\n"
-        "               [--uf2-family ID] [--manifest FILE.json]\n");
+        "               [--uf2-family ID] [--manifest FILE.json] "
+        "[--physical]\n");
     exit(2);
 }
 
@@ -690,6 +702,8 @@ int main(int argc, char **argv)
             crcsym = argv[++i];
         } else if (strcmp(a, "--append-crc32") == 0) {
             append_crc = 1;
+        } else if (strcmp(a, "--physical") == 0) {
+            g_physical = 1;
         } else if (strcmp(a, "--uf2-family") == 0 && i + 1 < argc) {
             family = parse_family(argv[++i]);
         } else if (strcmp(a, "--manifest") == 0 && i + 1 < argc) {

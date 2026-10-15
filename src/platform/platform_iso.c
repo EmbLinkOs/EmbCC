@@ -27,3 +27,10 @@ const char *plat_self_path(void)
 {
     return plat_argv0_path();
 }
+
+/* ISO C cannot list a directory */
+char **plat_list_dir(const char *path)
+{
+    (void)path;
+    return NULL;
+}

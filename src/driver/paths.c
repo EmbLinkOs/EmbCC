@@ -230,3 +230,100 @@ void paths_print_search_dirs(void)
     if (!n)
         printf("include: (none -- every header needs an explicit -I)\n");
 }
+
+/* ---- a PIC32's device pack ------------------------------------------- */
+
+/* "1.4.168" against "1.10.2", number by number */
+static int pack_version_cmp(const char *a, const char *b)
+{
+    long x[4] = { 0 }, y[4] = { 0 };
+    sscanf(a, "%ld.%ld.%ld.%ld", &x[0], &x[1], &x[2], &x[3]);
+    sscanf(b, "%ld.%ld.%ld.%ld", &y[0], &y[1], &y[2], &y[3]);
+    for (int i = 0; i < 4; i++)
+        if (x[i] != y[i])
+            return x[i] < y[i] ? -1 : 1;
+    return 0;
+}
+
+/* In a family's directory of versions (.../PIC32MZ-EF_DFP), the newest
+ * that has the part's header: into best (and its version into bestv) */
+static void pack_versions(const char *fam, const char *hdr, char *best,
+                          char *bestv, size_t cap)
+{
+    char **vs = plat_list_dir(fam);
+    for (char **v = vs; v && *v; v++) {
+        char dir[MAXP];
+        if (!pjoin(dir, sizeof dir, "%s/%s", fam, *v) || !has(dir, hdr))
+            continue;
+        if (!best[0] || pack_version_cmp(*v, bestv) > 0) {
+            snprintf(best, cap, "%s", dir);
+            snprintf(bestv, 64, "%s", *v);
+        }
+    }
+    plat_free_list(vs);
+}
+
+/* A packs root (~/.mchp_packs, an MPLAB X packs folder): every vendor's
+ * *_DFP families */
+static void pack_root(const char *root, const char *hdr, char *best,
+                      char *bestv, size_t cap)
+{
+    char **vendors = plat_list_dir(root);
+    for (char **vd = vendors; vd && *vd; vd++) {
+        char vdir[MAXP];
+        if (!pjoin(vdir, sizeof vdir, "%s/%s", root, *vd))
+            continue;
+        char **fams = plat_list_dir(vdir);
+        for (char **f = fams; f && *f; f++) {
+            size_t n = strlen(*f);
+            char fdir[MAXP];
+            if (n > 4 && strcmp(*f + n - 4, "_DFP") == 0 &&
+                pjoin(fdir, sizeof fdir, "%s/%s", vdir, *f))
+                pack_versions(fdir, hdr, best, bestv, cap);
+        }
+        plat_free_list(fams);
+    }
+    plat_free_list(vendors);
+}
+
+/* Each MPLAB X installed under base (base/<version>/packs) */
+static void pack_mplabx(const char *base, const char *hdr, char *best,
+                        char *bestv, size_t cap)
+{
+    char **vs = plat_list_dir(base);
+    for (char **v = vs; v && *v; v++) {
+        char packs[MAXP];
+        if (pjoin(packs, sizeof packs, "%s/%s/packs", base, *v))
+            pack_root(packs, hdr, best, bestv, cap);
+    }
+    plat_free_list(vs);
+}
+
+int paths_pic32_dfp(const char *part, const char *named, char *out,
+                    size_t cap)
+{
+    char hdr[96], bestv[64] = "";
+    size_t k = 0;
+    int n = snprintf(hdr, sizeof hdr, "include/proc/p");
+    for (; part[k] && n + 3 < (int)sizeof hdr; k++)
+        hdr[n++] = (char)(part[k] >= 'A' && part[k] <= 'Z' ? part[k] + 32
+                                                           : part[k]);
+    snprintf(hdr + n, sizeof hdr - (size_t)n, ".h");
+    out[0] = 0;
+    if (named) {
+        if (has(named, hdr)) {
+            snprintf(out, cap, "%s", named);
+            return 1;
+        }
+        pack_versions(named, hdr, out, bestv, cap);
+        return out[0] != 0;
+    }
+    const char *home = plat_getenv("HOME");
+    char root[MAXP];
+    if (home && pjoin(root, sizeof root, "%s/.mchp_packs", home))
+        pack_root(root, hdr, out, bestv, cap);
+    pack_mplabx("/Applications/microchip/mplabx", hdr, out, bestv, cap);
+    pack_mplabx("/opt/microchip/mplabx", hdr, out, bestv, cap);
+    pack_mplabx("C:/Program Files/Microchip/MPLABX", hdr, out, bestv, cap);
+    return out[0] != 0;
+}
