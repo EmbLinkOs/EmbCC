@@ -1,0 +1,20 @@
+EmbCC
+Copyright 2026 Téo Motsou and contributors
+
+Licensed under the Apache License, Version 2.0 (LICENSE).
+
+EmbCC includes code written by others, under the notices kept in those
+files, each of which permits use, modification and distribution:
+
+  lib/libc/src/math/fdlibm/
+      fdlibm, the Freely Distributable Math Library.
+      Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
+      Developed at SunPro, a Sun Microsystems, Inc. business.
+      Permission to use, copy, modify, and distribute this software is
+      freely granted, provided that this notice is preserved.
+
+  tools/embsim/avr.c, tools/embsim/riscv.c (the GDB target descriptions)
+      Copyright (C) 2018-2019 Free Software Foundation, Inc.
+      Copying and distribution of this file, with or without
+      modification, are permitted in any medium without royalty provided
+      the copyright notice and this notice are preserved.

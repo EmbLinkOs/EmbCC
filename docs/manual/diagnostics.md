@@ -101,8 +101,7 @@ A small number of messages bypass this mechanism and are printed
 immediately as plain text:
 
 - driver messages about the command line itself, such as an unknown `-W`
-  or `--error=` name, `--pedantic`, or a `--std=` value that is accepted but
-  not enforced;
+  or `--error=` name;
 - `escape sequence out of range ...; truncated, as gcc does`, from the
   lexer;
 - `the optimizer stopped after N rounds on 'F' without converging`, from

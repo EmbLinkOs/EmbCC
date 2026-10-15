@@ -1106,11 +1106,13 @@ and all of them and `gp` when it calls any function (a soft-float or
 puts `EPC` and `Status` back and returns with `eret`. `k0` and `k1` are
 the only registers it uses unsaved, as the ABI reserves them for this.
 
-On a core without an EIC -- malta's 24Kc, a PIC32MX -- `Cause[15:10]` are
-the pending interrupt lines, so the plain form unmasks the very line
-that is pending and re-enters at once, as GCC's does: use
-`vector=hwN` (`hw5` for the CP0 timer on line 7) or
-`keep_interrupts_masked` there.
+A PIC32, MX or MZ, has an EIC: its interrupt controller hands the
+requested priority to the core in `Cause.RIPL` (`Config3.VEIC` is set),
+so the plain form is the one to use there, as XC32's `__ISR` is. On a
+core without one -- malta's 24Kc -- `Cause[15:10]` are the pending
+interrupt lines, so the plain form unmasks the very line that is pending
+and re-enters at once, as GCC's does: use `vector=hwN` (`hw5` for the
+CP0 timer on line 7) or `keep_interrupts_masked` there.
 
 ```c
 __attribute__((interrupt("vector=hw5"))) void timer_isr(void)

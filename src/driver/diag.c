@@ -99,6 +99,8 @@ static int in_system_header(const char *file)
     return 0;
 }
 
+int diag_in_system_header(const char *file) { return in_system_header(file); }
+
 /* ---- macro-expansion registry ----
  *
  * The parser runs on preprocessed text, so an error inside a macro expansion is
@@ -764,6 +766,10 @@ static struct warn_opt g_warns[] = {
     /* 'ab': an int of implementation-defined value (GCC's and clang's
      * is computed here), on by default as in GCC */
     { "multichar",            1,  0,    0 },
+    /* -pedantic: what the C standard -std= names does not have -- a
+     * later standard's feature, or a GNU extension (lex_pedantic);
+     * -pedantic-errors makes each an error */
+    { "pedantic",             0,  0,    0 },
 };
 static const int g_nwarns = (int)(sizeof g_warns / sizeof g_warns[0]);
 
@@ -1062,6 +1068,7 @@ static const struct { const char *name, *implied, *what; } g_warn_doc[] = {
     { "nested-externs", NULL, "an `extern` declaration inside a function body" },
     { "old-style-declaration", NULL, "a storage class or `inline` after the type specifiers: `const static int t[]`, `int static n`" },
     { "overflow", NULL, "an integer constant converted to a type that cannot hold it as a signed or as an unsigned value: `unsigned char c = 300;`" },
+    { "pedantic", NULL, "a construct the C standard `--std` names does not have: a later standard's (`0b101` before C23, `_Bool` in C89) or a GNU extension (`({ ... })`, `case 1 ... 3`, `x ?: y`), except after `__extension__`. `--pedantic` turns it on and `--pedantic-errors` makes it an error; either also takes C23's keywords away from a GNU dialect before C23" },
     { "parentheses", NULL, "a comparison as an unparenthesized operand of `&`, `|` or `^`: `reg & MASK == 0`" },
     { "prio-ctor-dtor", NULL, "a `constructor` or `destructor` priority from 0 to 100, which the implementation reserves" },
     { "redundant-decls", NULL, "a second declaration of a function or `extern` object in the same scope" },

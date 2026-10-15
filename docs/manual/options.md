@@ -25,7 +25,7 @@ EmbCC's own spellings come first. Where GCC spells the same thing differently, i
 
 | Option | What it does | Also accepted |
 |---|---|---|
-| `--std=STD` | the language standard's macros (EmbCC reads one dialect per language) | `-std=STD` |
+| `--std=STD` | the language standard: c89 to c2y (gnu17 by default), or for C++ c++98 to c++26 (gnu++20 by default) | `-std=STD` |
 | `-D NAME[=VALUE]` | define a macro |  |
 | `-U NAME` | undefine a macro |  |
 | `-I DIR` | search DIR for headers |  |
@@ -133,7 +133,7 @@ EmbCC's own spellings come first. Where GCC spells the same thing differently, i
 | `--error=NAME` | this warning is an error | `-Werror=NAME` |
 | `--no-error=NAME` | this one is a warning again | `-Wno-error=NAME` |
 | `--no-warnings` | no warnings at all | `-w` |
-| `--pedantic` | warn for every extension of ISO C | `-pedantic` |
+| `--pedantic` | warn for what the --std standard does not have | `-pedantic` |
 | `--pedantic-errors` | ...as errors | `-pedantic-errors` |
 | `--warn-in-system-headers` | warn in system headers too | `-Wsystem-headers` |
 | `--diagnostics=FORMAT` | text, or json for tools | `-fdiagnostics-format=FORMAT` |
@@ -181,6 +181,9 @@ EmbCC's own spellings come first. Where GCC spells the same thing differently, i
 | `--no-default-libs` | no C library, no runtime | `-nodefaultlibs` |
 | `--static` | a static program | `-static` |
 | `--linker-arg=ARG` | pass ARG to EmbLD | `-Xlinker ARG` |
+| `--libc=LIBC` | embcc (EmbCC's own C library) or system (a Linux target's glibc: its headers, libraries and linker) |  |
+| `--sysroot=DIR` | the target system's root, for --libc=system (default /) |  |
+| `--linker=PATH` | the system's linker, for --libc=system (default: TRIPLE-ld, ld.lld or ld) | `--ld-path=PATH` |
 | `--assembler-arg=ARG` | pass ARG to the assembler | `-Wa,ARG` |
 
 ## Asking EmbCC
@@ -202,6 +205,7 @@ GCC flags EmbCC reads, either because they change nothing here or so as to refus
 
 | GCC spelling | Notes |
 |---|---|
+| `-ansi` | --std=c89 for C, and --std=c++98's macros for C++ |
 | `-x` | the language, as a separate argument (--lang=) |
 | `-pipe` | accepted: EmbCC writes no temporary files |
 | `-dumpbase` | accepted with -save-temps |
@@ -241,7 +245,8 @@ GCC flags EmbCC reads, either because they change nothing here or so as to refus
 | `-fno-plt` | accepted |
 | `-shared` | a shared library |
 | `-static-pie` | a static position-independent executable |
-| `-pthread` | accepted |
+| `-pthread` | POSIX threads: with --libc=system, glibc's (_REENTRANT, -lpthread) |
+| `-fuse-ld=*` | the system's linker for --libc=system: bfd, gold or lld (ld.NAME) |
 | `-fno-ident` | accepted |
 | `-fident` | accepted |
 | `-fno-reorder-functions` | accepted |

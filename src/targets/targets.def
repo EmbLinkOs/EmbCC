@@ -2,7 +2,15 @@
  * file per family. src/arch/target.c reads it; a backend keeps only the
  * code that is genuinely per-architecture.
  *
- * A family file holds two kinds of row.
+ * A family file holds three kinds of row.
+ *
+ * FAMILY(name, "what it covers", "default triple") -- first in the file,
+ * once. Every row after it, up to the next file's FAMILY, belongs to this
+ * family. `name` is the file's own name and what `make TARGETS=` builds
+ * (src/arch/target.h, FAMILY_BUILT); "what it covers" is the line
+ * `embcc --version` prints for it; the triple is the default target of a
+ * compiler built with this family and not x86 (the first such family in
+ * the order below).
  *
  * DATA_MODEL(ARCH, .field = value, ...) -- one per `enum target_arch`
  * (src/arch/target.h), the sizes and signedness C sees:
@@ -36,7 +44,9 @@
  * approximated.
  *
  * A new family is a new file here and a line below, in the order
- * an unknown --target lists them. */
+ * an unknown --target lists them; its EMBCC_FAMILY_<name> default in
+ * src/arch/target.h; and its sources, FAMILY_SRCS_<name>, and runtime
+ * triples, FAMILY_RT_<name>, in the Makefile. */
 #include "x86.def"
 #include "aarch64.def"
 #include "arm.def"

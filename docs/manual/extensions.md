@@ -13,14 +13,12 @@ described in [C language](c-language.md), C++ in [C++](cxx.md), and the
 
 ### Extensions are always enabled
 
-Every extension on this page is available in every compilation.
-[`--std=`](invoking.md#--stdstandard) does not change what the parser
-accepts, and no warning reports the use of an extension. `--pedantic` and
-`--pedantic-errors` are accepted, turn nothing on, and say so:
-
-```text
-embcc: warning: -pedantic: EmbCC has no diagnostics for extensions to ISO C, so this turns nothing on
-```
+Every extension on this page is available under every
+[`--std=`](invoking.md#--stdstandard) standard, as in GCC: under a strict
+`cNN` standard only the keywords `asm` and `typeof` are names, and
+`__asm__` and `__typeof__` still work. [`--pedantic`](invoking.md#--pedantic---pedantic-errors)
+reports each use of an extension, and `--pedantic-errors` refuses it,
+except in a system header or after `__extension__`.
 
 When EmbCC does not implement an extension, it refuses the program with
 an error that names the construct, rather than compiling it to do
@@ -80,13 +78,16 @@ operators](#feature-test-operators), with the limits described there.
 | [Zero-length arrays](#zero-length-and-flexible-arrays) | Supported as a structure member |
 | [Static initialization of a flexible array member](#zero-length-and-flexible-arrays) | Supported |
 | [`__int128`, `__real__`, `__imag__` and other types](#additional-types) | See the section |
-| [Alternate keywords](#alternate-keywords) (`__asm__`, `__inline__`, ...) | Supported, except `__signed__`, `__signed`, `__const`, `__const__` |
+| [Alternate keywords](#alternate-keywords) (`__asm__`, `__inline__`, ...) | Supported |
 | `__alignof__` of an expression | Supported |
 | `\e` escape (ESC, 27) | Supported |
 | Binary integer constants (`0b1011`) | Supported |
 | `__FUNCTION__`, `__PRETTY_FUNCTION__` | Supported; both are the function's name, as `__func__` is |
 | Anonymous structures and unions as members | Supported |
-| [Constructs EmbCC does not support](#gnu-extensions-that-are-not-supported) | Conditional with omitted operand, nested functions, empty structures, arithmetic on `void *`, cast to a union, integer complex types, `$` in identifiers, asm labels, `return` of a `void` expression |
+| Conditional with the middle operand omitted, `x ?: y` | Supported; `x` is evaluated once |
+| A structure or union with no members | Supported; its size is 0 |
+| An asm label, `int f(void) __asm__("name");` | Supported |
+| [Constructs EmbCC does not support](#gnu-extensions-that-are-not-supported) | Nested functions, arithmetic on `void *`, cast to a union, integer complex types, `$` in identifiers, `return` of a `void` expression |
 
 ### Statement expressions
 
@@ -303,11 +304,9 @@ headers written for `-ansi` work:
 | `__real`, `__imag` | `__real__`, `__imag__` |
 | `__attribute` | `__attribute__` |
 | `__thread` | `_Thread_local` |
+| `__signed__`, `__signed` | `signed` |
+| `__const__`, `__const` | `const` |
 | `__extension__` | Nothing; it is predefined as an empty macro |
-
-`__signed__`, `__signed`, `__const` and `__const__` are not recognized;
-a declaration that uses them is a syntax error (`expected a type before
-'__signed__'`).
 
 ### GNU extensions that are not supported
 
@@ -315,15 +314,12 @@ Each of these is refused with the diagnostic shown.
 
 | Construct | Diagnostic |
 |---|---|
-| Conditional with the middle operand omitted, `x ?: y` | `expected an expression, got ':'` |
 | Nested function definitions | `expected ';' before '{' [E0002]`, at the inner function's body |
-| A structure or union with no members | `a struct/union needs at least one member` |
 | Arithmetic on `void *` | `arithmetic on void *`, and `++/-- on void *` |
 | Arithmetic on a function pointer | `arithmetic on function *` |
 | `sizeof(void)` | `sizeof(void)` |
 | Cast to a union type, `(union u)x` | `cannot cast to union u` |
 | `$` in an identifier | `character '$' is not supported yet` |
-| An asm label, `int f(void) __asm__("name");` | `expected '{' or ';' before 'asm'` |
 | `return f();` in a `void` function, where `f` returns `void` | `returning a value from void 'g'` |
 | A conditional or cast as an lvalue | `assignment target must be a variable, *pointer, or member` |
 | Vector types; see [Vector extensions](#vector-extensions) | |
@@ -473,6 +469,8 @@ not supported (functions take it)`.
 | `aligned` | `enum` | Refused: `an aligned enum is not supported (an enum here is int, or the type its values need)` |
 | `deprecated` | a type | Accepted; using the type does not warn |
 | `may_alias` | a type | Accepted with no effect; EmbCC performs no type-based alias analysis |
+| `mode(M)` | an integer `typedef` or declaration | The integer type of mode `M`'s width, keeping the written signedness: `QI` 1 byte, `HI` 2, `SI` 4, `DI` 8, `TI` 16, `byte` 1, `word` and `pointer` the target's register and pointer width (glibc's `<sys/types.h>` writes these). Another mode is refused: `__attribute__((mode(V4SI))) is not supported: EmbCC takes the integer modes QI, HI, SI, DI, TI, byte, word and pointer` |
+| `transparent_union` | a `union` | A parameter of the union type takes any of its members' types, and is passed as its first member is (glibc's `<sys/socket.h>` under `_GNU_SOURCE`). Defining a function that receives one is refused off x86-64 and AArch64, where that is not yet checked: `a transparent_union parameter, which EmbCC receives only on x86-64 and AArch64` |
 
 `packed` applies to a whole structure or union. Written on a single
 member, before or after its declarator, it is accepted and has no
@@ -665,7 +663,6 @@ supported: REASON`:
 | `ifunc` | `the resolver would never run and calls would go to it rather than to the implementation it picks` |
 | `interrupt` | On every target but Cortex-M, AVR, RISC-V and MIPS32; see [Interrupt handlers](#interrupt-handlers) |
 | `keep_interrupts_masked` | `it modifies a MIPS interrupt handler, and only the MIPS32 target implements those` (on every target but MIPS32) |
-| `mode` | `the declaration would keep its written type, so a typedef that asks for a specific width would silently get another` |
 | `ms_abi` | `the arguments would be passed in System V's registers` |
 | `naked` | On x86-64 and AArch64; see [Naked functions](inline-asm.md#naked-functions) |
 | `signal` | On every target but AVR; see [Interrupt handlers](#interrupt-handlers) |
@@ -673,7 +670,6 @@ supported: REASON`:
 | `target` | `EmbCC selects its instruction set per compilation; a function asking for another would be compiled for the wrong one` |
 | `use_debug_exception_return` | `the handler would return with eret where the debug exception needs deret, and save DEPC as EPC` |
 | `use_shadow_register_set` | `EmbCC does not switch register sets: the handler would save into and run on a shadow set's stack pointer it never read with rdpgpr` |
-| `transparent_union` | `the union would be passed as a union rather than as its first member, which is a different calling convention` |
 | `vector_size` | `the type would stay a scalar: ...`; see [Vector extensions](#vector-extensions) |
 | `weakref` | `the symbol would be emitted as an ordinary reference, so a missing target would fail to link instead of being null` |
 

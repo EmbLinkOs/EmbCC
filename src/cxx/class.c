@@ -1505,6 +1505,7 @@ void ctor_meminit(struct cfunc *f, struct meminit_raw *mi, int n)
     if (n == 1 && (mi[0].cls ? mi[0].cls == c
                              : c->name && strcmp(mi[0].name, c->name) == 0)) {
         /* a delegating constructor */
+        cx_pedantic(mi[0].at, 2011, "a delegating constructor");
         f->delegate = mi[0].braced
                       ? construct(c, INIT_LIST, mi[0].args, 1, mi[0].at)
                       : mi[0].na == 0

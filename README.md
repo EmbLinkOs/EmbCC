@@ -67,6 +67,19 @@ ABI, options and limitations are in [Targets](docs/manual/targets.md).
 
 ## Building and installing
 
+A release installs on Linux and macOS, x86-64 and arm64, with
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/EmbLinkOs/EmbCC/main/install.sh | sh
+```
+
+into `~/.local` (`/usr/local` as root), after checking the download's
+SHA-256. Homebrew (`brew install EmbLinkOs/embcc/embcc`), the `.deb`
+packages and the script's options are described in
+[Installing](docs/manual/getting-started.md#installing).
+
+From a source checkout:
+
 ```sh
 make           # the compiler, every tool and every target's runtime
 make embdbg    # the debugger
@@ -74,9 +87,13 @@ make check     # compile and run every program in tests/exec and tests/cxx
 make install   # into PREFIX (default /usr/local)
 ```
 
-`make all` builds the tools alone. The runtime and C library for each
-board, and the test suites, are described in
-[Getting started](docs/manual/getting-started.md).
+`make all` builds the tools alone. To build the compiler and runtimes for
+the targets you use only, as a GCC cross compiler is built for one, name
+their families: `make TARGETS="arm riscv"`, or `./configure
+--targets=arm,riscv` to remember the choice
+([Choosing the targets](docs/manual/getting-started.md#choosing-the-targets)).
+The runtime and C library for each board, and the test suites, are
+described in [Getting started](docs/manual/getting-started.md).
 
 ## A first firmware, without a board
 
@@ -144,3 +161,10 @@ cc hello.o -o hello
   installing, and first programs on each family of boards.
 - [Contributing](docs/internals/contributing.md): the rules for changing
   the toolchain, and the tests a change needs.
+
+## License
+
+EmbCC is licensed under the [Apache License, Version 2.0](LICENSE).
+[NOTICE](NOTICE) names the code by others it includes, under their own
+permissive notices: Sun's fdlibm in the C library's math, and the GDB
+target descriptions EmbSim serves.

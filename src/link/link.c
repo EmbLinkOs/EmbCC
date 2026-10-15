@@ -21,6 +21,7 @@
 #include "../driver/util.h"
 #include "../elf/elf.h"
 #include "../embx/embx.h"
+#include "../arch/target.h"
 #include "../arch/riscv/emit.h"
 #include "../arch/loongarch/emit.h"
 #include "../arch/avr/emit.h"
@@ -1192,23 +1193,30 @@ static void collect_sections(struct linker *l, struct object *o)
  * consecutive links. Without the list, the entry's first CALL traps. */
 #define TC_STUB_SIZE 116
 
+#if FAMILY_BUILT(tricore)
 static unsigned long tc_csa_link(unsigned long a)
 {
     return ((a >> 12) & 0xf0000UL) | ((a >> 6) & 0xffffUL);
 }
+#endif
 
+#if FAMILY_BUILT(tricore)
 static void tc_li_fixed(struct code *c, int d, unsigned long v)
 {
     tc_movh(c, d, tc_hi_adj(v));
     tc_addi(c, d, d, (long long)(short)(unsigned short)(v & 0xffff));
 }
+#endif
 
+#if FAMILY_BUILT(tricore)
 static void tc_li_a_fixed(struct code *c, int a, unsigned long v)
 {
     tc_movh_a(c, a, tc_hi_adj(v));
     tc_lea(c, a, a, (long long)(short)(unsigned short)(v & 0xffff));
 }
+#endif
 
+#if FAMILY_BUILT(tricore)
 static void fill_tricore_stub(struct linker *l, struct code *c,
                               Elf64_Addr entry)
 {
@@ -1243,6 +1251,7 @@ static void fill_tricore_stub(struct linker *l, struct code *c,
         internal_error("the TriCore entry stub is %d bytes, not %d", c->len,
                        TC_STUB_SIZE);
 }
+#endif
 
 /* The RISC-V entry stub: set sp, then jump to the real entry.
  *
@@ -1259,7 +1268,6 @@ static void fill_tricore_stub(struct linker *l, struct code *c,
  * known before layout because it is a constant from the command line. */
 static void add_entry_stub(struct linker *l)
 {
-    int xlen = l->elf32 ? 32 : 64;
     /* MIPS: li sp, then lui/ori t9 with the entry's absolute address and
      * a jr through it, its delay slot a nop -- the lui/ori pair always
      * both, so the size is known before layout. */
@@ -1271,18 +1279,27 @@ static void add_entry_stub(struct linker *l)
      * with sp unset): movw/movt sp, movw/movt ip with the entry, bx ip --
      * five A32 words, whatever the addresses, and bx interworks if the
      * entry is Thumb. */
-    long size = l->machine == EM_MIPS
-              ? mips_li_len((long long)l->stack_top) + 16
-              : l->machine == EM_LOONGARCH
-              ? la_li_len((long long)l->stack_top) + 8
-              : l->machine == EM_ARM ? 20
+    /* (each machine's under its family: a link for one this compiler was
+     * built without was refused in add_object) */
+    long size = l->machine == EM_ARM ? 20
               : l->machine == EM_TRICORE ? TC_STUB_SIZE
               : l->machine == EM_XTENSA ? 52
               : l->machine == EM_PPC ? 32
               : l->machine == EM_RX ? 14
               : l->machine == EM_SPARC ? 20
-              : l->machine == EM_68K ? 12
-              : rv_li_len((long long)l->stack_top, xlen) + 8;
+              : l->machine == EM_68K ? 12 : 0;
+#if FAMILY_BUILT(mips)
+    if (l->machine == EM_MIPS)
+        size = mips_li_len((long long)l->stack_top) + 16;
+#endif
+#if FAMILY_BUILT(loongarch)
+    if (l->machine == EM_LOONGARCH)
+        size = la_li_len((long long)l->stack_top) + 8;
+#endif
+#if FAMILY_BUILT(riscv)
+    if (l->machine == EM_RISCV)
+        size = rv_li_len((long long)l->stack_top, l->elf32 ? 32 : 64) + 8;
+#endif
 
     if (l->nsec == l->capsec) {
         l->capsec = l->capsec ? l->capsec * 2 : 64;
@@ -1310,6 +1327,7 @@ static void fill_entry_stub(struct linker *l, Elf64_Addr entry)
     struct code c = { l->stub, 0, (int)l->stub_size, NULL, 0, 0, NULL, 0, 0 };
     struct insec *s = &l->insecs[l->stub_sec];
     int xlen = l->elf32 ? 32 : 64;
+#if FAMILY_BUILT(arm)
     if (l->machine == EM_ARM) {
         a32_movw_movt(&c, 13, (unsigned)(l->stack_top & 0xffff), 0);
         a32_movw_movt(&c, 13, (unsigned)((l->stack_top >> 16) & 0xffff), 1);
@@ -1318,10 +1336,14 @@ static void fill_entry_stub(struct linker *l, Elf64_Addr entry)
         a32_bx(&c, 12, 0);
         return;
     }
+#endif
+#if FAMILY_BUILT(tricore)
     if (l->machine == EM_TRICORE) {
         fill_tricore_stub(l, &c, entry);
         return;
     }
+#endif
+#if FAMILY_BUILT(xtensa)
     if (l->machine == EM_XTENSA) {
         /*   0  j     16          (over the literals)
          *   4  .word stack_top - 32, PS, entry
@@ -1368,6 +1390,8 @@ static void fill_entry_stub(struct linker *l, Elf64_Addr entry)
         (void)s;
         return;
     }
+#endif
+#if FAMILY_BUILT(ppc)
     if (l->machine == EM_PPC) {
         /* r1 = the stack's top, then the first frame below it with a
          * zero back chain (the end of the chain), and a bctr to the
@@ -1384,6 +1408,8 @@ static void fill_entry_stub(struct linker *l, Elf64_Addr entry)
         ppc_bctr(&c);
         return;
     }
+#endif
+#if FAMILY_BUILT(rx)
     if (l->machine == EM_RX) {
         /* mov.l #top, r0; mov.l #entry, r14; jmp r14 -- both moves in
          * their six-byte form, so the size is known before layout */
@@ -1392,6 +1418,8 @@ static void fill_entry_stub(struct linker *l, Elf64_Addr entry)
         rx_jmp(&c, RX_R14);
         return;
     }
+#endif
+#if FAMILY_BUILT(sparc)
     if (l->machine == EM_SPARC) {
         /* %sp = the stack's top less a 96-byte frame (the window save
          * area the first function's save writes below it is its own),
@@ -1406,6 +1434,8 @@ static void fill_entry_stub(struct linker *l, Elf64_Addr entry)
         sparc_nop(&c);
         return;
     }
+#endif
+#if FAMILY_BUILT(m68k)
     if (l->machine == EM_68K) {
         /* movea.l #top,%sp; jmp entry (abs.l): the encodings
          * tests/golden/coldfire-encoding.sh referees (cf_move, cf_jmp) */
@@ -1421,6 +1451,8 @@ static void fill_entry_stub(struct linker *l, Elf64_Addr entry)
         p[10] = (unsigned char)(e >> 8);   p[11] = (unsigned char)e;
         return;
     }
+#endif
+#if FAMILY_BUILT(mips)
     if (l->machine == EM_MIPS) {
         /* MIPS64 too, where lui and addiu sign-extend: both addresses
          * must be the sign extension of their low 32 bits (KSEG0/1,
@@ -1439,6 +1471,8 @@ static void fill_entry_stub(struct linker *l, Elf64_Addr entry)
         mips_nop(&c);
         return;
     }
+#endif
+#if FAMILY_BUILT(loongarch)
     if (l->machine == EM_LOONGARCH) {
         /* li sp, then pcaddu18i t0 + jirl zero, t0 to the entry: +-128
          * GiB, and a fixed eight bytes whatever the distance */
@@ -1450,6 +1484,8 @@ static void fill_entry_stub(struct linker *l, Elf64_Addr entry)
         la_jirl(&c, LA_ZERO, LA_T0, (long)(dd - (hi << 18)));
         return;
     }
+#endif
+#if FAMILY_BUILT(riscv)
     /* The auipc sits just before the jalr, at the end of the stub. */
     Elf64_Addr auipc_at = s->vaddr + (Elf64_Addr)l->stub_size - 8;
     long long d = (long long)entry - (long long)auipc_at;
@@ -1464,14 +1500,50 @@ static void fill_entry_stub(struct linker *l, Elf64_Addr entry)
     rv_auipc(&c, RV_T0, (long)(((d + 0x800) >> 12) & 0xfffff));
     /* jalr with rd = zero is a tail jump: nothing returns to the stub. */
     rv_jalr(&c, RV_ZERO, RV_T0, (int)(((d & 0xfff) ^ 0x800) - 0x800));
+#else
+    (void)c; (void)s; (void)xlen; (void)entry;
+#endif
 }
 
 static void add_symbols(struct linker *l, struct object *o);
+
+/* The family (make TARGETS=) whose backend links a machine's objects, and
+ * in *built whether this build has it. Every build but a subset compiler's
+ * -- embld's included -- has them all. */
+static const char *machine_family(unsigned m, int *built)
+{
+    switch (m) {
+    case EM_X86_64:    *built = FAMILY_BUILT(x86);       return "x86";
+    case EM_AARCH64:   *built = FAMILY_BUILT(aarch64);   return "aarch64";
+    case EM_ARM:       *built = FAMILY_BUILT(arm);       return "arm";
+    case EM_RISCV:     *built = FAMILY_BUILT(riscv);     return "riscv";
+    case EM_AVR:       *built = FAMILY_BUILT(avr);       return "avr";
+    case EM_MIPS:      *built = FAMILY_BUILT(mips);      return "mips";
+    case EM_LOONGARCH: *built = FAMILY_BUILT(loongarch); return "loongarch";
+    case EM_TRICORE:   *built = FAMILY_BUILT(tricore);   return "tricore";
+    case EM_XTENSA:    *built = FAMILY_BUILT(xtensa);    return "xtensa";
+    case EM_PPC:       *built = FAMILY_BUILT(ppc);       return "ppc";
+    case EM_RX:        *built = FAMILY_BUILT(rx);        return "rx";
+    case EM_SPARC:     *built = FAMILY_BUILT(sparc);     return "sparc";
+    case EM_68K:       *built = FAMILY_BUILT(m68k);      return "m68k";
+    default:           *built = 1;                       return "?";
+    }
+}
 
 /* Bring a parsed object fully into the link: register it, lay out its
  * allocated sections, and merge its symbols. */
 static void add_object(struct linker *l, struct object *o)
 {
+    /* A machine whose family this compiler was built without (make
+     * TARGETS=, src/arch/target.h): none of its relocations or entry
+     * stubs are here, and the object is refused by name. */
+    {
+        int built;
+        const char *fam = machine_family(o->machine, &built);
+        if (!built)
+            die("%s: an object for the %s family, and this compiler was "
+                "built without it (make TARGETS=)", o->name, fam);
+    }
     /* One machine per link, decided by the first object. Mixing them is
      * not a case to handle later: the relocations, the pointer width
      * and the output class all follow from it, and an image containing
@@ -1481,9 +1553,11 @@ static void add_object(struct linker *l, struct object *o)
         l->harvard = o->machine == EM_AVR;
         l->elf32 = o->elf32;
         l->big_endian = o->big_endian;
+#if FAMILY_BUILT(mips)
         /* the MIPS words this link reads, patches and writes (the entry
          * stub) are in the objects' order */
         mips_set_big_endian(o->big_endian);
+#endif
     } else if (o->machine != l->machine) {
         die("%s: an object for a different machine than the ones before "
             "it (%u against %u)", o->name, (unsigned)o->machine,
@@ -2735,6 +2809,7 @@ static void patch_arm_mov(unsigned char *loc, unsigned int h)
  * RELAX carries no value: it marks a site a linker MAY shorten. Optional,
  * so ignoring it is correct, and this does.
  */
+#if FAMILY_BUILT(riscv)
 static long rv_hi20(long long v) { return (long)(((v + 0x800) >> 12) & 0xfffff); }
 static int  rv_lo12(long long v) { return (int)(((v & 0xfff) ^ 0x800) - 0x800); }
 
@@ -2786,6 +2861,7 @@ static long long find_pcrel_hi(struct linker *l, struct object *o,
         "emitted as a pair", o->name, (unsigned long long)at);
     return 0;
 }
+#endif
 
 /* A relocated value its field cannot hold. Writing the low bits makes an
  * address nothing reports -- the field holds SOME address, and the
@@ -2812,6 +2888,7 @@ static void need_range(struct linker *l, struct object *o, const char *rel,
  * Every field is little-endian. R_RX_RH_RELAX is a hint for a relaxing
  * linker, which this is not; the other linker-relaxation, small-data and
  * expression relocations GNU as can write are refused by name. */
+#if FAMILY_BUILT(rx)
 static void apply_rx(struct linker *l, struct object *o, unsigned type,
                      unsigned char *loc, Elf64_Addr S, long long A,
                      Elf64_Addr P)
@@ -2857,7 +2934,9 @@ static void apply_rx(struct linker *l, struct object *o, unsigned type,
             type);
     }
 }
+#endif
 
+#if FAMILY_BUILT(riscv)
 static void apply_riscv(struct linker *l, struct object *o, unsigned type,
                         unsigned char *loc, Elf64_Addr S, long long A,
                         Elf64_Addr P)
@@ -2972,6 +3051,7 @@ static void apply_riscv(struct linker *l, struct object *o, unsigned type,
             "linker increment, not a bug in your program)", o->name, type);
     }
 }
+#endif
 
 /* ---- LoongArch64 ---------------------------------------------------------
  *
@@ -2991,13 +3071,16 @@ static void apply_riscv(struct linker *l, struct object *o, unsigned type,
 /* Put `v` (already reduced to the field's width) into bits lo..hi of the
  * word at loc, leaving every other bit -- the opcode, the registers -- as
  * the compiler wrote them. */
+#if FAMILY_BUILT(loongarch)
 static void la_put(unsigned char *loc, int lo, int width, unsigned long long v)
 {
     unsigned int m = (unsigned int)(((1ULL << width) - 1) << lo);
     put32(loc, (get32loc(loc) & ~m) |
                ((unsigned int)(v << lo) & m));
 }
+#endif
 
+#if FAMILY_BUILT(loongarch)
 static void apply_loongarch(struct linker *l, struct object *o, unsigned type,
                             unsigned char *loc, Elf64_Addr S, long long A,
                             Elf64_Addr P)
@@ -3146,6 +3229,7 @@ static void apply_loongarch(struct linker *l, struct object *o, unsigned type,
             l->rel_sym ? l->rel_sym : "?");
     }
 }
+#endif
 
 /* ---- MIPS (o32) --------------------------------------------------------
  *
@@ -3158,6 +3242,7 @@ static void apply_loongarch(struct linker *l, struct object *o, unsigned type,
  *
  * The GOT and GP-relative types are what PIC and small-data code use;
  * this linker builds neither a GOT nor a _gp, and says so by name. */
+#if FAMILY_BUILT(mips)
 struct mips_relctx {
     const unsigned char *rbytes;   /* the relocation section */
     int j, n, relsz, isrel;
@@ -3165,16 +3250,20 @@ struct mips_relctx {
     Elf64_Word symi;
     int local;                     /* the symbol is STB_LOCAL */
 };
+#endif
 
+#if FAMILY_BUILT(mips)
 static long long sext(unsigned long long v, int bits)
 {
     unsigned long long m = 1ULL << (bits - 1);
     v &= (1ULL << bits) - 1;
     return (long long)((v ^ m) - m);
 }
+#endif
 
 /* The LO16 that pairs with the HI16 at index c->j: its sign-extended
  * field, the low half of AHL. */
+#if FAMILY_BUILT(mips)
 static long long mips_lo_of(struct object *o, const struct mips_relctx *c)
 {
     for (int k = c->j + 1; k < c->n; k++) {
@@ -3188,15 +3277,19 @@ static long long mips_lo_of(struct object *o, const struct mips_relctx *c)
         "them and cannot be resolved apart", o->name);
     return 0;
 }
+#endif
 
 /* Every MIPS field is a word in the image's byte order (mips_get_word,
  * set from the objects), and its 16-bit immediate the word's low half. */
+#if FAMILY_BUILT(mips)
 static void mips_put16(unsigned char *loc, unsigned long v)
 {
     mips_put_word(loc, (mips_get_word(loc) & 0xffff0000U) |
                        (unsigned int)(v & 0xffffU));
 }
+#endif
 
+#if FAMILY_BUILT(mips)
 static void apply_mips(struct linker *l, struct object *o, unsigned type,
                        unsigned char *loc, Elf64_Addr S, long long A,
                        Elf64_Addr P, const struct mips_relctx *c)
@@ -3291,6 +3384,7 @@ static void apply_mips(struct linker *l, struct object *o, unsigned type,
             "linker increment, not a bug in your program)", o->name, type);
     }
 }
+#endif
 
 /* ---- TriCore -------------------------------------------------------------
  *
@@ -3303,6 +3397,7 @@ static void apply_mips(struct linker *l, struct object *o, unsigned type,
  * field is rebuilt by src/arch/tricore/emit.c's format packers from the
  * instruction's own other fields, so no layout is written down here. The
  * small-data and other types are refused by name. */
+#if FAMILY_BUILT(tricore)
 static void apply_tricore(struct linker *l, struct object *o, unsigned type,
                           unsigned char *loc, Elf64_Addr S, long long A,
                           Elf64_Addr P)
@@ -3353,6 +3448,7 @@ static void apply_tricore(struct linker *l, struct object *o, unsigned type,
             "linker increment, not a bug in your program)", o->name, type);
     }
 }
+#endif
 
 /* ---- AVR --------------------------------------------------------------
  *
@@ -3382,12 +3478,15 @@ static void apply_tricore(struct linker *l, struct object *o, unsigned type,
  * adjusted for the sign of the low one, which addi adds sign-extended.
  * The small-data and GOT/PLT types are what -msdata and PIC code use;
  * this linker lays out neither, and says so by name. */
+#if FAMILY_BUILT(ppc)
 static void put16be(unsigned char *loc, unsigned long v)
 {
     loc[0] = (unsigned char)(v >> 8);
     loc[1] = (unsigned char)v;
 }
+#endif
 
+#if FAMILY_BUILT(ppc)
 static void apply_ppc(struct linker *l, struct object *o, unsigned type,
                       unsigned char *loc, Elf64_Addr S, long long A,
                       Elf64_Addr P)
@@ -3467,6 +3566,7 @@ static void apply_ppc(struct linker *l, struct object *o, unsigned type,
             "linker increment, not a bug in your program)", o->name, type);
     }
 }
+#endif
 
 /* SPARC: RELA, so the addend is in the entry and every field is written
  * whole, a big-endian word in the image (sparc_get_word). HI22 is sethi's
@@ -3475,6 +3575,7 @@ static void apply_ppc(struct linker *l, struct object *o, unsigned type,
  * displacement (it reaches anywhere in 32 bits), WDISP22 a branch's. The
  * GOT and PLT types are what PIC code uses, which this linker does not
  * lay out, and it says so by name. */
+#if FAMILY_BUILT(sparc)
 static void apply_sparc(struct linker *l, struct object *o, unsigned type,
                         unsigned char *loc, Elf64_Addr S, long long A,
                         Elf64_Addr P)
@@ -3549,18 +3650,22 @@ static void apply_sparc(struct linker *l, struct object *o, unsigned type,
             "linker increment, not a bug in your program)", o->name, type);
     }
 }
+#endif
 
 /* m68k / ColdFire: RELA, every field big-endian and written whole. EmbCC's
  * objects carry R_68K_32 for every address and call (the 32-bit operand
  * after the operation word); the PC-relative forms are what an assembler
  * writes for a bsr or a (d16,pc) operand, measured from the field. The
  * GOT and PLT forms are position-independent code, refused by name. */
+#if FAMILY_BUILT(m68k)
 static void put_be(unsigned char *loc, int n, unsigned long v)
 {
     for (int k = 0; k < n; k++)
         loc[k] = (unsigned char)(v >> (8 * (n - 1 - k)));
 }
+#endif
 
+#if FAMILY_BUILT(m68k)
 static void apply_m68k(struct linker *l, struct object *o, unsigned type,
                        unsigned char *loc, Elf64_Addr S, long long A,
                        Elf64_Addr P)
@@ -3604,7 +3709,9 @@ static void apply_m68k(struct linker *l, struct object *o, unsigned type,
             "linker increment, not a bug in your program)", o->name, type);
     }
 }
+#endif
 
+#if FAMILY_BUILT(avr)
 static void apply_avr(struct linker *l, struct object *o, unsigned type,
                       unsigned char *loc, Elf64_Addr S, long long A,
                       Elf64_Addr P)
@@ -3761,6 +3868,7 @@ static void apply_avr(struct linker *l, struct object *o, unsigned type,
             "linker increment, not a bug in your program)", o->name, type);
     }
 }
+#endif
 
 static unsigned int get32loc(const unsigned char *p)
 {
@@ -3817,6 +3925,7 @@ static void patch_thm_mov(unsigned char *loc, unsigned int h)
  * assembler could relax, and the DIFF types hold differences between two
  * places in one section, which only a relaxing linker changes: none is
  * an instruction to patch here. */
+#if FAMILY_BUILT(xtensa)
 static void apply_xtensa(struct linker *l, struct object *o, unsigned type,
                          unsigned char *loc, Elf64_Addr S, long long A,
                          Elf64_Addr P)
@@ -3917,6 +4026,7 @@ static void apply_xtensa(struct linker *l, struct object *o, unsigned type,
             "other slots are not supported)", o->name, type, l->rel_sym);
     }
 }
+#endif
 
 static int veneer_needed(int arm, int call, int cond_al, int other,
                          long long d);
@@ -4051,26 +4161,37 @@ static void apply_relocs(struct linker *l, struct object *o)
             Elf64_Addr P = ts ? ts->vaddr + r_offset : 0;
             unsigned char *loc = base + r_offset;
 
+#if FAMILY_BUILT(riscv)
             if (o->machine == EM_RISCV) {
                 apply_riscv(l, o, type, loc, S, A, P);
                 continue;
             }
+#endif
+#if FAMILY_BUILT(loongarch)
             if (o->machine == EM_LOONGARCH) {
                 apply_loongarch(l, o, type, loc, S, A, P);
                 continue;
             }
+#endif
+#if FAMILY_BUILT(avr)
             if (o->machine == EM_AVR) {
                 apply_avr(l, o, type, loc, S, A, P);
                 continue;
             }
+#endif
+#if FAMILY_BUILT(tricore)
             if (o->machine == EM_TRICORE) {
                 apply_tricore(l, o, type, loc, S, A, P);
                 continue;
             }
+#endif
+#if FAMILY_BUILT(xtensa)
             if (o->machine == EM_XTENSA) {
                 apply_xtensa(l, o, type, loc, S, A, P);
                 continue;
             }
+#endif
+#if FAMILY_BUILT(ppc)
             if (o->machine == EM_PPC) {
                 if (isrel)
                     die("%s: a PowerPC object with REL relocations; the "
@@ -4078,10 +4199,14 @@ static void apply_relocs(struct linker *l, struct object *o)
                 apply_ppc(l, o, type, loc, S, A, P);
                 continue;
             }
+#endif
+#if FAMILY_BUILT(rx)
             if (o->machine == EM_RX) {
                 apply_rx(l, o, type, loc, S, A, P);
                 continue;
             }
+#endif
+#if FAMILY_BUILT(sparc)
             if (o->machine == EM_SPARC) {
                 if (isrel)
                     die("%s: a SPARC object with REL relocations; the "
@@ -4089,6 +4214,8 @@ static void apply_relocs(struct linker *l, struct object *o)
                 apply_sparc(l, o, type, loc, S, A, P);
                 continue;
             }
+#endif
+#if FAMILY_BUILT(m68k)
             if (o->machine == EM_68K) {
                 if (isrel)
                     die("%s: an m68k object with REL relocations; m68k "
@@ -4096,6 +4223,8 @@ static void apply_relocs(struct linker *l, struct object *o)
                 apply_m68k(l, o, type, loc, S, A, P);
                 continue;
             }
+#endif
+#if FAMILY_BUILT(mips)
             if (o->machine == EM_MIPS) {
                 struct mips_relctx mc;
                 mc.rbytes = rbytes;
@@ -4109,6 +4238,7 @@ static void apply_relocs(struct linker *l, struct object *o)
                 apply_mips(l, o, type, loc, S, A, P, &mc);
                 continue;
             }
+#endif
             if (o->elf32) {
                 /* SHT_REL keeps the addend IN the field, in whatever
                  * shape that field has -- a word for the data

@@ -2,6 +2,10 @@
  * Part of the target database; src/targets/targets.def says how a row
  * reads. */
 
+/* The family this file describes (src/targets/targets.def says how). */
+FAMILY(mips, "MIPS32 and MIPS64, both byte orders",
+       "mipsel-none-elf")
+
 /* o32 (clang --target=mipsel-unknown-elf -dM): ILP32, a SIGNED char
  * -- unlike the ARM and RISC-V targets beside it -- a signed int
  * wchar_t, long double the same 8-byte double, and no __int128. */

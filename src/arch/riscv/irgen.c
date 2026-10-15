@@ -127,6 +127,12 @@ int irg_va_arg_riscv(struct ir_func *fn, struct expr *e)
     }
 }
 
+/* Everything below is RISC-V's alone. The routine above is LoongArch's
+ * too, so a compiler built with LoongArch and without RISC-V (make
+ * TARGETS=, src/arch/target.h) compiles this file for it and nothing
+ * after this line. */
+#if FAMILY_BUILT(riscv)
+
 /* ---- inline assembly ----------------------------------------------------
  *
  * The template's operands are substituted HERE, into register names, and
@@ -498,3 +504,4 @@ int riscv_imm_foldable(int op, long imm)
         return 0;
     }
 }
+#endif /* FAMILY_BUILT(riscv) */

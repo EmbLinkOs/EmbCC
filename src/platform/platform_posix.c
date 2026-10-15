@@ -24,7 +24,13 @@
  *
  * __APPLE__ / __linux__ inside THIS file is what the seam is for --
  * the rule is that no file above it may ask. */
-#include <dirent.h>            /* opendir, for plat_list_dir */
+/* opendir, for plat_list_dir: macOS's and Linux's. EmbLinkOS builds this
+ * file against newlib, whose <dirent.h> is an #error; there a directory
+ * cannot be listed, and a PIC32 pack is named with --dfp=. */
+#if defined(__APPLE__) || defined(__linux__)
+#define PLAT_HAS_DIRENT 1
+#include <dirent.h>
+#endif
 #include <unistd.h>            /* isatty, readlink */
 #if defined(__APPLE__)
 #include <mach-o/dyld.h>
@@ -70,6 +76,13 @@ const char *plat_self_path(void)
     return buf[0] ? buf : NULL;
 }
 
+#ifndef PLAT_HAS_DIRENT
+char **plat_list_dir(const char *path)
+{
+    (void)path;
+    return NULL;
+}
+#else
 char **plat_list_dir(const char *path)
 {
     DIR *d = opendir(path);
@@ -97,3 +110,4 @@ char **plat_list_dir(const char *path)
         v[n] = NULL;
     return v;
 }
+#endif

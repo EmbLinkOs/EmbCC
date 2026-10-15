@@ -69,11 +69,13 @@ embcc: error: unknown language 'LANGUAGE' for -x (c or c++)
 
 ### Language level: `--std=STANDARD`
 
-Without `--std=`, a C++ unit is compiled as `--std=gnu++20`. EmbCC always
-parses C++20 (with the C++23 additions listed below); `--std=` selects the
-value of `__cplusplus`, the feature-test macros, and whether
-`__STRICT_ANSI__` is defined. It does not make EmbCC reject a newer
-construct.
+Without `--std=`, a C++ unit is compiled as `--std=gnu++20`. `--std=`
+selects the value of `__cplusplus`, the feature-test macros, whether
+`__STRICT_ANSI__` is defined, and the language of the program's own code:
+its keywords, its tokens and which constructs it may use, as GCC decides
+them ([Invoking EmbCC](invoking.md#--stdstandard)). A system header is
+read as C++20 and later whatever the standard: EmbCC's C++ library is
+written in it.
 
 | `--std=` | `__cplusplus` |
 |---|---|
@@ -90,11 +92,11 @@ construct.
   libstdc++ does not treat `__int128` as an integer type.
 - `--std=c++20` and the earlier strict spellings do not recognize
   `#elifdef` and `#elifndef`. Every other mode does.
-- A standard earlier than C++20 draws a warning, because it is not
-  enforced:
+- A construct newer than the standard is refused by name, as GCC
+  refuses it:
 
   ```text
-  embcc: warning: -std=c++17 sets the standard macros but is not enforced; EmbCC parses C++20 and will accept newer constructs
+  embcc: f.cc:2:1: error: a deduced return type is C++14's, and the standard here is C++11
   ```
 
 - `--std=c++23` and `--std=c++26` change only `__cplusplus`; the
@@ -581,6 +583,17 @@ refuses it, with the diagnostic shown. Diagnostics are quoted without the
 | Multidimensional subscript operator | Not supported | `'M' has no viable operator[]` |
 | `auto(x)`, `auto{x}` | Supported | A prvalue copy of `x`, of its decayed type. |
 
+### C++26
+
+As in GCC 16, these are taken under every standard that has the syntax
+for them, and `--pedantic` reports them before C++26.
+
+| Feature | Status | Notes |
+|---|---|---|
+| Pack indexing, `T...[N]` and `args...[i]` | Partial | Where the pack is bound: an alias template, a function template's body. In a template's own signature: `pack indexing of 'T' where its elements are not known yet (a template's signature) is not supported` |
+| `= delete("reason")` | Supported | A use says the reason: `use of deleted function 'f': use g instead` |
+| The `_` placeholder | Supported | Any number of local variables named `_`. |
+
 ## Notes on partial support
 
 ### Name lookup in templates
@@ -699,7 +712,6 @@ These are refused in C++:
 | `sizeof` of a variable-length array | `sizeof a variable-length array is not supported` |
 | Imaginary constants (`2.0i`) | `no literal operator 'operator""i' for this literal` |
 | `typeof` without underscores | `expected a declaration before 'typeof'` |
-| `?:` with the middle operand omitted | `expected an expression before ':'` |
 | Array designators (`[1] = 2`) | `expected a capture` |
 | `__label__` | `'__label__' was not declared in this scope` |
 

@@ -1,0 +1,237 @@
+# C++ conformance corpus for -std= (tests/golden/std-modes.sh).
+#
+# As tests/std/c-corpus.txt, for C++: each case is a name line `== NAME`
+# and the source after it, up to the next case. tools/std-check.py
+# compiles every case under every C++ standard from c++98 to c++26, with
+# and without -pedantic-errors, with GCC (the referee) and with EmbCC; the
+# referee's outcomes are tests/std/cxx-expect.txt. No case includes a
+# header.
+
+== kw-constexpr-ident
+int constexpr = 1;
+== kw-nullptr-ident
+int nullptr = 0;
+== kw-decltype-ident
+int decltype = 0;
+== kw-noexcept-ident
+int noexcept = 0;
+== kw-static_assert-ident
+int static_assert = 0;
+== kw-alignof-ident
+int alignof = 0;
+== kw-thread_local-ident
+int thread_local = 0;
+== kw-char16_t-ident
+int char16_t = 0;
+== kw-concept-ident
+int concept = 0;
+== kw-requires-ident
+int requires = 0;
+== kw-co_await-ident
+int co_await = 0;
+== kw-char8_t-ident
+int char8_t = 0;
+== kw-consteval-ident
+int consteval = 0;
+== kw-constinit-ident
+int constinit = 0;
+== cxx98-auto-storage
+void f() { auto int x = 1; (void)x; }
+== cxx98-register
+void f() { register int x = 1; (void)x; }
+== cxx11-auto-deduce
+void f() { auto x = 1; (void)x; }
+== cxx11-lambda
+int f() { return [](int a) { return a + 1; }(1); }
+== cxx11-range-for
+int f() { int a[3] = {1, 2, 3}; int s = 0; for (int x : a) s += x; return s; }
+== cxx11-nullptr
+int *p = nullptr;
+== cxx11-rvalue-ref
+int &&r = 1;
+== cxx11-variadic-template
+template <class... T> int count(T...) { return sizeof...(T); }
+int n = count(1, 2);
+== cxx11-right-angle
+template <class T> struct A {};
+A<A<int>> x;
+== cxx11-brace-init
+int a{1};
+== cxx11-constexpr-fn
+constexpr int sq(int x) { return x * x; }
+int a[sq(2)];
+== cxx11-decltype
+int a;
+decltype(a) b;
+== cxx11-static-assert
+static_assert(1, "x");
+== cxx11-enum-class
+enum class E { A, B };
+E e = E::A;
+== cxx11-override-final
+struct B { virtual void f(); };
+struct D final : B { void f() override; };
+== cxx11-default-delete
+struct S { S() = default; S(const S &) = delete; };
+== cxx11-using-alias
+using I = int;
+I x;
+== cxx11-long-long
+long long x = 1;
+== cxx11-trailing-return
+auto f() -> int { return 1; }
+== cxx11-raw-string
+const char *s = R"(a\b)";
+== cxx11-u8-string
+const char *s = u8"a";
+== cxx11-char16
+char16_t c = u'a';
+== cxx11-udl
+unsigned long long operator"" _k(unsigned long long v) { return v * 1000; }
+unsigned long long x = 5_k;
+== cxx11-noexcept
+void f() noexcept;
+== cxx11-alignas
+alignas(8) int x;
+== cxx11-thread-local
+thread_local int x;
+== cxx11-inline-namespace
+inline namespace N { int x; }
+== cxx11-attribute
+[[noreturn]] void f();
+== cxx11-delegating-ctor
+struct S { int a; S() : S(1) {} S(int x) : a(x) {} };
+== cxx11-nsdmi
+struct S { int a = 1; };
+== cxx11-extern-template
+template <class T> struct A { T t; };
+extern template struct A<int>;
+== cxx14-binary-literal
+int x = 0b101;
+== cxx14-digit-sep
+int x = 1'000;
+== cxx14-generic-lambda
+int f() { return [](auto a) { return a; }(1); }
+== cxx14-return-deduction
+auto f() { return 1; }
+== cxx14-variable-template
+template <class T> T zero = T();
+int z = zero<int>;
+== cxx14-deprecated
+[[deprecated]] void f();
+== cxx14-constexpr-loop
+constexpr int f(int n) { int s = 0; for (int i = 0; i < n; i++) s += i; return s; }
+int a[f(3)];
+== cxx14-lambda-init-capture
+int f() { return [v = 2] { return v; }(); }
+== cxx17-structured-binding
+struct P { int x, y; };
+int f() { P p{1, 2}; auto [a, b] = p; return a + b; }
+== cxx17-if-constexpr
+template <class T> int f() { if constexpr (sizeof(T) == 4) return 1; else return 2; }
+int n = f<int>();
+== cxx17-inline-var
+inline int x = 1;
+== cxx17-fold
+template <class... T> int sum(T... t) { return (t + ... + 0); }
+int n = sum(1, 2);
+== cxx17-nested-namespace
+namespace a::b { int x; }
+== cxx17-if-init
+int f(int v) { if (int x = v * 2; x > 2) return x; return 0; }
+== cxx17-static-assert-nomsg
+static_assert(1);
+== cxx17-nodiscard
+[[nodiscard]] int f();
+== cxx17-ctad
+template <class T> struct W { W(T) {} };
+W w(1);
+== cxx17-u8-char
+char c = u8'a';
+== cxx17-maybe-unused
+[[maybe_unused]] static int x;
+== cxx17-auto-template-param
+template <auto N> int f() { return N; }
+int n = f<3>();
+== cxx17-trigraph-removed
+??=define X 1
+int x = X;
+== cxx20-concept
+template <class T> concept C = sizeof(T) > 1;
+template <C T> int f(T) { return 1; }
+int n = f(1);
+== cxx20-requires
+template <class T> requires (sizeof(T) > 1) int f(T) { return 1; }
+int n = f(1);
+== cxx20-consteval
+consteval int f() { return 1; }
+int n = f();
+== cxx20-constinit
+constinit int x = 1;
+== cxx20-designated-init
+struct P { int x, y; };
+P p = { .x = 1, .y = 2 };
+== cxx20-spaceship-decl
+struct S { bool operator<=>(int) const; };
+== cxx20-char8
+char8_t c = u8'a';
+== cxx20-using-enum
+enum class E { A };
+int f() { using enum E; return (int)A; }
+== cxx20-lambda-template
+int n = []<class T>(T x) { return x; }(1);
+== cxx20-likely
+int f(int x) { if (x) [[likely]] return 1; return 0; }
+== cxx20-range-for-init
+int f() { int s = 0; for (int a[2] = {1, 2}; int x : a) s += x; return s; }
+== cxx20-abbreviated-template
+int f(auto x) { return x; }
+int n = f(1);
+== cxx20-bitfield-init
+struct S { int b : 3 = 1; };
+== cxx23-if-consteval
+constexpr int f() { if consteval { return 1; } else { return 2; } }
+int n = f();
+== cxx23-deducing-this
+struct S { int v; int get(this S const &s) { return s.v; } };
+== cxx23-auto-cast
+int f(int x) { return auto(x); }
+== cxx23-multi-subscript
+struct M { int operator[](int a, int b) { return a + b; } };
+== cxx23-size-literal
+auto n = 1uz;
+== cxx23-static-call-op
+struct F { static int operator()(int x) { return x; } };
+== cxx23-assume
+int f(int x) { [[assume(x > 0)]]; return x; }
+== cxx23-elifdef
+#ifdef NOPE
+#elifdef __cplusplus
+int x;
+#endif
+== cxx23-label-end
+void f() { goto l; l: }
+== cxx26-placeholder
+void f() { int _ = 1; int _ = 2; }
+== cxx26-delete-reason
+void f() = delete("no");
+== cxx26-pack-index
+template <class... T> using First = T...[0];
+First<int, char> x;
+== gnu-statement-expr
+int f() { return ({ int t = 2; t; }); }
+== gnu-case-range
+int f(int x) { switch (x) { case 1 ... 3: return 1; } return 0; }
+== gnu-elvis
+int f(int x) { return x ?: 1; }
+== gnu-typeof
+int a;
+__typeof__(a) b;
+== gnu-zero-array
+struct S { int n; int a[0]; };
+== gnu-vla
+void f(int n) { int a[n]; a[0] = 0; }
+== gnu-flexible-array
+struct S { int n; int a[]; };
+== gnu-int128
+__int128 x;

@@ -44,6 +44,12 @@ PIC32MX_DFP=${EMBCC_PIC32MX_DFP:-${PIC32MX_DFP:-$HOME/EmbRef/dl/pic32mx-dfp/x}}
 # and its dsPIC33E pack (Microchip.dsPIC33E-GM-GP-MC-GU-MU_DFP, unpacked):
 # the EDC files of the dsPIC33EP parts (tests/golden/embsim-dspic33.sh).
 DSPIC33E_DFP=${EMBCC_DSPIC33E_DFP:-${DSPIC33E_DFP:-$HOME/EmbRef/dl/dspic33e-dfp/x}}
+# A Linux system's root for each Linux target, for --libc=system: glibc's
+# headers, start files and shared objects (tests/golden/libc-system.sh).
+# tools/glibc-sysroot.sh makes them from Debian 12's packages. On a Linux
+# host of the target's architecture the test uses the host itself, /.
+GLIBC_SYSROOT_X86_64=${EMBCC_GLIBC_SYSROOT_X86_64:-$HOME/EmbRef/dl/sysroot-debian12-amd64}
+GLIBC_SYSROOT_AARCH64=${EMBCC_GLIBC_SYSROOT_AARCH64:-$HOME/EmbRef/dl/sysroot-debian12-arm64}
 
 # The Xtensa reference: Espressif's GCC told to generate for the de212 core
 # QEMU emulates, through a configuration plugin built from that core's

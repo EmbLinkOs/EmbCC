@@ -11,6 +11,69 @@ CC      ?= cc
 CFLAGS  ?= -std=c99 -Wall -Wextra -Werror -g
 BUILD   := build
 
+# What ./configure wrote, if it was run: TARGETS, DEFAULT_TARGET, PREFIX.
+# A variable on the command line still wins.
+-include config.mk
+
+# ---- which targets: make TARGETS= ------------------------------------------
+#
+# A compiler for the targets you use, as GCC is configured for one target:
+#
+#     make TARGETS="arm riscv"         (or TARGETS=arm,riscv)
+#     ./configure --targets=arm,riscv  (the same, remembered in config.mk)
+#
+# builds embcc with the ARM and RISC-V backends and no other -- the other
+# families' sources are not compiled, let alone linked -- and the runtimes
+# (`make runtimes`, `make install`) for their triples only. A family is one
+# file of the target database, src/targets/<name>.def:
+TARGET_FAMILIES := x86 aarch64 arm riscv avr mips loongarch tricore xtensa \
+                   ppc rx sparc m68k
+# and the default, `all`, is every one, as before. The backend directories'
+# names are accepted for their family too (thumb, coldfire, x86_64, ...).
+# The compiler refuses a target it was built without by name and says how
+# to add it; `embcc --version` lists what it has. Built without x86, its
+# default target is its first family's (src/targets/targets.def, FAMILY),
+# unless DEFAULT_TARGET says otherwise.
+#
+# A subset's objects go to a directory of their own, $(BUILD)/targets-<names>,
+# because the shared sources are compiled differently for it (each family's
+# EMBCC_FAMILY_<name>=0, src/arch/target.h): switching between selections
+# rebuilds nothing that is up to date and reuses nothing that is not.
+TARGETS ?= all
+TARGET_DEFS := $(filter-out targets,$(basename $(notdir $(wildcard src/targets/*.def))))
+ifneq ($(sort $(TARGET_FAMILIES)),$(sort $(TARGET_DEFS)))
+$(error TARGET_FAMILIES does not name the families src/targets/ holds)
+endif
+empty :=
+space := $(empty) $(empty)
+comma := ,
+TARGET_ALIASES := thumb=arm armv7a=arm coldfire=m68k x86_64=x86 x86-64=x86 \
+                  arm64=aarch64 powerpc=ppc ppc32=ppc riscv32=riscv \
+                  riscv64=riscv mips32=mips mips64=mips loongarch64=loongarch \
+                  sparc32=sparc
+family_of = $(or $(patsubst $(1)=%,%,$(filter $(1)=%,$(TARGET_ALIASES))),$(1))
+TARGETS_ASKED := $(foreach t,$(subst $(comma),$(space),$(TARGETS)),$(call family_of,$(t)))
+ifeq ($(strip $(TARGETS_ASKED)),)
+$(error TARGETS is empty: name the families to build ($(TARGET_FAMILIES)), or all)
+endif
+ifneq ($(filter all,$(TARGETS_ASKED)),)
+TARGETS_BUILT := $(TARGET_FAMILIES)
+else
+ifneq ($(filter-out $(TARGET_FAMILIES),$(TARGETS_ASKED)),)
+$(error TARGETS: no target family '$(filter-out $(TARGET_FAMILIES),$(TARGETS_ASKED))'; the families are $(TARGET_FAMILIES), or all)
+endif
+TARGETS_BUILT := $(filter $(TARGETS_ASKED),$(TARGET_FAMILIES))
+endif
+TARGETS_OMITTED := $(filter-out $(TARGETS_BUILT),$(TARGET_FAMILIES))
+TARGET_CFLAGS := $(foreach f,$(TARGETS_OMITTED),-DEMBCC_FAMILY_$(f)=0)
+ifeq ($(TARGETS_OMITTED),)
+OBJDIR := $(BUILD)
+else
+OBJDIR := $(BUILD)/targets-$(subst $(space),-,$(TARGETS_BUILT))
+endif
+# Is family $(1) built? Non-empty when it is.
+built = $(filter $(1),$(TARGETS_BUILT))
+
 # The target `embcc` compiles for when the command line names none.
 # Empty means x86_64-elf -- a compiler built here targets here. A person
 # whose work is one board builds the compiler for it once:
@@ -25,8 +88,8 @@ BUILD   := build
 # one shell, and --target= overrides both.
 #
 # Only the string is compiled in. The compiler still contains every
-# backend, so --target= reaches all of them -- unlike GCC, where a cross
-# build is a different binary.
+# backend TARGETS names (all, by default), so --target= reaches each of
+# them -- unlike GCC, where a cross build is a different binary.
 DEFAULT_TARGET ?=
 ifneq ($(DEFAULT_TARGET),)
 CFLAGS += -DEMBCC_DEFAULT_TARGET='"$(DEFAULT_TARGET)"'
@@ -105,6 +168,139 @@ OPT_SRCS := src/opt/opt.c \
 	src/opt/verify.c \
 	src/opt/x86loadop.c
 
+# Each target family's backend: the sources `make TARGETS=` builds for it
+# (the families are src/targets/<name>.def, above). A file two families
+# need is in both lists and compiled once: x86_64/topasm.c is the hosted
+# targets' file-scope asm, AArch64's too, and riscv/irgen.c holds the
+# variadic lowering LoongArch shares (the rest of it is RISC-V's alone).
+FAMILY_SRCS_x86 := \
+	src/arch/x86_64/irgen.c \
+	src/arch/x86_64/codegen.c \
+	src/arch/x86_64/emit.c \
+	src/arch/x86_64/topasm.c \
+	src/arch/x86_64/as.c \
+	src/arch/x86_64/disasm.c \
+	src/arch/x86_64/predef.c \
+	src/arch/x86_64/predef_cxx.c
+FAMILY_SRCS_aarch64 := \
+	src/arch/aarch64/irgen.c \
+	src/arch/aarch64/codegen.c \
+	src/arch/aarch64/emit.c \
+	src/arch/aarch64/asm.c \
+	src/arch/aarch64/predef.c \
+	src/arch/aarch64/predef_cxx.c \
+	src/arch/x86_64/topasm.c
+FAMILY_SRCS_arm := \
+	src/arch/thumb/options.c \
+	src/arch/thumb/emit.c \
+	src/arch/thumb/a32.c \
+	src/arch/thumb/attrs.c \
+	src/arch/thumb/irgen.c \
+	src/arch/thumb/codegen.c \
+	src/arch/thumb/v6m.c \
+	src/arch/thumb/asm.c \
+	src/arch/thumb/predef.c \
+	src/arch/thumb/predef_cxx.c \
+	src/arch/thumbv8m/predef.c \
+	src/arch/thumbv8m/predef_cxx.c \
+	src/arch/thumbv6m/predef.c \
+	src/arch/thumbv6m/predef_cxx.c \
+	src/arch/thumbv8mbase/predef.c \
+	src/arch/thumbv8mbase/predef_cxx.c \
+	src/arch/armv7a/predef.c \
+	src/arch/armv7a/predef_cxx.c
+FAMILY_SRCS_riscv := \
+	src/arch/riscv/options.c \
+	src/arch/riscv/emit.c \
+	src/arch/riscv/codegen.c \
+	src/arch/riscv/irgen.c \
+	src/arch/riscv/asm.c \
+	src/arch/riscv32/predef.c \
+	src/arch/riscv32/predef_cxx.c \
+	src/arch/riscv64/predef.c \
+	src/arch/riscv64/predef_cxx.c
+FAMILY_SRCS_avr := \
+	src/arch/avr/options.c \
+	src/arch/avr/emit.c \
+	src/arch/avr/codegen.c \
+	src/arch/avr/asm.c \
+	src/arch/avr/irgen.c \
+	src/arch/avr/predef.c \
+	src/arch/avr/predef_cxx.c
+FAMILY_SRCS_mips := \
+	src/arch/mips/options.c \
+	src/arch/mips/emit.c \
+	src/arch/mips/codegen.c \
+	src/arch/mips/irgen.c \
+	src/arch/mips/asm.c \
+	src/arch/mips32/predef.c \
+	src/arch/mips32/predef_cxx.c \
+	src/arch/mips32eb/predef.c \
+	src/arch/mips32eb/predef_cxx.c \
+	src/arch/mips64/predef.c \
+	src/arch/mips64/predef_cxx.c \
+	src/arch/mips64eb/predef.c \
+	src/arch/mips64eb/predef_cxx.c
+FAMILY_SRCS_loongarch := \
+	src/arch/loongarch/options.c \
+	src/arch/loongarch/emit.c \
+	src/arch/loongarch/codegen.c \
+	src/arch/loongarch/irgen.c \
+	src/arch/loongarch/asm.c \
+	src/arch/loongarch64/predef.c \
+	src/arch/loongarch64/predef_cxx.c \
+	src/arch/riscv/irgen.c
+FAMILY_SRCS_tricore := \
+	src/arch/tricore/options.c \
+	src/arch/tricore/emit.c \
+	src/arch/tricore/codegen.c \
+	src/arch/tricore/irgen.c \
+	src/arch/tricore/asm.c \
+	src/arch/tricore/predef.c \
+	src/arch/tricore/predef_cxx.c
+FAMILY_SRCS_xtensa := \
+	src/arch/xtensa/options.c \
+	src/arch/xtensa/emit.c \
+	src/arch/xtensa/codegen.c \
+	src/arch/xtensa/irgen.c \
+	src/arch/xtensa/asm.c \
+	src/arch/xtensa/predef.c \
+	src/arch/xtensa/predef_cxx.c
+FAMILY_SRCS_ppc := \
+	src/arch/ppc/options.c \
+	src/arch/ppc/emit.c \
+	src/arch/ppc/codegen.c \
+	src/arch/ppc/irgen.c \
+	src/arch/ppc/asm.c \
+	src/arch/ppc32/predef.c \
+	src/arch/ppc32/predef_cxx.c
+FAMILY_SRCS_rx := \
+	src/arch/rx/options.c \
+	src/arch/rx/emit.c \
+	src/arch/rx/codegen.c \
+	src/arch/rx/irgen.c \
+	src/arch/rx/asm.c \
+	src/arch/rx/predef.c
+FAMILY_SRCS_sparc := \
+	src/arch/sparc/options.c \
+	src/arch/sparc/emit.c \
+	src/arch/sparc/codegen.c \
+	src/arch/sparc/irgen.c \
+	src/arch/sparc/asm.c \
+	src/arch/sparc32/predef.c \
+	src/arch/sparc32/predef_cxx.c
+FAMILY_SRCS_m68k := \
+	src/arch/coldfire/options.c \
+	src/arch/coldfire/emit.c \
+	src/arch/coldfire/codegen.c \
+	src/arch/coldfire/irgen.c \
+	src/arch/coldfire/asm.c \
+	src/arch/coldfire/predef.c \
+	src/arch/coldfire/predef_cxx.c
+$(foreach f,$(TARGET_FAMILIES),$(if $(FAMILY_SRCS_$(f)),,$(error FAMILY_SRCS_$(f): family $(f) has no sources)))
+# A list with each word once, in the order first seen.
+uniq = $(if $(1),$(firstword $(1)) $(call uniq,$(filter-out $(firstword $(1)),$(1))))
+
 SRCS := \
 	$(PLATFORM_SRCS) \
 	src/driver/main.c \
@@ -155,114 +351,18 @@ SRCS := \
 	src/macho/write.c \
 	src/coff/write.c \
 	src/arch/target.c src/arch/backends.c src/arch/regalloc.c \
-	src/arch/loongarch/options.c src/arch/xtensa/options.c \
-	src/arch/ppc/options.c src/arch/rx/options.c src/arch/sparc/options.c \
-	src/arch/coldfire/options.c src/arch/mips/options.c \
-	src/arch/tricore/options.c \
-	src/arch/thumb/options.c src/arch/riscv/options.c \
-	src/arch/avr/options.c \
+	src/arch/common.c \
 	src/arch/code.c \
 	src/arch/predef.c \
-	src/arch/x86_64/irgen.c \
-	src/arch/x86_64/codegen.c \
-	src/arch/x86_64/emit.c \
-	src/arch/x86_64/topasm.c \
-	src/arch/x86_64/as.c \
-	src/arch/x86_64/disasm.c \
-	src/arch/x86_64/predef.c \
-	src/arch/x86_64/predef_cxx.c \
-	src/arch/aarch64/irgen.c \
-	src/arch/aarch64/codegen.c \
-	src/arch/aarch64/emit.c \
-	src/arch/aarch64/asm.c \
-	src/arch/aarch64/predef.c \
-	src/arch/aarch64/predef_cxx.c \
-	src/arch/thumb/emit.c \
-	src/arch/thumb/a32.c \
-	src/arch/thumb/attrs.c \
-	src/arch/thumb/irgen.c \
-	src/arch/thumb/codegen.c \
-	src/arch/thumb/v6m.c \
-	src/arch/thumb/asm.c \
-	src/arch/thumb/predef.c \
-	src/arch/thumb/predef_cxx.c \
-	src/arch/thumbv8m/predef.c \
-	src/arch/thumbv8m/predef_cxx.c \
-	src/arch/thumbv6m/predef.c \
-	src/arch/thumbv6m/predef_cxx.c \
-	src/arch/thumbv8mbase/predef.c \
-	src/arch/thumbv8mbase/predef_cxx.c \
-	src/arch/armv7a/predef.c \
-	src/arch/armv7a/predef_cxx.c \
-	src/arch/riscv/emit.c \
-	src/arch/riscv/codegen.c \
-	src/arch/riscv/irgen.c \
-	src/arch/riscv/asm.c \
-	src/arch/riscv32/predef.c \
-	src/arch/riscv32/predef_cxx.c \
-	src/arch/riscv64/predef.c \
-	src/arch/riscv64/predef_cxx.c \
-	src/arch/mips/emit.c \
-	src/arch/mips/codegen.c \
-	src/arch/mips/irgen.c \
-	src/arch/mips/asm.c \
-	src/arch/mips32/predef.c \
-	src/arch/mips32/predef_cxx.c \
-	src/arch/mips32eb/predef.c \
-	src/arch/mips32eb/predef_cxx.c \
-	src/arch/mips64/predef.c \
-	src/arch/mips64/predef_cxx.c \
-	src/arch/mips64eb/predef.c \
-	src/arch/mips64eb/predef_cxx.c \
-	src/arch/loongarch/emit.c \
-	src/arch/loongarch/codegen.c \
-	src/arch/loongarch/irgen.c \
-	src/arch/loongarch/asm.c \
-	src/arch/loongarch64/predef.c \
-	src/arch/loongarch64/predef_cxx.c \
-	src/arch/tricore/emit.c \
-	src/arch/tricore/codegen.c \
-	src/arch/tricore/irgen.c \
-	src/arch/tricore/asm.c \
-	src/arch/tricore/predef.c \
-	src/arch/tricore/predef_cxx.c \
-	src/arch/xtensa/emit.c \
-	src/arch/xtensa/codegen.c \
-	src/arch/xtensa/irgen.c \
-	src/arch/xtensa/asm.c \
-	src/arch/xtensa/predef.c \
-	src/arch/xtensa/predef_cxx.c \
-	src/arch/ppc/emit.c \
-	src/arch/ppc/codegen.c \
-	src/arch/ppc/irgen.c \
-	src/arch/ppc/asm.c \
-	src/arch/ppc32/predef.c \
-	src/arch/ppc32/predef_cxx.c \
-	src/arch/rx/emit.c \
-	src/arch/rx/codegen.c \
-	src/arch/rx/irgen.c \
-	src/arch/rx/asm.c \
-	src/arch/rx/predef.c \
-	src/arch/sparc/emit.c \
-	src/arch/sparc/codegen.c \
-	src/arch/sparc/irgen.c \
-	src/arch/sparc/asm.c \
-	src/arch/sparc32/predef.c \
-	src/arch/sparc32/predef_cxx.c \
-	src/arch/coldfire/emit.c \
-	src/arch/coldfire/codegen.c \
-	src/arch/coldfire/irgen.c \
-	src/arch/coldfire/asm.c \
-	src/arch/coldfire/predef.c \
-	src/arch/coldfire/predef_cxx.c \
-	src/arch/avr/emit.c \
-	src/arch/avr/codegen.c \
-	src/arch/avr/asm.c \
-	src/arch/avr/irgen.c \
-	src/arch/avr/predef.c \
-	src/arch/avr/predef_cxx.c
+	$(call uniq,$(foreach f,$(TARGET_FAMILIES),$(FAMILY_SRCS_$(f))))
 
-OBJS := $(SRCS:src/%.c=$(BUILD)/%.o)
+# SRCS is every source, whatever TARGETS says: it is what build.ebm, the
+# self-host and tools/cross-embcc.sh compile, and they build the whole
+# compiler. EMBCC_SRCS is this build's: the shared ones and the selected
+# families'.
+EMBCC_SRCS := $(filter-out $(foreach f,$(TARGET_FAMILIES),$(FAMILY_SRCS_$(f))),$(SRCS)) \
+              $(call uniq,$(foreach f,$(TARGETS_BUILT),$(FAMILY_SRCS_$(f))))
+OBJS := $(EMBCC_SRCS:src/%.c=$(OBJDIR)/%.o)
 
 # One unit that is not under src/. src/link/link.c writes the EMBX
 # image hash and the .embdbg sidecar through the SAME reader the embdbg
@@ -286,7 +386,13 @@ $(EMBDBG_CORE): tools/embdbg/embdbg.c tools/embdbg/embdbg_core.h
 # librt.a. (The first rule used to be build/embdbg_core.o's, so `make`
 # alone built that one object.) `make all` builds the tools alone.
 .DEFAULT_GOAL := toolchain
-RUNTIMES := libc libcxx libc-linux libcxx-linux-x86_64 libcxx-linux-aarch64 \
+# ...every target's of the families TARGETS builds: the hosted libraries of
+# x86 and AArch64 when they are built, and the embedded runtimes, whose
+# loops below run over the built families' triples (FAMILY_RT_*).
+RUNTIMES_x86 := libc-x86_64 libcxx-x86_64 libc-linux-x86_64 libcxx-linux-x86_64
+RUNTIMES_aarch64 := libc-aarch64 libcxx-aarch64 libc-linux-aarch64 \
+                    libcxx-linux-aarch64
+RUNTIMES := $(foreach f,x86 aarch64,$(if $(call built,$(f)),$(RUNTIMES_$(f)))) \
             rt-embedded libc-embedded libcxx-embedded
 .PHONY: toolchain runtimes
 toolchain: all embdbg runtimes
@@ -306,17 +412,21 @@ binutils-names: embar embpack embmap
 	    ln -sf $${p#*:} embcc-$${p%%:*}; \
 	done
 
-# Which host layer the last link used (PLATFORM and PROCESS). Switching
-# either leaves every object up to date, so without this `make
-# PLATFORM=iso` kept the old binary. Compared by NAME, not by time: a
-# stamp touched in the same second as the link looked up to date.
+# Which host layer the last link used (PLATFORM and PROCESS), and which
+# target families when not all of them (TARGETS). Switching any of them
+# can leave every object up to date -- a subset's objects are in their own
+# directory, and older than the ./embcc a different selection just linked
+# -- so without this `make PLATFORM=iso` kept the old binary. Compared by
+# NAME, not by time: a stamp touched in the same second as the link
+# looked up to date.
 PLATFORM_STAMP := $(BUILD)/platform.stamp
-ifneq ($(shell cat $(PLATFORM_STAMP) 2>/dev/null),$(PLATFORM)-$(PROCESS))
+LINK_CONFIG := $(PLATFORM)-$(PROCESS)$(if $(TARGETS_OMITTED), $(TARGETS_BUILT))
+ifneq ($(shell cat $(PLATFORM_STAMP) 2>/dev/null),$(LINK_CONFIG))
 PLATFORM_CHANGED := platform-changed
 endif
 .PHONY: platform-changed
 platform-changed:
-	@mkdir -p $(BUILD); echo $(PLATFORM)-$(PROCESS) > $(PLATFORM_STAMP)
+	@mkdir -p $(BUILD); echo $(LINK_CONFIG) > $(PLATFORM_STAMP)
 
 embcc: $(OBJS) $(EMBDBG_CORE) $(PLATFORM_CHANGED)
 	$(CC) $(CFLAGS) -o $@ $(OBJS) $(EMBDBG_CORE)
@@ -326,8 +436,9 @@ embcc: $(OBJS) $(EMBDBG_CORE) $(PLATFORM_CHANGED)
 # different host compilers, and it runs in parallel with every other
 # test -- so it must not replace the ./embcc those tests are running.
 # With BUILD= pointing somewhere private, this target is entirely its
-# own: `make CC=clang BUILD=/tmp/x /tmp/x/embcc`.
-$(BUILD)/embcc: $(OBJS) $(EMBDBG_CORE)
+# own: `make CC=clang BUILD=/tmp/x /tmp/x/embcc`. The stamp too, so a
+# second TARGETS= into the same BUILD relinks it.
+$(BUILD)/embcc: $(OBJS) $(EMBDBG_CORE) $(PLATFORM_CHANGED)
 	$(CC) $(CFLAGS) -o $@ $(OBJS) $(EMBDBG_CORE)
 
 # embas — the standalone NASM/Intel-syntax assembler (A1, ARCHITECTURE §4). Reads
@@ -554,7 +665,7 @@ EMBLS_SRCS = tools/embls/embls.c $(PLATFORM_SRCS) src/cpp/cpp.c src/lex/lex.c \
              $(filter src/cxx/%,$(SRCS)) src/sema/sema.c src/ir/irgen.c \
              src/ir/irprint.c src/ir/irparse.c \
              $(OPT_SRCS) src/debug/dwarf.c src/debug/eh.c src/elf/write.c \
-             src/arch/code.c src/arch/regalloc.c \
+             src/arch/code.c src/arch/regalloc.c src/arch/common.c \
              src/arch/x86_64/irgen.c src/arch/x86_64/codegen.c \
              src/arch/x86_64/emit.c src/arch/x86_64/topasm.c \
              src/arch/x86_64/as.c src/arch/x86_64/disasm.c src/arch/aarch64/irgen.c \
@@ -609,13 +720,14 @@ embdbg: tools/embdbg/embdbg.c tools/embdbg/remote.c tools/embdbg/remote.h \
 
 # The target database is #included by target.c, and nothing else tracks
 # header dependencies, so say this one.
-$(BUILD)/arch/target.o: $(wildcard src/targets/*.def)
+$(OBJDIR)/arch/target.o: $(wildcard src/targets/*.def)
 # ...and the option table, by options.c
-$(BUILD)/driver/options.o: src/driver/options.def
+$(OBJDIR)/driver/options.o: src/driver/options.def
 
-$(BUILD)/%.o: src/%.c
+# TARGET_CFLAGS: the families left out (make TARGETS=), empty for all.
+$(OBJDIR)/%.o: src/%.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CFLAGS) $(TARGET_CFLAGS) -c -o $@ $<
 
 # The tree is small; every object depending on every header is honest
 # enough and cannot go stale (CONTRIBUTING lie #1).
@@ -639,22 +751,23 @@ $(OBJS): $(wildcard src/*/*.h src/arch/*/*.h)
 # not check is exactly what the goldens exist for: that the answers
 # agree with gcc's, that -S and -c build the same program, that the
 # object format is what the platform's tools expect.
-check: embcc libc-x86_64 libcxx-x86_64
+# Without x86 (make TARGETS=) the libraries are not built and tests/run.sh
+# reports the suite skipped: there is nothing here to run it on.
+check: embcc $(if $(call built,x86),libc-x86_64 libcxx-x86_64)
 	tests/run.sh --exec-only
 
 # embas belongs here too: tests/golden/x86_64/assembler.sh runs it, and
 # without it in this list the suite passes from a dirty tree and fails
 # from a clean one -- which is the wrong way round.
 test: embcc embread embld embdbg embls embas embar embsvd embmap embpack \
-      embrt embsim embflash embtrace embdoc libc-x86_64 \
-      libcxx-x86_64 libc-linux-x86_64 libcxx-linux-x86_64
+      embrt embsim embflash embtrace embdoc $(if $(call built,x86),libc-x86_64 \
+      libcxx-x86_64 libc-linux-x86_64 libcxx-linux-x86_64)
 	tests/run.sh
 
 # The aarch64 suite: compile for the second architecture and RUN the result
 # under qemu-system-aarch64 (tests/harness/aarch64). Separate from `test`
 # because it needs the cross newlib and QEMU, which `test` does not.
-test-arm64: embcc libc-aarch64 libcxx-aarch64 libc-linux-aarch64 \
-            libcxx-linux-aarch64
+test-arm64: embcc $(if $(call built,aarch64),$(RUNTIMES_aarch64))
 	tests/run.sh --target=aarch64-elf
 
 # The C++ suites wholly on EmbCC's library: libstdc++ and libsupc++ built
@@ -795,12 +908,37 @@ libc-linux-aarch64: embcc embar
 # directory (tools/build-rt.sh says how each is built).
 RISCV_HF := riscv32-unknown-elf/ilp32f riscv32-unknown-elf/ilp32d \
             riscv64-unknown-elf/lp64f riscv64-unknown-elf/lp64d
-RT_EMBEDDED := avr thumbv6m-none-eabi thumbv8m.base-none-eabi thumbv7m-none-eabi thumbv7em-none-eabi \
+RT_EMBEDDED_ALL := avr thumbv6m-none-eabi thumbv8m.base-none-eabi thumbv7m-none-eabi thumbv7em-none-eabi \
                thumbv7em-none-eabihf thumbv8m.main-none-eabi \
                thumbv8m.main-none-eabihf armv7a-none-eabi armv7a-none-eabihf riscv32-unknown-elf \
                riscv64-unknown-elf $(RISCV_HF) mipsel-none-elf mips-none-elf loongarch64-unknown-elf tricore-none-elf \
                  xtensa-none-elf powerpc-none-eabi rx-none-elf sparc-none-elf m68k-none-elf \
                  mips64el-none-elf mips64-none-elf
+# The triples of each family's embedded runtimes; the lists above are the
+# runtimes there are, and each is built when its family is (make TARGETS=).
+FAMILY_RT_arm := thumbv6m-none-eabi thumbv8m.base-none-eabi \
+                 thumbv7m-none-eabi thumbv7em-none-eabi thumbv7em-none-eabihf \
+                 thumbv8m.main-none-eabi thumbv8m.main-none-eabihf \
+                 armv7a-none-eabi armv7a-none-eabihf
+FAMILY_RT_riscv := riscv32-unknown-elf riscv64-unknown-elf $(RISCV_HF)
+FAMILY_RT_avr := avr
+FAMILY_RT_mips := mipsel-none-elf mips-none-elf mips64el-none-elf \
+                  mips64-none-elf
+FAMILY_RT_loongarch := loongarch64-unknown-elf
+FAMILY_RT_tricore := tricore-none-elf
+FAMILY_RT_xtensa := xtensa-none-elf
+FAMILY_RT_ppc := powerpc-none-eabi
+FAMILY_RT_rx := rx-none-elf
+FAMILY_RT_sparc := sparc-none-elf
+FAMILY_RT_m68k := m68k-none-elf
+RT_TRIPLES := $(foreach f,$(TARGETS_BUILT),$(FAMILY_RT_$(f)))
+# The triples of a list that no family claims: a triple added to a list
+# and not to its family would be built by no selection, so it stops make.
+rt_strays = $(filter-out $(foreach f,$(TARGET_FAMILIES),$(FAMILY_RT_$(f))),$(1))
+ifneq ($(call rt_strays,$(RT_EMBEDDED_ALL)),)
+$(error RT_EMBEDDED_ALL: $(call rt_strays,$(RT_EMBEDDED_ALL)) is in no FAMILY_RT_ list)
+endif
+RT_EMBEDDED := $(filter $(RT_TRIPLES),$(RT_EMBEDDED_ALL))
 rt-embedded: embcc embar
 	@for t in $(RT_EMBEDDED); do \
 	    sh tools/build-rt.sh $$t $(BUILD)/libc/$$t || exit 1; \
@@ -814,7 +952,7 @@ rt-embedded: embcc embar
 # than an ATmega328P's flash and SRAM. AVR's library is lib/avr's (the string
 # and _P functions, sprintf and its _P forms, the EEPROM), which rt-embedded
 # builds into build/libc/avr/libc.a beside the startup.
-LIBC_EMBEDDED := thumbv6m-none-eabi thumbv8m.base-none-eabi thumbv7m-none-eabi thumbv7em-none-eabi \
+LIBC_EMBEDDED_ALL := thumbv6m-none-eabi thumbv8m.base-none-eabi thumbv7m-none-eabi thumbv7em-none-eabi \
                  thumbv7em-none-eabihf thumbv8m.main-none-eabi \
                  thumbv8m.main-none-eabihf armv7a-none-eabi armv7a-none-eabihf \
                  riscv32-unknown-elf riscv64-unknown-elf $(RISCV_HF) \
@@ -822,6 +960,10 @@ LIBC_EMBEDDED := thumbv6m-none-eabi thumbv8m.base-none-eabi thumbv7m-none-eabi t
                  loongarch64-unknown-elf tricore-none-elf \
                  xtensa-none-elf powerpc-none-eabi rx-none-elf sparc-none-elf m68k-none-elf \
                  mips64el-none-elf mips64-none-elf
+ifneq ($(call rt_strays,$(LIBC_EMBEDDED_ALL)),)
+$(error LIBC_EMBEDDED_ALL: $(call rt_strays,$(LIBC_EMBEDDED_ALL)) is in no FAMILY_RT_ list)
+endif
+LIBC_EMBEDDED := $(filter $(RT_TRIPLES),$(LIBC_EMBEDDED_ALL))
 libc-embedded: embcc embar
 	@for t in $(LIBC_EMBEDDED); do \
 	    sh tools/build-libc.sh $$t $(BUILD)/libc/$$t || exit 1; \
@@ -863,6 +1005,10 @@ LIBROOT  = $(DESTDIR)$(PREFIX)/lib/embcc/$(VERSION)
 install: toolchain
 	@$(MAKE) --no-print-directory install-files
 
+# The hosted triples' directories and where the build put them; the
+# embedded ones are RT_EMBEDDED's, each in a directory of its own name.
+INSTALL_PAIRS_x86 := "x86_64-elf:x86_64" "x86_64-linux-gnu:linux-x86_64"
+INSTALL_PAIRS_aarch64 := "aarch64-elf:aarch64" "aarch64-linux-gnu:linux-aarch64"
 install-files:
 	@echo "installing EmbCC $(VERSION) into $(DESTDIR)$(PREFIX)"
 	@mkdir -p $(DESTDIR)$(PREFIX)/bin
@@ -882,6 +1028,8 @@ install-files:
 	@mkdir -p $(DESTDIR)$(PREFIX)/share/embcc/cmake/Compiler
 	@cp cmake/embcc.cmake $(DESTDIR)$(PREFIX)/share/embcc/cmake/embcc.cmake
 	@cp cmake/Compiler/*.cmake $(DESTDIR)$(PREFIX)/share/embcc/cmake/Compiler/
+	@mkdir -p $(DESTDIR)$(PREFIX)/share/doc/embcc
+	@cp LICENSE NOTICE $(DESTDIR)$(PREFIX)/share/doc/embcc/
 	@mkdir -p $(DESTDIR)$(PREFIX)/share/man/man1
 	@SOURCE_DATE_EPOCH=$$(git log -1 --format=%ct 2>/dev/null || date +%s) \
 	    ./embcc --reference=man > $(DESTDIR)$(PREFIX)/share/man/man1/embcc.1
@@ -890,9 +1038,7 @@ install-files:
 	@cp -R lib/libc/include/. $(LIBROOT)/include/
 	@cp -R lib/libcxx/include/. $(LIBROOT)/include/c++/
 	@cp -R include/. $(LIBROOT)/freestanding/
-	@for pair in "x86_64-elf:x86_64" "aarch64-elf:aarch64" \
-	             "x86_64-linux-gnu:linux-x86_64" \
-	             "aarch64-linux-gnu:linux-aarch64" \
+	@for pair in $(foreach f,$(TARGETS_BUILT),$(INSTALL_PAIRS_$(f))) \
 	             $(foreach t,$(RT_EMBEDDED),"$(t):$(t)"); do \
 	    triple=$${pair%%:*}; dir=$${pair#*:}; \
 	    mkdir -p $(LIBROOT)/$$triple; \
@@ -922,8 +1068,11 @@ EXTRA_TOOLS := embpack embmap embsim embsvd embflash embtrace embrt
 # links <triple>-gcc and -cc to embcc (which reads the target from its
 # name), -ar and -ranlib to embar, -objcopy to embpack, -size and -nm to
 # embmap. An existing toolchain file or Makefile then builds with EmbCC
-# with only PATH changed.
-TRIPLES ?= arm-none-eabi riscv64-unknown-elf riscv32-unknown-elf avr
+# with only PATH changed. By default the GCC names of the families built
+# (TARGETS): a name for a family left out would only be refused.
+TRIPLES ?= $(if $(call built,arm),arm-none-eabi) \
+           $(if $(call built,riscv),riscv64-unknown-elf riscv32-unknown-elf) \
+           $(if $(call built,avr),avr)
 install-gnu: install-files
 	@for tr in $(TRIPLES); do \
 	    for p in gcc:embcc cc:embcc $(BINUTILS_NAMES); do \
@@ -944,6 +1093,8 @@ uninstall:
 	done
 	@rm -f $(DESTDIR)$(PREFIX)/share/embcc/cmake/embcc.cmake
 	@rm -f $(DESTDIR)$(PREFIX)/share/embcc/cmake/Compiler/EmbCC*.cmake
+	@rm -f $(DESTDIR)$(PREFIX)/share/doc/embcc/LICENSE \
+	       $(DESTDIR)$(PREFIX)/share/doc/embcc/NOTICE
 	@rm -rf $(LIBROOT)
 	@echo "removed EmbCC $(VERSION) from $(DESTDIR)$(PREFIX)"
 
@@ -1013,7 +1164,7 @@ libcxx: libcxx-x86_64 libcxx-aarch64
 # the -fno-exceptions -fno-rtti subset, tools/build-libcxx.sh. Into
 # build/libcxx/<triple>/, where the driver looks for it beside
 # build/libc/<triple>/libc.a and librt.a.
-LIBCXX_EMBEDDED := thumbv6m-none-eabi thumbv7m-none-eabi thumbv7em-none-eabi \
+LIBCXX_EMBEDDED_ALL := thumbv6m-none-eabi thumbv7m-none-eabi thumbv7em-none-eabi \
                    thumbv7em-none-eabihf thumbv8m.main-none-eabi \
                    thumbv8m.main-none-eabihf armv7a-none-eabi \
                    armv7a-none-eabihf riscv32-unknown-elf \
@@ -1021,6 +1172,10 @@ LIBCXX_EMBEDDED := thumbv6m-none-eabi thumbv7m-none-eabi thumbv7em-none-eabi \
                    mipsel-none-elf mips-none-elf mips64-none-elf \
                    powerpc-none-eabi sparc-none-elf m68k-none-elf \
                    xtensa-none-elf tricore-none-elf rx-none-elf
+ifneq ($(call rt_strays,$(LIBCXX_EMBEDDED_ALL)),)
+$(error LIBCXX_EMBEDDED_ALL: $(call rt_strays,$(LIBCXX_EMBEDDED_ALL)) is in no FAMILY_RT_ list)
+endif
+LIBCXX_EMBEDDED := $(filter $(RT_TRIPLES),$(LIBCXX_EMBEDDED_ALL))
 libcxx-embedded: embcc embar
 	@for t in $(LIBCXX_EMBEDDED); do \
 	    sh tools/build-libcxx.sh $$t $(BUILD)/libcxx/$$t || exit 1; \
@@ -1030,8 +1185,12 @@ libcxx-embedded: embcc embar
 clean:
 	rm -rf $(BUILD) embcc embread embld embdbg embas embls embidx embar embsvd embdoc
 
+# ...and what ./configure wrote.
+distclean: clean
+	rm -f config.mk
+
 .PHONY: all check test test-arm64 test-libstdcxx site libc libc-x86_64 libc-aarch64 \
         libc-emblinkos libc-linux libc-linux-x86_64 libc-linux-aarch64 \
         libcxx libcxx-x86_64 libcxx-aarch64 \
         libcxx-linux-x86_64 libcxx-linux-aarch64 libcxx-embedded \
-        install install-files uninstall libc-linux-all clean
+        install install-files uninstall libc-linux-all clean distclean
