@@ -2,7 +2,8 @@
  * initializer: in a pointer-wide slot it was stored as an address. */
 // expect-exit: 42
 int printf(const char *, ...);
-struct { int c; char pad[6]; int d; } v;
+#include <stddef.h>
+struct sv { int c; char pad[6]; int d; } v;
 static short i = ((char *)&(v.c) - (char *)&v);
 static long j = (char *)&v.d - (char *)&v.c;
 int arr[60];
@@ -12,5 +13,7 @@ int main(void)
 {
     long rt = &arr[9] - &arr[2];
     printf("%d %ld %ld %ld %ld\n", i, j, k, m, rt);
-    return i == 0 && j == 12 && k == 15 && m == 8 && rt == 7 ? 42 : 1;
+    /* d's offset is the target's (10 where int aligns to 2: ColdFire) */
+    return i == 0 && j == (long)(offsetof(struct sv, d) - offsetof(struct sv, c)) &&
+           k == 15 && m == 2 * (long)sizeof(int) && rt == 7 ? 42 : 1;
 }
