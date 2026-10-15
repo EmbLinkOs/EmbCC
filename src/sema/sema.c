@@ -373,6 +373,208 @@ static void implicit_float_decl(struct unit *u, const char *name,
     *pp = fd;
 }
 
+/* GCC's library builtins: `__builtin_NAME`, for a C or POSIX library
+ * function NAME, is NAME under a reserved name -- GCC's builtins.def has
+ * one for nearly every function it knows, and code written for it calls
+ * __builtin_abort and __builtin_printf without a declaration in sight.
+ * Each is its prototype in a short spelling, the result first:
+ *   v void, c char, i int, u unsigned, l long, U unsigned long,
+ *   L long long, Q unsigned long long, z size_t, d double, f float,
+ *   D long double, F FILE * (a void * here: a program that passes one
+ *   has <stdio.h>, and its declaration is the one used);
+ *   R the real type of the variant -- double in NAME, float in NAMEf,
+ *   long double in NAMEl -- and K its complex;
+ *   `*` a pointer to what follows, `k` const, `.` more arguments.
+ * memcpy and the rest of implicit_mem_decl's are not here: they come
+ * first, with IR of their own. */
+static const struct { const char *name, *sig; } g_lib_builtins[] = {
+    /* <stdlib.h> */
+    { "abort", "v" }, { "exit", "vi" }, { "_exit", "vi" }, { "_Exit", "vi" },
+    { "abs", "ii" }, { "labs", "ll" }, { "llabs", "LL" },
+    { "malloc", "*vz" }, { "calloc", "*vzz" }, { "realloc", "*v*vz" },
+    { "free", "v*v" },
+    { "atoi", "i*kc" }, { "atol", "l*kc" }, { "atoll", "L*kc" },
+    { "atof", "d*kc" },
+    { "strtol", "l*kc**ci" }, { "strtoul", "U*kc**ci" },
+    { "strtoll", "L*kc**ci" }, { "strtoull", "Q*kc**ci" },
+    { "strtod", "d*kc**c" }, { "strtof", "f*kc**c" }, { "strtold", "D*kc**c" },
+    /* <stdio.h> */
+    { "printf", "i*kc." }, { "fprintf", "iF*kc." }, { "sprintf", "i*c*kc." },
+    { "snprintf", "i*cz*kc." }, { "scanf", "i*kc." }, { "fscanf", "iF*kc." },
+    { "sscanf", "i*kc*kc." }, { "puts", "i*kc" }, { "putchar", "ii" },
+    { "fputs", "i*kcF" }, { "fputc", "iiF" }, { "putc", "iiF" },
+    { "fwrite", "z*kvzzF" },
+    /* <string.h> and <strings.h> */
+    { "strncat", "*c*c*kcz" }, { "strrchr", "*c*kci" },
+    { "strstr", "*c*kc*kc" }, { "strspn", "z*kc*kc" },
+    { "strcspn", "z*kc*kc" }, { "strpbrk", "*c*kc*kc" },
+    { "strnlen", "z*kcz" }, { "strdup", "*c*kc" }, { "strndup", "*c*kcz" },
+    { "stpcpy", "*c*c*kc" }, { "stpncpy", "*c*c*kcz" },
+    { "mempcpy", "*v*v*kvz" }, { "bzero", "v*vz" }, { "bcopy", "v*kv*vz" },
+    { "bcmp", "i*kv*kvz" }, { "index", "*c*kci" }, { "rindex", "*c*kci" },
+    { "strcasecmp", "i*kc*kc" }, { "strncasecmp", "i*kc*kcz" },
+    /* <ctype.h> */
+    { "isalnum", "ii" }, { "isalpha", "ii" }, { "isascii", "ii" },
+    { "isblank", "ii" }, { "iscntrl", "ii" }, { "isdigit", "ii" },
+    { "isgraph", "ii" }, { "islower", "ii" }, { "isprint", "ii" },
+    { "ispunct", "ii" }, { "isspace", "ii" }, { "isupper", "ii" },
+    { "isxdigit", "ii" }, { "toascii", "ii" }, { "tolower", "ii" },
+    { "toupper", "ii" },
+    /* <math.h>, each with its f and l variants */
+    { "acos", "RR" }, { "acosh", "RR" }, { "asin", "RR" }, { "asinh", "RR" },
+    { "atan", "RR" }, { "atanh", "RR" }, { "atan2", "RRR" }, { "cbrt", "RR" },
+    { "ceil", "RR" }, { "cos", "RR" }, { "cosh", "RR" }, { "erf", "RR" },
+    { "erfc", "RR" }, { "exp", "RR" }, { "exp2", "RR" }, { "expm1", "RR" },
+    { "fdim", "RRR" }, { "floor", "RR" }, { "fma", "RRRR" }, { "fmax", "RRR" },
+    { "fmin", "RRR" }, { "fmod", "RRR" }, { "hypot", "RRR" },
+    { "lgamma", "RR" }, { "log", "RR" }, { "log10", "RR" }, { "log1p", "RR" },
+    { "log2", "RR" }, { "logb", "RR" }, { "nearbyint", "RR" },
+    { "nextafter", "RRR" }, { "pow", "RRR" }, { "remainder", "RRR" },
+    { "rint", "RR" }, { "round", "RR" }, { "sin", "RR" }, { "sinh", "RR" },
+    { "tan", "RR" }, { "tanh", "RR" }, { "tgamma", "RR" }, { "trunc", "RR" },
+    { "frexp", "RR*i" }, { "ldexp", "RRi" }, { "scalbn", "RRi" },
+    { "modf", "RR*R" }, { "ilogb", "iR" }, { "lrint", "lR" },
+    { "llrint", "LR" }, { "lround", "lR" }, { "llround", "LR" },
+    /* <complex.h>, the same */
+    { "cabs", "RK" }, { "carg", "RK" }, { "creal", "RK" }, { "cimag", "RK" },
+    { "conj", "KK" }, { "cproj", "KK" }, { "cexp", "KK" }, { "clog", "KK" },
+    { "csqrt", "KK" }, { "cpow", "KKK" }, { "csin", "KK" }, { "ccos", "KK" },
+    { "ctan", "KK" }, { "casin", "KK" }, { "cacos", "KK" }, { "catan", "KK" },
+    { "csinh", "KK" }, { "ccosh", "KK" }, { "ctanh", "KK" },
+};
+
+/* bn's entry in g_lib_builtins: its signature, and in *real the type its
+ * R stands for. NULL when bn is none of them. */
+static const char *lib_builtin(const char *bn, struct type **real)
+{
+    size_t n = strlen(bn);
+    const size_t nb = sizeof g_lib_builtins / sizeof g_lib_builtins[0];
+    for (size_t i = 0; i < nb; i++)
+        if (strcmp(g_lib_builtins[i].name, bn) == 0) {
+            *real = ty_base(TY_DOUBLE, 0);
+            return g_lib_builtins[i].sig;
+        }
+    if (n > 1 && (bn[n - 1] == 'f' || bn[n - 1] == 'l'))
+        for (size_t i = 0; i < nb; i++)
+            if (strlen(g_lib_builtins[i].name) == n - 1 &&
+                strncmp(g_lib_builtins[i].name, bn, n - 1) == 0 &&
+                strpbrk(g_lib_builtins[i].sig, "RK")) {
+                *real = ty_base(bn[n - 1] == 'f' ? TY_FLOAT : TY_LDOUBLE, 0);
+                return g_lib_builtins[i].sig;
+            }
+    return NULL;
+}
+
+/* One type of a signature, from *s on (g_lib_builtins' letters). */
+static struct type *lib_sig_type(const char **s, struct type *real)
+{
+    switch (*(*s)++) {
+    case '*': return ty_ptr(lib_sig_type(s, real));
+    case 'k': return ty_const(lib_sig_type(s, real));
+    case 'c': return ty_base(TY_CHAR, target_char_unsigned());
+    case 'i': return ty_base(TY_INT, 0);
+    case 'u': return ty_base(TY_INT, 1);
+    case 'l': return ty_base(TY_LONG, 0);
+    case 'U': return ty_base(TY_LONG, 1);
+    case 'L': return ty_llong(0);
+    case 'Q': return ty_llong(1);
+    case 'z': return ty_size_t();
+    case 'd': return ty_base(TY_DOUBLE, 0);
+    case 'f': return ty_base(TY_FLOAT, 0);
+    case 'D': return ty_base(TY_LDOUBLE, 0);
+    case 'F': return ty_ptr(ty_base(TY_VOID, 0));
+    case 'R': return real;
+    case 'K': return ty_complex(real);
+    default:  return ty_base(TY_VOID, 0);
+    }
+}
+
+/* A library builtin's function, declared as C declares it unless the
+ * program has a declaration of its own in sight. */
+static void implicit_lib_decl(struct unit *u, const char *name,
+                              const char *sig, struct type *real)
+{
+    if (find_func(u, name))
+        return;
+    struct func *fd = xcalloc(1, sizeof *fd);
+    fd->name = name;
+    fd->file = u->file;
+    fd->seq = -1;
+    fd->declared = 1;
+    fd->ret_ty = lib_sig_type(&sig, real);
+    while (*sig && *sig != '.' && fd->nparams < MAX_PARAMS)
+        fd->param_tys[fd->nparams++] = lib_sig_type(&sig, real);
+    fd->is_varargs = *sig == '.';
+    fd->is_noreturn = strcmp(name, "abort") == 0 || strcmp(name, "exit") == 0 ||
+                      strcmp(name, "_exit") == 0 || strcmp(name, "_Exit") == 0;
+    struct func **pp = &u->funcs;
+    while (*pp)
+        pp = &(*pp)->next;
+    *pp = fd;
+}
+
+static int mem_builtin(const char *bn)
+{
+    static const char *const names[] = {
+        "memcpy", "memmove", "memset", "memcmp", "memchr", "strlen",
+        "strcmp", "strncmp", "strcpy", "strncpy", "strcat", "strchr",
+    };
+    for (size_t i = 0; i < sizeof names / sizeof names[0]; i++)
+        if (strcmp(bn, names[i]) == 0)
+            return 1;
+    return 0;
+}
+
+/* A call to __builtin_<bn> that is a library function's: renamed to the
+ * function, which is declared if the program has not, and left to the
+ * ordinary call path. _FORTIFY_SOURCE's checked forms --
+ * __builtin___memcpy_chk(d, s, n, objsize),
+ * __builtin___sprintf_chk(s, flag, objsize, fmt, ...) -- lose the
+ * object-size arguments: they are what GCC calls when the size is
+ * unknown, and EmbCC knows no sizes to check. 0 when bn is not one. */
+static int lib_builtin_call(struct unit *u, struct expr *e, const char *bn)
+{
+    struct type *real;
+    size_t n = strlen(bn);
+    if (n > 6 && strncmp(bn, "__", 2) == 0 && strcmp(bn + n - 4, "_chk") == 0) {
+        char *base = xmalloc(n - 5);
+        memcpy(base, bn + 2, n - 6);
+        base[n - 6] = 0;
+        int at, drop;
+        if (strcmp(base, "sprintf") == 0) {
+            at = 1;
+            drop = 2;
+        } else if (strcmp(base, "snprintf") == 0) {
+            at = 2;
+            drop = 2;
+        } else if (mem_builtin(base) ||
+                   (lib_builtin(base, &real) && !strchr(lib_builtin(base, &real), '.'))) {
+            at = e->nargs - 1;
+            drop = 1;
+        } else
+            return 0;
+        if (at < 0 || e->nargs < at + drop)
+            return 0;
+        for (int k = at; k + drop < e->nargs; k++)
+            e->args[k] = e->args[k + drop];
+        e->nargs -= drop;
+        bn = base;
+    }
+    if (strcmp(bn, "memcmp_eq") == 0)       /* memcmp, its result tested == 0 */
+        bn = "memcmp";
+    if (mem_builtin(bn)) {
+        e->lhs->name = bn;
+        implicit_mem_decl(u, bn);
+        return 1;
+    }
+    const char *sig = lib_builtin(bn, &real);
+    if (!sig)
+        return 0;
+    e->lhs->name = bn;
+    implicit_lib_decl(u, bn, sig, real);
+    return 1;
+}
+
 static struct global *find_global(struct unit *u, const char *name)
 {
     for (struct global *g = u->globals; g; g = g->next)
@@ -3717,6 +3919,10 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                 e->ty = ty_base(TY_VOID, 0);
                 break;
             }
+            /* __builtin_abort, __builtin_printf, __builtin_sinf...: the
+             * library function, by the ordinary call path below */
+            else
+                lib_builtin_call(u, e, bn);
         }
         /* a full memory barrier (not spelled __builtin_) */
         if (e->lhs->kind == EXPR_VAR && e->lhs->name &&
@@ -5205,6 +5411,9 @@ int sema_has_builtin(const char *name)
              i < sizeof g_named_builtins / sizeof g_named_builtins[0]; i++)
             if (strcmp(bn, g_named_builtins[i]) == 0)
                 return 1;
+        struct type *real;
+        if (lib_builtin(bn, &real))
+            return 1;
     }
     return 0;
 }
@@ -6818,21 +7027,18 @@ static void check_func(struct unit *u, struct func *f)
 
     check_stmt(u, f, &sc, f->body, 0, 0);
 
-    /* main is the exception the language makes: reaching its closing
-     * brace returns 0 (C99 5.1.2.2.3), and irgen says so. Refusing it
-     * refused `int main(void) { }`. A naked function's asm returns, with
-     * its value where the ABI puts it. */
+    /* A path to the closing brace of a function that returns a value: C
+     * allows it while no caller uses the value (C17 6.9.1p12), so it is a
+     * warning, on by default -- and irgen returns 0 there rather than
+     * whatever the register held. main is the exception the language
+     * makes: reaching its brace returns 0 (C99 5.1.2.2.3). A naked
+     * function's asm returns, with its value where the ABI puts it. */
     if (f->ret_ty->kind != TY_VOID && !list_returns(f->body) &&
-        strcmp(f->name, "main") != 0 && !f->is_naked) {
-        diag_error_at(f->file ? f->file : u->file, f->line, 0,
-                      "control may reach the end of '%s' — every path must "
-                      "end in a return statement", f->name);
+        strcmp(f->name, "main") != 0 && !f->is_naked &&
+        diag_warn_opt(f->file ? f->file : u->file, f->line, 0, "return-type",
+                      "control may reach the end of '%s', which returns %s",
+                      f->name, ty_name(f->ret_ty)))
         diag_set_id("E0008");
-        g_sema_errors++;
-        if (g_recover)
-            longjmp(*g_recover, 1);
-        fatal_unwind();
-    }
 
     /* -Wunused-variable / -Wunused-parameter: nothing read it and nothing
      * wrote it, in the whole function. A name the compiler invented for
