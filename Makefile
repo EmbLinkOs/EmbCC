@@ -1040,8 +1040,11 @@ EXTRA_TOOLS := embpack embmap embsim embsvd embflash embtrace embrt
 # links <triple>-gcc and -cc to embcc (which reads the target from its
 # name), -ar and -ranlib to embar, -objcopy to embpack, -size and -nm to
 # embmap. An existing toolchain file or Makefile then builds with EmbCC
-# with only PATH changed.
-TRIPLES ?= arm-none-eabi riscv64-unknown-elf riscv32-unknown-elf avr
+# with only PATH changed. By default the GCC names of the families built
+# (TARGETS): a name for a family left out would only be refused.
+TRIPLES ?= $(if $(call built,arm),arm-none-eabi) \
+           $(if $(call built,riscv),riscv64-unknown-elf riscv32-unknown-elf) \
+           $(if $(call built,avr),avr)
 install-gnu: install-files
 	@for tr in $(TRIPLES); do \
 	    for p in gcc:embcc cc:embcc $(BINUTILS_NAMES); do \
