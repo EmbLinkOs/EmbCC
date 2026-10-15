@@ -1,0 +1,10 @@
+pico: LED on (GP25) at 1.376 ms
+pico: LED off (GP25) at 1.876 ms
+pico: LED on (GP25) at 2.376 ms
+pico: LED off (GP25) at 2.876 ms
+pico: LED on (GP25) at 3.376 ms
+pico: LED off (GP25) at 3.876 ms
+pico: LED on (GP25) at 4.376 ms
+pico: LED off (GP25) at 4.381 ms
+pico: LED on (GP25) at 4.385 ms
+pico: LED off (GP25) at 4.385 ms

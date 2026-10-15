@@ -204,6 +204,14 @@ int main(void)
     IO_BANK0->GPIO0_CTRL = 2;                   /* UART0 TX */
     IO_BANK0->GPIO1_CTRL = 2;                   /* UART0 RX */
     puts_("pico\n");
+    /* EmbSim's ROM, word by word (the test holds it to its source) */
+    for (uint32_t a = 0; a < 0x34; a += 4) {
+        char nm[8] = "rom.";
+        nm[4] = "0123456789abcdef"[a >> 4];
+        nm[5] = "0123456789abcdef"[a & 15];
+        nm[6] = 0;
+        line(nm, REG(a));
+    }
 
     line("boot.VTOR", vtor);
     line("boot.rom-magic", rom_magic);
@@ -433,6 +441,12 @@ int main(void)
     puts_("'\n");
     NVIC_ICPR = 0xffffffffu;                    /* nothing left to come */
     puts_("done\n");
+#ifdef WATCHDOG_END
+    /* the watchdog: 2000 for a millisecond (it counts down twice a tick,
+     * RP2040-E1), and the chip resets */
+    WATCHDOG->LOAD = 2000;
+    WATCHDOG->CTRL = 1u << 30;
+#endif
     for (;;)
         ;
 }

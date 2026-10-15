@@ -1,0 +1,3 @@
+embsim: warning: a read at pc: SYSINFO.CHIP_ID reads its reset value while it is held in reset (RESETS.RESET.SYSINFO is 1)
+embsim: warning: a read at pc: PLL_SYS.CS reads its reset value while it is held in reset (RESETS.RESET.PLL_SYS is 1)
+embsim: warning: a read at pc: UART0.UARTCR reads its reset value while it is held in reset (RESETS.RESET.UART0 is 1)
