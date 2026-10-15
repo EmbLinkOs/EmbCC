@@ -75,6 +75,26 @@ EOF
         ' #' 'LATBSET = 0xBF860138' '  .global LATBSET' \
         'OFF000 = 0xBF810540' '  .global OFF000' \
         > "$1/xc32/32MZ2048EFH100/p32MZ2048EFH100.S"
+    # the memory map (XC32's linker's script, whose MEMORY block and
+    # EBASE EmbCC's own script takes) and the vector-offset module (where
+    # the OFFn registers are, and how many)
+    cat > "$1/xc32/32MZ2048EFH100/p32MZ2048EFH100.ld" <<'EOF'
+OUTPUT_ARCH(pic32mx)
+PROVIDE(_vector_spacing = 0x0001);
+PROVIDE(_ebase_address = 0x9D000000);
+MEMORY
+{
+  kseg0_program_mem     (rx)  : ORIGIN = 0x9D000000, LENGTH = 0x200000
+  kseg1_boot_mem              : ORIGIN = 0xBFC00000, LENGTH = 0x480
+  kseg0_data_mem       (w!x)  : ORIGIN = 0x80000000, LENGTH = 0x80000
+  config_BFC0FFC0             : ORIGIN = 0xBFC0FFC0, LENGTH = 0x4
+  config_BFC0FFC4             : ORIGIN = 0xBFC0FFC4, LENGTH = 0x4
+}
+SECTIONS { .text : { } >kseg0_program_mem ONLY_IF_RO }
+EOF
+    printf '%s\n' '  .section .__vector_offset_BF810540_data,data,keep,address(0xBF810540)' \
+        '  .word __vector_offset_0' '  .word __vector_offset_1' '  .word __vector_offset_2' \
+        > "$1/xc32/32MZ2048EFH100/p32MZ2048EFH100_voff_init.S"
 }
 mkpack "$out/pack" 1
 P="--target=mipsel-none-elf --mcu=32MZ2048EFH100"
@@ -237,6 +257,47 @@ printf '#pragma config FNOSC = SPLL\n' > "$out/nopart.c"
     fail "#pragma config without a part was accepted"
 grep -q 'needs the part' "$out/nopart.err" || { cat "$out/nopart.err"; fail "#pragma config without a part: no reason"; }
 echo "pic32: #pragma config sets its words' fields (a value or a number), and names what it refuses"
+
+# ---- 6. linking -------------------------------------------------------------------
+# EmbCC's startup (lib/pic32/crt0.S), the pack's processor module, and a
+# script made from the pack: the reset vector at 0xBFC00000; vector 1's
+# offset from EBASE in the table the startup copies into OFFn, the others
+# the default's; .data run from RAM and stored in flash; the configuration
+# word in place; and a HEX of physical addresses (embpack --physical)
+if [ -f "$(dirname "$EMBCC")/build/libc/mipsel-none-elf/pic32-crt0.o" ]; then
+    cat > "$out/isr.S" <<'EOF'
+    .section .vector_1, code, keep
+    .globl __vector_dispatch_1
+__vector_dispatch_1:
+    eret
+    nop
+EOF
+    printf '#include <xc.h>\n#pragma config FPLLIDIV = DIV_3\nvolatile int seed = 41;\nint main(void) { LATBSET = 1; return seed; }\n' > "$out/app.c"
+    # shellcheck disable=SC2086
+    "$EMBCC" $P --dfp="$out/pack" "$out/app.c" "$out/isr.S" -o "$out/app.elf" ||
+        fail "a PIC32 program does not link"
+    sym() { llvm-nm "$out/app.elf" | awk -v n="$1" '$3 == n { print $1 }'; }
+    [ "$(sym _reset)" = bfc00000 ] || fail "_reset is at $(sym _reset)"
+    llvm-readelf -l "$out/app.elf" | awk '$3 ~ /^0x8000/ && $4 ~ /^0x9d0/' | grep -q LOAD ||
+        fail ".data is not stored in flash and run from RAM"
+    tab=$(sym __vector_offset_table)
+    llvm-objcopy -O binary --only-section=.vector_offsets "$out/app.elf" "$out/off.bin"
+    got=$(od -An -tx4 "$out/off.bin" | tr -s ' \n' ' ' | sed 's/^ //; s/ $//')
+    d1=$(sym __vector_dispatch_1); def=$(sym __vector_offset_default)
+    want=$(printf '%08x %08x %08x' "0x$def" "$((0x$d1 - 0x9d000000))" "0x$def")
+    [ "$got" = "$want" ] || fail "the OFFn table is '$got', not '$want' (table at $tab)"
+    llvm-objcopy -O binary --only-section=.config_BFC0FFC4 "$out/app.elf" "$out/cw.bin"
+    [ "$(od -An -tx4 "$out/cw.bin" | tr -d ' ')" = fffffffa ] ||
+        fail "the configuration word at 0xBFC0FFC4 is not fffffffa"
+    "$(dirname "$EMBCC")/embpack" "$out/app.elf" -o "$out/app.hex" --format hex --physical ||
+        fail "embpack --physical"
+    grep -q '^:020000041FC0' "$out/app.hex" && grep -q '^:020000041D00' "$out/app.hex" &&
+        ! grep -q '^:020000049D00\|^:02000004BFC0' "$out/app.hex" ||
+        fail "the HEX is not at the physical 0x1D000000 and 0x1FC00000"
+    echo "pic32: linked by a script from the pack: reset at 0xBFC00000, OFFn's table, .data from flash, the config word, a physical HEX"
+else
+    echo "pic32: linking not tried: no build/libc/mipsel-none-elf/pic32-crt0.o (make rt-embedded)"
+fi
 
 # ---- 4. attributes ------------------------------------------------------------
 refuse() {          # refuse NAME SOURCE WANT

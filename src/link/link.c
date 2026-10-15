@@ -5727,12 +5727,48 @@ static unsigned long long ls_signature(struct linker *l, struct ls_script *sc)
     return h;
 }
 
+/* Two output sections over the same addresses, which GNU ld refuses: an
+ * image written so had one section's bytes over another's -- a PIC32
+ * exception handler longer than its 0x80-byte slot ran into the vectors
+ * placed after it. Sections a script places, by an address or a region;
+ * where they run, and where those stored in the image are stored. */
+static int ls_placed(const struct ls_osec *o)
+{
+    return !o->discard && o->size > 0 && (o->vregion || o->addr);
+}
+
+static void ls_check_overlap(struct ls_script *sc)
+{
+    for (int i = 0; i < sc->nosec; i++)
+        for (int j = i + 1; j < sc->nosec; j++) {
+            const struct ls_osec *a = &sc->osecs[i], *b = &sc->osecs[j];
+            if (!ls_placed(a) || !ls_placed(b))
+                continue;
+            if (a->vma < b->vma + b->size && b->vma < a->vma + a->size)
+                die("%s:%d: section %s at 0x%llx..0x%llx overlaps %s at "
+                    "0x%llx..0x%llx", b->file, b->line, b->name,
+                    (unsigned long long)b->vma,
+                    (unsigned long long)(b->vma + b->size), a->name,
+                    (unsigned long long)a->vma,
+                    (unsigned long long)(a->vma + a->size));
+            if (!a->noload && !b->noload && !a->nobits && !b->nobits &&
+                a->lma < b->lma + b->size && b->lma < a->lma + a->size)
+                die("%s:%d: section %s is stored at 0x%llx..0x%llx, over "
+                    "%s's 0x%llx..0x%llx", b->file, b->line, b->name,
+                    (unsigned long long)b->lma,
+                    (unsigned long long)(b->lma + b->size), a->name,
+                    (unsigned long long)a->lma,
+                    (unsigned long long)(a->lma + a->size));
+        }
+}
+
 static void ls_layout(struct linker *l, struct ls_script *sc, int orphan_mode)
 {
     if (l->machine != EM_ARM && l->machine != EM_RISCV &&
-        l->machine != EM_AVR)
-        die("-T: a linker script is supported for ARM, RISC-V and AVR "
-            "images only (this one is machine %u)", (unsigned)l->machine);
+        l->machine != EM_AVR && !(l->machine == EM_MIPS && l->elf32))
+        die("-T: a linker script is supported for ARM, RISC-V, AVR and "
+            "MIPS32 images only (this one is machine %u)",
+            (unsigned)l->machine);
     /* A region every output section names must exist, whether or not
      * anything ends up in the section: a typo in `> RAM` is a typo. */
     for (int k = 0; k < sc->nosec; k++) {
@@ -5792,6 +5828,7 @@ static void ls_layout(struct linker *l, struct ls_script *sc, int orphan_mode)
                 "another branch out of reach");
     }
     ls_layout_pass(l, sc, 1);        /* the same again, now reporting */
+    ls_check_overlap(sc);
     /* --rom-limit with a script: what is STORED in flash -- every loaded
      * output section by its load address, from the start of the code --
      * must fit, as without one. On AVR that is program space, below the

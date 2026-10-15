@@ -98,8 +98,9 @@ struct gas {
     int nfix, capfix;
     const struct gas_target *tgt;
     /* How many times each numeric local label has been DEFINED so far in
-     * this pass. Reset between passes so both agree. */
-    int local_n[10];
+     * this pass. Reset between passes so both agree. (NLOCAL of them: GNU
+     * as takes any number, and a startup file counts past 9.) */
+    int local_n[100];
     int cur;                /* current section */
     int npcrel;             /* .Lpcrel_hiN counter */
     int line;               /* for diagnostics */
@@ -558,7 +559,7 @@ static long parse_string(struct gas *g, const char *p, unsigned char *buf,
  * disagree about which `1:` a forward reference means, and the difference
  * shows up as a jump to the wrong loop.
  */
-#define NLOCAL 10
+#define NLOCAL ((int)(sizeof ((struct gas *)0)->local_n / sizeof (int)))
 
 static void local_name(char *buf, size_t n, int digit, int inst)
 {

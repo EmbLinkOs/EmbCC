@@ -56,6 +56,14 @@ done
 rm -f "$out/librt.a"
 "$AR" rcs "$out/librt.a" "$out"/rt/*.o
 
+# PIC32 (mipsel with --mcu=): EmbCC's startup, the same for every part;
+# the driver makes each part's linker script from its device pack.
+if [ "$triple" = mipsel-none-elf ]; then
+    "$EMBCC" --target=mipsel-none-elf -c "$here/lib/pic32/crt0.S" \
+        -o "$out/pic32-crt0.o" || {
+        echo "build-rt: lib/pic32/crt0.S does not assemble" >&2; exit 1; }
+fi
+
 # AVR: the startup and the linker script of each part -mmcu= takes
 # (src/arch/avr/options.c), which the driver links when -mmcu= names it:
 # crt<part>.o from lib/avr/crt.S, and <part>.ld from lib/avr/avr5.ld with

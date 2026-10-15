@@ -789,6 +789,8 @@ static int apply_wl(struct link_opts *lo)
 static int compile(const char *in, const char *out, int pp_only);
 static int has_gas_suffix(const char *s);
 static int assemble_file(const char *in, const char *out);
+static const char *pic32_dfp_dir(void);
+static int pic32_script(const char *path);
 
 /* An object or an archive, which goes to the link as it is. */
 static int has_link_input_suffix(const char *p)
@@ -976,6 +978,41 @@ static int compile_and_link(const char *in, const char *out)
             have_avr_crt = 1;
         }
     }
+    /* A PIC32 part: EmbCC's startup (lib/pic32/crt0.S, built beside the
+     * mipsel runtime), the device pack's processor module (each SFR's
+     * symbol at its address) assembled for this link, and -- when the
+     * link names no script -- one made from the pack (pic32_script). The
+     * pack's own script is XC32's linker's, which places what it leaves
+     * out and initialises .data from a table only that linker writes. */
+    static char pic32_ld[1024], pic32_proc[1024], pic32_crt[1024];
+    int have_pic32_crt = 0, have_pic32_proc = 0, pic32_own_script = 0;
+    if (target_pic32_part()) {
+        const char *x = out ? out : "a.out";
+        if (!lo.script) {
+            snprintf(pic32_ld, sizeof pic32_ld, "%s.embcc-pic32.ld", x);
+            if (pic32_script(pic32_ld))
+                return 1;
+            lo.script = pic32_ld;
+            pic32_own_script = 1;
+        }
+        char src[1024];
+        snprintf(src, sizeof src, "%s/xc32/%s/p%s.S", pic32_dfp_dir(),
+                 target_pic32_part(), target_pic32_part());
+        snprintf(pic32_proc, sizeof pic32_proc, "%s.embcc-proc.o", x);
+        if (assemble_file(src, pic32_proc) != 0)
+            return 1;
+        have_pic32_proc = 1;
+        if (!g_nostdlib && !g_nostartfiles) {
+            if (!paths_target_file(lib_triple(), "pic32-crt0.o", pic32_crt,
+                                   sizeof pic32_crt)) {
+                fprintf(stderr, "embcc: error: no pic32-crt0.o for %s: the "
+                        "MIPS runtime is not built or not installed "
+                        "(make rt-embedded)\n", lib_triple());
+                return 1;
+            }
+            have_pic32_crt = 1;
+        }
+    }
     lo.libdirs = g_libdirs;
     lo.nlibdirs = g_nlibdirs;
     lo.undefs = g_undefs;
@@ -1062,6 +1099,10 @@ static int compile_and_link(const char *in, const char *out)
         inputs[n++] = crt1;
     if (have_avr_crt)
         inputs[n++] = avr_crt;
+    if (have_pic32_crt)
+        inputs[n++] = pic32_crt;
+    if (have_pic32_proc)
+        inputs[n++] = pic32_proc;
     if (in)
         inputs[n++] = obj;
     for (int k = 0; k < g_nlink_in; k++) {
@@ -1104,6 +1145,10 @@ static int compile_and_link(const char *in, const char *out)
     rc = link_bounded(inputs, n, exe, &lo);
     if (in)
         remove(obj);
+    if (have_pic32_proc)
+        remove(pic32_proc);
+    if (pic32_own_script && rc == 0)
+        remove(pic32_ld);        /* kept beside a failed link, to read */
     for (int k = 0; k < nfound; k++)
         free(found[k]);
     return rc;
@@ -1774,6 +1819,119 @@ static const char *pic32_dfp_dir(void)
                    target_pic32_part());
     }
     return dir;
+}
+
+/* A PIC32's linker script, made from its device pack: the memory map of
+ * xc32/<part>/p<part>.ld (its MEMORY block, EBASE and the vector
+ * spacing), and from p<part>_voff_init.S where the OFFn registers are and
+ * how many. The sections are EmbCC's, for lib/pic32/crt0.S: the reset and
+ * boot exception vectors in boot flash; the exception vectors at EBASE,
+ * then each interrupt's .vector_N, its offset from EBASE in a table the
+ * startup copies into OFFn (an interrupt with no handler, the default's);
+ * code and constants in program flash, .data stored after them and copied
+ * to RAM, .bss after it; the stack at RAM's top; each configuration word
+ * in its own region. 0, or 1 having said why not. */
+static int pic32_script(const char *path)
+{
+    const char *part = target_pic32_part(), *dfp = pic32_dfp_dir();
+    char p[1024];
+    long len;
+    snprintf(p, sizeof p, "%s/xc32/%s/p%s.ld", dfp, part, part);
+    char *ld = src_read(p, &len);
+    if (!ld) {
+        fprintf(stderr, "embcc: error: the device pack has no %s\n", p);
+        return 1;
+    }
+    char *mem = strstr(ld, "\nMEMORY");
+    char *mend = mem ? strstr(mem, "\n}") : NULL;
+    if (!mend) {
+        fprintf(stderr, "embcc: error: %s has no MEMORY block\n", p);
+        free(ld);
+        return 1;
+    }
+    unsigned long ebase = 0x9D000000UL, spacing = 1;
+    char *q = strstr(ld, "_ebase_address = ");
+    if (q)
+        ebase = strtoul(q + 17, NULL, 0);
+    q = strstr(ld, "_vector_spacing = ");
+    if (q)
+        spacing = strtoul(q + 18, NULL, 0);
+    /* the OFFn registers: the address the init module's table is placed
+     * at, and its .word count; none on a part whose vectors are spaced
+     * evenly (PIC32MX) */
+    unsigned long offregs = 0;
+    int nvec = 0;
+    snprintf(p, sizeof p, "%s/xc32/%s/p%s_voff_init.S", dfp, part, part);
+    char *vo = src_read(p, &len);
+    if (vo) {
+        q = strstr(vo, "address(");
+        if (q)
+            offregs = strtoul(q + 8, NULL, 0);
+        for (q = vo; (q = strstr(q, ".word __vector_offset_")) != NULL; q++)
+            nvec++;
+        free(vo);
+    }
+    FILE *f = fopen(path, "w");
+    if (!f) {
+        fprintf(stderr, "embcc: error: cannot write %s\n", path);
+        free(ld);
+        return 1;
+    }
+    fprintf(f, "/* EmbCC's linker script for the PIC32 %s, made from its "
+               "device pack */\nENTRY(_reset)\n", part);
+    fwrite(mem + 1, 1, (size_t)(mend - mem) + 2, f);
+    fprintf(f, "\n_ebase_address = 0x%08lX;\n_vector_spacing = 0x%lX;\n"
+               "__vector_offset_regs = 0x%08lX;\n__vector_offset_count = %d;\n"
+               "PROVIDE(_min_stack_size = 0x400);\n"
+               "PROVIDE(_min_heap_size = 0);\n\nSECTIONS\n{\n",
+            ebase, spacing, offregs, nvec);
+    fprintf(f,
+        "  .reset 0xBFC00000 : { KEEP(*(.reset)) KEEP(*(.reset.startup)) } > kseg1_boot_mem\n"
+        "  .bev_excpt 0xBFC00380 : { KEEP(*(.bev_handler)) } > kseg1_boot_mem\n"
+        "  .simple_tlb_refill_excpt _ebase_address : { KEEP(*(.simple_tlb_refill_vector)) } > kseg0_program_mem\n"
+        "  .cache_err_excpt _ebase_address + 0x100 : { KEEP(*(.cache_err_vector)) } > kseg0_program_mem\n"
+        "  .app_excpt _ebase_address + 0x180 : { KEEP(*(.gen_handler)) } > kseg0_program_mem\n"
+        "  .vectors _ebase_address + 0x200 :\n  {\n"
+        "    __vector_offset_default = . - _ebase_address;\n"
+        "    KEEP(*(.vector_default))\n");
+    for (int k = 0; k < nvec; k++)
+        fprintf(f, "    . = ALIGN(4);\n    __vector_offset_%d = DEFINED(__vector_dispatch_%d)"
+                   " ? . - _ebase_address : __vector_offset_default;\n"
+                   "    KEEP(*(.vector_%d))\n", k, k, k);
+    fprintf(f, "  } > kseg0_program_mem\n"
+        "  .text : { *(.text .text.* .stub) } > kseg0_program_mem\n"
+        "  .rodata : { *(.rodata .rodata.* .rodata1) } > kseg0_program_mem\n"
+        "  .init_array : { . = ALIGN(4); __init_array_start = .;\n"
+        "    KEEP(*(SORT(.init_array.*))) KEEP(*(.init_array)) __init_array_end = .; } > kseg0_program_mem\n"
+        "  .vector_offsets : { . = ALIGN(4); __vector_offset_table = .;\n");
+    for (int k = 0; k < nvec; k++)
+        fprintf(f, "    LONG(__vector_offset_%d)\n", k);
+    fprintf(f, "  } > kseg0_program_mem\n"
+        "  .data : { . = ALIGN(4); _data_begin = .; *(.data .data.* .sdata .sdata.*)\n"
+        "    . = ALIGN(4); _data_end = .; } > kseg0_data_mem AT > kseg0_program_mem\n"
+        "  _data_load = LOADADDR(.data);\n"
+        "  _gp = _data_begin + 0x7FF0;\n"
+        "  .bss (NOLOAD) : { . = ALIGN(4); _bss_begin = .; *(.bss .bss.* .sbss .sbss.* COMMON)\n"
+        "    . = ALIGN(4); _bss_end = .; } > kseg0_data_mem\n"
+        "  _end = .;\n"
+        "  _stack = ORIGIN(kseg0_data_mem) + LENGTH(kseg0_data_mem);\n"
+        "  ASSERT(_stack - _end >= _min_stack_size + _min_heap_size,\n"
+        "         \"RAM is too small for .data, .bss, the heap and the stack\")\n");
+    /* each configuration word's region: config_XXXXXXXX */
+    for (q = mem; q < mend && (q = strstr(q, "\n  config_")) != NULL && q < mend; q++) {
+        char nm[32];
+        int k = 0;
+        for (const char *c = q + 3; k < 31 && ((*c >= '0' && *c <= '9') ||
+             (*c >= 'A' && *c <= 'Z') || (*c >= 'a' && *c <= 'z') ||
+             *c == '_'); c++)
+            nm[k++] = *c;
+        nm[k] = 0;
+        fprintf(f, "  .%s : { KEEP(*(.%s)) } > %s\n", nm, nm, nm);
+    }
+    fprintf(f, "  /DISCARD/ : { *(.pdr) *(.MIPS.abiflags) *(.reginfo) *(.comment) }\n}\n");
+    fclose(f);
+    free(ld);
+    return 0;
 }
 
 static void incdirs_with_defaults(void)
