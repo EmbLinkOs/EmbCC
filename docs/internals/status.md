@@ -575,12 +575,8 @@ Any `-W` name that is not one of EmbCC's warnings
 embcc: warning: -Wcast-align is not a warning EmbCC has, so it turns nothing on (--help-warnings lists them)
 ```
 
-`-std=` selects no dialect. `-std=c89` and `-std=c99` are accepted with
-a warning:
-
-```text
-embcc: warning: -std=c89 is accepted but not enforced; EmbCC has one C dialect, C11 with the GNU extensions, and will compile newer constructs anyway
-```
+`-std=` selects the language, C89 to C2y and C++98 to C++26, as GCC
+does ([Invoking EmbCC](../manual/invoking.md#--stdstandard)).
 
 ## Known defects
 

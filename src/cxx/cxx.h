@@ -626,6 +626,7 @@ struct cfunc {
     int is_explicit, is_virtual, is_constexpr;
     int is_consteval;         /* an immediate function (7.7) */
     int is_deleted, is_defaulted;
+    const char *delete_msg;   /* C++26's `= delete("why")`: why */
     int is_implicit;          /* declared by the compiler */
     int special;              /* an implicit one's kind: SP_* */
     int trivial;              /* ... and it runs no code (a C struct copy,

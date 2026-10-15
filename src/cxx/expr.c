@@ -2018,7 +2018,9 @@ struct cexpr *make_call(struct cfunc *fn, struct cexpr *obj,
         obj = NULL;
     }
     if (fn->is_deleted)
-        cx_error(at, "use of deleted function '%s'", fn->name);
+        cx_error(at, "use of deleted function '%s'%s%s", fn->name,
+                 fn->delete_msg ? ": " : "",
+                 fn->delete_msg ? fn->delete_msg : "");
     /* (the access check is above, before alias_of was followed) */
     func_deduce_return(fn, at);
     struct cty *ret = fn->type->to;
@@ -2134,7 +2136,9 @@ struct cfunc *dealloc_fn(struct cty *t, int global, int arr, int sized)
             if (f->alias_of)
                 f = f->alias_of;
             if (f->is_deleted)
-                cx_error(cx_cur(), "use of deleted function '%s'", name);
+                cx_error(cx_cur(), "use of deleted function '%s'%s%s", name,
+                         f->delete_msg ? ": " : "",
+                         f->delete_msg ? f->delete_msg : "");
             f->used = 1;
             return f;
         }
@@ -2692,7 +2696,9 @@ static struct cexpr *overloaded(const char *name, struct cexpr **args, int na,
     }
     if (f->cls && !f->is_static) {
         if (f->is_deleted)
-            cx_error(at, "use of deleted function '%s'", f->name);
+            cx_error(at, "use of deleted function '%s'%s%s", f->name,
+                     f->delete_msg ? ": " : "",
+                     f->delete_msg ? f->delete_msg : "");
         if ((f->is_implicit || f->is_defaulted) && f->trivial &&
             (f->special == SP_COPY_ASSIGN || f->special == SP_MOVE_ASSIGN)) {
             /* a trivial assignment is the struct's bytes */
@@ -5872,11 +5878,53 @@ struct cexpr *expr_assign(int op, struct cexpr *l, struct cexpr *r)
     return assign(op, l, r);
 }
 
+/* GNU's `x ?: y`: x when it is true, else y, x evaluated once --
+ *     ({ T __t = x; __t ? __t : y; })
+ * T being x's type, decayed and unqualified. One of class type is not
+ * taken (its copy is C++'s own question), nor one outside a function,
+ * where there is no statement for the temporary. */
+static struct cexpr *gnu_elvis(struct cexpr *c, const struct ctok *at)
+{
+    struct cexpr *x = rvalue(c);
+    struct cty *t = ct_unqual(x->t);
+    if (t->k == CT_CLASS)
+        cx_error(at, "GNU's '?:' with no middle operand, of class type %s, "
+                 "is not supported", ct_name(t));
+    if (!cx_curfn)
+        cx_error(at, "GNU's '?:' with no middle operand is supported in a "
+                 "function only");
+    struct cvar *v = cx_new_local(NULL, t, at);
+    v->init = convert(x, t, "?:");
+    struct cstmt *d = st_new(S_DECL);
+    d->line = at->t.line;
+    d->file = at->file;
+    d->var = v;
+    d->blk = cx_curblk;
+    struct cexpr *r1 = ex_new(E_VAR, t, VC_LVALUE);
+    struct cexpr *r2 = ex_new(E_VAR, t, VC_LVALUE);
+    r1->var = r2->var = v;
+    struct cexpr *cond = conditional(r1, r2, expr_parse_assign());
+    struct cstmt *es = st_new(S_EXPR);
+    es->e = cond;
+    es->line = at->t.line;
+    es->file = at->file;
+    d->next = es;
+    struct cstmt *b = st_new(S_BLOCK);
+    b->body = d;
+    b->blk = cx_curblk;
+    struct cexpr *e = ex_new(E_STMTEXPR, ct_unqual(cond->t), VC_PRVALUE);
+    e->body = b;
+    return e;
+}
+
 struct cexpr *expr_parse_cond(void)
 {
     struct cexpr *c = parse_binary(1);
+    const struct ctok *qat = cx_cur();
     if (!cx_accept(TOK_QUESTION))
         return c;
+    if (cx_accept(TOK_COLON))
+        return gnu_elvis(c, qat);
     struct cexpr *a = expr_parse();
     cx_expect(TOK_COLON, "':' in ?:");
     struct cexpr *b = expr_parse_assign();

@@ -69,11 +69,13 @@ embcc: error: unknown language 'LANGUAGE' for -x (c or c++)
 
 ### Language level: `--std=STANDARD`
 
-Without `--std=`, a C++ unit is compiled as `--std=gnu++20`. EmbCC always
-parses C++20 (with the C++23 additions listed below); `--std=` selects the
-value of `__cplusplus`, the feature-test macros, and whether
-`__STRICT_ANSI__` is defined. It does not make EmbCC reject a newer
-construct.
+Without `--std=`, a C++ unit is compiled as `--std=gnu++20`. `--std=`
+selects the value of `__cplusplus`, the feature-test macros, whether
+`__STRICT_ANSI__` is defined, and the language of the program's own code:
+its keywords, its tokens and which constructs it may use, as GCC decides
+them ([Invoking EmbCC](invoking.md#--stdstandard)). A system header is
+read as C++20 and later whatever the standard: EmbCC's C++ library is
+written in it.
 
 | `--std=` | `__cplusplus` |
 |---|---|
@@ -90,11 +92,11 @@ construct.
   libstdc++ does not treat `__int128` as an integer type.
 - `--std=c++20` and the earlier strict spellings do not recognize
   `#elifdef` and `#elifndef`. Every other mode does.
-- A standard earlier than C++20 draws a warning, because it is not
-  enforced:
+- A construct newer than the standard is refused by name, as GCC
+  refuses it:
 
   ```text
-  embcc: warning: -std=c++17 sets the standard macros but is not enforced; EmbCC parses C++20 and will accept newer constructs
+  embcc: f.cc:2:1: error: a deduced return type is C++14's, and the standard here is C++11
   ```
 
 - `--std=c++23` and `--std=c++26` change only `__cplusplus`; the

@@ -380,12 +380,24 @@ of `98`, `03`, `11`, `0x`, `14`, `1y`, `17`, `1z`, `20`, `2a`, `23`, `2b`,
 `26` and `2c`. These set the standard macros that libraries choose code
 by: `__cplusplus` (`199711L`, `201103L`, `201402L`, `201703L`, `202002L`,
 `202302L`, or `202400L` for C++26), the feature-test macros, and
-`__STRICT_ANSI__` for the `c++NN` spellings. The parser still reads C++20.
-A year before 2020 prints
+`__STRICT_ANSI__` for the `c++NN` spellings. And they decide the
+program's language, as GCC's do: the keywords (C++11's `constexpr` and
+`nullptr` are names in C++98, C++20's `concept` and `requires` before
+C++20), the tokens (digit separators from C++14, `u8'c'` from C++17,
+`<=>` from C++20, `u8""` of type `const char8_t[]` from C++20), and the
+constructs each standard introduced: in C++98 `auto` is a storage class
+and `>>` does not close two template argument lists, deduced return types
+and generic lambdas are C++14's, `template<auto>` and class template
+argument deduction C++17's, `using enum` C++20's. An older standard
+refuses a newer construct by name:
 
 ```text
-embcc: warning: -std=c++17 sets the standard macros but is not enforced; EmbCC parses C++20 and will accept newer constructs
+embcc: f.cc:3:1: error: class template argument deduction is C++17's, and the standard here is C++14
 ```
+
+A system header is read with all of EmbCC's C++ whatever `--std=` says:
+EmbCC's own C++ library is C++20 throughout. The cases are checked
+against GCC 16 in `tests/std/cxx-corpus.txt`.
 
 The default for C++ is equivalent to `--std=gnu++20`.
 

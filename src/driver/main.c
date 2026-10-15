@@ -4648,17 +4648,10 @@ int main(int argc, char **argv)
                     return 1;
                 }
                 cpp_set_cxx_std(year, strict);
+                /* the macros (libstdc++ picks its code by them) and the
+                 * language: keywords, tokens and the constructs each
+                 * standard has (lex_set_cxx_std, cx_need_std) */
                 lex_set_cxx_std(year, !strict);
-                /* The MACROS follow the year -- libstdc++ picks its
-                 * code by them -- but the language EmbCC parses is
-                 * C++20 whatever was asked. A lambda under -std=c++98
-                 * compiles, which is worth saying once rather than
-                 * letting a build believe it checked. */
-                if (year < 2020)
-                    fprintf(stderr, "embcc: warning: %s sets the standard "
-                                    "macros but is not enforced; EmbCC "
-                                    "parses C++20 and will accept newer "
-                                    "constructs\n", opt_typed(argv[i]));
             } else {
                 /* A C standard, as GCC names them: its year sets
                  * __STDC_VERSION__ and the keywords (lex_set_c_std), and

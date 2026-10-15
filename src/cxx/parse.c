@@ -2158,6 +2158,10 @@ static struct cfunc *declare_function(struct dspec *ds, struct declarator *d,
     /* (an explicit object member function has no `this`: C sees the
      * object as its first parameter) */
     f->is_static = ds->storage == SK_STATIC || ft->xobj;
+    /* (C++23: an operator[] of any number of parameters) */
+    if (cls && d->name && !strcmp(d->name, "operator[]") &&
+        ft->np - (ft->xobj ? 1 : 0) != 1)
+        cx_need_std(d->at, 2023, "an operator[] of other than one parameter");
     /* a class's operator new/delete are static members (11.12) */
     if (cls && (strncmp(d->name, "operator new", 12) == 0 ||
                 strncmp(d->name, "operator delete", 15) == 0))
@@ -2305,8 +2309,10 @@ static const char *local_cname(const char *name)
     if (g && (g->k == CS_VAR || (g->k == CS_FUNC && g->fns &&
                                  g->fns->c_linkage)))
         return cx_fmt("%s__%d", name, cx_uid());
-    if (strncmp(name, "__cx", 4) == 0)
-        return cx_fmt("%s__%d", name, cx_uid());
+    if (strncmp(name, "__cx", 4) == 0 || strcmp(name, "_") == 0)
+        return cx_fmt("%s__%d", name, cx_uid());   /* (_: C++26's placeholder,
+                                                    * declared any number of
+                                                    * times) */
     return name;
 }
 
@@ -2335,6 +2341,22 @@ static struct cstmt *parse_stmt(void);
 static struct cstmt *parse_block_body(struct cscope *s);
 static void cx_resync(int top);
 static void mark_nrvo(struct cfunc *f);
+
+/* C++26's `= delete("why")`: the reason, said where the function is
+ * used. GCC takes it under every standard. */
+static void delete_reason(struct cfunc *f)
+{
+    if (cx_kind() != TOK_LPAREN)
+        return;
+    cx_advance();
+    if (cx_kind() != TOK_STR)
+        cx_error(cx_cur(), "expected a string literal saying why the "
+                           "function is deleted");
+    f->delete_msg = cx_cur()->t.text;
+    while (cx_kind() == TOK_STR)
+        cx_advance();
+    cx_expect(TOK_RPAREN, "')' after a deleted function's reason");
+}
 
 /* How many local statics named `name` function fn declared before: the
  * discriminator that tells them apart in their mangled names. */
@@ -2464,6 +2486,26 @@ static void range_for_std(const struct ctok *at)
     }
 }
 
+/* C++11's constexpr function is one return statement (and what declares
+ * nothing: static_assert, typedef, using); C++14 relaxed it, and GCC
+ * refuses the rest under C++11 */
+static void constexpr_body_std(struct cfunc *f, const struct ctok *at)
+{
+    if (!f->is_constexpr || f->is_ctor || !f->body || cx_std_at(at) >= 2014)
+        return;
+    int returns = 0, other = 0;
+    for (struct cstmt *s = f->body->body; s; s = s->next) {
+        if (s->k == S_RETURN)
+            returns++;
+        else if (!(s->k == S_EXPR && !s->e) &&
+                 !(s->k == S_BLOCK && !s->body))
+            other++;
+    }
+    if (returns != 1 || other)
+        cx_error(at, "a constexpr function of more than one return statement "
+                 "is C++14's, and the standard here is C++11");
+}
+
 static void define_function(struct cfunc *f, struct cty *ft)
 {
     /* a function-try-block: `try` here, or just before a delayed body */
@@ -2558,8 +2600,10 @@ static void define_function(struct cfunc *f, struct cty *ft)
     if (cx_kind() != TOK_LBRACE)
         cx_error(cx_cur(), "expected '{' to begin the body of '%s'", f->name);
     struct cscope *bs = scope_push(SC_BLOCK, NULL);
+    const struct ctok *body_at = cx_cur();
     f->body = parse_block_body(bs);
     scope_pop();
+    constexpr_body_std(f, body_at);
     if (fn_try) {
         /* a function-try-block's handlers, the parameters in scope */
         f->fn_try = parse_handlers(at);
@@ -4121,6 +4165,7 @@ static void parse_member(struct cclass *c, int *access)
                     f->is_defaulted = 1;
                 } else if (cx_accept(TOK_CX_DELETE)) {
                     f->is_deleted = 1;
+                    delete_reason(f);
                 } else if (cx_kind() == TOK_NUM && cx_cur()->t.num == 0) {
                     if (!f->is_virtual)
                         cx_error(cx_cur(), "only a virtual function can be "
@@ -4929,6 +4974,7 @@ static void parse_declaration(int toplevel, struct cstmt **out)
                         class_default_outside(f);
                 } else if (cx_accept(TOK_CX_DELETE)) {
                     f->is_deleted = 1;
+                    delete_reason(f);
                 } else {
                     cx_error(cx_cur(), "expected 'default' or 'delete'");
                 }
@@ -4985,8 +5031,11 @@ static void parse_declaration(int toplevel, struct cstmt **out)
             s->file = d.at->file;
             s->var = v;
             struct csym *old = scope_find_here(cx_scope, d.name);
+            /* (C++26's placeholder: any number of locals named _,
+             * which GCC takes under every standard) */
             if (old && (old->k == CS_VAR) &&
-                (cx_scope->k == SC_BLOCK || cx_scope->k == SC_PARAMS))
+                (cx_scope->k == SC_BLOCK || cx_scope->k == SC_PARAMS) &&
+                strcmp(d.name, "_") != 0)
                 cx_error(d.at, "redeclaration of '%s'", d.name);
             struct csym *y = scope_add(cx_scope, CS_VAR, d.name);
             y->var = v;
@@ -8611,9 +8660,10 @@ struct cfunc *func_decl_replay(struct ctemplate *t, struct cscope *ps)
     if (t->decl0_tok)
         decl0_defaults(t, f);
     if (cx_accept(TOK_ASSIGN)) {
-        if (cx_accept(TOK_CX_DELETE))
+        if (cx_accept(TOK_CX_DELETE)) {
             f->is_deleted = 1;
-        else if (cx_accept(TOK_KW_DEFAULT))
+            delete_reason(f);
+        } else if (cx_accept(TOK_KW_DEFAULT))
             f->is_defaulted = 1;
     } else if (cx_kind() == TOK_LBRACE || cx_kind() == TOK_COLON) {
         skip_body(f);
