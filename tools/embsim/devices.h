@@ -83,16 +83,51 @@ void *pic24_rtcc_create(struct sim *s, struct rf_periph *p);
 /* the hardware sets interrupt irq's flag (IFSx), as the EDC numbers it;
  * the flag; an interrupt's number by the EDC's name (T1, ADC1), or -1 */
 void pic24_irq(struct sim *s, int irq);
+/* and at time `when` (struct sim's cycles), within the instruction: a
+ * model that keeps time by the cycle (the capture and compare modules) */
+void pic24_irq_at(struct sim *s, int irq, u64 when);
 int pic24_irq_flag(struct sim *s, int irq);
 int pic24_irq_enabled(struct sim *s, int irq);
 int pic24_irq_named(struct sim *s, const char *name);
-/* fn told of each interrupt event as it happens, whatever its flag (the
- * DMA's triggers): one listener */
-void pic24_irq_listen(struct sim *s, void (*fn)(void *ctx, int irq), void *ctx);
+/* fn told of each event as it happens: an interrupt's (its number,
+ * whatever its flag: the DMA's triggers), and the sync outputs of the
+ * output compare and CCP modules (PIC24_EV_OC_SYNC + n, its timer
+ * matching OCnRS; PIC24_EV_CCP_SYNC + n, its time base resetting), the
+ * sources the capture and compare modules synchronize to. pic24_event
+ * tells them of one, with its time; pic24_event_named names it as
+ * SYNCSEL's tables do (T2, IC1, CCP4, ADC1; OC1sync, CCP2sync) */
+#define PIC24_EV_OC_SYNC 1000
+#define PIC24_EV_CCP_SYNC 1100
+void pic24_irq_listen(struct sim *s, void (*fn)(void *ctx, int ev, u64 when),
+                      void *ctx);
+void pic24_event(struct sim *s, int ev, u64 when);
+int pic24_event_named(struct sim *s, const char *name);
+/* Timer n's (1 to 5) instruction cycles a count while it runs on the
+ * instruction clock, else 0 (pic24-tmr.c) */
+u32 pic24_timer_div(struct sim *s, int n);
+/* a PIC24's pins (pic32-gpio.c): a pin by a name the EDC gives it (RG6,
+ * OCM1A, RP21, IC4) as port * 32 + bit, or -1; the level it is at; the
+ * pin the PPS maps an input to (its RPINRx field: "IC1R"), or -1 */
+int pic24_pin(struct sim *s, const char *name);
+int pic24_pin_level(struct sim *s, int pin);
+int pic24_pin_of_input(struct sim *s, const char *field);
+/* a peripheral's output, from time `when` (struct sim's cycles): the PPS
+ * output function fn (the data sheet's Table 11-4 numbers it) or a pin
+ * of the peripheral's own at level 0 or 1, or -1 when it lets the pin go.
+ * Driven, the pin is the peripheral's, whatever TRISx and LATx say */
+void pic24_pps_out(struct sim *s, int fn, int level, u64 when);
+void pic24_pin_out(struct sim *s, int pin, int level, u64 when);
+/* fn told when a pin may have changed level (the time it did), and the
+ * ports told of a change the PPS made */
+void pic24_pin_watch(struct sim *s, void (*fn)(void *ctx, u64 when), void *ctx);
+void pic24_pins_changed(struct sim *s);
 extern const struct dev_ops pic24_dma_ops;
 void *pic24_dma_create(struct sim *s, struct rf_periph *p);
-extern const struct dev_ops pic24_i2c_ops;
+extern const struct dev_ops pic24_i2c_ops, pic24_ic_ops, pic24_oc_ops, pic24_ccp_ops;
 void *pic24_i2c_create(struct sim *s, struct rf_periph *p);
+void *pic24_ic_create(struct sim *s, struct rf_periph *p);
+void *pic24_oc_create(struct sim *s, struct rf_periph *p);
+void *pic24_ccp_create(struct sim *s, struct rf_periph *p);
 
 /* the PIC32 and PIC24 boards' own: LEDs, buttons, the Explorer 16/32's
  * sensors, LCD and EEPROM (a dev_desc's type names the board) */

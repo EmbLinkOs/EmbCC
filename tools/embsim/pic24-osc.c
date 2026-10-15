@@ -158,6 +158,7 @@ static void pps_write(void *ctx, u32 off, int n, u32 v)
     if (con && (con->value & 0x40))
         return;                                 /* IOLOCK */
     rf_write(q->p, off, n, v);
+    pic24_pins_changed(q->s);                   /* a pin's output, or an input's pin */
 }
 
 const struct dev_ops pic24_pps_ops = {

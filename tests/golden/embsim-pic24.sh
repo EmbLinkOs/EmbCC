@@ -29,9 +29,12 @@
 #     (the write latches, NVMKEY's unlock, a program and an erase, WRERR),
 #     the RTCC (its BCD carries from 23:59:58 on 31 December 2099, its
 #     alarm, WRLOCK and its unlock, a timestamp), the DMA controller (a
-#     copy on CHREQ, DMAH's limit, a channel Timer2 triggers) and I2C1 as
-#     a master on a bus with no slave (start, NACK, collision, overflow,
-#     stop).
+#     copy on CHREQ, DMAH's limit, a channel Timer2 triggers), I2C1 as a
+#     master on a bus with no slave (start, NACK, collision, overflow,
+#     stop), output compare into input capture through the PPS (OC1's
+#     pulse and PWM, IC1 and IC2 synchronized to it, the prescaler, the
+#     FIFO's overflow) and the CCPs (SCCP5's PWM captured by SCCP4 on the
+#     same pin, a triggered timer).
 #  6. The analyses on the PIC24 core (python3 builds the ELF file they
 #     read, of tests/golden/embsim/pic24-calls.s, with pic24-elf.py):
 #     --profile's calls (CALL, RCALL, an interrupt, a trap), --stack-report
@@ -137,11 +140,13 @@ printf '%s\n' \
     'R 0000 0100 0106 0001 0020 0300 0000 8800 8000 0008 0000' \
     'D 1111 4444 0000 0030 0058 0080 0001 0000 0002 1111 0022 0000 6230 0052 4010' \
     'C 0008 0002 4009 8088 800A 804A 00FF 8048 8050' \
+    'P 000A 1C01 0004 001A 0064 0190 0000 0002 1C3B 1C23 0002 0000 0002 0002 0006' \
+    'Q 000A 0032 0040 8000 0003 0000 0000 0080 0001 0000' \
     '.' > "$out/periph.want"
 cmp -s "$out/periph.out" "$out/periph.want" || {
     diff "$out/periph.want" "$out/periph.out"; cat "$out/periph.err"
     fail "pic24-periph.s: not the data sheet's"; }
-echo "embsim-pic24: the interrupt-on-change, the flash controller (latches, unlock, program, erase, WRERR), the RTCC (its carries to 2000, its alarm, WRLOCK, a timestamp), DMA (CHREQ, DMAH, Timer2's trigger), I2C1 on an empty bus"
+echo "embsim-pic24: the interrupt-on-change, the flash controller (latches, unlock, program, erase, WRERR), the RTCC (its carries to 2000, its alarm, WRLOCK, a timestamp), DMA (CHREQ, DMAH, Timer2's trigger), I2C1 on an empty bus, OC1 into IC1 and IC2 through the PPS (a pulse, PWM, sync, prescaler, overflow), SCCP5's PWM into SCCP4's capture, CCP6's trigger"
 
 # ---- 6. the analyses ------------------------------------------------------------------
 # --disassemble: each example of the manual beside what EmbSim makes of it

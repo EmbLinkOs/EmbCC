@@ -28,7 +28,26 @@
 ;      written then a collision, IWCOL; then ACKSTAT: no acknowledge),
 ;      IWCOL cleared, a byte received (RBF), a second with RBF still set
 ;      (I2COV), I2C1RCV (FF: the pull-ups) and RBF cleared by reading it,
-;      a stop (STAT.P).
+;      a stop (STAT.P);
+;   P  OC1's output on RP24 through the PPS, captured from it by IC1 and
+;      IC2 (IC1R, IC2R: RP24), their timers on the instruction clock: a
+;      single pulse from OC1R to OC1RS (every edge: the pulse's width, 10,
+;      and no second one);
+;      edge-aligned PWM, period OC1RS + 1, OC1R high, with IC1 and IC2
+;      synchronized to OC1's sync output (the rising edge a count after
+;      it, four periods summed; the falling one 25 later); IC1
+;      free-running (the period, 100),
+;      every fourth rising edge (400); ICI 01: no interrupt at the first
+;      capture, one at the second; the FIFO overflowed (ICOV) and read
+;      empty (ICOV, ICBNE cleared); OC1 driving RD1 (PORTD) high, low
+;      with OCINV, letting it go to its pull-up with OCTRIS, off; IC1's
+;      and OC1's flags;
+;   Q  SCCP5's PWM (period CCP5PRL + 1 = 50, CCP5RA to CCP5RB) on RP24,
+;      captured by SCCP4 from its ICM4 pin (RD1, which is RP24): the
+;      pulse's width (10) and the period; CCP5's flag (the pulse's end) and CCT5's (its period); the
+;      FIFO overflowed (ICOV) and discarded by clearing ICOV; CCP6's
+;      triggered timer: held at 0, CCPTRIG set by TRSET, CCT6's flag at
+;      its period, held again by TRCLR.
         .equ U1MODE, 0x398
         .equ U1STA, 0x39a
         .equ U1TXREG, 0x39c
@@ -82,6 +101,33 @@
         .equ DMASRC1, 0x4da
         .equ DMADST1, 0x4dc
         .equ DMACNT1, 0x4de
+        .equ IFS2, 0x8c
+        .equ IC1CON1, 0x200
+        .equ IC1CON2, 0x202
+        .equ IC1BUF, 0x204
+        .equ IC2CON1, 0x208
+        .equ IC2CON2, 0x20a
+        .equ IC2BUF, 0x20c
+        .equ OC1CON1, 0x230
+        .equ OC1CON2, 0x232
+        .equ OC1RS, 0x234
+        .equ OC1R, 0x236
+        .equ CCP4CON1L, 0x300
+        .equ CCP4STATL, 0x30c
+        .equ CCP4BUFL, 0x320
+        .equ CCP5CON1L, 0x324
+        .equ CCP5PRL, 0x338
+        .equ CCP5RAL, 0x33c
+        .equ CCP5RBL, 0x340
+        .equ CCP6CON1L, 0x348
+        .equ CCP6CON1H, 0x34a
+        .equ CCP6STATL, 0x354
+        .equ CCP6TMRL, 0x358
+        .equ CCP6PRL, 0x35c
+        .equ PORTD, 0x6a0
+        .equ IOCPUD, 0x6ae
+        .equ RPINR7, 0x79e
+        .equ RPOR12, 0x7ec
         .equ SRC, 0x1000
         .equ SRC2, 0x1002
         .equ SRC4, 0x1004
@@ -397,6 +443,196 @@ pwait:  btsc I2C1CONL, #2
         mov I2C1STAT, w0
         rcall print
         rcall newline
+
+; ---- output compare into input capture ---------------------------------------
+        mov #'P', w1
+        rcall putc
+        mov #0x1818, w0
+        mov w0, RPINR7                  ; IC1R, IC2R: RP24
+        mov #13, w0
+        mov w0, RPOR12                  ; RP24: OC1
+        mov #0x1c01, w0
+        mov w0, IC1CON1                 ; the instruction clock, every edge
+        mov #10, w0
+        mov w0, OC1R
+        mov #20, w0
+        mov w0, OC1RS
+        mov #0x001f, w0
+        mov w0, OC1CON2                 ; its own sync: period OC1RS + 1
+        mov #0x1c04, w0
+        mov w0, OC1CON1                 ; a single pulse, OC1R to OC1RS
+        rcall cap1
+        mov w0, w4
+        rcall cap1
+        .word 0x500004                  ; sub w0, w4, w0: the width
+        rcall print
+        repeat #200
+        nop
+        mov IC1CON1, w0                 ; no second pulse: ICBNE clear
+        rcall print
+        mov #0x0001, w0
+        mov w0, IC1CON2                 ; synchronized to OC1's sync output
+        mov w0, IC2CON2
+        mov #0x1c03, w0
+        mov w0, IC1CON1                 ; rising edges
+        mov #0x1c02, w0
+        mov w0, IC2CON1                 ; falling edges
+        mov #25, w0
+        mov w0, OC1R
+        mov #99, w0
+        mov w0, OC1RS
+        bclr IFS0, #2                   ; the pulse's flag cleared
+        mov #0x1c06, w0
+        mov w0, OC1CON1                 ; edge-aligned PWM
+        rcall cap2                      ; a period, then both drained
+        rcall drain
+        rcall cap1                      ; the rising edge: 1 after the sync,
+        mov w0, w4                      ; each period (four of them summed)
+        rcall cap1
+        .word 0x400204                  ; add w0, w4, w4
+        rcall cap1
+        .word 0x400204
+        rcall cap1
+        .word 0x400204
+        mov w4, w0
+        rcall print
+        rcall cap2
+        rcall print                     ; the falling edge: 25 later
+        mov #0, w0
+        mov w0, IC1CON2                 ; free-running
+        rcall drain
+        rcall cap1
+        mov w0, w4
+        rcall cap1
+        .word 0x500004                  ; sub w0, w4, w0: the period
+        rcall print
+        mov #0x1c04, w0
+        mov w0, IC1CON1                 ; every fourth rising edge
+        rcall cap1
+        mov w0, w4
+        rcall cap1
+        .word 0x500004
+        rcall print
+        mov #0x1c23, w0
+        mov w0, IC1CON1                 ; rising, interrupt every second
+        bclr IFS0, #1
+w1st:   btss IC1CON1, #3                ; the first capture
+        bra w1st
+        mov IFS0, w0
+        .word 0xb20020                  ; and #2, w0: no interrupt yet
+        rcall print
+        repeat #100
+        nop                             ; the second: the interrupt
+        mov IFS0, w0
+        .word 0xb20020
+        rcall print
+ovwait: btss IC1CON1, #4                ; ICOV
+        bra ovwait
+        mov IC1CON1, w0
+        rcall print
+        mov IC1BUF, w0
+        mov IC1BUF, w0
+        mov IC1BUF, w0
+        mov IC1BUF, w0                  ; read empty
+        mov IC1CON1, w0
+        rcall print
+        mov #0x8000, w0
+        mov w0, OC1R                    ; past the period: no match
+        bset IOCPUD, #1                 ; RD1's pull-up
+        mov #0x1c02, w0
+        mov w0, OC1CON1                 ; single compare, starting high
+        mov PORTD, w0
+        .word 0xb20020                  ; and #2, w0: RD1, which is RP24
+        rcall print
+        bset OC1CON2, #12               ; OCINV: low
+        mov PORTD, w0
+        .word 0xb20020
+        rcall print
+        bset OC1CON2, #5                ; OCTRIS: let go, the pull-up's
+        mov PORTD, w0
+        .word 0xb20020
+        rcall print
+        bclr OC1CON2, #5                ; driven low again
+        mov #0, w0
+        mov w0, OC1CON1                 ; off: let go too
+        mov PORTD, w0
+        .word 0xb20020
+        rcall print
+        bclr OC1CON2, #12
+        bclr IOCPUD, #1
+        mov #0, w0
+        mov w0, OC1CON1
+        mov w0, IC1CON1
+        mov w0, IC2CON1
+        mov IFS0, w0
+        .word 0xb20060                  ; and #6, w0: OC1's, IC1's flags
+        rcall print
+        rcall newline
+
+; ---- the CCPs -----------------------------------------------------------------
+        mov #'Q', w1
+        rcall putc
+        mov #17, w0
+        mov w0, RPOR12                  ; RP24: OCM5
+        mov #0x8013, w0
+        mov w0, CCP4CON1L               ; capture, every edge
+        mov #49, w0
+        mov w0, CCP5PRL
+        mov #0, w0
+        mov w0, CCP5RAL
+        mov #10, w0
+        mov w0, CCP5RBL
+        mov #0x8005, w0
+        mov w0, CCP5CON1L               ; buffered dual edge compare: PWM
+        rcall cap4
+        mov w0, w4
+        rcall cap4
+        .word 0x500004                  ; sub w0, w4, w0: the pulse's width
+        rcall print
+        rcall cap4
+        .word 0x500004                  ; the period
+        rcall print
+        mov IFS1, w0
+        .word 0xb20400                  ; and #0x40, w0: CCP5's flag
+        rcall print
+        mov #0x8000, w2
+        mov IFS2, w0
+        .word 0x600002                  ; and w0, w2, w0: CCT5's flag
+        rcall print
+ov4:    btss CCP4STATL, #1              ; ICOV
+        bra ov4
+        mov #0, w0
+        mov w0, CCP5CON1L
+        mov CCP4STATL, w0
+        rcall print
+        bclr CCP4STATL, #1              ; ICOV cleared: the FIFO discarded
+        mov CCP4STATL, w0
+        rcall print
+        mov #20, w0
+        mov w0, CCP6PRL
+        mov #0x0080, w0
+        mov w0, CCP6CON1H               ; TRIGEN
+        mov #0x8000, w0
+        mov w0, CCP6CON1L               ; a timer
+        nop
+        mov CCP6TMRL, w0                ; held
+        rcall print
+        bset CCP6STATL, #6              ; TRSET
+        mov CCP6STATL, w0
+        rcall print
+ct6:    btss IFS3, #0                   ; CCT6's flag
+        bra ct6
+        mov IFS3, w0
+        .word 0xb20010                  ; and #1, w0
+        rcall print
+        bset CCP6STATL, #5              ; TRCLR
+        nop
+        mov CCP6TMRL, w0
+        rcall print
+        mov #0, w0
+        mov w0, CCP6CON1L
+        mov w0, CCP4CON1L
+        rcall newline
         mov #'.', w1
         rcall putc
         rcall newline
@@ -416,6 +652,27 @@ readback:
         .word 0xba8012                  ; tblrdh [w2], w0
         rcall print
         return
+
+cap1:   btss IC1CON1, #3                ; IC1's next capture, in W0
+        bra cap1
+        mov IC1BUF, w0
+        return
+cap2:   btss IC2CON1, #3                ; IC2's
+        bra cap2
+        mov IC2BUF, w0
+        return
+cap4:   btss CCP4STATL, #0              ; SCCP4's
+        bra cap4
+        mov CCP4BUFL, w0
+        return
+drain:  btss IC1CON1, #3                ; IC1's and IC2's FIFOs emptied
+        bra drain2
+        mov IC1BUF, w0
+        bra drain
+drain2: btss IC2CON1, #3
+        return
+        mov IC2BUF, w0
+        bra drain2
 
 print:  push w1                         ; a space and W0 as four hex digits
         push w2

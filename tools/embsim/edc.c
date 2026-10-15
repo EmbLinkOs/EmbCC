@@ -16,7 +16,10 @@
  *     registers it joins.
  *   - <edc:InterruptList>: each <edc:Interrupt> by its number (edc:irq),
  *     named less "Interrupt" (T1, ADC1, U1RX), which the PIC24's
- *     interrupt controller model finds by name.
+ *     interrupt controller model finds by name;
+ *   - <edc:PinList>: each <edc:Pin>'s names (its <edc:VirtualPin>s: RP21,
+ *     OCM1A, PMA5, RG6...) on the port pin among them (RG6), which the
+ *     ports' model puts the peripherals' outputs on (svd_device.pin).
  * The file has no peripherals, only the module each register comes from
  * (edc:_modsrc): a run of registers from one module, unbroken by another
  * module's, is a peripheral, named after its first register (table
@@ -265,6 +268,45 @@ static int is_core(const char *mod)
     return mod && strstr(mod, "CPU");
 }
 
+/* a port pin's name: R, its port's letter (A to K, no I), its bit */
+static int port_pin(const char *n, int *port, int *bit)
+{
+    if (!n || n[0] != 'R' || n[1] < 'A' || n[1] > 'K' || n[1] == 'I' ||
+        n[2] < '0' || n[2] > '9')
+        return 0;
+    char *e;
+    long b = strtol(n + 2, &e, 10);
+    if (*e || b > 31)
+        return 0;
+    *port = n[1] - 'A' - (n[1] > 'I');
+    *bit = (int)b;
+    return 1;
+}
+
+static void read_pins(struct svd_device *d, const struct xnode *pl)
+{
+    for (int i = 0; pl && i < svd_xnkid(pl); i++) {
+        const struct xnode *p = svd_xkid(pl, i);
+        int port = -1, bit = -1, n = 0;
+        if (!is(p, "edc:Pin"))
+            continue;
+        for (int j = 0; j < svd_xnkid(p); j++)
+            if (port_pin(svd_xattr(svd_xkid(p, j), "edc:name"), &port, &bit))
+                n++;
+        if (n != 1)
+            continue;               /* a supply, or no port */
+        for (int j = 0; j < svd_xnkid(p); j++) {
+            const char *nm = svd_xattr(svd_xkid(p, j), "edc:name");
+            if (!is(svd_xkid(p, j), "edc:VirtualPin") || !nm)
+                continue;
+            d->pin = svd_grow(d->pin, (size_t)(d->npin + 1) * sizeof *d->pin);
+            d->pin[d->npin].name = nm;
+            d->pin[d->npin].port = port;
+            d->pin[d->npin++].bit = bit;
+        }
+    }
+}
+
 struct svd_device *edc_load(const char *path)
 {
     const struct xnode *root = svd_xml_read(path);
@@ -351,5 +393,6 @@ struct svd_device *edc_load(const char *path)
         if (q->value + 1 > d->num_irq)
             d->num_irq = q->value + 1;
     }
+    read_pins(d, svd_xfind(root, "edc:PinList"));
     return d;
 }

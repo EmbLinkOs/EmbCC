@@ -68,6 +68,9 @@ struct svd_node {
     int sized, locked, emitted;
 };
 struct svd_irq { const char *name, *desc; int value; };
+/* a pin of a 16-bit part, by one of the names its EDC gives it (RP21,
+ * OCM1A, RG6), on port `port` (0 for A, no I) at `bit` */
+struct svd_pin { const char *name; int port, bit; };
 struct svd_ablock { unsigned long long off, size; const char *usage; };
 struct svd_periph {
     const char *name, *desc, *group, *derived;
@@ -99,6 +102,9 @@ struct svd_device {
      * writes, as a PIC's SFR space does, instead of faulting */
     unsigned long long bus_offset;
     int holes_zero;
+    /* EmbSim's: a 16-bit part's pins, from its EDC's PinList */
+    struct svd_pin *pin;
+    int npin;
     int num_irq;
     struct svd_periph *p;
     int np;

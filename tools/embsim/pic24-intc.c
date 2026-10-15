@@ -32,9 +32,10 @@ struct intc {
     struct rf_reg *ifs[16], *iec[16], *ipc[64];
     int nw;
     struct pic24_intc ic;
-    /* told of every interrupt event (the DMA's triggers) */
-    void (*listen)(void *ctx, int irq);
-    void *listen_ctx;
+    /* told of every interrupt event and sync event (the DMA's triggers,
+     * the capture and compare modules' sync sources) */
+    struct { void (*fn)(void *ctx, int ev, u64 when); void *ctx; } listen[8];
+    int nlisten;
 };
 
 static struct intc *intc_of(struct sim *s)
@@ -118,23 +119,49 @@ const struct dev_ops pic24_intc_ops = {
 
 void pic24_irq(struct sim *s, int irq)
 {
+    pic24_irq_at(s, irq, s->cycles);
+}
+
+void pic24_irq_at(struct sim *s, int irq, u64 when)
+{
     struct intc *c = intc_of(s);
     if (!c || irq < 0 || irq / 16 >= c->nw)
         return;
     struct rf_reg *r = c->ifs[irq / 16];
     if (!(r->value >> (irq % 16) & 1))
         rf_hw(r, r->value | 1u << (irq % 16));
-    if (c->listen)
-        c->listen(c->listen_ctx, irq);
+    pic24_event(s, irq, when);
 }
 
-void pic24_irq_listen(struct sim *s, void (*fn)(void *ctx, int irq), void *ctx)
+void pic24_event(struct sim *s, int ev, u64 when)
 {
     struct intc *c = intc_of(s);
-    if (c) {
-        c->listen = fn;
-        c->listen_ctx = ctx;
+    for (int i = 0; c && i < c->nlisten; i++)
+        c->listen[i].fn(c->listen[i].ctx, ev, when);
+}
+
+void pic24_irq_listen(struct sim *s, void (*fn)(void *ctx, int ev, u64 when), void *ctx)
+{
+    struct intc *c = intc_of(s);
+    if (!c)
+        return;
+    for (int i = 0; i < c->nlisten; i++)
+        if (c->listen[i].ctx == ctx && c->listen[i].fn == fn)
+            return;                 /* a reset's: once is enough */
+    if (c->nlisten == (int)(sizeof c->listen / sizeof c->listen[0]))
+        die("too many models listening to the PIC24's interrupts");
+    c->listen[c->nlisten].fn = fn;
+    c->listen[c->nlisten++].ctx = ctx;
+}
+
+int pic24_event_named(struct sim *s, const char *name)
+{
+    size_t l = strlen(name);
+    if (l > 4 && !strcmp(name + l - 4, "sync")) {
+        int k = atoi(name + (name[0] == 'O' ? 2 : 3));
+        return (name[0] == 'O' ? PIC24_EV_OC_SYNC : PIC24_EV_CCP_SYNC) + k;
     }
+    return pic24_irq_named(s, name);
 }
 
 int pic24_irq_flag(struct sim *s, int irq)

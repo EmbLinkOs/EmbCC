@@ -187,6 +187,17 @@ static void tmr_reset(void *ctx)
     m->running = 0;
 }
 
+u32 pic24_timer_div(struct sim *s, int n)
+{
+    struct rf_periph *p = s->svd ? rf_periph(s->svd, "TMR") : 0;
+    const struct tmrs *m = p && p->ops == &pic24_tmr_ops ? p->ctx : 0;
+    if (!m || n < 1 || n > NT || !m->t[n].con)
+        return 0;
+    if (slave(m, n))
+        n--;                        /* Timer3 (5) counts on Timer2's (4) clock */
+    return on(m, n) ? divisor(&m->t[n]) : 0;
+}
+
 const struct dev_ops pic24_tmr_ops = {
     "pic24-tmr", tmr_read, tmr_write, tmr_reset, tmr_tick, tmr_next,
 };

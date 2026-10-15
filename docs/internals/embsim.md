@@ -52,9 +52,10 @@ file but the network one compiles with EmbCC itself. Everything is in
 | `pic32.h` | what a PIC32's models share: interrupts through the EVIC, the peripheral bus dividers |
 | `pic32-evic.c`, `pic32-cru.c`, `pic32-tmr.c`, `pic32-gpio.c`, `pic32-uart.c`, `pic32-pmp.c`, `pic32-adc.c` | a PIC32MZ's models over its ATDF's registers: the EVIC (and the core's EIC mode), CFG's SYSKEY and the oscillator, Timer1-9, ports A-K, UART1-6, the PMP, ADCHS |
 | `pic24.h`, `pic24.c` | the PIC24F core: the instruction set, REPEAT and the divide, the data space with its EDS window and program space visibility, table reads, traps and interrupts through the IVT, DISI, PWRSAV; its bus layout; the core's clock (`pic24_fcy`) |
-| `edc.c` | a Microchip EDC file (a device pack's `.PIC`: a PIC24's or dsPIC's SFRs) read into the SVD reader's `struct svd_device` |
+| `edc.c` | a Microchip EDC file (a device pack's `.PIC`: a PIC24's or dsPIC's SFRs, its interrupts and its pins' names) read into the SVD reader's `struct svd_device` |
 | `pic24-intc.c`, `pic24-osc.c`, `pic24-tmr.c`, `pic24-uart.c`, `pic24-adc.c`, `pic24-spi.c`, `pic24-epmp.c` | a PIC24FJ's models over its EDC's registers: the interrupt controller (driving the core), the oscillator and the PPS lock, Timer1-5, UART1-6, ADC1, SPI1-3, the EPMP's EDS space; its ports and their interrupt-on-change are `pic32-gpio.c`'s |
 | `pic24-nvm.c`, `pic24-rtcc.c`, `pic24-dma.c`, `pic24-i2c.c` | the flash controller (its write latches are the core's table writes at TBLPAG 0xFA, through `struct pic24_nvm`; NVMKEY's unlock is the core's, `pic24_unlocked`, which the RTCC's WRLOCK takes too), the RTCC, the DMA controller (its triggers are every interrupt the controller flags: `pic24_irq_listen`), I2C1-3 as masters on an empty bus |
+| `pic24-ic.c`, `pic24-oc.c`, `pic24-ccp.c` | input capture, output compare and the MCCP/SCCPs, each counting its own timer; their outputs and inputs are pins (`pic24_pps_out`, `pic24_pin_out`, `pic24_pin_watch` in `pic32-gpio.c`, by the EDC's pin names), their sync sources events with the time they came (`pic24_event`, `pic24_irq_at`), so a capture of another module's edge is exact to the cycle |
 | `pic-boards.c` | the boards around a PIC32 or a PIC24 (`struct board_io`): the Explorer 16/32's (with either PIM) and the Curiosity PIC32MZ EF 2.0's LEDs and buttons, the Explorer's potentiometer, temperature sensor, HD44780 LCD and 25LC256 EEPROM |
 | `svd-map.h`, `svd-map.c` | an SVD file's peripherals as a register file on the bus (`--svd`), `--trace-periph`, `--svd-map`, and the interface of the models over it |
 | `../embsvd/svd.h`, `../embsvd/svd.c` | the CMSIS-SVD reader, embsvd's |
@@ -478,7 +479,11 @@ field of their own, so they keep what is written. The file has no
 peripherals: a run of registers from one module (`edc:_modsrc`) is one,
 named by its first register (a table in `edc.c`, else the register's
 letters), and a later run of the same module joins it. The core's
-module's registers are left out, as the core handles them.
+module's registers are left out, as the core handles them. The pin
+list (`<edc:PinList>`) gives each pin's names on its port pin
+(`svd_device.pin`, `rf_pin`), which the ports' model uses to put a
+peripheral's output on an RPn pin and to find the pin an input is
+mapped to.
 
 A PIC24 has two address spaces, which EmbSim's one bus holds apart
 (`pic24.h`): program memory at twice its address (a 24-bit word as four

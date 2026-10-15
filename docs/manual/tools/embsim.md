@@ -763,6 +763,38 @@ PCH, DSRPAG, DSWPAG, RCOUNT, SR, CORCON, DISICNT, TBLPAG) are the core's.
   (ACKSTAT 1); one written while the module is busy is a collision
   (IWCOL); RCEN receives 0xFF, the bus's pull-ups, in eight (RBF; I2COV
   when RBF was still set), and reading I2CxRCV clears RBF.
+- **The pins the peripherals drive and read.** The EDC names each pin
+  (RD1, RP24, OCM1A...): an output the Peripheral Pin Select puts on an
+  RPn pin (RPORx: OC1-3, an SCCP's OCMx), or a peripheral's own pin (an
+  MCCP's OCMxA-F), drives it over TRISx and LATx -- PORTx reads it, the
+  interrupt-on-change and the board see it -- and an input the PPS maps
+  (RPINRx: IC1R...) reads its pin's level, so one module's output can be
+  another's input on the same pin.
+- **Input capture IC1-6**: ICxTMR counts the instruction clock or
+  Timer1-5's (ICTSEL) while the module is on, cleared by SYNCSEL's
+  source (Timer1-3's period, the ICs', CCPs' and ADC's interrupts, the
+  OCs' and CCPs' sync outputs) or, with ICTRIG, held at 0 until it sets
+  TRIGSTAT; the input's edges ICM selects (every edge, rising, falling,
+  every fourth or sixteenth rising) capture it into the four-deep FIFO
+  (ICxBUF, ICBNE) at the time they come; the interrupt every ICI + 1
+  captures, and ICOV when one comes with the FIFO full.
+- **Output compare OC1-6**: OCxTMR counts OCTSEL's clock, back to 0
+  after SYNCSEL's source (11111: its own match with OCxRS) or at
+  0xFFFF, held by OCTRIG until TRIGSTAT; single compare (set, clear,
+  toggle at OCxR), a single or continuous pulse (OCxR to OCxRS), edge-
+  and center-aligned PWM with OCxR and OCxRS double-buffered; the
+  interrupt at each, OCINV and OCTRIS on the output, and the match with
+  OCxRS the module's sync output.
+- **MCCP1-3 and SCCP4-7**: the time base on the system clock or its
+  double over TMRPS, its period CCPxPRL (CCPxPRH:CCPxPRL with T32), or
+  another CCP's sync output, or held by TRIGEN until TRSET (TRCLR holds
+  it again); the CCTx interrupt each period. Timer mode (two 16-bit
+  timers, the second's period the CCPx interrupt, or one 32-bit), the
+  single edge compare modes (SCEVT), dual edge compare and its buffered
+  PWM, on the pins OCxEN enables with POLACE and POLBDF; input capture
+  from the ICMx pin into a four-deep FIFO (two with T32), the interrupt
+  every OPS + 1 captures, ICOV, ICDIS, and Edge Detect mode's captures
+  that never overflow.
 
 **The `explorer16-32-pic24` board** is the Explorer 16/32 with the
 PIC24FJ1024GB610 PIM (MA240023). The board's schematic names the socket
@@ -788,12 +820,17 @@ LEDs and the LCD as the PIC32 Explorer does; `--set` gives
 `=pressed` or `=released`.
 
 **Not modelled on the PIC24:** the other peripherals' behaviour (their
-registers keep what is written: the CCPs, input capture and output
-compare, CRC, CLC, CTMU, USB, the comparators), I2C's slave mode and a
-slave on the bus, the DMA's peripheral indirect and null write modes,
-the RTCC's power control, its fine division and its pins, the NVM's
-dual partitions, the external interrupt
-pins, the alternate vector table,
+registers keep what is written: CRC, CLC, CTMU, USB, the comparators),
+I2C's slave mode and a slave on the bus, the DMA's peripheral indirect
+and null write modes, the RTCC's power control, its fine division and
+its pins, the NVM's dual partitions, the cascaded 32-bit input capture
+and output compare, the output compare's faults, the CCPs' center-
+aligned, variable frequency and external input modes, their output
+modes other than steering, dead time, auto-shutdown and gating, their
+clocks other than the system clock and its double, the sync sources
+the models do not make (the comparators, CLCs, CTMU, INTx pins), the
+cycle or two the part's captures and compare outputs lag, the external
+interrupt pins, the alternate vector table,
 the watchdog and deadman timer, Sleep and Idle beyond waiting for an
 interrupt, the EPMP's slave modes and its wait states' time, the SPI's
 and the UART's bit timing.
@@ -1638,4 +1675,6 @@ interrupt-on-change, the flash controller (its latches, the unlock, a
 program and an erase read back by TBLRD, WRERR), the RTCC (its carries
 from 23:59:58 on 31 December 2099 to 2000, its alarm, WRLOCK, a
 timestamp), the DMA controller (a copy on CHREQ, DMAH's limit, a channel
-Timer2 triggers) and I2C1 on an empty bus.
+Timer2 triggers), I2C1 on an empty bus, OC1's pulse and PWM captured
+through the PPS by IC1 and IC2 synchronized to it, and SCCP5's PWM
+captured by SCCP4 on the same pin.

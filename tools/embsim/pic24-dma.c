@@ -185,9 +185,10 @@ static void trigger(struct dma *m, struct ch *c)
     rf_hw(c->ch, (u32)c->ch->value & ~CH_CHREQ);
 }
 
-static void on_irq(void *ctx, int irq)
+static void on_irq(void *ctx, int irq, u64 when)
 {
     struct dma *m = ctx;
+    (void)when;
     if (m->busy > 4 || !(m->con->value >> 15 & 1))
         return;                     /* a channel triggering itself ad infinitum */
     m->busy++;

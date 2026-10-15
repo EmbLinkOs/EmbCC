@@ -455,6 +455,14 @@ const char *rf_device_name(struct svdmap *m)
     return m->d->name;
 }
 
+int rf_pin(struct svdmap *m, const char *name)
+{
+    for (int i = 0; i < m->d->npin; i++)
+        if (!strcmp(m->d->pin[i].name, name))
+            return m->d->pin[i].port * 32 + m->d->pin[i].bit;
+    return -1;
+}
+
 void rf_interrupt(struct rf_periph *p, int irq)
 {
     if (irq >= 0)

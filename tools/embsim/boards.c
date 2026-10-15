@@ -70,6 +70,9 @@ static const struct model_desc pic24f_models[] = {
     { "RTCC", "pic24-rtcc" },
     { "DMA", "pic24-dma" },
     { "I2C", "pic24-i2c" },
+    { "IC", "pic24-ic" },
+    { "OC", "pic24-oc" },
+    { "CCP", "pic24-ccp" },
     { 0, 0 },
 };
 
@@ -252,6 +255,9 @@ static const struct model_type model_types[] = {
     { "pic24-rtcc", &pic24_rtcc_ops, pic24_rtcc_create },
     { "pic24-dma", &pic24_dma_ops, pic24_dma_create },
     { "pic24-i2c", &pic24_i2c_ops, pic24_i2c_create },
+    { "pic24-ic", &pic24_ic_ops, pic24_ic_create },
+    { "pic24-oc", &pic24_oc_ops, pic24_oc_create },
+    { "pic24-ccp", &pic24_ccp_ops, pic24_ccp_create },
     { "pic24-osc", &pic24_osc_ops, pic24_osc_create },
     { "pic24-pps", &pic24_pps_ops, pic24_pps_create },
     { 0, 0, 0 },
