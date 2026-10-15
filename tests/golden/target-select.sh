@@ -235,7 +235,7 @@ if [ "${EMBCC_TARGETS_EVERY:-0}" = 1 ]; then
         make -C "$EMBCC_ROOT" -j4 BUILD="$out/every" TARGETS=$f \
             "$out/every/embcc" > "$out/every-$f.log" 2>&1 || {
             tail -20 "$out/every-$f.log"; fail "make TARGETS=$f did not build"; }
-        echo "  TARGETS=$f: $(wc -c < "$out/every/embcc") bytes"
+        echo "  TARGETS=$f: $(wc -c < "$out/every/embcc" | tr -d ' ') bytes"
         rm -f "$out/every/embcc"
     done
 fi
