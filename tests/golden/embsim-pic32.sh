@@ -19,6 +19,8 @@
 #     (tests/golden/embsim/pic32-fw.txt), and the board's report -- the
 #     LEDs and the LCD's lines -- what the program drove.
 #  3. The ends: a PIC32 board without its pack names what to give it.
+#  4. With EMBSIM_THERMO_ELF, a Harmony 3 + FreeRTOS thermometer built by
+#     EmbCC: the LCD's temperature at three temperatures, its LEDs.
 set -u
 echo "TEST-MARKER embsim-pic32"
 . "$(dirname "$0")/../lib.sh"
@@ -160,3 +162,21 @@ grep -q '^explorer16-32: LCD |EmbSim          | at' "$out/fw.err" &&
     grep -q '^explorer16-32:     |PIC32MZ EF      |$' "$out/fw.err" ||
     { cat "$out/fw.err"; fail "the LCD's two lines are not what the program wrote"; }
 echo "embsim-pic32: an EmbCC program on explorer16-32: $(wc -l < "$out/fw.out" | tr -d ' ') results as the record has them (DSP, EVIC, shadow sets, timers, OFF213, ports, ADC, PMP, SYSKEY), the LEDs and the LCD reported"
+
+# ---- 4. a real project: EMBSIM_THERMO_ELF -----------------------------------------
+# A Harmony 3 + FreeRTOS thermometer (the TC1047A read every 500 ms, its
+# temperature on the LCD), built by EmbCC into the image this names; its
+# sources are not in the tree, so the check runs only when it is given.
+if [ -n "${EMBSIM_THERMO_ELF:-}" ] && [ -f "$EMBSIM_THERMO_ELF" ]; then
+    for t in 25 30 -10; do
+        "$EMBSIM" "$EMBSIM_THERMO_ELF" --board explorer16-32 --dfp "$DFP" \
+            --set temperature=$t --max-insns 230000000 > "$out/thermo$t.out" 2> "$out/thermo$t.err"
+        case $t in 25) want=24.95 ;; 30) want=29.94 ;; *) want=-10.03 ;; esac
+        grep -q "LCD |Temp:$want C" "$out/thermo$t.err" &&
+        grep -q 'LED D5 on (RA2) at 502' "$out/thermo$t.err" ||
+            { tail -5 "$out/thermo$t.err"; fail "the thermometer at $t degrees does not show $want"; }
+    done
+    echo "embsim-pic32: the thermometer (FreeRTOS, Harmony): Temp:24.95, 29.94 and -10.03 C on the LCD at 25, 30 and -10 degrees, its LEDs every 500 ms"
+else
+    echo "embsim-pic32: no EMBSIM_THERMO_ELF: the thermometer project was not run"
+fi
