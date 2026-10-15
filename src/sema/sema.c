@@ -2984,6 +2984,11 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             sema_error_at(u, e->line, e->col,
                        "cannot take the address of bitfield '%s'",
                        e->rhs->memb->name);
+        /* `&_text` of an `extern void _text;`: GCC warns unless the
+         * object is const */
+        if (e->rhs->ty->kind == TY_VOID && !e->rhs->ty->is_const)
+            diag_warn_at(diag_file(u), e->line, e->col,
+                         "taking the address of an object of type void");
         e->ty = ty_ptr(e->rhs->ty);
         break;
     case EXPR_COMPLIT: {

@@ -3177,6 +3177,9 @@ static struct type *parse_array_dims(struct parser *ps, struct type *t)
     /* Innermost first. Once any dimension is variable, every dimension
      * outside it is too — `int a[3][n]` is 3 rows of a run-time size — so
      * each becomes a VLA node (with its constant as the length). */
+    if (ndims && t->kind == TY_VOID)
+        parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                       "an array cannot have elements of type void");
     for (int i = ndims - 1; i >= 0; i--) {
         if (dvar[i] || (ty_is_vla(t) && dexpr[i]))
             t = ty_vla(t, dexpr[i]);
@@ -5739,7 +5742,9 @@ static struct global *parse_global(struct parser *ps, struct type *ty,
     g->is_extern = is_extern;
     g->ty = ty;
 
-    if (g->ty->kind == TY_VOID)
+    /* `extern void _text;`, a linker symbol only ever taken the address
+     * of, is GNU C's; a definition of a void object is nothing */
+    if (g->ty->kind == TY_VOID && !is_extern)
         parse_error_line(ps, line, "a variable cannot have type void");
     g->ty = parse_array_dims(ps, g->ty);
     int has_init = cur(ps)->kind == TOK_ASSIGN;
