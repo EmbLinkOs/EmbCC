@@ -2619,6 +2619,13 @@ static struct type *fold_var_type(const char *name)
          g; g = g->next)
         if (g->name && strcmp(g->name, name) == 0)
             return g->ty;
+    /* a function's name: its type, as `typeof(f) g;` declares a second
+     * function like it (glibc's aliases) */
+    for (struct func *f = g_fold_unit ? g_fold_unit->funcs : NULL;
+         f; f = f->next)
+        if (f->name && strcmp(f->name, name) == 0 && f->ret_ty)
+            return ty_func(f->ret_ty, f->param_tys, f->nparams,
+                           f->is_varargs);
     return NULL;
 }
 
@@ -2666,6 +2673,20 @@ static struct type *ce_type(const struct expr *e)
     }
     case EXPR_CAST:
         return e->cast_ty;
+    case EXPR_COMPLIT:
+        /* `sizeof (struct s){ 1, 2 }`: the literal's type (an unsized
+         * array's count is the initializer's, unknown here) */
+        return e->cast_ty && !ty_incomplete(e->cast_ty) ? e->cast_ty : NULL;
+    case EXPR_COMMA: {
+        /* the right operand's value, so an array or a function decays:
+         * `sizeof (1, foo)` is a pointer's size */
+        struct type *t = ce_type(e->rhs);
+        if (t && t->kind == TY_FUNC)
+            return ty_ptr(t);
+        if (t && t->kind == TY_ARRAY)
+            return ty_ptr(t->pointee);
+        return t;
+    }
     case EXPR_SIZEOF:
     case EXPR_ALIGNOF:
         /* size_t, as sema types them. Unanswered, `-sizeof(int)` folded
