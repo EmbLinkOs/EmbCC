@@ -57,4 +57,3 @@ ref/
 /embrt
 # verify/fuzz: the programs that failed
 /verify/fuzz/out/
-__pycache__/
