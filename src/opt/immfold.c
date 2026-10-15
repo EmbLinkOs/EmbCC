@@ -56,6 +56,7 @@ static int const_is_expensive(const struct ir_ins *i)
     case IR_CONST: {
         long v = i->imm;
         if (i->w == 4) v = (long)(int)v;
+#if FAMILY_BUILT(aarch64)
         if (ta == TARGET_AARCH64) {
             unsigned long u = (unsigned long)v, n = ~u;
             int w = i->w == 4 ? 4 : 8;
@@ -66,8 +67,11 @@ static int const_is_expensive(const struct ir_ins *i)
             }
             return !a64_bitmask_ok(w == 4 ? (long)(unsigned)u : v, w);
         }
+#endif
+#if FAMILY_BUILT(arm)
         if (ta == TARGET_THUMB)
             return !(t_imm_ok(v) || (v >= 0 && v <= 0xffff));
+#endif
         if (ta == TARGET_MIPS32 || ta == TARGET_MIPS64)  /* addiu, ori from $0 */
             return !((v >= -32768 && v <= 32767) || (v >= 0 && v <= 0xffff));
         if (ta == TARGET_LOONGARCH64)  /* ori/addi.w from r0, or a lu12i.w */
@@ -247,12 +251,18 @@ enum binop swap_pred(enum binop p)
  * a register is built once and can be hoisted out of a loop. */
 static int target_imm_foldable(int op, long imm, int w)
 {
+    /* each backend's answer under its family (make TARGETS=, target.h) */
+#if FAMILY_BUILT(arm)
     if (target_get() == TARGET_THUMB && w == 8 &&
         (op == IR_AND || op == IR_OR || op == IR_XOR) && !getenv("EMBCC_T_NOWIDEIMM"))
         return thumb_imm_foldable64(op, imm);
+#endif
+#if FAMILY_BUILT(riscv)
     if (target_get() == TARGET_RISCV32 && w == 8 &&
         (op == IR_AND || op == IR_OR || op == IR_XOR) && !getenv("EMBCC_RV_NOWIDEIMM"))
         return riscv_imm_foldable64(op, imm);
+#endif
+#if FAMILY_BUILT(mips)
     if (target_get() == TARGET_MIPS32 && w == 8 &&
         (op == IR_AND || op == IR_OR || op == IR_XOR))
         return mips_imm_foldable64(op, imm);
@@ -261,34 +271,66 @@ static int target_imm_foldable(int op, long imm, int w)
     /* MIPS64: one register to 64 bits; a 128-bit operation takes none */
     if (target_get() == TARGET_MIPS64)
         return w <= 8 && mips_imm_foldable(op, imm);
+#endif
+#if FAMILY_BUILT(tricore)
     /* TriCore: a 64-bit AND/OR/XOR is done half by half with any constant
      * (codegen.c's logic_half); every other 64-bit operation builds it */
     if (target_get() == TARGET_TRICORE)
         return w == 8 ? op == IR_AND || op == IR_OR || op == IR_XOR
                       : tc_imm_foldable(op, imm);
+#endif
+#if FAMILY_BUILT(xtensa)
     if (target_get() == TARGET_XTENSA)
         return w == 4 && xtensa_imm_foldable(op, imm);
+#endif
+#if FAMILY_BUILT(ppc)
     if (target_get() == TARGET_PPC32 && w == 8 &&
         (op == IR_AND || op == IR_OR || op == IR_XOR))
         return ppc_imm_foldable64(op, imm);
     if (target_get() == TARGET_PPC32)
         return ppc_imm_foldable(op, imm);
+#endif
+#if FAMILY_BUILT(sparc)
     if (target_get() == TARGET_SPARC32 && w == 8 &&
         (op == IR_AND || op == IR_OR || op == IR_XOR))
         return sparc_imm_foldable64(op, imm);
     if (target_get() == TARGET_SPARC32)
         return sparc_imm_foldable(op, imm);
+#endif
+#if FAMILY_BUILT(m68k)
     if (target_get() == TARGET_COLDFIRE)
         return cf_imm_foldable(op, imm, w);
+#endif
+#if FAMILY_BUILT(arm)
     if (target_get() == TARGET_THUMB)
         return thumb_imm_foldable(op, imm);
+#endif
+#if FAMILY_BUILT(riscv)
     if (target_get() == TARGET_RISCV32 || target_get() == TARGET_RISCV64)
         return riscv_imm_foldable(op, imm);
+#endif
+#if FAMILY_BUILT(loongarch)
     if (target_get() == TARGET_LOONGARCH64)
         return la_imm_foldable(op, imm);
+#endif
+#if FAMILY_BUILT(aarch64)
     if (target_get() == TARGET_AARCH64)
         return a64_imm_foldable(op, imm, w);
+#endif
+    (void)op; (void)imm; (void)w;
     return 1;
+}
+
+/* thumb_cmp64_imm, in a compiler that has ARM (make TARGETS=) */
+static int cmp64_imm(int pred, int sign, long imm, int *pout, long *lo,
+                     long *hi)
+{
+#if FAMILY_BUILT(arm)
+    return thumb_cmp64_imm(pred, sign, imm, pout, lo, hi);
+#else
+    (void)pred; (void)sign; (void)imm; (void)pout; (void)lo; (void)hi;
+    return 0;
+#endif
 }
 
 /* `if (x >> 63)` for a 64-bit x is `if (x < 0)`: the shift's 0 or 1 is the
@@ -467,14 +509,14 @@ int pass_immfold(struct ir_func *fn)
         int p64;
         long lo64, hi64;
         if (cmp64 ? get_const(fn, &d, i->b, &B) &&
-                    thumb_cmp64_imm(i->pred, i->sign, B, &p64, &lo64, &hi64)
+                    cmp64_imm(i->pred, i->sign, B, &p64, &lo64, &hi64)
                   : get_const(fn, &d, i->b, &B) && (fits_imm32(B) || wide_ok) &&
                     target_imm_foldable(i->op, B, i->w)) {
             i->imm = B; i->imm_b = 1; i->b = -1;    /* op a, imm */
             changed = 1;
         } else if (cmp64 ? get_const(fn, &d, i->a, &A) &&
-                           thumb_cmp64_imm(swap_pred(i->pred), i->sign, A,
-                                           &p64, &lo64, &hi64)
+                           cmp64_imm(swap_pred(i->pred), i->sign, A,
+                                     &p64, &lo64, &hi64)
                          : (commutative || i->op == IR_CMP) &&
                            get_const(fn, &d, i->a, &A) &&
                            (fits_imm32(A) || wide_ok) &&

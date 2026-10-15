@@ -2,6 +2,11 @@
  * it and its data model. Part of the target database;
  * src/targets/targets.def says how a row reads. */
 
+/* The family this file describes (src/targets/targets.def says how). */
+FAMILY(arm, "Cortex-M (ARMv6-M, ARMv7-M, ARMv7E-M, ARMv8-M Baseline "
+            "and Mainline) and ARMv7-A",
+       "thumbv7m-none-eabi")
+
 /* AAPCS (32-bit, EABI): ILP32, unsigned char and wchar_t, and a
  * long double that is an ordinary IEEE double -- checked against
  * clang -target thumbv7m-none-eabi -dM, which gives

@@ -74,9 +74,13 @@ make check     # compile and run every program in tests/exec and tests/cxx
 make install   # into PREFIX (default /usr/local)
 ```
 
-`make all` builds the tools alone. The runtime and C library for each
-board, and the test suites, are described in
-[Getting started](docs/manual/getting-started.md).
+`make all` builds the tools alone. To build the compiler and runtimes for
+the targets you use only, as a GCC cross compiler is built for one, name
+their families: `make TARGETS="arm riscv"`, or `./configure
+--targets=arm,riscv` to remember the choice
+([Choosing the targets](docs/manual/getting-started.md#choosing-the-targets)).
+The runtime and C library for each board, and the test suites, are
+described in [Getting started](docs/manual/getting-started.md).
 
 ## A first firmware, without a board
 

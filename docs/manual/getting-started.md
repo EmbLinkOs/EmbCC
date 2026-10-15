@@ -44,7 +44,8 @@ This compiles the sources into `build/`, links `./embcc` and the other
 tools at the top of the tree, and builds every target's runtime and C
 library, so that a program links for the host (`x86_64-linux-gnu` on a
 Linux PC, which is the first thing CMake's compiler check does) and
-firmware links for every board. `make -j8` runs it in parallel.
+firmware links for every board. `make -j8` runs it in parallel. To build
+for some targets only, see [Choosing the targets](#choosing-the-targets).
 
 Each piece is also a target of its own:
 
@@ -68,6 +69,7 @@ The build can be adjusted with these `make` variables:
 | `CC` | `cc` | the host C compiler |
 | `CFLAGS` | `-std=c99 -Wall -Wextra -Werror -g` | flags for the host compiler |
 | `BUILD` | `build` | the object directory |
+| `TARGETS` | `all` | the target families to build; see [Choosing the targets](#choosing-the-targets) |
 | `DEFAULT_TARGET` | empty (`x86_64-elf`) | the target `embcc` uses when given no `--target=` |
 
 `make CC=clang BUILD=/tmp/embcc-clang /tmp/embcc-clang/embcc` builds a
@@ -76,6 +78,78 @@ untouched.
 
 Every object depends on every header under `src/`, so after editing one
 `make` rebuilds the whole compiler.
+
+### Choosing the targets
+
+By default EmbCC is built for every target it supports, and so are its
+runtimes. To build only the targets you use, as GCC is configured for one
+target, name their families:
+
+```sh
+make TARGETS="arm riscv"        # or TARGETS=arm,riscv
+```
+
+That `embcc` contains the ARM and RISC-V backends and no other. The other
+families' sources are not compiled, so the build is faster and the binary
+smaller (a one-family `embcc` is a little over half the size of the full
+one). `make runtimes`, a plain `make` and `make install` build and install
+the runtimes and C libraries of those families' triples only. The
+families are the files of the target database, `src/targets/`:
+
+| Family | Targets |
+|---|---|
+| `x86` | x86-64: `x86_64-elf`, `x86_64-linux-gnu`, `x86_64-apple-darwin`, `x86_64-windows-gnu`, EmbLinkOS |
+| `aarch64` | AArch64: `aarch64-elf`, `aarch64-linux-gnu`, `aarch64-apple-darwin`, EmbLinkOS |
+| `arm` | Cortex-M (`thumbv6m`, `thumbv7m`, `thumbv7em`, `thumbv8m.base`, `thumbv8m.main`, with their `-eabihf` forms) and ARMv7-A (`armv7a-none-eabi`) |
+| `riscv` | `riscv32-unknown-elf`, `riscv64-unknown-elf` |
+| `avr` | `avr` (ATmega) |
+| `mips` | `mipsel-none-elf`, `mips-none-elf`, `mips64el-none-elf`, `mips64-none-elf` |
+| `loongarch` | `loongarch64-unknown-elf` |
+| `tricore` | `tricore-none-elf` |
+| `xtensa` | `xtensa-none-elf` (ESP32) |
+| `ppc` | `powerpc-none-eabi` |
+| `rx` | `rx-none-elf` |
+| `sparc` | `sparc-none-elf` (LEON3) |
+| `m68k` | `m68k-none-elf` (ColdFire) |
+
+`TARGETS=all` is every family. The names of the backend directories are
+accepted for their family too: `thumb` for `arm`, `coldfire` for `m68k`,
+`x86_64` for `x86`, `riscv32` and `riscv64` for `riscv`. An unknown name
+stops `make` with the list of families.
+
+`embcc --version` lists the families a compiler has. A target from another
+family is refused before anything is compiled, with the families it has
+and the `TARGETS=` that adds the missing one:
+
+```text
+$ ./embcc --target=riscv32-unknown-elf -c main.c
+embcc: error: this embcc was built without the riscv backend, which riscv32-unknown-elf needs
+embcc: it was built with: arm
+embcc: rebuild with make TARGETS="arm riscv" to add it (docs/manual/getting-started.md, "Choosing the targets")
+```
+
+The linker in such a compiler likewise refuses another family's objects.
+A compiler built without `x86` uses its first family's target when given
+no `--target=` (`thumbv7m-none-eabi` for `TARGETS=arm`), unless
+`DEFAULT_TARGET` names another; see the next section.
+
+A subset's objects go to a directory of their own,
+`build/targets-arm-riscv`, so switching between `TARGETS=` values rebuilds
+only what that selection has not built yet. `make check` and `tests/run.sh`
+report the x86-64 suite as skipped when the compiler has no x86.
+
+To remember the choice, as GCC's `configure` does, run `./configure`
+once. It writes `config.mk`, which every later `make` reads:
+
+```sh
+./configure --targets=arm,riscv --prefix=/opt/embcc
+make
+make install
+```
+
+`./configure` also takes `--default-target=TRIPLE` (the same as
+`DEFAULT_TARGET`). A variable on the `make` command line still overrides
+`config.mk`, and `make distclean` removes it.
 
 ### Choosing the default target
 
@@ -89,9 +163,10 @@ make DEFAULT_TARGET=riscv32-unknown-elf embcc
 ./embcc -c main.c -o main.o              # compiled for RV32
 ```
 
-The binary still contains every backend, and `--target=` still selects
-any of them. Run `make clean` first: the value is compiled into one
-object, and `make` does not rebuild objects when only a variable changes.
+The binary still contains every backend that `TARGETS` names (all of
+them by default), and `--target=` still selects any of them. Run `make
+clean` first: the value is compiled into one object, and `make` does not
+rebuild objects when only a variable changes.
 
 The environment variable `EMBCC_DEFAULT_TARGET` overrides the built-in
 default for one shell, and `--target=` overrides both. See
@@ -121,6 +196,12 @@ below builds `embcc` first if it is out of date.
 
 There is no compiler runtime for `riscv64-unknown-elf`. The libraries and
 what they contain are described in [Libraries](libraries.md).
+
+`make runtimes`, `rt-embedded`, `libc-embedded` and `libcxx-embedded`
+build only the triples of the families `TARGETS` names, and the x86-64 and
+AArch64 libraries only when `x86` or `aarch64` is one of them. A target
+named explicitly, such as `make libc-x86_64`, is still attempted, and the
+compiler refuses it if it was built without that family.
 
 ### Checking the build
 
@@ -152,7 +233,10 @@ make install PREFIX=/opt/embcc
 
 `PREFIX` defaults to `/usr/local`. `make install` builds the toolchain,
 as a plain `make` does: every tool, `embdbg` included, and every target's
-runtime and C library, archived with EmbCC's own `embar`. Only once all
+runtime and C library, archived with EmbCC's own `embar`. With `TARGETS=`
+(or `./configure --targets=`) the compiler and the installed runtimes are
+those families' only, and `PREFIX/lib/embcc/VERSION/` has a directory for
+each of their triples and no other. Only once all
 of it is built does it copy `embcc`, `embld`, `embas`, `embread`,
 `embdbg`, `embls` and `embidx` into `PREFIX/bin`, so `make -j8 install`
 is safe. A tool that is missing stops the install with an error.

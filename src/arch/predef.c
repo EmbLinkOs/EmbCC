@@ -13,157 +13,97 @@ static int g_cxx;
 void predef_set_cxx(int cxx) { g_cxx = cxx; }
 int predef_is_cxx(void) { return g_cxx; }
 
+/* One generated table, in its C or its C++ flavour. */
+#define TABLE(name)                                                        \
+    (*count = g_cxx ? predef_macro_count_cxx_##name                        \
+                    : predef_macro_count_##name,                           \
+     g_cxx ? predef_macros_cxx_##name : predef_macros_##name)
+
+/* Each family's tables under its FAMILY_BUILT (src/arch/target.h): a
+ * compiler built without one has no tables for it, and its targets are
+ * refused before anything asks. */
 static const struct predef_macro *arch_table(int *count)
 {
-    if (g_cxx) {
-        switch (target_get()) {
-        case TARGET_AARCH64:
-            *count = predef_macro_count_cxx_aarch64;
-            return predef_macros_cxx_aarch64;
-        case TARGET_THUMB:
-            /* ARMv8-M Mainline has its own table. Not the v7-M one with
-             * __ARM_ARCH patched: the feature macros differ throughout, and
-             * a generated file is not hand-parameterised (ARCHITECTURE.md
-             * §5). Same arrangement as the two RISC-V widths. */
-            if (target_thumb_arch() >= 8) {
-                *count = predef_macro_count_cxx_thumbv8m;
-                return predef_macros_cxx_thumbv8m;
-            }
-            if (target_arm_a32()) {
-                *count = predef_macro_count_cxx_armv7a;
-                return predef_macros_cxx_armv7a;
-            }
-            if (target_thumb_v8m_base()) {
-                *count = predef_macro_count_cxx_thumbv8mbase;
-                return predef_macros_cxx_thumbv8mbase;
-            }
-            if (target_thumb_arch() == 6) {
-                *count = predef_macro_count_cxx_thumbv6m;
-                return predef_macros_cxx_thumbv6m;
-            }
-            *count = predef_macro_count_cxx_thumb;
-            return predef_macros_cxx_thumb;
-        case TARGET_RISCV32:
-            *count = predef_macro_count_cxx_riscv32;
-            return predef_macros_cxx_riscv32;
-        case TARGET_RISCV64:
-            *count = predef_macro_count_cxx_riscv64;
-            return predef_macros_cxx_riscv64;
-        case TARGET_AVR:
-            *count = predef_macro_count_cxx_avr;
-            return predef_macros_cxx_avr;
-        case TARGET_MIPS32:
-            if (target_big_endian()) {
-                *count = predef_macro_count_cxx_mips32eb;
-                return predef_macros_cxx_mips32eb;
-            }
-            *count = predef_macro_count_cxx_mips32;
-            return predef_macros_cxx_mips32;
-        case TARGET_MIPS64:
-            if (target_big_endian()) {
-                *count = predef_macro_count_cxx_mips64eb;
-                return predef_macros_cxx_mips64eb;
-            }
-            *count = predef_macro_count_cxx_mips64;
-            return predef_macros_cxx_mips64;
-        case TARGET_LOONGARCH64:
-            *count = predef_macro_count_cxx_loongarch64;
-            return predef_macros_cxx_loongarch64;
-        case TARGET_TRICORE:
-            *count = predef_macro_count_cxx_tricore;
-            return predef_macros_cxx_tricore;
-        case TARGET_XTENSA:
-            *count = predef_macro_count_cxx_xtensa;
-            return predef_macros_cxx_xtensa;
-        case TARGET_PPC32:
-            *count = predef_macro_count_cxx_ppc32;
-            return predef_macros_cxx_ppc32;
-        case TARGET_RX:                 /* C++ is refused for RX */
-            *count = predef_macro_count_rx;
-            return predef_macros_rx;
-        case TARGET_SPARC32:
-            *count = predef_macro_count_cxx_sparc32;
-            return predef_macros_cxx_sparc32;
-        case TARGET_COLDFIRE:
-            *count = predef_macro_count_cxx_coldfire;
-            return predef_macros_cxx_coldfire;
-        default:
-            *count = predef_macro_count_cxx_x86_64;
-            return predef_macros_cxx_x86_64;
-        }
-    }
     switch (target_get()) {
+#if FAMILY_BUILT(x86)
+    case TARGET_X86_64:
+        return TABLE(x86_64);
+#endif
+#if FAMILY_BUILT(aarch64)
     case TARGET_AARCH64:
-        *count = predef_macro_count_aarch64;
-        return predef_macros_aarch64;
+        return TABLE(aarch64);
+#endif
+#if FAMILY_BUILT(arm)
     case TARGET_THUMB:
-        if (target_thumb_arch() >= 8) {
-            *count = predef_macro_count_thumbv8m;
-            return predef_macros_thumbv8m;
-        }
-        if (target_arm_a32()) {
-            *count = predef_macro_count_armv7a;
-            return predef_macros_armv7a;
-        }
-        if (target_thumb_v8m_base()) {
-            *count = predef_macro_count_thumbv8mbase;
-            return predef_macros_thumbv8mbase;
-        }
-        if (target_thumb_arch() == 6) {
-            *count = predef_macro_count_thumbv6m;
-            return predef_macros_thumbv6m;
-        }
-        *count = predef_macro_count_thumb;
-        return predef_macros_thumb;
+        /* ARMv8-M Mainline has its own table. Not the v7-M one with
+         * __ARM_ARCH patched: the feature macros differ throughout, and
+         * a generated file is not hand-parameterised (ARCHITECTURE.md
+         * §5). Same arrangement as the two RISC-V widths. */
+        if (target_thumb_arch() >= 8)
+            return TABLE(thumbv8m);
+        if (target_arm_a32())
+            return TABLE(armv7a);
+        if (target_thumb_v8m_base())
+            return TABLE(thumbv8mbase);
+        if (target_thumb_arch() == 6)
+            return TABLE(thumbv6m);
+        return TABLE(thumb);
+#endif
+#if FAMILY_BUILT(riscv)
     case TARGET_RISCV32:
-        *count = predef_macro_count_riscv32;
-        return predef_macros_riscv32;
+        return TABLE(riscv32);
     case TARGET_RISCV64:
-        *count = predef_macro_count_riscv64;
-        return predef_macros_riscv64;
+        return TABLE(riscv64);
+#endif
+#if FAMILY_BUILT(avr)
     case TARGET_AVR:
-        *count = predef_macro_count_avr;
-        return predef_macros_avr;
+        return TABLE(avr);
+#endif
+#if FAMILY_BUILT(mips)
     case TARGET_MIPS32:
-        if (target_big_endian()) {
-            *count = predef_macro_count_mips32eb;
-            return predef_macros_mips32eb;
-        }
-        *count = predef_macro_count_mips32;
-        return predef_macros_mips32;
+        if (target_big_endian())
+            return TABLE(mips32eb);
+        return TABLE(mips32);
     case TARGET_MIPS64:
-        if (target_big_endian()) {
-            *count = predef_macro_count_mips64eb;
-            return predef_macros_mips64eb;
-        }
-        *count = predef_macro_count_mips64;
-        return predef_macros_mips64;
+        if (target_big_endian())
+            return TABLE(mips64eb);
+        return TABLE(mips64);
+#endif
+#if FAMILY_BUILT(loongarch)
     case TARGET_LOONGARCH64:
-        *count = predef_macro_count_loongarch64;
-        return predef_macros_loongarch64;
+        return TABLE(loongarch64);
+#endif
+#if FAMILY_BUILT(tricore)
     case TARGET_TRICORE:
-        *count = predef_macro_count_tricore;
-        return predef_macros_tricore;
+        return TABLE(tricore);
+#endif
+#if FAMILY_BUILT(xtensa)
     case TARGET_XTENSA:
-        *count = predef_macro_count_xtensa;
-        return predef_macros_xtensa;
+        return TABLE(xtensa);
+#endif
+#if FAMILY_BUILT(ppc)
     case TARGET_PPC32:
-        *count = predef_macro_count_ppc32;
-        return predef_macros_ppc32;
-    case TARGET_RX:
+        return TABLE(ppc32);
+#endif
+#if FAMILY_BUILT(rx)
+    case TARGET_RX:                 /* C++ is refused for RX: one table */
         *count = predef_macro_count_rx;
         return predef_macros_rx;
+#endif
+#if FAMILY_BUILT(sparc)
     case TARGET_SPARC32:
-        *count = predef_macro_count_sparc32;
-        return predef_macros_sparc32;
+        return TABLE(sparc32);
+#endif
+#if FAMILY_BUILT(m68k)
     case TARGET_COLDFIRE:
-        *count = predef_macro_count_coldfire;
-        return predef_macros_coldfire;
+        return TABLE(coldfire);
+#endif
     default:
-        *count = predef_macro_count_x86_64;
-        return predef_macros_x86_64;
+        internal_error("no predefined macros for %s: its backend is not "
+                       "built into this compiler", target_triple_now());
     }
 }
+#undef TABLE
 
 /* What an operating system adds on top of its architecture's table
  * (D-014).
@@ -404,8 +344,12 @@ static int thumb_fpu_drops(const char *name)
  * so that one is replaced and the table is otherwise the part's. */
 static int avr_other_part(void)
 {
+#if FAMILY_BUILT(avr)
     const struct avr_mcu *m = target_avr_mcu();
     return m && strcmp(m->macro, "__AVR_ATmega328P__") != 0;
+#else
+    return 0;                       /* no AVR in this compiler */
+#endif
 }
 
 /* __ELF__ lives in the generated architecture tables, because the
@@ -491,10 +435,12 @@ const struct predef_macro *predef_table(int *count)
                 merged[nmerged++] = thumb_dsp_add[i];
         if (rv)
             nmerged += riscv_adds(merged + nmerged);
+#if FAMILY_BUILT(avr)
         if (avr) {
             merged[nmerged].name = target_avr_mcu()->macro;
             merged[nmerged++].value = "1";
         }
+#endif
         if (fpu && target_arm_a32()) {
             int v4 = target_arm_vfp(NULL) == 4;
             const struct predef_macro *add = v4 ? a32_vfp4_add : a32_vfp3_add;

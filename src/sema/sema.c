@@ -33,6 +33,48 @@
 #include "uninit.h"
 #include "w128.h"
 
+/* A register variable's name is looked up in its target's assembler. A
+ * family left out of this compiler (make TARGETS=, src/arch/target.h)
+ * has no assembler to ask; its targets are refused before sema runs, so
+ * the lookup is never made, and answers "no such register" here. */
+#define NO_GPR(p, n) ((void)(p), (void)(n), -1)
+#if !FAMILY_BUILT(aarch64)
+#define a64asm_gpr(p, n) NO_GPR(p, n)
+#endif
+#if !FAMILY_BUILT(avr)
+#define avrasm_gpr(p, n) NO_GPR(p, n)
+#endif
+#if !FAMILY_BUILT(riscv)
+#define rvasm_gpr(p, n) NO_GPR(p, n)
+#endif
+#if !FAMILY_BUILT(arm)
+#define tasm_gpr(p, n) NO_GPR(p, n)
+#endif
+#if !FAMILY_BUILT(mips)
+#define mipsasm_gpr(p, n) NO_GPR(p, n)
+#endif
+#if !FAMILY_BUILT(tricore)
+#define tcasm_reg(p, n, file) (*(file) = 0, NO_GPR(p, n))
+#endif
+#if !FAMILY_BUILT(loongarch)
+#define laasm_gpr(p, n) NO_GPR(p, n)
+#endif
+#if !FAMILY_BUILT(xtensa)
+#define xtasm_gpr(p, n) NO_GPR(p, n)
+#endif
+#if !FAMILY_BUILT(sparc)
+#define spasm_gpr(p, n) NO_GPR(p, n)
+#endif
+#if !FAMILY_BUILT(ppc)
+#define ppcasm_gpr(p, n) NO_GPR(p, n)
+#endif
+#if !FAMILY_BUILT(rx)
+#define rxasm_gpr(p, n) NO_GPR(p, n)
+#endif
+#if !FAMILY_BUILT(m68k)
+#define cfasm_gpr(p, n) NO_GPR(p, n)
+#endif
+
 struct vardef {
     const char *name;
     struct type *ty;

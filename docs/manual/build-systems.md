@@ -86,7 +86,9 @@ export PATH=/opt/embcc/bin:$PATH
 For each triple this links `<triple>-gcc` and `<triple>-cc` to `embcc`,
 `-ar` and `-ranlib` to `embar`, `-objcopy` to `embpack`, and `-size` and
 `-nm` to `embmap`. The default `TRIPLES` are `arm-none-eabi`,
-`riscv64-unknown-elf`, `riscv32-unknown-elf` and `avr`.
+`riscv64-unknown-elf`, `riscv32-unknown-elf` and `avr`, less those whose
+family the compiler was built without
+([Choosing the targets](getting-started.md#choosing-the-targets)).
 
 Called by such a name, `embcc` compiles for the triple in it, as clang does.
 A version after the name is skipped (`arm-none-eabi-gcc-13.2`), and

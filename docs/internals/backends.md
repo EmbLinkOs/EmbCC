@@ -20,6 +20,8 @@ changing EmbCC. Register allocation, which all five share, is in
 | `code.c`, `code.h` | the machine-code buffer every encoder writes into |
 | `predef.c`, `predef.h` | which predefined-macro table the target uses |
 | `regalloc.c`, `regalloc.h` | the shared register allocator |
+| `backends.c` | the backend registry, a row per backend built in |
+| `common.c` | what every backend's lowering shares: the wide and float vreg classes, string-site resolution, the local-call rule, label marks |
 | `x86_64/` | x86-64: `codegen.c`, `emit.c`, `irgen.c` (`va_arg`, extended asm), `topasm.c` (file-scope asm), `as.c` (EmbAS), `disasm.c`, `predef*.c` |
 | `aarch64/` | AArch64: `codegen.c`, `emit.c`, `asm.c` (inline-asm assembler), `irgen.c`, `predef*.c` |
 | `thumb/` | ARMv6-M, ARMv7-M and ARMv8-M Mainline: `codegen.c` (ARMv7-M/ARMv8-M selection, and the ABI, frame and allocator code all three share), `v6m.c` (ARMv6-M selection), `cg.h` (what the two share), `emit.c`, `asm.c`, `attrs.c` (build attributes), `irgen.c`, `predef*.c` |
@@ -139,22 +141,30 @@ way that relocation type's linker reads it back.
 ### Adding a target
 
 1. Its family file in the target database, `src/targets/<family>.def`,
-   with a `DATA_MODEL` row and its `TRIPLE` rows, and the file's line in
-   `src/targets/targets.def`. Then an answer in every `switch` in
-   `target.c` (the build fails until each is given), and the relocation
-   mappings.
-2. A directory with `codegen.c`, `emit.c` and `irgen.c`, and a
+   with a `FAMILY` row first, a `DATA_MODEL` row and its `TRIPLE` rows,
+   and the file's line in `src/targets/targets.def`. Then an answer in
+   every `switch` in `target.c` (the build fails until each is given), and
+   the relocation mappings.
+2. Its place in `make TARGETS=` (see [Building for some
+   targets](#building-for-some-targets)): the family's
+   `EMBCC_FAMILY_<name>` default in `src/arch/target.h`, its name in the
+   Makefile's `TARGET_FAMILIES`, its sources in `FAMILY_SRCS_<name>` and
+   its runtime triples in `FAMILY_RT_<name>`. Every reference shared code
+   makes into the new backend (a registry row, an irgen or asm dispatch, a
+   predef table, the linker's relocations) goes under
+   `#if FAMILY_BUILT(name)`.
+3. A directory with `codegen.c`, `emit.c` and `irgen.c`, and a
    `codegen_unit_*` entry point.
-3. Its row in the backend registry, `src/arch/backends.c` (see [The
+4. Its row in the backend registry, `src/arch/backends.c` (see [The
    backend registry](#the-backend-registry)), and its GCC `-m` options in
    `src/arch/<arch>/options.c`. The driver reads the row; it has no
    per-target chain to extend.
-4. A predefined-macro table from `tools/gen-predef.sh` (below).
-5. An encoding referee for `emit.c` (see [Encoders and their
+5. A predefined-macro table from `tools/gen-predef.sh` (below).
+6. An encoding referee for `emit.c` (see [Encoders and their
    referees](#encoders-and-their-referees)).
-6. A QEMU harness under `tests/harness/<arch>/`, and the target in the
+7. A QEMU harness under `tests/harness/<arch>/`, and the target in the
    test suite. See [Testing](testing.md).
-7. A new source file also has to be added to the build lists, including
+8. A new source file also has to be added to the build lists, including
    `EMBLS_SRCS`; otherwise `make test` fails at its build step.
 
 ## Predefined macros
@@ -241,6 +251,50 @@ these were chains of `if (ta == TARGET_...)` in the driver, nine of them
 for the unwind refusals alone, and a new backend had to extend each one.
 More of the driver's per-target knowledge moves into the row as the
 redesign proceeds ([Redesign](redesign.md)).
+
+### Building for some targets
+
+`make TARGETS=arm,riscv` builds a compiler with those families' backends
+and no other ([Choosing the
+targets](../manual/getting-started.md#choosing-the-targets) is the user's
+side). A family is one file of the target database, and its `FAMILY` row
+gives the name, the line `--version` prints and the default triple of a
+compiler built with it alone; the `DATA_MODEL` rows after it are its
+architectures (`target_family_of`).
+
+The Makefile compiles only the selected families' `FAMILY_SRCS_<name>`,
+into `$(BUILD)/targets-<names>`, and defines `EMBCC_FAMILY_<name>=0` for
+each family left out. `src/arch/target.h` defaults every one to 1, so every
+other build of these sources (`build.ebm`, the self-host, `embld` and
+`embls`, which link some of them) has all of them, and `SRCS` stays the
+full list those builds read. Shared code that names a backend's symbol
+does so under `#if FAMILY_BUILT(name)`:
+
+| Where | What is guarded |
+|---|---|
+| `src/arch/backends.c` | the registry rows and the ELF notes |
+| `src/arch/predef.c` | the predefined-macro tables |
+| `src/ir/irgen.c` | the `va_arg` and `asm` dispatch |
+| `src/opt/immfold.c` | each backend's foldable immediates |
+| `src/sema/sema.c` | the register names of `register ... asm("r")` (stubbed: never asked) |
+| `src/as/gas.c` | the `gas_target` rows; ARM's and Xtensa's inline helpers (stubbed) |
+| `src/link/link.c` | each machine's relocations and entry stub; `add_object` refuses a machine whose family is not built |
+| `src/driver/main.c`, `asmout.c` | the x86-64 assembler and disassembler, the encoder settings for ARM and MIPS, AVR's `-mmcu=` |
+
+Two files serve two families: `x86_64/topasm.c` (file-scope `asm` on
+x86-64 and AArch64) and the variadic lowering at the top of
+`riscv/irgen.c` (RISC-V and LoongArch; the rest of that file is under
+`FAMILY_BUILT(riscv)`). Both are in both families' source lists. The
+helpers every backend calls are in `src/arch/common.c`.
+
+The driver checks `target_arch_built` once every way of choosing a target
+has been applied (`--target=`, the default, the name it was called by,
+`-arch`), and refuses an unbuilt one before anything asks for its row.
+`tests/golden/target-select.sh` builds `TARGETS=arm` and checks that no
+other backend's symbol is in it and that its objects are byte-identical to
+the full compiler's; `EMBCC_TARGETS_EVERY=1` builds all 13 one-family
+compilers, which is where a new unguarded reference shows up as a link
+error or an unused-function error.
 
 ## The backend contract
 

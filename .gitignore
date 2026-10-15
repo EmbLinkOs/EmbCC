@@ -57,3 +57,6 @@ ref/
 /embrt
 # verify/fuzz: the programs that failed
 /verify/fuzz/out/
+
+# what ./configure writes (make distclean removes it)
+/config.mk

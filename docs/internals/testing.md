@@ -31,7 +31,7 @@ which tests a change must pass and how to add one.
 
 | Target | Builds first | Runs | When |
 |---|---|---|---|
-| `make check` | `embcc`, `libc-x86_64`, `libcxx-x86_64` | `tests/run.sh --exec-only`: the compiled-and-run corpus (`tests/exec/*.c`, `tests/exec/x86_64/*.c`, `tests/cxx/*.cc`) for `x86_64-elf` | while working |
+| `make check` | `embcc`, `libc-x86_64`, `libcxx-x86_64` (without the libraries when built without x86, `make TARGETS=`) | `tests/run.sh --exec-only`: the compiled-and-run corpus (`tests/exec/*.c`, `tests/exec/x86_64/*.c`, `tests/cxx/*.cc`) for `x86_64-elf`, or a skip when the compiler has no x86 | while working |
 | `make test` | `embcc`, `embread`, `embld`, `embdbg`, `embls`, `embas`, `libc-x86_64`, `libcxx-x86_64`, `libc-linux-x86_64`, `libcxx-linux-x86_64` | `tests/run.sh`: every shell test in `tests/exec`, `tests/compile`, `tests/golden` and `tests/golden/x86_64`, then the corpus, for `x86_64-elf` | before a commit |
 | `make test-arm64` | `embcc`, `libc-aarch64`, `libcxx-aarch64`, `libc-linux-aarch64`, `libcxx-linux-aarch64` | `tests/run.sh --target=aarch64-elf`: `tests/golden/*.sh`, `tests/golden/aarch64/*.sh`, and the corpus compiled for `aarch64-elf` | before a commit that can affect aarch64 or shared code |
 | `make test-libstdcxx` | `embcc` | `tests/golden/cxx-libstdcxx-embcc.sh` for `x86_64-elf` and `aarch64-elf`, with `EMBCC_LIBSTDCXX=1` | opt-in; builds libstdc++ from GCC's sources and takes minutes |
@@ -71,12 +71,23 @@ Two further checks are run by hand:
 ## The runner
 
 ```sh
-tests/run.sh [--target=x86_64-elf|aarch64-elf] [--exec-only]
+tests/run.sh [--target=x86_64-elf|aarch64-elf] [--exec-only] [--embcc=PATH]
 ```
 
 `tests/run.sh` must be run from a tree where `./embcc` is built; it exits
 with an error otherwise. The default target is `x86_64-elf`.
 `--exec-only` skips every shell test and runs only the corpus.
+`--embcc=PATH` tests another compiler than `./embcc`, such as one built
+into a different `BUILD` directory.
+
+A compiler built for some target families only (`make TARGETS=`; see
+[Getting started](../manual/getting-started.md#choosing-the-targets))
+runs what it can. When it has no backend for the suite's `--target=`, the
+runner prints `run.sh: skipped:` with the compiler's refusal and exits 0;
+that is what `make check` does in a tree built without x86. A shell test
+that fails with that refusal (`this embcc was built without the NAME
+backend`) is reported as SKIP rather than FAIL. A compiler with every
+family never prints it, so on a full build nothing is skipped this way.
 
 The runner exports these variables to every test:
 
@@ -462,6 +473,7 @@ clang's AVR struct convention is not avr-gcc's.
 | `gas-file` | `.s` and `.S` input files on the embedded targets |
 | `triple` | target triples parse to architecture, OS and object format; old spellings keep their meaning |
 | `default-target` | `DEFAULT_TARGET`, `EMBCC_DEFAULT_TARGET` and `--target=` precedence, and the separation from `EMBCC_TARGET` |
+| `target-select` | `make TARGETS=arm` builds a compiler without the other backends (none of their symbols in it) whose objects are byte-identical to the full compiler's; it refuses another family's target by `--target=`, the default, `-arch` and its name, and the linker refuses that family's objects; `--version` lists the families; the runtimes and the install are the family's triples only; an unknown family stops `make` and `./configure`; `tests/run.sh` skips a suite the compiler cannot build. `EMBCC_TARGETS_EVERY=1` also builds each of the 13 one-family compilers |
 | `install` | the compiler finds its headers and libraries relative to its own binary |
 | `version` | `--version` names the target and the language and admits what is missing |
 | `driver-deps` | `-M`, `-MM`, `-MD`, `-MMD`, `-MF`, `-MT`, `-MP` and `-fsyntax-only` |
