@@ -31,7 +31,10 @@
  *     bits are its DOUT's, for the next LED, which this board does not
  *     have. A high under 0.45 us is read as a 0, a longer one a 1; one
  *     outside 0.15 to 0.75 us is warned of, once. The colour is reported
- *     as its 24th bit ends: "RGB LED #rrggbb", or "RGB LED off". */
+ *     as its 24th bit ends: "RGB LED #rrggbb", or "RGB LED off";
+ *   - arduino-zero: the Arduino Zero (Arduino's variant files for it):
+ *     the LED "L" on PA17 (pin 13), lit high; the TX and RX LEDs on PA27
+ *     and PB03, lit low; no user button (port 0 is PA, 1 PB). */
 #include <stdlib.h>
 #include <string.h>
 
@@ -73,6 +76,9 @@ static const struct mbutton dk_buttons[] = {
 };
 
 static const struct mbutton devkitm_buttons[] = { { 0, 9, "BOOT", 0 } };
+static const struct mled zero_leds[] = {
+    { 0, 17, "L", "PA17", 0 }, { 0, 27, "TX", "PA27", 1 }, { 1, 3, "RX", "PB03", 1 },
+};
 static const struct mrgb devkitm_rgb = { 0, 8, "RGB LED", "GPIO8" };
 
 #define N(a) (int)(sizeof a / sizeof a[0])
@@ -84,6 +90,7 @@ static const struct mboard mboards[] = {
       nrf_pins_changed, 0 },
     { "esp32c3-devkitm-1", 0, 0, devkitm_buttons, N(devkitm_buttons), 0, 0, 0,
       esp32c3_pins_changed, &devkitm_rgb },
+    { "arduino-zero", zero_leds, N(zero_leds), 0, 0, 0, 0, 0, samd21_pins_changed, 0 },
 };
 
 #define MAXLED 8

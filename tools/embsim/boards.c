@@ -169,6 +169,20 @@ static const struct model_desc esp32c3_models[] = {
     { 0, 0 },
 };
 
+/* the SAM D21's models, over its SVD (samd21.c): SYSCTRL first, which
+ * holds the clock tree the others read; PM, which gates them */
+static const struct model_desc samd21_models[] = {
+    { "SYSCTRL", "samd21-sysctrl" },
+    { "GCLK", "samd21-gclk" },
+    { "PM", "samd21-pm" },
+    { "NVMCTRL", "samd21-nvmctrl" },
+    { "PORT", "samd21-port" },
+    { "PORT_IOBUS", "samd21-port" },
+    { "SERCOM*", "samd21-sercom" },
+    { "TC*", "samd21-tc" },
+    { 0, 0 },
+};
+
 /* the PIC24FJ1024GB610's memory, on the bus as pic24.h places it:
  * program flash to program address 0xABFFF (the configuration words in
  * its last page) at twice its address, the configuration memory at
@@ -338,6 +352,18 @@ const struct board_desc boards[] = {
      * 8 KiB of fast memory at 0x50000000; the peripherals Espressif's
      * esp32c3.svd's; the board's RGB LED and BOOT button. No ROM and no
      * flash: the image is loaded into the SRAM, as the ROM's loader does */
+    /* the Arduino Zero: an ATSAMD21G18A, a Cortex-M0+ with two NVIC
+     * priority bits, 256 KiB of flash at 0 and 32 KiB of SRAM; the NVM
+     * rows (user row, calibration, serial number) at 0x00800000 read as
+     * erased; the peripherals Microchip's ATSAMD21G18A.svd's; the board's
+     * LEDs. The image is the whole flash: the Arduino bootloader is not
+     * there */
+    { "arduino-zero", "cortex-m", "cortex-m0plus", 2,
+      { { 0, KB(256), MEM_FLASH, 0, 0, 0xffffffffu },
+        { 0x20000000u, KB(32), MEM_RAM, 1, 0, 0 },
+        { 0x00800000u, KB(64), MEM_FLASH, 0, 0, 0xffffffffu } },
+      { { "arduino-zero", 0, 0 } }, { { 0, 0, 0 } },
+      "ATSAMD21G18A.svd", samd21_models, 0 },
     { "esp32c3-devkitm-1", "riscv", "esp32c3", 0,
       { { 0x3fc80000u, KB(384), MEM_RAM, 1, 0, 0 },
         { 0x40380000u, KB(384), MEM_ALIAS, 0, 0x3fc80000u, 0 },
@@ -405,6 +431,7 @@ static const struct dev_type dev_types[] = {
     { "nrf52840dk", &mcu_board_ops, mcu_board_create },
     { "nrf52840-ficr", &nrf52_ficr_ops, nrf52_ficr_create },
     { "esp32c3-devkitm-1", &mcu_board_ops, mcu_board_create },
+    { "arduino-zero", &mcu_board_ops, mcu_board_create },
 };
 
 /* ---- the peripheral models, over an SVD's registers (svd-map.h) -------- */
@@ -468,6 +495,13 @@ static const struct model_type model_types[] = {
     { "esp32c3-iomux", &esp32c3_iomux_ops, esp32c3_iomux_create },
     { "esp32c3-gpio", &esp32c3_gpio_ops, esp32c3_gpio_create },
     { "esp32c3-rtc", &esp32c3_rtc_ops, esp32c3_rtc_create },
+    { "samd21-sysctrl", &samd21_sysctrl_ops, samd21_sysctrl_create },
+    { "samd21-gclk", &samd21_gclk_ops, samd21_gclk_create },
+    { "samd21-pm", &samd21_pm_ops, samd21_pm_create },
+    { "samd21-nvmctrl", &samd21_nvmctrl_ops, samd21_nvmctrl_create },
+    { "samd21-port", &samd21_port_ops, samd21_port_create },
+    { "samd21-sercom", &samd21_sercom_ops, samd21_sercom_create },
+    { "samd21-tc", &samd21_tc_ops, samd21_tc_create },
     { 0, 0, 0 },
 };
 
