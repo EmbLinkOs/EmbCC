@@ -308,30 +308,49 @@ void opts_print_spellings(FILE *out)
 
 /* ---- the man page ----------------------------------------------------- */
 
+/* The bytes on the man page's current input line, which roff() keeps
+ * under 80 (mandoc's lint reports a longer one): each caller sets it to
+ * what it has written of the line before. */
+static int roff_col;
+
+static void roff_put(FILE *out, const char *s)
+{
+    fputs(s, out);
+    roff_col += (int)strlen(s);
+}
+
 /* Text as roff reads it: a backslash starts an escape, a '-' is a hyphen
  * unless escaped (and an option's dashes must stay minus signs), and a
  * line starting with '.' or '\'' would be a request. Markdown's `code`
- * becomes bold. */
+ * becomes bold. A long text is broken at a space into several input
+ * lines, which roff fills back into one paragraph. */
 static void roff(FILE *out, const char *s, const char *arg)
 {
     int code = 0;
     if (*s == '.' || *s == '\'')
-        fputs("\\&", out);
+        roff_put(out, "\\&");
     for (; *s; s++) {
-        if (*s == '\\')
-            fputs("\\e", out);
+        if (*s == ' ' && roff_col >= 64 && s[1]) {
+            fputc('\n', out);
+            roff_col = 0;
+            if (s[1] == '.' || s[1] == '\'')
+                roff_put(out, "\\&");
+        } else if (*s == '\\')
+            roff_put(out, "\\e");
         else if (*s == '-')
-            fputs("\\-", out);
+            roff_put(out, "\\-");
         else if (*s == '`') {
-            fputs(code ? "\\fR" : "\\fB", out);
+            roff_put(out, code ? "\\fR" : "\\fB");
             code = !code;
         } else if (*s == '%' && arg)
             roff(out, arg, NULL);
-        else
+        else {
             fputc(*s, out);
+            roff_col++;
+        }
     }
     if (code)
-        fputs("\\fR", out);
+        roff_put(out, "\\fR");
 }
 
 void opts_print_man(FILE *out, const char *version, const char *date)
@@ -379,6 +398,7 @@ void opts_print_man(FILE *out, const char *version, const char *date)
             if (o->group != (enum opt_group)g || !o->spelling)
                 continue;
             fputs(".TP\n\\fB", out);
+            roff_col = 3;
             roff(out, o->spelling, NULL);
             fputs("\\fR", out);
             if (o->arg) {
@@ -387,10 +407,12 @@ void opts_print_man(FILE *out, const char *version, const char *date)
                 fputs("\\fR", out);
             }
             fputc('\n', out);
+            roff_col = 0;
             roff(out, o->help, NULL);
             fputc('\n', out);
             if (o->gcc) {
                 fputs(".br\nGCC: \\fB", out);
+                roff_col = 8;
                 roff(out, o->gcc, o->arg ? o->arg : "VALUE");
                 fputs("\\fR\n", out);
             }
@@ -402,8 +424,10 @@ void opts_print_man(FILE *out, const char *version, const char *date)
     for (int k = 0; k < NOPTS; k++)
         if (!opts[k].spelling) {
             fputs(".TP\n\\fB", out);
+            roff_col = 3;
             roff(out, opts[k].gcc, NULL);
             fputs("\\fR\n", out);
+            roff_col = 0;
             roff(out, opts[k].help, NULL);
             fputc('\n', out);
         }
