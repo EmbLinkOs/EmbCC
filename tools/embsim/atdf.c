@@ -551,6 +551,21 @@ struct svd_device *atdf_load(const char *path)
     if (!d->np)
         svd_die("the device %s has no peripheral on the bus", d->name);
     devid(d, dev, modules);
+    /* the memory: program flash ("code") and RAM ("kseg0_data_mem") */
+    const struct xnode *spaces = svd_xfind(dev, "address-spaces");
+    for (int i = 0; spaces && i < svd_xnkid(spaces); i++) {
+        const struct xnode *sp = svd_xkid(spaces, i);
+        for (int k = 0; k < svd_xnkid(sp); k++) {
+            const struct xnode *seg = svd_xkid(sp, k);
+            const char *sn = svd_xattr(seg, "name");
+            if (strcmp(svd_xname(seg), "memory-segment") || !sn)
+                continue;
+            if (!strcmp(sn, "code"))
+                d->code_end = num(seg, "size", 0);
+            else if (!strcmp(sn, "kseg0_data_mem"))
+                d->ram_end = num(seg, "size", 0);
+        }
+    }
     if (d->clr_set_inv) {
         read_sci(d, path);
         ansel_from_header(d, path);

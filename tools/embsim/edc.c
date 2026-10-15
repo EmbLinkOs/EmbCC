@@ -17,6 +17,11 @@
  *   - <edc:InterruptList>: each <edc:Interrupt> by its number (edc:irq),
  *     named less "Interrupt" (T1, ADC1, U1RX), which the PIC24's
  *     interrupt controller model finds by name;
+ *   - <edc:ProgramSpace>: where program memory ends (the first
+ *     configuration sector's end, the single-partition part's), and each
+ *     configuration word (<edc:DCRDef>) at its address there; and the
+ *     RAM, <edc:DataSpace>'s span (svd_device.code_end, ram_base,
+ *     ram_end, cfg);
  *   - <edc:PinList>: each <edc:Pin>'s names (its <edc:VirtualPin>s: RP21,
  *     OCM1A, PMA5, RG6...) on the port pin among them (RG6), which the
  *     ports' model puts the peripherals' outputs on (svd_device.pin).
@@ -307,6 +312,32 @@ static void read_pins(struct svd_device *d, const struct xnode *pl)
     }
 }
 
+/* the program space: its end (the first code sector's, to its page's
+ * end, where the configuration words are), the configuration words (each
+ * the first time it is named: the single-partition part's) */
+static void read_program(struct svd_device *d, const struct xnode *n, int depth)
+{
+    for (int i = 0; n && depth < 8 && i < svd_xnkid(n); i++) {
+        const struct xnode *k = svd_xkid(n, i);
+        const char *rid = svd_xattr(k, "edc:regionid");
+        if (is(k, "edc:CodeSector") && !d->code_end && rid && !strcmp(rid, "program"))
+            d->code_end = (num(k, "edc:endaddr", 0) + 0x7ff) & ~0x7ffull;
+        if (is(k, "edc:DCRDef")) {
+            const char *nm = svd_xattr(k, "edc:cname");
+            int seen = 0;
+            for (int j = 0; nm && j < d->ncfg; j++)
+                seen |= !strcmp(d->cfg[j].name, nm);
+            if (nm && !seen) {
+                d->cfg = svd_grow(d->cfg, (size_t)(d->ncfg + 1) * sizeof *d->cfg);
+                d->cfg[d->ncfg].name = nm;
+                d->cfg[d->ncfg++].addr = num(k, "edc:_addr", 0);
+            }
+            continue;
+        }
+        read_program(d, k, depth + 1);
+    }
+}
+
 struct svd_device *edc_load(const char *path)
 {
     const struct xnode *root = svd_xml_read(path);
@@ -325,6 +356,9 @@ struct svd_device *edc_load(const char *path)
     const struct xnode *ds = svd_xfind(root, "edc:DataSpace");
     if (!ds)
         svd_die("an EDC file with no <edc:DataSpace>");
+    d->ram_base = num(ds, "edc:xbeginaddr", 0);
+    d->ram_end = num(ds, "edc:xendaddr", 0);
+    read_program(d, svd_xfind(root, "edc:ProgramSpace"), 0);
     struct sfrs all = { 0, 0, 0 };
     find_sectors(&all, ds, 0);
     /* runs of one module's registers: the peripherals */

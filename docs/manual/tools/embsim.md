@@ -81,12 +81,23 @@ built for QEMU runs unchanged.
 | `curiosity-pic32mz-ef-2` | PIC32MZ2048EFM144, on Microchip's Curiosity PIC32MZ EF 2.0 | as `pic32mz2048efh100` | the same, and the board's LEDs and switches |
 | `pic24fj1024gb610` | PIC24FJ1024GB610 (the PIC24F core, with EDS) | 1 MiB of program flash, 32 KiB of RAM at data `0x0800` | UART1-6, of the part's EDC ([below](#pic24-parts-and-the-explorer-1632s-pic24-pim)) |
 | `explorer16-32-pic24` | the same part, on the Explorer 16/32 with its PIC24FJ1024GB610 PIM | as `pic24fj1024gb610` | the same, and the board's LEDs, buttons, sensors, LCD and EEPROM |
+| any PIC32MZ EF part by its name: `pic32mz1024efg064`, `pic32mz0512efe100`... | that part, alone | its program flash and RAM as its ATDF gives them | as `pic32mz2048efh100`, of its own ATDF |
+| any PIC24FJ GA6/GB6 part by its name: `pic24fj256ga610`, `pic24fj128gb606`... | that part, alone | its program memory, configuration words and RAM as its EDC gives them | as `pic24fj1024gb610`, of its own EDC |
+
+A part by its name needs its pack, from `--dfp DIR` (or its file in
+`EMBSIM_SVD_PATH`); every part of the two packs' families is one, with
+the models the PIC32MZ2048EFH100 and the PIC24FJ1024GB610 have. A part
+of another family (`pic24fj128ga010`, a PIC32MX) is refused by name.
+A program built for the part (`embcc --mcu=32MZ1024EFG064`) finds its
+memory where the part has it; a 64-pin part has the ports and pins of
+its EDC or ATDF, so a test that drives RA0 needs a 100-pin one.
 
 - `--cpu` runs another core on the board: `cortex-m0`, `cortex-m0plus`,
   `cortex-m3`, `cortex-m4` or `cortex-m7` on the Cortex-M boards; `rv32`
   or `rv64` on `virt`, which otherwise takes the image's width (an
   ELFCLASS64 image is RV64); `atmega328p` on `uno`; `24kc` on `malta`;
-  `pic32mz` on the PIC32 boards; `pic24fj1024gb610` on the PIC24 ones.
+  `pic32mz` on the PIC32 boards; `pic24fj1024gb610` (or the part's own
+  name) on the PIC24 ones.
 - `--ram-size` changes the size of the SRAM at `0x20000000`, or of
   virt's RAM (the harness's QEMU runs give it `-m 8`, so
   `--ram-size 8M` is the same machine).

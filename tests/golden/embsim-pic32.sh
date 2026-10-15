@@ -23,6 +23,9 @@
 #     And a program on curiosity-pic32mz-ef-2 (its PIC32MZ2048EFM144):
 #     ANSELx out of reset, its switches, its LEDs
 #     (tests/golden/embsim/pic32-curiosity.c, .txt).
+#     And another part of the family by name (pic32mz1024efe064): its
+#     DEVID, its RAM's and flash's sizes (tests/golden/embsim/
+#     pic32-part.c, .txt).
 #  3. The ends: a PIC32 board without its pack names what to give it.
 #  4. With EMBSIM_THERMO_ELF, a Harmony 3 + FreeRTOS thermometer built by
 #     EmbCC: the LCD's temperature at three temperatures, its LEDs.
@@ -220,6 +223,26 @@ if [ -f "$DFP/atdf/PIC32MZ2048EFM144.atdf" ]; then
     echo "embsim-pic32: an EmbCC program on curiosity-pic32mz-ef-2: ANSELx out of reset, the four switches, the six LEDs lit low"
 else
     echo "SKIP: embsim-pic32: no PIC32MZ2048EFM144.atdf in the pack: the Curiosity board was not run"
+fi
+
+# ---- 2c. another part of the family, by name ---------------------------------------
+# pic32-part.c built for the PIC32MZ1024EFE064 and run on its board: its
+# DEVID, the last words of its RAM (256 KiB) and flash (1 MiB), and a bus
+# error reading past the RAM, which EmbCC's startup answers with sdbbp
+if [ -f "$DFP/atdf/PIC32MZ1024EFE064.atdf" ]; then
+    "$EMBCC" --target=mipsel-none-elf --mcu=32MZ1024EFE064 --dfp="$DFP" -O1 \
+        tests/golden/embsim/pic32-part.c -o "$out/part.elf" 2> "$out/part-build.err" ||
+        { cat "$out/part-build.err"; fail "pic32-part.c does not build"; }
+    "$EMBSIM" "$out/part.elf" --board pic32mz1024efe064 --dfp "$DFP" --until '==DONE==' \
+        --max-insns 1000000 > "$out/part.out" 2> "$out/part.err"; st=$?
+    [ $st = 3 ] && grep -q 'sdbbp' "$out/part.err" ||
+        { cat "$out/part.out" "$out/part.err"; fail "pic32-part.c on pic32mz1024efe064 exits $st, not at the bus error"; }
+    cmp -s "$out/part.out" tests/golden/embsim/pic32-part.txt || {
+        diff tests/golden/embsim/pic32-part.txt "$out/part.out" | head -20
+        fail "pic32-part.c's output is not pic32-part.txt"; }
+    echo "embsim-pic32: another part by name, pic32mz1024efe064: its DEVID, 256 KiB of RAM and 1 MiB of flash, as its ATDF has them"
+else
+    echo "SKIP: embsim-pic32: no PIC32MZ1024EFE064.atdf in the pack: another part was not run"
 fi
 
 # ---- 4. a real project: EMBSIM_THERMO_ELF -----------------------------------------

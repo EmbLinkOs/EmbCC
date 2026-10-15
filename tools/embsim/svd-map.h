@@ -151,6 +151,9 @@ const char *rf_device_name(struct svdmap *m);
 /* a 16-bit part's pin by a name its EDC gives it (RP21, OCM1A, RG6): its
  * port (0 for A, no I) times 32 plus its bit, or -1 */
 int rf_pin(struct svdmap *m, const char *name);
+/* a 16-bit part's configuration word's program address, by its name
+ * (FOSCSEL), or `dflt` */
+u32 rf_config_addr(struct svdmap *m, const char *name, u32 dflt);
 /* the model's clock starts (on 1) or stops: while it runs, its tick hook
  * is called after each instruction and its next_event asked (sim_clock,
  * for a model); `*running` is the model's own record of it */

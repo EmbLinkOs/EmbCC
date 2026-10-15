@@ -515,6 +515,16 @@ devices and the bit-band aliases. Add it to `--help`'s list in `main.c` and to t
 If QEMU models the board, give `tests/golden/embsim.sh` a configuration
 for it, so QEMU referees the new board on the whole exec corpus.
 
+A Microchip part needs no entry: `board_part` makes a board of any part
+of a family the models cover (the PIC32MZ EF, the PIC24FJ GA6/GB6) by
+its name, reading its memory from its pack before the run -- the ATDF's
+`code` and `kseg0_data_mem` segments, the EDC's first code sector and
+data space (`svd_device.code_end`, `ram_base`, `ram_end`) -- and the
+models find the rest in the same file at run time: a PIC24's
+configuration words by name (`rf_config_addr`), its pins, its
+registers. A family whose peripherals differ (a PIC32MX, a PIC24FJ
+GA0xx) needs its models first, and is refused by name until then.
+
 ## Adding a core
 
 1. A state struct whose first member is `struct cpu`, and the

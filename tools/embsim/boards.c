@@ -12,9 +12,12 @@
  * core's stores do not change; the MPS2 boards have SSRAM there. The
  * core adds its own devices (the system control space, SysTick, DWT and
  * the rest of the private peripheral bus) itself. */
+#include <ctype.h>
 #include <string.h>
 
+#include "../embsvd/svd.h"
 #include "devices.h"
+#include "pic24.h"
 #include "svd-map.h"
 
 #define KB(n) ((u32)(n) << 10)
@@ -277,6 +280,78 @@ const struct board_desc *board_find(const char *name)
         if (!strcmp(boards[i].name, name))
             return &boards[i];
     return 0;
+}
+
+/* NAME is digits from `at` for `n` characters at least */
+static int digits(const char *s, int at, int n)
+{
+    for (int i = 0; i < n; i++)
+        if (!isdigit((unsigned char)s[at + i]))
+            return 0;
+    return 1;
+}
+
+/* a part of a family EmbSim models, alone, by its name: every PIC32MZ EF
+ * (pic32mz1024efg064) and every PIC24FJ of the GA6/GB6 family
+ * (pic24fj256ga610), its memory as its pack's ATDF or EDC gives it */
+const struct board_desc *board_part(const char *name)
+{
+    static struct board_desc b;
+    static char nm[40], file[48];
+    size_t l = strlen(name);
+    /* pic32mz NNNN ef X NNN; pic24fj NNN(N) g A|B 6 NN */
+    int pic32 = l == 17 && !strncmp(name, "pic32mz", 7) && digits(name, 7, 4) &&
+                !strncmp(name + 11, "ef", 2) && name[13] && strchr("efghkm", name[13]) &&
+                digits(name, 14, 3);
+    int pic24 = !strncmp(name, "pic24fj", 7) && l >= 15 && l <= 16 &&
+                digits(name, 7, (int)l - 12) && name[l - 5] == 'g' &&
+                (name[l - 4] == 'a' || name[l - 4] == 'b') && name[l - 3] == '6' &&
+                digits(name, (int)l - 2, 2);
+    if (!pic32 && !pic24) {
+        if (!strncmp(name, "pic32", 5) || !strncmp(name, "pic24", 5) ||
+            !strncmp(name, "dspic", 5))
+            die("--board %s: of Microchip's parts, EmbSim has the PIC32MZ EF "
+                "family's and the PIC24FJ GA6/GB6 family's by name "
+                "(pic32mz1024efg064, pic24fj256ga610)", name);
+        return 0;
+    }
+    snprintf(nm, sizeof nm, "%s", name);
+    for (size_t i = 0; i < l; i++)
+        file[i] = (char)toupper((unsigned char)name[i]);
+    snprintf(file + l, sizeof file - l, pic32 ? ".atdf" : ".PIC");
+    static char path[1024];
+    const char *found = svd_search(file);
+    if (!found)
+        die("--board %s needs %s, from its device pack (Microchip.%s_DFP): "
+            "give the pack's directory with --dfp DIR", name, file,
+            pic32 ? "PIC32MZ-EF" : "PIC24F-GA-GB");
+    snprintf(path, sizeof path, "%s", found);
+    svd_prog = "embsim";
+    svd_status = 2;
+    svd_quiet = 1;
+    struct svd_device *d = pic32 ? atdf_load(path) : edc_load(path);
+    memset(&b, 0, sizeof b);
+    b.name = nm;
+    b.svd = file;
+    if (pic32) {
+        b.core = "mips";
+        b.cpu = "pic32mz";
+        b.models = pic32mz_models;
+        b.mem[0] = (struct mem_desc){ 0, (u32)d->ram_end, MEM_RAM, 1, 0, 0 };
+        b.mem[1] = (struct mem_desc){ 0x1d000000u, (u32)d->code_end, MEM_FLASH, 0, 0, 0xffffffffu };
+        b.mem[2] = (struct mem_desc){ 0x1fc00000u, 0x74000, MEM_FLASH, 0, 0, 0xffffffffu };
+    } else {
+        b.core = "pic24";
+        b.cpu = nm;
+        b.models = pic24f_models;
+        b.mem[0] = (struct mem_desc){ 0, 2 * (u32)d->code_end, MEM_FLASH, 0, 0, 0x00ffffffu };
+        b.mem[1] = (struct mem_desc){ 2 * 0x800000u, 0x4000, MEM_FLASH, 0, 0, 0x00ffffffu };
+        b.mem[2] = (struct mem_desc){ PIC24_DATA + (u32)d->ram_base,
+                                      (u32)(d->ram_end - d->ram_base), MEM_RAM, 1, 0, 0 };
+    }
+    if (!b.mem[0].size || !b.mem[pic32 ? 1 : 2].size)
+        die("--board %s: %s does not give the part's memory", name, path);
+    return &b;
 }
 
 void sim_add_dev(struct sim *s, u32 base, u32 size, const struct dev_ops *ops,

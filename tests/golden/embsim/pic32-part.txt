@@ -1,0 +1,5 @@
+pic32-part
+DEVID 67202053
+the RAM's last word 5a5aa5a5
+the flash's last word ffffffff
+past the RAM:

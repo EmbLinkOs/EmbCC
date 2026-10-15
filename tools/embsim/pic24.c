@@ -1781,20 +1781,20 @@ u32 pic24_fcy(struct sim *s)
     return fosc / 2;
 }
 
-/* the core: a PIC24FJ1024GB610's (1024 KiB of flash: program addresses
- * to 0xABFFF, the configuration words at the end) */
+/* the core: a PIC24FJ's (the PIC24FJ1024GB610 or a part of its family),
+ * its program memory the board's first region: to program address
+ * 0xABFFF on the PIC24FJ1024GB610, the configuration words at the end */
 struct cpu *pic24_create(struct sim *s, const char *model,
                          const struct board_desc *bd)
 {
-    (void)bd;
-    if (strcmp(model, "pic24fj1024gb610"))
+    if (strncmp(model, "pic24fj", 7))
         return 0;
     struct pic24_state *k = calloc(1, sizeof *k);
     if (!k)
         die("out of memory");
     k->cpu.ops = &pic24_ops;
     k->sim = s;
-    k->prog_end = 0xac000;
+    k->prog_end = bd && bd->mem[0].size ? bd->mem[0].size / 2 : 0xac000;
     s->cpu = &k->cpu;
     cpu_reset(&k->cpu);
     return &k->cpu;

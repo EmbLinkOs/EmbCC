@@ -35,6 +35,10 @@
 #     pulse and PWM, IC1 and IC2 synchronized to it, the prescaler, the
 #     FIFO's overflow) and the CCPs (SCCP5's PWM captured by SCCP4 on the
 #     same pin, a triggered timer).
+#  8. Other parts of the family by name (--board pic24fj256ga610), their
+#     memory and configuration words from their own EDC: pic24-periph.s's
+#     results on the PIC24FJ256GA610, pic24-part.s's FOSCSEL on the
+#     PIC24FJ128GA606.
 #  6. The analyses on the PIC24 core (python3 builds the ELF file they
 #     read, of tests/golden/embsim/pic24-calls.s, with pic24-elf.py):
 #     --profile's calls (CALL, RCALL, an interrupt, a trap), --stack-report
@@ -147,6 +151,31 @@ cmp -s "$out/periph.out" "$out/periph.want" || {
     diff "$out/periph.want" "$out/periph.out"; cat "$out/periph.err"
     fail "pic24-periph.s: not the data sheet's"; }
 echo "embsim-pic24: the interrupt-on-change, the flash controller (latches, unlock, program, erase, WRERR), the RTCC (its carries to 2000, its alarm, WRLOCK, a timestamp), DMA (CHREQ, DMAH, Timer2's trigger), I2C1 on an empty bus, OC1 into IC1 and IC2 through the PPS (a pulse, PWM, sync, prescaler, overflow), SCCP5's PWM into SCCP4's capture, CCP6's trigger"
+
+# ---- 8. other parts of the family, by name --------------------------------------------
+# the PIC24FJ256GA610 (another part's EDC: no USB, a quarter of the
+# flash) gives pic24-periph.s's results; a FOSCSEL where the
+# PIC24FJ128GA606's EDC puts it is its configuration word, not the
+# PIC24FJ1024GB610's, and its page is the program memory's last; a part
+# of another family is refused by name
+"$EMBSIM" "$out/periph.hex" --board pic24fj256ga610 --dfp "$DFP" --max-insns 2000000 \
+    > "$out/periph256.out" 2> "$out/periph256.err" ||
+    { cat "$out/periph256.err"; fail "pic24-periph.s on pic24fj256ga610 ends with status $?"; }
+cmp -s "$out/periph256.out" "$out/periph.want" || {
+    diff "$out/periph.want" "$out/periph256.out"; fail "pic24-periph.s on pic24fj256ga610: not the PIC24FJ1024GB610's results"; }
+awk -f "$ASM" tests/golden/embsim/pic24-part.s tests/golden/embsim/pic24-part.s \
+    > "$out/part.hex" || fail "pic24-part.s does not assemble"
+for b in pic24fj128ga606:0001 pic24fj1024gb610:0007; do
+    "$EMBSIM" "$out/part.hex" --board "${b%:*}" --dfp "$DFP" --max-insns 100000 \
+        > "$out/part.out" 2>&1 || { cat "$out/part.out"; fail "pic24-part.s on ${b%:*}"; }
+    [ "$(head -1 "$out/part.out")" = "O ${b#*:} FFFF 00FF" ] ||
+        { cat "$out/part.out"; fail "pic24-part.s on ${b%:*}: not OSCCON.COSC ${b#*:} and an erased page's end"; }
+done
+"$EMBSIM" "$out/part.hex" --board pic24fj128ga010 --dfp "$DFP" > "$out/other.out" 2>&1 &&
+    fail "a PIC24 of another family ran"
+grep -q 'PIC24FJ GA6/GB6 family' "$out/other.out" ||
+    { cat "$out/other.out"; fail "a part of another family is not refused by name"; }
+echo "embsim-pic24: the family's other parts by name: pic24-periph.s on the PIC24FJ256GA610, the PIC24FJ128GA606's FOSCSEL at its own address; another family's refused"
 
 # ---- 6. the analyses ------------------------------------------------------------------
 # --disassemble: each example of the manual beside what EmbSim makes of it

@@ -23,9 +23,10 @@
 #include "pic24.h"
 #include "svd-map.h"
 
-/* the configuration words of a single-partition part: FOSCSEL, FOSC */
-#define FOSCSEL_ADDR 0xabf18u
-#define FOSC_ADDR    0xabf1cu
+/* the configuration words FOSCSEL and FOSC, where the part's EDC puts
+ * them (a single-partition part's: the PIC24FJ1024GB610's by default) */
+#define FOSCSEL_ADDR(s) rf_config_addr((s)->svd, "FOSCSEL", 0xabf18u)
+#define FOSC_ADDR(s)    rf_config_addr((s)->svd, "FOSC", 0xabf1cu)
 
 struct osc {
     struct sim *s;
@@ -86,7 +87,7 @@ static void osc_write(void *ctx, u32 off, int n, u32 v)
         else {
             u32 keep = nv & 0x20;                /* LOCK: the hardware's */
             if ((nv & 0x40) && (rf_fields(o->osccon) & 0x40) &&
-                (pic24_prog(o->s, FOSC_ADDR) >> 4 & 1))
+                (pic24_prog(o->s, FOSC_ADDR(o->s)) >> 4 & 1))
                 x |= 0x40;                      /* IOL1WAY: IOLOCK stays */
             nv = (nv & 0xff00) | (x & ~0x20u) | keep;
         }
@@ -103,7 +104,7 @@ static void osc_write(void *ctx, u32 off, int n, u32 v)
 static void osc_reset(void *ctx)
 {
     struct osc *o = ctx;
-    u32 fnosc = pic24_prog(o->s, FOSCSEL_ADDR) & 7;
+    u32 fnosc = pic24_prog(o->s, FOSCSEL_ADDR(o->s)) & 7;
     u32 v = (u32)(o->osccon->value & ~0x7700ull) | fnosc << 12 | fnosc << 8;
     v = (fnosc == 1 || fnosc == 3) ? v | 0x20 : v & ~0x20u;
     o->osccon->value = o->osccon->reset = v;

@@ -281,6 +281,9 @@ extern const int nboards;
 extern const struct core_type cores[];
 extern const int ncores;
 const struct board_desc *board_find(const char *name);
+/* a part of a family EmbSim models, by its name, from its device pack
+ * (pic32mz1024efg064, pic24fj256ga610), or 0 */
+const struct board_desc *board_part(const char *name);
 void sim_add_device(struct sim *s, const struct dev_desc *d);
 /* a device on the bus, keeping time if it has a clock (a tick or a
  * next_event hook) */

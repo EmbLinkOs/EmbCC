@@ -71,6 +71,9 @@ struct svd_irq { const char *name, *desc; int value; };
 /* a pin of a 16-bit part, by one of the names its EDC gives it (RP21,
  * OCM1A, RG6), on port `port` (0 for A, no I) at `bit` */
 struct svd_pin { const char *name; int port, bit; };
+/* a 16-bit part's configuration word (its EDC's DCRDef), at its program
+ * address */
+struct svd_cfgword { const char *name; unsigned long long addr; };
 struct svd_ablock { unsigned long long off, size; const char *usage; };
 struct svd_periph {
     const char *name, *desc, *group, *derived;
@@ -105,6 +108,14 @@ struct svd_device {
     /* EmbSim's: a 16-bit part's pins, from its EDC's PinList */
     struct svd_pin *pin;
     int npin;
+    /* EmbSim's: a Microchip part's memory, as its pack gives it -- a
+     * PIC24's program memory's end (a program address: the configuration
+     * words in its last page) and its RAM (data addresses), a PIC32's
+     * program flash (code_end: its size) and RAM (ram_end) -- and a
+     * PIC24's configuration words */
+    unsigned long long code_end, ram_base, ram_end;
+    struct svd_cfgword *cfg;
+    int ncfg;
     int num_irq;
     struct svd_periph *p;
     int np;
