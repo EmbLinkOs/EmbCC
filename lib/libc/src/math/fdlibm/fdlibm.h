@@ -35,6 +35,12 @@ typedef uint32_t __uint32_t;
 #ifndef __OBSOLETE_MATH
 #define __OBSOLETE_MATH 1
 #endif
+/* Where double is binary32 (RX), fdlibm's double files compile to nothing
+ * and the float ones (ef_/kf_/sf_, newlib's, Cygnus's conversion of Sun's)
+ * define the double functions as well: newlib's own configuration. */
+#if defined(__SIZEOF_DOUBLE__) && __SIZEOF_DOUBLE__ == 4
+#define _DOUBLE_IS_32BITS 1
+#endif
 #include "math_config.h"
 
 /* Prototypes fdlibm cores call but that aren't in emlibc's <math.h>: expm1
@@ -42,6 +48,7 @@ typedef uint32_t __uint32_t;
  * rejects implicit declarations (C99), so declare them here. */
 extern double expm1(double x);
 extern int    finite(double x);
+extern int    finitef(float x);
 
 /* Most routines need to check whether a float is finite, infinite, or not a
    number, and many need to know whether the result of an operation will

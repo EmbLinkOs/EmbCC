@@ -16,6 +16,25 @@
 
 #include "fdlibm/fdlibm.h"
 
+/* Where double is binary32 (RX), fdlibm's double cores are compiled out
+ * (fdlibm.h's _DOUBLE_IS_32BITS) and the float cores serve both widths:
+ * the double names below, and every use in this file, are theirs. The
+ * sf_ files define the public double functions they carry (floor, sin,
+ * ...) themselves. */
+#ifdef _DOUBLE_IS_32BITS
+#define __ieee754_acos(x)     __ieee754_acosf(x)
+#define __ieee754_asin(x)     __ieee754_asinf(x)
+#define __ieee754_atan2(y, x) __ieee754_atan2f(y, x)
+#define __ieee754_cosh(x)     __ieee754_coshf(x)
+#define __ieee754_sinh(x)     __ieee754_sinhf(x)
+#define __ieee754_exp(x)      __ieee754_expf(x)
+#define __ieee754_log(x)      __ieee754_logf(x)
+#define __ieee754_log10(x)    __ieee754_log10f(x)
+#define __ieee754_pow(x, y)   __ieee754_powf(x, y)
+#define __ieee754_fmod(x, y)  __ieee754_fmodf(x, y)
+#define __ieee754_hypot(x, y) __ieee754_hypotf(x, y)
+#endif
+
 /* ---- the cores, under their public names ---- */
 
 double acos(double x)             { return __ieee754_acos(x); }
@@ -39,7 +58,9 @@ double hypot(double x, double y)  { return __ieee754_hypot(x, y); }
  * keeps that tree verbatim, which is what makes it auditable against
  * Sun's original. */
 double __ieee754_sqrt(double x) { return sqrt(x); }
+float __ieee754_sqrtf(float x) { return sqrtf(x); }
 int finite(double x) { return __fpclassifyd(x) > FP_INFINITE; }
+int finitef(float x) { return __fpclassifyf(x) > FP_INFINITE; }
 
 /* ---- what fdlibm's classic set does not carry ---- */
 
@@ -72,8 +93,13 @@ double atanh(double x)
 
 double round(double x)
 {
-    /* Half away from zero — which is round(), not rint(). */
-    return x >= 0 ? floor(x + 0.5) : ceil(x - 0.5);
+    /* Half away from zero — which is round(), not rint(). From the
+     * truncation, whose difference from x is exact: floor(x + 0.5) took
+     * the largest double below one half to 1, as x + 0.5 rounds up. */
+    double t = trunc(x);
+    if (fabs(x - t) >= 0.5)
+        t += x < 0 ? -1.0 : 1.0;
+    return t;
 }
 /* nearbyint and rint round according to the CURRENT rounding
  * direction, and that is the whole difference from round(): round()
@@ -116,11 +142,15 @@ long   lround(double x)    { return (long)round(x); }
 long long llround(double x){ return (long long)round(x); }
 long   lrint(double x)     { return (long)rint(x); }
 
+/* The fraction keeps x's sign, -0.0 for a negative integer; an infinity
+ * is all integer, its fraction a zero (x - x would be a NaN). */
 double modf(double x, double *ip)
 {
     double i = trunc(x);
     *ip = i;
-    return x - i;
+    if (x - x != 0 && x == x)
+        return copysign(0.0, x);
+    return copysign(x - i, x);
 }
 
 /* IEEE's remainder, which is not fmod's. fmod TRUNCATES the quotient;
@@ -159,6 +189,19 @@ double fma(double x, double y, double z) { return x * y + z; }
 
 double nan(const char *tag) { (void)tag; return __builtin_nan(""); }
 
+float nextafterf(float x, float y)
+{
+    if (x != x || y != y) return x + y;
+    if (x == y) return y;
+    union { float f; uint32_t u; } v = { x };
+    if (x == 0) { v.u = 1; return y > 0 ? v.f : -v.f; }
+    if ((x < y) == (x > 0)) v.u++; else v.u--;
+    return v.f;
+}
+
+#ifdef _DOUBLE_IS_32BITS
+double nextafter(double x, double y) { return nextafterf(x, y); }
+#else
 double nextafter(double x, double y)
 {
     if (x != x || y != y) return x + y;
@@ -168,6 +211,7 @@ double nextafter(double x, double y)
     if ((x < y) == (x > 0)) v.u++; else v.u--;
     return v.d;
 }
+#endif
 
 /* erf/tgamma/lgamma: declared so a program linking against them resolves,
  * and computed by series rather than by fdlibm's tables, which this tree
@@ -210,6 +254,9 @@ double tgamma(double x)
 
 /* ---- classification ---- */
 
+#ifdef _DOUBLE_IS_32BITS
+int __fpclassifyd(double x) { return __fpclassifyf(x); }
+#else
 int __fpclassifyd(double x)
 {
     union { double d; uint64_t u; } v = { x };
@@ -219,6 +266,7 @@ int __fpclassifyd(double x)
     if (e == 0x7ff) return m ? FP_NAN : FP_INFINITE;
     return FP_NORMAL;
 }
+#endif
 int __fpclassifyf(float x)
 {
     union { float f; uint32_t u; } v = { x };
@@ -240,37 +288,90 @@ int __fpclassifyl(long double x)
 }
 int __signbitl(long double x) { return __builtin_signbit(x); }
 
+#ifdef _DOUBLE_IS_32BITS
+int __signbitd(double x) { return __signbitf(x); }
+#else
 int __signbitd(double x)
 {
     union { double d; uint64_t u; } v = { x };
     return (int)(v.u >> 63);
 }
+#endif
 int __signbitf(float x)
 {
     union { float f; uint32_t u; } v = { x };
     return (int)(v.u >> 31);
 }
 
-/* ---- float and long double ----
+/* ---- float ----
  *
- * Computed in double and narrowed. That is exact for every float, and for
- * long double it is the honest choice: this library does not carry an
- * 80-bit or 128-bit core, and pretending otherwise by naming the functions
+ * In float, by the float cores (fdlibm/ef_*, kf_*, sf_*: newlib's, Cygnus's
+ * conversion of Sun's). sinf, cosf, tanf, atanf, tanhf, cbrtf, ceilf,
+ * floorf, truncf, fabsf, copysignf, frexpf, ldexpf, scalbnf and expm1f
+ * are the sf_ files' own. Going through double, as this did, was exact
+ * but costs a software double on a single-precision FPU -- a Cortex-M4F's
+ * sinf as a soft-double series -- and was wrong where double IS float
+ * (RX), since fdlibm read a binary32 double as two words.
+ */
+float acosf(float x)             { return __ieee754_acosf(x); }
+float asinf(float x)             { return __ieee754_asinf(x); }
+float atan2f(float y, float x)   { return __ieee754_atan2f(y, x); }
+float coshf(float x)             { return __ieee754_coshf(x); }
+float sinhf(float x)             { return __ieee754_sinhf(x); }
+float expf(float x)              { return __ieee754_expf(x); }
+float logf(float x)              { return __ieee754_logf(x); }
+float log10f(float x)            { return __ieee754_log10f(x); }
+float powf(float x, float y)     { return __ieee754_powf(x, y); }
+float fmodf(float x, float y)    { return __ieee754_fmodf(x, y); }
+float hypotf(float x, float y)   { return __ieee754_hypotf(x, y); }
+float log2f(float x)             { return __ieee754_logf(x) * 1.44269504088896340736f; }
+float exp2f(float x)             { return __ieee754_powf(2.0f, x); }
+
+/* The machine's instruction where it has a single-precision square root
+ * (a Cortex-M4F's vsqrt.f32, RISC-V F's fsqrt.s, SSE, AArch64) -- 25 times
+ * a software double's speed on the M4F. Elsewhere exact through double: a
+ * double's 53 bits round a float's square root once more without error
+ * (53 >= 2 * 24 + 2), and where double is binary32 it IS this function.
+ * (__builtin_sqrtf without the instruction is a call to sqrtf: itself.) */
+float sqrtf(float x)
+{
+#if (defined(__ARM_FP) && (__ARM_FP & 4)) || \
+    (defined(__riscv_flen) && __riscv_flen >= 32) || \
+    defined(__x86_64__) || defined(__aarch64__)
+    return __builtin_sqrtf(x);
+#else
+    return (float)sqrt((double)x);
+#endif
+}
+
+float roundf(float x)
+{
+    float t = truncf(x);
+    if (fabsf(x - t) >= 0.5f)
+        t += x < 0 ? -1.0f : 1.0f;
+    return t;
+}
+float fmaxf(float x, float y) { return (x != x) ? y : (y != y) ? x
+                                      : (x > y ? x : y); }
+float fminf(float x, float y) { return (x != x) ? y : (y != y) ? x
+                                      : (x < y ? x : y); }
+float fdimf(float x, float y) { return x > y ? x - y : 0.0f; }
+
+float modff(float x, float *ip)
+{
+    float i = truncf(x);
+    *ip = i;
+    if (x - x != 0 && x == x)
+        return copysignf(0.0f, x);
+    return copysignf(x - i, x);
+}
+
+/* ---- long double ----
+ *
+ * Computed in double and narrowed: this library does not carry an 80-bit
+ * or 128-bit core, and pretending otherwise by naming the functions
  * without widening the precision would be worse than saying so here.
  */
-#define FLT1(n) float n##f(float x) { return (float)n((double)x); }
-#define FLT2(n) float n##f(float x, float y) { return (float)n((double)x, (double)y); }
-FLT1(sin) FLT1(cos) FLT1(tan) FLT1(asin) FLT1(acos) FLT1(atan)
-FLT1(sinh) FLT1(cosh) FLT1(tanh) FLT1(exp) FLT1(exp2) FLT1(log)
-FLT1(log2) FLT1(log10) FLT1(sqrt) FLT1(cbrt) FLT1(ceil) FLT1(floor)
-FLT1(trunc) FLT1(round) FLT1(fabs)
-FLT2(atan2) FLT2(pow) FLT2(hypot) FLT2(copysign) FLT2(fmod)
-FLT2(fmax) FLT2(fmin) FLT2(fdim)
-
-float ldexpf(float x, int n)    { return (float)ldexp((double)x, n); }
-float frexpf(float x, int *e)   { return (float)frexp((double)x, e); }
-float modff(float x, float *ip) { double d; float r = (float)modf((double)x, &d);
-                                  *ip = (float)d; return r; }
 
 #define LD1(n) long double n##l(long double x) { return (long double)n((double)x); }
 #define LD2(n) long double n##l(long double x, long double y) \

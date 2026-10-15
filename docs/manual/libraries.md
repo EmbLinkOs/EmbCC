@@ -215,7 +215,14 @@ the backend cannot grow the heap, `malloc` returns a null pointer with
 **Math.** The double-precision functions are Sun's fdlibm (kept
 verbatim in `src/math/fdlibm/`, about 1 ulp), plus `log2`, `exp2`,
 `log1p`, the inverse hyperbolics, `lgamma`, `tgamma` and `erf`. `sqrt` is
-the hardware instruction. `float` forms compute in `double`. The `long
+the hardware instruction. The `float` forms compute in `float`, by
+newlib's conversions of the same functions (`fdlibm/ef_*.c`, `kf_*.c`,
+`sf_*.c`): within 1 ulp, and 2 for `tanhf`, `log10f`, `cbrtf`, `log2f`
+and `exp2f`, where computing in `double` was correctly rounded but cost
+a software `double` on a single-precision FPU -- `sinf` takes about 225
+cycles on a Cortex-M4F where it took 25,000. `sqrtf` is the FPU's
+instruction where the target has a single-precision one. Where `double`
+is binary32 (RX), the `double` functions are these `float` ones. The `long
 double` forms of the functions that compute a new value (`sinl`, `expl`,
 `powl`, ...) compute in `double`, so on x86-64 they deliver 53 of the 64
 significand bits; the functions that only move or inspect a value
