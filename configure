@@ -1,0 +1,61 @@
+#!/bin/sh
+# ./configure -- remember a build's choices in config.mk, which the Makefile
+# reads: the GCC habit, for the three choices worth remembering. Nothing is
+# probed and nothing is required; `make` alone builds EmbCC on any host with
+# a C99 compiler, and every choice here is also a make variable.
+#
+#   ./configure [--targets=LIST] [--default-target=TRIPLE] [--prefix=DIR]
+#
+#   --targets=arm,riscv    the target families to build (make TARGETS=):
+#                          x86 aarch64 arm riscv avr mips loongarch tricore
+#                          xtensa ppc rx sparc m68k, or all (the default)
+#   --default-target=T     what embcc compiles for with no --target=
+#                          (make DEFAULT_TARGET=)
+#   --prefix=DIR           where make install puts it (make PREFIX=)
+#
+# Then `make` and `make install`. A variable on make's command line still
+# wins over config.mk, and `make distclean` removes it. The manual:
+# docs/manual/getting-started.md, "Choosing the targets".
+set -eu
+
+usage() {
+    sed -n '7,14p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+targets=all default= prefix=
+for a in "$@"; do
+    case $a in
+    --targets=*)        targets=${a#--targets=} ;;
+    --default-target=*) default=${a#--default-target=} ;;
+    --prefix=*)         prefix=${a#--prefix=} ;;
+    --target=*)
+        echo "configure: --target= names one triple; EmbCC builds target" \
+             "families: --targets=arm,riscv (and --default-target=TRIPLE" \
+             "for the one embcc uses unasked)" >&2
+        exit 1 ;;
+    -h|--help)          usage; exit 0 ;;
+    *)  echo "configure: unknown option '$a'" >&2; usage >&2; exit 1 ;;
+    esac
+done
+
+cd "$(dirname "$0")"
+# The Makefile decides what the names mean -- the families, the aliases,
+# the refusal of one it does not know -- so it is asked, not restated.
+if ! built=$(make --no-print-directory -pn TARGETS="$targets" 2>&1 |
+             sed -n 's/^TARGETS_BUILT := //p' | head -1) || [ -z "$built" ]; then
+    make --no-print-directory -n TARGETS="$targets" embcc 2>&1 |
+        sed -n 's/^.*\*\*\* \(.*\)  Stop\.$/configure: \1/p' >&2
+    echo "configure: --targets=$targets: config.mk not written" >&2
+    exit 1
+fi
+
+{
+    echo "# Written by ./configure $*"
+    echo "# (make distclean removes it; a make command-line variable overrides it)"
+    echo "TARGETS := $built"
+    [ -n "$default" ] && echo "DEFAULT_TARGET := $default"
+    [ -n "$prefix" ] && echo "PREFIX := $prefix"
+    true
+} > config.mk
+echo "configured: TARGETS=$built${default:+, DEFAULT_TARGET=$default}${prefix:+, PREFIX=$prefix}"
+echo "now: make && make install"

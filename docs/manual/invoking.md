@@ -737,7 +737,9 @@ With no `--target=`, the target is chosen in this order:
 2. the `DEFAULT_TARGET` the compiler was built with
    (`make DEFAULT_TARGET=riscv32-unknown-elf`; see
    [Getting started](getting-started.md#choosing-the-default-target));
-3. `x86_64-elf`.
+3. `x86_64-elf`, or in a compiler built without x86 (`make TARGETS=`; see
+   [Choosing the targets](getting-started.md#choosing-the-targets)) the
+   first family it has: `thumbv7m-none-eabi` for `TARGETS=arm`.
 
 `--target=` on the command line overrides both. A default that is not an
 accepted triple stops every invocation, naming where it came from:
@@ -1863,9 +1865,14 @@ options:
 | `--no-stdlib` | no `crt1.o`, `libc.a` or `librt.a` |
 | `--no-default-libs` | no `libc.a` or `librt.a` |
 | `--no-start-files` | no `crt1.o` |
-| `--static` | accepted: every image EmbLD writes is static |
+| `--static` | accepted: every image EmbLD writes is static; with `--libc=system`, glibc's `libc.a` |
+| `--libc=embcc\|system` | the C library: EmbCC's own (the default), or for a Linux target the system's glibc, its headers and shared objects linked by the system's linker ([The C library](libraries.md#glibc-instead---libcsystem)) |
+| `--sysroot=DIR` | the system's root, where `--libc=system` finds glibc (default `/`) |
+| `--linker=PATH`, `--ld-path=PATH`, `-fuse-ld=NAME` | the linker `--libc=system` runs |
+| `FILE.so`, `FILE.so.N` | a shared object, linked with `--libc=system`; otherwise refused: `embcc: error: x.so is a shared object, which EmbLD does not link; --libc=system links a Linux program against the system's` |
 | `-specs=FILE`, `--specs=FILE` | accepted: `nano.specs` and `nosys.specs` choose GCC's newlib and its system-call stubs, and EmbCC links its own C library and runtime; a link notes once `embcc: note: -specs=nano.specs is ignored: EmbCC links its own C library and runtime, not newlib`, and a compile says nothing |
-| `-pthread`, `-rdynamic`, `-no-pie` | unknown argument |
+| `-pthread` | with `--libc=system`, `_REENTRANT` and `-lpthread`; otherwise nothing (EmbCC's C library has no threads, macOS's libSystem has them) |
+| `-rdynamic`, `-no-pie` | unknown argument |
 | `-shared`, `-static-pie` | refused: `embcc: error: -shared needs position-independent code, which EmbCC does not emit` |
 
 ## Asking EmbCC
@@ -1895,17 +1902,26 @@ by `SOURCE_DATE_EPOCH` when that is set, as reproducible builds ask.
 ### `--version`
 
 Print the version, the target in effect, the default target, the
-targets and languages supported, which images `embld` links, and what is
-not supported yet, then exit with status 0. Recognized anywhere on the
-command line; a `--target=` on the same command line changes the target
-it reports:
+target families this compiler was built with, the languages supported,
+which images `embld` links, and what is not supported yet, then exit with
+status 0. Recognized anywhere on the command line; a `--target=` on the
+same command line changes the target it reports:
 
 ```text
-EmbCC 1.0.0-m2.complete (a C and C++ compiler for EmbLinkOS and embedded boards)
+EmbCC 1.0.0-m2.complete (the Emb toolchain's C and C++ compiler, for embedded systems and operating systems)
 Target: x86_64-elf
 Default target: x86_64-elf
+Targets (every family; make TARGETS= builds fewer):
+  x86        x86-64: bare metal, EmbLinkOS, Linux, Darwin and Windows
+  aarch64    AArch64: bare metal, EmbLinkOS, Linux and Darwin
+  arm        Cortex-M (ARMv6-M, ARMv7-M, ARMv7E-M, ARMv8-M Baseline and Mainline) and ARMv7-A
 ...
 ```
+
+A compiler built with `make TARGETS=` (see
+[Choosing the targets](getting-started.md#choosing-the-targets)) lists
+only its own families, then the others under `Not built:`. A `--target=`
+from a family it lacks is refused rather than reported.
 
 ### `--print-target`
 

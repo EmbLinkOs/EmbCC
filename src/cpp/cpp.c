@@ -1377,7 +1377,12 @@ static long eval_if(struct src *s, const char *line)
  *                      struct timeval *__timeout));
  * The scanner is line-oriented, so an invocation whose ')' has not
  * arrived yet needs more input before it can be expanded. Returns 1
- * when the text ends inside such an argument list. */
+ * when the text ends inside such an argument list, and 2 when it ends
+ * with a function-like macro's name, whose '(' may begin the next line:
+ *     extern int sigset (int, void (*) (int)) __THROW
+ *       __attribute_deprecated_msg__
+ *         ("Use the signal and sigprocmask functions instead");
+ * which is glibc's <signal.h>, and one invocation. */
 static int needs_more_input(struct cpp *cpp, const char *text)
 {
     const char *p = text;
@@ -1429,6 +1434,8 @@ static int needs_more_input(struct cpp *cpp, const char *text)
             p = r + 1;
             continue;
         }
+        if (m && m->is_func && !*q)
+            return 2;     /* the name ends the line */
         p += n;
     }
     return 0;
@@ -2375,7 +2382,17 @@ static void process_file(struct cpp *cpp, const char *path,
         if (live) {
             /* Pull continuation lines while a function-like macro
              * invocation is still open (see needs_more_input). */
-            while (needs_more_input(cpp, lineb.p ? lineb.p : "")) {
+            for (int need; (need = needs_more_input(cpp, lineb.p ? lineb.p
+                                                                  : ""));) {
+                if (need == 2) {
+                    /* a name, and then a '(' on a line of its own? */
+                    const char *q = s.p;
+                    while (*q == ' ' || *q == '\t' || *q == '\n' ||
+                           *q == '\r')
+                        q++;
+                    if (*q != '(')
+                        break;
+                }
                 int more_nl = 0;
                 tb_putc(&lineb, ' ');
                 if (!read_logical_line(&s, &lineb, &more_nl)) {

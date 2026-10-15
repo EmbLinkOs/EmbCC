@@ -33,6 +33,48 @@
 #include "uninit.h"
 #include "w128.h"
 
+/* A register variable's name is looked up in its target's assembler. A
+ * family left out of this compiler (make TARGETS=, src/arch/target.h)
+ * has no assembler to ask; its targets are refused before sema runs, so
+ * the lookup is never made, and answers "no such register" here. */
+#define NO_GPR(p, n) ((void)(p), (void)(n), -1)
+#if !FAMILY_BUILT(aarch64)
+#define a64asm_gpr(p, n) NO_GPR(p, n)
+#endif
+#if !FAMILY_BUILT(avr)
+#define avrasm_gpr(p, n) NO_GPR(p, n)
+#endif
+#if !FAMILY_BUILT(riscv)
+#define rvasm_gpr(p, n) NO_GPR(p, n)
+#endif
+#if !FAMILY_BUILT(arm)
+#define tasm_gpr(p, n) NO_GPR(p, n)
+#endif
+#if !FAMILY_BUILT(mips)
+#define mipsasm_gpr(p, n) NO_GPR(p, n)
+#endif
+#if !FAMILY_BUILT(tricore)
+#define tcasm_reg(p, n, file) (*(file) = 0, NO_GPR(p, n))
+#endif
+#if !FAMILY_BUILT(loongarch)
+#define laasm_gpr(p, n) NO_GPR(p, n)
+#endif
+#if !FAMILY_BUILT(xtensa)
+#define xtasm_gpr(p, n) NO_GPR(p, n)
+#endif
+#if !FAMILY_BUILT(sparc)
+#define spasm_gpr(p, n) NO_GPR(p, n)
+#endif
+#if !FAMILY_BUILT(ppc)
+#define ppcasm_gpr(p, n) NO_GPR(p, n)
+#endif
+#if !FAMILY_BUILT(rx)
+#define rxasm_gpr(p, n) NO_GPR(p, n)
+#endif
+#if !FAMILY_BUILT(m68k)
+#define cfasm_gpr(p, n) NO_GPR(p, n)
+#endif
+
 struct vardef {
     const char *name;
     struct type *ty;
@@ -365,6 +407,43 @@ static int c89_implicit_call(struct unit *u, struct scope *sc,
 }
 
 /* ---- conversions ---- */
+
+static int is_null_const(const struct expr *e);
+static struct expr *mk_cast(struct expr *inner, struct type *to);
+
+/* An argument for a parameter of a transparent union's type (GCC's
+ * transparent_union; glibc's sockaddr arguments under _GNU_SOURCE): a
+ * value of any member's type, passed as the union's first member is --
+ * which is how every ABI here passes a union of pointers anyway. 1 when
+ * the argument was such a one and is now converted; 0 to convert it as
+ * any other (the union itself, or no transparent union at all). */
+static int transparent_arg(struct unit *u, struct expr *call, int i,
+                           struct type *pt)
+{
+    struct type *ut = pt->canon ? pt->canon : pt;
+    struct expr *a = call->args[i];
+    struct type *at = a->ty->canon ? a->ty->canon : a->ty;
+    if (ut->kind != TY_STRUCT || !ut->transparent_union || at == ut)
+        return 0;
+    for (int k = 0; k < ut->nmembers; k++) {
+        struct type *mt = ut->members[k].ty;
+        int ok = ty_equal(ty_unqual(a->ty), ty_unqual(mt));
+        if (!ok && mt->kind == TY_PTR && a->ty->kind == TY_PTR)
+            ok = ty_equal(ty_unqual(mt->pointee), ty_unqual(a->ty->pointee)) ||
+                 mt->pointee->kind == TY_VOID ||
+                 a->ty->pointee->kind == TY_VOID;
+        if (!ok && mt->kind == TY_PTR && is_null_const(a))
+            ok = 1;
+        if (ok) {
+            call->args[i] = mk_cast(a, ut->members[0].ty);
+            return 1;
+        }
+    }
+    sema_error_at(u, a->line, a->col,
+               "argument %d is %s, which is none of the types of the "
+               "transparent union %s", i + 1, ty_name(a->ty), ty_name(pt));
+    return 1;
+}
 
 static int is_null_const(const struct expr *e)
 {
@@ -3771,6 +3850,9 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                            ty_name(e->args[i]->ty));
             if (e->args[i]->ty->kind != TY_STRUCT)
                 need_scalar(u, e->args[i], "an argument");
+            if (i < ft->nptypes && !ft->noproto &&
+                transparent_arg(u, e, i, ft->ptypes[i]))
+                continue;
             if (i < ft->nptypes && !ft->noproto)
                 e->args[i] = convert_assign(u, e->args[i],
                                             ft->ptypes[i], "argument");
@@ -6792,6 +6874,23 @@ static void check_func(struct unit *u, struct func *f)
             sema_error_line(u, f->line,
                        "duplicate parameter '%s' in '%s'",
                        f->params[i], f->name);
+        /* A transparent union arrives as its first member was passed
+         * (transparent_arg). x86-64's and AArch64's conventions pass a
+         * union of pointers exactly so, in a register; elsewhere one
+         * defined here could be received otherwise (SPARC passes a union
+         * by reference), so it is refused there rather than guessed. */
+        {
+            const struct type *pu = f->param_tys[i]->canon
+                                  ? f->param_tys[i]->canon : f->param_tys[i];
+            if (pu->kind == TY_STRUCT && pu->transparent_union &&
+                target_get() != TARGET_X86_64 &&
+                target_get() != TARGET_AARCH64)
+                sema_error_line(u, f->line,
+                           "'%s' is defined with a transparent_union "
+                           "parameter, which EmbCC receives only on "
+                           "x86-64 and AArch64, where the union is passed "
+                           "as its first member", f->name);
+        }
         {
             if (f->params[i] && diag_warning_enabled("shadow"))
                 warn_shadow_global(u, f->params[i],

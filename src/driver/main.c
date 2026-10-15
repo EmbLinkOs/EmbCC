@@ -51,24 +51,69 @@ static void print_version(void)
      * layout clang uses -- and only what the tree holds: the long form,
      * with what is missing, is docs/internals/status.md. */
     const char *dt = target_default_name();
+    int nfam = target_family_count(), nbuilt = 0;
     printf("EmbCC %s (the Emb toolchain's C and C++ compiler, for "
            "embedded systems and operating systems)\n", EMBCC_VERSION);
     printf("Target: %s\n", target_triple_now());
-    printf("Default target: %s%s\n", dt ? dt : "x86_64-elf",
+    printf("Default target: %s%s\n", dt ? dt : target_builtin_default(),
            dt ? " (as configured)" : "");
-    printf("Targets: Cortex-M (ARMv6-M, ARMv7-M, ARMv7E-M, ARMv8-M "
-           "Baseline and Mainline), ARMv7-A, RISC-V (RV32, RV64),\n"
-           "AVR (ATmega), Xtensa (ESP32, windowed ABI), TriCore, Renesas "
-           "RX, ColdFire (m68k, ISA_A), MIPS32 and MIPS64\n"
-           "(both byte orders), PowerPC (32-bit EABI), SPARC V8 (LEON3), "
-           "LoongArch64 (LP64S); x86-64 and AArch64\n"
-           "(bare metal, EmbLinkOS, Linux, Darwin; x86-64 also Windows)\n");
+    /* The families this binary has (make TARGETS=), from the target
+     * database, so the list cannot claim a backend the build left out. */
+    for (int i = 0; i < nfam; i++)
+        nbuilt += target_family_built(i);
+    if (nbuilt == nfam)
+        printf("Targets (every family; make TARGETS= builds fewer):\n");
+    else
+        printf("Targets (%d of the %d families, as built with make "
+               "TARGETS=):\n", nbuilt, nfam);
+    for (int i = 0; i < nfam; i++)
+        if (target_family_built(i))
+            printf("  %-10s %s\n", target_family_name(i),
+                   target_family_desc(i));
+    if (nbuilt < nfam) {
+        printf("Not built:");
+        for (int i = 0; i < nfam; i++)
+            if (!target_family_built(i))
+                printf(" %s", target_family_name(i));
+        printf("\n");
+    }
     printf("Languages: C11 with the GNU extensions; C++ toward C++20 on "
            "every target but AVR\n");
-    printf("Linker: embld, for every target's images; AArch64 and Darwin "
-           "link with the platform's linker\n");
+    printf("Linker: embld, for the images of every target above; AArch64 "
+           "and Darwin link with the platform's linker\n");
     printf("Not yet: position-independent executables, shared libraries, "
            "dynamic linking. See docs/internals/status.md.\n");
+}
+
+/* A target whose family this compiler was built without (make TARGETS=,
+ * src/arch/target.h): refused by name before anything is compiled, with
+ * the families it does have and the build that would add this one. Every
+ * way of choosing a target -- --target=, the configured default, the
+ * name it was called by, -arch -- arrives here. Returns 1. */
+static int refuse_unbuilt_target(int was_default)
+{
+    const char *fam = target_family_name(target_family_of(target_get()));
+    fprintf(stderr, "embcc: error: this embcc was built without the %s "
+                    "backend, which %s needs\n",
+            fam ? fam : "(none)", target_triple_now());
+    if (was_default)
+        fprintf(stderr, "embcc: it is the default target, from %s\n",
+                plat_getenv("EMBCC_DEFAULT_TARGET") &&
+                    *plat_getenv("EMBCC_DEFAULT_TARGET")
+                    ? "EMBCC_DEFAULT_TARGET in the environment"
+                    : "the DEFAULT_TARGET this compiler was built with");
+    fprintf(stderr, "embcc: it was built with:");
+    for (int i = 0; i < target_family_count(); i++)
+        if (target_family_built(i))
+            fprintf(stderr, " %s", target_family_name(i));
+    fprintf(stderr, "\nembcc: rebuild with make TARGETS=\"");
+    for (int i = 0, n = 0; i < target_family_count(); i++)
+        if (target_family_built(i) ||
+            (fam && !strcmp(fam, target_family_name(i))))
+            fprintf(stderr, "%s%s", n++ ? " " : "", target_family_name(i));
+    fprintf(stderr, "\" to add it (docs/manual/getting-started.md, "
+                    "\"Choosing the targets\")\n");
+    return 1;
 }
 
 static void print_usage(FILE *out)
@@ -278,6 +323,45 @@ static char *sec_named(const char *pfx, const char *name)
 static int no_stdinc;
 /* -isysroot DIR: the macOS SDK a Darwin target's headers come from */
 static const char *g_isysroot;
+
+/* --libc=system: a Linux target's own C library, glibc, in place of
+ * EmbCC's -- its headers from the system's root (--sysroot=, / unless
+ * said), its start files and shared objects, linked by the system's
+ * linker (glibc_link). That is how POSIX's headers and the threads of
+ * its libpthread reach a program, as the Darwin targets reach Apple's. */
+static int g_libc_system;
+static const char *g_sysroot;      /* --sysroot=DIR */
+static const char *g_ld_path;      /* --linker=, GCC's --ld-path= */
+static const char *g_fuse_ld;      /* -fuse-ld=bfd|gold|lld */
+static int g_pthread;              /* -pthread */
+static int g_static_link;          /* -static */
+static int g_gnuc_given;           /* -fgnuc-version= */
+
+static int glibc_mode(void)
+{
+    return g_libc_system && target_os_get() == TGT_OS_LINUX;
+}
+
+/* Debian's multiarch directory names, which most distributions' glibc
+ * also lays out (Fedora's /usr/lib64 is found by glibc_libdir) */
+static const char *glibc_multiarch(void)
+{
+    return target_get() == TARGET_AARCH64 ? "aarch64-linux-gnu"
+                                          : "x86_64-linux-gnu";
+}
+
+/* the root with no trailing slash: "" for / */
+static const char *sysroot_prefix(void)
+{
+    static char r[1024];
+    if (!g_sysroot)
+        return "";
+    snprintf(r, sizeof r, "%s", g_sysroot);
+    size_t n = strlen(r);
+    while (n && r[n - 1] == '/')
+        r[--n] = 0;
+    return r;
+}
 
 /* -O level. 0 (the default) runs no optimizer, so output is byte-for-byte
  * as before — the property the self-host fixed point rests on. */
@@ -792,12 +876,27 @@ static int has_gas_suffix(const char *s);
 static int assemble_file(const char *in, const char *out);
 
 /* An object or an archive, which goes to the link as it is. */
+/* libx.so or libx.so.6: a shared object, for --libc=system's linker */
+static int is_shared_object(const char *p)
+{
+    const char *s = strstr(p, ".so");
+    while (s && s[3] && s[3] != '.')
+        s = strstr(s + 1, ".so");
+    if (!s)
+        return 0;
+    for (const char *q = s + 3; *q; q++)
+        if (*q != '.' && (*q < '0' || *q > '9'))
+            return 0;
+    return 1;
+}
+
 static int has_link_input_suffix(const char *p)
 {
     size_t n = strlen(p);
     return (n > 2 && !strcmp(p + n - 2, ".o")) ||
            (n > 2 && !strcmp(p + n - 2, ".a")) ||
-           (n > 4 && !strcmp(p + n - 4, ".obj"));
+           (n > 4 && !strcmp(p + n - 4, ".obj")) ||
+           is_shared_object(p);
 }
 
 /* -lNAME, as a linker finds it: libNAME.a in each -L directory in order.
@@ -858,6 +957,8 @@ static int firmware_target(void)
  * linked to a guessed map runs, wrongly. -nostdlib leaves out libc and
  * librt, -nodefaultlibs too, and -nostartfiles crt1. */
 static int darwin_link(const char *in, const char *exe);
+static int glibc_link(const char *in, const char *exe);
+static int is_shared_object(const char *p);
 
 /* A hosted target's library is missing: which file, and what to do -- in
  * a build tree, the make target that builds it (a plain `make` builds
@@ -882,6 +983,9 @@ static void missing_runtime(const char *file, const char *triple, int cxx)
         fprintf(stderr, "embcc: error: no %s for %s: its %s is not "
                 "installed; `make install` from EmbCC's source installs "
                 "every target's\n", file, triple, lib);
+    if ((lin64 || lina64) && !cxx)
+        fprintf(stderr, "embcc: or --libc=system compiles and links against "
+                        "the system's own C library, glibc\n");
     fprintf(stderr, "embcc: --print-search-dirs says where it looked\n");
 }
 
@@ -906,6 +1010,16 @@ static int compile_and_link(const char *in, const char *out)
 {
     if (target_os_get() == TGT_OS_DARWIN)
         return darwin_link(in, out);
+    if (glibc_mode())
+        return glibc_link(in, out);
+    for (int k = 0; k < g_nlink_in; k++)
+        if (is_shared_object(g_link_in[k])) {
+            fprintf(stderr, "embcc: error: %s is a shared object, which "
+                            "EmbLD does not link; --libc=system links a "
+                            "Linux program against the system's\n",
+                    g_link_in[k]);
+            return 1;
+        }
     int fw = firmware_target();
     if (!fw && (target_get() != TARGET_X86_64 ||
                 target_fmt_get() != TGT_FMT_ELF)) {
@@ -942,7 +1056,11 @@ static int compile_and_link(const char *in, const char *out)
      * several parts -- avr-gcc's default avr5 script and the ones derived
      * from it -- leaves to the driver. -Ttext, -Tdata and --rom-limit,
      * given, are applied over the script, as ld applies them. */
+#if FAMILY_BUILT(avr)
     const struct avr_mcu *mcu = target_avr_mcu();
+#else
+    const struct avr_mcu *mcu = NULL;       /* no AVR in this compiler */
+#endif
     static char avr_script[1024];
     char avr_crt[1024];
     int have_avr_crt = 0;
@@ -1722,6 +1840,275 @@ static int darwin_link(const char *in, const char *exe)
     return rc;
 }
 
+/* A program on the PATH, or NULL */
+static const char *path_find(const char *name)
+{
+    static char buf[4][1100];
+    static int which;
+    const char *path = plat_getenv("PATH");
+    if (strchr(name, '/'))
+        return plat_file_exists(name) ? name : NULL;
+    while (path && *path) {
+        const char *e = strchr(path, ':');
+        size_t n = e ? (size_t)(e - path) : strlen(path);
+        char *b = buf[which];
+        snprintf(b, sizeof buf[0], "%.*s/%s", (int)n, path, name);
+        if (n && plat_file_exists(b)) {
+            which = (which + 1) & 3;
+            return b;
+        }
+        path = e ? e + 1 : NULL;
+    }
+    return NULL;
+}
+
+/* The system's linker for --libc=system: --linker= (--ld-path=), else
+ * -fuse-ld='s, else the target's cross binutils (x86_64-linux-gnu-ld),
+ * ld.lld, and on Linux itself plain ld -- elsewhere `ld` is not an ELF
+ * linker (it is ld64 on macOS). */
+static const char *glibc_linker(void)
+{
+    char cross[64];
+    if (g_ld_path)
+        return path_find(g_ld_path);
+    if (g_fuse_ld) {
+        char nm[64];
+        snprintf(nm, sizeof nm, "ld.%s", g_fuse_ld);
+        return path_find(nm);
+    }
+    snprintf(cross, sizeof cross, "%s-ld", glibc_multiarch());
+    const char *ld = path_find(cross);
+    if (!ld)
+        ld = path_find("ld.lld");
+#ifdef __linux__
+    if (!ld)
+        ld = path_find("ld");
+#endif
+    return ld;
+}
+
+/* Where glibc's start files are under the root: Debian's multiarch
+ * directory, Fedora's lib64, or plain lib */
+static const char *glibc_libdir(void)
+{
+    static char d[1100];
+    char probe[1200];
+    const char *sub[] = { NULL, "/usr/lib64", "/usr/lib", "/lib64", "/lib" };
+    for (size_t k = 0; k < sizeof sub / sizeof sub[0]; k++) {
+        if (sub[k])
+            snprintf(d, sizeof d, "%s%s", sysroot_prefix(), sub[k]);
+        else
+            snprintf(d, sizeof d, "%s/usr/lib/%s", sysroot_prefix(),
+                     glibc_multiarch());
+        snprintf(probe, sizeof probe, "%s/crt1.o", d);
+        if (plat_file_exists(probe))
+            return d;
+    }
+    return NULL;
+}
+
+/* GCC's libgcc.a under the root, which a static glibc program needs
+ * (glibc's libc.a calls its soft-float and unwinding routines):
+ * usr/lib/gcc/MULTIARCH/N/, the newest N. NULL when GCC is not there. */
+static const char *glibc_libgcc_dir(void)
+{
+    static char d[1100];
+    char probe[1200];
+    const char *roots[] = { "/usr/lib/gcc", "/usr/lib64/gcc" };
+    for (size_t r = 0; r < sizeof roots / sizeof roots[0]; r++)
+        for (int v = 30; v >= 4; v--) {
+            snprintf(d, sizeof d, "%s%s/%s/%d", sysroot_prefix(), roots[r],
+                     glibc_multiarch(), v);
+            snprintf(probe, sizeof probe, "%s/libgcc.a", d);
+            if (plat_file_exists(probe))
+                return d;
+            /* Fedora names the directory by the GNU triple */
+            snprintf(d, sizeof d, "%s%s/%s-redhat-linux/%d",
+                     sysroot_prefix(), roots[r],
+                     target_get() == TARGET_AARCH64 ? "aarch64" : "x86_64",
+                     v);
+            snprintf(probe, sizeof probe, "%s/libgcc.a", d);
+            if (plat_file_exists(probe))
+                return d;
+        }
+    return NULL;
+}
+
+/* --libc=system's link: the program against glibc, by the system's
+ * linker, as GCC links one -- glibc's start files around the objects,
+ * then libc (and libpthread for -pthread), dynamically unless -static.
+ * GCC's crtbegin.o is not there to define __dso_handle, which glibc's
+ * atexit names; EmbCC's own does, weak, in case one is. */
+static int glibc_link(const char *in, const char *exe)
+{
+    const char *ld = glibc_linker();
+    const char *libdir = glibc_libdir();
+    int arm64 = target_get() == TARGET_AARCH64;
+    if (!ld) {
+        fprintf(stderr, "embcc: error: --libc=system links with the "
+                        "system's linker, and none was found: install "
+                        "binutils (%s-ld or ld) or lld, or name one with "
+                        "--linker=PATH\n", glibc_multiarch());
+        return 1;
+    }
+    if (!libdir && !g_nostdlib && !g_nostartfiles) {
+        fprintf(stderr, "embcc: error: --libc=system: no crt1.o under %s/ "
+                        "(usr/lib/%s, usr/lib64 or usr/lib): install the C "
+                        "library's development files (libc6-dev, "
+                        "glibc-devel), or name the system's root with "
+                        "--sysroot=\n", g_sysroot ? g_sysroot : "",
+                glibc_multiarch());
+        return 1;
+    }
+    if (g_link_cxx || (in && lang_cxx)) {
+        fprintf(stderr, "embcc: error: --libc=system links C programs: "
+                        "EmbCC's C++ runtime is built on its own C library, "
+                        "not glibc\n");
+        return 1;
+    }
+    const char *gccdir = NULL;
+    if (g_static_link && !g_nostdlib && !g_nodefaultlibs) {
+        gccdir = glibc_libgcc_dir();
+        if (!gccdir) {
+            fprintf(stderr, "embcc: error: a static program against glibc "
+                            "also needs GCC's libgcc.a and libgcc_eh.a, which "
+                            "glibc's libc.a calls into, and there are none "
+                            "under %s/usr/lib/gcc/%s/: install gcc, or link "
+                            "dynamically (without -static)\n",
+                    sysroot_prefix(), glibc_multiarch());
+            return 1;
+        }
+    }
+    char obj[1100], dso[1100], dso_s[1100];
+    snprintf(obj, sizeof obj, "%s.embcc-tmp.o", exe);
+    snprintf(dso_s, sizeof dso_s, "%s.embcc-dso.c", exe);
+    snprintf(dso, sizeof dso, "%s.embcc-dso.o", exe);
+    if (in) {
+        int rc = has_gas_suffix(in) ? assemble_file(in, obj)
+                                    : compile(in, obj, 0);
+        if (rc != 0)
+            return rc;
+    }
+    int start = !g_nostdlib && !g_nostartfiles;
+    int libs = !g_nostdlib && !g_nodefaultlibs;
+    if (start) {
+        FILE *f = fopen(dso_s, "w");
+        if (!f) {
+            fprintf(stderr, "embcc: error: cannot write %s\n", dso_s);
+            return 1;
+        }
+        fprintf(f, "__attribute__((weak, visibility(\"hidden\")))\n"
+                   "void *__dso_handle = &__dso_handle;\n");
+        fclose(f);
+        int rc = compile(dso_s, dso, 0);
+        remove(dso_s);
+        if (rc != 0)
+            return rc;
+    }
+    char crt1[1200], crti[1200], crtn[1200], sysopt[1100], ldirs[4][1100];
+    const char *argv[700];
+    int n = 0;
+    /* (no -m: a Linux linker's default emulation is its target's, and
+     * ld.lld takes it from the objects) */
+    argv[n++] = ld;
+    if (g_sysroot) {
+        snprintf(sysopt, sizeof sysopt, "--sysroot=%s", g_sysroot);
+        argv[n++] = sysopt;
+    }
+    argv[n++] = "--eh-frame-hdr";
+    if (g_static_link) {
+        argv[n++] = "-static";
+    } else {
+        argv[n++] = "-dynamic-linker";
+        argv[n++] = arm64 ? "/lib/ld-linux-aarch64.so.1"
+                          : "/lib64/ld-linux-x86-64.so.2";
+    }
+    argv[n++] = "-o";
+    argv[n++] = exe;
+    if (g_entry) {
+        argv[n++] = "-e";
+        argv[n++] = g_entry;
+    }
+    if (start) {
+        snprintf(crt1, sizeof crt1, "%s/crt1.o", libdir);
+        snprintf(crti, sizeof crti, "%s/crti.o", libdir);
+        argv[n++] = crt1;
+        argv[n++] = crti;
+        argv[n++] = dso;
+    }
+    for (int k = 0; k < g_nlibdirs && n < 600; k++) {
+        argv[n++] = "-L";
+        argv[n++] = g_libdirs[k];
+    }
+    {
+        /* the library directories GCC searches under the root */
+        const char *sub[4] = { NULL, NULL, "/usr/lib", "/lib" };
+        for (int k = 0; k < 4; k++) {
+            if (sub[k])
+                snprintf(ldirs[k], sizeof ldirs[k], "%s%s",
+                         sysroot_prefix(), sub[k]);
+            else
+                snprintf(ldirs[k], sizeof ldirs[k], "%s%s/%s",
+                         sysroot_prefix(), k ? "/lib" : "/usr/lib",
+                         glibc_multiarch());
+            argv[n++] = "-L";
+            argv[n++] = ldirs[k];
+        }
+    }
+    if (in)
+        argv[n++] = obj;
+    for (int k = 0; k < g_nlink_in && n < 640; k++)
+        argv[n++] = g_link_in[k];
+    for (int k = 0; k < g_nwl && n < 660; k++)
+        argv[n++] = g_wl[k];
+    if (libs) {
+        char librt[1100];
+        static char rtcopy[1100];
+        if (g_static_link)
+            argv[n++] = "--start-group";
+        if (g_pthread)
+            argv[n++] = "-lpthread";
+        argv[n++] = "-lc";
+        static char gcc_a[1200], gcc_eh[1200];
+        if (gccdir) {
+            snprintf(gcc_a, sizeof gcc_a, "%s/libgcc.a", gccdir);
+            snprintf(gcc_eh, sizeof gcc_eh, "%s/libgcc_eh.a", gccdir);
+            argv[n++] = gcc_a;
+            if (plat_file_exists(gcc_eh))
+                argv[n++] = gcc_eh;
+        }
+        /* EmbCC's compiler runtime, for the routines its code calls
+         * (__udivti3 ...), when this target's is built */
+        if (paths_target_file(lib_triple(), "librt.a", librt,
+                              sizeof librt)) {
+            snprintf(rtcopy, sizeof rtcopy, "%s", librt);
+            argv[n++] = rtcopy;
+        }
+        if (g_static_link)
+            argv[n++] = "--end-group";
+    }
+    if (start) {
+        snprintf(crtn, sizeof crtn, "%s/crtn.o", libdir);
+        argv[n++] = crtn;
+    }
+    argv[n] = NULL;
+    if (plat_getenv("EMBCC_SHOW_LINK")) {
+        for (int k = 0; k < n; k++)
+            fprintf(stderr, "%s%s", k ? " " : "", argv[k]);
+        fputc('\n', stderr);
+    }
+    int rc = 1, which;
+    if (plat_run_start(argv) < 0)
+        fprintf(stderr, "embcc: error: could not run %s\n", ld);
+    else
+        rc = plat_run_wait(&which);
+    if (in)
+        remove(obj);
+    if (start)
+        remove(dso);
+    return rc;
+}
+
 /* Asm labels that rename a symbol, now that nothing reads a function's
  * name for what it is (a builtin, main, setjmp): the object's name. ELF
  * and COFF take the label as written. Mach-O prefixes its own underscore,
@@ -1777,6 +2164,31 @@ static void incdirs_with_defaults(void)
         if (nincdirs < MAX_INCDIRS) {
             incdir_sys[nincdirs] = 1;
             incdirs[nincdirs++] = sdkinc;
+        }
+        if (ndef > 0 && nincdirs < MAX_INCDIRS) {
+            incdir_sys[nincdirs] = 1;
+            incdirs[nincdirs++] = def[ndef - 1];    /* freestanding */
+        }
+    } else if (!no_stdinc && glibc_mode()) {
+        /* --libc=system: glibc's headers, as GCC finds them, and then
+         * EmbCC's freestanding ones (<stddef.h>, <stdarg.h>...), which
+         * glibc leaves to the compiler. Last, as on Darwin: EmbCC's
+         * <string.h> and <stdint.h> are its own libc's, not glibc's. */
+        static char sysinc[3][1100];
+        const char *sub[3] = { "/usr/local/include", NULL, "/usr/include" };
+        int ndef = 0;
+        const char *const *def = paths_default_includes(&ndef);
+        for (int k = 0; k < 3 && nincdirs < MAX_INCDIRS; k++) {
+            if (sub[k])
+                snprintf(sysinc[k], sizeof sysinc[k], "%s%s",
+                         sysroot_prefix(), sub[k]);
+            else
+                snprintf(sysinc[k], sizeof sysinc[k], "%s/usr/include/%s",
+                         sysroot_prefix(), glibc_multiarch());
+            if (k < 2 && !plat_file_exists(sysinc[k]))
+                continue;
+            incdir_sys[nincdirs] = 1;
+            incdirs[nincdirs++] = sysinc[k];
         }
         if (ndef > 0 && nincdirs < MAX_INCDIRS) {
             incdir_sys[nincdirs] = 1;
@@ -2022,7 +2434,11 @@ static int compile_unit(const char *in, const char *out, int pp_only)
             if (gas_assemble_block(ta))
                 return 1;
         } else {
+            /* (x86-64's and AArch64's: every other target is firmware,
+             * so a compiler with neither never comes here) */
+#if FAMILY_BUILT(x86) || FAMILY_BUILT(aarch64)
             topasm_assemble(ta, target_get() == TARGET_X86_64);
+#endif
         }
         for (int r = 0; r < ta->nrels; r++) {
             if (!ta->rels[r].target)
@@ -4406,6 +4822,7 @@ int main(int argc, char **argv)
      * --target= below simply overwrites it. A compiler built with
      * `make DEFAULT_TARGET=riscv32-unknown-elf` compiles for the board
      * when it is handed nothing at all. */
+    int target_named = 0;       /* by the name, -arch or --target= */
     {
         const char *bad = NULL;
         if (!target_apply_default(&bad)) {
@@ -4417,7 +4834,8 @@ int main(int argc, char **argv)
                         : "the DEFAULT_TARGET this compiler was built with");
             fprintf(stderr, "embcc: the targets it emits for are:\n");
             for (int t = 0; t < target_triple_count(); t++)
-                fprintf(stderr, "embcc:   %s\n", target_triple_name(t));
+                if (target_triple_built(t))
+                    fprintf(stderr, "embcc:   %s\n", target_triple_name(t));
             return 1;
         }
     }
@@ -4460,12 +4878,15 @@ int main(int argc, char **argv)
                                 "not a target EmbCC knows; they are:\n",
                         b, tri);
                 for (int t = 0; t < target_triple_count(); t++)
-                    fprintf(stderr, "embcc:   %s\n", target_triple_name(t));
+                    if (target_triple_built(t))
+                        fprintf(stderr, "embcc:   %s\n",
+                                target_triple_name(t));
                 return 1;
             }
             target_set(a);
             target_os_set(os);
             target_fmt_set(fmt);
+            target_named = 1;
         }
     }
     /* Apple's driver names the machine with -arch: arm64 or x86_64 is the
@@ -4496,6 +4917,7 @@ int main(int argc, char **argv)
             target_set(a);
             target_os_set(os);
             target_fmt_set(fmt);
+            target_named = 1;
         }
     }
     /* Scanned ahead of everything else: --version and --dump-predef must
@@ -4511,13 +4933,20 @@ int main(int argc, char **argv)
                     argv[i] + 9);
             fprintf(stderr, "embcc: the targets it emits for are:\n");
             for (int t = 0; t < target_triple_count(); t++)
-                fprintf(stderr, "embcc:   %s\n", target_triple_name(t));
+                if (target_triple_built(t))
+                    fprintf(stderr, "embcc:   %s\n", target_triple_name(t));
             return 1;
         }
         target_set(a);
         target_os_set(os);
         target_fmt_set(fmt);
+        target_named = 1;
     }
+    /* A target this compiler has no backend for (make TARGETS=) stops
+     * here, before anything -- --version included -- asks its backend. */
+    if (!target_arch_built(target_get()))
+        return refuse_unbuilt_target(!target_named &&
+                                     target_default_name() != NULL);
     /* The backend's "this op calls a runtime helper" predicate, for the
      * optimizer's view of what a value crosses: x86-64 has no such
      * helpers and AVR's allocator does not model them. Set from the
@@ -4530,13 +4959,17 @@ int main(int argc, char **argv)
          * armv7a-none-eabi. Here, before anything is compiled, because the
          * optimizer asks the encoder which constants an instruction can
          * carry (thumb_imm_foldable) long before code generation. */
+#if FAMILY_BUILT(arm)
         t_isa_a32 = target_arm_a32();
+#endif
         target_set_calls_helper(backend_get(a)->op_calls_helper);
+#if FAMILY_BUILT(mips)
         /* the MIPS encoder's byte order, for the code generator and the
          * inline and file-scope assemblers alike */
         mips_set_big_endian(target_big_endian());
         /* ...and its width: the doubleword instructions at MIPS64 */
         mips_set_64(a == TARGET_MIPS64);
+#endif
     }
     /* Scanned across the whole command line, not just argv[1]: these
      * describe the TARGET, so `--target=aarch64-elf --dump-predef` has to
@@ -5129,9 +5562,6 @@ int main(int argc, char **argv)
                    strncmp(argv[i], "-fmessage-length=", 17) == 0 ||
                    strcmp(argv[i], "-fverbose-asm") == 0 ||
                    strcmp(argv[i], "-pipe") == 0 ||
-                   /* threads are the C library's: libSystem has them on
-                    * macOS, and a hosted ELF link names -lpthread */
-                   strcmp(argv[i], "-pthread") == 0 ||
                    strcmp(argv[i], "-fno-pic") == 0 ||
                    strcmp(argv[i], "-fno-PIC") == 0 ||
                    strcmp(argv[i], "-fno-pie") == 0 ||
@@ -5297,6 +5727,7 @@ int main(int argc, char **argv)
                 return 1;
             }
             cpp_set_gnuc_version(v[0], v[1], v[2]);
+            g_gnuc_given = 1;
         } else if (strcmp(argv[i], "-ffunction-sections") == 0) {
             func_sections = 1;
         } else if (strcmp(argv[i], "-fno-function-sections") == 0) {
@@ -5478,6 +5909,28 @@ int main(int argc, char **argv)
             no_stdinc = 1;
         } else if (strcmp(argv[i], "-arch") == 0) {
             i++;                /* applied in the pre-scan */
+        } else if (strncmp(argv[i], "--libc=", 7) == 0) {
+            if (!strcmp(argv[i] + 7, "system"))
+                g_libc_system = 1;
+            else if (!strcmp(argv[i] + 7, "embcc"))
+                g_libc_system = 0;
+            else {
+                fprintf(stderr, "embcc: error: %s: the C library is embcc "
+                                "(EmbCC's own) or system (a Linux "
+                                "target's glibc)\n", opt_typed(argv[i]));
+                return 1;
+            }
+        } else if (strncmp(argv[i], "--sysroot=", 10) == 0) {
+            g_sysroot = argv[i] + 10;
+        } else if (strncmp(argv[i], "--ld-path=", 10) == 0) {
+            g_ld_path = argv[i] + 10;
+        } else if (strncmp(argv[i], "-fuse-ld=", 9) == 0) {
+            g_fuse_ld = argv[i] + 9;
+        } else if (strcmp(argv[i], "-pthread") == 0) {
+            /* POSIX threads: the C library's. With --libc=system,
+             * glibc's: _REENTRANT and -lpthread, as GCC has it; EmbCC's
+             * own libc has none, and macOS's libSystem has them */
+            g_pthread = 1;
         } else if (strcmp(argv[i], "-isysroot") == 0) {
             if (i + 1 >= argc) {
                 fprintf(stderr, "embcc: -isysroot needs a directory\n");
@@ -5565,7 +6018,9 @@ int main(int argc, char **argv)
         } else if (!strcmp(argv[i], "-nodefaultlibs")) {
             g_nodefaultlibs = 1;
         } else if (!strcmp(argv[i], "-static")) {
-            /* every image EmbLD writes is static */
+            /* every image EmbLD writes is static; --libc=system's linker
+             * is told (glibc_link) */
+            g_static_link = 1;
         } else if (argv[i][0] != '-' && has_link_input_suffix(argv[i])) {
             g_child_skip[i] = 1;
             if (g_nlink_in < 256) {
@@ -5659,6 +6114,35 @@ int main(int argc, char **argv)
     if (backend_get(target_get())->options_done)
         backend_get(target_get())->options_done();
     sema_set_gnu89_inline(gnu89_inline || std_gnu89);
+    if (g_libc_system) {
+        char probe[1200];
+        if (target_os_get() != TGT_OS_LINUX ||
+            (target_get() != TARGET_X86_64 && target_get() != TARGET_AARCH64)) {
+            fprintf(stderr, "embcc: error: --libc=system is for the Linux "
+                            "targets, x86_64-linux-gnu and aarch64-linux-gnu, "
+                            "whose system C library is glibc; %s has none "
+                            "EmbCC uses\n", target_triple_now());
+            return 1;
+        }
+        snprintf(probe, sizeof probe, "%s/usr/include/stdio.h",
+                 sysroot_prefix());
+        if (!no_stdinc && !plat_file_exists(probe)) {
+            fprintf(stderr, "embcc: error: --libc=system: no %s -- install "
+                            "the C library's development files (libc6-dev, "
+                            "glibc-devel), or name the system's root with "
+                            "--sysroot=\n", probe);
+            return 1;
+        }
+        /* glibc's headers ask the compiler what it is by __GNUC__, and
+         * without one strip every __attribute__ -- the alignments in
+         * pthread_mutex_t's layout among them. EmbCC answers as clang
+         * does, GCC 4.2.1, for which glibc keeps its GNU forms and
+         * asks for no GCC 7 builtin types. */
+        if (!g_gnuc_given)
+            cpp_set_gnuc_version(4, 2, 1);
+        if (g_pthread)
+            cpp_cmdline_define("_REENTRANT=1", 0);
+    }
     /* -pedantic, -pedantic-errors or -Wpedantic: the dialect is the
      * standard's, without EmbCC's C23 extensions of a GNU one */
     lex_set_pedantic(diag_warning_enabled("pedantic"));
@@ -5877,8 +6361,12 @@ int main(int argc, char **argv)
                     "and the target is %s\n", input, target_triple_now());
             return 1;
         }
+#if FAMILY_BUILT(x86)
         return as_assemble(input, output ? output : default_output(input),
                            AS_ELF64);
+#else
+        return 1;           /* refused above: there is no x86-64 here */
+#endif
     }
     if (pp_only)
         return done(compile(input, dep_only ? NULL : output, 1));

@@ -314,8 +314,15 @@ If they are not built (`make libc-linux-x86_64`):
 
 ```text
 embcc: error: no crt1.o for x86_64-linux-gnu: its C library is not built; `make libc-linux-x86_64` in /path/to/EmbCC builds it
+embcc: or --libc=system compiles and links against the system's own C library, glibc
 embcc: --print-search-dirs says where it looked
 ```
+
+With `--libc=system` the program is the system's instead: compiled
+against glibc's headers and linked dynamically against its `libc.so.6`
+(and `libpthread` for `-pthread`) by the system's linker, as GCC links
+one, for `x86_64-linux-gnu` and `aarch64-linux-gnu` alike. See
+[The C library](libraries.md#glibc-instead---libcsystem).
 
 #### macOS (Mach-O)
 

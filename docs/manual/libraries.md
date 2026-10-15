@@ -278,6 +278,34 @@ forms of the time functions.
 | POSIX extensions such as `fdopen`, `fileno`, `popen`, `strtok_r`, `strerror_r`, `fseeko`, `fmemopen` | |
 | a time-zone database, locales other than `"C"`, signal delivery | |
 
+### glibc instead: `--libc=system`
+
+For a Linux target, `--libc=system` replaces this library with the
+system's own, glibc -- the way to POSIX threads, sockets and the rest of
+POSIX, none of which this library has. EmbCC does what GCC does:
+
+| | With `--libc=system` |
+|---|---|
+| Headers | the root's `usr/local/include`, `usr/include/TRIPLE` and `usr/include`, then EmbCC's freestanding headers (`<stddef.h>`, `<stdarg.h>`...); EmbCC presents itself to them as GCC 4.2.1 (`__GNUC__` 4, as clang does), unless `-fgnuc-version=` says otherwise |
+| `-pthread` | defines `_REENTRANT` and links `-lpthread` |
+| Start files | glibc's `crt1.o`, `crti.o` and `crtn.o`, from `usr/lib/TRIPLE`, `usr/lib64` or `usr/lib` |
+| Libraries | `-lc` (glibc's `libc.so`, which names `libc.so.6` and the dynamic linker), EmbCC's `librt.a` when built, and any `-l` and `.so` given |
+| Linker | `--linker=PATH` (`--ld-path=`), or `-fuse-ld=bfd\|gold\|lld`; else `TRIPLE-ld`, `ld.lld`, and on Linux `ld` |
+| Dynamic linker | `/lib64/ld-linux-x86-64.so.2`, `/lib/ld-linux-aarch64.so.1` |
+| The root | `/`, or `--sysroot=DIR` |
+
+glibc's types are laid out as GCC lays them out: `tests/golden/libc-system.sh`
+compares 40 of them, `pthread_mutex_t` and `struct stat` among them, byte
+for byte with GCC's, and runs a threaded program on a Linux kernel. One
+difference does not cross a call: EmbCC's `va_list` is a pointer to the
+ABI's argument tag, 8 bytes where GCC's is the tag, and passing one to
+`vprintf` passes that pointer either way.
+
+`-static` links glibc's `libc.a`, which needs GCC's `libgcc.a` and
+`libgcc_eh.a`; EmbCC takes them from the root's `usr/lib/gcc/TRIPLE/N/`
+and says so when there are none. A C++ program is refused: EmbCC's C++
+runtime is built on its own C library.
+
 ### Backends
 
 Everything above is portable C. An operating system is reached through

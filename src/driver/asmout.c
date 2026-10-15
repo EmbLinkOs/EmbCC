@@ -555,11 +555,13 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
             int have_dis = 0;
             int len = target_insn_len((const unsigned char *)text + pc,
                                       (int)(hi - pc));
+#if FAMILY_BUILT(x86)       /* the decoder is x86-64's (make TARGETS=) */
             if (len < 1) {
                 len = embdbg_decode_one(text + pc, (int)(hi - pc),
                                         (unsigned long)pc, dis);
                 have_dis = target_get() == TARGET_X86_64 && len >= 1;
             }
+#endif
             if (len < 1)
                 len = 1;
             /* An absolute address in .text -- a jump table's entry -- is

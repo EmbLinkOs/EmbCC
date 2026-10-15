@@ -30,6 +30,13 @@ READELF=${READELF:-$(_hp_tool readelf x86_64-elf-readelf)}
 OBJDUMP=${OBJDUMP:-$(_hp_tool x86_64-elf-objdump objdump)}
 OBJCOPY=${OBJCOPY:-$(_hp_tool x86_64-elf-objcopy objcopy)}
 
+# A Linux system's root for each Linux target, for --libc=system: glibc's
+# headers, start files and shared objects (tests/golden/libc-system.sh).
+# tools/glibc-sysroot.sh makes them from Debian 12's packages. On a Linux
+# host of the target's architecture the test uses the host itself, /.
+GLIBC_SYSROOT_X86_64=${EMBCC_GLIBC_SYSROOT_X86_64:-$HOME/EmbRef/dl/sysroot-debian12-amd64}
+GLIBC_SYSROOT_AARCH64=${EMBCC_GLIBC_SYSROOT_AARCH64:-$HOME/EmbRef/dl/sysroot-debian12-arm64}
+
 # The Xtensa reference: Espressif's GCC told to generate for the de212 core
 # QEMU emulates, through a configuration plugin built from that core's
 # overlay (tools/xtensa-ref-gcc.sh makes both). XTENSA_REF_GCC is the

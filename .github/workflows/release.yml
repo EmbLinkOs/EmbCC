@@ -1,0 +1,248 @@
+# Release packages. On a pushed tag v*, EmbCC is built on Linux and macOS
+# for x86-64 and arm64, installed into a staging directory, tested there,
+# and packaged: a tarball per OS and processor with its SHA-256 file, and a
+# .deb for each Linux. Everything is then uploaded to the tag's GitHub
+# Release, which is where install.sh downloads from. packaging/README.md
+# describes the whole release.
+#
+# Run by hand (workflow_dispatch) with a tag, it builds and publishes that
+# tag. Without one it builds the chosen branch and publishes nothing: the
+# packages are kept as the run's artifacts. That is how to try a change to
+# this file before tagging.
+#
+# Ordinary pushes and pull requests do not run it.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: >-
+          Tag to build and publish (vX.Y.Z). Empty builds the chosen branch
+          and publishes nothing.
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # The tag, the version and the commit, decided once so that every build
+  # packages the same commit under the same name.
+  version:
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.v.outputs.tag }}
+      version: ${{ steps.v.outputs.version }}
+      sha: ${{ steps.v.outputs.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          persist-credentials: false
+      - id: v
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          tag=$INPUT_TAG
+          if [ -z "$tag" ] && [ "$GITHUB_REF_TYPE" = tag ]; then
+            tag=$GITHUB_REF_NAME
+          fi
+          # src/driver/version.h is the one version string: --version
+          # prints it and the installed lib/embcc/VERSION directory is
+          # named by it. A release whose name says otherwise would install
+          # a compiler that reports another version.
+          ours=$(sed -n 's/.*EMBCC_VERSION "\(.*\)".*/\1/p' src/driver/version.h)
+          if [ -n "$tag" ]; then
+            case $tag in
+              v[0-9]*) ;;
+              *) echo "::error::$tag is not a release tag (vX.Y.Z)"; exit 1 ;;
+            esac
+            if [ "${tag#v}" != "$ours" ]; then
+              echo "::error::tag $tag does not match src/driver/version.h ($ours); change version.h and tag v$ours"
+              exit 1
+            fi
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$ours" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: version
+    name: build (${{ matrix.os }}-${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Ubuntu 22.04 rather than 24.04: the programs need the glibc of
+          # the system they were built on or newer, and 22.04's (2.35) is
+          # the older floor.
+          - { os: linux, arch: x86_64, runner: ubuntu-22.04, deb: amd64 }
+          - { os: linux, arch: aarch64, runner: ubuntu-22.04-arm, deb: arm64 }
+          # The macOS 13 runners are retired and macOS 14 is deprecated.
+          # MACOSX_DEPLOYMENT_TARGET below keeps what macOS 15 builds
+          # running on macOS 11 and newer.
+          - { os: macos, arch: aarch64, runner: macos-15 }
+          - { os: macos, arch: x86_64, runner: macos-15-intel }
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      PLATFORM: ${{ matrix.os }}-${{ matrix.arch }}
+      MACOSX_DEPLOYMENT_TARGET: '11.0'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.version.outputs.sha }}
+          persist-credentials: false
+
+      - name: Build the compiler and the tools
+        run: make -j"$(getconf _NPROCESSORS_ONLN)" all embdbg
+
+      # One job: install's prerequisites (the libraries) are not ordered
+      # before its copying step (install-files), so with -j it can copy
+      # before they exist and leave most of lib/embcc empty.
+      - name: Build the libraries and install into a staging directory
+        run: make -j1 install DESTDIR="$RUNNER_TEMP/stage" PREFIX=/usr/local
+
+      - name: Test the staged compiler
+        run: |
+          set -eux
+          prefix=$RUNNER_TEMP/stage/usr/local
+          E=$prefix/bin/embcc
+          L=$prefix/lib/embcc/$VERSION
+          "$E" --version
+          "$E" --print-search-dirs | tee "$RUNNER_TEMP/search-dirs.txt"
+          grep -q '^layout: installed' "$RUNNER_TEMP/search-dirs.txt"
+          for t in embcc embld embas embar embread embdbg embls embidx \
+                   embsim embflash embtrace embmap embpack embrt embsvd; do
+            test -x "$prefix/bin/$t"
+          done
+          mkdir "$RUNNER_TEMP/smoke"
+          cd "$RUNNER_TEMP/smoke"
+          cat > hello.c << 'EOF'
+          #include <stdio.h>
+          #include <string.h>
+
+          int main(void)
+          {
+              printf("hello from EmbCC %d\n", (int)strlen("embedded"));
+              return 0;
+          }
+          EOF
+          printf '%s\n' '#include <cstdio>' '#include <vector>' \
+            'int main() { std::vector<int> v{1, 2, 3}; std::printf("%zu\n", v.size()); }' \
+            > hello.cc
+
+          # A Cortex-M4 object, and C++ through the installed headers.
+          "$E" --target=thumbv7em-none-eabi --opt=size -c hello.c -o hello-m4.o
+          file hello-m4.o | grep 'ELF 32-bit LSB relocatable, ARM'
+          "$E" --target=x86_64-linux-gnu -x c++ -c hello.cc -o hello-cc.o
+
+          # A program for this machine, linked and run.
+          case $PLATFORM in
+            linux-x86_64)
+              "$E" --target=x86_64-linux-gnu hello.c -o hello
+              chmod +x hello ;;
+            linux-aarch64)
+              # embld does not link AArch64 objects: link with the
+              # system's ld, from the installed crt1.o, libc and runtime.
+              "$E" --target=aarch64-linux-gnu -c hello.c -o hello.o
+              T=$L/aarch64-linux-gnu
+              ld -static -T "$T/link.ld" -o hello "$T/crt1.o" hello.o \
+                "$T/libc.a" "$T/librt.a" ;;
+            macos-aarch64)
+              "$E" --target=aarch64-apple-darwin hello.c -o hello ;;
+            macos-x86_64)
+              "$E" --target=x86_64-apple-darwin hello.c -o hello ;;
+          esac
+          test "$(./hello)" = "hello from EmbCC 8"
+
+      - name: Package the tarball
+        run: sh packaging/tarball.sh "$RUNNER_TEMP/stage/usr/local" "$VERSION" "$PLATFORM" dist
+
+      - name: Install the tarball with install.sh
+        run: |
+          set -eux
+          mirror=$RUNNER_TEMP/mirror
+          mkdir -p "$mirror/download/v$VERSION" "$mirror/latest/download"
+          cp dist/*.tar.gz dist/*.tar.gz.sha256 "$mirror/download/v$VERSION/"
+          echo "v$VERSION" > "$mirror/latest/download/embcc-version.txt"
+          EMBCC_INSTALL_BASE_URL=$mirror sh install.sh --prefix "$RUNNER_TEMP/installed"
+          "$RUNNER_TEMP/installed/bin/embcc" --target=thumbv7em-none-eabi \
+            -c "$RUNNER_TEMP/smoke/hello.c" -o "$RUNNER_TEMP/installed-m4.o"
+
+      - name: Package the .deb
+        if: matrix.os == 'linux'
+        run: sh packaging/deb.sh "$RUNNER_TEMP/stage/usr/local" "$VERSION" "${{ matrix.deb }}" dist
+
+      - name: Install and remove the .deb
+        if: matrix.os == 'linux'
+        run: |
+          set -eux
+          dpkg-deb --info dist/*.deb
+          sudo dpkg -i dist/*.deb
+          /usr/bin/embcc --version
+          /usr/bin/embcc --print-search-dirs | grep '^layout: installed'
+          /usr/bin/embcc --target=thumbv7em-none-eabi \
+            -c "$RUNNER_TEMP/smoke/hello.c" -o "$RUNNER_TEMP/deb-m4.o"
+          test -s /usr/share/man/man1/embcc.1
+          sudo dpkg -r embcc
+          test ! -e /usr/bin/embcc
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: embcc-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/
+          if-no-files-found: error
+
+  release:
+    needs: [version, build]
+    if: needs.version.outputs.tag != ''
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.version.outputs.tag }}
+      VERSION: ${{ needs.version.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Check every file against its checksum
+        working-directory: dist
+        run: sha256sum -c ./*.sha256
+
+      # install.sh reads releases/latest/download/embcc-version.txt to find
+      # the latest release's tag, and from it the tarball's name.
+      - name: Name the release in embcc-version.txt
+        run: printf '%s\n' "$TAG" > dist/embcc-version.txt
+
+      - name: Upload to the release
+        run: |
+          set -eu
+          cat > "$RUNNER_TEMP/notes.md" << EOF
+          Install EmbCC $VERSION on Linux or macOS with
+
+              curl -fsSL https://raw.githubusercontent.com/$GH_REPO/main/install.sh | sh -s -- --version $TAG
+
+          or download the tarball for your system and its .sha256 file,
+          check one against the other, and unpack it anywhere: bin/embcc
+          finds its headers and libraries relative to itself. The .deb
+          files install into /usr with \`sudo apt install ./FILE.deb\`.
+          EOF
+          if ! gh release view "$TAG" > /dev/null 2>&1; then
+            gh release create "$TAG" --verify-tag --title "EmbCC $VERSION" \
+              --notes-file "$RUNNER_TEMP/notes.md"
+          fi
+          gh release upload "$TAG" dist/* --clobber
