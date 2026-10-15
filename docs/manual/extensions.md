@@ -87,6 +87,9 @@ operators](#feature-test-operators), with the limits described there.
 | Conditional with the middle operand omitted, `x ?: y` | Supported; `x` is evaluated once |
 | A structure or union with no members | Supported; its size is 0 |
 | An extra `;` at file scope (`};` after a function) | Supported; an empty declaration |
+| A `?:` with one `void` arm (`c ? f() : 1`) | Supported; the result is `void` |
+| A forward reference to an `enum` (`enum e *p;` before its body) | Supported |
+| An object of type `void`, `extern void _text;`, taken the address of | Supported, with GCC's warning on `&_text` unless it is `const` |
 | An asm label, `int f(void) __asm__("name");` | Supported |
 | [Constructs EmbCC does not support](#gnu-extensions-that-are-not-supported) | Nested functions, arithmetic on `void *`, cast to a union, integer complex types, `$` in identifiers, `return` of a `void` expression |
 
@@ -253,6 +256,10 @@ element from `first` to `last`:
 ```c
 int widths[10] = { [2 ... 5] = 8, [7] = 16 };
 ```
+
+GCC's older spellings of a designator are accepted too, with a
+`--pedantic` warning: `{ x: 1 }` for `{ .x = 1 }`, and `[3] 7`, without
+the `=`, for `[3] = 7`.
 
 ### Zero-length and flexible arrays
 
@@ -838,6 +845,11 @@ to, and return 1 if the stored value differs from the mathematical
 result and 0 otherwise. `a` and `b` are integers of any type; `res`
 points to an integer. They compile on every target.
 
+`__builtin_add_overflow_p(a, b, c)`, `__builtin_sub_overflow_p` and
+`__builtin_mul_overflow_p` return whether the same operation overflows
+the type of `c`. The value of `c` is not used; it is evaluated for its
+side effects only.
+
 The result is `int`, not `_Bool` as in GCC. A wrong operand is refused:
 `__builtin_add_overflow: operand 1 must be an integer, got double`, or
 `__builtin_add_overflow: the third argument points at the integer to
@@ -870,6 +882,7 @@ are refused (`the RV32 backend cannot lower a 128-bit value yet ...`).
 | `__builtin_isinf_sign(x)` | 1 for positive infinity, -1 for negative infinity, 0 otherwise |
 | `__builtin_isfinite(x)` | 1 if `x` is neither infinite nor NaN |
 | `__builtin_isnormal(x)` | 1 if `x` is a normal number: not zero, subnormal, infinite or NaN |
+| `__builtin_isinff(x)`, `isinfl`, `isnanf`, `isnanl`, `finite`, `finitef`, `finitel` | The same as `__builtin_isinf`, `__builtin_isnan` and `__builtin_isfinite` |
 
 `fabs` and `copysign` return the floating type their suffix names; the
 others return `int`. The classification builtins take a floating
@@ -877,6 +890,28 @@ argument of any type, and refuse an integer (`__builtin_isnan takes a
 floating-point argument`). All of them operate on the bits of the value:
 they do not round, raise no floating-point exception, and call no
 library.
+
+### Floating-point comparisons
+
+| Builtin | Result |
+|---|---|
+| `__builtin_isgreater(x, y)`, `isgreaterequal`, `isless`, `islessequal` | `x > y`, `x >= y`, `x < y`, `x <= y`: 0 when either is a NaN |
+| `__builtin_islessgreater(x, y)` | `x < y \|\| x > y`: 0 when either is a NaN |
+| `__builtin_isunordered(x, y)` | 1 when either is a NaN |
+| `__builtin_iseqsig(x, y)` | `x == y` |
+
+The operands are compared in their common real type, and each is
+evaluated once. They are `<math.h>`'s comparison macros; EmbCC does not
+track floating-point exceptions, so the quiet and signaling forms are
+the same comparisons.
+
+### Type classification
+
+`__builtin_classify_type(x)` is GCC's class of `x`'s type, after an
+array or function decays and an integer is promoted: 1 for an integer
+(an `enum` and a `_Bool` among them), 5 for a pointer, 8 for a real
+floating type, 9 for a complex one, 12 for a structure, 13 for a union
+and 0 for `void`. `x` is not evaluated.
 
 They compile on every target. A 16-byte `long double` (x87's 80-bit
 format on x86-64, IEEE binary128 on AArch64 ELF and Linux) is stored to
@@ -1042,8 +1077,7 @@ These are refused as undeclared functions, as shown in [General
 rules](#general-rules): `__builtin_assume`,
 `__builtin_bitreverse32` and the other widths,
 `__builtin_rotateleft32` and the other rotates, `__builtin_complex`,
-`__builtin_fpclassify`, `__builtin_isgreater` and the
-other comparison macros' builtins, `__builtin_setjmp`,
+`__builtin_fpclassify`, `__builtin_setjmp`,
 `__builtin___clear_cache`, `__builtin_FUNCTION`,
 `__builtin_speculation_safe_value`, `__builtin_shufflevector`, the
 target-specific families (`__builtin_ia32_*`, `__builtin_avr_*`), and
