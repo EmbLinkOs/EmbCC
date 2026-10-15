@@ -69,6 +69,31 @@ int mips64_target_option(const char *arg)
     return 1;
 }
 
+/* A PIC32 part (--mcu=, XC32's -mprocessor=), named as XC32 names it --
+ * 32MZ2048EFH100 -- and the device pack that describes it (--dfp=, XC32's
+ * -mdfp=). Kept in src/arch/target.c, which embls links too. */
+static void set_pic32_part(const char *arg, const char *v)
+{
+    char part[32];
+    size_t n = strlen(v), k;
+    int ok = n >= 6 && n < sizeof part &&
+             v[0] == '3' && v[1] == '2' && (v[2] == 'M' || v[2] == 'm');
+    for (k = 0; ok && k < n; k++)
+        ok = (v[k] >= '0' && v[k] <= '9') || (v[k] >= 'A' && v[k] <= 'Z') ||
+             (v[k] >= 'a' && v[k] <= 'z');
+    if (!ok)
+        diag_fatal(NULL, 0, "%s is not a PIC32 part: EmbCC takes the MIPS "
+                   "PIC32s by XC32's names, as 32MZ2048EFH100 or "
+                   "32MX795F512L", opt_typed(arg));
+    if (target_big_endian())
+        diag_fatal(NULL, 0, "%s is a PIC32 part, which is little-endian: "
+                   "--target=mipsel-none-elf", opt_typed(arg));
+    for (k = 0; k < n; k++)
+        part[k] = v[k] >= 'a' && v[k] <= 'z' ? (char)(v[k] - 32) : v[k];
+    part[n] = 0;
+    target_set_pic32(part, NULL);
+}
+
 int mips32_target_option(const char *arg)
 {
     static const char *const exact[] = {
@@ -78,6 +103,18 @@ int mips32_target_option(const char *arg)
     static const char *const prefix[] = {
         "-mcpu=", "-march=", "-mabi=", "-G", NULL
     };
+    if (strncmp(arg, "-mmcu=", 6) == 0) {
+        set_pic32_part(arg, arg + 6);
+        return 1;
+    }
+    if (strncmp(arg, "-mprocessor=", 12) == 0) {
+        set_pic32_part(arg, arg + 12);
+        return 1;
+    }
+    if (strncmp(arg, "-mdfp=", 6) == 0) {
+        target_set_pic32(NULL, arg + 6);
+        return 1;
+    }
     if (!option_listed(arg, exact, prefix))
         return 0;
     /* The flags a MIPS build passes (a PIC32 project's, clang's

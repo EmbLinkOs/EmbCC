@@ -6,6 +6,7 @@
 #include "target.h"
 #include "../driver/util.h"
 
+#include <stdio.h>
 #include <string.h>
 
 static int g_cxx;
@@ -352,6 +353,40 @@ static int avr_other_part(void)
 #endif
 }
 
+/* A PIC32 part (--mcu= on mipsel, src/arch/mips/options.c): the macros
+ * XC32 defines for it, which the device pack's headers test -- the part's
+ * own (__32MZ2048EFH100__ picks its header in <xc.h>), the family's, XC32's
+ * name and version, and __LANGUAGE_C__, which tells C from assembly there
+ * (the driver swaps it for __LANGUAGE_ASSEMBLY__ in a .S file). The
+ * pack's header defines the part's features (__PIC32_HAS_FPU64, ...). */
+static int pic32_adds(struct predef_macro *m)
+{
+    static char part_u[48], part[48], fam_u[16], fam[16];
+    const char *p = target_pic32_part();
+    int n = 0;
+    snprintf(part_u, sizeof part_u, "__%s__", p);
+    snprintf(part, sizeof part, "__%s", p);
+    /* the family is the two letters after 32: MX, MZ, MK, MM */
+    snprintf(fam_u, sizeof fam_u, "__PIC32%.2s__", p + 2);
+    snprintf(fam, sizeof fam, "__PIC32%.2s", p + 2);
+    m[n].name = part_u; m[n++].value = "1";
+    m[n].name = part;   m[n++].value = "1";
+    m[n].name = fam_u;  m[n++].value = "1";
+    m[n].name = fam;    m[n++].value = "1";
+    m[n].name = "__PIC32M"; m[n++].value = "1";
+    m[n].name = "__PIC32M__"; m[n++].value = "1";
+    m[n].name = "__XC32";   m[n++].value = "1";
+    m[n].name = "__XC32__"; m[n++].value = "1";
+    m[n].name = "__XC";     m[n++].value = "1";
+    m[n].name = "__XC__";   m[n++].value = "1";
+    /* the release whose behaviour EmbCC's <pic32m_builtins.h> follows */
+    m[n].name = "__XC32_VERSION"; m[n++].value = "4600";
+    m[n].name = "__XC32_VERSION__"; m[n++].value = "4600";
+    m[n].name = "__LANGUAGE_C__"; m[n++].value = "1";
+    m[n].name = "__LANGUAGE_C";   m[n++].value = "1";
+    return n;
+}
+
 /* __ELF__ lives in the generated architecture tables, because the
  * compilers they were generated from were the *-elf ones. It is a
  * statement about the OBJECT FORMAT, so on a target that is not ELF it
@@ -407,7 +442,8 @@ const struct predef_macro *predef_table(int *count)
     int rv = riscv_changes();
     int dsp = thumb_dsp();
     int avr = avr_other_part();
-    if (!os && !fpu && !cmse && !rv && !dsp && !avr &&
+    int pic32 = target_pic32_part() != NULL;
+    if (!os && !fpu && !cmse && !rv && !dsp && !avr && !pic32 &&
         target_fmt_get() == TGT_FMT_ELF) {
         *count = narch;
         return arch;
@@ -416,7 +452,7 @@ const struct predef_macro *predef_table(int *count)
     static struct predef_macro *merged;
     static int nmerged;
     if (!merged) {
-        merged = xmalloc((size_t)(narch + nos + 20 + ndarwin_a64_model) *
+        merged = xmalloc((size_t)(narch + nos + 40 + ndarwin_a64_model) *
                          sizeof *merged);
         for (int i = 0; i < narch; i++)
             if (!contradicted(arch[i].name))
@@ -441,6 +477,8 @@ const struct predef_macro *predef_table(int *count)
             merged[nmerged++].value = "1";
         }
 #endif
+        if (pic32)
+            nmerged += pic32_adds(merged + nmerged);
         if (fpu && target_arm_a32()) {
             int v4 = target_arm_vfp(NULL) == 4;
             const struct predef_macro *add = v4 ? a32_vfp4_add : a32_vfp3_add;

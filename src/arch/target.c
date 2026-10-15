@@ -1546,3 +1546,26 @@ int target_reloc_by_name(enum target_arch a, const char *name, int n)
             return reloc_names[i].type;
     return -1;
 }
+
+/* A PIC32 part and its device pack (src/arch/mips/options.c sets them) */
+static char g_pic32_part[32];
+static const char *g_pic32_dfp;
+
+void target_set_pic32(const char *part, const char *dfp)
+{
+    if (part)
+        snprintf(g_pic32_part, sizeof g_pic32_part, "%s", part);
+    if (dfp)
+        g_pic32_dfp = dfp;
+}
+
+const char *target_pic32_part(void)
+{
+    return target_get() == TARGET_MIPS32 && g_pic32_part[0] ? g_pic32_part
+                                                             : NULL;
+}
+
+const char *target_pic32_dfp(void)
+{
+    return target_pic32_part() ? g_pic32_dfp : NULL;
+}

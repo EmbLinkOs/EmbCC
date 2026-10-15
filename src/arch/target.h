@@ -957,4 +957,10 @@ struct avr_mcu {
 };
 const struct avr_mcu *target_avr_mcu(void);
 
+/* The PIC32 part (--mcu= on mipsel), as XC32 names it (32MZ2048EFH100),
+ * and the device pack named for it (--dfp=); NULL when none. */
+const char *target_pic32_part(void);
+const char *target_pic32_dfp(void);
+void target_set_pic32(const char *part, const char *dfp);  /* NULL: keep */
+
 #endif

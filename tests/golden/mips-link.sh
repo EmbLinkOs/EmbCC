@@ -18,8 +18,9 @@
 #  2. EmbCC's own addends: a string literal more than 32 KB into .rodata,
 #     whose LO16 field the object writer stored sign-extended.
 #  3. What is refused, by name: gp-relative small data, a hard-float
-#     object linked with soft-float ones, a HI16 with no LO16, and a
-#     linker script (-T), which EmbLD lays out for ARM and RISC-V only.
+#     object linked with soft-float ones, and a HI16 with no LO16.
+#  4. A GNU ld script's layout, run: .data in another region, stored after
+#     the code and copied, .bss cleared, a constructor.
 set -u
 # Run BIG-endian (mips-none-elf) as tests/golden/mips-be-link.sh, which sets
 # MIPS_BE=1.
@@ -175,16 +176,51 @@ printf '.text\n.globl h\nh: lui $2, %%hi(x)\njr $ra\nnop\n.data\nx: .word 1\n' \
 mc "$out/lone.s" -o "$out/lone.o" || { echo "llvm-mc rejected lone.s"; exit 1; }
 refuse "an R_MIPS_HI16 with no R_MIPS_LO16" "no R_MIPS_LO16" \
     "$out/boot.o" "$out/io.o" "$out/far.o" "$out/lone.o"
-# a GNU ld script: laid out for ARM and RISC-V only, so a MIPS image is
-# refused rather than laid out by rules nobody checked for it
-printf 'SECTIONS { .text 0x80100000 : { *(.text*) } .data : { *(.data*) } }\n' \
-    > "$out/s.ld"
-if "$EMBLD" -T "$out/s.ld" -e _start "$out/boot.o" "$out/io.o" "$out/far.o" \
-       -o "$out/s.elf" > "$out/s.txt" 2>&1; then
-    echo "embld linked a MIPS image by a linker script"; exit 1
-fi
-grep -q 'a linker script is supported for ARM, RISC-V and AVR images only' \
-    "$out/s.txt" || {
-    echo "embld refused a MIPS linker script, but not by name:"
-    cat "$out/s.txt"; exit 1; }
-echo "gp-relative data, a hard-float object, a lone HI16 and a linker script are refused by name"
+echo "gp-relative data, a hard-float object and a lone HI16 are refused by name"
+
+# ---- 4. a GNU ld script ----------------------------------------------------
+# (as a PIC32's, src/driver/main.c's pic32_script): .data run from RAM and
+# stored after the code, copied by the harness's boot from LOADADDR, .bss
+# cleared, a constructor run. With a script the image sets its own stack:
+# entry.s does, then jumps to the harness's _start.
+printf '\t.set noreorder\n\t.text\n\t.globl _entry\n_entry:\n\tlui $29, 0x8080\n\tj _start\n\tnop\n' \
+    > "$out/entry.s"
+mc "$out/entry.s" -o "$out/entry.o" || { echo "llvm-mc rejected entry.s"; exit 1; }
+printf '%s\n' 'extern void puts_(const char *); extern void putn(long);' \
+    'int seed = 41; int cleared; static int ran;' \
+    '__attribute__((constructor)) static void init(void) { ran = 1; }' \
+    'int main(void) { putn(seed + ran - cleared); puts_("\n==END==\n"); return 0; }' \
+    > "$out/ds.c"
+"$EMBCC" --target=$T -O2 -c "$out/ds.c" -o "$out/ds.o" || { echo "ds.c"; exit 1; }
+cat > "$out/s.ld" <<'EOF'
+ENTRY(_entry)
+MEMORY { FLASH (rx) : ORIGIN = 0x80100000, LENGTH = 0x100000
+         RAM (rwx) : ORIGIN = 0x80400000, LENGTH = 0x100000 }
+SECTIONS {
+  .text : { *(.text*) *(.rodata*) } > FLASH
+  .init_array : { __init_array_start = .; KEEP(*(.init_array*)) __init_array_end = .; } > FLASH
+  .data : { __data_start = .; *(.data*) . = ALIGN(4); __data_end = .; } > RAM AT > FLASH
+  __data_load = LOADADDR(.data);
+  .bss : { __bss_start = .; *(.bss*) *(COMMON) . = ALIGN(4); __bss_end = .; } > RAM
+}
+EOF
+"$EMBLD" -T "$out/s.ld" "$out/entry.o" "$out/boot.o" "$out/io.o" "$out/ds.o" \
+    -o "$out/s.elf" > "$out/s.txt" 2>&1 || {
+    echo "embld did not lay out a MIPS image by a script:"; cat "$out/s.txt"; exit 1; }
+[ "$(llvm-readelf -S "$out/s.elf" |
+      awk '{ for (i = 1; i < NF; i++) if ($i == ".data") print $(i + 2) }')" = 80400000 ] ||
+    { echo "the script's .data is not at RAM's 0x80400000"; exit 1; }
+sh tests/harness/mips/run.sh "$out/s.elf" > "$out/s.out" 2>&1
+grep -q '^42 *$' "$out/s.out" || {
+    echo "the scripted image printed:"; head -3 "$out/s.out"; exit 1; }
+echo "a linker script's image runs: .data copied from its load address, .bss cleared, a constructor run"
+# two sections a script puts over the same addresses: refused, both named
+printf 'ENTRY(_entry)\nSECTIONS { .text 0x80100000 : { *(.text*) *(.rodata*) }\n  .data 0x80100004 : { *(.data*) } }\n' \
+    > "$out/ov.ld"
+"$EMBLD" -T "$out/ov.ld" "$out/entry.o" "$out/boot.o" "$out/io.o" "$out/ds.o" \
+    -o "$out/ov.elf" > "$out/ov.txt" 2>&1 && {
+    echo "embld laid .data over .text"; exit 1; }
+grep -q 'section .data at 0x80100004\.\.0x[0-9a-f]* overlaps .text' "$out/ov.txt" || {
+    echo "the overlap is not named:"; cat "$out/ov.txt"; exit 1; }
+echo "two sections over the same addresses are refused by name"
+

@@ -2363,7 +2363,9 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             sc->vars[i].used = 1;     /* -Wunused-variable: it was read */
             e->var_index = sc->vars[i].alias ? sc->vars[i].alias - 1 : i;
             e->ty = sc->vars[e->var_index].ty;
-            e->gref = sc->vars[i].g; /* set for a static local */
+            e->gref = sc->vars[i].g; /* set for a static local, and */
+            if (e->gref)            /* a block-scope extern, which the */
+                e->gref->used = 1;  /* object then names (undefined) */
             e->asm_reg = sc->vars[i].asm_reg; /* register-asm binding */
         } else {
             /* enumerators fold to their constant right here */
@@ -5658,6 +5660,14 @@ static int asm_resolve_reg_mips(struct unit *u, struct stmt *s,
         if (*p == 'r' || *p == 'g' || *p == 'm' || *p == 'd') has_r = 1;
         if (*p == 'i' || *p == 'n' || (*p >= 'I' && *p <= 'P'))
             has_i = 1;
+    }
+    /* "dJ" with the constant 0: the zero register, as gcc chooses it, which
+     * a template prints as $0 through %z (XC32's mtc0 %z0) */
+    long z;
+    if (has_r && strchr(c, 'J') && const_fold(op->expr, &z) && z == 0) {
+        op->is_imm = 1;
+        op->imm = 0;
+        return ASM_REG_IMM;
     }
     if (has_i && !has_r) {
         long v;
