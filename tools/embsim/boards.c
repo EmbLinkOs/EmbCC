@@ -54,6 +54,26 @@ static const struct model_desc pic32mz_models[] = {
     { 0, 0 },
 };
 
+/* a PIC24FJ's models, over its EDC (pic24.h): the interrupt controller
+ * first, which the others raise their interrupts through */
+static const struct model_desc pic24f_models[] = {
+    { "INT", "pic24-intc" },
+    { "GPIO", "pic32-gpio" },
+    { "PMP", "pic24-epmp" },
+    { "ADC1", "pic24-adc" },
+    { "SPI", "pic24-spi" },
+    { 0, 0 },
+};
+
+/* the PIC24FJ1024GB610's memory, on the bus as pic24.h places it:
+ * program flash to program address 0xABFFF (the configuration words in
+ * its last page) at twice its address, the configuration memory at
+ * 0x800000 (FBOOT), and 32 KiB of RAM at data address 0x0800 to 0x87FF
+ * (its top 2 KiB EDS page 1's) */
+#define PIC24FJ1024_MEM { { 0, 2 * 0xac000u, MEM_FLASH, 0, 0 }, \
+                          { 2 * 0x800000u, 0x4000, MEM_FLASH, 0, 0 }, \
+                          { 0x2000800u, KB(32), MEM_RAM, 1, 0 } }
+
 /* the PIC32MZ2048EFH100's memory: 512 KiB of RAM at 0, 2 MiB of program
  * flash at 0x1D000000 and the boot flash at 0x1FC00000 (the physical
  * addresses kseg0 and kseg1 reach) */
@@ -123,15 +143,27 @@ const struct board_desc boards[] = {
       "PIC32MZ2048EFH100.atdf", pic32mz_models },
     /* Microchip's Explorer 16/32 with the PIC32MZ EF PIM: the part, and
      * the board's LEDs, buttons, potentiometer, temperature sensor and
-     * LCD (pic32-boards.c) */
+     * LCD (pic-boards.c) */
     { "explorer16-32", "mips", "pic32mz", 0, PIC32MZ_MEM,
       { { "explorer16-32", 0, 0 } }, { { 0, 0, 0 } },
       "PIC32MZ2048EFH100.atdf", pic32mz_models },
     /* Microchip's Curiosity PIC32MZ EF 2.0, a PIC32MZ2048EFM144: its LEDs
-     * and switches (pic32-boards.c) */
+     * and switches (pic-boards.c) */
     { "curiosity-pic32mz-ef-2", "mips", "pic32mz", 0, PIC32MZ_MEM,
       { { "curiosity-pic32mz-ef-2", 0, 0 } }, { { 0, 0, 0 } },
       "PIC32MZ2048EFM144.atdf", pic32mz_models },
+    /* the PIC24FJ1024GB610 alone: the core, the memory, and every register
+     * the device pack's EDC describes, with the models of its interrupt
+     * controller, ports, EPMP, ADC and SPI */
+    { "pic24fj1024gb610", "pic24", "pic24fj1024gb610", 0, PIC24FJ1024_MEM,
+      { { 0, 0, 0 } }, { { 0, 0, 0 } },
+      "PIC24FJ1024GB610.PIC", pic24f_models },
+    /* the Explorer 16/32 with the PIC24FJ1024GB610 PIM: its LEDs, buttons,
+     * potentiometer, temperature sensor, LCD and serial EEPROM
+     * (pic-boards.c) */
+    { "explorer16-32-pic24", "pic24", "pic24fj1024gb610", 0, PIC24FJ1024_MEM,
+      { { "explorer16-32-pic24", 0, 0 } }, { { 0, 0, 0 } },
+      "PIC24FJ1024GB610.PIC", pic24f_models },
 };
 const int nboards = (int)(sizeof boards / sizeof boards[0]);
 
@@ -140,6 +172,7 @@ const struct core_type cores[] = {
     { "riscv", riscv_create },
     { "avr", avr_create },
     { "mips", mips_create },
+    { "pic24", pic24_create },
 };
 const int ncores = (int)(sizeof cores / sizeof cores[0]);
 
@@ -180,8 +213,9 @@ static const struct dev_type dev_types[] = {
     { "ns16550a-8", &ns16550a_8_ops, ns16550a_create },
     { "malta-fpga", &malta_fpga_ops, malta_fpga_create },
     { "malta-rom", &malta_rom_ops, malta_rom_create },
-    { "explorer16-32", &pic32_board_ops, pic32_board_create },
-    { "curiosity-pic32mz-ef-2", &pic32_board_ops, pic32_board_create },
+    { "explorer16-32", &pic_board_ops, pic_board_create },
+    { "curiosity-pic32mz-ef-2", &pic_board_ops, pic_board_create },
+    { "explorer16-32-pic24", &pic_board_ops, pic_board_create },
 };
 
 /* ---- the peripheral models, over an SVD's registers (svd-map.h) -------- */
@@ -199,6 +233,10 @@ static const struct model_type model_types[] = {
     { "pic32-uart", &pic32_uart_ops, pic32_uart_create },
     { "pic32-pmp", &pic32_pmp_ops, pic32_pmp_create },
     { "pic32-adc", &pic32_adc_ops, pic32_adc_create },
+    { "pic24-intc", &pic24_intc_ops, pic24_intc_create },
+    { "pic24-adc", &pic24_adc_ops, pic24_adc_create },
+    { "pic24-epmp", &pic24_epmp_ops, pic24_epmp_create },
+    { "pic24-spi", &pic24_spi_ops, pic24_spi_create },
     { 0, 0, 0 },
 };
 

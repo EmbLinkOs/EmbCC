@@ -288,7 +288,8 @@ struct svdmap *svdmap_create(struct sim *s, const char *path)
     m->path = path;
     size_t pl = strlen(path);
     m->d = pl > 5 && !strcmp(path + pl - 5, ".atdf") ? atdf_load(path)
-                                                     : svd_load(path);
+         : pl > 4 && !strcmp(path + pl - 4, ".PIC") ? edc_load(path)
+         : svd_load(path);
     m->p = calloc((size_t)m->d->np + 1, sizeof *m->p);
     if (!m->p)
         die("out of memory");
@@ -300,7 +301,7 @@ struct svdmap *svdmap_create(struct sim *s, const char *path)
             continue;               /* the core's own: its devices answer */
         struct rf_periph *p = &m->p[m->np++];
         p->name = sp->name;
-        p->base = (u32)sp->base;
+        p->base = (u32)(sp->base + m->d->bus_offset);
         p->svd = sp;
         p->sim = s;
         p->ops = &rf_plain_ops;
@@ -728,7 +729,7 @@ static const char *access_kind(int n, int write)
 static void hole(struct svdmap *m, u32 a, int n, int write)
 {
     struct sim *s = m->s;
-    if (m->d->clr_set_inv)
+    if (m->d->holes_zero)
         return;
     bus_fault(&s->bus);
     if (s->bus.debug)
@@ -994,13 +995,17 @@ void svdmap_print(struct svdmap *m, FILE *f)
     const struct svd_device *d = m->d;
     fprintf(f, "# %s: %d peripherals, %d registers on the bus at "
             "0x%08x-0x%08x\n", d->name, m->np, m->nreg, m->lo, m->hi - 1);
+    if (d->bus_offset)
+        fprintf(f, "# (the file's addresses: each is on the bus 0x%llx above)\n",
+                d->bus_offset);
     for (int i = 0; i < d->np; i++) {
         const struct svd_periph *sp = &d->p[i];
         struct svd_flats fl = svd_flat_regs(sp, 1);
         for (int k = 0; k < fl.n; k++) {
             const struct svd_node *n = fl.v[k].r;
-            u32 a = (u32)(sp->base + fl.v[k].off);
-            fprintf(f, "%s 0x%08x %d %s %s.%s 0x%0*llx %s", sp->name, a,
+            u32 a = (u32)(sp->base + fl.v[k].off + d->bus_offset);
+            fprintf(f, "%s 0x%08x %d %s %s.%s 0x%0*llx %s", sp->name,
+                    a - (u32)d->bus_offset,
                     n->size, fl.v[k].name, sp->name, fl.v[k].path,
                     n->size / 4, (unsigned long long)n->reset, n->acc);
             struct rf_reg *r = sp->base >= 0xE0000000u ? 0 : reg_at(m, a, 1);
@@ -1037,6 +1042,9 @@ const char *svd_search(const char *name)
     static char buf[1024];
     if (svd_dfp) {
         snprintf(buf, sizeof buf, "%s/atdf/%s", svd_dfp, name);
+        if (readable(buf))
+            return buf;
+        snprintf(buf, sizeof buf, "%s/edc/%s", svd_dfp, name);
         if (readable(buf))
             return buf;
         snprintf(buf, sizeof buf, "%s/%s", svd_dfp, name);

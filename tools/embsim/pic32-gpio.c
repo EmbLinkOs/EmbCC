@@ -1,5 +1,6 @@
 /* pic32-gpio.c -- a PIC32MZ's I/O ports, A to K, over the ATDF's GPIO
- * registers (ANSELx, TRISx, PORTx, LATx, ODCx, CNPUx, CNPDx...).
+ * registers (ANSELx, TRISx, PORTx, LATx, ODCx, CNPUx, CNPDx...); and a
+ * PIC24's, over the EDC's (ANSx for ANSELx, IOCPUx for CNPUx).
  *
  *   - Out of reset every pin is an input (TRISx all ones) and every pin
  *     that has an analog function is analog (ANSELx: its fields, which
@@ -147,11 +148,15 @@ void *pic32_gpio_create(struct sim *s, struct rf_periph *p)
         char l = (char)('A' + i + (i >= 8));    /* no port I */
 #define REG(f, name) snprintf(nm, sizeof nm, name "%c", l); q->f = rf_reg(p, nm)
         REG(ansel, "ANSEL");
+        if (!q->ansel)
+            REG(ansel, "ANS");                  /* a PIC24's */
         REG(tris, "TRIS");
         REG(port, "PORT");
         REG(lat, "LAT");
         REG(odc, "ODC");
         REG(cnpu, "CNPU");
+        if (!q->cnpu)
+            REG(cnpu, "IOCPU");                 /* a PIC24's */
 #undef REG
         if (!q->port || !q->tris || !q->lat) {
             q->port = 0;

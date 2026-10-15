@@ -91,6 +91,8 @@ const struct model_type *model_find(const char *name);
  * .atdf is Microchip's device file (atdf.c) */
 struct svdmap *svdmap_create(struct sim *s, const char *path);
 struct svd_device *atdf_load(const char *path);
+/* and a file named .PIC is a 16-bit part's EDC file (edc.c) */
+struct svd_device *edc_load(const char *path);
 void svdmap_add(struct sim *s, struct svdmap *m);
 /* the board's models over them */
 void svdmap_models(struct sim *s, struct svdmap *m,

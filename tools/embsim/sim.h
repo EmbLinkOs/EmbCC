@@ -298,7 +298,7 @@ struct rx_port {
 /* What a board wires to its part's pins, beyond the part: LEDs and
  * buttons on the GPIO, voltages on the analog inputs, a display on a
  * parallel bus. The part's peripheral models call these (each may be
- * 0); the board's device fills them in (pic32-boards.c). */
+ * 0); the board's device fills them in (pic-boards.c). */
 struct board_io {
     void *ctx;
     /* a pin's driven level changed (port 0 is A): 1 high, 0 low, -1 let
@@ -311,6 +311,9 @@ struct board_io {
     /* a parallel master port's write and read cycles */
     void (*bus_write)(void *ctx, u32 addr, u32 data);
     u32 (*bus_read)(void *ctx, u32 addr);
+    /* a byte SPI unit n (1 up) exchanges as master: what the slave on its
+     * lines sends back, or -1 when none answers */
+    int (*spi)(void *ctx, int unit, int out);
     /* --set NAME=VALUE: 0, or -1 when the board has no such input */
     int (*set)(void *ctx, const char *name, const char *value);
     /* the run ended: what the board shows (its display) */
@@ -362,7 +365,7 @@ struct sim {
     int rx_on;
     /* the record of the run's inputs, or its replay (record.c), or 0 */
     struct rec *rec;
-    /* what the board has outside the part (pic32-boards.c's), or zeros */
+    /* what the board has outside the part (pic-boards.c's), or zeros */
     struct board_io io;
 };
 

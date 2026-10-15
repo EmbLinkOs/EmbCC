@@ -449,6 +449,7 @@ struct svd_device *atdf_load(const char *path)
     d->width = 32;
     d->aub = 8;
     d->clr_set_inv = d->cpu && !strcmp(d->cpu, "MIPS");
+    d->holes_zero = d->clr_set_inv;
     const struct xnode *per = svd_xfind(dev, "peripherals");
     for (int i = 0; i < svd_xnkid(per); i++) {
         const struct xnode *mod = svd_xkid(per, i);

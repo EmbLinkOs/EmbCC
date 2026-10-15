@@ -23,6 +23,7 @@
 
 #include "analysis.h"
 #include "sim.h"
+#include "pic24.h"
 #include "svd-map.h"
 
 static u32 parse_size(const char *s)
@@ -303,6 +304,10 @@ int main(int argc, char **argv)
     sim_load(s, ram_size, image);
     if ((nsu || stk_embrt) && !stk_report)
         die("--stack-su and --stack-embrt are for --stack-report");
+    if (pic24_is(s->cpu) && (coverage || profiling || stk_report || stk_limit ||
+                             fault_report))
+        die("--coverage, --profile, --stack-report and --fault-report do not "
+            "follow the PIC24 core yet");
     if (coverage || profiling || stk_report || stk_limit || fault_report ||
         input || record || rp) {
         struct analysis *an = an_create(s, profiling || stk_report || stk_limit ||

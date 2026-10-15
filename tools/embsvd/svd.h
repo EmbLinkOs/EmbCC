@@ -93,6 +93,12 @@ struct svd_device {
     int clr_set_inv;
     unsigned long long *sci_at;
     int nsci;
+    /* EmbSim's: where the file's addresses are on its bus (a PIC24's data
+     * space is above its program memory there: EmbSim's EDC reader sets
+     * it), and whether the space between registers reads as 0 and ignores
+     * writes, as a PIC's SFR space does, instead of faulting */
+    unsigned long long bus_offset;
+    int holes_zero;
     int num_irq;
     struct svd_periph *p;
     int np;

@@ -1,6 +1,6 @@
-/* pic32-boards.c -- the boards around a PIC32: what is wired to the
- * part's pins (struct board_io), each board a table of LEDs and buttons,
- * and the Explorer 16/32's sensors and LCD.
+/* pic-boards.c -- the boards around a PIC32 or a PIC24: what is wired
+ * to the part's pins (struct board_io), each board a table of LEDs and
+ * buttons, and the Explorer 16/32's sensors, LCD and serial EEPROM.
  *
  * Microchip's Explorer 16/32 (DM240001-3) with the PIC32MZ EF plug-in
  * module (MA320019). The pins are the PIM's: its information sheet maps
@@ -20,6 +20,25 @@
  *   - the USB-UART is whichever UART the program uses: every UART's
  *     output is the run's stdout (pic32-uart.c).
  *
+ * The Explorer 16/32 with the PIC24FJ1024GB610 plug-in module (MA240023):
+ * the board's schematic (03-01872, "Explorer 16/32 Development Board",
+ * revision 6.3) names the socket pin of each part, and the PIM connects
+ * the PIC24FJ1024GB610's pins to the socket one to one but for the
+ * exceptions its information sheet lists (DS50002423), with its jumpers
+ * in their USB position (J1-J4 1-2):
+ *   - LEDs D3-D10 on socket pins 17, 38, 58-61, 91, 92: RA0-RA7;
+ *   - S3 (pin 83) RD6, S4 (80) RD13, S5 (92) RA7 (with D10), S6 (84) RD7,
+ *     pulled up by the board;
+ *   - the potentiometer on pin 20, AN5 (RB5); the TC1047A on pin 21, AN4
+ *     (RB4);
+ *   - the LCD's RS on pin 44, PMA0 (RB15), E on 81 PMWR (RD4), R/W on 82
+ *     PMRD (RD5), data on PMD0-7 (RE0-RE7): the EPMP;
+ *   - the 25LC256 serial EEPROM: SCK on pin 10 (RG6, RP21), SI on pin 12
+ *     (RG8, RP19), SO on pin 11 (RG7, RP26), CS on pin 79, which J1 gives
+ *     the part's RG0. It answers the SPI unit whose SCKxOUT and SDOx the
+ *     Peripheral Pin Select puts on RP21 and RP19 while RG0 drives low;
+ *     the part reads it on the unit whose SDIx input is RP26.
+ *
  * Microchip's Curiosity PIC32MZ EF 2.0 (DM320209, a PIC32MZ2048EFM144),
  * by Harmony 3's BSP for it (bsp/boards/pic32mz_ef_curiosity_v2):
  *   - LED1 RJ7, LED2 RK7, LED3 RJ3, and the RGB LED's red RB7, green RB8
@@ -35,6 +54,11 @@
  * on the Explorer temperature=DEGREES (25 by default) and pot=VOLTS or
  * pot=PERCENT% (half way by default).
  *
+ * The serial EEPROM, a 25LC256 (32 KiB, erased to 0xFF at power-on):
+ * READ, WRITE (a 64-byte page, written when CS rises, then 5 ms busy:
+ * STATUS.WIP), WREN, WRDI, RDSR, WRSR (BP1, BP0: the upper quarter, half
+ * or all protected), as its data sheet (DS21822) has them.
+ *
  * The LCD controller: the HD44780's instruction set -- clear, home,
  * entry mode (increment or decrement, display shift), display on/off,
  * cursor and display shift, function set (8 or 4-bit interface, one or
@@ -46,7 +70,9 @@
 #include <string.h>
 
 #include "devices.h"
+#include "pic24.h"
 #include "pic32.h"
+#include "svd-map.h"
 
 enum { PA = 0, PB, PC, PD, PE, PF, PG, PH, PJ, PK };
 
@@ -63,6 +89,9 @@ struct board {
     const struct button *button;
     int nbutton;
     int explorer;                   /* the TC1047A, the potentiometer, the LCD */
+    int an_temp, an_pot;            /* their analog inputs */
+    int eeprom;                     /* the 25LC256, on the PIC24 PIM's pins */
+    const char *no_s3;              /* why S3 is not there, or 0 */
 };
 
 static const struct led e16_leds[] = {
@@ -72,6 +101,15 @@ static const struct led e16_leds[] = {
 };
 static const struct button e16_buttons[] = {
     { PF, 8, "S4", 1 }, { PA, 7, "S5", 1 }, { PD, 13, "S6", 1 },
+};
+static const struct led e16p24_leds[] = {
+    { PA, 0, "D3", 0 }, { PA, 1, "D4", 0 }, { PA, 2, "D5", 0 },
+    { PA, 3, "D6", 0 }, { PA, 4, "D7", 0 }, { PA, 5, "D8", 0 },
+    { PA, 6, "D9", 0 }, { PA, 7, "D10", 0 },
+};
+static const struct button e16p24_buttons[] = {
+    { PD, 6, "S3", 1 }, { PD, 13, "S4", 1 }, { PA, 7, "S5", 1 },
+    { PD, 7, "S6", 1 },
 };
 static const struct led cur_leds[] = {
     { PJ, 7, "LED1", 1 }, { PK, 7, "LED2", 1 }, { PJ, 3, "LED3", 1 },
@@ -84,9 +122,12 @@ static const struct button cur_buttons[] = {
 
 #define N(a) (int)(sizeof a / sizeof a[0])
 static const struct board boards_[] = {
-    { "explorer16-32", e16_leds, N(e16_leds), e16_buttons, N(e16_buttons), 1 },
+    { "explorer16-32", e16_leds, N(e16_leds), e16_buttons, N(e16_buttons),
+      1, 4, 45, 0, "S3 is not wired to the PIC32MZ EF plug-in module" },
+    { "explorer16-32-pic24", e16p24_leds, N(e16p24_leds), e16p24_buttons,
+      N(e16p24_buttons), 1, 4, 5, 1, 0 },
     { "curiosity-pic32mz-ef-2", cur_leds, N(cur_leds), cur_buttons,
-      N(cur_buttons), 0 },
+      N(cur_buttons), 0, 0, 0, 0, 0 },
 };
 
 #define NLED 8
@@ -104,6 +145,23 @@ struct lcd {
     int drawn;                      /* written since then */
 };
 
+/* the 25LC256 */
+#define EE_SIZE 0x8000
+#define EE_PAGE 64
+struct eeprom {
+    u8 mem[EE_SIZE];
+    int selected;                   /* CS low */
+    int nbytes;                     /* bytes since it was selected */
+    u8 cmd;
+    u16 addr;
+    int wel;                        /* write enabled */
+    u8 bp;                          /* STATUS's BP1, BP0 and WPEN */
+    u8 page[EE_PAGE];
+    u64 page_set;                   /* the page's bytes written */
+    u8 wrsr;                        /* WRSR's byte */
+    u64 busy_until;                 /* the write cycle's end (cycles) */
+};
+
 struct pboard {
     struct sim *s;
     const struct board *b;
@@ -111,11 +169,18 @@ struct pboard {
     int pressed[NBUTTON];
     double temperature, pot;
     struct lcd lcd;
+    struct eeprom *ee;
 };
+
+/* the core's clock: the time the board reports */
+static double hz(const struct pboard *x)
+{
+    return pic24_is(x->s->cpu) ? (double)pic24_fcy(x->s) : PIC32_SYSCLK;
+}
 
 static double now_ms(const struct pboard *x)
 {
-    return (double)x->s->cycles / (PIC32_SYSCLK / 1000.0);
+    return (double)x->s->cycles / (hz(x) / 1000.0);
 }
 
 static void say(const struct pboard *x, const char *fmt, const char *a,
@@ -135,10 +200,14 @@ static char port_letter(int port)
     return (char)('A' + port + (port >= 8));
 }
 
+static void ee_select(struct pboard *x, int low);
+
 static void pin_out(void *ctx, int port, int bit, int level)
 {
     struct pboard *x = ctx;
     char pin[8];
+    if (x->ee && port == PG && bit == 0)        /* the EEPROM's CS, by J1 */
+        ee_select(x, level == 0);
     for (int i = 0; i < x->b->nled; i++) {
         const struct led *l = &x->b->led[i];
         int on = l->active_low ? level == 0 : level == 1;
@@ -170,9 +239,9 @@ static double analog(void *ctx, int n)
     struct pboard *x = ctx;
     if (!x->b->explorer)
         return -1;
-    if (n == 4)                     /* TC1047A */
+    if (n == x->b->an_temp)         /* TC1047A */
         return 0.5 + 0.01 * x->temperature;
-    if (n == 45)                    /* R6 */
+    if (n == x->b->an_pot)          /* R6 */
         return x->pot;
     return -1;
 }
@@ -321,6 +390,144 @@ static u32 pmp_read(void *ctx, u32 addr)
     return d;
 }
 
+/* ---- the serial EEPROM ------------------------------------------------------ */
+
+enum { EE_WRSR = 1, EE_WRITE = 2, EE_READ = 3, EE_WRDI = 4, EE_RDSR = 5,
+       EE_WREN = 6 };
+
+static int ee_busy(const struct pboard *x)
+{
+    return x->s->cycles < x->ee->busy_until;
+}
+
+static u8 ee_status(const struct pboard *x)
+{
+    const struct eeprom *e = x->ee;
+    return (u8)(e->bp | (e->wel ? 2 : 0) | (ee_busy(x) ? 1 : 0));
+}
+
+/* the protected addresses BP1:BP0 give: none, the upper quarter, half,
+ * all */
+static int ee_protected(const struct eeprom *e, u32 a)
+{
+    switch (e->bp >> 2 & 3) {
+    case 1: return a >= 0x6000;
+    case 2: return a >= 0x4000;
+    case 3: return 1;
+    }
+    return 0;
+}
+
+/* CS falls (low 1) or rises: a write's page goes in as it rises, and the
+ * write cycle begins */
+static void ee_select(struct pboard *x, int low)
+{
+    struct eeprom *e = x->ee;
+    if (low == e->selected)
+        return;
+    e->selected = low;
+    if (low) {
+        e->nbytes = 0;
+        e->page_set = 0;
+        return;
+    }
+    if (e->nbytes < 1 || ee_busy(x))
+        return;
+    if (e->cmd == EE_WRITE && e->wel && e->nbytes > 3 && e->page_set) {
+        u32 base = e->addr & ~(u32)(EE_PAGE - 1);
+        for (int k = 0; k < EE_PAGE; k++)
+            if ((e->page_set >> k & 1) && !ee_protected(e, base + (u32)k))
+                e->mem[base + (u32)k] = e->page[k];
+        e->wel = 0;
+        e->busy_until = x->s->cycles + (u64)(hz(x) * 0.005);
+    } else if (e->cmd == EE_WRSR && e->wel && e->nbytes > 1) {
+        e->bp = e->wrsr & 0x8c;
+        e->wel = 0;
+        e->busy_until = x->s->cycles + (u64)(hz(x) * 0.005);
+    }
+}
+
+/* a byte in on SI; what goes out on SO (0xff while it drives nothing) */
+static int ee_byte(struct pboard *x, int in)
+{
+    struct eeprom *e = x->ee;
+    int k = e->nbytes++, out = 0xff;
+    if (k == 0) {
+        e->cmd = (u8)in;
+        if (ee_busy(x) && in != EE_RDSR)
+            e->cmd = 0;                         /* only RDSR while busy */
+        if (e->cmd == EE_WREN)
+            e->wel = 1;
+        else if (e->cmd == EE_WRDI)
+            e->wel = 0;
+        return out;
+    }
+    switch (e->cmd) {
+    case EE_RDSR:
+        return ee_status(x);
+    case EE_WRSR:
+        if (k == 1)
+            e->wrsr = (u8)in;
+        return out;
+    case EE_READ:
+    case EE_WRITE:
+        if (k == 1) {
+            e->addr = (u16)((in & 0x7f) << 8);
+            return out;
+        }
+        if (k == 2) {
+            e->addr = (u16)(e->addr | (u8)in);
+            return out;
+        }
+        if (e->cmd == EE_READ) {
+            out = e->mem[e->addr];
+            e->addr = (u16)((e->addr + 1) & (EE_SIZE - 1));
+            return out;
+        }
+        /* within the page, wrapping */
+        {
+            u32 off = (e->addr + (u32)(k - 3)) & (EE_PAGE - 1);
+            e->page[off] = (u8)in;
+            e->page_set |= 1ull << off;
+        }
+        return out;
+    }
+    return out;
+}
+
+/* the SPI unit whose clock and data the PPS puts on the EEPROM's pins:
+ * SCKxOUT on RP21, SDOx on RP19 (RPOR10's and RPOR9's high fields); and
+ * the unit reading RP26 (SDIxR) */
+static int pps_out(struct pboard *x, int rp)
+{
+    struct rf_periph *p = x->s->svd ? rf_periph(x->s->svd, "PPS") : 0;
+    char nm[16];
+    snprintf(nm, sizeof nm, "RPOR%d", rp / 2);
+    struct rf_reg *r = p ? rf_reg(p, nm) : 0;
+    return r ? (int)(r->value >> (rp & 1 ? 8 : 0) & 0x3f) : 0;
+}
+
+static int pps_in(struct pboard *x, const char *reg)
+{
+    struct rf_periph *p = x->s->svd ? rf_periph(x->s->svd, "PPS") : 0;
+    struct rf_reg *r = p ? rf_reg(p, reg) : 0;
+    return r ? (int)(r->value & 0x3f) : 0x3f;
+}
+
+static int spi(void *ctx, int unit, int out)
+{
+    struct pboard *x = ctx;
+    static const int sdo[4] = { 0, 7, 10, 23 }, sck[4] = { 0, 8, 11, 24 };
+    static const char *const sdi[4] = { 0, "RPINR20", "RPINR22", "RPINR28" };
+    if (!x->ee || unit < 1 || unit > 3)
+        return -1;
+    if (pps_out(x, 21) != sck[unit] || pps_out(x, 19) != sdo[unit] ||
+        !x->ee->selected)
+        return -1;
+    int b = ee_byte(x, out);
+    return pps_in(x, sdi[unit]) == 26 ? b : -1;
+}
+
 /* ---- the user's inputs, and the end --------------------------------------- */
 
 /* an input changed from outside: a port's next read sees it */
@@ -362,8 +569,8 @@ static int set(void *ctx, const char *name, const char *value)
             die("--set pot=%s: the potentiometer gives 0 to 3.3 V", value);
         return 0;
     }
-    if (!strcmp(name, "S3"))
-        die("--set S3: S3 is not wired to the PIC32MZ EF plug-in module");
+    if (!strcmp(name, "S3") && x->b->no_s3)
+        die("--set S3: %s", x->b->no_s3);
     return -1;
 }
 
@@ -395,20 +602,25 @@ static void board_reset(void *ctx)
     l->shown[0][16] = l->shown[1][16] = 0;
     for (int i = 0; i < NLED; i++)
         x->led[i] = 0;
+    if (x->ee) {                    /* its memory keeps what was written */
+        x->ee->selected = 0;
+        x->ee->wel = 0;
+        x->ee->busy_until = 0;
+    }
 }
 
-const struct dev_ops pic32_board_ops = {
+const struct dev_ops pic_board_ops = {
     "pic32-board", 0, 0, board_reset, 0, 0,
 };
 
-void *pic32_board_create(struct sim *s, const struct dev_desc *d)
+void *pic_board_create(struct sim *s, const struct dev_desc *d)
 {
     const struct board *b = 0;
     for (int i = 0; i < N(boards_); i++)
         if (!strcmp(boards_[i].name, d->type))
             b = &boards_[i];
     if (!b)
-        die("no PIC32 board named %s", d->type);
+        die("no PIC board named %s", d->type);
     struct pboard *x = calloc(1, sizeof *x);
     if (!x)
         die("out of memory");
@@ -416,6 +628,12 @@ void *pic32_board_create(struct sim *s, const struct dev_desc *d)
     x->b = b;
     x->temperature = 25.0;
     x->pot = 1.65;
+    if (b->eeprom) {
+        x->ee = calloc(1, sizeof *x->ee);
+        if (!x->ee)
+            die("out of memory");
+        memset(x->ee->mem, 0xff, sizeof x->ee->mem);
+    }
     board_reset(x);
     s->io.ctx = x;
     s->io.pin_out = pin_out;
@@ -425,6 +643,8 @@ void *pic32_board_create(struct sim *s, const struct dev_desc *d)
         s->io.bus_write = pmp_write;
         s->io.bus_read = pmp_read;
     }
+    if (x->ee)
+        s->io.spi = spi;
     s->io.set = set;
     s->io.end = end;
     return x;

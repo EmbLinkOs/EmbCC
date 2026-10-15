@@ -442,15 +442,18 @@ EMBSIM_SRCS := tools/embsim/main.c tools/embsim/run.c tools/embsim/bus.c \
                tools/embsim/pic32-cru.c tools/embsim/pic32-tmr.c \
                tools/embsim/pic32-gpio.c tools/embsim/pic32-uart.c \
                tools/embsim/pic32-pmp.c tools/embsim/pic32-adc.c \
-               tools/embsim/pic32-boards.c tools/embsim/ieee754.c \
-               tools/embsim/mips-fpu.c $(EMBSIM_NET)
+               tools/embsim/pic-boards.c tools/embsim/ieee754.c \
+               tools/embsim/mips-fpu.c tools/embsim/edc.c \
+               tools/embsim/pic24.c tools/embsim/pic24-intc.c \
+               tools/embsim/pic24-adc.c tools/embsim/pic24-epmp.c \
+               tools/embsim/pic24-spi.c $(EMBSIM_NET)
 EMBSIM_HDRS := tools/embsim/sim.h tools/embsim/cortexm.h tools/embsim/riscv.h \
                tools/embsim/avr.h \
                tools/embsim/devices.h tools/embsim/net.h tools/bench/cost.h \
                tools/embsim/svd-map.h tools/embsvd/svd.h \
                tools/embsim/image.h tools/embsim/analysis.h \
                tools/embsim/disasm.h tools/embsim/mips.h tools/embsim/pic32.h \
-               tools/embsim/ieee754.h
+               tools/embsim/ieee754.h tools/embsim/pic24.h
 # Optimized, unlike the other tools: a simulator's speed is the tests'
 # and the user's time, and -O2 runs a busy loop 2.5 (M3) to 3.6 (AVR)
 # times as fast as no -O. -g stays (it is in CFLAGS); `make EMBSIM_OPT=`

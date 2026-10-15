@@ -17,6 +17,8 @@ struct cpu *avr_create(struct sim *s, const char *model,
 int avr_is(const struct cpu *c);
 struct cpu *mips_create(struct sim *s, const char *model,
                         const struct board_desc *bd);
+struct cpu *pic24_create(struct sim *s, const char *model,
+                         const struct board_desc *bd);
 
 /* devices */
 extern const struct dev_ops pl011_ops, cmsdk_uart_ops, nrf51_uart_ops;
@@ -63,9 +65,22 @@ void *pic32_uart_create(struct sim *s, struct rf_periph *p);
 void *pic32_pmp_create(struct sim *s, struct rf_periph *p);
 void *pic32_adc_create(struct sim *s, struct rf_periph *p);
 
-/* the PIC32 boards' own: LEDs, buttons, the Explorer 16/32's sensors and
- * LCD (a dev_desc's type names the board) */
-extern const struct dev_ops pic32_board_ops;
-void *pic32_board_create(struct sim *s, const struct dev_desc *d);
+/* a PIC24's peripheral models, over its EDC's registers (pic24.h) */
+extern const struct dev_ops pic24_intc_ops, pic24_adc_ops, pic24_epmp_ops;
+extern const struct dev_ops pic24_spi_ops;
+void *pic24_intc_create(struct sim *s, struct rf_periph *p);
+void *pic24_adc_create(struct sim *s, struct rf_periph *p);
+void *pic24_epmp_create(struct sim *s, struct rf_periph *p);
+void *pic24_spi_create(struct sim *s, struct rf_periph *p);
+/* the hardware sets interrupt irq's flag (IFSx), as the EDC numbers it;
+ * the flag; an interrupt's number by the EDC's name (T1, ADC1), or -1 */
+void pic24_irq(struct sim *s, int irq);
+int pic24_irq_flag(struct sim *s, int irq);
+int pic24_irq_named(struct sim *s, const char *name);
+
+/* the PIC32 and PIC24 boards' own: LEDs, buttons, the Explorer 16/32's
+ * sensors, LCD and EEPROM (a dev_desc's type names the board) */
+extern const struct dev_ops pic_board_ops;
+void *pic_board_create(struct sim *s, const struct dev_desc *d);
 
 #endif
