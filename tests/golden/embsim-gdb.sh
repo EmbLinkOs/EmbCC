@@ -80,7 +80,7 @@ command -v "$GDB" >/dev/null 2>&1 || { echo "skipped: no gdb"; exit 0; }
 command -v "$QA" >/dev/null 2>&1 || { echo "skipped: no $QA to referee with"; exit 0; }
 [ -x "$EMBSIM" ] || fail "$EMBSIM is not built (make embsim)"
 
-port=$(( 31000 + ($$ % 1000) * 40 ))     # 36 used
+port=$(( 31000 + ($$ % 800) * 40 ))      # 36 used, below 65536
 next_port() { port=$((port + 1)); ports="$ports $port"; }
 
 # bounded SECONDS OUT CMD...: CMD with its output in OUT (its input from
