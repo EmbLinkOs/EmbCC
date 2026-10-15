@@ -7752,6 +7752,16 @@ void sema_check(struct unit *u)
     check_aliases(u);
     check_cmse_entries(u);
     merge_globals(u);
+    /* `int a[];` that nothing sized: one element, as C17 6.9.2p5 says
+     * and GCC does, with its warning */
+    for (struct global *g = u->globals; g; g = g->next)
+        if (!g->absorbed && g->defined && !g->is_extern && !g->has_init &&
+            g->ty->kind == TY_ARRAY && g->ty->count == 0 &&
+            !g->ty->zero_len && !g->ty->vla_len) {
+            diag_warn_at(g->file ? g->file : u->file, g->line, 0,
+                         "array '%s' assumed to have one element", g->name);
+            g->ty = ty_array_sized(g->ty->pointee, 1);
+        }
     check_econst_names(u);
     lower_globals(u);
 

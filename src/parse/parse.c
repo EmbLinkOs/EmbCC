@@ -5748,7 +5748,14 @@ static struct global *parse_global(struct parser *ps, struct type *ty,
      * initializer follows — it supplies the count — so defer that check. */
     int size_from_init = g->ty->kind == TY_ARRAY && g->ty->count == 0 &&
                          has_init;
-    if (ty_incomplete(g->ty) && !is_extern && !size_from_init)
+    /* `int a[];` with no initializer is a tentative definition that a
+     * later declaration may size; sema gives it one element if none does
+     * (C17 6.9.2p5) */
+    int tentative_open = g->ty->kind == TY_ARRAY && g->ty->count == 0 &&
+                         !g->ty->zero_len && !g->ty->vla_len && !has_init &&
+                         !ty_incomplete(g->ty->pointee);
+    if (ty_incomplete(g->ty) && !is_extern && !size_from_init &&
+        !tentative_open)
         parse_error_line(ps, line,
                    "'%s' has incomplete type %s", name, ty_name(g->ty));
     if (has_init) {
