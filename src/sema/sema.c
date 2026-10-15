@@ -2110,6 +2110,122 @@ static int asm_same_lvalue(const struct expr *a, const struct expr *b)
  * accumulator so, `"=r"(llr.w32[0]), "=r"(llr.w32[1]) : ... "0"(llr.w32[0]),
  * "1"(llr.w32[1])`. An input naming some OTHER value is refused by name:
  * it would need a copy into the output first, which nothing here makes. */
+/* GCC's matching constraint, an input "N" that must be in output N's
+ * register: its value goes in, and N's comes out. On every target it is
+ * rewritten into the in-out form each backend already lowers --
+ *   "=r"(x) ... "0"(x)   ->  "+r"(x)
+ *   "=r"(y) ... "0"(v)   ->  t = v;  "+r"(t);  y = t;   (t a temporary)
+ * -- the input leaving the operand list and the template's %N numbers
+ * following it (a reference to the input becomes one to output N).
+ * Thumb keeps its own form of the first (asm_tie_inputs), so there only
+ * the second is rewritten. Returns the asm statement, which in the
+ * second case is the middle of the block *s became. */
+static void asm_renumber(struct asm_stmt *a, const int *map)
+{
+    if (!a->tmpl)
+        return;
+    size_t len = strlen(a->tmpl);
+    char *o = xmalloc(len * 2 + 16), *q = o;
+    for (const char *p = a->tmpl; *p; ) {
+        if (*p != '%') {
+            *q++ = *p++;
+            continue;
+        }
+        *q++ = *p++;
+        if (*p == '%' || *p == '=' || *p == '[') {
+            if (*p == '[')
+                while (*p && *p != ']')
+                    *q++ = *p++;
+            if (*p)
+                *q++ = *p++;
+            continue;
+        }
+        while ((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z'))
+            *q++ = *p++;              /* a modifier: %w0, %c1, %H2 */
+        if (*p < '0' || *p > '9')
+            continue;
+        int k = 0;
+        while (*p >= '0' && *p <= '9')
+            k = k * 10 + (*p++ - '0');
+        q += sprintf(q, "%d", map[k]);
+    }
+    *q = 0;
+    a->tmpl = o;
+}
+
+static struct stmt *asm_untie(struct unit *u, struct stmt *s)
+{
+    struct asm_stmt *a = s->asm_s;
+    if (a->is_basic || !a->nin)
+        return s;
+    int nops = a->nout + a->nin, any = 0;
+    int *map = xmalloc((size_t)(nops > 0 ? nops : 1) * sizeof *map);
+    for (int k = 0; k < nops; k++)
+        map[k] = k;
+    struct stmt *pre = NULL, *post = NULL, **pret = &pre, **postt = &post;
+    int keep = 0;
+    for (int i = 0; i < a->nin; i++) {
+        const char *c = a->in[i].constraint;
+        int n = 0, k = 0;
+        for (; c[k] >= '0' && c[k] <= '9'; k++)
+            n = n * 10 + (c[k] - '0');
+        int tied = k > 0 && !c[k];
+        int same = tied && n < a->nout &&
+                   asm_same_lvalue(a->in[i].expr, a->out[n].expr);
+        if (tied && (n >= a->nout || (a->out[n].constraint[0] != '=' &&
+                                      a->out[n].constraint[0] != '+')))
+            sema_error_at(u, s->line, s->col, "asm input constraint \"%s\" "
+                          "names no output", c);
+        if (!tied || (same && target_get() == TARGET_THUMB)) {
+            map[a->nout + i] = a->nout + keep;
+            a->in[keep++] = a->in[i];
+            continue;
+        }
+        /* the output becomes in-out, of the input's value */
+        struct asm_operand *out = &a->out[n];
+        size_t cl = strlen(out->constraint);
+        char *pc = xmalloc(cl + 1);
+        memcpy(pc, out->constraint, cl + 1);
+        pc[0] = '+';
+        out->constraint = pc;
+        if (!same) {
+            struct type *ty = ty_unqual(out->expr->ty);
+            int t = scope_add(g_cx_sc, "<asm tied>", ty, NULL);
+            struct stmt *ps = xcalloc(1, sizeof *ps);
+            ps->kind = STMT_EXPR;
+            ps->line = s->line;
+            ps->expr = cx_assign(cx_var(t, s->line),
+                                 convert_assign(u, a->in[i].expr, ty,
+                                                "an asm input"));
+            *pret = ps;
+            pret = &ps->next;
+            struct stmt *qs = xcalloc(1, sizeof *qs);
+            qs->kind = STMT_EXPR;
+            qs->line = s->line;
+            qs->expr = cx_assign(out->expr, cx_var(t, s->line));
+            *postt = qs;
+            postt = &qs->next;
+            out->expr = cx_var(t, s->line);
+        }
+        map[a->nout + i] = n;
+        any = 1;
+    }
+    a->nin = keep;
+    if (any)
+        asm_renumber(a, map);
+    if (!pre)
+        return s;
+    /* *s becomes the block { pre; asm; post } */
+    struct stmt *as = xcalloc(1, sizeof *as);
+    *as = *s;
+    as->next = post;
+    *pret = as;
+    s->kind = STMT_BLOCK;
+    s->asm_s = NULL;
+    s->body = pre;
+    return as;
+}
+
 static void asm_tie_inputs(struct unit *u, struct stmt *s)
 {
     struct asm_stmt *a = s->asm_s;
@@ -6486,13 +6602,17 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                                "an asm output operand must be an lvalue");
                 need_modifiable(u, a->out[i].expr, s->line, s->col,
                                 "an asm output");
-                a->out[i].reg = asm_resolve_reg(u, s, &a->out[i], 1);
             }
-            for (int i = 0; i < a->nin; i++) {
+            for (int i = 0; i < a->nin; i++)
                 check_expr(u, f, sc, a->in[i].expr);
-                a->in[i].reg = asm_resolve_reg(u, s, &a->in[i], 0);
-            }
-            asm_tie_inputs(u, s);
+            /* matching constraints into in-out operands, before any
+             * target reads a constraint */
+            struct stmt *as = asm_untie(u, s);
+            for (int i = 0; i < a->nout; i++)
+                a->out[i].reg = asm_resolve_reg(u, as, &a->out[i], 1);
+            for (int i = 0; i < a->nin; i++)
+                a->in[i].reg = asm_resolve_reg(u, as, &a->in[i], 0);
+            asm_tie_inputs(u, as);
             /* the template is assembled in irgen, once -2 (allocatable)
              * operands have been assigned registers */
             break;
