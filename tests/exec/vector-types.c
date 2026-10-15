@@ -100,8 +100,8 @@ int main(void)
     ch += 10;
     if (ch[0] != 4 || ch[5] != 9 || ch[6] != 10)
         bad |= 64;
-    /* a scalar shifted by a vector is a lane first: (signed char)0x1f0 */
-    int n = 0x1f0;
+    /* a scalar shifted by a vector is a lane first: 0xf0 is -16 */
+    unsigned char n = 0xf0;
     SC sc = {1, 2, 3, 4};
     SC r = n >> sc;
     if (r[0] != -8 || r[1] != -4 || r[3] != -1)

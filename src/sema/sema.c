@@ -2327,7 +2327,8 @@ static void vec_binop(struct unit *u, struct expr *e)
                           vec_opname(op), ty_name(L->ty), ty_name(R->ty));
     } else {
         struct expr *s = lv ? R : L;
-        if (shift ? !ty_is_integer(s->ty) : !vec_scalar_fits(s, elem))
+        /* a shift's count is any integer; a scalar shifted is a lane */
+        if (shift && lv ? !ty_is_integer(s->ty) : !vec_scalar_fits(s, elem))
             sema_error_at(u, e->line, e->col,
                           "conversion of scalar %s to vector %s involves "
                           "truncation", ty_name(s->ty), ty_name(vt));
