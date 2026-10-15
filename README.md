@@ -157,3 +157,10 @@ cc hello.o -o hello
   installing, and first programs on each family of boards.
 - [Contributing](docs/internals/contributing.md): the rules for changing
   the toolchain, and the tests a change needs.
+
+## License
+
+EmbCC is licensed under the [Apache License, Version 2.0](LICENSE).
+[NOTICE](NOTICE) names the code by others it includes, under their own
+permissive notices: Sun's fdlibm in the C library's math, and the GDB
+target descriptions EmbSim serves.

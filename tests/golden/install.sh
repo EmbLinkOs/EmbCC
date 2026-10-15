@@ -78,6 +78,12 @@ for f in embcc.cmake Compiler/EmbCC.cmake Compiler/EmbCC-C.cmake \
         { echo "FAIL: make install left out share/embcc/cmake/$f"; exit 1; }
 done
 
+#    the license, and the notice of the code by others it includes
+for f in LICENSE NOTICE; do
+    cmp -s "$f" "$stage/usr/local/share/doc/embcc/$f" ||
+        { echo "FAIL: make install did not put $f in share/doc/embcc"; exit 1; }
+done
+
 #    `man embcc`: the page is printed from the option table, so it lists
 #    every EmbCC spelling, and mandoc (where there is one) finds nothing
 #    wrong with the roff.

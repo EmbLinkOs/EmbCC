@@ -198,8 +198,10 @@ git push
 
 ## License
 
-The repository has no LICENSE file yet. The Homebrew formula declares no
-license, the RPM spec says `Unspecified` and the PKGBUILD says `unknown`.
-A package without a license cannot enter Homebrew's core tap or a
-distribution's own repositories. When the repository has one, put its
-SPDX identifier in all three recipes.
+EmbCC is licensed under the Apache License, Version 2.0 (`LICENSE`, SPDX
+`Apache-2.0`); `NOTICE` names the code by others it includes, under their
+own permissive notices. `make install` puts both in `share/doc/embcc/`,
+so every package carries them. The recipes declare the license: the
+Homebrew formula's `license`, the RPM spec's `License:` with `%license`,
+the PKGBUILD's `license=()` (and the files in `/usr/share/licenses/embcc/`),
+and the `.deb`'s `/usr/share/doc/embcc/copyright`.

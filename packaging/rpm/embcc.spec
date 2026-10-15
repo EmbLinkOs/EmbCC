@@ -22,9 +22,7 @@ Version:        1.0.0~m2.complete
 Release:        1%{?dist}
 Summary:        C and C++ compiler and toolchain for embedded systems
 
-# The repository has no LICENSE file yet; set this to its SPDX identifier
-# when it has one.
-License:        Unspecified
+License:        Apache-2.0
 URL:            https://github.com/EmbLinkOs/EmbCC
 Source0:        %{url}/archive/refs/tags/v%{upstream_version}.tar.gz#/EmbCC-%{upstream_version}.tar.gz
 
@@ -60,6 +58,8 @@ printf '#include <stdio.h>\nint main(void) { puts("ok"); return 0; }\n' > check.
 %{buildroot}%{_bindir}/embcc --target=thumbv7em-none-eabi -c check.c -o check.o
 
 %files
+%license LICENSE NOTICE
+%{_docdir}/embcc/
 %{_bindir}/emb*
 %{_prefix}/lib/embcc/
 %{_datadir}/embcc/

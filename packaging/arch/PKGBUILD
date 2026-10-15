@@ -15,9 +15,7 @@ pkgrel=1
 pkgdesc='C and C++ compiler and toolchain for embedded systems'
 arch=('x86_64' 'aarch64')
 url='https://github.com/EmbLinkOs/EmbCC'
-# The repository has no LICENSE file yet; set this to its SPDX identifier
-# when it has one.
-license=('unknown')
+license=('Apache-2.0')
 depends=('glibc')
 makedepends=('gcc' 'make')
 # The libraries under lib/embcc are for the targets EmbCC compiles for, not
@@ -39,4 +37,6 @@ package() {
     # One job: install's prerequisites are not ordered before its copying
     # step, so with -j it can copy before the libraries exist.
     make -j1 CFLAGS="-std=c99 $CFLAGS" DESTDIR="$pkgdir" PREFIX=/usr install
+    # (Arch's place for a package's license and its notices)
+    install -Dm644 LICENSE NOTICE -t "$pkgdir/usr/share/licenses/$pkgname/"
 }

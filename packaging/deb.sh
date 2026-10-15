@@ -53,6 +53,34 @@ if [ -n "$glibc" ]; then
 else
     depends=libc6
 fi
+# Debian's copyright file (DEP-5), beside the LICENSE and NOTICE that
+# make install put in the same directory
+mkdir -p "$root/usr/share/doc/embcc"
+cat > "$root/usr/share/doc/embcc/copyright" << EOF
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: EmbCC
+Source: https://github.com/EmbLinkOs/EmbCC
+
+Files: *
+Copyright: 2026 Téo Motsou and contributors
+License: Apache-2.0
+ On Debian systems, the full text of the Apache License, Version 2.0 is in
+ /usr/share/common-licenses/Apache-2.0, and in
+ /usr/share/doc/embcc/LICENSE.
+
+Files: lib/libc/src/math/fdlibm/*
+Copyright: 1993 Sun Microsystems, Inc.
+License: fdlibm
+ Permission to use, copy, modify, and distribute this software is freely
+ granted, provided that this notice is preserved.
+
+Files: tools/embsim/avr.c tools/embsim/riscv.c
+Copyright: 2018-2019 Free Software Foundation, Inc.
+License: FSFAP
+ Copying and distribution of this file, with or without modification, are
+ permitted in any medium without royalty provided the copyright notice and
+ this notice are preserved.
+EOF
 size=$(du -sk "$root/usr" | cut -f 1)
 
 cat > "$root/DEBIAN/control" << EOF

@@ -3,12 +3,10 @@
 # It is published in the tap EmbLinkOs/homebrew-embcc, as Formula/embcc.rb;
 # packaging/README.md says how. packaging/set-version.sh sets the url and
 # sha256 lines for a new release.
-#
-# The repository has no LICENSE file yet, so the formula declares no
-# license. Add `license "..."` with its SPDX identifier when it has one.
 class Embcc < Formula
   desc "C and C++ compiler and toolchain for embedded systems"
   homepage "https://github.com/EmbLinkOs/EmbCC"
+  license "Apache-2.0"
   url "https://github.com/EmbLinkOs/EmbCC/archive/refs/tags/v1.0.0-m2.complete.tar.gz"
   sha256 "0000000000000000000000000000000000000000000000000000000000000000"
   head "https://github.com/EmbLinkOs/EmbCC.git", branch: "main"
