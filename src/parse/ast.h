@@ -96,8 +96,10 @@ struct expr {
     int is_arrow;
     struct member *memb;
     int is_subscript;     /* EXPR_BINOP: the `+` of p[i] (a vector's lane) */
-    struct expr *args[MAX_PARAMS]; /* EXPR_CALL; lhs is the callee
-                           * expression (a VAR for direct calls) */
+    struct expr **args;   /* EXPR_CALL; lhs is the callee expression (a
+                           * VAR for direct calls). Allocated, at least four
+                           * and zeroed past nargs; an expr_dup has its own.
+                           * EXPR_COND's condition is args[0]. */
     int nargs;
     int atomic_mo;        /* EXPR_CALL of an atomic builtin: its memory
                            * order when sema could fold it, as 1 + the

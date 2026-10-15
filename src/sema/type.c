@@ -375,6 +375,7 @@ struct type *ty_func(struct type *ret, struct type **ptypes, int n,
     struct type *t = xcalloc(1, sizeof *t);
     t->kind = TY_FUNC;
     t->ret = ret;
+    t->ptypes = xcalloc((size_t)(n ? n : 1), sizeof *t->ptypes);
     for (int i = 0; i < n; i++)
         t->ptypes[i] = ptypes[i];
     t->nptypes = n;
