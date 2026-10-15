@@ -64,6 +64,27 @@ grep -q "R_ARM_ABS32 .*\.text + $(printf '%x' $((0x$helper)))" "$out/s.rel" || {
     echo "FAIL: tbl[0] does not hold helper with its Thumb bit:"; cat "$out/s.rel"; exit 1; }
 echo "topasm-directives: .weak, .type, .balign and .p2align, and Thumb functions have bit 0"
 
+# ---- wider than .text's sixteen: the section is aligned as strictly ------
+# An ESP32-C3's vector table is `.balign 256` (its mtvec ignores the low
+# eight bits). The block was placed at 256 in .text, and .text stayed
+# sixteen-aligned, so the linker put the table anywhere. With a function
+# in a section of its own the block also moves when .text is cut out.
+cat > "$out/v.c" <<'SRC'
+void f(void) {}
+__attribute__((section(".text.g"))) void g(void) {}
+void h(void) {}
+__asm__(".globl vt\nnop\n.balign 256\nvt:\n nop\n");
+SRC
+for fs in -fno-function-sections -ffunction-sections; do
+    "$EMBCC" --target=riscv32-unknown-elf $fs -c "$out/v.c" -o "$out/v.o" || {
+        echo "FAIL $fs: v.c did not compile"; exit 1; }
+    al=$(llvm-readelf -S "$out/v.o" | awk '/ \.text  / { print $NF }')
+    vt=$(llvm-readelf -s "$out/v.o" | awk '$NF == "vt" { print $2 }')
+    [ "${al:-0}" -ge 256 ] && [ $((0x$vt % 256)) = 0 ] || {
+        echo "FAIL $fs: .text is $al-aligned and vt is at 0x$vt in it"; exit 1; }
+done
+echo "topasm-directives: a block's .balign 256 aligns .text to 256, with function sections too"
+
 # ---- a Thumb function written in asm, called through pointers -------------
 QEMU=${EMBCC_QEMU_ARM:-qemu-system-arm}
 command -v "$QEMU" >/dev/null 2>&1 || { echo "SKIP the run: no $QEMU"; exit 0; }

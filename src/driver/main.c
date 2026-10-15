@@ -2527,6 +2527,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     }
 
     struct code text = { 0 };
+    int text_align = 16;            /* .text's: more for an asm block's */
     struct extcall *ext;
     struct strsite *strs;
     struct gsite *gs;
@@ -2963,9 +2964,20 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         if (blocks_by_gas()) {
             /* what the block's own alignment directives asked for, at
              * least the target's instruction alignment; the padding is
-             * never executed (the code before it ends in a return) */
+             * never executed (the code before it ends in a return). It
+             * is the block's offset in .text that is aligned -- the code
+             * buffer less the function groups before it -- and .text is
+             * aligned as strictly (text_align): a vector table at
+             * `.balign 256` was at 256 in the object and at 16 in the
+             * image */
             int al = target_get() == TARGET_AVR ? 2 : 4;
-            code_align(&text, ta->align > al ? ta->align : al, 0);
+            long shift = g_ntg ? g_groups_end - g_plain_end : 0;
+            if (ta->align > al)
+                al = ta->align;
+            while ((text.len - shift) % al)
+                code_byte(&text, 0);
+            if (al > text_align)
+                text_align = al;
         } else {
             code_align(&text, 16, 0x90);
         }
@@ -3723,7 +3735,8 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     }
     int text_ndx = elfw_add_section(w, ".text", SHT_PROGBITS,
                                     SHF_ALLOC | SHF_EXECINSTR,
-                                    tbytes, (Elf64_Xword)tlen, 16);
+                                    tbytes, (Elf64_Xword)tlen,
+                                    (Elf64_Xword)text_align);
     for (int k = 0; k < g_ntg; k++)
         g_tg[k].ndx = elfw_add_section(
             w, g_tg[k].name, SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR,
