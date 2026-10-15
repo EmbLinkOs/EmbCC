@@ -6707,15 +6707,12 @@ static void parse_top(struct parser *ps, struct unit *u,
             g->is_tls = is_tls;
             g->is_const = gconst;
             g->section = at.progmem ? ".progmem.data" : at.section;
-            g->alias_of = at.alias;
             if (at.address && !is_extern)
                 parse_error_line(ps, at.address, "__attribute__((address)) on the definition of '%s' is not "
                        "supported: EmbCC does not place a variable at a "
                        "fixed address (an extern declaration takes it, as "
                        "a PIC32 SFR's does)", gname);
-            if (at.alias)
-                parse_error_line(ps, gline, "alias attribute on variable '%s' "
-                           "is not supported (functions take it)", gname);
+            g->alias_of = at.alias;
             g->seq = seq;
             g->def_seq = seq;
             **gtail = g;
@@ -6953,16 +6950,12 @@ fn_tail:
                 g->vis = at.vis;
                 g->is_tls = is_tls;
                 g->section = at.progmem ? ".progmem.data" : at.section;
-                g->alias_of = at.alias;
                 if (at.address && !is_extern)
                     parse_error_line(ps, at.address, "__attribute__((address)) on the definition of '%s' is not "
                        "supported: EmbCC does not place a variable at a "
                        "fixed address (an extern declaration takes it, as "
                        "a PIC32 SFR's does)", dname);
-                if (at.alias)
-                    parse_error_line(ps, dline, "alias attribute on variable "
-                               "'%s' is not supported (functions take it)",
-                               dname);
+                g->alias_of = at.alias;
                 g->seq = seq;
                 g->def_seq = seq;
                 **gtail = g;
