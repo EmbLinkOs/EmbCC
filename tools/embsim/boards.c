@@ -155,6 +155,20 @@ static const struct model_desc rp2040_models[] = {
     { 0, 0 },
 };
 
+/* the ESP32-C3's models, over esp32c3.svd (esp32c3.c): the interrupt
+ * matrix first, which the others' sources reach; SYSTEM, whose CPU clock
+ * the timer counts by; IO_MUX before GPIO, whose pins it configures */
+static const struct model_desc esp32c3_models[] = {
+    { "INTERRUPT_CORE0", "esp32c3-matrix" },
+    { "SYSTEM", "esp32c3-system" },
+    { "SYSTIMER", "esp32c3-systimer" },
+    { "UART*", "esp32c3-uart" },
+    { "IO_MUX", "esp32c3-iomux" },
+    { "GPIO", "esp32c3-gpio" },
+    { "RTC_CNTL", "esp32c3-rtc" },
+    { 0, 0 },
+};
+
 /* the PIC24FJ1024GB610's memory, on the bus as pic24.h places it:
  * program flash to program address 0xABFFF (the configuration words in
  * its last page) at twice its address, the configuration memory at
@@ -317,6 +331,20 @@ const struct board_desc boards[] = {
         { 0x50100000u, KB(4), MEM_RAM, 0, 0, 0 } },
       { { "rp2040-rom", 0, 0x4000 }, { "pico", 0, 0 } }, { { 0, 0, 0 } },
       "RP2040.svd", rp2040_models, RF_ATOMIC_ALIASES | RF_WIDE_WRITES },
+    /* Espressif's ESP32-C3-DevKitM-1: an ESP32-C3 (its RV32IMC core,
+     * riscv.c's esp32c3 model) with its 400 KiB of SRAM as the core sees
+     * it -- SRAM1's 384 KiB as DRAM at 0x3FC80000 and as IRAM at
+     * 0x40380000, SRAM0's 16 KiB as IRAM at 0x4037C000 -- and the RTC's
+     * 8 KiB of fast memory at 0x50000000; the peripherals Espressif's
+     * esp32c3.svd's; the board's RGB LED and BOOT button. No ROM and no
+     * flash: the image is loaded into the SRAM, as the ROM's loader does */
+    { "esp32c3-devkitm-1", "riscv", "esp32c3", 0,
+      { { 0x3fc80000u, KB(384), MEM_RAM, 1, 0, 0 },
+        { 0x40380000u, KB(384), MEM_ALIAS, 0, 0x3fc80000u, 0 },
+        { 0x4037c000u, KB(16), MEM_RAM, 0, 0, 0 },
+        { 0x50000000u, KB(8), MEM_RAM, 0, 0, 0 } },
+      { { "esp32c3-devkitm-1", 0, 0 } }, { { 0, 0, 0 } },
+      "esp32c3.svd", esp32c3_models, 0 },
 };
 const int nboards = (int)(sizeof boards / sizeof boards[0]);
 
@@ -376,6 +404,7 @@ static const struct dev_type dev_types[] = {
     { "bluepill", &mcu_board_ops, mcu_board_create },
     { "nrf52840dk", &mcu_board_ops, mcu_board_create },
     { "nrf52840-ficr", &nrf52_ficr_ops, nrf52_ficr_create },
+    { "esp32c3-devkitm-1", &mcu_board_ops, mcu_board_create },
 };
 
 /* ---- the peripheral models, over an SVD's registers (svd-map.h) -------- */
@@ -432,6 +461,13 @@ static const struct model_type model_types[] = {
     { "rp2040-sio", &rp2040_sio_ops, rp2040_sio_create },
     { "rp2040-uart", &rp2040_uart_ops, rp2040_uart_create },
     { "rp2040-ssi", &rp2040_ssi_ops, rp2040_ssi_create },
+    { "esp32c3-matrix", &esp32c3_matrix_ops, esp32c3_matrix_create },
+    { "esp32c3-system", &esp32c3_system_ops, esp32c3_system_create },
+    { "esp32c3-systimer", &esp32c3_systimer_ops, esp32c3_systimer_create },
+    { "esp32c3-uart", &esp32c3_uart_ops, esp32c3_uart_create },
+    { "esp32c3-iomux", &esp32c3_iomux_ops, esp32c3_iomux_create },
+    { "esp32c3-gpio", &esp32c3_gpio_ops, esp32c3_gpio_create },
+    { "esp32c3-rtc", &esp32c3_rtc_ops, esp32c3_rtc_create },
     { 0, 0, 0 },
 };
 

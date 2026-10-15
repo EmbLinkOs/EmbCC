@@ -1111,6 +1111,12 @@ static struct svd_device *read_device(struct xnode *root)
     d->aub = kidtext(root, "addressUnitBits")
         ? (int)svd_num(kidtext(root, "addressUnitBits"), "addressUnitBits",
                        root->line) : 8;
+    /* Espressif's SVDs (esp32c3.svd and the rest of their generator's)
+     * say 32 and number every address in bytes, as their TRMs do: the
+     * ESP32-C3's 32-bit interrupt maps are at offsets 0, 4, 8 */
+    const char *vid = kidtext(root, "vendorID");
+    if (d->aub == 32 && vid && !strcmp(vid, "ESPRESSIF"))
+        d->aub = 8;
     if (d->aub != 8)
         svd_die("addressUnitBits is %d: offsets in units of other than 8 bits "
             "are not supported", d->aub);

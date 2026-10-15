@@ -178,6 +178,23 @@ void *nrf_rtc_create(struct sim *s, struct rf_periph *p);
 void *nrf52_ficr_create(struct sim *s, const struct dev_desc *d);
 void nrf_pins_changed(struct sim *s);
 
+/* the ESP32-C3's models over esp32c3.svd (esp32c3.c): its interrupt
+ * matrix, which a source's level reaches through esp32c3_source; the CPU
+ * clock, at which the board keeps its time */
+extern const struct dev_ops esp32c3_matrix_ops, esp32c3_system_ops;
+extern const struct dev_ops esp32c3_systimer_ops, esp32c3_uart_ops;
+extern const struct dev_ops esp32c3_gpio_ops, esp32c3_iomux_ops, esp32c3_rtc_ops;
+void *esp32c3_matrix_create(struct sim *s, struct rf_periph *p);
+void *esp32c3_system_create(struct sim *s, struct rf_periph *p);
+void *esp32c3_systimer_create(struct sim *s, struct rf_periph *p);
+void *esp32c3_uart_create(struct sim *s, struct rf_periph *p);
+void *esp32c3_gpio_create(struct sim *s, struct rf_periph *p);
+void *esp32c3_iomux_create(struct sim *s, struct rf_periph *p);
+void *esp32c3_rtc_create(struct sim *s, struct rf_periph *p);
+void esp32c3_source(struct sim *s, int src, int level);
+u32 esp32c3_cpu_hz(struct sim *s);
+void esp32c3_pins_changed(struct sim *s);
+
 /* the boards around the microcontrollers: LEDs and buttons (mcu-boards.c;
  * a dev_desc's type names the board) */
 extern const struct dev_ops mcu_board_ops;

@@ -63,7 +63,8 @@ static void usage(void)
           "        EMBSIM_SVD_PATH), bluepill (STM32F103C8: ST's\n"
           "        STM32F103xx.svd), nrf52840dk (Nordic's nrf52840.svd),\n"
           "        pico (the Raspberry Pi Pico's RP2040:\n"
-          "        the Pico SDK's RP2040.svd), virt (RISC-V), uno (AVR),\n"
+          "        the Pico SDK's RP2040.svd), esp32c3-devkitm-1 (Espressif's\n"
+          "        esp32c3.svd), virt (RISC-V), uno (AVR),\n"
           "        malta (MIPS),\n"
           "        pic32mz2048efh100, explorer16-32, curiosity-pic32mz-ef-2\n"
           "        (PIC32MZ: its ATDF, from --dfp DIR, --svd FILE.atdf or\n"
@@ -75,7 +76,8 @@ static void usage(void)
           "        PIC24EP part by its name (pic32mz1024efg064, pic32mx795f512l,\n"
           "        pic24fj256ga610, dspic33ep512mu810), from --dfp DIR\n"
           "cpus:   cortex-m0, cortex-m0plus, cortex-m3, cortex-m4, cortex-m7;\n"
-          "        rv32, rv64 (virt's default: the image's width); atmega328p;\n"
+          "        rv32, rv64 (virt's default: the image's width), esp32c3;\n"
+          "        atmega328p;\n"
           "        24kc, pic32mz, pic32mx; pic24fj1024gb610, dspic33ep512mu810\n"
           "        (or the part's name)\n"
           "--set:  explorer16-32: temperature=DEGREES, pot=VOLTS or PERCENT%,\n"
@@ -84,7 +86,8 @@ static void usage(void)
           "        and S3;\n"
           "        curiosity-pic32mz-ef-2: SW1, SW2, SW3, SW4=pressed or released;\n"
           "        pico: BOOTSEL=pressed or released;\n"
-          "        nrf52840dk: BUTTON1-4=pressed or released\n",
+          "        nrf52840dk: BUTTON1-4=pressed or released;\n"
+          "        esp32c3-devkitm-1: BOOT=pressed or released\n",
           stderr);
     exit(2);
 }
