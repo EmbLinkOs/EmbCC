@@ -1283,12 +1283,15 @@ static void lex_raw(struct lexer *lx)
         return;
     }
 
-    if (isalpha((unsigned char)*lx->p) || *lx->p == '_' ||
+    /* `$` is an identifier's, as GCC takes it by default (VMS-style and
+     * generated names: `a$b`) */
+    if (isalpha((unsigned char)*lx->p) || *lx->p == '_' || *lx->p == '$' ||
         lex_ident_utf8(lx->p, 1)) {
         const char *start = lx->p;
         for (;;) {
             int u8;
-            if (isalnum((unsigned char)*lx->p) || *lx->p == '_')
+            if (isalnum((unsigned char)*lx->p) || *lx->p == '_' ||
+                *lx->p == '$')
                 lx->p++;
             else if ((u8 = lex_ident_utf8(lx->p, 0)) > 0)
                 lx->p += u8;
@@ -1296,6 +1299,12 @@ static void lex_raw(struct lexer *lx)
                 break;
         }
         size_t n = (size_t)(lx->p - start);
+        /* C99 lets an implementation take more characters in a name;
+         * C89 has no room for `$`, and -pedantic says so there, as GCC
+         * does */
+        if (!lx->cxx && g_c_year < 1999 && memchr(start, '$', n))
+            lex_pedantic(lx->file, t->line, t->col, lex_quiet(lx), 0,
+                         "`$` in an identifier");
         if (lx->cxx)
             for (size_t i = 0; i < sizeof cxx_keywords / sizeof cxx_keywords[0];
                  i++)
