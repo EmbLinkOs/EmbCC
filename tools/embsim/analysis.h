@@ -118,6 +118,9 @@ struct rec_machine {
     u32 ram_size;
     int semihosting, input;
     u64 max_insns;
+    const char *dfp;                /* --dfp's directory, or 0 */
+    const char **sets;              /* the board's inputs: --set NAME=VALUE */
+    int nset;
 };
 
 /* the analyses on for this run (from main.c's options), after sim_load;

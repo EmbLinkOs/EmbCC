@@ -45,6 +45,9 @@ struct image {
 
 /* the image's tables; dies when the file cannot be read */
 struct image *image_open(const char *path);
+/* an Intel HEX image: image_open gives it no symbols, lines or code
+ * ranges */
+int image_is_hex(const char *path);
 /* the function holding pc, by its index in m->fn, or -1 */
 int image_fn(const struct image *m, u32 pc);
 /* a symbol's address by its name: 1, or 0 when there is none */

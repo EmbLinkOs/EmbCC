@@ -16,7 +16,8 @@
 #  4. The peripherals and the board (pic24-board.s), on explorer16-32-pic24
 #     at 30 degrees with S3 pressed: Timer1's interrupt, the LEDs, the
 #     buttons, the ADC's conversions of the sensors, the LCD on the EPMP,
-#     the 25LC256 on SPI1 behind the Peripheral Pin Select and its lock.
+#     the 25LC256 on SPI1 behind the Peripheral Pin Select and its lock;
+#     and its run recorded and replayed, the board's inputs with it.
 #  5. With EMBSIM_THERMO24_ELF, an XC16 build of a thermometer project for
 #     the board (MPLAB X, MCC, the LCD, the ADC, the EEPROM): its menu, and
 #     with S3 pressed the temperature its own formula gives.
@@ -90,7 +91,16 @@ for l in 'LED D3 on (RA0)' 'LED D5 on (RA2)' 'LED D7 on (RA4)' 'LED D9 on (RA6)'
 done
 grep -q '^explorer16-32-pic24: LCD |PIC24           | at' "$out/board.err" ||
     { cat "$out/board.err"; fail "the LCD does not show what the EPMP wrote"; }
-echo "embsim-pic24: the Explorer 16/32: Timer1's interrupt, the LEDs, S3 and S6, the TC1047A and the potentiometer at 10 and 12 bits, the LCD on the EPMP, the 25LC256 behind the PPS"
+# the run recorded and replayed: the board's inputs (--set) and the pack
+# (--dfp) are the recording's, so the replay is the same run
+"$EMBSIM" "$out/board.hex" --board explorer16-32-pic24 --dfp "$DFP" --max-insns 2000000 \
+    --set temperature=30 --set S3=pressed --record "$out/board.rec" > /dev/null 2>&1 ||
+    fail "pic24-board.s does not record"
+"$EMBSIM" --replay "$out/board.rec" > "$out/replay.out" 2> "$out/replay.err" ||
+    { cat "$out/replay.err"; fail "the recorded run does not replay"; }
+cmp -s "$out/replay.out" "$out/board.want" ||
+    { cat "$out/replay.out" "$out/replay.err"; fail "the replay's output is not the run's"; }
+echo "embsim-pic24: the Explorer 16/32: Timer1's interrupt, the LEDs, S3 and S6, the TC1047A and the potentiometer at 10 and 12 bits, the LCD on the EPMP, the 25LC256 behind the PPS; recorded with its inputs, and replayed"
 
 # ---- 5. an XC16 project: EMBSIM_THERMO24_ELF ----------------------------------------------
 # A thermometer for the board, built by MPLAB X and XC16 (MCC's drivers:

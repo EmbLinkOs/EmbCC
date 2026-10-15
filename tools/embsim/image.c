@@ -794,6 +794,8 @@ struct image *image_open(const char *path)
     }
     fclose(fp);
     const u8 *f = m->f;
+    if (m->len && f[0] == ':')
+        return m;                   /* Intel HEX: no symbols, no lines */
     if (m->len < 52 || memcmp(f, "\177ELF", 4))
         die("%s is not an ELF file", path);
     m->e64 = f[4] == 2;
@@ -823,4 +825,13 @@ struct image *image_open(const char *path)
         m->frame_len = fr.size;
     }
     return m;
+}
+
+int image_is_hex(const char *path)
+{
+    FILE *fp = fopen(path, "rb");
+    int c = fp ? fgetc(fp) : EOF;
+    if (fp)
+        fclose(fp);
+    return c == ':';
 }

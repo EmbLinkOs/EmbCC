@@ -1162,7 +1162,9 @@ outside the machine, each with the step it came at, and the run's end:
   run waits for the host -- is one line, so the record grows with what
   the program does, not with how long a person takes to type;
 - the machine: the image (and a hash of it), the board, the core, the
-  RAM size, the SVD file, semihosting, `--max-insns` and `--until`;
+  RAM size, the SVD file, the device pack (`--dfp`), semihosting,
+  `--max-insns`, `--until`, and the board's inputs (`--set`), which the
+  replay takes from it;
 - the end: the steps, the instructions and cycles, how the run ended
   and its status, a hash of the registers and memory, and the output's
   length and hash.

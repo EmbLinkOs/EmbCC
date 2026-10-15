@@ -22,6 +22,7 @@
 #include <string.h>
 
 #include "analysis.h"
+#include "image.h"
 #include "sim.h"
 #include "pic24.h"
 #include "svd-map.h"
@@ -230,6 +231,17 @@ int main(int argc, char **argv)
         if (until && (!rm.until || strcmp(until, rm.until)))
             die("--until: the recording ran with %s", rm.until ? rm.until : "none");
         until = rm.until;
+        if (svd_dfp && (!rm.dfp || strcmp(svd_dfp, rm.dfp)))
+            die("--dfp %s: the recording ran with %s", svd_dfp,
+                rm.dfp ? rm.dfp : "none");
+        svd_dfp = rm.dfp;
+        if (nset)
+            die("--set: the recording's inputs are the run's (%d of them)",
+                rm.nset);
+        if (rm.nset) {
+            sets = rm.sets;
+            nset = rm.nset;
+        }
         rec_check_image(image, &rm);
     }
     if (svd && !board_given) {
@@ -306,6 +318,11 @@ int main(int argc, char **argv)
     sim_load(s, ram_size, image);
     if ((nsu || stk_embrt) && !stk_report)
         die("--stack-su and --stack-embrt are for --stack-report");
+    if ((coverage || profiling || stk_report || stk_limit || fault_report) &&
+        image_is_hex(image))
+        die("--coverage, --profile, --stack-report, --stack-limit and "
+            "--fault-report read the image's symbols and lines: give its ELF "
+            "file, not its HEX one");
     if (pic24_is(s->cpu) && (coverage || profiling || stk_report || stk_limit ||
                              fault_report))
         die("--coverage, --profile, --stack-report and --fault-report do not "
@@ -358,6 +375,9 @@ int main(int argc, char **argv)
             w.semihosting = semihosting;
             w.max_insns = max_insns;
             w.until = until;
+            w.dfp = svd_dfp;
+            w.sets = sets;
+            w.nset = nset;
             rec_record(s, record, &w);
         }
         if (s->rec)
