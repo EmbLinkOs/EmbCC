@@ -76,6 +76,7 @@ built for QEMU runs unchanged.
 | `stm32f405` | Cortex-M4 with FPv4-SP | 1 MiB flash at `0x08000000` (and at 0), 128 KiB SRAM at `0x20000000`, 64 KiB CCM at `0x10000000` | the USARTs of its SVD ([below](#the-stm32f405)) |
 | `bluepill` | STM32F103C8: Cortex-M3 | 64 KiB flash at `0x08000000` (and at 0), 20 KiB SRAM at `0x20000000` | the USARTs of ST's SVD ([below](#the-blue-pill-stm32f103c8)), and the board's LED |
 | `nrf52840dk` | nRF52840: Cortex-M4 with FPv4-SP, 64 MHz | 1 MiB flash at 0, 256 KiB RAM at `0x20000000` | UART0, UARTE0-1 of Nordic's SVD ([below](#the-nrf52840-dk)), and the DK's LEDs and buttons |
+| `arduino-zero` | the Arduino Zero's ATSAMD21G18A: a Cortex-M0+, 1 MHz out of reset | 256 KiB flash at 0, 32 KiB SRAM at `0x20000000` | the SERCOMs as USARTs, of Microchip's SVD ([below](#the-arduino-zero-atsamd21g18a)), and the board's LEDs |
 | `pico` | the Raspberry Pi Pico's RP2040: core 0, a Cortex-M0+ | its ROM at 0, 2 MiB flash at `0x10000000` (boot2, then the image), 264 KiB SRAM at `0x20000000` | UART0 and UART1 of RP2040.svd ([below](#the-raspberry-pi-pico)), and the board's LED |
 | `esp32c3-devkitm-1` | the ESP32-C3-DevKitM-1's ESP32-C3: RV32IMC | 400 KiB SRAM: DRAM at `0x3FC80000`, IRAM at `0x4037C000`; 8 KiB RTC fast memory at `0x50000000` | UART0 and UART1 of Espressif's SVD ([below](#the-esp32-c3-devkitm-1)), and the board's RGB LED and BOOT button |
 | `virt` | RISC-V, RV32 or RV64 with IMAFDC | 128 MiB RAM at `0x80000000` | NS16550A at `0x10000000` |
@@ -659,6 +660,97 @@ same addresses, and is the referee where they agree:
 | a TIMER's COUNT task while stopped | counts | does not count |
 | CLOCK, RTC, UARTE, P1, FICR (the nRF52840's) | not there | modelled, above |
 | UART0's TXD and TXDRDY; GPIO's DIR, OUT, PIN_CNF, IN with pulls; TIMER0 as a counter (compares, shorts, the 8-bit wrap, CAPTURE), INTENSET and INTENCLR | as EmbSim | as QEMU |
+
+## The Arduino Zero (ATSAMD21G18A)
+
+The `arduino-zero` board is the Arduino Zero: an ATSAMD21G18A, a
+Cortex-M0+ with two NVIC priority bits, 256 KiB of flash at 0, 32 KiB of
+SRAM at `0x20000000`, and the NVM rows at `0x00800000` (the user row,
+the factory calibration, the serial number), which read as erased. The
+image is the whole flash, as the EDBG port programs it: the Arduino
+bootloader is not there. Its peripherals are Microchip's
+`ATSAMD21G18A.svd`, found with `--svd FILE` or in `EMBSIM_SVD_PATH`:
+
+```sh
+embsvd ATSAMD21G18A.svd --no-cmsis --header samd21.h --startup startup.c \
+    --ld samd21.ld --flash 0:256K --ram 0x20000000:32K
+embcc --target=thumbv6m-none-eabi --opt=size -c startup.c main.c
+embcc --target=thumbv6m-none-eabi --link-script=samd21.ld startup.o main.o -o fw.elf
+EMBSIM_SVD_PATH=$HOME/svd embsim fw.elf --board arduino-zero
+```
+
+The SVD gives each SERCOM its four modes, and each TC its three, as
+unions over the same registers (`SERCOM5->USART.DATA`,
+`TC3->COUNT16.CC0`); the SERCOM and TC models keep the registers
+themselves, as the mode lays them out. The models (the datasheet,
+Atmel-42181G):
+
+- **SYSCTRL**: OSC8M at 8 MHz / 2^PRESC (1 MHz out of reset);
+  OSCULP32K; OSC32K and XOSC32K (the Zero's crystal), ready after their
+  STARTUP times (tables 16-10, 16-9: STARTUP 2 is 2048 + 3 cycles), with
+  a 32 kHz output under EN32K; the DFLL48M at 48 MHz in open loop, at
+  DFLLMUL.MUL times its reference in closed loop, locked (DFLLLCKC,
+  DFLLLCKF) 200 us after the reference runs (table 36-50) -- without
+  one it does not lock, runs on at 48 MHz with DFLLRCS, and EmbSim
+  warns. DFLLRDY is always set. Erratum 9905 is modelled: writing
+  DFLLVAL, DFLLMUL or DFLLSYNC while DFLLCTRL.ONDEMAND is set and nothing
+  runs on the DFLL freezes the part, which ends the run (status 3).
+  INTFLAG has PCLKSR's rises.
+- **GCLK**: generators 0-8 and the generic clocks, written whole with
+  their ID and read after an 8-bit write of it; reset as tables 14-5,
+  14-9 and 14-13 have them (generator 0 on OSC8M, 2 on OSCULP32K,
+  GCLK_WDT on generator 2, off). A generator is its source / DIV, or /
+  2^(DIV+1) with DIVSEL, with the DIV bits table 14-11 gives it (five on
+  generator 2); one changed to a source not running yet stays on its
+  old one until it runs; one on itself gives no clock.
+- **PM**: generator 0 / 2^CPUDIV is the CPU's clock, and the board
+  reports its time at it; CKRDY. The APBA, APBB and APBC masks gate
+  their peripherals' registers -- out of reset the SERCOMs and TCs are
+  masked -- as on the STM32s:
+
+  ```text
+  embsim: warning: a write at pc 0x00000350: SERCOM0.I2CM.CTRLA is ignored while its clock is off (PM.APBCMASK.SERCOM0 is 0)
+  ```
+
+- **NVMCTRL**: READY, PARAM (4096 pages of 64 bytes), CTRLB.RWS; a CPU
+  clock above what RWS allows at 3.3 V (table 36-39: 24 MHz with no wait
+  state, 48 with one) is warned of once:
+
+  ```text
+  embsim: warning: the CPU runs at 48.000 MHz with NVMCTRL's CTRLB.RWS 0: at 3.3 V the flash needs a wait state above 24 MHz (table 36-39), and the part would read it wrong
+  ```
+
+- **PORT** and its IOBUS at `0x60000000`, one model: DIR, OUT and their
+  CLR, SET and TGL, byte and halfword writes in their lanes; PINCFG and
+  PMUX, also by WRCONFIG (HWSEL, WRPINCFG, WRPMUX). A pin is driven
+  when DIR is set and PMUXEN is not; else the board drives it, or
+  PULLEN pulls it OUT's way, or it floats (0). IN shows a pin only with
+  INEN (table 22-1).
+- **SERCOM0-5 as USARTs** (CTRLA.MODE 0 or 1): CTRLA, CTRLB and BAUD
+  are enable-protected; with TXEN, the APB clock and GCLK_SERCOMn_CORE,
+  a byte written to DATA goes to stdout at once, with DRE and TXC. The
+  first SERCOM whose receiver is enabled takes `--input` into its
+  two-level buffer (RXC, DATA), where a byte waits while the buffer is
+  full; RXEN cleared empties it. INTENSET, INTENCLR, INTFLAG and the
+  interrupt. SYNCBUSY reads 0.
+- **TC3-5**: COUNT16, COUNT8 and COUNT32 (TC4, with TC5 its slave:
+  STATUS.SLAVE, its COUNT and CCs not reached), counting GCLK_TCx /
+  PRESCALER up or down to the top -- the maximum, COUNT8's PER, CC0 in
+  MFRQ and MPWM; past a lower top, to the maximum first -- with OVF at
+  the wrap and MCx as the counter leaves CCx; ONESHOT, RETRIGGER, STOP,
+  STATUS.STOP; CTRLA enable-protected. COUNT reads what the last read
+  request (READREQ.RREQ, or RCONT) synchronised, as on the part: without
+  one it does not change.
+
+The board (Arduino's variant files for the Zero): the LED L on PA17,
+lit high; the TX and RX LEDs on PA27 and PB03, lit low; port 0 is PA, 1
+PB. Every SERCOM writes to stdout; the EDBG port is SERCOM5 (PB22,
+PB23).
+
+```text
+arduino-zero: L on (PA17) at 138.224 ms
+arduino-zero: L off (PA17) at 139.224 ms
+```
 
 ## What it models: the RISC-V core
 
@@ -2157,6 +2249,14 @@ On the Cortex-M:
   written); the UARTs' baud rate, flow control and errors; the TIMER's
   PCLK1M; the RTC's "may not trigger" CC writes; the crystal's power-up
   time.
+- On the Arduino Zero: the XOSC and the FDPLL96M (0 Hz), the DFLL's
+  USB recovery, its steps and its frequency before the lock, the
+  generators' GCLK_IO pins, WRTLOCK, the clocks' on-demand and sleep
+  behaviour; the WDT, RTC, EIC, EVSYS, DMAC, USB, ADC, DAC, AC, TCC,
+  I2S and PTC, NVMCTRL's commands, the SERCOMs' SPI and I2C modes (their
+  registers keep what is written); the TCs' waveform outputs, captures
+  and events; the USARTs' baud timing, frame format, errors and flow
+  control; the Arduino bootloader and the NVM rows' factory contents.
 - On the Blue Pill: the F405's list below, and GPIO's LCKR sequence, the
   alternate functions' outputs but the USARTs' TX, EXTI and the pins'
   interrupts, the backup domain's (BKP, the RTC, LSE), the flash's
@@ -2382,6 +2482,24 @@ the input through UART0's RXD and into RAM by UARTE0. And the exec corpus
 for the M4 with FPv4-SP on the DK's memory against QEMU's mps2-an386,
 the same image on both: some 250 programs to the instruction and the
 cycle.
+
+**The Arduino Zero.** `tests/golden/embsim-arduino-zero.sh` builds
+`embsim-arduino-zero/zero.c` from embsvd's files for Microchip's SVD and
+holds 95 values to the SAM D21 datasheet: the reset values (GCLK's read
+through their IDs), a SERCOM whose APB clock is masked, the CPU's clock
+measured against OSCULP32K from 1 MHz to the DFLL48M in closed loop on
+XOSC32K (CPUDIV; generator 0 staying on OSC8M until XOSC32K runs), a
+generator's division with and without DIVSEL, XOSC32K's start-up, the
+DFLL's lock with and without its reference (DFLLRCS), PORT's input
+buffer, pulls, toggles, WRCONFIG and IOBUS, SERCOM5's enable-protected
+registers, DRE without TXEN and nothing sent without its core clock,
+TC4's MFRQ wrap and matches (as the counter leaves CCx), STOP,
+RETRIGGER, one-shot, counting down and up from above the top, COUNT8
+and COUNT32; L toggled by
+TC3's interrupt every 1 ms of the DFLL's clock; the three warnings;
+SERCOM5's input; erratum 9905's freeze. And the exec corpus on the
+Zero's memory (64 KiB of SRAM) against QEMU's micro:bit, the same image:
+some 250 programs to the instruction and the cycle.
 
 **The ESP32-C3-DevKitM-1.** `tests/golden/embsim-esp32c3.sh` builds
 `embsim-esp32c3/c3.c` from embsvd's files for Espressif's SVD (its

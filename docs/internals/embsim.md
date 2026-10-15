@@ -67,6 +67,7 @@ file but the network one compiles with EmbCC itself. Everything is in
 | `nrf52.c` | the nRF52840's peripheral interface (tasks, events, INTEN, the level interrupt), CLOCK and the board's time, P0-P1, UART0/UARTE0-1 with EasyDMA, TIMER0-4, RTC0-2, the FICR |
 | `rp2040.h`, `rp2040.c` | the RP2040: its ROM (the flash boot: boot2's CRC, its copy to SRAM, the hand-over), RESETS (the peripherals held in reset: `gate_held`), XOSC, ROSC, the PLLs, the clock generators and FC0, PSM, the watchdog and its microsecond tick; the board's time at clk_sys (`rp2040_now_ns`, `s->now_ns`) |
 | `rp2040-timer.c`, `rp2040-io.c`, `rp2040-sio.c`, `rp2040-uart.c`, `rp2040-ssi.c` | the RP2040's timer; IO_BANK0, PADS_BANK0 and IO_QSPI (the pins); the SIO (GPIO, spinlocks, divider, core 0's FIFOs); UART0-1 (PL011); the SSI and the Pico's W25Q16JV flash |
+| `samd21.c` | the SAM D21: SYSCTRL's oscillators and the DFLL48M, GCLK's indirect generators and generic clocks, PM's CPU clock (the board's time) and APB masks (`gate`), NVMCTRL, PORT and its IOBUS, the SERCOMs as USARTs and TC3-5, these two keeping their registers as the mode lays them out |
 | `esp32c3.c` | the ESP32-C3: its interrupt matrix (`esp32c3_source`, the core's `rv_eic`), SYSTEM's CPU clock and the board's time, the software interrupts, SYSTIMER, UART0-1, GPIO with IO_MUX's pads, RTC_CNTL's software reset |
 | `mcu-boards.c` | the boards around the microcontrollers EmbSim models by their SVD (`struct board_io`): each a table of LEDs, buttons and pins it drives (the Pico's), and an addressable LED decoded from its pin's pulses (the ESP32-C3-DevKitM-1's SK6812) |
 | `devices.h` | the create functions `boards.c` builds boards from |
@@ -710,6 +711,8 @@ or with its own file for the six functions of `net.h`.
   corpus against QEMU's mps2-an386. `tests/golden/embsim-esp32c3.sh`:
   the ESP32-C3-DevKitM-1 against its TRM, and the corpus against QEMU's
   virt with an RV32IMC core, through RISC-V semihosting.
+  `tests/golden/embsim-arduino-zero.sh`: the Arduino Zero against the
+  SAM D21 datasheet, and the corpus against QEMU's micro:bit.
   `tests/harness/embsim-corpus.sh` is the corpus run the board tests
   share: one program built once and linked for QEMU's machine and
   EmbSim's board, semihosting's output, the counts apart by a constant.

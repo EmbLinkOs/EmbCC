@@ -12,15 +12,19 @@
 #     clock is masked; GCLK written back (DIVSEL, generator 2's five DIV
 #     bits); PM's CKRDY; TC3's COUNT before and after a read request; the
 #     CPU's clock measured against OSCULP32K -- 1 MHz out of reset, 8 MHz
-#     from OSC8M, 48 MHz from the DFLL48M in open loop (with the flash's
-#     wait-state warning), 47.972 MHz in closed loop on XOSC32K x 1464,
-#     its lock 200 us after the reference runs and not before (warned);
-#     XOSC32K's start-up of 2048 + 3 cycles and SYSCTRL's INTFLAG; PORT's
-#     input buffer, pulls, toggles, WRCONFIG, the IOBUS, a byte write, a
-#     pin let go by PMUXEN; SERCOM5's flags and its enable-protected BAUD
-#     and MODE; TC4's MFRQ wrap and match flags, its enable-protected
-#     PRESCALER, STOP, RETRIGGER, one-shot, counting down, COUNT8's PER,
-#     COUNT32 with TC5 its slave; and TC3's interrupt toggling L every
+#     from OSC8M, halved by CPUDIV, on XOSC32K only once it runs, 48 MHz
+#     from the DFLL48M in open loop (with the flash's wait-state warning),
+#     47.972 MHz in closed loop on XOSC32K x 1464, its lock 200 us after
+#     the reference runs and not before (warned, DFLLRCS); a generator
+#     divided by DIV and by 2^(DIV+1); XOSC32K's start-up of 2048 + 3
+#     cycles and SYSCTRL's INTFLAG; PORT's input buffer, pulls, toggles,
+#     WRCONFIG, the IOBUS, a byte write, a pin let go by PMUXEN; SERCOM5's
+#     flags, DRE without TXEN, nothing sent without its core clock, its
+#     enable-protected BAUD and MODE; TC4's MFRQ wrap and match flags (a
+#     match as the counter leaves CCx), its enable-protected PRESCALER,
+#     STOP, RETRIGGER, one-shot, counting down, counting up from above the
+#     top to the maximum, COUNT8's PER, COUNT32 with TC5 its slave; and
+#     TC3's interrupt toggling L every
 #     1 ms of the DFLL's clock. Its values must be zero.txt, the
 #     datasheet's; stderr the LEDs and the three warnings (zero-err.txt).
 #  3. The board's input: SERCOM5's receiver reads --input, two bytes in

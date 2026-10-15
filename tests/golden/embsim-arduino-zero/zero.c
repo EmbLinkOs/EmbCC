@@ -190,6 +190,46 @@ int main(void)
     M("cpu-10khz-reset", cpu_10khz());
     SYSCTRL->OSC8M &= ~(3u << 8);               /* PRESC 0: 8 MHz */
     M("cpu-10khz-osc8m", cpu_10khz());
+    PM->CPUSEL = 1;                             /* CPUDIV: / 2 */
+    M("cpu-10khz-cpudiv2", cpu_10khz());
+    PM->CPUSEL = 0;
+
+    /* a generator's division: TC4 on generator 4, OSCULP32K / 4, then
+     * / 2^(DIV+1) with DIVSEL; over 328 counts of TC3's 32 kHz */
+    GCLK->GENDIV = 4 | 4u << 8;
+    GCLK->GENCTRL = 4 | 3u << 8 | 1u << 16;
+    gclk(0x1c, 4);                              /* GCLK_TC4_TC5 */
+    TC4->COUNT16.READREQ = 0x10 | 1u << 14;
+    TC4->COUNT16.CTRLA = 2;
+    uint32_t t0 = ulp(), c4 = TC4->COUNT16.COUNT;
+    while ((uint16_t)(ulp() - t0) < 328)
+        ;
+    /* in units of 1024 Hz, rounded: 8192 Hz is 8 */
+    M("gclk-div4-khz", ((uint16_t)(TC4->COUNT16.COUNT - c4) * 32768u / 328 + 512) / 1024);
+    GCLK->GENDIV = 4 | 2u << 8;
+    GCLK->GENCTRL = 4 | 3u << 8 | 1u << 16 | 1u << 20;
+    t0 = ulp(), c4 = TC4->COUNT16.COUNT;
+    while ((uint16_t)(ulp() - t0) < 328)
+        ;
+    M("gclk-divsel-khz", ((uint16_t)(TC4->COUNT16.COUNT - c4) * 32768u / 328 + 512) / 1024);
+    TC4->COUNT16.CTRLA = 0;
+    TC4->COUNT16.CTRLA = 1;                     /* SWRST */
+
+    /* XOSC32K: ready 2048 + 3 cycles after it is enabled (STARTUP 2);
+     * generator 0 moved onto it before then stays on OSC8M until it is */
+    SYSCTRL->XOSC32K = 1u << 1 | 1u << 2 | 1u << 3 | 2u << 8;
+    t0 = ulp();
+    GCLK->GENCTRL = 0 | 5u << 8 | 1u << 16;
+    M("cpu-10khz-xosc32k-starting", cpu_10khz());
+    while (!(SYSCTRL->PCLKSR & 1u << 1))
+        ;
+    M("xosc32k-startup-16cycles", (uint16_t)(ulp() - t0) / 16);
+    M("cpu-10khz-xosc32k", cpu_10khz());
+    GCLK->GENCTRL = 0 | 6u << 8 | 1u << 16;     /* back to OSC8M */
+    M("sysctrl-intflag-xosc32krdy", SYSCTRL->INTFLAG & 2);
+    SYSCTRL->INTFLAG = 2;
+    M("sysctrl-intflag-cleared", SYSCTRL->INTFLAG & 2);
+
     /* the DFLL in open loop, 48 MHz -- with no flash wait state yet */
     SYSCTRL->DFLLCTRL = 0;                      /* ONDEMAND off (erratum 9905) */
     while (!(SYSCTRL->PCLKSR & 1u << 4))
@@ -199,23 +239,13 @@ int main(void)
     M("cpu-10khz-dfll-open", cpu_10khz());
     NVMCTRL->CTRLB = 1u << 1;                   /* RWS 1 */
 
-    /* XOSC32K: ready 2048 + 3 cycles after it is enabled (STARTUP 2) */
-    SYSCTRL->XOSC32K = 1u << 1 | 1u << 2 | 1u << 3 | 2u << 8;
-    uint32_t t0 = ulp();
-    while (!(SYSCTRL->PCLKSR & 1u << 1))
-        ;
-    M("xosc32k-startup-16cycles", (uint16_t)(ulp() - t0) / 16);
-    M("sysctrl-intflag-xosc32krdy", SYSCTRL->INTFLAG & 2);
-    SYSCTRL->INTFLAG = 2;
-    M("sysctrl-intflag-cleared", SYSCTRL->INTFLAG & 2);
-
     /* the DFLL in closed loop: no lock without its reference */
     SYSCTRL->DFLLMUL = 1464 | 0x1fu << 16 | 0x1fu << 26;   /* 47.972352 MHz */
     SYSCTRL->DFLLCTRL = 2 | 4;                  /* closed loop */
     t0 = ulp();
     while ((uint16_t)(ulp() - t0) < 33)         /* 1 ms */
         ;
-    M("dfll-lock-without-ref", SYSCTRL->PCLKSR & 0xc0);
+    M("dfll-lock-without-ref", SYSCTRL->PCLKSR & 0x1c0);   /* DFLLRCS */
     GCLK->GENCTRL = 1 | 5u << 8 | 1u << 16;     /* generator 1: XOSC32K */
     gclk(0, 1);                                 /* GCLK_DFLL48M_REF */
     t0 = ulp();
@@ -223,6 +253,7 @@ int main(void)
         ;
     uint32_t lock = (uint16_t)(ulp() - t0);
     M("dfll-lock-200us", lock >= 6 && lock <= 7);
+    M("dfll-locked", SYSCTRL->PCLKSR & 0x1c0);
     M("cpu-10khz-dfll-closed", cpu_10khz());
 
     /* PORT */
@@ -245,6 +276,8 @@ int main(void)
     PORT->OUTTGL0 = 1u << 11;
     M("port-dir-toggled", PORT->DIR0 & 0xc00);
     M("port-out-toggled", PORT->OUT0 & 0xc00);
+    PORT->DIRTGL0 = 1u << 10;
+    M("port-dir-toggled-back", PORT->DIR0 & 0xc00);
     PORT->DIRCLR0 = 1u << 10 | 1u << 11;
     PORT->OUTCLR0 = 1u << 10 | 1u << 11;
     /* WRCONFIG: PA20 and PA21 (the upper half, HWSEL) with INEN and PULLEN,
@@ -283,6 +316,18 @@ int main(void)
     M("sercom-intenclr-reads", SERCOM5->USART.INTENCLR);
     SERCOM5->USART.INTENCLR = 0xff;
     M("sercom-syncbusy", SERCOM5->USART.SYNCBUSY);
+    /* DRE wants TXEN (writable while enabled) */
+    SERCOM5->USART.CTRLB = 1u << 17;
+    uint32_t dre = SERCOM5->USART.INTFLAG & 1;
+    SERCOM5->USART.CTRLB = 1u << 16 | 1u << 17;
+    M("sercom-dre-without-txen", dre);
+    /* without GCLK_SERCOM5_CORE nothing is sent */
+    SERCOM5->USART.INTFLAG = 2;
+    GCLK->CLKCTRL = 0x19;                       /* CLKEN 0 */
+    SERCOM5->USART.DATA = 'X';
+    uint32_t txc = SERCOM5->USART.INTFLAG & 2;
+    gclk(0x19, 0);
+    M("sercom-no-core-clock-txc", txc);
 
     /* TC4 */
     gclk(0x1c, 2);                              /* GCLK_TC4_TC5: OSCULP32K */
@@ -293,6 +338,9 @@ int main(void)
     TC4->COUNT16.CC1 = 49;
     TC4->COUNT16.CTRLA = 1u << 5 | 2;
     TC4->COUNT16.READREQ = 0x10 | 1u << 14;
+    while (TC4->COUNT16.COUNT != 49)
+        ;
+    M("tc-mc1-at-cc1", TC4->COUNT16.INTFLAG & 0x20);   /* on leaving it */
     while (TC4->COUNT16.COUNT < 50)
         ;
     M("tc-mc1-before-top", TC4->COUNT16.INTFLAG & 0x31);
@@ -311,8 +359,10 @@ int main(void)
     while ((uint16_t)(ulp() - t0) < 10)
         ;
     M("tc-stopped-holds", TC4->COUNT16.COUNT == held);
+    TC4->COUNT16.COUNT = 60;
     TC4->COUNT16.CTRLBSET = 1u << 6;
     M("tc-retrigger-runs", TC4->COUNT16.STATUS >> 3 & 1);
+    M("tc-retrigger-from-zero", TC4->COUNT16.COUNT < 10);
     /* one-shot: stops at the wrap */
     TC4->COUNT16.INTFLAG = 0xff;
     TC4->COUNT16.CTRLBSET = 1u << 2;
@@ -337,6 +387,22 @@ int main(void)
     M("tc-down-wraps-to-top", TC4->COUNT16.COUNT > 90);
     TC4->COUNT16.CTRLA = 0;
     TC4->COUNT16.CTRLBCLR = 1;
+    /* counting up from above the top: to the maximum, and round from
+     * there (figure 29-8) */
+    TC4->COUNT16.INTFLAG = 0xff;
+    TC4->COUNT16.COUNT = 200;
+    TC4->COUNT16.CTRLA = 1u << 5 | 2;
+    t0 = ulp();
+    while ((uint16_t)(ulp() - t0) < 150)
+        ;
+    M("tc-above-top-no-wrap", TC4->COUNT16.INTFLAG & 1);
+    TC4->COUNT16.COUNT = 0xfff0;
+    t0 = ulp();
+    while ((uint16_t)(ulp() - t0) < 30)
+        ;
+    M("tc-above-top-wraps-at-max", TC4->COUNT16.INTFLAG & 1);
+    M("tc-above-top-wrapped-low", TC4->COUNT16.COUNT < 30);
+    TC4->COUNT16.CTRLA = 0;
     /* SWRST, then COUNT8: PER the top */
     TC4->COUNT8.CTRLA = 1;
     TC4->COUNT8.CTRLA = 1u << 2;                /* MODE COUNT8, NFRQ */
