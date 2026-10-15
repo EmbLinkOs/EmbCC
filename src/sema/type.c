@@ -934,6 +934,10 @@ int ty_classify(const struct type *t, enum arg_class *classes)
     int size = ty_size(t);
     if (size > 16)
         return 0; /* MEMORY */
+    if (size == 0) {    /* GNU's empty struct: NO_CLASS, in no register */
+        classes[0] = classes[1] = CLASS_NONE;   /* and no hidden pointer */
+        return 1;
+    }
 
     int seen[2] = { 0, 0 };
     classes[0] = classes[1] = CLASS_INTEGER;

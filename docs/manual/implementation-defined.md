@@ -633,11 +633,14 @@ rounded up to a multiple of that.
 `__attribute__((aligned(N)))` and `_Alignas` raise a member's or a
 structure's alignment. `#pragma pack(N)` caps every member's alignment at
 `N` (see [Preprocessing directives](#preprocessing-directives)). A
-structure must have at least one member; an empty structure is refused:
-
-```text
-embcc: f.c:1:14: error: a struct/union needs at least one member
-```
+structure or union with no members, a GNU extension, has size 0 and
+alignment 1, as in GCC. Passed or returned by value, it travels as GCC's
+and clang's do on the target: in no register on most; by reference
+where every structure argument is (PowerPC, SPARC); and a result through
+the hidden pointer where every structure result is (MIPS o32, SPARC,
+ColdFire). On Xtensa, where the two compilers differ, EmbCC follows GCC:
+no register and no hidden pointer. A pointer to one steps by 0, and two
+such pointers cannot be subtracted.
 
 *The integer type compatible with each enumerated type (C17 6.7.2.2).*
 

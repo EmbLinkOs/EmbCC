@@ -884,6 +884,14 @@ static long san_min(int w);
  * so does every operation in one that can carry out of N bits (int_wrap,
  * and ++ and --), so a compare, a divide or a right shift can read the
  * whole register as they read any other integer's. */
+/* How far a pointer to t moves per step: t's size, 0 for GNU's empty
+ * struct, and GNU's 1 for void and functions (which sema lets through only
+ * where GCC does, `p += n`). */
+static int step_size(struct type *t)
+{
+    return t->kind == TY_VOID || t->kind == TY_FUNC ? 1 : ty_size(t);
+}
+
 static int bitint_ext(struct ir_func *fn, int v, const struct type *t)
 {
     int w = ty_w(t), n = t->bitint;
@@ -2223,8 +2231,8 @@ static int atomic_compound(struct ir_func *fn, struct expr *e)
     if (lt->kind == TY_PTR || opc || e->op == B_ADD || e->op == B_SUB) {
         int v;
         if (lt->kind == TY_PTR) {
-            int esz = ty_size(lt->pointee);
-            v = esz > 1 ? emit_bin(fn, IR_MUL, rv, emit_const(fn, esz, AW),
+            int esz = step_size(lt->pointee);
+            v = esz != 1 ? emit_bin(fn, IR_MUL, rv, emit_const(fn, esz, AW),
                                    AW, 1)
                         : rv;
         } else {
@@ -2298,7 +2306,7 @@ static int compound_value(struct ir_func *fn, struct expr *e, int cur,
     struct type *lt = e->lhs->ty;
     int res;
     if (lt->kind == TY_PTR) {
-        int esz = ty_size(lt->pointee);
+        int esz = step_size(lt->pointee);
         /* At the ADDRESS width, as every other pointer operation
          * here: this was 8, so `p += n` on a 32-bit target was a
          * 64-bit add of a four-byte pointer. It came out right only
@@ -2309,7 +2317,7 @@ static int compound_value(struct ir_func *fn, struct expr *e, int cur,
         if (ty_is_vla(lt->pointee))
             rv = emit_bin(fn, IR_MUL, rv, type_size_val(fn, lt->pointee),
                           AW, 1);
-        else if (esz > 1) {
+        else if (esz != 1) {    /* (0 for an empty struct: no step) */
             int k = emit_const(fn, esz, AW);
             rv = emit_bin(fn, IR_MUL, rv, k, AW, 1);
         }
@@ -3312,7 +3320,7 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
         if (atomic_lv(e->lhs))
             return atomic_incdec(fn, e);
         struct type *t = e->ty;
-        int scale = t->kind == TY_PTR ? ty_size(t->pointee) : 1;
+        int scale = t->kind == TY_PTR ? step_size(t->pointee) : 1;
         int vla_step = t->kind == TY_PTR && ty_is_vla(t->pointee);
         int w = ty_w(t);
         int local = e->lhs->kind == EXPR_VAR && !e->lhs->gref;
@@ -3594,11 +3602,11 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
                     idx = t;
                 }
                 struct type *pt = (lp ? lt : rt)->pointee;
-                int size = ty_size(pt);
+                int size = step_size(pt);
                 if (ty_is_vla(pt))
                     idx = emit_bin(fn, IR_MUL, idx, type_size_val(fn, pt),
                                    AW, 1);
-                else if (size > 1) {
+                else if (size != 1) {   /* (0: an empty struct's) */
                     int c = emit_const(fn, size, AW);
                     idx = emit_bin(fn, IR_MUL, idx, c, AW, 1);
                 }

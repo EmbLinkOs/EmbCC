@@ -447,6 +447,26 @@ static void need_scalar(struct unit *u, struct expr *e, const char *what)
                    what, ty_name(e->ty));
 }
 
+/* A pointer stepped or subtracted (`what` names the operator) moves by its
+ * pointee's size, which an incomplete type has not: `p + 1` through a
+ * `struct X *` added one byte, as though the size were 1, where GCC
+ * refuses it. A difference also divides by the size, so a pointee of size
+ * 0, GNU's empty struct, gives none (GCC refuses that too); a step by 0 is
+ * GCC's answer. void and functions are each caller's own matter. */
+static void ptr_step_check(struct unit *u, struct type *pt, int diff,
+                           const char *what, int line, int col)
+{
+    struct type *t = pt->pointee;
+    if (t->kind == TY_VOID || t->kind == TY_FUNC || ty_is_vla(t))
+        return;
+    if (ty_incomplete(t))
+        sema_error_at(u, line, col, "%s a pointer to incomplete type %s",
+                      what, ty_name(t));
+    else if (diff && ty_size(t) == 0)
+        sema_error_at(u, line, col, "subtracting pointers to %s, which has "
+                      "size 0: the difference counts nothing", ty_name(t));
+}
+
 static void need_integer(struct unit *u, struct expr *e, const char *what)
 {
     if (!ty_is_integer(e->ty))
@@ -2460,6 +2480,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                 e->ty->pointee->kind == TY_FUNC)
                 sema_error_at(u, e->line, e->col, "++/-- on %s",
                            ty_name(e->ty));
+            ptr_step_check(u, e->ty, 0, "++/-- on", e->line, e->col);
         } else if (!ty_is_arith(e->ty)) {
             sema_error_at(u, e->line, e->col, "++/-- needs an integer or "
                                          "pointer, got %s",
@@ -2825,6 +2846,8 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             if (e->op != B_ADD && e->op != B_SUB)
                 sema_error_at(u, e->line, e->col,
                            "only += and -= apply to a pointer");
+            ptr_step_check(u, e->lhs->ty, 0, e->op == B_ADD ? "+= on" : "-= on",
+                           e->line, e->col);
             need_integer(u, e->rhs, "pointer arithmetic");
             e->rhs = mk_cast(e->rhs, ty_base(TY_LONG, 0));
             e->cast_ty = e->lhs->ty;
@@ -3092,6 +3115,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                     lt->pointee->kind == TY_FUNC)
                     sema_error_at(u, e->line, e->col, "arithmetic on %s",
                                ty_name(lt));
+                ptr_step_check(u, lt, 1, "arithmetic on", e->line, e->col);
                 e->ty = ty_ptrdiff_t();
             } else if (lp || rp) {
                 if (rp && e->op == B_SUB)
@@ -3104,6 +3128,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                     pt->pointee->kind == TY_FUNC)
                     sema_error_at(u, e->line, e->col, "arithmetic on %s",
                                ty_name(pt));
+                ptr_step_check(u, pt, 0, "arithmetic on", e->line, e->col);
                 need_integer(u, *ip, "pointer arithmetic");
                 *ip = mk_cast(*ip, ty_base(TY_LONG, 0));
                 e->ty = pt;

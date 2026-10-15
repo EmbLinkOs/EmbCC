@@ -2826,14 +2826,14 @@ static int size_fold(const struct expr *e, long *out)
             *out = t->count;
             return 1;
         }
-        if (!t || ty_size(t) == 0)
+        if (!t || ty_incomplete(t))
             return 0;   /* sizeof(expr) whose type this pass cannot resolve */
-        *out = ty_size(t);
+        *out = ty_size(t);      /* (0 for a GNU empty struct) */
         return 1;
     }
     case EXPR_ALIGNOF: {
         struct type *t = e->cast_ty ? e->cast_ty : ce_type(e->rhs);
-        if (!t || ty_size(t) == 0)
+        if (!t || ty_incomplete(t))
             return 0;
         *out = ty_align(t);
         return 1;
@@ -3176,9 +3176,9 @@ static struct type *parse_struct_body(struct parser *ps, struct type *t,
             /* (an array of no elements — `T m[]`, C99's flexible array
              * member, or GNU's `T m[0]` — takes no room: its elements are
              * what follows the struct) */
-            if (!is_bf && ty_size(mty) == 0 &&
+            if (!is_bf && ty_incomplete(mty) &&
                 !(mty->kind == TY_ARRAY && mty->count == 0 && !mty->vla_len &&
-                  ty_size(mty->pointee) > 0))
+                  !ty_incomplete(mty->pointee)))
                 parse_error_line(ps, mline,
                            "member '%s' has incomplete type %s",
                            mname, ty_name(mty));
@@ -5576,7 +5576,7 @@ static struct global *parse_global(struct parser *ps, struct type *ty,
      * initializer follows — it supplies the count — so defer that check. */
     int size_from_init = g->ty->kind == TY_ARRAY && g->ty->count == 0 &&
                          has_init;
-    if (ty_size(g->ty) == 0 && !is_extern && !size_from_init)
+    if (ty_incomplete(g->ty) && !is_extern && !size_from_init)
         parse_error_line(ps, line,
                    "'%s' has incomplete type %s", name, ty_name(g->ty));
     if (has_init) {

@@ -160,7 +160,7 @@ define `__GNUC__` when compiling C.
 | `const` | Supported | See [Const qualification](#const-qualification). |
 | `volatile` | Supported | |
 | Scopes | Partial | Objects, functions and labels follow the standard's rules. Tags, typedef names and enumeration constants do not. See [Scope of tags, typedefs and enumeration constants](#scope-of-tags-typedefs-and-enumeration-constants). |
-| Structures, unions, bit-fields | Supported | A structure or union with no members is refused: `a struct/union needs at least one member`. |
+| Structures, unions, bit-fields | Supported | A structure or union with no members is a GNU extension: size 0, as in GCC, and an error under `--pedantic-errors`. |
 | Enumerations | Supported | A constant outside the range of `int` is accepted without a diagnostic and gives the enumeration a wider type, as in C23. See [Enumeration constants](#enumeration-constants). |
 | Tentative definitions | Partial | A file-scope array of unknown size, `int a[];`, is refused even when a later declaration completes it: `'a' has incomplete type int[0]`. `extern int a[];` is accepted. |
 | `goto`, labels, `switch` | Supported | |
