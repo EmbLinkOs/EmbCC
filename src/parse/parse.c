@@ -3857,10 +3857,11 @@ static struct expr *parse_primary(struct parser *ps)
             b = parse_type_name(ps, parse_type_spec(ps, 0));
             expect(ps, TOK_RPAREN, "')'");
             e = new_expr(EXPR_NUM, line, 0);
-            /* Qualifiers do not take part: gcc compares the unqualified
-             * types, so `const int` and `int` are compatible. */
-            e->num = ty_equal(a->canon ? a->canon : a,
-                              b->canon ? b->canon : b) ? 1 : 0;
+            /* C's compatibility, the top level's qualifiers aside, as
+             * gcc has it: `const int` and `int` are compatible, `char *`
+             * and `const char *` are not, nor two enums, and `int[5]`
+             * goes with `int[]` */
+            e->num = ty_compatible(a, b, 1);
             e->ty = ty_base(TY_INT, 0);
             return e;
         }
