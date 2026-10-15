@@ -37,7 +37,7 @@ boot.TICK 00000600
 boot.PSM.DONE 0001ffff
 held.UARTCR 00000300
 held.UARTIBRD 00000000
-uart.FR-no-clk_peri 00000018
+uart.FR-no-clk_peri 00000038
 resets.RESET_DONE 00601360
 xosc.STATUS-starting 00001000
 xosc.startup-1ms 00000001
@@ -91,6 +91,7 @@ gpio.OUT 02000000
 gpio.GPIO25_STATUS-low 00003100
 gpio.in-pullup 00000001
 gpio.in-pulldown 00000000
+gpio.in-disabled 00000000
 gpio.in-inverted 00000001
 gpio.vbus 00000001
 gpio.irqs 00000001

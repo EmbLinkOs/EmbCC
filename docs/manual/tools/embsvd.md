@@ -151,6 +151,15 @@ The startup is a C file:
   runs the constructors from `__init_array_start` to `__init_array_end`,
   and calls `main`.
 
+For the RP2040 (the SVD's device `RP2040`, the Raspberry Pi Pico's
+part), the startup holds a boot2 as well: the flash's first 256 bytes,
+in `.boot2`, which the part's bootrom copies to SRAM and runs if the
+CRC-32 of the first 252 is the last word. embsvd's sets the XIP up for
+03h reads, which any SPI flash answers -- the settings of the Pico
+SDK's `boot2_generic_03h`; its source is in `tools/embsvd/embsvd.c` --
+and goes to the vector table after it, at `0x10000100`; embsvd adds the
+CRC.
+
 ## The linker script (`--ld FILE`)
 
 An SVD describes peripherals, not memories, so the flash and RAM regions
@@ -164,7 +173,9 @@ ORIGIN:LENGTH`, in C notation with an optional `K`, `M` or `G`
 - `.bss` in RAM;
 - `_estack` at the top of RAM.
 
-It defines every symbol the generated startup reads.
+It defines every symbol the generated startup reads. For the RP2040,
+`.boot2` goes first and `.isr_vector` after it, at `0x10000100`: the
+flash must be given at `0x10000000`, or embsvd refuses.
 
 ## The hardware as JSON (`--json FILE`)
 

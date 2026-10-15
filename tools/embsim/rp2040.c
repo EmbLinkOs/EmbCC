@@ -659,15 +659,16 @@ const struct dev_ops rp2040_resets_ops = {
 /* where RP2040.svd's reset values are not the part's */
 static void corrections(struct sim *s)
 {
-    struct rf_periph *p;
-    struct rf_reg *r;
-    if ((p = periph(s, "SYSINFO"))) {
-        if ((r = rf_reg(p, "CHIP_ID")))
-            rf_set_reset(r, 0x20002927u);   /* revision 2 (B2), part 2, 0x927 */
-        if ((r = rf_reg(p, "PLATFORM")))
-            rf_set_reset(r, rf_mask(r, "ASIC"));
-    }
-    if ((p = periph(s, "VREG_AND_CHIP_RESET")) && (r = rf_reg(p, "CHIP_RESET")))
+    struct rf_periph *p = periph(s, "SYSINFO");
+    struct rf_reg *r = p ? rf_reg(p, "CHIP_ID") : 0;
+    if (r)
+        rf_set_reset(r, 0x20002927u);       /* revision 2 (B2), part 2, 0x927 */
+    r = p ? rf_reg(p, "PLATFORM") : 0;
+    if (r)
+        rf_set_reset(r, rf_mask(r, "ASIC"));
+    p = periph(s, "VREG_AND_CHIP_RESET");
+    r = p ? rf_reg(p, "CHIP_RESET") : 0;
+    if (r)
         rf_set_reset(r, rf_mask(r, "HAD_POR"));
 }
 

@@ -63,6 +63,9 @@ file but the network one compiles with EmbCC itself. Everything is in
 | `svd-map.h`, `svd-map.c` | an SVD file's peripherals as a register file on the bus (`--svd`), `--trace-periph`, `--svd-map`, and the interface of the models over it |
 | `../embsvd/svd.h`, `../embsvd/svd.c` | the CMSIS-SVD reader, embsvd's |
 | `stm32-rcc.c`, `stm32-gpio.c`, `stm32-usart.c`, `stm32-tim.c` | the STM32's peripheral models, over its SVD's registers |
+| `rp2040.h`, `rp2040.c` | the RP2040: its ROM (the flash boot: boot2's CRC, its copy to SRAM, the hand-over), RESETS (the peripherals held in reset: `gate_held`), XOSC, ROSC, the PLLs, the clock generators and FC0, PSM, the watchdog and its microsecond tick; the board's time at clk_sys (`rp2040_now_ns`, `s->now_ns`) |
+| `rp2040-timer.c`, `rp2040-io.c`, `rp2040-sio.c`, `rp2040-uart.c`, `rp2040-ssi.c` | the RP2040's timer; IO_BANK0, PADS_BANK0 and IO_QSPI (the pins); the SIO (GPIO, spinlocks, divider, core 0's FIFOs); UART0-1 (PL011); the SSI and the Pico's W25Q16JV flash |
+| `mcu-boards.c` | the boards around the microcontrollers EmbSim models by their SVD (`struct board_io`): each a table of LEDs, buttons and pins it drives (the Pico's) |
 | `devices.h` | the create functions `boards.c` builds boards from |
 | `image.h`, `image.c` | the image's symbols, code ranges, DWARF line table and `.debug_frame`, for the analyses |
 | `analysis.h`, `analysis.c` | the step the analyses watch, and the shadow stack of the program's calls |
@@ -270,7 +273,10 @@ struct board_desc {
 };
 ```
 
-`main_ram` marks the region `--ram-size` resizes. `MEM_FLASH` is read-only
+`main_ram` marks the region `--ram-size` resizes. `rules` says how the part's bus treats its SVD's registers beyond the
+file (`RF_*`, svd-map.h): the RP2040's atomic aliases and whole-register
+writes. Boards hold eight memories and eight devices (`BOARD_MEMS`,
+`BOARD_DEVS`). `MEM_FLASH` is read-only
 to the core after loading, and is flash in the memory map the GDB server
 gives (gdb then programs it with `load`). `MEM_ALIAS` is a second address
 for the region at `target`: the STM32's flash at 0. `erased` is the word
@@ -379,7 +385,14 @@ an access touches, and sends the access to that register's peripheral
 (`struct rf_periph`): to its model's `read` and `write` hooks if it has
 one, else to the register file's own. A clock gate, set by a model on
 another peripheral (`p->gate`, the RCC's enable bit), stops the access
-before either.
+before either; with `p->gate_held` the gate is a reset instead (the
+RP2040's RESETS): while its bit is set, reads give the registers' reset
+values, and `rf_periph_reset` puts the peripheral back to them as it
+enters reset. With `RF_ATOMIC_ALIASES` an address 0x1000, 0x2000 or
+0x3000 above a register (in its 16 KiB block, below the SIO) is an alias:
+`alias_write` gives the model a whole word in which each bit the write
+does not name is what a write leaves alone. With `RF_WIDE_WRITES` a byte
+or halfword write is widened first, its data repeated.
 
 A model is a `struct dev_ops` over one peripheral. It does not replace
 the register file; it wraps it:
@@ -531,6 +544,14 @@ image is loaded, calls `pic24_osc_power_on`.
 
 ## Adding a board
 
+The RP2040 shows a board whose part has more than registers: its ROM is
+a device (`rp2040-rom`) the core executes from (`fetch16` in cortexm.c
+reads a device when no memory region holds the code), its bus has rules
+of its own (`rules`), and its clock tree is modelled, so the board's
+time is clk_sys's (`s->now_ns`) and its timer counts clk_ref's
+microseconds. A board's LEDs and buttons are a `mcu-boards.c` table when
+its part's GPIO model calls `s->io`.
+
 An entry in `boards[]` in `boards.c`: the name, the core and its model,
 the NVIC's priority bits (0 for a core without one), the memory, the
 devices and the bit-band aliases. Add it to `--help`'s list in `main.c` and to the manual's table.
@@ -667,6 +688,13 @@ or with its own file for the six functions of `net.h`.
   against the specification's values; the STM32F405's models against
   QEMU's netduinoplus2 and RM0090. `embsim-svd-all.sh`: every SVD in
   `$EMBREF/svd` mapped, each register where `svdref.py` puts it.
+- `tests/golden/embsim-pico.sh`: the Pico (no QEMU has an RP2040):
+  embsvd's boot2 against llvm-mc and the bootrom's CRC, EmbSim's ROM
+  against its source, `embsim-pico/pico.c`'s values against the RP2040's
+  datasheet, the board's inputs, a bad boot2 refused, the watchdog's
+  reset, the SDK's own boot2 through the SSI, and the exec corpus on the
+  Pico against QEMU's micro:bit (the M0 core, from the Pico's flash and
+  boot), to the instruction and the cycle.
 - `tests/golden/svd-*.sh`: embsvd, whose reader EmbSim shares.
 - A change that must not change behaviour (a refactor, a speed-up)
   should also compare the binary before and after on every corpus image

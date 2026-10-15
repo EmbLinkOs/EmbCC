@@ -134,11 +134,13 @@ int main(void)
 
     unreset(R_IO_BANK0 | R_PLL_SYS | R_TIMER | R_UART0);
     uint32_t done1 = RESETS->RESET_DONE;
-    /* a byte written before clk_peri runs waits in the FIFO */
-    UART0->UARTLCR_H = (3u << 5) | (1u << 4);   /* 8 bits, FIFOs */
+    /* a byte written before clk_peri runs waits in the transmitter (one
+     * deep without the FIFOs), and one written to it full is lost */
+    UART0->UARTLCR_H = 3u << 5;                 /* 8 bits */
     UART0->UARTCR = (1u << 0) | (1u << 8);      /* UARTEN, TXE */
     UART0->UARTDR = '<';
     uint32_t fr_noclk = UART0->UARTFR;
+    UART0->UARTDR = '>';
 
     /* ---- the crystal's startup delay, timed on the ring oscillator ---- */
     /* the tick from clk_ref, the ROSC at 6.5 MHz: / 6 */
@@ -365,6 +367,8 @@ int main(void)
     line("gpio.in-pullup", SIO->GPIO_IN >> 2 & 1);
     PADS_BANK0->GPIO2 = (1u << 6) | (1u << 2);  /* IE, PDE */
     line("gpio.in-pulldown", SIO->GPIO_IN >> 2 & 1);
+    PADS_BANK0->GPIO2 = 1u << 3;                /* PUE, the input off */
+    line("gpio.in-disabled", SIO->GPIO_IN >> 2 & 1);
     IO_BANK0->GPIO2_CTRL = 5 | (1u << 16);      /* INOVER: invert */
     line("gpio.in-inverted", SIO->GPIO_IN >> 2 & 1);
     IO_BANK0->GPIO24_CTRL = 5;

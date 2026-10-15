@@ -74,6 +74,7 @@ built for QEMU runs unchanged.
 | `mps2-an500` | Cortex-M7 with FPv5 (double) | as `mps2-an385` | CMSDK |
 | `microbit` | Cortex-M0 | 256 KiB flash at 0, 16 KiB SRAM at `0x20000000` | nRF51 at `0x40002000` |
 | `stm32f405` | Cortex-M4 with FPv4-SP | 1 MiB flash at `0x08000000` (and at 0), 128 KiB SRAM at `0x20000000`, 64 KiB CCM at `0x10000000` | the USARTs of its SVD ([below](#the-stm32f405)) |
+| `pico` | the Raspberry Pi Pico's RP2040: core 0, a Cortex-M0+ | its ROM at 0, 2 MiB flash at `0x10000000` (boot2, then the image), 264 KiB SRAM at `0x20000000` | UART0 and UART1 of RP2040.svd ([below](#the-raspberry-pi-pico)), and the board's LED |
 | `virt` | RISC-V, RV32 or RV64 with IMAFDC | 128 MiB RAM at `0x80000000` | NS16550A at `0x10000000` |
 | `uno` | ATmega328P (AVR5) | 32 KiB flash, 2 KiB SRAM at data `0x100` | USART0 at data `0xC0` |
 | `malta` | MIPS32r2 (24Kc), little-endian | 64 MiB RAM at 0 (`0x80000000` in kseg0) | NS16550A at `0x1F000900`, registers 8 bytes apart |
@@ -100,7 +101,8 @@ memory where the part has it; a 64-pin part has the ports and pins of
 its EDC or ATDF, so a test that drives RA0 needs a 100-pin one.
 
 - `--cpu` runs another core on the board: `cortex-m0`, `cortex-m0plus`,
-  `cortex-m3`, `cortex-m4` or `cortex-m7` on the Cortex-M boards; `rv32`
+  `cortex-m3`, `cortex-m4` or `cortex-m7` on the Cortex-M boards (the
+  Pico's is `cortex-m0plus`); `rv32`
   or `rv64` on `virt`, which otherwise takes the image's width (an
   ELFCLASS64 image is RV64); `atmega328p` on `uno`; `24kc` on `malta`;
   `pic32mz` on the PIC32MZ boards, `pic32mx` on the PIC32MX ones;
@@ -131,8 +133,8 @@ its EDC or ATDF, so a test that drives RA0 needs a 100-pin one.
   its load address; a HEX record to its address as written.
 - A segment of the image outside the board's memory gets memory of its
   own, so a link script for a similar part still runs.
-- Flash on the lm3s6965, the micro:bit and the STM32F405 ignores
-  stores, as flash does. On the MPS2 boards it is SSRAM, which takes
+- Flash on the lm3s6965, the micro:bit, the STM32F405 and the Pico
+  ignores stores, as flash does. On the MPS2 boards it is SSRAM, which takes
   them.
 
 ## What it models: the Cortex-M
@@ -329,6 +331,166 @@ and the reference manual (RM0090) where it does not:
 Out of reset, the timer and the core see the same clock; EmbSim does not
 model the clocks' frequencies themselves -- its time is the core's
 cycles, whatever the PLL is set to.
+
+## The Raspberry Pi Pico
+
+No QEMU has an RP2040; EmbSim's `pico` board is the Raspberry Pi Pico:
+the RP2040's core 0 (a Cortex-M0+ with two NVIC priority bits), its ROM
+at 0, 2 MiB of flash at `0x10000000` (and its XIP aliases at
+`0x11000000`, `0x12000000` and `0x13000000`), 264 KiB of SRAM at
+`0x20000000`, the XIP cache's 16 KiB as SRAM at `0x15000000` and the USB
+controller's 4 KiB of DPRAM at `0x50100000`. Its peripherals are the
+Pico SDK's `RP2040.svd` (`src/rp2040/hardware_regs/` in the SDK), found
+with `--svd FILE` or in `EMBSIM_SVD_PATH`.
+
+```sh
+embsvd RP2040.svd --header RP2040.h --startup startup.c \
+    --ld rp2040.ld --flash 0x10000000:2M --ram 0x20000000:264K
+embcc --target=thumbv6m-none-eabi --opt=speed -c startup.c main.c
+embcc --target=thumbv6m-none-eabi --link-script=rp2040.ld startup.o main.o -o fw.elf
+EMBSIM_SVD_PATH=$PICO_SDK_PATH/src/rp2040/hardware_regs embsim fw.elf --board pico
+```
+
+**Building for it.** For the RP2040, embsvd's startup holds a boot2 --
+the flash's first 256 bytes, which the bootrom runs -- and its linker
+script puts it first, the vector table after it at `0x10000100` (the
+flash must be given at `0x10000000`). embsvd's boot2 sets the XIP up for
+03h reads, which any SPI flash answers, as the SDK's
+`boot2_generic_03h` does, and its last word is the CRC-32 the bootrom
+checks. An image built with the SDK's own boot2 (`boot2_w25q080`, the
+Pico's) boots the same way.
+
+**The boot.** EmbSim does not run the bootrom's code; its ROM does what
+the bootrom does to boot from flash (the datasheet's 2.8.1):
+
+- the CRC-32 (polynomial `0x04c11db7`, seed `0xffffffff`, not
+  reflected) of the flash's first 252 bytes must be its next word, or
+  the run ends at once (status 3), as the part would go on to its USB
+  boot:
+
+  ```text
+  embsim: the RP2040's bootrom finds no boot2 in flash: the CRC-32 of its first 252 bytes is 0x8ecd5dc8, the word after them 0x0d21ec2c
+  embsim: no boot2 in flash: the part would wait for USB (its BOOTSEL mode); 0 instructions, 0 cycles (est.)
+  ```
+
+- boot2 is copied to the top 256 bytes of SRAM (`0x20041f00`) and
+  entered with `lr` 0, as the bootrom enters it, with the peripherals as
+  the bootrom leaves them: PADS_BANK0, IO_QSPI and PADS_QSPI out of
+  reset, the QSPI pins' function the XIP's, GPIO26-29's input enables
+  off, the rest in reset;
+- the ROM's vector table, its header (`'M' 'u'`, version 1, ROM version
+  3: a B2) and its table lookup are there, but the lookup finds no
+  function: the bootrom's functions -- flash programming, the float
+  library, `memcpy`, `reset_usb_boot` -- are not modelled, so an SDK
+  program that calls them (`pico_stdlib`'s) does not run.
+
+**The bus.** As on the part (2.1.2 and 2.1.4):
+
+- each peripheral's registers are again at +0x1000, where a write XORs
+  its bits into the register, at +0x2000 (sets them) and at +0x3000
+  (clears them), as the SDK's `hw_xor_bits`, `hw_set_bits` and
+  `hw_clear_bits` use them; a bit the write does not name is not written
+  at all. The SIO has none. A read there reads the register;
+- a byte or halfword write to a register writes all of it, the data
+  repeated across the bus: `strb` of `0xa5` writes `0xa5a5a5a5`;
+- a peripheral RESETS holds in reset reads its registers' reset values
+  and ignores writes, and the first such access is a warning, as a
+  clock-gated STM32 peripheral's is:
+
+  ```text
+  embsim: warning: a read at pc 0x100003c2: UART0.UARTCR reads its reset value while it is held in reset (RESETS.RESET.UART0 is 1)
+  ```
+
+  The datasheet does not say what such an access does; the registers
+  held at their reset values is EmbSim's reading. Out of reset is what
+  RESET_DONE says: at once.
+
+**The clocks.** The core runs at clk_sys, which the program sets up, and
+the board reports its time at it:
+
+- **ROSC** runs at 6.5 MHz, the datasheet's nominal boot frequency
+  (2.17.1; its 2.15.2.1 says "typically 6MHz"); clk_ref and clk_sys
+  run from it out of reset;
+- **XOSC** is the Pico's 12 MHz crystal. CTRL.ENABLE anything but
+  DISABLE (`0xd1e`) enables it -- an invalid value sets BADWRITE, as the
+  SDK's `xosc_init` does --, and STATUS.STABLE sets once
+  STARTUP.DELAY x 256 of its cycles have passed (x 4 with X4). COUNT
+  counts down at 12 MHz;
+- **PLL_SYS and PLL_USB** run when PWR's PD and VCOPD are clear, at
+  XOSC / REFDIV x FBDIV_INT / (POSTDIV1 x POSTDIV2) once POSTDIVPD is
+  clear too, and CS.LOCK sets at once (16 <= FBDIV <= 320);
+- **the clock generators**: clk_ref (from the ROSC, its aux mux or the
+  XOSC) and clk_sys (clk_ref or its aux mux) switch glitchlessly --
+  SELECTED is one-hot of SRC at once --; clk_peri, clk_usb, clk_adc and
+  clk_rtc run while CTRL.ENABLE is set; each divides by its DIV (INT and
+  FRAC). FC0 measures any of them, done at once: FC0_RESULT in kHz and
+  32nds;
+- **the watchdog's tick** divides clk_ref by TICK.CYCLES into the
+  microsecond the timer counts (the SDK's `watchdog_start_tick`).
+  Out of reset CYCLES is 0, which EmbSim takes as no tick: the timer
+  does not count until the program starts it. The watchdog's counter,
+  loaded by LOAD, goes down by two each tick while CTRL.ENABLE (the
+  RP2040-E1 erratum); at zero, or on CTRL.TRIGGER, it resets the chip,
+  which ends the run (status 0); SCRATCH0-7 keep what is written.
+
+**The models**:
+
+- **TIMER**: the 64-bit microsecond count (TIMERAWH, TIMERAWL; TIMELR's
+  read latches the high half TIMEHR then reads; TIMELW then TIMEHW write
+  it); PAUSE. ALARM0-3: a write arms the alarm, and when the count's low
+  half reaches it INTR's bit sets, ARMED's clears and, with INTE,
+  TIMER_IRQ_n is raised. Writing ARMED disarms.
+- **IO_BANK0, PADS_BANK0**: each GPIO's function (CTRL.FUNCSEL) drives
+  it -- SIO from GPIO_OUT and GPIO_OE, a UART's TX and RTS high (idle) --,
+  through OUTOVER and OEOVER and the pad's OD; the pin is its output,
+  else what the board drives, else its pad's pull (both: the bus
+  keeper), else 0. Its input (IE) goes to GPIO_IN through INOVER, and to
+  the interrupts through IRQOVER: INTR0-3's level bits follow it, their
+  edge bits latch its rises and falls until written with 1, and
+  PROC0_INTS raises IO_IRQ_BANK0. GPIOn_STATUS shows each stage.
+- **SIO**, as core 0 sees it: CPUID 0; GPIO_OUT, GPIO_OE and their
+  QSPI-bank twins with SET, CLR and XOR; GPIO_IN and GPIO_HI_IN; the 32
+  spinlocks (a read claims, `1 << n`, or 0 when claimed; a write
+  releases); the divider -- results at once, CSR.READY after 8 cycles,
+  DIRTY until QUOTIENT is read; a divisor of 0, which the datasheet
+  leaves undefined, gives a quotient of all ones (-1 signed, 1 for a
+  negative dividend) and the dividend as remainder --; the FIFOs, core
+  0's side: eight words out (RDY, WOF), nothing ever in (ROE), and
+  SIO_IRQ_PROC0.
+- **UART0, UART1** (PL011): UARTDR's bytes go to stdout, at once while
+  UARTEN and TXE are set and clk_peri runs, else they wait in the FIFO
+  (32 with FEN); UART0's receiver is the run's input (`--input`);
+  UARTFR from the FIFOs; UARTRIS: TXRIS as a byte goes and the FIFO is
+  at its level, RXRIS at the receive level, RTRIS at once below it;
+  UARTMIS raises UART0_IRQ or UART1_IRQ. Every UART writes to stdout,
+  whatever its pins' function.
+- **SSI and the flash**: a W25Q16JV behind the SSI, its contents the
+  flash's (the XIP window reads them directly). DR0's frames in TX/RX
+  mode are a command and its answer; in EEPROM-read mode the
+  instruction, the address (standard, dual or quad framing) and
+  CTRLR1.NDF + 1 frames back. A command ends when the program reads SR
+  or DR0 after writing, or disables the SSI -- unless IO_QSPI holds the
+  chip select low, as the SDK's `flash_do_cmd` does. READ, FAST READ,
+  the quad I/O fast read and its continuous mode, the status registers
+  (QE 0 at power-up), WRITE ENABLE, JEDEC ID (`ef 40 15`), the unique ID
+  (EmbSim's: `456d6253 696d0001`), PAGE PROGRAM and the erases, which
+  finish at once.
+
+Where RP2040.svd's reset values are not the part's, the datasheet's are
+used: SYSINFO.CHIP_ID `0x20002927` (a B2) and PLATFORM (ASIC), XOSC.CTRL
+`0x00d1eaa0`, ROSC.STATUS (running), PSM.DONE (every domain powered),
+CHIP_RESET.HAD_POR, the SSI's SR (its FIFOs empty).
+
+**The board.** The LED on GP25, lit high; GP24 is VBUS sense, high (the
+board on USB); `--set BOOTSEL=pressed` pulls the QSPI chip select low,
+which the program reads with the select let go (IO_QSPI's OEOVER), as
+the SDK's `get_bootsel_button` does. The LED's changes are lines on
+stderr, at the board's time:
+
+```text
+pico: LED on (GP25) at 1.487 ms
+pico: LED off (GP25) at 1.987 ms
+```
 
 ## What it models: the RISC-V core
 
@@ -1687,6 +1849,17 @@ On the Cortex-M:
 - Peripherals beyond the UART, SysTick, the NVIC and DWT's cycle
   counter, except as an SVD file's registers (`--svd`) and the
   STM32F405's models.
+- On the Pico: core 1 (it stays in the bootrom's wait for its vector,
+  so `multicore_launch_core1` waits for ever); the bootrom's code and
+  functions; the interpolators; DMA, PIO, PWM, the ADC, SPI, I2C, the RTC,
+  USB and the XIP cache's controls, which are their registers alone; the
+  ROSC's frequency controls, the PLLs' lock time, the clock generators'
+  stop and start cycles, GPOUT and GPIN, the resus, SLEEP and DORMANT;
+  the watchdog's selections of what it resets, and booting again after
+  it; the pads' drive, slew and Schmitt trigger; the UARTs' baud rate
+  timing and line format; SysTick's external reference (the microsecond
+  tick: SysTick counts the core's clock); the SRAM's unstriped alias at
+  `0x21000000`.
 - On the STM32F405: DMA, the ADC, SPI, I2C, EXTI and the rest are their
   registers alone; RCC's clock frequencies, its interrupts and its reset
   registers; GPIO's LCKR and pin inputs from outside; the USARTs'
@@ -1842,6 +2015,27 @@ records each run, replays it with other bytes on stdin, and requires the
 same output, `--count`, `--stats` and status; replays a gdb session's
 writes and watchpoint without gdb; and refuses a record with a byte
 changed, a byte a step late, another image or another board.
+
+**The Pico.** No QEMU has an RP2040: `tests/golden/embsim-pico.sh`
+builds `embsim-pico/pico.c` from the header, startup and linker script
+embsvd writes from RP2040.svd -- embsvd's boot2 against llvm-mc's
+assembly of its source and the bootrom's CRC -- and holds EmbSim's ROM
+to llvm-mc's assembly of its source and 123 values to the RP2040's
+datasheet: the boot as the bootrom and boot2 leave it, a peripheral held
+in reset, the crystal's startup delay timed by the timer, the PLL and
+clocks as the SDK's `clocks_init` sets them (FC0 measuring each),
+UART0's divisors (the datasheet's 67 and 52 at 115200), a byte waiting
+for clk_peri and one lost to a full transmitter, the atomic aliases, the
+datasheet's `narrow_io_write` example, the timer's 64 bits, latch and
+alarm, the watchdog's double count, the LED's blinks 500 us apart,
+GPIO_STATUS through the overrides, the pads, an edge's interrupt, the
+divider, spinlocks and FIFOs, the flash's IDs and data through the SSI.
+And BOOTSEL, UART0's input, a bad boot2 refused, the watchdog's reset,
+the Pico SDK's own `boot2_w25q080` (assembled by clang) booting through
+the SSI and the flash's status registers; and the exec corpus from the
+Pico's flash and boot against QEMU's micro:bit -- the same ARMv6-M --
+some 250 programs to the instruction and the cycle, the boot's 28
+instructions apart.
 
 **RISC-V.** `tests/golden/embsim-riscv.sh` does the same on virt with
 qemu-system-riscv32 and -riscv64: the exec corpus on RV32 with ilp32

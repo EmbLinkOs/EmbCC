@@ -60,7 +60,9 @@ static void usage(void)
           "       embsim --svd FILE.svd --svd-map\n"
           "boards: lm3s6965evb (default), mps2-an385, mps2-an386,\n"
           "        mps2-an500, microbit, stm32f405 (its SVD: --svd or\n"
-          "        EMBSIM_SVD_PATH), virt (RISC-V), uno (AVR), malta (MIPS),\n"
+          "        EMBSIM_SVD_PATH), pico (the Raspberry Pi Pico's RP2040: its\n"
+          "        SVD, the Pico SDK's RP2040.svd), virt (RISC-V), uno (AVR),\n"
+          "        malta (MIPS),\n"
           "        pic32mz2048efh100, explorer16-32, curiosity-pic32mz-ef-2\n"
           "        (PIC32MZ: its ATDF, from --dfp DIR, --svd FILE.atdf or\n"
           "        EMBSIM_SVD_PATH), pic24fj1024gb610, explorer16-32-pic24\n"
@@ -78,7 +80,8 @@ static void usage(void)
           "        S4, S5, S6=pressed or released; explorer16-32-pic24,\n"
           "        explorer16-32-pic32mx and explorer16-32-dspic33: the same,\n"
           "        and S3;\n"
-          "        curiosity-pic32mz-ef-2: SW1, SW2, SW3, SW4=pressed or released\n",
+          "        curiosity-pic32mz-ef-2: SW1, SW2, SW3, SW4=pressed or released;\n"
+          "        pico: BOOTSEL=pressed or released\n",
           stderr);
     exit(2);
 }
