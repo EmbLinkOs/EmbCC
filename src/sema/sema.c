@@ -2187,7 +2187,9 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             sc->vars[i].used = 1;     /* -Wunused-variable: it was read */
             e->var_index = sc->vars[i].alias ? sc->vars[i].alias - 1 : i;
             e->ty = sc->vars[e->var_index].ty;
-            e->gref = sc->vars[i].g; /* set for a static local */
+            e->gref = sc->vars[i].g; /* set for a static local, and */
+            if (e->gref)            /* a block-scope extern, which the */
+                e->gref->used = 1;  /* object then names (undefined) */
             e->asm_reg = sc->vars[i].asm_reg; /* register-asm binding */
         } else {
             /* enumerators fold to their constant right here */
