@@ -4009,7 +4009,7 @@ static struct expr *parse_unary(struct parser *ps)
                     "expected a label name after '&&'");
         ped_at(ps, t->line, t->col, 0, "a label's address");
         e = new_expr(EXPR_LABELADDR, t->line, t->col);
-        e->name = cur(ps)->text;
+        e->name = label_map(ps, cur(ps)->text);   /* a __label__'s too */
         advance(ps);
         return e;
     case TOK_PLUSPLUS:
