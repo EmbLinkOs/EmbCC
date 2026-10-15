@@ -105,6 +105,9 @@ struct type {
                              * this); NULL on an original. */
     struct type *pointee;   /* TY_PTR: target; TY_ARRAY: element */
     int count;              /* TY_ARRAY: element count */
+    int zero_len;           /* TY_ARRAY: count 0 written or initialized --
+                             * `T a[0]`, `T a[] = {}` (GNU C) -- so complete
+                             * at size 0, where `T a[]` is incomplete */
     /* TY_ARRAY of variable length (C99 VLA, or a fixed count of VLA
      * elements): count is 0 and the element count is vla_len's run-time
      * value. vla_size is the hidden local (sema) holding sizeof this
@@ -236,6 +239,7 @@ int ty_is_complex(const struct type *t);
  * real in st0 and imaginary in st1), 0 otherwise. */
 int ty_x87_ret(const struct type *t);
 /* A variable-length array of elem, `len` elements (a VLA). */
+struct type *ty_array_sized(struct type *elem, int count);
 struct type *ty_vla(struct type *elem, struct expr *len);
 /* t is an array whose size is only known at run time. */
 int ty_is_vla(const struct type *t);

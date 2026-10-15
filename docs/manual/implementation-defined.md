@@ -142,13 +142,13 @@ A byte that is not part of an allowed character is an error:
 embcc: f.c:1: error: byte 0xcc is not part of a character C allows here (identifiers take UTF-8 letters, C11 Annex D)
 ```
 
-Universal character names (`é`) are not accepted in identifiers, and
-neither is `$`:
+Universal character names (`é`) are not accepted in identifiers:
 
 ```text
 embcc: f.c:1: error: character '\' is not supported yet
-embcc: f.c:1: error: character '$' is not supported yet
 ```
+
+`$` is accepted anywhere in an identifier, as in GCC (`a$b`, `$tmp`).
 
 *The number of significant initial characters in an identifier
 (C17 5.2.4.1, 6.4.2).*
@@ -867,6 +867,17 @@ that a build can be reproduced. `__TIMESTAMP__` is not defined.
 | Nesting of `#include` | 50: `#include nested too deeply` | 15 |
 | Nesting of conditional inclusion | 64: `conditionals nested too deeply` | 63 |
 | Parameters in one macro definition | 127: `more than 127 macro parameters` | 127 |
+
+### Translation limits
+
+| Limit | EmbCC | C17 minimum |
+|---|---|---|
+| Nesting of parenthesized expressions, blocks and statements, structure definitions, unary operators and casts | About 2,000 levels on a host with an 8 MB stack: deeper is `this nests too deeply to compile`, an error rather than a stack overflow | 63 expressions, 127 blocks, 63 structures |
+| Parameters in one function definition, arguments in one call | 32: `more than 32 parameters`, `more than 32 call arguments` | 127 |
+| Dimensions in one array declarator | 16: `more than 16 array dimensions` | 12 declarators of any kind |
+| Bytes in one object | 2147483647: `... is too large: EmbCC's objects hold at most 2147483647 bytes` | 65535 |
+
+The parameter limit is below the standard's minimum.
 
 ### Predefined macros that describe the implementation
 

@@ -41,6 +41,16 @@ void diag_register_expansion(const char *file, int line, const char *macro);
  * exit(1). line 0 omits the line; a registered source adds the line + caret. */
 EMBCC_NORETURN void diag_fatal(const char *file, int line, const char *fmt, ...);
 
+/* A deep recursion's check: when the compile has used more than `share`
+ * eighths of the stack since main() noted its frame and the stack's size
+ * (stack_note_base, from plat_stack_size), an error at file:line that
+ * the code nests too
+ * deeply, instead of an overflow. Parsing and the passes after it each
+ * start again from main's frame, so each may take most of it; the rest
+ * is for whatever a checked recursion calls. */
+void stack_note_base(const void *base, unsigned long size);
+void stack_check(const char *file, int line, int share);
+
 /* As diag_fatal, but with a column for the caret. */
 EMBCC_NORETURN void diag_at(const char *file, int line, int col, const char *fmt, ...);
 
@@ -63,6 +73,7 @@ int diag_warn_opt(const char *file, int line, int col, const char *name,
                    const char *fmt, ...);
 int diag_warning_enabled(const char *name);
 int diag_warning_implied(const char *name);  /* on by its parent only */
+int diag_warning_is_error(const char *name); /* -Werror[=name] */
 /* A comment the preprocessor saw that marks a fall-through on purpose
  * (one saying `fall through`), and whether one is on lines lo..hi of file. */
 void diag_fallthrough_comment(const char *file, int line);

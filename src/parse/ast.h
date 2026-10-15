@@ -46,6 +46,12 @@ struct expr {
     enum expr_kind kind;
     int line;
     int col;              /* 1-based column, for caret diagnostics (0 = unknown) */
+    int quiet;            /* parsed in a system header, a system macro or
+                           * after __extension__: sema's -pedantic
+                           * diagnostics say nothing of it */
+    int cast_value;       /* sema: a cast's value given an object -- `(union
+                           * u)x` as a compound literal -- which is not an
+                           * lvalue */
     struct type *ty;      /* set by sema on every node */
     struct type *undecayed; /* sema: original array type when ty is the
                              * decayed pointer (sizeof needs it) */
@@ -320,6 +326,9 @@ struct global {
     int is_static;
     int is_extern;        /* THIS declaration was 'extern' */
     int is_weak;          /* __attribute__((weak)) */
+    const char *alias_of; /* __attribute__((alias("t"))): another name for
+                           * variable t, defined in this file; it has no
+                           * storage of its own */
     /* __attribute__((aligned(N))) / _Alignas(N) on the object itself,
      * 0 when none. NOT the same as its type's alignment, and it was
      * silently dropped: a page table declared aligned(4096) was laid
@@ -381,6 +390,8 @@ struct func {
     const char *section;  /* __attribute__((section("s"))): its code goes
                            * to section s rather than .text */
     int is_noreturn;      /* __attribute__((noreturn)) / _Noreturn */
+    int falls_off;        /* sema: returns a value, and control can reach
+                           * its closing brace (--warn=return-type) */
     int is_nothrow;       /* __attribute__((nothrow)): no exception leaves it
                            * (a call of it needs no landing pad) */
     /* __attribute__((constructor)) / ((destructor)): its address goes in

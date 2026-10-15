@@ -75,7 +75,7 @@ operators](#feature-test-operators), with the limits described there.
 | [Local labels](#local-labels) (`__label__`) | Supported |
 | [Case ranges](#case-ranges) (`case 1 ... 5:`) | Supported |
 | [Designated range initializers](#designated-range-initializers) (`[2 ... 5] = x`) | Supported |
-| [Zero-length arrays](#zero-length-and-flexible-arrays) | Supported as a structure member |
+| [Zero-length arrays](#zero-length-and-flexible-arrays) | Supported |
 | [Static initialization of a flexible array member](#zero-length-and-flexible-arrays) | Supported |
 | [`__int128`, `__real__`, `__imag__` and other types](#additional-types) | See the section |
 | [Alternate keywords](#alternate-keywords) (`__asm__`, `__inline__`, ...) | Supported |
@@ -86,8 +86,13 @@ operators](#feature-test-operators), with the limits described there.
 | Anonymous structures and unions as members | Supported |
 | Conditional with the middle operand omitted, `x ?: y` | Supported; `x` is evaluated once |
 | A structure or union with no members | Supported; its size is 0 |
+| An extra `;` at file scope (`};` after a function) | Supported; an empty declaration |
+| A `?:` with one `void` arm (`c ? f() : 1`) | Supported; the result is `void` |
+| A forward reference to an `enum` (`enum e *p;` before its body) | Supported |
+| An object of type `void`, `extern void _text;`, taken the address of | Supported, with GCC's warning on `&_text` unless it is `const` |
 | An asm label, `int f(void) __asm__("name");` | Supported |
-| [Constructs EmbCC does not support](#gnu-extensions-that-are-not-supported) | Nested functions, arithmetic on `void *`, cast to a union, integer complex types, `$` in identifiers, `return` of a `void` expression |
+| [Arithmetic on `void *`, casts to a union and other small forms](#smaller-gnu-c-forms) | Supported |
+| [Constructs EmbCC does not support](#gnu-extensions-that-are-not-supported) | Nested functions, integer complex types, a conditional or cast as an lvalue, vector types |
 
 ### Statement expressions
 
@@ -205,8 +210,8 @@ sub:
 ```
 
 Arithmetic on a label address -- `&&b - &&a`, `&&a + n` -- is in bytes,
-as on a `char *` (on AVR, in words, since the address is one); `void *`
-arithmetic is still refused anywhere else (`arithmetic on void *`). A
+as on a `char *` (on AVR, in words, since the address is one), the way
+arithmetic on a `void *` is (see [Smaller GNU C forms](#smaller-gnu-c-forms)). A
 label address cannot initialize an object outside its function: at
 file scope it is refused with `a static initializer must be a constant,
 a string literal, or the address of a global`. A label whose address is
@@ -253,15 +258,21 @@ element from `first` to `last`:
 int widths[10] = { [2 ... 5] = 8, [7] = 16 };
 ```
 
+GCC's older spellings of a designator are accepted too, with a
+`--pedantic` warning: `{ x: 1 }` for `{ .x = 1 }`, and `[3] 7`, without
+the `=`, for `[3] = 7`.
+
 ### Zero-length and flexible arrays
 
 A structure member may be declared as an array of length zero, the
 pre-C99 form of a flexible array member. It contributes no size.
-An object that is itself an array of length zero is refused:
 
-```text
-embcc: z.c:1: error: 'z' has incomplete type int[0]
-```
+An object may be an array of length zero too: `int z[0];`, or `int z[] =
+{};`, whose empty initializer gives it no elements. Its size is 0, and
+it still has an address: a local takes one byte of the frame and a
+global one byte of its section, so two of them never compare equal.
+`int z[];` with no initializer is still an incomplete type. `--pedantic`
+warns about each (`an array of size 0 is a GNU extension, not ISO C`).
 
 A structure with a flexible array member may be initialized statically,
 including its trailing array:
@@ -308,6 +319,23 @@ headers written for `-ansi` work:
 | `__const__`, `__const` | `const` |
 | `__extension__` | Nothing; it is predefined as an empty macro |
 
+### Smaller GNU C forms
+
+| Form | Meaning |
+|---|---|
+| Arithmetic on a `void *` or a function pointer (`p + 1`, `p++`, `p - q`) | In bytes, as on a `char *` |
+| `sizeof(void)`; `sizeof` of a function type, of a function's name, or of a `void` expression | 1 |
+| `return f();` in a `void` function, where `f` returns `void` | `f` is called, and nothing is returned |
+| `$` in an identifier | Part of the name, at its start, middle or end |
+| A cast to a union type, `(union u)x` | The union `u` with `x` in its first member of `x`'s type. The result is a value, not an lvalue. An `x` whose type no member has is refused: `cannot cast double to union u: no member has that type` |
+| A cast of a structure to its own type, `(struct s)x` | `x`'s value |
+
+`--pedantic` warns about each of these (`... is a GNU extension, not ISO
+C`), except in system headers and after `__extension__`;
+`--pedantic-errors` refuses them. `$` gets the warning under `--std=c89`
+and `gnu89` only, as in GCC: C99 allows an implementation to accept
+other characters in identifiers.
+
 ### GNU extensions that are not supported
 
 Each of these is refused with the diagnostic shown.
@@ -315,17 +343,9 @@ Each of these is refused with the diagnostic shown.
 | Construct | Diagnostic |
 |---|---|
 | Nested function definitions | `expected ';' before '{' [E0002]`, at the inner function's body |
-| Arithmetic on `void *` | `arithmetic on void *`, and `++/-- on void *` |
-| Arithmetic on a function pointer | `arithmetic on function *` |
-| `sizeof(void)` | `sizeof(void)` |
-| Cast to a union type, `(union u)x` | `cannot cast to union u` |
-| `$` in an identifier | `character '$' is not supported yet` |
-| `return f();` in a `void` function, where `f` returns `void` | `returning a value from void 'g'` |
+| Integer complex types (`_Complex int`) | `invalid _Complex type (only float, double and long double _Complex are supported)` |
 | A conditional or cast as an lvalue | `assignment target must be a variable, *pointer, or member` |
 | Vector types; see [Vector extensions](#vector-extensions) | |
-
-`sizeof` applied to a function designator gives the size of a pointer
-to the function, not 1 as in GCC.
 
 ## Attributes
 
@@ -402,7 +422,7 @@ embcc: attr.c:1: warning: attribute 'frobnicate' is not one EmbCC knows, and is 
 | Attribute | Effect |
 |---|---|
 | `aligned(N)`, `aligned` | The function's first instruction is at an address that is a multiple of `N` (16 with no argument). It counts on any declaration, and the strictest wins. `__alignof__` of the function gives `N`, or without the attribute the instruction set's own boundary: 1 on x86-64, AVR and RX, 2 on Thumb, ColdFire, TriCore and RISC-V with compressed instructions, and 4 elsewhere, as GCC answers |
-| `alias("target")` | The function is another name for `target`, which must be a function defined in the same file and not itself an alias. The declaration with `alias` cannot have a body. Combine with `weak` for a weak alias. ELF only; see [Object formats](#object-formats) |
+| `alias("target")` | The function or variable is another name for `target`, which must be a function, or a variable, defined in the same file and not itself an alias. The declaration with `alias` cannot have a body or an initializer, and a variable alias has no storage of its own: inside the file it is `target`, to the optimizer as well. Combine with `weak` for a weak alias. ELF only; see [Object formats](#object-formats) |
 | `always_inline` | Lifts the inliner's size limit for calls to this function, at every level including `--opt=none`; see [Inlining](optimization.md#inlining) |
 | `constructor`, `destructor` | The function's address is placed in `.init_array` or `.fini_array`, for the startup code to call before `main` or at exit. On a bare-metal target the program's own startup code walks the tables; see [Startup code](embedded.md#startup-code-and-the-linkers-symbols). A `static` one is kept although nothing calls it. ELF only |
 | `deprecated`, `deprecated("message")` | A call, a read, or taking the address warns under [`--warn=deprecated-declarations`](diagnostics.md#--warndeprecated-declarations), on by default. The message text is not printed |
@@ -454,9 +474,7 @@ different `pcs` conventions.
 | `used` | A `static` variable is emitted even if nothing refers to it |
 | `visibility("...")` | As for functions |
 | `weak` | As for functions: a weak definition, or a weak reference whose address is null when nothing defines it |
-
-`alias` on a variable is refused: `alias attribute on variable 'x' is
-not supported (functions take it)`.
+| `alias("target")` | As for functions: another name for `target`, a variable defined in this file, with no storage of its own (`extern int b __attribute__((alias("a")));`). ELF only |
 
 ### Type attributes
 
@@ -470,7 +488,7 @@ not supported (functions take it)`.
 | `aligned` | `enum` | Refused: `an aligned enum is not supported (an enum here is int, or the type its values need)` |
 | `deprecated` | a type | Accepted; using the type does not warn |
 | `may_alias` | a type | Accepted with no effect; EmbCC performs no type-based alias analysis |
-| `mode(M)` | an integer `typedef` or declaration | The integer type of mode `M`'s width, keeping the written signedness: `QI` 1 byte, `HI` 2, `SI` 4, `DI` 8, `TI` 16, `byte` 1, `word` and `pointer` the target's register and pointer width (glibc's `<sys/types.h>` writes these). Another mode is refused: `__attribute__((mode(V4SI))) is not supported: EmbCC takes the integer modes QI, HI, SI, DI, TI, byte, word and pointer` |
+| `mode(M)` | an integer type: among or before a declaration's specifiers, between them and the declarator, on a typedef, or after a file-scope variable's name | The integer type of mode `M`'s width, keeping the written signedness: `QI` 1 byte, `HI` 2, `SI` 4, `DI` 8, `TI` 16, `byte` 1, `word` and `pointer` the target's register and pointer width (glibc's `<sys/types.h>` writes these; `typedef int __attribute__((mode(SI))) int_t;`, a member `E __attribute__((mode(byte))) e;`, an enum). Another mode is refused: `__attribute__((mode(V4SI))) is not supported: EmbCC takes the integer modes QI, HI, SI, DI, TI, byte, word and pointer`. After a local's, a member's or a parameter's name it is refused: `__attribute__((mode)) is not supported here` |
 | `transparent_union` | a `union` | A parameter of the union type takes any of its members' types, and is passed as its first member is (glibc's `<sys/socket.h>` under `_GNU_SOURCE`). Defining a function that receives one is refused off x86-64 and AArch64, where that is not yet checked: `a transparent_union parameter, which EmbCC receives only on x86-64 and AArch64` |
 
 `packed` applies to a whole structure or union. Written on a single
@@ -792,7 +810,7 @@ function name, such as `memcpy` or `printf`, as a builtin, with or without
 A `__builtin_` name EmbCC does not implement is an undeclared function:
 
 ```text
-embcc: f.c:1:29: error: '__builtin_fma' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
+embcc: f.c:1:29: error: '__builtin_shufflevector' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
 ```
 
 Whether a builtin is available does not depend on the target, but its
@@ -838,6 +856,11 @@ to, and return 1 if the stored value differs from the mathematical
 result and 0 otherwise. `a` and `b` are integers of any type; `res`
 points to an integer. They compile on every target.
 
+`__builtin_add_overflow_p(a, b, c)`, `__builtin_sub_overflow_p` and
+`__builtin_mul_overflow_p` return whether the same operation overflows
+the type of `c`. The value of `c` is not used; it is evaluated for its
+side effects only.
+
 The result is `int`, not `_Bool` as in GCC. A wrong operand is refused:
 `__builtin_add_overflow: operand 1 must be an integer, got double`, or
 `__builtin_add_overflow: the third argument points at the integer to
@@ -870,6 +893,7 @@ are refused (`the RV32 backend cannot lower a 128-bit value yet ...`).
 | `__builtin_isinf_sign(x)` | 1 for positive infinity, -1 for negative infinity, 0 otherwise |
 | `__builtin_isfinite(x)` | 1 if `x` is neither infinite nor NaN |
 | `__builtin_isnormal(x)` | 1 if `x` is a normal number: not zero, subnormal, infinite or NaN |
+| `__builtin_isinff(x)`, `isinfl`, `isnanf`, `isnanl`, `finite`, `finitef`, `finitel` | The same as `__builtin_isinf`, `__builtin_isnan` and `__builtin_isfinite` |
 
 `fabs` and `copysign` return the floating type their suffix names; the
 others return `int`. The classification builtins take a floating
@@ -877,6 +901,28 @@ argument of any type, and refuse an integer (`__builtin_isnan takes a
 floating-point argument`). All of them operate on the bits of the value:
 they do not round, raise no floating-point exception, and call no
 library.
+
+### Floating-point comparisons
+
+| Builtin | Result |
+|---|---|
+| `__builtin_isgreater(x, y)`, `isgreaterequal`, `isless`, `islessequal` | `x > y`, `x >= y`, `x < y`, `x <= y`: 0 when either is a NaN |
+| `__builtin_islessgreater(x, y)` | `x < y \|\| x > y`: 0 when either is a NaN |
+| `__builtin_isunordered(x, y)` | 1 when either is a NaN |
+| `__builtin_iseqsig(x, y)` | `x == y` |
+
+The operands are compared in their common real type, and each is
+evaluated once. They are `<math.h>`'s comparison macros; EmbCC does not
+track floating-point exceptions, so the quiet and signaling forms are
+the same comparisons.
+
+### Type classification
+
+`__builtin_classify_type(x)` is GCC's class of `x`'s type, after an
+array or function decays and an integer is promoted: 1 for an integer
+(an `enum` and a `_Bool` among them), 5 for a pointer, 8 for a real
+floating type, 9 for a complex one, 12 for a structure, 13 for a union
+and 0 for `void`. `x` is not evaluated.
 
 They compile on every target. A 16-byte `long double` (x87's 80-bit
 format on x86-64, IEEE binary128 on AArch64 ELF and Linux) is stored to
@@ -910,7 +956,7 @@ EmbCC's own `sqrtl` computes in `double` (see
 [Libraries](libraries.md)). On RISC-V, `__builtin_sqrtl` is refused
 with every other `long double` operation.
 
-### Memory and string functions
+### Library functions
 
 `__builtin_memcpy`, `__builtin_memmove`, `__builtin_memset`,
 `__builtin_memcmp`, `__builtin_memchr`, `__builtin_strlen`,
@@ -920,6 +966,21 @@ library functions under another name: each becomes a call to the
 function without the prefix, which the program must provide at link
 time. `memcpy`, `memmove` and `memset` may also be expanded inline. See
 [What the compiler emits calls to](embedded.md#what-the-compiler-emits-calls-to).
+
+The other C and POSIX library functions GCC has a builtin for are the
+same, without the inline expansion: `__builtin_abort`, `__builtin_exit`,
+`__builtin_printf`, `__builtin_malloc`, `__builtin_stpcpy`,
+`__builtin_isdigit`, `__builtin_sin` and `__builtin_sinf`, among the
+functions of `<stdlib.h>`, `<stdio.h>`, `<string.h>`, `<strings.h>`,
+`<ctype.h>`, `<math.h>` (each with its `f` and `l` variant) and
+`<complex.h>`. When the program has no declaration of the function,
+EmbCC declares it with its C prototype, so `__builtin_printf` needs no
+`<stdio.h>`. `__builtin_memcmp_eq` is `memcmp`.
+
+The `_FORTIFY_SOURCE` forms, such as `__builtin___memcpy_chk(d, s, n,
+size)` and `__builtin___sprintf_chk(s, flag, size, fmt, ...)`, are the
+call without the object-size arguments. They are what GCC calls when the
+size is unknown, and EmbCC has no sizes to check.
 
 ### Object size
 
@@ -1009,7 +1070,6 @@ function that calls does. `__builtin_return_address(0)` is:
 what it returns to is the trap's. AVR refuses
 `__builtin_frame_address` there too.
 
-
 A function that calls `alloca` is never inlined.
 
 ### Variable arguments
@@ -1025,11 +1085,10 @@ A function that calls `alloca` is never inlined.
 ### Builtins that are not supported
 
 These are refused as undeclared functions, as shown in [General
-rules](#general-rules): `__builtin_abs`, `__builtin_assume`,
+rules](#general-rules): `__builtin_assume`,
 `__builtin_bitreverse32` and the other widths,
 `__builtin_rotateleft32` and the other rotates, `__builtin_complex`,
-`__builtin_fma`, `__builtin_fpclassify`, `__builtin_isgreater` and the
-other comparison macros' builtins, `__builtin_setjmp`,
+`__builtin_fpclassify`, `__builtin_setjmp`,
 `__builtin___clear_cache`, `__builtin_FUNCTION`,
 `__builtin_speculation_safe_value`, `__builtin_shufflevector`, the
 target-specific families (`__builtin_ia32_*`, `__builtin_avr_*`), and
