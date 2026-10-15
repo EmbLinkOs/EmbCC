@@ -1913,8 +1913,21 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         return 0;
     }
 
+    /* A C++ unit's C, as cxx/ wrote it, read as strict C17: the C23
+     * words (alignof, static_assert, nullptr, constexpr...) are names a
+     * C++98 program may use, and the C++ front end writes none of them;
+     * and what -pedantic has to say about C++ was said about the C++ */
+    int c_year = lex_c_year(), c_gnu = lex_c_gnu();
+    if (lang_cxx) {
+        lex_set_c_std(2017, 0);
+        lex_set_pedantic(0);
+    }
     struct unit *u = parse_unit(in, pp);
     time_mark("parse");
+    if (lang_cxx) {
+        lex_set_c_std(c_year, c_gnu);
+        lex_set_pedantic(diag_warning_enabled("pedantic"));
+    }
     if (parse_error_count()) {
         /* Every syntax error is out; the tree is not whole, so nothing
          * downstream runs on it (a later pass would only invent errors). */
@@ -4635,6 +4648,7 @@ int main(int argc, char **argv)
                     return 1;
                 }
                 cpp_set_cxx_std(year, strict);
+                lex_set_cxx_std(year, !strict);
                 /* The MACROS follow the year -- libstdc++ picks its
                  * code by them -- but the language EmbCC parses is
                  * C++20 whatever was asked. A lambda under -std=c++98
@@ -4727,6 +4741,7 @@ int main(int argc, char **argv)
             want_unwind = 0;
         } else if (strcmp(argv[i], "-fchar8_t") == 0) {
             cpp_set_cxx_char8(1);   /* (C++: char8_t is a keyword anyway) */
+            lex_set_cxx_char8(1);   /* ...from C++20; before, by this */
         } else if (strcmp(argv[i], "-fdiagnostics-parseable-fixits") == 0) {
             diag_set_parseable_fixits(1);
         } else if (strcmp(argv[i], "--fix") == 0) {

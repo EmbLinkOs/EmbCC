@@ -1444,6 +1444,8 @@ static int raw_string_at(struct src *s, const struct tbuf *out)
 {
     if (!predef_is_cxx() || s->p[0] != 'R' || s->p[1] != '"')
         return 0;
+    if (cxx_std < 2011 && !diag_in_system_header(s->file))
+        return 0;           /* C++98: R is a name, and then a string */
     /* R alone, or after u8, u, U, L — not the end of another name */
     size_t n = out->len;
     const char *o = out->p;
@@ -2155,8 +2157,10 @@ static void do_pragma(struct src *s, const char *text, size_t n,
  * does. src unchanged when there is nothing to replace. */
 static const char *trigraphs(const char *src)
 {
-    if (predef_is_cxx() || lex_c_gnu() || lex_c_year() >= 2023 ||
-        !strstr(src, "??"))
+    /* (and C++'s strict standards before C++17, which removed them) */
+    int on = predef_is_cxx() ? cxx_strict && cxx_std < 2017
+                             : !lex_c_gnu() && lex_c_year() < 2023;
+    if (!on || !strstr(src, "??"))
         return src;
     static const char from[] = "=(/)'<!>-", to[] = "#[\\]^{|}~";
     char *out = xmalloc(strlen(src) + 1), *o = out;

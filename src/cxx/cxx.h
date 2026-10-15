@@ -54,6 +54,11 @@ void cx_skip_balanced(void);         /* past a ( [ { group and its close */
 
 /* diagnostics at a token (exit) */
 void cx_error(const struct ctok *at, const char *fmt, ...);
+/* The C++ standard the code at t is read under: -std='s (lex_cxx_year),
+ * or all of EmbCC's in a system header (lex.h). cx_need_std: `what` is
+ * C++YEAR's, an error at t under an earlier standard, as GCC has it. */
+int cx_std_at(const struct ctok *t);
+void cx_need_std(const struct ctok *t, int year, const char *what);
 /* Where an error resumes (a jmp_buf *, NULL to stop the compile) and how
  * many have been reported. */
 extern void *cx_recover;

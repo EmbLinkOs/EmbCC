@@ -84,12 +84,14 @@ void lex_init_mode(struct lexer *lx, const char *file, const char *src,
     lx->line_start = src;
     lx->line = 1;
     lx->ext_on = lx->ext_depth = lx->sys_depth = 0;
+    lx->sys_file = diag_in_system_header(file);
     lex_next(lx);
 }
 
 /* the C standard -std= selects (lex_set_c_std): its year, and whether
  * GNU's extensions of it are on */
 static int g_c_year = 2017, g_c_gnu = 1, g_c_pedantic;
+static int g_cxx_year = 2020, g_cxx_gnu = 1, g_cxx_char8;
 
 static void skip_space_and_comments(struct lexer *lx)
 {
@@ -281,6 +283,37 @@ void lex_set_c_std(int year, int gnu)
 int lex_c_year(void) { return g_c_year; }
 int lex_c_gnu(void) { return g_c_gnu; }
 void lex_set_pedantic(int on) { g_c_pedantic = on; }
+void lex_set_cxx_std(int year, int gnu) { g_cxx_year = year; g_cxx_gnu = gnu; }
+void lex_set_cxx_char8(int on) { g_cxx_char8 = on; }
+int lex_cxx_char8(void) { return g_cxx_year >= 2020 || g_cxx_char8; }
+int lex_cxx_year(void) { return g_cxx_year; }
+int lex_cxx_gnu(void) { return g_cxx_gnu; }
+int lex_cxx_year_here(const struct lexer *lx)
+{
+    return lx->sys_file ? 9999 : g_cxx_year;
+}
+
+/* The C++ keywords a standard added: names in an earlier one, as GCC
+ * reads them (char8_t also with -fchar8_t) */
+static int cxx_keyword_on(const struct lexer *lx, const char *w)
+{
+    static const char *const cxx11[] = {
+        "alignas", "alignof", "char16_t", "char32_t", "constexpr",
+        "decltype", "noexcept", "nullptr", "static_assert", "thread_local",
+    };
+    static const char *const cxx20[] = {
+        "char8_t", "concept", "consteval", "constinit", "co_await",
+        "co_return", "co_yield", "requires",
+    };
+    int y = lex_cxx_year_here(lx);
+    for (size_t k = 0; k < sizeof cxx11 / sizeof cxx11[0]; k++)
+        if (!strcmp(w, cxx11[k]))
+            return y >= 2011;
+    for (size_t k = 0; k < sizeof cxx20 / sizeof cxx20[0]; k++)
+        if (!strcmp(w, cxx20[k]))
+            return y >= 2020 || (g_cxx_char8 && !strcmp(w, "char8_t"));
+    return 1;
+}
 int lex_quiet(const struct lexer *lx) { return lx->ext_on || lx->sys_depth > 0; }
 int lex_c23_ext(void) { return g_c_year >= 2023 || (g_c_gnu && !g_c_pedantic); }
 
@@ -781,7 +814,8 @@ static int cxx_number(struct lexer *lx, struct token *t)
     const char *p = lx->p, *q = p;
     /* the pp-number (5.9) */
     while (isalnum((unsigned char)*q) || *q == '_' || *q == '.' ||
-           (*q == '\'' && (isalnum((unsigned char)q[1]) || q[1] == '_')) ||
+           (*q == '\'' && (isalnum((unsigned char)q[1]) || q[1] == '_') &&
+            (!lx->cxx || lex_cxx_year_here(lx) >= 2014)) ||  /* C++14's */
            ((*q == '+' || *q == '-') &&
             (q[-1] == 'e' || q[-1] == 'E' || q[-1] == 'p' || q[-1] == 'P') &&
             !(p[0] == '0' && (p[1] == 'x' || p[1] == 'X') &&
@@ -1038,14 +1072,19 @@ static void lex_raw(struct lexer *lx)
     {
         const char *q = lx->p;
         int w = 0, adv = 0;
+        /* C++98 has only L: u"", U"" and u8"" are C++11's */
+        int cxx98 = lx->cxx && lex_cxx_year_here(lx) < 2011;
         pfx = 0;
-        if ((q[0] == 'L' || q[0] == 'U') && (q[1] == '"' || q[1] == '\'')) {
+        if (cxx98 && q[0] != 'L') {
+            /* (a name, then a literal) */
+        } else if ((q[0] == 'L' || q[0] == 'U') && (q[1] == '"' || q[1] == '\'')) {
             /* U"" is UTF-32. L"" is wchar_t, which is int-sized: two
              * bytes on AVR, where four-byte elements made p[1] of an
              * L"xyz" read the high half of 'x'. */
             w = q[0] == 'L' ? target_wchar_size() : 4; adv = 1;
         } else if (q[0] == 'u' && q[1] == '8' && (q[2] == '"' ||
-                   (q[2] == '\'' && (lx->cxx || lex_c23_ext())))) {
+                   (q[2] == '\'' && (lx->cxx ? lex_cxx_year_here(lx) >= 2017
+                                       : lex_c23_ext())))) {
             /* u8'c' is C++17's (char8_t from C++20) and C23's (unsigned
              * char): one UTF-8 code unit */
             w = 1; adv = 2;
@@ -1250,7 +1289,8 @@ static void lex_raw(struct lexer *lx)
             for (size_t i = 0; i < sizeof cxx_keywords / sizeof cxx_keywords[0];
                  i++)
                 if (strlen(cxx_keywords[i].word) == n &&
-                    memcmp(cxx_keywords[i].word, start, n) == 0) {
+                    memcmp(cxx_keywords[i].word, start, n) == 0 &&
+                    cxx_keyword_on(lx, cxx_keywords[i].word)) {
                     t->kind = cxx_keywords[i].kind;
                     t->text = xstrndup(start, n);
                     lx->p = start + n;
@@ -1263,6 +1303,7 @@ static void lex_raw(struct lexer *lx)
                             strcmp(keywords[i].word, "alignof") == 0 ||
                             strcmp(keywords[i].word, "alignas") == 0 ||
                             strcmp(keywords[i].word, "thread_local") == 0 ||
+                            strcmp(keywords[i].word, "nullptr") == 0 ||
                             strcmp(keywords[i].word, "_Countof") == 0 ||
                             strcmp(keywords[i].word, "_BitInt") == 0))
                 continue;        /* identifiers in C++, or its own */
@@ -1353,7 +1394,8 @@ static void lex_raw(struct lexer *lx)
         } else if (lx->p[1] == '<') {
             t->kind = TOK_SHL;
             lx->p++;
-        } else if (lx->cxx && lx->p[1] == '=' && lx->p[2] == '>') {
+        } else if (lx->cxx && lx->p[1] == '=' && lx->p[2] == '>' &&
+                   lex_cxx_year_here(lx) >= 2020) {     /* C++20's */
             t->kind = TOK_SPACESHIP;
             lx->p += 2;
         } else if (lx->p[1] == '=') {
@@ -1397,6 +1439,7 @@ static void lex_raw(struct lexer *lx)
         while (*p && *p != '"')
             p++;
         lx->file = xstrndup(fstart, (size_t)(p - fstart));
+        lx->sys_file = diag_in_system_header(lx->file);
         while (*p && *p != '\n')
             p++;
         if (*p == '\n')

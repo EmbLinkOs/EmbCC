@@ -228,6 +228,10 @@ struct lexer {
      * LEX_SYS_OFF, which the preprocessor writes around it): -pedantic
      * has nothing to say about it either, as GCC has not */
     int sys_depth;
+    /* the current file is a system header (diag_in_system_header), read
+     * whatever -std= says with the whole of EmbCC's C++: its own C++
+     * library is C++20 and says so nowhere (lex_cxx_std) */
+    int sys_file;
 };
 
 /* The two bytes the preprocessor brackets a system macro's expansion
@@ -253,6 +257,21 @@ int lex_c_gnu(void);
  * dialect before C23 -- C23's keywords and syntax -- so that the dialect
  * is GCC's: lex_c23_ext() says whether they are on. */
 void lex_set_pedantic(int on);
+/* The C++ standard -std= names: its year (1998, 2011, 2014, 2017, 2020,
+ * 2023, 2026) and whether GNU's dialect; gnu++20 unless said. It decides
+ * the program's keywords and tokens -- `constexpr` is a name in C++98,
+ * `concept` before C++20 -- and the parser's (cxx/), in the program's own
+ * code: a system header is read with all of EmbCC's C++, its own library
+ * being C++20 throughout. -fchar8_t makes char8_t a keyword before C++20. */
+void lex_set_cxx_std(int year, int gnu);
+void lex_set_cxx_char8(int on);
+/* whether u8 literals are char8_t (C++20, -fchar8_t) or char (before) */
+int lex_cxx_char8(void);
+int lex_cxx_year(void);
+int lex_cxx_gnu(void);
+/* what a token at lx's place may use: the standard's year, or 9999 in a
+ * system header */
+int lex_cxx_year_here(const struct lexer *lx);
 int lex_c23_ext(void);
 /* -pedantic's diagnostic at file:line:col: `what` (a noun phrase: "a
  * binary constant") is C<since>'s and the standard here is earlier, or,

@@ -4819,8 +4819,9 @@ static struct cexpr *parse_string(void)
         cx_advance();
     }
     enum cty_kind ek = prefix == 'L' ? CT_WCHAR : prefix == 'u' ? CT_CHAR16
-                     : prefix == 'U' ? CT_CHAR32 : prefix == '8' ? CT_CHAR8
-                     : CT_CHAR;
+                     : prefix == 'U' ? CT_CHAR32
+                     : prefix == '8' && lex_cxx_char8() ? CT_CHAR8
+                     : CT_CHAR;     /* (u8"" is const char[] before C++20) */
     long units;
     char *bytes = lit_encode(lc, (int)n, width, &units, at->file, at->t.line);
     free(lc);
@@ -4992,7 +4993,8 @@ static struct cexpr *parse_primary(void)
         if (t->char_lit)
             k = t->str_prefix == 'L' ? CT_WCHAR : t->str_prefix == 'u'
                 ? CT_CHAR16 : t->str_prefix == 'U' ? CT_CHAR32
-                : t->str_prefix == '8' ? CT_CHAR8 : CT_CHAR;
+                : t->str_prefix == '8' && lex_cxx_char8() ? CT_CHAR8
+                : CT_CHAR;
         else if (t->num_llong)
             k = t->num_uns ? CT_ULLONG : CT_LLONG;
         else if (t->num_long)

@@ -59,6 +59,8 @@ void cx_advance(void)
 void cx_close_angle(void)
 {
     if (cx_toks[cx_pos].t.kind == TOK_SHR && !cx_half_gt) {
+        /* (C++98 reads `>>` as a shift: `> >` there) */
+        cx_need_std(cx_cur(), 2011, "'>>' closing two template argument lists");
         cx_half_gt = 1;             /* the second `>` closes the outer */
         return;
     }
@@ -155,6 +157,19 @@ void cx_error(const struct ctok *at, const char *fmt, ...)
     if (cx_recover)
         longjmp(*(jmp_buf *)cx_recover, 1);
     fatal_unwind();
+}
+
+int cx_std_at(const struct ctok *t)
+{
+    return t && t->file && diag_in_system_header(t->file) ? 9999
+                                                          : lex_cxx_year();
+}
+
+void cx_need_std(const struct ctok *t, int year, const char *what)
+{
+    if (cx_std_at(t) < year)
+        cx_error(t, "%s is C++%02d's, and the standard here is C++%02d",
+                 what, year % 100, lex_cxx_year() % 100);
 }
 
 char *cx_strdup(const char *s)

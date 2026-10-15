@@ -937,6 +937,10 @@ static void parse_dspec(struct dspec *ds)
         case TOK_CX_CHAR32_T: special = CT_CHAR32; n_special++; cx_advance();
             continue;
         case TOK_CX_AUTO:
+            if (cx_std_at(cx_cur()) < 2011) {
+                cx_advance();       /* C++98's storage class: says nothing */
+                continue;
+            }
             if (named || builtin)
                 break;
             named = ct_basic(CT_AUTO);
@@ -1248,6 +1252,7 @@ const char *parse_operator_name(struct cty **conv)
     }
     if (k == TOK_STR) {
         /* operator""_x: a literal operator */
+        cx_need_std(cx_cur(), 2011, "a literal operator");
         const struct token *st = &cx_cur()->t;
         if (st->num != 1)
             cx_error(at, "a literal operator's name has an empty \"\"");
@@ -1270,7 +1275,11 @@ const char *parse_operator_name(struct cty **conv)
     for (;;) {
         if (cx_accept(TOK_STAR)) t = ct_qual(ct_ptr(t), parse_cv());
         else if (cx_accept(TOK_AMP)) t = ct_ref(t, 0);
-        else if (cx_accept(TOK_ANDAND)) t = ct_ref(t, 1);
+        else if (cx_kind() == TOK_ANDAND) {
+            cx_need_std(cx_cur(), 2011, "an rvalue reference");
+            cx_advance();
+            t = ct_ref(t, 1);
+        }
         else break;
     }
     *conv = t;
@@ -1541,10 +1550,14 @@ static struct cty *parse_suffixes(struct cty *t, struct declarator *d,
         struct cty *ft = parse_params();
         struct cty *ret = t;
         if (cx_kind() == TOK_ARROW) {
+            cx_need_std(cx_cur(), 2011, "a trailing return type");
             cx_advance();
             ret = trailing_return_type(ft);
             if (t->k != CT_AUTO)
                 cx_error(cx_cur(), "a trailing return type needs 'auto'");
+        } else if (t->k == CT_AUTO) {
+            cx_need_std(cx_cur(), 2014, t->dauto ? "decltype(auto)"
+                                                 : "a deduced return type");
         }
         ft->to = ret;
         if (after_id && cx_accept(TOK_CX_REQUIRES)) {
@@ -1577,6 +1590,8 @@ static struct cty *ptr_ops(struct cty *t, int mode)
         if ((cx_kind() == TOK_AMP || cx_kind() == TOK_ANDAND) &&
             !(mode & DK_NEW)) {
             int rv = cx_kind() == TOK_ANDAND;
+            if (rv)
+                cx_need_std(cx_cur(), 2011, "an rvalue reference");
             cx_advance();
             if (t->k == CT_VOID)
                 cx_error(cx_cur(), "reference to void");
@@ -2422,6 +2437,33 @@ static struct cstmt *parse_handlers(const struct ctok *at);
 static void parse_range_for(struct cstmt *s, const struct ctok *at,
                             int colon);
 
+/* A range-based for (C++11), or one with an init-statement (C++20):
+ * GCC refuses either under -std=c++98 and takes it, with a warning,
+ * under gnu++98 */
+static void range_for_std(const struct ctok *at)
+{
+    if (lex_cxx_gnu() || cx_std_at(at) >= 2011)
+        return;
+    /* a `:` at the parentheses' level that no `?` pairs with, before the
+     * `)` -- past one `;` when there is an init-statement */
+    int depth = 0, q = 0;
+    for (int i = cx_pos; i < cx_ntoks; i++) {
+        enum tok_kind k = cx_toks[i].t.kind;
+        if (k == TOK_LPAREN || k == TOK_LBRACE || k == TOK_LBRACKET)
+            depth++;
+        else if (k == TOK_RPAREN || k == TOK_RBRACE || k == TOK_RBRACKET) {
+            if (depth-- == 0)
+                return;
+        } else if (depth == 0 && k == TOK_QUESTION)
+            q++;
+        else if (depth == 0 && k == TOK_COLON && q)
+            q--;
+        else if (depth == 0 && k == TOK_COLON)
+            cx_error(at, "a range-based for is C++11's, and the standard "
+                     "here is C++98");
+    }
+}
+
 static void define_function(struct cfunc *f, struct cty *ft)
 {
     /* a function-try-block: `try` here, or just before a delayed body */
@@ -2632,6 +2674,7 @@ static int parse_tparams(struct ctparam **out);
 static int tparam_base;
 static int abbrev_lparen(void);
 static void parse_abbreviated_template(struct cclass *cls, int access);
+static void abbrev_std(void);
 
 /* A deduction candidate: a function template made of a constructor of
  * the primary template (C's own parameters first, then the constructor's
@@ -3074,6 +3117,7 @@ static int ctad_try(struct ctad_cand *c, struct ctemplate *tm,
 struct cty *ctad_deduce(struct ctemplate *tm, int form, struct cexpr **args,
                         int na, const struct ctok *at)
 {
+    cx_need_std(at, 2017, "class template argument deduction");
     int list = form == INIT_LIST || form == INIT_COPY_LIST;
     struct cexpr **xs = args;
     int nx = na;
@@ -3765,6 +3809,7 @@ static struct cty *parse_enum_spec(struct dspec *ds)
     cx_advance();
     int scoped = 0;
     if (cx_kind() == TOK_CX_CLASS || cx_kind() == TOK_KW_STRUCT) {
+        cx_need_std(cx_cur(), 2011, "a scoped enumeration");
         scoped = 1;
         cx_advance();
     }
@@ -3970,6 +4015,7 @@ static void parse_member(struct cclass *c, int *access)
         break;
     }
     if (abbrev_lparen() >= 0) {
+        abbrev_std();
         parse_abbreviated_template(c, *access);  /* f(C auto x) */
         return;
     }
@@ -4150,6 +4196,11 @@ static void parse_member(struct cclass *c, int *access)
                 y->access = *access;
             }
             if (cx_kind() == TOK_ASSIGN || cx_kind() == TOK_LBRACE) {
+                /* a bit-field's: C++20's, refused under C++98 only, as
+                 * GCC refuses it */
+                if (fl->bitwidth >= 0 && cx_std_at(cx_cur()) < 2011)
+                    cx_error(cx_cur(), "a bit-field's default initializer is "
+                             "C++20's, and the standard here is C++98");
                 skip_default_init(fl);
                 add_pending(NULL, c, fl);
             }
@@ -4339,7 +4390,9 @@ static void parse_using(int access)
 {
     const struct ctok *at = cx_cur();
     cx_advance();
-    if (cx_accept(TOK_KW_ENUM)) {
+    if (cx_kind() == TOK_KW_ENUM) {
+        cx_need_std(cx_cur(), 2020, "'using enum'");
+        cx_advance();
         /* using enum E; : E's enumerators named here too (C++20) */
         struct qname q = peek_qname();
         if (q.bad || cx_kind_at(q.fin) != TOK_IDENT)
@@ -4393,6 +4446,7 @@ static void parse_using(int access)
     }
     if (cx_kind() == TOK_IDENT &&
         (cx_kind_at(1) == TOK_ASSIGN || alias_attrs)) {
+        cx_need_std(cx_cur(), 2011, "an alias declaration");
         const char *name = cx_cur()->t.text;
         cx_advance();
         parse_attrs(NULL);
@@ -4750,6 +4804,7 @@ static void parse_declaration(int toplevel, struct cstmt **out)
         return;
     }
     if (toplevel && abbrev_lparen() >= 0) {
+        abbrev_std();
         /* void f(C auto x): a function template */
         parse_abbreviated_template(enclosing_class(cx_scope), CA_PUBLIC);
         return;
@@ -5914,6 +5969,7 @@ static struct cstmt *parse_stmt_or_none(void)
          * The init runs once, before the range is evaluated, so it goes
          * ahead of the range-for's own declarations. */
         int rcolon = range_for_after_init();
+        range_for_std(at);
         if (rcolon >= 0) {
             struct cstmt *init = parse_init_statement();
             int colon = range_for_colon();
@@ -7097,6 +7153,8 @@ static int parse_tparams(struct ctparam **out)
             p->vtype_tok = cx_pos;
             struct dspec ds;
             parse_dspec(&ds);
+            if (ds.type && ds.type->k == CT_AUTO)
+                cx_need_std(at, 2017, "a template parameter of type 'auto'");
             if (!ds.type)
                 cx_error(at, "expected a template parameter before %s",
                          tok_describe(&cx_cur()->t));
@@ -7387,6 +7445,16 @@ static struct cguide *guide_at(void)
  * the cursor declares a function one of whose parameters' types is `auto`
  * (or `C auto`) — the `(` of that parameter list, else -1. (Its `auto`s
  * already named __cx_autoN count: a class template's body read again.) */
+/* C++98's `auto` is a storage class: `f(auto x)` declares x with no
+ * type there, as GCC says (C++20's abbreviated template from C++11 on,
+ * which GCC takes with a warning) */
+static void abbrev_std(void)
+{
+    if (cx_std_at(cx_cur()) < 2011)
+        cx_error(cx_cur(), "'auto' is a storage class in C++98, and a "
+                 "parameter declared with it has no type");
+}
+
 static int abbrev_lparen(void)
 {
     int depth = 0;
@@ -7671,6 +7739,7 @@ static void template_decl_rest(struct cclass *cls, int access,
     }
     if (cx_kind() == TOK_CX_USING) {
         /* template<...> using X = type; */
+        cx_need_std(cx_cur(), 2011, "an alias template");
         cx_advance();
         if (cx_kind() != TOK_IDENT)
             cx_error(cx_cur(), "expected an alias template's name");
@@ -9886,7 +9955,11 @@ struct cexpr *parse_lambda(void)
     int neps = 0;
     struct cscope *tscope = NULL;
     if (cx_kind() == TOK_LT) {
-        /* []<class T>(T x) { }: C++20, explicit template parameters */
+        /* []<class T>(T x) { }: C++20, explicit template parameters
+         * (refused under C++98 only, as GCC refuses it) */
+        if (cx_std_at(cx_cur()) < 2011)
+            cx_error(cx_cur(), "a lambda's template parameter list is "
+                     "C++20's, and the standard here is C++98");
         tscope = scope_push(SC_TEMPLATE, NULL);
         cx_advance();
         neps = parse_tparams(&eps);
@@ -9897,6 +9970,9 @@ struct cexpr *parse_lambda(void)
     int lparen = cx_kind() == TOK_LPAREN ? cx_pos : -1;
     struct ctparam *autos = NULL;
     int nautos = lparen >= 0 ? invent_auto_params(lparen, &autos) : 0;
+    if (nautos)
+        cx_need_std(&cx_toks[lparen], 2014, "a generic lambda (an 'auto' "
+                    "parameter)");
     int ntps = neps + nautos;
     if (ntps) {
         tps = xcalloc((size_t)ntps, sizeof *tps);
