@@ -31,6 +31,26 @@
 #include "../arch/backend.h"
 #include "../parse/ast.h"
 
+/* What this file asks a family's assembler outside its gas_target row,
+ * for a family left out of this compiler (make TARGETS=,
+ * src/arch/target.h): never asked, since such a target is refused before
+ * anything is assembled, and answered here as "nothing" so the paths that
+ * would ask still compile. */
+#if !FAMILY_BUILT(arm)
+#define t_isa_a32 0
+#define t_ldr_const(c, rd, v) ((void)(c), (void)(rd), (void)(v), 0)
+#define t_ldr_lit16(c, rd, off) ((void)(c), (void)(rd), (void)(off), 0)
+#define t_ldr_lit(c, rd, off) ((void)(c), (void)(rd), (void)(off), 0)
+#define tasm_set_wide(on) ((void)(on))
+#define tasm_took_wide() 0
+#define tasm_set_arch(a) ((void)(a))
+#define tasm_set_dsp(on) ((void)(on))
+#endif
+#if !FAMILY_BUILT(xtensa)
+#define xtasm_movi_operand(st, x, len) ((void)(st), (void)(x), (void)(len), -1)
+#define xtasm_is_entry(st) ((void)(st), 0)
+#endif
+
 /* ---- the pieces of a file ------------------------------------------ */
 
 /* The four sections every file has, created first so their indices are
@@ -3710,6 +3730,7 @@ static int write_object(struct gas *g, const char *out_path)
 
 /* ---- the targets ----------------------------------------------------- */
 
+#if FAMILY_BUILT(riscv)
 static const struct gas_target RISCV_GAS = {
     EM_RISCV, 0, rvasm_assemble, rvasm_gpr,
     R_RISCV_CALL, R_RISCV_PCREL_HI20, R_RISCV_PCREL_LO12_I,
@@ -3720,11 +3741,13 @@ static const struct gas_target RISCV_GAS = {
     0, rvasm_is_word, NULL, NULL, NULL,
     0, NULL, NULL, NULL, NULL, NULL
 };
+#endif
 
 /* ARMv7-M. `call` and `la` are RISC-V pseudos and have no ARM
  * spelling, so r_call/r_pcrel are zero: a symbol reference from a .S
  * file here goes through `bl sym` (R_ARM_THM_CALL) and the movw/movt
  * pair, which the driver names below. */
+#if FAMILY_BUILT(arm)
 static const struct gas_target THUMB_GAS = {
     EM_ARM, 1, tasm_assemble, tasm_gpr,
     R_ARM_THM_CALL, 0, 0,
@@ -3736,9 +3759,11 @@ static const struct gas_target THUMB_GAS = {
     1, tasm_is_word, tasm_reset, tasm_open, NULL,
     0, NULL, NULL, NULL, NULL, NULL
 };
+#endif
 
 /* ARMv7-A in ARM state: the same assembler, which writes A32 under
  * t_isa_a32, and `bl sym` carrying R_ARM_CALL. */
+#if FAMILY_BUILT(arm)
 static const struct gas_target A32_GAS = {
     EM_ARM, 1, tasm_assemble, tasm_gpr,
     R_ARM_CALL, 0, 0,
@@ -3747,10 +3772,12 @@ static const struct gas_target A32_GAS = {
     1, tasm_is_word, tasm_reset, tasm_open, NULL,
     0, NULL, NULL, NULL, NULL, NULL
 };
+#endif
 
 /* aarch64. `bl sym` carries R_AARCH64_CALL26, one instruction and one
  * relocation, the same shape ARM uses -- so the driver's ARM branch
  * covers it once the machine is allowed through. */
+#if FAMILY_BUILT(aarch64)
 static const struct gas_target A64_GAS = {
     EM_AARCH64, 0, a64asm_assemble, a64asm_gpr,
     R_AARCH64_CALL26, 0, 0,
@@ -3761,12 +3788,14 @@ static const struct gas_target A64_GAS = {
     1, NULL, NULL, NULL, NULL,
     0, NULL, NULL, NULL, NULL, NULL
 };
+#endif
 
 /* AVR. Its symbol-bearing forms are its own -- eight of them, because a
  * sixteen-bit address is loaded a byte at a time and program space is
  * addressed in words -- so they go through `symform` rather than through
  * the r_call/r_pcrel pair, which stay zero. `.word` is TWO bytes here, and
  * a symbol's address fits in one. */
+#if FAMILY_BUILT(avr)
 static const struct gas_target AVR_GAS = {
     EM_AVR, 1, avrasm_assemble, avrasm_gpr,
     0, 0, 0,
@@ -3776,12 +3805,14 @@ static const struct gas_target AVR_GAS = {
     0, avrasm_is_word, NULL, NULL, NULL,
     0, NULL, NULL, NULL, NULL, NULL
 };
+#endif
 
 /* MIPS32r2, o32. Its symbol forms -- `jal sym`, `%hi`/`%lo`, `la` -- are
  * mipsasm_symform's, carrying R_MIPS_26, R_MIPS_HI16 and R_MIPS_LO16;
  * `.word sym` is R_MIPS_32. A register is always `$`-spelt (is_reg),
  * the word after a `%` is an operator (is_word), and the reorder mode is
  * the instruction assembler's, reset at each pass. */
+#if FAMILY_BUILT(mips)
 static const struct gas_target MIPS_GAS = {
     EM_MIPS, 1, mipsasm_encode, mipsasm_is_reg,
     0, 0, 0,
@@ -3790,9 +3821,11 @@ static const struct gas_target MIPS_GAS = {
     0, mipsasm_is_word, mipsasm_reset, NULL, NULL,
     0, NULL, NULL, NULL, NULL, NULL
 };
+#endif
 
 /* MIPS64r2, n64: the same vocabulary and forms, an ELFCLASS64 object,
  * and `.dword sym` is R_MIPS_64. */
+#if FAMILY_BUILT(mips)
 static const struct gas_target MIPS64_GAS = {
     EM_MIPS, 0, mipsasm_encode, mipsasm_is_reg,
     0, 0, 0,
@@ -3801,12 +3834,14 @@ static const struct gas_target MIPS64_GAS = {
     0, mipsasm_is_word, mipsasm_reset, NULL, NULL,
     0, NULL, NULL, NULL, NULL, NULL
 };
+#endif
 
 /* LoongArch64. Its symbol forms -- b/bl, call36/tail36, la.pcrel and
  * la.local, la/la.global, and the %pc_hi20/%pc_lo12, %got_pc_*, %abs_* and
  * %call36 operators -- are laasm_symform's; `.word`/`.dword sym` are
  * R_LARCH_32/R_LARCH_64. A register is always `$`-spelt (is_reg) and the
  * word after a `%` is an operator (is_word). */
+#if FAMILY_BUILT(loongarch)
 static const struct gas_target LA_GAS = {
     EM_LOONGARCH, 0, laasm_assemble, laasm_is_reg,
     0, 0, 0,
@@ -3815,6 +3850,7 @@ static const struct gas_target LA_GAS = {
     0, laasm_is_word, NULL, NULL, NULL,
     0, NULL, NULL, NULL, NULL, NULL
 };
+#endif
 
 /* Xtensa (the ESP32's LX6, windowed). Its symbol forms -- every branch,
  * the loops, j, call0-12 and l32r naming a symbol defined elsewhere --
@@ -3823,6 +3859,7 @@ static const struct gas_target LA_GAS = {
  * is R_XTENSA_32. A special register's name is an operand word (is_word),
  * and a call's or an l32r's encoding needs the instruction's address
  * (at). */
+#if FAMILY_BUILT(xtensa)
 static const struct gas_target XT_GAS = {
     EM_XTENSA, 1, xtasm_assemble, xtasm_is_reg,
     0, 0, 0,
@@ -3831,6 +3868,7 @@ static const struct gas_target XT_GAS = {
     0, xtasm_is_word, NULL, NULL, xtasm_set_pc,
     0, NULL, NULL, NULL, NULL, NULL
 };
+#endif
 
 /* TriCore 1.6.1. `j`/`jl`/`call sym` carry R_TRICORE_24REL; an address
  * is movh/movh.a with hi:sym (R_TRICORE_HIADJ) and addi with lo:sym
@@ -3838,6 +3876,7 @@ static const struct gas_target XT_GAS = {
  * (R_TRICORE_LO2) -- tcasm_symform's, as are GNU's %hi()/%lo() spellings;
  * `.word sym` is R_TRICORE_32ABS. `hi`, `lo` and a core register's name
  * are operand words. */
+#if FAMILY_BUILT(tricore)
 static const struct gas_target TRICORE_GAS = {
     EM_TRICORE, 1, tcasm_encode, tcasm_is_reg,
     0, 0, 0,
@@ -3846,6 +3885,7 @@ static const struct gas_target TRICORE_GAS = {
     0, tcasm_is_word, NULL, NULL, NULL,
     0, NULL, NULL, NULL, NULL, NULL
 };
+#endif
 
 /* RX (RXv1). Its symbol forms are rxasm_symform's: `mov.l #sym, rd`
  * (R_RX_DIR32), and a branch to a symbol defined elsewhere (bra/bsr .a
@@ -3855,6 +3895,7 @@ static const struct gas_target TRICORE_GAS = {
  * statements and `#` is an immediate's prefix; a control register, a PSW
  * flag and a memex size are operand words; branches relax by levels, and
  * code is padded with GNU as's RX nops. */
+#if FAMILY_BUILT(rx)
 static const struct gas_target RX_GAS = {
     EM_RX, 1, rxasm_encode, rxasm_is_reg,
     0, 0, 0,
@@ -3864,6 +3905,7 @@ static const struct gas_target RX_GAS = {
     '!', rxasm_set_level, rxasm_took_level, rxasm_fill,
     rxasm_is_transfer, NULL
 };
+#endif
 
 /* ColdFire (ISA_A+, the MCF5208's), big-endian. Its symbol forms are
  * cfasm_symform's: a branch to a symbol defined elsewhere (bra/bsr as
@@ -3874,6 +3916,7 @@ static const struct gas_target RX_GAS = {
  * line comment and `#` an immediate's prefix; %sr, %ccr, %usp, %pc, the
  * control registers and an index's size are operand words; branches relax
  * .s/.w; code is padded with nops. */
+#if FAMILY_BUILT(m68k)
 static const struct gas_target CF_GAS = {
     EM_68K, 1, cfasm_encode, cfasm_is_reg,
     0, 0, 0,
@@ -3883,6 +3926,7 @@ static const struct gas_target CF_GAS = {
     0, cfasm_set_level, cfasm_took_level, cfasm_fill,
     cfasm_is_transfer, NULL
 };
+#endif
 
 /* SPARC V8 (the LEON3). A call or a branch to a symbol this file does
  * not resolve carries R_SPARC_WDISP30 / R_SPARC_WDISP22 (spasm_symform);
@@ -3892,6 +3936,7 @@ static const struct gas_target CF_GAS = {
  * operand word, as is the `a` of `,a` (is_word). `!` is the comment
  * character and `#` one only at a line's start, as GNU as has them for
  * SPARC -- `.type f, #function` is SPARC's spelling. */
+#if FAMILY_BUILT(sparc)
 static const struct gas_target SPARC_GAS = {
     EM_SPARC, 1, spasm_assemble, NULL,
     0, 0, 0,
@@ -3901,6 +3946,7 @@ static const struct gas_target SPARC_GAS = {
     0, NULL, NULL, NULL, NULL,
     spasm_symform_abs
 };
+#endif
 
 /* 32-bit PowerPC (the e500 and the classic cores). A branch to a symbol
  * this file does not resolve carries R_PPC_REL24 (b, bl), R_PPC_ADDR24
@@ -3909,6 +3955,7 @@ static const struct gas_target SPARC_GAS = {
  * (ppcasm_symform_abs); `.long sym` is R_PPC_ADDR32. rN is a register,
  * and a CR field or bit's name, the word after `@` and an SPR's name are
  * operand words. `.align` is an exponent, as GNU as has it here. */
+#if FAMILY_BUILT(ppc)
 static const struct gas_target PPC_GAS = {
     EM_PPC, 1, ppcasm_assemble, ppcasm_is_reg,
     0, 0, 0,
@@ -3918,23 +3965,48 @@ static const struct gas_target PPC_GAS = {
     0, NULL, NULL, NULL, NULL,
     ppcasm_symform_abs
 };
+#endif
 
 static const struct gas_target *target_for(void)
 {
     switch (target_get()) {
+#if FAMILY_BUILT(m68k)
     case TARGET_COLDFIRE: return &CF_GAS;
+#endif
+#if FAMILY_BUILT(rx)
     case TARGET_RX: return &RX_GAS;
+#endif
+#if FAMILY_BUILT(ppc)
     case TARGET_PPC32: return &PPC_GAS;
+#endif
+#if FAMILY_BUILT(sparc)
     case TARGET_SPARC32: return &SPARC_GAS;
+#endif
+#if FAMILY_BUILT(xtensa)
     case TARGET_XTENSA: return &XT_GAS;
+#endif
+#if FAMILY_BUILT(tricore)
     case TARGET_TRICORE: return &TRICORE_GAS;
+#endif
+#if FAMILY_BUILT(loongarch)
     case TARGET_LOONGARCH64: return &LA_GAS;
+#endif
+#if FAMILY_BUILT(mips)
     case TARGET_MIPS32: return &MIPS_GAS;
     case TARGET_MIPS64: return &MIPS64_GAS;
+#endif
+#if FAMILY_BUILT(avr)
     case TARGET_AVR: return &AVR_GAS;
+#endif
+#if FAMILY_BUILT(riscv)
     case TARGET_RISCV32: case TARGET_RISCV64: return &RISCV_GAS;
+#endif
+#if FAMILY_BUILT(arm)
     case TARGET_THUMB: return t_isa_a32 ? &A32_GAS : &THUMB_GAS;
+#endif
+#if FAMILY_BUILT(aarch64)
     case TARGET_AARCH64: return &A64_GAS;
+#endif
     default: return NULL;
     }
 }

@@ -101,6 +101,16 @@ const char *target_default_name(void)
     return t && *t ? t : NULL;
 }
 
+const char *target_builtin_default(void)
+{
+    if (FAMILY_BUILT(x86))
+        return "x86_64-elf";
+    for (int i = 0; i < target_family_count(); i++)
+        if (target_family_built(i))
+            return target_family_default(i);
+    return "x86_64-elf";                /* nothing is built: refused later */
+}
+
 int target_insn_len(const unsigned char *p, int avail)
 {
     if (avail <= 0)
@@ -205,8 +215,12 @@ int target_apply_default(const char **bad)
     enum target_os os;
     enum target_fmt fmt;
 
+    /* the built-in default stands -- x86_64-elf, unless this compiler was
+     * built without x86 (make TARGETS=), and then its first family's */
+    if (!t && FAMILY_BUILT(x86))
+        return 1;
     if (!t)
-        return 1;                    /* the built-in default stands */
+        t = target_builtin_default();
     if (!target_from_triple(t, &a, &os, &fmt)) {
         *bad = t;
         return 0;
@@ -250,12 +264,93 @@ static const struct data_model {
     int ptr, lng, it, dbl, ldbl, char_uns, wchar_uns, int128, maxal;
     int big_endian;
 } g_model[] = {
+#define FAMILY(name, desc, def)
 #define TRIPLE(name, arch, os, fmt, kind, sub, flag)
 #define DATA_MODEL(arch, ...) [TARGET_##arch] = { __VA_ARGS__ },
 #include "../targets/targets.def"
+#undef FAMILY
 #undef TRIPLE
 #undef DATA_MODEL
 };
+
+/* The families (src/targets/targets.def): each FAMILY row, and after it
+ * the architectures its DATA_MODEL rows name, in the database's order --
+ * so an architecture's family is the FAMILY row above it, which is the
+ * file it is written in. `built` is whether this binary has the family's
+ * backend (make TARGETS=, src/arch/target.h). */
+static const struct family_row {
+    const char *name, *desc, *def;  /* NULL name: an architecture's row */
+    int built;
+    enum target_arch arch;
+} g_fam_rows[] = {
+#define FAMILY(name, desc, def) { #name, desc, def, FAMILY_BUILT(name),      \
+                                  TARGET_X86_64 },
+#define TRIPLE(name, arch, os, fmt, kind, sub, flag)
+#define DATA_MODEL(arch, ...) { NULL, NULL, NULL, 0, TARGET_##arch },
+#include "../targets/targets.def"
+#undef FAMILY
+#undef TRIPLE
+#undef DATA_MODEL
+};
+static const int g_nfam_rows = (int)(sizeof g_fam_rows / sizeof g_fam_rows[0]);
+
+/* The row of the i-th family, or -1. */
+static int family_row(int i)
+{
+    for (int r = 0; r < g_nfam_rows; r++)
+        if (g_fam_rows[r].name && i-- == 0)
+            return r;
+    return -1;
+}
+
+int target_family_count(void)
+{
+    int n = 0;
+    for (int r = 0; r < g_nfam_rows; r++)
+        n += g_fam_rows[r].name != NULL;
+    return n;
+}
+
+const char *target_family_name(int i)
+{
+    int r = family_row(i);
+    return r < 0 ? NULL : g_fam_rows[r].name;
+}
+
+const char *target_family_desc(int i)
+{
+    int r = family_row(i);
+    return r < 0 ? NULL : g_fam_rows[r].desc;
+}
+
+const char *target_family_default(int i)
+{
+    int r = family_row(i);
+    return r < 0 ? NULL : g_fam_rows[r].def;
+}
+
+int target_family_built(int i)
+{
+    int r = family_row(i);
+    return r >= 0 && g_fam_rows[r].built;
+}
+
+int target_family_of(enum target_arch a)
+{
+    int fam = -1;
+    for (int r = 0; r < g_nfam_rows; r++) {
+        if (g_fam_rows[r].name)
+            fam++;
+        else if (g_fam_rows[r].arch == a)
+            return fam;
+    }
+    return -1;
+}
+
+int target_arch_built(enum target_arch a)
+{
+    return target_family_built(target_family_of(a));
+}
 
 int target_is_mips(void)
 {
@@ -604,8 +699,10 @@ static const struct triple {
 #define TRIPLE(name, arch, os, fmt, kind, sub, flag)                          \
     { name, TARGET_##arch, TGT_OS_##os, TGT_FMT_##fmt, TRIPLE_##kind,        \
       SUB_##sub, TFLAG_##flag },
+#define FAMILY(name, desc, def)
 #define DATA_MODEL(arch, ...)
 #include "../targets/targets.def"
+#undef FAMILY
 #undef TRIPLE
 #undef DATA_MODEL
 };

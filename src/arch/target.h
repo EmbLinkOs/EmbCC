@@ -104,6 +104,79 @@ enum target_arch {
     TARGET_MIPS64 = 13
 };
 
+/* ---- the target families this compiler was built with -------------------
+ *
+ * A FAMILY is one file of the target database (src/targets/<name>.def):
+ * x86, aarch64, arm, riscv, avr, mips, loongarch, tricore, xtensa, ppc,
+ * rx, sparc, m68k. It is the unit `make TARGETS=` builds -- as GCC is
+ * configured for one target and LLVM for a list -- and the name is the
+ * same everywhere: the file, the make variable, `embcc --version` and the
+ * refusal of a target whose backend is not in the binary.
+ *
+ * The Makefile defines EMBCC_FAMILY_<name>=0 for each family left out, and
+ * code that reaches into a backend -- the registry's rows, the dispatch in
+ * irgen, sema, the assembler and the linker -- sits under
+ * `#if FAMILY_BUILT(name)`. A build that defines nothing (every other
+ * build: build.ebm, the self-host, the tools that link these files) has
+ * every family. A FAMILY_BUILT(...) with this header not included is a
+ * preprocessor error, not a silent 0. The table of families (their
+ * descriptions and member architectures) is the database's FAMILY rows,
+ * read by target.c. */
+#define FAMILY_BUILT(name) EMBCC_FAMILY_##name
+#ifndef EMBCC_FAMILY_x86
+#define EMBCC_FAMILY_x86 1
+#endif
+#ifndef EMBCC_FAMILY_aarch64
+#define EMBCC_FAMILY_aarch64 1
+#endif
+#ifndef EMBCC_FAMILY_arm
+#define EMBCC_FAMILY_arm 1
+#endif
+#ifndef EMBCC_FAMILY_riscv
+#define EMBCC_FAMILY_riscv 1
+#endif
+#ifndef EMBCC_FAMILY_avr
+#define EMBCC_FAMILY_avr 1
+#endif
+#ifndef EMBCC_FAMILY_mips
+#define EMBCC_FAMILY_mips 1
+#endif
+#ifndef EMBCC_FAMILY_loongarch
+#define EMBCC_FAMILY_loongarch 1
+#endif
+#ifndef EMBCC_FAMILY_tricore
+#define EMBCC_FAMILY_tricore 1
+#endif
+#ifndef EMBCC_FAMILY_xtensa
+#define EMBCC_FAMILY_xtensa 1
+#endif
+#ifndef EMBCC_FAMILY_ppc
+#define EMBCC_FAMILY_ppc 1
+#endif
+#ifndef EMBCC_FAMILY_rx
+#define EMBCC_FAMILY_rx 1
+#endif
+#ifndef EMBCC_FAMILY_sparc
+#define EMBCC_FAMILY_sparc 1
+#endif
+#ifndef EMBCC_FAMILY_m68k
+#define EMBCC_FAMILY_m68k 1
+#endif
+
+/* The families, in the database's order: how many, the i-th one's name
+ * (`riscv`), what it covers in words, the triple it compiles for when it
+ * is the only one built, and whether this binary has its backend. */
+int target_family_count(void);
+const char *target_family_name(int i);
+const char *target_family_desc(int i);
+const char *target_family_default(int i);
+int target_family_built(int i);
+/* The family an architecture belongs to, and whether its backend is in
+ * this binary. A target whose family is not built is refused by name
+ * before anything is compiled (src/driver/main.c). */
+int target_family_of(enum target_arch a);
+int target_arch_built(enum target_arch a);
+
 /* Either MIPS: the one backend, the one encoder, the one assembler. */
 int target_is_mips(void);
 
@@ -551,6 +624,10 @@ int target_apply_default(const char **bad);
  * --help uses it, which is the point: a cross compiler whose help says
  * "x86_64-elf (the default)" is lying to the person reading it. */
 const char *target_default_name(void);
+/* The default when nothing is configured: x86_64-elf, or in a compiler
+ * built without x86 (make TARGETS=) the first built family's FAMILY
+ * default -- thumbv7m-none-eabi for `make TARGETS=arm`. */
+const char *target_builtin_default(void);
 
 /* The length in bytes of the instruction at `p`, for a reader walking a
  * .text stream (-S, and anything else that must group bytes by

@@ -50,24 +50,69 @@ static void print_version(void)
      * layout clang uses -- and only what the tree holds: the long form,
      * with what is missing, is docs/internals/status.md. */
     const char *dt = target_default_name();
+    int nfam = target_family_count(), nbuilt = 0;
     printf("EmbCC %s (the Emb toolchain's C and C++ compiler, for "
            "embedded systems and operating systems)\n", EMBCC_VERSION);
     printf("Target: %s\n", target_triple_now());
-    printf("Default target: %s%s\n", dt ? dt : "x86_64-elf",
+    printf("Default target: %s%s\n", dt ? dt : target_builtin_default(),
            dt ? " (as configured)" : "");
-    printf("Targets: Cortex-M (ARMv6-M, ARMv7-M, ARMv7E-M, ARMv8-M "
-           "Baseline and Mainline), ARMv7-A, RISC-V (RV32, RV64),\n"
-           "AVR (ATmega), Xtensa (ESP32, windowed ABI), TriCore, Renesas "
-           "RX, ColdFire (m68k, ISA_A), MIPS32 and MIPS64\n"
-           "(both byte orders), PowerPC (32-bit EABI), SPARC V8 (LEON3), "
-           "LoongArch64 (LP64S); x86-64 and AArch64\n"
-           "(bare metal, EmbLinkOS, Linux, Darwin; x86-64 also Windows)\n");
+    /* The families this binary has (make TARGETS=), from the target
+     * database, so the list cannot claim a backend the build left out. */
+    for (int i = 0; i < nfam; i++)
+        nbuilt += target_family_built(i);
+    if (nbuilt == nfam)
+        printf("Targets (every family; make TARGETS= builds fewer):\n");
+    else
+        printf("Targets (%d of the %d families, as built with make "
+               "TARGETS=):\n", nbuilt, nfam);
+    for (int i = 0; i < nfam; i++)
+        if (target_family_built(i))
+            printf("  %-10s %s\n", target_family_name(i),
+                   target_family_desc(i));
+    if (nbuilt < nfam) {
+        printf("Not built:");
+        for (int i = 0; i < nfam; i++)
+            if (!target_family_built(i))
+                printf(" %s", target_family_name(i));
+        printf("\n");
+    }
     printf("Languages: C11 with the GNU extensions; C++ toward C++20 on "
            "every target but AVR\n");
-    printf("Linker: embld, for every target's images; AArch64 and Darwin "
-           "link with the platform's linker\n");
+    printf("Linker: embld, for the images of every target above; AArch64 "
+           "and Darwin link with the platform's linker\n");
     printf("Not yet: position-independent executables, shared libraries, "
            "dynamic linking. See docs/internals/status.md.\n");
+}
+
+/* A target whose family this compiler was built without (make TARGETS=,
+ * src/arch/target.h): refused by name before anything is compiled, with
+ * the families it does have and the build that would add this one. Every
+ * way of choosing a target -- --target=, the configured default, the
+ * name it was called by, -arch -- arrives here. Returns 1. */
+static int refuse_unbuilt_target(int was_default)
+{
+    const char *fam = target_family_name(target_family_of(target_get()));
+    fprintf(stderr, "embcc: error: this embcc was built without the %s "
+                    "backend, which %s needs\n",
+            fam ? fam : "(none)", target_triple_now());
+    if (was_default)
+        fprintf(stderr, "embcc: it is the default target, from %s\n",
+                plat_getenv("EMBCC_DEFAULT_TARGET") &&
+                    *plat_getenv("EMBCC_DEFAULT_TARGET")
+                    ? "EMBCC_DEFAULT_TARGET in the environment"
+                    : "the DEFAULT_TARGET this compiler was built with");
+    fprintf(stderr, "embcc: it was built with:");
+    for (int i = 0; i < target_family_count(); i++)
+        if (target_family_built(i))
+            fprintf(stderr, " %s", target_family_name(i));
+    fprintf(stderr, "\nembcc: rebuild with make TARGETS=\"");
+    for (int i = 0, n = 0; i < target_family_count(); i++)
+        if (target_family_built(i) ||
+            (fam && !strcmp(fam, target_family_name(i))))
+            fprintf(stderr, "%s%s", n++ ? " " : "", target_family_name(i));
+    fprintf(stderr, "\" to add it (docs/manual/getting-started.md, "
+                    "\"Choosing the targets\")\n");
+    return 1;
 }
 
 static void print_usage(FILE *out)
@@ -941,7 +986,11 @@ static int compile_and_link(const char *in, const char *out)
      * several parts -- avr-gcc's default avr5 script and the ones derived
      * from it -- leaves to the driver. -Ttext, -Tdata and --rom-limit,
      * given, are applied over the script, as ld applies them. */
+#if FAMILY_BUILT(avr)
     const struct avr_mcu *mcu = target_avr_mcu();
+#else
+    const struct avr_mcu *mcu = NULL;       /* no AVR in this compiler */
+#endif
     static char avr_script[1024];
     char avr_crt[1024];
     int have_avr_crt = 0;
@@ -2004,7 +2053,11 @@ static int compile_unit(const char *in, const char *out, int pp_only)
             if (gas_assemble_block(ta))
                 return 1;
         } else {
+            /* (x86-64's and AArch64's: every other target is firmware,
+             * so a compiler with neither never comes here) */
+#if FAMILY_BUILT(x86) || FAMILY_BUILT(aarch64)
             topasm_assemble(ta, target_get() == TARGET_X86_64);
+#endif
         }
         for (int r = 0; r < ta->nrels; r++) {
             if (!ta->rels[r].target)
@@ -4385,6 +4438,7 @@ int main(int argc, char **argv)
      * --target= below simply overwrites it. A compiler built with
      * `make DEFAULT_TARGET=riscv32-unknown-elf` compiles for the board
      * when it is handed nothing at all. */
+    int target_named = 0;       /* by the name, -arch or --target= */
     {
         const char *bad = NULL;
         if (!target_apply_default(&bad)) {
@@ -4445,6 +4499,7 @@ int main(int argc, char **argv)
             target_set(a);
             target_os_set(os);
             target_fmt_set(fmt);
+            target_named = 1;
         }
     }
     /* Apple's driver names the machine with -arch: arm64 or x86_64 is the
@@ -4475,6 +4530,7 @@ int main(int argc, char **argv)
             target_set(a);
             target_os_set(os);
             target_fmt_set(fmt);
+            target_named = 1;
         }
     }
     /* Scanned ahead of everything else: --version and --dump-predef must
@@ -4496,7 +4552,13 @@ int main(int argc, char **argv)
         target_set(a);
         target_os_set(os);
         target_fmt_set(fmt);
+        target_named = 1;
     }
+    /* A target this compiler has no backend for (make TARGETS=) stops
+     * here, before anything -- --version included -- asks its backend. */
+    if (!target_arch_built(target_get()))
+        return refuse_unbuilt_target(!target_named &&
+                                     target_default_name() != NULL);
     /* The backend's "this op calls a runtime helper" predicate, for the
      * optimizer's view of what a value crosses: x86-64 has no such
      * helpers and AVR's allocator does not model them. Set from the
@@ -4509,13 +4571,17 @@ int main(int argc, char **argv)
          * armv7a-none-eabi. Here, before anything is compiled, because the
          * optimizer asks the encoder which constants an instruction can
          * carry (thumb_imm_foldable) long before code generation. */
+#if FAMILY_BUILT(arm)
         t_isa_a32 = target_arm_a32();
+#endif
         target_set_calls_helper(backend_get(a)->op_calls_helper);
+#if FAMILY_BUILT(mips)
         /* the MIPS encoder's byte order, for the code generator and the
          * inline and file-scope assemblers alike */
         mips_set_big_endian(target_big_endian());
         /* ...and its width: the doubleword instructions at MIPS64 */
         mips_set_64(a == TARGET_MIPS64);
+#endif
     }
     /* Scanned across the whole command line, not just argv[1]: these
      * describe the TARGET, so `--target=aarch64-elf --dump-predef` has to
@@ -5859,8 +5925,12 @@ int main(int argc, char **argv)
                     "and the target is %s\n", input, target_triple_now());
             return 1;
         }
+#if FAMILY_BUILT(x86)
         return as_assemble(input, output ? output : default_output(input),
                            AS_ELF64);
+#else
+        return 1;           /* refused above: there is no x86-64 here */
+#endif
     }
     if (pp_only)
         return done(compile(input, dep_only ? NULL : output, 1));

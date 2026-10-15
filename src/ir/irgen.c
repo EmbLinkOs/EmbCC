@@ -3431,33 +3431,63 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
     case EXPR_STMTEXPR:
         return gen_stmtexpr(fn, e);
     case EXPR_VA_ARG:
+        /* each lowering under its family (make TARGETS=, target.h) */
+#if FAMILY_BUILT(arm)
         if (target_get() == TARGET_THUMB)
             return irg_va_arg_thumb(fn, e);
+#endif
         /* LoongArch's LP64 variadic convention is RV64's rule for rule
-         * (src/arch/loongarch/irgen.c says how that was established). */
+         * (src/arch/loongarch/irgen.c says how that was established), and
+         * a compiler built with LoongArch builds that much of RISC-V's
+         * irgen.c whether or not it has RISC-V. */
+#if FAMILY_BUILT(riscv) || FAMILY_BUILT(loongarch)
         if (target_get() == TARGET_RISCV32 || target_get() == TARGET_RISCV64 ||
             target_get() == TARGET_LOONGARCH64)
             return irg_va_arg_riscv(fn, e);
+#endif
+#if FAMILY_BUILT(avr)
         if (target_get() == TARGET_AVR)
             return irg_va_arg_avr(fn, e);
+#endif
+#if FAMILY_BUILT(mips)
         if (target_is_mips())
             return irg_va_arg_mips(fn, e);
+#endif
+#if FAMILY_BUILT(tricore)
         if (target_get() == TARGET_TRICORE)
             return irg_va_arg_tricore(fn, e);
+#endif
+#if FAMILY_BUILT(xtensa)
         if (target_get() == TARGET_XTENSA)
             return irg_va_arg_xtensa(fn, e);
+#endif
+#if FAMILY_BUILT(ppc)
         if (target_get() == TARGET_PPC32)
             return irg_va_arg_ppc(fn, e);
+#endif
+#if FAMILY_BUILT(rx)
         if (target_get() == TARGET_RX)
             return irg_va_arg_rx(fn, e);
+#endif
+#if FAMILY_BUILT(sparc)
         if (target_get() == TARGET_SPARC32)
             return irg_va_arg_sparc(fn, e);
+#endif
+#if FAMILY_BUILT(m68k)
         if (target_get() == TARGET_COLDFIRE)
             return irg_va_arg_coldfire(fn, e);
-        if (target_get() != TARGET_AARCH64)
+#endif
+#if FAMILY_BUILT(aarch64)
+        if (target_get() == TARGET_AARCH64)
+            return target_os_get() == TGT_OS_DARWIN ? irg_va_arg_darwin(fn, e)
+                                                    : irg_va_arg_aapcs(fn, e);
+#endif
+#if FAMILY_BUILT(x86)
+        if (target_get() == TARGET_X86_64)
             return irg_va_arg_sysv(fn, e);
-        return target_os_get() == TGT_OS_DARWIN ? irg_va_arg_darwin(fn, e)
-                                                : irg_va_arg_aapcs(fn, e);
+#endif
+        internal_error("va_arg for %s, whose backend is not built in",
+                       target_triple_now());
     case EXPR_BINOP: {
         struct type *lt = e->lhs->ty, *rt = e->rhs->ty;
 
@@ -4537,34 +4567,56 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
             gen_expr(fn, s->expr); /* value discarded */
             break;
         case STMT_ASM:
-            /* the template is assembled by the target's own vocabulary */
-            if (target_get() == TARGET_AARCH64)
-                irg_asm_arm64(fn, s);
-            else if (target_get() == TARGET_THUMB)
-                irg_asm_thumb(fn, s);
-            else if (target_get() == TARGET_RISCV32 ||
-                     target_get() == TARGET_RISCV64)
+            /* the template is assembled by the target's own vocabulary,
+             * each under its family (make TARGETS=, target.h) */
+            switch (target_get()) {
+#if FAMILY_BUILT(aarch64)
+            case TARGET_AARCH64: irg_asm_arm64(fn, s); break;
+#endif
+#if FAMILY_BUILT(arm)
+            case TARGET_THUMB: irg_asm_thumb(fn, s); break;
+#endif
+#if FAMILY_BUILT(riscv)
+            case TARGET_RISCV32: case TARGET_RISCV64:
                 irg_asm_riscv(fn, s);
-            else if (target_get() == TARGET_AVR)
-                irg_asm_avr(fn, s);
-            else if (target_is_mips())
+                break;
+#endif
+#if FAMILY_BUILT(avr)
+            case TARGET_AVR: irg_asm_avr(fn, s); break;
+#endif
+#if FAMILY_BUILT(mips)
+            case TARGET_MIPS32: case TARGET_MIPS64:
                 irg_asm_mips(fn, s);
-            else if (target_get() == TARGET_LOONGARCH64)
-                irg_asm_loongarch(fn, s);
-            else if (target_get() == TARGET_TRICORE)
-                irg_asm_tricore(fn, s);
-            else if (target_get() == TARGET_XTENSA)
-                irg_asm_xtensa(fn, s);
-            else if (target_get() == TARGET_PPC32)
-                irg_asm_ppc(fn, s);
-            else if (target_get() == TARGET_RX)
-                irg_asm_rx(fn, s);
-            else if (target_get() == TARGET_SPARC32)
-                irg_asm_sparc(fn, s);
-            else if (target_get() == TARGET_COLDFIRE)
-                irg_asm_coldfire(fn, s);
-            else
-                irg_asm_x86(fn, s);
+                break;
+#endif
+#if FAMILY_BUILT(loongarch)
+            case TARGET_LOONGARCH64: irg_asm_loongarch(fn, s); break;
+#endif
+#if FAMILY_BUILT(tricore)
+            case TARGET_TRICORE: irg_asm_tricore(fn, s); break;
+#endif
+#if FAMILY_BUILT(xtensa)
+            case TARGET_XTENSA: irg_asm_xtensa(fn, s); break;
+#endif
+#if FAMILY_BUILT(ppc)
+            case TARGET_PPC32: irg_asm_ppc(fn, s); break;
+#endif
+#if FAMILY_BUILT(rx)
+            case TARGET_RX: irg_asm_rx(fn, s); break;
+#endif
+#if FAMILY_BUILT(sparc)
+            case TARGET_SPARC32: irg_asm_sparc(fn, s); break;
+#endif
+#if FAMILY_BUILT(m68k)
+            case TARGET_COLDFIRE: irg_asm_coldfire(fn, s); break;
+#endif
+#if FAMILY_BUILT(x86)
+            case TARGET_X86_64: irg_asm_x86(fn, s); break;
+#endif
+            default:
+                internal_error("asm for %s, whose backend is not built in",
+                               target_triple_now());
+            }
             break;
         case STMT_RETURN: {
             struct ir_ins *i;
