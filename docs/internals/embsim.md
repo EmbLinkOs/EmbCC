@@ -64,6 +64,7 @@ file but the network one compiles with EmbCC itself. Everything is in
 | `../embsvd/svd.h`, `../embsvd/svd.c` | the CMSIS-SVD reader, embsvd's |
 | `stm32-rcc.c`, `stm32-gpio.c`, `stm32-usart.c`, `stm32-tim.c` | the STM32's peripheral models, over its SVD's registers; the RCC's F1 rules and clock tree (`stm32f1_hclk`, the board's time) |
 | `stm32f1-gpio.c` | an STM32F1's GPIO ports (CRL/CRH), the debug port's pins, the pins to the board |
+| `nrf52.c` | the nRF52840's peripheral interface (tasks, events, INTEN, the level interrupt), CLOCK and the board's time, P0-P1, UART0/UARTE0-1 with EasyDMA, TIMER0-4, RTC0-2, the FICR |
 | `rp2040.h`, `rp2040.c` | the RP2040: its ROM (the flash boot: boot2's CRC, its copy to SRAM, the hand-over), RESETS (the peripherals held in reset: `gate_held`), XOSC, ROSC, the PLLs, the clock generators and FC0, PSM, the watchdog and its microsecond tick; the board's time at clk_sys (`rp2040_now_ns`, `s->now_ns`) |
 | `rp2040-timer.c`, `rp2040-io.c`, `rp2040-sio.c`, `rp2040-uart.c`, `rp2040-ssi.c` | the RP2040's timer; IO_BANK0, PADS_BANK0 and IO_QSPI (the pins); the SIO (GPIO, spinlocks, divider, core 0's FIFOs); UART0-1 (PL011); the SSI and the Pico's W25Q16JV flash |
 | `mcu-boards.c` | the boards around the microcontrollers EmbSim models by their SVD (`struct board_io`): each a table of LEDs, buttons and pins it drives (the Pico's) |
@@ -699,6 +700,9 @@ or with its own file for the six functions of `net.h`.
 - `tests/golden/embsim-bluepill.sh`: the Blue Pill against QEMU's
   stm32vldiscovery where it models the USART and RM0008 elsewhere, and
   the exec corpus on its memory against QEMU's netduino2.
+  `tests/golden/embsim-nrf52840dk.sh`: the DK against QEMU's micro:bit
+  where the nRF51 has the same peripheral, the PS elsewhere, and the
+  corpus against QEMU's mps2-an386.
   `tests/harness/embsim-corpus.sh` is the corpus run the board tests
   share: one program built once and linked for QEMU's machine and
   EmbSim's board, semihosting's output, the counts apart by a constant.

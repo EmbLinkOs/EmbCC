@@ -61,7 +61,8 @@ static void usage(void)
           "boards: lm3s6965evb (default), mps2-an385, mps2-an386,\n"
           "        mps2-an500, microbit, stm32f405 (its SVD: --svd or\n"
           "        EMBSIM_SVD_PATH), bluepill (STM32F103C8: ST's\n"
-          "        STM32F103xx.svd), pico (the Raspberry Pi Pico's RP2040:\n"
+          "        STM32F103xx.svd), nrf52840dk (Nordic's nrf52840.svd),\n"
+          "        pico (the Raspberry Pi Pico's RP2040:\n"
           "        the Pico SDK's RP2040.svd), virt (RISC-V), uno (AVR),\n"
           "        malta (MIPS),\n"
           "        pic32mz2048efh100, explorer16-32, curiosity-pic32mz-ef-2\n"
@@ -82,7 +83,8 @@ static void usage(void)
           "        explorer16-32-pic32mx and explorer16-32-dspic33: the same,\n"
           "        and S3;\n"
           "        curiosity-pic32mz-ef-2: SW1, SW2, SW3, SW4=pressed or released;\n"
-          "        pico: BOOTSEL=pressed or released\n",
+          "        pico: BOOTSEL=pressed or released;\n"
+          "        nrf52840dk: BUTTON1-4=pressed or released\n",
           stderr);
     exit(2);
 }

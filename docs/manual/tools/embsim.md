@@ -75,6 +75,7 @@ built for QEMU runs unchanged.
 | `microbit` | Cortex-M0 | 256 KiB flash at 0, 16 KiB SRAM at `0x20000000` | nRF51 at `0x40002000` |
 | `stm32f405` | Cortex-M4 with FPv4-SP | 1 MiB flash at `0x08000000` (and at 0), 128 KiB SRAM at `0x20000000`, 64 KiB CCM at `0x10000000` | the USARTs of its SVD ([below](#the-stm32f405)) |
 | `bluepill` | STM32F103C8: Cortex-M3 | 64 KiB flash at `0x08000000` (and at 0), 20 KiB SRAM at `0x20000000` | the USARTs of ST's SVD ([below](#the-blue-pill-stm32f103c8)), and the board's LED |
+| `nrf52840dk` | nRF52840: Cortex-M4 with FPv4-SP, 64 MHz | 1 MiB flash at 0, 256 KiB RAM at `0x20000000` | UART0, UARTE0-1 of Nordic's SVD ([below](#the-nrf52840-dk)), and the DK's LEDs and buttons |
 | `pico` | the Raspberry Pi Pico's RP2040: core 0, a Cortex-M0+ | its ROM at 0, 2 MiB flash at `0x10000000` (boot2, then the image), 264 KiB SRAM at `0x20000000` | UART0 and UART1 of RP2040.svd ([below](#the-raspberry-pi-pico)), and the board's LED |
 | `virt` | RISC-V, RV32 or RV64 with IMAFDC | 128 MiB RAM at `0x80000000` | NS16550A at `0x10000000` |
 | `uno` | ATmega328P (AVR5) | 32 KiB flash, 2 KiB SRAM at data `0x100` | USART0 at data `0xC0` |
@@ -134,8 +135,8 @@ its EDC or ATDF, so a test that drives RA0 needs a 100-pin one.
   its load address; a HEX record to its address as written.
 - A segment of the image outside the board's memory gets memory of its
   own, so a link script for a similar part still runs.
-- Flash on the lm3s6965, the micro:bit, the STM32F405, the Blue Pill
-  and the Pico ignores stores, as flash does. On the MPS2 boards it is SSRAM, which takes
+- Flash on the lm3s6965, the micro:bit, the STM32F405, the Blue Pill,
+  the nRF52840 DK and the Pico ignores stores, as flash does. On the MPS2 boards it is SSRAM, which takes
   them.
 
 ## What it models: the Cortex-M
@@ -559,6 +560,104 @@ not RM0008's, and where they differ:
 | a peripheral whose clock is off | works anyway | reads 0, ignores writes |
 | USART SR written with ones | they are set (`0x3ff`) | rc_w0 flags and read-only ones keep their value |
 | USART1's SR, BRR and CR1, TC cleared, the TXE interrupt; a reserved address's bus fault | as EmbSim | as QEMU |
+
+## The nRF52840 DK
+
+The `nrf52840dk` board is Nordic's nRF52840 DK (PCA10056): the nRF52840,
+a Cortex-M4 with FPv4-SP and 3 NVIC priority bits at 64 MHz, 1 MiB of
+flash at 0, 256 KiB of RAM at `0x20000000` (and again as code RAM at
+`0x00800000`). Its peripherals are Nordic's `nrf52840.svd`, found with
+`--svd FILE` or in `EMBSIM_SVD_PATH`:
+
+```sh
+embsvd nrf52840.svd --header nrf52840.h --startup startup.c \
+    --ld nrf52840.ld --flash 0:1M --ram 0x20000000:256K
+embcc --target=thumbv7em-none-eabihf --opt=speed -c startup.c main.c
+embcc --target=thumbv7em-none-eabihf --link-script=nrf52840.ld startup.o main.o -o fw.elf
+EMBSIM_SVD_PATH=$HOME/svd embsim fw.elf --board nrf52840dk
+```
+
+The header names things as Nordic's MDK does (`NRF_UART0`,
+`NRF_TIMER1->CC[0]`); a program built for the FPU turns it on first
+(CPACR), in `SystemInit` or its startup.
+
+Every peripheral modelled has Nordic's tasks, events and interrupts (the
+Product Specification's "Peripheral interface"): writing 1 to a task
+register triggers it; an event register is set by the hardware and
+cleared by writing 0; INTEN, INTENSET and INTENCLR hold one enable bit
+per event (bit n for the event at 0x100 + 4n); the interrupt is raised
+while an enabled event is set -- when it sets, and again when a write
+leaves it set; SHORTS connect events to tasks at once. The models (the
+nRF52840 Product Specification v1.1):
+
+- **CLOCK.** HFCLKSTART starts the 64 MHz crystal: HFCLKSTARTED and
+  HFCLKSTAT (Xtal, running) after HFXODEBOUNCE x 16 us (256 us out of
+  reset; the crystal's power-up time is not counted). LFCLKSTART starts
+  the 32.768 kHz clock from LFCLKSRC's source, copied to LFCLKSRCCOPY:
+  LFCLKSTARTED and LFCLKSTAT at once.
+- **P0, P1.** OUT, OUTSET, OUTCLR; DIR, DIRSET, DIRCLR, which are
+  PIN_CNF[n]'s DIR bits. IN is each pin whose input buffer is connected
+  (PIN_CNF.INPUT 0; out of reset none is): an output what OUT drives,
+  unless DRIVE lets that level go (D0S1 and D0H1 a 0, S0D1 and H0D1 a 1);
+  else what the board drives, else the pull (up 1, down 0), else 0
+  (floating, EmbSim's choice).
+- **UART0 and UARTE0** share their space and one model, as the part's do;
+  ENABLE 4 is the UART, 8 the UARTE. The UART: after STARTTX a byte
+  written to TXD is sent and TXDRDY set (not before); after STARTRX the
+  run's input (`--input`) fills RXD's six-byte FIFO, RXDRDY a byte. The
+  UARTE (and UARTE1): STARTTX sends TXD.MAXCNT bytes from TXD.PTR
+  (TXSTARTED, TXDRDY each, ENDTX, TXD.AMOUNT); STARTRX puts the input at
+  RXD.PTR (RXSTARTED, RXDRDY each, ENDRX and RXD.AMOUNT at RXD.MAXCNT;
+  STOPRX ends the buffer early, RXTO); ENDRX_STARTRX and ENDRX_STOPRX.
+  EasyDMA reaches Data RAM alone -- the PS: elsewhere "may result in a
+  HardFault or RAM corruption" -- so a buffer in flash is a warning, and
+  nothing moves:
+
+  ```text
+  embsim: warning: UARTE0's TXD.PTR 0x00000d14 is not in Data RAM: EasyDMA reaches only that (the part may fault or corrupt RAM); nothing is moved
+  ```
+
+- **TIMER0-4.** START, STOP, CLEAR, COUNT, CAPTURE[n], SHUTDOWN; in Timer
+  mode the counter counts at 16 MHz / 2^PRESCALER, in the Counter modes
+  at each COUNT while started; BITMODE's width (16, 8, 24, 32 bits) wraps
+  it; COMPARE[n] when it becomes CC[n]; COMPAREn_CLEAR and
+  COMPAREn_STOP. TIMER0-2 have four CC registers and TIMER3-4 six, as the
+  PS's instance table says (the SVD gives each six: on TIMER0-2 the last
+  two keep what is written, and compare with nothing).
+- **RTC0-2**, on the LFCLK (stopped, it does not count): the 24-bit
+  COUNTER at 32768 Hz / (PRESCALER + 1), PRESCALER latched by START,
+  CLEAR and TRIGOVRFLW and read-only while running; TICK each count,
+  OVRFLW from 0xFFFFFF to 0, COMPARE[n] as COUNTER becomes CC[n] -- each
+  event set only while EVTEN or INTEN enables it; TRIGOVRFLW sets COUNTER
+  to 0xFFFFF0. RTC0 has three CC registers, RTC1 and RTC2 four. The PS
+  says a CC written with N or N + 1 while COUNTER is N "may not" trigger:
+  EmbSim triggers at the transition.
+- **FICR**: CODEPAGESIZE 4096, CODESIZE 256, INFO.PART `0x52840`,
+  VARIANT "AACA", PACKAGE QI, RAM 256 KiB, FLASH 1 MiB, a DEVICEID of
+  EmbSim's; every other word reads `0xFFFFFFFF`, as unprogrammed -- so the
+  MDK's errata checks find no revision to work around.
+
+The core runs at 64 MHz, and the board reports its time at it. The
+board: LED1-4 on P0.13-16, lit low; BUTTON1-4 on P0.11, P0.12, P0.24,
+P0.25, low when pressed (`--set BUTTON1=pressed`), with no pull-up on the
+board (a program enables the pin's own); the interface MCU's UART is
+whichever UART the program uses (P0.06, P0.08): every UART writes to
+stdout.
+
+```text
+nrf52840dk: LED1 on (P0.13) at 3.577 ms
+nrf52840dk: LED1 off (P0.13) at 4.577 ms
+```
+
+QEMU's micro:bit, an nRF51, has the same UART, GPIO and TIMER at the
+same addresses, and is the referee where they agree:
+
+| | QEMU 11.1 (micro:bit) | EmbSim, as the nRF52840's PS |
+|---|---|---|
+| UART0's ENABLE, BAUDRATE | read 0, the reset value | keep what is written |
+| a TIMER's COUNT task while stopped | counts | does not count |
+| CLOCK, RTC, UARTE, P1, FICR (the nRF52840's) | not there | modelled, above |
+| UART0's TXD and TXDRDY; GPIO's DIR, OUT, PIN_CNF, IN with pulls; TIMER0 as a counter (compares, shorts, the 8-bit wrap, CAPTURE), INTENSET and INTENCLR | as EmbSim | as QEMU |
 
 ## What it models: the RISC-V core
 
@@ -1928,6 +2027,13 @@ On the Cortex-M:
   timing and line format; SysTick's external reference (the microsecond
   tick: SysTick counts the core's clock); the SRAM's unstriped alias at
   `0x21000000`.
+- On the nRF52840 DK: PPI and GPIOTE (events reach tasks only through
+  SHORTS), the GPIO's LATCH, DETECT and SENSE, the radio, USB, NFC, the
+  SAADC, SPI and TWI, the PWMs, QSPI, the crypto engines, the NVMC's
+  writes, POWER's modes and the watchdog (their registers keep what is
+  written); the UARTs' baud rate, flow control and errors; the TIMER's
+  PCLK1M; the RTC's "may not trigger" CC writes; the crystal's power-up
+  time.
 - On the Blue Pill: the F405's list below, and GPIO's LCKR sequence, the
   alternate functions' outputs but the USARTs' TX, EXTI and the pins'
   interrupts, the backup domain's (BKP, the RTC, LSE), the flash's
@@ -2123,6 +2229,21 @@ interrupt 1 ms apart at 72 MHz and 2 ms at 36; USART1's input. And the
 exec corpus on the Blue Pill's memory (its SRAM 64 KiB) against QEMU's
 netduino2, the same image on both: some 250 programs to the instruction
 and the cycle.
+
+**The nRF52840 DK.** `tests/golden/embsim-nrf52840dk.sh` builds
+`embsim-nrf52840dk/dk.c` from embsvd's files for Nordic's SVD, as
+ARMv6-M code with 16 KiB of RAM, so the same image runs on QEMU's
+micro:bit: 14 values (UART0, GPIO, TIMER0 as a counter, INTENSET and
+INTENCLR) must be what QEMU's nRF51 prints, and 28 the nRF52840 PS's:
+the GPIO's input buffer, pulls and drive modes, P1, a button, the FICR,
+the HFXO's 256 us debounce timed by TIMER2, the LFCLK, RTC0's compare
+after 32 counts, its read-only PRESCALER, TICK only when enabled, an RTC
+without the LFCLK, TRIGOVRFLW, TIMER1's 1 ms interrupt toggling LED1 at
+the board's time, UARTE0's EasyDMA from RAM and its refusal from flash,
+the input through UART0's RXD and into RAM by UARTE0. And the exec corpus
+for the M4 with FPv4-SP on the DK's memory against QEMU's mps2-an386,
+the same image on both: some 250 programs to the instruction and the
+cycle.
 
 **RISC-V.** `tests/golden/embsim-riscv.sh` does the same on virt with
 qemu-system-riscv32 and -riscv64: the exec corpus on RV32 with ilp32

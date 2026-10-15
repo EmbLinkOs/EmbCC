@@ -16,7 +16,8 @@
 #     UARTE0's EasyDMA from RAM and its refusal from flash. Its values must
 #     be dk.txt, the PS's; its "Q" values what QEMU's micro:bit prints;
 #     stderr the LEDs' changes (LED1's 1 ms apart) and EasyDMA's warning.
-#  3. UARTE0's receiver reads --input into RAM.
+#  3. The board's inputs: UART0's RXD and UARTE0's EasyDMA read --input;
+#     BUTTON1 pressed (--set) pulls P0.11 low.
 #  4. With QEMU: the core. The exec corpus for the M4 with FPv4-SP on the
 #     DK's memory runs on EmbSim's nrf52840dk and QEMU's mps2-an386, the
 #     same image: the same output and exit status, the instruction and
@@ -75,9 +76,13 @@ echo "embsim-nrf52840dk: dk.c's $nm values as the nRF52840's PS has them, LED1 t
 printf 'abcdefgh' > "$out/in.txt"
 "$EMBSIM" "$out/dk.elf" --board nrf52840dk --max-insns 50000000 --input "$out/in.txt" \
     > "$out/input.txt" 2> /dev/null
-grep -qx "rx 'abcd'" "$out/input.txt" ||
-    { grep '^rx' "$out/input.txt"; fail "UARTE0's receiver does not put --input in RAM"; }
-echo "embsim-nrf52840dk: four bytes of input into RAM by UARTE0's EasyDMA"
+grep -qx "rx0 'ab'" "$out/input.txt" && grep -qx "rx 'cdef'   00000004" "$out/input.txt" ||
+    { grep '^rx' "$out/input.txt"; fail "UART0's RXD and UARTE0's EasyDMA do not read --input"; }
+"$EMBSIM" "$out/dk.elf" --board nrf52840dk --max-insns 50000000 --set BUTTON1=pressed \
+    > "$out/button.txt" 2> /dev/null
+grep -qx 'M P0.IN-button1 00000000' "$out/button.txt" ||
+    { grep button1 "$out/button.txt"; fail "BUTTON1 pressed does not pull P0.11 low"; }
+echo "embsim-nrf52840dk: input through UART0's RXD and into RAM by UARTE0's EasyDMA; BUTTON1 pressed"
 
 # ---- 4. QEMU: the nRF51's peripherals, and the core ---------------------------
 if ! command -v "$QA" > /dev/null 2>&1 || ! "$QA" -M help 2>/dev/null | grep -q '^microbit '; then

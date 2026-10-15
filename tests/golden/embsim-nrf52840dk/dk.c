@@ -76,6 +76,7 @@ int main(void)
     NRF_UART0->PSEL.RXD = 8;
     NRF_UART0->BAUDRATE = 0x01d7e000;           /* 115200 */
     NRF_UART0->ENABLE = 4;
+    NRF_UART0->TXD = 'X';                       /* before STARTTX: not sent */
     NRF_UART0->TASKS_STARTTX = 1;
     puts_("nrf52840dk\n");
     M("UART0.ENABLE", NRF_UART0->ENABLE);       /* QEMU's reads 0 */
@@ -99,12 +100,12 @@ int main(void)
     M("P0.IN-disconnected", NRF_P0->IN >> 5 & 1);
     NRF_P0->PIN_CNF[11] = 3u << 2;              /* BUTTON1: pull-up */
     M("P0.IN-button1", NRF_P0->IN >> 11 & 1);
-    /* an open-drain output (S0D1) at 1 is let go: its pull-up holds it */
-    NRF_P0->PIN_CNF[6] = 1u | (3u << 2) | (6u << 8);
-    NRF_P0->OUTSET = 1u << 6;
-    M("P0.IN-open-drain", NRF_P0->IN >> 6 & 1);
-    NRF_P0->OUTCLR = 1u << 6;
-    M("P0.IN-open-drain-low", NRF_P0->IN >> 6 & 1);
+    /* an open-drain output (S0D1) at 1 is let go: its pull-down holds it;
+     * a push-pull one (S0S1) drives it */
+    NRF_P0->PIN_CNF[6] = 1u | (1u << 2) | (6u << 8);
+    NRF_P0->PIN_CNF[7] = 1u | (1u << 2);
+    NRF_P0->OUTSET = 3u << 6;
+    M("P0.IN-open-drain", NRF_P0->IN >> 6 & 3);
     NRF_P1->DIRSET = 1u << 2;
     NRF_P1->OUTSET = 1u << 2;
     M("P1.IN", NRF_P1->IN & 4);
@@ -134,9 +135,11 @@ int main(void)
     NRF_TIMER0->TASKS_CAPTURE[2] = 1;
     M("TIMER0.stopped", NRF_TIMER0->CC[2]);     /* QEMU's counts stopped */
     NRF_TIMER0->INTENSET = 1u << 17;
-    Q("TIMER0.INTENSET", NRF_TIMER0->INTENSET);
+    NRF_TIMER0->INTENSET = 1u << 16;
+    Q("TIMER0.INTENCLR-reads", NRF_TIMER0->INTENCLR);
     NRF_TIMER0->INTENCLR = 1u << 17;
-    Q("TIMER0.INTENCLR", NRF_TIMER0->INTENCLR);
+    Q("TIMER0.INTENSET-reads", NRF_TIMER0->INTENSET);
+    NRF_TIMER0->INTENCLR = 1u << 16;
     /* the rest is the nRF52840's: an nRF51 has no FICR words there */
     puts_("q-end\n");
 
@@ -146,6 +149,12 @@ int main(void)
     M("FICR.INFO.FLASH", NRF_FICR->INFO.FLASH);
     M("FICR.CODEPAGESIZE", NRF_FICR->CODEPAGESIZE);
     M("CLOCK.HFCLKSTAT-reset", NRF_CLOCK->HFCLKSTAT);
+    /* RTC1 started without the LFCLK does not count */
+    NRF_RTC1->TASKS_START = 1;
+    for (volatile int i = 0; i < 2000; i++)
+        ;
+    M("RTC1.COUNTER-no-lfclk", NRF_RTC1->COUNTER);
+    NRF_RTC1->TASKS_STOP = 1;
     /* the HFXO, timed by TIMER2 at 1 MHz: HFXODEBOUNCE 0x10, 256 us */
     NRF_TIMER2->MODE = 0;
     NRF_TIMER2->BITMODE = 3;
@@ -210,6 +219,21 @@ int main(void)
     M("TIMER1.irqs", tim_irqs);
 
     /* ---- UARTE0: the same space as UART0, EasyDMA from RAM --------------- */
+    /* the input (--input): two bytes through UART0's RXD first */
+    puts_("rx0 '");
+    NRF_UART0->EVENTS_RXDRDY = 0;
+    NRF_UART0->TASKS_STARTRX = 1;
+    for (int k = 0; k < 2; k++) {
+        int i;
+        for (i = 0; i < 100000 && !NRF_UART0->EVENTS_RXDRDY; i++)
+            ;
+        if (i == 100000)
+            break;
+        NRF_UART0->EVENTS_RXDRDY = 0;
+        putc_((char)NRF_UART0->RXD);
+    }
+    NRF_UART0->TASKS_STOPRX = 1;
+    puts_("'\n");
     NRF_UART0->TASKS_STOPTX = 1;
     NRF_UART0->ENABLE = 0;
     NRF_UARTE0->ENABLE = 8;
@@ -250,7 +274,8 @@ int main(void)
     puts_("rx '");
     for (uint32_t i = 0; i < rx_amount && i < 4; i++)
         putc_(rxbuf[i]);
-    puts_("'\n");
+    puts_("'");
+    line(' ', "", rx_amount);
     NVIC_ICPR = 0xffffffffu;
     puts_("done\n");
     for (;;)
