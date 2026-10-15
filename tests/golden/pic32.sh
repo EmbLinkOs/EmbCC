@@ -17,6 +17,8 @@
 #  4. address(N) on an SFR's extern declaration is the pack's processor
 #     module's symbol; on a definition it is refused, as are the vector
 #     attributes until EmbCC places handlers itself.
+#  5. #pragma config: each word a unit sets, in its section, as XC32
+#     emits it, from the pack's configuration.data.
 set -u
 echo "TEST-MARKER pic32"
 EMBCC=${EMBCC:-./embcc}
@@ -50,6 +52,22 @@ EOF
 #endif
 EOF
     printf '#ifdef __LANGUAGE_C__\nextern volatile unsigned int LATBSET __attribute__((section("sfrs"), address(0xBF860138)));\n#endif\n#define PACK_STAMP %s\n' "$2" > "$1/include/proc/p32mz2048efh100.h"
+    # two configuration words, as the pack's configuration.data has them:
+    # aliases on consecutive lines, values after them, a numeric setting
+    mkdir -p "$1/xc32/32MZ2048EFH100"
+    printf '%s\r\n' 'Daytona Configuration Word Definitions: 0001' \
+        'CWORD:BFC0FFC0:FFFFFFFF:FFFFFFFF' \
+        'CSETTING:0000FFFF:lowerbootaliasconfig_DEVCFG3_USERID:' \
+        'CSETTING:0000FFFF:USERID:Short name for DEVCFG3_USERID' \
+        'CVALUE:00000000:00000000:Range is from 0 to 0xffff' \
+        'CSETTING:01000000:FMIIEN:Ethernet RMII/MII Enable' \
+        'CVALUE:00000000:OFF:RMII Enabled' \
+        'CVALUE:01000000:ON:MII Enabled' \
+        'CWORD:BFC0FFC4:FFFFFFFF:FFFFFFFF' \
+        'CSETTING:00000007:FPLLIDIV:System PLL Input Divider' \
+        'CVALUE:00000000:DIV_1:Divide by 1' \
+        'CVALUE:00000002:DIV_3:Divide by 3' \
+        > "$1/xc32/32MZ2048EFH100/configuration.data"
 }
 mkpack "$out/pack" 1
 P="--target=mipsel-none-elf --mcu=32MZ2048EFH100"
@@ -146,6 +164,36 @@ llvm-objdump -d --no-show-raw-insn "$out/s.o" | grep -q 'mfc0.*\$14, 0x0' ||
 (cd "$out" && "$EMBCC" $P --dfp="$out/pack" -c s.S a.c 2> sc.err) ||
     { cat "$out/sc.err"; fail "a C file after a .S lost __LANGUAGE_C__"; }
 echo "pic32: a .S sees __LANGUAGE_ASSEMBLY__ and _CP0_EPC as \$14, 0; a C file after it, C's"
+
+# ---- 5. #pragma config ---------------------------------------------------------
+# each word a unit sets: its default, the settings' fields replaced, one
+# const object in .config_<address>, which the pack's linker script places
+# (ThermoV2's 44 settings give XC32's six words bit for bit)
+printf '#pragma config USERID = 0x1234, FMIIEN = OFF\n#pragma config FPLLIDIV = DIV_3\nint x;\n' > "$out/cfg.c"
+# shellcheck disable=SC2086
+"$EMBCC" $P --dfp="$out/pack" -c "$out/cfg.c" -o "$out/cfg.o" || fail "#pragma config"
+for w in "BFC0FFC0 feff1234" "BFC0FFC4 fffffffa"; do
+    set -- $w
+    llvm-objcopy -O binary --only-section=".config_$1" "$out/cfg.o" "$out/w.bin" ||
+        fail "no section .config_$1"
+    got=$(od -An -tx4 "$out/w.bin" | tr -d ' ')
+    [ "$got" = "$2" ] || fail ".config_$1 holds $got, not $2"
+done
+cfgbad() {          # cfgbad NAME PRAGMA WANT
+    printf '#pragma config %s\n' "$2" > "$out/$1.c"
+    # shellcheck disable=SC2086
+    "$EMBCC" $P --dfp="$out/pack" -c "$out/$1.c" -o "$out/$1.o" 2> "$out/$1.err" &&
+        fail "#pragma config $2 was accepted"
+    grep -q "$3" "$out/$1.err" || { cat "$out/$1.err"; fail "#pragma config $2: no reason"; }
+}
+cfgbad nosuch 'NOSUCH = ON' 'no setting named'
+cfgbad badval 'FPLLIDIV = DIV_2' 'FPLLIDIV takes DIV_1, DIV_3'
+cfgbad toobig 'USERID = 0x10000' "does not fit the setting's field"
+printf '#pragma config FNOSC = SPLL\n' > "$out/nopart.c"
+"$EMBCC" --target=mipsel-none-elf -c "$out/nopart.c" -o "$out/nopart.o" 2> "$out/nopart.err" &&
+    fail "#pragma config without a part was accepted"
+grep -q 'needs the part' "$out/nopart.err" || { cat "$out/nopart.err"; fail "#pragma config without a part: no reason"; }
+echo "pic32: #pragma config sets its words' fields (a value or a number), and names what it refuses"
 
 # ---- 4. attributes ------------------------------------------------------------
 refuse() {          # refuse NAME SOURCE WANT

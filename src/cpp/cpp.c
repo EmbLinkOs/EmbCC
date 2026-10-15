@@ -95,6 +95,10 @@ struct cpp {
     struct tm tm;
     struct once_file *once;
     struct pushed_macro *pushed;
+    /* #pragma config: each configuration word's value so far, and whether
+     * this unit set any of it (indexed as g_cfg.words) */
+    unsigned long *cfg_value;
+    unsigned char *cfg_set;
     int in_if;             /* expanding a #if line: `defined`'s operand
                             * is not expanded (expand_text) */
 };
@@ -1945,6 +1949,217 @@ static void emit_pack(struct src *s, const char *text, size_t n,
  * is a function or an object, and whether it is defined here, is the
  * unit's to decide. Dropped, a weak definition stayed strong and the
  * link failed on the one meant to replace it. */
+/* ---- #pragma config: a PIC32's configuration words ---------------------
+ *
+ * The device pack lists each word (CWORD:address:mask:default), each
+ * setting in it (CSETTING:mask:name:description -- a setting's aliases
+ * are consecutive lines with one mask) and each setting's values
+ * (CVALUE:bits:name:description; a numeric setting has one, whose
+ * description is "Range is from ..."). `#pragma config FNOSC = SPLL`
+ * replaces the setting's bits in its word's default; after the file,
+ * each word a unit set is one const object in section .config_<address>,
+ * where the pack's linker script places it -- as XC32 emits them. */
+struct cfg_value { char *name; unsigned long bits; };
+/* a setting's values (a numeric setting has none, and numeric = 1) */
+struct cfg_group { struct cfg_value *v; int n; int numeric; };
+struct cfg_setting {
+    char *name;
+    unsigned long mask;
+    int word, group;            /* aliases share a group */
+};
+static struct {
+    int loaded;
+    struct { unsigned long addr, def; } *words;
+    int nwords;
+    struct cfg_setting *set;
+    int nset;
+    struct cfg_group *grp;
+    int ngrp;
+} g_cfg;
+static const char *g_config_data;
+
+void cpp_set_config_data(const char *path) { g_config_data = path; }
+
+static char *cfg_field(char **p)        /* the next ':'-separated field */
+{
+    char *f = *p, *c = strchr(f, ':');
+    if (c) {
+        *c = 0;
+        *p = c + 1;
+    } else {
+        *p = f + strlen(f);
+    }
+    return f;
+}
+
+static int cfg_load(void)
+{
+    if (g_cfg.loaded)
+        return g_cfg.nwords > 0;
+    g_cfg.loaded = 1;
+    long len;
+    char *text = g_config_data ? src_read(g_config_data, &len) : NULL;
+    if (!text)
+        return 0;
+    int capw = 0, caps = 0, capg = 0, open_group = 0;
+    for (char *line = text; *line; ) {
+        char *e = strchr(line, '\n');
+        if (e)
+            *e = 0;
+        size_t l = strlen(line);
+        if (l && line[l - 1] == '\r')
+            line[l - 1] = 0;
+        char *p = line, *kind = cfg_field(&p);
+        if (strcmp(kind, "CWORD") == 0) {
+            if (g_cfg.nwords == capw) {
+                capw = capw ? 2 * capw : 32;
+                g_cfg.words = xrealloc(g_cfg.words,
+                                       (size_t)capw * sizeof *g_cfg.words);
+            }
+            g_cfg.words[g_cfg.nwords].addr = strtoul(cfg_field(&p), NULL, 16);
+            cfg_field(&p);                          /* the word's mask */
+            g_cfg.words[g_cfg.nwords++].def = strtoul(cfg_field(&p), NULL, 16);
+            open_group = 0;
+        } else if (strcmp(kind, "CSETTING") == 0 && g_cfg.nwords) {
+            if (!open_group) {                      /* a new setting */
+                if (g_cfg.ngrp == capg) {
+                    capg = capg ? 2 * capg : 64;
+                    g_cfg.grp = xrealloc(g_cfg.grp,
+                                         (size_t)capg * sizeof *g_cfg.grp);
+                }
+                memset(&g_cfg.grp[g_cfg.ngrp++], 0, sizeof *g_cfg.grp);
+                open_group = 1;
+            }
+            if (g_cfg.nset == caps) {
+                caps = caps ? 2 * caps : 256;
+                g_cfg.set = xrealloc(g_cfg.set, (size_t)caps * sizeof *g_cfg.set);
+            }
+            struct cfg_setting *c = &g_cfg.set[g_cfg.nset++];
+            c->mask = strtoul(cfg_field(&p), NULL, 16);
+            const char *nm = cfg_field(&p);
+            c->name = xstrndup(nm, strlen(nm));
+            c->word = g_cfg.nwords - 1;
+            c->group = g_cfg.ngrp - 1;
+        } else if (strcmp(kind, "CVALUE") == 0 && g_cfg.ngrp) {
+            open_group = 0;
+            unsigned long bits = strtoul(cfg_field(&p), NULL, 16);
+            char *name = cfg_field(&p);
+            if (strncmp(p, "Range", 5) == 0) {
+                g_cfg.grp[g_cfg.ngrp - 1].numeric = 1;
+            } else {
+                struct cfg_group *g = &g_cfg.grp[g_cfg.ngrp - 1];
+                g->v = xrealloc(g->v, (size_t)(g->n + 1) * sizeof *g->v);
+                g->v[g->n].name = xstrndup(name, strlen(name));
+                g->v[g->n++].bits = bits;
+            }
+        }
+        line = e ? e + 1 : line + strlen(line);
+    }
+    free(text);
+    return g_cfg.nwords > 0;
+}
+
+/* `#pragma config NAME = VALUE, NAME = VALUE ...` */
+static void do_config(struct src *s, const char *text, size_t n)
+{
+    if (!g_config_data)
+        cerr(s, "#pragma config sets a PIC32's configuration words, and "
+                "needs the part (--mcu=32MZ2048EFH100) and its device pack",
+             NULL);
+    if (!cfg_load())
+        cerr(s, "#pragma config: the device pack's configuration.data "
+                "cannot be read", g_config_data);
+    struct cpp *cpp = s->cpp;
+    if (!cpp->cfg_value) {
+        cpp->cfg_value = xmalloc((size_t)g_cfg.nwords * sizeof *cpp->cfg_value);
+        cpp->cfg_set = xcalloc((size_t)g_cfg.nwords, 1);
+        for (int w = 0; w < g_cfg.nwords; w++)
+            cpp->cfg_value[w] = g_cfg.words[w].def;
+    }
+    size_t i = 0;
+    for (;;) {
+        char name[64], val[64];
+        size_t k;
+        while (i < n && (text[i] == ' ' || text[i] == '\t')) i++;
+        for (k = 0; i < n && is_idc(text[i]) && k + 1 < sizeof name; i++)
+            name[k++] = text[i];
+        name[k] = 0;
+        while (i < n && (text[i] == ' ' || text[i] == '\t')) i++;
+        if (!k || i >= n || text[i] != '=')
+            cerr(s, "#pragma config takes NAME = VALUE, separated by commas",
+                 NULL);
+        i++;
+        while (i < n && (text[i] == ' ' || text[i] == '\t')) i++;
+        for (k = 0; i < n && is_idc(text[i]) && k + 1 < sizeof val; i++)
+            val[k++] = text[i];
+        val[k] = 0;
+        if (!k)
+            cerr(s, "#pragma config: a setting needs a value", name);
+        const struct cfg_setting *c = NULL;
+        for (int j = 0; j < g_cfg.nset && !c; j++)
+            if (strcmp(g_cfg.set[j].name, name) == 0)
+                c = &g_cfg.set[j];
+        if (!c)
+            cerr(s, "#pragma config: this part has no setting named", name);
+        unsigned long bits = 0;
+        int found = 0;
+        if (g_cfg.grp[c->group].numeric) {
+            char *end;
+            unsigned long v = strtoul(val, &end, 0);
+            int shift = 0;
+            while (shift < 32 && !(c->mask >> shift & 1))
+                shift++;
+            if (*end || (v << shift & ~c->mask))
+                cerr(s, "#pragma config: the value does not fit the "
+                        "setting's field", name);
+            bits = v << shift;
+            found = 1;
+        } else {
+            for (int j = 0; j < g_cfg.grp[c->group].n && !found; j++)
+                if (strcmp(g_cfg.grp[c->group].v[j].name, val) == 0) {
+                    bits = g_cfg.grp[c->group].v[j].bits;
+                    found = 1;
+                }
+        }
+        if (!found) {
+            char msg[1024];
+            size_t m = (size_t)snprintf(msg, sizeof msg, "#pragma config: "
+                                        "%s takes", name);
+            for (int j = 0; j < g_cfg.grp[c->group].n && m + 40 < sizeof msg; j++)
+                m += (size_t)snprintf(msg + m, sizeof msg - m, "%s %s",
+                                      j ? "," : "",
+                                      g_cfg.grp[c->group].v[j].name);
+            cerr(s, msg, NULL);
+        }
+        cpp->cfg_value[c->word] = (cpp->cfg_value[c->word] & ~c->mask) |
+                                  (bits & c->mask);
+        cpp->cfg_set[c->word] = 1;
+        while (i < n && (text[i] == ' ' || text[i] == '\t')) i++;
+        if (i >= n)
+            break;
+        if (text[i] != ',')
+            cerr(s, "#pragma config: settings are separated by commas", NULL);
+        i++;
+    }
+}
+
+/* After the unit: each word it set, where the linker script places it */
+static void emit_config(struct cpp *cpp, struct tbuf *out)
+{
+    for (int w = 0; cpp->cfg_set && w < g_cfg.nwords; w++) {
+        if (!cpp->cfg_set[w])
+            continue;
+        char line[256];
+        snprintf(line, sizeof line,
+                 "static const unsigned int __config_%08lX "
+                 "__attribute__((section(\".config_%08lX\"), used, "
+                 "aligned(4))) = 0x%08lXu;\n",
+                 g_cfg.words[w].addr, g_cfg.words[w].addr,
+                 cpp->cfg_value[w]);
+        tb_puts(out, line);
+    }
+}
+
 static void emit_weak(struct src *s, const char *text, size_t n,
                       struct tbuf *out)
 {
@@ -2105,6 +2320,8 @@ static void do_pragma(struct src *s, const char *text, size_t n,
             free(pm);
             break;          /* with no push to match, gcc does nothing */
         }
+    } else if (PRAGMA_IS("config")) {
+        do_config(s, text + 6, n - 6);
     } else if (PRAGMA_IS("weak")) {
         emit_weak(s, text + 4, n - 4, out);
     } else if (PRAGMA_IS("GCC") || PRAGMA_IS("clang")) {
@@ -2677,6 +2894,7 @@ char *cpp_process(const char *path, const char *src,
         cpp.depth--;
     }
     process_file(&cpp, path, src, &out, -1);
+    emit_config(&cpp, &out);
     if (g_dump_macros) {
         /* -dM: the output is every macro defined once the file has been
          * read -- the predefined ones, -D's and the file's own -- one

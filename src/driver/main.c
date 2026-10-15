@@ -1825,6 +1825,11 @@ static void incdirs_with_defaults(void)
             snprintf(dfpinc, sizeof dfpinc, "%s/include", pic32_dfp_dir());
             incdir_sys[nincdirs] = 1;
             incdirs[nincdirs++] = dfpinc;
+            /* and its configuration words, for #pragma config */
+            static char cfgdata[1024];
+            snprintf(cfgdata, sizeof cfgdata, "%s/xc32/%s/configuration.data",
+                     pic32_dfp_dir(), target_pic32_part());
+            cpp_set_config_data(cfgdata);
         }
         for (int k = 0; k < ndef && nincdirs < MAX_INCDIRS; k++) {
             incdir_sys[nincdirs] = 1;
