@@ -222,10 +222,31 @@ check tag-redefinition \
 struct P { int y; };
 int main(void) { return 0; }' \
     "redefinition of 'P'"
+# (a GNU extension GCC accepts; ISO C, which -pedantic-errors holds to,
+# requires a member)
 check empty-struct \
     'struct E { };
 int main(void) { return 0; }' \
-    "at least one member"
+    "a struct or union with no members is a GNU extension" -pedantic-errors
+# a pointer moves by its pointee's size, which an incomplete type has not
+# (this added one byte), and a difference of pointers to a type of size 0
+# counts nothing
+check ptr-step-incomplete \
+    'struct X;
+struct X *f(struct X *p) { return p + 1; }' \
+    "arithmetic on a pointer to incomplete type struct X"
+check ptr-incdec-incomplete \
+    'struct X;
+void f(struct X **p) { (*p)++; }' \
+    "++/-- on a pointer to incomplete type struct X"
+check ptr-addeq-incomplete \
+    'struct X;
+void f(struct X **p) { *p += 2; }' \
+    "+= on a pointer to incomplete type struct X"
+check ptr-diff-empty \
+    'struct E { };
+long f(struct E *p, struct E *q) { return q - p; }' \
+    "subtracting pointers to struct E, which has size 0"
 check typedef-redef \
     'typedef int T;
 typedef long T;

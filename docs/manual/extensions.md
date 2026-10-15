@@ -84,7 +84,10 @@ operators](#feature-test-operators), with the limits described there.
 | Binary integer constants (`0b1011`) | Supported |
 | `__FUNCTION__`, `__PRETTY_FUNCTION__` | Supported; both are the function's name, as `__func__` is |
 | Anonymous structures and unions as members | Supported |
-| [Constructs EmbCC does not support](#gnu-extensions-that-are-not-supported) | Conditional with omitted operand, nested functions, empty structures, arithmetic on `void *`, cast to a union, integer complex types, `$` in identifiers, asm labels, `return` of a `void` expression |
+| Conditional with the middle operand omitted, `x ?: y` | Supported; `x` is evaluated once |
+| A structure or union with no members | Supported; its size is 0 |
+| An asm label, `int f(void) __asm__("name");` | Supported |
+| [Constructs EmbCC does not support](#gnu-extensions-that-are-not-supported) | Nested functions, arithmetic on `void *`, cast to a union, integer complex types, `$` in identifiers, `return` of a `void` expression |
 
 ### Statement expressions
 
@@ -311,15 +314,12 @@ Each of these is refused with the diagnostic shown.
 
 | Construct | Diagnostic |
 |---|---|
-| Conditional with the middle operand omitted, `x ?: y` | `expected an expression, got ':'` |
 | Nested function definitions | `expected ';' before '{' [E0002]`, at the inner function's body |
-| A structure or union with no members | `a struct/union needs at least one member` |
 | Arithmetic on `void *` | `arithmetic on void *`, and `++/-- on void *` |
 | Arithmetic on a function pointer | `arithmetic on function *` |
 | `sizeof(void)` | `sizeof(void)` |
 | Cast to a union type, `(union u)x` | `cannot cast to union u` |
 | `$` in an identifier | `character '$' is not supported yet` |
-| An asm label, `int f(void) __asm__("name");` | `expected '{' or ';' before 'asm'` |
 | `return f();` in a `void` function, where `f` returns `void` | `returning a value from void 'g'` |
 | A conditional or cast as an lvalue | `assignment target must be a variable, *pointer, or member` |
 | Vector types; see [Vector extensions](#vector-extensions) | |

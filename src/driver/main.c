@@ -2966,7 +2966,10 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         }
         *len = (*len + align - 1) & ~(align - 1);
         g->off = *len;
-        *len += global_size(g);
+        /* A GNU empty struct, of size 0, still takes a byte of the
+         * section, as in GCC: a section of none was never made, and its
+         * objects went out as undefined symbols that no link could find. */
+        *len += global_size(g) ? global_size(g) : 1;
         if (!g->is_tls && !g->section) {
             int *sa = g->in_bss ? &bss_align : &data_align;
             if (align > *sa)
@@ -3038,7 +3041,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
             rodata_align = align;
         rodata_len = (rodata_len + align - 1) & ~(align - 1);
         g->off = rodata_len;
-        rodata_len += global_size(g);
+        rodata_len += global_size(g) ? global_size(g) : 1;   /* (as above) */
     }
     char *rodata = NULL;
     if (rodata_len) {

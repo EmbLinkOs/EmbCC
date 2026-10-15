@@ -712,7 +712,6 @@ These are refused in C++:
 | `sizeof` of a variable-length array | `sizeof a variable-length array is not supported` |
 | Imaginary constants (`2.0i`) | `no literal operator 'operator""i' for this literal` |
 | `typeof` without underscores | `expected a declaration before 'typeof'` |
-| `?:` with the middle operand omitted | `expected an expression before ':'` |
 | Array designators (`[1] = 2`) | `expected a capture` |
 | `__label__` | `'__label__' was not declared in this scope` |
 

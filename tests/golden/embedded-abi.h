@@ -66,6 +66,15 @@ unsigned nar_ret(unsigned long long v);
 int nar_ismax(unsigned u);
 int nar_lt(unsigned a, unsigned b);
 
+/* GNU's empty struct by value, size 0: in no register at all on most
+ * targets, by reference where every composite argument is (PowerPC,
+ * SPARC), and a result through the hidden pointer where every composite
+ * result is (o32, SPARC, m68k). EmbCC's o32 and n64 calls once disagreed
+ * with their own callees, and its x86-64 with GCC's, on the result. */
+struct empty { };
+struct empty emp_put(int *p, struct empty e, int v);
+int emp_mid(int a, struct empty e, int b);
+
 int vsum(int n, ...);
 long long vmix(int n, ...);
 int vafter4(int a, int b, int c, int d, ...);

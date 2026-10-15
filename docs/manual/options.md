@@ -25,7 +25,7 @@ EmbCC's own spellings come first. Where GCC spells the same thing differently, i
 
 | Option | What it does | Also accepted |
 |---|---|---|
-| `--std=STD` | the language standard: c89 to c2y, gnu17 by default (C++'s, c++98 to c++26, set its macros) | `-std=STD` |
+| `--std=STD` | the language standard: c89 to c2y (gnu17 by default), or for C++ c++98 to c++26 (gnu++20 by default) | `-std=STD` |
 | `-D NAME[=VALUE]` | define a macro |  |
 | `-U NAME` | undefine a macro |  |
 | `-I DIR` | search DIR for headers |  |

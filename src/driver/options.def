@@ -48,7 +48,7 @@ OPT(BUILD, "--emit-interfaces", NULL, NULL, "write the unit's interface record i
 OPT(BUILD, "--emit-empty-object", "FILE", NULL, "write an empty object for this target (it must come first)")
 
 /* ---- the language ---------------------------------------------------- */
-OPT(LANG, "--std=",         "STD",  "-std=%", "the language standard: c89 to c2y, gnu17 by default (C++'s, c++98 to c++26, set its macros)")
+OPT(LANG, "--std=",         "STD",  "-std=%", "the language standard: c89 to c2y (gnu17 by default), or for C++ c++98 to c++26 (gnu++20 by default)")
 GCCONLY(LANG, "-ansi", "--std=c89 for C, and --std=c++98's macros for C++")
 OPT(LANG, "-D",             "NAME[=VALUE]", NULL, "define a macro")
 OPT(LANG, "-U",             "NAME", NULL,   "undefine a macro")
