@@ -3778,8 +3778,12 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             i->a = ap;
             return -1;
         }
-        if (e->name && strcmp(e->name, "__builtin_va_end") == 0)
+        /* va_end does nothing to the list, but its argument is still an
+         * expression: `va_end(**ap++)` advances ap (GCC's va-arg-21.c) */
+        if (e->name && strcmp(e->name, "__builtin_va_end") == 0) {
+            gen_expr(fn, e->args[0]);
             return -1;
+        }
         /* va_copy(dst, src): copy the tag src points at into this call's
          * hidden slot, then point dst at the copy — so each list advances
          * independently, as C99 7.15.1.2 requires. */
