@@ -74,6 +74,7 @@ built for QEMU runs unchanged.
 | `mps2-an500` | Cortex-M7 with FPv5 (double) | as `mps2-an385` | CMSDK |
 | `microbit` | Cortex-M0 | 256 KiB flash at 0, 16 KiB SRAM at `0x20000000` | nRF51 at `0x40002000` |
 | `stm32f405` | Cortex-M4 with FPv4-SP | 1 MiB flash at `0x08000000` (and at 0), 128 KiB SRAM at `0x20000000`, 64 KiB CCM at `0x10000000` | the USARTs of its SVD ([below](#the-stm32f405)) |
+| `bluepill` | STM32F103C8: Cortex-M3 | 64 KiB flash at `0x08000000` (and at 0), 20 KiB SRAM at `0x20000000` | the USARTs of ST's SVD ([below](#the-blue-pill-stm32f103c8)), and the board's LED |
 | `pico` | the Raspberry Pi Pico's RP2040: core 0, a Cortex-M0+ | its ROM at 0, 2 MiB flash at `0x10000000` (boot2, then the image), 264 KiB SRAM at `0x20000000` | UART0 and UART1 of RP2040.svd ([below](#the-raspberry-pi-pico)), and the board's LED |
 | `virt` | RISC-V, RV32 or RV64 with IMAFDC | 128 MiB RAM at `0x80000000` | NS16550A at `0x10000000` |
 | `uno` | ATmega328P (AVR5) | 32 KiB flash, 2 KiB SRAM at data `0x100` | USART0 at data `0xC0` |
@@ -133,8 +134,8 @@ its EDC or ATDF, so a test that drives RA0 needs a 100-pin one.
   its load address; a HEX record to its address as written.
 - A segment of the image outside the board's memory gets memory of its
   own, so a link script for a similar part still runs.
-- Flash on the lm3s6965, the micro:bit, the STM32F405 and the Pico
-  ignores stores, as flash does. On the MPS2 boards it is SSRAM, which takes
+- Flash on the lm3s6965, the micro:bit, the STM32F405, the Blue Pill
+  and the Pico ignores stores, as flash does. On the MPS2 boards it is SSRAM, which takes
   them.
 
 ## What it models: the Cortex-M
@@ -491,6 +492,71 @@ stderr, at the board's time:
 pico: LED on (GP25) at 1.487 ms
 pico: LED off (GP25) at 1.987 ms
 ```
+
+## The Blue Pill (STM32F103C8)
+
+The `bluepill` board is the STM32F103C8 board sold as the "Blue Pill":
+a Cortex-M3 with 4 NVIC priority bits, 64 KiB of flash at `0x08000000`
+(seen at 0 too, BOOT0 low), 20 KiB of SRAM, the bit-band aliases. Its
+peripherals are ST's `STM32F103xx.svd` (the F103 family's, in the
+cmsis-svd-data project: it describes the high-density parts' FSMC,
+SDIO, TIM5-8, UART4-5 and the rest too, which the C8 does not have; their
+registers are there all the same), found with `--svd FILE` or in
+`EMBSIM_SVD_PATH`:
+
+```sh
+embsvd STM32F103xx.svd --nvic-prio-bits 4 --header STM32F103xx.h \
+    --startup startup.c --ld f103.ld --flash 0x08000000:64K --ram 0x20000000:20K
+embcc --target=thumbv7m-none-eabi --opt=speed -c startup.c main.c
+embcc --target=thumbv7m-none-eabi --link-script=f103.ld startup.o main.o -o fw.elf
+EMBSIM_SVD_PATH=$HOME/svd embsim fw.elf --board bluepill
+```
+
+The models are [the STM32F405's](#the-stm32f405) with the F1's own:
+
+- **RCC**, as the F405's (ready bits, the clock gates), and the F1's
+  rules (RM0008 7.2): a clock source is used once it is ready -- CFGR's
+  SWS takes SW's value only when the source's ready bit is set, and
+  switches when it becomes so --; PLLRDY sets when PLLON is set and the
+  PLL's source (HSI / 2, or HSE, halved with PLLXTPRE) is ready. The
+  clocks have frequencies: HSI 8 MHz, HSE the board's 8 MHz crystal, the
+  PLL its source times PLLMUL's factor, SYSCLK the source in use, HCLK
+  SYSCLK over HPRE's divisor. The core runs at HCLK, and the board
+  reports its time at it. A GPIO port's clock enable is IOPxEN.
+- **GPIOA-G**, the F1's layout (RM0008 9.1, 9.2): BSRR sets and resets
+  ODR's bits (set wins), BRR resets them; IDR is each pin from its
+  configuration: an analog input 0; a floating input what the board
+  drives, else 0 (EmbSim's choice); an input with a pull what the board
+  drives, else ODR's bit (1 up, 0 down); a push-pull output ODR's bit; an
+  open-drain one 0, or let go at 1 (floating); an alternate-function
+  output 1 on a USART's TX pin (the line idle, as AFIO's MAPR places it),
+  else 0. The debug port's pins are its while AFIO's MAPR.SWJ_CFG keeps
+  them -- out of reset all five --, whatever CRL and CRH say: PA13 and
+  PA15 pulled up, PA14 down, PB4 up (RM0008 9.1.1), PB3 0; SWJ_CFG 001
+  gives PB4 back, 010 PA15, PB3 and PB4, 100 all five.
+- **USART1-3** as the F405's, and USART1's receiver is the run's input
+  (`--input`): a byte comes in while UE and RE are set and RXNE is
+  clear, and a read of DR takes it.
+- **TIM1-4** and SysTick as the F405's; a timer's clock follows HCLK.
+
+The board's LED is on PC13, lit low; it has no user button.
+
+```text
+bluepill: LED on (PC13) at 2.543 ms
+bluepill: LED off (PC13) at 3.543 ms
+```
+
+QEMU's STM32F1 (its stm32vldiscovery, an STM32F100) models the USARTs,
+at the F103's addresses, and none of RCC, GPIO, AFIO or the timers (they
+read 0); where it models them EmbSim's values are QEMU's, where it does
+not RM0008's, and where they differ:
+
+| | QEMU 11.1 (stm32vldiscovery) | EmbSim, as RM0008 |
+|---|---|---|
+| RCC, GPIO, AFIO, the timers | not modelled: they read 0 | modelled, above |
+| a peripheral whose clock is off | works anyway | reads 0, ignores writes |
+| USART SR written with ones | they are set (`0x3ff`) | rc_w0 flags and read-only ones keep their value |
+| USART1's SR, BRR and CR1, TC cleared, the TXE interrupt; a reserved address's bus fault | as EmbSim | as QEMU |
 
 ## What it models: the RISC-V core
 
@@ -1860,6 +1926,11 @@ On the Cortex-M:
   timing and line format; SysTick's external reference (the microsecond
   tick: SysTick counts the core's clock); the SRAM's unstriped alias at
   `0x21000000`.
+- On the Blue Pill: the F405's list below, and GPIO's LCKR sequence, the
+  alternate functions' outputs but the USARTs' TX, EXTI and the pins'
+  interrupts, the backup domain's (BKP, the RTC, LSE), the flash's
+  programming, the clock security system; SysTick's HCLK / 8 reference
+  (CLKSOURCE 0: SysTick counts HCLK).
 - On the STM32F405: DMA, the ADC, SPI, I2C, EXTI and the rest are their
   registers alone; RCC's clock frequencies, its interrupts and its reset
   registers; GPIO's LCKR and pin inputs from outside; the USARTs'
@@ -2036,6 +2107,20 @@ the SSI and the flash's status registers; and the exec corpus from the
 Pico's flash and boot against QEMU's micro:bit -- the same ARMv6-M --
 some 250 programs to the instruction and the cycle, the boot's 28
 instructions apart.
+
+**The Blue Pill.** `tests/golden/embsim-bluepill.sh` builds
+`embsim-bluepill/bluepill.c` from embsvd's header, startup and linker
+script for ST's STM32F103xx.svd and runs it on EmbSim and on QEMU's
+stm32vldiscovery: 10 values -- USART1's registers, its interrupt, a
+reserved address's bus fault -- must be QEMU's, and 33 RM0008's: RCC
+out of reset and the switch to 72 MHz (SW waiting for the PLL, the PLL
+for HSE), a clock gate, the pins (pulls, the debug port's until SWJ_CFG
+frees them, open-drain, BSRR and BRR, a USART's TX pin), TIM2's update
+event and interrupts, SysTick against TIM2; the LED toggled by TIM2's
+interrupt 1 ms apart at 72 MHz and 2 ms at 36; USART1's input. And the
+exec corpus on the Blue Pill's memory (its SRAM 64 KiB) against QEMU's
+netduino2, the same image on both: some 250 programs to the instruction
+and the cycle.
 
 **RISC-V.** `tests/golden/embsim-riscv.sh` does the same on virt with
 qemu-system-riscv32 and -riscv64: the exec corpus on RV32 with ilp32
