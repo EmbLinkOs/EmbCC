@@ -7,7 +7,18 @@
  *     the pc and MOV to the pc may be returns;
  *   - RISC-V: JAL and JALR that link (rd ra or t0) are calls, C.JAL and
  *     C.JALR too; JALR and C.JR that do not link may be returns;
- *   - AVR: CALL, RCALL and ICALL are calls; RET is a return.
+ *   - AVR: CALL, RCALL and ICALL are calls; RET is a return;
+ *   - PIC24: CALL, RCALL, CALL Wn and RCALL Wn are calls; RETURN and
+ *     RETLW returns (RETFIE is the core's an_exc_return);
+ *   - MIPS: JAL, JALR that links, BAL and the other linking branches are
+ *     calls; JR may be a return. Each transfers after its delay slot, so
+ *     the step that makes the call or the return is the slot's: its
+ *     instruction counts to the caller, and the frame is pushed (or
+ *     popped) when the next pc is not the slot's fall-through. microMIPS
+ *     adds JALS, JALX, JALRS and the 16-bit JALR16 and JALRS16 as calls,
+ *     JR16 as a return, and the compact JRC and JRADDIUSP, returns with
+ *     no delay slot, which transfer at their own step; MIPS16e has JAL,
+ *     JALX and JALR, the compact JALRC, and JR and JRC.
  * A call that was taken pushes a frame, which returns to the instruction
  * after it. A transfer that may be a return is one when it lands where a
  * frame returns to: that frame and every frame above it are popped, so a
@@ -24,6 +35,8 @@
 #include "avr.h"
 #include "cortexm.h"
 #include "devices.h"
+#include "mips.h"
+#include "pic24.h"
 #include "riscv.h"
 
 enum { K_OTHER, K_CALL, K_RET };
@@ -32,6 +45,8 @@ enum { K_OTHER, K_CALL, K_RET };
 
 static int fetch16(struct sim *s, u32 a, u32 *h)
 {
+    if (s->cpu->ops->phys)
+        a = s->cpu->ops->phys(s->cpu, a);
     struct region *r = bus_region(&s->bus, a, 2);
     if (!r)
         return 0;
@@ -110,6 +125,93 @@ static int kind_avr(struct sim *s, u32 pc, int *size)
     return K_OTHER;
 }
 
+static int kind_mips(struct sim *s, u32 pc, int *size)
+{
+    u32 h, h2;
+    *size = 4;
+    if (!fetch16(s, pc, &h) || !fetch16(s, pc + 2, &h2))
+        return K_OTHER;
+    u32 i = h | h2 << 16, op = i >> 26, rt = (i >> 16) & 31;
+    if (op == 3)                                    /* JAL */
+        return K_CALL;
+    if (op == 1 && (rt & 0x1c) == 0x10)             /* BLTZAL, BGEZAL(L), BAL */
+        return K_CALL;
+    if (op == 0 && (i & 0x3f) == 9)                 /* JALR */
+        return (i >> 11) & 31 ? K_CALL : K_RET;
+    if (op == 0 && (i & 0x3f) == 8)                 /* JR */
+        return K_RET;
+    return K_OTHER;
+}
+
+/* a microMIPS instruction's kind and size; `compact`: it transfers at
+ * its own step, having no delay slot */
+static int kind_micro(struct sim *s, u32 pc, int *size, int *compact)
+{
+    u32 h, h2;
+    *size = 2;
+    *compact = 0;
+    if (!fetch16(s, pc, &h))
+        return K_OTHER;
+    u32 op = (h >> 10) & 0x3f;
+    if (mips_micro_size(h) == 2) {
+        if (op != 0x11)
+            return K_OTHER;
+        switch ((h >> 4) & 0x3f) {
+        case 0x18: case 0x19: return K_RET;                         /* JR16 */
+        case 0x1a: case 0x1b: case 0x30: case 0x31:                 /* JRC, JRADDIUSP */
+            *compact = 1;
+            return K_RET;
+        case 0x1c: case 0x1d: case 0x1e: case 0x1f: return K_CALL;  /* JALR16, JALRS16 */
+        }
+        return K_OTHER;
+    }
+    *size = 4;
+    if (!fetch16(s, pc + 2, &h2))
+        return K_OTHER;
+    u32 i = h << 16 | h2, minor = (i >> 21) & 31;
+    if (op == 0x3d || op == 0x1d || op == 0x3c)                     /* JAL, JALS, JALX */
+        return K_CALL;
+    if (op == 0x10 && (minor == 0x01 || minor == 0x03 || minor == 0x11 || minor == 0x13))
+        return K_CALL;                                              /* BLTZAL(S), BGEZAL(S) */
+    if (op == 0 && (i & 0x3f) == 0x3c && ((i >> 6) & 0x3f) == 0x3c &&
+        ((i >> 12) & 0xb) <= 1)                                     /* JALR(S)(.HB) */
+        return minor ? K_CALL : K_RET;
+    return K_OTHER;
+}
+
+/* a MIPS16e instruction's kind and size */
+static int kind_mips16(struct sim *s, u32 pc, int *size, int *compact)
+{
+    u32 h;
+    *size = 2;
+    *compact = 0;
+    if (!fetch16(s, pc, &h))
+        return K_OTHER;
+    *size = mips16_size(h);
+    if (((h >> 11) & 0x1f) == 0x03)                                 /* JAL, JALX */
+        return K_CALL;
+    if (((h >> 11) & 0x1f) == 0x1d && (h & 0x1f) == 0) {           /* JR, JRC, JALR, JALRC */
+        *compact = (h >> 7) & 1;
+        return (h >> 6) & 1 ? K_CALL : K_RET;
+    }
+    return K_OTHER;
+}
+
+/* a PIC24 instruction's kind, and its size in program addresses (2 a
+ * word) */
+static int kind_pic24(struct sim *s, u32 pc, int *size)
+{
+    u32 i = pic24_prog(s, pc), op = i >> 16;
+    *size = op == 0x02 || op == 0x04 ? 4 : 2;
+    if (op == 0x02 || op == 0x07)                               /* CALL, RCALL */
+        return K_CALL;
+    if (op == 0x01 && ((i & 0xfff0) == 0x0000 || (i & 0xfff0) == 0x2000))
+        return K_CALL;                                          /* CALL Wn, RCALL Wn */
+    if (i == 0x060000 || op == 0x05)                            /* RETURN, RETLW */
+        return K_RET;
+    return K_OTHER;
+}
+
 int an_sps(struct analysis *a, u32 *msp, u32 *psp)
 {
     if (a->arch == AN_ARM) {
@@ -132,18 +234,37 @@ int an_data_sym(struct analysis *a, const char *name, u32 *v)
     return 1;
 }
 
+/* the PIC24's stack, seen from above: deeper is lower, as elsewhere */
+#define PIC24_MIRROR (PIC24_DATA + 0x10000u)
+
+u32 an_stack_real(struct analysis *a, u32 v)
+{
+    return a->arch == AN_PIC24 && v ? PIC24_MIRROR - v : v;
+}
+
+u32 an_stack_view(struct analysis *a, u32 real)
+{
+    return a->arch == AN_PIC24 && real ? PIC24_MIRROR - real : real;
+}
+
 u32 an_sp(struct analysis *a)
 {
     switch (a->arch) {
     case AN_ARM: return ((struct cm_state *)a->s->cpu)->R[13];
     case AN_RV: return (u32)((struct rv_state *)a->s->cpu)->x[2];
+    case AN_MIPS: return ((struct mips_state *)a->s->cpu)->r[29];
+    case AN_PIC24: {
+        u32 w = ((struct pic24_state *)a->s->cpu)->w[15];
+        return w < (a->sp0 ? a->sp0 : 1u) ? 0 : PIC24_MIRROR - w;
+    }
     default: return AVR_DATA + ((struct avr_state *)a->s->cpu)->sp;
     }
 }
 
 /* An exception's entry lands on a jump to the handler where the vector
- * table holds instructions (the AVR's; RISC-V's vectored mode): the
- * jump's target, or `pc` itself when it is not a jump. */
+ * table holds instructions (the AVR's; RISC-V's vectored mode; MIPS's,
+ * a J and its delay slot): the jump's target, or `pc` itself when it is
+ * not a jump. */
 static u32 vector_target(struct analysis *a, u32 pc)
 {
     struct sim *s = a->s;
@@ -155,6 +276,9 @@ static u32 vector_target(struct analysis *a, u32 pc)
             return (((h >> 3 & 0x3e) | (h & 1)) << 16 | h2) * 2;
         if ((h & 0xf000) == 0xc000)                             /* RJMP */
             return pc + 2 + (u32)((s32)((h & 0xfff) << 20) >> 19);
+    } else if (a->arch == AN_MIPS) {
+        if (fetch16(s, pc + 2, &h2) && (h2 >> 10) == 2)          /* J */
+            return ((pc + 4) & 0xf0000000u) | ((h | h2 << 16) & 0x03ffffffu) << 2;
     } else if (a->arch == AN_RV) {
         if ((h & 0xfff) == 0x06f && fetch16(s, pc + 2, &h2)) {   /* JAL x0 */
             u32 i = h | h2 << 16;
@@ -223,8 +347,10 @@ static int child(struct analysis *a, int parent, int fn)
 static int cur_node(struct analysis *a, u32 pc)
 {
     int base = a->nfr ? a->fr[a->nfr - 1].node : 0;
-    if (a->nfr && a->fr[a->nfr - 1].vec == pc && a->fr[a->nfr - 1].exc)
-        return base;                /* the vector's jump: the handler's */
+    if (a->nfr && a->fr[a->nfr - 1].exc &&
+        (a->fr[a->nfr - 1].vec == pc ||
+         (a->arch == AN_MIPS && a->fr[a->nfr - 1].vec + 4 == pc)))
+        return base;                /* the vector's jump (and its slot): the handler's */
     int fn = an_fn(a, pc);
     if (base == a->cur_base && fn == a->cur_fn)
         return a->cur_node;
@@ -341,6 +467,26 @@ void an_step(struct sim *s)
         switch (a->arch) {
         case AN_ARM: a->kind = kind_thumb(s, pc0, &a->size); break;
         case AN_RV: a->kind = kind_riscv(s, pc0, &a->size); break;
+        case AN_MIPS: {
+            /* the branch's kind is its delay slot's step's: the transfer
+             * comes after the slot (but a compact one's, which has none) */
+            struct mips_state *m = (struct mips_state *)c;
+            int compact = 0;
+            int k = !m->isa ? kind_mips(s, pc0, &a->size)
+                    : m->micromips ? kind_micro(s, pc0, &a->size, &compact)
+                    : kind_mips16(s, pc0, &a->size, &compact);
+            if (compact) {
+                a->kind = k;
+                a->slot_kind = K_OTHER;
+                break;
+            }
+            a->kind = a->slot_kind;
+            a->slot_kind = m->slot ? K_OTHER : k;
+            if (m->slot == 0)
+                a->kind = K_OTHER;
+            break;
+        }
+        case AN_PIC24: a->kind = kind_pic24(s, pc0, &a->size); break;
         default: a->kind = kind_avr(s, pc0, &a->size); break;
         }
     }
@@ -386,7 +532,12 @@ struct analysis *an_create(struct sim *s, int calls)
         die("out of memory");
     a->s = s;
     a->img = image_open(s->image);
-    a->arch = avr_is(s->cpu) ? AN_AVR : riscv_is(s->cpu) ? AN_RV : AN_ARM;
+    a->arch = avr_is(s->cpu) ? AN_AVR : riscv_is(s->cpu) ? AN_RV
+            : mips_is(s->cpu) ? AN_MIPS : pic24_is(s->cpu) ? AN_PIC24 : AN_ARM;
+    /* the PIC24's stack starts where XC16's startup puts W15; before it
+     * (W15 0x0800 out of reset) it is not one */
+    if (a->arch == AN_PIC24 && !image_sym(a->img, "__SP_init", &a->sp0))
+        a->sp0 = 0;
     a->calls = calls;
     a->fn_lo = a->fn_hi = 0;        /* an empty cache */
     a->fn_idx = -1;

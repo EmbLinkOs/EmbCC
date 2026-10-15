@@ -49,9 +49,12 @@ struct svdmap {
     struct rf_reg **reg;            /* their registers, by address */
     int nreg;
     u32 lo, hi;                     /* the span the device covers */
-    struct device tk[MAX_TICKERS];  /* the models whose clock runs */
+    /* the peripherals whose model's clock runs: their hooks are looked up
+     * at each tick, so a model may start its clock while it is created */
+    struct rf_periph *tk[MAX_TICKERS];
     int ntk;
     int faults;                     /* bus faults reported */
+    int rules;                      /* the board's RF_* */
 };
 
 static const struct dev_ops rf_plain_ops;
@@ -126,6 +129,19 @@ static u64 lanes(int at, int n)
 
 /* ---- the map ---------------------------------------------------------- */
 
+static int ull_cmp(const void *a, const void *b)
+{
+    unsigned long long x = *(const unsigned long long *)a;
+    unsigned long long y = *(const unsigned long long *)b;
+    return x < y ? -1 : x > y;
+}
+
+static int u32_cmp(const void *a, const void *b)
+{
+    u32 x = *(const u32 *)a, y = *(const u32 *)b;
+    return x < y ? -1 : x > y;
+}
+
 static int reg_cmp(const void *a, const void *b)
 {
     const struct rf_reg *x = *(struct rf_reg *const *)a;
@@ -193,6 +209,76 @@ static void read_periph(struct svdmap *m, struct rf_periph *p,
     (void)m;
 }
 
+/* A PIC32's CLR, SET and INV registers: at +4, +8 and +0xC from the
+ * 32-bit registers the pack's processor module gives them (atdf.c), or
+ * without it, from each 16-byte aligned one whose next three words no
+ * register of the file holds -- which gives a few the part does not
+ * have (CFGCON, DEVID). Each is a register of its own, named as the
+ * device header names it (T2CONSET). */
+static void add_clr_set_inv(struct svd_device *d, struct rf_reg ***all,
+                            int *nall, int *cap)
+{
+    static const char *const suf[3] = { "CLR", "SET", "INV" };
+    int n0 = *nall;
+    u32 *at = malloc(sizeof *at * ((size_t)n0 + 1));
+    if (!at)
+        die("out of memory");
+    for (int i = 0; i < n0; i++)
+        at[i] = (*all)[i]->addr;
+    qsort(at, (size_t)n0, sizeof *at, u32_cmp);
+    for (int i = 0; i < n0; i++) {
+        struct rf_reg *r = (*all)[i];
+        if (r->bytes != 4)
+            continue;
+        if (d->nsci) {
+            unsigned long long ra = r->addr;
+            if (!bsearch(&ra, d->sci_at, (size_t)d->nsci, sizeof ra, ull_cmp))
+                continue;
+        } else if (r->addr & 15) {
+            continue;
+        }
+        int free_after = 1;
+        for (u32 k = 4; k <= 12 && free_after; k += 4) {
+            u32 a = r->addr + k;
+            free_after = !bsearch(&a, at, (size_t)n0, sizeof *at, u32_cmp);
+        }
+        if (!free_after)
+            continue;
+        struct rf_reg *x = calloc(3, sizeof *x);
+        struct rf_field *f = calloc(3, sizeof *f);
+        if (!x || !f)
+            die("out of memory");
+        for (int k = 0; k < 3; k++) {
+            size_t l = strlen(r->name) + 4;
+            char *nm = malloc(l);
+            if (!nm)
+                die("out of memory");
+            snprintf(nm, l, "%s%s", r->name, suf[k]);
+            x[k].addr = r->addr + 4 * (u32)(k + 1);
+            x[k].bytes = 4;
+            x[k].name = nm;
+            x[k].p = r->p;
+            f[k].width = 32;
+            f[k].acc = ACC_WO;
+            x[k].f = &f[k];
+            x[k].nf = 1;
+            x[k].base = r;
+            x[k].sci = k + 1;
+            r->alias[k] = &x[k];
+            if (*nall == *cap) {
+                *cap *= 2;
+                *all = realloc(*all, (size_t)*cap * sizeof **all);
+                if (!*all)
+                    die("out of memory");
+            }
+            (*all)[(*nall)++] = &x[k];
+            if (x[k].addr + 4 > r->p->end)
+                r->p->end = x[k].addr + 4;
+        }
+    }
+    free(at);
+}
+
 struct svdmap *svdmap_create(struct sim *s, const char *path)
 {
     svd_prog = "embsim";
@@ -203,7 +289,11 @@ struct svdmap *svdmap_create(struct sim *s, const char *path)
         die("out of memory");
     m->s = s;
     m->path = path;
-    m->d = svd_load(path);
+    m->rules = s->board ? s->board->rules : 0;
+    size_t pl = strlen(path);
+    m->d = pl > 5 && !strcmp(path + pl - 5, ".atdf") ? atdf_load(path)
+         : pl > 4 && !strcmp(path + pl - 4, ".PIC") ? edc_load(path)
+         : svd_load(path);
     m->p = calloc((size_t)m->d->np + 1, sizeof *m->p);
     if (!m->p)
         die("out of memory");
@@ -215,13 +305,15 @@ struct svdmap *svdmap_create(struct sim *s, const char *path)
             continue;               /* the core's own: its devices answer */
         struct rf_periph *p = &m->p[m->np++];
         p->name = sp->name;
-        p->base = (u32)sp->base;
+        p->base = (u32)(sp->base + m->d->bus_offset);
         p->svd = sp;
         p->sim = s;
         p->ops = &rf_plain_ops;
         p->ctx = p;
         read_periph(m, p, &all, &nall, &cap);
     }
+    if (m->d->clr_set_inv)
+        add_clr_set_inv(m->d, &all, &nall, &cap);
     /* by address; where two overlap, the first in the file is the one */
     if (nall)
         qsort(all, (size_t)nall, sizeof *all, reg_cmp);
@@ -274,6 +366,12 @@ static struct rf_reg *reg_at(struct svdmap *m, u32 a, int n)
     if (lo < m->nreg && m->reg[lo]->addr < (u64)a + (u64)n)
         return m->reg[lo];
     return 0;
+}
+
+struct rf_reg *rf_reg_at(struct svdmap *m, u32 addr)
+{
+    struct rf_reg *r = reg_at(m, addr, 1);
+    return r && r->addr == addr ? r : 0;
 }
 
 static int reg_index(struct svdmap *m, const struct rf_reg *r)
@@ -330,6 +428,21 @@ void rf_set_reset(struct rf_reg *r, u64 v)
     r->reset = r->value = v;
 }
 
+void rf_set_acc(struct rf_reg *r, u64 mask, int acc)
+{
+    for (int i = 0; i < r->nf; i++)
+        if (field_mask(&r->f[i]) & mask)
+            r->f[i].acc = acc;
+}
+
+u64 rf_fields(const struct rf_reg *r)
+{
+    u64 m = 0;
+    for (int i = 0; i < r->nf; i++)
+        m |= field_mask(&r->f[i]);
+    return m;
+}
+
 int rf_irq(const struct rf_periph *p, const char *want)
 {
     const struct svd_periph *sp = p->svd;
@@ -337,6 +450,49 @@ int rf_irq(const struct rf_periph *p, const char *want)
         if (strstr(sp->irq[i].name, want))
             return sp->irq[i].value;
     return sp->nirq ? sp->irq[0].value : -1;
+}
+
+int rf_dev_irq(struct svdmap *m, const char *name)
+{
+    for (int i = 0; i < m->d->nirq; i++)
+        if (!strcmp(m->d->irq[i].name, name))
+            return m->d->irq[i].value;
+    return -1;
+}
+
+int rf_irq_vector(struct svdmap *m, int irq)
+{
+    return irq >= 0 && irq < m->d->nirq_vector ? m->d->irq_vector[irq] : irq;
+}
+
+const char *rf_device_name(struct svdmap *m)
+{
+    return m->d->name;
+}
+
+u32 rf_config_addr(struct svdmap *m, const char *name, u32 dflt)
+{
+    for (int i = 0; i < m->d->ncfg; i++)
+        if (!strcmp(m->d->cfg[i].name, name))
+            return (u32)m->d->cfg[i].addr;
+    return dflt;
+}
+
+int rf_y_space(struct svdmap *m, u32 *lo, u32 *hi)
+{
+    if (!m->d->y_end)
+        return 0;
+    *lo = (u32)m->d->y_base;
+    *hi = (u32)m->d->y_end;
+    return 1;
+}
+
+int rf_pin(struct svdmap *m, const char *name)
+{
+    for (int i = 0; i < m->d->npin; i++)
+        if (!strcmp(m->d->pin[i].name, name))
+            return m->d->pin[i].port * 32 + m->d->pin[i].bit;
+    return -1;
 }
 
 void rf_interrupt(struct rf_periph *p, int irq)
@@ -551,6 +707,8 @@ static int access(struct svdmap *m, u32 a, int n, u32 *v, int write, int side)
         r = m->reg[i];
         if ((u64)r->addr >= (u64)a + (u64)n)
             break;
+        if (r->base)
+            continue;               /* CLR, SET, INV: map_write's */
         u32 lo = a > r->addr ? a : r->addr;
         u64 e1 = (u64)a + (u64)n, e2 = (u64)r->addr + (u64)r->bytes;
         int cnt = (int)((e1 < e2 ? e1 : e2) - lo);
@@ -604,10 +762,15 @@ static const char *access_kind(int n, int write)
     return n >= 1 && n <= 4 ? k[write != 0][n] : "an access";
 }
 
-/* an access no register answers: a bus fault, and why on stderr */
+/* An access no register answers: a bus fault, and why on stderr -- but
+ * on a PIC32, whose SFR space reads as 0 and ignores writes where nothing
+ * is (its startups write whole tables over the holes: XC32's OFFn table
+ * covers the unimplemented vectors' addresses), as the part does. */
 static void hole(struct svdmap *m, u32 a, int n, int write)
 {
     struct sim *s = m->s;
+    if (m->d->holes_zero)
+        return;
     bus_fault(&s->bus);
     if (s->bus.debug)
         return;
@@ -631,13 +794,24 @@ static void hole(struct svdmap *m, u32 a, int n, int write)
         fprintf(stderr, "no peripheral of %s is there\n", m->d->name);
 }
 
-static int gated(const struct rf_periph *p)
+int rf_gated(const struct rf_periph *p)
 {
-    return p->gate && !(p->gate->value & p->gate_mask);
+    return p->gate && (!(p->gate->value & p->gate_mask)) != p->gate_held;
 }
 
-/* an access to a peripheral whose clock is off: the trace says so, and
- * the first one is a warning */
+void rf_periph_reset(struct rf_periph *p)
+{
+    for (int i = 0; i < p->nreg; i++) {
+        p->reg[i]->value = p->reg[i]->reset;
+        p->reg[i]->once = 0;
+    }
+    if (p->ops->reset)
+        p->ops->reset(p->ctx);
+}
+
+/* An access to a peripheral whose clock is off, or that is held in
+ * reset: the trace says so, and the first one is a warning. A read gives
+ * 0 with the clock off, the registers' reset values in reset (`v`). */
 static void gated_access(struct svdmap *m, struct rf_periph *p, u32 a, int n,
                          int write, u32 v)
 {
@@ -645,39 +819,94 @@ static void gated_access(struct svdmap *m, struct rf_periph *p, u32 a, int n,
     if (s->bus.debug)
         return;
     struct rf_reg *r = reg_at(m, a, n);
+    const char *why = p->gate_held ? "it is held in reset" : "its clock is off";
     if (r->traced) {
         tr_head(s, write ? 'W' : 'R');
         if (write)
-            fprintf(stderr, "%s.%s 0x%08x ignored: its clock is off (%s)\n",
-                    p->name, r->name, v, p->gate_name);
+            fprintf(stderr, "%s.%s 0x%08x ignored: %s (%s)\n", p->name,
+                    r->name, v, why, p->gate_name);
         else
-            fprintf(stderr, "%s.%s 0x00000000: its clock is off (%s)\n",
-                    p->name, r->name, p->gate_name);
+            fprintf(stderr, "%s.%s 0x%08x: %s (%s)\n", p->name, r->name, v,
+                    why, p->gate_name);
     }
     if (!p->gate_warned) {
         p->gate_warned = 1;
         fflush(stdout);
         fprintf(stderr, "embsim: warning: %s at pc 0x%08x: %s.%s %s while "
-                "its clock is off (%s is 0)\n", write ? "a write" : "a read",
+                "%s (%s is %d)\n", write ? "a write" : "a read",
                 s->cpu->ops->pc(s->cpu), p->name, r->name,
-                write ? "is ignored" : "reads as 0", p->gate_name);
+                write ? "is ignored" : p->gate_held ? "reads its reset value"
+                                                    : "reads as 0",
+                why, p->gate_name, p->gate_held);
     }
+}
+
+/* RF_ATOMIC_ALIASES: the register an address at +0x1000, +0x2000 or
+ * +0x3000 from it names, and which alias (1 XOR, 2 set, 3 clear); 0 for
+ * an address that is not an alias -- one of the file's own registers, or
+ * the SIO's space (0xD0000000 up), which has none */
+static struct rf_reg *atomic_alias(struct svdmap *m, u32 a, int n, int *kind)
+{
+    if (!(m->rules & RF_ATOMIC_ALIASES) || !(a & 0x3000u) || a >= 0xd0000000u ||
+        reg_at(m, a, n))
+        return 0;
+    struct rf_reg *r = reg_at(m, a & ~0x3000u, n);
+    if (!r || r->base || (r->p->base & ~0x3fffu) != (a & ~0x3fffu))
+        return 0;
+    *kind = (int)(a >> 12 & 3);
+    return r;
+}
+
+/* A write of `v` through an atomic alias of r: the bits set in v are
+ * XORed, set or cleared, and the others are not written at all -- the
+ * model is given a whole word in which each of them is what a write
+ * leaves alone: a plain field's value as it is, 0 for oneToClear and its
+ * like, 1 for zeroToClear and its. (The datasheet's bus interposer in
+ * front of the UARTs, SPI, I2C and SSI reads the register and writes the
+ * result whole, which differs only for a register a read changes, a
+ * FIFO's: EmbSim does not tell them apart.) */
+static void alias_write(struct svdmap *m, struct rf_reg *r, int kind, u32 v)
+{
+    struct rf_periph *p = r->p;
+    u32 off = r->addr - p->base;
+    u64 old = r->value;
+    u64 hit = v, w = 0;
+    for (int i = 0; i < r->nf; i++) {
+        const struct rf_field *f = &r->f[i];
+        u64 fm = field_mask(f), keep;
+        if (f->mwv == MWV_MODIFY)
+            keep = f->acc == ACC_WO || f->acc == ACC_W1 ? 0 : old & fm;
+        else
+            keep = f->mwv >= MWV_0CLR && f->mwv <= MWV_0TOG ? fm : 0;
+        u64 to = kind == 1 ? ~old : kind == 2 ? ~0ULL : 0;
+        w |= (keep & ~hit) | (to & hit & fm);
+    }
+    (void)m;
+    if (p->ops->write)
+        p->ops->write(p->ctx, off, 4, (u32)w);
 }
 
 static u32 map_read(void *ctx, u32 off, int n)
 {
     struct svdmap *m = ctx;
     u32 a = m->lo + off, v = 0;
+    int kind;
+    if (atomic_alias(m, a, n, &kind))
+        a &= ~0x3000u;              /* a read there is the register's */
     struct rf_reg *r = reg_at(m, a, n);
     if (!r) {
         hole(m, a, n, 0);
         return 0;
     }
     struct rf_periph *p = r->p;
-    if (gated(p)) {
-        gated_access(m, p, a, n, 0, 0);
-        return 0;
+    if (rf_gated(p)) {
+        if (p->gate_held)
+            access(m, a, n, &v, 0, 0);
+        gated_access(m, p, a, n, 0, v);
+        return v;
     }
+    if (r->base)
+        return 0;                   /* CLR, SET, INV read as 0 */
     if (m->s->bus.debug) {
         access(m, a, n, &v, 0, 0);
         return v;
@@ -685,18 +914,58 @@ static u32 map_read(void *ctx, u32 off, int n)
     return p->ops->read ? p->ops->read(p->ctx, a - p->base, n) : 0;
 }
 
+/* a write to a CLR, SET or INV register: its register written with the
+ * bits cleared, set or inverted, as one word */
+static void sci_write(struct svdmap *m, struct rf_reg *r, u32 a, int n, u32 v)
+{
+    struct rf_reg *b = r->base;
+    struct rf_periph *p = b->p;
+    u32 sh = 8 * (a - r->addr);
+    u32 bits = (n == 4 ? v : v & ((1u << (8 * n)) - 1)) << sh;
+    u32 old = (u32)b->value, nv;
+    switch (r->sci) {
+    case 1: nv = old & ~bits; break;
+    case 2: nv = old | bits; break;
+    default: nv = old ^ bits; break;
+    }
+    (void)m;
+    if (p->ops->write)
+        p->ops->write(p->ctx, b->addr - p->base, 4, nv);
+}
+
 static void map_write(void *ctx, u32 off, int n, u32 v)
 {
     struct svdmap *m = ctx;
     u32 a = m->lo + off;
-    struct rf_reg *r = reg_at(m, a, n);
+    int kind = 0;
+    struct rf_reg *r = atomic_alias(m, a, n, &kind);
+    if (r)
+        a &= ~0x3000u;              /* the register the alias names */
+    else
+        r = reg_at(m, a, n);
+    if (r && n < 4 && r->bytes == 4 && (m->rules & RF_WIDE_WRITES)) {
+        /* the byte or halfword across the bus's four lanes, to the
+         * whole register */
+        v &= n == 1 ? 0xffu : 0xffffu;
+        v = n == 1 ? v * 0x01010101u : v * 0x00010001u;
+        a &= ~3u;
+        n = 4;
+    }
     if (!r) {
         hole(m, a, n, 1);
         return;
     }
     struct rf_periph *p = r->p;
-    if (gated(p)) {
+    if (rf_gated(p)) {
         gated_access(m, p, a, n, 1, v);
+        return;
+    }
+    if (kind) {
+        alias_write(m, r, kind, v);
+        return;
+    }
+    if (r->base) {
+        sci_write(m, r, a, n, v);
         return;
     }
     if (p->ops->write)
@@ -713,12 +982,11 @@ void rf_clock(struct rf_periph *p, int *running, int on)
     if (on) {
         if (m->ntk == MAX_TICKERS)
             die("too many peripheral clocks running");
-        m->tk[m->ntk].ops = p->ops;
-        m->tk[m->ntk++].ctx = p->ctx;
+        m->tk[m->ntk++] = p;
         return;
     }
     for (int i = 0; i < m->ntk; i++)
-        if (m->tk[i].ctx == p->ctx) {
+        if (m->tk[i] == p) {
             m->tk[i] = m->tk[--m->ntk];
             break;
         }
@@ -744,8 +1012,8 @@ static void map_tick(void *ctx, u32 cycles)
 {
     struct svdmap *m = ctx;
     for (int i = 0; i < m->ntk; i++)
-        if (m->tk[i].ops->tick)
-            m->tk[i].ops->tick(m->tk[i].ctx, cycles);
+        if (m->tk[i]->ops->tick)
+            m->tk[i]->ops->tick(m->tk[i]->ctx, cycles);
 }
 
 static int map_next_event(void *ctx, u32 *cycles)
@@ -754,7 +1022,7 @@ static int map_next_event(void *ctx, u32 *cycles)
     int any = 0;
     for (int i = 0; i < m->ntk; i++) {
         u32 c;
-        if (m->tk[i].ops->next_event && m->tk[i].ops->next_event(m->tk[i].ctx, &c) &&
+        if (m->tk[i]->ops->next_event && m->tk[i]->ops->next_event(m->tk[i]->ctx, &c) &&
             (!any || c < *cycles)) {
             *cycles = c;
             any = 1;
@@ -847,13 +1115,17 @@ void svdmap_print(struct svdmap *m, FILE *f)
     const struct svd_device *d = m->d;
     fprintf(f, "# %s: %d peripherals, %d registers on the bus at "
             "0x%08x-0x%08x\n", d->name, m->np, m->nreg, m->lo, m->hi - 1);
+    if (d->bus_offset)
+        fprintf(f, "# (the file's addresses: each is on the bus 0x%llx above)\n",
+                d->bus_offset);
     for (int i = 0; i < d->np; i++) {
         const struct svd_periph *sp = &d->p[i];
         struct svd_flats fl = svd_flat_regs(sp, 1);
         for (int k = 0; k < fl.n; k++) {
             const struct svd_node *n = fl.v[k].r;
-            u32 a = (u32)(sp->base + fl.v[k].off);
-            fprintf(f, "%s 0x%08x %d %s %s.%s 0x%0*llx %s", sp->name, a,
+            u32 a = (u32)(sp->base + fl.v[k].off + d->bus_offset);
+            fprintf(f, "%s 0x%08x %d %s %s.%s 0x%0*llx %s", sp->name,
+                    a - (u32)d->bus_offset,
                     n->size, fl.v[k].name, sp->name, fl.v[k].path,
                     n->size / 4, (unsigned long long)n->reset, n->acc);
             struct rf_reg *r = sp->base >= 0xE0000000u ? 0 : reg_at(m, a, 1);
@@ -864,15 +1136,41 @@ void svdmap_print(struct svdmap *m, FILE *f)
                 fprintf(f, " -- is %s.%s", r ? r->p->name : "?",
                         r ? r->name : "?");
             fputc('\n', f);
+            for (int q = 0; r && r->addr == a && q < 3 && r->alias[q]; q++)
+                fprintf(f, "%s 0x%08x 32 %s %s.%s 0x00000000 write-only -- "
+                        "%s of %s\n", sp->name, r->alias[q]->addr,
+                        r->alias[q]->name, sp->name, r->alias[q]->name,
+                        q == 0 ? "CLR" : q == 1 ? "SET" : "INV", r->name);
         }
         svd_free_flats(&fl);
     }
+}
+
+const char *svd_dfp;
+
+static int readable(const char *p)
+{
+    FILE *f = fopen(p, "rb");
+    if (f)
+        fclose(f);
+    return f != 0;
 }
 
 const char *svd_search(const char *name)
 {
     const char *path = getenv("EMBSIM_SVD_PATH");
     static char buf[1024];
+    if (svd_dfp) {
+        snprintf(buf, sizeof buf, "%s/atdf/%s", svd_dfp, name);
+        if (readable(buf))
+            return buf;
+        snprintf(buf, sizeof buf, "%s/edc/%s", svd_dfp, name);
+        if (readable(buf))
+            return buf;
+        snprintf(buf, sizeof buf, "%s/%s", svd_dfp, name);
+        if (readable(buf))
+            return buf;
+    }
     for (const char *q = path; q && *q; ) {
         size_t l = strcspn(q, ":");
         if (l && l + strlen(name) + 2 < sizeof buf) {

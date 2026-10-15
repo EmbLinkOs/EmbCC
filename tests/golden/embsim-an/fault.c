@@ -13,6 +13,10 @@
  *     1  the load from 0x30000000: a load access fault, with mtvec 0
  *     2  a write to a CSR there is not: an illegal instruction, with a
  *        handler that ends the run through the test device
+ *   MIPS (malta)
+ *     1  a load from 0xb0000000, kseg1 where nothing is: a bus error,
+ *        which the harness's handler reports before SOFTRES
+ *     2  a load from 0x80000001: an address error, BadVAddr the address
  * The comments in capitals mark the lines the report's backtrace must
  * name. */
 void puts_(const char *s);
@@ -22,9 +26,9 @@ volatile unsigned sink;
 
 __attribute__((noinline)) unsigned crash(volatile unsigned *p)
 {
-#if MODE == 2 && !defined(__riscv)
+#if MODE == 2 && !defined(__riscv) && !defined(__mips__)
     return 100 / zero;                                  /* DIV */
-#elif MODE == 2
+#elif MODE == 2 && defined(__riscv)
     __asm__ volatile("csrw 0x7ff, zero");               /* CSR */
     return 0;
 #else
@@ -32,9 +36,17 @@ __attribute__((noinline)) unsigned crash(volatile unsigned *p)
 #endif
 }
 
+#ifndef __mips__
+#define BAD 0x30000000u
+#elif MODE == 2
+#define BAD 0x80000001u
+#else
+#define BAD 0xb0000000u
+#endif
+
 __attribute__((noinline)) unsigned level2(unsigned x)
 {
-    unsigned r = crash((volatile unsigned *)0x30000000u) + x;  /* CALL2 */
+    unsigned r = crash((volatile unsigned *)BAD) + x;   /* CALL2 */
     sink = r;
     return r;
 }
@@ -46,7 +58,11 @@ __attribute__((noinline)) unsigned level1(unsigned x)
     return r;
 }
 
-#ifndef __riscv
+#if defined(__mips__)
+static void setup(void)
+{
+}
+#elif !defined(__riscv)
 static void semi_exit(void)
 {
     static const unsigned blk[2] = { 0x20026u, 0 };

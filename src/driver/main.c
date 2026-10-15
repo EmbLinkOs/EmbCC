@@ -279,7 +279,9 @@ static const char *path_basename(const char *p)
     return slash ? slash + 1 : p;
 }
 
-#define MAX_INCDIRS 16
+/* the search path: a vendor SDK's build gives a hundred -I directories (the
+ * Pico SDK's, one per component), so room for many more than that */
+#define MAX_INCDIRS 512
 static const char *incdirs[MAX_INCDIRS];
 static int incdir_sys[MAX_INCDIRS];   /* -isystem, or EmbCC's own include */
 static int nincdirs;
@@ -2248,9 +2250,13 @@ static int pic32_script(const char *path)
     q = strstr(ld, "_vector_spacing = ");
     if (q)
         spacing = strtoul(q + 18, NULL, 0);
-    /* the OFFn registers: the address the init module's table is placed
-     * at, and its .word count; none on a part whose vectors are spaced
-     * evenly (PIC32MX) */
+    /* the OFFn registers: where OFF000 is, and how many vectors there
+     * are to the last the init module names; none on a part whose
+     * vectors are spaced evenly (PIC32MX). The module places its table
+     * in runs, one section a run of implemented vectors (a PIC32MZ EF
+     * has none for 94-101, 107-108...), each at its first vector's
+     * register, OFF000 + 4n: the startup copies the whole span, the
+     * holes' words too, as XC32's image writes them. */
     unsigned long offregs = 0;
     int nvec = 0;
     snprintf(p, sizeof p, "%s/xc32/%s/p%s_voff_init.S", dfp, part, part);
@@ -2259,10 +2265,46 @@ static int pic32_script(const char *path)
         q = strstr(vo, "address(");
         if (q)
             offregs = strtoul(q + 8, NULL, 0);
-        for (q = vo; (q = strstr(q, ".word __vector_offset_")) != NULL; q++)
-            nvec++;
+        for (q = vo; (q = strstr(q, ".word __vector_offset_")) != NULL; q++) {
+            long v = strtol(q + 22, NULL, 10);
+            if (v + 1 > nvec)
+                nvec = (int)v + 1;
+        }
+        /* each run's section is where OFF000 + 4n says, or the table the
+         * startup copies would put offsets in the wrong registers */
+        for (q = vo; offregs && (q = strstr(q, "address(")) != NULL; q++) {
+            unsigned long at = strtoul(q + 8, NULL, 0);
+            char *w = strstr(q, ".word __vector_offset_");
+            if (w && at != offregs + 4 * (unsigned long)strtol(w + 22, NULL, 10)) {
+                fprintf(stderr, "embcc: error: %s places a vector's offset "
+                        "at 0x%08lX, not at OFF000 + 4 times its number\n",
+                        p, at);
+                free(vo);
+                free(ld);
+                return 1;
+            }
+        }
         free(vo);
     }
+    /* a PIC32MX's vectors are spaced evenly from EBASE + 0x200 (IntCtl.VS),
+     * where the pack's script places each .vector_N, and EBASE has a
+     * region of its own, exception_mem (in boot flash, or at program
+     * flash's end); its RAM is kseg1_data_mem */
+    int spaced = 0;
+    for (q = ld; !offregs && (q = strstr(q, "\n  .vector_")) != NULL; q++) {
+        char *e;
+        long v = strtol(q + 11, &e, 10);
+        if (e != q + 11 && !strncmp(e, " _ebase_address + 0x200", 23) && v + 1 > spaced)
+            spaced = (int)v + 1;
+    }
+    char head = *mend;
+    *mend = 0;
+    const char *data = strstr(mem, "kseg0_data_mem") ? "kseg0_data_mem" : "kseg1_data_mem";
+    const char *xmem = "kseg0_program_mem";
+    char *xm = strstr(mem, "exception_mem"), *xo = xm ? strstr(xm, "ORIGIN = 0x") : NULL;
+    if (xo && strtoul(xo + 9, NULL, 16) == ebase)
+        xmem = "exception_mem";             /* EBASE's own region */
+    *mend = head;
     FILE *f = fopen(path, "w");
     if (!f) {
         fprintf(stderr, "embcc: error: cannot write %s\n", path);
@@ -2280,17 +2322,30 @@ static int pic32_script(const char *path)
     fprintf(f,
         "  .reset 0xBFC00000 : { KEEP(*(.reset)) KEEP(*(.reset.startup)) } > kseg1_boot_mem\n"
         "  .bev_excpt 0xBFC00380 : { KEEP(*(.bev_handler)) } > kseg1_boot_mem\n"
-        "  .simple_tlb_refill_excpt _ebase_address : { KEEP(*(.simple_tlb_refill_vector)) } > kseg0_program_mem\n"
-        "  .cache_err_excpt _ebase_address + 0x100 : { KEEP(*(.cache_err_vector)) } > kseg0_program_mem\n"
-        "  .app_excpt _ebase_address + 0x180 : { KEEP(*(.gen_handler)) } > kseg0_program_mem\n"
-        "  .vectors _ebase_address + 0x200 :\n  {\n"
-        "    __vector_offset_default = . - _ebase_address;\n"
-        "    KEEP(*(.vector_default))\n");
-    for (int k = 0; k < nvec; k++)
-        fprintf(f, "    . = ALIGN(4);\n    __vector_offset_%d = DEFINED(__vector_dispatch_%d)"
-                   " ? . - _ebase_address : __vector_offset_default;\n"
-                   "    KEEP(*(.vector_%d))\n", k, k, k);
-    fprintf(f, "  } > kseg0_program_mem\n"
+        "  .simple_tlb_refill_excpt _ebase_address : { KEEP(*(.simple_tlb_refill_vector)) } > %s\n"
+        "  .cache_err_excpt _ebase_address + 0x100 : { KEEP(*(.cache_err_vector)) } > %s\n"
+        "  .app_excpt _ebase_address + 0x180 : { KEEP(*(.gen_handler)) } > %s\n",
+        xmem, xmem, xmem);
+    if (spaced) {
+        /* each vector in its slot, and the default handler where the
+         * region has room (an interrupt with no handler meets erased
+         * flash in its slot: a reserved instruction exception) */
+        for (int k = 0; k < spaced; k++)
+            fprintf(f, "  .vector_%d _ebase_address + 0x200 + _vector_spacing * 32 * %d :"
+                       " { KEEP(*(.vector_%d)) } > %s\n", k, k, k, xmem);
+        fprintf(f, "  .vectors : { __vector_offset_default = . - _ebase_address;\n"
+                   "    KEEP(*(.vector_default)) } > %s\n", xmem);
+    } else {
+        fprintf(f, "  .vectors _ebase_address + 0x200 :\n  {\n"
+            "    __vector_offset_default = . - _ebase_address;\n"
+            "    KEEP(*(.vector_default))\n");
+        for (int k = 0; k < nvec; k++)
+            fprintf(f, "    . = ALIGN(4);\n    __vector_offset_%d = DEFINED(__vector_dispatch_%d)"
+                       " ? . - _ebase_address : __vector_offset_default;\n"
+                       "    KEEP(*(.vector_%d))\n", k, k, k);
+        fprintf(f, "  } > %s\n", xmem);
+    }
+    fprintf(f,
         "  .text : { *(.text .text.* .stub) } > kseg0_program_mem\n"
         "  .rodata : { *(.rodata .rodata.* .rodata1) } > kseg0_program_mem\n"
         "  .init_array : { . = ALIGN(4); __init_array_start = .;\n"
@@ -2300,15 +2355,16 @@ static int pic32_script(const char *path)
         fprintf(f, "    LONG(__vector_offset_%d)\n", k);
     fprintf(f, "  } > kseg0_program_mem\n"
         "  .data : { . = ALIGN(4); _data_begin = .; *(.data .data.* .sdata .sdata.*)\n"
-        "    . = ALIGN(4); _data_end = .; } > kseg0_data_mem AT > kseg0_program_mem\n"
+        "    . = ALIGN(4); _data_end = .; } > %s AT > kseg0_program_mem\n"
         "  _data_load = LOADADDR(.data);\n"
         "  _gp = _data_begin + 0x7FF0;\n"
         "  .bss (NOLOAD) : { . = ALIGN(4); _bss_begin = .; *(.bss .bss.* .sbss .sbss.* COMMON)\n"
-        "    . = ALIGN(4); _bss_end = .; } > kseg0_data_mem\n"
+        "    . = ALIGN(4); _bss_end = .; } > %s\n"
         "  _end = .;\n"
-        "  _stack = ORIGIN(kseg0_data_mem) + LENGTH(kseg0_data_mem);\n"
+        "  _stack = ORIGIN(%s) + LENGTH(%s);\n"
         "  ASSERT(_stack - _end >= _min_stack_size + _min_heap_size,\n"
-        "         \"RAM is too small for .data, .bss, the heap and the stack\")\n");
+        "         \"RAM is too small for .data, .bss, the heap and the stack\")\n",
+        data, data, data, data);
     /* each configuration word's region: config_XXXXXXXX */
     for (q = mem; q < mend && (q = strstr(q, "\n  config_")) != NULL && q < mend; q++) {
         char nm[32];
@@ -2319,6 +2375,15 @@ static int pic32_script(const char *path)
             nm[k++] = *c;
         nm[k] = 0;
         fprintf(f, "  .%s : { KEEP(*(.%s)) } > %s\n", nm, nm, nm);
+    }
+    /* a PIC32MX's: config0 to config3, each word's section by its address */
+    for (q = mem; q < mend && (q = strstr(q, "\n  config")) != NULL && q < mend; q++) {
+        char *o = strstr(q, "ORIGIN = 0x"), *nl = strchr(q + 1, '\n');
+        if (q[9] < '0' || q[9] > '9' || !o || (nl && o > nl))
+            continue;
+        unsigned long at = strtoul(o + 9, NULL, 16);
+        fprintf(f, "  .config_%08lX : { KEEP(*(.config_%08lX)) } > config%c\n",
+                at, at, q[9]);
     }
     fprintf(f, "  /DISCARD/ : { *(.pdr) *(.MIPS.abiflags) *(.reginfo) *(.comment) }\n}\n");
     fclose(f);

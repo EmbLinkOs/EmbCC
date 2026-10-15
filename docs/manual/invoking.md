@@ -642,11 +642,13 @@ subdirectory, headers there are found as system headers.
 Project headers therefore take precedence over EmbCC's: a project that
 ships its own `<stdio.h>` in an `-I` directory gets its own.
 
-The search list holds at most 16 directories. EmbCC's four are appended
-only while there is room, so with more than 12 `-I`/`--system-include` options
-some of them are left out without a message, and a 17th `-I` is refused
-with `embcc: too many -I directories` (`embcc: too many include
-directories` for `--system-include`).
+The search list holds at most 512 directories -- a vendor SDK's build
+gives a hundred or so, one per component (the Pico SDK's does). EmbCC's
+four are appended only while there is room, so with more than 508
+`-I`/`--system-include` options some of them are left out without a
+message, and a 513th `-I` is refused with `embcc: too many -I
+directories` (`embcc: too many include directories` for
+`--system-include`).
 
 ### How the compiler finds its own files
 

@@ -5656,8 +5656,8 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
     case TOK_KW_RETURN:
         s = new_stmt(STMT_RETURN, t->line, t->col);
         advance(ps);
-        if (cur(ps)->kind != TOK_SEMI)
-            s->expr = parse_expr(ps); /* NULL = bare return (void) */
+        if (cur(ps)->kind != TOK_SEMI)       /* NULL = bare return (void) */
+            s->expr = parse_comma(ps);       /* an expression: commas too */
         expect(ps, TOK_SEMI, "';'");
         return s;
     case TOK_KW_IF:

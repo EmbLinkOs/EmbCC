@@ -1,0 +1,24 @@
+pic32mx-fw
+PRId 00018700
+Config1 80000006
+Config3 00000060
+SRSCtl.HSS 00000001
+DEVID 54307053
+OSCCON.PBDIV 00000002
+single: INTSTAT 00000100
+single: register set 00000001
+multi: CS0's register set 00000001
+multi: CS1's register set 00000000
+natural order 00000102
+subpriority 00000201
+vectors before requests 00000508
+Timer1: Count a period 000007d0
+UART1 TX: INTSTAT 00000218
+change notices 00000002
+RD7 without its pull-up 00000000
+RD7 with it 00000001
+RB0 analog 00000000
+RB0 digital 00000001
+PBDIV locked 00000002
+PBDIV unlocked 00000000
+==DONE==

@@ -5,8 +5,8 @@
 # tests/golden/embsim-an/cov.c marks every line that has code with the
 # times it runs (`=N`, `=0` for never): a branch taken and one not, a
 # loop, a function called from it and one never called. Built at -O0 -g
-# on the three cores -- the Cortex-M3 (lm3s6965evb), RV32 (virt) and the
-# AVR (uno), each in its harness -- the report must give exactly those
+# on four cores -- the Cortex-M3 (lm3s6965evb), RV32 (virt), the AVR
+# (uno) and MIPS (malta), each in its harness -- the report must give exactly those
 # counts, line for line, and no code on an unmarked line:
 #   - the text report (gcov's layout): each line of cov.c;
 #   - the lcov tracefile: DA for exactly the marked lines, FN and FNDA
@@ -63,6 +63,9 @@ build() {
         "$EMBCC" --target=$t -c tests/harness/avr/boot.S -o "$h/boot.o" &&
         "$EMBCC" --target=$t -Os -c tests/harness/avr/io.c -o "$h/io.o" &&
         sh tools/build-rt.sh avr "$h" > "$h/rt.log" 2>&1 ;;
+    mips) t=mipsel-none-elf
+        "$EMBCC" --target=$t -O0 -c tests/harness/mips/boot.c -o "$h/boot.o" &&
+        "$EMBCC" --target=$t -O0 -c tests/harness/mips/io.c -o "$h/io.o" ;;
     esac || { echo "FAIL $tag: the harness does not build"; return 1; }
     "$EMBCC" --target=$t -O0 -g -c "$src" -o "$h/cov.o" &&
     "$EMBCC" --target=$t -O0 -c "$src" -o "$h/cov-nog.o" || {
@@ -78,6 +81,7 @@ link() {
     m3) H=EMBCC_THUMB_HARNESS; l=thumb ;;
     rv32) H=EMBCC_RISCV_HARNESS; l=riscv ;;
     avr) H=EMBCC_AVR_HARNESS; l=avr ;;
+    mips) H=EMBCC_MIPS_HARNESS; l=mips ;;
     esac
     env "$H=$out/$1" sh tests/harness/$l/link.sh "$2" "$3" > /dev/null 2>&1
 }
@@ -97,7 +101,7 @@ verify() {
     cmp -s "$out/$tag.plain.out" "$out/$tag.out" &&
     cmp -s "$out/$tag.plain.count" "$out/$tag.count" || {
         echo "FAIL $tag: --coverage changed the run (its output or --count)"; fail=1; }
-    [ "$(tr -d ' ' < "$out/$tag.out")" = 2 ] || {
+    [ "$(grep -v '==EXIT' "$out/$tag.out" | tr -d ' \n')" = 2 ] || {
         echo "FAIL $tag: the program printed '$(cat "$out/$tag.out")', not 2"; fail=1; return; }
 
     # the text report: cov.c's section, each line "COUNT:LINE:source"
@@ -170,6 +174,7 @@ check() {
 check m3 --board lm3s6965evb
 check rv32 --board virt --ram-size 8M
 check avr --board uno
+check mips --board malta
 
 if command -v "$CLANG" >/dev/null 2>&1 &&
    "$CLANG" --target=thumbv7m-none-eabi -mcpu=cortex-m3 -O0 -g -ffreestanding \
@@ -187,5 +192,5 @@ fi
 "$EMBSIM" "$out/m3.elf" --coverage "$out/x" --coverage-format=html > "$out/bad.out" 2>&1
 [ $? = 2 ] && grep -q 'text or lcov' "$out/bad.out" || {
     echo "FAIL: --coverage-format=html is not refused"; fail=1; }
-[ $fail = 0 ] && echo "embsim --coverage: every line and function of cov.c counted exactly, on the Cortex-M, RISC-V and AVR"
+[ $fail = 0 ] && echo "embsim --coverage: every line and function of cov.c counted exactly, on the Cortex-M, RISC-V, AVR and MIPS"
 exit $fail

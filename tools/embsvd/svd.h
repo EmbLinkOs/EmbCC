@@ -68,6 +68,12 @@ struct svd_node {
     int sized, locked, emitted;
 };
 struct svd_irq { const char *name, *desc; int value; };
+/* a pin of a 16-bit part, by one of the names its EDC gives it (RP21,
+ * OCM1A, RG6), on port `port` (0 for A, no I) at `bit` */
+struct svd_pin { const char *name; int port, bit; };
+/* a 16-bit part's configuration word (its EDC's DCRDef), at its program
+ * address */
+struct svd_cfgword { const char *name; unsigned long long addr; };
 struct svd_ablock { unsigned long long off, size; const char *usage; };
 struct svd_periph {
     const char *name, *desc, *group, *derived;
@@ -86,6 +92,40 @@ struct svd_device {
     const char *name, *vendor, *version, *desc, *prefix;
     const char *cpu, *cpurev, *endian;
     int aub, width, has_cpu, prio_bits, fpu, fpu_dp, mpu, vendor_systick;
+    /* a PIC32's: 32-bit registers followed by their CLR, SET and INV
+     * registers, which the ATDF does not list (EmbSim's ATDF reader sets
+     * it); which ones, by their addresses, when the pack's processor
+     * module says (else every 16-byte aligned one with room) */
+    int clr_set_inv;
+    unsigned long long *sci_at;
+    int nsci;
+    /* EmbSim's: where the file's addresses are on its bus (a PIC24's data
+     * space is above its program memory there: EmbSim's EDC reader sets
+     * it), and whether the space between registers reads as 0 and ignores
+     * writes, as a PIC's SFR space does, instead of faulting */
+    unsigned long long bus_offset;
+    int holes_zero;
+    /* EmbSim's: a 16-bit part's pins, from its EDC's PinList */
+    struct svd_pin *pin;
+    int npin;
+    /* EmbSim's: a Microchip part's memory, as its pack gives it -- a
+     * PIC24's program memory's end (a program address: the configuration
+     * words in its last page) and its RAM (data addresses), a PIC32's
+     * program flash (code_end: its size) and RAM (ram_end) -- and a
+     * PIC24's configuration words */
+    unsigned long long code_end, ram_base, ram_end;
+    struct svd_cfgword *cfg;
+    int ncfg;
+    /* EmbSim's: a PIC32MX's boot flash's end (its configuration words'),
+     * and each interrupt request's vector (irq_vector[irq]), which the
+     * MX's interrupt controller shares among requests; 0 where they are
+     * the same number */
+    unsigned long long boot_end;
+    /* EmbSim's: a dsPIC's Y data space, [y_base, y_end), the RAM its DSP
+     * instructions read through W10 and W11 (0 where it has none) */
+    unsigned long long y_base, y_end;
+    int *irq_vector;
+    int nirq_vector;
     int num_irq;
     struct svd_periph *p;
     int np;
@@ -114,6 +154,17 @@ extern int svd_ntypes;
 
 /* read, resolve, lay out and check an SVD file; dies with its message */
 struct svd_device *svd_load(const char *path);
+
+/* the XML reader, for a reader of another format (EmbSim's of
+ * Microchip's ATDF): a file's tree, an element's name, an attribute (or
+ * 0), its children, the first child of a name (or 0), its line */
+const struct xnode *svd_xml_read(const char *path);
+const char *svd_xname(const struct xnode *n);
+const char *svd_xattr(const struct xnode *n, const char *name);
+int svd_xnkid(const struct xnode *n);
+const struct xnode *svd_xkid(const struct xnode *n, int i);
+const struct xnode *svd_xfind(const struct xnode *n, const char *name);
+int svd_xline(const struct xnode *n);
 
 void svd_die(const char *fmt, ...);
 void *svd_alloc(size_t n);

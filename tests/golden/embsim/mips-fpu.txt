@@ -1,0 +1,110 @@
+add_d rm0 5b67164e23206669
+add_d rm1 ee579a94a3cdfc30
+add_d rm2 63243ac3a645c129
+add_d rm3 1898737477e1b9fc
+sub_d rm0 446ad709386393e8
+sub_d rm1 2ac75d0d70171528
+sub_d rm2 5c2afe30025a2cde
+sub_d rm3 8801020e43a62cee
+mul_d rm0 7b096c9dcc88fe52
+mul_d rm1 cf3566cd7369f097
+mul_d rm2 1a5b380eb4c33fda
+mul_d rm3 2844d0bd7eb396eb
+div_d rm0 0e4b46d8c9861dcb
+div_d rm1 1414e031ed467d68
+div_d rm2 e61fdfebc4227783
+div_d rm3 7cfa46f19721a25f
+add_s rm0 24684d4121f55b30
+add_s rm1 d5bcc27fd3ebdb3d
+add_s rm2 db56a58f9e9cdc14
+add_s rm3 74d9768c954cbed1
+mul_s rm0 36bbc60aebf28258
+mul_s rm1 c28e79e5c8636411
+mul_s rm2 721fc9e52dfbc6bd
+mul_s rm3 e2d561dddff1c2a5
+div_s rm0 fa28017e5bd34081
+div_s rm1 6736a7b4387ae569
+div_s rm2 c5091e482b1ef9cc
+div_s rm3 cad24f0607d57ca6
+sqrt_d rm0 9d345483712d2b20
+sqrt_d rm1 39561383bce9b0b1
+sqrt_d rm2 b526a3a72a217f86
+sqrt_d rm3 8aa1b1c4d82a3fa1
+recip_d rm0 0370f95418156554
+recip_d rm1 954dffc774447688
+recip_d rm2 a01c61ca8818aba2
+recip_d rm3 ae7c39c11eb31574
+rsqrt_d rm0 21316b1447814fd7
+rsqrt_d rm1 0f5ec8532096e57b
+rsqrt_d rm2 d748c67f5296d89e
+rsqrt_d rm3 24fa6e16a0b2e36f
+cvt_s_d rm0 3ee952e7ad2bebdd
+cvt_s_d rm1 5f506a8ad41d9cfb
+cvt_s_d rm2 a33085bd5bbc9f75
+cvt_s_d rm3 5c4a33e3421d1f2b
+cvt_w_d rm0 9ecdc3394d9fdb4f
+cvt_w_d rm1 57fbbefbaaed83b5
+cvt_w_d rm2 1110a4f3e5e8cdbb
+cvt_w_d rm3 93360c09dacdae05
+cvt_l_d rm0 8fbe55d39a527b63
+cvt_l_d rm1 e0bb9b817a1eb349
+cvt_l_d rm2 14c4d2405e4e56f7
+cvt_l_d rm3 b69d5f0e114574a1
+round_w_d rm0 9ecdc3394d9fdb4f
+round_w_d rm1 ed4610be5f72dbdf
+round_w_d rm2 5900b7a14cf7878f
+round_w_d rm3 55c0c4b2861e3f5f
+trunc_w_d rm0 2df6a3ac9fbc16a5
+trunc_w_d rm1 57fbbefbaaed83b5
+trunc_w_d rm2 910c6ebbde957fb5
+trunc_w_d rm3 93360c09dacdae05
+ceil_w_d rm0 512eb7b729c1ad9b
+ceil_w_d rm1 599e71b5ac92f78b
+ceil_w_d rm2 1110a4f3e5e8cdbb
+ceil_w_d rm3 396f2b6d545b816b
+floor_w_d rm0 2df6a3ac9fbc16a5
+floor_w_d rm1 57fbbefbaaed83b5
+floor_w_d rm2 910c6ebbde957fb5
+floor_w_d rm3 93360c09dacdae05
+abs_d rm0 c42e221f378f9eff
+abs_d rm1 d649fce6e4d8fbcb
+abs_d rm2 60069d8af198f967
+abs_d rm3 ec910ccaf8fc0603
+neg_d rm0 9c861a85715a1bff
+neg_d rm1 5e94cd0fc45f0bcb
+neg_d rm2 2c02021c6e30f867
+neg_d rm3 67a54c0e35ae9d03
+madd_d rm0 ecb83573d12b2607
+madd_d rm1 e045817ccddf80bc
+madd_d rm2 94541fbfa52e3d49
+madd_d rm3 af807dd5bd26c75e
+msub_d rm0 3611e80d56c4be1c
+msub_d rm1 4056cc9a82e987b7
+msub_d rm2 a0f77dac1ca055af
+msub_d rm3 3b4ab698d7f7e34e
+nmadd_d rm0 611bb642c8aced07
+nmadd_d rm1 30077c0e342169bc
+nmadd_d rm2 7f2ac7f4fce38349
+nmadd_d rm3 4506a91984ab585e
+nmsub_d rm0 33809823d3ac8d1c
+nmsub_d rm1 8da2244b5d8b1fb7
+nmsub_d rm2 64bda6ad4ca010af
+nmsub_d rm3 36493339aa60224e
+cvt.from rm0 570b54261104e3de
+cvt.from rm1 fc304f01dbc14c7f
+cvt.from rm2 475803a70b77d20e
+cvt.from rm3 872e72cf00481407
+compares ad5bb53f5d5ce225
+mthc1/mfhc1 2222222211111111
+movt/movf 0000000700000009
+movt.d 4008000000000000
+ldc1/sdc1 0123456789abcdef
+ldxc1/sdxc1 0123456789abcdef
+lwxc1/swc1 0000000089abcdef
+fpe taken 0000000000000001
+fpe code 000000000000000f
+fpe fcsr 00000000000c8400
+fpe dest 0000000000000000
+fpe V taken 0000000000000002
+fpe V fcsr 00000000000d0800
+done

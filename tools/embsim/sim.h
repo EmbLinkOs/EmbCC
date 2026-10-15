@@ -55,6 +55,7 @@ struct region {
     u8 *mem;
     int rom;                        /* stores are ignored */
     int kind;                       /* MEM_RAM or MEM_FLASH */
+    u32 erased;                     /* each word of it before the image (bus_erase) */
 };
 
 /* A memory-mapped device. `off` is the offset of the access from the
@@ -93,8 +94,8 @@ struct watch {
     int kind;
 };
 
-#define BUS_REGIONS 8
-#define BUS_DEVICES 16
+#define BUS_REGIONS 12
+#define BUS_DEVICES 24
 #define BUS_ALIASES 4
 #define BUS_WATCHES 32
 
@@ -121,6 +122,8 @@ struct bus {
 };
 
 void bus_add_region(struct bus *b, u32 base, u32 size, int kind);
+/* the region as before an image: every 4 bytes its `erased` word */
+void bus_erase(struct region *r);
 /* the region holding all `n` bytes at `a`, or 0: memory's fast path, so
  * inline (the core fetches through it, and reads and writes memory
  * through it when no watchpoint is set) */
@@ -208,6 +211,11 @@ struct cpu_ops {
     /* the ELF classes its images may be: 1 for ELFCLASS32, 2 for
      * ELFCLASS64, or both (RISC-V) */
     int elf_classes;
+    /* the bus address of a program address, for a core whose addresses
+     * are not the bus's (MIPS: kseg0 and kseg1 are physical memory's
+     * windows), or 0: the loader's segments and a debugger's accesses go
+     * through it */
+    u32 (*phys)(struct cpu *c, u32 a);
 };
 
 struct cpu {
@@ -221,6 +229,10 @@ struct mem_desc {
     int kind;                       /* MEM_RAM, MEM_FLASH or MEM_ALIAS */
     int main_ram;                   /* the one --ram-size resizes */
     u32 target;                     /* MEM_ALIAS: the region it names */
+    /* what each word of erased flash reads, little-endian: a PIC32's
+     * 0xffffffff, a PIC24's 0x00ffffff (three bytes and the phantom); 0
+     * where the board's reference (QEMU) has zeros */
+    u32 erased;
 };
 
 struct dev_desc {
@@ -228,13 +240,16 @@ struct dev_desc {
     u32 base, size;
 };
 
+#define BOARD_MEMS 8
+#define BOARD_DEVS 8
+
 struct board_desc {
     const char *name;
     const char *core;               /* a name in boards.c's core list */
     const char *cpu;                /* the core's model */
     int prio_bits;                  /* NVIC priority bits implemented */
-    struct mem_desc mem[4];         /* ends with a size of 0 */
-    struct dev_desc dev[6];         /* ends with a type of 0 */
+    struct mem_desc mem[BOARD_MEMS];   /* ends with a size of 0 */
+    struct dev_desc dev[BOARD_DEVS];   /* ends with a type of 0 */
     struct alias bitband[2];        /* ends with a size of 0 */
     /* the part's CMSIS-SVD file, by its name: its peripherals' registers
      * are on the bus (svd-map.c), found with --svd or EMBSIM_SVD_PATH */
@@ -242,6 +257,9 @@ struct board_desc {
     /* the behavioural models layered over those registers, by the SVD's
      * peripheral names; ends with a name of 0 */
     const struct model_desc *models;
+    /* how the part's bus treats those registers, beyond the SVD: RF_*
+     * (svd-map.h), 0 for the plain rules */
+    int rules;
 };
 
 /* a model for the SVD's peripherals whose names match `periph` (a `*`
@@ -269,6 +287,9 @@ extern const int nboards;
 extern const struct core_type cores[];
 extern const int ncores;
 const struct board_desc *board_find(const char *name);
+/* a part of a family EmbSim models, by its name, from its device pack
+ * (pic32mz1024efg064, pic24fj256ga610), or 0 */
+const struct board_desc *board_part(const char *name);
 void sim_add_device(struct sim *s, const struct dev_desc *d);
 /* a device on the bus, keeping time if it has a clock (a tick or a
  * next_event hook) */
@@ -288,6 +309,31 @@ struct rx_port {
     int (*room)(void *ctx);
     void (*put)(void *ctx, int c);
     void *ctx;
+};
+
+/* What a board wires to its part's pins, beyond the part: LEDs and
+ * buttons on the GPIO, voltages on the analog inputs, a display on a
+ * parallel bus. The part's peripheral models call these (each may be
+ * 0); the board's device fills them in (pic-boards.c). */
+struct board_io {
+    void *ctx;
+    /* a pin's driven level changed (port 0 is A): 1 high, 0 low, -1 let
+     * go (an input, an open drain at 1) */
+    void (*pin_out)(void *ctx, int port, int bit, int level);
+    /* 1 and the level when something outside drives the pin, else 0 */
+    int (*pin_in)(void *ctx, int port, int bit, int *level);
+    /* the voltage on analog input n, or a negative one for none */
+    double (*analog)(void *ctx, int n);
+    /* a parallel master port's write and read cycles */
+    void (*bus_write)(void *ctx, u32 addr, u32 data);
+    u32 (*bus_read)(void *ctx, u32 addr);
+    /* a byte SPI unit n (1 up) exchanges as master: what the slave on its
+     * lines sends back, or -1 when none answers */
+    int (*spi)(void *ctx, int unit, int out);
+    /* --set NAME=VALUE: 0, or -1 when the board has no such input */
+    int (*set)(void *ctx, const char *name, const char *value);
+    /* the run ended: what the board shows (its display) */
+    void (*end)(void *ctx);
 };
 
 struct sim {
@@ -335,6 +381,11 @@ struct sim {
     int rx_on;
     /* the record of the run's inputs, or its replay (record.c), or 0 */
     struct rec *rec;
+    /* what the board has outside the part (pic-boards.c's), or zeros */
+    struct board_io io;
+    /* the time since reset in ns, from a part that models its clocks (the
+     * RP2040's: its core runs at the clk_sys the program sets), or 0 */
+    double (*now_ns)(struct sim *s);
 };
 
 /* build the board with its core (`model`, or 0 for the board's own),

@@ -1,0 +1,11 @@
+pic32mx-board
+S3 (RD6) 00000000
+S4 (RD13) 00000001
+LATA 00000058
+AN4 (the TC1047A) 000000f8
+AN5 (the potentiometer) 00000200
+ASAM after CLRASAM 00000000
+EEPROM busy for a while 00000001
+EEPROM read 003cc3ff
+SPI2STAT after a read 00000008
+==DONE==

@@ -18,7 +18,8 @@
  * from Config1's geometry and then made the kseg0 default; EBASE, the
  * vector spacing and each OFFn; .data copied and .bss cleared; exceptions
  * moved off the boot vectors (Status.BEV) and interrupts to the special
- * vector (Cause.IV); _on_bootstrap; the constructors; main(0, 0). Every
+ * vector (Cause.IV), the DSP ASE on (Status.MX) where the core has it;
+ * _on_bootstrap; the constructors; main(0, 0). Every
  * hook and handler is weak: a program's own takes its place.
  */
     .set    noreorder
@@ -163,7 +164,11 @@ _startup:
     nop
 
     /* interrupts to the special vector (Cause.IV), exceptions off the boot
-     * vectors and out of error level (Status.BEV, Status.ERL) */
+     * vectors and out of error level (Status.BEV, Status.ERL); and the
+     * DSP ASE's registers usable (Status.MX) on a core that has it
+     * (Config3.DSPP), as XC32's startup makes them: an RTOS saves and
+     * restores $ac1-$ac3 and DSPControl in every context switch, which
+     * without MX is a DSP State Disabled exception */
     mfc0    $8, $13, 0
     li      $9, 1
     ins     $8, $9, 23, 1
@@ -171,6 +176,9 @@ _startup:
     mfc0    $8, $12, 0
     ins     $8, $0, 22, 1
     ins     $8, $0, 2, 1
+    mfc0    $9, $16, 3                  /* Config3 */
+    ext     $9, $9, 10, 1               /* DSPP */
+    ins     $8, $9, 24, 1               /* Status.MX */
     mtc0    $8, $12, 0
     ehb
 

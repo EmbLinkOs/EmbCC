@@ -26,6 +26,13 @@
  *   when it skips a one-word instruction and 2 more for a two-word one,
  *   which EmbSim adds and QEMU's plugin cannot see.
  *
+ *   MIPS32 (a microAptiv-class five-stage pipeline, as a PIC32MZ has:
+ *   no one core's exact table): 1, a load 2 (lb to lw, lwl, lwr, ll and
+ *   the DSP's indexed loads, for their load-use stall), a multiply into
+ *   HI and LO or mul 2, div and divu 18 (the iterative divider takes 11
+ *   to 34), and nothing more for a taken branch: the delay slot hides
+ *   it, and the slot's instruction is counted as any other.
+ *
  * Each function takes an instruction's bytes (2 or 4) and returns its
  * cost, and says whether it may branch; the caller adds the cycles of a
  * taken branch (2; 1 on the AVR) when execution does not continue at
@@ -207,6 +214,27 @@ static inline int avr_cost(const uint8_t *p, size_t n, int *branch)
     default:                                            /* mul */
         return 2;
     }
+}
+
+/* A MIPS32 instruction's cost (little-endian); a taken branch costs
+ * nothing more, so *branch is always 0. */
+static inline int mips_cost(const uint8_t *p, size_t n, int *branch)
+{
+    uint32_t w = p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24;
+    unsigned op = w >> 26, fn = w & 0x3f;
+    (void)n;
+    *branch = 0;
+    if ((op >= 0x20 && op <= 0x26) || op == 0x30)       /* loads, ll */
+        return 2;
+    if (op == 0 && (fn == 0x18 || fn == 0x19))         /* mult, multu */
+        return 2;
+    if (op == 0 && (fn == 0x1a || fn == 0x1b))         /* div, divu */
+        return 18;
+    if (op == 0x1c && (fn <= 0x02 || fn == 0x04 || fn == 0x05))
+        return 2;                                       /* madd mul msub */
+    if (op == 0x1f && fn == 0x0a)                       /* lwx lhx lbux */
+        return 2;
+    return 1;
 }
 
 #endif

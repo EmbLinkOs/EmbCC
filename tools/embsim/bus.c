@@ -34,6 +34,16 @@ void bus_add_region(struct bus *b, u32 base, u32 size, int kind)
     b->nrg++;
 }
 
+void bus_erase(struct region *r)
+{
+    if (!r->erased) {
+        memset(r->mem, 0, r->size);
+        return;
+    }
+    for (u32 i = 0; i < r->size; i++)
+        r->mem[i] = (u8)(r->erased >> (8 * (i & 3)));
+}
+
 void bus_add_device(struct bus *b, u32 base, u32 size,
                     const struct dev_ops *ops, void *ctx)
 {

@@ -547,13 +547,39 @@ EMBSIM_SRCS := tools/embsim/main.c tools/embsim/run.c tools/embsim/bus.c \
                tools/embsim/image.c tools/embsim/analysis.c \
                tools/embsim/coverage.c tools/embsim/profile.c \
                tools/embsim/stack.c tools/embsim/fault.c \
-               tools/embsim/disasm.c tools/embsim/record.c $(EMBSIM_NET)
+               tools/embsim/disasm.c tools/embsim/record.c \
+               tools/embsim/mips.c tools/embsim/malta.c \
+               tools/embsim/atdf.c tools/embsim/pic32-evic.c \
+               tools/embsim/pic32-cru.c tools/embsim/pic32-tmr.c \
+               tools/embsim/pic32-gpio.c tools/embsim/pic32-uart.c \
+               tools/embsim/pic32-pmp.c tools/embsim/pic32-adc.c \
+               tools/embsim/pic-boards.c tools/embsim/ieee754.c \
+               tools/embsim/mips-fpu.c tools/embsim/edc.c \
+               tools/embsim/pic24.c tools/embsim/pic24-intc.c \
+               tools/embsim/pic24-adc.c tools/embsim/pic24-epmp.c \
+               tools/embsim/pic24-spi.c tools/embsim/pic24-uart.c \
+               tools/embsim/pic24-tmr.c tools/embsim/pic24-osc.c \
+               tools/embsim/mips-dsp.c tools/embsim/mips-micro.c \
+               tools/embsim/mips16.c tools/embsim/pic24-nvm.c \
+               tools/embsim/pic24-rtcc.c tools/embsim/pic24-dma.c \
+               tools/embsim/pic24-i2c.c tools/embsim/pic24-ic.c \
+               tools/embsim/pic24-oc.c tools/embsim/pic24-ccp.c \
+               tools/embsim/pic32-spi.c tools/embsim/pic32-adc10.c \
+               tools/embsim/pic24-dsp.c tools/embsim/pic24e-spi.c \
+               tools/embsim/pic24e-adc.c \
+               tools/embsim/rp2040.c tools/embsim/rp2040-timer.c \
+               tools/embsim/rp2040-io.c tools/embsim/rp2040-sio.c \
+               tools/embsim/rp2040-uart.c tools/embsim/rp2040-ssi.c \
+               tools/embsim/mcu-boards.c tools/embsim/stm32f1-gpio.c \
+               tools/embsim/nrf52.c \
+               $(EMBSIM_NET)
 EMBSIM_HDRS := tools/embsim/sim.h tools/embsim/cortexm.h tools/embsim/riscv.h \
                tools/embsim/avr.h \
                tools/embsim/devices.h tools/embsim/net.h tools/bench/cost.h \
                tools/embsim/svd-map.h tools/embsvd/svd.h \
                tools/embsim/image.h tools/embsim/analysis.h \
-               tools/embsim/disasm.h
+               tools/embsim/disasm.h tools/embsim/mips.h tools/embsim/pic32.h \
+               tools/embsim/ieee754.h tools/embsim/pic24.h tools/embsim/rp2040.h
 # Optimized, unlike the other tools: a simulator's speed is the tests'
 # and the user's time, and -O2 runs a busy loop 2.5 (M3) to 3.6 (AVR)
 # times as fast as no -O. -g stays (it is in CFLAGS); `make EMBSIM_OPT=`

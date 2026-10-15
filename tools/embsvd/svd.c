@@ -305,6 +305,44 @@ static const char *attr(const struct xnode *n, const char *name)
     return NULL;
 }
 
+/* the XML reader's tree, for a reader of another format (EmbSim's of
+ * Microchip's ATDF) */
+const struct xnode *svd_xml_read(const char *path)
+{
+    svd_file = path;
+    return xml_parse(svd_read_all(path));
+}
+
+const char *svd_xname(const struct xnode *n)
+{
+    return n->name;
+}
+
+const char *svd_xattr(const struct xnode *n, const char *name)
+{
+    return attr(n, name);
+}
+
+int svd_xnkid(const struct xnode *n)
+{
+    return n ? n->nkid : 0;
+}
+
+const struct xnode *svd_xkid(const struct xnode *n, int i)
+{
+    return n->kid[i];
+}
+
+const struct xnode *svd_xfind(const struct xnode *n, const char *name)
+{
+    return kid(n, name);
+}
+
+int svd_xline(const struct xnode *n)
+{
+    return n->line;
+}
+
 /* SVD's scaledNonNegativeInteger: decimal, 0x hex, #binary, with an
  * optional k/M/G multiplier */
 unsigned long long svd_num(const char *s, const char *what, int line)

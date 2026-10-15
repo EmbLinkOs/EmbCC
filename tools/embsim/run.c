@@ -127,13 +127,19 @@ void sim_init(struct sim *s, const struct board_desc *bd, const char *model,
      * space */
     if (!svd && bd->svd) {
         svd = svd_search(bd->svd);
+        if (!svd && (strstr(bd->svd, ".atdf") || strstr(bd->svd, ".PIC")))
+            die("the %s board's peripherals are %s's, from its device pack: "
+                "give the pack's directory with --dfp DIR (it holds "
+                "%s/%s), the file with --svd FILE, or a directory holding "
+                "it in EMBSIM_SVD_PATH", bd->name, bd->svd,
+                strstr(bd->svd, ".PIC") ? "edc" : "atdf", bd->svd);
         if (!svd)
             die("the %s board's peripherals are %s's: give its path with "
                 "--svd FILE, or a directory holding it in EMBSIM_SVD_PATH",
                 bd->name, bd->svd);
     }
     struct svdmap *m = svd ? svdmap_create(s, svd) : 0;
-    for (int i = 0; i < 6 && bd->dev[i].type; i++) {
+    for (int i = 0; i < BOARD_DEVS && bd->dev[i].type; i++) {
         if (m && !strcmp(bd->dev[i].type, "zero")) {
             svdmap_add(s, m);
             m = 0;
@@ -164,14 +170,17 @@ static void load(struct sim *s)
 void sim_load(struct sim *s, u32 ram_size, const char *image)
 {
     const struct board_desc *bd = s->board;
-    for (int i = 0; i < 4 && bd->mem[i].size; i++)
+    for (int i = 0; i < BOARD_MEMS && bd->mem[i].size; i++)
         if (bd->mem[i].kind == MEM_ALIAS)
             bus_add_mirror(&s->bus, bd->mem[i].base, bd->mem[i].target);
-        else
+        else {
             bus_add_region(&s->bus, bd->mem[i].base,
                            bd->mem[i].main_ram && ram_size ? ram_size
                                                            : bd->mem[i].size,
                            bd->mem[i].kind);
+            s->bus.rg[s->bus.nrg - 1].erased = bd->mem[i].erased;
+            bus_erase(&s->bus.rg[s->bus.nrg - 1]);
+        }
     s->image = image;
     load(s);
 }
@@ -180,7 +189,7 @@ void sim_reset(struct sim *s, int reload)
 {
     if (reload)
         for (int i = 0; i < s->bus.nrg; i++)
-            memset(s->bus.rg[i].mem, 0, s->bus.rg[i].size);
+            bus_erase(&s->bus.rg[i]);
     for (int i = 0; i < s->bus.ndev; i++)
         if (s->bus.dev[i].ops->reset)
             s->bus.dev[i].ops->reset(s->bus.dev[i].ctx);

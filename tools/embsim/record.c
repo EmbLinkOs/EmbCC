@@ -18,7 +18,7 @@
  *
  * --record FILE writes each of these with the step it came after (or
  * during), and the run's machine (the image and the options that shape
- * it) and its end: the steps, the counts, how it ended, a hash of the
+ * it: the board's inputs --set gives, --dfp's pack, too) and its end: the steps, the counts, how it ended, a hash of the
  * registers and memory, and the output's length and hash. A step is one call of the core's step that
  * did something (a debugger's watchpoint makes one that does nothing,
  * which a run without the debugger never takes). The record also holds
@@ -428,6 +428,9 @@ void rec_record(struct sim *s, const char *path, const struct rec_machine *m)
     fprintf(r->out, "until ");
     hexstr(r->out, m->until);
     fprintf(r->out, "input %d\n", s->rx_on);
+    fprintf(r->out, "dfp %s\n", m->dfp ? m->dfp : "-");
+    for (int i = 0; i < m->nset; i++)
+        fprintf(r->out, "set %s\n", m->sets[i]);
     fprintf(r->out, "events\n");
 }
 
@@ -502,6 +505,16 @@ struct rec *rec_load(const char *path, struct rec_machine *m)
             m->until = strcmp(v, "-") ? unhex(v) : 0;
         else if (!strcmp(line, "input"))
             m->input = atoi(v);
+        else if (!strcmp(line, "dfp"))
+            m->dfp = strcmp(v, "-") ? dup(v) : 0;
+        else if (!strcmp(line, "set")) {
+            const char **ns = realloc((void *)m->sets,
+                                      (size_t)(m->nset + 1) * sizeof *ns);
+            if (!ns)
+                die("out of memory");
+            ns[m->nset++] = dup(v);
+            m->sets = ns;
+        }
     }
     /* the events: lines of any length (a debugger's `load` is long) */
     for (;;) {

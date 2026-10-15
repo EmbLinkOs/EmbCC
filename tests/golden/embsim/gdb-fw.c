@@ -3,8 +3,10 @@
  * for the M4 with its FPU (float `real`), so neither needs lib/rt; and
  * for RISC-V, RV32 soft-float (integer) and RV64 with D (float), where
  * reset is entered from embld's -Tstack stub and the test device ends
- * the run; and for the AVR, where the harness's boot calls main and
- * waits for ever after it (an `int` there is 16 bits).
+ * the run; for MIPS on malta, entered the same way, where the status is
+ * printed on the UART and SOFTRES ends the run; and for the AVR, where
+ * the harness's boot calls main and waits for ever after it (an `int`
+ * there is 16 bits).
  *
  * main's result is the exit status (semihosting's SYS_EXIT_EXTENDED, or
  * the test device's code): 71 with an integer `real` and 65 with a float
@@ -22,7 +24,7 @@ extern unsigned __bss_start, __bss_end;
 int main(void);
 void reset(void);
 
-#if !defined(__riscv) && !defined(__AVR__)
+#if !defined(__riscv) && !defined(__AVR__) && !defined(__mips__)
 __attribute__((section(".vectors"), used))
 void *const vectors[2] = { (void *)0x20010000u, (void *)reset };
 #endif
@@ -57,7 +59,7 @@ struct pt origin = { 3, -4 };
 real scale = SCALE;
 volatile int spin = SPIN, idle = IDLE;
 
-#if !defined(__riscv) && !defined(__AVR__)
+#if !defined(__riscv) && !defined(__AVR__) && !defined(__mips__)
 static unsigned blk[2];
 
 static void semi(unsigned op, const void *a)
@@ -100,6 +102,8 @@ int main(void)
 #ifdef __AVR__
     *(volatile unsigned char *)0x53 = 1;        /* SMCR.SE */
     while (idle) __asm__ volatile("sleep");
+#elif defined(__mips__)
+    while (idle) __asm__ volatile("wait");
 #else
     while (idle) __asm__ volatile("wfi");
 #endif
@@ -124,6 +128,15 @@ void reset(void)
         *d++ = 0;
 #ifdef __riscv
     *(volatile unsigned *)0x100000u = ((unsigned)main() & 0x7f) << 16 | 0x3333u;
+#elif defined(__mips__)
+    {
+        unsigned r = (unsigned)main() & 0x7f;
+        volatile unsigned char *thr = (volatile unsigned char *)0xbf000900u;
+        *thr = (unsigned char)('0' + r / 10);
+        *thr = (unsigned char)('0' + r % 10);
+        *thr = '\n';
+        *(volatile unsigned *)0xbf000500u = 0x42;       /* SOFTRES */
+    }
 #else
     blk[0] = 0x20026u;
     blk[1] = (unsigned)main() & 0x7f;

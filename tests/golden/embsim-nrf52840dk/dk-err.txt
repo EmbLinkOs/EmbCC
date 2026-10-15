@@ -1,0 +1,11 @@
+nrf52840dk: LED1 on (P0.13)
+nrf52840dk: LED2 on (P0.14)
+nrf52840dk: LED1 off (P0.13)
+nrf52840dk: LED2 off (P0.14)
+nrf52840dk: LED2 on (P0.14)
+nrf52840dk: LED2 off (P0.14)
+nrf52840dk: LED1 on (P0.13)
+nrf52840dk: LED1 off (P0.13)
+nrf52840dk: LED1 on (P0.13)
+nrf52840dk: LED1 off (P0.13)
+embsim: warning: UARTE0's TXD.PTR is not in Data RAM: EasyDMA reaches only that (the part may fault or corrupt RAM); nothing is moved

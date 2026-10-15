@@ -1,0 +1,13 @@
+embsim: warning: a read at pc: GPIOA.IDR reads as 0 while its clock is off (RCC.APB2ENR.IOPAEN is 0)
+embsim: warning: a write at pc: USART2.BRR is ignored while its clock is off (RCC.APB1ENR.USART2EN is 0)
+bluepill: LED on (PC13)
+bluepill: LED off (PC13)
+bluepill: LED on (PC13)
+bluepill: LED off (PC13)
+bluepill: LED on (PC13)
+bluepill: LED off (PC13)
+bluepill: LED on (PC13)
+bluepill: LED off (PC13)
+bluepill: LED on (PC13)
+bluepill: LED off (PC13)
+embsim: bus fault: a word write at 0x40024000 (pc): no peripheral of STM32F103xx is there

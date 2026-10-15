@@ -28,18 +28,31 @@
  * The .su files (--stack-su, or any argument ending in .su) and embrt's
  * JSON (--stack-embrt) are read to put their numbers beside these: a
  * measured frame or depth above the static one is marked, as the static
- * analysis is then wrong. */
+ * analysis is then wrong.
+ *
+ * A PIC24's stack grows up: an_sp gives it mirrored, so that deeper is
+ * lower here too, and the report turns it back -- its addresses are W15's
+ * (data addresses), its top the stack's base (XC16's __SP_init, where W15
+ * starts), its limit __SPLIM_init's or the top of RAM, and the return
+ * address a call pushes (four bytes) the callee's. */
 #include <stdlib.h>
 #include <string.h>
 
 #include "analysis.h"
+#include "pic24.h"
 
 /* what a call pushes besides the callee's frame: the AVR's return
  * address (the ATmega328P's 16-bit program counter) */
-#define RET_BYTES(a) ((a)->arch == AN_AVR ? 2u : 0u)
+#define RET_BYTES(a) ((a)->arch == AN_AVR ? 2u : (a)->arch == AN_PIC24 ? 4u : 0u)
 
 static const char *const limit_syms[] = { "__stack_limit", "__StackLimit",
-                                          "_sstack", 0 };
+                                          "_sstack", "__SPLIM_init", 0 };
+
+/* an address as the report prints it: a PIC24's W15 */
+static u32 shown(const struct analysis *a, u32 v)
+{
+    return an_stack_real((struct analysis *)a, v);
+}
 static const char *const end_syms[] = { "_end", "__bss_end", "__bss_end__",
                                         "_ebss", "end", "__end__", 0 };
 
@@ -69,12 +82,15 @@ void stk_init(struct analysis *a)
         else if (!an_data_sym(a, a->stk_limit_arg, &a->stk_limit))
             die("--stack-limit: '%s' is neither an address nor a symbol of %s",
                 a->stk_limit_arg, a->s->image);
+        a->stk_limit = an_stack_view(a, a->stk_limit);
         a->stk_limit_why = "--stack-limit";
     }
     if (!a->stk_limit_why) {
         for (int i = 0; limit_syms[i] && !a->stk_limit_why; i++)
-            if (an_data_sym(a, limit_syms[i], &a->stk_limit))
+            if (an_data_sym(a, limit_syms[i], &a->stk_limit)) {
+                a->stk_limit = an_stack_view(a, a->stk_limit);
                 a->stk_limit_why = limit_syms[i];
+            }
     }
 }
 
@@ -82,6 +98,8 @@ void stk_init(struct analysis *a)
  * lies below the stack's top: 0, or 1 with its address and name */
 static int data_end(struct analysis *a, u32 top, u32 *at, const char **why)
 {
+    if (a->arch == AN_PIC24)
+        return 0;                   /* the data is below a stack that grows up */
     for (int i = 0; end_syms[i]; i++) {
         u32 v;
         if (an_data_sym(a, end_syms[i], &v) && v < top &&
@@ -174,10 +192,10 @@ void stk_step(struct analysis *a, int ran, int entered, int sample_frame)
         a->ovf_sp = msp;
         a->ovf_entry = !ran;
         image_where(a->img, a->pc0, where, sizeof where);
-        sim_end(s, END_LOCKUP, "stack overflow: sp 0x%08x is below %s 0x%08x "
-                "(%s), %s %s", msp,
+        sim_end(s, END_LOCKUP, "stack overflow: sp 0x%08x is %s %s 0x%08x "
+                "(%s), %s %s", shown(a, msp), a->arch == AN_PIC24 ? "above" : "below",
                 a->stk_check_data ? "the end of .data and .bss" : "the stack limit",
-                a->stk_check, a->stk_check_why,
+                shown(a, a->stk_check), a->stk_check_why,
                 ran ? "at" : "in an exception's entry, at", where);
     }
 }
@@ -312,7 +330,13 @@ void stk_report(struct analysis *a)
         lim = de;
         why = dwhy;
     }
-    if (!why && top) {
+    if (!why && top && a->arch == AN_PIC24) {
+        struct region *r = bus_region(&a->s->bus, PIC24_DATA + shown(a, top), 1);
+        if (r) {
+            lim = an_stack_view(a, r->base + r->size - PIC24_DATA);
+            why = "the top of RAM";
+        }
+    } else if (!why && top) {
         struct region *r = bus_region(&a->s->bus, top - 1, 1);
         if (r) {
             lim = r->base;
@@ -321,8 +345,15 @@ void stk_report(struct analysis *a)
     }
     fprintf(o, "embsim stack: %s\n", a->s->image);
     const char *msp_name = a->arch == AN_ARM ? "main stack (MSP)" : "stack";
+    int up = a->arch == AN_PIC24;
     if (a->msp_min == 0xffffffffu || !top) {
         fprintf(o, "%s: not used\n", msp_name);
+    } else if (up) {
+        fprintf(o, "%s: base 0x%04x, highest 0x%04x: %u bytes used", msp_name,
+                shown(a, top), shown(a, a->msp_min), top - a->msp_min);
+        if (why && lim < top)
+            fprintf(o, " of %u (up to 0x%04x, %s)", top - lim, shown(a, lim), why);
+        fprintf(o, "\n");
     } else {
         fprintf(o, "%s: top 0x%08x, deepest 0x%08x: %u bytes used", msp_name,
                 top, a->msp_min, top - a->msp_min);
@@ -333,8 +364,8 @@ void stk_report(struct analysis *a)
     if (a->ovf) {
         char where[256];
         image_where(m, a->ovf_pc, where, sizeof where);
-        fprintf(o, "OVERFLOW: sp 0x%08x went below 0x%08x (%s), %s %s\n",
-                a->ovf_sp, a->stk_check,
+        fprintf(o, "OVERFLOW: sp 0x%08x went %s 0x%08x (%s), %s %s\n",
+                shown(a, a->ovf_sp), up ? "above" : "below", shown(a, a->stk_check),
                 a->stk_check_data ? "the end of .data and .bss" : a->stk_check_why,
                 a->ovf_entry ? "in an exception's entry, at" : "at", where);
     }
@@ -383,7 +414,7 @@ void stk_report(struct analysis *a)
             snprintf(rt, sizeof rt, r == -1 ? "none" : "-");
         over += bad;
         fprintf(o, "  %-24s 0x%08x %7s %7u %7s %7u %7s%s\n", name,
-                a->fn_minsp[i], depth, a->fn_frame[i], su, a->fn_incl[i], rt,
+                shown(a, a->fn_minsp[i]), depth, a->fn_frame[i], su, a->fn_incl[i], rt,
                 bad ? "  ABOVE THE STATIC BOUND" : "");
     }
     if (a->nsu || a->nrt)

@@ -30,6 +30,20 @@ READELF=${READELF:-$(_hp_tool readelf x86_64-elf-readelf)}
 OBJDUMP=${OBJDUMP:-$(_hp_tool x86_64-elf-objdump objdump)}
 OBJCOPY=${OBJCOPY:-$(_hp_tool x86_64-elf-objcopy objcopy)}
 
+# Microchip's PIC32MZ EF device pack (Microchip.PIC32MZ-EF_DFP, unpacked):
+# its ATDF files describe every register of the parts, which EmbSim's
+# PIC32 boards are built from (tests/golden/embsim-pic32.sh).
+PIC32MZ_EF_DFP=${EMBCC_PIC32MZ_EF_DFP:-${PIC32MZ_EF_DFP:-$HOME/EmbRef/dl/pic32mz-ef-dfp/x}}
+# and its PIC24F GA/GB pack (Microchip.PIC24F-GA-GB_DFP, unpacked): the EDC
+# files of the PIC24FJ1024GB610 and its family (tests/golden/embsim-pic24.sh).
+PIC24F_GA_GB_DFP=${EMBCC_PIC24F_GA_GB_DFP:-${PIC24F_GA_GB_DFP:-$HOME/EmbRef/dl/pic24f-ga-gb-dfp/x}}
+# and its PIC32MX pack (Microchip.PIC32MX_DFP, unpacked): the EDC files the
+# PIC32MX boards are built from (the ATDFs place many registers wrongly),
+# with the ATDFs for their interrupt vectors (tests/golden/embsim-pic32mx.sh).
+PIC32MX_DFP=${EMBCC_PIC32MX_DFP:-${PIC32MX_DFP:-$HOME/EmbRef/dl/pic32mx-dfp/x}}
+# and its dsPIC33E pack (Microchip.dsPIC33E-GM-GP-MC-GU-MU_DFP, unpacked):
+# the EDC files of the dsPIC33EP parts (tests/golden/embsim-dspic33.sh).
+DSPIC33E_DFP=${EMBCC_DSPIC33E_DFP:-${DSPIC33E_DFP:-$HOME/EmbRef/dl/dspic33e-dfp/x}}
 # A Linux system's root for each Linux target, for --libc=system: glibc's
 # headers, start files and shared objects (tests/golden/libc-system.sh).
 # tools/glibc-sysroot.sh makes them from Debian 12's packages. On a Linux

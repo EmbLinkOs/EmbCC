@@ -367,6 +367,14 @@ static int unhex(const char *p, u8 *b, int len)
     return len;
 }
 
+/* a program address on the bus: the core's phys hook where its
+ * addresses are windows on it (MIPS: kseg0 and kseg1) */
+static u32 bus_addr(struct gdb *g, u32 a)
+{
+    struct cpu *c = g->s->cpu;
+    return c->ops->phys ? c->ops->phys(c, a) : a;
+}
+
 /* debugger accesses, by the widest aligned piece, so a device register
  * is read once as a word rather than four times as bytes */
 static int mem_read(struct gdb *g, u32 a, u8 *b, int len)
@@ -374,7 +382,7 @@ static int mem_read(struct gdb *g, u32 a, u8 *b, int len)
     struct bus *bus = &g->s->bus;
     int i = 0;
     while (i < len) {
-        u32 x = a + (u32)i, v;
+        u32 x = bus_addr(g, a + (u32)i), v;
         int n = (len - i >= 4 && !(x & 3)) ? 4 : (len - i >= 2 && !(x & 1)) ? 2 : 1;
         if (bus_debug_read(bus, x, n, &v))
             break;
@@ -390,7 +398,7 @@ static int mem_write(struct gdb *g, u32 a, const u8 *b, int len)
     struct bus *bus = &g->s->bus;
     rec_mem(g->s, a, b, len);
     for (int i = 0; i < len;) {
-        u32 x = a + (u32)i, v = 0;
+        u32 x = bus_addr(g, a + (u32)i), v = 0;
         int n = (len - i >= 4 && !(x & 3)) ? 4 : (len - i >= 2 && !(x & 1)) ? 2 : 1;
         for (int k = 0; k < n; k++)
             v |= (u32)b[i + k] << (8 * k);
@@ -742,7 +750,8 @@ static int session(struct gdb *g)
                     len = hexnum(&q);
                 int bad = 0;
                 for (u32 i = 0; i < len && !bad; i++)
-                    bad = bus_debug_write(&s->bus, a + i, 1, 0xff) != 0;
+                    bad = bus_debug_write(&s->bus, bus_addr(g, a + i), 1,
+                                          0xff) != 0;
                 if (!bad && s->rec && len) {
                     u8 *ff = malloc(len);
                     if (!ff)
@@ -798,10 +807,16 @@ static int session(struct gdb *g)
             continue;
         case 'q':
             if (!strncmp(p, "qSupported", 10)) {
+                /* no target description for a core gdb describes itself
+                 * (MIPS, as QEMU's stub has it); no memory map where the
+                 * program's addresses are windows on the bus (MIPS:
+                 * gdb compares a map's addresses with kseg0's sign
+                 * extended, and refuses what does not match) */
                 g->multiprocess = strstr(p, "multiprocess+") != 0;
-                snprintf(o, 256, "PacketSize=%x;qXfer:features:read+;"
-                         "qXfer:memory-map:read+;vContSupported+;"
+                snprintf(o, 256, "PacketSize=%x;%s%svContSupported+;"
                          "QStartNoAckMode+%s", PKT_MAX,
+                         c->ops->gdb_xml(c, "target.xml") ? "qXfer:features:read+;" : "",
+                         c->ops->phys ? "" : "qXfer:memory-map:read+;",
                          g->multiprocess ? ";multiprocess+" : "");
                 send(g, o);
             } else if (!strncmp(p, "qXfer:features:read:", 20)) {

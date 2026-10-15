@@ -13,6 +13,10 @@
 #   RV32 1  a load access fault with mtvec 0: mcause, mtval, the lw, the
 #           backtrace, "handler: none", the lockup
 #   RV32 2  an illegal instruction, handled: mtval holds its bits
+#   MIPS 1  a bus error loading from kseg1 where nothing is (malta),
+#           which the harness's handler reports: Cause's code, the lw,
+#           the calls EmbSim saw
+#   MIPS 2  a misaligned load: an address error, BadVAddr
 # Each faulting instruction's mnemonic must be llvm-objdump's. Without
 # --fault-report every run must be what it was: stdout, stderr, status
 # and --count. tests/golden/embsim/exc.c, which takes a UsageFault and
@@ -50,6 +54,10 @@ h=$out/rv32; mkdir -p "$h"
 "$EMBCC" --target=riscv32-unknown-elf -march=rv32ima -O0 -c tests/harness/riscv/boot.c -o "$h/boot.o" &&
 "$EMBCC" --target=riscv32-unknown-elf -march=rv32ima -O0 -c tests/harness/riscv/io.c -o "$h/io.o" ||
     { echo "FAIL: the RV32 harness does not build"; exit 1; }
+h=$out/mips; mkdir -p "$h"
+"$EMBCC" --target=mipsel-none-elf -O0 -c tests/harness/mips/boot.c -o "$h/boot.o" &&
+"$EMBCC" --target=mipsel-none-elf -O0 -c tests/harness/mips/io.c -o "$h/io.o" ||
+    { echo "FAIL: the MIPS harness does not build"; exit 1; }
 
 # build TAG ARCH MODE [-g]: $out/TAG.elf
 build() {
@@ -57,6 +65,7 @@ build() {
     case $arch in
     m3) t="--target=thumbv7m-none-eabi"; H=EMBCC_THUMB_HARNESS; l=thumb ;;
     rv32) t="--target=riscv32-unknown-elf -march=rv32ima"; H=EMBCC_RISCV_HARNESS; l=riscv ;;
+    mips) t="--target=mipsel-none-elf"; H=EMBCC_MIPS_HARNESS; l=mips ;;
     esac
     # shellcheck disable=SC2086
     "$EMBCC" $t -O1 $g -DMODE="$mode" -c "$src" -o "$out/$tag.o" &&
@@ -109,7 +118,8 @@ mnem() {
     ref=$("$OBJDUMP_" -d $od --triple="$triple" \
               --start-address=0x"$pc" --stop-address=$((0x$pc + 4)) "$out/$tag.elf" 2> /dev/null |
           awk '/^ *[0-9a-f]+:/ { for (i = 2; i <= NF; i++)
-                   if ($i !~ /^[0-9a-f]+$/ || (length($i) != 4 && length($i) != 8)) break
+                   if ($i !~ /^[0-9a-f]+$/ ||
+                       (length($i) != 2 && length($i) != 4 && length($i) != 8)) break
                  print $i; exit }')
     [ "${mine%.w}" = "${ref%.w}" ] && [ -n "$mine" ] ||
         { echo "FAIL $tag: the instruction at 0x$pc is '$mine' in the report, '$ref' by llvm-objdump"; fail=1; }
@@ -182,6 +192,23 @@ has rv32-2 ", trap"
 bt rv32-2 "crash:$CSR" "level2:$CALL2" "level1:$CALL1" "main:$CALL0"
 [ $fail = "$f0" ] && echo "  RV32: a load access fault with no handler, an illegal instruction handled: decoded, disassembled, unwound"
 
+f0=$fail
+build mips-1 mips 1 -g && run mips-1 --board malta
+[ $st = 0 ] && grep -q '^==FAULT cause 7 epc' "$out/mips-1.o1" ||
+    { echo "FAIL mips-1: the harness's handler did not run (status $st)"; fail=1; }
+has mips-1 "embsim: fault: bus error on a load or store: nothing is there (Cause.ExcCode 7) at 0x"
+has mips-1 ", in crash (fault.c:$LOAD)"
+has mips-1 " a0   0xb0000000"
+has mips-1 "handler: the general exception vector 0x80000180"
+bt mips-1 "crash:$LOAD" "level2:$CALL2" "level1:$CALL1" "main:$CALL0"
+mnem mips-1 mipsel
+build mips-2 mips 2 -g && run mips-2 --board malta
+has mips-2 "embsim: fault: address error on a load or fetch (misaligned, or a kernel address in user mode) (Cause.ExcCode 4) at 0x"
+has mips-2 "BadVAddr 0x80000001: the address"
+bt mips-2 "crash:$LOAD" "level2:$CALL2" "level1:$CALL1" "main:$CALL0"
+mnem mips-2 mipsel
+[ $fail = "$f0" ] && echo "  MIPS: a bus error and an address error: decoded, disassembled, the calls EmbSim saw"
+
 # exc.c: two faults, both handled, both reported; the run unchanged
 x=exc
 if "$EMBCC" --target=thumbv7m-none-eabi -O2 -c tests/golden/embsim/exc.c -o "$out/exc.o" &&
@@ -216,5 +243,5 @@ if "$EMBCC" --target=avr -c tests/harness/avr/boot.S -o "$a/boot.o" &&
 else
     echo "FAIL avr: the lockup image does not build"; fail=1
 fi
-[ $fail = 0 ] && echo "embsim --fault-report: Cortex-M and RISC-V faults decoded and unwound, handled or not; the run unchanged"
+[ $fail = 0 ] && echo "embsim --fault-report: Cortex-M, RISC-V and MIPS faults decoded and unwound, handled or not; the run unchanged"
 exit $fail

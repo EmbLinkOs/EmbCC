@@ -2,13 +2,13 @@
  * board.
  *
  * It runs an ELF image the way the part does -- a Cortex-M, a RISC-V
- * core or an AVR -- on a model of one of the boards QEMU models, so an
- * image built for QEMU runs unchanged, and QEMU referees the simulator:
- * tests/golden/embsim.sh, embsim-riscv.sh and embsim-avr.sh run the exec
- * corpus on both, and the output and the instruction count must be the
- * same. It
- * counts the instructions it executes and estimates their cycles with
- * the table tools/bench uses (tools/bench/cost.h) -- on the AVR, exactly
+ * core, an AVR or a MIPS32 -- on a model of one of the boards QEMU
+ * models, so an image built for QEMU runs unchanged, and QEMU referees
+ * the simulator: tests/golden/embsim.sh, embsim-riscv.sh, embsim-avr.sh
+ * and embsim-mips.sh run the exec corpus on both, and the output (and
+ * but on MIPS the instruction count) must be the same. It counts the
+ * instructions it executes and estimates their cycles with the table
+ * tools/bench uses (tools/bench/cost.h) -- on the AVR, exactly
  * -- and the timers (SysTick, DWT's CYCCNT, the CLINT's mtime, the AVR's
  * Timer/Counter1) advance by it, so a timed run gives the same answer
  * every time.
@@ -22,7 +22,10 @@
 #include <string.h>
 
 #include "analysis.h"
+#include "disasm.h"
+#include "image.h"
 #include "sim.h"
+#include "pic24.h"
 #include "svd-map.h"
 
 static u32 parse_size(const char *s)
@@ -40,7 +43,7 @@ static u32 parse_size(const char *s)
 
 static void usage(void)
 {
-    fputs("usage: embsim IMAGE.elf [--board NAME] [--cpu NAME]\n"
+    fputs("usage: embsim IMAGE.elf|IMAGE.hex [--board NAME] [--cpu NAME]\n"
           "              [--ram-size SIZE] [--until STRING] [--max-insns N]\n"
           "              [--stats] [--count FILE] [--trace FILE]\n"
           "              [--no-semihosting] [--gdb [HOST:]PORT [--gdb-wait]]\n"
@@ -50,15 +53,38 @@ static void usage(void)
           "               collapsed-insns]]\n"
           "              [--stack-report[=FILE]] [--stack-limit ADDR|SYMBOL]\n"
           "              [--stack-su FILE.su]... [--stack-embrt FILE.json] [FILE.su...]\n"
-          "              [--fault-report[=FILE]]\n"
+          "              [--fault-report[=FILE]] [--disassemble[=FILE]]\n"
           "              [--input FILE|-] [--record FILE]\n"
+          "              [--dfp DIR] [--set NAME=VALUE]...\n"
           "       embsim [IMAGE.elf] --replay FILE [--count FILE] [--stats] ...\n"
           "       embsim --svd FILE.svd --svd-map\n"
           "boards: lm3s6965evb (default), mps2-an385, mps2-an386,\n"
           "        mps2-an500, microbit, stm32f405 (its SVD: --svd or\n"
-          "        EMBSIM_SVD_PATH), virt (RISC-V), uno (AVR)\n"
+          "        EMBSIM_SVD_PATH), bluepill (STM32F103C8: ST's\n"
+          "        STM32F103xx.svd), nrf52840dk (Nordic's nrf52840.svd),\n"
+          "        pico (the Raspberry Pi Pico's RP2040:\n"
+          "        the Pico SDK's RP2040.svd), virt (RISC-V), uno (AVR),\n"
+          "        malta (MIPS),\n"
+          "        pic32mz2048efh100, explorer16-32, curiosity-pic32mz-ef-2\n"
+          "        (PIC32MZ: its ATDF, from --dfp DIR, --svd FILE.atdf or\n"
+          "        EMBSIM_SVD_PATH), pic24fj1024gb610, explorer16-32-pic24\n"
+          "        (PIC24: its EDC, from --dfp DIR or --svd FILE.PIC),\n"
+          "        explorer16-32-pic32mx (PIC32MX: its EDC, from --dfp DIR),\n"
+          "        explorer16-32-dspic33 (dsPIC33EP: its EDC, from --dfp DIR);\n"
+          "        and any PIC32MZ EF, PIC32MX, PIC24FJ GA6/GB6, dsPIC33EP or\n"
+          "        PIC24EP part by its name (pic32mz1024efg064, pic32mx795f512l,\n"
+          "        pic24fj256ga610, dspic33ep512mu810), from --dfp DIR\n"
           "cpus:   cortex-m0, cortex-m0plus, cortex-m3, cortex-m4, cortex-m7;\n"
-          "        rv32, rv64 (virt's default: the image's width); atmega328p\n",
+          "        rv32, rv64 (virt's default: the image's width); atmega328p;\n"
+          "        24kc, pic32mz, pic32mx; pic24fj1024gb610, dspic33ep512mu810\n"
+          "        (or the part's name)\n"
+          "--set:  explorer16-32: temperature=DEGREES, pot=VOLTS or PERCENT%,\n"
+          "        S4, S5, S6=pressed or released; explorer16-32-pic24,\n"
+          "        explorer16-32-pic32mx and explorer16-32-dspic33: the same,\n"
+          "        and S3;\n"
+          "        curiosity-pic32mz-ef-2: SW1, SW2, SW3, SW4=pressed or released;\n"
+          "        pico: BOOTSEL=pressed or released;\n"
+          "        nrf52840dk: BUTTON1-4=pressed or released\n",
           stderr);
     exit(2);
 }
@@ -73,22 +99,22 @@ int main(int argc, char **argv)
     int svd_map = 0, tracing_periph = 0, board_given = 0, cov_lcov = 0;
     int profiling = 0, prof_fmt = 0, stk_report = 0;
     const char *stk_path = 0, *stk_limit = 0, *stk_embrt = 0, *fault_path = 0;
-    int fault_report = 0, semi_given = 0;
+    int fault_report = 0, semi_given = 0, disassemble = 0;
+    const char *dis_path = 0;
     const char *input = 0, *record = 0, *replay = 0;
     const char **su = calloc((size_t)argc, sizeof *su);
-    int nsu = 0;
+    const char **sets = calloc((size_t)argc, sizeof *sets);
+    int nsu = 0, nset = 0;
     u32 ram_size = 0;
     u64 max_insns = 0;
     int stats = 0, verbose = 0, semihosting = 1, gdb_wait = 0;
     const struct board_desc *bd = &boards[0];
+    const char *board_name = 0;
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
         int more = i + 1 < argc;
         if (!strcmp(a, "--board") && more) {
-            const char *nm = argv[++i];
-            bd = board_find(nm);
-            if (!bd)
-                die("unknown board '%s'", nm);
+            board_name = argv[++i];
             board_given = 1;
         } else if (!strcmp(a, "--cpu") && more)
             cpu = argv[++i];
@@ -114,6 +140,12 @@ int main(int argc, char **argv)
             gdb = argv[++i];
         else if (!strcmp(a, "--gdb-wait"))
             gdb_wait = 1;
+        else if (!strcmp(a, "--set") && more)
+            sets[nset++] = argv[++i];
+        else if (!strncmp(a, "--set=", 6))
+            sets[nset++] = a + 6;
+        else if (!strcmp(a, "--dfp") && more)
+            svd_dfp = argv[++i];
         else if (!strcmp(a, "--svd") && more)
             svd = argv[++i];
         else if (!strcmp(a, "--svd-map"))
@@ -156,6 +188,10 @@ int main(int argc, char **argv)
             fault_report = 1, fault_path = 0;
         else if (!strncmp(a, "--fault-report=", 15))
             fault_report = 1, fault_path = a + 15;
+        else if (!strcmp(a, "--disassemble"))
+            disassemble = 1, dis_path = 0;
+        else if (!strncmp(a, "--disassemble=", 14))
+            disassemble = 1, dis_path = a + 14;
         else if (!strcmp(a, "--stack-report"))
             stk_report = 1, stk_path = 0;
         else if (!strncmp(a, "--stack-report=", 15))
@@ -177,6 +213,9 @@ int main(int argc, char **argv)
         else
             die("one image at a time ('%s' and '%s')", image, a);
     }
+    /* a board by its name, or a part by its own (from its pack: --dfp's) */
+    if (board_name && !(bd = board_find(board_name)) && !(bd = board_part(board_name)))
+        die("unknown board '%s'", board_name);
     /* --replay: the machine is the recording's; an option that shapes it
      * must say what the recording says, or be left out */
     struct rec *rp = 0;
@@ -190,9 +229,6 @@ int main(int argc, char **argv)
             image = rm.image;
         if (board_given && strcmp(bd->name, rm.board))
             die("--board %s: the recording ran on %s", bd->name, rm.board);
-        bd = board_find(rm.board);
-        if (!bd)
-            die("the recording's board '%s' is not one of EmbSim's", rm.board);
         board_given = 1;
         if (cpu && (!rm.cpu || strcmp(cpu, rm.cpu)))
             die("--cpu %s: the recording ran %s", cpu, rm.cpu ? rm.cpu : "the board's");
@@ -212,6 +248,19 @@ int main(int argc, char **argv)
         if (until && (!rm.until || strcmp(until, rm.until)))
             die("--until: the recording ran with %s", rm.until ? rm.until : "none");
         until = rm.until;
+        if (svd_dfp && (!rm.dfp || strcmp(svd_dfp, rm.dfp)))
+            die("--dfp %s: the recording ran with %s", svd_dfp,
+                rm.dfp ? rm.dfp : "none");
+        svd_dfp = rm.dfp;
+        if (!(bd = board_find(rm.board)) && !(bd = board_part(rm.board)))
+            die("the recording's board '%s' is not one of EmbSim's", rm.board);
+        if (nset)
+            die("--set: the recording's inputs are the run's (%d of them)",
+                rm.nset);
+        if (rm.nset) {
+            sets = rm.sets;
+            nset = rm.nset;
+        }
         rec_check_image(image, &rm);
     }
     if (svd && !board_given) {
@@ -261,6 +310,19 @@ int main(int argc, char **argv)
 
     struct sim *s = &sim;
     sim_init(s, bd, cpu, svd);
+    for (int i = 0; i < nset; i++) {
+        /* the board's inputs: --set temperature=30 */
+        char name[64];
+        const char *eq = strchr(sets[i], '=');
+        size_t l = eq ? (size_t)(eq - sets[i]) : 0;
+        if (!eq || !l || l >= sizeof name)
+            die("--set %s: give NAME=VALUE", sets[i]);
+        memcpy(name, sets[i], l);
+        name[l] = 0;
+        if (!s->io.set || s->io.set(s->io.ctx, name, eq + 1))
+            die("--set %s: the %s board has no input named %s", sets[i],
+                bd->name, name);
+    }
     if (tracing_periph) {
         if (!s->svd)
             die("--trace-periph needs --svd FILE: the names are the SVD's");
@@ -275,6 +337,22 @@ int main(int argc, char **argv)
     sim_load(s, ram_size, image);
     if ((nsu || stk_embrt) && !stk_report)
         die("--stack-su and --stack-embrt are for --stack-report");
+    if (disassemble) {
+        /* the image's code as text, and no run */
+        FILE *o = dis_path && *dis_path && strcmp(dis_path, "-") ? fopen(dis_path, "w")
+                                                                 : stdout;
+        if (!o)
+            die("cannot write %s", dis_path);
+        dis_listing(s, image_open(image), o);
+        if (o != stdout)
+            fclose(o);
+        return 0;
+    }
+    if ((coverage || profiling || stk_report || stk_limit || fault_report) &&
+        image_is_hex(image))
+        die("--coverage, --profile, --stack-report, --stack-limit and "
+            "--fault-report read the image's symbols and lines: give its ELF "
+            "file, not its HEX one");
     if (coverage || profiling || stk_report || stk_limit || fault_report ||
         input || record || rp) {
         struct analysis *an = an_create(s, profiling || stk_report || stk_limit ||
@@ -323,6 +401,9 @@ int main(int argc, char **argv)
             w.semihosting = semihosting;
             w.max_insns = max_insns;
             w.until = until;
+            w.dfp = svd_dfp;
+            w.sets = sets;
+            w.nset = nset;
             rec_record(s, record, &w);
         }
         if (s->rec)
@@ -333,6 +414,8 @@ int main(int argc, char **argv)
         gdb_serve(s, host[0] ? host : 0, port, gdb_wait);
     else
         sim_run(s);
+    if (s->io.end)
+        s->io.end(s->io.ctx);
     trace_report(s, count_path, stats || verbose);
     if (s->rec)
         rec_finish(s);
