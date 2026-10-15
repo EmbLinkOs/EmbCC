@@ -229,6 +229,7 @@ void mips_syscall(struct code *c);
 void mips_teq(struct code *c, int rs, int rt, int code);
 void mips_eret(struct code *c);
 void mips_deret(struct code *c);
+void mips_cache(struct code *c, int op, int base, long long off);
 void mips_add_trap(struct code *c, int sub, int rd, int rs, int rt);
 void mips_addi(struct code *c, int rt, int rs, long long imm);
 void mips_rddsp(struct code *c, int rd, int mask);  /* DSP ASE */

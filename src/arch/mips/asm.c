@@ -511,6 +511,15 @@ static int stmt_body(const char *stmt, int len, struct code *out,
         mips_add_trap(out, tok_is(&t[0], "sub"), d, a, b);
         return 0;
     }
+    if (n == 3 && tok_is(&t[0], "cache")) {
+        int base;
+        long long off;
+        if (!tok_imm(&t[1], &v) || v < 0 || v > 31 ||
+            !tok_mem(&t[2], &base, &off))
+            FAIL("cache wants an operation 0..31 and offset(base)");
+        mips_cache(out, (int)v, base, off);
+        return 0;
+    }
     if (n == 4 && tok_is(&t[0], "addi")) {
         int d = tok_reg(&t[1]), a = tok_reg(&t[2]);
         if (d < 0 || a < 0 || !tok_imm(&t[3], &v))

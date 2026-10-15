@@ -730,6 +730,16 @@ void mips_wrdsp(struct code *c, int rs, int mask)
               ((unsigned long)mask << 11) | (0x13UL << 6) | 0x38UL);
 }
 
+/* CACHE op, offset(base): opcode 0x2f, the operation in rt's field (the
+ * cache in its low two bits) -- a startup's cache initialisation, and a
+ * DMA buffer written back or invalidated by line */
+void mips_cache(struct code *c, int op, int base, long long off)
+{
+    need_reg(base);
+    need_field(op, 0, 31, "cache operation");
+    mips_w(c, mips_enc_i(0x2f, base, op, imm16(off, 1, "cache offset")));
+}
+
 /* COP0 with the CO bit: eret, deret and wait. */
 void mips_eret(struct code *c) { mips_w(c, 0x42000018UL); }
 void mips_deret(struct code *c)
