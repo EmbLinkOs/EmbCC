@@ -218,10 +218,14 @@ static char *mips_subst(const char *file, int line, const char *tmpl,
             continue;
         }
         int k = -1;
-        /* %c0: the constant alone, as gcc prints it */
-        int bare = 0;
-        if (*p == 'c' && (p[1] == '[' || isdigit((unsigned char)p[1]))) {
-            bare = 1;
+        /* %c0: the constant alone, as gcc prints it; %z0: $0 for the
+         * constant zero, else the register (XC32's <xc-pic32m.h> writes
+         * `mtc0 %z0, ...` with a "dJ" operand) */
+        int bare = 0, zero = 0;
+        if ((*p == 'c' || *p == 'z') &&
+            (p[1] == '[' || isdigit((unsigned char)p[1]))) {
+            bare = *p == 'c';
+            zero = *p == 'z';
             p++;
         }
         if (*p == '[') {
@@ -251,7 +255,13 @@ static char *mips_subst(const char *file, int line, const char *tmpl,
             diag_fatal(file, line, "%%c%d names a register operand; %%c "
                        "prints a constant, and wants an \"i\" or \"n\" "
                        "operand", k);
-        if (isimm[k])
+        if (zero && isimm[k] && imms[k] != 0)
+            diag_fatal(file, line, "%%z%d names the constant %ld; %%z "
+                       "prints a register, or $0 for the constant 0", k,
+                       imms[k]);
+        if (zero && isimm[k])
+            len += (size_t)snprintf(out + len, cap - len, "$0");
+        else if (isimm[k])
             len += (size_t)snprintf(out + len, cap - len, "%ld", imms[k]);
         else
             len += (size_t)snprintf(out + len, cap - len, "$%s",

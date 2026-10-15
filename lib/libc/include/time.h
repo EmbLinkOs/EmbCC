@@ -18,8 +18,14 @@
 extern "C" {
 #endif
 
+#ifndef _TIME_T_DECLARED          /* (and in <sys/types.h>) */
+#define _TIME_T_DECLARED
 typedef long time_t;
+#endif
+#ifndef _CLOCK_T_DECLARED
+#define _CLOCK_T_DECLARED
 typedef long clock_t;
+#endif
 
 #define CLOCKS_PER_SEC 1000000L
 

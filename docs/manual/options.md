@@ -65,7 +65,8 @@ EmbCC's own spellings come first. Where GCC spells the same thing differently, i
 | `--cpu=CPU` | the processor: cortex-m4, cortex-m0plus, ... | `-mcpu=CPU` |
 | `--fpu=FPU` | the floating-point unit: fpv4-sp-d16, fpv5-d16, ... | `-mfpu=FPU` |
 | `--float-abi=ABI` | soft, softfp or hard | `-mfloat-abi=ABI` |
-| `--mcu=PART` | the AVR part: atmega328p, ... | `-mmcu=PART` |
+| `--mcu=PART` | the part: an AVR (atmega328p, ...) or a PIC32 on mipsel (32MZ2048EFH100, ...; XC32's -mprocessor=) | `-mmcu=PART` |
+| `--dfp=DIR` | a PIC32's device pack (DFP), as MPLAB X installs it; found under ~/.mchp_packs when not named | `-mdfp=DIR` |
 | `--isa=thumb` | Thumb instructions (ARM) | `-mthumb` |
 | `--isa=arm` | ARM (A32) instructions | `-marm` |
 | `--isa=ISA` | the instruction set: rv32imac, rv64gc, armv7-a, mips32r2, isaa ... | `-march=ISA` |

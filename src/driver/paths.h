@@ -75,6 +75,14 @@ const char *const *paths_default_includes(int *n);
 int paths_target_file(const char *triple, const char *name,
                       char *out, size_t cap);
 
+/* A PIC32 part's device pack (DFP): the directory holding its
+ * include/proc/p<part>.h, xc32/<part>/ and the rest -- `named` (--dfp=),
+ * which may also be a family's directory of versions, or else the newest
+ * one MPLAB X installed (~/.mchp_packs, and the packs folder of an
+ * MPLAB X installation). 1 and the directory in `out`, or 0. */
+int paths_pic32_dfp(const char *part, const char *named, char *out,
+                    size_t cap);
+
 /* `--print-search-dirs`: what the compiler decided, in the form a
  * person can check against `ls`. A search path that cannot be inspected
  * is a search path nobody can debug. */

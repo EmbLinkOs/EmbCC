@@ -493,6 +493,8 @@ static int stmt_body(const char *stmt, int len, struct code *out,
                                         return 0; }
         if (tok_is(&t[0], "ehb"))     { mips_ehb(out); return 0; }
         if (tok_is(&t[0], "eret"))    { mips_eret(out); return 0; }
+        if (tok_is(&t[0], "deret"))   { mips_deret(out); return 0; }
+        if (tok_is(&t[0], "sdbbp"))   { mips_sdbbp(out, 0); return 0; }
         if (tok_is(&t[0], "wait"))    { mips_wait(out); return 0; }
         if (tok_is(&t[0], "syscall")) { mips_syscall(out); return 0; }
         if (tok_is(&t[0], "break"))   { mips_break(out, 0); return 0; }
@@ -671,6 +673,20 @@ static int stmt_body(const char *stmt, int len, struct code *out,
                  "select 0..7", t[0].len, t[0].s);
         if (tok_is(&t[0], "mfc0")) mips_mfc0(out, r, c0, (int)sel);
         else                       mips_mtc0(out, r, c0, (int)sel);
+        return 0;
+    }
+    if (n == 2 && tok_is(&t[0], "sdbbp")) {
+        if (!tok_imm(&t[1], &v) || v < 0 || v > 0xfffff)
+            FAIL("sdbbp's code is out of range (0..0xfffff)");
+        mips_sdbbp(out, (int)v);
+        return 0;
+    }
+    if (n == 3 && (tok_is(&t[0], "rdpgpr") || tok_is(&t[0], "wrpgpr"))) {
+        int d = tok_reg(&t[1]), r = tok_reg(&t[2]);
+        if (d < 0 || r < 0)
+            FAIL("%.*s wants two registers", t[0].len, t[0].s);
+        if (tok_is(&t[0], "rdpgpr")) mips_rdpgpr(out, d, r);
+        else                         mips_wrpgpr(out, d, r);
         return 0;
     }
     if (n == 2 && (tok_is(&t[0], "break") || tok_is(&t[0], "sync"))) {

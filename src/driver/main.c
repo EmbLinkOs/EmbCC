@@ -1756,6 +1756,26 @@ static void apply_asm_names(struct unit *u)
  * which the SDK leaves to the compiler -- never EmbCC's own libc, which is
  * not the one linked. */
 static int g_incdirs_done;
+/* The PIC32 part's device pack (--dfp=, or MPLAB X's), found once */
+static const char *pic32_dfp_dir(void)
+{
+    static char dir[1024];
+    if (!dir[0] &&
+        !paths_pic32_dfp(target_pic32_part(), target_pic32_dfp(), dir,
+                         sizeof dir)) {
+        if (target_pic32_dfp())
+            diag_fatal(NULL, 0, "--dfp=%s has no header for the %s "
+                       "(include/proc/p%s.h, in any version under it)",
+                       target_pic32_dfp(), target_pic32_part(),
+                       target_pic32_part());
+        diag_fatal(NULL, 0, "no device pack for the %s: MPLAB X installs "
+                   "them under ~/.mchp_packs (Tools > Packs), and "
+                   "--dfp=DIR names one (packs.download.microchip.com)",
+                   target_pic32_part());
+    }
+    return dir;
+}
+
 static void incdirs_with_defaults(void)
 {
     if (g_incdirs_done)
@@ -1794,6 +1814,18 @@ static void incdirs_with_defaults(void)
             incdir_sys[nincdirs] = 1;
             incdirs[nincdirs++] = avrinc;
         }
+        /* A PIC32 part: EmbCC's XC32-compatible headers (<cp0defs.h>,
+         * <sys/attribs.h>...), then the part's device pack, whose <xc.h>
+         * and processor header a PIC32 program includes */
+        static char picinc[1024], dfpinc[1024];
+        if (target_pic32_part() && ndef > 0 && nincdirs + 1 < MAX_INCDIRS) {
+            snprintf(picinc, sizeof picinc, "%s/pic32", def[ndef - 1]);
+            incdir_sys[nincdirs] = 1;
+            incdirs[nincdirs++] = picinc;
+            snprintf(dfpinc, sizeof dfpinc, "%s/include", pic32_dfp_dir());
+            incdir_sys[nincdirs] = 1;
+            incdirs[nincdirs++] = dfpinc;
+        }
         for (int k = 0; k < ndef && nincdirs < MAX_INCDIRS; k++) {
             incdir_sys[nincdirs] = 1;
             incdirs[nincdirs++] = def[k];
@@ -1813,13 +1845,28 @@ static int assemble_file(const char *in, const char *out)
      * a header shared with C (avr-libc's <avr/io.h>, CMSIS's) keeps its C
      * out of the assembler's way with it. Only for this file -- a C file
      * after it on the same command line does not see it. */
+    /* A PIC32 part's: the device pack's headers tell C from assembly by
+     * XC32's __LANGUAGE_C__ and __LANGUAGE_ASSEMBLY__ */
+    int pic32 = kind == 2 && target_pic32_part();
     if (kind == 2) {
         incdirs_with_defaults();
         cpp_cmdline_define("__ASSEMBLER__=1", 0);
     }
+    if (pic32) {
+        cpp_cmdline_define("__LANGUAGE_C__", 1);
+        cpp_cmdline_define("__LANGUAGE_C", 1);
+        cpp_cmdline_define("__LANGUAGE_ASSEMBLY__=1", 0);
+        cpp_cmdline_define("__LANGUAGE_ASSEMBLY=1", 0);
+    }
     int rc = gas_assemble(in, out, kind == 2, incdirs, nincdirs);
     if (kind == 2)
         cpp_cmdline_define("__ASSEMBLER__", 1);
+    if (pic32) {
+        cpp_cmdline_define("__LANGUAGE_ASSEMBLY__", 1);
+        cpp_cmdline_define("__LANGUAGE_ASSEMBLY", 1);
+        cpp_cmdline_define("__LANGUAGE_C__=1", 0);
+        cpp_cmdline_define("__LANGUAGE_C=1", 0);
+    }
     return rc;
 }
 

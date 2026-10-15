@@ -228,6 +228,10 @@ void mips_break(struct code *c, int code);         /* code 0..1023 */
 void mips_syscall(struct code *c);
 void mips_teq(struct code *c, int rs, int rt, int code);
 void mips_eret(struct code *c);
+void mips_deret(struct code *c);
+void mips_sdbbp(struct code *c, int code);         /* code 0..0xfffff */
+void mips_rdpgpr(struct code *c, int rd, int rt);
+void mips_wrpgpr(struct code *c, int rd, int rt);
 void mips_wait(struct code *c);
 void mips_ehb(struct code *c);
 void mips_di(struct code *c, int rt);

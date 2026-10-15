@@ -683,8 +683,33 @@ void mips_teq(struct code *c, int rs, int rt, int code)
     mips_w(c, ((unsigned long)rs << 21) | ((unsigned long)rt << 16) |
               ((unsigned long)code << 6) | F_TEQ);
 }
-/* COP0 with the CO bit: eret and wait. */
+/* COP0 with the CO bit: eret, deret and wait. */
 void mips_eret(struct code *c) { mips_w(c, 0x42000018UL); }
+void mips_deret(struct code *c)
+{
+    mips_w(c, mips_enc_r(OP_COP0, 0x10, 0, 0, 0, 0x1f));
+}
+/* SDBBP: SPECIAL2 0x3f, a 20-bit code above the function field */
+void mips_sdbbp(struct code *c, int code)
+{
+    need_field(code, 0, 0xfffff, "sdbbp code");
+    mips_w(c, mips_enc_r(OP_SPECIAL2, 0, 0, 0, 0, 0x3f) |
+              ((unsigned long)code << 6));
+}
+/* RDPGPR/WRPGPR (COP0 rs 0b01010/0b01110): rd in the shadow set the other
+ * names -- the previous one's rt into the current rd, or the current rt
+ * into the previous one's rd. LLVM has neither; the MIPS32 architecture
+ * manual's layout, as mfc0's. */
+void mips_rdpgpr(struct code *c, int rd, int rt)
+{
+    need_reg(rd); need_reg(rt);
+    mips_w(c, mips_enc_r(OP_COP0, 0x0a, rt, rd, 0, 0));
+}
+void mips_wrpgpr(struct code *c, int rd, int rt)
+{
+    need_reg(rd); need_reg(rt);
+    mips_w(c, mips_enc_r(OP_COP0, 0x0e, rt, rd, 0, 0));
+}
 void mips_wait(struct code *c) { mips_w(c, 0x42000020UL); }
 void mips_ehb(struct code *c)
 {

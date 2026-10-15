@@ -5450,6 +5450,14 @@ static int asm_resolve_reg_mips(struct unit *u, struct stmt *s,
         if (*p == 'i' || *p == 'n' || (*p >= 'I' && *p <= 'P'))
             has_i = 1;
     }
+    /* "dJ" with the constant 0: the zero register, as gcc chooses it, which
+     * a template prints as $0 through %z (XC32's mtc0 %z0) */
+    long z;
+    if (has_r && strchr(c, 'J') && const_fold(op->expr, &z) && z == 0) {
+        op->is_imm = 1;
+        op->imm = 0;
+        return ASM_REG_IMM;
+    }
     if (has_i && !has_r) {
         long v;
         if (const_fold(op->expr, &v)) {

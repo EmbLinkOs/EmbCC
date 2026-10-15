@@ -24,6 +24,7 @@
  *
  * __APPLE__ / __linux__ inside THIS file is what the seam is for --
  * the rule is that no file above it may ask. */
+#include <dirent.h>            /* opendir, for plat_list_dir */
 #include <unistd.h>            /* isatty, readlink */
 #if defined(__APPLE__)
 #include <mach-o/dyld.h>
@@ -67,4 +68,32 @@ const char *plat_self_path(void)
             snprintf(buf, sizeof buf, "%s", a);
     }
     return buf[0] ? buf : NULL;
+}
+
+char **plat_list_dir(const char *path)
+{
+    DIR *d = opendir(path);
+    if (!d)
+        return NULL;
+    size_t n = 0, cap = 16;
+    char **v = malloc(cap * sizeof *v);
+    struct dirent *e;
+    while (v && (e = readdir(d)) != NULL) {
+        if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
+            continue;
+        if (n + 1 >= cap) {
+            char **w = realloc(v, (cap *= 2) * sizeof *v);
+            if (!w)
+                break;
+            v = w;
+        }
+        v[n] = malloc(strlen(e->d_name) + 1);
+        if (!v[n])
+            break;
+        strcpy(v[n++], e->d_name);
+    }
+    closedir(d);
+    if (v)
+        v[n] = NULL;
+    return v;
 }

@@ -46,6 +46,14 @@ int plat_write_file(const char *path, const void *data, size_t len);
  * answer can be stale by the time the file is opened. */
 int plat_file_exists(const char *path);
 
+/* The names in a directory (not "." or ".."), malloc'd, NULL-terminated,
+ * in no particular order; NULL when it cannot be read or the host cannot
+ * list a directory at all (ISO C has no words for it), which callers treat
+ * as "nothing found" -- a PIC32 device pack is then named with --dfp=.
+ * plat_free_list frees the result. */
+char **plat_list_dir(const char *path);
+void plat_free_list(char **names);
+
 /* ---- environment ----
  *
  * Returns NULL where the host has no environment at all, which is the
