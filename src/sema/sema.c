@@ -673,6 +673,25 @@ static int cvt_bits(const struct expr *e)
            ? e->memb->bit_width : 0;
 }
 
+/* The type an operand brings to the usual conversions. A bit-field is
+ * promoted by its WIDTH (C11 6.3.1.1p2, and GCC's rule for the other
+ * integer types it takes): to int when an int holds every value the
+ * width can, to unsigned int when that does, else it keeps its declared
+ * type -- so `unsigned u:3` gives `s.u - 2 < 0`, as GCC and clang have
+ * it, where the declared unsigned int made it never true. */
+static struct type *opty(const struct expr *e)
+{
+    if (!(e->kind == EXPR_MEMBER && e->memb && e->memb->is_bitfield) ||
+        !e->ty || !ty_is_integer(e->ty))
+        return e->ty;
+    int w = e->memb->bit_width, ib = ty_size(ty_base(TY_INT, 0)) * 8;
+    if (w < ib || (w == ib && !e->ty->is_unsigned))
+        return ty_base(TY_INT, 0);
+    if (w == ib)
+        return ty_base(TY_INT, 1);
+    return e->ty;
+}
+
 static struct cvt cvt_expr(const struct expr *e, int enum_ok)
 {
     return cvt_type(e->ty, cvt_bits(e), enum_ok);
@@ -2586,7 +2605,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             break;
         }
         need_arith(u, e->rhs, "unary '-'");
-        e->ty = promote(e->rhs->ty);
+        e->ty = promote(opty(e->rhs));
         e->rhs = mk_cast(e->rhs, e->ty);
         break;
     case EXPR_BNOT:
@@ -2599,7 +2618,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             break;
         }
         need_integer(u, e->rhs, "'~'");
-        e->ty = promote(e->rhs->ty);
+        e->ty = promote(opty(e->rhs));
         e->rhs = mk_cast(e->rhs, e->ty);
         break;
     case EXPR_DEREF:
@@ -2855,7 +2874,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             need_scalar(u, e->args[0], "'?:'");
         check_expr(u, f, sc, e->lhs);
         check_expr(u, f, sc, e->rhs);
-        struct type *a = e->lhs->ty, *b = e->rhs->ty;
+        struct type *a = opty(e->lhs), *b = opty(e->rhs);
         if ((ty_is_complex(a) || ty_is_complex(b)) &&
             (ty_is_complex(a) || ty_is_arith(a)) &&
             (ty_is_complex(b) || ty_is_arith(b))) {
@@ -3152,7 +3171,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
     case EXPR_BINOP: {
         check_expr(u, f, sc, e->lhs);
         check_expr(u, f, sc, e->rhs);
-        struct type *lt = e->lhs->ty, *rt = e->rhs->ty;
+        struct type *lt = opty(e->lhs), *rt = opty(e->rhs);
         if (ty_is_complex(lt) || ty_is_complex(rt)) {
             cx_binop(u, e);
             break;
