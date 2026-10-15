@@ -9,5 +9,7 @@
 int dis_thumb(u32 pc, u32 h1, u32 h2, char *b, size_t n);
 /* the RISC-V instruction at pc (16 bits for a compressed one) */
 int dis_riscv(u32 pc, u32 insn, int xlen, char *b, size_t n);
+/* the MIPS32 instruction at pc */
+int dis_mips(u32 pc, u32 insn, char *b, size_t n);
 
 #endif

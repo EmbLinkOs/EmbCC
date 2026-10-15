@@ -6,7 +6,8 @@
 # paths -- a loop's calls, a function calling another twice, recursion
 # five deep, a call through a pointer, a timer interrupt -- and is built
 # at -O1 on the Cortex-M3, RV32 (with C, whose returns are C.JR, and
-# without, whose are JALR) and the AVR, in their harnesses. For each:
+# without, whose are JALR), the AVR and MIPS (malta: calls and returns
+# after their delay slots), in their harnesses. For each:
 #   - the counts add up exactly to --stats': the (total) row, the sum of
 #     the rows, and the collapsed stacks, by cycles and by instructions;
 #   - each function's self instructions are what an independent count
@@ -53,6 +54,9 @@ build() {
         "$EMBCC" --target=$t -c tests/harness/avr/boot.S -o "$h/boot.o" &&
         "$EMBCC" --target=$t -Os -c tests/harness/avr/io.c -o "$h/io.o" &&
         sh tools/build-rt.sh avr "$h" > "$h/rt.log" 2>&1 ;;
+    mips) t=mipsel-none-elf; H=EMBCC_MIPS_HARNESS; l=mips
+        "$EMBCC" --target=$t -O0 -c tests/harness/mips/boot.c -o "$h/boot.o" &&
+        "$EMBCC" --target=$t -O0 -c tests/harness/mips/io.c -o "$h/io.o" ;;
     esac &&
     "$EMBCC" --target=$t $m -O1 -c "$src" -o "$h/prof.o" &&
     env "$H=$h" sh tests/harness/$l/link.sh "$out/$tag.elf" "$h/prof.o" > /dev/null 2>&1
@@ -65,6 +69,8 @@ row() {
 
 check() {
     tag=$1; isr=$2; vec=$3; shift 3
+    # a MIPS vector is a J and its delay slot: both are the handler's
+    vec2=-1; [ "$vec" != -1 ] && [ $tag = mips ] && vec2=$((vec + 4))
     f0=$fail
     build "$tag" || { echo "FAIL $tag: prof.c does not build"; fail=1; return; }
     e=$out/$tag.elf
@@ -78,7 +84,7 @@ check() {
     cmp -s "$out/$tag.plain.out" "$out/$tag.out" &&
     cmp -s "$out/$tag.plain.count" "$out/$tag.count" || {
         echo "FAIL $tag: --profile changed the run (its output or --count)"; fail=1; }
-    [ "$(tr -s ' \n' '  ' < "$out/$tag.out")" = "37 3 " ] || {
+    [ "$(grep -v '==EXIT' "$out/$tag.out" | tr -s ' \n' '  ' | sed 's/^ //')" = "37 3 " ] || {
         echo "FAIL $tag: the program printed '$(cat "$out/$tag.out")', not 37 and 3 ticks"
         fail=1; return; }
 
@@ -125,10 +131,10 @@ check() {
     if [ $have_nm = 1 ]; then
         "$NM" -S --defined-only "$e" | awk '$3 ~ /^[tT]$/ && NF == 4' > "$out/$tag.nm"
         for f in main a b rec leaf spin "$isr"; do
-            v=-1; [ "$f" = "$isr" ] && v=$vec
-            want=$(awk -v f="$f" -v vec="$v" '
+            v=-1; v2=-1; [ "$f" = "$isr" ] && v=$vec && v2=$vec2
+            want=$(awk -v f="$f" -v vec="$v" -v vec2="$v2" '
                 FNR == NR { if ($4 == f) { lo = strtonum_("0x" $1); hi = lo + strtonum_("0x" $2) } next }
-                { a = strtonum_("0x" substr($1, 1, 8)); if ((a >= lo && a < hi) || a == vec) n++ }
+                { a = strtonum_("0x" substr($1, 1, 8)); if ((a >= lo && a < hi) || a == vec || a == vec2) n++ }
                 END { print n + 0 }
                 function strtonum_(s,   i, c, v) { v = 0; s = tolower(s)
                     for (i = 3; i <= length(s); i++) { c = index("0123456789abcdef", substr(s, i, 1)) - 1; v = v * 16 + c }
@@ -144,6 +150,7 @@ check m3 tick -1 --board lm3s6965evb
 check rv32 tick -1 --board virt --ram-size 8M
 check rv32nc tick -1 --board virt --ram-size 8M
 check avr __vector_11 44 --board uno
+check mips tick $((0x80000180)) --board malta
 
 # the M3's exceptions: exc.c counts its own SVCs, PendSVs and faults
 x=$out/exc

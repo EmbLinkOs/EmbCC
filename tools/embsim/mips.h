@@ -115,6 +115,7 @@ struct mips_state {
     u32 exc_code, exc_bad, exc_ce;
     int exc_bad_set, exc_refill;
     int watch_stop;                 /* a debugger's watchpoint: not run */
+    u32 *exc_regs;                  /* the set the last exception interrupted */
     int changed;                    /* it changed a register or memory */
     u32 insn;
 };

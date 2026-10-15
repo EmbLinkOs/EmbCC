@@ -18,7 +18,7 @@
 #include "image.h"
 #include "sim.h"
 
-enum { AN_ARM, AN_RV, AN_AVR };
+enum { AN_ARM, AN_RV, AN_AVR, AN_MIPS };
 
 /* a frame of the shadow stack: a call or an exception's entry */
 struct an_frame {
@@ -50,6 +50,8 @@ struct analysis {
     /* ---- the step ---- */
     u32 pc0;                        /* the instruction's address */
     int kind, size;                 /* its kind (a call, a return), its bytes */
+    int slot_kind;                  /* MIPS: the branch before this delay
+                                     * slot was a call or a return */
     struct { int what; u32 n, ret; } ev[4];   /* the step's exceptions */
     int nev;
 

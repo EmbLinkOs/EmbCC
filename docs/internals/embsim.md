@@ -117,8 +117,9 @@ was. `an_step` notes the pc and the counts, steps the core, and gives
 each analysis the instruction that ran (`s->insns` moved) and what it
 cost (the change in `s->cycles`). It follows the program's calls and
 returns on a shadow stack, recognizing them by the instruction as the
-core executes it (`analysis.c` says which), and the cores tell it what
-no instruction shows: `an_exc_entry` when an exception or interrupt is
+core executes it (`analysis.c` says which; a MIPS branch's in the step
+of its delay slot, where the transfer happens), and the cores tell it
+what no instruction shows: `an_exc_entry` when an exception or interrupt is
 entered, `an_exc_return` when the handler returns. Each is one test of
 `s->an` in the core, where it was 0 before.
 
@@ -502,14 +503,14 @@ or with its own file for the six functions of `net.h`.
   ADC, the LCD on the PMP, SYSKEY) against its record. Skipped, saying
   so, without the pack (`PIC32MZ_EF_DFP`, tools/hostpaths.sh).
 - `tests/golden/embsim-coverage.sh`: `--coverage` against a program
-  whose lines carry the counts they must get, on the three cores and
+  whose lines carry the counts they must get, on the four cores and
   from clang's DWARF 5.
 - `tests/golden/embsim-profile.sh`: `--profile` against a program of
   known calls, an interrupt among them, and the `--trace` of its run.
 - `tests/golden/embsim-stack.sh`: `--stack-report` against `.su` files
   and embrt, and overflows past a limit and into `.bss`.
 - `tests/golden/embsim-fault.sh`: `--fault-report` on faults of known
-  cause and call chain, on the M3 and RV32.
+  cause and call chain, on the M3, RV32 and MIPS.
 - `tests/golden/embsim-replay.sh`: `--input` on every receiver, and runs
   recorded with input from a pipe, SYS_READC and a debugger, replayed.
 - `tests/golden/embsim-idle.sh`: idle loops end at their first turn once

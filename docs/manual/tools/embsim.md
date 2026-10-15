@@ -739,15 +739,19 @@ needs no frame pointer and no debug information:
 | Cortex-M | `bl`, `blx` | `bx`, `pop {..., pc}`, `ldm` with the pc, `ldr pc`, `mov pc` |
 | RISC-V | `jal` and `jalr` that link (`ra` or `t0`), `c.jal`, `c.jalr` | `jalr` and `c.jr` that do not |
 | AVR | `call`, `rcall`, `icall` | `ret` |
+| MIPS | `jal`, `jalr` that links, `bal` and the other linking branches | `jr`, `jalr $zero` |
 
-A return is one when it lands where a call on the stack returns to:
+A MIPS call or return transfers after its delay slot: the slot's
+instruction counts to the caller, and the frame begins (or ends) where
+the slot hands over. A return is one when it lands where a call on the stack returns to:
 that call's frame and the ones above it end, so a tail call (a branch to
 another function, which then returns for both) leaves the stack right,
 and the function it branched to is shown as called from the one that
 branched. An exception's entry is a frame too, and its return (an
-EXC_RETURN, `mret`, `reti`) ends it wherever the handler returns to.
-Where the vector table holds a jump (the AVR's, RISC-V's vectored mode)
-the handler is the jump's target, and the jump counts as the handler's.
+EXC_RETURN, `mret`, `reti`, `eret`) ends it wherever the handler returns to.
+Where the vector table holds a jump (the AVR's, RISC-V's vectored mode,
+a MIPS vector's `j` and its delay slot) the handler is the jump's
+target, and the jump counts as the handler's.
 
 `--profile-format=collapsed` writes the call paths instead, one a line
 with its cycles (`collapsed-insns`: its instructions), the format
@@ -838,8 +842,17 @@ an exception's entry, at` the instruction it interrupted).
 
 `--fault-report` decodes each fault the moment the core takes it, on
 stderr (`--fault-report=FILE` to a file): a Cortex-M's HardFault,
-MemManage, BusFault and UsageFault, and a RISC-V exception (an ECALL and
-an EBREAK, which a program makes on purpose, are not faults).
+MemManage, BusFault and UsageFault, a RISC-V exception (an ECALL and
+an EBREAK, which a program makes on purpose, are not faults), and a
+MIPS exception other than an interrupt, a syscall and a break: Cause's
+code in words, BadVAddr for an address or TLB exception, the
+coprocessor of a Coprocessor Unusable, the registers of the set the
+exception interrupted:
+
+```text
+embsim: fault: DSP ASE state disabled: a DSP instruction with Status.MX clear (Cause.ExcCode 26) at 0x9d000b5c, in main+0x6c (pic32-fw.c:123)
+  instruction 0x9d000b5c: 01200811  mthi t1, $ac1
+```
 
 ```text
 embsim: fault: HardFault (exception 3) at 0x00000160, in crash (fault.c:31)
@@ -1108,8 +1121,10 @@ On MIPS:
 - The caches (`cache` is a no-op), the watch registers (kept, not
   enforced), the performance counters, EJTAG's debug mode (sdbbp ends
   the run).
-- The analyses (`--coverage`, `--profile`, `--stack-report`,
-  `--fault-report`). The GDB server gives a MIPS core no target
+- `--stack-report` takes the one stack pointer as the program's single
+  stack: an RTOS's task stacks, in its heap below `_end`, read as an
+  overflow (give `--stack-limit` an address below them). The GDB
+  server gives a MIPS core no target
   description and no memory map, as QEMU's stub does: gdb describes the
   core itself (registers 0-72: the GPRs, Status, LO, HI, BadVAddr,
   Cause, PC, the FPU's as 0), and would compare a map's kseg0 addresses

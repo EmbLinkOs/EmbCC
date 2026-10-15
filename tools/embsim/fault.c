@@ -21,6 +21,7 @@
 #include "analysis.h"
 #include "cortexm.h"
 #include "disasm.h"
+#include "mips.h"
 #include "riscv.h"
 
 static FILE *out(struct analysis *a)
@@ -53,10 +54,20 @@ static const char *where(struct analysis *a, u32 pc, char *b, size_t n)
 /* the instruction at pc, as "0x00000124: 6818      ldr r0, [r3, #0]" */
 static void insn_line(struct analysis *a, u32 pc, char *b, size_t n)
 {
-    struct region *r = bus_region(&a->s->bus, pc, 2);
+    struct cpu *c = a->s->cpu;
+    u32 pa = c->ops->phys ? c->ops->phys(c, pc) : pc;
+    struct region *r = bus_region(&a->s->bus, pa, 2);
     char t[96];
     if (!r) {
         snprintf(b, n, "0x%08x: (no memory there)", pc);
+        return;
+    }
+    if (a->arch == AN_MIPS) {
+        u32 w = 0;
+        if (bus_region(&a->s->bus, pa, 4))
+            w = mem_rd_le(r->mem + (pa - r->base), 4);
+        dis_mips(pc, w, t, sizeof t);
+        snprintf(b, n, "0x%08x: %08x  %s", pc, w, t);
         return;
     }
     u32 h1 = mem_rd_le(r->mem + (pc - r->base), 2), h2 = 0;
@@ -339,6 +350,71 @@ static void rv_fault(struct analysis *a, u32 cause, u32 epc)
                 f >= 0 ? a->img->fn[f].name : "(no symbol)");
 }
 
+/* ---- MIPS ------------------------------------------------------------------ */
+
+static const char *const mips_exc[32] = {
+    [EXC_MOD] = "TLB modified: a store to a clean page",
+    [EXC_TLBL] = "TLB miss or invalid entry on a load or fetch",
+    [EXC_TLBS] = "TLB miss or invalid entry on a store",
+    [EXC_ADEL] = "address error on a load or fetch (misaligned, or a kernel "
+                 "address in user mode)",
+    [EXC_ADES] = "address error on a store (misaligned, or a kernel address in "
+                 "user mode)",
+    [EXC_IBE] = "bus error on an instruction fetch: nothing is there",
+    [EXC_DBE] = "bus error on a load or store: nothing is there",
+    [EXC_RI] = "reserved instruction",
+    [EXC_CPU] = "coprocessor unusable",
+    [EXC_OV] = "arithmetic overflow (add, addi, sub)",
+    [EXC_TR] = "trap (a t* instruction's condition held)",
+    [EXC_FPE] = "floating-point exception",
+    [EXC_DSPDIS] = "DSP ASE state disabled: a DSP instruction with Status.MX clear",
+};
+
+static const char *const mn[32] = {
+    "zero", "at", "v0", "v1", "a0", "a1", "a2", "a3", "t0", "t1", "t2", "t3",
+    "t4", "t5", "t6", "t7", "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7",
+    "t8", "t9", "k0", "k1", "gp", "sp", "fp", "ra" };
+
+static void mips_fault(struct analysis *a, u32 code, u32 epc)
+{
+    struct mips_state *m = (struct mips_state *)a->s->cpu;
+    FILE *o = out(a);
+    char w[256], b[256];
+    u32 cause = m->cause;
+    fprintf(o, "embsim: fault: %s (Cause.ExcCode %u) at 0x%08x%s, in %s\n",
+            mips_exc[code], code, epc, cause & CA_BD ? " (a delay slot's branch)" : "",
+            where(a, epc, w, sizeof w));
+    if (code == EXC_ADEL || code == EXC_ADES || code <= EXC_TLBS)
+        fprintf(o, "  BadVAddr 0x%08x: the address\n", m->badvaddr);
+    if (code == EXC_CPU)
+        fprintf(o, "  coprocessor %u (Cause.CE)%s\n", (cause >> 28) & 3,
+                (cause >> 28 & 3) == 1 ? ": the FPU, with Status.CU1 clear" : "");
+    insn_line(a, cause & CA_BD ? epc + 4 : epc, b, sizeof b);
+    fprintf(o, "  instruction %s\n", b);
+    u32 *r = m->exc_regs ? m->exc_regs : m->r;
+    fprintf(o, "  registers:\n");
+    for (int i = 0; i < 32; i += 4) {
+        fprintf(o, "   ");
+        for (int k = i; k < i + 4; k++)
+            fprintf(o, " %-4s 0x%08x", mn[k], r[k]);
+        fprintf(o, "\n");
+    }
+    fprintf(o, "    Status 0x%08x  Cause 0x%08x  EPC 0x%08x\n", m->status, cause,
+            m->epc);
+    {
+        struct regs g;
+        memset(&g, 0, sizeof g);
+        for (int i = 0; i < 32; i++)
+            g.r[i] = r[i];
+        g.valid = 0xffffffffu;
+        cfi_bt(a, &g, epc, 29, 4);
+    }
+    u32 pc = a->s->cpu->ops->pc(a->s->cpu);
+    int f = image_fn(a->img, pc);
+    fprintf(o, "  handler: the general exception vector 0x%08x, %s\n", pc,
+            f >= 0 ? a->img->fn[f].name : "(no symbol)");
+}
+
 /* ---- entry points ---------------------------------------------------------- */
 
 void fault_entry(struct analysis *a, u32 n, u32 ret)
@@ -348,6 +424,9 @@ void fault_entry(struct analysis *a, u32 n, u32 ret)
         a->faults++;
     } else if (a->arch == AN_RV && !(n & 0x80000000u) && n < 8 && n != 3) {
         rv_fault(a, n, ret);
+        a->faults++;
+    } else if (a->arch == AN_MIPS && n < 32 && mips_exc[n]) {
+        mips_fault(a, n, ret);
         a->faults++;
     }
 }

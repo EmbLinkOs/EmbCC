@@ -8,7 +8,8 @@
  *   main -> leaf, through a pointer      BLX, JALR, ICALL
  *   main -> spin, interrupted by tick    a timer's interrupt: SysTick on
  *                                        the Cortex-M, the CLINT's mtimecmp
- *                                        on RISC-V, Timer/Counter1 on AVR
+ *                                        on RISC-V, Timer/Counter1 on AVR,
+ *                                        Count and Compare on MIPS
  *
  * It prints the sum the calls return (37) and the ticks taken. */
 void putn(long v);
@@ -98,6 +99,36 @@ static void timer_stop(void)
 {
     __asm__ volatile("csrc mstatus, %0" : : "r"(8));
     __asm__ volatile("csrc mie, %0" : : "r"(0x80));
+}
+#elif defined(__mips__)
+/* the core timer on IP7, through the general exception vector, where a
+ * J to the handler replaces the harness's (EXL stays set: compatibility
+ * mode has no level to raise Status.IPL to) */
+__attribute__((interrupt, keep_interrupts_masked)) void tick(void)
+{
+    unsigned c;
+    __asm__ volatile("mfc0 %0, $9" : "=r"(c));
+    ticks++;
+    __asm__ volatile("mtc0 %0, $11" : : "r"(c + 500));
+}
+
+static void timer_start(void)
+{
+    volatile unsigned *v = (volatile unsigned *)0x80000180u;
+    unsigned c, st;
+    v[0] = 0x08000000u | ((unsigned)tick >> 2 & 0x03ffffffu);  /* j tick */
+    v[1] = 0;
+    __asm__ volatile("mfc0 %0, $9" : "=r"(c));
+    __asm__ volatile("mtc0 %0, $11" : : "r"(c + 500));
+    __asm__ volatile("mfc0 %0, $12" : "=r"(st));
+    __asm__ volatile("mtc0 %0, $12\n\tehb" : : "r"(st | 0x8001u));  /* IM7, IE */
+}
+
+static void timer_stop(void)
+{
+    unsigned st;
+    __asm__ volatile("mfc0 %0, $12" : "=r"(st));
+    __asm__ volatile("mtc0 %0, $12\n\tehb" : : "r"(st & ~0x8001u));
 }
 #else
 /* Timer/Counter1's compare match A, CTC on OCR1A, at the core's clock */

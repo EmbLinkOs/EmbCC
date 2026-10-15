@@ -7,7 +7,12 @@
  *     the pc and MOV to the pc may be returns;
  *   - RISC-V: JAL and JALR that link (rd ra or t0) are calls, C.JAL and
  *     C.JALR too; JALR and C.JR that do not link may be returns;
- *   - AVR: CALL, RCALL and ICALL are calls; RET is a return.
+ *   - AVR: CALL, RCALL and ICALL are calls; RET is a return;
+ *   - MIPS: JAL, JALR that links, BAL and the other linking branches are
+ *     calls; JR may be a return. Each transfers after its delay slot, so
+ *     the step that makes the call or the return is the slot's: its
+ *     instruction counts to the caller, and the frame is pushed (or
+ *     popped) when the next pc is not the slot's fall-through.
  * A call that was taken pushes a frame, which returns to the instruction
  * after it. A transfer that may be a return is one when it lands where a
  * frame returns to: that frame and every frame above it are popped, so a
@@ -24,6 +29,7 @@
 #include "avr.h"
 #include "cortexm.h"
 #include "devices.h"
+#include "mips.h"
 #include "riscv.h"
 
 enum { K_OTHER, K_CALL, K_RET };
@@ -32,6 +38,8 @@ enum { K_OTHER, K_CALL, K_RET };
 
 static int fetch16(struct sim *s, u32 a, u32 *h)
 {
+    if (s->cpu->ops->phys)
+        a = s->cpu->ops->phys(s->cpu, a);
     struct region *r = bus_region(&s->bus, a, 2);
     if (!r)
         return 0;
@@ -110,6 +118,24 @@ static int kind_avr(struct sim *s, u32 pc, int *size)
     return K_OTHER;
 }
 
+static int kind_mips(struct sim *s, u32 pc, int *size)
+{
+    u32 h, h2;
+    *size = 4;
+    if (!fetch16(s, pc, &h) || !fetch16(s, pc + 2, &h2))
+        return K_OTHER;
+    u32 i = h | h2 << 16, op = i >> 26, rt = (i >> 16) & 31;
+    if (op == 3)                                    /* JAL */
+        return K_CALL;
+    if (op == 1 && (rt & 0x1c) == 0x10)             /* BLTZAL, BGEZAL(L), BAL */
+        return K_CALL;
+    if (op == 0 && (i & 0x3f) == 9)                 /* JALR */
+        return (i >> 11) & 31 ? K_CALL : K_RET;
+    if (op == 0 && (i & 0x3f) == 8)                 /* JR */
+        return K_RET;
+    return K_OTHER;
+}
+
 int an_sps(struct analysis *a, u32 *msp, u32 *psp)
 {
     if (a->arch == AN_ARM) {
@@ -137,13 +163,15 @@ u32 an_sp(struct analysis *a)
     switch (a->arch) {
     case AN_ARM: return ((struct cm_state *)a->s->cpu)->R[13];
     case AN_RV: return (u32)((struct rv_state *)a->s->cpu)->x[2];
+    case AN_MIPS: return ((struct mips_state *)a->s->cpu)->r[29];
     default: return AVR_DATA + ((struct avr_state *)a->s->cpu)->sp;
     }
 }
 
 /* An exception's entry lands on a jump to the handler where the vector
- * table holds instructions (the AVR's; RISC-V's vectored mode): the
- * jump's target, or `pc` itself when it is not a jump. */
+ * table holds instructions (the AVR's; RISC-V's vectored mode; MIPS's,
+ * a J and its delay slot): the jump's target, or `pc` itself when it is
+ * not a jump. */
 static u32 vector_target(struct analysis *a, u32 pc)
 {
     struct sim *s = a->s;
@@ -155,6 +183,9 @@ static u32 vector_target(struct analysis *a, u32 pc)
             return (((h >> 3 & 0x3e) | (h & 1)) << 16 | h2) * 2;
         if ((h & 0xf000) == 0xc000)                             /* RJMP */
             return pc + 2 + (u32)((s32)((h & 0xfff) << 20) >> 19);
+    } else if (a->arch == AN_MIPS) {
+        if (fetch16(s, pc + 2, &h2) && (h2 >> 10) == 2)          /* J */
+            return ((pc + 4) & 0xf0000000u) | ((h | h2 << 16) & 0x03ffffffu) << 2;
     } else if (a->arch == AN_RV) {
         if ((h & 0xfff) == 0x06f && fetch16(s, pc + 2, &h2)) {   /* JAL x0 */
             u32 i = h | h2 << 16;
@@ -223,8 +254,10 @@ static int child(struct analysis *a, int parent, int fn)
 static int cur_node(struct analysis *a, u32 pc)
 {
     int base = a->nfr ? a->fr[a->nfr - 1].node : 0;
-    if (a->nfr && a->fr[a->nfr - 1].vec == pc && a->fr[a->nfr - 1].exc)
-        return base;                /* the vector's jump: the handler's */
+    if (a->nfr && a->fr[a->nfr - 1].exc &&
+        (a->fr[a->nfr - 1].vec == pc ||
+         (a->arch == AN_MIPS && a->fr[a->nfr - 1].vec + 4 == pc)))
+        return base;                /* the vector's jump (and its slot): the handler's */
     int fn = an_fn(a, pc);
     if (base == a->cur_base && fn == a->cur_fn)
         return a->cur_node;
@@ -341,6 +374,16 @@ void an_step(struct sim *s)
         switch (a->arch) {
         case AN_ARM: a->kind = kind_thumb(s, pc0, &a->size); break;
         case AN_RV: a->kind = kind_riscv(s, pc0, &a->size); break;
+        case AN_MIPS: {
+            /* the branch's kind is its delay slot's step's: the transfer
+             * comes after the slot */
+            int k = kind_mips(s, pc0, &a->size);
+            a->kind = a->slot_kind;
+            a->slot_kind = ((struct mips_state *)c)->slot ? K_OTHER : k;
+            if (((struct mips_state *)c)->slot == 0)
+                a->kind = K_OTHER;
+            break;
+        }
         default: a->kind = kind_avr(s, pc0, &a->size); break;
         }
     }
@@ -386,7 +429,8 @@ struct analysis *an_create(struct sim *s, int calls)
         die("out of memory");
     a->s = s;
     a->img = image_open(s->image);
-    a->arch = avr_is(s->cpu) ? AN_AVR : riscv_is(s->cpu) ? AN_RV : AN_ARM;
+    a->arch = avr_is(s->cpu) ? AN_AVR : riscv_is(s->cpu) ? AN_RV
+            : mips_is(s->cpu) ? AN_MIPS : AN_ARM;
     a->calls = calls;
     a->fn_lo = a->fn_hi = 0;        /* an empty cache */
     a->fn_idx = -1;

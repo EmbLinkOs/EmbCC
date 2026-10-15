@@ -126,6 +126,7 @@ static void enter(u32 code, u32 intoff, int newset)
     struct sim *s = ms->sim;
     u32 st = ms->status, off;
     u32 ret = ms->slot ? ms->pc - 4 : ms->pc;
+    ms->exc_regs = ms->r;
     if (!(st & ST_EXL)) {
         ms->epc = ret;
         ms->cause = ms->slot ? ms->cause | CA_BD : ms->cause & ~CA_BD;
