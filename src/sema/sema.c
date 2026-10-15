@@ -575,6 +575,16 @@ static int lib_builtin_call(struct unit *u, struct expr *e, const char *bn)
     return 1;
 }
 
+/* An array sized by its initializer: n elements of elem, and an empty
+ * `{}` makes GNU C's zero-length array, which -pedantic names. */
+static struct type *init_sized(struct unit *u, int line, struct type *elem,
+                               int n)
+{
+    if (n == 0)
+        lex_pedantic(diag_file(u), line, 0, 0, 0, "an array of size 0");
+    return ty_array_sized(elem, n);
+}
+
 static struct global *find_global(struct unit *u, const char *name)
 {
     for (struct global *g = u->globals; g; g = g->next)
@@ -2887,7 +2897,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
              * initializer lowers to a relocation like any `&global`). */
             struct initbuf ib = { 0, 0, 0 };
             if (sized_by_init)
-                ty = ty_array_sized(ty->pointee,
+                ty = init_sized(u, e->line, ty->pointee,
                               flatten_sized(u, f, sc, e->lhs, ty, &ib));
             else
                 flatten_init(u, f, sc, e->lhs, ty, 0, &ib);
@@ -2927,7 +2937,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
         e->var_index = scope_add(sc, "<compound literal>", ty, NULL);
         struct initbuf ib = { 0, 0, 0 };
         if (sized_by_init) {
-            ty = ty_array_sized(ty->pointee,
+            ty = init_sized(u, e->line, ty->pointee,
                           flatten_sized(u, f, sc, e->lhs, ty, &ib));
             sc->vars[e->var_index].ty = ty;
             e->cast_ty = ty;
@@ -6547,7 +6557,7 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                 struct initbuf ib = { 0, 0, 0 };
                 if (sized_by_init) {
                     int n = flatten_sized(u, f, sc, s->expr, s->dty, &ib);
-                    s->dty = ty_array_sized(s->dty->pointee, n);
+                    s->dty = init_sized(u, s->line, s->dty->pointee, n);
                     sc->vars[s->var_index].ty = s->dty;
                 } else
                     flatten_init(u, f, sc, s->expr, s->dty, 0, &ib);

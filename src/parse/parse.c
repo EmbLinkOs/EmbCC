@@ -5686,6 +5686,8 @@ static struct global *parse_global(struct parser *ps, struct type *ty,
                                      initlist_elided_count(ie, g->ty,
                                                     ps->unit->econsts,
                                                     NULL));
+                    if (g->ty->count == 0)
+                        ped_at(ps, line, 0, 0, "an array of size 0");
                     g->count_from_init = 1;   /* sema checks the count */
                 }
                 else
