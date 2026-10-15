@@ -78,6 +78,9 @@ void diag_pragma_event(long pos, int kind, const char *name);
 /* Warnings from this file are dropped (a system header), unless
  * -Wsystem-headers. */
 void diag_mark_system(const char *file);
+/* whether warnings at `file` are dropped: a system header's, without
+ * -Wsystem-headers */
+int diag_in_system_header(const char *file);
 void diag_set_warn_system(int on);
 int diag_enable_warning(const char *name, int on);    /* -Wname / -Wno-name;
                                                        * 0 = no such warning */

@@ -83,21 +83,34 @@ void lex_init_mode(struct lexer *lx, const char *file, const char *src,
     lx->p = src;
     lx->line_start = src;
     lx->line = 1;
+    lx->ext_on = lx->ext_depth = lx->sys_depth = 0;
+    lx->sys_file = diag_in_system_header(file);
     lex_next(lx);
 }
+
+/* the C standard -std= selects (lex_set_c_std): its year, and whether
+ * GNU's extensions of it are on */
+static int g_c_year = 2017, g_c_gnu = 1, g_c_pedantic;
+static int g_cxx_year = 2020, g_cxx_gnu = 1, g_cxx_char8;
 
 static void skip_space_and_comments(struct lexer *lx)
 {
     for (;;) {
         while (*lx->p == ' ' || *lx->p == '\t' || *lx->p == '\r' ||
-               *lx->p == '\n' || *lx->p == '\f' || *lx->p == '\v') {
+               *lx->p == '\n' || *lx->p == '\f' || *lx->p == '\v' ||
+               *lx->p == LEX_SYS_ON || *lx->p == LEX_SYS_OFF) {
+            if (*lx->p == LEX_SYS_ON)
+                lx->sys_depth++;
+            else if (*lx->p == LEX_SYS_OFF && lx->sys_depth > 0)
+                lx->sys_depth--;
             if (*lx->p == '\n') {
                 lx->line++;
                 lx->line_start = lx->p + 1;
             }
             lx->p++;
         }
-        if (lx->p[0] == '/' && lx->p[1] == '/') {
+        if (lx->p[0] == '/' && lx->p[1] == '/' &&
+            (lx->cxx || g_c_gnu || g_c_year >= 1999)) {
             while (*lx->p && *lx->p != '\n')
                 lx->p++;
             continue;
@@ -199,6 +212,8 @@ static const struct {
     { "thread_local", TOK_KW_THREAD },
     { "_Generic", TOK_KW_GENERIC },
     { "_Alignof", TOK_KW_ALIGNOF },
+    { "_Countof", TOK_KW_COUNTOF },
+    { "_BitInt", TOK_KW_BITINT },
     { "__alignof__", TOK_KW_ALIGNOF },
     { "__alignof", TOK_KW_ALIGNOF },
     { "_Alignas", TOK_KW_ALIGNAS },
@@ -258,6 +273,152 @@ static const struct {
     { "case", TOK_KW_CASE },
     { "default", TOK_KW_DEFAULT },
 };
+
+void lex_set_c_std(int year, int gnu)
+{
+    g_c_year = year;
+    g_c_gnu = gnu;
+}
+
+int lex_c_year(void) { return g_c_year; }
+int lex_c_gnu(void) { return g_c_gnu; }
+void lex_set_pedantic(int on) { g_c_pedantic = on; }
+void lex_set_cxx_std(int year, int gnu) { g_cxx_year = year; g_cxx_gnu = gnu; }
+void lex_set_cxx_char8(int on) { g_cxx_char8 = on; }
+int lex_cxx_char8(void) { return g_cxx_year >= 2020 || g_cxx_char8; }
+int lex_cxx_year(void) { return g_cxx_year; }
+int lex_cxx_gnu(void) { return g_cxx_gnu; }
+int lex_cxx_year_here(const struct lexer *lx)
+{
+    return lx->sys_file ? 9999 : g_cxx_year;
+}
+
+/* The C++ keywords a standard added: names in an earlier one, as GCC
+ * reads them (char8_t also with -fchar8_t) */
+static int cxx_keyword_on(const struct lexer *lx, const char *w)
+{
+    static const char *const cxx11[] = {
+        "alignas", "alignof", "char16_t", "char32_t", "constexpr",
+        "decltype", "noexcept", "nullptr", "static_assert", "thread_local",
+    };
+    static const char *const cxx20[] = {
+        "char8_t", "concept", "consteval", "constinit", "co_await",
+        "co_return", "co_yield", "requires",
+    };
+    int y = lex_cxx_year_here(lx);
+    for (size_t k = 0; k < sizeof cxx11 / sizeof cxx11[0]; k++)
+        if (!strcmp(w, cxx11[k]))
+            return y >= 2011;
+    for (size_t k = 0; k < sizeof cxx20 / sizeof cxx20[0]; k++)
+        if (!strcmp(w, cxx20[k]))
+            return y >= 2020 || (g_cxx_char8 && !strcmp(w, "char8_t"));
+    return 1;
+}
+int lex_quiet(const struct lexer *lx) { return lx->ext_on || lx->sys_depth > 0; }
+int lex_c23_ext(void) { return g_c_year >= 2023 || (g_c_gnu && !g_c_pedantic); }
+
+/* The keywords a C standard added, which -pedantic reports under an
+ * earlier one; since 0, GNU's */
+static void keyword_pedantic(struct lexer *lx, const char *w)
+{
+    static const struct { const char *w; int since; } kw[] = {
+        { "_Bool", 1999 }, { "_Complex", 1999 },
+        { "_Static_assert", 2011 }, { "_Noreturn", 2011 },
+        { "_Thread_local", 2011 }, { "_Generic", 2011 },
+        { "_Alignas", 2011 }, { "_Alignof", 2011 }, { "_Atomic", 2011 },
+        { "_BitInt", 2023 }, { "_Countof", 2025 }, { "__int128", 0 },
+    };
+    for (size_t k = 0; k < sizeof kw / sizeof kw[0]; k++)
+        if (strcmp(w, kw[k].w) == 0) {
+            char what[40];
+            snprintf(what, sizeof what, "`%s`", w);
+            lex_pedantic(lx->file, lx->tok.line, lx->tok.col, lex_quiet(lx),
+                         kw[k].since, what);
+            return;
+        }
+}
+
+static const char *c_std_name(int year)
+{
+    switch (year) {
+    case 1989: return "C89";
+    case 1994: return "C94";
+    case 1999: return "C99";
+    case 2011: return "C11";
+    case 2017: return "C17";
+    case 2023: return "C23";
+    default:   return "C2y";
+    }
+}
+
+/* Whether a -pedantic diagnostic at file:line:col was given already: the
+ * parser reads some tokens twice, backing up after a look ahead. */
+static int pedantic_seen(const char *file, int line, int col)
+{
+    static struct { const char *file; int line, col; } ring[64];
+    static unsigned next;
+    for (int i = 0; i < 64; i++)
+        if (ring[i].file == file && ring[i].line == line && ring[i].col == col)
+            return 1;
+    ring[next % 64].file = file;
+    ring[next % 64].line = line;
+    ring[next % 64].col = col;
+    next++;
+    return 0;
+}
+
+void lex_pedantic(const char *file, int line, int col, int ext_on,
+                  int since, const char *what)
+{
+    if (!g_c_pedantic || ext_on || (since && g_c_year >= since) ||
+        pedantic_seen(file, line, col))
+        return;
+    if (since)
+        diag_warn_opt(file, line, col, "pedantic",
+                      "%s is new in %s, and the standard here is %s", what,
+                      c_std_name(since), c_std_name(g_c_year));
+    else
+        diag_warn_opt(file, line, col, "pedantic",
+                      "%s is a GNU extension, not ISO C", what);
+}
+
+void lex_pedantic_removed(const char *file, int line, int col, int ext_on,
+                          int removed, const char *what)
+{
+    if (!g_c_pedantic || ext_on || g_c_year < removed ||
+        pedantic_seen(file, line, col))
+        return;
+    diag_warn_opt(file, line, col, "pedantic",
+                  "%s is not %s: that standard removed it", what,
+                  c_std_name(removed));
+}
+
+/* Whether the C keyword w is one under the standard in force. Under a
+ * strict standard (cNN), as that standard says: the ones a later standard
+ * added are names -- `int restrict;` is C89, `int nullptr;` C17 -- and
+ * GNU's `asm` and `typeof` are names too (`__asm__` and `__typeof__`
+ * stay keywords). EmbCC's GNU dialects (gnuNN, and the default gnu17)
+ * have C23's keywords as well, as EmbCC always has: code built with it
+ * uses them unasked. */
+static int c_keyword_on(const char *w)
+{
+    static const char *const c23[] = {
+        "static_assert", "alignof", "alignas", "thread_local",
+        "typeof_unqual", "nullptr",
+    };
+    for (size_t k = 0; k < sizeof c23 / sizeof c23[0]; k++)
+        if (strcmp(w, c23[k]) == 0)
+            return lex_c23_ext();
+    if (strcmp(w, "typeof") == 0)
+        return g_c_gnu || g_c_year >= 2023;
+    if (strcmp(w, "asm") == 0)
+        return g_c_gnu;
+    if (strcmp(w, "inline") == 0)
+        return g_c_gnu || g_c_year >= 1999;
+    if (strcmp(w, "restrict") == 0)
+        return g_c_year >= 1999;
+    return 1;
+}
 
 static int hex_val(int c)
 {
@@ -540,6 +701,42 @@ long lit_char_value(struct litch c, int pfx, int *uns, const char *file,
  *   Nothing checked any of it against a reference.
  *
  * tests/golden/int-literals.sh now does, for every target. */
+/* C23's wb and uwb suffixes after an integer constant's digits, at *pp:
+ * the constant is a _BitInt of the fewest bits that hold v (and its sign
+ * bit, when signed). 1 when there was one, *pp past it. */
+static int bitint_suffix(struct lexer *lx, struct token *t, const char **pp,
+                         unsigned long v, int has_u, int has_l)
+{
+    const char *q = *pp;
+    if (lx->cxx || !((q[0] == 'w' && q[1] == 'b') || (q[0] == 'W' && q[1] == 'B')))
+        return 0;
+    q += 2;
+    if (!has_u && (*q == 'u' || *q == 'U')) {
+        has_u = 1;
+        q++;
+    }
+    if (has_l)
+        diag_fatal(lx->file, lx->line, "a constant cannot be both long and "
+                   "a _BitInt (wb)");
+    int n = 0;
+    while (n < 64 && (v >> n))
+        n++;
+    n = has_u ? (n ? n : 1) : n + 1 < 2 ? 2 : n + 1;
+    if (n > 64)
+        diag_fatal(lx->file, lx->line, "this constant needs a _BitInt(%d), "
+                   "wider than BITINT_MAXWIDTH, which is 64 here", n);
+    lex_pedantic(lx->file, t->line, t->col, lex_quiet(lx), 2023,
+                 "a _BitInt constant (wb)");
+    t->kind = TOK_NUM;
+    t->num = (long)v;
+    t->num_bitint = n;
+    t->num_uns = has_u;
+    t->num_long = t->num_llong = 0;
+    t->char_lit = 0;
+    *pp = q;
+    return 1;
+}
+
 static void num_classify(struct token *t, unsigned long v, int has_u,
                          int has_l, int decimal)
 {
@@ -617,7 +814,8 @@ static int cxx_number(struct lexer *lx, struct token *t)
     const char *p = lx->p, *q = p;
     /* the pp-number (5.9) */
     while (isalnum((unsigned char)*q) || *q == '_' || *q == '.' ||
-           (*q == '\'' && (isalnum((unsigned char)q[1]) || q[1] == '_')) ||
+           (*q == '\'' && (isalnum((unsigned char)q[1]) || q[1] == '_') &&
+            (!lx->cxx || lex_cxx_year_here(lx) >= 2014)) ||  /* C++14's */
            ((*q == '+' || *q == '-') &&
             (q[-1] == 'e' || q[-1] == 'E' || q[-1] == 'p' || q[-1] == 'P') &&
             !(p[0] == '0' && (p[1] == 'x' || p[1] == 'X') &&
@@ -636,6 +834,11 @@ static int cxx_number(struct lexer *lx, struct token *t)
     buf[k] = 0;
     int hex = buf[0] == '0' && (buf[1] == 'x' || buf[1] == 'X');
     int bin = buf[0] == '0' && (buf[1] == 'b' || buf[1] == 'B');
+    /* -pedantic: C++14's (GCC's extension before); C is said elsewhere */
+    if (bin && lx->cxx && g_c_pedantic && lex_cxx_year_here(lx) < 2014)
+        diag_warn_opt(lx->file, t->line, t->col, "pedantic",
+                      "a binary constant is new in C++14, and the standard "
+                      "here is C++%02d", g_cxx_year % 100);
     /* where the digits end: the suffix after */
     const char *d = buf;
     int is_float = 0;
@@ -808,7 +1011,40 @@ static void lex_multichar(struct lexer *lx, struct token *t,
     cxx_lit_suffix(lx, t);
 }
 
+static void lex_raw(struct lexer *lx);
+
 void lex_next(struct lexer *lx)
+{
+    lex_raw(lx);
+    if (lx->ext_on) {
+        switch (lx->tok.kind) {
+        case TOK_LPAREN: case TOK_LBRACKET: case TOK_LBRACE:
+            lx->ext_depth++;
+            break;
+        case TOK_RPAREN: case TOK_RBRACKET: case TOK_RBRACE:
+            if (lx->ext_depth-- == 0)
+                lx->ext_on = 0;
+            break;
+        case TOK_SEMI: case TOK_COMMA:
+            if (lx->ext_depth == 0)
+                lx->ext_on = 0;
+            break;
+        default:
+            break;
+        }
+    }
+    while (!lx->cxx && lx->tok.kind == TOK_IDENT &&
+           strcmp(lx->tok.text, "__extension__") == 0) {
+        lx->ext_on = 1;          /* and the token itself means nothing */
+        lx->ext_depth = 0;
+        lex_raw(lx);
+        if (lx->tok.kind == TOK_LPAREN || lx->tok.kind == TOK_LBRACKET ||
+            lx->tok.kind == TOK_LBRACE)
+            lx->ext_depth++;
+    }
+}
+
+static void lex_raw(struct lexer *lx)
 {
     struct token *t = &lx->tok;
 
@@ -817,6 +1053,7 @@ void lex_next(struct lexer *lx)
     t->col = (int)(lx->p - lx->line_start) + 1;
     t->text = NULL;
     t->num = 0;
+    t->num_bitint = 0;
     t->str_width = 1;
     t->str_prefix = 0;
     t->ud_suffix = NULL;
@@ -840,23 +1077,30 @@ void lex_next(struct lexer *lx)
     {
         const char *q = lx->p;
         int w = 0, adv = 0;
+        /* C++98 has only L: u"", U"" and u8"" are C++11's */
+        int cxx98 = lx->cxx && lex_cxx_year_here(lx) < 2011;
         pfx = 0;
-        if ((q[0] == 'L' || q[0] == 'U') && (q[1] == '"' || q[1] == '\'')) {
+        if (cxx98 && q[0] != 'L') {
+            /* (a name, then a literal) */
+        } else if ((q[0] == 'L' || q[0] == 'U') && (q[1] == '"' || q[1] == '\'')) {
             /* U"" is UTF-32. L"" is wchar_t, which is int-sized: two
              * bytes on AVR, where four-byte elements made p[1] of an
              * L"xyz" read the high half of 'x'. */
             w = q[0] == 'L' ? target_wchar_size() : 4; adv = 1;
         } else if (q[0] == 'u' && q[1] == '8' && (q[2] == '"' ||
-                   (q[2] == '\'' && lx->cxx))) {
-            /* u8'c' is C++17's (char8_t from C++20): one UTF-8 code unit */
+                   (q[2] == '\'' && (lx->cxx ? lex_cxx_year_here(lx) >= 2017
+                                       : lex_c23_ext())))) {
+            /* u8'c' is C++17's (char8_t from C++20) and C23's (unsigned
+             * char): one UTF-8 code unit */
             w = 1; adv = 2;
         } else if (q[0] == 'u' && (q[1] == '"' || q[1] == '\'')) {
             w = 2; adv = 1;
         }
         if (adv) {
             lx->p += adv;
-            /* u8 is plain char in C; C++20 makes it char8_t, marked '8' */
-            pfx = adv == 1 ? q[0] : lx->cxx ? '8' : 0;
+            /* a u8 string is plain char in C, a u8 character unsigned
+             * char (C23); C++20 makes both char8_t. Marked '8'. */
+            pfx = adv == 1 ? q[0] : lx->cxx || q[2] == '\'' ? '8' : 0;
             if (*lx->p == '"') {
                 t->str_width = w;
                 t->str_prefix = (char)pfx;
@@ -867,7 +1111,7 @@ void lex_next(struct lexer *lx)
     /* C++: a pp-number with digit separators (1'000) or a user-defined
      * suffix (5_km, 1.5_m, 10ms), and binary literals: read from a
      * cleaned copy, the suffix kept apart. */
-    if ((lx->cxx || has_digit_separator(lx->p)) &&
+    if ((lx->cxx || (lex_c23_ext() && has_digit_separator(lx->p))) &&
         (isdigit((unsigned char)*lx->p) ||
          (*lx->p == '.' && isdigit((unsigned char)lx->p[1])))) {
         if (cxx_number(lx, t)) {
@@ -878,13 +1122,23 @@ void lex_next(struct lexer *lx)
             return;
         }
     }
+    /* 0b101: a binary constant (GNU C, C23, C++14); 0o17: an octal one
+     * (C2y, and every C mode as GCC has it) */
+    int radix = 0;
     if (*lx->p == '0' && (lx->p[1] == 'b' || lx->p[1] == 'B') &&
-        (lx->p[2] == '0' || lx->p[2] == '1')) {
-        /* 0b101: a binary constant (GNU C, C23, C++14) */
+        (lx->p[2] == '0' || lx->p[2] == '1'))
+        radix = 2;
+    else if (!lx->cxx && *lx->p == '0' && (lx->p[1] == 'o' || lx->p[1] == 'O') &&
+             lx->p[2] >= '0' && lx->p[2] <= '7')
+        radix = 8;
+    if (radix) {
+        lex_pedantic(lx->file, t->line, t->col, lex_quiet(lx),
+                     radix == 2 ? 2023 : 2025,
+                     radix == 2 ? "a binary constant" : "a 0o octal constant");
         const char *q = lx->p + 2;
         unsigned long v = 0;
-        while (*q == '0' || *q == '1')
-            v = v << 1 | (unsigned long)(*q++ - '0');
+        while (*q >= '0' && *q < '0' + radix)
+            v = v * (unsigned long)radix + (unsigned long)(*q++ - '0');
         int has_u = 0, has_l = 0;
         t->num_llong = 0;
         t->char_lit = 0;
@@ -897,11 +1151,17 @@ void lex_next(struct lexer *lx)
                 has_l = 1;
             q++;
         }
+        int wb = bitint_suffix(lx, t, &q, v, has_u, has_l);
         if (isalnum((unsigned char)*q) || *q == '_' || *q == '.')
-            diag_fatal(lx->file, lx->line, "malformed binary constant");
+            diag_fatal(lx->file, lx->line, "malformed %s constant",
+                       radix == 2 ? "binary" : "octal");
+        if (wb) {
+            lx->p = q;
+            return;
+        }
         t->kind = TOK_NUM;
         t->num = (long)v;
-        num_classify(t, v, has_u, has_l, 0);   /* binary: never decimal */
+        num_classify(t, v, has_u, has_l, 0);   /* never decimal */
         lx->p = q;
         return;
     }
@@ -989,6 +1249,13 @@ void lex_next(struct lexer *lx)
                 has_l = 1;
             end++;
         }
+        if (bitint_suffix(lx, t, (const char **)&end, v, has_u, has_l)) {
+            if (isalnum((unsigned char)*end) || *end == '_' || *end == '.')
+                diag_fatal(lx->file, lx->line,
+                           "malformed integer constant");
+            lx->p = end;
+            return;
+        }
         if (*end == 'i' || *end == 'I' || *end == 'j' || *end == 'J')
             diag_fatal(lx->file, lx->line,
                        "an integer imaginary constant (GNU _Complex int) is "
@@ -1027,7 +1294,8 @@ void lex_next(struct lexer *lx)
             for (size_t i = 0; i < sizeof cxx_keywords / sizeof cxx_keywords[0];
                  i++)
                 if (strlen(cxx_keywords[i].word) == n &&
-                    memcmp(cxx_keywords[i].word, start, n) == 0) {
+                    memcmp(cxx_keywords[i].word, start, n) == 0 &&
+                    cxx_keyword_on(lx, cxx_keywords[i].word)) {
                     t->kind = cxx_keywords[i].kind;
                     t->text = xstrndup(start, n);
                     lx->p = start + n;
@@ -1039,11 +1307,18 @@ void lex_next(struct lexer *lx)
                             strcmp(keywords[i].word, "static_assert") == 0 ||
                             strcmp(keywords[i].word, "alignof") == 0 ||
                             strcmp(keywords[i].word, "alignas") == 0 ||
-                            strcmp(keywords[i].word, "thread_local") == 0))
+                            strcmp(keywords[i].word, "thread_local") == 0 ||
+                            strcmp(keywords[i].word, "nullptr") == 0 ||
+                            strcmp(keywords[i].word, "_Countof") == 0 ||
+                            strcmp(keywords[i].word, "_BitInt") == 0))
                 continue;        /* identifiers in C++, or its own */
             if (strlen(keywords[i].word) == n &&
                 memcmp(keywords[i].word, start, n) == 0) {
+                if (!lx->cxx && !c_keyword_on(keywords[i].word))
+                    break;                      /* a name in this standard */
                 t->kind = keywords[i].kind;
+                if (!lx->cxx && g_c_pedantic)
+                    keyword_pedantic(lx, keywords[i].word);
                 return;
             }
         }
@@ -1124,7 +1399,8 @@ void lex_next(struct lexer *lx)
         } else if (lx->p[1] == '<') {
             t->kind = TOK_SHL;
             lx->p++;
-        } else if (lx->cxx && lx->p[1] == '=' && lx->p[2] == '>') {
+        } else if (lx->cxx && lx->p[1] == '=' && lx->p[2] == '>' &&
+                   lex_cxx_year_here(lx) >= 2020) {     /* C++20's */
             t->kind = TOK_SPACESHIP;
             lx->p += 2;
         } else if (lx->p[1] == '=') {
@@ -1168,6 +1444,7 @@ void lex_next(struct lexer *lx)
         while (*p && *p != '"')
             p++;
         lx->file = xstrndup(fstart, (size_t)(p - fstart));
+        lx->sys_file = diag_in_system_header(lx->file);
         while (*p && *p != '\n')
             p++;
         if (*p == '\n')
@@ -1175,7 +1452,7 @@ void lex_next(struct lexer *lx)
         lx->p = p;
         lx->line_start = p;
         lx->line = (int)ln;
-        lex_next(lx); /* the marker produced no token; go again */
+        lex_raw(lx);  /* the marker produced no token; go again */
         return;
     }
     case '\'': {
@@ -1296,6 +1573,8 @@ const char *tok_describe(const struct token *t)
     case TOK_KW_STATIC_ASSERT: return "'_Static_assert'";
     case TOK_KW_GENERIC: return "'_Generic'";
     case TOK_KW_ALIGNOF: return "'_Alignof'";
+    case TOK_KW_COUNTOF: return "'_Countof'";
+    case TOK_KW_BITINT: return "'_BitInt'";
     case TOK_KW_ALIGNAS: return "'_Alignas'";
     case TOK_KW_TYPEOF: return "'typeof'";
     case TOK_KW_ATOMIC: return "'_Atomic'";

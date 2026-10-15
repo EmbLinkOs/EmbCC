@@ -68,6 +68,33 @@ int pack_length(struct csym *y)
     return y->npack;
 }
 
+/* Element i of bound pack y, as a symbol: a function parameter's
+ * variable, a type, a value or a template */
+struct csym *pack_elem_sym(struct csym *y, int i)
+{
+    struct csym *el = xcalloc(1, sizeof *el);
+    el->name = y->name;
+    el->scope = y->scope;
+    if (y->pvars) {
+        el->k = CS_VAR;
+        el->var = y->pvars[i];
+    } else {
+        struct ctarg *a = &y->pack[i];
+        if (a->kind == TP_TYPE) {
+            el->k = CS_TYPEDEF;
+            el->type = a->type;
+        } else if (a->kind == TP_VALUE) {
+            el->k = CS_ENUMERATOR;
+            el->type = a->vtype ? a->vtype : ct_basic(CT_INT);
+            el->value = a->value;
+        } else {
+            el->k = CS_TEMPLATE;
+            el->tmpl = a->tmpl;
+        }
+    }
+    return el;
+}
+
 struct csym *pack_current(struct csym *y)
 {
     if (!y || y->k != CS_PACK)
@@ -76,30 +103,9 @@ struct csym *pack_current(struct csym *y)
         struct pexp *e = &pexps[i];
         if (e->pack != y)
             continue;
-        if (e->elem)
-            return e->elem;
-        struct csym *el = xcalloc(1, sizeof *el);
-        el->name = y->name;
-        el->scope = y->scope;
-        if (y->pvars) {
-            el->k = CS_VAR;
-            el->var = y->pvars[e->index];
-        } else {
-            struct ctarg *a = &y->pack[e->index];
-            if (a->kind == TP_TYPE) {
-                el->k = CS_TYPEDEF;
-                el->type = a->type;
-            } else if (a->kind == TP_VALUE) {
-                el->k = CS_ENUMERATOR;
-                el->type = a->vtype ? a->vtype : ct_basic(CT_INT);
-                el->value = a->value;
-            } else {
-                el->k = CS_TEMPLATE;
-                el->tmpl = a->tmpl;
-            }
-        }
-        e->elem = el;
-        return el;
+        if (!e->elem)
+            e->elem = pack_elem_sym(y, e->index);
+        return e->elem;
     }
     return y;
 }

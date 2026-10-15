@@ -2018,7 +2018,9 @@ struct cexpr *make_call(struct cfunc *fn, struct cexpr *obj,
         obj = NULL;
     }
     if (fn->is_deleted)
-        cx_error(at, "use of deleted function '%s'", fn->name);
+        cx_error(at, "use of deleted function '%s'%s%s", fn->name,
+                 fn->delete_msg ? ": " : "",
+                 fn->delete_msg ? fn->delete_msg : "");
     /* (the access check is above, before alias_of was followed) */
     func_deduce_return(fn, at);
     struct cty *ret = fn->type->to;
@@ -2134,7 +2136,9 @@ struct cfunc *dealloc_fn(struct cty *t, int global, int arr, int sized)
             if (f->alias_of)
                 f = f->alias_of;
             if (f->is_deleted)
-                cx_error(cx_cur(), "use of deleted function '%s'", name);
+                cx_error(cx_cur(), "use of deleted function '%s'%s%s", name,
+                         f->delete_msg ? ": " : "",
+                         f->delete_msg ? f->delete_msg : "");
             f->used = 1;
             return f;
         }
@@ -2348,6 +2352,7 @@ struct cexpr *il_make(struct cty *ilt, struct cexpr *list,
 static struct cexpr *designated_init(struct cty *t, struct cexpr *list,
                                      const struct ctok *at)
 {
+    cx_pedantic(at, 2020, "a designated initializer");
     if (t->k != CT_CLASS || !t->cls->aggregate)
         cx_error(at, "designated initializers for '%s', not an aggregate "
                      "class", ct_name(t));
@@ -2692,7 +2697,9 @@ static struct cexpr *overloaded(const char *name, struct cexpr **args, int na,
     }
     if (f->cls && !f->is_static) {
         if (f->is_deleted)
-            cx_error(at, "use of deleted function '%s'", f->name);
+            cx_error(at, "use of deleted function '%s'%s%s", f->name,
+                     f->delete_msg ? ": " : "",
+                     f->delete_msg ? f->delete_msg : "");
         if ((f->is_implicit || f->is_defaulted) && f->trivial &&
             (f->special == SP_COPY_ASSIGN || f->special == SP_MOVE_ASSIGN)) {
             /* a trivial assignment is the struct's bytes */
@@ -4819,8 +4826,9 @@ static struct cexpr *parse_string(void)
         cx_advance();
     }
     enum cty_kind ek = prefix == 'L' ? CT_WCHAR : prefix == 'u' ? CT_CHAR16
-                     : prefix == 'U' ? CT_CHAR32 : prefix == '8' ? CT_CHAR8
-                     : CT_CHAR;
+                     : prefix == 'U' ? CT_CHAR32
+                     : prefix == '8' && lex_cxx_char8() ? CT_CHAR8
+                     : CT_CHAR;     /* (u8"" is const char[] before C++20) */
     long units;
     char *bytes = lit_encode(lc, (int)n, width, &units, at->file, at->t.line);
     free(lc);
@@ -4911,6 +4919,7 @@ static struct cexpr *fold_operand(int from, int to)
 static struct cexpr *parse_fold(int ell)
 {
     const struct ctok *at = cx_cur();
+    cx_pedantic(at, 2017, "a fold expression");
     int open = cx_pos, close = cx_pos;
     cx_skip_balanced();
     close = cx_pos - 1;
@@ -4992,7 +5001,8 @@ static struct cexpr *parse_primary(void)
         if (t->char_lit)
             k = t->str_prefix == 'L' ? CT_WCHAR : t->str_prefix == 'u'
                 ? CT_CHAR16 : t->str_prefix == 'U' ? CT_CHAR32
-                : t->str_prefix == '8' ? CT_CHAR8 : CT_CHAR;
+                : t->str_prefix == '8' && lex_cxx_char8() ? CT_CHAR8
+                : CT_CHAR;
         else if (t->num_llong)
             k = t->num_uns ? CT_ULLONG : CT_LLONG;
         else if (t->num_long)
@@ -5045,6 +5055,7 @@ static struct cexpr *parse_primary(void)
         }
         if (cx_kind_at(1) == TOK_LBRACE) {
             /* GNU statement expression */
+            cx_pedantic(at, 0, "a statement expression");
             cx_advance();
             struct cstmt *b = parse_compound();
             cx_expect(TOK_RPAREN, "')' to close a statement expression");
@@ -5113,6 +5124,7 @@ static struct cexpr *parse_primary(void)
     case TOK_CX_THROW:
         return parse_throw();
     case TOK_CX_AUTO:
+        cx_pedantic(cx_cur(), 2023, "auto(x)");
         /* C++23 auto(x) / auto{x}: a prvalue copy of x, of x's type
          * decayed -- the type an `auto` variable initialized from it
          * would have. */
@@ -5138,6 +5150,23 @@ static struct cexpr *parse_primary(void)
     case TOK_IDENT: case TOK_COLONCOLON: case TOK_CX_OPERATOR: {
         if (trait_at() && !trait_is_type(cx_cur()->t.text))
             return parse_trait();
+        if (cx_kind() == TOK_IDENT && cx_kind_at(1) == TOK_ELLIPSIS &&
+            cx_kind_at(2) == TOK_LBRACKET) {
+            /* args...[i]: one of a pack's values (C++26) */
+            struct csym *el = cx_pack_index();
+            if (el->k == CS_ENUMERATOR)
+                return ex_int(el->value, el->type);
+            if (el->k != CS_VAR)
+                cx_error(at, "'%s...[]' is not a value", at->t.text);
+            struct cexpr *e = ex_new(E_VAR, ct_strip_ref(el->var->type),
+                                     VC_LVALUE);
+            e->var = el->var;
+            e->line = at->t.line;
+            e->col = at->t.col;
+            e->file = at->file;
+            el->var->used = 1;
+            return e;
+        }
         int n;
         struct cty *t = peek_type_name(&n);
         if (t && (cx_kind_at(n) == TOK_LPAREN || cx_kind_at(n) == TOK_LBRACE)) {
@@ -5870,11 +5899,55 @@ struct cexpr *expr_assign(int op, struct cexpr *l, struct cexpr *r)
     return assign(op, l, r);
 }
 
+/* GNU's `x ?: y`: x when it is true, else y, x evaluated once --
+ *     ({ T __t = x; __t ? __t : y; })
+ * T being x's type, decayed and unqualified. One of class type is not
+ * taken (its copy is C++'s own question), nor one outside a function,
+ * where there is no statement for the temporary. */
+static struct cexpr *gnu_elvis(struct cexpr *c, const struct ctok *at)
+{
+    struct cexpr *x = rvalue(c);
+    struct cty *t = ct_unqual(x->t);
+    if (t->k == CT_CLASS)
+        cx_error(at, "GNU's '?:' with no middle operand, of class type %s, "
+                 "is not supported", ct_name(t));
+    if (!cx_curfn)
+        cx_error(at, "GNU's '?:' with no middle operand is supported in a "
+                 "function only");
+    struct cvar *v = cx_new_local(NULL, t, at);
+    v->init = convert(x, t, "?:");
+    struct cstmt *d = st_new(S_DECL);
+    d->line = at->t.line;
+    d->file = at->file;
+    d->var = v;
+    d->blk = cx_curblk;
+    struct cexpr *r1 = ex_new(E_VAR, t, VC_LVALUE);
+    struct cexpr *r2 = ex_new(E_VAR, t, VC_LVALUE);
+    r1->var = r2->var = v;
+    struct cexpr *cond = conditional(r1, r2, expr_parse_assign());
+    struct cstmt *es = st_new(S_EXPR);
+    es->e = cond;
+    es->line = at->t.line;
+    es->file = at->file;
+    d->next = es;
+    struct cstmt *b = st_new(S_BLOCK);
+    b->body = d;
+    b->blk = cx_curblk;
+    struct cexpr *e = ex_new(E_STMTEXPR, ct_unqual(cond->t), VC_PRVALUE);
+    e->body = b;
+    return e;
+}
+
 struct cexpr *expr_parse_cond(void)
 {
     struct cexpr *c = parse_binary(1);
+    const struct ctok *qat = cx_cur();
     if (!cx_accept(TOK_QUESTION))
         return c;
+    if (cx_accept(TOK_COLON)) {
+        cx_pedantic(qat, 0, "'?:' with no middle operand");
+        return gnu_elvis(c, qat);
+    }
     struct cexpr *a = expr_parse();
     cx_expect(TOK_COLON, "':' in ?:");
     struct cexpr *b = expr_parse_assign();

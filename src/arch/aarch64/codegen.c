@@ -695,7 +695,7 @@ static long *layout_frame(struct ir_func *fn, struct a64_frame *fr,
         if (al > 1)
             running = (running + al - 1) & ~((long)al - 1);
         disp[v] = running;
-        running += (ty_size(f->var_tys[v]) + 7) & ~7;
+        running += (fn->locals[v].size + 7) & ~7;   /* the IR's: an empty struct has one byte */
     }
     free(lref);
 

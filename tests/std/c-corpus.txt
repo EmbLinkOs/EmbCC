@@ -1,0 +1,148 @@
+# C conformance corpus for -std= (tests/golden/std-modes.sh).
+#
+# Each case is a name line `== NAME` and the C source after it, up to the
+# next case. tools/std-expect.sh compiles every case under every C mode,
+# with and without -pedantic-errors, with GCC (the referee), and records
+# whether GCC accepted it in tests/std/c-expect.txt; std-modes.sh holds
+# EmbCC to that record. A case uses no header but GCC's freestanding ones.
+
+== kw-bool-ident
+int bool = 1;
+== kw-true-ident
+int true = 1, false = 0;
+== kw-nullptr-ident
+int nullptr = 0;
+== kw-static_assert-ident
+int static_assert = 1;
+== kw-alignas-ident
+int alignas = 1, alignof = 2;
+== kw-thread_local-ident
+int thread_local = 1;
+== kw-typeof-ident
+int typeof = 1;
+== kw-typeof_unqual-ident
+int typeof_unqual = 1;
+== kw-constexpr-ident
+int constexpr = 1;
+== kw-asm-ident
+int asm = 1;
+== kw-inline-ident
+int inline = 1;
+== kw-restrict-ident
+int restrict = 1;
+== unproto-call-args
+int f();
+int g(void) { return f(1, 2.0); }
+== unproto-def-empty
+int f() { return 1; }
+int g(void) { return f(); }
+== knr-definition
+int add(a, b) int a; int b; { return a + b; }
+== knr-promoted
+double half(x) float x; { return x / 2; }
+== implicit-int
+static x = 1;
+== implicit-function
+int g(void) { return h(1); }
+== trigraph
+??=define X 1
+int x = X;
+== line-comment
+// a comment
+int x;
+== mixed-decl
+void f(void) { int a = 1; a++; int b = a; (void)b; }
+== for-decl
+void f(void) { for (int i = 0; i < 3; i++) ; }
+== long-long
+long long x = 1;
+== bool-type
+_Bool b = 1;
+== complex-type
+_Complex double z;
+== designated-init
+struct P { int x, y; } p = { .y = 2 };
+== compound-literal
+int *p = (int[]){ 1, 2 };
+== flexible-array
+struct S { int n; int a[]; };
+== vla
+void f(int n) { int a[n]; a[0] = 0; (void)a; }
+== restrict-kw
+void f(int *restrict p) { (void)p; }
+== inline-fn
+static inline int f(void) { return 1; }
+== static-assert-c11
+_Static_assert(1, "x");
+== generic
+int x = _Generic(1, int: 2, default: 3);
+== alignas-c11
+_Alignas(8) int x;
+== alignof-c11
+int x = _Alignof(int);
+== noreturn-c11
+_Noreturn void f(void) { for (;;) ; }
+== thread-local-c11
+_Thread_local int x;
+== atomic-c11
+_Atomic int x;
+== anon-struct
+struct S { struct { int a; }; int b; } s;
+== c23-bool-kw
+bool b = true;
+== c23-nullptr
+int *p = nullptr;
+== c23-constexpr
+constexpr int k = 3;
+== c23-auto
+void f(void) { auto x = 1; (void)x; }
+== c23-typeof
+int a; typeof(a) b;
+== c23-static-assert-nomsg
+static_assert(1);
+== c23-attribute
+[[deprecated]] int x;
+== c23-digit-sep
+int x = 1'000;
+== c23-binary-literal
+int x = 0b101;
+== c23-elifdef
+#ifdef NOPE
+#elifdef __STDC__
+int x;
+#endif
+== c23-unnamed-param
+int f(int) { return 0; }
+== c23-label-before-decl
+void f(void) { goto l; l: int x = 1; (void)x; }
+== c23-empty-init
+int a[3] = {};
+== c23-enum-type
+enum E : unsigned char { A };
+== c23-u8-char
+unsigned char c = u8'a';
+== c23-bitint
+_BitInt(12) q;
+== c23-empty-parens-proto
+int f();
+int g(void) { return f(1); }
+== c2y-countof
+int a[4]; int n = _Countof(a);
+== c2y-octal-0o
+int x = 0o17;
+== gnu-statement-expr
+int f(void) { return ({ int t = 2; t; }); }
+== gnu-case-range
+int f(int x) { switch (x) { case 1 ... 3: return 1; } return 0; }
+== gnu-zero-array
+struct S { int n; int a[0]; };
+== gnu-typeof-ext
+int a; __typeof__(a) b;
+== gnu-elvis
+int f(int x) { return x ?: 1; }
+== gnu-empty-struct
+struct E { };
+== gnu-asm-kw
+void f(void) { asm("nop"); }
+== gnu-dunder-asm
+void f(void) { __asm__("nop"); }

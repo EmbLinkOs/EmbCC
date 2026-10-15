@@ -334,7 +334,16 @@ On Cortex-M, RV32 and AVR the type does not exist:
 embcc: f.c:1:10: error: __int128 does not exist on this target (it needs 64-bit registers; use long long)
 ```
 
-C23's `_BitInt(N)` is not supported.
+C23's `_BitInt(N)` takes N up to 64 (`BITINT_MAXWIDTH`, and the
+predefined `__BITINT_MAXWIDTH__`). A `_BitInt(N)` has the size and
+alignment of the smallest of `char`, `short`, `int`, `long` and `long
+long` that holds N bits, and is passed and returned as that type is.
+Its value is the low N bits: the bits above them are copies of the sign
+bit, or zero when it is unsigned. A value from another compiler is read
+the same way whatever those bits hold, as the x86-64, AArch64 and RISC-V
+ABIs leave them unspecified. Converting a value a signed `_BitInt(N)`
+cannot represent keeps its low N bits, as for the other signed integer
+types.
 
 *Whether signed integer types are represented using sign and magnitude,
 two's complement, or ones' complement, and whether the extraordinary
@@ -624,11 +633,14 @@ rounded up to a multiple of that.
 `__attribute__((aligned(N)))` and `_Alignas` raise a member's or a
 structure's alignment. `#pragma pack(N)` caps every member's alignment at
 `N` (see [Preprocessing directives](#preprocessing-directives)). A
-structure must have at least one member; an empty structure is refused:
-
-```text
-embcc: f.c:1:14: error: a struct/union needs at least one member
-```
+structure or union with no members, a GNU extension, has size 0 and
+alignment 1, as in GCC. Passed or returned by value, it travels as GCC's
+and clang's do on the target: in no register on most; by reference
+where every structure argument is (PowerPC, SPARC); and a result through
+the hidden pointer where every structure result is (MIPS o32, SPARC,
+ColdFire). On Xtensa, where the two compilers differ, EmbCC follows GCC:
+no register and no hidden pointer. A pointer to one steps by 0, and two
+such pointers cannot be subtracted.
 
 *The integer type compatible with each enumerated type (C17 6.7.2.2).*
 

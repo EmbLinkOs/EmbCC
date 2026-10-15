@@ -1175,7 +1175,7 @@ static int *layout_frame(struct ir_func *fn, int *frame_out,
             continue;               /* in the outgoing area: placed below */
         if (i < fn->nparams && x86_param_home_incoming(f, i))
             continue;               /* in the caller's: the prologue says where */
-        int sz = (ty_size(f->var_tys[i]) + 7) & ~7;
+        int sz = (fn->locals[i].size + 7) & ~7;   /* the IR's: an empty struct has one byte */
         if (sz > ssize[s]) ssize[s] = sz;
         /* Alignment of a local's stack slot: the greater of its type's natural
          * alignment (a struct with an aligned(16) member, e.g. struct thread's

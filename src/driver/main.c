@@ -14,6 +14,7 @@
 #include "../arch/x86_64/topasm.h"
 #include "../arch/backend.h"
 #include "../cpp/cpp.h"
+#include "../lex/lex.h"
 #include "../cxx/translate.h"
 #include "../debug/dwarf.h"
 #include "../debug/eh.h"
@@ -1858,7 +1859,11 @@ static int compile_unit(const char *in, const char *out, int pp_only)
      * caller's problem. */
     incdirs_with_defaults();
     time_mark("startup");
+    /* text compiled marks what system macros expanded to, for -pedantic;
+     * text printed (-E) is the text */
+    int mark = cpp_set_mark_system(!pp_only);
     char *pp = cpp_process(in, src, incdirs, nincdirs);
+    cpp_set_mark_system(mark);
     time_mark("preprocess");
     if (dep_mode && dep_only) {       /* -M/-MM: the rule is the output */
         write_deps(in, out);
@@ -1931,8 +1936,21 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         return 0;
     }
 
+    /* A C++ unit's C, as cxx/ wrote it, read as strict C17: the C23
+     * words (alignof, static_assert, nullptr, constexpr...) are names a
+     * C++98 program may use, and the C++ front end writes none of them;
+     * and what -pedantic has to say about C++ was said about the C++ */
+    int c_year = lex_c_year(), c_gnu = lex_c_gnu();
+    if (lang_cxx) {
+        lex_set_c_std(2017, 0);
+        lex_set_pedantic(0);
+    }
     struct unit *u = parse_unit(in, pp);
     time_mark("parse");
+    if (lang_cxx) {
+        lex_set_c_std(c_year, c_gnu);
+        lex_set_pedantic(diag_warning_enabled("pedantic"));
+    }
     if (parse_error_count()) {
         /* Every syntax error is out; the tree is not whole, so nothing
          * downstream runs on it (a later pass would only invent errors). */
@@ -2585,7 +2603,10 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         }
         *len = (*len + align - 1) & ~(align - 1);
         g->off = *len;
-        *len += global_size(g);
+        /* A GNU empty struct, of size 0, still takes a byte of the
+         * section, as in GCC: a section of none was never made, and its
+         * objects went out as undefined symbols that no link could find. */
+        *len += global_size(g) ? global_size(g) : 1;
         if (!g->is_tls && !g->section) {
             int *sa = g->in_bss ? &bss_align : &data_align;
             if (align > *sa)
@@ -2657,7 +2678,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
             rodata_align = align;
         rodata_len = (rodata_len + align - 1) & ~(align - 1);
         g->off = rodata_len;
-        rodata_len += global_size(g);
+        rodata_len += global_size(g) ? global_size(g) : 1;   /* (as above) */
     }
     char *rodata = NULL;
     if (rodata_len) {
@@ -4653,52 +4674,49 @@ int main(int argc, char **argv)
                     return 1;
                 }
                 cpp_set_cxx_std(year, strict);
-                /* The MACROS follow the year -- libstdc++ picks its
-                 * code by them -- but the language EmbCC parses is
-                 * C++20 whatever was asked. A lambda under -std=c++98
-                 * compiles, which is worth saying once rather than
-                 * letting a build believe it checked. */
-                if (year < 2020)
-                    fprintf(stderr, "embcc: warning: %s sets the standard "
-                                    "macros but is not enforced; EmbCC "
-                                    "parses C++20 and will accept newer "
-                                    "constructs\n", opt_typed(argv[i]));
+                /* the macros (libstdc++ picks its code by them) and the
+                 * language: keywords, tokens and the constructs each
+                 * standard has (lex_set_cxx_std, cx_need_std) */
+                lex_set_cxx_std(year, !strict);
             } else {
-                /* A C standard. EmbCC has ONE C dialect -- C11 with the
-                 * GNU extensions -- and says so rather than nodding:
-                 * `-std=c89` used to be accepted and then compile
-                 * `for (int i = ...)` happily, which is a build
-                 * believing it checked something it did not. An
-                 * unknown name is refused outright. */
-                static const char *const known[] = {
-                    "c89", "c90", "iso9899:1990", "gnu89", "gnu90",
-                    "c99", "c9x", "iso9899:1999", "gnu99", "gnu9x",
-                    "c11", "c1x", "iso9899:2011", "gnu11", "gnu1x",
-                    "c17", "c18", "iso9899:2017", "gnu17", "gnu18",
-                    "c23", "c2x", "gnu23", "gnu2x"
+                /* A C standard, as GCC names them: its year sets
+                 * __STDC_VERSION__ and the keywords (lex_set_c_std), and
+                 * cNN is strict where gnuNN has GNU's extensions. */
+                static const struct { const char *name; int year, gnu; }
+                    cstd[] = {
+                    { "c89", 1989, 0 }, { "c90", 1989, 0 },
+                    { "iso9899:1990", 1989, 0 }, { "gnu89", 1989, 1 },
+                    { "gnu90", 1989, 1 }, { "iso9899:199409", 1994, 0 },
+                    { "c99", 1999, 0 }, { "c9x", 1999, 0 },
+                    { "iso9899:1999", 1999, 0 }, { "gnu99", 1999, 1 },
+                    { "gnu9x", 1999, 1 },
+                    { "c11", 2011, 0 }, { "c1x", 2011, 0 },
+                    { "iso9899:2011", 2011, 0 }, { "gnu11", 2011, 1 },
+                    { "gnu1x", 2011, 1 },
+                    { "c17", 2017, 0 }, { "c18", 2017, 0 },
+                    { "iso9899:2017", 2017, 0 }, { "iso9899:2018", 2017, 0 },
+                    { "gnu17", 2017, 1 }, { "gnu18", 2017, 1 },
+                    { "c23", 2023, 0 }, { "c2x", 2023, 0 },
+                    { "iso9899:2024", 2023, 0 }, { "gnu23", 2023, 1 },
+                    { "gnu2x", 2023, 1 },
+                    { "c2y", 2025, 0 }, { "gnu2y", 2025, 1 },
                 };
-                int ok = 0;
-                for (size_t k = 0; k < sizeof known / sizeof known[0]; k++)
-                    if (strcmp(v, known[k]) == 0) { ok = 1; break; }
-                if (!ok) {
+                int k = 0, n = (int)(sizeof cstd / sizeof cstd[0]);
+                while (k < n && strcmp(v, cstd[k].name) != 0)
+                    k++;
+                if (k == n) {
                     fprintf(stderr, "embcc: error: unknown standard '%s'\n",
                             opt_typed(argv[i]));
                     return 1;
                 }
-                std_gnu89 = !strcmp(v, "c89") || !strcmp(v, "c90") ||
-                            !strcmp(v, "iso9899:1990") ||
-                            !strcmp(v, "gnu89") || !strcmp(v, "gnu90");
-                if (strncmp(v, "c1", 2) != 0 && strncmp(v, "gnu1", 4) != 0 &&
-                    strcmp(v, "iso9899:2011") != 0 &&
-                    strcmp(v, "iso9899:2017") != 0 &&
-                    strncmp(v, "c2", 2) != 0 && strncmp(v, "gnu2", 4) != 0 &&
-                    strcmp(v, "c17") != 0 && strcmp(v, "c18") != 0)
-                    fprintf(stderr, "embcc: warning: %s is accepted but not "
-                                    "enforced; EmbCC has one C dialect, C11 "
-                                    "with the GNU extensions, and will "
-                                    "compile newer constructs anyway\n",
-                            opt_typed(argv[i]));
+                lex_set_c_std(cstd[k].year, cstd[k].gnu);
+                std_gnu89 = cstd[k].year < 1999;
             }
+        } else if (strcmp(argv[i], "-ansi") == 0) {
+            /* GCC's name for the first standard of each language */
+            lex_set_c_std(1989, 0);
+            std_gnu89 = 1;
+            cpp_set_cxx_std(1998, 1);
         } else if (strcmp(argv[i], "--emit-c") == 0) {
             emit_c_only = 1;
         } else if (strcmp(argv[i], "-dM") == 0) {
@@ -4742,6 +4760,7 @@ int main(int argc, char **argv)
             want_unwind = 0;
         } else if (strcmp(argv[i], "-fchar8_t") == 0) {
             cpp_set_cxx_char8(1);   /* (C++: char8_t is a keyword anyway) */
+            lex_set_cxx_char8(1);   /* ...from C++20; before, by this */
         } else if (strcmp(argv[i], "-fdiagnostics-parseable-fixits") == 0) {
             diag_set_parseable_fixits(1);
         } else if (strcmp(argv[i], "--fix") == 0) {
@@ -4886,15 +4905,11 @@ int main(int argc, char **argv)
              * and as that one, what EmbCC always does */
         } else if (strcmp(argv[i], "-w") == 0) {
             diag_set_no_warnings(1);
-        } else if (strcmp(argv[i], "-pedantic") == 0 ||
-                   strcmp(argv[i], "-pedantic-errors") == 0) {
-            /* Said, as an unknown -Wname is: EmbCC has no warnings about
-             * extensions to ISO C, so this turns nothing on. It was
-             * refused as an unknown argument, which stopped builds that
-             * pass it out of habit. */
-            fprintf(stderr, "embcc: warning: %s: EmbCC has no diagnostics "
-                            "for extensions to ISO C, so this turns "
-                            "nothing on\n", opt_typed(argv[i]));
+        } else if (strcmp(argv[i], "-pedantic") == 0) {
+            /* what the standard -std= names does not have (lex_pedantic) */
+            diag_enable_warning("pedantic", 1);
+        } else if (strcmp(argv[i], "-pedantic-errors") == 0) {
+            diag_set_werror_for("pedantic", 1);
         } else if (strncmp(argv[i], "-fdiagnostics-format=", 21) == 0) {
             const char *f = argv[i] + 21;
             if (strcmp(f, "json") == 0)
@@ -5644,6 +5659,9 @@ int main(int argc, char **argv)
     if (backend_get(target_get())->options_done)
         backend_get(target_get())->options_done();
     sema_set_gnu89_inline(gnu89_inline || std_gnu89);
+    /* -pedantic, -pedantic-errors or -Wpedantic: the dialect is the
+     * standard's, without EmbCC's C23 extensions of a GNU one */
+    lex_set_pedantic(diag_warning_enabled("pedantic"));
     /* -fno-jump-tables for a whole test suite, whose scripts spell their
      * own command lines: every dense switch takes the compare tree. */
     if (plat_getenv("EMBCC_NO_JUMP_TABLES"))
