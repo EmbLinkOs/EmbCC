@@ -46,6 +46,12 @@ struct expr {
     enum expr_kind kind;
     int line;
     int col;              /* 1-based column, for caret diagnostics (0 = unknown) */
+    int quiet;            /* parsed in a system header, a system macro or
+                           * after __extension__: sema's -pedantic
+                           * diagnostics say nothing of it */
+    int cast_value;       /* sema: a cast's value given an object -- `(union
+                           * u)x` as a compound literal -- which is not an
+                           * lvalue */
     struct type *ty;      /* set by sema on every node */
     struct type *undecayed; /* sema: original array type when ty is the
                              * decayed pointer (sizeof needs it) */

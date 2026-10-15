@@ -277,7 +277,6 @@ RISC-V).
 | `asm goto` | `` `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that `` |
 | Nested function definitions | A syntax error: `expected ';' before '{'` |
 | K&R (old-style) function definitions | A syntax error: `expected a parameter type before 'a'` |
-| `$` in identifiers | `character '$' is not supported yet` |
 | C23 `u8` character constants (`u8'a'`) | A syntax error |
 | C23 storage-class specifiers in a compound literal (`(static int[]){1, 2}`) | `expected an expression, got 'static'` |
 | A range designator followed by further designators (`[0 ... 1].a = 5`) | `a range designator [lo ... hi] followed by more designators is not supported` |

@@ -142,13 +142,13 @@ A byte that is not part of an allowed character is an error:
 embcc: f.c:1: error: byte 0xcc is not part of a character C allows here (identifiers take UTF-8 letters, C11 Annex D)
 ```
 
-Universal character names (`é`) are not accepted in identifiers, and
-neither is `$`:
+Universal character names (`é`) are not accepted in identifiers:
 
 ```text
 embcc: f.c:1: error: character '\' is not supported yet
-embcc: f.c:1: error: character '$' is not supported yet
 ```
+
+`$` is accepted anywhere in an identifier, as in GCC (`a$b`, `$tmp`).
 
 *The number of significant initial characters in an identifier
 (C17 5.2.4.1, 6.4.2).*

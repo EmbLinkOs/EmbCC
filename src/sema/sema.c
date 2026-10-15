@@ -526,6 +526,26 @@ static void need_scalar(struct unit *u, struct expr *e, const char *what)
                    what, ty_name(e->ty));
 }
 
+/* A GNU extension sema finds by its types, said under --pedantic as the
+ * parser says those it finds by their tokens (lex_pedantic), and not of
+ * code from a system header, a system macro or after __extension__. */
+static void sema_pedantic(struct unit *u, const struct expr *e,
+                          const char *what)
+{
+    lex_pedantic(diag_file(u), e->line, e->col, e->quiet, 0, what);
+}
+
+/* Arithmetic on a pointer to void or to a function: GNU C's, a step of
+ * one byte, as GCC has it (irgen's step_size) */
+static void void_step(struct unit *u, const struct expr *e,
+                      const struct type *pt)
+{
+    if (pt->pointee->kind == TY_VOID)
+        sema_pedantic(u, e, "arithmetic on a pointer to void");
+    else if (pt->pointee->kind == TY_FUNC)
+        sema_pedantic(u, e, "arithmetic on a pointer to a function");
+}
+
 /* A pointer stepped or subtracted (`what` names the operator) moves by its
  * pointee's size, which an incomplete type has not: `p + 1` through a
  * `struct X *` added one byte, as though the size were 1, where GCC
@@ -1339,11 +1359,20 @@ static void need_modifiable(struct unit *u, const struct expr *e,
 
 static int is_lvalue(const struct expr *e)
 {
+    /* a cast's value is not an object to assign or point at, nor is a
+     * member of one */
+    for (const struct expr *o = e; ; o = o->lhs) {
+        if (o->cast_value)
+            return 0;
+        if (o->kind != EXPR_MEMBER || o->is_arrow)
+            break;
+    }
     return e->kind == EXPR_VAR || e->kind == EXPR_DEREF ||
            e->kind == EXPR_MEMBER || e->kind == EXPR_COMPLIT;
 }
 
 static int const_fold(const struct expr *e, long *out);
+static int aggregate_cast(struct unit *u, struct expr *e);
 struct scope;
 static void check_atomic_call(struct unit *u, struct func *f,
                               struct scope *sc, struct expr *e,
@@ -2557,10 +2586,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             break;
         }
         if (e->ty->kind == TY_PTR) {
-            if (e->ty->pointee->kind == TY_VOID ||
-                e->ty->pointee->kind == TY_FUNC)
-                sema_error_at(u, e->line, e->col, "++/-- on %s",
-                           ty_name(e->ty));
+            void_step(u, e, e->ty);
             ptr_step_check(u, e->ty, 0, "++/-- on", e->line, e->col);
         } else if (!ty_is_arith(e->ty)) {
             sema_error_at(u, e->line, e->col, "++/-- needs an integer or "
@@ -2805,6 +2831,11 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
     }
     case EXPR_CAST:
         check_expr(u, f, sc, e->rhs);
+        if (e->cast_ty->kind == TY_STRUCT && !ty_is_complex(e->cast_ty)) {
+            if (aggregate_cast(u, e))
+                check_expr(u, f, sc, e);    /* the compound literal */
+            break;
+        }
         if (ty_is_complex(e->cast_ty) || ty_is_complex(e->rhs->ty)) {
             if (!ty_is_complex(e->rhs->ty) && !ty_is_arith(e->rhs->ty))
                 sema_error_at(u, e->line, e->col, "cannot cast %s to %s",
@@ -2927,6 +2958,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             if (e->op != B_ADD && e->op != B_SUB)
                 sema_error_at(u, e->line, e->col,
                            "only += and -= apply to a pointer");
+            void_step(u, e, e->lhs->ty);
             ptr_step_check(u, e->lhs->ty, 0, e->op == B_ADD ? "+= on" : "-= on",
                            e->line, e->col);
             need_integer(u, e->rhs, "pointer arithmetic");
@@ -3071,19 +3103,36 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                 break;
             }
         }
+        /* GNU C: void and a function have size 1, as GCC gives them (a
+         * function designator here is the function, not its pointer) */
         if (e->cast_ty) {
-            if (e->cast_ty->kind == TY_VOID)
-                sema_error_at(u, e->line, e->col, "sizeof(void)");
-            if (ty_incomplete(e->cast_ty))
-                sema_error_at(u, e->line, e->col, "sizeof of incomplete %s",
-                           ty_name(e->cast_ty));
-            size = ty_size(e->cast_ty);
+            if (e->cast_ty->kind == TY_VOID || e->cast_ty->kind == TY_FUNC) {
+                sema_pedantic(u, e, e->cast_ty->kind == TY_VOID
+                                    ? "sizeof(void)" : "sizeof of a function type");
+                size = 1;
+            } else {
+                if (ty_incomplete(e->cast_ty))
+                    sema_error_at(u, e->line, e->col,
+                                  "sizeof of incomplete %s",
+                                  ty_name(e->cast_ty));
+                size = ty_size(e->cast_ty);
+            }
         } else {
-            if (e->rhs->ty->kind == TY_VOID)
-                sema_error_at(u, e->line, e->col, "sizeof a void expression");
-            /* sizeof is the one context where an array does NOT decay */
-            size = ty_size(e->rhs->undecayed ? e->rhs->undecayed
-                                             : e->rhs->ty);
+            struct type *ot = e->rhs->undecayed ? e->rhs->undecayed
+                                                : e->rhs->ty;
+            /* a function's name is the function here, not the pointer
+             * it decays to elsewhere */
+            if (e->rhs->kind == EXPR_VAR && e->rhs->fref)
+                ot = e->rhs->ty->pointee;
+            if (ot->kind == TY_VOID || ot->kind == TY_FUNC) {
+                sema_pedantic(u, e, ot->kind == TY_VOID
+                                    ? "sizeof a void expression"
+                                    : "sizeof a function");
+                size = 1;
+            } else {
+                /* sizeof is the one context where an array does NOT decay */
+                size = ty_size(ot);
+            }
         }
         /* Folded to a constant here; the operand is never evaluated,
          * exactly as C specifies. Its type is the target's size_t:
@@ -3192,10 +3241,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                     sema_error_at(u, e->line, e->col,
                                "subtracting incompatible pointers "
                                "(%s vs %s)", ty_name(lt), ty_name(rt));
-                if (lt->pointee->kind == TY_VOID ||
-                    lt->pointee->kind == TY_FUNC)
-                    sema_error_at(u, e->line, e->col, "arithmetic on %s",
-                               ty_name(lt));
+                void_step(u, e, lt);
                 ptr_step_check(u, lt, 1, "arithmetic on", e->line, e->col);
                 e->ty = ty_ptrdiff_t();
             } else if (lp || rp) {
@@ -3205,10 +3251,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                                "integer");
                 struct expr **ip = lp ? &e->rhs : &e->lhs;
                 struct type *pt = lp ? lt : rt;
-                if (pt->pointee->kind == TY_VOID ||
-                    pt->pointee->kind == TY_FUNC)
-                    sema_error_at(u, e->line, e->col, "arithmetic on %s",
-                               ty_name(pt));
+                void_step(u, e, pt);
                 ptr_step_check(u, pt, 0, "arithmetic on", e->line, e->col);
                 need_integer(u, *ip, "pointer arithmetic");
                 *ip = mk_cast(*ip, ty_base(TY_LONG, 0));
@@ -4409,6 +4452,55 @@ struct icur {
  * already, and check_expr rewrites in place, so it must not run twice. */
 static struct expr *g_init_checked;
 
+/* A cast to a struct or union type, its operand checked (GNU C). To the
+ * operand's own type it is the operand's value; to a union with a member
+ * of the operand's type it is that union holding the value: `(union u)x`
+ * becomes `(union u){ .m = x }`, left for the caller to check or flatten
+ * (x is marked checked), and 1 is returned. Neither is an lvalue. */
+static int aggregate_cast(struct unit *u, struct expr *e)
+{
+    struct type *ty = e->cast_ty;
+    struct expr *x = e->rhs;
+    if (ty_equal(ty, x->ty)) {
+        sema_pedantic(u, e, "a cast of a struct or union to its own type");
+        *e = *x;
+        e->ty = ty_unqual(ty);
+        e->cast_value = 1;
+        return 0;
+    }
+    if (ty->is_union)
+        for (int i = 0; i < ty->nmembers; i++) {
+            struct member *m = &ty->members[i];
+            if (!m->name || m->is_bitfield || !ty_equal(m->ty, x->ty))
+                continue;
+            sema_pedantic(u, e, "a cast to a union type");
+            struct expr *il = xcalloc(1, sizeof *il);
+            il->kind = EXPR_INITLIST;
+            il->line = e->line;
+            il->col = e->col;
+            il->desig_index = il->desig_index_hi = -1;
+            il->elems = xmalloc(sizeof *il->elems);
+            il->elems[0] = x;
+            il->nelems = 1;
+            x->desig_field = m->name;
+            x->desig_index = x->desig_index_hi = -1;
+            x->desig_next = NULL;
+            e->kind = EXPR_COMPLIT;
+            e->lhs = il;
+            e->rhs = NULL;
+            e->cast_value = 1;
+            g_init_checked = x;
+            return 1;
+        }
+    if (ty->is_union)
+        sema_error_at(u, e->line, e->col, "cannot cast %s to %s: no member "
+                      "has that type", ty_name(x->ty), ty_name(ty));
+    else
+        sema_error_at(u, e->line, e->col, "cannot cast to %s", ty_name(ty));
+    e->ty = ty;
+    return 0;
+}
+
 static void flatten_agg(struct unit *u, struct func *f, struct scope *sc,
                         struct icur *c, struct type *ty, int off,
                         struct initbuf *out, int braced, int *count,
@@ -4434,6 +4526,7 @@ static void flatten_one(struct unit *u, struct func *f, struct scope *sc,
     /* (a complex number is a struct inside EmbCC, and a scalar to C:
      * `4` is 4 + 0i, not the real part of an elided pair) */
     int whole = el->kind == EXPR_INITLIST || el->kind == EXPR_COMPLIT ||
+                (el->kind == EXPR_CAST && ty_equal(el->cast_ty, ty)) ||
                 (ty->kind != TY_ARRAY && ty->kind != TY_STRUCT) ||
                 ty_is_complex(ty) || str_inits_array(el, ty);
     if (!whole && ty->kind == TY_STRUCT) {
@@ -4646,6 +4739,17 @@ static void flatten_init(struct unit *u, struct func *f, struct scope *sc,
             flatten_init(u, f, sc, init->lhs, ty, off, out);
             return;
         }
+    }
+    /* so is a cast to the union: its value placed in the member
+     * (aggregate_cast), checked once */
+    if (init->kind == EXPR_CAST && init->cast_ty->kind == TY_STRUCT &&
+        !ty_is_complex(init->cast_ty) && ty_equal(init->cast_ty, ty)) {
+        check_expr(u, f, sc, init->rhs);
+        if (aggregate_cast(u, init)) {
+            flatten_init(u, f, sc, init->lhs, ty, off, out);
+            return;
+        }
+        g_init_checked = init;
     }
     if (init->kind != EXPR_INITLIST) {
         if (ty->kind == TY_ARRAY) {
@@ -6455,11 +6559,31 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
             break;
         case STMT_RETURN:
             if (f->ret_ty->kind == TY_VOID) {
-                if (s->expr)
-                    sema_error_at(u, s->line, s->col,
-                               "returning a value from void '%s'",
-                               f->name);
+                /* a void expression is GNU C's (`return f();`, f void):
+                 * made and nothing returned, as GCC does; a value is an
+                 * error from C99 on, as in GCC 14 and later, and in C89
+                 * a warning (and the value is made and dropped) */
+                if (s->expr) {
+                    check_expr(u, f, sc, s->expr);
+                    if (s->expr->ty->kind == TY_VOID)
+                        sema_pedantic(u, s->expr, "a return of a void "
+                                      "expression from a void function");
+                    else if (lex_c_year() < 1999 &&
+                             !diag_warning_is_error("pedantic"))
+                        diag_warn_opt(diag_file(u), s->line, s->col,
+                                      "return-mismatch",
+                                      "returning a value from void '%s'",
+                                      f->name);
+                    else
+                        sema_error_at(u, s->line, s->col,
+                                   "returning a value from void '%s'",
+                                   f->name);
+                }
             } else {
+                /* C89 has `return;` in a function that returns a value
+                 * (the caller must not use it); C99 took it away */
+                if (!s->expr && lex_c_year() < 1999)
+                    break;
                 if (!s->expr)
                     sema_error_at(u, s->line, s->col,
                                "'%s' returns %s; 'return' needs a value",

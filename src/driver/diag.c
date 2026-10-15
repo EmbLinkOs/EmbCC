@@ -766,6 +766,9 @@ static struct warn_opt g_warns[] = {
     /* 'ab': an int of implementation-defined value (GCC's and clang's
      * is computed here), on by default as in GCC */
     { "multichar",            1,  0,    0 },
+    /* C89's `return x;` in a void function: GCC lets it through with
+     * this warning, on by default (from C99 on it is an error) */
+    { "return-mismatch",      1,  0,    0 },
     /* -pedantic: what the C standard -std= names does not have -- a
      * later standard's feature, or a GNU extension (lex_pedantic);
      * -pedantic-errors makes each an error */
@@ -1007,6 +1010,11 @@ static int warn_is_error(const char *name)
     return f ? f > 0 : g_werror;
 }
 
+int diag_warning_is_error(const char *name)
+{
+    return warn_is_error(name);
+}
+
 /* -Wall / -Wextra: the groups, as GCC draws them. A warning named on its
  * own (-Wno-unused-variable, or -Wunused-variable) keeps that setting
  * whether it came before the group or after, as in GCC: a Makefile's
@@ -1072,6 +1080,7 @@ static const struct { const char *name, *implied, *what; } g_warn_doc[] = {
     { "parentheses", NULL, "a comparison as an unparenthesized operand of `&`, `|` or `^`: `reg & MASK == 0`" },
     { "prio-ctor-dtor", NULL, "a `constructor` or `destructor` priority from 0 to 100, which the implementation reserves" },
     { "redundant-decls", NULL, "a second declaration of a function or `extern` object in the same scope" },
+    { "return-mismatch", NULL, "a `return` with a value in a `void` function, under `--std=c89` or `gnu89` (from C99 on, and under `--pedantic-errors`, it is an error)" },
     { "shadow", NULL, "a local declaration that hides a local variable, a parameter or a file-scope variable" },
     { "shift-count-overflow", NULL, "a constant shift count that is negative or not less than the operand width" },
     { "sign-compare", NULL, "a comparison that converts a possibly negative signed operand to unsigned" },

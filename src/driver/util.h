@@ -63,6 +63,7 @@ int diag_warn_opt(const char *file, int line, int col, const char *name,
                    const char *fmt, ...);
 int diag_warning_enabled(const char *name);
 int diag_warning_implied(const char *name);  /* on by its parent only */
+int diag_warning_is_error(const char *name); /* -Werror[=name] */
 /* A comment the preprocessor saw that marks a fall-through on purpose
  * (one saying `fall through`), and whether one is on lines lo..hi of file. */
 void diag_fallthrough_comment(const char *file, int line);
