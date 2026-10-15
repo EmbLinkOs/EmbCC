@@ -41,7 +41,7 @@ static u32 parse_size(const char *s)
 
 static void usage(void)
 {
-    fputs("usage: embsim IMAGE.elf [--board NAME] [--cpu NAME]\n"
+    fputs("usage: embsim IMAGE.elf|IMAGE.hex [--board NAME] [--cpu NAME]\n"
           "              [--ram-size SIZE] [--until STRING] [--max-insns N]\n"
           "              [--stats] [--count FILE] [--trace FILE]\n"
           "              [--no-semihosting] [--gdb [HOST:]PORT [--gdb-wait]]\n"
@@ -61,13 +61,15 @@ static void usage(void)
           "        EMBSIM_SVD_PATH), virt (RISC-V), uno (AVR), malta (MIPS),\n"
           "        pic32mz2048efh100, explorer16-32, curiosity-pic32mz-ef-2\n"
           "        (PIC32MZ: its ATDF, from --dfp DIR, --svd FILE.atdf or\n"
-          "        EMBSIM_SVD_PATH)\n"
+          "        EMBSIM_SVD_PATH), pic24fj1024gb610, explorer16-32-pic24\n"
+          "        (PIC24: its EDC, from --dfp DIR or --svd FILE.PIC)\n"
           "cpus:   cortex-m0, cortex-m0plus, cortex-m3, cortex-m4, cortex-m7;\n"
           "        rv32, rv64 (virt's default: the image's width); atmega328p;\n"
-          "        24kc, pic32mz\n"
+          "        24kc, pic32mz; pic24fj1024gb610\n"
           "--set:  explorer16-32: temperature=DEGREES, pot=VOLTS or PERCENT%,\n"
-          "        S4, S5, S6=pressed or released; curiosity-pic32mz-ef-2:\n"
-          "        SW1, SW2, SW3, SW4=pressed or released\n",
+          "        S4, S5, S6=pressed or released; explorer16-32-pic24: the\n"
+          "        same, and S3; curiosity-pic32mz-ef-2: SW1, SW2, SW3,\n"
+          "        SW4=pressed or released\n",
           stderr);
     exit(2);
 }

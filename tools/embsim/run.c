@@ -127,11 +127,12 @@ void sim_init(struct sim *s, const struct board_desc *bd, const char *model,
      * space */
     if (!svd && bd->svd) {
         svd = svd_search(bd->svd);
-        if (!svd && strstr(bd->svd, ".atdf"))
+        if (!svd && (strstr(bd->svd, ".atdf") || strstr(bd->svd, ".PIC")))
             die("the %s board's peripherals are %s's, from its device pack: "
                 "give the pack's directory with --dfp DIR (it holds "
-                "atdf/%s), the file with --svd FILE, or a directory holding "
-                "it in EMBSIM_SVD_PATH", bd->name, bd->svd, bd->svd);
+                "%s/%s), the file with --svd FILE, or a directory holding "
+                "it in EMBSIM_SVD_PATH", bd->name, bd->svd,
+                strstr(bd->svd, ".PIC") ? "edc" : "atdf", bd->svd);
         if (!svd)
             die("the %s board's peripherals are %s's: give its path with "
                 "--svd FILE, or a directory holding it in EMBSIM_SVD_PATH",

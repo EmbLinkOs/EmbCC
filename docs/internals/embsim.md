@@ -48,7 +48,10 @@ file but the network one compiles with EmbCC itself. Everything is in
 | `atdf.c` | a Microchip ATDF file (a device pack's PIC32, SAM or AVR part) read into the SVD reader's `struct svd_device`, for the register file |
 | `pic32.h` | what a PIC32's models share: interrupts through the EVIC, the peripheral bus dividers |
 | `pic32-evic.c`, `pic32-cru.c`, `pic32-tmr.c`, `pic32-gpio.c`, `pic32-uart.c`, `pic32-pmp.c`, `pic32-adc.c` | a PIC32MZ's models over its ATDF's registers: the EVIC (and the core's EIC mode), CFG's SYSKEY and the oscillator, Timer1-9, ports A-K, UART1-6, the PMP, ADCHS |
-| `pic32-boards.c` | the boards around a PIC32 (`struct board_io`): the Explorer 16/32's and the Curiosity PIC32MZ EF 2.0's LEDs and buttons, the Explorer's potentiometer, temperature sensor and HD44780 LCD |
+| `pic24.h`, `pic24.c` | the PIC24F core: the instruction set, REPEAT and the divide, the data space with its EDS window and program space visibility, table reads, traps and interrupts through the IVT, DISI, PWRSAV; its bus layout; the core's clock (`pic24_fcy`) |
+| `edc.c` | a Microchip EDC file (a device pack's `.PIC`: a PIC24's or dsPIC's SFRs) read into the SVD reader's `struct svd_device` |
+| `pic24-intc.c`, `pic24-osc.c`, `pic24-tmr.c`, `pic24-uart.c`, `pic24-adc.c`, `pic24-spi.c`, `pic24-epmp.c` | a PIC24FJ's models over its EDC's registers: the interrupt controller (driving the core), the oscillator and the PPS lock, Timer1-5, UART1-6, ADC1, SPI1-3, the EPMP's EDS space; its ports are `pic32-gpio.c`'s |
+| `pic-boards.c` | the boards around a PIC32 or a PIC24 (`struct board_io`): the Explorer 16/32's (with either PIM) and the Curiosity PIC32MZ EF 2.0's LEDs and buttons, the Explorer's potentiometer, temperature sensor, HD44780 LCD and 25LC256 EEPROM |
 | `svd-map.h`, `svd-map.c` | an SVD file's peripherals as a register file on the bus (`--svd`), `--trace-periph`, `--svd-map`, and the interface of the models over it |
 | `../embsvd/svd.h`, `../embsvd/svd.c` | the CMSIS-SVD reader, embsvd's |
 | `stm32-rcc.c`, `stm32-gpio.c`, `stm32-usart.c`, `stm32-tim.c` | the STM32's peripheral models, over its SVD's registers |
@@ -309,7 +312,7 @@ struct board_io {
 ```
 
 `s->io` is what the board wires to its part's pins: a board's own
-device (`pic32-boards.c`, a `dev` entry of size 0) fills it in at its
+device (`pic-boards.c`, a `dev` entry of size 0) fills it in at its
 creation, and the part's models call it -- the GPIO model when a pin's
 driven level changes and when a port is read, the ADC for an input's
 voltage, the PMP for its bus cycles. `--set NAME=VALUE` goes to `set`,
@@ -432,7 +435,7 @@ without the program writing ANSELx, as on the part.
 
 ### A PIC32's boards
 
-`pic32-boards.c` is one device for every board around a PIC32MZ: a
+`pic-boards.c` is one device for every board around a PIC32MZ or a PIC24: a
 `struct board` names its LEDs (port, pin, lit high or low), its buttons
 (and whether the board pulls them up), and whether it is the Explorer
 (the TC1047A, the potentiometer, the LCD). The GPIO model tells it each
@@ -442,6 +445,37 @@ its tables, an entry in `boards_[]`, its line in `boards[]` and
 `dev_types[]` in `boards.c` with the part's ATDF, `--help`, the manual,
 and a program in `tests/golden/embsim-pic32.sh` that drives each LED
 and reads each button.
+
+### Microchip's EDC, and a PIC24 on the bus
+
+A file named `.PIC` is a 16-bit part's EDC file, which `edc.c` reads into
+the same `struct svd_device`: each `<edc:SFRDef>` is a register at its
+data-space address, with its power-on value (`edc:por`) and the fields
+of its data sheet mode (`DS.0`); implemented bits no field names get a
+field of their own, so they keep what is written. The file has no
+peripherals: a run of registers from one module (`edc:_modsrc`) is one,
+named by its first register (a table in `edc.c`, else the register's
+letters), and a later run of the same module joins it. The core's
+module's registers are left out, as the core handles them.
+
+A PIC24 has two address spaces, which EmbSim's one bus holds apart
+(`pic24.h`): program memory at twice its address (a 24-bit word as four
+bytes, as XC16's ELF and HEX files lay it out, so `cpu_ops.phys` doubles
+an ELF segment's address), and the data space at `PIC24_DATA` plus its
+24-bit EDS address. `svd_device.bus_offset` places the EDC's registers
+there, `holes_zero` makes the SFR space between them read 0 (the PIC32's
+rule as well), and `--svd-map` prints the file's own addresses. The
+EPMP model adds a device over the EDS above the RAM.
+
+The interrupt controller drives the core through `struct pic24_intc`:
+the request it presents (priority and number), and what the core tells
+it -- the interrupt taken, the traps raised (INTCON1's bits), NSTDIS.
+The other models flag their interrupts with `pic24_irq`, by the EDC's
+names (`pic24_irq_named(s, "U1TX")`).
+
+The oscillator's state out of reset comes from the configuration words,
+which are in program memory: the core's reset, which comes after the
+image is loaded, calls `pic24_osc_power_on`.
 
 ## Adding a board
 
@@ -527,6 +561,15 @@ or with its own file for the six functions of `net.h`.
   Curiosity PIC32MZ EF 2.0 (`pic32-curiosity.c`: ANSELx out of reset,
   the switches with and without pull-ups, the LEDs lit low). Skipped,
   saying so, without the pack (`PIC32MZ_EF_DFP`, tools/hostpaths.sh).
+- `tests/golden/embsim-pic24.sh`: the PIC24FJ1024GB610's register file
+  from the pack's EDC against its linker script; the PIC24F core against
+  227 examples of the programmer's reference manual (`pic24-isa.s`,
+  generated: each example's Before state set, its instruction a `.word`,
+  its After state printed and held to `pic24-isa.txt`, the manual's);
+  `pic24-board.s`'s peripherals on the Explorer 16/32's PIC24 PIM. The
+  programs are assembled by `tests/golden/embsim/pic24-asm.awk`, the few
+  instructions they need, into Intel HEX. Skipped without the pack
+  (`PIC24F_GA_GB_DFP`).
 - `tests/golden/embsim-coverage.sh`: `--coverage` against a program
   whose lines carry the counts they must get, on the four cores and
   from clang's DWARF 5.

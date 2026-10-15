@@ -131,6 +131,14 @@ int pic24_irq_flag(struct sim *s, int irq)
     return (int)(c->ifs[irq / 16]->value >> (irq % 16) & 1);
 }
 
+int pic24_irq_enabled(struct sim *s, int irq)
+{
+    struct intc *c = intc_of(s);
+    if (!c || irq < 0 || irq / 16 >= c->nw)
+        return 0;
+    return (int)(c->iec[irq / 16]->value >> (irq % 16) & 1);
+}
+
 int pic24_irq_named(struct sim *s, const char *name)
 {
     return s->svd ? rf_dev_irq(s->svd, name) : -1;

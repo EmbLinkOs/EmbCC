@@ -94,5 +94,8 @@ u32 pic24_prog(struct sim *s, u32 addr);
 /* the core's clock (Fcy, instruction cycles per second), from the
  * configuration words and OSCCON and CLKDIV: the time the board reports */
 u32 pic24_fcy(struct sim *s);
+/* the oscillator's state out of reset, from the configuration words
+ * (pic24-osc.c): the core's reset calls it, the image being loaded */
+void pic24_osc_power_on(struct sim *s);
 
 #endif

@@ -762,8 +762,8 @@ static int bit_w(u32 op8, u32 i)
         break;
     case 0xa6: if (b) skip(); break;                         /* BTSS */
     case 0xa7: if (!b) skip(); break;                        /* BTSC */
-    case 0xad: {                                             /* BSW */
-        int c = zflag ? (ps->sr & SR_Z) != 0 : (ps->sr & SR_C) != 0;
+    case 0xad: {                                             /* BSW: C, or Z's complement */
+        int c = zflag ? !(ps->sr & SR_Z) : (ps->sr & SR_C) != 0;
         v = (u16)((v & ~(1u << bit)) | (u32)c << bit);
         wr = 1;
         break;
@@ -1558,6 +1558,7 @@ static void cpu_reset(struct cpu *c)
     memset(k->sw, 0, sizeof k->sw);
     k->ssr = 0;
     ps = k;
+    pic24_osc_power_on(k->sim);
 }
 
 static u32 cpu_pc(struct cpu *c)

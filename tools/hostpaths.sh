@@ -34,6 +34,9 @@ OBJCOPY=${OBJCOPY:-$(_hp_tool x86_64-elf-objcopy objcopy)}
 # its ATDF files describe every register of the parts, which EmbSim's
 # PIC32 boards are built from (tests/golden/embsim-pic32.sh).
 PIC32MZ_EF_DFP=${EMBCC_PIC32MZ_EF_DFP:-${PIC32MZ_EF_DFP:-$HOME/EmbRef/dl/pic32mz-ef-dfp/x}}
+# and its PIC24F GA/GB pack (Microchip.PIC24F-GA-GB_DFP, unpacked): the EDC
+# files of the PIC24FJ1024GB610 and its family (tests/golden/embsim-pic24.sh).
+PIC24F_GA_GB_DFP=${EMBCC_PIC24F_GA_GB_DFP:-${PIC24F_GA_GB_DFP:-$HOME/EmbRef/dl/pic24f-ga-gb-dfp/x}}
 
 # The Xtensa reference: Espressif's GCC told to generate for the de212 core
 # QEMU emulates, through a configuration plugin built from that core's

@@ -58,6 +58,10 @@ static const struct model_desc pic32mz_models[] = {
  * first, which the others raise their interrupts through */
 static const struct model_desc pic24f_models[] = {
     { "INT", "pic24-intc" },
+    { "OSC", "pic24-osc" },
+    { "PPS", "pic24-pps" },
+    { "TMR", "pic24-tmr" },
+    { "UART", "pic24-uart" },
     { "GPIO", "pic32-gpio" },
     { "PMP", "pic24-epmp" },
     { "ADC1", "pic24-adc" },
@@ -154,7 +158,8 @@ const struct board_desc boards[] = {
       "PIC32MZ2048EFM144.atdf", pic32mz_models },
     /* the PIC24FJ1024GB610 alone: the core, the memory, and every register
      * the device pack's EDC describes, with the models of its interrupt
-     * controller, ports, EPMP, ADC and SPI */
+     * controller, oscillator, PPS lock, timers, UARTs, ports, EPMP, ADC
+     * and SPI */
     { "pic24fj1024gb610", "pic24", "pic24fj1024gb610", 0, PIC24FJ1024_MEM,
       { { 0, 0, 0 } }, { { 0, 0, 0 } },
       "PIC24FJ1024GB610.PIC", pic24f_models },
@@ -237,6 +242,10 @@ static const struct model_type model_types[] = {
     { "pic24-adc", &pic24_adc_ops, pic24_adc_create },
     { "pic24-epmp", &pic24_epmp_ops, pic24_epmp_create },
     { "pic24-spi", &pic24_spi_ops, pic24_spi_create },
+    { "pic24-uart", &pic24_uart_ops, pic24_uart_create },
+    { "pic24-tmr", &pic24_tmr_ops, pic24_tmr_create },
+    { "pic24-osc", &pic24_osc_ops, pic24_osc_create },
+    { "pic24-pps", &pic24_pps_ops, pic24_pps_create },
     { 0, 0, 0 },
 };
 

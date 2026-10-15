@@ -67,8 +67,13 @@ void *pic32_adc_create(struct sim *s, struct rf_periph *p);
 
 /* a PIC24's peripheral models, over its EDC's registers (pic24.h) */
 extern const struct dev_ops pic24_intc_ops, pic24_adc_ops, pic24_epmp_ops;
-extern const struct dev_ops pic24_spi_ops;
+extern const struct dev_ops pic24_spi_ops, pic24_uart_ops, pic24_tmr_ops;
+extern const struct dev_ops pic24_osc_ops, pic24_pps_ops;
 void *pic24_intc_create(struct sim *s, struct rf_periph *p);
+void *pic24_uart_create(struct sim *s, struct rf_periph *p);
+void *pic24_tmr_create(struct sim *s, struct rf_periph *p);
+void *pic24_osc_create(struct sim *s, struct rf_periph *p);
+void *pic24_pps_create(struct sim *s, struct rf_periph *p);
 void *pic24_adc_create(struct sim *s, struct rf_periph *p);
 void *pic24_epmp_create(struct sim *s, struct rf_periph *p);
 void *pic24_spi_create(struct sim *s, struct rf_periph *p);
@@ -76,6 +81,7 @@ void *pic24_spi_create(struct sim *s, struct rf_periph *p);
  * the flag; an interrupt's number by the EDC's name (T1, ADC1), or -1 */
 void pic24_irq(struct sim *s, int irq);
 int pic24_irq_flag(struct sim *s, int irq);
+int pic24_irq_enabled(struct sim *s, int irq);
 int pic24_irq_named(struct sim *s, const char *name);
 
 /* the PIC32 and PIC24 boards' own: LEDs, buttons, the Explorer 16/32's

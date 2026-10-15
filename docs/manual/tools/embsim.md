@@ -1,9 +1,11 @@
 # embsim — run a firmware image without a board
 
-`embsim` runs a linked ELF image the way the part does: a Cortex-M
-(ARMv6-M, ARMv7-M), a RISC-V core (RV32 and RV64, IMAFDC), an AVR
-(the ATmega328P) or a MIPS32 Release 2 core (QEMU malta's 24Kc). It is ISO C with no dependencies, so it builds on any
-machine, including one without QEMU. It counts the instructions it executes and estimates the
+`embsim` runs a linked ELF image, or an Intel HEX one, the way the part
+does: a Cortex-M (ARMv6-M, ARMv7-M), a RISC-V core (RV32 and RV64,
+IMAFDC), an AVR (the ATmega328P), a MIPS32 Release 2 core (QEMU malta's
+24Kc, a PIC32MZ's) or a PIC24F (the PIC24FJ1024GB610). It is ISO C
+with no dependencies, so it builds on any machine, including one
+without QEMU. It counts the instructions it executes and estimates the
 cycles they take, and gdb, lldb or embdbg can debug the image while it
 runs. Given the part's CMSIS-SVD file, it puts every peripheral register
 the file describes on the bus, and traces a driver's accesses to them by
@@ -14,7 +16,7 @@ and how to add a core, a peripheral or a board, is
 ## Synopsis
 
 ```text
-embsim IMAGE.elf [--board NAME] [--cpu NAME] [--ram-size SIZE]
+embsim IMAGE.elf|IMAGE.hex [--board NAME] [--cpu NAME] [--ram-size SIZE]
                  [--until STRING] [--max-insns N] [--stats]
                  [--count FILE] [--trace FILE] [--no-semihosting]
                  [--gdb [HOST:]PORT [--gdb-wait]]
@@ -50,7 +52,13 @@ embsim fw.elf --svd STM32F405.svd --trace-periph=USART2,RCC
 
 embcc --target=mipsel-none-elf --mcu=32MZ2048EFH100 --dfp=$DFP *.c *.S -o fw.elf
 embsim fw.elf --board explorer16-32 --dfp $DFP --set temperature=30
+
+embsim thermo.hex --board explorer16-32-pic24 --dfp $DFP24 --set S3=pressed
 ```
+
+The image is an ELF file (its PT_LOAD segments), or an Intel HEX file
+(MPLAB's production `.hex`, an objcopy `-O ihex`), whose records are
+placed at their addresses on EmbSim's bus.
 
 ## The boards
 
@@ -71,12 +79,14 @@ built for QEMU runs unchanged.
 | `pic32mz2048efh100` | PIC32MZ EF (MIPS32r2, EIC mode, shadow sets) | 512 KiB RAM at 0, 2 MiB flash at `0x1D000000`, boot flash at `0x1FC00000` | UART1-6, of the part's ATDF ([below](#pic32-parts-the-explorer-1632-and-the-curiosity)) |
 | `explorer16-32` | the same part, on Microchip's Explorer 16/32 | as `pic32mz2048efh100` | the same, and the board's LEDs, buttons, sensors and LCD |
 | `curiosity-pic32mz-ef-2` | PIC32MZ2048EFM144, on Microchip's Curiosity PIC32MZ EF 2.0 | as `pic32mz2048efh100` | the same, and the board's LEDs and switches |
+| `pic24fj1024gb610` | PIC24FJ1024GB610 (the PIC24F core, with EDS) | 1 MiB of program flash, 32 KiB of RAM at data `0x0800` | UART1-6, of the part's EDC ([below](#pic24-parts-and-the-explorer-1632s-pic24-pim)) |
+| `explorer16-32-pic24` | the same part, on the Explorer 16/32 with its PIC24FJ1024GB610 PIM | as `pic24fj1024gb610` | the same, and the board's LEDs, buttons, sensors, LCD and EEPROM |
 
 - `--cpu` runs another core on the board: `cortex-m0`, `cortex-m0plus`,
   `cortex-m3`, `cortex-m4` or `cortex-m7` on the Cortex-M boards; `rv32`
   or `rv64` on `virt`, which otherwise takes the image's width (an
   ELFCLASS64 image is RV64); `atmega328p` on `uno`; `24kc` on `malta`;
-  `pic32mz` on the PIC32 boards.
+  `pic32mz` on the PIC32 boards; `pic24fj1024gb610` on the PIC24 ones.
 - `--ram-size` changes the size of the SRAM at `0x20000000`, or of
   virt's RAM (the harness's QEMU runs give it `-m 8`, so
   `--ram-size 8M` is the same machine).
@@ -93,6 +103,12 @@ built for QEMU runs unchanged.
   written with `0x42` resets the board, which ends the run, as QEMU's
   `-no-reboot` does. A MIPS image's segments are loaded at the physical
   address of their kseg0 or kseg1 address.
+- On the PIC24 boards EmbSim's bus holds both of the part's spaces:
+  program memory at twice its address (each 24-bit word the four bytes
+  an XC16 image and its HEX file give it: its three and a phantom 0),
+  the configuration memory at twice `0x800000`, and the data space at
+  `0x2000000` plus its Extended Data Space address. An ELF segment goes
+  to twice its load address; a HEX record to its address as written.
 - A segment of the image outside the board's memory gets memory of its
   own, so a link script for a similar part still runs.
 - Flash on the lm3s6965, the micro:bit and the STM32F405 ignores
@@ -600,6 +616,146 @@ module disables, sleep and idle.
   ends as a lockup at the breakpoint (startups put one in a default
   handler, for a debugger to stop at).
 
+## PIC24 parts, and the Explorer 16/32's PIC24 PIM
+
+QEMU has no PIC24 either. A PIC24 board is built from the part's device
+pack -- `Microchip.PIC24F-GA-GB_DFP`, from MPLAB X or
+packs.download.microchip.com -- found with `--dfp DIR` (the pack's
+directory, which holds `edc/PIC24FJ1024GB610.PIC`), `--svd FILE.PIC`,
+or `EMBSIM_SVD_PATH`. An image is XC16's: its ELF file, or the HEX file
+MPLAB X writes beside it.
+
+```sh
+embsim dist/default/production/thermo.X.production.hex \
+    --board explorer16-32-pic24 --dfp ~/.mchp_packs/Microchip/PIC24F-GA-GB_DFP/1.9.336
+```
+
+**The registers.** The pack's EDC file (MPLAB's description of a 16-bit
+part) gives every special function register: 664 on the
+PIC24FJ1024GB610, each at the address the pack's linker script
+(`xc16/support/PIC24F/gld/p24FJ1024GB610.gld`) gives it, with its value
+at power-on and the fields of the data sheet's names. Each behaves as
+[above](#peripherals-from-an-svd-file---svd); the unimplemented bits
+read 0, and the SFR space where no register is reads 0 and ignores
+writes, as the part's does. The file names no peripherals: a run of
+registers of one module is one, by its first register's name -- `INT`
+(the interrupt controller), `OSC`, `TMR` (Timer1-5), `UART` (UART1-6),
+`SPI` (SPI1-3), `GPIO` (ports A-G), `ADC1`, `PMP`, `PPS`, `RTCC`, and so
+on, as `--svd-map` lists them. The core's registers (W0-W15, SPLIM, PCL,
+PCH, DSRPAG, DSWPAG, RCOUNT, SR, CORCON, DISICNT, TBLPAG) are the core's.
+
+**The models:**
+
+- **The interrupt controller.** An interrupt is requested while its
+  flag (IFSx), its enable (IECx) and a priority (IPCx: 1-7) are set and
+  INTCON2.GIE is; the highest priority is presented, then the lowest
+  number, and the core takes it when it is above its own. INTTREG says
+  which; INTCON1 gets the traps' status bits; NSTDIS stops nesting.
+- **The oscillator.** OSCCON starts on the configuration words' FNOSC;
+  its bytes take a write only right after their unlock sequence (0x46,
+  0x57 to the low byte; 0x78, 0x9A to the high one), as XC16's
+  `__builtin_write_OSCCONL` and `_OSCCONH` write them, and a write
+  without one is ignored with a warning. OSWEN switches at once. The
+  core runs at half the oscillator: the 8 MHz FRC, the FRC divided by
+  CLKDIV.RCDIV (OSCFDIV), or 32 MHz from the 96 MHz PLL over
+  CLKDIV.CPDIV -- the time the board reports.
+- **The Peripheral Pin Select** registers ignore writes while
+  OSCCON.IOLOCK is set.
+- **Timer1 to Timer5**, at the instruction clock over TCKPS (1, 8, 64,
+  256), their flag at the match with PRx; Timer2/3 and Timer4/5 pair
+  into 32-bit timers (T32), TMR3HLD and TMR5HLD latched by a read of
+  the low half.
+- **Ports A-G**, as the PIC32's (ANSx and IOCPUx for ANSELx and CNPUx).
+- **UART1-6.** A byte written to UxTXREG with UARTEN and UTXEN goes to
+  stdout at once; the transmit interrupt is flagged as the buffer has
+  room again; the run's input arrives at the first UART on.
+- **The EPMP**, in master mode: its chip selects' regions of the
+  Extended Data Space (PMCSxBS), reached through the EDS window, are bus
+  cycles to the board: the word offset of the address on the PMA lines
+  PMCON4 enables, the low byte on an 8-bit port (one cycle a word, as
+  Microchip's own Explorer 16/32 LCD driver depends on), 16 bits on a
+  16-bit one.
+- **ADC1**: SAMP or ASAM start a sample, the program's clearing of SAMP
+  (SSRC 0000) or SAMC TADs (SSRC 0111) the conversion, 12 TADs (14 with
+  MODE12); CH0SA's input, or with CSCNA the next of AD1CSSL/AD1CSSH's;
+  the result against AVDD (3.3 V) in FORM's format, into the FIFO or the
+  input's own buffer (BUFREGEN), and the ADC1 interrupt after SMPI + 1.
+  AN28 is the band gap (1.2 V), AN29 AVSS, AN30 AVDD.
+- **SPI1-3**, as masters: a byte written to SPIxBUFL is exchanged at
+  once with the slave the board has on the unit's pins, and read back
+  from SPIxBUFL (SPIRBE, SPIRBF, SPIROV).
+
+**The `explorer16-32-pic24` board** is the Explorer 16/32 with the
+PIC24FJ1024GB610 PIM (MA240023). The board's schematic names the socket
+pin of each part, and the PIM connects the part's pins to the socket
+one to one, but for the exceptions its information sheet (DS50002423)
+lists; its jumpers are in their USB position:
+
+| | Pin | |
+|---|---|---|
+| LEDs D3-D10 | RA0-RA7 | lit when the pin drives high |
+| buttons S3, S4, S5, S6 | RD6, RD13, RA7 (with D10), RD7 | low when pressed (the board's pull-ups) |
+| TC1047A temperature sensor | AN4 (RB4) | 500 mV + 10 mV per degree C |
+| potentiometer R6 | AN5 (RB5) | |
+| 16x2 LCD, HD44780 | PMD0-7, RS on PMA0, E on PMWR, R/W on PMRD | the EPMP |
+| 25LC256 serial EEPROM | SCK RG6 (RP21), SI RG8 (RP19), SO RG7 (RP26), CS RG0 | the SPI unit the PPS puts on those pins |
+| USB-UART | the UART the program uses | every UART's output is stdout |
+
+The EEPROM is a 25LC256: 32 KiB, erased (0xFF) when the run starts;
+READ, WRITE (a 64-byte page, written as CS rises, then 5 ms busy),
+WREN, WRDI, RDSR, WRSR and its block protection. The run reports the
+LEDs and the LCD as the PIC32 Explorer does; `--set` gives
+`temperature=DEGREES`, `pot=VOLTS` or `pot=PERCENT%`, and `S3` to `S6`
+`=pressed` or `=released`.
+
+**Not modelled on the PIC24:** the other peripherals' behaviour (their
+registers keep what is written: RTCC, DMA, I2C, the CCPs, input capture
+and output compare, CRC, CLC, CTMU, USB, the comparators, the NVM
+controller and so self-programming), the change-notification
+interrupts, the external interrupt pins, the alternate vector table,
+the watchdog and deadman timer, Sleep and Idle beyond waiting for an
+interrupt, the EPMP's slave modes and its wait states' time, the SPI's
+and the UART's bit timing.
+
+## What it models: the PIC24F core
+
+- **The instruction set** of the PIC24F, by Microchip's 16-bit MCU and
+  DSC Programmer's Reference Manual (DS70000157): every instruction the
+  manual marks as the PIC24F's, byte and word forms, with the
+  addressing modes (register direct, indirect with pre/post increment
+  and decrement, register offset, signed 10-bit offset, the file
+  registers' 13 and 16-bit addresses) and SR's flags as each
+  description gives them (Z only cleared by ADDC, SUBB, SUBBR, CPB).
+  BSW.Z writes Z's complement, as the manual's examples have it. The
+  dsPIC's DSP instructions and the PIC24E's are not the core's: an
+  opcode it does not have makes the part reset (RCON.IOPUWR), and the
+  run ends there as a lockup naming it.
+- **REPEAT**: the target runs RCOUNT + 1 times, SR.RA set meanwhile,
+  and may be interrupted between any two runs. DIV.S, DIV.U and their
+  .D forms give the quotient, remainder and flags on the first of their
+  18 runs (REPEAT #17), so an interrupt in the middle leaves W0 and W1
+  as the program will see them; a divide by zero is a math error trap.
+- **The data space.** The core's registers at 0x0000-0x0055; a W
+  register used as a pointer before anything is written to it makes the
+  part reset (RCON.IOPUWR): the run ends there. The SFRs and RAM below
+  0x8000; above, the EDS window: DSRPAG (reads) and DSWPAG (writes)
+  pages 1-0x1FF are the EDS (RAM above 0x8000, then the EPMP's space),
+  0x200-0x2FF program memory's low words and 0x300-0x3FF its high bytes
+  (program space visibility: XC16's `const` data); page 0 there is an
+  address error, as is a word access at an odd address. W15 as a
+  pointer below 0x0800 or above SPLIM is a stack error.
+- **Table reads** of program and configuration memory (TBLPAG); table
+  writes go to the flash's latches, which are not modelled.
+- **Exceptions.** Traps (address, stack and math errors, the hard and
+  soft ones) and interrupts through the vector table at 0x000004: the
+  PC and SR's low byte with IPL3 pushed, the priority raised (IPL3 for
+  a trap), the vector's address; RETFIE undoes it. DISI holds
+  priorities 1-6 off for its count. A trap prints what raised it on
+  stderr; one at or below the CPU's priority makes the part reset, and
+  the run ends there.
+- **PWRSAV** waits for an interrupt, skipping ahead to the device that
+  will raise one; with none, the run ends. RESET ends it (exit 0).
+
 ## Counting
 
 Each instruction gets the cost in `tools/bench/cost.h`, the table
@@ -618,6 +774,13 @@ multiply into HI and LO or `mul` 2, a divide 18, and nothing more for a
 taken branch -- the delay slot hides it, and its instruction counts as
 any other.
 
+On the PIC24F the count is the manual's, in instruction cycles (half
+the oscillator's): one an instruction, two for a taken branch, GOTO,
+CALL, RCALL, MOV.D, PUSH.D, POP.D and the table instructions, three
+for RETURN, RETLW and RETFIE, one more for a skip over a word and two
+over a two-word instruction, one more for a read through the EDS
+window, five for an exception's entry.
+
 On the Cortex-M, RISC-V and MIPS the estimate is a model, not a
 cycle-accurate core: there are no wait states and no pipeline stalls. It
 charges the things a compiler chooses between. On the AVR it is the
@@ -629,7 +792,8 @@ not in the count (QEMU's plugin counts them; see below).
 executed (`-` for stderr); on RISC-V, the instruction as one word, or
 as one halfword for a compressed one; on the AVR, its one or two
 words, at the byte address; on MIPS, the instruction as one word, at
-its virtual address.
+its virtual address; on the PIC24, its one or two 24-bit words, at its
+program address.
 
 ## Output, and the end of a run
 
@@ -652,11 +816,12 @@ On the Cortex-M, semihosting (`bkpt 0xab`) is on unless
 | the image stores 0x5555 to virt's test device | 0 |
 | the image stores 0x3333 to the test device | the upper halfword stored |
 | the image writes 0x42 to malta's SOFTRES | 0 |
+| a PIC24's RESET instruction | 0 |
 | the image requests a reset (AIRCR.SYSRESETREQ) | 0 |
-| a branch to itself, or a WFI or MIPS wait, that no exception or interrupt can interrupt | 0 |
+| a branch to itself, or a WFI, MIPS wait or PIC24 PWRSAV, that no exception or interrupt can interrupt | 0 |
 | an AVR SLEEP that nothing can wake (the AVR harness ends in such a loop) | 0 |
 | the output contains `--until`'s string | 0 |
-| the core locks up (a RISC-V trap or MIPS exception whose vector cannot be fetched; an AVR instruction the part does not have; a MIPS sdbbp with no debugger; an instruction EmbSim does not model) | 3 |
+| the core locks up (a RISC-V trap or MIPS exception whose vector cannot be fetched; an AVR instruction the part does not have; a MIPS sdbbp with no debugger; a PIC24 opcode the core does not have, a W register used as a pointer before it is written, or a trap at the CPU's priority -- each a reset on the part; an instruction EmbSim does not model) | 3 |
 | the stack overflows, with `--stack-report` or `--stack-limit` | 3 |
 | `--max-insns` instructions have run | 4 |
 | `--replay`: the run is not the recording's | 5 |
@@ -1168,6 +1333,17 @@ On MIPS:
   Cause, PC, the FPU's as 0), and would compare a map's kseg0 addresses
   with its own sign-extended ones.
 
+On the PIC24F:
+- The dsPIC's DSP engine and the PIC24E's and dsPIC33's instructions
+  (MOVPAG, CPBEQ and the rest; each ends the run as a lockup); the
+  flash's programming (TBLWT and the NVM controller); the debug
+  executive and BREAK.
+- `--coverage`, `--profile`, `--stack-report` and `--fault-report`
+  do not follow the PIC24 core yet; no gdb has a PIC24 target, so the
+  GDB server's registers are EmbSim's own numbering (W0-W15, SPLIM, the
+  PC, SR, CORCON, DSRPAG, DSWPAG, RCOUNT, TBLPAG).
+- Program memory an image leaves out reads 0 (NOP), not erased flash.
+
 On RISC-V:
 - Supervisor mode and virtual memory, and the hypervisor.
 - Physical memory protection: the PMP registers are kept, not
@@ -1295,3 +1471,29 @@ over a table of operands, the multiplies, the 16-bit forms, the skips,
 the branches, the addressing modes, LPM, Timer/Counter1's interrupt --
 which must be QEMU's. And `embsim-gdb.sh` runs its gdb session on the
 AVR against QEMU's uno stub.
+
+**MIPS.** `tests/golden/embsim-mips.sh` runs the exec corpus at -O0,
+-O2 and -Os on QEMU's malta and on EmbSim's (the output and the exit
+status), `mips-isa.c`'s instruction edges and `mips-fpu.c`'s FPU edges
+against QEMU's 24Kc and P5600, and the ends of a run.
+
+**PIC32.** No QEMU has a PIC32. `tests/golden/embsim-pic32.sh` holds the
+register file the PIC32MZ2048EFH100's ATDF gives to the pack's own
+header (every SFR and its CLR, SET and INV at their addresses), and an
+EmbCC program on each PIC32 board to its record: the DSP ASE after
+EmbCC's startup, the EVIC, shadow sets, the timers, the ports, the ADC,
+the LCD on the PMP, SYSKEY on the Explorer; ANSELx, the switches and the
+LEDs on the Curiosity.
+
+**PIC24.** No QEMU has a PIC24, and no PIC24 assembler is at hand:
+`tests/golden/embsim-pic24.sh` holds the EDC's register file to the
+pack's linker script (every SFR at its address), and the instruction
+set to the examples of the programmer's reference manual: 227 of them,
+each case setting the example's Before state and printing its After
+state (`pic24-isa.s`, assembled by `pic24-asm.awk`, a few instructions'
+assembler, into an Intel HEX image), which must be what the manual
+prints -- the examples that contradict their own instruction's
+description are left out, and named. `pic24-board.s` drives the
+peripherals and the Explorer 16/32's PIC24 PIM: Timer1's interrupt, the
+LEDs, the buttons, the sensors through ADC1, the LCD through the EPMP,
+the EEPROM through SPI1 and the Peripheral Pin Select.
