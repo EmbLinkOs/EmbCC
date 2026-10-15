@@ -239,71 +239,15 @@ if ! command -v "$QA" > /dev/null 2>&1 || ! "$QA" -M help 2>/dev/null | grep -q 
     echo "embsim-pico: no QEMU micro:bit: the core is not compared with QEMU's"
     exit 0
 fi
-c=$out/corpus; mkdir -p "$c/p"
-inc=${QEMU_PLUGIN_INC:-/opt/homebrew/include}
-{ cc -shared -fPIC -O2 -I"$inc" $(pkg-config --cflags glib-2.0 2>/dev/null) \
-     -undefined dynamic_lookup -o "$c/icount.so" tools/bench/icount.c ||
-  cc -shared -fPIC -O2 -I"$inc" $(pkg-config --cflags glib-2.0 2>/dev/null) \
-     -o "$c/icount.so" tools/bench/icount.c; } 2>/dev/null ||
-    { echo "embsim-pico: QEMU's counting plugin does not build: the core is not compared"; exit 0; }
-CT=thumbv6m-none-eabi
-{ EMBCC=$EMBCC sh tools/build-rt.sh $CT "$c" && EMBCC=$EMBCC sh tools/build-libc.sh $CT "$c"; } \
-    > "$c/build.log" 2>&1 || fail "lib/rt or lib/libc does not build for $CT"
-awk '/__attribute__\(\(section\("\.boot2"\)/,/^};/' "$out/startup.c" > "$c/boot2.c"
-cat > "$c/drv.c" <<'EOT'
-int prog_main(void);
-extern void (*__init_array_start[])(void), (*__init_array_end[])(void);
-static volatile unsigned blk[2];
-int main(void)
-{
-    for (void (**f)(void) = __init_array_start; f < __init_array_end; f++)
-        (*f)();
-    blk[0] = 0x20026u;
-    blk[1] = (unsigned)prog_main();
-    __asm__ volatile("mov r1, %0\n\tmovs r0, #0x20\n\tbkpt #0xab"
-                     : : "r"(blk) : "r0", "r1", "memory");
-    for (;;)
-        ;
-}
-EOT
-"$EMBCC" --target=$CT -O2 -c "$c/boot2.c" -o "$c/boot2.o" &&
-"$EMBCC" --target=$CT -O2 -c $d/corpus-boot.c -o "$c/boot.o" &&
-"$EMBCC" --target=$CT -O1 -c "$c/drv.c" -o "$c/drv.o" || fail "the corpus's startup does not build"
-printf 'int main(void) { return 0; }\n' > "$c/empty.c"
-cat > "$c/one.sh" <<'EOT'
-# one.sh PROG.c: one program on QEMU's micro:bit and EmbSim's Pico
-c=$CDIR; f=$1; n=$(basename "$f" .c); o=$c/p/$n
-"$EMBCC" --target=thumbv6m-none-eabi -O2 -Dmain=prog_main -Ilib/libc/include -c "$f" -o $o.o 2>/dev/null &&
-"$EMBLD" -T $D/corpus-microbit.ld $c/boot.o $c/drv.o $o.o $c/libc.a $c/librt.a -o $o.mb.elf 2>/dev/null &&
-"$EMBLD" -T $D/corpus-pico.ld $c/boot2.o $c/boot.o $c/drv.o $o.o $c/libc.a $c/librt.a -o $o.pi.elf 2>/dev/null ||
-    { echo "NA $n"; exit 0; }
-EMBSIM_SVD_PATH=$SVDDIR "$EMBSIM" $o.pi.elf --board pico --max-insns 4000000000 \
-    --count $o.en > $o.eout 2> $o.eerr; es=$?
-sh tests/harness/qrun.sh 30 "$QA" -M microbit -global nrf51-soc.sram-size=65536 \
-    -chardev stdio,id=sh0 -semihosting-config enable=on,target=native,chardev=sh0 \
-    -serial none -monitor none -nographic -plugin $c/icount.so,out=$o.qn \
-    -kernel $o.mb.elf > $o.qout 2> /dev/null; qs=$?
-[ $qs -ge 124 ] && { echo "NA $n (QEMU did not finish)"; exit 0; }
-if [ $qs != $es ] || ! cmp -s $o.qout $o.eout; then
-    echo "DIFF $n: QEMU exits $qs, EmbSim $es$(cmp -s $o.qout $o.eout || echo ', and the output differs')"
-    exit 0
-fi
-[ -s $o.qn ] || { echo "NA $n (no count from QEMU)"; exit 0; }
-echo "COUNT $n $(($(sed -n 1p $o.en) - $(sed -n 1p $o.qn))) $(($(sed -n 2p $o.en) - $(sed -n 2p $o.qn))) $(sed -n 1p $o.en)"
-EOT
-export CDIR=$c D=$PWD/$d SVDDIR=$svddir QA EMBCC EMBLD EMBSIM
-base=$(sh "$c/one.sh" "$c/empty.c")
-case $base in
-    COUNT*) set -- $base; bi=$3; bc=$4 ;;
-    *) fail "a main that returns does not run on both: $base" ;;
-esac
-ls tests/exec/*.c | xargs -P "${EMBCC_JOBS:-8}" -n 1 sh "$c/one.sh" > "$c/results.txt" 2>&1
-grep '^DIFF' "$c/results.txt" && fail "the Pico's core and QEMU's M0 disagree"
-bad=$(grep '^COUNT' "$c/results.txt" | awk -v i="$bi" -v k="$bc" '$3 != i || $4 != k')
-[ -z "$bad" ] || { echo "$bad" | head -5
-    fail "EmbSim's count differs from QEMU's by other than the boot's $bi instructions and $bc cycles"; }
-same=$(grep -c '^COUNT' "$c/results.txt")
-na=$(grep -c '^NA' "$c/results.txt")
-insns=$(grep '^COUNT' "$c/results.txt" | awk '{ s += $5 } END { print s + 0 }')
-[ "$same" -ge 240 ] || fail "only $same programs were compared ($na not applicable)"
-echo "embsim-pico: the exec corpus from the Pico's flash: $same programs as QEMU's micro:bit, to the instruction and the cycle ($insns instructions; the boot's $bi more); $na not applicable"
+. tests/harness/embsim-corpus.sh
+CORP=$out/corpus CTRIPLE=thumbv6m-none-eabi CFLAGS_C= CBOOT=$d/corpus-boot.c
+CEXTRA=$CORP/boot2.o QLD=$d/corpus-microbit.ld ELD=$d/corpus-pico.ld CMIN=240
+QARGS="-M microbit -global nrf51-soc.sram-size=65536" EARGS="--board pico"
+EMBSIM_SVD_PATH=$svddir; export EMBSIM_SVD_PATH
+mkdir -p "$CORP"
+awk '/__attribute__\(\(section\("\.boot2"\)/,/^};/' "$out/startup.c" > "$CORP/boot2.c"
+"$EMBCC" --target=$CTRIPLE -O2 -c "$CORP/boot2.c" -o "$CORP/boot2.o" || fail "boot2.c does not build"
+why=$(corpus_run); r=$?
+[ $r = 2 ] && { echo "embsim-pico: $why: the core is not compared with QEMU's"; exit 0; }
+[ $r = 0 ] || { echo "$why"; fail "the exec corpus on the Pico and on QEMU's micro:bit"; }
+echo "embsim-pico: the exec corpus from the Pico's flash, against QEMU's micro:bit: $(cat "$CORP/summary")"

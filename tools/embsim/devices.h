@@ -51,6 +51,10 @@ void *stm32_rcc_create(struct sim *s, struct rf_periph *p);
 void *stm32_gpio_create(struct sim *s, struct rf_periph *p);
 void *stm32_usart_create(struct sim *s, struct rf_periph *p);
 void *stm32_tim_create(struct sim *s, struct rf_periph *p);
+/* an STM32F1's GPIO (CRL/CRH), and the board's pins changing under it */
+extern const struct dev_ops stm32f1_gpio_ops;
+void *stm32f1_gpio_create(struct sim *s, struct rf_periph *p);
+void stm32f1_pins_changed(struct sim *s);
 
 /* a PIC32's peripheral models, over its ATDF's registers (pic32.h) */
 extern const struct dev_ops pic32_evic_ops, pic32_cfg_ops, pic32_cru_ops;

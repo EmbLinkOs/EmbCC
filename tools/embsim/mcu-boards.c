@@ -14,7 +14,9 @@
  *     Datasheet", 2.1 and 4.1): the LED on GP25, lit high; GP24 is VBUS
  *     sense, high (the board on USB); the BOOTSEL button pulls the QSPI
  *     chip select low (port 1, bit 1), which the program reads with the
- *     select let go (rp2040-io.c). */
+ *     select let go (rp2040-io.c);
+ *   - bluepill: the STM32F103C8 board sold as the "Blue Pill": its LED on
+ *     PC13, lit low (to 3.3 V through a resistor); no user button. */
 #include <stdlib.h>
 #include <string.h>
 
@@ -41,11 +43,13 @@ struct mboard {
 static const struct mled pico_leds[] = { { 0, 25, "LED", "GP25", 0 } };
 static const struct mbutton pico_buttons[] = { { 1, 1, "BOOTSEL", 1 } };
 static const struct mfixed pico_fixed[] = { { 0, 24, 1 } };
+static const struct mled bluepill_leds[] = { { 2, 13, "LED", "PC13", 1 } };
 
 #define N(a) (int)(sizeof a / sizeof a[0])
 static const struct mboard mboards[] = {
     { "pico", pico_leds, N(pico_leds), pico_buttons, N(pico_buttons),
       pico_fixed, N(pico_fixed), 0, rp2040_pins_changed },
+    { "bluepill", bluepill_leds, N(bluepill_leds), 0, 0, 0, 0, 0, stm32f1_pins_changed },
 };
 
 #define MAXLED 8

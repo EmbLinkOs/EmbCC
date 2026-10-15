@@ -11,11 +11,17 @@
  *     the other boards' UARTs do, at once: TXE stays set and TC sets.
  *     Without UE and TE nothing is sent;
  *   - the interrupt (the SVD's, for this USART) is made pending when an
- *     access leaves TXE with TXEIE, TC with TCIE or RXNE with RXNEIE set.
+ *     access leaves TXE with TXEIE, TC with TCIE or RXNE with RXNEIE set;
+ *   - USART1's receiver is the run's input (--input): a byte comes in
+ *     while UE and RE are set and DR holds none (RXNE clear), sets RXNE
+ *     (and raises the interrupt with RXNEIE), and a read of DR takes it
+ *     and clears RXNE.
  *
- * Not modelled: reception (RXNE never sets: there is no input), the baud
- * rate's time (a byte takes no time), the error flags, DMA. */
+ * Not modelled: the other USARTs' reception, the baud rate's time (a
+ * byte takes no time), the error flags (ORE never sets: a byte waits for
+ * room), DMA. */
 #include <stdlib.h>
+#include <string.h>
 
 #include "devices.h"
 #include "svd-map.h"
@@ -24,8 +30,9 @@ struct usart {
     struct sim *s;
     struct rf_periph *p;
     struct rf_reg *sr, *dr, *cr1;
-    u64 txe, tc, rxne, ue, te, txeie, tcie, rxneie;
+    u64 txe, tc, rxne, ue, te, re, txeie, tcie, rxneie;
     int irq;
+    u8 rx;                          /* the byte received */
 };
 
 static void update_irq(struct usart *u)
@@ -39,7 +46,26 @@ static void update_irq(struct usart *u)
 static u32 usart_read(void *ctx, u32 off, int n)
 {
     struct usart *u = ctx;
+    if (off == rf_off(u->dr) && (u->sr->value & u->rxne)) {
+        if (!u->s->bus.debug)
+            rf_hw(u->sr, u->sr->value & ~u->rxne);
+        return u->rx;
+    }
     return rf_read(u->p, off, n);
+}
+
+static int usart_room(void *ctx)
+{
+    struct usart *u = ctx;
+    return (u->cr1->value & u->ue) && (u->cr1->value & u->re) && !(u->sr->value & u->rxne);
+}
+
+static void usart_put(void *ctx, int c)
+{
+    struct usart *u = ctx;
+    u->rx = (u8)c;
+    rf_hw(u->sr, u->sr->value | u->rxne);
+    update_irq(u);
 }
 
 static void usart_write(void *ctx, u32 off, int n, u32 v)
@@ -73,6 +99,7 @@ void *stm32_usart_create(struct sim *s, struct rf_periph *p)
     u.rxne = rf_mask(u.sr, "RXNE");
     u.ue = rf_mask(u.cr1, "UE");
     u.te = rf_mask(u.cr1, "TE");
+    u.re = rf_mask(u.cr1, "RE");
     u.txeie = rf_mask(u.cr1, "TXEIE");
     u.tcie = rf_mask(u.cr1, "TCIE");
     u.rxneie = rf_mask(u.cr1, "RXNEIE");
@@ -82,9 +109,12 @@ void *stm32_usart_create(struct sim *s, struct rf_periph *p)
     rf_set_reset(u.sr, u.txe | u.tc);
     rf_set_mwv(u.sr, rf_mask(u.sr, "CTS") | rf_mask(u.sr, "LBD") | u.tc | u.rxne,
                MWV_0CLR);
+    u.rx = 0;
     struct usart *c = malloc(sizeof *c);
     if (!c)
         die("out of memory");
     *c = u;
+    if (!strcmp(p->name, "USART1") && u.rxne && u.re)
+        sim_rx_port(s, usart_room, usart_put, c);
     return c;
 }

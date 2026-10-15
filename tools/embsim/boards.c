@@ -42,6 +42,16 @@ static const struct model_desc stm32_models[] = {
     { 0, 0 },
 };
 
+/* an STM32F1's: its GPIO ports are CRL/CRH ones (RM0008) */
+static const struct model_desc stm32f1_models[] = {
+    { "RCC", "stm32-rcc" },         /* first: the others' clock gates */
+    { "GPIO*", "stm32f1-gpio" },
+    { "USART*", "stm32-usart" },
+    { "UART*", "stm32-usart" },
+    { "TIM*", "stm32-tim" },
+    { 0, 0 },
+};
+
 /* a PIC32MZ's models, over its ATDF (pic32.h); the EVIC first, which
  * the others raise their interrupts through, and the oscillator's, whose
  * bus dividers the timers read */
@@ -189,6 +199,16 @@ const struct board_desc boards[] = {
         { 0x10000000u, KB(64), MEM_RAM, 0, 0, 0 } },
       { { 0, 0, 0 } },
       BITBAND, "STM32F405.svd", stm32_models, 0 },
+    /* the "Blue Pill": an STM32F103C8 (a Cortex-M3, 4 NVIC priority bits)
+     * with 64 KiB of flash at 0x08000000, seen at 0 too (BOOT0 low), and
+     * 20 KiB of SRAM; the peripherals ST's STM32F103xx.svd's, the F1's
+     * models over them; the LED on PC13, lit low */
+    { "bluepill", "cortex-m", "cortex-m3", 4,
+      { { 0x08000000u, KB(64), MEM_FLASH, 0, 0, 0xffffffffu },
+        { 0, KB(64), MEM_ALIAS, 0, 0x08000000u, 0 },
+        { 0x20000000u, KB(20), MEM_RAM, 1, 0, 0 } },
+      { { "bluepill", 0, 0 } },
+      BITBAND, "STM32F103xx.svd", stm32f1_models, 0 },
     /* QEMU's virt, RV32 or RV64 by the image: the reset ROM where the
      * core starts, the test device that ends a run, the CLINT, the
      * NS16550A, and the PLIC's space reading as zero */
@@ -329,6 +349,7 @@ static const struct dev_type dev_types[] = {
     { "explorer16-32-dspic33", &pic_board_ops, pic_board_create },
     { "rp2040-rom", &rp2040_rom_ops, rp2040_rom_create },
     { "pico", &mcu_board_ops, mcu_board_create },
+    { "bluepill", &mcu_board_ops, mcu_board_create },
 };
 
 /* ---- the peripheral models, over an SVD's registers (svd-map.h) -------- */
@@ -338,6 +359,7 @@ static const struct model_type model_types[] = {
     { "stm32-gpio", &stm32_gpio_ops, stm32_gpio_create },
     { "stm32-usart", &stm32_usart_ops, stm32_usart_create },
     { "stm32-tim", &stm32_tim_ops, stm32_tim_create },
+    { "stm32f1-gpio", &stm32f1_gpio_ops, stm32f1_gpio_create },
     { "pic32-evic", &pic32_evic_ops, pic32_evic_create },
     { "pic32-cfg", &pic32_cfg_ops, pic32_cfg_create },
     { "pic32-cru", &pic32_cru_ops, pic32_cru_create },
