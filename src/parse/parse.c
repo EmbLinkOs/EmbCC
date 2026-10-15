@@ -3144,6 +3144,7 @@ static struct type *parse_array_dims(struct parser *ps, struct type *t)
                            "hold at most %ld bytes", dims[i], ty_name(t),
                            0x7fffffffL);
             t = ty_array_sized(t, dims[i]);   /* `[0]`: complete, size 0 */
+        }
         else
             t = ty_array(t, dims[i]);
     }
@@ -3292,7 +3293,6 @@ static struct type *parse_struct_body(struct parser *ps, struct type *t,
     struct attrs at = *lead;     /* struct __attribute__((packed)) {...} */
     parse_attributes(ps, &at);   /* struct {...} __attribute__((packed)) */
     /* `struct E { };`: GNU C's, of size 0 (ISO C wants a member) */
-    ty_struct_layout(t, ms, n, at.packed, at.aligned, ps->pack_cur);
     {
         /* the members' sizes and the most padding they could need: past
          * an int, the offsets ty_struct_layout computes would wrap */
@@ -3305,6 +3305,7 @@ static struct type *parse_struct_body(struct parser *ps, struct type *t,
                              "hold at most %ld bytes", ty_name(t),
                              0x7fffffffL);
     }
+    ty_struct_layout(t, ms, n, at.packed, at.aligned, ps->pack_cur);
     if (at.transparent)                 /* union {...} __attribute__(...) */
         mark_transparent(ps, t);
     return t;
@@ -4602,6 +4603,20 @@ static struct expr *parse_initializer(struct parser *ps)
                            "expected a field name after '.'");
             field = cur(ps)->text;
             advance(ps);
+        } else if (cur(ps)->kind == TOK_IDENT) {
+            /* GNU's obsolete `field: value`, which `.field = value`
+             * replaced */
+            struct lexer save = ps->lx;
+            const char *nm = cur(ps)->text;
+            int fl = cur(ps)->line, fc = cur(ps)->col;
+            advance(ps);
+            if (cur(ps)->kind == TOK_COLON) {
+                ped_at(ps, fl, fc, 0, "an obsolete `field:` designator");
+                advance(ps);
+                field = nm;
+                goto designated;
+            }
+            ps->lx = save;
         }
         if (field || index >= 0) {
             while (cur(ps)->kind == TOK_DOT || cur(ps)->kind == TOK_LBRACKET) {
@@ -4633,8 +4648,14 @@ static struct expr *parse_initializer(struct parser *ps)
                 *dtail = d;
                 dtail = &d->next;
             }
-            expect(ps, TOK_ASSIGN, "'=' after a designator");
+            /* GNU's obsolete `[i] value`, without the `=` */
+            if (cur(ps)->kind != TOK_ASSIGN && !field && !dnext) {
+                ped_at(ps, cur(ps)->line, cur(ps)->col, 0,
+                       "an array designator without '='");
+            } else
+                expect(ps, TOK_ASSIGN, "'=' after a designator");
         }
+    designated:
         if (e->nelems == cap) {
             cap = cap ? cap * 2 : 8;
             e->elems = xrealloc(e->elems,
