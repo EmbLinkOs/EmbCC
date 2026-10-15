@@ -32,11 +32,11 @@ meaning other than the standard's. Check these first when porting code:
   declared in a block remain visible to the end of the translation unit.
   See [Scope of tags, typedefs and enumeration constants](#scope-of-tags-typedefs-and-enumeration-constants).
 
-EmbCC is also stricter than the standard in two places that commonly
-affect existing code: a non-`void` function other than `main` that can
-reach its closing brace is an error ([details](#functions-that-can-reach-their-closing-brace)),
-and an empty parameter list `()` always means "no parameters"
-([details](#empty-parameter-lists)).
+EmbCC is also stricter than the standard in one place that commonly
+affects existing code: an empty parameter list `()` always means "no
+parameters" ([details](#empty-parameter-lists)). A non-`void` function
+that can reach its closing brace gets a warning that is on by default
+([details](#functions-that-can-reach-their-closing-brace)).
 
 Features whose availability depends on the target (variable length
 arrays on AVR, `long double`, `__int128`, atomic sizes, thread-local
@@ -152,7 +152,7 @@ define `__GNUC__` when compiling C.
 | Old-style (K&R) function definitions | Not supported | `int add(a, b) int a, b; { ... }` gives `expected a parameter type before 'a'`. C23 removed them. |
 | Implicit `int` | Not supported | `static x = 3;` gives `expected a type before 'x'`. C99 removed it. |
 | Implicit function declarations | Not supported | `'foo' is not declared in 'main' — for a call, add a prototype or define it first [E0001]`. C99 removed them. |
-| Reaching the `}` of a non-`void` function | Not supported | An error even when the value is never used, except in `main`: `control may reach the end of 'f' — every path must end in a return statement [E0008]`. See [Functions that can reach their closing brace](#functions-that-can-reach-their-closing-brace). |
+| Reaching the `}` of a non-`void` function | Supported | A warning, on by default, except in `main`: `control may reach the end of 'f', which returns int [--warn=return-type] [E0008]`. See [Functions that can reach their closing brace](#functions-that-can-reach-their-closing-brace). |
 | `return;` in a non-`void` function | Supported | The caller must not use the value. From C99 on, where it is a constraint violation: `'g' returns int; 'return' needs a value`. |
 | `return x;` in a `void` function | Supported | `x` is evaluated and dropped, with a warning that is on by default: `returning a value from void 'f' [--warn=return-mismatch]` (an error under `--pedantic-errors`, and from C99 on). A `void` `x`, `return f();`, is a GNU C form: see [Smaller GNU C forms](extensions.md#smaller-gnu-c-forms). |
 | `auto` storage class | Supported | `auto int x;` |
@@ -163,7 +163,7 @@ define `__GNUC__` when compiling C.
 | Scopes | Partial | Objects, functions and labels follow the standard's rules. Tags, typedef names and enumeration constants do not. See [Scope of tags, typedefs and enumeration constants](#scope-of-tags-typedefs-and-enumeration-constants). |
 | Structures, unions, bit-fields | Supported | A structure or union with no members is a GNU extension: size 0, as in GCC, and an error under `--pedantic-errors`. |
 | Enumerations | Supported | A constant outside the range of `int` is accepted without a diagnostic and gives the enumeration a wider type, as in C23. See [Enumeration constants](#enumeration-constants). |
-| Tentative definitions | Partial | A file-scope array of unknown size, `int a[];`, is refused even when a later declaration completes it: `'a' has incomplete type int[0]`. `extern int a[];` is accepted. |
+| Tentative definitions | Supported | A file-scope array of unknown size, `int a[];`, takes its size from a later declaration (`int a[10];`); if none gives one, it has one element, with a warning: `array 'a' assumed to have one element` (C17 6.9.2p5). |
 | `goto`, labels, `switch` | Supported | |
 | Adjacent string literal concatenation | Supported | A prefixed and an unprefixed literal concatenate: `L"wi" "de"` is `L"wide"`. |
 | Wide literals `L"..."`, `L'x'` | Supported | |
@@ -345,17 +345,23 @@ be lowered.
 
 ### Functions that can reach their closing brace
 
-A function with a non-`void` return type, other than `main`, must end
-every path with a `return` statement. The standard allows control to
-reach the closing brace as long as the caller does not use the value;
-EmbCC refuses it:
+A function with a non-`void` return type should end every path with a
+`return` statement. The standard allows control to reach the closing
+brace as long as the caller does not use the value, so EmbCC accepts it,
+with a warning that is on by default (`--error=return-type` makes it an
+error):
 
 ```text
-error: control may reach the end of 'f' — every path must end in a return statement [E0008]
+warning: control may reach the end of 'f', which returns int [--warn=return-type] [E0008]
 ```
 
+The function returns 0 when control reaches the brace, if its result is
+an integer or a pointer, rather than whatever its return register held.
+A caller that uses the value then reads the same thing every time. A
+floating or aggregate result is undefined there.
+
 `main` is the exception the standard makes: reaching its closing brace
-returns 0.
+returns 0, without a warning.
 
 A path also ends at an infinite loop, at a call to a function declared
 `_Noreturn`, `[[noreturn]]` or `__attribute__((noreturn))`, and at a call

@@ -187,7 +187,6 @@ Some errors end the compile at once, with no summary line:
 
 - semantic errors outside a function body, such as an invalid
   file-scope initializer;
-- `control may reach the end of 'F'` ([E0008](#t6));
 - command-line and file errors (`cannot open file`, an unknown option);
 - errors from code generation, the assembler and object writers (an
   unsupported construct for the target, for example).
@@ -467,17 +466,17 @@ message (`[E0004]`) and carry it in the JSON `id` member.
 | `E0005` | an object is declared of a type whose size is not known | `'NAME' has incomplete type TYPE`, for an object defined in a block without an initializer |
 | `E0006` | a function is called with the wrong number of arguments | No diagnostic prints this id. The error for a wrong argument count is `this call needs N arguments, got M`. |
 | `E0007` | a value is assigned to something that cannot be assigned to | No diagnostic prints this id. The related errors are `cannot assign to an array` and `assignment target must be a variable, *pointer, or member`. |
-| `E0008` | control reaches the end of a function that must return a value | `control may reach the end of 'F' — every path must end in a return statement` |
+| `E0008` | control reaches the end of a function that must return a value | `control may reach the end of 'F', which returns TYPE`, a warning (`--warn=return-type`) |
 
 `E0006` and `E0007` have explanation entries but are not attached to any
 diagnostic. An assignment to a `const`-qualified object, the example in
 the `E0007` entry, is the error `assignment of read-only 'NAME' (its
 type is TYPE)`; see [Const qualification](c-language.md#const-qualification).
 
-`E0008` is an error, not a warning, and it ends the compile. It applies
-to every function with a non-`void` return type except `main`. Reaching
-the closing brace of `main` returns 0, as C99 5.1.2.2.3 specifies, so
-`int main(void) { }` is a valid program.
+`E0008` is a warning, on by default; `--error=return-type` makes it an
+error. It applies to every function with a non-`void` return type except
+`main`. Reaching the closing brace of `main` returns 0, as C99 5.1.2.2.3
+specifies, so `int main(void) { }` is a valid program.
 
 <a id="t4"></a>
 

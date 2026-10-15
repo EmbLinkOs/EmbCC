@@ -74,6 +74,13 @@ const char *plat_getenv(const char *name);
  * knowledge. EmbLinkOS has no unistd.h. */
 int plat_stderr_is_terminal(void);
 
+/* The bytes of stack the compiler's thread can count on. Parsing and
+ * checking recurse once per level of nesting, and a 10,000-deep stack of
+ * parentheses or structures (GCC's limits tests) would overflow it: the
+ * deep recursions ask how much they have used (stack_check) and stop
+ * with an error first. */
+unsigned long plat_stack_size(void);
+
 /* ---- where this program is ----
  *
  * The absolute path of the running executable, or NULL where the host

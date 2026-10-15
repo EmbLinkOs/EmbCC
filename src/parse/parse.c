@@ -113,6 +113,7 @@ struct parser {
      * typedef or a union is defined; anywhere else the declaration would
      * keep its written type, so attrs_unapplied() says so. */
     int mode_line, tu_line;
+    int type_mode;        /* a mode(M) among a type name's specifiers */
     /* GNU `__label__ n;`: a label LOCAL to the enclosing block, so a
      * macro that declares one can be expanded twice in a function
      * without the second `n:` being a duplicate. That is the only
@@ -1440,6 +1441,7 @@ static const struct expr *generic_choice(const struct expr *e);
 static struct type *parse_array_dims(struct parser *ps, struct type *t);
 static struct expr *new_expr(enum expr_kind kind, int line, int col);
 static struct type *parse_type_spec(struct parser *ps, int allow_body);
+static struct type *apply_mode(struct parser *ps, struct type *t, int bytes);
 static struct type *parse_type_spec_attrs(struct parser *ps, int allow_body,
                                           struct attrs *a);
 static void parse_static_assert(struct parser *ps);
@@ -1984,8 +1986,14 @@ static struct type *parse_tagged(struct parser *ps, enum tag_kind kind,
             return td->ty ? td->ty : ty_base(TY_INT, 0);
         return td->ty;
     }
-    if (kind == TAG_ENUM)
-        parse_error_line(ps, line, "unknown enum '%s'", tag);
+    if (kind == TAG_ENUM) {
+        /* `enum e *p;` or `enum e;` before e's body: GNU C's forward
+         * reference, an int-sized enumeration the definition completes
+         * (the tag holds no type until then, and reads as int) */
+        ped_at(ps, line, 0, 0, "a forward reference to an enum");
+        push_tag(ps, tag, kind, NULL);
+        return ty_base(TY_INT, 0);
+    }
     /* Forward reference: an incomplete struct, fine behind a pointer */
     return push_tag(ps, tag, kind, ty_struct(tag, kind == TAG_UNION))->ty;
 }
@@ -2031,10 +2039,21 @@ static struct type *parse_type_spec(struct parser *ps, int allow_body)
         ps->lead_flash = 0;
         q |= Q_FLASH;
     }
-    int q2 = 0, outer_sc = ps->spec_sc;
+    int q2 = 0, outer_sc = ps->spec_sc, outer_mode = ps->type_mode;
     ps->spec_sc = 0;
+    ps->type_mode = 0;
     struct type *t = parse_type_spec_inner(ps, allow_body, &q2);
     q |= q2;
+    /* __attribute__((mode(M))) before or among the specifiers changes the
+     * type they name, whatever is declared with it: `typedef int
+     * __attribute__((mode(SI))) int_t;`, a member `E
+     * __attribute__((mode(byte))) a;`, a cast */
+    int mode = ps->spec_on ? ps->spec_slot.mode : ps->type_mode;
+    ps->type_mode = outer_mode;
+    if (t && mode) {
+        t = apply_mode(ps, t, mode);
+        ps->spec_slot.mode = 0;
+    }
     if (!t && (q & (Q_CONST | Q_VOL)))
         t = c89_implicit_int(ps, 1);    /* `const c = 1;` in C89 */
     ps->spec_out = ps->spec_slot;
@@ -2122,6 +2141,8 @@ static void spec_attr(struct parser *ps)
         return;
     }
     parse_attributes(ps, &a);
+    if (a.mode)
+        ps->type_mode = a.mode;   /* `(int __attribute__((mode(DI))))x` */
     if (a.packed || a.aligned || a.weak || a.noreturn || a.section || a.pcs)
         parse_error_at(ps, at_tok->line, at_tok->col,
                 "__attribute__((%s)) is not supported in a type name: "
@@ -2494,6 +2515,7 @@ static void take_carried(struct parser *ps, struct attrs *a)
 
 static struct type *parse_stars(struct parser *ps, struct type *t)
 {
+    int stars = 0;
     for (;;) {
         /* A qualifier here belongs to the type built so far: before the
          * first `*` to what the specifiers named, after a `*` to that
@@ -2524,6 +2546,11 @@ static struct type *parse_stars(struct parser *ps, struct type *t)
             parse_attributes(ps, &a);
             if (a.unused)
                 ps->stars_unused = 1;
+            /* mode(M) before any `*` changes the type the specifiers
+             * named: `typedef int __attribute__((mode(SI))) int_t;`, a
+             * member `E __attribute__((mode(byte))) a;` */
+            if (a.mode && !stars)
+                t = apply_mode(ps, t, a.mode);
             if (ps->attr_carry_on) {
                 /* The enclosing declaration will take them. */
                 if (a.weak)     ps->attr_slot.weak = 1;
@@ -2563,6 +2590,7 @@ static struct type *parse_stars(struct parser *ps, struct type *t)
         if (cur(ps)->kind != TOK_STAR)
             return t;
         t = ty_ptr(t);
+        stars++;
         ps->q_top = 0;          /* a new pointer, unqualified so far */
         advance(ps);
     }
@@ -2646,6 +2674,13 @@ static struct type *fold_var_type(const char *name)
          g; g = g->next)
         if (g->name && strcmp(g->name, name) == 0)
             return g->ty;
+    /* a function's name: its type, as `typeof(f) g;` declares a second
+     * function like it (glibc's aliases) */
+    for (struct func *f = g_fold_unit ? g_fold_unit->funcs : NULL;
+         f; f = f->next)
+        if (f->name && strcmp(f->name, name) == 0 && f->ret_ty)
+            return ty_func(f->ret_ty, f->param_tys, f->nparams,
+                           f->is_varargs);
     return NULL;
 }
 
@@ -2693,6 +2728,20 @@ static struct type *ce_type(const struct expr *e)
     }
     case EXPR_CAST:
         return e->cast_ty;
+    case EXPR_COMPLIT:
+        /* `sizeof (struct s){ 1, 2 }`: the literal's type (an unsized
+         * array's count is the initializer's, unknown here) */
+        return e->cast_ty && !ty_incomplete(e->cast_ty) ? e->cast_ty : NULL;
+    case EXPR_COMMA: {
+        /* the right operand's value, so an array or a function decays:
+         * `sizeof (1, foo)` is a pointer's size */
+        struct type *t = ce_type(e->rhs);
+        if (t && t->kind == TY_FUNC)
+            return ty_ptr(t);
+        if (t && t->kind == TY_ARRAY)
+            return ty_ptr(t->pointee);
+        return t;
+    }
     case EXPR_SIZEOF:
     case EXPR_ALIGNOF:
         /* size_t, as sema types them. Unanswered, `-sizeof(int)` folded
@@ -3097,9 +3146,10 @@ static int size_fold(const struct expr *e, long *out)
  * into (nested) array types. Sizes are constant expressions. */
 static struct type *parse_array_dims(struct parser *ps, struct type *t)
 {
-    int dims[4];
-    struct expr *dexpr[4];   /* each dimension's expression (NULL for []) */
-    int dvar[4];             /* 1 = not a constant: a VLA dimension */
+    /* C99 5.2.4.1 asks for 12 declarators on a type, arrays among them */
+    int dims[16];
+    struct expr *dexpr[16];  /* each dimension's expression (NULL for []) */
+    int dvar[16];            /* 1 = not a constant: a VLA dimension */
     int ndims = 0;
     while (cur(ps)->kind == TOK_LBRACKET) {
         advance(ps);
@@ -3156,14 +3206,19 @@ static struct type *parse_array_dims(struct parser *ps, struct type *t)
                 if (dv < 0)
                     parse_error_line(ps, dline,
                                "array size cannot be negative");
+                if (dv > 0x7fffffffL)
+                    parse_error_line(ps, dline,
+                               "an array of %ld elements is too large: "
+                               "EmbCC's objects hold at most %ld bytes",
+                               dv, 0x7fffffffL);
                 dim = (int)dv; /* 0 is the extern/flexible form */
                 if (dv == 0)
                     ped_at(ps, dline, 0, 0, "an array of size 0");
             }
         }
-        if (ndims >= 4)
+        if (ndims >= 16)
             parse_error_at(ps, cur(ps)->line, cur(ps)->col,
-                       "more than 4 array dimensions");
+                       "more than 16 array dimensions");
         dims[ndims] = dim;
         dexpr[ndims] = de;
         dvar[ndims] = var;
@@ -3181,9 +3236,20 @@ static struct type *parse_array_dims(struct parser *ps, struct type *t)
     /* Innermost first. Once any dimension is variable, every dimension
      * outside it is too — `int a[3][n]` is 3 rows of a run-time size — so
      * each becomes a VLA node (with its constant as the length). */
+    if (ndims && t->kind == TY_VOID)
+        parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                       "an array cannot have elements of type void");
     for (int i = ndims - 1; i >= 0; i--) {
         if (dvar[i] || (ty_is_vla(t) && dexpr[i]))
             t = ty_vla(t, dexpr[i]);
+        else if (dexpr[i]) {
+            if ((long)dims[i] * ty_size(t) > 0x7fffffffL)
+                parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                           "an array of %d %s is too large: EmbCC's objects "
+                           "hold at most %ld bytes", dims[i], ty_name(t),
+                           0x7fffffffL);
+            t = ty_array_sized(t, dims[i]);   /* `[0]`: complete, size 0 */
+        }
         else
             t = ty_array(t, dims[i]);
     }
@@ -3198,6 +3264,7 @@ static struct type *parse_struct_body(struct parser *ps, struct type *t,
     ps->attr_carry_on = 0;
 
     int bline = cur(ps)->line, bcol = cur(ps)->col;
+    stack_check(ps->lx.file, bline, 6);         /* structures in structures */
     expect(ps, TOK_LBRACE, "'{'");
     int saved_vla_ok = ps->vla_ok;
     ps->vla_ok = 0;   /* a member cannot be variably modified (6.7.2.1p9) */
@@ -3331,6 +3398,18 @@ static struct type *parse_struct_body(struct parser *ps, struct type *t,
     struct attrs at = *lead;     /* struct __attribute__((packed)) {...} */
     parse_attributes(ps, &at);   /* struct {...} __attribute__((packed)) */
     /* `struct E { };`: GNU C's, of size 0 (ISO C wants a member) */
+    {
+        /* the members' sizes and the most padding they could need: past
+         * an int, the offsets ty_struct_layout computes would wrap */
+        long total = 0;
+        for (int i = 0; i < n; i++)
+            if (!ms[i].is_bitfield)
+                total += (long)ty_size(ms[i].ty) + ty_align(ms[i].ty);
+        if (total > 0x7fffffffL)
+            parse_error_line(ps, bline, "%s is too large: EmbCC's objects "
+                             "hold at most %ld bytes", ty_name(t),
+                             0x7fffffffL);
+    }
     ty_struct_layout(t, ms, n, at.packed, at.aligned, ps->pack_cur);
     if (at.transparent)                 /* union {...} __attribute__(...) */
         mark_transparent(ps, t);
@@ -3996,6 +4075,7 @@ static struct expr *parse_postfix(struct parser *ps)
 
 static struct expr *parse_unary(struct parser *ps)
 {
+    stack_check(ps->lx.file, cur(ps)->line, 6);  /* `- - - x`, `(int)(int)x` */
     struct token *t = cur(ps);
     struct expr *e;
 
@@ -4039,7 +4119,7 @@ static struct expr *parse_unary(struct parser *ps)
                     "expected a label name after '&&'");
         ped_at(ps, t->line, t->col, 0, "a label's address");
         e = new_expr(EXPR_LABELADDR, t->line, t->col);
-        e->name = cur(ps)->text;
+        e->name = label_map(ps, cur(ps)->text);   /* a __label__'s too */
         advance(ps);
         return e;
     case TOK_PLUSPLUS:
@@ -4323,6 +4403,7 @@ static struct expr *parse_cond(struct parser *ps)
 
 static struct expr *parse_expr(struct parser *ps)
 {
+    stack_check(ps->lx.file, cur(ps)->line, 6);  /* `((((x))))`, deep */
     struct expr *e = parse_cond(ps);
     enum tok_kind k = cur(ps)->kind;
     int line = cur(ps)->line;
@@ -4631,6 +4712,20 @@ static struct expr *parse_initializer(struct parser *ps)
                            "expected a field name after '.'");
             field = cur(ps)->text;
             advance(ps);
+        } else if (cur(ps)->kind == TOK_IDENT) {
+            /* GNU's obsolete `field: value`, which `.field = value`
+             * replaced */
+            struct lexer save = ps->lx;
+            const char *nm = cur(ps)->text;
+            int fl = cur(ps)->line, fc = cur(ps)->col;
+            advance(ps);
+            if (cur(ps)->kind == TOK_COLON) {
+                ped_at(ps, fl, fc, 0, "an obsolete `field:` designator");
+                advance(ps);
+                field = nm;
+                goto designated;
+            }
+            ps->lx = save;
         }
         if (field || index >= 0) {
             while (cur(ps)->kind == TOK_DOT || cur(ps)->kind == TOK_LBRACKET) {
@@ -4662,8 +4757,14 @@ static struct expr *parse_initializer(struct parser *ps)
                 *dtail = d;
                 dtail = &d->next;
             }
-            expect(ps, TOK_ASSIGN, "'=' after a designator");
+            /* GNU's obsolete `[i] value`, without the `=` */
+            if (cur(ps)->kind != TOK_ASSIGN && !field && !dnext) {
+                ped_at(ps, cur(ps)->line, cur(ps)->col, 0,
+                       "an array designator without '='");
+            } else
+                expect(ps, TOK_ASSIGN, "'=' after a designator");
         }
+    designated:
         if (e->nelems == cap) {
             cap = cap ? cap * 2 : 8;
             e->elems = xrealloc(e->elems,
@@ -4954,6 +5055,7 @@ static struct stmt *parse_eh_region(struct parser *ps)
 
 static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
 {
+    stack_check(ps->lx.file, cur(ps)->line, 6);  /* `{{{ }}}`, `if if if` */
     struct token *t = cur(ps);
     struct stmt *s;
 
@@ -5424,7 +5526,7 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
                                                       ps->unit->econsts,
                                                       &guessed);
                         if (!guessed)
-                            ft = ty_array(ft->pointee, n);
+                            ft = ty_array_sized(ft->pointee, n);
                     }
                 }
                 fold_local_add(dname, ft);
@@ -5711,7 +5813,9 @@ static struct global *parse_global(struct parser *ps, struct type *ty,
     g->is_extern = is_extern;
     g->ty = ty;
 
-    if (g->ty->kind == TY_VOID)
+    /* `extern void _text;`, a linker symbol only ever taken the address
+     * of, is GNU C's; a definition of a void object is nothing */
+    if (g->ty->kind == TY_VOID && !is_extern)
         parse_error_line(ps, line, "a variable cannot have type void");
     g->ty = parse_array_dims(ps, g->ty);
     int has_init = cur(ps)->kind == TOK_ASSIGN;
@@ -5720,7 +5824,14 @@ static struct global *parse_global(struct parser *ps, struct type *ty,
      * initializer follows — it supplies the count — so defer that check. */
     int size_from_init = g->ty->kind == TY_ARRAY && g->ty->count == 0 &&
                          has_init;
-    if (ty_incomplete(g->ty) && !is_extern && !size_from_init)
+    /* `int a[];` with no initializer is a tentative definition that a
+     * later declaration may size; sema gives it one element if none does
+     * (C17 6.9.2p5) */
+    int tentative_open = g->ty->kind == TY_ARRAY && g->ty->count == 0 &&
+                         !g->ty->zero_len && !g->ty->vla_len && !has_init &&
+                         !ty_incomplete(g->ty->pointee);
+    if (ty_incomplete(g->ty) && !is_extern && !size_from_init &&
+        !tentative_open)
         parse_error_line(ps, line,
                    "'%s' has incomplete type %s", name, ty_name(g->ty));
     if (has_init) {
@@ -5740,10 +5851,12 @@ static struct global *parse_global(struct parser *ps, struct type *ty,
                     ty_size(g->ty->pointee) == (ie->str_width ? ie->str_width : 1))
                     g->ty = ty_array(g->ty->pointee, (int)ie->num);
                 else if (ie->kind == EXPR_INITLIST) {
-                    g->ty = ty_array(g->ty->pointee,
+                    g->ty = ty_array_sized(g->ty->pointee,
                                      initlist_elided_count(ie, g->ty,
                                                     ps->unit->econsts,
                                                     NULL));
+                    if (g->ty->count == 0)
+                        ped_at(ps, line, 0, 0, "an array of size 0");
                     g->count_from_init = 1;   /* sema checks the count */
                 }
                 else
@@ -6412,6 +6525,10 @@ static void parse_top(struct parser *ps, struct unit *u,
      * `*`, where there is nothing to carry them. */
     if (at_attribute(ps))
         parse_attributes(ps, &at);
+    if (at.mode) {                  /* `int __attribute__((mode(DI))) w;` */
+        base = apply_mode(ps, base, at.mode);
+        at.mode = 0;
+    }
     /* Open the slot for this declaration's declarators, including the
      * rewind below: an attribute after a `*` belongs to what is being
      * declared. */
@@ -6533,6 +6650,10 @@ static void parse_top(struct parser *ps, struct unit *u,
                            "did you mean a function pointer (*)?");
             ps->decl_name = gname;
             parse_attributes(ps, &at); /* int x __attribute__((weak)) = ... */
+            if (at.mode) {             /* int w __attribute__((mode(DI))) */
+                gt = apply_mode(ps, gt, at.mode);
+                at.mode = 0;
+            }
             int gnl = ps->decl_name_line, gnc = ps->decl_name_col;
             struct global *g = parse_global(ps, gt, gname, gline,
                                             is_static, is_extern);
@@ -6556,9 +6677,7 @@ static void parse_top(struct parser *ps, struct unit *u,
                        "supported: EmbCC does not place a variable at a "
                        "fixed address (an extern declaration takes it, as "
                        "a PIC32 SFR's does)", gname);
-            if (at.alias)
-                parse_error_line(ps, gline, "alias attribute on variable '%s' "
-                           "is not supported (functions take it)", gname);
+            g->alias_of = at.alias;
             g->seq = seq;
             g->def_seq = seq;
             **gtail = g;
@@ -6771,6 +6890,10 @@ fn_tail:
                 struct type *vty = parse_array_dims(ps, dty);
                 ps->decl_name = dname;
                 parse_attributes(ps, &at);
+                if (at.mode) {
+                    vty = apply_mode(ps, vty, at.mode);
+                    at.mode = 0;
+                }
                 struct global *g = parse_global(ps, vty, dname, dline,
                                                 is_static, is_extern);
                 g->name_line = dline;
@@ -6792,10 +6915,7 @@ fn_tail:
                        "supported: EmbCC does not place a variable at a "
                        "fixed address (an extern declaration takes it, as "
                        "a PIC32 SFR's does)", dname);
-                if (at.alias)
-                    parse_error_line(ps, dline, "alias attribute on variable "
-                               "'%s' is not supported (functions take it)",
-                               dname);
+                g->alias_of = at.alias;
                 g->seq = seq;
                 g->def_seq = seq;
                 **gtail = g;
@@ -6889,6 +7009,14 @@ struct unit *parse_unit(const char *file, const char *src)
     struct global **gtail = &u->globals;
     volatile int seq = 0;      /* written between setjmp and longjmp */
     while (cur(&ps)->kind != TOK_EOF) {
+        /* `};` after a function, a macro that ends in its own `;`: an
+         * empty declaration, which GCC lets through */
+        if (cur(&ps)->kind == TOK_SEMI) {
+            ped_at(&ps, cur(&ps)->line, cur(&ps)->col, 0,
+                   "an extra ';' outside a function");
+            advance(&ps);
+            continue;
+        }
         jmp_buf jb, *save = ps.recover;
         ps.recover = &jb;
         if (!setjmp(jb)) {
