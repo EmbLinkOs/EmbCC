@@ -1826,6 +1826,32 @@ static struct expr *cx_neg(struct expr *a)
     return e;
 }
 
+static struct expr *cx_zero(struct type *t, int line);
+
+/* |x| in T, and c ? a : b in T -- for an integer complex's division */
+static struct expr *cx_abs(struct expr *x, struct type *T)
+{
+    struct expr *c = cx_node(EXPR_COND, x->line, T);
+    c->args = xcalloc(4, sizeof *c->args);
+    c->args[0] = cx_bin(B_LT, x, cx_zero(T, x->line), T);
+    c->nargs = 1;
+    c->lhs = cx_neg(mk_cast(x, T));
+    c->rhs = mk_cast(x, T);
+    return c;
+}
+
+static struct expr *cx_cond(struct expr *cond, struct expr *a,
+                            struct expr *b, struct type *T)
+{
+    struct expr *c = cx_node(EXPR_COND, cond->line, T);
+    c->args = xcalloc(4, sizeof *c->args);
+    c->args[0] = cond;
+    c->nargs = 1;
+    c->lhs = mk_cast(a, T);
+    c->rhs = mk_cast(b, T);
+    return c;
+}
+
 static struct expr *cx_zero(struct type *t, int line)
 {
     struct expr *z = cx_node(ty_is_float(t) ? EXPR_FNUM : EXPR_NUM, line, t);
@@ -2163,18 +2189,33 @@ static void cx_binop(struct unit *u, struct expr *e)
         break;
     case B_DIV:
         if (bi && !ty_is_float(T)) {
-            /* an integer complex, as GCC divides one: ((ac + bd) +
-             * (bc - ad)i) / (cc + dd), each part a truncating division */
-            struct expr *a2 = ai ? ai : cx_zero(T, line), *pd;
-            struct expr *den = cx_stable(cx_bin(B_ADD, cx_bin(B_MUL, br, br, T),
-                                                cx_bin(B_MUL, bi, bi, T), T),
-                                         &pd);
-            res = cx_comma(pd, cx_make(CT,
-                cx_bin(B_DIV, cx_bin(B_ADD, cx_bin(B_MUL, ar, br, T),
-                                     cx_bin(B_MUL, a2, bi, T), T), den, T),
-                cx_bin(B_DIV, cx_bin(B_SUB, cx_bin(B_MUL, a2, br, T),
-                                     cx_bin(B_MUL, ar, bi, T), T), den, T),
-                line));
+            /* an integer complex, as GCC divides one (its "wide"
+             * method, Smith's, tree-complex's expand_complex_div_wide):
+             *   |br| < |bi|:  r = br / bi, d = br*r + bi,
+             *                 ((ar*r + ai) + (ai*r - ar)i) / d
+             *   otherwise:    r = bi / br, d = bi*r + br,
+             *                 ((ai*r + ar) + (ai - ar*r)i) / d
+             * each division truncating, and each ratio computed only in
+             * the arm that is taken, as GCC's branch does. Clang divides
+             * (ac + bd) / (cc + dd) instead; the answers differ, and the
+             * extension is GCC's. */
+            struct expr *a2 = ai ? ai : cx_zero(T, line);
+            struct expr *small = cx_bin(B_LT, cx_abs(br, T), cx_abs(bi, T), T);
+            struct expr *r1 = cx_bin(B_DIV, br, bi, T);
+            struct expr *d1 = cx_bin(B_ADD, cx_bin(B_MUL, br, r1, T), bi, T);
+            struct expr *r2 = cx_bin(B_DIV, bi, br, T);
+            struct expr *d2 = cx_bin(B_ADD, cx_bin(B_MUL, bi, r2, T), br, T);
+            struct expr *re = cx_cond(small,
+                cx_bin(B_DIV, cx_bin(B_ADD, cx_bin(B_MUL, ar, r1, T), a2, T),
+                       d1, T),
+                cx_bin(B_DIV, cx_bin(B_ADD, cx_bin(B_MUL, a2, r2, T), ar, T),
+                       d2, T), T);
+            struct expr *im = cx_cond(small,
+                cx_bin(B_DIV, cx_bin(B_SUB, cx_bin(B_MUL, a2, r1, T), ar, T),
+                       d1, T),
+                cx_bin(B_DIV, cx_bin(B_SUB, a2, cx_bin(B_MUL, ar, r2, T), T),
+                       d2, T), T);
+            res = cx_make(CT, re, im, line);
         } else if (bi)
             res = cx_call(1, T, ar, ai ? ai : cx_zero(T, line), br, bi);
         else
@@ -6443,6 +6484,9 @@ static const char *const g_named_builtins[] = {
     "islessgreater", "isunordered", "iseqsig",
     "isinff", "isinfl", "isnanf", "isnanl", "finite", "finitef", "finitel",
     "classify_type", "memcmp_eq",
+    /* GNU vector types' (vec_shuffle, vec_shufflevector,
+     * vec_convertvector) */
+    "shuffle", "shufflevector", "convertvector",
 };
 
 int sema_has_builtin(const char *name)

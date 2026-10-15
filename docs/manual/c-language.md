@@ -609,10 +609,11 @@ GNU's integer complex types, `_Complex int`, `short _Complex`,
 `unsigned long long _Complex` and the rest, are supported too, and so is
 an integer imaginary constant, `2i`, which is a `_Complex int`. `*` and
 `/` of two of them are computed in the integer type, as GCC computes
-them: `(ac - bd) + (ad + bc)i`, and `((ac + bd) + (bc - ad)i) / (cc +
-dd)` with each part a truncating division. On MIPS a function cannot
-return one yet: `the MIPS32 backend cannot lower returning a _Complex of
-integers yet`.
+them. A product is `(ac - bd) + (ad + bc)i`. A quotient uses GCC's scaled
+method, each division truncating: when `|c| < |d|`, with `r = c / d`, it
+is `((ar + b) + (br - a)i) / (cr + d)`; otherwise, with `r = d / c`,
+`((br + a) + (b - ar)i) / (dr + c)`. So `(3+4i) / (1-2i)` is `-2+1i`,
+as GCC has it; clang's formula gives `-1+2i`.
 
 A complex object with static storage duration takes an initializer that
 EmbCC can fold. Otherwise:

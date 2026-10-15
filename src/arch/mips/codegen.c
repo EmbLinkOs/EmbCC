@@ -484,12 +484,24 @@ static int call_arg_align(const struct ir_ins *i, int k)
  * _Complex double's four (v0, v1, a0, a1), as clang returns them; 0 for
  * every other struct. -1 for a complex of integers, whose convention has
  * not been checked against clang and so is refused. */
+/* a complex's parts extend as their type: lb or lbu, lh or lhu */
+static int ret_signed(const struct type *t)
+{
+    return !(t && t->is_complex && t->celem && t->celem->is_unsigned);
+}
+
 static int ret_reg_words(const struct type *t)
 {
     if (!t || !t->is_complex || !t->celem)
         return 0;
-    if (!ty_is_float(t->celem))
-        return -1;
+    if (!ty_is_float(t->celem)) {
+        /* a complex of integers, as clang returns one: each part in its
+         * own register, v0 and v1 -- a long long's in v0:v1 and a0:a1,
+         * which are its words -- a char's or short's extended there
+         * (ret_pieces) */
+        int esz = ty_size(t->celem);
+        return esz == 8 ? 4 : esz <= 4 ? 2 : -1;
+    }
     return ty_size(t) == 8 ? 2 : ty_size(t) == 16 ? 4 : -1;
 }
 
@@ -519,27 +531,32 @@ static int ret_word_reg(int q)
  *      little-endian and its HIGH half big-endian;
  *   2  a structure of one long double: binary128's two doublewords in
  *      v0 and a0, as a long double result (TF_RET_*);
- *   3  a _Complex float or double: each part in its own register as a
- *      scalar of its type, a float sign-extended in the low half.
+ *   3  a _Complex: each part in its own register as a scalar of its
+ *      type, a float or an int sign-extended in the low half.
  *
- * 0 for a hidden pointer, -1 for a complex of integers, which is refused
- * as at o32. */
+ * 0 for a hidden pointer. */
 static int ret_pieces(const struct type *t, long size, int *off, int *sz,
                       int *fields)
 {
     *fields = 0;
     if (!g_m64) {
         int rw = ret_reg_words(t);
+        /* a complex of chars or shorts: each part a register of its own */
+        int esz = t && t->is_complex && t->celem && !ty_is_float(t->celem)
+                ? (int)ty_size(t->celem) : 4;
         for (int q = 0; q < rw; q++) {
-            off[q] = 4 * q;
-            sz[q] = 4;
+            off[q] = esz < 4 ? q * esz : 4 * q;
+            sz[q] = esz < 4 ? esz : 4;
         }
+        if (esz < 4)
+            *fields = 3;
         return rw;
     }
     if (!t || size > 16 || size <= 0)
         return 0;
     if (t->is_complex) {
-        if (!t->celem || !ty_is_float(t->celem))
+        /* a float, a double or an integer part per register, as clang */
+        if (!t->celem)
             return -1;
         off[0] = 0; sz[0] = (int)size / 2;
         off[1] = (int)size / 2; sz[1] = (int)size / 2;
@@ -3669,7 +3686,8 @@ static void gen_ins(struct mips_fn *F, int n)
                     for (int q = 0; q < rw; q++) {
                         int r = rfields == 2 && q ? MIPS_A0 : ret_word_reg(q);
                         if (!g_m64) {
-                            ld_any(F, r, ADDR, 4 * q, 4, 0, 0);
+                            ld_any(F, r, ADDR, roff[q], rsz[q],
+                                   ret_signed(fn->ret_abi.ty), 0);
                         } else if (rfields || rsz[q] == 8) {
                             ld_any(F, r, ADDR, roff[q], rsz[q], 1, 0);
                             /* a float field big-endian: the high half */

@@ -1,7 +1,8 @@
 /* GNU's integer complex types, `_Complex int` and the rest, and the
  * integer imaginary constant `2i`. EmbCC refused both ("invalid _Complex
  * type"); they are now pairs of the integer, with * and / in integer
- * arithmetic, as GCC computes them. */
+ * arithmetic, as GCC computes them -- the division by GCC's scaled
+ * method, which clang's straightforward formula does not match. */
 // expect-exit: 42
 
 typedef _Complex int ci;
@@ -31,7 +32,9 @@ int main(void)
     eq(a + b, 4, 2, 1);
     eq(a - b, 2, 6, 1);
     eq(a * b, 11, -2, 2);              /* (3+4i)(1-2i) */
-    eq(a / b, -1, 2, 2);               /* (3+4i)/(1-2i), truncated */
+    eq(a / b, -2, 1, 2);               /* (3+4i)/(1-2i) by GCC's method;
+                                        * clang's formula gives -1+2i */
+    eq(mk(100, 7) / mk(0, 3), 2, -33, 2);   /* a zero real part */
     eq(a / 2, 1, 2, 2);
     eq(-a, -3, -4, 4);
     eq(~a, 3, -4, 4);                  /* the conjugate */
