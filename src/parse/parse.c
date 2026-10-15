@@ -6816,6 +6816,14 @@ struct unit *parse_unit(const char *file, const char *src)
         jmp_buf jb, *save = ps.recover;
         ps.recover = &jb;
         if (!setjmp(jb)) {
+        /* `};` after a function, a macro that ends in its own `;`: an
+         * empty declaration, which GCC lets through */
+        if (cur(&ps)->kind == TOK_SEMI) {
+            ped_at(&ps, cur(&ps)->line, cur(&ps)->col, 0,
+                   "an extra ';' outside a function");
+            advance(&ps);
+            continue;
+        }
             parse_top(&ps, u, &ftail, &gtail, seq++);
             attrs_unapplied(&ps);
         } else
