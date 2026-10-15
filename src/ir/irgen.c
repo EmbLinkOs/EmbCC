@@ -111,10 +111,12 @@ void ir_locals_fill(struct ir_func *fn, struct func *f, int nvars)
         if (!t)
             continue;
         L->size = ty_size(t);
-        /* GNU's empty struct is size 0, and still an object with an
-         * address: a slot of one byte, which a store of nothing never
-         * touches (with none, `&e` asked for a slot it did not have) */
-        if (L->size == 0 && t->kind == TY_STRUCT)
+        /* GNU's empty struct and zero-length array are size 0, and still
+         * objects with an address: a slot of one byte, which a store of
+         * nothing never touches (with none, `&e` asked for a slot it did
+         * not have) */
+        if (L->size == 0 && !t->vla_len &&
+            (t->kind == TY_STRUCT || t->kind == TY_ARRAY))
             L->size = 1;
         /* a parameter's slot is the calling convention's, and its value
          * arrives as a whole register: a typedef's alignment is a local's
@@ -2943,6 +2945,7 @@ static int eh_type_index(struct ir_func *fn, struct global *ti);
 
 int gen_expr(struct ir_func *fn, struct expr *e)
 {
+    stack_check(fn->file, e->line, 6);
     /* Every instruction this expression lowers to is attributed to the
      * expression, not to the statement containing it -- so `a[i] + b[j]`
      * blames the right subscript. Saved and restored, because lowering
@@ -3743,6 +3746,17 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
         int cw;
         int c = truth(fn, gen_expr(fn, e->args[0]), e->args[0]->ty, &cw);
         emit_brz(fn, c, cw, l_else);
+        /* A void conditional -- `c ? f() : (void)x` -- has no value to
+         * merge: the arms run for their effects. Merging them moved from
+         * what a void call never defined. */
+        if (e->ty->kind == TY_VOID) {
+            gen_expr(fn, e->lhs);
+            emit_jmp(fn, l_end);
+            emit_label(fn, l_else);
+            gen_expr(fn, e->rhs);
+            emit_label(fn, l_end);
+            return -1;
+        }
         /* The two merges carry the conditional's OWN width. They were
          * emitted with none, which cost nothing while a register held
          * any scalar and is half a `long long` on a 32-bit machine. */
@@ -4500,6 +4514,7 @@ static void switch_tree(struct ir_func *fn, int v, int w, int sign,
 static void gen_stmt(struct ir_func *fn, struct stmt *s,
                      const struct loopctx *loop)
 {
+    stack_check(fn->file, s ? s->line : 0, 6);
     for (; s; s = s->next) {
         if (s->line) {
             g_cur_line = s->line;   /* -g: rows key off statement lines */
@@ -5189,9 +5204,16 @@ static void gen_func(struct ir_func *fn, struct func *f)
     if (g_instr_this)
         emit_instr_call(fn, f, "__cyg_profile_func_exit", f->line);
     g_instr_this = 0;               /* nothing after this function is it */
-    /* main that reaches its closing brace returns 0 (C99 5.1.2.2.3). After
-     * a body whose every path returned this is unreachable, and goes. */
-    if (!strcmp(f->name, "main") && ty_is_integer(f->ret_ty)) {
+    /* main that reaches its closing brace returns 0 (C99 5.1.2.2.3), and so
+     * does any function returning an integer or a pointer whose brace can
+     * be reached (--warn=return-type) -- 0 rather than whatever the
+     * register held, so a caller that uses the value anyway reads the same
+     * thing every time. A floating or aggregate result is left undefined.
+     * After a body whose every path returned this is unreachable, and
+     * goes. */
+    if ((!strcmp(f->name, "main") || f->falls_off) &&
+        (ty_is_integer(f->ret_ty) || f->ret_ty->kind == TY_PTR) &&
+        ty_size(f->ret_ty) <= 8 && !f->is_naked) {
         int z = emit_const(fn, 0, ty_size(f->ret_ty) > 4 ? 8 : 4);
         struct ir_ins *r = emit(fn);
         r->op = IR_RET;

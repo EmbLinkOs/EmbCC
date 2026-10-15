@@ -188,3 +188,37 @@ int g(int); void f(int x) { _Generic(x, int: g)(x); }
 void f(int x) { sizeof x; +x; "s"; }
 == c89-bare-return
 int f(void) { return; }
+== stray-semicolon-file-scope
+int f(void) { return 0; };
+== falls-off-end
+int f(int x) { if (x) return 1; }
+== gnu-zero-length-local
+int f(void) { int a[0]; return sizeof a; }
+== gnu-empty-init-array
+int f(void) { int a[] = {}; return sizeof a; }
+== gnu-lib-builtin
+void f(int x) { if (x) __builtin_abort(); __builtin_printf("%d\n", x); }
+== gnu-fortify-builtin
+void f(char *d, const char *s) { __builtin___memcpy_chk(d, s, 4, __builtin_object_size(d, 0)); }
+== gnu-obsolete-field-designator
+struct pt { int x, y; } p = { y: 2, x: 1 };
+== gnu-obsolete-index-designator
+int a[4] = { [2] 7 };
+== gnu-cond-one-void-arm
+void g(void); void f(int c) { c ? g() : 1; }
+== gnu-mode-in-specifiers
+typedef int __attribute__((mode(SI))) int_t;
+== gnu-typeof-function
+int f(int x) { return x; } extern __typeof(f) g;
+== gnu-enum-forward
+enum later *lp; enum later { L0 };
+== gnu-extern-void-object
+extern void sym; void *p = &sym;
+== tentative-unsized-array
+int b[];
+== static-address-difference
+struct { int c, d; } v; long off = (char *)&v.d - (char *)&v.c;
+== gnu-var-alias
+int a; extern int b __attribute__((alias("a")));
+== gnu-label-addr-local-label
+void f(void) { __label__ here; void *p = &&here; here: (void)p; }

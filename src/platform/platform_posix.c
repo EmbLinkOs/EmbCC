@@ -41,6 +41,12 @@ int plat_stderr_is_terminal(void)
     return isatty(2);
 }
 
+/* the main thread's default on macOS and Linux (ulimit -s) */
+unsigned long plat_stack_size(void)
+{
+    return 8ul << 20;
+}
+
 const char *plat_self_path(void)
 {
     static char buf[4096];
