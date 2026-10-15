@@ -2722,6 +2722,15 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                 e->gref = g;
                 g->used = 1;
                 e->ty = g->ty;
+                /* an alias IS its target, to every pass after this one:
+                 * `b = 2` after `a = 1` must not leave a's 1 standing.
+                 * Its own symbol is for the other units. */
+                struct global *t = g->alias_of ? find_global(u, g->alias_of)
+                                               : NULL;
+                if (t && !t->alias_of) {
+                    e->gref = t;
+                    t->used = 1;
+                }
                 if (g->attr_deprecated)
                     diag_warn_opt(diag_file(u), e->line, e->col,
                                   "deprecated-declarations",
@@ -7653,6 +7662,8 @@ static void merge_globals(struct unit *u)
         if (!g->is_extern)
             canon->is_const = g->is_const;
         canon->is_weak |= g->is_weak;
+        if (!canon->alias_of)
+            canon->alias_of = g->alias_of;
         if (!canon->asm_name)
             canon->asm_name = g->asm_name;
         if (g->section) {
@@ -7720,6 +7731,28 @@ static void check_aliases(struct unit *u)
         /* Its body must be emitted, and nothing calls it by name -- the
          * calls are the alias's -- so it is kept as __attribute__((used))
          * keeps a function: not inlined away, not dropped. */
+        t->used = 1;
+        t->attr_used = 1;
+    }
+}
+
+/* A variable's alias is the target's storage under another name: the
+ * target is a variable defined here, and the alias has no bytes. After
+ * merge_globals, which makes each name one node. */
+static void check_var_aliases(struct unit *u)
+{
+    for (struct global *g = u->globals; g; g = g->next) {
+        if (g->absorbed || !g->alias_of)
+            continue;
+        if (g->has_init)
+            sema_error_line(u, g->line, "'%s' has an initializer and is "
+                            "also an alias of '%s'", g->name, g->alias_of);
+        struct global *t = find_global(u, g->alias_of);
+        if (!t || !t->defined || t->alias_of)
+            sema_error_line(u, g->line, "'%s' is an alias of '%s', which is "
+                            "not a variable defined in this file", g->name,
+                            g->alias_of);
+        g->defined = 0;
         t->used = 1;
         t->attr_used = 1;
     }
@@ -7803,6 +7836,7 @@ void sema_check(struct unit *u)
     check_aliases(u);
     check_cmse_entries(u);
     merge_globals(u);
+    check_var_aliases(u);
     /* `int a[];` that nothing sized: one element, as C17 6.9.2p5 says
      * and GCC does, with its warning */
     for (struct global *g = u->globals; g; g = g->next)

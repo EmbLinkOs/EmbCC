@@ -320,6 +320,9 @@ struct global {
     int is_static;
     int is_extern;        /* THIS declaration was 'extern' */
     int is_weak;          /* __attribute__((weak)) */
+    const char *alias_of; /* __attribute__((alias("t"))): another name for
+                           * variable t, defined in this file; it has no
+                           * storage of its own */
     /* __attribute__((aligned(N))) / _Alignas(N) on the object itself,
      * 0 when none. NOT the same as its type's alignment, and it was
      * silently dropped: a page table declared aligned(4096) was laid

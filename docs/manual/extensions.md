@@ -404,7 +404,7 @@ embcc: attr.c:1: warning: attribute 'frobnicate' is not one EmbCC knows, and is 
 
 | Attribute | Effect |
 |---|---|
-| `alias("target")` | The function is another name for `target`, which must be a function defined in the same file and not itself an alias. The declaration with `alias` cannot have a body. Combine with `weak` for a weak alias. ELF only; see [Object formats](#object-formats) |
+| `alias("target")` | The function or variable is another name for `target`, which must be a function, or a variable, defined in the same file and not itself an alias. The declaration with `alias` cannot have a body or an initializer, and a variable alias has no storage of its own: inside the file it is `target`, to the optimizer as well. Combine with `weak` for a weak alias. ELF only; see [Object formats](#object-formats) |
 | `always_inline` | Lifts the inliner's size limit for calls to this function, at every level including `--opt=none`; see [Inlining](optimization.md#inlining) |
 | `constructor`, `destructor` | The function's address is placed in `.init_array` or `.fini_array`, for the startup code to call before `main` or at exit. On a bare-metal target the program's own startup code walks the tables; see [Startup code](embedded.md#startup-code-and-the-linkers-symbols). A `static` one is kept although nothing calls it. ELF only |
 | `deprecated`, `deprecated("message")` | A call, a read, or taking the address warns under [`--warn=deprecated-declarations`](diagnostics.md#--warndeprecated-declarations), on by default. The message text is not printed |
@@ -456,9 +456,7 @@ different `pcs` conventions.
 | `used` | A `static` variable is emitted even if nothing refers to it |
 | `visibility("...")` | As for functions |
 | `weak` | As for functions: a weak definition, or a weak reference whose address is null when nothing defines it |
-
-`alias` on a variable is refused: `alias attribute on variable 'x' is
-not supported (functions take it)`.
+| `alias("target")` | As for functions: another name for `target`, a variable defined in this file, with no storage of its own (`extern int b __attribute__((alias("a")));`). ELF only |
 
 ### Type attributes
 
@@ -1025,7 +1023,6 @@ function that calls does. `__builtin_return_address(0)` is:
 `__builtin_return_address` is refused: a handler was not called, and
 what it returns to is the trap's. AVR refuses
 `__builtin_frame_address` there too.
-
 
 A function that calls `alloca` is never inlined.
 
