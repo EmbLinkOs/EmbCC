@@ -218,6 +218,15 @@ void *pic24_intc_create(struct sim *s, struct rf_periph *p)
     c->intcon1 = rf_reg(p, "INTCON1");
     c->intcon2 = rf_reg(p, "INTCON2");
     c->intcon3 = rf_reg(p, "INTCON3");
+    /* the trap flags a dsPIC33E's EDC makes read-only are the program's to
+     * clear (the family reference manual's INTCON1, DS70000600: R/W-0) */
+    if (c->intcon1) {
+        static const char *const flag[] = { "OVAERR", "OVBERR", "COVAERR", "COVBERR",
+                                            "SFTACERR", "DIV0ERR" };
+        for (int k = 0; k < 6; k++)
+            if (rf_mask(c->intcon1, flag[k]))
+                rf_set_acc(c->intcon1, rf_mask(c->intcon1, flag[k]), ACC_RW);
+    }
     c->intcon4 = rf_reg(p, "INTCON4");
     c->inttreg = rf_reg(p, "INTTREG");
     char nm[16];

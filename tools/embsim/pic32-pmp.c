@@ -1,5 +1,7 @@
 /* pic32-pmp.c -- a PIC32's parallel master port, in its master modes
- * (PMMODE.MODE 2 and 3), over the ATDF's registers.
+ * (PMMODE.MODE 2 and 3), over the ATDF's registers; and a dsPIC33E's or
+ * PIC24E's, the same port over its EDC's (PMDIN1 the data register, its
+ * wait states instruction cycles).
  *
  *   - With PMCON.ON set, a write to PMDIN is a write cycle on the bus:
  *     the board (struct board_io's bus_write) gets the address PMADDR
@@ -16,11 +18,13 @@
 #include <string.h>
 
 #include "devices.h"
+#include "pic24.h"
 #include "pic32.h"
 #include "svd-map.h"
 
 struct pmp {
     struct sim *s;
+    int pic24;                      /* a PIC24E's or dsPIC33E's */
     struct rf_periph *p;
     struct rf_reg *con, *mode, *addr, *din, *aen;
     int irq;
@@ -46,8 +50,12 @@ static void end_cycle(struct pmp *m)
         u32 lo = (a + (inc == 1 ? 1u : 0x3fffu)) & 0x3fff;
         rf_hw(m->addr, (m->addr->value & ~0x3fffull) | lo);
     }
-    if (((mode >> 13) & 3) == 1)
-        pic32_irq(m->s, m->irq);
+    if (((mode >> 13) & 3) == 1) {
+        if (m->pic24)
+            pic24_irq(m->s, m->irq);
+        else
+            pic32_irq(m->s, m->irq);
+    }
     rf_clock(m->p, &m->running, 0);
 }
 
@@ -56,7 +64,7 @@ static void start_cycle(struct pmp *m)
 {
     u64 mode = m->mode->value;
     u32 wb = (u32)(mode >> 6) & 3, wm = (u32)(mode >> 2) & 15, we = (u32)mode & 3;
-    m->busy_left = (u64)(wb + 1 + wm + 1 + we + 1) * pic32_pb_div(m->s, 2);
+    m->busy_left = (u64)(wb + 1 + wm + 1 + we + 1) * (m->pic24 ? 1 : pic32_pb_div(m->s, 2));
     rf_hw(m->mode, mode | MODE_BUSY);
     rf_clock(m->p, &m->running, 1);
 }
@@ -110,7 +118,8 @@ static void pmp_tick(void *ctx, u32 cycles)
 static int pmp_next(void *ctx, u32 *cycles)
 {
     struct pmp *m = ctx;
-    if (!((m->mode->value >> 13 & 3) == 1 && pic32_irq_enabled(m->s, m->irq)))
+    int en = m->pic24 ? pic24_irq_enabled(m->s, m->irq) : pic32_irq_enabled(m->s, m->irq);
+    if (!((m->mode->value >> 13 & 3) == 1 && en))
         return 0;
     *cycles = (u32)m->busy_left;
     return 1;
@@ -128,6 +137,10 @@ const struct dev_ops pic32_pmp_ops = {
     "pic32-pmp", pmp_read, pmp_write, pmp_reset, pmp_tick, pmp_next,
 };
 
+const struct dev_ops pic24e_pmp_ops = {
+    "pic24e-pmp", pmp_read, pmp_write, pmp_reset, pmp_tick, pmp_next,
+};
+
 void *pic32_pmp_create(struct sim *s, struct rf_periph *p)
 {
     struct pmp m;
@@ -137,11 +150,12 @@ void *pic32_pmp_create(struct sim *s, struct rf_periph *p)
     m.con = rf_reg(p, "PMCON");
     m.mode = rf_reg(p, "PMMODE");
     m.addr = rf_reg(p, "PMADDR");
-    m.din = rf_reg(p, "PMDIN");
+    m.pic24 = pic24_is(s->cpu);
+    m.din = rf_reg(p, m.pic24 ? "PMDIN1" : "PMDIN");
     m.aen = rf_reg(p, "PMAEN");
     if (!m.con || !m.mode || !m.addr || !m.din)
         return 0;
-    m.irq = pic32_irq_named(s, "PMP");
+    m.irq = m.pic24 ? pic24_irq_named(s, "PMP") : pic32_irq_named(s, "PMP");
     struct pmp *c = malloc(sizeof *c);
     if (!c)
         die("out of memory");

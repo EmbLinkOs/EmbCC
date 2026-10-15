@@ -1,0 +1,62 @@
+MAC W4*W5, A, [W8]+=6, W4, [W10]+=2, W5       | mac w4*w5, a, [w8]+=6, w4, [w10]+=2, w5
+MAC W4*W5, A, [W8]-=2, W4, [W10]+=2, W5, W13  | mac w4*w5, a, [w8]-=2, w4, [w10]+=2, w5, w13
+MAC W4*W4, B, [W9+W12], W4, [W10]-=2, W5      | mac w4*w4, b, [w9+w12], w4, [w10]-=2, w5
+MAC W7*W7, A, [W11]-=2, W7                    | mac w7*w7, a, [w11]-=2, w7
+MOVSAC B, [W9], W6, [W11]+=4, W7, W13         | movsac b, [w9], w6, [w11]+=4, w7, w13
+MOVSAC A, [W9]-=2, W4, [W11+W12], W6, [W13]+=2| movsac a, [w9]-=2, w4, [w11+w12], w6, [w13]+=2
+MPY W4*W5, A, [W8]+=2, W6, [W10]-=2, W7       | mpy w4*w5, a, [w8]+=2, w6, [w10]-=2, w7
+MPY W6*W7, B, [W8]+=2, W4, [W10]-=2, W5       | mpy w6*w7, b, [w8]+=2, w4, [w10]-=2, w5
+MPY W6*W6, A, [W9]+=2, W6                     | mpy w6*w6, a, [w9]+=2, w6
+MPY W4*W4, B, [W9+W12], W4, [W10]+=2, W5      | mpy w4*w4, b, [w9+w12], w4, [w10]+=2, w5
+MPY.N W4*W5, A, [W8]+=2, W4, [W10]+=2, W5     | mpy.n w4*w5, a, [w8]+=2, w4, [w10]+=2, w5
+MPY.N W4*W5, A, [W8]+=2, W4, [W10]+=2, W5     | mpy.n w4*w5, a, [w8]+=2, w4, [w10]+=2, w5
+MSC W6*W7, A, [W8]-=4, W6, [W10]-=4, W7       | msc w6*w7, a, [w8]-=4, w6, [w10]-=4, w7
+MSC W4*W5, B, [W11+W12], W5, W13              | msc w4*w5, b, [w11+w12], w5, w13
+CLR A, [W8]+=2, W4, W13                       | clr a, [w8]+=2, w4, w13
+CLR B, [W8]+=2, W6, [W10]+=2, W7, [W13]+=2    | clr b, [w8]+=2, w6, [w10]+=2, w7, [w13]+=2
+ED W4*W4, A, [W8]+=2, [W10]-=2, W4            | ed w4*w4, a, [w8]+=2, [w10]-=2, w4
+ED W5*W5, B, [W9]+=2, [W11+W12], W5           | ed w5*w5, b, [w9]+=2, [w11+w12], w5
+EDAC W4*W4, A, [W8]+=2, [W10]-=2, W4          | edac w4*w4, a, [w8]+=2, [w10]-=2, w4
+EDAC W5*W5, B, [W9]+=2, [W11+W12], W5         | edac w5*w5, b, [w9]+=2, [w11+w12], w5
+ADD A                                         | add a
+ADD B                                         | add b
+ADD W0, #2, A                                 | add w0, #2, a
+ADD [W5++], A                                 | add [w5++], a
+LAC [--W2], #7, A                             | lac [--w2], #7, a
+NEG A                                         | neg a
+NEG B                                         | neg b
+SUB A                                         | sub a
+SUB B                                         | sub b
+SAC A, #4, W5                                 | sac a, #4, w5
+SAC B, #-4, [W5++]                            | sac b, #-4, [w5++]
+SAC.R A, #4, W5                               | sac.r a, #4, w5
+SAC.R B, #-4, [W5++]                          | sac.r b, #-4, [w5++]
+SFTAC A, #12                                  | sftac a, #12
+SFTAC B, #-10                                 | sftac b, #-10
+SFTAC A, W0                                   | sftac a, w0
+SFTAC B, W12                                  | sftac b, w12
+MUL.SS W0, W1, A                              | mul.ss w0, w1, a
+MUL.SU W8, W9, A                              | mul.su w8, w9, a
+MUL.SU W8, #0x02, A                           | mul.su w8, #2, a
+MUL.US W0, W1, B                              | mul.us w0, w1, b
+MUL.UU W8, #0x02, A                           | mul.uu w8, #2, a
+MULW.SS W0, W1, W12                           | mulw.ss w0, w1, w12
+MULW.SS W2, [--W4], W0                        | mulw.ss w2, [--w4], w0
+MULW.SU W8, [W9], W0                          | mulw.su w8, [w9], w0
+MULW.SU W2, [++W3], W4                        | mulw.su w2, [++w3], w4
+MULW.SU W8, #0x04, W0                         | mulw.su w8, #4, w0
+MULW.US W0, [W1], W2                          | mulw.us w0, [w1], w2
+MULW.US W6, [W5++], W10                       | mulw.us w6, [w5++], w10
+MULW.UU W4, W0, W2                            | mulw.uu w4, w0, w2
+MULW.UU W4, #0x04, W2                         | mulw.uu w4, #4, w2
+DIVF W8, W9                                   | divf w8, w9
+DIVF W8, W9                                   | divf w8, w9
+CP W4, #0x12                                  | cp w4, #18
+CPB.B W4, #0x12                               | cpb.b w4, #18
+CPB.B W4, #0x12                               | cpb.b w4, #18
+CPB W12, #0x1F                                | cpb w12, #31
+CPB W12, #0x1F                                | cpb w12, #31
+LNK #0xA0                                     | lnk #160
+ULNK                                          | ulnk
+MOVPAG #0x02, DSRPAG                          | movpag #0x2, dsrpag
+MOVPAG W2, DSRPAG                             | movpag w2, dsrpag

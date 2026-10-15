@@ -150,6 +150,8 @@ static const struct board boards_[] = {
       N(e16p24_buttons), 1, 4, 5, EE_SPI, 0, 0 },
     { "explorer16-32-pic32mx", e16p24_leds, N(e16p24_leds), e16p24_buttons,
       N(e16p24_buttons), 1, 4, 5, EE_SPI2, 0, 80e6 },
+    { "explorer16-32-dspic33", e16p24_leds, N(e16p24_leds), e16p24_buttons,
+      N(e16p24_buttons), 1, 4, 5, EE_SPI2, 0, 0 },
     { "curiosity-pic32mz-ef-2", cur_leds, N(cur_leds), cur_buttons,
       N(cur_buttons), 0, 0, 0, 0, 0, 0 },
 };

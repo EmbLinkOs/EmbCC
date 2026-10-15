@@ -52,7 +52,9 @@ file but the network one compiles with EmbCC itself. Everything is in
 | `pic32.h` | what a PIC32's models share: interrupts through the EVIC, the peripheral bus dividers |
 | `pic32-evic.c`, `pic32-cru.c`, `pic32-tmr.c`, `pic32-gpio.c`, `pic32-uart.c`, `pic32-pmp.c`, `pic32-adc.c` | a PIC32's models over its ATDF's (a PIC32MZ's) or EDC's (a PIC32MX's) registers: the EVIC (and the core's EIC mode: a PIC32MZ's OFFn, a PIC32MX's vectors spaced by IntCtl.VS, `struct mips_eic`'s `spaced`), CFG's SYSKEY and the oscillator (a PIC32MX's one bus divider in OSCCON), Timer1-9, ports A-K (a PIC32MX's AD1PCFG and change notices), UART1-6, the PMP, ADCHS |
 | `pic32-spi.c`, `pic32-adc10.c` | a PIC32's SPI units as masters (the board's device through `struct board_io`'s `spi`), and a PIC32MX's 10-bit ADC1 |
-| `pic24.h`, `pic24.c` | the PIC24F core: the instruction set, REPEAT and the divide, the data space with its EDS window and program space visibility, table reads, traps and interrupts through the IVT, DISI, PWRSAV; its bus layout; the core's clock (`pic24_fcy`) |
+| `pic24.h`, `pic24.c` | the PIC24F core: the instruction set, REPEAT and the divide, the data space with its EDS window and program space visibility, table reads, traps and interrupts through the IVT, DISI, PWRSAV; its bus layout; the core's clock (`pic24_fcy`); a PIC24EP's or dsPIC33EP's (`e`, `dsp`): the PIC24E's instructions and timing, the stack frame flag, DO loops and their stack, DIVF, MULW, MOVPAG |
+| `pic24e-spi.c`, `pic24e-adc.c` | a dsPIC33E's or PIC24E's SPI units (SPIxSTAT, SPIxCON1, SPIxBUF) and ADC1; its PMP is `pic32-pmp.c`'s, by the EDC's names (`pic24e-pmp`) |
+| `pic24-dsp.c` | a dsPIC33E's DSP engine: the accumulators, the MAC class with its X and Y prefetches and write-back, the multiplier's modes, the saturation and rounding logic, LAC, SAC, SFTAC, the MUL into an accumulator; the address generators' modulo and bit-reversed addressing (`pic24_agu_step`, `pic24_agu_offset`, which `pic24.c`'s operands call); it works on `pic24.c`'s state through the `pic24_core_*` functions |
 | `edc.c` | a Microchip EDC file (a device pack's `.PIC`: a PIC24's, dsPIC's or PIC32's SFRs, its interrupts and its pins' names) read into the SVD reader's `struct svd_device` |
 | `pic24-intc.c`, `pic24-osc.c`, `pic24-tmr.c`, `pic24-uart.c`, `pic24-adc.c`, `pic24-spi.c`, `pic24-epmp.c` | a PIC24FJ's models over its EDC's registers: the interrupt controller (driving the core), the oscillator and the PPS lock, Timer1-5, UART1-6, ADC1, SPI1-3, the EPMP's EDS space; its ports and their interrupt-on-change are `pic32-gpio.c`'s |
 | `pic24-nvm.c`, `pic24-rtcc.c`, `pic24-dma.c`, `pic24-i2c.c` | the flash controller (its write latches are the core's table writes at TBLPAG 0xFA, through `struct pic24_nvm`; NVMKEY's unlock is the core's, `pic24_unlocked`, which the RTCC's WRLOCK takes too), the RTCC, the DMA controller (its triggers are every interrupt the controller flags: `pic24_irq_listen`), I2C1-3 as masters on an empty bus |
@@ -482,8 +484,13 @@ of its data sheet mode (`DS.0`); implemented bits no field names get a
 field of their own, so they keep what is written. The file has no
 peripherals: a run of registers from one module (`edc:_modsrc`) is one,
 named by its first register (a table in `edc.c`, else the register's
-letters), and a later run of the same module joins it. The core's
-module's registers are left out, as the core handles them. The pin
+letters), and a later run of the same module joins it, as does a run
+named as the run just before it, of another module (a dsPIC33E's
+EDC gives Timer1 and Timer2-9, RPORx and RPINRx modules of their own).
+The core's module's registers are left out, as the core handles them:
+the PIC24F's module is named CPU, a dsPIC33E's is the one whose run
+starts at WREG0. A dsPIC's Y data space is `edc:ybeginaddr` to the
+general purpose RAM's end (`svd_device.y_base`, `y_end`, `rf_y_space`). The pin
 list (`<edc:PinList>`) gives each pin's names on its port pin
 (`svd_device.pin`, `rf_pin`), which the ports' model uses to put a
 peripheral's output on an RPn pin and to find the pin an input is
@@ -511,7 +518,10 @@ EPMP model adds a device over the EDS above the RAM.
 
 The interrupt controller drives the core through `struct pic24_intc`:
 the request it presents (priority and number), and what the core tells
-it -- the interrupt taken, the traps raised (INTCON1's bits), NSTDIS.
+it -- the interrupt taken, the traps raised (INTCON1's bits), NSTDIS,
+and a math error trap's condition (`math`: a dsPIC's accumulator
+overflow is a trap only when INTCON1 enables it; the controller sets
+its flag, OVAERR..., and says whether).
 The other models flag their interrupts with `pic24_irq`, by the EDC's
 names (`pic24_irq_named(s, "U1TX")`).
 
@@ -528,14 +538,16 @@ If QEMU models the board, give `tests/golden/embsim.sh` a configuration
 for it, so QEMU referees the new board on the whole exec corpus.
 
 A Microchip part needs no entry: `board_part` makes a board of any part
-of a family the models cover (the PIC32MZ EF, the PIC24FJ GA6/GB6) by
-its name, reading its memory from its pack before the run -- the ATDF's
+of a family the models cover (the PIC32MZ EF, the PIC32MX, the PIC24FJ
+GA6/GB6, the dsPIC33EP and PIC24EP) by its name, the core's model its
+name too (`pic24_create` takes a dsPIC33EP's and a PIC24EP's), reading
+its memory from its pack before the run -- the ATDF's
 `code` and `kseg0_data_mem` segments, the EDC's first code sector and
 data space (`svd_device.code_end`, `ram_base`, `ram_end`) -- and the
 models find the rest in the same file at run time: a PIC24's
 configuration words by name (`rf_config_addr`), its pins, its
-registers. A family whose peripherals differ (a PIC32MX, a PIC24FJ
-GA0xx) needs its models first, and is refused by name until then.
+registers. A family whose peripherals differ (a PIC24FJ GA0xx, a
+dsPIC33C) needs its models first, and is refused by name until then.
 
 ## Adding a core
 
@@ -618,6 +630,14 @@ or with its own file for the six functions of `net.h`.
   Curiosity PIC32MZ EF 2.0 (`pic32-curiosity.c`: ANSELx out of reset,
   the switches with and without pull-ups, the LEDs lit low). Skipped,
   saying so, without the pack (`PIC32MZ_EF_DFP`, tools/hostpaths.sh).
+- `tests/golden/embsim-dspic33.sh`: the dsPIC33EP512MU810's register
+  file against its linker script; the dsPIC33E core against 68 examples
+  of the programmer's reference manual and the data memory section
+  (`dspic33-isa.s`, generated as `pic24-isa.s` is, a DO placed at its
+  example's address) and `dspic33-dsp.s`'s checks of what the examples
+  leave out; `--disassemble` of the examples beside the manual's text.
+  Skipped without the pack
+  (`DSPIC33E_DFP`).
 - `tests/golden/embsim-pic24.sh`: the PIC24FJ1024GB610's register file
   from the pack's EDC against its linker script; the PIC24F core against
   227 examples of the programmer's reference manual (`pic24-isa.s`,

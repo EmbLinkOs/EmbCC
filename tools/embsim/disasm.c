@@ -673,6 +673,96 @@ static const char *p24_wreg(u32 i)
     return (i >> 13 & 1) ? "" : ", wreg";
 }
 
+/* a dsPIC's MAC class prefetch (iiii for X, jjjj for Y) into Wd: ", [w8]+=2,
+ * w4"; nothing for 0100 (none) */
+static int p24_prefetch(char *b, size_t n, u32 f, int y, u32 d)
+{
+    static const char *const step[8] = { "", "+=2", "+=4", "+=6", 0, "-=6", "-=4", "-=2" };
+    u32 r = (y ? 10 : 8) + (f >> 3);
+    if (f == 4)
+        return 0;
+    if (f == 12)
+        return snprintf(b, n, ", [w%u+w12], w%u", r, d);
+    return snprintf(b, n, ", [w%u]%s, w%u", r, step[f & 7], d);
+}
+
+/* the DSP instructions: the MAC class (0xC0-0xC7, 0xF0-0xF3) and the
+ * accumulator's (0xC8-0xCD) */
+static int dis_p24_dsp(u32 i, char *b, size_t n)
+{
+    static const int wm[8] = { 4, 4, 4, 0, 5, 5, 6, 0 }, wn[8] = { 5, 6, 7, 0, 6, 7, 7, 0 };
+    static const char *const shift_dst[2] = { "a", "b" };
+    u32 op = i >> 16 & 0xff, a = i >> 15 & 1;
+    char x[24] = "", y[24] = "", wb[16] = "", s1[24];
+    const char *acc = shift_dst[a];
+    if (op <= 0xc7 || op >= 0xf0) {
+        u32 aa = i & 3;
+        p24_prefetch(x, sizeof x, i >> 6 & 15, 0, 4 + (i >> 12 & 3));
+        if (op >= 0xf0) {                       /* the squares, ED, EDAC */
+            u32 m = 4 + (op & 3);
+            static const char *const sq[4] = { "mac", "mpy", "edac", "ed" };
+            if (aa >= 2) {                      /* [Wx], [Wy], Wxd */
+                char yy[24] = "";
+                p24_prefetch(yy, sizeof yy, i >> 2 & 15, 1, 0);
+                char *comma = strrchr(yy, ',');
+                if (comma)
+                    *comma = 0;
+                char *xc = strrchr(x, ',');
+                char xd[8] = "";
+                if (xc) {
+                    snprintf(xd, sizeof xd, "%s", xc);
+                    *xc = 0;
+                }
+                return snprintf(b, n, "%s w%u*w%u, %s%s%s%s", sq[aa], m, m, acc, x, yy, xd);
+            }
+            p24_prefetch(y, sizeof y, i >> 2 & 15, 1, 4 + (i >> 10 & 3));
+            return snprintf(b, n, "%s w%u*w%u, %s%s%s", sq[aa], m, m, acc, x, y);
+        }
+        p24_prefetch(y, sizeof y, i >> 2 & 15, 1, 4 + (i >> 10 & 3));
+        if (aa == 0)
+            snprintf(wb, sizeof wb, ", w13");
+        else if (aa == 1)
+            snprintf(wb, sizeof wb, ", [w13]+=2");
+        u32 mmm = op & 7, neg = i >> 14 & 1;
+        if (mmm == 3)
+            return snprintf(b, n, "clr %s%s%s%s", acc, x, y, wb);
+        if (mmm == 7)
+            return snprintf(b, n, "movsac %s%s%s%s", acc, x, y, wb);
+        snprintf(s1, sizeof s1, "w%d*w%d", wm[mmm], wn[mmm]);
+        if (aa == 3)
+            return snprintf(b, n, "%s %s, %s%s%s", neg ? "mpy.n" : "mpy", s1, acc, x, y);
+        return snprintf(b, n, "%s %s, %s%s%s%s", neg ? "msc" : "mac", s1, acc, x, y, wb);
+    }
+    int k = (int)(i >> 7 & 15);
+    k = (k ^ 8) - 8;
+    switch (op) {
+    case 0xc8:
+        if (i & 0x40) {
+            int v = (int)(i & 0x3f);
+            return snprintf(b, n, "sftac %s, #%d", acc, (v ^ 0x20) - 0x20);
+        }
+        return snprintf(b, n, "sftac %s, w%u", acc, (unsigned)(i & 15));
+    case 0xc9: case 0xca:
+        p24_op(s1, sizeof s1, (int)(i >> 4 & 7), i & 15, i >> 11 & 15);
+        if (k)
+            return snprintf(b, n, "%s %s, #%d, %s", op == 0xc9 ? "add" : "lac", s1, k, acc);
+        return snprintf(b, n, "%s %s, %s", op == 0xc9 ? "add" : "lac", s1, acc);
+    case 0xcb: {
+        static const char *const ab[8] = { "add", "neg", 0, "sub" };
+        const char *nm = ab[i >> 12 & 7];
+        if (nm && !(i & 0x0fff))
+            return snprintf(b, n, "%s %s", nm, acc);
+        break;
+    }
+    case 0xcc: case 0xcd:
+        p24_op(s1, sizeof s1, (int)(i >> 4 & 7), i & 15, i >> 11 & 15);
+        if (k)
+            return snprintf(b, n, "%s %s, #%d, %s", op == 0xcc ? "sac" : "sac.r", acc, k, s1);
+        return snprintf(b, n, "%s %s, %s", op == 0xcc ? "sac" : "sac.r", acc, s1);
+    }
+    return snprintf(b, n, ".word 0x%06x", (unsigned)i);
+}
+
 int dis_pic24(u32 pc, u32 i, u32 i2, char *b, size_t n)
 {
     static const char *const cc[16] = {
@@ -700,6 +790,10 @@ int dis_pic24(u32 pc, u32 i, u32 i2, char *b, size_t n)
         static const char *const w[4] = { "call", "rcall", "goto", "bra" };
         if ((i & 0x9ff0) == 0)
             return snprintf(b, n, "%s w%u", w[i >> 13 & 3], s), 1;
+        if ((i & 0xf9f0) == 0)                  /* the PIC24E's */
+            return snprintf(b, n, "%s w%u", w[i >> 9 & 3], s), 1;
+        if ((i & 0x83f0) == 0x8000)
+            return snprintf(b, n, "%s w%u", i & 0x400 ? "goto.l" : "call.l", s), 1;
         break;
     }
     case 0x02: case 0x04:
@@ -715,10 +809,22 @@ int dis_pic24(u32 pc, u32 i, u32 i2, char *b, size_t n)
         break;
     case 0x07:
         return snprintf(b, n, "rcall 0x%06x", (unsigned)(pc + 2 + 2 * (u32)rel)), 1;
+    case 0x08:                                  /* a dsPIC's DO */
+        if (i & 0x8000)
+            snprintf(x, sizeof x, "w%u", s);
+        else
+            snprintf(x, sizeof x, "#%u", (unsigned)(i & 0x7fff));
+        return snprintf(b, n, "do %s, 0x%06x", x,
+                        (unsigned)((pc + 4 + 2 * (u32)(s32)(int16_t)(i2 & 0xffff)) & 0x7ffffe)), 2;
     case 0x09:
         if (i & 0x8000)
             return snprintf(b, n, "repeat w%u", s), 1;
-        return snprintf(b, n, "repeat #%u", (unsigned)(i & 0x3fff)), 1;
+        return snprintf(b, n, "repeat #%u", (unsigned)(i & 0x7fff)), 1;
+    case 0x0c: case 0x0d: case 0x0e: case 0x0f: {
+        static const char *const dc[4] = { "oa", "ob", "sa", "sb" };
+        return snprintf(b, n, "bra %s, 0x%06x", dc[op - 0x0c],
+                        (unsigned)(pc + 2 + 2 * (u32)rel)), 1;
+    }
     case 0x80: case 0x81: case 0x82: case 0x83:
     case 0x84: case 0x85: case 0x86: case 0x87:
         return snprintf(b, n, "mov 0x%04x, w%u", (unsigned)(i >> 4 & 0x7fff) << 1, s), 1;
@@ -776,12 +882,18 @@ int dis_pic24(u32 pc, u32 i, u32 i2, char *b, size_t n)
         break;
     case 0xb8: case 0xb9: {
         static const char *const m[4] = { "uu", "us", "su", "ss" };
+        const char *v = m[(op - 0xb8) * 2 + (i >> 15 & 1)];
         if ((pm & 6) == 6)
             snprintf(x, sizeof x, "#%u", s | (u32)(pm & 1) << 4);
         else
             p24_op(x, sizeof x, pm, s, 0);
-        return snprintf(b, n, "mul.%s w%u, %s, w%u", m[(op - 0xb8) * 2 + (i >> 15 & 1)],
-                        (unsigned)(i >> 11 & 15), x, d), 1;
+        if (d >= 14)                            /* a dsPIC33E's accumulator */
+            return snprintf(b, n, "mul.%s w%u, %s, %s", v, (unsigned)(i >> 11 & 15), x,
+                            d == 14 ? "a" : "b"), 1;
+        if (d & 1)                              /* the PIC24E's MULW */
+            return snprintf(b, n, "mulw.%s w%u, %s, w%u", v, (unsigned)(i >> 11 & 15), x,
+                            d - 1), 1;
+        return snprintf(b, n, "mul.%s w%u, %s, w%u", v, (unsigned)(i >> 11 & 15), x, d), 1;
     }
     case 0xba: case 0xbb:
         p24_op(x, sizeof x, pm, s, 0);
@@ -806,6 +918,14 @@ int dis_pic24(u32 pc, u32 i, u32 i2, char *b, size_t n)
         return snprintf(b, n, "mov.d w%u, %s", (unsigned)(i >> 1 & 7) * 2, y), 1;
     case 0xbf:
         return snprintf(b, n, "mov%s 0x%04x%s", bs, (unsigned)f13, p24_wreg(i)), 1;
+    case 0xc0: case 0xc1: case 0xc2: case 0xc3: case 0xc4: case 0xc5:
+    case 0xc6: case 0xc7: case 0xc8: case 0xc9: case 0xca: case 0xcb:
+    case 0xcc: case 0xcd: case 0xf0: case 0xf1: case 0xf2: case 0xf3:
+        return dis_p24_dsp(i, b, n), 1;
+    case 0xd9:
+        if (!(i & 0x8780))
+            return snprintf(b, n, "divf w%u, w%u", (unsigned)(i >> 11 & 15), s), 1;
+        break;
     case 0xcf:
         p24_op(x, sizeof x, pm, s, 0);
         return snprintf(b, n, "%s %s, w%u", i & 0x8000 ? "ff1l" : "ff1r", x, d), 1;
@@ -853,8 +973,8 @@ int dis_pic24(u32 pc, u32 i, u32 i2, char *b, size_t n)
         p24_op(x, sizeof x, pm, s, 0);
         return snprintf(b, n, "cp0%s %s", i & 0x400 ? ".b" : "", x), 1;
     case 0xe1:
-        if ((pm & 6) == 6)
-            snprintf(x, sizeof x, "#%u", (unsigned)(i & 31));
+        if ((pm & 6) == 6)                      /* the PIC24E's 8 bits: 9:7 */
+            snprintf(x, sizeof x, "#%u", (unsigned)((i >> 7 & 7) << 5 | (i & 31)));
         else
             p24_op(x, sizeof x, pm, s, 0);
         return snprintf(b, n, "%s%s w%u, %s", i & 0x8000 ? "cpb" : "cp",
@@ -866,7 +986,13 @@ int dis_pic24(u32 pc, u32 i, u32 i2, char *b, size_t n)
                         (unsigned)f13), 1;
     case 0xe6: case 0xe7: {
         static const char *const c[4] = { "cpsgt", "cpslt", "cpsne", "cpseq" };
-        return snprintf(b, n, "%s%s w%u, w%u", c[(op - 0xe6) * 2 + (i >> 15 & 1)],
+        static const char *const cb[4] = { "cpbgt", "cpblt", "cpbne", "cpbeq" };
+        int k = (op - 0xe6) * 2 + (int)(i >> 15 & 1);
+        s32 off = (s32)((i >> 4 & 63) ^ 32) - 32;
+        if (off > 1 || off < 0)                 /* the PIC24E's compare and branch */
+            return snprintf(b, n, "%s%s w%u, w%u, 0x%06x", cb[k], i & 0x400 ? ".b" : "",
+                            (unsigned)(i >> 11 & 15), s, (unsigned)(pc + 2 + 2 * (u32)off)), 1;
+        return snprintf(b, n, "%s%s w%u, w%u", c[k],
                         i & 0x400 ? ".b" : "", (unsigned)(i >> 11 & 15), s), 1;
     }
     case 0xf8: return snprintf(b, n, "push 0x%04x", (unsigned)(i & 0xfffe)), 1;
@@ -893,6 +1019,12 @@ int dis_pic24(u32 pc, u32 i, u32 i2, char *b, size_t n)
             return snprintf(b, n, "swap%s w%u", B ? ".b" : "", s), 1;
         break;
     case 0xfe:
+        if ((i & 0xe000) == 0xc000 && (i >> 10 & 3) != 3) {    /* MOVPAG */
+            static const char *const pg[3] = { "dsrpag", "dswpag", "tblpag" };
+            if (i & 0x1000)
+                return snprintf(b, n, "movpag w%u, %s", s, pg[i >> 10 & 3]), 1;
+            return snprintf(b, n, "movpag #0x%x, %s", (unsigned)(i & 0x3ff), pg[i >> 10 & 3]), 1;
+        }
         switch (i & 0xffff) {
         case 0x0000: return snprintf(b, n, "reset"), 1;
         case 0x4000: case 0x4001:

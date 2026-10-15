@@ -3,7 +3,8 @@
 `embsim` runs a linked ELF image, or an Intel HEX one, the way the part
 does: a Cortex-M (ARMv6-M, ARMv7-M), a RISC-V core (RV32 and RV64,
 IMAFDC), an AVR (the ATmega328P), a MIPS32 Release 2 core (QEMU malta's
-24Kc, a PIC32MZ's) or a PIC24F (the PIC24FJ1024GB610). It is ISO C
+24Kc, a PIC32MZ's), a PIC24F (the PIC24FJ1024GB610) or a dsPIC33E with
+its DSP engine (the dsPIC33EP512MU810). It is ISO C
 with no dependencies, so it builds on any machine, including one
 without QEMU. It counts the instructions it executes and estimates the
 cycles they take, and gdb, lldb or embdbg can debug the image while it
@@ -85,12 +86,15 @@ built for QEMU runs unchanged.
 | any PIC32MZ EF part by its name: `pic32mz1024efg064`, `pic32mz0512efe100`... | that part, alone | its program flash and RAM as its ATDF gives them | as `pic32mz2048efh100`, of its own ATDF |
 | any PIC32MX part by its name: `pic32mx795f512l`, `pic32mx250f128b`... | that part, alone | its program flash, boot flash and RAM as its EDC gives them | as `explorer16-32-pic32mx`'s part, of its own EDC |
 | any PIC24FJ GA6/GB6 part by its name: `pic24fj256ga610`, `pic24fj128gb606`... | that part, alone | its program memory, configuration words and RAM as its EDC gives them | as `pic24fj1024gb610`, of its own EDC |
+| `explorer16-32-dspic33` | dsPIC33EP512MU810 (the dsPIC33E core with its DSP engine), on the Explorer 16/32 with its PIM | 512 KiB of program flash, 52 KiB of RAM at data `0x1000` (Y space from `0x9000`) | UART1-4, of the part's EDC ([below](#dspic33ep-parts)), and the board's LEDs, buttons, sensors, LCD and EEPROM |
+| any dsPIC33EP part by its name: `dspic33ep512mu810`, `dspic33ep64mc202`, `dspic33ep256gp506`... | that part, alone: the dsPIC33E core (the PIC24E's instructions, the DSP engine) | its program memory, configuration words, RAM and Y data space as its EDC gives them | UART1-4, of its EDC ([below](#dspic33ep-parts)) |
+| any PIC24EP part by its name: `pic24ep512gu810`, `pic24ep64gp202`... | that part, alone: the PIC24E core (the dsPIC33E's, without the DSP engine) | as a dsPIC33EP's | as a dsPIC33EP's |
 
 A part by its name needs its pack, from `--dfp DIR` (or its file in
-`EMBSIM_SVD_PATH`); every part of the three packs' families is one, with
-the models the PIC32MZ2048EFH100, the PIC32MX795F512L and the
-PIC24FJ1024GB610 have. A part of another family (`pic24fj128ga010`, a
-dsPIC) is refused by name.
+`EMBSIM_SVD_PATH`); every part of the four packs' families is one, with
+the models the PIC32MZ2048EFH100, the PIC32MX795F512L, the
+PIC24FJ1024GB610 and the dsPIC33EP512MU810 have. A part of another
+family (`pic24fj128ga010`, a dsPIC33F or dsPIC33C) is refused by name.
 A program built for the part (`embcc --mcu=32MZ1024EFG064`) finds its
 memory where the part has it; a 64-pin part has the ports and pins of
 its EDC or ATDF, so a test that drives RA0 needs a 100-pin one.
@@ -120,9 +124,11 @@ its EDC or ATDF, so a test that drives RA0 needs a 100-pin one.
 - On the PIC24 boards EmbSim's bus holds both of the part's spaces:
   program memory at twice its address (each 24-bit word the four bytes
   an XC16 image and its HEX file give it: its three and a phantom 0),
-  the configuration memory at twice `0x800000`, and the data space at
-  `0x2000000` plus its Extended Data Space address. An ELF segment goes
-  to twice its load address; a HEX record to its address as written.
+  the configuration memory at twice `0x800000` (a dsPIC33EP's and a
+  PIC24EP's at twice `0xF80000`, where its configuration words are not
+  in program memory's last page), and the data space at `0x2000000`
+  plus its Extended Data Space address. An ELF segment goes to twice
+  its load address; a HEX record to its address as written.
 - A segment of the image outside the board's memory gets memory of its
   own, so a link script for a similar part still runs.
 - Flash on the lm3s6965, the micro:bit and the STM32F405 ignores
@@ -978,6 +984,115 @@ and the UART's bit timing.
 - **PWRSAV** waits for an interrupt, skipping ahead to the device that
   will raise one; with none, the run ends. RESET ends it (exit 0).
 
+## dsPIC33EP parts
+
+A dsPIC33EP or PIC24EP part is built, by its name, from Microchip's
+dsPIC33E device pack (`Microchip.dsPIC33E-GM-GP-MC-GU-MU_DFP`, which
+holds both families: `--dfp DIR`, or `EMBSIM_SVD_PATH`):
+
+    embsim fir.hex --board dspic33ep512mu810 \
+        --dfp ~/.mchp_packs/Microchip/dsPIC33E-GM-GP-MC-GU-MU_DFP/1.4.170
+
+Its EDC gives the register file -- every SFR at the address the pack's
+linker script gives it (the dsPIC33E's EDC splits Timer1 from Timer2-9,
+the PPS's RPORx from its RPINRx and UART1-2 from UART3-4 into modules
+of their own; each is one peripheral here) -- the program memory and
+configuration words (in their own memory at 0xF80000 on the larger
+parts, in program memory's last page on the smaller), the RAM from
+0x1000 and its Y data space. The models are the PIC24's that fit the
+part: the interrupt controller (with the dsPIC33E's math error trap
+conditions and its DO stack overflow), the oscillator (the 7.37 MHz FRC,
+the PLL: Fin * M / (N1 * N2) from PLLFBD and CLKDIV) and the PPS lock,
+the timers, UART1-4 and the ports with ANSELx; and the dsPIC33E's own:
+
+- **SPI1-4** in master mode (SPIxSTAT, SPIxCON1, SPIxBUF): a byte (a word
+  with MODE16) written to SPIxBUF is exchanged at once with what the
+  board has on the unit's pins; SPIRBF says a word came back, reading
+  SPIxBUF clears it, and one arriving while it is set is lost (SPIROV).
+- **ADC1**, channel 0: sampling by SAMP or ASAM, the conversion when the
+  program clears SAMP (SSRC 000) or after SAMC TADs (111), 12 TADs (14 at
+  12 bits, AD12B) of ADCS + 1 instruction cycles; CH0SA or the inputs
+  AD1CSSL and AD1CSSH scan; 10 or 12 bits in FORM's four formats; the
+  results through ADC1BUF0-F as SMPI and BUFM say, DONE, the AD1
+  interrupt.
+- **The PMP** in its master modes, as the PIC32's (PMDIN1 its data
+  register, its wait states instruction cycles).
+
+`explorer16-32-dspic33` is the Explorer 16/32 with the dsPIC33EP512MU810
+PIM, whose pins are the board's 100-pin socket's as the
+PIC32MX795F512L PIM's: the LEDs on RA0-RA7, S3 (RD6), S4 (RD13), S5
+(RA7) and S6 (RD7) pulled up by the board, the TC1047A on AN4 and the
+potentiometer on AN5, the LCD on the PMP (RS on PMA0), the 25LC256 on
+SPI2's own pins (RG6-RG8) with its CS on RD12. `--set` takes what it
+takes for `explorer16-32-pic24`.
+
+## What it models: the dsPIC33E core
+
+The PIC24 core of a dsPIC33EP part is the PIC24E's, with the dsPIC's
+DSP engine; a PIC24EP's is the PIC24E's alone. By the programmer's
+reference manual (DS70000157) and the dsPIC33F family reference manual's
+CPU and data memory sections (DS70204, DS70202):
+
+- **The PIC24E's instructions** where they differ from the PIC24F's:
+  CALL, RCALL, CALL.L and LNK keep the stack frame flag (CORCON.SFA) in
+  the stacked return address's bit 0, RETURN, RETLW and RETFIE restore
+  it, ULNK clears it, as an exception's entry stacks it; the computed
+  RCALL, GOTO and BRA's own encodings, CALL.L and GOTO.L (a 23-bit
+  target in a register pair); CP and CPB with an 8-bit literal; REPEAT
+  #lit15 and REPEAT of a whole Wn; CPBEQ, CPBNE, CPBGT and CPBLT (an
+  offset of 1 is the compare and skip); MULW's 16-bit product; MOVPAG.
+  An opcode of the PIC24F's alone, or a DSP instruction on a PIC24EP, is
+  a lockup naming it, as on the PIC24F.
+- **The accumulators** A and B, 40 bits, at 0x22-0x2C (ACCxU reads
+  sign-extended to 16 bits). Written as registers they change no status
+  bit.
+- **The DSP instructions**: MAC, MPY, MPY.N and MSC of two of W4-W7 or of
+  one squared, ED and EDAC, CLR and MOVSAC, with their prefetches (a word
+  from X space through W8 or W9 -- `[Wx]`, `[Wx]+=k`, `[Wx]-=k`,
+  `[W9+W12]` -- and one from Y space through W10 or W11 into W4-W7; an
+  address in the other space reads 0) and the other accumulator's
+  write-back to W13 or `[W13]+=2`, rounded; ADD and SUB of the
+  accumulators, NEG; ADD Ws and LAC with their shift of the word placed
+  in bits 31:16; SAC and SAC.R with theirs; SFTAC by a literal or by Wb;
+  the MCU multiplies into an accumulator (MUL.xx Wb, Ws, Acc); BRA OA,
+  OB, SA and SB.
+- **The multiplier**: signed, unsigned or mixed (CORCON.US: W4 and W6
+  unsigned, W5 and W7 signed), 1.31 fractional (the product shifted left
+  once) or integer (CORCON.IF).
+- **The saturation logic**, as SATA, SATB and ACCSAT say: none (40 bits,
+  a carry out of bit 39 setting SA or SB: the sign lost), normal (1.31,
+  saturated to 0x007FFFFFFF or 0xFF80000000) or super (9.31, to
+  0x7FFFFFFFFF or 0x8000000000). OA and OB say a result does not fit
+  1.31 (never with normal saturation); SA and SB stay set until the
+  program clears them (clearing SAB clears both). INTCON1's OVATE, OVBTE
+  and COVTE make an overflow and a catastrophic one a math error trap
+  (OVAERR...), as a divide by zero (DIV0ERR) and SFTAC past 16 bits
+  (SFTACERR, the accumulator unchanged) always are.
+- **Rounding and stores**: SAC.R and the write-back round as CORCON.RND
+  says, conventionally (up from 0x8000) or convergently (0x8000 up only
+  with bit 16 set); with CORCON.SATDW (set out of reset), SAC and SAC.R
+  store 0x7FFF or 0x8000 for what bits 39:16 do not hold as 1.15; the
+  write-back is never saturated.
+- **DO loops**: DO #lit15 or Wn runs to its last instruction DCOUNT + 1
+  times, with no instruction of its own; four can nest, the outer loops'
+  DCOUNT, DOSTART and DOEND on the DO stack (CORCON.DL, SR.DA), and a
+  fifth DO is the soft trap (INTCON3.DOOVR), changing nothing. Setting
+  CORCON.EDT, or writing DCOUNT 0, ends a loop at the end of its pass.
+- **DIVF** (after REPEAT #17): the 1.15 quotient of Wm by Wn in W0, the
+  remainder in W1, OV when Wm is not smaller than Wn.
+- **The address generators**: modulo addressing -- MODCON's XWM register,
+  every instruction's indirect address through the X AGU (its pre- and
+  post-modification wrapping by the buffer's length past XMODEND
+  stepping up or below XMODSRT stepping down, an offset address
+  likewise), and YWM's, the Y prefetches' (YMODSRT, YMODEND); and
+  bit-reversed addressing -- XBREV.BREN, MODCON's BWM register, its word
+  writes through `[Wn++]` and `[++Wn]` stepped by XB in reverse-carry
+  order, its reads and byte writes and decrements not.
+- **The data space**: SFRs below 0x1000, RAM from 0x1000 (W15 there out
+  of reset, a stack error below it), DSRPAG and DSWPAG 1 out of reset,
+  so data addresses above 0x8000 reach the RAM there (a larger part's Y
+  space) as on the part.
+
 ## Counting
 
 Each instruction gets the cost in `tools/bench/cost.h`, the table
@@ -1001,7 +1116,12 @@ the oscillator's): one an instruction, two for a taken branch, GOTO,
 CALL, RCALL, MOV.D, PUSH.D, POP.D and the table instructions, three
 for RETURN, RETLW and RETFIE, one more for a skip over a word and two
 over a two-word instruction, one more for a read through the EDS
-window, five for an exception's entry.
+window, five for an exception's entry. On the PIC24E and dsPIC33E, the
+manual's for them: four for a taken branch, GOTO, CALL and RCALL, five
+for a taken compare and branch, six for RETURN, RETLW and RETFIE, five
+for the table instructions, four more for a read of program memory
+through the EDS window, one more for a read of a peripheral's
+register; DO two, and its loop's return none.
 
 On the Cortex-M, RISC-V and MIPS the estimate is a model, not a
 cycle-accurate core: there are no wait states and no pipeline stalls. It
@@ -1607,10 +1727,21 @@ On MIPS:
   with its own sign-extended ones.
 
 On the PIC24F:
-- The dsPIC's DSP engine and the PIC24E's and dsPIC33's instructions
-  (MOVPAG, CPBEQ and the rest; each ends the run as a lockup); the
-  flash's programming (TBLWT and the NVM controller); the debug
+- The flash's programming (TBLWT and the NVM controller); the debug
   executive and BREAK.
+
+On the dsPIC33E and PIC24E:
+- The dsPIC33C's instructions (LAC.D, SAC.D, MAX, MIN, NORM, FLIM,
+  BFEXT, BFINS, DIVF2, DIV2, CTXTSWP: each a lockup); the alternate
+  vector table; a trap that stays pending while its flag and condition
+  remain (it is taken once); the fixed and variable interrupt latency
+  (CORCON.VAR).
+- The part's peripherals beyond the interrupt controller, the
+  oscillator, the PPS, the timers, the UARTs, the ports, the SPI units,
+  ADC1's channel 0 and the PMP (their registers keep what is written).
+- The cycle counts are the manual's, but no test holds them to it.
+- The GDB server's registers are the PIC24's: the accumulators, DCOUNT,
+  DOSTART and DOEND are read as memory.
 - No gdb has a PIC24 target: the GDB server's registers are in EmbSim's
   own order (W0-W15, SPLIM, the PC in four bytes, SR, CORCON, DSRPAG,
   DSWPAG, RCOUNT, TBLPAG), which its target description names (feature
@@ -1772,6 +1903,29 @@ bus, the change notices, CNPUE, AD1PCFG and SYSKEY's lock, each by the
 family reference manual; on `explorer16-32-pic32mx`, the buttons, LEDs,
 ADC1's conversions of the board's sensors, the EEPROM on SPI2 and the
 LCD on the PMP; and on the PIC32MX250F128B by name, its memory.
+
+**dsPIC33E.** No QEMU has a dsPIC either: `tests/golden/embsim-dspic33.sh`
+holds the dsPIC33EP512MU810's register file to the pack's linker
+script, and the DSP engine and the PIC24E's instructions to 68 examples
+of the programmer's reference manual and the data memory section's
+modulo and bit-reversed buffers (`dspic33-isa.s`, generated as
+`pic24-isa.s` is: a DO placed at its example's address, the data moved
+into this part's RAM and Y space; the examples that contradict their
+own instruction's description left out, and named). `dspic33-dsp.s`
+holds what the examples leave out to the descriptions: the stack frame
+flag through a CALL.L, the computed branches, compare and branch,
+REPEAT's 15 and 16 bits, nested DO loops and the DO stack's overflow,
+EDT, each saturation mode at its limit, rounding both ways, SATDW, the
+multiplier's unsigned and mixed modes, the math error traps INTCON1
+enables, the Y modulo buffer, the other space read as 0, an offset
+address in an X modulo buffer, and what bit-reversed addressing leaves
+alone. `--disassemble` gives each example the manual's text.
+`dspic33-part.s` runs on parts whose memory differs (each FOSCSEL where
+its EDC puts it, its RAM's end, its Y space's start; a PIC24EP's lack of
+the DSP engine), and `dspic33-board.s` drives `explorer16-32-dspic33`
+on the FRC with the PLL (the board's reports at its clock): Timer1's
+interrupt, the LEDs, the buttons, the sensors through ADC1 (10 and 12
+bits, a signed fraction), the LCD on the PMP, the EEPROM on SPI2.
 
 **PIC24.** No QEMU has a PIC24, and no PIC24 assembler is at hand:
 `tests/golden/embsim-pic24.sh` holds the EDC's register file to the

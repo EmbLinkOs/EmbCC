@@ -98,7 +98,7 @@ static const struct model_desc pic24f_models[] = {
 
 /* a dsPIC33EP's or a PIC24EP's models, over its EDC: the interrupt
  * controller, the oscillator, the PPS lock, the timers, the UARTs, the
- * ports */
+ * ports, the SPI units, ADC1, the PMP */
 static const struct model_desc pic24e_models[] = {
     { "INT", "pic24-intc" },
     { "OSC", "pic24-osc" },
@@ -106,6 +106,9 @@ static const struct model_desc pic24e_models[] = {
     { "TMR", "pic24-tmr" },
     { "UART", "pic24-uart" },
     { "GPIO", "pic32-gpio" },
+    { "SPI", "pic24e-spi" },
+    { "ADC1", "pic24e-adc" },
+    { "PMP", "pic24e-pmp" },
     { 0, 0 },
 };
 
@@ -117,6 +120,14 @@ static const struct model_desc pic24e_models[] = {
 #define PIC24FJ1024_MEM { { 0, 2 * 0xac000u, MEM_FLASH, 0, 0, 0x00ffffffu }, \
                           { 2 * 0x800000u, 0x4000, MEM_FLASH, 0, 0, 0x00ffffffu }, \
                           { 0x2000800u, KB(32), MEM_RAM, 1, 0, 0 } }
+
+/* the dsPIC33EP512MU810's memory: program flash to program address
+ * 0x557FF at twice its address, the configuration memory at 0xF80000,
+ * and 52 KiB of RAM at data address 0x1000 to 0xDFFF (its Y space from
+ * 0x9000, the DMA's RAM from 0xD000) */
+#define DSPIC33EP512_MEM { { 0, 2 * 0x55800u, MEM_FLASH, 0, 0, 0x00ffffffu }, \
+                           { 2 * 0xf80000u, 0x100, MEM_FLASH, 0, 0, 0x00ffffffu }, \
+                           { 0x2001000u, 0xd000, MEM_RAM, 1, 0, 0 } }
 
 /* the PIC32MX795F512L's memory: 128 KiB of RAM at 0, 512 KiB of program
  * flash at 0x1D000000, 12 KiB of boot flash at 0x1FC00000 (the
@@ -221,6 +232,11 @@ const struct board_desc boards[] = {
     { "explorer16-32-pic24", "pic24", "pic24fj1024gb610", 0, PIC24FJ1024_MEM,
       { { "explorer16-32-pic24", 0, 0 } }, { { 0, 0, 0 } },
       "PIC24FJ1024GB610.PIC", pic24f_models },
+    /* the Explorer 16/32 with the dsPIC33EP512MU810 PIM: the part (its
+     * EDC), and the board's LEDs, buttons, sensors, LCD and EEPROM */
+    { "explorer16-32-dspic33", "pic24", "dspic33ep512mu810", 0, DSPIC33EP512_MEM,
+      { { "explorer16-32-dspic33", 0, 0 } }, { { 0, 0, 0 } },
+      "DSPIC33EP512MU810.PIC", pic24e_models },
 };
 const int nboards = (int)(sizeof boards / sizeof boards[0]);
 
@@ -274,6 +290,7 @@ static const struct dev_type dev_types[] = {
     { "curiosity-pic32mz-ef-2", &pic_board_ops, pic_board_create },
     { "explorer16-32-pic24", &pic_board_ops, pic_board_create },
     { "explorer16-32-pic32mx", &pic_board_ops, pic_board_create },
+    { "explorer16-32-dspic33", &pic_board_ops, pic_board_create },
 };
 
 /* ---- the peripheral models, over an SVD's registers (svd-map.h) -------- */
@@ -297,6 +314,9 @@ static const struct model_type model_types[] = {
     { "pic24-adc", &pic24_adc_ops, pic24_adc_create },
     { "pic24-epmp", &pic24_epmp_ops, pic24_epmp_create },
     { "pic24-spi", &pic24_spi_ops, pic24_spi_create },
+    { "pic24e-spi", &pic24e_spi_ops, pic24e_spi_create },
+    { "pic24e-adc", &pic24e_adc_ops, pic24e_adc_create },
+    { "pic24e-pmp", &pic24e_pmp_ops, pic32_pmp_create },
     { "pic24-uart", &pic24_uart_ops, pic24_uart_create },
     { "pic24-tmr", &pic24_tmr_ops, pic24_tmr_create },
     { "pic24-nvm", &pic24_nvm_ops, pic24_nvm_create },

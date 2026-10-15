@@ -279,7 +279,7 @@ start:  mov #STACK, w15
         .word 0xf08705        ; MPY W4*W4, B, [W9+W12], W4, [W10]+=2, W5
         .dump SAVE
         .show SAVE, sr, w4, w5, w9, w10, w12, 0x2c, 0x2a, 0x28, 0x1600, 0x9b00, 0x44
-; ---- 11: MPY.N W4*W5, A, [W8]+=2, W4, [W10]+=2, W5, integer (X at 0x1B00 for 0x0B00, Y at 0xA000)
+; ---- 11: MPY.N W4*W5, A, [W8]+=2, W4, [W10]+=2, W5 (integer; X at 0x1B00 for 0x0B00, Y at 0xA000 for 0x2000)
         .case 11
         mov #0x0054, w0
         mov w0, 0x1b00
@@ -299,10 +299,10 @@ start:  mov #STACK, w15
         mov #0x1290, w5
         mov #0x1b00, w8
         mov #0xa000, w10
-        .word 0xc04447        ; MPY.N W4*W5, A, [W8]+=2, W4, [W10]+=2, W5, integer
+        .word 0xc04447        ; MPY.N W4*W5, A, [W8]+=2, W4, [W10]+=2, W5
         .dump SAVE
         .show SAVE, sr, w4, w5, w8, w10, 0x26, 0x24, 0x22, 0x1b00, 0xa000, 0x44
-; ---- 12: MPY.N W4*W5, A, [W8]+=2, W4, [W10]+=2, W5, fractional (as above)
+; ---- 12: MPY.N W4*W5, A, [W8]+=2, W4, [W10]+=2, W5 (fractional; as above)
         .case 12
         mov #0x0054, w0
         mov w0, 0x1b00
@@ -322,7 +322,7 @@ start:  mov #STACK, w15
         mov #0x1290, w5
         mov #0x1b00, w8
         mov #0xa000, w10
-        .word 0xc04447        ; MPY.N W4*W5, A, [W8]+=2, W4, [W10]+=2, W5, fractional
+        .word 0xc04447        ; MPY.N W4*W5, A, [W8]+=2, W4, [W10]+=2, W5
         .dump SAVE
         .show SAVE, sr, w4, w5, w8, w10, 0x26, 0x24, 0x22, 0x1b00, 0xa000, 0x44
 ; ---- 13: MSC W6*W7, A, [W8]-=4, W6, [W10]-=4, W7 (X at 0x1C00 for 0x0C00, Y at 0x9C00 for 0x1C00)
@@ -434,7 +434,7 @@ start:  mov #STACK, w15
         .word 0xc3ac45        ; CLR B, [W8]+=2, W6, [W10]+=2, W7, [W13]+=2
         .dump SAVE
         .show SAVE, sr, w6, w7, w8, w10, w13, 0x26, 0x24, 0x22, 0x2c, 0x2a, 0x28, 0x2000, 0xb000, 0x4000
-; ---- 17: ED W4*W4, A, [W8]+=2, [W10]-=2, W4, integer (Y at 0xA300 for 0x2300)
+; ---- 17: ED W4*W4, A, [W8]+=2, [W10]-=2, W4 (integer; Y at 0xA300 for 0x2300)
         .case 17
         mov #0x007f, w0
         mov w0, 0x1100
@@ -453,10 +453,10 @@ start:  mov #STACK, w15
         mov #0x009a, w4
         mov #0x1100, w8
         mov #0xa300, w10
-        .word 0xf0405f        ; ED W4*W4, A, [W8]+=2, [W10]-=2, W4, integer
+        .word 0xf0405f        ; ED W4*W4, A, [W8]+=2, [W10]-=2, W4
         .dump SAVE
         .show SAVE, sr, w4, w8, w10, 0x26, 0x24, 0x22, 0x1100, 0xa300
-; ---- 18: ED W5*W5, B, [W9]+=2, [W11+W12], W5, integer (Y at 0xA500 for 0x2500)
+; ---- 18: ED W5*W5, B, [W9]+=2, [W11+W12], W5 (integer; Y at 0xA500 for 0x2500)
         .case 18
         mov #0x6a7c, w0
         mov w0, 0x1200
@@ -476,10 +476,10 @@ start:  mov #STACK, w15
         mov #0x1200, w9
         mov #0xa500, w11
         mov #0x0008, w12
-        .word 0xf1d273        ; ED W5*W5, B, [W9]+=2, [W11+W12], W5, integer
+        .word 0xf1d273        ; ED W5*W5, B, [W9]+=2, [W11+W12], W5
         .dump SAVE
         .show SAVE, sr, w5, w9, w11, w12, 0x2c, 0x2a, 0x28, 0x1200, 0xa508
-; ---- 19: EDAC W4*W4, A, [W8]+=2, [W10]-=2, W4, integer (Y at 0xA300 for 0x2300)
+; ---- 19: EDAC W4*W4, A, [W8]+=2, [W10]-=2, W4 (integer; Y at 0xA300 for 0x2300)
         .case 19
         mov #0x007f, w0
         mov w0, 0x1100
@@ -498,10 +498,10 @@ start:  mov #STACK, w15
         mov #0x009a, w4
         mov #0x1100, w8
         mov #0xa300, w10
-        .word 0xf0405e        ; EDAC W4*W4, A, [W8]+=2, [W10]-=2, W4, integer
+        .word 0xf0405e        ; EDAC W4*W4, A, [W8]+=2, [W10]-=2, W4
         .dump SAVE
         .show SAVE, sr, w4, w8, w10, 0x26, 0x24, 0x22, 0x1100, 0xa300
-; ---- 20: EDAC W5*W5, B, [W9]+=2, [W11+W12], W5, integer (Y at 0xA500 for 0x2500)
+; ---- 20: EDAC W5*W5, B, [W9]+=2, [W11+W12], W5 (integer; Y at 0xA500 for 0x2500)
         .case 20
         mov #0x6a7c, w0
         mov w0, 0x1200
@@ -521,7 +521,7 @@ start:  mov #STACK, w15
         mov #0x1200, w9
         mov #0xa500, w11
         mov #0x0008, w12
-        .word 0xf1d272        ; EDAC W5*W5, B, [W9]+=2, [W11+W12], W5, integer
+        .word 0xf1d272        ; EDAC W5*W5, B, [W9]+=2, [W11+W12], W5
         .dump SAVE
         .show SAVE, sr, w5, w9, w11, w12, 0x2c, 0x2a, 0x28, 0x1200, 0xa508
 ; ---- 21: ADD A
@@ -545,7 +545,7 @@ start:  mov #STACK, w15
         .word 0xcb0000        ; ADD A
         .dump SAVE
         .show SAVE, sr, 0x26, 0x24, 0x22, 0x2c, 0x2a, 0x28
-; ---- 22: ADD B, super saturation
+; ---- 22: ADD B (super saturation)
         .case 22
         mov #0x00d0, w0
         mov w0, CORCON
@@ -563,7 +563,7 @@ start:  mov #STACK, w15
         mov w0, 0x2c
         mov #0x0000, w0
         mov w0, SR
-        .word 0xcb8000        ; ADD B, super saturation
+        .word 0xcb8000        ; ADD B
         .dump SAVE
         .show SAVE, sr, 0x26, 0x24, 0x22, 0x2c, 0x2a, 0x28
 ; ---- 23: ADD W0, #2, A
@@ -600,7 +600,7 @@ start:  mov #STACK, w15
         .word 0xc90035        ; ADD [W5++], A
         .dump SAVE
         .show SAVE, sr, w5, 0x26, 0x24, 0x22, 0x2000
-; ---- 25: LAC [--W2], #7, A, saturation disabled
+; ---- 25: LAC [--W2], #7, A (saturation disabled)
         .case 25
         mov #0x9108, w0
         mov w0, 0x4000
@@ -617,10 +617,10 @@ start:  mov #STACK, w15
         mov #0x0000, w0
         mov w0, SR
         mov #0x4002, w2
-        .word 0xca03c2        ; LAC [--W2], #7, A, saturation disabled
+        .word 0xca03c2        ; LAC [--W2], #7, A
         .dump SAVE
         .show SAVE, sr, w2, 0x26, 0x24, 0x22, 0x4000, 0x4002
-; ---- 26: NEG A, no saturation
+; ---- 26: NEG A (no saturation)
         .case 26
         mov #0x0000, w0
         mov w0, CORCON
@@ -632,10 +632,10 @@ start:  mov #STACK, w15
         mov w0, 0x26
         mov #0x0000, w0
         mov w0, SR
-        .word 0xcb1000        ; NEG A, no saturation
+        .word 0xcb1000        ; NEG A
         .dump SAVE
         .show SAVE, sr, 0x26, 0x24, 0x22, 0x44
-; ---- 27: NEG B, normal saturation
+; ---- 27: NEG B (normal saturation)
         .case 27
         mov #0x00c0, w0
         mov w0, CORCON
@@ -647,10 +647,10 @@ start:  mov #STACK, w15
         mov w0, 0x2c
         mov #0x0000, w0
         mov w0, SR
-        .word 0xcb9000        ; NEG B, normal saturation
+        .word 0xcb9000        ; NEG B
         .dump SAVE
         .show SAVE, sr, 0x2c, 0x2a, 0x28, 0x44
-; ---- 28: SUB A, no saturation (SR not compared: 1100 is neither flag it names)
+; ---- 28: SUB A (no saturation; SR not compared: 1100 is neither flag it names)
         .case 28
         mov #0x0000, w0
         mov w0, CORCON
@@ -668,10 +668,10 @@ start:  mov #STACK, w15
         mov w0, 0x2c
         mov #0x0000, w0
         mov w0, SR
-        .word 0xcb3000        ; SUB A, no saturation
+        .word 0xcb3000        ; SUB A
         .dump SAVE
         .show SAVE, 0x26, 0x24, 0x22, 0x2c, 0x2a, 0x28
-; ---- 29: SUB B, normal saturation
+; ---- 29: SUB B (normal saturation)
         .case 29
         mov #0x0040, w0
         mov w0, CORCON
@@ -689,10 +689,10 @@ start:  mov #STACK, w15
         mov w0, 0x2c
         mov #0x0000, w0
         mov w0, SR
-        .word 0xcbb000        ; SUB B, normal saturation
+        .word 0xcbb000        ; SUB B
         .dump SAVE
         .show SAVE, sr, 0x26, 0x24, 0x22, 0x2c, 0x2a, 0x28, 0x44
-; ---- 30: SAC A, #4, W5, SATDW (CORCON 0x0020: the manual's 0x0010 is ACCSAT)
+; ---- 30: SAC A, #4, W5 (SATDW: CORCON 0x0020, the manual's 0x0010 being ACCSAT)
         .case 30
         mov #0x0020, w0
         mov w0, CORCON
@@ -705,10 +705,10 @@ start:  mov #STACK, w15
         mov #0x0000, w0
         mov w0, SR
         mov #0xb900, w5
-        .word 0xcc0205        ; SAC A, #4, W5, SATDW
+        .word 0xcc0205        ; SAC A, #4, W5
         .dump SAVE
         .show SAVE, sr, w5, 0x26, 0x24, 0x22
-; ---- 31: SAC B, #-4, [W5++], SATDW (ACCB not compared: the manual changes it)
+; ---- 31: SAC B, #-4, [W5++] (SATDW; ACCB not compared: the manual changes it)
         .case 31
         mov #0x5bbe, w0
         mov w0, 0x2000
@@ -723,10 +723,10 @@ start:  mov #STACK, w15
         mov #0x0000, w0
         mov w0, SR
         mov #0x2000, w5
-        .word 0xcc8635        ; SAC B, #-4, [W5++], SATDW
+        .word 0xcc8635        ; SAC B, #-4, [W5++]
         .dump SAVE
         .show SAVE, sr, w5, 0x2000
-; ---- 32: SAC.R A, #4, W5, SATDW
+; ---- 32: SAC.R A, #4, W5 (SATDW)
         .case 32
         mov #0x0020, w0
         mov w0, CORCON
@@ -739,10 +739,10 @@ start:  mov #STACK, w15
         mov #0x0000, w0
         mov w0, SR
         mov #0xb900, w5
-        .word 0xcd0205        ; SAC.R A, #4, W5, SATDW
+        .word 0xcd0205        ; SAC.R A, #4, W5
         .dump SAVE
         .show SAVE, sr, w5, 0x26, 0x24, 0x22
-; ---- 33: SAC.R B, #-4, [W5++], SATDW
+; ---- 33: SAC.R B, #-4, [W5++] (SATDW)
         .case 33
         mov #0x5bbe, w0
         mov w0, 0x2000
@@ -757,10 +757,10 @@ start:  mov #STACK, w15
         mov #0x0000, w0
         mov w0, SR
         mov #0x2000, w5
-        .word 0xcd8635        ; SAC.R B, #-4, [W5++], SATDW
+        .word 0xcd8635        ; SAC.R B, #-4, [W5++]
         .dump SAVE
         .show SAVE, sr, w5, 0x2c, 0x2a, 0x28, 0x2000
-; ---- 34: SFTAC A, #12, SATA
+; ---- 34: SFTAC A, #12 (SATA)
         .case 34
         mov #0x0080, w0
         mov w0, CORCON
@@ -772,10 +772,10 @@ start:  mov #STACK, w15
         mov w0, 0x26
         mov #0x0000, w0
         mov w0, SR
-        .word 0xc8004c        ; SFTAC A, #12, SATA
+        .word 0xc8004c        ; SFTAC A, #12
         .dump SAVE
         .show SAVE, sr, 0x26, 0x24, 0x22, 0x44
-; ---- 35: SFTAC B, #-10, SATB
+; ---- 35: SFTAC B, #-10 (SATB)
         .case 35
         mov #0x0040, w0
         mov w0, CORCON
@@ -787,10 +787,10 @@ start:  mov #STACK, w15
         mov w0, 0x2c
         mov #0x0000, w0
         mov w0, SR
-        .word 0xc88076        ; SFTAC B, #-10, SATB
+        .word 0xc88076        ; SFTAC B, #-10
         .dump SAVE
         .show SAVE, sr, 0x2c, 0x2a, 0x28, 0x44
-; ---- 36: SFTAC A, W0, no saturation
+; ---- 36: SFTAC A, W0 (no saturation)
         .case 36
         mov #0x0000, w0
         mov w0, CORCON
@@ -803,10 +803,10 @@ start:  mov #STACK, w15
         mov #0x0000, w0
         mov w0, SR
         mov #0xfffc, w0
-        .word 0xc80000        ; SFTAC A, W0, no saturation
+        .word 0xc80000        ; SFTAC A, W0
         .dump SAVE
         .show SAVE, sr, w0, 0x26, 0x24, 0x22, 0x44
-; ---- 37: SFTAC B, W12, SATB
+; ---- 37: SFTAC B, W12 (SATB)
         .case 37
         mov #0x0040, w0
         mov w0, CORCON
@@ -819,7 +819,7 @@ start:  mov #STACK, w15
         mov #0x0000, w0
         mov w0, SR
         mov #0x000f, w12
-        .word 0xc8800c        ; SFTAC B, W12, SATB
+        .word 0xc8800c        ; SFTAC B, W12
         .dump SAVE
         .show SAVE, sr, w12, 0x2c, 0x2a, 0x28, 0x44
 ; ---- 38: MUL.SS W0, W1, A (integer: CORCON.IF)
@@ -1021,7 +1021,7 @@ start:  mov #STACK, w15
         .word 0xb821e4        ; MULW.UU W4, #0x04, W2
         .dump SAVE
         .show SAVE, sr, w2, w4
-; ---- 52: REPEAT #17; DIVF W8, W9
+; ---- 52: DIVF W8, W9 (after REPEAT #17)
         .case 52
         mov #0x0000, w0
         mov w0, CORCON
@@ -1032,10 +1032,10 @@ start:  mov #STACK, w15
         mov #0x1000, w8
         mov #0x4000, w9
         repeat #17
-        .word 0xd94009        ; REPEAT #17; DIVF W8, W9
+        .word 0xd94009        ; DIVF W8, W9
         .dump SAVE
         .show SAVE, sr, w0, w1, w8, w9
-; ---- 53: REPEAT #17; DIVF W8, W9 (by -1.0)
+; ---- 53: DIVF W8, W9 (after REPEAT #17; by -1.0)
         .case 53
         mov #0x0000, w0
         mov w0, CORCON
@@ -1046,7 +1046,7 @@ start:  mov #STACK, w15
         mov #0x1000, w8
         mov #0x8000, w9
         repeat #17
-        .word 0xd94009        ; REPEAT #17; DIVF W8, W9
+        .word 0xd94009        ; DIVF W8, W9
         .dump SAVE
         .show SAVE, sr, w0, w1, w8, w9
 ; ---- 54: DO #5, END6 at 0x002000 (C set)
@@ -1222,6 +1222,7 @@ start:  mov #STACK, w15
         mov w0, SR
         mov #0x5a5a, w0
         mov w0, 0x11de
+        mov w0, 0x11e0
         mov #0x11e0, w0
         mov w0, 0x48
         mov #0x11ff, w0

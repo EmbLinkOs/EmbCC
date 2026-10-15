@@ -1697,7 +1697,10 @@ static int cpu_ipl(void)
     return (ps->corcon & CORCON_IPL3) ? 8 + (ps->sr >> 5 & 7) : (ps->sr >> 5 & 7);
 }
 
+/* the traps' priorities, by vector: a PIC24F's, and a PIC24E's and
+ * dsPIC33E's (the DMAC error trap at 10) */
 static const int trap_prio[8] = { 14, 13, 13, 12, 11, 8, 9, 8 };
+static const int trap_prio_e[8] = { 15, 14, 13, 12, 11, 10, 9, 8 };
 
 /* the exception's entry: PC and SR's low byte with IPL3 pushed, the
  * priority raised, and the vector's address */
@@ -1732,9 +1735,10 @@ static int take_exception(void)
 {
     if (ps->traps) {
         int t = 0, best = -1;
+        const int *prio = ps->e ? trap_prio_e : trap_prio;
         for (int k = 0; k < 8; k++)
-            if ((ps->traps >> k & 1) && trap_prio[k] > best) {
-                best = trap_prio[k];
+            if ((ps->traps >> k & 1) && prio[k] > best) {
+                best = prio[k];
                 t = k;
             }
         ps->traps &= (u8)~(1u << t);

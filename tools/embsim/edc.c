@@ -275,7 +275,8 @@ static const struct { const char *first, *name; } names[] = {
     { "PMD1", "PMD" }, { "RCON", "RCON" }, { "ANCFG", "ANCFG" },
     { "ALRMVAL", "RTCC" }, { "DCICON1", "DCI" }, { "C1CTRL1", "ECAN" }, { "C2CTRL1", "ECAN" },
     { "PTCON", "PWM" }, { "PADCFG1", "PAD" }, { "U3MODE", "UART" },
-    { "U4MODE", "UART" }, { "U1PWMRRS", "USB" },
+    { "U4MODE", "UART" }, { "U1PWMRRS", "USB" }, { "PTGCST", "PTG" },
+    { "ADC2BUF", "ADC2" }, { "FEXL", "ICD" },
 };
 
 static char *periph_name(const char *first)

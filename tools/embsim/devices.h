@@ -67,6 +67,11 @@ void *pic32_adc_create(struct sim *s, struct rf_periph *p);
 extern const struct dev_ops pic32_spi_ops, pic32_adc10_ops;
 void *pic32_spi_create(struct sim *s, struct rf_periph *p);
 void *pic32_adc10_create(struct sim *s, struct rf_periph *p);
+/* a dsPIC33E's or PIC24E's: the PMP (pic32-pmp.c's, its EDC's names), the
+ * SPI units, ADC1 */
+extern const struct dev_ops pic24e_pmp_ops, pic24e_spi_ops, pic24e_adc_ops;
+void *pic24e_spi_create(struct sim *s, struct rf_periph *p);
+void *pic24e_adc_create(struct sim *s, struct rf_periph *p);
 
 /* a PIC24's peripheral models, over its EDC's registers (pic24.h) */
 extern const struct dev_ops pic24_intc_ops, pic24_adc_ops, pic24_epmp_ops;
