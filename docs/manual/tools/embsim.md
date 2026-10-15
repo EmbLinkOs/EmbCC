@@ -425,7 +425,10 @@ core](#what-it-models-the-mips32-core), a PIC32MZ EF's: PRId 0x0001A700
 of 16-byte lines (`cache` does nothing), Config3 with EIC and vectored
 interrupts, DSP and DSPr2, MIPS32 and microMIPS (MIPS32 at reset); seven
 shadow register sets (SRSCtl.HSS 7); Status.MX and CU1 writable. The
-interrupts come from the EVIC in EIC mode.
+interrupts come from the EVIC in EIC mode. Its FPU is modelled: XC32's
+hard-float (FP64) images run as EmbCC's soft-float ones do -- the
+Thermometre's XC32 build shows the same temperature on the LCD as its
+EmbCC build.
 
 **The models** over the registers:
 
@@ -503,9 +506,7 @@ lines, the CGRAM and DDRAM addresses), its 80-byte display RAM with line
 by default), `pot=VOLTS` or `pot=PERCENT%` (1.65 V by default), and
 `S4`, `S5` or `S6` `=pressed` or `=released`.
 
-**Not modelled on the PIC32:** the FPU (EmbCC's PIC32 images are
-soft-float: a floating-point instruction with Status.CU1 set ends the
-run naming it), microMIPS (XC32's startups and `-mmicromips` code), the
+**Not modelled on the PIC32:** microMIPS (`-mmicromips` code), the
 DSP ASE beyond its registers, the MCU ASE's IRET, the peripherals other
 than these (their registers keep what is written), change-notification
 interrupts, the external interrupt pins, conversion and baud-rate
@@ -522,8 +523,20 @@ module disables, sleep and idle.
   rdhwr; cache, pref, sync and synci do nothing. A divide by zero, or
   of INT_MIN by -1, leaves LO the dividend and HI 0, as QEMU's does (the
   architecture leaves them unpredictable). A floating-point instruction
-  is a Coprocessor Unusable exception (the 24Kc has no FPU); an encoding
-  no MIPS32r2 core has is a Reserved Instruction exception.
+  is a Coprocessor Unusable exception on the 24Kc, which has no FPU; an
+  encoding no MIPS32r2 core has is a Reserved Instruction exception.
+- **The FPU** (`pic32mz`, which `--cpu pic32mz` puts on malta too):
+  coprocessor 1 with 64-bit registers (Status.FR) or paired 32-bit ones,
+  single and double precision and the word and long-word conversions,
+  in IEEE 754-2008 mode (FCSR.NAN2008, ABS2008): loads and stores, the
+  indexed ones too, the moves, add to sqrt, recip and rsqrt, abs and neg
+  (the sign alone), the unfused multiply-adds, cvt, round, trunc, ceil
+  and floor (a NaN gives 0, an overflow the largest integer of its
+  sign), c.cond into FCC0-FCC7, bc1t and bc1f, FCSR's Cause, Flags and
+  Enables and the floating-point exception. The arithmetic is IEEE
+  754's in integers, the RISC-V core's: a NaN an operation makes is the
+  default one (QEMU propagates an operand's payload; both are the
+  architecture's). Paired singles and flush-to-zero are not modelled.
 - **Coprocessor 0.** Status, Cause, EPC, ErrorEPC, BadVAddr, EBase,
   IntCtl, SRSCtl, SRSMap, Count and Compare, Config to Config3, PRId,
   HWREna, UserLocal, LLAddr, the TLB's registers and the debug ones;
@@ -1114,8 +1127,8 @@ On the AVR:
 - The sleep modes beyond Idle.
 
 On MIPS:
-- The FPU, microMIPS, MIPS16e, the MCU ASE and the DSP ASE's arithmetic
-  (each ends the run as a lockup naming the instruction).
+- microMIPS, MIPS16e, the MCU ASE and the DSP ASE's arithmetic (each
+  ends the run as a lockup naming the instruction); paired singles.
 - Big-endian images (mips-none-elf): EmbSim's MIPS core is
   little-endian.
 - The caches (`cache` is a no-op), the watch registers (kept, not

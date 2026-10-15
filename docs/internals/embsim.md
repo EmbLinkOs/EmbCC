@@ -34,7 +34,7 @@ file but the network one compiles with EmbCC itself. Everything is in
 | `uart-pl011.c`, `uart-cmsdk.c`, `uart-nrf51.c` | the boards' UARTs |
 | `riscv.h` | the RISC-V core's state, shared by its files |
 | `riscv.c` | the RISC-V core: memory, traps, the CSRs, the integer, atomic and compressed instructions, step, reset, its CPU interface |
-| `riscv-fpu.c` | F and D, on IEEE arithmetic of its own |
+| `riscv-fpu.c` | F and D, on ieee754.c's arithmetic |
 | `clint.c` | the RISC-V core's CLINT: msip, mtimecmp, mtime |
 | `virt-rom.c`, `sifive-test.c`, `uart-16550.c` | virt's reset ROM, test device and UART |
 | `avr.h` | the AVR core's state, and the interrupt-source interface of its peripherals |
@@ -42,6 +42,8 @@ file but the network one compiles with EmbCC itself. Everything is in
 | `avr-io.c`, `avr-usart.c`, `avr-timer16.c` | the ATmega328P's I/O registers, USART0, Timer/Counter1 |
 | `mips.h` | the MIPS32 core's state, and the interface of an external interrupt controller (EIC mode) |
 | `mips.c` | the MIPS32r2 core: the instruction set with its delay slots, coprocessor 0, exceptions and interrupts, the TLB, shadow register sets, Count and Compare, the DSP ASE's registers, step, reset, its CPU interface |
+| `mips-fpu.c` | the MIPS32r2 FPU (coprocessor 1), a PIC32MZ EF's: FR 0 and 1, single and double, the 2008 modes |
+| `ieee754.h`, `ieee754.c` | IEEE 754 arithmetic in integers, which the RISC-V and MIPS FPUs share |
 | `malta.c` | QEMU malta's FPGA (SOFTRES) and boot ROM; its UART is `uart-16550.c`'s, eight bytes apart |
 | `atdf.c` | a Microchip ATDF file (a device pack's PIC32, SAM or AVR part) read into the SVD reader's `struct svd_device`, for the register file |
 | `pic32.h` | what a PIC32's models share: interrupts through the EVIC, the peripheral bus dividers |
@@ -494,7 +496,7 @@ or with its own file for the six functions of `net.h`.
 - `tests/golden/embsim-mips.sh`: the MIPS32 core on malta: the exec
   corpus at -O0, -O2 and -Os against QEMU's malta (output and exit
   status), `mips-isa.c`'s instruction edges against QEMU and the record,
-  the ends of a run.
+  `mips-fpu.c`'s FPU edges against QEMU's P5600, the ends of a run.
 - `tests/golden/embsim-pic32.sh`: the PIC32MZ2048EFH100's register file
   from the device pack's ATDF against the pack's own header (every SFR
   and CLR/SET/INV at its address), and an EmbCC program on the Explorer

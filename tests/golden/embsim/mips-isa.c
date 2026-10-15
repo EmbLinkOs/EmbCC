@@ -424,10 +424,16 @@ static void test_tlb(void)
 /* Count and Compare: the timer's interrupt on IP7 wakes a wait */
 static void test_timer(void)
 {
-    uint32_t st, c;
+    uint32_t st, c, c0;
     exc_info[4] = 0;
-    __asm__ volatile("mfc0 %0, $9" : "=r"(c));
-    __asm__ volatile("mtc0 %0, $11\n\tehb" : : "r"(c + 2000));
+    /* Compare ahead of Count -- far enough that a loaded host running
+     * QEMU, whose Count follows the host's clock, has not passed it --
+     * and again if it has */
+    do {
+        __asm__ volatile("mfc0 %0, $9" : "=r"(c));
+        __asm__ volatile("mtc0 %0, $11\n\tehb" : : "r"(c + 200000));
+        __asm__ volatile("mfc0 %0, $9" : "=r"(c0));
+    } while ((int)(c0 - c) >= 200000);
     __asm__ volatile("mfc0 %0, $12" : "=r"(st));
     __asm__ volatile("mtc0 %0, $12\n\tehb" : : "r"((st & ~0xff00u) | 0x8001u));
     while (!exc_info[4])

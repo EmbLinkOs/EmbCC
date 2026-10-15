@@ -19,7 +19,11 @@
 #     likely and linking branches, the exceptions and their codes (one in
 #     a delay slot), ll and sc, rdhwr, the TLB and its refill vector, the
 #     core timer's interrupt waking a wait. EmbSim's output must be
-#     QEMU's, and the record's (tests/golden/embsim/mips-isa.txt).
+#     QEMU's, and the record's (tests/golden/embsim/mips-isa.txt). And
+#     the FPU's (tests/golden/embsim/mips-fpu.c) on the pic32mz core,
+#     against QEMU's P5600 (FR 1, the 2008 modes): each operation over a
+#     table of values in the four rounding modes, the flags, the
+#     compares, the moves and loads, the floating-point exception.
 set -u
 echo "TEST-MARKER embsim-mips"
 . "$(dirname "$0")/../lib.sh"
@@ -128,8 +132,31 @@ if "$CLANG" -print-targets 2>/dev/null | grep -q mipsel; then
             fail "mips-isa.c: EmbSim's output is not QEMU's"; }
     fi
     echo "embsim-mips: the instruction edges ($(wc -l < "$x/isa.sim" | tr -d ' ') results) as QEMU and the record have them"
+    # the FPU's (the pic32mz core's, a PIC32MZ EF's), against QEMU's P5600:
+    # 64-bit registers, the 2008 NaN and abs modes
+    "$CLANG" --target=mipsel-none-elf -march=mips32r2 -mabi=32 -mfp64 \
+        -mhard-float -fno-pic -mno-abicalls -G0 -O1 -ffreestanding \
+        -fno-builtin -nostdlib -c tests/golden/embsim/mips-fpu.c -o "$x/fpu.o" 2>"$x/fpu.err" ||
+        { cat "$x/fpu.err"; fail "mips-fpu.c does not compile"; }
+    "$EMBLD" -e _start -Ttext 0x80100000 -Tstack 0x80800000 "$x/fpu.o" \
+        -o "$x/fpu.elf" || fail "mips-fpu.c does not link"
+    "$EMBSIM" "$x/fpu.elf" --board malta --cpu pic32mz --max-insns 100000000 \
+        > "$x/fpu.sim" 2>&1; st=$?
+    [ $st = 0 ] || { tail -5 "$x/fpu.sim"; fail "mips-fpu.c: EmbSim exits $st"; }
+    cmp -s "$x/fpu.sim" tests/golden/embsim/mips-fpu.txt || {
+        diff tests/golden/embsim/mips-fpu.txt "$x/fpu.sim" | head -20
+        fail "mips-fpu.c: EmbSim's output is not mips-fpu.txt"; }
+    if [ $have_qemu = 1 ]; then
+        sh tests/harness/qrun.sh 30 "$QEMU" -M malta -cpu P5600 -m 64 \
+            -display none -monitor none -serial null -serial null \
+            -serial stdio -no-reboot -kernel "$x/fpu.elf" > "$x/fpu.qemu" 2>/dev/null
+        cmp -s "$x/fpu.qemu" "$x/fpu.sim" || {
+            diff "$x/fpu.qemu" "$x/fpu.sim" | head -20
+            fail "mips-fpu.c: EmbSim's output is not QEMU's (P5600)"; }
+    fi
+    echo "embsim-mips: the FPU's edges ($(wc -l < "$x/fpu.sim" | tr -d ' ') results: every operation in every rounding mode, the flags, compares, moves, the exceptions) as QEMU's P5600 and the record have them"
 else
-    echo "embsim-mips: no clang for mipsel: the instruction-edge program was not built"
+    echo "embsim-mips: no clang for mipsel: the instruction-edge programs were not built"
 fi
 
 # ---- 1. the exec corpus -----------------------------------------------------
