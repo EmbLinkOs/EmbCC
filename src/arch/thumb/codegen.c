@@ -7233,16 +7233,12 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     {
         int al = t_isa_a32 ? 3 : 1;
         for (int k = 0; k < fn->nins; k++)
-            if (fn->ins[k].op == IR_ASM) {
-                /* ...and one that aligns its own bytes (`.p2align 3`)
-                 * starts on that, so that in a section of its own the
-                 * buffer's offsets are the section's */
-                const struct ir_asm *ia = fn->ins[k].asm_ir;
-                int m = ia ? code_asm_align_max(ia->arange, ia->narange) : 0;
+            if (fn->ins[k].op == IR_ASM)
                 al |= 3;
-                if (m - 1 > al)
-                    al = m - 1;
-            }
+        /* ...and aligned(N), or an asm that aligns its own bytes
+         * (`.p2align 3`), starts it on that */
+        if (cg_fn_align(fn) - 1 > al)
+            al = cg_fn_align(fn) - 1;
         while (t->len & al)
             t_nop(t);
         f->code_align = al + 1;

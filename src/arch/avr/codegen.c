@@ -5584,13 +5584,10 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
         F.label_off[i] = -1;
 
     f->code_align = 2;                  /* a word of flash */
-    /* An asm that aligns its own bytes (`.p2align 2`): the function starts
-     * on that, so that in a section of its own the buffer's offsets are
-     * the section's. The padding, nops, is never run. */
-    for (i = 0; i < fn->nins; i++) {
-        const struct ir_asm *ia = fn->ins[i].op == IR_ASM ? fn->ins[i].asm_ir
-                                                          : NULL;
-        int m = ia ? code_asm_align_max(ia->arange, ia->narange) : 0;
+    /* aligned(N), or an asm that aligns its own bytes (`.p2align 2`):
+     * the function starts on that. The padding, nops, is never run. */
+    {
+        int m = cg_fn_align(fn);
         if (m > f->code_align) {
             code_fill(t, CODE_FILL_ZERO, (m - t->len % m) % m);
             f->code_align = m;

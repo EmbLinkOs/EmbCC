@@ -336,6 +336,15 @@ struct type *ty_array(struct type *elem, int count)
     return t;
 }
 
+/* An array whose count the program gave, by a dimension or an
+ * initializer: 0 elements is then GNU C's complete zero-length array. */
+struct type *ty_array_sized(struct type *elem, int count)
+{
+    struct type *t = ty_array(elem, count);
+    t->zero_len = count == 0;
+    return t;
+}
+
 struct type *ty_vla(struct type *elem, struct expr *len)
 {
     struct type *t = ty_array(elem, 0);
@@ -366,6 +375,7 @@ struct type *ty_func(struct type *ret, struct type **ptypes, int n,
     struct type *t = xcalloc(1, sizeof *t);
     t->kind = TY_FUNC;
     t->ret = ret;
+    t->ptypes = xcalloc((size_t)(n ? n : 1), sizeof *t->ptypes);
     for (int i = 0; i < n; i++)
         t->ptypes[i] = ptypes[i];
     t->nptypes = n;
@@ -475,7 +485,7 @@ int ty_incomplete(const struct type *t)
         return 0;
     if (t->kind == TY_STRUCT && t->complete)
         return 0;
-    if (t->kind == TY_ARRAY && t->count > 0)
+    if (t->kind == TY_ARRAY && (t->count > 0 || t->zero_len))
         return ty_incomplete(t->pointee);
     return 1;
 }
@@ -707,6 +717,60 @@ int ty_own_align(const struct type *t)
         int a = ty_size(t), m = target_max_scalar_align();
         return m && a > m ? m : a;
     }
+    }
+}
+
+/* C11 6.2.7's compatibility, as __builtin_types_compatible_p asks it --
+ * stricter than ty_equal, which the rest of the compiler leans on to let
+ * `long` and `long long` interchange: qualifiers count below the top
+ * level (`char *` is not `const char *`), an enumerated type goes with
+ * its underlying integer but two enums only with themselves, and an array
+ * of unknown size goes with any size. top: the outermost type, whose
+ * qualifiers the builtin ignores. */
+int ty_compatible(const struct type *a, const struct type *b, int top)
+{
+    if (top) {
+        a = ty_unqual((struct type *)a);
+        b = ty_unqual((struct type *)b);
+    } else if (!a->is_const != !b->is_const ||
+               !a->is_volatile != !b->is_volatile ||
+               !a->is_atomic != !b->is_atomic) {
+        return 0;
+    }
+    if (a->kind != b->kind || a->is_unsigned != b->is_unsigned ||
+        a->bitint != b->bitint)
+        return 0;
+    const struct type *ca = a->canon ? a->canon : a;
+    const struct type *cb = b->canon ? b->canon : b;
+    if (ca->is_enum || cb->is_enum)
+        return ca->is_enum && cb->is_enum ? ca == cb
+                                          : ty_size(a) == ty_size(b);
+    if (a->is_llong != b->is_llong)
+        return 0;
+    switch (a->kind) {
+    case TY_PTR:
+        return ty_compatible(a->pointee, b->pointee, 0);
+    case TY_ARRAY: {
+        int ka = a->count > 0, kb = b->count > 0;
+        if (ka && kb && !a->vla_len && !b->vla_len && a->count != b->count)
+            return 0;
+        return ty_compatible(a->pointee, b->pointee, 0);
+    }
+    case TY_STRUCT:
+        return ca == cb;
+    case TY_FUNC:
+        if (!ty_compatible(a->ret, b->ret, 1))
+            return 0;
+        if (a->noproto || b->noproto)
+            return 1;
+        if (a->nptypes != b->nptypes || a->is_varargs != b->is_varargs)
+            return 0;
+        for (int i = 0; i < a->nptypes; i++)
+            if (!ty_compatible(a->ptypes[i], b->ptypes[i], 1))
+                return 0;
+        return 1;
+    default:
+        return 1;
     }
 }
 

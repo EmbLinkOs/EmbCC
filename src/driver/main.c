@@ -570,6 +570,10 @@ static struct tgroup { const char *name; long start, end; int ndx, sym,
     *g_tg;
 static int g_ntg, g_captg;
 static long g_plain_end, g_groups_end;
+/* .text's own alignment: the sixteen it always had, or the strictest
+ * start among its functions -- aligned(256) on one is 256 only if the
+ * section is */
+static int g_text_align = 16;
 
 /* The group (1-based) holding code-buffer offset off, or 0 for .text;
  * *noff gets the offset within that section. */
@@ -2985,8 +2989,12 @@ static int compile_unit(const char *in, const char *out, int pp_only)
 
     /* The groups, as codegen laid them out (the sort above). */
     g_plain_end = g_groups_end = (long)text.len;
+    g_text_align = 16;
     for (int i = 0; i < iu->nfuncs; i++) {
         struct func *f = iu->funcs[i].src;
+        if (f && !f->section && f->code_len > 0 &&
+            f->code_align > g_text_align)
+            g_text_align = f->code_align;
         if (!f || !f->section || f->code_len <= 0)
             continue;
         if (!g_ntg || strcmp(g_tg[g_ntg - 1].name, f->section)) {
@@ -3543,12 +3551,18 @@ static int compile_unit(const char *in, const char *out, int pp_only)
      * one relocation.
      */
     /* Only the ELF writer and -S define an alias's symbol. */
-    if (target_fmt_get() != TGT_FMT_ELF)
+    if (target_fmt_get() != TGT_FMT_ELF) {
         for (struct func *f = u->funcs; f; f = f->next)
             if (!f->absorbed && f->alias_of)
                 diag_fatal(f->file, f->line, "alias attribute on '%s' is "
                            "not supported for %s output", f->name,
                            target_fmt_name(target_fmt_get()));
+        for (struct global *g = u->globals; g; g = g->next)
+            if (!g->absorbed && g->alias_of)
+                diag_fatal(g->file, g->line, "alias attribute on '%s' is "
+                           "not supported for %s output", g->name,
+                           target_fmt_name(target_fmt_get()));
+    }
     if (target_fmt_get() == TGT_FMT_MACHO) {
         /* A file-scope asm block's BYTES reach __text below, but its
          * labels and relocations are written by the ELF path further
@@ -3635,10 +3649,13 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         /* ---- 2. every section, before any symbol ---------------------
          * A symbol's n_value is an ADDRESS, so the section it sits in
          * has to have one first. */
+        unsigned m_text_al = 4;             /* an exponent: 16 */
+        while ((1 << m_text_al) < g_text_align)
+            m_text_al++;
         int m_text = machow_add_section(mw, "__TEXT", "__text",
                                         S_REGULAR | S_ATTR_PURE_INSTRUCTIONS |
                                         S_ATTR_SOME_INSTRUCTIONS,
-                                        text.p, text.len, 4);
+                                        text.p, text.len, m_text_al);
         int m_rodata = 0, m_data = 0, m_bss = 0, m_lsda = 0, m_cu = 0;
         if (rodata)
             m_rodata = machow_add_section(mw, "__TEXT", "__const", S_REGULAR,
@@ -4024,7 +4041,8 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                                        IMAGE_SCN_CNT_CODE |
                                        IMAGE_SCN_MEM_EXECUTE |
                                        IMAGE_SCN_MEM_READ,
-                                       text.p, (unsigned)text.len, 16);
+                                       text.p, (unsigned)text.len,
+                                       g_text_align);
         int c_rdata = 0, c_data = 0, c_bss = 0;
         if (rodata)
             c_rdata = coffw_add_section(cw, ".rdata",
@@ -4160,7 +4178,8 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     }
     int text_ndx = elfw_add_section(w, ".text", SHT_PROGBITS,
                                     SHF_ALLOC | SHF_EXECINSTR,
-                                    tbytes, (Elf64_Xword)tlen, 16);
+                                    tbytes, (Elf64_Xword)tlen,
+                                    (Elf64_Xword)g_text_align);
     for (int k = 0; k < g_ntg; k++)
         g_tg[k].ndx = elfw_add_section(
             w, g_tg[k].name, SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR,
@@ -4408,6 +4427,31 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                              : g->in_rodata ? rodata_ndx
                              : g->named ? named[g->named - 1].ndx
                              : g->in_bss ? bss_ndx : data_ndx));
+    /* A variable's alias: one more symbol at its target's address, size
+     * and section (sema checked the target is a variable defined here). */
+    for (int pass = 0; pass < 2; pass++)
+        for (struct global *g = u->globals; g; g = g->next) {
+            if (g->absorbed || !g->alias_of || g->is_static != !pass)
+                continue;
+            struct global *t = NULL;
+            for (struct global *c = u->globals; c && !t; c = c->next)
+                if (!c->absorbed && c->defined && !strcmp(c->name, g->alias_of))
+                    t = c;
+            if (!t || t->is_common)
+                diag_fatal(g->file, g->line, "'%s' is an alias of '%s', which "
+                           "%s", g->name, g->alias_of,
+                           t ? "is a common symbol (--no-common places it)"
+                             : "is not defined here");
+            if (pass == 1)
+                break;      /* the global ones come after the locals */
+            g->sym_ndx = elfw_add_symbol(
+                w, g->name, (Elf64_Addr)t->off, (Elf64_Xword)global_size(t),
+                ELF64_ST_INFO(STB_LOCAL, t->is_tls ? STT_TLS : STT_OBJECT),
+                (Elf64_Half)(t->is_tls ? (t->in_bss ? tbss_ndx : tdata_ndx)
+                             : t->in_rodata ? rodata_ndx
+                             : t->named ? named[t->named - 1].ndx
+                             : t->in_bss ? bss_ndx : data_ndx));
+        }
     /* A block's label that is not .global, with the name of a function
      * or an object this unit declares and does not define -- a static
      * naked function's, chiefly: the C code's references go to it, as
@@ -4487,6 +4531,22 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                              : g->in_rodata ? rodata_ndx
                              : g->named ? named[g->named - 1].ndx
                              : g->in_bss ? bss_ndx : data_ndx));
+    for (struct global *g = u->globals; g; g = g->next) {
+        if (g->absorbed || !g->alias_of || g->is_static)
+            continue;
+        struct global *t = NULL;
+        for (struct global *c = u->globals; c && !t; c = c->next)
+            if (!c->absorbed && c->defined && !strcmp(c->name, g->alias_of))
+                t = c;
+        g->sym_ndx = elfw_add_symbol(
+            w, g->name, (Elf64_Addr)t->off, (Elf64_Xword)global_size(t),
+            ELF64_ST_INFO(g->is_weak ? STB_WEAK : STB_GLOBAL,
+                          t->is_tls ? STT_TLS : STT_OBJECT),
+            (Elf64_Half)(t->is_tls ? (t->in_bss ? tbss_ndx : tdata_ndx)
+                         : t->in_rodata ? rodata_ndx
+                         : t->named ? named[t->named - 1].ndx
+                         : t->in_bss ? bss_ndx : data_ndx));
+    }
     /* File-scope asm's .global labels (_start): global functions at their
      * .text offset. Local labels stay internal — the assembler already
      * resolved jumps to them into rel32s.
@@ -4987,6 +5047,8 @@ static int expand_wp(int *argcp, char ***argvp)
 
 int main(int argc, char **argv)
 {
+    /* the deep recursions measure from here */
+    stack_note_base(&argc, plat_stack_size());
     plat_set_argv0(argc > 0 ? argv[0] : NULL);   /* where this program is */
     if (expand_wp(&argc, &argv))
         return 1;

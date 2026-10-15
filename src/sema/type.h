@@ -15,11 +15,12 @@
 #ifndef EMBCC_SEMA_TYPE_H
 #define EMBCC_SEMA_TYPE_H
 
-/* The most parameters/arguments a function type, prototype, or call carries.
- * Defined here (not ast.h) because struct type's ptypes[] lives here and
- * ast.h includes this header — the two must agree or a >N-param function
- * type overflows ptypes[]. */
-#define MAX_PARAMS 32
+/* The most parameters/arguments a function type, prototype, or call
+ * carries: C17 5.2.4.1 asks for 127 of each. A function type's ptypes and
+ * a call's args are allocated to their count; this bounds the per-
+ * parameter arrays of a definition (struct func) and of each backend's
+ * argument lowering. */
+#define MAX_PARAMS 128
 
 struct expr;
 
@@ -105,6 +106,9 @@ struct type {
                              * this); NULL on an original. */
     struct type *pointee;   /* TY_PTR: target; TY_ARRAY: element */
     int count;              /* TY_ARRAY: element count */
+    int zero_len;           /* TY_ARRAY: count 0 written or initialized --
+                             * `T a[0]`, `T a[] = {}` (GNU C) -- so complete
+                             * at size 0, where `T a[]` is incomplete */
     /* TY_ARRAY of variable length (C99 VLA, or a fixed count of VLA
      * elements): count is 0 and the element count is vla_len's run-time
      * value. vla_size is the hidden local (sema) holding sizeof this
@@ -141,7 +145,7 @@ struct type {
     int nat_align;
     /* TY_FUNC (always behind a pointer in this subset): */
     struct type *ret;
-    struct type *ptypes[MAX_PARAMS];
+    struct type **ptypes;   /* nptypes of them (ty_func's own copy) */
     int nptypes;
     int is_varargs;
     /* TY_FUNC declared with no prototype: `int f()` before C23, or a K&R
@@ -236,6 +240,7 @@ int ty_is_complex(const struct type *t);
  * real in st0 and imaginary in st1), 0 otherwise. */
 int ty_x87_ret(const struct type *t);
 /* A variable-length array of elem, `len` elements (a VLA). */
+struct type *ty_array_sized(struct type *elem, int count);
 struct type *ty_vla(struct type *elem, struct expr *len);
 /* t is an array whose size is only known at run time. */
 int ty_is_vla(const struct type *t);
@@ -273,6 +278,7 @@ int ty_natural_align(const struct type *t);
  * aligned typedef moves an object, not an argument slot. */
 int ty_own_align(const struct type *t);
 int ty_equal(const struct type *a, const struct type *b);
+int ty_compatible(const struct type *a, const struct type *b, int top);
 int ty_is_integer(const struct type *t);
 int ty_is_float(const struct type *t);
 int ty_is_arith(const struct type *t);   /* integer or floating */

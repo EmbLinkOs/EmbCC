@@ -480,6 +480,17 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
     if (target_is_mips())
         ob_str(b, "\t.set\tnoreorder\n\t.set\tnoat\n\t.set\tnomacro\n");
     ob_str(b, "\t.text\n");
+    /* the section on the strictest start of its functions, where one asks
+     * more than the sixteen an assembler gives .text (aligned(N)) */
+    {
+        int al = 16;
+        for (int i = 0; i < iu->nfuncs; i++)
+            if (iu->funcs[i].src && !iu->funcs[i].src->section &&
+                iu->funcs[i].src->code_align > al)
+                al = iu->funcs[i].src->code_align;
+        if (al > 16)
+            ob_fmt(b, "\t.balign\t%d\n", al);
+    }
     long prev_end = 0;
     /* The most recent auipc's local label, for the addi that pairs with
      * it, and a counter so the labels are unique within the unit. */
@@ -747,6 +758,15 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
         ob_fmt(b, "\t.%s\t%s, %s\n",
                arm_thumb() ? "thumb_set" : "set",
                asym(f->name), asym(f->alias_of));
+    }
+    for (struct global *g = u->globals; g; g = g->next) {
+        if (g->absorbed || !g->alias_of)
+            continue;
+        if (!g->is_static)
+            ob_fmt(b, "\t.%s\t%s\n", g->is_weak ? "weak" : "globl",
+                   asym(g->name));
+        ob_fmt(b, "\t.type\t%s, %sobject\n", asym(g->name), type_sigil());
+        ob_fmt(b, "\t.set\t%s, %s\n", asym(g->name), asym(g->alias_of));
     }
 
     /* .rodata: the string literals, each under the label the code refers

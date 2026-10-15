@@ -111,10 +111,12 @@ void ir_locals_fill(struct ir_func *fn, struct func *f, int nvars)
         if (!t)
             continue;
         L->size = ty_size(t);
-        /* GNU's empty struct is size 0, and still an object with an
-         * address: a slot of one byte, which a store of nothing never
-         * touches (with none, `&e` asked for a slot it did not have) */
-        if (L->size == 0 && t->kind == TY_STRUCT)
+        /* GNU's empty struct and zero-length array are size 0, and still
+         * objects with an address: a slot of one byte, which a store of
+         * nothing never touches (with none, `&e` asked for a slot it did
+         * not have) */
+        if (L->size == 0 && !t->vla_len &&
+            (t->kind == TY_STRUCT || t->kind == TY_ARRAY))
             L->size = 1;
         /* a parameter's slot is the calling convention's, and its value
          * arrives as a whole register: a typedef's alignment is a local's
@@ -1898,9 +1900,10 @@ static int libatomic_call(struct ir_func *fn, const char *name,
                           struct type *ret, int n, const int *vals,
                           struct type *const *tys, int line)
 {
-    struct expr e, a[5];
+    struct expr e, a[5], *av[5] = { 0 };
     memset(&e, 0, sizeof e);
     memset(a, 0, sizeof a);
+    e.args = av;
     e.kind = EXPR_CALL;
     e.line = line;
     e.ty = ret;
@@ -2846,6 +2849,155 @@ static int gen_bitop(struct ir_func *fn, struct expr *e, int kind, int rank)
  * appear in bounds checks on hot paths, where a mispredicted branch
  * costs more than the arithmetic.
  */
+/* An overflow builtin's operand as its 64 bits (extended by its own
+ * signedness) and, in *neg, 1 when it is negative (64-bit 0/1). */
+static int ovf_operand(struct ir_func *fn, struct expr *x, int *neg)
+{
+    struct type *t = x->ty->canon ? x->ty->canon : x->ty;
+    int uns = t->is_unsigned || t->kind == TY_BOOL;
+    int v = gen_convert(fn, gen_expr(fn, x), t, ty_int_of_size(8, uns));
+    *neg = uns ? bk(fn, 0, 8)
+               : gen_convert(fn, emit_cmp(fn, B_LT, v, bk(fn, 0, 8), 8, 1),
+                             ty_base(TY_INT, 0), ty_int_of_size(8, 1));
+    return v;
+}
+
+/* x ^ m - m: x negated when the mask m is all ones, kept when it is 0 */
+static int ovf_cneg(struct ir_func *fn, int x, int m, int w)
+{
+    return emit_bin(fn, IR_SUB, emit_bin(fn, IR_XOR, x, m, w, 0), m, w, 0);
+}
+
+/* The builtins' exact meaning, for operands of any signedness up to 64
+ * bits and a result T of any width up to 128: the mathematical a op b,
+ * stored into *res wrapped to T, and 1 when it does not fit T. Each
+ * operand is its 64 bits u and a sign n, its value u - n * 2^64.
+ *  + and -: s = ua op ub wraps by k = carry - na - nb (or nb - na -
+ *    borrow), so the exact value is s + k * 2^64, k in -2..1;
+ *  *: |a| * |b| as hi:lo from 32-bit limbs (no 128-bit arithmetic on a
+ *    32-bit target), and the product's sign.
+ * GCC's own semantics; the fast paths below are this for operands that
+ * T or 64 bits already hold. */
+static int gen_overflow_exact(struct ir_func *fn, struct expr *e, char op,
+                              int addr, struct type *rt)
+{
+    struct type *U = ty_int_of_size(8, 1), *I = ty_base(TY_INT, 0);
+    int sz = ty_size(rt), n = sz * 8, uns = rt->is_unsigned;
+    unsigned long umax = n >= 64 ? ~0UL : (1UL << n) - 1;
+    unsigned long smax = n >= 64 ? (~0UL >> 1) : (1UL << (n - 1)) - 1;
+    int na, nb;
+    int ua = ovf_operand(fn, e->args[0], &na);
+    int ub = ovf_operand(fn, e->args[1], &nb);
+    int zero = bk(fn, 0, 8), fits, lo, hi;
+    if (op != 'm') {
+        int s = emit_bin(fn, op == 'a' ? IR_ADD : IR_SUB, ua, ub, 8, 0);
+        int cb = op == 'a' ? emit_cmp(fn, B_LT, s, ua, 8, 0)
+                           : emit_cmp(fn, B_LT, ua, ub, 8, 0);
+        int cb64 = gen_convert(fn, cb, I, U);
+        int k = op == 'a'
+              ? emit_bin(fn, IR_SUB, emit_bin(fn, IR_SUB, cb64, na, 8, 0),
+                         nb, 8, 0)
+              : emit_bin(fn, IR_SUB, emit_bin(fn, IR_SUB, nb, na, 8, 0),
+                         cb64, 8, 0);
+        lo = s;
+        hi = k;                         /* S's upper word, two's complement */
+        if (sz == 16) {
+            fits = uns ? emit_cmp(fn, B_GE, k, zero, 8, 1) : bk(fn, 1, 4);
+        } else {
+            int k0 = emit_cmp(fn, B_EQ, k, zero, 8, 1);
+            int low = emit_cmp(fn, B_LE, s, bk(fn, uns ? umax : smax, 8),
+                               8, 0);
+            fits = emit_bin(fn, IR_AND, k0, low, 4, 0);
+            if (!uns) {                 /* or S = s - 2^64 >= T's minimum */
+                int km1 = emit_cmp(fn, B_EQ, k, bk(fn, ~0UL, 8), 8, 1);
+                int ge = emit_cmp(fn, B_GE, s,
+                                  bk(fn, 0UL - (smax + 1), 8), 8, 0);
+                fits = emit_bin(fn, IR_OR, fits,
+                                emit_bin(fn, IR_AND, km1, ge, 4, 0), 4, 0);
+            }
+        }
+    } else {
+        int ma = ovf_cneg(fn, ua, emit_bin(fn, IR_SUB, zero, na, 8, 0), 8);
+        int mb = ovf_cneg(fn, ub, emit_bin(fn, IR_SUB, zero, nb, 8, 0), 8);
+        int m32 = bk(fn, 0xffffffffUL, 8), s32 = bk(fn, 32, 8);
+        int a0 = emit_bin(fn, IR_AND, ma, m32, 8, 0);
+        int a1 = emit_bin(fn, IR_SHR, ma, s32, 8, 0);
+        int b0 = emit_bin(fn, IR_AND, mb, m32, 8, 0);
+        int b1 = emit_bin(fn, IR_SHR, mb, s32, 8, 0);
+        int p00 = emit_bin(fn, IR_MUL, a0, b0, 8, 0);
+        int p01 = emit_bin(fn, IR_MUL, a0, b1, 8, 0);
+        int p10 = emit_bin(fn, IR_MUL, a1, b0, 8, 0);
+        int p11 = emit_bin(fn, IR_MUL, a1, b1, 8, 0);
+        int mid = emit_bin(fn, IR_ADD,
+                           emit_bin(fn, IR_ADD,
+                                    emit_bin(fn, IR_SHR, p00, s32, 8, 0),
+                                    emit_bin(fn, IR_AND, p01, m32, 8, 0),
+                                    8, 0),
+                           emit_bin(fn, IR_AND, p10, m32, 8, 0), 8, 0);
+        lo = emit_bin(fn, IR_OR, emit_bin(fn, IR_SHL, mid, s32, 8, 0),
+                      emit_bin(fn, IR_AND, p00, m32, 8, 0), 8, 0);
+        hi = emit_bin(fn, IR_ADD,
+                      emit_bin(fn, IR_ADD, p11,
+                               emit_bin(fn, IR_SHR, p01, s32, 8, 0), 8, 0),
+                      emit_bin(fn, IR_ADD,
+                               emit_bin(fn, IR_SHR, p10, s32, 8, 0),
+                               emit_bin(fn, IR_SHR, mid, s32, 8, 0), 8, 0),
+                      8, 0);
+        int nz = emit_cmp(fn, B_NE, emit_bin(fn, IR_OR, lo, hi, 8, 0), zero,
+                          8, 0);
+        int sgn = emit_cmp(fn, B_NE, emit_bin(fn, IR_XOR, na, nb, 8, 0), zero,
+                           8, 0);
+        int negp = emit_bin(fn, IR_AND, sgn, nz, 4, 0);        /* int 0/1 */
+        int negp64 = gen_convert(fn, negp, I, U);
+        if (sz == 16) {
+            if (uns) {
+                fits = emit_bin(fn, IR_XOR, negp, bk(fn, 1, 4), 4, 0);
+            } else {                    /* |P| < 2^127, or -2^127 exactly */
+                int top = bk(fn, 1UL << 63, 8);
+                int hok = emit_cmp(fn, B_LT, hi, top, 8, 0);
+                int edge = emit_bin(fn, IR_AND,
+                                    emit_bin(fn, IR_AND, negp,
+                                             emit_cmp(fn, B_EQ, hi, top, 8, 0),
+                                             4, 0),
+                                    emit_cmp(fn, B_EQ, lo, zero, 8, 0), 4, 0);
+                fits = emit_bin(fn, IR_OR, hok, edge, 4, 0);
+            }
+            /* the two's complement of a negative product, across words:
+             * -(hi:lo) is ~hi:-lo, plus one in hi when lo is 0 */
+            int m = emit_bin(fn, IR_SUB, zero, negp64, 8, 0);
+            int nlo = ovf_cneg(fn, lo, m, 8);
+            int carry = emit_bin(fn, IR_AND,
+                                 emit_cmp(fn, B_EQ, lo, zero, 8, 0), negp, 4,
+                                 0);
+            hi = emit_bin(fn, IR_ADD, emit_bin(fn, IR_XOR, hi, m, 8, 0),
+                          gen_convert(fn, carry, I, U), 8, 0);
+            lo = nlo;
+        } else {
+            int h0 = emit_cmp(fn, B_EQ, hi, zero, 8, 0);
+            int lim = uns ? bk(fn, umax, 8)
+                          : emit_bin(fn, IR_ADD, bk(fn, smax, 8), negp64, 8, 0);
+            fits = emit_bin(fn, IR_AND, h0, emit_cmp(fn, B_LE, lo, lim, 8, 0),
+                            4, 0);
+            if (uns)
+                fits = emit_bin(fn, IR_AND, fits,
+                                emit_bin(fn, IR_XOR, negp, bk(fn, 1, 4), 4, 0),
+                                4, 0);
+            lo = ovf_cneg(fn, lo, emit_bin(fn, IR_SUB, zero, negp64, 8, 0), 8);
+        }
+    }
+    if (sz == 16) {
+        struct type *U2 = ty_int_of_size(16, 1);
+        int v = emit_bin(fn, IR_OR,
+                         emit_bin(fn, IR_SHL, gen_convert(fn, hi, U, U2),
+                                  bk(fn, 64, 16), 16, 0),
+                         gen_convert(fn, lo, U, U2), 16, 0);
+        emit_store(fn, addr, v, rt);
+    } else {
+        emit_store(fn, addr, gen_convert(fn, lo, U, rt), rt);
+    }
+    return emit_bin(fn, IR_XOR, fits, bk(fn, 1, 4), 4, 0);
+}
+
 static int gen_overflow(struct ir_func *fn, struct expr *e, char op)
 {
     /* `volatile int *` is an ordinary destination here; the volatile
@@ -2857,6 +3009,24 @@ static int gen_overflow(struct ir_func *fn, struct expr *e, char op)
     int uns = rt->is_unsigned;
     enum ir_op iop = op == 'a' ? IR_ADD : op == 's' ? IR_SUB : IR_MUL;
     int addr = gen_expr(fn, e->args[2]);
+
+    /* The two fast paths below are exact only where their arithmetic
+     * holds every operand: 32-bit ones into a narrower T (exact in 64
+     * bits), or ones T's own 64-bit type holds. Anything else -- an
+     * operand of the other signedness, a 64-bit one into a narrower T,
+     * a 128-bit T -- takes the exact form: `-1 + 1` into an unsigned
+     * long was an overflow, and UINT64_MAX + 0 into a long was not. */
+    {
+        struct type *ta = e->args[0]->ty, *tb = e->args[1]->ty;
+        int sa = ty_size(ta), sb = ty_size(tb);
+        int ua = ta->is_unsigned || ta->kind == TY_BOOL;
+        int ub = tb->is_unsigned || tb->kind == TY_BOOL;
+        int small = sz < 8 && sa <= 4 && sb <= 4;
+        int in64 = sz == 8 && (ua == uns || (!uns && ua && sa < 8)) &&
+                   (ub == uns || (!uns && ub && sb < 8));
+        if (!small && !in64)
+            return gen_overflow_exact(fn, e, op, addr, rt);
+    }
 
     if (sz < 8) {
         /* Exact in 64 bits, then "does it still say the same thing
@@ -2943,6 +3113,7 @@ static int eh_type_index(struct ir_func *fn, struct global *ti);
 
 int gen_expr(struct ir_func *fn, struct expr *e)
 {
+    stack_check(fn->file, e->line, 6);
     /* Every instruction this expression lowers to is attributed to the
      * expression, not to the statement containing it -- so `a[i] + b[j]`
      * blames the right subscript. Saved and restored, because lowering
@@ -3714,6 +3885,11 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
         int local = e->lhs->kind == EXPR_VAR && !e->lhs->gref;
         int is_bf = expr_is_bitfield(e->lhs);
         int addr = local ? -1 : gen_addr(fn, e->lhs);
+        /* The right operand first, then the target's value: `x |= f()`
+         * where f changes x reads x as f left it. C leaves the two
+         * unsequenced against the call; GCC and clang read after it, and
+         * code relying on that (GCC's pr58943.c) gets their answer. */
+        int rv = gen_expr(fn, e->rhs);
         int cur;
         if (local) {
             cur = emit_ldvar(fn, e->lhs->var_index, lt);
@@ -3723,7 +3899,6 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             cur = emit_load(fn, addr, lt);     /* aligned as x++'s is */
             mark_natural(fn, e->lhs);
         }
-        int rv = gen_expr(fn, e->rhs);
         int res = compound_value(fn, e, cur, rv);
         if (local) {
             emit_stvar(fn, e->lhs->var_index, res, lt);
@@ -3743,6 +3918,17 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
         int cw;
         int c = truth(fn, gen_expr(fn, e->args[0]), e->args[0]->ty, &cw);
         emit_brz(fn, c, cw, l_else);
+        /* A void conditional -- `c ? f() : (void)x` -- has no value to
+         * merge: the arms run for their effects. Merging them moved from
+         * what a void call never defined. */
+        if (e->ty->kind == TY_VOID) {
+            gen_expr(fn, e->lhs);
+            emit_jmp(fn, l_end);
+            emit_label(fn, l_else);
+            gen_expr(fn, e->rhs);
+            emit_label(fn, l_end);
+            return -1;
+        }
         /* The two merges carry the conditional's OWN width. They were
          * emitted with none, which cost nothing while a register held
          * any scalar and is half a `long long` on a 32-bit machine. */
@@ -3778,8 +3964,12 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             i->a = ap;
             return -1;
         }
-        if (e->name && strcmp(e->name, "__builtin_va_end") == 0)
+        /* va_end does nothing to the list, but its argument is still an
+         * expression: `va_end(**ap++)` advances ap (GCC's va-arg-21.c) */
+        if (e->name && strcmp(e->name, "__builtin_va_end") == 0) {
+            gen_expr(fn, e->args[0]);
             return -1;
+        }
         /* va_copy(dst, src): copy the tag src points at into this call's
          * hidden slot, then point dst at the copy — so each list advances
          * independently, as C99 7.15.1.2 requires. */
@@ -4500,6 +4690,7 @@ static void switch_tree(struct ir_func *fn, int v, int w, int sign,
 static void gen_stmt(struct ir_func *fn, struct stmt *s,
                      const struct loopctx *loop)
 {
+    stack_check(fn->file, s ? s->line : 0, 6);
     for (; s; s = s->next) {
         if (s->line) {
             g_cur_line = s->line;   /* -g: rows key off statement lines */
@@ -4680,26 +4871,35 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
             break;
         case STMT_RETURN: {
             struct ir_ins *i;
-            int v = s->expr ? gen_expr(fn, s->expr) : -1;
+            struct expr *rx = s->expr;
+            int v = rx ? gen_expr(fn, rx) : -1;
+            /* A void function's `return x;` -- GNU C's `return f();` of a
+             * void f, or C89's value, which it allows with a warning:
+             * x is made, and nothing comes back */
+            if (rx && (rx->ty->kind == TY_VOID ||
+                       (fn->src && fn->src->ret_ty->kind == TY_VOID))) {
+                v = -1;
+                rx = NULL;
+            }
             if (g_instr_this)           /* after the value, before leaving */
                 emit_instr_call(fn, g_instr_fn, "__cyg_profile_func_exit",
                                 s->line);
-            if (s->expr && s->expr->ty->kind == TY_STRUCT && fn->src &&
+            if (rx && rx->ty->kind == TY_STRUCT && fn->src &&
                 fn->src->ret_scalar)
-                v = emit_load(fn, v, ty_scalar_struct_ret(s->expr->ty));
+                v = emit_load(fn, v, ty_scalar_struct_ret(rx->ty));
             i = emit(fn);
             i->op = IR_RET;
             i->a = v;
-            if (s->expr && ty_is_float(s->expr->ty)) {
+            if (rx && ty_is_float(rx->ty)) {
                 i->flt = 1; /* the value goes home in xmm0, not rax */
-                i->w = ty_size(s->expr->ty);
-            } else if (s->expr && s->expr->ty->kind == TY_STRUCT &&
+                i->w = ty_size(rx->ty);
+            } else if (rx && rx->ty->kind == TY_STRUCT &&
                        !(fn->src && fn->src->ret_scalar)) {
                 /* `a` is the ADDRESS of the value; how it travels home
                  * is the callee's classification, computed in codegen
                  * from the function's own return type. */
-                i->size = ty_size(s->expr->ty);
-                i->natural = struct_val_natural(s->expr);
+                i->size = ty_size(rx->ty);
+                i->natural = struct_val_natural(rx);
             }
             break;
         }
@@ -5125,8 +5325,11 @@ static void gen_func(struct ir_func *fn, struct func *f)
             emit_stvar(fn, k, bitint_ext(fn, emit_ldvar(fn, k, pt), pt), pt);
     }
     if (f->has_vm_params)               /* `int a[n][m]`: its row size */
-        for (int i = 0; i < f->nparams; i++)
+        for (int i = 0; i < f->nparams; i++) {
             vla_eval(fn, f->param_tys[i]);
+            if (i < MAX_PARAMS && f->param_bound[i])
+                gen_expr(fn, f->param_bound[i]);    /* `int a[i++]` */
+        }
     g_eh_cur = -1;
     /* Locals aligned beyond the stack's guarantee (sema's var_indirect):
      * each is carved off the stack ONCE, here, rounded up to its
@@ -5180,9 +5383,16 @@ static void gen_func(struct ir_func *fn, struct func *f)
     if (g_instr_this)
         emit_instr_call(fn, f, "__cyg_profile_func_exit", f->line);
     g_instr_this = 0;               /* nothing after this function is it */
-    /* main that reaches its closing brace returns 0 (C99 5.1.2.2.3). After
-     * a body whose every path returned this is unreachable, and goes. */
-    if (!strcmp(f->name, "main") && ty_is_integer(f->ret_ty)) {
+    /* main that reaches its closing brace returns 0 (C99 5.1.2.2.3), and so
+     * does any function returning an integer or a pointer whose brace can
+     * be reached (--warn=return-type) -- 0 rather than whatever the
+     * register held, so a caller that uses the value anyway reads the same
+     * thing every time. A floating or aggregate result is left undefined.
+     * After a body whose every path returned this is unreachable, and
+     * goes. */
+    if ((!strcmp(f->name, "main") || f->falls_off) &&
+        (ty_is_integer(f->ret_ty) || f->ret_ty->kind == TY_PTR) &&
+        ty_size(f->ret_ty) <= 8 && !f->is_naked) {
         int z = emit_const(fn, 0, ty_size(f->ret_ty) > 4 ? 8 : 4);
         struct ir_ins *r = emit(fn);
         r->op = IR_RET;

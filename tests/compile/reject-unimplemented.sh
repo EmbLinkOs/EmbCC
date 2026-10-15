@@ -298,15 +298,17 @@ check nonstatic-then-static \
 static int f(void) { return 1; }
 int main(void) { return f(); }' \
     "static declaration of 'f' follows non-static"
-# main alone may reach its closing brace (it returns 0, C99 5.1.2.2.3)
+# main alone may reach its closing brace (it returns 0, C99 5.1.2.2.3);
+# any other function returning a value warns (--warn=return-type, E0008),
+# which -Werror here makes the refusal
 check fallthrough \
     'static int f(void) { int x = 1; }
 int main(void) { return f(); }' \
-    "must end in a return"
+    "control may reach the end of 'f', which returns int"
 check fallthrough-if \
     'static int f(void) { if (1) return 1; }
 int main(void) { return f(); }' \
-    "must end in a return"
+    "control may reach the end of 'f', which returns int"
 check arity \
     'static int f(int a, int b) { return a + b; }
 int main(void) { return f(1); }' \
@@ -719,3 +721,13 @@ int main(void) { return 0; }' \
         "__builtin_frame_address(1) is not supported on" \
         "--target=$t"
 done
+
+# An object larger than EmbCC's int sizes hold is refused: the count was
+# truncated (`char a[0x100000001]` was one byte) and a struct's size
+# wrapped, with no diagnostic.
+check array-too-large 'char a[0x100000001]; int main(void) { return 0; }' \
+    "is too large: EmbCC's objects hold at most 2147483647 bytes"
+check array-bytes-too-large 'int a[0x40000000]; int main(void) { return 0; }' \
+    "is too large: EmbCC's objects hold at most 2147483647 bytes"
+check struct-too-large 'struct s { char a[0x7fffffff]; char b; } x; int main(void) { return 0; }' \
+    "struct s is too large"

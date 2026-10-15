@@ -585,6 +585,16 @@ int pass_brdom(struct ir_func *fn)
                     known = j->op == IR_BRZ ? 0 : 1;
                 else if (T != F && df && !dt)
                     known = j->op == IR_BRZ ? 1 : 0;
+                /* What D's branch learned is about v at ITS width: zero
+                 * there is zero at any narrower width, nonzero there is
+                 * nonzero at any wider one, and nothing else follows --
+                 * `unsigned yy = y; if (yy == 0)` under `if (y == 0)`
+                 * tests y's low half, which may be zero when y is not
+                 * (GCC's arith-rand.c divided by it). */
+                if (known >= 0 && j->w != i->w &&
+                    (!j->w || !i->w || (known == 0 ? i->w > j->w
+                                                   : i->w < j->w)))
+                    known = -1;
                 if (known >= 0) {
                     int fires = i->op == IR_BRZ ? known == 0 : known != 0;
                     if (fires) { i->op = IR_JMP; i->a = -1; }   /* always */

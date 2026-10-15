@@ -2692,6 +2692,15 @@ static void gen_func(struct ir_func *fn, struct code *t, struct cf_sites *st,
     F.skip_next = 0;
     F.form = form;
     F.nform = nform;
+    /* aligned(N), or an asm that aligns its own bytes (`.p2align 3`):
+     * the function starts on that. The padding before it is never run. */
+    {
+        int m = cg_fn_align(fn);
+        if (m > f->code_align) {
+            code_fill(t, CODE_FILL_ZERO, (m - t->len % m) % m);
+            f->code_align = m;
+        }
+    }
     f->code_off = t->len;
 
     /* The prologue: the frame, the callee-saved registers, the sret

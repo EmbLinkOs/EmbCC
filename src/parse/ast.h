@@ -46,6 +46,12 @@ struct expr {
     enum expr_kind kind;
     int line;
     int col;              /* 1-based column, for caret diagnostics (0 = unknown) */
+    int quiet;            /* parsed in a system header, a system macro or
+                           * after __extension__: sema's -pedantic
+                           * diagnostics say nothing of it */
+    int cast_value;       /* sema: a cast's value given an object -- `(union
+                           * u)x` as a compound literal -- which is not an
+                           * lvalue */
     struct type *ty;      /* set by sema on every node */
     struct type *undecayed; /* sema: original array type when ty is the
                              * decayed pointer (sizeof needs it) */
@@ -89,8 +95,10 @@ struct expr {
      * memb is resolved by sema (offset + type). */
     int is_arrow;
     struct member *memb;
-    struct expr *args[MAX_PARAMS]; /* EXPR_CALL; lhs is the callee
-                           * expression (a VAR for direct calls) */
+    struct expr **args;   /* EXPR_CALL; lhs is the callee expression (a
+                           * VAR for direct calls). Allocated, at least four
+                           * and zeroed past nargs; an expr_dup has its own.
+                           * EXPR_COND's condition is args[0]. */
     int nargs;
     int atomic_mo;        /* EXPR_CALL of an atomic builtin: its memory
                            * order when sema could fold it, as 1 + the
@@ -320,6 +328,9 @@ struct global {
     int is_static;
     int is_extern;        /* THIS declaration was 'extern' */
     int is_weak;          /* __attribute__((weak)) */
+    const char *alias_of; /* __attribute__((alias("t"))): another name for
+                           * variable t, defined in this file; it has no
+                           * storage of its own */
     /* __attribute__((aligned(N))) / _Alignas(N) on the object itself,
      * 0 when none. NOT the same as its type's alignment, and it was
      * silently dropped: a page table declared aligned(4096) was laid
@@ -381,6 +392,8 @@ struct func {
     const char *section;  /* __attribute__((section("s"))): its code goes
                            * to section s rather than .text */
     int is_noreturn;      /* __attribute__((noreturn)) / _Noreturn */
+    int falls_off;        /* sema: returns a value, and control can reach
+                           * its closing brace (--warn=return-type) */
     int is_nothrow;       /* __attribute__((nothrow)): no exception leaves it
                            * (a call of it needs no landing pad) */
     /* __attribute__((constructor)) / ((destructor)): its address goes in
@@ -459,6 +472,11 @@ struct func {
      * to edit the name, not the function's first column */
     int param_lines[MAX_PARAMS], param_cols[MAX_PARAMS];
     int param_unused[MAX_PARAMS];   /* __attribute__((unused)) on it */
+    /* the outermost length of an array parameter, which the adjustment to
+     * a pointer leaves out of its type but a definition evaluates at
+     * entry: `int a[i++]` increments i (C17 6.9.1p10). sema keeps one
+     * only when evaluating it does something. */
+    struct expr *param_bound[MAX_PARAMS];
     /* A parameter of a struct the ABI passes as the integer it holds
      * (ty_scalar_struct_ret): 1 + the local the body uses in its place,
      * which irgen fills from the parameter at entry (sema); 0 otherwise */
@@ -526,6 +544,9 @@ struct func {
      * function's section has to claim when it is a section of its own
      * (-ffunction-sections). 0 is "not said", taken as 16. */
     int code_align;
+    /* __attribute__((aligned(N))) on any declaration: the least its first
+     * instruction is aligned to, beyond the target's own; 0 for none */
+    int user_align;
     /* How many bytes of stack this function's own frame takes — the
      * prologue's saved registers plus its locals, temporaries and
      * outgoing-argument area, and NOT what it calls. `-fstack-usage`
