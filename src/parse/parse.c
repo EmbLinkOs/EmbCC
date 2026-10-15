@@ -202,6 +202,10 @@ struct parser {
     const char *fn_pnames[MAX_PARAMS]; /* the parameter names of the last
                            * function declarator inside parentheses
                            * (`(*f(int a))[3]`) */
+    struct expr *fn_pbound[MAX_PARAMS]; /* ...and each one's param_bound */
+    /* the length param_adjust took off an array parameter: `i++` in
+     * `int a[i++]`, which a definition evaluates at entry (6.9.1p10) */
+    struct expr *param_bound;
     int in_members;       /* inside a struct or union body (nesting) */
 };
 
@@ -607,7 +611,8 @@ static int at_declaration(struct parser *ps)
 
 static struct type *parse_fn_params(struct parser *ps, struct type *ret);
 static struct type *parse_fn_params_named(struct parser *ps, struct type *ret,
-                                          const char **names);
+                                          const char **names,
+                                          struct expr **bounds);
 /* The GNU attributes EmbCC honors; everything else is parsed and dropped.
  * section("name") is honored on file-scope variables and refused (never
  * dropped) anywhere else — a silently-ignored section is a table the
@@ -1361,6 +1366,7 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
 
 static struct type *parse_stars(struct parser *ps, struct type *t);
 static struct expr *parse_cond(struct parser *ps);
+static struct expr *parse_expr(struct parser *ps);
 
 /* A _FloatN keyword's token (lex.c keeps its spelling for these) */
 static int float_n_name(const struct token *t)
@@ -1526,11 +1532,14 @@ static struct type *declarator(struct parser *ps, struct type *base,
              * `sig` -- the inner `(int)` of `handler` overwrote slot 0
              * while the outer parameter list was still filling it. */
             const char *pn[MAX_PARAMS];
+            struct expr *pb[MAX_PARAMS];
             int have_pn = 0;
             if (cur(ps)->kind == TOK_LPAREN) {
-                for (int pi = 0; pi < MAX_PARAMS; pi++)
+                for (int pi = 0; pi < MAX_PARAMS; pi++) {
                     pn[pi] = NULL;
-                outer = parse_fn_params_named(ps, base, pn);
+                    pb[pi] = NULL;
+                }
+                outer = parse_fn_params_named(ps, base, pn, pb);
                 have_pn = 1;
             } else if (cur(ps)->kind == TOK_LBRACKET)
                 outer = parse_array_dims(ps, base);
@@ -1556,6 +1565,7 @@ static struct type *declarator(struct parser *ps, struct type *base,
                     ps->fn_plines[pi] = 0;
                     ps->fn_pcols[pi] = 0;
                     ps->fn_punused[pi] = 0;
+                    ps->fn_pbound[pi] = pb[pi];
                 }
             }
             return t;
@@ -1581,7 +1591,7 @@ static struct type *declarator(struct parser *ps, struct type *base,
         advance(ps);
     }
     if (nested && cur(ps)->kind == TOK_LPAREN)
-        return parse_fn_params_named(ps, base, ps->fn_pnames);
+        return parse_fn_params_named(ps, base, ps->fn_pnames, ps->fn_pbound);
     return parse_array_dims(ps, base);
 }
 
@@ -1614,6 +1624,7 @@ static struct type *param_adjust(struct parser *ps, struct type *t)
 {
     int q = ps->param_q_out;
     ps->param_q_out = 0;
+    ps->param_bound = ty_is_vla(t) ? t->vla_len : NULL;
     t = ty_ptr(t->pointee);
     if (q & Q_VOL)
         t = ty_volatile(t);
@@ -1667,7 +1678,7 @@ static struct type *parse_fn_params(struct parser *ps, struct type *ret)
     /* Nor can a parameter carry one. */
     ps->attr_carry_on = 0;
 
-    return parse_fn_params_named(ps, ret, NULL);
+    return parse_fn_params_named(ps, ret, NULL, NULL);
 }
 
 /* ... and the parameters' names into names[] (NULL where unnamed) */
@@ -1682,7 +1693,8 @@ static void warn_no_prototype(struct parser *ps)
 }
 
 static struct type *parse_fn_params_named(struct parser *ps, struct type *ret,
-                                          const char **names)
+                                          const char **names,
+                                          struct expr **bounds)
 {
     /* The declarator being parsed has its name already: the parameters'
      * own declarators must not leave theirs in its place. */
@@ -1762,8 +1774,11 @@ static struct type *parse_fn_params_named(struct parser *ps, struct type *ret,
                     ps->fn_punused[n] = unused;
                 }
             }
+            ps->param_bound = NULL;
             if (t->kind == TY_ARRAY)
                 t = param_adjust(ps, t);    /* C's adjustment */
+            if (bounds && n < MAX_PARAMS)
+                bounds[n] = ps->param_bound;
             if (t->kind == TY_FUNC)
                 t = ty_ptr(t);
             if (t->kind == TY_VOID)
@@ -3089,7 +3104,8 @@ static struct type *parse_array_dims(struct parser *ps, struct type *t)
                    "a flexible array member");
         if (!de && cur(ps)->kind != TOK_RBRACKET) {
             int dline = cur(ps)->line;
-            de = parse_cond(ps);
+            /* an assignment-expression (6.7.6.2p1): `int a[i += 2]` */
+            de = parse_expr(ps);
             long dv;
             if (!size_fold(de, &dv)) {
                 ped_at(ps, dline, 0, 1999, "a variable-length array");
@@ -6454,6 +6470,7 @@ static void parse_top(struct parser *ps, struct unit *u,
                     f->param_lines[i] = ps->fn_plines[i];
                     f->param_cols[i] = ps->fn_pcols[i];
                     f->param_unused[i] = ps->fn_punused[i];
+                    f->param_bound[i] = ps->fn_pbound[i];
                 }
                 f->is_varargs = gt->is_varargs;
                 f->noproto = gt->noproto;
@@ -6606,8 +6623,11 @@ static void parse_top(struct parser *ps, struct unit *u,
             unused |= ps->stars_unused;
             ps->stars_unused = 0;
             f->param_unused[f->nparams] = unused;
-            if (pt->kind == TY_ARRAY)
+            if (pt->kind == TY_ARRAY) {
                 pt = param_adjust(ps, pt);  /* C's adjustment */
+                if (f->nparams < MAX_PARAMS)
+                    f->param_bound[f->nparams] = ps->param_bound;
+            }
             if (pt->kind == TY_FUNC)
                 pt = ty_ptr(pt);
             if (pt->kind == TY_VOID)

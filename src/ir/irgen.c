@@ -5125,8 +5125,11 @@ static void gen_func(struct ir_func *fn, struct func *f)
             emit_stvar(fn, k, bitint_ext(fn, emit_ldvar(fn, k, pt), pt), pt);
     }
     if (f->has_vm_params)               /* `int a[n][m]`: its row size */
-        for (int i = 0; i < f->nparams; i++)
+        for (int i = 0; i < f->nparams; i++) {
             vla_eval(fn, f->param_tys[i]);
+            if (i < MAX_PARAMS && f->param_bound[i])
+                gen_expr(fn, f->param_bound[i]);    /* `int a[i++]` */
+        }
     g_eh_cur = -1;
     /* Locals aligned beyond the stack's guarantee (sema's var_indirect):
      * each is carved off the stack ONCE, here, rounded up to its

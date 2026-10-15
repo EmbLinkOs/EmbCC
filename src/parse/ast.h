@@ -459,6 +459,11 @@ struct func {
      * to edit the name, not the function's first column */
     int param_lines[MAX_PARAMS], param_cols[MAX_PARAMS];
     int param_unused[MAX_PARAMS];   /* __attribute__((unused)) on it */
+    /* the outermost length of an array parameter, which the adjustment to
+     * a pointer leaves out of its type but a definition evaluates at
+     * entry: `int a[i++]` increments i (C17 6.9.1p10). sema keeps one
+     * only when evaluating it does something. */
+    struct expr *param_bound[MAX_PARAMS];
     /* A parameter of a struct the ABI passes as the integer it holds
      * (ty_scalar_struct_ret): 1 + the local the body uses in its place,
      * which irgen fills from the parameter at entry (sema); 0 otherwise */
