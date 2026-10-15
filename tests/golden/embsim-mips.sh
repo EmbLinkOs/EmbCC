@@ -238,6 +238,21 @@ if command -v "$MC" >/dev/null 2>&1; then
             diff "$x/m16.qemu" "$x/m16.sim" | head -20
             fail "mips-mips16.s: EmbSim's output is not QEMU's (24Kc)"; }
     fi
+    # the pic32mx core (a PIC32MX's M4K) runs the same MIPS32 and MIPS16e:
+    # the instruction edges up to the MMU's (it has fixed mapping, no
+    # TLB: kseg2 is unmapped there), and every MIPS16e result
+    "$EMBSIM" "$x/isa.elf" --board malta --cpu pic32mx --max-insns 100000000 \
+        > "$x/isa.mx" 2>&1
+    mmu=$(grep -n '^kseg2 unmapped' tests/golden/embsim/mips-isa.txt | cut -d: -f1)
+    head -n $((mmu - 1)) tests/golden/embsim/mips-isa.txt > "$x/isa.head"
+    head -n $((mmu - 1)) "$x/isa.mx" | cmp -s - "$x/isa.head" ||
+        { head -n $((mmu - 1)) "$x/isa.mx" | diff "$x/isa.head" - | head
+          fail "mips-isa.c on the pic32mx core: not the 24Kc's results"; }
+    "$EMBSIM" "$x/m16.elf" --board malta --cpu pic32mx --max-insns 50000000 \
+        > "$x/m16.mx" 2>&1
+    cmp -s "$x/m16.mx" tests/golden/embsim/mips-mips16.txt ||
+        { diff tests/golden/embsim/mips-mips16.txt "$x/m16.mx" | head; fail "mips-mips16.s on the pic32mx core: not the 24Kc's results"; }
+    echo "embsim-mips: the pic32mx core (the M4K): $((mmu - 1)) instruction edges and the MIPS16e results as the 24Kc's"
     calls=$(awk '$NF == "_start" { print $(NF - 1) }' "$x/m16.prof")
     [ "${calls:-0}" -ge 100 ] || { cat "$x/m16.prof"; fail "--profile does not see MIPS16e's calls"; }
     echo "embsim-mips: MIPS16e ($(wc -l < "$x/m16.sim" | tr -d ' ') results: the 16-bit and EXTENDed instructions, save and restore, the compact branches and the delay slots, jalx, the exceptions) as QEMU's 24Kc and the record have them; --profile counts its $calls calls"
