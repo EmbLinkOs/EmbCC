@@ -1937,8 +1937,14 @@ static struct type *parse_tagged(struct parser *ps, enum tag_kind kind,
             return td->ty ? td->ty : ty_base(TY_INT, 0);
         return td->ty;
     }
-    if (kind == TAG_ENUM)
-        parse_error_line(ps, line, "unknown enum '%s'", tag);
+    if (kind == TAG_ENUM) {
+        /* `enum e *p;` or `enum e;` before e's body: GNU C's forward
+         * reference, an int-sized enumeration the definition completes
+         * (the tag holds no type until then, and reads as int) */
+        ped_at(ps, line, 0, 0, "a forward reference to an enum");
+        push_tag(ps, tag, kind, NULL);
+        return ty_base(TY_INT, 0);
+    }
     /* Forward reference: an incomplete struct, fine behind a pointer */
     return push_tag(ps, tag, kind, ty_struct(tag, kind == TAG_UNION))->ty;
 }
