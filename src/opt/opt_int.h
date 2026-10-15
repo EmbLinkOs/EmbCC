@@ -180,6 +180,10 @@ struct vecloop {
                         * and then red_vec is the NARROW vector it reads */
     int lo, hi;        /* the loop's instruction range, [lo, hi) */
     int header;        /* its first block */
+    /* the registers set before the loop that a lane op reads as a scalar
+     * (`g[i] += n`): each is broadcast once, before it. ninv temps. */
+    char *inv;
+    int ninv;
 };
 
 #define VDBG(...) do { if (getenv("EMBCC_VECDEBUG")) \
