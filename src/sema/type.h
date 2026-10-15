@@ -138,6 +138,9 @@ struct type {
      * `<1>`... -- which is an array's layout -- and lowered lane by lane
      * by sema (ty_vector) */
     int is_vector, vec_n;
+    /* ...and a comparison's result: GCC's opaque vector, which converts
+     * to any vector of its size (sema's vec_convert) */
+    int vec_opaque;
     struct member *members;
     int nmembers;
     int size, align;        /* SysV layout, computed when completed */
@@ -240,6 +243,7 @@ int ty_x87_struct(const struct type *t);
 struct type *ty_complex(struct type *elem);
 int ty_is_complex(const struct type *t);
 struct type *ty_vector(struct type *elem, int bytes);
+struct type *ty_vector_opaque(struct type *elem, int bytes);
 int ty_is_vector(const struct type *t);
 /* SysV x86-64: how a struct comes back in x87 registers — 1 for exactly
  * one long double (X87, in st0), 2 for a long double _Complex (COMPLEX_X87,

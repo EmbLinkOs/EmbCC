@@ -571,6 +571,24 @@ static int at_type_start(struct parser *ps)
         ps->lx = save;
         if (type)
             return 1;
+        /* ...and with any attribute: `(__attribute__((vector_size(16)))
+         * float)t`, a vector type's usual spelling behind a macro */
+        while (cur(ps)->kind == TOK_KW_ATTRIBUTE) {
+            advance(ps);
+            int depth = 0;
+            do {
+                if (cur(ps)->kind == TOK_LPAREN) depth++;
+                else if (cur(ps)->kind == TOK_RPAREN) depth--;
+                else if (cur(ps)->kind == TOK_EOF) break;
+                advance(ps);
+            } while (depth > 0);
+        }
+        type = tok_is_type_start(cur(ps)->kind) ||
+               (cur(ps)->kind == TOK_IDENT &&
+                find_typedef(ps, cur(ps)->text) != NULL);
+        ps->lx = save;
+        if (type)
+            return 1;
     }
     return cur(ps)->kind == TOK_IDENT &&
            (find_typedef(ps, cur(ps)->text) != NULL ||
@@ -3018,6 +3036,14 @@ static int size_fold(const struct expr *e, long *out)
         if (!t || ty_incomplete(t))
             return 0;
         *out = ty_align(t);
+        /* of a variable, its own aligned(N) too, as sema answers:
+         * `int f[__alignof__(x) == 128 ? 1 : -1]` */
+        if (!e->cast_ty && e->rhs->kind == EXPR_VAR && !fold_local_find(
+                e->rhs->name) && g_fold_unit)
+            for (struct global *g = g_fold_unit->globals; g; g = g->next)
+                if (g->name && !strcmp(g->name, e->rhs->name) &&
+                    g->user_align > *out)
+                    *out = g->user_align;
         return 1;
     }
     case EXPR_CAST:
@@ -3873,6 +3899,25 @@ static struct expr *parse_primary(struct parser *ps)
          * __builtin_choose_expr below it is how C code dispatched on a
          * type before _Generic existed, and kernel headers still use
          * the pair. */
+        /* __builtin_convertvector(v, T): a call whose second argument
+         * is a type, which sema converts lane by lane */
+        if (strcmp(t->text, "__builtin_convertvector") == 0) {
+            int line = t->line, col = t->col;
+            struct expr *fn = new_expr(EXPR_VAR, line, col);
+            fn->name = t->text;
+            advance(ps);
+            expect(ps, TOK_LPAREN, "'(' after __builtin_convertvector");
+            e = new_expr(EXPR_CALL, line, col);
+            e->lhs = fn;
+            e->name = fn->name;
+            e->args = xcalloc(4, sizeof *e->args);
+            e->args[0] = parse_expr(ps);
+            e->nargs = 1;
+            expect(ps, TOK_COMMA, "',' before the vector type");
+            e->cast_ty = parse_type_name(ps, parse_type_spec(ps, 0));
+            expect(ps, TOK_RPAREN, "')'");
+            return e;
+        }
         if (strcmp(t->text, "__builtin_types_compatible_p") == 0) {
             int line = t->line;
             struct type *a, *b;
@@ -5733,6 +5778,26 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
         s->cond = parse_comma(ps);
         expect(ps, TOK_RPAREN, "')'");
         s->body = parse_controlled(ps);
+        /* `switch (x) case 4: case 0: f();`: a label is a marker in a
+         * list, so with no braces the body is the labels AND the
+         * statement they label -- which ran after the switch instead */
+        if (s->body && (s->body->kind == STMT_CASE ||
+                        s->body->kind == STMT_DEFAULT)) {
+            struct stmt *blk = new_stmt(STMT_BLOCK, s->body->line,
+                                        s->body->col);
+            struct stmt *tail = s->body;
+            blk->body = s->body;
+            for (;;) {
+                while (tail->next)
+                    tail = tail->next;
+                if (tail->kind != STMT_CASE && tail->kind != STMT_DEFAULT)
+                    break;
+                tail->next = parse_controlled(ps);
+                if (!tail->next)
+                    break;
+            }
+            s->body = blk;
+        }
         return s;
     case TOK_KW_CASE:
         /* a position MARKER in the switch body's list, not a wrapper —
