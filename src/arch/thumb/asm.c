@@ -1579,6 +1579,17 @@ static int one_stmt(const char *stmt, int len, struct code *out,
             if (!mnemonic_is(&t[0], e->name))
                 continue;
             if (rd < 0 || rn < 0) FAIL("%s wants registers", e->name);
+            /* `add rdn, rdn, rm`, either way round: the 16-bit ADD
+             * (register) that leaves the flags alone, as GNU as and
+             * llvm-mc pick it unless told `.w` -- and the only
+             * flag-preserving register add ARMv6-M has */
+            if (rm >= 0 && e->op == T_OP_ADD && !e->s && !t_isa_a32 &&
+                (rd == rn || rd == rm) && !(rn == 15 && rm == 15) &&
+                !(t[0].len > 2 && t[0].s[t[0].len - 2] == '.' &&
+                  t[0].s[t[0].len - 1] == 'w')) {
+                t1_add_hi(out, rd, rd == rn ? rm : rn);
+                return 0;
+            }
             if (rm >= 0) { t_alu_reg(out, e->op, rd, rn, rm, e->s); return 0; }
             if (!tok_imm(&t[3], &imm))
                 FAIL("%s wants a register or an immediate", e->name);
@@ -2346,6 +2357,11 @@ void tasm_vocabulary(FILE *f)
     fprintf(f, "\tsub sp, sp, #16\n\tadd sp, sp, #508\n\tadd r4, sp, #8\n"
                "\tadd r7, sp, #1020\n\tsub.w sp, sp, #16\n\tadd r9, sp, #8\n"
                "\tsub sp, sp, #512\n");
+    /* ADD (register)'s narrow form, which sets no flags: the destination
+     * is either source, or the two-operand spelling; .w asks the wide */
+    fprintf(f, "\tadd r3, r3, r4\n\tadd r5, r6, r5\n\tadd r2, r7\n"
+               "\tadd r8, r8, r1\n\tadd sp, sp, r2\n\tadd r0, r0, sp\n"
+               "\tadd.w r6, r6, r1\n");
     fprintf(f, "\tpush {r4-r7, lr}\n\tpop {r4-r7, pc}\n");
     fprintf(f, "\tpush {r4-r11, lr}\n\tpop {r4-r11, pc}\n");
     fprintf(f, "\tstmdb r0!, {r4-r11, lr}\n\tldmia r0!, {r4-r11, lr}\n");

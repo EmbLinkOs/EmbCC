@@ -16,7 +16,10 @@ __attribute__((noinline)) static int add(int a, int b)
     __asm__("addl %2, %0" : "=r"(r) : "0"(a), "r"(b));
 #elif defined(__aarch64__)
     __asm__("add %w0, %w1, %w2" : "=r"(r) : "0"(a), "r"(b));
-#elif defined(__thumb__) || defined(__arm__)
+#elif defined(__thumb__)
+    /* the two-operand form: every Thumb core has it, ARMv6-M included */
+    __asm__("add %0, %2" : "=r"(r) : "0"(a), "r"(b));
+#elif defined(__arm__)
     __asm__("add %0, %1, %2" : "=r"(r) : "0"(a), "r"(b));
 #elif defined(__riscv) || defined(__mips__)
     __asm__("add %0, %1, %2" : "=r"(r) : "0"(a), "r"(b));
