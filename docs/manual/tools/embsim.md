@@ -79,15 +79,18 @@ built for QEMU runs unchanged.
 | `pic32mz2048efh100` | PIC32MZ EF (MIPS32r2, EIC mode, shadow sets) | 512 KiB RAM at 0, 2 MiB flash at `0x1D000000`, boot flash at `0x1FC00000` | UART1-6, of the part's ATDF ([below](#pic32-parts-the-explorer-1632-and-the-curiosity)) |
 | `explorer16-32` | the same part, on Microchip's Explorer 16/32 | as `pic32mz2048efh100` | the same, and the board's LEDs, buttons, sensors and LCD |
 | `curiosity-pic32mz-ef-2` | PIC32MZ2048EFM144, on Microchip's Curiosity PIC32MZ EF 2.0 | as `pic32mz2048efh100` | the same, and the board's LEDs and switches |
+| `explorer16-32-pic32mx` | PIC32MX795F512L (the M4K: MIPS32r2, MIPS16e, EIC mode, one shadow set), on the Explorer 16/32 with its PIM | 128 KiB RAM at 0, 512 KiB flash at `0x1D000000`, 12 KiB boot flash at `0x1FC00000` | UART1-6, of the part's EDC ([below](#pic32mx-parts-and-the-explorer-1632s-pic32mx-pim)), and the board's LEDs, buttons, sensors, LCD and EEPROM |
 | `pic24fj1024gb610` | PIC24FJ1024GB610 (the PIC24F core, with EDS) | 1 MiB of program flash, 32 KiB of RAM at data `0x0800` | UART1-6, of the part's EDC ([below](#pic24-parts-and-the-explorer-1632s-pic24-pim)) |
 | `explorer16-32-pic24` | the same part, on the Explorer 16/32 with its PIC24FJ1024GB610 PIM | as `pic24fj1024gb610` | the same, and the board's LEDs, buttons, sensors, LCD and EEPROM |
 | any PIC32MZ EF part by its name: `pic32mz1024efg064`, `pic32mz0512efe100`... | that part, alone | its program flash and RAM as its ATDF gives them | as `pic32mz2048efh100`, of its own ATDF |
+| any PIC32MX part by its name: `pic32mx795f512l`, `pic32mx250f128b`... | that part, alone | its program flash, boot flash and RAM as its EDC gives them | as `explorer16-32-pic32mx`'s part, of its own EDC |
 | any PIC24FJ GA6/GB6 part by its name: `pic24fj256ga610`, `pic24fj128gb606`... | that part, alone | its program memory, configuration words and RAM as its EDC gives them | as `pic24fj1024gb610`, of its own EDC |
 
 A part by its name needs its pack, from `--dfp DIR` (or its file in
-`EMBSIM_SVD_PATH`); every part of the two packs' families is one, with
-the models the PIC32MZ2048EFH100 and the PIC24FJ1024GB610 have. A part
-of another family (`pic24fj128ga010`, a PIC32MX) is refused by name.
+`EMBSIM_SVD_PATH`); every part of the three packs' families is one, with
+the models the PIC32MZ2048EFH100, the PIC32MX795F512L and the
+PIC24FJ1024GB610 have. A part of another family (`pic24fj128ga010`, a
+dsPIC) is refused by name.
 A program built for the part (`embcc --mcu=32MZ1024EFG064`) finds its
 memory where the part has it; a 64-pin part has the ports and pins of
 its EDC or ATDF, so a test that drives RA0 needs a 100-pin one.
@@ -96,8 +99,8 @@ its EDC or ATDF, so a test that drives RA0 needs a 100-pin one.
   `cortex-m3`, `cortex-m4` or `cortex-m7` on the Cortex-M boards; `rv32`
   or `rv64` on `virt`, which otherwise takes the image's width (an
   ELFCLASS64 image is RV64); `atmega328p` on `uno`; `24kc` on `malta`;
-  `pic32mz` on the PIC32 boards; `pic24fj1024gb610` (or the part's own
-  name) on the PIC24 ones.
+  `pic32mz` on the PIC32MZ boards, `pic32mx` on the PIC32MX ones;
+  `pic24fj1024gb610` (or the part's own name) on the PIC24 ones.
 - `--ram-size` changes the size of the SRAM at `0x20000000`, or of
   virt's RAM (the harness's QEMU runs give it `-m 8`, so
   `--ram-size 8M` is the same machine).
@@ -578,6 +581,86 @@ than these (their registers keep what is written), change-notification
 interrupts, the external interrupt pins, conversion and baud-rate
 timing, DMA, the watchdog and deadman timer, the prefetch cache, PMD's
 module disables, sleep and idle.
+
+## PIC32MX parts, and the Explorer 16/32's PIC32MX PIM
+
+A PIC32MX board is built from `Microchip.PIC32MX_DFP` (`--dfp DIR`). Its
+ATDF files will not do -- the PIC32MX795F512L's places 35 peripherals
+(the timers, UARTs, ADC, SPI, I2C, input capture, output compare, PMP,
+RTCC) 0xC below their addresses and has no port G or change-notice
+registers -- so EmbSim reads the part's EDC file
+(`edc/PIC32MX795F512L.PIC`, MPLAB's own), which has every register: 2955
+of them at the device header's addresses, 2166 of them CLR, SET and INV
+registers (the EDC's `portals`), each peripheral named as the EDC names
+its instance (`UART2`, `TMR3`, the ports one `GPIO`). The interrupt
+requests are the EDC's; which vector each one shares is the ATDF's
+(beside it, `atdf/`), the one thing both files agree on.
+
+**The core** is the `pic32mx` model of the [MIPS32
+core](#what-it-models-the-mips32-core), the M4K: PRId 0x00018700,
+Config with fixed mapping (no TLB: useg at physical 0x40000000 up,
+kseg2 and kseg3 unmapped) and no caches, Config1 MIPS16e and EJTAG,
+Config3 EIC and vectored interrupts, two register sets (SRSCtl.HSS 1);
+no FPU, no DSP ASE, no microMIPS.
+
+**The models:**
+
+- **The interrupt controller**, in EIC mode as the family reference
+  manual's section 8 has it: a request pending (IFSx and IECx) at its
+  vector's priority (IPCx, by vector: UART1's error, receive and
+  transmit requests are its one vector, 24); the highest priority, then
+  subpriority, then the lowest vector. In single-vector mode
+  (INTCON.MVEC 0) every interrupt is presented as vector 0, at EBASE +
+  0x200, in the shadow set with INTCON.SS0; in multi-vector mode at
+  EBASE + 0x200 + the vector times IntCtl.VS's spacing, in the shadow
+  set if its priority is DEVCFG3.FSRSSEL's. INTSTAT says which vector
+  and at what level (VEC, SRIPL).
+- **The oscillator**: OSCCON from the configuration words (FNOSC, and
+  PBDIV from DEVCFG1.FPBDIV), locked behind SYSKEY; the peripheral bus
+  divides the core's clock by PBDIV (1, 2, 4, 8) for the timers and the
+  ADC.
+- **Timer1-5**, as the PIC32MZ's; **UART1-6**; **the PMP**.
+- **Ports A-G**: port B's analog pins are AD1PCFG's clear bits; the
+  pull-ups are CNPUE's, by each pin's change-notice number (the EDC's
+  pin names: RD7 is CN16); with CNCON.ON, a pin whose CNEN bit is set
+  flags CHANGE_NOTICE when its level changes.
+- **SPI1-4**, as masters: a word written to SPIxBUF (8, 16 or 32 bits)
+  is exchanged at once with the board's device on the unit's pins;
+  SPIRBF, SPIROV, the receive interrupt.
+- **ADC1**, the 10-bit converter: SAMP and ASAM, manual (SSRC 000) or
+  auto-convert (111) after SAMC TADs, 12 TADs a conversion, CH0SA or
+  the AD1CSSL scan, FORM's eight formats, the 16-word buffer (BUFM's
+  halves), SMPI's interrupt, CLRASAM.
+
+**The `explorer16-32-pic32mx` board** is the Explorer 16/32 with the
+PIC32MX795F512L PIM (MA320003). The part's 100-pin package puts the
+board's signals on the socket's pins one to one, as its own pin list
+says:
+
+| | Pin | |
+|---|---|---|
+| LEDs D3-D10 | RA0-RA7 | lit when the pin drives high |
+| buttons S3, S4, S5, S6 | RD6, RD13, RA7 (with D10), RD7 | low when pressed (the board's pull-ups) |
+| TC1047A temperature sensor | AN4 (RB4) | 500 mV + 10 mV per degree C |
+| potentiometer R6 | AN5 (RB5) | |
+| 16x2 LCD, HD44780 | PMD0-7, RS on PMA0, E on PMWR, R/W on PMRD | the PMP |
+| 25LC256 serial EEPROM | SCK2 RG6, SDI2 RG7, SDO2 RG8, CS RD12 | SPI2 |
+| USB-UART | the UART the program uses | every UART's output is stdout |
+
+The times the board reports are the core's cycles at 80 MHz, the part's
+usual setting. `--set` takes what `explorer16-32-pic24` takes.
+
+EmbCC builds for these parts with `--mcu=32MX795F512L` and the pack's
+`--dfp`: its linker script places each `.vector_N` in its slot, EBASE +
+0x200 + N times 32 bytes, as the pack's own script does.
+
+**Not modelled on the PIC32MX:** the bus matrix's RAM and flash
+partitions (BMX: user mode finds nothing at physical 0x40000000 up), the
+prefetch cache (CHECON keeps what is written), the external interrupt
+pins, the proximity timer (TPC), a PIC32MX1xx/2xx's per-port change
+notices (CNCONx, CNENx, CNSTATx), the other peripherals (DMA, I2C,
+input capture, output compare, RTCC, USB, CAN, Ethernet: their
+registers keep what is written).
 
 ## What it models: the MIPS32 core
 
@@ -1676,6 +1759,19 @@ EmbCC program on each PIC32 board to its record: the DSP ASE after
 EmbCC's startup, the EVIC, shadow sets, the timers, the ports, the ADC,
 the LCD on the PMP, SYSKEY on the Explorer; ANSELx, the switches and the
 LEDs on the Curiosity.
+
+**PIC32MX.** `tests/golden/embsim-pic32mx.sh` holds the EDC's register
+file to the pack's device header (every SFR and its CLR, SET and INV
+registers at the header's address; the header's other names aliases of
+them), and runs EmbCC programs against their records: on the bare
+PIC32MX795F512L, the M4K's identity, DEVID, FPBDIV, the interrupt
+controller in single- and multi-vector modes (INTSTAT, the shadow set by
+SS0 and by FSRSSEL, the order by vector rather than by request number,
+subpriority, a vector three requests share), Timer1 on the peripheral
+bus, the change notices, CNPUE, AD1PCFG and SYSKEY's lock, each by the
+family reference manual; on `explorer16-32-pic32mx`, the buttons, LEDs,
+ADC1's conversions of the board's sensors, the EEPROM on SPI2 and the
+LCD on the PMP; and on the PIC32MX250F128B by name, its memory.
 
 **PIC24.** No QEMU has a PIC24, and no PIC24 assembler is at hand:
 `tests/golden/embsim-pic24.sh` holds the EDC's register file to the

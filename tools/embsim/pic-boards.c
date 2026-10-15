@@ -43,6 +43,18 @@
  *     Peripheral Pin Select puts on RP21 and RP19 while RG0 drives low;
  *     the part reads it on the unit whose SDIx input is RP26.
  *
+ * The Explorer 16/32 with the PIC32MX795F512L PIM (MA320003): the part's
+ * 100-pin package puts the board's signals on the socket's pins one to
+ * one (its own pin list says so: RA0-RA7 on pins 17, 38, 58-61, 91, 92,
+ * RD6/RD13/RD7 on 83/80/84, AN4 and AN5 on 21 and 20, PMA0, PMWR, PMRD
+ * and PMD0-7 where the LCD is, SCK2/SDI2/SDO2 on 10/11/12, RD12 on 79):
+ *   - LEDs D3-D10 on RA0-RA7; S3 RD6, S4 RD13, S5 RA7, S6 RD7, pulled up;
+ *   - the potentiometer on AN5, the TC1047A on AN4;
+ *   - the LCD on the PMP;
+ *   - the 25LC256 on SPI2 (no Peripheral Pin Select on this part), its
+ *     CS on RD12;
+ *   - the core at 80 MHz (its usual PLL setting), for the times reported.
+ *
  * Microchip's Curiosity PIC32MZ EF 2.0 (DM320209, a PIC32MZ2048EFM144),
  * by Harmony 3's BSP for it (bsp/boards/pic32mz_ef_curiosity_v2):
  *   - LED1 RJ7, LED2 RK7, LED3 RJ3, and the RGB LED's red RB7, green RB8
@@ -94,13 +106,15 @@ struct board {
     int nbutton;
     int explorer;                   /* the TC1047A, the potentiometer, the LCD */
     int an_temp, an_pot;            /* their analog inputs */
-    int eeprom;                     /* the 25LC256: EE_SPI or EE_PINS */
+    int eeprom;                     /* the 25LC256: EE_SPI, EE_SPI2 or EE_PINS */
     const char *no_s3;              /* why S3 is not there, or 0 */
+    double hz;                      /* a PIC32's core clock, or 0: 200 MHz */
 };
 
-/* the 25LC256's wiring: an SPI unit the PPS routes (the PIC24 PIM's), or
- * the PIC32 PIM's pins, which the program clocks itself */
-enum { EE_NONE, EE_SPI, EE_PINS };
+/* the 25LC256's wiring: an SPI unit the PPS routes (the PIC24 PIM's),
+ * SPI2 with CS on RD12 (the PIC32MX PIM's), or the PIC32MZ PIM's pins,
+ * which the program clocks itself */
+enum { EE_NONE, EE_SPI, EE_SPI2, EE_PINS };
 
 static const struct led e16_leds[] = {
     { PA, 0, "D3", 0 }, { PA, 1, "D4", 0 }, { PA, 2, "D5", 0 },
@@ -131,11 +145,13 @@ static const struct button cur_buttons[] = {
 #define N(a) (int)(sizeof a / sizeof a[0])
 static const struct board boards_[] = {
     { "explorer16-32", e16_leds, N(e16_leds), e16_buttons, N(e16_buttons),
-      1, 4, 45, EE_PINS, "S3 is not wired to the PIC32MZ EF plug-in module" },
+      1, 4, 45, EE_PINS, "S3 is not wired to the PIC32MZ EF plug-in module", 0 },
     { "explorer16-32-pic24", e16p24_leds, N(e16p24_leds), e16p24_buttons,
-      N(e16p24_buttons), 1, 4, 5, EE_SPI, 0 },
+      N(e16p24_buttons), 1, 4, 5, EE_SPI, 0, 0 },
+    { "explorer16-32-pic32mx", e16p24_leds, N(e16p24_leds), e16p24_buttons,
+      N(e16p24_buttons), 1, 4, 5, EE_SPI2, 0, 80e6 },
     { "curiosity-pic32mz-ef-2", cur_leds, N(cur_leds), cur_buttons,
-      N(cur_buttons), 0, 0, 0, 0, 0 },
+      N(cur_buttons), 0, 0, 0, 0, 0, 0 },
 };
 
 #define NLED 8
@@ -187,7 +203,7 @@ struct pboard {
 /* the core's clock: the time the board reports */
 static double hz(const struct pboard *x)
 {
-    return pic24_is(x->s->cpu) ? (double)pic24_fcy(x->s) : PIC32_SYSCLK;
+    return pic24_is(x->s->cpu) ? (double)pic24_fcy(x->s) : x->b->hz ? x->b->hz : PIC32_SYSCLK;
 }
 
 static double now_ms(const struct pboard *x)
@@ -220,6 +236,8 @@ static void pin_out(void *ctx, int port, int bit, int level)
     struct pboard *x = ctx;
     char pin[8];
     if (x->b->eeprom == EE_SPI && port == PG && bit == 0)  /* CS, by J1 */
+        ee_select(x, level == 0);
+    if (x->b->eeprom == EE_SPI2 && port == PD && bit == 12)
         ee_select(x, level == 0);
     if (x->b->eeprom == EE_PINS)
         ee_pins(x, port, bit, level);
@@ -582,6 +600,8 @@ static int spi(void *ctx, int unit, int out)
     struct pboard *x = ctx;
     static const int sdo[4] = { 0, 7, 10, 23 }, sck[4] = { 0, 8, 11, 24 };
     static const char *const sdi[4] = { 0, "RPINR20", "RPINR22", "RPINR28" };
+    if (x->b->eeprom == EE_SPI2)
+        return x->ee && unit == 2 && x->ee->selected ? ee_byte(x, out) : -1;
     if (!x->ee || unit < 1 || unit > 3)
         return -1;
     if (pps_out(x, 21) != sck[unit] || pps_out(x, 19) != sdo[unit] ||
@@ -708,7 +728,7 @@ void *pic_board_create(struct sim *s, const struct dev_desc *d)
         s->io.bus_write = pmp_write;
         s->io.bus_read = pmp_read;
     }
-    if (b->eeprom == EE_SPI)
+    if (b->eeprom == EE_SPI || b->eeprom == EE_SPI2)
         s->io.spi = spi;
     s->io.set = set;
     s->io.end = end;

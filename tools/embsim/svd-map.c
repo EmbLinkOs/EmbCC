@@ -450,6 +450,11 @@ int rf_dev_irq(struct svdmap *m, const char *name)
     return -1;
 }
 
+int rf_irq_vector(struct svdmap *m, int irq)
+{
+    return irq >= 0 && irq < m->d->nirq_vector ? m->d->irq_vector[irq] : irq;
+}
+
 const char *rf_device_name(struct svdmap *m)
 {
     return m->d->name;

@@ -64,6 +64,9 @@ void *pic32_gpio_create(struct sim *s, struct rf_periph *p);
 void *pic32_uart_create(struct sim *s, struct rf_periph *p);
 void *pic32_pmp_create(struct sim *s, struct rf_periph *p);
 void *pic32_adc_create(struct sim *s, struct rf_periph *p);
+extern const struct dev_ops pic32_spi_ops, pic32_adc10_ops;
+void *pic32_spi_create(struct sim *s, struct rf_periph *p);
+void *pic32_adc10_create(struct sim *s, struct rf_periph *p);
 
 /* a PIC24's peripheral models, over its EDC's registers (pic24.h) */
 extern const struct dev_ops pic24_intc_ops, pic24_adc_ops, pic24_epmp_ops;

@@ -34,7 +34,8 @@ struct cfg {
 struct cru {
     struct sim *s;
     struct rf_periph *p;
-    struct rf_reg *osccon, *spllcon, *clkstat, *pbdiv[9];
+    struct rf_reg *osccon, *spllcon, *clkstat;
+    struct rf_reg *pbdiv[9];        /* PB1DIV... ; [0] a PIC32MX's OSCCON */
     int booted;                     /* OSCCON has the configuration's clock */
     int warned;
 };
@@ -45,9 +46,16 @@ static struct cfg *cfg_of(struct sim *s)
     return p && p->ops == &pic32_cfg_ops ? p->ctx : 0;
 }
 
-static struct cru *cru_of(struct sim *s)
+/* the oscillator's peripheral: a PIC32MZ's CRU, a PIC32MX's OSC */
+static struct rf_periph *osc_periph(struct sim *s)
 {
     struct rf_periph *p = s->svd ? rf_periph(s->svd, "CRU") : 0;
+    return p ? p : s->svd ? rf_periph(s->svd, "OSC") : 0;
+}
+
+static struct cru *cru_of(struct sim *s)
+{
+    struct rf_periph *p = osc_periph(s);
     return p && p->ops == &pic32_cru_ops ? p->ctx : 0;
 }
 
@@ -60,9 +68,10 @@ int pic32_unlocked(struct sim *s)
 struct rf_reg *pic32_pb_reg(struct sim *s, int bus)
 {
     char nm[8];
-    struct rf_periph *p = s->svd ? rf_periph(s->svd, "CRU") : 0;
+    struct rf_periph *p = osc_periph(s);
     snprintf(nm, sizeof nm, "PB%dDIV", bus);
-    return p ? rf_reg(p, nm) : 0;
+    struct rf_reg *r = p ? rf_reg(p, nm) : 0;
+    return r ? r : p ? rf_reg(p, "OSCCON") : 0;     /* a PIC32MX's one bus */
 }
 
 u32 pic32_pb_div(struct sim *s, int bus)
@@ -70,7 +79,7 @@ u32 pic32_pb_div(struct sim *s, int bus)
     struct cru *c = cru_of(s);
     if (!c || bus < 1 || bus > 8)
         return 1;
-    return pic32_pb_of(c->pbdiv[bus]);
+    return pic32_pb_of(c->pbdiv[bus] ? c->pbdiv[bus] : c->pbdiv[0]);
 }
 
 /* ---- CFG ------------------------------------------------------------------ */
@@ -122,17 +131,21 @@ void *pic32_cfg_create(struct sim *s, struct rf_periph *p)
 
 /* ---- CRU ------------------------------------------------------------------ */
 
-/* OSCCON's clock out of reset: the configuration words' FNOSC */
+/* OSCCON out of reset: the configuration words' FNOSC (DEVCFG1), and a
+ * PIC32MX's peripheral bus divider, FPBDIV, in PBDIV */
 static void boot(struct cru *c)
 {
     u32 w;
     if (c->booted)
         return;
     c->booted = 1;
-    if (bus_debug_read(&c->s->bus, 0x1fc0ffc8u, 4, &w))
+    u32 at = rf_config_addr(c->s->svd, "DEVCFG1", 0x1fc0ffc8u);
+    if (bus_debug_read(&c->s->bus, at, 4, &w))
         w = 0xffffffffu;
-    u64 fnosc = w & 7;
-    rf_hw(c->osccon, (c->osccon->value & ~0x7700ull) | fnosc << 12 | fnosc << 8);
+    u64 fnosc = w & 7, v = (c->osccon->value & ~0x7700ull) | fnosc << 12 | fnosc << 8;
+    if (c->pbdiv[0])
+        v = (v & ~(3ull << 19)) | (u64)(w >> 12 & 3) << 19;
+    rf_hw(c->osccon, v);
 }
 
 static int locked_reg(const struct cru *c, u32 off)
@@ -162,8 +175,9 @@ static void cru_write(void *ctx, u32 off, int n, u32 v)
             c->warned = 1;
             fflush(stdout);
             fprintf(stderr, "embsim: warning: a write at pc 0x%08x to "
-                    "CRU+0x%03x is ignored: it is locked (SYSKEY's unlock "
-                    "sequence was not written)\n", s->cpu->ops->pc(s->cpu), off);
+                    "%s+0x%03x is ignored: it is locked (SYSKEY's unlock "
+                    "sequence was not written)\n", s->cpu->ops->pc(s->cpu),
+                    c->p->name, off);
         }
         return;
     }
@@ -202,6 +216,8 @@ void *pic32_cru_create(struct sim *s, struct rf_periph *p)
     }
     if (!c.osccon)
         return 0;
+    if (!c.pbdiv[1])
+        c.pbdiv[0] = c.osccon;          /* a PIC32MX: PBDIV is OSCCON's */
     for (int i = 1; i <= 8; i++)
         if (c.pbdiv[i]) {
             rf_set_reset(c.pbdiv[i], 0x8800u | (i == 7 ? 0u : 1u));

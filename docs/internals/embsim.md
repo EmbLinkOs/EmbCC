@@ -50,9 +50,10 @@ file but the network one compiles with EmbCC itself. Everything is in
 | `malta.c` | QEMU malta's FPGA (SOFTRES) and boot ROM; its UART is `uart-16550.c`'s, eight bytes apart |
 | `atdf.c` | a Microchip ATDF file (a device pack's PIC32, SAM or AVR part) read into the SVD reader's `struct svd_device`, for the register file |
 | `pic32.h` | what a PIC32's models share: interrupts through the EVIC, the peripheral bus dividers |
-| `pic32-evic.c`, `pic32-cru.c`, `pic32-tmr.c`, `pic32-gpio.c`, `pic32-uart.c`, `pic32-pmp.c`, `pic32-adc.c` | a PIC32MZ's models over its ATDF's registers: the EVIC (and the core's EIC mode), CFG's SYSKEY and the oscillator, Timer1-9, ports A-K, UART1-6, the PMP, ADCHS |
+| `pic32-evic.c`, `pic32-cru.c`, `pic32-tmr.c`, `pic32-gpio.c`, `pic32-uart.c`, `pic32-pmp.c`, `pic32-adc.c` | a PIC32's models over its ATDF's (a PIC32MZ's) or EDC's (a PIC32MX's) registers: the EVIC (and the core's EIC mode: a PIC32MZ's OFFn, a PIC32MX's vectors spaced by IntCtl.VS, `struct mips_eic`'s `spaced`), CFG's SYSKEY and the oscillator (a PIC32MX's one bus divider in OSCCON), Timer1-9, ports A-K (a PIC32MX's AD1PCFG and change notices), UART1-6, the PMP, ADCHS |
+| `pic32-spi.c`, `pic32-adc10.c` | a PIC32's SPI units as masters (the board's device through `struct board_io`'s `spi`), and a PIC32MX's 10-bit ADC1 |
 | `pic24.h`, `pic24.c` | the PIC24F core: the instruction set, REPEAT and the divide, the data space with its EDS window and program space visibility, table reads, traps and interrupts through the IVT, DISI, PWRSAV; its bus layout; the core's clock (`pic24_fcy`) |
-| `edc.c` | a Microchip EDC file (a device pack's `.PIC`: a PIC24's or dsPIC's SFRs, its interrupts and its pins' names) read into the SVD reader's `struct svd_device` |
+| `edc.c` | a Microchip EDC file (a device pack's `.PIC`: a PIC24's, dsPIC's or PIC32's SFRs, its interrupts and its pins' names) read into the SVD reader's `struct svd_device` |
 | `pic24-intc.c`, `pic24-osc.c`, `pic24-tmr.c`, `pic24-uart.c`, `pic24-adc.c`, `pic24-spi.c`, `pic24-epmp.c` | a PIC24FJ's models over its EDC's registers: the interrupt controller (driving the core), the oscillator and the PPS lock, Timer1-5, UART1-6, ADC1, SPI1-3, the EPMP's EDS space; its ports and their interrupt-on-change are `pic32-gpio.c`'s |
 | `pic24-nvm.c`, `pic24-rtcc.c`, `pic24-dma.c`, `pic24-i2c.c` | the flash controller (its write latches are the core's table writes at TBLPAG 0xFA, through `struct pic24_nvm`; NVMKEY's unlock is the core's, `pic24_unlocked`, which the RTCC's WRLOCK takes too), the RTCC, the DMA controller (its triggers are every interrupt the controller flags: `pic24_irq_listen`), I2C1-3 as masters on an empty bus |
 | `pic24-ic.c`, `pic24-oc.c`, `pic24-ccp.c` | input capture, output compare and the MCCP/SCCPs, each counting its own timer; their outputs and inputs are pins (`pic24_pps_out`, `pic24_pin_out`, `pic24_pin_watch` in `pic32-gpio.c`, by the EDC's pin names), their sync sources events with the time they came (`pic24_event`, `pic24_irq_at`), so a capture of another module's edge is exact to the cycle |
@@ -487,6 +488,17 @@ list (`<edc:PinList>`) gives each pin's names on its port pin
 (`svd_device.pin`, `rf_pin`), which the ports' model uses to put a
 peripheral's output on an RPn pin and to find the pin an input is
 mapped to.
+
+A PIC32's EDC (`edc:arch` 32xxxx: a PIC32MX's, whose ATDF misplaces
+registers) is read by `edc_load32`: its `<edc:PhysicalSpace>`'s SFR
+sectors, each register at its physical address, its peripheral the
+instance `ltx:baseofperipheral` or `ltx:memberofperipheral` names (the
+ports joined as `GPIO`), its CLR, SET and INV registers where
+`edc:portals` says (`svd_device.sci_at`); the memory (the code sector's
+size, the RAM, the boot flash's end at the configuration words'), the
+configuration words, DEVID with the latest revision; the interrupt
+requests (`<edc:InterruptRequest>`), and from the ATDF beside it which
+vector each request shares (`svd_device.irq_vector`, `rf_irq_vector`).
 
 A PIC24 has two address spaces, which EmbSim's one bus holds apart
 (`pic24.h`): program memory at twice its address (a 24-bit word as four

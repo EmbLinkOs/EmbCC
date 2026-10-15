@@ -254,7 +254,8 @@ static void take_interrupt(void)
     } else if (ms->eic) {
         ms->cause = (ms->cause & ~(0xffu << 10)) | (u32)ms->eic->ripl << 10;
         if (!(ms->status & ST_BEV) && vs)
-            off = ms->eic->offset;
+            off = ms->eic->spaced ? 0x200 + (u32)ms->eic->vector * (vs << 5)
+                                  : ms->eic->offset;
         set = ms->eic->srs;
         ms->srsctl = (ms->srsctl & ~(15u << 18)) | (u32)(set & 15) << 18;
     } else if (vs && !(ms->status & ST_BEV)) {
@@ -361,10 +362,18 @@ static int xlate(u32 va, int acc, u32 *pa)
             *pa = va & 0x1fffffffu;
             return 0;
         }
+        if (ms->fmt) {              /* kseg2 and kseg3, unmapped */
+            *pa = va;
+            return 0;
+        }
         return tlb_xlate(va, acc, pa);
     }
     if (ms->status & ST_ERL) {
         *pa = va;
+        return 0;
+    }
+    if (ms->fmt) {                  /* useg at 0x40000000 up */
+        *pa = va + 0x40000000u;
         return 0;
     }
     return tlb_xlate(va, acc, pa);
@@ -1425,7 +1434,7 @@ static void cpu_reset(struct cpu *c)
     k->epc = k->errorepc = k->badvaddr = k->depc = 0;
     k->ebase = 0x80000000u;
     k->intctl = k->pic32 ? 0 : 7u << 29;
-    k->srsctl = (k->pic32 ? (u32)(MIPS_SETS - 1) : 0) << 26;
+    k->srsctl = (u32)k->hss << 26;
     k->srsmap = 0;
     k->config0 = (k->config0 & ~7u) | 2;
     k->hwrena = k->userlocal = k->wired = k->index = 0;
@@ -1575,14 +1584,17 @@ int mips_is(const struct cpu *c)
 }
 
 /* The cores: `pic32mz`, a PIC32MZ EF's (M-class: shadow sets, EIC mode
- * with the EVIC, the DSP ASE Revision 2, the FPU, microMIPS), and
- * `24kc`, QEMU malta's (MIPS32r2 and MIPS16e, no FPU, no DSP, the timer
- * on IP7). The IDs are the parts': PRId and Config1's caches and
- * TLB, which a startup reads to set the caches up. */
+ * with the EVIC, the DSP ASE Revision 2, the FPU, microMIPS); `pic32mx`,
+ * a PIC32MX's M4K (EIC mode, one shadow set, MIPS16e, fixed mapping
+ * instead of a TLB, no caches, no FPU, no DSP); and `24kc`, QEMU malta's
+ * (MIPS32r2 and MIPS16e, no FPU, no DSP, the timer on IP7). The IDs are
+ * the parts': PRId and Config1's caches and TLB, which a startup reads
+ * to set the caches up. */
 struct cpu *mips_create(struct sim *s, const char *model,
                         const struct board_desc *bd)
 {
-    int pic32 = !strcmp(model, "pic32mz");
+    int mx = !strcmp(model, "pic32mx");
+    int pic32 = mx || !strcmp(model, "pic32mz");
     if (!pic32 && strcmp(model, "24kc"))
         return 0;
     struct mips_state *k = calloc(1, sizeof *k);
@@ -1591,7 +1603,19 @@ struct cpu *mips_create(struct sim *s, const char *model,
     k->cpu.ops = &mips_ops;
     k->sim = s;
     k->pic32 = pic32;
-    if (pic32) {
+    if (mx) {
+        /* the M4K (PRId 0x87): fixed mapping (Config.MT 3), dual SRAM
+         * interfaces, MIPS16e and EJTAG (Config1), EIC and vectored
+         * interrupts (Config3); two register sets */
+        k->prid = 0x00018700u;
+        k->config0 = 0x80000000u | 1u << 16 | 1u << 10 | 3u << 7;
+        k->config1 = 0x80000000u | 1u << 2 | 1u << 1;
+        k->config2 = 0x80000000u;
+        k->config3 = 1u << 6 | 1u << 5;
+        k->mips16 = 1;
+        k->fmt = 1;
+        k->hss = 1;
+    } else if (pic32) {
         /* M5150 (PRId 0xa7), 16-entry TLB; 16 KiB 4-way I-cache and 4 KiB
          * 4-way D-cache of 16-byte lines; performance counters, watch
          * registers, EJTAG, the FPU. Config3: 8-bit IPL, the MCU ASE,
@@ -1609,6 +1633,7 @@ struct cpu *mips_create(struct sim *s, const char *model,
         k->fpu = 1;
         k->micromips = 1;
         k->bootcfg = bd && bd->svd;     /* a PIC32 board: its DEVCFG0 */
+        k->hss = MIPS_SETS - 1;
     } else {
         /* the 24Kc: 64 KiB caches... as QEMU's PRId and Config have it */
         k->prid = 0x00019300u;

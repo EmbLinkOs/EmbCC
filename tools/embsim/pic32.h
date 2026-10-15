@@ -5,7 +5,8 @@
  *   pic32-evic.c   the EVIC: IFS, IEC, IPC, OFFn, INTCON, PRISS,
  *                  INTSTAT, and the core's EIC mode
  *   pic32-cru.c    the oscillator's registers: OSCCON, the PBxDIV
- *                  dividers, SYSKEY's unlock
+ *                  dividers (a PIC32MX's one, OSCCON.PBDIV), SYSKEY's
+ *                  unlock
  *   pic32-tmr.c    Timer1 (type A) and Timer2-9 (type B, and 32-bit pairs)
  *   pic32-gpio.c   ports A-K: TRIS, LAT, PORT, ANSEL, the pulls
  *   pic32-uart.c   UART1-6
@@ -44,9 +45,12 @@ struct rf_reg *pic32_pb_reg(struct sim *s, int bus);
 /* the core cycles per second the board runs at, for its reports */
 #define PIC32_SYSCLK 200000000u
 
-/* a PBnDIV register's divider (1 without one) */
+/* a PBnDIV register's divider, or a PIC32MX's OSCCON's (PBDIV: 1, 2,
+ * 4 or 8); 1 without one */
 static inline u32 pic32_pb_of(const struct rf_reg *r)
 {
+    if (r && r->name[0] == 'O')
+        return 1u << (r->value >> 19 & 3);
     return r ? (u32)(r->value & 0x7f) + 1 : 1;
 }
 

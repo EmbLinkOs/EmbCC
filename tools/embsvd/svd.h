@@ -116,6 +116,13 @@ struct svd_device {
     unsigned long long code_end, ram_base, ram_end;
     struct svd_cfgword *cfg;
     int ncfg;
+    /* EmbSim's: a PIC32MX's boot flash's end (its configuration words'),
+     * and each interrupt request's vector (irq_vector[irq]), which the
+     * MX's interrupt controller shares among requests; 0 where they are
+     * the same number */
+    unsigned long long boot_end;
+    int *irq_vector;
+    int nirq_vector;
     int num_irq;
     struct svd_periph *p;
     int np;

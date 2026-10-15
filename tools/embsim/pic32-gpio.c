@@ -20,6 +20,12 @@
  *     bits (it cannot set them), and IOCSTAT follows. As the data sheet
  *     says, an output's LATx is what changes a pin in a test (the board's
  *     inputs are set when the run starts).
+ *   - A PIC32MX's: port B's analog pins are AD1PCFG's clear bits (the
+ *     ADC's register, 1 for digital), the pull-ups CNPUE's by each pin's
+ *     change-notice number (CNn, the device file's pin names), and with
+ *     CNCON.ON a pin whose CNEN bit is set flags CHANGE_NOTICE when its
+ *     level changes, either way (the part compares with the last read of
+ *     PORTx: here, with the last level).
  *   - A PIC24's peripherals on its pins: an output a peripheral drives
  *     (pic24_pps_out: a PPS output function, on each RPn pin whose RPORx
  *     field selects it; pic24_pin_out: a pin of its own, an MCCP's OCMxA)
@@ -53,6 +59,10 @@ struct gpio {
     struct port pt[NPORTS];
     struct rf_reg *padcon, *iocstat;        /* PAD's: IOCON, the ports' flags */
     int ioc_irq;
+    /* a PIC32MX's: AD1PCFG, the change notices, each pin's CN number */
+    struct rf_reg *ad1pcfg, *cncon, *cnen, *cnpue;
+    signed char cn[NPORTS][32];
+    int cn_irq;
     /* a PIC24's peripherals on its pins */
     struct rf_reg *rpor[32], *rpinr[64];    /* the PPS's */
     signed char rp_of[NPORTS][32];          /* a pin's RPn, or -1 */
@@ -97,6 +107,16 @@ static u32 drives(const struct gpio *g, int i, u32 *low)
     return hi;
 }
 
+/* a PIC32MX's pull-ups on port i: CNPUE's bits, by the pins' CN numbers */
+static u32 cn_bits(const struct gpio *g, const struct rf_reg *r, int i)
+{
+    u32 v = 0;
+    for (int b = 0; r && b < 32; b++)
+        if (g->cn[i][b] >= 0 && (r->value >> g->cn[i][b] & 1))
+            v |= 1u << b;
+    return v;
+}
+
 static u32 pins_read(struct gpio *g, int i)
 {
     struct port *q = &g->pt[i];
@@ -104,7 +124,9 @@ static u32 pins_read(struct gpio *g, int i)
     u32 tris = (u32)q->tris->value, lat = (u32)q->lat->value;
     u32 od = q->odc ? (u32)q->odc->value : 0;
     u32 an = q->ansel ? (u32)q->ansel->value : 0;
-    u32 up = q->cnpu ? (u32)q->cnpu->value : 0, v = 0;
+    u32 up = q->cnpu ? (u32)q->cnpu->value : cn_bits(g, g->cnpue, i), v = 0;
+    if (i == 1 && g->ad1pcfg)
+        an = ~(u32)g->ad1pcfg->value & 0xffff;   /* port B: 1 is digital */
     for (int b = 0; b < 32; b++) {
         u32 m = 1u << b;
         int level = 0, pl;
@@ -139,17 +161,21 @@ static void tell_board(struct gpio *g)
     }
 }
 
-/* the interrupt-on-change: each port's pins against their last levels */
+/* the interrupt-on-change: each port's pins against their last levels
+ * (a PIC24's IOC, a PIC32MX's change notices) */
 static void ioc_check(struct gpio *g)
 {
     int on = g->padcon && (g->padcon->value >> 15 & 1);
+    int cn_on = g->cncon && (g->cncon->value >> 15 & 1);
     for (int i = 0; i < NPORTS; i++) {
         struct port *q = &g->pt[i];
-        if (!q->port || !q->iocf)
+        if (!q->port || (!q->iocf && !g->cncon))
             continue;
         u32 lv = pins_read(g, i), was = q->level;
         q->level = lv;
-        if (!on)
+        if (cn_on && ((lv ^ was) & cn_bits(g, g->cnen, i)) && g->cn_irq >= 0)
+            pic32_irq(g->s, g->cn_irq);
+        if (!on || !q->iocf)
             continue;
         u32 ch = (lv & ~was & (q->iocp ? (u32)q->iocp->value : 0)) |
                  (~lv & was & (q->iocn ? (u32)q->iocn->value : 0));
@@ -283,6 +309,20 @@ void *pic32_gpio_create(struct sim *s, struct rf_periph *p)
     g->padcon = pad ? rf_reg(pad, "PADCON") : 0;
     g->iocstat = pad ? rf_reg(pad, "IOCSTAT") : 0;
     g->ioc_irq = g->padcon ? pic24_irq_named(s, "IOC") : -1;
+    /* a PIC32MX's AD1PCFG and change notices */
+    struct rf_periph *adc = s->svd ? rf_periph(s->svd, "ADC10") : 0;
+    g->ad1pcfg = adc && !g->pt[1].ansel ? rf_reg(adc, "AD1PCFG") : 0;
+    g->cncon = rf_reg(p, "CNCON");
+    g->cnen = rf_reg(p, "CNEN");
+    g->cnpue = rf_reg(p, "CNPUE");
+    memset(g->cn, -1, sizeof g->cn);
+    for (int k = 0; g->cncon && k < 32; k++) {
+        snprintf(nm, sizeof nm, "CN%d", k);
+        int pin = rf_pin(s->svd, nm);
+        if (pin >= 0 && pin / 32 < NPORTS)
+            g->cn[pin / 32][pin % 32] = (signed char)k;
+    }
+    g->cn_irq = g->cncon ? pic32_irq_named(s, "CHANGE_NOTICE") : -1;
     /* the PPS's pins: RPn (input and output) and RPIn (input) */
     struct rf_periph *pps = s->svd ? rf_periph(s->svd, "PPS") : 0;
     memset(g->rp_of, -1, sizeof g->rp_of);

@@ -37,6 +37,10 @@ PIC32MZ_EF_DFP=${EMBCC_PIC32MZ_EF_DFP:-${PIC32MZ_EF_DFP:-$HOME/EmbRef/dl/pic32mz
 # and its PIC24F GA/GB pack (Microchip.PIC24F-GA-GB_DFP, unpacked): the EDC
 # files of the PIC24FJ1024GB610 and its family (tests/golden/embsim-pic24.sh).
 PIC24F_GA_GB_DFP=${EMBCC_PIC24F_GA_GB_DFP:-${PIC24F_GA_GB_DFP:-$HOME/EmbRef/dl/pic24f-ga-gb-dfp/x}}
+# and its PIC32MX pack (Microchip.PIC32MX_DFP, unpacked): the EDC files the
+# PIC32MX boards are built from (the ATDFs place many registers wrongly),
+# with the ATDFs for their interrupt vectors (tests/golden/embsim-pic32mx.sh).
+PIC32MX_DFP=${EMBCC_PIC32MX_DFP:-${PIC32MX_DFP:-$HOME/EmbRef/dl/pic32mx-dfp/x}}
 
 # The Xtensa reference: Espressif's GCC told to generate for the de212 core
 # QEMU emulates, through a configuration plugin built from that core's

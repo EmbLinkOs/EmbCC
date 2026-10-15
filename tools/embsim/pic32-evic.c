@@ -1,17 +1,25 @@
-/* pic32-evic.c -- a PIC32MZ's interrupt controller (the EVIC), over its
- * registers in the ATDF (module INT), driving the core in EIC mode.
+/* pic32-evic.c -- a PIC32's interrupt controller (the EVIC), over its
+ * registers in the device file (INT), driving the core in EIC mode: a
+ * PIC32MZ's, and a PIC32MX's.
  *
- *   - An interrupt is requested while its flag (IFSx) and its enable
- *     (IECx) are set and its priority (IPCx's IP, 1 to 7) is not 0. Of
- *     those, the highest priority is presented to the core, then the
- *     highest subpriority (IS), then the lowest number (the natural
+ *   - An interrupt request is pending while its flag (IFSx) and its
+ *     enable (IECx) are set and its vector's priority (IPCx's IP, 1 to 7)
+ *     is not 0. A PIC32MZ's vector is the request's number; a PIC32MX's
+ *     vectors are shared among requests (a UART's error, receive and
+ *     transmit requests are its one vector), as its device file says. Of
+ *     the pending, the highest priority is presented to the core, then
+ *     the highest subpriority (IS), then the lowest vector (the natural
  *     order).
- *   - The core takes it when the priority is above Status.IPL: at EBASE
- *     plus OFFn of its vector (the vector is the interrupt's number) in
- *     multi-vector mode (INTCON.MVEC), at EBASE + 0x200 in single-vector
- *     mode; in the shadow register set PRISS gives its priority (PRIxSS;
- *     SS0 in single-vector mode). INTSTAT then says which (SIRQ) and at
- *     what level (SRIPL).
+ *   - The core takes it when the priority is above Status.IPL. In
+ *     multi-vector mode (INTCON.MVEC): a PIC32MZ's at EBASE plus OFFn of
+ *     its vector, a PIC32MX's at EBASE + 0x200 + the vector times
+ *     IntCtl.VS's spacing; in single-vector mode every one at EBASE +
+ *     0x200. Its register set: on a PIC32MZ, the one PRISS gives its
+ *     priority (PRIxSS; SS0 in single-vector mode); on a PIC32MX, the
+ *     shadow set for the priority DEVCFG3.FSRSSEL names in multi-vector
+ *     mode, and for every interrupt with INTCON.SS0 in single-vector
+ *     mode. INTSTAT then says which (SIRQ on a PIC32MZ, VEC on a
+ *     PIC32MX) and at what level (SRIPL).
  *   - The core's own interrupts are numbers 0 to 2: its timer (Cause.TI)
  *     and the two software interrupts (Cause.IP0, IP1) set CTIF, CS0IF
  *     and CS1IF as they rise; the program clears them, as the others.
@@ -35,6 +43,8 @@ struct evic {
     struct sim *s;
     struct rf_periph *p;
     struct rf_reg *intcon, *priss, *intstat;
+    int mx;                         /* a PIC32MX's: no PRISS, spaced vectors */
+    u8 vec[256];                    /* each request's vector */
     struct rf_reg *ifs[8], *iec[8], *ipc[64], *off[256];
     int nw;                         /* IFS/IEC words */
     struct mips_eic eic;
@@ -50,12 +60,25 @@ static struct evic *evic_of(struct sim *s)
     return p && p->ops == &pic32_evic_ops ? p->ctx : 0;
 }
 
+/* request irq's vector's priority, and its subpriority */
 static int prio(const struct evic *e, int irq, int *sub)
 {
-    const struct rf_reg *r = e->ipc[irq / 4];
-    u32 b = r ? (u32)(r->value >> (8 * (irq % 4))) : 0;
+    int v = irq < 256 ? e->vec[irq] : irq;
+    const struct rf_reg *r = v / 4 < 64 ? e->ipc[v / 4] : 0;
+    u32 b = r ? (u32)(r->value >> (8 * (v % 4))) : 0;
     *sub = (int)(b & 3);
     return (int)((b >> 2) & 7);
+}
+
+/* a PIC32MX's DEVCFG3.FSRSSEL (bits 18:16): the priority given the
+ * shadow set */
+static int fsrssel(const struct evic *e)
+{
+    u32 w;
+    u32 at = rf_config_addr(e->s->svd, "DEVCFG3", 0x1fc02ff0u);
+    if (bus_debug_read(&e->s->bus, at, 4, &w))
+        w = 0xffffffffu;
+    return (int)(w >> 16 & 7);
 }
 
 static void set_flag(struct evic *e, int irq);
@@ -76,7 +99,8 @@ static void evaluate(struct evic *e)
                 bit++;
             pend &= pend - 1;
             int irq = 32 * w + bit, sub, pr = prio(e, irq, &sub);
-            if (pr && (pr > bp || (pr == bp && sub > bs))) {
+            if (pr && (pr > bp || (pr == bp && (sub > bs ||
+                       (sub == bs && e->vec[irq] < e->vec[best]))))) {
                 best = irq;
                 bp = pr;
                 bs = sub;
@@ -87,10 +111,15 @@ static void evaluate(struct evic *e)
     e->presented = best;
     e->eic.ripl = bp;
     e->eic.offset = 0x200;
-    if (best >= 0 && mvec && e->off[best])
+    e->eic.vector = best >= 0 && mvec ? e->vec[best] : 0;
+    if (best >= 0 && mvec && !e->mx && e->off[best])
         e->eic.offset = (u32)e->off[best]->value & 0x3fffeu;
-    u32 priss = (u32)e->priss->value;
-    e->eic.srs = mvec ? (int)((priss >> (4 * bp)) & 15) : (int)(priss & 1);
+    if (e->mx) {
+        e->eic.srs = mvec ? bp == fsrssel(e) : (int)(e->intcon->value >> 16 & 1);
+    } else {
+        u32 priss = (u32)e->priss->value;
+        e->eic.srs = mvec ? (int)((priss >> (4 * bp)) & 15) : (int)(priss & 1);
+    }
     if (!bp)
         e->eic.srs = 0;
     mips_eic_changed(e->s);
@@ -168,8 +197,8 @@ static void taken(void *ctx)
 {
     struct evic *e = ctx;
     if (e->presented >= 0)
-        rf_hw(e->intstat, (e->intstat->value & ~0x7ffull) |
-                              (u64)e->eic.ripl << 8 | (u64)(e->presented & 0xff));
+        rf_hw(e->intstat, (e->intstat->value & ~0x7ffull) | (u64)e->eic.ripl << 8 |
+                              (u64)((e->mx ? e->eic.vector : e->presented) & 0xff));
 }
 
 static int timer_on(void *ctx)
@@ -232,8 +261,14 @@ void *pic32_evic_create(struct sim *s, struct rf_periph *p)
         snprintf(nm, sizeof nm, "OFF%03d", i);
         e.off[i] = rf_reg(p, nm);
     }
-    if (!e.intcon || !e.priss || !e.intstat || !e.nw || !mips_is(s->cpu))
+    e.mx = !e.priss;
+    if (!e.intcon || !e.intstat || !e.nw || !mips_is(s->cpu))
         return 0;
+    for (int i = 0; i < 256; i++) {
+        int v = rf_irq_vector(s->svd, i);
+        e.vec[i] = (u8)(v >= 0 && v < 256 ? v : i);
+    }
+    e.eic.spaced = e.mx;
     struct evic *c = malloc(sizeof *c);
     if (!c)
         die("out of memory");

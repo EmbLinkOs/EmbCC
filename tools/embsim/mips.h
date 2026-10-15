@@ -64,6 +64,11 @@ struct mips_eic {
     int ripl;
     u32 offset;
     int srs;
+    /* the vector number, when the core places the handler as the MIPS32
+     * architecture has it -- EBase + 0x200 + vector * IntCtl.VS's
+     * spacing (a PIC32MX's) -- rather than at `offset` (a PIC32MZ's
+     * OFFn): spaced set */
+    int vector, spaced;
 };
 
 struct mips_tlbe {
@@ -74,7 +79,9 @@ struct mips_tlbe {
 struct mips_state {
     struct cpu cpu;                 /* the interface; first */
     struct sim *sim;
-    int pic32;                      /* the PIC32MZ's core: EIC mode, its IDs */
+    int pic32;                      /* a PIC32's core: EIC mode, its IDs */
+    int fmt;                        /* fixed mapping, no TLB (the M4K's) */
+    int hss;                        /* SRSCtl.HSS: shadow sets, less one */
 
     u32 gpr[MIPS_SETS][32];
     u32 *r;                         /* the set executing: gpr[SRSCtl.CSS] */

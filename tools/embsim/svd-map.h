@@ -146,6 +146,9 @@ void rf_interrupt(struct rf_periph *p, int irq);
 /* the device's interrupt of that name (an ATDF's: TIMER_2, UART1_TX),
  * or -1 */
 int rf_dev_irq(struct svdmap *m, const char *name);
+/* interrupt request irq's vector (a PIC32MX's controller shares vectors
+ * among requests: the device file says which), else irq itself */
+int rf_irq_vector(struct svdmap *m, int irq);
 /* the register file of the run, its device's name */
 const char *rf_device_name(struct svdmap *m);
 /* a 16-bit part's pin by a name its EDC gives it (RP21, OCM1A, RG6): its

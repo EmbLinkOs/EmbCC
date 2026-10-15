@@ -183,11 +183,29 @@ static void read_sfr(struct svd_node *r, const struct xnode *x,
 struct sfr {
     struct svd_node r;
     const char *mod;
+    const char *inst;               /* a PIC32's: its peripheral instance */
+    int sci;                        /* a PIC32's: it has CLR, SET and INV */
 };
 struct sfrs {
     struct sfr *v;
     int n, cap;
 };
+
+/* a register's module; on a PIC32, its peripheral instance (the first
+ * of ltx:baseofperipheral's or ltx:memberofperipheral's names, else its
+ * group) and whether it has CLR, SET and INV registers (edc:portals) */
+static void note(struct sfr *s, const struct xnode *x)
+{
+    s->mod = svd_xattr(x, "edc:_modsrc");
+    const char *in = svd_xattr(x, "ltx:baseofperipheral");
+    if (!in || !*in)
+        in = svd_xattr(x, "ltx:memberofperipheral");
+    if (!in || !*in)
+        in = svd_xattr(x, "edc:grp");
+    s->inst = in && *in ? svd_dup(in, strcspn(in, " ")) : 0;
+    const char *po = svd_xattr(x, "edc:portals");
+    s->sci = po && strstr(po, "CLR") != 0;
+}
 
 static void collect(struct sfrs *out, const struct xnode *sector)
 {
@@ -209,7 +227,7 @@ static void collect(struct sfrs *out, const struct xnode *sector)
                 }
                 unsigned long long a = num(y, "edc:_addr", at);
                 read_sfr(&out->v[out->n].r, y, a);
-                out->v[out->n].mod = svd_xattr(y, "edc:_modsrc");
+                note(&out->v[out->n], y);
                 out->n++;
                 at = a + 2;
             }
@@ -223,7 +241,7 @@ static void collect(struct sfrs *out, const struct xnode *sector)
         }
         unsigned long long a = num(x, "edc:_addr", at);
         read_sfr(&out->v[out->n].r, x, a);
-        out->v[out->n].mod = svd_xattr(x, "edc:_modsrc");
+        note(&out->v[out->n], x);
         out->n++;
         at = a + (unsigned long long)(num(x, "edc:nzwidth", 16) + 7) / 8;
         if (at & 1)
@@ -338,6 +356,167 @@ static void read_program(struct svd_device *d, const struct xnode *n, int depth)
     }
 }
 
+/* ---- a PIC32's EDC (edc:arch 32xxxx) -------------------------------------- */
+
+static int ull_cmp(const void *a, const void *b)
+{
+    unsigned long long x = *(const unsigned long long *)a;
+    unsigned long long y = *(const unsigned long long *)b;
+    return x < y ? -1 : x > y;
+}
+
+/* the physical space's memory: program flash's size, the RAM, the boot
+ * flash's end (the configuration words'), the configuration words, and
+ * the device ID with the latest silicon revision listed */
+static void read_physical(struct svd_device *d, const struct xnode *n, int depth,
+                          unsigned long long *devid)
+{
+    for (int i = 0; n && depth < 8 && i < svd_xnkid(n); i++) {
+        const struct xnode *k = svd_xkid(n, i);
+        if (is(k, "edc:CodeSector") && !d->code_end)
+            d->code_end = num(k, "edc:endaddr", 0) - num(k, "edc:beginaddr", 0);
+        else if (is(k, "edc:GPRDataSector") && !d->ram_end) {
+            d->ram_base = num(k, "edc:beginaddr", 0);
+            d->ram_end = num(k, "edc:endaddr", 0);
+        } else if (is(k, "edc:ConfigFuseSector"))
+            d->boot_end = num(k, "edc:endaddr", 0);
+        else if (is(k, "edc:DeviceIDSector")) {
+            *devid = num(k, "edc:value", 0);
+            for (int j = 0; j < svd_xnkid(k); j++)
+                if (is(svd_xkid(k, j), "edc:DEVIDToRev") &&
+                    num(svd_xkid(k, j), "edc:value", 0) > (*devid & 0xf0000000ull))
+                    *devid = (*devid & 0x0fffffffull) | num(svd_xkid(k, j), "edc:value", 0);
+            continue;
+        } else if (is(k, "edc:DCRDef")) {
+            const char *nm = svd_xattr(k, "edc:cname");
+            if (nm) {
+                d->cfg = svd_grow(d->cfg, (size_t)(d->ncfg + 1) * sizeof *d->cfg);
+                d->cfg[d->ncfg].name = nm;
+                d->cfg[d->ncfg++].addr = num(k, "edc:_addr", 0);
+            }
+            continue;
+        } else if (is(k, "edc:SFRDataSector") || is(k, "edc:NMMRPlace"))
+            continue;
+        read_physical(d, k, depth + 1, devid);
+    }
+}
+
+/* each interrupt request's vector, from the part's ATDF beside the EDC
+ * (atdf/NAME.atdf: its <interrupt>s give both numbers; the EDC lists the
+ * vectors and the requests apart, by different names) */
+static void read_vectors(struct svd_device *d, const char *path)
+{
+    const char *e = strstr(path, "/edc/");
+    size_t l = strlen(path);
+    if (!e || l < 5 || strcmp(path + l - 4, ".PIC"))
+        return;
+    char *ap = svd_alloc(l + 8);
+    snprintf(ap, l + 8, "%.*s/atdf/%.*s.atdf", (int)(e - path), path,
+             (int)(path + l - 4 - (e + 5)), e + 5);
+    FILE *f = fopen(ap, "rb");
+    if (!f)
+        return;
+    fclose(f);
+    const char *file = svd_file;
+    const struct xnode *root = svd_xml_read(ap);
+    svd_file = file;
+    const struct xnode *devs = svd_xfind(root, "devices");
+    const struct xnode *dev = devs ? svd_xfind(devs, "device") : 0;
+    const struct xnode *irqs = dev ? svd_xfind(dev, "interrupts") : 0;
+    for (int i = 0; irqs && i < svd_xnkid(irqs); i++) {
+        const struct xnode *q = svd_xkid(irqs, i);
+        if (strcmp(svd_xname(q), "interrupt") || !svd_xattr(q, "irq-index"))
+            continue;
+        long irq = (long)num(q, "irq-index", 0), vec = (long)num(q, "index", 0);
+        if (irq < 0 || irq > 1023)
+            continue;
+        if (irq >= d->nirq_vector) {
+            d->irq_vector = svd_grow(d->irq_vector, (size_t)(irq + 1) * sizeof *d->irq_vector);
+            for (int k = d->nirq_vector; k <= irq; k++)
+                d->irq_vector[k] = k;
+            d->nirq_vector = (int)irq + 1;
+        }
+        d->irq_vector[irq] = (int)vec;
+    }
+}
+
+static struct svd_device *edc_load32(const char *path, const struct xnode *root,
+                                     struct svd_device *d)
+{
+    unsigned long long devid = 0;
+    d->width = 32;
+    d->holes_zero = 1;
+    d->clr_set_inv = 1;
+    const struct xnode *ps = svd_xfind(root, "edc:PhysicalSpace");
+    if (!ps)
+        svd_die("a PIC32 EDC file with no <edc:PhysicalSpace>");
+    read_physical(d, ps, 0, &devid);
+    struct sfrs all = { 0, 0, 0 };
+    find_sectors(&all, ps, 0);
+    /* the peripherals: each register's instance's, its ports one (GPIO) */
+    for (int i = 0; i < all.n; i++) {
+        struct sfr *s = &all.v[i];
+        const char *nm = s->inst;
+        if (!nm)
+            nm = i && all.v[i - 1].inst ? all.v[i - 1].inst : "CORE";
+        if (nm[0] == '_')
+            nm = "ICD";             /* _DDPSTAT, _STRO, _APPO, _APPI */
+        if (!strncmp(nm, "PORT", 4) && strlen(nm) == 5)
+            nm = "GPIO";
+        struct svd_periph *p = 0;
+        for (int k = 0; k < d->np; k++)
+            if (!strcmp(d->p[k].name, nm))
+                p = &d->p[k];
+        if (!p) {
+            d->p = svd_grow(d->p, (size_t)(d->np + 1) * sizeof *d->p);
+            p = &d->p[d->np++];
+            memset(p, 0, sizeof *p);
+            p->name = nm;
+            p->group = s->mod;
+            p->base = s->r.off;
+        }
+        if (s->r.off < p->base)
+            svd_die("line %d: %s below its peripheral %s's first register",
+                    s->r.line, s->r.name, nm);
+        if (!strcmp(s->r.name, "DEVID") && devid) {
+            s->r.reset = devid;
+            s->r.acc = "read-only";
+            s->r.access = 1;
+            for (int f = 0; f < s->r.nf; f++)
+                s->r.f[f].acc = "read-only";
+        }
+        p->kid = svd_grow(p->kid, sizeof *p->kid * (size_t)(p->nkid + 1));
+        p->kid[p->nkid] = s->r;
+        p->kid[p->nkid++].off -= p->base;
+        if (s->sci) {
+            d->sci_at = svd_grow(d->sci_at, (size_t)(d->nsci + 1) * sizeof *d->sci_at);
+            d->sci_at[d->nsci++] = s->r.off;
+        }
+    }
+    free(all.v);
+    qsort(d->sci_at, (size_t)d->nsci, sizeof *d->sci_at, ull_cmp);
+    for (int i = 0; i < d->np; i++)
+        d->p[i].layout = &d->p[i];
+    /* the interrupt requests, by number (the flags' bits) */
+    const struct xnode *il = svd_xfind(root, "edc:InterruptList");
+    for (int i = 0; il && i < svd_xnkid(il); i++) {
+        const struct xnode *x = svd_xkid(il, i);
+        const char *cn = svd_xattr(x, "edc:cname");
+        if (!is(x, "edc:InterruptRequest") || !cn)
+            continue;
+        d->irq = svd_grow(d->irq, (size_t)(d->nirq + 1) * sizeof *d->irq);
+        struct svd_irq *q = &d->irq[d->nirq++];
+        q->name = cn;
+        q->desc = svd_xattr(x, "edc:desc");
+        q->value = (int)num(x, "edc:irq", 0);
+        if (q->value + 1 > d->num_irq)
+            d->num_irq = q->value + 1;
+    }
+    read_vectors(d, path);
+    read_pins(d, svd_xfind(root, "edc:PinList"));
+    return d;
+}
+
 struct svd_device *edc_load(const char *path)
 {
     const struct xnode *root = svd_xml_read(path);
@@ -349,8 +528,10 @@ struct svd_device *edc_load(const char *path)
     d->vendor = "Microchip";
     d->cpu = svd_xattr(root, "edc:arch");
     d->endian = "little";
-    d->width = 16;
     d->aub = 8;
+    if (d->cpu && !strncmp(d->cpu, "32", 2))
+        return edc_load32(path, root, d);
+    d->width = 16;
     d->bus_offset = PIC24_DATA;
     d->holes_zero = 1;
     const struct xnode *ds = svd_xfind(root, "edc:DataSpace");

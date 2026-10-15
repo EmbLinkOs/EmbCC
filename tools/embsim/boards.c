@@ -57,6 +57,23 @@ static const struct model_desc pic32mz_models[] = {
     { 0, 0 },
 };
 
+/* a PIC32MX's models, over its EDC (the ATDF's peripheral bases are
+ * wrong): the EVIC, SYSKEY, the oscillator (OSCCON's bus divider), the
+ * timers, the ports with AD1PCFG and the change notices, the UARTs, the
+ * PMP */
+static const struct model_desc pic32mx_models[] = {
+    { "INT", "pic32-evic" },
+    { "CFG", "pic32-cfg" },
+    { "OSC", "pic32-cru" },
+    { "TMR*", "pic32-tmr" },
+    { "GPIO", "pic32-gpio" },
+    { "UART*", "pic32-uart" },
+    { "PMP", "pic32-pmp" },
+    { "SPI*", "pic32-spi" },
+    { "ADC10", "pic32-adc10" },
+    { 0, 0 },
+};
+
 /* a PIC24FJ's models, over its EDC (pic24.h): the interrupt controller
  * first, which the others raise their interrupts through */
 static const struct model_desc pic24f_models[] = {
@@ -87,6 +104,13 @@ static const struct model_desc pic24f_models[] = {
 #define PIC24FJ1024_MEM { { 0, 2 * 0xac000u, MEM_FLASH, 0, 0, 0x00ffffffu }, \
                           { 2 * 0x800000u, 0x4000, MEM_FLASH, 0, 0, 0x00ffffffu }, \
                           { 0x2000800u, KB(32), MEM_RAM, 1, 0, 0 } }
+
+/* the PIC32MX795F512L's memory: 128 KiB of RAM at 0, 512 KiB of program
+ * flash at 0x1D000000, 12 KiB of boot flash at 0x1FC00000 (the
+ * configuration words at its end) */
+#define PIC32MX795_MEM { { 0, KB(128), MEM_RAM, 1, 0, 0 }, \
+                         { 0x1d000000u, KB(512), MEM_FLASH, 0, 0, 0xffffffffu }, \
+                         { 0x1fc00000u, KB(12), MEM_FLASH, 0, 0, 0xffffffffu } }
 
 /* the PIC32MZ2048EFH100's memory: 512 KiB of RAM at 0, 2 MiB of program
  * flash at 0x1D000000 and the boot flash at 0x1FC00000 (the physical
@@ -166,6 +190,11 @@ const struct board_desc boards[] = {
     { "curiosity-pic32mz-ef-2", "mips", "pic32mz", 0, PIC32MZ_MEM,
       { { "curiosity-pic32mz-ef-2", 0, 0 } }, { { 0, 0, 0 } },
       "PIC32MZ2048EFM144.atdf", pic32mz_models },
+    /* the Explorer 16/32 with the PIC32MX795F512L PIM: the part (its EDC),
+     * and the board's LEDs, buttons, sensors, LCD and EEPROM */
+    { "explorer16-32-pic32mx", "mips", "pic32mx", 0, PIC32MX795_MEM,
+      { { "explorer16-32-pic32mx", 0, 0 } }, { { 0, 0, 0 } },
+      "PIC32MX795F512L.PIC", pic32mx_models },
     /* the PIC24FJ1024GB610 alone: the core, the memory, and every register
      * the device pack's EDC describes, with the models of its interrupt
      * controller, oscillator, PPS lock, timers, UARTs, ports, EPMP, ADC
@@ -231,6 +260,7 @@ static const struct dev_type dev_types[] = {
     { "explorer16-32", &pic_board_ops, pic_board_create },
     { "curiosity-pic32mz-ef-2", &pic_board_ops, pic_board_create },
     { "explorer16-32-pic24", &pic_board_ops, pic_board_create },
+    { "explorer16-32-pic32mx", &pic_board_ops, pic_board_create },
 };
 
 /* ---- the peripheral models, over an SVD's registers (svd-map.h) -------- */
@@ -248,6 +278,8 @@ static const struct model_type model_types[] = {
     { "pic32-uart", &pic32_uart_ops, pic32_uart_create },
     { "pic32-pmp", &pic32_pmp_ops, pic32_pmp_create },
     { "pic32-adc", &pic32_adc_ops, pic32_adc_create },
+    { "pic32-spi", &pic32_spi_ops, pic32_spi_create },
+    { "pic32-adc10", &pic32_adc10_ops, pic32_adc10_create },
     { "pic24-intc", &pic24_intc_ops, pic24_intc_create },
     { "pic24-adc", &pic24_adc_ops, pic24_adc_create },
     { "pic24-epmp", &pic24_epmp_ops, pic24_epmp_create },
@@ -292,27 +324,30 @@ static int digits(const char *s, int at, int n)
 }
 
 /* a part of a family EmbSim models, alone, by its name: every PIC32MZ EF
- * (pic32mz1024efg064) and every PIC24FJ of the GA6/GB6 family
- * (pic24fj256ga610), its memory as its pack's ATDF or EDC gives it */
+ * (pic32mz1024efg064), every PIC32MX (pic32mx795f512l) and every PIC24FJ
+ * of the GA6/GB6 family (pic24fj256ga610), its memory as its pack's ATDF
+ * or EDC gives it */
 const struct board_desc *board_part(const char *name)
 {
     static struct board_desc b;
     static char nm[40], file[48];
     size_t l = strlen(name);
-    /* pic32mz NNNN ef X NNN; pic24fj NNN(N) g A|B 6 NN */
+    /* pic32mz NNNN ef X NNN; pic32mx NNN f NNN X; pic24fj NNN(N) g A|B 6 NN */
     int pic32 = l == 17 && !strncmp(name, "pic32mz", 7) && digits(name, 7, 4) &&
                 !strncmp(name + 11, "ef", 2) && name[13] && strchr("efghkm", name[13]) &&
                 digits(name, 14, 3);
+    int mx = l == 15 && !strncmp(name, "pic32mx", 7) && digits(name, 7, 3) &&
+             name[10] == 'f' && digits(name, 11, 3) && name[14] >= 'a' && name[14] <= 'z';
     int pic24 = !strncmp(name, "pic24fj", 7) && l >= 15 && l <= 16 &&
                 digits(name, 7, (int)l - 12) && name[l - 5] == 'g' &&
                 (name[l - 4] == 'a' || name[l - 4] == 'b') && name[l - 3] == '6' &&
                 digits(name, (int)l - 2, 2);
-    if (!pic32 && !pic24) {
+    if (!pic32 && !pic24 && !mx) {
         if (!strncmp(name, "pic32", 5) || !strncmp(name, "pic24", 5) ||
             !strncmp(name, "dspic", 5))
             die("--board %s: of Microchip's parts, EmbSim has the PIC32MZ EF "
-                "family's and the PIC24FJ GA6/GB6 family's by name "
-                "(pic32mz1024efg064, pic24fj256ga610)", name);
+                "family's, the PIC32MX's and the PIC24FJ GA6/GB6 family's by "
+                "name (pic32mz1024efg064, pic32mx795f512l, pic24fj256ga610)", name);
         return 0;
     }
     snprintf(nm, sizeof nm, "%s", name);
@@ -324,7 +359,7 @@ const struct board_desc *board_part(const char *name)
     if (!found)
         die("--board %s needs %s, from its device pack (Microchip.%s_DFP): "
             "give the pack's directory with --dfp DIR", name, file,
-            pic32 ? "PIC32MZ-EF" : "PIC24F-GA-GB");
+            pic32 ? "PIC32MZ-EF" : mx ? "PIC32MX" : "PIC24F-GA-GB");
     snprintf(path, sizeof path, "%s", found);
     svd_prog = "embsim";
     svd_status = 2;
@@ -333,7 +368,17 @@ const struct board_desc *board_part(const char *name)
     memset(&b, 0, sizeof b);
     b.name = nm;
     b.svd = file;
-    if (pic32) {
+    if (mx) {
+        b.core = "mips";
+        b.cpu = "pic32mx";
+        b.models = pic32mx_models;
+        b.mem[0] = (struct mem_desc){ 0, (u32)d->ram_end, MEM_RAM, 1, 0, 0 };
+        b.mem[1] = (struct mem_desc){ 0x1d000000u, (u32)d->code_end, MEM_FLASH, 0, 0, 0xffffffffu };
+        b.mem[2] = (struct mem_desc){ 0x1fc00000u, (u32)(d->boot_end - 0x1fc00000u),
+                                      MEM_FLASH, 0, 0, 0xffffffffu };
+        if (d->boot_end <= 0x1fc00000u)
+            die("--board %s: %s does not give the boot flash", name, path);
+    } else if (pic32) {
         b.core = "mips";
         b.cpu = "pic32mz";
         b.models = pic32mz_models;
@@ -349,7 +394,7 @@ const struct board_desc *board_part(const char *name)
         b.mem[2] = (struct mem_desc){ PIC24_DATA + (u32)d->ram_base,
                                       (u32)(d->ram_end - d->ram_base), MEM_RAM, 1, 0, 0 };
     }
-    if (!b.mem[0].size || !b.mem[pic32 ? 1 : 2].size)
+    if (!b.mem[0].size || !b.mem[pic32 || mx ? 1 : 2].size)
         die("--board %s: %s does not give the part's memory", name, path);
     return &b;
 }
