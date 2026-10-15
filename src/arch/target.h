@@ -667,6 +667,9 @@ const char *target_triple_now(void);
  * message that lists them. Returns the count; name[i] is the i-th. */
 int target_triple_count(void);
 const char *target_triple_name(int i);
+/* Whether the i-th triple's family is built into this compiler (make
+ * TARGETS=): the lists of what it "emits for" name only those. */
+int target_triple_built(int i);
 
 /* Machine-neutral relocation kinds.
  *

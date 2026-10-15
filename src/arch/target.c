@@ -981,6 +981,11 @@ const char *target_triple_name(int i)
     return i >= 0 && i < g_ntriples ? g_triples[i].name : "";
 }
 
+int target_triple_built(int i)
+{
+    return i >= 0 && i < g_ntriples && target_arch_built(g_triples[i].arch);
+}
+
 int target_elf_machine(enum target_arch a)
 {
     switch (a) {

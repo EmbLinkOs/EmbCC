@@ -4450,7 +4450,8 @@ int main(int argc, char **argv)
                         : "the DEFAULT_TARGET this compiler was built with");
             fprintf(stderr, "embcc: the targets it emits for are:\n");
             for (int t = 0; t < target_triple_count(); t++)
-                fprintf(stderr, "embcc:   %s\n", target_triple_name(t));
+                if (target_triple_built(t))
+                    fprintf(stderr, "embcc:   %s\n", target_triple_name(t));
             return 1;
         }
     }
@@ -4493,7 +4494,9 @@ int main(int argc, char **argv)
                                 "not a target EmbCC knows; they are:\n",
                         b, tri);
                 for (int t = 0; t < target_triple_count(); t++)
-                    fprintf(stderr, "embcc:   %s\n", target_triple_name(t));
+                    if (target_triple_built(t))
+                        fprintf(stderr, "embcc:   %s\n",
+                                target_triple_name(t));
                 return 1;
             }
             target_set(a);
@@ -4546,7 +4549,8 @@ int main(int argc, char **argv)
                     argv[i] + 9);
             fprintf(stderr, "embcc: the targets it emits for are:\n");
             for (int t = 0; t < target_triple_count(); t++)
-                fprintf(stderr, "embcc:   %s\n", target_triple_name(t));
+                if (target_triple_built(t))
+                    fprintf(stderr, "embcc:   %s\n", target_triple_name(t));
             return 1;
         }
         target_set(a);
