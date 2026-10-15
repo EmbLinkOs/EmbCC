@@ -25,6 +25,18 @@ cmake --build build
 |---|---|
 | `EMBCC_TARGET` | The triple, as `embcc --target=` takes it. Without it, the compiler's default target. |
 | `EMBCC_FLAGS` | Flags for every compile and link: a CPU, an FPU, an optimization level. |
+| `EMBCC_LIBC` | For a Linux triple: `system` builds against the system's glibc, with its POSIX headers and threads ([`--libc=system`](libraries.md#glibc-instead---libcsystem)); `embcc` or empty, EmbCC's own C library. `CMAKE_SYSROOT` is then the system's root (`--sysroot=`). |
+
+A POSIX program for Linux, threads included, as CMake builds one with
+GCC:
+
+```sh
+cmake -B build -DCMAKE_TOOLCHAIN_FILE=<prefix>/share/embcc/cmake/embcc.cmake \
+    -DEMBCC_TARGET=x86_64-linux-gnu -DEMBCC_LIBC=system
+```
+
+`find_package(Threads)` then finds glibc's (`CMAKE_HAVE_LIBC_PTHREAD`),
+and `Threads::Threads` is `-pthread`.
 
 The file sets:
 
@@ -74,7 +86,9 @@ export PATH=/opt/embcc/bin:$PATH
 For each triple this links `<triple>-gcc` and `<triple>-cc` to `embcc`,
 `-ar` and `-ranlib` to `embar`, `-objcopy` to `embpack`, and `-size` and
 `-nm` to `embmap`. The default `TRIPLES` are `arm-none-eabi`,
-`riscv64-unknown-elf`, `riscv32-unknown-elf` and `avr`.
+`riscv64-unknown-elf`, `riscv32-unknown-elf` and `avr`, less those whose
+family the compiler was built without
+([Choosing the targets](getting-started.md#choosing-the-targets)).
 
 Called by such a name, `embcc` compiles for the triple in it, as clang does.
 A version after the name is skipped (`arm-none-eabi-gcc-13.2`), and

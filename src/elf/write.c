@@ -309,6 +309,19 @@ void elfw_add_rela(struct elfw *w, int target_ndx, Elf64_Addr offset,
 
 int elfw_write(struct elfw *w, const char *path)
 {
+    /* A Linux object says its code needs no executable stack, as GCC's
+     * do: without the empty .note.GNU-stack the system's linker warns,
+     * and marks the program's stack executable. Not for the bare-metal
+     * targets, whose images EmbLD makes and whose bytes are pinned. */
+    if (target_os_get() == TGT_OS_LINUX) {
+        int have = 0;
+        for (int i = 0; i < w->nsec && !have; i++)
+            have = !strcmp((const char *)w->shstrtab.p +
+                           w->sec[i].hdr.sh_name, ".note.GNU-stack");
+        if (!have)
+            elfw_add_section(w, ".note.GNU-stack", SHT_PROGBITS, 0, NULL,
+                             0, 1);
+    }
     /* Materialize the bookkeeping sections after the user's: one
      * .rela.<target> per relocation group (sh_link/sh_info patched below
      * once the symtab index exists), then .symtab/.strtab/.shstrtab. The

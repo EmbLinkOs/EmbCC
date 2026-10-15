@@ -74,12 +74,13 @@ echo "$err" | grep -q "assembler option '-mfoo'" || {
     echo "FAIL: -Wa,-mfoo refused without naming it:"; echo "$err"; exit 1; }
 echo "-Wa, takes the harmless options and refuses the rest by name"
 
-# 5. -pedantic is accepted, and says that it turns nothing on.
+# 5. -pedantic is accepted; on ISO C it has nothing to report
+#    (tests/golden/std-modes.sh has what it reports)
 err=$("$EMBCC" $T -c "$out/s.c" -o "$out/s.o" -pedantic 2>&1) || {
     echo "FAIL: -pedantic was refused"; exit 1; }
-echo "$err" | grep -q "turns nothing on" || {
-    echo "FAIL: -pedantic was accepted silently:"; echo "$err"; exit 1; }
-echo "-pedantic is accepted, and says what it does"
+[ -z "$err" ] || {
+    echo "FAIL: -pedantic reported ISO C:"; echo "$err"; exit 1; }
+echo "-pedantic is accepted, and quiet on ISO C"
 
 # 6. A link embld refuses fails the command and leaves nothing behind:
 #    embld's refusal ended the process, and the compile's temporary

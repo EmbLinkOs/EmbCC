@@ -5,6 +5,7 @@
  */
 #include <setjmp.h>
 #include <stdarg.h>
+#include "../lex/lex.h"
 #include "sema.h"
 
 #include <stdio.h>
@@ -31,6 +32,48 @@
 #include "format.h"
 #include "uninit.h"
 #include "w128.h"
+
+/* A register variable's name is looked up in its target's assembler. A
+ * family left out of this compiler (make TARGETS=, src/arch/target.h)
+ * has no assembler to ask; its targets are refused before sema runs, so
+ * the lookup is never made, and answers "no such register" here. */
+#define NO_GPR(p, n) ((void)(p), (void)(n), -1)
+#if !FAMILY_BUILT(aarch64)
+#define a64asm_gpr(p, n) NO_GPR(p, n)
+#endif
+#if !FAMILY_BUILT(avr)
+#define avrasm_gpr(p, n) NO_GPR(p, n)
+#endif
+#if !FAMILY_BUILT(riscv)
+#define rvasm_gpr(p, n) NO_GPR(p, n)
+#endif
+#if !FAMILY_BUILT(arm)
+#define tasm_gpr(p, n) NO_GPR(p, n)
+#endif
+#if !FAMILY_BUILT(mips)
+#define mipsasm_gpr(p, n) NO_GPR(p, n)
+#endif
+#if !FAMILY_BUILT(tricore)
+#define tcasm_reg(p, n, file) (*(file) = 0, NO_GPR(p, n))
+#endif
+#if !FAMILY_BUILT(loongarch)
+#define laasm_gpr(p, n) NO_GPR(p, n)
+#endif
+#if !FAMILY_BUILT(xtensa)
+#define xtasm_gpr(p, n) NO_GPR(p, n)
+#endif
+#if !FAMILY_BUILT(sparc)
+#define spasm_gpr(p, n) NO_GPR(p, n)
+#endif
+#if !FAMILY_BUILT(ppc)
+#define ppcasm_gpr(p, n) NO_GPR(p, n)
+#endif
+#if !FAMILY_BUILT(rx)
+#define rxasm_gpr(p, n) NO_GPR(p, n)
+#endif
+#if !FAMILY_BUILT(m68k)
+#define cfasm_gpr(p, n) NO_GPR(p, n)
+#endif
 
 struct vardef {
     const char *name;
@@ -338,7 +381,69 @@ static struct global *find_global(struct unit *u, const char *name)
     return NULL;
 }
 
+/* C89's implicit declaration (C90 6.3.2.2): a call to a name nothing
+ * declares declares it `extern int name();` at file scope. C99 removed
+ * it, and E0001 refuses such a call; -std=c89 and gnu89 have it. */
+static int c89_implicit_call(struct unit *u, struct scope *sc,
+                             const struct expr *callee)
+{
+    if (lex_c_year() >= 1999 || callee->kind != EXPR_VAR || !callee->name ||
+        scope_find(sc, callee->name) >= 0 || find_global(u, callee->name))
+        return 0;
+    if (find_func(u, callee->name))
+        return 1;           /* declared or defined later in the file */
+    struct func *fd = xcalloc(1, sizeof *fd);
+    fd->name = callee->name;
+    fd->file = u->file;
+    fd->seq = -1;
+    fd->declared = 1;
+    fd->noproto = 1;
+    fd->ret_ty = ty_base(TY_INT, 0);
+    struct func **pp = &u->funcs;
+    while (*pp)
+        pp = &(*pp)->next;
+    *pp = fd;
+    return 1;
+}
+
 /* ---- conversions ---- */
+
+static int is_null_const(const struct expr *e);
+static struct expr *mk_cast(struct expr *inner, struct type *to);
+
+/* An argument for a parameter of a transparent union's type (GCC's
+ * transparent_union; glibc's sockaddr arguments under _GNU_SOURCE): a
+ * value of any member's type, passed as the union's first member is --
+ * which is how every ABI here passes a union of pointers anyway. 1 when
+ * the argument was such a one and is now converted; 0 to convert it as
+ * any other (the union itself, or no transparent union at all). */
+static int transparent_arg(struct unit *u, struct expr *call, int i,
+                           struct type *pt)
+{
+    struct type *ut = pt->canon ? pt->canon : pt;
+    struct expr *a = call->args[i];
+    struct type *at = a->ty->canon ? a->ty->canon : a->ty;
+    if (ut->kind != TY_STRUCT || !ut->transparent_union || at == ut)
+        return 0;
+    for (int k = 0; k < ut->nmembers; k++) {
+        struct type *mt = ut->members[k].ty;
+        int ok = ty_equal(ty_unqual(a->ty), ty_unqual(mt));
+        if (!ok && mt->kind == TY_PTR && a->ty->kind == TY_PTR)
+            ok = ty_equal(ty_unqual(mt->pointee), ty_unqual(a->ty->pointee)) ||
+                 mt->pointee->kind == TY_VOID ||
+                 a->ty->pointee->kind == TY_VOID;
+        if (!ok && mt->kind == TY_PTR && is_null_const(a))
+            ok = 1;
+        if (ok) {
+            call->args[i] = mk_cast(a, ut->members[0].ty);
+            return 1;
+        }
+    }
+    sema_error_at(u, a->line, a->col,
+               "argument %d is %s, which is none of the types of the "
+               "transparent union %s", i + 1, ty_name(a->ty), ty_name(pt));
+    return 1;
+}
 
 static int is_null_const(const struct expr *e)
 {
@@ -419,6 +524,26 @@ static void need_scalar(struct unit *u, struct expr *e, const char *what)
     if (!ty_is_scalar(e->ty))
         sema_error_at(u, e->line, e->col, "%s needs a scalar value, got %s",
                    what, ty_name(e->ty));
+}
+
+/* A pointer stepped or subtracted (`what` names the operator) moves by its
+ * pointee's size, which an incomplete type has not: `p + 1` through a
+ * `struct X *` added one byte, as though the size were 1, where GCC
+ * refuses it. A difference also divides by the size, so a pointee of size
+ * 0, GNU's empty struct, gives none (GCC refuses that too); a step by 0 is
+ * GCC's answer. void and functions are each caller's own matter. */
+static void ptr_step_check(struct unit *u, struct type *pt, int diff,
+                           const char *what, int line, int col)
+{
+    struct type *t = pt->pointee;
+    if (t->kind == TY_VOID || t->kind == TY_FUNC || ty_is_vla(t))
+        return;
+    if (ty_incomplete(t))
+        sema_error_at(u, line, col, "%s a pointer to incomplete type %s",
+                      what, ty_name(t));
+    else if (diff && ty_size(t) == 0)
+        sema_error_at(u, line, col, "subtracting pointers to %s, which has "
+                      "size 0: the difference counts nothing", ty_name(t));
 }
 
 static void need_integer(struct unit *u, struct expr *e, const char *what)
@@ -536,7 +661,7 @@ static struct cvt cvt_type(const struct type *t, int bits, int enum_ok)
     } else if (ty_is_integer(t) && t->kind != TY_BOOL &&
                (!t->is_enum || enum_ok)) {
         c.cls = 1;
-        c.prec = bits ? bits : ty_size(t) * 8;
+        c.prec = bits ? bits : t->bitint ? t->bitint : ty_size(t) * 8;
         c.uns = t->is_unsigned;
     }
     return c;
@@ -1797,6 +1922,57 @@ static void vla_prepare(struct unit *u, struct func *f, struct scope *sc,
     t->vla_size = scope_add(sc, "<vla size>", ty_base(TY_LONG, 1), NULL);
 }
 
+/* C2y's _Countof: how many elements an array has, of a type name or of
+ * an expression, which is not evaluated. A constant, folded as sizeof is;
+ * of a variable-length array, its run-time size over its element's, both
+ * read from the size slots its declaration filled rather than by
+ * evaluating the length again -- `n` may have changed since. */
+static void check_countof(struct unit *u, struct func *f, struct scope *sc,
+                          struct expr *e)
+{
+    struct type *at = e->cast_ty;
+    if (at) {
+        if (ty_is_vm(at))
+            vla_prepare(u, f, sc, at);
+    } else {
+        check_expr(u, f, sc, e->rhs);
+        at = e->rhs->undecayed ? e->rhs->undecayed : e->rhs->ty;
+    }
+    if (at->kind != TY_ARRAY)
+        sema_error_at(u, e->line, e->col,
+                "_Countof of %s, which is not an array", ty_name(at));
+    e->countof = 0;
+    if (!ty_is_vla(at)) {
+        if (ty_incomplete(at))
+            sema_error_at(u, e->line, e->col, "_Countof of incomplete %s",
+                    ty_name(at));
+        e->kind = EXPR_NUM;
+        e->num = at->count;
+        e->rhs = NULL;
+        e->cast_ty = NULL;
+        e->ty = ty_size_t();
+        return;
+    }
+    struct expr *whole = cx_node(EXPR_SIZEOF, e->line, ty_size_t());
+    whole->cast_ty = e->cast_ty;
+    whole->rhs = e->rhs;
+    struct expr *elem;
+    if (ty_is_vla(at->pointee)) {
+        /* irgen reads a VLA sizeof's slot from its operand's type */
+        elem = cx_node(EXPR_SIZEOF, e->line, ty_size_t());
+        elem->rhs = cx_node(EXPR_NUM, e->line, at->pointee);
+    } else {
+        elem = cx_node(EXPR_NUM, e->line, ty_size_t());
+        elem->num = ty_size(at->pointee);
+    }
+    e->kind = EXPR_BINOP;
+    e->op = B_DIV;
+    e->lhs = whole;
+    e->rhs = elem;
+    e->cast_ty = NULL;
+    e->ty = ty_size_t();
+}
+
 
 /* -Waddress in a TRUTH test: `if (f)` rather than `if (f())`. The name
  * decays to its address, which is never null, so the branch is always
@@ -2278,8 +2454,9 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                 e->str_width = 1;
                 e->str_prefix = 0;
                 check_expr(u, f, sc, e);   /* give it the array/pointer type */
-            } else if (strcmp(e->name, "true") == 0 ||
-                       strcmp(e->name, "false") == 0) {
+            } else if (lex_c23_ext() &&
+                       (strcmp(e->name, "true") == 0 ||
+                        strcmp(e->name, "false") == 0)) {
                 /* C23 makes `true` and `false` keywords: constants of type
                  * bool. gcc 15 and later default to C23, and code written
                  * against them -- EmbLinkOs among it -- uses both without
@@ -2384,6 +2561,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                 e->ty->pointee->kind == TY_FUNC)
                 sema_error_at(u, e->line, e->col, "++/-- on %s",
                            ty_name(e->ty));
+            ptr_step_check(u, e->ty, 0, "++/-- on", e->line, e->col);
         } else if (!ty_is_arith(e->ty)) {
             sema_error_at(u, e->line, e->col, "++/-- needs an integer or "
                                          "pointer, got %s",
@@ -2749,6 +2927,8 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             if (e->op != B_ADD && e->op != B_SUB)
                 sema_error_at(u, e->line, e->col,
                            "only += and -= apply to a pointer");
+            ptr_step_check(u, e->lhs->ty, 0, e->op == B_ADD ? "+= on" : "-= on",
+                           e->line, e->col);
             need_integer(u, e->rhs, "pointer arithmetic");
             e->rhs = mk_cast(e->rhs, ty_base(TY_LONG, 0));
             e->cast_ty = e->lhs->ty;
@@ -2867,6 +3047,10 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
     }
     case EXPR_SIZEOF: {
         long size;
+        if (e->countof) {
+            check_countof(u, f, sc, e);
+            break;
+        }
         /* sizeof a VLA is a run-time value: irgen reads its size slot (for
          * a type name, after computing it). Stays EXPR_SIZEOF. The operand
          * EXPRESSION is not evaluated even so — C evaluates it only when
@@ -2890,7 +3074,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
         if (e->cast_ty) {
             if (e->cast_ty->kind == TY_VOID)
                 sema_error_at(u, e->line, e->col, "sizeof(void)");
-            if (ty_size(e->cast_ty) == 0)
+            if (ty_incomplete(e->cast_ty))
                 sema_error_at(u, e->line, e->col, "sizeof of incomplete %s",
                            ty_name(e->cast_ty));
             size = ty_size(e->cast_ty);
@@ -2919,7 +3103,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             check_expr(u, f, sc, e->rhs);
             t = e->rhs->undecayed ? e->rhs->undecayed : e->rhs->ty;
         }
-        if (t->kind == TY_VOID || (ty_size(t) == 0 && !ty_is_vla(t)))
+        if (ty_incomplete(t) && !ty_is_vla(t))
             sema_error_at(u, e->line, e->col, "_Alignof of incomplete %s",
                     ty_name(t));
         e->kind = EXPR_NUM;                 /* folds to a size_t constant */
@@ -3012,6 +3196,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                     lt->pointee->kind == TY_FUNC)
                     sema_error_at(u, e->line, e->col, "arithmetic on %s",
                                ty_name(lt));
+                ptr_step_check(u, lt, 1, "arithmetic on", e->line, e->col);
                 e->ty = ty_ptrdiff_t();
             } else if (lp || rp) {
                 if (rp && e->op == B_SUB)
@@ -3024,6 +3209,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                     pt->pointee->kind == TY_FUNC)
                     sema_error_at(u, e->line, e->col, "arithmetic on %s",
                                ty_name(pt));
+                ptr_step_check(u, pt, 0, "arithmetic on", e->line, e->col);
                 need_integer(u, *ip, "pointer arithmetic");
                 *ip = mk_cast(*ip, ty_base(TY_LONG, 0));
                 e->ty = pt;
@@ -3555,13 +3741,24 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
          * function-pointer value. */
         struct type *ft = NULL;
         e->callee = NULL;
+        int implicit = c89_implicit_call(u, sc, e->lhs);
         int si = e->lhs->kind == EXPR_VAR ? scope_find(sc, e->lhs->name) : -1;
         struct func *blkfn = si >= 0 ? sc->vars[si].fdecl : NULL;
         if (blkfn || (e->lhs->kind == EXPR_VAR && si < 0 &&
                       !find_global(u, e->lhs->name) &&
                       find_func(u, e->lhs->name))) {
             struct func *callee = blkfn ? blkfn : find_func(u, e->lhs->name);
-            if (!blkfn && callee->seq > cur_body_seq)
+            /* in C89 the call declared it `int name()`, which a later
+             * declaration must agree with */
+            if (!blkfn && callee->seq > cur_body_seq && implicit &&
+                !(callee->ret_ty && callee->ret_ty->kind == TY_INT &&
+                  !callee->ret_ty->is_unsigned))
+                sema_error_at(u, e->line, e->col,
+                           "call to '%s' before its declaration, which C89 "
+                           "takes as `int %s()`; it returns %s",
+                           e->lhs->name, e->lhs->name,
+                           ty_name(callee->ret_ty));
+            if (!blkfn && callee->seq > cur_body_seq && !implicit)
                 sema_error_at(u, e->line, e->col,
                            "call to '%s' before its declaration — "
                            "declare or define functions before their "
@@ -3578,6 +3775,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             ft = ty_func(callee->ret_ty, callee->param_tys,
                          callee->nparams, callee->is_varargs);
             ft->sret_first = callee->sret_first;
+            ft->noproto = callee->noproto;
         } else {
             check_expr(u, f, sc, e->lhs);
             if (e->lhs->ty->kind != TY_PTR ||
@@ -3587,8 +3785,8 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                            ty_name(e->lhs->ty));
             ft = e->lhs->ty->pointee;
         }
-        if (ft->is_varargs ? e->nargs < ft->nptypes
-                           : e->nargs != ft->nptypes)
+        if (!ft->noproto && (ft->is_varargs ? e->nargs < ft->nptypes
+                                            : e->nargs != ft->nptypes))
             sema_error_at(u, e->line, e->col,
                        "this call needs %s%d argument%s, got %d",
                        ft->is_varargs ? "at least " : "", ft->nptypes,
@@ -3611,10 +3809,13 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                            ty_name(e->args[i]->ty));
             if (e->args[i]->ty->kind != TY_STRUCT)
                 need_scalar(u, e->args[i], "an argument");
-            if (i < ft->nptypes)
+            if (i < ft->nptypes && !ft->noproto &&
+                transparent_arg(u, e, i, ft->ptypes[i]))
+                continue;
+            if (i < ft->nptypes && !ft->noproto)
                 e->args[i] = convert_assign(u, e->args[i],
                                             ft->ptypes[i], "argument");
-            else /* variadic tail: default argument promotions */
+            else /* variadic tail, or no prototype: the promotions */
                 e->args[i] = mk_cast(e->args[i],
                                      default_arg_promote(e->args[i]->ty));
         }
@@ -3659,17 +3860,18 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
  * is the one _Static_assert uses. */
 static long cast_fold_value(const struct type *t, long v)
 {
-    int sz;
+    int bits;
     if (!t || !ty_is_integer(t))
         return v;
-    sz = ty_size(t);
-    if (sz <= 0 || sz >= (int)sizeof(long))
+    /* a _BitInt(N) keeps N bits, whatever it is stored in */
+    bits = t->bitint ? t->bitint : ty_size(t) * 8;
+    if (bits <= 0 || bits >= (int)sizeof(long) * 8)
         return v;
     {
-        unsigned long mask = (~0UL) >> ((sizeof(unsigned long) - (size_t)sz) * 8);
+        unsigned long mask = (~0UL) >> (sizeof(unsigned long) * 8 - (size_t)bits);
         unsigned long u = (unsigned long)v & mask;
         if (!t->is_unsigned) {
-            unsigned long sign = 1UL << (sz * 8 - 1);
+            unsigned long sign = 1UL << (bits - 1);
             if (u & sign)
                 u |= ~mask;
         }
@@ -3833,7 +4035,8 @@ static int const_fold(const struct expr *e, long *out)
             unsigned long ua = (unsigned long)a, ub = (unsigned long)b;
             int cmp = e->op >= B_EQ && e->op <= B_GE;
             int u = is_uns64(cmp ? e->lhs->ty : e->ty);
-            int wbits = e->ty && ty_is_integer(e->ty) ? 8 * ty_size(e->ty) : 64;
+            int wbits = e->ty && ty_is_integer(e->ty)
+                      ? e->ty->bitint ? e->ty->bitint : 8 * ty_size(e->ty) : 64;
             switch (e->op) {
             case B_ADD: *out = in_type(e, (long)(ua + ub)); return 1;
             case B_SUB: *out = in_type(e, (long)(ua - ub)); return 1;
@@ -4433,7 +4636,13 @@ static void flatten_init(struct unit *u, struct func *f, struct scope *sc,
      * `expr` initializer keeps EXPR_COMPLIT); `&(T){...}` stays an
      * EXPR_ADDR and is lowered through the anonymous-object path instead. */
     if (init->kind == EXPR_COMPLIT) {
-        if (init->lhs && init->lhs->kind == EXPR_INITLIST) {
+        /* ...unless it is an array that decays: `int *p = (int[]){1, 2};`
+         * points at the literal, an object of its own (which the check
+         * below makes, anonymous and static); flattened, its two values
+         * were refused as the pointer's */
+        int decays = ty->kind == TY_PTR && init->cast_ty &&
+                     init->cast_ty->kind == TY_ARRAY;
+        if (init->lhs && init->lhs->kind == EXPR_INITLIST && !decays) {
             flatten_init(u, f, sc, init->lhs, ty, off, out);
             return;
         }
@@ -6562,6 +6771,23 @@ static void check_func(struct unit *u, struct func *f)
             sema_error_line(u, f->line,
                        "duplicate parameter '%s' in '%s'",
                        f->params[i], f->name);
+        /* A transparent union arrives as its first member was passed
+         * (transparent_arg). x86-64's and AArch64's conventions pass a
+         * union of pointers exactly so, in a register; elsewhere one
+         * defined here could be received otherwise (SPARC passes a union
+         * by reference), so it is refused there rather than guessed. */
+        {
+            const struct type *pu = f->param_tys[i]->canon
+                                  ? f->param_tys[i]->canon : f->param_tys[i];
+            if (pu->kind == TY_STRUCT && pu->transparent_union &&
+                target_get() != TARGET_X86_64 &&
+                target_get() != TARGET_AARCH64)
+                sema_error_line(u, f->line,
+                           "'%s' is defined with a transparent_union "
+                           "parameter, which EmbCC receives only on "
+                           "x86-64 and AArch64, where the union is passed "
+                           "as its first member", f->name);
+        }
         {
             if (f->params[i] && diag_warning_enabled("shadow"))
                 warn_shadow_global(u, f->params[i],
@@ -6810,6 +7036,27 @@ static void merge_decls(struct unit *u)
         for (int i = 0; match && i < f->nparams; i++)
             if (!ty_equal(canon->param_tys[i], f->param_tys[i]))
                 match = 0;
+        /* No prototype on one side (`int f();` before C23, or a K&R
+         * definition): the same return type is enough, and a prototype
+         * that comes later is the one calls are checked against from
+         * then on. A K&R definition of a function prototyped before must
+         * agree with the prototype once its parameters are promoted. */
+        if (!match && (canon->noproto || f->noproto) &&
+            ty_equal(canon->ret_ty, f->ret_ty)) {
+            match = 1;
+            if (canon->noproto && (!f->noproto || f->defined)) {
+                canon->nparams = f->nparams;
+                for (int i = 0; i < f->nparams; i++)
+                    canon->param_tys[i] = f->param_tys[i];
+                canon->is_varargs = f->is_varargs;
+                canon->noproto = f->noproto;
+            } else if (!canon->noproto && f->defined && f->nparams) {
+                match = canon->nparams == f->nparams && !canon->is_varargs;
+                for (int i = 0; match && i < f->nparams; i++)
+                    if (!ty_equal(canon->param_tys[i], f->param_tys[i]))
+                        match = 0;
+            }
+        }
         if (!match) {
             diag_error_at(f->file, f->line, 0,
                           "conflicting declaration of '%s'", f->name);

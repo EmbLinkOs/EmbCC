@@ -392,7 +392,18 @@ static int ret_words(int is_struct, long size)
 
 static int fn_sret(const struct ir_func *fn)
 {
-    return fn->ret_abi.is_struct && ret_words(1, fn->ret_abi.size) == 0;
+    return fn->ret_abi.is_struct && fn->ret_abi.size &&
+           ret_words(1, fn->ret_abi.size) == 0;
+}
+
+/* Does this call return a struct? Its retsize says, except for GNU's
+ * empty struct, whose size is 0 as a scalar call's retsize is; its rety
+ * is still the struct. One comes back in nothing, as GCC returns it
+ * (clang passes a hidden pointer; GCC is the Xtensa referee here, and the
+ * callee once expected that pointer where the call passed none). */
+static int call_composite(const struct ir_ins *i)
+{
+    return i->retsize || (i->rety && i->rety->kind == TY_STRUCT);
 }
 
 static int call_sret(const struct ir_ins *i)
@@ -432,7 +443,7 @@ static void xt_abi_hints(const struct ir_func *fn, int *hint)
         }
         if (i->op != IR_CALL)
             continue;
-        if (!i->retsize && i->dst >= 0 && i->dst < fn->nvregs && i->w <= 4)
+        if (!call_composite(i) && i->dst >= 0 && i->dst < fn->nvregs && i->w <= 4)
             hint[i->dst] = XT_A10;
         words = call_sret(i) ? 1 : 0;
         stk = 0;
@@ -1959,7 +1970,7 @@ static void gen_call(struct xt_fn *F, int n)
 
     if (i->dst < 0)
         return;
-    if (i->retsize) {
+    if (call_composite(i)) {
         /* dst receives the scratch's ADDRESS. A composite that came back
          * in a10-a13 is stored there first; a larger one the callee wrote
          * through the hidden pointer. */
@@ -2717,9 +2728,10 @@ static void gen_ins(struct xt_fn *F, int n)
                                   i->natural && fn->ret_abi.align
                                       ? fn->ret_abi.align : 1,
                                   q, TMP, &adv);
-                } else {
+                } else if (fn_sret(fn)) {
                     /* through the caller's buffer, whose address the
-                     * prologue kept; the pointer goes back in a2 */
+                     * prologue kept; the pointer goes back in a2 (an
+                     * empty struct comes back in nothing) */
                     rd(F, i->a, TMP);
                     ld_sp(F, ADDR, F->sret_slot, 4, 0);
                     copy_block(F, 1, fn->ret_abi.size, 0);
@@ -3121,7 +3133,7 @@ static void xt_pair_hints(const struct ir_func *fn, int *hint)
         }
         if (i->op != IR_CALL)
             continue;
-        if (!i->retsize && i->dst >= 0 && i->dst < fn->nvregs && i->w == 8)
+        if (!call_composite(i) && i->dst >= 0 && i->dst < fn->nvregs && i->w == 8)
             hint[i->dst] = XT_A10;
         words = call_sret(i) ? 1 : 0;
         stk = 0;

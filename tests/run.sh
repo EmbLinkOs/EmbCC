@@ -2,9 +2,15 @@
 # Test runner (ARCHITECTURE.md §7).
 #
 #   usage: tests/run.sh [--target=x86_64-elf|aarch64-elf] [--exec-only]
+#                       [--embcc=PATH]
 #
 # --exec-only skips the .sh tests and runs just the compiled-and-RUN corpus —
-# the quick loop while working on codegen.
+# the quick loop while working on codegen. --embcc= tests another compiler
+# than ./embcc: one built elsewhere, for instance with make TARGETS=.
+#
+# A compiler built for some target families only (make TARGETS=) runs what
+# it can: the suite is reported skipped when it has no backend for
+# --target=, and so is each test that stopped on a target it lacks.
 #
 # Two kinds of test:
 #   *.sh under tests/{exec,compile,golden}/ — run with $EMBCC set; passes
@@ -36,10 +42,13 @@ set -u
 
 TARGET=x86_64-elf
 EXEC_ONLY=0
+EMBCC_ARG=
 for a in "$@"; do
     case "$a" in
         --target=*) TARGET=${a#--target=} ;;
         --exec-only) EXEC_ONLY=1 ;;
+        --embcc=*) EMBCC_ARG=${a#--embcc=}
+                   case $EMBCC_ARG in /*) ;; *) EMBCC_ARG=$PWD/$EMBCC_ARG ;; esac ;;
         *) echo "run.sh: unknown argument '$a'" >&2; exit 1 ;;
     esac
 done
@@ -57,7 +66,7 @@ if [ -z "${EMBCC_X86_RUNNER:-}" ]; then
 fi
 
 cd "$(dirname "$0")/.."
-EMBCC="$PWD/embcc"
+EMBCC=${EMBCC_ARG:-$PWD/embcc}
 export EMBCC
 
 # Turn on the optimizer's IR verifier for the whole suite: every -O1/-O2 compile
@@ -72,6 +81,20 @@ export EMBCC_VERIFY=1
 if [ ! -x "$EMBCC" ]; then
     echo "run.sh: $EMBCC not built (run make first)" >&2
     exit 1
+fi
+
+# What a compiler built without a target's family (make TARGETS=) says when
+# asked for it -- src/driver/main.c, refuse_unbuilt_target.
+UNBUILT='this embcc was built without the [a-z0-9]* backend'
+# The suite's own target first: with no backend for it there is nothing to
+# compile or run, and that is a skip, said once, not a failure per test.
+if ! why=$("$EMBCC" --target="$TARGET" --print-target 2>&1 >/dev/null) &&
+   printf '%s\n' "$why" | grep -q "$UNBUILT"; then
+    echo "run.sh: skipped: $(printf '%s\n' "$why" | grep -m1 "$UNBUILT" |
+                             sed 's/^embcc: error: //')"
+    echo "-----"
+    echo "0/0 passed (the suite for $TARGET skipped: see above)"
+    exit 0
 fi
 
 pass=0
@@ -149,6 +172,12 @@ while [ $i -lt $n_sh ]; do
         ok "$t"
     elif [ "$status" -eq 0 ]; then
         bad "$t" "exit 0 but marker 'TEST-MARKER $name' missing — did it run?" "$out"
+    elif printf '%s\n' "$out" | grep -q "$UNBUILT"; then
+        # stopped on a target this compiler was built without (make
+        # TARGETS=): not run, so neither a pass nor a failure
+        echo "SKIP $t ($(printf '%s\n' "$out" | grep -m1 "$UNBUILT" |
+                         sed 's/^.*embcc: error: //'))"
+        skip=$((skip + 1))
     else
         bad "$t" "exit $status" "$out"
     fi

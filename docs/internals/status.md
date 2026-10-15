@@ -259,7 +259,7 @@ supported. This section lists what is not.
 | An object, `sizeof`, cast or call of `_Float16`, `__fp16` (a declaration may name it) | `'h' has incomplete type _Float16`, `sizeof of incomplete _Float16`, `cannot cast to _Float16`, `calling 'g' with incomplete return type _Float16` |
 | `_Float128`, `__float128` on x86-64 | ``_Float128 is not supported on x86-64: `long double` here is x87's 80-bit extended format, not IEEE binary128, so it is not the same type`` |
 | `_Float128` on Cortex-M, AVR and Apple arm64 | `_Float128 is not supported on this target: it has no 128-bit floating-point type` |
-| `_BitInt(N)` | `expected a type before '_BitInt'` |
+| `_BitInt(N)` wider than 64 bits | `_BitInt(65) is wider than BITINT_MAXWIDTH, which is 64 here` |
 | `_Decimal32`, `_Decimal64`, `_Decimal128` | `expected a type before '_Decimal32'` |
 | `_Imaginary` | `expected a type before '_Imaginary'` |
 | Integer `_Complex` | `invalid _Complex type (only float, double and long double _Complex are supported)` |
@@ -564,11 +564,8 @@ and refuses any other
 The full rules are in
 [Invoking EmbCC](../manual/invoking.md#--linker-argarg).
 
-`-pedantic` and `-pedantic-errors` are accepted and turn nothing on:
-
-```text
-embcc: warning: -pedantic: EmbCC has no diagnostics for extensions to ISO C, so this turns nothing on
-```
+`-pedantic` and `-pedantic-errors` report what the `-std=` standard does
+not have, for C and C++ ([Invoking EmbCC](../manual/invoking.md#--pedantic---pedantic-errors)).
 
 Any `-W` name that is not one of EmbCC's warnings
 (`--help-warnings` lists them) is accepted with:
@@ -577,12 +574,8 @@ Any `-W` name that is not one of EmbCC's warnings
 embcc: warning: -Wcast-align is not a warning EmbCC has, so it turns nothing on (--help-warnings lists them)
 ```
 
-`-std=` selects no dialect. `-std=c89` and `-std=c99` are accepted with
-a warning:
-
-```text
-embcc: warning: -std=c89 is accepted but not enforced; EmbCC has one C dialect, C11 with the GNU extensions, and will compile newer constructs anyway
-```
+`-std=` selects the language, C89 to C2y and C++98 to C++26, as GCC
+does ([Invoking EmbCC](../manual/invoking.md#--stdstandard)).
 
 ## Known defects
 
