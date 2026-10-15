@@ -1,0 +1,15 @@
+embsim: warning: a write at pc N: SERCOM0.I2CM.CTRLA is ignored while its clock is off (PM.APBCMASK.SERCOM0 is 0)
+embsim: warning: the CPU runs at 48.000 MHz with NVMCTRL's CTRLB.RWS 0: at 3.3 V the flash needs a wait state above 24 MHz (table 36-39), and the part would read it wrong
+embsim: warning: the DFLL48M is in closed loop and its reference, generic clock 0 (GCLK_DFLL48M_REF), is not running: it will not lock
+arduino-zero: L on (PA17)
+arduino-zero: L off (PA17)
+arduino-zero: L on (PA17)
+arduino-zero: RX on (PB03)
+arduino-zero: L off (PA17)
+arduino-zero: L on (PA17)
+arduino-zero: L off (PA17)
+arduino-zero: L on (PA17)
+arduino-zero: L off (PA17)
+arduino-zero: L on (PA17)
+arduino-zero: L off (PA17)
+arduino-zero: L on (PA17)

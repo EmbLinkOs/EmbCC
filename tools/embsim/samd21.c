@@ -11,8 +11,11 @@
  *     at DFLLMUL.MUL times its reference, generic clock 0, locking
  *     (DFLLLCKC, DFLLLCKF) 200 us after it is enabled with the reference
  *     running (table 36-50's typical) -- never without one, which EmbSim
- *     warns of. DFLLRDY and OSC8MRDY are always set: a write takes at
- *     once. INTFLAG has PCLKSR's rises, cleared by writing 1;
+ *     warns of: it then runs on at 48 MHz, with PCLKSR.DFLLRCS. DFLLRDY and OSC8MRDY are always set: a write takes at
+ *     once. A write to DFLLVAL, DFLLMUL or DFLLSYNC while ONDEMAND is set
+ *     and no generator runs on the DFLL freezes the part (erratum 9905):
+ *     the run ends.
+ *     INTFLAG has PCLKSR's rises, cleared by writing 1;
  *   - GCLK (14): the generators 0-8 (GENCTRL, GENDIV) and the generic
  *     clocks (CLKCTRL), each register reached through its ID -- a write
  *     of the whole register sets one, an 8-bit write of the ID selects
@@ -42,8 +45,9 @@
  *     TXEN, with the APB clock and its generic clock running, a byte
  *     written to DATA goes out at once (to stdout), and DRE and TXC are
  *     set; the first SERCOM whose receiver is enabled takes the run's
- *     input (--input) into its two-level buffer: RXC while it holds a
- *     byte, read from DATA, BUFOVF when a third arrives. INTENSET,
+ *     input (--input) into its two-level buffer, where it waits while the
+ *     buffer is full: RXC while it holds a byte, read from DATA; RXEN
+ *     cleared empties it. INTENSET,
  *     INTENCLR, INTFLAG and the interrupt while a flag set is enabled.
  *     SYNCBUSY is never set. The other modes keep what is written;
  *   - TC3-5 (29): COUNT16 and COUNT8 (and COUNT32 on TC4, TC5 its slave),
@@ -174,21 +178,25 @@ static u32 src_hz(struct samd *d, int src, int depth)
             return 0;
         if (!(c >> 2 & 1))
             return DFLL_HZ;                     /* open loop */
+        /* closed loop: MUL times the reference; without one it keeps
+         * running as it was (PCLKSR.DFLLRCS) */
         u32 ref = d->clkctrl[0] >> 14 & 1 ? gen_hz(d, (int)(d->clkctrl[0] >> 8 & 15), depth + 1) : 0;
-        return (rd(sc, 0x2c) & 0xffff) * ref;
+        return ref ? (rd(sc, 0x2c) & 0xffff) * ref : DFLL_HZ;
     }
     }
     return 0;                                   /* XOSC, GCLKIN, FDPLL96M */
 }
 
-/* a generator's output: its source divided (table 14-11's DIV bits) */
+/* the DIV bits each generator has (table 14-11) */
+static const u32 divmask[NGEN] = { 0xff, 0xffff, 0x1f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
+
+/* a generator's output: its source divided; one on itself gives none */
 static u32 gen_hz(struct samd *d, int g, int depth)
 {
-    static const u32 divmask[NGEN] = { 0xff, 0xffff, 0x1f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
     if (g < 0 || g >= NGEN || depth > 3 || !(d->genctrl[g] >> 16 & 1))
         return 0;
     u32 f = src_hz(d, d->eff_src[g], depth);
-    u32 div = d->gendiv[g] >> 8 & divmask[g];
+    u32 div = d->gendiv[g] >> 8;
     if (d->genctrl[g] >> 20 & 1)                /* DIVSEL: 2^(DIV+1) */
         return div + 1 >= 32 ? 0 : f >> (div + 1);
     return div > 1 ? f / div : f;
@@ -276,6 +284,9 @@ static u32 pclksr(struct samd *d)
         v |= 1u << 2;
     if (d->dfll_closed_on && t >= d->lock_at)
         v |= 1u << 6 | 1u << 7;                 /* DFLLLCKF, DFLLLCKC */
+    u32 c = rd(d->sysctrl, 0x24);
+    if ((c >> 1 & 1) && (c >> 2 & 1) && !d->dfll_closed_on)
+        v |= 1u << 8;                           /* DFLLRCS: no reference */
     return v;
 }
 
@@ -356,6 +367,19 @@ static void sys_write(void *ctx, u32 off, int n, u32 v)
         if (on && !d->xosc32k_on)
             d->xosc32k_at = now_ns(d) + 1e9 * (xosc32k_start[rd(p, 0x14) >> 8 & 7] + 3) / OSC32_HZ;
         d->xosc32k_on = on;
+    }
+    int requested = 0;
+    for (int g = 0; g < NGEN; g++)
+        requested |= (d->genctrl[g] >> 16 & 1) && d->eff_src[g] == 7;
+    if ((off == 0x28 || off == 0x2c || off == 0x30) && (rd(p, 0x24) >> 7 & 1) &&
+        !((rd(p, 0x24) >> 1 & 1) && requested) && d->s->state == RUN) {
+        /* erratum 9905: a DFLL register written before its clock is
+         * requested (ONDEMAND set, and no generator running on it)
+         * freezes the part */
+        sim_end(d->s, END_LOCKUP, "SYSCTRL's %s written while DFLLCTRL.ONDEMAND is set "
+                "and the DFLL48M is off: the part freezes (erratum 9905; write "
+                "DFLLCTRL.ONDEMAND 0 first)", off == 0x28 ? "DFLLVAL" : off == 0x2c ? "DFLLMUL" : "DFLLSYNC");
+        return;
     }
     if (off == 0x18) {                          /* OSC32K */
         int on = (int)(rd(p, 0x18) >> 1 & 1);
@@ -444,7 +468,7 @@ static void gclk_write(void *ctx, u32 off, int n, u32 v)
         return;
     } else if (off == 0x4 && n == 4) {
         u32 id = v & 15;
-        if (id < NGEN && !(id == 1 && (v >> 8 & 31) == 2)) {   /* not itself */
+        if (id < NGEN) {
             d->genctrl[id] = v & 0x003f1f0f;
             d->sel_gen = (int)id;
         }
@@ -453,8 +477,8 @@ static void gclk_write(void *ctx, u32 off, int n, u32 v)
         return;
     } else if (off == 0x8 && n == 4) {
         u32 id = v & 15;
-        if (id < NGEN) {
-            d->gendiv[id] = v & 0x00ffff0f;
+        if (id < NGEN) {                        /* the bits above its DIV's ignored */
+            d->gendiv[id] = (v & 0x0f) | (v & divmask[id] << 8);
             d->sel_div = (int)id;
         }
     } else {
@@ -793,22 +817,19 @@ static int u_clocked(struct sercom *u)
     return samd21_gclk_hz(u->s, 0x14 + u->n) != 0;
 }
 
+/* the input waits while the two-level buffer is full: no byte is lost */
 static int u_room(void *ctx)
 {
     struct sercom *u = ctx;
     return enabled(u) && usart(u) && (get_bytes(u->r, U_CTRLB, 4) >> 17 & 1) && u_clocked(u) &&
-           !rf_gated(u->p);
+           !rf_gated(u->p) && u->nrx < 2;
 }
 
 static void u_put(void *ctx, int c)
 {
     struct sercom *u = ctx;
-    if (u->nrx == 2) {
-        u->r[U_STATUS] |= 1u << 2;              /* BUFOVF */
-        u->r[U_INTFLAG] |= 0x80;                /* ERROR */
-    } else {
+    if (u->nrx < 2)
         u->rx[u->nrx++] = (u16)(c & 0xff);
-    }
     u_flags(u);
 }
 
@@ -1024,7 +1045,11 @@ static void t_advance(struct tc *t, u64 n)
 {
     int down = t->ctrlb & 1;
     while (n && !t->stopped) {
-        u32 top = t_top(t), c = t->count;
+        u32 top = t_top(t), c = t->count & t_max(t);
+        /* counting up past a top below it, the counter runs to its
+         * maximum first (figure 29-8) */
+        if (!down && c > top)
+            top = t_max(t);
         u64 room = down ? c : (u64)top - c;     /* counts before the wrap */
         u64 k = n <= room ? n : room;
         /* the CCx the counter leaves in these k counts */
@@ -1043,7 +1068,7 @@ static void t_advance(struct tc *t, u64 n)
         for (int x = 0; x < 2; x++)
             if ((t->cc[x] & t_max(t)) == c)
                 t->r[T_INTFLAG] |= (u8)(F_MC0 << x);
-        t->count = down ? top : 0;
+        t->count = down ? t_top(t) : 0;
         t->r[T_INTFLAG] |= F_OVF;
         n--;
         if (t->ctrlb >> 2 & 1) {                /* ONESHOT */
@@ -1076,9 +1101,11 @@ static int t_next(void *ctx, u32 *cycles)
     struct tc *t = ctx;
     if (!t_counting(t) || !t->hz_cpu)
         return 0;
-    u32 top = t_top(t), c = t->count;
+    u32 top = t_top(t), c = t->count & t_max(t);
     int down = t->ctrlb & 1;
     u64 best = 0;
+    if (!down && c > top)
+        top = t_max(t);
     int any = 0;
     if (t->r[T_INTENSET] & F_OVF) {
         best = (down ? c : (u64)top - c) + 1;
@@ -1111,7 +1138,7 @@ static u32 t_read(void *ctx, u32 off, int n)
         return 0;
     t_status(t);
     u32 m = t_mode(t);
-    if (t_slave(t))
+    if (t_slave(t) && off >= T_COUNT)
         return 0;                               /* "not allowed" (29.6.2.4) */
     /* COUNT, PER, CCx in the mode's widths */
     if (m == 1) {
@@ -1139,7 +1166,7 @@ static void t_reset(void *ctx);
 static void t_write(void *ctx, u32 off, int n, u32 v)
 {
     struct tc *t = ctx;
-    if (off + (u32)n > sizeof t->r || t_slave(t))
+    if (off + (u32)n > sizeof t->r || (t_slave(t) && off >= T_COUNT))
         return;
     u32 m = t_mode(t);
     int en = t->r[T_CTRLA] >> 1 & 1;
