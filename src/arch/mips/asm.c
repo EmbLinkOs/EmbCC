@@ -503,6 +503,48 @@ static int stmt_body(const char *stmt, int len, struct code *out,
         if (tok_is(&t[0], "ei"))      { mips_ei(out, MIPS_ZERO); return 0; }
     }
 
+    /* ---- the trapping add and sub, and DSPControl ---- */
+    if (n == 4 && (tok_is(&t[0], "add") || tok_is(&t[0], "sub"))) {
+        int d = tok_reg(&t[1]), a = tok_reg(&t[2]), b = tok_reg(&t[3]);
+        if (d < 0 || a < 0 || b < 0)
+            FAIL("%.*s wants three registers", t[0].len, t[0].s);
+        mips_add_trap(out, tok_is(&t[0], "sub"), d, a, b);
+        return 0;
+    }
+    if (n == 4 && tok_is(&t[0], "addi")) {
+        int d = tok_reg(&t[1]), a = tok_reg(&t[2]);
+        if (d < 0 || a < 0 || !tok_imm(&t[3], &v))
+            FAIL("addi wants two registers and an immediate");
+        mips_addi(out, d, a, v);
+        return 0;
+    }
+    if (n == 3 && (tok_is(&t[0], "mfhi") || tok_is(&t[0], "mflo") ||
+                   tok_is(&t[0], "mthi") || tok_is(&t[0], "mtlo"))) {
+        /* the DSP ASE's accumulator: $ac0..$ac3 */
+        const char *a = t[2].s;
+        int al = t[2].len, r = tok_reg(&t[1]);
+        if (al && *a == '$') { a++; al--; }
+        if (r < 0 || al != 3 || strncmp(a, "ac", 2) != 0 ||
+            a[2] < '0' || a[2] > '3')
+            FAIL("%.*s wants a register and an accumulator $ac0..$ac3",
+                 t[0].len, t[0].s);
+        int op = tok_is(&t[0], "mfhi") ? 0 : tok_is(&t[0], "mflo") ? 1
+               : tok_is(&t[0], "mthi") ? 2 : 3;
+        mips_hilo_ac(out, op, r, a[2] - '0');
+        return 0;
+    }
+    if ((n == 2 || n == 3) &&
+        (tok_is(&t[0], "rddsp") || tok_is(&t[0], "wrdsp"))) {
+        int r = tok_reg(&t[1]);
+        v = 0x3ff;      /* GNU as's default, every field (XC32's objects) */
+        if (r < 0 || (n == 3 && (!tok_imm(&t[2], &v) || v < 0 || v > 0x3ff)))
+            FAIL("%.*s wants a register and a mask 0..0x3ff", t[0].len,
+                 t[0].s);
+        if (tok_is(&t[0], "rddsp")) mips_rddsp(out, r, (int)v);
+        else                        mips_wrdsp(out, r, (int)v);
+        return 0;
+    }
+
     /* ---- three registers ---- */
     for (const struct r3_ent *e = r3_tab; e->name; e++) {
         int d, a, b;
@@ -863,6 +905,10 @@ int mipsasm_is_reg(const char *name, int len)
     if (len >= 3 && len <= 4 && name[1] == 'f' && isdigit((unsigned char)name[2]) &&
         (len == 3 || isdigit((unsigned char)name[3])))
         return 32;
+    /* the DSP ASE's accumulators, $ac0..$ac3 */
+    if (len == 4 && name[1] == 'a' && name[2] == 'c' &&
+        name[3] >= '0' && name[3] <= '3')
+        return 33;
     return mipsasm_gpr(name, len);
 }
 

@@ -229,6 +229,12 @@ void mips_syscall(struct code *c);
 void mips_teq(struct code *c, int rs, int rt, int code);
 void mips_eret(struct code *c);
 void mips_deret(struct code *c);
+void mips_add_trap(struct code *c, int sub, int rd, int rs, int rt);
+void mips_addi(struct code *c, int rt, int rs, long long imm);
+void mips_rddsp(struct code *c, int rd, int mask);  /* DSP ASE */
+/* op 0 mfhi, 1 mflo, 2 mthi, 3 mtlo, with the DSP accumulator ac 0..3 */
+void mips_hilo_ac(struct code *c, int op, int r, int ac);
+void mips_wrdsp(struct code *c, int rs, int mask);
 void mips_sdbbp(struct code *c, int code);         /* code 0..0xfffff */
 void mips_rdpgpr(struct code *c, int rd, int rt);
 void mips_wrpgpr(struct code *c, int rd, int rt);

@@ -407,6 +407,20 @@ void mips_mflo(struct code *c, int rd)
 {
     mips_w(c, mips_enc_r(OP_SPECIAL, 0, 0, rd, 0, F_MFLO));
 }
+/* The DSP ASE's four accumulators, $ac0..$ac3 ($ac0 is hi/lo): the
+ * accumulator in rs's low bits for mfhi/mflo, in rd's for mthi/mtlo */
+void mips_hilo_ac(struct code *c, int op, int r, int ac)
+{
+    need_reg(r);
+    need_field(ac, 0, 3, "DSP accumulator");
+    switch (op) {
+    case 0: mips_w(c, mips_enc_r(OP_SPECIAL, ac, 0, r, 0, F_MFHI)); break;
+    case 1: mips_w(c, mips_enc_r(OP_SPECIAL, ac, 0, r, 0, F_MFLO)); break;
+    case 2: mips_w(c, mips_enc_r(OP_SPECIAL, r, 0, ac, 0, F_MTHI)); break;
+    default: mips_w(c, mips_enc_r(OP_SPECIAL, r, 0, ac, 0, F_MTLO)); break;
+    }
+}
+
 void mips_mthi(struct code *c, int rs)
 {
     mips_w(c, mips_enc_r(OP_SPECIAL, rs, 0, 0, 0, F_MTHI));
@@ -683,6 +697,39 @@ void mips_teq(struct code *c, int rs, int rt, int code)
     mips_w(c, ((unsigned long)rs << 21) | ((unsigned long)rt << 16) |
               ((unsigned long)code << 6) | F_TEQ);
 }
+/* ADD, SUB and ADDI: the forms that trap on signed overflow. EmbCC's
+ * code never uses them (C's overflow does not trap), but assembly written
+ * for GNU as does -- FreeRTOS's PIC32MZ port copies sp with `add`. */
+void mips_add_trap(struct code *c, int sub, int rd, int rs, int rt)
+{
+    need_reg(rd); need_reg(rs); need_reg(rt);
+    mips_w(c, mips_enc_r(OP_SPECIAL, rs, rt, rd, 0, sub ? 0x22 : 0x20));
+}
+void mips_addi(struct code *c, int rt, int rs, long long imm)
+{
+    need_reg(rt); need_reg(rs);
+    mips_w(c, mips_enc_i(0x08, rs, rt, imm16(imm, 1, "addi")));
+}
+
+/* The DSP ASE's DSPControl register: RDDSP rd, mask and WRDSP rs, mask
+ * (SPECIAL3, function 0x38, op 0x12 and 0x13), the mask choosing its
+ * fields -- every PIC32MZ has DSPr2, and FreeRTOS saves DSPControl with
+ * each task */
+void mips_rddsp(struct code *c, int rd, int mask)
+{
+    need_reg(rd);
+    need_field(mask, 0, 0x3ff, "rddsp mask");
+    mips_w(c, (0x1fUL << 26) | ((unsigned long)mask << 16) |
+              ((unsigned long)rd << 11) | (0x12UL << 6) | 0x38UL);
+}
+void mips_wrdsp(struct code *c, int rs, int mask)
+{
+    need_reg(rs);
+    need_field(mask, 0, 0x3ff, "wrdsp mask");
+    mips_w(c, (0x1fUL << 26) | ((unsigned long)rs << 21) |
+              ((unsigned long)mask << 11) | (0x13UL << 6) | 0x38UL);
+}
+
 /* COP0 with the CO bit: eret, deret and wait. */
 void mips_eret(struct code *c) { mips_w(c, 0x42000018UL); }
 void mips_deret(struct code *c)

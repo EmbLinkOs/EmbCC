@@ -2648,6 +2648,42 @@ static int directive(struct gas *g, char *p, int pass)
             free(tmp);
         }
         e = skip_ws(e);
+        /* Microchip's assembler (XC32's, for PIC32) spells the kind in
+         * words: `.section .vector_9, code, keep` -- Harmony's and
+         * FreeRTOS's interrupt stubs. code is "ax", data "aw", bss "aw"
+         * @nobits; keep asks the linker to keep it, which the device
+         * pack's script does for these sections by KEEP(). A word EmbCC
+         * does not place (address(), persist, ramfunc...) is refused
+         * rather than left to make a section with no flags at all. */
+        if (*e == ',' && isalpha((unsigned char)*skip_ws(e + 1))) {
+            explicit_flags = explicit_type = 1;
+            fl = 0;
+            ty = SHT_PROGBITS;
+            while (*e == ',') {
+                char *w = skip_ws(e + 1), *we = w;
+                while (*we && is_symc((unsigned char)*we)) we++;
+#define WD(s) ((size_t)(we - w) == strlen(s) && !strncmp(w, s, strlen(s)))
+                if (WD("code")) fl |= SHF_ALLOC | SHF_EXECINSTR;
+                else if (WD("data")) fl |= SHF_ALLOC | SHF_WRITE;
+                else if (WD("bss")) {
+                    fl |= SHF_ALLOC | SHF_WRITE;
+                    ty = SHT_NOBITS;
+                } else if (WD("keep")) {
+                    /* kept by the linker script's KEEP() */
+                } else {
+                    gerr(g, "section attribute '%.*s' is not one EmbCC's "
+                            "assembler places (code, data, bss, keep)",
+                         (int)(we - w), w);
+                    return 1;
+                }
+#undef WD
+                e = skip_ws(we);
+            }
+            if (*e) {
+                gerr(g, "unexpected '%s' after the section's attributes", e);
+                return 1;
+            }
+        }
         if (*e == ',') {
             e = skip_ws(e + 1);
             if (*e == '"') {

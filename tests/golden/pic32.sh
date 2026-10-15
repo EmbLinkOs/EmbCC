@@ -163,7 +163,34 @@ llvm-objdump -d --no-show-raw-insn "$out/s.o" | grep -q 'mfc0.*\$14, 0x0' ||
 # shellcheck disable=SC2086
 (cd "$out" && "$EMBCC" $P --dfp="$out/pack" -c s.S a.c 2> sc.err) ||
     { cat "$out/sc.err"; fail "a C file after a .S lost __LANGUAGE_C__"; }
-echo "pic32: a .S sees __LANGUAGE_ASSEMBLY__ and _CP0_EPC as \$14, 0; a C file after it, C's"
+# what FreeRTOS's PIC32MZ port and Harmony's interrupts_a.S write, each as
+# llvm-mc encodes it; a DSP mask left out is GNU as's 0x3ff (XC32's
+# objects of those files have it), and Microchip's section words
+cat > "$out/port.S" <<'EOF'
+    .section .vector_9, code, keep
+    add     $21, $0, $29
+    sub     $3, $4, $5
+    addi    $2, $3, -4
+    rddsp   $22
+    wrdsp   $22
+    rddsp   $22, 0x1f
+    mfhi    $22, $ac1
+    mflo    $22, $ac2
+    mthi    $22, $ac3
+    mtlo    $22, $ac1
+EOF
+"$EMBCC" --target=mipsel-none-elf -c "$out/port.S" -o "$out/port.o" || fail "port.S"
+got=$(llvm-objdump -D -j .vector_9 "$out/port.o" | awk '/^ +[0-9a-f]+:/ { print $2 $3 $4 $5 }' | tr '\n' ' ')
+[ "$got" = "20a81d00 22188500 fcff6220 b8b4ff7f f8fcdf7e b8b41f7c 10b02000 12b04000 1118c002 1308c002 " ] ||
+    fail "add/sub/addi, rddsp/wrdsp and the accumulators encode as '$got'"
+llvm-readelf -S "$out/port.o" | grep -q '\.vector_9 *PROGBITS .* AX ' ||
+    fail ".section .vector_9, code, keep is not an allocated code section"
+printf '    .section .x, address(0x9d000000)\n' > "$out/addr.S"
+"$EMBCC" --target=mipsel-none-elf -c "$out/addr.S" -o "$out/addr.o" 2> "$out/addr.err" &&
+    fail "a section at an address() was accepted"
+grep -q "section attribute 'address' is not one" "$out/addr.err" ||
+    { cat "$out/addr.err"; fail "address() is not refused by name"; }
+echo "pic32: a .S sees __LANGUAGE_ASSEMBLY__ and _CP0_EPC as \$14, 0, a C file after it C's; add/sub/addi, rddsp/wrdsp, \$ac0-3, and .section NAME, code, keep"
 
 # ---- 5. #pragma config ---------------------------------------------------------
 # each word a unit sets: its default, the settings' fields replaced, one
