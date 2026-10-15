@@ -3692,11 +3692,20 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                             e->lhs->name);
                 for (int i = 0; i < 3; i++)
                     check_expr(u, f, sc, e->args[i]);
-                for (int i = 0; i < 2; i++)
+                for (int i = 0; i < 2; i++) {
                     if (!ty_is_integer(e->args[i]->ty))
                         sema_error_at(u, e->args[i]->line, e->args[i]->col,
                                 "%s: operand %d must be an integer, got %s",
                                 e->lhs->name, i + 1, ty_name(e->args[i]->ty));
+                    /* the exact form (irgen's gen_overflow_exact) takes
+                     * operands of up to 64 bits; a wider one would be
+                     * cut, so it is refused (the result may be 128) */
+                    if (ty_size(e->args[i]->ty) > 8)
+                        sema_error_at(u, e->args[i]->line, e->args[i]->col,
+                                "%s: operand %d is %s, and EmbCC takes "
+                                "operands of up to 64 bits here",
+                                e->lhs->name, i + 1, ty_name(e->args[i]->ty));
+                }
                 struct type *pt = e->args[2]->ty;
                 if (!pt || pt->kind != TY_PTR || !pt->pointee ||
                     !ty_is_integer(pt->pointee))
