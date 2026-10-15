@@ -277,6 +277,7 @@ int ty_natural_align(const struct type *t);
  * aligned typedef moves an object, not an argument slot. */
 int ty_own_align(const struct type *t);
 int ty_equal(const struct type *a, const struct type *b);
+int ty_compatible(const struct type *a, const struct type *b, int top);
 int ty_is_integer(const struct type *t);
 int ty_is_float(const struct type *t);
 int ty_is_arith(const struct type *t);   /* integer or floating */

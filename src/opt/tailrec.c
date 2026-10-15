@@ -21,9 +21,11 @@
  * Read-all-then-write-all, because `return f(b, a)` swaps its arguments
  * and assigning them one at a time would give f(b, b).
  *
- * Refused when a parameter's address escapes: the recursive call gets a
- * fresh frame and this does not, so anything holding a pointer to a
- * parameter would see it change underneath. */
+ * Refused when a parameter's or a local's address is taken: the
+ * recursive call gets a fresh frame and this does not, so anything
+ * holding a pointer into the frame would see it change underneath --
+ * `int x = a; ... return f(a - 1, &x);` hands the next level the
+ * address of THIS level's x, which the loop then reassigns. */
 
 #include "opt_int.h"
 
@@ -86,10 +88,11 @@ int pass_tailrec(struct ir_func *fn)
     if (np > MAX_PARAMS)
         return 0;
 
-    /* A parameter whose address is taken cannot be reassigned here. */
+    /* A parameter or local whose address is taken: its one slot cannot
+     * stand for every level's (GCC's 20000412-2.c read the last level's
+     * x where the first level's was asked for). */
     for (int n = 0; n < fn->nins; n++)
-        if (fn->ins[n].op == IR_ADDR && fn->ins[n].a >= 0 &&
-            fn->ins[n].a < np)
+        if (fn->ins[n].op == IR_ADDR && fn->ins[n].a >= 0)
             return 0;
 
     int found = 0, junk;
