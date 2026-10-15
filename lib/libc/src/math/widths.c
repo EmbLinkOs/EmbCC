@@ -73,13 +73,14 @@ double remquo(double x, double y, int *quo)
     { return (float)name((double)x, (double)y); }
 
 F1(asinh) F1(acosh) F1(atanh)
-F1(expm1) F1(log1p)
+F1(log1p)
 F1(nearbyint) F1(rint)
 F1(erf) F1(erfc) F1(tgamma) F1(lgamma)
-F2(nextafter) F2(remainder)
+F2(remainder)
 
-float scalbnf(float x, int n)  { return (float)scalbn((double)x, n); }
-float scalblnf(float x, long n) { return (float)scalbn((double)x, (int)n); }
+/* (expm1f, scalbnf and nextafterf are float throughout: fdlibm/sf_expm1.c,
+ * sf_scalbn.c and math.c) */
+float scalblnf(float x, long n) { return scalbnf(x, (int)n); }
 float fmaf(float x, float y, float z)
 {
     /* fma's whole purpose is a SINGLE rounding of x*y+z. Computing the
