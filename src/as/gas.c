@@ -4070,7 +4070,14 @@ int gas_assemble(const char *in_path, const char *out_path, int preprocess,
     }
     /* `.S` is preprocessed and `.s` is not, which is the whole of the
      * difference between them. */
-    text = preprocess ? cpp_process(in_path, src, incdirs, nincdirs) : src;
+    if (preprocess) {
+        /* for this assembler, not the C lexer: no -pedantic marks */
+        int mark = cpp_set_mark_system(0);
+        text = cpp_process(in_path, src, incdirs, nincdirs);
+        cpp_set_mark_system(mark);
+    } else {
+        text = src;
+    }
 
     memset(&g, 0, sizeof g);
     g.path = in_path;

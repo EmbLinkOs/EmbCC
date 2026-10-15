@@ -111,6 +111,11 @@ void ir_locals_fill(struct ir_func *fn, struct func *f, int nvars)
         if (!t)
             continue;
         L->size = ty_size(t);
+        /* GNU's empty struct is size 0, and still an object with an
+         * address: a slot of one byte, which a store of nothing never
+         * touches (with none, `&e` asked for a slot it did not have) */
+        if (L->size == 0 && t->kind == TY_STRUCT)
+            L->size = 1;
         /* a parameter's slot is the calling convention's, and its value
          * arrives as a whole register: a typedef's alignment is a local's
          * only (sema's var_indirect skips parameters likewise) */
@@ -874,11 +879,48 @@ static long san_min(int w);
  * expression, on every AVR program, with nothing said. And/or/xor and a
  * right shift of extended values are already extended; a signed
  * remainder is too, and an unsigned complement is not. */
+/* A _BitInt(N)'s value as its class holds it: the low N bits, sign- or
+ * zero-extended. Every conversion to one leaves that (gen_convert), and
+ * so does every operation in one that can carry out of N bits (int_wrap,
+ * and ++ and --), so a compare, a divide or a right shift can read the
+ * whole register as they read any other integer's. */
+/* How far a pointer to t moves per step: t's size, 0 for GNU's empty
+ * struct, and GNU's 1 for void and functions (which sema lets through only
+ * where GCC does, `p += n`). */
+static int step_size(struct type *t)
+{
+    return t->kind == TY_VOID || t->kind == TY_FUNC ? 1 : ty_size(t);
+}
+
+static int bitint_ext(struct ir_func *fn, int v, const struct type *t)
+{
+    int w = ty_w(t), n = t->bitint;
+    if (n >= w * 8)
+        return v;
+    if (n == 8 || n == 16 || n == 32) {
+        struct ir_ins *x = emit(fn);
+        x->op = IR_EXT;
+        x->a = v;
+        x->size = n / 8;
+        x->sign = ty_signed_int(t);
+        x->w = w;
+        x->dst = new_temp(fn);
+        return x->dst;
+    }
+    if (!ty_signed_int(t))
+        return emit_bin(fn, IR_AND, v,
+                        emit_const(fn, (long)((1UL << n) - 1), w), w, 0);
+    int sh = emit_const(fn, w * 8 - n, w);
+    return emit_bin(fn, IR_SHR, emit_bin(fn, IR_SHL, v, sh, w, 0), sh, w, 1);
+}
+
 static int int_wrap(struct ir_func *fn, int v, const struct type *t,
                     enum ir_op op)
 {
-    if (!t || ty_is_float(t) || t->kind == TY_BOOL ||
-        ty_size(t) < 2 || ty_size(t) >= ty_w(t))
+    if (!t || ty_is_float(t) || t->kind == TY_BOOL)
+        return v;
+    if (t->bitint ? t->bitint >= ty_w(t) * 8
+                  : ty_size(t) < 2 || ty_size(t) >= ty_w(t))
         return v;
     switch (op) {
     case IR_ADD: case IR_SUB: case IR_MUL: case IR_SHL: case IR_NEG:
@@ -894,6 +936,8 @@ static int int_wrap(struct ir_func *fn, int v, const struct type *t,
     default:
         return v;
     }
+    if (t->bitint)
+        return bitint_ext(fn, v, t);
     struct ir_ins *x = emit(fn);
     x->op = IR_EXT;
     x->a = v;
@@ -1545,6 +1589,15 @@ int gen_convert(struct ir_func *fn, int v, const struct type *from,
     if (to->kind == TY_BOOL && from->kind != TY_BOOL)
         return emit_tobool(fn, v, from);
 
+    /* To a _BitInt(N): as to the integer it is stored as, then its low N
+     * bits (bitint_ext) */
+    if (to->bitint && (from->bitint != to->bitint ||
+                       !from->is_unsigned != !to->is_unsigned)) {
+        struct type st = *to;
+        st.bitint = 0;
+        return bitint_ext(fn, gen_convert(fn, v, from, &st), to);
+    }
+
     /* __int128 (w 16): to or from it, an IR_EXT at width 16 (extend) or
      * from a 16-byte value (truncate), or an I2F/F2I of size/width 16 */
     if (from->kind == TY_INT128 || to->kind == TY_INT128) {
@@ -2178,8 +2231,8 @@ static int atomic_compound(struct ir_func *fn, struct expr *e)
     if (lt->kind == TY_PTR || opc || e->op == B_ADD || e->op == B_SUB) {
         int v;
         if (lt->kind == TY_PTR) {
-            int esz = ty_size(lt->pointee);
-            v = esz > 1 ? emit_bin(fn, IR_MUL, rv, emit_const(fn, esz, AW),
+            int esz = step_size(lt->pointee);
+            v = esz != 1 ? emit_bin(fn, IR_MUL, rv, emit_const(fn, esz, AW),
                                    AW, 1)
                         : rv;
         } else {
@@ -2253,7 +2306,7 @@ static int compound_value(struct ir_func *fn, struct expr *e, int cur,
     struct type *lt = e->lhs->ty;
     int res;
     if (lt->kind == TY_PTR) {
-        int esz = ty_size(lt->pointee);
+        int esz = step_size(lt->pointee);
         /* At the ADDRESS width, as every other pointer operation
          * here: this was 8, so `p += n` on a 32-bit target was a
          * 64-bit add of a four-byte pointer. It came out right only
@@ -2264,7 +2317,7 @@ static int compound_value(struct ir_func *fn, struct expr *e, int cur,
         if (ty_is_vla(lt->pointee))
             rv = emit_bin(fn, IR_MUL, rv, type_size_val(fn, lt->pointee),
                           AW, 1);
-        else if (esz > 1) {
+        else if (esz != 1) {    /* (0 for an empty struct: no step) */
             int k = emit_const(fn, esz, AW);
             rv = emit_bin(fn, IR_MUL, rv, k, AW, 1);
         }
@@ -3141,6 +3194,11 @@ static int emit_call(struct ir_func *fn, struct expr *e, const int *args,
         emit_store(fn, ad->dst, val, leaf);
         return ad->dst;
     }
+    /* A _BitInt's bits above N are the callee's to leave unspecified,
+     * in the x86-64, AArch64 and RISC-V ABIs: what the rest of this
+     * function reads is the value (bitint_ext) */
+    if (rty->bitint)
+        return bitint_ext(fn, i->dst, rty);
     return i->dst;
 }
 
@@ -3262,7 +3320,7 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
         if (atomic_lv(e->lhs))
             return atomic_incdec(fn, e);
         struct type *t = e->ty;
-        int scale = t->kind == TY_PTR ? ty_size(t->pointee) : 1;
+        int scale = t->kind == TY_PTR ? step_size(t->pointee) : 1;
         int vla_step = t->kind == TY_PTR && ty_is_vla(t->pointee);
         int w = ty_w(t);
         int local = e->lhs->kind == EXPR_VAR && !e->lhs->gref;
@@ -3312,7 +3370,9 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
                            emit_const(fn, (long)e->delta * scale, w), w, 1)
                 : san_bin(fn, e->delta > 0 ? IR_ADD : IR_SUB, cur,
                           emit_const(fn, 1, w), w, ty_signed_int(t));
-        if (ty_size(t) <= 2 && !is_bf) {
+        if (t->bitint) {
+            sum = bitint_ext(fn, sum, t);   /* and a _BitInt like itself */
+        } else if (ty_size(t) <= 2 && !is_bf) {
             /* ++c on a char must wrap like a char, in the value too */
             struct ir_ins *i = emit(fn);
             i->op = IR_EXT;
@@ -3542,11 +3602,11 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
                     idx = t;
                 }
                 struct type *pt = (lp ? lt : rt)->pointee;
-                int size = ty_size(pt);
+                int size = step_size(pt);
                 if (ty_is_vla(pt))
                     idx = emit_bin(fn, IR_MUL, idx, type_size_val(fn, pt),
                                    AW, 1);
-                else if (size > 1) {
+                else if (size != 1) {   /* (0: an empty struct's) */
                     int c = emit_const(fn, size, AW);
                     idx = emit_bin(fn, IR_MUL, idx, c, AW, 1);
                 }
@@ -5005,6 +5065,13 @@ static void gen_func(struct ir_func *fn, struct func *f)
     }
     g_nlabels_used = 0;                 /* labels are per-function */
     g_nvla = 0;
+    /* a _BitInt parameter as its caller's ABI leaves it: the bits above
+     * N unspecified (emit_call has the same for a result) */
+    for (int k = 0; k < f->nparams && k < MAX_PARAMS; k++) {
+        const struct type *pt = f->param_tys[k];
+        if (pt->bitint && pt->bitint < ty_w(pt) * 8 && !f->param_scalar[k])
+            emit_stvar(fn, k, bitint_ext(fn, emit_ldvar(fn, k, pt), pt), pt);
+    }
     if (f->has_vm_params)               /* `int a[n][m]`: its row size */
         for (int i = 0; i < f->nparams; i++)
             vla_eval(fn, f->param_tys[i]);

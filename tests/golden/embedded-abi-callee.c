@@ -54,3 +54,5 @@ int nat_stk(int a, int b, int c, int d, int e, int f, int g, int h, int i,
 unsigned nar_ret(unsigned long long v) { return (unsigned)v; }
 int nar_ismax(unsigned u) { return u == 0xffffffffu; }
 int nar_lt(unsigned a, unsigned b) { return a < b; }
+struct empty emp_put(int *p, struct empty e, int v) { *p = v; return e; }
+int emp_mid(int a, struct empty e, int b) { (void)e; return a * 10 + b; }

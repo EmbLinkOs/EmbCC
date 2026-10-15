@@ -32,6 +32,8 @@ enum tok_kind {
     TOK_KW_STATIC_ASSERT,
     TOK_KW_GENERIC,
     TOK_KW_ALIGNOF,
+    TOK_KW_COUNTOF,       /* C2y _Countof: an array's element count */
+    TOK_KW_BITINT,        /* C23 _BitInt(N) */
     TOK_KW_ALIGNAS,
     TOK_KW_TYPEOF,
     TOK_KW_AUTOTYPE,
@@ -194,6 +196,7 @@ struct token {
     int char_lit;  /* TOK_NUM from a character constant; str_prefix holds its
                     * encoding prefix (C++ types 'a' as char, not int) */
     int num_uns;   /* TOK_NUM: type is unsigned (U suffix or hex range) */
+    int num_bitint; /* TOK_NUM with C23's wb suffix: its _BitInt's width */
     double fnum;   /* TOK_FNUM */
     int fnum_is_float; /* TOK_FNUM: an 'f' suffix -> float, else double */
     int fnum_is_imag;  /* TOK_FNUM: a GNU imaginary constant (an i/j
@@ -216,8 +219,69 @@ struct lexer {
     const char *line_start;   /* start of the current line, for columns */
     int line;
     struct token tok; /* current token */
+    /* GNU's __extension__ (C only; a macro in C++): no -pedantic
+     * diagnostic from here to the end of the declaration or expression
+     * it begins -- the `;` or `,` at its nesting, or the bracket that
+     * closes around it. ext_depth counts the brackets opened since. */
+    int ext_on, ext_depth;
+    /* inside text a system header's macro expanded to (LEX_SYS_ON ..
+     * LEX_SYS_OFF, which the preprocessor writes around it): -pedantic
+     * has nothing to say about it either, as GCC has not */
+    int sys_depth;
+    /* the current file is a system header (diag_in_system_header), read
+     * whatever -std= says with the whole of EmbCC's C++: its own C++
+     * library is C++20 and says so nowhere (lex_cxx_std) */
+    int sys_file;
 };
 
+/* The two bytes the preprocessor brackets a system macro's expansion
+ * with when it is compiled rather than printed (cpp_set_mark_system);
+ * the lexer reads them as space. */
+#define LEX_SYS_ON  '\x01'
+#define LEX_SYS_OFF '\x02'
+/* whether -pedantic is quiet at the current token: __extension__, or a
+ * system macro's text */
+int lex_quiet(const struct lexer *lx);
+
+/* The C standard a unit is read under (-std=): its year -- 1989, 1994,
+ * 1999, 2011, 2017, 2023, or 2025 for C2y -- and whether GNU's
+ * extensions come with it (gnuNN, not cNN). gnu17 unless the driver says
+ * otherwise. The keywords a standard does not have are identifiers under
+ * it: `bool` and `nullptr` before C23, `asm` and `typeof` outside GNU's
+ * modes (as GCC reads them). */
+void lex_set_c_std(int year, int gnu);
+int lex_c_year(void);
+int lex_c_gnu(void);
+/* -pedantic (or -pedantic-errors): diagnose what the standard -std= names
+ * does not have. It also takes away EmbCC's own extension of a GNU
+ * dialect before C23 -- C23's keywords and syntax -- so that the dialect
+ * is GCC's: lex_c23_ext() says whether they are on. */
+void lex_set_pedantic(int on);
+/* The C++ standard -std= names: its year (1998, 2011, 2014, 2017, 2020,
+ * 2023, 2026) and whether GNU's dialect; gnu++20 unless said. It decides
+ * the program's keywords and tokens -- `constexpr` is a name in C++98,
+ * `concept` before C++20 -- and the parser's (cxx/), in the program's own
+ * code: a system header is read with all of EmbCC's C++, its own library
+ * being C++20 throughout. -fchar8_t makes char8_t a keyword before C++20. */
+void lex_set_cxx_std(int year, int gnu);
+void lex_set_cxx_char8(int on);
+/* whether u8 literals are char8_t (C++20, -fchar8_t) or char (before) */
+int lex_cxx_char8(void);
+int lex_cxx_year(void);
+int lex_cxx_gnu(void);
+/* what a token at lx's place may use: the standard's year, or 9999 in a
+ * system header */
+int lex_cxx_year_here(const struct lexer *lx);
+int lex_c23_ext(void);
+/* -pedantic's diagnostic at file:line:col: `what` (a noun phrase: "a
+ * binary constant") is C<since>'s and the standard here is earlier, or,
+ * since 0, a GNU extension in every standard. Nothing when the standard
+ * has it, without -pedantic, or under __extension__ (pass lx->ext_on). */
+void lex_pedantic(const char *file, int line, int col, int ext_on,
+                  int since, const char *what);
+/* the same for what a standard REMOVED: `what` is not C<removed>'s */
+void lex_pedantic_removed(const char *file, int line, int col, int ext_on,
+                          int removed, const char *what);
 void lex_init(struct lexer *lx, const char *file, const char *src);
 /* lex_init, choosing C (cxx 0) or C++ (cxx 1) keywords and punctuators. */
 void lex_init_mode(struct lexer *lx, const char *file, const char *src,

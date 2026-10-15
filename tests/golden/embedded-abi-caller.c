@@ -17,4 +17,7 @@ int main(void){
   { static volatile unsigned long long v = 0x12345678ffffffffULL;
     putn(nar_ret(v) == 0xffffffffu); putn(nar_ismax(nar_ret(v)));
     putn(nar_ismax((unsigned)v)); putn(nar_lt((unsigned)v, 3u)); }
+  { static struct empty none; int n = 0;
+    struct empty e = emp_put(&n, none, 7); putn(n);
+    putn(emp_mid(4, emp_put(&n, e, 9), 2)); putn(n); }
   puts_("\n==END==\n"); return 0; }

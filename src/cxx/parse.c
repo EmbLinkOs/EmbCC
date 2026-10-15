@@ -219,6 +219,7 @@ static void parse_attrs(struct attrs *a)
             continue;
         }
         if (cx_kind() == TOK_LBRACKET && cx_kind_at(1) == TOK_LBRACKET) {
+            cx_pedantic(cx_cur(), 2011, "a [[...]] attribute");
             cx_advance();
             cx_advance();
             while (!(cx_kind() == TOK_RBRACKET &&
@@ -866,7 +867,10 @@ static void parse_dspec(struct dspec *ds)
         case TOK_KW_TYPEDEF: ds->storage = SK_TYPEDEF; cx_advance(); continue;
         case TOK_KW_STATIC: ds->storage = SK_STATIC; cx_advance(); continue;
         case TOK_KW_EXTERN: ds->storage = SK_EXTERN; cx_advance(); continue;
-        case TOK_CX_REGISTER: cx_advance(); continue;
+        case TOK_CX_REGISTER:
+            cx_pedantic_removed(cx_cur(), 2017, "the 'register' storage class");
+            cx_advance();
+            continue;
         case TOK_CX_THREAD_LOCAL:
             /* One object per thread, which C spells __thread -- and
              * since this front end lowers to C, that is exactly what it
@@ -922,8 +926,17 @@ static void parse_dspec(struct dspec *ds)
         case TOK_KW_CHAR: n_char++; cx_advance(); continue;
         case TOK_KW_SHORT: n_short++; cx_advance(); continue;
         case TOK_KW_INT: n_int++; cx_advance(); continue;
-        case TOK_KW_LONG: n_long++; cx_advance(); continue;
-        case TOK_KW_INT128: n_int128++; cx_advance(); continue;
+        case TOK_KW_LONG:
+            if (n_long == 1)
+                cx_pedantic(cx_cur(), 2011, "'long long'");
+            n_long++;
+            cx_advance();
+            continue;
+        case TOK_KW_INT128:
+            cx_pedantic(cx_cur(), 0, "'__int128'");
+            n_int128++;
+            cx_advance();
+            continue;
         case TOK_KW_SIGNED: n_signed++; cx_advance(); continue;
         case TOK_KW_UNSIGNED: n_unsigned++; cx_advance(); continue;
         case TOK_KW_FLOAT: n_float++; cx_advance(); continue;
@@ -937,6 +950,10 @@ static void parse_dspec(struct dspec *ds)
         case TOK_CX_CHAR32_T: special = CT_CHAR32; n_special++; cx_advance();
             continue;
         case TOK_CX_AUTO:
+            if (cx_std_at(cx_cur()) < 2011) {
+                cx_advance();       /* C++98's storage class: says nothing */
+                continue;
+            }
             if (named || builtin)
                 break;
             named = ct_basic(CT_AUTO);
@@ -1019,6 +1036,16 @@ static void parse_dspec(struct dspec *ds)
                                              * constraint, checked there) */
                     continue;
                 }
+            }
+            if (cx_kind() == TOK_IDENT && cx_kind_at(1) == TOK_ELLIPSIS &&
+                cx_kind_at(2) == TOK_LBRACKET) {
+                /* T...[N]: one of a pack's types (C++26) */
+                const struct ctok *pat = cx_cur();
+                struct csym *el = cx_pack_index();
+                if (el->k != CS_TYPEDEF)
+                    cx_error(pat, "'%s...[]' is not a type", pat->t.text);
+                named = el->type;
+                continue;
             }
             if (at_ctor_declarator())
                 break;
@@ -1248,6 +1275,7 @@ const char *parse_operator_name(struct cty **conv)
     }
     if (k == TOK_STR) {
         /* operator""_x: a literal operator */
+        cx_need_std(cx_cur(), 2011, "a literal operator");
         const struct token *st = &cx_cur()->t;
         if (st->num != 1)
             cx_error(at, "a literal operator's name has an empty \"\"");
@@ -1270,7 +1298,11 @@ const char *parse_operator_name(struct cty **conv)
     for (;;) {
         if (cx_accept(TOK_STAR)) t = ct_qual(ct_ptr(t), parse_cv());
         else if (cx_accept(TOK_AMP)) t = ct_ref(t, 0);
-        else if (cx_accept(TOK_ANDAND)) t = ct_ref(t, 1);
+        else if (cx_kind() == TOK_ANDAND) {
+            cx_need_std(cx_cur(), 2011, "an rvalue reference");
+            cx_advance();
+            t = ct_ref(t, 1);
+        }
         else break;
     }
     *conv = t;
@@ -1397,6 +1429,7 @@ static void parse_declarator_id(struct declarator *d, int mode)
 
 /* At `(` after a name: parameters follow (a function declarator), rather
  * than an initializer. `T x();` declares a function (the standard's rule). */
+static int class_depth;          /* (below) */
 static struct cty *parse_params(void);
 
 static int params_follow(void)
@@ -1522,7 +1555,14 @@ static struct cty *parse_suffixes(struct cty *t, struct declarator *d,
                 n = expr_parse_bound(local ? &vla : NULL);
                 if (n < 0 && !vla)
                     cx_error(at, "array bound is negative");
+                if (vla)
+                    cx_pedantic(at, 0, "a variable-length array");
+                else if (n == 0)
+                    cx_pedantic(at, 0, "an array of size 0");
             }
+        } else if (class_depth > 0 && cx_scope->k == SC_CLASS &&
+                   !(mode & DK_NEW)) {
+            cx_pedantic(at, 0, "a flexible array member");
         }
         cx_expect(TOK_RBRACKET, "']'");
         struct cty *inner = parse_suffixes(t, d, mode, 0);
@@ -1541,10 +1581,14 @@ static struct cty *parse_suffixes(struct cty *t, struct declarator *d,
         struct cty *ft = parse_params();
         struct cty *ret = t;
         if (cx_kind() == TOK_ARROW) {
+            cx_need_std(cx_cur(), 2011, "a trailing return type");
             cx_advance();
             ret = trailing_return_type(ft);
             if (t->k != CT_AUTO)
                 cx_error(cx_cur(), "a trailing return type needs 'auto'");
+        } else if (t->k == CT_AUTO) {
+            cx_need_std(cx_cur(), 2014, t->dauto ? "decltype(auto)"
+                                                 : "a deduced return type");
         }
         ft->to = ret;
         if (after_id && cx_accept(TOK_CX_REQUIRES)) {
@@ -1577,6 +1621,8 @@ static struct cty *ptr_ops(struct cty *t, int mode)
         if ((cx_kind() == TOK_AMP || cx_kind() == TOK_ANDAND) &&
             !(mode & DK_NEW)) {
             int rv = cx_kind() == TOK_ANDAND;
+            if (rv)
+                cx_need_std(cx_cur(), 2011, "an rvalue reference");
             cx_advance();
             if (t->k == CT_VOID)
                 cx_error(cx_cur(), "reference to void");
@@ -1807,6 +1853,8 @@ static struct cty *parse_params(void)
     int saved_ok = decl_pack_ok;
     /* an explicit object parameter (C++23 `this Self &&self`): the object
      * a member function is called on, as its first parameter */
+    if (cx_kind() == TOK_CX_THIS)
+        cx_pedantic(cx_cur(), 2023, "an explicit object parameter");
     int xobj = cx_accept(TOK_CX_THIS);
     if (cx_kind() == TOK_KW_VOID && cx_kind_at(1) == TOK_RPAREN) {
         cx_advance();
@@ -1943,6 +1991,8 @@ static struct cty *parse_params(void)
                                        == 0 ||
                                        strcmp(cx_cur()->t.text, "final")
                                        == 0)) {
+            cx_pedantic(cx_cur(), 2011, cx_cur()->t.text[0] == 'o'
+                        ? "'override'" : "'final'");
             cx_advance();
             continue;
         }
@@ -2143,6 +2193,13 @@ static struct cfunc *declare_function(struct dspec *ds, struct declarator *d,
     /* (an explicit object member function has no `this`: C sees the
      * object as its first parameter) */
     f->is_static = ds->storage == SK_STATIC || ft->xobj;
+    if (cls && d->name && !strcmp(d->name, "operator()") &&
+        ds->storage == SK_STATIC)
+        cx_pedantic(d->at, 2023, "a static operator()");
+    /* (C++23: an operator[] of any number of parameters) */
+    if (cls && d->name && !strcmp(d->name, "operator[]") &&
+        ft->np - (ft->xobj ? 1 : 0) != 1)
+        cx_need_std(d->at, 2023, "an operator[] of other than one parameter");
     /* a class's operator new/delete are static members (11.12) */
     if (cls && (strncmp(d->name, "operator new", 12) == 0 ||
                 strncmp(d->name, "operator delete", 15) == 0))
@@ -2290,8 +2347,10 @@ static const char *local_cname(const char *name)
     if (g && (g->k == CS_VAR || (g->k == CS_FUNC && g->fns &&
                                  g->fns->c_linkage)))
         return cx_fmt("%s__%d", name, cx_uid());
-    if (strncmp(name, "__cx", 4) == 0)
-        return cx_fmt("%s__%d", name, cx_uid());
+    if (strncmp(name, "__cx", 4) == 0 || strcmp(name, "_") == 0)
+        return cx_fmt("%s__%d", name, cx_uid());   /* (_: C++26's placeholder,
+                                                    * declared any number of
+                                                    * times) */
     return name;
 }
 
@@ -2320,6 +2379,51 @@ static struct cstmt *parse_stmt(void);
 static struct cstmt *parse_block_body(struct cscope *s);
 static void cx_resync(int top);
 static void mark_nrvo(struct cfunc *f);
+
+/* `= default` and `= delete`, C++11's */
+static void default_delete_pedantic(void)
+{
+    if (cx_kind() == TOK_KW_DEFAULT)
+        cx_pedantic(cx_cur(), 2011, "a defaulted function");
+    else if (cx_kind() == TOK_CX_DELETE)
+        cx_pedantic(cx_cur(), 2011, "a deleted function");
+}
+
+struct csym *cx_pack_index(void)
+{
+    const struct ctok *at = cx_cur();
+    struct csym *y = lookup_raw(cx_scope, at->t.text);
+    cx_pedantic(at, 2026, "pack indexing");
+    if (!y || y->k != CS_PACK)
+        cx_error(at, y && y->pack_param
+                     ? "pack indexing of '%s' where its elements are not "
+                       "known yet (a template's signature) is not supported"
+                     : "'%s' is not a parameter pack", at->t.text);
+    cx_pos += 3;                                        /* NAME ... [ */
+    long i = expr_parse_const("a pack index");
+    cx_expect(TOK_RBRACKET, "']' after a pack index");
+    if (i < 0 || i >= pack_length(y))
+        cx_error(at, "pack index %ld is out of range: '%s' has %d element%s",
+                 i, at->t.text, pack_length(y), pack_length(y) == 1 ? "" : "s");
+    return pack_elem_sym(y, (int)i);
+}
+
+/* C++26's `= delete("why")`: the reason, said where the function is
+ * used. GCC takes it under every standard. */
+static void delete_reason(struct cfunc *f)
+{
+    if (cx_kind() != TOK_LPAREN)
+        return;
+    cx_pedantic(cx_cur(), 2026, "a deleted function's reason");
+    cx_advance();
+    if (cx_kind() != TOK_STR)
+        cx_error(cx_cur(), "expected a string literal saying why the "
+                           "function is deleted");
+    f->delete_msg = cx_cur()->t.text;
+    while (cx_kind() == TOK_STR)
+        cx_advance();
+    cx_expect(TOK_RPAREN, "')' after a deleted function's reason");
+}
 
 /* How many local statics named `name` function fn declared before: the
  * discriminator that tells them apart in their mangled names. */
@@ -2422,6 +2526,58 @@ static struct cstmt *parse_handlers(const struct ctok *at);
 static void parse_range_for(struct cstmt *s, const struct ctok *at,
                             int colon);
 
+/* A range-based for (C++11), or one with an init-statement (C++20):
+ * GCC refuses either under -std=c++98 and takes it, with a warning,
+ * under gnu++98 */
+static void range_for_std(const struct ctok *at)
+{
+    if (cx_std_at(at) >= 2011)
+        return;
+    /* a `:` at the parentheses' level that no `?` pairs with, before the
+     * `)` -- past one `;` when there is an init-statement */
+    int depth = 0, q = 0;
+    for (int i = cx_pos; i < cx_ntoks; i++) {
+        enum tok_kind k = cx_toks[i].t.kind;
+        if (k == TOK_LPAREN || k == TOK_LBRACE || k == TOK_LBRACKET)
+            depth++;
+        else if (k == TOK_RPAREN || k == TOK_RBRACE || k == TOK_RBRACKET) {
+            if (depth-- == 0)
+                return;
+        } else if (depth == 0 && k == TOK_QUESTION)
+            q++;
+        else if (depth == 0 && k == TOK_COLON && q)
+            q--;
+        else if (depth == 0 && k == TOK_COLON) {
+            if (lex_cxx_gnu())
+                cx_pedantic(at, 2011, "a range-based for");
+            else
+                cx_error(at, "a range-based for is C++11's, and the "
+                         "standard here is C++98");
+            return;
+        }
+    }
+}
+
+/* C++11's constexpr function is one return statement (and what declares
+ * nothing: static_assert, typedef, using); C++14 relaxed it, and GCC
+ * refuses the rest under C++11 */
+static void constexpr_body_std(struct cfunc *f, const struct ctok *at)
+{
+    if (!f->is_constexpr || f->is_ctor || !f->body || cx_std_at(at) >= 2014)
+        return;
+    int returns = 0, other = 0;
+    for (struct cstmt *s = f->body->body; s; s = s->next) {
+        if (s->k == S_RETURN)
+            returns++;
+        else if (!(s->k == S_EXPR && !s->e) &&
+                 !(s->k == S_BLOCK && !s->body))
+            other++;
+    }
+    if (returns != 1 || other)
+        cx_error(at, "a constexpr function of more than one return statement "
+                 "is C++14's, and the standard here is C++11");
+}
+
 static void define_function(struct cfunc *f, struct cty *ft)
 {
     /* a function-try-block: `try` here, or just before a delayed body */
@@ -2516,8 +2672,10 @@ static void define_function(struct cfunc *f, struct cty *ft)
     if (cx_kind() != TOK_LBRACE)
         cx_error(cx_cur(), "expected '{' to begin the body of '%s'", f->name);
     struct cscope *bs = scope_push(SC_BLOCK, NULL);
+    const struct ctok *body_at = cx_cur();
     f->body = parse_block_body(bs);
     scope_pop();
+    constexpr_body_std(f, body_at);
     if (fn_try) {
         /* a function-try-block's handlers, the parameters in scope */
         f->fn_try = parse_handlers(at);
@@ -2550,6 +2708,7 @@ static struct cexpr *parse_init_args(enum init_form *form,
         }
         na = 1;
     } else if (cx_kind() == TOK_LBRACE) {
+        cx_pedantic(cx_cur(), 2011, "list-initialization");
         *form = INIT_LIST;
         args = xmalloc(sizeof *args);
         args[0] = parse_braced_list();
@@ -2632,6 +2791,7 @@ static int parse_tparams(struct ctparam **out);
 static int tparam_base;
 static int abbrev_lparen(void);
 static void parse_abbreviated_template(struct cclass *cls, int access);
+static void abbrev_std(void);
 
 /* A deduction candidate: a function template made of a constructor of
  * the primary template (C's own parameters first, then the constructor's
@@ -3075,6 +3235,7 @@ static int ctad_try(struct ctad_cand *c, struct ctemplate *tm,
 struct cty *ctad_deduce(struct ctemplate *tm, int form, struct cexpr **args,
                         int na, const struct ctok *at)
 {
+    cx_need_std(at, 2017, "class template argument deduction");
     int list = form == INIT_LIST || form == INIT_COPY_LIST;
     struct cexpr **xs = args;
     int nx = na;
@@ -3372,6 +3533,8 @@ static void declare_global_var(struct dspec *ds, struct declarator *d,
         v->section = ds->a.section ? ds->a.section : d->a.section;
     if (ds->a.aligned || d->a.aligned)
         v->align_attr = ds->a.aligned ? ds->a.aligned : d->a.aligned;
+    if (ds->is_inline)
+        cx_pedantic(d->at, 2017, "an inline variable");
     if (ds->is_inline || ds->is_constexpr)
         v->is_inline = ds->is_inline || v->is_member_static;
     if (ds->is_constexpr) {
@@ -3602,6 +3765,7 @@ static struct cty *parse_class_spec(struct dspec *ds)
     int is_final = 0;
     if (cx_kind() == TOK_IDENT && strcmp(cx_cur()->t.text, "final") == 0 &&
         (cx_kind_at(1) == TOK_LBRACE || cx_kind_at(1) == TOK_COLON)) {
+        cx_pedantic(cx_cur(), 2011, "'final'");
         cx_advance();
         is_final = 1;
     }
@@ -3766,6 +3930,7 @@ static struct cty *parse_enum_spec(struct dspec *ds)
     cx_advance();
     int scoped = 0;
     if (cx_kind() == TOK_CX_CLASS || cx_kind() == TOK_KW_STRUCT) {
+        cx_need_std(cx_cur(), 2011, "a scoped enumeration");
         scoped = 1;
         cx_advance();
     }
@@ -3971,6 +4136,7 @@ static void parse_member(struct cclass *c, int *access)
         break;
     }
     if (abbrev_lparen() >= 0) {
+        abbrev_std();
         parse_abbreviated_template(c, *access);  /* f(C auto x) */
         return;
     }
@@ -4072,10 +4238,12 @@ static void parse_member(struct cclass *c, int *access)
                 return;
             }
             if (cx_accept(TOK_ASSIGN)) {
+                default_delete_pedantic();
                 if (cx_accept(TOK_KW_DEFAULT)) {
                     f->is_defaulted = 1;
                 } else if (cx_accept(TOK_CX_DELETE)) {
                     f->is_deleted = 1;
+                    delete_reason(f);
                 } else if (cx_kind() == TOK_NUM && cx_cur()->t.num == 0) {
                     if (!f->is_virtual)
                         cx_error(cx_cur(), "only a virtual function can be "
@@ -4095,6 +4263,8 @@ static void parse_member(struct cclass *c, int *access)
             v->is_extern = 1;
             v->is_constexpr = ds.is_constexpr;
             v->is_inline = ds.is_inline || ds.is_constexpr;
+            if (ds.is_inline)
+                cx_pedantic(d.at, 2017, "an inline variable");
             v->line = d.at->t.line;
             v->col = d.at->t.col;
             v->file = d.at->file;
@@ -4151,6 +4321,17 @@ static void parse_member(struct cclass *c, int *access)
                 y->access = *access;
             }
             if (cx_kind() == TOK_ASSIGN || cx_kind() == TOK_LBRACE) {
+                /* a bit-field's: C++20's, refused under C++98 only, as
+                 * GCC refuses it */
+                if (fl->bitwidth >= 0 && cx_std_at(cx_cur()) < 2011)
+                    cx_error(cx_cur(), "a bit-field's default initializer is "
+                             "C++20's, and the standard here is C++98");
+                if (fl->bitwidth >= 0)
+                    cx_pedantic(cx_cur(), 2020, "a bit-field's default "
+                                "member initializer");
+                else
+                    cx_pedantic(cx_cur(), 2011, "a default member "
+                                "initializer");
                 skip_default_init(fl);
                 add_pending(NULL, c, fl);
             }
@@ -4185,6 +4366,8 @@ static void parse_static_assert(void)
             msg = cx_cur()->t.text;
         while (cx_kind() == TOK_STR)
             cx_advance();
+    } else {
+        cx_pedantic(cx_cur(), 2017, "a static_assert with no message");
     }
     cx_expect(TOK_RPAREN, "')'");
     cx_expect(TOK_SEMI, "';'");
@@ -4340,7 +4523,9 @@ static void parse_using(int access)
 {
     const struct ctok *at = cx_cur();
     cx_advance();
-    if (cx_accept(TOK_KW_ENUM)) {
+    if (cx_kind() == TOK_KW_ENUM) {
+        cx_need_std(cx_cur(), 2020, "'using enum'");
+        cx_advance();
         /* using enum E; : E's enumerators named here too (C++20) */
         struct qname q = peek_qname();
         if (q.bad || cx_kind_at(q.fin) != TOK_IDENT)
@@ -4394,6 +4579,7 @@ static void parse_using(int access)
     }
     if (cx_kind() == TOK_IDENT &&
         (cx_kind_at(1) == TOK_ASSIGN || alias_attrs)) {
+        cx_need_std(cx_cur(), 2011, "an alias declaration");
         const char *name = cx_cur()->t.text;
         cx_advance();
         parse_attrs(NULL);
@@ -4559,6 +4745,7 @@ static void parse_namespace(void)
     const struct ctok *at = cx_cur();
     int is_inline = 0;
     if (cx_kind() == TOK_KW_INLINE) {
+        cx_pedantic(at, 2011, "an inline namespace");
         is_inline = 1;
         cx_advance();
     }
@@ -4572,7 +4759,9 @@ static void parse_namespace(void)
     if (cx_kind() == TOK_IDENT) {
         names[nn++] = cx_cur()->t.text;
         cx_advance();
-        while (cx_accept(TOK_COLONCOLON)) {
+        while (cx_kind() == TOK_COLONCOLON) {
+            cx_pedantic(cx_cur(), 2017, "a nested namespace definition");
+            cx_advance();
             int this_inline = cx_accept(TOK_KW_INLINE);
             if (cx_kind() != TOK_IDENT || nn == 16)
                 cx_error(cx_cur(), "expected a namespace name");
@@ -4720,6 +4909,7 @@ static void parse_declaration(int toplevel, struct cstmt **out)
             return;
         }
         if (cx_kind_at(1) == TOK_CX_TEMPLATE) {
+            cx_pedantic(cx_cur(), 2011, "'extern template'");
             cx_advance();
             cx_advance();
             parse_explicit_instantiation(1);
@@ -4751,6 +4941,7 @@ static void parse_declaration(int toplevel, struct cstmt **out)
         return;
     }
     if (toplevel && abbrev_lparen() >= 0) {
+        abbrev_std();
         /* void f(C auto x): a function template */
         parse_abbreviated_template(enclosing_class(cx_scope), CA_PUBLIC);
         return;
@@ -4869,12 +5060,14 @@ static void parse_declaration(int toplevel, struct cstmt **out)
                 return;
             }
             if (cx_accept(TOK_ASSIGN)) {
+                default_delete_pedantic();
                 if (cx_accept(TOK_KW_DEFAULT)) {
                     f->is_defaulted = 1;
                     if (d.qual && f->cls && f->cls->complete)
                         class_default_outside(f);
                 } else if (cx_accept(TOK_CX_DELETE)) {
                     f->is_deleted = 1;
+                    delete_reason(f);
                 } else {
                     cx_error(cx_cur(), "expected 'default' or 'delete'");
                 }
@@ -4931,9 +5124,15 @@ static void parse_declaration(int toplevel, struct cstmt **out)
             s->file = d.at->file;
             s->var = v;
             struct csym *old = scope_find_here(cx_scope, d.name);
+            /* (C++26's placeholder: any number of locals named _,
+             * which GCC takes under every standard) */
             if (old && (old->k == CS_VAR) &&
-                (cx_scope->k == SC_BLOCK || cx_scope->k == SC_PARAMS))
+                (cx_scope->k == SC_BLOCK || cx_scope->k == SC_PARAMS) &&
+                strcmp(d.name, "_") != 0)
                 cx_error(d.at, "redeclaration of '%s'", d.name);
+            if (old && old->k == CS_VAR && !strcmp(d.name, "_"))
+                cx_pedantic(d.at, 2026, "a second declaration of the "
+                            "placeholder _");
             struct csym *y = scope_add(cx_scope, CS_VAR, d.name);
             y->var = v;
             il_collect = 1;
@@ -5042,6 +5241,7 @@ static struct cstmt *parse_structured_binding(struct cty *ds_type,
                                               struct cexpr *given,
                                               const struct ctok *at)
 {
+    cx_pedantic(at, 2017, "a structured binding");
     struct cty *declared = ds_type;
     if (cx_accept(TOK_AMP))
         declared = ct_ref(ds_type, 0);
@@ -5830,6 +6030,7 @@ static struct cstmt *parse_stmt_or_none(void)
         cx_advance();
         if (cx_kind() == TOK_CX_CONSTEVAL ||
             (cx_kind() == TOK_BANG && cx_kind_at(1) == TOK_CX_CONSTEVAL)) {
+            cx_pedantic(cx_cur(), 2023, "'if consteval'");
             /* C++23 if consteval { } else { }: the first in a constant
              * evaluation, the second at run time — as
              * if (__builtin_is_constant_evaluated()) (! : reversed) */
@@ -5848,12 +6049,17 @@ static struct cstmt *parse_stmt_or_none(void)
             s->els = neg ? a : b;
             return s;
         }
+        if (cx_kind() == TOK_CX_CONSTEXPR)
+            cx_pedantic(cx_cur(), 2017, "'if constexpr'");
         int is_constexpr = cx_accept(TOK_CX_CONSTEXPR);
         cx_expect(TOK_LPAREN, "'(' after if");
         scope_push(SC_BLOCK, NULL);
         struct cstmt *decl = NULL;
         /* C++17 init-statement: if (init; cond) */
+        const struct ctok *init_at = cx_cur();
         struct cstmt *init = parse_init_statement();
+        if (init)
+            cx_pedantic(init_at, 2017, "an if statement's init-statement");
         s->e = convert_bool(parse_condition(&decl), "an if condition");
         s->init = chain_stmts(init, decl);
         cx_expect(TOK_RPAREN, "')' after the condition");
@@ -5915,6 +6121,9 @@ static struct cstmt *parse_stmt_or_none(void)
          * The init runs once, before the range is evaluated, so it goes
          * ahead of the range-for's own declarations. */
         int rcolon = range_for_after_init();
+        range_for_std(at);
+        if (rcolon >= 0)
+            cx_pedantic(at, 2020, "a range-based for's init-statement");
         if (rcolon >= 0) {
             struct cstmt *init = parse_init_statement();
             int colon = range_for_colon();
@@ -5987,6 +6196,8 @@ static struct cstmt *parse_stmt_or_none(void)
         s = st_new(S_CASE);
         cx_advance();
         s->cval = expr_parse_const("a case label");
+        if (cx_kind() == TOK_ELLIPSIS)
+            cx_pedantic(cx_cur(), 0, "a case range");
         if (cx_accept(TOK_ELLIPSIS)) {
             s->is_range = 1;
             s->cval2 = expr_parse_const("a case range's end");
@@ -6100,6 +6311,8 @@ static struct cstmt *parse_stmt_or_none(void)
             cx_advance();
             cx_advance();
             parse_attrs(NULL);
+            if (cx_kind() == TOK_RBRACE)
+                cx_pedantic(cx_cur(), 2023, "a label at the end of a block");
             s->body = cx_kind() == TOK_RBRACE ? st_new(S_NULL) : parse_stmt();
             return s;
         }
@@ -7033,6 +7246,8 @@ static int parse_tparams(struct ctparam **out)
              * A<T>::type V = x is a value one) */
             p->kind = TP_TYPE;
             cx_advance();
+            if (cx_kind() == TOK_ELLIPSIS)
+                cx_pedantic(cx_cur(), 2011, "a variadic template");
             if (cx_accept(TOK_ELLIPSIS))
                 p->pack = 1;
             if (cx_kind() == TOK_IDENT) {
@@ -7098,6 +7313,8 @@ static int parse_tparams(struct ctparam **out)
             p->vtype_tok = cx_pos;
             struct dspec ds;
             parse_dspec(&ds);
+            if (ds.type && ds.type->k == CT_AUTO)
+                cx_need_std(at, 2017, "a template parameter of type 'auto'");
             if (!ds.type)
                 cx_error(at, "expected a template parameter before %s",
                          tok_describe(&cx_cur()->t));
@@ -7388,6 +7605,18 @@ static struct cguide *guide_at(void)
  * the cursor declares a function one of whose parameters' types is `auto`
  * (or `C auto`) — the `(` of that parameter list, else -1. (Its `auto`s
  * already named __cx_autoN count: a class template's body read again.) */
+/* C++98's `auto` is a storage class: `f(auto x)` declares x with no
+ * type there, as GCC says (C++20's abbreviated template from C++11 on,
+ * which GCC takes with a warning) */
+static void abbrev_std(void)
+{
+    if (cx_std_at(cx_cur()) < 2011)
+        cx_error(cx_cur(), "'auto' is a storage class in C++98, and a "
+                 "parameter declared with it has no type");
+    cx_pedantic(cx_cur(), 2020, "an abbreviated function template (an "
+                "'auto' parameter)");
+}
+
 static int abbrev_lparen(void)
 {
     int depth = 0;
@@ -7672,6 +7901,7 @@ static void template_decl_rest(struct cclass *cls, int access,
     }
     if (cx_kind() == TOK_CX_USING) {
         /* template<...> using X = type; */
+        cx_need_std(cx_cur(), 2011, "an alias template");
         cx_advance();
         if (cx_kind() != TOK_IDENT)
             cx_error(cx_cur(), "expected an alias template's name");
@@ -8099,6 +8329,7 @@ static void template_decl_rest(struct cclass *cls, int access,
         return;
     }
     /* a variable template: template<class T> constexpr T pi = T(3.14); */
+    cx_pedantic(d.at, 2014, "a variable template");
     struct ctemplate *tm = template_new(TK_VAR, d.name, home, ps, np);
     tm->decl_tok = decl;
     tm->req_start = req_s;
@@ -8543,9 +8774,11 @@ struct cfunc *func_decl_replay(struct ctemplate *t, struct cscope *ps)
     if (t->decl0_tok)
         decl0_defaults(t, f);
     if (cx_accept(TOK_ASSIGN)) {
-        if (cx_accept(TOK_CX_DELETE))
+        default_delete_pedantic();
+        if (cx_accept(TOK_CX_DELETE)) {
             f->is_deleted = 1;
-        else if (cx_accept(TOK_KW_DEFAULT))
+            delete_reason(f);
+        } else if (cx_accept(TOK_KW_DEFAULT))
             f->is_defaulted = 1;
     } else if (cx_kind() == TOK_LBRACE || cx_kind() == TOK_COLON) {
         skip_body(f);
@@ -9221,8 +9454,14 @@ void cx_parse_unit(void)
         jmp_buf jb;
         void *save = cx_recover;
         cx_recover = &jb;
+        int before = cx_pos;
         if (!setjmp(jb)) {
             parse_declaration(1, NULL);
+            /* a declaration that read nothing and said nothing would be
+             * read again, forever (C++26's `T...[0]` was one) */
+            if (cx_pos == before)
+                cx_error(cx_cur(), "expected a declaration, found %s",
+                         tok_describe(&cx_cur()->t));
         } else {
             int at = cx_pos;
             parse_restore(st);
@@ -9803,6 +10042,7 @@ static void lambda_to_pointer(struct clambda *L, const struct ctok *at)
 struct cexpr *parse_lambda(void)
 {
     const struct ctok *at = cx_cur();
+    cx_pedantic(at, 2011, "a lambda");
     struct clambda *L = xcalloc(1, sizeof *L);
     L->at = at;
     L->outer = cx_curfn;
@@ -9856,6 +10096,7 @@ struct cexpr *parse_lambda(void)
             k->byref = byref;
             if (cx_kind() == TOK_ASSIGN || cx_kind() == TOK_LBRACE ||
                 cx_kind() == TOK_LPAREN) {
+                cx_pedantic(cx_cur(), 2014, "a lambda's init-capture");
                 /* an init-capture: a new variable, of the initializer's
                  * type (or a reference to it) */
                 struct cexpr *e;
@@ -9898,7 +10139,12 @@ struct cexpr *parse_lambda(void)
     int neps = 0;
     struct cscope *tscope = NULL;
     if (cx_kind() == TOK_LT) {
-        /* []<class T>(T x) { }: C++20, explicit template parameters */
+        /* []<class T>(T x) { }: C++20, explicit template parameters
+         * (refused under C++98 only, as GCC refuses it) */
+        if (cx_std_at(cx_cur()) < 2011)
+            cx_error(cx_cur(), "a lambda's template parameter list is "
+                     "C++20's, and the standard here is C++98");
+        cx_pedantic(cx_cur(), 2020, "a lambda's template parameter list");
         tscope = scope_push(SC_TEMPLATE, NULL);
         cx_advance();
         neps = parse_tparams(&eps);
@@ -9909,6 +10155,9 @@ struct cexpr *parse_lambda(void)
     int lparen = cx_kind() == TOK_LPAREN ? cx_pos : -1;
     struct ctparam *autos = NULL;
     int nautos = lparen >= 0 ? invent_auto_params(lparen, &autos) : 0;
+    if (nautos)
+        cx_need_std(&cx_toks[lparen], 2014, "a generic lambda (an 'auto' "
+                    "parameter)");
     int ntps = neps + nautos;
     if (ntps) {
         tps = xcalloc((size_t)ntps, sizeof *tps);
