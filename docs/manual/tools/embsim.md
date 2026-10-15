@@ -614,7 +614,7 @@ nRF52840 Product Specification v1.1):
   nothing moves:
 
   ```text
-  embsim: warning: UARTE0's TXD.PTR 0x00000d14 is not in Data RAM: EasyDMA reaches only that (the part may fault or corrupt RAM); nothing is moved
+  embsim: warning: UARTE0's TXD.PTR 0x00000dfc is not in Data RAM: EasyDMA reaches only that (the part may fault or corrupt RAM); nothing is moved
   ```
 
 - **TIMER0-4.** START, STOP, CLEAR, COUNT, CAPTURE[n], SHUTDOWN; in Timer
@@ -645,8 +645,8 @@ whichever UART the program uses (P0.06, P0.08): every UART writes to
 stdout.
 
 ```text
-nrf52840dk: LED1 on (P0.13) at 3.577 ms
-nrf52840dk: LED1 off (P0.13) at 4.577 ms
+nrf52840dk: LED1 on (P0.13) at 2.921 ms
+nrf52840dk: LED1 off (P0.13) at 3.921 ms
 ```
 
 QEMU's micro:bit, an nRF51, has the same UART, GPIO and TIMER at the
