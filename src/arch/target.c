@@ -379,6 +379,25 @@ int target_vector_align_cap(void)
     default: return 0;
     }
 }
+/* What a function's address is aligned to with nothing said about it --
+ * the instruction set's unit, GCC's FUNCTION_BOUNDARY -- and so what
+ * __alignof__ of one answers, as GCC does: not the sixteen a backend may
+ * pad to for the fetch unit, which -Os drops. */
+int target_fn_align(void)
+{
+    switch (g_arch) {
+    case TARGET_X86_64: case TARGET_AVR: case TARGET_RX:
+        return 1;
+    case TARGET_THUMB:
+        return g_arm_a32 ? 4 : 2;
+    case TARGET_RISCV32: case TARGET_RISCV64:
+        return target_riscv_rvc() ? 2 : 4;
+    case TARGET_COLDFIRE: case TARGET_TRICORE:
+        return 2;
+    default:    /* AArch64, MIPS, LoongArch, PowerPC, SPARC, Xtensa */
+        return 4;
+    }
+}
 int target_default_new_align(void)
 {
     switch (g_arch) {

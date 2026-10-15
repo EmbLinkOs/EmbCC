@@ -4135,6 +4135,13 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                     ty_name(t));
         e->kind = EXPR_NUM;                 /* folds to a size_t constant */
         e->num = ty_align(t);
+        /* Of a function, what its address is aligned to: the target's
+         * instruction boundary, or its aligned(N). Not the pointer it
+         * decays to, which is what this measured. */
+        if (!e->cast_ty && e->rhs->kind == EXPR_VAR && e->rhs->fref) {
+            int ua = e->rhs->fref->user_align;
+            e->num = ua > target_fn_align() ? ua : target_fn_align();
+        }
         /* Of an OBJECT (GNU __alignof__ of an expression), what the
          * object was declared with counts too: `int gx aligned(64)` is
          * 64-aligned, and its type's 4 is what this answered. */
@@ -8396,6 +8403,10 @@ static void merge_decls(struct unit *u)
          * (EmbTrace's own hooks, a clock) -- instrumenting one of those
          * recursed through the hook forever */
         canon->attr_no_instrument |= f->attr_no_instrument;
+        /* aligned(N) on any declaration, the strictest (GCC's align-3.c
+         * puts it on the prototype) */
+        if (f->user_align > canon->user_align)
+            canon->user_align = f->user_align;
         /* an asm label on any declaration names the symbol */
         if (!canon->asm_name)
             canon->asm_name = f->asm_name;

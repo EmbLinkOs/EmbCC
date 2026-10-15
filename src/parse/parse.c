@@ -6741,6 +6741,7 @@ static void parse_top(struct parser *ps, struct unit *u,
     f->attr_always_inline = at.always_inline;
     f->attr_noinline = at.noinline;
     if (at.no_instrument) f->attr_no_instrument = 1;
+    if (at.aligned > f->user_align) f->user_align = at.aligned;
     f->attr_gnu_inline = at.gnu_inline;
     f->pcs = at.pcs;
     f->attr_deprecated = at.deprecated;
@@ -6760,6 +6761,7 @@ static void parse_top(struct parser *ps, struct unit *u,
                 f->attr_always_inline = at.always_inline;
                 f->attr_noinline = at.noinline;
                 if (at.no_instrument) f->attr_no_instrument = 1;
+                if (at.aligned > f->user_align) f->user_align = at.aligned;
                 f->attr_gnu_inline = at.gnu_inline;
                 f->pcs = at.pcs;
     f->pcs = at.pcs;
@@ -6863,6 +6865,7 @@ static void parse_top(struct parser *ps, struct unit *u,
     f->attr_always_inline = at.always_inline;
     f->attr_noinline = at.noinline;
     if (at.no_instrument) f->attr_no_instrument = 1;
+    if (at.aligned > f->user_align) f->user_align = at.aligned;
     f->attr_gnu_inline = at.gnu_inline;
     f->pcs = at.pcs;
     f->attr_deprecated = at.deprecated;
@@ -6997,6 +7000,7 @@ fn_tail:
     f->attr_always_inline = at.always_inline;
     f->attr_noinline = at.noinline;
     if (at.no_instrument) f->attr_no_instrument = 1;
+    if (at.aligned > f->user_align) f->user_align = at.aligned;
     f->attr_gnu_inline = at.gnu_inline;
     f->pcs = at.pcs;
     f->attr_deprecated = at.deprecated;

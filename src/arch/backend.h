@@ -47,6 +47,13 @@ struct ir_ins;
 int cg_label_mark(const struct ir_ins *i);
 void cg_note_labels(struct ir_func *fn, const int *label_off);
 
+/* The boundary a function's first instruction must be on beyond its
+ * target's own: what __attribute__((aligned(N))) asks of it, or the
+ * largest an asm in it aligns its own bytes to (`.p2align 3`), so that
+ * in a section of its own the buffer's offsets are the section's. 0 for
+ * neither. The padding before the function is never run. */
+int cg_fn_align(const struct ir_func *fn);
+
 struct extcall {
     int patch_off;        /* offset of the rel32 field in .text */
     struct func *callee;  /* canonical, !has_defn */
