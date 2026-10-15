@@ -98,10 +98,12 @@ struct rv_state {
     /* the ESP32-C3's core (esp): RV32IMC and its own CSRs, its interrupt
      * controller; the performance counter (mpcer, mpcmr, mpccr: its value
      * at the cycle and instruction counts mpc_cyc, mpc_ins), the trigger
-     * module's and the dedicated GPIO's CSRs (kept) */
+     * module's and the dedicated GPIO's CSRs (kept; cpu_gpio_in, 0x804,
+     * read-only, reads 0) */
     int esp;
     struct rv_eic eic;
-    u64 mpcer, mpcmr, mpccr, mpc_cyc, mpc_ins;
+    u64 mpcer, mpcmr, mpccr, mpc_cyc, mpc_ins, mpc_idle;
+    u64 idle;                       /* the cycles spent in WFI */
     u64 tselect, tdata1[8], tdata2[8], tcontrol, gpio_oen, gpio_out;
 };
 

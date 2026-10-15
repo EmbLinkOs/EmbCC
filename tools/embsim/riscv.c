@@ -191,17 +191,30 @@ void rv_fp_dirty(void)
     rs->mstatus |= MSTATUS_FS;
 }
 
-/* the ESP32-C3's performance counter now: what was written, and the
- * cycles or instructions since if CYCLE or INST is selected and COUNT_EN
- * set (with both, a cycle counts once); saturating with COUNT_SAT */
+/* the ESP32-C3's performance counter now (its TRM, 1.4.2): what was
+ * written, and since then, with COUNT_EN, the events mpcer selects --
+ * CYCLE the cycles but those in WFI, INST the instructions, IDLE the
+ * cycles in WFI; two that happen in one cycle count once, so CYCLE with
+ * INST counts the cycles -- saturating with COUNT_SAT, else wrapping.
+ * A read gives the count before the reading instruction; a write
+ * counts from the instruction after it.
+ * The other events (the hazards, loads, stores, jumps, branches and
+ * compressed instructions) are not counted */
 static u64 mpccr_now(void)
 {
-    u64 v = rs->mpccr;
-    if ((rs->mpcmr & 1) && (rs->mpcer & 3)) {
-        v += rs->mpcer & 1 ? rs->cyc_now - rs->mpc_cyc : rs->insn_now - rs->mpc_ins;
-        if (v > 0xffffffffull)
-            v = rs->mpcmr & 2 ? 0xffffffffull : v & 0xffffffffull;
-    }
+    u64 v = rs->mpccr, e = rs->mpcer, n = 0;
+    if (!(rs->mpcmr & 1))
+        return v;
+    u64 idle = rs->idle - rs->mpc_idle;
+    if (e & 1)
+        n = rs->cyc_now - rs->mpc_cyc - idle;
+    else if (e & 2)
+        n = rs->insn_now - rs->mpc_ins;
+    if (e & 16)
+        n += idle;
+    v += n;
+    if (v > 0xffffffffull)
+        v = rs->mpcmr & 2 ? 0xffffffffull : v & 0xffffffffull;
     return v;
 }
 
@@ -273,16 +286,18 @@ static void esp_csr_wr(u32 csr, u64 v)
     case 0x7a2: rs->tdata2[rs->tselect & 7] = v; return;
     case 0x7a5: rs->tcontrol = v; return;
     case 0x7e0: case 0x7e1: case 0x7e2:
+        /* counted up to this instruction; from the next, as written */
         rs->mpccr = csr == 0x7e2 ? v : mpccr_now();
-        rs->mpc_cyc = rs->cyc_now;
-        rs->mpc_ins = rs->insn_now;
+        rs->mpc_cyc = rs->sim->cycles;
+        rs->mpc_ins = rs->sim->insns;
+        rs->mpc_idle = rs->idle;
         if (csr == 0x7e0)
             rs->mpcer = v & 0x7ff;
         if (csr == 0x7e1)
             rs->mpcmr = v & 3;
         return;
-    case 0x803: rs->gpio_oen = v; return;
-    case 0x805: rs->gpio_out = v; return;
+    case 0x803: rs->gpio_oen = v & 0xff; return;
+    case 0x805: rs->gpio_out = v & 0xff; return;
     }
 }
 
@@ -430,7 +445,8 @@ static void csr_insn(u32 i)
     int write = (f3 & 3) == 1 || rs1 != 0;
     u64 old;
     if (((csr >> 8) & 3) > (u32)rs->priv ||
-        (write && (csr >> 10) == 3) || !csr_rd(csr, &old, 0)) {
+        (write && ((csr >> 10) == 3 || (rs->esp && csr == 0x804))) ||
+        !csr_rd(csr, &old, 0)) {
         rv_illegal();
         return;
     }
@@ -721,12 +737,61 @@ static void wfi(void)
         return;
     if ((rs->mie || rs->eic.pending) && sim_next_event(s, &left)) {
         s->cycles += left;
+        rs->idle += left;
         sim_advance(s, left);
         return;
     }
     sim_end(s, END_IDLE,
             "waiting for an interrupt that nothing can raise, at 0x%08llx",
             (unsigned long long)rs->pc);
+}
+
+/* ---- semihosting ------------------------------------------------------ */
+
+static int fetch16(u32 a, u32 *h);
+
+/* the 32-bit instruction at a, or 0 when it cannot be fetched */
+static u32 word_at(u32 a)
+{
+    u32 lo, hi;
+    return fetch16(a, &lo) && fetch16(a + 2, &hi) ? lo | hi << 16 : 0;
+}
+
+static u32 semi_ld(void *ctx, u32 a, int n)
+{
+    (void)ctx;
+    return (u32)rv_load(a, n);
+}
+
+static void semi_st(void *ctx, u32 a, int n, u32 v)
+{
+    (void)ctx;
+    rv_store(a, n, v);
+}
+
+static int semi_faulted(void *ctx)
+{
+    (void)ctx;
+    return rs->trap;
+}
+
+static const struct semi_ops semi_mem = { semi_ld, semi_st, semi_faulted };
+
+/* The RISC-V semihosting call (the RISC-V Semihosting spec, 1.0): an
+ * uncompressed ebreak between `slli x0, x0, 0x1f` and `srai x0, x0, 7`,
+ * the operation in a0, its parameter in a1, ARM's calls; RV32 only, whose
+ * parameter blocks are ARM's 32-bit ones. QEMU's -semihosting-config
+ * answers the same sequence. */
+static int rv_semihost(void)
+{
+    u32 pc = (u32)rs->pc, r;
+    if (!rs->sim->semihosting || rs->xlen != 32 ||
+        word_at(pc - 4) != 0x01f01013u || word_at(pc + 4) != 0x40705013u)
+        return 0;
+    if (semihost(rs->sim, &semi_mem, rs, (u32)rs->x[10], (u32)rs->x[11], &r) &&
+        !rs->trap)
+        rs->x[10] = r;
+    return 1;
 }
 
 static void sys_insn(u32 i, u32 rd, u32 f3)
@@ -743,7 +808,8 @@ static void sys_insn(u32 i, u32 rd, u32 f3)
         rv_trap(rs->priv == PRV_M ? EXC_ECALL_M : EXC_ECALL_U, 0);
         return;
     case 0x00100073:                            /* EBREAK */
-        rv_trap(EXC_BREAKPOINT, rs->pc);
+        if (!rv_semihost())
+            rv_trap(EXC_BREAKPOINT, rs->pc);
         return;
     case 0x30200073: {                          /* MRET */
         if (rs->priv != PRV_M) {

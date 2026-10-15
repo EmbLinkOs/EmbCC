@@ -609,16 +609,9 @@ static void write_ld(FILE *f, const struct svd_device *d, const char *flash,
                      const char *ram)
 {
     if (is_esp32c3(d)) {
-        if (flash || ram)
-            svd_die("--ld: the ESP32-C3 takes no --flash or --ram: its ROM loads "
-                "the image into SRAM, which the script splits into IRAM and "
-                "DRAM; edit its MEMORY to split it otherwise");
         write_ld_esp32c3(f, d);
         return;
     }
-    if (!flash || !ram)
-        svd_die("--ld needs --flash ORIGIN:LENGTH and --ram ORIGIN:LENGTH: an "
-            "SVD describes the peripherals, not the memories");
     unsigned long long fo, fl, ro, rl;
     parse_region(flash, &fo, &fl, "--flash");
     parse_region(ram, &ro, &rl, "--ram");
@@ -992,6 +985,19 @@ int main(int argc, char **argv)
     if (!in || (!hdr && !st && !ld && !json && !list && !show))
         usage();
     struct svd_device *d = svd_load(in);
+    if (ld && is_esp32c3(d) && (flash || ram)) {
+        fprintf(stderr, "embsvd: --ld: the ESP32-C3 takes no --flash or --ram: "
+                        "its ROM loads the image into SRAM, which the script "
+                        "splits into IRAM and DRAM; edit its MEMORY to split "
+                        "it otherwise\n");
+        return 2;
+    }
+    if (ld && !is_esp32c3(d) && (!flash || !ram)) {
+        fprintf(stderr, "embsvd: --ld needs --flash ORIGIN:LENGTH and "
+                        "--ram ORIGIN:LENGTH: an SVD describes the "
+                        "peripherals, not the memories\n");
+        return 2;
+    }
     if (prio) {
         int n = atoi(prio);
         if (n < 2 || n > 8) {
