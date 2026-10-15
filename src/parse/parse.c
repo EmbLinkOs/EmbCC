@@ -1462,6 +1462,18 @@ static void parse_label_decl(struct parser *ps)
 
 static struct stmt *parse_block(struct parser *ps);
 
+/* At a `(` that opens a parameter list rather than an expression's
+ * parentheses: `()`, `(...)`, or a parameter's type next. */
+static int fn_suffix_follows(struct parser *ps)
+{
+    struct lexer save = ps->lx;
+    advance(ps);
+    int yes = cur(ps)->kind == TOK_RPAREN || cur(ps)->kind == TOK_ELLIPSIS ||
+              cur(ps)->kind == TOK_KW_ATTRIBUTE || at_type_start(ps);
+    ps->lx = save;
+    return yes;
+}
+
 /* Declarator over a base type (C11 6.7.6): pointers, then a name — or a
  * parenthesized declarator — then array and function suffixes. The
  * parenthesized one binds looser than the suffixes after it (`int
@@ -1584,6 +1596,13 @@ static struct type *declarator(struct parser *ps, struct type *base,
     }
     if (nested && cur(ps)->kind == TOK_LPAREN)
         return parse_fn_params_named(ps, base, ps->fn_pnames);
+    /* a parameter of function type, `int f(int)` (adjusted to a
+     * pointer), and an abstract declarator's parameter list: `void
+     * (void)` and `int *(char, ...)` are type names for function types
+     * (`sizeof(void (void))`, a parameter `int (int)`) */
+    if ((ps->in_param || !*name_out) && cur(ps)->kind == TOK_LPAREN &&
+        fn_suffix_follows(ps))
+        return parse_fn_params(ps, base);
     return parse_array_dims(ps, base);
 }
 
@@ -2931,6 +2950,10 @@ static int size_fold(const struct expr *e, long *out)
             *out = t->count;
             return 1;
         }
+        if (t && (t->kind == TY_VOID || t->kind == TY_FUNC)) {
+            *out = 1;           /* GNU C's size of void and of a function */
+            return 1;
+        }
         if (!t || ty_incomplete(t))
             return 0;   /* sizeof(expr) whose type this pass cannot resolve */
         *out = ty_size(t);      /* (0 for a GNU empty struct) */
@@ -3570,12 +3593,16 @@ static struct type *parse_enum_body(struct parser *ps, struct type *fixed,
 
 /* ---- expressions ---- */
 
+/* The lexer of the unit being parsed, for new_expr's `quiet` */
+static struct lexer *g_expr_lx;
+
 static struct expr *new_expr(enum expr_kind kind, int line, int col)
 {
     struct expr *e = xcalloc(1, sizeof *e);
     e->kind = kind;
     e->line = line;
     e->col = col;
+    e->quiet = g_expr_lx && lex_quiet(g_expr_lx);
     e->desig_index = -1;      /* positional unless a [i] designator sets it */
     e->desig_index_hi = -1;
     return e;
@@ -5719,6 +5746,14 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
     case TOK_MINUSMINUS:
     case TOK_KW_REAL:   /* __real__ z = ...; */
     case TOK_KW_IMAG:
+    case TOK_KW_GENERIC:        /* _Generic(x, ...)(y); -- tgmath style */
+    case TOK_KW_SIZEOF:         /* the rest begin expressions too, which */
+    case TOK_KW_ALIGNOF:        /* a statement may be (to no effect) */
+    case TOK_KW_COUNTOF:
+    case TOK_KW_NULLPTR:
+    case TOK_PLUS:
+    case TOK_STR:
+    case TOK_ANDAND:
         /* expression statement: assignment, call, or ++/-- */
         if (t->kind == TOK_IDENT)
             reject_reserved(ps, t->text, t->line, t->col);
@@ -6925,6 +6960,7 @@ struct unit *parse_unit(const char *file, const char *src)
     ps.alignas_out = 0;
     ps.vla_ok = 0;            /* file scope */
     lex_init(&ps.lx, file, src);
+    g_expr_lx = &ps.lx;
     struct func **ftail = &u->funcs;
     struct global **gtail = &u->globals;
     volatile int seq = 0;      /* written between setjmp and longjmp */
@@ -6953,5 +6989,6 @@ struct unit *parse_unit(const char *file, const char *src)
      * valid C — EmbCC's own predef macro table is exactly that. An entirely
      * empty unit is legal too (a header-only .c, a fully #if'd-out file);
      * it yields a valid, empty object. */
+    g_expr_lx = NULL;           /* ps, and its lexer, end here */
     return u;
 }

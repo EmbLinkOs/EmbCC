@@ -4695,26 +4695,35 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
             break;
         case STMT_RETURN: {
             struct ir_ins *i;
-            int v = s->expr ? gen_expr(fn, s->expr) : -1;
+            struct expr *rx = s->expr;
+            int v = rx ? gen_expr(fn, rx) : -1;
+            /* A void function's `return x;` -- GNU C's `return f();` of a
+             * void f, or C89's value, which it allows with a warning:
+             * x is made, and nothing comes back */
+            if (rx && (rx->ty->kind == TY_VOID ||
+                       (fn->src && fn->src->ret_ty->kind == TY_VOID))) {
+                v = -1;
+                rx = NULL;
+            }
             if (g_instr_this)           /* after the value, before leaving */
                 emit_instr_call(fn, g_instr_fn, "__cyg_profile_func_exit",
                                 s->line);
-            if (s->expr && s->expr->ty->kind == TY_STRUCT && fn->src &&
+            if (rx && rx->ty->kind == TY_STRUCT && fn->src &&
                 fn->src->ret_scalar)
-                v = emit_load(fn, v, ty_scalar_struct_ret(s->expr->ty));
+                v = emit_load(fn, v, ty_scalar_struct_ret(rx->ty));
             i = emit(fn);
             i->op = IR_RET;
             i->a = v;
-            if (s->expr && ty_is_float(s->expr->ty)) {
+            if (rx && ty_is_float(rx->ty)) {
                 i->flt = 1; /* the value goes home in xmm0, not rax */
-                i->w = ty_size(s->expr->ty);
-            } else if (s->expr && s->expr->ty->kind == TY_STRUCT &&
+                i->w = ty_size(rx->ty);
+            } else if (rx && rx->ty->kind == TY_STRUCT &&
                        !(fn->src && fn->src->ret_scalar)) {
                 /* `a` is the ADDRESS of the value; how it travels home
                  * is the callee's classification, computed in codegen
                  * from the function's own return type. */
-                i->size = ty_size(s->expr->ty);
-                i->natural = struct_val_natural(s->expr);
+                i->size = ty_size(rx->ty);
+                i->natural = struct_val_natural(rx);
             }
             break;
         }
