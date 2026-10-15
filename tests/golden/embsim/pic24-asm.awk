@@ -10,7 +10,8 @@
 #   ADDR" for a label, "E NAME VALUE" for an .equ (pic24-elf.py's input)
 #
 # Syntax: `label:`, `; comment`, `.equ NAME, VALUE`, `.org ADDR` (a
-# program address), `.word V` (a 24-bit word or a label), `.fill N, V`;
+# program address; into code already assembled, an error), `.word V` (a
+# 24-bit word or a label), `.fill N, V` (words a later .org may replace);
 # numbers in C syntax or 'c'. For the tests: `.dump ADDR` stores SR, W0
 # ... W15 at ADDR (W0 first, then SR, so no flag changes before it is
 # kept), then sets W15 to STACK and clears the stored SR's DC if the
@@ -78,8 +79,14 @@ function and_(a, b,    r, k) {
     return r
 }
 function emit(w) {
-    if (pass == 2)
+    if (pass == 2) {
+        # a word written twice is an .org into code, unless the first was
+        # a .fill's (a vector table's default, then a vector)
+        if ((pc in word) && !(pc in filled))
+            die(sprintf("a second word at 0x%06x (an .org into code)", pc))
+        delete filled[pc]
         word[pc] = and_(w < 0 ? w + 16777216 : w, 16777215)
+    }
     pc += 2
 }
 function rel(target) {
@@ -97,7 +104,14 @@ function asm(line,    op, args, n, a, x, y, c, b, base, t, k, it, m, item) {
     if (op == ".equ") { gsub(/[ \t]/, "", a[1]); sym[a[1]] = num(a[2]); return }
     if (op == ".org") { pc = num(a[1]); return }
     if (op == ".word") { emit(num(a[1])); return }
-    if (op == ".fill") { for (k = 0; k < num(a[1]); k++) emit(num(a[2])); return }
+    if (op == ".fill") {
+        for (k = 0; k < num(a[1]); k++) {
+            emit(num(a[2]))
+            if (pass == 2)
+                filled[pc - 2] = 1
+        }
+        return
+    }
     if (op == ".dump") {
         # W0, then SR (MOV f, Wnd changes no flag), then W1-W15, to the
         # words at ADDR: SR, W0, W1 ... W15

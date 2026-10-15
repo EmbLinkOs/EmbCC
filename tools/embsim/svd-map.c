@@ -468,6 +468,15 @@ u32 rf_config_addr(struct svdmap *m, const char *name, u32 dflt)
     return dflt;
 }
 
+int rf_y_space(struct svdmap *m, u32 *lo, u32 *hi)
+{
+    if (!m->d->y_end)
+        return 0;
+    *lo = (u32)m->d->y_base;
+    *hi = (u32)m->d->y_end;
+    return 1;
+}
+
 int rf_pin(struct svdmap *m, const char *name)
 {
     for (int i = 0; i < m->d->npin; i++)

@@ -121,6 +121,9 @@ struct svd_device {
      * MX's interrupt controller shares among requests; 0 where they are
      * the same number */
     unsigned long long boot_end;
+    /* EmbSim's: a dsPIC's Y data space, [y_base, y_end), the RAM its DSP
+     * instructions read through W10 and W11 (0 where it has none) */
+    unsigned long long y_base, y_end;
     int *irq_vector;
     int nirq_vector;
     int num_irq;

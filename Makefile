@@ -454,6 +454,7 @@ EMBSIM_SRCS := tools/embsim/main.c tools/embsim/run.c tools/embsim/bus.c \
                tools/embsim/pic24-i2c.c tools/embsim/pic24-ic.c \
                tools/embsim/pic24-oc.c tools/embsim/pic24-ccp.c \
                tools/embsim/pic32-spi.c tools/embsim/pic32-adc10.c \
+               tools/embsim/pic24-dsp.c \
                $(EMBSIM_NET)
 EMBSIM_HDRS := tools/embsim/sim.h tools/embsim/cortexm.h tools/embsim/riscv.h \
                tools/embsim/avr.h \

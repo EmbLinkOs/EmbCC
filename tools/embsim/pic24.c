@@ -1,6 +1,7 @@
 /* pic24.c -- the PIC24F core (a PIC24FJ1024GB610's: the PIC24 CPU with
- * the Extended Data Space), by Microchip's "16-Bit MCU and DSC
- * Programmer's Reference Manual" (DS70000157) and the part's data sheet.
+ * the Extended Data Space), and a dsPIC33EP's, by Microchip's "16-Bit
+ * MCU and DSC Programmer's Reference Manual" (DS70000157) and the parts'
+ * data sheets.
  *
  *   - The instruction set of the PIC24F: every instruction the manual
  *     marks as the PIC24F's, with its addressing modes (register direct,
@@ -42,11 +43,36 @@
  *   - PWRSAV: until an interrupt; with none that can come, the run ends.
  *     A branch to itself with no interrupt to come ends it too.
  *
+ * A dsPIC33EP's core (pic24.h's `e` and `dsp`) is the PIC24E's with the
+ * DSP engine (pic24-dsp.c), by the same manual's pages for the dsPIC33E:
+ *   - the PIC24E's instructions where the PIC24F's differ: CALL, RCALL,
+ *     CALL.L and LNK keep the stack frame flag (CORCON.SFA) in the
+ *     return address's bit 0, RETURN, RETLW and RETFIE restore it, ULNK
+ *     clears it, as an exception's entry stacks it; the computed RCALL,
+ *     GOTO and BRA's other encodings, GOTO.L; CP and CPB with an 8-bit
+ *     literal; REPEAT #lit15 and of a whole Wn; CPBEQ, CPBNE, CPBGT and
+ *     CPBLT (their offset 1: the compare and skip); MULW's 16-bit
+ *     product; MOVPAG;
+ *   - the dsPIC's: DO (#lit15 or Wn; four nested, the outer loops'
+ *     registers on the DO stack, a fifth the soft trap; DCOUNT, DOSTART,
+ *     DOEND, CORCON.DL, SR.DA; CORCON.EDT ends a loop at its pass's end),
+ *     BRA OA, OB, SA and SB, DIVF (the quotient of Wm * 2^15 / Wn, the
+ *     remainder in the same scale);
+ *   - the core's registers: the accumulators, DCOUNT, DOSTART (read-only)
+ *     and DOEND, MODCON, XMODSRT, XMODEND, YMODSRT, YMODEND, XBREV; SR's
+ *     DSP bits (OA, OB, SA and SB writable, clearing SAB clears SA and
+ *     SB) and CORCON's; W15 at the RAM's start (0x1000), DSRPAG and
+ *     DSWPAG 1 out of reset.
+ *
  * Cycles are the manual's: one an instruction, two for a taken branch, a
  * GOTO, CALL, RCALL, MOV.D, PUSH.D, POP.D and the table instructions,
  * three for RETURN, RETLW and RETFIE, one more for a skip over a word and
  * two over a two-word instruction, one more for a read through the EDS
- * window, five for an exception's entry. */
+ * window, five for an exception's entry. A PIC24E's: four for a taken
+ * branch, GOTO, CALL and RCALL, five for a taken compare and branch, six
+ * for RETURN, RETLW and RETFIE, three more for the table instructions,
+ * four more for a read of program memory through the EDS window, one more
+ * for a read of a peripheral's register. */
 #include <stdlib.h>
 #include <string.h>
 
@@ -90,8 +116,8 @@ static int illegal(const char *why)
 static int bad_opcode(void)
 {
     char m[64];
-    snprintf(m, sizeof m, "0x%06x is not a PIC24F instruction",
-             (unsigned)ps->insn);
+    snprintf(m, sizeof m, "0x%06x is not a %s instruction",
+             (unsigned)ps->insn, ps->dsp ? "dsPIC33E" : ps->e ? "PIC24E" : "PIC24F");
     return illegal(m);
 }
 
@@ -137,10 +163,37 @@ static u16 disicnt(void)
     return gone >= ps->disicnt ? 0 : (u16)(ps->disicnt - gone);
 }
 
+/* SR with a dsPIC's summary bits: OAB of OA and OB, SAB of SA and SB */
+static void sr_summary(void)
+{
+    ps->sr = (u16)(ps->sr & ~(SR_OAB | SR_SAB));
+    if (ps->sr & (SR_OA | SR_OB))
+        ps->sr |= SR_OAB;
+    if (ps->sr & (SR_SA | SR_SB))
+        ps->sr |= SR_SAB;
+}
+
 static u16 creg_read(u32 a)
 {
     if (a < 0x20)
         return ps->w[a / 2];
+    if (ps->dsp)
+        switch (a) {
+        case 0x22: case 0x24: case 0x26: case 0x28: case 0x2a: case 0x2c:
+            return pic24_acc_read(a);
+        case 0x38: return ps->dcount;
+        case 0x3a: return (u16)ps->dostart;
+        case 0x3c: return (u16)(ps->dostart >> 16 & 0x3f);
+        case 0x3e: return (u16)ps->doend;
+        case 0x40: return (u16)(ps->doend >> 16 & 0x3f);
+        case 0x46: return ps->modcon;
+        case 0x48: return ps->xmodsrt;
+        case 0x4a: return ps->xmodend;
+        case 0x4c: return ps->ymodsrt;
+        case 0x4e: return ps->ymodend;
+        case 0x50: return ps->xbrev;
+        case 0x58: return ps->mstrpr;
+        }
     switch (a) {
     case 0x20: return ps->splim;
     case 0x2e: return (u16)ps->pc;
@@ -174,6 +227,23 @@ static void creg_write(u32 a, u16 v, u16 mask)
         set_w((int)(a / 2), x);
         return;
     }
+    if (ps->dsp)
+        switch (a) {
+        case 0x22: case 0x24: case 0x26: case 0x28: case 0x2a: case 0x2c:
+            pic24_acc_write(a, x);
+            return;
+        case 0x38: ps->dcount = x; return;
+        case 0x3a: case 0x3c: return;           /* DOSTART: read-only */
+        case 0x3e: ps->doend = (ps->doend & 0x3f0000u) | (x & 0xfffeu); return;
+        case 0x40: ps->doend = (ps->doend & 0xfffeu) | (u32)(x & 0x3f) << 16; return;
+        case 0x46: ps->modcon = (u16)(x & 0xcfff); return;
+        case 0x48: ps->xmodsrt = (u16)(x & ~1u); return;
+        case 0x4a: ps->xmodend = (u16)(x | 1u); return;
+        case 0x4c: ps->ymodsrt = (u16)(x & ~1u); return;
+        case 0x4e: ps->ymodend = (u16)(x | 1u); return;
+        case 0x50: ps->xbrev = x; return;
+        case 0x58: ps->mstrpr = x; return;
+        }
     switch (a) {
     case 0x20: ps->splim = (u16)(x & ~1u); ps->splim_set = 1; break;
     case 0x32: ps->dsrpag = (u16)(x & 0x3ff); break;
@@ -183,13 +253,35 @@ static void creg_write(u32 a, u16 v, u16 mask)
         u16 keep = SR_RA;
         if (ps->intc && ps->intc->nstdis && ps->intc->nstdis(ps->intc->ctx))
             keep |= SR_IPL;
-        ps->sr = (u16)(((ps->sr & keep) | (x & ~keep)) & 0x1ff);
+        if (!ps->dsp) {
+            ps->sr = (u16)(((ps->sr & keep) | (x & ~keep)) & 0x1ff);
+            irq_changed();
+            break;
+        }
+        /* a dsPIC33E's OA, OB, SA, SB are the program's to write too;
+         * clearing SAB clears SA and SB; OAB, SAB, DA are the hardware's */
+        keep |= SR_DA;
+        if ((old & SR_SAB) && !(x & SR_SAB))
+            x = (u16)(x & ~(SR_SA | SR_SB));
+        ps->sr = (u16)((ps->sr & keep) | (x & ~keep & ~(SR_OAB | SR_SAB)));
+        sr_summary();
         irq_changed();
         break;
     }
     case 0x44:
-        /* IPL3 can only be cleared; PSV is the program's */
-        ps->corcon = (u16)((x & 0x4) | (ps->corcon & x & CORCON_IPL3));
+        if (ps->dsp) {
+            /* DL and SFA are the hardware's; EDT ends the DO loop */
+            u16 rw = CORCON_VAR | CORCON_US | CORCON_SATA | CORCON_SATB |
+                     CORCON_SATDW | CORCON_ACCSAT | CORCON_RND | CORCON_IF;
+            if (x & CORCON_EDT)
+                ps->edt = 1;
+            ps->corcon = (u16)((x & rw) | (ps->corcon & (CORCON_DL | CORCON_SFA)) |
+                               (ps->corcon & x & CORCON_IPL3));
+        } else if (ps->e)
+            ps->corcon = (u16)((ps->corcon & CORCON_SFA) | (ps->corcon & x & CORCON_IPL3));
+        else
+            /* IPL3 can only be cleared; PSV is the program's */
+            ps->corcon = (u16)((x & 0x4) | (ps->corcon & x & CORCON_IPL3));
         irq_changed();
         break;
     case 0x52:
@@ -220,12 +312,16 @@ static int dread(u32 ea, int n, u16 *v)
         return 0;
     }
     u32 ba;
-    if (ea < 0x8000)
+    if (ea < 0x8000) {
         ba = PIC24_DATA + ea;
-    else {
+        if (ps->e && ea < ps->ram_base)
+            ps->extra = 1;                      /* a peripheral's register */
+    } else {
         u16 pg = ps->dsrpag;
         ps->extra = 1;
         if (pg & 0x200) {                       /* program space visibility */
+            if (ps->e)
+                ps->extra = 4;
             u32 p = (u32)(pg & 0xff) << 15 | (ea & 0x7fff);
             u32 word = pic24_prog(ps->sim, p);
             u16 half = (pg & 0x100) ? (u16)(word >> 16 & 0xff) : (u16)word;
@@ -298,27 +394,36 @@ static int pointer(int n)
 
 static int stack_check(u32 ea)
 {
-    if (ea < 0x800)
+    if (ea < ps->ram_base)
         return trap(TRAP_STACK, "W15 points below the RAM, at", ea);
     if (ps->splim_set && ea > ps->splim)
         return trap(TRAP_STACK, "W15 is past SPLIM, at", ea);
     return 0;
 }
 
+/* W r modified by d through the X AGU: on a dsPIC, modulo or
+ * bit-reversed as MODCON and XBREV say (pic24-dsp.c) */
+static u16 step_w(int r, u16 w, int d, int write)
+{
+    return ps->dsp ? pic24_agu_step(r, w, d, write, 0) : (u16)(w + d);
+}
+
 /* The effective address of an indirect operand (modes 1-7 of ppp, qqq,
  * ggg, hhh: [W], [W--], [W++], [--W], [++W], [W+Wb]), its register
- * modified; -1 when it cannot be formed. */
-static int ea_of(int mode, int r, int wb, int n, u32 *ea)
+ * modified; -1 when it cannot be formed. `write`: the operand is the
+ * instruction's destination (a dsPIC's bit-reversed addressing is the
+ * X AGU's writes'). */
+static int ea_of(int mode, int r, int wb, int n, u32 *ea, int write)
 {
     if (!pointer(r))
         return -1;
     u16 w = ps->w[r];
     switch (mode) {
     case 1: *ea = w; break;
-    case 2: *ea = w; set_w(r, (u16)(w - n)); break;
-    case 3: *ea = w; set_w(r, (u16)(w + n)); break;
-    case 4: set_w(r, (u16)(w - n)); *ea = ps->w[r]; break;
-    case 5: set_w(r, (u16)(w + n)); *ea = ps->w[r]; break;
+    case 2: *ea = w; set_w(r, step_w(r, w, -n, write)); break;
+    case 3: *ea = w; set_w(r, step_w(r, w, n, write)); break;
+    case 4: set_w(r, step_w(r, w, -n, write)); *ea = ps->w[r]; break;
+    case 5: set_w(r, step_w(r, w, n, write)); *ea = ps->w[r]; break;
     default:
         if (wb < 0) {
             bad_opcode();
@@ -327,6 +432,8 @@ static int ea_of(int mode, int r, int wb, int n, u32 *ea)
         if (!pointer(wb))
             return -1;
         *ea = (u16)(w + ps->w[wb]);
+        if (ps->dsp)
+            *ea = pic24_agu_offset(r, (u16)*ea, (ps->w[wb] & 0x8000) != 0, 0);
         break;
     }
     if (r == 15 && stack_check(*ea))
@@ -342,7 +449,7 @@ static int src(int mode, int r, int wb, int n, u16 *v)
         return 0;
     }
     u32 ea;
-    if (ea_of(mode, r, wb, n, &ea))
+    if (ea_of(mode, r, wb, n, &ea, 0))
         return -1;
     return dread(ea, n, v);
 }
@@ -355,7 +462,7 @@ static int dst(int mode, int r, int wb, int n, u16 v)
         return 0;
     }
     u32 ea;
-    if (ea_of(mode, r, wb, n, &ea))
+    if (ea_of(mode, r, wb, n, &ea, 1))
         return -1;
     return dwrite(ea, n, v);
 }
@@ -423,10 +530,11 @@ static int carry(void)
 
 /* ---- branches ---------------------------------------------------------------------- */
 
+/* a branch taken: two cycles, a PIC24E's four */
 static void jump(u32 to)
 {
     ps->npc = to & 0x7ffffe;
-    ps->extra++;
+    ps->extra += ps->e ? 3 : 1;
 }
 
 static int cond(int c)
@@ -456,7 +564,7 @@ static int cond(int c)
 static int two_word(u32 i)
 {
     u32 op = i >> 16 & 0xff;
-    return op == 0x02 || op == 0x04;
+    return op == 0x02 || op == 0x04 || (op == 0x08 && ps->dsp);
 }
 
 /* skip the next instruction: one cycle more, two over a two-word one */
@@ -468,12 +576,26 @@ static void skip(void)
     ps->extra += words;
 }
 
+/* a call: the return address stacked (a PIC24E's with CORCON.SFA in its
+ * bit 0, which the call clears) */
 static int call(u32 to, u32 ret)
 {
-    if (push((u16)ret) || push((u16)(ret >> 16 & 0x7f)))
+    u16 sfa = ps->e && (ps->corcon & CORCON_SFA) ? 1 : 0;
+    if (push((u16)(ret | sfa)) || push((u16)(ret >> 16 & 0x7f)))
         return 0;
+    if (ps->e)
+        ps->corcon &= (u16)~CORCON_SFA;
     jump(to);
     return 1;
+}
+
+/* a return's address, popped: a PIC24E's CORCON.SFA from its bit 0 */
+static void return_to(u16 hi, u16 lo)
+{
+    if (ps->e)
+        ps->corcon = (u16)((ps->corcon & ~CORCON_SFA) | ((lo & 1) ? CORCON_SFA : 0));
+    ps->npc = ((u32)(hi & 0x7f) << 16 | lo) & 0x7ffffe;
+    ps->extra += ps->e ? 5 : 2;
 }
 
 static u32 sext(u32 v, int bits)
@@ -657,11 +779,92 @@ static int mul(u32 i, int su_a, int su_b)
     s64 x = su_a ? (s64)(int16_t)a : (s64)a;
     s64 y = su_b && (pm & 6) != 6 ? (s64)(int16_t)b : (s64)b;
     u32 p = (u32)(x * y);
+    if (d >= 14 && ps->dsp) {                   /* MUL.xx Wb, Ws, Acc */
+        s64 q = x * y;
+        pic24_dsp_mul_acc(d - 14, (ps->corcon & CORCON_IF) ? q : 2 * q);
+        return 1;
+    }
+    if ((d & 1) && d <= 13 && ps->e) {          /* MULW: Wnd = the low word */
+        set_w(d - 1, (u16)p);
+        return 1;
+    }
     if (d & 1 || d > 12)
         return bad_opcode();
     set_w(d, (u16)p);
     set_w(d + 1, (u16)(p >> 16));
     return 1;
+}
+
+/* DIVF Wm, Wn: Wm and Wn 1.15 fractions, the quotient 1.15 (Wm * 2^15 /
+ * Wn) in W0, the remainder in W1; computed on the first of its 18
+ * executions as DIV's are: 1101 1001 0ttt t000 0000 ssss */
+static int divf(u32 i)
+{
+    int first = !(ps->sr & SR_RA) || ps->rcount == 17;
+    if ((i & 0x8780) || !ps->dsp)
+        return bad_opcode();
+    ps->changed = 1;
+    if (!first)
+        return 1;
+    s64 a = (int16_t)ps->w[F(14, 11)], b = (int16_t)ps->w[F(3, 0)];
+    if (!b) {
+        pic24_core_math(PIC24_MATH_DIV0);
+        return 1;
+    }
+    s64 num = a * 32768, q = num / b, r = num % b;
+    set_w(0, (u16)q);
+    set_w(1, (u16)r);
+    flags(SR_N | SR_Z | SR_OV | SR_C, (u16)((r < 0 ? SR_N : 0) | (r ? 0 : SR_Z) |
+                                            (q > 32767 || q < -32768 ? SR_OV : 0)));
+    return 1;
+}
+
+/* DO #lit15 or Wn, Expr: the loop's registers to the DO stack, the new
+ * loop's in them, DL one more, SR.DA */
+static int do_loop(u32 i)
+{
+    if (!ps->dsp || (F(15, 15) && (i & 0x7ff0)))
+        return bad_opcode();
+    int dl = ps->corcon >> 8 & 7;
+    if (dl >= PIC24_DO_LEVELS) {
+        trap(TRAP_SOFT, "a DO loop nested past the DO stack's four levels", ~0u);
+        return 1;
+    }
+    u32 w2 = pic24_prog(ps->sim, ps->pc + 2);
+    ps->dostack[dl].dcount = ps->dcount;
+    ps->dostack[dl].dostart = ps->dostart;
+    ps->dostack[dl].doend = ps->doend;
+    ps->dcount = F(15, 15) ? ps->w[i & 15] : (u16)(i & 0x7fff);
+    ps->dostart = (ps->pc + 4) & 0x7ffffe;
+    ps->doend = (ps->pc + 4 + 2 * sext(w2 & 0xffff, 16)) & 0x7ffffe;
+    ps->corcon = (u16)((ps->corcon & ~CORCON_DL) | (u32)(dl + 1) << 8);
+    ps->sr |= SR_DA;
+    ps->edt = 0;
+    ps->changed = 1;
+    ps->extra++;
+    return 1;
+}
+
+/* the last instruction of the DO loop done: again from DOSTART while
+ * DCOUNT is not 0 (taking one from it), else the loop ends and the outer
+ * loop's registers come back */
+static void do_end(void)
+{
+    if (ps->dcount && !ps->edt) {
+        ps->dcount--;
+        ps->npc = ps->dostart;
+        return;
+    }
+    int dl = ps->corcon >> 8 & 7;
+    if (dl)
+        dl--;
+    ps->dcount = ps->dostack[dl].dcount;
+    ps->dostart = ps->dostack[dl].dostart;
+    ps->doend = ps->dostack[dl].doend;
+    ps->corcon = (u16)((ps->corcon & ~CORCON_DL) | (u32)dl << 8);
+    if (!dl)
+        ps->sr &= (u16)~SR_DA;
+    ps->edt = 0;
 }
 
 /* DIV.S, DIV.U and their .D forms: Uttt tvvv vW00 ssss */
@@ -676,7 +879,7 @@ static int divide(u32 i)
     u32 div = ps->w[dn];
     u32 lo = ps->w[m], hi = dbl ? ps->w[mh] : uns ? 0 : ((lo & 0x8000) ? 0xffff : 0);
     if (!div) {
-        trap(TRAP_MATH, "a divide by zero", ~0u);
+        pic24_core_math(PIC24_MATH_DIV0);
         return 1;
     }
     u32 q, r;
@@ -714,6 +917,8 @@ static int mov_offset(u32 i, int store)
         if (!pointer(d))
             return 1;
         u32 ea = (u16)(ps->w[d] + off);
+        if (ps->dsp)
+            ea = pic24_agu_offset(d, (u16)ea, (off & 0x8000) != 0, 0);
         if (d == 15 && stack_check(ea))
             return 1;
         dwrite(ea, n, n == 2 ? ps->w[s] : (u16)(ps->w[s] & 0xff));
@@ -722,6 +927,8 @@ static int mov_offset(u32 i, int store)
     if (!pointer(s))
         return 1;
     u32 ea = (u16)(ps->w[s] + off);
+    if (ps->dsp)
+        ea = pic24_agu_offset(s, (u16)ea, (off & 0x8000) != 0, 0);
     if (s == 15 && stack_check(ea))
         return 1;
     if (dread(ea, n, &v))
@@ -750,7 +957,7 @@ static int bit_w(u32 op8, u32 i)
     u32 ea = 0;
     u16 v;
     if (pm) {
-        if (ea_of(pm, s, -1, n, &ea) || dread(ea, n, &v))
+        if (ea_of(pm, s, -1, n, &ea, 0) || dread(ea, n, &v))
             return 1;
     } else
         v = n == 2 ? ps->w[s] : (u16)(ps->w[s] & 0xff);
@@ -822,8 +1029,10 @@ static int table_read(u32 i, int high)
     int n = F(14, 14) ? 1 : 2, pm = (int)F(6, 4), s = (int)F(3, 0);
     u32 ea;
     ps->extra++;
-    if (!pm || ea_of(pm, s, -1, n, &ea))
+    if (!pm || ea_of(pm, s, -1, n, &ea, 0))
         return pm ? 1 : bad_opcode();
+    if (ps->e)
+        ps->extra += 3;
     u32 p = (u32)ps->tblpag << 16 | ea;
     u32 word = pic24_prog(ps->sim, p);
     u16 v;
@@ -847,8 +1056,10 @@ static int table_write(u32 i)
         return 1;
     if (!qm)
         return bad_opcode();
-    if (ea_of(qm, d, -1, n, &ea))
+    if (ea_of(qm, d, -1, n, &ea, 0))
         return 1;
+    if (ps->e)
+        ps->extra += 3;
     u32 p = (u32)ps->tblpag << 16 | ea;
     if ((p & 0xffff00u) == PIC24_LATCHES && ps->nvm)
         ps->nvm->latch_write(ps->nvm->ctx, p, (int)F(15, 15), n, v);
@@ -860,10 +1071,9 @@ static int retfie(void)
     u16 hi, lo;
     if (pop(&hi) || pop(&lo))
         return 1;
-    ps->sr = (u16)((ps->sr & 0x100) | (hi >> 8));
+    ps->sr = (u16)((ps->sr & 0xff00) | (hi >> 8));
     ps->corcon = (u16)((ps->corcon & ~CORCON_IPL3) | ((hi & 0x80) ? CORCON_IPL3 : 0));
-    ps->npc = ((u32)(hi & 0x7f) << 16 | lo) & 0x7ffffe;
-    ps->extra += 2;
+    return_to(hi, lo);
     irq_changed();
     if (ps->sim->an)
         an_exc_return(ps->sim);
@@ -875,8 +1085,7 @@ static int ret(void)
     u16 hi, lo;
     if (pop(&hi) || pop(&lo))
         return 1;
-    ps->npc = ((u32)(hi & 0x7f) << 16 | lo) & 0x7ffffe;
-    ps->extra += 2;
+    return_to(hi, lo);
     return 1;
 }
 
@@ -910,8 +1119,24 @@ static int exec(u32 i)
     switch (op8) {
     case 0x00:                                  /* NOP */
         return 1;
-    case 0x01:
-        switch (i & 0xfff0) {
+    case 0x01: {
+        /* the PIC24E's RCALL, GOTO and BRA Wn: 0x0200, 0x0400, 0x0600 */
+        u32 k = i & 0xfff0;
+        if (ps->e && (k & 0x8000)) {            /* CALL.L, GOTO.L Wn */
+            int lo = (int)(i & 15), hi = (int)F(14, 11);
+            if ((i & 0x03f0) || (lo & 1) || hi != lo + 1)
+                return bad_opcode();
+            u32 to = (u32)(ps->w[hi] & 0x7f) << 16 | ps->w[lo];
+            if (F(10, 10))
+                jump(to);
+            else
+                call(to, ps->pc + 2);
+            return 1;
+        }
+        if (ps->e)
+            k = k == 0x0200 ? 0x2000 : k == 0x0400 ? 0x4000 : k == 0x0600 ? 0x6000 :
+                k == 0x0000 ? 0 : 1;
+        switch (k) {
         case 0x0000:                            /* CALL Wn */
             call(ps->w[i & 15], ps->pc + 2);
             return 1;
@@ -926,6 +1151,7 @@ static int exec(u32 i)
             return 1;
         }
         return bad_opcode();
+    }
     case 0x02: {                                /* CALL lit23 */
         u32 w2 = pic24_prog(ps->sim, ps->pc + 2);
         call((i & 0xfffe) | (w2 & 0x7f) << 16, ps->pc + 4);
@@ -943,8 +1169,7 @@ static int exec(u32 i)
         if (pop(&hi) || pop(&lo))
             return 1;
         dst(0, (int)F(3, 0), -1, n, (u16)(n == 1 ? k & 0xff : k));
-        ps->npc = ((u32)(hi & 0x7f) << 16 | lo) & 0x7ffffe;
-        ps->extra += 2;
+        return_to(hi, lo);
         return 1;
     }
     case 0x06:
@@ -956,11 +1181,15 @@ static int exec(u32 i)
     case 0x07:                                  /* RCALL */
         call(ps->pc + 2 + 2 * sext(i & 0xffff, 16), ps->pc + 2);
         return 1;
+    case 0x08:                                  /* DO */
+        return do_loop(i);
     case 0x09:                                  /* REPEAT */
         if (F(15, 15)) {
             if ((i & 0x7ff0) != 0)
                 return bad_opcode();
-            ps->rcount = (u16)(ps->w[i & 15] & 0x3fff);
+            ps->rcount = (u16)(ps->e ? ps->w[i & 15] : ps->w[i & 15] & 0x3fff);
+        } else if (ps->e) {
+            ps->rcount = (u16)(i & 0x7fff);     /* #lit15 */
         } else {
             if (F(14, 14))
                 return bad_opcode();
@@ -1159,6 +1388,13 @@ static int exec(u32 i)
         else
             dst(0, 0, -1, n, v);
         return 1;
+    case 0xc0: case 0xc1: case 0xc2: case 0xc3: case 0xc4: case 0xc5:
+    case 0xc6: case 0xc7: case 0xc8: case 0xc9: case 0xca: case 0xcb:
+    case 0xcc: case 0xcd: case 0xce: case 0xf0: case 0xf1: case 0xf2:
+    case 0xf3:
+        return ps->dsp ? pic24_dsp_exec(i) : bad_opcode();
+    case 0xd9:                                  /* DIVF */
+        return divf(i);
     case 0xcf: {                                /* FF1R, FF1L */
         if ((i & 0x7800) != 0)
             return bad_opcode();
@@ -1230,11 +1466,12 @@ static int exec(u32 i)
     case 0xe1: {                                /* CP, CPB Wb, Ws or #lit5 */
         int pm = (int)F(6, 4), cb = (int)F(15, 15);
         n = F(10, 10) ? 1 : 2;
-        if ((i & 0x0380) != 0)
+        /* a PIC24E's literal is 8 bits: its top three at 9:7 */
+        if ((i & 0x0380) != 0 && !(ps->e && (pm & 6) == 6))
             return bad_opcode();
         u16 a = n == 2 ? ps->w[F(14, 11)] : (u16)(ps->w[F(14, 11)] & 0xff), b;
         if ((pm & 6) == 6)
-            b = (u16)F(4, 0);
+            b = (u16)(F(9, 7) << 5 | F(4, 0));
         else if (src(pm, (int)F(3, 0), -1, n, &b))
             return 1;
         sub(a, b, cb ? (u32)carry() : 1, n, cb);
@@ -1258,7 +1495,10 @@ static int exec(u32 i)
         return 1;
     }
     case 0xe6: case 0xe7: {                     /* CPSGT, CPSLT, CPSNE, CPSEQ */
-        if ((i & 0x03f0) != 0)
+        /* a PIC24E's CPBGT, CPBLT, CPBNE, CPBEQ: the offset at 9:4, 1
+         * the compare and skip */
+        s32 off = (s32)sext(F(9, 4), 6);
+        if ((i & 0x03f0) != 0 && !ps->e)
             return bad_opcode();
         n = F(10, 10) ? 1 : 2;
         u32 m = n == 2 ? 0xffff : 0xff;
@@ -1269,7 +1509,10 @@ static int exec(u32 i)
             t = F(15, 15) ? sa < sb : sa > sb;
         else
             t = F(15, 15) ? a == b : a != b;
-        if (t)
+        if (t && ps->e && off != 1) {
+            jump(ps->pc + 2 + 2 * (u32)off);
+            ps->extra++;                        /* five cycles taken */
+        } else if (t)
             skip();
         return 1;
     }
@@ -1316,12 +1559,16 @@ static int exec(u32 i)
                 return 1;
             set_w(14, ps->w[15]);
             set_w(15, (u16)(ps->w[15] + (i & 0x3ffe)));
+            if (ps->e)
+                ps->corcon |= CORCON_SFA;       /* a stack frame active */
             return 1;
         }
         if (i == 0xfa8000) {                    /* ULNK */
             set_w(15, ps->w[14]);
             if (!pop(&v))
                 set_w(14, v);
+            if (ps->e)
+                ps->corcon &= (u16)~CORCON_SFA;
             return 1;
         }
         return bad_opcode();
@@ -1377,6 +1624,23 @@ static int exec(u32 i)
         }
         return bad_opcode();
     case 0xfe:
+        if (ps->e && (i & 0xe000) == 0xc000) {  /* MOVPAG #lit or Wn */
+            int pp = (int)F(11, 10);
+            u32 k = F(9, 0);
+            if (F(12, 12)) {
+                if (i & 0x03f0)
+                    return bad_opcode();
+                k = ps->w[i & 15];
+            }
+            switch (pp) {
+            case 0: ps->dsrpag = (u16)(k & 0x3ff); break;
+            case 1: ps->dswpag = (u16)(k & 0x1ff); break;
+            case 2: ps->tblpag = (u16)(k & 0xff); break;
+            default: return bad_opcode();
+            }
+            ps->changed = 1;
+            return 1;
+        }
         switch (i & 0xffff) {
         case 0x0000:                            /* RESET */
             sim_end(ps->sim, END_EXIT, "RESET at 0x%06x", (unsigned)ps->pc);
@@ -1412,6 +1676,12 @@ static int exec(u32 i)
             jump(ps->pc + 2 + 2 * sext(i & 0xffff, 16));
         return 1;
     }
+    if (op8 >= 0x0c && op8 <= 0x0f && ps->dsp) {    /* BRA OA, OB, SA, SB */
+        static const u16 bit[4] = { SR_OA, SR_OB, SR_SA, SR_SB };
+        if (ps->sr & bit[op8 - 0x0c])
+            jump(ps->pc + 2 + 2 * sext(i & 0xffff, 16));
+        return 1;
+    }
     return bad_opcode();
 }
 
@@ -1437,10 +1707,13 @@ static void enter(u32 vector, int ipl, int irq)
     u32 ret = ps->pc;
     u16 hi = (u16)((ps->sr & 0xff) << 8 | ((ps->corcon & CORCON_IPL3) ? 0x80 : 0) |
                    (ret >> 16 & 0x7f));
+    u16 sfa = ps->e && (ps->corcon & CORCON_SFA) ? 1 : 0;
     ps->trap = 0;
-    if (push((u16)ret) || push(hi)) {
+    if (push((u16)(ret | sfa)) || push(hi)) {
         ps->trap = 0;                           /* a stack that cannot take it */
     }
+    if (ps->e)
+        ps->corcon &= (u16)~CORCON_SFA;
     if (ipl < 8 && ps->intc && ps->intc->nstdis && ps->intc->nstdis(ps->intc->ctx))
         ipl = 7;
     ps->sr = (u16)((ps->sr & ~(SR_IPL | SR_RA)) | (u32)(ipl & 7) << 5);
@@ -1539,6 +1812,8 @@ static void step(struct cpu *c)
         }
         ps->sr &= (u16)~SR_RA;
     }
+    if ((ps->sr & SR_DA) && ps->pc == ps->doend && ps->dsp)
+        do_end();
     if (ps->npc == ps->pc && !ps->changed && s->state == RUN) {
         /* a branch to itself: the end, unless an interrupt can come */
         int irq, pr = ps->intc ? ps->intc->request(ps->intc->ctx, &irq) : 0;
@@ -1560,13 +1835,24 @@ static void cpu_reset(struct cpu *c)
 {
     struct pic24_state *k = (struct pic24_state *)c;
     memset(k->w, 0, sizeof k->w);
-    k->w[15] = 0x0800;
+    k->w[15] = k->ram_base;
     k->winit = 1u << 15;
     k->splim = 0;
     k->splim_set = 0;
     k->sr = 0;
-    k->corcon = 0x0004;
+    k->corcon = k->dsp ? CORCON_SATDW : k->e ? 0 : 0x0004;
     k->dsrpag = k->dswpag = k->rcount = k->tblpag = k->disicnt = 0;
+    if (k->e)
+        k->dsrpag = k->dswpag = 1;              /* the RAM above 0x8000 */
+    k->acc[0] = k->acc[1] = 0;
+    k->dcount = 0;
+    k->dostart = k->doend = 0;
+    k->edt = 0;
+    k->modcon = k->xmodsrt = k->ymodsrt = k->xbrev = k->mstrpr = 0;
+    k->xmodend = k->ymodend = 1;
+    k->y_lo = k->y_hi = 0;
+    if (k->dsp && k->sim->svd)
+        rf_y_space(k->sim->svd, &k->y_lo, &k->y_hi);
     k->disi_at = 0;
     k->pc = 0;
     k->traps = 0;
@@ -1748,6 +2034,30 @@ int pic24_unlocked(struct sim *s)
     return 1;
 }
 
+/* A dsPIC33E's clock: the 7.37 MHz FRC (COSC 000), with the PLL (001),
+ * the primary oscillator (the board's 8 MHz, 010) and with the PLL (011),
+ * the SOSC (100), the LPRC (101), the FRC divided by 16 (110) or by
+ * CLKDIV.FRCDIV (111); the PLL's output Fin * M / (N1 * N2): M PLLFBD + 2,
+ * N1 CLKDIV.PLLPRE + 2, N2 2 (CLKDIV.PLLPOST + 1). The CPU runs at half. */
+static u32 fcy_e(struct rf_periph *osc, u32 cosc, u32 clkdiv)
+{
+    u32 frc = 7370000u, fin = cosc <= 1 ? frc : 8000000u, fosc;
+    struct rf_reg *r = osc ? rf_reg(osc, "PLLFBD") : 0;
+    u64 m = (r ? (u32)r->value & 0x1ff : 0x30) + 2;
+    switch (cosc) {
+    case 1: case 3:
+        fosc = (u32)((u64)fin * m / ((clkdiv & 0x1f) + 2) / (2 * ((clkdiv >> 6 & 3) + 1)));
+        break;
+    case 2: fosc = 8000000u; break;
+    case 4: fosc = 32768; break;
+    case 5: fosc = 32000; break;
+    case 6: fosc = frc / 16; break;
+    case 7: fosc = frc >> (clkdiv >> 8 & 7); break;
+    default: fosc = frc; break;
+    }
+    return fosc / 2;
+}
+
 /* The core's clock. FNOSC (FOSCSEL<2:0>) chooses the oscillator at reset
  * and OSCCON.COSC the one running: the 8 MHz FRC, the FRC with the 96 MHz
  * PLL (CLKDIV.CPDIV divides it to 32, 16, 8 or 4 MHz), the FRC divided by
@@ -1764,6 +2074,8 @@ u32 pic24_fcy(struct sim *s)
     r = osc ? rf_reg(osc, "CLKDIV") : 0;
     if (r)
         clkdiv = (u32)r->value;
+    if (pic24_is(s->cpu) && ((struct pic24_state *)s->cpu)->e)
+        return fcy_e(osc, cosc, clkdiv);
     u32 fosc;
     switch (cosc) {
     case 1: fosc = 32000000u >> (clkdiv >> 6 & 3); break;
@@ -1781,21 +2093,83 @@ u32 pic24_fcy(struct sim *s)
     return fosc / 2;
 }
 
-/* the core: a PIC24FJ's (the PIC24FJ1024GB610 or a part of its family),
- * its program memory the board's first region: to program address
- * 0xABFFF on the PIC24FJ1024GB610, the configuration words at the end */
+/* the core: a PIC24FJ's (the PIC24FJ1024GB610 or a part of its family)
+ * or a dsPIC33EP's, its program memory the board's first region (to
+ * program address 0xABFFF on the PIC24FJ1024GB610, the configuration
+ * words at the end), its RAM the third */
 struct cpu *pic24_create(struct sim *s, const char *model,
                          const struct board_desc *bd)
 {
-    if (strncmp(model, "pic24fj", 7))
+    int ds = !strncmp(model, "dspic33ep", 9), e = ds || !strncmp(model, "pic24ep", 7);
+    if (strncmp(model, "pic24fj", 7) && !e)
         return 0;
     struct pic24_state *k = calloc(1, sizeof *k);
     if (!k)
         die("out of memory");
     k->cpu.ops = &pic24_ops;
     k->sim = s;
+    k->e = e;
+    k->dsp = ds;
+    k->ram_base = bd && bd->mem[2].base >= PIC24_DATA ?
+                  (u16)(bd->mem[2].base - PIC24_DATA) : e ? 0x1000 : 0x0800;
     k->prog_end = bd && bd->mem[0].size ? bd->mem[0].size / 2 : 0xac000;
     s->cpu = &k->cpu;
     cpu_reset(&k->cpu);
     return &k->cpu;
+}
+
+/* ---- the core's own, for pic24-dsp.c -------------------------------------------- */
+
+int pic24_core_read(u32 ea, int n, u16 *v)
+{
+    return dread(ea, n, v);
+}
+
+int pic24_core_write(u32 ea, int n, u16 v)
+{
+    return dwrite(ea, n, v);
+}
+
+void pic24_core_set_w(int n, u16 v)
+{
+    set_w(n, v);
+}
+
+int pic24_core_pointer(int n)
+{
+    return pointer(n);
+}
+
+int pic24_core_src(int mode, int r, int wb, int n, u16 *v)
+{
+    return src(mode, r, wb, n, v);
+}
+
+int pic24_core_dst(int mode, int r, int wb, int n, u16 v)
+{
+    return dst(mode, r, wb, n, v);
+}
+
+int pic24_core_bad_opcode(void)
+{
+    return bad_opcode();
+}
+
+int pic24_core_trap(int n, const char *why)
+{
+    return trap(n, why, ~0u);
+}
+
+void pic24_core_math(int why)
+{
+    static const char *const what[] = {
+        "a divide by zero", "an overflow of ACCA", "an overflow of ACCB",
+        "a catastrophic overflow of ACCA", "a catastrophic overflow of ACCB",
+        "a shift of an accumulator past 16 bits",
+    };
+    int on = why == PIC24_MATH_DIV0 || why == PIC24_MATH_SFTAC;
+    if (ps->intc && ps->intc->math)
+        on = ps->intc->math(ps->intc->ctx, why);
+    if (on)
+        trap(TRAP_MATH, what[why], ~0u);
 }

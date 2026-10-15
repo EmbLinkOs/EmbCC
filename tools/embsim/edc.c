@@ -263,7 +263,7 @@ static void find_sectors(struct sfrs *out, const struct xnode *n, int depth)
 /* a peripheral's name by its first register: the family's own, where
  * the register's letters say little */
 static const struct { const char *first, *name; } names[] = {
-    { "INTCON1", "INT" }, { "OSCCON", "OSC" }, { "PMCON1", "PMP" },
+    { "INTCON1", "INT" }, { "IFS0", "INT" }, { "OSCCON", "OSC" }, { "PMCON", "PMP" },
     { "CRCCON1", "CRC" }, { "REFOCON", "REFO" }, { "CTMUCON1", "CTMU" },
     { "RTCCON1", "RTCC" }, { "CMSTAT", "CMP" }, { "U1MODE", "UART" },
     { "I2C1", "I2C" }, { "DMACON", "DMA" }, { "U1OTG", "USB" },
@@ -273,6 +273,9 @@ static const struct { const char *first, *name; } names[] = {
     { "TMR1", "TMR" }, { "IC1CON", "IC" }, { "OC1CON", "OC" },
     { "CCP1CON", "CCP" }, { "SPI1CON", "SPI" }, { "CLC1CON", "CLC" },
     { "PMD1", "PMD" }, { "RCON", "RCON" }, { "ANCFG", "ANCFG" },
+    { "ALRMVAL", "RTCC" }, { "DCICON1", "DCI" }, { "C1CTRL1", "ECAN" }, { "C2CTRL1", "ECAN" },
+    { "PTCON", "PWM" }, { "PADCFG1", "PAD" }, { "U3MODE", "UART" },
+    { "U4MODE", "UART" }, { "U1PWMRRS", "USB" },
 };
 
 static char *periph_name(const char *first)
@@ -286,9 +289,11 @@ static char *periph_name(const char *first)
     return svd_dup(first, n ? n : strlen(first));
 }
 
-static int is_core(const char *mod)
+/* the core's registers: its module's (the PIC24F's "CPU"; a dsPIC33E's
+ * module has no such name, but its run starts at W0) */
+static int is_core(const char *mod, const char *first)
 {
-    return mod && strstr(mod, "CPU");
+    return (mod && strstr(mod, "CPU")) || !strcmp(first, "WREG0");
 }
 
 /* a port pin's name: R, its port's letter (A to K, no I), its bit */
@@ -539,27 +544,43 @@ struct svd_device *edc_load(const char *path)
         svd_die("an EDC file with no <edc:DataSpace>");
     d->ram_base = num(ds, "edc:xbeginaddr", 0);
     d->ram_end = num(ds, "edc:xendaddr", 0);
+    /* a dsPIC's Y space: from ybeginaddr to the general purpose RAM's
+     * end (the DMA's RAM past it is X space) */
+    d->y_base = num(ds, "edc:ybeginaddr", 0);
+    if (d->y_base) {
+        const struct xnode *rm = svd_xfind(ds, "edc:RegardlessOfMode");
+        const struct xnode *gpr = rm ? svd_xfind(rm, "edc:GPRDataSector") : 0;
+        d->y_end = gpr ? num(gpr, "edc:endaddr", 0) : d->ram_end;
+    }
     read_program(d, svd_xfind(root, "edc:ProgramSpace"), 0);
     struct sfrs all = { 0, 0, 0 };
     find_sectors(&all, ds, 0);
-    /* runs of one module's registers: the peripherals */
+    /* runs of one module's registers: the peripherals (the registers
+     * of no module, the debugger's, one run) */
+    int last = -1;
     for (int i = 0; i < all.n; ) {
         int j = i + 1;
-        while (j < all.n && all.v[j].mod && all.v[i].mod &&
-               !strcmp(all.v[j].mod, all.v[i].mod))
+        while (j < all.n && (all.v[j].mod && all.v[i].mod ?
+                             !strcmp(all.v[j].mod, all.v[i].mod) :
+                             !all.v[j].mod && !all.v[i].mod))
             j++;
-        if (is_core(all.v[i].mod)) {
+        if (is_core(all.v[i].mod, all.v[i].r.name)) {
             i = j;
             continue;
         }
         const char *nm = periph_name(all.v[i].r.name);
-        /* a module whose registers another module's interrupt (CCP1-3,
-         * then CCP4-7 past the comparators): one peripheral still */
+        /* a later run of a module and name with a peripheral already is
+         * that peripheral's (CCP4-7 past the comparators; a dsPIC33E's
+         * UART3 and UART4 between its SPIs); so is a run named as the run
+         * just before it, of another module (a dsPIC33E's Timer1 and its
+         * Timer2-9, its RPORx and RPINRx) */
         struct svd_periph *p = 0;
         for (int k = 0; k < d->np; k++)
             if (!strcmp(d->p[k].name, nm) && d->p[k].group && all.v[i].mod &&
                 !strcmp(d->p[k].group, all.v[i].mod))
                 p = &d->p[k];
+        if (!p && last >= 0 && !strcmp(d->p[last].name, nm))
+            p = &d->p[last];
         if (!p) {
             /* a name a run of another module had (the device's own
              * module's blocks): numbered */
@@ -580,6 +601,7 @@ struct svd_device *edc_load(const char *path)
             p->group = all.v[i].mod;
             p->base = all.v[i].r.off;
         }
+        last = (int)(p - d->p);
         p->kid = svd_grow(p->kid, sizeof *p->kid * (size_t)(p->nkid + j - i));
         for (int k = i; k < j; k++) {
             p->kid[p->nkid] = all.v[k].r;

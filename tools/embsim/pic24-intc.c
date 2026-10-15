@@ -10,8 +10,13 @@
  *   - Taking it, INTTREG says which: VECNUM (the vector number, n + 8)
  *     and ILR (the new priority).
  *   - The core's traps set INTCON1's status bits (OSCFAIL, ADDRERR,
- *     STKERR, MATHERR) and INTCON4.SGHT for a hard trap; the program
- *     clears them in its handler.
+ *     STKERR, MATHERR) and INTCON4.SGHT for a hard trap, a dsPIC33E's
+ *     INTCON3.DOOVR for its soft trap (a DO stack overflow); the program
+ *     clears them in its handler. Of the math error trap's conditions,
+ *     a divide by zero sets DIV0ERR and an accumulator shifted too far
+ *     SFTACERR; an accumulator's overflow is one only with OVATE or
+ *     OVBTE (then OVAERR, OVBERR), a catastrophic one with COVTE
+ *     (COVAERR, COVBERR).
  *   - INTCON1.NSTDIS: an interrupt runs at priority 7, so none nests.
  * A model raises its interrupt with pic24_irq; the program clears the
  * flag. Writing a flag sets it too, as on the part.
@@ -28,7 +33,7 @@
 struct intc {
     struct sim *s;
     struct rf_periph *p;
-    struct rf_reg *intcon1, *intcon2, *intcon4, *inttreg;
+    struct rf_reg *intcon1, *intcon2, *intcon3, *intcon4, *inttreg;
     struct rf_reg *ifs[16], *iec[16], *ipc[64];
     int nw;
     struct pic24_intc ic;
@@ -88,6 +93,22 @@ static void trap(void *ctx, int n)
         rf_hw(c->intcon1, c->intcon1->value | bit[n]);
     if (n == TRAP_HARD && c->intcon4)
         rf_hw(c->intcon4, c->intcon4->value | 1);
+    if (n == TRAP_SOFT && c->intcon3)
+        rf_hw(c->intcon3, c->intcon3->value | rf_mask(c->intcon3, "DOOVR"));
+}
+
+static int math(void *ctx, int why)
+{
+    static const char *const err[] = {
+        "DIV0ERR", "OVAERR", "OVBERR", "COVAERR", "COVBERR", "SFTACERR" };
+    static const char *const en[] = { 0, "OVATE", "OVBTE", "COVTE", "COVTE", 0 };
+    struct intc *c = ctx;
+    if (!c->intcon1)
+        return !en[why];
+    if (en[why] && !(c->intcon1->value & rf_mask(c->intcon1, en[why])))
+        return 0;
+    rf_hw(c->intcon1, c->intcon1->value | rf_mask(c->intcon1, err[why]));
+    return 1;
 }
 
 static int nstdis(void *ctx)
@@ -196,6 +217,7 @@ void *pic24_intc_create(struct sim *s, struct rf_periph *p)
     c->p = p;
     c->intcon1 = rf_reg(p, "INTCON1");
     c->intcon2 = rf_reg(p, "INTCON2");
+    c->intcon3 = rf_reg(p, "INTCON3");
     c->intcon4 = rf_reg(p, "INTCON4");
     c->inttreg = rf_reg(p, "INTTREG");
     char nm[16];
@@ -217,6 +239,7 @@ void *pic24_intc_create(struct sim *s, struct rf_periph *p)
     c->ic.request = request;
     c->ic.taken = taken;
     c->ic.trap = trap;
+    c->ic.math = math;
     c->ic.nstdis = nstdis;
     c->ic.ctx = c;
     pic24_intc_attach(s, &c->ic);

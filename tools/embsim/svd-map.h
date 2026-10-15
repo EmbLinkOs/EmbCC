@@ -157,6 +157,8 @@ int rf_pin(struct svdmap *m, const char *name);
 /* a 16-bit part's configuration word's program address, by its name
  * (FOSCSEL), or `dflt` */
 u32 rf_config_addr(struct svdmap *m, const char *name, u32 dflt);
+/* a dsPIC's Y data space, [*lo, *hi) in data addresses; 0 if it has none */
+int rf_y_space(struct svdmap *m, u32 *lo, u32 *hi);
 /* the model's clock starts (on 1) or stops: while it runs, its tick hook
  * is called after each instruction and its next_event asked (sim_clock,
  * for a model); `*running` is the model's own record of it */

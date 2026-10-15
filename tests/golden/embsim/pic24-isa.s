@@ -26,7 +26,7 @@
         .org 0
         goto start
         .fill 126, trap
-        .org 0x100
+        .org 0x4000                ; past the program memory the table reads read
 start:  mov #STACK, w15
         mov #0x8000, w0
         mov w0, U1MODE
