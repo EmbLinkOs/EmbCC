@@ -78,7 +78,7 @@ operators](#feature-test-operators), with the limits described there.
 | [Zero-length arrays](#zero-length-and-flexible-arrays) | Supported as a structure member |
 | [Static initialization of a flexible array member](#zero-length-and-flexible-arrays) | Supported |
 | [`__int128`, `__real__`, `__imag__` and other types](#additional-types) | See the section |
-| [Alternate keywords](#alternate-keywords) (`__asm__`, `__inline__`, ...) | Supported, except `__signed__`, `__signed`, `__const`, `__const__` |
+| [Alternate keywords](#alternate-keywords) (`__asm__`, `__inline__`, ...) | Supported |
 | `__alignof__` of an expression | Supported |
 | `\e` escape (ESC, 27) | Supported |
 | Binary integer constants (`0b1011`) | Supported |
@@ -304,11 +304,9 @@ headers written for `-ansi` work:
 | `__real`, `__imag` | `__real__`, `__imag__` |
 | `__attribute` | `__attribute__` |
 | `__thread` | `_Thread_local` |
+| `__signed__`, `__signed` | `signed` |
+| `__const__`, `__const` | `const` |
 | `__extension__` | Nothing; it is predefined as an empty macro |
-
-`__signed__`, `__signed`, `__const` and `__const__` are not recognized;
-a declaration that uses them is a syntax error (`expected a type before
-'__signed__'`).
 
 ### GNU extensions that are not supported
 
@@ -471,6 +469,8 @@ not supported (functions take it)`.
 | `aligned` | `enum` | Refused: `an aligned enum is not supported (an enum here is int, or the type its values need)` |
 | `deprecated` | a type | Accepted; using the type does not warn |
 | `may_alias` | a type | Accepted with no effect; EmbCC performs no type-based alias analysis |
+| `mode(M)` | an integer `typedef` or declaration | The integer type of mode `M`'s width, keeping the written signedness: `QI` 1 byte, `HI` 2, `SI` 4, `DI` 8, `TI` 16, `byte` 1, `word` and `pointer` the target's register and pointer width (glibc's `<sys/types.h>` writes these). Another mode is refused: `__attribute__((mode(V4SI))) is not supported: EmbCC takes the integer modes QI, HI, SI, DI, TI, byte, word and pointer` |
+| `transparent_union` | a `union` | A parameter of the union type takes any of its members' types, and is passed as its first member is (glibc's `<sys/socket.h>` under `_GNU_SOURCE`). Defining a function that receives one is refused off x86-64 and AArch64, where that is not yet checked: `a transparent_union parameter, which EmbCC receives only on x86-64 and AArch64` |
 
 `packed` applies to a whole structure or union. Written on a single
 member, before or after its declarator, it is accepted and has no
@@ -663,7 +663,6 @@ supported: REASON`:
 | `ifunc` | `the resolver would never run and calls would go to it rather than to the implementation it picks` |
 | `interrupt` | On every target but Cortex-M, AVR, RISC-V and MIPS32; see [Interrupt handlers](#interrupt-handlers) |
 | `keep_interrupts_masked` | `it modifies a MIPS interrupt handler, and only the MIPS32 target implements those` (on every target but MIPS32) |
-| `mode` | `the declaration would keep its written type, so a typedef that asks for a specific width would silently get another` |
 | `ms_abi` | `the arguments would be passed in System V's registers` |
 | `naked` | On x86-64 and AArch64; see [Naked functions](inline-asm.md#naked-functions) |
 | `signal` | On every target but AVR; see [Interrupt handlers](#interrupt-handlers) |
@@ -671,7 +670,6 @@ supported: REASON`:
 | `target` | `EmbCC selects its instruction set per compilation; a function asking for another would be compiled for the wrong one` |
 | `use_debug_exception_return` | `the handler would return with eret where the debug exception needs deret, and save DEPC as EPC` |
 | `use_shadow_register_set` | `EmbCC does not switch register sets: the handler would save into and run on a shadow set's stack pointer it never read with rdpgpr` |
-| `transparent_union` | `the union would be passed as a union rather than as its first member, which is a different calling convention` |
 | `vector_size` | `the type would stay a scalar: ...`; see [Vector extensions](#vector-extensions) |
 | `weakref` | `the symbol would be emitted as an ordinary reference, so a missing target would fail to link instead of being null` |
 

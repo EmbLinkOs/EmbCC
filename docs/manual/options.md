@@ -180,6 +180,9 @@ EmbCC's own spellings come first. Where GCC spells the same thing differently, i
 | `--no-default-libs` | no C library, no runtime | `-nodefaultlibs` |
 | `--static` | a static program | `-static` |
 | `--linker-arg=ARG` | pass ARG to EmbLD | `-Xlinker ARG` |
+| `--libc=LIBC` | embcc (EmbCC's own C library) or system (a Linux target's glibc: its headers, libraries and linker) |  |
+| `--sysroot=DIR` | the target system's root, for --libc=system (default /) |  |
+| `--linker=PATH` | the system's linker, for --libc=system (default: TRIPLE-ld, ld.lld or ld) | `--ld-path=PATH` |
 | `--assembler-arg=ARG` | pass ARG to the assembler | `-Wa,ARG` |
 
 ## Asking EmbCC
@@ -241,7 +244,8 @@ GCC flags EmbCC reads, either because they change nothing here or so as to refus
 | `-fno-plt` | accepted |
 | `-shared` | a shared library |
 | `-static-pie` | a static position-independent executable |
-| `-pthread` | accepted |
+| `-pthread` | POSIX threads: with --libc=system, glibc's (_REENTRANT, -lpthread) |
+| `-fuse-ld=*` | the system's linker for --libc=system: bfd, gold or lld (ld.NAME) |
 | `-fno-ident` | accepted |
 | `-fident` | accepted |
 | `-fno-reorder-functions` | accepted |

@@ -83,6 +83,11 @@ struct attrs { int packed; int aligned; int weak; int noreturn;
                 * .progmem.data, whatever section() says -- avr-gcc's rule.
                 * Last, for the reason isr gives. */
                int progmem;
+               /* mode(QI|HI|SI|DI|TI|word|pointer|byte): the integer of
+                * that many bytes, the declared type's signedness kept;
+                * 0 none. Last, for the reason isr gives. */
+               int mode;
+               int transparent;       /* transparent_union */
 };
 
 struct parser {
@@ -102,6 +107,11 @@ struct parser {
      * gets (0: none), and the values `push` saved */
     int pack_cur, npack;
     int pack_stack[32];
+    /* The line of a mode or transparent_union attribute parsed and not
+     * yet applied (0: none). They change a TYPE, and are applied where a
+     * typedef or a union is defined; anywhere else the declaration would
+     * keep its written type, so attrs_unapplied() says so. */
+    int mode_line, tu_line;
     /* GNU `__label__ n;`: a label LOCAL to the enclosing block, so a
      * macro that declares one can be expanded twice in a function
      * without the second `n:` being a duplicate. That is the only
@@ -799,12 +809,10 @@ static const struct attr_entry attr_table[] = {
       "the type would stay a scalar: EmbCC's vector IR comes from the "
       "auto-vectorizer and only x86-64 lowers it, so a vector TYPE has "
       "no representation in the front end or on three of four targets" },
-    { "mode",        ATTR_REFUSED,
-      "the declaration would keep its written type, so a typedef that "
-      "asks for a specific width would silently get another" },
-    { "transparent_union", ATTR_REFUSED,
-      "the union would be passed as a union rather than as its first "
-      "member, which is a different calling convention" },
+    /* glibc's <sys/types.h> (register_t) and <sys/socket.h> (the
+     * sockaddr arguments under _GNU_SOURCE) */
+    { "mode",        ATTR_HONOURED, NULL },
+    { "transparent_union", ATTR_HONOURED, NULL },
     { "target",      ATTR_REFUSED,
       "EmbCC selects its instruction set per compilation; a function "
       "asking for another would be compiled for the wrong one" },
@@ -1067,6 +1075,37 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
             long fidx = 0, ffirst = 0;
             if (cur(ps)->kind == TOK_LPAREN) {
                 advance(ps);
+                if (name && attr_is(name, "mode")) {
+                    /* GCC's machine modes, by the bytes of each; the
+                     * floating ones (SF, DF...) are not taken */
+                    const char *m = cur(ps)->kind == TOK_IDENT
+                                  ? cur(ps)->text : "";
+                    while (*m == '_')
+                        m++;
+                    size_t ml = strlen(m);
+                    while (ml && m[ml - 1] == '_')
+                        ml--;
+                    static const struct { const char *n; int b; } modes[] = {
+                        { "QI", 1 }, { "HI", 2 }, { "SI", 4 }, { "DI", 8 },
+                        { "TI", 16 }, { "byte", 1 }, { "word", -1 },
+                        { "pointer", -1 }, { "unwind_word", -1 },
+                    };
+                    int b = 0;
+                    for (size_t k = 0; k < sizeof modes / sizeof modes[0]; k++)
+                        if (strlen(modes[k].n) == ml &&
+                            !strncmp(modes[k].n, m, ml))
+                            b = modes[k].b < 0 ? target_ptr_size()
+                                               : modes[k].b;
+                    if (!b)
+                        parse_error_line(ps, aline,
+                            "__attribute__((mode(%s))) is not supported: "
+                            "EmbCC takes the integer modes QI, HI, SI, DI, "
+                            "TI, byte, word and pointer",
+                            cur(ps)->kind == TOK_IDENT ? cur(ps)->text : "?");
+                    if (out)
+                        out->mode = b;
+                    ps->mode_line = aline;
+                }
                 if (name && attr_is(name, "format") &&
                     cur(ps)->kind == TOK_IDENT) {
                     /* Both arguments are 1-based and count the format
@@ -1201,6 +1240,10 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
             }
             if (name && out) {
                 if (attr_is(name, "packed")) out->packed = 1;
+                else if (attr_is(name, "transparent_union")) {
+                    out->transparent = 1;
+                    ps->tu_line = aline;
+                }
                 else if (attr_is(name, "weak")) out->weak = 1;
                 else if (attr_is(name, "signal")) {
                     /* signal and interrupt together are interrupt on AVR,
@@ -1318,6 +1361,15 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
 
 static struct type *parse_stars(struct parser *ps, struct type *t);
 static struct expr *parse_cond(struct parser *ps);
+
+/* A _FloatN keyword's token (lex.c keeps its spelling for these) */
+static int float_n_name(const struct token *t)
+{
+    return (t->kind == TOK_KW_FLOAT || t->kind == TOK_KW_DOUBLE ||
+            t->kind == TOK_KW_FLOAT128 || t->kind == TOK_KW_FLOAT16) &&
+           t->text && !strncmp(t->text, "_Float", 6);
+}
+static void mark_transparent(struct parser *ps, struct type *t);
 /* A cast in a CONSTANT EXPRESSION truncates and re-extends, exactly as
  * it would at run time. Folding the operand and ignoring the cast made
  * `(char)200` fold to 200 instead of -56 and `(unsigned char)300` to 300
@@ -2181,6 +2233,10 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
             any++;
             continue;
         }
+        /* `typedef float _Float32;`: the declarator's, after a type
+         * (float_n_typedef) */
+        if (any && float_n_name(cur(ps)))
+            break;
         if (k == TOK_KW_FLOAT) nfloat++;
         else if (k == TOK_KW_COMPLEX) ncomplex++;
         else if (k == TOK_KW_BOOL) nbool++;
@@ -3223,6 +3279,8 @@ static struct type *parse_struct_body(struct parser *ps, struct type *t,
     parse_attributes(ps, &at);   /* struct {...} __attribute__((packed)) */
     /* `struct E { };`: GNU C's, of size 0 (ISO C wants a member) */
     ty_struct_layout(t, ms, n, at.packed, at.aligned, ps->pack_cur);
+    if (at.transparent)                 /* union {...} __attribute__(...) */
+        mark_transparent(ps, t);
     return t;
 }
 
@@ -4583,6 +4641,26 @@ static void close_tags(struct parser *ps, struct tagdef *mark, int outer)
     ps->tag_blk = outer;
 }
 
+/* A mode or transparent_union written where nothing applies it: on a
+ * variable, a parameter or a member. GCC changes that declaration's type;
+ * EmbCC takes mode on a typedef, as glibc and Linux write it, and refuses
+ * it elsewhere rather than leave the written type. transparent_union is
+ * ignored with a warning off a union type, as in GCC. */
+static void attrs_unapplied(struct parser *ps)
+{
+    int ml = ps->mode_line, tl = ps->tu_line;
+    ps->mode_line = ps->tu_line = 0;
+    if (ml)
+        parse_error_line(ps, ml, "__attribute__((mode)) is not supported "
+                         "here: EmbCC applies it to a typedef (typedef int "
+                         "T __attribute__((mode(DI)));), and this "
+                         "declaration would keep its written type");
+    if (tl)
+        diag_warn_opt(ps->lx.file, tl, 0, "attributes",
+                      "__attribute__((transparent_union)) is ignored: it "
+                      "applies to a union type");
+}
+
 static struct stmt *parse_block(struct parser *ps)
 {
     struct stmt *s = new_stmt(STMT_BLOCK, cur(ps)->line, cur(ps)->col);
@@ -4623,6 +4701,7 @@ static struct stmt *parse_block(struct parser *ps)
             *tail = parse_stmt(ps, 1);
             while (*tail) /* a declaration may be a chain: int a, b; */
                 tail = &(*tail)->next;
+            attrs_unapplied(ps);
         } else {
             *tail = NULL;          /* half a statement is no statement */
             resync(ps, 0);
@@ -5863,10 +5942,63 @@ static struct func *sibling_proto(struct parser *ps, struct type *dty,
 }
 
 /* The declarators of a file-scope typedef, through its ';' */
+/* glibc's <bits/floatn-common.h>, for a compiler before GCC 7, gives the
+ * C23 interchange types as typedefs: `typedef float _Float32;`. EmbCC
+ * has them as keywords already, so a typedef that names one as the type
+ * it already is declares nothing, and passes; one that would change it
+ * is refused. 1 when that was the declaration, its ';' left. */
+static int float_n_typedef(struct parser *ps, struct type *tbase)
+{
+    struct token *t = cur(ps);
+    if (!float_n_name(t))
+        return 0;
+    int bits = atoi(t->text + 6);
+    if (!ty_is_float(tbase) || ty_size(tbase) * 8 != bits)
+        parse_error_at(ps, t->line, t->col,
+                   "typedef %s %s: %s is a keyword, and this is not its type",
+                   ty_name(tbase), t->text, t->text);
+    advance(ps);
+    if (cur(ps)->kind != TOK_SEMI)
+        parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                   "expected ';' after typedef %s", t->text);
+    return 1;
+}
+
+/* __attribute__((mode(M))): the integer of M's bytes, signed or not as
+ * the type written was -- `typedef int register_t
+ * __attribute__((__mode__(__word__)))` */
+static struct type *apply_mode(struct parser *ps, struct type *t, int bytes)
+{
+    ps->mode_line = 0;
+    struct type *m = ty_is_integer(t) && t->kind != TY_BOOL
+                   ? ty_int_of_size(bytes, t->is_unsigned) : NULL;
+    if (!m)
+        parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                   "__attribute__((mode)) of %d bytes does not apply to %s "
+                   "on this target", bytes, ty_name(t));
+    return t->is_const ? ty_const(m) : m;
+}
+
+/* __attribute__((transparent_union)) on a union: see struct type */
+static void mark_transparent(struct parser *ps, struct type *t)
+{
+    ps->tu_line = 0;
+    if (t->canon)
+        t = t->canon;
+    if (t->kind != TY_STRUCT || !t->is_union || !t->complete ||
+        !t->nmembers)
+        parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                   "transparent_union applies to a union with members, "
+                   "not %s", ty_name(t));
+    t->transparent_union = 1;
+}
+
 static void typedef_declarators(struct parser *ps, struct type *tbase,
                                 int spec_const, struct attrs tdat)
 {
     for (;;) {
+        if (float_n_typedef(ps, tbase))
+            break;
         const char *tname;
         int tconst;
         struct type *tt = parse_declarator_c(ps, tbase, &tname,
@@ -5896,6 +6028,10 @@ static void typedef_declarators(struct parser *ps, struct type *tbase,
          * that is applied where the struct is defined. */
         if (tdone.aligned)
             tt = ty_aligned(tt, tdone.aligned);
+        if (tdone.mode)
+            tt = apply_mode(ps, tt, tdone.mode);
+        if (tdone.transparent)
+            mark_transparent(ps, tt);
         struct type *prev = find_typedef(ps, tname);
         if (prev && !ty_equal(prev, tt))
             parse_error_at(ps, cur(ps)->line, cur(ps)->col,
@@ -6675,9 +6811,10 @@ struct unit *parse_unit(const char *file, const char *src)
     while (cur(&ps)->kind != TOK_EOF) {
         jmp_buf jb, *save = ps.recover;
         ps.recover = &jb;
-        if (!setjmp(jb))
+        if (!setjmp(jb)) {
             parse_top(&ps, u, &ftail, &gtail, seq++);
-        else
+            attrs_unapplied(&ps);
+        } else
             resync(&ps, 1);
         ps.recover = save;
     }

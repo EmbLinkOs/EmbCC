@@ -25,6 +25,18 @@ cmake --build build
 |---|---|
 | `EMBCC_TARGET` | The triple, as `embcc --target=` takes it. Without it, the compiler's default target. |
 | `EMBCC_FLAGS` | Flags for every compile and link: a CPU, an FPU, an optimization level. |
+| `EMBCC_LIBC` | For a Linux triple: `system` builds against the system's glibc, with its POSIX headers and threads ([`--libc=system`](libraries.md#glibc-instead---libcsystem)); `embcc` or empty, EmbCC's own C library. `CMAKE_SYSROOT` is then the system's root (`--sysroot=`). |
+
+A POSIX program for Linux, threads included, as CMake builds one with
+GCC:
+
+```sh
+cmake -B build -DCMAKE_TOOLCHAIN_FILE=<prefix>/share/embcc/cmake/embcc.cmake \
+    -DEMBCC_TARGET=x86_64-linux-gnu -DEMBCC_LIBC=system
+```
+
+`find_package(Threads)` then finds glibc's (`CMAKE_HAVE_LIBC_PTHREAD`),
+and `Threads::Threads` is `-pthread`.
 
 The file sets:
 
