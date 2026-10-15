@@ -3104,6 +3104,11 @@ static struct type *parse_array_dims(struct parser *ps, struct type *t)
                 if (dv < 0)
                     parse_error_line(ps, dline,
                                "array size cannot be negative");
+                if (dv > 0x7fffffffL)
+                    parse_error_line(ps, dline,
+                               "an array of %ld elements is too large: "
+                               "EmbCC's objects hold at most %ld bytes",
+                               dv, 0x7fffffffL);
                 dim = (int)dv; /* 0 is the extern/flexible form */
                 if (dv == 0)
                     ped_at(ps, dline, 0, 0, "an array of size 0");
@@ -3132,7 +3137,12 @@ static struct type *parse_array_dims(struct parser *ps, struct type *t)
     for (int i = ndims - 1; i >= 0; i--) {
         if (dvar[i] || (ty_is_vla(t) && dexpr[i]))
             t = ty_vla(t, dexpr[i]);
-        else if (dexpr[i])
+        else if (dexpr[i]) {
+            if ((long)dims[i] * ty_size(t) > 0x7fffffffL)
+                parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                           "an array of %d %s is too large: EmbCC's objects "
+                           "hold at most %ld bytes", dims[i], ty_name(t),
+                           0x7fffffffL);
             t = ty_array_sized(t, dims[i]);   /* `[0]`: complete, size 0 */
         else
             t = ty_array(t, dims[i]);
@@ -3283,6 +3293,18 @@ static struct type *parse_struct_body(struct parser *ps, struct type *t,
     parse_attributes(ps, &at);   /* struct {...} __attribute__((packed)) */
     /* `struct E { };`: GNU C's, of size 0 (ISO C wants a member) */
     ty_struct_layout(t, ms, n, at.packed, at.aligned, ps->pack_cur);
+    {
+        /* the members' sizes and the most padding they could need: past
+         * an int, the offsets ty_struct_layout computes would wrap */
+        long total = 0;
+        for (int i = 0; i < n; i++)
+            if (!ms[i].is_bitfield)
+                total += (long)ty_size(ms[i].ty) + ty_align(ms[i].ty);
+        if (total > 0x7fffffffL)
+            parse_error_line(ps, bline, "%s is too large: EmbCC's objects "
+                             "hold at most %ld bytes", ty_name(t),
+                             0x7fffffffL);
+    }
     if (at.transparent)                 /* union {...} __attribute__(...) */
         mark_transparent(ps, t);
     return t;
