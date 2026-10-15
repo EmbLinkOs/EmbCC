@@ -4759,7 +4759,8 @@ static int expand_wp(int *argcp, char ***argvp)
 
 int main(int argc, char **argv)
 {
-    stack_note_base(&argc);         /* the deep recursions measure from here */
+    /* the deep recursions measure from here */
+    stack_note_base(&argc, plat_stack_size());
     plat_set_argv0(argc > 0 ? argv[0] : NULL);   /* where this program is */
     if (expand_wp(&argc, &argv))
         return 1;

@@ -19,6 +19,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 /* isatty lives behind the platform layer: nothing above it may know
  * what kind of host this is, and EmbLinkOS has no <unistd.h>. */
 #include "../platform/platform.h"
@@ -1386,4 +1387,30 @@ EMBCC_NORETURN void diag_fatal(const char *file, int line, const char *fmt, ...)
     new_diag(DIAG_ERROR, file, line, 0, vfmt(fmt, ap));
     va_end(ap);
     leave();
+}
+
+/* ---- the stack ---- */
+
+static uintptr_t g_stack_base;
+static unsigned long g_stack_size;
+
+void stack_note_base(const void *base, unsigned long size)
+{
+    g_stack_base = (uintptr_t)base;
+    g_stack_size = size;
+}
+
+void stack_check(const char *file, int line, int share)
+{
+    char here;
+    uintptr_t h = (uintptr_t)&here;
+    if (!g_stack_base)
+        return;
+    unsigned long used = (unsigned long)(h < g_stack_base ? g_stack_base - h
+                                                          : h - g_stack_base);
+    unsigned long budget = g_stack_size / 8 * (unsigned long)share;
+    if (used > budget)
+        diag_fatal(file, line, "this nests too deeply to compile: it took "
+                   "more than %lu KB of the %lu KB stack",
+                   budget >> 10, g_stack_size >> 10);
 }
