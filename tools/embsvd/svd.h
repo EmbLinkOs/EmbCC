@@ -86,6 +86,13 @@ struct svd_device {
     const char *name, *vendor, *version, *desc, *prefix;
     const char *cpu, *cpurev, *endian;
     int aub, width, has_cpu, prio_bits, fpu, fpu_dp, mpu, vendor_systick;
+    /* a PIC32's: 32-bit registers followed by their CLR, SET and INV
+     * registers, which the ATDF does not list (EmbSim's ATDF reader sets
+     * it); which ones, by their addresses, when the pack's processor
+     * module says (else every 16-byte aligned one with room) */
+    int clr_set_inv;
+    unsigned long long *sci_at;
+    int nsci;
     int num_irq;
     struct svd_periph *p;
     int np;
@@ -114,6 +121,17 @@ extern int svd_ntypes;
 
 /* read, resolve, lay out and check an SVD file; dies with its message */
 struct svd_device *svd_load(const char *path);
+
+/* the XML reader, for a reader of another format (EmbSim's of
+ * Microchip's ATDF): a file's tree, an element's name, an attribute (or
+ * 0), its children, the first child of a name (or 0), its line */
+const struct xnode *svd_xml_read(const char *path);
+const char *svd_xname(const struct xnode *n);
+const char *svd_xattr(const struct xnode *n, const char *name);
+int svd_xnkid(const struct xnode *n);
+const struct xnode *svd_xkid(const struct xnode *n, int i);
+const struct xnode *svd_xfind(const struct xnode *n, const char *name);
+int svd_xline(const struct xnode *n);
 
 void svd_die(const char *fmt, ...);
 void *svd_alloc(size_t n);

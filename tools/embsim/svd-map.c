@@ -126,6 +126,19 @@ static u64 lanes(int at, int n)
 
 /* ---- the map ---------------------------------------------------------- */
 
+static int ull_cmp(const void *a, const void *b)
+{
+    unsigned long long x = *(const unsigned long long *)a;
+    unsigned long long y = *(const unsigned long long *)b;
+    return x < y ? -1 : x > y;
+}
+
+static int u32_cmp(const void *a, const void *b)
+{
+    u32 x = *(const u32 *)a, y = *(const u32 *)b;
+    return x < y ? -1 : x > y;
+}
+
 static int reg_cmp(const void *a, const void *b)
 {
     const struct rf_reg *x = *(struct rf_reg *const *)a;
@@ -193,6 +206,76 @@ static void read_periph(struct svdmap *m, struct rf_periph *p,
     (void)m;
 }
 
+/* A PIC32's CLR, SET and INV registers: at +4, +8 and +0xC from the
+ * 32-bit registers the pack's processor module gives them (atdf.c), or
+ * without it, from each 16-byte aligned one whose next three words no
+ * register of the file holds -- which gives a few the part does not
+ * have (CFGCON, DEVID). Each is a register of its own, named as the
+ * device header names it (T2CONSET). */
+static void add_clr_set_inv(struct svd_device *d, struct rf_reg ***all,
+                            int *nall, int *cap)
+{
+    static const char *const suf[3] = { "CLR", "SET", "INV" };
+    int n0 = *nall;
+    u32 *at = malloc(sizeof *at * ((size_t)n0 + 1));
+    if (!at)
+        die("out of memory");
+    for (int i = 0; i < n0; i++)
+        at[i] = (*all)[i]->addr;
+    qsort(at, (size_t)n0, sizeof *at, u32_cmp);
+    for (int i = 0; i < n0; i++) {
+        struct rf_reg *r = (*all)[i];
+        if (r->bytes != 4)
+            continue;
+        if (d->nsci) {
+            unsigned long long ra = r->addr;
+            if (!bsearch(&ra, d->sci_at, (size_t)d->nsci, sizeof ra, ull_cmp))
+                continue;
+        } else if (r->addr & 15) {
+            continue;
+        }
+        int free_after = 1;
+        for (u32 k = 4; k <= 12 && free_after; k += 4) {
+            u32 a = r->addr + k;
+            free_after = !bsearch(&a, at, (size_t)n0, sizeof *at, u32_cmp);
+        }
+        if (!free_after)
+            continue;
+        struct rf_reg *x = calloc(3, sizeof *x);
+        struct rf_field *f = calloc(3, sizeof *f);
+        if (!x || !f)
+            die("out of memory");
+        for (int k = 0; k < 3; k++) {
+            size_t l = strlen(r->name) + 4;
+            char *nm = malloc(l);
+            if (!nm)
+                die("out of memory");
+            snprintf(nm, l, "%s%s", r->name, suf[k]);
+            x[k].addr = r->addr + 4 * (u32)(k + 1);
+            x[k].bytes = 4;
+            x[k].name = nm;
+            x[k].p = r->p;
+            f[k].width = 32;
+            f[k].acc = ACC_WO;
+            x[k].f = &f[k];
+            x[k].nf = 1;
+            x[k].base = r;
+            x[k].sci = k + 1;
+            r->alias[k] = &x[k];
+            if (*nall == *cap) {
+                *cap *= 2;
+                *all = realloc(*all, (size_t)*cap * sizeof **all);
+                if (!*all)
+                    die("out of memory");
+            }
+            (*all)[(*nall)++] = &x[k];
+            if (x[k].addr + 4 > r->p->end)
+                r->p->end = x[k].addr + 4;
+        }
+    }
+    free(at);
+}
+
 struct svdmap *svdmap_create(struct sim *s, const char *path)
 {
     svd_prog = "embsim";
@@ -203,7 +286,9 @@ struct svdmap *svdmap_create(struct sim *s, const char *path)
         die("out of memory");
     m->s = s;
     m->path = path;
-    m->d = svd_load(path);
+    size_t pl = strlen(path);
+    m->d = pl > 5 && !strcmp(path + pl - 5, ".atdf") ? atdf_load(path)
+                                                     : svd_load(path);
     m->p = calloc((size_t)m->d->np + 1, sizeof *m->p);
     if (!m->p)
         die("out of memory");
@@ -222,6 +307,8 @@ struct svdmap *svdmap_create(struct sim *s, const char *path)
         p->ctx = p;
         read_periph(m, p, &all, &nall, &cap);
     }
+    if (m->d->clr_set_inv)
+        add_clr_set_inv(m->d, &all, &nall, &cap);
     /* by address; where two overlap, the first in the file is the one */
     if (nall)
         qsort(all, (size_t)nall, sizeof *all, reg_cmp);
@@ -330,6 +417,21 @@ void rf_set_reset(struct rf_reg *r, u64 v)
     r->reset = r->value = v;
 }
 
+void rf_set_acc(struct rf_reg *r, u64 mask, int acc)
+{
+    for (int i = 0; i < r->nf; i++)
+        if (field_mask(&r->f[i]) & mask)
+            r->f[i].acc = acc;
+}
+
+u64 rf_fields(const struct rf_reg *r)
+{
+    u64 m = 0;
+    for (int i = 0; i < r->nf; i++)
+        m |= field_mask(&r->f[i]);
+    return m;
+}
+
 int rf_irq(const struct rf_periph *p, const char *want)
 {
     const struct svd_periph *sp = p->svd;
@@ -337,6 +439,19 @@ int rf_irq(const struct rf_periph *p, const char *want)
         if (strstr(sp->irq[i].name, want))
             return sp->irq[i].value;
     return sp->nirq ? sp->irq[0].value : -1;
+}
+
+int rf_dev_irq(struct svdmap *m, const char *name)
+{
+    for (int i = 0; i < m->d->nirq; i++)
+        if (!strcmp(m->d->irq[i].name, name))
+            return m->d->irq[i].value;
+    return -1;
+}
+
+const char *rf_device_name(struct svdmap *m)
+{
+    return m->d->name;
 }
 
 void rf_interrupt(struct rf_periph *p, int irq)
@@ -551,6 +666,8 @@ static int access(struct svdmap *m, u32 a, int n, u32 *v, int write, int side)
         r = m->reg[i];
         if ((u64)r->addr >= (u64)a + (u64)n)
             break;
+        if (r->base)
+            continue;               /* CLR, SET, INV: map_write's */
         u32 lo = a > r->addr ? a : r->addr;
         u64 e1 = (u64)a + (u64)n, e2 = (u64)r->addr + (u64)r->bytes;
         int cnt = (int)((e1 < e2 ? e1 : e2) - lo);
@@ -604,10 +721,15 @@ static const char *access_kind(int n, int write)
     return n >= 1 && n <= 4 ? k[write != 0][n] : "an access";
 }
 
-/* an access no register answers: a bus fault, and why on stderr */
+/* An access no register answers: a bus fault, and why on stderr -- but
+ * on a PIC32, whose SFR space reads as 0 and ignores writes where nothing
+ * is (its startups write whole tables over the holes: XC32's OFFn table
+ * covers the unimplemented vectors' addresses), as the part does. */
 static void hole(struct svdmap *m, u32 a, int n, int write)
 {
     struct sim *s = m->s;
+    if (m->d->clr_set_inv)
+        return;
     bus_fault(&s->bus);
     if (s->bus.debug)
         return;
@@ -678,11 +800,32 @@ static u32 map_read(void *ctx, u32 off, int n)
         gated_access(m, p, a, n, 0, 0);
         return 0;
     }
+    if (r->base)
+        return 0;                   /* CLR, SET, INV read as 0 */
     if (m->s->bus.debug) {
         access(m, a, n, &v, 0, 0);
         return v;
     }
     return p->ops->read ? p->ops->read(p->ctx, a - p->base, n) : 0;
+}
+
+/* a write to a CLR, SET or INV register: its register written with the
+ * bits cleared, set or inverted, as one word */
+static void sci_write(struct svdmap *m, struct rf_reg *r, u32 a, int n, u32 v)
+{
+    struct rf_reg *b = r->base;
+    struct rf_periph *p = b->p;
+    u32 sh = 8 * (a - r->addr);
+    u32 bits = (n == 4 ? v : v & ((1u << (8 * n)) - 1)) << sh;
+    u32 old = (u32)b->value, nv;
+    switch (r->sci) {
+    case 1: nv = old & ~bits; break;
+    case 2: nv = old | bits; break;
+    default: nv = old ^ bits; break;
+    }
+    (void)m;
+    if (p->ops->write)
+        p->ops->write(p->ctx, b->addr - p->base, 4, nv);
 }
 
 static void map_write(void *ctx, u32 off, int n, u32 v)
@@ -697,6 +840,10 @@ static void map_write(void *ctx, u32 off, int n, u32 v)
     struct rf_periph *p = r->p;
     if (gated(p)) {
         gated_access(m, p, a, n, 1, v);
+        return;
+    }
+    if (r->base) {
+        sci_write(m, r, a, n, v);
         return;
     }
     if (p->ops->write)
@@ -864,15 +1011,38 @@ void svdmap_print(struct svdmap *m, FILE *f)
                 fprintf(f, " -- is %s.%s", r ? r->p->name : "?",
                         r ? r->name : "?");
             fputc('\n', f);
+            for (int q = 0; r && r->addr == a && q < 3 && r->alias[q]; q++)
+                fprintf(f, "%s 0x%08x 32 %s %s.%s 0x00000000 write-only -- "
+                        "%s of %s\n", sp->name, r->alias[q]->addr,
+                        r->alias[q]->name, sp->name, r->alias[q]->name,
+                        q == 0 ? "CLR" : q == 1 ? "SET" : "INV", r->name);
         }
         svd_free_flats(&fl);
     }
+}
+
+const char *svd_dfp;
+
+static int readable(const char *p)
+{
+    FILE *f = fopen(p, "rb");
+    if (f)
+        fclose(f);
+    return f != 0;
 }
 
 const char *svd_search(const char *name)
 {
     const char *path = getenv("EMBSIM_SVD_PATH");
     static char buf[1024];
+    if (svd_dfp) {
+        snprintf(buf, sizeof buf, "%s/atdf/%s", svd_dfp, name);
+        if (readable(buf))
+            return buf;
+        snprintf(buf, sizeof buf, "%s/%s", svd_dfp, name);
+        if (readable(buf))
+            return buf;
+    }
     for (const char *q = path; q && *q; ) {
         size_t l = strcspn(q, ":");
         if (l && l + strlen(name) + 2 < sizeof buf) {

@@ -52,14 +52,19 @@ static void usage(void)
           "              [--stack-su FILE.su]... [--stack-embrt FILE.json] [FILE.su...]\n"
           "              [--fault-report[=FILE]]\n"
           "              [--input FILE|-] [--record FILE]\n"
+          "              [--dfp DIR] [--set NAME=VALUE]...\n"
           "       embsim [IMAGE.elf] --replay FILE [--count FILE] [--stats] ...\n"
           "       embsim --svd FILE.svd --svd-map\n"
           "boards: lm3s6965evb (default), mps2-an385, mps2-an386,\n"
           "        mps2-an500, microbit, stm32f405 (its SVD: --svd or\n"
-          "        EMBSIM_SVD_PATH), virt (RISC-V), uno (AVR), malta (MIPS)\n"
+          "        EMBSIM_SVD_PATH), virt (RISC-V), uno (AVR), malta (MIPS),\n"
+          "        pic32mz2048efh100, explorer16-32 (PIC32MZ: its ATDF, from\n"
+          "        --dfp DIR, --svd FILE.atdf or EMBSIM_SVD_PATH)\n"
           "cpus:   cortex-m0, cortex-m0plus, cortex-m3, cortex-m4, cortex-m7;\n"
           "        rv32, rv64 (virt's default: the image's width); atmega328p;\n"
-          "        24kc\n",
+          "        24kc, pic32mz\n"
+          "--set:  explorer16-32: temperature=DEGREES, pot=VOLTS or PERCENT%%,\n"
+          "        S4, S5, S6=pressed or released\n",
           stderr);
     exit(2);
 }
@@ -77,7 +82,8 @@ int main(int argc, char **argv)
     int fault_report = 0, semi_given = 0;
     const char *input = 0, *record = 0, *replay = 0;
     const char **su = calloc((size_t)argc, sizeof *su);
-    int nsu = 0;
+    const char **sets = calloc((size_t)argc, sizeof *sets);
+    int nsu = 0, nset = 0;
     u32 ram_size = 0;
     u64 max_insns = 0;
     int stats = 0, verbose = 0, semihosting = 1, gdb_wait = 0;
@@ -115,6 +121,12 @@ int main(int argc, char **argv)
             gdb = argv[++i];
         else if (!strcmp(a, "--gdb-wait"))
             gdb_wait = 1;
+        else if (!strcmp(a, "--set") && more)
+            sets[nset++] = argv[++i];
+        else if (!strncmp(a, "--set=", 6))
+            sets[nset++] = a + 6;
+        else if (!strcmp(a, "--dfp") && more)
+            svd_dfp = argv[++i];
         else if (!strcmp(a, "--svd") && more)
             svd = argv[++i];
         else if (!strcmp(a, "--svd-map"))
@@ -262,6 +274,19 @@ int main(int argc, char **argv)
 
     struct sim *s = &sim;
     sim_init(s, bd, cpu, svd);
+    for (int i = 0; i < nset; i++) {
+        /* the board's inputs: --set temperature=30 */
+        char name[64];
+        const char *eq = strchr(sets[i], '=');
+        size_t l = eq ? (size_t)(eq - sets[i]) : 0;
+        if (!eq || !l || l >= sizeof name)
+            die("--set %s: give NAME=VALUE", sets[i]);
+        memcpy(name, sets[i], l);
+        name[l] = 0;
+        if (!s->io.set || s->io.set(s->io.ctx, name, eq + 1))
+            die("--set %s: the %s board has no input named %s", sets[i],
+                bd->name, name);
+    }
     if (tracing_periph) {
         if (!s->svd)
             die("--trace-periph needs --svd FILE: the names are the SVD's");
@@ -334,6 +359,8 @@ int main(int argc, char **argv)
         gdb_serve(s, host[0] ? host : 0, port, gdb_wait);
     else
         sim_run(s);
+    if (s->io.end)
+        s->io.end(s->io.ctx);
     trace_report(s, count_path, stats || verbose);
     if (s->rec)
         rec_finish(s);

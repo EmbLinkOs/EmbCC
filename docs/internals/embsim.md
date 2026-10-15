@@ -43,6 +43,10 @@ file but the network one compiles with EmbCC itself. Everything is in
 | `mips.h` | the MIPS32 core's state, and the interface of an external interrupt controller (EIC mode) |
 | `mips.c` | the MIPS32r2 core: the instruction set with its delay slots, coprocessor 0, exceptions and interrupts, the TLB, shadow register sets, Count and Compare, the DSP ASE's registers, step, reset, its CPU interface |
 | `malta.c` | QEMU malta's FPGA (SOFTRES) and boot ROM; its UART is `uart-16550.c`'s, eight bytes apart |
+| `atdf.c` | a Microchip ATDF file (a device pack's PIC32, SAM or AVR part) read into the SVD reader's `struct svd_device`, for the register file |
+| `pic32.h` | what a PIC32's models share: interrupts through the EVIC, the peripheral bus dividers |
+| `pic32-evic.c`, `pic32-cru.c`, `pic32-tmr.c`, `pic32-gpio.c`, `pic32-uart.c`, `pic32-pmp.c`, `pic32-adc.c` | a PIC32MZ's models over its ATDF's registers: the EVIC (and the core's EIC mode), CFG's SYSKEY and the oscillator, Timer1-9, ports A-K, UART1-6, the PMP, ADCHS |
+| `explorer.c` | the Explorer 16/32 board around the part (`struct board_io`): LEDs, buttons, the potentiometer and temperature sensor, the HD44780 LCD |
 | `svd-map.h`, `svd-map.c` | an SVD file's peripherals as a register file on the bus (`--svd`), `--trace-periph`, `--svd-map`, and the interface of the models over it |
 | `../embsvd/svd.h`, `../embsvd/svd.c` | the CMSIS-SVD reader, embsvd's |
 | `stm32-rcc.c`, `stm32-gpio.c`, `stm32-usart.c`, `stm32-tim.c` | the STM32's peripheral models, over its SVD's registers |
@@ -286,6 +290,30 @@ tells it its own requests -- the timer's and the two software
 interrupts -- and takes the level, vector offset and register set it
 presents.
 
+### What a board has outside the part: `struct board_io`
+
+```c
+struct board_io {
+    void *ctx;
+    void (*pin_out)(void *ctx, int port, int bit, int level);  /* a pin driven */
+    int (*pin_in)(void *ctx, int port, int bit, int *level);   /* a pin driven from outside */
+    double (*analog)(void *ctx, int n);                        /* volts on ANn, or < 0 */
+    void (*bus_write)(void *ctx, u32 addr, u32 data);          /* a parallel port's cycles */
+    u32 (*bus_read)(void *ctx, u32 addr);
+    int (*set)(void *ctx, const char *name, const char *value);   /* --set */
+    void (*end)(void *ctx);                                    /* the run ended */
+};
+```
+
+`s->io` is what the board wires to its part's pins: a board's own
+device (`explorer.c`, a `dev` entry of size 0) fills it in at its
+creation, and the part's models call it -- the GPIO model when a pin's
+driven level changes and when a port is read, the ADC for an input's
+voltage, the PMP for its bus cycles. `--set NAME=VALUE` goes to `set`,
+and `end` is called when the run ends (the LCD's last frame). A part on
+a bare board leaves it zero, and the models take that as nothing
+connected.
+
 ## Adding a peripheral
 
 1. Write `tools/embsim/NAME.c`: a context struct, the `struct dev_ops`
@@ -367,6 +395,30 @@ static void usart_write(void *ctx, u32 off, int n, u32 v)
    firmware that prints the registers, run on QEMU where QEMU models the
    peripheral, and held to the reference manual where it does not.
 
+### Microchip's ATDF, and the PIC32's CLR, SET and INV
+
+A file named `.atdf` is read by `atdf.c` into the same `struct
+svd_device` (through `svd.c`'s XML reader, which it exports for this),
+so the register file and its models do not know the difference: each
+instance with a register group at an address is a peripheral, the
+module's group its registers, bitfields their fields (a mask with holes
+is a field per run of ones), named values their enumerated values, and
+the device's interrupts `svd_device.irq` by index (a model finds its own
+with `rf_dev_irq(m, "TIMER_2")`). A group that names every instance's
+registers -- a PIC32's Timer2 group holds T2CON to T9CON -- is split by
+the number in each register's name.
+
+On a PIC32 (`svd_device.clr_set_inv`), `svdmap_create` gives each
+register that the pack's processor module lists with a NAMECLR its
+CLR, SET and INV registers (`struct rf_reg`'s `base` and `sci`): a write
+to one becomes a write of the result to its register, through the
+register's peripheral's model, so a model handles a register's writes
+once, whatever their form. And holes in the space read as 0 and ignore
+writes, as the part's do, instead of being bus faults. An ATDF marks no
+bit as the hardware's: a model makes its status bits read-only with
+`rf_set_acc`, and corrects reset values (`rf_set_reset`) the file leaves
+at 0 -- PRx at 0xFFFF, TRISx all ones, UxSTA's TRMT.
+
 ## Adding a board
 
 An entry in `boards[]` in `boards.c`: the name, the core and its model,
@@ -442,6 +494,13 @@ or with its own file for the six functions of `net.h`.
   corpus at -O0, -O2 and -Os against QEMU's malta (output and exit
   status), `mips-isa.c`'s instruction edges against QEMU and the record,
   the ends of a run.
+- `tests/golden/embsim-pic32.sh`: the PIC32MZ2048EFH100's register file
+  from the device pack's ATDF against the pack's own header (every SFR
+  and CLR/SET/INV at its address), and an EmbCC program on the Explorer
+  16/32 (`pic32-fw.c`: the DSP ASE after EmbCC's startup, the EVIC's
+  priorities, order and shadow sets, the timers, OFF213, the ports, the
+  ADC, the LCD on the PMP, SYSKEY) against its record. Skipped, saying
+  so, without the pack (`PIC32MZ_EF_DFP`, tools/hostpaths.sh).
 - `tests/golden/embsim-coverage.sh`: `--coverage` against a program
   whose lines carry the counts they must get, on the three cores and
   from clang's DWARF 5.

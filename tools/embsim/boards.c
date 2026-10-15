@@ -39,6 +39,28 @@ static const struct model_desc stm32_models[] = {
     { 0, 0 },
 };
 
+/* a PIC32MZ's models, over its ATDF (pic32.h); the EVIC first, which
+ * the others raise their interrupts through, and the oscillator's, whose
+ * bus dividers the timers read */
+static const struct model_desc pic32mz_models[] = {
+    { "INT", "pic32-evic" },
+    { "CFG", "pic32-cfg" },
+    { "CRU", "pic32-cru" },
+    { "TMR*", "pic32-tmr" },
+    { "GPIO", "pic32-gpio" },
+    { "UART*", "pic32-uart" },
+    { "PMP", "pic32-pmp" },
+    { "ADCHS", "pic32-adc" },
+    { 0, 0 },
+};
+
+/* the PIC32MZ2048EFH100's memory: 512 KiB of RAM at 0, 2 MiB of program
+ * flash at 0x1D000000 and the boot flash at 0x1FC00000 (the physical
+ * addresses kseg0 and kseg1 reach) */
+#define PIC32MZ_MEM { { 0, KB(512), MEM_RAM, 1, 0 }, \
+                      { 0x1d000000u, MB(2), MEM_FLASH, 0, 0 }, \
+                      { 0x1fc00000u, 0x74000, MEM_FLASH, 0, 0 } }
+
 const struct board_desc boards[] = {
     { "lm3s6965evb", "cortex-m", "cortex-m3", 3,
       { { 0, KB(256), MEM_FLASH, 0, 0 }, { 0x20000000u, KB(64), MEM_RAM, 1, 0 } },
@@ -93,6 +115,18 @@ const struct board_desc boards[] = {
         { "malta-fpga", 0x1f000000u, 0x100000 },
         { "malta-rom", 0x1fc00000u, 0x400000 } },
       { { 0, 0, 0 } }, 0, 0 },
+    /* the PIC32MZ2048EFH100 alone: the core in EIC mode, the memory, and
+     * every register the device pack's ATDF describes, with the models
+     * of its EVIC, oscillator, timers, ports, UARTs, PMP and ADC */
+    { "pic32mz2048efh100", "mips", "pic32mz", 0, PIC32MZ_MEM,
+      { { 0, 0, 0 } }, { { 0, 0, 0 } },
+      "PIC32MZ2048EFH100.atdf", pic32mz_models },
+    /* Microchip's Explorer 16/32 with the PIC32MZ EF PIM: the part, and
+     * the board's LEDs, buttons, potentiometer, temperature sensor and
+     * LCD (explorer.c) */
+    { "explorer16-32", "mips", "pic32mz", 0, PIC32MZ_MEM,
+      { { "explorer16-32", 0, 0 } }, { { 0, 0, 0 } },
+      "PIC32MZ2048EFH100.atdf", pic32mz_models },
 };
 const int nboards = (int)(sizeof boards / sizeof boards[0]);
 
@@ -141,6 +175,7 @@ static const struct dev_type dev_types[] = {
     { "ns16550a-8", &ns16550a_8_ops, ns16550a_create },
     { "malta-fpga", &malta_fpga_ops, malta_fpga_create },
     { "malta-rom", &malta_rom_ops, malta_rom_create },
+    { "explorer16-32", &explorer_ops, explorer_create },
 };
 
 /* ---- the peripheral models, over an SVD's registers (svd-map.h) -------- */
@@ -150,6 +185,14 @@ static const struct model_type model_types[] = {
     { "stm32-gpio", &stm32_gpio_ops, stm32_gpio_create },
     { "stm32-usart", &stm32_usart_ops, stm32_usart_create },
     { "stm32-tim", &stm32_tim_ops, stm32_tim_create },
+    { "pic32-evic", &pic32_evic_ops, pic32_evic_create },
+    { "pic32-cfg", &pic32_cfg_ops, pic32_cfg_create },
+    { "pic32-cru", &pic32_cru_ops, pic32_cru_create },
+    { "pic32-tmr", &pic32_tmr_ops, pic32_tmr_create },
+    { "pic32-gpio", &pic32_gpio_ops, pic32_gpio_create },
+    { "pic32-uart", &pic32_uart_ops, pic32_uart_create },
+    { "pic32-pmp", &pic32_pmp_ops, pic32_pmp_create },
+    { "pic32-adc", &pic32_adc_ops, pic32_adc_create },
     { 0, 0, 0 },
 };
 

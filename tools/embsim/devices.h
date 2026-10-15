@@ -50,4 +50,21 @@ void *stm32_gpio_create(struct sim *s, struct rf_periph *p);
 void *stm32_usart_create(struct sim *s, struct rf_periph *p);
 void *stm32_tim_create(struct sim *s, struct rf_periph *p);
 
+/* a PIC32's peripheral models, over its ATDF's registers (pic32.h) */
+extern const struct dev_ops pic32_evic_ops, pic32_cfg_ops, pic32_cru_ops;
+extern const struct dev_ops pic32_tmr_ops, pic32_gpio_ops, pic32_uart_ops;
+extern const struct dev_ops pic32_pmp_ops, pic32_adc_ops;
+void *pic32_evic_create(struct sim *s, struct rf_periph *p);
+void *pic32_cfg_create(struct sim *s, struct rf_periph *p);
+void *pic32_cru_create(struct sim *s, struct rf_periph *p);
+void *pic32_tmr_create(struct sim *s, struct rf_periph *p);
+void *pic32_gpio_create(struct sim *s, struct rf_periph *p);
+void *pic32_uart_create(struct sim *s, struct rf_periph *p);
+void *pic32_pmp_create(struct sim *s, struct rf_periph *p);
+void *pic32_adc_create(struct sim *s, struct rf_periph *p);
+
+/* the boards' own: the Explorer 16/32's LEDs, buttons, sensors and LCD */
+extern const struct dev_ops explorer_ops;
+void *explorer_create(struct sim *s, const struct dev_desc *d);
+
 #endif

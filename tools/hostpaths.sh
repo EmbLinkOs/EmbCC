@@ -30,6 +30,11 @@ READELF=${READELF:-$(_hp_tool readelf x86_64-elf-readelf)}
 OBJDUMP=${OBJDUMP:-$(_hp_tool x86_64-elf-objdump objdump)}
 OBJCOPY=${OBJCOPY:-$(_hp_tool x86_64-elf-objcopy objcopy)}
 
+# Microchip's PIC32MZ EF device pack (Microchip.PIC32MZ-EF_DFP, unpacked):
+# its ATDF files describe every register of the parts, which EmbSim's
+# PIC32 boards are built from (tests/golden/embsim-pic32.sh).
+PIC32MZ_EF_DFP=${EMBCC_PIC32MZ_EF_DFP:-${PIC32MZ_EF_DFP:-$HOME/EmbRef/dl/pic32mz-ef-dfp/x}}
+
 # The Xtensa reference: Espressif's GCC told to generate for the de212 core
 # QEMU emulates, through a configuration plugin built from that core's
 # overlay (tools/xtensa-ref-gcc.sh makes both). XTENSA_REF_GCC is the

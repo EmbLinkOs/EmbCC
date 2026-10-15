@@ -1,0 +1,23 @@
+pic32-fw
+ac1 12345678
+cs0 taken 00000001
+cs0 register set 00000001
+cs0 at IPL 1 00000001
+cs0 at IPL 0 00000002
+timer1 interrupts 00000003
+timer1 Count/1000 00000018
+core timer interrupts 00000002
+timer2/3 interrupts 00000001
+timer3 after the wrap 00000000
+taken in order 000e0104
+vector 213 taken 00000001
+INTSTAT 000005d5
+PORTA 00000055
+LATA after PORTA=0x0f 0000000f
+S4 (RF8) 00000000
+AN4 000003e0
+AN45 (ADC0's alternate) 00000800
+AN6 (ADC7 off) ffffffff
+PB3DIV locked 00008801
+PB3DIV unlocked 00008803
+==DONE==

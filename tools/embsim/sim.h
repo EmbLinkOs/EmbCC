@@ -295,6 +295,27 @@ struct rx_port {
     void *ctx;
 };
 
+/* What a board wires to its part's pins, beyond the part: LEDs and
+ * buttons on the GPIO, voltages on the analog inputs, a display on a
+ * parallel bus. The part's peripheral models call these (each may be
+ * 0); the board's device fills them in (explorer.c). */
+struct board_io {
+    void *ctx;
+    /* an output pin's level changed (port 0 is A): what the part drives */
+    void (*pin_out)(void *ctx, int port, int bit, int level);
+    /* 1 and the level when something outside drives the pin, else 0 */
+    int (*pin_in)(void *ctx, int port, int bit, int *level);
+    /* the voltage on analog input n, or a negative one for none */
+    double (*analog)(void *ctx, int n);
+    /* a parallel master port's write and read cycles */
+    void (*bus_write)(void *ctx, u32 addr, u32 data);
+    u32 (*bus_read)(void *ctx, u32 addr);
+    /* --set NAME=VALUE: 0, or -1 when the board has no such input */
+    int (*set)(void *ctx, const char *name, const char *value);
+    /* the run ended: what the board shows (its display) */
+    void (*end)(void *ctx);
+};
+
 struct sim {
     struct bus bus;
     struct cpu *cpu;
@@ -340,6 +361,8 @@ struct sim {
     int rx_on;
     /* the record of the run's inputs, or its replay (record.c), or 0 */
     struct rec *rec;
+    /* what the board has outside the part (explorer.c's), or zeros */
+    struct board_io io;
 };
 
 /* build the board with its core (`model`, or 0 for the board's own),

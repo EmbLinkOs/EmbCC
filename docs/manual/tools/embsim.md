@@ -24,6 +24,7 @@ embsim IMAGE.elf [--board NAME] [--cpu NAME] [--ram-size SIZE]
                  [--stack-report[=FILE]] [--stack-limit ADDR|SYMBOL]
                  [--stack-su FILE.su]... [--stack-embrt FILE.json] [FILE.su...]
                  [--fault-report[=FILE]] [--input FILE|-] [--record FILE]
+                 [--dfp DIR] [--set NAME=VALUE]...
 embsim [IMAGE.elf] --replay FILE [--count FILE] [--stats] [...]
 embsim --svd FILE.svd --svd-map
 ```
@@ -46,6 +47,9 @@ embsvd STM32F405.svd --header STM32F405.h --startup startup.c \
 embcc --target=thumbv7em-none-eabi --opt=speed -c startup.c main.c
 embcc --target=thumbv7em-none-eabi --link-script=f405.ld startup.o main.o -o fw.elf
 embsim fw.elf --svd STM32F405.svd --trace-periph=USART2,RCC
+
+embcc --target=mipsel-none-elf --mcu=32MZ2048EFH100 --dfp=$DFP *.c *.S -o fw.elf
+embsim fw.elf --board explorer16-32 --dfp $DFP --set temperature=30
 ```
 
 ## The boards
@@ -64,11 +68,14 @@ built for QEMU runs unchanged.
 | `virt` | RISC-V, RV32 or RV64 with IMAFDC | 128 MiB RAM at `0x80000000` | NS16550A at `0x10000000` |
 | `uno` | ATmega328P (AVR5) | 32 KiB flash, 2 KiB SRAM at data `0x100` | USART0 at data `0xC0` |
 | `malta` | MIPS32r2 (24Kc), little-endian | 64 MiB RAM at 0 (`0x80000000` in kseg0) | NS16550A at `0x1F000900`, registers 8 bytes apart |
+| `pic32mz2048efh100` | PIC32MZ EF (MIPS32r2, EIC mode, shadow sets) | 512 KiB RAM at 0, 2 MiB flash at `0x1D000000`, boot flash at `0x1FC00000` | UART1-6, of the part's ATDF ([below](#pic32-parts-and-the-explorer-1632)) |
+| `explorer16-32` | the same part, on Microchip's Explorer 16/32 | as `pic32mz2048efh100` | the same, and the board's LEDs, buttons, sensors and LCD |
 
 - `--cpu` runs another core on the board: `cortex-m0`, `cortex-m0plus`,
   `cortex-m3`, `cortex-m4` or `cortex-m7` on the Cortex-M boards; `rv32`
   or `rv64` on `virt`, which otherwise takes the image's width (an
-  ELFCLASS64 image is RV64); `atmega328p` on `uno`; `24kc` on `malta`.
+  ELFCLASS64 image is RV64); `atmega328p` on `uno`; `24kc` on `malta`;
+  `pic32mz` on the PIC32 boards.
 - `--ram-size` changes the size of the SRAM at `0x20000000`, or of
   virt's RAM (the harness's QEMU runs give it `-m 8`, so
   `--ram-size 8M` is the same machine).
@@ -375,6 +382,136 @@ cycles, whatever the PLL is set to.
   interrupt's entry four, and four more when it wakes SLEEP. The part
   has no wait states, so this is the count the silicon takes.
 
+## PIC32 parts, and the Explorer 16/32
+
+QEMU has no PIC32 board; EmbSim's are where EmbCC's PIC32 output runs
+(`embcc --mcu=32MZ2048EFH100`, [PIC32](../pic32.md)). A PIC32 board is
+built from the part's device pack -- Microchip's
+`Microchip.PIC32MZ-EF_DFP`, which MPLAB X installs and
+packs.download.microchip.com serves -- found with `--dfp DIR` (the
+pack's directory, which holds `atdf/PIC32MZ2048EFH100.atdf`), `--svd
+FILE.atdf`, or a directory holding the file in `EMBSIM_SVD_PATH`:
+
+```sh
+embsim fw.elf --board explorer16-32 --dfp ~/.mchp_packs/Microchip/PIC32MZ-EF_DFP/1.4.168
+```
+
+**The registers.** The pack's ATDF file (the "AVR tools device file"
+Microchip writes for its PIC32, SAM and AVR parts alike) describes every
+register of the part; EmbSim reads it as it reads an SVD file, and each
+register behaves as [above](#peripherals-from-an-svd-file---svd): 71
+peripherals and 1608 registers on the PIC32MZ2048EFH100, 4230 with their
+CLR, SET and INV registers. Two things are a PIC32's:
+
+- Each register the pack's processor module gives CLR, SET and INV
+  registers (`xc32/<part>/p<part>.S`, beside `atdf/`) has them at +4,
+  +8 and +0xC: a write clears, sets or inverts its bits in the register,
+  as one write of the result, so a model sees `T2CONSET = 0x8000` as
+  T2CON written with ON set. They read as 0. Every SFR and each of these
+  is at the address the pack's device header gives it, but USBCRCON,
+  where Microchip's two files disagree (EmbSim follows the ATDF).
+- An address in the SFR space where no register is reads as 0 and
+  ignores writes, as the part's do: a startup writes OFFn's whole table,
+  over the vectors the part does not implement.
+
+Where one ATDF register group names every instance's registers (Timer2
+to Timer9 in one, UART1 to UART6 in one), each instance is a peripheral
+of its own: `TMR3`, `UART2`. `--svd-map` lists them, `--trace-periph`
+traces them by these names.
+
+**The core** is the `pic32mz` model of the [MIPS32
+core](#what-it-models-the-mips32-core), a PIC32MZ EF's: PRId 0x0001A700
+(the M5150), Config1 with a 16-entry TLB, 16 KiB and 4 KiB 4-way caches
+of 16-byte lines (`cache` does nothing), Config3 with EIC and vectored
+interrupts, DSP and DSPr2, MIPS32 and microMIPS (MIPS32 at reset); seven
+shadow register sets (SRSCtl.HSS 7); Status.MX and CU1 writable. The
+interrupts come from the EVIC in EIC mode.
+
+**The models** over the registers:
+
+- **EVIC.** An interrupt is requested while its flag (IFSx), its enable
+  (IECx) and a priority (IPCx: IP 1-7) are set; the highest priority
+  is presented, then the highest subpriority, then the lowest number.
+  The core takes it when its priority is above Status.IPL: at EBASE +
+  OFFn of its vector in multi-vector mode (INTCON.MVEC), else EBASE +
+  0x200, in the shadow register set PRISS gives its priority; INTSTAT
+  says which. The core's timer (Count = Compare) and its two software
+  interrupts (Cause.IP0, IP1) set CTIF, CS0IF and CS1IF as they rise.
+- **SYSKEY and the oscillator.** Writing 0xAA996655 then 0x556699AA to
+  SYSKEY unlocks OSCCON, SPLLCON and the PBxDIV registers; a write to
+  one while locked is ignored, as on the part, and the first is a
+  warning. OSCCON starts with the clock the configuration words choose
+  (DEVCFG1.FNOSC); setting OSWEN switches at once. PB1-PB5 and PB8
+  divide by 2 out of reset, PB7 by 1; CLKSTAT says every clock is
+  ready.
+- **Timer1 to Timer9.** Counting while ON, at peripheral bus 3's clock
+  (the core's cycles over PB3DIV) over the prescaler; at PRx, back to 0
+  and the interrupt flag. Timer2 to Timer9 pair into 32-bit timers
+  (T32), with the odd timer's interrupt. PRx is 0xFFFF out of reset.
+- **Ports A-K.** All inputs and every analog-capable pin analog out of
+  reset (TRISx, ANSELx). PORTx reads the pins -- an output what LATx
+  drives, an input what the board drives on it or its pull-up (CNPUx),
+  an analog pin 0 -- and a write to PORTx writes LATx.
+- **UART1-6.** A byte written to UxTXREG with ON and UTXEN goes to
+  stdout at once (TRMT stays set); the transmit interrupt is persistent
+  while there is room; the run's input (`--input`) arrives at the first
+  UART receiving.
+- **PMP**, in its master modes: a write to PMDIN is a write cycle to the
+  board (the address on the PMA lines PMAEN enables, the data), a read
+  of PMDIN gives the previous read cycle's data and starts the next;
+  BUSY for the wait states (WAITB, WAITM, WAITE, at PB2's clock), then
+  the interrupt with IRQM 01, and PMADDR stepped with INCM.
+- **ADCHS**, enough to convert an input and read it: turning the ADC on
+  makes its reference ready (BGVRRDY), ANENx makes ADCx ready (WKRDYx);
+  the global software trigger (GSWTRG) converts each input whose
+  trigger source it is, and the scan list with STRGSRC 1; RQCNVRT
+  converts ADINSEL's. The result is the board's voltage against 3.3 V
+  at the resolution SELRES gives, in ADCDATAn with ARDYn (reading it
+  clears ARDYn) and, enabled, its interrupt. ADC0-4 convert their
+  alternate inputs AN45-AN49 with ADCTRGMODE.SHxALT 01.
+
+**The `explorer16-32` board** is Microchip's Explorer 16/32 (DM240001-3)
+with the PIC32MZ EF plug-in module (MA320019). Its pins are the PIM's, as
+its information sheet maps the board's 100-pin socket to the part:
+
+| | Pin | |
+|---|---|---|
+| LEDs D3-D10 | RA0, RA1, RA2, RA3, RF13, RF12, RA6, RA7 | lit when the pin drives high |
+| buttons S4, S5, S6 | RF8, RA7 (with D10), RD13 | low when pressed (the board's pull-ups); S3 is not wired on this PIM |
+| TC1047A temperature sensor | AN4 (RB4) | 500 mV + 10 mV per degree C |
+| potentiometer R6 | AN45 (RB5) | ADC0's alternate input |
+| 16x2 LCD, HD44780 | PMD0-7, RS on PMA0, E on PMWR, R/W on PMRD | the PMP in master mode |
+| USB-UART | the UART the program uses | every UART's output is stdout |
+
+The run reports on stderr each LED that goes on or off, and the LCD's
+two lines each time the program clears the display or sends its cursor
+home -- the frame it had drawn -- and when the run ends:
+
+```text
+explorer16-32: LED D5 on (RA2) at 502.378 ms
+explorer16-32: LCD |Temp:24.95 C    | at 1004.377 ms
+explorer16-32:     |                |
+```
+
+The times are the core's cycles at 200 MHz. The LCD is an HD44780: its
+instruction set (clear, home, entry mode, display on/off, cursor and
+display shift, function set with 8- or 4-bit interface and one or two
+lines, the CGRAM and DDRAM addresses), its 80-byte display RAM with line
+2 at 0x40, never busy.
+
+`--set NAME=VALUE` gives the board's inputs: `temperature=DEGREES` (25
+by default), `pot=VOLTS` or `pot=PERCENT%` (1.65 V by default), and
+`S4`, `S5` or `S6` `=pressed` or `=released`.
+
+**Not modelled on the PIC32:** the FPU (EmbCC's PIC32 images are
+soft-float: a floating-point instruction with Status.CU1 set ends the
+run naming it), microMIPS (XC32's startups and `-mmicromips` code), the
+DSP ASE beyond its registers, the MCU ASE's IRET, the peripherals other
+than these (their registers keep what is written), change-notification
+interrupts, the external interrupt pins, conversion and baud-rate
+timing, DMA, the watchdog and deadman timer, the prefetch cache, PMD's
+module disables, sleep and idle.
+
 ## What it models: the MIPS32 core
 
 - **The instruction set.** MIPS32 Release 2, little-endian: every
@@ -405,7 +542,19 @@ cycles, whatever the PLL is set to.
   eret clears the link.
 - **Interrupts.** Compatibility mode (Cause.IP against Status.IM, the
   timer on IP7) and vectored mode (IntCtl.VS), the hardware lines
-  IP2-IP7, and the two software interrupts. Count counts every other
+  IP2-IP7, and the two software interrupts; on a PIC32, EIC mode: the
+  EVIC's level against Status.IPL (8 bits: Status bits 18 and 16-10),
+  captured in Cause.RIPL as the interrupt is taken, its handler at
+  EBASE plus the EVIC's offset, its shadow register set.
+- **Shadow register sets** (`pic32mz`): an exception or interrupt saves
+  SRSCtl.CSS in PSS and switches to ESS (an exception), the EVIC's set
+  (EIC mode) or SRSMap's (vectored mode); eret switches back; rdpgpr
+  and wrpgpr reach the previous set.
+- **The DSP ASE** (`pic32mz`), what an RTOS saves and restores: HI and
+  LO of $ac1-$ac3 (mfhi, mflo, mthi, mtlo, the multiplies), rddsp and
+  wrdsp, lwx, lhx, lbux and bposge32, each a DSP State Disabled
+  exception while Status.MX is clear; the rest of the ASE ends the run
+  naming the instruction. Count counts every other
   cycle; Compare's match sets Cause.TI. wait sleeps until an interrupt:
   it skips ahead to the device that will raise one, and ends the run
   when nothing can.
@@ -950,6 +1099,17 @@ On the AVR:
 - Self-programming (SPM) and the boot section; the other AVR parts (the
   ATmega2560's 3-byte program counter, ELPM and RAMPZ).
 - The sleep modes beyond Idle.
+
+On MIPS:
+- The FPU, microMIPS, MIPS16e, the MCU ASE and the DSP ASE's arithmetic
+  (each ends the run as a lockup naming the instruction).
+- Big-endian images (mips-none-elf): EmbSim's MIPS core is
+  little-endian.
+- The caches (`cache` is a no-op), the watch registers (kept, not
+  enforced), the performance counters, EJTAG's debug mode (sdbbp ends
+  the run).
+- The analyses (`--coverage`, `--profile`, `--stack-report`,
+  `--fault-report`) and the GDB server's target description.
 
 On RISC-V:
 - Supervisor mode and virtual memory, and the hypervisor.

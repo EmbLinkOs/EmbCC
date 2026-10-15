@@ -52,6 +52,11 @@ struct rf_reg {
     struct rf_field *f;
     int nf;
     int traced;                     /* --trace-periph shows it */
+    /* a PIC32's CLR, SET or INV register (sci 1, 2, 3): a write changes
+     * `base`, as a write of the result to it; and a register's own */
+    struct rf_reg *base;
+    int sci;
+    struct rf_reg *alias[3];
 };
 
 struct rf_periph {
@@ -82,8 +87,10 @@ struct model_type {
 };
 const struct model_type *model_find(const char *name);
 
-/* the SVD's peripherals on the bus (sim_init calls it) */
+/* the SVD's peripherals on the bus (sim_init calls it); a file named
+ * .atdf is Microchip's device file (atdf.c) */
 struct svdmap *svdmap_create(struct sim *s, const char *path);
+struct svd_device *atdf_load(const char *path);
 void svdmap_add(struct sim *s, struct svdmap *m);
 /* the board's models over them */
 void svdmap_models(struct sim *s, struct svdmap *m,
@@ -93,8 +100,11 @@ void svdmap_models(struct sim *s, struct svdmap *m,
 void svdmap_trace(struct svdmap *m, const char *which);
 /* --svd-map: every register of the file, and what EmbSim made of it */
 void svdmap_print(struct svdmap *m, FILE *f);
-/* the board's SVD file: in EMBSIM_SVD_PATH's directories, or 0 */
+/* the board's SVD (or ATDF) file: in --dfp's directory (DIR/atdf/NAME,
+ * as a Microchip device pack has it, or DIR/NAME), in EMBSIM_SVD_PATH's
+ * directories, or 0 */
 const char *svd_search(const char *name);
+extern const char *svd_dfp;
 
 /* ---- for the models --------------------------------------------------- */
 
@@ -121,11 +131,21 @@ void rf_hw(struct rf_reg *r, u64 v);
  * fields under `mask`, a reset value */
 void rf_set_mwv(struct rf_reg *r, u64 mask, int mwv);
 void rf_set_reset(struct rf_reg *r, u64 v);
+/* the access of the fields under `mask` (ACC_RO: the hardware's bits,
+ * which an ATDF does not mark) */
+void rf_set_acc(struct rf_reg *r, u64 mask, int acc);
+/* the bits the register's fields cover */
+u64 rf_fields(const struct rf_reg *r);
 /* the peripheral's interrupt (the SVD's): the first whose name has
  * `want` in it, else its first; -1 when it has none */
 int rf_irq(const struct rf_periph *p, const char *want);
 /* pend that interrupt in the core */
 void rf_interrupt(struct rf_periph *p, int irq);
+/* the device's interrupt of that name (an ATDF's: TIMER_2, UART1_TX),
+ * or -1 */
+int rf_dev_irq(struct svdmap *m, const char *name);
+/* the register file of the run, its device's name */
+const char *rf_device_name(struct svdmap *m);
 /* the model's clock starts (on 1) or stops: while it runs, its tick hook
  * is called after each instruction and its next_event asked (sim_clock,
  * for a model); `*running` is the model's own record of it */
