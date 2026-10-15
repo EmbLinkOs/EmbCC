@@ -26,7 +26,7 @@ embsim IMAGE.elf|IMAGE.hex [--board NAME] [--cpu NAME] [--ram-size SIZE]
                  [--stack-report[=FILE]] [--stack-limit ADDR|SYMBOL]
                  [--stack-su FILE.su]... [--stack-embrt FILE.json] [FILE.su...]
                  [--fault-report[=FILE]] [--input FILE|-] [--record FILE]
-                 [--dfp DIR] [--set NAME=VALUE]...
+                 [--dfp DIR] [--set NAME=VALUE]... [--disassemble[=FILE]]
 embsim [IMAGE.elf] --replay FILE [--count FILE] [--stats] [...]
 embsim --svd FILE.svd --svd-map
 ```
@@ -1065,6 +1065,12 @@ the run stayed within the static numbers
   says so.
 - On RISC-V and the AVR there is one stack pointer: a program that
   switches stacks (an RTOS's tasks) is measured over all of them.
+- A PIC24's stack grows up, from XC16's `__SP_init` (W15 before the
+  startup sets it is not counted) toward `__SPLIM_init` (or the top of
+  RAM): the report gives its **base** and **highest** W15 (data
+  addresses), and the call's four-byte return address is the callee's
+  frame, as on the AVR. The part's own check of W15 against SPLIM is
+  the core's: a stack error trap, which `--fault-report` reports.
 
 **An overflow ends the run.** With `--stack-report` or `--stack-limit
 ADDR` (or a symbol's name), the main stack going below its limit -- past
@@ -1143,6 +1149,25 @@ embsim: the core locked up at 0x00000000, in 0x00000000: the fault above had no 
   there is none -- a vector without the Thumb bit or nowhere near a
   function, an mtvec where nothing can be fetched -- in which case the
   core locks up next, and the run ends with status 3 and one more line.
+- On a PIC24, a trap is the fault -- an address error, a stack error, a
+  math error, an oscillator failure: what the instruction did ("a word
+  read at the odd address 0x1001"), the instruction itself, disassembled,
+  the W registers, SR and SPLIM as the trap found them, the calls EmbSim
+  saw, and the trap's handler:
+
+  ```text
+  embsim: fault: address error trap (trap 1) at 0x00022e, in start+0x2e
+    a word read at the odd address 0x1001
+    instruction 0x00022e: 780011         mov [w1], w0
+    registers:
+      w0  0x0000  w1  0x1001  w2  0x0000  w3  0x0000
+      ...
+      w12 0x0000  w13 0x0000  w14 0x0000  w15 0x1200
+      sr  0x0103  splim 0x1ff0  corcon 0x0004  rcount 0x0000
+    backtrace (the calls EmbSim saw the core make):
+      #0  0x0000022e in start+0x2e
+    handler: 0x00025c, addrerr (the trap's vector, returning to 0x000230)
+  ```
 - An AVR has no faults; with `--fault-report` its lockup (an instruction
   the part does not have) gives the pc and the calls that led there.
 
@@ -1246,6 +1271,30 @@ A recorded debugging session -- breakpoints, `set var`, a register
 changed, a watchpoint -- replays without the debugger, so a run that
 went wrong once under gdb can be run again, and `--trace`d, `--profile`d
 or debugged again, exactly as it went.
+
+## The code as text: `--disassemble`
+
+`--disassemble` prints the image's code disassembled, and does not run
+it (`--disassemble=FILE` to a file): an ELF file's executable segments,
+a function's name above its first instruction; a PIC24's HEX image,
+its program memory where it is not erased. It knows the instruction
+sets the fault report shows -- Thumb, RISC-V, MIPS32 and the PIC24F
+(in XC16's mnemonics; f and the addresses in hex, the literals in
+decimal) -- which covers a PIC24 image when no `xc16-objdump` is at hand:
+
+```text
+$ embsim thermo.elf --board explorer16-32-pic24 --dfp $DFP --disassemble
+
+_main:
+  002d2c:  fa0014         lnk #20
+  002d2e:  0702ba         rcall 0x0032a4
+  002d30:  200100         mov #0x0010, w0
+  002d32:  980710         mov w0, [w14+2]
+```
+
+Data in the code's segments (a PIC24's interrupt vector table, the
+strings of `.const`) prints as `.word`, as does an encoding the
+disassembler does not know.
 
 ## Debugging: `--gdb`
 
@@ -1379,11 +1428,10 @@ On the PIC24F:
   (MOVPAG, CPBEQ and the rest; each ends the run as a lockup); the
   flash's programming (TBLWT and the NVM controller); the debug
   executive and BREAK.
-- `--coverage`, `--profile`, `--stack-report` and `--fault-report`
-  do not follow the PIC24 core yet; no gdb has a PIC24 target, so the
-  GDB server's registers are EmbSim's own numbering (W0-W15, SPLIM, the
-  PC, SR, CORCON, DSRPAG, DSWPAG, RCOUNT, TBLPAG).
-- Program memory an image leaves out reads 0 (NOP), not erased flash.
+- No gdb has a PIC24 target: the GDB server's registers are in EmbSim's
+  own order (W0-W15, SPLIM, the PC in four bytes, SR, CORCON, DSRPAG,
+  DSWPAG, RCOUNT, TBLPAG), which its target description names (feature
+  `org.embcc.embsim.pic24.core`) for a client of the protocol.
 
 On RISC-V:
 - Supervisor mode and virtual memory, and the hypervisor.

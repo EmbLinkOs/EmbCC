@@ -99,11 +99,21 @@ static const char *const trap_name[8] = {
 
 static int traps_told;
 
+const char *pic24_trap_name(int n)
+{
+    return trap_name[n & 7];
+}
+
 /* the instruction executing raises trap n: the first is the one */
 static int trap(int n, const char *why, u32 at)
 {
     if (!ps->trap) {
         ps->trap = n + 1;
+        ps->trap_pc = ps->pc;
+        if (at != ~0u)
+            snprintf(ps->trap_why, sizeof ps->trap_why, "%s 0x%04x", why, (unsigned)at);
+        else
+            snprintf(ps->trap_why, sizeof ps->trap_why, "%s", why);
         if (traps_told++ < 10) {
             fflush(stdout);
             fprintf(stderr, "embsim: %s trap at pc 0x%06x: %s", trap_name[n],
@@ -1574,7 +1584,8 @@ static void cpu_interrupt(struct cpu *c, int n)
 
 /* The registers for a debugger: W0-W15 (0-15), SPLIM 16, the PC 17
  * (four bytes), SR 18, CORCON 19, DSRPAG 20, DSWPAG 21, RCOUNT 22,
- * TBLPAG 23 -- no gdb has a PIC24 target; this is EmbSim's own order. */
+ * TBLPAG 23 -- no gdb has a PIC24 target; this is EmbSim's own order,
+ * which the target description (cpu_gdb_xml) names for a client. */
 static int cpu_reg_read(struct cpu *c, int n, u8 *buf)
 {
     struct pic24_state *k = (struct pic24_state *)c;
@@ -1635,11 +1646,44 @@ static const int *cpu_gdb_g_regs(struct cpu *c)
     return g_regs;
 }
 
+/* the registers by name and size, in the g packet's order: a feature of
+ * EmbSim's own, as gdb has none for the PIC24 (and so no architecture) */
+static const char target_xml[] =
+    "<?xml version=\"1.0\"?>\n"
+    "<!DOCTYPE target SYSTEM \"gdb-target.dtd\">\n"
+    "<target version=\"1.0\">\n"
+    "<feature name=\"org.embcc.embsim.pic24.core\">\n"
+    "<reg name=\"w0\" bitsize=\"16\" type=\"uint16\" regnum=\"0\"/>\n"
+    "<reg name=\"w1\" bitsize=\"16\" type=\"uint16\"/>\n"
+    "<reg name=\"w2\" bitsize=\"16\" type=\"uint16\"/>\n"
+    "<reg name=\"w3\" bitsize=\"16\" type=\"uint16\"/>\n"
+    "<reg name=\"w4\" bitsize=\"16\" type=\"uint16\"/>\n"
+    "<reg name=\"w5\" bitsize=\"16\" type=\"uint16\"/>\n"
+    "<reg name=\"w6\" bitsize=\"16\" type=\"uint16\"/>\n"
+    "<reg name=\"w7\" bitsize=\"16\" type=\"uint16\"/>\n"
+    "<reg name=\"w8\" bitsize=\"16\" type=\"uint16\"/>\n"
+    "<reg name=\"w9\" bitsize=\"16\" type=\"uint16\"/>\n"
+    "<reg name=\"w10\" bitsize=\"16\" type=\"uint16\"/>\n"
+    "<reg name=\"w11\" bitsize=\"16\" type=\"uint16\"/>\n"
+    "<reg name=\"w12\" bitsize=\"16\" type=\"uint16\"/>\n"
+    "<reg name=\"w13\" bitsize=\"16\" type=\"uint16\"/>\n"
+    "<reg name=\"w14\" bitsize=\"16\" type=\"data_ptr\"/>\n"
+    "<reg name=\"w15\" bitsize=\"16\" type=\"data_ptr\"/>\n"
+    "<reg name=\"splim\" bitsize=\"16\" type=\"data_ptr\"/>\n"
+    "<reg name=\"pc\" bitsize=\"32\" type=\"code_ptr\"/>\n"
+    "<reg name=\"sr\" bitsize=\"16\" type=\"uint16\"/>\n"
+    "<reg name=\"corcon\" bitsize=\"16\" type=\"uint16\"/>\n"
+    "<reg name=\"dsrpag\" bitsize=\"16\" type=\"uint16\"/>\n"
+    "<reg name=\"dswpag\" bitsize=\"16\" type=\"uint16\"/>\n"
+    "<reg name=\"rcount\" bitsize=\"16\" type=\"uint16\"/>\n"
+    "<reg name=\"tblpag\" bitsize=\"16\" type=\"uint16\"/>\n"
+    "</feature>\n"
+    "</target>\n";
+
 static const char *cpu_gdb_xml(struct cpu *c, const char *annex)
 {
     (void)c;
-    (void)annex;
-    return 0;
+    return !strcmp(annex, "target.xml") ? target_xml : 0;
 }
 
 /* an image's program address on the bus: twice it (a word's four bytes) */

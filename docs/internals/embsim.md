@@ -65,7 +65,7 @@ file but the network one compiles with EmbCC itself. Everything is in
 | `profile.c` | `--profile`: the counts per call path, the report and the collapsed stacks |
 | `stack.c` | `--stack-report`, `--stack-limit`: the stacks' high-water marks, frames by function, `.su` and embrt's bounds, the overflow |
 | `fault.c` | `--fault-report`: a fault decoded at its entry, the stacked frame, the backtrace by `.debug_frame` (or the shadow stack) |
-| `disasm.h`, `disasm.c` | one Thumb or RISC-V instruction as text, for the fault report |
+| `disasm.h`, `disasm.c` | one Thumb, RISC-V, MIPS32 or PIC24F instruction as text, for the fault report; `--disassemble`'s listing of an image |
 | `record.c` | `--input`, `--record`, `--replay`: the UART's input, the record of a run's inputs, the replay |
 
 The cost of each instruction comes from `tools/bench/cost.h`, the table
@@ -153,7 +153,20 @@ run.
 `image.c` reads the ELF a second time, apart from the loader, for what
 the analyses need: the functions (STT_FUNC, and labels in the code for
 assembly), the line table as address ranges, and the call frame
-information. None of it is read without an analysis.
+information. None of it is read without an analysis. XC16's images
+(e_machine 118) differ in three ways it takes care of: a segment's file
+size is twice its program addresses (four bytes a word), the sections
+not loaded -- the DWARF -- hold each byte followed by a zero, and its
+local labels (`L11`, `CORCON_RESET`) and data, whose addresses are
+numbers the code has too, are not functions.
+
+The analyses follow a PIC24 as the other cores (`AN_PIC24`): CALL,
+RCALL and their Wn forms are calls, RETURN and RETLW returns, RETFIE the
+core's `an_exc_return`; a trap's number is `an_exc_entry`'s 0-7 and an
+interrupt's 8 plus its number. Its stack grows up, and `an_sp` mirrors
+it (`PIC24_DATA + 0x10000 - W15`) so that `stack.c`'s "deeper is lower"
+holds; `an_stack_real` turns an address back for the report, and the
+stack is not counted before W15 reaches XC16's `__SP_init`.
 
 ## The interfaces
 

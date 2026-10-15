@@ -6,6 +6,8 @@
 # these few carry the setup and the printing around them.
 #
 #   awk -f pic24-asm.awk PROG.s PROG.s > PROG.hex     (two passes: labels)
+#   awk -v syms=FILE ...: and the symbols to FILE, a line each: "L NAME
+#   ADDR" for a label, "E NAME VALUE" for an .equ (pic24-elf.py's input)
 #
 # Syntax: `label:`, `; comment`, `.equ NAME, VALUE`, `.org ADDR` (a
 # program address), `.word V` (a 24-bit word or a label), `.fill N, V`;
@@ -195,8 +197,10 @@ FNR == 1 { pass++; pc = 0 }
     while (match(line, /^[ \t]*[A-Za-z_.][A-Za-z0-9_.]*:/)) {
         l = substr(line, RSTART, RLENGTH - 1)
         gsub(/[ \t]/, "", l)
-        if (pass == 1)
+        if (pass == 1) {
             sym[l] = pc
+            islabel[l] = 1
+        }
         line = substr(line, RSTART + RLENGTH)
     }
     asm(line)
@@ -240,4 +244,7 @@ END {
         i += k
     }
     print ":00000001FF"
+    if (syms != "")
+        for (n in sym)
+            printf "%s %s %d\n", (n in islabel) ? "L" : "E", n, sym[n] > syms
 }

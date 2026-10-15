@@ -20,7 +20,21 @@
 #     and its run recorded and replayed, the board's inputs with it.
 #  5. With EMBSIM_THERMO24_ELF, an XC16 build of a thermometer project for
 #     the board (MPLAB X, MCC, the LCD, the ADC, the EEPROM): its menu, and
-#     with S3 pressed the temperature its own formula gives.
+#     with S3 pressed the temperature its own formula gives; and the
+#     analyses on it (its functions, its stack from __SP_init, its source
+#     lines when the build has them).
+#  6. The analyses on the PIC24 core (python3 builds the ELF file they
+#     read, of tests/golden/embsim/pic24-calls.s, with pic24-elf.py):
+#     --profile's calls (CALL, RCALL, an interrupt, a trap), --stack-report
+#     of a stack that grows up (its base, its highest W15, each function's
+#     frame with the return address it was called with), --coverage's
+#     functions, --fault-report of an address error (what the instruction
+#     did, the instruction, the registers as the trap found them, the
+#     handler); --disassemble of the manual's 228 examples, each beside the
+#     manual's own text (tests/golden/embsim/pic24-dis.txt); and the GDB
+#     server's registers, by the target description it gives
+#     (tests/golden/embsim/pic24-rsp.py, a client of the protocol: no gdb
+#     has a PIC24 target).
 set -u
 echo "TEST-MARKER embsim-pic24"
 . "$(dirname "$0")/../lib.sh"
@@ -102,6 +116,75 @@ cmp -s "$out/replay.out" "$out/board.want" ||
     { cat "$out/replay.out" "$out/replay.err"; fail "the replay's output is not the run's"; }
 echo "embsim-pic24: the Explorer 16/32: Timer1's interrupt, the LEDs, S3 and S6, the TC1047A and the potentiometer at 10 and 12 bits, the LCD on the EPMP, the 25LC256 behind the PPS; recorded with its inputs, and replayed"
 
+# ---- 6. the analyses ------------------------------------------------------------------
+# --disassemble: each example of the manual beside what EmbSim makes of it
+{ echo "        .org 0x200"
+  grep '^ *\.word 0x' tests/golden/embsim/pic24-isa.s | sed 's/^ *\(\.word 0x[0-9a-fA-F]*\).*/        \1/'
+} > "$out/dis.s"
+grep '^ *\.word 0x' tests/golden/embsim/pic24-isa.s | sed 's/^[^;]*; *//' > "$out/dis.manual"
+awk -f "$ASM" "$out/dis.s" "$out/dis.s" > "$out/dis.hex" || fail "the examples do not assemble"
+"$EMBSIM" "$out/dis.hex" --board pic24fj1024gb610 --dfp "$DFP" --disassemble > "$out/dis.out" ||
+    fail "--disassemble of a PIC24 HEX image"
+sed -n 's/^  [0-9a-f]\{6\}:  [0-9a-f]\{6\} *//p' "$out/dis.out" > "$out/dis.text"
+paste -d'|' "$out/dis.manual" "$out/dis.text" |
+    awk -F'|' '{ printf "%-34s| %s\n", $1, $2 }' > "$out/dis.both"
+cmp -s "$out/dis.both" tests/golden/embsim/pic24-dis.txt || {
+    diff tests/golden/embsim/pic24-dis.txt "$out/dis.both" | head -20
+    fail "--disassemble: the examples are not pic24-dis.txt"; }
+echo "embsim-pic24: --disassemble: the manual's $(wc -l < "$out/dis.both" | tr -d ' ') examples, each as pic24-dis.txt has it beside the manual's text"
+if command -v python3 > /dev/null 2>&1; then
+    c=$out/calls
+    awk -v syms="$c.syms" -f "$ASM" tests/golden/embsim/pic24-calls.s \
+        tests/golden/embsim/pic24-calls.s > "$c.hex" &&
+    python3 -I tests/golden/embsim/pic24-elf.py "$c.hex" "$c.syms" "$c.elf" ||
+        fail "pic24-calls.s does not build"
+    "$EMBSIM" "$c.elf" --board pic24fj1024gb610 --dfp "$DFP" --max-insns 100000 \
+        --profile="$c.prof" --stack-report="$c.stk" --fault-report="$c.flt" \
+        --coverage "$c.cov" > "$c.out" 2> "$c.err"
+    st=$?
+    [ $st = 0 ] || { cat "$c.err"; fail "pic24-calls.s with the analyses exits $st"; }
+    calls() { awk -v f="$1" '$NF == f { print $(NF - 1) }' "$c.prof"; }
+    [ "$(calls outer)" = 2 ] && [ "$(calls leaf)" = 4 ] && [ "$(calls t1isr)" = 2 ] &&
+    [ "$(calls addrerr)" = 1 ] ||
+        { cat "$c.prof"; fail "--profile: not outer 2 calls, leaf 4, t1isr 2, addrerr 1"; }
+    grep -q '^stack: base 0x1200, highest 0x1212: 18 bytes used of 3568 (up to 0x1ff0, __SPLIM_init)$' "$c.stk" &&
+    grep -q '^  outer  *0x0000120e  *14  *10  *-  *18 ' "$c.stk" &&
+    grep -q '^  leaf  *0x00001212  *18  *8  *-  *8 ' "$c.stk" ||
+        { cat "$c.stk"; fail "--stack-report: not the stack that grows up from 0x1200"; }
+    for l in 'embsim: fault: address error trap (trap 1) at 0x00022e, in start+0x2e' \
+             '  a word read at the odd address 0x1001' \
+             '  instruction 0x00022e: 780011         mov [w1], w0' \
+             '    w12 0x0000  w13 0x0000  w14 0x0000  w15 0x1200' \
+             '  handler: 0x00025c, addrerr (the trap'"'"'s vector, returning to 0x000230)'; do
+        grep -qF "$l" "$c.flt" || { cat "$c.flt"; fail "--fault-report: no line '$l'"; }
+    done
+    grep -q '^  function leaf: 4$' "$c.cov" && grep -q '^  function addrerr: 1$' "$c.cov" ||
+        { cat "$c.cov"; fail "--coverage: not the functions' counts"; }
+    echo "embsim-pic24: --profile, --stack-report (a stack that grows up), --coverage and --fault-report (an address error) on the PIC24 core"
+    # the GDB server: the registers by its target description, at a
+    # breakpoint on outer's first call
+    port=$(( 32000 + ($$ % 900) * 30 ))
+    outer=$(awk '$2 == "outer" { printf "%x", $3 }' "$c.syms")
+    ( "$EMBSIM" "$c.elf" --board pic24fj1024gb610 --dfp "$DFP" --gdb $port --gdb-wait \
+        > "$c.gdb.out" 2> "$c.gdb.err"; echo $? > "$c.gdb.st" ) &
+    gp=$!
+    ( sleep 60; kill $gp; pkill -f "embsim $c.elf" ) > /dev/null 2>&1 &
+    wd=$!
+    python3 -I tests/golden/embsim/pic24-rsp.py $port $outer > "$c.rsp" 2>&1
+    wait $gp
+    kill $wd 2>/dev/null
+    wait $wd 2>/dev/null
+    for l in 'feature org.embcc.embsim.pic24.core' \
+             'registers w0 w1 w2 w3 w4 w5 w6 w7 w8 w9 w10 w11 w12 w13 w14 w15 splim pc sr corcon dsrpag dswpag rcount tblpag' \
+             'stop T05' 'w8 0x1111' 'w9 0x2222' 'w15 0x1204' 'splim 0x1ff0' \
+             "pc 0x00000$outer" "p pc 0x00000$outer"; do
+        grep -qx "$l" "$c.rsp" || { cat "$c.rsp" "$c.gdb.err"; fail "the GDB server: no '$l'"; }
+    done
+    echo "embsim-pic24: the GDB server's PIC24 registers by its target description, at a breakpoint"
+else
+    echo "embsim-pic24: no python3: the analyses' ELF image was not built"
+fi
+
 # ---- 5. an XC16 project: EMBSIM_THERMO24_ELF ----------------------------------------------
 # A thermometer for the board, built by MPLAB X and XC16 (MCC's drivers:
 # ADC1 scanning AN4 and internal channels, SPI1 to the EEPROM, the EPMP's
@@ -123,6 +206,22 @@ if [ -n "${EMBSIM_THERMO24_ELF:-}" ] && [ -f "$EMBSIM_THERMO24_ELF" ]; then
             { cat "$out/t24-$t.err"; fail "the thermometer at $t degrees does not show $want C"; }
     done
     echo "embsim-pic24: the XC16 thermometer: its menu, and 74 C and 79 C at 25 and 30 degrees, as its formula has them"
+    # the analyses on XC16's image: its functions, its stack from
+    # __SP_init, and with a debug build its lines
+    "$EMBSIM" "$EMBSIM_THERMO24_ELF" --board explorer16-32-pic24 --dfp "$DFP" \
+        --max-insns 3000000 --profile="$out/t24.prof" --stack-report="$out/t24.stk" \
+        --coverage "$out/t24.cov" > "$out/t24an.out" 2> "$out/t24an.err"
+    [ $? = 4 ] || { cat "$out/t24an.err"; fail "the thermometer with the analyses"; }
+    grep -q ' _main$' "$out/t24.prof" && grep -q ' __ADC1Interrupt$' "$out/t24.prof" ||
+        { cat "$out/t24.prof"; fail "--profile: no _main and __ADC1Interrupt in the thermometer"; }
+    grep -q '^stack: base 0x[0-9a-f]*, highest 0x[0-9a-f]*: [0-9]* bytes used of [0-9]* (up to 0x[0-9a-f]*, __SPLIM_init)$' "$out/t24.stk" ||
+        { cat "$out/t24.stk"; fail "--stack-report: not XC16's stack"; }
+    if grep -q '^main.c: ' "$out/t24.cov"; then
+        lines=$(sed -n 's/^main.c: //p' "$out/t24.cov")
+    else
+        lines="functions only (no debug lines)"
+    fi
+    echo "embsim-pic24: the thermometer's --profile, --stack-report and --coverage (main.c: $lines)"
 else
     echo "embsim-pic24: no EMBSIM_THERMO24_ELF: the XC16 thermometer was not run"
 fi

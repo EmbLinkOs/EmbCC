@@ -22,6 +22,7 @@
 #include <string.h>
 
 #include "analysis.h"
+#include "disasm.h"
 #include "image.h"
 #include "sim.h"
 #include "pic24.h"
@@ -52,7 +53,7 @@ static void usage(void)
           "               collapsed-insns]]\n"
           "              [--stack-report[=FILE]] [--stack-limit ADDR|SYMBOL]\n"
           "              [--stack-su FILE.su]... [--stack-embrt FILE.json] [FILE.su...]\n"
-          "              [--fault-report[=FILE]]\n"
+          "              [--fault-report[=FILE]] [--disassemble[=FILE]]\n"
           "              [--input FILE|-] [--record FILE]\n"
           "              [--dfp DIR] [--set NAME=VALUE]...\n"
           "       embsim [IMAGE.elf] --replay FILE [--count FILE] [--stats] ...\n"
@@ -85,7 +86,8 @@ int main(int argc, char **argv)
     int svd_map = 0, tracing_periph = 0, board_given = 0, cov_lcov = 0;
     int profiling = 0, prof_fmt = 0, stk_report = 0;
     const char *stk_path = 0, *stk_limit = 0, *stk_embrt = 0, *fault_path = 0;
-    int fault_report = 0, semi_given = 0;
+    int fault_report = 0, semi_given = 0, disassemble = 0;
+    const char *dis_path = 0;
     const char *input = 0, *record = 0, *replay = 0;
     const char **su = calloc((size_t)argc, sizeof *su);
     const char **sets = calloc((size_t)argc, sizeof *sets);
@@ -175,6 +177,10 @@ int main(int argc, char **argv)
             fault_report = 1, fault_path = 0;
         else if (!strncmp(a, "--fault-report=", 15))
             fault_report = 1, fault_path = a + 15;
+        else if (!strcmp(a, "--disassemble"))
+            disassemble = 1, dis_path = 0;
+        else if (!strncmp(a, "--disassemble=", 14))
+            disassemble = 1, dis_path = a + 14;
         else if (!strcmp(a, "--stack-report"))
             stk_report = 1, stk_path = 0;
         else if (!strncmp(a, "--stack-report=", 15))
@@ -318,15 +324,22 @@ int main(int argc, char **argv)
     sim_load(s, ram_size, image);
     if ((nsu || stk_embrt) && !stk_report)
         die("--stack-su and --stack-embrt are for --stack-report");
+    if (disassemble) {
+        /* the image's code as text, and no run */
+        FILE *o = dis_path && *dis_path && strcmp(dis_path, "-") ? fopen(dis_path, "w")
+                                                                 : stdout;
+        if (!o)
+            die("cannot write %s", dis_path);
+        dis_listing(s, image_open(image), o);
+        if (o != stdout)
+            fclose(o);
+        return 0;
+    }
     if ((coverage || profiling || stk_report || stk_limit || fault_report) &&
         image_is_hex(image))
         die("--coverage, --profile, --stack-report, --stack-limit and "
             "--fault-report read the image's symbols and lines: give its ELF "
             "file, not its HEX one");
-    if (pic24_is(s->cpu) && (coverage || profiling || stk_report || stk_limit ||
-                             fault_report))
-        die("--coverage, --profile, --stack-report and --fault-report do not "
-            "follow the PIC24 core yet");
     if (coverage || profiling || stk_report || stk_limit || fault_report ||
         input || record || rp) {
         struct analysis *an = an_create(s, profiling || stk_report || stk_limit ||

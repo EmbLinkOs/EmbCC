@@ -8,6 +8,8 @@
  *   - RISC-V: JAL and JALR that link (rd ra or t0) are calls, C.JAL and
  *     C.JALR too; JALR and C.JR that do not link may be returns;
  *   - AVR: CALL, RCALL and ICALL are calls; RET is a return;
+ *   - PIC24: CALL, RCALL, CALL Wn and RCALL Wn are calls; RETURN and
+ *     RETLW returns (RETFIE is the core's an_exc_return);
  *   - MIPS: JAL, JALR that links, BAL and the other linking branches are
  *     calls; JR may be a return. Each transfers after its delay slot, so
  *     the step that makes the call or the return is the slot's: its
@@ -34,6 +36,7 @@
 #include "cortexm.h"
 #include "devices.h"
 #include "mips.h"
+#include "pic24.h"
 #include "riscv.h"
 
 enum { K_OTHER, K_CALL, K_RET };
@@ -194,6 +197,21 @@ static int kind_mips16(struct sim *s, u32 pc, int *size, int *compact)
     return K_OTHER;
 }
 
+/* a PIC24 instruction's kind, and its size in program addresses (2 a
+ * word) */
+static int kind_pic24(struct sim *s, u32 pc, int *size)
+{
+    u32 i = pic24_prog(s, pc), op = i >> 16;
+    *size = op == 0x02 || op == 0x04 ? 4 : 2;
+    if (op == 0x02 || op == 0x07)                               /* CALL, RCALL */
+        return K_CALL;
+    if (op == 0x01 && ((i & 0xfff0) == 0x0000 || (i & 0xfff0) == 0x2000))
+        return K_CALL;                                          /* CALL Wn, RCALL Wn */
+    if (i == 0x060000 || op == 0x05)                            /* RETURN, RETLW */
+        return K_RET;
+    return K_OTHER;
+}
+
 int an_sps(struct analysis *a, u32 *msp, u32 *psp)
 {
     if (a->arch == AN_ARM) {
@@ -216,12 +234,29 @@ int an_data_sym(struct analysis *a, const char *name, u32 *v)
     return 1;
 }
 
+/* the PIC24's stack, seen from above: deeper is lower, as elsewhere */
+#define PIC24_MIRROR (PIC24_DATA + 0x10000u)
+
+u32 an_stack_real(struct analysis *a, u32 v)
+{
+    return a->arch == AN_PIC24 && v ? PIC24_MIRROR - v : v;
+}
+
+u32 an_stack_view(struct analysis *a, u32 real)
+{
+    return a->arch == AN_PIC24 && real ? PIC24_MIRROR - real : real;
+}
+
 u32 an_sp(struct analysis *a)
 {
     switch (a->arch) {
     case AN_ARM: return ((struct cm_state *)a->s->cpu)->R[13];
     case AN_RV: return (u32)((struct rv_state *)a->s->cpu)->x[2];
     case AN_MIPS: return ((struct mips_state *)a->s->cpu)->r[29];
+    case AN_PIC24: {
+        u32 w = ((struct pic24_state *)a->s->cpu)->w[15];
+        return w < (a->sp0 ? a->sp0 : 1u) ? 0 : PIC24_MIRROR - w;
+    }
     default: return AVR_DATA + ((struct avr_state *)a->s->cpu)->sp;
     }
 }
@@ -451,6 +486,7 @@ void an_step(struct sim *s)
                 a->kind = K_OTHER;
             break;
         }
+        case AN_PIC24: a->kind = kind_pic24(s, pc0, &a->size); break;
         default: a->kind = kind_avr(s, pc0, &a->size); break;
         }
     }
@@ -497,7 +533,11 @@ struct analysis *an_create(struct sim *s, int calls)
     a->s = s;
     a->img = image_open(s->image);
     a->arch = avr_is(s->cpu) ? AN_AVR : riscv_is(s->cpu) ? AN_RV
-            : mips_is(s->cpu) ? AN_MIPS : AN_ARM;
+            : mips_is(s->cpu) ? AN_MIPS : pic24_is(s->cpu) ? AN_PIC24 : AN_ARM;
+    /* the PIC24's stack starts where XC16's startup puts W15; before it
+     * (W15 0x0800 out of reset) it is not one */
+    if (a->arch == AN_PIC24 && !image_sym(a->img, "__SP_init", &a->sp0))
+        a->sp0 = 0;
     a->calls = calls;
     a->fn_lo = a->fn_hi = 0;        /* an empty cache */
     a->fn_idx = -1;

@@ -18,7 +18,7 @@
 #include "image.h"
 #include "sim.h"
 
-enum { AN_ARM, AN_RV, AN_AVR, AN_MIPS };
+enum { AN_ARM, AN_RV, AN_AVR, AN_MIPS, AN_PIC24 };
 
 /* a frame of the shadow stack: a call or an exception's entry */
 struct an_frame {
@@ -46,6 +46,7 @@ struct analysis {
     struct sim *s;
     struct image *img;
     int arch;
+    u32 sp0;                        /* PIC24: the stack's base (__SP_init), or 0 */
 
     /* ---- the step ---- */
     u32 pc0;                        /* the instruction's address */
@@ -132,8 +133,15 @@ void an_finish(struct sim *s);
 
 /* the function holding pc (an index into img->fn, or -1), cached */
 int an_fn(struct analysis *a, u32 pc);
-/* the stack pointer, as an address on the bus */
+/* the stack pointer, as an address on the bus; 0 before the program has
+ * one. A PIC24's stack grows up: its sp is mirrored (an_stack_real), so
+ * deeper is lower on every core */
 u32 an_sp(struct analysis *a);
+/* a mirrored PIC24 stack address back to W15's value (a data address);
+ * anything else as it is */
+u32 an_stack_real(struct analysis *a, u32 v);
+/* and a data address to the analyses' sp */
+u32 an_stack_view(struct analysis *a, u32 real);
 /* the main and the process stack pointers (a Cortex-M's MSP and PSP; sp
  * and 0 elsewhere), and whether the PSP is the one in use */
 int an_sps(struct analysis *a, u32 *msp, u32 *psp);

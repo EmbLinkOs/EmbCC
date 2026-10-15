@@ -1,0 +1,228 @@
+ADD.B RAM100                      | add.b 0x1100
+ADD.B #0xFF, W7                   | add.b #255, w7
+ADD #0xFF, W1                     | add #255, w1
+ADD W3, #0x6, [--W4]              | add w3, #6, [--w4]
+ADD.B W5, W6, W7                  | add.b w5, w6, w7
+ADD W5, W6, W7                    | add w5, w6, w7
+ADDC.B RAM100                     | addc.b 0x1100
+ADDC RAM200, WREG                 | addc 0x1200, wreg
+ADDC.B #0xFF, W7                  | addc.b #255, w7
+ADDC #0xFF, W1                    | addc #255, w1
+ADDC.B W0, #0x1F, [W7]            | addc.b w0, #31, [w7]
+ADDC W3, #0x6, [--W4]             | addc w3, #6, [--w4]
+ADDC.B W0, [W1++], [W2++]         | addc.b w0, [w1++], [w2++]
+ADDC W3, [W2++], [W1++]           | addc w3, [w2++], [w1++]
+AND.B RAM100                      | and.b 0x1100
+AND RAM200, WREG                  | and 0x1200, wreg
+AND.B #0x83, W7                   | and.b #131, w7
+AND #0x333, W1                    | and #819, w1
+AND W0, #0x1F, W1                 | and w0, #31, w1
+AND.B W0, W1, [W2++]              | and.b w0, w1, [w2++]
+AND W0, [W1++], W2                | and w0, [w1++], w2
+ASR.B RAM400, WREG                | asr.b 0x1400, wreg
+ASR RAM200                        | asr 0x1200
+ASR.B [W0++], [W1++]              | asr.b [w0++], [w1++]
+ASR W12, W13                      | asr w12, w13
+ASR W0, #0x4, W1                  | asr w0, #4, w1
+ASR W0, #0x6, W1                  | asr w0, #6, w1
+ASR W0, #0xF, W1                  | asr w0, #15, w1
+ASR W0, W5, W6                    | asr w0, w5, w6
+ASR W11, W12, W13                 | asr w11, w12, w13
+BCLR.B 0x1800, #0x7               | bclr 0x1800, #7
+BCLR 0x1400, #0x9                 | bclr 0x1400, #9
+BCLR.B W2, #0x2                   | bclr.b w2, #2
+BCLR [W0++], #0x0                 | bclr [w0++], #0
+BSET.B 0x1601, #0x3               | bset 0x1600, #11
+BSET 0x1444, #0xF                 | bset 0x1444, #15
+BSET.B W3, #0x7                   | bset.b w3, #7
+BSET [W4++], #0x0                 | bset [w4++], #0
+BSW.C W2, W3                      | bsw.c w2, w3
+BSW.Z W2, W3                      | bsw.z w2, w3
+BSW.C [++W0], W6                  | bsw.c [++w0], w6
+BSW.Z [W1--], W5                  | bsw.z [w1--], w5
+BTG.B 0x1001, #0x4                | btg 0x1000, #12
+BTG 0x1660, #0x8                  | btg 0x1660, #8
+BTG W2, #0x0                      | btg w2, #0
+BTG [W0++], #0x0                  | btg [w0++], #0
+BTSC.B 0x1201, #2                 | btsc 0x1200, #10
+BTSC 0x1804, #14                  | btsc 0x1804, #14
+BTSS [W6++], #0xC                 | btss [w6++], #12
+BTST.B 0x1201, #0x3               | btst 0x1200, #11
+BTST 0x1302, #0x7                 | btst 0x1302, #7
+BTST.C [W0++], #0x3               | btst.c [w0++], #3
+BTST.Z W0, #0x7                   | btst.z w0, #7
+BTST.C W2, W3                     | btst.c w2, w3
+BTST.Z [W0++], W1                 | btst.z [w0++], w1
+BTSTS.C [W0++], #0x3              | btsts.c [w0++], #3
+CLR.B RAM200                      | clr.b 0x1200
+CLR WREG                          | clr wreg
+CLR.B W2                          | clr.b w2
+CLR [W0++]                        | clr [w0++]
+COM.B RAM200                      | com.b 0x1200
+COM RAM400, WREG                  | com 0x1400, wreg
+COM.B [W0++], [W1++]              | com.b [w0++], [w1++]
+COM W0, [W1++]                    | com w0, [w1++]
+CP.B RAM400                       | cp.b 0x1400
+CP 0x1200                         | cp 0x1200
+CP.B W4, #0x12                    | cp.b w4, #18
+CP W4, #0x12                      | cp w4, #18
+CP.B W0, [W1++]                   | cp.b w0, [w1++]
+CP W5, W6                         | cp w5, w6
+CP0.B RAM100                      | cp0.b 0x1100
+CP0 0x1FFE                        | cp0 0x1ffe
+CP0 [--W5]                        | cp0 [--w5]
+CPB.B RAM400                      | cpb.b 0x1400
+CPB 0x1200                        | cpb 0x1200
+CPB.B W0, [W1++]                  | cpb.b w0, [w1++]
+CPB.B W0, [W1++]                  | cpb.b w0, [w1++]
+CPB W4, W5                        | cpb w4, w5
+CPSEQ W4, W8                      | cpseq w4, w8
+CPSGT.B W0, W1                    | cpsgt.b w0, w1
+CPSGT W4, W5                      | cpsgt w4, w5
+DAW.B W3                          | daw.b w3
+DEC.B 0x1200                      | dec.b 0x1200
+DEC W5, [W6++]                    | dec w5, [w6++]
+DEC2.B 0x1200                     | dec2.b 0x1200
+DEC2.B [W7--], [W8--]             | dec2.b [w7--], [w8--]
+DEC2 W5, [W6++]                   | dec2 w5, [w6++]
+REPEAT #17; DIV.S W3, W4          | div.s w3, w4
+REPEAT #17; DIV.SD W0, W12        | div.sd w0, w12
+EXCH W1, W9                       | exch w1, w9
+FBCL W1, W9                       | fbcl w1, w9
+FBCL W1, W9                       | fbcl w1, w9
+FBCL [W1++], W9                   | fbcl [w1++], w9
+FF1L W2, W5                       | ff1l w2, w5
+FF1L [W2++], W5                   | ff1l [w2++], w5
+FF1R W1, W9                       | ff1r w1, w9
+FF1R [W1++], W9                   | ff1r [w1++], w9
+INC 0x1000, WREG                  | inc 0x1000, wreg
+INC.B W1, [++W2]                  | inc.b w1, [++w2]
+INC W1, W2                        | inc w1, w2
+INC2.B W1, [++W2]                 | inc2.b w1, [++w2]
+INC2 W1, W2                       | inc2 w1, w2
+IOR.B 0x1000                      | ior.b 0x1000
+IOR 0x1000, WREG                  | ior 0x1000, wreg
+IOR.B #0xAA, W9                   | ior.b #170, w9
+IOR #0x2AA, W4                    | ior #682, w4
+IOR.B W1, #0x5, [W9++]            | ior.b w1, #5, [w9++]
+IOR W1, #0x0, W9                  | ior w1, #0, w9
+IOR.B W1, [W5++], [W9++]          | ior.b w1, [w5++], [w9++]
+IOR W1, W5, W9                    | ior w1, w5, w9
+LNK #0xA0                         | lnk #160
+LSR.B 0x1600                      | lsr.b 0x1600
+LSR 0x1600, WREG                  | lsr 0x1600, wreg
+LSR.B W0, W1                      | lsr.b w0, w1
+LSR W0, W1                        | lsr w0, w1
+LSR W4, #14, W5                   | lsr w4, #14, w5
+LSR W4, #1, W5                    | lsr w4, #1, w5
+LSR W0, W1, W2                    | lsr w0, w1, w2
+LSR W5, W4, W3                    | lsr w5, w4, w3
+MOV 0x1800                        | mov 0x1800
+MOV.B WREG, 0x1801                | mov.b wreg, 0x1801
+MOV 0x27FE, W3                    | mov 0x27fe, w3
+MOV W8, 0x1222                    | mov w8, 0x1222
+MOV.B #0x17, W5                   | mov.b #23, w5
+MOV.B #0xFE, W9                   | mov.b #254, w9
+MOV #-1000, W8                    | mov #0xfc18, w8
+MOV.B [W8+0x13], W10              | mov.b [w8+19], w10
+MOV [W4+0x3E8], W2                | mov [w4+1000], w2
+MOV.B W0, [W1+0x7]                | mov.b w0, [w1+7]
+MOV W11, [W1-0x400]               | mov w11, [w1-1024]
+MOV.B [W0--], W4                  | mov.b [w0--], w4
+MOV [W6++], [W2+W3]               | mov [w6++], [w2+w3]
+MOV.D W2, W6                      | mov.d w2, w6
+MOV.D [W7--], W4                  | mov.d [w7--], w4
+MUL.B 0x1800                      | mul.b 0x1800
+MUL 0x1802                        | mul 0x1802
+MUL.SS W0, W1, W12                | mul.ss w0, w1, w12
+MUL.SS W2, [--W4], W0             | mul.ss w2, [--w4], w0
+MUL.SU W0, #0x1F, W2              | mul.su w0, #31, w2
+MUL.SU W8, [W9], W0               | mul.su w8, [w9], w0
+MUL.SU W2, [++W3], W4             | mul.su w2, [++w3], w4
+MUL.US W0, [W1], W2               | mul.us w0, [w1], w2
+MUL.US W6, [W5++], W10            | mul.us w6, [w5++], w10
+MUL.UU W0, #0xF, W12              | mul.uu w0, #15, w12
+MUL.UU W7, #0x1F, W0              | mul.uu w7, #31, w0
+MUL.UU W4, W0, W2                 | mul.uu w4, w0, w2
+MUL.UU W0, [W1++], W4             | mul.uu w0, [w1++], w4
+NEG 0x1200                        | neg 0x1200
+NEG.B W3, [W4++]                  | neg.b w3, [w4++]
+NEG [W2++], [--W4]                | neg [w2++], [--w4]
+POP 0x1230                        | pop 0x1230
+POP W4                            | pop w4
+POP [++W10]                       | pop [++w10]
+POP.D W6                          | pop.d w6
+PUSH 0xC0E                        | push 0x0c0e
+PUSH W2                           | push w2
+PUSH [W5+W10]                     | push [w5+w10]
+PUSH.D W10                        | push.d w10
+PUSH.S                            | push.s
+POP.S                             | pop.s
+RLC.B 0x1233                      | rlc.b 0x1233
+RLC 0x1820, WREG                  | rlc 0x1820, wreg
+RLNC.B 0x1233                     | rlnc.b 0x1233
+RLNC.B W0, W3                     | rlnc.b w0, w3
+RLNC [W2++], [W8]                 | rlnc [w2++], [w8]
+RRC.B 0x1233                      | rrc.b 0x1233
+RRC 0x1820, WREG                  | rrc 0x1820, wreg
+RRC.B W0, W3                      | rrc.b w0, w3
+RRC [W2++], [W8]                  | rrc [w2++], [w8]
+RRNC.B 0x1233                     | rrnc.b 0x1233
+RRNC 0x1820, WREG                 | rrnc 0x1820, wreg
+RRNC.B W0, W3                     | rrnc.b w0, w3
+RRNC [W2++], [W8]                 | rrnc [w2++], [w8]
+SE W3, W4                         | se w3, w4
+SE [W2++], W12                    | se [w2++], w12
+SETM.B 0x891                      | setm.b 0x0891
+SETM WREG                         | setm wreg
+SETM.B W13                        | setm.b w13
+SETM [--W6]                       | setm [--w6]
+SL 0x1650, WREG                   | sl 0x1650, wreg
+SL.B W3, W4                       | sl.b w3, w4
+SL [W2++], [W12]                  | sl [w2++], [w12]
+SL W2, #4, W2                     | sl w2, #4, w2
+SL W3, #12, W8                    | sl w3, #12, w8
+SL W0, W1, W2                     | sl w0, w1, w2
+SL W4, W5, W6                     | sl w4, w5, w6
+SUB 0xA04, WREG                   | sub 0x0a04, wreg
+SUB.B #0x23, W0                   | sub.b #35, w0
+SUB #0x108, W4                    | sub #264, w4
+SUB.B W4, #0x10, W5               | sub.b w4, #16, w5
+SUB W0, #0x8, [W2++]              | sub w0, #8, [w2++]
+SUB.B W0, W1, W0                  | sub.b w0, w1, w0
+SUB W7, [W8++], [W9++]            | sub w7, [w8++], [w9++]
+SUBB 0xA04, WREG                  | subb 0x0a04, wreg
+SUBB.B #0x23, W0                  | subb.b #35, w0
+SUBB #0x108, W4                   | subb #264, w4
+SUBB.B W4, #0x10, W5              | subb.b w4, #16, w5
+SUBB W0, #0x8, [W2++]             | subb w0, #8, [w2++]
+SUBB.B W0, W1, W0                 | subb.b w0, w1, w0
+SUBB W7, [W8++], [W9++]           | subb w7, [w8++], [w9++]
+SUBBR.B 0x803                     | subbr.b 0x0803
+SUBBR 0xA04, WREG                 | subbr 0x0a04, wreg
+SUBBR.B W0, #0x10, W1             | subbr.b w0, #16, w1
+SUBBR.B W0, W1, W0                | subbr.b w0, w1, w0
+SUBBR W7, [W8++], [W9++]          | subbr w7, [w8++], [w9++]
+SUBR.B 0x1FFF                     | subr.b 0x1fff
+SUBR 0xA04, WREG                  | subr 0x0a04, wreg
+SUBR.B W0, #0x10, W1              | subr.b w0, #16, w1
+SUBR W0, #0x8, [W2++]             | subr w0, #8, [w2++]
+SUBR.B W0, W1, W0                 | subr.b w0, w1, w0
+SUBR W7, [W8++], [W9++]           | subr w7, [w8++], [w9++]
+SWAP.B W0                         | swap.b w0
+SWAP W0                           | swap w0
+TBLRDL [W6], [W8++]               | tblrdl [w6], [w8++]
+TBLRDH [W6++], W8                 | tblrdh [w6++], w8
+TBLRDL.B [W0++], W1               | tblrdl.b [w0++], w1
+TBLRDH.B [W0], [W1++]             | tblrdh.b [w0], [w1++]
+ULNK                              | ulnk
+XOR.B 0x1FFF                      | xor.b 0x1fff
+XOR 0xA04, WREG                   | xor 0x0a04, wreg
+XOR #0x108, W4                    | xor #264, w4
+XOR W2, #0x1F, [W8++]             | xor w2, #31, [w8++]
+XOR.B W1, [W5++], [W9++]          | xor.b w1, [w5++], [w9++]
+XOR W1, W5, W9                    | xor w1, w5, w9
+ZE W3, W4                         | ze w3, w4
+ZE [W2++], W12                    | ze [w2++], w12
+        .word 0x292e40            | mov #0x92e4, w0
+        .word 0xef2042            | clr 0x0042

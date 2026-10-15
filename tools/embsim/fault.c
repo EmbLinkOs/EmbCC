@@ -14,7 +14,10 @@
  *     through an exception frame where the CFI reaches one; else the
  *     calls EmbSim saw the core make (the shadow stack, analysis.c);
  *   - the handler the core goes to, or that there is none.
- * A lockup, which no handler follows, is reported where the run ends. */
+ * A lockup, which no handler follows, is reported where the run ends.
+ * On a PIC24 a trap is the fault (an address, stack or math error, an
+ * oscillator failure): what the instruction did, the instruction, the W
+ * registers, SR and the shadow stack's backtrace. */
 #include <stdlib.h>
 #include <string.h>
 
@@ -22,6 +25,7 @@
 #include "cortexm.h"
 #include "disasm.h"
 #include "mips.h"
+#include "pic24.h"
 #include "riscv.h"
 
 static FILE *out(struct analysis *a)
@@ -60,6 +64,14 @@ static void insn_line(struct analysis *a, u32 pc, char *b, size_t n)
     char t[96];
     if (!r) {
         snprintf(b, n, "0x%08x: (no memory there)", pc);
+        return;
+    }
+    if (a->arch == AN_PIC24) {
+        u32 i = pic24_prog(a->s, pc), i2 = pic24_prog(a->s, pc + 2);
+        if (dis_pic24(pc, i, i2, t, sizeof t) == 2)
+            snprintf(b, n, "0x%06x: %06x %06x  %s", pc, i, i2, t);
+        else
+            snprintf(b, n, "0x%06x: %06x         %s", pc, i, t);
         return;
     }
     if (a->arch == AN_MIPS) {
@@ -375,6 +387,50 @@ static const char *const mn[32] = {
     "t4", "t5", "t6", "t7", "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7",
     "t8", "t9", "k0", "k1", "gp", "sp", "fp", "ra" };
 
+/* ---- the PIC24 ------------------------------------------------------------- */
+
+static void pic24_fault(struct analysis *a, u32 n, u32 ret)
+{
+    struct pic24_state *k = (struct pic24_state *)a->s->cpu;
+    FILE *o = out(a);
+    char w[256], b[256];
+    /* the instruction that raised it: the core's record for the traps an
+     * instruction raises, else the one the trap returns to */
+    int own = n == TRAP_ADDR || n == TRAP_STACK || n == TRAP_MATH;
+    u32 at = own ? k->trap_pc : ret;
+    const char *name = pic24_trap_name((int)n);
+    if (!strncmp(name, "an ", 3))
+        name += 3;
+    else if (!strncmp(name, "a ", 2))
+        name += 2;
+    fprintf(o, "embsim: fault: %s trap (trap %u) at 0x%06x, in %s\n", name, n, at,
+            where(a, at, w, sizeof w));
+    if (own && k->trap_why[0])
+        fprintf(o, "  %s\n", k->trap_why);
+    insn_line(a, at, b, sizeof b);
+    fprintf(o, "  instruction %s\n", b);
+    /* as the trap found them: the entry pushed the PC and SR's low byte
+     * (with IPL3), and raised the priority */
+    u16 r[16];
+    u32 hi = 0;
+    for (int i = 0; i < 16; i++)
+        r[i] = k->w[i];
+    r[15] = (u16)(k->w[15] - 4);
+    bus_debug_read(&a->s->bus, PIC24_DATA + (u16)(k->w[15] - 2), 2, &hi);
+    fprintf(o, "  registers:\n");
+    for (int i = 0; i < 16; i += 4)
+        fprintf(o, "    w%-2d 0x%04x  w%-2d 0x%04x  w%-2d 0x%04x  w%-2d 0x%04x\n",
+                i, r[i], i + 1, r[i + 1], i + 2, r[i + 2], i + 3, r[i + 3]);
+    fprintf(o, "    sr  0x%04x  splim 0x%04x  corcon 0x%04x  rcount 0x%04x\n",
+            (unsigned)((k->sr & 0x100) | (hi >> 8 & 0xff)), k->splim,
+            (unsigned)((k->corcon & ~8u) | ((hi & 0x80) ? 8u : 0)), k->rcount);
+    shadow_bt(a, at);
+    u32 pc = a->s->cpu->ops->pc(a->s->cpu);
+    int f = image_fn(a->img, pc);
+    fprintf(o, "  handler: 0x%06x, %s (the trap's vector, returning to 0x%06x)\n", pc,
+            f >= 0 ? a->img->fn[f].name : "(no symbol)", ret);
+}
+
 static void mips_fault(struct analysis *a, u32 code, u32 epc)
 {
     struct mips_state *m = (struct mips_state *)a->s->cpu;
@@ -445,6 +501,9 @@ void fault_entry(struct analysis *a, u32 n, u32 ret)
         a->faults++;
     } else if (a->arch == AN_MIPS && n < 32 && mips_exc[n]) {
         mips_fault(a, n, ret);
+        a->faults++;
+    } else if (a->arch == AN_PIC24 && n < 8 && n != TRAP_RES5 && n != TRAP_RES7) {
+        pic24_fault(a, n, ret);
         a->faults++;
     }
 }

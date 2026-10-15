@@ -77,6 +77,8 @@ struct pic24_state {
     int changed;                    /* it wrote a register or memory */
     int extra;                      /* cycles it takes beyond one */
     int trap;                       /* the trap it raised (TRAP_* + 1), or 0 */
+    u32 trap_pc;                    /* the last trap's instruction */
+    char trap_why[96];              /* and what it did */
     u8 traps;                       /* traps pending, by number */
     int sleeping;                   /* PWRSAV: until an interrupt */
     u32 prog_end;                   /* past the last program address */
@@ -87,6 +89,8 @@ struct pic24_state {
 extern struct pic24_state *ps;
 
 int pic24_is(const struct cpu *c);
+/* a trap's name ("an address error"), by its number (TRAP_*) */
+const char *pic24_trap_name(int n);
 /* the controller drives the core */
 void pic24_intc_attach(struct sim *s, struct pic24_intc *ic);
 /* a word of program memory (24 bits) at an even program address */

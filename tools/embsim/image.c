@@ -136,6 +136,19 @@ static int find_sec(const struct image *m, const char *want, struct sec *out)
             off + sz <= m->len) {
             out->data = f + off;
             out->size = (u32)sz;
+            if (le16(f + 18) == 118 && !(le32(sh + 8) & 2) &&
+                (le32(sh + 8) & 0x40000000u)) {
+                /* XC16's: a section not loaded is kept two bytes for
+                 * each of its own, the second 0 (as program memory's
+                 * phantom byte) -- the DWARF is every other byte */
+                u8 *d = malloc(sz / 2 + 1);
+                if (!d)
+                    die("out of memory");
+                for (u64 k = 0; k < sz / 2; k++)
+                    d[k] = f[off + 2 * k];
+                out->data = d;
+                out->size = (u32)(sz / 2);
+            }
             return 1;
         }
     }
@@ -175,6 +188,7 @@ static void read_symbols(struct image *m)
     u32 shentsize = le16(f + (e64 ? 58 : 46));
     u32 shnum = le16(f + (e64 ? 60 : 48));
     int arm = le16(f + 18) == 40;
+    int pic30 = le16(f + 18) == 118;
     if (!shoff || shoff + (u64)shnum * shentsize > m->len)
         return;
     for (u32 i = 0; i < shnum; i++) {
@@ -212,10 +226,13 @@ static void read_symbols(struct image *m)
             m->sym[m->nsym].size = (u32)size;
             m->sym[m->nsym].name = name;
             m->nsym++;
-            /* a function: STT_FUNC, or a label in the code (assembly) */
+            /* a function: STT_FUNC, or a label in the code (assembly);
+             * XC16's local labels (L11, CORCON_RESET) are not, and its
+             * data, whose addresses are numbers code has too, either */
             if (arm && type == 2)
                 a &= ~1u;
-            if (type == 2 || (type == 0 && in_code(m, a))) {
+            if (type == 2 || (type == 0 && in_code(m, a) && shndx != 0xfff1 &&
+                              (!pic30 || (info >> 4) != 0))) {
                 m->fn[m->nfn].addr = a;
                 m->fn[m->nfn].size = type == 2 ? (u32)size : 0;
                 m->fn[m->nfn].name = name;
@@ -813,6 +830,8 @@ struct image *image_open(const char *path)
         u64 msz = m->e64 ? le64(ph + 40) : le32(ph + 20);
         if (le32(ph) != 1 || !(flags & 1) || !msz || va + msz > 0x100000000ull)
             continue;
+        if (le16(f + 18) == 118)
+            msz /= 2;               /* XC16's: two file bytes a program address */
         m->code_lo[m->ncode] = (u32)va;
         m->code_hi[m->ncode] = (u32)(va + msz);
         m->ncode++;
