@@ -3098,6 +3098,16 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             e->lhs = mk_cast(e->lhs, b);
         } else if (a->kind == TY_VOID && b->kind == TY_VOID) {
             e->ty = a;
+        } else if (a->kind == TY_VOID || b->kind == TY_VOID) {
+            /* `c ? f() : 1`, f void: GNU C's, a void result -- the
+             * other arm is evaluated for its effects alone */
+            lex_pedantic(diag_file(u), e->line, e->col, 0, 0,
+                         "a '?:' with only one void arm");
+            e->ty = a->kind == TY_VOID ? a : b;
+            if (a->kind != TY_VOID)
+                e->lhs = mk_cast(e->lhs, e->ty);
+            else
+                e->rhs = mk_cast(e->rhs, e->ty);
         } else if (a->kind == TY_STRUCT && ty_equal(a, b)) {
             e->ty = a; /* both arms are the same aggregate */
         } else {
