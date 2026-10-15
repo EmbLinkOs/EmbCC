@@ -233,7 +233,9 @@ static const char *path_basename(const char *p)
     return slash ? slash + 1 : p;
 }
 
-#define MAX_INCDIRS 16
+/* the search path: a vendor SDK's build gives a hundred -I directories (the
+ * Pico SDK's, one per component), so room for many more than that */
+#define MAX_INCDIRS 512
 static const char *incdirs[MAX_INCDIRS];
 static int incdir_sys[MAX_INCDIRS];   /* -isystem, or EmbCC's own include */
 static int nincdirs;
