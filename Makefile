@@ -1002,6 +1002,8 @@ install-files:
 	@mkdir -p $(DESTDIR)$(PREFIX)/share/embcc/cmake/Compiler
 	@cp cmake/embcc.cmake $(DESTDIR)$(PREFIX)/share/embcc/cmake/embcc.cmake
 	@cp cmake/Compiler/*.cmake $(DESTDIR)$(PREFIX)/share/embcc/cmake/Compiler/
+	@mkdir -p $(DESTDIR)$(PREFIX)/share/doc/embcc
+	@cp LICENSE NOTICE $(DESTDIR)$(PREFIX)/share/doc/embcc/
 	@mkdir -p $(DESTDIR)$(PREFIX)/share/man/man1
 	@SOURCE_DATE_EPOCH=$$(git log -1 --format=%ct 2>/dev/null || date +%s) \
 	    ./embcc --reference=man > $(DESTDIR)$(PREFIX)/share/man/man1/embcc.1
@@ -1065,6 +1067,8 @@ uninstall:
 	done
 	@rm -f $(DESTDIR)$(PREFIX)/share/embcc/cmake/embcc.cmake
 	@rm -f $(DESTDIR)$(PREFIX)/share/embcc/cmake/Compiler/EmbCC*.cmake
+	@rm -f $(DESTDIR)$(PREFIX)/share/doc/embcc/LICENSE \
+	       $(DESTDIR)$(PREFIX)/share/doc/embcc/NOTICE
 	@rm -rf $(LIBROOT)
 	@echo "removed EmbCC $(VERSION) from $(DESTDIR)$(PREFIX)"
 
