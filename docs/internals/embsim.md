@@ -461,9 +461,12 @@ without the program writing ANSELx, as on the part.
 `pic-boards.c` is one device for every board around a PIC32MZ or a PIC24: a
 `struct board` names its LEDs (port, pin, lit high or low), its buttons
 (and whether the board pulls them up), and whether it is the Explorer
-(the TC1047A, the potentiometer, the LCD). The GPIO model tells it each
-pin driven high, driven low or let go (1, 0, -1), so an LED lit low is
-off while its pin is an input or an open drain let go. To add a board:
+(the TC1047A, the potentiometer, the LCD) and how its 25LC256 is wired
+(`EE_SPI`: the SPI unit the PPS routes, `io.spi` a byte at a time;
+`EE_PINS`: pins the program clocks, followed edge by edge through
+`pin_out` and `pin_in`). The GPIO model tells it each pin driven high,
+driven low or let go (1, 0, -1), so an LED lit low is off while its pin
+is an input or an open drain let go. To add a board:
 its tables, an entry in `boards_[]`, its line in `boards[]` and
 `dev_types[]` in `boards.c` with the part's ATDF, `--help`, the manual,
 and a program in `tests/golden/embsim-pic32.sh` that drives each LED

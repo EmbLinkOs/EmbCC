@@ -15,7 +15,9 @@
 #     EVIC's vectors and priorities and shadow register sets, Timer1,
 #     the core timer, a 32-bit Timer2/3, vector 213 through OFF213, the
 #     ports, the ADC's conversions of the board's sensors, the LCD on the
-#     PMP, SYSKEY's lock. Its output must be the record
+#     PMP, SYSKEY's lock, DEVID, the 25LC256 EEPROM on the PIM's pins
+#     (clocked by the program: RA5 has no SPI clock). Its output must be
+#     the record
 #     (tests/golden/embsim/pic32-fw.txt), and the board's report -- the
 #     LEDs and the LCD's lines -- what the program drove.
 #     And a program on curiosity-pic32mz-ef-2 (its PIC32MZ2048EFM144):
@@ -192,7 +194,7 @@ grep -q 'warning: a write at pc 0x9d[0-9a-f]* to CRU+0x120 is ignored: it is loc
 grep -q '^explorer16-32: LCD |EmbSim          | at' "$out/fw.err" &&
     grep -q '^explorer16-32:     |PIC32MZ EF      |$' "$out/fw.err" ||
     { cat "$out/fw.err"; fail "the LCD's two lines are not what the program wrote"; }
-echo "embsim-pic32: an EmbCC program on explorer16-32: $(wc -l < "$out/fw.out" | tr -d ' ') results as the record has them (DSP, EVIC, shadow sets, timers, OFF213, ports, ADC, PMP, SYSKEY), the LEDs and the LCD reported"
+echo "embsim-pic32: an EmbCC program on explorer16-32: $(wc -l < "$out/fw.out" | tr -d ' ') results as the record has them (DSP, EVIC, shadow sets, timers, OFF213, ports, ADC, PMP, SYSKEY, DEVID, the EEPROM), the LEDs and the LCD reported"
 
 # ---- 2b. a program on the Curiosity PIC32MZ EF 2.0 -------------------------------
 # Its PIC32MZ2048EFM144, from the same pack: ANSELx out of reset only on

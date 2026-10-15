@@ -466,7 +466,9 @@ EmbCC build.
   warning. OSCCON starts with the clock the configuration words choose
   (DEVCFG1.FNOSC); setting OSWEN switches at once. PB1-PB5 and PB8
   divide by 2 out of reset, PB7 by 1; CLKSTAT says every clock is
-  ready.
+  ready. DEVID reads the part's ID and its silicon revision, the
+  latest the pack's ATDF lists (0x67213053 on the PIC32MZ2048EFH100:
+  revision B2), and ignores writes.
 - **Timer1 to Timer9.** Counting while ON, at peripheral bus 3's clock
   (the core's cycles over PB3DIV) over the prescaler; at PRx, back to 0
   and the interrupt flag. Timer2 to Timer9 pair into 32-bit timers
@@ -506,7 +508,13 @@ its information sheet maps the board's 100-pin socket to the part:
 | TC1047A temperature sensor | AN4 (RB4) | 500 mV + 10 mV per degree C |
 | potentiometer R6 | AN45 (RB5) | ADC0's alternate input |
 | 16x2 LCD, HD44780 | PMD0-7, RS on PMA0, E on PMWR, R/W on PMRD | the PMP in master mode |
+| 25LC256 serial EEPROM | SCK RA5, SI RG8, SO RG7, CS RG15 | the program clocks it on the pins (RA5 has no SPI clock) |
 | USB-UART | the UART the program uses | every UART's output is stdout |
+
+The EEPROM is the PIC24 board's (below), on the socket pins the PIM
+gives RA5, RG8, RG7 and RG15; since no SPI unit reaches RA5, a program
+drives SCK and SI itself and reads SO as SPI mode 0 or 3 has it: SI
+taken as SCK rises, SO's next bit out as it falls.
 
 The run reports on stderr each LED that goes on or off, and the LCD's
 two lines each time the program clears the display or sends its cursor

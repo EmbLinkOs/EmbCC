@@ -22,7 +22,13 @@
  *     AN45, the potentiometer, as ADC0's alternate input; an input of
  *     the shared ADC, which is off, is not converted;
  *   - the parallel master port: the LCD's two lines;
- *   - SYSKEY's lock: PB3DIV written locked, and unlocked.
+ *   - SYSKEY's lock: PB3DIV written locked, and unlocked;
+ *   - DEVID: the part's ID with its silicon revision, a write ignored;
+ *   - the Explorer's 25LC256 EEPROM on the PIM's pins (SCK RA5, SI RG8,
+ *     SO RG7, CS RG15), clocked by the program -- RA5 has no SPI clock:
+ *     WREN, two bytes written at 0x0100, STATUS polled until the write
+ *     cycle ends, the three bytes from 0x0100 read back (the third
+ *     erased).
  * The interrupt handlers are the assembly the test writes (isr.S): each
  * takes the stack from the interrupted register set (rdpgpr), saves what
  * a C function may change, calls isr_N and returns with eret. */
@@ -49,6 +55,30 @@ static void line(const char *name, uint32_t v)
     for (int i = 7; i >= 0; i--)
         putc_("0123456789abcdef"[(v >> (4 * i)) & 15]);
     putc_('\n');
+}
+
+/* a byte out on SI and in from SO, MSB first: SPI mode 0 */
+static unsigned ee_xfer(unsigned out)
+{
+    unsigned in = 0;
+    for (int i = 7; i >= 0; i--) {
+        if (out >> i & 1)
+            LATGSET = 1u << 8;
+        else
+            LATGCLR = 1u << 8;
+        LATASET = 1u << 5;
+        in = in << 1 | PORTGbits.RG7;
+        LATACLR = 1u << 5;
+    }
+    return in;
+}
+
+static void ee_cs(int low)
+{
+    if (low)
+        LATGCLR = 1u << 15;
+    else
+        LATGSET = 1u << 15;
 }
 
 volatile uint32_t n_cs0, set_cs0, n_t1, n_ct, n_t3, n_213;
@@ -271,6 +301,53 @@ int main(void)
     PB3DIV = 0x8803u;
     SYSKEY = 0x33333333u;
     line("PB3DIV unlocked", PB3DIV);
+
+    /* DEVID */
+    line("DEVID", DEVID);
+    DEVID = 0;
+    line("DEVID written", DEVID);
+
+    /* the 25LC256, clocked on the PIM's pins */
+    ANSELACLR = 1u << 5;
+    ANSELGCLR = 1u << 7 | 1u << 8 | 1u << 15;
+    LATGSET = 1u << 15;                         /* CS high */
+    LATACLR = 1u << 5;
+    TRISACLR = 1u << 5;
+    TRISGCLR = 1u << 8 | 1u << 15;
+    TRISGSET = 1u << 7;
+    ee_cs(1);
+    ee_xfer(6);                                 /* WREN */
+    ee_cs(0);
+    ee_cs(1);
+    ee_xfer(5);                                 /* RDSR */
+    line("EEPROM status after WREN", ee_xfer(0));
+    ee_cs(0);
+    ee_cs(1);
+    ee_xfer(2);                                 /* WRITE 0x0100 */
+    ee_xfer(0x01);
+    ee_xfer(0x00);
+    ee_xfer(0x5a);
+    ee_xfer(0xa5);
+    ee_cs(0);
+    unsigned es, polls = 0;
+    do {
+        ee_cs(1);
+        ee_xfer(5);
+        es = ee_xfer(0);
+        ee_cs(0);
+        polls++;
+    } while (es & 1);                           /* WIP */
+    line("EEPROM busy for a while", polls > 10);
+    line("EEPROM status after the write", es);
+    ee_cs(1);
+    ee_xfer(3);                                 /* READ 0x0100 */
+    ee_xfer(0x01);
+    ee_xfer(0x00);
+    uint32_t r = ee_xfer(0) << 16;
+    r |= ee_xfer(0) << 8;
+    r |= ee_xfer(0);
+    ee_cs(0);
+    line("EEPROM read", r);
 
     puts_("==DONE==\n");
     for (;;)

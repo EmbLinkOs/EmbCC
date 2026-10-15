@@ -11,7 +11,9 @@
  *   - PBxDIV: each bus's divider, at reset 2 for PB1-PB5 and PB8 and 1 for
  *     PB7 (the CPU's), with PBDIVRDY set; the timers and the other models
  *     divide the core's cycles by them (pic32_pb_div).
- *   - DEVID is the ATDF's (atdf.c gives it its signature).
+ *   - DEVID reads the part's ID and silicon revision, which atdf.c gives
+ *     it from the ATDF (the latest revision the pack lists), and ignores
+ *     writes.
  * EmbSim's time is the core's cycles whatever the PLL is set to: the
  * dividers are what changes a peripheral's rate. Not modelled: the clock
  * fail-safe monitor, the reference clock outputs, sleep and idle. */

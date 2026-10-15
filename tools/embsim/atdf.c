@@ -23,7 +23,10 @@
  * CLR, SET and INV registers, which the file leaves out: the register
  * file makes them (svd_device.clr_set_inv), those the pack's processor
  * module lists. And the file gives each ANSELx sixteen analog pins,
- * which the pack's device header corrects. */
+ * which the pack's device header corrects. A register named DEVID reads
+ * the device's signature (SIGNATURES' DEVID_DEVID) with, in VER, the
+ * latest silicon revision the file lists (DEVID__VER), and ignores
+ * writes, as the part's does. */
 #include <stdlib.h>
 #include <string.h>
 
@@ -430,6 +433,52 @@ static void ansel_from_header(struct svd_device *d, const char *path)
         }
 }
 
+/* DEVID: the signature and the latest revision */
+static void devid(struct svd_device *d, const struct xnode *dev,
+                  const struct xnode *modules)
+{
+    unsigned long long sig = 0, ver = 0;
+    int have = 0;
+    const struct xnode *pgs = svd_xfind(dev, "property-groups");
+    for (int i = 0; pgs && i < svd_xnkid(pgs); i++) {
+        const struct xnode *g = svd_xkid(pgs, i);
+        const char *gn = svd_xattr(g, "name");
+        for (int k = 0; gn && !strcmp(gn, "SIGNATURES") && k < svd_xnkid(g); k++) {
+            const char *pn = svd_xattr(svd_xkid(g, k), "name");
+            const char *pv = svd_xattr(svd_xkid(g, k), "value");
+            if (pn && !strcmp(pn, "DEVID_DEVID") && pv && *pv) {
+                sig = num(svd_xkid(g, k), "value", 0);
+                have = 1;
+            }
+        }
+    }
+    if (!have)
+        return;
+    for (int q = 0; q < svd_xnkid(modules); q++) {
+        const struct xnode *m = svd_xkid(modules, q);
+        for (int i = 0; i < svd_xnkid(m); i++) {
+            const struct xnode *g = svd_xkid(m, i);
+            const char *gn = svd_xattr(g, "name");
+            if (strcmp(svd_xname(g), "value-group") || !gn || strcmp(gn, "DEVID__VER"))
+                continue;
+            for (int k = 0; k < svd_xnkid(g); k++)
+                if (num(svd_xkid(g, k), "value", 0) > ver)
+                    ver = num(svd_xkid(g, k), "value", 0);
+        }
+    }
+    for (int i = 0; i < d->np; i++)
+        for (int j = 0; j < d->p[i].nkid; j++) {
+            struct svd_node *r = &d->p[i].kid[j];
+            if (r->cluster || !r->name || strcmp(r->name, "DEVID"))
+                continue;
+            r->reset = sig | ver;
+            r->acc = "read-only";
+            r->access = 1;
+            for (int f = 0; f < r->nf; f++)
+                r->f[f].acc = "read-only";
+        }
+}
+
 struct svd_device *atdf_load(const char *path)
 {
     const struct xnode *root = svd_xml_read(path);
@@ -501,6 +550,7 @@ struct svd_device *atdf_load(const char *path)
     }
     if (!d->np)
         svd_die("the device %s has no peripheral on the bus", d->name);
+    devid(d, dev, modules);
     if (d->clr_set_inv) {
         read_sci(d, path);
         ansel_from_header(d, path);

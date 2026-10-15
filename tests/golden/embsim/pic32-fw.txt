@@ -22,4 +22,10 @@ AN45 (ADC0's alternate) 00000800
 AN6 (ADC7 off) ffffffff
 PB3DIV locked 00008801
 PB3DIV unlocked 00008803
+DEVID 67213053
+DEVID written 67213053
+EEPROM status after WREN 00000002
+EEPROM busy for a while 00000001
+EEPROM status after the write 00000000
+EEPROM read 005aa5ff
 ==DONE==
