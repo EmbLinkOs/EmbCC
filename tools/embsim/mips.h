@@ -106,6 +106,11 @@ struct mips_state {
     u64 count_at, ti_at;
     int count_on;                   /* the core timer's device: running */
 
+    /* the FPU (mips-fpu.c): 32 registers of 64 bits (Status.FR 1), or
+     * 32 of 32 paired for a double (FR 0) in their low halves; FCSR, FIR */
+    u64 fpr[32];
+    u32 fcsr, fir;
+
     struct mips_eic *eic;           /* EIC mode's controller, or 0 */
     u32 ip_hw;                      /* compatibility mode: IP2-IP7 lines */
 
@@ -123,6 +128,17 @@ struct mips_state {
 extern struct mips_state *ms;
 
 int mips_is(const struct cpu *c);
+
+/* mips.c, for mips-fpu.c: the instruction's memory accesses, its branch,
+ * and its exceptions */
+u32 mips_load(u32 va, int n);
+void mips_store(u32 va, int n, u32 v);
+void mips_branch(int taken, u32 target, int likely);
+void mips_raise(u32 code);
+/* mips-fpu.c: a COP1, COP1X, LWC1, LDC1, SWC1, SDC1 or MOVCI instruction,
+ * with Status.CU1 set */
+void mips_fp_exec(u32 i);
+void mips_fp_reset(struct mips_state *k);
 /* an image's address, as the bus has it: kseg0 and kseg1 unmapped, the
  * rest as it is (the loader's segments, a debugger's accesses) */
 u32 mips_phys(u32 va);

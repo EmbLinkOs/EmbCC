@@ -431,6 +431,21 @@ static void store(u32 va, int n, u32 v)
         raise_exc(EXC_DBE);
 }
 
+u32 mips_load(u32 va, int n)
+{
+    return load(va, n);
+}
+
+void mips_store(u32 va, int n, u32 v)
+{
+    store(va, n, v);
+}
+
+void mips_raise(u32 code)
+{
+    raise_exc(code);
+}
+
 /* ---- the registers ----------------------------------------------------- */
 
 static inline u32 R(u32 n)
@@ -756,6 +771,14 @@ static void branch_likely(int taken, u32 target)
     }
 }
 
+void mips_branch(int taken, u32 target, int likely)
+{
+    if (likely)
+        branch_likely(taken, target);
+    else
+        branch(taken, target);
+}
+
 /* the word at a, without side effects, or ~0 */
 static u32 peek(u32 a)
 {
@@ -813,7 +836,7 @@ static void special(u32 i)
             raise_cpu(1);
             return;
         }
-        unmodelled("a floating-point instruction");
+        mips_fp_exec(i);
         return;
     case 0x02:                                                  /* SRL, ROTR */
         if (rs & 1)
@@ -1138,7 +1161,7 @@ static void exec(u32 i)
         if (!(ms->status & ST_CU1) || !ms->fpu)
             raise_cpu(1);
         else
-            unmodelled("a floating-point instruction");
+            mips_fp_exec(i);
         return;
     case 0x12: case 0x32: case 0x36: case 0x3a: case 0x3e:
         raise_cpu(2);                                           /* COP2 */
@@ -1321,6 +1344,7 @@ static void cpu_reset(struct cpu *c)
     k->debug = k->errctl = k->desave = k->watchlo = k->watchhi = 0;
     memset(k->taglo, 0, sizeof k->taglo);
     k->llbit = 0;
+    mips_fp_reset(k);
     k->compare = 0;
     k->count_base = 0;
     k->count_at = k->sim->cycles;
@@ -1378,7 +1402,13 @@ static int cpu_reg_read(struct cpu *c, int n, u8 *buf)
     case 36: return put32(buf, cp0_read(13, 0));
     case 37: return put32(buf, ms->pc);
     }
-    if (n >= 38 && n <= 72)
+    if (n >= 38 && n <= 69)
+        return put32(buf, (u32)ms->fpr[n - 38]);
+    if (n == 70)
+        return put32(buf, ms->fpu ? ms->fcsr : 0);
+    if (n == 71)
+        return put32(buf, ms->fpu ? ms->fir : 0);
+    if (n == 72)
         return put32(buf, 0);
     return 0;
 }
@@ -1405,7 +1435,13 @@ static int cpu_reg_write(struct cpu *c, int n, const u8 *buf)
         ms->slot = 0;
         return 4;
     }
-    if (n >= 38 && n <= 72)
+    if (n >= 38 && n <= 69) {
+        ms->fpr[n - 38] = (ms->fpr[n - 38] & ~0xffffffffull) | v;
+        return 4;
+    }
+    if (n == 70 && ms->fpu)
+        ms->fcsr = (ms->fcsr & 0x000c0000u) | (v & ~0x000c0000u);
+    if (n >= 70 && n <= 72)
         return 4;
     return 0;
 }
