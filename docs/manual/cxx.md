@@ -583,6 +583,17 @@ refuses it, with the diagnostic shown. Diagnostics are quoted without the
 | Multidimensional subscript operator | Not supported | `'M' has no viable operator[]` |
 | `auto(x)`, `auto{x}` | Supported | A prvalue copy of `x`, of its decayed type. |
 
+### C++26
+
+As in GCC 16, these are taken under every standard that has the syntax
+for them, and `--pedantic` reports them before C++26.
+
+| Feature | Status | Notes |
+|---|---|---|
+| Pack indexing, `T...[N]` and `args...[i]` | Partial | Where the pack is bound: an alias template, a function template's body. In a template's own signature: `pack indexing of 'T' where its elements are not known yet (a template's signature) is not supported` |
+| `= delete("reason")` | Supported | A use says the reason: `use of deleted function 'f': use g instead` |
+| The `_` placeholder | Supported | Any number of local variables named `_`. |
+
 ## Notes on partial support
 
 ### Name lookup in templates

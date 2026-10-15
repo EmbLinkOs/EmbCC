@@ -1037,6 +1037,16 @@ static void parse_dspec(struct dspec *ds)
                     continue;
                 }
             }
+            if (cx_kind() == TOK_IDENT && cx_kind_at(1) == TOK_ELLIPSIS &&
+                cx_kind_at(2) == TOK_LBRACKET) {
+                /* T...[N]: one of a pack's types (C++26) */
+                const struct ctok *pat = cx_cur();
+                struct csym *el = cx_pack_index();
+                if (el->k != CS_TYPEDEF)
+                    cx_error(pat, "'%s...[]' is not a type", pat->t.text);
+                named = el->type;
+                continue;
+            }
             if (at_ctor_declarator())
                 break;
             int n;
@@ -2377,6 +2387,25 @@ static void default_delete_pedantic(void)
         cx_pedantic(cx_cur(), 2011, "a defaulted function");
     else if (cx_kind() == TOK_CX_DELETE)
         cx_pedantic(cx_cur(), 2011, "a deleted function");
+}
+
+struct csym *cx_pack_index(void)
+{
+    const struct ctok *at = cx_cur();
+    struct csym *y = lookup_raw(cx_scope, at->t.text);
+    cx_pedantic(at, 2026, "pack indexing");
+    if (!y || y->k != CS_PACK)
+        cx_error(at, y && y->pack_param
+                     ? "pack indexing of '%s' where its elements are not "
+                       "known yet (a template's signature) is not supported"
+                     : "'%s' is not a parameter pack", at->t.text);
+    cx_pos += 3;                                        /* NAME ... [ */
+    long i = expr_parse_const("a pack index");
+    cx_expect(TOK_RBRACKET, "']' after a pack index");
+    if (i < 0 || i >= pack_length(y))
+        cx_error(at, "pack index %ld is out of range: '%s' has %d element%s",
+                 i, at->t.text, pack_length(y), pack_length(y) == 1 ? "" : "s");
+    return pack_elem_sym(y, (int)i);
 }
 
 /* C++26's `= delete("why")`: the reason, said where the function is

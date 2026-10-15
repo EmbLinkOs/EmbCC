@@ -5150,6 +5150,23 @@ static struct cexpr *parse_primary(void)
     case TOK_IDENT: case TOK_COLONCOLON: case TOK_CX_OPERATOR: {
         if (trait_at() && !trait_is_type(cx_cur()->t.text))
             return parse_trait();
+        if (cx_kind() == TOK_IDENT && cx_kind_at(1) == TOK_ELLIPSIS &&
+            cx_kind_at(2) == TOK_LBRACKET) {
+            /* args...[i]: one of a pack's values (C++26) */
+            struct csym *el = cx_pack_index();
+            if (el->k == CS_ENUMERATOR)
+                return ex_int(el->value, el->type);
+            if (el->k != CS_VAR)
+                cx_error(at, "'%s...[]' is not a value", at->t.text);
+            struct cexpr *e = ex_new(E_VAR, ct_strip_ref(el->var->type),
+                                     VC_LVALUE);
+            e->var = el->var;
+            e->line = at->t.line;
+            e->col = at->t.col;
+            e->file = at->file;
+            el->var->used = 1;
+            return e;
+        }
         int n;
         struct cty *t = peek_type_name(&n);
         if (t && (cx_kind_at(n) == TOK_LPAREN || cx_kind_at(n) == TOK_LBRACE)) {

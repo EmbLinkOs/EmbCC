@@ -574,6 +574,10 @@ int ct_dependent(const struct cty *t);
 void pack_push(struct csym *pack, int index);
 void pack_pop(int n);
 struct csym *pack_current(struct csym *y);   /* the element, or y itself */
+struct csym *pack_elem_sym(struct csym *y, int i);
+/* C++26's pack indexing at the cursor, NAME...[N] (parse.c): the element
+ * of the bound pack NAME, as a symbol; the cursor past the `]` */
+struct csym *cx_pack_index(void);
 int pack_length(struct csym *y);
 /* The expansion at the cursor, if the element up to its `,` or closer ends
  * in `...` (angles: `<` `>` nest, in template arguments): the packs its

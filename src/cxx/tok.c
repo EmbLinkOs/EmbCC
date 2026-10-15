@@ -39,14 +39,6 @@ void cx_tokenize(const char *file, const char *src)
         lex_next(&lx);
     }
     cx_pos = 0;
-    /* `...[` is C++26's pack indexing (`T...[0]`, `args...[i]`), and
-     * nothing else: said here, since the parser read `T...` as a pack
-     * expansion and instantiating an alias of one never ended */
-    for (int i = 0; i + 1 < cx_ntoks; i++)
-        if (cx_toks[i].t.kind == TOK_ELLIPSIS &&
-            cx_toks[i + 1].t.kind == TOK_LBRACKET)
-            cx_error(&cx_toks[i], "pack indexing (C++26's `T...[N]`) is "
-                     "not supported");
 }
 
 void cx_advance(void)
