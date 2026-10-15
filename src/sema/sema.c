@@ -6551,18 +6551,29 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
             if (f->ret_ty->kind == TY_VOID) {
                 /* a void expression is GNU C's (`return f();`, f void):
                  * made and nothing returned, as GCC does; a value is an
-                 * error, as in GCC 14 and later */
+                 * error from C99 on, as in GCC 14 and later, and in C89
+                 * a warning (and the value is made and dropped) */
                 if (s->expr) {
                     check_expr(u, f, sc, s->expr);
                     if (s->expr->ty->kind == TY_VOID)
                         sema_pedantic(u, s->expr, "a return of a void "
                                       "expression from a void function");
+                    else if (lex_c_year() < 1999 &&
+                             !diag_warning_is_error("pedantic"))
+                        diag_warn_opt(diag_file(u), s->line, s->col,
+                                      "return-mismatch",
+                                      "returning a value from void '%s'",
+                                      f->name);
                     else
                         sema_error_at(u, s->line, s->col,
                                    "returning a value from void '%s'",
                                    f->name);
                 }
             } else {
+                /* C89 has `return;` in a function that returns a value
+                 * (the caller must not use it); C99 took it away */
+                if (!s->expr && lex_c_year() < 1999)
+                    break;
                 if (!s->expr)
                     sema_error_at(u, s->line, s->col,
                                "'%s' returns %s; 'return' needs a value",
