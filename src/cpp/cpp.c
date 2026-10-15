@@ -186,11 +186,26 @@ static size_t pp_number(const char *p, char prev)
     }
 }
 
-/* Copies a string or char literal verbatim; returns chars consumed. */
+/* The length of C's encoding prefix (L, u, U, u8) when p begins a
+ * character or string literal with one, else 0: `L'X'` is one token, and
+ * a macro named L must not touch it. base is where the text starts, so a
+ * name that merely ends in L (`VAL'x'`) is not a prefix. */
+static size_t lit_prefix(const char *p, const char *base)
+{
+    if (p > base && is_idc(p[-1]))
+        return 0;
+    size_t k = p[0] == 'u' && p[1] == '8' ? 2
+             : p[0] == 'L' || p[0] == 'u' || p[0] == 'U' ? 1 : 0;
+    return k && (p[k] == '\'' || p[k] == '"') ? k : 0;
+}
+
+/* Copies a string or char literal verbatim, with its encoding prefix;
+ * returns chars consumed. */
 static size_t copy_literal(const char *p, struct tbuf *out)
 {
-    char q = p[0];
-    size_t i = 1;
+    size_t k = lit_prefix(p, p);
+    char q = p[k];
+    size_t i = k + 1;
     while (p[i] && p[i] != q && p[i] != '\n') {
         if (p[i] == '\\' && p[i + 1])
             i++;
@@ -282,7 +297,8 @@ static char *va_opt_body(struct src *s, struct macro *m, char **exp)
             p += pn;
             continue;
         }
-        if (*p == '"' || *p == '\'') {
+        if (*p == '"' || *p == '\'' ||
+            lit_prefix(p, start)) {
             p += copy_literal(p, &out);
             continue;
         }
@@ -333,7 +349,8 @@ static char *subst_body(struct src *s, struct macro *m,
             p += pn;
             continue;
         }
-        if (*p == '"' || *p == '\'') {
+        if (*p == '"' || *p == '\'' ||
+            lit_prefix(p, start)) {
             p += copy_literal(p, &out);
             continue;
         }
@@ -582,7 +599,8 @@ static void expand_text(struct src *s, const char *text, struct tbuf *out)
             p += pn;
             continue;
         }
-        if (*p == '"' || *p == '\'') {
+        if (*p == '"' || *p == '\'' ||
+            lit_prefix(p, text)) {
             p += copy_literal(p, out);
             continue;
         }
@@ -1291,7 +1309,8 @@ static long eval_if(struct src *s, const char *line)
             p += pn;
             continue;
         }
-        if (*p == '\'' || *p == '"') {
+        if (*p == '\'' || *p == '"' ||
+            lit_prefix(p, line)) {
             p += copy_literal(p, &pre);
             continue;
         }
@@ -1393,7 +1412,8 @@ static int needs_more_input(struct cpp *cpp, const char *text)
             p += pn;
             continue;
         }
-        if (*p == '"' || *p == '\'') {
+        if (*p == '"' || *p == '\'' ||
+            lit_prefix(p, text)) {
             p += copy_literal(p, NULL);
             continue;
         }
