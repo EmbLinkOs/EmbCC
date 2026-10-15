@@ -75,7 +75,7 @@ operators](#feature-test-operators), with the limits described there.
 | [Local labels](#local-labels) (`__label__`) | Supported |
 | [Case ranges](#case-ranges) (`case 1 ... 5:`) | Supported |
 | [Designated range initializers](#designated-range-initializers) (`[2 ... 5] = x`) | Supported |
-| [Zero-length arrays](#zero-length-and-flexible-arrays) | Supported as a structure member |
+| [Zero-length arrays](#zero-length-and-flexible-arrays) | Supported |
 | [Static initialization of a flexible array member](#zero-length-and-flexible-arrays) | Supported |
 | [`__int128`, `__real__`, `__imag__` and other types](#additional-types) | See the section |
 | [Alternate keywords](#alternate-keywords) (`__asm__`, `__inline__`, ...) | Supported |
@@ -86,6 +86,7 @@ operators](#feature-test-operators), with the limits described there.
 | Anonymous structures and unions as members | Supported |
 | Conditional with the middle operand omitted, `x ?: y` | Supported; `x` is evaluated once |
 | A structure or union with no members | Supported; its size is 0 |
+| An extra `;` at file scope (`};` after a function) | Supported; an empty declaration |
 | An asm label, `int f(void) __asm__("name");` | Supported |
 | [Constructs EmbCC does not support](#gnu-extensions-that-are-not-supported) | Nested functions, arithmetic on `void *`, cast to a union, integer complex types, `$` in identifiers, `return` of a `void` expression |
 
@@ -257,11 +258,13 @@ int widths[10] = { [2 ... 5] = 8, [7] = 16 };
 
 A structure member may be declared as an array of length zero, the
 pre-C99 form of a flexible array member. It contributes no size.
-An object that is itself an array of length zero is refused:
 
-```text
-embcc: z.c:1: error: 'z' has incomplete type int[0]
-```
+An object may be an array of length zero too: `int z[0];`, or `int z[] =
+{};`, whose empty initializer gives it no elements. Its size is 0, and
+it still has an address: a local takes one byte of the frame and a
+global one byte of its section, so two of them never compare equal.
+`int z[];` with no initializer is still an incomplete type. `--pedantic`
+warns about each (`an array of size 0 is a GNU extension, not ISO C`).
 
 A structure with a flexible array member may be initialized statically,
 including its trailing array:
