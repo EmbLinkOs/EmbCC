@@ -18,6 +18,7 @@
 
 set(EMBCC_TARGET "" CACHE STRING "the triple EmbCC compiles for (embcc --target=)")
 set(EMBCC_FLAGS "" CACHE STRING "flags for every compile and link: -mcpu=, -mfpu=, -O...")
+set(EMBCC_LIBC "" CACHE STRING "a Linux target's C library: embcc (EmbCC's own) or system (glibc, its POSIX headers and pthreads; embcc --libc=)")
 
 set(_embcc_bin "")
 foreach(_d "${CMAKE_CURRENT_LIST_DIR}/../../../bin" "${CMAKE_CURRENT_LIST_DIR}/..")
@@ -70,6 +71,9 @@ else()
 endif()
 
 set(_embcc_flags "${EMBCC_FLAGS}")
+if(EMBCC_LIBC)
+  set(_embcc_flags "--libc=${EMBCC_LIBC} ${_embcc_flags}")
+endif()
 if(EMBCC_TARGET)
   set(_embcc_flags "--target=${EMBCC_TARGET} ${_embcc_flags}")
 endif()
