@@ -113,6 +113,22 @@ struct type *ty_llong(int is_unsigned)
     return &llongs[is_unsigned ? 1 : 0];
 }
 
+struct type *ty_bitint(int n, int is_unsigned)
+{
+    static struct type *made[2][TY_BITINT_MAXWIDTH + 1];
+    if (n < (is_unsigned ? 1 : 2) || n > TY_BITINT_MAXWIDTH)
+        return NULL;
+    struct type **slot = &made[is_unsigned ? 1 : 0][n];
+    if (!*slot) {
+        struct type *t = xcalloc(1, sizeof *t);
+        *t = *ty_int_of_size(n <= 8 ? 1 : n <= 16 ? 2 : n <= 32 ? 4 : 8,
+                             is_unsigned);
+        t->bitint = n;
+        *slot = t;
+    }
+    return *slot;
+}
+
 struct type *ty_size_t(void)
 {
     return ty_base(target_int_size() == target_ptr_size() &&
@@ -320,6 +336,15 @@ struct type *ty_array(struct type *elem, int count)
     return t;
 }
 
+/* An array whose count the program gave, by a dimension or an
+ * initializer: 0 elements is then GNU C's complete zero-length array. */
+struct type *ty_array_sized(struct type *elem, int count)
+{
+    struct type *t = ty_array(elem, count);
+    t->zero_len = count == 0;
+    return t;
+}
+
 struct type *ty_vla(struct type *elem, struct expr *len)
 {
     struct type *t = ty_array(elem, 0);
@@ -350,6 +375,7 @@ struct type *ty_func(struct type *ret, struct type **ptypes, int n,
     struct type *t = xcalloc(1, sizeof *t);
     t->kind = TY_FUNC;
     t->ret = ret;
+    t->ptypes = xcalloc((size_t)(n ? n : 1), sizeof *t->ptypes);
     for (int i = 0; i < n; i++)
         t->ptypes[i] = ptypes[i];
     t->nptypes = n;
@@ -449,6 +475,19 @@ static void ms_struct_layout(struct type *t, struct member *members, int n,
     (void)t;
     *align_out = align;
     *bits_out = bitpos;
+}
+
+int ty_incomplete(const struct type *t)
+{
+    if (t->kind == TY_VOID)
+        return 1;
+    if (ty_size((struct type *)t) != 0)
+        return 0;
+    if (t->kind == TY_STRUCT && t->complete)
+        return 0;
+    if (t->kind == TY_ARRAY && (t->count > 0 || t->zero_len))
+        return ty_incomplete(t->pointee);
+    return 1;
 }
 
 void ty_struct_layout(struct type *t, struct member *members, int n,
@@ -681,9 +720,64 @@ int ty_own_align(const struct type *t)
     }
 }
 
+/* C11 6.2.7's compatibility, as __builtin_types_compatible_p asks it --
+ * stricter than ty_equal, which the rest of the compiler leans on to let
+ * `long` and `long long` interchange: qualifiers count below the top
+ * level (`char *` is not `const char *`), an enumerated type goes with
+ * its underlying integer but two enums only with themselves, and an array
+ * of unknown size goes with any size. top: the outermost type, whose
+ * qualifiers the builtin ignores. */
+int ty_compatible(const struct type *a, const struct type *b, int top)
+{
+    if (top) {
+        a = ty_unqual((struct type *)a);
+        b = ty_unqual((struct type *)b);
+    } else if (!a->is_const != !b->is_const ||
+               !a->is_volatile != !b->is_volatile ||
+               !a->is_atomic != !b->is_atomic) {
+        return 0;
+    }
+    if (a->kind != b->kind || a->is_unsigned != b->is_unsigned ||
+        a->bitint != b->bitint)
+        return 0;
+    const struct type *ca = a->canon ? a->canon : a;
+    const struct type *cb = b->canon ? b->canon : b;
+    if (ca->is_enum || cb->is_enum)
+        return ca->is_enum && cb->is_enum ? ca == cb
+                                          : ty_size(a) == ty_size(b);
+    if (a->is_llong != b->is_llong)
+        return 0;
+    switch (a->kind) {
+    case TY_PTR:
+        return ty_compatible(a->pointee, b->pointee, 0);
+    case TY_ARRAY: {
+        int ka = a->count > 0, kb = b->count > 0;
+        if (ka && kb && !a->vla_len && !b->vla_len && a->count != b->count)
+            return 0;
+        return ty_compatible(a->pointee, b->pointee, 0);
+    }
+    case TY_STRUCT:
+        return ca == cb;
+    case TY_FUNC:
+        if (!ty_compatible(a->ret, b->ret, 1))
+            return 0;
+        if (a->noproto || b->noproto)
+            return 1;
+        if (a->nptypes != b->nptypes || a->is_varargs != b->is_varargs)
+            return 0;
+        for (int i = 0; i < a->nptypes; i++)
+            if (!ty_compatible(a->ptypes[i], b->ptypes[i], 1))
+                return 0;
+        return 1;
+    default:
+        return 1;
+    }
+}
+
 int ty_equal(const struct type *a, const struct type *b)
 {
-    if (a->kind != b->kind || a->is_unsigned != b->is_unsigned)
+    if (a->kind != b->kind || a->is_unsigned != b->is_unsigned ||
+        a->bitint != b->bitint)
         return 0;
     /* `long` against `long long`. C says they are distinct types
      * whatever the target, but this compiler has always let them
@@ -714,6 +808,9 @@ int ty_equal(const struct type *a, const struct type *b)
     if (a->kind == TY_FUNC) {
         /* a cmse_nonsecure_call is a different way to call: a pointer to
          * one is not a pointer to the other (as clang has it) */
+        /* one with no prototype goes with any of the same return */
+        if ((a->noproto || b->noproto) && a->cmse_ns_call == b->cmse_ns_call)
+            return ty_equal(a->ret, b->ret);
         if (a->nptypes != b->nptypes || a->is_varargs != b->is_varargs ||
             a->sret_first != b->sret_first ||
             a->cmse_ns_call != b->cmse_ns_call || !ty_equal(a->ret, b->ret))
@@ -901,6 +998,10 @@ int ty_classify(const struct type *t, enum arg_class *classes)
     int size = ty_size(t);
     if (size > 16)
         return 0; /* MEMORY */
+    if (size == 0) {    /* GNU's empty struct: NO_CLASS, in no register */
+        classes[0] = classes[1] = CLASS_NONE;   /* and no hidden pointer */
+        return 1;
+    }
 
     int seen[2] = { 0, 0 };
     classes[0] = classes[1] = CLASS_INTEGER;
@@ -942,7 +1043,11 @@ const char *ty_name(const struct type *t)
         t = t->pointee;
     }
     char structbuf[48];
-    switch (t->kind) {
+    if (t->bitint) {
+        snprintf(structbuf, sizeof structbuf, "%s_BitInt(%d)",
+                 t->is_unsigned ? "unsigned " : "", t->bitint);
+        base = structbuf;
+    } else switch (t->kind) {
     case TY_VOID: base = "void"; break;
     case TY_BOOL: base = "_Bool"; break;
     case TY_CHAR: base = t->is_unsigned ? "unsigned char" : "char"; break;
@@ -1079,6 +1184,8 @@ struct type *ty_promote(struct type *t)
     /* The value of an expression has no qualifiers: `x + 1` on a const
      * long is a long, and typeof of it can be assigned. */
     t = ty_unqual(t);
+    if (t->bitint)      /* C23 6.3.1.1: a _BitInt is not promoted */
+        return t;
     if (t->kind == TY_CHAR || t->kind == TY_SHORT)
         return ty_base(TY_INT, t->is_unsigned &&
                                ty_size(t) >= ty_size(ty_base(TY_INT, 0)));
@@ -1099,6 +1206,39 @@ struct type *ty_promote(struct type *t)
  * wide branch was right while long was always eight bytes and is a
  * silent NARROWING where it is four: `a + b` on two long longs came out
  * as a 32-bit add. */
+/* An integer type's width, and whether a's rank is above b's: by width
+ * (C23 6.3.1.1), a standard type above a _BitInt of its own width, and
+ * of two standard types of one width (int and long on ILP32) the later */
+static int int_width(const struct type *t)
+{
+    return t->bitint ? t->bitint : ty_size(t) * 8;
+}
+
+static int rank_above(const struct type *a, const struct type *b)
+{
+    int wa = int_width(a), wb = int_width(b);
+    if (wa != wb)
+        return wa > wb;
+    if (a->bitint || b->bitint)
+        return !a->bitint && b->bitint;
+    return a->kind > b->kind || (a->is_llong && !b->is_llong);
+}
+
+/* The usual arithmetic conversions with a _BitInt among the (promoted)
+ * operands: C11 6.3.1.8's rules, by rank */
+static struct type *bitint_common(struct type *a, struct type *b)
+{
+    if (!a->is_unsigned == !b->is_unsigned)
+        return rank_above(b, a) ? b : a;
+    struct type *u = a->is_unsigned ? a : b, *s = a->is_unsigned ? b : a;
+    if (!rank_above(s, u))
+        return u;
+    if (int_width(s) > int_width(u))
+        return s;
+    return s->bitint ? ty_bitint(s->bitint, 1)
+         : s->is_llong ? ty_llong(1) : ty_base(s->kind, 1);
+}
+
 struct type *ty_arith_common(struct type *a, struct type *b)
 {
     /* Floating types outrank every integer, and long double > double >
@@ -1111,6 +1251,8 @@ struct type *ty_arith_common(struct type *a, struct type *b)
         return ty_base(TY_FLOAT, 0);
     a = ty_promote(a);
     b = ty_promote(b);
+    if (a->bitint || b->bitint)
+        return bitint_common(a, b);
     int qa = a->kind == TY_INT128, qb = b->kind == TY_INT128;
     if (qa || qb)       /* __int128 outranks long, holds all its values */
         return ty_base(TY_INT128, qa && qb ? a->is_unsigned || b->is_unsigned

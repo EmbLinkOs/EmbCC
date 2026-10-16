@@ -291,6 +291,50 @@ static void chain(struct ctx *c, struct state *st, struct expr *e)
     st_free(&any);
 }
 
+/* A condition, split by its outcome: *t the state where it was true, *f
+ * where it was false. `if (fseek(f, 0, 2) || (n = ftell(f)) < 0) return;`
+ * leaves n written for what follows, because the else side -- the
+ * condition false -- is where both operands ran; walked as one value the
+ * condition left n written on SOME paths, and `use(n)` after it was a
+ * false "may be used uninitialized". So: `a && b` is true where b was,
+ * from where a was true, and false where either was; `a || b` the other
+ * way round; `!a` swaps them; anything else is one state for both. */
+static void cond2(struct ctx *c, struct state *st, struct expr *e,
+                  struct state *t, struct state *f)
+{
+    while (e && e->kind == EXPR_CAST && e->rhs && scalar(e->ty))
+        e = e->rhs;                     /* (int)(a || b) splits the same */
+    if (e && e->kind == EXPR_NOT) {
+        cond2(c, st, e->rhs, f, t);
+        return;
+    }
+    if (e && e->kind == EXPR_BINOP && (e->op == B_LAND || e->op == B_LOR)) {
+        int and = e->op == B_LAND;
+        struct state ta, fa, tb, fb;
+        cond2(c, st, e->lhs, &ta, &fa);
+        c->cond_depth++;                /* the right runs on one side only */
+        cond2(c, and ? &ta : &fa, e->rhs, &tb, &fb);
+        c->cond_depth--;
+        if (and) {
+            *t = tb;
+            st_join(c, &fa, &fb);
+            *f = fa;
+            st_free(&ta);
+            st_free(&fb);
+        } else {
+            st_join(c, &ta, &tb);
+            *t = ta;
+            *f = fb;
+            st_free(&fa);
+            st_free(&tb);
+        }
+        return;
+    }
+    ex(c, st, e);
+    *t = st_copy(c, st);
+    *f = st_copy(c, st);
+}
+
 static void ex(struct ctx *c, struct state *st, struct expr *e)
 {
     if (!e)
@@ -359,14 +403,17 @@ static void ex(struct ctx *c, struct state *st, struct expr *e)
         }
         break;
     case EXPR_COND: {
-        ex(c, st, e->args[0]);
-        struct state other = st_copy(c, st);
+        struct state tt, ff;
+        cond2(c, st, e->args[0], &tt, &ff);
         c->cond_depth++;
-        ex(c, st, e->lhs);
-        ex(c, &other, e->rhs);
+        ex(c, &tt, e->lhs);
+        ex(c, &ff, e->rhs);
         c->cond_depth--;
-        st_join(c, st, &other);
-        st_free(&other);
+        st_join(c, &tt, &ff);
+        memcpy(st->v, tt.v, (size_t)c->nvars);
+        st->reach = tt.reach;
+        st_free(&tt);
+        st_free(&ff);
         return;
     }
     default:
@@ -488,14 +535,17 @@ static void stm(struct ctx *c, struct state *st, struct stmt *s)
             st->reach = 0;
             break;
         case STMT_IF: {
-            ex(c, st, s->cond);
-            struct state other = st_copy(c, st);
+            struct state tt, ff;
+            cond2(c, st, s->cond, &tt, &ff);
             c->cond_depth++;
-            stm(c, st, s->thn);
-            stm(c, &other, s->els);
+            stm(c, &tt, s->thn);
+            stm(c, &ff, s->els);
             c->cond_depth--;
-            st_join(c, st, &other);
-            st_free(&other);
+            st_join(c, &tt, &ff);
+            memcpy(st->v, tt.v, (size_t)c->nvars);
+            st->reach = tt.reach;
+            st_free(&tt);
+            st_free(&ff);
             break;
         }
         case STMT_WHILE:

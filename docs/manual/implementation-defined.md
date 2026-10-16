@@ -142,13 +142,13 @@ A byte that is not part of an allowed character is an error:
 embcc: f.c:1: error: byte 0xcc is not part of a character C allows here (identifiers take UTF-8 letters, C11 Annex D)
 ```
 
-Universal character names (`é`) are not accepted in identifiers, and
-neither is `$`:
+Universal character names (`é`) are not accepted in identifiers:
 
 ```text
 embcc: f.c:1: error: character '\' is not supported yet
-embcc: f.c:1: error: character '$' is not supported yet
 ```
+
+`$` is accepted anywhere in an identifier, as in GCC (`a$b`, `$tmp`).
 
 *The number of significant initial characters in an identifier
 (C17 5.2.4.1, 6.4.2).*
@@ -334,7 +334,16 @@ On Cortex-M, RV32 and AVR the type does not exist:
 embcc: f.c:1:10: error: __int128 does not exist on this target (it needs 64-bit registers; use long long)
 ```
 
-C23's `_BitInt(N)` is not supported.
+C23's `_BitInt(N)` takes N up to 64 (`BITINT_MAXWIDTH`, and the
+predefined `__BITINT_MAXWIDTH__`). A `_BitInt(N)` has the size and
+alignment of the smallest of `char`, `short`, `int`, `long` and `long
+long` that holds N bits, and is passed and returned as that type is.
+Its value is the low N bits: the bits above them are copies of the sign
+bit, or zero when it is unsigned. A value from another compiler is read
+the same way whatever those bits hold, as the x86-64, AArch64 and RISC-V
+ABIs leave them unspecified. Converting a value a signed `_BitInt(N)`
+cannot represent keeps its low N bits, as for the other signed integer
+types.
 
 *Whether signed integer types are represented using sign and magnitude,
 two's complement, or ones' complement, and whether the extraordinary
@@ -624,11 +633,14 @@ rounded up to a multiple of that.
 `__attribute__((aligned(N)))` and `_Alignas` raise a member's or a
 structure's alignment. `#pragma pack(N)` caps every member's alignment at
 `N` (see [Preprocessing directives](#preprocessing-directives)). A
-structure must have at least one member; an empty structure is refused:
-
-```text
-embcc: f.c:1:14: error: a struct/union needs at least one member
-```
+structure or union with no members, a GNU extension, has size 0 and
+alignment 1, as in GCC. Passed or returned by value, it travels as GCC's
+and clang's do on the target: in no register on most; by reference
+where every structure argument is (PowerPC, SPARC); and a result through
+the hidden pointer where every structure result is (MIPS o32, SPARC,
+ColdFire). On Xtensa, where the two compilers differ, EmbCC follows GCC:
+no register and no hidden pointer. A pointer to one steps by 0, and two
+such pointers cannot be subtracted.
 
 *The integer type compatible with each enumerated type (C17 6.7.2.2).*
 
@@ -855,6 +867,15 @@ that a build can be reproduced. `__TIMESTAMP__` is not defined.
 | Nesting of `#include` | 50: `#include nested too deeply` | 15 |
 | Nesting of conditional inclusion | 64: `conditionals nested too deeply` | 63 |
 | Parameters in one macro definition | 127: `more than 127 macro parameters` | 127 |
+
+### Translation limits
+
+| Limit | EmbCC | C17 minimum |
+|---|---|---|
+| Nesting of parenthesized expressions, blocks and statements, structure definitions, unary operators and casts | About 2,000 levels on a host with an 8 MB stack: deeper is `this nests too deeply to compile`, an error rather than a stack overflow | 63 expressions, 127 blocks, 63 structures |
+| Parameters in one function definition, arguments in one call | 128: `more than 128 parameters`, `more than 128 call arguments` | 127 |
+| Dimensions in one array declarator | 16: `more than 16 array dimensions` | 12 declarators of any kind |
+| Bytes in one object | 2147483647: `... is too large: EmbCC's objects hold at most 2147483647 bytes` | 65535 |
 
 ### Predefined macros that describe the implementation
 

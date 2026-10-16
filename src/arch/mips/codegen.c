@@ -589,15 +589,23 @@ static int ret_n(const struct type *t, long size)
     return ret_pieces(t, size, off, sz, &fl);
 }
 
+/* GNU's empty struct, of size 0, comes back as clang returns it: through
+ * the hidden pointer at o32, as every o32 composite does, and in nothing
+ * at n64. (A call returning one has retsize 0, as a scalar call has; its
+ * rety says which it is.) */
 static int fn_sret(const struct ir_func *fn)
 {
+    if (fn->ret_abi.is_struct && fn->ret_abi.size == 0)
+        return !g_m64;
     return fn->ret_abi.is_struct &&
            ret_n(fn->ret_abi.ty, fn->ret_abi.size) == 0;
 }
 
 static int call_sret(const struct ir_ins *i)
 {
-    return i->retsize && ret_n(i->rety, i->retsize) == 0;
+    if (!i->retsize)
+        return i->rety && i->rety->kind == TY_STRUCT && !g_m64;
+    return ret_n(i->rety, i->retsize) == 0;
 }
 
 /* Where the ABI would put each value: a parameter in the register it
@@ -2897,7 +2905,7 @@ static void gen_call(struct mips_fn *F, int n)
 
     if (i->dst < 0)
         return;
-    if (i->retsize) {
+    if (i->retsize || (i->rety && i->rety->kind == TY_STRUCT)) {
         /* dst receives the scratch's ADDRESS, the contract irgen shares
          * with every backend. A composite that came back in registers is
          * stored there first -- each piece at its offset, a field at its
@@ -3671,9 +3679,10 @@ static void gen_ins(struct mips_fn *F, int n)
                             pack_tail(F, r, ADDR, roff[q], rsz[q]);
                         }
                     }
-                } else {
+                } else if (fn_sret(fn)) {
                     /* through the caller's buffer, whose address the
-                     * prologue kept; the pointer comes back in v0 */
+                     * prologue kept; the pointer comes back in v0 (and
+                     * an n64 empty struct comes back in nothing) */
                     rd(F, i->a, TMP);
                     ld_sp(F, ADDR, F->sret_slot, W, 1);
                     copy_block(F, 1, fn->ret_abi.size, 0);
@@ -4419,6 +4428,15 @@ static void gen_func(struct ir_func *fn, struct code *t, struct mips_sites *st,
     F.fb = MIPS_SP;
     F.longb = longb;
     F.nlongb = nlongb;
+    /* aligned(N), or an asm that aligns its own bytes (`.p2align 3`):
+     * the function starts on that. The padding before it is never run. */
+    {
+        int m = cg_fn_align(fn);
+        if (m > f->code_align) {
+            code_fill(t, CODE_FILL_ZERO, (m - t->len % m) % m);
+            f->code_align = m;
+        }
+    }
     f->code_off = t->len;
     F.barrier = t->len;
     F.fill = !keep_vars && !getenv("EMBCC_MIPS_NO_FILL");

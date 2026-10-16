@@ -14,6 +14,8 @@ src/arch/
   code.c/.h        the machine-code byte buffer every encoder writes into
   predef.c/.h      which predefined-macro table the target uses
   regalloc.c/.h    the shared register allocator (x86-64 and aarch64 use it)
+  backends.c       the backend registry: one row per built backend
+  common.c         what every backend's lowering shares (cg_wide_vregs, ...)
   x86_64/          x86-64, System V AMD64 ABI           -> x86_64/README.md
   aarch64/         AArch64, AAPCS64                      -> aarch64/README.md
   thumb/           ARMv7-M (Cortex-M), AAPCS32, ILP32   -> D-015

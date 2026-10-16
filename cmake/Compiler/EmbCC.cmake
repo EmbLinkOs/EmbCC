@@ -42,6 +42,8 @@ macro(__compiler_embcc lang)
   set(CMAKE_${lang}_DEPENDS_USE_COMPILER TRUE)
 
   set(CMAKE_INCLUDE_SYSTEM_FLAG_${lang} "-isystem ")
+  # CMAKE_SYSROOT: where --libc=system finds a Linux system's glibc
+  set(CMAKE_${lang}_COMPILE_OPTIONS_SYSROOT "--sysroot=")
 
   string(APPEND CMAKE_${lang}_FLAGS_INIT " ")
   string(APPEND CMAKE_${lang}_FLAGS_DEBUG_INIT " -g")

@@ -222,10 +222,31 @@ check tag-redefinition \
 struct P { int y; };
 int main(void) { return 0; }' \
     "redefinition of 'P'"
+# (a GNU extension GCC accepts; ISO C, which -pedantic-errors holds to,
+# requires a member)
 check empty-struct \
     'struct E { };
 int main(void) { return 0; }' \
-    "at least one member"
+    "a struct or union with no members is a GNU extension" -pedantic-errors
+# a pointer moves by its pointee's size, which an incomplete type has not
+# (this added one byte), and a difference of pointers to a type of size 0
+# counts nothing
+check ptr-step-incomplete \
+    'struct X;
+struct X *f(struct X *p) { return p + 1; }' \
+    "arithmetic on a pointer to incomplete type struct X"
+check ptr-incdec-incomplete \
+    'struct X;
+void f(struct X **p) { (*p)++; }' \
+    "++/-- on a pointer to incomplete type struct X"
+check ptr-addeq-incomplete \
+    'struct X;
+void f(struct X **p) { *p += 2; }' \
+    "+= on a pointer to incomplete type struct X"
+check ptr-diff-empty \
+    'struct E { };
+long f(struct E *p, struct E *q) { return q - p; }' \
+    "subtracting pointers to struct E, which has size 0"
 check typedef-redef \
     'typedef int T;
 typedef long T;
@@ -277,15 +298,17 @@ check nonstatic-then-static \
 static int f(void) { return 1; }
 int main(void) { return f(); }' \
     "static declaration of 'f' follows non-static"
-# main alone may reach its closing brace (it returns 0, C99 5.1.2.2.3)
+# main alone may reach its closing brace (it returns 0, C99 5.1.2.2.3);
+# any other function returning a value warns (--warn=return-type, E0008),
+# which -Werror here makes the refusal
 check fallthrough \
     'static int f(void) { int x = 1; }
 int main(void) { return f(); }' \
-    "must end in a return"
+    "control may reach the end of 'f', which returns int"
 check fallthrough-if \
     'static int f(void) { if (1) return 1; }
 int main(void) { return f(); }' \
-    "must end in a return"
+    "control may reach the end of 'f', which returns int"
 check arity \
     'static int f(int a, int b) { return a + b; }
 int main(void) { return f(1); }' \
@@ -313,7 +336,8 @@ check assign-to-literal \
 # for. The message once named "aarch64" for every such target -- a Thumb
 # build was told it needed aarch64 -- so each target is named as itself.
 printf 'int main(void) { return 0; }\n' > "$out_dir/nolink.c"
-for t in aarch64-elf thumbv7em-none-eabi riscv32-unknown-elf mipsel-none-elf; do
+for t in aarch64-elf thumbv7em-none-eabi riscv32-unknown-elf mipsel-none-elf \
+         powerpc-none-eabi; do
     if err=$("$EMBCC" --target=$t "$out_dir/nolink.c" \
              -o "$out_dir/nolink.bin" 2>&1); then
         echo "case nolink $t: linked in one step without a memory map"
@@ -326,9 +350,13 @@ for t in aarch64-elf thumbv7em-none-eabi riscv32-unknown-elf mipsel-none-elf; do
         want="cannot link for $t: embld does not read AArch64 objects"
     echo "$err" | grep -q "$want" || {
         echo "case nolink $t: wrong diagnostic:"; echo "$err"; exit 1; }
-    # MIPS (like AVR) has no linker-script layout in embld: not offered
-    if [ "$t" = mipsel-none-elf ] && echo "$err" | grep -q 'linker script'; then
+    # a script is offered where embld lays one out -- ARM, RISC-V, AVR
+    # and MIPS32 (a PIC32's) -- and not where it does not (PowerPC)
+    if [ "$t" = powerpc-none-eabi ] && echo "$err" | grep -q 'linker script'; then
         echo "case nolink $t: offered a linker script embld refuses:"; echo "$err"; exit 1
+    fi
+    if [ "$t" = mipsel-none-elf ] && ! echo "$err" | grep -q 'linker script'; then
+        echo "case nolink $t: no linker script offered:"; echo "$err"; exit 1
     fi
 done
 echo "case nolink: a board image with no memory map, or an AArch64 one, is refused by name"
@@ -693,3 +721,13 @@ int main(void) { return 0; }' \
         "__builtin_frame_address(1) is not supported on" \
         "--target=$t"
 done
+
+# An object larger than EmbCC's int sizes hold is refused: the count was
+# truncated (`char a[0x100000001]` was one byte) and a struct's size
+# wrapped, with no diagnostic.
+check array-too-large 'char a[0x100000001]; int main(void) { return 0; }' \
+    "is too large: EmbCC's objects hold at most 2147483647 bytes"
+check array-bytes-too-large 'int a[0x40000000]; int main(void) { return 0; }' \
+    "is too large: EmbCC's objects hold at most 2147483647 bytes"
+check struct-too-large 'struct s { char a[0x7fffffff]; char b; } x; int main(void) { return 0; }' \
+    "struct s is too large"

@@ -15,11 +15,12 @@
 #ifndef EMBCC_SEMA_TYPE_H
 #define EMBCC_SEMA_TYPE_H
 
-/* The most parameters/arguments a function type, prototype, or call carries.
- * Defined here (not ast.h) because struct type's ptypes[] lives here and
- * ast.h includes this header — the two must agree or a >N-param function
- * type overflows ptypes[]. */
-#define MAX_PARAMS 32
+/* The most parameters/arguments a function type, prototype, or call
+ * carries: C17 5.2.4.1 asks for 127 of each. A function type's ptypes and
+ * a call's args are allocated to their count; this bounds the per-
+ * parameter arrays of a definition (struct func) and of each backend's
+ * argument lowering. */
+#define MAX_PARAMS 128
 
 struct expr;
 
@@ -85,6 +86,7 @@ struct type {
                              * copy, like const; an array's elements carry it
                              * too. Ignored by ty_equal; sema keeps pointers to
                              * the two spaces apart. */
+    int bitint;             /* _BitInt(N): N, the value's width (ty_bitint) */
     int is_enum;            /* an enumerated type: its underlying integer
                              * type in every other respect (ty_equal and
                              * the lowerings do not look), but GCC's
@@ -104,6 +106,9 @@ struct type {
                              * this); NULL on an original. */
     struct type *pointee;   /* TY_PTR: target; TY_ARRAY: element */
     int count;              /* TY_ARRAY: element count */
+    int zero_len;           /* TY_ARRAY: count 0 written or initialized --
+                             * `T a[0]`, `T a[] = {}` (GNU C) -- so complete
+                             * at size 0, where `T a[]` is incomplete */
     /* TY_ARRAY of variable length (C99 VLA, or a fixed count of VLA
      * elements): count is 0 and the element count is vla_len's run-time
      * value. vla_size is the hidden local (sema) holding sizeof this
@@ -121,6 +126,9 @@ struct type {
     const char *tag;        /* NULL for anonymous */
     int is_union;
     int complete;           /* body seen; size/align/members valid */
+    int transparent_union;  /* union __attribute__((transparent_union)):
+                             * a parameter of it takes any member's type,
+                             * passed as the first member is (sema) */
     int is_complex;         /* a C99 `T _Complex`: laid out, passed and
                              * returned as struct { T __real__, __imag__; }
                              * — which is exactly its ABI on both targets —
@@ -137,9 +145,14 @@ struct type {
     int nat_align;
     /* TY_FUNC (always behind a pointer in this subset): */
     struct type *ret;
-    struct type *ptypes[MAX_PARAMS];
+    struct type **ptypes;   /* nptypes of them (ty_func's own copy) */
     int nptypes;
     int is_varargs;
+    /* TY_FUNC declared with no prototype: `int f()` before C23, or a K&R
+     * definition `int f(a) int a; {...}`. A call is not checked against
+     * it, and its arguments take the default promotions; it is
+     * compatible with any function type of the same return type. */
+    int noproto;
     int cmse_ns_call;       /* __attribute__((cmse_nonsecure_call)) under
                              * -mcmse: a call through a pointer to this
                              * type enters the Non-secure state (BLXNS),
@@ -174,6 +187,14 @@ struct type *ty_wchar(void);
 struct type *ty_str_elem(int prefix);
 /* `long long` / `unsigned long long`: eight bytes on every target. */
 struct type *ty_llong(int is_unsigned);
+/* C23's _BitInt(N), N from 1 (unsigned) or 2 (signed) to BITINT_MAXWIDTH,
+ * which is 64 here; NULL beyond it. Its storage -- the smallest of char,
+ * short, int, long and long long that holds N bits -- is its kind, size,
+ * alignment and calling convention, as the x86-64, AArch64 and RISC-V
+ * ABIs lay out a _BitInt of up to 64 bits; `bitint` is N. A value of one
+ * is always held as its low N bits, sign- or zero-extended (irgen). */
+#define TY_BITINT_MAXWIDTH 64
+struct type *ty_bitint(int n, int is_unsigned);
 /* The integer type that is exactly `size` bytes wide, or NULL if the
  * target has none. Callers that want "the unsigned type of width w"
  * must ask this rather than assuming w == 8 means long: on ILP32 it
@@ -219,6 +240,7 @@ int ty_is_complex(const struct type *t);
  * real in st0 and imaginary in st1), 0 otherwise. */
 int ty_x87_ret(const struct type *t);
 /* A variable-length array of elem, `len` elements (a VLA). */
+struct type *ty_array_sized(struct type *elem, int count);
 struct type *ty_vla(struct type *elem, struct expr *len);
 /* t is an array whose size is only known at run time. */
 int ty_is_vla(const struct type *t);
@@ -239,6 +261,10 @@ struct type *ty_func(struct type *ret, struct type **ptypes, int n,
                      int is_varargs);
 /* Assigns member offsets and the struct's size/align per SysV, and
  * marks the type complete. Members must already have complete types. */
+/* A type whose size is not known: an incomplete struct or union, void,
+ * an array of unknown bound or of an incomplete element. Size 0 does not
+ * say so: GNU's empty struct is complete at size 0. */
+int ty_incomplete(const struct type *t);
 void ty_struct_layout(struct type *t, struct member *members, int n,
                       int packed, int user_align, int pack);
 struct member *ty_find_member(struct type *t, const char *name);
@@ -252,6 +278,7 @@ int ty_natural_align(const struct type *t);
  * aligned typedef moves an object, not an argument slot. */
 int ty_own_align(const struct type *t);
 int ty_equal(const struct type *a, const struct type *b);
+int ty_compatible(const struct type *a, const struct type *b, int top);
 int ty_is_integer(const struct type *t);
 int ty_is_float(const struct type *t);
 int ty_is_arith(const struct type *t);   /* integer or floating */

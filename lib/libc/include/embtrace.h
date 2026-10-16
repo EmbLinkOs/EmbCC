@@ -43,19 +43,19 @@ unsigned embtrace_clock(void);
  * is turned on; RISC-V counts them in mcycle (machine mode). */
 #if defined(__ARM_ARCH_7M__) || defined(__ARM_ARCH_7EM__) || \
     defined(__ARM_ARCH_8M_MAIN__)
-static inline EMBTRACE_NOI void embtrace_dwt_start(void)
+static __inline__ EMBTRACE_NOI void embtrace_dwt_start(void)
 {
     *(volatile unsigned *)0xE000EDFCu |= 1u << 24;      /* DEMCR.TRCENA */
     *(volatile unsigned *)0xE0001004u = 0;              /* DWT_CYCCNT */
     *(volatile unsigned *)0xE0001000u |= 1u;            /* CYCCNTENA */
 }
-static inline EMBTRACE_NOI unsigned embtrace_dwt_cycles(void)
+static __inline__ EMBTRACE_NOI unsigned embtrace_dwt_cycles(void)
 {
     return *(volatile unsigned *)0xE0001004u;
 }
 #endif
 #if defined(__riscv)
-static inline EMBTRACE_NOI unsigned embtrace_mcycle(void)
+static __inline__ EMBTRACE_NOI unsigned embtrace_mcycle(void)
 {
     unsigned long c;
     __asm__ volatile ("csrr %0, mcycle" : "=r"(c));

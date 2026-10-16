@@ -312,11 +312,19 @@ others. A GCC constraint with several alternatives therefore takes the
 meaning of the first known letter by that order. The letters and their
 precedence are listed under each target.
 
-Matching constraints (a digit such as `"0"`) and flag-output constraints
-(`"=@ccz"`) are not supported on any target. A digit constraint is
-refused. Flag outputs are discussed under [x86-64](#x86-64) and
-[AArch64](#aarch64), the two targets that define
-`__GCC_ASM_FLAG_OUTPUTS__`.
+A matching constraint, a digit such as `"0"`, is supported on every
+target: the input's value goes into the register of the output it
+names, and the output's value comes out. EmbCC makes the pair one
+in-out (`"+"`) operand before the target reads a constraint -- with the
+output's own lvalue directly, and through a temporary when the input is
+another value (`"=r"(sum) : "0"(a)`) -- and renumbers the template: the
+input's `%N` names the output, and the operands after it keep their
+meaning. An input of a narrower type than its output is converted to the
+output's type, where GCC leaves whatever the target's load gives.
+
+Flag-output constraints (`"=@ccz"`) are not supported on any target.
+They are discussed under [x86-64](#x86-64) and [AArch64](#aarch64), the
+two targets that define `__GCC_ASM_FLAG_OUTPUTS__`.
 
 Whether an unsupported constraint is reported depends on the target. On
 x86-64, ARM Cortex-M and RISC-V it is reported when the function is
@@ -1045,7 +1053,7 @@ does not have, and the ARMv8-M levels add the instructions in
 | `r`, `q`, `g`, `R` | a general register chosen by EmbCC |
 | `i`, `n`, `I`, `J`, `K`, `L`, `M` | a constant, written into the template as a number (`ssat %0, %1, %2` with `"I"(8)` reads `ssat r0, 8, r1`); refused when the operand is not a constant |
 | `m` | a general register chosen by EmbCC, holding the address of the operand (inputs) |
-| `0`, `1`, ... (inputs) | the output of that number: the input must be the output's own lvalue, and the pair is taken as one `+r` operand, as CMSIS's `__SMLALD` writes its accumulator; another value is refused |
+| `0`, `1`, ... (inputs) | the output of that number: the pair is taken as one `+r` operand, as CMSIS's `__SMLALD` writes its accumulator, through a temporary when the input is another value (see [Constraint strings](#constraint-strings)) |
 | `=`, `+`, `&` | see [Output operands](#output-operands) |
 
 Constraints are read by the same rules as on x86-64. As a result the
@@ -2635,10 +2643,8 @@ In summary, compared with GCC:
   in a template, and a function template cannot refer to a symbol on any
   target.
 - `asm goto`, `asm inline` and flag-output constraints are not
-  supported, nor are matching constraints (`"0"`) except on SPARC,
-  PowerPC and ARM Cortex-M (where the input must be the output's own
-  lvalue). Flag outputs are not always refused (see [x86-64](#x86-64) and
-  [AArch64](#aarch64)).
+  supported. Flag outputs are not always refused (see [x86-64](#x86-64)
+  and [AArch64](#aarch64)).
 - `m` outputs do not work (except on MIPS32, Xtensa, SPARC and PowerPC,
   where the operand's register holds the address), and `m` inputs are a
   register holding the

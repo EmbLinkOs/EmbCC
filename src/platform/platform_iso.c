@@ -17,6 +17,12 @@ int plat_stderr_is_terminal(void)
     return 0;
 }
 
+/* nothing to ask: the smallest default a desktop host gives (Windows') */
+unsigned long plat_stack_size(void)
+{
+    return 1ul << 20;
+}
+
 const char *plat_self_path(void)
 {
     return plat_argv0_path();

@@ -32,11 +32,11 @@ meaning other than the standard's. Check these first when porting code:
   declared in a block remain visible to the end of the translation unit.
   See [Scope of tags, typedefs and enumeration constants](#scope-of-tags-typedefs-and-enumeration-constants).
 
-EmbCC is also stricter than the standard in two places that commonly
-affect existing code: a non-`void` function other than `main` that can
-reach its closing brace is an error ([details](#functions-that-can-reach-their-closing-brace)),
-and an empty parameter list `()` always means "no parameters"
-([details](#empty-parameter-lists)).
+EmbCC is also stricter than the standard in one place that commonly
+affects existing code: an empty parameter list `()` always means "no
+parameters" ([details](#empty-parameter-lists)). A non-`void` function
+that can reach its closing brace gets a warning that is on by default
+([details](#functions-that-can-reach-their-closing-brace)).
 
 Features whose availability depends on the target (variable length
 arrays on AVR, `long double`, `__int128`, atomic sizes, thread-local
@@ -59,40 +59,33 @@ prefix. The format is described in [Diagnostics](diagnostics.md).
 
 GCC: `-std=STANDARD`.
 
-Name a C standard. The option is accepted so that existing build systems
-work; it does not change what EmbCC accepts or the macros it defines.
+Name a C standard. Each is compiled as it is: its keywords, its
+`__STDC_VERSION__`, C89's implicit `int` and C99's `//` comments, the
+unprototyped `int f()` before C23, and trigraphs under a strict standard
+before C23. The full rules are under
+[`--std=`](invoking.md#--stdstandard).
 
-| `--std=` value | Standard | Result |
+| `--std=` value | Standard | `__STDC_VERSION__` |
 |---|---|---|
-| `c89`, `c90`, `iso9899:1990`, `gnu89`, `gnu90` | C89/C90 | Accepted with a warning |
-| `c99`, `c9x`, `iso9899:1999`, `gnu99`, `gnu9x` | C99 | Accepted with a warning |
-| `c11`, `c1x`, `iso9899:2011`, `gnu11`, `gnu1x` | C11 | Accepted |
-| `c17`, `c18`, `iso9899:2017`, `gnu17`, `gnu18` | C17 | Accepted |
-| `c23`, `c2x`, `gnu23`, `gnu2x` | C23 | Accepted |
+| `c89`, `c90`, `iso9899:1990`, `gnu89`, `gnu90` | C89/C90 | not defined |
+| `iso9899:199409` | C94 | `199409L` |
+| `c99`, `c9x`, `iso9899:1999`, `gnu99`, `gnu9x` | C99 | `199901L` |
+| `c11`, `c1x`, `iso9899:2011`, `gnu11`, `gnu1x` | C11 | `201112L` |
+| `c17`, `c18`, `iso9899:2017`, `iso9899:2018`, `gnu17`, `gnu18` | C17 | `201710L` |
+| `c23`, `c2x`, `iso9899:2024`, `gnu23`, `gnu2x` | C23 | `202311L` |
+| `c2y`, `gnu2y` | C2y | `202500L` |
 | any other value | | Error |
 
-A standard older than C11 prints:
+The default is `gnu17`. A `cNN` value defines `__STRICT_ANSI__`. `-ansi`
+is `--std=c89`. Any other value is an error:
 
 ```text
-embcc: warning: -std=c99 is accepted but not enforced; EmbCC has one C dialect, C11 with the GNU extensions, and will compile newer constructs anyway
+embcc: error: unknown standard '-std=c3x'
 ```
 
-Any other value is an error, for example `--std=c2y`, `--std=gnu2y`,
-`--std=iso9899:199409` and `--std=iso9899:2018`:
-
-```text
-embcc: error: unknown standard '-std=c2y'
-```
-
-Whatever the value, `__STDC_VERSION__` is `201710L` and `__STRICT_ANSI__`
-is not defined. With no `--std=` option the dialect is the same. EmbCC has
-no mode that diagnoses extensions. `-ansi` is refused as an unknown
-argument. `--pedantic` and `--pedantic-errors` are accepted, turn nothing
-on, and print a warning that says so:
-
-```text
-embcc: warning: -pedantic: EmbCC has no diagnostics for extensions to ISO C, so this turns nothing on
-```
+[`--pedantic` and `--pedantic-errors`](invoking.md#--pedantic---pedantic-errors)
+report, as a warning or an error, what the standard does not have: a
+later standard's feature, or a GNU extension.
 
 See [Diagnostics](diagnostics.md).
 
@@ -159,17 +152,18 @@ define `__GNUC__` when compiling C.
 | Old-style (K&R) function definitions | Not supported | `int add(a, b) int a, b; { ... }` gives `expected a parameter type before 'a'`. C23 removed them. |
 | Implicit `int` | Not supported | `static x = 3;` gives `expected a type before 'x'`. C99 removed it. |
 | Implicit function declarations | Not supported | `'foo' is not declared in 'main' — for a call, add a prototype or define it first [E0001]`. C99 removed them. |
-| Reaching the `}` of a non-`void` function | Not supported | An error even when the value is never used, except in `main`: `control may reach the end of 'f' — every path must end in a return statement [E0008]`. See [Functions that can reach their closing brace](#functions-that-can-reach-their-closing-brace). |
-| `return;` in a non-`void` function | Not supported | `'g' returns int; 'return' needs a value`. A constraint violation since C99. |
+| Reaching the `}` of a non-`void` function | Supported | A warning, on by default, except in `main`: `control may reach the end of 'f', which returns int [--warn=return-type] [E0008]`. See [Functions that can reach their closing brace](#functions-that-can-reach-their-closing-brace). |
+| `return;` in a non-`void` function | Supported | The caller must not use the value. From C99 on, where it is a constraint violation: `'g' returns int; 'return' needs a value`. |
+| `return x;` in a `void` function | Supported | `x` is evaluated and dropped, with a warning that is on by default: `returning a value from void 'f' [--warn=return-mismatch]` (an error under `--pedantic-errors`, and from C99 on). A `void` `x`, `return f();`, is a GNU C form: see [Smaller GNU C forms](extensions.md#smaller-gnu-c-forms). |
 | `auto` storage class | Supported | `auto int x;` |
 | `register` storage class | Partial | Accepted on block-scope objects and on parameters, where it is a hint the allocator does not need. At file scope, which C does not allow: `'register' is not supported yet (see docs/manual/c-language.md)`. Taking the address of a `register` object is not diagnosed. Any other storage class on a parameter: `a parameter can have no storage class but 'register'`. |
 | Storage class after the type, `const static int t[]`, `int static n`, `long typedef L` | Partial | Obsolescent (C17 6.11.5), and `-Wold-style-declaration` (`-Wextra`) reports it, as in GCC. At block scope `extern` and `typedef` must come first: `at block scope, write 'extern' first in the declaration`. |
 | `const` | Supported | See [Const qualification](#const-qualification). |
 | `volatile` | Supported | |
 | Scopes | Partial | Objects, functions and labels follow the standard's rules. Tags, typedef names and enumeration constants do not. See [Scope of tags, typedefs and enumeration constants](#scope-of-tags-typedefs-and-enumeration-constants). |
-| Structures, unions, bit-fields | Supported | A structure or union with no members is refused: `a struct/union needs at least one member`. |
+| Structures, unions, bit-fields | Supported | A structure or union with no members is a GNU extension: size 0, as in GCC, and an error under `--pedantic-errors`. |
 | Enumerations | Supported | A constant outside the range of `int` is accepted without a diagnostic and gives the enumeration a wider type, as in C23. See [Enumeration constants](#enumeration-constants). |
-| Tentative definitions | Partial | A file-scope array of unknown size, `int a[];`, is refused even when a later declaration completes it: `'a' has incomplete type int[0]`. `extern int a[];` is accepted. |
+| Tentative definitions | Supported | A file-scope array of unknown size, `int a[];`, takes its size from a later declaration (`int a[10];`); if none gives one, it has one element, with a warning: `array 'a' assumed to have one element` (C17 6.9.2p5). |
 | `goto`, labels, `switch` | Supported | |
 | Adjacent string literal concatenation | Supported | A prefixed and an unprefixed literal concatenate: `L"wi" "de"` is `L"wide"`. |
 | Wide literals `L"..."`, `L'x'` | Supported | |
@@ -195,7 +189,7 @@ define `__GNUC__` when compiling C.
 | `inline` | Yes | See [Inline functions](#inline-functions). |
 | `restrict` | Supported | Accepted. EmbCC does not use it for optimization. |
 | Variable length arrays | Partial | See [Variable length arrays](#variable-length-arrays). Not available on AVR. |
-| Variably modified types: pointers to VLAs, VLA parameters `int a[n][m]`, `[*]` | Supported | |
+| Variably modified types: pointers to VLAs, VLA parameters `int a[n][m]`, `[*]` | Supported | A definition evaluates its parameters' lengths on entry, the outermost too, though the parameter is a pointer: `int a[i++]` increments `i`. A length is an assignment-expression, so `int a[i += 2]` is one. |
 | `static` and qualifiers in array parameters, `int a[static 4]` | Supported | The qualifiers apply to the pointer the parameter becomes: `int a[const 4]` is `int *const a`. `static` promises at least that many elements and changes no code. Outside a parameter: `expected an expression, got 'static'`. |
 | Flexible array members | Supported | An initializer for the flexible member is accepted only on a static object, which is a GNU extension. On an automatic object: `'l' is not static, so its flexible array member 'd' cannot be initialized: the object has no room for the elements`. |
 | Designated initializers | Supported | |
@@ -267,9 +261,9 @@ C17's value, `201710L`.
 | `true` and `false` in `#if` | Supported | |
 | Binary constants `0b1010` | Supported | Also in `#if`. |
 | Digit separators `1'000'000` | Supported | In integer and floating constants, and in `#if`. |
-| `u8` character constants `u8'a'` | Not supported | Read as the identifier `u8` followed by `'a'`, which is a syntax error such as `expected ';' before number 97 [E0002]`. |
+| `u8` character constants `u8'a'` | Supported | Of type `unsigned char`. |
 | `char8_t`; `u8"..."` of type `unsigned char[]` | Not supported | `u8"..."` has C17's type, `char[]`. `<uchar.h>` does not declare `char8_t`. |
-| `_BitInt(N)`, the `wb` and `uwb` suffixes | Not supported | `expected a type before '_BitInt'`; a `3wb` constant gives `malformed integer constant`. |
+| `_BitInt(N)`, the `wb` and `uwb` suffixes | Partial | N up to 64, which is `BITINT_MAXWIDTH`; wider is refused: `_BitInt(65) is wider than BITINT_MAXWIDTH, which is 64 here`. Arithmetic in the type wraps at N bits, a `_BitInt` is not promoted to `int`, and conversions rank it by its width. Laid out and passed as the x86-64, AArch64 and RISC-V ABIs say, so calls between EmbCC and GCC agree. See [Integers](implementation-defined.md). |
 | Enumerations with a fixed underlying type, `enum E : unsigned char` | Partial | The enumeration and its constants have the underlying type, and `enum E : short;` declares it ahead of its definition. A value the underlying type cannot represent is not diagnosed. See [Enumeration constants](#enumeration-constants). A non-integer type: `an enum's underlying type must be an integer type`. |
 | Enumeration constants outside the range of `int` | Partial | The enumeration and its constants take a type that can represent every value. A value of 2^63 or more is read as negative. See [Enumeration constants](#enumeration-constants). |
 | Empty initializer `= {}` | Partial | Zero-initializes any object except a VLA, which is refused: `variable length array 'a' cannot be initialized`. See [Initializers](#initializers). |
@@ -351,17 +345,23 @@ be lowered.
 
 ### Functions that can reach their closing brace
 
-A function with a non-`void` return type, other than `main`, must end
-every path with a `return` statement. The standard allows control to
-reach the closing brace as long as the caller does not use the value;
-EmbCC refuses it:
+A function with a non-`void` return type should end every path with a
+`return` statement. The standard allows control to reach the closing
+brace as long as the caller does not use the value, so EmbCC accepts it,
+with a warning that is on by default (`--error=return-type` makes it an
+error):
 
 ```text
-error: control may reach the end of 'f' — every path must end in a return statement [E0008]
+warning: control may reach the end of 'f', which returns int [--warn=return-type] [E0008]
 ```
 
+The function returns 0 when control reaches the brace, if its result is
+an integer or a pointer, rather than whatever its return register held.
+A caller that uses the value then reads the same thing every time. A
+floating or aggregate result is undefined there.
+
 `main` is the exception the standard makes: reaching its closing brace
-returns 0.
+returns 0, without a warning.
 
 A path also ends at an infinite loop, at a call to a function declared
 `_Noreturn`, `[[noreturn]]` or `__attribute__((noreturn))`, and at a call

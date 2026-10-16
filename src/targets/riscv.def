@@ -1,6 +1,10 @@
 /* RISC-V: the triples that name it and its data models. Part of the
  * target database; src/targets/targets.def says how a row reads. */
 
+/* The family this file describes (src/targets/targets.def says how). */
+FAMILY(riscv, "RISC-V: RV32 and RV64",
+       "riscv32-unknown-elf")
+
 /* The RISC-V psABI. Unsigned char like the ARM ones, but a SIGNED
  * wchar_t -- which is why those are two columns and not one -- and
  * a binary128 long double at both widths. Read off

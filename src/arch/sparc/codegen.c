@@ -414,9 +414,18 @@ static int fn_sret(const struct ir_func *fn)
     return fn->ret_abi.size == 16;
 }
 
+/* Does this call return a struct? Its retsize says, except for GNU's
+ * empty struct, whose size is 0 as a scalar call's retsize is; its rety
+ * is still the struct. (That call once had no `unimp` word after it, and
+ * the callee returned past the instruction there instead.) */
+static int call_composite(const struct ir_ins *i)
+{
+    return i->retsize || (i->rety && i->rety->kind == TY_STRUCT);
+}
+
 static int call_sret(const struct ir_ins *i)
 {
-    if (i->retsize)
+    if (call_composite(i))
         return ret_reg_words(i->rety) == 0;
     return i->ret_tybytes == 16 && i->dst >= 0;
 }
@@ -424,7 +433,7 @@ static int call_sret(const struct ir_ins *i)
 /* The size the caller's `unimp` after a struct-returning call holds. */
 static long call_sret_size(const struct ir_ins *i)
 {
-    return i->retsize ? i->retsize : 16;
+    return call_composite(i) ? i->retsize : 16;
 }
 
 static void sparc_abi_hints(const struct ir_func *fn, int *hint)
@@ -456,7 +465,7 @@ static void sparc_abi_hints(const struct ir_func *fn, int *hint)
         }
         if (i->op != IR_CALL)
             continue;
-        if (!i->retsize && i->dst >= 0 && i->dst < fn->nvregs && i->w <= 4)
+        if (!call_composite(i) && i->dst >= 0 && i->dst < fn->nvregs && i->w <= 4)
             hint[i->dst] = SP_O0;
         word = 0;
         for (int k = 0; k < i->nargs; k++) {
@@ -2533,8 +2542,8 @@ static void gen_call(struct sparc_fn *F, int n)
             addr_sp(F, out_reg(pl[k].reg), pl[k].copy);
     /* The result buffer's address in the struct-return word. */
     if (sret) {
-        long res = i->retsize ? F->scratch_at + i->scratch
-                              : tf_result(F, i->dst);
+        long res = call_composite(i) ? F->scratch_at + i->scratch
+                                     : tf_result(F, i->dst);
         addr_sp(F, SCR, res);
         sparc_store(t, SCR, SP_SP, SRET, 4);
     }
@@ -2558,7 +2567,7 @@ static void gen_call(struct sparc_fn *F, int n)
 
     if (i->dst < 0)
         return;
-    if (i->retsize) {
+    if (call_composite(i)) {
         /* dst receives the scratch's ADDRESS, the contract irgen shares
          * with every backend. A complex result came back in registers and
          * is stored there first; a struct the callee wrote itself. */
@@ -3879,7 +3888,7 @@ static void sparc_pair_hints(const struct ir_func *fn, int *hint)
         }
         if (i->op != IR_CALL)
             continue;
-        if (!i->retsize && i->dst >= 0 && i->dst < fn->nvregs && i->w == 8)
+        if (!call_composite(i) && i->dst >= 0 && i->dst < fn->nvregs && i->w == 8)
             hint[i->dst] = SP_O0;
         word = 0;
         for (int k = 0; k < i->nargs; k++) {
@@ -4050,6 +4059,15 @@ static void gen_func(struct ir_func *fn, struct code *t,
         for (int v = 0; v < fn->nvars; v++)
             fn->var_off[v] = F.slot[v] < 0 ? IR_VAR_NO_LOC
                            : ra_var_home(fn, v, 1, fpo(&F, obj_slot(&F, v)));
+    }
+    /* aligned(N), or an asm that aligns its own bytes (`.p2align 3`):
+     * the function starts on that. The padding before it is never run. */
+    {
+        int m = cg_fn_align(fn);
+        if (m > f->code_align) {
+            code_fill(t, CODE_FILL_ZERO, (m - t->len % m) % m);
+            f->code_align = m;
+        }
     }
     f->code_off = t->len;
 

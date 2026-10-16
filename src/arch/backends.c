@@ -11,7 +11,12 @@
  *
  * A row holds facts and entry points, no behaviour of its own: the
  * backends stay where they are (src/arch/<arch>/), and target.c keeps the
- * data model. */
+ * data model.
+ *
+ * A row exists only when its family is built (make TARGETS=,
+ * FAMILY_BUILT in target.h): a compiler built without riscv has no
+ * RISC-V row and no RISC-V code, and the driver refuses its targets by
+ * name before anything asks for the row. */
 #include "backend.h"
 #include "thumb/attrs.h"
 #include "../elf/elf.h"
@@ -28,6 +33,7 @@
  * against a hard-float one. With no section at all there was nothing to
  * compare, so that link succeeded and the callee read its arguments from
  * registers the caller never wrote. See src/arch/thumb/attrs.h. */
+#if FAMILY_BUILT(arm)
 static void arm_elf_notes(struct elfw *w)
 {
     size_t alen = 0;
@@ -36,9 +42,11 @@ static void arm_elf_notes(struct elfw *w)
                      ab, (Elf64_Xword)alen, 1);
     free(ab);
 }
+#endif
 
 /* RISC-V's: the ISA the -march= names (riscv_build_attributes); without
  * it a disassembler knows only RV32I and C. */
+#if FAMILY_BUILT(riscv)
 static void riscv_elf_notes(struct elfw *w)
 {
     size_t alen = 0;
@@ -47,10 +55,12 @@ static void riscv_elf_notes(struct elfw *w)
                      ab, (Elf64_Xword)alen, 1);
     free(ab);
 }
+#endif
 
 /* MIPS's ABI flags, as clang's objects carry them: the ISA and register
  * sizes the code needs and the floating-point ABI (soft), so a linker
  * can refuse to mix it with a hard-float object. */
+#if FAMILY_BUILT(mips)
 static void mips_elf_notes(struct elfw *w)
 {
     unsigned char af[24];
@@ -58,8 +68,10 @@ static void mips_elf_notes(struct elfw *w)
     elfw_add_section(w, ".MIPS.abiflags", SHT_MIPS_ABIFLAGS, SHF_ALLOC,
                      af, (Elf64_Xword)sizeof af, 8);
 }
+#endif
 
 static const struct backend_desc g_backends[] = {
+#if FAMILY_BUILT(x86)
     [TARGET_X86_64] = {
         .family = "x86-64", .codegen = codegen_unit, .ra_at_o0 = 0,
         .op_calls_helper = NULL,
@@ -69,6 +81,8 @@ static const struct backend_desc g_backends[] = {
         .call_insn = "call", .call_delay_slot = 0, .sym_prefix = "",
         .imm_prefixed = 0, .text_p2align = 2,
         .no_asm_text = NULL },
+#endif
+#if FAMILY_BUILT(aarch64)
     [TARGET_AARCH64] = {
         .family = "AArch64", .codegen = codegen_unit_arm64, .ra_at_o0 = 0,
         .op_calls_helper = a64_op_calls_helper,
@@ -78,6 +92,8 @@ static const struct backend_desc g_backends[] = {
         .call_insn = "bl", .call_delay_slot = 0, .sym_prefix = "",
         .imm_prefixed = 0, .text_p2align = 2,
         .no_asm_text = NULL },
+#endif
+#if FAMILY_BUILT(arm)
     [TARGET_THUMB] = {
         .family = "ARM", .codegen = codegen_unit_thumb, .ra_at_o0 = 1,
         .op_calls_helper = t_op_calls_helper,
@@ -91,6 +107,8 @@ static const struct backend_desc g_backends[] = {
         .options_done = thumb_options_done,
         .frame_sp = 13, .frame_ra = 14,     /* sp, lr */
         .elf_notes = arm_elf_notes },
+#endif
+#if FAMILY_BUILT(riscv)
     [TARGET_RISCV32] = {
         .family = "RISC-V", .codegen = codegen_unit_riscv, .ra_at_o0 = 1,
         .op_calls_helper = rv_op_calls_helper,
@@ -117,6 +135,8 @@ static const struct backend_desc g_backends[] = {
         .options_done = riscv_options_done,
         .frame_sp = 2, .frame_ra = 1,       /* sp, ra */
         .elf_notes = riscv_elf_notes },
+#endif
+#if FAMILY_BUILT(avr)
     [TARGET_AVR] = {
         .family = "AVR", .codegen = codegen_unit_avr, .ra_at_o0 = 1,
         .op_calls_helper = NULL,
@@ -127,6 +147,8 @@ static const struct backend_desc g_backends[] = {
         .imm_prefixed = 0, .text_p2align = 1,
         .no_asm_text = NULL,
         .option = avr_target_option },
+#endif
+#if FAMILY_BUILT(mips)
     [TARGET_MIPS32] = {
         .family = "MIPS", .codegen = codegen_unit_mips, .ra_at_o0 = 0,
         .op_calls_helper = mips_op_calls_helper,
@@ -149,6 +171,8 @@ static const struct backend_desc g_backends[] = {
         .no_asm_text = NULL,
         .option = mips64_target_option,
         .elf_notes = mips_elf_notes },
+#endif
+#if FAMILY_BUILT(loongarch)
     [TARGET_LOONGARCH64] = {
         .family = "LoongArch", .codegen = codegen_unit_loongarch, .ra_at_o0 = 1,
         .op_calls_helper = la_op_calls_helper,
@@ -159,6 +183,8 @@ static const struct backend_desc g_backends[] = {
         .imm_prefixed = 0, .text_p2align = 2,
         .no_asm_text = NULL,
         .option = loongarch_target_option },
+#endif
+#if FAMILY_BUILT(tricore)
     [TARGET_TRICORE] = {
         .family = "TriCore", .codegen = codegen_unit_tricore, .ra_at_o0 = 0,
         .op_calls_helper = tc_op_calls_helper,
@@ -169,6 +195,8 @@ static const struct backend_desc g_backends[] = {
         .imm_prefixed = 0, .text_p2align = 2,
         .no_asm_text = NULL,
         .option = tricore_target_option },
+#endif
+#if FAMILY_BUILT(xtensa)
     [TARGET_XTENSA] = {
         .family = "Xtensa", .codegen = codegen_unit_xtensa, .ra_at_o0 = 0,
         .op_calls_helper = xtensa_op_calls_helper,
@@ -180,6 +208,8 @@ static const struct backend_desc g_backends[] = {
         .no_asm_text = "compile with -c (there is no Xtensa assembler here to check the text "
                        "against)",
         .option = xtensa_target_option },
+#endif
+#if FAMILY_BUILT(ppc)
     [TARGET_PPC32] = {
         .family = "PowerPC", .codegen = codegen_unit_ppc, .ra_at_o0 = 0,
         .op_calls_helper = ppc_op_calls_helper,
@@ -190,6 +220,8 @@ static const struct backend_desc g_backends[] = {
         .imm_prefixed = 0, .text_p2align = 2,
         .no_asm_text = NULL,
         .option = ppc_target_option },
+#endif
+#if FAMILY_BUILT(sparc)
     [TARGET_SPARC32] = {
         .family = "SPARC", .codegen = codegen_unit_sparc, .ra_at_o0 = 0,
         .op_calls_helper = sparc_op_calls_helper,
@@ -200,6 +232,8 @@ static const struct backend_desc g_backends[] = {
         .imm_prefixed = 0, .text_p2align = 2,
         .no_asm_text = NULL,
         .option = sparc_target_option },
+#endif
+#if FAMILY_BUILT(m68k)
     [TARGET_COLDFIRE] = {
         .family = "ColdFire", .codegen = codegen_unit_coldfire, .ra_at_o0 = 0,
         .op_calls_helper = cf_op_calls_helper,
@@ -210,6 +244,8 @@ static const struct backend_desc g_backends[] = {
         .imm_prefixed = 1, .text_p2align = 2,
         .no_asm_text = NULL,
         .option = coldfire_target_option },
+#endif
+#if FAMILY_BUILT(rx)
     [TARGET_RX] = {
         .family = "RX", .codegen = codegen_unit_rx, .ra_at_o0 = 0,
         .op_calls_helper = rx_op_calls_helper,
@@ -221,6 +257,7 @@ static const struct backend_desc g_backends[] = {
         .no_asm_text = "EmbCC writes no RX assembly text (use -c; .s files and "
                        "inline asm do assemble)",
         .option = rx_target_option },
+#endif
 };
 
 int option_listed(const char *arg, const char *const *exact,
@@ -239,6 +276,7 @@ const struct backend_desc *backend_get(enum target_arch a)
 {
     if ((unsigned)a >= sizeof g_backends / sizeof g_backends[0] ||
         !g_backends[a].codegen)
-        abort();                    /* a target with no row: a build error */
+        abort();    /* no row: a build error, or a family not built that
+                     * the driver failed to refuse (target_arch_built) */
     return &g_backends[a];
 }

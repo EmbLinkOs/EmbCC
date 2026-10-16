@@ -146,12 +146,19 @@ static const int A64_POOL_VA_AT[A64_NPOOL_VA_AT] = { 15, 20, 21, 22, 23,
 
 static int a64_callee_saved(int reg) { return reg >= 19 && reg <= 28; }
 
-/* A load that needs no extension is a plain move, so the value may stay
- * where it is: `ldr w` already zero-extends into the 64-bit register, so
- * only a SIGNED narrowing widen has to emit anything. */
+/* A read that needs no extension is a plain move, so the value may stay
+ * where it is: an 8-byte value, or a 4-byte one read at 4 bytes, whose
+ * upper half no w-register instruction looks at. A 4-byte value read at
+ * 8 bytes is extended, signed or not: `ldr w` zero-extends what it LOADS,
+ * but a register's upper half is not known to be clear -- a narrowing
+ * copy (`(unsigned)long_value`) is a 64-bit move, and a call's 32-bit
+ * result, like a GCC-built caller's 32-bit argument, has an upper half
+ * AAPCS64 leaves unspecified. (u128)(unsigned)v kept v's high bits (fuzz
+ * seed 30003). */
 static int a64_ldvar_plain(int size, int sign, int w)
 {
-    return size == 8 || (size == 4 && !(sign && w == 8));
+    (void)sign;
+    return size == 8 || (size == 4 && w == 4);
 }
 
 /* The two dispatchers below handle every instruction whose operands are
@@ -695,7 +702,7 @@ static long *layout_frame(struct ir_func *fn, struct a64_frame *fr,
         if (al > 1)
             running = (running + al - 1) & ~((long)al - 1);
         disp[v] = running;
-        running += (ty_size(f->var_tys[v]) + 7) & ~7;
+        running += (fn->locals[v].size + 7) & ~7;   /* the IR's: an empty struct has one byte */
     }
     free(lref);
 
@@ -2013,13 +2020,10 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
     if (!target_opt_size())
         align16(t);
     f->code_align = target_opt_size() ? 4 : 16;
-    /* ...and at -Os, an asm that aligns its own bytes (`.p2align 3`)
-     * starts the function on that, so that in a section of its own the
-     * buffer's offsets are the section's. The padding is never run. */
-    for (int k = 0; k < fn->nins; k++) {
-        const struct ir_asm *ia = fn->ins[k].op == IR_ASM ? fn->ins[k].asm_ir
-                                                          : NULL;
-        int m = ia ? code_asm_align_max(ia->arange, ia->narange) : 0;
+    /* ...or more: aligned(N), or an asm that aligns its own bytes
+     * (`.p2align 5`). The padding is never run. */
+    {
+        int m = cg_fn_align(fn);
         if (m > f->code_align) {
             while (t->len % m)
                 code_u32(t, 0xd503201fUL);               /* nop */
