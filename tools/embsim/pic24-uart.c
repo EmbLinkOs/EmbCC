@@ -127,7 +127,7 @@ const struct dev_ops pic24_uart_ops = {
 void *pic24_uart_create(struct sim *s, struct rf_periph *p)
 {
     struct uart *c = calloc(1, sizeof *c);
-    char nm[16];
+    char nm[24];        /* "SPI" or "U", any int, the longest suffix: GCC counts it */
     int any = 0;
     if (!c)
         die("out of memory");
