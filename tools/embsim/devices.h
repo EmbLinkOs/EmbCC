@@ -178,6 +178,40 @@ void *nrf_rtc_create(struct sim *s, struct rf_periph *p);
 void *nrf52_ficr_create(struct sim *s, const struct dev_desc *d);
 void nrf_pins_changed(struct sim *s);
 
+/* the ESP32-C3's models over esp32c3.svd (esp32c3.c): its interrupt
+ * matrix, which a source's level reaches through esp32c3_source; the CPU
+ * clock, at which the board keeps its time */
+extern const struct dev_ops esp32c3_matrix_ops, esp32c3_system_ops;
+extern const struct dev_ops esp32c3_systimer_ops, esp32c3_uart_ops;
+extern const struct dev_ops esp32c3_gpio_ops, esp32c3_iomux_ops, esp32c3_rtc_ops;
+void *esp32c3_matrix_create(struct sim *s, struct rf_periph *p);
+void *esp32c3_system_create(struct sim *s, struct rf_periph *p);
+void *esp32c3_systimer_create(struct sim *s, struct rf_periph *p);
+void *esp32c3_uart_create(struct sim *s, struct rf_periph *p);
+void *esp32c3_gpio_create(struct sim *s, struct rf_periph *p);
+void *esp32c3_iomux_create(struct sim *s, struct rf_periph *p);
+void *esp32c3_rtc_create(struct sim *s, struct rf_periph *p);
+void esp32c3_source(struct sim *s, int src, int level);
+u32 esp32c3_cpu_hz(struct sim *s);
+void esp32c3_pins_changed(struct sim *s);
+
+/* the SAM D21's models over its SVD (samd21.c): the clock tree (SYSCTRL,
+ * GCLK, PM) and the board's time, NVMCTRL, PORT and its IOBUS, the
+ * SERCOMs as USARTs, TC3-5 */
+extern const struct dev_ops samd21_sysctrl_ops, samd21_gclk_ops, samd21_pm_ops;
+extern const struct dev_ops samd21_nvmctrl_ops, samd21_port_ops, samd21_iobus_ops;
+extern const struct dev_ops samd21_sercom_ops, samd21_tc_ops;
+void *samd21_sysctrl_create(struct sim *s, struct rf_periph *p);
+void *samd21_gclk_create(struct sim *s, struct rf_periph *p);
+void *samd21_pm_create(struct sim *s, struct rf_periph *p);
+void *samd21_nvmctrl_create(struct sim *s, struct rf_periph *p);
+void *samd21_port_create(struct sim *s, struct rf_periph *p);
+void *samd21_sercom_create(struct sim *s, struct rf_periph *p);
+void *samd21_tc_create(struct sim *s, struct rf_periph *p);
+u32 samd21_gclk_hz(struct sim *s, int id);
+u32 samd21_cpu_hz(struct sim *s);
+void samd21_pins_changed(struct sim *s);
+
 /* the boards around the microcontrollers: LEDs and buttons (mcu-boards.c;
  * a dev_desc's type names the board) */
 extern const struct dev_ops mcu_board_ops;

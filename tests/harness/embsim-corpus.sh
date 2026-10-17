@@ -5,8 +5,10 @@
 #
 #   CORP      the directory to work in (made here)
 #   CTRIPLE   the target triple; CFLAGS_C, the extra flags (-mcpu=...)
-#   CBOOT     the startup (tests/golden/embsim-pico/corpus-boot.c: output
-#             and the exit status by semihosting on both machines)
+#   CBOOT     the startup (tests/golden/embsim-pico/corpus-boot.c for
+#             Cortex-M, tests/golden/embsim-esp32c3/corpus-boot.c for
+#             RISC-V): output and the exit status by semihosting on both
+#             machines, the exit as _exit(status)
 #   CEXTRA    objects the EmbSim image needs first (the Pico's boot2), or ""
 #   QLD, ELD  the linker scripts for QEMU's image and EmbSim's (the same
 #             file when the board's memory is QEMU's)
@@ -37,18 +39,13 @@ corpus_run() {
         > "$CORP/build.log" 2>&1 || { echo "lib/rt or lib/libc does not build"; return 1; }
     cat > "$CORP/drv.c" <<'EOT'
 int prog_main(void);
+void _exit(int status) __attribute__((noreturn));
 extern void (*__init_array_start[])(void), (*__init_array_end[])(void);
-static volatile unsigned blk[2];
 int main(void)
 {
     for (void (**f)(void) = __init_array_start; f < __init_array_end; f++)
         (*f)();
-    blk[0] = 0x20026u;
-    blk[1] = (unsigned)prog_main();
-    __asm__ volatile("mov r1, %0\n\tmovs r0, #0x20\n\tbkpt #0xab"
-                     : : "r"(blk) : "r0", "r1", "memory");
-    for (;;)
-        ;
+    _exit(prog_main());
 }
 EOT
     "$CORP/cc" --target="$CTRIPLE" -O2 -c "$CBOOT" -o "$CORP/boot.o" &&

@@ -76,7 +76,9 @@ built for QEMU runs unchanged.
 | `stm32f405` | Cortex-M4 with FPv4-SP | 1 MiB flash at `0x08000000` (and at 0), 128 KiB SRAM at `0x20000000`, 64 KiB CCM at `0x10000000` | the USARTs of its SVD ([below](#the-stm32f405)) |
 | `bluepill` | STM32F103C8: Cortex-M3 | 64 KiB flash at `0x08000000` (and at 0), 20 KiB SRAM at `0x20000000` | the USARTs of ST's SVD ([below](#the-blue-pill-stm32f103c8)), and the board's LED |
 | `nrf52840dk` | nRF52840: Cortex-M4 with FPv4-SP, 64 MHz | 1 MiB flash at 0, 256 KiB RAM at `0x20000000` | UART0, UARTE0-1 of Nordic's SVD ([below](#the-nrf52840-dk)), and the DK's LEDs and buttons |
+| `arduino-zero` | the Arduino Zero's ATSAMD21G18A: a Cortex-M0+, 1 MHz out of reset | 256 KiB flash at 0, 32 KiB SRAM at `0x20000000` | the SERCOMs as USARTs, of Microchip's SVD ([below](#the-arduino-zero-atsamd21g18a)), and the board's LEDs |
 | `pico` | the Raspberry Pi Pico's RP2040: core 0, a Cortex-M0+ | its ROM at 0, 2 MiB flash at `0x10000000` (boot2, then the image), 264 KiB SRAM at `0x20000000` | UART0 and UART1 of RP2040.svd ([below](#the-raspberry-pi-pico)), and the board's LED |
+| `esp32c3-devkitm-1` | the ESP32-C3-DevKitM-1's ESP32-C3: RV32IMC | 400 KiB SRAM: DRAM at `0x3FC80000`, IRAM at `0x4037C000`; 8 KiB RTC fast memory at `0x50000000` | UART0 and UART1 of Espressif's SVD ([below](#the-esp32-c3-devkitm-1)), and the board's RGB LED and BOOT button |
 | `virt` | RISC-V, RV32 or RV64 with IMAFDC | 128 MiB RAM at `0x80000000` | NS16550A at `0x10000000` |
 | `uno` | ATmega328P (AVR5) | 32 KiB flash, 2 KiB SRAM at data `0x100` | USART0 at data `0xC0` |
 | `malta` | MIPS32r2 (24Kc), little-endian | 64 MiB RAM at 0 (`0x80000000` in kseg0) | NS16550A at `0x1F000900`, registers 8 bytes apart |
@@ -659,6 +661,97 @@ same addresses, and is the referee where they agree:
 | CLOCK, RTC, UARTE, P1, FICR (the nRF52840's) | not there | modelled, above |
 | UART0's TXD and TXDRDY; GPIO's DIR, OUT, PIN_CNF, IN with pulls; TIMER0 as a counter (compares, shorts, the 8-bit wrap, CAPTURE), INTENSET and INTENCLR | as EmbSim | as QEMU |
 
+## The Arduino Zero (ATSAMD21G18A)
+
+The `arduino-zero` board is the Arduino Zero: an ATSAMD21G18A, a
+Cortex-M0+ with two NVIC priority bits, 256 KiB of flash at 0, 32 KiB of
+SRAM at `0x20000000`, and the NVM rows at `0x00800000` (the user row,
+the factory calibration, the serial number), which read as erased. The
+image is the whole flash, as the EDBG port programs it: the Arduino
+bootloader is not there. Its peripherals are Microchip's
+`ATSAMD21G18A.svd`, found with `--svd FILE` or in `EMBSIM_SVD_PATH`:
+
+```sh
+embsvd ATSAMD21G18A.svd --no-cmsis --header samd21.h --startup startup.c \
+    --ld samd21.ld --flash 0:256K --ram 0x20000000:32K
+embcc --target=thumbv6m-none-eabi --opt=size -c startup.c main.c
+embcc --target=thumbv6m-none-eabi --link-script=samd21.ld startup.o main.o -o fw.elf
+EMBSIM_SVD_PATH=$HOME/svd embsim fw.elf --board arduino-zero
+```
+
+The SVD gives each SERCOM its four modes, and each TC its three, as
+unions over the same registers (`SERCOM5->USART.DATA`,
+`TC3->COUNT16.CC0`); the SERCOM and TC models keep the registers
+themselves, as the mode lays them out. The models (the datasheet,
+Atmel-42181G):
+
+- **SYSCTRL**: OSC8M at 8 MHz / 2^PRESC (1 MHz out of reset);
+  OSCULP32K; OSC32K and XOSC32K (the Zero's crystal), ready after their
+  STARTUP times (tables 16-10, 16-9: STARTUP 2 is 2048 + 3 cycles), with
+  a 32 kHz output under EN32K; the DFLL48M at 48 MHz in open loop, at
+  DFLLMUL.MUL times its reference in closed loop, locked (DFLLLCKC,
+  DFLLLCKF) 200 us after the reference runs (table 36-50) -- without
+  one it does not lock, runs on at 48 MHz with DFLLRCS, and EmbSim
+  warns. DFLLRDY is always set. Erratum 9905 is modelled: writing
+  DFLLVAL, DFLLMUL or DFLLSYNC while DFLLCTRL.ONDEMAND is set and nothing
+  runs on the DFLL freezes the part, which ends the run (status 3).
+  INTFLAG has PCLKSR's rises.
+- **GCLK**: generators 0-8 and the generic clocks, written whole with
+  their ID and read after an 8-bit write of it; reset as tables 14-5,
+  14-9 and 14-13 have them (generator 0 on OSC8M, 2 on OSCULP32K,
+  GCLK_WDT on generator 2, off). A generator is its source / DIV, or /
+  2^(DIV+1) with DIVSEL, with the DIV bits table 14-11 gives it (five on
+  generator 2); one changed to a source not running yet stays on its
+  old one until it runs; one on itself gives no clock.
+- **PM**: generator 0 / 2^CPUDIV is the CPU's clock, and the board
+  reports its time at it; CKRDY. The APBA, APBB and APBC masks gate
+  their peripherals' registers -- out of reset the SERCOMs and TCs are
+  masked -- as on the STM32s:
+
+  ```text
+  embsim: warning: a write at pc 0x00000350: SERCOM0.I2CM.CTRLA is ignored while its clock is off (PM.APBCMASK.SERCOM0 is 0)
+  ```
+
+- **NVMCTRL**: READY, PARAM (4096 pages of 64 bytes), CTRLB.RWS; a CPU
+  clock above what RWS allows at 3.3 V (table 36-39: 24 MHz with no wait
+  state, 48 with one) is warned of once:
+
+  ```text
+  embsim: warning: the CPU runs at 48.000 MHz with NVMCTRL's CTRLB.RWS 0: at 3.3 V the flash needs a wait state above 24 MHz (table 36-39), and the part would read it wrong
+  ```
+
+- **PORT** and its IOBUS at `0x60000000`, one model: DIR, OUT and their
+  CLR, SET and TGL, byte and halfword writes in their lanes; PINCFG and
+  PMUX, also by WRCONFIG (HWSEL, WRPINCFG, WRPMUX). A pin is driven
+  when DIR is set and PMUXEN is not; else the board drives it, or
+  PULLEN pulls it OUT's way, or it floats (0). IN shows a pin only with
+  INEN (table 22-1).
+- **SERCOM0-5 as USARTs** (CTRLA.MODE 0 or 1): CTRLA, CTRLB and BAUD
+  are enable-protected; with TXEN, the APB clock and GCLK_SERCOMn_CORE,
+  a byte written to DATA goes to stdout at once, with DRE and TXC. The
+  first SERCOM whose receiver is enabled takes `--input` into its
+  two-level buffer (RXC, DATA), where a byte waits while the buffer is
+  full; RXEN cleared empties it. INTENSET, INTENCLR, INTFLAG and the
+  interrupt. SYNCBUSY reads 0.
+- **TC3-5**: COUNT16, COUNT8 and COUNT32 (TC4, with TC5 its slave:
+  STATUS.SLAVE, its COUNT and CCs not reached), counting GCLK_TCx /
+  PRESCALER up or down to the top -- the maximum, COUNT8's PER, CC0 in
+  MFRQ and MPWM; past a lower top, to the maximum first -- with OVF at
+  the wrap and MCx as the counter leaves CCx; ONESHOT, RETRIGGER, STOP,
+  STATUS.STOP; CTRLA enable-protected. COUNT reads what the last read
+  request (READREQ.RREQ, or RCONT) synchronised, as on the part: without
+  one it does not change.
+
+The board (Arduino's variant files for the Zero): the LED L on PA17,
+lit high; the TX and RX LEDs on PA27 and PB03, lit low; port 0 is PA, 1
+PB. Every SERCOM writes to stdout; the EDBG port is SERCOM5 (PB22,
+PB23).
+
+```text
+arduino-zero: L on (PA17) at 138.224 ms
+arduino-zero: L off (PA17) at 139.224 ms
+```
+
 ## What it models: the RISC-V core
 
 - **The instruction sets.** RV32I and RV64I, M, A (LR/SC and every
@@ -705,6 +798,126 @@ same addresses, and is the referee where they agree:
   the counters and the event counters (zero), and fflags, frm and fcsr.
   Another CSR, or a write to a read-only one, is an illegal
   instruction.
+- **Semihosting** on RV32: an uncompressed `ebreak` between `slli x0,
+  x0, 0x1f` and `srai x0, x0, 7` is a call (the RISC-V Semihosting
+  specification), the operation in a0 and its parameter in a1, the
+  result in a0; the calls are ARM's ([below](#output-and-the-end-of-a-run)).
+  Any other ebreak is a breakpoint trap. QEMU answers the same sequence
+  with `-semihosting-config enable=on`.
+
+The ESP32-C3's core is this one, as the ESP32-C3 has it
+([below](#the-esp32-c3-devkitm-1)).
+
+## The ESP32-C3-DevKitM-1
+
+The `esp32c3-devkitm-1` board is Espressif's ESP32-C3-DevKitM-1: an
+ESP32-C3, its RV32IMC core at 20 MHz out of reset, with its 400 KiB of
+SRAM as the core reaches it -- SRAM1's 384 KiB as DRAM at `0x3FC80000`
+(loads and stores) and again as IRAM at `0x40380000` (fetches), SRAM0's
+16 KiB as IRAM at `0x4037C000` -- and the RTC's 8 KiB of fast memory at
+`0x50000000`. Its peripherals are Espressif's `esp32c3.svd`, found with
+`--svd FILE` or in `EMBSIM_SVD_PATH`.
+
+There is no ROM and no flash: EmbSim does what the ROM's loader does
+with an image whose segments are all in SRAM -- puts each where it is
+linked, and starts at the ELF's entry. ESP-IDF's ROM, its second-stage
+bootloader and the flash cache are out of scope; so is an ESP-IDF
+application, which calls the ROM's functions. On the chip, such an image
+is made from the ELF by esptool's `elf2image` (EmbCC has no tool for
+it) and written at flash offset 0, where the ROM loads it as it loads a
+bootloader.
+
+```sh
+embsvd esp32c3.svd --no-cmsis --header esp32c3.h --startup startup.c --ld esp32c3.ld
+embcc --target=riscv32-unknown-elf --opt=size -c startup.c main.c
+embcc --target=riscv32-unknown-elf --link-script=esp32c3.ld startup.o main.o -o fw.elf
+EMBSIM_SVD_PATH=$HOME/svd embsim fw.elf --board esp32c3-devkitm-1
+```
+
+embsvd's script puts the code in IRAM and the rest in DRAM past it (the
+same SRAM, so the two must not overlap), below the ROM loader's own RAM;
+its startup's `_start` sets the stack pointer, and its vector table is
+the core's: entry 0 for exceptions, entry N for CPU interrupt N, each a
+jump to a weak `Exception_Handler` or `CPU_INTN_Handler`. Define those
+with `__attribute__((interrupt))`. The ESP32-C3 has no A extension, and
+EmbCC needs it ([RISC-V](../embedded.md#risc-v)): code that uses an
+atomic -- and lib/libc's stdio, whose lock is LR/SC -- traps there with
+an illegal instruction, on the chip as on EmbSim. The ROM leaves the
+watchdogs running; a program disables or feeds them first (EmbSim does
+not model them).
+
+The core (the RISC-V core [above](#what-it-models-the-risc-v-core), as
+the ESP32-C3 Technical Reference Manual v1.4, chapter 1, has it):
+
+- **RV32IMC**, with Zicsr and Zifencei: an AMO, LR, SC, or an F or D
+  instruction is an illegal instruction. misa reads `0x40101104`.
+- **Its CSRs only**: mvendorid (`0x612`), marchid, mimpid, mhartid;
+  mstatus (MIE, MPIE, MPP's low bit, its high bit tied to it, TW);
+  mtvec, always vectored, its base 256-aligned; mscratch, mepc, mcause,
+  mtval; the PMP registers (kept); the trigger module's (kept); the
+  performance counter (mpcer, mpcmr, mpccr: CYCLE counts the cycles but
+  those in WFI, INST the instructions, IDLE the cycles in WFI, with
+  COUNT_EN and COUNT_SAT; the other events count nothing); the
+  dedicated GPIO's cpu_gpio_oen and cpu_gpio_out (kept: the GPIO
+  matrix's signals are not modelled) and cpu_gpio_in (0). No mie, mip,
+  cycle or time: any other CSR, a debug-mode one, or a write to a
+  read-only one is an illegal instruction, mtval the instruction.
+- **Interrupts** come from the interrupt matrix: CPU interrupt N is
+  taken at mtvec + 4N with mcause N and bit 31, when mstatus.MIE allows.
+  WFI waits for one even with MIE off.
+- **Time**: a taken branch's cycles pass on the board's time too, so the
+  performance counter and the peripherals' clocks agree.
+
+The peripherals modelled (the TRM's chapters):
+
+- **INTERRUPT_CORE0** (1.5, 8): each of the 62 sources' map register
+  routes it to a CPU interrupt, 1-31. A level type (CPU_INT_TYPE 0) is
+  pending while a source mapped to it is high; an edge type captures
+  the rise, and CPU_INT_CLEAR clears it once the core has taken it, or
+  while the interrupt is disabled -- not before. CPU_INT_EIP_STATUS
+  shows the ones pending, enabled, and with a priority (CPU_INT_PRI_N,
+  1-15) not below CPU_INT_THRESH; the core takes the highest priority,
+  then the lowest number. INTR_STATUS_REG_0-1 are the sources' levels.
+- **SYSTEM**: the CPU clock, from XTAL_CLK (40 MHz / (PRE_DIV_CNT + 1),
+  20 MHz out of reset), the PLL (80 or 160 MHz by CPUPERIOD_SEL) or
+  RC_FAST_CLK (17.5 MHz / (PRE_DIV_CNT + 1)); the board reports its time
+  at it. CPU_INTR_FROM_CPU_0-3 raise sources 50-53, the software's own.
+- **SYSTIMER** (10): UNIT0 and UNIT1 count at 16 MHz while enabled
+  (UNIT0 out of reset); UPDATE latches a count with VALUE_VALID, LOAD
+  loads one. A comparator, from COMPx_LOAD and TARGETx_WORK_EN, alarms
+  once in target mode -- at once when the count is past the target by
+  less than 2^51 - 1 -- or every period in period mode; INT_RAW, INT_ENA,
+  INT_ST, INT_CLR, and the alarm's source.
+- **UART0, UART1** (26): a byte written to FIFO is sent at once (to
+  stdout), with TX_DONE; TXFIFO_CNT is 0, and TXFIFO_EMPTY raised while
+  that is below its threshold. UART0's receiver is the run's input
+  (`--input`): RXFIFO_CNT, the FIFO read from FIFO, RXFIFO_FULL raised
+  while it holds more than its threshold, RXFIFO_RST. INT_ST and the
+  source as INT_RAW & INT_ENA.
+- **GPIO and IO_MUX** (5): OUT, ENABLE and their W1TS and W1TC; a pad
+  in its GPIO function (MCU_SEL 1, or 0 where function 0 is GPIO) with
+  its output enabled and FUNCn_OUT_SEL 128 drives OUT's bit, inverted by
+  INV_SEL, open drain by PINn's PAD_DRIVER. IN shows the pads whose
+  FUN_IE is set: what is driven, else the board, else FUN_WPU or
+  FUN_WPD, else 0 (floating, EmbSim's choice). The pads' reset values
+  are table 5.12-1's, pin by pin.
+- **RTC_CNTL**: OPTIONS0.SW_SYS_RST resets the chip, which ends the run
+  (status 0).
+
+The board (its schematic, V1): the BOOT button on GPIO9, low when
+pressed (`--set BOOT=pressed`), with no pull-up of its own (R14 is not
+fitted; GPIO9's internal one is on out of reset); and the RGB LED, an
+SK68XXMINI-HS on GPIO8. That LED takes 24 bits, green, red and blue,
+each a high pulse -- 0.3 us a 0, 0.6 us a 1 (the SK6812MINI's datasheet,
++-0.15 us) -- and shows them after 80 us low. EmbSim decodes GPIO8's
+pulses at the board's time (a high under 0.45 us is a 0; one outside
+0.15-0.75 us is warned of, once) and reports the colour as its 24th bit
+ends:
+
+```text
+esp32c3-devkitm-1: RGB LED #201008 (GPIO8) at 6.120 ms
+esp32c3-devkitm-1: RGB LED off (GPIO8) at 7.120 ms
+```
 
 ## What it models: the AVR
 
@@ -1474,8 +1687,9 @@ The NS16550A sends what is written to THR, and its LSR always says the
 transmitter is empty. Its receiver has nothing, unless the run has an
 input (`--input`, [below](#record-and-replay---input---record---replay)).
 
-On the Cortex-M, semihosting (`bkpt 0xab`) is on unless
-`--no-semihosting` is given. It handles:
+On the Cortex-M (`bkpt 0xab`) and on RV32 (an `ebreak` between its
+markers, [above](#what-it-models-the-risc-v-core)), semihosting is on
+unless `--no-semihosting` is given. It handles:
 - console output: SYS_WRITEC, SYS_WRITE0 and SYS_WRITE;
 - the exit calls: SYS_EXIT and SYS_EXIT_EXTENDED;
 - the small calls a C library makes at start-up.
@@ -1487,6 +1701,7 @@ On the Cortex-M, semihosting (`bkpt 0xab`) is on unless
 | the image stores 0x5555 to virt's test device | 0 |
 | the image stores 0x3333 to the test device | the upper halfword stored |
 | the image writes 0x42 to malta's SOFTRES | 0 |
+| the image sets the ESP32-C3's RTC_CNTL OPTIONS0.SW_SYS_RST | 0 |
 | a PIC24's RESET instruction | 0 |
 | the image requests a reset (AIRCR.SYSRESETREQ) | 0 |
 | a branch to itself, or a WFI, MIPS wait or PIC24 PWRSAV, that no exception or interrupt can interrupt | 0 |
@@ -2034,6 +2249,14 @@ On the Cortex-M:
   written); the UARTs' baud rate, flow control and errors; the TIMER's
   PCLK1M; the RTC's "may not trigger" CC writes; the crystal's power-up
   time.
+- On the Arduino Zero: the XOSC and the FDPLL96M (0 Hz), the DFLL's
+  USB recovery, its steps and its frequency before the lock, the
+  generators' GCLK_IO pins, WRTLOCK, the clocks' on-demand and sleep
+  behaviour; the WDT, RTC, EIC, EVSYS, DMAC, USB, ADC, DAC, AC, TCC,
+  I2S and PTC, NVMCTRL's commands, the SERCOMs' SPI and I2C modes (their
+  registers keep what is written); the TCs' waveform outputs, captures
+  and events; the USARTs' baud timing, frame format, errors and flow
+  control; the Arduino bootloader and the NVM rows' factory contents.
 - On the Blue Pill: the F405's list below, and GPIO's LCKR sequence, the
   alternate functions' outputs but the USARTs' TX, EXTI and the pins'
   interrupts, the backup domain's (BKP, the RTC, LSE), the flash's
@@ -2104,8 +2327,23 @@ On RISC-V:
 - Physical memory protection: the PMP registers are kept, not
   enforced.
 - The PLIC, and so external interrupts; virt's RTC, virtio and PCIe.
-- RISC-V semihosting.
+- Semihosting on RV64.
 - mcountinhibit is kept but does not stop the counters.
+- On the ESP32-C3: the ROM (its loader's work is done, its functions are
+  not there) and so ESP-IDF; the flash, its cache and MMU; the
+  watchdogs (TIMG's MWDT, RTC_CNTL's RWDT, the super watchdog: they
+  never reset); the PLL's power-up and the clocks' switching time; the
+  core's own timings (its cycle costs are EmbSim's RISC-V's), the
+  interrupt controller's 4-cycle latency, debug mode and the trigger
+  module (kept), the stall bits; the performance counter's hazard, load,
+  store, jump, branch and compressed-instruction events; the GPIO
+  matrix's peripheral signals (so the dedicated GPIO CSRs), the pins'
+  interrupts, the pads' sleep settings, GPIO_STRAP; the UARTs' baud
+  timing, line format, flow control and RXFIFO_TOUT; the timer groups,
+  LEDC, RMT, SPI, I2C, I2S, TWAI, the ADC, the GDMA, the crypto
+  accelerators, USB Serial/JTAG, Wi-Fi and Bluetooth, and SYSTEM's
+  clock gates and peripheral resets (their registers keep what is
+  written).
 - Extensions beyond IMAFDC, Zicsr and Zifencei (an illegal instruction
   each, as above).
 
@@ -2244,6 +2482,43 @@ the input through UART0's RXD and into RAM by UARTE0. And the exec corpus
 for the M4 with FPv4-SP on the DK's memory against QEMU's mps2-an386,
 the same image on both: some 250 programs to the instruction and the
 cycle.
+
+**The Arduino Zero.** `tests/golden/embsim-arduino-zero.sh` builds
+`embsim-arduino-zero/zero.c` from embsvd's files for Microchip's SVD and
+holds 95 values to the SAM D21 datasheet: the reset values (GCLK's read
+through their IDs), a SERCOM whose APB clock is masked, the CPU's clock
+measured against OSCULP32K from 1 MHz to the DFLL48M in closed loop on
+XOSC32K (CPUDIV; generator 0 staying on OSC8M until XOSC32K runs), a
+generator's division with and without DIVSEL, XOSC32K's start-up, the
+DFLL's lock with and without its reference (DFLLRCS), PORT's input
+buffer, pulls, toggles, WRCONFIG and IOBUS, SERCOM5's enable-protected
+registers, DRE without TXEN and nothing sent without its core clock,
+TC4's MFRQ wrap and matches (as the counter leaves CCx), STOP,
+RETRIGGER, one-shot, counting down and up from above the top, COUNT8
+and COUNT32; L toggled by
+TC3's interrupt every 1 ms of the DFLL's clock; the three warnings;
+SERCOM5's input; erratum 9905's freeze. And the exec corpus on the
+Zero's memory (64 KiB of SRAM) against QEMU's micro:bit, the same image:
+some 250 programs to the instruction and the cycle.
+
+**The ESP32-C3-DevKitM-1.** `tests/golden/embsim-esp32c3.sh` builds
+`embsim-esp32c3/c3.c` from embsvd's files for Espressif's SVD (its
+vector table must be 256-aligned in the image) and holds 118 values to
+the TRM: the core's CSRs, the exceptions with mcause and mtval, UART0's
+reset values and interrupt bits, the clocks at 20, 40, 80 and 160 MHz
+against SYSTIMER's 16 MHz, SYSTIMER's loads and comparators (once in
+target mode, at once when passed, the 2^51 - 1 boundary), the interrupt
+matrix's priorities, threshold and order, an edge type's capture and
+clearing, a level type taken again, WFI woken with MIE off, the pads'
+reset values pin by pin, GPIO in and out, inverted and open drain; the
+RGB LED's frames 1 ms apart from SYSTIMER's period interrupt, decoded
+from GPIO8, the first at the time SYSTIMER's UNIT0 gives (the board's
+time across four clock changes); UART0's input; the BOOT button. QEMU has no ESP32-C3, but
+its virt with an rv32i,m,c,zicsr,zifencei core has the C3's instruction
+set: the exec corpus linked for each (RISC-V semihosting for the output
+and the exit) runs some 240 programs to the instruction and the cycle;
+those that use lib/libc's stdio trap on both (its lock is LR/SC) and
+are not counted.
 
 **RISC-V.** `tests/golden/embsim-riscv.sh` does the same on virt with
 qemu-system-riscv32 and -riscv64: the exec corpus on RV32 with ilp32

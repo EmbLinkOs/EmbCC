@@ -173,6 +173,8 @@ static u64 mstatus_rd(void)
 
 static u64 misa(void)
 {
+    if (rs->esp)
+        return 0x40101104u;         /* RV32 I M C U, the ESP32-C3's */
     /* A C D F I M U, and the base's width */
     u64 ext = 1u << 0 | 1u << 2 | 1u << 3 | 1u << 5 | 1u << 8 | 1u << 12 |
               1u << 20;
@@ -189,10 +191,122 @@ void rv_fp_dirty(void)
     rs->mstatus |= MSTATUS_FS;
 }
 
+/* the ESP32-C3's performance counter now (its TRM, 1.4.2): what was
+ * written, and since then, with COUNT_EN, the events mpcer selects --
+ * CYCLE the cycles but those in WFI, INST the instructions, IDLE the
+ * cycles in WFI; two that happen in one cycle count once, so CYCLE with
+ * INST counts the cycles -- saturating with COUNT_SAT, else wrapping.
+ * A read gives the count before the reading instruction; a write
+ * counts from the instruction after it.
+ * The other events (the hazards, loads, stores, jumps, branches and
+ * compressed instructions) are not counted */
+static u64 mpccr_now(void)
+{
+    u64 v = rs->mpccr, e = rs->mpcer, n = 0;
+    if (!(rs->mpcmr & 1))
+        return v;
+    u64 idle = rs->idle - rs->mpc_idle;
+    if (e & 1)
+        n = rs->cyc_now - rs->mpc_cyc - idle;
+    else if (e & 2)
+        n = rs->insn_now - rs->mpc_ins;
+    if (e & 16)
+        n += idle;
+    v += n;
+    if (v > 0xffffffffull)
+        v = rs->mpcmr & 2 ? 0xffffffffull : v & 0xffffffffull;
+    return v;
+}
+
+/* The ESP32-C3's CSRs (its TRM, 1.4): the machine-mode set it lists and
+ * its own; any other is an illegal instruction. The debug-mode CSRs are
+ * not reachable outside debug mode. */
+static int esp_csr_rd(u32 csr, u64 *v)
+{
+    if (csr >= 0x3a0 && csr <= 0x3a3) {
+        *v = rs->pmpcfg[csr - 0x3a0];
+        return 1;
+    }
+    if (csr >= 0x3b0 && csr <= 0x3bf) {
+        *v = rs->pmpaddr[csr - 0x3b0];
+        return 1;
+    }
+    switch (csr) {
+    case 0xf11: *v = 0x612; return 1;                   /* mvendorid */
+    case 0xf12: *v = 0x80000001u; return 1;             /* marchid */
+    case 0xf13: *v = 1; return 1;                       /* mimpid */
+    case 0xf14: *v = 0; return 1;                       /* mhartid */
+    case 0x300: *v = rs->mstatus; return 1;
+    case 0x301: *v = misa(); return 1;
+    case 0x305: *v = rs->mtvec; return 1;
+    case 0x340: *v = rs->mscratch; return 1;
+    case 0x341: *v = rs->mepc; return 1;
+    case 0x342: *v = rs->mcause; return 1;
+    case 0x343: *v = rs->mtval; return 1;
+    case 0x7a0: *v = rs->tselect; return 1;
+    case 0x7a1: *v = rs->tdata1[rs->tselect & 7]; return 1;
+    case 0x7a2: *v = rs->tdata2[rs->tselect & 7]; return 1;
+    case 0x7a5: *v = rs->tcontrol; return 1;
+    case 0x7e0: *v = rs->mpcer; return 1;
+    case 0x7e1: *v = rs->mpcmr; return 1;
+    case 0x7e2: *v = mpccr_now(); return 1;
+    case 0x803: *v = rs->gpio_oen; return 1;
+    case 0x804: *v = 0; return 1;                       /* cpu_gpio_in */
+    case 0x805: *v = rs->gpio_out; return 1;
+    }
+    return 0;
+}
+
+static void esp_csr_wr(u32 csr, u64 v)
+{
+    v = (u32)v;
+    if (csr >= 0x3a0 && csr <= 0x3a3) {
+        rs->pmpcfg[csr - 0x3a0] = v;
+        return;
+    }
+    if (csr >= 0x3b0 && csr <= 0x3bf) {
+        rs->pmpaddr[csr - 0x3b0] = v;
+        return;
+    }
+    switch (csr) {
+    case 0x300: {
+        /* MIE, MPIE, TW; MPP's low bit, its high bit tied to it */
+        u64 m = MSTATUS_MIE | MSTATUS_MPIE | MSTATUS_TW;
+        u64 mpp = v >> 11 & 1 ? MSTATUS_MPP : 0;
+        rs->mstatus = (rs->mstatus & ~(m | MSTATUS_MPP)) | (v & m) | mpp;
+        return;
+    }
+    case 0x305: rs->mtvec = (v & ~0xffull) | 1; return;   /* vectored only */
+    case 0x340: rs->mscratch = v; return;
+    case 0x341: rs->mepc = v & ~1ull; return;
+    case 0x342: rs->mcause = v & 0x8000001full; return;
+    case 0x343: rs->mtval = v; return;
+    case 0x7a0: rs->tselect = v & 7; return;
+    case 0x7a1: rs->tdata1[rs->tselect & 7] = v; return;
+    case 0x7a2: rs->tdata2[rs->tselect & 7] = v; return;
+    case 0x7a5: rs->tcontrol = v; return;
+    case 0x7e0: case 0x7e1: case 0x7e2:
+        /* counted up to this instruction; from the next, as written */
+        rs->mpccr = csr == 0x7e2 ? v : mpccr_now();
+        rs->mpc_cyc = rs->sim->cycles;
+        rs->mpc_ins = rs->sim->insns;
+        rs->mpc_idle = rs->idle;
+        if (csr == 0x7e0)
+            rs->mpcer = v & 0x7ff;
+        if (csr == 0x7e1)
+            rs->mpcmr = v & 3;
+        return;
+    case 0x803: rs->gpio_oen = v & 0xff; return;
+    case 0x805: rs->gpio_out = v & 0xff; return;
+    }
+}
+
 /* A CSR's value: 0 when there is no such CSR. A debugger's read (debug)
  * passes the floating-point unit's being off. */
 static int csr_rd(u32 csr, u64 *v, int debug)
 {
+    if (rs->esp)
+        return esp_csr_rd(csr, v);
     int x32 = rs->xlen == 32;
     u64 cyc = rs->cyc_now + rs->mcycle_off;
     u64 ins = rs->insn_now + rs->minstret_off;
@@ -259,6 +373,10 @@ static u64 set_hi(u64 old, u64 v) { return (old & 0xffffffffull) | v << 32; }
 /* a write to a CSR that exists and may be written */
 static void csr_wr(u32 csr, u64 v)
 {
+    if (rs->esp) {
+        esp_csr_wr(csr, v);
+        return;
+    }
     int x32 = rs->xlen == 32;
     rs->sim->bus.touched = 1;           /* mie, time: the CLINT's next event */
     u64 cyc = rs->cyc_now + rs->mcycle_off;
@@ -327,7 +445,8 @@ static void csr_insn(u32 i)
     int write = (f3 & 3) == 1 || rs1 != 0;
     u64 old;
     if (((csr >> 8) & 3) > (u32)rs->priv ||
-        (write && (csr >> 10) == 3) || !csr_rd(csr, &old, 0)) {
+        (write && ((csr >> 10) == 3 || (rs->esp && csr == 0x804))) ||
+        !csr_rd(csr, &old, 0)) {
         rv_illegal();
         return;
     }
@@ -612,16 +731,67 @@ static void wfi(void)
         rv_illegal();
         return;
     }
+    if (rs->eic.pending && rs->eic.pending(rs->eic.ctx))
+        return;
     if (rs->mie & rv_mip())
         return;
-    if (rs->mie && sim_next_event(s, &left)) {
+    if ((rs->mie || rs->eic.pending) && sim_next_event(s, &left)) {
         s->cycles += left;
+        rs->idle += left;
         sim_advance(s, left);
         return;
     }
     sim_end(s, END_IDLE,
             "waiting for an interrupt that nothing can raise, at 0x%08llx",
             (unsigned long long)rs->pc);
+}
+
+/* ---- semihosting ------------------------------------------------------ */
+
+static int fetch16(u32 a, u32 *h);
+
+/* the 32-bit instruction at a, or 0 when it cannot be fetched */
+static u32 word_at(u32 a)
+{
+    u32 lo, hi;
+    return fetch16(a, &lo) && fetch16(a + 2, &hi) ? lo | hi << 16 : 0;
+}
+
+static u32 semi_ld(void *ctx, u32 a, int n)
+{
+    (void)ctx;
+    return (u32)rv_load(a, n);
+}
+
+static void semi_st(void *ctx, u32 a, int n, u32 v)
+{
+    (void)ctx;
+    rv_store(a, n, v);
+}
+
+static int semi_faulted(void *ctx)
+{
+    (void)ctx;
+    return rs->trap;
+}
+
+static const struct semi_ops semi_mem = { semi_ld, semi_st, semi_faulted };
+
+/* The RISC-V semihosting call (the RISC-V Semihosting spec, 1.0): an
+ * uncompressed ebreak between `slli x0, x0, 0x1f` and `srai x0, x0, 7`,
+ * the operation in a0, its parameter in a1, ARM's calls; RV32 only, whose
+ * parameter blocks are ARM's 32-bit ones. QEMU's -semihosting-config
+ * answers the same sequence. */
+static int rv_semihost(void)
+{
+    u32 pc = (u32)rs->pc, r;
+    if (!rs->sim->semihosting || rs->xlen != 32 ||
+        word_at(pc - 4) != 0x01f01013u || word_at(pc + 4) != 0x40705013u)
+        return 0;
+    if (semihost(rs->sim, &semi_mem, rs, (u32)rs->x[10], (u32)rs->x[11], &r) &&
+        !rs->trap)
+        rs->x[10] = r;
+    return 1;
 }
 
 static void sys_insn(u32 i, u32 rd, u32 f3)
@@ -638,7 +808,8 @@ static void sys_insn(u32 i, u32 rd, u32 f3)
         rv_trap(rs->priv == PRV_M ? EXC_ECALL_M : EXC_ECALL_U, 0);
         return;
     case 0x00100073:                            /* EBREAK */
-        rv_trap(EXC_BREAKPOINT, rs->pc);
+        if (!rv_semihost())
+            rv_trap(EXC_BREAKPOINT, rs->pc);
         return;
     case 0x30200073: {                          /* MRET */
         if (rs->priv != PRV_M) {
@@ -761,10 +932,13 @@ static void exec32(u32 i)
         sys_insn(i, rd, f3);
         return;
     case 0x2f:
-        amo(i, rd, f3, a, b);
+        if (rs->esp)                            /* the ESP32-C3 has no A */
+            rv_illegal();
+        else
+            amo(i, rd, f3, a, b);
         return;
     }
-    if (!rv_fp_exec(i))
+    if (rs->esp || !rv_fp_exec(i))              /* nor F nor D */
         rv_illegal();
 }
 
@@ -954,6 +1128,15 @@ static int take_interrupt(void)
 {
     if (rs->priv == PRV_M && !(rs->mstatus & MSTATUS_MIE))
         return 0;
+    if (rs->eic.pending) {
+        int id = rs->eic.pending(rs->eic.ctx);
+        if (!id)
+            return 0;
+        trap_enter((u64)id, 0, 1);
+        if (rs->eic.claim)
+            rs->eic.claim(rs->eic.ctx, id);
+        return 1;
+    }
     u64 p = rs->mie & rv_mip();
     if (!p)
         return 0;
@@ -980,7 +1163,7 @@ static void step(struct cpu *c)
 {
     rs = (struct rv_state *)c;
     struct sim *s = rs->sim;
-    if (rs->mie && take_interrupt())
+    if ((rs->mie || rs->eic.pending) && take_interrupt())
         return;
     u32 h0, h1 = 0;
     u32 pc = (u32)rs->pc;
@@ -1030,16 +1213,25 @@ static void step(struct cpu *c)
         trap_enter(rs->cause, rs->tval, 0);
         return;
     }
-    if (br && rs->npc != rs->pc + (u64)size)
+    if (br && rs->npc != rs->pc + (u64)size) {
         s->cycles += 2;
+        /* the ESP32-C3's board time is its CPU clock, which the
+         * program's own counter (mpccr) counts too: a taken branch's
+         * cycles pass on it as on the counter. On virt the devices keep
+         * QEMU's time, which has no branch penalty */
+        if (rs->esp)
+            cost += 2;
+    }
     if (s->counting)
         sim_advance(s, cost);
     if (rs->npc == rs->pc && !rs->changed && s->state == RUN) {
         /* a jump to itself that changed nothing: the end, unless an
          * interrupt can come */
         int on = rs->priv < PRV_M || (rs->mstatus & MSTATUS_MIE);
-        if (!on || !rs->mie ||
-            (!(rs->mie & rv_mip()) && !sim_event_coming(s))) {
+        int src = rs->mie || rs->eic.pending;
+        int now = (rs->mie & rv_mip()) ||
+                  (rs->eic.pending && rs->eic.pending(rs->eic.ctx));
+        if (!on || !src || (!now && !sim_event_coming(s))) {
             sim_end(s, END_IDLE, "a loop at 0x%08llx that nothing can "
                     "interrupt", (unsigned long long)rs->pc);
             return;
@@ -1057,17 +1249,27 @@ static void cpu_reset(struct cpu *c)
     struct rv_state *k = (struct rv_state *)c;
     struct cpu keep = k->cpu;
     struct sim *s = k->sim;
-    int mx = k->model_xlen;
+    int mx = k->model_xlen, esp = k->esp;
+    struct rv_eic eic = k->eic;
     memset(k, 0, sizeof *k);
     k->cpu = keep;
     k->sim = s;
     k->model_xlen = mx;
+    k->esp = esp;
+    k->eic = eic;
     k->xlen = mx ? mx : s->elf64 ? 64 : 32;
     if (mx && (mx == 64) != (s->elf64 != 0))
         die("%s is an RV%d image, and the core is RV%d", s->image,
             s->elf64 ? 64 : 32, mx);
     k->priv = PRV_M;
     k->pc = 0x1000;
+    if (esp) {
+        /* the ROM has loaded the image and jumps to its entry; mtvec is
+         * vectored, the counter counts nothing yet, COUNT_SAT, COUNT_EN */
+        k->pc = s->entry;
+        k->mtvec = 1;
+        k->mpcmr = 3;
+    }
     rs = k;
 }
 
@@ -1234,9 +1436,11 @@ static const char *cpu_gdb_xml(struct cpu *c, const char *annex)
     if (!strcmp(annex, "target.xml")) {
         cat("<?xml version=\"1.0\"?><!DOCTYPE target SYSTEM "
             "\"gdb-target.dtd\"><target><architecture>riscv:rv%d"
-            "</architecture><xi:include href=\"%s\"/><xi:include "
-            "href=\"%s\"/><xi:include href=\"%s\"/><xi:include "
-            "href=\"riscv-csr.xml\"/></target>", w, cpu, fpu, virt);
+            "</architecture><xi:include href=\"%s\"/>", w, cpu);
+        if (!k->esp)                            /* the ESP32-C3 has no FPU */
+            cat("<xi:include href=\"%s\"/>", fpu);
+        cat("<xi:include href=\"%s\"/><xi:include "
+            "href=\"riscv-csr.xml\"/></target>", virt);
     } else if (!strcmp(annex, cpu)) {
         cat("%s<feature name=\"org.gnu.gdb.riscv.cpu\">\n", xml_note);
         for (int i = 0; i < 32; i++)
@@ -1291,13 +1495,21 @@ int riscv_is(const struct cpu *c)
     return c && c->ops == &riscv_ops;
 }
 
-/* the core: rv32, rv64, or riscv (the width of the image it runs) */
+void riscv_attach_eic(struct cpu *c, const struct rv_eic *e)
+{
+    ((struct rv_state *)c)->eic = *e;
+}
+
+/* the core: rv32, rv64, or riscv (the width of the image it runs); or
+ * esp32c3, the ESP32-C3's RV32IMC */
 struct cpu *riscv_create(struct sim *s, const char *model,
                          const struct board_desc *bd)
 {
-    int xlen;
+    int xlen, esp = 0;
     (void)bd;
-    if (!strcmp(model, "rv32"))
+    if (!strcmp(model, "esp32c3"))
+        xlen = 32, esp = 1;
+    else if (!strcmp(model, "rv32"))
         xlen = 32;
     else if (!strcmp(model, "rv64"))
         xlen = 64;
@@ -1312,6 +1524,7 @@ struct cpu *riscv_create(struct sim *s, const char *model,
     k->sim = s;
     k->model_xlen = xlen;
     k->xlen = xlen ? xlen : 64;
+    k->esp = esp;
     k->priv = PRV_M;
     rs = k;
     s->cpu = &k->cpu;

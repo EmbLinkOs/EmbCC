@@ -48,6 +48,18 @@ enum { PRV_U = 0, PRV_M = 3 };
 #define FF_DZ 8u
 #define FF_NV 16u
 
+/* An external interrupt controller, the ESP32-C3's (its interrupt
+ * matrix, esp32c3.c): pending gives the ID (1-31) of the interrupt the
+ * core is to take -- the highest priority one pending, enabled and at or
+ * above the threshold -- or 0. The core takes it at mtvec + 4 x ID with
+ * mcause ID, when mstatus.MIE allows, and tells the controller (claim):
+ * an edge-type interrupt is cleared once claimed. */
+struct rv_eic {
+    void *ctx;
+    int (*pending)(void *ctx);
+    void (*claim)(void *ctx, int id);
+};
+
 struct rv_state {
     struct cpu cpu;                 /* the interface; first */
     struct sim *sim;
@@ -82,7 +94,21 @@ struct rv_state {
     /* the CLINT's registers (clint.c) */
     u32 msip;
     u64 mtimecmp, mtime_off;
+
+    /* the ESP32-C3's core (esp): RV32IMC and its own CSRs, its interrupt
+     * controller; the performance counter (mpcer, mpcmr, mpccr: its value
+     * at the cycle and instruction counts mpc_cyc, mpc_ins), the trigger
+     * module's and the dedicated GPIO's CSRs (kept; cpu_gpio_in, 0x804,
+     * read-only, reads 0) */
+    int esp;
+    struct rv_eic eic;
+    u64 mpcer, mpcmr, mpccr, mpc_cyc, mpc_ins, mpc_idle;
+    u64 idle;                       /* the cycles spent in WFI */
+    u64 tselect, tdata1[8], tdata2[8], tcontrol, gpio_oen, gpio_out;
 };
+
+/* the ESP32-C3's interrupt controller attaches to its core */
+void riscv_attach_eic(struct cpu *c, const struct rv_eic *e);
 
 extern struct rv_state *rs;
 

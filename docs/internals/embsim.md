@@ -21,7 +21,7 @@ file but the network one compiles with EmbCC itself. Everything is in
 | `bus.c` | memory regions, bit-band aliases, devices by address, watchpoints |
 | `boards.c` | the boards as data, and the catalogues of cores and device types |
 | `loader.c` | the ELF image |
-| `semihost.c` | ARM semihosting |
+| `semihost.c` | ARM semihosting, which RV32's semihosting calls too |
 | `trace.c` | `--trace`, `--count`, `--stats` |
 | `gdb.c` | the GDB remote server |
 | `net.h`, `net-posix.c`, `net-none.c` | the server's connection: POSIX sockets, or none |
@@ -33,7 +33,7 @@ file but the network one compiles with EmbCC itself. Everything is in
 | `systick.c`, `dwt.c` | SysTick, DWT's cycle counter |
 | `uart-pl011.c`, `uart-cmsdk.c`, `uart-nrf51.c` | the boards' UARTs |
 | `riscv.h` | the RISC-V core's state, shared by its files |
-| `riscv.c` | the RISC-V core: memory, traps, the CSRs, the integer, atomic and compressed instructions, step, reset, its CPU interface |
+| `riscv.c` | the RISC-V core: memory, traps, the CSRs, the integer, atomic and compressed instructions, semihosting, step, reset, its CPU interface; and its `esp32c3` model: the ESP32-C3's RV32IMC, its CSRs (the performance counter), and an external interrupt controller (`struct rv_eic`) in place of mie and mip |
 | `riscv-fpu.c` | F and D, on ieee754.c's arithmetic |
 | `clint.c` | the RISC-V core's CLINT: msip, mtimecmp, mtime |
 | `virt-rom.c`, `sifive-test.c`, `uart-16550.c` | virt's reset ROM, test device and UART |
@@ -67,7 +67,9 @@ file but the network one compiles with EmbCC itself. Everything is in
 | `nrf52.c` | the nRF52840's peripheral interface (tasks, events, INTEN, the level interrupt), CLOCK and the board's time, P0-P1, UART0/UARTE0-1 with EasyDMA, TIMER0-4, RTC0-2, the FICR |
 | `rp2040.h`, `rp2040.c` | the RP2040: its ROM (the flash boot: boot2's CRC, its copy to SRAM, the hand-over), RESETS (the peripherals held in reset: `gate_held`), XOSC, ROSC, the PLLs, the clock generators and FC0, PSM, the watchdog and its microsecond tick; the board's time at clk_sys (`rp2040_now_ns`, `s->now_ns`) |
 | `rp2040-timer.c`, `rp2040-io.c`, `rp2040-sio.c`, `rp2040-uart.c`, `rp2040-ssi.c` | the RP2040's timer; IO_BANK0, PADS_BANK0 and IO_QSPI (the pins); the SIO (GPIO, spinlocks, divider, core 0's FIFOs); UART0-1 (PL011); the SSI and the Pico's W25Q16JV flash |
-| `mcu-boards.c` | the boards around the microcontrollers EmbSim models by their SVD (`struct board_io`): each a table of LEDs, buttons and pins it drives (the Pico's) |
+| `samd21.c` | the SAM D21: SYSCTRL's oscillators and the DFLL48M, GCLK's indirect generators and generic clocks, PM's CPU clock (the board's time) and APB masks (`gate`), NVMCTRL, PORT and its IOBUS, the SERCOMs as USARTs and TC3-5, these two keeping their registers as the mode lays them out |
+| `esp32c3.c` | the ESP32-C3: its interrupt matrix (`esp32c3_source`, the core's `rv_eic`), SYSTEM's CPU clock and the board's time, the software interrupts, SYSTIMER, UART0-1, GPIO with IO_MUX's pads, RTC_CNTL's software reset |
+| `mcu-boards.c` | the boards around the microcontrollers EmbSim models by their SVD (`struct board_io`): each a table of LEDs, buttons and pins it drives (the Pico's), and an addressable LED decoded from its pin's pulses (the ESP32-C3-DevKitM-1's SK6812) |
 | `devices.h` | the create functions `boards.c` builds boards from |
 | `image.h`, `image.c` | the image's symbols, code ranges, DWARF line table and `.debug_frame`, for the analyses |
 | `analysis.h`, `analysis.c` | the step the analyses watch, and the shadow stack of the program's calls |
@@ -552,7 +554,11 @@ reads a device when no memory region holds the code), its bus has rules
 of its own (`rules`), and its clock tree is modelled, so the board's
 time is clk_sys's (`s->now_ns`) and its timer counts clk_ref's
 microseconds. A board's LEDs and buttons are a `mcu-boards.c` table when
-its part's GPIO model calls `s->io`.
+its part's GPIO model calls `s->io`. The ESP32-C3 shows a part whose
+interrupt controller is not the core's: its models raise sources with
+`esp32c3_source`, the interrupt matrix routes them, and the core asks it
+(`struct rv_eic`'s `pending`) before each instruction and tells it what
+it took (`claim`).
 
 An entry in `boards[]` in `boards.c`: the name, the core and its model,
 the NVIC's priority bits (0 for a core without one), the memory, the
@@ -592,7 +598,7 @@ dsPIC33C) needs its models first, and is refused by name until then.
 4. A line in `cores[]` in `boards.c`, its boards, and its files in the
    Makefile. The ELF loader takes the core's `elf_machine`; semihosting
    (`semihost`) takes the core's view of memory through `struct semi_ops`,
-   so a RISC-V core can reuse it with its own trap.
+   as the RISC-V core does for its `ebreak` sequence.
 
 ## The GDB server
 
@@ -702,7 +708,11 @@ or with its own file for the six functions of `net.h`.
   the exec corpus on its memory against QEMU's netduino2.
   `tests/golden/embsim-nrf52840dk.sh`: the DK against QEMU's micro:bit
   where the nRF51 has the same peripheral, the PS elsewhere, and the
-  corpus against QEMU's mps2-an386.
+  corpus against QEMU's mps2-an386. `tests/golden/embsim-esp32c3.sh`:
+  the ESP32-C3-DevKitM-1 against its TRM, and the corpus against QEMU's
+  virt with an RV32IMC core, through RISC-V semihosting.
+  `tests/golden/embsim-arduino-zero.sh`: the Arduino Zero against the
+  SAM D21 datasheet, and the corpus against QEMU's micro:bit.
   `tests/harness/embsim-corpus.sh` is the corpus run the board tests
   share: one program built once and linked for QEMU's machine and
   EmbSim's board, semihosting's output, the counts apart by a constant.

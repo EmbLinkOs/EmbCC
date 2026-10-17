@@ -620,7 +620,10 @@ __asm__(".text\n"
 ```
 
 The block's bytes go into the unit's `.text`, aligned as the block's own
-alignment directives ask and at least to 4 bytes (2 on AVR). Its symbols:
+alignment directives ask and at least to 4 bytes (2 on AVR); `.text`
+itself is aligned as strictly, so a `.balign 256` vector table (an
+ESP32-C3's `mtvec` ignores the low eight bits) is on a 256-byte boundary
+in the linked image, not only in the object. Its symbols:
 
 - A label named by `.global` or `.weak` is a global symbol, typed by
   `.type` or `.thumb_func`, with the size `.size` gives. A Thumb function

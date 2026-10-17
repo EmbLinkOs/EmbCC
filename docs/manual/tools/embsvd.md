@@ -55,7 +55,8 @@ int main(void)
 The header has the shape of the headers CMSIS's `svdconv` writes, and of
 the vendors' own:
 
-- **`IRQn_Type`.** The core's exceptions (`SysTick_IRQn = -1`, ...), then
+- **`IRQn_Type`.** The core's exceptions (`SysTick_IRQn = -1`, ...; a
+  RISC-V part has none), then
   each interrupt of the SVD as `NAME_IRQn`, by number. ARMv6-M and
   ARMv8-M Baseline cores (`CM0`, `CM0PLUS`, `CM1`, `CM23`) get only the
   exceptions they have.
@@ -160,6 +161,19 @@ SDK's `boot2_generic_03h`; its source is in `tools/embsvd/embsvd.c` --
 and goes to the vector table after it, at `0x10000100`; embsvd adds the
 CRC.
 
+For the ESP32-C3 (the SVD's device `ESP32-C3`, a RISC-V part), the
+startup is the core's instead: its ROM's loader has put the image in
+SRAM and jumps to the entry, `_start`, which sets the stack pointer to
+`_estack` and calls `Reset_Handler`. That points mtvec at the vector
+table -- 256-aligned, in the core's vectored mode, entry 0 a jump to
+`Exception_Handler` and entry N to `CPU_INTN_Handler` (N 1-31), each
+weak -- zeroes `.bss` (`.data` is already where it is linked), and goes
+on as above. Which peripheral raises which CPU interrupt is the
+interrupt matrix's to say (INTERRUPT_CORE0's map registers), not the
+table's; a handler takes `__attribute__((interrupt))`. Another RISC-V
+part's startup is refused: its interrupt controller is its vendor's, and
+its SVD does not describe it.
+
 ## The linker script (`--ld FILE`)
 
 An SVD describes peripherals, not memories, so the flash and RAM regions
@@ -176,6 +190,14 @@ ORIGIN:LENGTH`, in C notation with an optional `K`, `M` or `G`
 It defines every symbol the generated startup reads. For the RP2040,
 `.boot2` goes first and `.isr_vector` after it, at `0x10000100`: the
 flash must be given at `0x10000000`, or embsvd refuses.
+
+For the ESP32-C3 the script takes no `--flash` or `--ram`: the image runs
+from SRAM1, which the core fetches from as IRAM at `0x40380000` and loads
+from as DRAM at `0x3FC80000`, the same bytes. The code goes in IRAM's
+first 128 KiB and the rest in DRAM after them, up to `0x3FCDC000`, below
+the ROM loader's own RAM; `_estack` is the top of that. `.data` is not
+stored twice: the loader puts it in place. Edit the script's `MEMORY` to
+split the SRAM otherwise.
 
 ## The hardware as JSON (`--json FILE`)
 
@@ -318,7 +340,8 @@ drives the wrong register:
 - two different structs that would have one name (two clusters with
   one `headerStructName`, say);
 - a field outside its register;
-- an `addressUnitBits` other than 8.
+- an `addressUnitBits` other than 8 -- but 32 in an Espressif SVD
+  (`vendorID` ESPRESSIF), whose addresses count bytes all the same.
 
 ## Exit status
 

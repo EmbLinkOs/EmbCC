@@ -571,7 +571,7 @@ EMBSIM_SRCS := tools/embsim/main.c tools/embsim/run.c tools/embsim/bus.c \
                tools/embsim/rp2040-io.c tools/embsim/rp2040-sio.c \
                tools/embsim/rp2040-uart.c tools/embsim/rp2040-ssi.c \
                tools/embsim/mcu-boards.c tools/embsim/stm32f1-gpio.c \
-               tools/embsim/nrf52.c \
+               tools/embsim/nrf52.c tools/embsim/esp32c3.c tools/embsim/samd21.c \
                $(EMBSIM_NET)
 EMBSIM_HDRS := tools/embsim/sim.h tools/embsim/cortexm.h tools/embsim/riscv.h \
                tools/embsim/avr.h \

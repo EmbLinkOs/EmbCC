@@ -1,0 +1,7 @@
+esp32c3-devkitm-1: RGB LED (GPIO8): a high of N us is neither a 0 (0.3 +- 0.15 us) nor a 1 (0.6 +- 0.15 us); taken as a 1
+esp32c3-devkitm-1: RGB LED #201008 (GPIO8)
+esp32c3-devkitm-1: RGB LED off (GPIO8)
+esp32c3-devkitm-1: RGB LED #201008 (GPIO8)
+esp32c3-devkitm-1: RGB LED off (GPIO8)
+esp32c3-devkitm-1: RGB LED #201008 (GPIO8)
+esp32c3-devkitm-1: RGB LED off (GPIO8)
