@@ -59,10 +59,20 @@ fi
 # sp-relative and sp sits the frame size below x29, so fbreg + frame size is
 # the [sp, #M] a 4-byte store targets. (tests/golden/debug-live.sh proves the
 # same thing on a running program.)
-sumoff=$(gdb -batch -nx "$out/loc.o" -ex "info scope compute" 2>/dev/null \
-         | sed -n 's/.*Symbol sum .*offset 0+\(-*[0-9]*\).*/\1/p')
+# The offset is gdb's reading where there is a gdb, and the DIE's own
+# (readelf's DW_OP_fbreg) where there is not.
+if command -v gdb >/dev/null 2>&1; then
+    sumoff=$(gdb -batch -nx "$out/loc.o" -ex "info scope compute" 2>/dev/null \
+             | sed -n 's/.*Symbol sum .*offset 0+\(-*[0-9]*\).*/\1/p')
+    by=gdb
+else
+    sumoff=$(printf '%s\n' "$info" | awk '/DW_AT_name.*: sum *$/ { f = 1 }
+             f && /DW_OP_fbreg/ { sub(/.*DW_OP_fbreg: */, ""); sub(/\).*/, "")
+                                  print; exit }')
+    by=readelf
+fi
 if [ -z "$sumoff" ]; then
-    echo "cross-check: gdb gave no location for sum"; fail=1
+    echo "cross-check: $by gave no location for sum"; fail=1
 elif [ "$ARCH" = aarch64 ]; then
     dis=$(aarch64-elf-objdump -d "$out/loc.o" 2>/dev/null)
     fsz=$(printf '%s\n' "$dis" | sed -n 's/.*sub[[:space:]]*sp, sp, #\(0x[0-9a-f]*\).*/\1/p' | head -1)
