@@ -425,8 +425,16 @@ int embdbg_decode_one(const unsigned char *code, int n, unsigned long addr,
             sprintf(out, "mfence");
             return i;
         }
-        if (o2 == 0xc7) { int r = modrm(code, &i, rex, opsz, 0, rm); (void)r;
-            sprintf(out, "rdrand %s", rm); return i; }
+        if (o2 == 0xc7) {           /* group 9, told apart by ModRM.reg */
+            int r = modrm(code, &i, rex, opsz, 0, rm) & 7;
+            if (r == 1)             /* REX.W widens it to 16 bytes */
+                sprintf(out, "%s%s %s", lock ? "lock " : "",
+                        (rex & 8) ? "cmpxchg16b" : "cmpxchg8b", rm);
+            else
+                sprintf(out, "%s %s", r == 6 ? "rdrand" : r == 7 ? "rdseed"
+                                                                 : "(bad)", rm);
+            return i;
+        }
         /* SSE scalar/packed — reg is xmm; rm is xmm or memory */
         /* SSE scalar/packed. `tail` is what follows the s/d the prefix
          * selects, and `gpr_dst` marks the two conversions whose
