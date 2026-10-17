@@ -35,7 +35,9 @@ export EMBCC_VERIFY=1
     echo "EmbCC could not assemble forms.S"; exit 1; }
 
 # ---- 1. the transfers, assembled from their text, on QEMU's translator -----
-if command -v "$QEMU" >/dev/null 2>&1; then
+if why=$(qemu_too_old "$QEMU" 10.1 "its translator spells TCG's ops otherwise than 10.1 and later do (an add with carry is add2_i32, not addco_i32), and tricorecheck reads 10.1's"); then
+    echo "SKIP the translator half: $why"
+elif command -v "$QEMU" >/dev/null 2>&1; then
     cc -std=c99 -Wall -Wextra -o "$out/tricorecheck" \
        tools/tricorecheck/tricorecheck.c src/arch/tricore/emit.c \
        src/arch/tricore/asm.c src/arch/code.c src/driver/util.c \

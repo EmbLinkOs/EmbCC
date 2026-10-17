@@ -112,7 +112,11 @@ awk -F'@' 'NR % 2 == 1 { a = $2; next } $2 != a { bad = 1 } END { exit bad }' \
     cat "$out/dot.txt"; exit 1; }
 
 # ---- 2. on the board ---------------------------------------------------------
-if command -v "$QEMU" >/dev/null 2>&1; then
+if ! command -v "$QEMU" >/dev/null 2>&1; then
+    echo "SKIP the board half: $QEMU not found"
+elif why=$(qemu_too_old "$QEMU" 10.0 "the harness's image does not start on it: on 8.2 no program printed a byte, and 10.2 is the oldest seen to run it"); then
+    echo "SKIP the board half: $why"
+else
     export EMBCC_LOONGARCH_HARNESS="$PWD/$out"
     for f in boot io; do
         "$EMBCC" --target=$T -O1 -c "tests/harness/loongarch/$f.c" \
@@ -148,8 +152,6 @@ if command -v "$QEMU" >/dev/null 2>&1; then
     done
     echo "inline asm, a file-scope block, a naked function and forms.S"
     echo "(assembled by: $asms) run on the board at -O0 and -O2"
-else
-    echo "SKIP the board half: $QEMU not found"
 fi
 
 # ---- 3. -S, reassembled ---------------------------------------------------------

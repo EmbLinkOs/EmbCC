@@ -119,6 +119,18 @@ objcopy_has_srec() {
     return $_r
 }
 
+# qemu_too_old QEMU MAJOR.MINOR WHAT  — prints why, and is true, when that
+# QEMU is older than MAJOR.MINOR; WHAT says what the older one gets wrong.
+# False when it is not, or when its version cannot be read.
+qemu_too_old() {
+    _v=$("$1" --version 2>/dev/null |
+         sed -n 's/^QEMU emulator version \([0-9]*\)\.\([0-9]*\).*/\1 \2/p')
+    [ -n "$_v" ] || return 1
+    set -- "$1" "$2" "$3" $_v
+    [ $(($4 * 100 + $5)) -lt $((${2%%.*} * 100 + ${2#*.})) ] || return 1
+    echo "$1 is QEMU $4.$5, and $3"
+}
+
 # x86_gcc_exe EXE SRC [flags...]  — compile and link with the referee gcc.
 x86_gcc_exe() {
     exe=$1; src=$2; shift 2

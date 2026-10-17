@@ -29,6 +29,11 @@ echo "TEST-MARKER $NAME"
 
 command -v "$QEMU" >/dev/null 2>&1 || {
     echo "skipped: $QEMU not found"; exit 0; }
+# QEMU before 9.1 runs SDIV wrong -- it divides by the divisor's unsigned
+# value (QEMU issue 2319; Ubuntu 24.04's 8.2 has it) -- and EmbCC's code
+# divides with it: on 8.2 a dozen programs computed other answers.
+why=$(qemu_too_old "$QEMU" 9.1 "its SDIV divides by the divisor's unsigned value (QEMU issue 2319, fixed in 9.1)") && {
+    echo "skipped: $why"; exit 0; }
 CLANG=${EMBCC_REF_CLANG_SPARC:-clang}
 command -v "$CLANG" >/dev/null 2>&1 &&
     "$CLANG" --target=$CT -mcpu=leon3 -msoft-float \
