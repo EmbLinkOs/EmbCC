@@ -98,7 +98,7 @@ const struct dev_ops pic24e_spi_ops = {
 void *pic24e_spi_create(struct sim *s, struct rf_periph *p)
 {
     struct spi *c = calloc(1, sizeof *c);
-    char nm[16];
+    char nm[24];        /* "SPI" or "U", any int, the longest suffix: GCC counts it */
     int any = 0;
     if (!c)
         die("out of memory");
