@@ -119,6 +119,36 @@ objcopy_has_srec() {
     return $_r
 }
 
+# The LLVM release the suite's LLVM referees are: the clang the generated
+# tables record (src/arch/thumb/predef.c), whose llvm-mc, llvm-objdump and
+# clang the encodings, disassemblies, macros and conventions were checked
+# against. An older release encodes, prints and decides a few things
+# otherwise -- LLVM 18 prints AVR's lds/sts as <unknown>, wants a feature
+# for SPARC's casa, emits no R_LARCH_CALL36 -- and a test that compares
+# EmbCC with it is testing LLVM.
+LLVM_REFEREE=$(sed -n '1s/.* clang \([0-9][0-9]*\)\..*/\1/p' \
+                   "$EMBCC_ROOT/src/arch/thumb/predef.c" 2>/dev/null)
+
+# llvm_too_old TOOL  — prints why TOOL (clang, llvm-mc, llvm-objdump ...)
+# is older than that release, and is true; false when it is not, or when
+# its version cannot be read.
+llvm_too_old() {
+    _v=$("$1" --version 2>/dev/null |
+         sed -En 's/.*(LLVM|clang) version ([0-9]+).*/\2/p' | head -1)
+    [ -n "$_v" ] && [ -n "$LLVM_REFEREE" ] && [ "$_v" -lt "$LLVM_REFEREE" ] || return 1
+    echo "$1 is LLVM $_v, and this test's references are LLVM $LLVM_REFEREE's"
+}
+
+# skip_if_llvm_old TOOL...  — ends the test, reported as skipped, when a
+# TOOL is older than that release, and says which.
+skip_if_llvm_old() {
+    for _t in "$@"; do
+        if _w=$(llvm_too_old "$_t"); then
+            echo "skipped: $_w"; exit 0
+        fi
+    done
+}
+
 # qemu_too_old QEMU MAJOR.MINOR WHAT  — prints why, and is true, when that
 # QEMU is older than MAJOR.MINOR; WHAT says what the older one gets wrong.
 # False when it is not, or when its version cannot be read.

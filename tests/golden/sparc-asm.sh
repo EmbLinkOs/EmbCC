@@ -80,7 +80,9 @@ if [ -n "$have_llvm" ]; then
     cmp -s "$out/vo.hex" "$out/ours.hex" || {
         echo "the vocabulary as a .s file makes other bytes than the"
         echo "statement assembler's"; exit 1; }
-    "$MC" -triple=sparc -mcpu=leon3 -filetype=obj "$out/v.s" -o "$out/mc.o" \
+    # (+hasleoncasa: LLVM 23's leon3 has CASA, and 22's and older want the
+    # feature named, or refuse casa and print it as <unknown>)
+    "$MC" -triple=sparc -mcpu=leon3 -mattr=+hasleoncasa -filetype=obj "$out/v.s" -o "$out/mc.o" \
         2> "$out/mc.err" || {
         echo "llvm-mc rejected the vocabulary -- an entry claims a form it"
         echo "does not have:"; grep error "$out/mc.err" | head -5; exit 1; }
@@ -98,7 +100,7 @@ if [ -n "$have_llvm" ]; then
         head -20 "$out/diff.txt"; exit 1
     fi
     # the mnemonic llvm-objdump reads back from EmbCC's own object
-    "$OD" --mcpu=leon3 -d --no-show-raw-insn "$out/v.o" |
+    "$OD" --mcpu=leon3 --mattr=+hasleoncasa -d --no-show-raw-insn "$out/v.o" |
         grep -E '^ *[0-9a-f]+:' |
         sed 's/^[^:]*:[[:space:]]*//; s/[[:space:]][[:space:]]*/ /g; s/ $//' \
         > "$out/dis.txt"
@@ -175,7 +177,11 @@ if command -v "$QEMU" >/dev/null 2>&1; then
     want1="15 77 55 107 3 1234 55 -4076 48 54 124076833 37 23 87654321 87654321"
     want2="42 43 55 110 2 9 1 7 1 11 -4 3 142 301221497 15 56 42 5 77 77 77 77 99 42 -32570 4658 581 19 42 42 6"
     asms=embcc
-    if [ -n "$CLANG" ]; then
+    # (clang assembles forms.S's casa for leon3 from LLVM 23 on, and no
+    # flag reaches 22's integrated assembler to say it may)
+    if [ -n "$CLANG" ] && why=$(llvm_too_old "$CLANG"); then
+        echo "SKIP forms.S assembled by clang: $why"
+    elif [ -n "$CLANG" ]; then
         "$CLANG" --target=$T -mcpu=leon3 -c "$d/forms.S" -o "$out/forms-clang.o" || {
             echo "clang: forms.S"; exit 1; }
         asms="embcc clang"
