@@ -168,30 +168,43 @@ t_run() {
 # does inline, and the cross toolchains have no libatomic. Prints why.
 no_gcc_reference() {
     why=$(sed -n 's|.*// no-gcc-reference: *\(.*\)|\1|p' "$1" | head -1)
-    if [ -z "$why" ] && grep -q '_BitInt' "$1" && ! gcc_has_bitint; then
-        # GCC has _BitInt from 14 on; Ubuntu 24.04's cc is GCC 13. Too old
-        # a referee is no reference, not a failure of the program --
-        # EMBCC_X86_GCC=gcc-14 names a newer one.
-        why="$X86_GCC has no _BitInt; GCC 14 and later have"
-    fi
+    [ -n "$why" ] || why=$(gcc_too_old_for "$1")
     [ -n "$why" ] && echo "$(basename "$1" .c): no gcc reference ($why), skipped"
 }
 
-# gcc_has_bitint: the target's referee gcc compiles a _BitInt. Asked once
-# per test, the answer kept in _gcc_bitint.
-_gcc_bitint=
-gcc_has_bitint() {
-    if [ -z "$_gcc_bitint" ]; then
-        _p=$(mktemp "${TMPDIR:-/tmp}/bitint.XXXXXX")
-        printf 'unsigned _BitInt(12) x;\n' > "$_p.c"
+# gcc_too_old_for FILE: prints what of FILE's C the target's referee gcc
+# has not got, if anything -- _BitInt is GCC 14's, _Countof and the 0o
+# octal constants GCC 16's, and Ubuntu 24.04's cc is GCC 13, 26.04's 15.
+# Too old a referee is no reference, not a failure of the program;
+# EMBCC_X86_GCC names a newer one. A feature is asked of the referee only
+# for a program that uses it (gcc_has).
+gcc_too_old_for() {
+    if grep -q '_BitInt' "$1" && ! gcc_has bitint 'unsigned _BitInt(12) x;'; then
+        echo "the referee gcc has no _BitInt; GCC 14 and later have"
+    elif grep -q '_Countof' "$1" && ! gcc_has countof 'int a[3]; int n = _Countof(a);'; then
+        echo "the referee gcc has no _Countof; GCC 16 and later have"
+    elif grep -Eq '\b0[oO][0-7]' "$1" && ! gcc_has octal 'int n = 0o17;'; then
+        echo "the referee gcc has no 0o constants; GCC 16 and later have"
+    fi
+}
+
+# gcc_has NAME SOURCE: the target's referee gcc compiles SOURCE as C11, as
+# the golden comparisons build. The answer is kept in _gcc_has_NAME (for
+# the shell that asked).
+gcc_has() {
+    eval "_h=\${_gcc_has_$1:-}"
+    if [ -z "$_h" ]; then
+        _p=$(mktemp "${TMPDIR:-/tmp}/gcchas.XXXXXX")
+        printf '%s\n' "$2" > "$_p.c"
         if t_gcc_c "$_p.c" -std=c11 -o "$_p.o" >/dev/null 2>&1; then
-            _gcc_bitint=yes
+            _h=yes
         else
-            _gcc_bitint=no
+            _h=no
         fi
         rm -f "$_p" "$_p.c" "$_p.o"
+        eval "_gcc_has_$1=\$_h"
     fi
-    [ "$_gcc_bitint" = yes ]
+    [ "$_h" = yes ]
 }
 
 pinned_elsewhere() {
