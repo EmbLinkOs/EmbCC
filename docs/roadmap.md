@@ -119,8 +119,8 @@ GDB test on every board family, at `-O2`.
 - Close the size gap to the 1.0 targets: register pressure on Thumb
   (the 32-bit encodings that `r8`-`r12` force), 64-bit values on 32-bit
   targets, AVR's register runs.
-- Division by a constant on AVR and Cortex-M0, which still call a
-  division helper for `x / 10`.
+- Division by a constant on AVR, which still calls a helper for
+  `x / 10` though the ATmega has a hardware multiplier.
 - Speed measured with the cycle estimates on Cortex-M4 and RV32 and
   compared with clang. The 1.0 speed target is set from that baseline.
 - Compile speed tracked per release (`lib/libc` at `-O2`, against

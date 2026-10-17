@@ -17,27 +17,24 @@ levels are in [C language](../manual/c-language.md) and
   complete targets: C and C++ with exceptions, the full optimizer,
   register allocation, DWARF debug information, and EmbCC's own C, C++
   and compiler-runtime libraries. Linux programs are static images.
-- **Apple arm64** compiles C and C++ for the system linker, and the
-  result runs natively. Debug information is refused.
-- **Cortex-M, RISC-V and AVR** are bare-metal C targets with EmbCC's
-  compiler runtime and linker, and no C library. C++ compiles on
-  Cortex-M and RV32 without exceptions (RV64: untested); AVR refuses
-  it.
-- **MIPS32** (`mipsel-none-elf`, MIPS32r2 o32 soft float, a PIC32's
-  core) is a bare-metal C target with EmbCC's compiler runtime, C
-  library and linker, run on QEMU's malta board. C++ compiles without
-  exceptions.
-- **LoongArch64** (`loongarch64-unknown-elf`, LA64 LP64S soft float) is
-  a bare-metal C target with EmbCC's compiler runtime, C library,
-  assembler and linker, run on QEMU's virt board. C++ compiles with
-  `-fno-exceptions`.
-- **Renesas RX** (`rx-none-elf`, RXv1, GCC's rx-elf ABI with 32-bit
-  doubles and no FPU) is a bare-metal C target with EmbCC's compiler
-  runtime, C library and linker, run on QEMU's gdbsim-r5f562n8 board.
-  No assembler yet (inline, file-scope, `.s` and `-S` are refused). C++
-  is not supported.
+  `embld` links x86-64; AArch64 objects need another linker.
+- **The embedded targets** -- Cortex-M (ARMv6-M to ARMv8-M), ARMv7-A,
+  RISC-V (RV32 and RV64), MIPS32 and MIPS64, LoongArch64, Xtensa,
+  TriCore, PowerPC, RX, SPARC, ColdFire and AVR -- are bare-metal
+  targets with EmbCC's compiler runtime, C library (on AVR, `lib/avr`'s
+  smaller one), assembler and linker. C++ compiles on every one but AVR,
+  without exceptions, and the 32-bit ones have a C++ runtime
+  (`make libcxx-embedded`).
+- **Apple arm64 and macOS x86-64** compile C and C++ for the system
+  linker, and the result runs natively. `-g` is accepted and writes no
+  debug information yet.
 - **Windows x86-64** produces COFF objects that are not yet compatible
   with the Microsoft x64 ABI. EmbCC warns on every such compile.
+
+What each target compiles, construct by construct, is in
+[What each target compiles](../manual/limits.md): a page generated from
+the compiler's own answers and checked against it by
+`tests/golden/limits.sh`, so it cannot drift as this page did.
 
 ## How EmbCC refuses
 
@@ -77,15 +74,16 @@ ignored (see [Attributes](#attributes)).
 |---|---|---|---|---|---|---|
 | x86-64 ELF: `x86_64-elf`, `x86_64-emblink`, `x86_64-linux-gnu` | Complete. SSE2 floating point, x87 `long double`, `__int128`. C and C++ with exceptions. | Every pass, including the vectorizer. | Graph colouring; integer and SSE classes. | DWARF 4. | `embcc` links in-process with `embld`. Static images only. EMBX through `embld --embx`. | `libc.a`, `libcxx.a`; `crt1.o` and `librt.a` on Linux. |
 | AArch64 ELF: `aarch64-elf`, `aarch64-emblink`, `aarch64-linux-gnu` | Complete. FP/SIMD, binary128 `long double` in software, `__int128`. C and C++ with exceptions. | Every pass except vectorization. | Graph colouring; integer and FP/SIMD classes. | DWARF 4. | An external AArch64 linker. `embld` refuses AArch64 objects. | `libc.a`, `libcxx.a`; `crt1.o` and `librt.a` on Linux. |
-| Apple arm64: `aarch64-apple-darwin` | AArch64 backend, Apple's arm64 convention, Mach-O. C and C++ with exceptions. | As AArch64. | As AArch64. | Refused. | The system linker. | The system's. EmbCC's C headers do not match it; see [Darwin](#darwin). |
-| macOS x86-64: `x86_64-apple-darwin` | x86-64 backend, Mach-O. C++ objects that use exceptions do not link. | As x86-64. | As x86-64. | Refused. | The system linker. | The system's. |
+| Apple arm64: `aarch64-apple-darwin` | AArch64 backend, Apple's arm64 convention, Mach-O. C and C++ with exceptions. | As AArch64. | As AArch64. | None yet: `-g` is accepted with a warning. | The system linker. | The system's. EmbCC's C headers do not match it; see [Darwin](#darwin). |
+| macOS x86-64: `x86_64-apple-darwin` | x86-64 backend, Mach-O. C++ objects that use exceptions do not link. | As x86-64. | As x86-64. | None yet: `-g` is accepted with a warning. | The system linker. | The system's. |
 | Windows x86-64: `x86_64-windows-gnu` | x86-64 backend, COFF, part of the Microsoft x64 convention. C++ only without exceptions and unwind tables. | As x86-64. | As x86-64. | Refused. | An external linker. | None. |
-| Cortex-M: `thumbv6m-none-eabi`, `thumbv8m.base-none-eabi`, `thumbv7m-none-eabi`, `thumbv7em-none-eabi[hf]`, `thumbv8m.main-none-eabi[hf]` | Thumb-1 for ARMv6-M and ARMv8-M Baseline (with Baseline's divides and exclusives), Thumb-2 for ARMv7-M, ARMv7E-M and ARMv8-M Mainline. Soft float, or a single-precision FPU with `double` in software. No DSP instructions. TrustZone-M's Secure side (`-mcmse`, soft float) on both ARMv8-M profiles. C, and C++ without exceptions. | Every pass except vectorization and division by a constant. | Graph colouring; register pairs for 64-bit values; `s16`-`s31` with an FPU. | DWARF 4, with [known problems](../manual/debugging.md#known-problems). | `embld`. | `librt.a`, one per triple. No C library. |
-| RV32: `riscv32-unknown-elf` | RV32IMAC, soft float. No operation on `long double`. C, and C++ without exceptions. | Every pass except vectorization and division by a constant. | Graph colouring; register pairs for 64-bit values. | DWARF 4, with known problems. | `embld`. | `librt.a`. No C library. |
-| RV64: `riscv64-unknown-elf` | RV64IMAC, soft float. No operation on `long double` or `__int128`. C, and C++ without exceptions (untested). | Every pass except vectorization. | Graph colouring. | DWARF 4, with known problems. | `embld`. | None built (see below). No C library. |
-| MIPS32: `mipsel-none-elf` | MIPS32r2, little-endian, o32, soft float. Delay slots filled from the instruction before the transfer where safe, else a `nop`; jump tables. C, and C++ without exceptions. | Every pass except vectorization. | Graph colouring; register pairs for 64-bit values. | DWARF 4, with known problems. | `embld`, which also links clang's objects. | `librt.a` and `libc.a` (`make rt-embedded libc-embedded`). |
+| Cortex-M: `thumbv6m-none-eabi`, `thumbv8m.base-none-eabi`, `thumbv7m-none-eabi`, `thumbv7em-none-eabi[hf]`, `thumbv8m.main-none-eabi[hf]` | Thumb-1 for ARMv6-M and ARMv8-M Baseline (with Baseline's divides and exclusives), Thumb-2 for ARMv7-M, ARMv7E-M and ARMv8-M Mainline. Soft float, or a single-precision FPU with `double` in software. The code generator uses no DSP instructions; the assembler and inline `asm` accept them. TrustZone-M's Secure side (`-mcmse`, soft float) on both ARMv8-M profiles. C, and C++ without exceptions. | Every pass except vectorization. ARMv6-M, which has no long multiply, divides by a constant through `__aeabi_uidiv`, as GCC does. | Graph colouring; register pairs for 64-bit values; `s16`-`s31` with an FPU. | DWARF 4, with [known problems](../manual/debugging.md#known-problems). | `embld`. | `librt.a`, `libc.a` and `libcxx.a`, one per triple (`make rt-embedded libc-embedded libcxx-embedded`). |
+| RV32: `riscv32-unknown-elf` | RV32IMAC (with F and D: the `ilp32f`/`ilp32d` runtimes), binary128 `long double` in software. C, and C++ without exceptions. | Every pass except vectorization. | Graph colouring; register pairs for 64-bit values. | DWARF 4, with known problems. | `embld`. | `librt.a`, `libc.a` and `libcxx.a`. |
+| RV64: `riscv64-unknown-elf` | RV64IMAC (with F and D: the `lp64f`/`lp64d` runtimes), `__int128` and binary128 `long double`. C, and C++ without exceptions (untested). | Every pass except vectorization. | Graph colouring. | DWARF 4, with known problems. | `embld`. | `librt.a` and `libc.a`; no C++ runtime. |
+| MIPS32: `mipsel-none-elf` | MIPS32r2, little-endian, o32, soft float. Delay slots filled from the instruction before the transfer where safe, else a `nop`; jump tables. C, and C++ without exceptions. | Every pass except vectorization. | Graph colouring; register pairs for 64-bit values. | DWARF 4, with known problems. | `embld`, which also links clang's objects. | `librt.a`, `libc.a` and `libcxx.a` (`make rt-embedded libc-embedded libcxx-embedded`). |
 | LoongArch64: `loongarch64-unknown-elf` | LA64 base integer ISA, LP64S soft float, the normal code model; jump tables; `__int128` and binary128 `long double` in software; atomics of every width but 16 bytes. C, and C++ without exceptions. | Every pass except vectorization. | Graph colouring. | DWARF 4, with known problems. | `embld`, which also links clang's objects (its medium code model and GOT accesses included). | `librt.a` and `libc.a` (`make rt-embedded libc-embedded`). |
-| AVR: `avr` | ATmega328P (AVR5). 16-bit `int`, 32-bit `double`. C only: C++ is refused. | Every pass except vectorization and division by a constant; a few more passes do nothing on AVR. | Graph colouring over register runs; each function is generated under several allocation modes and the shortest result kept. Off under `-g`. | Accepted, but not usable by a debugger. | `embld`. | `librt.a`. No C library. |
+| AVR: `avr` | ATmega328P (AVR5). 16-bit `int`, 32-bit `double`. C only: C++ is refused. | Every pass except vectorization; division by a constant is a call; a few more passes do nothing on AVR. | Graph colouring over register runs; each function is generated under several allocation modes and the shortest result kept. Off under `-g`. | DWARF 4: addresses, line rows, the Y frame base, globals. | `embld`. | `librt.a`, and `lib/avr`'s library (`<avr/pgmspace.h>`, `<avr/eeprom.h>`, `printf`, strings). |
+| ARMv7-A (`armv7a-none-eabi[hf]`), MIPS64 (`mips64[el]-none-elf`), Xtensa (`xtensa-none-elf`), TriCore (`tricore-none-elf`), PowerPC (`powerpc-none-eabi`), RX (`rx-none-elf`), SPARC (`sparc-none-elf`), ColdFire (`m68k-none-elf`) | C, and C++ without exceptions; each target's ISA, ABI and limits are in its section of [Targets](../manual/targets.md). | Every pass except vectorization. | Graph colouring. | DWARF 4, with known problems. | `embld`, with `-Ttext`/`-Tdata`; linker scripts only on ARMv7-A. | `librt.a` and `libc.a`; `libcxx.a` on all but little-endian MIPS64. |
 
 The register allocator is described in
 [Register allocation](register-allocation.md), the passes and their
@@ -97,16 +95,16 @@ listed under [ABI limitations](#abi-limitations).
 
 ### Linking
 
-The driver links x86-64 ELF programs and, for the firmware targets
-(ARMv7-M, ARMv8-M, RV32, RV64, MIPS32, LoongArch64, AVR), images whose memory map the build
-gives: a linker script (`-T`, ARM and RISC-V) or `-Wl,-Ttext`/`-Tdata`.
+The driver links x86-64 ELF programs and, for the embedded targets,
+images whose memory map the build gives: a linker script (`-T`, on ARM,
+RISC-V, AVR and MIPS32) or `-Wl,-Ttext`/`-Tdata` (on every one).
 A firmware link without one stops with `embcc: error: linking a TRIPLE
 image needs its memory map`. Every other target (AArch64 ELF, Mach-O,
 COFF) stops with `embcc: error: cannot link for TRIPLE`, because embld
 does not read those objects. AArch64 objects are refused by embld with:
 
 ```text
-embld: FILE: a 64-bit object for machine 183; only x86-64 and RV64 (EM_RISCV) are supported
+embld: FILE: a 64-bit object for machine 183; only x86-64, RV64 (EM_RISCV), LoongArch64 (EM_LOONGARCH) and MIPS64 (EM_MIPS) are supported
 ```
 
 The driver compiles several sources in one command by running itself
@@ -118,13 +116,19 @@ fork/exec -- compiles one source per command and refuses a second:
 embcc: error: more than one source file ('a.c' and 'b.c'), and this host cannot run a compiler for each (EmbCC was built with PROCESS=none): compile each with -c and link the objects (embcc a.o b.o -o OUT)
 ```
 
-EmbCC has no archiver. The library builds use `x86_64-elf-ar`,
-`aarch64-elf-ar` or `llvm-ar`.
+`embar` is EmbCC's archiver (`ar` and `ranlib`); the library builds
+use it.
 
 There is no position-independent code, no shared library and no dynamic
 linking. `-fPIC`, `-shared` and the related options are refused (see
 [Options](#options)). EmbLD reads GNU ld linker scripts (`embld -T`) for
-ARM and RISC-V images, not for x86-64 or AVR; the driver links firmware
+ARM, RISC-V, AVR and MIPS32 images, not yet for the other targets:
+
+```text
+embld: -T: a linker script is supported for ARM, RISC-V, AVR and MIPS32 images only (this one is machine 62)
+```
+
+Where it reads one, the driver links firmware
 with them (`embcc -T board.ld a.o b.o -o fw.elf`). `--gc-sections` drops
 the sections nothing reaches, on every machine, for objects built with
 `-ffunction-sections -fdata-sections`; `-Map` and
@@ -132,12 +136,12 @@ the sections nothing reaches, on every machine, for objects built with
 
 ### Assembly
 
-| Input or output | x86-64 | AArch64, Cortex-M, RISC-V, MIPS32, AVR |
+| Input or output | x86-64 | Every other target |
 |---|---|---|
 | `.s` and `.S` files (GNU syntax) | Refused: `no assembly-file support for x86_64-elf yet; its instruction encoder exists (inline __asm__ works) but this driver has not been wired to it` | Assembled, with GNU as's directives, macros, conditionals, sections, expressions, literal pools and branch relaxation; ARM's CMSIS and ST's startup files assemble to clang's object ([embas](../manual/tools/embas.md#gnu-syntax-assembly)) |
 | `.asm` files (NASM syntax) | Assembled | Assembled as x86-64; see [Known defects](#known-defects) |
-| `-S` | `.byte` directives with the disassembly in comments | `.byte` directives without mnemonics; on MIPS a relocated instruction is written symbolically (`jal f`, `lui $2, %hi(g)`), because llvm-mc's MIPS `.reloc` knows none of those relocations |
-| File-scope `__asm__` | Labels, `.globl`, `.byte`/`.long`/`.quad` and the instructions `and`, `call`, `jmp`, `ret` | AArch64: labels, `.globl` and data directives, no instruction. Cortex-M, RISC-V, MIPS32 and AVR: the GNU-syntax assembler's whole language, as in a `.S` file, into `.text` |
+| `-S` | `.byte` directives with the disassembly in comments | Refused on Xtensa and RX (see [What each target compiles](../manual/limits.md#-s-assembly-output)); elsewhere `.byte` directives without mnemonics; on MIPS a relocated instruction is written symbolically (`jal f`, `lui $2, %hi(g)`), because llvm-mc's MIPS `.reloc` knows none of those relocations |
+| File-scope `__asm__` | Labels, `.globl`, `.byte`/`.long`/`.quad` and the instructions `and`, `call`, `jmp`, `ret` | AArch64: labels, `.globl` and data directives, no instruction. Every other target: the GNU-syntax assembler's whole language, as in a `.S` file, into `.text` |
 
 Any other instruction in a file-scope `asm` block is refused. On x86-64:
 
@@ -163,87 +167,49 @@ clang: the assembler puts a `nop` in each delay slot unless the code says
 ### Thread-local storage
 
 `__thread` and `_Thread_local` use the local-exec model on x86-64 and
-AArch64 ELF (`R_X86_64_TPOFF32`, `R_AARCH64_TLSLE_*`). On Cortex-M,
-RISC-V, MIPS32 and AVR a thread-local object is placed in `.tbss` or `.tdata`
+AArch64 ELF (`R_X86_64_TPOFF32`, `R_AARCH64_TLSLE_*`). On the
+embedded targets a thread-local object is placed in `.tbss` or `.tdata`
 but addressed with ordinary absolute or PC-relative relocations, so
 there is one instance, not one per thread. On Darwin and Windows it is
 refused (see [ABI limitations](#abi-limitations)).
 
 ### Target-specific refusals
 
-x86-64 and AArch64:
+Which constructs each target refuses -- `__int128`, `long double`,
+`_Float16`, the atomics of each width, the frame builtins, C++ and its
+exceptions, `-S`, `-g`, unwind tables and the rest -- is the generated
+page [What each target compiles](../manual/limits.md), with the message
+for each. Beyond those:
 
-| Construct | Diagnostic |
-|---|---|
-| Floating point under `-mno-sse` (x86-64) | `floating point needs SSE, which -mno-sse forbids` |
-| Floating point under `-mgeneral-regs-only` (AArch64) | `floating point used under -mgeneral-regs-only (in 'f')` |
+| Target | Construct | Diagnostic |
+|---|---|---|
+| x86-64 | Floating point under `-mno-sse` | `floating point needs SSE, which -mno-sse forbids` |
+| AArch64 | Floating point under `-mgeneral-regs-only` | `floating point used under -mgeneral-regs-only (in 'f')` |
+| Cortex-M | An `asm` output wider than 4 bytes | `the ARMv7-M backend cannot lower an asm output wider than a register yet (function f) [asm w=4 size=4]` |
+| RV32 | An `asm` output wider than a register | `the RV32 backend cannot lower an asm output wider than a register yet (function f) [asm w=4 size=4]` |
+| AVR | An 8-byte `asm` operand | `an asm operand of 8 bytes needs 8 consecutive registers, which is more than this backend keeps free across an asm` |
+| MIPS32 | `-mhard-float`, `-mabicalls`, `-mabi=n32`, `-G8`, a core that is not MIPS32r2 | each refused by name; see [Invoking EmbCC](../manual/invoking.md#mips-options) |
+| LoongArch64 | `-mabi=lp64d`, `-mabi=lp64f`, `-mfpu=64`, `-mdouble-float`, `-mcmodel=extreme`, `-mstrict-align`, `-mlsx`, `-mlasx`, an LA32 `-march` | each refused by name; see [Targets](../manual/targets.md#loongarch64) |
+| LoongArch64 | In assembly: `la.abs`, the TLS, extreme-model and absolute-GOT operators, floating-point and vector instructions | each refused by name, with the statement |
 
-Cortex-M (`ARMv7-M` backend):
-
-| Construct | Diagnostic |
-|---|---|
-| `__int128` | `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |
-| An `asm` output wider than 4 bytes | `the ARMv7-M backend cannot lower an asm output wider than a register yet (function f) [asm w=4 size=4]` |
-
-RISC-V (RV32 messages shown; RV64 names itself):
-
-| Construct | Diagnostic |
-|---|---|
-| Any operation on `long double` | `the RV32 backend cannot lower a 128-bit value yet (function f) [ldvar w=16 size=16]` |
-| `__int128` at RV32 | `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |
-| Any operation on `__int128` at RV64 | `the RV64 backend cannot lower a 128-bit value yet (function f) [ldvar w=16 size=16]` |
-| An `asm` output wider than a register | `the RV32 backend cannot lower an asm output wider than a register yet (function f) [asm w=4 size=4]` |
-
-`long double` and `__int128` can still be declared and measured with
-`sizeof` on RISC-V, and a static initializer such as
-`long double g = 1.5L * 2;` is computed at compile time.
-
-MIPS32:
-
-| Construct | Diagnostic |
-|---|---|
-| `__builtin_frame_address`, `__builtin_return_address` | `the MIPS32 backend cannot lower __builtin_frame_address or __builtin_return_address (o32 code keeps no frame-pointer chain) yet (function f) [frameaddr w=8 size=4]` |
-| `__int128` | `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |
-| `-mhard-float`, `-EB`, `-mabicalls`, `-mabi=n32`, `-G8`, a core that is not MIPS32r2 | each refused by name; see [Invoking EmbCC](../manual/invoking.md#mips-options) |
-| `-funwind-tables`, `-fasynchronous-unwind-tables`, `-fexceptions` | `unwind tables are not supported for mipsel-none-elf yet (-funwind-tables, -fasynchronous-unwind-tables, -fexceptions): EmbCC writes no MIPS .eh_frame` |
-
-LoongArch64:
-
-| Construct | Diagnostic |
-|---|---|
-| A 16-byte atomic | `the LoongArch64 backend cannot lower a sixteen-byte atomic (the LA64 base ISA has no 128-bit ll/sc or am* instruction) yet (function f) [cas16 w=16 size=16]` |
-| `__builtin_frame_address`, `__builtin_return_address` | `the LoongArch64 backend cannot lower __builtin_frame_address or __builtin_return_address (EmbCC's LoongArch code keeps no frame-pointer chain) yet (function f) [frameaddr w=8 size=4]` |
-| `-mabi=lp64d`, `-mabi=lp64f`, `-mfpu=64`, `-mdouble-float`, `-mcmodel=extreme`, `-mstrict-align`, `-mlsx`, `-mlasx`, an LA32 `-march` | each refused by name; see [Targets](../manual/targets.md#loongarch64) |
-| `-funwind-tables`, `-fasynchronous-unwind-tables`, `-fexceptions`, C++ without `-fno-exceptions` | `unwind tables are not supported for loongarch64-unknown-elf yet (...): EmbCC writes no LoongArch .eh_frame` |
-| In assembly: `la.abs`, the TLS, extreme-model and absolute-GOT operators, floating-point and vector instructions | each refused by name, with the statement |
-
-AVR:
-
-| Construct | Diagnostic |
-|---|---|
-| An 8-byte `asm` operand | `an asm operand of 8 bytes needs 8 consecutive registers, which is more than this backend keeps free across an asm` |
-| `__int128` | `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |
-
-C++ code generation is refused on Cortex-M, RV32, MIPS32 and AVR, and
-C++ exceptions at RV64 and on LoongArch64; see [C++](#c).
+Each target's other refused options are listed in its section of
+[Targets](../manual/targets.md).
 
 ### Runtime libraries
 
 - EmbCC ships a C library for `x86_64-elf`, `aarch64-elf`, both Linux
   triples and EmbLinkOS, and a C++ library for the x86-64 and AArch64 ELF
-  triples. It ships no C library for Cortex-M, RISC-V or AVR.
-- The compiler runtime (`librt.a`) is built for both Linux triples
-  (`make libc-linux-x86_64`, `make libc-linux-aarch64`) and for every
-  Cortex-M triple, `riscv32-unknown-elf`, `mipsel-none-elf`,
-  `loongarch64-unknown-elf` and `avr` (`make rt-embedded`). For
-  `mipsel-none-elf` and `loongarch64-unknown-elf` the C library is built
-  too (`make libc-embedded`), on its bare-metal backend.
-  It is not built for `riscv64-unknown-elf`, because `lib/rt/int128.c`
-  and `lib/rt/fp128.c` use `__int128`, which the RV64 backend refuses.
-  The other `lib/rt` files compile for RV64 one at a time.
+  triples (`make libc`, `make libcxx`, `make libc-linux`).
+- For the embedded targets, `make rt-embedded` builds the compiler
+  runtime (`librt.a`) for every triple, and `make libc-embedded` the C
+  library for every one but AVR, whose library is `lib/avr`'s
+  (`<avr/pgmspace.h>`, `<avr/eeprom.h>`, a small `printf` and the string
+  functions). `make libcxx-embedded` builds the C++ runtime (`operator
+  new`, the guards, RTTI) for the 32-bit ones; RV64, little-endian MIPS64
+  and LoongArch64 have none.
 - The runtime routines have libgcc's names (`__divdi3`, `__addsf3`,
-  `__multi3`, ...). The ARM run-time ABI's `__aeabi_*` routines are not
-  provided.
+  `__multi3`, ...), and on ARM the run-time ABI's `__aeabi_*` routines
+  as well.
 - On Linux, time functions enter the kernel on every call (the vDSO is
   not used), and the file-status functions use `statx`, so they need
   Linux 4.11 or later.
@@ -512,9 +478,9 @@ headers, such as `printf`, link and run.
   clang's `_Complex` results in `v0`..`a1`; clang's PIC and small-data
   objects (`-fPIC`, `-mno-abicalls -G8`) are refused by `embld` by
   relocation name.
-- C++ code generation is refused on Cortex-M, RV32, MIPS32 and AVR,
-  whose `long` or pointers are narrower than the 8 bytes the C++ front
-  end lays types out for (see [C++](#c)).
+- C++ on the 32-bit embedded targets follows the Itanium C++ ABI's
+  32-bit form, with the ARM C++ ABI's changes on ARM; C++ is refused on
+  AVR, whose `int` and pointers are 16 bits (see [C++](#c)).
 
 ## Options
 
@@ -656,32 +622,36 @@ The project's original milestones, and their state:
 
 ## Roadmap
 
-These items are named as open in the source or in the project's
-roadmap, and are open in the code. They are listed without priority or
-dates.
+The releases up to 1.0.0, and what each must achieve, are in
+[the roadmap](../roadmap.md). These are the open items in the code that
+it schedules, each checked against the compiler when this page was last
+audited:
 
-- Several input files per invocation, object-file and archive inputs,
-  and `-l`/`-L`.
 - Position-independent code, shared libraries and dynamic linking.
-- `embld` support for AArch64.
+- `embld`: linking AArch64 objects, and GNU linker scripts on the targets
+  other than ARM, RISC-V, AVR and MIPS32.
 - Debug information, thread-local storage and constructors in Mach-O
   and COFF objects; the Microsoft x64 data model and callee-saved
   registers; `.pdata`/`.xdata` unwind tables for Windows.
-- GNU-syntax assembly files for x86-64.
-- binary128 `long double` arithmetic on RISC-V, and `__int128` at RV64.
-- Computed `goto` on Cortex-M, RISC-V, MIPS32 and AVR;
-  unwind tables on MIPS32.
-- `__attribute__((interrupt))` on MIPS64, and GCC's MIPS
+- GNU-syntax assembly files for x86-64, and instructions in a
+  file-scope `asm` block on AArch64.
+- Unwind tables, and so C++ exceptions, on every target but x86-64 and
+  AArch64.
+- `__attribute__((interrupt))` on ARMv7-A, MIPS64, LoongArch64, Xtensa,
+  TriCore, PowerPC, RX, SPARC and ColdFire; GCC's MIPS
   `use_shadow_register_set` and `use_debug_exception_return`.
+- `_Float16`, `__fp16`, `asm goto`, nested functions,
+  `__builtin_setjmp` and sixteen-byte atomics off x86-64 and AArch64
+  (see [What each target compiles](../manual/limits.md)).
+- `-S` on Xtensa and RX.
 - On MIPS32, a delay slot filled from anywhere but the instruction just
   before the transfer (the branch target's first instruction, or one
   from before the `slt` a compare-and-branch needs).
-- Scalar locals aligned beyond the stack alignment.
 - Linker relaxation: on RISC-V a call between sections stays an
   eight-byte `auipc`/`jalr`.
-- A machine-level IR below EmbIR.
-- SSA as the form of EmbIR between passes.
-- Alias information on memory references (types, `restrict`, fields).
+- A machine-level IR below EmbIR; SSA as the form of EmbIR between
+  passes; alias information on memory references (types, `restrict`,
+  fields).
 - Vectorization on targets other than x86-64.
 - Reading the vDSO on Linux.
 - The C++ items marked "not supported yet" above and in
