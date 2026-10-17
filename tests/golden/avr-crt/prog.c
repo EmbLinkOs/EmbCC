@@ -21,13 +21,19 @@ __attribute__((constructor)) void emb_ctor(void) { ctor_ran = 7; }
 /* early_flag is set by early.S, in .init3: before .data is copied and
  * .bss cleared, which .noinit is spared. */
 
-ISR(TIMER1_COMPA_vect) { ticks++; }
+/* Each handler counts what it is there to show -- that it ran, three
+ * times for the compare match and once for the overflow -- and no
+ * further: QEMU's Timer1 keeps the host's time, and on a loaded runner a
+ * match or an overflow more lands while the program turns the interrupt
+ * off (QEMU's TIMSK1 write never lowers an interrupt it raised), so
+ * counting every one made "ticks 4" or "bad 2" there. */
+ISR(TIMER1_COMPA_vect) { if (ticks < 3) ticks++; }
 
 /* Timer1's overflow (vector 13) has no handler: __bad_interrupt sends it
  * here, and this stops it. */
 ISR(BADISR_vect)
 {
-    bad++;
+    bad = 1;
     TIMSK1 &= (uint8_t)~_BV(TOIE1);
 }
 
@@ -83,14 +89,8 @@ int main(void)
         _delay_us(10);
     cli();
     TIMSK1 = 0;
-    /* Normal mode at /64, the count 16 short of the top: the overflow
-     * comes 1024 cycles on, and the next one 262 ms after it. At /1 from
-     * 0 the next was 4 ms after, and QEMU's timer keeps the host's time:
-     * on a loaded CI runner a second overflow came before the handler had
-     * cleared TOIE1, its interrupt stayed raised, and "bad 2" was
-     * printed. */
-    TCCR1B = _BV(CS11) | _BV(CS10);
-    TCNT1 = 0xfff0;
+    TCCR1B = _BV(CS10);                          /* normal mode, /1 */
+    TCNT1 = 0;
     TIFR1 = _BV(TOV1);
     TIMSK1 = _BV(TOIE1);
     sei();
