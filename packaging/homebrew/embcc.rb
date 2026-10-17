@@ -7,8 +7,8 @@ class Embcc < Formula
   desc "C and C++ compiler and toolchain for embedded systems"
   homepage "https://github.com/EmbLinkOs/EmbCC"
   license "Apache-2.0"
-  url "https://github.com/EmbLinkOs/EmbCC/archive/refs/tags/v1.0.0-m2.complete.tar.gz"
-  sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+  url "https://github.com/EmbLinkOs/EmbCC/archive/refs/tags/v0.0.1-beta.tar.gz"
+  sha256 "868b5349223ead6fe8d590c43716758c049dea10b6992018fba5102010b990fd"
   head "https://github.com/EmbLinkOs/EmbCC.git", branch: "main"
 
   def install

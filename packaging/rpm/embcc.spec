@@ -9,7 +9,7 @@
 
 # The release tag, without its 'v'. RPM's Version cannot hold a '-', and a
 # '~' sorts before the release it precedes, so 1.1.0-rc1 is 1.1.0~rc1.
-%global upstream_version 1.0.0-m2.complete
+%global upstream_version 0.0.1-beta
 
 # The libraries under lib/embcc are for the targets EmbCC compiles for
 # (Cortex-M, RISC-V, AVR, ...), not for this machine: strip cannot read
@@ -18,7 +18,7 @@
 %global __strip /bin/true
 
 Name:           embcc
-Version:        1.0.0~m2.complete
+Version:        0.0.1~beta
 Release:        1%{?dist}
 Summary:        C and C++ compiler and toolchain for embedded systems
 
