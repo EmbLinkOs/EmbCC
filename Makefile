@@ -379,12 +379,14 @@ OBJS := $(EMBCC_SRCS:src/%.c=$(OBJDIR)/%.o)
 # the OBJS rule maps src/%.c and because it is compiled without its CLI
 # main, which the driver already has.
 SRCS_TOOLCORE := tools/embdbg/embdbg.c
+# It goes with the families' objects, in OBJDIR, compiled with their
+# TARGET_CFLAGS: without the x86 family it has no x86-64 decoder to call.
 TOOLCORE_CFLAGS := -DEMBDBG_NO_MAIN -Wno-unused-function
-EMBDBG_CORE := $(BUILD)/embdbg_core.o
+EMBDBG_CORE := $(OBJDIR)/embdbg_core.o
 
 $(EMBDBG_CORE): tools/embdbg/embdbg.c tools/embdbg/embdbg_core.h
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) $(TOOLCORE_CFLAGS) -c -o $@ $<
+	$(CC) $(CFLAGS) $(TARGET_CFLAGS) $(TOOLCORE_CFLAGS) -c -o $@ $<
 
 # What a plain `make` builds: every tool and every target's runtime, so
 # that what was built links. Without the runtimes, `embcc hello.c -o
