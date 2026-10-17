@@ -136,7 +136,12 @@ echo "embsim-riscv: the test device's status, a lockup, an idle loop, a WFI noth
 # ---- 3. instruction edges ----------------------------------------------------
 x=$out/isa; mkdir -p "$x"
 CLANG=${EMBCC_REF_CLANG:-clang}
-if command -v "$CLANG" >/dev/null 2>&1; then
+# (by the suite's clang: the record holds addresses of its code, which
+# clang 22 lays out otherwise, and clang 18 does not compile rv-isa.c's
+# inline asm)
+if command -v "$CLANG" >/dev/null 2>&1 && why=$(llvm_too_old "$CLANG"); then
+    echo "embsim-riscv: the instruction-edge program was not built: $why"
+elif command -v "$CLANG" >/dev/null 2>&1; then
     for w in 32 64; do
         "$CLANG" --target=riscv$w-unknown-elf -march=rv${w}gc \
             -mabi=$([ $w = 32 ] && echo ilp32d || echo lp64d) -mcmodel=medany \

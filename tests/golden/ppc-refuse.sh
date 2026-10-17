@@ -45,7 +45,11 @@ if command -v "$RE" >/dev/null 2>&1; then
 fi
 
 # ---- -S, reassembled ------------------------------------------------------
-if command -v "$MC" >/dev/null 2>&1 && command -v "$OD" >/dev/null 2>&1 &&
+# (by the suite's llvm-mc: LLVM 18's relocates a local symbol's reference
+# against its section, where -c names the symbol)
+if why=$(llvm_too_old "$MC"); then
+    echo "SKIP -S reassembled: $why"
+elif command -v "$MC" >/dev/null 2>&1 && command -v "$OD" >/dev/null 2>&1 &&
    command -v "$RE" >/dev/null 2>&1; then
     cat > "$out/s.c" <<'C'
 extern int g; int arr[20000]; static const char *msg = "hi";

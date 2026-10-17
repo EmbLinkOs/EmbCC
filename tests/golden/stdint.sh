@@ -128,6 +128,10 @@ for pair in "x86_64-elf|x86_64-elf-gcc" "aarch64-elf|aarch64-elf-gcc" \
     refcc=${ref%% *}
     command -v "$refcc" >/dev/null 2>&1 || {
         echo "SKIP $et: its reference compiler ($refcc) is not installed"; continue; }
+    # (a clang older than the suite's referees is no reference: LLVM 18's
+    # own <stdint.h> makes UINT8_C and UINT16_C unsigned int, not int)
+    [ "$refcc" = clang ] && why=$(llvm_too_old clang) && {
+        echo "SKIP $et: $why"; continue; }
     "$EMBCC" --target="$et" -c "$out/probe.c" -o "$out/e.o" 2> "$out/e.err" || {
         echo "$et: the probe did not compile:"; head -3 "$out/e.err"; exit 1; }
     # shellcheck disable=SC2086
@@ -144,6 +148,8 @@ for pair in "x86_64-elf|x86_64-elf-gcc" "aarch64-elf|aarch64-elf-gcc" \
     fi
     checked=$((checked + $(wc -l < "$out/c.$et")))
 done
+[ "$checked" -gt 0 ] || {
+    echo "skipped: no target's reference compiler could be asked"; exit 0; }
 echo "<stdint.h> agrees with each target's reference compiler on all eight targets -- $checked
 facts: the size and signedness of every type, every limit, and the value, type
 and signedness of every constant macro"

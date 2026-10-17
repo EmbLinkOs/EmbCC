@@ -20,6 +20,9 @@ echo "TEST-MARKER riscv-encoding"
 MC=${EMBCC_LLVM_MC:-llvm-mc}
 command -v "$MC" >/dev/null 2>&1 || {
     echo "SKIP: llvm-mc not found (set EMBCC_LLVM_MC)"; exit 0; }
+# An llvm-mc older than the suite's LLVM (lib.sh) is no referee here: LLVM 18's
+# disassembler prints andi for zext.b, and a .text line first.
+skip_if_llvm_old "$MC"
 
 out=tests/golden/out/riscv-encoding
 rm -rf "$out"; mkdir -p "$out"

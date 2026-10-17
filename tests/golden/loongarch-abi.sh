@@ -31,12 +31,17 @@ echo "TEST-MARKER loongarch-abi"
 QEMU=${EMBCC_QEMU_LOONGARCH:-qemu-system-loongarch64}
 command -v "$QEMU" >/dev/null 2>&1 || {
     echo "skipped: $QEMU not found"; exit 0; }
+why=$(qemu_too_old "$QEMU" 10.0 "the harness's image does not start on it: on 8.2 no program printed a byte, and 10.2 is the oldest seen to run it") && {
+    echo "skipped: $why"; exit 0; }
 CLANG=${EMBCC_REF_CLANG_LOONGARCH:-clang}
 command -v "$CLANG" >/dev/null 2>&1 &&
     "$CLANG" --target=loongarch64-unknown-elf -msoft-float \
         -fsyntax-only -x c /dev/null 2>/dev/null || {
     echo "skipped: no clang with a LoongArch target (set EMBCC_REF_CLANG_LOONGARCH)"
     exit 0; }
+# (and the suite's clang: LLVM 18's calls are B26 relocations, with no
+# R_LARCH_CALL36 for embld to be shown applying)
+skip_if_llvm_old "$CLANG"
 
 T=loongarch64-unknown-elf
 EMBCC=${EMBCC:-./embcc}

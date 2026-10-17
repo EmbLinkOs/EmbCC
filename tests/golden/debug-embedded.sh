@@ -27,6 +27,10 @@ out=$EMBCC_ROOT/tests/golden/out/debug-embedded
 rm -rf "$out"; mkdir -p "$out"
 command -v "$DWDUMP" >/dev/null 2>&1 || {
     echo "skipped: llvm-dwarfdump not found"; exit 0; }
+# Every check reads llvm-dwarfdump's and llvm-objdump's print, as LLVM 23
+# prints it: 22 and older print a pointer DIE's byte_size and SPARC's and
+# AVR's frame offsets otherwise.
+skip_if_llvm_old "$DWDUMP" "$OBJDUMP"
 
 cat > "$out/p.c" <<'CEOF'
 struct point { int x, y; };

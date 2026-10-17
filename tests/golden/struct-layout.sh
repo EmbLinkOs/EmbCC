@@ -121,6 +121,10 @@ for pair in "x86_64-elf|x86_64-elf-gcc" "aarch64-elf|aarch64-elf-gcc" \
     et=${pair%%|*}; ref=${pair#*|}
     command -v "${ref%% *}" >/dev/null 2>&1 || {
         echo "SKIP $et: its reference compiler (${ref%% *}) is not installed"; continue; }
+    # (a clang older than the suite's referees is no reference: LLVM 18's
+    # objects read back nothing here)
+    [ "${ref%% *}" = clang ] && why=$(llvm_too_old clang) && {
+        echo "SKIP $et: $why"; continue; }
     # shellcheck disable=SC2086
     $ref -ffreestanding -w -c "$out/probe.c" -o "$out/r.o" 2> "$out/r.err" || {
         echo "$et: the reference could not compile the probe:"; head -3 "$out/r.err"; exit 1; }
@@ -135,6 +139,8 @@ for pair in "x86_64-elf|x86_64-elf-gcc" "aarch64-elf|aarch64-elf-gcc" \
     fi
     n=$((n + $(wc -l < "$out/r.$et")))
 done
+[ "$n" -gt 0 ] || {
+    echo "skipped: no target's reference compiler could be asked"; exit 0; }
 echo "struct, union and bit-field layout agrees with each target's reference
 compiler on all eight targets -- $n facts: sizes, alignments, member offsets,
 and the exact bits every bit-field occupies"
