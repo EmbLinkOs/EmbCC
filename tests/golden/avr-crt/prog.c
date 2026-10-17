@@ -83,8 +83,14 @@ int main(void)
         _delay_us(10);
     cli();
     TIMSK1 = 0;
-    TCCR1B = _BV(CS10);                          /* normal mode, /1 */
-    TCNT1 = 0;
+    /* Normal mode at /64, the count 16 short of the top: the overflow
+     * comes 1024 cycles on, and the next one 262 ms after it. At /1 from
+     * 0 the next was 4 ms after, and QEMU's timer keeps the host's time:
+     * on a loaded CI runner a second overflow came before the handler had
+     * cleared TOIE1, its interrupt stayed raised, and "bad 2" was
+     * printed. */
+    TCCR1B = _BV(CS11) | _BV(CS10);
+    TCNT1 = 0xfff0;
     TIFR1 = _BV(TOV1);
     TIMSK1 = _BV(TOIE1);
     sei();
