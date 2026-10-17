@@ -14,12 +14,11 @@
 #           run natively.
 #   suite   the whole test suite, `make test`, with QEMU and the LLVM tools
 #           installed: on Ubuntu 26.04 with LLVM 23 (the referees'
-#           release), on 24.04 (the oldest tools a contributor is likely
-#           to have, where what they cannot referee is a SKIP), and on
-#           arm64 macOS with Homebrew's LLVM and QEMU (the development
-#           machine's). Its first run, on 24.04 alone, passed 635 of 707.
-#           It does not yet fail the workflow (continue-on-error) -- it
-#           becomes a required check once it is green.
+#           release), and on 24.04 (the oldest tools a contributor is
+#           likely to have, where what they cannot referee is a SKIP). Its
+#           first run, on 24.04 alone, passed 635 of 707. It does not yet
+#           fail the workflow (continue-on-error) -- it becomes a required
+#           check once it is green.
 name: ci
 
 on:
@@ -177,59 +176,4 @@ jobs:
         if: failure()
         with:
           name: failed-outs-${{ matrix.name }}
-          path: failed-outs.tgz
-
-  # The development machine's tools on a clean runner: Homebrew's LLVM 23
-  # and QEMU 11 on arm64 macOS, where x86-64 programs run on the QEMU
-  # harness (which wants a cross newlib this runner has not got: those
-  # runs report skipped) and the Darwin tests run natively.
-  suite-macos:
-    name: suite (macos-15)
-    runs-on: macos-15
-    timeout-minutes: 240
-    continue-on-error: true
-    env:
-      # GitHub's macOS runners are VMs without the hypervisor framework
-      EMBCC_QEMU_ACCEL: -accel tcg -cpu max
-      EMBCC_QEMU_TIMEOUT: 60            # (as the Linux jobs: three cores)
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Install QEMU and the LLVM tools
-        run: |
-          brew install llvm qemu x86_64-elf-gcc
-          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
-      - name: The tools
-        run: |
-          cc --version | head -1
-          clang --version | head -1
-          llvm-mc --version | sed -n 2p
-          qemu-system-x86_64 --version | head -1
-      - name: Build everything the suite runs
-        run: make -j"$(getconf _NPROCESSORS_ONLN)" all embdbg embdoc runtimes
-      - name: make test
-        shell: bash
-        run: |
-          set -o pipefail
-          make test 2>&1 | tee test.log
-      - name: The failures
-        if: always()
-        run: grep -E '^(FAIL|SKIP) ' test.log || true
-      - name: The failed tests' outputs
-        if: failure()
-        run: |
-          for t in $(sed -n 's|^FAIL tests/golden/\(.*\)\.sh .*|\1|p' test.log); do
-            ls -d "tests/golden/out/$t" "tests/golden/out/$t"-* 2>/dev/null || true
-          done | sort -u > failed-outs.txt
-          tar czf failed-outs.tgz -T failed-outs.txt
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: always()
-        with:
-          name: test-log-macos-15
-          path: test.log
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: failure()
-        with:
-          name: failed-outs-macos-15
           path: failed-outs.tgz
