@@ -159,8 +159,18 @@ elif command -v "$CLANG" >/dev/null 2>&1; then
             q=$Q32; [ $w = 64 ] && q=$Q64
             sh tests/harness/qrun.sh 20 "$q" -M virt -bios none -nographic \
                 -m 8 -kernel "$x/isa$w.elf" > "$x/isa$w.qemu" 2>/dev/null
-            cmp -s "$x/isa$w.qemu" "$x/isa$w.sim" || {
-                diff "$x/isa$w.qemu" "$x/isa$w.sim" | head -20
+            # QEMU before 11.1 raised a misaligned AMO as a misaligned
+            # LOAD, cause 4, where the privileged spec, EmbSim and the
+            # record have the store/AMO one, 6 (QEMU issue 3503): against
+            # an older QEMU that one line is the record's alone
+            cp "$x/isa$w.qemu" "$x/isa$w.qref"; cp "$x/isa$w.sim" "$x/isa$w.sref"
+            if why=$(qemu_too_old "$q" 11.1 "it raises a misaligned AMO with cause 4 (QEMU issue 3503)"); then
+                echo "embsim-riscv: amo-misaligned not compared with QEMU: $why"
+                grep -v '^amo-misaligned ' "$x/isa$w.qemu" > "$x/isa$w.qref"
+                grep -v '^amo-misaligned ' "$x/isa$w.sim" > "$x/isa$w.sref"
+            fi
+            cmp -s "$x/isa$w.qref" "$x/isa$w.sref" || {
+                diff "$x/isa$w.qref" "$x/isa$w.sref" | head -20
                 fail "rv-isa.c on RV$w: EmbSim's output is not QEMU's"; }
         fi
         echo "embsim-riscv: RV$w's instruction edges ($(wc -l < "$x/isa$w.sim" | tr -d ' ') results) as QEMU and the record have them"
