@@ -94,7 +94,9 @@ jobs:
           - { os: macos, arch: x86_64, runner: macos-15-intel }
     env:
       VERSION: ${{ needs.version.outputs.version }}
-      PLATFORM: ${{ matrix.os }}-${{ matrix.arch }}
+      # the package's OS-ARCH -- not PLATFORM, which is the Makefile's
+      # host layer (posix or iso) and is read from the environment
+      PKG_PLATFORM: ${{ matrix.os }}-${{ matrix.arch }}
       MACOSX_DEPLOYMENT_TARGET: '11.0'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -146,7 +148,7 @@ jobs:
           "$E" --target=x86_64-linux-gnu -x c++ -c hello.cc -o hello-cc.o
 
           # A program for this machine, linked and run.
-          case $PLATFORM in
+          case $PKG_PLATFORM in
             linux-x86_64)
               "$E" --target=x86_64-linux-gnu hello.c -o hello
               chmod +x hello ;;
@@ -165,7 +167,7 @@ jobs:
           test "$(./hello)" = "hello from EmbCC 8"
 
       - name: Package the tarball
-        run: sh packaging/tarball.sh "$RUNNER_TEMP/stage/usr/local" "$VERSION" "$PLATFORM" dist
+        run: sh packaging/tarball.sh "$RUNNER_TEMP/stage/usr/local" "$VERSION" "$PKG_PLATFORM" dist
 
       - name: Install the tarball with install.sh
         run: |

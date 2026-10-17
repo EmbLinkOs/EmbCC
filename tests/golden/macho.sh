@@ -192,3 +192,27 @@ e_size=$(wc -c < "$out/va-elf.o")
     echo "      and its stores are probably still being emitted"
     exit 1; }
 echo "and the register save area is gone: $d_size bytes against $e_size"
+
+# 6. x86-64 keeps a reference's addend IN the instruction: `leaq
+#    _arr+20(%rip)` is 48 8d 05 14 00 00 00 with X86_64_RELOC_SIGNED _arr,
+#    as clang writes it. The writer dropped it, so a function's every
+#    string literal after its first was the first -- `strlen("embedded")`
+#    beside a printf format measured the format, which the release
+#    workflow's smoke test caught on macOS x86-64. Checked in the object,
+#    so it runs on an arm64 host too: the second literal is the eleventh
+#    byte of the constants, after "0123456789" and its NUL.
+cat > "$out/lit2.c" <<'EOF2'
+const char *first(void) { return "0123456789"; }
+const char *second(void) { return "abc"; }
+EOF2
+"$EMBCC" --target=x86_64-apple-darwin -c "$out/lit2.c" -o "$out/lit2.o" \
+    2> "$out/lit2.log" || {
+    echo "FAIL: embcc could not compile two literals for x86_64-apple-darwin:"
+    cat "$out/lit2.log"; exit 1; }
+# the system's objdump: lib.sh may put a GNU cross one first on PATH,
+# which has no Mach-O
+/usr/bin/objdump -d "$out/lit2.o" > "$out/lit2.dis" 2>&1 || true
+grep -A8 '_second>:' "$out/lit2.dis" | grep -q '48 8d 05 0b 00 00 00' || {
+    echo "FAIL: second()'s literal is not 11 bytes into the constants:"
+    cat "$out/lit2.dis"; exit 1; }
+echo "x86-64: a literal's offset is in its lea, as clang writes it"

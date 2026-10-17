@@ -42,7 +42,9 @@ struct sim;
 struct cpu;
 
 /* print "embsim: MESSAGE" and exit with status 2 */
-void die(const char *fmt, ...);
+/* reports and exits: GCC then knows that a NULL tested before it cannot
+ * reach what follows (-Wformat-truncation at boards.c's snprintf) */
+void die(const char *fmt, ...) __attribute__((noreturn));
 
 /* ---- the bus (bus.c) -------------------------------------------------- */
 

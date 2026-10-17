@@ -274,6 +274,23 @@ void machow_add_reloc(struct machow *w, int sect, unsigned long long offset,
         buf_append(&s->relocs, &r, sizeof r);
         s->nreloc++;
     }
+    /* x86-64 keeps an instruction's addend in the instruction: the 32-bit
+     * field is the addend, as clang writes `leaq _arr+20(%rip)` -- 14 00
+     * 00 00 and X86_64_RELOC_SIGNED _arr. It was dropped, so every string
+     * a function used after its first was the first: `strlen("embedded")`
+     * beside a printf format measured the format (the release workflow's
+     * smoke test, on macOS x86-64). */
+    if (addend && w->cputype != CPU_TYPE_ARM64 && length == 2 &&
+        !s->zerofill && offset + 4 <= s->data.len) {
+        unsigned char *q = s->data.p + offset;
+        uint32_t v = (uint32_t)q[0] | (uint32_t)q[1] << 8 |
+                     (uint32_t)q[2] << 16 | (uint32_t)q[3] << 24;
+        v += (uint32_t)addend;
+        q[0] = (unsigned char)v;
+        q[1] = (unsigned char)(v >> 8);
+        q[2] = (unsigned char)(v >> 16);
+        q[3] = (unsigned char)(v >> 24);
+    }
     r.r_address = (int32_t)offset;
     r.r_packed = macho_reloc_pack((uint32_t)sym, pcrel, length, 1, type);
     buf_append(&s->relocs, &r, sizeof r);

@@ -101,6 +101,13 @@ endif
 # host's. `posix` is macOS, Linux and EmbLinkOS; `iso` needs nothing but a
 # hosted C library, for a hobby or non-POSIX OS (docs/internals/porting.md).
 PLATFORM ?= posix
+# Only these two: `?=` takes a PLATFORM from the environment too, and a CI
+# job's PLATFORM=linux-x86_64 (a package's name) asked for
+# src/platform/platform_linux-x86_64.c, which make could only report as a
+# missing file.
+ifeq ($(filter posix iso,$(PLATFORM)),)
+$(error PLATFORM=$(PLATFORM) is not a host layer: EmbCC builds with PLATFORM=posix (the default) or PLATFORM=iso; if it came from the environment, unset it or say make PLATFORM=posix)
+endif
 # Whether the host can run a program (src/platform/platform.h): `spawn` is
 # POSIX's posix_spawn, macOS and Linux; `none` is EmbLinkOS (no fork/exec)
 # and any host with only a C library, and the default with PLATFORM=iso.

@@ -276,7 +276,10 @@ void *pic32_gpio_create(struct sim *s, struct rf_periph *p)
     for (int i = 0; i < NPORTS; i++) {
         struct port *q = &g->pt[i];
         char l = (char)('A' + i + (i >= 8));    /* no port I */
-#define REG(f, name) snprintf(nm, sizeof nm, name "%c", l); q->f = rf_reg(p, nm)
+/* one statement: `if (!q->ansel) REG(ansel, "ANS")` guarded only the
+ * snprintf, and the assignment always ran (GCC's -Wmultistatement-macros) */
+#define REG(f, name) do { snprintf(nm, sizeof nm, name "%c", l); \
+                          q->f = rf_reg(p, nm); } while (0)
         REG(ansel, "ANSEL");
         if (!q->ansel)
             REG(ansel, "ANS");                  /* a PIC24's */
