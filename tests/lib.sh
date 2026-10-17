@@ -118,7 +118,30 @@ t_run() {
 # does inline, and the cross toolchains have no libatomic. Prints why.
 no_gcc_reference() {
     why=$(sed -n 's|.*// no-gcc-reference: *\(.*\)|\1|p' "$1" | head -1)
+    if [ -z "$why" ] && grep -q '_BitInt' "$1" && ! gcc_has_bitint; then
+        # GCC has _BitInt from 14 on; Ubuntu 24.04's cc is GCC 13. Too old
+        # a referee is no reference, not a failure of the program --
+        # EMBCC_X86_GCC=gcc-14 names a newer one.
+        why="$X86_GCC has no _BitInt; GCC 14 and later have"
+    fi
     [ -n "$why" ] && echo "$(basename "$1" .c): no gcc reference ($why), skipped"
+}
+
+# gcc_has_bitint: the target's referee gcc compiles a _BitInt. Asked once
+# per test, the answer kept in _gcc_bitint.
+_gcc_bitint=
+gcc_has_bitint() {
+    if [ -z "$_gcc_bitint" ]; then
+        _p=$(mktemp "${TMPDIR:-/tmp}/bitint.XXXXXX")
+        printf 'unsigned _BitInt(12) x;\n' > "$_p.c"
+        if t_gcc_c "$_p.c" -std=c11 -o "$_p.o" >/dev/null 2>&1; then
+            _gcc_bitint=yes
+        else
+            _gcc_bitint=no
+        fi
+        rm -f "$_p" "$_p.c" "$_p.o"
+    fi
+    [ "$_gcc_bitint" = yes ]
 }
 
 pinned_elsewhere() {
