@@ -94,6 +94,12 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 180
     continue-on-error: true
+    env:
+      # A QEMU run's wall-clock bound (tests/run.sh's default is 20 s).
+      # The suite runs a test per core and some tests run eight QEMUs
+      # each: on a four-core runner a program that takes a second alone
+      # has run out the 20 s (switch-thread and neg-index on the M23).
+      EMBCC_QEMU_TIMEOUT: 60
     strategy:
       fail-fast: false
       matrix:
@@ -185,6 +191,7 @@ jobs:
     env:
       # GitHub's macOS runners are VMs without the hypervisor framework
       EMBCC_QEMU_ACCEL: -accel tcg -cpu max
+      EMBCC_QEMU_TIMEOUT: 60            # (as the Linux jobs: three cores)
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
