@@ -86,6 +86,28 @@ x86_cannot_run() {
     return 1
 }
 
+# qemu_plugin SRC OUT.so  — build a QEMU TCG plugin (the TriCore harness's
+# output, tools/bench/icount.c's counts) against qemu-plugin.h, which must
+# be the installed QEMU's own: QEMU_PLUGIN_INC names its directory, and
+# Homebrew's is the default. Linux distributions package no qemu-plugin.h;
+# it is include/qemu/qemu-plugin.h in the source of the installed version.
+# Prints why, and is false, when the plugin cannot be built.
+qemu_plugin() {
+    _inc=${QEMU_PLUGIN_INC:-/opt/homebrew/include}
+    [ -f "$_inc/qemu-plugin.h" ] || {
+        echo "no qemu-plugin.h in $_inc (set QEMU_PLUGIN_INC to the directory of the installed QEMU's include/qemu/qemu-plugin.h)"
+        return 1; }
+    # macOS links a plugin's calls into QEMU only when told they resolve
+    # at load time; Linux does that unasked, and has no such flag
+    # shellcheck disable=SC2046
+    cc -shared -fPIC -O2 -I"$_inc" $(pkg-config --cflags glib-2.0 2>/dev/null) \
+       -undefined dynamic_lookup -o "$2" "$1" > /dev/null 2>&1 ||
+    cc -shared -fPIC -O2 -I"$_inc" $(pkg-config --cflags glib-2.0 2>/dev/null) \
+       -o "$2" "$1" > "$2.log" 2>&1 || {
+        echo "$1 does not build against $_inc/qemu-plugin.h (the plugins here are written for the plugin API of QEMU 9.1 or later): $(grep -m1 'error' "$2.log")"
+        return 1; }
+}
+
 # x86_gcc_exe EXE SRC [flags...]  — compile and link with the referee gcc.
 x86_gcc_exe() {
     exe=$1; src=$2; shift 2

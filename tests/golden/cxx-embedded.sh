@@ -193,15 +193,13 @@ for t in $boards; do
 done
 # TriCore's UART is a QEMU plugin watching its stores
 case " $(echo $boards) " in *" tricore-none-elf "*)
-    inc=${QEMU_PLUGIN_INC:-/opt/homebrew/include}
-    cc -shared -fPIC -O2 -I"$inc" $(pkg-config --cflags glib-2.0 2>/dev/null) \
-       -undefined dynamic_lookup -o "$out/putc.so" \
-       tests/harness/tricore/putc.c 2>/dev/null ||
-    cc -shared -fPIC -O2 -I"$inc" $(pkg-config --cflags glib-2.0 2>/dev/null) \
-       -o "$out/putc.so" tests/harness/tricore/putc.c || {
-        echo "the TriCore harness's output plugin does not build"; exit 1; }
-    EMBCC_TRICORE_PLUGIN=$PWD/$out/putc.so
-    export EMBCC_TRICORE_PLUGIN ;;
+    if why=$(qemu_plugin tests/harness/tricore/putc.c "$out/putc.so"); then
+        EMBCC_TRICORE_PLUGIN=$PWD/$out/putc.so
+        export EMBCC_TRICORE_PLUGIN
+    else
+        echo "SKIP tricore-none-elf: its harness prints through a QEMU plugin, and $why"
+        boards=$(echo $boards | tr ' ' '\n' | grep -v '^tricore-none-elf$' | tr '\n' ' ')
+    fi ;;
 esac
 
 cat > "$out/one.sh" <<'EOF'

@@ -106,13 +106,9 @@ for t in $boards; do
     fi
     case $t in tricore*)
         [ -n "${EMBCC_TRICORE_PLUGIN:-}" ] || {
-            inc=${QEMU_PLUGIN_INC:-/opt/homebrew/include}
-            cc -shared -fPIC -O2 -I"$inc" $(pkg-config --cflags glib-2.0 2>/dev/null) \
-               -undefined dynamic_lookup -o "$out/putc.so" \
-               tests/harness/tricore/putc.c 2>/dev/null ||
-            cc -shared -fPIC -O2 -I"$inc" $(pkg-config --cflags glib-2.0 2>/dev/null) \
-               -o "$out/putc.so" tests/harness/tricore/putc.c || {
-                echo "the TriCore harness's output plugin does not build"; exit 1; }
+            why=$(qemu_plugin tests/harness/tricore/putc.c "$out/putc.so") || {
+                echo "$t: skipped, its harness prints through a QEMU plugin, and $why"
+                continue; }
             EMBCC_TRICORE_PLUGIN=$PWD/$out/putc.so
             export EMBCC_TRICORE_PLUGIN; } ;;
     esac

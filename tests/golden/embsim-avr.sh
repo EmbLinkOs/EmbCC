@@ -46,17 +46,13 @@ fail() { echo "FAIL: $*"; exit 1; }
 
 have_qemu=0
 command -v "$QAVR" >/dev/null 2>&1 && have_qemu=1
-plug=
+plug= why=
 if [ $have_qemu = 1 ] && command -v "$NM" >/dev/null 2>&1; then
-    inc=${QEMU_PLUGIN_INC:-/opt/homebrew/include}
     p=$PWD/$out/icount.so
-    { cc -shared -fPIC -O2 -I"$inc" $(pkg-config --cflags glib-2.0 2>/dev/null) \
-         -undefined dynamic_lookup -o "$p" tools/bench/icount.c ||
-      cc -shared -fPIC -O2 -I"$inc" $(pkg-config --cflags glib-2.0 2>/dev/null) \
-         -o "$p" tools/bench/icount.c; } 2>/dev/null && plug=$p
+    why=$(qemu_plugin tools/bench/icount.c "$p") && plug=$p
 fi
 [ $have_qemu = 0 ] || [ -n "$plug" ] ||
-    echo "note: QEMU's counting plugin (or $NM) is missing; counts are not compared"
+    echo "note: QEMU's counting plugin (or $NM) is missing${why:+ ($why)}; counts are not compared"
 
 # the harness, the runtime and the driver
 H=$out/h; mkdir -p "$H"

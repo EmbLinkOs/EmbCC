@@ -63,12 +63,11 @@ else
 fi
 
 # ---- 2. on the board ---------------------------------------------------------
-if command -v "$QEMU" >/dev/null 2>&1; then
-    inc=${QEMU_PLUGIN_INC:-/opt/homebrew/include}
-    cc -shared -fPIC -O2 -I"$inc" $(pkg-config --cflags glib-2.0 2>/dev/null) \
-       -undefined dynamic_lookup -o "$out/putc.so" \
-       tests/harness/tricore/putc.c 2>/dev/null ||
-        { echo "the harness's output plugin does not build"; exit 1; }
+if ! command -v "$QEMU" >/dev/null 2>&1; then
+    echo "SKIP the board half: $QEMU not found"
+elif ! why=$(qemu_plugin tests/harness/tricore/putc.c "$out/putc.so"); then
+    echo "SKIP the board half: the harness prints through a QEMU plugin, and $why"
+else
     EMBCC_TRICORE_PLUGIN=$PWD/$out/putc.so
     EMBCC_TRICORE_HARNESS=$PWD/$out
     export EMBCC_TRICORE_PLUGIN EMBCC_TRICORE_HARNESS EMBLD
@@ -94,8 +93,6 @@ if command -v "$QEMU" >/dev/null 2>&1; then
     done
     echo "forms.S, a file-scope block, a naked function and templates with"
     echo "labels run on the tricore_testboard at -O0, -O1, -O2 and -Os"
-else
-    echo "SKIP the board half: $QEMU not found"
 fi
 
 # ---- 3. the relocations ---------------------------------------------------------
