@@ -27,8 +27,28 @@ static unsigned long long db(double d)
 { union { double d; unsigned long long u; } x; x.d = d; return x.u; }
 static unsigned fb(float f)
 { union { float f; unsigned u; } x; x.f = f; return x.u; }
-static void hd(double d) { hx(db(d), 16); }
-static void hf(float f) { hx((unsigned long long)fb(f), 8); }
+/* A NaN is printed with its sign cleared. The NaN an invalid operation
+ * makes (0 * inf, inf - inf, 0 / 0) is the machine's own "default NaN",
+ * and its sign is the machine's choice: x86 makes it negative, ARM and
+ * RISC-V positive, and neither C nor IEEE 754 says which -- so on an x86
+ * host every such line differed from the target before a single bit of
+ * the arithmetic did. The payload and the quiet bit are still compared,
+ * and nothing here makes a NaN any other way. */
+static unsigned long long dnan(unsigned long long u)
+{
+    if ((u & 0x7ff0000000000000ULL) == 0x7ff0000000000000ULL &&
+        (u & 0x000fffffffffffffULL) != 0)
+        u &= ~0x8000000000000000ULL;
+    return u;
+}
+static unsigned fnan(unsigned u)
+{
+    if ((u & 0x7f800000u) == 0x7f800000u && (u & 0x007fffffu) != 0)
+        u &= ~0x80000000u;
+    return u;
+}
+static void hd(double d) { hx(dnan(db(d)), 16); }
+static void hf(float f) { hx((unsigned long long)fnan(fb(f)), 8); }
 static void nl(void) { writec('\n'); }
 static void pi(int v) { putn((long)v); }
 
@@ -39,6 +59,11 @@ static void pi(int v) { putn((long)v); }
  * conversions that have an answer. */
 static int fits(double d) { return d > -2147483000.0 && d < 2147483000.0; }
 static void pid(double d) { pi(fits(d) ? (int)d : 0); }
+/* ...and the same for long long, which 1e300 and 1e38f do not fit: ARM
+ * saturates them to LLONG_MAX, x86 gives LLONG_MIN. */
+static int fits64(double d) { return d > -9.2e18 && d < 9.2e18; }
+static void pll(double d)
+{ hx(fits64(d) ? (unsigned long long)(long long)d : 0, 16); }
 
 /* Zeros of both signs, one, a half, pi, the extremes of the exponent
  * range, the smallest normal and the smallest denormal, a value that
@@ -79,13 +104,13 @@ int main(void)
      * forth through the integers. */
     for (int i = 0; i < nd; i++) {
         hd(-dv[i]); hf((float)dv[i]); hd((double)(float)dv[i]);
-        hx((unsigned long long)(long long)dv[i], 16);
+        pll(dv[i]);
         pid(dv[i]);
         nl();
     }
     for (int i = 0; i < nf; i++) {
         hf(-fv[i]); hd((double)fv[i]);
-        hx((unsigned long long)(long long)fv[i], 16);
+        pll((double)fv[i]);
         pid((double)fv[i]);
         nl();
     }
