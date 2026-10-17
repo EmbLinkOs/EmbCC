@@ -56,7 +56,9 @@ cat > "$out/asm.S" <<'EOF'
 EOF
 "$EMBCC" --target=avr -c "$out/asm.S" -o "$out/asm.o" || fail "<avr/io.h> in a .S file"
 printf 'out\t0x5, r24\nsbi\t0x4, 0x5\nsts\t0xc6, r24\nlds\tr24, 0x81\nin\tr24, 0x3f\n' > "$out/asm.want"
-llvm-objdump -d "$out/asm.o" 2>&1 | grep -E '^ +[0-9a-f]+:' | awk -F'\t' '{ print $2 "\t" $3 }' > "$out/asm.dis"
+# (--mcpu: LLVM 22 and older do not take the part from the object's
+# e_flags, and printed lds and sts as <unknown>)
+llvm-objdump -d --mcpu=atmega328p "$out/asm.o" 2>&1 | grep -E '^ +[0-9a-f]+:' | awk -F'\t' '{ print $2 "\t" $3 }' > "$out/asm.dis"
 cmp -s "$out/asm.dis" "$out/asm.want" ||
     { diff "$out/asm.want" "$out/asm.dis"; fail "<avr/io.h> in assembly: wrong numbers"; }
 echo "  $n compiles of 11 headers (4 parts, -O0/-Os, -Werror); <avr/io.h> in a .S file; not found for ARM"
@@ -165,7 +167,7 @@ for O in -O0 -Os; do
     for v in 11 16 1 2 3; do
         llvm-nm "$out/use$O.o" | grep -q " T __vector_$v\$" || fail "$O: no __vector_$v"
     done
-    llvm-objdump -d "$out/use$O.o" > "$out/use$O.dis"
+    llvm-objdump -d --mcpu=atmega328p "$out/use$O.o" > "$out/use$O.dis"
     # the watchdog's timed sequence: wdr, then the two stores back to back
     awk '/wdr$/ { w = NR } /sts	0x60,/ { if (NR == w + 1) a = NR; else if (NR == a + 1) pairs++; else bad = 1 }
          END { exit bad || pairs < 2 }' "$out/use$O.dis" ||

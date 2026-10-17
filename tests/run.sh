@@ -184,6 +184,26 @@ while [ $i -lt $n_sh ]; do
 done
 rm -rf "$run_dir"
 
+# Where the corpus cannot run at all -- this host is not the target, and
+# the QEMU harness's cross gcc or newlib is not here -- each program is
+# reported skipped with the reason, as the C++ ones are without their
+# libstdc++, rather than failed at its link: a Mac without ~/cross is a
+# host that cannot run them, not a compiler that is wrong.
+. tools/hostpaths.sh
+corpus_why=
+if [ "$TARGET" != x86_64-elf ] || [ "$EMBCC_X86_RUNNER" != host ]; then
+    if [ "$TARGET" = aarch64-elf ]; then
+        nl=$AARCH64_NEWLIB tc=${EMBCC_AARCH64_GCC:-aarch64-elf-gcc} nv=EMBCC_AARCH64_NEWLIB
+    else
+        nl=$X86_NEWLIB tc=${EMBCC_X86_GCC:-x86_64-elf-gcc} nv=EMBCC_X86_NEWLIB
+    fi
+    if [ ! -d "$nl/lib" ]; then
+        corpus_why="no ${TARGET%-elf} newlib at $nl for the QEMU harness: set $nv"
+    elif ! command -v "$tc" >/dev/null 2>&1; then
+        corpus_why="no $tc for the QEMU harness"
+    fi
+fi
+
 # tests/exec/*.c run on every target; tests/exec/<arch>/*.c on that one only
 for c in tests/exec/*.c tests/exec/${TARGET%-elf}/*.c; do
     [ -e "$c" ] || continue
@@ -194,6 +214,11 @@ for c in tests/exec/*.c tests/exec/${TARGET%-elf}/*.c; do
     only=$(sed -n 's|.*// target: *\([a-z0-9_-]*\).*|\1|p' "$c" | head -1)
     if [ -n "$only" ] && [ "$only" != "$TARGET" ]; then
         echo "SKIP $c (target: $only)"
+        skip=$((skip + 1))
+        continue
+    fi
+    if [ -n "$corpus_why" ]; then
+        echo "SKIP $c ($corpus_why)"
         skip=$((skip + 1))
         continue
     fi
@@ -214,7 +239,10 @@ for c in tests/exec/*.c tests/exec/${TARGET%-elf}/*.c; do
     # Where the code runs: on this host when it IS the target, else on the
     # target's QEMU harness (tests/harness/<arch>/{link,run}.sh).
     if [ "$TARGET" = x86_64-elf ] && [ "$EMBCC_X86_RUNNER" = host ]; then
-        if ! msg=$(cc -no-pie -o "$exe" "$obj" 2>&1); then
+        # -lm: the corpus calls libm (cabs, sqrtf, ...), which glibc keeps
+        # apart from libc; noexecstack: an x86_64-elf object, like GCC's
+        # for that target, has no .note.GNU-stack to say so itself
+        if ! msg=$(cc -no-pie -Wl,-z,noexecstack -o "$exe" "$obj" -lm 2>&1); then
             bad "$c" "host link failed" "$msg"
             continue
         fi
@@ -255,6 +283,11 @@ for cc in tests/cxx/*.cc; do
     name=$(basename "$cc" .cc)
     if [ ! -f "$ref_gxx/$TARGET/lib/libstdc++.a" ]; then
         echo "SKIP $cc (no reference libstdc++ at $ref_gxx: tools/build-ref-gxx.sh $TARGET)"
+        skip=$((skip + 1))
+        continue
+    fi
+    if [ -n "$corpus_why" ]; then         # (the C corpus's reason)
+        echo "SKIP $cc ($corpus_why)"
         skip=$((skip + 1))
         continue
     fi

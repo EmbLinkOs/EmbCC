@@ -49,7 +49,9 @@ fields"; exit 1; }
 
 cut -d'|' -f1 "$out/vocab.txt" > "$out/v.s"
 cut -d'|' -f2 "$out/vocab.txt" > "$out/ours.txt"
-"$MC" -triple=sparc -mcpu=leon3 -filetype=obj "$out/v.s" -o "$out/v.o" \
+# (+hasleoncasa: LLVM 23's leon3 has CASA, and 22's and older want the
+# feature named, or refuse casa and print it as <unknown>)
+"$MC" -triple=sparc -mcpu=leon3 -mattr=+hasleoncasa -filetype=obj "$out/v.s" -o "$out/v.o" \
     2> "$out/mc.err" || {
     echo "llvm-mc rejected the vocabulary -- an entry claims an instruction"
     echo "that does not exist:"

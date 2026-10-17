@@ -63,6 +63,16 @@ CC=${FUZZ_CC:-clang}
 OUT=${FUZZ_OUT:-$F/out}
 mkdir -p "$OUT"
 W=$(mktemp -d "${TMPDIR:-/tmp}/embfuzz.XXXXXX") || exit 2
+# x86-64 runs on this host where the host IS x86-64 Linux, as tests/run.sh
+# runs the exec corpus, and on the QEMU harness (which needs the cross
+# newlib) anywhere else; EMBCC_X86_RUNNER=host|qemu forces one
+if [ -z "${EMBCC_X86_RUNNER:-}" ]; then
+    if [ "$(uname -s)-$(uname -m)" = Linux-x86_64 ]; then
+        EMBCC_X86_RUNNER=host
+    else
+        EMBCC_X86_RUNNER=qemu
+    fi
+fi
 trap 'rm -rf "$W"' EXIT INT TERM
 
 # the host reference: checksum of program $1, or nothing
@@ -77,8 +87,14 @@ board() {   # board NAME OPT FILE
     case $b in
     x86)
         "$EMBCC" --target=x86_64-elf $o -c "$src" -o "$d/p.o" || { echo "compile failed"; return; }
-        tests/harness/x86_64/link.sh -o "$d/p" "$d/p.o" > /dev/null 2>&1 || { echo "link failed"; return; }
-        tests/harness/x86_64/run.sh "$d/p" > /dev/null 2>&1; echo "exit $?" ;;
+        if [ "$EMBCC_X86_RUNNER" = host ]; then
+            cc -no-pie -Wl,-z,noexecstack -o "$d/p" "$d/p.o" -lm > /dev/null 2>&1 ||
+                { echo "link failed"; return; }
+            "$d/p" > /dev/null 2>&1; echo "exit $?"
+        else
+            tests/harness/x86_64/link.sh -o "$d/p" "$d/p.o" > /dev/null 2>&1 || { echo "link failed"; return; }
+            tests/harness/x86_64/run.sh "$d/p" > /dev/null 2>&1; echo "exit $?"
+        fi ;;
     a64)
         "$EMBCC" --target=aarch64-elf $o -c "$src" -o "$d/p.o" || { echo "compile failed"; return; }
         EMBCC_HARNESS_WORK=$d tests/harness/aarch64/link.sh -o "$d/p.elf" "$d/p.o" > /dev/null 2>&1 ||
@@ -129,7 +145,10 @@ if [ $selftest = 1 ]; then
     python3 "$F/gen$gen.py" 1 > "$W/p.c"
     ck=$(host_ck "$W/p.c" "") || { echo "selftest: the host build failed"; exit 1; }
     python3 "$F/gen$gen.py" 1 "$ck" > "$W/good.c"
-    python3 "$F/gen$gen.py" 1 $((ck + 1)) > "$W/bad.c"
+    # one more than the checksum, mod 2^64: a 64-bit unsigned value, which
+    # dash (Ubuntu's sh) refuses in $(( )) and bash wraps negative
+    wrong=$(python3 -c 'import sys; print((int(sys.argv[1]) + 1) % 2**64)' "$ck")
+    python3 "$F/gen$gen.py" 1 "$wrong" > "$W/bad.c"
     bad=0
     for b in $boards; do
         r=$(board $b -O0 "$W/good.c" 2>&1 | tail -1)

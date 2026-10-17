@@ -53,6 +53,10 @@ for x in "$MC" "$OD" "$OC" "$RE"; do
 done
 [ -n "$have_llvm" ] && "$MC" -triple=powerpc -mcpu=e500 /dev/null \
     -o /dev/null 2>/dev/null || have_llvm=
+# (and of the suite's LLVM: LLVM 18's llvm-objdump reads mfpid otherwise)
+if [ -n "$have_llvm" ] && why=$(llvm_too_old "$MC"); then
+    echo "SKIP the LLVM halves: $why"; have_llvm=
+fi
 command -v "$CLANG" >/dev/null 2>&1 &&
     "$CLANG" --target=$T -mcpu=e500 -c -x assembler /dev/null -o /dev/null \
         2>/dev/null || CLANG=

@@ -41,37 +41,55 @@ cc -std=c99 -Wall -Wextra -o "$out/tricorecheck" \
    src/platform/platform_common.c src/platform/platform_posix.c || {
     echo "tricorecheck did not build"; exit 1; }
 
-"$out/tricorecheck" --image "$out/walk.elf" || {
-    echo "tricorecheck could not build its walk"; exit 1; }
+# QEMU's TCG ops are what tricorecheck reads: the decoding is checked on
+# QEMU 10.1 or later (before it they were spelled otherwise), and on an
+# arm64 host only -- QEMU emits deposit_i32, extract_i32,
+# eqv_i32, orc_i32 and the 64-bit multiplies only where the host's TCG
+# backend has them, and on x86-64 expands them into other ops (636 of the
+# walk's 9433 on Ubuntu 26.04)
+case $(uname -m) in
+    arm64|aarch64) tcg_host= ;;
+    *) tcg_host="this $(uname -m) host's TCG expands deposit, extract, eqv, orc and the wide multiplies into other ops, where an arm64 host's keeps the ops tricorecheck reads" ;;
+esac
+if [ -n "$tcg_host" ]; then
+    echo "SKIP the decoding: $tcg_host"
+    n=
+elif why=$(qemu_too_old "$QEMU" 10.1 "its translator spells TCG's ops otherwise than 10.1 and later do (an add with carry is add2_i32, not addco_i32), and tricorecheck reads 10.1's"); then
+    echo "SKIP the decoding: $why"
+    n=
+else
+    "$out/tricorecheck" --image "$out/walk.elf" || {
+        echo "tricorecheck could not build its walk"; exit 1; }
 
-# The walk ends by writing its status to the test device, which ends QEMU
-# with it; the timeout bounds a walk that went astray (a jump into
-# unmapped memory runs on through zeros, which are NOPs).
-sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-20}" \
-    "$QEMU" -M tricore_testboard -cpu tc27x -display none -monitor none \
-    -kernel "$out/walk.elf" -d op -accel tcg,one-insn-per-tb=on \
-    -D "$out/walk.log" > "$out/qemu.txt" 2>&1
-st=$?
+    # The walk ends by writing its status to the test device, which ends QEMU
+    # with it; the timeout bounds a walk that went astray (a jump into
+    # unmapped memory runs on through zeros, which are NOPs).
+    sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-20}" \
+        "$QEMU" -M tricore_testboard -cpu tc27x -display none -monitor none \
+        -kernel "$out/walk.elf" -d op -accel tcg,one-insn-per-tb=on \
+        -D "$out/walk.log" > "$out/qemu.txt" 2>&1
+    st=$?
 
-# The decoding first: when the walk went astray, the instruction that sent
-# it there is usually one QEMU decoded as something else.
-"$out/tricorecheck" --check "$out/walk.log" > "$out/check.txt"
-ck=$?
-if [ "$ck" != 0 ]; then
-    head -60 "$out/check.txt"
-    exit 1
+    # The decoding first: when the walk went astray, the instruction that sent
+    # it there is usually one QEMU decoded as something else.
+    "$out/tricorecheck" --check "$out/walk.log" > "$out/check.txt"
+    ck=$?
+    if [ "$ck" != 0 ]; then
+        head -60 "$out/check.txt"
+        exit 1
+    fi
+    if [ "$st" != 0 ]; then
+        echo "the walk did not finish cleanly on the board: status $st"
+        echo "(a number is the run-time check that failed: a tc_li sequence or"
+        echo "an MTCR/MFCR round trip; 137 is the timeout)"
+        head -5 "$out/qemu.txt"
+        exit 1
+    fi
+    n=$(cat "$out/check.txt")
+    [ "$n" -ge 8000 ] || {
+        echo "the walk is only $n instructions -- it no longer sweeps the fields"
+        exit 1; }
 fi
-if [ "$st" != 0 ]; then
-    echo "the walk did not finish cleanly on the board: status $st"
-    echo "(a number is the run-time check that failed: a tc_li sequence or"
-    echo "an MTCR/MFCR round trip; 137 is the timeout)"
-    head -5 "$out/qemu.txt"
-    exit 1
-fi
-n=$(cat "$out/check.txt")
-[ "$n" -ge 8000 ] || {
-    echo "the walk is only $n instructions -- it no longer sweeps the fields"
-    exit 1; }
 
 k=$("$out/tricorecheck" --refuse list) || { echo "--refuse list failed"; exit 1; }
 i=0
@@ -85,7 +103,11 @@ while [ "$i" -lt "$k" ]; do
     i=$((i + 1))
 done
 
-echo "all $n TriCore instructions decode in QEMU as their operands say, every"
-echo "register in every field and both ends of every immediate; the tc_li and"
-echo "MTCR/MFCR checks pass on the board; and $k encoder range checks each"
-echo "refuse rather than truncate"
+if [ -n "$n" ]; then
+    echo "all $n TriCore instructions decode in QEMU as their operands say, every"
+    echo "register in every field and both ends of every immediate; the tc_li and"
+    echo "MTCR/MFCR checks pass on the board; and $k encoder range checks each"
+    echo "refuse rather than truncate"
+else
+    echo "$k encoder range checks each refuse rather than truncate"
+fi

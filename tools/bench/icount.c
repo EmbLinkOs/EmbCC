@@ -37,7 +37,9 @@
  * between. Static costs are added per translation block, inline, as the
  * count is; whether a block's last branch was taken is seen from where
  * the next block starts, by a callback per block executed. Written for
- * the plugin API of QEMU 11 (callbacks take userdata, not an id). */
+ * the plugin API of QEMU 11 (callbacks take userdata, not an id), and
+ * built against 9.1's and 10's as well, whose translation and exit
+ * callbacks take the plugin's id instead (QEMU_PLUGIN_VERSION < 7). */
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -102,7 +104,11 @@ static void tb_exec(unsigned int vcpu, void *ud)
     }
 }
 
+#if QEMU_PLUGIN_VERSION >= 7
 static void tb_trans(struct qemu_plugin_tb *tb, void *p)
+#else
+static void tb_trans(qemu_plugin_id_t p, struct qemu_plugin_tb *tb)
+#endif
 {
     (void)p;
     size_t n = qemu_plugin_tb_n_insns(tb);
@@ -141,8 +147,15 @@ static void tb_trans(struct qemu_plugin_tb *tb, void *p)
                                          e);
 }
 
+#if QEMU_PLUGIN_VERSION >= 7
 static void at_exit(void *p)
+#else
+static void at_exit(qemu_plugin_id_t p, void *u)
+#endif
 {
+#if QEMU_PLUGIN_VERSION < 7
+    (void)u;
+#endif
     (void)p;
     uint64_t total = qemu_plugin_u64_sum(count);
     uint64_t cyc = qemu_plugin_u64_sum(cost) + (is_avr ? 1 : 2) * taken;
@@ -187,7 +200,11 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id,
     count = qemu_plugin_scoreboard_u64(counts);
     costs = qemu_plugin_scoreboard_new(sizeof(uint64_t));
     cost = qemu_plugin_scoreboard_u64(costs);
+#if QEMU_PLUGIN_VERSION >= 7
     qemu_plugin_register_vcpu_tb_trans_cb(id, tb_trans, NULL);
+#else
+    qemu_plugin_register_vcpu_tb_trans_cb(id, tb_trans);
+#endif
     qemu_plugin_register_atexit_cb(id, at_exit, NULL);
     return 0;
 }

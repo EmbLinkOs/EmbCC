@@ -16,7 +16,11 @@ QEMU=${EMBCC_QEMU_ARM:-qemu-system-arm}
 sram=
 [ -n "${EMBCC_M0_SRAM:-}" ] && sram="-global nrf51-soc.sram-size=$EMBCC_M0_SRAM"
 # shellcheck disable=SC2086
-o=$("$here/../qrun.sh" "${EMBCC_QEMU_TIMEOUT:-10}" --until '==EXIT ' \
+# --until is the WHOLE sentinel, status and closing ==: the UART writes a
+# byte at a time, and stopping at '==EXIT ' killed QEMU before the status
+# now and then -- an empty status, 124, for a program that had passed
+# (thumbv8mbase-exec on CI, three of 1256 runs; tests/harness/mips/run.sh)
+o=$("$here/../qrun.sh" "${EMBCC_QEMU_TIMEOUT:-10}" --until '==EXIT -*[0-9][0-9]*==' \
     "$QEMU" -M microbit $sram -nographic -kernel "$1" 2>/dev/null)
 printf '%s\n' "$o" | sed '/^==EXIT /d'
 code=$(printf '%s\n' "$o" | sed -n 's/^==EXIT \(-*[0-9]*\)==.*/\1/p' | tail -1)

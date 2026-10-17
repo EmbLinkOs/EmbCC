@@ -141,18 +141,14 @@ tricore tricore-none-elf tricore qemu-system-tricore
 xtensa xtensa-none-elf xtensa qemu-system-xtensa
 rx rx-none-elf rx qemu-system-rx"
 # TriCore's harness prints through a QEMU plugin (tests/harness/tricore)
-inc=${QEMU_PLUGIN_INC:-/opt/homebrew/include}
-cc -shared -fPIC -O2 -I"$inc" $(pkg-config --cflags glib-2.0 2>/dev/null) \
-   -undefined dynamic_lookup -o "$out/putc.so" \
-   tests/harness/tricore/putc.c 2>/dev/null ||
-cc -shared -fPIC -O2 -I"$inc" $(pkg-config --cflags glib-2.0 2>/dev/null) \
-   -o "$out/putc.so" tests/harness/tricore/putc.c 2>/dev/null ||
-    echo "  (the TriCore output plugin does not build)"
+no_plugin=$(qemu_plugin tests/harness/tricore/putc.c "$out/putc.so")
 EMBCC_TRICORE_PLUGIN=$PWD/$out/putc.so
-export EMBCC_TRICORE_PLUGIN
+export EMBCC_TRICORE_PLUGIN no_plugin
 echo "$boards" | while read -r b t h q; do
     [ -n "${EMBCC_BOARDS:-}" ] && case " $EMBCC_BOARDS " in *" $b "*) ;; *) continue ;; esac
     command -v "$q" >/dev/null 2>&1 || { echo "  (SKIP $b: no $q)"; continue; }
+    [ $b = tricore ] && [ -n "$no_plugin" ] && {
+        echo "  (SKIP $b: its harness prints through a QEMU plugin, and $no_plugin)"; continue; }
     lib=build/libc/$t/librt.a
     [ -f "$lib" ] || fail "$b: no $lib (make rt-embedded)"
     o=$out/$b; mkdir -p "$o"

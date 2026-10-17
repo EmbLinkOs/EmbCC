@@ -144,7 +144,11 @@ grep -q 'C++ exceptions are not supported for sparc-none-elf' "$out/cxx.err" || 
 # same symbols, but for a string literal's, which -S names by its label.
 MC=${EMBCC_LLVM_MC:-llvm-mc}
 OD=${EMBCC_LLVM_OBJDUMP:-llvm-objdump}
-if command -v "$MC" >/dev/null 2>&1 && command -v "$OD" >/dev/null 2>&1; then
+# (by the suite's llvm-mc: LLVM 18's relocates a call to a local function
+# against .text, where -c names the function)
+if why=$(llvm_too_old "$MC"); then
+    echo "SKIP -S reassembled: $why"
+elif command -v "$MC" >/dev/null 2>&1 && command -v "$OD" >/dev/null 2>&1; then
     for f in tests/golden/sparc-abi-caller.c tests/exec/structs.c; do
         b=$(basename "$f" .c)
         "$EMBCC" --target=$T -O2 -I tests/golden -S "$f" -o "$out/$b.s" &&

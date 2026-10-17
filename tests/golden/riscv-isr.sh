@@ -36,6 +36,12 @@ rm -rf "$out"; mkdir -p "$out"
 EMBCC=${EMBCC:-./embcc}
 OBJDUMP=${EMBCC_LLVM_OBJDUMP:-llvm-objdump}
 CLANG=${EMBCC_CLANG:-clang}
+# clang's save set is a release's choice: LLVM 18's also saved fs0-fs11 in
+# a handler that calls. A clang older than the suite's is not compared with.
+if command -v "$CLANG" >/dev/null 2>&1 && clang_old=$(llvm_too_old "$CLANG"); then
+    echo "SKIP the comparison with clang's save set: $clang_old"
+    CLANG=no-such-clang
+fi
 d=tests/golden/riscv-isr
 fail() { echo "FAIL: $*"; exit 1; }
 

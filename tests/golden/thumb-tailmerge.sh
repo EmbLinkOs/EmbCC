@@ -316,11 +316,17 @@ for t in thumbv7em-none-eabi riscv32-unknown-elf x86_64-elf; do
     [ "$n" = 2 ] || { cat "$out/sw-$t.out"; fail "sw.c on $t: $n calls of f, not 2"; }
 done
 "$EMBCC" --target=x86_64-elf -Os -c "$out/sw.c" -o "$out/sw.o" || fail "sw.c: compile"
-tests/harness/x86_64/link.sh -o "$out/sw" "$out/sw.o" > "$out/sw-ln.log" 2>&1 || fail "sw.c: link"
-tests/harness/x86_64/run.sh "$out/sw" > /dev/null 2>&1
-rc=$?
-[ "$rc" = 42 ] || fail "sw.c exits $rc, not 42"
-echo "C: the switch's cases share one call through a merge temp, and the sum is C's"
+# run where lib.sh says x86-64 runs: this host, or the QEMU harness
+if why=$(x86_cannot_run); then
+    echo "SKIP the run of sw.c: $why"
+else
+    x86_link "$out/sw" "$out/sw.o" > "$out/sw-ln.log" 2>&1 ||
+        fail "sw.c: link: $(head -3 "$out/sw-ln.log")"
+    x86_run "$out/sw" > /dev/null 2>&1
+    rc=$?
+    [ "$rc" = 42 ] || fail "sw.c exits $rc, not 42"
+    echo "C: the switch's cases share one call through a merge temp, and the sum is C's"
+fi
 
 command -v "$OBJDUMP" >/dev/null 2>&1 || { echo "SKIP the C half: no $OBJDUMP"; exit 0; }
 "$EMBCC" --target=thumbv7em-none-eabi -Os -Ilib/libc/include \

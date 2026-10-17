@@ -28,9 +28,10 @@ out=$EMBCC_ROOT/tests/golden/out/sanitize-$ARCH
 rm -rf "$out"; mkdir -p "$out"
 
 # $OBJDUMP is the host's, which is x86-64's even in the aarch64 run, so
-# the disassembly half needs the target's own.
+# the disassembly half needs the target's own -- for x86-64 that IS
+# $OBJDUMP (Linux's own objdump, or x86_64-elf-objdump elsewhere).
 case "$ARCH" in
-    x86_64)  OD=x86_64-elf-objdump ;;
+    x86_64)  OD=$OBJDUMP ;;
     aarch64) OD=aarch64-elf-objdump ;;
     *)       OD= ;;
 esac
@@ -154,9 +155,12 @@ echo "and none of them traps when -fsanitize was not asked for"
 
 # ---- a check the optimizer can settle leaves nothing behind -----------
 # This is the reason the checks are IR and not a per-backend pattern.
-if [ -n "$OD" ] && command -v "$OD" > /dev/null 2>&1; then
+# (k.c and r.c are written whether or not there is an objdump to read
+# them with: the refusals at the end compile them too.)
 printf 'int f(int a){ return a / 7; }\nint g(int a){ return a << 3; }\n' \
     > "$out/k.c"
+printf 'int f(int a, int b){ return a / b; }\n' > "$out/r.c"
+if [ -n "$OD" ] && command -v "$OD" > /dev/null 2>&1; then
 "$EMBCC" --target="$TARGET" -O2 -fsanitize=undefined -c "$out/k.c" \
     -o "$out/k.o" || { echo "the constant-operand file does not compile"
                        exit 1; }
@@ -165,7 +169,6 @@ n=$("$OD" -d "$out/k.o" | grep -cE '\bud2\b|\budf\b|unimp' || true)
     echo "a divide by 7 and a shift by 3 left $n trap(s) at -O2"
     "$OD" -d "$out/k.o" | head -20; exit 1; }
 # ...while a runtime divisor still has its check.
-printf 'int f(int a, int b){ return a / b; }\n' > "$out/r.c"
 "$EMBCC" --target="$TARGET" -O2 -fsanitize=undefined -c "$out/r.c" \
     -o "$out/r.o" || { echo "the runtime-divisor file does not compile"; exit 1; }
 n=$("$OD" -d "$out/r.o" | grep -cE '\bud2\b|\budf\b|unimp' || true)

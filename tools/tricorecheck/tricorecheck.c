@@ -141,7 +141,9 @@ static void begin_at(unsigned long pc, const char *fmt, ...)
 }
 
 /* An expected TCG operation: the text, `?` standing for any name or
- * number, `|` separating alternatives. */
+ * number, `|` separating alternatives, and `;` joining operations that
+ * must follow each other -- one alternative can be what another QEMU
+ * spells in two ops (match_run). */
 static void want(const char *fmt, ...)
 {
     va_list ap;
@@ -405,7 +407,10 @@ static void alu_rr(void)
             case TC_NOR: want("or_i32 %s,%s,%s", D(dc), D(da), D(db));
                          want("not_i32 %s,%s", D(dc), D(dc)); break;
             case TC_ANDN: want("andc_i32 %s,%s,%s", D(dc), D(da), D(db)); break;
-            case TC_ORN: want("orc_i32 %s,%s,%s", D(dc), D(da), D(db)); break;
+            /* orc_i32 where the host's TCG backend has it, else not_i32
+             * into a temporary and or_i32 (an x86-64 host) */
+            case TC_ORN: want("orc_i32 %s,%s,%s|not_i32 ?,%s;or_i32 %s,%s,?",
+                              D(dc), D(da), D(db), D(db), D(dc), D(da)); break;
             case TC_NAND: want("and_i32 %s,%s,%s", D(dc), D(da), D(db));
                           want("not_i32 %s,%s", D(dc), D(dc)); break;
             case TC_XNOR: want("eqv_i32 %s,%s,%s", D(dc), D(da), D(db)); break;
@@ -1271,15 +1276,35 @@ static int match1(const char *p, int n, const char *op)
     return *op == 0;
 }
 
-static int match(const char *pat, const char *op)
+/* Does the alternative p[0..n) match ops[at] on? One op, or a run of
+ * them joined by `;` that must follow each other. Returns how many ops
+ * it takes, 0 if it does not match. */
+static int match_run(const char *p, int n, char **ops, int nops, int at)
+{
+    int used = 0;
+    for (;;) {
+        const char *semi = memchr(p, ';', (size_t)n);
+        int len = semi ? (int)(semi - p) : n;
+        if (at + used >= nops || !match1(p, len, ops[at + used]))
+            return 0;
+        used++;
+        if (!semi)
+            return used;
+        n -= len + 1;
+        p = semi + 1;
+    }
+}
+
+static int match(const char *pat, char **ops, int nops, int at)
 {
     const char *bar;
+    int used;
     while ((bar = strchr(pat, '|')) != NULL) {
-        if (match1(pat, (int)(bar - pat), op))
-            return 1;
+        if ((used = match_run(pat, (int)(bar - pat), ops, nops, at)) > 0)
+            return used;
         pat = bar + 1;
     }
-    return match1(pat, (int)strlen(pat), op);
+    return match_run(pat, (int)strlen(pat), ops, nops, at);
 }
 
 /* What every translation block has besides the instruction itself. */
@@ -1321,7 +1346,9 @@ static int check(const char *path)
                 goto next;
             }
         for (int w = 0; w < x->nwant; w++) {
-            while (at < b->nops && !match(x->want[w], b->ops[at])) {
+            int used = 0;
+            while (at < b->nops &&
+                   !(used = match(x->want[w], b->ops, b->nops, at))) {
                 if (x->exact && !noise(b->ops[at])) {
                     if (bad++ < 20)
                         printf("  0x%08lx %s: `%s` is more than it says\n",
@@ -1339,7 +1366,7 @@ static int check(const char *path)
                 }
                 goto next;
             }
-            at++;
+            at += used;
         }
         for (; x->exact && at < b->nops; at++)
             if (!noise(b->ops[at])) {

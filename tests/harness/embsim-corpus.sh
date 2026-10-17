@@ -26,12 +26,8 @@
 corpus_run() {
     command -v "$QA" > /dev/null 2>&1 || { echo "no $QA"; return 2; }
     mkdir -p "$CORP/p"
-    inc=${QEMU_PLUGIN_INC:-/opt/homebrew/include}
-    { cc -shared -fPIC -O2 -I"$inc" $(pkg-config --cflags glib-2.0 2>/dev/null) \
-         -undefined dynamic_lookup -o "$CORP/icount.so" tools/bench/icount.c ||
-      cc -shared -fPIC -O2 -I"$inc" $(pkg-config --cflags glib-2.0 2>/dev/null) \
-         -o "$CORP/icount.so" tools/bench/icount.c; } 2>/dev/null ||
-        { echo "QEMU's counting plugin does not build"; return 2; }
+    why=$(qemu_plugin tools/bench/icount.c "$CORP/icount.so") ||
+        { echo "QEMU's counting plugin does not build: $why"; return 2; }
     printf 'exec "%s" "$@" %s\n' "$EMBCC" "$CFLAGS_C" > "$CORP/cc"
     chmod +x "$CORP/cc"
     { EMBCC=$PWD/$CORP/cc sh tools/build-rt.sh "$CTRIPLE" "$CORP" &&

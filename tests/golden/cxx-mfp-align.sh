@@ -8,6 +8,7 @@
 # a C++ unit is now 2-aligned there, as clang aligns member functions.
 set -u
 echo "TEST-MARKER cxx-mfp-align"
+. "$(dirname "$0")/../lib.sh"
 EMBCC=${EMBCC:-./embcc}
 out=tests/golden/out/cxx-mfp-align
 rm -rf "$out"; mkdir -p "$out"
@@ -34,19 +35,20 @@ ga=$(awk '$4 == "g" { print $1 }' "$out/c.nm")
 [ $((0x$fa + 0x$fs)) -eq $((0x$ga)) ] ||
     fail "a C unit's functions are padded: $(cat "$out/c.nm")"
 echo "every function of a C++ unit is 2-aligned at -Os"
-# and the calls through the member pointers, run
-if [ -x tests/harness/x86_64/run.sh ] && command -v qemu-system-x86_64 >/dev/null 2>&1; then
+# and the calls through the member pointers, run where lib.sh says x86-64
+# runs: this host, or the QEMU harness
+if why=$(x86_cannot_run); then
+    echo "SKIP: the run ($why)"
+else
     for O in -O0 -O2 -Os; do
         "$EMBCC" --target=x86_64-elf $O -fno-exceptions -fno-rtti -c "$src" \
             -o "$out/r.o" || fail "prog.cc at $O"
-        tests/harness/x86_64/link.sh -o "$out/r" "$out/r.o" > "$out/link.log" 2>&1 ||
+        x86_link "$out/r" "$out/r.o" > "$out/link.log" 2>&1 ||
             fail "prog.cc at $O does not link: $(head -3 "$out/link.log")"
-        tests/harness/x86_64/run.sh "$out/r" > /dev/null 2>&1
+        x86_run "$out/r" > /dev/null 2>&1
         st=$?
         [ $st = 42 ] || fail "prog.cc at $O exits $st, not 42"
     done
     echo "the calls through member pointers return 42 at -O0, -O2 and -Os"
-else
-    echo "SKIP: the run (no x86-64 harness or qemu-system-x86_64)"
 fi
 echo "ok cxx-mfp-align"

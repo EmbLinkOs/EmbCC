@@ -37,7 +37,11 @@ for arch in x86_64 aarch64 thumb thumbv6m thumbv8m thumbv8mbase armv7a riscv32 r
     esac
     out=$("$EMBCC" --target=$triple --dump-predef) || {
         echo "--target=$triple --dump-predef exited nonzero"; exit 1; }
-    gcc=$(sh tools/gen-predef.sh --reference "$arch" 2>/dev/null >/dev/null && echo yes)
+    # (a reference of another release than the table's is no reference:
+    # tools/gen-predef.sh --reference-check says why)
+    gcc=
+    why=$(sh tools/gen-predef.sh --reference-check "$arch") &&
+        sh tools/gen-predef.sh --reference "$arch" >/dev/null 2>&1 && gcc=yes
     if [ "$gcc" = yes ]; then
         ref=$(sh tools/gen-predef.sh --reference "$arch")
         if [ "$out" != "$ref" ]; then
@@ -90,7 +94,7 @@ for arch in x86_64 aarch64 thumb thumbv6m thumbv8m thumbv8mbase armv7a riscv32 r
         done
         n=$(printf '%s\n' "$out" | wc -l)
         [ "$n" -ge 300 ] || { echo "$arch: only $n macros — table looks truncated"; exit 1; }
-        echo "$arch: no reference gcc; the known-fatal macros are present"
+        echo "$arch: no reference gcc${why:+ ($why)}; the known-fatal macros are present"
     fi
 done
 
@@ -99,7 +103,10 @@ done
 # are a promise about the code: __riscv_flen says what the FPU is, and
 # __riscv_float_abi_* where floating point is passed). Without -mabi= the
 # ABI follows -march= as clang's does. Sorted: the overrides are appended.
-if command -v clang >/dev/null 2>&1; then
+# Asked only of the clang release the tables were taken from.
+if ! clang_why=$(sh tools/gen-predef.sh --reference-check riscv32); then
+    echo "RISC-V -march/-mabi: not compared with clang ($clang_why)"
+else
     tmpa=${TMPDIR:-/tmp}/predef.rv.$$
     tmpb=${TMPDIR:-/tmp}/predef.rvref.$$
     nrv=0
@@ -143,7 +150,9 @@ fi
 # a v7-M or v6-M part, or a missing one on a v7E-M part, is a difference
 # here. __ARM_FEATURE_FMA is left out of both sides: clang claims it with
 # no FPU, and EmbCC does not (src/arch/predef.c, thumb_fpu_add).
-if command -v clang >/dev/null 2>&1; then
+if ! clang_why=$(sh tools/gen-predef.sh --reference-check thumb); then
+    echo "Cortex-M -mcpu/-march: not compared with clang ($clang_why)"
+else
     tmpa=${TMPDIR:-/tmp}/predef.cm.$$
     tmpb=${TMPDIR:-/tmp}/predef.cmref.$$
     ncm=0

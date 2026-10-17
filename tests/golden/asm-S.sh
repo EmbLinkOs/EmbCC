@@ -116,8 +116,11 @@ fi
 grep -q '\.byte' "$out/x.s" ||
     { echo "FAIL: aarch64 -S produced no instruction bytes"; exit 1; }
 # A64 is fixed 32-bit: every instruction line must carry four bytes.
-if grep -qE '^\t\.byte\t0x..(,0x..)?$' "$out/x.s"; then
+# (A real tab in the pattern: GNU grep reads \t as a plain t, and this
+# check could not fail on Linux.)
+tab=$(printf '\t')
+if grep -qE "^$tab\.byte${tab}0x..(,0x..)?\$" "$out/x.s"; then
     echo "FAIL: aarch64 -S grouped bytes into non-4-byte instructions"
-    grep -nE '^\t\.byte\t0x..(,0x..)?$' "$out/x.s" | head -3; exit 1
+    grep -nE "^$tab\.byte${tab}0x..(,0x..)?\$" "$out/x.s" | head -3; exit 1
 fi
 echo "-S works for aarch64 too, grouped 4 bytes to the instruction"

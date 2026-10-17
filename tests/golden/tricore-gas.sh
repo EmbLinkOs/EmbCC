@@ -35,7 +35,21 @@ export EMBCC_VERIFY=1
     echo "EmbCC could not assemble forms.S"; exit 1; }
 
 # ---- 1. the transfers, assembled from their text, on QEMU's translator -----
-if command -v "$QEMU" >/dev/null 2>&1; then
+# QEMU's TCG ops are what tricorecheck reads: this half runs on QEMU 10.1
+# or later (before it they were spelled otherwise), and on an arm64 host
+# only -- QEMU emits deposit_i32, extract_i32,
+# eqv_i32, orc_i32 and the 64-bit multiplies only where the host's TCG
+# backend has them, and on x86-64 expands them into other ops (636 of the
+# walk's 9433 on Ubuntu 26.04)
+case $(uname -m) in
+    arm64|aarch64) tcg_host= ;;
+    *) tcg_host="this $(uname -m) host's TCG expands deposit, extract, eqv, orc and the wide multiplies into other ops, where an arm64 host's keeps the ops tricorecheck reads" ;;
+esac
+if [ -n "$tcg_host" ]; then
+    echo "SKIP the translator half: $tcg_host"
+elif why=$(qemu_too_old "$QEMU" 10.1 "its translator spells TCG's ops otherwise than 10.1 and later do (an add with carry is add2_i32, not addco_i32), and tricorecheck reads 10.1's"); then
+    echo "SKIP the translator half: $why"
+elif command -v "$QEMU" >/dev/null 2>&1; then
     cc -std=c99 -Wall -Wextra -o "$out/tricorecheck" \
        tools/tricorecheck/tricorecheck.c src/arch/tricore/emit.c \
        src/arch/tricore/asm.c src/arch/code.c src/driver/util.c \
@@ -63,12 +77,11 @@ else
 fi
 
 # ---- 2. on the board ---------------------------------------------------------
-if command -v "$QEMU" >/dev/null 2>&1; then
-    inc=${QEMU_PLUGIN_INC:-/opt/homebrew/include}
-    cc -shared -fPIC -O2 -I"$inc" $(pkg-config --cflags glib-2.0 2>/dev/null) \
-       -undefined dynamic_lookup -o "$out/putc.so" \
-       tests/harness/tricore/putc.c 2>/dev/null ||
-        { echo "the harness's output plugin does not build"; exit 1; }
+if ! command -v "$QEMU" >/dev/null 2>&1; then
+    echo "SKIP the board half: $QEMU not found"
+elif ! why=$(qemu_plugin tests/harness/tricore/putc.c "$out/putc.so"); then
+    echo "SKIP the board half: the harness prints through a QEMU plugin, and $why"
+else
     EMBCC_TRICORE_PLUGIN=$PWD/$out/putc.so
     EMBCC_TRICORE_HARNESS=$PWD/$out
     export EMBCC_TRICORE_PLUGIN EMBCC_TRICORE_HARNESS EMBLD
@@ -94,8 +107,6 @@ if command -v "$QEMU" >/dev/null 2>&1; then
     done
     echo "forms.S, a file-scope block, a naked function and templates with"
     echo "labels run on the tricore_testboard at -O0, -O1, -O2 and -Os"
-else
-    echo "SKIP the board half: $QEMU not found"
 fi
 
 # ---- 3. the relocations ---------------------------------------------------------

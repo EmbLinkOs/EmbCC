@@ -113,12 +113,17 @@ oc pad -O binary -R .far --pad-to 0x08000800
 oc only -O binary -j .tab
 oc onlyhex -O ihex -j .text -j .data
 oc farhex -O ihex
-# S-records: the S0 header holds the output's name, so both are img.srec
+# S-records: the S0 header holds the output's name, so both are img.srec.
+# llvm-objcopy writes them from LLVM 19 on; an older one cannot referee them.
 mkdir -p "$out/s1" "$out/s2"
 "$B/arm-none-eabi-objcopy" -O srec -R .far "$out/img.elf" "$out/s1/img.srec" || fail "objcopy -O srec"
-(cd "$out/s2" && llvm-objcopy -O srec -R .far ../img.elf img.srec) || fail "llvm-objcopy -O srec"
-(cd "$out/s1" && "$B/arm-none-eabi-objcopy" -O srec -R .far ../img.elf img.srec) || fail "objcopy -O srec"
-cmp -s "$out/s1/img.srec" "$out/s2/img.srec" || fail "objcopy -O srec differs from llvm-objcopy"
+if objcopy_has_srec llvm-objcopy; then
+    (cd "$out/s2" && llvm-objcopy -O srec -R .far ../img.elf img.srec) || fail "llvm-objcopy -O srec"
+    (cd "$out/s1" && "$B/arm-none-eabi-objcopy" -O srec -R .far ../img.elf img.srec) || fail "objcopy -O srec"
+    cmp -s "$out/s1/img.srec" "$out/s2/img.srec" || fail "objcopy -O srec differs from llvm-objcopy"
+else
+    echo "SKIP the S-record comparison: llvm-objcopy writes none (LLVM 19 and later do)"
+fi
 if "$B/arm-none-eabi-objcopy" "$out/img.elf" "$out/copy.elf" 2> "$out/elf.err"; then
     fail "an ELF-to-ELF copy was accepted"
 fi

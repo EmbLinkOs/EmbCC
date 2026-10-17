@@ -50,7 +50,7 @@ if command -v llvm-objdump >/dev/null 2>&1; then
     for O in -O0 -O1 -O2 -Os; do
         "$EMBCC" --target=avr $O -c $D/shape.c -o "$out/shape.o" ||
             fail "$O: shape.c does not compile"
-        llvm-objdump -d --no-show-raw-insn --triple=avr "$out/shape.o" |
+        llvm-objdump -d --no-show-raw-insn --triple=avr --mcpu=atmega328p "$out/shape.o" |
             awk -f $D/shape.awk > "$out/shape$O.txt"
         [ "$(grep -c ' ok$' "$out/shape$O.txt")" = 45 ] || {
             grep -v ' ok$' "$out/shape$O.txt" | head -5

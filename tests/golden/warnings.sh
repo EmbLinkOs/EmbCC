@@ -369,7 +369,11 @@ lines=$(grep -o 'sc.c:[0-9]*' "$out/sc.txt" | cut -d: -f2 | sort -n | tr '\n' ' 
 [ "$lines" = "8 10 11 15 16 " ] || {
     sed "s|$out/||" "$out/sc.txt"
     echo "FAIL: -Wsign-compare at lines '$lines', expected '8 10 11 15 16 '"; exit 1; }
-if command -v clang > /dev/null 2>&1; then
+# (the suite's clang: LLVM 18 said nothing of -q->flags < u, which can be
+# negative, where 23 and EmbCC warn)
+if command -v clang > /dev/null 2>&1 && why=$(llvm_too_old clang); then
+    echo "SKIP the comparison with clang's -Wsign-compare: $why"
+elif command -v clang > /dev/null 2>&1; then
     clang -fsyntax-only -Wsign-compare "$out/sc.c" 2> "$out/sc-clang.txt" || true
     cl=$(grep -o 'sc.c:[0-9]*' "$out/sc-clang.txt" | cut -d: -f2 | sort -n | tr '\n' ' ')
     [ "$cl" = "$lines" ] || {
@@ -432,8 +436,11 @@ done
     cat "$out/cs-f2.txt"; echo "FAIL: -Wformat=2 is not -Wformat-security and -nonliteral"; exit 1; }
 grep -q 'cs.c:21:.*here' "$out/cs-implicit-fallthrough.txt" || {
     cat "$out/cs-implicit-fallthrough.txt"; echo "FAIL: the fall-through note is not at the next label"; exit 1; }
-# the referee, for those clang has in C: the same lines
-if command -v clang > /dev/null 2>&1; then
+# the referee, for those clang has in C: the same lines (from the suite's
+# clang, as above)
+if command -v clang > /dev/null 2>&1 && why=$(llvm_too_old clang); then
+    echo "SKIP the coding-standard lines against clang's: $why"
+elif command -v clang > /dev/null 2>&1; then
     for w in undef strict-prototypes missing-prototypes cast-qual double-promotion \
              vla switch-default implicit-fallthrough format-security; do
         clang --target=x86_64-elf -W$w -fsyntax-only -isystem "$X86_NEWLIB/include" \

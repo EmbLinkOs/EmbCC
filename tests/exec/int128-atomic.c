@@ -81,5 +81,16 @@ int main(void)
     __sync_lock_release(&sobj);
     if (sobj != 0 || __sync_sub_and_fetch(&sobj, 1) != -1)
         return 18;
+    /* nand of an object that is not 0: check 10 above passed when the
+     * loop negated a stale temporary that happened to be 0 -- it ran the
+     * NOT before the AND it negates, which only real hardware (garbage
+     * on the stack) caught */
+    obj = a;
+    if (__atomic_nand_fetch(&obj, a, __ATOMIC_SEQ_CST) != ~a || obj != ~a)
+        return 19;
+    obj = a;
+    if (__atomic_fetch_nand(&obj, b, __ATOMIC_SEQ_CST) != a ||
+        obj != ~(a & b))
+        return 20;
     return 42;
 }

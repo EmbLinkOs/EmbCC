@@ -205,7 +205,13 @@ int main(void)
             1.4e-45f, 16777216.0f, 12345.678f, -12345.678f
         };
         for (k = 0; k < (int)(sizeof fv / sizeof fv[0]); k++) {
-            chkb("f2i", __fixsfsi(fv[k]) == (int)fv[k], 1, fv[k], 0);
+            /* (int) of a float past INT_MAX is undefined, and the hosts
+             * answer differently -- ARM saturates to INT_MAX, x86 makes
+             * INT_MIN -- so 4294967040 is asked only of the unsigned
+             * conversion, where it fits, and not compared with whatever
+             * this host's cvttss2si happens to give. */
+            if (fv[k] >= -2147483648.0f && fv[k] < 2147483648.0f)
+                chkb("f2i", __fixsfsi(fv[k]) == (int)fv[k], 1, fv[k], 0);
             if (fv[k] >= 0.0f)
                 chkb("f2u", __fixunssfsi(fv[k]) == (unsigned)fv[k], 1,
                      fv[k], 0);

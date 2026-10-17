@@ -198,8 +198,13 @@ cat > "$out/cx.c" <<'EOF'
 void writec(int c); void puts_(const char *s);
 static void phex(unsigned char b)
 { static const char d[] = "0123456789abcdef"; writec(d[b >> 4]); writec(d[b & 15]); }
+/* a NaN's sign cleared: inf * 0 makes the machine's default NaN, whose
+ * sign is the machine's (x86's is negative) and neither C nor IEEE 754's */
 static void pf(float f)
-{ unsigned char *p = (unsigned char *)&f; int i; for (i = 3; i >= 0; i--) phex(p[i]); writec(' '); }
+{ unsigned char *p = (unsigned char *)&f; int i;
+  if ((p[3] & 0x7f) == 0x7f && (p[2] & 0x80) && ((p[2] & 0x7f) | p[1] | p[0]))
+      p[3] &= 0x7f;
+  for (i = 3; i >= 0; i--) phex(p[i]); writec(' '); }
 static float _Complex mul(float _Complex a, float _Complex b) { return a * b; }
 static float _Complex dv(float _Complex a, float _Complex b) { return a / b; }
 static float _Complex mk(float r, float i)

@@ -254,7 +254,13 @@ static void timer(void)
     *OCR1AL = 200;
     *TCCR1A = 0;
     *TIMSK1 = 0x02;                         /* OCIE1A */
-    *TCCR1B = 0x09;                         /* CTC on OCR1A, clock /1 */
+    /* CTC on OCR1A, clock /1024: a match every 12.9 ms. At /1 it was every
+     * 12.6 us of QEMU's timer, which keeps the host's time, and a match
+     * landing inside the fifth tick's handler, before it clears TIMSK1,
+     * leaves QEMU's interrupt raised -- its TIMSK1 write never lowers it --
+     * so a sixth tick ran after RETI: on CI's slower runner QEMU printed 6
+     * where EmbSim (and the part) print 5. */
+    *TCCR1B = 0x0d;
     k_sei();
     while (ticks < 5)
         ;

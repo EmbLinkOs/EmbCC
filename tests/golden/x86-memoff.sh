@@ -71,14 +71,20 @@ int main(void)
     return 42;
 }
 EOF
-for O in -O1 -Os -O2; do
-    "$EMBCC" --target=x86_64-elf $O -c "$out/m.c" -o "$out/m.o" || fail "m.c $O: compile"
-    tests/harness/x86_64/link.sh -o "$out/m" "$out/m.o" > "$out/ln.log" 2>&1 || fail "m.c $O: link"
-    tests/harness/x86_64/run.sh "$out/m" > /dev/null 2>&1
-    rc=$?
-    [ "$rc" = 42 ] || fail "m.c $O exits $rc, not 42: a field was stored at the wrong offset"
-done
-echo "x86-memoff: every field holds what C says at -O1, -Os and -O2"
+# run where lib.sh says x86-64 runs: this host, or the QEMU harness
+if why=$(x86_cannot_run); then
+    echo "SKIP the runs: $why"
+else
+    for O in -O1 -Os -O2; do
+        "$EMBCC" --target=x86_64-elf $O -c "$out/m.c" -o "$out/m.o" || fail "m.c $O: compile"
+        x86_link "$out/m" "$out/m.o" > "$out/ln.log" 2>&1 ||
+            fail "m.c $O: link: $(head -3 "$out/ln.log")"
+        x86_run "$out/m" > /dev/null 2>&1
+        rc=$?
+        [ "$rc" = 42 ] || fail "m.c $O exits $rc, not 42: a field was stored at the wrong offset"
+    done
+    echo "x86-memoff: every field holds what C says at -O1, -Os and -O2"
+fi
 
 command -v "$OBJDUMP" >/dev/null 2>&1 || { echo "SKIP the disassembly half: no $OBJDUMP"; exit 0; }
 "$EMBCC" --target=x86_64-elf -Os -c "$out/m.c" -o "$out/m.o" || fail "m.c: compile"

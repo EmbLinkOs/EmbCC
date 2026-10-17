@@ -131,7 +131,10 @@ echo "under a timer interrupt writing the neighbouring lanes, fetch_add on every
 # ---- every order, as clang emits it -----------------------------------
 # orders.c: every operation at every width and memory order; each
 # function's atomic instructions, aq and rl included, must be clang's
-if command -v clang >/dev/null 2>&1 && command -v llvm-objdump >/dev/null 2>&1; then
+# (against the suite's clang: LLVM 18 put other orders on its lr and sc)
+if command -v clang >/dev/null 2>&1 && why=$(llvm_too_old clang); then
+    echo "SKIP the orders against clang's: $why"
+elif command -v clang >/dev/null 2>&1 && command -v llvm-objdump >/dev/null 2>&1; then
     shape() {
         llvm-objdump -d --no-show-raw-insn --mattr=+a,+c,+m "$1" | awk '
             /^[0-9a-f]+ <[^>]+>:$/ { if (f != "") print f ":" s

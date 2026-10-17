@@ -54,7 +54,7 @@ x86_gcc_c() {
 x86_link() {
     exe=$1; shift
     if [ "$EMBCC_X86_RUNNER" = host ]; then
-        cc -no-pie -o "$exe" "$@"
+        cc -no-pie -Wl,-z,noexecstack -o "$exe" "$@" -lm   # as tests/run.sh links
     else
         "$EMBCC_ROOT/tests/harness/x86_64/link.sh" -o "$exe" "$@"
     fi
@@ -67,6 +67,100 @@ x86_run() {
     else
         "$EMBCC_ROOT/tests/harness/x86_64/run.sh" "$1"
     fi
+}
+
+# x86_cannot_run  — prints why this host can neither run an x86-64 program
+# itself nor boot one on the QEMU harness, and is true; false when it can.
+# A Linux x86-64 host runs it; any other needs the harness's cross gcc and
+# binutils, QEMU, and the cross newlib (docs/manual/getting-started.md).
+x86_cannot_run() {
+    [ "$EMBCC_X86_RUNNER" = host ] && return 1
+    for _t in "$X86_GCC" "${EMBCC_X86_LD:-x86_64-elf-ld}" \
+              "${EMBCC_X86_OBJCOPY:-x86_64-elf-objcopy}" qemu-system-x86_64; do
+        command -v "$_t" >/dev/null 2>&1 || {
+            echo "no $_t for the x86-64 QEMU harness"; return 0; }
+    done
+    [ -d "$X86_NEWLIB/lib" ] || {
+        echo "no x86_64 newlib at $X86_NEWLIB for the x86-64 QEMU harness (set EMBCC_X86_NEWLIB)"
+        return 0; }
+    return 1
+}
+
+# qemu_plugin SRC OUT.so  — build a QEMU TCG plugin (the TriCore harness's
+# output, tools/bench/icount.c's counts) against qemu-plugin.h, which must
+# be the installed QEMU's own: QEMU_PLUGIN_INC names its directory, and
+# Homebrew's is the default. Linux distributions package no qemu-plugin.h;
+# it is include/qemu/qemu-plugin.h in the source of the installed version.
+# Prints why, and is false, when the plugin cannot be built.
+qemu_plugin() {
+    _inc=${QEMU_PLUGIN_INC:-/opt/homebrew/include}
+    [ -f "$_inc/qemu-plugin.h" ] || {
+        echo "no qemu-plugin.h in $_inc (set QEMU_PLUGIN_INC to the directory of the installed QEMU's include/qemu/qemu-plugin.h)"
+        return 1; }
+    # macOS links a plugin's calls into QEMU only when told they resolve
+    # at load time; Linux does that unasked, and has no such flag
+    # shellcheck disable=SC2046
+    cc -shared -fPIC -O2 -I"$_inc" $(pkg-config --cflags glib-2.0 2>/dev/null) \
+       -undefined dynamic_lookup -o "$2" "$1" > /dev/null 2>&1 ||
+    cc -shared -fPIC -O2 -I"$_inc" $(pkg-config --cflags glib-2.0 2>/dev/null) \
+       -o "$2" "$1" > "$2.log" 2>&1 || {
+        echo "$1 does not build against $_inc/qemu-plugin.h (the plugins here are written for the plugin API of QEMU 9.2 or later): $(grep -m1 'error' "$2.log")"
+        return 1; }
+}
+
+# objcopy_has_srec OBJCOPY  — that llvm-objcopy writes S-records, which
+# LLVM 19 was the first to do (18 says "invalid output format: 'srec'").
+# Asked of one byte of raw binary.
+objcopy_has_srec() {
+    _p=$(mktemp "${TMPDIR:-/tmp}/srec.XXXXXX")
+    printf 'x' > "$_p"
+    "$1" -I binary -O srec "$_p" "$_p.srec" > /dev/null 2>&1; _r=$?
+    rm -f "$_p" "$_p.srec"
+    return $_r
+}
+
+# The LLVM release the suite's LLVM referees are: the clang the generated
+# tables record (src/arch/thumb/predef.c), whose llvm-mc, llvm-objdump and
+# clang the encodings, disassemblies, macros and conventions were checked
+# against. An older release encodes, prints and decides a few things
+# otherwise -- LLVM 18's disassembler prints andi for zext.b and its clang
+# emits no R_LARCH_CALL36, clang 22 has no __WCHAR_MIN__ -- and a test
+# that compares EmbCC with it is testing LLVM. (Where a flag makes an old
+# release agree, a test passes it instead: --mcpu for AVR, +hasleoncasa
+# for SPARC.)
+LLVM_REFEREE=$(sed -n '1s/.* clang \([0-9][0-9]*\)\..*/\1/p' \
+                   "$EMBCC_ROOT/src/arch/thumb/predef.c" 2>/dev/null)
+
+# llvm_too_old TOOL  — prints why TOOL (clang, llvm-mc, llvm-objdump ...)
+# is older than that release, and is true; false when it is not, or when
+# its version cannot be read.
+llvm_too_old() {
+    _v=$("$1" --version 2>/dev/null |
+         sed -En 's/.*(LLVM|clang) version ([0-9]+).*/\2/p' | head -1)
+    [ -n "$_v" ] && [ -n "$LLVM_REFEREE" ] && [ "$_v" -lt "$LLVM_REFEREE" ] || return 1
+    echo "$1 is LLVM $_v, and this test's references are LLVM $LLVM_REFEREE's"
+}
+
+# skip_if_llvm_old TOOL...  — ends the test, reported as skipped, when a
+# TOOL is older than that release, and says which.
+skip_if_llvm_old() {
+    for _t in "$@"; do
+        if _w=$(llvm_too_old "$_t"); then
+            echo "skipped: $_w"; exit 0
+        fi
+    done
+}
+
+# qemu_too_old QEMU MAJOR.MINOR WHAT  — prints why, and is true, when that
+# QEMU is older than MAJOR.MINOR; WHAT says what the older one gets wrong.
+# False when it is not, or when its version cannot be read.
+qemu_too_old() {
+    _v=$("$1" --version 2>/dev/null |
+         sed -n 's/^QEMU emulator version \([0-9]*\)\.\([0-9]*\).*/\1 \2/p')
+    [ -n "$_v" ] || return 1
+    set -- "$1" "$2" "$3" $_v
+    [ $(($4 * 100 + $5)) -lt $((${2%%.*} * 100 + ${2#*.})) ] || return 1
+    echo "$1 is QEMU $4.$5, and $3"
 }
 
 # x86_gcc_exe EXE SRC [flags...]  — compile and link with the referee gcc.
@@ -118,7 +212,43 @@ t_run() {
 # does inline, and the cross toolchains have no libatomic. Prints why.
 no_gcc_reference() {
     why=$(sed -n 's|.*// no-gcc-reference: *\(.*\)|\1|p' "$1" | head -1)
+    [ -n "$why" ] || why=$(gcc_too_old_for "$1")
     [ -n "$why" ] && echo "$(basename "$1" .c): no gcc reference ($why), skipped"
+}
+
+# gcc_too_old_for FILE: prints what of FILE's C the target's referee gcc
+# has not got, if anything -- _BitInt is GCC 14's, _Countof and the 0o
+# octal constants GCC 16's, and Ubuntu 24.04's cc is GCC 13, 26.04's 15.
+# Too old a referee is no reference, not a failure of the program;
+# EMBCC_X86_GCC names a newer one. A feature is asked of the referee only
+# for a program that uses it (gcc_has).
+gcc_too_old_for() {
+    if grep -q '_BitInt' "$1" && ! gcc_has bitint 'unsigned _BitInt(12) x;'; then
+        echo "the referee gcc has no _BitInt; GCC 14 and later have"
+    elif grep -q '_Countof' "$1" && ! gcc_has countof 'int a[3]; int n = _Countof(a);'; then
+        echo "the referee gcc has no _Countof; GCC 16 and later have"
+    elif grep -Eq '\b0[oO][0-7]' "$1" && ! gcc_has octal 'int n = 0o17;'; then
+        echo "the referee gcc has no 0o constants; GCC 16 and later have"
+    fi
+}
+
+# gcc_has NAME SOURCE: the target's referee gcc compiles SOURCE as C11, as
+# the golden comparisons build. The answer is kept in _gcc_has_NAME (for
+# the shell that asked).
+gcc_has() {
+    eval "_h=\${_gcc_has_$1:-}"
+    if [ -z "$_h" ]; then
+        _p=$(mktemp "${TMPDIR:-/tmp}/gcchas.XXXXXX")
+        printf '%s\n' "$2" > "$_p.c"
+        if t_gcc_c "$_p.c" -std=c11 -o "$_p.o" >/dev/null 2>&1; then
+            _h=yes
+        else
+            _h=no
+        fi
+        rm -f "$_p" "$_p.c" "$_p.o"
+        eval "_gcc_has_$1=\$_h"
+    fi
+    [ "$_h" = yes ]
 }
 
 pinned_elsewhere() {

@@ -290,17 +290,26 @@ int main(void)
         static unsigned char cb = 0xf0;
         static unsigned short ch = 0xfff0;
         u32 h[2] = { 0 };
+        /* The call first, then the value it left. As two arguments of one
+         * call, exb's call and the read of cb are indeterminately
+         * sequenced (C11 6.5.2.2p10): GCC on x86-64 read cb before the
+         * call where clang and EmbCC read it after, and on CI the host's
+         * model was not the board's. */
         for (int i = 0; i < NV; i++) {
-            h[0] = mix(mix(h[0], exb(&cb, vals[i])), cb);
-            h[1] = mix(mix(h[1], exh(&ch, vals[i])), ch);
+            u32 r = exb(&cb, vals[i]);
+            h[0] = mix(mix(h[0], r), cb);
+            r = exh(&ch, vals[i]);
+            h[1] = mix(mix(h[1], r), ch);
         }
         line("ldrexb/strexb", h[0]); line("ldrexh/strexh", h[1]);
 #if defined(HOST) || !defined(__thumb__)
         {
             static u64 cd = 0xfffffffffffffff0ull;
             u32 hd = 0;
-            for (int i = 0; i < NV; i++)
-                hd = mix64(mix64(hd, exd(&cd, vals[i])), cd);
+            for (int i = 0; i < NV; i++) {
+                u64 r = exd(&cd, vals[i]);          /* (as above) */
+                hd = mix64(mix64(hd, r), cd);
+            }
             line("ldrexd/strexd", hd);
         }
 #endif

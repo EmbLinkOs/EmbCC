@@ -38,7 +38,9 @@ printf 'char c; int f(void){ return __atomic_fetch_add(&c, 1, 5); }\n' > "$out/o
 "$EMBCC" --target=$T -O2 -c "$out/one.c" -o "$out/one.o" ||
     { echo "a one-byte fetch-and-add did not compile"; exit 1; }
 OD=${EMBCC_LLVM_OBJDUMP:-llvm-objdump}
-if "$OD" -d --mcpu=leon3 "$out/one.o" > "$out/one.dis" 2>/dev/null; then
+# (+hasleoncasa: LLVM 23's leon3 has CASA, and 22's and older want the
+# feature named, or refuse casa and print it as <unknown>)
+if "$OD" -d --mcpu=leon3 --mattr=+hasleoncasa "$out/one.o" > "$out/one.dis" 2>/dev/null; then
     for insn in casa sll srl; do
         grep -q "[[:space:]]$insn[[:space:]]" "$out/one.dis" || {
             echo "a one-byte fetch-and-add has no $insn:"; cat "$out/one.dis"
@@ -67,7 +69,10 @@ board() {
         sh tests/harness/sparc/run.sh "$S/sub.elf" 2>/dev/null |
         tr -d '\r' | sed -n '1,/^DONE/p' > "$out/got.txt"
 }
-"$CLANG" --target=$T -mcpu=leon3 -msoft-float -ffreestanding -fno-builtin \
+# (the feature named for clang 22 and older, as for llvm-mc above: without
+# it their leon3 calls __atomic_* where 23's has casa)
+"$CLANG" --target=$T -mcpu=leon3 -Xclang -target-feature -Xclang +hasleoncasa \
+    -msoft-float -ffreestanding -fno-builtin \
     -O2 -c $SUB -o "$S/sub.o" 2>/dev/null || {
     echo "(SKIP: clang does not build subword.c for $T)"; exit 0; }
 board "clang"

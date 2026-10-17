@@ -13,6 +13,8 @@ echo "TEST-MARKER loongarch-atomics"
 
 QEMU=${EMBCC_QEMU_LOONGARCH:-qemu-system-loongarch64}
 command -v "$QEMU" >/dev/null 2>&1 || { echo "skipped: $QEMU not found"; exit 0; }
+why=$(qemu_too_old "$QEMU" 10.0 "the harness's image does not start on it: on 8.2 no program printed a byte, and 10.2 is the oldest seen to run it") && {
+    echo "skipped: $why"; exit 0; }
 T=loongarch64-unknown-elf
 EMBCC=${EMBCC:-./embcc}
 EMBLD=${EMBLD:-./embld}
