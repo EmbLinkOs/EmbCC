@@ -41,7 +41,7 @@ and `Threads::Threads` is `-pthread`.
 The file sets:
 
 - the C, C++ and assembler compilers to `embcc`, identified to CMake as
-  EmbCC (`The C compiler identification is EmbCC 1.0.0`,
+  EmbCC (`The C compiler identification is EmbCC 0.0.1`,
   `CMAKE_C_COMPILER_ID` is `EmbCC`), with EmbCC's rules beside it in
   `Compiler/EmbCC-*.cmake`: the flags for each build type (`MinSizeRel`
   is `-Os`), each `C_STANDARD` and `CXX_STANDARD` (C17 and C++20 when none
