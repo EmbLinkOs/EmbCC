@@ -209,7 +209,11 @@ if [ "$HAVE_QEMU" = 1 ]; then
         echo "NA $opt $n (QEMU did not finish)"; exit 0
     fi
 fi
-"$EMBSIM" $o.elf --board uno --max-insns 4000000000 --count $o.en > $o.eout 2> $o.eerr; es=$?
+# ...and what QEMU finished, EmbSim must: its budget is more than QEMU's
+# AVR runs in 60 s on any host. It was 4e9, and on CI's runner QEMU
+# finished divconst-32 at -O2, which takes 4.45e9 -- where the Mac's QEMU
+# did not, so it was not applicable there.
+"$EMBSIM" $o.elf --board uno --max-insns 20000000000 --count $o.en > $o.eout 2> $o.eerr; es=$?
 if [ $es != 0 ] || ! grep -q '==END==' $o.eout; then
     echo "DIFF $opt $n: EmbSim exits $es without the sentinel $(head -c 200 $o.eerr | tr '\n' ' ')"
     exit 0
