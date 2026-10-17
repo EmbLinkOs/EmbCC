@@ -1618,9 +1618,11 @@ cross toolchain; only the program under test comes from EmbCC.
 
 ## C++ on the embedded targets
 
-C++ is compiled for the 32-bit ARM targets (the Cortex-M triples and
-`armv7a-none-eabi`) and for `riscv32-unknown-elf` without exceptions,
-with or without RTTI. A firmware build looks like this:
+C++ is compiled without exceptions, with or without RTTI, for the 32-bit
+embedded targets: the Cortex-M triples and `armv7a-none-eabi`,
+`riscv32-unknown-elf`, MIPS, PowerPC, SPARC, ColdFire, Xtensa, TriCore
+and RX ([C++ targets](cxx.md#targets) has the exact list). A firmware
+build looks like this:
 
 ```sh
 embcc --target=thumbv7em-none-eabihf --opt=size --no-exceptions --no-rtti \
@@ -1635,19 +1637,18 @@ The startup code must call the functions between `__init_array_start`
 and `__init_array_end` before `main`: that is where the constructors of
 namespace-scope objects are. `make libcxx-embedded` builds the C++
 runtime (`operator new` and `delete`, the guard functions,
-`__aeabi_atexit`, the RTTI classes and `__dynamic_cast`); objects follow the ARM C++ ABI and link with
-clang++'s. Exceptions are refused by name, as there are no unwind tables
+`__aeabi_atexit`, the RTTI classes and `__dynamic_cast`). On ARM the
+objects follow the ARM C++ ABI and link with clang++'s. Exceptions are refused by name, as there are no unwind tables
 for these machines:
 
 ```text
 embcc: error: C++ exceptions are not supported for thumbv7m-none-eabi yet: EmbCC writes no ARM EHABI unwind tables (.ARM.exidx); compile with -fno-exceptions
 ```
 
-On AVR, MIPS32, Xtensa and TriCore EmbCC refuses to generate code for a
-C++ unit:
+On AVR EmbCC refuses to generate code for a C++ unit:
 
 ```text
-embcc: error: C++ is not yet supported for avr: the C++ front end follows the C++ ABI of x86-64, AArch64, 32-bit ARM and riscv32, and this target's (2-byte pointers) is not implemented
+embcc: error: C++ is not yet supported for avr: the C++ lowering assumes a 32-bit int and 4-byte pointers (integral promotions, member pointers, RTTI), and this target's are 16 bits
 ```
 
 `--syntax-only`, `-E`, `-M` and `--deps-only` still accept C++ there. See
