@@ -53,5 +53,20 @@ else
     echo "BOUNDARY MISMATCH vs objdump:"; diff "$out/e.txt" "$out/o.txt" | head; fail=1
 fi
 
+# 0f c7 is a group told apart by ModRM.reg: EmbCC's 16-byte atomics are
+# lock cmpxchg16b (/1 with REX.W), which the decoder once called rdrand
+cat > "$out/cas.c" <<'CEOF'
+static _Alignas(16) unsigned __int128 obj;
+int cas(unsigned __int128 *e, unsigned __int128 d)
+{
+    return __atomic_compare_exchange_n(&obj, e, d, 0, __ATOMIC_SEQ_CST,
+                                       __ATOMIC_SEQ_CST);
+}
+CEOF
+"$EMBCC" -c "$out/cas.c" -o "$out/cas.o" || { echo "embcc failed on cas.c"; exit 1; }
+cdis=$("$EMBDBG" "$out/cas.o" disassemble cas)
+echo "$cdis" | grep -q "lock cmpxchg16b" || { echo "cmpxchg16b not named:"; echo "$cdis" | grep -i 'rdrand\|c7'; fail=1; }
+echo "$cdis" | grep -q "rdrand" && { echo "cmpxchg16b printed as rdrand"; fail=1; }
+
 [ "$fail" -eq 0 ] && echo "embdbg-disasm: decode correct, boundaries == objdump, mixed source" || exit 1
 echo "embdbg-disasm golden passed (native x86-64 disassembler)"
