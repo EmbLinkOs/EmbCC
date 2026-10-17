@@ -106,6 +106,13 @@ for t in $boards; do
             2>/dev/null; then
         echo "$t: no $REF for $t: EmbCC with itself only"; REF=
     fi
+    # (LLVM 23's SPARC long double is the 16-byte quad EmbCC's is; 18's
+    # is 8 bytes, another ABI, and every pairing differs in that fact)
+    case $t in sparc*)
+        if [ -n "$REF" ] && why=$(llvm_too_old "$REF"); then
+            echo "$t: $why: EmbCC with itself only"; REF=
+        fi ;;
+    esac
     case $t in tricore*)
         [ -n "${EMBCC_TRICORE_PLUGIN:-}" ] || {
             why=$(qemu_plugin tests/harness/tricore/putc.c "$out/putc.so") || {

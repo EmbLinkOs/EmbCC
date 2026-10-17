@@ -142,7 +142,11 @@ EOF
 "$EMBCC" --target=$T -O1 -c "$out/stubs.c" -o "$out/stubs.o" &&
 "$EMBCC" --target=$T -c "$d/layout.S" -o "$out/layout.o" || {
     echo "layout.S does not assemble"; exit 1; }
-if [ -n "$CLANG" ] && [ -n "$have_llvm" ]; then
+# (clang of the suite's LLVM: 18's assembler stops at layout.S's padding,
+# "unable to write nop sequence of 1 bytes")
+if [ -n "$CLANG" ] && [ -n "$have_llvm" ] && why=$(llvm_too_old "$CLANG"); then
+    echo "SKIP layout.S against clang's: $why"
+elif [ -n "$CLANG" ] && [ -n "$have_llvm" ]; then
     "$CLANG" --target=$T -mcpu=leon3 -c "$d/layout.S" -o "$out/layout-clang.o" \
         2> "$out/layout-clang.err" || {
         echo "clang: layout.S"; cat "$out/layout-clang.err"; exit 1; }
