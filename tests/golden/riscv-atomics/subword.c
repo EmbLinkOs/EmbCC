@@ -91,12 +91,19 @@ int main(void)
     puts_("\n");
 
     /* test-and-set, an exchange of a byte with 1, on every lane, with
-     * set and clear neighbours */
+     * set and clear neighbours. The lane itself holds 0 first, as a flag
+     * must: GCC returns any other byte as it found it (0x5A for 0x5A) and
+     * clang as 1, so a host built by either is the reference. Lanes 1 and
+     * 3 are tried in a second word, whose patterns sit in 0 and 2. */
     static unsigned char tb[4] __attribute__((aligned(4))) = { 0, 0x5A, 0, 0xA5 };
+    static unsigned char tc[4] __attribute__((aligned(4))) = { 0xA5, 0, 0x5A, 0 };
     for (int k = 0; k < 4; k++) {
-        putn(__atomic_test_and_set(&tb[k], __ATOMIC_SEQ_CST));
-        putn(tb[0]); putn(tb[1]); putn(tb[2]); putn(tb[3]);
+        unsigned char *t = k & 1 ? tc : tb;
+        putn(__atomic_test_and_set(&t[k], __ATOMIC_SEQ_CST));
+        putn(t[0]); putn(t[1]); putn(t[2]); putn(t[3]);
     }
+    /* and a flag that is already set */
+    putn(__atomic_test_and_set(&tb[0], __ATOMIC_SEQ_CST)); putn(tb[0]);
     puts_("\nDONE\n");
     return 0;
 }
