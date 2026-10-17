@@ -93,7 +93,9 @@ build() {          # build PROFILE OPT -> $out/PROFILE$OPT/{secure,ns}.elf
 }
 run() {            # run PROFILE OPT
     b=$out/$1$2
-    sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-10}" --until '==EXIT ' \
+    # (the whole sentinel: at '==EXIT ' QEMU could be killed before the
+    # status was written, as tests/harness/thumb-m23/run.sh says)
+    sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-10}" --until '==EXIT -*[0-9][0-9]*==' \
         "$QEMU" -M mps2-an505 -cpu cortex-m33 -nographic \
         -kernel "$b/secure.elf" -device loader,file="$b/ns.elf" \
         > "$b/run.txt" 2>&1
