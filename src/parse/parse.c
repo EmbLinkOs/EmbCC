@@ -89,6 +89,7 @@ struct attrs { int packed; int aligned; int weak; int noreturn;
                 * 0 none. Last, for the reason isr gives. */
                int mode;
                int transparent;       /* transparent_union */
+               int vecsize;           /* vector_size(N): the bytes */
 };
 
 struct parser {
@@ -112,8 +113,11 @@ struct parser {
      * yet applied (0: none). They change a TYPE, and are applied where a
      * typedef or a union is defined; anywhere else the declaration would
      * keep its written type, so attrs_unapplied() says so. */
-    int mode_line, tu_line;
+    int mode_line, tu_line, vec_line;
     int type_mode;        /* a mode(M) among a type name's specifiers */
+    int type_vecsize;     /* ...and a vector_size(N) */
+    int param_vec;        /* a vector_size before a parameter's type,
+                           * which param_sret_attr read */
     /* GNU `__label__ n;`: a label LOCAL to the enclosing block, so a
      * macro that declares one can be expanded twice in a function
      * without the second `n:` being a duplicate. That is the only
@@ -573,6 +577,24 @@ static int at_type_start(struct parser *ps)
         ps->lx = save;
         if (type)
             return 1;
+        /* ...and with any attribute: `(__attribute__((vector_size(16)))
+         * float)t`, a vector type's usual spelling behind a macro */
+        while (cur(ps)->kind == TOK_KW_ATTRIBUTE) {
+            advance(ps);
+            int depth = 0;
+            do {
+                if (cur(ps)->kind == TOK_LPAREN) depth++;
+                else if (cur(ps)->kind == TOK_RPAREN) depth--;
+                else if (cur(ps)->kind == TOK_EOF) break;
+                advance(ps);
+            } while (depth > 0);
+        }
+        type = tok_is_type_start(cur(ps)->kind) ||
+               (cur(ps)->kind == TOK_IDENT &&
+                find_typedef(ps, cur(ps)->text) != NULL);
+        ps->lx = save;
+        if (type)
+            return 1;
     }
     return cur(ps)->kind == TOK_IDENT &&
            (find_typedef(ps, cur(ps)->text) != NULL ||
@@ -840,10 +862,8 @@ static const struct attr_entry attr_table[] = {
     { "micromips",   ATTR_WARNED,
       "EmbCC emits MIPS32 code only, so the function is larger than "
       "microMIPS code would be" },
-    { "vector_size", ATTR_REFUSED,
-      "the type would stay a scalar: EmbCC's vector IR comes from the "
-      "auto-vectorizer and only x86-64 lowers it, so a vector TYPE has "
-      "no representation in the front end or on three of four targets" },
+    /* GNU C's vector types: ty_vector */
+    { "vector_size", ATTR_HONOURED, NULL },
     /* glibc's <sys/types.h> (register_t) and <sys/socket.h> (the
      * sockaddr arguments under _GNU_SOURCE) */
     { "mode",        ATTR_HONOURED, NULL },
@@ -1170,6 +1190,17 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
                         }
                     }
                 }
+                if (name && attr_is(name, "vector_size")) {
+                    /* a constant expression of bytes, as aligned's */
+                    struct expr *ve = parse_cond(ps);
+                    long vb = 0;
+                    if (!size_fold(ve, &vb) || vb <= 0 || (vb & (vb - 1)))
+                        parse_error_line(ps, aline,
+                            "vector_size wants a constant power of two");
+                    if (out)
+                        out->vecsize = (int)vb;
+                    ps->vec_line = aline;
+                }
                 if (name && attr_is(name, "aligned") &&
                     cur(ps)->kind != TOK_RPAREN) {
                     /* A constant EXPRESSION, as for _Alignas: only a
@@ -1448,6 +1479,7 @@ static struct type *parse_array_dims(struct parser *ps, struct type *t);
 static struct expr *new_expr(enum expr_kind kind, int line, int col);
 static struct type *parse_type_spec(struct parser *ps, int allow_body);
 static struct type *apply_mode(struct parser *ps, struct type *t, int bytes);
+static struct type *apply_vec(struct parser *ps, struct type *t, int bytes);
 static struct type *parse_type_spec_attrs(struct parser *ps, int allow_body,
                                           struct attrs *a);
 static void parse_static_assert(struct parser *ps);
@@ -1717,6 +1749,7 @@ static int param_sret_attr(struct parser *ps, int index, int *unused)
     struct token *at = cur(ps);
     struct attrs a = { 0 };
     parse_attributes(ps, &a);
+    ps->param_vec = a.vecsize;          /* `vector int t` */
     if (a.sret && index != 0)
         parse_error_at(ps, at->line, at->col,
                 "embcc_sret marks the first parameter only");
@@ -1792,14 +1825,22 @@ static struct type *parse_fn_params_named(struct parser *ps, struct type *ret,
             skip_param_register(ps);
             while (cur(ps)->kind == TOK_KW_ATTRIBUTE && addr_space_qual(ps))
                 ps->lead_flash = 1;    /* `__flash char *p` */
+            int pvec = ps->param_vec;
+            ps->param_vec = 0;
             if (at_attribute(ps)) {
                 struct attrs pat = { 0 };
                 parse_attributes(ps, &pat);
                 pcs_not_here(ps, &pat, "a parameter");
                 unused |= pat.unused;
+                if (pat.vecsize)
+                    pvec = pat.vecsize;
             }
             struct attrs sat = { 0 };
             struct type *spec = parse_type_spec_attrs(ps, 0, &sat);
+            /* `vector int t`: a vector_size before the type or among
+             * its specifiers is the parameter's type */
+            if (spec && (pvec || sat.vecsize))
+                spec = apply_vec(ps, spec, sat.vecsize ? sat.vecsize : pvec);
             param_storage(ps);
             pcs_not_here(ps, &sat, "a parameter");
             unused |= sat.unused;
@@ -1814,6 +1855,8 @@ static struct type *parse_fn_params_named(struct parser *ps, struct type *ret,
                 parse_attributes(ps, &pat);
                 pcs_not_here(ps, &pat, "a parameter");
                 unused |= pat.unused;
+                if (pat.vecsize)        /* `int t __attribute__((vector_size(16)))` */
+                    t = apply_vec(ps, t, pat.vecsize);
             }
             unused |= ps->stars_unused;
             ps->stars_unused = 0;
@@ -2055,8 +2098,10 @@ static struct type *parse_type_spec(struct parser *ps, int allow_body)
         q |= Q_FLASH;
     }
     int q2 = 0, outer_sc = ps->spec_sc, outer_mode = ps->type_mode;
+    int outer_vec = ps->type_vecsize;
     ps->spec_sc = 0;
     ps->type_mode = 0;
+    ps->type_vecsize = 0;
     struct type *t = parse_type_spec_inner(ps, allow_body, &q2);
     q |= q2;
     /* __attribute__((mode(M))) before or among the specifiers changes the
@@ -2064,10 +2109,16 @@ static struct type *parse_type_spec(struct parser *ps, int allow_body)
      * __attribute__((mode(SI))) int_t;`, a member `E
      * __attribute__((mode(byte))) a;`, a cast */
     int mode = ps->spec_on ? ps->spec_slot.mode : ps->type_mode;
+    int vsz = ps->spec_on ? ps->spec_slot.vecsize : ps->type_vecsize;
     ps->type_mode = outer_mode;
+    ps->type_vecsize = outer_vec;
     if (t && mode) {
         t = apply_mode(ps, t, mode);
         ps->spec_slot.mode = 0;
+    }
+    if (t && vsz) {         /* `__attribute__((vector_size(16))) int v;` */
+        t = apply_vec(ps, t, vsz);
+        ps->spec_slot.vecsize = 0;
     }
     if (!t && (q & (Q_CONST | Q_VOL)))
         t = c89_implicit_int(ps, 1);    /* `const c = 1;` in C89 */
@@ -2158,6 +2209,8 @@ static void spec_attr(struct parser *ps)
     parse_attributes(ps, &a);
     if (a.mode)
         ps->type_mode = a.mode;   /* `(int __attribute__((mode(DI))))x` */
+    if (a.vecsize)
+        ps->type_vecsize = a.vecsize;
     if (a.packed || a.aligned || a.weak || a.noreturn || a.section || a.pcs)
         parse_error_at(ps, at_tok->line, at_tok->col,
                 "__attribute__((%s)) is not supported in a type name: "
@@ -2566,6 +2619,8 @@ static struct type *parse_stars(struct parser *ps, struct type *t)
              * member `E __attribute__((mode(byte))) a;` */
             if (a.mode && !stars)
                 t = apply_mode(ps, t, a.mode);
+            if (a.vecsize && !stars)
+                t = apply_vec(ps, t, a.vecsize);
             if (ps->attr_carry_on) {
                 /* The enclosing declaration will take them. */
                 if (a.weak)     ps->attr_slot.weak = 1;
@@ -3009,6 +3064,14 @@ static int size_fold(const struct expr *e, long *out)
         if (!t || ty_incomplete(t))
             return 0;
         *out = ty_align(t);
+        /* of a variable, its own aligned(N) too, as sema answers:
+         * `int f[__alignof__(x) == 128 ? 1 : -1]` */
+        if (!e->cast_ty && e->rhs->kind == EXPR_VAR && !fold_local_find(
+                e->rhs->name) && g_fold_unit)
+            for (struct global *g = g_fold_unit->globals; g; g = g->next)
+                if (g->name && !strcmp(g->name, e->rhs->name) &&
+                    g->user_align > *out)
+                    *out = g->user_align;
         return 1;
     }
     case EXPR_CAST:
@@ -3386,6 +3449,8 @@ static struct type *parse_struct_body(struct parser *ps, struct type *t,
             struct attrs mat = { 0 };
             parse_attributes(ps, &mat);  /* T buf[N] __attribute__((aligned(N))) */
             pcs_not_here(ps, &mat, "a member");
+            if (mat.vecsize)             /* `int v __attribute__((vector_size(16)));` */
+                mty = apply_vec(ps, mty, mat.vecsize);
             ms[n].name = mname;
             ms[n].ty = mty;
             ms[n].off = 0;
@@ -3863,6 +3928,25 @@ static struct expr *parse_primary(struct parser *ps)
          * __builtin_choose_expr below it is how C code dispatched on a
          * type before _Generic existed, and kernel headers still use
          * the pair. */
+        /* __builtin_convertvector(v, T): a call whose second argument
+         * is a type, which sema converts lane by lane */
+        if (strcmp(t->text, "__builtin_convertvector") == 0) {
+            int line = t->line, col = t->col;
+            struct expr *fn = new_expr(EXPR_VAR, line, col);
+            fn->name = t->text;
+            advance(ps);
+            expect(ps, TOK_LPAREN, "'(' after __builtin_convertvector");
+            e = new_expr(EXPR_CALL, line, col);
+            e->lhs = fn;
+            e->name = fn->name;
+            e->args = xcalloc(4, sizeof *e->args);
+            e->args[0] = parse_expr(ps);
+            e->nargs = 1;
+            expect(ps, TOK_COMMA, "',' before the vector type");
+            e->cast_ty = parse_type_name(ps, parse_type_spec(ps, 0));
+            expect(ps, TOK_RPAREN, "')'");
+            return e;
+        }
         if (strcmp(t->text, "__builtin_types_compatible_p") == 0) {
             int line = t->line;
             struct type *a, *b;
@@ -4066,6 +4150,7 @@ static struct expr *parse_postfix_ops(struct parser *ps, struct expr *e)
             expect(ps, TOK_RBRACKET, "']'");
             struct expr *d = new_expr(EXPR_DEREF, line, e->col);
             d->rhs = binop(B_ADD, e, idx);
+            d->rhs->is_subscript = 1;   /* v[i] of a vector (sema) */
             e = d;
         } else if (cur(ps)->kind == TOK_DOT ||
                    cur(ps)->kind == TOK_ARROW) {
@@ -4838,8 +4923,14 @@ static void close_tags(struct parser *ps, struct tagdef *mark, int outer)
  * ignored with a warning off a union type, as in GCC. */
 static void attrs_unapplied(struct parser *ps)
 {
-    int ml = ps->mode_line, tl = ps->tu_line;
-    ps->mode_line = ps->tu_line = 0;
+    int ml = ps->mode_line, tl = ps->tu_line, vl = ps->vec_line;
+    ps->mode_line = ps->tu_line = ps->vec_line = 0;
+    if (vl)
+        parse_error_line(ps, vl, "__attribute__((vector_size)) is not "
+                         "supported here: EmbCC applies it to a typedef "
+                         "(typedef int v4si __attribute__((vector_size(16)));)"
+                         ", a variable or a member, and this declaration "
+                         "would keep its written type");
     if (ml)
         parse_error_line(ps, ml, "__attribute__((mode)) is not supported "
                          "here: EmbCC applies it to a typedef (typedef int "
@@ -5731,6 +5822,26 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
         s->cond = parse_comma(ps);
         expect(ps, TOK_RPAREN, "')'");
         s->body = parse_controlled(ps);
+        /* `switch (x) case 4: case 0: f();`: a label is a marker in a
+         * list, so with no braces the body is the labels AND the
+         * statement they label -- which ran after the switch instead */
+        if (s->body && (s->body->kind == STMT_CASE ||
+                        s->body->kind == STMT_DEFAULT)) {
+            struct stmt *blk = new_stmt(STMT_BLOCK, s->body->line,
+                                        s->body->col);
+            struct stmt *tail = s->body;
+            blk->body = s->body;
+            for (;;) {
+                while (tail->next)
+                    tail = tail->next;
+                if (tail->kind != STMT_CASE && tail->kind != STMT_DEFAULT)
+                    break;
+                tail->next = parse_controlled(ps);
+                if (!tail->next)
+                    break;
+            }
+            s->body = blk;
+        }
         return s;
     case TOK_KW_CASE:
         /* a position MARKER in the switch body's list, not a wrapper —
@@ -6189,6 +6300,29 @@ static struct type *apply_mode(struct parser *ps, struct type *t, int bytes)
     return t->is_const ? ty_const(m) : m;
 }
 
+/* __attribute__((vector_size(N))): a vector of N bytes of the type
+ * written (ty_vector) -- whose lanes are an integer or floating type */
+static struct type *apply_vec(struct parser *ps, struct type *t, int bytes)
+{
+    ps->vec_line = 0;
+    struct type *e = ty_unqual(t);
+    if (e->kind == TY_BOOL || e->kind == TY_LDOUBLE ||
+        (!ty_is_integer(e) && !ty_is_float(e)))
+        parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                   "vector_size applies to an integer or floating type, "
+                   "not %s", ty_name(t));
+    if (bytes < ty_size(e) || bytes % ty_size(e))
+        parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                   "vector_size(%d) is not a whole number of %s lanes",
+                   bytes, ty_name(e));
+    struct type *v = ty_vector(e, bytes);
+    if (t->is_const)
+        v = ty_const(v);
+    if (t->is_volatile)
+        v = ty_volatile(v);
+    return v;
+}
+
 /* __attribute__((transparent_union)) on a union: see struct type */
 static void mark_transparent(struct parser *ps, struct type *t)
 {
@@ -6236,10 +6370,12 @@ static void typedef_declarators(struct parser *ps, struct type *tbase,
          * for an unaligned access (irgen's lv_natural). A struct or
          * union that carries its own aligned/packed is unaffected --
          * that is applied where the struct is defined. */
-        if (tdone.aligned)
-            tt = ty_aligned(tt, tdone.aligned);
         if (tdone.mode)
             tt = apply_mode(ps, tt, tdone.mode);
+        if (tdone.vecsize)
+            tt = apply_vec(ps, tt, tdone.vecsize);
+        if (tdone.aligned)
+            tt = ty_aligned(tt, tdone.aligned);
         if (tdone.transparent)
             mark_transparent(ps, tt);
         struct type *prev = find_typedef(ps, tname);
@@ -6561,6 +6697,10 @@ static void parse_top(struct parser *ps, struct unit *u,
         base = apply_mode(ps, base, at.mode);
         at.mode = 0;
     }
+    if (at.vecsize) {
+        base = apply_vec(ps, base, at.vecsize);
+        at.vecsize = 0;
+    }
     /* Open the slot for this declaration's declarators, including the
      * rewind below: an attribute after a `*` belongs to what is being
      * declared. */
@@ -6689,6 +6829,10 @@ static void parse_top(struct parser *ps, struct unit *u,
                 gt = apply_mode(ps, gt, at.mode);
                 at.mode = 0;
             }
+            if (at.vecsize) {
+                gt = apply_vec(ps, gt, at.vecsize);
+                at.vecsize = 0;
+            }
             int gnl = ps->decl_name_line, gnc = ps->decl_name_col;
             struct global *g = parse_global(ps, gt, gname, gline,
                                             is_static, is_extern);
@@ -6805,14 +6949,22 @@ static void parse_top(struct parser *ps, struct unit *u,
             ps->stars_unused = 0;
             while (cur(ps)->kind == TOK_KW_ATTRIBUTE && addr_space_qual(ps))
                 ps->lead_flash = 1;    /* `__flash char *p` */
+            int pvec = ps->param_vec;
+            ps->param_vec = 0;
             if (at_attribute(ps)) {
                 struct attrs pat = { 0 };
                 parse_attributes(ps, &pat);
                 pcs_not_here(ps, &pat, "a parameter");
                 unused |= pat.unused;
+                if (pat.vecsize)
+                    pvec = pat.vecsize;
             }
             struct attrs sat = { 0 };
             struct type *spec = parse_type_spec_attrs(ps, 0, &sat);
+            /* `vector int t`: a vector_size before the type or among
+             * its specifiers is the parameter's type */
+            if (spec && (pvec || sat.vecsize))
+                spec = apply_vec(ps, spec, sat.vecsize ? sat.vecsize : pvec);
             param_storage(ps);
             pcs_not_here(ps, &sat, "a parameter");
             unused |= sat.unused;
@@ -6827,6 +6979,8 @@ static void parse_top(struct parser *ps, struct unit *u,
                 parse_attributes(ps, &pat);
                 pcs_not_here(ps, &pat, "a parameter");
                 unused |= pat.unused;
+                if (pat.vecsize)
+                    pt = apply_vec(ps, pt, pat.vecsize);
             }
             unused |= ps->stars_unused;
             ps->stars_unused = 0;
@@ -6933,6 +7087,10 @@ fn_tail:
                 if (at.mode) {
                     vty = apply_mode(ps, vty, at.mode);
                     at.mode = 0;
+                }
+                if (at.vecsize) {
+                    vty = apply_vec(ps, vty, at.vecsize);
+                    at.vecsize = 0;
                 }
                 struct global *g = parse_global(ps, vty, dname, dline,
                                                 is_static, is_extern);

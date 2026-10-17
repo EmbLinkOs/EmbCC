@@ -92,7 +92,8 @@ operators](#feature-test-operators), with the limits described there.
 | An object of type `void`, `extern void _text;`, taken the address of | Supported, with GCC's warning on `&_text` unless it is `const` |
 | An asm label, `int f(void) __asm__("name");` | Supported |
 | [Arithmetic on `void *`, casts to a union and other small forms](#smaller-gnu-c-forms) | Supported |
-| [Constructs EmbCC does not support](#gnu-extensions-that-are-not-supported) | Nested functions, integer complex types, a conditional or cast as an lvalue, vector types |
+| [Vector types](#vector-extensions), `__attribute__((vector_size(N)))` | Supported, lane by lane on every target |
+| [Constructs EmbCC does not support](#gnu-extensions-that-are-not-supported) | Nested functions, integer complex types, a conditional or cast as an lvalue |
 
 ### Statement expressions
 
@@ -345,7 +346,6 @@ Each of these is refused with the diagnostic shown.
 | Nested function definitions | `expected ';' before '{' [E0002]`, at the inner function's body |
 | Integer complex types (`_Complex int`) | `invalid _Complex type (only float, double and long double _Complex are supported)` |
 | A conditional or cast as an lvalue | `assignment target must be a variable, *pointer, or member` |
-| Vector types; see [Vector extensions](#vector-extensions) | |
 
 ## Attributes
 
@@ -689,7 +689,6 @@ supported: REASON`:
 | `target` | `EmbCC selects its instruction set per compilation; a function asking for another would be compiled for the wrong one` |
 | `use_debug_exception_return` | `the handler would return with eret where the debug exception needs deret, and save DEPC as EPC` |
 | `use_shadow_register_set` | `EmbCC does not switch register sets: the handler would save into and run on a shadow set's stack pointer it never read with rdpgpr` |
-| `vector_size` | `the type would stay a scalar: ...`; see [Vector extensions](#vector-extensions) |
 | `weakref` | `the symbol would be emitted as an ordinary reference, so a missing target would fail to link instead of being null` |
 
 `ms_abi` and `sysv_abi` are refused on every target, including
@@ -1192,16 +1191,53 @@ The instructions used on each embedded target are described in
 
 ## Vector extensions
 
-EmbCC has no vector types. `__attribute__((vector_size(N)))` is refused:
+`__attribute__((vector_size(N)))` makes a vector of `N` bytes of an
+integer or floating type, as in GCC:
 
-```text
-embcc: v.c:1: error: __attribute__((vector_size)) is not supported: the type would stay a scalar: EmbCC's vector IR comes from the auto-vectorizer and only x86-64 lowers it, so a vector TYPE has no representation in the front end or on three of four targets
+```c
+typedef int v4si __attribute__((vector_size(16)));
+
+v4si scale(v4si a, int k)
+{
+    return (a << 1) + k;        /* k goes to every lane */
+}
 ```
 
-Clang's `ext_vector_type` is not recognized; it draws the unknown
-attribute warning, and the type stays a scalar. `__builtin_shufflevector`
-is not implemented. The optimizer's automatic vectorization is described
-in [Optimization](optimization.md#--passvectorize---no-passvectorize).
+The attribute is taken on a typedef, a variable, a member, a parameter
+and in a type name, before the type or after the declarator, so the
+usual macro spelling, `#define vector __attribute__((vector_size(16)))`
+with `vector float x`, works too. `N` is a power of two and a whole
+number of lanes; `_Bool` and `long double` lanes are refused.
+
+| Operation | What it does |
+|---|---|
+| `+ - * / % & \| ^ << >>` | Lane by lane. Both operands are vectors of the same number and size of lanes, or one is a scalar that converts to a lane without loss (an integer constant that fits its bits, or a type no wider than the lane): `conversion of scalar ... involves truncation` otherwise. `%`, the bitwise operators and the shifts take integer lanes |
+| `== != < <= > >=` | A vector of signed integers of the lanes' size, each lane -1 (every bit set) or 0. It converts to any vector of its size, as GCC's opaque comparison type does: `unsigned_v = a == b` |
+| `-` `~` `+`, `++` `--`, `op=` | Lane by lane |
+| `v[i]` | The lane, an lvalue when `v` is; `i` may be any integer |
+| `(T)v` | Between two vectors, or a vector and an integer, of the same size: the same bytes as the other type |
+| `__builtin_shuffle(a, mask)`, `__builtin_shuffle(a, b, mask)` | Lane `k` is lane `mask[k]` of `a`, or of `a` and `b` side by side, the index taken modulo the lanes there are |
+| `__builtin_shufflevector(a, b, i...)` | Lane `k` is lane `i_k` of `a` and `b` side by side; the indices are constants, and `-1` is a lane of no value (0) |
+| `__builtin_convertvector(v, T)` | Each lane converted to the lanes of the vector type `T`, which has as many |
+
+A vector is assigned, passed, returned and placed in structures and
+arrays like a structure of its lanes. Its alignment is its size, up to 16
+bytes on x86-64 and AArch64 and 8 on Arm, as GCC and clang align vectors
+there. A vector cannot be the condition of `if`, `?:`, `&&` or `||`, as in
+GCC (`used vector type where scalar is required`).
+
+EmbCC computes the operations lane by lane with the target's scalar
+instructions, so they run on every target, AVR and Cortex-M0 included.
+They are not translated to SIMD instructions; the optimizer's automatic
+vectorization is separate, see
+[Optimization](optimization.md#--passvectorize---no-passvectorize). A
+vector argument is passed as that structure would be. On x86-64 and
+AArch64, where GCC passes a vector in a SIMD register, a function taking
+or returning one by value does not interoperate with GCC-compiled code.
+Arithmetic on vectors in a static initializer is refused; a braced
+initializer, `v4si g = {1, 2, 3, 4};`, is fine. Clang's
+`ext_vector_type` is not recognized; it draws the unknown-attribute
+warning, and the type stays a scalar.
 
 ## Feature-test operators
 

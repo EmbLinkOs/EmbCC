@@ -977,6 +977,66 @@ int ty_is_complex(const struct type *t)
     return t && t->kind == TY_STRUCT && t->is_complex;
 }
 
+/* `typedef int v4si __attribute__((vector_size(16)))`: a struct of the
+ * lanes, so that a vector is a value -- assigned, passed and returned --
+ * on every target, aligned to its size up to the cap the target's ABI
+ * puts on a vector (target_vector_align_cap). Interned by element and
+ * size: two typedefs of one vector are one type, as in GCC. Its operators
+ * are sema's, lane by lane. */
+static struct type *vector_of(struct type *elem, int bytes, int opaque)
+{
+    static struct vmade { struct type *elem; int bytes, opaque;
+                          struct type *t; } *made;
+    static int nmade, capmade;
+    for (int k = 0; k < nmade; k++)
+        if (made[k].elem == elem && made[k].bytes == bytes &&
+            made[k].opaque == opaque)
+            return made[k].t;
+    int n = bytes / ty_size(elem);
+    struct member *ms = xcalloc((size_t)n, sizeof *ms);
+    for (int k = 0; k < n; k++) {
+        char nm[16];
+        snprintf(nm, sizeof nm, "<%d>", k);   /* no program can name one */
+        ms[k].name = xstrndup(nm, strlen(nm));
+        ms[k].ty = elem;
+    }
+    int al = bytes, cap = target_vector_align_cap();
+    if (cap && al > cap)
+        al = cap;
+    struct type *t = ty_struct(NULL, 0);
+    ty_struct_layout(t, ms, n, 0, al, 0);
+    t->is_vector = 1;
+    t->celem = elem;
+    t->vec_n = n;
+    t->vec_opaque = opaque;
+    if (nmade == capmade) {
+        capmade = capmade ? 2 * capmade : 16;
+        made = xrealloc(made, (size_t)capmade * sizeof *made);
+    }
+    made[nmade].elem = elem;
+    made[nmade].bytes = bytes;
+    made[nmade].opaque = opaque;
+    made[nmade++].t = t;
+    return t;
+}
+
+struct type *ty_vector(struct type *elem, int bytes)
+{
+    return vector_of(elem, bytes, 0);
+}
+
+/* a comparison's result: signed lanes of -1 and 0, which GCC lets convert
+ * to any vector of the size -- `V w = v != x` with V unsigned */
+struct type *ty_vector_opaque(struct type *elem, int bytes)
+{
+    return vector_of(elem, bytes, 1);
+}
+
+int ty_is_vector(const struct type *t)
+{
+    return t && t->kind == TY_STRUCT && t->is_vector;
+}
+
 int ty_classify(const struct type *t, enum arg_class *classes)
 {
     /* long double is X87 class; as an argument that means MEMORY, and a
@@ -1064,6 +1124,14 @@ const char *ty_name(const struct type *t)
     case TY_INT128: base = t->is_unsigned ? "unsigned __int128" : "__int128";
         break;
     case TY_STRUCT:
+        if (t->is_vector) {             /* GCC's spelling of one */
+            char eb[96];
+            snprintf(eb, sizeof eb, "%s", ty_name(t->celem));
+            snprintf(structbuf, sizeof structbuf, "__vector(%d) %s",
+                     t->vec_n, eb);
+            base = structbuf;
+            break;
+        }
         if (t->is_complex) {
             snprintf(structbuf, sizeof structbuf, "%s _Complex",
                      t->celem->kind == TY_FLOAT ? "float"
