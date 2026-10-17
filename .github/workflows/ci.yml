@@ -96,22 +96,29 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Ubuntu 26.04: QEMU 10.2, LLVM 22 and GCC 15, the nearest a
-          # runner comes to the QEMU 11 and LLVM 23 the referees were
-          # written against
-          - { name: ubuntu-26.04, runner: ubuntu-26.04, llvm: 22,
-              qemu-riscv: qemu-system-riscv }
+          # Ubuntu 26.04: QEMU 10.2 and GCC 15, and LLVM 23 from
+          # apt.llvm.org -- the LLVM the referees and the generated
+          # tables (src/arch/*/predef.c) were taken from, with a QEMU one
+          # release behind the development machine's 11
+          - { name: ubuntu-26.04, runner: ubuntu-26.04, llvm: 23,
+              llvm-apt: resolute, qemu-riscv: qemu-system-riscv }
           # Ubuntu 24.04: QEMU 8.2, LLVM 18 and GCC 13, the oldest tools a
           # contributor is likely to have -- what they cannot referee must
           # be a SKIP that says why, not a FAIL
           - { name: ubuntu-24.04, runner: ubuntu-24.04, llvm: 18,
-              qemu-riscv: qemu-system-misc }
+              llvm-apt: '', qemu-riscv: qemu-system-misc }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install QEMU and the LLVM tools
         run: |
+          if [ -n "${{ matrix.llvm-apt }}" ]; then
+            curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key |
+              sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
+            echo "deb http://apt.llvm.org/${{ matrix.llvm-apt }}/ llvm-toolchain-${{ matrix.llvm-apt }}-${{ matrix.llvm }} main" |
+              sudo tee /etc/apt/sources.list.d/llvm.list
+          fi
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             qemu-system-arm qemu-system-misc qemu-system-mips \
