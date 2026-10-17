@@ -23,7 +23,7 @@ makedepends=('gcc' 'make')
 # kept as such.
 options=('!strip' '!debug' 'staticlibs')
 source=("$pkgname-${_tag#v}.tar.gz::$url/archive/refs/tags/$_tag.tar.gz")
-sha256sums=('aacee55b3d95eb172da6b2c85675d5b707f808358f52d5cc15b170893a27b910')
+sha256sums=('868b5349223ead6fe8d590c43716758c049dea10b6992018fba5102010b990fd')
 
 build() {
     cd "EmbCC-${_tag#v}"

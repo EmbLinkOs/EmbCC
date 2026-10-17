@@ -8,7 +8,7 @@ class Embcc < Formula
   homepage "https://github.com/EmbLinkOs/EmbCC"
   license "Apache-2.0"
   url "https://github.com/EmbLinkOs/EmbCC/archive/refs/tags/v0.0.1-beta.tar.gz"
-  sha256 "aacee55b3d95eb172da6b2c85675d5b707f808358f52d5cc15b170893a27b910"
+  sha256 "868b5349223ead6fe8d590c43716758c049dea10b6992018fba5102010b990fd"
   head "https://github.com/EmbLinkOs/EmbCC.git", branch: "main"
 
   def install
