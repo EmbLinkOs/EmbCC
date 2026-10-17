@@ -8,9 +8,9 @@
 # The release tag. pkgver cannot hold a '-'; a pre-release suffix is written
 # without a separator, which pacman sorts before the release itself
 # (1.1.0-rc1 is 1.1.0rc1).
-_tag=v1.0.0-m2.complete
+_tag=v0.0.1-beta
 pkgname=embcc
-pkgver=1.0.0m2.complete
+pkgver=0.0.1beta
 pkgrel=1
 pkgdesc='C and C++ compiler and toolchain for embedded systems'
 arch=('x86_64' 'aarch64')
@@ -23,7 +23,7 @@ makedepends=('gcc' 'make')
 # kept as such.
 options=('!strip' '!debug' 'staticlibs')
 source=("$pkgname-${_tag#v}.tar.gz::$url/archive/refs/tags/$_tag.tar.gz")
-sha256sums=('0000000000000000000000000000000000000000000000000000000000000000')
+sha256sums=('aacee55b3d95eb172da6b2c85675d5b707f808358f52d5cc15b170893a27b910')
 
 build() {
     cd "EmbCC-${_tag#v}"
