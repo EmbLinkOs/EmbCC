@@ -713,8 +713,8 @@ name is what `--print-target`, `--version` and diagnostics print.
 | `thumbv7em-none-eabihf` | | ARMv7E-M with FPv4-SP-D16 (FPv5-D16 with `--cpu=cortex-m7`), hard float | bare metal | ELF32 |
 | `thumbv8m.main-none-eabi` | `thumbv8m.main`, `thumbv8m-none-eabi`, `armv8m.main-none-eabi` | ARMv8-M Mainline (Cortex-M33), soft float | bare metal | ELF32 |
 | `thumbv8m.main-none-eabihf` | | ARMv8-M Mainline with FPv5-SP-D16, hard float | bare metal | ELF32 |
-| `riscv32-unknown-elf` | `riscv32`, `riscv32-elf`, `rv32` | RV32 | bare metal | ELF32 |
-| `riscv64-unknown-elf` | `riscv64`, `riscv64-elf`, `rv64` | RV64 | bare metal | ELF64 |
+| `riscv32-unknown-elf` | `riscv32-none-elf`, `riscv32`, `riscv32-elf`, `rv32` | RV32 | bare metal | ELF32 |
+| `riscv64-unknown-elf` | `riscv64-none-elf`, `riscv64`, `riscv64-elf`, `rv64` | RV64 | bare metal | ELF64 |
 | `avr` | `avr-none-elf`, `avr-elf`, `avr-unknown-none` | AVR (ATmega328P) | bare metal | ELF32 |
 | `mipsel-none-elf` | `mipsel-unknown-elf`, `mipsel-elf`, `mipsel` | MIPS32r2, little-endian, o32 soft float | bare metal | ELF32 |
 | `x86_64-emblink` | | x86-64 | EmbLinkOS | ELF64 |

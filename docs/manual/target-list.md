@@ -47,7 +47,7 @@ Every target `--target=` accepts, generated from EmbCC's target database (`src/t
 
 | Target | Runs on | Object format | Also spelled |
 |---|---|---|---|
-| `riscv32-unknown-elf` | bare metal | ELF | `riscv32`, `riscv32-elf`, `rv32` |
+| `riscv32-unknown-elf` | bare metal | ELF | `riscv32-none-elf`, `riscv32`, `riscv32-elf`, `rv32` |
 
 ## RISC-V, 64-bit
 
@@ -55,7 +55,7 @@ Every target `--target=` accepts, generated from EmbCC's target database (`src/t
 
 | Target | Runs on | Object format | Also spelled |
 |---|---|---|---|
-| `riscv64-unknown-elf` | bare metal | ELF | `riscv64`, `riscv64-elf`, `rv64` |
+| `riscv64-unknown-elf` | bare metal | ELF | `riscv64-none-elf`, `riscv64`, `riscv64-elf`, `rv64` |
 
 ## AVR
 
