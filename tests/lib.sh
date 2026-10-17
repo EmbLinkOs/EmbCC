@@ -108,6 +108,17 @@ qemu_plugin() {
         return 1; }
 }
 
+# objcopy_has_srec OBJCOPY  — that llvm-objcopy writes S-records, which
+# LLVM 19 was the first to do (18 says "invalid output format: 'srec'").
+# Asked of one byte of raw binary.
+objcopy_has_srec() {
+    _p=$(mktemp "${TMPDIR:-/tmp}/srec.XXXXXX")
+    printf 'x' > "$_p"
+    "$1" -I binary -O srec "$_p" "$_p.srec" > /dev/null 2>&1; _r=$?
+    rm -f "$_p" "$_p.srec"
+    return $_r
+}
+
 # x86_gcc_exe EXE SRC [flags...]  — compile and link with the referee gcc.
 x86_gcc_exe() {
     exe=$1; src=$2; shift 2
