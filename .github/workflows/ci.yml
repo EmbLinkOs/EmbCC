@@ -153,8 +153,20 @@ jobs:
       - name: The failures
         if: always()
         run: grep -E '^(FAIL|SKIP) ' test.log || true
+      - name: The failed tests' outputs
+        if: failure()
+        run: |
+          for t in $(sed -n 's|^FAIL tests/golden/\(.*\)\.sh .*|\1|p' test.log); do
+            ls -d "tests/golden/out/$t" "tests/golden/out/$t"-* 2>/dev/null || true
+          done | sort -u > failed-outs.txt
+          tar czf failed-outs.tgz -T failed-outs.txt
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: test-log-${{ matrix.name }}
           path: test.log
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: failure()
+        with:
+          name: failed-outs-${{ matrix.name }}
+          path: failed-outs.tgz
