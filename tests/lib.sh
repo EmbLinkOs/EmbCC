@@ -104,7 +104,7 @@ qemu_plugin() {
        -undefined dynamic_lookup -o "$2" "$1" > /dev/null 2>&1 ||
     cc -shared -fPIC -O2 -I"$_inc" $(pkg-config --cflags glib-2.0 2>/dev/null) \
        -o "$2" "$1" > "$2.log" 2>&1 || {
-        echo "$1 does not build against $_inc/qemu-plugin.h (the plugins here are written for the plugin API of QEMU 9.1 or later): $(grep -m1 'error' "$2.log")"
+        echo "$1 does not build against $_inc/qemu-plugin.h (the plugins here are written for the plugin API of QEMU 9.2 or later): $(grep -m1 'error' "$2.log")"
         return 1; }
 }
 
