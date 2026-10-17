@@ -248,6 +248,10 @@ it prints the line to add to the shell's startup file. It needs `curl` or
 `wget`, `tar`, and `sha256sum` or `shasum`, and runs under any POSIX
 shell.
 
+GitHub never counts a pre-release as the latest release, so while every
+release is one (0.0.1-beta is the first), the script needs
+`--version v0.0.1-beta`, as in the example below.
+
 Options follow `sh -s --`:
 
 ```sh
@@ -270,6 +274,9 @@ says so and builds from source instead, which takes a few minutes.
 Installing a version again replaces it.
 
 ### With Homebrew
+
+The tap, `EmbLinkOs/homebrew-embcc`, is not published yet; until it is,
+the formula is in `packaging/homebrew/embcc.rb`. Once it is:
 
 ```sh
 brew install EmbLinkOs/embcc/embcc
