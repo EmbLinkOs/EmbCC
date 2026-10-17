@@ -69,6 +69,23 @@ x86_run() {
     fi
 }
 
+# x86_cannot_run  — prints why this host can neither run an x86-64 program
+# itself nor boot one on the QEMU harness, and is true; false when it can.
+# A Linux x86-64 host runs it; any other needs the harness's cross gcc and
+# binutils, QEMU, and the cross newlib (docs/manual/getting-started.md).
+x86_cannot_run() {
+    [ "$EMBCC_X86_RUNNER" = host ] && return 1
+    for _t in "$X86_GCC" "${EMBCC_X86_LD:-x86_64-elf-ld}" \
+              "${EMBCC_X86_OBJCOPY:-x86_64-elf-objcopy}" qemu-system-x86_64; do
+        command -v "$_t" >/dev/null 2>&1 || {
+            echo "no $_t for the x86-64 QEMU harness"; return 0; }
+    done
+    [ -d "$X86_NEWLIB/lib" ] || {
+        echo "no x86_64 newlib at $X86_NEWLIB for the x86-64 QEMU harness (set EMBCC_X86_NEWLIB)"
+        return 0; }
+    return 1
+}
+
 # x86_gcc_exe EXE SRC [flags...]  — compile and link with the referee gcc.
 x86_gcc_exe() {
     exe=$1; src=$2; shift 2

@@ -61,8 +61,12 @@ int main(void)
 }
 E
 "$EMBCC" --target=x86_64-elf -Os -c "$out/run.c" -o "$out/run.o" || fail "run.c: compile"
-tests/harness/x86_64/link.sh -o "$out/run" "$out/run.o" > "$out/ln.log" 2>&1 || fail "run.c: link"
-tests/harness/x86_64/run.sh "$out/run" > /dev/null 2>&1
+# run where lib.sh says x86-64 runs: this host, or the QEMU harness
+if why=$(x86_cannot_run); then
+    echo "SKIP the run: $why"; exit 0
+fi
+x86_link "$out/run" "$out/run.o" > "$out/ln.log" 2>&1 || fail "run.c: link: $(head -3 "$out/ln.log")"
+x86_run "$out/run" > /dev/null 2>&1
 rc=$?
 [ "$rc" = 42 ] || fail "run.c exits $rc, not 42"
 echo "brdom: the join's store runs, and the function returns what C says"
