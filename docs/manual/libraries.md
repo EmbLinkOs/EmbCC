@@ -374,7 +374,7 @@ depends on the target:
 | `x86_64-linux-gnu`, `aarch64-linux-gnu` | EmbCC's own, `lib/rt/unwind.c`, in `librt.a` |
 | `x86_64-elf`, `aarch64-elf` | libgcc's; the program links `libgcc.a` (or `libgcc_eh.a`) |
 | EmbLinkOS, macOS | the platform's |
-| the embedded targets | none. C++ exceptions are refused on 32-bit ARM and RV32, C++ code generation on AVR, MIPS32, Xtensa and TriCore, and at RV64 a function that needs a landing pad is refused (see [Bare-metal programming](embedded.md#c-on-the-embedded-targets)) |
+| the embedded targets | none. C++ exceptions are refused on every embedded target, C++ code generation on AVR, and at RV64 a function that needs a landing pad is refused (see [Bare-metal programming](embedded.md#c-on-the-embedded-targets)) |
 
 `<unwind.h>` in the freestanding directory declares the level-I unwinder
 interface (`_Unwind_RaiseException`, `_Unwind_GetIP`, ...) with the GCC

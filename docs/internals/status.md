@@ -20,11 +20,13 @@ levels are in [C language](../manual/c-language.md) and
 - **Apple arm64** compiles C and C++ for the system linker, and the
   result runs natively. Debug information is refused.
 - **Cortex-M, RISC-V and AVR** are bare-metal C targets with EmbCC's
-  compiler runtime and linker, and no C library. C++ is not supported
-  on them.
+  compiler runtime and linker, and no C library. C++ compiles on
+  Cortex-M and RV32 without exceptions (RV64: untested); AVR refuses
+  it.
 - **MIPS32** (`mipsel-none-elf`, MIPS32r2 o32 soft float, a PIC32's
   core) is a bare-metal C target with EmbCC's compiler runtime, C
-  library and linker, run on QEMU's malta board. C++ is not supported.
+  library and linker, run on QEMU's malta board. C++ compiles without
+  exceptions.
 - **LoongArch64** (`loongarch64-unknown-elf`, LA64 LP64S soft float) is
   a bare-metal C target with EmbCC's compiler runtime, C library,
   assembler and linker, run on QEMU's virt board. C++ compiles with
@@ -78,12 +80,12 @@ ignored (see [Attributes](#attributes)).
 | Apple arm64: `aarch64-apple-darwin` | AArch64 backend, Apple's arm64 convention, Mach-O. C and C++ with exceptions. | As AArch64. | As AArch64. | Refused. | The system linker. | The system's. EmbCC's C headers do not match it; see [Darwin](#darwin). |
 | macOS x86-64: `x86_64-apple-darwin` | x86-64 backend, Mach-O. C++ objects that use exceptions do not link. | As x86-64. | As x86-64. | Refused. | The system linker. | The system's. |
 | Windows x86-64: `x86_64-windows-gnu` | x86-64 backend, COFF, part of the Microsoft x64 convention. C++ only without exceptions and unwind tables. | As x86-64. | As x86-64. | Refused. | An external linker. | None. |
-| Cortex-M: `thumbv6m-none-eabi`, `thumbv8m.base-none-eabi`, `thumbv7m-none-eabi`, `thumbv7em-none-eabi[hf]`, `thumbv8m.main-none-eabi[hf]` | Thumb-1 for ARMv6-M and ARMv8-M Baseline (with Baseline's divides and exclusives), Thumb-2 for ARMv7-M, ARMv7E-M and ARMv8-M Mainline. Soft float, or a single-precision FPU with `double` in software. No DSP instructions. TrustZone-M's Secure side (`-mcmse`, soft float) on both ARMv8-M profiles. C only. | Every pass except vectorization and division by a constant. | Graph colouring; register pairs for 64-bit values; `s16`-`s31` with an FPU. | DWARF 4, with [known problems](../manual/debugging.md#known-problems). | `embld`. | `librt.a`, one per triple. No C library. |
-| RV32: `riscv32-unknown-elf` | RV32IMAC, soft float. No operation on `long double`. C only. | Every pass except vectorization and division by a constant. | Graph colouring; register pairs for 64-bit values. | DWARF 4, with known problems. | `embld`. | `librt.a`. No C library. |
-| RV64: `riscv64-unknown-elf` | RV64IMAC, soft float. No operation on `long double` or `__int128`. C only. | Every pass except vectorization. | Graph colouring. | DWARF 4, with known problems. | `embld`. | None built (see below). No C library. |
-| MIPS32: `mipsel-none-elf` | MIPS32r2, little-endian, o32, soft float. Delay slots filled from the instruction before the transfer where safe, else a `nop`; jump tables. C only. | Every pass except vectorization. | Graph colouring; register pairs for 64-bit values. | DWARF 4, with known problems. | `embld`, which also links clang's objects. | `librt.a` and `libc.a` (`make rt-embedded libc-embedded`). |
+| Cortex-M: `thumbv6m-none-eabi`, `thumbv8m.base-none-eabi`, `thumbv7m-none-eabi`, `thumbv7em-none-eabi[hf]`, `thumbv8m.main-none-eabi[hf]` | Thumb-1 for ARMv6-M and ARMv8-M Baseline (with Baseline's divides and exclusives), Thumb-2 for ARMv7-M, ARMv7E-M and ARMv8-M Mainline. Soft float, or a single-precision FPU with `double` in software. No DSP instructions. TrustZone-M's Secure side (`-mcmse`, soft float) on both ARMv8-M profiles. C, and C++ without exceptions. | Every pass except vectorization and division by a constant. | Graph colouring; register pairs for 64-bit values; `s16`-`s31` with an FPU. | DWARF 4, with [known problems](../manual/debugging.md#known-problems). | `embld`. | `librt.a`, one per triple. No C library. |
+| RV32: `riscv32-unknown-elf` | RV32IMAC, soft float. No operation on `long double`. C, and C++ without exceptions. | Every pass except vectorization and division by a constant. | Graph colouring; register pairs for 64-bit values. | DWARF 4, with known problems. | `embld`. | `librt.a`. No C library. |
+| RV64: `riscv64-unknown-elf` | RV64IMAC, soft float. No operation on `long double` or `__int128`. C, and C++ without exceptions (untested). | Every pass except vectorization. | Graph colouring. | DWARF 4, with known problems. | `embld`. | None built (see below). No C library. |
+| MIPS32: `mipsel-none-elf` | MIPS32r2, little-endian, o32, soft float. Delay slots filled from the instruction before the transfer where safe, else a `nop`; jump tables. C, and C++ without exceptions. | Every pass except vectorization. | Graph colouring; register pairs for 64-bit values. | DWARF 4, with known problems. | `embld`, which also links clang's objects. | `librt.a` and `libc.a` (`make rt-embedded libc-embedded`). |
 | LoongArch64: `loongarch64-unknown-elf` | LA64 base integer ISA, LP64S soft float, the normal code model; jump tables; `__int128` and binary128 `long double` in software; atomics of every width but 16 bytes. C, and C++ without exceptions. | Every pass except vectorization. | Graph colouring. | DWARF 4, with known problems. | `embld`, which also links clang's objects (its medium code model and GOT accesses included). | `librt.a` and `libc.a` (`make rt-embedded libc-embedded`). |
-| AVR: `avr` | ATmega328P (AVR5). 16-bit `int`, 32-bit `double`. C only. | Every pass except vectorization and division by a constant; a few more passes do nothing on AVR. | Graph colouring over register runs; each function is generated under several allocation modes and the shortest result kept. Off under `-g`. | Accepted, but not usable by a debugger. | `embld`. | `librt.a`. No C library. |
+| AVR: `avr` | ATmega328P (AVR5). 16-bit `int`, 32-bit `double`. C only: C++ is refused. | Every pass except vectorization and division by a constant; a few more passes do nothing on AVR. | Graph colouring over register runs; each function is generated under several allocation modes and the shortest result kept. Off under `-g`. | Accepted, but not usable by a debugger. | `embld`. | `librt.a`. No C library. |
 
 The register allocator is described in
 [Register allocation](register-allocation.md), the passes and their
@@ -409,8 +411,9 @@ target:
 | macOS x86-64 | An object that uses exceptions does not link: Apple's linker reports `ld: fixup error (kind=x86_64_rip) ... target '___cxa_allocate_exception' does not have address`. Compile with `-fno-exceptions`. |
 | Windows x86-64 | Only with `-fno-exceptions -fno-unwind-tables`. Otherwise every unit is refused: `C++ exceptions are not supported for a Windows target yet: the unwind tables go in .pdata and .xdata and neither is written` |
 | 32-bit ARM (Cortex-M, ARM state), RV32 | Supported with `-fno-exceptions`, with or without RTTI: the data model is the target's, the Itanium ABI's 32-bit form with the ARM C++ ABI's changes on ARM, checked against clang++ by `tests/golden/cxx-abi-ilp32.sh` and run on six boards by `tests/golden/cxx-embedded.sh`; runtime from `make libcxx-embedded`. Exceptions are refused: `C++ exceptions are not supported for thumbv7m-none-eabi yet: EmbCC writes no ARM EHABI unwind tables (.ARM.exidx); compile with -fno-exceptions`. |
-| AVR, MIPS32, Xtensa, TriCore | Not supported: `C++ is not yet supported for avr: the C++ front end follows the C++ ABI of x86-64, AArch64, 32-bit ARM and riscv32, and this target's (2-byte pointers) is not implemented`. `-fsyntax-only`, `-E` and `-c -M` still run. |
-| RV64 | Not supported. Code is generated, but no `libcxx.a` is built, and a function that needs a landing pad is refused: `the RV64 backend cannot lower this operation yet (function F) [landing w=8 size=4]`. |
+| MIPS (`mipsel-none-elf`, `mips-none-elf`, `mips64-none-elf`), PowerPC, SPARC, ColdFire, Xtensa, TriCore, RX | Supported with `-fno-exceptions`, as on 32-bit ARM and RV32; runtime from `make libcxx-embedded`. |
+| AVR | Not supported: `C++ is not yet supported for avr: the C++ lowering assumes a 32-bit int and 4-byte pointers (integral promotions, member pointers, RTTI), and this target's are 16 bits`. `-fsyntax-only`, `-E` and `-c -M` still run. |
+| RV64, `mips64el-none-elf`, LoongArch64 | Not supported. Code is generated with `-fno-exceptions`, but no `libcxx.a` is built, and on RV64 a function that needs a landing pad is refused: `the RV64 backend cannot lower this operation yet (function F) [landing w=8 size=4]`. |
 
 Language refusals:
 

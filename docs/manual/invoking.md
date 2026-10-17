@@ -128,12 +128,12 @@ As with GCC, a default output is written in the current directory, not
 next to the input: `embcc -c src/foo.c` writes `foo.o`, and
 `embcc -S src/foo.c` writes `foo.s`.
 
-A C++ input is compiled only for a target whose C++ ABI is implemented:
-x86-64, AArch64, 32-bit ARM and RV32 (the last two with
-`--no-exceptions`). For AVR, MIPS32, Xtensa and TriCore, every mode but
-`-E`, `-M`, `--deps-only` and `--syntax-only` stops with `embcc: error: C++ is
-not yet supported for TRIPLE: the C++ front end follows the C++ ABI of
-...` (see [C++ targets](cxx.md#targets)).
+A C++ input is compiled for every target but AVR: with exceptions on
+x86-64 and AArch64, and with `--no-exceptions` on the embedded targets
+(see [C++ targets](cxx.md#targets)). For AVR, every mode but `-E`, `-M`,
+`--deps-only` and `--syntax-only` stops with `embcc: error: C++ is not
+yet supported for avr: the C++ lowering assumes a 32-bit int and 4-byte
+pointers ...`.
 
 When several mode options are given, `-E` takes precedence over the
 others, then `--syntax-only`, then `-S`, then `-c`.

@@ -203,13 +203,14 @@ exact list of accepted names is under
 [`--std=STANDARD`](invoking.md#--stdstandard).
 
 C is supported on every target. C++ is supported on the x86-64 and
-AArch64 targets, with restrictions on macOS and Windows, and on 32-bit
-ARM (Cortex-M and ARM state) and RV32 without exceptions, with
-a small runtime (`make libcxx-embedded`). On AVR, MIPS32, Xtensa and
-TriCore EmbCC refuses to generate code for a C++ unit
-(`embcc: error: C++ is not yet supported for TRIPLE: ...`); `--syntax-only`
-still checks one. On RV64 a C++ unit compiles when exceptions are
-turned off, but C++ is not supported or tested there. See
+AArch64 targets, with restrictions on macOS and Windows. On the 32-bit
+embedded targets (Cortex-M and ARM state, RV32, MIPS, PowerPC, SPARC,
+ColdFire, Xtensa, TriCore and RX) it is supported without exceptions,
+with a small runtime (`make libcxx-embedded`). On RV64, little-endian
+MIPS64 and LoongArch64 a C++ unit compiles with `--no-exceptions`, but
+C++ is not supported or tested there. On AVR EmbCC refuses to generate
+code for a C++ unit (`embcc: error: C++ is not yet supported for avr:
+...`); `--syntax-only` still checks one. The exact list is under
 [Targets](cxx.md#targets) in the C++ page.
 
 The language pages give the details:
