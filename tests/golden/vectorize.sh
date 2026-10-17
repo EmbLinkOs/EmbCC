@@ -37,7 +37,9 @@ nvec() {
     "$EMBCC" --target=x86_64-linux-gnu -O2 -fremarks -c "$1" -o /dev/null \
         2> "$out/r.txt" || { echo "FAIL: could not compile $1:"
                              cat "$out/r.txt"; exit 1; }
-    grep -c 'vec/' "$out/r.txt" || true
+    # the remark's tag, not the text: a tree in a directory named
+    # `...vec/` put `vec/` in every remark's path
+    grep -c '\[opt/vec/' "$out/r.txt" || true
 }
 
 # ---- 1. it fires on the shape it is meant to ---------------------------

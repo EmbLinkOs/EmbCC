@@ -732,6 +732,9 @@ static int c89_implicit_call(struct unit *u, struct scope *sc,
 
 static int is_null_const(const struct expr *e);
 static struct expr *mk_cast(struct expr *inner, struct type *to);
+static struct expr *vec_convert(struct unit *u, struct expr *rhs,
+                                struct type *to);
+static void vec_cast(struct unit *u, struct expr *e);
 
 /* An argument for a parameter of a transparent union's type (GCC's
  * transparent_union; glibc's sockaddr arguments under _GNU_SOURCE): a
@@ -1585,6 +1588,7 @@ static struct expr *convert_assign(struct unit *u, struct expr *rhs,
             sema_error_id(u, rhs->line, rhs->col, "E0003",
                           "%s: copying a whole __flash %s is not supported "
                           "yet; read its members", ctx, ty_name(rhs->ty));
+        rhs = vec_convert(u, rhs, to);
         if (!ty_equal(to, rhs->ty))
             sema_error_id(u, rhs->line, rhs->col, "E0003",
                           "%s: cannot convert %s to %s",
@@ -1932,10 +1936,37 @@ static struct expr *cx_neg(struct expr *a)
     return e;
 }
 
+static struct expr *cx_zero(struct type *t, int line);
+
+/* |x| in T, and c ? a : b in T -- for an integer complex's division */
+static struct expr *cx_abs(struct expr *x, struct type *T)
+{
+    struct expr *c = cx_node(EXPR_COND, x->line, T);
+    c->args = xcalloc(4, sizeof *c->args);
+    c->args[0] = cx_bin(B_LT, x, cx_zero(T, x->line), T);
+    c->nargs = 1;
+    c->lhs = cx_neg(mk_cast(x, T));
+    c->rhs = mk_cast(x, T);
+    return c;
+}
+
+static struct expr *cx_cond(struct expr *cond, struct expr *a,
+                            struct expr *b, struct type *T)
+{
+    struct expr *c = cx_node(EXPR_COND, cond->line, T);
+    c->args = xcalloc(4, sizeof *c->args);
+    c->args[0] = cond;
+    c->nargs = 1;
+    c->lhs = mk_cast(a, T);
+    c->rhs = mk_cast(b, T);
+    return c;
+}
+
 static struct expr *cx_zero(struct type *t, int line)
 {
-    struct expr *z = cx_node(EXPR_FNUM, line, t);
+    struct expr *z = cx_node(ty_is_float(t) ? EXPR_FNUM : EXPR_NUM, line, t);
     z->fnum = 0.0;
+    z->num = 0;
     return z;
 }
 
@@ -2250,7 +2281,14 @@ static void cx_binop(struct unit *u, struct expr *e)
         break;
     }
     case B_MUL:
-        if (ai && bi)
+        if (ai && bi && !ty_is_float(T)) {
+            /* an integer complex: (ac - bd) + (ad + bc)i, each part read
+             * twice (cx_parts made them stable) */
+            res = cx_make(CT, cx_bin(B_SUB, cx_bin(B_MUL, ar, br, T),
+                                     cx_bin(B_MUL, ai, bi, T), T),
+                          cx_bin(B_ADD, cx_bin(B_MUL, ar, bi, T),
+                                 cx_bin(B_MUL, ai, br, T), T), line);
+        } else if (ai && bi)
             res = cx_call(0, T, ar, ai, br, bi);
         else if (ai)
             res = cx_make(CT, cx_bin(B_MUL, ar, br, T), cx_bin(B_MUL, ai, br, T),
@@ -2260,7 +2298,35 @@ static void cx_binop(struct unit *u, struct expr *e)
                           line);
         break;
     case B_DIV:
-        if (bi)
+        if (bi && !ty_is_float(T)) {
+            /* an integer complex, as GCC divides one (its "wide"
+             * method, Smith's, tree-complex's expand_complex_div_wide):
+             *   |br| < |bi|:  r = br / bi, d = br*r + bi,
+             *                 ((ar*r + ai) + (ai*r - ar)i) / d
+             *   otherwise:    r = bi / br, d = bi*r + br,
+             *                 ((ai*r + ar) + (ai - ar*r)i) / d
+             * each division truncating, and each ratio computed only in
+             * the arm that is taken, as GCC's branch does. Clang divides
+             * (ac + bd) / (cc + dd) instead; the answers differ, and the
+             * extension is GCC's. */
+            struct expr *a2 = ai ? ai : cx_zero(T, line);
+            struct expr *small = cx_bin(B_LT, cx_abs(br, T), cx_abs(bi, T), T);
+            struct expr *r1 = cx_bin(B_DIV, br, bi, T);
+            struct expr *d1 = cx_bin(B_ADD, cx_bin(B_MUL, br, r1, T), bi, T);
+            struct expr *r2 = cx_bin(B_DIV, bi, br, T);
+            struct expr *d2 = cx_bin(B_ADD, cx_bin(B_MUL, bi, r2, T), br, T);
+            struct expr *re = cx_cond(small,
+                cx_bin(B_DIV, cx_bin(B_ADD, cx_bin(B_MUL, ar, r1, T), a2, T),
+                       d1, T),
+                cx_bin(B_DIV, cx_bin(B_ADD, cx_bin(B_MUL, a2, r2, T), ar, T),
+                       d2, T), T);
+            struct expr *im = cx_cond(small,
+                cx_bin(B_DIV, cx_bin(B_SUB, cx_bin(B_MUL, a2, r1, T), ar, T),
+                       d1, T),
+                cx_bin(B_DIV, cx_bin(B_SUB, a2, cx_bin(B_MUL, ar, r2, T), T),
+                       d2, T), T);
+            res = cx_make(CT, re, im, line);
+        } else if (bi)
             res = cx_call(1, T, ar, ai ? ai : cx_zero(T, line), br, bi);
         else
             res = cx_make(CT, cx_bin(B_DIV, ar, br, T), cx_bin(B_DIV, ai, br, T),
@@ -2310,6 +2376,461 @@ static struct expr *cx_update(struct unit *u, struct expr *lhs, enum binop op,
     return cx_comma(pre, old ? cx_comma(as, old) : as);
 }
 
+/* ---- GNU vector types -------------------------------------------------------
+ *
+ * A vector is a struct of its lanes (ty_vector), and each operator is
+ * applied here, lane by lane, into a temp of the result's type -- so every
+ * target runs vectors with the scalar code it already has. The forms GCC
+ * takes in C: the arithmetic and bitwise operators and shifts of two
+ * vectors of one shape, or of a vector and a scalar that converts to its
+ * lanes without loss; the comparisons, whose lanes are -1 or 0 in a signed
+ * vector of the lanes' size; unary - ~ +; ++ and --; the compound
+ * assignments; v[i]; a cast to or from a vector or an integer of the same
+ * size, which keeps the bytes; and __builtin_shuffle. */
+
+/* lane k of a vector expression that may be read more than once */
+static struct expr *vec_lane(struct expr *base, int k)
+{
+    struct type *vt = base->ty;
+    struct expr *m = cx_node(EXPR_MEMBER, base->line, vt->celem);
+    m->lhs = base;
+    m->name = vt->members[k].name;
+    m->memb = &vt->members[k];
+    return m;
+}
+
+static struct expr *vec_member(struct expr *base, struct member *mb)
+{
+    struct expr *m = cx_node(EXPR_MEMBER, base->line, mb->ty);
+    m->lhs = base;
+    m->name = mb->name;
+    m->memb = mb;
+    return m;
+}
+
+/* x evaluated once: a variable as it is, anything else into a temp */
+static struct expr *vec_stable(struct expr *x, struct expr **pre)
+{
+    *pre = NULL;
+    if ((x->kind == EXPR_VAR && !x->fref) || x->kind == EXPR_NUM ||
+        x->kind == EXPR_FNUM)
+        return x;
+    int t = scope_add(g_cx_sc, "<vector>", x->ty, NULL);
+    *pre = cx_assign(cx_var(t, x->line), x);
+    return cx_var(t, x->line);
+}
+
+/* A vector of type rt from its lanes, in a fresh temp. */
+static struct expr *vec_make(struct type *rt, struct expr **lanes, int line)
+{
+    int t = scope_add(g_cx_sc, "<vector>", rt, NULL);
+    struct expr *seq = NULL;
+    for (int k = 0; k < rt->vec_n; k++)
+        seq = cx_comma(seq, cx_assign(vec_lane(cx_var(t, line), k),
+                                      mk_cast(lanes[k], rt->celem)));
+    return cx_comma(seq, cx_var(t, line));
+}
+
+/* the type a lane is computed in */
+static struct type *vec_calc(struct type *elem)
+{
+    return ty_is_float(elem) ? elem : promote(elem);
+}
+
+static const char *vec_opname(enum binop op)
+{
+    switch (op) {
+    case B_ADD: return "+"; case B_SUB: return "-"; case B_MUL: return "*";
+    case B_DIV: return "/"; case B_MOD: return "%"; case B_AND: return "&";
+    case B_OR: return "|"; case B_XOR: return "^"; case B_SHL: return "<<";
+    case B_SHR: return ">>"; case B_EQ: return "=="; case B_NE: return "!=";
+    case B_LT: return "<"; case B_LE: return "<="; case B_GT: return ">";
+    case B_GE: return ">="; case B_LAND: return "&&"; case B_LOR: return "||";
+    default: return "?";
+    }
+}
+
+/* Does scalar s convert to a lane of `elem` with nothing lost? GCC's rule
+ * for `v + s`: an integer for integer lanes, a constant that fits, or a
+ * type no wider than the lane's. */
+static int vec_scalar_fits(struct expr *s, struct type *elem)
+{
+    if (!ty_is_arith(s->ty) || ty_is_complex(s->ty))
+        return 0;
+    if (ty_is_float(elem))
+        return 1;
+    if (!ty_is_integer(s->ty))
+        return 0;
+    long v;
+    if (const_fold(s, &v)) {
+        int bits = 8 * ty_size(elem);
+        if (bits >= 64)
+            return 1;
+        /* its bits: GCC takes -18 into unsigned lanes */
+        return v >= -(1L << (bits - 1)) && v < (1L << bits);
+    }
+    return ty_size(s->ty) <= ty_size(elem);
+}
+
+/* e: a binary operator whose operands are checked, one or both vectors */
+static void vec_binop(struct unit *u, struct expr *e)
+{
+    struct expr *L = e->lhs, *R = e->rhs;
+    int lv = ty_is_vector(L->ty), rv = ty_is_vector(R->ty);
+    struct type *vt = ty_unqual(lv ? L->ty : R->ty);
+    /* beside an opaque one (a comparison's), the other vector's type */
+    if (lv && rv && vt->vec_opaque && !ty_unqual(R->ty)->vec_opaque)
+        vt = ty_unqual(R->ty);
+    struct type *elem = vt->celem;
+    enum binop op = e->op;
+    int cmp = op == B_EQ || op == B_NE || op == B_LT || op == B_LE ||
+              op == B_GT || op == B_GE;
+    int shift = op == B_SHL || op == B_SHR;
+    if (op == B_LAND || op == B_LOR)
+        sema_error_at(u, e->line, e->col,
+                      "used vector type where scalar is required");
+    if (lv && rv) {
+        struct type *wt = ty_unqual(vt == ty_unqual(R->ty) ? L->ty : R->ty);
+        if (wt != vt && (wt->vec_n != vt->vec_n ||
+                         ty_size(wt->celem) != ty_size(elem) ||
+                         ty_is_float(wt->celem) || ty_is_float(elem)))
+            sema_error_at(u, e->line, e->col,
+                          "invalid operands to binary %s (have %s and %s)",
+                          vec_opname(op), ty_name(L->ty), ty_name(R->ty));
+    } else {
+        struct expr *s = lv ? R : L;
+        /* a shift's count is any integer; a scalar shifted is a lane */
+        if (shift && lv ? !ty_is_integer(s->ty) : !vec_scalar_fits(s, elem))
+            sema_error_at(u, e->line, e->col,
+                          "conversion of scalar %s to vector %s involves "
+                          "truncation", ty_name(s->ty), ty_name(vt));
+    }
+    if (ty_is_float(elem) && (op == B_MOD || op == B_AND || op == B_OR ||
+                              op == B_XOR || shift))
+        sema_error_at(u, e->line, e->col,
+                      "invalid operands to binary %s (have %s and %s)",
+                      vec_opname(op), ty_name(L->ty), ty_name(R->ty));
+    if (!cx_lowering())
+        sema_error_at(u, e->line, e->col,
+                      "vector arithmetic is not supported in a static "
+                      "initializer");
+    struct type *calc = vec_calc(elem);
+    struct expr *pa, *pb;
+    /* a scalar operand is a lane's value -- broadcast, so converted to
+     * the lanes' type first, `n >> v` included -- evaluated once; only a
+     * shift's count keeps its own promoted type, as C's shifts do */
+    struct expr *A = vec_stable(lv ? L : mk_cast(L, elem), &pa);
+    struct expr *B = vec_stable(rv ? R : mk_cast(R, shift
+                                ? promote(R->ty) : elem), &pb);
+    struct type *rt = vt;
+    if (cmp)
+        rt = ty_vector_opaque(ty_int_of_size(ty_size(elem), 0), ty_size(vt));
+    struct expr **lanes = xcalloc((size_t)rt->vec_n, sizeof *lanes);
+    for (int k = 0; k < rt->vec_n; k++) {
+        /* a lane of the other signedness, as this one: the same bits */
+        struct expr *a = lv ? mk_cast(vec_lane(A, k), elem) : A;
+        struct expr *b = rv && !shift ? mk_cast(vec_lane(B, k), elem)
+                       : rv ? vec_lane(B, k) : B;
+        struct expr *n;
+        if (shift) {
+            n = cx_node(EXPR_BINOP, e->line, calc);
+            n->lhs = mk_cast(a, calc);
+            n->rhs = mk_cast(b, promote(b->ty));
+        } else {
+            n = cx_node(EXPR_BINOP, e->line, cmp ? ty_base(TY_INT, 0)
+                                                  : calc);
+            n->lhs = mk_cast(a, calc);
+            n->rhs = mk_cast(b, calc);
+        }
+        n->op = op;
+        lanes[k] = cmp ? cx_neg(n) : n;     /* true is -1: every bit set */
+    }
+    struct expr *r = vec_make(rt, lanes, e->line);
+    free(lanes);
+    *e = *cx_comma(pa, cx_comma(pb, r));
+}
+
+/* -v, ~v, +v */
+static void vec_unary(struct unit *u, struct expr *e, const char *what)
+{
+    struct expr *x = e->rhs;
+    struct type *vt = ty_unqual(x->ty);
+    if (e->kind == EXPR_BNOT && ty_is_float(vt->celem))
+        sema_error_at(u, e->line, e->col,
+                      "wrong type argument to bit-complement");
+    if (!cx_lowering())
+        sema_error_at(u, e->line, e->col, "vector %s is not supported in a "
+                      "static initializer", what);
+    struct expr *pre;
+    struct expr *X = vec_stable(x, &pre);
+    struct type *calc = vec_calc(vt->celem);
+    struct expr **lanes = xcalloc((size_t)vt->vec_n, sizeof *lanes);
+    for (int k = 0; k < vt->vec_n; k++) {
+        struct expr *n = cx_node(e->kind, e->line, calc);
+        n->rhs = mk_cast(vec_lane(X, k), calc);
+        lanes[k] = n;
+    }
+    struct expr *r = vec_make(vt, lanes, e->line);
+    free(lanes);
+    *e = *cx_comma(pre, r);
+}
+
+/* lhs op= rhs (and ++/--, post for the value before), lhs once */
+static struct expr *vec_update(struct unit *u, struct expr *lhs,
+                               enum binop op, struct expr *rhs, int post)
+{
+    struct expr *pre = NULL, *target = lhs;
+    if (!(lhs->kind == EXPR_VAR && !lhs->fref)) {
+        struct type *pt = ty_ptr(lhs->ty);
+        struct expr *addr = cx_node(EXPR_ADDR, lhs->line, pt);
+        addr->rhs = lhs;
+        int t = scope_add(g_cx_sc, "<vector>", pt, NULL);
+        pre = cx_assign(cx_var(t, lhs->line), addr);
+        target = cx_node(EXPR_DEREF, lhs->line, lhs->ty);
+        target->rhs = cx_var(t, lhs->line);
+    }
+    struct expr *old = NULL;
+    if (post) {
+        int t = scope_add(g_cx_sc, "<vector>", lhs->ty, NULL);
+        pre = cx_comma(pre, cx_assign(cx_var(t, lhs->line), target));
+        old = cx_var(t, lhs->line);
+    }
+    struct expr *val = cx_node(EXPR_BINOP, lhs->line, NULL);
+    val->op = op;
+    val->lhs = target;
+    val->rhs = rhs;
+    vec_binop(u, val);
+    struct expr *as = cx_assign(target, val);
+    return cx_comma(pre, old ? cx_comma(as, old) : as);
+}
+
+/* v in v[i]: (T *)&v, v first into a temp when it is not an object */
+static struct expr *vec_lanes_ptr(struct unit *u, struct expr *v)
+{
+    struct type *vt = v->ty;
+    struct type *et = vt->celem;
+    if (vt->is_const)
+        et = ty_const(et);
+    if (vt->is_volatile)
+        et = ty_volatile(et);
+    struct expr *pre = NULL, *obj = v;
+    if (!is_lvalue(v)) {
+        if (!cx_lowering())
+            sema_error_at(u, v->line, v->col, "a lane of a vector value is "
+                          "not supported in a static initializer");
+        int t = scope_add(g_cx_sc, "<vector>", vt, NULL);
+        pre = cx_assign(cx_var(t, v->line), v);
+        obj = cx_var(t, v->line);
+    }
+    struct expr *addr = cx_node(EXPR_ADDR, v->line, ty_ptr(vt));
+    addr->rhs = obj;
+    return cx_comma(pre, mk_cast(addr, ty_ptr(et)));
+}
+
+/* (to)x where either side is a vector: the same bytes, through a union */
+static void vec_cast(struct unit *u, struct expr *e)
+{
+    struct type *to = e->cast_ty, *from = e->rhs->ty;
+    if (to->kind == TY_VOID) {
+        e->ty = to;
+        return;
+    }
+    if (ty_unqual(to) == ty_unqual(from)) {
+        *e = *e->rhs;
+        return;
+    }
+    int tv = ty_is_vector(to), fv = ty_is_vector(from);
+    if ((!tv && !ty_is_integer(to)) || (!fv && !ty_is_integer(from)))
+        sema_error_at(u, e->line, e->col,
+                      "cannot convert a value of type %s to %s: a vector "
+                      "converts to or from a vector or an integer of its "
+                      "size", ty_name(from), ty_name(to));
+    if (ty_size(to) != ty_size(from))
+        sema_error_at(u, e->line, e->col,
+                      "cannot convert a value of type %s (%d bytes) to %s "
+                      "(%d bytes)", ty_name(from), ty_size(from),
+                      ty_name(to), ty_size(to));
+    if (!cx_lowering())
+        sema_error_at(u, e->line, e->col,
+                      "a vector cast is not supported in a static "
+                      "initializer");
+    struct type *ut = ty_struct(NULL, 1);
+    struct member *ms = xcalloc(2, sizeof *ms);
+    ms[0].name = "<from>";
+    ms[0].ty = ty_unqual(from);
+    ms[1].name = "<to>";
+    ms[1].ty = ty_unqual(to);
+    ty_struct_layout(ut, ms, 2, 0, 0, 0);
+    int t = scope_add(g_cx_sc, "<bitcast>", ut, NULL);
+    struct expr *put = cx_assign(vec_member(cx_var(t, e->line),
+                                            &ut->members[0]), e->rhs);
+    *e = *cx_comma(put, vec_member(cx_var(t, e->line), &ut->members[1]));
+}
+
+/* __builtin_shufflevector(a, b, i...): clang's and GCC's, with constant
+ * indices -- lane k is lane i_k of a and b side by side, as many lanes as
+ * there are indices; -1 is a lane of no value, zero here */
+static void vec_shufflevector(struct unit *u, struct func *f,
+                              struct scope *sc, struct expr *e)
+{
+    if (e->nargs < 3)
+        sema_error_at(u, e->line, e->col, "__builtin_shufflevector takes "
+                      "two vectors and the indices");
+    for (int k = 0; k < e->nargs; k++)
+        check_expr(u, f, sc, e->args[k]);
+    struct expr *a = e->args[0], *b = e->args[1];
+    if (!ty_is_vector(a->ty) || !ty_is_vector(b->ty) ||
+        ty_unqual(a->ty)->celem != ty_unqual(b->ty)->celem)
+        sema_error_at(u, e->line, e->col, "__builtin_shufflevector shuffles "
+                      "two vectors of one element type");
+    struct type *at = ty_unqual(a->ty), *bt = ty_unqual(b->ty);
+    int ni = e->nargs - 2, na = at->vec_n;
+    if (ni & (ni - 1))
+        sema_error_at(u, e->line, e->col, "__builtin_shufflevector needs a "
+                      "power of two of indices, not %d", ni);
+    if (!cx_lowering())
+        sema_error_at(u, e->line, e->col, "__builtin_shufflevector is not "
+                      "supported in a static initializer");
+    struct expr *pa, *pb;
+    struct expr *A = vec_stable(a, &pa), *B = vec_stable(b, &pb);
+    struct type *rt = ty_vector(at->celem, ni * ty_size(at->celem));
+    struct expr **lanes = xcalloc((size_t)ni, sizeof *lanes);
+    for (int k = 0; k < ni; k++) {
+        long ix;
+        if (!const_fold(e->args[2 + k], &ix) || ix < -1 ||
+            ix >= na + bt->vec_n)
+            sema_error_at(u, e->args[2 + k]->line, e->args[2 + k]->col,
+                          "__builtin_shufflevector's index %d is not a "
+                          "constant from -1 to %d", k, na + bt->vec_n - 1);
+        if (ix < 0) {
+            struct expr *z = cx_node(EXPR_NUM, e->line, ty_base(TY_INT, 0));
+            z->num = 0;
+            lanes[k] = z;
+        } else {
+            lanes[k] = ix < na ? vec_lane(A, (int)ix)
+                               : vec_lane(B, (int)ix - na);
+        }
+    }
+    struct expr *r = vec_make(rt, lanes, e->line);
+    free(lanes);
+    *e = *cx_comma(pa, cx_comma(pb, r));
+}
+
+/* __builtin_convertvector(v, T): each lane converted, as a cast would */
+static void vec_convertvector(struct unit *u, struct func *f,
+                              struct scope *sc, struct expr *e)
+{
+    check_expr(u, f, sc, e->args[0]);
+    struct expr *v = e->args[0];
+    struct type *to = ty_unqual(e->cast_ty);
+    if (!ty_is_vector(v->ty) || !ty_is_vector(to) ||
+        ty_unqual(v->ty)->vec_n != to->vec_n)
+        sema_error_at(u, e->line, e->col, "__builtin_convertvector converts "
+                      "a vector to one of as many lanes");
+    if (!cx_lowering())
+        sema_error_at(u, e->line, e->col, "__builtin_convertvector is not "
+                      "supported in a static initializer");
+    struct expr *pre;
+    struct expr *V = vec_stable(v, &pre);
+    struct expr **lanes = xcalloc((size_t)to->vec_n, sizeof *lanes);
+    for (int k = 0; k < to->vec_n; k++)
+        lanes[k] = vec_lane(V, k);           /* vec_make converts each */
+    struct expr *r = vec_make(to, lanes, e->line);
+    free(lanes);
+    *e = *cx_comma(pre, r);
+}
+
+/* an opaque vector (a comparison's) where another of its size is wanted:
+ * the same bytes, as that type; anything else is left to the caller */
+static struct expr *vec_convert(struct unit *u, struct expr *rhs,
+                                struct type *to)
+{
+    if (!ty_is_vector(to) || !ty_is_vector(rhs->ty) ||
+        ty_unqual(to) == ty_unqual(rhs->ty) ||
+        !ty_unqual(rhs->ty)->vec_opaque || ty_size(to) != ty_size(rhs->ty))
+        return rhs;
+    struct expr *c = cx_node(EXPR_CAST, rhs->line, to);
+    c->cast_ty = ty_unqual(to);
+    c->rhs = rhs;
+    vec_cast(u, c);
+    return c;
+}
+
+/* __builtin_shuffle(a, mask) and (a, b, mask): lane k of the result is
+ * lane mask[k] of a, or of a and b side by side, the index taken modulo
+ * the lanes there are */
+static void vec_shuffle(struct unit *u, struct func *f, struct scope *sc,
+                        struct expr *e)
+{
+    if (e->nargs != 2 && e->nargs != 3)
+        sema_error_at(u, e->line, e->col,
+                      "__builtin_shuffle takes two or three arguments");
+    for (int k = 0; k < e->nargs; k++)
+        check_expr(u, f, sc, e->args[k]);
+    struct expr *a = e->args[0], *b = e->nargs == 3 ? e->args[1] : NULL;
+    struct expr *m = e->args[e->nargs - 1];
+    if (!ty_is_vector(a->ty) || (b && ty_unqual(b->ty) != ty_unqual(a->ty)))
+        sema_error_at(u, e->line, e->col,
+                      "__builtin_shuffle shuffles vectors of one type");
+    struct type *vt = ty_unqual(a->ty), *mt = ty_unqual(m->ty);
+    if (!ty_is_vector(m->ty) || !ty_is_integer(mt->celem) ||
+        mt->vec_n != vt->vec_n)
+        sema_error_at(u, e->line, e->col,
+                      "__builtin_shuffle's mask is a vector of %d integer "
+                      "lanes", vt->vec_n);
+    if (!cx_lowering())
+        sema_error_at(u, e->line, e->col, "__builtin_shuffle is not "
+                      "supported in a static initializer");
+    int n = vt->vec_n, both = b != NULL;
+    /* the inputs side by side in one temp, so one index reaches either */
+    struct type *pair = ty_array(vt->celem, both ? 2 * n : n);
+    int ts = scope_add(g_cx_sc, "<shuffle>", pair, NULL);
+    struct expr *pre = NULL, *pm;
+    for (int k = 0; k < (both ? 2 : 1); k++) {
+        struct type *pv = ty_ptr(vt);
+        struct expr *arr = cx_var(ts, e->line);
+        arr->undecayed = pair;
+        arr->ty = ty_ptr(vt->celem);
+        struct expr *at = arr;
+        if (k) {
+            struct expr *off = cx_node(EXPR_NUM, e->line, ty_base(TY_INT, 0));
+            off->num = n;
+            at = cx_node(EXPR_BINOP, e->line, arr->ty);
+            at->op = B_ADD;
+            at->lhs = arr;
+            at->rhs = off;
+        }
+        struct expr *dst = cx_node(EXPR_DEREF, e->line, vt);
+        dst->rhs = mk_cast(at, pv);
+        pre = cx_comma(pre, cx_assign(dst, k ? b : a));
+    }
+    struct expr *M = vec_stable(m, &pm);
+    if (pm)
+        pre = cx_comma(pre, pm);
+    struct expr **lanes = xcalloc((size_t)n, sizeof *lanes);
+    for (int k = 0; k < n; k++) {
+        struct expr *idx = cx_node(EXPR_BINOP, e->line, ty_base(TY_LONG, 0));
+        struct expr *mask = cx_node(EXPR_NUM, e->line, ty_base(TY_LONG, 0));
+        mask->num = (both ? 2 * n : n) - 1;
+        idx->op = B_AND;
+        idx->lhs = mk_cast(vec_lane(M, k), ty_base(TY_LONG, 0));
+        idx->rhs = mask;
+        struct expr *arr = cx_var(ts, e->line);
+        arr->undecayed = pair;
+        arr->ty = ty_ptr(vt->celem);
+        struct expr *at = cx_node(EXPR_BINOP, e->line, arr->ty);
+        at->op = B_ADD;
+        at->lhs = arr;
+        at->rhs = idx;
+        struct expr *ld = cx_node(EXPR_DEREF, e->line, vt->celem);
+        ld->rhs = at;
+        lanes[k] = ld;
+    }
+    struct expr *r = vec_make(vt, lanes, e->line);
+    free(lanes);
+    *e = *cx_comma(pre, r);
+}
+
 /* Fold a static complex (or real) constant: its parts, in fmt. Only what a
  * static initializer reasonably holds — literals, casts, + and -, negation,
  * and scaling by a real; a complex * or / is left to run time (refused). */
@@ -2323,6 +2844,10 @@ static int cx_fold(const struct expr *e, enum ldf_fmt fmt, struct ldf **re,
     }
     struct ldf *ar, *ai, *br, *bi;
     switch (e->kind) {
+    case EXPR_NUM:                           /* an integer one, 2i */
+        *re = ldf_from_int(0, 0);
+        *im = ldf_from_int(e->num, e->ty->celem->is_unsigned);
+        return 1;
     case EXPR_FNUM:                          /* an imaginary constant */
         *re = ldf_from_int(0, 0);
         *im = ldf_round(e->ldv ? e->ldv : ldf_from_double(
@@ -2913,9 +3438,10 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
     case EXPR_FNUM:
         /* type assigned by the parser from the literal's shape; an
          * imaginary constant is the complex 0 + v*i */
-        if (e->kind == EXPR_FNUM && e->imag && cx_lowering()) {
-            struct expr *v = cx_node(EXPR_FNUM, e->line, e->ty->celem);
+        if (e->imag && cx_lowering()) {
+            struct expr *v = cx_node(e->kind, e->line, e->ty->celem);
             v->fnum = e->fnum;
+            v->num = e->num;
             v->ldv = e->ldv;
             *e = *cx_make(e->ty, cx_zero(e->ty->celem, e->line), v, e->line);
         }
@@ -3139,6 +3665,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
         if (ty_is_complex(e->lhs->ty) || ty_is_complex(e->rhs->ty)) {
             e->rhs = convert_assign(u, e->rhs, e->lhs->ty, "assignment");
         } else if (e->lhs->ty->kind == TY_STRUCT) {
+            e->rhs = vec_convert(u, e->rhs, e->lhs->ty);
             if (!ty_equal(e->lhs->ty, e->rhs->ty))
                 sema_error_at(u, e->line, e->col,
                            "cannot assign %s to %s",
@@ -3166,6 +3693,16 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             one->num = 1;
             *e = *cx_update(u, e->lhs, e->delta > 0 ? B_ADD : B_SUB, one,
                             e->is_post);
+            break;
+        }
+        if (ty_is_vector(e->ty)) {                     /* every lane */
+            if (!cx_lowering())
+                sema_error_at(u, e->line, e->col, "++/-- on a vector is not "
+                              "supported in a static initializer");
+            struct expr *one = cx_node(EXPR_NUM, e->line, ty_base(TY_INT, 0));
+            one->num = 1;
+            *e = *vec_update(u, e->lhs, e->delta > 0 ? B_ADD : B_SUB, one,
+                             e->is_post);
             break;
         }
         if (e->ty->kind == TY_PTR) {
@@ -3196,6 +3733,10 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                                         e->line));
             break;
         }
+        if (ty_is_vector(e->rhs->ty)) {
+            vec_unary(u, e, "negation");
+            break;
+        }
         need_arith(u, e->rhs, "unary '-'");
         e->ty = promote(opty(e->rhs));
         e->rhs = mk_cast(e->rhs, e->ty);
@@ -3207,6 +3748,10 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             struct expr *re, *im;
             struct expr *pre = cx_parts(e->rhs, e->rhs->ty->celem, &re, &im);
             *e = *cx_comma(pre, cx_make(e->rhs->ty, re, cx_neg(im), e->line));
+            break;
+        }
+        if (ty_is_vector(e->rhs->ty)) {
+            vec_unary(u, e, "'~'");
             break;
         }
         need_integer(u, e->rhs, "'~'");
@@ -3425,6 +3970,10 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
     }
     case EXPR_CAST:
         check_expr(u, f, sc, e->rhs);
+        if (ty_is_vector(e->cast_ty) || ty_is_vector(e->rhs->ty)) {
+            vec_cast(u, e);
+            break;
+        }
         if (e->cast_ty->kind == TY_STRUCT && !ty_is_complex(e->cast_ty)) {
             if (aggregate_cast(u, e))
                 check_expr(u, f, sc, e);    /* the compound literal */
@@ -3556,6 +4105,10 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
         if ((ty_is_complex(e->lhs->ty) || ty_is_complex(e->rhs->ty)) &&
             cx_lowering()) {
             *e = *cx_update(u, e->lhs, e->op, e->rhs, 0);
+            break;
+        }
+        if (ty_is_vector(e->lhs->ty)) {
+            *e = *vec_update(u, e->lhs, e->op, e->rhs, 0);
             break;
         }
         if (e->lhs->ty->kind == TY_PTR) {
@@ -3814,6 +4367,14 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
     case EXPR_BINOP: {
         check_expr(u, f, sc, e->lhs);
         check_expr(u, f, sc, e->rhs);
+        if (e->is_subscript && ty_is_vector(e->lhs->ty))
+            e->lhs = vec_lanes_ptr(u, e->lhs);      /* v[i] */
+        else if (e->is_subscript && ty_is_vector(e->rhs->ty))
+            e->rhs = vec_lanes_ptr(u, e->rhs);      /* i[v] */
+        else if (ty_is_vector(e->lhs->ty) || ty_is_vector(e->rhs->ty)) {
+            vec_binop(u, e);
+            break;
+        }
         struct type *lt = opty(e->lhs), *rt = opty(e->rhs);
         if (ty_is_complex(lt) || ty_is_complex(rt)) {
             cx_binop(u, e);
@@ -4006,6 +4567,18 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
         if (e->lhs->kind == EXPR_VAR && e->lhs->name &&
             strncmp(e->lhs->name, "__builtin_", 10) == 0) {
             const char *bn = e->lhs->name + 10;
+            if (strcmp(bn, "shuffle") == 0) {
+                vec_shuffle(u, f, sc, e);
+                break;
+            }
+            if (strcmp(bn, "shufflevector") == 0) {
+                vec_shufflevector(u, f, sc, e);
+                break;
+            }
+            if (strcmp(bn, "convertvector") == 0 && e->cast_ty) {
+                vec_convertvector(u, f, sc, e);
+                break;
+            }
             /* GCC's per-type spellings of the type-generic tests */
             {
                 static const char *const same[][2] = {
@@ -5440,7 +6013,8 @@ static void flatten_init(struct unit *u, struct func *f, struct scope *sc,
     /* so is a cast to the union: its value placed in the member
      * (aggregate_cast), checked once */
     if (init->kind == EXPR_CAST && init->cast_ty->kind == TY_STRUCT &&
-        !ty_is_complex(init->cast_ty) && ty_equal(init->cast_ty, ty)) {
+        !ty_is_complex(init->cast_ty) && !ty_is_vector(init->cast_ty) &&
+        ty_equal(init->cast_ty, ty)) {
         check_expr(u, f, sc, init->rhs);
         if (aggregate_cast(u, init)) {
             flatten_init(u, f, sc, init->lhs, ty, off, out);
@@ -5812,6 +6386,23 @@ static void lower_static_bytes(struct unit *u, int line, int size,
         }
         int sz = ty_size(v[k].ty);
         /* A complex slot: both parts folded in its element's format */
+        if (ty_is_complex(v[k].ty) && !ty_is_float(v[k].ty->celem)) {
+            /* an integer complex: both parts folded exactly (binary128
+             * holds any 64-bit integer), stored as the integer */
+            struct type *el = v[k].ty->celem;
+            struct ldf *re, *im;
+            if (!cx_fold(v[k].e, LDF_QUAD, &re, &im))
+                sema_error_line(u, line,
+                           "a static complex initializer must be a constant "
+                           "that EmbCC folds: literals, casts, + and -, and "
+                           "scaling by a real");
+            int esz = ty_size(el);
+            target_put_uint((unsigned char *)bytes + v[k].off, esz,
+                            (unsigned long)ldf_to_long(re));
+            target_put_uint((unsigned char *)bytes + v[k].off + esz, esz,
+                            (unsigned long)ldf_to_long(im));
+            continue;
+        }
         if (ty_is_complex(v[k].ty)) {
             struct type *el = v[k].ty->celem;
             /* (a four-byte double -- AVR's, RX's -- is binary32) */
@@ -6003,6 +6594,9 @@ static const char *const g_named_builtins[] = {
     "islessgreater", "isunordered", "iseqsig",
     "isinff", "isinfl", "isnanf", "isnanl", "finite", "finitef", "finitel",
     "classify_type", "memcmp_eq",
+    /* GNU vector types' (vec_shuffle, vec_shufflevector,
+     * vec_convertvector) */
+    "shuffle", "shufflevector", "convertvector",
 };
 
 int sema_has_builtin(const char *name)

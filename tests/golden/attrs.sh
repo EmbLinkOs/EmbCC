@@ -130,7 +130,7 @@ where the use is correct, and each is switched off by the name it prints"
 # `set -e`, so a plain `cmd; rc=$?` would abort at the first refusal --
 # which is every second line here.
 cat > "$out/known.txt" <<'EOF'
-vector_size(16)|refuse
+vector_size(16)|applied
 mode(V4SI)|refuse
 target("sse4.2")|refuse
 weakref("other")|refuse
@@ -176,6 +176,14 @@ while IFS='|' read -r spec want; do
             cat "$out/k.log"; exit 1
         fi
         ;;
+    applied)
+        # It changes the type, and the type is what it says: a vector
+        # (extensions.md, Vector types)
+        if [ "$rc" != 0 ] || [ -s "$out/k.log" ]; then
+            echo "FAIL: $nm is applied, and it was refused or warned:"
+            cat "$out/k.log"; exit 1
+        fi
+        ;;
     warn)
         # Accepted -- refusing would break a header that never calls it --
         # but the build-time check it asks for will not happen, so that is
@@ -196,8 +204,8 @@ while IFS='|' read -r spec want; do
     esac
 done < "$out/known.txt"
 echo "fifteen attributes that used to be dropped now each have a stated
-disposition: five refused by name, eight silent no-ops, two accepted with
-the loss named"
+disposition: one applied, four refused by name, eight silent no-ops, two
+accepted with the loss named"
 
 # mode and transparent_union change a type, and are applied where a typedef
 # or a union is defined (tests/golden/gnu-header-forms.sh runs them). mode

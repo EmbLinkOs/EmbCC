@@ -269,6 +269,7 @@ int target_double_size(void);      /* 8, or 4 on AVR */
 int target_int_size(void);
 /* The most alignment any scalar gets, or 0 for no cap -- 1 on AVR. */
 int target_max_scalar_align(void);         /* 4, or 2 on AVR */
+int target_vector_align_cap(void);         /* a vector's, 0 = its size */
 int target_fn_align(void);                 /* __alignof__ of a function */
 /* __STDCPP_DEFAULT_NEW_ALIGNMENT__: what operator new(size_t) returns
  * aligned for, and above which `new` calls the align_val_t forms -- 8 on

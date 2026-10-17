@@ -95,6 +95,7 @@ struct expr {
      * memb is resolved by sema (offset + type). */
     int is_arrow;
     struct member *memb;
+    int is_subscript;     /* EXPR_BINOP: the `+` of p[i] (a vector's lane) */
     struct expr **args;   /* EXPR_CALL; lhs is the callee expression (a
                            * VAR for direct calls). Allocated, at least four
                            * and zeroed past nargs; an expr_dup has its own.

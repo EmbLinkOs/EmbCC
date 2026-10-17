@@ -262,8 +262,6 @@ supported. This section lists what is not.
 | `_BitInt(N)` wider than 64 bits | `_BitInt(65) is wider than BITINT_MAXWIDTH, which is 64 here` |
 | `_Decimal32`, `_Decimal64`, `_Decimal128` | `expected a type before '_Decimal32'` |
 | `_Imaginary` | `expected a type before '_Imaginary'` |
-| Integer `_Complex` | `invalid _Complex type (only float, double and long double _Complex are supported)` |
-| Integer imaginary constant (`2i`) | `an integer imaginary constant (GNU _Complex int) is not supported — write it as a floating one (2.0i)` |
 | `_Atomic` on anything but an integer or a pointer | `reading an _Atomic struct s is not supported: EmbCC makes the operators atomic for integers and pointers only` (the first words name the operation) |
 | C23 `constexpr` of a non-integer type | `constexpr 'd' of type double is not supported: EmbCC takes integer constants` |
 
@@ -320,7 +318,6 @@ implement, so they are errors:
 | `cleanup` | `__attribute__((cleanup)) is not supported: the cleanup function would never run` |
 | `ms_abi` | `__attribute__((ms_abi)) is not supported: the arguments would be passed in System V's registers` |
 | `sysv_abi` | `__attribute__((sysv_abi)) is not supported: the arguments would be passed in the other convention's registers` |
-| `vector_size` | `__attribute__((vector_size)) is not supported: the type would stay a scalar: EmbCC's vector IR comes from the auto-vectorizer and only x86-64 lowers it, so a vector TYPE has no representation in the front end or on three of four targets` |
 | `mode` | `__attribute__((mode)) is not supported: the declaration would keep its written type, so a typedef that asks for a specific width would silently get another` |
 | `transparent_union` | `__attribute__((transparent_union)) is not supported: the union would be passed as a union rather than as its first member, which is a different calling convention` |
 | `target` | `__attribute__((target)) is not supported: EmbCC selects its instruction set per compilation; a function asking for another would be compiled for the wrong one` |
