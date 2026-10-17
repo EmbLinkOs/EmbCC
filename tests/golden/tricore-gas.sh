@@ -35,7 +35,19 @@ export EMBCC_VERIFY=1
     echo "EmbCC could not assemble forms.S"; exit 1; }
 
 # ---- 1. the transfers, assembled from their text, on QEMU's translator -----
-if why=$(qemu_too_old "$QEMU" 10.1 "its translator spells TCG's ops otherwise than 10.1 and later do (an add with carry is add2_i32, not addco_i32), and tricorecheck reads 10.1's"); then
+# QEMU's TCG ops are what tricorecheck reads: this half runs on QEMU 10.1
+# or later (before it they were spelled otherwise), and on an arm64 host
+# only -- QEMU emits deposit_i32, extract_i32,
+# eqv_i32, orc_i32 and the 64-bit multiplies only where the host's TCG
+# backend has them, and on x86-64 expands them into other ops (636 of the
+# walk's 9433 on Ubuntu 26.04)
+case $(uname -m) in
+    arm64|aarch64) tcg_host= ;;
+    *) tcg_host="this $(uname -m) host's TCG expands deposit, extract, eqv, orc and the wide multiplies into other ops, where an arm64 host's keeps the ops tricorecheck reads" ;;
+esac
+if [ -n "$tcg_host" ]; then
+    echo "SKIP the translator half: $tcg_host"
+elif why=$(qemu_too_old "$QEMU" 10.1 "its translator spells TCG's ops otherwise than 10.1 and later do (an add with carry is add2_i32, not addco_i32), and tricorecheck reads 10.1's"); then
     echo "SKIP the translator half: $why"
 elif command -v "$QEMU" >/dev/null 2>&1; then
     cc -std=c99 -Wall -Wextra -o "$out/tricorecheck" \

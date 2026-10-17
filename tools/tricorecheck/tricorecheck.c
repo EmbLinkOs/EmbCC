@@ -407,8 +407,8 @@ static void alu_rr(void)
             case TC_NOR: want("or_i32 %s,%s,%s", D(dc), D(da), D(db));
                          want("not_i32 %s,%s", D(dc), D(dc)); break;
             case TC_ANDN: want("andc_i32 %s,%s,%s", D(dc), D(da), D(db)); break;
-            /* QEMU 11's orc_i32 is 10's not_i32 into a temporary, then
-             * or_i32 (Ubuntu 26.04's QEMU is 10.2) */
+            /* orc_i32 where the host's TCG backend has it, else not_i32
+             * into a temporary and or_i32 (an x86-64 host) */
             case TC_ORN: want("orc_i32 %s,%s,%s|not_i32 ?,%s;or_i32 %s,%s,?",
                               D(dc), D(da), D(db), D(db), D(dc), D(da)); break;
             case TC_NAND: want("and_i32 %s,%s,%s", D(dc), D(da), D(db));
