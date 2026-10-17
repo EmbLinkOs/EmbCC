@@ -77,7 +77,9 @@ for t in $boards; do
             Q=qemu-system-mips ;;
         sparc*)
             SRC=tests/harness/sparc H=$SRC hv=EMBCC_SPARC_HARNESS
-            CL="--target=sparc-none-elf -mcpu=leon3 -msoft-float"
+            # (+hasleoncasa: LLVM 23's leon3 has CASA; 22's and older call
+            # __atomic_load_1, which lib/rt does not have, for a guard)
+            CL="--target=sparc-none-elf -mcpu=leon3 -msoft-float -Xclang -target-feature -Xclang +hasleoncasa"
             Q=qemu-system-sparc ;;
         powerpc*)
             SRC=tests/harness/ppc H=$SRC hv=EMBCC_PPC_HARNESS
