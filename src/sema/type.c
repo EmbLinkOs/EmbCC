@@ -1109,7 +1109,11 @@ const char *ty_name(const struct type *t)
         }
         t = t->pointee;
     }
-    char structbuf[48];
+    /* Room for the longest name built in it below: "__vector(N) " and
+     * a 96-byte element name. GCC's -Wformat-truncation (in -Wall, so
+     * an error in the Linux build) counts that bound, not the names a
+     * program has. */
+    char structbuf[128];
     if (t->bitint) {
         snprintf(structbuf, sizeof structbuf, "%s_BitInt(%d)",
                  t->is_unsigned ? "unsigned " : "", t->bitint);
