@@ -24,19 +24,19 @@ trap 'rm -rf "$tmp"' EXIT
 # 1. Every spelling of each target resolves, and the canonical name comes
 #    back. `rv32`/`rv64` are here because that is what the architecture
 #    manual calls them and what a person types.
-for alias in riscv32-unknown-elf riscv32 riscv32-elf rv32; do
+for alias in riscv32-unknown-elf riscv32-none-elf riscv32 riscv32-elf rv32; do
     got=$("$EMBCC" --target="$alias" -dumpmachine) || {
         echo "--target=$alias was not accepted"; exit 1; }
     [ "$got" = "$R32" ] || {
         echo "--target=$alias -dumpmachine said '$got', not '$R32'"; exit 1; }
 done
-for alias in riscv64-unknown-elf riscv64 riscv64-elf rv64; do
+for alias in riscv64-unknown-elf riscv64-none-elf riscv64 riscv64-elf rv64; do
     got=$("$EMBCC" --target="$alias" -dumpmachine) || {
         echo "--target=$alias was not accepted"; exit 1; }
     [ "$got" = "$R64" ] || {
         echo "--target=$alias -dumpmachine said '$got', not '$R64'"; exit 1; }
 done
-echo "four spellings each resolve to $R32 and $R64"
+echo "five spellings each resolve to $R32 and $R64"
 
 # The other targets still answer for themselves. -dumpmachine reads the
 # target table now instead of a ternary chain of its own, and a chain is

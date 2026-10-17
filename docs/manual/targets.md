@@ -1085,8 +1085,8 @@ registers, `cbz`, `tbb` and `tbh` are refused
 
 | Triple | Accepted aliases | ISA | ABI |
 |---|---|---|---|
-| `riscv32-unknown-elf` | `riscv32`, `riscv32-elf`, `rv32` | RV32IMAC | `ilp32` |
-| `riscv64-unknown-elf` | `riscv64`, `riscv64-elf`, `rv64` | RV64IMAC | `lp64` |
+| `riscv32-unknown-elf` | `riscv32-none-elf`, `riscv32`, `riscv32-elf`, `rv32` | RV32IMAC | `ilp32` |
+| `riscv64-unknown-elf` | `riscv64-none-elf`, `riscv64`, `riscv64-elf`, `rv64` | RV64IMAC | `lp64` |
 
 Both are freestanding. One code generator serves both widths. The ISA
 and ABI columns are the defaults; `--isa=` and `--abi=`
