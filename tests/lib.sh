@@ -123,9 +123,11 @@ objcopy_has_srec() {
 # tables record (src/arch/thumb/predef.c), whose llvm-mc, llvm-objdump and
 # clang the encodings, disassemblies, macros and conventions were checked
 # against. An older release encodes, prints and decides a few things
-# otherwise -- LLVM 18 prints AVR's lds/sts as <unknown>, wants a feature
-# for SPARC's casa, emits no R_LARCH_CALL36 -- and a test that compares
-# EmbCC with it is testing LLVM.
+# otherwise -- LLVM 18's disassembler prints andi for zext.b and its clang
+# emits no R_LARCH_CALL36, clang 22 has no __WCHAR_MIN__ -- and a test
+# that compares EmbCC with it is testing LLVM. (Where a flag makes an old
+# release agree, a test passes it instead: --mcpu for AVR, +hasleoncasa
+# for SPARC.)
 LLVM_REFEREE=$(sed -n '1s/.* clang \([0-9][0-9]*\)\..*/\1/p' \
                    "$EMBCC_ROOT/src/arch/thumb/predef.c" 2>/dev/null)
 
