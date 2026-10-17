@@ -2376,9 +2376,12 @@ static int cas16_loop(struct ir_func *fn, int addr, int op, int val,
     case '|': nv = emit_bin(fn, IR_OR, cur, val, 16, 0); break;
     case '^': nv = emit_bin(fn, IR_XOR, cur, val, 16, 0); break;
     default: {                                        /* nand */
+        /* the AND first: emitted inside the NOT's fields it landed after
+         * the NOT that reads it, and could move the buffer `n` points in */
+        int a = emit_bin(fn, IR_AND, cur, val, 16, 0);
         struct ir_ins *n = emit(fn);
         n->op = IR_BNOT;
-        n->a = emit_bin(fn, IR_AND, cur, val, 16, 0);
+        n->a = a;
         n->w = 16;
         n->dst = new_temp(fn);
         nv = n->dst;

@@ -214,7 +214,10 @@ for c in tests/exec/*.c tests/exec/${TARGET%-elf}/*.c; do
     # Where the code runs: on this host when it IS the target, else on the
     # target's QEMU harness (tests/harness/<arch>/{link,run}.sh).
     if [ "$TARGET" = x86_64-elf ] && [ "$EMBCC_X86_RUNNER" = host ]; then
-        if ! msg=$(cc -no-pie -o "$exe" "$obj" 2>&1); then
+        # -lm: the corpus calls libm (cabs, sqrtf, ...), which glibc keeps
+        # apart from libc; noexecstack: an x86_64-elf object, like GCC's
+        # for that target, has no .note.GNU-stack to say so itself
+        if ! msg=$(cc -no-pie -Wl,-z,noexecstack -o "$exe" "$obj" -lm 2>&1); then
             bad "$c" "host link failed" "$msg"
             continue
         fi
