@@ -1246,8 +1246,13 @@ static void lex_raw(struct lexer *lx)
         int has_u = 0, has_l = 0;
         t->num_llong = 0;
         t->char_lit = 0;
-        while (*end == 'u' || *end == 'U' || *end == 'l' || *end == 'L') {
-            if (*end == 'u' || *end == 'U')
+        t->num_is_imag = 0;
+        while (*end == 'u' || *end == 'U' || *end == 'l' || *end == 'L' ||
+               (!t->num_is_imag && (*end == 'i' || *end == 'I' ||
+                                    *end == 'j' || *end == 'J'))) {
+            if (*end == 'i' || *end == 'I' || *end == 'j' || *end == 'J')
+                t->num_is_imag = 1;   /* GNU's 2i, before or after u/l */
+            else if (*end == 'u' || *end == 'U')
                 has_u = 1;
             else if (has_l)
                 t->num_llong = 1;     /* LL: long long (C++ keeps it apart) */
@@ -1262,10 +1267,6 @@ static void lex_raw(struct lexer *lx)
             lx->p = end;
             return;
         }
-        if (*end == 'i' || *end == 'I' || *end == 'j' || *end == 'J')
-            diag_fatal(lx->file, lx->line,
-                       "an integer imaginary constant (GNU _Complex int) is "
-                       "not supported — write it as a floating one (2.0i)");
         if (isalnum((unsigned char)*end) || *end == '_' || *end == '.')
             diag_fatal(lx->file, lx->line,
                        "malformed integer constant");

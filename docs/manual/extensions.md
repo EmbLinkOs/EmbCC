@@ -93,7 +93,7 @@ operators](#feature-test-operators), with the limits described there.
 | An asm label, `int f(void) __asm__("name");` | Supported |
 | [Arithmetic on `void *`, casts to a union and other small forms](#smaller-gnu-c-forms) | Supported |
 | [Vector types](#vector-extensions), `__attribute__((vector_size(N)))` | Supported, lane by lane on every target |
-| [Constructs EmbCC does not support](#gnu-extensions-that-are-not-supported) | Nested functions, integer complex types, a conditional or cast as an lvalue |
+| [Constructs EmbCC does not support](#gnu-extensions-that-are-not-supported) | Nested functions, a conditional or cast as an lvalue |
 
 ### Statement expressions
 
@@ -289,8 +289,8 @@ struct msg hello = { 5, { 'h', 'e', 'l', 'l', 'o' } };
 |---|---|
 | `__int128`, `unsigned __int128`, `__int128_t`, `__uint128_t` | x86-64 and AArch64. On RV64 the type exists but operations on it are refused (`the RV64 backend cannot lower a 128-bit value yet ...`). On Cortex-M, RV32 and AVR: `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |
 | `_Complex` and `__complex__`, `__real__`, `__imag__` | Supported for `float`, `double` and `long double` on every target |
-| Imaginary constants with an `i` or `j` suffix (`2.0i`, `3.0fi`, `1.0j`) | Supported for floating constants. An integer one is refused: `an integer imaginary constant (GNU _Complex int) is not supported — write it as a floating one (2.0i)` |
-| Integer complex types (`_Complex int`) | Not supported: `invalid _Complex type (only float, double and long double _Complex are supported)` |
+| Imaginary constants with an `i` or `j` suffix (`2.0i`, `3.0fi`, `1.0j`, `2i`) | Supported; an integer one is a `_Complex int` |
+| Integer complex types (`_Complex int`) | Supported; see [Complex types](c-language.md#complex-types) |
 | `_Float32`, `_Float64` | The same types as `float` and `double` |
 | `_Float128`, `__float128` | AArch64 ELF and Linux targets, where `long double` is IEEE binary128. Refused on x86-64 (`_Float128 is not supported on x86-64: ...`) and on Apple arm64, Cortex-M and AVR (`_Float128 is not supported on this target: it has no 128-bit floating-point type`); on RISC-V its operations are refused like those of `long double` |
 | `_Float16`, `__fp16` | Not supported: ``_Float16/__fp16 is not supported: EmbCC has no 16-bit floating-point type, and widening it to `float` would give 24 bits of mantissa where the program asked for 11`` |
@@ -344,7 +344,6 @@ Each of these is refused with the diagnostic shown.
 | Construct | Diagnostic |
 |---|---|
 | Nested function definitions | `expected ';' before '{' [E0002]`, at the inner function's body |
-| Integer complex types (`_Complex int`) | `invalid _Complex type (only float, double and long double _Complex are supported)` |
 | A conditional or cast as an lvalue | `assignment target must be a variable, *pointer, or member` |
 
 ## Attributes

@@ -1826,10 +1826,37 @@ static struct expr *cx_neg(struct expr *a)
     return e;
 }
 
+static struct expr *cx_zero(struct type *t, int line);
+
+/* |x| in T, and c ? a : b in T -- for an integer complex's division */
+static struct expr *cx_abs(struct expr *x, struct type *T)
+{
+    struct expr *c = cx_node(EXPR_COND, x->line, T);
+    c->args = xcalloc(4, sizeof *c->args);
+    c->args[0] = cx_bin(B_LT, x, cx_zero(T, x->line), T);
+    c->nargs = 1;
+    c->lhs = cx_neg(mk_cast(x, T));
+    c->rhs = mk_cast(x, T);
+    return c;
+}
+
+static struct expr *cx_cond(struct expr *cond, struct expr *a,
+                            struct expr *b, struct type *T)
+{
+    struct expr *c = cx_node(EXPR_COND, cond->line, T);
+    c->args = xcalloc(4, sizeof *c->args);
+    c->args[0] = cond;
+    c->nargs = 1;
+    c->lhs = mk_cast(a, T);
+    c->rhs = mk_cast(b, T);
+    return c;
+}
+
 static struct expr *cx_zero(struct type *t, int line)
 {
-    struct expr *z = cx_node(EXPR_FNUM, line, t);
+    struct expr *z = cx_node(ty_is_float(t) ? EXPR_FNUM : EXPR_NUM, line, t);
     z->fnum = 0.0;
+    z->num = 0;
     return z;
 }
 
@@ -2144,7 +2171,14 @@ static void cx_binop(struct unit *u, struct expr *e)
         break;
     }
     case B_MUL:
-        if (ai && bi)
+        if (ai && bi && !ty_is_float(T)) {
+            /* an integer complex: (ac - bd) + (ad + bc)i, each part read
+             * twice (cx_parts made them stable) */
+            res = cx_make(CT, cx_bin(B_SUB, cx_bin(B_MUL, ar, br, T),
+                                     cx_bin(B_MUL, ai, bi, T), T),
+                          cx_bin(B_ADD, cx_bin(B_MUL, ar, bi, T),
+                                 cx_bin(B_MUL, ai, br, T), T), line);
+        } else if (ai && bi)
             res = cx_call(0, T, ar, ai, br, bi);
         else if (ai)
             res = cx_make(CT, cx_bin(B_MUL, ar, br, T), cx_bin(B_MUL, ai, br, T),
@@ -2154,7 +2188,35 @@ static void cx_binop(struct unit *u, struct expr *e)
                           line);
         break;
     case B_DIV:
-        if (bi)
+        if (bi && !ty_is_float(T)) {
+            /* an integer complex, as GCC divides one (its "wide"
+             * method, Smith's, tree-complex's expand_complex_div_wide):
+             *   |br| < |bi|:  r = br / bi, d = br*r + bi,
+             *                 ((ar*r + ai) + (ai*r - ar)i) / d
+             *   otherwise:    r = bi / br, d = bi*r + br,
+             *                 ((ai*r + ar) + (ai - ar*r)i) / d
+             * each division truncating, and each ratio computed only in
+             * the arm that is taken, as GCC's branch does. Clang divides
+             * (ac + bd) / (cc + dd) instead; the answers differ, and the
+             * extension is GCC's. */
+            struct expr *a2 = ai ? ai : cx_zero(T, line);
+            struct expr *small = cx_bin(B_LT, cx_abs(br, T), cx_abs(bi, T), T);
+            struct expr *r1 = cx_bin(B_DIV, br, bi, T);
+            struct expr *d1 = cx_bin(B_ADD, cx_bin(B_MUL, br, r1, T), bi, T);
+            struct expr *r2 = cx_bin(B_DIV, bi, br, T);
+            struct expr *d2 = cx_bin(B_ADD, cx_bin(B_MUL, bi, r2, T), br, T);
+            struct expr *re = cx_cond(small,
+                cx_bin(B_DIV, cx_bin(B_ADD, cx_bin(B_MUL, ar, r1, T), a2, T),
+                       d1, T),
+                cx_bin(B_DIV, cx_bin(B_ADD, cx_bin(B_MUL, a2, r2, T), ar, T),
+                       d2, T), T);
+            struct expr *im = cx_cond(small,
+                cx_bin(B_DIV, cx_bin(B_SUB, cx_bin(B_MUL, a2, r1, T), ar, T),
+                       d1, T),
+                cx_bin(B_DIV, cx_bin(B_SUB, a2, cx_bin(B_MUL, ar, r2, T), T),
+                       d2, T), T);
+            res = cx_make(CT, re, im, line);
+        } else if (bi)
             res = cx_call(1, T, ar, ai ? ai : cx_zero(T, line), br, bi);
         else
             res = cx_make(CT, cx_bin(B_DIV, ar, br, T), cx_bin(B_DIV, ai, br, T),
@@ -2672,6 +2734,10 @@ static int cx_fold(const struct expr *e, enum ldf_fmt fmt, struct ldf **re,
     }
     struct ldf *ar, *ai, *br, *bi;
     switch (e->kind) {
+    case EXPR_NUM:                           /* an integer one, 2i */
+        *re = ldf_from_int(0, 0);
+        *im = ldf_from_int(e->num, e->ty->celem->is_unsigned);
+        return 1;
     case EXPR_FNUM:                          /* an imaginary constant */
         *re = ldf_from_int(0, 0);
         *im = ldf_round(e->ldv ? e->ldv : ldf_from_double(
@@ -3262,9 +3328,10 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
     case EXPR_FNUM:
         /* type assigned by the parser from the literal's shape; an
          * imaginary constant is the complex 0 + v*i */
-        if (e->kind == EXPR_FNUM && e->imag && cx_lowering()) {
-            struct expr *v = cx_node(EXPR_FNUM, e->line, e->ty->celem);
+        if (e->imag && cx_lowering()) {
+            struct expr *v = cx_node(e->kind, e->line, e->ty->celem);
             v->fnum = e->fnum;
+            v->num = e->num;
             v->ldv = e->ldv;
             *e = *cx_make(e->ty, cx_zero(e->ty->celem, e->line), v, e->line);
         }
@@ -6209,6 +6276,23 @@ static void lower_static_bytes(struct unit *u, int line, int size,
         }
         int sz = ty_size(v[k].ty);
         /* A complex slot: both parts folded in its element's format */
+        if (ty_is_complex(v[k].ty) && !ty_is_float(v[k].ty->celem)) {
+            /* an integer complex: both parts folded exactly (binary128
+             * holds any 64-bit integer), stored as the integer */
+            struct type *el = v[k].ty->celem;
+            struct ldf *re, *im;
+            if (!cx_fold(v[k].e, LDF_QUAD, &re, &im))
+                sema_error_line(u, line,
+                           "a static complex initializer must be a constant "
+                           "that EmbCC folds: literals, casts, + and -, and "
+                           "scaling by a real");
+            int esz = ty_size(el);
+            target_put_uint((unsigned char *)bytes + v[k].off, esz,
+                            (unsigned long)ldf_to_long(re));
+            target_put_uint((unsigned char *)bytes + v[k].off + esz, esz,
+                            (unsigned long)ldf_to_long(im));
+            continue;
+        }
         if (ty_is_complex(v[k].ty)) {
             struct type *el = v[k].ty->celem;
             /* (a four-byte double -- AVR's, RX's -- is binary32) */
@@ -6400,6 +6484,9 @@ static const char *const g_named_builtins[] = {
     "islessgreater", "isunordered", "iseqsig",
     "isinff", "isinfl", "isnanf", "isnanl", "finite", "finitef", "finitel",
     "classify_type", "memcmp_eq",
+    /* GNU vector types' (vec_shuffle, vec_shufflevector,
+     * vec_convertvector) */
+    "shuffle", "shufflevector", "convertvector",
 };
 
 int sema_has_builtin(const char *name)
