@@ -42,7 +42,7 @@ toolchain on the host.
 line:
 
 ```text
-EmbCC 1.0.0-m2.complete (the Emb toolchain's C and C++ compiler, for embedded systems and operating systems)
+EmbCC 0.0.1-beta (the Emb toolchain's C and C++ compiler, for embedded systems and operating systems)
 ```
 
 ## Components

@@ -248,11 +248,15 @@ it prints the line to add to the shell's startup file. It needs `curl` or
 `wget`, `tar`, and `sha256sum` or `shasum`, and runs under any POSIX
 shell.
 
+GitHub never counts a pre-release as the latest release, so while every
+release is one (0.0.1-beta is the first), the script needs
+`--version v0.0.1-beta`, as in the example below.
+
 Options follow `sh -s --`:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/EmbLinkOs/EmbCC/main/install.sh |
-    sh -s -- --prefix /opt/embcc --version v1.0.0
+    sh -s -- --prefix /opt/embcc --version v0.0.1-beta
 ```
 
 | Option | Meaning |
@@ -270,6 +274,9 @@ says so and builds from source instead, which takes a few minutes.
 Installing a version again replaces it.
 
 ### With Homebrew
+
+The tap, `EmbLinkOs/homebrew-embcc`, is not published yet; until it is,
+the formula is in `packaging/homebrew/embcc.rb`. Once it is:
 
 ```sh
 brew install EmbLinkOs/embcc/embcc
@@ -345,7 +352,7 @@ PREFIX/share/man/man1/embcc.1
 PREFIX/share/embcc/cmake/embcc.cmake
 ```
 
-`VERSION` is the version `embcc --version` prints (`1.0.0-m2.complete`).
+`VERSION` is the version `embcc --version` prints (`0.0.1-beta`).
 Nothing in the binary refers to `PREFIX`: the compiler finds this
 directory relative to its own location, so an installation can be moved
 or unpacked anywhere. Check what a compiler found with:

@@ -243,8 +243,13 @@ jobs:
           finds its headers and libraries relative to itself. The .deb
           files install into /usr with \`sudo apt install ./FILE.deb\`.
           EOF
+          # A version with a suffix (0.0.1-beta, 1.2.0-rc1) is a
+          # pre-release: GitHub does not make it the latest release, so
+          # install.sh with no --version keeps finding the last full one.
+          pre=
+          case $VERSION in *-*) pre=--prerelease ;; esac
           if ! gh release view "$TAG" > /dev/null 2>&1; then
             gh release create "$TAG" --verify-tag --title "EmbCC $VERSION" \
-              --notes-file "$RUNNER_TEMP/notes.md"
+              --notes-file "$RUNNER_TEMP/notes.md" $pre
           fi
           gh release upload "$TAG" dist/* --clobber

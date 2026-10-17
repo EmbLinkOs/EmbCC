@@ -63,8 +63,10 @@ whose `lib/embcc` is mostly empty.
 4. Update the Homebrew, RPM and Arch recipes, as described below.
 
 `install.sh` installs the release GitHub marks as the latest one, which
-is never a draft or a pre-release. Marking a release as a pre-release
-keeps it from users who do not ask for it with `--version`.
+is never a draft or a pre-release. The workflow marks a version with a
+suffix (`0.0.1-beta`, `1.2.0-rc1`) as a pre-release, which keeps it from
+users who do not ask for it with `--version`; while every release is a
+pre-release, `install.sh` needs `--version`.
 
 The Linux programs are built on Ubuntu 22.04, so they run where its
 glibc (2.35) or a newer one is installed, such as Ubuntu 22.04 and

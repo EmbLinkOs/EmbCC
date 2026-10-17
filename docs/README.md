@@ -76,4 +76,5 @@ Start with the [architecture](internals/architecture.md) and the
 | [Contributing](internals/contributing.md) | Conventions, the review checklist, commit style |
 | [Design decisions](internals/decisions.md) | The decision record (D-001 …) |
 | [Status](internals/status.md) | Per-target maturity and known limitations |
+| [Roadmap](roadmap.md) | What 1.0.0 will promise, and the releases on the way there |
 | [Porting to a new host](internals/porting.md) | Running EmbCC on another OS: the platform layer, `PLATFORM=iso`, building it |

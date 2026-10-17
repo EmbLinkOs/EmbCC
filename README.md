@@ -67,16 +67,20 @@ ABI, options and limitations are in [Targets](docs/manual/targets.md).
 
 ## Building and installing
 
-A release installs on Linux and macOS, x86-64 and arm64, with
+A release installs on Linux and macOS, x86-64 and arm64. The first one,
+0.0.1-beta, is a pre-release, so name it:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/EmbLinkOs/EmbCC/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/EmbLinkOs/EmbCC/main/install.sh | sh -s -- --version v0.0.1-beta
 ```
 
-into `~/.local` (`/usr/local` as root), after checking the download's
-SHA-256. Homebrew (`brew install EmbLinkOs/embcc/embcc`), the `.deb`
-packages and the script's options are described in
-[Installing](docs/manual/getting-started.md#installing).
+The script installs into `~/.local` (`/usr/local` as root), after
+checking the download's SHA-256. Once a release without a suffix is out,
+`| sh` alone installs the latest one. The `.deb` packages and the
+script's options are described in
+[Installing](docs/manual/getting-started.md#installing); the Homebrew tap
+is not published yet. Where EmbCC is going before 1.0 is in the
+[roadmap](docs/roadmap.md).
 
 From a source checkout:
 
@@ -161,6 +165,8 @@ cc hello.o -o hello
   installing, and first programs on each family of boards.
 - [Contributing](docs/internals/contributing.md): the rules for changing
   the toolchain, and the tests a change needs.
+- [Roadmap](docs/roadmap.md): what 1.0.0 will promise, and the releases
+  on the way there.
 
 ## License
 
