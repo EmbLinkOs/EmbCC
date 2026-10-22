@@ -40,6 +40,12 @@ x86_64-windows-gnu"
 CONSTRUCTS=
 construct() {
     cat > "$out/src/$2"
+    again "$@"
+}
+# again NAME FILE "OPTIONS" "WHAT": another construct over a file an earlier
+# one wrote (plain.c), which must not read standard input -- it once did,
+# and emptied plain.c, or waited for input that never came
+again() {
     CONSTRUCTS="$CONSTRUCTS $1"
     eval "file_$1=\$2; opts_$1=\$3; what_$1=\$4"
 }
@@ -121,16 +127,17 @@ EOF
 construct naked naked.c "" '`__attribute__((naked))`' <<'EOF'
 __attribute__((naked)) void h(void) { }
 EOF
-construct asmfile asm.s "" 'an assembly source (`.s`)' <<'EOF'
+construct asmfile asm.s "" 'an assembly source (`.s`) with an instruction' <<'EOF'
 	.text
 	.globl f
 f:
+	nop
 EOF
 construct dashS plain.c "-S" '`-S` (assembly output)' <<'EOF'
 int f(int a) { return a + 1; }
 EOF
-construct debug plain.c "-g" '`-g` (DWARF)'
-construct unwind plain.c "--unwind-tables" '`--unwind-tables`'
+again debug plain.c "-g" '`-g` (DWARF)'
+again unwind plain.c "--unwind-tables" '`--unwind-tables`'
 construct cxx cxx.cc "--no-exceptions" 'C++ (without exceptions)' <<'EOF'
 struct A { int x; A(int v) : x(v) {} virtual int get() const { return x; } };
 int f(int v) { A a(v); return a.get() + 1; }
