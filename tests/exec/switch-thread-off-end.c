@@ -6,8 +6,9 @@
  * switch, whose copy branches the other way to the block after it, which
  * does not exist: it read past the end of its label array and branched
  * to label 0 ("label 0 in 'f' was never placed" at -O2 on x86-64 and
- * the M4, whatever the garbage named elsewhere). From GCC's torture
- * suite, compile/920624-1.c. */
+ * the M4, whatever the garbage named elsewhere; a heap overrun, SIGBUS
+ * or SIGSEGV, when a later pass indexed by it). From GCC's torture
+ * suite: compile/920624-1.c (f, g) and compile/pr83510.c (test_3). */
 // expect-exit: 42
 
 int B[8], Q[8];
@@ -33,13 +34,47 @@ void g(void)
         }
 }
 
+struct xyz { unsigned a0; };
+unsigned arr[10];
+static unsigned calls, last;
+
+__attribute__((noinline)) void wfm(struct xyz *c, int i, unsigned v)
+{
+    (void)c;
+    calls++;
+    last = (unsigned)i * 100 + v;
+}
+
+__attribute__((noinline)) int get_flag(void) { return 1; }
+
+/* case 9 is the only one the loop reaches */
+void test_3(struct xyz *ctx)
+{
+    unsigned int i;
+    for (i = 0; i < 10; i++) {
+        switch (i) {
+        case 0x9:
+            wfm(ctx, i, ctx->a0);
+            break;
+        case 0xA: case 0xB:
+        case 0xC: case 0xD: case 0xE: case 0xF:
+        case 0x10: case 0x11: case 0x12: case 0x13:
+            if (get_flag())
+                wfm(ctx, i, arr[i - 0xa]);
+            break;
+        }
+    }
+}
+
 int main(void)
 {
+    struct xyz x = { 7 };
     f();
     g();
+    test_3(&x);
     int sum = 0;
     for (int i = 0; i < 8; i++)
         sum += B[i] * (i + 1) + Q[i] * 10;
     /* B[2] B[3]: 3 + 4; Q[2..5]: 40 */
-    return sum == 47 ? 42 : sum;
+    return sum == 47 && calls == 1 && last == 907 ? 42 : sum;
 }
