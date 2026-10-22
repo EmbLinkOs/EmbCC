@@ -572,6 +572,12 @@ int  target_debug_info(void);
  * than as a change to target_get()'s meaning. */
 enum target_os  target_os_get(void);
 enum target_fmt target_fmt_get(void);
+/* 1 where a file-scope asm block, and the body of a naked function, are
+ * assembled by the GNU-syntax assembler that reads .s files (src/as/gas.c):
+ * every target but x86-64 (src/arch/x86_64/topasm.c's few instructions)
+ * and AArch64 into Mach-O or COFF, whose writers take no relocation type
+ * from an assembler. */
+int target_asm_blocks(void);
 void target_os_set(enum target_os o);
 void target_fmt_set(enum target_fmt f);
 

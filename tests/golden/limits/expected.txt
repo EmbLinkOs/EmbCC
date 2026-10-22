@@ -558,7 +558,7 @@ x86_64-elf cgoto yes
 x86_64-elf asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 x86_64-elf nested no: expected ';' before '{' [E0002]
 x86_64-elf interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V and MIPS32 it is implemented)
-x86_64-elf naked no: __attribute__((naked)) is not supported: on this target the body could only be assembled by the file-scope assembler's few instructions; it is supported on the ARM, RISC-V, MIPS and AVR targets
+x86_64-elf naked no: __attribute__((naked)) is not supported: on this target the body could only be assembled by the file-scope assembler's few instructions; it is supported on every target but x86-64 and AArch64 for Darwin or Windows
 x86_64-elf asmfile no: no assembly-file support for x86_64-elf yet
 x86_64-elf dashS yes
 x86_64-elf debug yes
@@ -585,7 +585,7 @@ aarch64-elf cgoto yes
 aarch64-elf asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 aarch64-elf nested no: expected ';' before '{' [E0002]
 aarch64-elf interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V and MIPS32 it is implemented)
-aarch64-elf naked no: __attribute__((naked)) is not supported: on this target the body could only be assembled by the file-scope assembler's few instructions; it is supported on the ARM, RISC-V, MIPS and AVR targets
+aarch64-elf naked yes
 aarch64-elf asmfile yes
 aarch64-elf dashS yes
 aarch64-elf debug yes
@@ -612,7 +612,7 @@ x86_64-linux-gnu cgoto yes
 x86_64-linux-gnu asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 x86_64-linux-gnu nested no: expected ';' before '{' [E0002]
 x86_64-linux-gnu interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V and MIPS32 it is implemented)
-x86_64-linux-gnu naked no: __attribute__((naked)) is not supported: on this target the body could only be assembled by the file-scope assembler's few instructions; it is supported on the ARM, RISC-V, MIPS and AVR targets
+x86_64-linux-gnu naked no: __attribute__((naked)) is not supported: on this target the body could only be assembled by the file-scope assembler's few instructions; it is supported on every target but x86-64 and AArch64 for Darwin or Windows
 x86_64-linux-gnu asmfile no: no assembly-file support for x86_64-linux-gnu yet
 x86_64-linux-gnu dashS yes
 x86_64-linux-gnu debug yes
@@ -639,7 +639,7 @@ aarch64-apple-darwin cgoto yes
 aarch64-apple-darwin asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 aarch64-apple-darwin nested no: expected ';' before '{' [E0002]
 aarch64-apple-darwin interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V and MIPS32 it is implemented)
-aarch64-apple-darwin naked no: __attribute__((naked)) is not supported: on this target the body could only be assembled by the file-scope assembler's few instructions; it is supported on the ARM, RISC-V, MIPS and AVR targets
+aarch64-apple-darwin naked no: __attribute__((naked)) is not supported: on this target the body could only be assembled by the file-scope assembler's few instructions; it is supported on every target but x86-64 and AArch64 for Darwin or Windows
 aarch64-apple-darwin asmfile yes
 aarch64-apple-darwin dashS yes
 aarch64-apple-darwin debug warns: -g: no debug information for aarch64-apple-darwin yet; tests/golden/out/limits/src/plain.c is compiled without it
@@ -666,7 +666,7 @@ x86_64-windows-gnu cgoto yes
 x86_64-windows-gnu asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 x86_64-windows-gnu nested no: expected ';' before '{' [E0002]
 x86_64-windows-gnu interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V and MIPS32 it is implemented)
-x86_64-windows-gnu naked no: __attribute__((naked)) is not supported: on this target the body could only be assembled by the file-scope assembler's few instructions; it is supported on the ARM, RISC-V, MIPS and AVR targets
+x86_64-windows-gnu naked no: __attribute__((naked)) is not supported: on this target the body could only be assembled by the file-scope assembler's few instructions; it is supported on every target but x86-64 and AArch64 for Darwin or Windows
 x86_64-windows-gnu asmfile no: no assembly-file support for x86_64-windows-gnu yet
 x86_64-windows-gnu dashS yes
 x86_64-windows-gnu debug no: -g is not supported for a Windows target yet: its debug information goes in CodeView records this does not write, and emitting DWARF under a COFF name would be worse than refusing
