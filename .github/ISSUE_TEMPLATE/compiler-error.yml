@@ -1,0 +1,47 @@
+name: Refused or crashed
+description: EmbCC refuses code that GCC or clang accept, stops with an internal error, or crashes.
+title: ""
+labels: ["refusal"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        EmbCC refuses what it cannot compile correctly, with an error that names the construct. Some refusals are known and listed in the manual ([Status and known limitations](https://github.com/EmbLinkOs/EmbCC/blob/main/docs/internals/status.md)). A report still helps: it tells us which ones people hit.
+  - type: input
+    id: version
+    attributes:
+      label: embcc --version
+      description: The first line it prints.
+    validations:
+      required: true
+  - type: input
+    id: target
+    attributes:
+      label: Target
+      description: The --target= triple.
+      placeholder: riscv32-unknown-elf
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: The command line
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: message
+    attributes:
+      label: What embcc printed
+      description: The whole message, including the file, line and any [bracketed] internal detail.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: source
+    attributes:
+      label: The code
+      description: The smallest source that shows it. `embcc -E` output of the file is fine when the headers matter.
+      render: c
+    validations:
+      required: true

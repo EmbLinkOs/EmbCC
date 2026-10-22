@@ -1,0 +1,58 @@
+name: Wrong code
+description: A program compiled by EmbCC does something other than the C or C++ says, or gives a different result than GCC or clang.
+title: "wrong code: "
+labels: ["wrong code"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Wrong code is the most urgent kind of bug EmbCC can have. The smaller the program that shows it, the faster it is fixed: if you can, cut it down to one file that prints or returns the wrong value.
+  - type: input
+    id: version
+    attributes:
+      label: embcc --version
+      description: The first line it prints.
+      placeholder: EmbCC 0.0.1-beta (the Emb toolchain's C and C++ compiler, ...)
+    validations:
+      required: true
+  - type: input
+    id: target
+    attributes:
+      label: Target and board
+      description: The --target= triple, and where the program ran (a board, EmbSim, QEMU).
+      placeholder: thumbv7em-none-eabihf on an nRF52840 DK
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: The command line
+      description: Every option, exactly as given to embcc.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: source
+    attributes:
+      label: The program
+      description: The smallest source file that shows the bug. Paste it, or attach it.
+      render: c
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: What it does, and what it should do
+      description: The output or value you got, the one you expected, and, if you have them, what GCC or clang give with the same options.
+    validations:
+      required: true
+  - type: dropdown
+    id: levels
+    attributes:
+      label: Does it depend on the optimization level?
+      options:
+        - I don't know
+        - Only with optimization (-O1, -O2, -Os)
+        - At -O0 too
+    validations:
+      required: true

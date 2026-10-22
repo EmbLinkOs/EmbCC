@@ -167,6 +167,8 @@ cc hello.o -o hello
   the toolchain, and the tests a change needs.
 - [Roadmap](docs/roadmap.md): what 1.0.0 will promise, and the releases
   on the way there.
+- [Security](SECURITY.md): how to report a vulnerability privately, and
+  what counts as one.
 
 ## License
 
