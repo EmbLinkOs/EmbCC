@@ -2233,6 +2233,18 @@ static void fb_ld(struct t_fn *F, int rt, long off, int size, int sign)
     ldst_must(F->t, rt, rt, 0, size, sign, 0);
 }
 
+/* A stack argument's word into the outgoing area, [sp, #off]: through
+ * T_ADDR where no immediate reaches -- an argument after a struct of
+ * more than 4 KB is that far from the sp. The value is never in T_ADDR
+ * (a role scratch holds no value). */
+static void sp_st(struct t_fn *F, int rt, long off)
+{
+    if (t_ldst_imm(F->t, rt, T_SP, off, 4, 0, 1))
+        return;
+    t_add_sp(F->t, T_ADDR, off);
+    ldst_must(F->t, rt, T_ADDR, 0, 4, 0, 1);
+}
+
 /* The most a block copy or clear does in straight-line code; past it, a
  * loop (t_copy_block). It was "while every offset fits an immediate":
  * 4092 bytes, and a 2 KB table cleared in a loop -- tools/bench's hash --
@@ -5609,6 +5621,30 @@ static void gen_ins(struct t_fn *F, int n)
                  * no register for it at all. */
                 long fo = 0;
                 int fa = faddr(F, a->vreg, &fo);
+                long from = (long)pl[k].nreg * 4, bytes = a->size - from;
+                /* A big one is a loop, as IR_MEMCPY's is (t_copy_block),
+                 * from the struct's first stack word to the outgoing
+                 * area at the live sp. Word by word in straight-line
+                 * code, a 64 KB struct needed offsets no immediate
+                 * reaches ("a 4-byte load at offset 4096 is out of
+                 * reach": GCC's torture execute/pr20621-1.c,
+                 * pr23135.c, pr28982b.c), and a 72 MB one
+                 * (compile/20050622-1.c) would have been 144 MB of
+                 * code. So would a small struct after a big one: its
+                 * stack words are past 4 KB of the sp too. */
+                if (bytes > t_block_straight() || a->size > 4092 ||
+                    pl[k].stk + bytes > 4092) {
+                    if (fa) {
+                        fb_addr(F, T_TMP, fo + from);
+                    } else {
+                        rd(F, a->vreg, T_TMP);
+                        if (from)
+                            t_addw(t, T_TMP, T_TMP, from);
+                    }
+                    t_add_sp(t, T_ADDR, pl[k].stk);
+                    t_copy_block(t, T_ADDR, T_TMP, 1, bytes);
+                    continue;
+                }
                 int base = fa ? F->fb : cs1 >= 0 ? cs1 : T_ADDR;
                 int dr = cs0 >= 0 ? cs0 : T_ACC;
                 if (!fa)
@@ -5640,21 +5676,21 @@ static void gen_ins(struct t_fn *F, int n)
                 if (in_reg(F, a->vreg)) {
                     int r = F->loc[a->vreg];
                     if (!t_ldst_pair(t, r, r + 1, T_SP, pl[k].stk, 1)) {
-                        ldst_must(t, r, T_SP, pl[k].stk, 4, 0, 1);
-                        ldst_must(t, r + 1, T_SP, pl[k].stk + 4, 4, 0, 1);
+                        sp_st(F, r, pl[k].stk);
+                        sp_st(F, r + 1, pl[k].stk + 4);
                     }
                 } else {
                     int lo = cs0 >= 0 && cs1 >= 0 ? cs0 : T_ACC;
                     int hi = cs0 >= 0 && cs1 >= 0 ? cs1 : T_TMP;
                     rd64(F, a->vreg, lo, hi);
-                    ldst_must(t, lo, T_SP, pl[k].stk, 4, 0, 1);
-                    ldst_must(t, hi, T_SP, pl[k].stk + 4, 4, 0, 1);
+                    sp_st(F, lo, pl[k].stk);
+                    sp_st(F, hi, pl[k].stk + 4);
                 }
             } else {
                 int r = in_reg(F, a->vreg) ? F->loc[a->vreg]
                                            : cs0 >= 0 ? cs0 : T_ACC;
                 rd(F, a->vreg, r);
-                ldst_must(t, r, T_SP, pl[k].stk, 4, 0, 1);
+                sp_st(F, r, pl[k].stk);
             }
         }
         /* The VFP arguments next, while every vreg is still where the

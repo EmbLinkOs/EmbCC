@@ -2097,6 +2097,58 @@ static void sp_st(struct t_fn *F, int rv, long off, unsigned avoid)
     tmp_put(F, x);
 }
 
+/* A struct argument's stack words past this many bytes are copied by a
+ * loop (v6_arg_loop), not word by word in straight-line code: 64 KB of
+ * struct was 16384 load-store pairs, and the 72 MB of GCC's torture
+ * compile/20050622-1.c a compile that did not finish. */
+#define V6_STRAIGHT_ARG 128
+
+/* The stack words of struct argument a -- its bytes from `from` on --
+ * into the outgoing area at [sp + stk], by a loop: a word a trip where
+ * irgen promises the address is word-aligned (ARMv6-M faults on an
+ * unaligned word), else a byte, and the bytes past the last whole word
+ * after it. Four registers: the source in S1, the destination, its end
+ * and the data from tmp_get, which may push them -- so the destination
+ * is made after, at the sp they leave. Flags are dead: a call follows. */
+static void v6_arg_loop(struct t_fn *F, const struct ir_arg *a, long from,
+                        long stk)
+{
+    struct code *t = F->t;
+    int step = a->natural && a->align >= 4 ? 4 : 1;
+    long bytes = a->size - from, body = bytes / step * step;
+    int s = sc(F, S1), d, e, x, top, at;
+    pool_point(F, 96, 0);
+    v_rd(F, a->vreg, s);
+    if (from)
+        t1_addsub_imm8(t, T_OP_ADD, s, from);
+    F->tbusy |= 1u << s;
+    d = tmp_get(F, 0);
+    e = tmp_get(F, 1u << d);
+    x = tmp_get(F, (1u << d) | (1u << e));
+    k32_nf(F, d, (unsigned long)(stk + F->spb));   /* after any push */
+    t1_add_hi(t, d, T_SP);
+    k32_nf(F, e, (unsigned long)body);
+    t1_addsub_reg(t, T_OP_ADD, e, e, d);
+    top = t->len;
+    t1_ldst_imm(t, x, s, 0, step, 0);
+    t1_ldst_imm(t, x, d, 0, step, 1);
+    t1_addsub_imm8(t, T_OP_ADD, s, step);
+    t1_addsub_imm8(t, T_OP_ADD, d, step);
+    t1_cmp_reg(t, d, e);
+    at = bc16(F, T_NE);
+    if (!t_patch_bcond16(t, at, top))
+        internal_error("thumb: %s: a struct argument's copy loop is out of "
+                       "reach", F->fn->name);
+    for (long k = 0; k < bytes - body; k++) {
+        t1_ldst_imm(t, x, s, k, 1, 0);
+        t1_ldst_imm(t, x, d, k, 1, 1);
+    }
+    tmp_put(F, x);
+    tmp_put(F, e);
+    tmp_put(F, d);
+    F->tbusy &= ~(1u << s);
+}
+
 static void gen_call(struct t_fn *F, int n)
 {
     struct ir_func *fn = F->fn;
@@ -2127,7 +2179,10 @@ static void gen_call(struct t_fn *F, int n)
             v6_refuse(fn, i, "a VFP argument (ARMv6-M has no FPU)");
         if (!pl[k].nstk)
             continue;
-        if (a->is_struct) {
+        if (a->is_struct &&
+            a->size - (long)pl[k].nreg * 4 > V6_STRAIGHT_ARG) {
+            v6_arg_loop(F, a, (long)pl[k].nreg * 4, pl[k].stk);
+        } else if (a->is_struct) {
             v_rd(F, a->vreg, sc(F, S1));
             for (int q = 0; q < pl[k].nstk; q++) {
                 long off = (long)(pl[k].nreg + q) * 4;
@@ -3720,8 +3775,9 @@ static long v6_est(const struct t_fn *F, int n)
     case IR_CALL: {
         long e = 96;
         for (int k = 0; k < i->nargs; k++)
-            e += i->argv[k].is_struct ? 48 + 40L * ((i->argv[k].size + 3) / 4)
-                                      : 32;
+            e += !i->argv[k].is_struct ? 32
+                 : i->argv[k].size > V6_STRAIGHT_ARG ? 96 + 40   /* a loop */
+                 : 48 + 40L * ((i->argv[k].size + 3) / 4);
         return e;
     }
     case IR_ASM: {
