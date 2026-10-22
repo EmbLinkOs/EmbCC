@@ -23,6 +23,8 @@ echo "TEST-MARKER loongarch-exec"
 QEMU=${EMBCC_QEMU_LOONGARCH:-qemu-system-loongarch64}
 command -v "$QEMU" >/dev/null 2>&1 || {
     echo "skipped: $QEMU not found"; exit 0; }
+why=$(qemu_too_old "$QEMU" 10.0 "the harness's image does not start on it: on 8.2 no program printed a byte, and 10.2 is the oldest seen to run it") && {
+    echo "skipped: $why"; exit 0; }
 CLANG=${EMBCC_REF_CLANG_LOONGARCH:-clang}
 command -v "$CLANG" >/dev/null 2>&1 &&
     "$CLANG" --target=loongarch64-unknown-elf -msoft-float \

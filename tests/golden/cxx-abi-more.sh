@@ -77,7 +77,9 @@ for t in $boards; do
             Q=qemu-system-mips ;;
         sparc*)
             SRC=tests/harness/sparc H=$SRC hv=EMBCC_SPARC_HARNESS
-            CL="--target=sparc-none-elf -mcpu=leon3 -msoft-float"
+            # (+hasleoncasa: LLVM 23's leon3 has CASA; 22's and older call
+            # __atomic_load_1, which lib/rt does not have, for a guard)
+            CL="--target=sparc-none-elf -mcpu=leon3 -msoft-float -Xclang -target-feature -Xclang +hasleoncasa"
             Q=qemu-system-sparc ;;
         powerpc*)
             SRC=tests/harness/ppc H=$SRC hv=EMBCC_PPC_HARNESS
@@ -104,15 +106,18 @@ for t in $boards; do
             2>/dev/null; then
         echo "$t: no $REF for $t: EmbCC with itself only"; REF=
     fi
+    # (LLVM 23's SPARC long double is the 16-byte quad EmbCC's is; 18's
+    # is 8 bytes, another ABI, and every pairing differs in that fact)
+    case $t in sparc*)
+        if [ -n "$REF" ] && why=$(llvm_too_old "$REF"); then
+            echo "$t: $why: EmbCC with itself only"; REF=
+        fi ;;
+    esac
     case $t in tricore*)
         [ -n "${EMBCC_TRICORE_PLUGIN:-}" ] || {
-            inc=${QEMU_PLUGIN_INC:-/opt/homebrew/include}
-            cc -shared -fPIC -O2 -I"$inc" $(pkg-config --cflags glib-2.0 2>/dev/null) \
-               -undefined dynamic_lookup -o "$out/putc.so" \
-               tests/harness/tricore/putc.c 2>/dev/null ||
-            cc -shared -fPIC -O2 -I"$inc" $(pkg-config --cflags glib-2.0 2>/dev/null) \
-               -o "$out/putc.so" tests/harness/tricore/putc.c || {
-                echo "the TriCore harness's output plugin does not build"; exit 1; }
+            why=$(qemu_plugin tests/harness/tricore/putc.c "$out/putc.so") || {
+                echo "$t: skipped, its harness prints through a QEMU plugin, and $why"
+                continue; }
             EMBCC_TRICORE_PLUGIN=$PWD/$out/putc.so
             export EMBCC_TRICORE_PLUGIN; } ;;
     esac

@@ -11,6 +11,8 @@
 #        gen-predef.sh --reference ARCH               print the filtered table
 #                                                    (what tests/golden/predef.sh
 #                                                    compares --dump-predef with)
+#        gen-predef.sh --reference-check ARCH         is the reference here, and
+#                                                    the release the table is?
 #
 #   ARCH is one of: x86_64 aarch64 thumb thumbv6m thumbv8m thumbv8mbase armv7a riscv32 riscv64 avr mips32
 #                   mips32eb ppc32 sparc32 mips64 mips64eb
@@ -292,9 +294,33 @@ reference_cxx() {
         | grep -v -E "$(exclude_arch_cxx "$1")"
 }
 
+# A checked-in table is one release's answer, and the next release's
+# differs: clang 18 has no __DBL_NORM_MAX__ or __GCC_CONSTRUCTIVE_SIZE,
+# and says __BOOL_WIDTH__ 8 where clang 23 (and C23) says 1. Comparing
+# the table with another release's compiler tests the compiler, not EmbCC.
+# --reference-check ARCH succeeds, saying nothing, when ARCH's reference
+# compiler is here and is the major version its table records; otherwise
+# it prints why not, and fails.
+reference_check() {
+    GCC=$(refgcc "$1")
+    command -v "$GCC" >/dev/null 2>&1 || { echo "no $GCC"; return 1; }
+    table="$(dirname "$0")/../src/arch/$1/predef.c"
+    [ -f "$table" ] || return 0
+    want=$(sed -n '1s/.* \([0-9][0-9]*\)\.[0-9][0-9.]* .*/\1/p' "$table")
+    # shellcheck disable=SC2046
+    have=$("$GCC" $(refflags "$1") -dumpversion 2>/dev/null | cut -d. -f1)
+    [ -z "$want" ] || [ "$want" = "$have" ] || {
+        echo "its table is $(basename "$GCC") $want's, and this $GCC is $have"
+        return 1; }
+}
+
 if [ "${1:-}" = --reference ]; then
     reference "${2:?usage: gen-predef.sh --reference ARCH}"
     exit 0
+fi
+if [ "${1:-}" = --reference-check ]; then
+    reference_check "${2:?usage: gen-predef.sh --reference-check ARCH}"
+    exit
 fi
 if [ "${1:-}" = --reference-cxx ]; then
     reference_cxx "${2:?usage: gen-predef.sh --reference-cxx ARCH}"

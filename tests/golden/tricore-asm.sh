@@ -58,11 +58,9 @@ echo "constraints and modifiers, symbols and named labels in a template are"
 echo "refused by name"
 
 command -v "$QEMU" >/dev/null 2>&1 || { echo "skipped the board: no $QEMU"; exit 0; }
-inc=${QEMU_PLUGIN_INC:-/opt/homebrew/include}
-cc -shared -fPIC -O2 -I"$inc" $(pkg-config --cflags glib-2.0 2>/dev/null) \
-   -undefined dynamic_lookup -o "$out/putc.so" \
-   tests/harness/tricore/putc.c 2>/dev/null ||
-    { echo "the harness's output plugin does not build"; exit 1; }
+why=$(qemu_plugin tests/harness/tricore/putc.c "$out/putc.so") || {
+    echo "skipped the board: the TriCore harness prints through a QEMU plugin, and $why"
+    exit 0; }
 EMBCC_TRICORE_PLUGIN=$PWD/$out/putc.so
 EMBCC_TRICORE_HARNESS=$PWD/$out
 export EMBCC_TRICORE_PLUGIN EMBCC_TRICORE_HARNESS EMBLD

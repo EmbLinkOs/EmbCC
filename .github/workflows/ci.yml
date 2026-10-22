@@ -13,12 +13,12 @@
 #           every tests/exec and tests/cxx program compiled by EmbCC and
 #           run natively.
 #   suite   the whole test suite, `make test`, with QEMU and the LLVM tools
-#           installed -- run by hand (workflow_dispatch) for now. Its first
-#           run here passed 635 of 707: most failures are this runner's
-#           older LLVM (18) and QEMU (8.2) refereeing tests written against
-#           LLVM 23 and QEMU 11, or reference trees (the cross newlib, a
-#           reference g++) that only the development machine has. It joins
-#           every pull request once it is green.
+#           installed: on Ubuntu 26.04 with LLVM 23 (the referees'
+#           release), and on 24.04 (the oldest tools a contributor is
+#           likely to have, where what they cannot referee is a SKIP). Its
+#           first run, on 24.04 alone, passed 635 of 707. It does not yet
+#           fail the workflow (continue-on-error) -- it becomes a required
+#           check once it is green.
 name: ci
 
 on:
@@ -89,31 +89,91 @@ jobs:
         run: make check
 
   suite:
-    name: suite (linux x86-64, QEMU)
-    runs-on: ubuntu-24.04
-    if: github.event_name == 'workflow_dispatch'
+    name: suite (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 180
     continue-on-error: true
+    env:
+      # A QEMU run's wall-clock bound (tests/run.sh's default is 20 s).
+      # The suite runs a test per core and some tests run eight QEMUs
+      # each: on a four-core runner a program that takes a second alone
+      # has run out the 20 s (switch-thread and neg-index on the M23).
+      EMBCC_QEMU_TIMEOUT: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Ubuntu 26.04: QEMU 10.2 and GCC 15, and LLVM 23 from
+          # apt.llvm.org -- the LLVM the referees and the generated
+          # tables (src/arch/*/predef.c) were taken from, with a QEMU one
+          # release behind the development machine's 11
+          - { name: ubuntu-26.04, runner: ubuntu-26.04, llvm: 23,
+              llvm-apt: resolute, qemu-riscv: qemu-system-riscv }
+          # Ubuntu 24.04: QEMU 8.2, LLVM 18 and GCC 13, the oldest tools a
+          # contributor is likely to have -- what they cannot referee must
+          # be a SKIP that says why, not a FAIL
+          - { name: ubuntu-24.04, runner: ubuntu-24.04, llvm: 18,
+              llvm-apt: '', qemu-riscv: qemu-system-misc }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install QEMU and the LLVM tools
         run: |
+          if [ -n "${{ matrix.llvm-apt }}" ]; then
+            curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key |
+              sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
+            echo "deb http://apt.llvm.org/${{ matrix.llvm-apt }}/ llvm-toolchain-${{ matrix.llvm-apt }}-${{ matrix.llvm }} main" |
+              sudo tee /etc/apt/sources.list.d/llvm.list
+          fi
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             qemu-system-arm qemu-system-misc qemu-system-mips \
             qemu-system-ppc qemu-system-sparc qemu-system-x86 \
-            clang llvm lld
+            ${{ matrix.qemu-riscv }} libglib2.0-dev \
+            clang-${{ matrix.llvm }} llvm-${{ matrix.llvm }} lld-${{ matrix.llvm }}
+          echo "/usr/lib/llvm-${{ matrix.llvm }}/bin" >> "$GITHUB_PATH"
+      # The TriCore harness's output and the instruction counts are QEMU
+      # TCG plugins, built against the plugin API of the QEMU that loads
+      # them. Ubuntu packages no qemu-plugin.h, so it comes from the
+      # source tree of the installed version.
+      - name: QEMU's plugin header
+        run: |
+          v=$(qemu-system-x86_64 --version | sed -n 's/^QEMU emulator version \([0-9.]*\).*/\1/p')
+          mkdir -p "$RUNNER_TEMP/qemu-include"
+          curl -fsSL -o "$RUNNER_TEMP/qemu-include/qemu-plugin.h" \
+            "https://gitlab.com/qemu-project/qemu/-/raw/v$v/include/qemu/qemu-plugin.h"
+          echo "QEMU_PLUGIN_INC=$RUNNER_TEMP/qemu-include" >> "$GITHUB_ENV"
+      - name: The tools
+        run: |
+          cc --version | head -1
+          clang --version | head -1
+          llvm-mc --version | sed -n 2p
+          qemu-system-x86_64 --version | head -1
       - name: Build everything the suite runs
         run: make -j"$(getconf _NPROCESSORS_ONLN)" all embdbg embdoc runtimes
       - name: make test
-        run: make test 2>&1 | tee test.log
+        shell: bash
+        run: |
+          set -o pipefail
+          make test 2>&1 | tee test.log
       - name: The failures
         if: always()
         run: grep -E '^(FAIL|SKIP) ' test.log || true
+      - name: The failed tests' outputs
+        if: failure()
+        run: |
+          for t in $(sed -n 's|^FAIL tests/golden/\(.*\)\.sh .*|\1|p' test.log); do
+            ls -d "tests/golden/out/$t" "tests/golden/out/$t"-* 2>/dev/null || true
+          done | sort -u > failed-outs.txt
+          tar czf failed-outs.tgz -T failed-outs.txt
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
-          name: test-log
+          name: test-log-${{ matrix.name }}
           path: test.log
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: failure()
+        with:
+          name: failed-outs-${{ matrix.name }}
+          path: failed-outs.tgz

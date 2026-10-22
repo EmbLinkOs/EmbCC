@@ -46,17 +46,13 @@ fail() { echo "FAIL: $*"; exit 1; }
 
 have_qemu=0
 command -v "$QAVR" >/dev/null 2>&1 && have_qemu=1
-plug=
+plug= why=
 if [ $have_qemu = 1 ] && command -v "$NM" >/dev/null 2>&1; then
-    inc=${QEMU_PLUGIN_INC:-/opt/homebrew/include}
     p=$PWD/$out/icount.so
-    { cc -shared -fPIC -O2 -I"$inc" $(pkg-config --cflags glib-2.0 2>/dev/null) \
-         -undefined dynamic_lookup -o "$p" tools/bench/icount.c ||
-      cc -shared -fPIC -O2 -I"$inc" $(pkg-config --cflags glib-2.0 2>/dev/null) \
-         -o "$p" tools/bench/icount.c; } 2>/dev/null && plug=$p
+    why=$(qemu_plugin tools/bench/icount.c "$p") && plug=$p
 fi
 [ $have_qemu = 0 ] || [ -n "$plug" ] ||
-    echo "note: QEMU's counting plugin (or $NM) is missing; counts are not compared"
+    echo "note: QEMU's counting plugin (or $NM) is missing${why:+ ($why)}; counts are not compared"
 
 # the harness, the runtime and the driver
 H=$out/h; mkdir -p "$H"
@@ -213,7 +209,11 @@ if [ "$HAVE_QEMU" = 1 ]; then
         echo "NA $opt $n (QEMU did not finish)"; exit 0
     fi
 fi
-"$EMBSIM" $o.elf --board uno --max-insns 4000000000 --count $o.en > $o.eout 2> $o.eerr; es=$?
+# ...and what QEMU finished, EmbSim must: its budget is more than QEMU's
+# AVR runs in 60 s on any host. It was 4e9, and on CI's runner QEMU
+# finished divconst-32 at -O2, which takes 4.45e9 -- where the Mac's QEMU
+# did not, so it was not applicable there.
+"$EMBSIM" $o.elf --board uno --max-insns 20000000000 --count $o.en > $o.eout 2> $o.eerr; es=$?
 if [ $es != 0 ] || ! grep -q '==END==' $o.eout; then
     echo "DIFF $opt $n: EmbSim exits $es without the sentinel $(head -c 200 $o.eerr | tr '\n' ' ')"
     exit 0

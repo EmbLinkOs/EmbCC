@@ -45,6 +45,9 @@ command -v "$MC" >/dev/null 2>&1 && command -v "$OBJCOPY" >/dev/null 2>&1 || {
     echo "SKIP: llvm-mc/llvm-objcopy not found"; exit 0; }
 "$MC" -triple=avr -mcpu=atmega328p /dev/null -o /dev/null 2>/dev/null || {
     echo "SKIP: this llvm-mc has no AVR target"; exit 0; }
+# An llvm-mc older than the suite's LLVM (lib.sh) is no referee here: LLVM 18's
+# disassembler starts with a .text line, and disassembles otherwise.
+skip_if_llvm_old "$MC"
 
 cc -std=c99 -Wall -Wextra -o "$out/avrcheck" \
    tools/avrcheck/avrcheck.c src/arch/avr/emit.c src/arch/code.c \

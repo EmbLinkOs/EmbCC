@@ -29,7 +29,11 @@ out=tests/golden/out/riscv-asm
 rm -rf "$out"; mkdir -p "$out"
 
 # ---- 1. the vocabulary, against llvm-mc --------------------------------
-if command -v "$MC" >/dev/null 2>&1 && command -v "$OBJCOPY" >/dev/null 2>&1
+# (against the suite's LLVM: LLVM 18 encoded an rv64 line as addiw where
+# EmbCC and LLVM 23 have addi)
+if mc_old=$(llvm_too_old "$MC"); then
+    echo "SKIP the encoding half: $mc_old"
+elif command -v "$MC" >/dev/null 2>&1 && command -v "$OBJCOPY" >/dev/null 2>&1
 then
     cc -std=c99 -Wall -Wextra -o "$out/rvasmcheck" \
        tools/rvasmcheck/rvasmcheck.c src/arch/riscv/asm.c \

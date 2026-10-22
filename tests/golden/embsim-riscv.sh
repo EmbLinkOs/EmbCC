@@ -53,17 +53,13 @@ fail() { echo "FAIL: $*"; exit 1; }
 have_qemu=0
 command -v "$Q32" >/dev/null 2>&1 && command -v "$Q64" >/dev/null 2>&1 &&
     have_qemu=1
-plug=
+plug= why=
 if [ $have_qemu = 1 ] && command -v "$NM" >/dev/null 2>&1; then
-    inc=${QEMU_PLUGIN_INC:-/opt/homebrew/include}
     p=$PWD/$out/icount.so
-    { cc -shared -fPIC -O2 -I"$inc" $(pkg-config --cflags glib-2.0 2>/dev/null) \
-         -undefined dynamic_lookup -o "$p" tools/bench/icount.c ||
-      cc -shared -fPIC -O2 -I"$inc" $(pkg-config --cflags glib-2.0 2>/dev/null) \
-         -o "$p" tools/bench/icount.c; } 2>/dev/null && plug=$p
+    why=$(qemu_plugin tools/bench/icount.c "$p") && plug=$p
 fi
 [ $have_qemu = 0 ] || [ -n "$plug" ] ||
-    echo "note: QEMU's counting plugin (or $NM) is missing; counts are not compared"
+    echo "note: QEMU's counting plugin (or $NM) is missing${why:+ ($why)}; counts are not compared"
 
 # ---- 2. the ends of a run ------------------------------------------------
 e=$out/ends; mkdir -p "$e"
@@ -140,7 +136,12 @@ echo "embsim-riscv: the test device's status, a lockup, an idle loop, a WFI noth
 # ---- 3. instruction edges ----------------------------------------------------
 x=$out/isa; mkdir -p "$x"
 CLANG=${EMBCC_REF_CLANG:-clang}
-if command -v "$CLANG" >/dev/null 2>&1; then
+# (by the suite's clang: the record holds addresses of its code, which
+# clang 22 lays out otherwise, and clang 18 does not compile rv-isa.c's
+# inline asm)
+if command -v "$CLANG" >/dev/null 2>&1 && why=$(llvm_too_old "$CLANG"); then
+    echo "embsim-riscv: the instruction-edge program was not built: $why"
+elif command -v "$CLANG" >/dev/null 2>&1; then
     for w in 32 64; do
         "$CLANG" --target=riscv$w-unknown-elf -march=rv${w}gc \
             -mabi=$([ $w = 32 ] && echo ilp32d || echo lp64d) -mcmodel=medany \
@@ -158,8 +159,18 @@ if command -v "$CLANG" >/dev/null 2>&1; then
             q=$Q32; [ $w = 64 ] && q=$Q64
             sh tests/harness/qrun.sh 20 "$q" -M virt -bios none -nographic \
                 -m 8 -kernel "$x/isa$w.elf" > "$x/isa$w.qemu" 2>/dev/null
-            cmp -s "$x/isa$w.qemu" "$x/isa$w.sim" || {
-                diff "$x/isa$w.qemu" "$x/isa$w.sim" | head -20
+            # QEMU before 11.1 raised a misaligned AMO as a misaligned
+            # LOAD, cause 4, where the privileged spec, EmbSim and the
+            # record have the store/AMO one, 6 (QEMU issue 3503): against
+            # an older QEMU that one line is the record's alone
+            cp "$x/isa$w.qemu" "$x/isa$w.qref"; cp "$x/isa$w.sim" "$x/isa$w.sref"
+            if why=$(qemu_too_old "$q" 11.1 "it raises a misaligned AMO with cause 4 (QEMU issue 3503)"); then
+                echo "embsim-riscv: amo-misaligned not compared with QEMU: $why"
+                grep -v '^amo-misaligned ' "$x/isa$w.qemu" > "$x/isa$w.qref"
+                grep -v '^amo-misaligned ' "$x/isa$w.sim" > "$x/isa$w.sref"
+            fi
+            cmp -s "$x/isa$w.qref" "$x/isa$w.sref" || {
+                diff "$x/isa$w.qref" "$x/isa$w.sref" | head -20
                 fail "rv-isa.c on RV$w: EmbSim's output is not QEMU's"; }
         fi
         echo "embsim-riscv: RV$w's instruction edges ($(wc -l < "$x/isa$w.sim" | tr -d ' ') results) as QEMU and the record have them"

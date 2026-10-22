@@ -43,6 +43,9 @@ d=tests/golden/arm-asm-more
 out=tests/golden/out/arm-asm-more
 rm -rf "$out"; mkdir -p "$out"
 fail() { echo "FAIL: $*"; exit 1; }
+# An llvm-mc older than the suite's LLVM (lib.sh) is no referee here: LLVM 22's and
+# older take ldrd's post-index #-1024, which does not encode (+-1020).
+skip_if_llvm_old "$MC" "$OD"
 
 # readback BIN TRIPLE VOCAB NAME: EmbCC's bytes disassembled must be the
 # lines written, less what llvm-objdump prints differently and means the

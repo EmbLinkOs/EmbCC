@@ -36,6 +36,9 @@ out=tests/golden/out/int-constants
 rm -rf "$out"; mkdir -p "$out"
 EMBCC=${EMBCC:-./embcc}
 command -v clang >/dev/null 2>&1 || { echo "SKIP: no clang to referee"; exit 0; }
+# (a clang older than the suite's referees is no reference: LLVM 18's
+# objects read back nothing here)
+skip_if_llvm_old clang
 
 python3 - "$out/exprs" <<'PYEOF'
 import sys

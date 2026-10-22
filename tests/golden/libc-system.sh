@@ -195,7 +195,10 @@ for arch in x86_64 aarch64; do
         cat "$d/link.err"; fail "$triple: an object without .note.GNU-stack"
     fi
     if [ "$native" = 1 ]; then
-        got=$("$d/prog" | tr '\n' ' '); st=$?
+        # the program's status, not tr's: $? after a pipe in $(...) is
+        # the last command's, and this said 0 for every run on Linux
+        "$d/prog" > "$d/run.out"; st=$?
+        got=$(tr '\n' ' ' < "$d/run.out")
     else
         root=$d/root
         if [ "$arch" = x86_64 ]; then

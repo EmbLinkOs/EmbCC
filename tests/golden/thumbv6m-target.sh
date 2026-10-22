@@ -72,7 +72,10 @@ for m in __ARM_ARCH_7M__ __ARM_FEATURE_IDIV __ARM_FEATURE_LDREX \
     printf '%s\n' "$v6" | grep -q "^#define $m " && {
         echo "ARMv6-M claims $m, which it does not have"; exit 1; }
 done
-if command -v clang >/dev/null 2>&1; then
+# (against the clang release the table was taken from: another's differs)
+if ! why=$(sh tools/gen-predef.sh --reference-check thumbv6m); then
+    echo "the ARMv6-M macros: not compared with clang ($why)"
+else
     ref=$(sh tools/gen-predef.sh --reference thumbv6m)
     [ "$v6" = "$ref" ] || {
         echo "the ARMv6-M table disagrees with clang's:"

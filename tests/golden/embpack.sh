@@ -12,6 +12,7 @@ EMBPACK=${EMBPACK:-./embpack}
 [ -x "$EMBPACK" ] || { echo "FAIL: $EMBPACK is not built (make embpack)"; exit 1; }
 OC=${EMBCC_LLVM_OBJCOPY:-llvm-objcopy}
 echo "TEST-MARKER embpack"
+. "$(dirname "$0")/../lib.sh"
 command -v "$OC" >/dev/null 2>&1 || { echo "SKIP: $OC not found"; exit 0; }
 command -v python3 >/dev/null 2>&1 || { echo "SKIP: python3 not found"; exit 0; }
 out=tests/golden/out/embpack
@@ -76,10 +77,18 @@ PY
 python3 "$out/dec.py" hex "$out/fw.hex" "$out/ref.hex" > "$out/hex.txt" 2>&1 ||
     { cat "$out/hex.txt"; fail "Intel HEX differs from llvm-objcopy's"; }
 "$EMBPACK" "$F" -o "$out/fw.srec" || fail "srec"
-"$OC" -O srec "$F" "$out/ref.srec"
-python3 "$out/dec.py" srec "$out/fw.srec" "$out/ref.srec" > "$out/srec.txt" 2>&1 ||
-    { cat "$out/srec.txt"; fail "S-records differ from llvm-objcopy's"; }
-echo "bin, hex and srec: the bytes llvm-objcopy writes ($(cat "$out/hex.txt"))"
+# llvm-objcopy writes S-records from LLVM 19 on: an older one referees the
+# others, and says why it cannot referee these
+srec=srec
+if objcopy_has_srec "$OC"; then
+    "$OC" -O srec "$F" "$out/ref.srec"
+    python3 "$out/dec.py" srec "$out/fw.srec" "$out/ref.srec" > "$out/srec.txt" 2>&1 ||
+        { cat "$out/srec.txt"; fail "S-records differ from llvm-objcopy's"; }
+else
+    echo "SKIP the S-records: $OC writes none (LLVM 19 and later do)"
+    srec=
+fi
+echo "bin, hex${srec:+ and $srec}: the bytes llvm-objcopy writes ($(cat "$out/hex.txt"))"
 
 # the raw binary runs: QEMU loads a non-ELF image at address 0
 QARM=${EMBCC_QEMU_ARM:-qemu-system-arm}
@@ -147,9 +156,11 @@ R=$out/crc-riscv32-unknown-elf.elf
 "$EMBPACK" "$R" -o "$out/rv.hex" && "$OC" -O ihex "$R" "$out/rv-ref.hex" &&
     python3 "$out/dec.py" hex "$out/rv.hex" "$out/rv-ref.hex" > "$out/rvhex.txt" 2>&1 ||
     { cat "$out/rvhex.txt"; fail "Intel HEX above 64 KiB differs from llvm-objcopy's"; }
-"$EMBPACK" "$R" -o "$out/rv.srec" && "$OC" -O srec "$R" "$out/rv-ref.srec" &&
-    python3 "$out/dec.py" srec "$out/rv.srec" "$out/rv-ref.srec" > "$out/rvsrec.txt" 2>&1 ||
-    { cat "$out/rvsrec.txt"; fail "S-records above 64 KiB differ from llvm-objcopy's"; }
+if [ -n "$srec" ]; then
+    "$EMBPACK" "$R" -o "$out/rv.srec" && "$OC" -O srec "$R" "$out/rv-ref.srec" &&
+        python3 "$out/dec.py" srec "$out/rv.srec" "$out/rv-ref.srec" > "$out/rvsrec.txt" 2>&1 ||
+        { cat "$out/rvsrec.txt"; fail "S-records above 64 KiB differ from llvm-objcopy's"; }
+fi
 if "$EMBCC" --target=mips-none-elf -c "$out/crc.c" -o /dev/null 2>/dev/null; then
     crc_check mips-none-elf big
 else

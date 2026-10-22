@@ -78,12 +78,24 @@ static void phex(unsigned char b)
 }
 /* A float as its four bytes, most significant first. Not a decimal print:
  * there is no printf here, and the bytes ARE the value -- an ulp of
- * difference shows, where a rounded decimal would hide it. */
+ * difference shows, where a rounded decimal would hide it.
+ *
+ * Except a NaN's sign, which is cleared. The NaN that inf - inf, inf * 0
+ * and 0 / 0 make is the machine's default NaN, whose sign is the
+ * machine's choice -- an x86 host makes it negative (ffc00000), this
+ * code positive -- and neither C nor IEEE 754 says which. The quiet bit
+ * and the payload are still compared. (copysign onto a NaN, whose sign
+ * IS defined, is printed with pbytes.) */
 static void p32(float v)
 {
     unsigned char *p = (unsigned char *)&v;
+    unsigned char top = p[3];
     int i;
-    for (i = 3; i >= 0; i--)
+    if ((p[3] & 0x7f) == 0x7f && (p[2] & 0x80) &&
+        ((p[2] & 0x7f) | p[1] | p[0]))
+        top &= 0x7f;
+    phex(top);
+    for (i = 2; i >= 0; i--)
         phex(p[i]);
     writec(' ');
 }
@@ -413,7 +425,7 @@ void run(void)
     p32(fab(K(K_NEGZERO))); p32(fab(K(K_NEG12345))); p32(fab(K(K_NEGINF)));
     p32(fab(K(K_NEGSMALL))); p32((float)fabd((double)K(K_NEGONEP9)));
     p32(cps(K(K_12345), K(K_NEGZERO))); p32(cps(K(K_NEG12345), K(K_ZERO)));
-    p32(cps(K(K_NAN), K(K_NEGONE)));
+    { float c = cps(K(K_NAN), K(K_NEGONE)); pbytes(&c, 4); }
     puts_("| ");
     pd(__builtin_signbit(K(K_NEGZERO))); pd(__builtin_signbit(K(K_ZERO)));
     pd(__builtin_signbit(K(K_NEGINF)));

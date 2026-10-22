@@ -65,7 +65,9 @@ echo "  linked by the part's script, an avr5-style one, and that with -Ttext/-Td
 # 2. the vector table
 e=$out/prog-Os-2.elf
 addr() { llvm-nm "$e" | awk -v s="$1" '$3 == s { print $1 }'; }
-llvm-objdump -d "$e" > "$out/dis" || fail "no disassembly"
+# (--mcpu: LLVM 22 and older do not take the part from e_flags, and
+# printed every jmp in the table as <unknown>)
+llvm-objdump -d --mcpu=atmega328p "$e" > "$out/dis" || fail "no disassembly"
 init=$(addr __init) v11=$(addr __vector_11) bad=$(addr __bad_interrupt) dflt=$(addr __vector_default)
 [ -n "$init" ] && [ -n "$v11" ] && [ -n "$bad" ] && [ -n "$dflt" ] || fail "a startup symbol is missing"
 [ "$v11" != "$bad" ] && [ "$dflt" != "$(addr __vectors)" ] || fail "__vector_11 or __vector_default is the startup's"

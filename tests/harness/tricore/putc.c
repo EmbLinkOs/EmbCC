@@ -16,7 +16,8 @@
  * at full speed. Each byte goes out with write(2) at once, unbuffered,
  * because the run ends by the test device calling exit() from inside
  * QEMU, and nothing buffered here would be flushed. Written for the
- * plugin API of QEMU 11. */
+ * plugin API of QEMU 11, and built against 9.2's or 10's as well (see
+ * tb_trans). */
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -57,7 +58,15 @@ static int byte_store(uint8_t op1)
     }
 }
 
+/* QEMU 11's plugin API (version 7) passes every callback its userdata;
+ * the earlier ones this runs on (9.2's version 4 to 10.2's 5) pass the
+ * translation callback the plugin's id instead, and register it without
+ * userdata. Ubuntu 26.04's QEMU is 10.2. */
+#if QEMU_PLUGIN_VERSION >= 7
 static void tb_trans(struct qemu_plugin_tb *tb, void *udata)
+#else
+static void tb_trans(qemu_plugin_id_t udata, struct qemu_plugin_tb *tb)
+#endif
 {
     size_t n = qemu_plugin_tb_n_insns(tb);
     (void)udata;
@@ -81,6 +90,10 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id,
     for (int i = 0; i < argc; i++)
         if (!strncmp(argv[i], "addr=", 5))
             uart = strtoull(argv[i] + 5, NULL, 0);
+#if QEMU_PLUGIN_VERSION >= 7
     qemu_plugin_register_vcpu_tb_trans_cb(id, tb_trans, NULL);
+#else
+    qemu_plugin_register_vcpu_tb_trans_cb(id, tb_trans);
+#endif
     return 0;
 }

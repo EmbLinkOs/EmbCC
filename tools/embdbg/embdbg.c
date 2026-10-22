@@ -696,6 +696,23 @@ static const char *file_name(struct img *m, int idx)
 
 #include "../../src/arch/x86_64/disasm.h"
 
+/* The decoder is src/arch/x86_64's, which an embcc built without the x86
+ * family (make TARGETS=arm) does not link. The core embcc links
+ * (EMBDBG_NO_MAIN) runs none of the commands that disassemble, but GCC
+ * emits their unused static functions at -O0 where clang drops them, so
+ * the calls must still resolve: in that core every byte is a .byte. */
+#if defined(EMBCC_FAMILY_x86) && !EMBCC_FAMILY_x86
+static int decode_one(const unsigned char *code, int n, unsigned long addr,
+                      char *out)
+{
+    (void)n; (void)addr;
+    sprintf(out, ".byte 0x%02x", code[0]);
+    return 1;
+}
+#else
+#define decode_one embdbg_decode_one
+#endif
+
 /* Bytes + the source file/line a range of code belongs to. Requires an ELF
  * with a .text section (a .o, or any object carrying code) — a .embdbg holds
  * no machine code. */
@@ -734,7 +751,7 @@ static void cmd_disassemble(struct img *m, int argc, char **argv)
             printf("\033[2m; %s:%d\033[0m\n", file_name(m, r->file), r->line);
         }
         char text_s[128];
-        int len = embdbg_decode_one(text + a, (int)(hi - a), a, text_s);
+        int len = decode_one(text + a, (int)(hi - a), a, text_s);
         printf("  %6lx:\t", a);
         for (int b = 0; b < len; b++) printf("%02x ", text[a + b]);
         for (int b = len; b < 8; b++) printf("   ");
@@ -997,7 +1014,7 @@ static void cmd_crash(struct img *m, int argc, char **argv)
         unsigned long addrs[4096]; char texts[4096][80]; int lens[4096], nins = 0;
         for (unsigned long a = f->addr; a < f->addr + f->size && nins < 4096; ) {
             char t[128];
-            int len = embdbg_decode_one(text + a, (int)(f->addr + f->size - a), a, t);
+            int len = decode_one(text + a, (int)(f->addr + f->size - a), a, t);
             addrs[nins] = a; lens[nins] = len;
             snprintf(texts[nins], sizeof texts[nins], "%.79s", t);
             nins++; a += (unsigned long)len;
@@ -1665,7 +1682,7 @@ static void tui_interactive(struct img *m, struct crash *cr, int crash_avail)
         if (text && cf) {
             static unsigned long ad[16384]; static char tx[16384][72]; int nins = 0;
             for (unsigned long a = cf->addr; a < cf->addr + cf->size && nins < 16384; ) {
-                char t[128]; int l = embdbg_decode_one(text + a, (int)(cf->addr + cf->size - a), a, t);
+                char t[128]; int l = decode_one(text + a, (int)(cf->addr + cf->size - a), a, t);
                 ad[nins] = a; snprintf(tx[nins], sizeof tx[0], "%.71s", t); nins++;
                 a += (unsigned long)l;
             }

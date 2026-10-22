@@ -29,7 +29,10 @@ body() {
     awk -v f="<$1>:" '$2 == f { on = 1; next } /^[0-9a-f]+ <.*>:$/ { on = 0 }
                       on && /^ *[0-9a-f]+:/' "$out/w.dis"
 }
-n() { body "$1" | grep -cE "$2" || true; }
+# (awk, not grep -E: GNU grep reads \t as a plain t, so on Linux every
+# count of '\tlui\t' was 0 -- a fail where one was wanted, and a pass
+# that proved nothing where none was)
+n() { body "$1" | awk -v re="$2" '$0 ~ re { k++ } END { print k + 0 }'; }
 total() { body "$1" | wc -l | tr -d ' '; }
 fail() { echo "FAIL: $1:"; body "$2"; exit 1; }
 

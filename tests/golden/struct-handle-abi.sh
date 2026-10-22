@@ -160,19 +160,25 @@ if command -v qemu-system-riscv64 > /dev/null 2>&1; then
         "-march=rv64imac -mabi=lp64 -mno-relax -mcmodel=medany" \
         qemu-system-riscv64 -M virt -bios none -m 8 || fail=1
 fi
-# x86-64: the harness's own runner, which answers with the exit status
+# x86-64: where lib.sh says it runs -- this host, or the QEMU harness --
+# which answers with the exit status
 d=$out/x86_64; mkdir -p "$d"
 "$EMBCC" --target=x86_64-elf -c "$out/host.c" -o "$d/host.o" || fail=1
-for pr in e:e e:c c:e c:c; do
+x86_pairs="e:e e:c c:e c:c"
+if why=$(x86_cannot_run); then
+    echo "SKIP the x86-64 runs: $why"
+    x86_pairs=
+fi
+for pr in $x86_pairs; do
     for o in -O0 -O2; do
         a=${pr%:*} b=${pr#*:} tag=$a$b$o
         cc_obj $a x86_64-elf $o "$out/caller.c" "$d/caller.$tag.o" -mno-red-zone &&
         cc_obj $b x86_64-elf $o "$out/callee.c" "$d/callee.$tag.o" -mno-red-zone || {
             echo "x86_64 $tag: does not compile"; fail=1; continue; }
-        tests/harness/x86_64/link.sh -o "$d/$tag" "$d/host.o" "$d/caller.$tag.o" \
+        x86_link "$d/$tag" "$d/host.o" "$d/caller.$tag.o" \
             "$d/callee.$tag.o" > "$d/$tag.ld" 2>&1 || {
             echo "x86_64 $tag: does not link"; head -3 "$d/$tag.ld"; fail=1; continue; }
-        tests/harness/x86_64/run.sh "$d/$tag" > /dev/null 2>&1
+        x86_run "$d/$tag" > /dev/null 2>&1
         r=$?
         [ $r = 42 ] || { echo "x86_64 caller $a callee $b $o: check $r failed"; fail=1; }
         runs=$((runs + 1))

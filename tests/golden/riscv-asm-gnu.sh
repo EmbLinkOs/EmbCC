@@ -23,6 +23,9 @@ OBJDUMP=${EMBCC_LLVM_OBJDUMP:-llvm-objdump}
 MC=${EMBCC_LLVM_MC:-llvm-mc}
 command -v "$OBJDUMP" >/dev/null 2>&1 || { echo "SKIP: no $OBJDUMP"; exit 0; }
 command -v "$MC" >/dev/null 2>&1 || { echo "SKIP: no $MC"; exit 0; }
+# An llvm-mc older than the suite's LLVM (lib.sh) is no referee here: LLVM 18's
+# expands the GNU forms into other words.
+skip_if_llvm_old "$MC" "$OBJDUMP"
 out=tests/golden/out/riscv-asm-gnu
 rm -rf "$out"; mkdir -p "$out/inc"
 fail() { echo "FAIL: $*"; exit 1; }

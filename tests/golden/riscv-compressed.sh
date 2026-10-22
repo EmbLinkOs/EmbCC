@@ -97,8 +97,10 @@ for t in riscv32-unknown-elf riscv64-unknown-elf; do
     # four too. -S prints one .byte line per instruction, so a two-byte
     # line right after a PCREL_HI20 relocation means the low half
     # compressed and the relocation is now writing over its neighbour.
+    # (a real tab: GNU grep reads \t as a plain t, and never matched)
+    tab=$(printf '\t')
     bad=$(grep -A1 'R_RISCV_PCREL_HI20' "$out/p.s" |
-          grep -cE '^\t\.byte\t0x..,0x..$') || bad=0
+          grep -cE "^$tab\.byte${tab}0x..,0x..\$") || bad=0
     if [ "$bad" -ne 0 ]; then
         echo "FAIL $t: an instruction after a PCREL_HI20 was compressed"
         fail=1

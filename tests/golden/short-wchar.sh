@@ -15,6 +15,7 @@
 #     ones.
 set -u
 echo "TEST-MARKER short-wchar"
+. "$(dirname "$0")/../lib.sh"
 EMBCC=${EMBCC:-./embcc}
 out=tests/golden/out/short-wchar
 rm -rf "$out"; mkdir -p "$out"
@@ -57,7 +58,10 @@ echo "wchar_t is a 16-bit unsigned short in C and C++ on five targets, and only 
 
 # ---- the macros, against clang ---------------------------------------------
 CLANG=${EMBCC_REF_CLANG:-clang}
-if command -v "$CLANG" >/dev/null 2>&1; then
+# (against the suite's clang: 22 and older define no __WCHAR_MIN__)
+if command -v "$CLANG" >/dev/null 2>&1 && why=$(llvm_too_old "$CLANG"); then
+    echo "SKIP: the macro comparison ($why)"
+elif command -v "$CLANG" >/dev/null 2>&1; then
     for T in thumbv7m-none-eabi riscv32-unknown-elf; do
         "$EMBCC" --target=$T -fshort-wchar -E -dM -x c /dev/null |
             grep WCHAR | grep -v __CLANG_ | sort > "$out/m-embcc-$T"

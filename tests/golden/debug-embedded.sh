@@ -162,8 +162,10 @@ if command -v "$OBJDUMP" >/dev/null 2>&1; then
     off=$("$DWDUMP" --debug-info "$o" 2>/dev/null |
           grep -A2 'DW_AT_name	("p")' | grep -oE 'fbreg [+-][0-9]+' |
           grep -oE '[+-][0-9]+' | head -1)
+    # (LLVM 18's llvm-objdump prints the 13-bit offset unsigned: %fp+8172
+    # for %fp+-0x14)
     if [ -n "$off" ] && [ "$off" -lt 0 ] && "$OBJDUMP" -d "$o" 2>/dev/null |
-         grep -qE "st[[:space:]]+%i0,[[:space:]]*\\[%fp\\+-0x$(printf '%x' "$((-off))")\\]"; then
+         grep -qE "st[[:space:]]+%i0,[[:space:]]*\\[%fp\\+(-0x$(printf '%x' "$((-off))")|$((8192 + off)))\\]"; then
         echo "  sparc-none-elf: 'p' at fbreg $off is the slot the prologue writes"
     else
         echo "FAIL sparc-none-elf: 'p' is at fbreg '$off' but nothing stores %i0 there"
@@ -199,9 +201,16 @@ for t in thumbv7m-none-eabi riscv32-unknown-elf riscv64-unknown-elf \
     [ $t = avr ] && want=2
     "$EMBCC" --target=$t -g -c "$out/p.c" -o "$out/ptr-$t.o" 2>/dev/null || {
         echo "FAIL $t: p.c with -g"; fail=1; continue; }
+    # (the size is printed in hex, "(0x04)": read digit by digit, since
+    # only BSD awk takes "0x04" + 0 as 4 -- mawk and gawk make it 0, and
+    # on Linux every target read back 0)
     got=$("$DWDUMP" --debug-info "$out/ptr-$t.o" 2>/dev/null |
-          awk '/DW_TAG_pointer_type/ { p = 1; next }
-               p && /DW_AT_byte_size/ { gsub(/[()]/, "", $2); print $2 + 0; p = 0 }' |
+          awk 'function hex(s,  n, i) { n = 0; sub(/^0[xX]/, "", s)
+                   for (i = 1; i <= length(s); i++)
+                       n = n * 16 + index("0123456789abcdef", tolower(substr(s, i, 1))) - 1
+                   return n }
+               /DW_TAG_pointer_type/ { p = 1; next }
+               p && /DW_AT_byte_size/ { gsub(/[()]/, "", $2); print hex($2); p = 0 }' |
           sort -u | tr '\n' ' ')
     [ "$got" = "$want " ] || {
         echo "FAIL $t: pointer DIEs have byte_size '$got', the target's is $want"
@@ -239,7 +248,8 @@ if command -v "$OBJDUMP" >/dev/null 2>&1; then
             fail=1; continue; }
         "$DWDUMP" --debug-info "$o" > "$out/avr-O$O.di" 2>/dev/null
         "$DWDUMP" --debug-line "$o" > "$out/avr-O$O.dl" 2>/dev/null
-        "$OBJDUMP" -d "$o" > "$out/avr-O$O.dis" 2>/dev/null
+        # (--mcpu: LLVM 22 and older do not take the part from e_flags)
+        "$OBJDUMP" -d --mcpu=atmega328p "$o" > "$out/avr-O$O.dis" 2>/dev/null
         # the address of each row of line N, and of the row after it
         rows=$(grep -E '^0x[0-9a-f]+ +[0-9]+ ' "$out/avr-O$O.dl" |
                while read -r a l rest; do echo "$(printf '%d' "$a") $l"; done)

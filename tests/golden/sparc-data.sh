@@ -34,6 +34,9 @@ command -v "$CLANG" >/dev/null 2>&1 &&
     echo "skipped: no clang with a SPARC target (set EMBCC_REF_CLANG_SPARC)"
     exit 0; }
 command -v python3 >/dev/null 2>&1 || { echo "skipped: no python3"; exit 0; }
+# (the suite's clang: LLVM 18's SPARC long double is 8 bytes, 23's the
+# 16-byte quad EmbCC and the ABI have)
+skip_if_llvm_old "$CLANG"
 
 EMBCC=${EMBCC:-./embcc}
 EMBLD=${EMBLD:-./embld}

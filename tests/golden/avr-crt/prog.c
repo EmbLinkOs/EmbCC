@@ -21,13 +21,19 @@ __attribute__((constructor)) void emb_ctor(void) { ctor_ran = 7; }
 /* early_flag is set by early.S, in .init3: before .data is copied and
  * .bss cleared, which .noinit is spared. */
 
-ISR(TIMER1_COMPA_vect) { ticks++; }
+/* Each handler counts what it is there to show -- that it ran, three
+ * times for the compare match and once for the overflow -- and no
+ * further: QEMU's Timer1 keeps the host's time, and on a loaded runner a
+ * match or an overflow more lands while the program turns the interrupt
+ * off (QEMU's TIMSK1 write never lowers an interrupt it raised), so
+ * counting every one made "ticks 4" or "bad 2" there. */
+ISR(TIMER1_COMPA_vect) { if (ticks < 3) ticks++; }
 
 /* Timer1's overflow (vector 13) has no handler: __bad_interrupt sends it
  * here, and this stops it. */
 ISR(BADISR_vect)
 {
-    bad++;
+    bad = 1;
     TIMSK1 &= (uint8_t)~_BV(TOIE1);
 }
 

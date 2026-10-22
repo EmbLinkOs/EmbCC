@@ -54,13 +54,9 @@ have_qemu=0
 command -v "$QA" >/dev/null 2>&1 && have_qemu=1
 plug=
 if [ $have_qemu = 1 ]; then
-    inc=${QEMU_PLUGIN_INC:-/opt/homebrew/include}
     p=$PWD/$out/icount.so
-    { cc -shared -fPIC -O2 -I"$inc" $(pkg-config --cflags glib-2.0 2>/dev/null) \
-         -undefined dynamic_lookup -o "$p" tools/bench/icount.c ||
-      cc -shared -fPIC -O2 -I"$inc" $(pkg-config --cflags glib-2.0 2>/dev/null) \
-         -o "$p" tools/bench/icount.c; } 2>/dev/null && plug=$p
-    [ -n "$plug" ] || echo "note: QEMU's counting plugin does not build; counts are not compared"
+    why=$(qemu_plugin tools/bench/icount.c "$p") && plug=$p
+    [ -n "$plug" ] || echo "note: QEMU's counting plugin does not build ($why); counts are not compared"
 fi
 
 # ---- 3. the ends of a run (no QEMU needed) --------------------------------

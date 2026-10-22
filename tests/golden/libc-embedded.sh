@@ -84,10 +84,9 @@ for t in riscv32-unknown-elf riscv64-unknown-elf riscv32-unknown-elf/ilp32f \
         tricore*) H=tests/harness/tricore
                   # the board has no UART: putc.so prints the harness's
                   # output word (tests/harness/tricore/putc.c)
-                  cc -shared -fPIC -O2 -I"${QEMU_PLUGIN_INC:-/opt/homebrew/include}" \
-                     $(pkg-config --cflags glib-2.0 2>/dev/null) \
-                     -undefined dynamic_lookup -o "$out/putc.so" \
-                     "$H/putc.c" 2>/dev/null || { echo "SKIP $t: no plugin"; continue; }
+                  why=$(qemu_plugin "$H/putc.c" "$out/putc.so") || {
+                      echo "SKIP $t: its harness prints through a QEMU plugin, and $why"
+                      continue; }
                   Q="qemu-system-tricore -M tricore_testboard -cpu tc27x -display none -monitor none -plugin $PWD/$out/putc.so" ;;
         xtensa*)  H=tests/harness/xtensa
                   Q="qemu-system-xtensa -M sim -cpu de212 -m 128 -semihosting -display none -monitor none"
