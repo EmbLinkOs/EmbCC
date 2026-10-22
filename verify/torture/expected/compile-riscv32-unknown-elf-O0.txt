@@ -51,6 +51,7 @@ compile/20001205-1.c
 compile/20001212-1.c
 compile/20001221-1.c
 compile/20001222-1.c
+compile/20001226-1.c
 compile/200031109-1.c
 compile/20010102-1.c
 compile/20010107-1.c
@@ -660,6 +661,7 @@ compile/labels-3.c
 compile/lbug.c
 compile/libcall-1.c
 compile/limits-blockid.c
+compile/limits-caselabels.c
 compile/limits-enumconst.c
 compile/limits-externalid.c
 compile/limits-externdecl.c
