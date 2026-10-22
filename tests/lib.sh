@@ -54,7 +54,7 @@ x86_gcc_c() {
 x86_link() {
     exe=$1; shift
     if [ "$EMBCC_X86_RUNNER" = host ]; then
-        cc -no-pie -o "$exe" "$@"
+        cc -no-pie -Wl,-z,noexecstack -o "$exe" "$@" -lm   # as tests/run.sh links
     else
         "$EMBCC_ROOT/tests/harness/x86_64/link.sh" -o "$exe" "$@"
     fi

@@ -129,7 +129,10 @@ if [ $selftest = 1 ]; then
     python3 "$F/gen$gen.py" 1 > "$W/p.c"
     ck=$(host_ck "$W/p.c" "") || { echo "selftest: the host build failed"; exit 1; }
     python3 "$F/gen$gen.py" 1 "$ck" > "$W/good.c"
-    python3 "$F/gen$gen.py" 1 $((ck + 1)) > "$W/bad.c"
+    # one more than the checksum, mod 2^64: a 64-bit unsigned value, which
+    # dash (Ubuntu's sh) refuses in $(( )) and bash wraps negative
+    wrong=$(python3 -c 'import sys; print((int(sys.argv[1]) + 1) % 2**64)' "$ck")
+    python3 "$F/gen$gen.py" 1 "$wrong" > "$W/bad.c"
     bad=0
     for b in $boards; do
         r=$(board $b -O0 "$W/good.c" 2>&1 | tail -1)
