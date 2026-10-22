@@ -1,0 +1,131 @@
+# Every night, the two tests too long for a pull request, on main:
+#
+#   torture  GCC's torture suite (verify/torture/run.sh): 3,900 files GCC
+#            accepts, compiled for four targets at two levels, and the
+#            execute/ programs built for x86-64 and run on this runner,
+#            against the baselines in verify/torture/expected/.
+#   fuzz     200 random programs (verify/fuzz/run.sh) on the x86-64 host
+#            and QEMU's Cortex-M4, Cortex-M0, RV32 and RV64 boards at
+#            -O0, -O1, -O2 and -Os, with new seeds each night.
+#
+# A failed night opens an issue (or adds to the open one) with the run's
+# link; the results are the run's artifacts. Run by hand with `update`,
+# the torture job records its baselines instead of checking them and
+# uploads verify/torture/expected/ -- how the x86-64 execute baseline,
+# which only a Linux machine can make, is first made and later renewed.
+name: nightly
+
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+    inputs:
+      update:
+        description: Record the torture baselines instead of checking them
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+jobs:
+  torture:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build the compiler
+        run: make -j"$(getconf _NPROCESSORS_ONLN)" embcc
+      - name: Fetch GCC's torture suite
+        run: sh verify/torture/fetch.sh
+      - name: Run it
+        env:
+          UPDATE: ${{ inputs.update && '--update' || '' }}
+        run: sh verify/torture/run.sh $UPDATE all
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: torture-results
+          path: build/torture-out
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: inputs.update
+        with:
+          name: torture-baselines
+          path: verify/torture/expected
+
+  fuzz:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # the host reference is clang (FUZZ_CC); the boards are QEMU's
+      - name: Install QEMU and clang
+        run: |
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key |
+            sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
+          echo "deb http://apt.llvm.org/resolute/ llvm-toolchain-resolute-23 main" |
+            sudo tee /etc/apt/sources.list.d/llvm.list
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-arm qemu-system-riscv clang-23 llvm-23 lld-23
+          echo "/usr/lib/llvm-23/bin" >> "$GITHUB_PATH"
+      - name: Build the compiler, the linker and the runtimes
+        run: make -j"$(getconf _NPROCESSORS_ONLN)" embcc embld rt-embedded
+      # the night's seeds: 200 a day from the date, so each night tries
+      # new programs and any night can be run again from the log
+      - name: Fuzz
+        run: |
+          first=$(( $(date -u +%s) / 86400 % 5000 * 200 ))
+          last=$(( first + 199 ))
+          echo "seeds $first to $last"
+          mkdir -p fuzz-out
+          FUZZ_OUT=$PWD/fuzz-out EMBCC_QEMU_TIMEOUT=60 \
+            sh verify/fuzz/run.sh -b x86,m4,m0,rv32,rv64 -O "-O0 -O1 -O2 -Os" \
+            "$first" "$last" > fuzz.log 2>&1 || true
+          echo "$(grep -c '^seed [0-9]* done$' fuzz.log || true) seeds done"
+          # a program the generator got wrong is its bug, said but not failed
+          if grep -E '^seed [0-9]+: ' fuzz.log; then
+            echo "::notice::some seeds were skipped: the host build failed or the generator read uninitialised memory"
+          fi
+          # a board that did not return 42 is EmbCC's
+          if grep -E '^seed [0-9]+ [a-z0-9]+ -O' fuzz.log; then
+            echo "::error::the fuzzer found programs EmbCC gets wrong (fuzz.log, fuzz-out/)"
+            exit 1
+          fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: fuzz
+          path: |
+            fuzz.log
+            fuzz-out
+
+  report:
+    needs: [torture, fuzz]
+    if: failure() && github.event_name == 'schedule'
+    runs-on: ubuntu-26.04
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Open or add to the nightly issue
+        run: |
+          title="nightly: torture or fuzz failed"
+          body="The nightly run on $(date -u +%F) failed: $RUN (results in its artifacts)."
+          n=$(gh issue list --state open --search "\"$title\" in:title" --json number --jq '.[0].number')
+          if [ -n "$n" ]; then
+            gh issue comment "$n" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body"
+          fi

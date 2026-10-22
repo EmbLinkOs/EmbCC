@@ -666,6 +666,28 @@ in the vocabulary is unchecked however many forms the vocabulary reports.
 Where a reference assembler emits a placeholder (a relocated branch), the
 comparison runs the other way: the reference disassembles EmbCC's bytes.
 
+## Beyond the suite
+
+Two tests are too long for `make test` and run on their own, before a
+batch is marked ready and every night in CI:
+
+- **The fuzzer**, `verify/fuzz/run.sh`: random C programs with no
+  undefined behavior, each checked on every QEMU board at every level
+  against the host compiler's answer ([verify/fuzz/README.md](../../verify/fuzz/README.md)).
+- **GCC's torture suite**, `verify/torture/run.sh`: the 3,900 files of
+  `gcc/testsuite/gcc.c-torture`, all code GCC accepts.
+  `verify/torture/fetch.sh` fetches them at a pinned commit (50 MB) into
+  `build/gcc-torture`. Every file is compiled for x86-64, Cortex-M4, RV32
+  and AVR at `-O0` and `-O2`, and every `execute/` program is built for
+  the host and run. The baselines in `verify/torture/expected/` say which
+  files compile and which programs pass; one that did and no longer does
+  fails the test. So does a crash -- a signal, an internal error or no
+  answer in 60 s -- except those listed in `crash-known.txt`, each of
+  which is a bug to fix and take off the list. `--update` records the
+  results after a change has been reviewed. The whole run takes about
+  eight minutes on an M-series Mac; `EMBCC_TORTURE_TARGETS` and
+  `EMBCC_TORTURE_OPTS` narrow it.
+
 ## Environment variables
 
 ### Suite and harness
