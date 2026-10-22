@@ -2,8 +2,6 @@ compile-avr-O0	compile/limits-declparen.c
 compile-avr-O2	compile/20001226-1.c
 compile-avr-O2	compile/limits-caselabels.c
 compile-avr-O2	compile/limits-declparen.c
-compile-avr-O2	execute/20021127-1.c
-compile-avr-O2	execute/981019-1.c
 compile-riscv32-unknown-elf-O0	compile/limits-declparen.c
 compile-riscv32-unknown-elf-O2	compile/limits-caselabels.c
 compile-riscv32-unknown-elf-O2	compile/limits-declparen.c
