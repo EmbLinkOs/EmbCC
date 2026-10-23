@@ -43,6 +43,20 @@ static int lkey_eq(const struct lkey *x, const struct lkey *y)
            x->bid == y->bid && x->off == y->off;
 }
 
+static unsigned lkey_hash(const struct lkey *k)
+{
+    unsigned long f[8] = { (unsigned long)k->op, (unsigned long)k->a,
+                           (unsigned long)k->size, (unsigned long)k->sign,
+                           (unsigned long)k->w, (unsigned long)k->bkind,
+                           (unsigned long)k->bid, k->off };
+    unsigned h = 2166136261u;
+    for (int i = 0; i < 8; i++) {
+        h ^= (unsigned)(f[i] ^ f[i] >> 32);
+        h *= 16777619u;
+    }
+    return h;
+}
+
 static int lcse_kills_mem(enum ir_op op)
 {
     switch (op) {
@@ -128,16 +142,30 @@ static void lcse_store_gen(int *s, int nk, const struct lkey *keys,
  * once: printf's flag loop read its character five times. Its value is a
  * temp written once (the load), so nothing else has to drop it. Thumb
  * only, measured there; the other targets' output stays as it was. */
-static void lcse_kill_defs(int *s, int nk, const struct lkey *keys,
-                           const struct ir_ins *ins)
+static void lcse_kill_defs(int *s, const int *afirst, const int *anext,
+                           int nv, const struct ir_ins *ins)
 {
     int t = def_target(ins);
-    if (t < 0)
+    if (t < 0 || t >= nv)
         return;
-    for (int k = 0; k < nk; k++)
-        if (keys[k].op == IR_LOAD && keys[k].bkind == BASE_NONE &&
-            keys[k].a == t)
-            s[k] = -1;
+    for (int k = afirst[t]; k >= 0; k = anext[k])
+        s[k] = -1;
+}
+
+/* A write of local v: its LDVAR keys go (vfirst/vnext), and, when its
+ * address is taken, every key memory can change. */
+static void lcse_kill_var(int *s, int nk, const char *is_mem,
+                          const int *vfirst, const int *vnext,
+                          const char *taken, int v)
+{
+    if (taken[v]) {
+        for (int k = 0; k < nk; k++)    /* v's own LDVARs are is_mem too */
+            if (is_mem[k])
+                s[k] = -1;
+        return;
+    }
+    for (int k = vfirst[v]; k >= 0; k = vnext[k])
+        s[k] = -1;
 }
 
 int pass_loadcse(struct ir_func *fn)
@@ -162,6 +190,14 @@ int pass_loadcse(struct ir_func *fn)
     /* Enumerate distinct load keys; keyidx[i] maps a load instruction to one. */
     struct lkey *keys = NULL; int nk = 0, capk = 0;
     int *keyidx = xmalloc((size_t)fn->nins * sizeof *keyidx);
+    /* ...found through a hash of their fields: a search of every key at
+     * every load was quadratic (20,000 `a[x - 1]` took seconds). */
+    int hcap = 64;
+    while (hcap < 2 * fn->nins)
+        hcap *= 2;
+    int *htab = xmalloc((size_t)hcap * sizeof *htab);
+    for (int h = 0; h < hcap; h++)
+        htab[h] = -1;
     for (int i = 0; i < fn->nins; i++) {
         keyidx[i] = -1;
         struct ir_ins *in = &fn->ins[i];
@@ -188,18 +224,41 @@ int pass_loadcse(struct ir_func *fn)
             }
         }
         int found = -1;
-        for (int j = 0; j < nk; j++)
-            if (lkey_eq(&keys[j], &k)) { found = j; break; }
+        unsigned h = lkey_hash(&k) & (unsigned)(hcap - 1);
+        for (; htab[h] >= 0; h = (h + 1) & (unsigned)(hcap - 1))
+            if (lkey_eq(&keys[htab[h]], &k)) { found = htab[h]; break; }
         if (found < 0) {
             if (nk == capk) { capk = capk ? capk * 2 : 32;
                 keys = xrealloc(keys, (size_t)capk * sizeof *keys); }
             keys[nk] = k; found = nk++;
+            htab[h] = found;
         }
         keyidx[i] = found;
     }
+    free(htab);
     if (nk == 0) {
         free(order); free(l2b); free(taken); free(keyidx); free(keys);
         free_cfg(bb, nbb); free_defs(&d); return 0;
+    }
+    /* The keys by what kills them one at a time: an address temp's LOADs
+     * (lcse_kill_defs) and a local's LDVARs (lcse_kill_var). */
+    int nv = fn->nvregs;
+    int *afirst = xmalloc((size_t)(nv ? nv : 1) * sizeof *afirst);
+    int *vfirst = xmalloc((size_t)(nvars ? nvars : 1) * sizeof *vfirst);
+    int *anext = xmalloc((size_t)nk * sizeof *anext);
+    int *vnext = xmalloc((size_t)nk * sizeof *vnext);
+    for (int v = 0; v < nv; v++) afirst[v] = -1;
+    for (int v = 0; v < nvars; v++) vfirst[v] = -1;
+    for (int k = nk - 1; k >= 0; k--) {
+        anext[k] = vnext[k] = -1;
+        if (keys[k].op == IR_LOAD && keys[k].bkind == BASE_NONE &&
+            keys[k].a >= 0 && keys[k].a < nv) {
+            anext[k] = afirst[keys[k].a];
+            afirst[keys[k].a] = k;
+        } else if (keys[k].op == IR_LDVAR) {
+            vnext[k] = vfirst[keys[k].a];
+            vfirst[keys[k].a] = k;
+        }
     }
     /* is_mem[k]: a LOAD or an address-taken local's LDVAR (killed by any write).
      * A non-address-taken local's LDVAR is killed only by a store to that local. */
@@ -249,17 +308,14 @@ int pass_loadcse(struct ir_func *fn)
             for (int i = bb[b].start; i < bb[b].end; i++) {
                 struct ir_ins *ins = &fn->ins[i];
                 if (ins->op == IR_STVAR) {
-                    for (int k = 0; k < nk; k++)
-                        if ((keys[k].op == IR_LDVAR && keys[k].a == ins->dst) ||
-                            (taken[ins->dst] && is_mem[k]))
-                            s[k] = -1;
+                    lcse_kill_var(s, nk, is_mem, vfirst, vnext, taken, ins->dst);
                 } else if (lcse_kills_mem(ins->op)) {
                     lcse_kill(s, nk, is_mem, kacc, ins, fn, &d, taken, nvars);
                     if (ins->op == IR_STORE)
                         lcse_store_gen(s, nk, keys, ins, fn, &d);
                 }
                 if (mdef)
-                    lcse_kill_defs(s, nk, keys, ins);
+                    lcse_kill_defs(s, afirst, anext, nv, ins);
                 int k = keyidx[i];
                 if (k >= 0 && s[k] < 0) s[k] = ins->dst;   /* first def of the value */
             }
@@ -277,17 +333,14 @@ int pass_loadcse(struct ir_func *fn)
         for (int i = bb[b].start; i < bb[b].end; i++) {
             struct ir_ins *ins = &fn->ins[i];
             if (ins->op == IR_STVAR) {
-                for (int k = 0; k < nk; k++)
-                    if ((keys[k].op == IR_LDVAR && keys[k].a == ins->dst) ||
-                        (taken[ins->dst] && is_mem[k]))
-                        s[k] = -1;
+                lcse_kill_var(s, nk, is_mem, vfirst, vnext, taken, ins->dst);
             } else if (lcse_kills_mem(ins->op)) {
                 lcse_kill(s, nk, is_mem, kacc, ins, fn, &d, taken, nvars);
                 if (ins->op == IR_STORE)
                     lcse_store_gen(s, nk, keys, ins, fn, &d);
             }
             if (mdef)
-                lcse_kill_defs(s, nk, keys, ins);
+                lcse_kill_defs(s, afirst, anext, nv, ins);
             int k = keyidx[i];
             if (k < 0) continue;
             if (s[k] >= 0 && s[k] != ins->dst) {
@@ -300,6 +353,7 @@ int pass_loadcse(struct ir_func *fn)
 
     free(order); free(l2b); free(taken); free(keyidx); free(keys);
     free(is_mem); free(kacc); free(aout); free(ain); free(s);
+    free(afirst); free(anext); free(vfirst); free(vnext);
     free_cfg(bb, nbb); free_defs(&d);
     return changed;
 }
