@@ -4598,6 +4598,21 @@ static void switch_table(struct ir_func *fn, int v, int w, int sign,
     s->jt = t;
 }
 
+/* case values in order, for qsort: unique (sema refuses a duplicate), so
+ * the order is the same from run to run (R4) whatever the sort */
+static int case_cmp_s(const void *a, const void *b)
+{
+    long x = (*(struct stmt *const *)a)->cval, y = (*(struct stmt *const *)b)->cval;
+    return x < y ? -1 : x > y;
+}
+
+static int case_cmp_u(const void *a, const void *b)
+{
+    unsigned long x = (unsigned long)(*(struct stmt *const *)a)->cval;
+    unsigned long y = (unsigned long)(*(struct stmt *const *)b)->cval;
+    return x < y ? -1 : x > y;
+}
+
 static int switch_dense(int n, int w, long lo, long hi)
 {
     unsigned long range = (unsigned long)hi - (unsigned long)lo + 1;
@@ -4981,38 +4996,72 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
              * to it is a jump into that statement, as C says. */
             struct stmt **lab;
             int nlab = switch_labels(s->body, &lab);
-            int ncase = 0;
+            int base = fn->nlabels;     /* lab[k]'s label is base + k */
             for (int k = 0; k < nlab; k++) {
                 struct stmt *c = lab[k];
                 c->label = new_label(fn);
                 if (c->kind == STMT_DEFAULT)
                     dflt = c->label;
-                else
-                    ncase++;
+            }
+            /* A case that goes where the default goes is not tested: one
+             * written beside `default:`, and, with no default, one whose
+             * statement is the switch's own `break` -- GCC's
+             * limits-caselabels.c stacks 100,000 of those on one break,
+             * and the decision tree over them took the optimizer one
+             * node a round to undo. Read off the body's top level, where
+             * the markers stand in a row before their statement. */
+            char *same = xcalloc((size_t)(nlab ? nlab : 1), 1);
+            {
+                struct stmt *run = NULL;
+                int has_dflt = 0;
+                for (struct stmt *t = list; t; t = t->next) {
+                    if (t->kind == STMT_CASE || t->kind == STMT_DEFAULT) {
+                        if (!run)
+                            run = t;
+                        has_dflt |= t->kind == STMT_DEFAULT;
+                        continue;
+                    }
+                    if (run && (has_dflt ||
+                                (dflt < 0 && t->kind == STMT_BREAK)))
+                        for (struct stmt *c = run; c != t; c = c->next)
+                            if (c->kind == STMT_CASE &&
+                                c->label - base >= 0 && c->label - base < nlab)
+                                same[c->label - base] = 1;
+                    run = NULL;
+                    has_dflt = 0;
+                }
+                if (run && dflt < 0)    /* markers at the end: they break */
+                    for (struct stmt *c = run; c; c = c->next)
+                        if (c->kind == STMT_CASE &&
+                            c->label - base >= 0 && c->label - base < nlab)
+                            same[c->label - base] = 1;
+            }
+            /* ...unless every case together is a jump table, where one
+             * that goes to the default costs nothing (a gap does the
+             * same) and leaving it out can break the run into a tree */
+            int nall = 0, ncase = 0;
+            long lo = 0, hi = 0;
+            for (int k = 0; k < nlab; k++)
+                if (lab[k]->kind == STMT_CASE) {
+                    long cv = lab[k]->cval;
+                    if (!nall || (sign ? cv < lo : (unsigned long)cv < (unsigned long)lo))
+                        lo = cv;
+                    if (!nall || (sign ? cv > hi : (unsigned long)cv > (unsigned long)hi))
+                        hi = cv;
+                    nall++;
+                    ncase += !same[k];
+                }
+            if (nall && switch_dense(nall, w, lo, hi)) {
+                memset(same, 0, (size_t)(nlab ? nlab : 1));
+                ncase = nall;
             }
             if (ncase) {
                 struct stmt **cs = xmalloc((size_t)ncase * sizeof *cs);
                 int n = 0;
                 for (int k = 0; k < nlab; k++)
-                    if (lab[k]->kind == STMT_CASE)
+                    if (lab[k]->kind == STMT_CASE && !same[k])
                         cs[n++] = lab[k];
-                /* Insertion sort by value: the case list of a real
-                 * switch is short, and a stable order keeps the emitted
-                 * code the same from run to run (R4). Duplicate values
-                 * cannot occur -- sema refuses them -- so no tie-break
-                 * is needed. */
-                for (int a1 = 1; a1 < n; a1++) {
-                    struct stmt *t = cs[a1];
-                    int b1 = a1 - 1;
-                    while (b1 >= 0 &&
-                           (sign ? cs[b1]->cval > t->cval
-                                 : (unsigned long)cs[b1]->cval >
-                                   (unsigned long)t->cval)) {
-                        cs[b1 + 1] = cs[b1];
-                        b1--;
-                    }
-                    cs[b1 + 1] = t;
-                }
+                qsort(cs, (size_t)n, sizeof *cs, sign ? case_cmp_s : case_cmp_u);
                 int ci = 0, cj = -1;
                 if (switch_dense(n, w, cs[0]->cval, cs[n - 1]->cval))
                     switch_table(fn, v, w, sign, cs, n, cs[0]->cval,
@@ -5038,6 +5087,7 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
             } else {
                 emit_jmp(fn, dflt >= 0 ? dflt : lc.brk);
             }
+            free(same);
             free(lab);
             gen_stmt(fn, list, &lc); /* fallthrough is just: no jumps */
             emit_label(fn, lc.brk);
