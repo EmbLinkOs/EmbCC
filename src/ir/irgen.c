@@ -191,18 +191,60 @@ void emit_jmp(struct ir_func *fn, int label)
  * name gets its IR label the first time EITHER a `goto` or the label itself is
  * seen. gen_func resets this table; after the body it errors on any label that
  * was referenced by a goto but never defined. */
-#define IRGEN_MAX_LABELS 256
+/* As many as a function has -- a generated state machine has thousands,
+ * where the table held 256 -- found by name through an index (open
+ * addressing on the name's FNV-1a hash, the slot's g_labels index + 1),
+ * emptied with the table for each function. */
 static struct { const char *name; int label; int defined; int line; }
-    g_labels[IRGEN_MAX_LABELS];
-static int g_nlabels_used;
+    *g_labels;
+static int g_nlabels_used, g_labels_cap;
+static int *g_label_ix, g_label_ix_cap;
+
+static unsigned long label_hash(const char *s)
+{
+    unsigned long h = 2166136261UL;
+    for (; *s; s++)
+        h = (h ^ (unsigned char)*s) * 16777619UL;
+    return h;
+}
+
+/* the slot of NAME in g_label_ix: where it is, or the empty one it would
+ * go in */
+static int label_slot(const char *name)
+{
+    int m = g_label_ix_cap - 1, i = (int)(label_hash(name) & (unsigned long)m);
+    while (g_label_ix[i] && strcmp(g_labels[g_label_ix[i] - 1].name, name) != 0)
+        i = (i + 1) & m;
+    return i;
+}
+
+static void labels_reset(void)
+{
+    g_nlabels_used = 0;
+    if (g_label_ix)
+        memset(g_label_ix, 0, (size_t)g_label_ix_cap * sizeof *g_label_ix);
+}
 
 static int label_idx(struct ir_func *fn, const char *name, int line)
 {
-    for (int i = 0; i < g_nlabels_used; i++)
-        if (strcmp(g_labels[i].name, name) == 0)
-            return i;
-    if (g_nlabels_used >= IRGEN_MAX_LABELS)
-        diag_fatal(fn->file, line, "too many labels in one function");
+    (void)line;
+    if (g_label_ix_cap) {
+        int i = g_label_ix[label_slot(name)];
+        if (i)
+            return i - 1;
+    }
+    if (2 * (g_nlabels_used + 1) > g_label_ix_cap) {   /* grow, and refill */
+        g_label_ix_cap = g_label_ix_cap ? 2 * g_label_ix_cap : 64;
+        free(g_label_ix);
+        g_label_ix = xcalloc((size_t)g_label_ix_cap, sizeof *g_label_ix);
+        for (int k = 0; k < g_nlabels_used; k++)
+            g_label_ix[label_slot(g_labels[k].name)] = k + 1;
+    }
+    if (g_nlabels_used == g_labels_cap) {
+        g_labels_cap = g_labels_cap ? 2 * g_labels_cap : 64;
+        g_labels = xrealloc(g_labels, (size_t)g_labels_cap * sizeof *g_labels);
+    }
+    g_label_ix[label_slot(name)] = g_nlabels_used + 1;
     g_labels[g_nlabels_used].name = name;
     g_labels[g_nlabels_used].label = new_label(fn);
     g_labels[g_nlabels_used].defined = 0;
@@ -226,7 +268,8 @@ static int label_mark(struct ir_func *fn, struct func *f, const char *name,
 {
     struct ir_ins *i = emit(fn);
     i->op = IR_LABELADDR;
-    i->label = g_labels[label_idx(fn, name, line)].label;
+    int ix = label_idx(fn, name, line);  /* first: it may move g_labels */
+    i->label = g_labels[ix].label;
     i->dst = new_temp(fn);
     i->vol = 1;
     i->imm = f->nlabel_pos;
@@ -3391,9 +3434,10 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
         return emit_fconst(fn, e->ldv ? ldf_to_double(e->ldv) : e->fnum,
                            ty_size(e->ty));
     case EXPR_LABELADDR: {   /* &&label -> a void* to the label's code location */
+        int ix = label_idx(fn, e->name, e->line);  /* first: it may move g_labels */
         struct ir_ins *i = emit(fn);
         i->op = IR_LABELADDR;
-        i->label = g_labels[label_idx(fn, e->name, e->line)].label;
+        i->label = g_labels[ix].label;
         i->dst = new_temp(fn);
         return i->dst;
     }
@@ -4750,7 +4794,8 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
                         vla_release(fn, k);
                         break;
                     }
-                emit_jmp(fn, g_labels[label_idx(fn, s->name, s->line)].label);
+                int ix = label_idx(fn, s->name, s->line); /* may move g_labels */
+                emit_jmp(fn, g_labels[ix].label);
             }
             break;
         case STMT_DECL:
@@ -5368,7 +5413,7 @@ static void gen_func(struct ir_func *fn, struct func *f)
             fn->var_scope_hi[i] = 0x7fffffff;   /* whole function until stamped */
         }
     }
-    g_nlabels_used = 0;                 /* labels are per-function */
+    labels_reset();                     /* labels are per-function */
     g_nvla = 0;
     /* a _BitInt parameter as its caller's ABI leaves it: the bits above
      * N unspecified (emit_call has the same for a result) */

@@ -287,14 +287,21 @@ int pass_cfgclean(struct ir_func *fn)
         if (fn->ins[n].op == IR_LABEL && fn->ins[n].label >= 0 &&
             fn->ins[n].label < fn->nlabels)
             at[fn->ins[n].label] = n;
+    /* the last of each run of labels on one spot: a switch's 100,000
+     * stacked `case` labels (GCC's limits-caselabels.c) were each walked
+     * past by every label of the run, quadratically */
+    int *last = xmalloc((size_t)fn->nins * sizeof *last);
+    for (int n = fn->nins - 1; n >= 0; n--)
+        last[n] = fn->ins[n].op == IR_LABEL && n + 1 < fn->nins &&
+                  fn->ins[n + 1].op == IR_LABEL ? last[n + 1] : n;
     for (int l = 0; l < fn->nlabels; l++) {
         int n = at[l];
         if (n < 0) continue;
-        /* skip any further labels on the same spot */
-        while (n + 1 < fn->nins && fn->ins[n + 1].op == IR_LABEL) n++;
+        n = last[n];                   /* past the labels on the same spot */
         if (n + 1 < fn->nins && fn->ins[n + 1].op == IR_JMP)
             fwd[l] = fn->ins[n + 1].label;
     }
+    free(last);
     /* Follow the chains, with a bound: `L: goto L` is a real loop and
      * must not be collapsed into itself. */
     for (int l = 0; l < fn->nlabels; l++) {
