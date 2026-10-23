@@ -59,12 +59,27 @@ static int sccp_core(struct ir_func *fn, int fold_branches)
         }
     }
 
-    /* Reachability over the live edges only. */
+    /* Reachability over the live edges only -- and to every label whose
+     * address code that runs takes. With a computed goto those are
+     * edges already (build_cfg); without one, `&&L` still has to be an
+     * address, so its label has to be placed, and dropping the block
+     * left `&&L1 - &&L2`, or `void *x = &&L2`, naming a label no
+     * backend could find ("label 2 in 'f' was never placed"). The
+     * block is kept as written, like the label cfgclean keeps for
+     * anything that names it; a taker that is itself unreachable is
+     * dropped with its block, and takes nothing. */
     char *reach = xcalloc((size_t)nbb, 1);
     int *wl = xmalloc((size_t)nbb * sizeof *wl), nwl = 0;
     reach[0] = 1; wl[nwl++] = 0;
     while (nwl) {
         int b = wl[--nwl];
+        for (int n = bb[b].start; n < bb[b].end; n++) {
+            const struct ir_ins *i = &fn->ins[n];
+            if (i->op != IR_LABELADDR || i->label < 0 || i->label >= fn->nlabels)
+                continue;
+            int tb = l2b[i->label];
+            if (tb >= 0 && !reach[tb]) { reach[tb] = 1; wl[nwl++] = tb; }
+        }
         for (int s = 0; s < bb[b].nsucc; s++) {
             if (live_only[b] >= 0 && s != live_only[b])
                 continue;

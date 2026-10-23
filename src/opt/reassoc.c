@@ -206,6 +206,17 @@ int pass_reassoc(struct ir_func *fn)
  * lost fifteen instructions a sample. A lone one is the case that only
  * moved work around. Not ARMv6-M, whose loads take no negative
  * displacement. */
+struct idxkey { int b, x; long k; int n; };
+
+static int idxkey_cmp(const void *p, const void *q)
+{
+    const struct idxkey *a = p, *b = q;
+    if (a->b != b->b) return a->b < b->b ? -1 : 1;
+    if (a->x != b->x) return a->x < b->x ? -1 : 1;
+    if (a->k != b->k) return a->k < b->k ? -1 : 1;
+    return 0;
+}
+
 int pass_idxoff(struct ir_func *fn)
 {
     int grouped = target_get() == TARGET_THUMB &&
@@ -276,19 +287,27 @@ int pass_idxoff(struct ir_func *fn)
         }
     }
     free(use); free(ause);
-    /* Thumb: a candidate alone in its group (base, index, scale) stays */
+    /* Thumb: a candidate alone in its group (base, index, scale) stays.
+     * The groups are runs of the candidates sorted by that key -- looking
+     * for a mate in the whole function from each was quadratic, seconds
+     * on a function of 100,000 instructions. */
     if (any && grouped) {
-        any = 0;
-        for (int n = 0; n < fn->nins; n++) {
-            int mates = 0;
-            if (!doit[n])
-                continue;
-            for (int m = 0; m < fn->nins && !mates; m++)
-                mates = m != n && (doit[m] & 1) && rb[m] == rb[n] &&
-                        rx[m] == rx[n] && rk[m] == rk[n];
-            if (mates)
-                doit[n] |= 2;           /* kept */
+        int ng = 0;
+        struct idxkey *g = xmalloc((size_t)fn->nins * sizeof *g);
+        for (int n = 0; n < fn->nins; n++)
+            if (doit[n]) {
+                g[ng].b = rb[n]; g[ng].x = rx[n]; g[ng].k = rk[n];
+                g[ng++].n = n;
+            }
+        qsort(g, (size_t)ng, sizeof *g, idxkey_cmp);
+        for (int s = 0, e; s < ng; s = e) {
+            for (e = s + 1; e < ng && !idxkey_cmp(&g[s], &g[e]); e++)
+                ;
+            for (int t = s; t < e && e - s > 1; t++)
+                doit[g[t].n] |= 2;      /* kept */
         }
+        free(g);
+        any = 0;
         for (int n = 0; n < fn->nins; n++) {
             doit[n] = (char)(doit[n] == 3);
             any |= doit[n];

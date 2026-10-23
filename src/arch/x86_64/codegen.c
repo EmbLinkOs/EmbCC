@@ -2135,6 +2135,19 @@ static void gen_x87(struct code *text, const int *sd, struct ir_ins *i)
  * because they return the same type. That is the whole point of the
  * transform, and it is why the IR_RET that follows is skipped rather
  * than emitted. */
+/* What tail_call_ok asks of the whole function -- an address of the
+ * frame, an alloca, a computed goto -- asked once by gen_func, not at
+ * every call: 20,000 calls took 6 s, each a scan of the function. */
+static int g_tc_frame_ok;
+static int tail_frame_ok(const struct ir_func *fn)
+{
+    for (int k = 0; k < fn->nins; k++)
+        if (fn->ins[k].op == IR_ADDR || fn->ins[k].op == IR_ALLOCA ||
+            fn->ins[k].op == IR_IGOTO || fn->ins[k].op == IR_LABELADDR)
+            return 0;
+    return 1;
+}
+
 static int tail_call_ok(struct ir_func *fn, int n)
 {
     struct ir_ins *c = &fn->ins[n];
@@ -2151,10 +2164,8 @@ static int tail_call_ok(struct ir_func *fn, int n)
     for (k = 0; k < c->nargs; k++)
         if (c->argv[k].on_stack || c->argv[k].byref)
             return 0;
-    for (k = 0; k < fn->nins; k++)
-        if (fn->ins[k].op == IR_ADDR || fn->ins[k].op == IR_ALLOCA ||
-            fn->ins[k].op == IR_IGOTO || fn->ins[k].op == IR_LABELADDR)
-            return 0;
+    if (!g_tc_frame_ok)
+        return 0;
     /* Follow the call's value forward to a RET of it.
      *
      * A `mov` that merely forwards the value is transparent, and so is
@@ -2634,6 +2645,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
     for (int n = 0; n < fn->nins; n++)
         if (fn->ins[n].op == IR_IGOTO || fn->ins[n].op == IR_LABELADDR)
             { g_has_cgoto = 1; break; }
+    g_tc_frame_ok = tail_frame_ok(fn);
     /* So does a landing pad, entered from any call of its region (a
      * control-flow edge the liveness below does not see). */
     if (fn->neh)

@@ -276,6 +276,7 @@ compile/20050423-1.c
 compile/20050510-1.c
 compile/20050516-1.c
 compile/20050520-1.c
+compile/20050622-1.c
 compile/20050721-1.c
 compile/20050801-1.c
 compile/20051207-1.c
@@ -2631,6 +2632,7 @@ execute/pr20187-1.c
 execute/pr20466-1.c
 execute/pr20527-1.c
 execute/pr20601-1.c
+execute/pr20621-1.c
 execute/pr21173.c
 execute/pr21331.c
 execute/pr21964-1.c
@@ -2645,6 +2647,7 @@ execute/pr22429.c
 execute/pr22493-1.c
 execute/pr22630.c
 execute/pr23047.c
+execute/pr23135.c
 execute/pr23324.c
 execute/pr23604.c
 execute/pr23941.c
@@ -2665,6 +2668,7 @@ execute/pr28651.c
 execute/pr28778.c
 execute/pr28865.c
 execute/pr28982a.c
+execute/pr28982b.c
 execute/pr29006.c
 execute/pr29156.c
 execute/pr29695-1.c

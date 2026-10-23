@@ -1035,6 +1035,22 @@ int rv_tail_placeholder(struct code *c)
     return at;
 }
 
+/* A jump past jal's +-1 MiB, to a label in the same function:
+ * `auipc rd, 0; jalr x0, 0(rd)`, its immediates patched as a PC-relative
+ * pair (rv_patch_pcrel_pair, which keeps the opcodes) -- what the psABI's
+ * `tail` is for a symbol, here with the displacement known. */
+int rv_far_placeholder(struct code *c, int rd)
+{
+    int save_rvc = g_rvc;
+    g_rvc = 0;
+
+    int at = c->len;
+    rv_w(c, rv_enc_u(OP_AUIPC, rd, 0));
+    rv_w(c, rv_enc_i(OP_JALR, RV_ZERO, 0, rd, 0));
+    g_rvc = save_rvc;
+    return at;
+}
+
 /* ---- traps ------------------------------------------------------------ */
 
 /* A CSR instruction's top 12 bits are an UNSIGNED csr number, not the

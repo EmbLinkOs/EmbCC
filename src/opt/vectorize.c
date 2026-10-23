@@ -445,6 +445,84 @@ static int vec_self_accum(struct ir_func *fn, struct defs *d, int lo, int hi,
     return 0;
 }
 
+/* Where each temp is read, first and last (-1: nowhere), as ins_reads
+ * asks it: "is t read outside [lo, hi)" is rlo < lo or rhi >= hi. The
+ * escape checks below each asked every instruction of the function,
+ * for every loop -- and for each value of the loop -- which made a
+ * function of 300 small loops take seconds. */
+struct rspan { int *lo, *hi, n, nv; };
+static void rspan_cb(int *p, void *ctx)
+{
+    struct rspan *r = ctx;
+    int v = *p;
+    if (v < 0 || v >= r->nv)
+        return;
+    if (r->lo[v] < 0) r->lo[v] = r->n;
+    r->hi[v] = r->n;
+}
+
+static void rspan_build(struct ir_func *fn, struct rspan *r)
+{
+    r->nv = fn->nvregs;
+    r->lo = xmalloc((size_t)(r->nv ? r->nv : 1) * sizeof *r->lo);
+    r->hi = xmalloc((size_t)(r->nv ? r->nv : 1) * sizeof *r->hi);
+    for (int v = 0; v < r->nv; v++)
+        r->lo[v] = r->hi[v] = -1;
+    for (r->n = 0; r->n < fn->nins; r->n++) {
+        struct ir_ins *i = &fn->ins[r->n];
+        if (i->op != IR_LDVAR && i->op != IR_ADDR)   /* ins_reads' rule */
+            each_read(i, rspan_cb, r);
+    }
+}
+
+/* Does an instruction read a vector temp? (each_read's operands) */
+struct vread { const char *vec; int nv, hit; };
+static void vread_cb(int *p, void *ctx)
+{
+    struct vread *r = ctx;
+    if (*p >= 0 && *p < r->nv && r->vec[*p])
+        r->hit = 1;
+}
+
+/* Is v read by an instruction outside [lo, hi)? */
+static int read_outside(const struct rspan *r, int v, int lo, int hi)
+{
+    return v >= 0 && v < r->nv && r->lo[v] >= 0 &&
+           (r->lo[v] < lo || r->hi[v] >= hi);
+}
+
+/* Every definition of the induction variable outside the loop is a
+ * zero, and there is one: its definitions, from the def lists -- or
+ * every instruction, when they do not account for all of them (a
+ * landing pad's, which the lists leave out). */
+static int iv_starts_at_zero(struct ir_func *fn, struct defs *d, int iv,
+                             int lo, int hi)
+{
+    int init_ok = 0, nd = 0, all = 1;
+    for (int n = d->first[iv]; n >= 0; n = d->next[n])
+        nd++;
+    if (nd + (iv < fn->nparams) != d->cnt[iv])
+        all = 0;
+    for (int n = all ? d->first[iv] : 0; all ? n >= 0 : n < fn->nins;
+         n = all ? d->next[n] : n + 1) {
+        if (n >= lo && n < hi)
+            continue;
+        struct ir_ins *i = &fn->ins[n];
+        if (def_target(i) != iv)
+            continue;
+        if (i->op == IR_MOV && i->a >= 0 && i->a < fn->nvregs &&
+            d->cnt[i->a] == 1 && d->ins[i->a] >= 0 &&
+            fn->ins[d->ins[i->a]].op == IR_CONST &&
+            fn->ins[d->ins[i->a]].imm == 0)
+            init_ok = 1;
+        else if (i->op == IR_CONST && i->imm == 0)
+            init_ok = 1;
+        else
+            return 0;
+    }
+    return init_ok;
+}
+
 static int vectorize_one(struct ir_func *fn)
 {
     if (fn->nins == 0)
@@ -461,6 +539,9 @@ static int vectorize_one(struct ir_func *fn)
     compute_idom(bb, order, norder);
     struct defs d;
     compute_defs(fn, &d);
+    defs_lists(fn, &d);
+    struct rspan rs;                /* the IR holds still until a rewrite */
+    rspan_build(fn, &rs);
     char *in = xmalloc((size_t)nbb);
     /* (one rewrite at most per call, so nvregs holds until it) */
     char *inv = xmalloc((size_t)(fn->nvregs ? fn->nvregs : 1));
@@ -549,23 +630,8 @@ static int vectorize_one(struct ir_func *fn)
 
         /* It has to start at zero, or lane k is not element i+k. The
          * other definition of the phi temp is the one before the loop. */
-        int init_ok = 0;
-        for (int n = 0; n < fn->nins; n++) {
-            if (n >= L.lo && n < L.hi)
-                continue;
-            struct ir_ins *i = &fn->ins[n];
-            if (def_target(i) != L.iv)
-                continue;
-            if (i->op == IR_MOV && i->a >= 0 && i->a < fn->nvregs &&
-                d.cnt[i->a] == 1 && d.ins[i->a] >= 0 &&
-                fn->ins[d.ins[i->a]].op == IR_CONST &&
-                fn->ins[d.ins[i->a]].imm == 0)
-                init_ok = 1;
-            else if (i->op == IR_CONST && i->imm == 0)
-                init_ok = 1;
-            else
-                { init_ok = 0; break; }
-        }
+        int init_ok = L.iv >= 0 && L.iv < fn->nvregs &&
+                      iv_starts_at_zero(fn, &d, L.iv, L.lo, L.hi);
         if (!init_ok)
             { VDBG("h=%d iv does not start at 0\n", h); continue; }
 
@@ -846,13 +912,12 @@ static int vectorize_one(struct ir_func *fn)
             }
             if (L.red_ext >= 0) {
                 int w = def_target(&fn->ins[L.red_ext]);
-                for (int n = 0; n < fn->nins && ok; n++)
-                    if (n != L.red_add && ins_reads(&fn->ins[n], w))
-                        ok = 0;     /* the widened value feeds only the sum */
+                if (w >= 0 && w < rs.nv && rs.lo[w] >= 0 &&
+                    (rs.lo[w] != L.red_add || rs.hi[w] != L.red_add))
+                    ok = 0;     /* the widened value feeds only the sum */
             }
-            for (int n = 0; n < fn->nins && ok; n++)
-                if ((n < L.lo || n >= L.hi) && ins_reads(&fn->ins[n], L.red_next))
-                    ok = 0;             /* the partial sum must not escape */
+            if (ok && read_outside(&rs, L.red_next, L.lo, L.hi))
+                ok = 0;             /* the partial sum must not escape */
             if (!ok) {
                 VDBG("h=%d the accumulator is read elsewhere\n", h);
                 free(vec); continue;
@@ -928,12 +993,12 @@ static int vectorize_one(struct ir_func *fn)
             int t = def_target(&fn->ins[n]);
             if (t < 0 || t >= fn->nvregs || t == L.iv || t == L.red_acc)
                 continue;
-            for (int m = 0; m < fn->nins && ok; m++)
-                if ((m < L.lo || m >= L.hi) && ins_reads(&fn->ins[m], t)) {
-                    VDBG("h=%d temp %%%d (def at %d) read at %d; iv=%%%d"
-                         " acc=%%%d\n", h, t, n, m, L.iv, L.red_acc);
-                    ok = 0;
-                }
+            if (read_outside(&rs, t, L.lo, L.hi)) {
+                VDBG("h=%d temp %%%d (def at %d) read at %d..%d; iv=%%%d"
+                     " acc=%%%d\n", h, t, n, rs.lo[t], rs.hi[t], L.iv,
+                     L.red_acc);
+                ok = 0;
+            }
         }
         if (!ok) {
             VDBG("h=%d a value escapes the loop\n", h);
@@ -944,18 +1009,21 @@ static int vectorize_one(struct ir_func *fn)
          * that also becomes one: a lane-wise op inside the loop, or the
          * store that consumes it. Anything else -- a use after the loop,
          * a scalar op inside it -- would read sixteen bytes as eight. */
-        for (int n = 0; n < fn->nins && ok; n++) {
+        for (int v = 0; v < fn->nvregs && ok; v++)   /* read after or before */
+            if (vec[v] && read_outside(&rs, v, L.lo, L.hi))
+                ok = 0;
+        for (int n = L.lo; n < L.hi && ok; n++) {    /* ...or inside */
             struct ir_ins *i = &fn->ins[n];
-            int inside = n >= L.lo && n < L.hi;
             int t = def_target(i);
-            int consumer = inside && (i->op == IR_STORE || n == L.red_add ||
-                                      n == L.red_ext ||
-                                      (t >= 0 && t < fn->nvregs && vec[t]));
-            if (consumer)
-                continue;
-            for (int v = 0; v < fn->nvregs && ok; v++)
-                if (vec[v] && ins_reads(i, v))
-                    ok = 0;
+            int consumer = i->op == IR_STORE || n == L.red_add ||
+                           n == L.red_ext ||
+                           (t >= 0 && t < fn->nvregs && vec[t]);
+            struct vread vr = { vec, fn->nvregs, 0 };
+            if (consumer || i->op == IR_LDVAR || i->op == IR_ADDR)
+                continue;                   /* (ins_reads' rule) */
+            each_read(i, vread_cb, &vr);
+            if (vr.hit)
+                ok = 0;
         }
         if (!ok) { VDBG("h=%d a vector value escapes\n", h); free(vec); continue; }
 
@@ -1252,6 +1320,7 @@ static int vectorize_one(struct ir_func *fn)
 
     free(in);
     free(inv);
+    free(rs.lo); free(rs.hi);
     free_defs(&d);
     free(order); free(l2b);
     free_cfg(bb, nbb);

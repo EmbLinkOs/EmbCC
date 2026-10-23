@@ -81,6 +81,13 @@ int plat_stderr_is_terminal(void);
  * with an error first. */
 unsigned long plat_stack_size(void);
 
+/* Calls fn(argc, argv) on the biggest stack this host offers and returns
+ * what it returns; plat_stack_size() then says that stack's size. On
+ * macOS and Linux a thread with 256 MB of stack, reserved and touched only
+ * as deep as a compile goes (GCC's limits tests nest 10,000 levels; the
+ * main thread's 8 MB cannot grow on macOS); elsewhere the caller's own. */
+int plat_run_on_stack(int (*fn)(int, char **), int argc, char **argv);
+
 /* ---- where this program is ----
  *
  * The absolute path of the running executable, or NULL where the host

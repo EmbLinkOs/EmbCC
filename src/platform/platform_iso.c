@@ -23,6 +23,12 @@ unsigned long plat_stack_size(void)
     return 1ul << 20;
 }
 
+/* ISO C has no threads to give a bigger stack: the caller's own */
+int plat_run_on_stack(int (*fn)(int, char **), int argc, char **argv)
+{
+    return fn(argc, argv);
+}
+
 const char *plat_self_path(void)
 {
     return plat_argv0_path();

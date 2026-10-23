@@ -126,6 +126,9 @@ struct xt_fn {
      * function's entry; the body asked for nlit of them. */
     struct xt_lit *lit;
     int nlit, caplit;
+    /* ...found through a hash (lit_index): each constant searched the
+     * whole pool, and 20,000 of them took 20 s at -O0. Slot: index + 1. */
+    int *lith, caplith;
     int pool_at, npool;
     /* Literals placed in the code itself, jumped over, for an l32r more
      * than 256 KiB past the pool: their offsets, and what each holds. */
@@ -568,11 +571,38 @@ static void layout(struct xt_fn *F)
 
 /* ---- literals -------------------------------------------------------------- */
 
+static unsigned lit_hash(int kind, unsigned long v, const void *p)
+{
+    unsigned long h = v * 0x9e3779b97f4a7c15UL ^ (unsigned long)p ^
+                      (unsigned long)kind << 7;
+    return (unsigned)(h ^ h >> 29 ^ h >> 47);
+}
+
+/* The slot of the hash where (kind, v, p) is, or the empty one where it
+ * goes. */
+static int *lit_slot(struct xt_fn *F, int kind, unsigned long v, void *p)
+{
+    unsigned m = (unsigned)F->caplith - 1, h = lit_hash(kind, v, p) & m;
+    for (; F->lith[h]; h = (h + 1) & m) {
+        const struct xt_lit *l = &F->lit[F->lith[h] - 1];
+        if (l->kind == kind && l->v == v && l->p == p)
+            break;
+    }
+    return &F->lith[h];
+}
+
 static int lit_index(struct xt_fn *F, int kind, unsigned long v, void *p)
 {
-    for (int k = 0; k < F->nlit; k++)
-        if (F->lit[k].kind == kind && F->lit[k].v == v && F->lit[k].p == p)
-            return k;
+    if (2 * (F->nlit + 1) > F->caplith) {   /* grow, and put them back */
+        F->caplith = F->caplith ? 2 * F->caplith : 64;
+        free(F->lith);
+        F->lith = xcalloc((size_t)F->caplith, sizeof *F->lith);
+        for (int k = 0; k < F->nlit; k++)
+            *lit_slot(F, F->lit[k].kind, F->lit[k].v, F->lit[k].p) = k + 1;
+    }
+    int *sl = lit_slot(F, kind, v, p);
+    if (*sl)
+        return *sl - 1;
     if (F->nlit == F->caplit) {
         F->caplit = F->caplit ? F->caplit * 2 : 16;
         F->lit = xrealloc(F->lit, (size_t)F->caplit * sizeof *F->lit);
@@ -580,6 +610,7 @@ static int lit_index(struct xt_fn *F, int kind, unsigned long v, void *p)
     F->lit[F->nlit].kind = kind;
     F->lit[F->nlit].v = v;
     F->lit[F->nlit].p = p;
+    *sl = F->nlit + 1;
     return F->nlit++;
 }
 
@@ -3422,6 +3453,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct xt_sites *st,
     F.st->next = se0; F.st->nstr = ss0; F.st->ng = sg0; F.st->nf = sf0;
     F.nfix = 0;
     F.nlit = 0;
+    if (F.lith)
+        memset(F.lith, 0, (size_t)F.caplith * sizeof *F.lith);
     F.nisl = 0;
     for (i = 0; i <= fn->nlabels; i++)
         F.label_off[i] = -1;
@@ -3516,6 +3549,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct xt_sites *st,
     free(F.label_off);
     free(F.fix);
     free(F.lit);
+    free(F.lith);
     free(F.isl);
     free(F.isl_at);
     free(F.wide);
