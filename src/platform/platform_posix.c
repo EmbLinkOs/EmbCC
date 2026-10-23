@@ -32,6 +32,12 @@
 #include <dirent.h>
 #endif
 #include <unistd.h>            /* isatty, readlink */
+/* threads, for plat_run_on_stack's big stack: macOS's and glibc's (in
+ * libc from 2.34, -lpthread before). EmbLinkOS's newlib has none. */
+#if defined(__APPLE__) || defined(__linux__)
+#define PLAT_HAS_THREADS 1
+#include <pthread.h>
+#endif
 #if defined(__APPLE__)
 #include <mach-o/dyld.h>
 #endif
@@ -41,10 +47,55 @@ int plat_stderr_is_terminal(void)
     return isatty(2);
 }
 
-/* the main thread's default on macOS and Linux (ulimit -s) */
+/* the main thread's default on macOS and Linux (ulimit -s), until
+ * plat_run_on_stack moves the compile onto a bigger one */
+static unsigned long g_stack = 8ul << 20;
+
 unsigned long plat_stack_size(void)
 {
-    return 8ul << 20;
+    return g_stack;
+}
+
+#if PLAT_HAS_THREADS
+struct onstack {
+    int (*fn)(int, char **);
+    int argc;
+    char **argv;
+    int rc;
+};
+
+static void *onstack_run(void *p)
+{
+    struct onstack *o = p;
+    o->rc = o->fn(o->argc, o->argv);
+    return NULL;
+}
+#endif
+
+int plat_run_on_stack(int (*fn)(int, char **), int argc, char **argv)
+{
+#if PLAT_HAS_THREADS
+    /* reserved, not committed: the pages are touched only as deep as the
+     * recursion goes, so an ordinary compile costs what it did */
+    const unsigned long want = 256ul << 20;
+    struct onstack o = { fn, argc, argv, 0 };
+    pthread_attr_t a;
+    pthread_t t;
+    if (pthread_attr_init(&a) == 0) {
+        int ok = pthread_attr_setstacksize(&a, (size_t)want) == 0;
+        if (ok) {
+            g_stack = want;            /* before the thread reads it */
+            ok = pthread_create(&t, &a, onstack_run, &o) == 0;
+        }
+        pthread_attr_destroy(&a);
+        if (ok) {
+            pthread_join(t, NULL);
+            return o.rc;
+        }
+        g_stack = 8ul << 20;           /* no thread: the main one's */
+    }
+#endif
+    return fn(argc, argv);
 }
 
 const char *plat_self_path(void)

@@ -92,6 +92,13 @@ struct attrs { int packed; int aligned; int weak; int noreturn;
                int vecsize;           /* vector_size(N): the bytes */
 };
 
+/* The `)` that closes a declarator's `(`: the lexer at it, under the `(`'s
+ * place in the source (its lx.p, unique in a unit). */
+struct pmatch {
+    const char *open;
+    struct lexer close;
+};
+
 /* A name -> pointer index (open addressing, FNV-1a), that only grows:
  * the parser's tags and typedefs are never taken off their lists. */
 struct nameix {
@@ -146,6 +153,11 @@ static void nameix_put(struct nameix *ix, const char *name, void *val)
 }
 
 struct parser {
+    /* a parenthesized declarator's matches (decl_skip_group), for the nest
+     * being read; decl_depth counts the declarators open, and the table
+     * is emptied when the outermost one returns */
+    struct pmatch *pm;
+    int pm_cap, pm_n, decl_depth;
     /* the enumerator range parse_enum_body saw last (enum_pack) */
     long last_enum_lo;
     unsigned long last_enum_hi;
@@ -1601,6 +1613,79 @@ static int fn_suffix_follows(struct parser *ps)
     return yes;
 }
 
+/* The match recorded for the `(` at OPEN, or NULL. */
+static struct lexer *pm_find(struct parser *ps, const char *open)
+{
+    if (!ps->pm_cap)
+        return NULL;
+    unsigned long h = ((unsigned long)open >> 3) * 2654435761UL;
+    for (int i = (int)(h & (unsigned long)(ps->pm_cap - 1));;
+         i = (i + 1) & (ps->pm_cap - 1)) {
+        if (!ps->pm[i].open)
+            return NULL;
+        if (ps->pm[i].open == open)
+            return &ps->pm[i].close;
+    }
+}
+
+static void pm_put(struct parser *ps, const char *open,
+                   const struct lexer *close)
+{
+    if (2 * (ps->pm_n + 1) > ps->pm_cap) {          /* grow, and rehash */
+        struct pmatch *old = ps->pm;
+        int ocap = ps->pm_cap;
+        ps->pm_cap = ocap ? 2 * ocap : 64;
+        ps->pm = xcalloc((size_t)ps->pm_cap, sizeof *ps->pm);
+        ps->pm_n = 0;
+        for (int i = 0; i < ocap; i++)
+            if (old[i].open)
+                pm_put(ps, old[i].open, &old[i].close);
+        free(old);
+    }
+    unsigned long h = ((unsigned long)open >> 3) * 2654435761UL;
+    int i = (int)(h & (unsigned long)(ps->pm_cap - 1));
+    while (ps->pm[i].open && ps->pm[i].open != open)
+        i = (i + 1) & (ps->pm_cap - 1);
+    if (!ps->pm[i].open)
+        ps->pm_n++;
+    ps->pm[i].open = open;
+    ps->pm[i].close = *close;
+}
+
+/* From the token after a declarator's `(` (OPEN is the lexer at it), to the
+ * `)` that closes it. Scanned, the matches of every `(` on the way are
+ * recorded too, so the declarator inside finds its own at each level
+ * without scanning again: one pass for a whole nest, where a scan per
+ * level was quadratic (GCC's limits-declparen.c: 10,000 levels, 5 s; 40,000
+ * took 86). */
+static void decl_skip_group(struct parser *ps, const struct lexer *open)
+{
+    const struct lexer *m = pm_find(ps, open->p);
+    if (m) {
+        ps->lx = *m;
+        return;
+    }
+    const char **st = xmalloc(16 * sizeof *st);
+    int nst = 0, cap = 16;
+    st[nst++] = open->p;
+    for (;;) {
+        if (cur(ps)->kind == TOK_EOF)
+            parse_error_line(ps, open->tok.line,
+                             "unbalanced '(' in a declarator");
+        advance(ps);
+        if (cur(ps)->kind == TOK_LPAREN) {
+            if (nst == cap)
+                st = xrealloc(st, (size_t)(cap *= 2) * sizeof *st);
+            st[nst++] = ps->lx.p;
+        } else if (cur(ps)->kind == TOK_RPAREN) {
+            pm_put(ps, st[--nst], &ps->lx);
+            if (!nst)
+                break;
+        }
+    }
+    free(st);
+}
+
 /* Declarator over a base type (C11 6.7.6): pointers, then a name — or a
  * parenthesized declarator — then array and function suffixes. The
  * parenthesized one binds looser than the suffixes after it (`int
@@ -1612,9 +1697,30 @@ static int fn_suffix_follows(struct parser *ps)
  * themselves; its parameter names (a definition needs them) are left in
  * ps->fn_pnames. name_out is NULL when no name appeared (legal in
  * prototypes and abstract declarators). */
+static struct type *declarator_in(struct parser *ps, struct type *base,
+                                  const char **name_out, int nested,
+                                  int top_in, int *obj_const);
+
+/* The matches decl_skip_group records live as long as the nest they
+ * belong to: emptied when the outermost declarator returns. */
 static struct type *declarator(struct parser *ps, struct type *base,
                                const char **name_out, int nested,
                                int top_in, int *obj_const)
+{
+    ps->decl_depth++;
+    struct type *t = declarator_in(ps, base, name_out, nested, top_in,
+                                   obj_const);
+    if (!--ps->decl_depth && ps->pm_n) {
+        free(ps->pm);
+        ps->pm = NULL;
+        ps->pm_cap = ps->pm_n = 0;
+    }
+    return t;
+}
+
+static struct type *declarator_in(struct parser *ps, struct type *base,
+                                  const char **name_out, int nested,
+                                  int top_in, int *obj_const)
 {
     /* top_in: whether the type so far is const at its top level; the
      * stars change that, and what holds when the NAME is read is whether
@@ -1622,6 +1728,7 @@ static struct type *declarator(struct parser *ps, struct type *base,
      * ps->q_top, by then: a suffix parsed before a parenthesized
      * declarator, or an array dimension after the name, parses types of
      * its own. */
+    stack_check(ps->lx.file, cur(ps)->line, 6);  /* `(*(*(*v)))`, deep */
     ps->q_top = top_in;
     base = parse_stars(ps, base);
     int top = ps->q_top;
@@ -1644,17 +1751,7 @@ static struct type *declarator(struct parser *ps, struct type *base,
         if (cur(ps)->kind == TOK_STAR ||
             (cur(ps)->kind == TOK_IDENT && !at_type_start(ps))) {
             /* past the parentheses to the suffixes */
-            int depth = 1;
-            while (depth > 0) {
-                if (cur(ps)->kind == TOK_EOF)
-                    parse_error_line(ps, open.tok.line,
-                               "unbalanced '(' in a declarator");
-                advance(ps);
-                if (cur(ps)->kind == TOK_LPAREN)
-                    depth++;
-                else if (cur(ps)->kind == TOK_RPAREN)
-                    depth--;
-            }
+            decl_skip_group(ps, &open);
             advance(ps);
             struct type *outer = base;
             /* The suffix's parameter names are captured, because
@@ -1666,14 +1763,14 @@ static struct type *declarator(struct parser *ps, struct type *base,
              * `void (*signal(int sig, void (*handler)(int)))(int)` lose
              * `sig` -- the inner `(int)` of `handler` overwrote slot 0
              * while the outer parameter list was still filling it. */
-            const char *pn[MAX_PARAMS];
-            struct expr *pb[MAX_PARAMS];
+            /* (on the heap: a frame per level of nesting, and 2 KB of
+             * arrays in each kept 10,000 levels from fitting) */
+            const char **pn = NULL;
+            struct expr **pb = NULL;
             int have_pn = 0;
             if (cur(ps)->kind == TOK_LPAREN) {
-                for (int pi = 0; pi < MAX_PARAMS; pi++) {
-                    pn[pi] = NULL;
-                    pb[pi] = NULL;
-                }
+                pn = xcalloc(MAX_PARAMS, sizeof *pn);
+                pb = xcalloc(MAX_PARAMS, sizeof *pb);
                 outer = parse_fn_params_named(ps, base, pn, pb);
                 have_pn = 1;
             } else if (cur(ps)->kind == TOK_LBRACKET)
@@ -1703,6 +1800,8 @@ static struct type *declarator(struct parser *ps, struct type *base,
                     ps->fn_pbound[pi] = pb[pi];
                 }
             }
+            free(pn);
+            free(pb);
             return t;
         }
         ps->lx = open; /* not a parenthesized declarator */

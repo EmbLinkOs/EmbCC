@@ -5056,7 +5056,8 @@ static int expand_wp(int *argcp, char ***argvp)
     return 0;
 }
 
-int main(int argc, char **argv)
+/* the compiler proper, on the stack plat_run_on_stack gives it */
+static int embcc_main(int argc, char **argv)
 {
     /* the deep recursions measure from here */
     stack_note_base(&argc, plat_stack_size());
@@ -6756,4 +6757,9 @@ int main(int argc, char **argv)
                                      "support but an object file does not; "
                                      "name a file\n"), 1));
     return done(compile(input, output ? output : default_output(input), 0));
+}
+
+int main(int argc, char **argv)
+{
+    return plat_run_on_stack(embcc_main, argc, argv);
 }
