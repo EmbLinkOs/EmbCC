@@ -233,6 +233,49 @@ static int g6_ins_at;           /* where the current instruction began */
  * starts its range search after them -- searching all of a unit's ranges
  * at every halfword made a file of 20,000 functions quadratic. */
 static int g6_len0, g6_nd0;
+/* ...and whether this function's ranges are in order and apart, checked
+ * as they come (g6_dchk: how many are; g6_dbad: one was not). Each marks
+ * code at the end of what is emitted, so they are; while they are, a
+ * scan finds its first range by a binary search and steps past the rest
+ * as it goes, instead of asking each of them at every halfword -- the
+ * literal pools of 10,000 double constants made that quadratic. */
+static int g6_dchk, g6_dbad;
+
+/* Where the data range holding `at` ends, or -1; *cur is the scan's place
+ * among the ranges, -1 to start. `at` only moves forward in a scan. */
+static int v6_data_end(const struct code *t, int k0, int at, int *cur)
+{
+    if (k0 == g6_nd0 && !g6_dbad) {
+        if (g6_dchk > t->ndrange)            /* taken back: still in order */
+            g6_dchk = t->ndrange & ~1;
+        if (g6_dchk < k0)
+            g6_dchk = k0;
+        for (; g6_dchk + 1 < t->ndrange; g6_dchk += 2)
+            if (t->drange[g6_dchk] > t->drange[g6_dchk + 1] ||
+                (g6_dchk > k0 && t->drange[g6_dchk] < t->drange[g6_dchk - 1]))
+                g6_dbad = 1;
+    }
+    if (k0 != g6_nd0 || g6_dbad) {           /* every range, as before */
+        for (int k = k0; k + 1 < t->ndrange; k += 2)
+            if (at >= t->drange[k] && at < t->drange[k + 1])
+                return t->drange[k + 1];
+        return -1;
+    }
+    int k = *cur;
+    if (k < 0) {                     /* the first range ending past at */
+        int lo = 0, hi = (t->ndrange - k0) / 2;
+        while (lo < hi) {
+            int mid = lo + (hi - lo) / 2;
+            if (t->drange[k0 + 2 * mid + 1] <= at) lo = mid + 1;
+            else                                 hi = mid;
+        }
+        k = k0 + 2 * lo;
+    }
+    while (k + 1 < t->ndrange && t->drange[k + 1] <= at)
+        k += 2;
+    *cur = k;
+    return k + 1 < t->ndrange && at >= t->drange[k] ? t->drange[k + 1] : -1;
+}
 static const char *g6_atk;      /* per vreg: its address is taken */
 static const struct ir_ins *g6_cur;  /* the instruction being lowered */
 
@@ -298,20 +341,16 @@ static unsigned v6_writes(const struct t_fn *F, int from, int to, int *br)
     const struct code *t = F->t;
     const unsigned call = 0xfu | (1u << 12) | (1u << 14);
     unsigned m = 0;
-    int at = from, b = 0, k0 = from >= g6_len0 ? g6_nd0 : 0;
+    int at = from, b = 0, k0 = from >= g6_len0 ? g6_nd0 : 0, cur = -1;
     if (to > t->len)
         to = t->len;
     while (at + 1 < to) {
         unsigned h = (unsigned)(t->p[at] | t->p[at + 1] << 8);
-        int data = 0;
-        for (int k = k0; k + 1 < t->ndrange; k += 2)
-            if (at >= t->drange[k] && at < t->drange[k + 1]) {
-                at = t->drange[k + 1];
-                data = 1;
-                break;
-            }
-        if (data)
+        int dend = v6_data_end(t, k0, at, &cur);
+        if (dend >= 0) {
+            at = dend;
             continue;
+        }
         if ((h >> 11) >= 0x1d) {
             unsigned h2 = at + 3 < t->len
                 ? (unsigned)(t->p[at + 2] | t->p[at + 3] << 8) : 0;
@@ -3904,18 +3943,14 @@ static int v6_ok32(unsigned h, unsigned h2)
 static void v6_scan(struct t_fn *F, int from)
 {
     struct code *t = F->t;
-    int at = from, k0 = from >= g6_len0 ? g6_nd0 : 0;
+    int at = from, k0 = from >= g6_len0 ? g6_nd0 : 0, cur = -1;
     while (at + 1 < t->len) {
         unsigned h = (unsigned)(t->p[at] | t->p[at + 1] << 8);
-        int data = 0;
-        for (int k = k0; k + 1 < t->ndrange; k += 2)
-            if (at >= t->drange[k] && at < t->drange[k + 1]) {
-                at = t->drange[k + 1];
-                data = 1;
-                break;
-            }
-        if (data)
+        int dend = v6_data_end(t, k0, at, &cur);
+        if (dend >= 0) {
+            at = dend;
             continue;
+        }
         if ((h >> 11) >= 0x1d) {
             unsigned h2 = at + 3 < t->len
                 ? (unsigned)(t->p[at + 2] | t->p[at + 3] << 8) : 0;
@@ -4281,6 +4316,8 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     int first = 1;                 /* the first pass of a layout */
     g6_len0 = len0;
     g6_nd0 = nd0 & ~1;
+    g6_dchk = g6_nd0;
+    g6_dbad = 0;
     for (int pass = 0; pass < 12; pass++) {
         int redo = 0;
         long frame_push;
@@ -4811,7 +4848,7 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     free(g6_far_at);
     g6_far_at = NULL;
     g6_nfar = g6_capfar = 0;
-    g6_len0 = g6_nd0 = 0;
+    g6_len0 = g6_nd0 = g6_dchk = g6_dbad = 0;
     free(g6_lsnap);
     g6_lfwd = g6_lseen = NULL;
     g6_lsnap = NULL;
