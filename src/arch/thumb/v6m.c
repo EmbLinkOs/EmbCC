@@ -222,7 +222,17 @@ static void mov(struct t_fn *F, int d, int s)
 static long g6_rc_off[8];       /* per low register: the word's frame offset,
                                  * or -1 */
 static int g6_rc_at[8];         /* ...and where in the code it began */
+static int g6_rc_chk[8];        /* ...and how far nothing has written it:
+                                 * rc_find scans only what came after.
+                                 * Scanning from g6_rc_at at every branch
+                                 * was quadratic in a function's size. */
 static int g6_ins_at;           /* where the current instruction began */
+/* Where this function's code begins, and how many data ranges came
+ * before it: those mark code already emitted, so all of them end at or
+ * before g6_len0, and a scan of this function's code (v6_writes, v6_scan)
+ * starts its range search after them -- searching all of a unit's ranges
+ * at every halfword made a file of 20,000 functions quadratic. */
+static int g6_len0, g6_nd0;
 static const char *g6_atk;      /* per vreg: its address is taken */
 static const struct ir_ins *g6_cur;  /* the instruction being lowered */
 
@@ -249,14 +259,34 @@ static int rc_off(void)
     return off;
 }
 
-/* The far branch BL at `at` (F->far_mode), as opposed to a call. */
+/* Where this pass emitted its far branches: each at the end of the
+ * code, so ascending; v6_invert_last takes back the last. */
+static int *g6_far_at, g6_nfar, g6_capfar;
+
+static void far_note(int at)
+{
+    if (g6_nfar == g6_capfar) {
+        g6_capfar = g6_capfar ? 2 * g6_capfar : 64;
+        g6_far_at = xrealloc(g6_far_at, (size_t)g6_capfar * sizeof *g6_far_at);
+    }
+    g6_far_at[g6_nfar++] = at;
+}
+
+/* The far branch BL at `at` (F->far_mode), as opposed to a call. A search
+ * of the branches (fix) for each BL v6_writes met made a far-mode
+ * function's compile cubic. */
 static int v6_far_bl(const struct t_fn *F, int at)
 {
+    int lo = 0, hi = g6_nfar - 1;
     if (!F->far_mode)
         return 0;
-    for (int k = 0; k < F->nfix; k++)
-        if (F->fix[k].at == at && F->fix[k].ins == BC_FAR)
+    while (lo <= hi) {
+        int mid = lo + (hi - lo) / 2;
+        if (g6_far_at[mid] == at)
             return 1;
+        if (g6_far_at[mid] < at) lo = mid + 1;
+        else                     hi = mid - 1;
+    }
     return 0;
 }
 
@@ -268,13 +298,13 @@ static unsigned v6_writes(const struct t_fn *F, int from, int to, int *br)
     const struct code *t = F->t;
     const unsigned call = 0xfu | (1u << 12) | (1u << 14);
     unsigned m = 0;
-    int at = from, b = 0;
+    int at = from, b = 0, k0 = from >= g6_len0 ? g6_nd0 : 0;
     if (to > t->len)
         to = t->len;
     while (at + 1 < to) {
         unsigned h = (unsigned)(t->p[at] | t->p[at + 1] << 8);
         int data = 0;
-        for (int k = 0; k + 1 < t->ndrange; k += 2)
+        for (int k = k0; k + 1 < t->ndrange; k += 2)
             if (at >= t->drange[k] && at < t->drange[k + 1]) {
                 at = t->drange[k + 1];
                 data = 1;
@@ -409,7 +439,7 @@ static void rc_note(const struct t_fn *F, int r, long off)
     if (br)
         return;
     g6_rc_off[r] = off;
-    g6_rc_at[r] = F->t->len;
+    g6_rc_at[r] = g6_rc_chk[r] = F->t->len;
 }
 
 static int rc_find(const struct t_fn *F, long off);
@@ -454,7 +484,7 @@ static void rc_label(const struct t_fn *F, int label)
         if (g6_lseen[label])
             o = !ft || o == s[r] ? s[r] : -1;
         g6_rc_off[r] = o;
-        g6_rc_at[r] = F->t->len;
+        g6_rc_at[r] = g6_rc_chk[r] = F->t->len;
     }
 }
 
@@ -464,11 +494,15 @@ static int rc_find(const struct t_fn *F, long off)
     for (int r = 0; r < 8; r++) {
         if (g6_rc_off[r] != off)
             continue;
+        int from = g6_rc_chk[r];
+        if (from < g6_rc_at[r] || from > F->t->len)
+            from = g6_rc_at[r];
         if (g6_rc_at[r] > F->t->len ||
-            (v6_writes(F, g6_rc_at[r], F->t->len, NULL) >> r & 1)) {
+            (v6_writes(F, from, F->t->len, NULL) >> r & 1)) {
             g6_rc_off[r] = -1;
             continue;
         }
+        g6_rc_chk[r] = F->t->len;
         return r;
     }
     return -1;
@@ -1202,6 +1236,8 @@ static int v6_branch(struct t_fn *F, int cond, int label)
     F->fix[k].sz = t->len - start;
     F->fix[k].cz_at = start;
     F->fix[k].ins = cls;
+    if (cls == BC_FAR)
+        far_note(at);
     return k;
 }
 
@@ -1233,9 +1269,14 @@ static int v6_invert_last(struct t_fn *F, int n, int label)
         return 0;
     cond = F->fix[F->bc_fix].cond ^ 1;
     F->t->len -= F->fix[F->bc_fix].sz;
-    for (int r = 0; r < 8; r++)         /* begun after the branch removed */
+    for (int r = 0; r < 8; r++) {       /* begun after the branch removed */
         if (g6_rc_at[r] > F->t->len)
             g6_rc_off[r] = -1;
+        if (g6_rc_chk[r] > F->t->len)   /* checked up to code now gone */
+            g6_rc_chk[r] = F->t->len;
+    }
+    while (g6_nfar > 0 && g6_far_at[g6_nfar - 1] >= F->t->len)
+        g6_nfar--;
     if (g6_ins_at > F->t->len)
         g6_ins_at = F->t->len;
     F->nfix--;
@@ -3863,11 +3904,11 @@ static int v6_ok32(unsigned h, unsigned h2)
 static void v6_scan(struct t_fn *F, int from)
 {
     struct code *t = F->t;
-    int at = from;
+    int at = from, k0 = from >= g6_len0 ? g6_nd0 : 0;
     while (at + 1 < t->len) {
         unsigned h = (unsigned)(t->p[at] | t->p[at + 1] << 8);
         int data = 0;
-        for (int k = 0; k + 1 < t->ndrange; k += 2)
+        for (int k = k0; k + 1 < t->ndrange; k += 2)
             if (at >= t->drange[k] && at < t->drange[k + 1]) {
                 at = t->drange[k + 1];
                 data = 1;
@@ -4238,11 +4279,14 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     int sc0 = st->ncall, se0 = st->next, ss0 = st->nstr, sg0 = st->ng,
         sf0 = st->nf;
     int first = 1;                 /* the first pass of a layout */
+    g6_len0 = len0;
+    g6_nd0 = nd0 & ~1;
     for (int pass = 0; pass < 12; pass++) {
         int redo = 0;
         long frame_push;
         t->len = len0;
         t->ndrange = nd0;
+        g6_nfar = 0;
         fn->nlines = nl0;
         st->ncall = sc0; st->next = se0; st->nstr = ss0; st->ng = sg0;
         st->nf = sf0;
@@ -4764,6 +4808,10 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     g6_vmiss = g6_velide = g6_noelide = NULL;
     free(g6_lfwd);
     free(g6_lseen);
+    free(g6_far_at);
+    g6_far_at = NULL;
+    g6_nfar = g6_capfar = 0;
+    g6_len0 = g6_nd0 = 0;
     free(g6_lsnap);
     g6_lfwd = g6_lseen = NULL;
     g6_lsnap = NULL;
