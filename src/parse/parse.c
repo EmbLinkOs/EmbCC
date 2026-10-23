@@ -92,6 +92,59 @@ struct attrs { int packed; int aligned; int weak; int noreturn;
                int vecsize;           /* vector_size(N): the bytes */
 };
 
+/* A name -> pointer index (open addressing, FNV-1a), that only grows:
+ * the parser's tags and typedefs are never taken off their lists. */
+struct nameix {
+    const char **key;
+    void **val;
+    int cap, n;
+};
+
+static unsigned long nameix_hash(const char *s)
+{
+    unsigned long h = 2166136261UL;
+    for (; *s; s++)
+        h = (h ^ (unsigned char)*s) * 16777619UL;
+    return h;
+}
+
+static void *nameix_get(const struct nameix *ix, const char *name)
+{
+    if (!ix->cap)
+        return NULL;
+    for (int i = (int)(nameix_hash(name) & (unsigned long)(ix->cap - 1));;
+         i = (i + 1) & (ix->cap - 1)) {
+        if (!ix->key[i])
+            return NULL;
+        if (strcmp(ix->key[i], name) == 0)
+            return ix->val[i];
+    }
+}
+
+/* name -> val, replacing what the name had */
+static void nameix_put(struct nameix *ix, const char *name, void *val)
+{
+    if (2 * (ix->n + 1) > ix->cap) {
+        struct nameix old = *ix;
+        ix->cap = old.cap ? 2 * old.cap : 256;
+        ix->key = xcalloc((size_t)ix->cap, sizeof *ix->key);
+        ix->val = xcalloc((size_t)ix->cap, sizeof *ix->val);
+        ix->n = 0;
+        for (int i = 0; i < old.cap; i++)
+            if (old.key[i])
+                nameix_put(ix, old.key[i], old.val[i]);
+        free(old.key);
+        free(old.val);
+    }
+    int i = (int)(nameix_hash(name) & (unsigned long)(ix->cap - 1));
+    while (ix->key[i] && strcmp(ix->key[i], name) != 0)
+        i = (i + 1) & (ix->cap - 1);
+    if (!ix->key[i])
+        ix->n++;
+    ix->key[i] = name;
+    ix->val[i] = val;
+}
+
 struct parser {
     /* the enumerator range parse_enum_body saw last (enum_pack) */
     long last_enum_lo;
@@ -143,6 +196,10 @@ struct parser {
      * block number handed out: see struct tagdef */
     int tag_blk, tag_blk_seq;
     struct typedefent *typedefs;
+    /* tags and typedefs by name (find_tag, find_typedef): the newest of
+     * each name, where a walk of the lists cost every identifier the
+     * length of a vendor header's thousands of typedefs */
+    struct nameix tag_ix, typedef_ix;
     struct econst **econst_tail;
     int seq;              /* current top-level item, for econst seq */
     int alignas_out;      /* alignment from a `_Alignas(...)` on the current
@@ -227,8 +284,8 @@ static void advance(struct parser *ps)
 
 static struct tagdef *find_tag(struct parser *ps, const char *tag)
 {
-    for (struct tagdef *t = ps->tags; t; t = t->next)
-        if (!t->dead && strcmp(t->tag, tag) == 0)
+    for (struct tagdef *t = nameix_get(&ps->tag_ix, tag); t; t = t->same)
+        if (!t->dead)
             return t;
     return NULL;
 }
@@ -244,15 +301,17 @@ static struct tagdef *push_tag(struct parser *ps, const char *tag,
     td->blk = ps->tag_blk;
     td->next = ps->tags;
     ps->tags = td;
+    if (tag) {
+        td->same = nameix_get(&ps->tag_ix, tag);
+        nameix_put(&ps->tag_ix, tag, td);
+    }
     return td;
 }
 
 static struct type *find_typedef(struct parser *ps, const char *name)
 {
-    for (struct typedefent *t = ps->typedefs; t; t = t->next)
-        if (strcmp(t->name, name) == 0)
-            return t->ty;
-    return NULL;
+    struct typedefent *t = nameix_get(&ps->typedef_ix, name);
+    return t ? t->ty : NULL;
 }
 
 /* A syntax error: recorded, then the parser resumes at the nearest recovery
@@ -2339,12 +2398,12 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
         }
         if (!td)
             return NULL;
-        for (struct typedefent *te = ps->typedefs; te; te = te->next)
-            if (strcmp(te->name, cur(ps)->text) == 0) {
-                if (te->is_const)        /* typedef const struct cfg cfg_t; */
-                    *vol |= Q_CONST;
-                break;
-            }
+        {
+            /* the entry find_typedef found: typedef const struct cfg cfg_t; */
+            struct typedefent *te = nameix_get(&ps->typedef_ix, cur(ps)->text);
+            if (te && te->is_const)
+                *vol |= Q_CONST;
+        }
         advance(ps);
         return td;
     }
@@ -5276,6 +5335,7 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
                 struct typedefent *te = xcalloc(1, sizeof *te);
                 te->name = tname; te->ty = tt; te->is_const = tconst;
                 te->next = ps->typedefs; ps->typedefs = te;
+                nameix_put(&ps->typedef_ix, tname, te);
                 if (ty_is_vm(tt)) {
                     static int vm_typedef_id;
                     int id = ++vm_typedef_id;
@@ -6410,6 +6470,7 @@ static void typedef_declarators(struct parser *ps, struct type *tbase,
         te->is_const = tconst;
         te->next = ps->typedefs;
         ps->typedefs = te;
+        nameix_put(&ps->typedef_ix, tname, te);
         if (cur(ps)->kind == TOK_COMMA) {
             advance(ps);
             continue;

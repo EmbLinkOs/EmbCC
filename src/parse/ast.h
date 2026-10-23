@@ -657,6 +657,8 @@ struct tagdef {
      * functions may each define `union llreg_u`, as CMSIS's cmsis_gcc.h
      * does in every __SMLALD-style intrinsic. */
     int blk, dead;
+    /* the next older tag of the same name (the parser's name index) */
+    struct tagdef *same;
 };
 
 /* One step of a designator after its first: `.field` or `[index]`. */
