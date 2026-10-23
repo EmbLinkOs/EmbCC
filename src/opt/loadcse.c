@@ -75,6 +75,75 @@ static int lcse_kills_mem(enum ir_op op)
     }
 }
 
+/* The keys a named write can reach, without asking every key: listed by
+ * base value (kacc's bkind and bid) and by object (kind and id; every
+ * unknown one under one list). A store to a global or a slot can touch
+ * only keys from its own base -- same_base -- or on an object may_alias
+ * cannot tell from its own: that object, and an unknown one unless the
+ * slot's address was never taken. The rest acc_overlap would answer 0
+ * for, so they are not visited; the ones that are get the same question
+ * as before. 20,000 globals each read and written took 20 s, every store
+ * asking every key. */
+struct lcse_ix {
+    int cap, *tag, *id, *head;      /* (tag, id) -> first key; tag 0: free */
+    int *bnext, *onext;             /* per key: the next of its base, object */
+};
+enum { LX_BASE = 100, LX_OBJ = 200 };
+
+static unsigned lx_find(const struct lcse_ix *x, int tag, int id)
+{
+    unsigned h = ((unsigned)tag * 2654435761u) ^ ((unsigned)id * 40503u);
+    for (h &= (unsigned)(x->cap - 1); x->tag[h];
+         h = (h + 1) & (unsigned)(x->cap - 1))
+        if (x->tag[h] == tag && x->id[h] == id)
+            break;
+    return h;
+}
+
+/* The first key listed under (tag, id), or -1. */
+static int lx_first(const struct lcse_ix *x, int tag, int id)
+{
+    unsigned h = lx_find(x, tag, id);
+    return x->tag[h] ? x->head[h] : -1;
+}
+
+static void lx_push(struct lcse_ix *x, int tag, int id, int k, int *next)
+{
+    unsigned h = lx_find(x, tag, id);
+    if (!x->tag[h]) {
+        x->tag[h] = tag;
+        x->id[h] = id;
+        x->head[h] = -1;
+    }
+    next[k] = x->head[h];
+    x->head[h] = k;
+}
+
+static void lx_build(struct lcse_ix *x, int nk, const struct maccess *kacc)
+{
+    x->cap = 64;
+    while (x->cap < 4 * nk)
+        x->cap *= 2;
+    x->tag = xcalloc((size_t)x->cap, sizeof *x->tag);
+    x->id = xmalloc((size_t)x->cap * sizeof *x->id);
+    x->head = xmalloc((size_t)x->cap * sizeof *x->head);
+    x->bnext = xmalloc((size_t)nk * sizeof *x->bnext);
+    x->onext = xmalloc((size_t)nk * sizeof *x->onext);
+    for (int k = nk - 1; k >= 0; k--) {     /* lists in key order */
+        int kind = kacc[k].obj.kind;
+        x->bnext[k] = -1;
+        if (kacc[k].bkind != BASE_NONE)
+            lx_push(x, LX_BASE + kacc[k].bkind, kacc[k].bid, k, x->bnext);
+        lx_push(x, LX_OBJ + kind, kind == MEM_UNKNOWN ? -1 : kacc[k].obj.id,
+                k, x->onext);
+    }
+}
+
+static void lx_free(struct lcse_ix *x)
+{
+    free(x->tag); free(x->id); free(x->head); free(x->bnext); free(x->onext);
+}
+
 /* Drop the cached loads a write could reach. A plain store names its
  * bytes, so only the keys that may overlap them go (acc_overlap): a
  * store to q->wr keeps q->len. A volatile store, a memcpy and a memzero
@@ -82,7 +151,8 @@ static int lcse_kills_mem(enum ir_op op)
  * atomic, a fence or a vector store names nothing, so everything
  * reachable goes. */
 static void lcse_kill(int *s, int nk, const char *is_mem,
-                      const struct maccess *kacc, struct ir_ins *ins,
+                      const struct maccess *kacc, const struct lcse_ix *x,
+                      struct ir_ins *ins,
                       struct ir_func *fn, struct defs *d, const char *taken,
                       int nvars)
 {
@@ -98,6 +168,24 @@ static void lcse_kill(int *s, int nk, const char *is_mem,
     } else if (ins->op == IR_CALL && !ins->indirect && ins->callee &&
                ins->callee->inf_no_write) {
         return;         /* it writes nothing the caller can see */
+    }
+    if (named && (w.obj.kind == MEM_GLOBAL || w.obj.kind == MEM_SLOT)) {
+        if (w.bkind != BASE_NONE)
+            for (int k = lx_first(x, LX_BASE + w.bkind, w.bid); k >= 0;
+                 k = x->bnext[k])
+                if (is_mem[k] && acc_overlap(w, kacc[k], taken, nvars))
+                    s[k] = -1;
+        for (int k = lx_first(x, LX_OBJ + w.obj.kind, w.obj.id); k >= 0;
+             k = x->onext[k])
+            if (is_mem[k] && acc_overlap(w, kacc[k], taken, nvars))
+                s[k] = -1;
+        if (w.obj.kind == MEM_GLOBAL ||     /* may_alias's unknown rule */
+            !(w.obj.id >= 0 && w.obj.id < nvars && !taken[w.obj.id]))
+            for (int k = lx_first(x, LX_OBJ + MEM_UNKNOWN, -1); k >= 0;
+                 k = x->onext[k])
+                if (is_mem[k] && acc_overlap(w, kacc[k], taken, nvars))
+                    s[k] = -1;
+        return;
     }
     for (int k = 0; k < nk; k++) {
         if (!is_mem[k])
@@ -116,8 +204,9 @@ static void lcse_kill(int *s, int nk, const char *is_mem,
  * (A float stored and its bits loaded as an integer is the same value:
  * the forwarded copy ties the two to one register class, which is what
  * every backend's class analysis already does with a copy.) */
-static void lcse_store_gen(int *s, int nk, const struct lkey *keys,
-                           const struct ir_ins *ins,
+static void lcse_store_gen(int *s, const struct lkey *keys,
+                           const struct lcse_ix *x, const int *afirst,
+                           const int *anext, const struct ir_ins *ins,
                            struct ir_func *fn, struct defs *d)
 {
     int v = ins->b;
@@ -126,7 +215,17 @@ static void lcse_store_gen(int *s, int nk, const struct lkey *keys,
         (ins->size != 4 && ins->size != 8))
         return;
     struct maccess m = mem_access(fn, d, ins->a, ins->size);
-    for (int k = 0; k < nk; k++) {
+    /* the keys at that address: by its temp (BASE_NONE), else from its
+     * base -- a LOAD key's bkind and bid are its kacc's, one walk */
+    int k, bykey = m.bkind == BASE_NONE;
+    if (bykey) {
+        if (ins->a < 0 || ins->a >= fn->nvregs)
+            return;
+        k = afirst[ins->a];
+    } else {
+        k = lx_first(x, LX_BASE + m.bkind, m.bid);
+    }
+    for (; k >= 0; k = bykey ? anext[k] : x->bnext[k]) {
         if (keys[k].op != IR_LOAD || keys[k].size != ins->size ||
             keys[k].w != ins->size || keys[k].bkind != m.bkind)
             continue;
@@ -277,6 +376,8 @@ int pass_loadcse(struct ir_func *fn)
         else
             kacc[k] = mem_access(fn, &d, keys[k].rep, keys[k].size);
     }
+    struct lcse_ix lx;
+    lx_build(&lx, nk, kacc);
 
     /* Dataflow. avail[b][k]: -2 top (init), -1 not available, >=0 the temp. */
     int *aout = xmalloc((size_t)nbb * (size_t)nk * sizeof *aout);
@@ -310,9 +411,9 @@ int pass_loadcse(struct ir_func *fn)
                 if (ins->op == IR_STVAR) {
                     lcse_kill_var(s, nk, is_mem, vfirst, vnext, taken, ins->dst);
                 } else if (lcse_kills_mem(ins->op)) {
-                    lcse_kill(s, nk, is_mem, kacc, ins, fn, &d, taken, nvars);
+                    lcse_kill(s, nk, is_mem, kacc, &lx, ins, fn, &d, taken, nvars);
                     if (ins->op == IR_STORE)
-                        lcse_store_gen(s, nk, keys, ins, fn, &d);
+                        lcse_store_gen(s, keys, &lx, afirst, anext, ins, fn, &d);
                 }
                 if (mdef)
                     lcse_kill_defs(s, afirst, anext, nv, ins);
@@ -335,9 +436,9 @@ int pass_loadcse(struct ir_func *fn)
             if (ins->op == IR_STVAR) {
                 lcse_kill_var(s, nk, is_mem, vfirst, vnext, taken, ins->dst);
             } else if (lcse_kills_mem(ins->op)) {
-                lcse_kill(s, nk, is_mem, kacc, ins, fn, &d, taken, nvars);
+                lcse_kill(s, nk, is_mem, kacc, &lx, ins, fn, &d, taken, nvars);
                 if (ins->op == IR_STORE)
-                    lcse_store_gen(s, nk, keys, ins, fn, &d);
+                    lcse_store_gen(s, keys, &lx, afirst, anext, ins, fn, &d);
             }
             if (mdef)
                 lcse_kill_defs(s, afirst, anext, nv, ins);
@@ -354,6 +455,7 @@ int pass_loadcse(struct ir_func *fn)
     free(order); free(l2b); free(taken); free(keyidx); free(keys);
     free(is_mem); free(kacc); free(aout); free(ain); free(s);
     free(afirst); free(anext); free(vfirst); free(vnext);
+    lx_free(&lx);
     free_cfg(bb, nbb); free_defs(&d);
     return changed;
 }
