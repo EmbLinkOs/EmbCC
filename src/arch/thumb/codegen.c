@@ -3055,6 +3055,14 @@ static unsigned t_mov_imm_len(int rd, long v)
     return n;
 }
 
+struct t_lv { long long v; int n; };
+static int t_lv_cmp(const void *a, const void *b)
+{
+    const struct t_lv *x = a, *y = b;
+    if (x->v != y->v) return x->v < y->v ? -1 : 1;
+    return (x->n > y->n) - (x->n < y->n);
+}
+
 static void t_lit64_plan(struct t_fn *F)
 {
     const struct ir_func *fn = F->fn;
@@ -3076,23 +3084,29 @@ static void t_lit64_plan(struct t_fn *F)
                   t_mov_imm_len(hi, (long)((i->imm >> 32) & 0xffffffffL));
     }
     /* by value: the pool when its loads and its slot are shorter than
-     * building every one of them */
-    for (int n = 0; n < nins; n++) {
-        if (cand[n] != 1)
-            continue;
-        long long v = fn->ins[n].imm;
+     * building every one of them. The candidates of one value are a run
+     * of them sorted by value -- a scan of the rest of the function for
+     * each was quadratic in a function of 10,000 double constants. */
+    int nc = 0;
+    struct t_lv *by = xmalloc((size_t)nins * sizeof *by);
+    for (int n = 0; n < nins; n++)
+        if (cand[n] == 1) {
+            by[nc].v = fn->ins[n].imm;
+            by[nc++].n = n;
+        }
+    qsort(by, (size_t)nc, sizeof *by, t_lv_cmp);
+    for (int s = 0, e; s < nc; s = e) {
         unsigned built = 0, cnt = 0;
-        for (int m = n; m < nins; m++)
-            if (cand[m] == 1 && fn->ins[m].imm == v) {
-                built += cost[m];
-                cnt++;
-            }
+        for (e = s; e < nc && by[e].v == by[s].v; e++) {
+            built += cost[by[e].n];
+            cnt++;
+        }
         int pool = 4 * cnt + 8 < built;
-        for (int m = n; m < nins; m++)
-            if (cand[m] == 1 && fn->ins[m].imm == v)
-                cand[m] = pool ? 2 : 3;
+        for (int k = s; k < e; k++)
+            cand[by[k].n] = pool ? 2 : 3;
         any |= pool;
     }
+    free(by);
     if (any) {
         F->lp_use = xcalloc((size_t)nins, 1);
         for (int n = 0; n < nins; n++)
@@ -6594,17 +6608,21 @@ static int *t_pair_alloc(struct ir_func *fn, const char *wide,
             ra_each_use(&fn->ins[n], t_pw_cb, &c);
             t_pw_cb(ra_ins_def(&fn->ins[n]), &c);
         }
-        for (int k = 0;; k++) {
-            int best = -1;
-            for (int v = 0; v < nv; v++)
-                if (!x[v] && c.w[v] >= 0 && (best < 0 || c.w[v] > c.w[best]))
-                    best = v;
-            if (best < 0)
-                break;
-            if (k >= g_t_pair_cap)
-                x[best] = 1;            /* past the cap: no pair */
-            c.w[best] = -1;             /* ranked */
-        }
+        /* ranked by weight, the lower vreg first among equals: what a
+         * search for the heaviest left, repeated, ranked them in -- a
+         * search of every vreg per candidate, quadratic in the 64-bit
+         * values of a function */
+        int ncand = 0;
+        struct t_lv *rk = xmalloc((size_t)(nv ? nv : 1) * sizeof *rk);
+        for (int v = 0; v < nv; v++)
+            if (!x[v] && c.w[v] >= 0) {
+                rk[ncand].v = -(long long)c.w[v];
+                rk[ncand++].n = v;
+            }
+        qsort(rk, (size_t)ncand, sizeof *rk, t_lv_cmp);
+        for (int k = g_t_pair_cap; k < ncand; k++)
+            x[rk[k].n] = 1;             /* past the cap: no pair */
+        free(rk);
         free(c.w);
         free(dep);
     }
