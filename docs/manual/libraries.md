@@ -138,10 +138,10 @@ including the `include` directory beside the invoked executable, is in
 
 ### Scope
 
-`lib/libc` is a C11 library written for EmbCC: the portable part is the
-same source on every target, and each operating system is reached through
-one small backend file (see [Backends](#backends)). Its headers are the
-C11 hosted set:
+`lib/libc` is a C11 library written for EmbCC, with C23's additions:
+the portable part is the same source on every target, and each operating
+system is reached through one small backend file (see
+[Backends](#backends)). Its headers are the C11 hosted set:
 
 `<assert.h>` `<complex.h>` `<ctype.h>` `<errno.h>` `<fenv.h>`
 `<inttypes.h>` `<iso646.h>` `<limits.h>` `<locale.h>` `<math.h>`
@@ -150,7 +150,8 @@ C11 hosted set:
 `<time.h>` `<uchar.h>` `<wchar.h>` `<wctype.h>`
 
 `<stddef.h>`, `<stdarg.h>`, `<stdbool.h>`, `<stdint.h>` and `<float.h>`
-come from the freestanding directory. `<limits.h>` defines the library's
+come from the freestanding directory, and so do C23's `<stdbit.h>` and
+`<stdckdint.h>`, which a program with no C library has too. `<limits.h>` defines the library's
 own limits (`PATH_MAX` 4096, `NAME_MAX` 255, ...) and includes the
 freestanding `<limits.h>` for the type widths.
 
@@ -171,6 +172,9 @@ freestanding `<limits.h>` for the type widths.
 | `<threads.h>` | threads, mutexes, condition variables, `call_once` |
 | `<wchar.h>`, `<uchar.h>` | wide strings, `wcsto*`, restartable UTF-8 conversions (`mbrtowc`, `wcrtomb`, `mbsrtowcs`, `wcsrtombs`), `btowc`, `wctob`, wide streams (`fgetwc`, `fputwc`, `fgetws`, `fputws`, `ungetwc`, `fwide` and the rest), the wide `printf` and `scanf` families, `wcsftime`, `mbrtoc16`/`c16rtomb`/`mbrtoc32`/`c32rtomb` |
 | `<stdatomic.h>` | the C11 interface over the compiler's atomic builtins; no library code |
+| `<stdbit.h>` (C23) | all fourteen operations at the five unsigned types and type-generic; each named function is also a macro over the compiler's bit builtins, so a call is the instruction, and the functions themselves are in `lib/libc` for a pointer to one |
+| `<stdckdint.h>` (C23) | `ckd_add`, `ckd_sub`, `ckd_mul` over the compiler's overflow builtins; no library code |
+| C23 elsewhere | `memccpy`, `memset_explicit`; `free_sized`, `free_aligned_sized`, `memalignment`, `strfromd`/`strfromf`/`strfroml`, `call_once` in `<stdlib.h>`; `char8_t`, `mbrtoc8`, `c8rtomb`; `timespec_getres`; `roundeven`, `nextup`, `nextdown`, `fmaximum`, `fminimum` and their `_num`, `_mag` and `_mag_num` forms, `exp10`, at all three widths and in `<tgmath.h>`, and `iszero`, `issubnormal`; printf's `%B`, `#` on `%b`, and the `wN` and `wfN` length modifiers, scanf's `%b` and `wN`; the `0b` prefix in `strtol` and `%i`; the `_WIDTH` macros of `<stdint.h>`; a variadic `assert` |
 | `<assert.h>`, `<inttypes.h>`, `<errno.h>` | complete; each `PRI`/`SCN` macro has the length modifier of its type on the target (`PRId64` is `"lld"` where `int64_t` is `long long`); `errno` values are the traditional POSIX numbers |
 
 ### Behavior worth knowing
@@ -206,6 +210,12 @@ a wide character with no UTF-8, is an encoding error: `WEOF` or -1, `errno`
 precision and `%n` in wide characters; `swprintf` returns -1 when the
 result does not fit, where `snprintf` returns the length it would have
 had. A byte printf with no `%ls` or `%lc` links none of this.
+
+**C23's `0b`.** `strtol` and its family with base 0 or 2, and scanf's
+`%i` and `%b`, read a `0b` or `0B` prefix in every language mode, as C23
+does; a C17 program that parses `"0b1"` with base 0 gets 1, not 0. A
+prefix with no digit after it is not one: `strtol("0xz", &end, 16)` is 0
+and leaves `end` at the `x`.
 
 **`strtod`.** A decimal with at most 15 significant digits and a power
 of ten up to 10^22 is converted exactly. Other inputs may be one unit in

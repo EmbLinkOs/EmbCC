@@ -112,8 +112,9 @@ The GNU keywords (`asm`, `__typeof__`, `__attribute__`, ...) are in
 
 ### Testing for features in source code
 
-- `#if __STDC_VERSION__ >= 202311L` is false, although many C23 features
-  are available. Test for the feature, or for `__EMBCC__`.
+- `#if __STDC_VERSION__ >= 202311L` is false by default, although many
+  C23 features are available; it is true under `--std=c23`. Test for the
+  feature, or for `__EMBCC__`.
 - `__has_c_attribute(NAME)` is defined, but evaluates to 0 for every
   name, including the standard attributes EmbCC accepts.
 - `__has_include` works as specified.
@@ -262,7 +263,7 @@ C17's value, `201710L`.
 | Binary constants `0b1010` | Supported | Also in `#if`. |
 | Digit separators `1'000'000` | Supported | In integer and floating constants, and in `#if`. |
 | `u8` character constants `u8'a'` | Supported | Of type `unsigned char`. |
-| `char8_t`; `u8"..."` of type `unsigned char[]` | Not supported | `u8"..."` has C17's type, `char[]`. `<uchar.h>` does not declare `char8_t`. |
+| `char8_t`; `u8"..."` of type `unsigned char[]` | Partial | `<uchar.h>` declares `char8_t` under `-std=c23`, with `mbrtoc8` and `c8rtomb`. `u8"..."` has C17's type, `char[]`. |
 | `_BitInt(N)`, the `wb` and `uwb` suffixes | Partial | N up to 64, which is `BITINT_MAXWIDTH`; wider is refused: `_BitInt(65) is wider than BITINT_MAXWIDTH, which is 64 here`. Arithmetic in the type wraps at N bits, a `_BitInt` is not promoted to `int`, and conversions rank it by its width. Laid out and passed as the x86-64, AArch64 and RISC-V ABIs say, so calls between EmbCC and GCC agree. See [Integers](implementation-defined.md). |
 | Enumerations with a fixed underlying type, `enum E : unsigned char` | Partial | The enumeration and its constants have the underlying type, and `enum E : short;` declares it ahead of its definition. A value the underlying type cannot represent is not diagnosed. See [Enumeration constants](#enumeration-constants). A non-integer type: `an enum's underlying type must be an integer type`. |
 | Enumeration constants outside the range of `int` | Partial | The enumeration and its constants take a type that can represent every value. A value of 2^63 or more is read as negative. See [Enumeration constants](#enumeration-constants). |
@@ -278,9 +279,10 @@ C17's value, `201710L`.
 | `_Float128` | Partial | The same type as `long double` where that is IEEE binary128. See [Target-dependent features](#target-dependent-features). |
 | `_Float16` | Partial | An incomplete type: a declaration may name it (macOS's `<math.h>` declares `__fabsf16` and its kin), but there is no 16-bit floating-point value. An object, `sizeof`, a cast or a call is refused: `'h' has incomplete type _Float16`. Widening it to `float` would give 24 bits of mantissa where the program asked for 11. |
 | `_Float32x`, `_Float64x` | Not supported | `expected a type before '_Float32x'` |
-| `unreachable()` in `<stddef.h>` | Not supported | Not defined: `'unreachable' is not declared in 'f' — for a call, add a prototype or define it first [E0001]`. `__builtin_unreachable()` is available. |
-| Width macros `INT_WIDTH`, `INT8_WIDTH`, ... | Not supported | Not defined by `<limits.h>` or `<stdint.h>`. |
-| `__STDC_VERSION__` of `202311L` | Not supported | The value is `201710L`. |
+| `unreachable()` in `<stddef.h>` | Supported | Under `-std=c23`; it is `__builtin_unreachable()`. |
+| Width macros `INT_WIDTH`, `INT8_WIDTH`, ... | Supported | `<limits.h>` and `<stdint.h>`. |
+| `<stdbit.h>`, `<stdckdint.h>` | Supported | Freestanding headers; see [Libraries](libraries.md). |
+| `__STDC_VERSION__` of `202311L` | Supported | Under `--std=c23` or `gnu23`; the default, `gnu17`, is `201710L`. |
 | Identifiers per Unicode UAX #31 | Not supported | Identifiers use the C11 Annex D character ranges. |
 
 ### Later drafts
