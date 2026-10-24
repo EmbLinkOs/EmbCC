@@ -43,21 +43,33 @@
     long double: fn##l,                               \
     default: fn)(x)
 
-/* Two arguments, selected on the FIRST. C says the selection is made
- * from the types of all the arguments together -- if either is a long
- * double the long double function is used -- and doing it from the
- * first alone differs only when the two widths disagree, where the
- * usual arithmetic conversions have already widened the narrower one at
- * the call. */
-#define __tg2(fn, x, y) _Generic((x),                 \
-    float: fn##f,                                     \
-    long double: fn##l,                               \
-    default: fn)(x, y)
+/* Two and three arguments. C11 7.25p3 decides from all the generic
+ * arguments together: long double if any is one, else double if any is
+ * double or an integer, else float -- so pow(2.0f, 3.0L) is powl, and
+ * atan2(y, 1) on a float y is atan2, not atan2f. That is the usual
+ * arithmetic conversions over a stand-in for each argument -- a float, a
+ * long double, or for anything else a double -- which the outer
+ * _Generic then reads the type of. No stand-in is evaluated: a
+ * _Generic's controlling expression never is. */
+#define __tg_rep(x) _Generic((x),                     \
+    float: 0.0f,                                      \
+    long double: 0.0L,                                \
+    default: 0.0)
 
-#define __tg3(fn, x, y, z) _Generic((x),              \
+#define __tg_pick(fn, t) _Generic((t),                \
     float: fn##f,                                     \
     long double: fn##l,                               \
-    default: fn)(x, y, z)
+    default: fn)
+
+#define __tg2(fn, x, y) __tg_pick(fn, __tg_rep(x) + __tg_rep(y))(x, y)
+
+#define __tg3(fn, x, y, z)                                              \
+    __tg_pick(fn, __tg_rep(x) + __tg_rep(y) + __tg_rep(z))(x, y, z)
+
+/* The ones with one generic argument and another that is not: the
+ * exponent of scalbn and ldexp, the pointer of frexp and modf, the long
+ * double direction of nexttoward. The first decides alone. */
+#define __tgx(fn, x, y) __tg_pick(fn, __tg_rep(x))(x, y)
 
 #define acos(x)        __tg1(acos, x)
 #define asin(x)        __tg1(asin, x)
@@ -108,17 +120,18 @@
 #define nextafter(x, y) __tg2(nextafter, x, y)
 #define pow(x, y)      __tg2(pow, x, y)
 #define remainder(x, y) __tg2(remainder, x, y)
-#define scalbn(x, n)   __tg2(scalbn, x, n)
-#define scalbln(x, n)  __tg2(scalbln, x, n)
-#define ldexp(x, n)    __tg2(ldexp, x, n)
-#define frexp(x, p)    __tg2(frexp, x, p)
-#define modf(x, p)     __tg2(modf, x, p)
+#define scalbn(x, n)   __tgx(scalbn, x, n)
+#define scalbln(x, n)  __tgx(scalbln, x, n)
+#define ldexp(x, n)    __tgx(ldexp, x, n)
+#define frexp(x, p)    __tgx(frexp, x, p)
+#define modf(x, p)     __tgx(modf, x, p)
+#define nexttoward(x, y) __tgx(nexttoward, x, y)
 
 /* fma is the one that genuinely needs the right width: its whole
  * purpose is a single rounding, and computing it at a wider type and
  * narrowing would round twice. */
 #define fma(x, y, z)   __tg3(fma, x, y, z)
-#define remquo(x, y, q) __tg3(remquo, x, y, q)
+#define remquo(x, y, q) __tg_pick(remquo, __tg_rep(x) + __tg_rep(y))(x, y, q)
 
 #endif /* __cplusplus */
 
