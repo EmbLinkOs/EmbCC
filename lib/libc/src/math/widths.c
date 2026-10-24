@@ -76,7 +76,7 @@ double remquo(double x, double y, int *quo)
 F1(asinh) F1(acosh) F1(atanh)
 F1(log1p)
 F1(nearbyint) F1(rint)
-F1(erf) F1(erfc) F1(tgamma) F1(lgamma)
+/* erff, erfcf, lgammaf and tgammaf are FreeBSD's (msun/) */
 F2(remainder)
 
 /* (expm1f, scalbnf and nextafterf are float throughout: fdlibm/sf_expm1.c,

@@ -13,7 +13,9 @@ files, each of which permits use, modification and distribution:
       Permission to use, copy, modify, and distribute this software is
       freely granted, provided that this notice is preserved.
 
-  lib/libc/src/math/msun/ (but math_private.h, which is EmbCC's)
+  lib/libc/src/math/msun/ (but math_private.h, bsdsrc/math_private.h and
+  tgamma.c, which are EmbCC's; math_private.h carries a few macros from
+  FreeBSD's, under the SunPro notice)
       The complex functions of FreeBSD's libm, msun, each file under its
       own notice: the BSD 2-clause licence, by
       Copyright (c) 2012 Stephen Montgomery-Smith (catrig.c, catrigf.c),
@@ -25,6 +27,16 @@ files, each of which permits use, modification and distribution:
       with permission to use, copy, modify and distribute for any
       purpose provided the copyright notice and permission notice
       appear in all copies.
+      And from the same libm: erf, erfc and lgamma in double and float
+      (s_erf*.c, e_lgamma*.c) and the float kernels (k_sinf.c, k_cosf.c,
+      k_tanf.c), Copyright (C) 1993, 2004 Sun Microsystems, Inc., under
+      the SunPro notice; the half-cycle trigonometric functions
+      (s_sinpi*.c, s_cospi*.c, s_tanpi*.c, s_asinpi*.c, s_atanpi*.c,
+      k_sinpi.h, k_cospi.h), Copyright (c) 2017, 2023, 2026 Steven G.
+      Kargl, BSD 2-clause; s_tgammaf.c, Copyright (c) 2008 David
+      Schultz, BSD 2-clause; and bsdsrc/ (b_tgamma.c, b_exp.c, b_log.c,
+      tgamma), Copyright (c) 1985, 1992, 1993 The Regents of the
+      University of California, BSD 3-clause.
 
   tools/embsim/avr.c, tools/embsim/riscv.c (the GDB target descriptions)
       Copyright (C) 2018-2019 Free Software Foundation, Inc.

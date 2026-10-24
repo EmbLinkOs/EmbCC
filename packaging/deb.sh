@@ -91,6 +91,26 @@ License: ISC-like
  purpose with or without fee is hereby granted, provided that the above
  copyright notice and this permission notice appear in all copies.
 
+Files: lib/libc/src/math/msun/s_erf*.c lib/libc/src/math/msun/e_lgamma*.c
+ lib/libc/src/math/msun/k_sinf.c lib/libc/src/math/msun/k_cosf.c
+ lib/libc/src/math/msun/k_tanf.c
+Copyright: 1993, 2004 Sun Microsystems, Inc.
+License: fdlibm
+ Permission to use, copy, modify, and distribute this software is freely
+ granted, provided that this notice is preserved.
+
+Files: lib/libc/src/math/msun/s_*pi*.c lib/libc/src/math/msun/k_*pi.h
+ lib/libc/src/math/msun/s_tgammaf.c
+Copyright: 2017-2026 Steven G. Kargl
+ 2008 David Schultz
+License: BSD-2-Clause
+ Each file carries the licence text in full.
+
+Files: lib/libc/src/math/msun/bsdsrc/b_*.c
+Copyright: 1985-1993 The Regents of the University of California
+License: BSD-3-Clause
+ Each file carries the licence text in full.
+
 Files: tools/embsim/avr.c tools/embsim/riscv.c
 Copyright: 2018-2019 Free Software Foundation, Inc.
 License: FSFAP

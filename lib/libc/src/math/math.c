@@ -12,6 +12,7 @@
 #include <math.h>
 #include <fenv.h>
 #include <errno.h>
+#include <limits.h>
 #include <stdint.h>
 
 #include "fdlibm/fdlibm.h"
@@ -246,44 +247,26 @@ double nextafter(double x, double y)
 }
 #endif
 
-/* erf/tgamma/lgamma: declared so a program linking against them resolves,
- * and computed by series rather than by fdlibm's tables, which this tree
- * does not carry. Accurate to a few ulp over the usual range, which is
- * what a C library owes and more than a program that needs better should
- * rely on. */
-double erf(double x)
-{
-    double t = 1.0 / (1.0 + 0.3275911 * fabs(x));
-    double y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741)
-                       * t - 0.284496736) * t + 0.254829592) * t * exp(-x * x);
-    return x >= 0 ? y : -y;
-}
-double erfc(double x) { return 1.0 - erf(x); }
-
-double lgamma(double x)
-{
-    /* Lanczos, g=7, n=9 — the standard coefficients. */
-    static const double c[9] = {
-        0.99999999999980993, 676.5203681218851, -1259.1392167224028,
-        771.32342877765313, -176.61502916214059, 12.507343278686905,
-        -0.13857109526572012, 9.9843695780195716e-6, 1.5056327351493116e-7 };
-    if (x < 0.5)
-        return __ieee754_log(3.14159265358979323846 /
-                             fabs(sin(3.14159265358979323846 * x))) -
-               lgamma(1.0 - x);
-    x -= 1.0;
-    double a = c[0], t = x + 7.5;
-    for (int i = 1; i < 9; i++) a += c[i] / (x + i);
-    return 0.5 * __ieee754_log(2 * 3.14159265358979323846) +
-           (x + 0.5) * __ieee754_log(t) - t + __ieee754_log(a);
-}
+/* erf, erfc, lgamma and tgamma, and their float forms, are FreeBSD's
+ * (msun/s_erf.c, e_lgamma_r.c, bsdsrc/b_tgamma.c and the f files). Where
+ * double is binary32 (RX) those double files read a double as two words,
+ * which it is not; they are compiled under other names (msun/
+ * math_private.h) and the double functions are the float ones -- tgamma
+ * from lgamma there, as s_tgammaf.c's tgammaf calls tgamma. */
+#ifdef _DOUBLE_IS_32BITS
+double erf(double x) { return erff(x); }
+double erfc(double x) { return erfcf(x); }
+double lgamma_r(double x, int *sign) { return lgammaf_r(x, sign); }
+double lgamma(double x) { return lgammaf_r(x, &signgam); }
 double tgamma(double x)
 {
-    if (x < 0.5)
-        return 3.14159265358979323846 /
-               (sin(3.14159265358979323846 * x) * tgamma(1.0 - x));
-    return exp(lgamma(x)) * (x < 0 ? -1.0 : 1.0);
+    int sign;
+    if (x == 0 || (x < 0 && x == floor(x)) || x != x)
+        return x == 0 ? 1 / x : (x - x) / (x - x);
+    double l = lgammaf_r(x, &sign);
+    return sign * exp(l);
 }
+#endif
 
 /* ---- classification ---- */
 
@@ -429,18 +412,31 @@ LD2(pow)
 int ilogb(double x)
 {
     if (x == 0.0)
-        return -2147483647 - 1;      /* FP_ILOGB0 */
+        return FP_ILOGB0;
     if (isnan(x))
-        return -2147483647 - 1;      /* FP_ILOGBNAN */
+        return FP_ILOGBNAN;
     if (isinf(x))
-        return 2147483647;
+        return INT_MAX;
     int e;
     frexp(x, &e);
     return e - 1;
 }
 
 int ilogbf(float x) { return ilogb((double)x); }
-int ilogbl(long double x) { return ilogb((double)x); }
+/* at long double's own range: through double, 1e4000L was INT_MAX and a
+ * value below double's least was FP_ILOGB0 */
+int ilogbl(long double x)
+{
+    if (x == 0)
+        return FP_ILOGB0;
+    if (x != x)
+        return FP_ILOGBNAN;
+    if (x - x != 0)
+        return INT_MAX;
+    int e;
+    frexpl(x, &e);
+    return e - 1;
+}
 
 double logb(double x)
 {
@@ -454,4 +450,11 @@ double logb(double x)
 }
 
 float logbf(float x) { return (float)logb((double)x); }
-long double logbl(long double x) { return (long double)logb((double)x); }
+long double logbl(long double x)
+{
+    if (x == 0)
+        return -HUGE_VALL;
+    if (x != x || x - x != 0)
+        return fabsl(x);
+    return ilogbl(x);
+}

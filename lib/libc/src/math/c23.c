@@ -17,6 +17,8 @@
  */
 #include <math.h>
 
+#include "fdlibm/fdlibm.h"
+
 #define C23_MATH(T, S)                                                      \
 static int neg##S(T x) { return copysign##S((T)1, x) < 0; }                 \
                                                                             \
@@ -84,3 +86,31 @@ T exp10##S(T x) { return pow##S((T)10, x); }
 C23_MATH(double, )
 C23_MATH(float, f)
 C23_MATH(long double, l)
+
+/* atan2pi, which FreeBSD has not got: atan2 over pi, an ulp or two from
+ * the answer where the others (msun/) are within one. */
+double atan2pi(double y, double x) { return atan2(y, x) / M_PI; }
+float atan2pif(float y, float x) { return (float)(atan2(y, x) / M_PI); }
+
+/* the long double forms in double, as this library's long double
+ * transcendentals are (docs/manual/libraries.md) */
+long double sinpil(long double x)  { return sinpi((double)x); }
+long double cospil(long double x)  { return cospi((double)x); }
+long double tanpil(long double x)  { return tanpi((double)x); }
+long double asinpil(long double x) { return asinpi((double)x); }
+long double acospil(long double x) { return acospi((double)x); }
+long double atanpil(long double x) { return atanpi((double)x); }
+long double atan2pil(long double y, long double x)
+{
+    return atan2pi((double)y, (double)x);
+}
+
+/* where double is binary32 (RX) the double ones are the float ones */
+#ifdef _DOUBLE_IS_32BITS
+double sinpi(double x)  { return sinpif(x); }
+double cospi(double x)  { return cospif(x); }
+double tanpi(double x)  { return tanpif(x); }
+double asinpi(double x) { return asinpif(x); }
+double atanpi(double x) { return atanpif(x); }
+double acospi(double x) { return acospif(x); }
+#endif

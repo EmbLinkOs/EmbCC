@@ -75,9 +75,38 @@ double exp(double), exp2(double), expm1(double);
 double log(double), log2(double), log10(double), log1p(double);
 double pow(double, double), sqrt(double), cbrt(double), hypot(double, double);
 double frexp(double, int *), ldexp(double, int), scalbn(double, int);
+/* The types the evaluation happens in (7.12p2): FLT_EVAL_METHOD is 0
+ * everywhere, so each is its own type. */
+typedef float float_t;
+typedef double double_t;
+
+/* POSIX's constants, outside strict ISO C (--std=c11 and the rest, which
+ * define __STRICT_ANSI__) as glibc and newlib have them: M_PI is in more
+ * programs than not, and was missing. */
+#if !defined(__STRICT_ANSI__) || defined(_XOPEN_SOURCE) || \
+    defined(_POSIX_C_SOURCE) || defined(_GNU_SOURCE) || defined(_DEFAULT_SOURCE)
+#define M_E        2.7182818284590452354
+#define M_LOG2E    1.4426950408889634074
+#define M_LOG10E   0.43429448190325182765
+#define M_LN2      0.69314718055994530942
+#define M_LN10     2.30258509299404568402
+#define M_PI       3.14159265358979323846
+#define M_PI_2     1.57079632679489661923
+#define M_PI_4     0.78539816339744830962
+#define M_1_PI     0.31830988618379067154
+#define M_2_PI     0.63661977236758134308
+#define M_2_SQRTPI 1.12837916709551257390
+#define M_SQRT2    1.41421356237309504880
+#define M_SQRT1_2  0.70710678118654752440
+#endif
+
 /* ilogb/logb: the exponent as an int and as a value of the same type.
  * Neither is in fdlibm's 1993 set; C99 §7.12.6.5/.11 requires both. */
 int    ilogb(double), ilogbf(float), ilogbl(long double);
+/* what ilogb answers for a zero and a NaN (7.12p8): the int's least, as
+ * glibc's are -- an int being 16 bits on AVR */
+#define FP_ILOGB0   (-__INT_MAX__ - 1)
+#define FP_ILOGBNAN (-__INT_MAX__ - 1)
 double logb(double);
 float  logbf(float);
 long double logbl(long double);
@@ -103,6 +132,11 @@ double fdim(double, double), fmax(double, double), fmin(double, double);
 double fma(double, double, double);
 double nextafter(double, double), nexttoward(double, long double);
 double erf(double), erfc(double), tgamma(double), lgamma(double);
+/* lgamma's sign, which lgamma leaves in signgam (POSIX), and the forms
+ * that return it through a pointer instead -- for a program with threads */
+extern int signgam;
+double lgamma_r(double, int *);
+float lgammaf_r(float, int *);
 
 /* The float forms. C11 requires all three widths for every function
  * here, and <tgmath.h> makes the requirement visible: a type-generic
@@ -171,13 +205,23 @@ long long llrintl(long double), llroundl(long double);
  * nextdown, one step toward an infinity; fmaximum and fminimum, which say
  * what fmax and fmin do not -- a NaN either side is a NaN, +0 is above
  * -0 -- with their _num (a number over a NaN), _mag (by magnitude) and
- * _mag_num forms; and exp10. lib/libc/src/math/c23.c. */
+ * _mag_num forms; and exp10. lib/libc/src/math/c23.c. And sinpi, cospi,
+ * tanpi, asinpi, acospi, atanpi, atan2pi: the trigonometry of pi x, exact
+ * where the argument is (sinpi(1) is 0, where sin(M_PI) is not), FreeBSD's
+ * in msun/ where it has them. */
 #define __C23_MATH_DECL(T, S)                                               \
     T roundeven##S(T), nextup##S(T), nextdown##S(T), exp10##S(T);           \
     T fmaximum##S(T, T), fminimum##S(T, T);                                 \
     T fmaximum_num##S(T, T), fminimum_num##S(T, T);                         \
     T fmaximum_mag##S(T, T), fminimum_mag##S(T, T);                         \
     T fmaximum_mag_num##S(T, T), fminimum_mag_num##S(T, T);
+#define __C23_MATH_PI(T, S)                                                 \
+    T sinpi##S(T), cospi##S(T), tanpi##S(T);                                \
+    T asinpi##S(T), acospi##S(T), atanpi##S(T), atan2pi##S(T, T);
+__C23_MATH_PI(double, )
+__C23_MATH_PI(float, f)
+__C23_MATH_PI(long double, l)
+#undef __C23_MATH_PI
 __C23_MATH_DECL(double, )
 __C23_MATH_DECL(float, f)
 __C23_MATH_DECL(long double, l)

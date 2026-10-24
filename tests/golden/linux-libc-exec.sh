@@ -13,6 +13,7 @@
 #   quick-exit.c, multibyte-stdlib.c, inttypes-formats.c,
 #   tgmath-selection.c, wide-printf.c, wide-scanf.c, c23-library.c
 #   strtod-rounding.c  strtold at the x87's 64 bits and binary128's 113
+#   math-special.c   ilogbl and logbl at long double's range
 #
 # At -O0 and -O2, each exiting 42. Skipped without a kernel for
 # tests/harness/linux (EMBCC_LINUX_KERNEL_X86_64 / _AARCH64).
@@ -24,7 +25,7 @@ out=$EMBCC_ROOT/tests/golden/out/linux-libc-exec
 rm -rf "${out:?}"; mkdir -p "$out/root/tmp"
 progs="tmpfile next-toward quick-exit multibyte-stdlib inttypes-formats
        tgmath-selection wide-streams wide-printf wide-scanf c23-library
-       strtod-rounding"
+       strtod-rounding math-special"
 
 A64LD=${EMBCC_AARCH64_LD:-aarch64-elf-ld}
 A64GCC=$(dirname "$(aarch64-elf-gcc -print-libgcc-file-name 2>/dev/null)")

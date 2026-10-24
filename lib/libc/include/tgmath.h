@@ -139,6 +139,13 @@
 #define fminimum_mag(x, y) __tg2(fminimum_mag, x, y)
 #define fmaximum_mag_num(x, y) __tg2(fmaximum_mag_num, x, y)
 #define fminimum_mag_num(x, y) __tg2(fminimum_mag_num, x, y)
+#define sinpi(x)       __tg1(sinpi, x)
+#define cospi(x)       __tg1(cospi, x)
+#define tanpi(x)       __tg1(tanpi, x)
+#define asinpi(x)      __tg1(asinpi, x)
+#define acospi(x)      __tg1(acospi, x)
+#define atanpi(x)      __tg1(atanpi, x)
+#define atan2pi(y, x)  __tg2(atan2pi, y, x)
 
 /* fma is the one that genuinely needs the right width: its whole
  * purpose is a single rounding, and computing it at a wider type and
