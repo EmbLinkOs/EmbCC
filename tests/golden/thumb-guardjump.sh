@@ -232,9 +232,11 @@ done
 echo "IR: the guard dropped where it is the test, kept in $n shapes where it is not"
 
 command -v "$OBJDUMP" >/dev/null 2>&1 || { echo "SKIP the C half: no $OBJDUMP"; exit 0; }
-for cfg in "thumbv7em-none-eabi -Os 1" "thumbv6m-none-eabi -Os 1" "thumbv7em-none-eabi -O2 2"; do
+# (-O2 without unrolling, which copies slen's loop four times: a load each)
+for cfg in "thumbv7em-none-eabi -Os 1" "thumbv6m-none-eabi -Os 1" \
+           "thumbv7em-none-eabi -O2 2 --no-pass=unroll"; do
     set -- $cfg
-    "$EMBCC" --target=$1 $2 -c tests/exec/size-shapes.c -o "$out/s.o" || fail "$1 $2: compile"
+    "$EMBCC" --target=$1 $2 ${4:-} -c tests/exec/size-shapes.c -o "$out/s.o" || fail "$1 $2: compile"
     k=$("$OBJDUMP" -d --triple=${1%%-*} "$out/s.o" | sed -n '/<slen>:/,/^$/p' | grep -c 'ldrb')
     [ "$k" = "$3" ] || { "$OBJDUMP" -d --triple=${1%%-*} "$out/s.o" | sed -n '/<slen>:/,/^$/p'
                          fail "$1 $2: slen loads its byte $k times, want $3"; }

@@ -683,14 +683,19 @@ static int unroll_one(struct ir_func *fn, char *seen, int nseen)
  * goes through a stub that moves them back and jumps where the exit
  * went; the stubs follow the loop, which falls out over them.
  *
- * What it saves per iteration is the taken branch back, U-1 times in U,
- * and the copy of each carried value. Not a loop that calls (see
+ * What it saves per iteration is the taken branch back, three times in
+ * four, and the copy of each carried value. Not a loop that calls (see
  * unr_find), nor a long one: the branches a copy keeps are most of a
  * short body's cost, and none of a long one's.
  */
 
-#define UNRX_MAX_BODY 12  /* instructions in the body, its branches counted */
-#define UNRX_BUDGET   28  /* four copies within this, else two */
+/* Four copies of a body of at most six instructions, its branches
+ * counted. The list walk is six, and four copies of it are what clang
+ * makes: two left the Cortex-M4 at 1.21 of clang's cycles where four
+ * reach 1.06. Longer bodies, copied twice, bought the workload nothing
+ * and lib/libc's -O2 code 3% more (6.6% in all, 3.3% now). */
+#define UNRX_MAX_BODY 6
+#define UNRX_COPIES   4
 
 struct unrxloop {
     int lo, hi;        /* [lo, hi): the header's label .. the back edge */
@@ -989,7 +994,7 @@ static int unrx_one(struct ir_func *fn, char *seen, int nseen)
         unrx_sink(fn, &R);
         return 1;
     }
-    int U = nbody * 4 <= UNRX_BUDGET ? 4 : 2;
+    int U = UNRX_COPIES;
     /* a label for each stub there can be, and the exit's, still inside
      * `seen` -- or the loop is left alone */
     if (!nbody || fn->nlabels + U * (L.nexit + 1) + 1 > nseen) {

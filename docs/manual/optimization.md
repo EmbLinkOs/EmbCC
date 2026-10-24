@@ -573,6 +573,17 @@ from one constant offset of a base to another. A body that calls a
 runtime helper (soft-float arithmetic, for example) is not copied
 whole.
 
+A loop whose trip count cannot be known -- a list walk, a search, a scan
+for a terminator, `while (*pp && (*pp)->key < key) pp = &(*pp)->next;`
+-- is copied four times when its body is at most six IR instructions,
+each copy keeping its own exits and only the last branching back. The
+values the loop carries are renamed from copy to copy, so a pointer
+chase needs no register copy per element, and an exit from an earlier
+copy goes through a few moves after the loop that put them back. Code
+that leaves the loop from its middle (`if (*p == c) return p;`) is
+first moved out of the loop's way. `--remarks` names each such loop
+`unroll/exits-kept`; `EMBCC_NO_UNROLL_EXITS=1` turns this off alone.
+
 ### `--pass=pre`, `--no-pass=pre`
 
 GCC: `-fpre`, `-fno-pre`.
