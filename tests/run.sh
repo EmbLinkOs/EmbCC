@@ -222,6 +222,15 @@ for c in tests/exec/*.c tests/exec/${TARGET%-elf}/*.c; do
         skip=$((skip + 1))
         continue
     fi
+    # `// needs-libc: why` -- the program calls what only EmbCC's C library
+    # has, and this corpus links another: the harness's newlib, or the
+    # host's libc. tests/golden/libc.sh and the boards' goldens run it.
+    needs=$(sed -n 's|.*// needs-libc: *\(.*\)|\1|p' "$c" | head -1)
+    if [ -n "$needs" ]; then
+        echo "SKIP $c (needs EmbCC's libc: $needs)"
+        skip=$((skip + 1))
+        continue
+    fi
     expect=$(sed -n 's|.*// expect-exit: *\([0-9][0-9]*\).*|\1|p' "$c" | head -1)
     if [ -z "$expect" ]; then
         bad "$c" "no '// expect-exit: N' line — cannot assert anything" ""
