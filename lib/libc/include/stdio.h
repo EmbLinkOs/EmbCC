@@ -40,7 +40,11 @@ extern "C" {
 #define _IOLBF 1
 #define _IONBF 2
 
+/* <wchar.h> declares FILE too, for the wide stream functions. */
+#ifndef __EMBLIBC_FILE
+#define __EMBLIBC_FILE
 typedef struct _FILE FILE;
+#endif
 typedef long fpos_t;
 
 #if defined(__APPLE__)

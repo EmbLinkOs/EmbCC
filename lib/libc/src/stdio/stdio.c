@@ -91,6 +91,7 @@ int fflush(FILE *f)
 int __putc_unlocked(int c, FILE *f)
 {
     if (!f || !(f->flags & F_WRITE)) { if (f) f->flags |= F_ERR; return EOF; }
+    __byte_orient(f);
     settle_mode(f);
     unsigned char ch = (unsigned char)c;
     if (f->mode == _IONBF || !f->buf) {
@@ -143,6 +144,7 @@ size_t __fwrite_unlocked(const void *p, size_t size, size_t n, FILE *f)
 {
     if (!f || !(f->flags & F_WRITE) || size == 0 || n == 0)
         return 0;
+    __byte_orient(f);
     const unsigned char *q = p;
     size_t total = size * n;
     /* A large write goes straight out rather than through the buffer: the
@@ -187,6 +189,7 @@ static int refill(FILE *f)
 int __getc_unlocked(FILE *f)
 {
     if (!f || !(f->flags & F_READ)) return EOF;
+    __byte_orient(f);
     if (f->ungot >= 0) { int c = f->ungot; f->ungot = -1; return c; }
     if (f->pos >= f->len && refill(f) == EOF) return EOF;
     return f->buf[f->pos++];
@@ -207,6 +210,7 @@ int getchar(void)  { return fgetc(stdin); }
 int __ungetc_unlocked(int c, FILE *f)
 {
     if (!f || c == EOF || f->ungot >= 0) return EOF;
+    __byte_orient(f);
     f->ungot = (unsigned char)c;
     f->flags &= ~F_EOF;
     return c;

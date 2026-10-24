@@ -169,7 +169,7 @@ freestanding `<limits.h>` for the type widths.
 | `<signal.h>` | `signal` and `raise` |
 | `<locale.h>` | `setlocale` and `localeconv`, one locale |
 | `<threads.h>` | threads, mutexes, condition variables, `call_once` |
-| `<wchar.h>`, `<uchar.h>` | wide strings, `wcsto*`, restartable UTF-8 conversions (`mbrtowc`, `wcrtomb`, `mbsrtowcs`, `wcsrtombs`), `btowc`, `wctob`, `mbrtoc16`/`c16rtomb`/`mbrtoc32`/`c32rtomb` |
+| `<wchar.h>`, `<uchar.h>` | wide strings, `wcsto*`, restartable UTF-8 conversions (`mbrtowc`, `wcrtomb`, `mbsrtowcs`, `wcsrtombs`), `btowc`, `wctob`, wide streams (`fgetwc`, `fputwc`, `fgetws`, `fputws`, `ungetwc`, `fwide` and the rest), the wide `printf` and `scanf` families, `wcsftime`, `mbrtoc16`/`c16rtomb`/`mbrtoc32`/`c32rtomb` |
 | `<stdatomic.h>` | the C11 interface over the compiler's atomic builtins; no library code |
 | `<assert.h>`, `<inttypes.h>`, `<errno.h>` | complete; each `PRI`/`SCN` macro has the length modifier of its type on the target (`PRId64` is `"lld"` where `int64_t` is `long long`); `errno` values are the traditional POSIX numbers |
 
@@ -181,15 +181,31 @@ correctly rounded with ties to even (`%.0f` of 2.5 is `2`). `long double`
 is converted at its own width. `%a` is exact and rounds a precision to
 nearest, ties to even; a subnormal is printed normalized with a leading
 `1`. `%b` prints binary. A null `%s` prints `(null)` and a null `%p`
-prints `(nil)`. `%n` always stores an `int`, whatever its length
-modifier. An unknown conversion prints itself. `%lc` and `%ls` are not
-wide: the `l` is ignored, and the argument is read as an `int` or a
-`char *`.
+prints `(nil)`. `%n` stores into the type its length modifier names
+(`%hhn` a `signed char`, `%jn` an `intmax_t`). An unknown conversion
+prints itself. `%lc` and `%ls` take wide characters and write their
+UTF-8, a precision on `%ls` counting bytes and never cutting a character;
+one with no UTF-8, a lone surrogate, makes the call return -1 with
+`errno` `EILSEQ`.
 
 **Formatted input.** `scanf` supports `%[`, `%n`, `%a` and hexadecimal
 floating-point input. It distinguishes an input failure (returns `EOF`)
 from a matching failure (returns the number of items assigned, possibly
-0): `sscanf("x", "%d", &n)` returns 0.
+0): `sscanf("x", "%d", &n)` returns 0. The character it reads ahead and
+does not use goes back to the stream: `fscanf(f, "%d", &n)` on `12x`
+leaves the `x` for the next read. `%lc`, `%ls` and `%l[` store the wide
+characters the input's UTF-8 decodes to.
+
+**Wide streams.** `fwprintf`, `fgetwc` and the rest read and write a
+stream's bytes as UTF-8, a character at a time, so a `FILE` costs nothing
+more for being able to be wide. The first byte or wide operation on a
+stream fixes its orientation, as C11 7.21.2 says, and `fwide` reports it.
+`ungetwc` holds one wide character. A byte sequence that is not UTF-8, or
+a wide character with no UTF-8, is an encoding error: `WEOF` or -1, `errno`
+`EILSEQ`, and the stream's error indicator. The wide printfs count width,
+precision and `%n` in wide characters; `swprintf` returns -1 when the
+result does not fit, where `snprintf` returns the length it would have
+had. A byte printf with no `%ls` or `%lc` links none of this.
 
 **`strtod`.** A decimal with at most 15 significant digits and a power
 of ten up to 10^22 is converted exactly. Other inputs may be one unit in
@@ -297,7 +313,6 @@ forms of the time functions.
 
 | Missing | Notes |
 |---|---|
-| wide-character I/O: `fwide`, `fwprintf`, `wprintf`, `swprintf`, `fgetws`, ... | |
 | `setenv`, `unsetenv` | declared, not defined |
 | C11 Annex K (`*_s` functions) | |
 | POSIX extensions such as `fdopen`, `fileno`, `popen`, `strtok_r`, `strerror_r`, `fseeko`, `fmemopen` | |
