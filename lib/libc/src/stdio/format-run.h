@@ -62,6 +62,23 @@ static int FMT_RUN(struct out *o, const FMT_CH *fmt, va_list *ap)
             else if (*p == 't') { len = L_PTRDIFF; p++; }
             else if (*p == 'j') { len = L_MAX; p++; }
             else if (*p == 'L') { len = L_LDOUBLE; p++; }
+            else if (*p == 'w') {
+                /* C23's wN and wfN: the int of N bits, or the fast one --
+                 * read as whichever standard type has that size */
+                int fast = 0, bits = 0, size;
+                p++;
+                if (*p == 'f') { fast = 1; p++; }
+                while (*p >= '0' && *p <= '9') bits = bits * 10 + (int)(*p++ - '0');
+                size = !fast ? bits / 8
+                     : bits == 8 ? (int)sizeof(int_fast8_t)
+                     : bits == 16 ? (int)sizeof(int_fast16_t)
+                     : bits == 32 ? (int)sizeof(int_fast32_t)
+                     : (int)sizeof(int_fast64_t);
+                len = size == 1 ? L_CHAR : size == (int)sizeof(short) ? L_SHORT
+                    : size == (int)sizeof(int) ? L_INT
+                    : size == (int)sizeof(long) ? L_LONG : L_LLONG;
+                break;
+            }
             else break;
         }
 
@@ -87,7 +104,7 @@ static int FMT_RUN(struct out *o, const FMT_CH *fmt, va_list *ap)
             __fmt_int(o, u, 10, 0, flags, width, prec, sign, "");
             break;
         }
-        case 'u': case 'o': case 'x': case 'X': case 'b': {
+        case 'u': case 'o': case 'x': case 'X': case 'b': case 'B': {
             unsigned long long v;
             switch (len) {
             case L_CHAR:    v = (unsigned char)va_arg(*ap, unsigned); break;
@@ -100,11 +117,13 @@ static int FMT_RUN(struct out *o, const FMT_CH *fmt, va_list *ap)
             default:        v = va_arg(*ap, unsigned); break;
             }
             int base = conv == 'o' ? 8 : conv == 'u' ? 10
-                     : conv == 'b' ? 2 : 16;
+                     : conv == 'b' || conv == 'B' ? 2 : 16;
             const char *pfx = "";
             if ((flags & F_HASH) && v) {
                 if (conv == 'x') pfx = "0x";
                 else if (conv == 'X') pfx = "0X";
+                else if (conv == 'b') pfx = "0b";       /* C23 */
+                else if (conv == 'B') pfx = "0B";
                 else if (conv == 'o') pfx = "0";
             }
             __fmt_int(o, v, base, conv == 'X', flags, width, prec, "", pfx);

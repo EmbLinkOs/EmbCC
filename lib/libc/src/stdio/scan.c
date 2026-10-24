@@ -78,17 +78,20 @@ int __scan_int(struct scan *s, int base, int width, int assign, va_list *ap,
     }
     /* The 0x prefix is part of the number for base 16 and for base 0, and
      * is NOT for base 10 -- "0x1f" read as %d is the single digit 0 with
-     * "x1f" left behind, which is a matching success, not a failure. */
+     * "x1f" left behind, which is a matching success, not a failure. C23's
+     * 0b is the same for base 2 (%b) and base 0. */
     if (width && c == '0') {
         any = 1;                       /* the 0 itself is already a match */
         width--;
         c = sgetc(s);
-        if (width && (c == 'x' || c == 'X') && (base == 16 || base == 0)) {
-            base = 16;
+        int px = (c == 'x' || c == 'X') && (base == 16 || base == 0);
+        int pb = (c == 'b' || c == 'B') && (base == 2 || base == 0);
+        if (width && (px || pb)) {
+            base = px ? 16 : 2;
             width--;
             c = sgetc(s);
             any = 0;                   /* "0x" with no digit: back to the 0 */
-            if (digit_val(c) >= 16) {
+            if (digit_val(c) >= base) {
                 sungetc(s, c);
                 if (assign) __scan_store_int(ap, len, 0, 0);
                 return 1;              /* matched just the "0" */

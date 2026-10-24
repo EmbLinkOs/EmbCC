@@ -63,6 +63,23 @@ static int SCAN_RUN(struct scan *s, const SCAN_CH *fmt, va_list *ap)
         case 'z': len = L_SIZE; f++; break;
         case 't': len = L_PTRDIFF; f++; break;
         case 'L': len = L_LDOUBLE; f++; break;
+        case 'w': {
+            /* C23's wN and wfN: the int of N bits, or the fast one --
+             * stored as whichever standard type has that size */
+            int fast = 0, bits = 0, size;
+            f++;
+            if (*f == 'f') { fast = 1; f++; }
+            while (*f >= '0' && *f <= '9') bits = bits * 10 + (int)(*f++ - '0');
+            size = !fast ? bits / 8
+                 : bits == 8 ? (int)sizeof(int_fast8_t)
+                 : bits == 16 ? (int)sizeof(int_fast16_t)
+                 : bits == 32 ? (int)sizeof(int_fast32_t)
+                 : (int)sizeof(int_fast64_t);
+            len = size == 1 ? L_CHAR : size == (int)sizeof(short) ? L_SHORT
+                : size == (int)sizeof(int) ? L_INT
+                : size == (int)sizeof(long) ? L_LONG : L_LLONG;
+            break;
+        }
         default: break;
         }
 
@@ -97,6 +114,11 @@ static int SCAN_RUN(struct scan *s, const SCAN_CH *fmt, va_list *ap)
             break;
         case 'x': case 'X':
             if (!__scan_int(s, 16, width, assign, ap, len))
+                goto done;
+            assigned += assign;
+            break;
+        case 'b':                      /* C23 */
+            if (!__scan_int(s, 2, width, assign, ap, len))
                 goto done;
             assigned += assign;
             break;
