@@ -8,11 +8,16 @@
 #   1. Speed: tools/bench/run.sh, estimated cycles on the Cortex-M4 and
 #      RV32 boards at -O2 and -Os (geomean over its kernels).
 #   2. Size: lib/libc compiled by both compilers at -Os for every target
-#      clang also has, summed over the functions both define (llvm-nm -S
-#      symbol sizes, not .text, which would count read-only data --
-#      docs/internals/testing.md). clang gets -fno-inline-functions so a
-#      function is the same function in both; math (fdlibm) is reported
-#      apart because it is dominated by floating-point helpers.
+#      clang also has (llvm-nm -S symbol sizes, not .text, which would
+#      count read-only data -- docs/internals/testing.md), two ways: per
+#      OBJECT, every function of each file both compile, and per FUNCTION,
+#      the functions both define. clang gets -fno-inline-functions; EmbCC
+#      still inlines a static with one caller, and then the per-function
+#      join pairs the caller's whole body with clang's wrapper and drops
+#      clang's static -- after printf's engine became one such static,
+#      the M4 read 1.40 per function and 1.13 per object. The per-object
+#      ratio is the one to steer by. Math (fdlibm, msun) is reported apart
+#      because floating-point helpers dominate it.
 #   3. Compile speed: lib/libc compiled for x86_64-elf at -O2, one file
 #      at a time, wall clock, EmbCC against clang.
 #   4. Limitations: distinct refusal messages in src/ -- the constructs
@@ -60,13 +65,17 @@ fi
 echo
 
 # ---- 2. size --------------------------------------------------------------
-echo "## 2. Code size (lib/libc at -Os, functions both define)"
+echo "## 2. Code size (lib/libc at -Os)"
 echo
-echo "| Target | all | without math | functions |"
-echo "|---|---|---|---|"
+echo "Per object: every function of each file both compilers build. Per"
+echo "function: the functions both define, which a static EmbCC inlines into"
+echo "its one caller skews (see the script)."
+echo
+echo "| Target | per object | without math | per function | without math | objects |"
+echo "|---|---|---|---|---|---|"
 for t in thumbv7em-none-eabi thumbv6m-none-eabi riscv32-unknown-elf \
          riscv64-unknown-elf x86_64-elf aarch64-elf mipsel-none-elf \
-         powerpc-none-eabi sparc-none-elf loongarch64-unknown-elf; do
+         powerpc-none-eabi sparc-none-elf loongarch64-unknown-elf avr; do
     ct=$t
     case $t in
         x86_64-elf) ct=x86_64-unknown-elf ;;
@@ -82,6 +91,7 @@ for t in thumbv7em-none-eabi thumbv6m-none-eabi riscv32-unknown-elf \
         sparc*) cflags="-mcpu=leon3 -msoft-float" ;;   # EmbCC is soft float here
         loongarch*) cflags="-mabi=lp64s -msoft-float" ;;
         thumbv7em*|thumbv6m*) cflags="-mfloat-abi=soft" ;;
+        avr) cflags="-mmcu=atmega328p" ;;
         riscv32*) cflags="-march=rv32imac -mabi=ilp32" ;;
         riscv64*) cflags="-march=rv64imac -mabi=lp64 -mcmodel=medany" ;;
     esac
@@ -95,7 +105,7 @@ for t in thumbv7em-none-eabi thumbv6m-none-eabi riscv32-unknown-elf \
         clang --target=$ct $cflags -Os -ffreestanding -fno-builtin \
             -fno-inline-functions -nostdinc -isystem "$RES/include" \
             -Ilib/libc/include -Ilib/libc/src/math -w -c "$f" \
-            -o "$d/c/$b.o" 2>/dev/null || continue
+            -o "$d/c/$b.o" 2>/dev/null || { rm -f "$d/e/$b.o"; continue; }
     done
     for k in e c; do
         for o in "$d/$k"/*.o; do
@@ -114,11 +124,22 @@ for t in thumbv7em-none-eabi thumbv6m-none-eabi riscv32-unknown-elf \
                         return v }'
         done | sort > "$d/$k.sizes"
     done
-    join "$d/e.sizes" "$d/c.sizes" | awk -v t="$t" '
+    # per object: each file's functions summed, then the files both have
+    for k in e c; do
+        awk '{ split($1, a, ":"); tot[a[1]] += $2; m[a[1]] = $3 }
+             END { for (f in tot) print f, tot[f], m[f] }' "$d/$k.sizes" |
+            sort > "$d/$k.objs"
+    done
+    po=$(join "$d/e.objs" "$d/c.objs" | awk '
         { ea += $2; ca += $4; n++; if ($3 == 0) { eo += $2; co += $4 } }
-        END { if (n == 0 || ca == 0) { printf "| %s | ? | ? | 0 |\n", t; exit }
-              printf "| %s | %.3f | %.3f | %d |\n", t, ea / ca,
-                     (co ? eo / co : 0), n }'
+        END { if (n == 0 || ca == 0) { print "? ? 0"; exit }
+              printf "%.3f %.3f %d\n", ea / ca, (co ? eo / co : 0), n }')
+    pf=$(join "$d/e.sizes" "$d/c.sizes" | awk '
+        { ea += $2; ca += $4; n++; if ($3 == 0) { eo += $2; co += $4 } }
+        END { if (n == 0 || ca == 0) { print "? ?"; exit }
+              printf "%.3f %.3f\n", ea / ca, (co ? eo / co : 0) }')
+    set -- $po $pf
+    printf "| %s | %s | %s | %s | %s | %s |\n" "$t" "$1" "$2" "$4" "$5" "$3"
 done
 echo
 
