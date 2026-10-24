@@ -34,6 +34,8 @@
 #include <wchar.h>
 #include <errno.h>
 #include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
 
 /* The internal state, which is what the opaque mbstate_t really is.
  * Laid out so a zeroed mbstate_t is the initial state, as the standard
@@ -57,7 +59,16 @@ int mbsinit(const mbstate_t *ps)
 }
 
 static int is_surrogate(unsigned int c) { return c >= 0xD800 && c <= 0xDFFF; }
-static int too_big(unsigned int c) { return c > 0x10FFFF; }
+/* The last code point there is -- or, where wchar_t is 16 bits (Xtensa's,
+ * as GCC has it), the last one a wchar_t holds: the rest of Unicode has no
+ * wide form there, so its UTF-8 is not a character, rather than one
+ * truncated into the Basic Multilingual Plane. */
+#if __WCHAR_MAX__ < 0x10FFFF
+#define LAST_WC __WCHAR_MAX__
+#else
+#define LAST_WC 0x10FFFF
+#endif
+static int too_big(unsigned int c) { return c > LAST_WC; }
 
 size_t mbrtowc(wchar_t *__restrict pwc, const char *__restrict s, size_t n,
                mbstate_t *__restrict ps)
@@ -239,4 +250,76 @@ size_t wcsrtombs(char *__restrict d, const wchar_t **__restrict s, size_t n,
     }
     *s = p;
     return made;
+}
+
+/* ---- one byte, C11 §7.29.6.1 ---- */
+
+/* The single-byte characters of UTF-8 are ASCII, and no others: a byte
+ * from 0x80 up is part of a longer character. */
+wint_t btowc(int c)
+{
+    return c >= 0 && c < 0x80 ? (wint_t)c : WEOF;
+}
+
+int wctob(wint_t c)
+{
+    return (unsigned long)c < 0x80 ? (int)c : EOF;
+}
+
+/* ---- the forms without a state, <stdlib.h> §7.22.7 and §7.22.8 ----
+ *
+ * C89's conversions, before mbstate_t: each keeps a state of its own, and
+ * a null s puts it back to the start and asks whether the encoding has
+ * shift states. UTF-8 has none, so that answer is 0, and the state is
+ * only ever mid-character between the two halves of one call -- they
+ * have no "incomplete", so a character n cuts short is invalid (-1, with
+ * EILSEQ as POSIX has it) and the next call starts afresh. Which makes a
+ * state of their own a fresh one each time: no static, and nothing two
+ * threads can share. */
+int mbtowc(wchar_t *__restrict pwc, const char *__restrict s, size_t n)
+{
+    if (!s)
+        return 0;
+    mbstate_t ms;
+    memset(&ms, 0, sizeof ms);
+    size_t r = mbrtowc(pwc, s, n, &ms);
+    if (r == (size_t)-2)
+        errno = EILSEQ;
+    if (r == (size_t)-1 || r == (size_t)-2)
+        return -1;
+    return (int)r;
+}
+
+int mblen(const char *s, size_t n)
+{
+    return mbtowc(NULL, s, n);
+}
+
+/* wctomb(s, 0) stores the NUL and returns 1, which wcrtomb does. */
+int wctomb(char *s, wchar_t wc)
+{
+    if (!s)
+        return 0;
+    mbstate_t ms;
+    memset(&ms, 0, sizeof ms);
+    size_t r = wcrtomb(s, wc, &ms);
+    return r == (size_t)-1 ? -1 : (int)r;
+}
+
+/* The string forms are the restartable ones from the initial state, with
+ * the source pointer the caller does not get back. */
+size_t mbstowcs(wchar_t *__restrict d, const char *__restrict s, size_t n)
+{
+    mbstate_t ms;
+    memset(&ms, 0, sizeof ms);
+    const char *p = s;
+    return mbsrtowcs(d, &p, n, &ms);
+}
+
+size_t wcstombs(char *__restrict d, const wchar_t *__restrict s, size_t n)
+{
+    mbstate_t ms;
+    memset(&ms, 0, sizeof ms);
+    const wchar_t *p = s;
+    return wcsrtombs(d, &p, n, &ms);
 }

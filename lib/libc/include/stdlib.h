@@ -62,6 +62,14 @@ void *bsearch(const void *key, const void *base, size_t n, size_t size,
 void  qsort(void *base, size_t n, size_t size,
             int (*cmp)(const void *, const void *));
 
+/* Multibyte characters without a state (7.22.7, 7.22.8): UTF-8, as the
+ * restartable forms in <wchar.h> are. */
+int    mblen(const char *s, size_t n);
+int    mbtowc(wchar_t *__restrict pwc, const char *__restrict s, size_t n);
+int    wctomb(char *s, wchar_t wc);
+size_t mbstowcs(wchar_t *__restrict d, const char *__restrict s, size_t n);
+size_t wcstombs(char *__restrict d, const wchar_t *__restrict s, size_t n);
+
 int       abs(int x);
 long      labs(long x);
 long long llabs(long long x);

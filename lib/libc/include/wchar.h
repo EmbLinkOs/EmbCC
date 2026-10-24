@@ -87,6 +87,8 @@ wchar_t *wmemchr(const wchar_t *s, wchar_t c, size_t n);
 
 /* ---- conversion (7.29.6) ---- */
 int mbsinit(const mbstate_t *ps);
+wint_t btowc(int c);
+int wctob(wint_t c);
 size_t mbrlen(const char *__restrict s, size_t n, mbstate_t *__restrict ps);
 size_t mbrtowc(wchar_t *__restrict pwc, const char *__restrict s, size_t n,
                mbstate_t *__restrict ps);
