@@ -94,6 +94,8 @@ void perror(const char *s);
 
 int remove(const char *path);
 int rename(const char *from, const char *to);
+FILE *tmpfile(void);
+char *tmpnam(char *s);
 
 /* Which argument is the format, and where the tail it describes begins
  * -- both 1-based, as GCC has spelled this for thirty years. It is what
