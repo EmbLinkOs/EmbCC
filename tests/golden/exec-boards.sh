@@ -17,7 +17,8 @@
 #   rv32d  -march=rv32imafdc -mabi=ilp32d: doubles in f registers at RV32
 #   rv64d  -march=rv64gc -mabi=lp64d
 #
-# EMBCC_BOARDS="rv32f rv64d" runs just those.
+# EMBCC_BOARDS="rv32f rv64d" runs just those, and
+# EMBCC_EXEC_ONLY="setjmp-longjmp vla" just those programs.
 #
 # The corpus ran on these only by hand, and on ARMv6-M through
 # thumb-v6m-exec; `make test` ran it on x86-64 and AArch64, which share
@@ -232,6 +233,12 @@ export SKIP32 SKIPM4 SKIPA7 QA Q32 Q64
 for b in $boards; do
     for opt in -O0 -O1 -O2 -Os; do
         for c in tests/exec/*.c; do
+            if [ -n "${EMBCC_EXEC_ONLY:-}" ]; then
+                case " $EMBCC_EXEC_ONLY " in
+                    *" $(basename "$c" .c) "*) ;;
+                    *) continue ;;
+                esac
+            fi
             echo "$c $opt $b $out"
         done
     done
@@ -252,6 +259,7 @@ grep '^FAIL' "$out/results.txt" | sort | head -40
 grep '^NA .*does not compile' "$out/results.txt" | awk '{print $2, $3}' |
     sort | uniq -c | awk '$1 != 4 { print "FAIL (compiles at some levels only):", $2, $3; bad = 1 }
                           END { exit bad }' || fail=1
+[ -n "${EMBCC_EXEC_ONLY:-}" ] ||
 [ "$(grep -c '^PASS' "$out/results.txt")" -ge 1000 ] || {
     echo "FAIL: fewer than 1000 runs passed -- the harness, not the programs"
     fail=1; }
