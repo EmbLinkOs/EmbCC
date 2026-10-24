@@ -3752,19 +3752,16 @@ void parse_set_single_precision_constant(int on) { g_single_prec = on; }
 static double single_value(struct parser *ps, const struct token *t)
 {
     double d = t->fnum;
-    /* the midpoint between FLT_MAX and 2^128, which rounds to infinity */
-    const double lim = 3.4028235677973366e38;
-    if (d >= lim || d <= -lim) {
-        unsigned long long bits = d > 0 ? 0x7ff0000000000000ULL
-                                        : 0xfff0000000000000ULL;
+    /* rounded once, from the digits -- not the double rounded again */
+    struct ldf *v = t->text ? ldf_from_text(t->text, LDF_FLOAT) : NULL;
+    float f = v ? (float)ldf_to_double(v) : (float)d;
+    if (f - f != 0) {
         if (d - d == 0)        /* finite as a double: the flag made it inf */
             diag_warn_at(ps->lx.file, t->line, t->col,
                          "floating constant exceeds the range of 'float' "
                          "(%s)", opt_typed("-fsingle-precision-constant"));
-        memcpy(&d, &bits, sizeof d);
-        return d;
+        return (double)f;
     }
-    float f = (float)d;
     if (f == 0 && d != 0)
         diag_warn_at(ps->lx.file, t->line, t->col,
                      "floating constant truncated to zero "
