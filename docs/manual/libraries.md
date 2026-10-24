@@ -52,7 +52,10 @@ C library routine can call the runtime (printing a 128-bit value divides
 it). Archives are searched left to right with a final pass that
 revisits them, so a member pulled in late can still resolve against an
 earlier archive. Only the archive members a program references are
-linked.
+linked, and the embedded `libc.a` and `librt.a` have a section per
+function and per object, so an image linked with `--gc-sections` keeps
+only the functions it reaches inside those members
+([Embedded](embedded.md#leaving-out-what-is-never-called---gc-sections)).
 
 A missing library is reported by name rather than as a list of undefined
 symbols:
@@ -527,7 +530,7 @@ scratch.
 | `make libc-linux-x86_64` | C library with the Linux backend, `crt1.o`, and `librt.a`, for `x86_64-linux-gnu` | `build/libc/linux-x86_64/{libc.a,crt1.o,librt.a}` |
 | `make libc-linux-aarch64` | the same for `aarch64-linux-gnu` | `build/libc/linux-aarch64/{libc.a,crt1.o,librt.a}` |
 | `make libc-linux` | both Linux C libraries | |
-| `make libc-embedded` | C library with the bare-metal backend, `--opt=size`, for each embedded target it builds on (all but `avr`) | `build/libc/TRIPLE/libc.a` |
+| `make libc-embedded` | C library with the bare-metal backend, `--opt=size --sections=functions,data`, for each embedded target it builds on (all but `avr`) | `build/libc/TRIPLE/libc.a` |
 | `make libc-emblinkos EMBLINKOS=DIR` | C library with the EmbLinkOS backend, `--opt=speed`; needs `DIR/user/lib/embk.h` (default `DIR` is `$HOME/EmbLinkOs`) | `build/libc/emblinkos/libc.a` |
 | `make libcxx-x86_64`, `make libcxx-aarch64` | C++ library for `x86_64-elf`, `aarch64-elf`, `--opt=speed` | `build/libcxx/x86_64/libcxx.a`, `build/libcxx/aarch64/libcxx.a` |
 | `make libcxx` | both of the above | |

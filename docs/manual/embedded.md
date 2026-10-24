@@ -343,6 +343,13 @@ Memory region         Used Size  Region Size  %age Used
            FLASH:        844 B       256 KB      0.32%
 ```
 
+EmbCC's own libraries are built the same way: `lib/libc` and the runtime
+have a section per function and per object, so `--gc-sections` drops
+what a program does not reach inside them too, not only in its own
+files. On a Cortex-M4, `printf` brings 8 KB of code where it brought 16,
+and `strtod` with `snprintf`'s `%f` 19 KB where it brought 78. Linked
+without `--gc-sections`, an image is the size it always was.
+
 What is kept is what the entry symbol, `-u` and the script's `KEEP()`
 reach, through every relocation of everything kept. Some things are
 reached without a reference, and are kept too:
@@ -1311,10 +1318,10 @@ embcc --target=avr --mcu=atmega328p --opt=size main.c -o fw.elf
     `.fini0` disables interrupts and stops in a loop.
   - A program adds a step to the sequence with code in `.init1`,
     `.init3`, `.init5`, `.init7`, `.init8` or `.fini8`..`.fini1`, without a
-    `ret`: the sections run into each other. It has to be a `.S` file:
-    EmbCC places a naked C function's body in `.text`, so avr-libc's
-    naked `.init3` function is refused (`naked function ... in section
-    '.init3' is not supported yet`).
+    `ret`: the sections run into each other. In a `.S` file, or in C as
+    avr-libc writes it: a naked function placed in the section,
+    `__attribute__((naked, used, section(".init3")))`, whose body is its
+    asm and nothing after it.
 - **The linker script**, when the link names none: `<part>.ld`
   (`lib/avr/avr5.ld` with the part's memories), avr-ld's layout: flash
   from 0 with the vectors, `PROGMEM` data, `.init0`..`.init9`, the code

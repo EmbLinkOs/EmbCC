@@ -17,7 +17,8 @@
 # the difference between a float program fitting and not -- software binary32
 # alone is 40 KB of AVR text at -O0.
 #
-# -Os: this is firmware, and the runtime is linked into every image.
+# -Os: this is firmware, and the runtime is linked into every image; a
+# section per function and object, as tools/build-libc.sh says why.
 set -eu
 triple=$1
 out=$2
@@ -49,7 +50,8 @@ mkdir -p "$out/rt"
 for f in "$here"/lib/rt/*.c; do
     b=$(basename "$f" .c)
     # shellcheck disable=SC2086
-    "$EMBCC" --target="$triple" $flags -fenum-size-neutral -Os -c "$f" -o "$out/rt/$b.o" || {
+    "$EMBCC" --target="$triple" $flags -fenum-size-neutral -Os \
+        --sections=functions,data -c "$f" -o "$out/rt/$b.o" || {
         echo "build-rt: lib/rt/$b.c does not compile for $triple" >&2
         exit 1; }
 done
