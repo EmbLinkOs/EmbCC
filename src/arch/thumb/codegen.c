@@ -4364,6 +4364,268 @@ static void t_select_cc(struct t_fn *F, const struct ir_ins *i, int cond,
  * immediate (t_select_imms). */
 #define SEL_OPR(F, v, scratch) (t_sel_imm((F), (v)) ? -1 : rdr((F), (v), scratch))
 
+/* ---- a clamp to a bit range: ssat, usat ---------------------------------
+ *
+ * `if (y > 32767) y = 32767; if (y < -32768) y = -32768;` saturates y to
+ * sixteen signed bits, which every ARMv7-M part does in one instruction,
+ * `ssat y, #16, y` -- and a clamp to [0, 2^n - 1] is `usat y, #n, y`.
+ * If-conversion leaves the two tests as two compare-and-selects, the
+ * second on the first's result, with the second `if`'s empty label
+ * between them or not; clang and GCC make the one instruction of them,
+ * where an IT block each took a compare, two moves and the constants
+ * built for both. Either half may come first, and each may be written
+ * either way round (`y > K ? K : y`, `y < K ? y : K`). */
+
+/* The constant temp v holds, when one IR_CONST is its only definition.
+ * The table is built on the first question, once per function. */
+static int t_kval(struct t_fn *F, int v, long *k)
+{
+    const struct ir_func *fn = F->fn;
+    if (v < fn->nvars || v >= fn->nvregs)
+        return 0;
+    if (!F->kc_state) {
+        int nv = fn->nvregs;
+        F->kc_state = xcalloc((size_t)nv, 1);  /* 1: a constant, 2: not */
+        F->kc_val = xcalloc((size_t)nv, sizeof *F->kc_val);
+        for (int n = 0; n < fn->nins; n++) {
+            const struct ir_ins *i = &fn->ins[n];
+            int d = ra_ins_def(i);
+            if (d < 0 || d >= nv)
+                continue;
+            if (!F->kc_state[d] && i->op == IR_CONST && !i->flt &&
+                i->w <= 4) {
+                F->kc_state[d] = 1;
+                F->kc_val[d] = (long)(int)i->imm;
+            } else {
+                F->kc_state[d] = 2;
+            }
+        }
+    }
+    if (F->kc_state[v] != 1)
+        return 0;
+    *k = F->kc_val[v];
+    return 1;
+}
+
+/* Does any instruction name label L as where it goes? */
+static int t_label_reached(const struct ir_func *fn, int L)
+{
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        switch (i->op) {
+        case IR_JMP: case IR_BRZ: case IR_BRNZ: case IR_LABELADDR:
+            if (i->label == L)
+                return 1;
+            break;
+        case IR_SWITCH:
+            if (i->label == L)
+                return 1;
+            for (int k = 0; k < fn->jt[i->jt].n; k++)
+                if (fn->jt[i->jt].labels[k] == L)
+                    return 1;
+            break;
+        case IR_LANDING: case IR_IGOTO:
+            return 1;               /* edges the IR does not spell */
+        default:
+            break;
+        }
+    }
+    return 0;
+}
+
+/* Instructions n and n + 1 as one half of a clamp, MIN(x, K) or MAX(x, K):
+ * a signed 32-bit compare of x with K, read by nothing but a select of x
+ * and K. */
+static int t_clamp_half(struct t_fn *F, int n, int *x, long *k, int *ismax)
+{
+    const struct ir_func *fn = F->fn;
+    if (n + 1 >= fn->nins || !F->usecnt)
+        return 0;
+    const struct ir_ins *c = &fn->ins[n], *s = &fn->ins[n + 1];
+    long kc, ka;
+    if (c->op != IR_CMP || c->flt || c->w != 4 || !c->sign || c->dst < 0 ||
+        c->a < 0 || F->wide[c->a] || in_freg(F, c->a) ||
+        !t_select_it_ok(F, s) || s->a != c->dst ||
+        F->usecnt[c->dst] != 1)
+        return 0;
+    if (c->imm_b)
+        kc = (long)(int)c->imm;
+    else if (!t_kval(F, c->b, &kc))
+        return 0;
+    int then_k = s->c == c->a && t_kval(F, s->b, &ka) && ka == kc;
+    int else_k = s->b == c->a && t_kval(F, s->c, &ka) && ka == kc;
+    int gt = c->pred == B_GT || c->pred == B_GE;
+    int lt = c->pred == B_LT || c->pred == B_LE;
+    if (then_k == else_k || (!gt && !lt))
+        return 0;
+    /* x > K ? K : x is the smaller, x < K ? K : x the larger, and with
+     * the arms the other way round, the other. At equality >= and <=
+     * choose K, which is x. */
+    *ismax = then_k ? lt : gt;
+    *x = c->a;
+    *k = kc;
+    return 1;
+}
+
+struct t_cnt { int v, n; };
+static void t_cnt_cb(int u, void *ctx)
+{
+    struct t_cnt *c = ctx;
+    if (u == c->v)
+        c->n++;
+}
+
+/* Is every read of temp v inside instructions [lo, hi)? Counted as
+ * usecnt counts them (ra_count_vreg_uses). */
+static int t_reads_within(const struct t_fn *F, int v, int lo, int hi)
+{
+    const struct ir_func *fn = F->fn;
+    struct t_cnt c = { v, 0 };
+    for (int m = lo; m < hi; m++)
+        ra_each_use(&fn->ins[m], t_cnt_cb, &c);
+    return c.n == F->usecnt[v];
+}
+
+/* The clamp starting at instruction n, which may be one of the constants
+ * the two halves compare with -- each half's IR_CONST comes just before
+ * it, and is emitted as the clamp is, not at all: the window skips the
+ * constants and the second `if`'s empty label wherever they fall, when
+ * nothing outside the window reads them. */
+static int t_clamp_sat(struct t_fn *F, int n)
+{
+    struct ir_func *fn = F->fn;
+    int x1, x2, max1, max2;
+    long k1, k2;
+    if (getenv("EMBCC_T_NOSAT") || !F->usecnt)
+        return 0;
+    int j = n;
+    while (j < fn->nins && j - n < 3 && fn->ins[j].op == IR_CONST)
+        j++;
+    if (!t_clamp_half(F, j, &x1, &k1, &max1))
+        return 0;
+    int s1 = fn->ins[j + 1].dst, m = j + 2;
+    while (m < fn->nins && m - j < 6 &&
+           (fn->ins[m].op == IR_CONST ||
+            (fn->ins[m].op == IR_LABEL &&
+             !t_label_reached(fn, fn->ins[m].label))))
+        m++;
+    /* the second half clamps the first's result, which nothing else reads */
+    if (!t_clamp_half(F, m, &x2, &k2, &max2) || x2 != s1 || max1 == max2 ||
+        F->usecnt[s1] != 2)
+        return 0;
+    for (int q = n; q < m; q++)
+        if (fn->ins[q].op == IR_CONST &&
+            (fn->ins[q].dst < 0 ||
+             !t_reads_within(F, fn->ins[q].dst, n, m + 2)))
+            return 0;
+    long hi = max1 ? k2 : k1, lo = max1 ? k1 : k2;
+    int sign, bits = 0;
+    if (lo == 0 && hi > 0 && (hi & (hi + 1)) == 0) {
+        sign = 0;                       /* [0, 2^n - 1]: usat #n, n 1..31 */
+        for (long v = hi; v; v >>= 1)
+            bits++;
+    } else if (lo < 0 && hi == -lo - 1 && (hi & (hi + 1)) == 0) {
+        sign = 1;                       /* [-2^(n-1), 2^(n-1) - 1]: ssat #n */
+        for (long v = hi; v; v >>= 1)
+            bits++;
+        bits++;
+    } else {
+        return 0;
+    }
+    int dst = fn->ins[m + 1].dst;
+    int rx = rdr(F, x1, T_ACC);
+    int d = wreg(F, dst, T_ACC);
+    t_sat(F->t, d, bits, rx, sign, 0, 0);
+    wrote(F, dst, d);
+    F->skip_next = m + 1 - n;
+    return 1;
+}
+
+/* ---- a rotate by a constant: ror --------------------------------------
+ *
+ * `x << k | x >> (32 - k)` is x rotated, which Thumb-2 does in one
+ * `ror rd, rn, #(32 - k)` -- and which an ALU operation takes as its
+ * shifted operand, so CRC's `(crc << 1 | crc >> 31) ^ b` is one `eor.w
+ * rd, rb, rc, ror #31`, as clang writes it, where it was a shift, an orr
+ * with the other shift, and the eor. The two shifts' bits never overlap,
+ * so an add or an exclusive or of them is the same rotate as the or. */
+
+/* Instructions n, n + 1, n + 2 as a rotate of a 32-bit x: the two shifts,
+ * either first, each read only by the combining operation. */
+static int t_rot_at(const struct t_fn *F, int n, int *x, int *ror, int *dst)
+{
+    const struct ir_func *fn = F->fn;
+    if (n + 2 >= fn->nins || !F->usecnt)
+        return 0;
+    const struct ir_ins *a = &fn->ins[n], *b = &fn->ins[n + 1];
+    const struct ir_ins *o = &fn->ins[n + 2];
+    const struct ir_ins *l = a->op == IR_SHL ? a : b;
+    const struct ir_ins *r = a->op == IR_SHL ? b : a;
+    if (l->op != IR_SHL || r->op != IR_SHR || r->sign || !l->imm_b ||
+        !r->imm_b || l->w != 4 || r->w != 4 || l->imm < 1 || l->imm > 31 ||
+        l->imm + r->imm != 32 || l->a != r->a || l->a < 0 ||
+        F->wide[l->a] || in_freg(F, l->a) || a->dst == a->a ||
+        l->dst < 0 || r->dst < 0 || l->dst == r->dst ||
+        F->usecnt[l->dst] != 1 || F->usecnt[r->dst] != 1)
+        return 0;
+    if ((o->op != IR_OR && o->op != IR_XOR && o->op != IR_ADD) || o->flt ||
+        o->imm_b || o->w != 4 || o->dst < 0 || F->wide[o->dst] ||
+        in_freg(F, o->dst) ||
+        !((o->a == l->dst && o->b == r->dst) ||
+          (o->a == r->dst && o->b == l->dst)))
+        return 0;
+    *x = l->a;
+    *ror = (int)r->imm;
+    *dst = o->dst;
+    return 1;
+}
+
+static int t_rotate(struct t_fn *F, int n)
+{
+    struct ir_func *fn = F->fn;
+    struct code *t = F->t;
+    int x, ror, dst;
+    if (getenv("EMBCC_T_NOROR") || !t_rot_at(F, n, &x, &ror, &dst))
+        return 0;
+    /* the next instruction's shifted operand, when that is its only
+     * reader and its other operand is in a register already (no scratch
+     * register is taken four instructions ahead of where the pool was
+     * computed) */
+    if (F->usecnt[dst] == 1 && n + 3 < fn->nins) {
+        const struct ir_ins *nx = &fn->ins[n + 3];
+        int comm = nx->op == IR_ADD || nx->op == IR_AND ||
+                   nx->op == IR_OR || nx->op == IR_XOR;
+        int op = nx->op == IR_ADD ? T_OP_ADD : nx->op == IR_SUB ? T_OP_SUB
+               : nx->op == IR_AND ? T_OP_AND : nx->op == IR_OR ? T_OP_ORR
+               : nx->op == IR_XOR ? T_OP_EOR : -1;
+        int other = -1;
+        if (op >= 0 && !nx->flt && !nx->imm_b && nx->w == 4 &&
+            nx->dst >= 0 && !F->wide[nx->dst] && !in_freg(F, nx->dst)) {
+            if (nx->b == dst && nx->a != dst)
+                other = nx->a;
+            else if (nx->a == dst && nx->b != dst && comm)
+                other = nx->b;
+            else if (nx->a == dst && nx->b != dst && op == T_OP_SUB)
+                other = nx->b, op = T_OP_RSB;
+        }
+        if (other >= 0 && in_reg(F, other) && !F->wide[other]) {
+            int rm = rdr(F, x, T_ACC);
+            int rn = F->loc[other];
+            int d = wreg(F, nx->dst, T_ACC);
+            t_alu_reg_shift(t, op, d, rn, rm, T_SH_ROR, ror, 0);
+            wrote(F, nx->dst, d);
+            F->skip_next = 3;
+            return 1;
+        }
+    }
+    int rm = rdr(F, x, T_ACC);
+    int d = wreg(F, dst, T_ACC);
+    t_shift_imm(t, T_SH_ROR, d, rm, ror, 0);
+    wrote(F, dst, d);
+    F->skip_next = 2;
+    return 1;
+}
+
 static void gen_ins(struct t_fn *F, int n)
 {
     struct ir_func *fn = F->fn;
@@ -4629,6 +4891,7 @@ static void gen_ins(struct t_fn *F, int n)
         F->label_off[i->label] = t->len;
         F->bc_end = -1;          /* something may branch here */
         F->fl_end = -1;          /* ...with other flags */
+        F->zs_end = -1;
         F->ls_end = -1;          /* ...and other registers */
         return;
     case IR_JMP:
@@ -4642,6 +4905,8 @@ static void gen_ins(struct t_fn *F, int n)
             jump_to(F, i->label);
         return;
     case IR_CONST: {
+        if (t_clamp_sat(F, n))
+            return;             /* a clamp's bound: ssat/usat (above) */
         if (t_sel_imm(F, i->dst))
             return;             /* the select moves it (t_select_imms) */
         if (F->remat && i->dst >= 0 && F->remat[i->dst])
@@ -4766,6 +5031,25 @@ static void gen_ins(struct t_fn *F, int n)
                    !in_freg(F, fn->ins[k].dst) && !in_freg(F, fn->ins[k].a))
                 k++;
             const struct ir_ins *bx = k < fn->nins ? &fn->ins[k] : i;
+            /* ...and a select on it: `tst a, #k; ite ne` -- `(i & 31) == 0
+             * ? a : b`, where the and and a compare with 0 were two
+             * instructions and a register. The arms are where an IT
+             * block's moves take them (in registers, or immediates). */
+            if (k == n + 1 && t_select_it_ok(F, bx) && bx->a == i->dst &&
+                (in_reg(F, bx->b) || t_sel_imm(F, bx->b)) &&
+                (in_reg(F, bx->c) || t_sel_imm(F, bx->c)) &&
+                (!i->imm_b ? in_reg(F, i->b) : t_imm_ok(i->imm))) {
+                int rb = SEL_OPR(F, bx->b, T_TMP);
+                int rc = SEL_OPR(F, bx->c, T_ADDR);
+                int ra_ = rdr(F, i->a, T_ACC);
+                if (i->imm_b)
+                    t_tst_imm(t, ra_, i->imm);
+                else
+                    t_tst_reg(t, ra_, F->loc[i->b]);
+                t_select_cc(F, bx, T_NE, rb, rc);
+                F->skip_next = 1;
+                return;
+            }
             if ((bx->op == IR_BRZ || bx->op == IR_BRNZ) &&
                 bx->a == i->dst && bx->w == 4) {
                 int ra_ = rdr(F, i->a, T_ACC);
@@ -4876,6 +5160,8 @@ static void gen_ins(struct t_fn *F, int n)
             if ((i->op == IR_ADD || i->op == IR_SUB) && lo &&
                 (mg <= 7 || (d == ra_ && mg <= 255))) {
                 t_alu_imm(t, opm, d, ra_, mg, 1);
+                F->zs_end = t->len;
+                F->zs_reg = d;
             /* addw/subw reach any 0..4095 where the modified immediate
              * reaches only what it can rotate into place, and almost
              * every constant folded here is a small offset. */
@@ -5002,6 +5288,8 @@ static void gen_ins(struct t_fn *F, int n)
         return;
     }
     case IR_SHL: case IR_SHR: {
+        if (t_rotate(F, n))
+            return;
         int sh = i->op == IR_SHL ? T_SH_LSL : i->sign ? T_SH_ASR : T_SH_LSR;
         /* `(x >> s) & (2^k - 1)` with s + k <= 32 is the bitfield
          * x[s, s+k): one ubfx where the shift and the mask were two. The
@@ -5149,6 +5437,8 @@ static void gen_ins(struct t_fn *F, int n)
     }
 
     case IR_CMP: {
+        if (t_clamp_sat(F, n))
+            return;
         int cond = cond_for(i->pred, i->sign);
         /* Does the NEXT instruction branch on this result, and does
          * nothing else read it? Then the 0/1 never has to exist.
@@ -5293,6 +5583,12 @@ static void gen_ins(struct t_fn *F, int n)
     case IR_BRZ: case IR_BRNZ:
         if (F->tst_br == n + 1) {       /* the mask's tst, made above */
             F->tst_br = 0;
+            jump_if(F, i->op == IR_BRZ ? T_EQ : T_NE, i->label);
+            return;
+        }
+        if (i->w != 8 && F->zs_end == t->len && in_reg(F, i->a) &&
+            F->loc[i->a] == F->zs_reg && !getenv("EMBCC_T_NOZS")) {
+            /* the adds/subs just made set Z from this register */
             jump_if(F, i->op == IR_BRZ ? T_EQ : T_NE, i->label);
             return;
         }
@@ -6911,6 +7207,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     F.floc = NULL; F.nfsave = 0;
     F.bc_end = F.bc_fix = -1;
     F.fl_end = -1;
+    F.zs_end = -1;
     F.ls_end = -1;
     F.shortb = NULL; F.nshortb = 0;
     F.scr_save = T_SCR_ALL;
@@ -7209,6 +7506,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         F.skip_next = 0;
         F.bc_end = F.bc_fix = -1;
         F.fl_end = -1;
+        F.zs_end = -1;
+    F.zs_end = -1;
         F.ls_end = -1;
         rc_reset(&F);
         F.va_regsave = F.va_first = -1;
@@ -7864,6 +8163,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     free(F.lv_busy);
     free(F.rc_reg);
     free(F.remat);
+    free(F.kc_state);
+    free(F.kc_val);
     free(F.remat_v);
     free(F.rc_lmin);
     free(F.lp_use);

@@ -127,6 +127,17 @@ struct t_fn {
      * one value. fl_end is -1 when there is none. */
     int fl_end, fl_reg;
     long fl_imm;
+    /* The last 16-bit adds/subs: where it ended and the register it
+     * wrote. Its Z is that register's == 0, so a branch on the register
+     * with nothing emitted since and no label placed needs no compare --
+     * `subs r0, #1; bne` where it was `subs; cmp r0, #0; bne`. zs_end is
+     * -1 when there is none. */
+    int zs_end, zs_reg;
+    /* The temps defined once by a 32-bit constant, and the constants
+     * (t_kval): kc_state 1 for one, 2 for any other temp; NULL until the
+     * first question. */
+    char *kc_state;
+    long *kc_val;
     /* The last store of a register to a frame slot (wr): where its code
      * ended, the register, the slot's offset and the base. A read of the
      * same slot with nothing emitted since and no label placed is the
