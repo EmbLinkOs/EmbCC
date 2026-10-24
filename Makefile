@@ -796,7 +796,8 @@ test-libstdcxx: embcc
 # Everything above the seam, which is every target's library verbatim. The
 # backend is appended per target -- that difference IS the port.
 LIBC_SRCS_PORTABLE := $(wildcard lib/libc/src/*/*.c) \
-                      $(wildcard lib/libc/src/math/fdlibm/*.c)
+                      $(wildcard lib/libc/src/math/fdlibm/*.c) \
+                      $(wildcard lib/libc/src/math/msun/*.c)
 LIBC_SRCS := $(LIBC_SRCS_PORTABLE) lib/libc/os/posixlike/backend.c
 LIBC_INC  := -Ilib/libc/include -Ilib/libc/src/math
 

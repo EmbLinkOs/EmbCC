@@ -86,7 +86,7 @@ for t in thumbv7em-none-eabi thumbv6m-none-eabi riscv32-unknown-elf \
         riscv64*) cflags="-march=rv64imac -mabi=lp64 -mcmodel=medany" ;;
     esac
     d=$W/sz-$t; mkdir -p "$d/e" "$d/c"
-    for f in lib/libc/src/*/*.c lib/libc/src/math/fdlibm/*.c; do
+    for f in lib/libc/src/*/*.c lib/libc/src/math/fdlibm/*.c lib/libc/src/math/msun/*.c; do
         [ -f "$f" ] || continue
         b=$(echo "$f" | sed 's|lib/libc/src/||; s|/|_|g; s|\.c$||')
         "$EMBCC" --target=$t -Os -Ilib/libc/include -Ilib/libc/src/math \
@@ -148,7 +148,7 @@ echo "|---|---|---|---|---|"
 LIBC_I="-Ilib/libc/include -Ilib/libc/src/math"
 time_corpus "lib/libc" "$LIBC_I" \
     "-ffreestanding -fno-builtin -nostdinc -isystem $RES/include $LIBC_I" \
-    lib/libc/src/*/*.c lib/libc/src/math/fdlibm/*.c
+    lib/libc/src/*/*.c lib/libc/src/math/fdlibm/*.c lib/libc/src/math/msun/*.c
 # EmbCC's own sources: the large files (src/opt/opt.c, the backends)
 # are where a slow pass or the allocator would show. Both compilers read
 # lib/libc's headers, which is what EmbCC uses for this target -- clang

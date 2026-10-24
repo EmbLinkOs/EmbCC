@@ -74,6 +74,23 @@ License: fdlibm
  Permission to use, copy, modify, and distribute this software is freely
  granted, provided that this notice is preserved.
 
+Files: lib/libc/src/math/msun/catrig*.c lib/libc/src/math/msun/s_csqrt*.c
+ lib/libc/src/math/msun/s_cexp*.c lib/libc/src/math/msun/k_exp*.c
+ lib/libc/src/math/msun/s_ctanh*.c lib/libc/src/math/msun/s_cproj*.c
+ lib/libc/src/math/msun/s_ccosh*.c lib/libc/src/math/msun/s_csinh*.c
+Copyright: 2012 Stephen Montgomery-Smith
+ 2007-2011 David Schultz
+ 2005-2025 Bruce D. Evans and Steven G. Kargl
+License: BSD-2-Clause
+ Each file carries the licence text in full.
+
+Files: lib/libc/src/math/msun/s_cpow*.c
+Copyright: 2008 Stephen L. Moshier
+License: ISC-like
+ Permission to use, copy, modify, and distribute this software for any
+ purpose with or without fee is hereby granted, provided that the above
+ copyright notice and this permission notice appear in all copies.
+
 Files: tools/embsim/avr.c tools/embsim/riscv.c
 Copyright: 2018-2019 Free Software Foundation, Inc.
 License: FSFAP

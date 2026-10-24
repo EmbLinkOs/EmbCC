@@ -162,7 +162,7 @@ freestanding `<limits.h>` for the type widths.
 | `<stdlib.h>` | `malloc` family with `aligned_alloc`; `strtol` family, `strtod`/`strtof`/`strtold`, `ato*`; `qsort` (heapsort) and `bsearch`; `rand`/`srand` (`RAND_MAX` is 2147483647); `abs`/`div` families; `atexit`, `exit`, `_Exit`, `abort`; `getenv`; `system` (always reports no command processor) |
 | `<stdio.h>` | `FILE` streams with buffering, files by name, positioning (`fseek`, `ftell`, `fgetpos`, `fsetpos`, `rewind`), `remove`, `rename`, `setvbuf`, `ungetc`, `perror`, and the complete `printf` and `scanf` families (`v`, `f`, `s`, `sn` forms) |
 | `<math.h>`, `<tgmath.h>` | every C11 function at all three widths |
-| `<complex.h>` | complete |
+| `<complex.h>` | complete: every function at all three widths |
 | `<fenv.h>` | exception flags and rounding modes, on x86-64 (`MXCSR`) and AArch64 (`FPSR`/`FPCR`) |
 | `<time.h>` | `time`, `clock`, `difftime`, `mktime`, `timegm`, `gmtime`, `localtime`, the `_r` forms, `asctime`, `ctime`, `strftime`, `timespec_get` |
 | `<setjmp.h>` | `setjmp`/`longjmp` on every target: x86-64, AArch64, ARM state, Thumb (every Cortex-M, with s16-s31 where there is an FPU), RISC-V (with fs0-fs11 under F or D), MIPS o32 and n64, LoongArch64, PowerPC, SPARC, Xtensa, TriCore, ColdFire, RX, and on AVR in `lib/avr`. `jmp_buf` is 256 bytes everywhere but AVR, where it is 24 |
@@ -232,6 +232,18 @@ significand bits; the functions that only move or inspect a value
 in its own format, so `isinf(LDBL_MAX)` is 0 and a `long double`
 subnormal is `FP_SUBNORMAL`. `nearbyint` and `rint` follow the current
 rounding mode; `remainder` rounds the quotient to nearest, ties to even.
+
+**Complex.** The exponential, logarithm, square root, power, and the
+trigonometric and hyperbolic functions with their inverses are
+FreeBSD's (`src/math/msun/`, by their authors' notices): every special
+value Annex G lists, and accuracy across the plane -- the inverse
+functions are Hull, Fairgrieve and Tang's algorithm, which keeps its
+digits beside the branch points. `clog`'s real part is exact near
+|z| = 1, where `log(cabs(z))` keeps none. The `float` forms compute in
+`float`; the `long double` forms compute in `double` (as above), except
+`creall`, `cimagl`, `conjl` and `cprojl`, which only take a value apart
+or put it back. `CMPLX`, `CMPLXF` and `CMPLXL` are the header's own and
+call nothing in the library.
 
 **Locale.** There is one locale, `"C"`. `setlocale` accepts `"C"`,
 `"POSIX"` and `""` and returns a null pointer for any other name. The
