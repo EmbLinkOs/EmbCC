@@ -101,7 +101,7 @@ double remquo(double, double, int *);
 double fabs(double), copysign(double, double), nan(const char *);
 double fdim(double, double), fmax(double, double), fmin(double, double);
 double fma(double, double, double);
-double nextafter(double, double);
+double nextafter(double, double), nexttoward(double, long double);
 double erf(double), erfc(double), tgamma(double), lgamma(double);
 
 /* The float forms. C11 requires all three widths for every function
@@ -122,6 +122,7 @@ float ldexpf(float, int), frexpf(float, int *), modff(float, float *);
 float fmaxf(float, float), fminf(float, float), fdimf(float, float);
 float scalbnf(float, int), scalblnf(float, long);
 float nextafterf(float, float), remainderf(float, float);
+float nexttowardf(float, long double), nanf(const char *);
 float fmaf(float, float, float), remquof(float, float, int *);
 float erff(float), erfcf(float), tgammaf(float), lgammaf(float);
 long lrintf(float), lroundf(float);
@@ -157,6 +158,7 @@ long double fmaxl(long double, long double), fminl(long double, long double);
 long double fdiml(long double, long double);
 long double scalbnl(long double, int), scalblnl(long double, long);
 long double nextafterl(long double, long double);
+long double nexttowardl(long double, long double), nanl(const char *);
 long double remainderl(long double, long double);
 long double fmal(long double, long double, long double);
 long double remquol(long double, long double, int *);
