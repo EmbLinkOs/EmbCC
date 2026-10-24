@@ -526,6 +526,166 @@ void sj_deep(jmp_buf env, int n)
     sj_deep(env, n - 1);
     clobber[0] = 0;
 }
+
+#elif defined(__AVR__)
+#define SJ_PROBE 1
+/* r2-r17 and Y (r28:r29): an int has 16 bits here, too few for a mask of
+ * eighteen, so this probe returns the first wrong register's number + 1
+ * (1 for r2 .. 16 for r17, 17 and 18 for r28 and r29). */
+#define SJ_PROBE_INDEX 1
+#define SJ_AVR_SET(r, v) "    ldi r30, " #v "\n    mov r" #r ", r30\n"
+#define SJ_AVR_ALL(v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12,  \
+                   v13, v14, v15, v16, v17, v18)                       \
+    SJ_AVR_SET(2, v1) SJ_AVR_SET(3, v2) SJ_AVR_SET(4, v3)             \
+    SJ_AVR_SET(5, v4) SJ_AVR_SET(6, v5) SJ_AVR_SET(7, v6)             \
+    SJ_AVR_SET(8, v7) SJ_AVR_SET(9, v8) SJ_AVR_SET(10, v9)            \
+    SJ_AVR_SET(11, v10) SJ_AVR_SET(12, v11) SJ_AVR_SET(13, v12)       \
+    SJ_AVR_SET(14, v13) SJ_AVR_SET(15, v14) SJ_AVR_SET(16, v15)       \
+    SJ_AVR_SET(17, v16) SJ_AVR_SET(28, v17) SJ_AVR_SET(29, v18)
+#define SJ_AVR_CHK(r, v) "    mov r30, r" #r "\n    cpi r30, " #v "\n" \
+    "    breq 9f\n    ldi r24, " #v "\n    rjmp 8f\n9:\n"
+#define SJ_AVR_SAVE(op) \
+    op(2) op(3) op(4) op(5) op(6) op(7) op(8) op(9) op(10) op(11)     \
+    op(12) op(13) op(14) op(15) op(16) op(17) op(28) op(29)
+#define SJ_AVR_PUSH(r) "    push r" #r "\n"
+#define SJ_AVR_POP(r)  "    pop r" #r "\n"
+#define SJ_AVR_RESTORE \
+    SJ_AVR_POP(29) SJ_AVR_POP(28) SJ_AVR_POP(17) SJ_AVR_POP(16)      \
+    SJ_AVR_POP(15) SJ_AVR_POP(14) SJ_AVR_POP(13) SJ_AVR_POP(12)      \
+    SJ_AVR_POP(11) SJ_AVR_POP(10) SJ_AVR_POP(9) SJ_AVR_POP(8)        \
+    SJ_AVR_POP(7) SJ_AVR_POP(6) SJ_AVR_POP(5) SJ_AVR_POP(4)          \
+    SJ_AVR_POP(3) SJ_AVR_POP(2)
+__asm__(
+".text\n"
+".globl sj_probe\n"
+".type sj_probe, @function\n"
+"sj_probe:\n"
+SJ_AVR_SAVE(SJ_AVR_PUSH)
+"    push r24\n"                       /* env, kept on the stack */
+"    push r25\n"
+SJ_AVR_ALL(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18)
+"    pop r25\n    pop r24\n    push r24\n    push r25\n"
+"    call setjmp\n"
+"    cp r24, r1\n"
+"    cpc r25, r1\n"
+"    brne 1f\n"
+SJ_AVR_ALL(101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112,
+           113, 114, 115, 116, 117, 118)
+"    pop r25\n    pop r24\n    push r24\n    push r25\n"
+"    ldi r22, 1\n"
+"    ldi r23, 0\n"
+"    call longjmp\n"
+"1:\n"
+SJ_AVR_CHK(2, 1) SJ_AVR_CHK(3, 2) SJ_AVR_CHK(4, 3) SJ_AVR_CHK(5, 4)
+SJ_AVR_CHK(6, 5) SJ_AVR_CHK(7, 6) SJ_AVR_CHK(8, 7) SJ_AVR_CHK(9, 8)
+SJ_AVR_CHK(10, 9) SJ_AVR_CHK(11, 10) SJ_AVR_CHK(12, 11)
+SJ_AVR_CHK(13, 12) SJ_AVR_CHK(14, 13) SJ_AVR_CHK(15, 14)
+SJ_AVR_CHK(16, 15) SJ_AVR_CHK(17, 16) SJ_AVR_CHK(28, 17)
+SJ_AVR_CHK(29, 18)
+"    ldi r24, 0\n"
+"8:  clr r25\n"
+"    pop r0\n    pop r0\n"
+SJ_AVR_RESTORE
+"    ret\n"
+);
+
+#elif defined(__TRICORE__)
+#define SJ_PROBE 1
+/* The upper context's D8-D15 and A12-A15: bits 0-11. Set, setjmp, set
+ * again, and the jump from sj_deep ten calls down, whose contexts
+ * longjmp gives back; sj_deep coming back is bit 12. */
+#define SJ_TC_DSET(r, v) "    mov d" #r ", " #v "\n"
+#define SJ_TC_ASET(r, v) "    mov d0, " #v "\n    mov.a a" #r ", d0\n"
+#define SJ_TC_ALL(a) \
+    SJ_TC_DSET(8, a##1) SJ_TC_DSET(9, a##2) SJ_TC_DSET(10, a##3)      \
+    SJ_TC_DSET(11, a##4) SJ_TC_DSET(12, a##5) SJ_TC_DSET(13, a##6)    \
+    SJ_TC_DSET(14, a##7) SJ_TC_DSET(15, a##8) SJ_TC_ASET(12, a##9)    \
+    SJ_TC_ASET(13, a##10) SJ_TC_ASET(14, a##11) SJ_TC_ASET(15, a##12)
+#define SJ_TC_DCHK(r, v, bit) "    mov d0, " #v "\n    jeq d" #r ", d0, 9f\n" \
+    "    mov.u d1, " #bit "\n    or d2, d2, d1\n9:\n"
+#define SJ_TC_ACHK(r, v, bit) "    mov.d d0, a" #r "\n    mov d1, " #v "\n" \
+    "    jeq d0, d1, 9f\n    mov.u d1, " #bit "\n    or d2, d2, d1\n9:\n"
+__asm__(
+".text\n"
+".globl sj_probe\n"
+".type sj_probe, @function\n"
+"sj_probe:\n"
+"    lea a10, [a10]-8\n"
+"    st.a [a10]0, a4\n"               /* env */
+SJ_TC_ALL()
+"    call setjmp\n"
+"    jnz d2, 1f\n"
+SJ_TC_ALL(10)
+"    ld.a a4, [a10]0\n"
+"    mov d4, 10\n"
+"    call sj_deep\n"
+"    mov.u d2, 4096\n"
+"    j 8f\n"
+"1:  mov d2, 0\n"
+SJ_TC_DCHK(8, 1, 1) SJ_TC_DCHK(9, 2, 2) SJ_TC_DCHK(10, 3, 4)
+SJ_TC_DCHK(11, 4, 8) SJ_TC_DCHK(12, 5, 16) SJ_TC_DCHK(13, 6, 32)
+SJ_TC_DCHK(14, 7, 64) SJ_TC_DCHK(15, 8, 128) SJ_TC_ACHK(12, 9, 256)
+SJ_TC_ACHK(13, 10, 512) SJ_TC_ACHK(14, 11, 1024) SJ_TC_ACHK(15, 12, 2048)
+"8:  lea a10, [a10]8\n"
+"    ret\n"
+);
+void sj_deep(jmp_buf env, int n);
+void sj_deep(jmp_buf env, int n)
+{
+    volatile int clobber[8];
+    for (int k = 0; k < 8; k++)
+        clobber[k] = n * 31 + k;
+    if (n == 0)
+        longjmp(env, 1);
+    sj_deep(env, n - 1);
+    clobber[0] = 0;
+}
+
+#elif defined(__XTENSA__)
+#define SJ_PROBE 1
+/* The probe's a2-a7, which a call8 leaves to it: bits 0-5. Set, setjmp,
+ * set again, and the jump from sj_deep ten calls down -- deeper than the
+ * register file -- which longjmp's spill and the underflow handler have
+ * to bring back. sj_deep coming back is bit 6. */
+#define SJ_XT_CHK(r, v, bit) "    movi a8, " #v "\n    beq a" #r ", a8, 9f\n" \
+    "    movi a8, " #bit "\n    or a9, a9, a8\n9:\n"
+__asm__(
+".text\n"
+".globl sj_probe\n"
+".type sj_probe, @function\n"
+".align 4\n"
+"sj_probe:\n"
+"    entry a1, 32\n"
+"    s32i a2, a1, 0\n"               /* env */
+"    movi a2, 1\n movi a3, 2\n movi a4, 3\n movi a5, 4\n movi a6, 5\n"
+"    movi a7, 6\n"
+"    l32i a10, a1, 0\n"
+"    call8 setjmp\n"
+"    bnez a10, 1f\n"
+"    movi a2, 101\n movi a3, 102\n movi a4, 103\n movi a5, 104\n"
+"    movi a6, 105\n movi a7, 106\n"
+"    l32i a10, a1, 0\n"
+"    movi a11, 10\n"
+"    call8 sj_deep\n"
+"    movi a9, 64\n"
+"    j 8f\n"
+"1:  movi a9, 0\n"
+SJ_XT_CHK(2, 1, 1) SJ_XT_CHK(3, 2, 2) SJ_XT_CHK(4, 3, 4)
+SJ_XT_CHK(5, 4, 8) SJ_XT_CHK(6, 5, 16) SJ_XT_CHK(7, 6, 32)
+"8:  mov a2, a9\n"
+"    retw\n"
+);
+void sj_deep(jmp_buf env, int n);
+void sj_deep(jmp_buf env, int n)
+{
+    volatile int clobber[8];
+    for (int k = 0; k < 8; k++)
+        clobber[k] = n * 31 + k;
+    if (n == 0)
+        longjmp(env, 1);
+    sj_deep(env, n - 1);
+    clobber[0] = 0;
+}
 #endif
 
 #if defined(SJ_PROBE)
@@ -535,7 +695,11 @@ static jmp_buf probe_env;
 
 int main(void)
 {
-#if defined(SJ_PROBE)
+#if defined(SJ_PROBE_INDEX)
+    int r = sj_probe(probe_env);
+    if (r != 0)
+        return r;                       /* that register did not come back */
+#elif defined(SJ_PROBE)
     unsigned long m = (unsigned long)(unsigned)sj_probe(probe_env);
     for (int k = 0; k < 32; k++)
         if (m >> k & 1)

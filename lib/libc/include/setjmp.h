@@ -6,8 +6,8 @@
  * pointer; no C expression denotes those. The implementations are machine
  * code (src/setjmp/), one file per architecture.
  *
- * The buffer is 256 bytes on every target rather than sized per target,
- * so a jmp_buf in a shared struct has the same size everywhere: x86-64
+ * The buffer is 256 bytes on every target but the AVR rather than sized
+ * per target, so a jmp_buf in a shared struct has the same size: x86-64
  * uses 64 of them, aarch64 160, RV64 with D 208, RV32 with D 152 (which
  * is why a 32-bit target's is long long: 8-aligned for its fsd), and a
  * Cortex-M with an FPU 104.
@@ -33,6 +33,10 @@ typedef int jmp_buf[(14 + 8 + 2) * 2];
 #else
 typedef int jmp_buf[(9 * 2) + 3 + 16];
 #endif
+#elif defined(__AVR__)
+/* lib/avr's: r2-r17, Y, SP, SREG and a 2-byte return address, in the 24
+ * bytes avr-libc's takes -- not 256 of an ATmega328P's 2048 */
+typedef unsigned char jmp_buf[24];
 #elif __SIZEOF_LONG__ == 8
 typedef long jmp_buf[32];
 #else

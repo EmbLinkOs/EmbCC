@@ -165,7 +165,7 @@ freestanding `<limits.h>` for the type widths.
 | `<complex.h>` | complete |
 | `<fenv.h>` | exception flags and rounding modes, on x86-64 (`MXCSR`) and AArch64 (`FPSR`/`FPCR`) |
 | `<time.h>` | `time`, `clock`, `difftime`, `mktime`, `timegm`, `gmtime`, `localtime`, the `_r` forms, `asctime`, `ctime`, `strftime`, `timespec_get` |
-| `<setjmp.h>` | `setjmp`/`longjmp` for x86-64 and AArch64 |
+| `<setjmp.h>` | `setjmp`/`longjmp` on every target: x86-64, AArch64, ARM state, Thumb (every Cortex-M, with s16-s31 where there is an FPU), RISC-V (with fs0-fs11 under F or D), MIPS o32 and n64, LoongArch64, PowerPC, SPARC, Xtensa, TriCore, ColdFire, RX, and on AVR in `lib/avr`. `jmp_buf` is 256 bytes everywhere but AVR, where it is 24 |
 | `<signal.h>` | `signal` and `raise` |
 | `<locale.h>` | `setlocale` and `localeconv`, one locale |
 | `<threads.h>` | threads, mutexes, condition variables, `call_once` |

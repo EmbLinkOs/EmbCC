@@ -959,7 +959,7 @@ rt-embedded: embcc embar
 # the recipe, and tests/golden/libc-embedded.sh runs what it builds on the
 # boards. Not avr: lib/libc's formatter and stream buffers alone are more
 # than an ATmega328P's flash and SRAM. AVR's library is lib/avr's (the string
-# and _P functions, sprintf and its _P forms, the EEPROM), which rt-embedded
+# and _P functions, sprintf and its _P forms, the EEPROM, setjmp), which rt-embedded
 # builds into build/libc/avr/libc.a beside the startup.
 LIBC_EMBEDDED_ALL := thumbv6m-none-eabi thumbv8m.base-none-eabi thumbv7m-none-eabi thumbv7em-none-eabi \
                  thumbv7em-none-eabihf thumbv8m.main-none-eabi \
