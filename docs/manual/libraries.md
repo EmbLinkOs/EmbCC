@@ -217,10 +217,13 @@ does; a C17 program that parses `"0b1"` with base 0 gets 1, not 0. A
 prefix with no digit after it is not one: `strtol("0xz", &end, 16)` is 0
 and leaves `end` at the `x`.
 
-**`strtod`.** A decimal with at most 15 significant digits and a power
-of ten up to 10^22 is converted exactly. Other inputs may be one unit in
-the last place from the nearest value, which C11 permits. Hexadecimal
-input is exact.
+**`strtod`.** `strtod`, `strtof` and `strtold` are correctly rounded:
+the nearest value of the type, ties to even, for every input, each at its
+own precision -- a `long double` keeps the x87's 64 bits or binary128's
+113. Hexadecimal input is rounded the same way, and its binary exponent
+is optional (`strtod("0x1")` is 1). scanf's floating conversions and
+`wcstod` give the same answers; scanf keeps a numeral's first 900 digits
+and reads the rest as one, which can matter only to a `long double`.
 
 **Buffering.** `BUFSIZ` is 4096 and `FOPEN_MAX` is 32. `stdout` is fully
 buffered, or line-buffered when the backend reports it is a terminal;

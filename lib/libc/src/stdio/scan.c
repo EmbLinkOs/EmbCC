@@ -162,87 +162,114 @@ int __scan_flt(struct scan *s, int width, int assign, va_list *ap, int len)
         return 1;
     }
 
-    int hex = 0;
+    /* The rest is read into a buffer and converted by strtof, strtod or
+     * strtold -- correctly rounded, at the type's own precision, and the
+     * same answer the program's own strtod gives. The digits past the
+     * buffer's 900 can only say whether the value is above what was kept
+     * (strtod.c), so they are counted, and stand in as one nonzero digit
+     * and an exponent. */
+    char buf[960];
+    int n = 0, kept = 0, sticky = 0, hex = 0, point = 0;
+    long extra = 0;              /* integer-part digits not kept */
+    if (neg)
+        buf[n++] = '-';
     if (width && c == '0') {
+        buf[n++] = '0';
         any = 1;
         width--;
         c = sgetc(s);
         if (width && (c == 'x' || c == 'X')) {
             hex = 1;
             any = 0;
+            buf[n++] = 'x';
             width--;
             c = sgetc(s);
         }
     }
-
     int base = hex ? 16 : 10;
-    long exp = 0;
-    while (width && digit_val(c) < base) {
-        v = v * base + digit_val(c);
-        any = 1;
-        width--;
-        c = sgetc(s);
-    }
-    if (width && c == '.') {
-        width--;
-        c = sgetc(s);
-        while (width && digit_val(c) < base) {
-            v = v * base + digit_val(c);
-            exp -= hex ? 4 : 1;
+    while (width && (digit_val(c) < base || (c == '.' && !point))) {
+        if (c == '.') {
+            point = 1;
+            buf[n++] = '.';
+        } else if (kept < 900) {
+            buf[n++] = (char)c;
+            kept++;
             any = 1;
-            width--;
-            c = sgetc(s);
+        } else {
+            any = 1;
+            if (c != '0')
+                sticky = 1;
+            if (!point)
+                extra++;
         }
+        width--;
+        c = sgetc(s);
     }
     if (!any) {
+        if (hex) {
+            /* "0x" and no digit: the 0, the 'x' gone with no way back
+             * (one character of pushback) -- the position is unspecified
+             * by C, and the 0 is the useful reading. */
+            sungetc(s, c);
+            if (assign) store_flt(ap, len, neg ? -0.0L : 0.0L);
+            return 1;
+        }
         sungetc(s, c);
         return 0;
     }
-    /* A decimal exponent is 'e', a hex one is 'p' and counts in powers of
-     * two -- which is why `exp` above is already in bits for the hex case. */
+    long ex = 0;
     if (width && ((hex && (c == 'p' || c == 'P')) ||
                   (!hex && (c == 'e' || c == 'E')))) {
-        int save_w = width;
+        int save_w = width, eneg = 0;
         width--;
         c = sgetc(s);
-        int eneg = 0;
         if (width && (c == '-' || c == '+')) {
             eneg = c == '-';
             width--;
             c = sgetc(s);
         }
-        if (digit_val(c) < 10) {
-            long e = 0;
+        if (width && digit_val(c) < 10) {
             while (width && digit_val(c) < 10) {
-                if (e < 100000) e = e * 10 + digit_val(c);
+                if (ex < 100000000)
+                    ex = ex * 10 + digit_val(c);
                 width--;
                 c = sgetc(s);
             }
-            exp += eneg ? -e : e;
+            if (eneg)
+                ex = -ex;
         } else {
             /* "1e" with no exponent digits: the 'e' is not part of the
              * number. One pushback slot, so the caller sees the character
              * after it; the standard allows that. */
-            sungetc(s, c);
             width = save_w;
         }
     }
     sungetc(s, c);
-
-    /* Scale by repeated squaring rather than a loop of multiplies: 1e300
-     * is 300 multiplications the naive way, and each one adds rounding. */
-    long double base_f = hex ? 2.0L : 10.0L;
-    long n = exp < 0 ? -exp : exp;
-    long double scale = 1.0L, p = base_f;
-    while (n) {
-        if (n & 1) scale *= p;
-        p *= p;
-        n >>= 1;
+    if (sticky) {
+        if (!point)
+            buf[n++] = '.';
+        buf[n++] = '1';
     }
-    v = exp < 0 ? v / scale : v * scale;
-
-    if (assign)
-        store_flt(ap, len, neg ? -v : v);
+    ex += hex ? 4 * extra : extra;
+    /* the exponent, written here: snprintf would bring printf in */
+    buf[n++] = hex ? 'p' : 'e';
+    if (ex < 0) {
+        buf[n++] = '-';
+        ex = -ex;
+    }
+    char t[12];
+    int k = 0;
+    do t[k++] = (char)('0' + ex % 10); while ((ex /= 10) && k < 12);
+    while (k)
+        buf[n++] = t[--k];
+    buf[n] = 0;
+    if (assign) {
+        switch (len) {
+        case L_LDOUBLE: *va_arg(*ap, long double *) = strtold(buf, NULL); break;
+        case L_DOUBLE:  *va_arg(*ap, double *) = strtod(buf, NULL); break;
+        default:        *va_arg(*ap, float *) = strtof(buf, NULL); break;
+        }
+    }
     return 1;
 }
 

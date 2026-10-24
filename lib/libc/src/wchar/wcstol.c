@@ -11,97 +11,80 @@
  * Reimplementing strtod for wide input would mean a second copy of the
  * exact decimal arithmetic in lib/libc/src/stdlib/strtod.c, and a
  * second copy is a second thing to get wrong.
+ *
+ * The copy is the whole of what can be a number, however long: it was
+ * cut at 511 characters, so a longer decimal rounded by its first 511
+ * digits only and its end was put at the cut.
  */
 #include <wchar.h>
 #include <stdlib.h>
 
-/* A number longer than this has extra digits that cannot change the
- * answer -- see strtod.c on why digits past the accumulator's width
- * only shift the exponent. */
-#define MAXNUM 512
+/* The longest start of s a number can be: white space, then the
+ * characters of a numeral, inf, nan and nan(...). Every one is below 128,
+ * which is what makes the copy a byte copy. It goes on the stack up to
+ * this many characters, and is allocated beyond -- a 900-digit decimal
+ * still rounds by all its digits, and its end is still found. */
+#define STACKNUM 128
 
-static void narrow(const wchar_t *s, char *buf)
+static size_t numlen(const wchar_t *s)
 {
     size_t i = 0;
-    while (i + 1 < MAXNUM && s[i] && (unsigned)s[i] < 128u) {
-        buf[i] = (char)s[i];
+    while (s[i] == ' ' || (s[i] >= '\t' && s[i] <= '\r'))
         i++;
+    for (; s[i]; i++) {
+        wchar_t c = s[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') ||
+              (c >= 'A' && c <= 'Z') || c == '.' || c == '+' || c == '-' ||
+              c == '(' || c == ')' || c == '_'))
+            break;
     }
-    buf[i] = 0;
+    return i;
+}
+
+/* s's number as bytes, in stack (STACKNUM bytes) or allocated; NULL if
+ * an allocation failed */
+static char *narrow(const wchar_t *s, char *stack)
+{
+    size_t n = numlen(s);
+    char *buf = n < STACKNUM ? stack : malloc(n + 1);
+    if (!buf)
+        return NULL;
+    for (size_t i = 0; i < n; i++)
+        buf[i] = (char)s[i];
+    buf[n] = 0;
+    return buf;
 }
 
 /* The end pointer, mapped from a byte offset back to a character
  * offset. They are the same number, because every byte that was copied
  * came from exactly one wchar_t below 128. */
-static void put_end(const wchar_t *s, wchar_t **end, const char *buf,
-                    const char *e)
-{
-    if (end)
-        *end = (wchar_t *)s + (e ? (size_t)(e - buf) : 0);
-}
+#define WIDE(T, name, call)                                                 \
+    T name                                                                  \
+    {                                                                       \
+        char stack[STACKNUM], *e = NULL, *buf = narrow(s, stack);           \
+        if (!buf) {                                                         \
+            if (end) *end = (wchar_t *)s;                                   \
+            return 0;                                                       \
+        }                                                                   \
+        T v = call;                                                         \
+        if (end) *end = (wchar_t *)s + (size_t)(e - buf);                   \
+        if (buf != stack) free(buf);                                        \
+        return v;                                                           \
+    }
 
-long wcstol(const wchar_t *__restrict s, wchar_t **__restrict end, int base)
-{
-    char buf[MAXNUM], *e = NULL;
-    narrow(s, buf);
-    long v = strtol(buf, &e, base);
-    put_end(s, end, buf, e);
-    return v;
-}
-
-unsigned long wcstoul(const wchar_t *__restrict s, wchar_t **__restrict end,
-                      int base)
-{
-    char buf[MAXNUM], *e = NULL;
-    narrow(s, buf);
-    unsigned long v = strtoul(buf, &e, base);
-    put_end(s, end, buf, e);
-    return v;
-}
-
-long long wcstoll(const wchar_t *__restrict s, wchar_t **__restrict end,
-                  int base)
-{
-    char buf[MAXNUM], *e = NULL;
-    narrow(s, buf);
-    long long v = strtoll(buf, &e, base);
-    put_end(s, end, buf, e);
-    return v;
-}
-
-unsigned long long wcstoull(const wchar_t *__restrict s,
-                            wchar_t **__restrict end, int base)
-{
-    char buf[MAXNUM], *e = NULL;
-    narrow(s, buf);
-    unsigned long long v = strtoull(buf, &e, base);
-    put_end(s, end, buf, e);
-    return v;
-}
-
-double wcstod(const wchar_t *__restrict s, wchar_t **__restrict end)
-{
-    char buf[MAXNUM], *e = NULL;
-    narrow(s, buf);
-    double v = strtod(buf, &e);
-    put_end(s, end, buf, e);
-    return v;
-}
-
-float wcstof(const wchar_t *__restrict s, wchar_t **__restrict end)
-{
-    char buf[MAXNUM], *e = NULL;
-    narrow(s, buf);
-    float v = strtof(buf, &e);
-    put_end(s, end, buf, e);
-    return v;
-}
-
-long double wcstold(const wchar_t *__restrict s, wchar_t **__restrict end)
-{
-    char buf[MAXNUM], *e = NULL;
-    narrow(s, buf);
-    long double v = strtold(buf, &e);
-    put_end(s, end, buf, e);
-    return v;
-}
+WIDE(long, wcstol(const wchar_t *__restrict s, wchar_t **__restrict end,
+                  int base), strtol(buf, &e, base))
+WIDE(unsigned long, wcstoul(const wchar_t *__restrict s,
+                            wchar_t **__restrict end, int base),
+     strtoul(buf, &e, base))
+WIDE(long long, wcstoll(const wchar_t *__restrict s, wchar_t **__restrict end,
+                        int base), strtoll(buf, &e, base))
+WIDE(unsigned long long, wcstoull(const wchar_t *__restrict s,
+                                  wchar_t **__restrict end, int base),
+     strtoull(buf, &e, base))
+WIDE(double, wcstod(const wchar_t *__restrict s, wchar_t **__restrict end),
+     strtod(buf, &e))
+WIDE(float, wcstof(const wchar_t *__restrict s, wchar_t **__restrict end),
+     strtof(buf, &e))
+WIDE(long double, wcstold(const wchar_t *__restrict s,
+                          wchar_t **__restrict end), strtold(buf, &e))
