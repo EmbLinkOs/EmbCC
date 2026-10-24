@@ -1,10 +1,11 @@
 #!/bin/sh
 # A _Generic that selects a function is that function's name, so the call
 # is direct -- `call @sinf` in the IR, not `call [%v]` through a pointer --
-# and can be inlined. That is the shape of every <tgmath.h> call, `_Generic(x, float: sinf, ...)(x)`; sema checked the selection as an
+# and can be inlined. That is the shape of every <tgmath.h> and <stdbit.h>
+# call, `_Generic(x, float: sinf, ...)(x)`; sema checked the selection as an
 # expression on its own first, where the name decayed to a pointer, and each
 # of those calls went through a register. Parenthesized, nested, through
-# the header, and on a name that is a static inline function.
+# the two headers, and on a name that is a static inline function.
 set -u
 echo "TEST-MARKER generic-direct-call"
 . "$(dirname "$0")/../lib.sh"
@@ -14,6 +15,7 @@ rm -rf "${out:?}"; mkdir -p "$out"
 
 cat > "$out/g.c" <<'EOF'
 #include <tgmath.h>
+#include <stdbit.h>
 float sinf(float);
 static inline unsigned twice(unsigned x) { return 2 * x; }
 float viatg(float x) { return sqrt(x); }
@@ -23,6 +25,7 @@ unsigned nested(unsigned x)
 {
     return _Generic(x, unsigned: _Generic(1.0, double: twice))(x);
 }
+unsigned bits(unsigned x) { return stdc_count_ones(x); }
 EOF
 
 fail=0
@@ -33,7 +36,7 @@ for t in x86_64-linux-gnu thumbv7em-none-eabi riscv32-unknown-elf; do
         echo "$t: a call through a pointer:"; grep 'call \[' "$out/$t.ir"
         fail=1
     fi
-    for want in sqrtf sinf twice; do
+    for want in sqrtf sinf twice __stdc_pop_ui; do
         grep -q "call @$want(" "$out/$t.ir" || {
             echo "$t: no direct call of $want"; fail=1; }
     done
