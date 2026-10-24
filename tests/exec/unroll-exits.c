@@ -1,6 +1,7 @@
 // expect-exit: 42
 /* Loops whose trip count is not known, unrolled with every exit kept
- * (src/opt/unroll.c, unrx_one): each copy keeps its exits, the carried
+ * (src/opt/unroll.c, unrx_one) when their bodies are short (the longer
+ * ones here check the loops left alone): each copy keeps its exits, the carried
  * values are renamed from copy to copy, and an exit from the middle goes
  * through a stub that moves them back. What can go wrong is which copy's
  * value an exit sees, so every loop below is left from each position in
@@ -71,6 +72,31 @@ static unsigned hash_until(const unsigned char *s, unsigned char stop)
     }
 }
 
+/* strchr: two returns laid out in the loop's middle, moved out of it
+ * first, and `for (;;)`'s jump back */
+__attribute__((noinline))
+static const char *chr(const char *p, int c)
+{
+    for (;;) {
+        if (*p == c)
+            return p;
+        if (!*p)
+            return 0;
+        p++;
+    }
+}
+
+/* a value computed once in the body and read by the exit after it */
+__attribute__((noinline))
+static int first_over(const int *a, int lim)
+{
+    for (;;) {
+        int v = *a++ * 3;
+        if (v > lim)
+            return v;
+    }
+}
+
 int main(void)
 {
     /* a sorted list 0, 3, 6, ..., 45 */
@@ -95,6 +121,20 @@ int main(void)
                 return 3;
         }
     }
+
+    static const char hay[] = "abcdefghijklm";
+    for (int c = 'a'; c <= 'n'; c++) {
+        const char *want = c <= 'm' ? hay + (c - 'a') : 0;
+        if (chr(hay, c) != want)
+            return 7;
+    }
+    if (chr(hay, 0) != hay + 13)
+        return 8;
+    static const int vals[10] = { 1, 4, 2, 8, 5, 7, 3, 9, 6, 100 };
+    static const int want_v[8] = { 12, 12, 12, 24, 24, 24, 300, 300 };
+    for (int lim = 3; lim <= 31; lim += 4)
+        if (first_over(vals, lim) != want_v[(lim - 3) / 4])
+            return 9;
 
     static const char *strs[] = { "", "a", "ab", "abc", "abcd", "abcde",
                                   "abcdef", "abcdefg", "abcdefgh",
