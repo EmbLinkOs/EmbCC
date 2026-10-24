@@ -106,6 +106,32 @@ void _Exit(int status)
     for (;;) {}
 }
 
+/* quick_exit's own list (C11 7.22.4.3, 7.22.4.7): the way out for a
+ * program whose atexit handlers and destructors cannot be trusted to run
+ * -- another thread still using what they tear down -- which therefore
+ * runs only these, and then leaves as _Exit does, nothing flushed. Last
+ * registered, first run; a handler registered while they run is run next,
+ * as C wants it after the ones already called. C11 promises 32. */
+#define MAX_QUICK_EXIT 32
+
+static void (*g_q[MAX_QUICK_EXIT])(void);
+static int g_qn;
+
+int at_quick_exit(void (*f)(void))
+{
+    if (!f || g_qn >= MAX_QUICK_EXIT)
+        return -1;
+    g_q[g_qn++] = f;
+    return 0;
+}
+
+void quick_exit(int status)
+{
+    while (g_qn > 0)
+        g_q[--g_qn]();
+    _Exit(status);
+}
+
 void abort(void)
 {
     /* SIGABRT would be raised here if this library had signals. Until then,

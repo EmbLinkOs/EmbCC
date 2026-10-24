@@ -86,18 +86,23 @@ variant() {
 
 cat > "$out/drv-m4.c" <<'EOT'
 /* main's result out through semihosting SYS_EXIT_EXTENDED (the
- * harness's boot has run the constructors) */
+ * harness's boot has run the constructors) -- by _exit, which replaces
+ * lib/libc's weak bare-metal one, so a program that leaves by exit,
+ * _Exit or quick_exit is heard as well */
 int prog_main(void);
 static volatile unsigned blk[2];
-int main(void)
+void _exit(int r)
 {
-    int r = prog_main();
     blk[0] = 0x20026u;              /* ADP_Stopped_ApplicationExit */
     blk[1] = (unsigned)r;
     __asm__ volatile("mov r1, %0\n\tmovs r0, #0x20\n\tbkpt #0xab"
                      : : "r"(blk) : "r0", "r1", "memory");
     for (;;)
         ;
+}
+int main(void)
+{
+    _exit(prog_main());
 }
 EOT
 cat > "$out/drv-a7.c" <<'EOT'
@@ -109,15 +114,18 @@ EOT
 cat > "$out/drv-rv.c" <<'EOT'
 /* main's result out through virt's test device: 0x5555 exits 0, and
  * 0x3333 with a code in the upper half exits with that code (the
- * harness's boot has run the constructors) */
+ * harness's boot has run the constructors) -- by _exit, as on the M4 */
 int prog_main(void);
-int main(void)
+void _exit(int r)
 {
-    int r = prog_main();
     *(volatile unsigned *)0x100000u =
         r ? ((unsigned)r << 16) | 0x3333u : 0x5555u;
     for (;;)
         ;
+}
+int main(void)
+{
+    _exit(prog_main());
 }
 EOT
 

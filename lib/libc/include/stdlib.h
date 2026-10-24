@@ -50,6 +50,10 @@ int   __cxa_atexit(void (*f)(void *), void *arg, void *dso);
 void  __cxa_finalize(void *dso);
 void  exit(int status);
 void  _Exit(int status);
+/* The exit that runs only what at_quick_exit registered (C11 7.22.4.7):
+ * no atexit handlers, no destructors, no flush. */
+int   at_quick_exit(void (*f)(void));
+void  quick_exit(int status);
 char *getenv(const char *name);
 /* The vector getenv reads; the program's startup code publishes it. */
 extern char **environ;
