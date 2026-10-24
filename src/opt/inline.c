@@ -308,6 +308,15 @@ static void inline_call(struct ir_func *fn, int ci, struct ir_func *cf)
                 struct ir_ins *mv = &buf[m++];
                 ins_blank(mv);
                 mv->op = IR_MOV; mv->dst = dst; mv->a = in.a;
+                /* the value's width and class are the call's -- what the
+                 * caller read the result as. Without them the move was
+                 * width 0, which AArch64 copied between stack slots as a
+                 * single (ldur/stur s): four bytes of a double, so a
+                 * static inline function's double result was garbage in
+                 * its top half (msun's lgamma of a negative argument
+                 * returned infinity at -O1). */
+                mv->w = call.w;
+                mv->flt = call.flt;
                 mv->line = in.line;      /* the callee's `return` */
                 mv->col = in.col;
             }
