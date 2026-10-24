@@ -159,9 +159,9 @@ freestanding `<limits.h>` for the type widths.
 | `<string.h>` | all of C11 §7.24, plus `strdup`, `strndup`, `strnlen`, `stpcpy`, `stpncpy` and `mempcpy` |
 | `<strings.h>` | `bzero`, `bcopy`, `bcmp`, `index`, `rindex`, `strcasecmp`, `strncasecmp`, `ffs`. Each is defined weak, so a program's own `index` or `bcopy` takes its place |
 | `<ctype.h>`, `<wctype.h>` | complete, for the `"C"` locale; the classification functions return 0 or 1 |
-| `<stdlib.h>` | `malloc` family with `aligned_alloc`; `strtol` family, `strtod`/`strtof`/`strtold`, `ato*`; `qsort` (heapsort) and `bsearch`; `rand`/`srand` (`RAND_MAX` is 2147483647); `abs`/`div` families; `atexit`, `exit`, `_Exit`, `abort`; `getenv`; `system` (always reports no command processor) |
-| `<stdio.h>` | `FILE` streams with buffering, files by name, positioning (`fseek`, `ftell`, `fgetpos`, `fsetpos`, `rewind`), `remove`, `rename`, `setvbuf`, `ungetc`, `perror`, and the complete `printf` and `scanf` families (`v`, `f`, `s`, `sn` forms) |
-| `<math.h>`, `<tgmath.h>` | every C11 function at all three widths |
+| `<stdlib.h>` | `malloc` family with `aligned_alloc`; `strtol` family, `strtod`/`strtof`/`strtold`, `ato*`; `qsort` (heapsort) and `bsearch`; `rand`/`srand` (`RAND_MAX` is 2147483647); `abs`/`div` families; `atexit`, `exit`, `_Exit`, `abort`, `at_quick_exit`, `quick_exit`; the multibyte conversions without a state (`mblen`, `mbtowc`, `wctomb`, `mbstowcs`, `wcstombs`), in UTF-8; `getenv`; `system` (always reports no command processor) |
+| `<stdio.h>` | `FILE` streams with buffering, files by name, positioning (`fseek`, `ftell`, `fgetpos`, `fsetpos`, `rewind`), `remove`, `rename`, `tmpfile`, `tmpnam`, C11's exclusive `"x"` open mode, `setvbuf`, `ungetc`, `perror`, and the complete `printf` and `scanf` families (`v`, `f`, `s`, `sn` forms) |
+| `<math.h>`, `<tgmath.h>` | every C11 function at all three widths; `<tgmath.h>` chooses the width from every generic argument, as C11 7.25 says (`pow(2.0f, 3.0L)` is `powl`) |
 | `<complex.h>` | complete: every function at all three widths |
 | `<fenv.h>` | exception flags and rounding modes, on x86-64 (`MXCSR`) and AArch64 (`FPSR`/`FPCR`) |
 | `<time.h>` | `time`, `clock`, `difftime`, `mktime`, `timegm`, `gmtime`, `localtime`, the `_r` forms, `asctime`, `ctime`, `strftime`, `timespec_get` |
@@ -169,9 +169,9 @@ freestanding `<limits.h>` for the type widths.
 | `<signal.h>` | `signal` and `raise` |
 | `<locale.h>` | `setlocale` and `localeconv`, one locale |
 | `<threads.h>` | threads, mutexes, condition variables, `call_once` |
-| `<wchar.h>`, `<uchar.h>` | wide strings, `wcsto*`, restartable UTF-8 conversions (`mbrtowc`, `wcrtomb`, `mbsrtowcs`, `wcsrtombs`), `mbrtoc16`/`c16rtomb`/`mbrtoc32`/`c32rtomb` |
+| `<wchar.h>`, `<uchar.h>` | wide strings, `wcsto*`, restartable UTF-8 conversions (`mbrtowc`, `wcrtomb`, `mbsrtowcs`, `wcsrtombs`), `btowc`, `wctob`, `mbrtoc16`/`c16rtomb`/`mbrtoc32`/`c32rtomb` |
 | `<stdatomic.h>` | the C11 interface over the compiler's atomic builtins; no library code |
-| `<assert.h>`, `<inttypes.h>`, `<errno.h>` | complete; `errno` values are the traditional POSIX numbers |
+| `<assert.h>`, `<inttypes.h>`, `<errno.h>` | complete; each `PRI`/`SCN` macro has the length modifier of its type on the target (`PRId64` is `"lld"` where `int64_t` is `long long`); `errno` values are the traditional POSIX numbers |
 
 ### Behavior worth knowing
 
@@ -248,8 +248,16 @@ call nothing in the library.
 **Locale.** There is one locale, `"C"`. `setlocale` accepts `"C"`,
 `"POSIX"` and `""` and returns a null pointer for any other name. The
 multibyte encoding is UTF-8: overlong forms, surrogates and values above
-U+10FFFF are rejected. `wchar_t` is 32 bits on the targets this library is
-built for.
+U+10FFFF are rejected. `wchar_t` is 32 bits on every target but Xtensa,
+where it is 16, as GCC has it; there a character past U+FFFF has no wide
+form, and its UTF-8 is rejected too rather than cut down to fit.
+
+**Temporary files.** `tmpfile` creates its file under `/tmp`, named with
+twelve letters from the backend's entropy (or the clock, where there is
+none), opens it exclusively and for the owner only, and removes the name
+at once: the file lasts as long as the stream. `tmpnam`'s names are under
+`/tmp` too, each one no file had when it was made. A target with no
+filesystem has no temporary files: `tmpfile` returns a null pointer.
 
 **Time.** There is no time-zone database: `localtime` is `gmtime`,
 `tm_isdst` is 0, and `strftime`'s `%z` is `+0000`. `time` and `clock`
@@ -289,9 +297,6 @@ forms of the time functions.
 
 | Missing | Notes |
 |---|---|
-| `tmpfile`, `tmpnam` | |
-| `quick_exit`, `at_quick_exit` | |
-| `mblen`, `mbtowc`, `wctomb`, `mbstowcs`, `wcstombs`, `btowc`, `wctob` | use the restartable `mbr*`/`wcr*` forms |
 | wide-character I/O: `fwide`, `fwprintf`, `wprintf`, `swprintf`, `fgetws`, ... | |
 | `setenv`, `unsetenv` | declared, not defined |
 | C11 Annex K (`*_s` functions) | |
