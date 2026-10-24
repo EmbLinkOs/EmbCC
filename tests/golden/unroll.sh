@@ -156,8 +156,14 @@ echo "the seven counted loops were unrolled, the nest's inner one included"
 #   step2  -- the step is not one, so `n - i` is not the iterations left
 #   down   -- counts down; the test is not `iv < invariant`
 #   brk/cont -- the body is not one straight line
+# Refused as COUNTED loops: a short one may still be copied with every
+# exit kept (unroll/exits-kept), which needs no count.
+took_counted() {
+    grep -qE "unrolled '$1'.*\[unroll/(counted-loop|constant-trip-count)\]" \
+        "$out/rem.txt"
+}
 for f in calls step2 down brk cont; do
-    if took "$f"; then
+    if took_counted "$f"; then
         echo "FAIL: '$f' WAS unrolled. See the comment above this loop in"
         echo "      the test for why that is not a shape this pass handles."
         exit 1
