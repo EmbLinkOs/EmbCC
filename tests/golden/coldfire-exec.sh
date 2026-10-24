@@ -72,8 +72,6 @@ na() {
         echo "shifts a long by 32 or more, undefined when long is 32 bits" ;;
     alignas-decl|alignof-object)
         echo "a 16- or 8-aligned scalar local, refused by name above the 4-byte stack" ;;
-    volatile-local-longjmp)
-        echo "setjmp/longjmp, which lib/libc implements for x86-64 and AArch64 only" ;;
     *) return 1 ;;
     esac
 }

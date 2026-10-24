@@ -64,8 +64,6 @@ na() {
         echo "__builtin_frame_address(1), refused by name: no frame chain (ppc-refuse.sh)" ;;
     atomics-reg)
         echo "a 64-bit long (0x123456789abcdef0L in a long: it exits 4 on ILP32); its 1- and 2-byte atomics run in ppc-atomics.sh" ;;
-    volatile-local-longjmp)
-        echo "setjmp/longjmp, which lib/libc implements for x86-64 and AArch64 only" ;;
     *) return 1 ;;
     esac
 }

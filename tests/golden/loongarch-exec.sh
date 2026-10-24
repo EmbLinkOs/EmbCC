@@ -51,8 +51,6 @@ na() {
     case $1 in
     preprocessor)
         echo "#errors unless the target is x86-64 or AArch64" ;;
-    volatile-local-longjmp)
-        echo "setjmp/longjmp, which lib/libc implements for x86-64 and AArch64 only" ;;
     atomics)
         echo "__builtin_frame_address(1), refused by name: no frame chain (loongarch-refuse.sh)" ;;
     int128-atomic)
