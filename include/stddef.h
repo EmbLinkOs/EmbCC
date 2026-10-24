@@ -25,4 +25,9 @@ typedef struct {
 /* Fold to a size_t constant via the builtin, so offsetof works in an
  * integer-constant-expression (the `&((T*)0)->m` form does not). */
 #define offsetof(type, member) __builtin_offsetof(type, member)
+/* C23: reaching it is undefined, which is what lets the code before it
+ * be compiled as if it cannot be reached. */
+#if !defined(__cplusplus) && __STDC_VERSION__ >= 202311L
+#define unreachable() __builtin_unreachable()
+#endif
 #endif

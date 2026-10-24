@@ -126,6 +126,19 @@
 #define frexp(x, p)    __tgx(frexp, x, p)
 #define modf(x, p)     __tgx(modf, x, p)
 #define nexttoward(x, y) __tgx(nexttoward, x, y)
+/* C23's */
+#define roundeven(x)   __tg1(roundeven, x)
+#define nextup(x)      __tg1(nextup, x)
+#define nextdown(x)    __tg1(nextdown, x)
+#define exp10(x)       __tg1(exp10, x)
+#define fmaximum(x, y) __tg2(fmaximum, x, y)
+#define fminimum(x, y) __tg2(fminimum, x, y)
+#define fmaximum_num(x, y) __tg2(fmaximum_num, x, y)
+#define fminimum_num(x, y) __tg2(fminimum_num, x, y)
+#define fmaximum_mag(x, y) __tg2(fmaximum_mag, x, y)
+#define fminimum_mag(x, y) __tg2(fminimum_mag, x, y)
+#define fmaximum_mag_num(x, y) __tg2(fmaximum_mag_num, x, y)
+#define fminimum_mag_num(x, y) __tg2(fminimum_mag_num, x, y)
 
 /* fma is the one that genuinely needs the right width: its whole
  * purpose is a single rounding, and computing it at a wider type and

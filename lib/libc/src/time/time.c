@@ -157,6 +157,19 @@ int timespec_get(struct timespec *ts, int base)
     return base;
 }
 
+/* timespec_get counts whole seconds -- __os_time's -- so that is its
+ * resolution; where there is no clock there is no TIME_UTC either. */
+int timespec_getres(struct timespec *ts, int base)
+{
+    if (base != TIME_UTC || __os_time() < 0)
+        return 0;
+    if (ts) {
+        ts->tv_sec = 1;
+        ts->tv_nsec = 0;
+    }
+    return base;
+}
+
 /* The "C" locale's names, which is the only locale this library has. They
  * are data, not a locale database: %A is "Sunday" in the C locale, so it
  * is "Sunday" here rather than the abbreviation a lazy strftime returns. */

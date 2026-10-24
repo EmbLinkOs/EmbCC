@@ -77,6 +77,30 @@ void *memchr(const void *s, int c, size_t n)
     return NULL;
 }
 
+/* The bytes up to and including the first c, and a pointer past it in d;
+ * a null pointer if no c came in the first n. */
+void *memccpy(void *restrict d, const void *restrict s, int c, size_t n)
+{
+    unsigned char *dp = d;
+    const unsigned char *sp = s;
+    unsigned char v = (unsigned char)c;
+    for (size_t i = 0; i < n; i++)
+        if ((dp[i] = sp[i]) == v)
+            return dp + i + 1;
+    return NULL;
+}
+
+/* A store through a volatile pointer is a side effect the compiler must
+ * keep, where a memset of memory nothing reads again may be removed --
+ * which is the point of this one: the memory held a secret. */
+void *memset_explicit(void *d, int c, size_t n)
+{
+    volatile unsigned char *p = d;
+    while (n--)
+        *p++ = (unsigned char)c;
+    return d;
+}
+
 size_t strlen(const char *s)
 {
     const char *p = s;
