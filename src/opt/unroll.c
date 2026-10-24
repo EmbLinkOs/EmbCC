@@ -641,6 +641,11 @@ static int unroll_one(struct ir_func *fn, char *seen, int nseen)
     free_cfg(bb, nbb);
     if (L.Lh >= 0 && L.Lh < nseen)
         seen[L.Lh] = 1;
+    /* ...and the block of copies, which ends in a conditional branch
+     * back to itself: a loop to unrx_find, whose copies would be copied
+     * again */
+    if (!T && Lunroll < nseen)
+        seen[Lunroll] = 1;
     if (remarks_on() && fn->src && T)
         remark_add("unroll", "unrolled", fn->name, "constant-trip-count",
                    fn->file, lineh ? lineh : fn->line,
@@ -651,6 +656,499 @@ static int unroll_one(struct ir_func *fn, char *seen, int nseen)
                    fn->file, lineh ? lineh : fn->line,
                    "%d copies of a %d-instruction body, the original kept "
                    "for the remainder", U, nbody);
+    return 1;
+}
+
+/* ==== loops whose trip count is not known =================================
+ *
+ * `while (*pp && (*pp)->key < key) pp = &(*pp)->next;` -- a list walk, a
+ * search, a scan for a terminator -- has no count to divide by U: it
+ * leaves when its data says so, from the middle of its body as well as at
+ * its test. Such a loop is unrolled by keeping every exit: U copies of the
+ * body, each with its own exits, and only the last ending in the back
+ * edge:
+ *
+ *   Lh:  body   if (!a) goto X   ...   if (!c) goto out     <- copy 1
+ *        ...
+ *        body   if (!a) goto X   ...   if (c) goto Lh       <- copy U
+ *   out:
+ *
+ * The values the loop carries are renamed from copy to copy, as the
+ * counted unroller renames them, so each copy reads what the one before
+ * it computed: a pointer chase alternates registers instead of copying
+ * the new node into the old one's every element -- the `mov` in EmbCC's
+ * list walk that clang's has not. The last copy writes the original
+ * names, so the back edge carries them as the loop always did. An exit
+ * taken earlier finds the carried values under their copies' names, and
+ * goes through a stub that moves them back and jumps where the exit
+ * went; the stubs follow the loop, which falls out over them.
+ *
+ * What it saves per iteration is the taken branch back, U-1 times in U,
+ * and the copy of each carried value. Not a loop that calls (see
+ * unr_find), nor a long one: the branches a copy keeps are most of a
+ * short body's cost, and none of a long one's.
+ */
+
+#define UNRX_MAX_BODY 12  /* instructions in the body, its branches counted */
+#define UNRX_BUDGET   28  /* four copies within this, else two */
+
+struct unrxloop {
+    int lo, hi;        /* [lo, hi): the header's label .. the back edge */
+    int Lh;
+    int nexit;         /* branches out of the body, the back edge's not counted */
+};
+
+/* Does anything but instruction `skip` name label L? */
+static int unr_label_named(struct ir_func *fn, int L, int skip)
+{
+    for (int m = 0; m < fn->nins; m++) {
+        if (m == skip)
+            continue;
+        struct unr_lblctx lc = { L, 0 };
+        if (fn->ins[m].op == IR_LABELADDR && fn->ins[m].label == L)
+            return 1;
+        each_label(fn, &fn->ins[m], unr_lbl_cb, &lc);
+        if (lc.hit)
+            return 1;
+    }
+    return 0;
+}
+
+/* The exit code a loop holds in its middle: `for (;;) { if (*p == c)
+ * return p; ... }` lays the return out between the loop's blocks, so the
+ * loop's instructions are not one range. Such a run of blocks, which the
+ * loop does not come back from, moves to after the function's last
+ * instruction, and the branch around it is turned over to branch to it:
+ *
+ *   brz c, L  ; exit code ; ret  ; L: ...    becomes
+ *   brnz c, X ; L: ...  ...  X: exit code ; ret
+ *
+ * which is also the loop's better layout -- it stays in a straight line
+ * and branches out to leave. Up to UNRX_MAX_RUNS of them. */
+#define UNRX_MAX_RUNS 8
+
+struct unrx_runs { int n, lo[UNRX_MAX_RUNS], hi[UNRX_MAX_RUNS]; };
+
+static int unrx_find(struct ir_func *fn, struct bb *bb, int nbb, int *order,
+                     int norder, const int *l2b, struct defs *d, char *in,
+                     struct unrxloop *L, struct unrx_runs *R,
+                     const char *seen, int nseen)
+{
+    (void)d;
+    enum ir_op last = fn->nins ? fn->ins[fn->nins - 1].op : IR_LABEL;
+    /* the moved exit code goes after the function's last instruction,
+     * which must not fall into it */
+    if (last != IR_RET && last != IR_JMP && last != IR_UD2 && last != IR_IGOTO)
+        return 0;
+    for (int oi = norder - 1; oi >= 0; oi--) {
+        int h = order[oi];
+        if (h == 0 || bb[h].end <= bb[h].start ||
+            fn->ins[bb[h].start].op != IR_LABEL)
+            continue;
+        int Lh = fn->ins[bb[h].start].label;
+        if (Lh < 0 || Lh >= nseen || seen[Lh])
+            continue;
+        int latch = -1, nback = 0;
+        for (int q = 0; q < bb[h].npred; q++) {
+            int p = bb[h].pred[q];
+            if (bb_dominates(bb, h, p)) {
+                latch = p; nback++;
+            }
+        }
+        if (nback != 1 || bb[latch].end <= bb[latch].start)
+            continue;
+        /* a test at the bottom, or `for (;;)`'s jump back, the loop
+         * leaving only from its body */
+        const struct ir_ins *br = &fn->ins[bb[latch].end - 1];
+        if ((br->op != IR_BRNZ && br->op != IR_BRZ && br->op != IR_JMP) ||
+            br->label != Lh)
+            continue;
+        memset(in, 0, (size_t)nbb);
+        loop_body(bb, nbb, h, latch, in);
+        L->lo = bb[h].start; L->hi = bb[latch].end;
+        /* every block of the loop in [lo, hi); any other block there is
+         * exit code to move out (unrx_sink) */
+        int ok = 1;
+        R->n = 0;
+        for (int b = 0; b < nbb && ok; b++) {
+            int inside = bb[b].start >= L->lo && bb[b].end <= L->hi;
+            if (in[b] && !inside)
+                ok = 0;
+            else if (!in[b] && inside && bb[b].end > bb[b].start) {
+                if (R->n && R->hi[R->n - 1] == bb[b].start)
+                    R->hi[R->n - 1] = bb[b].end;      /* the run goes on */
+                else if (R->n == UNRX_MAX_RUNS)
+                    ok = 0;
+                else {
+                    R->lo[R->n] = bb[b].start;
+                    R->hi[R->n++] = bb[b].end;
+                }
+            }
+        }
+        /* and an instruction after it, for its last exit to fall into --
+         * unless it ends in a jump back, and only leaves from its body */
+        if (!ok || (L->hi >= fn->nins && br->op != IR_JMP))
+            continue;
+        for (int r = 0; r < R->n && ok; r++) {
+            /* a run that cannot fall out of its end, after a block that
+             * branches around it or does not fall into it at all */
+            enum ir_op e = fn->ins[R->hi[r] - 1].op;
+            const struct ir_ins *p = &fn->ins[R->lo[r] - 1];
+            if (e != IR_RET && e != IR_JMP && e != IR_UD2)
+                ok = 0;
+            else if (p->op == IR_BRZ || p->op == IR_BRNZ)
+                ok = fn->ins[R->hi[r]].op == IR_LABEL &&
+                     fn->ins[R->hi[r]].label == p->label;
+            else if (p->op != IR_JMP && p->op != IR_RET && p->op != IR_UD2)
+                ok = 0;
+        }
+        if (!ok)
+            continue;
+        int nbody = 0, nexit = 0, r = 0;
+        for (int n = L->lo + 1; n < L->hi - 1 && ok; n++) {
+            if (r < R->n && n == R->lo[r]) {
+                n = R->hi[r++] - 1;               /* not the loop's */
+                continue;
+            }
+            const struct ir_ins *i = &fn->ins[n];
+            if (i->op == IR_LABEL) {
+                /* rotation's empty label, which nothing reaches -- or the
+                 * one after a run, which only the branch around the run
+                 * reaches until unrx_sink turns that over (and the loop
+                 * is looked at again) */
+                int after_run = 0;
+                for (int k = 0; k < R->n; k++)
+                    if (n == R->hi[k])
+                        after_run = 1;
+                if (!after_run && unr_label_named(fn, i->label, -1))
+                    ok = 0;
+                continue;
+            }
+            nbody++;
+            if (i->op == IR_BRZ || i->op == IR_BRNZ) {
+                /* out of the loop, or it is not a body of one block */
+                int around = 0;            /* the branch around a run */
+                for (int k = 0; k < R->n; k++)
+                    if (n == R->lo[k] - 1)
+                        around = 1;
+                if (!around &&
+                    (i->label < 0 || i->label >= fn->nlabels ||
+                     l2b[i->label] < 0 || in[l2b[i->label]]))
+                    ok = 0;
+                nexit++;
+                continue;
+            }
+            /* the counted unroller's reasons, the same here */
+            if (!unr_copyable(i) || i->op == IR_CALL ||
+                target_op_calls_helper(i))
+                ok = 0;
+        }
+        if (!ok || nbody == 0 || nbody > UNRX_MAX_BODY)
+            continue;
+        L->Lh = Lh;
+        L->nexit = nexit;
+        return nbody;
+    }
+    return 0;
+}
+
+/* Move the runs out (see above): the function less them, then each run
+ * after its last instruction, under a label of its own that the branch
+ * before it, turned over, goes to. A local whose scope held any of a
+ * run's instructions keeps its slot to the end of the function, where
+ * they now are. */
+static void unrx_sink(struct ir_func *fn, const struct unrx_runs *R)
+{
+    struct ibuf nb = { 0, 0, 0 };
+    int *lbl = xmalloc((size_t)R->n * sizeof *lbl);
+    int *newpos = xmalloc((size_t)(fn->nins + 1) * sizeof *newpos);
+    for (int r = 0; r < R->n; r++)
+        lbl[r] = fn->ins[R->lo[r]].op == IR_LABEL ? fn->ins[R->lo[r]].label
+                                                  : fn->nlabels++;
+    int r = 0;
+    for (int n = 0; n < fn->nins; n++) {
+        newpos[n] = nb.n;
+        if (r < R->n && n == R->lo[r]) {
+            n = R->hi[r++] - 1;
+            continue;
+        }
+        struct ir_ins *q = ib_push(&nb);
+        *q = fn->ins[n];
+        for (int k = 0; k < R->n; k++)
+            if (n == R->lo[k] - 1 && (q->op == IR_BRZ || q->op == IR_BRNZ)) {
+                q->op = q->op == IR_BRZ ? IR_BRNZ : IR_BRZ;
+                q->label = lbl[k];
+            }
+    }
+    newpos[fn->nins] = nb.n;
+    int end = nb.n;
+    for (r = 0; r < R->n; r++) {
+        if (fn->ins[R->lo[r]].op != IR_LABEL) {
+            struct ir_ins *p = unr_emit(&nb, IR_LABEL, fn->ins[R->lo[r]].line,
+                                        fn->ins[R->lo[r]].col);
+            p->label = lbl[r];
+        }
+        for (int n = R->lo[r]; n < R->hi[r]; n++) {
+            newpos[n] = nb.n;
+            *ib_push(&nb) = fn->ins[n];
+        }
+    }
+    if (fn->var_scope_lo)
+        for (int v = 0; v < fn->nvars; v++) {
+            int lo = fn->var_scope_lo[v], hi = fn->var_scope_hi[v];
+            int held = 0;
+            for (int k = 0; k < R->n; k++)
+                if (lo < R->hi[k] && hi > R->lo[k])
+                    held = 1;
+            if (lo >= 0 && lo <= fn->nins)
+                fn->var_scope_lo[v] = lo < fn->nins ? newpos[lo] : end;
+            if (held)
+                fn->var_scope_hi[v] = nb.n;
+            else if (hi >= 0 && hi <= fn->nins)
+                fn->var_scope_hi[v] = hi < fn->nins ? newpos[hi] : end;
+        }
+    free(lbl);
+    free(newpos);
+    free(fn->ins);
+    fn->ins = nb.p; fn->nins = nb.n; fn->cap = nb.cap;
+}
+
+/* The stubs an exit from the middle goes through: each moves the carried
+ * values that are under a copy's name back to their own, and jumps on. */
+struct unrx_stub { int label, target, n, *v, *from; };
+struct unrx_stubs { struct unrx_stub *s; int n, cap; };
+
+/* Where an exit to `target` from here goes: target itself when every
+ * carried value is under its own name, else a stub -- the same one for
+ * the same target and the same names. */
+static int unrx_target(struct ir_func *fn, struct unrx_stubs *S, int target,
+                       const int *cur, const char *carried, int nvr)
+{
+    int n = 0;
+    for (int v = 0; v < nvr; v++)
+        if (carried[v] && cur[v] >= 0)
+            n++;
+    if (!n)
+        return target;
+    for (int k = 0; k < S->n; k++) {
+        const struct unrx_stub *st = &S->s[k];
+        int same = st->target == target && st->n == n;
+        for (int j = 0; j < st->n && same; j++)
+            if (cur[st->v[j]] != st->from[j])
+                same = 0;
+        if (same)
+            return st->label;
+    }
+    if (S->n == S->cap) {
+        S->cap = S->cap ? 2 * S->cap : 8;
+        S->s = xrealloc(S->s, (size_t)S->cap * sizeof *S->s);
+    }
+    struct unrx_stub *st = &S->s[S->n++];
+    st->label = fn->nlabels++;
+    st->target = target;
+    st->n = 0;
+    st->v = xmalloc((size_t)n * sizeof *st->v);
+    st->from = xmalloc((size_t)n * sizeof *st->from);
+    for (int v = 0; v < nvr; v++)
+        if (carried[v] && cur[v] >= 0) {
+            st->v[st->n] = v;
+            st->from[st->n++] = cur[v];
+        }
+    return st->label;
+}
+
+static int unrx_one(struct ir_func *fn, char *seen, int nseen)
+{
+    if (fn->nins == 0)
+        return 0;
+    int nbb, *l2b;
+    struct bb *bb = build_cfg(fn, &nbb, &l2b);
+    int *order = xmalloc((size_t)(nbb ? nbb : 1) * sizeof *order), norder;
+    compute_rpo(bb, nbb, order, &norder);
+    if (norder != nbb) {
+        free(order); free(l2b);
+        free_cfg(bb, nbb);
+        return 0;
+    }
+    compute_idom(bb, order, norder);
+    struct defs d;
+    compute_defs(fn, &d);
+    char *in = xmalloc((size_t)(nbb ? nbb : 1));
+    struct unrxloop L;
+    struct unrx_runs R;
+    int nbody = unrx_find(fn, bb, nbb, order, norder, l2b, &d, in, &L, &R,
+                          seen, nseen);
+    free(in);
+    if (nbody && R.n) {
+        /* the exit code out of the way first; the loop is found again,
+         * a range of its own, on the next call */
+        free_defs(&d); free(order); free(l2b);
+        free_cfg(bb, nbb);
+        if (fn->nlabels + R.n > nseen)
+            return 0;
+        unrx_sink(fn, &R);
+        return 1;
+    }
+    int U = nbody * 4 <= UNRX_BUDGET ? 4 : 2;
+    /* a label for each stub there can be, and the exit's, still inside
+     * `seen` -- or the loop is left alone */
+    if (!nbody || fn->nlabels + U * (L.nexit + 1) + 1 > nseen) {
+        free_defs(&d); free(order); free(l2b);
+        free_cfg(bb, nbb);
+        return 0;
+    }
+
+    int nvr = fn->nvregs;
+    /* local: what the counted unroller calls local, a temp whose every
+     * read is in the body after its one write -- a copy's own, renamed
+     * in each. carried: every other temp the body writes, which the back
+     * edge brings round or something after the loop reads: renamed in
+     * the copies but the last, and moved back by the stubs. */
+    char *carried = xcalloc((size_t)(nvr ? nvr : 1), 1);
+    char *local = xmalloc((size_t)(nvr ? nvr : 1));
+    int *cw = xcalloc((size_t)(nvr ? nvr : 1), sizeof *cw);
+    char *cf = xcalloc((size_t)(nvr ? nvr : 1), 1);
+    for (int v = 0; v < nvr; v++)
+        local[v] = d.cnt[v] == 1 && d.ins[v] > L.lo && d.ins[v] < L.hi - 1;
+    for (int m = 0; m < fn->nins; m++) {
+        struct unr_local ul = { local, &d, m, L.hi, nvr };
+        each_read(&fn->ins[m], unr_local_cb, &ul);
+    }
+    for (int n = L.hi - 2; n > L.lo; n--) {      /* the first write's width */
+        int t = def_target(&fn->ins[n]);
+        if (t >= fn->nvars && t < nvr && !local[t]) {
+            carried[t] = 1;
+            cw[t] = ir_result_w(&fn->ins[n]);
+            cf[t] = (char)ir_result_flt(&fn->ins[n]);
+        }
+    }
+
+    int lineh = fn->ins[L.lo].line, colh = fn->ins[L.lo].col;
+    /* where the test at the bottom falls out to; a loop that jumps back
+     * has no such exit */
+    int jmp_back = fn->ins[L.hi - 1].op == IR_JMP;
+    int exit_label = !jmp_back && fn->ins[L.hi].op != IR_LABEL;
+    int Lexit = jmp_back ? -1
+              : exit_label ? fn->nlabels++ : fn->ins[L.hi].label;
+
+    struct unrx_stubs S = { NULL, 0, 0 };
+    struct ibuf nb = { 0, 0, 0 };
+    int *newpos = fn->var_scope_lo
+        ? xmalloc((size_t)(fn->nins + 1) * sizeof *newpos) : NULL;
+    int cstart = 0, cend = 0;
+    int *cur = xmalloc((size_t)(nvr ? nvr : 1) * sizeof *cur);
+    for (int n = 0; n < fn->nins; n++) {
+        if (newpos) newpos[n] = nb.n;
+        if (n > L.lo && n < L.hi)
+            continue;                 /* the body: its copies are below */
+        if (n == L.hi && exit_label) {
+            struct ir_ins *p = unr_emit(&nb, IR_LABEL, lineh, colh);
+            p->label = Lexit;
+        }
+        *ib_push(&nb) = fn->ins[n];
+        if (n != L.lo)
+            continue;
+        cstart = nb.n;
+        for (int v = 0; v < nvr; v++)
+            cur[v] = -1;
+        for (int c = 0; c < U; c++)
+            for (int n2 = L.lo + 1; n2 < L.hi; n2++) {
+                if (fn->ins[n2].op == IR_LABEL)
+                    continue;
+                if (fn->ins[n2].op == IR_JMP && c < U - 1)
+                    continue;         /* into the next copy */
+                struct ir_ins q = fn->ins[n2];
+                ins_own_args(&q);
+                struct lcopy lc = { cur, nvr, 0 };
+                each_read(&q, lcopy_cb, &lc);
+                if (q.op == IR_JMP) {
+                    *ib_push(&nb) = q;    /* the last copy's, back to Lh */
+                    continue;
+                }
+                if (q.op == IR_BRZ || q.op == IR_BRNZ) {
+                    if (n2 == L.hi - 1 && c < U - 1) {
+                        /* the back edge, in a copy that is not the
+                         * last: the loop goes on into the next copy, and
+                         * leaves where it would have fallen out */
+                        q.op = q.op == IR_BRNZ ? IR_BRZ : IR_BRNZ;
+                        q.label = unrx_target(fn, &S, Lexit, cur, carried,
+                                              nvr);
+                    } else if (n2 != L.hi - 1) {
+                        q.label = unrx_target(fn, &S, q.label, cur, carried,
+                                              nvr);
+                    }
+                    *ib_push(&nb) = q;
+                    continue;
+                }
+                int t = def_target(&q);
+                if (t >= fn->nvars && t < nvr) {
+                    if (c == U - 1 && !local[t]) {
+                        cur[t] = -1;
+                    } else {
+                        q.dst = fn->nvregs++;
+                        cur[t] = q.dst;
+                    }
+                }
+                *ib_push(&nb) = q;
+            }
+        /* The stubs, right after the loop: a value a stub reads is live
+         * from its copy to the stub, and the stubs at the function's end
+         * made every one of them live across whatever followed the loop
+         * -- an outer loop's every iteration, on the Cortex-M4 spilled.
+         * The test at the bottom falls out over them. */
+        if (S.n && !jmp_back) {
+            struct ir_ins *p = unr_emit(&nb, IR_JMP, lineh, colh);
+            p->label = Lexit;
+        }
+        for (int k = 0; k < S.n; k++) {
+            const struct unrx_stub *st = &S.s[k];
+            struct ir_ins *p = unr_emit(&nb, IR_LABEL, lineh, colh);
+            p->label = st->label;
+            for (int j = 0; j < st->n; j++) {
+                /* copies' names are fresh, never another move's
+                 * destination, so one after another is the parallel move */
+                p = unr_emit(&nb, IR_MOV, lineh, colh);
+                p->dst = st->v[j];
+                p->a = st->from[j];
+                p->b = -1;
+                p->w = cw[st->v[j]];
+                p->flt = cf[st->v[j]];
+            }
+            p = unr_emit(&nb, IR_JMP, lineh, colh);
+            p->label = st->target;
+            free(st->v);
+            free(st->from);
+        }
+        cend = nb.n;
+    }
+    if (newpos) {
+        newpos[fn->nins] = nb.n;
+        for (int v = 0; v < fn->nvars; v++) {
+            int lo = fn->var_scope_lo[v], hi = fn->var_scope_hi[v];
+            /* a scope that began or ended in the body covers the copies */
+            if (lo > L.lo && lo < L.hi) fn->var_scope_lo[v] = cstart;
+            else if (lo >= 0 && lo <= fn->nins) fn->var_scope_lo[v] = newpos[lo];
+            if (hi > L.lo && hi < L.hi) fn->var_scope_hi[v] = cend;
+            else if (hi >= 0 && hi <= fn->nins) fn->var_scope_hi[v] = newpos[hi];
+        }
+        free(newpos);
+    }
+    int nstub = S.n;
+    free(S.s);
+    free(cur); free(carried); free(local); free(cw); free(cf);
+    free(fn->ins);
+    fn->ins = nb.p; fn->nins = nb.n; fn->cap = nb.cap;
+    free_defs(&d); free(order); free(l2b);
+    free_cfg(bb, nbb);
+    seen[L.Lh] = 1;
+    if (remarks_on() && fn->src)
+        remark_add("unroll", "unrolled", fn->name, "exits-kept",
+                   fn->file, lineh ? lineh : fn->line,
+                   "%d copies of a %d-instruction body whose trip count is "
+                   "not known, each keeping its %d exit%s; %d stub%s move "
+                   "the carried values back", U, nbody,
+                   L.nexit + !jmp_back, L.nexit + !jmp_back == 1 ? "" : "s",
+                   nstub, nstub == 1 ? "" : "s");
     return 1;
 }
 
@@ -666,6 +1164,10 @@ int pass_unroll(struct ir_func *fn)
     int changed = 0, guard = 0;
     while (guard++ < 16 && fn->nlabels + 2 <= cap &&
            unroll_one(fn, seen, cap))
+        changed = 1;
+    /* then the loops no count can be found for, every exit kept */
+    for (guard = 0; guard < 16 && !getenv("EMBCC_NO_UNROLL_EXITS") &&
+                    unrx_one(fn, seen, cap); guard++)
         changed = 1;
     free(seen);
     return changed;
