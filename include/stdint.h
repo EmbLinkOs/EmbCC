@@ -115,14 +115,20 @@ typedef __UINTMAX_TYPE__  uintmax_t;
 #define SIZE_MAX     __SIZE_MAX__
 #define SIG_ATOMIC_MAX __SIG_ATOMIC_MAX__
 #define SIG_ATOMIC_MIN (-SIG_ATOMIC_MAX - 1)
-#define WCHAR_MAX    __WCHAR_MAX__
 #define WINT_MAX     __WINT_MAX__
+/* <limits.h> and <wchar.h> name wchar_t's range too, as the C library's
+ * headers do; whichever is first says it, and the same value. */
+#ifndef WCHAR_MAX
+#define WCHAR_MAX    __WCHAR_MAX__
+#endif
+#ifndef WCHAR_MIN
 #ifdef __WCHAR_UNSIGNED__
 #define WCHAR_MIN    0
 #elif defined(__WCHAR_MIN__)
 #define WCHAR_MIN    __WCHAR_MIN__
 #else
 #define WCHAR_MIN    (-WCHAR_MAX - 1)
+#endif
 #endif
 #ifdef __WINT_UNSIGNED__
 #define WINT_MIN     0
