@@ -7219,21 +7219,28 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
             fn->var_off = NULL;
         }
     }
-    /* A Thumb function must start on a halfword, and that is all: this
-     * backend has no literal pool whose pc-relative loads would care
-     * where it sits (constants and addresses are movw/movt), and clang
-     * lays functions out at two as well. Rounding each up to four was
-     * a nop after every other one. A function with inline asm keeps the
-     * four, since its template may address relative to pc. */
+    /* A Thumb function must start on a halfword, and most need no more:
+     * constants and addresses are movw/movt, and clang lays functions
+     * out at two as well. Rounding each up to four was a nop after every
+     * other one. But the 64-bit literal pool's ldrd (t_lit64_load) and a
+     * jump table's adr.w address from Align(pc, 4), and their offsets
+     * are worked out from where the code sits in this buffer -- right
+     * only when the function starts on a word, in the buffer and in its
+     * section. With --sections=functions the section is the function's
+     * own, and at two its pool was read two bytes off wherever the
+     * linker put it on a halfword: lib/rt's 64-bit division returned -1
+     * for 5 / 10 in an image linked with --gc-sections. So a function
+     * with a pool, a switch (which may take the adr.w form) or inline
+     * asm (whose template may address relative to pc) starts on four. */
     /* Pad with halfword NOPs (bf00), not with a repeated 0xbf: that
      * byte pairs into 0xbfbf, which is an `itttt` — harmless, since
      * nothing branches there, but it makes every disassembly of the gap
      * between two functions look like a condition block. */
     /* An A32 function is word-aligned, as every A32 instruction is. */
     {
-        int al = t_isa_a32 ? 3 : 1;
+        int al = t_isa_a32 || F.lp_use ? 3 : 1;
         for (int k = 0; k < fn->nins; k++)
-            if (fn->ins[k].op == IR_ASM)
+            if (fn->ins[k].op == IR_ASM || fn->ins[k].op == IR_SWITCH)
                 al |= 3;
         /* ...and aligned(N), or an asm that aligns its own bytes
          * (`.p2align 3`), starts it on that */
