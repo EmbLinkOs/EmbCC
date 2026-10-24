@@ -323,6 +323,24 @@ static const char *mips_ls_name(int op)
     }
 }
 
+/* A block whose bytes are in a code section of their own (a naked
+ * function's section attribute): into it before the block, aligned as the
+ * object's section is, and back to .text after. */
+static void block_section(struct outbuf *b, const struct topasm *ta, int in)
+{
+    if (!ta->section)
+        return;
+    if (in) {
+        int al = target_get() == TARGET_AVR ? 2 : 4;
+        if (ta->align > al)
+            al = ta->align;
+        ob_fmt(b, "\t.section\t%s,\"ax\",%sprogbits\n\t.balign\t%d\n",
+               asym(ta->section), type_sigil(), al);
+    } else {
+        ob_str(b, "\t.text\n");
+    }
+}
+
 /* MIPS: the file-scope blocks and naked functions in .text, from `from`
  * to the end, with their labels and relocations -- written symbolically,
  * as the functions' are (llvm-mc's MIPS .reloc knows none of R_MIPS_26,
@@ -351,6 +369,7 @@ static void mips_emit_blocks(struct outbuf *b, const char *srcname,
         }
         if (!ta)
             break;
+        block_section(b, ta, 1);
         ob_fmt(b, ".Ltopasm%d:\n", nb);
         for (long k = 0; k <= ta->codelen; k++) {
             for (int j = 0; j < ta->nsyms; j++) {
@@ -425,6 +444,7 @@ static void mips_emit_blocks(struct outbuf *b, const char *srcname,
             if (ta->syms[j].size)
                 ob_fmt(b, "\t.size\t%s, %ld\n", asym(ta->syms[j].name),
                        ta->syms[j].size);
+        block_section(b, ta, 0);
         pc = ta->text_off + ta->codelen;
         nb++;
     }
@@ -1224,6 +1244,7 @@ static void blocks_emit(struct outbuf *b, struct unit *u,
         ob_str(b, "\n");
         if (ta->text_off > pc)                 /* the padding before it */
             bytes_line(b, text + pc, ta->text_off - pc);
+        block_section(b, ta, 1);
         ob_fmt(b, "%s:\n", bname(".Lasm%d", i, NULL, 0));
         for (long k = 0; k <= ta->codelen; ) {
             /* the labels here, a block's own first */
@@ -1338,6 +1359,7 @@ static void blocks_emit(struct outbuf *b, struct unit *u,
             if (s.lab[j].blk == i && s.lab[j].sym && s.lab[j].as->size)
                 ob_fmt(b, "\t.size\t%s, %ld\n", s.lab[j].name,
                        s.lab[j].as->size);
+        block_section(b, ta, 0);
         pc = ta->text_off + ta->codelen;
     }
     if (textlen > pc)

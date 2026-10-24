@@ -702,6 +702,11 @@ The body may contain:
   RISC-V and AVR).
   AVR's FreeRTOS port calls the scheduler this way from its naked yield.
 
+A naked function goes where a function would: into `.text`, into the
+section its `section` attribute names (`.ramfunc`, AVR's `.init3`), or,
+under `--sections=functions`, into a `.text.NAME` of its own, for
+`--gc-sections` to keep only when something refers to it.
+
 A naked function's parameters arrive in the registers the calling
 convention puts them in, for the asm to read. There is no warning for an
 unused parameter, and no error for a non-`void` function without a
@@ -714,7 +719,6 @@ These are refused, because a naked function has no frame for them:
 | any other statement | `naked function 'f' holds a statement that is not an asm or a call with no arguments; with no prologue there is no frame for it to run in` |
 | an operand that is not a constant | `operand 0 of the asm in naked function 'f' is not a constant ("i"); a naked function has no frame to load one from` |
 | an output operand | `the asm in naked function 'f' has an output; a naked function has no frame to put it in` |
-| a `section` attribute | `naked function 'f' in section '.ramfunc' is not supported yet: its body is assembled into .text` |
 | x86-64 and AArch64 | `__attribute__((naked)) is not supported: on this target the body could only be assembled by the file-scope assembler's few instructions; it is supported on the ARM, RISC-V, MIPS and AVR targets` |
 
 `tests/golden/freertos-cm3.sh` builds the FreeRTOS kernel and its GCC

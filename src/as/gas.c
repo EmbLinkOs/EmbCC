@@ -4248,15 +4248,30 @@ int gas_assemble_block(struct topasm *ta)
     gas_run(&g, &gx, ta->tmpl, ta->file);
 
     /* One section: the block's bytes go into the unit's .text, between
-     * its functions. */
-    for (int i = 0; i < g.nsecs && !g.errors; i++)
-        if (i != SEC_TEXT && (g.secs[i].c.len || g.secs[i].size))
-            gerr(&g, "assembly in a C file that switches to section %s is "
-                     "not supported yet: a block's bytes go in .text",
-                 g.secs[i].name);
+     * its functions -- or, when they are all in one other CODE section
+     * (a naked function's section attribute, a `.section .ramfunc,"ax"`),
+     * into a section of that name, which the driver lays out as it does
+     * a function's. Data, and bytes in two sections, are refused. */
+    int us = SEC_TEXT;
+    for (int i = 0; i < g.nsecs && !g.errors; i++) {
+        if (i == SEC_TEXT || !(g.secs[i].c.len || g.secs[i].size))
+            continue;
+        if (!(g.secs[i].flags & SHF_EXECINSTR) ||
+            g.secs[i].type != SHT_PROGBITS)
+            gerr(&g, "assembly in a C file that puts bytes in section %s "
+                     "is not supported yet: a block's bytes go in code "
+                     "sections; write data in C", g.secs[i].name);
+        else if (us != SEC_TEXT || g.secs[SEC_TEXT].c.len)
+            gerr(&g, "assembly in a C file that puts bytes in sections %s "
+                     "and %s is not supported yet: one block, one section",
+                 g.secs[us].name, g.secs[i].name);
+        else
+            us = i;
+    }
     for (int i = 0; i < g.nfix && !g.errors; i++)
-        if (g.fix[i].sec != SEC_TEXT)
-            gerr(&g, "a relocation outside .text in an asm block");
+        if (g.fix[i].sec != us)
+            gerr(&g, "a relocation outside the block's section %s",
+                 g.secs[us].name);
     /* .set aliases, resolved as the object writer does */
     for (int i = 0; i < g.nsyms && !g.errors; i++) {
         struct sym *s = &g.syms[i], *a = s;
@@ -4278,16 +4293,17 @@ int gas_assemble_block(struct topasm *ta)
         s->is_func |= a->is_func;
     }
     if (!g.errors) {
-        struct gsec *tx = &g.secs[SEC_TEXT];
+        struct gsec *tx = &g.secs[us];
         ta->codelen = (int)tx->c.len;
         ta->code = xmalloc((size_t)(ta->codelen ? ta->codelen : 1));
         memcpy(ta->code, tx->c.p, (size_t)ta->codelen);
         ta->align = (int)(tx->align > 1 ? tx->align : 1);
+        ta->section = us == SEC_TEXT ? NULL : xstrndup(tx->name, strlen(tx->name));
         /* its labels: the ones C may name, and any a relocation names */
         ta->syms = xcalloc((size_t)(g.nsyms ? g.nsyms : 1), sizeof *ta->syms);
         for (int i = 0; i < g.nsyms; i++) {
             const struct sym *s = &g.syms[i];
-            if (s->sec != SEC_TEXT)
+            if (s->sec != us)
                 continue;
             if (!s->is_global && !strncmp(s->name, ".L", 2))
                 continue;
@@ -4318,7 +4334,7 @@ int gas_assemble_block(struct topasm *ta)
             r->addend = f->addend;
             r->elf_type = f->type;
             r->kind = ASMREL_ABS32;
-            if (s && !s->is_global && s->sec == SEC_TEXT) {
+            if (s && !s->is_global && s->sec == us) {
                 r->target = NULL;                 /* the block itself */
                 r->addend += s->value;
                 if (t->machine == EM_ARM && !t_isa_a32 && s->is_func &&
@@ -4331,11 +4347,11 @@ int gas_assemble_block(struct topasm *ta)
         /* where the data in it is ($d), for the disassemblers */
         ta->drange = xcalloc((size_t)(2 * g.nmaps + 2), sizeof *ta->drange);
         for (int i = 0; i < g.nmaps; i++) {
-            if (g.maps[i].sec != SEC_TEXT || g.maps[i].kind != 'd')
+            if (g.maps[i].sec != us || g.maps[i].kind != 'd')
                 continue;
             long end = tx->c.len;
             for (int k = i + 1; k < g.nmaps; k++)
-                if (g.maps[k].sec == SEC_TEXT && g.maps[k].off > g.maps[i].off) {
+                if (g.maps[k].sec == us && g.maps[k].off > g.maps[i].off) {
                     end = g.maps[k].off;
                     break;
                 }

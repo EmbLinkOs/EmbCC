@@ -639,6 +639,9 @@ struct topasm {
     int nrels;
     int text_off;        /* where the bytes landed in .text (driver) */
     int align;           /* what its start must be aligned to, 0 = any */
+    const char *section; /* the code section its bytes are in, when not
+                          * .text: a naked function's section attribute,
+                          * or a block's own `.section NAME,"ax"` */
     int *drange;         /* data in it, as [start, end) pairs ($d) */
     int ndrange;
     struct topasm *next;

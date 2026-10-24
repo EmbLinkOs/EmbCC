@@ -155,6 +155,57 @@ printf 'void f(unsigned a) __attribute__((naked));\nvoid f(unsigned a) { (void)a
 refuse $T '(void)(a + 1); __asm volatile("bx lr");' 'not an asm or a call with no arguments'
 echo "naked-asm: (void)param is no code, and (void) of an expression is still refused"
 
+# ---- in a section ------------------------------------------------------------
+# A naked function goes where any function would: the section it names (a
+# RAM function; avr-libc's naked .init3, which runs between the startup's
+# sections), or its own .text.NAME under --sections=functions. It was
+# refused, "its body is assembled into .text". The C after it stays in .text.
+cat > "$out/sec.c" <<'EOF'
+__attribute__((naked, section(".ramfunc"))) int ram_inc(int a)
+{
+    __asm volatile("adds r0, #1\n bx lr");
+}
+__attribute__((naked)) int own(int a)
+{
+    __asm volatile("bx lr");
+}
+int after(int a) { return ram_inc(a) + own(a); }
+EOF
+for s in "" --sections=functions; do
+    "$EMBCC" --target=$T -O2 $s -c "$out/sec.c" -o "$out/sec.o" 2> "$out/sec.err" ||
+        { cat "$out/sec.err"; fail "a naked function with a section attribute ($s)"; }
+    llvm-readelf -S -W "$out/sec.o" > "$out/sec.S"
+    llvm-readelf -s -W "$out/sec.o" > "$out/sec.sym"
+    secof() {     # the name of the section symbol $1 is defined in
+        ndx=$(awk -v n="$1" '$8 == n { print $7 }' "$out/sec.sym")
+        awk -v i="$ndx" '{ gsub(/\[ */, "["); if ($1 == "[" i "]") print $2 }' "$out/sec.S"
+    }
+    [ "$(secof ram_inc)" = .ramfunc ] || fail "ram_inc is in '$(secof ram_inc)', not .ramfunc ($s)"
+    grep -E ' \.ramfunc +PROGBITS' "$out/sec.S" | grep -q ' AX ' ||
+        fail ".ramfunc is not allocated and executable ($s)"
+    want=.text; [ -n "$s" ] && want=.text.own
+    [ "$(secof own)" = $want ] || fail "own is in '$(secof own)', not $want ($s)"
+    want=.text; [ -n "$s" ] && want=.text.after
+    [ "$(secof after)" = $want ] || fail "after is in '$(secof after)', not $want ($s)"
+done
+cat > "$out/init3.c" <<'EOF'
+/* avr-libc's way to run code during startup: no ret, the next .init
+ * section follows it */
+__attribute__((naked, used, section(".init3"))) void early(void)
+{
+    __asm volatile("ldi r24, 42\n out 0x1e, r24");      /* GPIOR0 = 42 */
+}
+int main(void) { return 0; }
+EOF
+"$EMBCC" --target=avr -mmcu=atmega328p -Os "$out/init3.c" -o "$out/init3.elf" 2> "$out/init3.err" ||
+    { cat "$out/init3.err"; fail "avr: a naked .init3 function"; }
+a=$(llvm-nm "$out/init3.elf" | awk '$3 == "early" { print $1 }')
+c=$(llvm-nm "$out/init3.elf" | awk '$3 == "__do_copy_data" { print $1 }')
+[ -n "$a" ] && [ -n "$c" ] || fail "avr: early or __do_copy_data is not in the image"
+# .init3 lies before .init4's __do_copy_data, and runs into it: early has no ret
+[ $((0x$a)) -lt $((0x$c)) ] || fail "avr: .init3 at $a is not before .init4 at $c"
+echo "naked-asm: in the section it names, .text.NAME under --sections=functions, AVR's .init3 before .init4"
+
 # ---- RISC-V ---------------------------------------------------------------
 cat > "$out/rv.c" <<'EOF'
 void puts_(const char *s);

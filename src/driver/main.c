@@ -561,15 +561,32 @@ static void write_deps(const char *in, const char *obj)
 /* Functions with a section attribute: codegen lays them out after every
  * other function, grouped by section (compile_unit sorts them there), so
  * the code buffer is [.text's functions][group][group]...[file-scope
- * asm]. Each group becomes a section of its own, and .text is the two
- * outer slices. text_at() is the one translation from a code-buffer
- * offset -- which every site, symbol and table records -- to the section
- * it lands in and the offset there. */
+ * asm][a block's group]... -- a file-scope block whose bytes are in a
+ * code section of their own (a naked function's section attribute) is a
+ * group too, after the blocks before it. Each group becomes a section of
+ * its own, and .text is every byte no group holds, in order. The groups
+ * are in the order of their starts. text_at() is the one translation
+ * from a code-buffer offset -- which every site, symbol and table
+ * records -- to the section it lands in and the offset there. */
 static struct tgroup { const char *name; long start, end; int ndx, sym,
                        align; }
     *g_tg;
 static int g_ntg, g_captg;
 static long g_plain_end, g_groups_end;
+
+/* How many of the bytes before code-buffer offset off are not .text's:
+ * the functions' groups, [g_plain_end, g_groups_end) with the padding
+ * between them (which is in no section), and the blocks' groups after. */
+static long grouped_before(long off)
+{
+    long n = 0;
+    if (off > g_plain_end)
+        n += (off < g_groups_end ? off : g_groups_end) - g_plain_end;
+    for (int k = 0; k < g_ntg; k++)
+        if (g_tg[k].start >= g_groups_end && g_tg[k].start < off)
+            n += (g_tg[k].end < off ? g_tg[k].end : off) - g_tg[k].start;
+    return n;
+}
 /* .text's own alignment: the sixteen it always had, or the strictest
  * start among its functions -- aligned(256) on one is 256 only if the
  * section is */
@@ -584,8 +601,7 @@ static int text_at(long off, long *noff)
             *noff = off - g_tg[k].start;
             return k + 1;
         }
-    *noff = g_ntg && off >= g_groups_end ? off - (g_groups_end - g_plain_end)
-                                         : off;
+    *noff = off - grouped_before(off);
     return 0;
 }
 
@@ -646,6 +662,37 @@ static long code_ref(long off, int text_sym, int *sym)
 {
     long o;
     int gi = text_at(off, &o);
+    *sym = gi ? g_tg[gi - 1].sym : text_sym;
+    return o;
+}
+
+/* text_at for offset off within block ta: a block in a section of its
+ * own keeps every one of its labels there, the one at its very end too,
+ * where text_at would read the next byte's section. */
+static int block_at(const struct topasm *ta, long off, long *noff)
+{
+    if (ta->section)
+        for (int k = 0; k < g_ntg; k++)
+            if (g_tg[k].start == ta->text_off &&
+                g_tg[k].name == ta->section) {
+                *noff = off;
+                return k + 1;
+            }
+    return text_at(ta->text_off + off, noff);
+}
+
+static int block_sec(const struct topasm *ta, long off, int text_ndx)
+{
+    long o;
+    int gi = block_at(ta, off, &o);
+    return gi ? g_tg[gi - 1].ndx : text_ndx;
+}
+
+static long block_ref(const struct topasm *ta, long off, int text_sym,
+                      int *sym)
+{
+    long o;
+    int gi = block_at(ta, off, &o);
     *sym = gi ? g_tg[gi - 1].sym : text_sym;
     return o;
 }
@@ -1698,15 +1745,23 @@ static void naked_to_blocks(struct unit *u)
     for (struct func *f = u->funcs; f; f = f->next) {
         if (f->absorbed || !f->is_naked || !f->has_defn)
             continue;
-        if (f->section)
-            diag_fatal(f->file, f->line, "naked function '%s' in section "
-                       "'%s' is not supported yet: its body is assembled "
-                       "into .text", f->name, f->section);
         struct outbuf b = { NULL, 0, 0 };
         enum target_arch t = target_get();
         /* the object's name, `_f` on RX, as the block assembler reads it */
         const char *up = backend_get(t)->sym_prefix;
-        ob_fmt(&b, ".text\n.p2align %d\n", backend_get(t)->text_p2align);
+        /* Where any function would go: the section it names (a RAM
+         * function's, AVR's .init3 as avr-libc writes it), its own
+         * .text.NAME under --sections=functions, else .text. The block
+         * ends back in .text, where a naked function always left the
+         * file-scope assembler. */
+        const char *sec = f->section;
+        if (!sec && func_sections && target_fmt_get() == TGT_FMT_ELF)
+            sec = sec_named(".text.", f->name);
+        if (sec)
+            ob_fmt(&b, ".section \"%s\",\"ax\"\n", sec);
+        else
+            ob_str(&b, ".text\n");
+        ob_fmt(&b, ".p2align %d\n", backend_get(t)->text_p2align);
         if (f->is_weak)
             ob_fmt(&b, ".weak %s%s\n", up, f->name);
         else if (!f->is_static)
@@ -1722,6 +1777,8 @@ static void naked_to_blocks(struct unit *u)
         const struct stmt *first = f->body;     /* the statement list */
         naked_body_text(&b, f, first);
         ob_fmt(&b, ".size %s%s, .-%s%s\n", up, f->name, up, f->name);
+        if (sec)
+            ob_str(&b, ".text\n");
         ob_ch(&b, '\0');
         struct topasm *ta = xcalloc(1, sizeof *ta);
         ta->tmpl = b.p;
@@ -3415,13 +3472,32 @@ static int compile_unit(const char *in, const char *out, int pp_only)
              * `.balign 256` was at 256 in the object and at 16 in the
              * image */
             int al = target_get() == TARGET_AVR ? 2 : 4;
-            long shift = g_ntg ? g_groups_end - g_plain_end : 0;
             if (ta->align > al)
                 al = ta->align;
-            while ((text.len - shift) % al)
-                code_byte(&text, 0);
-            if (al > g_text_align)
-                g_text_align = al;
+            if (ta->section) {
+                /* a section of its own, starting at the block: aligned
+                 * by the section, with nothing before it to pad */
+                if (target_fmt_get() != TGT_FMT_ELF)
+                    diag_fatal(ta->file, ta->line, "assembly in section "
+                               "'%s' is not supported for %s output",
+                               ta->section,
+                               target_fmt_name(target_fmt_get()));
+                if (g_ntg == g_captg) {
+                    g_captg = g_captg ? 2 * g_captg : 16;
+                    g_tg = xrealloc(g_tg, (size_t)g_captg * sizeof *g_tg);
+                }
+                memset(&g_tg[g_ntg], 0, sizeof g_tg[g_ntg]);
+                g_tg[g_ntg].name = ta->section;
+                g_tg[g_ntg].start = text.len;
+                g_tg[g_ntg].end = text.len + ta->codelen;
+                g_tg[g_ntg].align = al;
+                g_ntg++;
+            } else {
+                while ((text.len - grouped_before(text.len)) % al)
+                    code_byte(&text, 0);
+                if (al > g_text_align)
+                    g_text_align = al;
+            }
         } else {
             code_align(&text, 16, 0x90);
         }
@@ -4181,11 +4257,21 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     unsigned char *tbytes = (unsigned char *)text.p;
     long tlen = (long)text.len;
     if (g_ntg) {
-        tlen = g_plain_end + ((long)text.len - g_groups_end);
+        /* .text's functions, then what follows the functions' groups
+         * less the blocks' groups among it */
+        long at = g_groups_end, n = g_plain_end;
+        tlen = (long)text.len - grouped_before((long)text.len);
         tbytes = xmalloc((size_t)(tlen ? tlen : 1));
         memcpy(tbytes, text.p, (size_t)g_plain_end);
-        memcpy(tbytes + g_plain_end, (unsigned char *)text.p + g_groups_end,
-               (size_t)((long)text.len - g_groups_end));
+        for (int k = 0; k <= g_ntg; k++) {
+            if (k < g_ntg && g_tg[k].start < g_groups_end)
+                continue;                       /* a function's group */
+            long to = k < g_ntg ? g_tg[k].start : (long)text.len;
+            memcpy(tbytes + n, (unsigned char *)text.p + at, (size_t)(to - at));
+            n += to - at;
+            if (k < g_ntg)
+                at = g_tg[k].end;
+        }
     }
     int text_ndx = elfw_add_section(w, ".text", SHT_PROGBITS,
                                     SHF_ALLOC | SHF_EXECINSTR,
@@ -4484,14 +4570,14 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                     lg = g;
             if (!lf && !lg)
                 continue;
-            long loff = ta->text_off + as->off, lval;
-            text_at(loff, &lval);
+            long lval;
+            block_at(ta, as->off, &lval);
             if (lf)
                 lval = fn_sym_value(target_get(), lval);
             int lndx = elfw_add_symbol(
                 w, as->name, (Elf64_Addr)lval, (Elf64_Xword)as->size,
                 ELF64_ST_INFO(STB_LOCAL, lf ? STT_FUNC : STT_OBJECT),
-                (Elf64_Half)code_sec(loff, text_ndx));
+                (Elf64_Half)block_sec(ta, as->off, text_ndx));
             if (lf)
                 lf->sym_ndx = lndx;
             else
@@ -4576,7 +4662,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
             if (ta->syms[k].is_global) {
                 long toff;
                 const struct asmsym *as = &ta->syms[k];
-                text_at(ta->text_off + as->off, &toff);
+                block_at(ta, as->off, &toff);
                 /* Its type is what .type said. Untyped, it stays a
                  * function, as every label was -- except on Thumb, where
                  * a function's address carries bit 0 and gas leaves an
@@ -4592,7 +4678,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                 int ndx = elfw_add_symbol(
                     w, as->name, (Elf64_Addr)toff, (Elf64_Xword)as->size,
                     ELF64_ST_INFO(as->is_weak ? STB_WEAK : STB_GLOBAL, st),
-                    (Elf64_Half)text_ndx);
+                    (Elf64_Half)block_sec(ta, as->off, text_ndx));
                 for (struct func *f = u->funcs; f; f = f->next)
                     if (!f->absorbed && !f->has_defn && !f->sym_ndx &&
                         strcmp(f->name, ta->syms[k].name) == 0)
@@ -4694,7 +4780,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
              * label: the block's start plus the label's offset, against
              * the section */
             if (!tn) {
-                addend = code_ref(ta->text_off + addend, text_sym, &sym);
+                addend = block_ref(ta, addend, text_sym, &sym);
                 code_rela(w, text_ndx, ta->text_off + ta->rels[r].off,
                           sym, etype, addend);
                 continue;
@@ -4712,8 +4798,8 @@ static int compile_unit(const char *in, const char *out, int pp_only)
             for (struct topasm *lb = u->topasm; lb && !sym; lb = lb->next)
                 for (int k = 0; k < lb->nsyms && !sym; k++)
                     if (strcmp(lb->syms[k].name, tn) == 0) {
-                        addend += code_ref(lb->text_off + lb->syms[k].off,
-                                           text_sym, &sym);
+                        addend += block_ref(lb, lb->syms[k].off,
+                                            text_sym, &sym);
                         /* a Thumb function's ADDRESS carries bit 0; a
                          * branch to it does not */
                         if (thumb_state() &&
