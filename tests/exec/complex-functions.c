@@ -16,6 +16,14 @@
 #include <math.h>
 #include <stddef.h>
 
+/* C11's constructors, where the C library's <complex.h> has not got them --
+ * the cross gcc's newlib, for tests/golden/agrees-with-gcc.sh */
+#ifndef CMPLX
+#define CMPLX(x, y)  __builtin_complex((double)(x), (double)(y))
+#define CMPLXF(x, y) __builtin_complex((float)(x), (float)(y))
+#define CMPLXL(x, y) __builtin_complex((long double)(x), (long double)(y))
+#endif
+
 /* Classified by hand, not with <math.h>'s macros: the x86-64 QEMU harness
  * compiles with lib/libc's headers and links newlib, which has none of the
  * functions those call. */

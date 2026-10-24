@@ -7,6 +7,7 @@
  * each call, which is its function's return type; and the values, which
  * the narrowed second argument made wrong. */
 // expect-exit: 42
+// no-gcc-reference: the cross gcc's newlib <tgmath.h> gives sqrt(2.0f) the type double
 #include <tgmath.h>
 #include <float.h>
 
