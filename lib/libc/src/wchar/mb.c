@@ -37,43 +37,31 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-/* The internal state, which is what the opaque mbstate_t really is.
- * Laid out so a zeroed mbstate_t is the initial state, as the standard
- * requires. */
-struct state {
-    unsigned int wch;
-    unsigned char want;
-    unsigned char have;
-    unsigned int lowbound;
-};
+#include "../internal/utf8.h"
 
-static struct state *st(mbstate_t *ps)
+/* The internal state, which is what the opaque mbstate_t really is:
+ * internal/utf8.h's decoder state, laid out so a zeroed mbstate_t is the
+ * initial state, as the standard requires. The decoding and encoding
+ * themselves -- what is refused, byte by byte -- are there too, shared
+ * with printf, scanf and the wide streams. */
+_Static_assert(sizeof(struct __utf8) <= sizeof(mbstate_t),
+               "mbstate_t holds the decoder's state");
+
+static struct __utf8 *st(mbstate_t *ps)
 {
     static mbstate_t internal;
-    return (struct state *)(ps ? ps : &internal);
+    return (struct __utf8 *)(ps ? ps : &internal);
 }
 
 int mbsinit(const mbstate_t *ps)
 {
-    return !ps || ((const struct state *)ps)->want == 0;
+    return !ps || ((const struct __utf8 *)ps)->want == 0;
 }
-
-static int is_surrogate(unsigned int c) { return c >= 0xD800 && c <= 0xDFFF; }
-/* The last code point there is -- or, where wchar_t is 16 bits (Xtensa's,
- * as GCC has it), the last one a wchar_t holds: the rest of Unicode has no
- * wide form there, so its UTF-8 is not a character, rather than one
- * truncated into the Basic Multilingual Plane. */
-#if __WCHAR_MAX__ < 0x10FFFF
-#define LAST_WC __WCHAR_MAX__
-#else
-#define LAST_WC 0x10FFFF
-#endif
-static int too_big(unsigned int c) { return c > LAST_WC; }
 
 size_t mbrtowc(wchar_t *__restrict pwc, const char *__restrict s, size_t n,
                mbstate_t *__restrict ps)
 {
-    struct state *k = st(ps);
+    struct __utf8 *k = st(ps);
 
     /* A null s means "reset to the initial state", and the standard
      * spells it as mbrtowc(0, "", 1, ps). */
@@ -81,58 +69,24 @@ size_t mbrtowc(wchar_t *__restrict pwc, const char *__restrict s, size_t n,
         memset(k, 0, sizeof *k);
         return 0;
     }
-    if (n == 0)
-        return (size_t)-2;        /* incomplete: nothing to look at */
-
-    size_t used = 0;
-    while (used < n) {
-        unsigned char b = (unsigned char)s[used++];
-
-        if (k->want == 0) {
-            if (b < 0x80) {
-                if (pwc)
-                    *pwc = (wchar_t)b;
-                return b ? used : 0;   /* a NUL converts and returns 0 */
-            }
-            /* A continuation byte with nothing to continue, or one of
-             * the two bytes that can never begin a sequence. */
-            if (b < 0xC2 || b > 0xF4) {
-                errno = EILSEQ;
-                return (size_t)-1;
-            }
-            if (b < 0xE0) { k->want = 1; k->wch = b & 0x1Fu; k->lowbound = 0x80; }
-            else if (b < 0xF0) { k->want = 2; k->wch = b & 0x0Fu; k->lowbound = 0x800; }
-            else { k->want = 3; k->wch = b & 0x07u; k->lowbound = 0x10000; }
-            k->have = 1;
+    for (size_t used = 0; used < n; ) {
+        uint_least32_t c;
+        int r = __utf8_step(k, (unsigned char)s[used++], &c);
+        if (r == 0)
             continue;
-        }
-
-        if ((b & 0xC0u) != 0x80u) {
-            /* A byte that is not a continuation, in the middle of a
-             * sequence. The sequence is broken; the state is cleared so
-             * the caller can resynchronise rather than stay wedged. */
-            memset(k, 0, sizeof *k);
-            errno = EILSEQ;
-            return (size_t)-1;
-        }
-        k->wch = (k->wch << 6) | (b & 0x3Fu);
-        k->have++;
-        if (--k->want)
-            continue;
-
-        unsigned int c = k->wch;
-        unsigned int low = k->lowbound;
-        memset(k, 0, sizeof *k);
-        if (c < low || is_surrogate(c) || too_big(c)) {
+        /* A broken sequence leaves the state initial, so the caller can
+         * resynchronise rather than stay wedged. */
+        if (r < 0) {
             errno = EILSEQ;
             return (size_t)-1;
         }
         if (pwc)
             *pwc = (wchar_t)c;
-        return c ? used : 0;
+        return c ? used : 0;           /* a NUL converts and returns 0 */
     }
-    /* Ran out of input mid-character: -2, and the state remembers where
-     * we were so the next call continues rather than restarts. */
+    /* Ran out of input mid-character (or had none to look at): -2, and the
+     * state remembers where we were so the next call continues rather
+     * than restarts. */
     return (size_t)-2;
 }
 
@@ -143,7 +97,7 @@ size_t mbrlen(const char *__restrict s, size_t n, mbstate_t *__restrict ps)
 
 size_t wcrtomb(char *__restrict s, wchar_t wc, mbstate_t *__restrict ps)
 {
-    struct state *k = st(ps);
+    struct __utf8 *k = st(ps);
     memset(k, 0, sizeof *k);      /* UTF-8 encoding is stateless */
 
     /* A null s asks for the length of the shift sequence to return to
@@ -153,31 +107,12 @@ size_t wcrtomb(char *__restrict s, wchar_t wc, mbstate_t *__restrict ps)
         s = buf;
         wc = 0;
     }
-    unsigned int c = (unsigned int)wc;
-    if (is_surrogate(c) || too_big(c)) {
+    int r = __utf8_put((uint_least32_t)wc, s);
+    if (r < 0) {
         errno = EILSEQ;
         return (size_t)-1;
     }
-    if (c < 0x80) {
-        s[0] = (char)c;
-        return 1;
-    }
-    if (c < 0x800) {
-        s[0] = (char)(0xC0u | (c >> 6));
-        s[1] = (char)(0x80u | (c & 0x3Fu));
-        return 2;
-    }
-    if (c < 0x10000) {
-        s[0] = (char)(0xE0u | (c >> 12));
-        s[1] = (char)(0x80u | ((c >> 6) & 0x3Fu));
-        s[2] = (char)(0x80u | (c & 0x3Fu));
-        return 3;
-    }
-    s[0] = (char)(0xF0u | (c >> 18));
-    s[1] = (char)(0x80u | ((c >> 12) & 0x3Fu));
-    s[2] = (char)(0x80u | ((c >> 6) & 0x3Fu));
-    s[3] = (char)(0x80u | (c & 0x3Fu));
-    return 4;
+    return (size_t)r;
 }
 
 size_t mbsrtowcs(wchar_t *__restrict d, const char **__restrict s, size_t n,

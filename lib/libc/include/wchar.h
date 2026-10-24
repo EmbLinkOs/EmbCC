@@ -49,10 +49,10 @@ typedef union {
 } mbstate_t;
 #else
 typedef struct {
-    unsigned int __wch;       /* the code point being assembled */
-    unsigned char __want;     /* bytes still needed (0: none pending) */
-    unsigned char __have;     /* bytes taken so far */
-    unsigned int __lowbound;  /* the smallest value this length may encode */
+    __UINT_LEAST32_TYPE__ __wch;      /* the code point being assembled */
+    unsigned char __want;             /* bytes still needed (0: none pending) */
+    unsigned char __have;             /* bytes taken so far */
+    __UINT_LEAST32_TYPE__ __lowbound; /* the smallest value this length may encode */
 } mbstate_t;
 #endif
 
