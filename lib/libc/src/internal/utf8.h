@@ -30,16 +30,17 @@ struct __utf8 {
     uint_least32_t lowbound;  /* the least value this length may encode */
 };
 
-static inline int __utf8_bad(uint_least32_t c)
+static inline int __utf8_bad(uint_least32_t c, uint_least32_t last)
 {
-    return (c >= 0xD800 && c <= 0xDFFF) || c > __UTF8_LAST;
+    return (c >= 0xD800 && c <= 0xDFFF) || c > last;
 }
 
 /* One more byte. 1: *out is a whole character (0 for the NUL byte); 0: more
- * bytes wanted; -1: this is not UTF-8. After 1 or -1 the state is the
- * initial one again, so a caller can go on from the next byte. */
-static inline int __utf8_step(struct __utf8 *k, unsigned char b,
-                              uint_least32_t *out)
+ * bytes wanted; -1: this is not UTF-8, or a code point past `last`. After
+ * 1 or -1 the state is the initial one again, so a caller can go on from
+ * the next byte. */
+static inline int __utf8_step_to(struct __utf8 *k, unsigned char b,
+                                 uint_least32_t *out, uint_least32_t last)
 {
     if (k->want == 0) {
         if (b < 0x80) {
@@ -67,17 +68,25 @@ static inline int __utf8_step(struct __utf8 *k, unsigned char b,
     k->want = 0;
     k->have = 0;
     k->lowbound = 0;
-    if (!cont || c < low || __utf8_bad(c))
+    if (!cont || c < low || __utf8_bad(c, last))
         return -1;
     *out = c;
     return 1;
+}
+
+/* ... for a wchar_t: up to what one holds. char16_t and char32_t take all
+ * of Unicode (wchar/uchar.c). */
+static inline int __utf8_step(struct __utf8 *k, unsigned char b,
+                              uint_least32_t *out)
+{
+    return __utf8_step_to(k, b, out, __UTF8_LAST);
 }
 
 /* The bytes of one character, into s (room for four): their count, or -1
  * for a value that has none. */
 static inline int __utf8_put(uint_least32_t c, char *s)
 {
-    if (__utf8_bad(c))
+    if (__utf8_bad(c, 0x10FFFF))
         return -1;
     if (c < 0x80) {
         s[0] = (char)c;
