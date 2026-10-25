@@ -53,8 +53,8 @@ long double _Complex __cmplxl(long double r, long double i)
     return z;
 }
 
-double creal(double _Complex z) { return __real__ z; }
-double cimag(double _Complex z) { return __imag__ z; }
+double (creal)(double _Complex z) { return __real__ z; }
+double (cimag)(double _Complex z) { return __imag__ z; }
 double cabs(double _Complex z)  { return hypot(__real__ z, __imag__ z); }
 double carg(double _Complex z)  { return atan2(__imag__ z, __real__ z); }
 double _Complex conj(double _Complex z)
@@ -62,8 +62,8 @@ double _Complex conj(double _Complex z)
     return __cmplx(__real__ z, -__imag__ z);
 }
 
-float crealf(float _Complex z) { return __real__ z; }
-float cimagf(float _Complex z) { return __imag__ z; }
+float (crealf)(float _Complex z) { return __real__ z; }
+float (cimagf)(float _Complex z) { return __imag__ z; }
 float cabsf(float _Complex z)  { return hypotf(__real__ z, __imag__ z); }
 float cargf(float _Complex z)  { return atan2f(__imag__ z, __real__ z); }
 float _Complex conjf(float _Complex z)
@@ -151,8 +151,8 @@ double _Complex cpow(double _Complex x, double _Complex y)
 
 /* ---- long double ---- */
 
-long double creall(long double _Complex z) { return __real__ z; }
-long double cimagl(long double _Complex z) { return __imag__ z; }
+long double (creall)(long double _Complex z) { return __real__ z; }
+long double (cimagl)(long double _Complex z) { return __imag__ z; }
 long double _Complex conjl(long double _Complex z)
 {
     return __cmplxl(__real__ z, -__imag__ z);

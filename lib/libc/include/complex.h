@@ -84,6 +84,18 @@ long double _Complex catanl(long double _Complex);
 long double _Complex casinhl(long double _Complex), cacoshl(long double _Complex);
 long double _Complex catanhl(long double _Complex);
 
+/* The parts as GCC and clang compile them: the part itself, not a call.
+ * C11 7.1.4 lets any library function be a macro as well; (creal)(z)
+ * and &creal are the functions. msun's float functions take creal of a
+ * float complex, which as a call widened it to double complex, called,
+ * and narrowed the answer -- csqrtf came out twice clang's size. */
+#define creal(z)  ((double)__real__ (z))
+#define cimag(z)  ((double)__imag__ (z))
+#define crealf(z) ((float)__real__ (z))
+#define cimagf(z) ((float)__imag__ (z))
+#define creall(z) ((long double)__real__ (z))
+#define cimagl(z) ((long double)__imag__ (z))
+
 #ifdef __cplusplus
 }
 #endif

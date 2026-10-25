@@ -50,19 +50,24 @@ int __signbitl(long double x);
 #define fpclassify(x) (sizeof(x) == sizeof(float) ? __fpclassifyf((float)(x)) \
                        : sizeof(x) == sizeof(double) ? __fpclassifyd((double)(x)) \
                        : __fpclassifyl((long double)(x)))
-#define isfinite(x)   (fpclassify(x) > FP_INFINITE)
-#define isnan(x)      (fpclassify(x) == FP_NAN)
-#define isinf(x)      (fpclassify(x) == FP_INFINITE)
-#define isnormal(x)   (fpclassify(x) == FP_NORMAL)
-#define signbit(x)    (sizeof(x) == sizeof(float) ? __signbitf((float)(x)) \
-                       : sizeof(x) == sizeof(double) ? __signbitd((double)(x)) \
-                       : __signbitl((long double)(x)))
-#define isgreater(a, b)      ((a) > (b))
-#define isgreaterequal(a, b) ((a) >= (b))
-#define isless(a, b)         ((a) < (b))
-#define islessequal(a, b)    ((a) <= (b))
-#define islessgreater(a, b)  ((a) < (b) || (a) > (b))
-#define isunordered(a, b)    (isnan(a) || isnan(b))
+/* The rest are the builtins GCC and clang spell the same way: a few
+ * instructions inline, each argument evaluated once, where each was a
+ * call to __fpclassifyf (or d, or l) doing the same work -- and msun asks
+ * isnan and isinf of nearly every argument it is given. */
+#define isfinite(x)   __builtin_isfinite(x)
+#define isnan(x)      __builtin_isnan(x)
+#define isinf(x)      __builtin_isinf(x)
+#define isnormal(x)   __builtin_isnormal(x)
+#define signbit(x)    __builtin_signbit(x)
+/* ...and the comparisons that are quiet: a NaN operand is false (true for
+ * isunordered) without raising FE_INVALID, which `>` and the rest
+ * raise. */
+#define isgreater(a, b)      __builtin_isgreater(a, b)
+#define isgreaterequal(a, b) __builtin_isgreaterequal(a, b)
+#define isless(a, b)         __builtin_isless(a, b)
+#define islessequal(a, b)    __builtin_islessequal(a, b)
+#define islessgreater(a, b)  __builtin_islessgreater(a, b)
+#define isunordered(a, b)    __builtin_isunordered(a, b)
 
 /* trigonometry */
 double sin(double), cos(double), tan(double);
