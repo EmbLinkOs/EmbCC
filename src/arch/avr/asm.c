@@ -70,7 +70,7 @@ static const char *skipws(const char *p)
     return p;
 }
 
-static int idc(int c) { return isalnum(c) || c == '_' || c == '.' || c == '$'; }
+static int idc(int c) { return asm_symc(c); }
 
 /* A symbol NAME cannot begin with a digit -- that is a number. The
  * distinction matters only in avrasm_symform, where an operand is either a
@@ -78,8 +78,7 @@ static int idc(int c) { return isalnum(c) || c == '_' || c == '.' || c == '$'; }
  * symbol called "0xC1", which the linker then reported as undefined. A
  * plain `1` or `0x40` reaches the expression parser instead, which is where
  * every I/O address in a real source goes. */
-static int sym_start(int c) { return isalpha(c) || c == '_' || c == '.' ||
-                                     c == '$'; }
+static int sym_start(int c) { return asm_sym0(c) || c == '$'; }
 
 /* ---- registers -------------------------------------------------------- */
 

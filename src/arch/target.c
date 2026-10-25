@@ -1462,8 +1462,8 @@ long target_reloc_addend(enum target_arch a, enum reloc_kind k, long bias)
 }
 
 /* ELF relocation types by name, as an assembler's `.reloc` spells them:
- * the ones `embcc -S` writes for Cortex-M, RISC-V and AVR, and the ones
- * an object from these targets may carry beside them. One table read
+ * every one `embcc -S` writes, on every target whose text EmbCC's own
+ * assembler reads back, and the ones an object may carry beside them. One table read
  * both ways -- -S writes a name from a number (src/driver/asmout.c) and
  * the assembler reads it back (src/as/gas.c) -- so the two cannot
  * disagree about what a name means. */
@@ -1481,6 +1481,23 @@ static const struct reloc_spelling {
     { EM_ARM,   R_ARM_PREL31,          "R_ARM_PREL31" },
     { EM_ARM,   R_ARM_THM_MOVW_ABS_NC, "R_ARM_THM_MOVW_ABS_NC" },
     { EM_ARM,   R_ARM_THM_MOVT_ABS,    "R_ARM_THM_MOVT_ABS" },
+    { EM_ARM,   R_ARM_CALL,            "R_ARM_CALL" },
+    { EM_ARM,   R_ARM_JUMP24,          "R_ARM_JUMP24" },
+    { EM_ARM,   R_ARM_MOVW_ABS_NC,     "R_ARM_MOVW_ABS_NC" },
+    { EM_ARM,   R_ARM_MOVT_ABS,        "R_ARM_MOVT_ABS" },
+    { EM_AARCH64, R_AARCH64_ABS64,     "R_AARCH64_ABS64" },
+    { EM_AARCH64, R_AARCH64_ABS32,     "R_AARCH64_ABS32" },
+    { EM_AARCH64, R_AARCH64_PREL32,    "R_AARCH64_PREL32" },
+    { EM_AARCH64, R_AARCH64_ADR_PREL_PG_HI21, "R_AARCH64_ADR_PREL_PG_HI21" },
+    { EM_AARCH64, R_AARCH64_ADD_ABS_LO12_NC,  "R_AARCH64_ADD_ABS_LO12_NC" },
+    { EM_AARCH64, R_AARCH64_JUMP26,    "R_AARCH64_JUMP26" },
+    { EM_AARCH64, R_AARCH64_CALL26,    "R_AARCH64_CALL26" },
+    { EM_AARCH64, R_AARCH64_ADR_GOT_PAGE,     "R_AARCH64_ADR_GOT_PAGE" },
+    { EM_AARCH64, R_AARCH64_LD64_GOT_LO12_NC, "R_AARCH64_LD64_GOT_LO12_NC" },
+    { EM_AARCH64, R_AARCH64_TLSLE_ADD_TPREL_HI12,
+      "R_AARCH64_TLSLE_ADD_TPREL_HI12" },
+    { EM_AARCH64, R_AARCH64_TLSLE_ADD_TPREL_LO12_NC,
+      "R_AARCH64_TLSLE_ADD_TPREL_LO12_NC" },
     { EM_RISCV, R_RISCV_32,            "R_RISCV_32" },
     { EM_RISCV, R_RISCV_64,            "R_RISCV_64" },
     { EM_RISCV, R_RISCV_BRANCH,        "R_RISCV_BRANCH" },

@@ -91,6 +91,7 @@ struct sym {
                              * exist */
     int elf_ndx;            /* filled when the symbol table is built */
     int is_object;          /* .type %object */
+    int is_tls;             /* .type %tls_object: a thread's own (STT_TLS) */
     int vis;                /* .hidden/.internal/.protected: STV_* */
     /* `.set a, b` where b is not placed yet (or is external): a is b,
      * resolved when the object is written. */
@@ -256,8 +257,65 @@ static void fix_add(struct gas *g, int sec, long off, const char *sym,
 
 /* ---- lexing a line -------------------------------------------------- */
 
-static int is_sym0(int c) { return isalpha(c) || c == '_' || c == '.' || c == '$'; }
-static int is_symc(int c) { return isalnum(c) || c == '_' || c == '.' || c == '$'; }
+/* A byte from 0x80 up is part of a name: C lets an identifier hold UTF-8
+ * letters (`größe`), and the object carries their bytes as they are. */
+static int is_sym0(int c)
+{
+    return isalpha(c) || c == '_' || c == '.' || c == '$' || c >= 0x80;
+}
+static int is_symc(int c)
+{
+    return isalnum(c) || c == '_' || c == '.' || c == '$' || c >= 0x80;
+}
+
+/* A name in double quotes -- `"größe":`, `.globl "größe"`, `call
+ * "hölper"` -- as clang and `embcc -S` write one that holds UTF-8: the
+ * quotes go, and the name is read as any other. Only a quoted run of name
+ * characters with such a byte in it is a name, and not in the directives
+ * whose operands are strings (`.ascii "größe"` is text). */
+static void unquote_names(char *s)
+{
+    static const char *const strdir[] = {
+        ".ascii", ".asciz", ".string", ".string8", ".string16", ".string32",
+        ".file", ".ident", ".section", ".pushsection", ".incbin",
+        ".include", ".print", ".error", ".warning", ".err",
+        ".eabi_attribute", ".ifc", ".ifnc", ".ifeqs", ".ifnes", NULL
+    };
+    char *w = s;
+    for (int pass = 0; pass < 2; pass++) {       /* past one label */
+        while (*w == ' ' || *w == '\t') w++;
+        char *e = w;
+        while (*e && !isspace((unsigned char)*e) && *e != ':') e++;
+        if (*e == ':' && pass == 0) { w = e + 1; continue; }
+        for (int i = 0; strdir[i]; i++)
+            if ((size_t)(e - w) == strlen(strdir[i]) &&
+                !strncmp(w, strdir[i], (size_t)(e - w)))
+                return;
+        break;
+    }
+    for (char *p = s; *p; p++) {
+        if (*p == '\'' && p[1] && p[2] == '\'') {   /* a character */
+            p += 2;
+            continue;
+        }
+        if (*p != '"')
+            continue;
+        char *q = p + 1;
+        int high = 0;
+        while (*q && *q != '"' && is_symc((unsigned char)*q))
+            high |= (unsigned char)*q++ >= 0x80;
+        if (*q != '"' || q == p + 1 || !high) {
+            while (*q && *q != '"') q += *q == '\\' && q[1] ? 2 : 1;
+            if (!*q)
+                return;
+            p = q;                          /* past a string */
+            continue;
+        }
+        memmove(q, q + 1, strlen(q + 1) + 1);       /* the closing quote */
+        memmove(p, p + 1, strlen(p + 1) + 1);       /* the opening one */
+        p = q - 2;
+    }
+}
 
 /* Strips comments and trailing space, in place. `#` and `//` start one;
  * a `#` inside a string does not, and with `hash_imm` (ARM, aarch64) a
@@ -2509,6 +2567,7 @@ static void gx_text(struct gexp *x, char *text, const char *path, int base)
                 in = xrealloc(in, (size_t)cap * sizeof *in);
             }
             in[n].text = xstrndup(s, semi ? (size_t)(semi - s) : strlen(s));
+            unquote_names(in[n].text);
             in[n].line = line;
             n++;
             if (!semi) break;
@@ -2833,6 +2892,8 @@ static int directive(struct gas *g, char *p, int pass)
             sy->is_func = 1;
         else if (!strncmp(t, "object", 6) || !strncmp(t, "STT_OBJECT", 10))
             sy->is_object = 1;
+        else if (!strncmp(t, "tls_object", 10) || !strncmp(t, "STT_TLS", 7))
+            sy->is_tls = 1;
         else if (strncmp(t, "notype", 6) && strncmp(t, "STT_NOTYPE", 10))
             gerr(g, ".type %s is not supported", t);
         return 1;
@@ -3675,6 +3736,7 @@ static int write_object(struct gas *g, const char *out_path)
             unsigned char bind = s->is_weak ? STB_WEAK
                                : s->is_global ? STB_GLOBAL : STB_LOCAL;
             unsigned char type = s->is_func ? STT_FUNC
+                               : s->is_tls ? STT_TLS
                                : s->is_object ? STT_OBJECT : STT_NOTYPE;
             /* A function in Thumb code: the interworking bit. Every
              * function here is Thumb (M-profile has no ARM state), in
@@ -3691,6 +3753,11 @@ static int write_object(struct gas *g, const char *out_path)
                                          (Elf64_Half)(s->sec >= 0 ? ndx[s->sec]
                                                       : s->sec == SEC_ABS
                                                       ? SHN_ABS : SHN_UNDEF));
+            /* .hidden and its siblings: read, and then never written --
+             * a hidden symbol came out default, exported from a shared
+             * object it was meant to stay inside */
+            if (s->vis)
+                elfw_symbol_visibility(w, s->elf_ndx, s->vis);
         }
     /* Anything a relocation names and nothing defined becomes UNDEF --
      * but not a label defined here that no symbol was written for: a
@@ -3699,12 +3766,15 @@ static int write_object(struct gas *g, const char *out_path)
      * object can define. */
     for (i = 0; i < g->nfix; i++) {
         struct sym *s = sym_find(g, g->fix[i].sym, strlen(g->fix[i].sym));
-        if (s && !s->elf_ndx && s->sec < 0)
+        if (s && !s->elf_ndx && s->sec < 0) {
             s->elf_ndx = elfw_add_symbol(w, s->name, 0, 0,
                                          (Elf64_Uchar)(((s->is_weak ? STB_WEAK
                                                        : STB_GLOBAL) << 4) |
                                                        STT_NOTYPE),
                                          SHN_UNDEF);
+            if (s->vis)
+                elfw_symbol_visibility(w, s->elf_ndx, s->vis);
+        }
     }
     for (i = 0; i < g->nfix; i++) {
         struct fixup *f = &g->fix[i];

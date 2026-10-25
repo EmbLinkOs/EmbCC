@@ -971,14 +971,12 @@ int mipsasm_is_word(const char *stmt, const char *w, int len)
 static int sym_operand(const char *p, int *slen, long *add)
 {
     int n = 0;
-    if (!(isalpha((unsigned char)p[0]) || p[0] == '_' || p[0] == '.' ||
-          p[0] == '$'))
+    if (!(asm_sym0((unsigned char)p[0]) || p[0] == '$'))
         return 0;
     if (p[0] == '$' || (p[0] == '.' && (p[1] == '+' || p[1] == '-' ||
                                         !p[1] || p[1] == ')')))
         return 0;                         /* a register, or `.` itself */
-    while (isalnum((unsigned char)p[n]) || p[n] == '_' || p[n] == '.' ||
-           p[n] == '$')
+    while (asm_symc((unsigned char)p[n]))
         n++;
     *slen = n;
     *add = 0;
@@ -1038,7 +1036,7 @@ int mipsasm_symform(const char *stmt, struct asm_symform *f)
             "%got", "%call16", "%gp_rel", "%got_disp", "%got_page",
             "%got_ofst", "%call_hi", "%call_lo", "%got_hi", "%got_lo",
             "%gottprel", "%tlsgd", "%tlsldm", "%dtprel_hi", "%dtprel_lo",
-            "%tprel_hi", "%tprel_lo", "%higher", "%highest", "%neg",
+            "%tprel_hi", "%tprel_lo", "%neg",
             "%pcrel_hi", "%pcrel_lo", NULL
         };
         const char *pc = strchr(q, '%');
@@ -1080,9 +1078,10 @@ int mipsasm_symform(const char *stmt, struct asm_symform *f)
         if (mips_is_64())
             return refuse_form(f, stmt, o, slen,
                                "la loads a 32-bit address, and a MIPS64 "
-                               "address is 64 bits (nor are %highest and "
-                               "%higher assembled here): load it from a "
-                               ".dword holding the symbol");
+                               "address is 64 bits: build it as lui "
+                               "%highest, daddiu %higher, dsll 16, daddiu "
+                               "%hi, dsll 16, daddiu %lo, or load it from "
+                               "a .dword holding the symbol");
         f->sym_at = (int)(o - stmt);
         f->sym_len = slen;
         f->addend = add;
@@ -1096,8 +1095,49 @@ int mipsasm_symform(const char *stmt, struct asm_symform *f)
         return 1;
     }
 
-    /* %hi(sym) and %lo(sym): which instruction may carry each */
+    /* MIPS64's address in four pieces, as `embcc -S` and GCC's n64
+     * non-PIC code write it: lui %highest, then daddiu %higher, %hi and
+     * %lo with a dsll 16 between each */
     {
+        int daddiu = mlen == 6 && !strncmp(m, "daddiu", 6);
+        const char *at = strstr(q, "%highest(");
+        int w = 8, rel = R_MIPS_HIGHEST, n;
+        if (!at) {
+            at = strstr(q, "%higher(");
+            w = 7;
+            rel = R_MIPS_HIGHER;
+        }
+        if (at) {
+            n = sym_operand(at + w + 1, &slen, &add);
+            if (!n || at[w + 1 + n] != ')')
+                return 0;
+            f->sym_at = (int)(at + w + 1 - stmt);
+            f->sym_len = slen;
+            f->addend = add;
+            if (!mips_is_64())
+                return refuse_form(f, stmt, at + w + 1, slen,
+                                   "%highest and %higher are MIPS64's: a "
+                                   "MIPS32 address is %hi and %lo");
+            if (rel == R_MIPS_HIGHEST ? !(mlen == 3 && !strncmp(m, "lui", 3))
+                                      : !daddiu)
+                return refuse_form(f, stmt, at + w + 1, slen,
+                                   rel == R_MIPS_HIGHEST
+                                       ? "%highest(symbol) is a lui's operand"
+                                       : "%higher(symbol) is a daddiu's "
+                                         "operand");
+            snprintf(f->encode, sizeof f->encode, "%.*s0%s",
+                     (int)(at - stmt), stmt, at + w + 2 + n);
+            f->site[0].off = 0;
+            f->site[0].reloc = rel;
+            f->nsites = 1;
+            return 1;
+        }
+    }
+
+    /* %hi(sym) and %lo(sym): which instruction may carry each -- and on
+     * MIPS64 a daddiu either, between the shifts */
+    {
+        int daddiu = mips_is_64() && mlen == 6 && !strncmp(m, "daddiu", 6);
         const char *h = strstr(q, "%hi(");
         const char *l = strstr(q, "%lo(");
         const char *at = h ? h : l;
@@ -1111,7 +1151,7 @@ int mipsasm_symform(const char *stmt, struct asm_symform *f)
         f->sym_len = slen;
         f->addend = add;
         if (h) {
-            if (!(mlen == 3 && !strncmp(m, "lui", 3)))
+            if (!(mlen == 3 && !strncmp(m, "lui", 3)) && !daddiu)
                 return refuse_form(f, stmt, at + 4, slen,
                                    "%hi(symbol) is a lui's operand");
             snprintf(f->encode, sizeof f->encode, "%.*s0%s",
@@ -1122,7 +1162,11 @@ int mipsasm_symform(const char *stmt, struct asm_symform *f)
                 "lb", "lbu", "lh", "lhu", "lw", "sb", "sh", "sw", "ll", "sc",
                 "lwl", "lwr", "swl", "swr", NULL
             };
-            int okm = mlen == 5 && !strncmp(m, "addiu", 5);
+            static const char *const ls64[] = { "ld", "sd", "lwu", NULL };
+            int okm = daddiu || (mlen == 5 && !strncmp(m, "addiu", 5));
+            for (int k = 0; !okm && mips_is_64() && ls64[k]; k++)
+                okm = (int)strlen(ls64[k]) == mlen &&
+                      !strncmp(m, ls64[k], (size_t)mlen);
             for (int k = 0; !okm && ls[k]; k++)
                 okm = (int)strlen(ls[k]) == mlen && !strncmp(m, ls[k], (size_t)mlen);
             if (!okm)

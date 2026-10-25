@@ -105,7 +105,7 @@ static int tok_reg(const struct tok *t)
 }
 
 static int is_ident0(int c) { return isalpha(c) || c == '_' || c == '.' || c == '$'; }
-static int is_identc(int c) { return isalnum(c) || c == '_' || c == '.' || c == '$'; }
+static int is_identc(int c) { return asm_symc(c); }
 
 /* A constant: a C expression, or %hi()/%lo() of one. 0 when it is not. */
 static int tok_imm(const struct tok *t, long long *out)
@@ -1072,7 +1072,7 @@ int spasm_is_word(const char *stmt, const char *w, int len)
 static int sym_operand(const char *p, int *slen, long *add)
 {
     int n = 0;
-    if (!(isalpha((unsigned char)p[0]) || p[0] == '_' || p[0] == '.'))
+    if (!asm_sym0((unsigned char)p[0]))
         return 0;
     if (p[0] == '.' && !(isalnum((unsigned char)p[1]) || p[1] == '_'))
         return 0;

@@ -774,13 +774,12 @@ int laasm_is_word(const char *stmt, const char *w, int len)
 static int sym_operand(const char *p, int *slen, long *add)
 {
     int n = 0;
-    if (!(isalpha((unsigned char)p[0]) || p[0] == '_' || p[0] == '.'))
+    if (!asm_sym0((unsigned char)p[0]))
         return 0;
     if (p[0] == '.' && (p[1] == '+' || p[1] == '-' || !p[1] || p[1] == ')' ||
                         p[1] == ' '))
         return 0;                         /* `.` itself */
-    while (isalnum((unsigned char)p[n]) || p[n] == '_' || p[n] == '.' ||
-           p[n] == '$')
+    while (asm_symc((unsigned char)p[n]))
         n++;
     *slen = n;
     *add = 0;
