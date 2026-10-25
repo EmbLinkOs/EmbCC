@@ -10,6 +10,7 @@
  * refuses a weak reference nothing defines, so it is never asked the
  * UTF-8 one). */
 // expect-exit: 42
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
