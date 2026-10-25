@@ -932,7 +932,12 @@ int target_riscv_flen(void);
 int target_riscv_abi_flen(void);
 /* -march= named Zifencei (or `g`): only __riscv_zifencei reads it. */
 int target_riscv_zifencei(void);
-void target_set_riscv_isa(int f, int d, int c, int zifencei);
+/* -march= named the A extension (1 too on every other architecture):
+ * without it there is no atomic read-modify-write instruction, and those
+ * are calls (target_atomic_rmw_libcall) */
+int target_riscv_atomics(void);
+int target_atomic_rmw_libcall(int size);
+void target_set_riscv_isa(int a, int f, int d, int c, int zifencei);
 void target_set_riscv_abi_flen(int flen);
 
 /* Does this target's object carry REL relocations -- the addend stored in

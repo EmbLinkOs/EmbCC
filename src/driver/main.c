@@ -137,12 +137,18 @@ static void print_usage(FILE *out)
 static const char *lib_triple(void)
 {
     static char buf[128];
-    int abi = target_riscv_abi_flen();
-    if (!abi)
+    int abi = target_riscv_abi_flen(), noa = !target_riscv_atomics();
+    if (!abi && !noa)
         return target_triple_now();
-    snprintf(buf, sizeof buf, "%s/%s%s", target_triple_now(),
-             target_get() == TARGET_RISCV64 ? "lp64" : "ilp32",
-             abi == 64 ? "d" : "f");
+    /* ...and one built without the A extension (an ESP32-C3's rv32imc) is
+     * a variant beside them, noa or ilp32f-noa: the C library's locks are
+     * amo instructions in the others, which that part has not got */
+    if (!abi)
+        snprintf(buf, sizeof buf, "%s/noa", target_triple_now());
+    else
+        snprintf(buf, sizeof buf, "%s/%s%s%s", target_triple_now(),
+                 target_get() == TARGET_RISCV64 ? "lp64" : "ilp32",
+                 abi == 64 ? "d" : "f", noa ? "-noa" : "");
     return buf;
 }
 

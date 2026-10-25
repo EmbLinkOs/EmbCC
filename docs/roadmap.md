@@ -141,7 +141,8 @@ Every refusal either implemented or declared permanent:
   and RISC-V hard-float conventions, remain.)
 - C++ exceptions on Cortex-M, RV32 and the other 32-bit targets (needs
   0.3.0's unwind tables). C++ on AVR, or a permanent refusal.
-- RISC-V without the A extension (`rv32imc`, the ESP32-C3's ISA).
+- RISC-V without the A extension (`rv32imc`, the ESP32-C3's ISA): done;
+  without M (`rv32ic`) and the E base (`rv32ec`, the CH32V003) remain.
 - The Microsoft x64 calling convention in full, so Windows objects link
   with other compilers' objects.
 - `embld` linking AArch64 programs; an AT&T-syntax x86-64 assembler for

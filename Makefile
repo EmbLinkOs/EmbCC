@@ -918,6 +918,9 @@ libc-linux-aarch64: embcc embar
 # directory (tools/build-rt.sh says how each is built).
 RISCV_HF := riscv32-unknown-elf/ilp32f riscv32-unknown-elf/ilp32d \
             riscv64-unknown-elf/lp64f riscv64-unknown-elf/lp64d
+# ...and the soft-float ABI without the A extension (an ESP32-C3's rv32imc),
+# whose C library cannot hold the amo instructions of the others' locks
+RISCV_HF += riscv32-unknown-elf/noa riscv64-unknown-elf/noa
 RT_EMBEDDED_ALL := avr thumbv6m-none-eabi thumbv8m.base-none-eabi thumbv7m-none-eabi thumbv7em-none-eabi \
                thumbv7em-none-eabihf thumbv8m.main-none-eabi \
                thumbv8m.main-none-eabihf armv7a-none-eabi armv7a-none-eabihf riscv32-unknown-elf \

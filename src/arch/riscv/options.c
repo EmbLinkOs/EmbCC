@@ -105,11 +105,6 @@ void riscv_options_done(void)
             diag_fatal(NULL, 0, "%s: EmbCC needs the M extension -- "
                        "its code multiplies and divides with mul and div, "
                        "and has no __mulsi3 path: add m", isa_said);
-        if (!a)
-            diag_fatal(NULL, 0, "%s: EmbCC needs the A extension -- "
-                       "its atomics are lr/sc and the amo instructions, and "
-                       "it has no __atomic_* library path: add a",
-                       isa_said);
     }
     abi = d ? 64 : f ? 32 : 0;
     if (g_rv_mabi) {
@@ -139,7 +134,7 @@ void riscv_options_done(void)
                        abi == 64 ? "D" : "F", rv64 ? "rv64" : "rv32",
                        abi == 64 ? "imafdc" : "imafc");
     }
-    target_set_riscv_isa(f, d, c, zifencei);
+    target_set_riscv_isa(a, f, d, c, zifencei);
     target_set_riscv_abi_flen(abi);
 }
 

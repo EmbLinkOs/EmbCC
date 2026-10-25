@@ -39,7 +39,7 @@ static int g_thumb_hard;    /* see target_thumb_hard_abi */
 static int g_thumb_hf_name; /* the triple asked for was an -eabihf one */
 /* RISC-V's -march= and -mabi= (target_riscv_flen and the rest): the C
  * extension on and no FPU by default, rv32imac/ilp32 and rv64imac/lp64. */
-static int g_rv_c = 1, g_rv_f, g_rv_d, g_rv_zifencei, g_rv_abi_flen;
+static int g_rv_c = 1, g_rv_a = 1, g_rv_f, g_rv_d, g_rv_zifencei, g_rv_abi_flen;
 /* ARMv7-A in ARM state (armv7a-none-eabi): the same AAPCS32 and data model
  * as the Cortex-M levels -- which is why it is this target and not a new
  * enum value -- with the A32 instruction set. See target_arm_a32. */
@@ -1074,12 +1074,31 @@ int target_riscv_abi_flen(void)
     return g_rv_abi_flen;
 }
 int target_riscv_zifencei(void) { return g_rv_zifencei; }
-void target_set_riscv_isa(int f, int d, int c, int zifencei)
+int target_riscv_atomics(void)
 {
+    return (g_arch != TARGET_RISCV32 && g_arch != TARGET_RISCV64) || g_rv_a;
+}
+void target_set_riscv_isa(int a, int f, int d, int c, int zifencei)
+{
+    g_rv_a = a ? 1 : 0;
     g_rv_f = f ? 1 : 0;
     g_rv_d = d ? 1 : 0;
     g_rv_c = c ? 1 : 0;
     g_rv_zifencei = zifencei ? 1 : 0;
+}
+
+/* An atomic read-modify-write, exchange or compare-exchange of `size`
+ * bytes made by calling libatomic's sized routine (__atomic_fetch_add_4
+ * and its kin) rather than by an instruction: eight bytes where pointers
+ * are four, and every width on RISC-V without the A extension, which has
+ * no such instruction at all -- as GCC and clang do there. An aligned
+ * load or store is one access either way, and stays inline but for the
+ * eight-byte case (target_atomic8_libcall). */
+int target_atomic_rmw_libcall(int size)
+{
+    if (size == 8 && target_atomic8_libcall())
+        return 1;
+    return !target_riscv_atomics() && size <= 8;
 }
 void target_set_riscv_abi_flen(int flen) { g_rv_abi_flen = flen; }
 

@@ -255,13 +255,46 @@ static int riscv_on(void)
 static int riscv_changes(void)
 {
     return riscv_on() && (target_riscv_flen() || !target_riscv_rvc() ||
-                          target_riscv_zifencei());
+                          target_riscv_zifencei() || !target_riscv_atomics());
+}
+
+/* Without the A extension (clang's rv32imc): no __riscv_a, no
+ * __GCC_HAVE_SYNC_COMPARE_AND_SWAP_N, and every lock-free answer 1,
+ * "sometimes" -- the read-modify-writes are libatomic calls. */
+static const char *const rv_lock_free[] = {
+    "__GCC_ATOMIC_BOOL_LOCK_FREE", "__GCC_ATOMIC_CHAR_LOCK_FREE",
+    "__GCC_ATOMIC_CHAR16_T_LOCK_FREE", "__GCC_ATOMIC_CHAR32_T_LOCK_FREE",
+    "__GCC_ATOMIC_WCHAR_T_LOCK_FREE", "__GCC_ATOMIC_SHORT_LOCK_FREE",
+    "__GCC_ATOMIC_INT_LOCK_FREE", "__GCC_ATOMIC_LONG_LOCK_FREE",
+    "__GCC_ATOMIC_LLONG_LOCK_FREE", "__GCC_ATOMIC_POINTER_LOCK_FREE",
+    "__CLANG_ATOMIC_BOOL_LOCK_FREE", "__CLANG_ATOMIC_CHAR_LOCK_FREE",
+    "__CLANG_ATOMIC_CHAR16_T_LOCK_FREE", "__CLANG_ATOMIC_CHAR32_T_LOCK_FREE",
+    "__CLANG_ATOMIC_WCHAR_T_LOCK_FREE", "__CLANG_ATOMIC_SHORT_LOCK_FREE",
+    "__CLANG_ATOMIC_INT_LOCK_FREE", "__CLANG_ATOMIC_LONG_LOCK_FREE",
+    "__CLANG_ATOMIC_LLONG_LOCK_FREE", "__CLANG_ATOMIC_POINTER_LOCK_FREE",
+};
+#define N_RV_LOCK_FREE (int)(sizeof rv_lock_free / sizeof *rv_lock_free)
+
+static int rv_noa_drops(const char *name)
+{
+    if (!riscv_on() || target_riscv_atomics())
+        return 0;
+    if (!strcmp(name, "__riscv_a") || !strcmp(name, "__riscv_atomic") ||
+        !strcmp(name, "__riscv_zaamo") || !strcmp(name, "__riscv_zalrsc") ||
+        !strncmp(name, "__GCC_HAVE_SYNC_COMPARE_AND_SWAP_", 33))
+        return 1;
+    for (int k = 0; k < N_RV_LOCK_FREE; k++)
+        if (!strcmp(name, rv_lock_free[k]))
+            return 1;
+    return 0;
 }
 
 static int riscv_drops(const char *name)
 {
     if (!riscv_on())
         return 0;
+    if (rv_noa_drops(name))
+        return 1;
     if (target_riscv_abi_flen() && strcmp(name, "__riscv_float_abi_soft") == 0)
         return 1;
     return !target_riscv_rvc() &&
@@ -298,6 +331,11 @@ static int riscv_adds(struct predef_macro *out)
     if (target_riscv_zifencei()) {
         out[n].name = "__riscv_zifencei"; out[n++].value = "2000000";
     }
+    if (!target_riscv_atomics())
+        for (int k = 0; k < N_RV_LOCK_FREE; k++) {
+            out[n].name = rv_lock_free[k];
+            out[n++].value = "1";
+        }
     return n;
 }
 
@@ -509,7 +547,8 @@ const struct predef_macro *predef_table(int *count)
     static struct predef_macro *merged;
     static int nmerged;
     if (!merged) {
-        merged = xmalloc((size_t)(narch + nos + 40 + ndarwin_a64_model +
+        merged = xmalloc((size_t)(narch + nos + 40 + N_RV_LOCK_FREE +
+                                  ndarwin_a64_model +
                                   (int)(sizeof flt16_add / sizeof *flt16_add) +
                                   (int)(sizeof bflt16_add / sizeof *bflt16_add)) *
                          sizeof *merged);

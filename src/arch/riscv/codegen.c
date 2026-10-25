@@ -5739,6 +5739,11 @@ static void gen_ins(struct rv_fn *F, int n)
     case IR_XCHG: case IR_XADD: case IR_ARMW: {
         int aw = i->size;
         int addr, val, dst;
+        /* without the A extension irgen calls libatomic for every one of
+         * these (target_atomic_rmw_libcall): one here would trap */
+        if (!target_riscv_atomics())
+            internal_error("riscv: %s: an atomic read-modify-write without "
+                           "the A extension", fn->name);
         if (aw == 1 || aw == 2) {
             /* the word around it: see sub_lane. The shift is SUB_X
              * throughout, the address dead once it is made. */
@@ -5826,6 +5831,9 @@ static void gen_ins(struct rv_fn *F, int n)
     }
 
     case IR_CAS: case IR_CMPXCHG: {
+        if (!target_riscv_atomics())
+            internal_error("riscv: %s: a compare-and-swap without the A "
+                           "extension", fn->name);
         /* A compare-and-swap is a load-reserved/store-conditional loop: the
          * A extension has no single instruction for it.
          *

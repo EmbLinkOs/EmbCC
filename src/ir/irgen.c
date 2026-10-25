@@ -2032,6 +2032,13 @@ static void atomic_width_ok(struct ir_func *fn, const struct type *t,
 static int emit_call(struct ir_func *fn, struct expr *e, const int *args,
                      int fptemp);
 
+/* ...and a read-modify-write of any width where the machine has none
+ * (RISC-V without the A extension: target_atomic_rmw_libcall) */
+static int atomic_lib_rmw(const struct type *t)
+{
+    return target_atomic_rmw_libcall(ty_size(t));
+}
+
 static int atomic8_lib(const struct type *t)
 {
     return ty_size(t) == 8 && target_atomic8_libcall();
@@ -2045,7 +2052,7 @@ static struct type *lib_int(void) { return ty_base(TY_INT, 0); }
 static struct func *libatomic_fn(const char *name, struct type *ret, int n,
                                  struct type *const *tys)
 {
-    static struct func *made[32];
+    static struct func *made[64];
     static int nmade;
     for (int k = 0; k < nmade; k++)
         if (strcmp(made[k]->name, name) == 0)
@@ -2326,31 +2333,44 @@ static void lib_store8(struct ir_func *fn, int addr, int val, int ordv,
 }
 
 /* IR_XCHG, IR_XADD (opc '-' for a subtraction) or IR_ARMW's opc */
-static int lib_rmw8(struct ir_func *fn, enum ir_op op, int opc, int addr,
-                    int val, int ordv, int line)
+/* libatomic's sized name for an operation on `size` bytes: which 0
+ * exchange, 1-6 fetch_add, sub, and, or, xor, nand, 7 compare_exchange */
+static const char *lib_name(int which, int size)
 {
-    const char *name =
-        op == IR_XCHG ? "__atomic_exchange_8"
-      : op == IR_XADD ? (opc == '-' ? "__atomic_fetch_sub_8"
-                                    : "__atomic_fetch_add_8")
-      : opc == '&' ? "__atomic_fetch_and_8"
-      : opc == '|' ? "__atomic_fetch_or_8"
-      : opc == '^' ? "__atomic_fetch_xor_8"
-      : "__atomic_fetch_nand_8";
+    static const char *const op[8] = { "exchange", "fetch_add", "fetch_sub",
+        "fetch_and", "fetch_or", "fetch_xor", "fetch_nand",
+        "compare_exchange" };
+    static char *made[8][4];
+    int k = size == 1 ? 0 : size == 2 ? 1 : size == 4 ? 2 : 3;
+    if (!made[which][k]) {
+        char b[48];
+        snprintf(b, sizeof b, "__atomic_%s_%d", op[which], size);
+        made[which][k] = xstrndup(b, strlen(b));
+    }
+    return made[which][k];
+}
+
+static int lib_rmw(struct ir_func *fn, enum ir_op op, int opc, int addr,
+                   int val, int ordv, int line, int size)
+{
+    int which = op == IR_XCHG ? 0
+              : op == IR_XADD ? (opc == '-' ? 2 : 1)
+              : opc == '&' ? 3 : opc == '|' ? 4 : opc == '^' ? 5 : 6;
+    struct type *ut = ty_int_of_size(size, 1);
     int v[3] = { addr, val, lib_order(fn, ordv) };
-    struct type *t[3] = { lib_ptr(), lib_u64(), lib_int() };
-    return libatomic_call(fn, name, lib_u64(), 3, v, t, line);
+    struct type *t[3] = { lib_ptr(), ut, lib_int() };
+    return libatomic_call(fn, lib_name(which, size), ut, 3, v, t, line);
 }
 
 /* the bool: *addr == *expp, then *addr = des; else *expp = *addr */
-static int lib_cmpxchg8(struct ir_func *fn, int addr, int expp, int des,
-                        int sv, int fv, int line)
+static int lib_cmpxchg(struct ir_func *fn, int addr, int expp, int des,
+                       int sv, int fv, int line, int size)
 {
     int v[5] = { addr, expp, des, lib_order(fn, sv), lib_order(fn, fv) };
-    struct type *t[5] = { lib_ptr(), lib_ptr(), lib_u64(), lib_int(),
-                          lib_int() };
-    return libatomic_call(fn, "__atomic_compare_exchange_8",
-                          ty_base(TY_BOOL, 0), 5, v, t, line);
+    struct type *t[5] = { lib_ptr(), lib_ptr(), ty_int_of_size(size, 1),
+                          lib_int(), lib_int() };
+    return libatomic_call(fn, lib_name(7, size), ty_base(TY_BOOL, 0), 5, v,
+                          t, line);
 }
 
 /* An atomic access is never merged with another or removed: vol says so to
@@ -2415,8 +2435,8 @@ static int atomic_rmw_mo(struct ir_func *fn, enum ir_op op, int opc,
                          int addr, int val, const struct type *t, int mo,
                          int ordv, int line)
 {
-    if (atomic8_lib(t))
-        return lib_rmw8(fn, op, opc, addr, val, ordv, line);
+    if (atomic_lib_rmw(t))
+        return lib_rmw(fn, op, opc, addr, val, ordv, line, ty_size(t));
     if (op == IR_XADD && opc == '-') {
         /* x86 has lock xadd; subtraction adds the negation */
         val = emit_bin(fn, IR_SUB, emit_const(fn, 0, ty_w(t)), val,
@@ -2587,7 +2607,7 @@ static int atomic_incdec(struct ir_func *fn, struct expr *e)
     long step = (long)e->delta * (t->kind == TY_PTR ? ty_size(t->pointee) : 1);
     int addr = gen_addr(fn, e->lhs);
     int old;
-    if (atomic8_lib(t) && step < 0)
+    if (atomic_lib_rmw(t) && step < 0)
         old = atomic_rmw_mo(fn, IR_XADD, '-', addr, emit_const(fn, -step, w),
                             t, IR_MO_SEQ_CST, -1, e->line);
     else
@@ -2639,7 +2659,7 @@ static int atomic_compound(struct ir_func *fn, struct expr *e)
                      : e->op == B_SUB ? IR_SUB : IR_ADD;
         return atomic_result(fn, emit_bin(fn, o, old, v, w, sign), lt);
     }
-    if (atomic8_lib(lt)) {
+    if (atomic_lib_rmw(lt)) {
         /* clang's loop: the expected value in a local (sema's
          * e->var_index), which a failed compare-exchange refreshes */
         int x = e->var_index;
@@ -2647,8 +2667,8 @@ static int atomic_compound(struct ir_func *fn, struct expr *e)
         int top = new_label(fn);
         emit_label(fn, top);
         int res = compound_value(fn, e, emit_ldvar(fn, x, lt), rv);
-        int ok = lib_cmpxchg8(fn, addr, local_addr(fn, x), res, -1, -1,
-                              e->line);
+        int ok = lib_cmpxchg(fn, addr, local_addr(fn, x), res, -1, -1,
+                             e->line, ty_size(lt));
         emit_brz(fn, ok, 4, top);
         return res;
     }
@@ -2889,8 +2909,9 @@ static int gen_atomic(struct ir_func *fn, struct expr *e, enum atomic_kind ak,
     }
     int w = ty_w(obj), sign = ty_signed_int(obj);
     int mo = ir_mo(e->atomic_mo);
-    /* a libatomic call (atomic8_lib) passes the orders as written */
-    int lib = atomic8_lib(obj);
+    /* a libatomic call (atomic8_lib, atomic_lib_rmw) passes the orders as
+     * written */
+    int lib = atomic8_lib(obj), librmw = atomic_lib_rmw(obj);
     int is_sync = e->name && strncmp(e->name, "__sync_", 7) == 0;
     int addr = gen_expr(fn, e->args[0]);
     if (ty_size(obj) == 16)
@@ -2914,7 +2935,7 @@ static int gen_atomic(struct ir_func *fn, struct expr *e, enum atomic_kind ak,
         return -1;
     case AK_EXCHANGE_N: case AK_SYNC_LOCK_TAS: {
         int val = atomic_value(fn, e->args[1], obj);
-        int ov = lib && !is_sync ? lib_order_arg(fn, e, 2) : -1;
+        int ov = librmw && !is_sync ? lib_order_arg(fn, e, 2) : -1;
         return atomic_result(fn, atomic_rmw_mo(fn, IR_XCHG, 0, addr, val,
                                                obj, mo, ov, e->line), obj);
     }
@@ -2925,7 +2946,7 @@ static int gen_atomic(struct ir_func *fn, struct expr *e, enum atomic_kind ak,
     }
     case AK_FETCH_OP: case AK_OP_FETCH: {
         int val = atomic_value(fn, e->args[1], obj);
-        int ov = lib && !is_sync ? lib_order_arg(fn, e, 2) : -1;
+        int ov = librmw && !is_sync ? lib_order_arg(fn, e, 2) : -1;
         int old;
         if (op == '+' || op == '-')
             old = atomic_rmw_mo(fn, IR_XADD, op == '-' ? '-' : 0, addr, val,
@@ -2963,10 +2984,11 @@ static int gen_atomic(struct ir_func *fn, struct expr *e, enum atomic_kind ak,
         int des = ak == AK_CMPXCHG_N
             ? atomic_value(fn, e->args[2], obj)
             : emit_load(fn, gen_expr(fn, e->args[2]), obj);  /* by pointer */
-        if (lib) {
+        if (librmw) {
             int sv = lib_order_arg(fn, e, 4);
-            return lib_cmpxchg8(fn, addr, exp, des, sv,
-                                lib_order_arg(fn, e, 5), e->line);
+            return lib_cmpxchg(fn, addr, exp, des, sv,
+                               lib_order_arg(fn, e, 5), e->line,
+                               ty_size(obj));
         }
         struct ir_ins *i = emit(fn);
         i->op = IR_CMPXCHG;
@@ -2999,19 +3021,20 @@ static int gen_atomic(struct ir_func *fn, struct expr *e, enum atomic_kind ak,
         int rp = gen_expr(fn, e->args[2]);
         int val = emit_load(fn, vp, obj);
         int old = atomic_rmw_mo(fn, IR_XCHG, 0, addr, val, obj, mo,
-                                lib ? lib_order_arg(fn, e, 3) : -1, e->line);
+                                librmw ? lib_order_arg(fn, e, 3) : -1,
+                                e->line);
         emit_store(fn, rp, old, obj);
         return -1;
     }
     case AK_SYNC_VAL_CAS: case AK_SYNC_BOOL_CAS: {
         int expv = atomic_value(fn, e->args[1], obj);
         int newv = atomic_value(fn, e->args[2], obj);
-        if (lib) {
+        if (librmw) {
             /* expected through a local (sema's e->var_index), as clang's
              * is: the call leaves the value seen there */
             emit_stvar(fn, e->var_index, expv, obj);
-            int ok = lib_cmpxchg8(fn, addr, local_addr(fn, e->var_index),
-                                  newv, -1, -1, e->line);
+            int ok = lib_cmpxchg(fn, addr, local_addr(fn, e->var_index),
+                                 newv, -1, -1, e->line, ty_size(obj));
             return ak == AK_SYNC_BOOL_CAS ? ok
                                           : emit_ldvar(fn, e->var_index, obj);
         }

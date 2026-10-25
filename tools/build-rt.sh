@@ -34,6 +34,15 @@ case $triple in
              ilp32d) flags="-march=rv32imafdc -mabi=ilp32d" ;;
              lp64f)  flags="-march=rv64imafc -mabi=lp64f" ;;
              lp64d)  flags="-march=rv64imafdc -mabi=lp64d" ;;
+             # without the A extension (an ESP32-C3's rv32imc)
+             noa) case $triple in
+                      riscv64*) flags="-march=rv64imc" ;;
+                      *)        flags="-march=rv32imc" ;;
+                  esac ;;
+             ilp32f-noa) flags="-march=rv32imfc -mabi=ilp32f" ;;
+             ilp32d-noa) flags="-march=rv32imfdc -mabi=ilp32d" ;;
+             lp64f-noa)  flags="-march=rv64imfc -mabi=lp64f" ;;
+             lp64d-noa)  flags="-march=rv64imfdc -mabi=lp64d" ;;
              *) echo "$0: no library variant '$abi' for $triple" >&2; exit 1 ;;
          esac ;;
 esac

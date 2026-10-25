@@ -118,7 +118,8 @@ else
                  "32 rv32ima ilp32" "32 rv32imafdc_zicsr_zifencei ilp32d" \
                  "32 rv32imafc -" "32 rv32gc -" \
                  "64 rv64gc lp64d" "64 rv64imafc lp64f" "64 rv64imafdc lp64" \
-                 "64 rv64imafdc lp64f" "64 rv64ima lp64" "64 rv64gc -"; do
+                 "64 rv64imafdc lp64f" "64 rv64ima lp64" "64 rv64gc -" \
+                 "32 rv32imc ilp32" "32 rv32imfc ilp32f" "64 rv64imc lp64"; do
         set -- $combo
         abiflag="-mabi=$3"; refabi=$3
         if [ "$3" = - ]; then
@@ -128,11 +129,14 @@ else
             esac
         fi
         # shellcheck disable=SC2086
+        # (the _Float16 and __bf16 description set aside, as above)
         "$EMBCC" --target=riscv$1-unknown-elf -march=$2 $abiflag \
-            --dump-predef | LC_ALL=C sort > "$tmpa" || {
+            --dump-predef | grep -v '^#define __B*FLT16_' |
+            LC_ALL=C sort > "$tmpa" || {
             echo "riscv$1 -march=$2 $abiflag: --dump-predef failed"; exit 1; }
         EMBCC_PREDEF_RV_MARCH=$2 EMBCC_PREDEF_RV_MABI=$refabi \
-            sh tools/gen-predef.sh --reference riscv$1 | LC_ALL=C sort > "$tmpb"
+            sh tools/gen-predef.sh --reference riscv$1 |
+            grep -v '^#define __B*FLT16_' | LC_ALL=C sort > "$tmpb"
         if ! cmp -s "$tmpa" "$tmpb"; then
             echo "riscv$1 -march=$2 $abiflag disagrees with clang:"
             diff "$tmpb" "$tmpa" | head -20

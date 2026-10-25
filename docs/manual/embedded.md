@@ -1005,6 +1005,21 @@ bits as clang's does (`atomic_fetch_add_explicit(p, 1,
 memory_order_relaxed)` is a bare `amoadd.w`, an acquire compare-exchange
 `lr.w.aq`/`sc.w`).
 
+Without the A extension (`--isa=rv32imc`, an ESP32-C3) there is no atomic
+read-modify-write instruction, so each one is a call to libatomic's sized
+routine, as GCC and clang make it there: `__atomic_fetch_add_4`,
+`__atomic_compare_exchange_1` and the rest. An aligned load or store is
+one instruction either way, and stays inline. EmbCC's runtime defines
+the routines (`lib/rt/atomic-riscv.c`) by masking interrupts:
+`mstatus.MIE` is cleared and read in one `csrrci`, and set again only if
+it was set, so they nest. That makes them atomic on one core with no
+other bus master, which is what such a part is. They need machine mode,
+and they are not atomic against a second core or DMA, so every one is
+weak, and an SDK or RTOS with another way replaces them by defining its
+own. The C library's locks are atomics too, so a program for such a part
+links the runtime and C library built without A, from
+`build/libc/<triple>/noa`; the driver picks them from `--isa=`.
+
 A one- or two-byte atomic works on the aligned word around it, as GCC's
 and LLVM's do: AND, OR and XOR are one AMO with the other lanes neutral,
 and the rest an `lr.w`/`sc.w` loop that rewrites only its lane. That is
