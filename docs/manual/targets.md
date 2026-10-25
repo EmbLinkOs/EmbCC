@@ -930,12 +930,17 @@ fused multiply-add.
 Every floating-point operation the hardware lacks, every 64-bit
 division (`__divdi3`, `__udivdi3`, `__moddi3`, `__umoddi3`) and complex
 multiply and divide are calls to helpers with libgcc's names.
-`make rt-embedded` builds `librt.a` for each of the six Cortex-M
+`make rt-embedded` builds `librt.a` for each of the seven Cortex-M
 triples (one archive per float ABI, because hard- and soft-float objects
-do not link together); link it after your objects. On ARMv7-M and
-ARMv8-M EmbCC does not provide the ARM run-time ABI's `__aeabi_*`
-routines, so an object from another compiler that calls them must bring
-its own.
+do not link together); link it after your objects. Each also has the ARM
+run-time ABI's `__aeabi_*` routines (`lib/rt/aeabi.c`), which clang, GCC
+and the vendors' toolchains call where EmbCC calls libgcc's names: the
+block operations, the divides, the 64-bit multiply, shifts and compares,
+the soft-float arithmetic, comparisons and conversions, and the
+half-precision conversions `__aeabi_h2f`, `__aeabi_f2h` and
+`__aeabi_d2h`. They take their values in core registers whatever the
+float ABI, as the run-time ABI says, and are weak, so a program's own
+definition wins.
 
 ARMv6-M has no divide, no 64-bit multiply and no exclusive loads and
 stores, so more operations are calls there. `librt.a` for

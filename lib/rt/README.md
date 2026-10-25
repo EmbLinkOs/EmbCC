@@ -54,6 +54,16 @@ on aarch64 it is IEEE binary128 with no instruction behind it, so even
 | `armv6m.c` | ARMv6-M (Cortex-M0): the RTABI's 64-bit multiply and shifts and block routines, and the `__atomic_*` calls with interrupts masked; all weak |
 | `aeabidiv.c` | the RTABI's 32-bit `__aeabi_[u]idiv[mod]` for an ARM core with no divide instruction: ARMv6-M, and ARMv7-A in ARM state; weak |
 | `aeabi.c` | the rest of the RTABI's `__aeabi_*` names for every ARM target (block operations, 64-bit division, soft-float forwarders); weak |
+| `int64.c` | 64-bit divide and remainder on the 32-bit targets |
+| `softfp.c` | binary32 and binary64 from the bits up, where no FPU has them |
+| `avr.c`, `avr64.c`, `avrfp*.c` | AVR's 32- and 64-bit multiply and divide, and its binary32 (RX's too: its `double` is four bytes) |
+| `half.c` | `_Float16` and `__bf16` to and from the wider formats, under each convention's names -- on ARM the RTABI's `__aeabi_h2f`/`f2h`/`d2h` as well |
+| `powi.c` | `__builtin_powi` and kin |
+| `clear_cache.c` | `__clear_cache`, each architecture's sequence |
+| `builtin-setjmp.c` | `__embcc_setjmp`/`__embcc_longjmp`, what `__builtin_setjmp` calls: the C library's `setjmp` under another name |
+| `atomic8.c` | libatomic's eight-byte and generic entry points, on the 32-bit targets |
+| `atomic-riscv.c` | libatomic's sized entry points for a RISC-V core without the A extension |
+| `embtrace.c` | EmbTrace's `-finstrument-functions` recorder |
 
 `softtf.c` is the largest of them and the one under the most pressure
 from the rule above: it implements `long double` for a machine that has

@@ -168,6 +168,24 @@ for c in darwin x86_64 aarch64 rv32 rv32f rv64d m4 m4hf; do
             [ $st = 42 ] || bad "$c $O: main by $([ $1 = e ] && echo EmbCC || echo the reference), lib by $([ $2 = e ] && echo EmbCC || echo the reference): exit $st, want 42"
         done
     done
+    # The run-time ABI's half helpers, which the other compiler calls and
+    # EmbCC's runtime must have: by name, and for the conversions the FPU
+    # cannot make -- every one without an FPU (m4's -mfpu=none), the
+    # double's with fpv4 (m4hf)
+    case $c in
+        m4*) FN=; [ $c = m4 ] && FN=-mfpu=none
+             o=$out/$c-rtabi
+             # shellcheck disable=SC2086
+             if ! $REF $FN -O2 -Dmain=prog_main -ffreestanding -c $S/rtabi.c -o $o.o; then
+                 bad "$c: the reference compiler does not compile rtabi.c"
+             elif ! EMBCC_THUMB_HARNESS=$out/$c sh tests/harness/thumb-m4f/link.sh $o \
+                      $o.o "$out/$c/drv.o" build/libc/$RT/librt.a > $o.lerr 2>&1; then
+                 bad "$c: the run-time ABI's half helpers do not link: $(head -1 $o.lerr)"
+             else
+                 run $c $o; st=$?
+                 [ $st = 42 ] || bad "$c: the run-time ABI's half helpers: exit $st, want 42"
+             fi ;;
+    esac
     ran="$ran $c"
 done
 [ $fails = 0 ] || exit 1

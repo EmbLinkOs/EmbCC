@@ -129,9 +129,10 @@ The complete list of what each `librt.a` defines is in
 [Libraries](libraries.md#the-compiler-runtime-librt). The names are
 libgcc's, so an object compiled by EmbCC links against another
 toolchain's libgcc, and objects from GCC or Clang that call the libgcc
-names link against EmbCC's `librt.a`. EmbCC does not provide the ARM
-run-time ABI names (`__aeabi_ldivmod`, `__aeabi_fadd`, ...); an object
-from another ARM compiler that calls them must bring its own.
+names link against EmbCC's `librt.a`. On ARM it also has the run-time
+ABI's names, which other ARM compilers call and EmbCC's own code does
+not (`__aeabi_ldivmod`, `__aeabi_fadd`, `__aeabi_h2f`, ...), all weak,
+so an object from one of them links against it too.
 
 ### The runtime archive
 

@@ -471,18 +471,26 @@ not apply.
 
 | File | Routines | Built where |
 |---|---|---|
-| `int64.c` | `__divdi3` `__udivdi3` `__moddi3` `__umoddi3` | 32-bit targets except AVR |
-| `int128.c` | `__multi3` `__divti3` `__udivti3` `__modti3` `__umodti3` `__ashlti3` `__ashrti3` `__lshrti3` `__negti2` | targets with `__int128` (not RV64) |
+| `int64.c` | `__divdi3` `__udivdi3` `__moddi3` `__umoddi3` | the 32-bit targets but AVR |
+| `int128.c` | `__multi3` `__divti3` `__udivti3` `__modti3` `__umodti3` `__ashlti3` `__ashrti3` `__lshrti3` `__negti2` | the 64-bit targets, which have `__int128` |
 | `fp128.c` | conversions between 128-bit integers and `float`/`double`: `__floattidf` `__floatuntidf` `__floattisf` `__floatuntisf` `__fixdfti` `__fixunsdfti` `__fixsfti` `__fixunssfti` | as `int128.c` |
 | `complex.c` | `__mulsc3` `__muldc3` `__divsc3` `__divdc3` | every target |
+| `half.c` | `_Float16` and `__bf16` to and from the wider formats, on the bits: libgcc's `__extendhfsf2` `__truncsfhf2` `__truncdfhf2` and `__truncxfhf2` (x87) or `__trunctfhf2` (binary128) on x86-64 and AArch64; libgcc's `__gnu_h2f_ieee` `__gnu_f2h_ieee` `__gnu_d2h_ieee` and the run-time ABI's `__aeabi_h2f` `__aeabi_f2h` `__aeabi_d2h` on ARM; EmbCC's own `__embcc_h2f` `__embcc_f2h` `__embcc_d2h` elsewhere; `__truncsfbf2` `__extendbfsf2`, `__truncdfbf2` where `double` is eight bytes and `__embcc_ll2bf` `__embcc_ull2bf` where it is four | every target |
 | `clear_cache.c` | `__clear_cache`, `__builtin___clear_cache`'s: AArch64's `dc cvau`/`ic ivau` by `CTR_EL0`'s line sizes, ARMv7-A's CP15 operations, Cortex-M's `dsb`/`isb`, RISC-V's `fence.i`, MIPS's `synci` loop returning by `jr.hb`, PowerPC's `dcbst`/`icbi`, SPARC's `flush`, LoongArch's `ibar` | every target |
 | `powi.c` | `__powisf2` `__powidf2`, and `__powixf2` (x87) or `__powitf2` (binary128) where `long double` is wider than `double`: `__builtin_powi` and kin | every target |
-| `ldouble.c` | x86-64: the x87 `long double` conversions `__floattixf` `__floatuntixf` `__fixxfti` `__fixunsxfti` and `__mulxc3` `__divxc3`; AArch64: `__multc3` `__divtc3` | x86-64, AArch64 |
-| `softtf.c` | IEEE binary128 in software, AArch64's `long double`: `__addtf3` `__subtf3` `__multf3` `__divtf3` `__negtf2`, the comparisons `__eqtf2` ... `__unordtf2`, and the conversions `__extenddftf2` `__trunctfdf2` `__floatsitf` `__fixtfdi` ... | AArch64 |
-| `softfp.c` | binary32 and binary64 in software: `__addsf3` `__subsf3` `__mulsf3` `__divsf3` `__negsf2` and the `df` forms, comparisons (`__eqsf2` `__nesf2` `__ltsf2` `__lesf2` `__gtsf2` `__gesf2` `__unordsf2` and `df`), conversions to and from 32- and 64-bit integers, `__extendsfdf2`, `__truncdfsf2` | Cortex-M (all variants; built for the Cortex-M7's double-precision unit, only the eight conversions to and from 64-bit integers, `__fixdfdi` ... `__floatundisf`), RISC-V |
+| `builtin-setjmp.c` | `__embcc_setjmp` `__embcc_longjmp`, which `__builtin_setjmp` and `__builtin_longjmp` call: the C library's `setjmp` and `longjmp` under names no program has | every target but Darwin |
+| `atomic8.c` | libatomic's eight-byte entry points, which the compiler calls for every eight-byte atomic there: `__atomic_load_8` `__atomic_store_8` `__atomic_exchange_8` `__atomic_compare_exchange_8`, `__atomic_fetch_OP_8` and `__atomic_OP_fetch_8`; and the generic `__atomic_load` `__atomic_store` `__atomic_exchange` `__atomic_compare_exchange`, which take the size first | the 32-bit targets but AVR |
+| `atomic-riscv.c` | libatomic's sized entry points for every atomic on a core without the A extension (an ESP32-C3's `rv32imc`): `__atomic_exchange_N`, `__atomic_compare_exchange_N`, `__atomic_fetch_OP_N` and `__atomic_OP_fetch_N` | RISC-V |
+| `embtrace.c` | EmbTrace's recorder: `__cyg_profile_func_enter` and `__cyg_profile_func_exit`, which `-finstrument-functions` calls, and `embtrace_enable` `embtrace_reset` `embtrace_dump` `embtrace_clock` `embtrace_putc` | every target |
+| `ldouble.c` | x86-64: the x87 `long double` conversions `__floattixf` `__floatuntixf` `__fixxfti` `__fixunsxfti` and `__mulxc3` `__divxc3`; where `long double` is binary128: `__multc3` `__divtc3` | x86-64, AArch64, RISC-V, LoongArch, MIPS64, SPARC |
+| `softtf.c` | IEEE binary128 in software, `long double` where no instruction is behind it: `__addtf3` `__subtf3` `__multf3` `__divtf3` `__negtf2`, the comparisons `__eqtf2` ... `__unordtf2`, and the conversions `__extenddftf2` `__trunctfdf2` `__floatsitf` `__fixtfdi` ... | AArch64, RISC-V, LoongArch, MIPS64, SPARC |
+| `softfp.c` | binary32 and binary64 in software: `__addsf3` `__subsf3` `__mulsf3` `__divsf3` `__negsf2` and the `df` forms, comparisons (`__eqsf2` `__nesf2` `__ltsf2` `__lesf2` `__gtsf2` `__gesf2` `__unordsf2` and `df`), conversions to and from 32- and 64-bit integers, `__extendsfdf2`, `__truncdfsf2` | the embedded targets but AVR and RX; built for a double-precision unit (the Cortex-M7's, RISC-V's `ilp32d`), only the eight conversions to and from 64-bit integers, `__fixdfdi` ... `__floatundisf`, and for RV64's `lp64d` none |
 | `avr.c` | `__mulsi3` `__divsi3` `__udivsi3` `__modsi3` `__umodsi3` | AVR |
 | `avr64.c` | `__muldi3` `__divdi3` `__udivdi3` `__moddi3` `__umoddi3` | AVR |
-| `avrfp*.c` | binary32 in software, one object per group: `__addsf3`/`__subsf3`/`__negsf2`, `__mulsf3`, `__divsf3`, the comparisons including `__cmpsf2`, and the integer conversions | AVR |
+| `avrfp*.c` | binary32 in software, one object per group: `__addsf3`/`__subsf3`/`__negsf2`, `__mulsf3`, `__divsf3`, the comparisons including `__cmpsf2`, and the integer conversions | AVR, and RX, whose `double` is four bytes too |
+| `aeabi.c` | the ARM run-time ABI's names, which clang, GCC and the vendors' toolchains call and EmbCC's own code does not: `__aeabi_memcpy` `__aeabi_memmove` `__aeabi_memset` `__aeabi_memclr` and their 4- and 8-byte forms, `__aeabi_idiv` `__aeabi_uidiv` `__aeabi_idivmod` `__aeabi_uidivmod` where there is a divide instruction, `__aeabi_ldivmod` `__aeabi_uldivmod`, `__aeabi_lmul`, the 64-bit shifts and compares, and the soft-float arithmetic, comparisons and conversions (`__aeabi_fadd` ... `__aeabi_d2f`); all weak | every ARM triple |
+| `aeabidiv.c` | `__aeabi_idiv` `__aeabi_uidiv` `__aeabi_idivmod` `__aeabi_uidivmod` for an ARM core with no divide instruction; weak | ARMv6-M, ARMv7-A |
+| `armv6m.c` | what Thumb-1 has no instruction for: `__aeabi_lmul`, `__aeabi_llsl` `__aeabi_llsr` `__aeabi_lasr`, `__aeabi_memcpy` `__aeabi_memclr`, and the `__atomic_*` calls with interrupts masked; weak | ARMv6-M, and ARMv8-M Baseline without the atomics |
 | `unwind.c` | the DWARF CFI unwinder and the `_Unwind_*` API, plus `__register_frame_info` and `__deregister_frame_info` | Linux triples |
 
 On the ARM hard-float triples the helpers keep the base (core-register)
@@ -510,16 +518,24 @@ The same kind of note is given for the conversion routines (`__fix*`,
 
 ### Per-target archives
 
-| Triple | `librt.a` | Contents |
-|---|---|---|
-| `x86_64-linux-gnu` | yes | `int128.c`, `fp128.c`, `complex.c`, `ldouble.c`, `unwind.c` |
-| `aarch64-linux-gnu` | yes | `int128.c`, `fp128.c`, `complex.c`, `ldouble.c`, `softtf.c`, `unwind.c` |
-| `thumbv7m-none-eabi`, `thumbv7em-none-eabi`, `thumbv7em-none-eabihf`, `thumbv8m.main-none-eabi`, `thumbv8m.main-none-eabihf`, `riscv32-unknown-elf` | yes | `int64.c`, `softfp.c`, `complex.c` |
-| `thumbv6m-none-eabi` | yes | `armv6m.c` (the `__aeabi_*` divide, multiply, shift and block routines, and the `__atomic_*` calls), `int64.c`, `softfp.c`, `complex.c` |
-| `avr` | yes | `avr.c`, `avr64.c`, `avrfp*.c`, `complex.c` |
-| `aarch64-apple-darwin`, `x86_64-apple-darwin` | yes | `int128.c`, `fp128.c`, `complex.c`, `powi.c`, `ldouble.c` (x86-64), linked after libSystem: the routines it does not export -- `__divdc3` and `__divsc3`, the 128-bit shifts and `__multi3` -- which clang takes from its own `libclang_rt.osx.a`. The archive is in the BSD format Apple's linker reads, as `embar` writes for Mach-O members |
-| `x86_64-elf`, `aarch64-elf` | no | these link libgcc |
-| `riscv64-unknown-elf` | no | `int128.c` and `fp128.c` do not compile there; compile `softfp.c` and `complex.c` by hand |
+Each `librt.a` holds `complex.c`, `half.c`, `powi.c`, `clear_cache.c`
+and `embtrace.c`, and all but Darwin's `builtin-setjmp.c`; beyond those:
+
+| Triple | Also |
+|---|---|
+| `x86_64-elf`, `x86_64-linux-gnu` | `int128.c`, `fp128.c`, `ldouble.c`; on Linux `unwind.c` |
+| `aarch64-elf`, `aarch64-linux-gnu` | `int128.c`, `fp128.c`, `ldouble.c`, `softtf.c`; on Linux `unwind.c` |
+| `thumbv7m-none-eabi`, `thumbv7em-none-eabi`, `thumbv7em-none-eabihf`, `thumbv8m.main-none-eabi`, `thumbv8m.main-none-eabihf` | `aeabi.c`, `int64.c`, `softfp.c`, `atomic8.c` |
+| `thumbv8m.base-none-eabi` | the same, and `armv6m.c` |
+| `thumbv6m-none-eabi`, `armv7a-none-eabi`, `armv7a-none-eabihf` | `aeabi.c`, `aeabidiv.c`, `int64.c`, `softfp.c`, `atomic8.c`; on ARMv6-M `armv6m.c` |
+| `riscv32-unknown-elf`, each ABI | `int64.c`, `softfp.c`, `softtf.c`, `ldouble.c`, `atomic8.c`, `atomic-riscv.c` |
+| `riscv64-unknown-elf`, each ABI | `int128.c`, `fp128.c`, `softfp.c` (empty for `lp64d`), `softtf.c`, `ldouble.c`, `atomic-riscv.c` |
+| `loongarch64-unknown-elf`, `mips64-none-elf`, `mips64el-none-elf` | `int128.c`, `fp128.c`, `softfp.c`, `softtf.c`, `ldouble.c` |
+| `sparc-none-elf` | `int64.c`, `softfp.c`, `softtf.c`, `ldouble.c`, `atomic8.c` |
+| `mips-none-elf`, `mipsel-none-elf`, `powerpc-none-eabi`, `m68k-none-elf`, `tricore-none-elf`, `xtensa-none-elf` | `int64.c`, `softfp.c`, `atomic8.c` |
+| `rx-none-elf` | `int64.c`, `avrfp*.c`, `atomic8.c` |
+| `avr` | `avr.c`, `avr64.c`, `avrfp*.c` |
+| `aarch64-apple-darwin`, `x86_64-apple-darwin` | `int128.c`, `fp128.c`, `ldouble.c`, and on AArch64 `softtf.c`; linked after libSystem: the routines it does not export -- `__divdc3` and `__divsc3`, the 128-bit shifts and `__multi3` -- which clang takes from its own `libclang_rt.osx.a`. The archive is in the BSD format Apple's linker reads, as `embar` writes for Mach-O members |
 
 ## Building the libraries
 

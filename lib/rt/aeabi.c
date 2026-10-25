@@ -22,6 +22,9 @@
  *   ulz}, f2d, d2f                           soft-float, by forwarding to
  *                                            lib/rt/softfp.c's routines
  *
+ * (and __aeabi_h2f, __aeabi_f2h and __aeabi_d2h, the half-precision
+ * conversions, are lib/rt/half.c's, beside the routines that do them)
+ *
  * The floating-point helpers take and return their values in core
  * registers whatever the build's float ABI -- the RTABI says the base
  * procedure call standard -- so they are pcs("aapcs") under

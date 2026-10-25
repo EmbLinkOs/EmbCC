@@ -216,6 +216,15 @@ float __trunctfhf2(long double x) { return f_of(h_narrowl(x)); }
 float __gnu_h2f_ieee(unsigned short h) { return f_of(h_widen(h)); }
 unsigned short __gnu_f2h_ieee(float f) { return (unsigned short)h_narrow(f_bits(f)); }
 unsigned short __gnu_d2h_ieee(double d) { return (unsigned short)h_narrow64(d_bits(d)); }
+#if defined(__ARM_EABI__)
+/* and the run-time ABI's names for them, which clang calls (and GCC's
+ * libgcc defines) where the FPU converts no half or no double: in core
+ * registers whatever the float ABI, and weak, as aeabi.c's helpers are */
+#define BASE __attribute__((weak, pcs("aapcs")))
+BASE float __aeabi_h2f(unsigned short h) { return f_of(h_widen(h)); }
+BASE unsigned short __aeabi_f2h(float f) { return (unsigned short)h_narrow(f_bits(f)); }
+BASE unsigned short __aeabi_d2h(double d) { return (unsigned short)h_narrow64(d_bits(d)); }
+#endif
 #else
 float __embcc_h2f(unsigned short h) { return f_of(h_widen(h)); }
 unsigned short __embcc_f2h(float f) { return (unsigned short)h_narrow(f_bits(f)); }
