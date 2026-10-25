@@ -54,7 +54,14 @@ x86_gcc_c() {
 x86_link() {
     exe=$1; shift
     if [ "$EMBCC_X86_RUNNER" = host ]; then
-        cc -no-pie -Wl,-z,noexecstack -o "$exe" "$@" -lm   # as tests/run.sh links
+        # as tests/run.sh links, lib/rt's __embcc_setjmp pair too: what
+        # __builtin_setjmp calls, and no host library has
+        _rtsj=$(dirname "$exe")/rtsj-host.o
+        _rtsrc=$EMBCC_ROOT/lib/rt/builtin-setjmp.c
+        if [ ! -f "$_rtsj" ] || [ "$_rtsrc" -nt "$_rtsj" ]; then
+            cc -c "$_rtsrc" -o "$_rtsj.$$" && mv -f "$_rtsj.$$" "$_rtsj" || return 1
+        fi
+        cc -no-pie -Wl,-z,noexecstack -o "$exe" "$@" "$_rtsj" -lm
     else
         "$EMBCC_ROOT/tests/harness/x86_64/link.sh" -o "$exe" "$@"
     fi
