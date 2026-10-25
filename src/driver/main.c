@@ -2254,17 +2254,71 @@ static const char *asm_link_name(const char *lab)
 
 /* The symbol a name already has in the object being written: a function
  * or object defined here -- an asm label can give a definition the name
- * an extern declaration also has -- or 0 for none yet. */
+ * an extern declaration also has -- or 0 for none yet.
+ *
+ * Asked once per undefined name, so it is a table built on the first
+ * question, from the definitions, which all have their symbols by then: a
+ * walk of the unit per question made 100,000 extern functions in a table
+ * an hour's compile (many-declarations.sh). The first definition of a
+ * name wins, functions before objects, as the walk had it. */
+static struct {
+    const struct unit *u;
+    const char **names;
+    int *ndx;
+    size_t cap;
+} g_defs;
+
+static size_t defs_hash(const char *s)
+{
+    unsigned long long h = 1469598103934665603ULL;      /* FNV-1a */
+    while (*s) {
+        h ^= (unsigned char)*s++;
+        h *= 1099511628211ULL;
+    }
+    return (size_t)(h ^ (h >> 32));
+}
+
+static void defs_put(const char *name, int ndx)
+{
+    size_t m = g_defs.cap - 1, i = defs_hash(name) & m;
+    while (g_defs.names[i]) {
+        if (!strcmp(g_defs.names[i], name))
+            return;                                    /* the first wins */
+        i = (i + 1) & m;
+    }
+    g_defs.names[i] = name;
+    g_defs.ndx[i] = ndx;
+}
+
 static int defined_here(const struct unit *u, const char *name)
 {
-    for (const struct func *f = u->funcs; f; f = f->next)
-        if (!f->absorbed && f->sym_ndx && (f->has_defn || f->alias_of) &&
-            !strcmp(f->name, name))
-            return f->sym_ndx;
-    for (const struct global *g = u->globals; g; g = g->next)
-        if (!g->absorbed && g->sym_ndx && (g->defined || g->alias_of) &&
-            !strcmp(g->name, name))
-            return g->sym_ndx;
+    if (g_defs.u != u) {
+        size_t n = 0;
+        for (const struct func *f = u->funcs; f; f = f->next)
+            n++;
+        for (const struct global *g = u->globals; g; g = g->next)
+            n++;
+        free(g_defs.names);
+        free(g_defs.ndx);
+        g_defs.cap = 64;
+        while (g_defs.cap < 2 * n + 2)
+            g_defs.cap *= 2;
+        g_defs.names = xcalloc(g_defs.cap, sizeof *g_defs.names);
+        g_defs.ndx = xcalloc(g_defs.cap, sizeof *g_defs.ndx);
+        g_defs.u = u;
+        for (const struct func *f = u->funcs; f; f = f->next)
+            if (!f->absorbed && f->sym_ndx && (f->has_defn || f->alias_of))
+                defs_put(f->name, f->sym_ndx);
+        for (const struct global *g = u->globals; g; g = g->next)
+            if (!g->absorbed && g->sym_ndx && (g->defined || g->alias_of))
+                defs_put(g->name, g->sym_ndx);
+    }
+    size_t m = g_defs.cap - 1, i = defs_hash(name) & m;
+    while (g_defs.names[i]) {
+        if (!strcmp(g_defs.names[i], name))
+            return g_defs.ndx[i];
+        i = (i + 1) & m;
+    }
     return 0;
 }
 
@@ -4732,6 +4786,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
      * the same name, and the C code's references went to the second.
      * The same for a definition an asm label gave the name (`char
      * s[4] __asm__("sect_start")` beside `extern void sect_start`). */
+    g_defs.u = NULL;        /* defined_here's table: this unit's, afresh */
     for (struct global *g = u->globals; g; g = g->next)
         if (!g->absorbed && !g->defined && g->used && !g->sym_ndx &&
             !(g->sym_ndx = defined_here(u, g->name)))
