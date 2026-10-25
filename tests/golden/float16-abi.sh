@@ -135,6 +135,17 @@ for c in darwin x86_64 aarch64 rv32 rv32f rv64d m4 m4hf; do
     cfg $c
     harness $c || { bad "$c: the harness does not build"; continue; }
     case $c in rv*|m4*) PM=-Dmain=prog_main ;; *) PM= ;; esac
+    # A clang without __bf16 for this target (older ones have it on fewer)
+    # still referees _Float16: both sides are compiled without the __bf16
+    # calls, and the run says so.
+    NB=
+    if [ "$REF" != gcc ] &&
+       ! printf '__bf16 f(__bf16 x) { return x; }\n' |
+           $REF $ST -ffreestanding -fsyntax-only -x c - 2>/dev/null; then
+        NB=-DNO_BF16
+        echo "  $c: the reference compiler has no __bf16 here; _Float16 alone"
+    fi
+    ST="$ST $NB"
     for O in -O0 -O2; do
         o=$out/$c$O
         # shellcheck disable=SC2086

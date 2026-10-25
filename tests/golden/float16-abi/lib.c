@@ -18,6 +18,7 @@ h16 x_pick(int i, h16 a, float f, h16 b, double d, h16 c)
 float x_after(h16 a, float f) { (void)a; return f; }
 
 /* and bfloat16, which every convention passes as it passes a _Float16 */
+#ifndef NO_BF16
 __bf16 x_bid(__bf16 a) { return a; }
 __bf16 x_bmix(int i, __bf16 a, h16 h, float f, __bf16 b)
 {
@@ -25,6 +26,7 @@ __bf16 x_bmix(int i, __bf16 a, h16 h, float f, __bf16 b)
     (void)f;
     return i ? b : a;
 }
+#endif
 int x_int(h16 a, int i, h16 b) { (void)a; (void)b; return i; }
 
 h16 x_nth(int k, h16 a0, h16 a1, h16 a2, h16 a3, h16 a4, h16 a5, h16 a6,

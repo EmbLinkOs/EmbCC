@@ -18,7 +18,10 @@ static unsigned char code[64] __attribute__((aligned(64)));
 static int evals;
 static unsigned char *at(unsigned char *p) { evals++; return p; }
 
-#if defined(__linux__) || defined(__APPLE__) || defined(_WIN32)
+/* (x86-64 too: the builtin emits nothing there, and an x86_64-elf
+ * program may run on a Linux host, whose data is not executable) */
+#if defined(__linux__) || defined(__APPLE__) || defined(_WIN32) || \
+    defined(__x86_64__)
 #define NO_EXEC 1
 #endif
 
