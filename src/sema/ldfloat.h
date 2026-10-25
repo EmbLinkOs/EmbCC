@@ -18,8 +18,9 @@
 
 /* The target layouts. LDF_DOUBLE rounds to IEEE double (a long double
  * constant converted to double in an initializer), LDF_HALF to binary16
- * (a _Float16's). */
-enum ldf_fmt { LDF_X87, LDF_QUAD, LDF_DOUBLE, LDF_FLOAT, LDF_HALF };
+ * (a _Float16's), LDF_BF16 to bfloat16 (a __bf16's). */
+enum ldf_fmt { LDF_X87, LDF_QUAD, LDF_DOUBLE, LDF_FLOAT, LDF_HALF,
+               LDF_BF16 };
 
 struct ldf;   /* opaque, heap-allocated, never freed (compile-time only) */
 

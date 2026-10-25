@@ -124,6 +124,85 @@ static u32 f_bits(float f)
     return x.u;
 }
 
+/* A float's bits to the nearest bfloat16's: its top half, rounded by what
+ * is below, ties to even; a NaN's top half made quiet (irgen's
+ * bf_narrow_f does the same inline) */
+static u32 bf_round(u32 u)
+{
+    if ((u & 0x7fffffffUL) > 0x7f800000UL)
+        return (u >> 16) | 0x40;
+    return (u + 0x7fff + ((u >> 16) & 1)) >> 16;
+}
+
+#if __SIZEOF_DOUBLE__ == 4
+/* __bf16 from a 64-bit integer where a double is a float's four bytes
+ * (AVR, RX), so src/ir/irgen.c (bf_from_int) has no exact wider format to
+ * go through: the integer's top 24 significant bits, with everything
+ * shifted out below them kept as one sticky bit, are a float exactly, and
+ * rounding that to bfloat16's 8 bits is rounding the integer -- once. */
+
+unsigned short __embcc_ull2bf(unsigned long long x)
+{
+    unsigned long long sticky = 0;
+    u32 sh = 0;
+    while (x >= (1ULL << 24)) {
+        sticky |= x & 1;
+        x >>= 1;
+        sh++;
+    }
+    x |= sticky;
+    if (!x)
+        return 0;
+    return (unsigned short)bf_round(f_bits((float)(u32)x) + (sh << 23));
+}
+
+unsigned short __embcc_ll2bf(long long x)
+{
+    if (x < 0)
+        return (unsigned short)(0x8000u |
+                                __embcc_ull2bf(0ULL - (unsigned long long)x));
+    return __embcc_ull2bf((unsigned long long)x);
+}
+#endif
+
+/* ---- __bf16 for another compiler's objects ------------------------------
+ * EmbCC converts to and from bfloat16 inline, and calls none of these. An
+ * object of clang's or GCC's may, by compiler-rt's and libgcc's names (at
+ * -O0 clang converts a __bf16 argument through float), with the bfloat16
+ * where its convention passes one: the low half of a floating-point
+ * register where floats go in those -- NaN-boxed under RISC-V's -- and an
+ * integer register otherwise. */
+#if defined(__x86_64__) || defined(__aarch64__) || defined(__ARM_PCS_VFP) || \
+    (defined(__riscv) && !defined(__riscv_float_abi_soft))
+#if defined(__riscv)
+#define BF_BOX 0xffff0000UL
+#else
+#define BF_BOX 0
+#endif
+typedef float bf_t;
+static bf_t bf_out(u32 b) { return f_of(b | BF_BOX); }
+static u32 bf_in(bf_t x) { return f_bits(x) & 0xffff; }
+#else
+typedef unsigned short bf_t;
+static bf_t bf_out(u32 b) { return (bf_t)b; }
+static u32 bf_in(bf_t x) { return x; }
+#endif
+#if !defined(__AVR__)
+float __extendbfsf2(bf_t b) { return f_of(bf_in(b) << 16); }
+bf_t __truncsfbf2(float f) { return bf_out(bf_round(f_bits(f))); }
+#if __SIZEOF_DOUBLE__ == 8
+/* rounded to odd into a float first, then to bfloat16: once */
+bf_t __truncdfbf2(double d)
+{
+    float f = (float)d;
+    u32 b = f_bits(f);
+    if (d == d && (double)f != d && !(b & 1))
+        b += ((d > (double)f) != (d < 0)) ? 1 : (u32)-1;
+    return bf_out(bf_round(b));
+}
+#endif
+#endif
+
 #if defined(__x86_64__) || defined(__aarch64__)
 float __extendhfsf2(float h) { return f_of(h_widen(f_bits(h) & 0xffff)); }
 float __truncsfhf2(float f) { return f_of(h_narrow(f_bits(f))); }

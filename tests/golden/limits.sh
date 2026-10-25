@@ -57,6 +57,9 @@ construct fp16 fp16.c "" '`__fp16`' <<'EOF'
 __fp16 x;
 float f(void) { return x; }
 EOF
+construct bf16 bf16.c "" '`__bf16`' <<'EOF'
+__bf16 f(__bf16 a, long long b) { return a + b; }
+EOF
 construct float16struct float16struct.c "" 'a struct holding a `_Float16`, by value' <<'EOF'
 struct h2 { _Float16 a, b; };
 struct h2 f(struct h2 p) { p.a += p.b; return p; }

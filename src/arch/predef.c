@@ -414,6 +414,27 @@ static const struct predef_macro flt16_add[] = {
     { "__FLT16_NORM_MAX__", "6.5504e+4F16" },
 };
 
+/* __bf16 is EmbCC's on every target too; GCC's values, as its x86-64 and
+ * AArch64 tables carry them */
+static const struct predef_macro bflt16_add[] = {
+    { "__BFLT16_DECIMAL_DIG__", "4" },
+    { "__BFLT16_DENORM_MIN__", "9.18354961579912115600575419704879436e-41BF16" },
+    { "__BFLT16_DIG__", "2" },
+    { "__BFLT16_EPSILON__", "7.81250000000000000000000000000000000e-3BF16" },
+    { "__BFLT16_HAS_DENORM__", "1" },
+    { "__BFLT16_HAS_INFINITY__", "1" },
+    { "__BFLT16_HAS_QUIET_NAN__", "1" },
+    { "__BFLT16_IS_IEC_60559__", "0" },
+    { "__BFLT16_MANT_DIG__", "8" },
+    { "__BFLT16_MAX_10_EXP__", "38" },
+    { "__BFLT16_MAX_EXP__", "128" },
+    { "__BFLT16_MAX__", "3.38953138925153547590470800371487867e+38BF16" },
+    { "__BFLT16_MIN_10_EXP__", "(-37)" },
+    { "__BFLT16_MIN_EXP__", "(-125)" },
+    { "__BFLT16_MIN__", "1.17549435082228750796873653722224568e-38BF16" },
+    { "__BFLT16_NORM_MAX__", "3.38953138925153547590470800371487867e+38BF16" },
+};
+
 static int table_has(const struct predef_macro *t, int n, const char *name)
 {
     for (int i = 0; i < n; i++)
@@ -473,11 +494,14 @@ const struct predef_macro *predef_table(int *count)
     int dsp = thumb_dsp();
     int avr = avr_other_part();
     int pic32 = target_pic32_part() != NULL;
-    /* (C only: the C++ front end has no _Float16, and libstdc++ declares
-     * one where __FLT16_MANT_DIG__ says it may) */
+    /* (C only: the C++ front end has neither _Float16 nor __bf16, and
+     * libstdc++ declares each where __FLT16_DIG__ or __BFLT16_DIG__ says
+     * it may) */
     int f16 = !predef_is_cxx() && !table_has(arch, narch, "__FLT16_MANT_DIG__");
+    int bf16 = !predef_is_cxx() &&
+               !table_has(arch, narch, "__BFLT16_MANT_DIG__");
     if (!os && !fpu && !cmse && !rv && !dsp && !avr && !pic32 && !f16 &&
-        target_fmt_get() == TGT_FMT_ELF) {
+        !bf16 && target_fmt_get() == TGT_FMT_ELF) {
         *count = narch;
         return arch;
     }
@@ -486,7 +510,8 @@ const struct predef_macro *predef_table(int *count)
     static int nmerged;
     if (!merged) {
         merged = xmalloc((size_t)(narch + nos + 40 + ndarwin_a64_model +
-                                  (int)(sizeof flt16_add / sizeof *flt16_add)) *
+                                  (int)(sizeof flt16_add / sizeof *flt16_add) +
+                                  (int)(sizeof bflt16_add / sizeof *bflt16_add)) *
                          sizeof *merged);
         for (int i = 0; i < narch; i++)
             if (!contradicted(arch[i].name))
@@ -516,6 +541,9 @@ const struct predef_macro *predef_table(int *count)
         if (f16)
             for (size_t i = 0; i < sizeof flt16_add / sizeof *flt16_add; i++)
                 merged[nmerged++] = flt16_add[i];
+        if (bf16)
+            for (size_t i = 0; i < sizeof bflt16_add / sizeof *bflt16_add; i++)
+                merged[nmerged++] = bflt16_add[i];
         if (fpu && target_arm_a32()) {
             int v4 = target_arm_vfp(NULL) == 4;
             const struct predef_macro *add = v4 ? a32_vfp4_add : a32_vfp3_add;

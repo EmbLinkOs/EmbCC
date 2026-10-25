@@ -50,6 +50,10 @@ Compiles on every target.
 
 Compiles on every target.
 
+## `__bf16`
+
+Compiles on every target.
+
 ## a struct holding a `_Float16`, by value
 
 Refused on 1 of the 25 targets.
@@ -67,7 +71,7 @@ Refused on 25 of the 25 targets.
 - Refused on `thumbv6m-none-eabi`, `thumbv7m-none-eabi`, `thumbv7em-none-eabihf`, `thumbv8m.base-none-eabi`, `thumbv8m.main-none-eabi`, `armv7a-none-eabi`, `riscv32-unknown-elf`, `riscv64-unknown-elf`, `avr`, `mipsel-none-elf`, `mips-none-elf`, `mips64el-none-elf`, `mips64-none-elf`, `loongarch64-unknown-elf`, `xtensa-none-elf`, `tricore-none-elf`, `rx-none-elf`, `powerpc-none-eabi`, `sparc-none-elf`, `m68k-none-elf`, `x86_64-elf`, `aarch64-elf`, `x86_64-linux-gnu`, `aarch64-apple-darwin`, `x86_64-windows-gnu`:
 
   ```text
-  'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted binary16 among the variable arguments; convert it to double, as va_arg will read it
+  'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted 16-bit float among the variable arguments; convert it to double, as va_arg will read it
   ```
 
 ## `_BitInt(N)`
@@ -440,39 +444,40 @@ Refused on 21 of the 25 targets.
 
 ## The whole matrix
 
-| Target | int128 | ldouble | float16 | fp16 | float16struct | float16va | bitint | complexint | vector | atomic1 | atomic8 | atomic16 | tls | vla | align32 | frameaddr | retaddr1 | setjmp | cgoto | asmgoto | nested | interrupt | naked | asmfile | dashS | debug | unwind | cxx | cxxeh |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| `thumbv6m-none-eabi` | no | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
-| `thumbv7m-none-eabi` | no | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
-| `thumbv7em-none-eabihf` | no | yes | yes | yes | no | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
-| `thumbv8m.base-none-eabi` | no | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
-| `thumbv8m.main-none-eabi` | no | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
-| `armv7a-none-eabi` | no | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | no | yes | yes | yes | yes | no | yes | no |
-| `riscv32-unknown-elf` | no | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
-| `riscv64-unknown-elf` | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
-| `avr` | no | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | yes | yes | yes | yes | yes | no | no | no |
-| `mipsel-none-elf` | no | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
-| `mips-none-elf` | no | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
-| `mips64el-none-elf` | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | no | yes | yes | yes | yes | no | yes | no |
-| `mips64-none-elf` | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | no | yes | yes | yes | yes | no | yes | no |
-| `loongarch64-unknown-elf` | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | no | yes | yes | yes | yes | no | yes | no |
-| `xtensa-none-elf` | no | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | no | yes | yes | no | yes | no | yes | no |
-| `tricore-none-elf` | no | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | no | yes | yes | yes | yes | no | yes | no |
-| `rx-none-elf` | no | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | no | yes | yes | no | yes | no | yes | no |
-| `powerpc-none-eabi` | no | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | no | yes | yes | yes | yes | no | yes | no |
-| `sparc-none-elf` | no | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | no | yes | yes | yes | yes | no | yes | no |
-| `m68k-none-elf` | no | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | no | no | no | yes | yes | yes | yes | no | yes | no |
-| `x86_64-elf` | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | no | yes | no | no | no | no | no | yes | yes | yes | yes | yes |
-| `aarch64-elf` | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | no | yes | no | no | no | no | yes | yes | yes | yes | yes | yes |
-| `x86_64-linux-gnu` | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | no | yes | no | no | no | no | no | yes | yes | yes | yes | yes |
-| `aarch64-apple-darwin` | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | no | no | no | no | yes | yes | warns | yes | yes | yes |
-| `x86_64-windows-gnu` | no | no | yes | yes | yes | no | yes | yes | yes | yes | yes | no | no | yes | yes | yes | yes | no | yes | no | no | no | no | no | yes | no | no | no | no |
+| Target | int128 | ldouble | float16 | fp16 | bf16 | float16struct | float16va | bitint | complexint | vector | atomic1 | atomic8 | atomic16 | tls | vla | align32 | frameaddr | retaddr1 | setjmp | cgoto | asmgoto | nested | interrupt | naked | asmfile | dashS | debug | unwind | cxx | cxxeh |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `thumbv6m-none-eabi` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
+| `thumbv7m-none-eabi` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
+| `thumbv7em-none-eabihf` | no | yes | yes | yes | yes | no | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
+| `thumbv8m.base-none-eabi` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
+| `thumbv8m.main-none-eabi` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
+| `armv7a-none-eabi` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | no | yes | yes | yes | yes | no | yes | no |
+| `riscv32-unknown-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
+| `riscv64-unknown-elf` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
+| `avr` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | yes | yes | yes | yes | yes | no | no | no |
+| `mipsel-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
+| `mips-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
+| `mips64el-none-elf` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | no | yes | yes | yes | yes | no | yes | no |
+| `mips64-none-elf` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | no | yes | yes | yes | yes | no | yes | no |
+| `loongarch64-unknown-elf` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | no | yes | yes | yes | yes | no | yes | no |
+| `xtensa-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | no | yes | yes | no | yes | no | yes | no |
+| `tricore-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | no | yes | yes | yes | yes | no | yes | no |
+| `rx-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | no | yes | yes | no | yes | no | yes | no |
+| `powerpc-none-eabi` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | no | yes | yes | yes | yes | no | yes | no |
+| `sparc-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | no | yes | yes | yes | yes | no | yes | no |
+| `m68k-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | no | no | no | yes | yes | yes | yes | no | yes | no |
+| `x86_64-elf` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | no | yes | no | no | no | no | no | yes | yes | yes | yes | yes |
+| `aarch64-elf` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | no | yes | no | no | no | no | yes | yes | yes | yes | yes | yes |
+| `x86_64-linux-gnu` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | no | yes | no | no | no | no | no | yes | yes | yes | yes | yes |
+| `aarch64-apple-darwin` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | no | no | no | no | yes | yes | warns | yes | yes | yes |
+| `x86_64-windows-gnu` | no | no | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | no | yes | yes | yes | yes | no | yes | no | no | no | no | no | yes | no | no | no | no |
 
 The columns are the sections above, in order:
 - `int128`: `__int128`
 - `ldouble`: `long double` arithmetic
 - `float16`: `_Float16`
 - `fp16`: `__fp16`
+- `bf16`: `__bf16`
 - `float16struct`: a struct holding a `_Float16`, by value
 - `float16va`: a `_Float16` through `...`
 - `bitint`: `_BitInt(N)`

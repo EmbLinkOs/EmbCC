@@ -73,7 +73,7 @@ cfg() {
                RT=riscv64-unknown-elf/lp64d
                REF="$CLANG --target=riscv64-unknown-elf -march=rv64gc -mabi=lp64d -mno-relax -mcmodel=medany" ;;
         m4) EF=--target=thumbv7em-none-eabi RT=thumbv7em-none-eabi
-            REF="$CLANG --target=thumbv7em-none-eabi -mfloat-abi=soft" ;;
+            REF="$CLANG --target=thumbv7em-none-eabi" ;;
         m4hf) EF=--target=thumbv7em-none-eabihf ST= RT=thumbv7em-none-eabihf
               REF="$CLANG --target=thumbv7em-none-eabihf -mfpu=fpv4-sp-d16 -mfloat-abi=hard" ;;
     esac

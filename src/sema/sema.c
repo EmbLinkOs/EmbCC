@@ -875,18 +875,19 @@ static int half_struct_by_regs(const struct type *t)
 }
 
 /* va: through `...` (or to a function without a prototype); else a
- * struct holding a half, by value */
+ * struct holding a half, by value. t: the type, for its name */
 static void half_abi_refuse(struct unit *u, int line, int col,
-                            const char *fname, int va)
+                            const char *fname, int va, const struct type *t)
 {
     if (va)
         sema_error_at(u, line, col,
-                      "%s%s%spassing a _Float16 through '...' is not "
+                      "%s%s%spassing a %s through '...' is not "
                       "supported yet: it is not promoted there, and EmbCC "
-                      "does not yet place an unpromoted binary16 among the "
-                      "variable arguments; convert it to double, as "
+                      "does not yet place an unpromoted 16-bit float among "
+                      "the variable arguments; convert it to double, as "
                       "va_arg will read it",
-                      fname ? "'" : "", fname ? fname : "", fname ? "': " : "");
+                      fname ? "'" : "", fname ? fname : "", fname ? "': " : "",
+                      ty_name(t));
     else
         sema_error_at(u, line, col,
                       "%s%s%sa struct holding a _Float16, passed or "
@@ -5197,12 +5198,13 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                        half_struct_by_regs(e->args[i]->ty)) {
                 half_abi_refuse(u, e->args[i]->line, e->args[i]->col,
                                 e->callee ? e->callee->name : NULL,
-                                e->args[i]->ty->kind == TY_FLOAT16);
+                                e->args[i]->ty->kind == TY_FLOAT16,
+                                e->args[i]->ty);
             }
         }
         if (half_struct_by_regs(ft->ret))
             half_abi_refuse(u, e->line, e->col,
-                            e->callee ? e->callee->name : NULL, 0);
+                            e->callee ? e->callee->name : NULL, 0, ft->ret);
         /* After the promotions, because those are what the variadic
          * tail actually carries: a float arrives as a double and a
          * short as an int, so %f of a float and %d of a short are both
@@ -5584,7 +5586,8 @@ static double fold_round(const struct type *t, double v)
     if (!t || !ty_is_float(t) || ty_is_xldouble(t))
         return v;
     if (ty_size(t) == 2)
-        return ldf_to_double(ldf_round(ldf_from_double(v), LDF_HALF));
+        return ldf_to_double(ldf_round(ldf_from_double(v),
+                                       t->is_bf16 ? LDF_BF16 : LDF_HALF));
     if (ty_size(t) == 4)
         return (double)(float)v;
     return v;
@@ -5606,7 +5609,8 @@ static int const_fold_f(const struct expr *e, double *out)
         struct ldf *x = const_fold_ld(e->rhs);
         if (!x) return 0;
         int sz = ty_size(e->ty);
-        *out = ldf_to_double(ldf_round(x, sz == 2 ? LDF_HALF
+        *out = ldf_to_double(ldf_round(x, sz == 2 ? e->ty->is_bf16 ? LDF_BF16
+                                                                   : LDF_HALF
                                         : sz == 4 ? LDF_FLOAT : LDF_DOUBLE));
         return 1;
     }
@@ -6591,9 +6595,10 @@ static void lower_static_bytes(struct unit *u, int line, int size,
                            "a static float initializer must be a constant "
                            "expression");
             unsigned long ubits;
-            if (sz == 2) {                  /* binary16 */
+            if (sz == 2) {                  /* binary16, or bfloat16 */
                 unsigned char hb[2];
-                ldf_encode(ldf_from_double(dv), LDF_HALF, hb);
+                ldf_encode(ldf_from_double(dv),
+                           v[k].ty->is_bf16 ? LDF_BF16 : LDF_HALF, hb);
                 ubits = (unsigned long)hb[0] | (unsigned long)hb[1] << 8;
             } else if (v[k].ty->kind == TY_FLOAT || sz == 4) {
                 /* float, or a double that is binary32 (AVR, RX) */
@@ -8369,13 +8374,14 @@ static void check_func(struct unit *u, struct func *f)
     }
 
     if (half_struct_by_regs(f->ret_ty))
-        half_abi_refuse(u, f->line, 0, f->name, 0);
+        half_abi_refuse(u, f->line, 0, f->name, 0, f->ret_ty);
     f->half_ret = f->ret_ty && f->ret_ty->kind == TY_FLOAT16;
     for (int i = 0; i < f->nparams; i++) {
         if (half_struct_by_regs(f->param_tys[i]) ||
             (f->noproto && has_half(f->param_tys[i])))
             half_abi_refuse(u, f->line, 0, f->name,
-                            f->noproto && f->param_tys[i]->kind == TY_FLOAT16);
+                            f->noproto && f->param_tys[i]->kind == TY_FLOAT16,
+                            f->param_tys[i]);
         if (scope_find(&sc, f->params[i]) >= 0)
             sema_error_line(u, f->line,
                        "duplicate parameter '%s' in '%s'",

@@ -2,8 +2,9 @@ thumbv6m-none-eabi int128 no: __int128 does not exist on this target (it needs 6
 thumbv6m-none-eabi ldouble yes
 thumbv6m-none-eabi float16 yes
 thumbv6m-none-eabi fp16 yes
+thumbv6m-none-eabi bf16 yes
 thumbv6m-none-eabi float16struct yes
-thumbv6m-none-eabi float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted binary16 among the variable arguments; convert it to double, as va_arg will read it
+thumbv6m-none-eabi float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted 16-bit float among the variable arguments; convert it to double, as va_arg will read it
 thumbv6m-none-eabi bitint yes
 thumbv6m-none-eabi complexint yes
 thumbv6m-none-eabi vector yes
@@ -31,8 +32,9 @@ thumbv7m-none-eabi int128 no: __int128 does not exist on this target (it needs 6
 thumbv7m-none-eabi ldouble yes
 thumbv7m-none-eabi float16 yes
 thumbv7m-none-eabi fp16 yes
+thumbv7m-none-eabi bf16 yes
 thumbv7m-none-eabi float16struct yes
-thumbv7m-none-eabi float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted binary16 among the variable arguments; convert it to double, as va_arg will read it
+thumbv7m-none-eabi float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted 16-bit float among the variable arguments; convert it to double, as va_arg will read it
 thumbv7m-none-eabi bitint yes
 thumbv7m-none-eabi complexint yes
 thumbv7m-none-eabi vector yes
@@ -60,8 +62,9 @@ thumbv7em-none-eabihf int128 no: __int128 does not exist on this target (it need
 thumbv7em-none-eabihf ldouble yes
 thumbv7em-none-eabihf float16 yes
 thumbv7em-none-eabihf fp16 yes
+thumbv7em-none-eabihf bf16 yes
 thumbv7em-none-eabihf float16struct no: 'f': a struct holding a _Float16, passed or returned by value, is not supported yet with the hard-float calling convention, which puts each binary16 member in a floating-point register of its own; pass a pointer to it
-thumbv7em-none-eabihf float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted binary16 among the variable arguments; convert it to double, as va_arg will read it
+thumbv7em-none-eabihf float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted 16-bit float among the variable arguments; convert it to double, as va_arg will read it
 thumbv7em-none-eabihf bitint yes
 thumbv7em-none-eabihf complexint yes
 thumbv7em-none-eabihf vector yes
@@ -89,8 +92,9 @@ thumbv8m.base-none-eabi int128 no: __int128 does not exist on this target (it ne
 thumbv8m.base-none-eabi ldouble yes
 thumbv8m.base-none-eabi float16 yes
 thumbv8m.base-none-eabi fp16 yes
+thumbv8m.base-none-eabi bf16 yes
 thumbv8m.base-none-eabi float16struct yes
-thumbv8m.base-none-eabi float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted binary16 among the variable arguments; convert it to double, as va_arg will read it
+thumbv8m.base-none-eabi float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted 16-bit float among the variable arguments; convert it to double, as va_arg will read it
 thumbv8m.base-none-eabi bitint yes
 thumbv8m.base-none-eabi complexint yes
 thumbv8m.base-none-eabi vector yes
@@ -118,8 +122,9 @@ thumbv8m.main-none-eabi int128 no: __int128 does not exist on this target (it ne
 thumbv8m.main-none-eabi ldouble yes
 thumbv8m.main-none-eabi float16 yes
 thumbv8m.main-none-eabi fp16 yes
+thumbv8m.main-none-eabi bf16 yes
 thumbv8m.main-none-eabi float16struct yes
-thumbv8m.main-none-eabi float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted binary16 among the variable arguments; convert it to double, as va_arg will read it
+thumbv8m.main-none-eabi float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted 16-bit float among the variable arguments; convert it to double, as va_arg will read it
 thumbv8m.main-none-eabi bitint yes
 thumbv8m.main-none-eabi complexint yes
 thumbv8m.main-none-eabi vector yes
@@ -147,8 +152,9 @@ armv7a-none-eabi int128 no: __int128 does not exist on this target (it needs 64-
 armv7a-none-eabi ldouble yes
 armv7a-none-eabi float16 yes
 armv7a-none-eabi fp16 yes
+armv7a-none-eabi bf16 yes
 armv7a-none-eabi float16struct yes
-armv7a-none-eabi float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted binary16 among the variable arguments; convert it to double, as va_arg will read it
+armv7a-none-eabi float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted 16-bit float among the variable arguments; convert it to double, as va_arg will read it
 armv7a-none-eabi bitint yes
 armv7a-none-eabi complexint yes
 armv7a-none-eabi vector yes
@@ -176,8 +182,9 @@ riscv32-unknown-elf int128 no: __int128 does not exist on this target (it needs 
 riscv32-unknown-elf ldouble yes
 riscv32-unknown-elf float16 yes
 riscv32-unknown-elf fp16 yes
+riscv32-unknown-elf bf16 yes
 riscv32-unknown-elf float16struct yes
-riscv32-unknown-elf float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted binary16 among the variable arguments; convert it to double, as va_arg will read it
+riscv32-unknown-elf float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted 16-bit float among the variable arguments; convert it to double, as va_arg will read it
 riscv32-unknown-elf bitint yes
 riscv32-unknown-elf complexint yes
 riscv32-unknown-elf vector yes
@@ -205,8 +212,9 @@ riscv64-unknown-elf int128 yes
 riscv64-unknown-elf ldouble yes
 riscv64-unknown-elf float16 yes
 riscv64-unknown-elf fp16 yes
+riscv64-unknown-elf bf16 yes
 riscv64-unknown-elf float16struct yes
-riscv64-unknown-elf float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted binary16 among the variable arguments; convert it to double, as va_arg will read it
+riscv64-unknown-elf float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted 16-bit float among the variable arguments; convert it to double, as va_arg will read it
 riscv64-unknown-elf bitint yes
 riscv64-unknown-elf complexint yes
 riscv64-unknown-elf vector yes
@@ -234,8 +242,9 @@ avr int128 no: __int128 does not exist on this target (it needs 64-bit registers
 avr ldouble yes
 avr float16 yes
 avr fp16 yes
+avr bf16 yes
 avr float16struct yes
-avr float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted binary16 among the variable arguments; convert it to double, as va_arg will read it
+avr float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted 16-bit float among the variable arguments; convert it to double, as va_arg will read it
 avr bitint yes
 avr complexint yes
 avr vector yes
@@ -263,8 +272,9 @@ mipsel-none-elf int128 no: __int128 does not exist on this target (it needs 64-b
 mipsel-none-elf ldouble yes
 mipsel-none-elf float16 yes
 mipsel-none-elf fp16 yes
+mipsel-none-elf bf16 yes
 mipsel-none-elf float16struct yes
-mipsel-none-elf float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted binary16 among the variable arguments; convert it to double, as va_arg will read it
+mipsel-none-elf float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted 16-bit float among the variable arguments; convert it to double, as va_arg will read it
 mipsel-none-elf bitint yes
 mipsel-none-elf complexint yes
 mipsel-none-elf vector yes
@@ -292,8 +302,9 @@ mips-none-elf int128 no: __int128 does not exist on this target (it needs 64-bit
 mips-none-elf ldouble yes
 mips-none-elf float16 yes
 mips-none-elf fp16 yes
+mips-none-elf bf16 yes
 mips-none-elf float16struct yes
-mips-none-elf float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted binary16 among the variable arguments; convert it to double, as va_arg will read it
+mips-none-elf float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted 16-bit float among the variable arguments; convert it to double, as va_arg will read it
 mips-none-elf bitint yes
 mips-none-elf complexint yes
 mips-none-elf vector yes
@@ -321,8 +332,9 @@ mips64el-none-elf int128 yes
 mips64el-none-elf ldouble yes
 mips64el-none-elf float16 yes
 mips64el-none-elf fp16 yes
+mips64el-none-elf bf16 yes
 mips64el-none-elf float16struct yes
-mips64el-none-elf float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted binary16 among the variable arguments; convert it to double, as va_arg will read it
+mips64el-none-elf float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted 16-bit float among the variable arguments; convert it to double, as va_arg will read it
 mips64el-none-elf bitint yes
 mips64el-none-elf complexint yes
 mips64el-none-elf vector yes
@@ -350,8 +362,9 @@ mips64-none-elf int128 yes
 mips64-none-elf ldouble yes
 mips64-none-elf float16 yes
 mips64-none-elf fp16 yes
+mips64-none-elf bf16 yes
 mips64-none-elf float16struct yes
-mips64-none-elf float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted binary16 among the variable arguments; convert it to double, as va_arg will read it
+mips64-none-elf float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted 16-bit float among the variable arguments; convert it to double, as va_arg will read it
 mips64-none-elf bitint yes
 mips64-none-elf complexint yes
 mips64-none-elf vector yes
@@ -379,8 +392,9 @@ loongarch64-unknown-elf int128 yes
 loongarch64-unknown-elf ldouble yes
 loongarch64-unknown-elf float16 yes
 loongarch64-unknown-elf fp16 yes
+loongarch64-unknown-elf bf16 yes
 loongarch64-unknown-elf float16struct yes
-loongarch64-unknown-elf float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted binary16 among the variable arguments; convert it to double, as va_arg will read it
+loongarch64-unknown-elf float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted 16-bit float among the variable arguments; convert it to double, as va_arg will read it
 loongarch64-unknown-elf bitint yes
 loongarch64-unknown-elf complexint yes
 loongarch64-unknown-elf vector yes
@@ -408,8 +422,9 @@ xtensa-none-elf int128 no: __int128 does not exist on this target (it needs 64-b
 xtensa-none-elf ldouble yes
 xtensa-none-elf float16 yes
 xtensa-none-elf fp16 yes
+xtensa-none-elf bf16 yes
 xtensa-none-elf float16struct yes
-xtensa-none-elf float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted binary16 among the variable arguments; convert it to double, as va_arg will read it
+xtensa-none-elf float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted 16-bit float among the variable arguments; convert it to double, as va_arg will read it
 xtensa-none-elf bitint yes
 xtensa-none-elf complexint yes
 xtensa-none-elf vector yes
@@ -437,8 +452,9 @@ tricore-none-elf int128 no: __int128 does not exist on this target (it needs 64-
 tricore-none-elf ldouble yes
 tricore-none-elf float16 yes
 tricore-none-elf fp16 yes
+tricore-none-elf bf16 yes
 tricore-none-elf float16struct yes
-tricore-none-elf float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted binary16 among the variable arguments; convert it to double, as va_arg will read it
+tricore-none-elf float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted 16-bit float among the variable arguments; convert it to double, as va_arg will read it
 tricore-none-elf bitint yes
 tricore-none-elf complexint yes
 tricore-none-elf vector yes
@@ -466,8 +482,9 @@ rx-none-elf int128 no: __int128 does not exist on this target (it needs 64-bit r
 rx-none-elf ldouble yes
 rx-none-elf float16 yes
 rx-none-elf fp16 yes
+rx-none-elf bf16 yes
 rx-none-elf float16struct yes
-rx-none-elf float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted binary16 among the variable arguments; convert it to double, as va_arg will read it
+rx-none-elf float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted 16-bit float among the variable arguments; convert it to double, as va_arg will read it
 rx-none-elf bitint yes
 rx-none-elf complexint yes
 rx-none-elf vector yes
@@ -495,8 +512,9 @@ powerpc-none-eabi int128 no: __int128 does not exist on this target (it needs 64
 powerpc-none-eabi ldouble yes
 powerpc-none-eabi float16 yes
 powerpc-none-eabi fp16 yes
+powerpc-none-eabi bf16 yes
 powerpc-none-eabi float16struct yes
-powerpc-none-eabi float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted binary16 among the variable arguments; convert it to double, as va_arg will read it
+powerpc-none-eabi float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted 16-bit float among the variable arguments; convert it to double, as va_arg will read it
 powerpc-none-eabi bitint yes
 powerpc-none-eabi complexint yes
 powerpc-none-eabi vector yes
@@ -524,8 +542,9 @@ sparc-none-elf int128 no: __int128 does not exist on this target (it needs 64-bi
 sparc-none-elf ldouble yes
 sparc-none-elf float16 yes
 sparc-none-elf fp16 yes
+sparc-none-elf bf16 yes
 sparc-none-elf float16struct yes
-sparc-none-elf float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted binary16 among the variable arguments; convert it to double, as va_arg will read it
+sparc-none-elf float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted 16-bit float among the variable arguments; convert it to double, as va_arg will read it
 sparc-none-elf bitint yes
 sparc-none-elf complexint yes
 sparc-none-elf vector yes
@@ -553,8 +572,9 @@ m68k-none-elf int128 no: __int128 does not exist on this target (it needs 64-bit
 m68k-none-elf ldouble yes
 m68k-none-elf float16 yes
 m68k-none-elf fp16 yes
+m68k-none-elf bf16 yes
 m68k-none-elf float16struct yes
-m68k-none-elf float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted binary16 among the variable arguments; convert it to double, as va_arg will read it
+m68k-none-elf float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted 16-bit float among the variable arguments; convert it to double, as va_arg will read it
 m68k-none-elf bitint yes
 m68k-none-elf complexint yes
 m68k-none-elf vector yes
@@ -582,8 +602,9 @@ x86_64-elf int128 yes
 x86_64-elf ldouble yes
 x86_64-elf float16 yes
 x86_64-elf fp16 yes
+x86_64-elf bf16 yes
 x86_64-elf float16struct yes
-x86_64-elf float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted binary16 among the variable arguments; convert it to double, as va_arg will read it
+x86_64-elf float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted 16-bit float among the variable arguments; convert it to double, as va_arg will read it
 x86_64-elf bitint yes
 x86_64-elf complexint yes
 x86_64-elf vector yes
@@ -611,8 +632,9 @@ aarch64-elf int128 yes
 aarch64-elf ldouble yes
 aarch64-elf float16 yes
 aarch64-elf fp16 yes
+aarch64-elf bf16 yes
 aarch64-elf float16struct yes
-aarch64-elf float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted binary16 among the variable arguments; convert it to double, as va_arg will read it
+aarch64-elf float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted 16-bit float among the variable arguments; convert it to double, as va_arg will read it
 aarch64-elf bitint yes
 aarch64-elf complexint yes
 aarch64-elf vector yes
@@ -640,8 +662,9 @@ x86_64-linux-gnu int128 yes
 x86_64-linux-gnu ldouble yes
 x86_64-linux-gnu float16 yes
 x86_64-linux-gnu fp16 yes
+x86_64-linux-gnu bf16 yes
 x86_64-linux-gnu float16struct yes
-x86_64-linux-gnu float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted binary16 among the variable arguments; convert it to double, as va_arg will read it
+x86_64-linux-gnu float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted 16-bit float among the variable arguments; convert it to double, as va_arg will read it
 x86_64-linux-gnu bitint yes
 x86_64-linux-gnu complexint yes
 x86_64-linux-gnu vector yes
@@ -669,8 +692,9 @@ aarch64-apple-darwin int128 yes
 aarch64-apple-darwin ldouble yes
 aarch64-apple-darwin float16 yes
 aarch64-apple-darwin fp16 yes
+aarch64-apple-darwin bf16 yes
 aarch64-apple-darwin float16struct yes
-aarch64-apple-darwin float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted binary16 among the variable arguments; convert it to double, as va_arg will read it
+aarch64-apple-darwin float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted 16-bit float among the variable arguments; convert it to double, as va_arg will read it
 aarch64-apple-darwin bitint yes
 aarch64-apple-darwin complexint yes
 aarch64-apple-darwin vector yes
@@ -698,8 +722,9 @@ x86_64-windows-gnu int128 no: __int128 in the signature of 'f' is not supported 
 x86_64-windows-gnu ldouble no: long double in the signature of 'f' is not supported for a Windows target yet: there it travels by reference and returns through a hidden pointer, and EmbCC passes it on the stack by value
 x86_64-windows-gnu float16 yes
 x86_64-windows-gnu fp16 yes
+x86_64-windows-gnu bf16 yes
 x86_64-windows-gnu float16struct yes
-x86_64-windows-gnu float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted binary16 among the variable arguments; convert it to double, as va_arg will read it
+x86_64-windows-gnu float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted 16-bit float among the variable arguments; convert it to double, as va_arg will read it
 x86_64-windows-gnu bitint yes
 x86_64-windows-gnu complexint yes
 x86_64-windows-gnu vector yes

@@ -394,7 +394,7 @@ static int tok_is_type_start(enum tok_kind k)
            k == TOK_KW_CONST || k == TOK_KW_VOLATILE ||
            k == TOK_KW_FLOAT || k == TOK_KW_DOUBLE || k == TOK_KW_BOOL ||
            k == TOK_KW_FLOAT128 || k == TOK_KW_FLOAT16 ||
-           k == TOK_KW_FP16 ||
+           k == TOK_KW_FP16 || k == TOK_KW_BF16 ||
            k == TOK_KW_COMPLEX || k == TOK_KW_BITINT ||
            k == TOK_KW_ALIGNAS || k == TOK_KW_TYPEOF || k == TOK_KW_ATOMIC ||
            /* __auto_type begins a declaration even though it names no
@@ -2355,7 +2355,7 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
     /* base specifiers in any order: unsigned long int, long unsigned... */
     int uns = -1, nlong = 0, nshort = 0, nchar = 0, nint = 0, nvoid = 0;
     int nfloat = 0, ndouble = 0, nbool = 0, ncomplex = 0, n128 = 0;
-    int nf128 = 0, nf16 = 0, nfp16 = 0;
+    int nf128 = 0, nf16 = 0, nfp16 = 0, nbf16 = 0;
     int any = 0, nbitint = 0, bline = 0, bcol = 0;
     long bits = 0;
     for (;;) {
@@ -2390,6 +2390,7 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
         else if (k == TOK_KW_FLOAT128) nf128++;
         else if (k == TOK_KW_FLOAT16) nf16++;
         else if (k == TOK_KW_FP16) nfp16++;
+        else if (k == TOK_KW_BF16) nbf16++;
         else if (k == TOK_KW_SHORT) nshort++;
         else if (k == TOK_KW_CHAR) nchar++;
         else if (k == TOK_KW_INT) nint++;
@@ -2467,11 +2468,11 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
                         : ty_base(nlong ? TY_LONG : TY_INT, uns == 1);
         return ty_complex(it);
     }
-    if (ncomplex && (nf16 || nfp16))
+    if (ncomplex && (nf16 || nfp16 || nbf16))
         parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                        "_Complex %s is not supported yet: EmbCC has no "
-                       "complex binary16 arithmetic", nf16 ? "_Float16"
-                                                          : "__fp16");
+                       "complex 16-bit floating-point arithmetic",
+                       nf16 ? "_Float16" : nfp16 ? "__fp16" : "__bf16");
     if (ncomplex) {
         /* `T _Complex` for a floating T; a bare _Complex means double, as
          * in gcc */
@@ -2483,15 +2484,16 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
                                   : nlong ? TY_LDOUBLE : TY_DOUBLE, 0);
         return ty_complex(el);
     }
-    if (nf16 || nfp16) {
+    if (nf16 || nfp16 || nbf16) {
         /* IEEE binary16: _Float16 computes as itself, every operation
          * rounded to half; __fp16, ARM's storage format, is promoted to
-         * float wherever it is read (type.h, is_fp16) */
+         * float wherever it is read (type.h, is_fp16); __bf16 is
+         * bfloat16, computed as itself like _Float16 */
         if (any > 1)
             parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                        "%s cannot combine with other specifiers",
-                       nf16 ? "_Float16" : "__fp16");
-        return nf16 ? ty_base(TY_FLOAT16, 0) : ty_fp16();
+                       nf16 ? "_Float16" : nfp16 ? "__fp16" : "__bf16");
+        return nf16 ? ty_base(TY_FLOAT16, 0) : nfp16 ? ty_fp16() : ty_bf16();
     }
     if (nf128) {
         if (any > 1)
@@ -3858,11 +3860,12 @@ static struct expr *parse_primary(struct parser *ps)
         if (t->fnum_is_f16) {
             /* rounded once, from the digits: a double rounded to half
              * would be rounded twice */
-            struct ldf *h = ldf_from_text(t->text, LDF_HALF);
+            int bf = t->fnum_is_f16 == 2;
+            struct ldf *h = ldf_from_text(t->text, bf ? LDF_BF16 : LDF_HALF);
             if (!h || t->fnum_is_imag)
                 parse_error_line(ps, t->line, "malformed floating constant "
-                                 "'%sf16'", t->text);
-            e->ty = ty_base(TY_FLOAT16, 0);
+                                 "'%s%s'", t->text, bf ? "bf16" : "f16");
+            e->ty = bf ? ty_bf16() : ty_base(TY_FLOAT16, 0);
             e->fnum = ldf_to_double(h);
         }
         if (t->fnum_is_imag) {

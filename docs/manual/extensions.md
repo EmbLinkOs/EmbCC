@@ -294,6 +294,7 @@ struct msg hello = { 5, { 'h', 'e', 'l', 'l', 'o' } };
 | `_Float32`, `_Float64` | The same types as `float` and `double` |
 | `_Float128`, `__float128` | AArch64 ELF and Linux targets, where `long double` is IEEE binary128. Refused on x86-64 (`_Float128 is not supported on x86-64: ...`) and on Apple arm64, Cortex-M and AVR (`_Float128 is not supported on this target: it has no 128-bit floating-point type`); on RISC-V its operations are refused like those of `long double` |
 | `_Float16`, `__fp16` | Supported on every target; see [Half-precision floating point](c-language.md#half-precision-floating-point). `_Float16` through `...` is refused |
+| `__bf16` (bfloat16), and the `bf16` constant suffix | Supported on every target, where GCC has it on x86-64, AArch64 and ARM; see [Half-precision floating point](c-language.md#half-precision-floating-point) |
 | `_Float32x`, `_Decimal32` and the other interchange and decimal types | Not supported (`expected a type before '_Float32x'`) |
 
 The size, alignment and format of each type per target are in

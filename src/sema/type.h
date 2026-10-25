@@ -97,6 +97,11 @@ struct type {
                              * of it is promoted to float, as a char is to
                              * int, where a _Float16 computes as itself
                              * (ty_arith_common). Distinct to ty_equal. */
+    int is_bf16;            /* TY_FLOAT16 spelled `__bf16`: bfloat16, the
+                             * top half of a float (8-bit significand, the
+                             * float's exponent) in the same two bytes --
+                             * a different format, computed as itself like
+                             * _Float16. Distinct to ty_equal. */
     int align_ovr;          /* a typedef's __attribute__((aligned(N))): the
                              * type's alignment is N, larger or smaller than
                              * its own, and its size is unchanged (GCC's and
@@ -202,6 +207,8 @@ struct type *ty_str_elem(int prefix);
 struct type *ty_llong(int is_unsigned);
 /* `__fp16`, beside ty_base(TY_FLOAT16, 0) which is `_Float16` */
 struct type *ty_fp16(void);
+/* `__bf16`: bfloat16 */
+struct type *ty_bf16(void);
 /* The type a binary16 travels between functions as, by the target's
  * convention for _Float16: a float holding its bits in its low half
  * (*nanbox: and ones above, as a RISC-V FPR holds a narrower value), or a

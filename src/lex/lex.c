@@ -195,6 +195,7 @@ static const struct {
     { "__float128", TOK_KW_FLOAT128 },
     { "_Float16", TOK_KW_FLOAT16 },
     { "__fp16", TOK_KW_FP16 },
+    { "__bf16", TOK_KW_BF16 },
     { "_Bool", TOK_KW_BOOL },
     { "_Complex", TOK_KW_COMPLEX },
     { "__complex__", TOK_KW_COMPLEX },
@@ -1263,6 +1264,13 @@ static void lex_raw(struct lexer *lx)
                            !t->fnum_is_ld && !t->fnum_is_f16) {
                     t->fnum_is_f16 = 1;
                     fend += 2;
+                } else if (((fend[0] == 'b' && fend[1] == 'f') ||
+                            (fend[0] == 'B' && fend[1] == 'F')) &&
+                           fend[2] == '1' && fend[3] == '6' &&
+                           !t->fnum_is_float && !t->fnum_is_ld &&
+                           !t->fnum_is_f16) {
+                    t->fnum_is_f16 = 2;          /* GCC's __bf16 suffix */
+                    fend += 3;
                 } else if ((*fend == 'f' || *fend == 'F') &&
                            !t->fnum_is_float && !t->fnum_is_ld &&
                            !t->fnum_is_f16) {

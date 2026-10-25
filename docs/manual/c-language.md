@@ -277,7 +277,7 @@ C17's value, `201710L`.
 | `_Decimal32`, `_Decimal64`, `_Decimal128` | Not supported | `expected a type before '_Decimal32'` |
 | `_Float32`, `_Float64` | Partial | The same types as `float` and `double`. The `f32` and `f64` constant suffixes are refused: `malformed floating constant`. |
 | `_Float128` | Partial | The same type as `long double` where that is IEEE binary128. See [Target-dependent features](#target-dependent-features). |
-| `_Float16` | Supported | IEEE binary16 on every target, each operation rounded to it; the `f16` constant suffix. Through `...` it is refused. See [Half-precision floating point](#half-precision-floating-point). |
+| `_Float16` | Supported | IEEE binary16 on every target, each operation rounded to it; the `f16` constant suffix. Through `...` it is refused. GNU's `__bf16` (bfloat16) too. See [Half-precision floating point](#half-precision-floating-point). |
 | `_Float32x`, `_Float64x` | Not supported | `expected a type before '_Float32x'` |
 | `unreachable()` in `<stddef.h>` | Supported | Under `-std=c23`; it is `__builtin_unreachable()`. |
 | Width macros `INT_WIDTH`, `INT8_WIDTH`, ... | Supported | `<limits.h>` and `<stdint.h>`. |
@@ -654,6 +654,21 @@ read from one is a `float`, as a `char` read is an `int`. `a + b` of two
 `__fp16` is a `float`, rounded once when it is stored, and through `...`
 an `__fp16` is a `double`. `_Float16` and `__fp16` are distinct types to
 `_Generic`.
+
+`__bf16` is bfloat16: the top half of a `float`, with its 8-bit exponent
+and an 8-bit significand, in two bytes. It works as `_Float16` does, on
+every target: an operation on two of them, or on one and an integer, is a
+`__bf16`, each rounded to bfloat16; with a `float` it is a `float`; and
+with a `_Float16` it is a `_Float16`, as in GCC and clang. A constant
+takes GCC's `bf16` or `BF16` suffix. A conversion to `__bf16` from
+`double`, `long double` or an integer is rounded once: through a `float`,
+2^24 + 2^16 + 1 would land on a half-way point and round down. The
+conversions are inline integer arithmetic, so no runtime routine is
+called. The exception is a 64-bit integer on AVR and RX, whose `double`
+is four bytes; there, `__embcc_ll2bf` and `__embcc_ull2bf` in
+`lib/rt/half.c` do it. The `__BFLT16_MANT_DIG__` family of predefined
+macros describes it. A `__bf16` travels between functions as a
+`_Float16` does.
 
 The predefined `__FLT16_MANT_DIG__`, `__FLT16_MAX__` and the rest of that
 family are always defined. `<float.h>` defines `FLT16_MANT_DIG` and the

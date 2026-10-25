@@ -32,8 +32,10 @@ static struct type bases[11][2] = {
 /* ARM's __fp16: binary16 too, its own type because its arithmetic is
  * float's (type.h, is_fp16) */
 static struct type fp16_type = { .kind = TY_FLOAT16, .is_fp16 = 1 };
+static struct type bf16_type = { .kind = TY_FLOAT16, .is_bf16 = 1 };
 
 struct type *ty_fp16(void) { return &fp16_type; }
+struct type *ty_bf16(void) { return &bf16_type; }
 
 /* As clang and GCC pass a _Float16: in the low half of an SSE, NEON or
  * VFP register on x86-64, AArch64 and the ARM hard-float convention;
@@ -778,7 +780,8 @@ int ty_compatible(const struct type *a, const struct type *b, int top)
         return 0;
     }
     if (a->kind != b->kind || a->is_unsigned != b->is_unsigned ||
-        a->bitint != b->bitint || a->is_fp16 != b->is_fp16)
+        a->bitint != b->bitint || a->is_fp16 != b->is_fp16 ||
+        a->is_bf16 != b->is_bf16)
         return 0;
     const struct type *ca = a->canon ? a->canon : a;
     const struct type *cb = b->canon ? b->canon : b;
@@ -817,7 +820,8 @@ int ty_compatible(const struct type *a, const struct type *b, int top)
 int ty_equal(const struct type *a, const struct type *b)
 {
     if (a->kind != b->kind || a->is_unsigned != b->is_unsigned ||
-        a->bitint != b->bitint || a->is_fp16 != b->is_fp16)
+        a->bitint != b->bitint || a->is_fp16 != b->is_fp16 ||
+        a->is_bf16 != b->is_bf16)
         return 0;
     /* `long` against `long long`. C says they are distinct types
      * whatever the target, but this compiler has always let them
@@ -1172,7 +1176,8 @@ const char *ty_name(const struct type *t)
     case TY_FLOAT: base = "float"; break;
     case TY_DOUBLE: base = "double"; break;
     case TY_LDOUBLE: base = "long double"; break;
-    case TY_FLOAT16: base = t->is_fp16 ? "__fp16" : "_Float16"; break;
+    case TY_FLOAT16: base = t->is_fp16 ? "__fp16"
+                          : t->is_bf16 ? "__bf16" : "_Float16"; break;
     case TY_INT128: base = t->is_unsigned ? "unsigned __int128" : "__int128";
         break;
     case TY_STRUCT:
@@ -1366,10 +1371,17 @@ struct type *ty_arith_common(struct type *a, struct type *b)
         return ty_base(TY_DOUBLE, 0);
     if (a->kind == TY_FLOAT || b->kind == TY_FLOAT)
         return ty_base(TY_FLOAT, 0);
-    /* _Float16 outranks the integers and computes as itself; __fp16 is
+    /* _Float16 and __bf16 outrank the integers and compute as themselves,
+     * and of the two _Float16 wins, as in GCC and clang; __fp16 is
      * promoted to float first, whatever it meets */
-    if (a->kind == TY_FLOAT16 || b->kind == TY_FLOAT16)
-        return ty_base(a->is_fp16 || b->is_fp16 ? TY_FLOAT : TY_FLOAT16, 0);
+    if (a->kind == TY_FLOAT16 || b->kind == TY_FLOAT16) {
+        if (a->is_fp16 || b->is_fp16)
+            return ty_base(TY_FLOAT, 0);
+        if ((a->kind != TY_FLOAT16 || a->is_bf16) &&
+            (b->kind != TY_FLOAT16 || b->is_bf16))
+            return ty_bf16();
+        return ty_base(TY_FLOAT16, 0);
+    }
     a = ty_promote(a);
     b = ty_promote(b);
     if (a->bitint || b->bitint)
