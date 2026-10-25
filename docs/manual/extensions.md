@@ -815,7 +815,7 @@ function name, such as `memcpy` or `printf`, as a builtin, with or without
 A `__builtin_` name EmbCC does not implement is an undeclared function:
 
 ```text
-embcc: f.c:1:29: error: '__builtin_shufflevector' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
+embcc: f.c:1:22: error: '__builtin_cpu_supports' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
 ```
 
 Whether a builtin is available does not depend on the target, but its
@@ -833,11 +833,21 @@ compiled.
 | `__builtin_parity(x)`, `parityl`, `parityll` | Number of one bits, modulo 2 |
 | `__builtin_ffs(x)`, `ffsl`, `ffsll` | One plus the index of the least significant one bit of an `int`, `long`, `long long`; 0 when `x` is 0 |
 | `__builtin_clrsb(x)`, `clrsbl`, `clrsbll` | Number of leading bits equal to the sign bit, not counting the sign bit, of an `int`, `long`, `long long` |
+| `__builtin_popcountg(x)` | Number of one bits of an unsigned integer of any width, `unsigned char` to `unsigned __int128`, counted at its own width (GCC 14's) |
 
 All return `int`, take an integer argument, and compile on every target.
 The operand width is the target's: `long` is 32 bits on Cortex-M, RV32
 and AVR, and `int` is 16 bits on AVR. GCC leaves `clz` and `ctz` of zero
 undefined; EmbCC returns a value, which code should not depend on.
+
+clang's bit reversals and rotates take and return the unsigned type of
+their width (`uint8_t` to `uint64_t`):
+
+| Builtin | Result |
+|---|---|
+| `__builtin_bitreverse8(x)`, `16`, `32`, `64` | `x` with the order of its bits reversed |
+| `__builtin_rotateleft8(x, n)`, `16`, `32`, `64` | `x` rotated left by `n` modulo the width |
+| `__builtin_rotateright8(x, n)`, `16`, `32`, `64` | `x` rotated right by `n` modulo the width |
 
 ### Byte swapping
 
@@ -899,6 +909,7 @@ are refused (`the RV32 backend cannot lower a 128-bit value yet ...`).
 | `__builtin_isfinite(x)` | 1 if `x` is neither infinite nor NaN |
 | `__builtin_isnormal(x)` | 1 if `x` is a normal number: not zero, subnormal, infinite or NaN |
 | `__builtin_isinff(x)`, `isinfl`, `isnanf`, `isnanl`, `finite`, `finitef`, `finitel` | The same as `__builtin_isinf`, `__builtin_isnan` and `__builtin_isfinite` |
+| `__builtin_fpclassify(nan, inf, normal, subnormal, zero, x)` | The argument naming `x`'s class: `nan` for a NaN, `inf` for an infinity, and so on. `x` is evaluated once; the five classes are `int` (glibc's `fpclassify` is this builtin) |
 
 `fabs` and `copysign` return the floating type their suffix names; the
 others return `int`. The classification builtins take a floating
@@ -906,6 +917,16 @@ argument of any type, and refuse an integer (`__builtin_isnan takes a
 floating-point argument`). All of them operate on the bits of the value:
 they do not round, raise no floating-point exception, and call no
 library.
+
+`__builtin_powi(x, n)`, `__builtin_powif` and `__builtin_powil` raise a
+`double`, `float` or `long double` `x` to the `int` power `n`, by
+squaring and multiplying over `n`'s bits and taking `1 / x^-n` for a
+negative `n`, as libgcc does. They are calls to libgcc's names,
+`__powidf2`, `__powisf2` and `__powixf2` (x87 `long double`) or
+`__powitf2` (binary128), which EmbCC's runtime defines on every target,
+so an object of GCC's that calls them links too. GCC documents no
+precision for them, and neither does EmbCC: a result can differ from
+`pow`'s in the last bit.
 
 ### Floating-point comparisons
 
@@ -1007,10 +1028,11 @@ and 3. A `_FORTIFY_SOURCE` header reads that value as "do not check".
 | `__builtin_offsetof(type, designator)` | The byte offset of a member, as an integer constant expression. The designator may use `.member` and `[constant]`. This is what `<stddef.h>`'s `offsetof` expands to |
 | `__builtin_LINE()` | The line of the call, as an `int` constant |
 | `__builtin_FILE()` | The name of the source file, as a string literal |
+| `__builtin_FUNCTION()` | The name of the enclosing function, as `__func__` is; `""` outside a function |
+| `__builtin_assume(cond)` | Nothing: `cond` is not evaluated, and the promise is not used (clang's) |
+| `__builtin_speculation_safe_value(v)`, `(v, failval)` | `v`, an integer or a pointer. EmbCC hardens nothing against speculative execution, so there is no barrier and `failval` is not used |
 | `__builtin_expect(expr, value)`, `__builtin_expect_with_probability(expr, value, p)` | `expr`; the hint is discarded |
 | `__builtin_assume_aligned(ptr, align, ...)` | `ptr`; the hint is discarded |
-
-`__builtin_FUNCTION()` is not implemented; use `__func__`.
 
 ### Control flow
 
@@ -1019,9 +1041,15 @@ and 3. A `_FORTIFY_SOURCE` header reads that value as "do not check".
 | `__builtin_unreachable()` | Emits the target's trap instruction. Reaching it stops the program; it is not undefined behavior |
 | `__builtin_trap()` | Emits the target's trap instruction |
 | `__builtin_prefetch(addr, ...)` | Evaluates its arguments and emits nothing |
+| `__builtin_debugtrap()` | Emits the target's breakpoint instruction, inline: under a debugger the program stops there and can carry on; without one it stops with the breakpoint's signal or exception (clang's) |
 
 The trap is `ud2` on x86-64, `udf` on AArch64 and Cortex-M, `unimp`
-on RISC-V and `break` on MIPS32. AVR has no trapping instruction, and the trap is a jump to
+on RISC-V and `break` on MIPS32. The breakpoint is the one each target's
+debugger plants: `int3` on x86-64, `brk #0xf000` on AArch64 (lldb steps
+over it, as for clang's), `bkpt #0` on Cortex-M and ARMv7-A, `ebreak` on
+RISC-V, `break` on MIPS and AVR, `break 0` on LoongArch, `debug` on
+TriCore, `break 1, 15` on Xtensa, `trap` on PowerPC, `ta 1` on SPARC,
+`brk` on RX and `halt` on ColdFire. AVR has no trapping instruction, and the trap is a jump to
 itself. A call to either builtin ends a path for the missing-return
 check, as a call to a `noreturn` function does.
 
@@ -1033,6 +1061,7 @@ check, as a call to a `noreturn` function does.
 | `__builtin_alloca_with_align(size, align)` | As `__builtin_alloca`, aligned to `align` bits, which must be a constant power of two of at least 8 | All |
 | `__builtin_frame_address(level)` | The frame address of the current function (`level` 0) or of a caller, found by following the saved frame pointers | Any level: x86-64, AArch64, ColdFire. Level 0: Cortex-M, ARMv7-A, RISC-V, MIPS32, MIPS64, LoongArch, SPARC, PowerPC, Xtensa, TriCore, RX, AVR |
 | `__builtin_return_address(level)` | The return address of the current function (`level` 0) or of a caller | As `__builtin_frame_address` |
+| `__builtin_extract_return_addr(addr)`, `__builtin_frob_return_addr(addr)` | The address a function returns to, from `__builtin_return_address`'s, and back: `addr` itself, but on SPARC, whose return is past its call, `addr + 8` -- `addr + 12` in a function returning a struct or a `long double`, which returns past the caller's `unimp` word -- and `frob` takes it off, as GCC's | All |
 
 `level` must be a non-negative integer constant (`__builtin_frame_address
 needs a non-negative constant level`).
@@ -1107,13 +1136,12 @@ macOS).
 ### Builtins that are not supported
 
 These are refused as undeclared functions, as shown in [General
-rules](#general-rules): `__builtin_assume`,
-`__builtin_bitreverse32` and the other widths,
-`__builtin_rotateleft32` and the other rotates, `__builtin_complex`,
-`__builtin_fpclassify`, `__builtin___clear_cache`, `__builtin_FUNCTION`,
-`__builtin_speculation_safe_value`, `__builtin_shufflevector`, the
-target-specific families (`__builtin_ia32_*`, `__builtin_avr_*`), and
-Clang's `__c11_atomic_*`. `__builtin_addressof`, `__builtin_bit_cast`
+rules](#general-rules): `__builtin_complex`, `__builtin___clear_cache`,
+`__builtin_va_arg_pack`, the C23 `__builtin_stdc_*` family, clang's
+`__builtin_elementwise_*`, `__builtin_reduce_*` and
+`__builtin_nontemporal_load`, `__builtin_cpu_supports` and
+`__builtin_cpu_init`, the target-specific families (`__builtin_ia32_*`,
+`__builtin_avr_*`), and Clang's `__c11_atomic_*`. `__builtin_addressof`, `__builtin_bit_cast`
 and `__builtin_is_constant_evaluated` exist in C++ only; see
 [C++](cxx.md).
 

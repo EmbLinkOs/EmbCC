@@ -231,6 +231,7 @@ static void encode(struct as *a,int ln,const char *m,struct oper *ops,int no){
     /* zero-operand */
     struct { const char *m; unsigned char b[3]; int n; } Z[] = {
         {"cli",{0xfa},1},{"hlt",{0xf4},1},{"ret",{0xc3},1},{"nop",{0x90},1},
+        {"int3",{0xcc},1},
         {"sti",{0xfb},1},{"leave",{0xc9},1},{"iretd",{0xcf},1},
         /* NASM in BITS 64: bare `iret` is IRETQ (48 cf); only `iretd` is cf */
         {"iret",{0x48,0xcf},2},{"iretq",{0x48,0xcf},2},

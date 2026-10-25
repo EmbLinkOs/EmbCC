@@ -52,6 +52,8 @@ enum atomic_kind atomic_builtin(const char *name, int *op);
  * operand's type as a rank -- 1 int, 2 long, 3 long long -- whose size is
  * the target's to say (irgen gen_bitop). */
 int builtin_bitop(const char *bn, int *width);
+int builtin_bitx(const char *bn, int *bits);
+struct type *ty_uint_bits(int bits);
 
 /* Does the C front end implement this compiler-known name? This is the
  * answer `__has_builtin` gives, and it must not be able to drift from

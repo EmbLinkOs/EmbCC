@@ -322,37 +322,18 @@ register across the call may not survive the second return.
 A builtin EmbCC does not provide is an undeclared function:
 
 ```text
-error: '__builtin_abs' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
+error: '__builtin_cpu_supports' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
 ```
 
 `__has_builtin` answers 0 for these. Among the GCC and Clang builtins
 that are missing:
 
-- The `__builtin_` spellings of most C library functions:
-  `__builtin_abs`, `__builtin_labs`, `__builtin_llabs`,
-  `__builtin_printf`, `__builtin_puts`, `__builtin_malloc`,
-  `__builtin_free`, and the math functions `__builtin_exp`,
-  `__builtin_log`, `__builtin_pow`, `__builtin_powi`, `__builtin_floor`,
-  `__builtin_ceil`, `__builtin_trunc`, `__builtin_round`,
-  `__builtin_fmin`, `__builtin_fmax`, `__builtin_fmod`, `__builtin_fma`,
-  `__builtin_ldexp` and `__builtin_frexp`. (`__builtin_memcpy`,
-  `memset`, `memmove`, `memcmp`, `memchr`, `strlen`, `strcmp`, `strcpy`,
-  `strchr`, `fabs`, `copysign` and `sqrt` are provided.)
-- `__builtin_isgreater`, `__builtin_isgreaterequal`,
-  `__builtin_isless`, `__builtin_islessequal`,
-  `__builtin_islessgreater`, `__builtin_isunordered` and
-  `__builtin_fpclassify`.
-- `__builtin___clear_cache`,
-  `__builtin_extract_return_addr`, `__builtin_debugtrap`.
-- `__builtin_complex`, `__builtin_classify_type`,
-  `__builtin_va_arg_pack`, `__builtin_assume`,
-  `__builtin_speculation_safe_value`, `__builtin_add_overflow_p`.
-- `__builtin_bitreverse*`, `__builtin_rotateleft*`,
-  `__builtin_popcountg` and the C23 `__builtin_stdc_*` family.
-- Vector builtins: `__builtin_shufflevector`, `__builtin_elementwise_*`,
-  `__builtin_reduce_*`, `__builtin_nontemporal_load`.
-- Target builtins: `__builtin_cpu_supports`, `__builtin_ia32_*`,
-  `__builtin_avr_*`.
+- `__builtin_complex`, `__builtin___clear_cache`,
+  `__builtin_va_arg_pack`, and the C23 `__builtin_stdc_*` family.
+- Vector builtins: `__builtin_elementwise_*`, `__builtin_reduce_*`,
+  `__builtin_nontemporal_load` (`__builtin_shufflevector` is provided).
+- Target builtins: `__builtin_cpu_supports`, `__builtin_cpu_init`,
+  `__builtin_ia32_*`, `__builtin_avr_*`.
 - Clang's `__c11_atomic_*` family. `_Atomic`, `<stdatomic.h>`, the
   `__atomic_*` builtins and the `__sync_*` builtins are provided. Where
   the machine's atomic instructions are a word -- RISC-V, MIPS,

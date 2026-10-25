@@ -818,6 +818,68 @@ static struct expr *mk_cast(struct expr *inner, struct type *to)
     return c;
 }
 
+/* A node a builtin's rewrite builds, as the parser's new_expr would
+ * (positional, and room for four arguments), and its common shapes. */
+static struct expr *sx(enum expr_kind kind, int line)
+{
+    struct expr *e = xcalloc(1, sizeof *e);
+    e->kind = kind;
+    e->line = line;
+    e->desig_index = e->desig_index_hi = -1;
+    e->args = xcalloc(4, sizeof *e->args);
+    return e;
+}
+
+static struct expr *sx_var(const char *name, int line)
+{
+    struct expr *e = sx(EXPR_VAR, line);
+    e->name = name;
+    return e;
+}
+
+static struct expr *sx_call1(const char *fname, struct expr *arg, int line)
+{
+    struct expr *e = sx(EXPR_CALL, line);
+    e->lhs = sx_var(fname, line);
+    e->args[0] = arg;
+    e->nargs = 1;
+    return e;
+}
+
+/* Each target's breakpoint instruction, as its debugger plants it:
+ * __builtin_debugtrap's template. */
+static const char *debugtrap_insn(void)
+{
+    switch (target_get()) {
+    case TARGET_X86_64:      return "int3";
+    case TARGET_AARCH64:     return "brk #0xf000";
+    case TARGET_THUMB:       return "bkpt #0";
+    case TARGET_RISCV32:
+    case TARGET_RISCV64:     return "ebreak";
+    case TARGET_AVR:
+    case TARGET_MIPS32:
+    case TARGET_MIPS64:      return "break";
+    case TARGET_LOONGARCH64: return "break 0";
+    case TARGET_TRICORE:     return "debug";
+    case TARGET_XTENSA:      return "break 1, 15";
+    case TARGET_PPC32:       return "trap";
+    case TARGET_SPARC32:     return "ta 1";
+    case TARGET_RX:          return "brk";
+    case TARGET_COLDFIRE:    return "halt";
+    }
+    return "";
+}
+
+static struct expr *sx_cond(struct expr *c, struct expr *t, struct expr *f)
+{
+    struct expr *e = sx(EXPR_COND, c->line);
+    e->args[0] = c;
+    e->nargs = 1;
+    e->lhs = t;
+    e->rhs = f;
+    return e;
+}
+
 /* C's integer promotions: everything narrower than int becomes int
  * (all narrow values fit, so the promoted type is always signed). */
 /* promote() and arith_common() live in src/sema/type.c now, as
@@ -5027,6 +5089,213 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                 e->ty = ty_base(TY_VOID, 0);
                 break;
             }
+            /* clang's bitreverseN(x), rotateleftN(x, n), rotaterightN(x,
+             * n) for N 8, 16, 32 and 64: an unsigned value of exactly N
+             * bits; lowered in irgen (gen_bitx) */
+            else if (builtin_bitx(bn, NULL) != 0) {
+                int bits, k = builtin_bitx(bn, &bits);
+                if (e->nargs != (k == 1 ? 1 : 2))
+                    sema_error_at(u, e->line, e->col, "%s takes %s",
+                            e->lhs->name,
+                            k == 1 ? "one argument" : "a value and an amount");
+                for (int i = 0; i < e->nargs; i++) {
+                    check_expr(u, f, sc, e->args[i]);
+                    need_integer(u, e->args[i], e->lhs->name);
+                }
+                e->name = e->lhs->name;
+                e->ty = ty_uint_bits(bits);
+                break;
+            }
+            /* GCC's __builtin_FUNCTION(), __builtin_FILE() and
+             * __builtin_LINE(): where the call is (C has no default
+             * arguments, which is where they name the caller's place) */
+            else if (strcmp(bn, "FUNCTION") == 0 || strcmp(bn, "FILE") == 0 ||
+                     strcmp(bn, "LINE") == 0) {
+                if (e->nargs)
+                    sema_error_at(u, e->line, e->col, "%s takes no arguments",
+                            e->lhs->name);
+                if (bn[0] == 'L') {
+                    e->kind = EXPR_NUM;
+                    e->num = e->line;
+                    e->ty = ty_base(TY_INT, 0);
+                    break;
+                }
+                /* (outside a function -- a file-scope initializer, which
+                 * sema checks as "<global initializer>" -- it is "", as
+                 * GCC's and clang's are) */
+                const char *nm = bn[1] == 'U'
+                               ? (f->name[0] == '<' ? "" : f->name)
+                               : f->file ? f->file : diag_file(u);
+                e->kind = EXPR_STR;
+                e->name = nm;
+                e->num = (long)strlen(nm) + 1;
+                e->str_width = 1;
+                e->str_prefix = 0;
+                e->nargs = 0;
+                check_expr(u, f, sc, e);  /* the array/pointer type */
+                break;
+            }
+            /* GCC's __builtin_speculation_safe_value(v[, fail]): v, the
+             * value in the code that runs -- a speculation barrier only
+             * matters on a core that speculates past a bounds check,
+             * which none of EmbCC's targets' code is built to fence */
+            else if (strcmp(bn, "speculation_safe_value") == 0) {
+                if (e->nargs < 1 || e->nargs > 2)
+                    sema_error_at(u, e->line, e->col,
+                            "%s takes a value and an optional failure value",
+                            e->lhs->name);
+                for (int i = 0; i < e->nargs; i++)
+                    check_expr(u, f, sc, e->args[i]);
+                if (e->nargs && !ty_is_integer(e->args[0]->ty) &&
+                    e->args[0]->ty->kind != TY_PTR)
+                    sema_error_at(u, e->line, e->col,
+                            "%s takes an integer or a pointer, got %s",
+                            e->lhs->name, ty_name(e->args[0]->ty));
+                *e = *e->args[0];
+                break;
+            }
+            /* __builtin_fpclassify(nan, inf, normal, subnormal, zero, x):
+             * GCC's, which glibc's fpclassify() is. The value goes to a
+             * local once, and the classes are the predicates' own, so
+             * every float width -- a 16-byte long double too -- is theirs:
+             * (t = x, isnan(t) ? nan : isinf(t) ? inf : isnormal(t) ?
+             * normal : t == 0 ? zero : subnormal) */
+            else if (strcmp(bn, "fpclassify") == 0) {
+                static int nfpc;
+                if (e->nargs != 6)
+                    sema_error_at(u, e->line, e->col,
+                            "__builtin_fpclassify takes five class values "
+                            "and a floating-point value");
+                check_expr(u, f, sc, e->args[5]);
+                if (!ty_is_float(e->args[5]->ty))
+                    sema_error_at(u, e->line, e->col,
+                            "__builtin_fpclassify takes a floating-point "
+                            "value last");
+                char *nm = xmalloc(32);
+                snprintf(nm, 32, "<fpclassify %d>", nfpc++);
+                scope_add(sc, nm, ty_unqual(e->args[5]->ty), NULL);
+                int ln = e->line;
+                struct expr *asg = sx(EXPR_ASSIGN, ln);
+                asg->lhs = sx_var(nm, ln);
+                asg->rhs = e->args[5];
+                struct expr *zero = sx(EXPR_BINOP, ln);
+                zero->op = B_EQ;
+                zero->lhs = sx_var(nm, ln);
+                zero->rhs = sx(EXPR_NUM, ln);
+                zero->rhs->ty = ty_base(TY_INT, 0);  /* (as the parser types one) */
+                struct expr *chain =
+                    sx_cond(sx_call1("__builtin_isnan", sx_var(nm, ln), ln),
+                            e->args[0],
+                    sx_cond(sx_call1("__builtin_isinf", sx_var(nm, ln), ln),
+                            e->args[1],
+                    sx_cond(sx_call1("__builtin_isnormal", sx_var(nm, ln), ln),
+                            e->args[2],
+                    sx_cond(zero, e->args[4], e->args[3]))));
+                struct expr *all = sx(EXPR_COMMA, ln);
+                all->lhs = asg;
+                all->rhs = chain;
+                *e = *all;
+                check_expr(u, f, sc, e);
+                break;
+            }
+            /* GCC's __builtin_powi(x, n), powif, powil: libgcc's
+             * __powi*f2 (lib/rt/powi.c), x to an int power */
+            else if (strcmp(bn, "powi") == 0 || strcmp(bn, "powif") == 0 ||
+                     strcmp(bn, "powil") == 0) {
+                struct type *rt = bn[4] == 'f' ? ty_base(TY_FLOAT, 0)
+                                : bn[4] == 'l' ? ty_base(TY_LDOUBLE, 0)
+                                : ty_base(TY_DOUBLE, 0);
+                if (e->nargs != 2)
+                    sema_error_at(u, e->line, e->col,
+                            "%s takes a value and an int power", e->lhs->name);
+                for (int i = 0; i < e->nargs; i++)
+                    check_expr(u, f, sc, e->args[i]);
+                need_integer(u, e->args[1], e->lhs->name);
+                e->args[0] = mk_cast(e->args[0], rt);
+                e->args[1] = mk_cast(e->args[1], ty_base(TY_INT, 0));
+                e->name = e->lhs->name;
+                e->ty = rt;
+                break;
+            }
+            /* GCC's __builtin_extract_return_addr(a) and
+             * __builtin_frob_return_addr(a): the address a return goes
+             * to, from __builtin_return_address's, and back -- the same
+             * on every target here but SPARC's, whose call is followed by
+             * its delay slot and returns 8 past it */
+            else if (strcmp(bn, "extract_return_addr") == 0 ||
+                     strcmp(bn, "frob_return_addr") == 0) {
+                if (e->nargs != 1)
+                    sema_error_at(u, e->line, e->col, "%s takes an address",
+                            e->lhs->name);
+                check_expr(u, f, sc, e->args[0]);
+                e->args[0] = mk_cast(e->args[0], ty_ptr(ty_base(TY_VOID, 0)));
+                e->name = e->lhs->name;
+                e->ty = ty_ptr(ty_base(TY_VOID, 0));
+                break;
+            }
+            /* clang's __builtin_debugtrap(): a breakpoint the program
+             * carries on from -- not __builtin_trap's, which ends it.
+             * `({ __asm__ volatile ("<the target's breakpoint>"); })`, so
+             * the debugger stops at the call itself, as it does for
+             * clang's; where the instruction leaves the pc on itself
+             * (brk, bkpt, ebreak, break) the debugger steps over it. */
+            else if (strcmp(bn, "debugtrap") == 0) {
+                if (e->nargs)
+                    sema_error_at(u, e->line, e->col, "%s takes no arguments",
+                            e->lhs->name);
+                struct stmt *as = xcalloc(1, sizeof *as);
+                as->kind = STMT_ASM;
+                as->line = e->line;
+                as->col = e->col;
+                as->asm_s = xcalloc(1, sizeof *as->asm_s);
+                as->asm_s->tmpl = debugtrap_insn();
+                as->asm_s->is_volatile = as->asm_s->is_basic = 1;
+                struct stmt *blk = xcalloc(1, sizeof *blk);
+                blk->kind = STMT_BLOCK;
+                blk->line = e->line;
+                blk->col = e->col;
+                blk->body = as;
+                struct expr *se = sx(EXPR_STMTEXPR, e->line);
+                se->col = e->col;
+                se->body = blk;
+                *e = *se;
+                check_expr(u, f, sc, e);
+                break;
+            }
+            /* GCC's __builtin_popcountg(x): the ones of any unsigned
+             * integer type, at its own width */
+            else if (strcmp(bn, "popcountg") == 0) {
+                if (e->nargs != 1)
+                    sema_error_at(u, e->line, e->col, "%s takes one argument",
+                            e->lhs->name);
+                check_expr(u, f, sc, e->args[0]);
+                if (!ty_is_integer(e->args[0]->ty) ||
+                    !e->args[0]->ty->is_unsigned)
+                    sema_error_at(u, e->line, e->col,
+                            "%s takes an unsigned integer, as in GCC",
+                            e->lhs->name);
+                e->name = e->lhs->name;
+                e->ty = ty_base(TY_INT, 0);
+                break;
+            }
+            /* clang's __builtin_assume(cond): a promise, not evaluated
+             * (clang's rule); EmbCC takes nothing from it */
+            else if (strcmp(bn, "assume") == 0) {
+                if (e->nargs != 1)
+                    sema_error_at(u, e->line, e->col, "%s takes a condition",
+                            e->lhs->name);
+                check_expr(u, f, sc, e->args[0]);
+                struct expr *z = xcalloc(1, sizeof *z);
+                z->kind = EXPR_NUM;
+                z->line = e->line;
+                z->ty = ty_base(TY_INT, 0);
+                e->kind = EXPR_CAST;
+                e->cast_ty = ty_base(TY_VOID, 0);
+                e->rhs = z;
+                e->nargs = 0;
+                e->ty = e->cast_ty;
+                break;
+            }
             /* The bit family: ctz clz popcount ffs parity clrsb, each with l
              * and ll forms taking long / long long. Lowered in irgen from
              * ordinary integer ops, on both targets alike. */
@@ -6785,6 +7054,9 @@ static const char *const g_named_builtins[] = {
     "signbit", "signbitf", "signbitl",
     "isnan", "isinf", "isinf_sign", "isfinite", "isnormal",
     "trap", "unreachable", "setjmp", "longjmp",
+    "FUNCTION", "FILE", "LINE", "speculation_safe_value", "assume",
+    "fpclassify", "powi", "powif", "powil", "extract_return_addr",
+    "frob_return_addr", "debugtrap", "popcountg",
     "va_arg", "va_copy", "va_end", "va_start",
     "add_overflow", "sub_overflow", "mul_overflow",
     "add_overflow_p", "sub_overflow_p", "mul_overflow_p",
@@ -6815,7 +7087,7 @@ int sema_has_builtin(const char *name)
         return 0;
     {
         const char *bn = name + 10;
-        if (builtin_bitop(bn, NULL) != 0)
+        if (builtin_bitop(bn, NULL) != 0 || builtin_bitx(bn, NULL) != 0)
             return 1;
         for (size_t i = 0;
              i < sizeof g_named_builtins / sizeof g_named_builtins[0]; i++)
@@ -6874,6 +7146,41 @@ int builtin_bitop(const char *bn, int *width)
         return (int)i + 1;
     }
     return 0;
+}
+
+/* clang's bitreverse8/16/32/64 (1) and rotateleft (2) / rotateright (3)
+ * of the same widths; *bits gets the width. 0 for anything else. */
+int builtin_bitx(const char *bn, int *bits)
+{
+    static const char *const ops[] = { "bitreverse", "rotateleft",
+                                       "rotateright" };
+    for (unsigned i = 0; i < sizeof ops / sizeof ops[0]; i++) {
+        size_t n = strlen(ops[i]);
+        if (strncmp(bn, ops[i], n) != 0)
+            continue;
+        const char *w = bn + n;
+        int b = !strcmp(w, "8") ? 8 : !strcmp(w, "16") ? 16
+              : !strcmp(w, "32") ? 32 : !strcmp(w, "64") ? 64 : 0;
+        if (!b)
+            continue;
+        if (bits)
+            *bits = b;
+        return (int)i + 1;
+    }
+    return 0;
+}
+
+/* The unsigned type of exactly `bits` bits on this target. */
+struct type *ty_uint_bits(int bits)
+{
+    if (bits == 8)
+        return ty_base(TY_CHAR, 1);
+    if (bits == 16)
+        return ty_base(TY_SHORT, 1);
+    if (bits == 64)
+        return ty_llong(1);
+    return ty_size(ty_base(TY_INT, 1)) == 4 ? ty_base(TY_INT, 1)
+                                           : ty_base(TY_LONG, 1);
 }
 
 enum atomic_kind atomic_builtin(const char *name, int *op)

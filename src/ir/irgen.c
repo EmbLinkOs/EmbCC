@@ -3236,6 +3236,53 @@ static int gen_bitop(struct ir_func *fn, struct expr *e, int kind, int rank)
     return gen_convert(fn, r, ut, ty_base(TY_INT, 0));    /* the result is int */
 }
 
+/* clang's bitreverseN (kind 1), rotateleftN (2) and rotaterightN (3):
+ * the value as an unsigned of exactly N bits, in a register of 4 bytes
+ * (N up to 32) or 8, with each amount masked to N - 1 -- so a rotate by
+ * 0 or N is the value, and no shift is by N or more. A narrow value is
+ * computed at 4 bytes and masked back to its N bits. */
+static int gen_bitx(struct ir_func *fn, struct expr *e, int kind, int bits)
+{
+    struct type *ut = ty_uint_bits(bits);
+    int w = bits > 32 ? 8 : 4;
+    unsigned long all = bits == 64 ? ~0UL : (1UL << bits) - 1;
+    int x = gen_convert(fn, gen_expr(fn, e->args[0]), e->args[0]->ty, ut);
+    int r;
+    if (bits < 32)
+        x = emit_bin(fn, IR_AND, x, bk(fn, all, w), w, 0);
+    if (kind == 1) {
+        r = x;
+        for (int k = 1; k < bits; k *= 2) {
+            unsigned long m = 0;
+            for (int i = 0; i < bits; i += 2 * k)
+                m |= ((1UL << k) - 1) << i;
+            int lo = emit_bin(fn, IR_AND,
+                              emit_bin(fn, IR_SHR, r, bk(fn, (unsigned long)k, w),
+                                       w, 0),
+                              bk(fn, m, w), w, 0);
+            int hi = emit_bin(fn, IR_SHL,
+                              emit_bin(fn, IR_AND, r, bk(fn, m, w), w, 0),
+                              bk(fn, (unsigned long)k, w), w, 0);
+            r = emit_bin(fn, IR_OR, lo, hi, w, 0);
+        }
+    } else {
+        int n = gen_convert(fn, gen_expr(fn, e->args[1]), e->args[1]->ty, ut);
+        int s = emit_bin(fn, IR_AND, n, bk(fn, (unsigned long)(bits - 1), w),
+                         w, 0);
+        int t = emit_bin(fn, IR_AND,
+                         emit_bin(fn, IR_SUB, bk(fn, (unsigned long)bits, w), s,
+                                  w, 0),
+                         bk(fn, (unsigned long)(bits - 1), w), w, 0);
+        int left = kind == 2;
+        r = emit_bin(fn, IR_OR,
+                     emit_bin(fn, left ? IR_SHL : IR_SHR, x, s, w, 0),
+                     emit_bin(fn, left ? IR_SHR : IR_SHL, x, t, w, 0), w, 0);
+    }
+    if (bits < 32)
+        r = emit_bin(fn, IR_AND, r, bk(fn, all, w), w, 0);
+    return r;
+}
+
 /* __builtin_{add,sub,mul}_overflow(a, b, r): the operation as if in
  * infinite precision, truncated into *r, and 1 when it did not fit.
  *
@@ -3785,6 +3832,27 @@ static int emit_call(struct ir_func *fn, struct expr *e, const int *args,
     if (rty->bitint)
         return bitint_ext(fn, i->dst, rty);
     return i->dst;
+}
+
+/* How far past its call a SPARC function returns: 12 where it returns
+ * through the caller's buffer, a struct or a long double, and the caller
+ * put an `unimp` word after the call's delay slot; else 8. The backend's
+ * own test (src/arch/sparc/codegen.c fn_sret and ret_reg_words), read
+ * from the return type as gen_func set it. */
+static long sparc_ret_offset(const struct ir_func *fn)
+{
+    const struct type *t = fn->ret_abi.ty;
+    if (fn->src && fn->src->sret_first)
+        return 12;
+    if (fn->ret_abi.is_struct) {
+        /* a _Complex of 8 bytes, or a 16-byte float one, comes back in
+         * registers */
+        int regs = t && t->is_complex && t->celem &&
+                   (ty_size(t) == 8 ||
+                    (ty_size(t) == 16 && ty_is_float(t->celem)));
+        return regs ? 8 : 12;
+    }
+    return fn->ret_abi.size == 16 ? 12 : 8;
 }
 
 static int gen_expr_inner(struct ir_func *fn, struct expr *e)
@@ -4542,6 +4610,9 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             int bw, bk = builtin_bitop(e->name + 10, &bw);
             if (bk)
                 return gen_bitop(fn, e, bk, bw);
+            bk = builtin_bitx(e->name + 10, &bw);
+            if (bk)
+                return gen_bitx(fn, e, bk, bw);
         }
         if (e->name && strncmp(e->name, "__builtin_", 10) == 0 &&
             (strcmp(e->name + 10, "add_overflow") == 0 ||
@@ -4552,6 +4623,59 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
                         strcmp(e->name, "__builtin_trap") == 0)) {
             emit(fn)->op = IR_UD2;
             return -1;
+        }
+        /* __builtin_powi/powif/powil: libgcc's __powi*f2, by the value's
+         * width (lib/rt/powi.c) */
+        if (e->name && (strcmp(e->name, "__builtin_powi") == 0 ||
+                        strcmp(e->name, "__builtin_powif") == 0 ||
+                        strcmp(e->name, "__builtin_powil") == 0)) {
+            int sz = ty_size(e->ty);
+            const char *name = sz == 4 ? "__powisf2" : sz == 8 ? "__powidf2"
+                             : target_get() == TARGET_X86_64 ? "__powixf2"
+                             : "__powitf2";
+            struct type *tys[2] = { e->ty, ty_base(TY_INT, 0) };
+            int vals[2];
+            vals[0] = gen_expr(fn, e->args[0]);
+            vals[1] = gen_expr(fn, e->args[1]);
+            struct func *cf = libatomic_fn(name, e->ty, 2, tys);
+            cf->inf_no_read = cf->inf_no_write = cf->is_nothrow = 1;
+            return libatomic_call(fn, name, e->ty, 2, vals, tys, g_cur_line);
+        }
+        /* __builtin_extract_return_addr / frob_return_addr: the address
+         * itself, but SPARC's, whose return is past its call (GCC's
+         * RETURN_ADDR_OFFSET) */
+        if (e->name && (strcmp(e->name, "__builtin_extract_return_addr") == 0 ||
+                        strcmp(e->name, "__builtin_frob_return_addr") == 0)) {
+            int a = gen_expr(fn, e->args[0]);
+            if (target_get() != TARGET_SPARC32)
+                return a;
+            int extract = e->name[10] == 'e';
+            return emit_bin(fn, extract ? IR_ADD : IR_SUB, a,
+                            emit_const(fn, sparc_ret_offset(fn), AW), AW, 1);
+        }
+        /* __builtin_popcountg(x): at x's own width -- 4 bytes for a
+         * narrower one (zero-extended), 8, or two halves of 16 */
+        if (e->name && strcmp(e->name, "__builtin_popcountg") == 0) {
+            const struct type *at = e->args[0]->ty;
+            int sz = ty_size(at), r;
+            int x = gen_expr(fn, e->args[0]);
+            if (sz == 16) {
+                const struct type *u64 = ty_int_of_size(8, 1);
+                int lo = gen_convert(fn, x, at, u64);
+                int hi = gen_convert(fn,
+                                     emit_bin(fn, IR_SHR, x,
+                                              emit_const(fn, 64, 16), 16, 0),
+                                     at, u64);
+                r = emit_bin(fn, IR_ADD, bpopcount(fn, lo, 8),
+                             bpopcount(fn, hi, 8), 8, 0);
+                return gen_convert(fn, r, u64, ty_base(TY_INT, 0));
+            }
+            const struct type *ut = sz > 4 ? ty_int_of_size(8, 1)
+                                           : ty_int_of_size(4, 1);
+            int w = sz > 4 ? 8 : 4;
+            x = gen_convert(fn, x, at, ut);
+            r = bpopcount(fn, x, w);
+            return gen_convert(fn, r, ut, ty_base(TY_INT, 0));
         }
         /* GCC's __builtin_setjmp(buf) / __builtin_longjmp(buf, 1), onto
          * an ordinary setjmp: the jmp_buf sema made in this frame, its

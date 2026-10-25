@@ -786,6 +786,8 @@ static void asm_assemble(struct ir_func *fn, struct stmt *s,
         }
         else if (mlen == 3 && strncmp(m, "sti", 3) == 0) { code[n++] = 0xfb; }
         else if (mlen == 3 && strncmp(m, "hlt", 3) == 0) { code[n++] = 0xf4; }
+        /* the breakpoint (__builtin_debugtrap) */
+        else if (mlen == 4 && strncmp(m, "int3", 4) == 0) { code[n++] = 0xcc; }
         else if (mlen == 3 && strncmp(m, "nop", 3) == 0) { code[n++] = 0x90; }
         else if (mlen == 5 && strncmp(m, "pause", 5) == 0) {
             code[n++] = 0xf3; code[n++] = 0x90;
