@@ -342,7 +342,7 @@ that are missing:
   `__builtin_isless`, `__builtin_islessequal`,
   `__builtin_islessgreater`, `__builtin_isunordered` and
   `__builtin_fpclassify`.
-- `__builtin_setjmp`, `__builtin_longjmp`, `__builtin___clear_cache`,
+- `__builtin___clear_cache`,
   `__builtin_extract_return_addr`, `__builtin_debugtrap`.
 - `__builtin_complex`, `__builtin_classify_type`,
   `__builtin_va_arg_pack`, `__builtin_assume`,
@@ -643,7 +643,7 @@ audited:
   `use_shadow_register_set` and `use_debug_exception_return`.
 - A `_Float16` through `...`, and a struct of them by value with the
   ARM or RISC-V hard-float convention; `asm goto`, nested functions,
-  `__builtin_setjmp` and sixteen-byte atomics off x86-64 and AArch64
+  and sixteen-byte atomics off x86-64 and AArch64
   (see [What each target compiles](../manual/limits.md)).
 - On MIPS32, a delay slot filled from anywhere but the instruction just
   before the transfer (the branch target's first instruction, or one

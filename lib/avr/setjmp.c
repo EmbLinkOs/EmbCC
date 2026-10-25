@@ -16,6 +16,13 @@
  *
  * longjmp(env, 0) makes setjmp return 1 (C11 7.13.2.1p4): val + carry
  * of val < 1, unsigned. */
+/* The symbols' names: lib/rt/builtin-setjmp.c builds this file again as
+ * __builtin_setjmp's and __builtin_longjmp's own pair. */
+#ifndef SJ_SETJMP
+#define SJ_SETJMP  "setjmp"
+#define SJ_LONGJMP "longjmp"
+#endif
+
 #if defined(__AVR__)
 
 #if !defined(__AVR_2_BYTE_PC__)
@@ -30,9 +37,9 @@
 
 __asm__(
 ".text\n"
-".globl setjmp\n"
-".type setjmp, @function\n"
-"setjmp:\n"
+".globl " SJ_SETJMP "\n"
+".type " SJ_SETJMP ", @function\n"
+ SJ_SETJMP ":\n"
 "    movw r26, r24\n"               /* X = env */
 SJ_AVR_REGS(SJ_AVR_ST)
 "    pop r31\n"                     /* Z = where to go back to */
@@ -48,11 +55,11 @@ SJ_AVR_REGS(SJ_AVR_ST)
 "    clr r24\n"
 "    clr r25\n"
 "    ijmp\n"
-".size setjmp, .-setjmp\n"
+".size " SJ_SETJMP ", .-" SJ_SETJMP "\n"
 
-".globl longjmp\n"
-".type longjmp, @function\n"
-"longjmp:\n"
+".globl " SJ_LONGJMP "\n"
+".type " SJ_LONGJMP ", @function\n"
+ SJ_LONGJMP ":\n"
 "    movw r26, r24\n"               /* X = env */
 "    movw r24, r22\n"               /* the result: val, or 1 for 0 */
 "    cpi r24, 1\n"
@@ -69,7 +76,7 @@ SJ_AVR_REGS(SJ_AVR_LD)
 "    ld r30, X+\n"
 "    ld r31, X+\n"
 "    ijmp\n"
-".size longjmp, .-longjmp\n"
+".size " SJ_LONGJMP ", .-" SJ_LONGJMP "\n"
 );
 
 #endif

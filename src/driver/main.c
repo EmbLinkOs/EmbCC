@@ -6392,6 +6392,7 @@ int main(int argc, char **argv)
                                 "target's glibc)\n", opt_typed(argv[i]));
                 return 1;
             }
+            target_set_system_libc(g_libc_system);
         } else if (strncmp(argv[i], "--sysroot=", 10) == 0) {
             g_sysroot = argv[i] + 10;
         } else if (strncmp(argv[i], "--ld-path=", 10) == 0) {

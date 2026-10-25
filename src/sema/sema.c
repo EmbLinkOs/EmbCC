@@ -5083,6 +5083,55 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                 e->ty = ty_base(TY_INT, 0);
                 break;
             }
+            /* __builtin_setjmp(buf) and __builtin_longjmp(buf, 1), GCC's
+             * pair: lowered in irgen onto an ordinary setjmp whose jmp_buf
+             * lives in the caller's frame (lib/rt/builtin-setjmp.c says
+             * how); of buf's five words one holds that jmp_buf's address */
+            else if (strcmp(bn, "setjmp") == 0 || strcmp(bn, "longjmp") == 0) {
+                int lj = bn[0] == 'l';
+                if (target_os_get() == TGT_OS_WINDOWS)
+                    sema_error_at(u, e->line, e->col,
+                            "%s is not supported for %s: MinGW's setjmp "
+                            "takes a frame for its unwinder, and EmbCC does "
+                            "not lower onto it", e->lhs->name,
+                            target_triple_now());
+                if (e->nargs != (lj ? 2 : 1))
+                    sema_error_at(u, e->line, e->col,
+                            lj ? "__builtin_longjmp takes a buffer and 1"
+                               : "__builtin_setjmp takes a buffer");
+                for (int i = 0; i < e->nargs; i++)
+                    check_expr(u, f, sc, e->args[i]);
+                if (!e->args[0]->ty || (e->args[0]->ty->kind != TY_PTR &&
+                                        e->args[0]->ty->kind != TY_ARRAY))
+                    sema_error_at(u, e->line, e->col,
+                            "%s's buffer is a pointer (GCC's five words)",
+                            e->lhs->name);
+                if (lj) {
+                    long one;
+                    if (!const_fold(e->args[1], &one) || one != 1)
+                        sema_error_at(u, e->line, e->col,
+                                "__builtin_longjmp's second argument must be "
+                                "the constant 1, as in GCC");
+                    e->ty = ty_base(TY_VOID, 0);
+                } else {
+                    /* the jmp_buf, in this frame: lib/libc's size (AVR's
+                     * 24 bytes; glibc's and Apple's fit in 64 words) */
+                    struct type *jb =
+                        target_get() == TARGET_AVR
+                            ? ty_array(ty_base(TY_CHAR, 1), 24)
+                        : target_ptr_size() == 8
+                            ? ty_array(ty_base(TY_LONG, 0),
+                                       target_system_libc() ||
+                                       target_os_get() == TGT_OS_DARWIN
+                                           ? 64 : 32)
+                            : ty_array(ty_llong(0), 32);
+                    e->num = scope_add(sc, "<__builtin_setjmp buffer>", jb,
+                                       NULL);
+                    e->ty = ty_base(TY_INT, 0);
+                }
+                e->name = e->lhs->name;
+                break;
+            }
             /* control never reaches here -> a trap (ud2 / udf) */
             else if (strcmp(bn, "unreachable") == 0 || strcmp(bn, "trap") == 0) {
                 e->name = e->lhs->name;
@@ -6735,7 +6784,7 @@ static const char *const g_named_builtins[] = {
     "copysign", "copysignf", "copysignl",
     "signbit", "signbitf", "signbitl",
     "isnan", "isinf", "isinf_sign", "isfinite", "isnormal",
-    "trap", "unreachable",
+    "trap", "unreachable", "setjmp", "longjmp",
     "va_arg", "va_copy", "va_end", "va_start",
     "add_overflow", "sub_overflow", "mul_overflow",
     "add_overflow_p", "sub_overflow_p", "mul_overflow_p",
@@ -8264,7 +8313,7 @@ int is_noreturn_call(const struct expr *e)
         return 1;                       /* __attribute__((noreturn)) callee */
     static const char *const nr[] = {
         "exit", "abort", "_Exit", "diag_fatal",
-        "__builtin_unreachable", "__builtin_trap",
+        "__builtin_unreachable", "__builtin_trap", "__builtin_longjmp",
     };
     for (unsigned i = 0; i < sizeof nr / sizeof *nr; i++)
         if (strcmp(e->name, nr[i]) == 0)

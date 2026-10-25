@@ -23,6 +23,13 @@
  *                      D8-D11, A12-A15, D12-D15), [16] = return address
  *
  * longjmp(env, 0) makes setjmp return 1 (C11 7.13.2.1p4). */
+/* The symbols' names: lib/rt/builtin-setjmp.c builds this file again as
+ * __builtin_setjmp's and __builtin_longjmp's own pair. */
+#ifndef SJ_SETJMP
+#define SJ_SETJMP  "setjmp"
+#define SJ_LONGJMP "longjmp"
+#endif
+
 #if defined(__TRICORE__) || defined(__tricore__)
 
 /* d0's link -> a2, the area's address (through d1, d2) */
@@ -38,9 +45,9 @@
 
 __asm__(
 ".text\n"
-".globl setjmp\n"
-".type setjmp, @function\n"
-"setjmp:\n"                         /* env in a4 */
+".globl " SJ_SETJMP "\n"
+".type " SJ_SETJMP ", @function\n"
+ SJ_SETJMP ":\n"                         /* env in a4 */
 "    mfcr d0, pcxi\n"
 SJ_TC_AREA
 SJ_TC_CP(0) SJ_TC_CP(4) SJ_TC_CP(8) SJ_TC_CP(12)
@@ -50,11 +57,11 @@ SJ_TC_CP(48) SJ_TC_CP(52) SJ_TC_CP(56) SJ_TC_CP(60)
 "    st.a [a4]64, a11\n"
 "    mov d2, 0\n"
 "    ret\n"
-".size setjmp, .-setjmp\n"
+".size " SJ_SETJMP ", .-" SJ_SETJMP "\n"
 
-".globl longjmp\n"
-".type longjmp, @function\n"
-"longjmp:\n"                        /* env in a4, val in d4 */
+".globl " SJ_LONGJMP "\n"
+".type " SJ_LONGJMP ", @function\n"
+ SJ_LONGJMP ":\n"                        /* env in a4, val in d4 */
 "    mfcr d3, 0xfe2c\n"             /* ICR, put back at the end */
 "    disable\n"
 "    ld.w d5, [a4]0\n"              /* the link to stop at */
@@ -100,7 +107,7 @@ SJ_TC_AREA
 "    jnz d2, 3f\n"
 "    mov d2, 1\n"
 "3:  ji a2\n"
-".size longjmp, .-longjmp\n"
+".size " SJ_LONGJMP ", .-" SJ_LONGJMP "\n"
 );
 
 #endif

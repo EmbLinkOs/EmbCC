@@ -11,6 +11,13 @@
  *
  * longjmp(env, 0) makes setjmp return 1 (C11 7.13.2.1p4): a0 = val +
  * (val == 0). */
+/* The symbols' names: lib/rt/builtin-setjmp.c builds this file again as
+ * __builtin_setjmp's and __builtin_longjmp's own pair. */
+#ifndef SJ_SETJMP
+#define SJ_SETJMP  "setjmp"
+#define SJ_LONGJMP "longjmp"
+#endif
+
 #if defined(__riscv)
 
 #if __riscv_xlen == 64
@@ -60,24 +67,24 @@
 
 __asm__(
 ".text\n"
-".globl setjmp\n"
-".type setjmp, @function\n"
-"setjmp:\n"
+".globl " SJ_SETJMP "\n"
+".type " SJ_SETJMP ", @function\n"
+ SJ_SETJMP ":\n"
 SJ_GP_ALL(SJ_S)
 SJ_FP_ALL(SJ_FS)
 "    li a0, 0\n"
 "    ret\n"
-".size setjmp, .-setjmp\n"
+".size " SJ_SETJMP ", .-" SJ_SETJMP "\n"
 
-".globl longjmp\n"
-".type longjmp, @function\n"
-"longjmp:\n"
+".globl " SJ_LONGJMP "\n"
+".type " SJ_LONGJMP ", @function\n"
+ SJ_LONGJMP ":\n"
 SJ_GP_ALL(SJ_L)
 SJ_FP_ALL(SJ_FL)
 "    seqz a0, a1\n"
 "    add a0, a0, a1\n"
 "    ret\n"
-".size longjmp, .-longjmp\n"
+".size " SJ_LONGJMP ", .-" SJ_LONGJMP "\n"
 );
 
 #endif

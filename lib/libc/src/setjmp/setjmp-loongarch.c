@@ -8,6 +8,13 @@
  *
  * longjmp(env, 0) makes setjmp return 1 (C11 7.13.2.1p4): a0 = val +
  * (val == 0), at 32 bits as an int is kept. */
+/* The symbols' names: lib/rt/builtin-setjmp.c builds this file again as
+ * __builtin_setjmp's and __builtin_longjmp's own pair. */
+#ifndef SJ_SETJMP
+#define SJ_SETJMP  "setjmp"
+#define SJ_LONGJMP "longjmp"
+#endif
+
 #if defined(__loongarch__)
 
 #define SJ_STR_(x) #x
@@ -20,22 +27,22 @@
 
 __asm__(
 ".text\n"
-".globl setjmp\n"
-".type setjmp, @function\n"
-"setjmp:\n"
+".globl " SJ_SETJMP "\n"
+".type " SJ_SETJMP ", @function\n"
+ SJ_SETJMP ":\n"
 SJ_ALL("st.d")
 "    move $a0, $zero\n"
 "    jr $ra\n"
-".size setjmp, .-setjmp\n"
+".size " SJ_SETJMP ", .-" SJ_SETJMP "\n"
 
-".globl longjmp\n"
-".type longjmp, @function\n"
-"longjmp:\n"
+".globl " SJ_LONGJMP "\n"
+".type " SJ_LONGJMP ", @function\n"
+ SJ_LONGJMP ":\n"
 SJ_ALL("ld.d")
 "    sltui $a0, $a1, 1\n"
 "    add.w $a0, $a0, $a1\n"
 "    jr $ra\n"
-".size longjmp, .-longjmp\n"
+".size " SJ_LONGJMP ", .-" SJ_LONGJMP "\n"
 );
 
 #endif

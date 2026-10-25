@@ -810,6 +810,8 @@ libc-x86_64: embcc embar
 	@rm -f $(BUILD)/libc/x86_64/libc.a
 	@$${EMBCC_X86_AR:-./embar} rcs $(BUILD)/libc/x86_64/libc.a $(BUILD)/libc/x86_64/*.o
 	@echo "libc: $(BUILD)/libc/x86_64/libc.a"
+	@EMBCC=./embcc sh tools/build-rt.sh x86_64-elf $(BUILD)/libc/x86_64 > /dev/null
+	@echo "rt: $(BUILD)/libc/x86_64/librt.a"
 
 libc-aarch64: embcc embar
 	@mkdir -p $(BUILD)/libc/aarch64
@@ -820,6 +822,8 @@ libc-aarch64: embcc embar
 	@rm -f $(BUILD)/libc/aarch64/libc.a
 	@$${EMBCC_AARCH64_AR:-./embar} rcs $(BUILD)/libc/aarch64/libc.a $(BUILD)/libc/aarch64/*.o
 	@echo "libc: $(BUILD)/libc/aarch64/libc.a"
+	@EMBCC=./embcc sh tools/build-rt.sh aarch64-elf $(BUILD)/libc/aarch64 > /dev/null
+	@echo "rt: $(BUILD)/libc/aarch64/librt.a"
 
 # EmbLinkOS is a backend, not a second library: same sources, one different
 # file at the bottom. It needs that OS's ABI headers, so it is opt-in.

@@ -647,6 +647,10 @@ const char *target_builtin_default(void);
  *
  * `avail` is how many bytes remain; a result is never larger than it. */
 int target_insn_len(const unsigned char *p, int avail);
+/* --libc=system: a Linux target's own C library (glibc) in place of
+ * EmbCC's -- what __builtin_setjmp is lowered onto depends on it. */
+void target_set_system_libc(int on);
+int target_system_libc(void);
 
 /* Parses a full triple into all three dimensions. Returns 0 and leaves
  * every output alone on anything it does not know, so the driver can

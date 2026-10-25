@@ -1087,14 +1087,30 @@ A function that calls `alloca` is never inlined.
 'f', which is not variadic`). Passing and retrieving structures through
 `...` is described in [C language](c-language.md).
 
+### `__builtin_setjmp` and `__builtin_longjmp`
+
+GCC's pair, for a jump with no C library behind it (a language
+runtime, an SJLJ unwinder): `__builtin_setjmp(buf)` returns 0, and 1
+when `__builtin_longjmp(buf, 1)` comes back to it, from anywhere below
+while the function that called `__builtin_setjmp` has not returned.
+`buf` is GCC's five words. EmbCC keeps an ordinary `jmp_buf` in that
+function's frame, stores its address in `buf[0]`, and calls the
+runtime's own setjmp and longjmp on it (lib/rt's, built from lib/libc's
+for every target; the system C library's `_setjmp` and `_longjmp` on
+Darwin and with `--libc=system`). As with `setjmp`, a local changed
+between the two and read after the jump must be `volatile`.
+`__builtin_longjmp` takes only the constant 1, as in GCC; both are
+refused on Windows (`x86_64-windows-gnu`), whose `_setjmp` takes a frame
+for its unwinder. clang has the pair on fewer targets (not on AArch64
+macOS).
+
 ### Builtins that are not supported
 
 These are refused as undeclared functions, as shown in [General
 rules](#general-rules): `__builtin_assume`,
 `__builtin_bitreverse32` and the other widths,
 `__builtin_rotateleft32` and the other rotates, `__builtin_complex`,
-`__builtin_fpclassify`, `__builtin_setjmp`,
-`__builtin___clear_cache`, `__builtin_FUNCTION`,
+`__builtin_fpclassify`, `__builtin___clear_cache`, `__builtin_FUNCTION`,
 `__builtin_speculation_safe_value`, `__builtin_shufflevector`, the
 target-specific families (`__builtin_ia32_*`, `__builtin_avr_*`), and
 Clang's `__c11_atomic_*`. `__builtin_addressof`, `__builtin_bit_cast`

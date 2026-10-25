@@ -134,9 +134,9 @@ GDB test on every board family, at `-O2`.
 
 Every refusal either implemented or declared permanent:
 
-- `asm goto`, global register variables,
-  `__builtin_setjmp`/`__builtin_longjmp`, nested functions (or a
-  permanent refusal, as clang has). (`_Float16` and `__fp16` are done:
+- `asm goto`, global register variables, nested functions (or a
+  permanent refusal, as clang has). (`__builtin_setjmp`/
+  `__builtin_longjmp` are done, on every target but Windows.) (`_Float16` and `__fp16` are done:
   a `_Float16` through `...`, and a struct of them by value with the ARM
   and RISC-V hard-float conventions, remain.)
 - C++ exceptions on Cortex-M, RV32 and the other 32-bit targets (needs

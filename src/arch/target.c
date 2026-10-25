@@ -111,6 +111,13 @@ const char *target_builtin_default(void)
     return "x86_64-elf";                /* nothing is built: refused later */
 }
 
+static int g_system_libc;
+void target_set_system_libc(int on) { g_system_libc = on; }
+int target_system_libc(void)
+{
+    return g_system_libc && g_os == TGT_OS_LINUX;
+}
+
 int target_insn_len(const unsigned char *p, int avail)
 {
     if (avail <= 0)

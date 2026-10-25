@@ -1,7 +1,8 @@
 #!/bin/sh
 # setjmp and longjmp on the ATmega328P: lib/avr/setjmp.c, with
 # tests/exec/setjmp-registers.c (every callee-saved register, r2-r17 and
-# Y, comes back), setjmp-longjmp.c and volatile-local-longjmp.c, compiled
+# Y, comes back), setjmp-longjmp.c and volatile-local-longjmp.c -- and
+# builtin-setjmp.c, GCC's __builtin_setjmp on lib/rt's copy -- compiled
 # for AVR at -O0, -O1, -O2 and -Os -- and at -O2 and -Os with each
 # allocation mode forced (EMBCC_AVR_RA_MODE: best-of-three only ever runs
 # the winner) -- and run on qemu-system-avr's uno, where each must exit
@@ -25,7 +26,8 @@ EMBCC_AVR_HARNESS=$PWD/$out; export EMBCC_AVR_HARNESS
 "$EMBCC" --target=avr -Os -c tests/harness/avr/io.c -o "$out/io.o" || {
     echo "the harness does not compile"; exit 1; }
 for f in lib/rt/avr.c lib/rt/avrfp.c lib/rt/avrfpadd.c lib/rt/avrfpmul.c \
-         lib/rt/avrfpdiv.c lib/rt/avrfpcmp.c lib/rt/avrfpi.c lib/avr/setjmp.c; do
+         lib/rt/avrfpdiv.c lib/rt/avrfpcmp.c lib/rt/avrfpi.c lib/avr/setjmp.c \
+         lib/rt/builtin-setjmp.c; do
     "$EMBCC" --target=avr -Os -c "$f" -o "$out/rt-$(basename "$f" .c).o" || {
         echo "$f does not compile"; exit 1; }
 done
@@ -69,7 +71,7 @@ run() {             # run SRC OPT [MODE]
     fi
 }
 for c in tests/exec/setjmp-registers.c tests/exec/setjmp-longjmp.c \
-         tests/exec/volatile-local-longjmp.c; do
+         tests/exec/volatile-local-longjmp.c tests/exec/builtin-setjmp.c; do
     for o in -O0 -O1 -O2 -Os; do
         run "$c" $o
     done

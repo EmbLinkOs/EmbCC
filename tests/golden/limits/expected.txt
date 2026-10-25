@@ -16,7 +16,7 @@ thumbv6m-none-eabi vla yes
 thumbv6m-none-eabi align32 yes
 thumbv6m-none-eabi frameaddr yes
 thumbv6m-none-eabi retaddr1 no: __builtin_return_address(1) is not supported on thumbv6m-none-eabi: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
-thumbv6m-none-eabi setjmp no: '__builtin_setjmp' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
+thumbv6m-none-eabi setjmp yes
 thumbv6m-none-eabi cgoto yes
 thumbv6m-none-eabi asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 thumbv6m-none-eabi nested no: expected ';' before '{' [E0002]
@@ -46,7 +46,7 @@ thumbv7m-none-eabi vla yes
 thumbv7m-none-eabi align32 yes
 thumbv7m-none-eabi frameaddr yes
 thumbv7m-none-eabi retaddr1 no: __builtin_return_address(1) is not supported on thumbv7m-none-eabi: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
-thumbv7m-none-eabi setjmp no: '__builtin_setjmp' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
+thumbv7m-none-eabi setjmp yes
 thumbv7m-none-eabi cgoto yes
 thumbv7m-none-eabi asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 thumbv7m-none-eabi nested no: expected ';' before '{' [E0002]
@@ -76,7 +76,7 @@ thumbv7em-none-eabihf vla yes
 thumbv7em-none-eabihf align32 yes
 thumbv7em-none-eabihf frameaddr yes
 thumbv7em-none-eabihf retaddr1 no: __builtin_return_address(1) is not supported on thumbv7em-none-eabihf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
-thumbv7em-none-eabihf setjmp no: '__builtin_setjmp' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
+thumbv7em-none-eabihf setjmp yes
 thumbv7em-none-eabihf cgoto yes
 thumbv7em-none-eabihf asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 thumbv7em-none-eabihf nested no: expected ';' before '{' [E0002]
@@ -106,7 +106,7 @@ thumbv8m.base-none-eabi vla yes
 thumbv8m.base-none-eabi align32 yes
 thumbv8m.base-none-eabi frameaddr yes
 thumbv8m.base-none-eabi retaddr1 no: __builtin_return_address(1) is not supported on thumbv8m.base-none-eabi: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
-thumbv8m.base-none-eabi setjmp no: '__builtin_setjmp' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
+thumbv8m.base-none-eabi setjmp yes
 thumbv8m.base-none-eabi cgoto yes
 thumbv8m.base-none-eabi asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 thumbv8m.base-none-eabi nested no: expected ';' before '{' [E0002]
@@ -136,7 +136,7 @@ thumbv8m.main-none-eabi vla yes
 thumbv8m.main-none-eabi align32 yes
 thumbv8m.main-none-eabi frameaddr yes
 thumbv8m.main-none-eabi retaddr1 no: __builtin_return_address(1) is not supported on thumbv8m.main-none-eabi: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
-thumbv8m.main-none-eabi setjmp no: '__builtin_setjmp' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
+thumbv8m.main-none-eabi setjmp yes
 thumbv8m.main-none-eabi cgoto yes
 thumbv8m.main-none-eabi asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 thumbv8m.main-none-eabi nested no: expected ';' before '{' [E0002]
@@ -166,7 +166,7 @@ armv7a-none-eabi vla yes
 armv7a-none-eabi align32 yes
 armv7a-none-eabi frameaddr yes
 armv7a-none-eabi retaddr1 no: __builtin_return_address(1) is not supported on armv7a-none-eabi: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
-armv7a-none-eabi setjmp no: '__builtin_setjmp' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
+armv7a-none-eabi setjmp yes
 armv7a-none-eabi cgoto yes
 armv7a-none-eabi asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 armv7a-none-eabi nested no: expected ';' before '{' [E0002]
@@ -196,7 +196,7 @@ riscv32-unknown-elf vla yes
 riscv32-unknown-elf align32 yes
 riscv32-unknown-elf frameaddr yes
 riscv32-unknown-elf retaddr1 no: __builtin_return_address(1) is not supported on riscv32-unknown-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
-riscv32-unknown-elf setjmp no: '__builtin_setjmp' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
+riscv32-unknown-elf setjmp yes
 riscv32-unknown-elf cgoto yes
 riscv32-unknown-elf asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 riscv32-unknown-elf nested no: expected ';' before '{' [E0002]
@@ -226,7 +226,7 @@ riscv64-unknown-elf vla yes
 riscv64-unknown-elf align32 yes
 riscv64-unknown-elf frameaddr yes
 riscv64-unknown-elf retaddr1 no: __builtin_return_address(1) is not supported on riscv64-unknown-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
-riscv64-unknown-elf setjmp no: '__builtin_setjmp' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
+riscv64-unknown-elf setjmp yes
 riscv64-unknown-elf cgoto yes
 riscv64-unknown-elf asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 riscv64-unknown-elf nested no: expected ';' before '{' [E0002]
@@ -256,7 +256,7 @@ avr vla yes
 avr align32 yes
 avr frameaddr yes
 avr retaddr1 no: __builtin_return_address(1) is not supported on avr: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
-avr setjmp no: '__builtin_setjmp' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
+avr setjmp yes
 avr cgoto yes
 avr asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 avr nested no: expected ';' before '{' [E0002]
@@ -286,7 +286,7 @@ mipsel-none-elf vla yes
 mipsel-none-elf align32 yes
 mipsel-none-elf frameaddr yes
 mipsel-none-elf retaddr1 no: __builtin_return_address(1) is not supported on mipsel-none-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
-mipsel-none-elf setjmp no: '__builtin_setjmp' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
+mipsel-none-elf setjmp yes
 mipsel-none-elf cgoto yes
 mipsel-none-elf asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 mipsel-none-elf nested no: expected ';' before '{' [E0002]
@@ -316,7 +316,7 @@ mips-none-elf vla yes
 mips-none-elf align32 yes
 mips-none-elf frameaddr yes
 mips-none-elf retaddr1 no: __builtin_return_address(1) is not supported on mips-none-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
-mips-none-elf setjmp no: '__builtin_setjmp' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
+mips-none-elf setjmp yes
 mips-none-elf cgoto yes
 mips-none-elf asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 mips-none-elf nested no: expected ';' before '{' [E0002]
@@ -346,7 +346,7 @@ mips64el-none-elf vla yes
 mips64el-none-elf align32 yes
 mips64el-none-elf frameaddr yes
 mips64el-none-elf retaddr1 no: __builtin_return_address(1) is not supported on mips64el-none-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
-mips64el-none-elf setjmp no: '__builtin_setjmp' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
+mips64el-none-elf setjmp yes
 mips64el-none-elf cgoto yes
 mips64el-none-elf asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 mips64el-none-elf nested no: expected ';' before '{' [E0002]
@@ -376,7 +376,7 @@ mips64-none-elf vla yes
 mips64-none-elf align32 yes
 mips64-none-elf frameaddr yes
 mips64-none-elf retaddr1 no: __builtin_return_address(1) is not supported on mips64-none-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
-mips64-none-elf setjmp no: '__builtin_setjmp' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
+mips64-none-elf setjmp yes
 mips64-none-elf cgoto yes
 mips64-none-elf asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 mips64-none-elf nested no: expected ';' before '{' [E0002]
@@ -406,7 +406,7 @@ loongarch64-unknown-elf vla yes
 loongarch64-unknown-elf align32 yes
 loongarch64-unknown-elf frameaddr yes
 loongarch64-unknown-elf retaddr1 no: __builtin_return_address(1) is not supported on loongarch64-unknown-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
-loongarch64-unknown-elf setjmp no: '__builtin_setjmp' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
+loongarch64-unknown-elf setjmp yes
 loongarch64-unknown-elf cgoto yes
 loongarch64-unknown-elf asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 loongarch64-unknown-elf nested no: expected ';' before '{' [E0002]
@@ -436,7 +436,7 @@ xtensa-none-elf vla yes
 xtensa-none-elf align32 yes
 xtensa-none-elf frameaddr yes
 xtensa-none-elf retaddr1 no: __builtin_return_address(1) is not supported on xtensa-none-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
-xtensa-none-elf setjmp no: '__builtin_setjmp' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
+xtensa-none-elf setjmp yes
 xtensa-none-elf cgoto yes
 xtensa-none-elf asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 xtensa-none-elf nested no: expected ';' before '{' [E0002]
@@ -466,7 +466,7 @@ tricore-none-elf vla yes
 tricore-none-elf align32 yes
 tricore-none-elf frameaddr yes
 tricore-none-elf retaddr1 no: __builtin_return_address(1) is not supported on tricore-none-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
-tricore-none-elf setjmp no: '__builtin_setjmp' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
+tricore-none-elf setjmp yes
 tricore-none-elf cgoto yes
 tricore-none-elf asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 tricore-none-elf nested no: expected ';' before '{' [E0002]
@@ -496,7 +496,7 @@ rx-none-elf vla yes
 rx-none-elf align32 yes
 rx-none-elf frameaddr yes
 rx-none-elf retaddr1 no: __builtin_return_address(1) is not supported on rx-none-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
-rx-none-elf setjmp no: '__builtin_setjmp' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
+rx-none-elf setjmp yes
 rx-none-elf cgoto yes
 rx-none-elf asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 rx-none-elf nested no: expected ';' before '{' [E0002]
@@ -526,7 +526,7 @@ powerpc-none-eabi vla yes
 powerpc-none-eabi align32 yes
 powerpc-none-eabi frameaddr yes
 powerpc-none-eabi retaddr1 no: __builtin_return_address(1) is not supported on powerpc-none-eabi: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
-powerpc-none-eabi setjmp no: '__builtin_setjmp' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
+powerpc-none-eabi setjmp yes
 powerpc-none-eabi cgoto yes
 powerpc-none-eabi asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 powerpc-none-eabi nested no: expected ';' before '{' [E0002]
@@ -556,7 +556,7 @@ sparc-none-elf vla yes
 sparc-none-elf align32 yes
 sparc-none-elf frameaddr yes
 sparc-none-elf retaddr1 no: __builtin_return_address(1) is not supported on sparc-none-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
-sparc-none-elf setjmp no: '__builtin_setjmp' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
+sparc-none-elf setjmp yes
 sparc-none-elf cgoto yes
 sparc-none-elf asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 sparc-none-elf nested no: expected ';' before '{' [E0002]
@@ -586,7 +586,7 @@ m68k-none-elf vla yes
 m68k-none-elf align32 yes
 m68k-none-elf frameaddr yes
 m68k-none-elf retaddr1 yes
-m68k-none-elf setjmp no: '__builtin_setjmp' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
+m68k-none-elf setjmp yes
 m68k-none-elf cgoto yes
 m68k-none-elf asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 m68k-none-elf nested no: expected ';' before '{' [E0002]
@@ -616,7 +616,7 @@ x86_64-elf vla yes
 x86_64-elf align32 yes
 x86_64-elf frameaddr yes
 x86_64-elf retaddr1 yes
-x86_64-elf setjmp no: '__builtin_setjmp' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
+x86_64-elf setjmp yes
 x86_64-elf cgoto yes
 x86_64-elf asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 x86_64-elf nested no: expected ';' before '{' [E0002]
@@ -646,7 +646,7 @@ aarch64-elf vla yes
 aarch64-elf align32 yes
 aarch64-elf frameaddr yes
 aarch64-elf retaddr1 yes
-aarch64-elf setjmp no: '__builtin_setjmp' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
+aarch64-elf setjmp yes
 aarch64-elf cgoto yes
 aarch64-elf asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 aarch64-elf nested no: expected ';' before '{' [E0002]
@@ -676,7 +676,7 @@ x86_64-linux-gnu vla yes
 x86_64-linux-gnu align32 yes
 x86_64-linux-gnu frameaddr yes
 x86_64-linux-gnu retaddr1 yes
-x86_64-linux-gnu setjmp no: '__builtin_setjmp' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
+x86_64-linux-gnu setjmp yes
 x86_64-linux-gnu cgoto yes
 x86_64-linux-gnu asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 x86_64-linux-gnu nested no: expected ';' before '{' [E0002]
@@ -706,7 +706,7 @@ aarch64-apple-darwin vla yes
 aarch64-apple-darwin align32 yes
 aarch64-apple-darwin frameaddr yes
 aarch64-apple-darwin retaddr1 yes
-aarch64-apple-darwin setjmp no: '__builtin_setjmp' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
+aarch64-apple-darwin setjmp yes
 aarch64-apple-darwin cgoto yes
 aarch64-apple-darwin asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 aarch64-apple-darwin nested no: expected ';' before '{' [E0002]
@@ -736,7 +736,7 @@ x86_64-windows-gnu vla yes
 x86_64-windows-gnu align32 yes
 x86_64-windows-gnu frameaddr yes
 x86_64-windows-gnu retaddr1 yes
-x86_64-windows-gnu setjmp no: '__builtin_setjmp' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
+x86_64-windows-gnu setjmp no: __builtin_setjmp is not supported for x86_64-windows-gnu: MinGW's setjmp takes a frame for its unwinder, and EmbCC does not lower onto it
 x86_64-windows-gnu cgoto yes
 x86_64-windows-gnu asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 x86_64-windows-gnu nested no: expected ';' before '{' [E0002]

@@ -32,18 +32,25 @@
  *
  * longjmp(env, 0) makes setjmp return 1 (C11 7.13.2.1p4). EmbCC's Xtensa
  * is soft-float. */
+/* The symbols' names: lib/rt/builtin-setjmp.c builds this file again as
+ * __builtin_setjmp's and __builtin_longjmp's own pair. */
+#ifndef SJ_SETJMP
+#define SJ_SETJMP  "setjmp"
+#define SJ_LONGJMP "longjmp"
+#endif
+
 #if defined(__XTENSA__) || defined(__xtensa__)
 
 __asm__(
 ".text\n"
 ".align 4\n"
 ".Lsj_here:\n"
-"    .long setjmp\n"
+"  .long " SJ_SETJMP "\n"
 
-".globl setjmp\n"
-".type setjmp, @function\n"
+".globl " SJ_SETJMP "\n"
+".type " SJ_SETJMP ", @function\n"
 ".align 4\n"
-"setjmp:\n"                         /* the caller's window: env in a10 */
+ SJ_SETJMP ":\n"                         /* the caller's window: env in a10 */
 "    s32i a0, a10, 0\n"
 "    s32i a1, a10, 4\n"
 "    s32i a2, a10, 8\n"
@@ -61,12 +68,12 @@ __asm__(
 "    or a8, a8, a9\n"
 "    movi a10, 0\n"
 "    jx a8\n"
-".size setjmp, .-setjmp\n"
+".size " SJ_SETJMP ", .-" SJ_SETJMP "\n"
 
-".globl longjmp\n"
-".type longjmp, @function\n"
+".globl " SJ_LONGJMP "\n"
+".type " SJ_LONGJMP ", @function\n"
 ".align 4\n"
-"longjmp:\n"                        /* env in a10, val in a11 */
+ SJ_LONGJMP ":\n"                        /* env in a10, val in a11 */
 "    mov a2, a10\n"                 /* the caller's a2-a7 survive a call8 */
 "    mov a3, a11\n"
 "    call8 .Lsj_spill1\n"
@@ -88,7 +95,7 @@ __asm__(
 "    l32i a3, a2, 12\n"
 "    l32i a2, a2, 8\n"               /* the base, last */
 "    jx a8\n"
-".size longjmp, .-longjmp\n"
+".size " SJ_LONGJMP ", .-" SJ_LONGJMP "\n"
 
 /* The spill: each level's frame holds its own extra save area (a call12
  * caller's is 32 bytes) under the base save area above it. The first is

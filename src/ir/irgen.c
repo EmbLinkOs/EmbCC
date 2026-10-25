@@ -4553,6 +4553,40 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             emit(fn)->op = IR_UD2;
             return -1;
         }
+        /* GCC's __builtin_setjmp(buf) / __builtin_longjmp(buf, 1), onto
+         * an ordinary setjmp: the jmp_buf sema made in this frame, its
+         * address in buf[0], and the C library's _setjmp/_longjmp where
+         * the system's is linked (glibc, Darwin), else lib/rt's own pair
+         * (lib/rt/builtin-setjmp.c) */
+        if (e->name && (strcmp(e->name, "__builtin_setjmp") == 0 ||
+                        strcmp(e->name, "__builtin_longjmp") == 0)) {
+            int lj = e->name[10] == 'l';
+            int sys = target_system_libc() || target_os_get() == TGT_OS_DARWIN;
+            const char *name = lj ? (sys ? "_longjmp" : "__embcc_longjmp")
+                                  : (sys ? "_setjmp" : "__embcc_setjmp");
+            struct type *vp = ty_ptr(ty_base(TY_VOID, 0));
+            struct type *ity = ty_base(TY_INT, 0);
+            int buf = gen_expr(fn, e->args[0]);
+            if (lj) {
+                int vals[2], jb = emit_load(fn, buf, vp);
+                struct type *tys[2] = { vp, ity };
+                vals[0] = jb;
+                vals[1] = emit_const(fn, 1, 4);
+                struct func *cf = libatomic_fn(name, ty_base(TY_VOID, 0), 2,
+                                               tys);
+                cf->is_noreturn = 1;
+                libatomic_call(fn, name, ty_base(TY_VOID, 0), 2, vals, tys,
+                               g_cur_line);
+                emit(fn)->op = IR_UD2;
+                return -1;
+            }
+            int jb = local_addr(fn, (int)e->num);
+            emit_store(fn, buf, jb, vp);
+            int vals[1] = { jb };
+            struct type *tys[1] = { vp };
+            libatomic_fn(name, ity, 1, tys);
+            return libatomic_call(fn, name, ity, 1, vals, tys, g_cur_line);
+        }
         if (e->name) {
             int aop;
             enum atomic_kind ak = atomic_builtin(e->name, &aop);
