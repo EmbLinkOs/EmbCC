@@ -219,14 +219,22 @@ no_gcc_reference() {
 }
 
 # gcc_too_old_for FILE: prints what of FILE's C the target's referee gcc
-# has not got, if anything -- _BitInt is GCC 14's, _Countof and the 0o
-# octal constants GCC 16's, and Ubuntu 24.04's cc is GCC 13, 26.04's 15.
+# has not got, if anything -- _BitInt and the type-generic bit builtins
+# (__builtin_popcountg and the rest) are GCC 14's, __builtin_stdc_* GCC
+# 15's, _Countof and the 0o octal constants GCC 16's, and Ubuntu 24.04's
+# cc is GCC 13, 26.04's 15.
 # Too old a referee is no reference, not a failure of the program;
 # EMBCC_X86_GCC names a newer one. A feature is asked of the referee only
 # for a program that uses it (gcc_has).
 gcc_too_old_for() {
     if grep -q '_BitInt' "$1" && ! gcc_has bitint 'unsigned _BitInt(12) x;'; then
         echo "the referee gcc has no _BitInt; GCC 14 and later have"
+    elif grep -Eq '__builtin_(clz|ctz|popcount|parity|ffs|clrsb)g\(' "$1" &&
+         ! gcc_has bitg 'int n(void) { return __builtin_popcountg(1u); }'; then
+        echo "the referee gcc has no type-generic bit builtins; GCC 14 and later have"
+    elif grep -q '__builtin_stdc_' "$1" &&
+         ! gcc_has stdcbit 'unsigned n(void) { return __builtin_stdc_rotate_left(1u, 1); }'; then
+        echo "the referee gcc has no __builtin_stdc_ bit builtins; GCC 15 and later have"
     elif grep -q '_Countof' "$1" && ! gcc_has countof 'int a[3]; int n = _Countof(a);'; then
         echo "the referee gcc has no _Countof; GCC 16 and later have"
     elif grep -Eq '\b0[oO][0-7]' "$1" && ! gcc_has octal 'int n = 0o17;'; then

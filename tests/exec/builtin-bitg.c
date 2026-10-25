@@ -24,7 +24,14 @@ static volatile ull seeds[] = {
     0xdeadbeefcafef00dull, 0x8000000000000000ull, 0x8000000000000001ull,
     0xffffffffffffffffull, 0x0123456789abcdefull,
 };
-static volatile long long amounts[] = { 0, 1, 7, 8, 15, 31, 33, 63, 64, 65, -1, -9, 1000 };
+/* rotate counts; a negative one turns EmbCC's rotate the other way, and
+ * is undefined behaviour in GCC's */
+static volatile long long amounts[] = {
+    0, 1, 7, 8, 15, 31, 33, 63, 64, 65, 1000,
+#ifdef __EMBCC__
+    -1, -9,
+#endif
+};
 
 #define N(a) (sizeof (a) / sizeof (a)[0])
 
@@ -152,7 +159,9 @@ int main(void)
             }
             f |= __builtin_stdc_rotate_left(x, 64) != ((unsigned __int128)lo << 64 | hi);
             f |= __builtin_stdc_rotate_right(x, 4) != (x >> 4 | x << 124);
+#ifdef __EMBCC__
             f |= __builtin_stdc_rotate_left(x, -4) != (x >> 4 | x << 124);
+#endif
         }
         bad |= f << 5;
     }
