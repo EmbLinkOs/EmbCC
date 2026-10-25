@@ -586,6 +586,9 @@ static void memory(void)
             unsigned pm = (masks[k] & ~0x4000u) |
                           (masks[k] & 0x4000u ? 0x8000u : 0);
             I("a32_pop", t_pop(&C, pm), "ldm sp!, %s", rlist(pm));
+            /* an exception handler's return: pc always, and the S bit */
+            I("a32_pop_exc", a32_pop_exc(&C, pm), "ldm sp!, %s^",
+              rlist((pm & 0x5fffu) | 0x8000u));
         }
         int at = t_push(&C, 0x4010);
         t_patch_push(&C, at, 0x4ff0);
