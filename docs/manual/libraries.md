@@ -84,7 +84,9 @@ The driver looks for a target's files relative to its own executable:
 In a build tree the directory is `build/libc/x86_64` for `x86_64-elf`
 and `x86_64-emblink`, `build/libc/aarch64` for `aarch64-elf`,
 `build/libc/linux-x86_64` and `build/libc/linux-aarch64` for the Linux
-triples, and `build/libc/TRIPLE` for every other triple. `libcxx.a` is
+triples, `build/libc/darwin-aarch64` and `build/libc/darwin-x86_64` for
+macOS (`make rt-darwin-aarch64 rt-darwin-x86_64`), and
+`build/libc/TRIPLE` for every other triple. `libcxx.a` is
 under `build/libcxx/` in the same scheme. An installation has one
 directory per canonical triple and none for `x86_64-emblink`. The search
 for the installation itself, and `EMBCC_PREFIX`, are described in
@@ -473,6 +475,7 @@ not apply.
 | `int128.c` | `__multi3` `__divti3` `__udivti3` `__modti3` `__umodti3` `__ashlti3` `__ashrti3` `__lshrti3` `__negti2` | targets with `__int128` (not RV64) |
 | `fp128.c` | conversions between 128-bit integers and `float`/`double`: `__floattidf` `__floatuntidf` `__floattisf` `__floatuntisf` `__fixdfti` `__fixunsdfti` `__fixsfti` `__fixunssfti` | as `int128.c` |
 | `complex.c` | `__mulsc3` `__muldc3` `__divsc3` `__divdc3` | every target |
+| `powi.c` | `__powisf2` `__powidf2`, and `__powixf2` (x87) or `__powitf2` (binary128) where `long double` is wider than `double`: `__builtin_powi` and kin | every target |
 | `ldouble.c` | x86-64: the x87 `long double` conversions `__floattixf` `__floatuntixf` `__fixxfti` `__fixunsxfti` and `__mulxc3` `__divxc3`; AArch64: `__multc3` `__divtc3` | x86-64, AArch64 |
 | `softtf.c` | IEEE binary128 in software, AArch64's `long double`: `__addtf3` `__subtf3` `__multf3` `__divtf3` `__negtf2`, the comparisons `__eqtf2` ... `__unordtf2`, and the conversions `__extenddftf2` `__trunctfdf2` `__floatsitf` `__fixtfdi` ... | AArch64 |
 | `softfp.c` | binary32 and binary64 in software: `__addsf3` `__subsf3` `__mulsf3` `__divsf3` `__negsf2` and the `df` forms, comparisons (`__eqsf2` `__nesf2` `__ltsf2` `__lesf2` `__gtsf2` `__gesf2` `__unordsf2` and `df`), conversions to and from 32- and 64-bit integers, `__extendsfdf2`, `__truncdfsf2` | Cortex-M (all variants; built for the Cortex-M7's double-precision unit, only the eight conversions to and from 64-bit integers, `__fixdfdi` ... `__floatundisf`), RISC-V |
@@ -513,6 +516,7 @@ The same kind of note is given for the conversion routines (`__fix*`,
 | `thumbv7m-none-eabi`, `thumbv7em-none-eabi`, `thumbv7em-none-eabihf`, `thumbv8m.main-none-eabi`, `thumbv8m.main-none-eabihf`, `riscv32-unknown-elf` | yes | `int64.c`, `softfp.c`, `complex.c` |
 | `thumbv6m-none-eabi` | yes | `armv6m.c` (the `__aeabi_*` divide, multiply, shift and block routines, and the `__atomic_*` calls), `int64.c`, `softfp.c`, `complex.c` |
 | `avr` | yes | `avr.c`, `avr64.c`, `avrfp*.c`, `complex.c` |
+| `aarch64-apple-darwin`, `x86_64-apple-darwin` | yes | `int128.c`, `fp128.c`, `complex.c`, `powi.c`, `ldouble.c` (x86-64), linked after libSystem: the routines it does not export -- `__divdc3` and `__divsc3`, the 128-bit shifts and `__multi3` -- which clang takes from its own `libclang_rt.osx.a`. The archive is in the BSD format Apple's linker reads, as `embar` writes for Mach-O members |
 | `x86_64-elf`, `aarch64-elf` | no | these link libgcc |
 | `riscv64-unknown-elf` | no | `int128.c` and `fp128.c` do not compile there; compile `softfp.c` and `complex.c` by hand |
 

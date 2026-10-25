@@ -1934,9 +1934,15 @@ static int darwin_link(const char *in, const char *exe)
         }
     }
     if (!g_nostdlib && !g_nodefaultlibs) {
+        static char librt[1100];
         if (g_link_cxx || (in && lang_cxx))
             argv[n++] = "-lc++";
         argv[n++] = "-lSystem";
+        /* EmbCC's compiler runtime, after the system: the routines its
+         * code calls that libSystem has not got -- __divdc3, the 128-bit
+         * shifts and multiply (make rt-darwin-*) */
+        if (paths_target_file(lib_triple(), "librt.a", librt, sizeof librt))
+            argv[n++] = librt;
     }
     argv[n] = NULL;
     if (plat_getenv("EMBCC_SHOW_LINK")) {
@@ -3722,6 +3728,8 @@ static int compile_unit(const char *in, const char *out, int pp_only)
             ta == TARGET_AARCH64 ? CPU_TYPE_ARM64 : CPU_TYPE_X86_64,
             ta == TARGET_AARCH64 ? CPU_SUBTYPE_ARM64_ALL
                                  : CPU_SUBTYPE_X86_64_ALL);
+        if (g_macos_min)
+            machow_set_min_os(mw, g_macos_min);
 
         /* ---- 1. the bytes, before any section is handed over ---------
          *

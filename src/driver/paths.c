@@ -204,6 +204,8 @@ int paths_target_file(const char *triple, const char *name,
         const char *dir =
             strncmp(triple, "x86_64-linux", 12) == 0 ? "linux-x86_64"
             : strncmp(triple, "aarch64-linux", 13) == 0 ? "linux-aarch64"
+            : strncmp(triple, "x86_64-apple", 12) == 0 ? "darwin-x86_64"
+            : strncmp(triple, "aarch64-apple", 13) == 0 ? "darwin-aarch64"
             : strncmp(triple, "aarch64", 7) == 0 ? "aarch64"
             : strncmp(triple, "x86_64", 6) == 0 ? "x86_64"
             : triple;

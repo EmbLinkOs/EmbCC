@@ -123,7 +123,7 @@ What each binutils name does:
 
 | Name | Program | What it takes |
 |---|---|---|
-| `-ar` | `embar` | `r`, `q`, `c`, `s`, `t`, `x`, `d` (and `D`, `u`, `v`, `o`, which change nothing: the output is always deterministic) |
+| `-ar` | `embar` | `r`, `q`, `c`, `s`, `t`, `x`, `d` (and `D`, `u`, `v`, `o`, which change nothing: the output is always deterministic). ELF members are archived in the System V / GNU format; Mach-O members in the BSD format with a `__.SYMDEF` table, which is what Apple's linker reads |
 | `-ranlib` | `embar` | `ranlib ARCHIVE...`: each archive's symbol index, written again |
 | `-objcopy` | `embpack` | `-O binary`, `-O ihex`, `-O srec`, `-R SECTION`, `-j SECTION` (both with `*` and `?` patterns), `--gap-fill BYTE`, `--pad-to ADDRESS`, `-I elf...`. `-S`, `-g` and `--strip-*` are accepted and change nothing in an image. |
 | `-size` | `embmap` | Berkeley (the default, `-B`) and SysV (`-A`) tables, `-d`, `-o`, `-x`, `-t` |

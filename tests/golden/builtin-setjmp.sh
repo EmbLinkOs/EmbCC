@@ -52,7 +52,7 @@ llvm-nm "$out/c-aarch64-apple-darwin.o" | grep -q ' U __longjmp$' ||
     fail "darwin: not a call to the system's _setjmp and _longjmp"
 n=0
 for a in build/libc/*/librt.a; do
-    case $a in */linux-*|*/x86_64/*|*/aarch64/*) continue ;; esac
+    case $a in */linux-*|*/darwin-*|*/x86_64/*|*/aarch64/*) continue ;; esac
     # (RX's names carry its underscore, as its C names do)
     llvm-nm "$a" 2>/dev/null | grep -qE ' T _?__embcc_setjmp$' &&
     llvm-nm "$a" 2>/dev/null | grep -qE ' T _?__embcc_longjmp$' ||

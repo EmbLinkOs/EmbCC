@@ -25,6 +25,12 @@ struct machow;
 struct machow *machow_new(int cputype, int cpusubtype);
 void machow_free(struct machow *w);
 
+/* The oldest macOS the object is for, "MAJOR[.MINOR[.PATCH]]" (what
+ * -mmacosx-version-min= says), recorded in its LC_BUILD_VERSION; without
+ * it, 11.0 for arm64 and 10.13 for x86-64 -- the version the driver hands
+ * ld64, which warns when an object asks for a newer one than the link. */
+void machow_set_min_os(struct machow *w, const char *version);
+
 /* Returns the section index, 1-based as a symbol's n_sect wants it.
  * `align` is the alignment as a power of two, given as the EXPONENT
  * (4 means 16 bytes) — the field is stored that way and converting at

@@ -398,9 +398,10 @@ $(EMBDBG_CORE): tools/embdbg/embdbg.c tools/embdbg/embdbg_core.h
 # ...every target's of the families TARGETS builds: the hosted libraries of
 # x86 and AArch64 when they are built, and the embedded runtimes, whose
 # loops below run over the built families' triples (FAMILY_RT_*).
-RUNTIMES_x86 := libc-x86_64 libcxx-x86_64 libc-linux-x86_64 libcxx-linux-x86_64
+RUNTIMES_x86 := libc-x86_64 libcxx-x86_64 libc-linux-x86_64 libcxx-linux-x86_64 \
+                rt-darwin-x86_64
 RUNTIMES_aarch64 := libc-aarch64 libcxx-aarch64 libc-linux-aarch64 \
-                    libcxx-linux-aarch64
+                    libcxx-linux-aarch64 rt-darwin-aarch64
 RUNTIMES := $(foreach f,x86 aarch64,$(if $(call built,$(f)),$(RUNTIMES_$(f)))) \
             rt-embedded libc-embedded libcxx-embedded
 .PHONY: toolchain runtimes
@@ -825,6 +826,19 @@ libc-aarch64: embcc embar
 	@EMBCC=./embcc sh tools/build-rt.sh aarch64-elf $(BUILD)/libc/aarch64 > /dev/null
 	@echo "rt: $(BUILD)/libc/aarch64/librt.a"
 
+# EmbCC's compiler runtime for macOS (lib/rt, as Mach-O): the routines its
+# code calls that libSystem does not export -- __divdc3 for a complex
+# division, the 128-bit shifts and multiply, __muloti4 -- which clang takes
+# from its own libclang_rt.osx.a. The driver links it after -lSystem, so
+# what the system has comes from the system.
+rt-darwin-aarch64: embcc embar
+	@EMBCC=./embcc sh tools/build-rt.sh aarch64-apple-darwin $(BUILD)/libc/darwin-aarch64 > /dev/null
+	@echo "rt: $(BUILD)/libc/darwin-aarch64/librt.a"
+
+rt-darwin-x86_64: embcc embar
+	@EMBCC=./embcc sh tools/build-rt.sh x86_64-apple-darwin $(BUILD)/libc/darwin-x86_64 > /dev/null
+	@echo "rt: $(BUILD)/libc/darwin-x86_64/librt.a"
+
 # EmbLinkOS is a backend, not a second library: same sources, one different
 # file at the bottom. It needs that OS's ABI headers, so it is opt-in.
 #   make libc-emblinkos EMBLINKOS=$HOME/EmbLinkOs
@@ -1024,8 +1038,10 @@ install: toolchain
 
 # The hosted triples' directories and where the build put them; the
 # embedded ones are RT_EMBEDDED's, each in a directory of its own name.
-INSTALL_PAIRS_x86 := "x86_64-elf:x86_64" "x86_64-linux-gnu:linux-x86_64"
-INSTALL_PAIRS_aarch64 := "aarch64-elf:aarch64" "aarch64-linux-gnu:linux-aarch64"
+INSTALL_PAIRS_x86 := "x86_64-elf:x86_64" "x86_64-linux-gnu:linux-x86_64" \
+                     "x86_64-apple-darwin:darwin-x86_64"
+INSTALL_PAIRS_aarch64 := "aarch64-elf:aarch64" "aarch64-linux-gnu:linux-aarch64" \
+                         "aarch64-apple-darwin:darwin-aarch64"
 install-files:
 	@echo "installing EmbCC $(VERSION) into $(DESTDIR)$(PREFIX)"
 	@mkdir -p $(DESTDIR)$(PREFIX)/bin
