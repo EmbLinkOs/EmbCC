@@ -1388,10 +1388,6 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
                            target_get() == TARGET_COLDFIRE) &&
                          !(attr_is(name, "keep_interrupts_masked") &&
                            target_is_mips()) &&
-                         !(attr_is(name, "naked") &&
-                           target_get() != TARGET_X86_64 &&
-                           target_get() != TARGET_AARCH64) &&
-                           target_get() == TARGET_MIPS32) &&
                          !(attr_is(name, "naked") && target_asm_blocks()) &&
                          !((attr_is(name, "interrupt") ||
                             attr_is(name, "signal")) &&

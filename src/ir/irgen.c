@@ -6287,10 +6287,9 @@ static void gen_func(struct ir_func *fn, struct func *f)
             fn->var_scope_hi[i] = 0x7fffffff;   /* whole function until stamped */
         }
     }
-    g_nlabels_used = 0;                 /* labels are per-function */
+    labels_reset();                     /* labels are per-function */
     for (int k = 0; k < g_nhbits; k++)  /* and vregs (half_widen) */
         g_hbits[k] = -1;
-    labels_reset();                     /* labels are per-function */
     g_nvla = 0;
     /* a _BitInt parameter as its caller's ABI leaves it: the bits above
      * N unspecified (emit_call has the same for a result) */

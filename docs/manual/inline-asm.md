@@ -723,7 +723,6 @@ These are refused, because a naked function has no frame for them:
 | any other statement | `naked function 'f' holds a statement that is not an asm or a call with no arguments; with no prologue there is no frame for it to run in` |
 | an operand that is not a constant | `operand 0 of the asm in naked function 'f' is not a constant ("i"); a naked function has no frame to load one from` |
 | an output operand | `the asm in naked function 'f' has an output; a naked function has no frame to put it in` |
-| a `section` attribute | `naked function 'f' in section '.ramfunc' is not supported yet: its body is assembled into .text` |
 | x86-64 and Apple arm64 | `__attribute__((naked)) is not supported: on this target the body could only be assembled by the file-scope assembler's few instructions; it is supported on every target but x86-64 and AArch64 for Darwin or Windows` |
 
 `tests/golden/freertos-cm3.sh` builds the FreeRTOS kernel and its GCC

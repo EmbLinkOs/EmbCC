@@ -2138,11 +2138,6 @@ static void gen_x87(struct code *text, const int *sd, struct ir_ins *i)
  * is `%9 = call g` then `ret %9` with g's u32 returned as a float, and a
  * jump left it in eax where the caller read xmm0 (lib/rt/half.c's
  * __truncdfhf2 at -Os, every double-to-_Float16 conversion wrong). */
- * What is NOT a condition: the return TYPE. The callee leaves its value
- * exactly where this function would have left it -- rax, xmm0, st0 --
- * because they return the same type. That is the whole point of the
- * transform, and it is why the IR_RET that follows is skipped rather
- * than emitted. */
 /* What tail_call_ok asks of the whole function -- an address of the
  * frame, an alloca, a computed goto -- asked once by gen_func, not at
  * every call: 20,000 calls took 6 s, each a scan of the function. */
