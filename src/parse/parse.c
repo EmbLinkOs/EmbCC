@@ -764,7 +764,7 @@ static const struct attr_entry attr_table[] = {
       "the handler would return with an ordinary return instead of the "
       "interrupt return the CPU needs, and without saving the registers "
       "(on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, "
-      "MIPS32, RX and ColdFire it is implemented)" },
+      "MIPS, RX and ColdFire it is implemented)" },
     /* GCC's m68k spelling of the same thing, honoured on ColdFire (the
      * dispatch below); interrupt_thread is the Fido's, whose threads
      * switch register banks this target does not have. */
@@ -784,11 +784,11 @@ static const struct attr_entry attr_table[] = {
     /* GCC's MIPS interrupt modifiers. keep_interrupts_masked is the one
      * whose meaning is a matter of two bits of the Status word the
      * prologue writes anyway (IE cleared with EXL, and no IPL), so MIPS32
-     * honours it; the other two change where the handler's registers or
-     * its return come from, and are refused there too. */
+     * and MIPS64 honour it; the other two change where the handler's
+     * registers or its return come from, and are refused there too. */
     { "keep_interrupts_masked", ATTR_REFUSED,
-      "it modifies a MIPS interrupt handler, and only the MIPS32 target "
-      "implements those" },
+      "it modifies a MIPS interrupt handler, and only the MIPS targets "
+      "implement those" },
     { "use_shadow_register_set", ATTR_REFUSED,
       "EmbCC does not switch register sets: the handler would save into "
       "and run on a shadow set's stack pointer it never read with rdpgpr" },
@@ -1021,12 +1021,12 @@ static int isr_kind(struct parser *ps, int line, const char *arg,
     /* a number, or anything not a string: read as no argument, it made
      * `interrupt(5)` the default handler without a word */
     if (has_args && !arg && (a == TARGET_RISCV32 || a == TARGET_RISCV64 ||
-                             a == TARGET_MIPS32))
+                             target_is_mips()))
         parse_error_line(ps, line,
             "interrupt's argument is a string on %s: %s",
-            a == TARGET_MIPS32 ? "MIPS" : "RISC-V",
-            a == TARGET_MIPS32 ? "\"eic\" or \"vector=sw0\" .. \"vector=hw5\""
-                               : "\"machine\" or \"supervisor\"");
+            target_is_mips() ? "MIPS" : "RISC-V",
+            target_is_mips() ? "\"eic\" or \"vector=sw0\" .. \"vector=hw5\""
+                             : "\"machine\" or \"supervisor\"");
     if (a == TARGET_RISCV32 || a == TARGET_RISCV64) {
         if (!arg || !strcmp(arg, "machine"))
             return ISR_INTERRUPT;
@@ -1042,7 +1042,7 @@ static int isr_kind(struct parser *ps, int line, const char *arg,
             "interrupt wants \"machine\" or \"supervisor\" on RISC-V, "
             "not \"%s\"", arg);
     }
-    if (a == TARGET_MIPS32) {
+    if (target_is_mips()) {
         static const char *const vec[8] = { "sw0", "sw1", "hw0", "hw1",
                                             "hw2", "hw3", "hw4", "hw5" };
         if (!arg || !strcmp(arg, "eic"))
@@ -1282,12 +1282,13 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
                            (target_get() == TARGET_RISCV32 ||
                             target_get() == TARGET_RISCV64 ||
                             target_get() == TARGET_MIPS32 ||
+                            target_get() == TARGET_MIPS64 ||
                             target_get() == TARGET_RX ||
                             target_get() == TARGET_COLDFIRE)) &&
                          !(attr_is(name, "interrupt_handler") &&
                            target_get() == TARGET_COLDFIRE) &&
                          !(attr_is(name, "keep_interrupts_masked") &&
-                           target_get() == TARGET_MIPS32) &&
+                           target_is_mips()) &&
                          !(attr_is(name, "naked") &&
                            target_get() != TARGET_X86_64 &&
                            target_get() != TARGET_AARCH64) &&

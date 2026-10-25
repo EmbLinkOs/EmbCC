@@ -140,18 +140,22 @@ static long long xp_prim(struct xp *x)
         base = 16;
         x->p += 2;
     }
+    /* up to 64 bits (a MIPS64 dli's), refused past them: it stopped at
+     * 47, and no doubleword constant could be written */
+    unsigned long long u = 0;
     while (x->p < x->e) {
         int d;
         if (isdigit((unsigned char)*x->p)) d = *x->p - '0';
         else if (base == 16 && isxdigit((unsigned char)*x->p))
             d = tolower((unsigned char)*x->p) - 'a' + 10;
         else break;
-        if (v > 0x7fffffffffffLL) { x->bad = 1; return 0; }
-        v = v * base + d;
+        if (u > (~0ULL - (unsigned)d) / (unsigned)base) { x->bad = 1; return 0; }
+        u = u * (unsigned)base + (unsigned)d;
         x->p++;
         any = 1;
     }
     if (!any) x->bad = 1;
+    v = (long long)u;
     return v;
 }
 
@@ -463,9 +467,187 @@ static int set_option(const struct tok *o, char *err, int errlen)
     for (int k = 0; ok[k]; k++)
         if (tok_is(o, ok[k]))
             return 0;
+    if (mips_is_64() && (tok_is(o, "mips64r2") || tok_is(o, "mips64") ||
+                         tok_is(o, "arch=mips64r2")))
+        return 0;                   /* what a MIPS64 target emits anyway */
     FAIL(".set %.*s is not supported: this assembler emits MIPS32r2 "
          "(no MIPS16, microMIPS, Release 6, 64-bit or floating-point "
          "instructions)", o->len, o->s);
+}
+
+/* MIPS64r2's doubleword forms, on the MIPS64 targets only: the
+ * arithmetic, the shifts (0..63, and the *32 spellings 0..31), the
+ * multiplies and divides, the bit fields, the byte and halfword swaps,
+ * CP0's doubleword moves, the doubleword and unsigned-word memory forms,
+ * and dli. Each is one encoder call (src/arch/mips/emit.c, refereed by
+ * mips64-encoding.sh), and mipsasm_vocabulary lists them for llvm-mc.
+ * 1 when the statement is none of these, else what stmt_body returns. */
+static const struct r3_ent r3_64[] = {
+    { "daddu", MIPS_DADDU }, { "dsubu", MIPS_DSUBU },
+    { "dsllv", MIPS_DSLLV }, { "dsrlv", MIPS_DSRLV },
+    { "dsrav", MIPS_DSRAV }, { "drotrv", MIPS_DROTRV },
+    { NULL, 0 }
+};
+static const struct sh_ent sh_64[] = {
+    { "dsll", MIPS_DSLL }, { "dsrl", MIPS_DSRL }, { "dsra", MIPS_DSRA },
+    { "drotr", MIPS_DROTR },
+    { NULL, 0 }
+};
+static const struct ls_ent ls_64[] = {     /* kind: as ls_tab's, and 8 lld,
+                                            * 9 scd, 10-13 ldl ldr sdl sdr */
+    { "lwu", 0, 4, 0 }, { "lld", 8, 8, 0 }, { "scd", 9, 8, 0 },
+    { "ldl", 10, 8, 0 }, { "ldr", 11, 8, 0 }, { "sdl", 12, 8, 0 },
+    { "sdr", 13, 8, 0 },
+    { NULL, 0, 0, 0 }
+};
+
+static int is_mips64_name(const struct tok *t)
+{
+    static const char *const other[] = {
+        "dmult", "dmultu", "ddiv", "ddivu", "dext", "dins", "dsbh", "dshd",
+        "dclz", "dclo", "dmfc0", "dmtc0", "dli", NULL
+    };
+    for (const struct r3_ent *e = r3_64; e->name; e++)
+        if (tok_is(t, e->name))
+            return 1;
+    for (const struct sh_ent *e = sh_64; e->name; e++) {
+        char n32[16];
+        snprintf(n32, sizeof n32, "%s32", e->name);
+        if (tok_is(t, e->name) || tok_is(t, n32))
+            return 1;
+    }
+    for (const struct ls_ent *e = ls_64; e->name; e++)
+        if (tok_is(t, e->name))
+            return 1;
+    for (int k = 0; other[k]; k++)
+        if (tok_is(t, other[k]))
+            return 1;
+    return 0;
+}
+
+static int mips64_form(const struct tok *t, int n, struct code *out,
+                       char *err, int errlen)
+{
+    long long v;
+    if (!is_mips64_name(&t[0]))
+        return 1;
+    if (!mips_is_64())
+        FAIL("%.*s is a MIPS64 instruction", t[0].len, t[0].s);
+    for (const struct r3_ent *e = r3_64; e->name; e++) {
+        int d, a, b;
+        if (!tok_is(&t[0], e->name))
+            continue;
+        if (n != 4) FAIL("%s takes three registers", e->name);
+        d = tok_reg(&t[1]); a = tok_reg(&t[2]); b = tok_reg(&t[3]);
+        if (d < 0 || a < 0 || b < 0) FAIL("%s wants registers", e->name);
+        mips_alu(out, e->op, d, a, b);
+        return 0;
+    }
+    for (const struct sh_ent *e = sh_64; e->name; e++) {
+        char n32[16];
+        int d, a, hi;
+        snprintf(n32, sizeof n32, "%s32", e->name);
+        hi = tok_is(&t[0], n32);
+        if (!hi && !tok_is(&t[0], e->name))
+            continue;
+        if (n != 4) FAIL("%.*s takes two registers and an amount",
+                         t[0].len, t[0].s);
+        d = tok_reg(&t[1]); a = tok_reg(&t[2]);
+        if (d < 0 || a < 0 || !tok_imm(&t[3], &v) || v < 0 ||
+            v > (hi ? 31 : 63))
+            FAIL("%.*s wants two registers and an amount 0..%d",
+                 t[0].len, t[0].s, hi ? 31 : 63);
+        mips_shift_imm(out, e->op, d, a, (int)(hi ? v + 32 : v));
+        return 0;
+    }
+    for (const struct ls_ent *e = ls_64; e->name; e++) {
+        int r, base;
+        long long off;
+        if (!tok_is(&t[0], e->name))
+            continue;
+        if (n != 3) FAIL("%s takes a register and an address", e->name);
+        r = tok_reg(&t[1]);
+        if (r < 0) FAIL("\"%.*s\" is not a register", t[1].len, t[1].s);
+        if (!tok_mem(&t[2], &base, &off))
+            FAIL("\"%.*s\" is not an `off(reg)` address", t[2].len, t[2].s);
+        if (!mips_fits16(off, 1))
+            FAIL("%s offset %lld does not fit a signed 16-bit field",
+                 e->name, off);
+        switch (e->kind) {
+        case 0:  mips_lwu(out, r, base, (int)off); break;
+        case 8:  mips_lld(out, r, base, (int)off); break;
+        case 9:  mips_scd(out, r, base, (int)off); break;
+        case 10: mips_ldl(out, r, base, (int)off); break;
+        case 11: mips_ldr(out, r, base, (int)off); break;
+        case 12: mips_sdl(out, r, base, (int)off); break;
+        default: mips_sdr(out, r, base, (int)off); break;
+        }
+        return 0;
+    }
+    if (tok_is(&t[0], "dmult") || tok_is(&t[0], "dmultu") ||
+        tok_is(&t[0], "ddiv") || tok_is(&t[0], "ddivu")) {
+        int op = tok_is(&t[0], "dmult") ? MIPS_DMULT
+               : tok_is(&t[0], "dmultu") ? MIPS_DMULTU
+               : tok_is(&t[0], "ddiv") ? MIPS_DDIV : MIPS_DDIVU;
+        int a, b, k = 1;
+        /* as div: `ddiv $zero, a, b` is the instruction, the two- and
+         * three-register forms the trapping macro */
+        if (op == MIPS_DDIV || op == MIPS_DDIVU) {
+            if (n != 4 || tok_reg(&t[1]) != MIPS_ZERO)
+                FAIL("this %.*s is an assembler macro (it adds a "
+                     "divide-by-zero trap); write %.*s $zero, rs, rt and "
+                     "read the quotient with mflo", t[0].len, t[0].s,
+                     t[0].len, t[0].s);
+            k = 2;
+        } else if (n != 3) {
+            FAIL("%.*s takes two registers", t[0].len, t[0].s);
+        }
+        a = tok_reg(&t[k]); b = tok_reg(&t[k + 1]);
+        if (a < 0 || b < 0) FAIL("%.*s wants registers", t[0].len, t[0].s);
+        mips_muldiv(out, op, a, b);
+        return 0;
+    }
+    if (n == 5 && (tok_is(&t[0], "dext") || tok_is(&t[0], "dins"))) {
+        int d = tok_reg(&t[1]), s = tok_reg(&t[2]);
+        long long pos, size;
+        if (d < 0 || s < 0 || !tok_imm(&t[3], &pos) || !tok_imm(&t[4], &size) ||
+            pos < 0 || pos > 63 || size < 1 || pos + size > 64)
+            FAIL("%.*s wants two registers, a position and a size within "
+                 "the doubleword", t[0].len, t[0].s);
+        if (tok_is(&t[0], "dext")) mips_dext(out, d, s, (int)pos, (int)size);
+        else                       mips_dins(out, d, s, (int)pos, (int)size);
+        return 0;
+    }
+    if (n == 3 && (tok_is(&t[0], "dsbh") || tok_is(&t[0], "dshd") ||
+                   tok_is(&t[0], "dclz") || tok_is(&t[0], "dclo"))) {
+        int d = tok_reg(&t[1]), s = tok_reg(&t[2]);
+        if (d < 0 || s < 0) FAIL("%.*s wants two registers", t[0].len, t[0].s);
+        if (tok_is(&t[0], "dsbh")) mips_dsbh(out, d, s);
+        else if (tok_is(&t[0], "dshd")) mips_dshd(out, d, s);
+        else if (tok_is(&t[0], "dclz")) mips_dclz(out, d, s);
+        else mips_dclo(out, d, s);
+        return 0;
+    }
+    if ((tok_is(&t[0], "dmfc0") || tok_is(&t[0], "dmtc0")) &&
+        (n == 3 || n == 4)) {
+        int r = tok_reg(&t[1]), c0 = tok_reg(&t[2]);
+        long long sel = 0;
+        if (r < 0 || c0 < 0 || (n == 4 && (!tok_imm(&t[3], &sel) ||
+                                           sel < 0 || sel > 7)))
+            FAIL("%.*s wants a register, a coprocessor 0 register and a "
+                 "select 0..7", t[0].len, t[0].s);
+        if (tok_is(&t[0], "dmfc0")) mips_dmfc0(out, r, c0, (int)sel);
+        else                        mips_dmtc0(out, r, c0, (int)sel);
+        return 0;
+    }
+    if (tok_is(&t[0], "dli") && n == 3) {
+        int d = tok_reg(&t[1]);
+        if (d < 0 || !tok_imm(&t[2], &v))
+            FAIL("dli wants a register and a constant");
+        mips_li64(out, d, v);
+        return 0;
+    }
+    FAIL("%.*s takes other operands", t[0].len, t[0].s);
 }
 
 static int stmt_body(const char *stmt, int len, struct code *out,
@@ -581,6 +763,11 @@ static int stmt_body(const char *stmt, int len, struct code *out,
                  v);
         mips_alu_imm(out, MIPS_DADDIU, d, a, v);
         return 0;
+    }
+    {
+        int r64 = mips64_form(t, n, out, err, errlen);
+        if (r64 != 1)
+            return r64;
     }
     for (const struct ri_ent *e = ri_tab; e->name; e++) {
         int d, a;
@@ -1186,8 +1373,41 @@ int mipsasm_symform(const char *stmt, struct asm_symform *f)
 
 /* ---- the referee's input -------------------------------------------------- */
 
+/* MIPS64r2's doubleword forms (mips64_form), from its own tables, in
+ * the n64 names a MIPS64 target's registers have ($a4-$a7 where o32 has
+ * $t0-$t3); the MIPS32 forms are refereed in the 32-bit vocabulary. */
+static void vocabulary64(FILE *f)
+{
+    for (const struct r3_ent *e = r3_64; e->name; e++)
+        fprintf(f, "\t%s $v0, $a1, $t3\n\t%s $s8, $zero, $31\n",
+                e->name, e->name);
+    for (const struct sh_ent *e = sh_64; e->name; e++)
+        fprintf(f, "\t%s $a0, $t3, 0\n\t%s $a0, $t3, 31\n\t%s $k0, $gp, 63\n"
+                   "\t%s32 $a0, $t3, 0\n\t%s32 $s1, $v1, 31\n",
+                e->name, e->name, e->name, e->name, e->name);
+    for (const struct ls_ent *e = ls_64; e->name; e++)
+        fprintf(f, "\t%s $a2, -4($sp)\n\t%s $t8, 32767($a1)\n",
+                e->name, e->name);
+    fprintf(f, "\tdmult $a0, $a1\n\tdmultu $t8, $t9\n\tddiv $zero, $s0, $s1\n");
+    fprintf(f, "\tddivu $zero, $v0, $v1\n");
+    fprintf(f, "\tdext $a0, $a1, 0, 32\n\tdext $t0, $t1, 0, 33\n"
+               "\tdext $t0, $t1, 31, 33\n\tdext $s0, $s1, 32, 32\n"
+               "\tdext $s0, $s1, 63, 1\n");
+    fprintf(f, "\tdins $a0, $a1, 0, 32\n\tdins $t0, $t1, 0, 33\n"
+               "\tdins $t0, $t1, 31, 33\n\tdins $s0, $s1, 32, 32\n"
+               "\tdins $s0, $s1, 63, 1\n");
+    fprintf(f, "\tdsbh $t2, $t3\n\tdshd $a0, $a3\n\tdclz $v0, $s7\n"
+               "\tdclo $t0, $t1\n");
+    fprintf(f, "\tdmfc0 $t0, $14\n\tdmfc0 $a0, $15, 1\n\tdmtc0 $t1, $14, 0\n"
+               "\tdmtc0 $zero, $30, 7\n");
+}
+
 void mipsasm_vocabulary(FILE *f)
 {
+    if (mips_is_64()) {
+        vocabulary64(f);
+        return;
+    }
     fprintf(f, "\tnop\n\tehb\n\teret\n\twait\n\tsyscall\n\tbreak\n");
     fprintf(f, "\tbreak 3\n\tsync\n\tsync 4\n\tdi\n\tei\n\tdi $t0\n\tei $a1\n");
     fprintf(f, "\tmove $a0, $t9\n\tli $v0, -32768\n\tli $v1, 65535\n");

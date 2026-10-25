@@ -166,10 +166,13 @@ static __attribute__((noinline)) unsigned churn(unsigned n)
     return a ^ b ^ c ^ d ^ e ^ f ^ g ^ h ^ i ^ j ^ k ^ l;
 }
 
-/* lui k0, %hi(h) ; ori k0, k0, %lo(h) ; jr k0 ; nop -- at a vector */
-static void install(unsigned long at, void (*h)(void))
+/* lui k0, %hi(h) ; ori k0, k0, %lo(h) ; jr k0 ; nop -- at a vector. The
+ * address is KSEG0's, sign-extended: on MIPS64 that is the n64 view of
+ * the same window (0xffffffff80000180), and lui sign-extends the handler's
+ * address the same way. */
+static void install(unsigned at, void (*h)(void))
 {
-    volatile unsigned *v = (volatile unsigned *)at;
+    volatile unsigned *v = (volatile unsigned *)(long)(int)at;
     unsigned a = (unsigned)(unsigned long)h;
     v[0] = 0x3c1a0000u | (a >> 16);
     v[1] = 0x375a0000u | (a & 0xffffu);

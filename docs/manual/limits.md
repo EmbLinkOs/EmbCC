@@ -202,12 +202,12 @@ Refused on 25 of the 25 targets.
 
 ## `__attribute__((interrupt))`
 
-Refused on 13 of the 25 targets.
+Refused on 11 of the 25 targets.
 
-- Refused on `armv7a-none-eabi`, `mips64el-none-elf`, `mips64-none-elf`, `loongarch64-unknown-elf`, `xtensa-none-elf`, `tricore-none-elf`, `powerpc-none-eabi`, `sparc-none-elf`, `x86_64-elf`, `aarch64-elf`, `x86_64-linux-gnu`, `aarch64-apple-darwin`, `x86_64-windows-gnu`:
+- Refused on `armv7a-none-eabi`, `loongarch64-unknown-elf`, `xtensa-none-elf`, `tricore-none-elf`, `powerpc-none-eabi`, `sparc-none-elf`, `x86_64-elf`, `aarch64-elf`, `x86_64-linux-gnu`, `aarch64-apple-darwin`, `x86_64-windows-gnu`:
 
   ```text
-  __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS32, RX and ColdFire it is implemented)
+  __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS, RX and ColdFire it is implemented)
   ```
 
 ## `__attribute__((naked))`
@@ -445,8 +445,8 @@ Refused on 21 of the 25 targets.
 | `avr` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | yes | yes | yes | yes | yes | no | no | no |
 | `mipsel-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
 | `mips-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
-| `mips64el-none-elf` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | no | yes | yes | yes | yes | no | yes | no |
-| `mips64-none-elf` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | no | yes | yes | yes | yes | no | yes | no |
+| `mips64el-none-elf` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
+| `mips64-none-elf` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
 | `loongarch64-unknown-elf` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | no | yes | yes | yes | yes | no | yes | no |
 | `xtensa-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | no | yes | yes | yes | yes | no | yes | no |
 | `tricore-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | no | yes | yes | yes | yes | no | yes | no |

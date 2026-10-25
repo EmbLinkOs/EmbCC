@@ -441,7 +441,7 @@ embcc: attr.c:1: warning: attribute 'frobnicate' is not one EmbCC knows, and is 
 | `warn_unused_result`, `[[nodiscard]]` | Discarding the result warns under [`--warn=unused-result`](diagnostics.md#--warnunused-result), on by default |
 | `weak` | On a definition, the symbol is weak and another definition overrides it at link time. On a declaration, the reference is weak: the function's address is null if no definition is linked. `weak` on any declaration of a function makes it weak |
 | `interrupt`, `signal` | Interrupt handlers. See [Interrupt handlers](#interrupt-handlers) |
-| `keep_interrupts_masked` | MIPS32 only, with `interrupt`: interrupts stay disabled in the handler. See [Interrupt handlers](#interrupt-handlers) |
+| `keep_interrupts_masked` | MIPS32 and MIPS64, with `interrupt`: interrupts stay disabled in the handler. See [Interrupt handlers](#interrupt-handlers) |
 
 `constructor(N)` and `destructor(N)` take a priority, as in GCC. The
 address goes in a section of its own, `.init_array.NNNNN` or
@@ -680,10 +680,10 @@ supported: REASON`:
 |---|---|
 | `cleanup` | `the cleanup function would never run` |
 | `ifunc` | `the resolver would never run and calls would go to it rather than to the implementation it picks` |
-| `interrupt` | On every target but Cortex-M, AVR, RISC-V, MIPS32, RX and ColdFire; see [Interrupt handlers](#interrupt-handlers) |
+| `interrupt` | On every target but Cortex-M, AVR, RISC-V, MIPS, RX and ColdFire; see [Interrupt handlers](#interrupt-handlers) |
 | `interrupt_handler` | `it is the m68k port's interrupt handler, implemented on the ColdFire target only` (on every target but ColdFire) |
 | `interrupt_thread` | `it makes a Fido interrupt thread, which switches register banks a ColdFire does not have; use __attribute__((interrupt))` |
-| `keep_interrupts_masked` | `it modifies a MIPS interrupt handler, and only the MIPS32 target implements those` (on every target but MIPS32) |
+| `keep_interrupts_masked` | `it modifies a MIPS interrupt handler, and only the MIPS targets implement those` (on every target but MIPS32 and MIPS64) |
 | `ms_abi` | `the arguments would be passed in System V's registers` |
 | `naked` | On x86-64 and AArch64; see [Naked functions](inline-asm.md#naked-functions) |
 | `signal` | On every target but AVR; see [Interrupt handlers](#interrupt-handlers) |
@@ -722,18 +722,18 @@ vector table, a startup routine and handlers for each board is in
 | AVR | Implemented. The handler saves `r0`, `SREG`, `r1`, the call-clobbered registers and the frame pointer, clears `r1`, re-enables interrupts with `sei` on entry, and returns with `reti` | Implemented, as `interrupt` without the `sei`: interrupts stay disabled in the body |
 | Cortex-M | Accepted; the code is the same as without it, because the processor saves the caller-saved registers on exception entry and an ordinary return performs the exception return. An argument such as `interrupt("IRQ")` is accepted | Refused |
 | RISC-V | Implemented, with `"machine"` (the default, returning with `mret`) and `"supervisor"` (`sret`). The handler saves the caller-saved registers it writes, and all of them, floating point included, when it calls; it is 4-byte aligned. `"user"` is refused | Refused |
-| MIPS32 | Implemented, with `"eic"` (the default), `"vector=sw0"`..`"vector=hw5"` and `keep_interrupts_masked`. The handler saves `EPC`, `Status`, the caller-saved registers it writes and `HI`/`LO`, all of them and `gp` when it calls, and returns with `eret`. `use_shadow_register_set` and `use_debug_exception_return` are refused | Refused |
+| MIPS32, MIPS64 | Implemented, with `"eic"` (the default), `"vector=sw0"`..`"vector=hw5"` and `keep_interrupts_masked`. The handler saves `EPC`, `Status`, the caller-saved registers it writes and `HI`/`LO`, all of them and `gp` when it calls, and returns with `eret`; on MIPS64 every save is a doubleword and `EPC` moves with `dmfc0`/`dmtc0`, as GCC's n64 handlers have it (clang ignores the attribute there). `use_shadow_register_set` and `use_debug_exception_return` are refused | Refused |
 | Renesas RX | Implemented, as rx-elf-gcc makes it: the handler pushes the caller-saved `r1`-`r5`, `r14` and `r15` and the callee-saved registers it uses with `pushm`, and returns with `rte`. GCC's `interrupt(N)` (a vector-table slot for GNU ld to fill) and `fast_interrupt` are refused | Refused |
 | ColdFire | Implemented, as GCC's m68k port makes it, and spelled `interrupt_handler` too: the handler saves `d0`, `d1`, `a0` and `a1` with the callee-saved registers it uses in one `movem`, and returns with `rte`. `interrupt_thread` (the Fido's) and an argument are refused | Refused |
-| x86-64, AArch64, MIPS64 and the other targets | Refused | Refused |
+| x86-64, AArch64 and the other targets | Refused | Refused |
 
-On RISC-V, MIPS32, RX and ColdFire a handler with parameters or a non-`void` result is
+On RISC-V, MIPS, RX and ColdFire a handler with parameters or a non-`void` result is
 refused, and so is a function given two different kinds; the attribute
 may be on a prototype, on the definition or on both. In C++ the attribute
 is refused except on Cortex-M. The refusals read:
 
 ```text
-embcc: isr.c:2: error: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS32, RX and ColdFire it is implemented)
+embcc: isr.c:2: error: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS, RX and ColdFire it is implemented)
 embcc: isr.c:2: error: __attribute__((signal)) is not supported: an interrupt handler needs the machine's own return instruction and every register saved, which only the AVR backend does
 embcc: isr.c:2: error: interrupt handler 'isr' takes parameters: the hardware calls it, so nothing passes them, and they would be read out of whatever the interrupted code left in the argument registers
 embcc: isr.c:2: error: interrupt handler 'isr' returns a value: the interrupt return goes back to the interrupted instruction, and nothing there receives it -- it must return void

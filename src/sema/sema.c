@@ -8355,7 +8355,7 @@ static void check_func(struct unit *u, struct func *f)
      * both are refused. (AVR's backend refuses the same two itself.) */
     if (f->is_isr && (target_get() == TARGET_RISCV32 ||
                       target_get() == TARGET_RISCV64 ||
-                      target_get() == TARGET_MIPS32 ||
+                      target_is_mips() ||
                       target_get() == TARGET_RX ||
                       target_get() == TARGET_COLDFIRE)) {
         if (f->nparams || f->is_varargs)
@@ -8370,7 +8370,7 @@ static void check_func(struct unit *u, struct func *f)
                 "return goes back to the interrupted instruction, and "
                 "nothing there receives it -- it must return void",
                 f->name);
-        if (target_get() == TARGET_MIPS32 && !ISR_KIND(f->is_isr))
+        if (target_is_mips() && !ISR_KIND(f->is_isr))
             sema_error_line(u, f->line,
                 "'%s' is keep_interrupts_masked but not an interrupt "
                 "handler: the modifier needs __attribute__((interrupt))",

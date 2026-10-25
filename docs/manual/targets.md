@@ -1539,7 +1539,6 @@ the word. `__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1`, `_2`, `_4` and `_8` are defined.
 |---|---|
 | a 16-byte atomic | `the MIPS64 backend cannot lower a 16-byte atomic (MIPS64's lld/scd are a doubleword; there is no 128-bit ll/sc) yet (function f) [cas16 w=16 size=16]` |
 | `__builtin_frame_address(N)` or `__builtin_return_address(N)` with N above 0 (level 0 is supported; see [Extensions](extensions.md)) | `__builtin_return_address(1) is not supported on mips64el-none-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found` |
-| `__attribute__((interrupt))` | `__attribute__((interrupt)) is not supported: ...` |
 | a doubleword instruction in inline assembly (`daddu`, `ld`, ...) | `asm instruction "daddu $a4, $a5, $a5" is not in the MIPS vocabulary` |
 | `la` in a `.s` file or file-scope `asm` | `la loads a 32-bit address, and a MIPS64 address is 64 bits (nor are %highest and %higher assembled here): load it from a .dword holding the symbol` |
 | reading a packed bit-field over more than 8 bytes, big-endian | `a packed bit-field 'v' across 9 bytes is not supported on a big-endian target (mips64-none-elf)` |

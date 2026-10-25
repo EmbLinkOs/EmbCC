@@ -277,9 +277,9 @@ implement, so they are errors:
 | Attribute | Diagnostic |
 |---|---|
 | `naked` (x86-64 and AArch64; supported on Cortex-M, RISC-V, MIPS32 and AVR) | `__attribute__((naked)) is not supported: on this target the body could only be assembled by the file-scope assembler's few instructions; it is supported on the ARM, RISC-V, MIPS and AVR targets` |
-| `interrupt` (except on Cortex-M, AVR, RISC-V, MIPS32, RX and ColdFire) | `__attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS32, RX and ColdFire it is implemented)` |
+| `interrupt` (except on Cortex-M, AVR, RISC-V, MIPS, RX and ColdFire) | `__attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS, RX and ColdFire it is implemented)` |
 | `interrupt("user")` (RISC-V) | `__attribute__((interrupt("user"))) is not supported: user-mode interrupts (the N extension and its uret) were never ratified and are gone from the privileged spec, and GCC and clang no longer accept them` |
-| `keep_interrupts_masked` (except on MIPS32) | `__attribute__((keep_interrupts_masked)) is not supported: it modifies a MIPS interrupt handler, and only the MIPS32 target implements those` |
+| `keep_interrupts_masked` (except on MIPS32 and MIPS64) | `__attribute__((keep_interrupts_masked)) is not supported: it modifies a MIPS interrupt handler, and only the MIPS targets implement those` |
 | `use_shadow_register_set` | `__attribute__((use_shadow_register_set)) is not supported: EmbCC does not switch register sets: the handler would save into and run on a shadow set's stack pointer it never read with rdpgpr` |
 | `use_debug_exception_return` | `__attribute__((use_debug_exception_return)) is not supported: the handler would return with eret where the debug exception needs deret, and save DEPC as EPC` |
 | `interrupt`, `signal` in C++ (except `interrupt` on Cortex-M) | `__attribute__((interrupt)) is not supported in C++ yet: the handler would return with an ordinary return instead of the interrupt return, without saving the registers; write it in C` |

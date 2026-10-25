@@ -1679,6 +1679,26 @@ There are no floating-point or coprocessor 1 instructions, no trapping
 `add`, `addi` or `sub`, no DSP, MIPS16 or microMIPS instructions, no
 `cache`, `pref` or `rdhwr`, and no `madd` or `msub`.
 
+On the MIPS64 targets (`mips64el-none-elf`, `mips64-none-elf`) the same
+vocabulary is joined by MIPS64r2's doubleword forms, each encoded as
+llvm-mc encodes it (tests/golden/mips64-encoding.sh), and the registers
+have their n64 names (`$a4`-`$a7` where o32 has `$t0`-`$t3`); `.set
+mips64r2` is accepted. On MIPS32 each is refused as `daddu is a MIPS64
+instruction`.
+
+| Instruction | Operands |
+|---|---|
+| `daddu`, `dsubu` `Rd, Rs, Rt`; `dsllv`, `dsrlv`, `dsrav`, `drotrv` `Rd, Rt, Rs` | |
+| `daddiu Rt, Rs, IMM` | 16-bit signed |
+| `dsll`, `dsrl`, `dsra`, `drotr` `Rd, Rt, SA` | 0 to 63 |
+| `dsll32`, `dsrl32`, `dsra32`, `drotr32` `Rd, Rt, SA` | 0 to 31 (a shift by 32 + SA) |
+| `ld`, `sd`, `lwu`, `lld`, `scd`, `ldl`, `ldr`, `sdl`, `sdr` | `Rt, OFF(Rs)` |
+| `dmult`, `dmultu` `Rs, Rt`; `ddiv`, `ddivu` | `$zero, Rs, Rt` only, as `div` |
+| `dext`, `dins` `Rt, Rs, POS, SIZE` | within the doubleword (`dextm`/`dextu`, `dinsm`/`dinsu` as POS and SIZE need) |
+| `dsbh`, `dshd`, `dclz`, `dclo` `Rd, Rs` | |
+| `dmfc0`, `dmtc0` `Rt, $N[, SEL]` | `SEL` 0 to 7 |
+| `dli Rd, IMM` | any 64-bit constant; the code generator's sequence |
+
 ### Callee-saved registers on MIPS32
 
 A template that names s0 to s7, gp, fp, ra, k0 or k1 is refused, and so

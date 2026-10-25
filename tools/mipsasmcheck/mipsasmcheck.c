@@ -5,6 +5,8 @@
  *   mipsasmcheck --list    the vocabulary, one statement per line
  *   mipsasmcheck bytes     what src/arch/mips/asm.c assembles it to
  *   mipsasmcheck bytes-be  ...big-endian (mips-none-elf)
+ *   mipsasmcheck --64 ...  the same for MIPS64r2: the vocabulary gains
+ *                          the doubleword forms (mips64-encoding.sh)
  *
  * The vocabulary is generated from asm.c's own tables, so an instruction
  * added there cannot escape the referee. Each line is assembled in
@@ -23,6 +25,11 @@ int main(int argc, char **argv)
     FILE *tmp;
     struct code c = { 0 };
     char err[512];
+    if (argc > 1 && strcmp(argv[1], "--64") == 0) {
+        mips_set_64(1);
+        argv++;
+        argc--;
+    }
     int list = argc > 1 && strcmp(argv[1], "--list") == 0;
 
     if (argc > 1 && strcmp(argv[1], "bytes-be") == 0)
