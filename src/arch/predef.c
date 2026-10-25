@@ -452,6 +452,18 @@ static const struct predef_macro flt16_add[] = {
     { "__FLT16_NORM_MAX__", "6.5504e+4F16" },
 };
 
+/* avr-gcc's __builtin_avr_* that EmbCC has beyond those clang's AVR
+ * table names (src/sema/sema.c avr_builtin), each with the macro avr-gcc
+ * defines for it */
+static const struct predef_macro avr_builtin_add[] = {
+    { "__BUILTIN_AVR_DELAY_CYCLES", "1" },
+    { "__BUILTIN_AVR_FMUL", "1" },
+    { "__BUILTIN_AVR_FMULS", "1" },
+    { "__BUILTIN_AVR_FMULSU", "1" },
+    { "__BUILTIN_AVR_INSERT_BITS", "1" },
+    { "__BUILTIN_AVR_NOPS", "1" },
+};
+
 /* __bf16 is EmbCC's on every target too; GCC's values, as its x86-64 and
  * AArch64 tables carry them */
 static const struct predef_macro bflt16_add[] = {
@@ -538,8 +550,9 @@ const struct predef_macro *predef_table(int *count)
     int f16 = !predef_is_cxx() && !table_has(arch, narch, "__FLT16_MANT_DIG__");
     int bf16 = !predef_is_cxx() &&
                !table_has(arch, narch, "__BFLT16_MANT_DIG__");
+    int avrb = target_get() == TARGET_AVR;
     if (!os && !fpu && !cmse && !rv && !dsp && !avr && !pic32 && !f16 &&
-        !bf16 && target_fmt_get() == TGT_FMT_ELF) {
+        !bf16 && !avrb && target_fmt_get() == TGT_FMT_ELF) {
         *count = narch;
         return arch;
     }
@@ -550,7 +563,9 @@ const struct predef_macro *predef_table(int *count)
         merged = xmalloc((size_t)(narch + nos + 40 + N_RV_LOCK_FREE +
                                   ndarwin_a64_model +
                                   (int)(sizeof flt16_add / sizeof *flt16_add) +
-                                  (int)(sizeof bflt16_add / sizeof *bflt16_add)) *
+                                  (int)(sizeof bflt16_add / sizeof *bflt16_add) +
+                                  (int)(sizeof avr_builtin_add /
+                                        sizeof *avr_builtin_add)) *
                          sizeof *merged);
         for (int i = 0; i < narch; i++)
             if (!contradicted(arch[i].name))
@@ -583,6 +598,10 @@ const struct predef_macro *predef_table(int *count)
         if (bf16)
             for (size_t i = 0; i < sizeof bflt16_add / sizeof *bflt16_add; i++)
                 merged[nmerged++] = bflt16_add[i];
+        if (avrb)
+            for (size_t i = 0; i < sizeof avr_builtin_add / sizeof *avr_builtin_add;
+                 i++)
+                merged[nmerged++] = avr_builtin_add[i];
         if (fpu && target_arm_a32()) {
             int v4 = target_arm_vfp(NULL) == 4;
             const struct predef_macro *add = v4 ? a32_vfp4_add : a32_vfp3_add;
