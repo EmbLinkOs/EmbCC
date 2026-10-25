@@ -37,9 +37,12 @@ x86_64-windows-gnu"
 # construct NAME FILE "OPTIONS" "WHAT THE PAGE CALLS IT" -- the source is
 # read from standard input. Each is the smallest unit that needs the
 # construct; `plain.c` is there for the options that apply to any code.
+# A FILE an earlier construct wrote is shared, and its caller gives no
+# source: reading standard input again once emptied plain.c, so the -S,
+# -g and --unwind-tables cells compiled an empty file on every target.
 CONSTRUCTS=
 construct() {
-    cat > "$out/src/$2"
+    [ -f "$out/src/$2" ] || cat > "$out/src/$2"
     CONSTRUCTS="$CONSTRUCTS $1"
     eval "file_$1=\$2; opts_$1=\$3; what_$1=\$4"
 }
