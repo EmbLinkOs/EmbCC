@@ -30,10 +30,11 @@ fail() { echo "FAIL: $*"; exit 1; }
 [ -s "$out/table.txt" ] || fail "the table is empty"
 
 # ---- 1. the driver names nothing the table does not -----------------------
-# main()'s text with adjacent string literals joined ("-Werror-implicit-"
+# the driver's text with adjacent string literals joined ("-Werror-implicit-"
 # "function-declaration" is one spelling), then each literal that a
 # strcmp/strncmp of argv[i], a or arg compares against, with its kind.
-awk '/^int main\(/ { on = 1 } on { printf "%s ", $0 }' "$ROOT/src/driver/main.c" |
+# (main() runs embcc_main on a stack of its own, and the options are there)
+awk '/^(static )?int (embcc_)?main\(/ { on = 1 } on { printf "%s ", $0 }' "$ROOT/src/driver/main.c" |
     sed 's/"[[:space:]]*"//g' |
     grep -oE 'str(n?)cmp\((argv\[i\]|a|arg)[[:space:]]*(\+[[:space:]]*[0-9]+)?[[:space:]]*,[[:space:]]*"-[^"]*"' |
     sed -E 's/^str(n?)cmp.*"(-[^"]*)"$/\1 \2/' |

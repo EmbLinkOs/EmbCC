@@ -139,7 +139,9 @@ refuse $T '__asm volatile("mov %0, r0\n bx lr" : "=r"(x));' 'has an output'
 refuse riscv64-unknown-elf 'return a;' 'not an asm or a call with no arguments'
 refuse avr 'g(a);' 'not an asm or a call with no arguments'
 refuse x86_64-elf '__asm volatile("ret");' '__attribute__((naked)) is not supported'
-refuse aarch64-elf '__asm volatile("ret");' '__attribute__((naked)) is not supported'
+# (AArch64 ELF's blocks go through the GNU-syntax assembler, and a naked
+# function is one; Apple arm64's Mach-O objects have no such path yet)
+refuse aarch64-apple-darwin '__asm volatile("ret");' '__attribute__((naked)) is not supported'
 echo "naked-asm: a C statement, a register operand, an output, and naked off the embedded targets are refused"
 
 # `(void)a;` computes nothing: GCC takes it in a naked function, and a port
