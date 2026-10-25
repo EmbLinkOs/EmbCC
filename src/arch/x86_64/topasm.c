@@ -188,9 +188,11 @@ static int insn_len(struct topasm *ta, const char *l, int mnemonics_ok)
      * asm that simply needs writing as data here. */
     if (!mnemonics_ok)
         diag_fatal(ta->file, ta->line,
-                   "file-scope asm instruction \"%s\": EmbCC assembles "
-                   "instructions for x86-64 only. On this target write the "
-                   "block as .byte/.long data (see lib/libc/src/setjmp).", l);
+                   "file-scope asm instruction \"%s\": EmbCC assembles a "
+                   "block's instructions on x86-64 (a few) and on every ELF "
+                   "target, not yet into %s objects. On this target write "
+                   "the block as .byte/.long data (see lib/libc/src/setjmp).",
+                   l, target_fmt_get() == TGT_FMT_MACHO ? "Mach-O" : "COFF");
     if (strncmp(l, "and ", 4) == 0)
         return 4;                                 /* 48 83 /4 ib */
     if (strncmp(l, "call ", 5) == 0)

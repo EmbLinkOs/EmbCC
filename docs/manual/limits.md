@@ -200,15 +200,15 @@ Refused on 15 of the 25 targets.
 
 ## `__attribute__((naked))`
 
-Refused on 5 of the 25 targets.
+Refused on 4 of the 25 targets.
 
-- Refused on `x86_64-elf`, `aarch64-elf`, `x86_64-linux-gnu`, `aarch64-apple-darwin`, `x86_64-windows-gnu`:
+- Refused on `x86_64-elf`, `x86_64-linux-gnu`, `aarch64-apple-darwin`, `x86_64-windows-gnu`:
 
   ```text
-  __attribute__((naked)) is not supported: on this target the body could only be assembled by the file-scope assembler's few instructions; it is supported on the ARM, RISC-V, MIPS and AVR targets
+  __attribute__((naked)) is not supported: on this target the body could only be assembled by the file-scope assembler's few instructions; it is supported on every target but x86-64 and AArch64 for Darwin or Windows
   ```
 
-## an assembly source (`.s`)
+## an assembly source (`.s`) with an instruction
 
 Refused on 3 of the 25 targets.
 
@@ -455,7 +455,7 @@ Refused on 21 of the 25 targets.
 | `sparc-none-elf` | no | yes | no | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | no | yes | yes | yes | yes | no | yes | no |
 | `m68k-none-elf` | no | yes | no | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | no | no | no | yes | yes | yes | yes | no | yes | no |
 | `x86_64-elf` | yes | yes | no | no | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | no | yes | no | no | no | no | no | yes | yes | yes | yes | yes |
-| `aarch64-elf` | yes | yes | no | no | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | no | yes | no | no | no | no | yes | yes | yes | yes | yes | yes |
+| `aarch64-elf` | yes | yes | no | no | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | no | yes | no | no | no | yes | yes | yes | yes | yes | yes | yes |
 | `x86_64-linux-gnu` | yes | yes | no | no | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | no | yes | no | no | no | no | no | yes | yes | yes | yes | yes |
 | `aarch64-apple-darwin` | yes | yes | no | no | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | no | no | no | no | yes | yes | warns | yes | yes | yes |
 | `x86_64-windows-gnu` | no | no | no | no | yes | yes | yes | yes | yes | no | no | yes | yes | yes | yes | no | yes | no | no | no | no | no | yes | no | no | no | no |
@@ -482,7 +482,7 @@ The columns are the sections above, in order:
 - `nested`: nested functions
 - `interrupt`: `__attribute__((interrupt))`
 - `naked`: `__attribute__((naked))`
-- `asmfile`: an assembly source (`.s`)
+- `asmfile`: an assembly source (`.s`) with an instruction
 - `dashS`: `-S` (assembly output)
 - `debug`: `-g` (DWARF)
 - `unwind`: `--unwind-tables`
