@@ -879,7 +879,7 @@ libc-linux-x86_64: embcc embar
 	    $(BUILD)/libc/linux-x86_64/*.o
 	@./embcc --target=x86_64-linux-gnu -c -O1 $(LIBC_INC) \
 	    lib/libc/os/linux/start.c -o $(BUILD)/libc/linux-x86_64/crt1.o
-	@mkdir -p $(BUILD)/libc/linux-x86_64/rt
+	@rm -rf $(BUILD)/libc/linux-x86_64/rt && mkdir -p $(BUILD)/libc/linux-x86_64/rt
 	@for f in $(RT_SRCS); do \
 	    o=$(BUILD)/libc/linux-x86_64/rt/$$(basename $$f .c).o; \
 	    ./embcc --target=x86_64-linux-gnu -c -O1 $$f -o $$o || exit 1; \
@@ -900,7 +900,7 @@ libc-linux-aarch64: embcc embar
 	    $(BUILD)/libc/linux-aarch64/libc.a $(BUILD)/libc/linux-aarch64/*.o
 	@./embcc --target=aarch64-linux-gnu -c -O1 $(LIBC_INC) \
 	    lib/libc/os/linux/start.c -o $(BUILD)/libc/linux-aarch64/crt1.o
-	@mkdir -p $(BUILD)/libc/linux-aarch64/rt
+	@rm -rf $(BUILD)/libc/linux-aarch64/rt && mkdir -p $(BUILD)/libc/linux-aarch64/rt
 	@for f in $(RT_SRCS); do \
 	    o=$(BUILD)/libc/linux-aarch64/rt/$$(basename $$f .c).o; \
 	    ./embcc --target=aarch64-linux-gnu -c -O1 $$f -o $$o || exit 1; \
