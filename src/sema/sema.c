@@ -3018,6 +3018,16 @@ static int cx_fold(const struct expr *e, enum ldf_fmt fmt, struct ldf **re,
         }
         return 0;
     }
+    case EXPR_CALL:
+        /* __builtin_complex(re, im), which a static initializer keeps
+         * as the call (its sema case): the parts, each a constant */
+        if (!e->name || strcmp(e->name, "__builtin_complex") != 0 ||
+            e->nargs != 2 || !cx_fold_real(e->args[0], fmt, &ar) ||
+            !cx_fold_real(e->args[1], fmt, &ai))
+            return 0;
+        *re = ar;
+        *im = ai;
+        return 1;
     default:
         return 0;
     }
@@ -3792,10 +3802,19 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                 }
                 const char *sug = suggest_name(u, sc, e->name);
                 const char *hdr = header_declaring(e->name);
-                diag_error_at(diag_file(u), e->line, e->col,
-                              "'%s' is not declared in '%s' — for a call, "
-                              "add a prototype or define it first",
-                              e->name, f->name);
+                /* (a file-scope initializer is checked as a function of
+                 * sema's own, "<global initializer>", which is no name to
+                 * show anyone) */
+                if (f->name[0] == '<')
+                    diag_error_at(diag_file(u), e->line, e->col,
+                                  "'%s' is not declared at file scope — for "
+                                  "a call, add a prototype or define it first",
+                                  e->name);
+                else
+                    diag_error_at(diag_file(u), e->line, e->col,
+                                  "'%s' is not declared in '%s' — for a call, "
+                                  "add a prototype or define it first",
+                                  e->name, f->name);
                 diag_set_id("E0001");
                 if (hdr) {
                     /* The C library's own surface is fixed by the standard,
@@ -5133,6 +5152,43 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                 e->str_prefix = 0;
                 e->nargs = 0;
                 check_expr(u, f, sc, e);  /* the array/pointer type */
+                break;
+            }
+            /* GCC's __builtin_complex(re, im): the complex of their type
+             * from its two parts -- what CMPLX is, which a multiply by I
+             * cannot be when im is an infinity or a NaN. In a function,
+             * built in a fresh slot (cx_make); in a static initializer the
+             * call stays, typed, for cx_fold to fold, as C11 asks of CMPLX
+             * there */
+            else if (strcmp(bn, "complex") == 0) {
+                if (e->nargs != 2) {
+                    sema_error_at(u, e->line, e->col,
+                            "__builtin_complex takes a real and an "
+                            "imaginary part");
+                    e->ty = ty_base(TY_INT, 0);
+                    break;
+                }
+                check_expr(u, f, sc, e->args[0]);
+                check_expr(u, f, sc, e->args[1]);
+                struct type *rt = ty_unqual(e->args[0]->ty),
+                            *it = ty_unqual(e->args[1]->ty);
+                if (!ty_is_float(rt) || ty_is_complex(rt) || !ty_is_float(it) ||
+                    ty_is_complex(it) || ty_size(rt) != ty_size(it) ||
+                    rt->kind != it->kind) {
+                    sema_error_at(u, e->line, e->col,
+                            "__builtin_complex takes two parts of one real "
+                            "floating type, as in GCC, not %s and %s",
+                            ty_name(e->args[0]->ty), ty_name(e->args[1]->ty));
+                    e->ty = ty_base(TY_INT, 0);
+                    break;
+                }
+                if (cx_lowering()) {
+                    *e = *cx_make(ty_complex(rt), e->args[0], e->args[1],
+                                  e->line);
+                    break;
+                }
+                e->name = e->lhs->name;
+                e->ty = ty_complex(rt);
                 break;
             }
             /* GCC's __builtin_speculation_safe_value(v[, fail]): v, the
@@ -7167,7 +7223,7 @@ static const char *const g_named_builtins[] = {
     "trap", "unreachable", "setjmp", "longjmp",
     "FUNCTION", "FILE", "LINE", "speculation_safe_value", "assume",
     "fpclassify", "powi", "powif", "powil", "extract_return_addr",
-    "frob_return_addr", "debugtrap",
+    "frob_return_addr", "debugtrap", "complex",
     "va_arg", "va_copy", "va_end", "va_start",
     "add_overflow", "sub_overflow", "mul_overflow",
     "add_overflow_p", "sub_overflow_p", "mul_overflow_p",

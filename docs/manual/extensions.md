@@ -964,6 +964,15 @@ so an object of GCC's that calls them links too. GCC documents no
 precision for them, and neither does EmbCC: a result can differ from
 `pow`'s in the last bit.
 
+`__builtin_complex(re, im)` is the complex of `re`'s and `im`'s type --
+both one real floating type, as GCC requires (`__builtin_complex takes
+two parts of one real floating type, as in GCC, not double and float`) --
+made of those two parts, whatever they are: an infinite or NaN imaginary
+part and a negative zero survive, which `re + im * I` does not keep. Of
+constants it is a constant, so EmbCC's `<complex.h>` defines C11's
+`CMPLX`, `CMPLXF` and `CMPLXL` with it, and they initialize a static
+object, as C11 asks.
+
 ### Floating-point comparisons
 
 | Builtin | Result |
@@ -1172,7 +1181,7 @@ macOS).
 ### Builtins that are not supported
 
 These are refused as undeclared functions, as shown in [General
-rules](#general-rules): `__builtin_complex`, `__builtin___clear_cache`,
+rules](#general-rules): `__builtin___clear_cache`,
 `__builtin_va_arg_pack`, clang's
 `__builtin_elementwise_*`, `__builtin_reduce_*` and
 `__builtin_nontemporal_load`, `__builtin_cpu_supports` and
