@@ -740,6 +740,133 @@ static int ld_fold(struct ir_func *fn, struct defs *d, struct ldfold *L,
 
 static void ld_insert(struct ir_func *fn, struct ldfold *L);
 
+/* ---- arithmetic in a wider format than it needs ------------------------
+ *
+ * `float y = x * 0.5;` -- the 0.5 is a double, so C multiplies in double
+ * and rounds the product back to float: on a Cortex-M4F, whose FPU does
+ * single precision only, that is a call to __aeabi_dmul and two
+ * conversions, and on any soft-float part a double call. Done in float it
+ * is one vmul. The answers are the same: a sum, difference, product or
+ * quotient of two float values computed in a format of q significand
+ * bits and rounded to float is the float operation's own result when
+ * q >= 2p + 2 (Figueroa, "When is double rounding innocuous?", 1995) --
+ * float (p 24) in double (53), and double (53) in binary128 (113), not in
+ * x87's 64. A directed rounding mode rounds twice to the same answer as
+ * well. An operand qualifies when it is a float widened (exactly), or a
+ * constant the narrow format holds exactly; clang does the same.
+ *
+ * A comparison needs no condition at all: (double)a < (double)b is a < b
+ * whatever the formats, and so is (double)a < 0.5 with the 0.5 a float's.
+ *
+ * Rewritten in place: the operation takes the narrow operands at the
+ * narrow width, a constant read by nothing else is made narrow where it
+ * is, and the narrowing after it becomes a move; the widenings, now
+ * unread, are dead. */
+
+/* The narrow operand an operand of a w-wide operation stands for, at
+ * width nw: the source of an exact widening, or a single-use constant the
+ * narrow format holds exactly (*kin its instruction, to be made narrow).
+ * -1 for neither. */
+static int narrow_operand(struct ir_func *fn, struct defs *d, const int *use,
+                          int v, int w, int nw, int *kin)
+{
+    *kin = -1;
+    if (v < 0 || v >= fn->nvregs || d->cnt[v] != 1 || d->ins[v] < 0)
+        return -1;
+    struct ir_ins *dv = &fn->ins[d->ins[v]];
+    if (dv->op == IR_F2F && dv->w == w && dv->size == nw && dv->a >= 0 &&
+        dv->a < fn->nvregs && d->cnt[dv->a] == 1)
+        return dv->a;
+    /* a constant's bits, as the floating-point operation that alone
+     * reads it takes them (constants carry no class: const.8 holds a
+     * double's bits) */
+    if (dv->op == IR_CONST && dv->w == 8 && w == 8 && nw == 4 &&
+        use[v] == 1) {
+        union { unsigned long u; double d; } x;
+        union { unsigned u; float f; } y;
+        x.u = (unsigned long)dv->imm;
+        y.f = (float)x.d;
+        if ((double)y.f != x.d && x.d == x.d)
+            return -1;                  /* not exactly a float (a NaN is) */
+        *kin = d->ins[v];
+        return v;
+    }
+    return -1;
+}
+
+static int fold_narrow(struct ir_func *fn, struct defs *d, const int *use,
+                       struct ir_ins *i)
+{
+    if (getenv("EMBCC_NO_FP_NARROW"))
+        return 0;
+    /* (narrow)(a OP b), the operation's result read by nothing else */
+    if (i->op == IR_F2F && i->w < i->size && i->a >= 0 &&
+        i->a < fn->nvregs && d->cnt[i->a] == 1 && d->ins[i->a] >= 0 &&
+        use[i->a] == 1) {
+        struct ir_ins *op = &fn->ins[d->ins[i->a]];
+        if ((op->op != IR_ADD && op->op != IR_SUB && op->op != IR_MUL &&
+             op->op != IR_DIV) || !op->flt || op->imm_b || op->w != i->size)
+            return 0;
+        int p = i->w == 4 ? 24 : 53;
+        enum ldf_fmt lf = ldf_target_fmt();
+        int q = i->size == 8 ? 53
+              : i->size == 16 && lf == LDF_QUAD ? 113
+              : i->size == 16 && lf == LDF_X87 ? 64 : 0;
+        if (q < 2 * p + 2)
+            return 0;
+        int ka, kb;
+        int na = narrow_operand(fn, d, use, op->a, i->size, i->w, &ka);
+        int nb = narrow_operand(fn, d, use, op->b, i->size, i->w, &kb);
+        if (na < 0 || nb < 0 || (ka >= 0 && kb >= 0))
+            return 0;                   /* two constants: fold_bin's */
+        for (int k = 0; k < 2; k++) {
+            int ki = k ? kb : ka;
+            if (ki < 0)
+                continue;
+            struct ir_ins *c = &fn->ins[ki];
+            union { unsigned long u; double d; } x;
+            union { unsigned u; float f; } y;
+            x.u = (unsigned long)c->imm;
+            y.f = (float)x.d;
+            c->imm = (long)y.u;
+            c->w = 4;
+        }
+        op->w = i->w;
+        op->a = na;
+        op->b = nb;
+        to_mov(i, op->dst);
+        return 1;
+    }
+    /* a comparison of two exactly widened values, or of one and a
+     * constant the narrow format holds: at the narrow width */
+    if (i->op == IR_CMP && i->flt && !i->imm_b && (i->w == 8 || i->w == 16)) {
+        for (int nw = 4; nw < i->w; nw *= 2) {
+            int ka, kb;
+            int na = narrow_operand(fn, d, use, i->a, i->w, nw, &ka);
+            int nb = narrow_operand(fn, d, use, i->b, i->w, nw, &kb);
+            if (na < 0 || nb < 0 || (ka >= 0 && kb >= 0))
+                continue;
+            for (int k = 0; k < 2; k++) {
+                int ki = k ? kb : ka;
+                if (ki < 0)
+                    continue;
+                struct ir_ins *c = &fn->ins[ki];
+                union { unsigned long u; double d; } x;
+                union { unsigned u; float f; } y;
+                x.u = (unsigned long)c->imm;
+                y.f = (float)x.d;
+                c->imm = (long)y.u;
+                c->w = 4;
+            }
+            i->w = nw;
+            i->a = na;
+            i->b = nb;
+            return 1;
+        }
+    }
+    return 0;
+}
+
 int pass_fold(struct ir_func *fn)
 {
     struct defs d;
@@ -781,6 +908,10 @@ int pass_fold(struct ir_func *fn)
         if (i->op == IR_LABEL)
             lk.gen++;
         if (ld_fold(fn, &d, &L, &lk, i, n)) {
+            changed = 1;
+            continue;
+        }
+        if (fold_narrow(fn, &d, use, i)) {
             changed = 1;
             continue;
         }
