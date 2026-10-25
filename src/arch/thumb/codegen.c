@@ -3794,6 +3794,16 @@ static void vfp_load(struct t_fn *F, int v, int sreg)
         t_vldst(F->t, sreg, F->fb, (int)F->slot[v], 0, 0);
         return;
     }
+    /* a float constant made where it is read: vmov.f32 #imm when it is
+     * one of VFP's (0.5, 1.0, 10.0...), as vfp_const_d makes a double */
+    if (F->remat && v >= 0 && F->remat[v]) {
+        int k = t_vfp_imm8((unsigned long long)(unsigned long)
+                           (F->remat_v[v] & 0xffffffffL), 0);
+        if (k >= 0) {
+            t_vmov_imm(F->t, sreg, k, 0);
+            return;
+        }
+    }
     rd(F, v, T_ACC);                    /* the general path, via a core reg */
     t_vmov_core(F->t, sreg, T_ACC, 1);
 }
@@ -3909,6 +3919,12 @@ static void vfp_done(struct t_fn *F, int v, int sreg)
 static int vfp_operand_b(struct t_fn *F, const struct ir_ins *i, int sreg)
 {
     if (i->imm_b) {
+        int k = t_vfp_imm8((unsigned long long)(unsigned long)
+                           (i->imm & 0xffffffffL), 0);
+        if (k >= 0) {
+            t_vmov_imm(F->t, sreg, k, 0);
+            return sreg;
+        }
         t_mov_imm(F->t, T_ACC, (long)i->imm, 0);
         t_vmov_core(F->t, sreg, T_ACC, 1);
         return sreg;
@@ -4911,6 +4927,15 @@ static void gen_ins(struct t_fn *F, int n)
             return;             /* the select moves it (t_select_imms) */
         if (F->remat && i->dst >= 0 && F->remat[i->dst])
             return;             /* made where it is read (rd) */
+        /* into an S register: vmov.f32 #imm when VFP has it */
+        if (in_freg(F, i->dst)) {
+            int k = t_vfp_imm8((unsigned long long)(unsigned long)
+                               (i->imm & 0xffffffffL), 0);
+            if (k >= 0) {
+                t_vmov_imm(t, F->floc[i->dst], k, 0);
+                return;
+            }
+        }
         /* Build the constant in the destination's OWN register when it
          * has one. Going through T_ACC and copying cost two extra
          * instructions on the commonest operation there is, and the
