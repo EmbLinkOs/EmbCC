@@ -16,6 +16,10 @@ void   *memmove(void *dst, const void *src, size_t n);
 void   *memset(void *s, int c, size_t n);
 int     memcmp(const void *a, const void *b, size_t n);
 void   *memchr(const void *s, int c, size_t n);
+/* C23 makes these two freestanding as well: copy up to and including the
+ * first c, and a memset done even when nothing reads the memory again. */
+void   *memccpy(void *dst, const void *src, int c, size_t n);
+void   *memset_explicit(void *s, int c, size_t n);
 
 size_t  strlen(const char *s);
 char   *strcpy(char *dst, const char *src);

@@ -64,8 +64,6 @@ na() {
         echo "a scalar local aligned beyond the 4-byte stack, refused by name (as on Thumb and MIPS)" ;;
     atomics)
         echo "__builtin_frame_address(1), refused by name: no frame chain (rx-refuse.sh)" ;;
-    volatile-local-longjmp)
-        echo "setjmp/longjmp, which lib/libc implements for x86-64 and AArch64 only" ;;
     *) return 1 ;;
     esac
 }
@@ -109,6 +107,7 @@ ONE
 nna=0
 for c in tests/exec/*.c; do
     n=$(basename "$c" .c)
+    case " ${EMBCC_EXEC_ONLY:-$n} " in *" $n "*) ;; *) continue ;; esac
     only=$(sed -n 's|.*// target: *\([a-z0-9_-]*\).*|\1|p' "$c" | head -1)
     [ -n "$only" ] && [ "$only" != $T ] && continue
     if why=$(na "$n"); then

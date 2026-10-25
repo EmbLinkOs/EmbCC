@@ -69,26 +69,59 @@ double exp2(double x)  { return __ieee754_pow(2.0, x); }
 double log1p(double x)
 {
     /* log(1+x) with the cancellation removed for small x, which is the
-     * entire reason the function exists. */
+     * entire reason the function exists: log(u) scaled by the rounding of
+     * 1 + x (Goldberg). Not for an infinity or a NaN, where that ratio is
+     * inf/inf: log1p(+inf) is +inf. */
     double u = 1.0 + x;
     if (u == 1.0) return x;
+    if (!isfinite(u)) return __ieee754_log(u);
     return __ieee754_log(u) * (x / (u - 1.0));
 }
 
+/* asinh and acosh as fdlibm has them: past 2^28 the 1 under the root is
+ * gone and the answer is log(2x) -- where x*x would overflow and leave
+ * inf/inf, which was asinh(1e200) a NaN and acosh(1e200) an infinity. */
+#define LN2 6.93147180559945286227e-01
 double asinh(double x)
 {
-    double s = x < 0 ? -1.0 : 1.0, a = fabs(x);
-    return s * log1p(a + a * a / (1.0 + sqrt(a * a + 1.0)));
+    double a = fabs(x), t;
+    if (!isfinite(a))
+        return x + x;                   /* +-inf, or the NaN */
+    if (a > 268435456.0)                /* 2^28 */
+        t = __ieee754_log(a) + LN2;
+    else if (a > 2.0)
+        t = __ieee754_log(2.0 * a + 1.0 / (sqrt(a * a + 1.0) + a));
+    else
+        t = log1p(a + a * a / (1.0 + sqrt(a * a + 1.0)));
+    return copysign(t, x);              /* -0 for -0 */
 }
 double acosh(double x)
 {
     if (x < 1.0) { errno = EDOM; return __builtin_nan(""); }
-    return __ieee754_log(x + sqrt(x * x - 1.0));
+    if (!isfinite(x))
+        return x + x;
+    if (x > 268435456.0)
+        return __ieee754_log(x) + LN2;
+    if (x > 2.0)
+        return __ieee754_log(2.0 * x - 1.0 / (x + sqrt(x * x - 1.0)));
+    double t = x - 1.0;
+    return log1p(t + sqrt(2.0 * t + t * t));
 }
+/* On |x|, the sign put back after, as fdlibm has it: for x near -1,
+ * 2x/(1 - x) is near -1 and log1p of it all cancellation -- atanh(-0.999999)
+ * kept 5 of its digits. Below 1/2, 2x + 2x^2/(1 - x) keeps the small
+ * argument's own digits. */
 double atanh(double x)
 {
-    if (x > 1.0 || x < -1.0) { errno = EDOM; return __builtin_nan(""); }
-    return 0.5 * log1p(2.0 * x / (1.0 - x));
+    double a = fabs(x), t;
+    if (a > 1.0) { errno = EDOM; return __builtin_nan(""); }
+    if (a < 0.5) {
+        t = a + a;
+        t = 0.5 * log1p(t + t * a / (1.0 - a));
+    } else {
+        t = 0.5 * log1p((a + a) / (1.0 - a));
+    }
+    return copysign(t, x);
 }
 
 double round(double x)

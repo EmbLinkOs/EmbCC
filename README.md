@@ -174,5 +174,5 @@ cc hello.o -o hello
 
 EmbCC is licensed under the [Apache License, Version 2.0](LICENSE).
 [NOTICE](NOTICE) names the code by others it includes, under their own
-permissive notices: Sun's fdlibm in the C library's math, and the GDB
-target descriptions EmbSim serves.
+permissive notices: Sun's fdlibm and FreeBSD's complex functions in the
+C library's math, and the GDB target descriptions EmbSim serves.

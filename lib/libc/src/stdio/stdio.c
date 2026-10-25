@@ -91,6 +91,7 @@ int fflush(FILE *f)
 int __putc_unlocked(int c, FILE *f)
 {
     if (!f || !(f->flags & F_WRITE)) { if (f) f->flags |= F_ERR; return EOF; }
+    __byte_orient(f);
     settle_mode(f);
     unsigned char ch = (unsigned char)c;
     if (f->mode == _IONBF || !f->buf) {
@@ -143,6 +144,7 @@ size_t __fwrite_unlocked(const void *p, size_t size, size_t n, FILE *f)
 {
     if (!f || !(f->flags & F_WRITE) || size == 0 || n == 0)
         return 0;
+    __byte_orient(f);
     const unsigned char *q = p;
     size_t total = size * n;
     /* A large write goes straight out rather than through the buffer: the
@@ -187,6 +189,7 @@ static int refill(FILE *f)
 int __getc_unlocked(FILE *f)
 {
     if (!f || !(f->flags & F_READ)) return EOF;
+    __byte_orient(f);
     if (f->ungot >= 0) { int c = f->ungot; f->ungot = -1; return c; }
     if (f->pos >= f->len && refill(f) == EOF) return EOF;
     return f->buf[f->pos++];
@@ -207,6 +210,7 @@ int getchar(void)  { return fgetc(stdin); }
 int __ungetc_unlocked(int c, FILE *f)
 {
     if (!f || c == EOF || f->ungot >= 0) return EOF;
+    __byte_orient(f);
     f->ungot = (unsigned char)c;
     f->flags &= ~F_EOF;
     return c;
@@ -301,6 +305,9 @@ void perror(const char *s)
 #define O_CREAT  __OS_O_CREAT
 #define O_TRUNC  __OS_O_TRUNC
 #define O_APPEND __OS_O_APPEND
+#define O_EXCL   __OS_O_EXCL
+
+static FILE *open_as(const char *path, int fl, int acc, int perm);
 
 FILE *fopen(const char *restrict path, const char *restrict mode)
 {
@@ -314,7 +321,15 @@ FILE *fopen(const char *restrict path, const char *restrict mode)
     }
     if (strchr(mode, '+')) { acc = F_READ | F_WRITE;
                              fl = (fl & ~(O_RDONLY | O_WRONLY)) | O_RDWR; }
+    /* C11's exclusive mode, "wx" and its forms: the open fails if the
+     * file exists, and that test and the creation are one step. */
+    if (mode[0] == 'w' && strchr(mode, 'x'))
+        fl |= O_EXCL;
+    return open_as(path, fl, acc, 0666);
+}
 
+static FILE *open_as(const char *path, int fl, int acc, int perm)
+{
     /* Claiming the slot and opening the file are two steps, and the
      * claim has to happen under the table's lock or two threads take
      * the same slot. F_USED is set while still holding it, so the slot
@@ -332,7 +347,7 @@ FILE *fopen(const char *restrict path, const char *restrict mode)
     __unlock(&files_lock);
     if (!f) { errno = EMFILE; return NULL; }
 
-    int fd = __os_open(path, fl, 0666);
+    int fd = __os_open(path, fl, perm);
     if (fd < 0) {                  /* the backend set errno */
         __lock(&files_lock);
         f->flags = 0;              /* the slot goes back */
@@ -468,4 +483,76 @@ int remove(const char *path) { return __os_remove(path); }
 int rename(const char *from, const char *to)
 {
     return __os_rename(from, to);
+}
+
+/* ---- temporary files, C11 §7.21.4.3 and §7.21.4.4 ----
+ *
+ * Their names are under /tmp, the directory the rest of this library
+ * calls temporary (lib/libcxx's temp_directory_path), and end in twelve
+ * letters from the OS's entropy -- a name another program can predict
+ * is one it can create first, a link to somewhere else. A target with no
+ * entropy mixes the clock in instead, and a count keeps one program's
+ * names apart either way.
+ *
+ * tmpnam's name is one no file had when it was made. Between that and
+ * the caller's open is a race C cannot close, so tmpfile does not use
+ * it: it opens exclusively, which fails if the name exists by then, and
+ * tries another name; with read and write for the owner only; and
+ * removes the name at once. The open stream keeps the file, which goes
+ * when the stream closes or the program ends -- or, on a filesystem
+ * that cannot remove an open file, is left behind. A target with no
+ * filesystem has no tmpfile: NULL, with the backend's errno. */
+static void tmp_name(char *buf)
+{
+    static const char abc[] = "abcdefghijklmnopqrstuvwxyz012345";
+    static unsigned long count;
+    unsigned long long r;
+    int saved = errno;
+    if (__os_getentropy(&r, sizeof r) != 0)
+        r = (unsigned long long)__os_clock_ns() ^
+            (unsigned long long)__os_time() << 32;
+    errno = saved;
+    r += (unsigned long long)++count * 0x9E3779B97F4A7C15ull;
+    memcpy(buf, "/tmp/", 5);
+    for (int i = 0; i < 12; i++, r >>= 5)
+        buf[5 + i] = abc[r & 31];
+    buf[17] = 0;
+}
+
+char *tmpnam(char *s)
+{
+    static char internal[L_tmpnam];
+    char name[L_tmpnam];
+    int saved = errno;
+    for (int tries = 0; tries < 100; tries++) {
+        struct __os_fileinfo fi;
+        tmp_name(name);
+        /* Free if nothing is there -- or if there is nowhere for anything
+         * to be. */
+        if (__os_lstat(name, &fi) != 0 &&
+            (errno == ENOENT || errno == ENOSYS)) {
+            errno = saved;
+            return strcpy(s ? s : internal, name);
+        }
+    }
+    return NULL;
+}
+
+FILE *tmpfile(void)
+{
+    char name[L_tmpnam];
+    for (int tries = 0; tries < 100; tries++) {
+        tmp_name(name);
+        FILE *f = open_as(name, O_RDWR | O_CREAT | O_EXCL, F_READ | F_WRITE,
+                          0600);
+        if (f) {
+            int saved = errno;
+            __os_remove(name);
+            errno = saved;
+            return f;
+        }
+        if (errno != EEXIST)
+            return NULL;
+    }
+    return NULL;
 }

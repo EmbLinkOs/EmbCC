@@ -1537,7 +1537,13 @@ int t_tst_imm(struct code *c, int rn, long imm)
 /* T2 STM (IA): 1110 1000 10W0 Rn | 0 M 0 list   T1 STMDB: 1110 1001 00W0 Rn
  * T2 LDM (IA): 1110 1000 10W1 Rn | P M 0 list   T1 LDMDB: 1110 1001 00W1 Rn
  * -- the same words t_push (STMDB sp!) and t_pop (LDMIA sp!) write with
- * Rn = sp and W = 1. */
+ * Rn = sp and W = 1.
+ *
+ * And the 16-bit forms, whenever they say the same thing: T1 STMIA is
+ * 1100 0 Rn list with the base written back, T1 LDMIA 1100 1 Rn list,
+ * written back exactly when the base is not in the list; low registers
+ * only. They are the only ones ARMv6-M and ARMv8-M Baseline have, and
+ * the ones GNU as and llvm-mc choose on every core. */
 int t_ldm_stm(struct code *c, int rn, unsigned mask, int wback, int before,
               int load)
 {
@@ -1545,6 +1551,12 @@ int t_ldm_stm(struct code *c, int rn, unsigned mask, int wback, int before,
     int n = 0;
     for (unsigned m = mask; m; m &= m - 1)
         n++;
+    if (!before && n >= 1 && rn >= 0 && rn < 8 && !(mask & ~0xffu) &&
+        (load ? wback == !(mask & (1u << rn))
+              : wback && !(mask & (1u << rn)))) {
+        hw(c, (load ? 0xc800u : 0xc000u) | ((unsigned)rn << 8) | mask);
+        return 1;
+    }
     if (n < 2 || rn < 0 || rn > 14 || (mask & ~0xffffu) ||
         (mask & (1u << 13)) || (!load && (mask & (1u << 15))) ||
         (load && (mask & (1u << 15)) && (mask & (1u << 14))) ||

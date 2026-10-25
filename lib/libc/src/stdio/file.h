@@ -7,6 +7,7 @@
 #define EMBLIBC_FILE_H
 
 #include <stdio.h>
+#include <wchar.h>
 
 #include "../internal/lock.h"
 
@@ -35,6 +36,15 @@ struct _FILE {
 #define F_APPEND 0x10
 #define F_USED   0x20
 #define F_WRITING 0x40   /* the buffer currently holds unwritten output */
+/* Orientation (C11 7.21.2p4): none until the first byte or wide operation
+ * on the stream, and then that one until freopen. A wide stream's bytes
+ * are UTF-8, read and written through the byte functions below -- which
+ * is why those set F_BYTE only when neither is set yet. On a wide stream
+ * `ungot` holds a wide character: there are no byte reads to see it. */
+#define F_WIDE   0x80
+#define F_BYTE   0x100
+#define __byte_orient(f) \
+    ((f)->flags & (F_WIDE | F_BYTE) ? (void)0 : (void)((f)->flags |= F_BYTE))
 
 void __stdio_flush_all(void);
 int  __stdio_flush(FILE *f);

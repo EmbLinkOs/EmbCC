@@ -35,6 +35,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <stdint.h>
 
 #include "../../os/backend.h"
 #include "../internal/lock.h"
@@ -259,6 +260,28 @@ void free(void *p)
     __lock(&heap_lock);
     do_free(p);
     __unlock(&heap_lock);
+}
+
+/* C23's: the size and alignment are hints an allocator may use, and this
+ * one has them in the block's header already. */
+void free_sized(void *p, size_t size)
+{
+    (void)size;
+    free(p);
+}
+
+void free_aligned_sized(void *p, size_t align, size_t size)
+{
+    (void)align;
+    (void)size;
+    free(p);
+}
+
+/* What an address is aligned to: its lowest set bit, 0 for a null one. */
+size_t memalignment(const void *p)
+{
+    uintptr_t a = (uintptr_t)p;
+    return (size_t)(a & -a);
 }
 
 void *calloc(size_t n, size_t size)

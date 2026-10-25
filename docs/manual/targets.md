@@ -1060,7 +1060,8 @@ where clang inlines an `ldrexd`/`strexd` loop.
 ### Runtime
 
 `make rt-embedded` and `make libc-embedded` build `lib/rt` and `lib/libc`
-for `armv7a-none-eabi`. `lib/libc` has `setjmp`/`longjmp` for ARM state.
+for `armv7a-none-eabi`. `lib/libc` has `setjmp`/`longjmp` for ARM state,
+saving s16-s31 on `armv7a-none-eabihf`.
 `tests/harness/arm-a32` boots QEMU's `virt` board (a Cortex-A15): the
 MMU on with a flat map, the exception vectors, the PL011 UART and a
 semihosting exit.

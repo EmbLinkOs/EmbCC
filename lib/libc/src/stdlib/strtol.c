@@ -25,12 +25,19 @@ static unsigned long long conv(const char *s, char **end, int base,
     if (*s == '+' || *s == '-') neg = (*s++ == '-');
     *neg_out = neg;
 
-    if (base == 0) {
-        if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) { base = 16; s += 2; }
-        else if (s[0] == '0')                            { base = 8; }
-        else                                              base = 10;
-    } else if (base == 16 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
-        s += 2;
+    /* 0x before a base-16 numeral and, as C23 has it, 0b before a base-2
+     * one; base 0 takes either, or a leading 0 for octal. A prefix with no
+     * digit after it is not one: "0xz" is the number 0 and ends at the x
+     * -- `zero` keeps that 0 -- where it was no number at all. */
+    const char *zero = NULL;
+    if ((base == 0 || base == 16) && s[0] == '0' &&
+        (s[1] == 'x' || s[1] == 'X')) {
+        zero = s; base = 16; s += 2;
+    } else if ((base == 0 || base == 2) && s[0] == '0' &&
+               (s[1] == 'b' || s[1] == 'B')) {
+        zero = s; base = 2; s += 2;
+    } else if (base == 0) {
+        base = s[0] == '0' ? 8 : 10;
     }
 
     const char *digits = s;
@@ -51,8 +58,9 @@ static unsigned long long conv(const char *s, char **end, int base,
     }
     if (s == digits) {
         /* No digits at all: C says `end` gets the ORIGINAL string, not the
-         * position after the sign we hopefully consumed. */
-        if (end) *end = (char *)start;
+         * position after the sign we hopefully consumed -- unless a prefix
+         * had its 0. */
+        if (end) *end = (char *)(zero ? zero + 1 : start);
         return 0;
     }
     if (end) *end = (char *)s;

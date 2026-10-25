@@ -40,7 +40,11 @@ extern "C" {
 #define _IOLBF 1
 #define _IONBF 2
 
+/* <wchar.h> declares FILE too, for the wide stream functions. */
+#ifndef __EMBLIBC_FILE
+#define __EMBLIBC_FILE
 typedef struct _FILE FILE;
+#endif
 typedef long fpos_t;
 
 #if defined(__APPLE__)
@@ -94,6 +98,8 @@ void perror(const char *s);
 
 int remove(const char *path);
 int rename(const char *from, const char *to);
+FILE *tmpfile(void);
+char *tmpnam(char *s);
 
 /* Which argument is the format, and where the tail it describes begins
  * -- both 1-based, as GCC has spelled this for thirty years. It is what

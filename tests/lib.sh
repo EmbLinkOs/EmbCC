@@ -212,6 +212,8 @@ t_run() {
 # does inline, and the cross toolchains have no libatomic. Prints why.
 no_gcc_reference() {
     why=$(sed -n 's|.*// no-gcc-reference: *\(.*\)|\1|p' "$1" | head -1)
+    # the reference links newlib, which has not got what `needs-libc` asks
+    [ -n "$why" ] || why=$(sed -n 's|.*// needs-libc: *\(.*\)|\1|p' "$1" | head -1)
     [ -n "$why" ] || why=$(gcc_too_old_for "$1")
     [ -n "$why" ] && echo "$(basename "$1" .c): no gcc reference ($why), skipped"
 }
@@ -254,4 +256,11 @@ gcc_has() {
 pinned_elsewhere() {
     only=$(sed -n 's|.*// target: *\([a-z0-9_-]*\).*|\1|p' "$1" | head -1)
     [ -n "$only" ] && [ "$only" != "$TARGET" ]
+}
+
+# needs_libc FILE  — true if the program says `// needs-libc: why`: it calls
+# what only EmbCC's C library has, and a test that links the harness's
+# newlib (t_link) cannot run it.
+needs_libc() {
+    grep -q '// needs-libc:' "$1"
 }

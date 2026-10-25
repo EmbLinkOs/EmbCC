@@ -108,6 +108,8 @@ fi
 EOF
 for opt in -O0 -O1 -O2 -Os; do
     for c in tests/exec/*.c; do
+        n=$(basename "$c" .c)
+        case " ${EMBCC_EXEC_ONLY:-$n} " in *" $n "*) ;; *) continue ;; esac
         echo "$c $opt $out $refm"
     done
 done | EMBCC_QEMU_TIMEOUT=${EMBCC_QEMU_TIMEOUT:-20} \
@@ -121,6 +123,7 @@ for opt in -O0 -O1 -O2 -Os; do
     [ "$f" = 0 ] || fail=1
 done
 grep '^FAIL' "$out/results.txt" | head -20
+[ -n "${EMBCC_EXEC_ONLY:-}" ] ||
 [ "$(grep -c '^PASS' "$out/results.txt")" -ge 600 ] || {
     echo "fewer than 600 corpus runs passed -- the harness, not the programs"
     fail=1; }

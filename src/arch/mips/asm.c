@@ -566,6 +566,22 @@ static int stmt_body(const char *stmt, int len, struct code *out,
         return 0;
     }
     /* ---- register, register, immediate ---- */
+    /* MIPS64's doubleword add, what a 64-bit stack pointer moves by; like
+     * ld and sd, outside the MIPS32 table the referee checks. */
+    if (tok_is(&t[0], "daddiu")) {
+        int d, a;
+        if (!mips_is_64())
+            FAIL("daddiu is a MIPS64 instruction");
+        if (n != 4) FAIL("daddiu takes two registers and an immediate");
+        d = tok_reg(&t[1]); a = tok_reg(&t[2]);
+        if (d < 0 || a < 0 || !tok_imm(&t[3], &v))
+            FAIL("daddiu wants two registers and an immediate");
+        if (!mips_alu_imm_ok(MIPS_DADDIU, v))
+            FAIL("daddiu immediate %lld does not fit its signed 16-bit field",
+                 v);
+        mips_alu_imm(out, MIPS_DADDIU, d, a, v);
+        return 0;
+    }
     for (const struct ri_ent *e = ri_tab; e->name; e++) {
         int d, a;
         if (!tok_is(&t[0], e->name))
@@ -609,6 +625,26 @@ static int stmt_body(const char *stmt, int len, struct code *out,
     }
 
     /* ---- loads and stores ---- */
+    /* MIPS64's doubleword ones, what a 64-bit register is saved with
+     * (lib/libc's setjmp). Not in ls_tab: that is the MIPS32 vocabulary
+     * the referee checks. */
+    if (tok_is(&t[0], "ld") || tok_is(&t[0], "sd")) {
+        int r, base, st = tok_is(&t[0], "sd");
+        long long off;
+        if (!mips_is_64())
+            FAIL("%s is a MIPS64 instruction", st ? "sd" : "ld");
+        if (n != 3) FAIL("%s takes a register and an address", st ? "sd" : "ld");
+        r = tok_reg(&t[1]);
+        if (r < 0) FAIL("\"%.*s\" is not a register", t[1].len, t[1].s);
+        if (!tok_mem(&t[2], &base, &off))
+            FAIL("\"%.*s\" is not an `off(reg)` address", t[2].len, t[2].s);
+        if (!mips_fits16(off, 1))
+            FAIL("%s offset %lld does not fit a signed 16-bit field",
+                 st ? "sd" : "ld", off);
+        if (st) mips_store(out, r, base, (int)off, 8);
+        else    mips_load(out, r, base, (int)off, 8, 1);
+        return 0;
+    }
     for (const struct ls_ent *e = ls_tab; e->name; e++) {
         int r, base;
         long long off;

@@ -16,6 +16,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <wchar.h>
 
 #include "../../os/backend.h"
 
@@ -153,6 +154,19 @@ int timespec_get(struct timespec *ts, int base)
         return 0;
     ts->tv_sec = now;
     ts->tv_nsec = 0;
+    return base;
+}
+
+/* timespec_get counts whole seconds -- __os_time's -- so that is its
+ * resolution; where there is no clock there is no TIME_UTC either. */
+int timespec_getres(struct timespec *ts, int base)
+{
+    if (base != TIME_UTC || __os_time() < 0)
+        return 0;
+    if (ts) {
+        ts->tv_sec = 1;
+        ts->tv_nsec = 0;
+    }
     return base;
 }
 
@@ -335,4 +349,47 @@ size_t strftime(char *restrict s, size_t max, const char *restrict fmt,
         return 0;
     b.p[b.len] = 0;
     return b.len;
+}
+
+/* wcsftime, C11 §7.29.5.1: strftime into wide characters. The format's
+ * own text is copied as it is; each conversion is strftime's, whose output
+ * in this library's one locale is ASCII -- one wide character per byte. */
+size_t wcsftime(wchar_t *restrict s, size_t max, const wchar_t *restrict fmt,
+                const struct tm *restrict tm)
+{
+    size_t n = 0;
+    for (; *fmt; fmt++) {
+        char out[128];
+        size_t r;
+        if (*fmt != L'%' || !fmt[1]) {
+            if (n + 1 >= max)
+                return 0;
+            s[n++] = *fmt;
+            continue;
+        }
+        char spec[4] = { '%', 0, 0, 0 };
+        int k = 1;
+        fmt++;
+        if ((*fmt == L'E' || *fmt == L'O') && fmt[1])
+            spec[k++] = (char)*fmt++;
+        if ((unsigned long)*fmt < 0x80) {
+            spec[k] = (char)*fmt;
+            r = strftime(out, sizeof out, spec, tm);
+        } else {                       /* no conversion: itself, as strftime */
+            if (n + 2 >= max)
+                return 0;
+            s[n++] = L'%';
+            s[n++] = *fmt;
+            continue;
+        }
+        for (size_t i = 0; i < r; i++) {
+            if (n + 1 >= max)
+                return 0;
+            s[n++] = (unsigned char)out[i];
+        }
+    }
+    if (n >= max)
+        return 0;
+    s[n] = 0;
+    return n;
 }

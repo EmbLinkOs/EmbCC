@@ -49,14 +49,19 @@ typedef union {
 } mbstate_t;
 #else
 typedef struct {
-    unsigned int __wch;       /* the code point being assembled */
-    unsigned char __want;     /* bytes still needed (0: none pending) */
-    unsigned char __have;     /* bytes taken so far */
-    unsigned int __lowbound;  /* the smallest value this length may encode */
+    __UINT_LEAST32_TYPE__ __wch;      /* the code point being assembled */
+    unsigned char __want;             /* bytes still needed (0: none pending) */
+    unsigned char __have;             /* bytes taken so far */
+    __UINT_LEAST32_TYPE__ __lowbound; /* the smallest value this length may encode */
 } mbstate_t;
 #endif
 
 struct tm;
+
+#ifndef __EMBLIBC_FILE
+#define __EMBLIBC_FILE
+typedef struct _FILE FILE;
+#endif
 
 /* ---- wide string handling (7.29.4) ---- */
 size_t wcslen(const wchar_t *s);
@@ -87,6 +92,8 @@ wchar_t *wmemchr(const wchar_t *s, wchar_t c, size_t n);
 
 /* ---- conversion (7.29.6) ---- */
 int mbsinit(const mbstate_t *ps);
+wint_t btowc(int c);
+int wctob(wint_t c);
 size_t mbrlen(const char *__restrict s, size_t n, mbstate_t *__restrict ps);
 size_t mbrtowc(wchar_t *__restrict pwc, const char *__restrict s, size_t n,
                mbstate_t *__restrict ps);
@@ -95,6 +102,44 @@ size_t mbsrtowcs(wchar_t *__restrict d, const char **__restrict s, size_t n,
                  mbstate_t *__restrict ps);
 size_t wcsrtombs(char *__restrict d, const wchar_t **__restrict s, size_t n,
                  mbstate_t *__restrict ps);
+
+/* ---- wide-character input and output (7.29.3) ----
+ *
+ * A wide stream's bytes are UTF-8. The first byte or wide operation on a
+ * stream decides which it is, and fwide asks (or decides). */
+int fwide(FILE *f, int mode);
+wint_t fgetwc(FILE *f);
+wint_t getwc(FILE *f);
+wint_t getwchar(void);
+wint_t fputwc(wchar_t c, FILE *f);
+wint_t putwc(wchar_t c, FILE *f);
+wint_t putwchar(wchar_t c);
+wint_t ungetwc(wint_t c, FILE *f);
+wchar_t *fgetws(wchar_t *__restrict s, int n, FILE *__restrict f);
+int fputws(const wchar_t *__restrict s, FILE *__restrict f);
+
+/* ---- formatted wide input and output (7.29.2) ---- */
+int fwprintf(FILE *__restrict f, const wchar_t *__restrict fmt, ...);
+int wprintf(const wchar_t *__restrict fmt, ...);
+int swprintf(wchar_t *__restrict s, size_t n,
+             const wchar_t *__restrict fmt, ...);
+int vfwprintf(FILE *__restrict f, const wchar_t *__restrict fmt,
+              va_list ap);
+int vwprintf(const wchar_t *__restrict fmt, va_list ap);
+int vswprintf(wchar_t *__restrict s, size_t n,
+              const wchar_t *__restrict fmt, va_list ap);
+int fwscanf(FILE *__restrict f, const wchar_t *__restrict fmt, ...);
+int wscanf(const wchar_t *__restrict fmt, ...);
+int swscanf(const wchar_t *__restrict s, const wchar_t *__restrict fmt, ...);
+int vfwscanf(FILE *__restrict f, const wchar_t *__restrict fmt, va_list ap);
+int vwscanf(const wchar_t *__restrict fmt, va_list ap);
+int vswscanf(const wchar_t *__restrict s, const wchar_t *__restrict fmt,
+             va_list ap);
+
+/* ---- time (7.29.5) ---- */
+size_t wcsftime(wchar_t *__restrict s, size_t max,
+                const wchar_t *__restrict fmt,
+                const struct tm *__restrict tm);
 
 /* ---- numeric conversion (7.29.4.1) ---- */
 long wcstol(const wchar_t *__restrict s, wchar_t **__restrict end, int base);

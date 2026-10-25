@@ -2368,6 +2368,10 @@ void tasm_vocabulary(FILE *f)
     fprintf(f, "\tstmfd r1!, {r2, r3}\n\tldmfd r9!, {r2, r3}\n");
     fprintf(f, "\tstmia r2, {r8-r11}\n\tstm r6, {r8, r9}\n");
     fprintf(f, "\tldmdb r5, {r8, pc}\n\tldm r7, {r0, r10}\n");
+    /* ...and the 16-bit forms, low registers written back (lib/libc's
+     * ARMv6-M setjmp) */
+    fprintf(f, "\tstmia r0!, {r4-r7}\n\tldmia r0!, {r2-r7}\n");
+    fprintf(f, "\tldmia r1, {r1-r3}\n\tstm r6!, {r0}\n");
     fprintf(f, "\tvstmdb r0!, {s16-s31}\n\tvldmia r0!, {s16-s31}\n");
     fprintf(f, "\tvstmia r3, {s0-s7}\n\tvldmdb r9!, {s1-s3}\n");
     fprintf(f, "\tvpush {s16-s31}\n\tvpop {s16-s31}\n");

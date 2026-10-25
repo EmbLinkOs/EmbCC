@@ -101,7 +101,7 @@ double remquo(double, double, int *);
 double fabs(double), copysign(double, double), nan(const char *);
 double fdim(double, double), fmax(double, double), fmin(double, double);
 double fma(double, double, double);
-double nextafter(double, double);
+double nextafter(double, double), nexttoward(double, long double);
 double erf(double), erfc(double), tgamma(double), lgamma(double);
 
 /* The float forms. C11 requires all three widths for every function
@@ -122,6 +122,7 @@ float ldexpf(float, int), frexpf(float, int *), modff(float, float *);
 float fmaxf(float, float), fminf(float, float), fdimf(float, float);
 float scalbnf(float, int), scalblnf(float, long);
 float nextafterf(float, float), remainderf(float, float);
+float nexttowardf(float, long double), nanf(const char *);
 float fmaf(float, float, float), remquof(float, float, int *);
 float erff(float), erfcf(float), tgammaf(float), lgammaf(float);
 long lrintf(float), lroundf(float);
@@ -157,6 +158,7 @@ long double fmaxl(long double, long double), fminl(long double, long double);
 long double fdiml(long double, long double);
 long double scalbnl(long double, int), scalblnl(long double, long);
 long double nextafterl(long double, long double);
+long double nexttowardl(long double, long double), nanl(const char *);
 long double remainderl(long double, long double);
 long double fmal(long double, long double, long double);
 long double remquol(long double, long double, int *);
@@ -164,6 +166,27 @@ long double erfl(long double), erfcl(long double);
 long double tgammal(long double), lgammal(long double);
 long lrintl(long double), lroundl(long double);
 long long llrintl(long double), llroundl(long double);
+
+/* C23 (7.12): roundeven, ties to even in any rounding mode; nextup and
+ * nextdown, one step toward an infinity; fmaximum and fminimum, which say
+ * what fmax and fmin do not -- a NaN either side is a NaN, +0 is above
+ * -0 -- with their _num (a number over a NaN), _mag (by magnitude) and
+ * _mag_num forms; and exp10. lib/libc/src/math/c23.c. */
+#define __C23_MATH_DECL(T, S)                                               \
+    T roundeven##S(T), nextup##S(T), nextdown##S(T), exp10##S(T);           \
+    T fmaximum##S(T, T), fminimum##S(T, T);                                 \
+    T fmaximum_num##S(T, T), fminimum_num##S(T, T);                         \
+    T fmaximum_mag##S(T, T), fminimum_mag##S(T, T);                         \
+    T fmaximum_mag_num##S(T, T), fminimum_mag_num##S(T, T);
+__C23_MATH_DECL(double, )
+__C23_MATH_DECL(float, f)
+__C23_MATH_DECL(long double, l)
+#undef __C23_MATH_DECL
+
+#if __STDC_VERSION__ >= 202311L
+#define iszero(x)      ((x) == 0)
+#define issubnormal(x) (fpclassify(x) == FP_SUBNORMAL)
+#endif
 
 #ifdef __cplusplus
 }

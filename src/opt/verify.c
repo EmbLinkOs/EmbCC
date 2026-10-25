@@ -98,6 +98,18 @@ void verify_func(struct ir_func *fn, const char *tag)
             free(pv);
         }
     }
+    /* (5) every move says how wide it is: a backend reads w to choose
+     * the register class and the copy, and the inliner's moves of a
+     * returned value had none -- AArch64 copied a double between stack
+     * slots as four bytes. */
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        if (i->op == IR_MOV && i->dst >= 0 && i->w <= 0)
+            diag_fatal(fn->file, 0, "internal: %s instruction %d moves %%%d "
+                       "to %%%d with no width (after %s) -- a pass built the "
+                       "move without saying how wide the value is",
+                       fn->name, n, i->a, i->dst, tag);
+    }
     if (fn->var_scope_lo)
         for (int i = 0; i < fn->nvars; i++) {
             int lo = fn->var_scope_lo[i], hi = fn->var_scope_hi[i];

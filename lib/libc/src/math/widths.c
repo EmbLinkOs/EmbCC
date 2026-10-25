@@ -27,6 +27,7 @@
 #include <math.h>
 #include <fenv.h>
 #include <float.h>
+#include <stdint.h>
 
 /* ---- the double forms C11 requires that fdlibm's 1993 set omits ------- */
 
@@ -278,7 +279,112 @@ L1(exp2) L1(expm1)
 L1(log2) L1(log10) L1(log1p)
 L1(cbrt)
 L1(erf) L1(erfc) L1(tgamma) L1(lgamma)
-L2(atan2) L2(hypot) L2(nextafter) L2(remainder)
+L2(atan2) L2(hypot) L2(remainder)
+
+/* ---- one step: nextafter's long double, and nexttoward ----
+ *
+ * nextafterl moves by one long double, which a double cannot do for it:
+ * the x87's neighbours are 2^-11 of a double's apart and binary128's
+ * 2^-60, so going through nextafter answered with the double next to x,
+ * dozens of long doubles away. It works on the representation instead,
+ * as nextafter does: the magnitude is an integer, and the next value
+ * away from zero is the next integer -- a normal's largest significand
+ * steps into the next exponent, the largest finite value into infinity,
+ * and the largest subnormal into the smallest normal by the same carry.
+ * Where long double is double, it is nextafter. */
+#if __LDBL_MANT_DIG__ == __DBL_MANT_DIG__
+long double nextafterl(long double x, long double y)
+{
+    return nextafter((double)x, (double)y);
+}
+#else
+long double nextafterl(long double x, long double y)
+{
+    if (x != x || y != y)
+        return x + y;
+    if (x == y)
+        return y;
+    if (x == 0)
+        return y > 0 ? LDBL_TRUE_MIN : -LDBL_TRUE_MIN;
+    int away = (x < y) == (x > 0);
+#if __LDBL_MANT_DIG__ == 64
+    /* The x87's: a 64-bit significand whose top bit, the integer bit, is
+     * written out -- set in a normal, clear in a subnormal -- then the
+     * sign and fifteen bits of exponent. The carry out of the significand
+     * is the exponent's, the integer bit coming back; a subnormal that
+     * reaches the integer bit is the smallest normal, exponent 1. */
+    union { long double v; struct { uint64_t m; uint16_t se; } b; } u;
+    const uint64_t one = (uint64_t)1 << 63;
+    u.v = x;
+    if (away) {
+        if (++u.b.m == 0) {
+            u.b.m = one;
+            u.b.se++;
+        } else if ((u.b.se & 0x7FFF) == 0 && u.b.m == one) {
+            u.b.se++;
+        }
+    } else if (u.b.m == one && (u.b.se & 0x7FFF) != 0) {
+        u.b.se--;
+        u.b.m = (u.b.se & 0x7FFF) ? ~(uint64_t)0 : ~(uint64_t)0 >> 1;
+    } else {
+        u.b.m--;
+    }
+    return u.v;
+#elif __LDBL_MANT_DIG__ == 113
+    /* binary128: sign, fifteen bits of exponent, 112 of fraction -- one
+     * 127-bit magnitude, in two halves stored in the target's order. */
+    union {
+        long double v;
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+        struct { uint64_t hi, lo; } b;
+#else
+        struct { uint64_t lo, hi; } b;
+#endif
+    } u;
+    u.v = x;
+    if (away) {
+        if (++u.b.lo == 0)
+            u.b.hi++;
+    } else {
+        if (u.b.lo-- == 0)
+            u.b.hi--;
+    }
+    return u.v;
+#else
+#error "nextafterl: a long double layout this file does not know"
+#endif
+}
+#endif
+
+/* nexttoward is nextafter with a long double for the direction: a double
+ * can be asked to step toward a value between it and its neighbour that
+ * only a long double holds. Which way to go is all y decides. */
+double nexttoward(double x, long double y)
+{
+    if (x != x || y != y)
+        return (double)(x + y);
+    if (x == y)
+        return (double)y;
+    return nextafter(x, x < y ? (double)INFINITY : -(double)INFINITY);
+}
+
+float nexttowardf(float x, long double y)
+{
+    if (x != x || y != y)
+        return (float)(x + y);
+    if (x == y)
+        return (float)y;
+    return nextafterf(x, x < y ? INFINITY : -INFINITY);
+}
+
+long double nexttowardl(long double x, long double y)
+{
+    return nextafterl(x, y);
+}
+
+/* A quiet NaN, whatever the tag: nan() does the same. */
+float nanf(const char *tag) { (void)tag; return __builtin_nanf(""); }
+long double nanl(const char *tag) { (void)tag; return __builtin_nanl(""); }
 
 long double fmal(long double x, long double y, long double z)
 { return x * y + z; }

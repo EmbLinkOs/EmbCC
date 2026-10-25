@@ -21,8 +21,12 @@
  * signedness is a TARGET decision, not a C one: it is signed 32-bit on
  * x86-64 and unsigned 32-bit on aarch64, exactly as those ABIs say. The
  * compiler knows which and publishes it. */
+#ifndef WCHAR_MIN           /* <stdint.h> or <wchar.h> may have said so */
 #define WCHAR_MIN  __WCHAR_MIN__
+#endif
+#ifndef WCHAR_MAX
 #define WCHAR_MAX  __WCHAR_MAX__
+#endif
 
 /* The longest multibyte character this library writes: a UTF-8 sequence
  * is at most four bytes. The compiler's half says 1, for a library with
