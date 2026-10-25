@@ -205,8 +205,7 @@ static const struct backend_desc g_backends[] = {
         .firmware = 1, .ld_scripts = 0,
         .call_insn = "call", .call_delay_slot = 0, .sym_prefix = "",
         .imm_prefixed = 0, .text_p2align = 2,
-        .no_asm_text = "compile with -c (there is no Xtensa assembler here to check the text "
-                       "against)",
+        .no_asm_text = NULL,
         .option = xtensa_target_option },
 #endif
 #if FAMILY_BUILT(ppc)
@@ -254,8 +253,7 @@ static const struct backend_desc g_backends[] = {
         .firmware = 1, .ld_scripts = 0,
         .call_insn = "bsr", .call_delay_slot = 0, .sym_prefix = "_",
         .imm_prefixed = 1, .text_p2align = 2,
-        .no_asm_text = "EmbCC writes no RX assembly text (use -c; .s files and "
-                       "inline asm do assemble)",
+        .no_asm_text = NULL,
         .option = rx_target_option },
 #endif
 };

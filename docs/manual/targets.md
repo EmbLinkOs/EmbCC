@@ -2181,7 +2181,6 @@ the entry.
 | `.begin longcalls` | `.begin longcalls is not supported: a long call is an l32r and a callx, which this assembler does not make of a call; write them` |
 | `__int128` | `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |
 | `__attribute__((interrupt))` | `__attribute__((interrupt)) is not supported: ...` |
-| `-S` | `-S is not supported for xtensa-none-elf yet: compile with -c (there is no Xtensa assembler here to check the text against)` |
 | `--unwind-tables`, `-fasynchronous-unwind-tables`, `--exceptions` | `unwind tables are not supported for xtensa-none-elf yet (...): EmbCC writes no Xtensa .eh_frame` |
 | C++ with exceptions (on by default) | `C++ exceptions are not supported for xtensa-none-elf yet: EmbCC writes no Xtensa .eh_frame; compile with --no-exceptions`. C++ itself compiles with `--no-exceptions`; see [C++](cxx.md#targets) |
 | `__builtin_frame_address(N)` or `__builtin_return_address(N)` with N above 0 (level 0 is supported; see [Extensions](extensions.md)) | `__builtin_return_address(1) is not supported on sparc-none-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found` |

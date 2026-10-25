@@ -376,6 +376,8 @@ struct global {
     int in_rodata;        /* driver: a const object, placed in .rodata
                            * after the string literals (ELF) */
     int named;            /* driver: 1 + index into the named sections, or 0 */
+    int sec_flags;        /* driver: that named section's SHF_* flags, as
+                           * the object gives them (-S writes the same) */
     int off;              /* driver: offset inside its section */
     int sym_ndx;          /* driver: symbol index */
 };

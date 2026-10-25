@@ -443,7 +443,7 @@ xtensa-none-elf nested no: expected ';' before '{' [E0002]
 xtensa-none-elf interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V and MIPS32 it is implemented)
 xtensa-none-elf naked yes
 xtensa-none-elf asmfile yes
-xtensa-none-elf dashS no: -S is not supported for xtensa-none-elf yet: compile with -c (there is no Xtensa assembler here to check the text against)
+xtensa-none-elf dashS yes
 xtensa-none-elf debug yes
 xtensa-none-elf unwind no: unwind tables are not supported for xtensa-none-elf yet (--unwind-tables, --exceptions): EmbCC writes no Xtensa .eh_frame
 xtensa-none-elf cxx yes
@@ -503,7 +503,7 @@ rx-none-elf nested no: expected ';' before '{' [E0002]
 rx-none-elf interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V and MIPS32 it is implemented)
 rx-none-elf naked yes
 rx-none-elf asmfile yes
-rx-none-elf dashS no: -S is not supported for rx-none-elf yet: EmbCC writes no RX assembly text (use -c; .s files and inline asm do assemble)
+rx-none-elf dashS yes
 rx-none-elf debug yes
 rx-none-elf unwind no: unwind tables are not supported for rx-none-elf yet (--unwind-tables, --exceptions): EmbCC writes no RX .eh_frame
 rx-none-elf cxx yes

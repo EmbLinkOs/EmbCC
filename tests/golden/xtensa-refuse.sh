@@ -92,7 +92,6 @@ refopt -mforce-l32 'is not supported for xtensa-none-elf'
 refopt -mabi=n32 'not an Xtensa ABI'
 refopt -mfoo "unknown argument '-mfoo'"
 refopt -mdynconfig=xtensa_esp32s2.so 'is not supported for xtensa-none-elf'
-refopt -S 'is not supported for xtensa-none-elf yet'
 for o in -funwind-tables -fasynchronous-unwind-tables -fexceptions; do
     refopt $o 'unwind tables are not supported for xtensa-none-elf yet'
 done

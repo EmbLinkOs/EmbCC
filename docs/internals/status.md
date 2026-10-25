@@ -140,7 +140,7 @@ the sections nothing reaches, on every machine, for objects built with
 |---|---|---|
 | `.s` and `.S` files (GNU syntax) | Refused: `no assembly-file support for x86_64-elf yet; its instruction encoder exists (inline __asm__ works) but this driver has not been wired to it` | Assembled, with GNU as's directives, macros, conditionals, sections, expressions, literal pools and branch relaxation; ARM's CMSIS and ST's startup files assemble to clang's object ([embas](../manual/tools/embas.md#gnu-syntax-assembly)) |
 | `.asm` files (NASM syntax) | Assembled | Assembled as x86-64; see [Known defects](#known-defects) |
-| `-S` | `.byte` directives with the disassembly in comments | Refused on Xtensa and RX (see [What each target compiles](../manual/limits.md#-s-assembly-output)); elsewhere `.byte` directives without mnemonics; on MIPS a relocated instruction is written symbolically (`jal f`, `lui $2, %hi(g)`), because llvm-mc's MIPS `.reloc` knows none of those relocations |
+| `-S` | `.byte` directives with the disassembly in comments | Elsewhere `.byte` directives without mnemonics; on MIPS a relocated instruction is written symbolically (`jal f`, `lui $2, %hi(g)`), because llvm-mc's MIPS `.reloc` knows none of those relocations. Every target's text reassembles into the object: checked with EmbCC's own assembler on all but x86-64, and with llvm-mc where it has the target |
 | File-scope `__asm__` | Labels, `.globl`, `.byte`/`.long`/`.quad` and the instructions `and`, `call`, `jmp`, `ret` | AArch64: labels, `.globl` and data directives, no instruction. Every other target: the GNU-syntax assembler's whole language, as in a `.S` file, into `.text` |
 
 Any other instruction in a file-scope `asm` block is refused. On x86-64:
@@ -645,7 +645,6 @@ audited:
   ARM or RISC-V hard-float convention; `asm goto`, nested functions,
   `__builtin_setjmp` and sixteen-byte atomics off x86-64 and AArch64
   (see [What each target compiles](../manual/limits.md)).
-- `-S` on Xtensa and RX.
 - On MIPS32, a delay slot filled from anywhere but the instruction just
   before the transfer (the branch target's first instruction, or one
   from before the `slt` a compare-and-branch needs).

@@ -102,7 +102,6 @@ refopt -mas100-syntax 'AS100'
 for o in -funwind-tables -fasynchronous-unwind-tables -fexceptions; do
     refopt $o 'unwind tables are not supported for rx-none-elf yet'
 done
-refopt -S '-S is not supported for rx-none-elf'
 echo "the RXv1/little-endian/32-bit-double/no-FPU/RX-ABI flags are accepted, others refused"
 
 # ---- the constructs ----------------------------------------------------------

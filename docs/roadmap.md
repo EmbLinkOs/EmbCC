@@ -146,7 +146,8 @@ Every refusal either implemented or declared permanent:
 - The Microsoft x64 calling convention in full, so Windows objects link
   with other compilers' objects.
 - `embld` linking AArch64 programs; an AT&T-syntax x86-64 assembler for
-  `.s` files; `-S` on every target.
+  `.s` files. (`-S` on every target: done -- Xtensa and RX too, and the
+  text of every target but x86-64 reassembles with EmbCC's own assembler.)
 - A Windows host build of the whole toolchain.
 
 **Done when:** the refusal count is zero apart from the permanent list,

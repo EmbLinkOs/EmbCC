@@ -232,19 +232,7 @@ Refused on 3 of the 25 targets.
 
 ## `-S` (assembly output)
 
-Refused on 2 of the 25 targets.
-
-- Refused on `xtensa-none-elf`:
-
-  ```text
-  -S is not supported for TARGET yet: compile with -c (there is no Xtensa assembler here to check the text against)
-  ```
-
-- Refused on `rx-none-elf`:
-
-  ```text
-  -S is not supported for TARGET yet: EmbCC writes no RX assembly text (use -c; .s files and inline asm do assemble)
-  ```
+Compiles on every target.
 
 ## `-g` (DWARF)
 
@@ -460,9 +448,9 @@ Refused on 21 of the 25 targets.
 | `mips64el-none-elf` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | no | yes | yes | yes | yes | no | yes | no |
 | `mips64-none-elf` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | no | yes | yes | yes | yes | no | yes | no |
 | `loongarch64-unknown-elf` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | no | yes | yes | yes | yes | no | yes | no |
-| `xtensa-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | no | yes | yes | no | yes | no | yes | no |
+| `xtensa-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | no | yes | yes | yes | yes | no | yes | no |
 | `tricore-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | no | yes | yes | yes | yes | no | yes | no |
-| `rx-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | no | yes | yes | no | yes | no | yes | no |
+| `rx-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | no | yes | yes | yes | yes | no | yes | no |
 | `powerpc-none-eabi` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | no | yes | yes | yes | yes | no | yes | no |
 | `sparc-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | no | yes | yes | yes | yes | no | yes | no |
 | `m68k-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | no | no | no | yes | yes | yes | yes | no | yes | no |

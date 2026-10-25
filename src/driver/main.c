@@ -2230,15 +2230,36 @@ static int glibc_link(const char *in, const char *exe)
  * writer is told by a leading \1 (LLVM's spelling of the same thing). */
 static const char *asm_link_name(const char *lab)
 {
-    if (target_fmt_get() != TGT_FMT_MACHO)
+    /* (and RX's ELF the same: its writer prefixes C names too, and an asm
+     * label is the symbol as written -- `asm("sect_start")` was
+     * `_sect_start`) */
+    const char *pre = target_fmt_get() == TGT_FMT_MACHO ? "_"
+                    : backend_get(target_get())->sym_prefix;
+    if (!pre || !*pre)
         return lab;
-    if (lab[0] == '_')
-        return lab + 1;
+    if (!strncmp(lab, pre, strlen(pre)) && lab[strlen(pre)])
+        return lab + strlen(pre);
     size_t n = strlen(lab);
     char *raw = xmalloc(n + 2);
     raw[0] = '\1';
     memcpy(raw + 1, lab, n + 1);
     return raw;
+}
+
+/* The symbol a name already has in the object being written: a function
+ * or object defined here -- an asm label can give a definition the name
+ * an extern declaration also has -- or 0 for none yet. */
+static int defined_here(const struct unit *u, const char *name)
+{
+    for (const struct func *f = u->funcs; f; f = f->next)
+        if (!f->absorbed && f->sym_ndx && (f->has_defn || f->alias_of) &&
+            !strcmp(f->name, name))
+            return f->sym_ndx;
+    for (const struct global *g = u->globals; g; g = g->next)
+        if (!g->absorbed && g->sym_ndx && (g->defined || g->alias_of) &&
+            !strcmp(g->name, name))
+            return g->sym_ndx;
+    return 0;
 }
 
 static void apply_asm_names(struct unit *u)
@@ -3378,6 +3399,9 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     for (int k = 0; k < nnamed; k++)
         if (!named[k].nobits && named[k].len)
             named[k].buf = xcalloc(1, (size_t)named[k].len);
+    for (struct global *g = u->globals; g; g = g->next)
+        if (g->named)
+            g->sec_flags = named[g->named - 1].flags;
     char *data = NULL;
     if (data_len)
         data = xcalloc(1, (size_t)data_len);
@@ -3580,9 +3604,8 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     /* -S: the same bytes, as text (src/driver/asmout.c). Everything the
      * emitter needs is in hand here -- the code, the string pool, and the
      * relocation sites the backend recorded. */
-    /* A target with no -S text (the registry's no_asm_text: Xtensa has no
-     * assembler here to check the text against, and RX no disassembler
-     * to write it) is refused by name rather than written unverified. */
+    /* A target with no -S text (the registry's no_asm_text, NULL on every
+     * target today) is refused by name rather than written unverified. */
     const char *no_asm_text = backend_get(ta)->no_asm_text;
     if (want_asm && no_asm_text)
         diag_fatal(NULL, 0, "-S is not supported for %s yet: %s",
@@ -4698,9 +4721,12 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     /* extern-declared, used, never defined: the linker's problem --
      * unless a file-scope asm block defines it (sym_ndx, set above),
      * which gave the object a definition and an undefined symbol of
-     * the same name, and the C code's references went to the second. */
+     * the same name, and the C code's references went to the second.
+     * The same for a definition an asm label gave the name (`char
+     * s[4] __asm__("sect_start")` beside `extern void sect_start`). */
     for (struct global *g = u->globals; g; g = g->next)
-        if (!g->absorbed && !g->defined && g->used && !g->sym_ndx)
+        if (!g->absorbed && !g->defined && g->used && !g->sym_ndx &&
+            !(g->sym_ndx = defined_here(u, g->name)))
             g->sym_ndx = elfw_add_symbol(
                 w, g->name, 0, 0,
                 ELF64_ST_INFO(g->is_weak ? STB_WEAK : STB_GLOBAL,
@@ -4711,6 +4737,8 @@ static int compile_unit(const char *in, const char *out, int pp_only)
      * the END of the call instruction, four bytes past r_offset. */
     for (int i = 0; i < next; i++) {
         struct func *callee = ext[i].callee;
+        if (!callee->sym_ndx)
+            callee->sym_ndx = defined_here(u, callee->name);
         if (!callee->sym_ndx)
             callee->sym_ndx =
                 elfw_add_symbol(w, callee->name, 0, 0,
@@ -4905,6 +4933,8 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                 /* a function pointer (a vtable): resolve to the function's
                  * symbol; an external, never-called one needs an UNDEF. */
                 if (!ft->sym_ndx)
+                    ft->sym_ndx = defined_here(u, ft->name);
+                if (!ft->sym_ndx)
                     ft->sym_ndx = elfw_add_symbol(
                         w, ft->name, 0, 0,
                         ELF64_ST_INFO(ft->is_weak ? STB_WEAK : STB_GLOBAL,
@@ -4944,6 +4974,8 @@ static int compile_unit(const char *in, const char *out, int pp_only)
      * address-taken external gets an UNDEF symbol like a called one. */
     for (int i = 0; i < nfs; i++) {
         struct func *tf = fs[i].target;
+        if (!tf->sym_ndx)
+            tf->sym_ndx = defined_here(u, tf->name);
         if (!tf->sym_ndx)
             tf->sym_ndx = elfw_add_symbol(
                 w, tf->name, 0, 0,
