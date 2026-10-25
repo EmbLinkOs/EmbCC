@@ -685,7 +685,7 @@ supported: REASON`:
 | `interrupt_thread` | `it makes a Fido interrupt thread, which switches register banks a ColdFire does not have; use __attribute__((interrupt))` |
 | `keep_interrupts_masked` | `it modifies a MIPS interrupt handler, and only the MIPS targets implement those` (on every target but MIPS32 and MIPS64) |
 | `ms_abi` | `the arguments would be passed in System V's registers` |
-| `naked` | On x86-64 and AArch64; see [Naked functions](inline-asm.md#naked-functions) |
+| `naked` | On x86-64 and Apple arm64; see [Naked functions](inline-asm.md#naked-functions) |
 | `signal` | On every target but AVR; see [Interrupt handlers](#interrupt-handlers) |
 | `sysv_abi` | `the arguments would be passed in the other convention's registers` |
 | `target` | `EmbCC selects its instruction set per compilation; a function asking for another would be compiled for the wrong one` |
@@ -746,11 +746,12 @@ How to install a handler on each board, and what each one saves, is in
 and [MIPS32](embedded.md#interrupt-handlers-2). For the AVR vector names
 (`__vector_N`), see [AVR](embedded.md#avr-atmega328p).
 
-`naked` is supported on ARM Cortex-M, RISC-V and AVR, where the body is
-assembled as a block of the target's assembly; see
-[Naked functions](inline-asm.md#naked-functions). On x86-64, AArch64 and
-MIPS32 it is refused, and a function that must run without a prologue is
-written in assembly.
+`naked` is supported on every target but x86-64 and Apple arm64: the
+body is assembled as a block of the target's assembly (on AArch64, from
+its inline-asm vocabulary); see
+[Naked functions](inline-asm.md#naked-functions). On those two it is
+refused, and a function that must run without a prologue is written in
+assembly.
 
 ### Placing code and data
 

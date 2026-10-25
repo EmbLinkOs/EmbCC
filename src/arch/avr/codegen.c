@@ -6183,12 +6183,30 @@ static int avr_attempt(struct ir_func *fn, struct code *t, struct a_sites *st,
             g_a_xhome = 0;               /* X was scratch after all */
             continue;
         }
+        int vol = 0, home = 0;
         for (int v = 0; v < nv; v++) {
-            if (g_a_pend[v] & 1) { g_a_novol[v] = 1; any = 1; }
-            if (g_a_pend[v] & 2) { g_a_nohome[v] = 1; any = 1; }
+            if (g_a_pend[v] & 1) { g_a_novol[v] = 1; any = vol = 1; }
+            if (g_a_pend[v] & 2) { g_a_nohome[v] = 1; any = home = 1; }
         }
         if (!any)
             return len;
+        /* A round learns of the values it caught, and the allocator gives
+         * the home to the next one: a site whose lowering needs B as
+         * scratch catches one value a round. GCC's 20001226-1.c, 8,192
+         * tests of 128 values held across the function, caught four a
+         * round for 82 rounds of a 185 KB function. Past a budget of
+         * rounds times the function's size, the whole class goes -- no
+         * homes in B, as before there were any, and then none at all:
+         * larger code, for a function too big to mind it. The budget is
+         * over five times the most any function of tests/exec and libc
+         * takes (63 rounds of 380 instructions, 7 of 4,967), so their
+         * code is what it was. The masks are the attempt's own, so the
+         * replay of the best (gen_func_best) does the same. */
+        long work = (long)tries * (long)fn->nins;
+        if (vol && work >= 200000)
+            memset(g_a_novol, 1, (size_t)nv);
+        if (home && work >= 400000)
+            memset(g_a_nohome, 1, (size_t)nv);
         if (tries > 2 * nv + 2)
             internal_error("avr: %s: values kept being overwritten in their "
                            "homes after %d attempts", fn->name, tries);
@@ -6258,6 +6276,14 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
                 fprintf(stderr, "%s: mode %d cap %d, %d bytes\n", fn->name,
                         m, g_a_cap, len);
             best_last = 0;
+            /* The attempts are there to save bytes of a part's flash: a
+             * function whose first came out larger than 64 KB, more than
+             * an ATmega's 16-bit Z can reach, is kept as it is (GCC's
+             * 20001226-1.c: 185 KB, nine attempts of it) */
+            if (best == AVR_RA_NONE && len > 65536) {
+                m1 = m;
+                c1 = c;
+            }
             if (best == AVR_RA_NONE || len < best_len) {
                 best = m;
                 best_cap = g_a_cap;

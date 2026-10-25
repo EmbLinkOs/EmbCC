@@ -240,6 +240,12 @@ int target_apply_default(const char **bad)
 
 enum target_os  target_os_get(void)  { return g_os; }
 enum target_fmt target_fmt_get(void) { return g_fmt; }
+int target_asm_blocks(void)
+{
+    if (target_get() == TARGET_X86_64)
+        return 0;
+    return target_get() != TARGET_AARCH64 || g_fmt == TGT_FMT_ELF;
+}
 void target_os_set(enum target_os o)   { g_os = o; }
 void target_fmt_set(enum target_fmt f) { g_fmt = f; }
 

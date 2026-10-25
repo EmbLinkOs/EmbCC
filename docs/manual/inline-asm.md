@@ -475,17 +475,20 @@ label (`name:`).
 
 How a block is assembled depends on the target:
 
-- **ARM Cortex-M, RISC-V, MIPS32, LoongArch64, Xtensa, TriCore, SPARC, PowerPC, RX, ColdFire and AVR.** The block is read by the assembler
+- **ARM Cortex-M, RISC-V, MIPS32, LoongArch64, Xtensa, TriCore, SPARC, PowerPC, RX, ColdFire, AVR, and AArch64 ELF.** The block is read by the assembler
   that reads a `.s` file, so it holds the target's own instructions; see
   [On Cortex-M, RISC-V, MIPS32 and AVR](#on-cortex-m-risc-v-mips32-and-avr).
-- **x86-64 and AArch64.** The block is read by a small fixed vocabulary
+  On AArch64 they are the instructions of its [inline asm](#aarch64)
+  vocabulary, which has no `ldp`, `stp` or arithmetic yet.
+- **x86-64, and AArch64 into Mach-O.** The block is read by a small fixed vocabulary
   of directives, data and (on x86-64) four instructions, described in the
   rest of this section. `#`, `;` and `/*` start a comment that runs to
   the end of the line. Registers are written with a single `%`.
 
 The assembled bytes of every block are placed in `.text` after the
-unit's functions. On x86-64 and AArch64 each block starts on a 16-byte
-boundary.
+unit's functions. On x86-64 and Apple arm64 each block starts on a
+16-byte boundary; elsewhere on the alignment its own `.align` asks for,
+and at least the instruction size.
 
 ### Directives
 
@@ -564,17 +567,18 @@ __asm__(".global _start\n"
 |---|---|
 | x86-64 ELF (`x86_64-elf`, `x86_64-emblink`, `x86_64-linux-gnu`) | everything above |
 | ARM Cortex-M, RISC-V, MIPS32, LoongArch64, Xtensa, TriCore, SPARC, PowerPC, RX, ColdFire, AVR | the target's instructions and the GNU assembler's directives; see [On Cortex-M, RISC-V, MIPS32 and AVR](#on-cortex-m-risc-v-mips32-and-avr) |
-| AArch64 ELF | directives and data only; an instruction is refused (below) |
+| AArch64 ELF | the instructions of the [AArch64](#aarch64) inline-asm vocabulary, labels and the GNU assembler's directives |
 | `x86_64-apple-darwin` | a block with a label or a symbol reference is refused (below) |
 | `aarch64-apple-darwin` | directives and data only, and a block with a label or a symbol reference is refused (below) |
 | `x86_64-windows-gnu` | a block with a label or a symbol reference is refused (below) |
 | C++ (any target) | refused: `file-scope asm in C++ is not supported yet` |
 
-On AArch64, an instruction in a file-scope block is refused, whatever
-its mnemonic:
+On Apple arm64, an instruction in a file-scope block is refused, whatever
+its mnemonic, because the Mach-O writer takes no relocation type from an
+assembler:
 
 ```text
-file-scope asm instruction "ret": EmbCC assembles instructions for x86-64 only. On this target write the block as .byte/.long data (see lib/libc/src/setjmp).
+file-scope asm instruction "ret": EmbCC assembles a block's instructions on x86-64 (a few) and on every ELF target, not yet into Mach-O objects. On this target write the block as .byte/.long data (see lib/libc/src/setjmp).
 ```
 
 A block written as data (`.byte`, `.long`, `.quad`, labels and the
@@ -668,7 +672,7 @@ A naked function has no prologue and no epilogue: its body is the asm in
 it, which must return by itself. It is how a Cortex-M RTOS writes its
 context switch, which runs on a task's stack and saves registers the
 code generator's frame would otherwise own. EmbCC supports `naked` on
-ARM Cortex-M, RISC-V, MIPS32 and AVR, and does what GCC does: the function's
+every target but x86-64 and Apple arm64, and does what GCC does: the function's
 body is assembled where the function would be, starting with its label.
 It is assembled as a [file-scope block](#on-cortex-m-risc-v-mips32-and-avr), so
 it may hold labels, literal pools and calls into C.
@@ -719,7 +723,8 @@ These are refused, because a naked function has no frame for them:
 | any other statement | `naked function 'f' holds a statement that is not an asm or a call with no arguments; with no prologue there is no frame for it to run in` |
 | an operand that is not a constant | `operand 0 of the asm in naked function 'f' is not a constant ("i"); a naked function has no frame to load one from` |
 | an output operand | `the asm in naked function 'f' has an output; a naked function has no frame to put it in` |
-| x86-64 and AArch64 | `__attribute__((naked)) is not supported: on this target the body could only be assembled by the file-scope assembler's few instructions; it is supported on the ARM, RISC-V, MIPS and AVR targets` |
+| a `section` attribute | `naked function 'f' in section '.ramfunc' is not supported yet: its body is assembled into .text` |
+| x86-64 and Apple arm64 | `__attribute__((naked)) is not supported: on this target the body could only be assembled by the file-scope assembler's few instructions; it is supported on every target but x86-64 and AArch64 for Darwin or Windows` |
 
 `tests/golden/freertos-cm3.sh` builds the FreeRTOS kernel and its GCC
 ARM_CM3 port, unmodified, and runs three tasks, a queue, a mutex and a

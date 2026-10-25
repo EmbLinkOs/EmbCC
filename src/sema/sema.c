@@ -97,10 +97,23 @@ struct vardef {
  * removed — the index IS the variable's slot for the whole function —
  * they are only deactivated when their block ends. Lookup runs backward
  * so an inner declaration shadows an outer one. */
+struct name_ix {
+    const struct unit *u;
+    const void *head, *tail;         /* the list as far as it is indexed */
+    const char **names;
+    void **nodes;
+    size_t cap, n;
+};
 struct scope {
     struct vardef *vars;
     int n, cap;
     int block_start;    /* index where the innermost block began */
+    /* By name, the visible variable (its index + 1), and in same[] the
+     * older one of the name it hides (-1: none), put back when its block
+     * closes: a lookup scanned every variable the function had declared,
+     * closed blocks' too, so a function of 20,000 blocks was quadratic. */
+    struct name_ix *ix;
+    int *same;
 };
 
 /* Where semantic analysis resumes after an error: the statement being
@@ -185,22 +198,35 @@ static void sema_error_line(struct unit *u, int line, const char *fmt, ...)
     fatal_unwind();
 }
 
+static void *ix_get(const struct name_ix *x, const char *name);
+static void ix_set(struct name_ix *x, const char *name, void *node);
+
 static int scope_find(struct scope *sc, const char *name)
 {
-    for (int i = sc->n - 1; i >= 0; i--)
-        if (sc->vars[i].active && strcmp(sc->vars[i].name, name) == 0)
-            return i;
-    return -1;
+    void *v = sc->ix ? ix_get(sc->ix, name) : NULL;
+    int i = v ? (int)(long)v - 1 : -1;
+    return i >= 0 && sc->vars[i].active ? i : -1;
 }
 
 /* A redeclaration is an error only within the SAME block; an inner
- * block may shadow, exactly as C allows. */
+ * block may shadow, exactly as C allows. The visible one of the name is
+ * the newest, so it is this block's if this block has one. */
 static int scope_find_here(struct scope *sc, const char *name)
 {
-    for (int i = sc->n - 1; i >= sc->block_start; i--)
-        if (sc->vars[i].active && strcmp(sc->vars[i].name, name) == 0)
-            return i;
-    return -1;
+    int i = scope_find(sc, name);
+    return i >= sc->block_start ? i : -1;
+}
+
+/* A block closes: its variables leave, newest first, each giving its name
+ * back to the one it hid. */
+static void scope_close(struct scope *sc, int mark)
+{
+    for (int i = sc->n - 1; i >= mark; i--) {
+        if (!sc->vars[i].active)
+            continue;
+        sc->vars[i].active = 0;
+        ix_set(sc->ix, sc->vars[i].name, (void *)(long)(sc->same[i] + 1));
+    }
 }
 
 static int scope_add(struct scope *sc, const char *name, struct type *ty,
@@ -209,6 +235,14 @@ static int scope_add(struct scope *sc, const char *name, struct type *ty,
     if (sc->n == sc->cap) {
         sc->cap = sc->cap ? sc->cap * 2 : 8;
         sc->vars = xrealloc(sc->vars, (size_t)sc->cap * sizeof *sc->vars);
+        sc->same = xrealloc(sc->same, (size_t)sc->cap * sizeof *sc->same);
+    }
+    if (!sc->ix)
+        sc->ix = xcalloc(1, sizeof *sc->ix);
+    {
+        void *v = ix_get(sc->ix, name);
+        sc->same[sc->n] = v ? (int)(long)v - 1 : -1;
+        ix_set(sc->ix, name, (void *)(long)(sc->n + 1));
     }
     sc->vars[sc->n].name = name;
     sc->vars[sc->n].ty = ty;
@@ -284,13 +318,6 @@ static void warn_shadow(struct unit *u, struct scope *sc, const char *name,
  * list whose head moved, starts the table again (sema_check also clears
  * it). A node merged into its canonical one (absorbed) is never the first
  * of its name, so the slow walk that skips one is all but never taken. */
-struct name_ix {
-    const struct unit *u;
-    const void *head, *tail;         /* the list as far as it is indexed */
-    const char **names;
-    void **nodes;
-    size_t cap, n;
-};
 static struct name_ix g_func_ix, g_glob_ix;
 
 static size_t ix_hash(const char *s)
@@ -336,6 +363,23 @@ static void ix_put(struct name_ix *x, const char *name, void *node)
     x->names[i] = name;
     x->nodes[i] = node;
     x->n++;
+}
+
+/* name -> node, replacing what the name had (a scope's visible variable) */
+static void ix_set(struct name_ix *x, const char *name, void *node)
+{
+    /* the name's slot, if it has one: its node may be NULL (a closed
+     * block gave the name back to nothing), which ix_get cannot tell
+     * from no slot at all */
+    if (x->cap) {
+        size_t m = x->cap - 1, i = ix_hash(name) & m;
+        for (; x->names[i]; i = (i + 1) & m)
+            if (strcmp(x->names[i], name) == 0) {
+                x->nodes[i] = node;
+                return;
+            }
+    }
+    ix_put(x, name, node);
 }
 
 static void *ix_get(const struct name_ix *x, const char *name)
@@ -7265,7 +7309,7 @@ static void lower_globals(struct unit *u)
          * global — mirror the source position so the declare-before-use
          * rule (and enum-constant visibility) matches C. */
         cur_body_seq = g->def_seq;
-        struct scope sc = { 0, 0, 0, 0 };
+        struct scope sc = { 0 };
         struct initbuf ib = { 0, 0, 0 };
         g_in_static_init++;
         if (g->count_from_init) {
@@ -9226,8 +9270,7 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
             if (s->step)
                 check_expr(u, f, sc, s->step);
             check_stmt(u, f, sc, s->body, 1, in_switch);
-            for (int i = mark; i < sc->n; i++)
-                sc->vars[i].active = 0;
+            scope_close(sc, mark);
             sc->block_start = prev;
             break;
         }
@@ -9235,8 +9278,7 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
             int mark = sc->n, prev = sc->block_start;
             sc->block_start = mark;
             check_stmt(u, f, sc, s->body, in_loop, in_switch);
-            for (int i = mark; i < sc->n; i++)
-                sc->vars[i].active = 0; /* the block closed */
+            scope_close(sc, mark);              /* the block closed */
             sc->block_start = prev;
             break;
         }
@@ -9409,7 +9451,7 @@ static void check_func(struct unit *u, struct func *f)
     g_nundeclared = 0;           /* a fresh function: report its names again */
     const char *savefile = g_file;
     g_file = f->file ? f->file : u->file;
-    struct scope sc = { 0, 0, 0, 0 };
+    struct scope sc = { 0 };
     g_cx_sc = &sc;       /* complex lowering adds its temps here */
 
     /* An interrupt handler on RISC-V or MIPS: the hardware calls it, so
@@ -9663,6 +9705,11 @@ static void check_func(struct unit *u, struct func *f)
         f->var_aligns[i] = 0;
     }
     free(sc.vars);
+    free(sc.same);
+    if (sc.ix) {
+        ix_clear(sc.ix);
+        free(sc.ix);
+    }
     g_cx_sc = NULL;
     g_file = savefile;
 }

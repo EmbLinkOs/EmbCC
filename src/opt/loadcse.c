@@ -43,6 +43,20 @@ static int lkey_eq(const struct lkey *x, const struct lkey *y)
            x->bid == y->bid && x->off == y->off;
 }
 
+static unsigned lkey_hash(const struct lkey *k)
+{
+    unsigned long f[8] = { (unsigned long)k->op, (unsigned long)k->a,
+                           (unsigned long)k->size, (unsigned long)k->sign,
+                           (unsigned long)k->w, (unsigned long)k->bkind,
+                           (unsigned long)k->bid, k->off };
+    unsigned h = 2166136261u;
+    for (int i = 0; i < 8; i++) {
+        h ^= (unsigned)(f[i] ^ f[i] >> 32);
+        h *= 16777619u;
+    }
+    return h;
+}
+
 static int lcse_kills_mem(enum ir_op op)
 {
     switch (op) {
@@ -61,6 +75,75 @@ static int lcse_kills_mem(enum ir_op op)
     }
 }
 
+/* The keys a named write can reach, without asking every key: listed by
+ * base value (kacc's bkind and bid) and by object (kind and id; every
+ * unknown one under one list). A store to a global or a slot can touch
+ * only keys from its own base -- same_base -- or on an object may_alias
+ * cannot tell from its own: that object, and an unknown one unless the
+ * slot's address was never taken. The rest acc_overlap would answer 0
+ * for, so they are not visited; the ones that are get the same question
+ * as before. 20,000 globals each read and written took 20 s, every store
+ * asking every key. */
+struct lcse_ix {
+    int cap, *tag, *id, *head;      /* (tag, id) -> first key; tag 0: free */
+    int *bnext, *onext;             /* per key: the next of its base, object */
+};
+enum { LX_BASE = 100, LX_OBJ = 200 };
+
+static unsigned lx_find(const struct lcse_ix *x, int tag, int id)
+{
+    unsigned h = ((unsigned)tag * 2654435761u) ^ ((unsigned)id * 40503u);
+    for (h &= (unsigned)(x->cap - 1); x->tag[h];
+         h = (h + 1) & (unsigned)(x->cap - 1))
+        if (x->tag[h] == tag && x->id[h] == id)
+            break;
+    return h;
+}
+
+/* The first key listed under (tag, id), or -1. */
+static int lx_first(const struct lcse_ix *x, int tag, int id)
+{
+    unsigned h = lx_find(x, tag, id);
+    return x->tag[h] ? x->head[h] : -1;
+}
+
+static void lx_push(struct lcse_ix *x, int tag, int id, int k, int *next)
+{
+    unsigned h = lx_find(x, tag, id);
+    if (!x->tag[h]) {
+        x->tag[h] = tag;
+        x->id[h] = id;
+        x->head[h] = -1;
+    }
+    next[k] = x->head[h];
+    x->head[h] = k;
+}
+
+static void lx_build(struct lcse_ix *x, int nk, const struct maccess *kacc)
+{
+    x->cap = 64;
+    while (x->cap < 4 * nk)
+        x->cap *= 2;
+    x->tag = xcalloc((size_t)x->cap, sizeof *x->tag);
+    x->id = xmalloc((size_t)x->cap * sizeof *x->id);
+    x->head = xmalloc((size_t)x->cap * sizeof *x->head);
+    x->bnext = xmalloc((size_t)nk * sizeof *x->bnext);
+    x->onext = xmalloc((size_t)nk * sizeof *x->onext);
+    for (int k = nk - 1; k >= 0; k--) {     /* lists in key order */
+        int kind = kacc[k].obj.kind;
+        x->bnext[k] = -1;
+        if (kacc[k].bkind != BASE_NONE)
+            lx_push(x, LX_BASE + kacc[k].bkind, kacc[k].bid, k, x->bnext);
+        lx_push(x, LX_OBJ + kind, kind == MEM_UNKNOWN ? -1 : kacc[k].obj.id,
+                k, x->onext);
+    }
+}
+
+static void lx_free(struct lcse_ix *x)
+{
+    free(x->tag); free(x->id); free(x->head); free(x->bnext); free(x->onext);
+}
+
 /* Drop the cached loads a write could reach. A plain store names its
  * bytes, so only the keys that may overlap them go (acc_overlap): a
  * store to q->wr keeps q->len. A volatile store, a memcpy and a memzero
@@ -68,7 +151,8 @@ static int lcse_kills_mem(enum ir_op op)
  * atomic, a fence or a vector store names nothing, so everything
  * reachable goes. */
 static void lcse_kill(int *s, int nk, const char *is_mem,
-                      const struct maccess *kacc, struct ir_ins *ins,
+                      const struct maccess *kacc, const struct lcse_ix *x,
+                      struct ir_ins *ins,
                       struct ir_func *fn, struct defs *d, const char *taken,
                       int nvars)
 {
@@ -84,6 +168,24 @@ static void lcse_kill(int *s, int nk, const char *is_mem,
     } else if (ins->op == IR_CALL && !ins->indirect && ins->callee &&
                ins->callee->inf_no_write) {
         return;         /* it writes nothing the caller can see */
+    }
+    if (named && (w.obj.kind == MEM_GLOBAL || w.obj.kind == MEM_SLOT)) {
+        if (w.bkind != BASE_NONE)
+            for (int k = lx_first(x, LX_BASE + w.bkind, w.bid); k >= 0;
+                 k = x->bnext[k])
+                if (is_mem[k] && acc_overlap(w, kacc[k], taken, nvars))
+                    s[k] = -1;
+        for (int k = lx_first(x, LX_OBJ + w.obj.kind, w.obj.id); k >= 0;
+             k = x->onext[k])
+            if (is_mem[k] && acc_overlap(w, kacc[k], taken, nvars))
+                s[k] = -1;
+        if (w.obj.kind == MEM_GLOBAL ||     /* may_alias's unknown rule */
+            !(w.obj.id >= 0 && w.obj.id < nvars && !taken[w.obj.id]))
+            for (int k = lx_first(x, LX_OBJ + MEM_UNKNOWN, -1); k >= 0;
+                 k = x->onext[k])
+                if (is_mem[k] && acc_overlap(w, kacc[k], taken, nvars))
+                    s[k] = -1;
+        return;
     }
     for (int k = 0; k < nk; k++) {
         if (!is_mem[k])
@@ -102,8 +204,9 @@ static void lcse_kill(int *s, int nk, const char *is_mem,
  * (A float stored and its bits loaded as an integer is the same value:
  * the forwarded copy ties the two to one register class, which is what
  * every backend's class analysis already does with a copy.) */
-static void lcse_store_gen(int *s, int nk, const struct lkey *keys,
-                           const struct ir_ins *ins,
+static void lcse_store_gen(int *s, const struct lkey *keys,
+                           const struct lcse_ix *x, const int *afirst,
+                           const int *anext, const struct ir_ins *ins,
                            struct ir_func *fn, struct defs *d)
 {
     int v = ins->b;
@@ -112,7 +215,17 @@ static void lcse_store_gen(int *s, int nk, const struct lkey *keys,
         (ins->size != 4 && ins->size != 8))
         return;
     struct maccess m = mem_access(fn, d, ins->a, ins->size);
-    for (int k = 0; k < nk; k++) {
+    /* the keys at that address: by its temp (BASE_NONE), else from its
+     * base -- a LOAD key's bkind and bid are its kacc's, one walk */
+    int k, bykey = m.bkind == BASE_NONE;
+    if (bykey) {
+        if (ins->a < 0 || ins->a >= fn->nvregs)
+            return;
+        k = afirst[ins->a];
+    } else {
+        k = lx_first(x, LX_BASE + m.bkind, m.bid);
+    }
+    for (; k >= 0; k = bykey ? anext[k] : x->bnext[k]) {
         if (keys[k].op != IR_LOAD || keys[k].size != ins->size ||
             keys[k].w != ins->size || keys[k].bkind != m.bkind)
             continue;
@@ -128,16 +241,30 @@ static void lcse_store_gen(int *s, int nk, const struct lkey *keys,
  * once: printf's flag loop read its character five times. Its value is a
  * temp written once (the load), so nothing else has to drop it. Thumb
  * only, measured there; the other targets' output stays as it was. */
-static void lcse_kill_defs(int *s, int nk, const struct lkey *keys,
-                           const struct ir_ins *ins)
+static void lcse_kill_defs(int *s, const int *afirst, const int *anext,
+                           int nv, const struct ir_ins *ins)
 {
     int t = def_target(ins);
-    if (t < 0)
+    if (t < 0 || t >= nv)
         return;
-    for (int k = 0; k < nk; k++)
-        if (keys[k].op == IR_LOAD && keys[k].bkind == BASE_NONE &&
-            keys[k].a == t)
-            s[k] = -1;
+    for (int k = afirst[t]; k >= 0; k = anext[k])
+        s[k] = -1;
+}
+
+/* A write of local v: its LDVAR keys go (vfirst/vnext), and, when its
+ * address is taken, every key memory can change. */
+static void lcse_kill_var(int *s, int nk, const char *is_mem,
+                          const int *vfirst, const int *vnext,
+                          const char *taken, int v)
+{
+    if (taken[v]) {
+        for (int k = 0; k < nk; k++)    /* v's own LDVARs are is_mem too */
+            if (is_mem[k])
+                s[k] = -1;
+        return;
+    }
+    for (int k = vfirst[v]; k >= 0; k = vnext[k])
+        s[k] = -1;
 }
 
 int pass_loadcse(struct ir_func *fn)
@@ -162,6 +289,14 @@ int pass_loadcse(struct ir_func *fn)
     /* Enumerate distinct load keys; keyidx[i] maps a load instruction to one. */
     struct lkey *keys = NULL; int nk = 0, capk = 0;
     int *keyidx = xmalloc((size_t)fn->nins * sizeof *keyidx);
+    /* ...found through a hash of their fields: a search of every key at
+     * every load was quadratic (20,000 `a[x - 1]` took seconds). */
+    int hcap = 64;
+    while (hcap < 2 * fn->nins)
+        hcap *= 2;
+    int *htab = xmalloc((size_t)hcap * sizeof *htab);
+    for (int h = 0; h < hcap; h++)
+        htab[h] = -1;
     for (int i = 0; i < fn->nins; i++) {
         keyidx[i] = -1;
         struct ir_ins *in = &fn->ins[i];
@@ -188,18 +323,41 @@ int pass_loadcse(struct ir_func *fn)
             }
         }
         int found = -1;
-        for (int j = 0; j < nk; j++)
-            if (lkey_eq(&keys[j], &k)) { found = j; break; }
+        unsigned h = lkey_hash(&k) & (unsigned)(hcap - 1);
+        for (; htab[h] >= 0; h = (h + 1) & (unsigned)(hcap - 1))
+            if (lkey_eq(&keys[htab[h]], &k)) { found = htab[h]; break; }
         if (found < 0) {
             if (nk == capk) { capk = capk ? capk * 2 : 32;
                 keys = xrealloc(keys, (size_t)capk * sizeof *keys); }
             keys[nk] = k; found = nk++;
+            htab[h] = found;
         }
         keyidx[i] = found;
     }
+    free(htab);
     if (nk == 0) {
         free(order); free(l2b); free(taken); free(keyidx); free(keys);
         free_cfg(bb, nbb); free_defs(&d); return 0;
+    }
+    /* The keys by what kills them one at a time: an address temp's LOADs
+     * (lcse_kill_defs) and a local's LDVARs (lcse_kill_var). */
+    int nv = fn->nvregs;
+    int *afirst = xmalloc((size_t)(nv ? nv : 1) * sizeof *afirst);
+    int *vfirst = xmalloc((size_t)(nvars ? nvars : 1) * sizeof *vfirst);
+    int *anext = xmalloc((size_t)nk * sizeof *anext);
+    int *vnext = xmalloc((size_t)nk * sizeof *vnext);
+    for (int v = 0; v < nv; v++) afirst[v] = -1;
+    for (int v = 0; v < nvars; v++) vfirst[v] = -1;
+    for (int k = nk - 1; k >= 0; k--) {
+        anext[k] = vnext[k] = -1;
+        if (keys[k].op == IR_LOAD && keys[k].bkind == BASE_NONE &&
+            keys[k].a >= 0 && keys[k].a < nv) {
+            anext[k] = afirst[keys[k].a];
+            afirst[keys[k].a] = k;
+        } else if (keys[k].op == IR_LDVAR) {
+            vnext[k] = vfirst[keys[k].a];
+            vfirst[keys[k].a] = k;
+        }
     }
     /* is_mem[k]: a LOAD or an address-taken local's LDVAR (killed by any write).
      * A non-address-taken local's LDVAR is killed only by a store to that local. */
@@ -218,6 +376,8 @@ int pass_loadcse(struct ir_func *fn)
         else
             kacc[k] = mem_access(fn, &d, keys[k].rep, keys[k].size);
     }
+    struct lcse_ix lx;
+    lx_build(&lx, nk, kacc);
 
     /* Dataflow. avail[b][k]: -2 top (init), -1 not available, >=0 the temp. */
     int *aout = xmalloc((size_t)nbb * (size_t)nk * sizeof *aout);
@@ -249,17 +409,14 @@ int pass_loadcse(struct ir_func *fn)
             for (int i = bb[b].start; i < bb[b].end; i++) {
                 struct ir_ins *ins = &fn->ins[i];
                 if (ins->op == IR_STVAR) {
-                    for (int k = 0; k < nk; k++)
-                        if ((keys[k].op == IR_LDVAR && keys[k].a == ins->dst) ||
-                            (taken[ins->dst] && is_mem[k]))
-                            s[k] = -1;
+                    lcse_kill_var(s, nk, is_mem, vfirst, vnext, taken, ins->dst);
                 } else if (lcse_kills_mem(ins->op)) {
-                    lcse_kill(s, nk, is_mem, kacc, ins, fn, &d, taken, nvars);
+                    lcse_kill(s, nk, is_mem, kacc, &lx, ins, fn, &d, taken, nvars);
                     if (ins->op == IR_STORE)
-                        lcse_store_gen(s, nk, keys, ins, fn, &d);
+                        lcse_store_gen(s, keys, &lx, afirst, anext, ins, fn, &d);
                 }
                 if (mdef)
-                    lcse_kill_defs(s, nk, keys, ins);
+                    lcse_kill_defs(s, afirst, anext, nv, ins);
                 int k = keyidx[i];
                 if (k >= 0 && s[k] < 0) s[k] = ins->dst;   /* first def of the value */
             }
@@ -277,17 +434,14 @@ int pass_loadcse(struct ir_func *fn)
         for (int i = bb[b].start; i < bb[b].end; i++) {
             struct ir_ins *ins = &fn->ins[i];
             if (ins->op == IR_STVAR) {
-                for (int k = 0; k < nk; k++)
-                    if ((keys[k].op == IR_LDVAR && keys[k].a == ins->dst) ||
-                        (taken[ins->dst] && is_mem[k]))
-                        s[k] = -1;
+                lcse_kill_var(s, nk, is_mem, vfirst, vnext, taken, ins->dst);
             } else if (lcse_kills_mem(ins->op)) {
-                lcse_kill(s, nk, is_mem, kacc, ins, fn, &d, taken, nvars);
+                lcse_kill(s, nk, is_mem, kacc, &lx, ins, fn, &d, taken, nvars);
                 if (ins->op == IR_STORE)
-                    lcse_store_gen(s, nk, keys, ins, fn, &d);
+                    lcse_store_gen(s, keys, &lx, afirst, anext, ins, fn, &d);
             }
             if (mdef)
-                lcse_kill_defs(s, nk, keys, ins);
+                lcse_kill_defs(s, afirst, anext, nv, ins);
             int k = keyidx[i];
             if (k < 0) continue;
             if (s[k] >= 0 && s[k] != ins->dst) {
@@ -300,6 +454,8 @@ int pass_loadcse(struct ir_func *fn)
 
     free(order); free(l2b); free(taken); free(keyidx); free(keys);
     free(is_mem); free(kacc); free(aout); free(ain); free(s);
+    free(afirst); free(anext); free(vfirst); free(vnext);
+    lx_free(&lx);
     free_cfg(bb, nbb); free_defs(&d);
     return changed;
 }

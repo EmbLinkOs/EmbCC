@@ -293,6 +293,7 @@ struct rv_fn {
      * emits every one in its longest form. */
     const signed char *relax;
     int nrelax;
+    int far;             /* every jump and branch in its far form (FX_FAR) */
     int nfix, capfix;
     /* An interrupt handler (rv_isr_grow): ISR_INTERRUPT or ISR_SUPERVISOR,
      * 0 for an ordinary function. isr_x and isr_f are the caller-saved
@@ -2053,7 +2054,17 @@ static void ext_reg(struct rv_fn *F, int rdst, int rs, int size, int sign)
 enum { FX_J, FX_CJ, FX_LONG, FX_B, FX_CB,
        FX_TAB,     /* a jump table's entry: bat is the auipc that finds
                     * the table, the word becomes target - auipc */
-       FX_ADDR };  /* &&label: an auipc/addi pair at `at` */
+       FX_ADDR,    /* &&label: an auipc/addi pair at `at` */
+       /* Past jal's +-1 MiB, in a function bigger than that (a 30000-case
+        * switch at -O0 is 4 MB: GCC's torture compile/limits-caselabels.c,
+        * and 20001226-1.c): `auipc t6; jalr x0, t6` (FX_FAR), and the
+        * opposite branch over it (FX_FARB). A pass that measures one of
+        * J or LONG out of reach makes the function again with F->far
+        * set, every jump and branch in these forms (shortened, as ever,
+        * where the measure says a shorter one reaches). t6 holds nothing
+        * at a jump to a label: a scratch's value never crosses a block,
+        * and the branch has read its operands before the auipc writes. */
+       FX_FAR, FX_FARB };
 
 static void want_label(struct rv_fn *F, int at, int label, int kind,
                        int cond, int rs1, int rs2, int bat)
@@ -2080,8 +2091,12 @@ static int relaxed_form(const struct rv_fn *F)
 
 static void jump_to(struct rv_fn *F, int label)
 {
-    if (relaxed_form(F) == FX_CJ)
+    int form = relaxed_form(F);
+    if (form == FX_CJ)
         want_label(F, rv_c_placeholder(F->t), label, FX_CJ, 0, 0, 0, 0);
+    else if (form == FX_FAR || (form < 0 && F->far))
+        want_label(F, rv_far_placeholder(F->t, FAR), label, FX_FAR,
+                   0, 0, 0, 0);
     else
         want_label(F, rv_j_placeholder(F->t, RV_ZERO), label, FX_J,
                    0, 0, 0, 0);
@@ -2115,8 +2130,13 @@ static void branch_if(struct rv_fn *F, int cond, int rs1, int rs2, int label)
     /* The long form, which reaches anywhere: the opposite branch over a
      * jump. Patched to wherever the jump ENDED, not to `at + 8`. */
     at = rv_b_placeholder(F->t, invert_branch(cond), rs1, rs2);
-    jat = rv_j_placeholder(F->t, RV_ZERO);
-    want_label(F, jat, label, FX_LONG, cond, rs1, rs2, at);
+    if (form == FX_FARB || (form < 0 && F->far)) {
+        jat = rv_far_placeholder(F->t, FAR);
+        want_label(F, jat, label, FX_FARB, cond, rs1, rs2, at);
+    } else {
+        jat = rv_j_placeholder(F->t, RV_ZERO);
+        want_label(F, jat, label, FX_LONG, cond, rs1, rs2, at);
+    }
     rv_patch_b(F->t, at, F->t->len);        /* over the jump just emitted */
 }
 
@@ -6875,9 +6895,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
         if (fn->ins[i].op == IR_ASM && fn->ins[i].asm_ir)
             asm_sl += code_asm_align_slack(fn->ins[i].asm_ir->arange,
                                            fn->ins[i].asm_ir->narange);
-    for (int pass = 0; pass < 2; pass++) {
+    for (int pass = 0, again = 0; pass < 2; pass++) {
     F.fb = RV_SP;
-    if (pass) {
+    if (pass || again) {
         t->len = len0;
         fn->nlines = nl0;
         F.st->ncall = sc0; F.st->next = se0; F.st->nstr = ss0;
@@ -6887,8 +6907,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
             F.label_off[i] = -1;
         F.skip_next = 0;
         F.va_first = -1;
-        F.relax = relax;
-        F.nrelax = nrelax;
+        F.relax = pass ? relax : NULL;
+        F.nrelax = pass ? nrelax : 0;
         if (target_debug_info()) {
             free(fn->var_off);
             fn->var_off = NULL;
@@ -7281,6 +7301,26 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
     }
     }
 
+    /* A jump the first pass made with jal that jal does not reach: the
+     * function is made again with every one in its far form (FX_FAR). */
+    if (!F.far) {
+        for (i = 0; i < F.nfix; i++) {
+            long d = (long)F.label_off[F.fix[i].label] - F.fix[i].at;
+            if ((F.fix[i].kind == FX_J || F.fix[i].kind == FX_LONG) &&
+                F.label_off[F.fix[i].label] >= 0 &&
+                (d < -(1L << 20) || d > (1L << 20) - 2))
+                break;
+        }
+        if (i < F.nfix) {
+            if (pass)
+                internal_error("riscv: %s: a relaxed jump no longer reaches "
+                               "its label", fn->name);
+            F.far = 1;
+            again = 1;
+            pass = -1;
+            continue;
+        }
+    }
     for (i = 0; i < F.nfix; i++) {
         int target = F.label_off[F.fix[i].label], ok = 1;
         if (target < 0)
@@ -7289,6 +7329,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
         switch (F.fix[i].kind) {
         case FX_J: case FX_LONG:
             rv_patch_j(t, F.fix[i].at, target);
+            break;
+        case FX_FAR: case FX_FARB:
+            rv_patch_pcrel_pair(t, F.fix[i].at, target);
             break;
         case FX_CJ:
             ok = rv_patch_cj(t, F.fix[i].at, target);
@@ -7327,10 +7370,16 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
                 relax[i] = (signed char)F.fix[i].kind;  /* not a branch */
                 continue;
             }
-            if (F.fix[i].kind == FX_J) {
+            /* jal's reach from where its jump would sit, for the far
+             * forms: code only shrinks on the second pass */
+            long jd = tgt - (F.fix[i].kind == FX_FARB ? F.fix[i].bat + 4
+                                                      : F.fix[i].at);
+            int jal = jd >= -(1L << 20) + asm_sl && jd <= (1L << 20) - 2 - asm_sl;
+            if (F.fix[i].kind == FX_J || F.fix[i].kind == FX_FAR) {
                 long d = tgt - F.fix[i].at;
                 relax[i] = d >= -2048 + asm_sl && d <= 2046 - asm_sl
-                         ? FX_CJ : FX_J;
+                         ? FX_CJ : F.fix[i].kind == FX_J || jal ? FX_J
+                         : FX_FAR;
             } else {
                 long d = tgt - F.fix[i].bat;
                 int c = F.fix[i].cond, r1 = F.fix[i].rs1;
@@ -7340,10 +7389,12 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
                     relax[i] = FX_CB;
                 else if (d >= -4096 + asm_sl && d <= 4094 - asm_sl)
                     relax[i] = FX_B;
-                else
+                else if (F.fix[i].kind == FX_LONG || jal)
                     relax[i] = FX_LONG;
+                else
+                    relax[i] = FX_FARB;
             }
-            any |= relax[i] != FX_J && relax[i] != FX_LONG;
+            any |= relax[i] != F.fix[i].kind;
         }
         if (!any || !g_rv_regalloc)
             break;

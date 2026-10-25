@@ -1618,7 +1618,7 @@ static int compile(const char *in, const char *out, int pp_only)
  * do AArch64's, which are data words today. */
 static int blocks_by_gas(void)
 {
-    return backend_get(target_get())->firmware;
+    return target_asm_blocks();
 }
 
 /* One asm statement of a naked function, its operands written in: only
@@ -2848,17 +2848,17 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     if (blocks_by_gas())
         naked_to_blocks(u);
     for (struct topasm *ta = u->topasm; ta; ta = ta->next) {
-        /* x86-64's mnemonics are what topasm.c encodes; the directives --
-         * labels and .byte/.long/.quad -- are not, so on AArch64 a block
-         * written as data assembles, and one written with mnemonics is
-         * refused by name instead of quietly emitting x86 bytes. The
-         * embedded targets have an assembler of their own. */
+        /* The GNU-syntax assembler that reads .s files assembles a block
+         * on every target but x86-64 and AArch64 into Mach-O or COFF
+         * (target_asm_blocks). There topasm.c takes labels, the data
+         * directives and x86-64's few mnemonics, and refuses any other
+         * instruction by name instead of quietly emitting x86 bytes. */
         if (blocks_by_gas()) {
             if (gas_assemble_block(ta))
                 return 1;
         } else {
-            /* (x86-64's and AArch64's: every other target is firmware,
-             * so a compiler with neither never comes here) */
+            /* (x86-64's, and AArch64's into Mach-O or COFF: a compiler
+             * with neither family never comes here) */
 #if FAMILY_BUILT(x86) || FAMILY_BUILT(aarch64)
             topasm_assemble(ta, target_get() == TARGET_X86_64);
 #endif
@@ -5243,7 +5243,8 @@ static int expand_wp(int *argcp, char ***argvp)
     return 0;
 }
 
-int main(int argc, char **argv)
+/* the compiler proper, on the stack plat_run_on_stack gives it */
+static int embcc_main(int argc, char **argv)
 {
     /* the deep recursions measure from here */
     stack_note_base(&argc, plat_stack_size());
@@ -6944,4 +6945,9 @@ int main(int argc, char **argv)
                                      "support but an object file does not; "
                                      "name a file\n"), 1));
     return done(compile(input, output ? output : default_output(input), 0));
+}
+
+int main(int argc, char **argv)
+{
+    return plat_run_on_stack(embcc_main, argc, argv);
 }

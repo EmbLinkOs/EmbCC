@@ -877,6 +877,9 @@ int pass_fold(struct ir_func *fn)
     for (int n = 0; n < fn->nins; n++)
         each_read(&fn->ins[n], count_cb, &uc);
     int changed = 0;
+    /* the switches, once: getenv walks the environment each call */
+    int no_kzext = getenv("EMBCC_NO_KZEXT") != NULL;
+    int no_lkconst = getenv("EMBCC_NO_LKCONST") != NULL;
     struct lkconst lk = {
         xcalloc((size_t)fn->nvregs, sizeof(int)),
         xmalloc((size_t)fn->nvregs * sizeof(long)),
@@ -1098,7 +1101,7 @@ int pass_fold(struct ir_func *fn)
                 }
             } else if (i->a >= 0 && i->a < fn->nvregs && i->size > 0 &&
                        (i->w == 4 || i->w == 8) &&
-                       !getenv("EMBCC_NO_KZEXT")) {
+                       !no_kzext) {
                 /* An extension of a value whose high bits are already
                  * zero (known_zero) -- `(u8)(x >> 24)`, `(u8)(x & 0x7f)`,
                  * and a join of such values, `b = c ? (u8)x : 0x7e` --
@@ -1153,7 +1156,7 @@ int pass_fold(struct ir_func *fn)
              i->op == IR_MUL || i->op == IR_AND || i->op == IR_OR ||
              i->op == IR_XOR || i->op == IR_SHL || i->op == IR_SHR) &&
             !i->imm_b && (i->w == 4 || i->w == 8) &&
-            !(ka && kb) && !getenv("EMBCC_NO_LKCONST")) {
+            !(ka && kb) && !no_lkconst) {
             long la = 0, lb = 0;
             int ja = ka || lk_get(&lk, i->a, i->w, &la);
             int jb = kb || lk_get(&lk, i->b, i->w, &lb);

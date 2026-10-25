@@ -152,6 +152,7 @@ compile/20021008-1.c
 compile/20021015-1.c
 compile/20021015-2.c
 compile/20021103-1.c
+compile/20021108-1.c
 compile/20021110.c
 compile/20021119-1.c
 compile/20021124-1.c
@@ -654,6 +655,8 @@ compile/inline-asm-1.c
 compile/irreducible-loop.c
 compile/isinf.c
 compile/jmp.c
+compile/labels-1.c
+compile/labels-2.c
 compile/labels-3.c
 compile/lbug.c
 compile/libcall-1.c
@@ -1387,6 +1390,7 @@ compile/pr83104.c
 compile/pr83164.c
 compile/pr83448.c
 compile/pr83487.c
+compile/pr83510.c
 compile/pr83575.c
 compile/pr84111.c
 compile/pr84136.c

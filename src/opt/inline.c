@@ -262,7 +262,7 @@ static void inline_call(struct ir_func *fn, int ci, struct ir_func *cf)
     int after = L + cf->nlabels;
 
     /* 2. Build param stores + the remapped body + one exit label. */
-    struct ir_ins *buf = xmalloc((size_t)(nparams + 2 * cf->nins + 1) * sizeof *buf);
+    struct ir_ins *buf = xmalloc((size_t)(nparams + 2 * cf->nins + 2) * sizeof *buf);
     int m = 0;
     /* Every instruction the inliner INVENTS still has a source location:
      * the call it replaces (R3). A pass that builds an instruction from
@@ -329,6 +329,29 @@ static void inline_call(struct ir_func *fn, int ci, struct ir_func *cf)
             }
         } else {
             buf[m++] = in;
+        }
+    }
+    /* A callee that can fall off its closing brace returns nothing on
+     * that path: irgen writes no `ret` for a float result's, nor for any
+     * whose brace only a noreturn call stands before (`long long
+     * llabs(long long b) { abort(); }`, GCC's torture execute/
+     * 20021127-1.c). Spliced in, that path reached the caller's read of
+     * the result with nothing ever written to it -- a temp with no
+     * definition, which the AVR backend, giving it no slot, stopped on
+     * ("a frame access in a function whose frame pointer was not set
+     * up"). So the path writes 0, as irgen's own falling-off return of
+     * an integer does: the result has a definition wherever it is read,
+     * and the value is the same every time. */
+    if (dst >= 0 && cf->nins > 0) {
+        enum ir_op last = cf->ins[cf->nins - 1].op;
+        if (last != IR_RET && last != IR_JMP && last != IR_UD2 &&
+            last != IR_SWITCH && last != IR_IGOTO) {
+            struct ir_ins *z = &buf[m++];
+            ins_blank(z);
+            z->op = IR_CONST; z->dst = dst; z->imm = 0;
+            z->w = call.w ? call.w : 4;
+            z->line = call.line;     /* the call, whose value this is */
+            z->col = call.col;
         }
     }
     struct ir_ins *lb = &buf[m++];

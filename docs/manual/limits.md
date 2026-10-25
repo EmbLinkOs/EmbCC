@@ -212,15 +212,15 @@ Refused on 9 of the 25 targets.
 
 ## `__attribute__((naked))`
 
-Refused on 5 of the 25 targets.
+Refused on 4 of the 25 targets.
 
-- Refused on `x86_64-elf`, `aarch64-elf`, `x86_64-linux-gnu`, `aarch64-apple-darwin`, `x86_64-windows-gnu`:
+- Refused on `x86_64-elf`, `x86_64-linux-gnu`, `aarch64-apple-darwin`, `x86_64-windows-gnu`:
 
   ```text
-  __attribute__((naked)) is not supported: on this target the body could only be assembled by the file-scope assembler's few instructions; it is supported on the ARM, RISC-V, MIPS and AVR targets
+  __attribute__((naked)) is not supported: on this target the body could only be assembled by the file-scope assembler's few instructions; it is supported on every target but x86-64 and AArch64 for Darwin or Windows
   ```
 
-## an assembly source (`.s`)
+## an assembly source (`.s`) with an instruction
 
 Refused on 3 of the 25 targets.
 
@@ -432,33 +432,33 @@ Refused on 21 of the 25 targets.
 
 ## The whole matrix
 
-| Target | int128 | ldouble | float16 | fp16 | bf16 | float16struct | float16va | bitint | complexint | vector | atomic1 | atomic8 | atomic16 | tls | vla | align32 | frameaddr | retaddr1 | setjmp | cgoto | asmgoto | nested | interrupt | naked | asmfile | dashS | debug | unwind | cxx | cxxeh |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| `thumbv6m-none-eabi` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
-| `thumbv7m-none-eabi` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
-| `thumbv7em-none-eabihf` | no | yes | yes | yes | yes | no | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
-| `thumbv8m.base-none-eabi` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
-| `thumbv8m.main-none-eabi` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
-| `armv7a-none-eabi` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
-| `riscv32-unknown-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
-| `riscv64-unknown-elf` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
-| `avr` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | no | no | yes | yes | yes | yes | yes | no | no | no |
-| `mipsel-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
-| `mips-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
-| `mips64el-none-elf` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
-| `mips64-none-elf` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
-| `loongarch64-unknown-elf` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | no | no | no | yes | yes | yes | yes | no | yes | no |
-| `xtensa-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | no | no | no | yes | yes | yes | yes | no | yes | no |
-| `tricore-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
-| `rx-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
-| `powerpc-none-eabi` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | no | no | no | yes | yes | yes | yes | no | yes | no |
-| `sparc-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | no | no | no | yes | yes | yes | yes | no | yes | no |
-| `m68k-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
-| `x86_64-elf` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | no | no | no | no | no | yes | yes | yes | yes | yes |
-| `aarch64-elf` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | no | no | no | no | yes | yes | yes | yes | yes | yes |
-| `x86_64-linux-gnu` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | no | no | no | no | no | yes | yes | yes | yes | yes |
-| `aarch64-apple-darwin` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | no | no | no | no | yes | yes | warns | yes | yes | yes |
-| `x86_64-windows-gnu` | no | no | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | no | yes | yes | yes | yes | no | yes | no | no | no | no | no | yes | no | no | no | no |
+| Target | int128 | ldouble | float16 | fp16 | bitint | complexint | vector | atomic1 | atomic8 | atomic16 | tls | vla | align32 | frameaddr | retaddr1 | setjmp | cgoto | asmgoto | nested | interrupt | naked | asmfile | dashS | debug | unwind | cxx | cxxeh |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `thumbv6m-none-eabi` | no | yes | no | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
+| `thumbv7m-none-eabi` | no | yes | no | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
+| `thumbv7em-none-eabihf` | no | yes | no | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
+| `thumbv8m.base-none-eabi` | no | yes | no | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
+| `thumbv8m.main-none-eabi` | no | yes | no | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
+| `armv7a-none-eabi` | no | yes | no | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | no | yes | yes | yes | yes | no | yes | no |
+| `riscv32-unknown-elf` | no | yes | no | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
+| `riscv64-unknown-elf` | yes | yes | no | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
+| `avr` | no | yes | no | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | yes | yes | yes | yes | yes | no | no | no |
+| `mipsel-none-elf` | no | yes | no | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
+| `mips-none-elf` | no | yes | no | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
+| `mips64el-none-elf` | yes | yes | no | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | no | yes | yes | yes | yes | no | yes | no |
+| `mips64-none-elf` | yes | yes | no | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | no | yes | yes | yes | yes | no | yes | no |
+| `loongarch64-unknown-elf` | yes | yes | no | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | no | yes | yes | yes | yes | no | yes | no |
+| `xtensa-none-elf` | no | yes | no | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | no | yes | yes | no | yes | no | yes | no |
+| `tricore-none-elf` | no | yes | no | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | no | yes | yes | yes | yes | no | yes | no |
+| `rx-none-elf` | no | yes | no | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | no | yes | yes | no | yes | no | yes | no |
+| `powerpc-none-eabi` | no | yes | no | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | no | yes | yes | yes | yes | no | yes | no |
+| `sparc-none-elf` | no | yes | no | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | no | yes | yes | yes | yes | no | yes | no |
+| `m68k-none-elf` | no | yes | no | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | no | no | no | yes | yes | yes | yes | no | yes | no |
+| `x86_64-elf` | yes | yes | no | no | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | no | yes | no | no | no | no | no | yes | yes | yes | yes | yes |
+| `aarch64-elf` | yes | yes | no | no | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | no | yes | no | no | no | yes | yes | yes | yes | yes | yes | yes |
+| `x86_64-linux-gnu` | yes | yes | no | no | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | no | yes | no | no | no | no | no | yes | yes | yes | yes | yes |
+| `aarch64-apple-darwin` | yes | yes | no | no | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | no | no | no | no | yes | yes | warns | yes | yes | yes |
+| `x86_64-windows-gnu` | no | no | no | no | yes | yes | yes | yes | yes | no | no | yes | yes | yes | yes | no | yes | no | no | no | no | no | yes | no | no | no | no |
 
 The columns are the sections above, in order:
 - `int128`: `__int128`
@@ -485,7 +485,7 @@ The columns are the sections above, in order:
 - `nested`: nested functions
 - `interrupt`: `__attribute__((interrupt))`
 - `naked`: `__attribute__((naked))`
-- `asmfile`: an assembly source (`.s`)
+- `asmfile`: an assembly source (`.s`) with an instruction
 - `dashS`: `-S` (assembly output)
 - `debug`: `-g` (DWARF)
 - `unwind`: `--unwind-tables`

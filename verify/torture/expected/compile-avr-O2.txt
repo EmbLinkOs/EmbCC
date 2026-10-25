@@ -150,6 +150,7 @@ compile/20021008-1.c
 compile/20021015-1.c
 compile/20021015-2.c
 compile/20021103-1.c
+compile/20021108-1.c
 compile/20021110.c
 compile/20021119-1.c
 compile/20021124-1.c
@@ -653,6 +654,8 @@ compile/inline-asm-1.c
 compile/irreducible-loop.c
 compile/isinf.c
 compile/jmp.c
+compile/labels-1.c
+compile/labels-2.c
 compile/labels-3.c
 compile/lbug.c
 compile/libcall-1.c
@@ -1733,6 +1736,7 @@ execute/20021119-1.c
 execute/20021120-1.c
 execute/20021120-2.c
 execute/20021120-3.c
+execute/20021127-1.c
 execute/20021204-1.c
 execute/20021219-1.c
 execute/20030105-1.c
@@ -2145,6 +2149,7 @@ execute/980709-1.c
 execute/980716-1.c
 execute/980929-1.c
 execute/981001-1.c
+execute/981019-1.c
 execute/981130-1.c
 execute/981206-1.c
 execute/990106-2.c

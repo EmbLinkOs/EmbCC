@@ -1,9 +1,10 @@
 /* setjmp/longjmp for aarch64 (AAPCS64).
  *
- * The same form as the x86-64 file, and the reason is sharper here: EmbCC
- * has no aarch64 assembler at all, so `.long` with the encoding written out
- * is the only way this routine exists on this target. See the sibling file
- * for why that is a design choice rather than a workaround.
+ * The encodings written out as `.long`, as in the x86-64 file: on AArch64
+ * ELF a file-scope block goes through the GNU-syntax assembler, whose
+ * AArch64 vocabulary is the kernel's (src/arch/aarch64/asm.c) and has no
+ * ldp or stp yet. Its comments are `//`, AArch64's: `#` there starts an
+ * immediate, not a comment.
  *
  * AAPCS64 calls x19-x28 callee-saved, and also the LOW 64 BITS of v8-v15 --
  * the one place this differs from x86-64, where every vector register is
@@ -23,8 +24,8 @@
 #ifdef __aarch64__
 
 __asm__(
-".globl " SJ_SETJMP "\n"
- SJ_SETJMP ":\n"
+".globl setjmp\n"
+"setjmp:\n"
 "    .long 0xa9005013   // stp  x19, x20, [x0, #0]\n"
 "    .long 0xa9015815   // stp  x21, x22, [x0, #16]\n"
 "    .long 0xa9026017   // stp  x23, x24, [x0, #32]\n"
@@ -44,8 +45,8 @@ __asm__(
 "    .long 0x52800000   // mov  w0, #0\n"
 "    .long 0xd65f03c0   // ret\n"
 
-".globl " SJ_LONGJMP "\n"
- SJ_LONGJMP ":\n"
+".globl longjmp\n"
+"longjmp:\n"
 "    .long 0xa9405013   // ldp  x19, x20, [x0, #0]\n"
 "    .long 0xa9415815   // ldp  x21, x22, [x0, #16]\n"
 "    .long 0xa9426017   // ldp  x23, x24, [x0, #32]\n"
