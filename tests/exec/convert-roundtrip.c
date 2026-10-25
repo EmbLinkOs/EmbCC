@@ -41,13 +41,17 @@ int main(void)
     float inf = 1.0f / zero, nan = zero / zero;
     if (f_d_f(inf) != inf || f_d_f(nan) == f_d_f(nan)) return 3;
     if (d_ld_d(DBL_MAX) != DBL_MAX || d_ld_d(-DBL_MIN) != -DBL_MIN) return 4;
+    if (s_f_s(SHRT_MIN) != SHRT_MIN || s_f_s(SHRT_MAX) != SHRT_MAX) return 7;
+    /* rounded, as written */
+    if (i_f_i(16777217) != 16777216) return 8;
+    /* the rest need a double wider than a float (AVR's and RX's double is
+     * binary32, where (double)INT_MAX rounds and 0.1 is 0.1f) */
+    if (DBL_MANT_DIG < 53)
+        return 42;
     static const int is[] = { 0, 1, -1, 123456789, INT_MAX, INT_MIN, 16777217 };
     for (unsigned k = 0; k < sizeof is / sizeof is[0]; k++)
         if (i_d_i(is[k]) != is[k]) return 5;
     if (u_d_u(UINT_MAX) != UINT_MAX || u_d_u(0x80000001u) != 0x80000001u) return 6;
-    if (s_f_s(SHRT_MIN) != SHRT_MIN || s_f_s(SHRT_MAX) != SHRT_MAX) return 7;
-    /* rounded, as written */
-    if (i_f_i(16777217) != 16777216) return 8;
     if (ll_d_ll(9007199254740993LL) != 9007199254740992LL) return 9;
     if (d_f_d(0.1) == 0.1 || d_f_d(0.1) != (double)0.1f) return 10;
     if (i_d_u(-1) != 0x7fffffffu) return 11;

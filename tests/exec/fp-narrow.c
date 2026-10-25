@@ -48,6 +48,9 @@ static int same(float x, float y)
 
 int main(void)
 {
+    /* nothing to narrow where a double is a float (AVR's, RX's binary32) */
+    if (DBL_MANT_DIG == FLT_MANT_DIG)
+        return 42;
     static const float special[] = { 0.0f, -0.0f, 1.0f, -1.0f, 0.5f, 0.1f,
         3.0f, FLT_MAX, -FLT_MAX, FLT_MIN, FLT_MIN / 4, FLT_EPSILON,
         1.0f / 3.0f, 16777217.0f, 1e-30f, 7e30f };
