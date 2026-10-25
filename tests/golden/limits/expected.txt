@@ -170,7 +170,7 @@ armv7a-none-eabi setjmp no: '__builtin_setjmp' is not declared in 'f' — for a 
 armv7a-none-eabi cgoto yes
 armv7a-none-eabi asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 armv7a-none-eabi nested no: expected ';' before '{' [E0002]
-armv7a-none-eabi interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS32 and RX it is implemented)
+armv7a-none-eabi interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS32, RX and ColdFire it is implemented)
 armv7a-none-eabi naked yes
 armv7a-none-eabi asmfile yes
 armv7a-none-eabi dashS yes
@@ -350,7 +350,7 @@ mips64el-none-elf setjmp no: '__builtin_setjmp' is not declared in 'f' — for a
 mips64el-none-elf cgoto yes
 mips64el-none-elf asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 mips64el-none-elf nested no: expected ';' before '{' [E0002]
-mips64el-none-elf interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS32 and RX it is implemented)
+mips64el-none-elf interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS32, RX and ColdFire it is implemented)
 mips64el-none-elf naked yes
 mips64el-none-elf asmfile yes
 mips64el-none-elf dashS yes
@@ -380,7 +380,7 @@ mips64-none-elf setjmp no: '__builtin_setjmp' is not declared in 'f' — for a c
 mips64-none-elf cgoto yes
 mips64-none-elf asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 mips64-none-elf nested no: expected ';' before '{' [E0002]
-mips64-none-elf interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS32 and RX it is implemented)
+mips64-none-elf interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS32, RX and ColdFire it is implemented)
 mips64-none-elf naked yes
 mips64-none-elf asmfile yes
 mips64-none-elf dashS yes
@@ -410,7 +410,7 @@ loongarch64-unknown-elf setjmp no: '__builtin_setjmp' is not declared in 'f' —
 loongarch64-unknown-elf cgoto yes
 loongarch64-unknown-elf asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 loongarch64-unknown-elf nested no: expected ';' before '{' [E0002]
-loongarch64-unknown-elf interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS32 and RX it is implemented)
+loongarch64-unknown-elf interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS32, RX and ColdFire it is implemented)
 loongarch64-unknown-elf naked yes
 loongarch64-unknown-elf asmfile yes
 loongarch64-unknown-elf dashS yes
@@ -440,7 +440,7 @@ xtensa-none-elf setjmp no: '__builtin_setjmp' is not declared in 'f' — for a c
 xtensa-none-elf cgoto yes
 xtensa-none-elf asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 xtensa-none-elf nested no: expected ';' before '{' [E0002]
-xtensa-none-elf interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS32 and RX it is implemented)
+xtensa-none-elf interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS32, RX and ColdFire it is implemented)
 xtensa-none-elf naked yes
 xtensa-none-elf asmfile yes
 xtensa-none-elf dashS yes
@@ -470,7 +470,7 @@ tricore-none-elf setjmp no: '__builtin_setjmp' is not declared in 'f' — for a 
 tricore-none-elf cgoto yes
 tricore-none-elf asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 tricore-none-elf nested no: expected ';' before '{' [E0002]
-tricore-none-elf interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS32 and RX it is implemented)
+tricore-none-elf interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS32, RX and ColdFire it is implemented)
 tricore-none-elf naked yes
 tricore-none-elf asmfile yes
 tricore-none-elf dashS yes
@@ -530,7 +530,7 @@ powerpc-none-eabi setjmp no: '__builtin_setjmp' is not declared in 'f' — for a
 powerpc-none-eabi cgoto yes
 powerpc-none-eabi asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 powerpc-none-eabi nested no: expected ';' before '{' [E0002]
-powerpc-none-eabi interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS32 and RX it is implemented)
+powerpc-none-eabi interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS32, RX and ColdFire it is implemented)
 powerpc-none-eabi naked yes
 powerpc-none-eabi asmfile yes
 powerpc-none-eabi dashS yes
@@ -560,7 +560,7 @@ sparc-none-elf setjmp no: '__builtin_setjmp' is not declared in 'f' — for a ca
 sparc-none-elf cgoto yes
 sparc-none-elf asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 sparc-none-elf nested no: expected ';' before '{' [E0002]
-sparc-none-elf interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS32 and RX it is implemented)
+sparc-none-elf interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS32, RX and ColdFire it is implemented)
 sparc-none-elf naked yes
 sparc-none-elf asmfile yes
 sparc-none-elf dashS yes
@@ -590,7 +590,7 @@ m68k-none-elf setjmp no: '__builtin_setjmp' is not declared in 'f' — for a cal
 m68k-none-elf cgoto yes
 m68k-none-elf asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 m68k-none-elf nested no: expected ';' before '{' [E0002]
-m68k-none-elf interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS32 and RX it is implemented)
+m68k-none-elf interrupt yes
 m68k-none-elf naked yes
 m68k-none-elf asmfile yes
 m68k-none-elf dashS yes
@@ -620,7 +620,7 @@ x86_64-elf setjmp no: '__builtin_setjmp' is not declared in 'f' — for a call, 
 x86_64-elf cgoto yes
 x86_64-elf asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 x86_64-elf nested no: expected ';' before '{' [E0002]
-x86_64-elf interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS32 and RX it is implemented)
+x86_64-elf interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS32, RX and ColdFire it is implemented)
 x86_64-elf naked no: __attribute__((naked)) is not supported: on this target the body could only be assembled by the file-scope assembler's few instructions; it is supported on the ARM, RISC-V, MIPS and AVR targets
 x86_64-elf asmfile no: no assembly-file support for x86_64-elf yet
 x86_64-elf dashS yes
@@ -650,7 +650,7 @@ aarch64-elf setjmp no: '__builtin_setjmp' is not declared in 'f' — for a call,
 aarch64-elf cgoto yes
 aarch64-elf asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 aarch64-elf nested no: expected ';' before '{' [E0002]
-aarch64-elf interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS32 and RX it is implemented)
+aarch64-elf interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS32, RX and ColdFire it is implemented)
 aarch64-elf naked no: __attribute__((naked)) is not supported: on this target the body could only be assembled by the file-scope assembler's few instructions; it is supported on the ARM, RISC-V, MIPS and AVR targets
 aarch64-elf asmfile yes
 aarch64-elf dashS yes
@@ -680,7 +680,7 @@ x86_64-linux-gnu setjmp no: '__builtin_setjmp' is not declared in 'f' — for a 
 x86_64-linux-gnu cgoto yes
 x86_64-linux-gnu asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 x86_64-linux-gnu nested no: expected ';' before '{' [E0002]
-x86_64-linux-gnu interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS32 and RX it is implemented)
+x86_64-linux-gnu interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS32, RX and ColdFire it is implemented)
 x86_64-linux-gnu naked no: __attribute__((naked)) is not supported: on this target the body could only be assembled by the file-scope assembler's few instructions; it is supported on the ARM, RISC-V, MIPS and AVR targets
 x86_64-linux-gnu asmfile no: no assembly-file support for x86_64-linux-gnu yet
 x86_64-linux-gnu dashS yes
@@ -710,7 +710,7 @@ aarch64-apple-darwin setjmp no: '__builtin_setjmp' is not declared in 'f' — fo
 aarch64-apple-darwin cgoto yes
 aarch64-apple-darwin asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 aarch64-apple-darwin nested no: expected ';' before '{' [E0002]
-aarch64-apple-darwin interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS32 and RX it is implemented)
+aarch64-apple-darwin interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS32, RX and ColdFire it is implemented)
 aarch64-apple-darwin naked no: __attribute__((naked)) is not supported: on this target the body could only be assembled by the file-scope assembler's few instructions; it is supported on the ARM, RISC-V, MIPS and AVR targets
 aarch64-apple-darwin asmfile yes
 aarch64-apple-darwin dashS yes
@@ -740,7 +740,7 @@ x86_64-windows-gnu setjmp no: '__builtin_setjmp' is not declared in 'f' — for 
 x86_64-windows-gnu cgoto yes
 x86_64-windows-gnu asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 x86_64-windows-gnu nested no: expected ';' before '{' [E0002]
-x86_64-windows-gnu interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS32 and RX it is implemented)
+x86_64-windows-gnu interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS32, RX and ColdFire it is implemented)
 x86_64-windows-gnu naked no: __attribute__((naked)) is not supported: on this target the body could only be assembled by the file-scope assembler's few instructions; it is supported on the ARM, RISC-V, MIPS and AVR targets
 x86_64-windows-gnu asmfile no: no assembly-file support for x86_64-windows-gnu yet
 x86_64-windows-gnu dashS yes

@@ -764,7 +764,16 @@ static const struct attr_entry attr_table[] = {
       "the handler would return with an ordinary return instead of the "
       "interrupt return the CPU needs, and without saving the registers "
       "(on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, "
-      "MIPS32 and RX it is implemented)" },
+      "MIPS32, RX and ColdFire it is implemented)" },
+    /* GCC's m68k spelling of the same thing, honoured on ColdFire (the
+     * dispatch below); interrupt_thread is the Fido's, whose threads
+     * switch register banks this target does not have. */
+    { "interrupt_handler", ATTR_REFUSED,
+      "it is the m68k port's interrupt handler, implemented on the "
+      "ColdFire target only" },
+    { "interrupt_thread", ATTR_REFUSED,
+      "it makes a Fido interrupt thread, which switches register banks "
+      "a ColdFire does not have; use __attribute__((interrupt))" },
     /* RX's other kind, GCC's: registers banked in BPC and BPSW, returned
      * from with rtfi. Unknown, it would only be warned about, and the
      * handler built as an ordinary function would return with rts. */
@@ -1052,6 +1061,10 @@ static int isr_kind(struct parser *ps, int line, const char *arg,
             "slot of the relocatable vector table by a $tableentry$ symbol "
             "that GNU ld's RX port gathers into one, and EmbLD builds no "
             "table from them; name the handler in your vector table");
+    if (a == TARGET_COLDFIRE && has_args)
+        parse_error_line(ps, line,
+            "interrupt takes no argument on ColdFire, as in GCC's m68k "
+            "port: the handler is installed by its vector table entry");
     return ISR_INTERRUPT;
 }
 
@@ -1269,7 +1282,10 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
                            (target_get() == TARGET_RISCV32 ||
                             target_get() == TARGET_RISCV64 ||
                             target_get() == TARGET_MIPS32 ||
-                            target_get() == TARGET_RX)) &&
+                            target_get() == TARGET_RX ||
+                            target_get() == TARGET_COLDFIRE)) &&
+                         !(attr_is(name, "interrupt_handler") &&
+                           target_get() == TARGET_COLDFIRE) &&
                          !(attr_is(name, "keep_interrupts_masked") &&
                            target_get() == TARGET_MIPS32) &&
                          !(attr_is(name, "naked") &&
@@ -1360,6 +1376,8 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
                             "declaration");
                     out->isr = (out->isr & ISR_MASKED) | k;
                 }
+                else if (attr_is(name, "interrupt_handler"))
+                    out->isr = ISR_INTERRUPT;       /* ColdFire's, above */
                 else if (attr_is(name, "keep_interrupts_masked"))
                     out->isr |= ISR_MASKED;
                 else if (attr_is(name, "noreturn")) out->noreturn = 1;

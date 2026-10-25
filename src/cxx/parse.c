@@ -150,10 +150,15 @@ static void parse_attrs(struct attrs *a)
                 /* An interrupt handler, likewise: skipped, it returns with
                  * an ordinary return and saves only the callee-saved
                  * registers. The C front end implements it (AVR, RISC-V,
-                 * MIPS32, RX); on a Cortex-M it changes nothing, and is
-                 * accepted. */
-                if ((attr_is(n, "interrupt") || attr_is(n, "signal")) &&
-                    !(target_get() == TARGET_THUMB && !target_arm_a32()))
+                 * MIPS32, RX, ColdFire); on a Cortex-M it changes nothing,
+                 * and is accepted. The other spellings of a handler too,
+                 * which C++ would otherwise skip as unknown. */
+                if ((attr_is(n, "interrupt") || attr_is(n, "signal") ||
+                     attr_is(n, "interrupt_handler") ||
+                     attr_is(n, "interrupt_thread") ||
+                     attr_is(n, "fast_interrupt")) &&
+                    !(attr_is(n, "interrupt") &&
+                      target_get() == TARGET_THUMB && !target_arm_a32()))
                     cx_error(cx_cur(), "__attribute__((%s)) is not "
                              "supported in C++ yet: the handler would return "
                              "with an ordinary return instead of the "

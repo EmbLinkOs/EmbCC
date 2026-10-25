@@ -8356,7 +8356,8 @@ static void check_func(struct unit *u, struct func *f)
     if (f->is_isr && (target_get() == TARGET_RISCV32 ||
                       target_get() == TARGET_RISCV64 ||
                       target_get() == TARGET_MIPS32 ||
-                      target_get() == TARGET_RX)) {
+                      target_get() == TARGET_RX ||
+                      target_get() == TARGET_COLDFIRE)) {
         if (f->nparams || f->is_varargs)
             sema_error_line(u, f->line,
                 "interrupt handler '%s' takes parameters: the hardware "
