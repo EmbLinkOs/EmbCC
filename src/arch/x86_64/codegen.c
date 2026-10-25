@@ -2130,11 +2130,14 @@ static void gen_x87(struct code *text, const int *sd, struct ir_ins *i)
  *   - Win64 reserves shadow space in the caller's frame, which is the
  *     same overlap problem in a different ABI.
  *
- * What is NOT a condition: the return TYPE. The callee leaves its value
- * exactly where this function would have left it -- rax, xmm0, st0 --
- * because they return the same type. That is the whole point of the
- * transform, and it is why the IR_RET that follows is skipped rather
- * than emitted. */
+ * And the RETURN's class and width must be the call's: then the callee
+ * leaves its value exactly where this function would have left it --
+ * rax, xmm0, st0 -- which is the whole point of the transform, and why
+ * the IR_RET that follows is skipped rather than emitted. "The same
+ * type" is not given: once a union pun is inlined, `return f_of(g(x))`
+ * is `%9 = call g` then `ret %9` with g's u32 returned as a float, and a
+ * jump left it in eax where the caller read xmm0 (lib/rt/half.c's
+ * __truncdfhf2 at -Os, every double-to-_Float16 conversion wrong). */
 static int tail_call_ok(struct ir_func *fn, int n)
 {
     struct ir_ins *c = &fn->ins[n];
@@ -2179,7 +2182,9 @@ static int tail_call_ok(struct ir_func *fn, int n)
                 continue;
             }
             if (r->op == IR_RET)
-                return val >= 0 ? r->a == val : r->a < 0;
+                return val >= 0 ? r->a == val && r->flt == c->flt &&
+                                  r->w == c->w
+                                : r->a < 0;
             return 0;
         }
     }
