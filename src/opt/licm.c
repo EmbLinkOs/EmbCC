@@ -171,13 +171,60 @@ static int lmem_inert(enum ir_op op)
     }
 }
 
+/* One loop: its blocks in ascending order -- which is the order of
+ * their instructions, so a walk over them visits what a walk over the
+ * function filtered by `in` visited, in the same order -- and the same
+ * blocks as a mark. Everything below costs what the loop holds, not
+ * what the function does: a function of 300 small loops spent seconds
+ * clearing and scanning the whole of itself once per loop. */
+struct lpset { const int *b; int n; const char *in; };
+
+/* The global each symbol's first `gaddr` names (lp_in_bounds), found
+ * once per call rather than by a scan of the function per load. */
+struct gtab { int cap; int *sym; const struct global **g; };
+
+static void gtab_build(struct gtab *t, struct ir_func *fn)
+{
+    int ng = 0;
+    for (int n = 0; n < fn->nins; n++)
+        ng += fn->ins[n].op == IR_GADDR;
+    t->cap = 16;
+    while (t->cap < 2 * ng + 2)
+        t->cap *= 2;
+    t->sym = xmalloc((size_t)t->cap * sizeof *t->sym);
+    t->g = xmalloc((size_t)t->cap * sizeof *t->g);
+    for (int k = 0; k < t->cap; k++)
+        t->sym[k] = -1;
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        if (i->op != IR_GADDR || i->glob_sym < 0 || !i->glob)
+            continue;
+        unsigned h = (unsigned)i->glob_sym * 2654435761u & (unsigned)(t->cap - 1);
+        while (t->sym[h] >= 0 && t->sym[h] != i->glob_sym)
+            h = (h + 1) & (unsigned)(t->cap - 1);
+        if (t->sym[h] < 0) {             /* the first one names it */
+            t->sym[h] = i->glob_sym;
+            t->g[h] = i->glob;
+        }
+    }
+}
+
+static const struct global *gtab_get(const struct gtab *t, int sym)
+{
+    if (sym < 0)
+        return NULL;
+    unsigned h = (unsigned)sym * 2654435761u & (unsigned)(t->cap - 1);
+    while (t->sym[h] >= 0 && t->sym[h] != sym)
+        h = (h + 1) & (unsigned)(t->cap - 1);
+    return t->sym[h] == sym ? t->g[h] : NULL;
+}
+
 static void lmem_build(struct ir_func *fn, struct defs *d, struct bb *bb,
-                       int nbb, const char *in, struct lmem *m)
+                       const struct lpset *L, struct lmem *m)
 {
     memset(m, 0, sizeof *m);
-    for (int b = 0; b < nbb; b++) {
-        if (!in[b])
-            continue;
+    for (int k = 0; k < L->n; k++) {
+        int b = L->b[k];
         for (int n = bb[b].start; n < bb[b].end; n++) {
             struct ir_ins *i = &fn->ins[n];
             switch (i->op) {
@@ -243,17 +290,16 @@ static int lmem_no_write(const struct lmem *m, struct maccess x,
 
 /* Does block `s` run in every iteration that ends -- at a latch or by
  * leaving? It must dominate every latch and every exiting block. */
-static int lp_every_iter(struct bb *bb, int nbb, const char *in, int h, int s,
+static int lp_every_iter(struct bb *bb, const struct lpset *L, int h, int s,
                          int exits_only)
 {
     int any = 0;
-    for (int b = 0; b < nbb; b++) {
-        if (!in[b])
-            continue;
+    for (int q = 0; q < L->n; q++) {
+        int b = L->b[q];
         int need = 0;
         for (int k = 0; k < bb[b].nsucc; k++) {
             int t = bb[b].succ[k];
-            if (!in[t]) { need = 1; any = 1; }
+            if (!L->in[t]) { need = 1; any = 1; }
             else if (t == h && !exits_only) need = 1;
         }
         if (need && !bb_dominates(bb, s, b))
@@ -266,7 +312,8 @@ static int lp_every_iter(struct bb *bb, int nbb, const char *in, int h, int s,
  * mapped wherever the function runs. Only an object whose extent is
  * known here: not weak (an undefined weak one is at address 0), not
  * placed in a named section, not merely declared. */
-static int lp_in_bounds(struct ir_func *fn, struct maccess x, int size)
+static int lp_in_bounds(struct ir_func *fn, const struct gtab *gt,
+                        struct maccess x, int size)
 {
     long objsz = 0;
     if (size <= 0)
@@ -276,10 +323,7 @@ static int lp_in_bounds(struct ir_func *fn, struct maccess x, int size)
             return 0;
         objsz = fn->locals[x.bid].size;
     } else if (x.bkind == BASE_GLOBAL) {
-        const struct global *g = NULL;
-        for (int n = 0; n < fn->nins && !g; n++)
-            if (fn->ins[n].op == IR_GADDR && fn->ins[n].glob_sym == x.bid)
-                g = fn->ins[n].glob;
+        const struct global *g = gtab_get(gt, x.bid);
         if (!g || g->is_weak || g->section || g->absorbed || !g->defined ||
             !g->ty || g->ty->is_volatile)
             return 0;
@@ -329,28 +373,25 @@ static int lp_guard_loaded(struct ir_func *fn, struct defs *d, struct bb *bb,
 /* Can a load of x, at instruction n of the loop, run in the preheader
  * without faulting where the program would not have? */
 static int lp_load_safe(struct ir_func *fn, struct defs *d, struct bb *bb,
-                        int nbb, const char *in, int h, const struct lmem *m,
-                        int blk, struct maccess x, int size)
+                        const struct lpset *L, int h, const struct lmem *m,
+                        const struct gtab *gt, int blk, struct maccess x,
+                        int size)
 {
-    if (!m->ncall && lp_every_iter(bb, nbb, in, h, blk, 0))
+    if (!m->ncall && lp_every_iter(bb, L, h, blk, 0))
         return 1;                                         /* R1 */
-    if (lp_in_bounds(fn, x, size))
+    if (lp_in_bounds(fn, gt, x, size))
         return 1;                                         /* R2 */
-    return lp_guard_loaded(fn, d, bb, in, h, x);          /* R3 */
+    return lp_guard_loaded(fn, d, bb, L->in, h, x);       /* R3 */
 }
 
 /* Retarget every entry into the loop from outside -- a branch's label or
  * a switch's table entry -- from the header Lh to the preheader Lpre. */
-static void lp_retarget_entries(struct ir_func *fn, struct bb *bb, int nbb,
+static void lp_retarget_entries(struct ir_func *fn, struct bb *bb,
                                 const char *in, int h, int Lh, int Lpre)
 {
-    for (int p = 0; p < nbb; p++) {
+    for (int q = 0; q < bb[h].npred; q++) {      /* the blocks into h */
+        int p = bb[h].pred[q];
         if (in[p] || bb[p].end <= bb[p].start)
-            continue;
-        int hits = 0;
-        for (int k = 0; k < bb[p].nsucc; k++)
-            if (bb[p].succ[k] == h) hits = 1;
-        if (!hits)
             continue;
         struct ir_ins *t = &fn->ins[bb[p].end - 1];
         if (t->op == IR_JMP || t->op == IR_BRZ || t->op == IR_BRNZ ||
@@ -389,18 +430,16 @@ static int lp_value_width(struct ir_func *fn, struct defs *d, int v, int w)
 /* Promote one location of the loop to a temp; 1 when it did. `in` is
  * the loop, h its header, inl_ins its instructions. */
 static int licm_promote(struct ir_func *fn, struct defs *d, struct bb *bb,
-                        int nbb, const char *in, const char *inl_ins, int h,
-                        const struct lmem *m, const char *taken)
+                        int nbb, const struct lpset *L, const char *inl_ins,
+                        int h, const struct lmem *m, const char *taken,
+                        const int *i2b, const struct gtab *gt)
 {
+    const char *in = L->in;
     if (m->barrier || m->rwcall || m->multi || m->n == 0)
         return 0;
-    if (!lp_every_iter(bb, nbb, in, h, h, 1))
+    if (!lp_every_iter(bb, L, h, h, 1))
         return 0;                       /* no way out: nowhere to store */
     int nvars = fn->nvars;
-    int *i2b = xmalloc((size_t)fn->nins * sizeof *i2b);
-    for (int b = 0; b < nbb; b++)
-        for (int n = bb[b].start; n < bb[b].end; n++)
-            i2b[n] = b;
     char *mem = xmalloc((size_t)m->n);
     int done = 0;
     for (int c = 0; c < m->n && !done; c++) {
@@ -446,10 +485,10 @@ static int licm_promote(struct ir_func *fn, struct defs *d, struct bb *bb,
                 }
             } else {
                 if (st0 < 0) st0 = m->at[k];
-                if (lp_every_iter(bb, nbb, in, h, i2b[m->at[k]], 1))
+                if (lp_every_iter(bb, L, h, i2b[m->at[k]], 1))
                     sblk_ok = 1;
             }
-            if (lp_every_iter(bb, nbb, in, h, i2b[m->at[k]], 0))
+            if (lp_every_iter(bb, L, h, i2b[m->at[k]], 0))
                 guard_blk = i2b[m->at[k]];
             if (A < 0 && one_value(fn, d, i->a) &&
                 (d->ins[i->a] < 0 || !inl_ins[d->ins[i->a]]))
@@ -465,13 +504,13 @@ static int licm_promote(struct ir_func *fn, struct defs *d, struct bb *bb,
             continue;
         /* the loaded value can be put back where the loop started */
         if (nld && !((!m->ncall && guard_blk >= 0) ||
-                     lp_in_bounds(fn, K, size) ||
+                     lp_in_bounds(fn, gt, K, size) ||
                      lp_guard_loaded(fn, d, bb, in, h, K)))
             continue;
         /* stored values: an address based on it would escape; a value
          * kept without re-extension must already be what a load reads */
-        for (int b = 0; b < nbb && ok; b++) {
-            if (!in[b]) continue;
+        for (int q = 0; q < L->n && ok; q++) {
+            int b = L->b[q];
             for (int n = bb[b].start; n < bb[b].end && ok; n++) {
                 const struct ir_ins *i = &fn->ins[n];
                 if (i->op == IR_STORE) {
@@ -498,8 +537,8 @@ static int licm_promote(struct ir_func *fn, struct defs *d, struct bb *bb,
         int ncps = 0, ntrs = 0;
         cps = xmalloc((size_t)(2 * nbb + 1) * sizeof *cps);
         trs = xmalloc((size_t)(2 * nbb + 1) * sizeof *trs);
-        for (int b = 0; b < nbb && ok; b++) {
-            if (!in[b]) continue;
+        for (int q = 0; q < L->n && ok; q++) {
+            int b = L->b[q];
             struct ir_ins *lt = &fn->ins[bb[b].end - 1];
             int did_tr = 0, did_fall = 0;
             for (int k = 0; k < bb[b].nsucc && ok; k++) {
@@ -543,7 +582,7 @@ static int licm_promote(struct ir_func *fn, struct defs *d, struct bb *bb,
         int Lpre = -1;
         if (nld) {
             Lpre = fn->nlabels++;
-            lp_retarget_entries(fn, bb, nbb, in, h, Lh, Lpre);
+            lp_retarget_entries(fn, bb, in, h, Lh, Lpre);
         }
         for (int t = 0; t < ntrs; t++) {
             struct ir_ins *br = &fn->ins[bb[trs[t].to].end - 1];
@@ -635,14 +674,29 @@ static int licm_promote(struct ir_func *fn, struct defs *d, struct bb *bb,
                        ncps + ntrs == 1 ? "" : "s");
         done = 1;
     }
-    free(mem); free(i2b);
+    free(mem);
     return done;
 }
 
 /* -flicm-mem (opt_run sets it): the memory half of LICM above. */
 int g_licm_mem = 1;
 
-/* Hoist out of one loop, or report that there was nothing to do. */
+static int lp_cmp_int(const void *a, const void *b)
+{
+    int x = *(const int *)a, y = *(const int *)b;
+    return (x > y) - (x < y);
+}
+
+/* Hoist out of every loop that can be done at once, or report that there
+ * was nothing to do. One loop was done per call, the function rebuilt
+ * after each, and a function of many loops paid a rebuild per loop (and
+ * waited for later rounds past 64). A loop is done along with the others
+ * of this call when none of its blocks, the blocks entering it, or its
+ * header's immediate dominator belongs to a loop already chosen: then
+ * nothing it reads is changed by their hoists, and it hoists what it
+ * would have hoisted after them. A loop that touches one -- the loop
+ * around a chosen one, the next one in a nest -- waits for the next
+ * call, which sees the rebuilt function as before. */
 static int licm_one(struct ir_func *fn)
 {
     if (fn->nins == 0)
@@ -667,22 +721,51 @@ static int licm_one(struct ir_func *fn)
 
     struct defs d;
     compute_defs(fn, &d);
-    char *in = xmalloc((size_t)nbb);
-    char *inl_ins = xmalloc((size_t)fn->nins);
-    char *wrin = xmalloc((size_t)(fn->nvregs ? fn->nvregs : 1));
-    char *inv = xmalloc((size_t)fn->nins);
-    char *stored = xmalloc((size_t)(fn->nvars ? fn->nvars : 1));
-    int *hoist = xmalloc((size_t)fn->nins * sizeof *hoist);
-    int *i2b = xmalloc((size_t)(fn->nins ? fn->nins : 1) * sizeof *i2b);
+    struct gtab gt;
+    gtab_build(&gt, fn);
+    int nv1 = fn->nvregs ? fn->nvregs : 1, ni1 = fn->nins ? fn->nins : 1;
+    int nvar1 = fn->nvars ? fn->nvars : 1;
+    /* Each is all zero between loops: a loop clears what it set. */
+    char *in = xcalloc((size_t)nbb, 1);
+    char *inl_ins = xcalloc((size_t)ni1, 1);
+    char *wrin = xcalloc((size_t)nv1, 1);
+    char *inv = xcalloc((size_t)ni1, 1);
+    char *stored = xcalloc((size_t)nvar1, 1);
     /* a load the memory rules refused, so the fixpoint asks once */
-    char *nomem = xmalloc((size_t)(fn->nins ? fn->nins : 1));
+    char *nomem = xcalloc((size_t)ni1, 1);
+    int *hoist = xmalloc((size_t)ni1 * sizeof *hoist);
+    int *i2b = xmalloc((size_t)ni1 * sizeof *i2b);
+    int *lb = xmalloc((size_t)nbb * sizeof *lb), nlb = 0;     /* the loop */
+    int *lins = xmalloc((size_t)ni1 * sizeof *lins), nlins = 0;
+    int *wset = xmalloc((size_t)nv1 * sizeof *wset), nwset = 0, wall = 0;
+    int *sset = xmalloc((size_t)nvar1 * sizeof *sset), nsset = 0;
+    int *stk = xmalloc((size_t)nbb * sizeof *stk);
     for (int b = 0; b < nbb; b++)
         for (int n = bb[b].start; n < bb[b].end; n++)
             i2b[n] = b;
+    /* The loops chosen: their blocks, and per loop its header, its
+     * preheader's label and its hoists (hall[hoff[k] .. hoff[k + 1])). */
+    char *taken_bb = xcalloc((size_t)nbb, 1);
+    int *bh = NULL, *blpre = NULL, *hoff = NULL, *hall = NULL, *bnld = NULL;
+    int nbatch = 0, capb = 0, nhall = 0, caph = 0;
     int done = 0;
 
     /* Headers innermost first: a higher RPO number is deeper in. */
     for (int oi = norder - 1; oi >= 0 && !done; oi--) {
+        /* the last loop's marks, cleared */
+        for (int k = 0; k < nlb; k++)
+            in[lb[k]] = 0;
+        for (int k = 0; k < nlins; k++)
+            inl_ins[lins[k]] = inv[lins[k]] = nomem[lins[k]] = 0;
+        for (int k = 0; k < nsset; k++)
+            stored[sset[k]] = 0;
+        if (wall)
+            memset(wrin, 0, (size_t)nv1);
+        else
+            for (int k = 0; k < nwset; k++)
+                wrin[wset[k]] = 0;
+        nlb = nlins = nsset = nwset = wall = 0;
+
         int h = order[oi];
         if (h == 0)                      /* the entry has no preheader slot */
             continue;
@@ -690,24 +773,46 @@ static int licm_one(struct ir_func *fn)
             continue;                    /* not a branch target: no back edge */
         int Lh = fn->ins[bb[h].start].label;
 
-        memset(in, 0, (size_t)nbb);
+        /* The natural loop of each back edge into h (loop_body's walk,
+         * keeping the blocks it marks). */
         int any_back = 0;
         for (int q = 0; q < bb[h].npred; q++) {   /* back edges into h */
             int p = bb[h].pred[q];
-            if (bb_dominates(bb, h, p)) {
-                loop_body(bb, nbb, h, p, in);
-                any_back = 1;
+            if (!bb_dominates(bb, h, p))
+                continue;
+            int sp = 0;
+            if (!in[h]) { in[h] = 1; lb[nlb++] = h; }
+            if (!in[p]) { in[p] = 1; lb[nlb++] = p; stk[sp++] = p; }
+            while (sp) {
+                int b = stk[--sp];
+                for (int k = 0; k < bb[b].npred; k++) {
+                    int r = bb[b].pred[k];
+                    if (!in[r]) { in[r] = 1; lb[nlb++] = r; stk[sp++] = r; }
+                }
             }
+            any_back = 1;
         }
         if (!any_back)
             continue;
+        qsort(lb, (size_t)nlb, sizeof *lb, lp_cmp_int);
+        struct lpset L = { lb, nlb, in };
+
+        /* Beside the loops already chosen, or left for the next call. */
+        if (nbatch) {
+            int clash = bb[h].idom >= 0 && taken_bb[bb[h].idom];
+            for (int k = 0; k < nlb && !clash; k++)
+                clash = taken_bb[lb[k]];
+            for (int q = 0; q < bb[h].npred && !clash; q++)
+                clash = taken_bb[bb[h].pred[q]];
+            if (clash)
+                continue;
+        }
 
         /* Every way into the loop must be through the header, or the
          * preheader would not dominate what was hoisted into it. */
         int ok = 1, nentry = 0;
-        for (int b = 0; b < nbb && ok; b++) {
-            if (!in[b])
-                continue;
+        for (int q = 0; q < nlb && ok; q++) {
+            int b = lb[q];
             for (int k = 0; k < bb[b].npred; k++) {
                 int p = bb[b].pred[k];
                 if (in[p])
@@ -722,8 +827,9 @@ static int licm_one(struct ir_func *fn)
          * it would fall into the preheader instead. A block that ends
          * where the header starts falls into it unless its last
          * instruction leaves unconditionally. */
-        for (int p = 0; p < nbb && ok; p++) {
-            if (!in[p] || bb[p].end != bb[h].start || bb[p].end <= bb[p].start)
+        for (int q = 0; q < nlb && ok; q++) {
+            int p = lb[q];
+            if (bb[p].end != bb[h].start || bb[p].end <= bb[p].start)
                 continue;
             enum ir_op t = fn->ins[bb[p].end - 1].op;
             if (t != IR_JMP && t != IR_RET && t != IR_UD2 && t != IR_SWITCH)
@@ -734,16 +840,16 @@ static int licm_one(struct ir_func *fn)
 
         /* What the loop does to memory, which decides whether a load of
          * a frame slot can move. */
-        memset(inl_ins, 0, (size_t)fn->nins);
-        memset(stored, 0, (size_t)(fn->nvars ? fn->nvars : 1));
-        for (int b = 0; b < nbb; b++) {
-            if (!in[b])
-                continue;
+        for (int q = 0; q < nlb; q++) {
+            int b = lb[q];
             for (int n = bb[b].start; n < bb[b].end; n++) {
                 inl_ins[n] = 1;
+                lins[nlins++] = n;
                 if (fn->ins[n].op == IR_STVAR && fn->ins[n].dst >= 0 &&
-                    fn->ins[n].dst < fn->nvars)
+                    fn->ins[n].dst < fn->nvars && !stored[fn->ins[n].dst]) {
                     stored[fn->ins[n].dst] = 1;
+                    sset[nsset++] = fn->ins[n].dst;
+                }
             }
         }
         /* Which temps the loop writes at all, by ANY definition. A temp
@@ -754,17 +860,22 @@ static int licm_one(struct ir_func *fn)
          * the value it found there. Refusing every multiply-defined
          * operand refused the row address of every 2-D array walk:
          * `ma[i][k]` recomputed i*48 + ma on each trip of the k loop. */
-        memset(wrin, 0, (size_t)(fn->nvregs ? fn->nvregs : 1));
-        for (int n = 0; n < fn->nins; n++) {
-            if (!inl_ins[n])
-                continue;
+        for (int q = 0; q < nlins; q++) {
+            int n = lins[q];
             int t = def_target(&fn->ins[n]);
-            if (t >= 0 && t < fn->nvregs) wrin[t] = 1;
+            if (t >= 0 && t < fn->nvregs && !wrin[t]) {
+                wrin[t] = 1;
+                wset[nwset++] = t;
+            }
             if (fn->ins[n].op == IR_LANDING && fn->ins[n].b >= 0 &&
-                fn->ins[n].b < fn->nvregs)
+                fn->ins[n].b < fn->nvregs && !wrin[fn->ins[n].b]) {
                 wrin[fn->ins[n].b] = 1;
-            if (fn->ins[n].op == IR_ASM)
+                wset[nwset++] = fn->ins[n].b;
+            }
+            if (fn->ins[n].op == IR_ASM) {
                 memset(wrin, 1, (size_t)(fn->nvregs ? fn->nvregs : 1));
+                wall = 1;
+            }
         }
 
         /* What the loop does to memory (lmem_build), for the loads that
@@ -772,18 +883,17 @@ static int licm_one(struct ir_func *fn)
         struct lmem lm;
         memset(&lm, 0, sizeof lm);
         if (g_licm_mem)
-            lmem_build(fn, &d, bb, nbb, in, &lm);
+            lmem_build(fn, &d, bb, &L, &lm);
         else
             lm.barrier = 1;
 
         /* The invariance fixpoint. */
-        memset(inv, 0, (size_t)fn->nins);
-        memset(nomem, 0, (size_t)fn->nins);
         int grew = 1, nloads = 0;
         while (grew) {
             grew = 0;
-            for (int n = 0; n < fn->nins; n++) {
-                if (!inl_ins[n] || inv[n])
+            for (int q = 0; q < nlins; q++) {
+                int n = lins[q];
+                if (inv[n])
                     continue;
                 struct ir_ins *i = &fn->ins[n];
                 if (i->vol)
@@ -835,7 +945,7 @@ static int licm_one(struct ir_func *fn)
                      * grows: asked once per load */
                     struct maccess x = mem_access(fn, &d, i->a, i->size);
                     all = lmem_no_write(&lm, x, addr_taken, fn->nvars) &&
-                          lp_load_safe(fn, &d, bb, nbb, in, h, &lm, i2b[n],
+                          lp_load_safe(fn, &d, bb, &L, h, &lm, &gt, i2b[n],
                                        x, i->size);
                     if (!all)
                         nomem[n] = 1;
@@ -848,14 +958,16 @@ static int licm_one(struct ir_func *fn)
         }
 
         int nh = 0;
-        for (int n = 0; n < fn->nins; n++)
-            if (inv[n])
-                hoist[nh++] = n;
+        for (int q = 0; q < nlins; q++)
+            if (inv[lins[q]])
+                hoist[nh++] = lins[q];
         if (nh == 0) {
             /* Nothing left to hoist: the location the loop keeps going
-             * back to memory for, if there is one. */
-            if (!lm.barrier &&
-                licm_promote(fn, &d, bb, nbb, in, inl_ins, h, &lm, addr_taken))
+             * back to memory for, if there is one -- alone, since it
+             * rewrites the function there and then. */
+            if (!nbatch && !lm.barrier &&
+                licm_promote(fn, &d, bb, nbb, &L, inl_ins, h, &lm, addr_taken,
+                             i2b, &gt))
                 done = 1;
             lmem_free(&lm);
             continue;
@@ -889,26 +1001,59 @@ static int licm_one(struct ir_func *fn)
          * switch's table entry is an entry too: left on the header, it
          * jumped past the hoisted definitions. */
         int Lpre = fn->nlabels++;
-        lp_retarget_entries(fn, bb, nbb, in, h, Lh, Lpre);
+        lp_retarget_entries(fn, bb, in, h, Lh, Lpre);
 
-        /* Rebuild: the preheader label and the hoisted instructions go in
-         * before the header's label, and the originals come out. */
+        /* Chosen: the rewrite below does every chosen loop at once. */
+        if (nbatch == capb) {
+            capb = capb ? 2 * capb : 8;
+            bh = xrealloc(bh, (size_t)capb * sizeof *bh);
+            blpre = xrealloc(blpre, (size_t)capb * sizeof *blpre);
+            bnld = xrealloc(bnld, (size_t)capb * sizeof *bnld);
+            hoff = xrealloc(hoff, (size_t)(capb + 1) * sizeof *hoff);
+        }
+        if (nhall + nh > caph) {
+            while (nhall + nh > caph)
+                caph = caph ? 2 * caph : 64;
+            hall = xrealloc(hall, (size_t)caph * sizeof *hall);
+        }
+        bh[nbatch] = h;
+        blpre[nbatch] = Lpre;
+        bnld[nbatch] = nloads;
+        hoff[nbatch] = nhall;
+        memcpy(hall + nhall, hoist, (size_t)nh * sizeof *hoist);
+        nhall += nh;
+        nbatch++;
+        hoff[nbatch] = nhall;
+        for (int q = 0; q < nlb; q++)
+            taken_bb[lb[q]] = 1;
+    }
+
+    if (nbatch) {
+        /* Rebuild: each preheader label and its hoisted instructions go in
+         * before its header's label, and the originals come out. */
         char *moved = xcalloc((size_t)fn->nins, 1);
-        for (int k = 0; k < nh; k++)
-            moved[hoist[k]] = 1;
+        int *at = xmalloc((size_t)ni1 * sizeof *at);  /* a header's start */
+        for (int n = 0; n < fn->nins; n++)
+            at[n] = -1;
+        for (int k = 0; k < nbatch; k++) {
+            at[bb[bh[k]].start] = k;
+            for (int j = hoff[k]; j < hoff[k + 1]; j++)
+                moved[hall[j]] = 1;
+        }
         int *newpos = fn->var_scope_lo
             ? xmalloc((size_t)(fn->nins + 1) * sizeof *newpos) : NULL;
         struct ibuf nb = { 0, 0, 0 };
         for (int n = 0; n < fn->nins; n++) {
-            if (n == bb[h].start) {
+            if (at[n] >= 0) {
+                int k = at[n];
                 struct ir_ins *l = ib_push(&nb);
                 l->op = IR_LABEL;
-                l->label = Lpre;
+                l->label = blpre[k];
                 l->line = fn->ins[n].line;
                 l->col = fn->ins[n].col;
                 l->synth = 1;            /* no source construct: it is a seam */
-                for (int k = 0; k < nh; k++)
-                    *ib_push(&nb) = fn->ins[hoist[k]];
+                for (int j = hoff[k]; j < hoff[k + 1]; j++)
+                    *ib_push(&nb) = fn->ins[hall[j]];
             }
             if (newpos) newpos[n] = nb.n;
             if (moved[n])
@@ -929,7 +1074,9 @@ static int licm_one(struct ir_func *fn)
         fn->nins = nb.n;
         fn->cap = nb.cap;
         free(moved);
-        if (remarks_on() && fn->src) {
+        free(at);
+        for (int k = 0; k < nbatch && remarks_on() && fn->src; k++) {
+            int nh = hoff[k + 1] - hoff[k], nloads = bnld[k];
             remark_add("opt", "hoisted", fn->name, "licm/loop-invariant",
                        fn->file, fn->line,
                        "%d instruction%s out of a loop", nh, nh == 1 ? "" : "s");
@@ -945,6 +1092,9 @@ static int licm_one(struct ir_func *fn)
 
     free(i2b); free(nomem);
     free(hoist); free(stored); free(inv); free(inl_ins); free(wrin); free(in);
+    free(lb); free(lins); free(wset); free(sset); free(stk); free(taken_bb);
+    free(bh); free(blpre); free(bnld); free(hoff); free(hall);
+    free(gt.sym); free(gt.g);
     free_defs(&d); free(addr_taken);
     free(order); free(l2b);
     free_cfg(bb, nbb);

@@ -152,39 +152,107 @@ void compute_rpo(struct bb *bb, int nbb, int *order, int *norder)
     free(seen); free(stk); free(it); free(post);
 }
 
-static int idom_intersect(struct bb *bb, int a, int b)
+/* Lengauer-Tarjan's EVAL with path compression, without recursion: a
+ * chain of 8,192 blocks would recurse 8,192 deep. */
+static int lt_eval(int v, int *anc, int *label, const int *semi, int *stk)
 {
-    while (a != b) {
-        while (bb[a].rpo > bb[b].rpo) a = bb[a].idom;
-        while (bb[b].rpo > bb[a].rpo) b = bb[b].idom;
+    if (anc[v] < 0)
+        return v;
+    int n = 0, x = v;
+    while (anc[anc[x]] >= 0) {
+        stk[n++] = x;
+        x = anc[x];
     }
-    return a;
+    while (n-- > 0) {                  /* nearest the forest's root first */
+        x = stk[n];
+        if (semi[label[anc[x]]] < semi[label[x]])
+            label[x] = label[anc[x]];
+        anc[x] = anc[anc[x]];
+    }
+    return label[v];
 }
 
-/* Immediate dominators (Cooper-Harvey-Kennedy) over the reachable blocks. */
+/* Immediate dominators over the reachable blocks: Lengauer-Tarjan, with
+ * path compression. Cooper-Harvey-Kennedy's walk up the tentative
+ * dominators went the whole length of a chain from each predecessor of
+ * a join every test of the chain branches to -- GCC's 20001226-1.c,
+ * 8,192 tests to two labels: some 67 million steps a computation, and a
+ * dozen passes compute it every round. This one is near-linear, and its
+ * dominators are the same. */
 void compute_idom(struct bb *bb, int *order, int norder)
 {
     bb[0].idom = 0;
-    int changed = 1;
-    while (changed) {
-        changed = 0;
-        for (int i = 1; i < norder; i++) {       /* skip entry, RPO order */
-            int b = order[i], nd = -1;
-            for (int k = 0; k < bb[b].npred; k++) {
-                int p = bb[b].pred[k];
-                if (bb[p].idom < 0) continue;    /* not yet processed */
-                nd = nd < 0 ? p : idom_intersect(bb, nd, p);
+    int nbb = 0;
+    for (int i = 0; i < norder; i++)
+        if (order[i] + 1 > nbb) nbb = order[i] + 1;
+    if (norder > 1) {
+        int n = norder;
+        int *dfn = xmalloc((size_t)nbb * sizeof *dfn);   /* block -> number */
+        int *vert = xmalloc((size_t)n * sizeof *vert);   /* number -> block */
+        int *parent = xmalloc((size_t)n * sizeof *parent);
+        int *semi = xmalloc((size_t)n * sizeof *semi);
+        int *idom = xmalloc((size_t)n * sizeof *idom);
+        int *anc = xmalloc((size_t)n * sizeof *anc);
+        int *label = xmalloc((size_t)n * sizeof *label);
+        int *bhead = xmalloc((size_t)n * sizeof *bhead);
+        int *bnext = xmalloc((size_t)n * sizeof *bnext);
+        int *stk = xmalloc((size_t)n * sizeof *stk);
+        int *it = xmalloc((size_t)n * sizeof *it);
+        for (int b = 0; b < nbb; b++)
+            dfn[b] = -1;
+        /* preorder numbers over the depth-first spanning tree */
+        int cnt = 0, sp = 0;
+        dfn[0] = cnt; vert[cnt] = 0; parent[cnt] = -1; cnt++;
+        stk[sp] = 0; it[sp] = 0; sp++;
+        while (sp > 0) {
+            int u = stk[sp - 1];
+            if (it[sp - 1] < bb[u].nsucc) {
+                int w = bb[u].succ[it[sp - 1]++];
+                if (w < 0 || w >= nbb || dfn[w] >= 0 || cnt == n)
+                    continue;
+                dfn[w] = cnt; vert[cnt] = w; parent[cnt] = dfn[u]; cnt++;
+                stk[sp] = w; it[sp] = 0; sp++;
+            } else {
+                sp--;
             }
-            if (nd >= 0 && bb[b].idom != nd) { bb[b].idom = nd; changed = 1; }
         }
+        for (int v = 0; v < cnt; v++) {
+            semi[v] = label[v] = v;
+            anc[v] = -1;
+            bhead[v] = -1;
+            idom[v] = 0;
+        }
+        for (int w = cnt - 1; w > 0; w--) {
+            const struct bb *b = &bb[vert[w]];
+            for (int k = 0; k < b->npred; k++) {
+                int pb = b->pred[k];
+                if (pb < 0 || pb >= nbb || dfn[pb] < 0)
+                    continue;                    /* not reached */
+                int u = lt_eval(dfn[pb], anc, label, semi, stk);
+                if (semi[u] < semi[w])
+                    semi[w] = semi[u];
+            }
+            bnext[w] = bhead[semi[w]];
+            bhead[semi[w]] = w;
+            anc[w] = parent[w];                  /* link */
+            for (int v = bhead[parent[w]]; v >= 0; v = bnext[v]) {
+                int u = lt_eval(v, anc, label, semi, stk);
+                idom[v] = semi[u] < semi[v] ? u : parent[w];
+            }
+            bhead[parent[w]] = -1;
+        }
+        for (int w = 1; w < cnt; w++) {
+            if (idom[w] != semi[w])
+                idom[w] = idom[idom[w]];
+            bb[vert[w]].idom = vert[idom[w]];
+        }
+        free(dfn); free(vert); free(parent); free(semi); free(idom);
+        free(anc); free(label); free(bhead); free(bnext); free(stk); free(it);
     }
     /* Number the dominator tree depth-first, so that "does s dominate b"
      * is two comparisons (bb_dominates) rather than a walk up b's
      * dominators -- which on a chain of 4000 else-ifs is a walk of
      * thousands, asked of every edge by every loop pass. */
-    int nbb = 0;
-    for (int i = 0; i < norder; i++)
-        if (order[i] + 1 > nbb) nbb = order[i] + 1;
     int *kid = xcalloc((size_t)nbb + 1, sizeof *kid);
     int *kids = xmalloc((size_t)(norder ? norder : 1) * sizeof *kids);
     int *stk = xmalloc((size_t)(norder ? norder : 1) * sizeof *stk);
@@ -235,13 +303,17 @@ void compute_df(struct bb *bb, int nbb, int **df, int *ndf)
         for (int k = 0; k < bb[b].npred; k++) {
             int r = bb[b].pred[k];
             while (r >= 0 && r != bb[b].idom) {
-                if (!(ndf[r] > 0 && df[r][ndf[r] - 1] == b)) {
-                    if (ndf[r] == cap[r]) {
-                        cap[r] = cap[r] ? cap[r] * 2 : 4;
-                        df[r] = xrealloc(df[r], (size_t)cap[r] * sizeof(int));
-                    }
-                    df[r][ndf[r]++] = b;
+                /* b on r's frontier already: an earlier walk came this way
+                 * and went on up to b's idom, so the rest is done too. Not
+                 * stopping walked the whole chain from each predecessor of
+                 * a join a chain of tests all branches to: quadratic. */
+                if (ndf[r] > 0 && df[r][ndf[r] - 1] == b)
+                    break;
+                if (ndf[r] == cap[r]) {
+                    cap[r] = cap[r] ? cap[r] * 2 : 4;
+                    df[r] = xrealloc(df[r], (size_t)cap[r] * sizeof(int));
                 }
+                df[r][ndf[r]++] = b;
                 r = bb[r].idom;
             }
         }

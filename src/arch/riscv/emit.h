@@ -113,6 +113,7 @@ int rv_pcrel_pair(struct code *c, int rd);
  * place is known: `auipc rd, %pcrel_hi; addi rd, rd, %pcrel_lo` with no
  * relocation (a computed goto's &&label). */
 void rv_patch_pcrel_pair(struct code *c, int at, int target);
+int rv_far_placeholder(struct code *c, int rd);  /* auipc rd; jalr x0, rd */
 void rv_set_compress(int on, int xlen);
 int  rv_compress_enabled(void);
 

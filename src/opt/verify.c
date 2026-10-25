@@ -23,6 +23,17 @@ static void vrfy_read_cb(int *p, void *ctx)
         "internal: %s reads temp %%%d with no definition (after %s) — an optimizer "
         "pass dropped a value that is still used", v->fn->name, r, v->tag);
 }
+struct vlabel { struct ir_func *fn; const char *tag; const char *placed;
+                const char *what; };
+static void vrfy_label_cb(int *p, void *ctx)
+{
+    struct vlabel *v = ctx;
+    int l = *p;
+    if (l >= 0 && l < v->fn->nlabels && v->placed[l])
+        return;
+    diag_fatal(v->fn->file, 0, "internal: %s: a %s names label L%d, which "
+               "nothing places (after %s)", v->fn->name, v->what, l, v->tag);
+}
 /* pointer order, for the duplicate test only: nothing printed or emitted
  * depends on it */
 static int cmp_argv_ptr(const void *a, const void *b)
@@ -39,29 +50,27 @@ void verify_func(struct ir_func *fn, const char *tag)
     struct vrfy v = { &d, fn->nparams, fn->nvars, fn, tag };
     for (int n = 0; n < fn->nins; n++)
         each_read(&fn->ins[n], vrfy_read_cb, &v);
-    /* (3) every target a switch names is a label this function places:
-     * a table entry left behind by a pass that renumbered or dropped
-     * labels is a jump into nowhere. */
+    /* (3) every label anything names -- a branch's target, a switch's
+     * default and table, a `&&label` -- is one this function places: a
+     * reference left behind by a pass that renumbered or dropped labels
+     * is a jump into nowhere. Switches only, this once let a `brz -> L-1`
+     * and a branch to a dropped exit through to the backend, which
+     * stopped there with "label 0 was never placed" and no pass named. */
     {
         char *placed = xcalloc((size_t)(fn->nlabels ? fn->nlabels : 1), 1);
         for (int n = 0; n < fn->nins; n++)
             if (fn->ins[n].op == IR_LABEL && fn->ins[n].label >= 0 &&
                 fn->ins[n].label < fn->nlabels)
                 placed[fn->ins[n].label] = 1;
+        struct vlabel vl = { fn, tag, placed, NULL };
         for (int n = 0; n < fn->nins; n++) {
-            const struct ir_ins *i = &fn->ins[n];
-            if (i->op != IR_SWITCH)
-                continue;
-            if (i->jt < 0 || i->jt >= fn->njt || fn->jt[i->jt].n < 1)
+            struct ir_ins *i = &fn->ins[n];
+            if (i->op == IR_SWITCH &&
+                (i->jt < 0 || i->jt >= fn->njt || fn->jt[i->jt].n < 1))
                 diag_fatal(fn->file, 0, "internal: %s has a switch with no "
                            "table (after %s)", fn->name, tag);
-            for (int k = -1; k < fn->jt[i->jt].n; k++) {
-                int l = k < 0 ? i->label : fn->jt[i->jt].labels[k];
-                if (l < 0 || l >= fn->nlabels || !placed[l])
-                    diag_fatal(fn->file, 0, "internal: %s: a switch names "
-                               "label L%d, which nothing places (after %s)",
-                               fn->name, l, tag);
-            }
+            vl.what = ir_opname(i->op);
+            each_label(fn, i, vrfy_label_cb, &vl);
         }
         free(placed);
     }
