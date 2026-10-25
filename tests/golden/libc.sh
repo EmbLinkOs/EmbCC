@@ -35,7 +35,10 @@ function hexval(s,   i, c, v, d) {
 }
 {
     i = index($0, dir);   if (!i) next
-    h = index($0, "#");   if (!h) next
+    # the comment: AArch64's `//` (where `#` begins an immediate), or `#`
+    h = index($0, "//"); cl = 2
+    if (!h) { h = index($0, "#"); cl = 1 }
+    if (!h) next
     vals = substr($0, i + length(dir), h - i - length(dir))
     gsub(/[ \t]/, "", vals)
     n = split(vals, a, ",")
@@ -44,7 +47,7 @@ function hexval(s,   i, c, v, d) {
         for (b = 0; b < width; b++) { printf "%02x\n", v % 256 > bytes
                                       v = int(v / 256) }
     }
-    m = substr($0, h + 1)
+    m = substr($0, h + cl)
     sub(/\\n".*$/, "", m)
     gsub(/^[ \t]+|[ \t]+$/, "", m)
     print m > asm
@@ -80,6 +83,9 @@ command -v x86_64-elf-ld > /dev/null 2>&1 ||
     { echo "skipped: no x86_64-elf-ld"; exit 0; }
 
 LIB=build/libc/x86_64/libc.a
+# EmbCC's compiler runtime, after the C library as the driver links it:
+# __builtin_setjmp's __embcc_setjmp pair is there, and in no libgcc
+RT=build/libc/x86_64/librt.a
 [ -f "$LIB" ] || { echo "skipped: $LIB absent (make libc-x86_64)"; exit 0; }
 
 GCC=${EMBCC_X86_GCC:-x86_64-elf-gcc}
@@ -100,7 +106,7 @@ build_run() {              # build_run <source> <extra-cc-flags>
     "$EMBCC" -c -Ilib/libc/include "$2" "$1" -o "$out/p.o" 2>"$out/cc.txt" ||
         return 91
     x86_64-elf-ld -n -z max-page-size=0x1000 -T "$H/link.ld" -o "$out/p.64" \
-        "$out/start.o" "$out/p.o" "$out/sys.o" "$out/crt.o" "$LIB" \
+        "$out/start.o" "$out/p.o" "$out/sys.o" "$out/crt.o" "$LIB" "$RT" \
         -L"$LIBGCC" -lgcc 2>"$out/ld.txt" || return 92
     x86_64-elf-objcopy -I elf64-x86-64 -O elf32-i386 "$out/p.64" "$out/p.elf"
     "$H/../x86_64/run.sh" "$out/p.elf" > "$out/run.txt" 2>&1
