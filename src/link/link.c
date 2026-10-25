@@ -737,6 +737,165 @@ static void mips64_rinfo(const char *name, unsigned char *buf, int big)
     }
 }
 
+#if FAMILY_BUILT(riscv)
+/* ---- R_RISCV_ALIGN -------------------------------------------------------
+ *
+ * An object assembled for a relaxing linker (GCC's and clang's default)
+ * cannot know its final layout, so at each alignment it emits the WORST
+ * case of NOPs -- the alignment less two bytes -- marked by R_RISCV_ALIGN,
+ * and leaves the linker to delete what the layout does not need. This one
+ * relaxes nothing else, so every offset in the section is final the
+ * moment it is read: the deletions are worked out here, before layout,
+ * from the offsets alone, the section's alignment raised to the largest
+ * so that an offset's remainder is the address's. Padding left whole had
+ * left what follows misaligned -- a trap vector off its boundary.
+ *
+ * Deleting is sound because the same assembler resolved no distance it
+ * would change: every branch, jump-table entry and DWARF length across it
+ * is a relocation against a label, and the labels are symbols. So the
+ * bytes close up in place, and the symbols, the offsets of the
+ * section's relocations, and the addends of relocations against its
+ * section symbol move with them. */
+struct rv_del { Elf64_Addr at, len; };
+
+static void put32(unsigned char *p, unsigned int v);
+static void put16(unsigned char *p, unsigned int v);
+
+static Elf64_Addr rv_moved(const struct rv_del *d, int n, Elf64_Addr off)
+{
+    Elf64_Addr out = off;
+    for (int k = 0; k < n; k++)
+        if (off >= d[k].at + d[k].len)
+            out -= d[k].len;
+        else if (off > d[k].at)
+            out -= off - d[k].at;           /* inside: to where it starts */
+    return out;
+}
+
+static void rv_align_section(struct object *o, int s)
+{
+    Elf64_Shdr *sh = &o->shdrs[s];
+    unsigned char *base = o->buf + sh->sh_offset;
+    int esz = o->elf32 ? (int)sizeof(Elf32_Rela) : (int)sizeof(Elf64_Rela);
+    struct rv_del *dl = NULL;
+    int ndl = 0;
+    Elf64_Addr shift = 0;
+    Elf64_Xword maxal = sh->sh_addralign ? sh->sh_addralign : 1;
+    for (int r = 0; r < o->nsh; r++) {
+        Elf64_Shdr *rsh = &o->shdrs[r];
+        if (rsh->sh_type != SHT_RELA || (int)rsh->sh_info != s)
+            continue;
+        long n = (long)(rsh->sh_size / (Elf64_Xword)esz);
+        for (long j = 0; j < n; j++) {
+            unsigned char *e = o->buf + rsh->sh_offset + j * esz;
+            Elf64_Addr at;
+            long long addend;
+            unsigned type;
+            if (o->elf32) {
+                Elf32_Rela *r32 = (Elf32_Rela *)e;
+                at = r32->r_offset;
+                type = r32->r_info & 0xff;
+                addend = r32->r_addend;
+            } else {
+                Elf64_Rela *r64 = (Elf64_Rela *)e;
+                at = r64->r_offset;
+                type = (unsigned)ELF64_R_TYPE(r64->r_info);
+                addend = r64->r_addend;
+            }
+            if (type != R_RISCV_ALIGN)
+                continue;
+            if (ndl && at < dl[ndl - 1].at)
+                die("%s: R_RISCV_ALIGN relocations out of order in %s",
+                    o->name, o->shstr + sh->sh_name);
+            /* the alignment it pads to: addend + 2 rounded up to a
+             * power of two (the worst case is two bytes short of it) */
+            Elf64_Addr al = 2;
+            while (al < (Elf64_Addr)addend + 2)
+                al <<= 1;
+            if (al > maxal)
+                maxal = al;
+            Elf64_Addr now = at - shift;
+            Elf64_Addr keep = (al - now % al) % al;
+            if (keep > (Elf64_Addr)addend || at + (Elf64_Addr)addend > sh->sh_size)
+                die("%s: R_RISCV_ALIGN at %#lx in %s leaves %lld bytes for a "
+                    "%lu-byte alignment", o->name, (unsigned long)at,
+                    o->shstr + sh->sh_name, addend, (unsigned long)al);
+            for (Elf64_Addr k = 0; k + 4 <= keep; k += 4)
+                put32(base + at + k, 0x00000013u);          /* nop */
+            if (keep & 2)
+                put16(base + at + (keep & ~(Elf64_Addr)3), 0x0001u);   /* c.nop */
+            if ((Elf64_Addr)addend == keep)
+                continue;
+            dl = xrealloc(dl, (size_t)(ndl + 1) * sizeof *dl);
+            dl[ndl].at = at + keep;
+            dl[ndl].len = (Elf64_Addr)addend - keep;
+            shift += dl[ndl].len;
+            ndl++;
+        }
+    }
+    if (maxal > sh->sh_addralign)
+        sh->sh_addralign = maxal;
+    if (!ndl)
+        return;
+    /* close the gaps, front to back */
+    Elf64_Addr to = dl[0].at;
+    for (int k = 0; k < ndl; k++) {
+        Elf64_Addr from = dl[k].at + dl[k].len;
+        Elf64_Addr end = k + 1 < ndl ? dl[k + 1].at : sh->sh_size;
+        memmove(base + to, base + from, (size_t)(end - from));
+        to += end - from;
+    }
+    sh->sh_size -= shift;
+    for (int k = 0; k < o->nsym; k++) {
+        Elf64_Sym *y = &o->syms[k];
+        if (y->st_shndx != s)
+            continue;
+        Elf64_Addr lo = rv_moved(dl, ndl, y->st_value);
+        Elf64_Addr hi = rv_moved(dl, ndl, y->st_value + y->st_size);
+        y->st_value = lo;
+        y->st_size = hi - lo;
+    }
+    for (int r = 0; r < o->nsh; r++) {
+        Elf64_Shdr *rsh = &o->shdrs[r];
+        if (rsh->sh_type != SHT_RELA)
+            continue;
+        long n = (long)(rsh->sh_size / (Elf64_Xword)esz);
+        for (long j = 0; j < n; j++) {
+            unsigned char *e = o->buf + rsh->sh_offset + j * esz;
+            unsigned symi;
+            if (o->elf32) {
+                Elf32_Rela *r32 = (Elf32_Rela *)e;
+                symi = r32->r_info >> 8;
+                if ((int)rsh->sh_info == s)
+                    r32->r_offset = (Elf32_Addr)rv_moved(dl, ndl, r32->r_offset);
+                if (symi < (unsigned)o->nsym && o->syms[symi].st_shndx == s &&
+                    ELF64_ST_TYPE(o->syms[symi].st_info) == STT_SECTION)
+                    r32->r_addend = (int)rv_moved(dl, ndl,
+                                        (Elf64_Addr)r32->r_addend);
+            } else {
+                Elf64_Rela *r64 = (Elf64_Rela *)e;
+                symi = (unsigned)ELF64_R_SYM(r64->r_info);
+                if ((int)rsh->sh_info == s)
+                    r64->r_offset = rv_moved(dl, ndl, r64->r_offset);
+                if (symi < (unsigned)o->nsym && o->syms[symi].st_shndx == s &&
+                    ELF64_ST_TYPE(o->syms[symi].st_info) == STT_SECTION)
+                    r64->r_addend = (long long)rv_moved(dl, ndl,
+                                        (Elf64_Addr)r64->r_addend);
+            }
+        }
+    }
+    free(dl);
+}
+
+static void rv_align(struct object *o)
+{
+    for (int s = 1; s < o->nsh; s++)
+        if (o->shdrs[s].sh_type == SHT_PROGBITS &&
+            (o->shdrs[s].sh_flags & SHF_EXECINSTR))
+            rv_align_section(o, s);
+}
+#endif
+
 static struct object *parse_object(const char *name, unsigned char *buf,
                                    long len)
 {
@@ -969,6 +1128,10 @@ static struct object *parse_object(const char *name, unsigned char *buf,
             break;
         }
     }
+#if FAMILY_BUILT(riscv)
+    if (o->machine == EM_RISCV)
+        rv_align(o);
+#endif
     return o;
 }
 
@@ -3042,6 +3205,92 @@ static void apply_riscv(struct linker *l, struct object *o, unsigned type,
                        I32_MAX - 0x800);
         rv_put_u(loc, rv_hi20(d));
         rv_put_i(loc + 4, rv_lo12(d));
+        return;
+    }
+    case R_RISCV_RVC_BRANCH: {
+        /* c.beqz/c.bnez: offset[8|4:3] in bits 12:10, [7:6|2:1|5] in
+         * 6:2 */
+        long long d = V - (long long)P;
+        unsigned int u = (unsigned int)d, w = get16(loc) & 0xe383u;
+        need_range(l, o, "R_RISCV_RVC_BRANCH", d, -256, 254);
+        w |= ((u >> 8) & 1) << 12 | ((u >> 3) & 3) << 10 |
+             ((u >> 6) & 3) << 5 | ((u >> 1) & 3) << 3 | ((u >> 5) & 1) << 2;
+        put16(loc, w);
+        return;
+    }
+    case R_RISCV_RVC_JUMP: {
+        /* c.j/c.jal: offset[11|4|9:8|10|6|7|3:1|5] in bits 12:2 */
+        long long d = V - (long long)P;
+        unsigned int u = (unsigned int)d, w = get16(loc) & 0xe003u;
+        need_range(l, o, "R_RISCV_RVC_JUMP", d, -2048, 2046);
+        w |= ((u >> 11) & 1) << 12 | ((u >> 4) & 1) << 11 |
+             ((u >> 8) & 3) << 9 | ((u >> 10) & 1) << 8 |
+             ((u >> 6) & 1) << 7 | ((u >> 7) & 1) << 6 |
+             ((u >> 1) & 7) << 3 | ((u >> 5) & 1) << 2;
+        put16(loc, w);
+        return;
+    }
+    /* In-place arithmetic, as LoongArch's: a difference of two labels is
+     * an ADD of one and a SUB of the other at the same place. */
+    case R_RISCV_ADD8:  loc[0] = (unsigned char)(loc[0] + V); return;
+    case R_RISCV_SUB8:  loc[0] = (unsigned char)(loc[0] - V); return;
+    case R_RISCV_ADD16: put16(loc, (get16(loc) + (unsigned int)V) & 0xffffU);
+                        return;
+    case R_RISCV_SUB16: put16(loc, (get16(loc) - (unsigned int)V) & 0xffffU);
+                        return;
+    case R_RISCV_ADD32: put32(loc, get32loc(loc) + (unsigned int)V); return;
+    case R_RISCV_SUB32: put32(loc, get32loc(loc) - (unsigned int)V); return;
+    case R_RISCV_ADD64: case R_RISCV_SUB64: {
+        unsigned long long w = (unsigned long long)get32loc(loc) |
+                               ((unsigned long long)get32loc(loc + 4) << 32);
+        w = type == R_RISCV_ADD64 ? w + (unsigned long long)V
+                                  : w - (unsigned long long)V;
+        put64(loc, w);
+        return;
+    }
+    case R_RISCV_SUB6:
+        loc[0] = (unsigned char)((loc[0] & 0xc0) | ((loc[0] - V) & 0x3f));
+        return;
+    case R_RISCV_SET6:
+        loc[0] = (unsigned char)((loc[0] & 0xc0) | (V & 0x3f));
+        return;
+    case R_RISCV_SET8:  loc[0] = (unsigned char)V; return;
+    case R_RISCV_SET16: put16(loc, (unsigned int)V & 0xffffU); return;
+    case R_RISCV_SET32: put32(loc, (unsigned int)V); return;
+    case R_RISCV_32_PCREL: {
+        long long d = V - (long long)P;
+        need_range(l, o, "R_RISCV_32_PCREL", d, I32_MIN, I32_MAX);
+        put32(loc, (unsigned int)d);
+        return;
+    }
+    case R_RISCV_SET_ULEB128: case R_RISCV_SUB_ULEB128: {
+        /* A ULEB128 of the length the assembler left, which only the
+         * PAIR fits: SET's S + A is an address, the SUB at the same place
+         * takes the other label's away, and the psABI puts the SUB right
+         * after. So SET waits for it; every byte of the result but the
+         * last keeps its continuation bit. */
+        static unsigned char *set_at;
+        static unsigned long long set_v;
+        int n = 1;
+        unsigned long long v;
+        if (type == R_RISCV_SET_ULEB128) {
+            set_at = loc;
+            set_v = (unsigned long long)V;
+            return;
+        }
+        if (set_at != loc)
+            die("%s: R_RISCV_SUB_ULEB128 without its SET_ULEB128 before it",
+                o->name);
+        set_at = NULL;
+        while (n < 10 && (loc[n - 1] & 0x80))
+            n++;
+        v = set_v - (unsigned long long)V;
+        for (int k = 0; k < n; k++, v >>= 7)
+            loc[k] = (unsigned char)((v & 0x7f) | (k < n - 1 ? 0x80 : 0));
+        if (v)
+            die("%s: an R_RISCV_SET_ULEB128/SUB_ULEB128 difference does not "
+                "fit the %d byte%s the assembler left for it", o->name, n,
+                n == 1 ? "" : "s");
         return;
     }
     case R_RISCV_RELAX:
