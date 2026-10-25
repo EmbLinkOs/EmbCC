@@ -22,8 +22,9 @@ fail() { echo "FAIL: $*"; exit 1; }
 # ---- 1. delay_cycles counted --------------------------------------------
 # cycles OBJ: the cycles of f's straight line and loop, from the ldi's
 # values (the count) and the loop body between the last ldi and the brne
+# (--mcpu: without one, LLVM 18 decodes no sbiw)
 cycles() {
-    llvm-objdump -d --no-show-raw-insn "$1" | sed -n '/<f>:/,$p' |
+    llvm-objdump -d --mcpu=atmega328p --no-show-raw-insn "$1" | sed -n '/<f>:/,$p' |
         sed -n 's/^ *[0-9a-f]*:[[:space:]]*//p' | awk '
         $1 == "ldi"  { split($0, a, ","); v = a[2]; sub(/^ */, "", v);
                        k += strtonum(v) * mult; mult *= 256; pre++; next }
@@ -41,7 +42,7 @@ cycles() {
 # (an awk without strtonum: the immediates are written in hex, 0x..)
 awk 'BEGIN { exit strtonum("0x10") == 16 ? 0 : 1 }' 2>/dev/null || {
     cycles() {
-        llvm-objdump -d --no-show-raw-insn "$1" | sed -n '/<f>:/,$p' |
+        llvm-objdump -d --mcpu=atmega328p --no-show-raw-insn "$1" | sed -n '/<f>:/,$p' |
             sed -n 's/^ *[0-9a-f]*:[[:space:]]*//p' > "$out/c.dis"
         pre=0; body=0; loop=0; tail=0; k=0; mult=1
         while read op a b; do
@@ -66,7 +67,7 @@ for c in 0 1 2 5 6 7 8 100 765 766 767 768 1000 4567 262141 262142 262143 \
     "$EMBCC" --target=avr -O2 -c "$out/d.c" -o "$out/d.o" || fail "delay_cycles($c) does not compile"
     got=$(cycles "$out/d.o")
     [ "$got" = "$c" ] || {
-        llvm-objdump -d "$out/d.o"; fail "delay_cycles($c) takes $got cycles"; }
+        llvm-objdump -d --mcpu=atmega328p "$out/d.o"; fail "delay_cycles($c) takes $got cycles"; }
     n=$((n + 1))
 done
 printf 'void f(unsigned long n) { __builtin_avr_delay_cycles(n); }\n' > "$out/bad.c"

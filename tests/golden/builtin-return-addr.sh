@@ -25,15 +25,16 @@ void *frob(void *p) { return __builtin_frob_return_addr(p); }
 EOT
 "$EMBCC" --target=sparc-elf -O2 -c "$out/r.c" -o "$out/sparc.o" || fail "sparc: does not compile"
 llvm-objdump -d "$out/sparc.o" > "$out/sparc.dis" || fail "llvm-objdump"
-# fn PATTERN: the function's body holds the instruction
+# fn PATTERN: the function's body holds the instruction (an extended
+# regular expression: LLVM 18 writes the immediates in decimal, 23 in hex)
 has() {
-    sed -n "/<$1>:/,/^\$/p" "$out/sparc.dis" | grep -q "$2" || {
+    sed -n "/<$1>:/,/^\$/p" "$out/sparc.dis" | grep -Eq "$2" || {
         cat "$out/sparc.dis"; fail "sparc: $1 does not $3"; }
 }
-has scalar 'add[[:space:]]*%o0, 0x8, %o0' "add 8 (a scalar return)"
-has agg    'add[[:space:]]*%o0, 0xc, %o0' "add 12 (a struct return, past the unimp)"
-has ld     'add[[:space:]]*%o0, 0xc, %o0' "add 12 (a long double return, past the unimp)"
-has frob   'sub[[:space:]]*%o0, 0x8, %o0' "subtract 8"
+has scalar 'add[[:space:]]*%o0, (0x8|8), %o0' "add 8 (a scalar return)"
+has agg    'add[[:space:]]*%o0, (0xc|12), %o0' "add 12 (a struct return, past the unimp)"
+has ld     'add[[:space:]]*%o0, (0xc|12), %o0' "add 12 (a long double return, past the unimp)"
+has frob   'sub[[:space:]]*%o0, (0x8|8), %o0' "subtract 8"
 echo "builtin-return-addr: SPARC adds 8, or 12 past a struct return's unimp, and frob takes it off"
 
 "$EMBCC" --target=riscv32-unknown-elf -O2 -c "$out/r.c" -o "$out/rv.o" || fail "riscv32: does not compile"

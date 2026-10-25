@@ -22,6 +22,8 @@ echo "TEST-MARKER avr-mul"
 EMBCC=${EMBCC:-./embcc}
 QEMU=${EMBCC_QEMU_AVR:-qemu-system-avr}
 OD=${EMBCC_LLVM_OBJDUMP:-llvm-objdump}
+# (--mcpu: without one, LLVM 18 decodes none of mul, movw and sbiw)
+ODM=--mcpu=atmega328p
 out=tests/golden/out/avr-mul
 rm -rf "$out"; mkdir -p "$out/h"
 fail() { echo "FAIL: $*"; exit 1; }
@@ -47,13 +49,13 @@ for p in mul32:MUL mul16:MUL16 wide:WIDE; do
         fi
     done
 done
-"$OD" -d "$out/mul32-Os.elf" | sed -n '/<__mulsi3>:/,/^$/p' > "$out/mulsi3.dis"
+"$OD" $ODM -d "$out/mul32-Os.elf" | sed -n '/<__mulsi3>:/,/^$/p' > "$out/mulsi3.dis"
 [ "$(grep -c 'mul	' "$out/mulsi3.dis")" -ge 10 ] ||
     { cat "$out/mulsi3.dis"; fail "librt's __mulsi3 does not use mul"; }
-"$OD" -dr "$out/mul16-O2.o" | sed -n '/<mu>:/,/^$/p' > "$out/mu.dis"
+"$OD" $ODM -dr "$out/mul16-O2.o" | sed -n '/<mu>:/,/^$/p' > "$out/mu.dis"
 grep -q '__mulsi3' "$out/mu.dis" && { cat "$out/mu.dis"; fail "-O2: an unsigned int product calls __mulsi3"; }
 grep -q 'mul	' "$out/mu.dis" || { cat "$out/mu.dis"; fail "-O2: an unsigned int product has no mul"; }
-"$OD" -dr "$out/wide-O2.o" | sed -n '/<wide>:/,/^$/p' > "$out/wide.dis"
+"$OD" $ODM -dr "$out/wide-O2.o" | sed -n '/<wide>:/,/^$/p' > "$out/wide.dis"
 grep -q '__mulsi3' "$out/wide.dis" && { cat "$out/wide.dis"; fail "-O2: a 16x16->32 product calls __mulsi3"; }
 [ "$(grep -c 'mul	' "$out/wide.dis")" -ge 4 ] ||
     { cat "$out/wide.dis"; fail "-O2: a 16x16->32 product is not four muls"; }

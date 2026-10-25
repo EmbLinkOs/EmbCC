@@ -45,8 +45,13 @@ for row in "x86_64-elf int3" "x86_64-windows-gnu int3" \
     t=${row%% *}; insn=${row#* }
     "$EMBCC" --target=$t -O2 --no-warn=windows-abi -c "$out/d.c" -o "$out/d-$t.o" ||
         fail "$t: does not compile"
-    llvm-objdump -d "$out/d-$t.o" > "$out/d-$t.dis" || fail "$t: llvm-objdump"
-    grep -q "	$insn" "$out/d-$t.dis" || {
+    # (--mcpu: without one, LLVM 18 decodes no AVR break)
+    MC=; [ $t = avr ] && MC=--mcpu=atmega328p
+    llvm-objdump -d $MC "$out/d-$t.o" > "$out/d-$t.dis" || fail "$t: llvm-objdump"
+    # (whitespace as one space: LLVM 18 parts SPARC's operands with a
+    # space, 23 with a tab)
+    tr -s ' 	' '  ' < "$out/d-$t.dis" |
+        grep -q " $(printf '%s' "$insn" | tr '	' ' ')" || {
         cat "$out/d-$t.dis"; fail "$t: no '$insn' in f"; }
     if llvm-nm "$out/d-$t.o" | grep -q ' U '; then
         llvm-nm "$out/d-$t.o"; fail "$t: f calls something"
