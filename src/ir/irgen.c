@@ -4910,6 +4910,30 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             cf->inf_no_read = cf->inf_no_write = cf->is_nothrow = 1;
             return libatomic_call(fn, name, e->ty, 2, vals, tys, g_cur_line);
         }
+        /* __builtin___clear_cache(begin, end): libgcc's __clear_cache
+         * (lib/rt/clear_cache.c), a call that reads and writes memory as
+         * far as anything here knows, so no store moves past it -- and
+         * nothing at all where instruction fetch sees the data caches
+         * or there are none to clean (x86-64, AVR, RX, ColdFire), as GCC
+         * emits on x86 */
+        if (e->name && strcmp(e->name, "__builtin___clear_cache") == 0) {
+            struct type *vp = ty_ptr(ty_base(TY_VOID, 0));
+            struct type *tys[2] = { vp, vp };
+            int vals[2];
+            vals[0] = gen_expr(fn, e->args[0]);
+            vals[1] = gen_expr(fn, e->args[1]);
+            switch (target_get()) {
+            case TARGET_X86_64: case TARGET_AVR: case TARGET_RX:
+            case TARGET_COLDFIRE:
+                return -1;
+            default:
+                break;
+            }
+            libatomic_fn("__clear_cache", ty_base(TY_VOID, 0), 2, tys);
+            libatomic_call(fn, "__clear_cache", ty_base(TY_VOID, 0), 2, vals,
+                           tys, g_cur_line);
+            return -1;
+        }
         /* __builtin_extract_return_addr / frob_return_addr: the address
          * itself, but SPARC's, whose return is past its call (GCC's
          * RETURN_ADDR_OFFSET) */

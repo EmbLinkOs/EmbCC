@@ -1086,6 +1086,7 @@ and 3. A `_FORTIFY_SOURCE` header reads that value as "do not check".
 | `__builtin_unreachable()` | Emits the target's trap instruction. Reaching it stops the program; it is not undefined behavior |
 | `__builtin_trap()` | Emits the target's trap instruction |
 | `__builtin_prefetch(addr, ...)` | Evaluates its arguments and emits nothing |
+| `__builtin___clear_cache(begin, end)` | Makes the instructions stored in `[begin, end)` the ones fetched, after a loader or a JIT writes code: a call to libgcc's `__clear_cache` -- each architecture's sequence in EmbCC's runtime, the system's on macOS and with glibc -- and nothing on x86-64, AVR, RX and ColdFire, as GCC emits on x86. The arguments are pointers (`__builtin___clear_cache takes two pointers, as in GCC, not int`) |
 | `__builtin_debugtrap()` | Emits the target's breakpoint instruction, inline: under a debugger the program stops there and can carry on; without one it stops with the breakpoint's signal or exception (clang's) |
 
 The trap is `ud2` on x86-64, `udf` on AArch64 and Cortex-M, `unimp`
@@ -1181,8 +1182,7 @@ macOS).
 ### Builtins that are not supported
 
 These are refused as undeclared functions, as shown in [General
-rules](#general-rules): `__builtin___clear_cache`,
-`__builtin_va_arg_pack`, clang's
+rules](#general-rules): `__builtin_va_arg_pack`, clang's
 `__builtin_elementwise_*`, `__builtin_reduce_*` and
 `__builtin_nontemporal_load`, `__builtin_cpu_supports` and
 `__builtin_cpu_init`, the target-specific families (`__builtin_ia32_*`,

@@ -328,7 +328,7 @@ error: '__builtin_cpu_supports' is not declared in 'f' — for a call, add a pro
 `__has_builtin` answers 0 for these. Among the GCC and Clang builtins
 that are missing:
 
-- `__builtin___clear_cache` and `__builtin_va_arg_pack`.
+- `__builtin_va_arg_pack`.
 - Vector builtins: `__builtin_elementwise_*`, `__builtin_reduce_*`,
   `__builtin_nontemporal_load` (`__builtin_shufflevector` is provided).
 - Target builtins: `__builtin_cpu_supports`, `__builtin_cpu_init`,

@@ -475,6 +475,7 @@ not apply.
 | `int128.c` | `__multi3` `__divti3` `__udivti3` `__modti3` `__umodti3` `__ashlti3` `__ashrti3` `__lshrti3` `__negti2` | targets with `__int128` (not RV64) |
 | `fp128.c` | conversions between 128-bit integers and `float`/`double`: `__floattidf` `__floatuntidf` `__floattisf` `__floatuntisf` `__fixdfti` `__fixunsdfti` `__fixsfti` `__fixunssfti` | as `int128.c` |
 | `complex.c` | `__mulsc3` `__muldc3` `__divsc3` `__divdc3` | every target |
+| `clear_cache.c` | `__clear_cache`, `__builtin___clear_cache`'s: AArch64's `dc cvau`/`ic ivau` by `CTR_EL0`'s line sizes, ARMv7-A's CP15 operations, Cortex-M's `dsb`/`isb`, RISC-V's `fence.i`, MIPS's `synci` loop returning by `jr.hb`, PowerPC's `dcbst`/`icbi`, SPARC's `flush`, LoongArch's `ibar` | every target |
 | `powi.c` | `__powisf2` `__powidf2`, and `__powixf2` (x87) or `__powitf2` (binary128) where `long double` is wider than `double`: `__builtin_powi` and kin | every target |
 | `ldouble.c` | x86-64: the x87 `long double` conversions `__floattixf` `__floatuntixf` `__fixxfti` `__fixunsxfti` and `__mulxc3` `__divxc3`; AArch64: `__multc3` `__divtc3` | x86-64, AArch64 |
 | `softtf.c` | IEEE binary128 in software, AArch64's `long double`: `__addtf3` `__subtf3` `__multf3` `__divtf3` `__negtf2`, the comparisons `__eqtf2` ... `__unordtf2`, and the conversions `__extenddftf2` `__trunctfdf2` `__floatsitf` `__fixtfdi` ... | AArch64 |

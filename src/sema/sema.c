@@ -5289,6 +5289,28 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                 e->ty = ty_ptr(ty_base(TY_VOID, 0));
                 break;
             }
+            /* GCC's __builtin___clear_cache(begin, end): the instructions
+             * stored there made the ones fetched (irgen: libgcc's
+             * __clear_cache, or nothing where the caches are coherent) */
+            else if (strcmp(bn, "__clear_cache") == 0) {
+                if (e->nargs != 2)
+                    sema_error_at(u, e->line, e->col,
+                            "__builtin___clear_cache takes where the code "
+                            "begins and where it ends");
+                for (int i = 0; i < e->nargs && i < 2; i++) {
+                    check_expr(u, f, sc, e->args[i]);
+                    struct type *at = e->args[i]->ty;
+                    if (at->kind != TY_PTR && at->kind != TY_ARRAY)
+                        sema_error_at(u, e->line, e->col,
+                                "__builtin___clear_cache takes two "
+                                "pointers, as in GCC, not %s", ty_name(at));
+                    e->args[i] = mk_cast(e->args[i],
+                                         ty_ptr(ty_base(TY_VOID, 0)));
+                }
+                e->name = e->lhs->name;
+                e->ty = ty_base(TY_VOID, 0);
+                break;
+            }
             /* clang's __builtin_debugtrap(): a breakpoint the program
              * carries on from -- not __builtin_trap's, which ends it.
              * `({ __asm__ volatile ("<the target's breakpoint>"); })`, so
@@ -7223,7 +7245,7 @@ static const char *const g_named_builtins[] = {
     "trap", "unreachable", "setjmp", "longjmp",
     "FUNCTION", "FILE", "LINE", "speculation_safe_value", "assume",
     "fpclassify", "powi", "powif", "powil", "extract_return_addr",
-    "frob_return_addr", "debugtrap", "complex",
+    "frob_return_addr", "debugtrap", "complex", "__clear_cache",
     "va_arg", "va_copy", "va_end", "va_start",
     "add_overflow", "sub_overflow", "mul_overflow",
     "add_overflow_p", "sub_overflow_p", "mul_overflow_p",
