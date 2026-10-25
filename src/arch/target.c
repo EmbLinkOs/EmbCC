@@ -364,6 +364,11 @@ int target_is_mips(void)
     return g_arch == TARGET_MIPS32 || g_arch == TARGET_MIPS64;
 }
 
+const char *target_sym_prefix(void)
+{
+    return g_arch == TARGET_RX ? "_" : NULL;
+}
+
 int target_ptr_size(void)       { return g_model[g_arch].ptr; }
 int target_atomic8_libcall(void) { return g_model[g_arch].ptr == 4; }
 int target_double_size(void)    { return g_model[g_arch].dbl; }

@@ -97,7 +97,9 @@ static const char *asym(const char *n)
  * names -- an asm block's labels, a section -- are already spelt so. */
 static const char *csym(const char *n)
 {
-    const char *p = backend_get(target_get())->sym_prefix;
+    /* (target.c's, not the backend table's: tools/embls links this file
+     * and no code generator) */
+    const char *p = target_sym_prefix();
     /* (not on an assembler-local name or a static's `.`-joined one, as
      * the writer leaves those: `main.z`, `.Lcomplit.0`) */
     if (n[0] == '\001')               /* an asm label: the name as given */

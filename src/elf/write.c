@@ -131,7 +131,7 @@ struct elfw *elfw_new(int machine)
                 "by a little-endian host\n", target_triple_now());
         fatal_unwind();
     }
-    w->sym_prefix = target_get() == TARGET_RX ? "_" : NULL;
+    w->sym_prefix = target_sym_prefix();
     if (machine == EM_ARM)
         w->eflags = EF_ARM_EABI_VER5;
     /* RISC-V's and AVR's come from the target (elfw_set_flags): whether

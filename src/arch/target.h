@@ -180,6 +180,10 @@ int target_arch_built(enum target_arch a);
 /* Either MIPS: the one backend, the one encoder, the one assembler. */
 int target_is_mips(void);
 
+/* What the object's symbol for a C name puts first: "_" on RX, whose ABI
+ * prefixes C names, NULL elsewhere (the ELF writer and an -S file both) */
+const char *target_sym_prefix(void);
+
 /* The register width in bytes: 4 on RV32, 8 on RV64 and on the other
  * 64-bit targets. The RISC-V backend is written once against this,
  * because an `add` is an `add` at either width and only the loads, the

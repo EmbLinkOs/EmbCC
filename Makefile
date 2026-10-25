@@ -220,6 +220,7 @@ FAMILY_SRCS_riscv := \
 	src/arch/riscv/options.c \
 	src/arch/riscv/emit.c \
 	src/arch/riscv/codegen.c \
+	src/arch/riscv/attrs.c \
 	src/arch/riscv/irgen.c \
 	src/arch/riscv/asm.c \
 	src/arch/riscv32/predef.c \
@@ -682,7 +683,7 @@ EMBLS_SRCS = tools/embls/embls.c $(PLATFORM_SRCS) src/cpp/cpp.c src/lex/lex.c \
              src/arch/aarch64/codegen.c src/arch/aarch64/emit.c \
              src/arch/aarch64/asm.c src/arch/thumb/irgen.c src/arch/thumb/asm.c \
              src/arch/thumb/emit.c src/arch/thumb/a32.c src/arch/thumb/attrs.c \
-             src/arch/riscv/irgen.c \
+             src/arch/riscv/irgen.c src/arch/riscv/attrs.c \
              src/arch/riscv/asm.c src/arch/riscv/emit.c \
              src/arch/mips/irgen.c src/arch/mips/asm.c src/arch/mips/emit.c \
              src/arch/loongarch/irgen.c src/arch/loongarch/emit.c \
