@@ -133,8 +133,10 @@ refc "__builtin_frame_address(1)" 'only level 0' \
     'void *f(void){ return __builtin_frame_address(1); }'
 refc "__int128" '__int128 does not exist on this target' \
     '__int128 x;'
-refc "an interrupt handler" '__attribute__((interrupt)) is not supported' \
-    'void __attribute__((interrupt)) f(void){}'
+# (an interrupt handler compiles: tests/golden/rx-isr.sh; its bad forms
+# are refused there)
+refc "a fast interrupt handler" 'fast interrupt returns with rtfi' \
+    'void __attribute__((fast_interrupt)) f(void){}'
 # assembly of every kind assembles (tests/golden/rx-asm.sh referees it);
 # what is outside the vocabulary is refused by name
 printf 'int f(void){ __asm__("nop"); return 0; }
@@ -160,5 +162,5 @@ grep -q 'C++ exceptions are not supported for rx-none-elf' "$out/cxx.err" || {
 "$EMBCC" --target=$T -fno-exceptions -c "$out/c.cc" -o /dev/null || {
     echo "C++ with -fno-exceptions does not compile"; exit 1; }
 echo "the frame and return address above level 0, __int128,"
-echo "interrupt functions, an over-aligned scalar, FPU instructions in asm"
+echo "fast interrupts, an over-aligned scalar, FPU instructions in asm"
 echo "and C++ exceptions are each refused by name; assembly compiles"

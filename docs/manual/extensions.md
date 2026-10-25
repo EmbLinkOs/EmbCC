@@ -680,7 +680,7 @@ supported: REASON`:
 |---|---|
 | `cleanup` | `the cleanup function would never run` |
 | `ifunc` | `the resolver would never run and calls would go to it rather than to the implementation it picks` |
-| `interrupt` | On every target but Cortex-M, AVR, RISC-V and MIPS32; see [Interrupt handlers](#interrupt-handlers) |
+| `interrupt` | On every target but Cortex-M, AVR, RISC-V, MIPS32 and RX; see [Interrupt handlers](#interrupt-handlers) |
 | `keep_interrupts_masked` | `it modifies a MIPS interrupt handler, and only the MIPS32 target implements those` (on every target but MIPS32) |
 | `ms_abi` | `the arguments would be passed in System V's registers` |
 | `naked` | On x86-64 and AArch64; see [Naked functions](inline-asm.md#naked-functions) |
@@ -721,15 +721,16 @@ vector table, a startup routine and handlers for each board is in
 | Cortex-M | Accepted; the code is the same as without it, because the processor saves the caller-saved registers on exception entry and an ordinary return performs the exception return. An argument such as `interrupt("IRQ")` is accepted | Refused |
 | RISC-V | Implemented, with `"machine"` (the default, returning with `mret`) and `"supervisor"` (`sret`). The handler saves the caller-saved registers it writes, and all of them, floating point included, when it calls; it is 4-byte aligned. `"user"` is refused | Refused |
 | MIPS32 | Implemented, with `"eic"` (the default), `"vector=sw0"`..`"vector=hw5"` and `keep_interrupts_masked`. The handler saves `EPC`, `Status`, the caller-saved registers it writes and `HI`/`LO`, all of them and `gp` when it calls, and returns with `eret`. `use_shadow_register_set` and `use_debug_exception_return` are refused | Refused |
+| Renesas RX | Implemented, as rx-elf-gcc makes it: the handler pushes the caller-saved `r1`-`r5`, `r14` and `r15` and the callee-saved registers it uses with `pushm`, and returns with `rte`. GCC's `interrupt(N)` (a vector-table slot for GNU ld to fill) and `fast_interrupt` are refused | Refused |
 | x86-64, AArch64, MIPS64 and the other targets | Refused | Refused |
 
-On RISC-V and MIPS32 a handler with parameters or a non-`void` result is
+On RISC-V, MIPS32 and RX a handler with parameters or a non-`void` result is
 refused, and so is a function given two different kinds; the attribute
 may be on a prototype, on the definition or on both. In C++ the attribute
 is refused except on Cortex-M. The refusals read:
 
 ```text
-embcc: isr.c:2: error: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V and MIPS32 it is implemented)
+embcc: isr.c:2: error: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS32 and RX it is implemented)
 embcc: isr.c:2: error: __attribute__((signal)) is not supported: an interrupt handler needs the machine's own return instruction and every register saved, which only the AVR backend does
 embcc: isr.c:2: error: interrupt handler 'isr' takes parameters: the hardware calls it, so nothing passes them, and they would be read out of whatever the interrupted code left in the argument registers
 embcc: isr.c:2: error: interrupt handler 'isr' returns a value: the interrupt return goes back to the interrupted instruction, and nothing there receives it -- it must return void

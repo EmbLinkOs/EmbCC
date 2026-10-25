@@ -203,7 +203,8 @@ By name: `__int128` (no 128-bit type on ILP32), atomics wider than a word
 (one and two bytes are an s32c1i loop on the word around them), computed goto, `__builtin_frame_address`
 and `__builtin_return_address`, interrupt functions (inline, file-scope
 and naked assembly and `.s`/`.S` files came later, with src/arch/xtensa/asm.c), tail calls (the windowed ABI has none), C++, `-S`
-(no Xtensa assembler to read it back), a function over 128 KiB, and every
+(no Xtensa assembler to read it back -- it came when src/as/gas.c read
+Xtensa and became the referee), a function over 128 KiB, and every
 machine flag except `-mabi=windowed`, `-mlongcalls`/`-mno-longcalls`
 (calls are direct either way; the linker refuses one out of reach),
 `-mtext-section-literals` and `-mserialize-volatile`.
@@ -242,7 +243,7 @@ machine flag except `-mabi=windowed`, `-mlongcalls`/`-mno-longcalls`
   (`xtensa-refuse.sh`).
 
 Known gaps, each refused by name rather than miscompiled: inline and
-file-scope assembly (and so naked functions), `-S`, jump tables (a dense
+file-scope assembly (and so naked functions), jump tables (a dense
 switch is a decision tree), unwind tables, computed goto, the frame and
 return address builtins, atomics other than a word, interrupt
 attributes, C++. Code size: no density (16-bit) instructions, no zero-

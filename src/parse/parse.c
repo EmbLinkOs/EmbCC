@@ -763,8 +763,15 @@ static const struct attr_entry attr_table[] = {
     { "interrupt", ATTR_REFUSED,
       "the handler would return with an ordinary return instead of the "
       "interrupt return the CPU needs, and without saving the registers "
-      "(on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V and "
-      "MIPS32 it is implemented)" },
+      "(on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, "
+      "MIPS32 and RX it is implemented)" },
+    /* RX's other kind, GCC's: registers banked in BPC and BPSW, returned
+     * from with rtfi. Unknown, it would only be warned about, and the
+     * handler built as an ordinary function would return with rts. */
+    { "fast_interrupt", ATTR_REFUSED,
+      "a fast interrupt returns with rtfi from BPC and BPSW, which EmbCC "
+      "does not emit; use __attribute__((interrupt)), which returns with "
+      "rte" },
     /* GCC's MIPS interrupt modifiers. keep_interrupts_masked is the one
      * whose meaning is a matter of two bits of the Status word the
      * prologue writes anyway (IE cleared with EXL, and no IPL), so MIPS32
@@ -998,9 +1005,19 @@ static void cmse_call_leftover(struct parser *ps)
  * else is refused rather than read as the default: a handler for the
  * wrong mode returns with the wrong instruction. Elsewhere the argument
  * is not read, as before. */
-static int isr_kind(struct parser *ps, int line, const char *arg)
+static int isr_kind(struct parser *ps, int line, const char *arg,
+                    int has_args)
 {
     enum target_arch a = target_get();
+    /* a number, or anything not a string: read as no argument, it made
+     * `interrupt(5)` the default handler without a word */
+    if (has_args && !arg && (a == TARGET_RISCV32 || a == TARGET_RISCV64 ||
+                             a == TARGET_MIPS32))
+        parse_error_line(ps, line,
+            "interrupt's argument is a string on %s: %s",
+            a == TARGET_MIPS32 ? "MIPS" : "RISC-V",
+            a == TARGET_MIPS32 ? "\"eic\" or \"vector=sw0\" .. \"vector=hw5\""
+                               : "\"machine\" or \"supervisor\"");
     if (a == TARGET_RISCV32 || a == TARGET_RISCV64) {
         if (!arg || !strcmp(arg, "machine"))
             return ISR_INTERRUPT;
@@ -1029,6 +1046,12 @@ static int isr_kind(struct parser *ps, int line, const char *arg)
             "interrupt wants \"eic\" or \"vector=sw0\" .. "
             "\"vector=hw5\" on MIPS, not \"%s\"", arg);
     }
+    if (a == TARGET_RX && has_args)
+        parse_error_line(ps, line,
+            "interrupt takes no argument on RX: GCC's interrupt(N) names a "
+            "slot of the relocatable vector table by a $tableentry$ symbol "
+            "that GNU ld's RX port gathers into one, and EmbLD builds no "
+            "table from them; name the handler in your vector table");
     return ISR_INTERRUPT;
 }
 
@@ -1129,8 +1152,10 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
             int aline = cur(ps)->line;
             int fkind = 0;
             long fidx = 0, ffirst = 0;
+            int has_args = 0;       /* something between the parentheses */
             if (cur(ps)->kind == TOK_LPAREN) {
                 advance(ps);
+                has_args = cur(ps)->kind != TOK_RPAREN;
                 if (name && attr_is(name, "mode")) {
                     /* GCC's machine modes, by the bytes of each; the
                      * floating ones (SF, DF...) are not taken */
@@ -1243,7 +1268,8 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
                          !(attr_is(name, "interrupt") &&
                            (target_get() == TARGET_RISCV32 ||
                             target_get() == TARGET_RISCV64 ||
-                            target_get() == TARGET_MIPS32)) &&
+                            target_get() == TARGET_MIPS32 ||
+                            target_get() == TARGET_RX)) &&
                          !(attr_is(name, "keep_interrupts_masked") &&
                            target_get() == TARGET_MIPS32) &&
                          !(attr_is(name, "naked") &&
@@ -1325,7 +1351,7 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
                 else if (attr_is(name, "progmem") && target_get() == TARGET_AVR)
                     out->progmem = 1;
                 else if (attr_is(name, "interrupt")) {
-                    int k = isr_kind(ps, aline, sarg);
+                    int k = isr_kind(ps, aline, sarg, has_args);
                     if (ISR_KIND(out->isr) && ISR_KIND(out->isr) != k &&
                         !(target_get() == TARGET_AVR &&
                           ISR_KIND(out->isr) == ISR_SIGNAL))

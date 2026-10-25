@@ -77,6 +77,10 @@ struct rx_fn {
     int pair_used[8], npair;
     int nsave;           /* registers the allocator says it used */
     int save_hi;         /* pushm r6-r<save_hi>, or 0 for none */
+    /* An interrupt handler: the registers it pushes -- every one it may
+     * change, the caller-saved ones too -- as a mask (rx_isr_mask), and
+     * it returns with rte. 0 for an ordinary function. */
+    unsigned isr_mask;
     struct code *t;
     struct rx_sites *st;
     char *wide;
@@ -536,6 +540,12 @@ static void layout(struct rx_fn *F)
             F->save_hi = F->used_callee[k];
     F->in_base = F->frame + (F->save_hi ? 4L * (F->save_hi - RX_R6 + 1) : 0)
                  + 4;
+    if (F->isr_mask) {          /* its saves, and the PC and PSW pushed */
+        int n = 0;
+        for (int r = RX_R1; r <= RX_R15; r++)
+            n += (int)(F->isr_mask >> r & 1);
+        F->in_base = F->frame + 4L * n + 8;
+    }
     F->va_first = -1;
 }
 
@@ -1294,9 +1304,18 @@ static int gen_ins64(struct rx_fn *F, int n)
  *
  * One rtsd releases the frame, pops r6..rN and returns, when the frame
  * and the saved registers fit its byte; else the frame goes first. */
+static void rx_isr_runs(struct rx_fn *F, int push);
+
 static void rx_restore(struct rx_fn *F)
 {
     struct code *t = F->t;
+    if (F->isr_mask) {
+        if (F->frame)
+            rx_add3(t, F->frame, RX_SP, RX_SP);
+        rx_isr_runs(F, 0);
+        rx_rte(t);
+        return;
+    }
     long nb = F->save_hi ? 4L * (F->save_hi - RX_R6 + 1) : 0;
     long fr = F->frame;
     if (fr + nb > 1020) {
@@ -1309,6 +1328,56 @@ static void rx_restore(struct rx_fn *F)
         rx_rtsd(t, fr);
     else
         rx_rts(t);
+}
+
+/* ---- interrupt handlers ----------------------------------------------------
+ *
+ * __attribute__((interrupt)), as GCC's rx-elf compiles it: the CPU has
+ * pushed PC and PSW, and the handler pushes every register it may change
+ * -- the callee-saved ones it uses, as any function does, and the
+ * caller-saved r1-r5, r14 and r15 too, which the interrupted code was
+ * using -- and returns with rte. GCC pushes only the caller-saved
+ * registers a leaf handler writes; here all seven are, because this
+ * backend's scratch registers (r5, r14, r15) and its helper calls'
+ * arguments (r1-r4) are written without the allocator knowing. They go
+ * as pushm runs, highest first, and popm in the opposite order. No
+ * accumulator (GCC saves ACC only under -msave-acc-in-interrupts, and
+ * this backend never writes it) and no FPSW (no FPU). */
+static unsigned rx_isr_mask(const struct rx_fn *F)
+{
+    unsigned m = 1u << RX_R1 | 1u << RX_R2 | 1u << RX_R3 | 1u << RX_R4 |
+                 1u << RX_R5 | 1u << RX_R14 | 1u << RX_R15;
+    for (int k = 0; k < F->nsave; k++)
+        m |= 1u << F->used_callee[k];
+    return m;
+}
+
+static void rx_isr_runs(struct rx_fn *F, int push)
+{
+    int lo[16], hi[16], n = 0;
+    for (int r = RX_R1; r <= RX_R15; r++) {
+        if (!(F->isr_mask >> r & 1))
+            continue;
+        if (n && hi[n - 1] == r - 1)
+            hi[n - 1] = r;
+        else {
+            lo[n] = hi[n] = r;
+            n++;
+        }
+    }
+    for (int k = 0; k < n; k++) {
+        int j = push ? n - 1 - k : k;
+        if (lo[j] == hi[j]) {
+            if (push)
+                rx_push(F->t, lo[j]);
+            else
+                rx_pop(F->t, lo[j]);
+        } else if (push) {
+            rx_pushm(F->t, lo[j], hi[j]);
+        } else {
+            rx_popm(F->t, lo[j], hi[j]);
+        }
+    }
 }
 
 /* ---- calls ---------------------------------------------------------------- */
@@ -2444,6 +2513,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rx_sites *st,
     }
     if (fn->has_alloca)
         F.used_callee[F.nsave++] = FBREG;
+    if (f->is_isr)
+        F.isr_mask = rx_isr_mask(&F);
     layout(&F);
 
     F.label_off = xmalloc((size_t)(fn->nlabels + 1) * sizeof *F.label_off);
@@ -2483,7 +2554,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rx_sites *st,
     f->code_off = t->len;
 
     /* The prologue: push the callee-saved range, then the frame. */
-    if (F.save_hi == RX_R6)
+    if (F.isr_mask)
+        rx_isr_runs(&F, 1);
+    else if (F.save_hi == RX_R6)
         rx_push(t, RX_R6);
     else if (F.save_hi)
         rx_pushm(t, RX_R6, F.save_hi);

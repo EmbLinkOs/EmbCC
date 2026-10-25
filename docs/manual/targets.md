@@ -1232,8 +1232,18 @@ Accepted options: `--cpu=rx600|rx610|rx200|rx100`, `-m32bit-doubles`,
 Refused by name: `-m64bit-doubles`, `-fpu`, `-mbig-endian-data`,
 `-mgcc-abi`, a nonzero `-msmall-data-limit`, `-mpid`, a nonzero
 `-mint-register`, `-mno-allow-string-insns`, `-mas100-syntax`, unwind
-tables, `-S`, and C++ exceptions (C++ compiles with `--no-exceptions`; see
-[C++](cxx.md#targets)).
+tables, `fast_interrupt`, and C++ exceptions (C++ compiles with
+`--no-exceptions`; see [C++](cxx.md#targets)).
+
+`__attribute__((interrupt))` makes an interrupt handler as rx-elf-gcc
+does: it pushes the registers it may change -- the caller-saved r1-r5,
+r14 and r15 as well as the callee-saved ones it uses -- with `pushm`, and
+returns with `rte`, which takes back the PC and PSW the CPU pushed. The
+handler goes in the relocatable vector table INTB points at; GCC's
+`interrupt(N)`, which names the slot for GNU ld's RX port to fill, is
+refused (EmbLD builds no table from it), and so are parameters and a
+result. tests/golden/rx-isr.sh runs CMT0's interrupt on QEMU against
+code that keeps a value in every register.
 
 EmbCC assembles RX itself, in GNU syntax: inline `__asm__` with GCC's
 operand constraints, naked functions, file-scope blocks and `.s`/`.S`

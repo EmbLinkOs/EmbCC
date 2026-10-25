@@ -277,7 +277,7 @@ implement, so they are errors:
 | Attribute | Diagnostic |
 |---|---|
 | `naked` (x86-64 and AArch64; supported on Cortex-M, RISC-V, MIPS32 and AVR) | `__attribute__((naked)) is not supported: on this target the body could only be assembled by the file-scope assembler's few instructions; it is supported on the ARM, RISC-V, MIPS and AVR targets` |
-| `interrupt` (except on Cortex-M, AVR, RISC-V and MIPS32) | `__attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V and MIPS32 it is implemented)` |
+| `interrupt` (except on Cortex-M, AVR, RISC-V, MIPS32 and RX) | `__attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS32 and RX it is implemented)` |
 | `interrupt("user")` (RISC-V) | `__attribute__((interrupt("user"))) is not supported: user-mode interrupts (the N extension and its uret) were never ratified and are gone from the privileged spec, and GCC and clang no longer accept them` |
 | `keep_interrupts_masked` (except on MIPS32) | `__attribute__((keep_interrupts_masked)) is not supported: it modifies a MIPS interrupt handler, and only the MIPS32 target implements those` |
 | `use_shadow_register_set` | `__attribute__((use_shadow_register_set)) is not supported: EmbCC does not switch register sets: the handler would save into and run on a shadow set's stack pointer it never read with rdpgpr` |

@@ -150,7 +150,7 @@ static void parse_attrs(struct attrs *a)
                 /* An interrupt handler, likewise: skipped, it returns with
                  * an ordinary return and saves only the callee-saved
                  * registers. The C front end implements it (AVR, RISC-V,
-                 * MIPS32); on a Cortex-M it changes nothing, and is
+                 * MIPS32, RX); on a Cortex-M it changes nothing, and is
                  * accepted. */
                 if ((attr_is(n, "interrupt") || attr_is(n, "signal")) &&
                     !(target_get() == TARGET_THUMB && !target_arm_a32()))
