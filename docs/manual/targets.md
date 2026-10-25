@@ -1560,37 +1560,6 @@ the word. `__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1`, `_2`, `_4` and `_8` are defined.
 LA64, little-endian, with the LoongArch psABI's LP64S convention (soft
 float): `loongarch64-unknown-elf`. Freestanding only. The design notes
 are in [the LoongArch64 plan](../internals/loongarch64-plan.md).
-## TriCore
-
-Infineon TriCore 1.6.1, the core of the AURIX TC2xx microcontrollers and
-a subset of the TC3xx's TriCore 1.6.2: 32-bit, little-endian, soft float.
-Freestanding only. The design notes, and where each fact below comes
-from, are in [the TriCore plan](../internals/tricore-plan.md): there is
-no TriCore compiler on the machine EmbCC is developed on, so the calling
-convention, the data layout, the relocation numbers and the predefined
-macros are the TriCore EABI and GCC for TriCore **as remembered, and
-unverified** against a reference compiler. The instruction encodings are
-checked against QEMU's TriCore translator, and every test runs on QEMU's
-`tricore_testboard`.
-## ColdFire
-
-Motorola/NXP ColdFire, ISA_A with the hardware divide (an MCF5208 and
-every later core), big-endian, soft float: GCC's `m68k-elf` with
-`--cpu=5208`. Freestanding only. The design notes, and which facts are
-not yet checked against a real m68k compiler, are in
-[the ColdFire plan](../internals/coldfire-plan.md).
-
-EmbCC assembles ColdFire itself, in GNU as's Motorola syntax (`%` optional,
-MIT's `An@(d)` accepted): inline `__asm__` with GCC's operand constraints,
-naked functions, file-scope blocks and `.s`/`.S` files, through one
-assembler for the MCF5208's ISA_A+ -- tests/golden/coldfire-asm.sh reads
-every form back with QEMU's m68k disassembler, assembles FreeRTOS's
-ColdFire V2 port, and runs a program that uses it against a host model.
-Branches relax to .s or .w (the MCF5208 has no 32-bit branch); a `bra` or
-`bsr` to a symbol defined elsewhere is a `jmp`/`jsr` to its address
-(`R_68K_32`). The vocabulary, the constraints and what is refused are in
-[Inline assembly](inline-asm.md#coldfire) and
-[embas](tools/embas.md#coldfire-specifics).
 
 ### Triples
 
@@ -1703,6 +1672,264 @@ From `clang --target=loongarch64-unknown-elf -msoft-float`:
 `__loongarch_arch` and `__loongarch_tune` (`"loongarch64"`), `_LP64` and
 `__LP64__`. Not `__loongarch_sx` (no LSX). `__CHAR_UNSIGNED__` is not
 defined. `__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1`, `_2`, `_4` and `_8` are.
+
+### Runtime
+
+`make rt-embedded` builds `librt.a` and `make libc-embedded` builds
+`libc.a` for `loongarch64-unknown-elf` (soft float, binary128 and the
+128-bit integer routines, the C library on its bare-metal backend).
+`tests/harness/loongarch` runs programs on QEMU's `virt` board: the image
+is linked at 0x1000000 and loaded with `-kernel`, the UART at 0x1fe001e0
+is the console, an exception prints its code and address, and the ACPI
+GED's sleep register powers the board off at the end.
+
+### Limitations
+
+| Construct | Diagnostic |
+|---|---|
+| a 16-byte atomic | `the LoongArch64 backend cannot lower a sixteen-byte atomic (the LA64 base ISA has no 128-bit ll/sc or am* instruction) yet (function f) [cas16 w=16 size=16]` |
+| `__builtin_frame_address(N)` or `__builtin_return_address(N)` with N above 0 (level 0 is supported; see [Extensions](extensions.md)) | `__builtin_return_address(1) is not supported on loongarch64-unknown-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found` |
+| `__attribute__((interrupt))` | `__attribute__((interrupt)) is not supported: ...` (write the exception entry in a `.S` file or a naked function) |
+| `--unwind-tables`, `-fasynchronous-unwind-tables`, `--exceptions`, C++ without `--no-exceptions` | `unwind tables are not supported for loongarch64-unknown-elf yet (...): EmbCC writes no LoongArch .eh_frame` |
+
+## TriCore
+
+Infineon TriCore 1.6.1, the core of the AURIX TC2xx microcontrollers and
+a subset of the TC3xx's TriCore 1.6.2: 32-bit, little-endian, soft float.
+Freestanding only. The design notes, and where each fact below comes
+from, are in [the TriCore plan](../internals/tricore-plan.md): there is
+no TriCore compiler on the machine EmbCC is developed on, so the calling
+convention, the data layout, the relocation numbers and the predefined
+macros are the TriCore EABI and GCC for TriCore **as remembered, and
+unverified** against a reference compiler. The instruction encodings are
+checked against QEMU's TriCore translator, and every test runs on QEMU's
+`tricore_testboard`.
+
+### Triples
+
+| Triple | Accepted aliases | ISA | ABI |
+|---|---|---|---|
+| `tricore-none-elf` | `tricore-elf`, `tricore-unknown-elf`, `tricore` | TriCore 1.6.1 | TriCore EABI, soft float |
+
+### Options
+
+| Option | Accepted values | Refused with |
+|---|---|---|
+| `--cpu=CPU`, `--isa=CPU`, `-mCPU` | `tc16`, `tc161`, `tc162`, `tc1.6`, `tc1.6.1`, `tc1.6.2`, `tc16x`, `tc2xx`, `tc22xx`, `tc23xx`, `tc26xx`, `tc27xx`, `tc29xx`, `tc3xx`, `tc33xx`, `tc36xx`, `tc37xx`, `tc38xx`, `tc39xx` | `--cpu=tc1797 is not a TriCore 1.6 core: EmbCC emits TriCore 1.6.1 code, for the AURIX TC2xx and TC3xx (...)` |
+| `-msoft-float`, `--endian=little` | (no value) | `-mhard-float is not supported: EmbCC emits soft float for TriCore (the TC3xx FPU is not used yet)` |
+
+### Calling convention (TriCore EABI, unverified)
+
+- A pointer argument travels in the next free of `A4`–`A7`; any other
+  scalar of 32 bits or fewer in the lowest free of `D4`–`D7`; a `long
+  long` or `double` in the next free even pair, `E4` (`D4:D5`) or `E6`,
+  low word in the even register -- a register skipped on the way is
+  filled by a later 32-bit argument.
+- A structure or union of 8 bytes or fewer travels as an integer of its
+  size; a larger one by reference, the caller passing the address of its
+  own copy as a pointer argument.
+- What finds no register goes on the stack in whole words from the
+  caller's `A10`, 4-aligned whatever its size. Every unnamed argument of
+  a variadic call goes there too, so `va_list` is a `char *`.
+- A pointer result comes back in `A2`; another of 32 bits or fewer in
+  `D2`; a 64-bit one, or a struct of 5-8 bytes, in `E2`; a larger struct
+  through a hidden pointer the caller passes in `A4`.
+- `CALL` saves the upper context (`D8`–`D15`, `A10`–`A15`) in a
+  context-save area and `RET` restores it, so those registers and the
+  stack pointer survive every call with no save code. `A0`, `A1`, `A8`
+  and `A9` are the system's and never touched.
+- The stack is 8-byte aligned; `long long` and `double` are 4-aligned in
+  memory.
+
+### Code generation
+
+Every value lives in a data register or a frame slot; address registers
+are loaded just before a load or store, and for a call's pointer
+arguments and results. Addresses are absolute: `movh` and `addi` with
+`R_TRICORE_HIADJ` and `R_TRICORE_LO`. Calls are `CALL` with
+`R_TRICORE_24REL` (±16 MiB). Conditional branches reach ±32 KiB; a branch
+in a function larger than that becomes an inverted branch over a `J`. A
+dense `switch` is a tree of compares (no jump tables yet). A load or store
+the compiler cannot prove aligned goes a byte at a time. Only the 32-bit
+encodings are emitted.
+
+### Atomics
+
+An exchange of a word is `SWAP.W`, a compare-and-swap `CMPSWAP.W`, and a
+read-modify-write a `CMPSWAP.W` loop, each bracketed by `DSYNC`. A one- or
+two-byte atomic works on the aligned word around it: the loop rewrites
+only its lane, `old ^ ((new ^ old) & mask)`, so it is atomic against the
+neighbouring bytes too (a store to any of them makes the `CMPSWAP.W` fail
+and the loop go round). A compare-and-swap hands `CMPSWAP.W` the word last
+seen with the expected value in the lane; when it fails because a
+neighbour moved, the loop goes round, and when the lane differs, it
+fails. `__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1`, `_2` and `_4` are defined.
+
+### Object format and linking
+
+ELF32, little-endian, `EM_TRICORE` (44), RELA relocations, `e_flags`
+`0x00200000`. `embld` links these objects, applying `R_TRICORE_32ABS`,
+`R_TRICORE_24REL`, `R_TRICORE_HIADJ`, `R_TRICORE_LO` and `R_TRICORE_LO2`,
+and refuses the small-data relocations by name. `-Tstack ADDR --csa
+START:END` makes it emit an entry stub that sets `A10`, links the
+context-save areas in [START, END) into the free list every `CALL` draws
+from, turns call-depth counting off and jumps to the entry symbol; the
+areas must be 64-byte aligned and within the first 4 MiB of one 256 MiB
+segment.
+
+### Assembly
+
+Inline `asm` is assembled by EmbCC's TriCore vocabulary
+(`src/arch/tricore/asm.c`): the system instructions (`mtcr`/`mfcr` with
+core registers by name or number, `isync`, `dsync`, `syscall`,
+`enable`, ...), the moves, the ALU forms, the loads and stores,
+`swap.w`, `cmpswap.w` and the indirect jumps and calls. Constraints:
+`d`/`r` a data register, `a` an address register, `m` an address register
+holding the operand's address (written `[%0]`), `i` a constant; register
+variables bound to `d0`-`d7` or `a2`-`a7`.
+
+The same vocabulary has the control transfers: `j`, `jl` and `call` (+-16
+MiB), the conditional branches `jeq`, `jne`, `jlt`, `jlt.u`, `jge`,
+`jge.u` against a register or a 4-bit constant, `jz`/`jnz` (jeq/jne
+against 0), `jeq.a`, `jne.a`, `jz.a`, `jnz.a` and `loop` (+-32 KiB), each
+to `.+N`/`.-N` or, in a template, a numeric label (`1:`, `1b`, `1f`).
+`embcc -c` assembles `.s` and `.S` files, and file-scope `asm` blocks and
+`__attribute__((naked))` functions are assembled the same way, in GNU
+syntax with optional `%` on registers; there `j`/`jl`/`call sym` carry
+`R_TRICORE_24REL`, an address is `movh`/`movh.a` with `hi:sym` or
+`%hi(sym)` (`R_TRICORE_HIADJ`) and `addi` with `lo:sym` or `%lo(sym)`
+(`R_TRICORE_LO`) or `lea`, a load or a store with `[aB]lo:sym`
+(`R_TRICORE_LO2`), and `.word sym` is `R_TRICORE_32ABS`. A conditional
+branch or `loop` reaches only a label of its own section (`embld` does not
+apply `R_TRICORE_15REL`), and is refused by name with a symbol defined
+elsewhere. `tests/golden/tricore-gas.sh` runs every transfer, assembled
+from its text, through QEMU's TriCore translator (tricore-encoding.sh's
+referee), and a `.S` file with C on the board.
+
+### Predefined macros
+
+`__tricore__`, `__TRICORE__`, `__TC161__`, `__TRICORE_CORE__` and
+`__TRICORE_NAME__` (`0x161`), with the ILP32 set; `__CHAR_UNSIGNED__` is
+not defined. `__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1`, `_2` and `_4` are.
+
+### Runtime
+
+`make rt-embedded` and `make libc-embedded` build `librt.a` and `libc.a`
+for `tricore-none-elf`. `tests/harness/tricore` runs programs on QEMU's
+`tricore_testboard` (`-cpu tc27x`): the image is linked at 0x80000000 and
+loaded with `-kernel`; the board has no UART, so a TCG plugin
+(`tests/harness/tricore/putc.c`) prints what the harness stores to its
+output word; a trap prints its class, number and address.
+
+### Limitations
+
+| Construct | Diagnostic |
+|---|---|
+| `__builtin_frame_address(N)` or `__builtin_return_address(N)` with N above 0 (level 0 is supported; see [Extensions](extensions.md)) | `__builtin_return_address(1) is not supported on tricore-none-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found` |
+| `__int128` | `__int128 does not exist on this target ...` |
+| `__attribute__((interrupt))` | `__attribute__((...)) is not supported: ...` |
+| a conditional branch or `loop` to a symbol defined elsewhere (`.s`, `.S`, file-scope `asm`) | `a conditional branch or loop reaches only a label of its own section: its 15-bit displacement (R_TRICORE_15REL) is not one embld applies; branch over a j` |
+| `--unwind-tables`, `-fasynchronous-unwind-tables`, `--exceptions` | `unwind tables are not supported for tricore-none-elf yet ...` |
+| C++ with exceptions (on by default) | `C++ exceptions are not supported for tricore-none-elf yet: EmbCC writes no TriCore .eh_frame; compile with --no-exceptions`. C++ itself compiles with `--no-exceptions`; see [C++](cxx.md#targets) |
+
+## ColdFire
+
+Motorola/NXP ColdFire, ISA_A with the hardware divide (an MCF5208 and
+every later core), big-endian, soft float: GCC's `m68k-elf` with
+`--cpu=5208`. Freestanding only. The design notes, and which facts are
+not yet checked against a real m68k compiler, are in
+[the ColdFire plan](../internals/coldfire-plan.md).
+
+EmbCC assembles ColdFire itself, in GNU as's Motorola syntax (`%` optional,
+MIT's `An@(d)` accepted): inline `__asm__` with GCC's operand constraints,
+naked functions, file-scope blocks and `.s`/`.S` files, through one
+assembler for the MCF5208's ISA_A+ -- tests/golden/coldfire-asm.sh reads
+every form back with QEMU's m68k disassembler, assembles FreeRTOS's
+ColdFire V2 port, and runs a program that uses it against a host model.
+Branches relax to .s or .w (the MCF5208 has no 32-bit branch); a `bra` or
+`bsr` to a symbol defined elsewhere is a `jmp`/`jsr` to its address
+(`R_68K_32`). The vocabulary, the constraints and what is refused are in
+[Inline assembly](inline-asm.md#coldfire) and
+[embas](tools/embas.md#coldfire-specifics).
+
+### Triples
+
+| Triple | Accepted aliases | ISA | ABI |
+|---|---|---|---|
+| `m68k-none-elf` | `m68k-unknown-elf`, `m68k-elf`, `m68k` | ColdFire ISA_A | m68k SVR4, soft float |
+
+The 68000 family proper (68000-68060, CPU32) is not a target.
+
+### Options
+
+| Option | Accepted values | Refused |
+|---|---|---|
+| `--cpu=CPU`, `--tune=CPU`, `-mCPU` | `5208`, `5207`, `5206e`, `5211`-`5216`, `5235`, `5249`, `5271`-`5282`, `5307`, `5329`, `5373`, `5407`, `54455` and their kin | a 68000-family CPU; `5206`, `5202`, `5204` (no divider); `547x`/`548x` (an FPU) |
+| `--isa=ISA` | `isaa`, `isaaplus`, `isab`, `isac` | anything else |
+| `-msoft-float`, `-mdiv`, `-mno-align-int`, `-mno-short`, `-mno-rtd`, `-m[no-]strict-align`, `--endian=big` | (no value) | `-mhard-float`, `-mno-div`, `-malign-int`, `-mshort`, `-mrtd`, `-mpcrel`, `-mid-shared-library`, `-msep-data`, `-mxgot`, `--endian=little` |
+
+### Calling convention
+
+- Every argument is on the stack in whole 4-byte words, the first at
+  `4(%sp)` on entry: a scalar of four bytes or fewer promoted to a word
+  (a `char`'s byte is its word's last), a `long long` or `double` two
+  words, high first, a structure or union by value, its size rounded up
+  to a word -- right-justified when smaller than a word. The caller pops.
+- A variadic function's unnamed arguments are laid out as named ones;
+  `va_list` is a `char *`.
+- A scalar result comes back in `d0`, or `d0:d1` (high word in `d0`); a
+  pointer in `a0` and `d0`; a `_Complex float` in `d0`/`d1`, a `_Complex
+  double` in `d0:d1`/`d2:d3`. Every other structure and union is returned
+  through the buffer whose address the caller passes in `a1`.
+- `d2`-`d7` and `a2`-`a6` survive a call; `a6` is the frame pointer, which
+  every function links.
+- Nothing is aligned beyond 2 bytes, so `struct { char c; int i; }` is 6
+  bytes; the stack is 4-aligned at a call.
+
+`tests/golden/coldfire-abi.sh` checks that caller and callee agree, EmbCC
+to EmbCC at every optimization pairing.
+
+### Code generation
+
+Operands are effective addresses, so a frame slot is read in place. The
+allocator's data class is `d2`-`d7` and its address class `a2`-`a5`.
+Addresses and calls are 32-bit absolute (`move.l #sym`, `lea sym`,
+`jsr sym`, `R_68K_32`). Branches are `bcc.b`/`bcc.w`; one beyond 32 KiB
+becomes a position-independent `lea`/`adda.l`/`jmp`. A 64-bit multiply,
+divide and variable shift call `lib/rt`. The atomics mask interrupts
+around a plain read-modify-write -- ISA_A has no compare-and-swap -- so
+they need supervisor mode, where bare-metal code runs; in user mode they
+trap.
+
+### Object format
+
+ELF32, big-endian, `EM_68K`, RELA, `e_flags` `0x2` (ISA_A). `embld` links
+them, applying `R_68K_32`/`16`/`8` and `R_68K_PC32`/`PC16`/`PC8`, refuses
+GOT and PLT relocations, a little-endian, FPU or non-ColdFire object by
+name, and with `-Tstack ADDR` emits a stub that sets `%sp` and jumps to
+the entry.
+
+### Interrupt handlers
+
+`__attribute__((interrupt))`, and its m68k spelling `interrupt_handler`,
+makes an interrupt handler as GCC's m68k port does: it saves `d0`, `d1`,
+`a0` and `a1` with the callee-saved registers it uses in its frame's one
+`movem`, and returns with `rte`, which takes back the format word, SR and
+PC the exception stacked. `interrupt_thread` (the Fido's register banks),
+an argument, parameters and a result are refused.
+tests/golden/coldfire-isr.sh runs PIT0's interrupt on QEMU's mcf5208evb
+against code that keeps a value in every register.
+
+### Limitations
+
+| Construct | Diagnostic |
+|---|---|
+| a rotate, `dbcc`, `exg`, `cas`, BCD and the FPU's instructions in asm | `rol.l: ColdFire has no rotate` (and so on, by name) |
+| ISA_B's `mvs`, `mvz`, `mov3q`, `sats`, and a 32-bit branch (`bra.l`) | `mvs.b is an ISA_B instruction, which the MCF5208 (ISA_A+) does not have: it traps as illegal there` |
+| a frame beyond 32 KiB | `a stack frame larger than 32 KiB` |
+| unwind tables | `unwind tables are not supported for m68k-none-elf yet` |
+| C++ with exceptions (on by default) | `C++ exceptions are not supported for m68k-none-elf yet: EmbCC writes no ColdFire .eh_frame; compile with --no-exceptions`. C++ itself compiles with `--no-exceptions`; see [C++](cxx.md#targets) |
+
 ## Xtensa
 
 Little-endian Xtensa with the windowed-register ABI: the instruction set
@@ -1870,6 +2097,31 @@ configuration, `__CHAR_UNSIGNED__`, `__WCHAR_TYPE__` `short unsigned int`,
 `__INT32_TYPE__` `long int`. Not `__XTENSA_SOFT_FLOAT__`: the ESP32's GCC
 does not define it, and the float ABI is the same either way.
 `__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1`, `_2` and `_4` are defined.
+
+### Runtime
+
+`make rt-embedded` builds `librt.a` and `make libc-embedded` builds
+`libc.a` for `xtensa-none-elf` (soft float, 64-bit multiply and division,
+the C library on its bare-metal backend). `tests/harness/xtensa` runs
+programs on QEMU's `sim` machine with the de212 core (an LX6 with no FPU
+or MMU): the generic loader starts the image at its entry, the harness
+installs the window overflow and underflow handlers and the Alloca
+exception's, output and exit are the sim machine's simcalls, and any other
+exception prints its cause, `EPC1` and `EXCVADDR`.
+
+### Limitations
+
+| Construct | Diagnostic |
+|---|---|
+| `__builtin_frame_address(N)` or `__builtin_return_address(N)` with N above 0 (level 0 is supported; see [Extensions](extensions.md)) | `__builtin_return_address(1) is not supported on xtensa-none-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found` |
+| `call0` or `callx0` in inline asm | `call0 in Xtensa asm writes a0, which holds this function's return address under the windowed ABI: call a windowed function with call8/callx8` |
+| a density (`.n`) instruction | `ret.n is a 16-bit instruction of the density option, which this assembler does not emit: write ret, its 24-bit form` |
+| `.begin longcalls` | `.begin longcalls is not supported: a long call is an l32r and a callx, which this assembler does not make of a call; write them` |
+| `__int128` | `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |
+| `__attribute__((interrupt))` | `__attribute__((interrupt)) is not supported: ...` |
+| `--unwind-tables`, `-fasynchronous-unwind-tables`, `--exceptions` | `unwind tables are not supported for xtensa-none-elf yet (...): EmbCC writes no Xtensa .eh_frame` |
+| C++ with exceptions (on by default) | `C++ exceptions are not supported for xtensa-none-elf yet: EmbCC writes no Xtensa .eh_frame; compile with --no-exceptions`. C++ itself compiles with `--no-exceptions`; see [C++](cxx.md#targets) |
+
 ## SPARC
 
 SPARC V8, big-endian, as Gaisler's LEON3 implements it -- the processor
@@ -1995,130 +2247,6 @@ From `clang --target=sparc-none-elf -mcpu=leon3 -msoft-float`:
 ### Runtime
 
 `make rt-embedded` builds `librt.a` and `make libc-embedded` builds
-`libc.a` for `loongarch64-unknown-elf` (soft float, binary128 and the
-128-bit integer routines, the C library on its bare-metal backend).
-`tests/harness/loongarch` runs programs on QEMU's `virt` board: the image
-is linked at 0x1000000 and loaded with `-kernel`, the UART at 0x1fe001e0
-is the console, an exception prints its code and address, and the ACPI
-GED's sleep register powers the board off at the end.
-| `tricore-none-elf` | `tricore-elf`, `tricore-unknown-elf`, `tricore` | TriCore 1.6.1 | TriCore EABI, soft float |
-
-### Options
-
-| Option | Accepted values | Refused with |
-|---|---|---|
-| `--cpu=CPU`, `--isa=CPU`, `-mCPU` | `tc16`, `tc161`, `tc162`, `tc1.6`, `tc1.6.1`, `tc1.6.2`, `tc16x`, `tc2xx`, `tc22xx`, `tc23xx`, `tc26xx`, `tc27xx`, `tc29xx`, `tc3xx`, `tc33xx`, `tc36xx`, `tc37xx`, `tc38xx`, `tc39xx` | `--cpu=tc1797 is not a TriCore 1.6 core: EmbCC emits TriCore 1.6.1 code, for the AURIX TC2xx and TC3xx (...)` |
-| `-msoft-float`, `--endian=little` | (no value) | `-mhard-float is not supported: EmbCC emits soft float for TriCore (the TC3xx FPU is not used yet)` |
-
-### Calling convention (TriCore EABI, unverified)
-
-- A pointer argument travels in the next free of `A4`–`A7`; any other
-  scalar of 32 bits or fewer in the lowest free of `D4`–`D7`; a `long
-  long` or `double` in the next free even pair, `E4` (`D4:D5`) or `E6`,
-  low word in the even register -- a register skipped on the way is
-  filled by a later 32-bit argument.
-- A structure or union of 8 bytes or fewer travels as an integer of its
-  size; a larger one by reference, the caller passing the address of its
-  own copy as a pointer argument.
-- What finds no register goes on the stack in whole words from the
-  caller's `A10`, 4-aligned whatever its size. Every unnamed argument of
-  a variadic call goes there too, so `va_list` is a `char *`.
-- A pointer result comes back in `A2`; another of 32 bits or fewer in
-  `D2`; a 64-bit one, or a struct of 5-8 bytes, in `E2`; a larger struct
-  through a hidden pointer the caller passes in `A4`.
-- `CALL` saves the upper context (`D8`–`D15`, `A10`–`A15`) in a
-  context-save area and `RET` restores it, so those registers and the
-  stack pointer survive every call with no save code. `A0`, `A1`, `A8`
-  and `A9` are the system's and never touched.
-- The stack is 8-byte aligned; `long long` and `double` are 4-aligned in
-  memory.
-
-### Code generation
-
-Every value lives in a data register or a frame slot; address registers
-are loaded just before a load or store, and for a call's pointer
-arguments and results. Addresses are absolute: `movh` and `addi` with
-`R_TRICORE_HIADJ` and `R_TRICORE_LO`. Calls are `CALL` with
-`R_TRICORE_24REL` (±16 MiB). Conditional branches reach ±32 KiB; a branch
-in a function larger than that becomes an inverted branch over a `J`. A
-dense `switch` is a tree of compares (no jump tables yet). A load or store
-the compiler cannot prove aligned goes a byte at a time. Only the 32-bit
-encodings are emitted.
-
-### Atomics
-
-An exchange of a word is `SWAP.W`, a compare-and-swap `CMPSWAP.W`, and a
-read-modify-write a `CMPSWAP.W` loop, each bracketed by `DSYNC`. A one- or
-two-byte atomic works on the aligned word around it: the loop rewrites
-only its lane, `old ^ ((new ^ old) & mask)`, so it is atomic against the
-neighbouring bytes too (a store to any of them makes the `CMPSWAP.W` fail
-and the loop go round). A compare-and-swap hands `CMPSWAP.W` the word last
-seen with the expected value in the lane; when it fails because a
-neighbour moved, the loop goes round, and when the lane differs, it
-fails. `__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1`, `_2` and `_4` are defined.
-
-### Object format and linking
-
-ELF32, little-endian, `EM_TRICORE` (44), RELA relocations, `e_flags`
-`0x00200000`. `embld` links these objects, applying `R_TRICORE_32ABS`,
-`R_TRICORE_24REL`, `R_TRICORE_HIADJ`, `R_TRICORE_LO` and `R_TRICORE_LO2`,
-and refuses the small-data relocations by name. `-Tstack ADDR --csa
-START:END` makes it emit an entry stub that sets `A10`, links the
-context-save areas in [START, END) into the free list every `CALL` draws
-from, turns call-depth counting off and jumps to the entry symbol; the
-areas must be 64-byte aligned and within the first 4 MiB of one 256 MiB
-segment.
-
-### Assembly
-
-Inline `asm` is assembled by EmbCC's TriCore vocabulary
-(`src/arch/tricore/asm.c`): the system instructions (`mtcr`/`mfcr` with
-core registers by name or number, `isync`, `dsync`, `syscall`,
-`enable`, ...), the moves, the ALU forms, the loads and stores,
-`swap.w`, `cmpswap.w` and the indirect jumps and calls. Constraints:
-`d`/`r` a data register, `a` an address register, `m` an address register
-holding the operand's address (written `[%0]`), `i` a constant; register
-variables bound to `d0`-`d7` or `a2`-`a7`.
-
-The same vocabulary has the control transfers: `j`, `jl` and `call` (+-16
-MiB), the conditional branches `jeq`, `jne`, `jlt`, `jlt.u`, `jge`,
-`jge.u` against a register or a 4-bit constant, `jz`/`jnz` (jeq/jne
-against 0), `jeq.a`, `jne.a`, `jz.a`, `jnz.a` and `loop` (+-32 KiB), each
-to `.+N`/`.-N` or, in a template, a numeric label (`1:`, `1b`, `1f`).
-`embcc -c` assembles `.s` and `.S` files, and file-scope `asm` blocks and
-`__attribute__((naked))` functions are assembled the same way, in GNU
-syntax with optional `%` on registers; there `j`/`jl`/`call sym` carry
-`R_TRICORE_24REL`, an address is `movh`/`movh.a` with `hi:sym` or
-`%hi(sym)` (`R_TRICORE_HIADJ`) and `addi` with `lo:sym` or `%lo(sym)`
-(`R_TRICORE_LO`) or `lea`, a load or a store with `[aB]lo:sym`
-(`R_TRICORE_LO2`), and `.word sym` is `R_TRICORE_32ABS`. A conditional
-branch or `loop` reaches only a label of its own section (`embld` does not
-apply `R_TRICORE_15REL`), and is refused by name with a symbol defined
-elsewhere. `tests/golden/tricore-gas.sh` runs every transfer, assembled
-from its text, through QEMU's TriCore translator (tricore-encoding.sh's
-referee), and a `.S` file with C on the board.
-
-### Predefined macros
-
-`__tricore__`, `__TRICORE__`, `__TC161__`, `__TRICORE_CORE__` and
-`__TRICORE_NAME__` (`0x161`), with the ILP32 set; `__CHAR_UNSIGNED__` is
-not defined. `__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1`, `_2` and `_4` are.
-
-### Runtime
-
-`make rt-embedded` and `make libc-embedded` build `librt.a` and `libc.a`
-for `tricore-none-elf`. `tests/harness/tricore` runs programs on QEMU's
-`tricore_testboard` (`-cpu tc27x`): the image is linked at 0x80000000 and
-loaded with `-kernel`; the board has no UART, so a TCG plugin
-(`tests/harness/tricore/putc.c`) prints what the harness stores to its
-output word; a trap prints its class, number and address.
-`libc.a` for `xtensa-none-elf` (soft float, 64-bit multiply and division,
-the C library on its bare-metal backend). `tests/harness/xtensa` runs
-programs on QEMU's `sim` machine with the de212 core (an LX6 with no FPU
-or MMU): the generic loader starts the image at its entry, the harness
-installs the window overflow and underflow handlers and the Alloca
-exception's, output and exit are the sim machine's simcalls, and any other
-exception prints its cause, `EPC1` and `EXCVADDR`.
 `libc.a` for `sparc-none-elf` (soft float, 64-bit division, binary128,
 the C library on its bare-metal backend). `tests/harness/sparc` runs
 programs on QEMU's `leon3_generic` board: the image is linked at
@@ -2127,81 +2255,11 @@ console, and the harness installs the window overflow and underflow trap
 handlers a windowed program needs (any other trap prints its type and
 address). A program for real LEON3 hardware needs the same handlers in its
 startup, as BCC's provides.
-| `m68k-none-elf` | `m68k-unknown-elf`, `m68k-elf`, `m68k` | ColdFire ISA_A | m68k SVR4, soft float |
-
-The 68000 family proper (68000-68060, CPU32) is not a target.
-
-### Options
-
-| Option | Accepted values | Refused |
-|---|---|---|
-| `--cpu=CPU`, `--tune=CPU`, `-mCPU` | `5208`, `5207`, `5206e`, `5211`-`5216`, `5235`, `5249`, `5271`-`5282`, `5307`, `5329`, `5373`, `5407`, `54455` and their kin | a 68000-family CPU; `5206`, `5202`, `5204` (no divider); `547x`/`548x` (an FPU) |
-| `--isa=ISA` | `isaa`, `isaaplus`, `isab`, `isac` | anything else |
-| `-msoft-float`, `-mdiv`, `-mno-align-int`, `-mno-short`, `-mno-rtd`, `-m[no-]strict-align`, `--endian=big` | (no value) | `-mhard-float`, `-mno-div`, `-malign-int`, `-mshort`, `-mrtd`, `-mpcrel`, `-mid-shared-library`, `-msep-data`, `-mxgot`, `--endian=little` |
-
-### Calling convention
-
-- Every argument is on the stack in whole 4-byte words, the first at
-  `4(%sp)` on entry: a scalar of four bytes or fewer promoted to a word
-  (a `char`'s byte is its word's last), a `long long` or `double` two
-  words, high first, a structure or union by value, its size rounded up
-  to a word -- right-justified when smaller than a word. The caller pops.
-- A variadic function's unnamed arguments are laid out as named ones;
-  `va_list` is a `char *`.
-- A scalar result comes back in `d0`, or `d0:d1` (high word in `d0`); a
-  pointer in `a0` and `d0`; a `_Complex float` in `d0`/`d1`, a `_Complex
-  double` in `d0:d1`/`d2:d3`. Every other structure and union is returned
-  through the buffer whose address the caller passes in `a1`.
-- `d2`-`d7` and `a2`-`a6` survive a call; `a6` is the frame pointer, which
-  every function links.
-- Nothing is aligned beyond 2 bytes, so `struct { char c; int i; }` is 6
-  bytes; the stack is 4-aligned at a call.
-
-`tests/golden/coldfire-abi.sh` checks that caller and callee agree, EmbCC
-to EmbCC at every optimization pairing.
-
-### Code generation
-
-Operands are effective addresses, so a frame slot is read in place. The
-allocator's data class is `d2`-`d7` and its address class `a2`-`a5`.
-Addresses and calls are 32-bit absolute (`move.l #sym`, `lea sym`,
-`jsr sym`, `R_68K_32`). Branches are `bcc.b`/`bcc.w`; one beyond 32 KiB
-becomes a position-independent `lea`/`adda.l`/`jmp`. A 64-bit multiply,
-divide and variable shift call `lib/rt`. The atomics mask interrupts
-around a plain read-modify-write -- ISA_A has no compare-and-swap -- so
-they need supervisor mode, where bare-metal code runs; in user mode they
-trap.
-
-### Object format
-
-ELF32, big-endian, `EM_68K`, RELA, `e_flags` `0x2` (ISA_A). `embld` links
-them, applying `R_68K_32`/`16`/`8` and `R_68K_PC32`/`PC16`/`PC8`, refuses
-GOT and PLT relocations, a little-endian, FPU or non-ColdFire object by
-name, and with `-Tstack ADDR` emits a stub that sets `%sp` and jumps to
-the entry.
 
 ### Limitations
 
 | Construct | Diagnostic |
 |---|---|
-| a 16-byte atomic | `the LoongArch64 backend cannot lower a sixteen-byte atomic (the LA64 base ISA has no 128-bit ll/sc or am* instruction) yet (function f) [cas16 w=16 size=16]` |
-| `__builtin_frame_address(N)` or `__builtin_return_address(N)` with N above 0 (level 0 is supported; see [Extensions](extensions.md)) | `__builtin_return_address(1) is not supported on loongarch64-unknown-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found` |
-| `__attribute__((interrupt))` | `__attribute__((interrupt)) is not supported: ...` (write the exception entry in a `.S` file or a naked function) |
-| `--unwind-tables`, `-fasynchronous-unwind-tables`, `--exceptions`, C++ without `--no-exceptions` | `unwind tables are not supported for loongarch64-unknown-elf yet (...): EmbCC writes no LoongArch .eh_frame` |
-| `__builtin_frame_address(N)` or `__builtin_return_address(N)` with N above 0 (level 0 is supported; see [Extensions](extensions.md)) | `__builtin_return_address(1) is not supported on tricore-none-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found` |
-| `__int128` | `__int128 does not exist on this target ...` |
-| `__attribute__((interrupt))` | `__attribute__((...)) is not supported: ...` |
-| a conditional branch or `loop` to a symbol defined elsewhere (`.s`, `.S`, file-scope `asm`) | `a conditional branch or loop reaches only a label of its own section: its 15-bit displacement (R_TRICORE_15REL) is not one embld applies; branch over a j` |
-| `--unwind-tables`, `-fasynchronous-unwind-tables`, `--exceptions` | `unwind tables are not supported for tricore-none-elf yet ...` |
-| C++ with exceptions (on by default) | `C++ exceptions are not supported for tricore-none-elf yet: EmbCC writes no TriCore .eh_frame; compile with --no-exceptions`. C++ itself compiles with `--no-exceptions`; see [C++](cxx.md#targets) |
-| `__builtin_frame_address(N)` or `__builtin_return_address(N)` with N above 0 (level 0 is supported; see [Extensions](extensions.md)) | `__builtin_return_address(1) is not supported on xtensa-none-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found` |
-| `call0` or `callx0` in inline asm | `call0 in Xtensa asm writes a0, which holds this function's return address under the windowed ABI: call a windowed function with call8/callx8` |
-| a density (`.n`) instruction | `ret.n is a 16-bit instruction of the density option, which this assembler does not emit: write ret, its 24-bit form` |
-| `.begin longcalls` | `.begin longcalls is not supported: a long call is an l32r and a callx, which this assembler does not make of a call; write them` |
-| `__int128` | `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |
-| `__attribute__((interrupt))` | `__attribute__((interrupt)) is not supported: ...` |
-| `--unwind-tables`, `-fasynchronous-unwind-tables`, `--exceptions` | `unwind tables are not supported for xtensa-none-elf yet (...): EmbCC writes no Xtensa .eh_frame` |
-| C++ with exceptions (on by default) | `C++ exceptions are not supported for xtensa-none-elf yet: EmbCC writes no Xtensa .eh_frame; compile with --no-exceptions`. C++ itself compiles with `--no-exceptions`; see [C++](cxx.md#targets) |
 | `__builtin_frame_address(N)` or `__builtin_return_address(N)` with N above 0 (level 0 is supported; see [Extensions](extensions.md)) | `__builtin_return_address(1) is not supported on sparc-none-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found` |
 | `__int128` | `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |
 | `__attribute__((interrupt))` | `__attribute__((interrupt)) is not supported: ...` |
@@ -2210,11 +2268,6 @@ the entry.
 | a V9 relocation operator (`%hh`, `%lm`, `%gdop_*`...) | `this relocation operator is SPARC V9's or position-independent code's; EmbLD applies %hi/%lo (R_SPARC_HI22/LO10), call and branch displacements and data words` |
 | `--unwind-tables`, `-fasynchronous-unwind-tables`, `--exceptions` | `unwind tables are not supported for sparc-none-elf yet (...): EmbCC writes no SPARC .eh_frame` |
 | C++ with exceptions (on by default) | `C++ exceptions are not supported for sparc-none-elf yet: EmbCC writes no SPARC .eh_frame; compile with --no-exceptions`. C++ itself compiles with `--no-exceptions`; see [C++](cxx.md#targets) |
-| a rotate, `dbcc`, `exg`, `cas`, BCD and the FPU's instructions in asm | `rol.l: ColdFire has no rotate` (and so on, by name) |
-| ISA_B's `mvs`, `mvz`, `mov3q`, `sats`, and a 32-bit branch (`bra.l`) | `mvs.b is an ISA_B instruction, which the MCF5208 (ISA_A+) does not have: it traps as illegal there` |
-| a frame beyond 32 KiB | `a stack frame larger than 32 KiB` |
-| unwind tables | `unwind tables are not supported for m68k-none-elf yet` |
-| C++ with exceptions (on by default) | `C++ exceptions are not supported for m68k-none-elf yet: EmbCC writes no ColdFire .eh_frame; compile with --no-exceptions`. C++ itself compiles with `--no-exceptions`; see [C++](cxx.md#targets) |
 
 ## AVR
 
