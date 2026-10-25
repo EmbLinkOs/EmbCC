@@ -202,12 +202,12 @@ Refused on 25 of the 25 targets.
 
 ## `__attribute__((interrupt))`
 
-Refused on 10 of the 25 targets.
+Refused on 9 of the 25 targets.
 
-- Refused on `loongarch64-unknown-elf`, `xtensa-none-elf`, `tricore-none-elf`, `powerpc-none-eabi`, `sparc-none-elf`, `x86_64-elf`, `aarch64-elf`, `x86_64-linux-gnu`, `aarch64-apple-darwin`, `x86_64-windows-gnu`:
+- Refused on `loongarch64-unknown-elf`, `xtensa-none-elf`, `powerpc-none-eabi`, `sparc-none-elf`, `x86_64-elf`, `aarch64-elf`, `x86_64-linux-gnu`, `aarch64-apple-darwin`, `x86_64-windows-gnu`:
 
   ```text
-  __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS, RX, ColdFire and ARMv7-A it is implemented)
+  __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS, RX, ColdFire, TriCore and ARMv7-A it is implemented)
   ```
 
 ## `__attribute__((naked))`
@@ -449,7 +449,7 @@ Refused on 21 of the 25 targets.
 | `mips64-none-elf` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
 | `loongarch64-unknown-elf` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | no | yes | yes | yes | yes | no | yes | no |
 | `xtensa-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | no | yes | yes | yes | yes | no | yes | no |
-| `tricore-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | no | yes | yes | yes | yes | no | yes | no |
+| `tricore-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
 | `rx-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
 | `powerpc-none-eabi` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | no | yes | yes | yes | yes | no | yes | no |
 | `sparc-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | no | yes | no | no | no | yes | yes | yes | yes | no | yes | no |

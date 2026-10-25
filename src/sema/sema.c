@@ -8358,6 +8358,7 @@ static void check_func(struct unit *u, struct func *f)
                       target_is_mips() ||
                       target_get() == TARGET_RX ||
                       target_get() == TARGET_COLDFIRE ||
+                      target_get() == TARGET_TRICORE ||
                       (target_get() == TARGET_THUMB && target_arm_a32()))) {
         /* ARM state with an FPU: the handler would change the VFP
          * registers and FPSCR of the code it interrupted, which GCC does

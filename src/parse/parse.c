@@ -764,7 +764,7 @@ static const struct attr_entry attr_table[] = {
       "the handler would return with an ordinary return instead of the "
       "interrupt return the CPU needs, and without saving the registers "
       "(on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, "
-      "MIPS, RX, ColdFire and ARMv7-A it is implemented)" },
+      "MIPS, RX, ColdFire, TriCore and ARMv7-A it is implemented)" },
     /* GCC's m68k spelling of the same thing, honoured on ColdFire (the
      * dispatch below); interrupt_thread is the Fido's, whose threads
      * switch register banks this target does not have. */
@@ -1083,6 +1083,11 @@ static int isr_kind(struct parser *ps, int line, const char *arg,
             "interrupt wants \"IRQ\", \"FIQ\", \"ABORT\", \"SWI\" or "
             "\"UNDEF\" on ARM, not \"%s\"", arg);
     }
+    if (a == TARGET_TRICORE && has_args)
+        parse_error_line(ps, line,
+            "interrupt takes no argument on TriCore: the handler's priority "
+            "and vector are its interrupt router's SRN and BIV, set at run "
+            "time");
     if (a == TARGET_COLDFIRE && has_args)
         parse_error_line(ps, line,
             "interrupt takes no argument on ColdFire, as in GCC's m68k "
@@ -1305,7 +1310,8 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
                             target_get() == TARGET_MIPS32 ||
                             target_get() == TARGET_MIPS64 ||
                             target_get() == TARGET_RX ||
-                            target_get() == TARGET_COLDFIRE)) &&
+                            target_get() == TARGET_COLDFIRE ||
+                            target_get() == TARGET_TRICORE)) &&
                          !(attr_is(name, "interrupt_handler") &&
                            target_get() == TARGET_COLDFIRE) &&
                          !(attr_is(name, "keep_interrupts_masked") &&

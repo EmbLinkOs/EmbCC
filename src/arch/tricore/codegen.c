@@ -3138,7 +3138,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct tc_sites *st,
         }
     }
     F.tail = NULL;
-    if (g_tc_regalloc && !keep_vars)
+    if (g_tc_regalloc && !keep_vars && !f->is_isr)  /* (an ISR leaves by rfe) */
         for (i = 0; i < fn->nins; i++)
             if (tc_tail_ok(&F, i)) {
                 if (!F.tail)
@@ -3192,7 +3192,16 @@ static void gen_func(struct ir_func *fn, struct code *t, struct tc_sites *st,
     f->code_off = t->len;
 
     /* The prologue: A10 down by the frame. No register is saved -- CALL
-     * saved the upper context -- and the return address stays in A11. */
+     * saved the upper context -- and the return address stays in A11.
+     *
+     * An interrupt or trap handler is entered with the upper context
+     * saved by the hardware, as by a CALL, and the lower one -- D0-D7,
+     * A2-A7, A11 -- the interrupted code's still: svlcx puts it in a
+     * context-save area first, and the end is rslcx and rfe, which takes
+     * the upper context (A10 with it) back and returns to the
+     * interrupted instruction -- HighTec GCC's handler. */
+    if (f->is_isr)
+        tc_svlcx(t);
     if (F.frame)
         lea_off(&F, TC_SP, TC_SP, -F.frame);
     if (fn->has_alloca) {
@@ -3220,8 +3229,12 @@ static void gen_func(struct ir_func *fn, struct code *t, struct tc_sites *st,
         for (i = 0; tail_end && i < F.nfix; i++)
             if (F.fix[i].label == fn->nlabels)
                 tail_end = 0;
-        if (!tail_end)
+        if (!tail_end && f->is_isr) {
+            tc_rslcx(t);
+            tc_rfe(t);
+        } else if (!tail_end) {
             tc_ret(t);
+        }
     }
 
     for (i = 0; i < F.nfix; i++) {

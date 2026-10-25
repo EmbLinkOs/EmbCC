@@ -1821,13 +1821,23 @@ loaded with `-kernel`; the board has no UART, so a TCG plugin
 (`tests/harness/tricore/putc.c`) prints what the harness stores to its
 output word; a trap prints its class, number and address.
 
+### Interrupt and trap handlers
+
+`__attribute__((interrupt))` makes a handler as HighTec's GCC does: the
+hardware has saved the upper context on entry, as for a CALL, and the
+handler saves the lower one with `svlcx` and leaves with `rslcx` and
+`rfe`, which takes the upper context back and returns to the interrupted
+instruction. The same handler serves a trap. Parameters, a result and an
+argument (the priority and vector are the interrupt router's, set at run
+time) are refused. tests/golden/tricore-isr.sh traps into one from a loop
+that keeps a value in every lower-context register.
+
 ### Limitations
 
 | Construct | Diagnostic |
 |---|---|
 | `__builtin_frame_address(N)` or `__builtin_return_address(N)` with N above 0 (level 0 is supported; see [Extensions](extensions.md)) | `__builtin_return_address(1) is not supported on tricore-none-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found` |
 | `__int128` | `__int128 does not exist on this target ...` |
-| `__attribute__((interrupt))` | `__attribute__((...)) is not supported: ...` |
 | a conditional branch or `loop` to a symbol defined elsewhere (`.s`, `.S`, file-scope `asm`) | `a conditional branch or loop reaches only a label of its own section: its 15-bit displacement (R_TRICORE_15REL) is not one embld applies; branch over a j` |
 | `--unwind-tables`, `-fasynchronous-unwind-tables`, `--exceptions` | `unwind tables are not supported for tricore-none-elf yet ...` |
 | C++ with exceptions (on by default) | `C++ exceptions are not supported for tricore-none-elf yet: EmbCC writes no TriCore .eh_frame; compile with --no-exceptions`. C++ itself compiles with `--no-exceptions`; see [C++](cxx.md#targets) |
