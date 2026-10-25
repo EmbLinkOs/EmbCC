@@ -3693,6 +3693,309 @@ static struct expr *generic_choice(struct unit *u, struct func *f,
     return chosen;
 }
 
+/* The builtins check_expr's EXPR_CALL hands here: clang's bit
+ * reversals and rotates, FUNCTION/FILE/LINE, complex,
+ * speculation_safe_value, fpclassify, powi, extract/frob_return_addr,
+ * __clear_cache, the AVR ones, debugtrap, the type-generic and stdc_ bit
+ * ones, and assume. 1 when bn was one of them. Out of check_expr itself
+ * because EmbCC is built without optimization: every local here sat in
+ * check_expr's frame, at every level of an expression's nesting, and
+ * 2000 unary minuses no longer fit in the stack (deep-nesting.sh). */
+static int check_builtin_more(struct unit *u, struct func *f,
+                              struct scope *sc, struct expr *e,
+                              const char *bn)
+{
+    /* clang's bitreverseN(x), rotateleftN(x, n), rotaterightN(x,
+     * n) for N 8, 16, 32 and 64: an unsigned value of exactly N
+     * bits; lowered in irgen (gen_bitx) */
+    if (builtin_bitx(bn, NULL) != 0) {
+        int bits, k = builtin_bitx(bn, &bits);
+        if (e->nargs != (k == 1 ? 1 : 2))
+            sema_error_at(u, e->line, e->col, "%s takes %s",
+                    e->lhs->name,
+                    k == 1 ? "one argument" : "a value and an amount");
+        for (int i = 0; i < e->nargs; i++) {
+            check_expr(u, f, sc, e->args[i]);
+            need_integer(u, e->args[i], e->lhs->name);
+        }
+        e->name = e->lhs->name;
+        e->ty = ty_uint_bits(bits);
+        return 1;
+    }
+    /* GCC's __builtin_FUNCTION(), __builtin_FILE() and
+     * __builtin_LINE(): where the call is (C has no default
+     * arguments, which is where they name the caller's place) */
+    else if (strcmp(bn, "FUNCTION") == 0 || strcmp(bn, "FILE") == 0 ||
+             strcmp(bn, "LINE") == 0) {
+        if (e->nargs)
+            sema_error_at(u, e->line, e->col, "%s takes no arguments",
+                    e->lhs->name);
+        if (bn[0] == 'L') {
+            e->kind = EXPR_NUM;
+            e->num = e->line;
+            e->ty = ty_base(TY_INT, 0);
+            return 1;
+        }
+        /* (outside a function -- a file-scope initializer, which
+         * sema checks as "<global initializer>" -- it is "", as
+         * GCC's and clang's are) */
+        const char *nm = bn[1] == 'U'
+                       ? (f->name[0] == '<' ? "" : f->name)
+                       : f->file ? f->file : diag_file(u);
+        e->kind = EXPR_STR;
+        e->name = nm;
+        e->num = (long)strlen(nm) + 1;
+        e->str_width = 1;
+        e->str_prefix = 0;
+        e->nargs = 0;
+        check_expr(u, f, sc, e);  /* the array/pointer type */
+        return 1;
+    }
+    /* GCC's __builtin_complex(re, im): the complex of their type
+     * from its two parts -- what CMPLX is, which a multiply by I
+     * cannot be when im is an infinity or a NaN. In a function,
+     * built in a fresh slot (cx_make); in a static initializer the
+     * call stays, typed, for cx_fold to fold, as C11 asks of CMPLX
+     * there */
+    else if (strcmp(bn, "complex") == 0) {
+        if (e->nargs != 2) {
+            sema_error_at(u, e->line, e->col,
+                    "__builtin_complex takes a real and an "
+                    "imaginary part");
+            e->ty = ty_base(TY_INT, 0);
+            return 1;
+        }
+        check_expr(u, f, sc, e->args[0]);
+        check_expr(u, f, sc, e->args[1]);
+        struct type *rt = ty_unqual(e->args[0]->ty),
+                    *it = ty_unqual(e->args[1]->ty);
+        if (!ty_is_float(rt) || ty_is_complex(rt) || !ty_is_float(it) ||
+            ty_is_complex(it) || ty_size(rt) != ty_size(it) ||
+            rt->kind != it->kind) {
+            sema_error_at(u, e->line, e->col,
+                    "__builtin_complex takes two parts of one real "
+                    "floating type, as in GCC, not %s and %s",
+                    ty_name(e->args[0]->ty), ty_name(e->args[1]->ty));
+            e->ty = ty_base(TY_INT, 0);
+            return 1;
+        }
+        if (cx_lowering()) {
+            *e = *cx_make(ty_complex(rt), e->args[0], e->args[1],
+                          e->line);
+            return 1;
+        }
+        e->name = e->lhs->name;
+        e->ty = ty_complex(rt);
+        return 1;
+    }
+    /* GCC's __builtin_speculation_safe_value(v[, fail]): v, the
+     * value in the code that runs -- a speculation barrier only
+     * matters on a core that speculates past a bounds check,
+     * which none of EmbCC's targets' code is built to fence */
+    else if (strcmp(bn, "speculation_safe_value") == 0) {
+        if (e->nargs < 1 || e->nargs > 2)
+            sema_error_at(u, e->line, e->col,
+                    "%s takes a value and an optional failure value",
+                    e->lhs->name);
+        for (int i = 0; i < e->nargs; i++)
+            check_expr(u, f, sc, e->args[i]);
+        if (e->nargs && !ty_is_integer(e->args[0]->ty) &&
+            e->args[0]->ty->kind != TY_PTR)
+            sema_error_at(u, e->line, e->col,
+                    "%s takes an integer or a pointer, got %s",
+                    e->lhs->name, ty_name(e->args[0]->ty));
+        *e = *e->args[0];
+        return 1;
+    }
+    /* __builtin_fpclassify(nan, inf, normal, subnormal, zero, x):
+     * GCC's, which glibc's fpclassify() is. The value goes to a
+     * local once, and the classes are the predicates' own, so
+     * every float width -- a 16-byte long double too -- is theirs:
+     * (t = x, isnan(t) ? nan : isinf(t) ? inf : isnormal(t) ?
+     * normal : t == 0 ? zero : subnormal) */
+    else if (strcmp(bn, "fpclassify") == 0) {
+        static int nfpc;
+        if (e->nargs != 6)
+            sema_error_at(u, e->line, e->col,
+                    "__builtin_fpclassify takes five class values "
+                    "and a floating-point value");
+        check_expr(u, f, sc, e->args[5]);
+        if (!ty_is_float(e->args[5]->ty))
+            sema_error_at(u, e->line, e->col,
+                    "__builtin_fpclassify takes a floating-point "
+                    "value last");
+        char *nm = xmalloc(32);
+        snprintf(nm, 32, "<fpclassify %d>", nfpc++);
+        scope_add(sc, nm, ty_unqual(e->args[5]->ty), NULL);
+        int ln = e->line;
+        struct expr *asg = sx(EXPR_ASSIGN, ln);
+        asg->lhs = sx_var(nm, ln);
+        asg->rhs = e->args[5];
+        struct expr *zero = sx(EXPR_BINOP, ln);
+        zero->op = B_EQ;
+        zero->lhs = sx_var(nm, ln);
+        zero->rhs = sx(EXPR_NUM, ln);
+        zero->rhs->ty = ty_base(TY_INT, 0);  /* (as the parser types one) */
+        struct expr *chain =
+            sx_cond(sx_call1("__builtin_isnan", sx_var(nm, ln), ln),
+                    e->args[0],
+            sx_cond(sx_call1("__builtin_isinf", sx_var(nm, ln), ln),
+                    e->args[1],
+            sx_cond(sx_call1("__builtin_isnormal", sx_var(nm, ln), ln),
+                    e->args[2],
+            sx_cond(zero, e->args[4], e->args[3]))));
+        struct expr *all = sx(EXPR_COMMA, ln);
+        all->lhs = asg;
+        all->rhs = chain;
+        *e = *all;
+        check_expr(u, f, sc, e);
+        return 1;
+    }
+    /* GCC's __builtin_powi(x, n), powif, powil: libgcc's
+     * __powi*f2 (lib/rt/powi.c), x to an int power */
+    else if (strcmp(bn, "powi") == 0 || strcmp(bn, "powif") == 0 ||
+             strcmp(bn, "powil") == 0) {
+        struct type *rt = bn[4] == 'f' ? ty_base(TY_FLOAT, 0)
+                        : bn[4] == 'l' ? ty_base(TY_LDOUBLE, 0)
+                        : ty_base(TY_DOUBLE, 0);
+        if (e->nargs != 2)
+            sema_error_at(u, e->line, e->col,
+                    "%s takes a value and an int power", e->lhs->name);
+        for (int i = 0; i < e->nargs; i++)
+            check_expr(u, f, sc, e->args[i]);
+        need_integer(u, e->args[1], e->lhs->name);
+        e->args[0] = mk_cast(e->args[0], rt);
+        e->args[1] = mk_cast(e->args[1], ty_base(TY_INT, 0));
+        e->name = e->lhs->name;
+        e->ty = rt;
+        return 1;
+    }
+    /* GCC's __builtin_extract_return_addr(a) and
+     * __builtin_frob_return_addr(a): the address a return goes
+     * to, from __builtin_return_address's, and back -- the same
+     * on every target here but SPARC's, whose call is followed by
+     * its delay slot and returns 8 past it */
+    else if (strcmp(bn, "extract_return_addr") == 0 ||
+             strcmp(bn, "frob_return_addr") == 0) {
+        if (e->nargs != 1)
+            sema_error_at(u, e->line, e->col, "%s takes an address",
+                    e->lhs->name);
+        check_expr(u, f, sc, e->args[0]);
+        e->args[0] = mk_cast(e->args[0], ty_ptr(ty_base(TY_VOID, 0)));
+        e->name = e->lhs->name;
+        e->ty = ty_ptr(ty_base(TY_VOID, 0));
+        return 1;
+    }
+    /* GCC's __builtin___clear_cache(begin, end): the instructions
+     * stored there made the ones fetched (irgen: libgcc's
+     * __clear_cache, or nothing where the caches are coherent) */
+    else if (strcmp(bn, "__clear_cache") == 0) {
+        if (e->nargs != 2)
+            sema_error_at(u, e->line, e->col,
+                    "__builtin___clear_cache takes where the code "
+                    "begins and where it ends");
+        for (int i = 0; i < e->nargs && i < 2; i++) {
+            check_expr(u, f, sc, e->args[i]);
+            struct type *at = e->args[i]->ty;
+            if (at->kind != TY_PTR && at->kind != TY_ARRAY)
+                sema_error_at(u, e->line, e->col,
+                        "__builtin___clear_cache takes two "
+                        "pointers, as in GCC, not %s", ty_name(at));
+            e->args[i] = mk_cast(e->args[i],
+                                 ty_ptr(ty_base(TY_VOID, 0)));
+        }
+        e->name = e->lhs->name;
+        e->ty = ty_base(TY_VOID, 0);
+        return 1;
+    }
+    /* avr-gcc's __builtin_avr_*, on AVR */
+    else if (strncmp(bn, "avr_", 4) == 0 && avr_builtin_known(bn + 4)) {
+        avr_builtin(u, f, sc, e, bn + 4);
+        return 1;
+    }
+    /* clang's __builtin_debugtrap(): a breakpoint the program
+     * carries on from -- not __builtin_trap's, which ends it.
+     * `({ __asm__ volatile ("<the target's breakpoint>"); })`, so
+     * the debugger stops at the call itself, as it does for
+     * clang's; where the instruction leaves the pc on itself
+     * (brk, bkpt, ebreak, break) the debugger steps over it. */
+    else if (strcmp(bn, "debugtrap") == 0) {
+        if (e->nargs)
+            sema_error_at(u, e->line, e->col, "%s takes no arguments",
+                    e->lhs->name);
+        asm_in_place(u, f, sc, e, debugtrap_insn(), NULL, 0, NULL,
+                     NULL, NULL);
+        return 1;
+    }
+    /* GCC's type-generic bit builtins (clzg, ctzg, popcountg,
+     * parityg, ffsg, clrsbg) and C23's stdc_ ones: the operand
+     * at its own width, any unsigned integer type -- signed for
+     * ffsg and clrsbg -- but bool and an enum, as GCC takes */
+    else if (builtin_bitg(bn) != 0) {
+        int k = builtin_bitg(bn);
+        int rot = k == BG_ROTL || k == BG_ROTR;
+        int opt = k == BG_CLZ || k == BG_CTZ;
+        int sgn = k == BG_FFS || k == BG_CLRSB;
+        if (e->nargs < 1 || e->nargs > (rot || opt ? 2 : 1) ||
+            (rot && e->nargs != 2)) {
+            sema_error_at(u, e->line, e->col, "%s takes %s",
+                    e->lhs->name,
+                    rot ? "a value and an amount"
+                  : opt ? "a value, and what to answer for 0"
+                        : "one argument");
+            e->ty = ty_base(TY_INT, 0);
+            return 1;
+        }
+        for (int i = 0; i < e->nargs; i++)
+            check_expr(u, f, sc, e->args[i]);
+        struct type *at = e->args[0]->ty;
+        int bits = ty_is_integer(at) ? bitg_bits(at) : 0;
+        if (!ty_is_integer(at) || at->kind == TY_BOOL || at->is_enum ||
+            (sgn ? at->is_unsigned : !at->is_unsigned))
+            sema_error_at(u, e->line, e->col,
+                    "%s takes %s integer type, as in GCC, not %s",
+                    e->lhs->name, sgn ? "a signed" : "an unsigned",
+                    ty_name(at));
+        else if ((bits > 64 && bits != 128) ||
+                 (rot && (bits & (bits - 1))))
+            sema_error_at(u, e->line, e->col,
+                    "%s is not supported for %s: EmbCC computes it "
+                    "on 8 to 64 bits and on 128%s", e->lhs->name,
+                    ty_name(at),
+                    rot ? ", and rotates a power of two of them" : "");
+        if (e->nargs == 2) {
+            need_integer(u, e->args[1], e->lhs->name);
+            if (opt)
+                e->args[1] = mk_cast(e->args[1], ty_base(TY_INT, 0));
+        }
+        e->name = e->lhs->name;
+        e->ty = k <= BG_CLRSB ? ty_base(TY_INT, 0)
+              : k == BG_ONE ? ty_base(TY_BOOL, 0)
+              : k >= BG_FLOOR ? ty_unqual(at)
+              : ty_base(TY_INT, 1);
+        return 1;
+    }
+    /* clang's __builtin_assume(cond): a promise, not evaluated
+     * (clang's rule); EmbCC takes nothing from it */
+    else if (strcmp(bn, "assume") == 0) {
+        if (e->nargs != 1)
+            sema_error_at(u, e->line, e->col, "%s takes a condition",
+                    e->lhs->name);
+        check_expr(u, f, sc, e->args[0]);
+        struct expr *z = xcalloc(1, sizeof *z);
+        z->kind = EXPR_NUM;
+        z->line = e->line;
+        z->ty = ty_base(TY_INT, 0);
+        e->kind = EXPR_CAST;
+        e->cast_ty = ty_base(TY_VOID, 0);
+        e->rhs = z;
+        e->nargs = 0;
+        e->ty = e->cast_ty;
+        return 1;
+    }
+    return 0;
+}
+
 static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                        struct expr *e)
 {
@@ -5187,294 +5490,8 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                 e->ty = ty_base(TY_VOID, 0);
                 break;
             }
-            /* clang's bitreverseN(x), rotateleftN(x, n), rotaterightN(x,
-             * n) for N 8, 16, 32 and 64: an unsigned value of exactly N
-             * bits; lowered in irgen (gen_bitx) */
-            else if (builtin_bitx(bn, NULL) != 0) {
-                int bits, k = builtin_bitx(bn, &bits);
-                if (e->nargs != (k == 1 ? 1 : 2))
-                    sema_error_at(u, e->line, e->col, "%s takes %s",
-                            e->lhs->name,
-                            k == 1 ? "one argument" : "a value and an amount");
-                for (int i = 0; i < e->nargs; i++) {
-                    check_expr(u, f, sc, e->args[i]);
-                    need_integer(u, e->args[i], e->lhs->name);
-                }
-                e->name = e->lhs->name;
-                e->ty = ty_uint_bits(bits);
+            else if (check_builtin_more(u, f, sc, e, bn))
                 break;
-            }
-            /* GCC's __builtin_FUNCTION(), __builtin_FILE() and
-             * __builtin_LINE(): where the call is (C has no default
-             * arguments, which is where they name the caller's place) */
-            else if (strcmp(bn, "FUNCTION") == 0 || strcmp(bn, "FILE") == 0 ||
-                     strcmp(bn, "LINE") == 0) {
-                if (e->nargs)
-                    sema_error_at(u, e->line, e->col, "%s takes no arguments",
-                            e->lhs->name);
-                if (bn[0] == 'L') {
-                    e->kind = EXPR_NUM;
-                    e->num = e->line;
-                    e->ty = ty_base(TY_INT, 0);
-                    break;
-                }
-                /* (outside a function -- a file-scope initializer, which
-                 * sema checks as "<global initializer>" -- it is "", as
-                 * GCC's and clang's are) */
-                const char *nm = bn[1] == 'U'
-                               ? (f->name[0] == '<' ? "" : f->name)
-                               : f->file ? f->file : diag_file(u);
-                e->kind = EXPR_STR;
-                e->name = nm;
-                e->num = (long)strlen(nm) + 1;
-                e->str_width = 1;
-                e->str_prefix = 0;
-                e->nargs = 0;
-                check_expr(u, f, sc, e);  /* the array/pointer type */
-                break;
-            }
-            /* GCC's __builtin_complex(re, im): the complex of their type
-             * from its two parts -- what CMPLX is, which a multiply by I
-             * cannot be when im is an infinity or a NaN. In a function,
-             * built in a fresh slot (cx_make); in a static initializer the
-             * call stays, typed, for cx_fold to fold, as C11 asks of CMPLX
-             * there */
-            else if (strcmp(bn, "complex") == 0) {
-                if (e->nargs != 2) {
-                    sema_error_at(u, e->line, e->col,
-                            "__builtin_complex takes a real and an "
-                            "imaginary part");
-                    e->ty = ty_base(TY_INT, 0);
-                    break;
-                }
-                check_expr(u, f, sc, e->args[0]);
-                check_expr(u, f, sc, e->args[1]);
-                struct type *rt = ty_unqual(e->args[0]->ty),
-                            *it = ty_unqual(e->args[1]->ty);
-                if (!ty_is_float(rt) || ty_is_complex(rt) || !ty_is_float(it) ||
-                    ty_is_complex(it) || ty_size(rt) != ty_size(it) ||
-                    rt->kind != it->kind) {
-                    sema_error_at(u, e->line, e->col,
-                            "__builtin_complex takes two parts of one real "
-                            "floating type, as in GCC, not %s and %s",
-                            ty_name(e->args[0]->ty), ty_name(e->args[1]->ty));
-                    e->ty = ty_base(TY_INT, 0);
-                    break;
-                }
-                if (cx_lowering()) {
-                    *e = *cx_make(ty_complex(rt), e->args[0], e->args[1],
-                                  e->line);
-                    break;
-                }
-                e->name = e->lhs->name;
-                e->ty = ty_complex(rt);
-                break;
-            }
-            /* GCC's __builtin_speculation_safe_value(v[, fail]): v, the
-             * value in the code that runs -- a speculation barrier only
-             * matters on a core that speculates past a bounds check,
-             * which none of EmbCC's targets' code is built to fence */
-            else if (strcmp(bn, "speculation_safe_value") == 0) {
-                if (e->nargs < 1 || e->nargs > 2)
-                    sema_error_at(u, e->line, e->col,
-                            "%s takes a value and an optional failure value",
-                            e->lhs->name);
-                for (int i = 0; i < e->nargs; i++)
-                    check_expr(u, f, sc, e->args[i]);
-                if (e->nargs && !ty_is_integer(e->args[0]->ty) &&
-                    e->args[0]->ty->kind != TY_PTR)
-                    sema_error_at(u, e->line, e->col,
-                            "%s takes an integer or a pointer, got %s",
-                            e->lhs->name, ty_name(e->args[0]->ty));
-                *e = *e->args[0];
-                break;
-            }
-            /* __builtin_fpclassify(nan, inf, normal, subnormal, zero, x):
-             * GCC's, which glibc's fpclassify() is. The value goes to a
-             * local once, and the classes are the predicates' own, so
-             * every float width -- a 16-byte long double too -- is theirs:
-             * (t = x, isnan(t) ? nan : isinf(t) ? inf : isnormal(t) ?
-             * normal : t == 0 ? zero : subnormal) */
-            else if (strcmp(bn, "fpclassify") == 0) {
-                static int nfpc;
-                if (e->nargs != 6)
-                    sema_error_at(u, e->line, e->col,
-                            "__builtin_fpclassify takes five class values "
-                            "and a floating-point value");
-                check_expr(u, f, sc, e->args[5]);
-                if (!ty_is_float(e->args[5]->ty))
-                    sema_error_at(u, e->line, e->col,
-                            "__builtin_fpclassify takes a floating-point "
-                            "value last");
-                char *nm = xmalloc(32);
-                snprintf(nm, 32, "<fpclassify %d>", nfpc++);
-                scope_add(sc, nm, ty_unqual(e->args[5]->ty), NULL);
-                int ln = e->line;
-                struct expr *asg = sx(EXPR_ASSIGN, ln);
-                asg->lhs = sx_var(nm, ln);
-                asg->rhs = e->args[5];
-                struct expr *zero = sx(EXPR_BINOP, ln);
-                zero->op = B_EQ;
-                zero->lhs = sx_var(nm, ln);
-                zero->rhs = sx(EXPR_NUM, ln);
-                zero->rhs->ty = ty_base(TY_INT, 0);  /* (as the parser types one) */
-                struct expr *chain =
-                    sx_cond(sx_call1("__builtin_isnan", sx_var(nm, ln), ln),
-                            e->args[0],
-                    sx_cond(sx_call1("__builtin_isinf", sx_var(nm, ln), ln),
-                            e->args[1],
-                    sx_cond(sx_call1("__builtin_isnormal", sx_var(nm, ln), ln),
-                            e->args[2],
-                    sx_cond(zero, e->args[4], e->args[3]))));
-                struct expr *all = sx(EXPR_COMMA, ln);
-                all->lhs = asg;
-                all->rhs = chain;
-                *e = *all;
-                check_expr(u, f, sc, e);
-                break;
-            }
-            /* GCC's __builtin_powi(x, n), powif, powil: libgcc's
-             * __powi*f2 (lib/rt/powi.c), x to an int power */
-            else if (strcmp(bn, "powi") == 0 || strcmp(bn, "powif") == 0 ||
-                     strcmp(bn, "powil") == 0) {
-                struct type *rt = bn[4] == 'f' ? ty_base(TY_FLOAT, 0)
-                                : bn[4] == 'l' ? ty_base(TY_LDOUBLE, 0)
-                                : ty_base(TY_DOUBLE, 0);
-                if (e->nargs != 2)
-                    sema_error_at(u, e->line, e->col,
-                            "%s takes a value and an int power", e->lhs->name);
-                for (int i = 0; i < e->nargs; i++)
-                    check_expr(u, f, sc, e->args[i]);
-                need_integer(u, e->args[1], e->lhs->name);
-                e->args[0] = mk_cast(e->args[0], rt);
-                e->args[1] = mk_cast(e->args[1], ty_base(TY_INT, 0));
-                e->name = e->lhs->name;
-                e->ty = rt;
-                break;
-            }
-            /* GCC's __builtin_extract_return_addr(a) and
-             * __builtin_frob_return_addr(a): the address a return goes
-             * to, from __builtin_return_address's, and back -- the same
-             * on every target here but SPARC's, whose call is followed by
-             * its delay slot and returns 8 past it */
-            else if (strcmp(bn, "extract_return_addr") == 0 ||
-                     strcmp(bn, "frob_return_addr") == 0) {
-                if (e->nargs != 1)
-                    sema_error_at(u, e->line, e->col, "%s takes an address",
-                            e->lhs->name);
-                check_expr(u, f, sc, e->args[0]);
-                e->args[0] = mk_cast(e->args[0], ty_ptr(ty_base(TY_VOID, 0)));
-                e->name = e->lhs->name;
-                e->ty = ty_ptr(ty_base(TY_VOID, 0));
-                break;
-            }
-            /* GCC's __builtin___clear_cache(begin, end): the instructions
-             * stored there made the ones fetched (irgen: libgcc's
-             * __clear_cache, or nothing where the caches are coherent) */
-            else if (strcmp(bn, "__clear_cache") == 0) {
-                if (e->nargs != 2)
-                    sema_error_at(u, e->line, e->col,
-                            "__builtin___clear_cache takes where the code "
-                            "begins and where it ends");
-                for (int i = 0; i < e->nargs && i < 2; i++) {
-                    check_expr(u, f, sc, e->args[i]);
-                    struct type *at = e->args[i]->ty;
-                    if (at->kind != TY_PTR && at->kind != TY_ARRAY)
-                        sema_error_at(u, e->line, e->col,
-                                "__builtin___clear_cache takes two "
-                                "pointers, as in GCC, not %s", ty_name(at));
-                    e->args[i] = mk_cast(e->args[i],
-                                         ty_ptr(ty_base(TY_VOID, 0)));
-                }
-                e->name = e->lhs->name;
-                e->ty = ty_base(TY_VOID, 0);
-                break;
-            }
-            /* avr-gcc's __builtin_avr_*, on AVR */
-            else if (strncmp(bn, "avr_", 4) == 0 && avr_builtin_known(bn + 4)) {
-                avr_builtin(u, f, sc, e, bn + 4);
-                break;
-            }
-            /* clang's __builtin_debugtrap(): a breakpoint the program
-             * carries on from -- not __builtin_trap's, which ends it.
-             * `({ __asm__ volatile ("<the target's breakpoint>"); })`, so
-             * the debugger stops at the call itself, as it does for
-             * clang's; where the instruction leaves the pc on itself
-             * (brk, bkpt, ebreak, break) the debugger steps over it. */
-            else if (strcmp(bn, "debugtrap") == 0) {
-                if (e->nargs)
-                    sema_error_at(u, e->line, e->col, "%s takes no arguments",
-                            e->lhs->name);
-                asm_in_place(u, f, sc, e, debugtrap_insn(), NULL, 0, NULL,
-                             NULL, NULL);
-                break;
-            }
-            /* GCC's type-generic bit builtins (clzg, ctzg, popcountg,
-             * parityg, ffsg, clrsbg) and C23's stdc_ ones: the operand
-             * at its own width, any unsigned integer type -- signed for
-             * ffsg and clrsbg -- but bool and an enum, as GCC takes */
-            else if (builtin_bitg(bn) != 0) {
-                int k = builtin_bitg(bn);
-                int rot = k == BG_ROTL || k == BG_ROTR;
-                int opt = k == BG_CLZ || k == BG_CTZ;
-                int sgn = k == BG_FFS || k == BG_CLRSB;
-                if (e->nargs < 1 || e->nargs > (rot || opt ? 2 : 1) ||
-                    (rot && e->nargs != 2)) {
-                    sema_error_at(u, e->line, e->col, "%s takes %s",
-                            e->lhs->name,
-                            rot ? "a value and an amount"
-                          : opt ? "a value, and what to answer for 0"
-                                : "one argument");
-                    e->ty = ty_base(TY_INT, 0);
-                    break;
-                }
-                for (int i = 0; i < e->nargs; i++)
-                    check_expr(u, f, sc, e->args[i]);
-                struct type *at = e->args[0]->ty;
-                int bits = ty_is_integer(at) ? bitg_bits(at) : 0;
-                if (!ty_is_integer(at) || at->kind == TY_BOOL || at->is_enum ||
-                    (sgn ? at->is_unsigned : !at->is_unsigned))
-                    sema_error_at(u, e->line, e->col,
-                            "%s takes %s integer type, as in GCC, not %s",
-                            e->lhs->name, sgn ? "a signed" : "an unsigned",
-                            ty_name(at));
-                else if ((bits > 64 && bits != 128) ||
-                         (rot && (bits & (bits - 1))))
-                    sema_error_at(u, e->line, e->col,
-                            "%s is not supported for %s: EmbCC computes it "
-                            "on 8 to 64 bits and on 128%s", e->lhs->name,
-                            ty_name(at),
-                            rot ? ", and rotates a power of two of them" : "");
-                if (e->nargs == 2) {
-                    need_integer(u, e->args[1], e->lhs->name);
-                    if (opt)
-                        e->args[1] = mk_cast(e->args[1], ty_base(TY_INT, 0));
-                }
-                e->name = e->lhs->name;
-                e->ty = k <= BG_CLRSB ? ty_base(TY_INT, 0)
-                      : k == BG_ONE ? ty_base(TY_BOOL, 0)
-                      : k >= BG_FLOOR ? ty_unqual(at)
-                      : ty_base(TY_INT, 1);
-                break;
-            }
-            /* clang's __builtin_assume(cond): a promise, not evaluated
-             * (clang's rule); EmbCC takes nothing from it */
-            else if (strcmp(bn, "assume") == 0) {
-                if (e->nargs != 1)
-                    sema_error_at(u, e->line, e->col, "%s takes a condition",
-                            e->lhs->name);
-                check_expr(u, f, sc, e->args[0]);
-                struct expr *z = xcalloc(1, sizeof *z);
-                z->kind = EXPR_NUM;
-                z->line = e->line;
-                z->ty = ty_base(TY_INT, 0);
-                e->kind = EXPR_CAST;
-                e->cast_ty = ty_base(TY_VOID, 0);
-                e->rhs = z;
-                e->nargs = 0;
-                e->ty = e->cast_ty;
-                break;
-            }
             /* The bit family: ctz clz popcount ffs parity clrsb, each with l
              * and ll forms taking long / long long. Lowered in irgen from
              * ordinary integer ops, on both targets alike. */

@@ -4124,6 +4124,110 @@ static long sparc_ret_offset(const struct ir_func *fn)
     return fn->ret_abi.size == 16 ? 12 : 8;
 }
 
+/* The builtins gen_expr_inner hands here -- powi, __clear_cache,
+ * extract/frob_return_addr, the type-generic and stdc_ bit ones,
+ * __builtin_setjmp and __builtin_longjmp -- their value, -1 for none, or
+ * NOT_BUILTIN when e is none of them. Out of gen_expr_inner because EmbCC
+ * is built without optimization, where every local here was a part of
+ * gen_expr_inner's frame at each level of an expression's nesting
+ * (deep-nesting.sh). */
+#define NOT_BUILTIN (-2)
+static int gen_builtin_more(struct ir_func *fn, struct expr *e)
+{
+    /* __builtin_powi/powif/powil: libgcc's __powi*f2, by the value's
+     * width (lib/rt/powi.c) */
+    if (e->name && (strcmp(e->name, "__builtin_powi") == 0 ||
+                    strcmp(e->name, "__builtin_powif") == 0 ||
+                    strcmp(e->name, "__builtin_powil") == 0)) {
+        int sz = ty_size(e->ty);
+        const char *name = sz == 4 ? "__powisf2" : sz == 8 ? "__powidf2"
+                         : target_get() == TARGET_X86_64 ? "__powixf2"
+                         : "__powitf2";
+        struct type *tys[2] = { e->ty, ty_base(TY_INT, 0) };
+        int vals[2];
+        vals[0] = gen_expr(fn, e->args[0]);
+        vals[1] = gen_expr(fn, e->args[1]);
+        struct func *cf = libatomic_fn(name, e->ty, 2, tys);
+        cf->inf_no_read = cf->inf_no_write = cf->is_nothrow = 1;
+        return libatomic_call(fn, name, e->ty, 2, vals, tys, g_cur_line);
+    }
+    /* __builtin___clear_cache(begin, end): libgcc's __clear_cache
+     * (lib/rt/clear_cache.c), a call that reads and writes memory as
+     * far as anything here knows, so no store moves past it -- and
+     * nothing at all where instruction fetch sees the data caches
+     * or there are none to clean (x86-64, AVR, RX, ColdFire), as GCC
+     * emits on x86 */
+    if (e->name && strcmp(e->name, "__builtin___clear_cache") == 0) {
+        struct type *vp = ty_ptr(ty_base(TY_VOID, 0));
+        struct type *tys[2] = { vp, vp };
+        int vals[2];
+        vals[0] = gen_expr(fn, e->args[0]);
+        vals[1] = gen_expr(fn, e->args[1]);
+        switch (target_get()) {
+        case TARGET_X86_64: case TARGET_AVR: case TARGET_RX:
+        case TARGET_COLDFIRE:
+            return -1;
+        default:
+            break;
+        }
+        libatomic_fn("__clear_cache", ty_base(TY_VOID, 0), 2, tys);
+        libatomic_call(fn, "__clear_cache", ty_base(TY_VOID, 0), 2, vals,
+                       tys, g_cur_line);
+        return -1;
+    }
+    /* __builtin_extract_return_addr / frob_return_addr: the address
+     * itself, but SPARC's, whose return is past its call (GCC's
+     * RETURN_ADDR_OFFSET) */
+    if (e->name && (strcmp(e->name, "__builtin_extract_return_addr") == 0 ||
+                    strcmp(e->name, "__builtin_frob_return_addr") == 0)) {
+        int a = gen_expr(fn, e->args[0]);
+        if (target_get() != TARGET_SPARC32)
+            return a;
+        int extract = e->name[10] == 'e';
+        return emit_bin(fn, extract ? IR_ADD : IR_SUB, a,
+                        emit_const(fn, sparc_ret_offset(fn), AW), AW, 1);
+    }
+    /* GCC's type-generic bit builtins and C23's stdc_ ones */
+    if (e->name && strncmp(e->name, "__builtin_", 10) == 0 &&
+        builtin_bitg(e->name + 10) != 0)
+        return gen_bitg(fn, e, builtin_bitg(e->name + 10));
+    /* GCC's __builtin_setjmp(buf) / __builtin_longjmp(buf, 1), onto
+     * an ordinary setjmp: the jmp_buf sema made in this frame, its
+     * address in buf[0], and the C library's _setjmp/_longjmp where
+     * the system's is linked (glibc, Darwin), else lib/rt's own pair
+     * (lib/rt/builtin-setjmp.c) */
+    if (e->name && (strcmp(e->name, "__builtin_setjmp") == 0 ||
+                    strcmp(e->name, "__builtin_longjmp") == 0)) {
+        int lj = e->name[10] == 'l';
+        int sys = target_system_libc() || target_os_get() == TGT_OS_DARWIN;
+        const char *name = lj ? (sys ? "_longjmp" : "__embcc_longjmp")
+                              : (sys ? "_setjmp" : "__embcc_setjmp");
+        struct type *vp = ty_ptr(ty_base(TY_VOID, 0));
+        struct type *ity = ty_base(TY_INT, 0);
+        int buf = gen_expr(fn, e->args[0]);
+        if (lj) {
+            int vals[2], jb = emit_load(fn, buf, vp);
+            struct type *tys[2] = { vp, ity };
+            vals[0] = jb;
+            vals[1] = emit_const(fn, 1, 4);
+            struct func *cf = libatomic_fn(name, ty_base(TY_VOID, 0), 2,
+                                           tys);
+            cf->is_noreturn = 1;
+            libatomic_call(fn, name, ty_base(TY_VOID, 0), 2, vals, tys,
+                           g_cur_line);
+            emit(fn)->op = IR_UD2;
+            return -1;
+        }
+        int jb = local_addr(fn, (int)e->num);
+        emit_store(fn, buf, jb, vp);
+        int vals[1] = { jb };
+        struct type *tys[1] = { vp };
+        libatomic_fn(name, ity, 1, tys);
+        return libatomic_call(fn, name, ity, 1, vals, tys, g_cur_line);
+    }
+    return NOT_BUILTIN;
+}
+
 static int gen_expr_inner(struct ir_func *fn, struct expr *e)
 {
     switch (e->kind) {
@@ -4893,96 +4997,10 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             emit(fn)->op = IR_UD2;
             return -1;
         }
-        /* __builtin_powi/powif/powil: libgcc's __powi*f2, by the value's
-         * width (lib/rt/powi.c) */
-        if (e->name && (strcmp(e->name, "__builtin_powi") == 0 ||
-                        strcmp(e->name, "__builtin_powif") == 0 ||
-                        strcmp(e->name, "__builtin_powil") == 0)) {
-            int sz = ty_size(e->ty);
-            const char *name = sz == 4 ? "__powisf2" : sz == 8 ? "__powidf2"
-                             : target_get() == TARGET_X86_64 ? "__powixf2"
-                             : "__powitf2";
-            struct type *tys[2] = { e->ty, ty_base(TY_INT, 0) };
-            int vals[2];
-            vals[0] = gen_expr(fn, e->args[0]);
-            vals[1] = gen_expr(fn, e->args[1]);
-            struct func *cf = libatomic_fn(name, e->ty, 2, tys);
-            cf->inf_no_read = cf->inf_no_write = cf->is_nothrow = 1;
-            return libatomic_call(fn, name, e->ty, 2, vals, tys, g_cur_line);
-        }
-        /* __builtin___clear_cache(begin, end): libgcc's __clear_cache
-         * (lib/rt/clear_cache.c), a call that reads and writes memory as
-         * far as anything here knows, so no store moves past it -- and
-         * nothing at all where instruction fetch sees the data caches
-         * or there are none to clean (x86-64, AVR, RX, ColdFire), as GCC
-         * emits on x86 */
-        if (e->name && strcmp(e->name, "__builtin___clear_cache") == 0) {
-            struct type *vp = ty_ptr(ty_base(TY_VOID, 0));
-            struct type *tys[2] = { vp, vp };
-            int vals[2];
-            vals[0] = gen_expr(fn, e->args[0]);
-            vals[1] = gen_expr(fn, e->args[1]);
-            switch (target_get()) {
-            case TARGET_X86_64: case TARGET_AVR: case TARGET_RX:
-            case TARGET_COLDFIRE:
-                return -1;
-            default:
-                break;
-            }
-            libatomic_fn("__clear_cache", ty_base(TY_VOID, 0), 2, tys);
-            libatomic_call(fn, "__clear_cache", ty_base(TY_VOID, 0), 2, vals,
-                           tys, g_cur_line);
-            return -1;
-        }
-        /* __builtin_extract_return_addr / frob_return_addr: the address
-         * itself, but SPARC's, whose return is past its call (GCC's
-         * RETURN_ADDR_OFFSET) */
-        if (e->name && (strcmp(e->name, "__builtin_extract_return_addr") == 0 ||
-                        strcmp(e->name, "__builtin_frob_return_addr") == 0)) {
-            int a = gen_expr(fn, e->args[0]);
-            if (target_get() != TARGET_SPARC32)
-                return a;
-            int extract = e->name[10] == 'e';
-            return emit_bin(fn, extract ? IR_ADD : IR_SUB, a,
-                            emit_const(fn, sparc_ret_offset(fn), AW), AW, 1);
-        }
-        /* GCC's type-generic bit builtins and C23's stdc_ ones */
-        if (e->name && strncmp(e->name, "__builtin_", 10) == 0 &&
-            builtin_bitg(e->name + 10) != 0)
-            return gen_bitg(fn, e, builtin_bitg(e->name + 10));
-        /* GCC's __builtin_setjmp(buf) / __builtin_longjmp(buf, 1), onto
-         * an ordinary setjmp: the jmp_buf sema made in this frame, its
-         * address in buf[0], and the C library's _setjmp/_longjmp where
-         * the system's is linked (glibc, Darwin), else lib/rt's own pair
-         * (lib/rt/builtin-setjmp.c) */
-        if (e->name && (strcmp(e->name, "__builtin_setjmp") == 0 ||
-                        strcmp(e->name, "__builtin_longjmp") == 0)) {
-            int lj = e->name[10] == 'l';
-            int sys = target_system_libc() || target_os_get() == TGT_OS_DARWIN;
-            const char *name = lj ? (sys ? "_longjmp" : "__embcc_longjmp")
-                                  : (sys ? "_setjmp" : "__embcc_setjmp");
-            struct type *vp = ty_ptr(ty_base(TY_VOID, 0));
-            struct type *ity = ty_base(TY_INT, 0);
-            int buf = gen_expr(fn, e->args[0]);
-            if (lj) {
-                int vals[2], jb = emit_load(fn, buf, vp);
-                struct type *tys[2] = { vp, ity };
-                vals[0] = jb;
-                vals[1] = emit_const(fn, 1, 4);
-                struct func *cf = libatomic_fn(name, ty_base(TY_VOID, 0), 2,
-                                               tys);
-                cf->is_noreturn = 1;
-                libatomic_call(fn, name, ty_base(TY_VOID, 0), 2, vals, tys,
-                               g_cur_line);
-                emit(fn)->op = IR_UD2;
-                return -1;
-            }
-            int jb = local_addr(fn, (int)e->num);
-            emit_store(fn, buf, jb, vp);
-            int vals[1] = { jb };
-            struct type *tys[1] = { vp };
-            libatomic_fn(name, ity, 1, tys);
-            return libatomic_call(fn, name, ity, 1, vals, tys, g_cur_line);
+        {
+            int r = gen_builtin_more(fn, e);
+            if (r != NOT_BUILTIN)
+                return r;
         }
         if (e->name) {
             int aop;
