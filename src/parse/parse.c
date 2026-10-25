@@ -2917,6 +2917,18 @@ static struct type *ce_type(const struct expr *e)
         }
         if (lt && rt && ty_is_arith(lt) && ty_is_arith(rt))
             return ty_arith_common(lt, rt);
+        /* A complex operand: the complex of the parts' common real type,
+         * as sema types it (cx_common). <tgmath.h>'s pow(z, 2.0f) picks
+         * cpowf by the type of such a sum, in a _Generic a static
+         * assertion folds here. */
+        if (lt && rt && (ty_is_complex(lt) || ty_is_complex(rt)) &&
+            (ty_is_complex(lt) || ty_is_arith(lt)) &&
+            (ty_is_complex(rt) || ty_is_arith(rt)) &&
+            (e->op == B_ADD || e->op == B_SUB || e->op == B_MUL ||
+             e->op == B_DIV))
+            return ty_complex(ty_arith_common(
+                ty_is_complex(lt) ? lt->celem : lt,
+                ty_is_complex(rt) ? rt->celem : rt));
         return NULL;
     }
     case EXPR_CALL: {
