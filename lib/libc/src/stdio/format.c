@@ -26,53 +26,47 @@
  */
 #include "file.h"
 
-#include <errno.h>
-#include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
-#include <wchar.h>
 
-#include "../internal/utf8.h"
+struct out {
+    void (*sink)(void *, const char *, size_t);
+    void *ctx;
+    int n;                       /* characters that WOULD have been written */
+};
 
-#include "format.h"
-
-/* A wide printf's ASCII is the same characters, one wide one per byte. */
-void __fmt_emit(struct out *o, const char *s, size_t n)
+static void emit(struct out *o, const char *s, size_t n)
 {
-    if (o->wsink) {
-        wchar_t w[32];
-        for (size_t done = 0; done < n; ) {
-            size_t k = n - done < 32 ? n - done : 32;
-            for (size_t i = 0; i < k; i++)
-                w[i] = (unsigned char)s[done + i];
-            o->wsink(o->ctx, w, k);
-            done += k;
-        }
-    } else {
-        o->sink(o->ctx, s, n);
-    }
+    o->sink(o->ctx, s, n);
     o->n += (int)n;
 }
 
-void __fmt_pad(struct out *o, char c, int n)
+static void pad(struct out *o, char c, int n)
 {
     char b[32];
     if (n <= 0) return;
     memset(b, c, sizeof b);
     while (n > 0) {
         int k = n < (int)sizeof b ? n : (int)sizeof b;
-        __fmt_emit(o, b, (size_t)k);
+        emit(o, b, (size_t)k);
         n -= k;
     }
 }
+
+/* Flags, in the order §7.21.6.1 lists them. */
+#define F_MINUS 0x01
+#define F_PLUS  0x02
+#define F_SPACE 0x04
+#define F_HASH  0x08
+#define F_ZERO  0x10
 
 static const char *DIGL = "0123456789abcdef";
 static const char *DIGU = "0123456789ABCDEF";
 
 /* One integer, already made unsigned and with its sign decided. */
-void __fmt_int(struct out *o, unsigned long long v, int base, int upper,
-               int flags, int width, int prec, const char *sign,
-               const char *prefix)
+static void put_int(struct out *o, unsigned long long v, int base, int upper,
+                    int flags, int width, int prec, const char *sign,
+                    const char *prefix)
 {
     char d[32];
     int nd = 0;
@@ -89,13 +83,13 @@ void __fmt_int(struct out *o, unsigned long long v, int base, int upper,
                ? width - body : 0;
     int spad = width - body - (zpad > 0 ? zpad : 0);
 
-    if (!(flags & F_MINUS)) __fmt_pad(o, ' ', spad);
-    if (*sign)   __fmt_emit(o, sign, strlen(sign));
-    if (*prefix) __fmt_emit(o, prefix, strlen(prefix));
-    __fmt_pad(o, '0', zpad);
-    __fmt_pad(o, '0', zeros);
-    while (nd) { char c = d[--nd]; __fmt_emit(o, &c, 1); }
-    if (flags & F_MINUS) __fmt_pad(o, ' ', spad);
+    if (!(flags & F_MINUS)) pad(o, ' ', spad);
+    if (*sign)   emit(o, sign, strlen(sign));
+    if (*prefix) emit(o, prefix, strlen(prefix));
+    pad(o, '0', zpad);
+    pad(o, '0', zeros);
+    while (nd) { char c = d[--nd]; emit(o, &c, 1); }
+    if (flags & F_MINUS) pad(o, ' ', spad);
 }
 
 /* ---- a decimal big integer, for exact floating-point conversion ---------
@@ -448,10 +442,10 @@ static void emit_dg(struct out *o, const char *dg, int ndg, int i, int n)
     while (n-- > 0) {
         buf[k++] = (i >= 0 && i < ndg) ? dg[i] : '0';
         i++;
-        if (k == (int)sizeof buf) { __fmt_emit(o, buf, (size_t)k); k = 0; }
+        if (k == (int)sizeof buf) { emit(o, buf, (size_t)k); k = 0; }
     }
     if (k)
-        __fmt_emit(o, buf, (size_t)k);
+        emit(o, buf, (size_t)k);
 }
 
 /* The exponent field. C wants at least two digits for %e and at least
@@ -550,19 +544,19 @@ static void put_hexfp(struct out *o, struct fpval f, char conv, int flags,
     int zpad = (flags & F_ZERO) && !(flags & F_MINUS) ? width - body : 0;
     int spad = width - body - (zpad > 0 ? zpad : 0);
 
-    if (!(flags & F_MINUS)) __fmt_pad(o, ' ', spad);
-    if (sign[0]) __fmt_emit(o, sign, 1);
-    __fmt_emit(o, up ? "0X" : "0x", 2);
-    __fmt_pad(o, '0', zpad);               /* zeros go after the 0x, not before */
+    if (!(flags & F_MINUS)) pad(o, ' ', spad);
+    if (sign[0]) emit(o, sign, 1);
+    emit(o, up ? "0X" : "0x", 2);
+    pad(o, '0', zpad);               /* zeros go after the 0x, not before */
     char c = hx[d[0]];
-    __fmt_emit(o, &c, 1);
-    if (dot) __fmt_emit(o, ".", 1);
+    emit(o, &c, 1);
+    if (dot) emit(o, ".", 1);
     for (int j = 1; j <= p; j++) {
         c = j <= nfrac ? hx[d[j]] : '0';
-        __fmt_emit(o, &c, 1);
+        emit(o, &c, 1);
     }
-    __fmt_emit(o, eb, (size_t)nex);
-    if (flags & F_MINUS) __fmt_pad(o, ' ', spad);
+    emit(o, eb, (size_t)nex);
+    if (flags & F_MINUS) pad(o, ' ', spad);
 }
 
 /* %f / %e / %g / %a, over the caller's big-integer buffers. */
@@ -587,10 +581,10 @@ static void put_fp(struct out *o, struct fpval f, char conv, int flags,
         const char *w = f.cls == FP_NAN ? (up ? "NAN" : "nan")
                                         : (up ? "INF" : "inf");
         int body = 3 + (sign[0] ? 1 : 0);
-        if (!(flags & F_MINUS)) __fmt_pad(o, ' ', width - body);
-        if (sign[0]) __fmt_emit(o, sign, 1);
-        __fmt_emit(o, w, 3);
-        if (flags & F_MINUS) __fmt_pad(o, ' ', width - body);
+        if (!(flags & F_MINUS)) pad(o, ' ', width - body);
+        if (sign[0]) emit(o, sign, 1);
+        emit(o, w, 3);
+        if (flags & F_MINUS) pad(o, ' ', width - body);
         return;
     }
 
@@ -706,27 +700,27 @@ static void put_fp(struct out *o, struct fpval f, char conv, int flags,
     int zpad = (flags & F_ZERO) && !(flags & F_MINUS) ? width - body : 0;
     int spad = width - body - (zpad > 0 ? zpad : 0);
 
-    if (!(flags & F_MINUS)) __fmt_pad(o, ' ', spad);
-    if (sign[0]) __fmt_emit(o, sign, 1);
-    __fmt_pad(o, '0', zpad);
+    if (!(flags & F_MINUS)) pad(o, ' ', spad);
+    if (sign[0]) emit(o, sign, 1);
+    pad(o, '0', zpad);
     if (expo) {
         emit_dg(o, dg, ndg, 0, 1);
-        if (dot) __fmt_emit(o, ".", 1);
+        if (dot) emit(o, ".", 1);
         emit_dg(o, dg, ndg, 1, prec);
-        __fmt_emit(o, eb, (size_t)nex);
+        emit(o, eb, (size_t)nex);
     } else {
         if (ip_len <= 0)
-            __fmt_emit(o, "0", 1);
+            emit(o, "0", 1);
         else
             emit_dg(o, dg, ndg, 0, ip_len);
-        if (dot) __fmt_emit(o, ".", 1);
+        if (dot) emit(o, ".", 1);
         emit_dg(o, dg, ndg, ip_len, prec);
     }
-    if (flags & F_MINUS) __fmt_pad(o, ' ', spad);
+    if (flags & F_MINUS) pad(o, ' ', spad);
 }
 
-void __fmt_double(struct out *o, double v, char conv, int flags,
-                  int width, int prec)
+static void put_double(struct out *o, double v, char conv, int flags,
+                       int width, int prec)
 {
     unsigned int limbs[DEC_LIMBS];
     char dg[DEC_DIGITS];
@@ -737,8 +731,8 @@ void __fmt_double(struct out *o, double v, char conv, int flags,
 /* A separate entry point rather than a flag, because the difference that
  * matters is the size of the buffers above -- putting the long double's
  * on every printf of a double would be ~17KB of stack for nothing. */
-void __fmt_ldouble(struct out *o, long double v, char conv, int flags,
-                   int width, int prec)
+static void put_ldouble(struct out *o, long double v, char conv, int flags,
+                        int width, int prec)
 {
     unsigned int limbs[LD_LIMBS];
     char dg[LD_DIGITS];
@@ -746,86 +740,158 @@ void __fmt_ldouble(struct out *o, long double v, char conv, int flags,
            limbs, LD_LIMBS, dg, LD_DIGITS);
 }
 
-/* ---- %c and %s in a byte printf ----
- *
- * %lc and %ls take wide characters and write their UTF-8 -- a precision on
- * %ls counting bytes and never cutting a character in two. One that has
- * no UTF-8, a lone surrogate, is an encoding error: nothing more is
- * written, and the call returns -1 with errno EILSEQ (C11 7.21.6.1p14).
- * The wide printfs' own %c and %s are wide.c's. */
-
-/* The bytes of the wide string s that fit in `prec` (all of them when it
- * is negative), written when `write` is set; -1 on an encoding error. */
-static long mb_of_wide(struct out *o, const wchar_t *s, int prec, int write)
-{
-    char b[4];
-    long n = 0;
-    for (; *s; s++) {
-        int r = __utf8_put((uint_least32_t)*s, b);
-        if (r < 0)
-            return -1;
-        if (prec >= 0 && n + r > prec)
-            break;
-        if (write)
-            __fmt_emit(o, b, (size_t)r);
-        n += r;
-    }
-    return n;
-}
-
-static void put_char(struct out *o, int is_l, va_list *ap, int flags,
-                     int width)
-{
-    char b[4];
-    int n = 1;
-    if (is_l) {
-        n = __utf8_put((uint_least32_t)(wchar_t)va_arg(*ap, wint_t), b);
-        if (n < 0) { o->bad = 1; return; }
-    } else {
-        b[0] = (char)va_arg(*ap, int);
-    }
-    if (!(flags & F_MINUS)) __fmt_pad(o, ' ', width - n);
-    __fmt_emit(o, b, (size_t)n);
-    if (flags & F_MINUS) __fmt_pad(o, ' ', width - n);
-}
-
-static void put_str(struct out *o, int is_l, va_list *ap, int flags,
-                    int width, int prec)
-{
-    long n;
-    const wchar_t *ws = NULL;
-    const char *s = NULL;
-    if (is_l) {
-        ws = va_arg(*ap, const wchar_t *);
-        if (!ws) ws = L"(null)";
-        n = mb_of_wide(o, ws, prec, 0);
-        if (n < 0) { o->bad = 1; return; }
-    } else {
-        s = va_arg(*ap, const char *);
-        if (!s) s = "(null)";
-        /* A precision on %s is a MAXIMUM, and the string need not be
-         * terminated within it -- so the length is strnlen, not strlen. */
-        n = (long)(prec >= 0 ? strnlen(s, (size_t)prec) : strlen(s));
-    }
-    if (!(flags & F_MINUS)) __fmt_pad(o, ' ', width - (int)n);
-    if (s) __fmt_emit(o, s, (size_t)n); else mb_of_wide(o, ws, prec, 1);
-    if (flags & F_MINUS) __fmt_pad(o, ' ', width - (int)n);
-}
-
-#define FMT_CH char
-#define FMT_RUN format_bytes
-#define FMT_TEXT(o, s, n) __fmt_emit((o), (s), (n))
-#define FMT_CHAR put_char
-#define FMT_STR put_str
-#include "format-run.h"
-
 int __vformat(void (*sink)(void *, const char *, size_t), void *ctx,
               const char *fmt, va_list ap)
 {
-    struct out o = { sink, NULL, ctx, 0, 0 };
-    va_list cp;
-    va_copy(cp, ap);
-    int r = format_bytes(&o, fmt, &cp);
-    va_end(cp);
-    return r;
+    struct out o = { sink, ctx, 0 };
+
+    for (const char *p = fmt; *p; ) {
+        if (*p != '%') {
+            const char *s = p;
+            while (*p && *p != '%') p++;
+            emit(&o, s, (size_t)(p - s));
+            continue;
+        }
+        p++;
+        if (*p == '%') { emit(&o, "%", 1); p++; continue; }
+
+        int flags = 0;
+        for (;; p++) {
+            if (*p == '-')      flags |= F_MINUS;
+            else if (*p == '+') flags |= F_PLUS;
+            else if (*p == ' ') flags |= F_SPACE;
+            else if (*p == '#') flags |= F_HASH;
+            else if (*p == '0') flags |= F_ZERO;
+            else break;
+        }
+        int width = 0;
+        if (*p == '*') {
+            width = va_arg(ap, int);
+            if (width < 0) { flags |= F_MINUS; width = -width; }
+            p++;
+        } else while (*p >= '0' && *p <= '9') width = width * 10 + (*p++ - '0');
+
+        int prec = -1;
+        if (*p == '.') {
+            p++;
+            prec = 0;
+            if (*p == '*') { prec = va_arg(ap, int); p++; }
+            else while (*p >= '0' && *p <= '9') prec = prec * 10 + (*p++ - '0');
+            if (prec < 0) prec = -1;    /* a negative * precision is as if absent */
+        }
+
+        /* Length modifiers. `z`, `t` and `j` matter as much as the rest:
+         * a size_t printed with %u is wrong on LP64 and silently right on
+         * ILP32, which is the worst way for a bug to behave. */
+        enum { L_INT, L_CHAR, L_SHORT, L_LONG, L_LLONG, L_SIZE, L_PTRDIFF,
+               L_MAX, L_LDOUBLE } len = L_INT;
+        for (;;) {
+            if (*p == 'h')      { len = (len == L_SHORT) ? L_CHAR : L_SHORT; p++; }
+            else if (*p == 'l') { len = (len == L_LONG) ? L_LLONG : L_LONG; p++; }
+            else if (*p == 'z') { len = L_SIZE; p++; }
+            else if (*p == 't') { len = L_PTRDIFF; p++; }
+            else if (*p == 'j') { len = L_MAX; p++; }
+            else if (*p == 'L') { len = L_LDOUBLE; p++; }
+            else break;
+        }
+
+        char conv = *p++;
+        switch (conv) {
+        case 'd': case 'i': {
+            long long v;
+            switch (len) {
+            case L_CHAR:    v = (signed char)va_arg(ap, int); break;
+            case L_SHORT:   v = (short)va_arg(ap, int); break;
+            case L_LONG:    v = va_arg(ap, long); break;
+            case L_LLONG:   v = va_arg(ap, long long); break;
+            case L_SIZE:    v = (long long)va_arg(ap, size_t); break;
+            case L_PTRDIFF: v = (long long)va_arg(ap, ptrdiff_t); break;
+            case L_MAX:     v = va_arg(ap, long long); break;
+            default:        v = va_arg(ap, int); break;
+            }
+            const char *sign = v < 0 ? "-" : (flags & F_PLUS) ? "+"
+                             : (flags & F_SPACE) ? " " : "";
+            unsigned long long u = v < 0 ? (unsigned long long)-(v + 1) + 1
+                                         : (unsigned long long)v;
+            put_int(&o, u, 10, 0, flags, width, prec, sign, "");
+            break;
+        }
+        case 'u': case 'o': case 'x': case 'X': case 'b': {
+            unsigned long long v;
+            switch (len) {
+            case L_CHAR:    v = (unsigned char)va_arg(ap, unsigned); break;
+            case L_SHORT:   v = (unsigned short)va_arg(ap, unsigned); break;
+            case L_LONG:    v = va_arg(ap, unsigned long); break;
+            case L_LLONG:   v = va_arg(ap, unsigned long long); break;
+            case L_SIZE:    v = va_arg(ap, size_t); break;
+            case L_PTRDIFF: v = (unsigned long long)va_arg(ap, ptrdiff_t); break;
+            case L_MAX:     v = va_arg(ap, unsigned long long); break;
+            default:        v = va_arg(ap, unsigned); break;
+            }
+            int base = conv == 'o' ? 8 : conv == 'u' ? 10
+                     : conv == 'b' ? 2 : 16;
+            const char *pfx = "";
+            if ((flags & F_HASH) && v) {
+                if (conv == 'x') pfx = "0x";
+                else if (conv == 'X') pfx = "0X";
+                else if (conv == 'o') pfx = "0";
+            }
+            put_int(&o, v, base, conv == 'X', flags, width, prec, "", pfx);
+            break;
+        }
+        case 'f': case 'F': case 'e': case 'E': case 'g': case 'G':
+        case 'a': case 'A':
+            if (len == L_LDOUBLE)
+                put_ldouble(&o, va_arg(ap, long double), conv, flags,
+                            width, prec);
+            else
+                put_double(&o, va_arg(ap, double), conv, flags, width, prec);
+            break;
+        case 'c': {
+            char c = (char)va_arg(ap, int);
+            if (!(flags & F_MINUS)) pad(&o, ' ', width - 1);
+            emit(&o, &c, 1);
+            if (flags & F_MINUS) pad(&o, ' ', width - 1);
+            break;
+        }
+        case 's': {
+            const char *s = va_arg(ap, const char *);
+            if (!s) s = "(null)";
+            /* A precision on %s is a MAXIMUM, and the string need not be
+             * terminated within it -- so the length is strnlen, not strlen. */
+            size_t n = prec >= 0 ? strnlen(s, (size_t)prec) : strlen(s);
+            if (!(flags & F_MINUS)) pad(&o, ' ', width - (int)n);
+            emit(&o, s, n);
+            if (flags & F_MINUS) pad(&o, ' ', width - (int)n);
+            break;
+        }
+        case 'p': {
+            void *v = va_arg(ap, void *);
+            if (!v) {
+                const char *nil = "(nil)";
+                if (!(flags & F_MINUS)) pad(&o, ' ', width - 5);
+                emit(&o, nil, 5);
+                if (flags & F_MINUS) pad(&o, ' ', width - 5);
+            } else {
+                put_int(&o, (unsigned long long)(size_t)v, 16, 0, flags,
+                        width, prec, "", "0x");
+            }
+            break;
+        }
+        case 'n': {
+            int *q = va_arg(ap, int *);
+            if (q) *q = o.n;
+            break;
+        }
+        case 0:
+            return o.n;                /* a trailing '%': stop, do not run off */
+        default:
+            /* An unknown conversion prints itself, which is more use than
+             * silence when a format string has a typo. */
+            emit(&o, "%", 1);
+            emit(&o, &conv, 1);
+            break;
+        }
+    }
+    return o.n;
 }

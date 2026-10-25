@@ -1,6 +1,6 @@
-/* <uchar.h> — C11 §7.28, C23 §7.30.
+/* <uchar.h> — C11 §7.28.
  *
- * UTF-8, UTF-16 and UTF-32 conversions, with the types named so the width is
+ * UTF-16 and UTF-32 conversions, with the types named so the width is
  * in the type rather than in a comment. This is the header that exists
  * because `wchar_t` does not say how wide it is: `char32_t` always
  * holds a code point and `char16_t` always holds a UTF-16 code unit, on
@@ -26,22 +26,6 @@ extern "C" {
 typedef __CHAR16_TYPE__ char16_t;
 typedef __CHAR32_TYPE__ char32_t;
 #endif
-
-/* char8_t is C23's and C++20's -- a keyword there, a typedef here. The
- * functions that take it are here in every mode, spelled with what it
- * is. */
-#if defined(__cplusplus) && defined(__cpp_char8_t)
-#define __UCHAR_C8 char8_t
-#elif !defined(__cplusplus) && __STDC_VERSION__ >= 202311L
-typedef unsigned char char8_t;
-#define __UCHAR_C8 char8_t
-#else
-#define __UCHAR_C8 unsigned char
-#endif
-size_t mbrtoc8(__UCHAR_C8 *__restrict pc8, const char *__restrict s, size_t n,
-               mbstate_t *__restrict ps);
-size_t c8rtomb(char *__restrict s, __UCHAR_C8 c8, mbstate_t *__restrict ps);
-#undef __UCHAR_C8
 
 size_t mbrtoc16(char16_t *__restrict pc16, const char *__restrict s, size_t n,
                 mbstate_t *__restrict ps);

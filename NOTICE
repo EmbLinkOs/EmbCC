@@ -13,19 +13,6 @@ files, each of which permits use, modification and distribution:
       Permission to use, copy, modify, and distribute this software is
       freely granted, provided that this notice is preserved.
 
-  lib/libc/src/math/msun/ (but math_private.h, which is EmbCC's)
-      The complex functions of FreeBSD's libm, msun, each file under its
-      own notice: the BSD 2-clause licence, by
-      Copyright (c) 2012 Stephen Montgomery-Smith (catrig.c, catrigf.c),
-      Copyright (c) 2007, 2008, 2011 David Schultz (s_csqrt*.c,
-      s_cexp*.c, k_exp*.c, s_ctanh*.c, s_cproj*.c),
-      Copyright (c) 2005-2025 Bruce D. Evans and Steven G. Kargl
-      (s_ccosh*.c, s_csinh*.c);
-      and s_cpow.c, s_cpowf.c, Copyright (c) 2008 Stephen L. Moshier,
-      with permission to use, copy, modify and distribute for any
-      purpose provided the copyright notice and permission notice
-      appear in all copies.
-
   tools/embsim/avr.c, tools/embsim/riscv.c (the GDB target descriptions)
       Copyright (C) 2018-2019 Free Software Foundation, Inc.
       Copying and distribution of this file, with or without

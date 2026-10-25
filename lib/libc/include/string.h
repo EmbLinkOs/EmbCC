@@ -18,10 +18,6 @@ void *memmove(void *d, const void *s, size_t n);
 void *memset(void *d, int c, size_t n);
 int   memcmp(const void *a, const void *b, size_t n);
 void *memchr(const void *s, int c, size_t n);
-/* C23: copy up to and including the first c; and a memset that is done
- * even when nothing reads the memory again -- a key being wiped. */
-void *memccpy(void *__restrict d, const void *__restrict s, int c, size_t n);
-void *memset_explicit(void *d, int c, size_t n);
 
 char  *strcpy(char *__restrict d, const char *__restrict s);
 char  *strncpy(char *__restrict d, const char *__restrict s, size_t n);

@@ -42,7 +42,6 @@ command -v "$AR" >/dev/null 2>&1 || [ -x "$AR" ] || AR=ar
 rm -rf "$out/c"
 mkdir -p "$out/c"
 for f in "$here"/lib/libc/src/*/*.c "$here"/lib/libc/src/math/fdlibm/*.c \
-         "$here"/lib/libc/src/math/msun/*.c \
          "$here"/lib/libc/os/baremetal/backend.c; do
     o=$(echo "${f#$here/}" | tr / _ | sed 's/\.c$/.o/')
     # shellcheck disable=SC2086

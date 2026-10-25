@@ -17,8 +17,7 @@
 #   rv32d  -march=rv32imafdc -mabi=ilp32d: doubles in f registers at RV32
 #   rv64d  -march=rv64gc -mabi=lp64d
 #
-# EMBCC_BOARDS="rv32f rv64d" runs just those, and
-# EMBCC_EXEC_ONLY="setjmp-longjmp vla" just those programs.
+# EMBCC_BOARDS="rv32f rv64d" runs just those.
 #
 # The corpus ran on these only by hand, and on ARMv6-M through
 # thumb-v6m-exec; `make test` ran it on x86-64 and AArch64, which share
@@ -86,23 +85,18 @@ variant() {
 
 cat > "$out/drv-m4.c" <<'EOT'
 /* main's result out through semihosting SYS_EXIT_EXTENDED (the
- * harness's boot has run the constructors) -- by _exit, which replaces
- * lib/libc's weak bare-metal one, so a program that leaves by exit,
- * _Exit or quick_exit is heard as well */
+ * harness's boot has run the constructors) */
 int prog_main(void);
 static volatile unsigned blk[2];
-void _exit(int r)
+int main(void)
 {
+    int r = prog_main();
     blk[0] = 0x20026u;              /* ADP_Stopped_ApplicationExit */
     blk[1] = (unsigned)r;
     __asm__ volatile("mov r1, %0\n\tmovs r0, #0x20\n\tbkpt #0xab"
                      : : "r"(blk) : "r0", "r1", "memory");
     for (;;)
         ;
-}
-int main(void)
-{
-    _exit(prog_main());
 }
 EOT
 cat > "$out/drv-a7.c" <<'EOT'
@@ -114,18 +108,15 @@ EOT
 cat > "$out/drv-rv.c" <<'EOT'
 /* main's result out through virt's test device: 0x5555 exits 0, and
  * 0x3333 with a code in the upper half exits with that code (the
- * harness's boot has run the constructors) -- by _exit, as on the M4 */
+ * harness's boot has run the constructors) */
 int prog_main(void);
-void _exit(int r)
+int main(void)
 {
+    int r = prog_main();
     *(volatile unsigned *)0x100000u =
         r ? ((unsigned)r << 16) | 0x3333u : 0x5555u;
     for (;;)
         ;
-}
-int main(void)
-{
-    _exit(prog_main());
 }
 EOT
 
@@ -241,12 +232,6 @@ export SKIP32 SKIPM4 SKIPA7 QA Q32 Q64
 for b in $boards; do
     for opt in -O0 -O1 -O2 -Os; do
         for c in tests/exec/*.c; do
-            if [ -n "${EMBCC_EXEC_ONLY:-}" ]; then
-                case " $EMBCC_EXEC_ONLY " in
-                    *" $(basename "$c" .c) "*) ;;
-                    *) continue ;;
-                esac
-            fi
             echo "$c $opt $b $out"
         done
     done
@@ -267,7 +252,6 @@ grep '^FAIL' "$out/results.txt" | sort | head -40
 grep '^NA .*does not compile' "$out/results.txt" | awk '{print $2, $3}' |
     sort | uniq -c | awk '$1 != 4 { print "FAIL (compiles at some levels only):", $2, $3; bad = 1 }
                           END { exit bad }' || fail=1
-[ -n "${EMBCC_EXEC_ONLY:-}" ] ||
 [ "$(grep -c '^PASS' "$out/results.txt")" -ge 1000 ] || {
     echo "FAIL: fewer than 1000 runs passed -- the harness, not the programs"
     fail=1; }

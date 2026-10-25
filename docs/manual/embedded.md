@@ -1506,9 +1506,7 @@ what it calls:
   width, precision, `hh h l ll z t j`, `d i u o x X c s p n %` and `%S`, a
   string in flash. A floating-point conversion prints `?`, as avr-libc's
   does without `-lprintf_flt`; EmbCC has no `printf_flt`;
-- the `<avr/eeprom.h>` functions;
-- `setjmp` and `longjmp`, with a 24-byte `jmp_buf`: r2-r17, Y, the stack
-  pointer, SREG and the return address.
+- the `<avr/eeprom.h>` functions.
 
 Not there: streams (`printf`, `puts`, `FILE`, `fdevopen`), `malloc`,
 `<stdlib.h>`'s conversions and `<ctype.h>`'s functions. Their

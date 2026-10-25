@@ -115,20 +115,14 @@ typedef __UINTMAX_TYPE__  uintmax_t;
 #define SIZE_MAX     __SIZE_MAX__
 #define SIG_ATOMIC_MAX __SIG_ATOMIC_MAX__
 #define SIG_ATOMIC_MIN (-SIG_ATOMIC_MAX - 1)
-#define WINT_MAX     __WINT_MAX__
-/* <limits.h> and <wchar.h> name wchar_t's range too, as the C library's
- * headers do; whichever is first says it, and the same value. */
-#ifndef WCHAR_MAX
 #define WCHAR_MAX    __WCHAR_MAX__
-#endif
-#ifndef WCHAR_MIN
+#define WINT_MAX     __WINT_MAX__
 #ifdef __WCHAR_UNSIGNED__
 #define WCHAR_MIN    0
 #elif defined(__WCHAR_MIN__)
 #define WCHAR_MIN    __WCHAR_MIN__
 #else
 #define WCHAR_MIN    (-WCHAR_MAX - 1)
-#endif
 #endif
 #ifdef __WINT_UNSIGNED__
 #define WINT_MIN     0
@@ -151,43 +145,5 @@ typedef __UINTMAX_TYPE__  uintmax_t;
 #define UINT64_C(c)  __UINT64_C(c)
 #define INTMAX_C(c)  __INTMAX_C(c)
 #define UINTMAX_C(c) __UINTMAX_C(c)
-
-/* ---- widths (C23 7.22.2) -------------------------------------------------
- * The bits each type has, value and sign together -- what a shift or a
- * bit loop wants, without sizeof * CHAR_BIT and its padding question. A
- * signed type and its unsigned partner are the same width. */
-#define INT8_WIDTH        8
-#define UINT8_WIDTH       8
-#define INT16_WIDTH       16
-#define UINT16_WIDTH      16
-#define INT32_WIDTH       32
-#define UINT32_WIDTH      32
-#define INT64_WIDTH       64
-#define UINT64_WIDTH      64
-#define INT_LEAST8_WIDTH   __INT_LEAST8_WIDTH__
-#define UINT_LEAST8_WIDTH  __INT_LEAST8_WIDTH__
-#define INT_LEAST16_WIDTH  __INT_LEAST16_WIDTH__
-#define UINT_LEAST16_WIDTH __INT_LEAST16_WIDTH__
-#define INT_LEAST32_WIDTH  __INT_LEAST32_WIDTH__
-#define UINT_LEAST32_WIDTH __INT_LEAST32_WIDTH__
-#define INT_LEAST64_WIDTH  __INT_LEAST64_WIDTH__
-#define UINT_LEAST64_WIDTH __INT_LEAST64_WIDTH__
-#define INT_FAST8_WIDTH    __INT_FAST8_WIDTH__
-#define UINT_FAST8_WIDTH   __INT_FAST8_WIDTH__
-#define INT_FAST16_WIDTH   __INT_FAST16_WIDTH__
-#define UINT_FAST16_WIDTH  __INT_FAST16_WIDTH__
-#define INT_FAST32_WIDTH   __INT_FAST32_WIDTH__
-#define UINT_FAST32_WIDTH  __INT_FAST32_WIDTH__
-#define INT_FAST64_WIDTH   __INT_FAST64_WIDTH__
-#define UINT_FAST64_WIDTH  __INT_FAST64_WIDTH__
-#define INTPTR_WIDTH       __INTPTR_WIDTH__
-#define UINTPTR_WIDTH      __INTPTR_WIDTH__
-#define INTMAX_WIDTH       __INTMAX_WIDTH__
-#define UINTMAX_WIDTH      __INTMAX_WIDTH__
-#define PTRDIFF_WIDTH      __PTRDIFF_WIDTH__
-#define SIG_ATOMIC_WIDTH   __SIG_ATOMIC_WIDTH__
-#define SIZE_WIDTH         __SIZE_WIDTH__
-#define WCHAR_WIDTH        __WCHAR_WIDTH__
-#define WINT_WIDTH         __WINT_WIDTH__
 
 #endif /* _STDINT_H */

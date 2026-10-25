@@ -43,7 +43,6 @@ for c in tests/exec/*.c; do
     [ -z "$exp" ] && continue
     name=$(basename "$c" .c)
     pinned_elsewhere "$c" && continue
-    needs_libc "$c" && continue        # t_link links newlib
     o="$out/$name.o"; e="$out/$name"
     "$EMBCC" --target="$TARGET" -c -O1 "$c" -o "$o" || {
         echo "-O1 failed to compile $c"; exit 1; }

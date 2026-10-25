@@ -154,7 +154,6 @@ Directives the runner and the golden tests read from a corpus file:
 |---|---|
 | `// expect-exit: N` | Required. The exit status the program must return. A file without it fails: it cannot assert anything. |
 | `// target: TRIPLE` | Run the program only for this target; elsewhere it is reported as SKIP. Used for programs that contain one machine's inline assembly. |
-| `// needs-libc: REASON` | The program calls what only EmbCC's C library has. `tests/run.sh`, which links the QEMU harnesses' newlib or the host's C library, reports it as SKIP, and so do the gcc-differential tests; `tests/golden/libc.sh` and the boards' exec goldens, which link `lib/libc`, run it. |
 | `// no-gcc-reference: REASON` | The gcc-differential tests (`agrees-with-gcc`, `optimizer`, `regalloc-O2`, `exec-Os`) skip the file and print the reason. Used where the cross gcc cannot build a reference, for example because it would call `libatomic`. |
 
 Exec programs must be valid strict C11: `agrees-with-gcc` compiles each

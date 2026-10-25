@@ -24,12 +24,6 @@ void *calloc(size_t n, size_t size);
 void *realloc(void *p, size_t n);
 void  free(void *p);
 void *aligned_alloc(size_t align, size_t n);
-/* C23: free, told the size (and alignment) the block was asked for -- this
- * allocator keeps both in the block, so they free as free does -- and the
- * alignment an address has, its lowest set bit. */
-void   free_sized(void *p, size_t size);
-void   free_aligned_sized(void *p, size_t align, size_t size);
-size_t memalignment(const void *p);
 
 double             strtod(const char *__restrict s, char **__restrict end);
 float              strtof(const char *__restrict s, char **__restrict end);
@@ -38,15 +32,6 @@ long               strtol(const char *__restrict s, char **__restrict end, int b
 long long          strtoll(const char *__restrict s, char **__restrict end, int base);
 unsigned long      strtoul(const char *__restrict s, char **__restrict end, int base);
 unsigned long long strtoull(const char *__restrict s, char **__restrict end, int base);
-
-/* C23: one floating value as a printf conversion writes it, the format
- * being "%" with an optional precision and one of aAeEfFgG. */
-int strfromd(char *__restrict s, size_t n, const char *__restrict fmt,
-             double fp);
-int strfromf(char *__restrict s, size_t n, const char *__restrict fmt,
-             float fp);
-int strfroml(char *__restrict s, size_t n, const char *__restrict fmt,
-             long double fp);
 
 int       atoi(const char *s);
 long      atol(const char *s);
@@ -65,19 +50,6 @@ int   __cxa_atexit(void (*f)(void *), void *arg, void *dso);
 void  __cxa_finalize(void *dso);
 void  exit(int status);
 void  _Exit(int status);
-/* The exit that runs only what at_quick_exit registered (C11 7.22.4.7):
- * no atexit handlers, no destructors, no flush. */
-int   at_quick_exit(void (*f)(void));
-void  quick_exit(int status);
-/* C23 declares call_once here as well as in <threads.h>. */
-#if __STDC_VERSION__ >= 202311L
-#ifndef __EMBLIBC_ONCE_FLAG
-#define __EMBLIBC_ONCE_FLAG
-typedef struct { int __state; } once_flag;
-#define ONCE_FLAG_INIT { 0 }
-#endif
-void call_once(once_flag *flag, void (*func)(void));
-#endif
 char *getenv(const char *name);
 /* The vector getenv reads; the program's startup code publishes it. */
 extern char **environ;
@@ -89,14 +61,6 @@ void *bsearch(const void *key, const void *base, size_t n, size_t size,
               int (*cmp)(const void *, const void *));
 void  qsort(void *base, size_t n, size_t size,
             int (*cmp)(const void *, const void *));
-
-/* Multibyte characters without a state (7.22.7, 7.22.8): UTF-8, as the
- * restartable forms in <wchar.h> are. */
-int    mblen(const char *s, size_t n);
-int    mbtowc(wchar_t *__restrict pwc, const char *__restrict s, size_t n);
-int    wctomb(char *s, wchar_t wc);
-size_t mbstowcs(wchar_t *__restrict d, const char *__restrict s, size_t n);
-size_t wcstombs(char *__restrict d, const wchar_t *__restrict s, size_t n);
 
 int       abs(int x);
 long      labs(long x);

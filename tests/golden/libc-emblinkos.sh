@@ -91,7 +91,7 @@ echo "the backend defines all eleven primitives of os/backend.h"
 # single #ifdef up there would show up here as an undefined embk_* symbol.
 mkdir -p "$out/lib"
 n=0
-for f in lib/libc/src/*/*.c lib/libc/src/math/fdlibm/*.c lib/libc/src/math/msun/*.c; do
+for f in lib/libc/src/*/*.c lib/libc/src/math/fdlibm/*.c; do
     o="$out/lib/$(echo "$f" | tr / _ | sed 's/\.c$/.o/')"
     "$EMBCC" -c -O2 -Ilib/libc/include -Ilib/libc/src/math \
         -I"$EMBLINKOS/user/lib" "$f" -o "$o" || {

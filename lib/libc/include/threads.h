@@ -71,12 +71,11 @@ typedef struct {
     int __seq;
 } cnd_t;
 
-/* <stdlib.h> declares it too, in C23. */
-#ifndef __EMBLIBC_ONCE_FLAG
-#define __EMBLIBC_ONCE_FLAG
-typedef struct { int __state; } once_flag;
+typedef struct {
+    int __state;
+} once_flag;
+
 #define ONCE_FLAG_INIT { 0 }
-#endif
 
 /* Thread-specific storage needs thread-local storage underneath, which
  * this compiler does not have; tss_create reports failure rather than

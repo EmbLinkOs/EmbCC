@@ -1,14 +1,12 @@
-/* <inttypes.h>'s functions.
+/* <inttypes.h>'s four functions.
  *
- * They are one-liners because intmax_t is long long or long -- the same
- * width -- on every target, so these ARE strtoll/strtoull/wcstoll/
- * wcstoull. Spelling them as calls rather than as aliases keeps that a
- * fact about these targets rather than a promise: on a target where
- * intmax_t is wider, only this file changes.
+ * They are one-liners here because intmax_t is `long` on both targets, so
+ * these ARE strtol/strtoul/labs/ldiv. Spelling them as calls rather than
+ * as aliases keeps that a fact about this target rather than a promise:
+ * on a target where intmax_t is wider, only this file changes.
  */
 #include <inttypes.h>
 #include <stdlib.h>
-#include <wchar.h>
 
 intmax_t imaxabs(intmax_t j) { return j < 0 ? -j : j; }
 
@@ -28,15 +26,4 @@ intmax_t strtoimax(const char *restrict s, char **restrict end, int base)
 uintmax_t strtoumax(const char *restrict s, char **restrict end, int base)
 {
     return (uintmax_t)strtoull(s, end, base);
-}
-
-intmax_t wcstoimax(const wchar_t *restrict s, wchar_t **restrict end, int base)
-{
-    return (intmax_t)wcstoll(s, end, base);
-}
-
-uintmax_t wcstoumax(const wchar_t *restrict s, wchar_t **restrict end,
-                    int base)
-{
-    return (uintmax_t)wcstoull(s, end, base);
 }

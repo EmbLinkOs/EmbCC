@@ -138,10 +138,10 @@ including the `include` directory beside the invoked executable, is in
 
 ### Scope
 
-`lib/libc` is a C11 library written for EmbCC, with C23's additions:
-the portable part is the same source on every target, and each operating
-system is reached through one small backend file (see
-[Backends](#backends)). Its headers are the C11 hosted set:
+`lib/libc` is a C11 library written for EmbCC: the portable part is the
+same source on every target, and each operating system is reached through
+one small backend file (see [Backends](#backends)). Its headers are the
+C11 hosted set:
 
 `<assert.h>` `<complex.h>` `<ctype.h>` `<errno.h>` `<fenv.h>`
 `<inttypes.h>` `<iso646.h>` `<limits.h>` `<locale.h>` `<math.h>`
@@ -150,8 +150,7 @@ system is reached through one small backend file (see
 `<time.h>` `<uchar.h>` `<wchar.h>` `<wctype.h>`
 
 `<stddef.h>`, `<stdarg.h>`, `<stdbool.h>`, `<stdint.h>` and `<float.h>`
-come from the freestanding directory, and so do C23's `<stdbit.h>` and
-`<stdckdint.h>`, which a program with no C library has too. `<limits.h>` defines the library's
+come from the freestanding directory. `<limits.h>` defines the library's
 own limits (`PATH_MAX` 4096, `NAME_MAX` 255, ...) and includes the
 freestanding `<limits.h>` for the type widths.
 
@@ -160,22 +159,19 @@ freestanding `<limits.h>` for the type widths.
 | `<string.h>` | all of C11 §7.24, plus `strdup`, `strndup`, `strnlen`, `stpcpy`, `stpncpy` and `mempcpy` |
 | `<strings.h>` | `bzero`, `bcopy`, `bcmp`, `index`, `rindex`, `strcasecmp`, `strncasecmp`, `ffs`. Each is defined weak, so a program's own `index` or `bcopy` takes its place |
 | `<ctype.h>`, `<wctype.h>` | complete, for the `"C"` locale; the classification functions return 0 or 1 |
-| `<stdlib.h>` | `malloc` family with `aligned_alloc`; `strtol` family, `strtod`/`strtof`/`strtold`, `ato*`; `qsort` (heapsort) and `bsearch`; `rand`/`srand` (`RAND_MAX` is 2147483647); `abs`/`div` families; `atexit`, `exit`, `_Exit`, `abort`, `at_quick_exit`, `quick_exit`; the multibyte conversions without a state (`mblen`, `mbtowc`, `wctomb`, `mbstowcs`, `wcstombs`), in UTF-8; `getenv`; `system` (always reports no command processor) |
-| `<stdio.h>` | `FILE` streams with buffering, files by name, positioning (`fseek`, `ftell`, `fgetpos`, `fsetpos`, `rewind`), `remove`, `rename`, `tmpfile`, `tmpnam`, C11's exclusive `"x"` open mode, `setvbuf`, `ungetc`, `perror`, and the complete `printf` and `scanf` families (`v`, `f`, `s`, `sn` forms) |
-| `<math.h>`, `<tgmath.h>` | every C11 function at all three widths; `<tgmath.h>` chooses the width from every generic argument, as C11 7.25 says (`pow(2.0f, 3.0L)` is `powl`) |
-| `<complex.h>` | complete: every function at all three widths |
+| `<stdlib.h>` | `malloc` family with `aligned_alloc`; `strtol` family, `strtod`/`strtof`/`strtold`, `ato*`; `qsort` (heapsort) and `bsearch`; `rand`/`srand` (`RAND_MAX` is 2147483647); `abs`/`div` families; `atexit`, `exit`, `_Exit`, `abort`; `getenv`; `system` (always reports no command processor) |
+| `<stdio.h>` | `FILE` streams with buffering, files by name, positioning (`fseek`, `ftell`, `fgetpos`, `fsetpos`, `rewind`), `remove`, `rename`, `setvbuf`, `ungetc`, `perror`, and the complete `printf` and `scanf` families (`v`, `f`, `s`, `sn` forms) |
+| `<math.h>`, `<tgmath.h>` | every C11 function at all three widths |
+| `<complex.h>` | complete |
 | `<fenv.h>` | exception flags and rounding modes, on x86-64 (`MXCSR`) and AArch64 (`FPSR`/`FPCR`) |
 | `<time.h>` | `time`, `clock`, `difftime`, `mktime`, `timegm`, `gmtime`, `localtime`, the `_r` forms, `asctime`, `ctime`, `strftime`, `timespec_get` |
-| `<setjmp.h>` | `setjmp`/`longjmp` on every target: x86-64, AArch64, ARM state, Thumb (every Cortex-M, with s16-s31 where there is an FPU), RISC-V (with fs0-fs11 under F or D), MIPS o32 and n64, LoongArch64, PowerPC, SPARC, Xtensa, TriCore, ColdFire, RX, and on AVR in `lib/avr`. `jmp_buf` is 256 bytes everywhere but AVR, where it is 24 |
+| `<setjmp.h>` | `setjmp`/`longjmp` for x86-64 and AArch64 |
 | `<signal.h>` | `signal` and `raise` |
 | `<locale.h>` | `setlocale` and `localeconv`, one locale |
 | `<threads.h>` | threads, mutexes, condition variables, `call_once` |
-| `<wchar.h>`, `<uchar.h>` | wide strings, `wcsto*`, restartable UTF-8 conversions (`mbrtowc`, `wcrtomb`, `mbsrtowcs`, `wcsrtombs`), `btowc`, `wctob`, wide streams (`fgetwc`, `fputwc`, `fgetws`, `fputws`, `ungetwc`, `fwide` and the rest), the wide `printf` and `scanf` families, `wcsftime`, `mbrtoc16`/`c16rtomb`/`mbrtoc32`/`c32rtomb` |
+| `<wchar.h>`, `<uchar.h>` | wide strings, `wcsto*`, restartable UTF-8 conversions (`mbrtowc`, `wcrtomb`, `mbsrtowcs`, `wcsrtombs`), `mbrtoc16`/`c16rtomb`/`mbrtoc32`/`c32rtomb` |
 | `<stdatomic.h>` | the C11 interface over the compiler's atomic builtins; no library code |
-| `<stdbit.h>` (C23) | all fourteen operations at the five unsigned types and type-generic; each named function is also a macro over the compiler's bit builtins, so a call is the instruction, and the functions themselves are in `lib/libc` for a pointer to one |
-| `<stdckdint.h>` (C23) | `ckd_add`, `ckd_sub`, `ckd_mul` over the compiler's overflow builtins; no library code |
-| C23 elsewhere | `memccpy`, `memset_explicit`; `free_sized`, `free_aligned_sized`, `memalignment`, `strfromd`/`strfromf`/`strfroml`, `call_once` in `<stdlib.h>`; `char8_t`, `mbrtoc8`, `c8rtomb`; `timespec_getres`; `roundeven`, `nextup`, `nextdown`, `fmaximum`, `fminimum` and their `_num`, `_mag` and `_mag_num` forms, `exp10`, at all three widths and in `<tgmath.h>`, and `iszero`, `issubnormal`; printf's `%B`, `#` on `%b`, and the `wN` and `wfN` length modifiers, scanf's `%b` and `wN`; the `0b` prefix in `strtol` and `%i`; the `_WIDTH` macros of `<stdint.h>`; a variadic `assert` |
-| `<assert.h>`, `<inttypes.h>`, `<errno.h>` | complete; each `PRI`/`SCN` macro has the length modifier of its type on the target (`PRId64` is `"lld"` where `int64_t` is `long long`); `errno` values are the traditional POSIX numbers |
+| `<assert.h>`, `<inttypes.h>`, `<errno.h>` | complete; `errno` values are the traditional POSIX numbers |
 
 ### Behavior worth knowing
 
@@ -185,37 +181,15 @@ correctly rounded with ties to even (`%.0f` of 2.5 is `2`). `long double`
 is converted at its own width. `%a` is exact and rounds a precision to
 nearest, ties to even; a subnormal is printed normalized with a leading
 `1`. `%b` prints binary. A null `%s` prints `(null)` and a null `%p`
-prints `(nil)`. `%n` stores into the type its length modifier names
-(`%hhn` a `signed char`, `%jn` an `intmax_t`). An unknown conversion
-prints itself. `%lc` and `%ls` take wide characters and write their
-UTF-8, a precision on `%ls` counting bytes and never cutting a character;
-one with no UTF-8, a lone surrogate, makes the call return -1 with
-`errno` `EILSEQ`.
+prints `(nil)`. `%n` always stores an `int`, whatever its length
+modifier. An unknown conversion prints itself. `%lc` and `%ls` are not
+wide: the `l` is ignored, and the argument is read as an `int` or a
+`char *`.
 
 **Formatted input.** `scanf` supports `%[`, `%n`, `%a` and hexadecimal
 floating-point input. It distinguishes an input failure (returns `EOF`)
 from a matching failure (returns the number of items assigned, possibly
-0): `sscanf("x", "%d", &n)` returns 0. The character it reads ahead and
-does not use goes back to the stream: `fscanf(f, "%d", &n)` on `12x`
-leaves the `x` for the next read. `%lc`, `%ls` and `%l[` store the wide
-characters the input's UTF-8 decodes to.
-
-**Wide streams.** `fwprintf`, `fgetwc` and the rest read and write a
-stream's bytes as UTF-8, a character at a time, so a `FILE` costs nothing
-more for being able to be wide. The first byte or wide operation on a
-stream fixes its orientation, as C11 7.21.2 says, and `fwide` reports it.
-`ungetwc` holds one wide character. A byte sequence that is not UTF-8, or
-a wide character with no UTF-8, is an encoding error: `WEOF` or -1, `errno`
-`EILSEQ`, and the stream's error indicator. The wide printfs count width,
-precision and `%n` in wide characters; `swprintf` returns -1 when the
-result does not fit, where `snprintf` returns the length it would have
-had. A byte printf with no `%ls` or `%lc` links none of this.
-
-**C23's `0b`.** `strtol` and its family with base 0 or 2, and scanf's
-`%i` and `%b`, read a `0b` or `0B` prefix in every language mode, as C23
-does; a C17 program that parses `"0b1"` with base 0 gets 1, not 0. A
-prefix with no digit after it is not one: `strtol("0xz", &end, 16)` is 0
-and leaves `end` at the `x`.
+0): `sscanf("x", "%d", &n)` returns 0.
 
 **`strtod`.** A decimal with at most 15 significant digits and a power
 of ten up to 10^22 is converted exactly. Other inputs may be one unit in
@@ -259,31 +233,11 @@ in its own format, so `isinf(LDBL_MAX)` is 0 and a `long double`
 subnormal is `FP_SUBNORMAL`. `nearbyint` and `rint` follow the current
 rounding mode; `remainder` rounds the quotient to nearest, ties to even.
 
-**Complex.** The exponential, logarithm, square root, power, and the
-trigonometric and hyperbolic functions with their inverses are
-FreeBSD's (`src/math/msun/`, by their authors' notices): every special
-value Annex G lists, and accuracy across the plane -- the inverse
-functions are Hull, Fairgrieve and Tang's algorithm, which keeps its
-digits beside the branch points. `clog`'s real part is exact near
-|z| = 1, where `log(cabs(z))` keeps none. The `float` forms compute in
-`float`; the `long double` forms compute in `double` (as above), except
-`creall`, `cimagl`, `conjl` and `cprojl`, which only take a value apart
-or put it back. `CMPLX`, `CMPLXF` and `CMPLXL` are the header's own and
-call nothing in the library.
-
 **Locale.** There is one locale, `"C"`. `setlocale` accepts `"C"`,
 `"POSIX"` and `""` and returns a null pointer for any other name. The
 multibyte encoding is UTF-8: overlong forms, surrogates and values above
-U+10FFFF are rejected. `wchar_t` is 32 bits on every target but Xtensa,
-where it is 16, as GCC has it; there a character past U+FFFF has no wide
-form, and its UTF-8 is rejected too rather than cut down to fit.
-
-**Temporary files.** `tmpfile` creates its file under `/tmp`, named with
-twelve letters from the backend's entropy (or the clock, where there is
-none), opens it exclusively and for the owner only, and removes the name
-at once: the file lasts as long as the stream. `tmpnam`'s names are under
-`/tmp` too, each one no file had when it was made. A target with no
-filesystem has no temporary files: `tmpfile` returns a null pointer.
+U+10FFFF are rejected. `wchar_t` is 32 bits on the targets this library is
+built for.
 
 **Time.** There is no time-zone database: `localtime` is `gmtime`,
 `tm_isdst` is 0, and `strftime`'s `%z` is `+0000`. `time` and `clock`
@@ -323,6 +277,10 @@ forms of the time functions.
 
 | Missing | Notes |
 |---|---|
+| `tmpfile`, `tmpnam` | |
+| `quick_exit`, `at_quick_exit` | |
+| `mblen`, `mbtowc`, `wctomb`, `mbstowcs`, `wcstombs`, `btowc`, `wctob` | use the restartable `mbr*`/`wcr*` forms |
+| wide-character I/O: `fwide`, `fwprintf`, `wprintf`, `swprintf`, `fgetws`, ... | |
 | `setenv`, `unsetenv` | declared, not defined |
 | C11 Annex K (`*_s` functions) | |
 | POSIX extensions such as `fdopen`, `fileno`, `popen`, `strtok_r`, `strerror_r`, `fseeko`, `fmemopen` | |

@@ -56,8 +56,6 @@ time_t time(time_t *t);
 clock_t clock(void);
 double difftime(time_t end, time_t start);
 int timespec_get(struct timespec *ts, int base);
-/* C23: how fine timespec_get's answer is in that base. */
-int timespec_getres(struct timespec *ts, int base);
 
 time_t mktime(struct tm *tm);
 /* Not in C11, but the honest name for what mktime does here, and what a

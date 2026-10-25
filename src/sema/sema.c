@@ -3473,45 +3473,6 @@ static int sc_nonneg(const struct expr *e)
     }
 }
 
-/* `_Generic(lhs, T1: e1, ..., default: eN)`: the association whose type
- * matches the controlling expression's (after its lvalue conversion -- an
- * array/function operand already carries its decayed type here), else
- * `default`. The controlling expression is not evaluated (C11 6.5.1.1);
- * the node becomes the selected expression, which the caller checks. */
-static struct expr *generic_choice(struct unit *u, struct func *f,
-                                   struct scope *sc, struct expr *e)
-{
-    check_expr(u, f, sc, e->lhs);
-    struct expr *chosen = NULL, *deflt = NULL;
-    /* lvalue conversion drops the operand's own qualifiers */
-    const struct type *ct = ty_unqual(e->lhs->ty);
-    int nmatch = 0;
-    for (int i = 0; i < e->ngen; i++) {
-        if (!e->gtypes[i]) { deflt = e->gexprs[i]; continue; }
-        /* Strictly: ty_equal lets `long` be `long long` and `char`
-         * be `signed char`, and the first association that matched
-         * that loosely was taken -- _Generic(1L, long long: ...,
-         * long: ...) picked the long long arm. */
-        if (ty_generic_same(ct, e->gtypes[i])) {
-            if (!chosen)
-                chosen = e->gexprs[i];
-            nmatch++;
-        }
-    }
-    if (nmatch > 1)
-        sema_error_at(u, e->line, e->col,
-                   "more than one _Generic association matches type %s: "
-                   "two associations name the same type",
-                   ty_name(ct));
-    if (!chosen)
-        chosen = deflt;
-    if (!chosen)
-        sema_error_at(u, e->line, e->col,
-                   "no _Generic association matches type %s",
-                   ty_name(e->lhs->ty));
-    return chosen;
-}
-
 static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                        struct expr *e)
 {
@@ -4014,7 +3975,39 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
         break;
     }
     case EXPR_GENERIC: {
-        struct expr *chosen = generic_choice(u, f, sc, e);
+        /* Pick the association whose type matches the controlling
+         * expression's (after its lvalue conversion — an array/function
+         * operand already carries its decayed type here), else `default`.
+         * The controlling expression is not evaluated (C11 6.5.1.1); the
+         * node simply becomes the selected expression. */
+        check_expr(u, f, sc, e->lhs);
+        struct expr *chosen = NULL, *deflt = NULL;
+        /* lvalue conversion drops the operand's own qualifiers */
+        const struct type *ct = ty_unqual(e->lhs->ty);
+        int nmatch = 0;
+        for (int i = 0; i < e->ngen; i++) {
+            if (!e->gtypes[i]) { deflt = e->gexprs[i]; continue; }
+            /* Strictly: ty_equal lets `long` be `long long` and `char`
+             * be `signed char`, and the first association that matched
+             * that loosely was taken -- _Generic(1L, long long: ...,
+             * long: ...) picked the long long arm. */
+            if (ty_generic_same(ct, e->gtypes[i])) {
+                if (!chosen)
+                    chosen = e->gexprs[i];
+                nmatch++;
+            }
+        }
+        if (nmatch > 1)
+            sema_error_at(u, e->line, e->col,
+                       "more than one _Generic association matches type %s: "
+                       "two associations name the same type",
+                       ty_name(ct));
+        if (!chosen)
+            chosen = deflt;
+        if (!chosen)
+            sema_error_at(u, e->line, e->col,
+                       "no _Generic association matches type %s",
+                       ty_name(e->lhs->ty));
         check_expr(u, f, sc, chosen);
         *e = *chosen;   /* become the selected expression */
         break;
@@ -4568,18 +4561,6 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
         break;
     }
     case EXPR_CALL: {
-        /* A _Generic that names a function -- the shape of every
-         * <tgmath.h> and <stdbit.h> call, `_Generic(x, float: sinf, ...)(x)`
-         * -- is that function's name before anything below looks at the
-         * callee, so the call is direct and can be inlined. Checked as an
-         * expression on its own first, the name decayed to a pointer and
-         * the call went through it. */
-        while (e->lhs->kind == EXPR_GENERIC) {
-            struct expr *chosen = generic_choice(u, f, sc, e->lhs);
-            if (!chosen)
-                break;
-            *e->lhs = *chosen;
-        }
         /* The stdarg builtins are not real functions: va_start needs the
          * ADDRESS of its va_list (irgen takes it), and none is declared
          * anywhere. Type-check the operands, mark the enclosing function
