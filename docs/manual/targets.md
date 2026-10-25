@@ -2372,10 +2372,10 @@ The table also defines `__flash`, as
 `__attribute__((__address_space__(1)))`, which EmbCC implements: `const`
 data kept in program memory and read with `lpm` (see
 [Data in program memory](embedded.md#data-in-program-memory)). It also
-defines `__BUILTIN_AVR_CLI`, `__BUILTIN_AVR_SEI`, `__BUILTIN_AVR_NOP`,
-`__BUILTIN_AVR_SLEEP`, `__BUILTIN_AVR_SWAP` and `__BUILTIN_AVR_WDR`, but
-the `__builtin_avr_*` functions are undeclared. Use inline assembly
-(`cli`, `sei`, `sleep`, `wdr`, `swap`) instead.
+defines `__BUILTIN_AVR_CLI`, `_SEI`, `_NOP`, `_NOPS`, `_SLEEP`, `_SWAP`,
+`_WDR`, `_DELAY_CYCLES`, `_FMUL`, `_FMULS`, `_FMULSU` and `_INSERT_BITS`,
+one for each of avr-gcc's `__builtin_avr_*` that EmbCC has
+([Extensions](extensions.md)).
 
 ### Headers
 

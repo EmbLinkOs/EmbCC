@@ -796,12 +796,22 @@ on AVR, without changing its type; it is read with `pgm_read_byte()` and
 the rest of `<avr/pgmspace.h>`. On other targets it is ignored with a
 `--warn=attributes` warning.
 
-The predefined macros `__BUILTIN_AVR_CLI`, `__BUILTIN_AVR_SEI`,
-`__BUILTIN_AVR_NOP`, `__BUILTIN_AVR_SLEEP`, `__BUILTIN_AVR_SWAP` and
-`__BUILTIN_AVR_WDR` are defined, but the `__builtin_avr_*` functions
-are not implemented (`'__builtin_avr_sei' is not declared in 'f' — for a
-call, add a prototype or define it first [E0001]`). Use inline
-assembly, for example `__asm__ volatile("sei")`.
+avr-gcc's `__builtin_avr_*` are there, each with the `__BUILTIN_AVR_*`
+macro avr-gcc predefines for it:
+
+| Builtin | Effect |
+|---|---|
+| `__builtin_avr_sei()`, `__builtin_avr_cli()` | `sei`, `cli`, as memory barriers (avr-libc's `sei()` and `cli()`) |
+| `__builtin_avr_sleep()`, `__builtin_avr_wdr()`, `__builtin_avr_nop()` | `sleep`, `wdr`, `nop` |
+| `__builtin_avr_nops(n)` | `n` nops, `n` a constant up to 4096 |
+| `__builtin_avr_delay_cycles(n)` | Exactly `n` cycles of an ATmega's clock, `n` a constant up to 4294967295: a loop on a counter of one to four bytes in `r24` up, and `rjmp .+0` and `nop` for the remainder |
+| `__builtin_avr_swap(x)` | `x`'s nibbles exchanged, an `unsigned char` |
+| `__builtin_avr_fmul(a, b)`, `fmuls`, `fmulsu` | `(a * b) << 1`, the product of two 1.7 fractions: unsigned, signed, signed by unsigned; `unsigned int` or `int` |
+| `__builtin_avr_insert_bits(map, bits, val)` | Bit `i` of the result is bit `map[i]` of `bits` (nibble `i` of the constant `map`, 0 to 7), or bit `i` of `val` where the nibble is 0xf |
+
+They are AVR's alone: on another target `__has_builtin` says no, and a
+call is an undeclared function. `__builtin_avr_flash_segment` (it needs
+`__memx`) and the fixed-point ones (`_Fract`, `_Accum`) are not there.
 
 ## Builtin functions
 
@@ -1185,8 +1195,7 @@ These are refused as undeclared functions, as shown in [General
 rules](#general-rules): `__builtin_va_arg_pack`, clang's
 `__builtin_elementwise_*`, `__builtin_reduce_*` and
 `__builtin_nontemporal_load`, `__builtin_cpu_supports` and
-`__builtin_cpu_init`, the target-specific families (`__builtin_ia32_*`,
-`__builtin_avr_*`). `__builtin_addressof`, `__builtin_bit_cast`
+`__builtin_cpu_init`, the x86 family (`__builtin_ia32_*`). `__builtin_addressof`, `__builtin_bit_cast`
 and `__builtin_is_constant_evaluated` exist in C++ only; see
 [C++](cxx.md).
 

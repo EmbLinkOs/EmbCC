@@ -830,6 +830,16 @@ static struct expr *sx(enum expr_kind kind, int line)
     return e;
 }
 
+/* A cast of a node not yet checked, as the parser writes one (mk_cast
+ * wants its operand's type already) */
+static struct expr *sx_cast(struct expr *inner, struct type *to)
+{
+    struct expr *c = sx(EXPR_CAST, inner->line);
+    c->cast_ty = to;
+    c->rhs = inner;
+    return c;
+}
+
 static struct expr *sx_var(const char *name, int line)
 {
     struct expr *e = sx(EXPR_VAR, line);
@@ -869,6 +879,72 @@ static const char *debugtrap_insn(void)
     }
     return "";
 }
+
+static void check_expr(struct unit *u, struct func *f, struct scope *sc,
+                       struct expr *e);
+
+static struct stmt *sx_stmt(enum stmt_kind k, const struct expr *at)
+{
+    struct stmt *s = xcalloc(1, sizeof *s);
+    s->kind = k;
+    s->line = at->line;
+    s->col = at->col;
+    return s;
+}
+
+/* `({ PRE; __asm__ volatile (TMPL : "+r"(OUT) :: CLOBBERS); RESULT; })` in
+ * place of a builtin's call e: the instruction where the call was, as
+ * debugtrap and the AVR builtins have it. pre, out and result may each be
+ * NULL; without a result the value is void. */
+static void asm_in_place(struct unit *u, struct func *f, struct scope *sc,
+                         struct expr *e, const char *tmpl,
+                         const char *const *clob, int nclob,
+                         struct expr *pre, struct expr *out,
+                         struct expr *result)
+{
+    struct stmt *first = NULL, **link = &first;
+    if (pre) {
+        struct stmt *ps = sx_stmt(STMT_EXPR, e);
+        ps->expr = pre;
+        *link = ps;
+        link = &ps->next;
+    }
+    struct stmt *as = sx_stmt(STMT_ASM, e);
+    as->asm_s = xcalloc(1, sizeof *as->asm_s);
+    as->asm_s->tmpl = tmpl;
+    as->asm_s->is_volatile = 1;
+    as->asm_s->is_basic = !out;
+    if (out) {
+        as->asm_s->out = xcalloc(1, sizeof *as->asm_s->out);
+        as->asm_s->out[0].constraint = "+r";
+        as->asm_s->out[0].expr = out;
+        as->asm_s->nout = 1;
+    }
+    if (nclob) {
+        as->asm_s->clob = xcalloc((size_t)nclob, sizeof *as->asm_s->clob);
+        for (int i = 0; i < nclob; i++)
+            as->asm_s->clob[i] = clob[i];
+        as->asm_s->nclob = nclob;
+    }
+    *link = as;
+    link = &as->next;
+    if (result) {
+        struct stmt *rs = sx_stmt(STMT_EXPR, e);
+        rs->expr = result;
+        *link = rs;
+    }
+    struct stmt *blk = sx_stmt(STMT_BLOCK, e);
+    blk->body = first;
+    struct expr *se = sx(EXPR_STMTEXPR, e->line);
+    se->col = e->col;
+    se->body = blk;
+    *e = *se;
+    check_expr(u, f, sc, e);
+}
+
+static int avr_builtin_known(const char *b);
+static void avr_builtin(struct unit *u, struct func *f, struct scope *sc,
+                        struct expr *e, const char *b);
 
 static struct expr *sx_cond(struct expr *c, struct expr *t, struct expr *f)
 {
@@ -5314,6 +5390,11 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                 e->ty = ty_base(TY_VOID, 0);
                 break;
             }
+            /* avr-gcc's __builtin_avr_*, on AVR */
+            else if (strncmp(bn, "avr_", 4) == 0 && avr_builtin_known(bn + 4)) {
+                avr_builtin(u, f, sc, e, bn + 4);
+                break;
+            }
             /* clang's __builtin_debugtrap(): a breakpoint the program
              * carries on from -- not __builtin_trap's, which ends it.
              * `({ __asm__ volatile ("<the target's breakpoint>"); })`, so
@@ -5324,23 +5405,8 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                 if (e->nargs)
                     sema_error_at(u, e->line, e->col, "%s takes no arguments",
                             e->lhs->name);
-                struct stmt *as = xcalloc(1, sizeof *as);
-                as->kind = STMT_ASM;
-                as->line = e->line;
-                as->col = e->col;
-                as->asm_s = xcalloc(1, sizeof *as->asm_s);
-                as->asm_s->tmpl = debugtrap_insn();
-                as->asm_s->is_volatile = as->asm_s->is_basic = 1;
-                struct stmt *blk = xcalloc(1, sizeof *blk);
-                blk->kind = STMT_BLOCK;
-                blk->line = e->line;
-                blk->col = e->col;
-                blk->body = as;
-                struct expr *se = sx(EXPR_STMTEXPR, e->line);
-                se->col = e->col;
-                se->body = blk;
-                *e = *se;
-                check_expr(u, f, sc, e);
+                asm_in_place(u, f, sc, e, debugtrap_insn(), NULL, 0, NULL,
+                             NULL, NULL);
                 break;
             }
             /* GCC's type-generic bit builtins (clzg, ctzg, popcountg,
@@ -7267,6 +7333,256 @@ static const char *const g_named_builtins[] = {
     "shuffle", "shufflevector", "convertvector",
 };
 
+/* ---- avr-gcc's __builtin_avr_* ------------------------------------------
+ *
+ * On AVR only, as avr-gcc has them: the instructions sei, cli, sleep, wdr
+ * and nop in place (sei and cli as memory barriers, as avr-libc writes
+ * them), nops(n) for n nops, swap's nibbles exchanged, the fractional
+ * multiplies fmul, fmuls and fmulsu ((a * b) << 1 in 1.7 format),
+ * insert_bits(map, bits, val), and delay_cycles(n): a busy loop of
+ * exactly n cycles of an ATmega's clock, n a constant -- what avr-libc's
+ * <util/delay.h> is built on. (flash_segment needs __memx, and the
+ * fixed-point ones _Fract and _Accum, which EmbCC has not got.) */
+static const char *const g_avr_builtins[] = {
+    "nop", "sei", "cli", "sleep", "wdr", "swap", "fmul", "fmuls", "fmulsu",
+    "delay_cycles", "nops", "insert_bits", NULL
+};
+
+static int avr_builtin_known(const char *b)
+{
+    if (target_get() != TARGET_AVR)
+        return 0;
+    for (int i = 0; g_avr_builtins[i]; i++)
+        if (strcmp(b, g_avr_builtins[i]) == 0)
+            return 1;
+    return 0;
+}
+
+/* delay_cycles(n)'s code: a counter of one to four bytes in r24 up, counted
+ * down in a loop of 3, 4, 5 or 6 cycles a pass (dec/brne; sbiw/brne;
+ * subi/sbci/brne), the remainder in `rjmp .+0` (two cycles) and `nop`.
+ * The loops cost 3K, 4K + 1, 5K + 2 and 6K + 3 cycles with the ldi's: an
+ * ATmega's (AVR5's) timings, those avr-gcc counts by. Returns the
+ * registers clobbered. */
+static int avr_delay_text(unsigned long n, char *buf, size_t cap)
+{
+    static const char *const r[4] = { "r24", "r25", "r26", "r27" };
+    size_t len = 0;
+    int bytes = n < 6 ? 0 : n <= 765 ? 1 : n <= 262141UL ? 2
+              : n <= 83886077UL ? 3 : 4;
+    unsigned long k = 0, rem = n;
+    buf[0] = 0;
+#define DT(...) (len += (size_t)snprintf(buf + len, cap - len, __VA_ARGS__))
+    if (bytes) {
+        k = (n - (unsigned long)(bytes - 1)) / (unsigned long)(bytes + 2);
+        rem = (n - (unsigned long)(bytes - 1)) % (unsigned long)(bytes + 2);
+        for (int i = 0; i < bytes; i++)
+            DT("ldi %s, %lu\n", r[i], (k >> (8 * i)) & 0xff);
+        if (bytes == 1)
+            DT("dec r24\nbrne .-4\n");
+        else if (bytes == 2)
+            DT("sbiw r24, 1\nbrne .-4\n");
+        else {
+            DT("subi r24, 1\n");
+            for (int i = 1; i < bytes; i++)
+                DT("sbci %s, 0\n", r[i]);
+            DT("brne .-%d\n", 2 * bytes + 2);
+        }
+    }
+    for (; rem >= 2; rem -= 2)
+        DT("rjmp .+0\n");
+    if (rem)
+        DT("nop\n");
+#undef DT
+    return bytes;
+}
+
+static void avr_builtin(struct unit *u, struct func *f, struct scope *sc,
+                        struct expr *e, const char *b)
+{
+    static const char *const regs[4] = { "r24", "r25", "r26", "r27" };
+    static const char *const mem[1] = { "memory" };
+    int want = !strcmp(b, "swap") || !strcmp(b, "delay_cycles") ||
+               !strcmp(b, "nops") ? 1
+             : !strncmp(b, "fmul", 4) ? 2 : !strcmp(b, "insert_bits") ? 3 : 0;
+    if (e->nargs != want) {
+        sema_error_at(u, e->line, e->col, "%s takes %d argument%s, as in "
+                "avr-gcc", e->lhs->name, want, want == 1 ? "" : "s");
+        e->ty = ty_base(TY_INT, 0);
+        return;
+    }
+    for (int i = 0; i < e->nargs; i++) {
+        check_expr(u, f, sc, e->args[i]);
+        need_integer(u, e->args[i], e->lhs->name);
+    }
+    if (!want) {                        /* the instruction of the name */
+        int barrier = !strcmp(b, "sei") || !strcmp(b, "cli");
+        asm_in_place(u, f, sc, e, b, barrier ? mem : NULL, barrier, NULL,
+                     NULL, NULL);
+        return;
+    }
+    if (!strcmp(b, "delay_cycles") || !strcmp(b, "nops")) {
+        long n;
+        if (!fold_is_exact(e->args[0]) || !const_fold(e->args[0], &n) ||
+            n < 0 || (unsigned long long)n > 0xffffffffULL ||
+            (b[0] == 'n' && n > 4096)) {
+            sema_error_at(u, e->line, e->col, "%s takes a constant number of "
+                    "%s, as in avr-gcc (%s)", e->lhs->name,
+                    b[0] == 'n' ? "nops" : "cycles",
+                    b[0] == 'n' ? "0 to 4096" : "0 to 4294967295");
+            e->ty = ty_base(TY_VOID, 0);
+            return;
+        }
+        char *text;
+        int nreg = 0;
+        if (b[0] == 'n') {
+            text = xmalloc((size_t)n * 4 + 1);
+            text[0] = 0;
+            for (long i = 0; i < n; i++)
+                memcpy(text + 4 * i, "nop\n", 5);
+        } else {
+            text = xmalloc(512);
+            nreg = avr_delay_text((unsigned long)n, text, 512);
+        }
+        asm_in_place(u, f, sc, e, text, regs, nreg, NULL, NULL, NULL);
+        return;
+    }
+    struct type *u8 = ty_base(TY_CHAR, 1);
+    if (!strcmp(b, "swap")) {
+        /* (t = x, (unsigned char)(t << 4 | t >> 4)): the C, not an asm --
+         * an asm's operand goes through memory here, and the C is what a
+         * swap peephole would find */
+        char *nm = xmalloc(32);
+        static int nsw;
+        snprintf(nm, 32, "<avr_swap %d>", nsw++);
+        scope_add(sc, nm, u8, NULL);
+        struct expr *asg = sx(EXPR_ASSIGN, e->line);
+        asg->lhs = sx_var(nm, e->line);
+        asg->rhs = mk_cast(e->args[0], u8);
+        struct expr *hi = sx(EXPR_BINOP, e->line), *lo = sx(EXPR_BINOP, e->line);
+        hi->op = B_SHL;
+        hi->lhs = sx_var(nm, e->line);
+        hi->rhs = sx(EXPR_NUM, e->line);
+        hi->rhs->num = 4;
+        hi->rhs->ty = ty_base(TY_INT, 0);
+        lo->op = B_SHR;
+        lo->lhs = sx_var(nm, e->line);
+        lo->rhs = sx(EXPR_NUM, e->line);
+        lo->rhs->num = 4;
+        lo->rhs->ty = ty_base(TY_INT, 0);
+        struct expr *o = sx(EXPR_BINOP, e->line);
+        o->op = B_OR;
+        o->lhs = hi;
+        o->rhs = lo;
+        struct expr *c = sx(EXPR_COMMA, e->line);
+        c->lhs = asg;
+        c->rhs = sx_cast(o, u8);
+        *e = *c;
+        check_expr(u, f, sc, e);
+        return;
+    }
+    if (!strncmp(b, "fmul", 4)) {
+        /* (a * b) << 1, a 1.7 fraction times a 1.7 fraction: unsigned
+         * both (fmul), signed both (fmuls), or a signed times an unsigned
+         * (fmulsu), as the 16-bit result of the type the instruction
+         * gives */
+        int sa = b[4] == 's', sb = sa && b[5] != 'u';
+        struct type *it = ty_base(TY_INT, 0);
+        struct expr *m = sx(EXPR_BINOP, e->line);
+        m->op = B_MUL;
+        m->lhs = mk_cast(mk_cast(e->args[0], sa ? ty_int_of_size(1, 0) : u8), it);
+        m->rhs = mk_cast(mk_cast(e->args[1], sb ? ty_int_of_size(1, 0) : u8), it);
+        struct expr *sh = sx(EXPR_BINOP, e->line);
+        sh->op = B_SHL;
+        sh->lhs = sx_cast(m, ty_base(TY_INT, 1));
+        sh->rhs = sx(EXPR_NUM, e->line);
+        sh->rhs->num = 1;
+        sh->rhs->ty = it;
+        *e = *sx_cast(sh, ty_int_of_size(2, !sa));
+        check_expr(u, f, sc, e);
+        return;
+    }
+    /* insert_bits(map, bits, val): result bit i is bits' bit map[i] (map's
+     * nibble i, 0..7), or val's own bit i where the nibble is 0xf */
+    long map;
+    if (!fold_is_exact(e->args[0]) || !const_fold(e->args[0], &map)) {
+        sema_error_at(u, e->line, e->col, "__builtin_avr_insert_bits takes a "
+                "constant map, as in avr-gcc");
+        e->ty = u8;
+        return;
+    }
+    char *nb = xmalloc(32), *nv = xmalloc(32);
+    static int nib;
+    snprintf(nb, 32, "<avr_bits %d>", nib);
+    snprintf(nv, 32, "<avr_val %d>", nib++);
+    scope_add(sc, nb, u8, NULL);
+    scope_add(sc, nv, u8, NULL);
+    /* bits' bits grouped by how far each moves (i - src): one mask and
+     * one shift per distance, and val's bits by one mask -- an identity
+     * nibble needs no shift at all */
+    unsigned move[15] = { 0 }, vmask = 0;
+    for (int i = 0; i < 8; i++) {
+        int src = (int)((unsigned long)map >> (4 * i) & 0xf);
+        if (src > 7 && src != 0xf) {
+            sema_error_at(u, e->line, e->col, "__builtin_avr_insert_bits: "
+                    "nibble %d of the map is %d, which is no bit (0..7) and "
+                    "not 0xf", i, src);
+            src = 0xf;
+        }
+        if (src == 0xf)
+            vmask |= 1u << i;
+        else
+            move[i - src + 7] |= 1u << src;
+    }
+    struct expr *all = NULL;
+    for (int d = -7; d <= 8; d++) {
+        unsigned m = d == 8 ? vmask : move[d + 7];
+        if (!m)
+            continue;
+        struct expr *t = sx(EXPR_BINOP, e->line);   /* (v & m) */
+        t->op = B_AND;
+        t->lhs = sx_var(d == 8 ? nv : nb, e->line);
+        t->rhs = sx(EXPR_NUM, e->line);
+        t->rhs->num = m;
+        t->rhs->ty = ty_base(TY_INT, 0);
+        if (d != 8 && d != 0) {                     /* << d or >> -d */
+            struct expr *sh = sx(EXPR_BINOP, e->line);
+            sh->op = d > 0 ? B_SHL : B_SHR;
+            sh->lhs = t;
+            sh->rhs = sx(EXPR_NUM, e->line);
+            sh->rhs->num = d > 0 ? d : -d;
+            sh->rhs->ty = ty_base(TY_INT, 0);
+            t = sh;
+        }
+        if (!all)
+            all = t;
+        else {
+            struct expr *o = sx(EXPR_BINOP, e->line);
+            o->op = B_OR;
+            o->lhs = all;
+            o->rhs = t;
+            all = o;
+        }
+    }
+    if (!all) {                                     /* (no bit at all) */
+        all = sx(EXPR_NUM, e->line);
+        all->ty = ty_base(TY_INT, 0);
+    }
+    struct expr *a1 = sx(EXPR_ASSIGN, e->line);
+    a1->lhs = sx_var(nb, e->line);
+    a1->rhs = mk_cast(e->args[1], u8);
+    struct expr *a2 = sx(EXPR_ASSIGN, e->line);
+    a2->lhs = sx_var(nv, e->line);
+    a2->rhs = mk_cast(e->args[2], u8);
+    struct expr *c1 = sx(EXPR_COMMA, e->line), *c2 = sx(EXPR_COMMA, e->line);
+    c2->lhs = a2;
+    c2->rhs = sx_cast(all, u8);
+    c1->lhs = a1;
+    c1->rhs = c2;
+    *e = *c1;
+    check_expr(u, f, sc, e);
+}
+
 int sema_has_builtin(const char *name)
 {
     int dummy_op;
@@ -7284,7 +7600,8 @@ int sema_has_builtin(const char *name)
     {
         const char *bn = name + 10;
         if (builtin_bitop(bn, NULL) != 0 || builtin_bitx(bn, NULL) != 0 ||
-            builtin_bitg(bn) != 0)
+            builtin_bitg(bn) != 0 ||
+            (strncmp(bn, "avr_", 4) == 0 && avr_builtin_known(bn + 4)))
             return 1;
         for (size_t i = 0;
              i < sizeof g_named_builtins / sizeof g_named_builtins[0]; i++)

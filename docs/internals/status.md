@@ -332,7 +332,8 @@ that are missing:
 - Vector builtins: `__builtin_elementwise_*`, `__builtin_reduce_*`,
   `__builtin_nontemporal_load` (`__builtin_shufflevector` is provided).
 - Target builtins: `__builtin_cpu_supports`, `__builtin_cpu_init`,
-  `__builtin_ia32_*`, `__builtin_avr_*`.
+  `__builtin_ia32_*`; on AVR `__builtin_avr_flash_segment` and the
+  fixed-point ones.
 
 ### Code generation
 

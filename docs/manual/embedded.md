@@ -1385,10 +1385,9 @@ A handler saves `r0`, `SREG`, `r1`, every call-clobbered register
 own body, and returns with `reti`. `signal` runs the body with interrupts
 disabled. `interrupt` re-enables them with `sei` at entry, so the handler
 can be interrupted. Interrupts are enabled globally with
-`__asm__ volatile("sei")` and disabled with `__asm__ volatile("cli" :::
-"memory")`. `__builtin_avr_sei`, `__builtin_avr_cli` and the other
-`__builtin_avr_*` functions are not implemented, although their
-`__BUILTIN_AVR_*` macros are predefined.
+`sei()` (`<avr/interrupt.h>`) or `__builtin_avr_sei()`, and disabled
+with `cli()` or `__builtin_avr_cli()`; avr-gcc's other `__builtin_avr_*`
+are there too ([Extensions](extensions.md)).
 
 ### avr-libc-compatible headers
 
@@ -1426,8 +1425,8 @@ Where they differ from avr-libc's:
   (`_delay_loop_2`) and wait at least the time asked. With a constant
   argument the count is worked out at compile time from `--opt=basic` up; at
   `--opt=none` it is computed at run time in software floating point, which
-  makes the delay longer. avr-libc's use `__builtin_avr_delay_cycles`,
-  which EmbCC does not have.
+  makes the delay longer. For a delay of exactly `n` cycles, which
+  avr-libc's `_delay_ms` builds on, call `__builtin_avr_delay_cycles(n)`.
 - `<avr/io.h>` in a `.S` file gives each register as its data-space
   address (`sts UDR0, r24`, `out _SFR_IO_ADDR(PORTB), r24`), as avr-libc's
   does; EmbCC defines `__ASSEMBLER__` for a `.S` file as GCC does.
