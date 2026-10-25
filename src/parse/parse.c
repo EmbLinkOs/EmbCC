@@ -394,6 +394,7 @@ static int tok_is_type_start(enum tok_kind k)
            k == TOK_KW_CONST || k == TOK_KW_VOLATILE ||
            k == TOK_KW_FLOAT || k == TOK_KW_DOUBLE || k == TOK_KW_BOOL ||
            k == TOK_KW_FLOAT128 || k == TOK_KW_FLOAT16 ||
+           k == TOK_KW_FP16 ||
            k == TOK_KW_COMPLEX || k == TOK_KW_BITINT ||
            k == TOK_KW_ALIGNAS || k == TOK_KW_TYPEOF || k == TOK_KW_ATOMIC ||
            /* __auto_type begins a declaration even though it names no
@@ -2351,7 +2352,7 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
     /* base specifiers in any order: unsigned long int, long unsigned... */
     int uns = -1, nlong = 0, nshort = 0, nchar = 0, nint = 0, nvoid = 0;
     int nfloat = 0, ndouble = 0, nbool = 0, ncomplex = 0, n128 = 0;
-    int nf128 = 0, nf16 = 0;
+    int nf128 = 0, nf16 = 0, nfp16 = 0;
     int any = 0, nbitint = 0, bline = 0, bcol = 0;
     long bits = 0;
     for (;;) {
@@ -2385,6 +2386,7 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
         else if (k == TOK_KW_INT128) n128++;
         else if (k == TOK_KW_FLOAT128) nf128++;
         else if (k == TOK_KW_FLOAT16) nf16++;
+        else if (k == TOK_KW_FP16) nfp16++;
         else if (k == TOK_KW_SHORT) nshort++;
         else if (k == TOK_KW_CHAR) nchar++;
         else if (k == TOK_KW_INT) nint++;
@@ -2462,6 +2464,11 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
                         : ty_base(nlong ? TY_LONG : TY_INT, uns == 1);
         return ty_complex(it);
     }
+    if (ncomplex && (nf16 || nfp16))
+        parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                       "_Complex %s is not supported yet: EmbCC has no "
+                       "complex binary16 arithmetic", nf16 ? "_Float16"
+                                                          : "__fp16");
     if (ncomplex) {
         /* `T _Complex` for a floating T; a bare _Complex means double, as
          * in gcc */
@@ -2473,25 +2480,15 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
                                   : nlong ? TY_LDOUBLE : TY_DOUBLE, 0);
         return ty_complex(el);
     }
-    if (nf16) {
-        /* binary16 is a WIDTH this compiler does not have. Adding it is
-         * a new TY_ kind through ty_size, ty_align, the usual arithmetic
-         * conversions, the IR's three float conversions and all four
-         * backends, plus __extendhfsf2/__truncsfhf2 on the soft-float
-         * ones -- not a spelling. Storing it as a float would silently
-         * give 24 bits of mantissa where the program asked for 11 (THE
-         * RULE). So it is an INCOMPLETE type: a declaration may name it
-         * -- macOS's <math.h> declares __fabsf16 and its kin
-         * unconditionally -- and a value of it cannot exist. A call, an
-         * object, a sizeof or a cast is refused as for any incomplete
-         * type, naming _Float16. */
+    if (nf16 || nfp16) {
+        /* IEEE binary16: _Float16 computes as itself, every operation
+         * rounded to half; __fp16, ARM's storage format, is promoted to
+         * float wherever it is read (type.h, is_fp16) */
         if (any > 1)
             parse_error_at(ps, cur(ps)->line, cur(ps)->col,
-                       "_Float16 cannot combine with other specifiers");
-        static struct type *f16;
-        if (!f16)
-            f16 = ty_struct("_Float16", 0);
-        return f16;
+                       "%s cannot combine with other specifiers",
+                       nf16 ? "_Float16" : "__fp16");
+        return nf16 ? ty_base(TY_FLOAT16, 0) : ty_fp16();
     }
     if (nf128) {
         if (any > 1)
@@ -3855,6 +3852,16 @@ static struct expr *parse_primary(struct parser *ps)
         if (as_float && !t->fnum_is_float)
             e->fnum = single_value(ps, t);
         e->ty = ty_base(as_float ? TY_FLOAT : TY_DOUBLE, 0);
+        if (t->fnum_is_f16) {
+            /* rounded once, from the digits: a double rounded to half
+             * would be rounded twice */
+            struct ldf *h = ldf_from_text(t->text, LDF_HALF);
+            if (!h || t->fnum_is_imag)
+                parse_error_line(ps, t->line, "malformed floating constant "
+                                 "'%sf16'", t->text);
+            e->ty = ty_base(TY_FLOAT16, 0);
+            e->fnum = ldf_to_double(h);
+        }
         if (t->fnum_is_imag) {
             e->imag = 1;
             e->ty = ty_complex(ty_base(as_float ? TY_FLOAT

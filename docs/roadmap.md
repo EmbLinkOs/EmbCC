@@ -134,9 +134,11 @@ GDB test on every board family, at `-O2`.
 
 Every refusal either implemented or declared permanent:
 
-- `asm goto`, `_Float16` and `__fp16`, global register variables,
+- `asm goto`, global register variables,
   `__builtin_setjmp`/`__builtin_longjmp`, nested functions (or a
-  permanent refusal, as clang has).
+  permanent refusal, as clang has). (`_Float16` and `__fp16` are done:
+  a `_Float16` through `...`, and a struct of them by value with the ARM
+  and RISC-V hard-float conventions, remain.)
 - C++ exceptions on Cortex-M, RV32 and the other 32-bit targets (needs
   0.3.0's unwind tables). C++ on AVR, or a permanent refusal.
 - RISC-V without the A extension (`rv32imc`, the ESP32-C3's ISA).

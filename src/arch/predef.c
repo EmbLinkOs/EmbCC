@@ -392,6 +392,36 @@ static int pic32_adds(struct predef_macro *m)
  * statement about the OBJECT FORMAT, so on a target that is not ELF it
  * is simply false, and a header that reads it would be told the wrong
  * thing. Dropped rather than overridden: there is no "__ELF__ 0". */
+/* _Float16 is EmbCC's on every target (src/ir/irgen.c, lib/rt/half.c),
+ * and its float.h-style description with it: the generated tables of
+ * the targets whose reference compiler has the type carry these
+ * already, and the others get them here. Clang's values. */
+static const struct predef_macro flt16_add[] = {
+    { "__FLT16_DECIMAL_DIG__", "5" },
+    { "__FLT16_DENORM_MIN__", "5.9604644775390625e-8F16" },
+    { "__FLT16_DIG__", "3" },
+    { "__FLT16_EPSILON__", "9.765625e-4F16" },
+    { "__FLT16_HAS_DENORM__", "1" },
+    { "__FLT16_HAS_INFINITY__", "1" },
+    { "__FLT16_HAS_QUIET_NAN__", "1" },
+    { "__FLT16_MANT_DIG__", "11" },
+    { "__FLT16_MAX_10_EXP__", "4" },
+    { "__FLT16_MAX_EXP__", "16" },
+    { "__FLT16_MAX__", "6.5504e+4F16" },
+    { "__FLT16_MIN_10_EXP__", "(-4)" },
+    { "__FLT16_MIN_EXP__", "(-13)" },
+    { "__FLT16_MIN__", "6.103515625e-5F16" },
+    { "__FLT16_NORM_MAX__", "6.5504e+4F16" },
+};
+
+static int table_has(const struct predef_macro *t, int n, const char *name)
+{
+    for (int i = 0; i < n; i++)
+        if (!strcmp(t[i].name, name))
+            return 1;
+    return 0;
+}
+
 static int contradicted(const char *name)
 {
     if (darwin_a64()) {
@@ -443,7 +473,8 @@ const struct predef_macro *predef_table(int *count)
     int dsp = thumb_dsp();
     int avr = avr_other_part();
     int pic32 = target_pic32_part() != NULL;
-    if (!os && !fpu && !cmse && !rv && !dsp && !avr && !pic32 &&
+    int f16 = !table_has(arch, narch, "__FLT16_MANT_DIG__");
+    if (!os && !fpu && !cmse && !rv && !dsp && !avr && !pic32 && !f16 &&
         target_fmt_get() == TGT_FMT_ELF) {
         *count = narch;
         return arch;
@@ -452,7 +483,8 @@ const struct predef_macro *predef_table(int *count)
     static struct predef_macro *merged;
     static int nmerged;
     if (!merged) {
-        merged = xmalloc((size_t)(narch + nos + 40 + ndarwin_a64_model) *
+        merged = xmalloc((size_t)(narch + nos + 40 + ndarwin_a64_model +
+                                  (int)(sizeof flt16_add / sizeof *flt16_add)) *
                          sizeof *merged);
         for (int i = 0; i < narch; i++)
             if (!contradicted(arch[i].name))
@@ -479,6 +511,9 @@ const struct predef_macro *predef_table(int *count)
 #endif
         if (pic32)
             nmerged += pic32_adds(merged + nmerged);
+        if (f16)
+            for (size_t i = 0; i < sizeof flt16_add / sizeof *flt16_add; i++)
+                merged[nmerged++] = flt16_add[i];
         if (fpu && target_arm_a32()) {
             int v4 = target_arm_vfp(NULL) == 4;
             const struct predef_macro *add = v4 ? a32_vfp4_add : a32_vfp3_add;

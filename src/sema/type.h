@@ -25,8 +25,8 @@
 struct expr;
 
 enum ty_kind { TY_VOID, TY_BOOL, TY_CHAR, TY_SHORT, TY_INT, TY_LONG,
-               TY_FLOAT, TY_DOUBLE, TY_LDOUBLE, TY_INT128, TY_PTR,
-               TY_ARRAY, TY_STRUCT, TY_FUNC };
+               TY_FLOAT, TY_DOUBLE, TY_LDOUBLE, TY_INT128, TY_FLOAT16,
+               TY_PTR, TY_ARRAY, TY_STRUCT, TY_FUNC };
 
 struct member {
     const char *name;     /* NULL for an anonymous (padding) bitfield */
@@ -92,6 +92,11 @@ struct type {
                              * the lowerings do not look), but GCC's
                              * -Wconversion treats a conversion to or from
                              * one as deliberate (ty_enum) */
+    int is_fp16;            /* TY_FLOAT16 spelled `__fp16`, ARM's storage
+                             * format: the same binary16, but an operand
+                             * of it is promoted to float, as a char is to
+                             * int, where a _Float16 computes as itself
+                             * (ty_arith_common). Distinct to ty_equal. */
     int align_ovr;          /* a typedef's __attribute__((aligned(N))): the
                              * type's alignment is N, larger or smaller than
                              * its own, and its size is unchanged (GCC's and
@@ -195,6 +200,13 @@ struct type *ty_wchar(void);
 struct type *ty_str_elem(int prefix);
 /* `long long` / `unsigned long long`: eight bytes on every target. */
 struct type *ty_llong(int is_unsigned);
+/* `__fp16`, beside ty_base(TY_FLOAT16, 0) which is `_Float16` */
+struct type *ty_fp16(void);
+/* The type a binary16 travels between functions as, by the target's
+ * convention for _Float16: a float holding its bits in its low half
+ * (*nanbox: and ones above, as a RISC-V FPR holds a narrower value), or a
+ * short holding them. */
+struct type *ty_half_carrier(int *nanbox);
 /* C23's _BitInt(N), N from 1 (unsigned) or 2 (signed) to BITINT_MAXWIDTH,
  * which is 64 here; NULL beyond it. Its storage -- the smallest of char,
  * short, int, long and long long that holds N bits -- is its kind, size,

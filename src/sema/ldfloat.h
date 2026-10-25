@@ -17,8 +17,9 @@
 #define EMBCC_SEMA_LDFLOAT_H
 
 /* The target layouts. LDF_DOUBLE rounds to IEEE double (a long double
- * constant converted to double in an initializer). */
-enum ldf_fmt { LDF_X87, LDF_QUAD, LDF_DOUBLE, LDF_FLOAT };
+ * constant converted to double in an initializer), LDF_HALF to binary16
+ * (a _Float16's). */
+enum ldf_fmt { LDF_X87, LDF_QUAD, LDF_DOUBLE, LDF_FLOAT, LDF_HALF };
 
 struct ldf;   /* opaque, heap-allocated, never freed (compile-time only) */
 
@@ -38,12 +39,13 @@ struct ldf *ldf_neg(const struct ldf *a);
 struct ldf *ldf_round(const struct ldf *a, enum ldf_fmt fmt);
 
 /* The value's bytes in fmt, little-endian: 16 for LDF_X87 (10 significant,
- * 6 of zero padding) and LDF_QUAD, 8 for LDF_DOUBLE, 4 for LDF_FLOAT. */
+ * 6 of zero padding) and LDF_QUAD, 8 for LDF_DOUBLE, 4 for LDF_FLOAT, 2
+ * for LDF_HALF. */
 void ldf_encode(const struct ldf *a, enum ldf_fmt fmt, unsigned char *out);
 /* ...in the TARGET's byte order, for an object's image (.rodata, .data):
  * ldf_encode's bytes reversed whole on a big-endian target, as a
  * big-endian machine stores a float, a double or a binary128. Returns the
- * format's size in bytes (4, 8 or 16). ldf_encode stays little-endian:
+ * format's size in bytes (2, 4, 8 or 16). ldf_encode stays little-endian:
  * ldf_to_double and the C++ evaluator read it as the host's order. */
 int ldf_encode_target(const struct ldf *a, enum ldf_fmt fmt,
                       unsigned char *out);

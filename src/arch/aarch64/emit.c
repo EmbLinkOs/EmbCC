@@ -840,7 +840,8 @@ void a64_udf(struct code *c)     { a64_word(c, 0x00000000UL); }
 static void fldst(struct code *c, int vt, int rn, long off, int w, int load)
 {
     a64_no_dead_slot(rn, off);
-    unsigned long sz = (w == 8) ? 3UL : 2UL;
+    /* d, s, and h for a binary16 in a packed (Darwin) argument slot */
+    unsigned long sz = w == 8 ? 3UL : w == 2 ? 1UL : 2UL;
     unsigned long base = 0x3D000000UL | (sz << 30) | (load ? 0x400000UL : 0);
     if (w == 16)       /* q: size 00 with opc<1> set (a long double) */
         base = load ? 0x3DC00000UL : 0x3D800000UL;
@@ -944,12 +945,13 @@ void a64_fcvt(struct code *c, int vd, int vn, int from_w, int to_w)
         a64_fmov_reg(c, vd, vn, to_w);
         return;
     }
-    /* The opcode names the DESTINATION precision (01 single, 00 double at
-     * bits 16..15), while `type` names the source's. */
-    if (from_w == 4)
-        fdp1(c, 5, vd, vn, ftype(4));    /* fcvt Dd, Sn */
-    else
-        fdp1(c, 4, vd, vn, ftype(8));    /* fcvt Sd, Dn */
+    /* The opcode names the DESTINATION precision (00 single, 01 double,
+     * 11 half at bits 16..15), while `type` names the source's (00, 01,
+     * 11 at bits 23..22): w 2 is a binary16, in an H register, whose
+     * conversions every ARMv8-A has. */
+    unsigned long dst = to_w == 8 ? 1UL : to_w == 2 ? 3UL : 0UL;
+    unsigned long src = from_w == 8 ? 1UL : from_w == 2 ? 3UL : 0UL;
+    fdp1(c, 4UL | dst, vd, vn, src << 22);
 }
 
 void a64_fcmp(struct code *c, int vn, int vm, int w)

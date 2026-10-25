@@ -5655,9 +5655,12 @@ static void gen_ins(struct t_fn *F, int n)
     case IR_LDVAR: {
         int d;
         if (i->w > 4) t_refuse(fn, i, "a 64-bit local");
-        if (in_freg(F, i->a) || in_freg(F, i->dst)) {
+        if (in_freg(F, i->a) || (in_freg(F, i->dst) && i->size == 4)) {
             /* A float local in s16-s31, or read into one: the value is
-             * all four bytes of it, so this is a move. */
+             * all four bytes of it, so this is a move. A narrower read
+             * into one -- a _Float16's bits, leaving as the float that
+             * carries them (ty_half_carrier) -- is an integer read below,
+             * which wrote() moves across. */
             if (i->size != 4)
                 internal_error("thumb: %s: a %d-byte read of a float in "
                                "an S register", fn->name, i->size);

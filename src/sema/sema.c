@@ -834,9 +834,82 @@ static struct type *promote(struct type *t) { return ty_promote(t); }
  * would hand printf garbage. */
 static struct type *default_arg_promote(struct type *t)
 {
-    if (t->kind == TY_FLOAT)
+    /* __fp16 too, as clang does; a _Float16 is not promoted (ISO/IEC TS
+     * 18661-3), and travels as itself */
+    if (t->kind == TY_FLOAT || t->is_fp16)
         return ty_base(TY_DOUBLE, 0);
     return promote(t);
+}
+
+/* Is there a binary16 in t, as a value or inside one passed by value? */
+static int has_half(const struct type *t)
+{
+    if (!t)
+        return 0;
+    if (t->kind == TY_FLOAT16)
+        return 1;
+    if (t->kind == TY_ARRAY)
+        return has_half(t->pointee);
+    if (t->kind == TY_STRUCT && t->complete && !t->is_complex)
+        for (int m = 0; m < t->nmembers; m++)
+            if (has_half(t->members[m].ty))
+                return 1;
+    return 0;
+}
+
+/* A binary16 by itself travels as its carrier (ty_half_carrier). A
+ * struct holding one is bytes to most conventions, and those pass it as
+ * they pass any struct; AArch64's makes a struct of halves a homogeneous
+ * aggregate, h0 to h3, which EmbCC passes (ty_hfa). The ARM hard-float
+ * convention does the same in S registers, and the RISC-V hard-float one
+ * flattens it into FPRs -- which EmbCC does not do yet. So there, and
+ * through `...` or a call without a prototype anywhere, it is refused
+ * rather than passed where no other compiler looks. A pointer to one is
+ * fine. */
+static int half_struct_by_regs(const struct type *t)
+{
+    return t && t->kind == TY_STRUCT && has_half(t) &&
+           ((target_get() == TARGET_THUMB && target_thumb_hard_abi()) ||
+            ((target_get() == TARGET_RISCV32 ||
+              target_get() == TARGET_RISCV64) && target_riscv_abi_flen()));
+}
+
+/* va: through `...` (or to a function without a prototype); else a
+ * struct holding a half, by value */
+static void half_abi_refuse(struct unit *u, int line, int col,
+                            const char *fname, int va)
+{
+    if (va)
+        sema_error_at(u, line, col,
+                      "%s%s%spassing a _Float16 through '...' is not "
+                      "supported yet: it is not promoted there, and EmbCC "
+                      "does not yet place an unpromoted binary16 among the "
+                      "variable arguments; convert it to double, as "
+                      "va_arg will read it",
+                      fname ? "'" : "", fname ? fname : "", fname ? "': " : "");
+    else
+        sema_error_at(u, line, col,
+                      "%s%s%sa struct holding a _Float16, passed or "
+                      "returned by value, is not supported yet with the "
+                      "hard-float calling convention, which puts each "
+                      "binary16 member in a floating-point register of its "
+                      "own; pass a pointer to it",
+                      fname ? "'" : "", fname ? fname : "", fname ? "': " : "");
+}
+
+/* v's bits as the carrier, or (to a binary16 type) a carrier's bits as
+ * the value: irgen's half_to_carrier and carrier_to_half */
+static struct expr *half_bits_cast(struct expr *inner, struct type *to)
+{
+    struct expr *c = xcalloc(1, sizeof *c);
+    c->kind = EXPR_CAST;
+    c->line = inner->line;
+    c->col = inner->col;
+    c->cast_ty = to;
+    c->rhs = inner;
+    c->ty = to;
+    c->half_bits = 1;
+    return c;
 }
 
 static struct type *arith_common(struct type *a, struct type *b)
@@ -5092,7 +5165,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
         /* A call makes a value of the return type and copies each
          * argument, so all of them must be complete (C11 6.5.2.2p1, p4):
          * a call through `extern struct S k(struct S);` passed and returned
-         * nothing at all. _Float16 is such a type (parse.c). */
+         * nothing at all. */
         if (ft->ret->kind == TY_STRUCT && !ft->ret->complete)
             sema_error_at(u, e->line, e->col,
                        "calling %s%s%swith incomplete return type %s",
@@ -5116,7 +5189,20 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             else /* variadic tail, or no prototype: the promotions */
                 e->args[i] = mk_cast(e->args[i],
                                      default_arg_promote(e->args[i]->ty));
+            if (e->args[i]->ty->kind == TY_FLOAT16 &&
+                i < ft->nptypes && !ft->noproto) {
+                int nb;
+                e->args[i] = half_bits_cast(e->args[i], ty_half_carrier(&nb));
+            } else if (e->args[i]->ty->kind == TY_FLOAT16 ||
+                       half_struct_by_regs(e->args[i]->ty)) {
+                half_abi_refuse(u, e->args[i]->line, e->args[i]->col,
+                                e->callee ? e->callee->name : NULL,
+                                e->args[i]->ty->kind == TY_FLOAT16);
+            }
         }
+        if (half_struct_by_regs(ft->ret))
+            half_abi_refuse(u, e->line, e->col,
+                            e->callee ? e->callee->name : NULL, 0);
         /* After the promotions, because those are what the variadic
          * tail actually carries: a float arrives as a double and a
          * short as an int, so %f of a float and %d of a short are both
@@ -5130,6 +5216,23 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
         if (e->ty && e->ty->kind == TY_STRUCT && sc && !e->res_local &&
             !predef_is_cxx() && ty_scalar_struct_ret(e->ty))
             e->res_local = 1 + scope_add(sc, "<struct result>", e->ty, NULL);
+        /* a binary16 result comes back as its carrier: the call becomes
+         * the operand of the cast that reads the value out of it, in
+         * place, so whatever holds this node holds the cast */
+        if (e->ty && e->ty->kind == TY_FLOAT16) {
+            struct expr *call = xmalloc(sizeof *call);
+            int nb;
+            *call = *e;
+            call->ty = ty_half_carrier(&nb);
+            memset(e, 0, sizeof *e);
+            e->kind = EXPR_CAST;
+            e->line = call->line;
+            e->col = call->col;
+            e->rhs = call;
+            e->cast_ty = e->ty = ft->ret;
+            e->half_bits = 1;
+            break;
+        }
         /* and an argument of one, in a prototyped position, travels as
          * the integer too */
         e->scalar_args = 0;
@@ -5471,6 +5574,22 @@ static int const_fold128(const struct expr *e, struct w128 *out)
  * rounds to single precision. Returns 0 (not constant) if it can't reduce. */
 static struct ldf *const_fold_ld(const struct expr *e);
 
+/* v rounded to t's format, as the operation that made it rounds at run
+ * time: a float's (or a four-byte double's -- AVR's, RX's) or a half's.
+ * Folding a float sum in double and rounding only at the end gave
+ * (16777216.0f + 1.0f) - 16777216.0f the value 1, where every float
+ * machine gives 0. */
+static double fold_round(const struct type *t, double v)
+{
+    if (!t || !ty_is_float(t) || ty_is_xldouble(t))
+        return v;
+    if (ty_size(t) == 2)
+        return ldf_to_double(ldf_round(ldf_from_double(v), LDF_HALF));
+    if (ty_size(t) == 4)
+        return (double)(float)v;
+    return v;
+}
+
 static int const_fold_f(const struct expr *e, double *out)
 {
     double a, b; long iv;
@@ -5486,13 +5605,14 @@ static int const_fold_f(const struct expr *e, double *out)
         e->rhs->ty->kind == TY_LDOUBLE) {
         struct ldf *x = const_fold_ld(e->rhs);
         if (!x) return 0;
-        *out = ldf_to_double(ldf_round(x, e->ty->kind == TY_FLOAT ? LDF_FLOAT
-                                                                  : LDF_DOUBLE));
+        int sz = ty_size(e->ty);
+        *out = ldf_to_double(ldf_round(x, sz == 2 ? LDF_HALF
+                                        : sz == 4 ? LDF_FLOAT : LDF_DOUBLE));
         return 1;
     }
     switch (e->kind) {
     case EXPR_FNUM:
-        *out = e->fnum;
+        *out = fold_round(e->ty, e->fnum);
         return 1;
     case EXPR_NUM:
         *out = (double)e->num;      /* an integer constant used where a float is wanted */
@@ -5500,7 +5620,7 @@ static int const_fold_f(const struct expr *e, double *out)
     case EXPR_CAST:
         if (ty_is_float(e->ty)) {
             if (!const_fold_f(e->rhs, &a)) return 0;
-            *out = (e->ty->kind == TY_FLOAT) ? (double)(float)a : a;
+            *out = fold_round(e->ty, a);
             return 1;
         }
         if (ty_is_integer(e->ty)) {   /* (int)f : evaluate then truncate toward zero */
@@ -5516,10 +5636,11 @@ static int const_fold_f(const struct expr *e, double *out)
         if (!const_fold_f(e->lhs, &a) || !const_fold_f(e->rhs, &b))
             return 0;
         switch (e->op) {
-        case B_ADD: *out = a + b; return 1;
-        case B_SUB: *out = a - b; return 1;
-        case B_MUL: *out = a * b; return 1;
-        case B_DIV: *out = a / b; return 1;   /* x/0.0 is inf/nan -- valid float result */
+        case B_ADD: *out = fold_round(e->ty, a + b); return 1;
+        case B_SUB: *out = fold_round(e->ty, a - b); return 1;
+        case B_MUL: *out = fold_round(e->ty, a * b); return 1;
+        /* x/0.0 is inf/nan -- valid float result */
+        case B_DIV: *out = fold_round(e->ty, a / b); return 1;
         default: return 0;
         }
     default:
@@ -6470,7 +6591,11 @@ static void lower_static_bytes(struct unit *u, int line, int size,
                            "a static float initializer must be a constant "
                            "expression");
             unsigned long ubits;
-            if (v[k].ty->kind == TY_FLOAT || sz == 4) {
+            if (sz == 2) {                  /* binary16 */
+                unsigned char hb[2];
+                ldf_encode(ldf_from_double(dv), LDF_HALF, hb);
+                ubits = (unsigned long)hb[0] | (unsigned long)hb[1] << 8;
+            } else if (v[k].ty->kind == TY_FLOAT || sz == 4) {
                 /* float, or a double that is binary32 (AVR, RX) */
                 float fv = (float)dv; unsigned int u32;
                 memcpy(&u32, &fv, 4); ubits = u32;
@@ -7938,6 +8063,10 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                     if (!ty_is_complex(s->expr->ty))
                         need_scalar(u, s->expr, "'return'");
                 s->expr = convert_assign(u, s->expr, f->ret_ty, "return");
+                if (f->half_ret) {
+                    int nb;
+                    s->expr = half_bits_cast(s->expr, ty_half_carrier(&nb));
+                }
             }
             break;
         case STMT_EXPR:
@@ -8239,7 +8368,14 @@ static void check_func(struct unit *u, struct func *f)
                 f->name);
     }
 
+    if (half_struct_by_regs(f->ret_ty))
+        half_abi_refuse(u, f->line, 0, f->name, 0);
+    f->half_ret = f->ret_ty && f->ret_ty->kind == TY_FLOAT16;
     for (int i = 0; i < f->nparams; i++) {
+        if (half_struct_by_regs(f->param_tys[i]) ||
+            (f->noproto && has_half(f->param_tys[i])))
+            half_abi_refuse(u, f->line, 0, f->name,
+                            f->noproto && f->param_tys[i]->kind == TY_FLOAT16);
         if (scope_find(&sc, f->params[i]) >= 0)
             sema_error_line(u, f->line,
                        "duplicate parameter '%s' in '%s'",
@@ -8290,6 +8426,21 @@ static void check_func(struct unit *u, struct func *f)
          * that integer's: mem2reg then takes it as the register it came in */
         sc.vars[i].ty = ty_scalar_struct_ret(f->param_tys[i]);
         f->param_scalar[i] = c + 1;
+    }
+    /* A binary16 parameter arrives as its carrier (half_signature); the
+     * body uses a local of the half type, which irgen fills from the bits
+     * at entry, and the parameter's own slot is the carrier's. */
+    for (int i = 0; i < f->nparams && i < MAX_PARAMS; i++) {
+        f->half_param[i] = 0;
+        if (!f->param_tys[i] || f->param_tys[i]->kind != TY_FLOAT16)
+            continue;
+        int nb;
+        if (!f->is_naked && f->params[i]) {
+            int c = scope_add(&sc, "<half param>", f->param_tys[i], NULL);
+            sc.vars[i].alias = c + 1;
+            f->half_param[i] = c + 1;
+        }
+        sc.vars[i].ty = ty_half_carrier(&nb);
     }
     /* `int a[n][m]` arrives as int (*)[m]: its row size is computed at
      * entry from the parameters before it */
@@ -8428,6 +8579,24 @@ static void check_func(struct unit *u, struct func *f)
     free(sc.vars);
     g_cx_sc = NULL;
     g_file = savefile;
+}
+
+/* A defined function's binary16 parameters and result as the carriers
+ * they travel as (ty_half_carrier), which the backends classify by: once
+ * every body in the unit has been checked, since a call reads the
+ * callee's type from these same fields (ty_func of ret_ty, param_tys)
+ * and must see _Float16 there. check_func made each return and each
+ * parameter's copy for this. */
+static void half_signature(struct func *f)
+{
+    int nb;
+    if (f->half_ret)
+        f->ret_ty = ty_half_carrier(&nb);
+    for (int i = 0; i < f->nparams && i < MAX_PARAMS; i++)
+        if (f->param_tys[i] && f->param_tys[i]->kind == TY_FLOAT16) {
+            f->param_tys[i] = ty_half_carrier(&nb);
+            f->half_abi[i] = 1;
+        }
 }
 
 static int g_gnu89_inline;
@@ -8922,6 +9091,9 @@ void sema_check(struct unit *u)
             check_func(u, canon);
         }
     }
+    for (struct func *f = u->funcs; f; f = f->next)
+        if (f->defined)
+            half_signature(find_func(u, f->name));
 
     /* -Wunused-function: a static nobody calls is dead in this unit, and
      * no other unit can reach it. (A non-static one may be called from

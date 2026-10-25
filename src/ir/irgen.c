@@ -126,7 +126,10 @@ void ir_locals_fill(struct ir_func *fn, struct func *f, int nvars)
         L->is_volatile = t->is_volatile;
         L->is_ldouble = ty_is_xldouble(t);
         L->is_int128 = t->kind == TY_INT128;
-        L->is_int_or_ptr = ty_is_integer(t) || t->kind == TY_PTR;
+        /* a _Float16's slot holds its two bytes, which mem2reg promotes
+         * as it does a short's */
+        L->is_int_or_ptr = ty_is_integer(t) || t->kind == TY_PTR ||
+                           t->kind == TY_FLOAT16;
         L->is_scalar_int_or_ptr =
             L->is_int_or_ptr && (L->size == 4 || L->size == 8);
         L->is_scalar_float = ty_is_float(t) && !L->is_ldouble &&
@@ -281,6 +284,28 @@ void emit_brnz(struct ir_func *fn, int v, int w, int label)
  * involved. Same reason loads and stores need no float path. */
 static int emit_ldconst(struct ir_func *fn, const struct ldf *v);
 
+/* ---- _Float16 -----------------------------------------------------------
+ * A _Float16 (or __fp16) VALUE is a float that is exactly a binary16
+ * number. Its loads widen the two bytes to that float and its stores
+ * narrow it back; each operation whose type is _Float16 is computed in
+ * float and rounded to half, which float's 24 bits do exactly (Figueroa:
+ * 24 >= 2*11 + 2), so the answers are those of a machine with binary16
+ * arithmetic. The conversions are calls into lib/rt/half.c (half_call). */
+static int is_half(const struct type *t)
+{
+    return t && t->kind == TY_FLOAT16;
+}
+
+/* The IR width of a floating value of type t: a half is a float. */
+static int fw(const struct type *t)
+{
+    return is_half(t) ? 4 : ty_size(t);
+}
+
+static int half_widen(struct ir_func *fn, int bits);
+static int half_narrow(struct ir_func *fn, int v, int fsize);
+static int half_round(struct ir_func *fn, int v, int fsize);
+
 static int emit_fconst(struct ir_func *fn, double d, int w)
 {
     if (w == 16)                 /* long double: exact from the double */
@@ -351,12 +376,14 @@ static int emit_ldvar_slot(struct ir_func *fn, int v, const struct type *t)
     i->w = ty_w(t);
     i->vol = t->is_volatile;
     i->dst = new_temp(fn);
-    return i->dst;
+    return is_half(t) ? half_widen(fn, i->dst) : i->dst;
 }
 
 static void emit_stvar_slot(struct ir_func *fn, int v, int val,
                             const struct type *t)
 {
+    if (is_half(t))
+        val = half_narrow(fn, val, 4);
     struct ir_ins *i = emit(fn);
     i->op = IR_STVAR;
     i->dst = v;
@@ -494,12 +521,14 @@ int emit_load(struct ir_func *fn, int addr, const struct type *t)
     if (i->flash)
         i->vol = 1;
     i->dst = new_temp(fn);
-    return i->dst;
+    return is_half(t) ? half_widen(fn, i->dst) : i->dst;
 }
 
 void emit_store(struct ir_func *fn, int addr, int val,
                        const struct type *t)
 {
+    if (is_half(t))
+        val = half_narrow(fn, val, 4);
     struct ir_ins *i = emit(fn);
     i->op = IR_STORE;
     i->a = addr;
@@ -1446,7 +1475,7 @@ static int emit_tobool(struct ir_func *fn, int v, const struct type *from)
     /* the zero operand MUST be emitted before the compare that reads it —
      * the IR is lowered in order, so an operand emitted after would be
      * materialized after the cmp already ran (a real bug, once). */
-    int zero = flt ? emit_fconst(fn, 0.0, ty_size(from))
+    int zero = flt ? emit_fconst(fn, 0.0, fw(from))
                    : emit_const(fn, 0, ty_w(from));
     struct ir_ins *i = emit(fn);
     i->op = IR_CMP;
@@ -1455,7 +1484,7 @@ static int emit_tobool(struct ir_func *fn, int v, const struct type *from)
     i->b = zero;
     i->sign = 0;
     i->flt = flt;
-    i->w = flt ? ty_size(from) : ty_w(from);
+    i->w = flt ? fw(from) : ty_w(from);
     i->dst = new_temp(fn);
     return i->dst;
 }
@@ -1578,6 +1607,34 @@ static int gen_float_to_u64(struct ir_func *fn, int v, int fsize)
     return res;
 }
 
+/* v, of type `from`, rounded to binary16 here if it is the constant just
+ * emitted -- a literal assigned to a _Float16 needs no call -- else -1. A
+ * long double constant is not one instruction (emit_ldconst) and goes
+ * the run-time way. */
+static int half_const(struct ir_func *fn, int v, const struct type *from)
+{
+    const struct ir_ins *c = fn->nins ? &fn->ins[fn->nins - 1] : NULL;
+    struct ldf *x;
+    if (!c || c->op != IR_CONST || c->dst != v)
+        return -1;
+    if (ty_is_float(from) && ty_size(from) == 4) {
+        unsigned int u = (unsigned int)c->imm;
+        float f;
+        memcpy(&f, &u, 4);
+        x = ldf_from_double((double)f);
+    } else if (ty_is_float(from) && ty_size(from) == 8) {
+        double d;
+        long bits = c->imm;
+        memcpy(&d, &bits, 8);
+        x = ldf_from_double(d);
+    } else if (ty_is_integer(from) && ty_size(from) <= 8 && !from->bitint) {
+        x = ldf_from_int(c->imm, from->is_unsigned);
+    } else {
+        return -1;
+    }
+    return emit_fconst(fn, ldf_to_double(ldf_round(x, LDF_HALF)), 4);
+}
+
 /* Change a temp's representation between type classes: truncating to a
  * narrow type re-extends from its low bytes; widening extends per the
  * SOURCE's signedness. Free conversions return the same temp. */
@@ -1590,6 +1647,26 @@ int gen_convert(struct ir_func *fn, int v, const struct type *from,
     /* To _Bool is a normalize-to-0/1, not a truncation. */
     if (to->kind == TY_BOOL && from->kind != TY_BOOL)
         return emit_tobool(fn, v, from);
+
+    /* A _Float16 is a float that is exactly a binary16 (half_widen), and
+     * __fp16 holds the same values. From one, a float's conversions; to
+     * one, a rounding ONCE from the value -- a float, double or long
+     * double directly, an integer through float, which is exact below
+     * 2^24, far past where a half overflows (65520). A constant is
+     * rounded here, not by a call. */
+    if (is_half(from) || is_half(to)) {
+        struct type *f32 = ty_base(TY_FLOAT, 0);
+        if (is_half(from) && is_half(to))
+            return v;
+        if (is_half(from))
+            return gen_convert(fn, v, f32, to);
+        int k = half_const(fn, v, from);
+        if (k >= 0)
+            return k;
+        if (ty_is_float(from))
+            return half_round(fn, v, ty_size(from));
+        return half_round(fn, gen_convert(fn, v, from, f32), 4);
+    }
 
     /* To a _BitInt(N): as to the integer it is stored as, then its low N
      * bits (bitint_ext) */
@@ -1876,7 +1953,7 @@ static struct type *lib_int(void) { return ty_base(TY_INT, 0); }
 static struct func *libatomic_fn(const char *name, struct type *ret, int n,
                                  struct type *const *tys)
 {
-    static struct func *made[16];
+    static struct func *made[32];
     static int nmade;
     for (int k = 0; k < nmade; k++)
         if (strcmp(made[k]->name, name) == 0)
@@ -1916,6 +1993,120 @@ static int libatomic_call(struct ir_func *fn, const char *name,
         e.args[k] = &a[k];
     }
     return emit_call(fn, &e, vals, -1);
+}
+
+/* The conversions of lib/rt/half.c, which keeps the same table: where
+ * the machine passes a _Float16 in the low bits of a floating-point
+ * register (x86-64, AArch64) libgcc's names, the half travelling as
+ * those bits of a float; on ARM libgcc's __gnu_*_ieee with an unsigned
+ * short; elsewhere EmbCC's own. which: 0 widen, 1 narrow a float, 2 a
+ * double, 3 a long double wider than double. (The AArch64 backend makes
+ * each of the first three one FCVT: a64_half_cvt.)
+ *
+ * macOS is the exception that names the rule: its compiler-rt, which a
+ * Darwin program links instead of a runtime of ours, has the same names
+ * built with the half as a uint16_t -- in w0, not h0. Asked with the bits
+ * in s0, __extendhfsf2 widened whatever w0 held. */
+static const char *half_fn(int which, int *as_float)
+{
+    static const char *const sse[4] = {
+        "__extendhfsf2", "__truncsfhf2", "__truncdfhf2", "__truncxfhf2" };
+    static const char *const a64[4] = {
+        "__extendhfsf2", "__truncsfhf2", "__truncdfhf2", "__trunctfhf2" };
+    static const char *const arm[4] = {
+        "__gnu_h2f_ieee", "__gnu_f2h_ieee", "__gnu_d2h_ieee", "__gnu_d2h_ieee" };
+    static const char *const own[4] = {
+        "__embcc_h2f", "__embcc_f2h", "__embcc_d2h", "__embcc_ld2h" };
+    int t = target_get();
+    *as_float = t == TARGET_X86_64 ||
+                (t == TARGET_AARCH64 && target_os_get() != TGT_OS_DARWIN);
+    return (t == TARGET_X86_64 ? sse : t == TARGET_AARCH64 ? a64
+            : t == TARGET_THUMB ? arm : own)[which];
+}
+
+static int half_call(struct ir_func *fn, int which, int v, struct type *at)
+{
+    int as_float;
+    const char *name = half_fn(which, &as_float);
+    struct type *u16 = ty_base(TY_SHORT, 1), *flt = ty_base(TY_FLOAT, 0);
+    struct type *ret = which ? (as_float ? flt : u16) : flt;
+    int vals[1] = { v };
+    struct type *tys[1] = { which ? at : as_float ? flt : u16 };
+    /* a conversion and nothing else: unused, it goes (dce) */
+    struct func *cf = libatomic_fn(name, ret, 1, tys);
+    cf->inf_no_read = cf->inf_no_write = cf->is_nothrow = 1;
+    return libatomic_call(fn, name, ret, 1, vals, tys, g_cur_line);
+}
+
+/* The bits each widened half came from, by the float's vreg (-1: none):
+ * narrowing one is those bits again, so a sum stored, or a half copied
+ * to another, costs one conversion and not three. A widened value is a
+ * call's result, defined once, and its bits were defined before it. */
+static int *g_hbits;
+static int g_nhbits;
+
+static int half_widen(struct ir_func *fn, int bits)
+{
+    int v = half_call(fn, 0, bits, NULL);
+    if (v >= g_nhbits) {
+        int n = v + 64;
+        g_hbits = xrealloc(g_hbits, (size_t)n * sizeof *g_hbits);
+        for (int k = g_nhbits; k < n; k++)
+            g_hbits[k] = -1;
+        g_nhbits = n;
+    }
+    g_hbits[v] = bits;
+    return v;
+}
+
+/* a float (fsize 4), double (8) or long double (16) to the bits of the
+ * nearest binary16, ties to even: rounded ONCE from that value. On x86-64
+ * and AArch64 the bits come back in a float's low half, and are masked. */
+static int half_narrow(struct ir_func *fn, int v, int fsize)
+{
+    int as_float;
+    if (fsize == 4 && v >= 0 && v < g_nhbits && g_hbits[v] >= 0)
+        return g_hbits[v];
+    struct type *at = fsize == 4 ? ty_base(TY_FLOAT, 0)
+                    : fsize == 8 && ty_size(ty_base(TY_DOUBLE, 0)) == 8
+                    ? ty_base(TY_DOUBLE, 0) : ty_base(TY_LDOUBLE, 0);
+    int which = fsize == 4 ? 1 : fsize == 8 ? 2 : 3;
+    int r = half_call(fn, which, v, at);
+    (void)half_fn(which, &as_float);
+    return as_float ? emit_bin(fn, IR_AND, r, emit_const(fn, 0xffff, 4), 4, 0)
+                    : r;
+}
+
+/* v rounded to the nearest binary16, as the float it is */
+static int half_round(struct ir_func *fn, int v, int fsize)
+{
+    return half_widen(fn, half_narrow(fn, v, fsize));
+}
+
+/* A binary16 value to the carrier it travels between functions as
+ * (ty_half_carrier): its bits, NaN-boxed or sign-extended as the target's
+ * convention has them -- and back, from the low sixteen bits whatever
+ * the caller left above them (x86-64's pinsrw leaves xmm0's). */
+static int half_to_carrier(struct ir_func *fn, int v)
+{
+    int nanbox, b = half_narrow(fn, v, 4);
+    struct type *c = ty_half_carrier(&nanbox);
+    if (nanbox)
+        return emit_bin(fn, IR_OR, b, emit_const(fn, (long)0xffff0000L, 4),
+                        4, 0);
+    if (ty_signed_int(c)) {
+        struct ir_ins *x = emit(fn);
+        x->op = IR_EXT; x->a = b; x->size = 2; x->sign = 1; x->w = 4;
+        x->dst = new_temp(fn);
+        return x->dst;
+    }
+    return b;
+}
+
+static int carrier_to_half(struct ir_func *fn, int v)
+{
+    return half_widen(fn, emit_bin(fn, IR_AND, v, emit_const(fn, 0xffff, 4),
+                                   4, 0));
 }
 
 /* the order argument: v, or seq_cst when v < 0 */
@@ -2334,9 +2525,11 @@ static int compound_value(struct ir_func *fn, struct expr *e, int cur,
         IR_AND, IR_OR, IR_XOR, IR_SHL, IR_SHR,
     };
     enum ir_op o = map[e->op - B_ADD];
-    if (ty_is_float(ct))
-        res = emit_fbin(fn, o, cv, rv, ty_size(ct));
-    else
+    if (ty_is_float(ct)) {
+        res = emit_fbin(fn, o, cv, rv, fw(ct));
+        if (is_half(ct))
+            res = half_round(fn, res, 4);
+    } else
         res = int_wrap(fn, san_bin(fn, o, cv, rv, ty_w(ct),
                                    ty_signed_int(ct)), ct, o);
     return gen_convert(fn, res, ct, lt);
@@ -3197,6 +3390,7 @@ static int emit_call(struct ir_func *fn, struct expr *e, const int *args,
         ar->align = ty_own_align(at);    /* the ABI's, not a typedef's */
         ar->nat_align = ty_natural_align(at);
         ar->is_float = ty_is_float(at);
+        ar->is_half = e->args[k]->kind == EXPR_CAST && e->args[k]->half_bits;
         ar->is_int128 = at->kind == TY_INT128;
         ar->is_struct = at->kind == TY_STRUCT;
         ar->natural = ar->is_struct && struct_val_natural(e->args[k]);
@@ -3389,7 +3583,7 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
         /* a long double that is a double (or a float): its value,
          * which sema already rounded to that format */
         return emit_fconst(fn, e->ldv ? ldf_to_double(e->ldv) : e->fnum,
-                           ty_size(e->ty));
+                           fw(e->ty));
     case EXPR_LABELADDR: {   /* &&label -> a void* to the label's code location */
         struct ir_ins *i = emit(fn);
         i->op = IR_LABELADDR;
@@ -3524,14 +3718,16 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             save->op = IR_MOV;
             save->a = cur;
             save->dst = old = new_temp(fn);
-            save->w = ty_is_float(t) ? ty_size(t) : w;
+            save->w = ty_is_float(t) ? fw(t) : w;
             save->flt = ty_is_float(t) && !ty_is_xldouble(t);
         }
         int sum;
-        if (ty_is_float(t))   /* x++ adds 1.0 — not 1 to the bit pattern */
+        if (ty_is_float(t)) { /* x++ adds 1.0 — not 1 to the bit pattern */
             sum = emit_fbin(fn, e->delta > 0 ? IR_ADD : IR_SUB, cur,
-                            emit_fconst(fn, 1.0, ty_size(t)), ty_size(t));
-        else if (vla_step)   /* ++p over rows of a run-time size */
+                            emit_fconst(fn, 1.0, fw(t)), fw(t));
+            if (is_half(t))
+                sum = half_round(fn, sum, 4);
+        } else if (vla_step)   /* ++p over rows of a run-time size */
             sum = emit_bin(fn, e->delta > 0 ? IR_ADD : IR_SUB, cur,
                            type_size_val(fn, t->pointee), w, 1);
         else
@@ -3546,8 +3742,9 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
                           emit_const(fn, 1, w), w, ty_signed_int(t));
         if (t->bitint) {
             sum = bitint_ext(fn, sum, t);   /* and a _BitInt like itself */
-        } else if (ty_size(t) <= 2 && !is_bf) {
-            /* ++c on a char must wrap like a char, in the value too */
+        } else if (ty_size(t) <= 2 && !is_bf && !ty_is_float(t)) {
+            /* ++c on a char must wrap like a char, in the value too (a
+             * _Float16 is two bytes and a float value: rounded above) */
             struct ir_ins *i = emit(fn);
             i->op = IR_EXT;
             i->a = sum;
@@ -3590,7 +3787,7 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             /* -x on a float flips the sign BIT: exact for -0.0 and for
              * NaN, which 0.0-x is not, and it needs no new instruction
              * because the slot already holds the pattern. */
-            int sz = ty_size(e->ty);
+            int sz = fw(e->ty);
             int mask = emit_const(fn,
                                   sz == 8 ? (long)0x8000000000000000LL
                                           : (long)0x80000000L, sz);
@@ -3638,7 +3835,7 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
         if (i->flash)
             i->vol = 1;
         i->dst = new_temp(fn);
-        return i->dst;
+        return is_half(e->ty) ? half_widen(fn, i->dst) : i->dst;
     }
     case EXPR_ADDR:
         return gen_addr(fn, e->rhs);
@@ -3646,6 +3843,9 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
         int v = gen_expr(fn, e->rhs);
         if (e->ty->kind == TY_VOID)
             return v; /* evaluated for its effect; the value is dropped */
+        if (e->half_bits)   /* a binary16 into or out of its carrier */
+            return is_half(e->ty) ? carrier_to_half(fn, v)
+                                  : half_to_carrier(fn, v);
         return gen_convert(fn, v, e->rhs->ty, e->ty);
     }
     case EXPR_REAL:
@@ -3827,8 +4027,10 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             int a = gen_expr(fn, e->lhs);
             int b = gen_expr(fn, e->rhs);
             enum ir_op o = e->op == B_ADD ? IR_ADD : IR_SUB;
-            if (ty_is_float(e->ty))
-                return emit_fbin(fn, o, a, b, ty_size(e->ty));
+            if (ty_is_float(e->ty)) {
+                int r = emit_fbin(fn, o, a, b, fw(e->ty));
+                return is_half(e->ty) ? half_round(fn, r, 4) : r;
+            }
             return int_wrap(fn, san_bin(fn, o, a, b, ty_w(e->ty),
                                         ty_signed_int(e->ty)), e->ty, o);
         }
@@ -3847,7 +4049,7 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             i->b = b;
             if (ty_is_float(lt)) {
                 i->flt = 1;
-                i->w = ty_size(lt);
+                i->w = fw(lt);
             } else {
                 i->w = ty_w(lt);
             }
@@ -3863,9 +4065,10 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             };
             int a = gen_expr(fn, e->lhs);
             int b = gen_expr(fn, e->rhs);
-            if (ty_is_float(e->ty))
-                return emit_fbin(fn, map[e->op - B_ADD], a, b,
-                                 ty_size(e->ty));
+            if (ty_is_float(e->ty)) {
+                int r = emit_fbin(fn, map[e->op - B_ADD], a, b, fw(e->ty));
+                return is_half(e->ty) ? half_round(fn, r, 4) : r;
+            }
             return int_wrap(fn, san_bin(fn, map[e->op - B_ADD], a, b,
                                         ty_w(e->ty), ty_signed_int(e->ty)),
                             e->ty, map[e->op - B_ADD]);
@@ -3935,7 +4138,7 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
         /* The two merges carry the conditional's OWN width. They were
          * emitted with none, which cost nothing while a register held
          * any scalar and is half a `long long` on a 32-bit machine. */
-        int mw = ty_is_float(e->ty) ? ty_size(e->ty) : ty_w(e->ty);
+        int mw = ty_is_float(e->ty) ? fw(e->ty) : ty_w(e->ty);
         int mflt = ty_is_float(e->ty) && !ty_is_xldouble(e->ty);
         int a = gen_expr(fn, e->lhs);
         struct ir_ins *m1 = emit(fn);
@@ -5291,6 +5494,7 @@ static void gen_func(struct ir_func *fn, struct func *f)
             a->nat_align = pt ? ty_natural_align(pt) : 1;
             a->is_struct = pt && pt->kind == TY_STRUCT;
             a->is_float = pt && ty_is_float(pt);
+            a->is_half = k < MAX_PARAMS && f->half_abi[k];
             a->is_int128 = pt && pt->kind == TY_INT128;
             a->hfa_size = 0;
             a->hfa_n = ty_hfa(pt, &a->hfa_size);
@@ -5319,6 +5523,8 @@ static void gen_func(struct ir_func *fn, struct func *f)
         }
     }
     g_nlabels_used = 0;                 /* labels are per-function */
+    for (int k = 0; k < g_nhbits; k++)  /* and vregs (half_widen) */
+        g_hbits[k] = -1;
     g_nvla = 0;
     /* a _BitInt parameter as its caller's ABI leaves it: the bits above
      * N unspecified (emit_call has the same for a result) */
@@ -5377,6 +5583,14 @@ static void gen_func(struct ir_func *fn, struct func *f)
             ad->a = f->param_scalar[k] - 1;
             ad->dst = new_temp(fn);
             emit_store(fn, ad->dst, v, lt);
+        }
+    /* a binary16 parameter, arrived as its carrier: into the local of
+     * its own type the body uses (sema) */
+    for (int k = 0; k < f->nparams && k < MAX_PARAMS; k++)
+        if (f->half_param[k]) {
+            int c = f->half_param[k] - 1;
+            int v = carrier_to_half(fn, emit_ldvar(fn, k, f->param_tys[k]));
+            emit_stvar(fn, c, v, f->var_tys[c]);
         }
     if (g_instr_this)
         emit_instr_call(fn, f, "__cyg_profile_func_enter", f->line);

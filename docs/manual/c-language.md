@@ -277,7 +277,7 @@ C17's value, `201710L`.
 | `_Decimal32`, `_Decimal64`, `_Decimal128` | Not supported | `expected a type before '_Decimal32'` |
 | `_Float32`, `_Float64` | Partial | The same types as `float` and `double`. The `f32` and `f64` constant suffixes are refused: `malformed floating constant`. |
 | `_Float128` | Partial | The same type as `long double` where that is IEEE binary128. See [Target-dependent features](#target-dependent-features). |
-| `_Float16` | Partial | An incomplete type: a declaration may name it (macOS's `<math.h>` declares `__fabsf16` and its kin), but there is no 16-bit floating-point value. An object, `sizeof`, a cast or a call is refused: `'h' has incomplete type _Float16`. Widening it to `float` would give 24 bits of mantissa where the program asked for 11. |
+| `_Float16` | Supported | IEEE binary16 on every target, each operation rounded to it; the `f16` constant suffix. Through `...` it is refused. See [Half-precision floating point](#half-precision-floating-point). |
 | `_Float32x`, `_Float64x` | Not supported | `expected a type before '_Float32x'` |
 | `unreachable()` in `<stddef.h>` | Supported | Under `-std=c23`; it is `__builtin_unreachable()`. |
 | Width macros `INT_WIDTH`, `INT8_WIDTH`, ... | Supported | `<limits.h>` and `<stdint.h>`. |
@@ -627,6 +627,77 @@ error: a static complex initializer must be a constant that EmbCC folds: literal
 This rules out a product or quotient of two complex values, and
 `CMPLX(1.0, 2.0)`, which `<complex.h>` defines as a call to a library
 function. At block scope both are accepted.
+
+### Half-precision floating point
+
+`_Float16` (C23 Annex X) is IEEE 754 binary16 on every target: two
+bytes, aligned like a `short`, with an 11-bit significand. An operation
+on `_Float16` operands has type `_Float16`, and each one is rounded to
+binary16. EmbCC computes it in `float` and rounds the result, which is
+exact, because a float's 24 bits are enough that rounding twice never
+differs from rounding once. So a program gets the answers of a machine
+with binary16 arithmetic, such as Arm's FEAT_FP16 or RISC-V's Zfh, on
+every target. `FLT_EVAL_METHOD` is 0.
+
+GCC and clang on x86-64 evaluate instead in `float`, and round only at an
+assignment, a cast or a return. They may evaluate a constant in `float`
+too: `0.1f16 + 0.2f16` is `0x34cc` with EmbCC and `0x34cd` with GCC
+there. Where the two must agree, cast each intermediate result and
+constant to `_Float16`.
+
+A constant takes the `f16` or `F16` suffix, and is rounded once from its
+digits. A conversion from `double` or `long double` is rounded once from
+that value, never through `float`.
+
+`__fp16` is Arm's storage format: the same binary16 bits, but a value
+read from one is a `float`, as a `char` read is an `int`. `a + b` of two
+`__fp16` is a `float`, rounded once when it is stored, and through `...`
+an `__fp16` is a `double`. `_Float16` and `__fp16` are distinct types to
+`_Generic`.
+
+The predefined `__FLT16_MANT_DIG__`, `__FLT16_MAX__` and the rest of that
+family are always defined. `<float.h>` defines `FLT16_MANT_DIG` and the
+other `FLT16_` names when `__STDC_WANT_IEC_60559_TYPES_EXT__` is defined
+before it is included.
+
+A `_Float16` argument or result travels as the target's calling
+convention passes one, so a function compiled by EmbCC can call or be
+called by one compiled by GCC or clang:
+
+| Target | A `_Float16` argument or result |
+|---|---|
+| x86-64, AArch64, ARM with `-mfloat-abi=hard` | In the low 16 bits of the floating-point argument register |
+| RISC-V with `-mabi=ilp32f`, `ilp32d`, `lp64f` or `lp64d` | NaN-boxed in a floating-point register |
+| RISC-V and LoongArch soft-float | Sign-extended in an integer register |
+| ARM soft-float, and targets whose convention has no `_Float16` (AVR, MIPS, Xtensa, TriCore, RX, PowerPC, SPARC, ColdFire) | Zero-extended in an integer register |
+
+A struct holding a `_Float16` is passed like any other struct. On AArch64
+a struct of two to four of them is a homogeneous aggregate, in `h0` to
+`h3`. With the ARM hard-float convention, which also gives each member a
+floating-point register of its own, it is refused:
+
+```text
+error: 'f': a struct holding a _Float16, passed or returned by value, is not supported yet with the hard-float calling convention, which puts each binary16 member in a floating-point register of its own; pass a pointer to it
+```
+
+The same refusal applies to RISC-V's hard-float conventions. A
+`_Float16` passed through `...` is refused on every target, because it
+is not promoted there:
+
+```text
+error: 'printf': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted binary16 among the variable arguments; convert it to double, as va_arg will read it
+```
+
+The conversions between binary16 and the wider formats are calls to
+EmbCC's runtime, `lib/rt/half.c`. They use integer arithmetic only, so a
+target without a floating-point unit pays for no soft-float call there.
+On AArch64 each conversion is one `fcvt` instruction instead. The
+routines are named as libgcc names them where libgcc has them:
+`__extendhfsf2`, `__truncsfhf2` and `__truncdfhf2` on x86-64, and
+`__gnu_h2f_ieee`, `__gnu_f2h_ieee` and `__gnu_d2h_ieee` on ARM. On the
+other targets the names are EmbCC's own, `__embcc_h2f` and the rest, so a
+program linked against another runtime gets a link error naming the
+routine. On macOS the system's compiler-rt provides them.
 
 ### Generic selection
 

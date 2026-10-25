@@ -60,6 +60,9 @@ struct expr {
     double fnum;          /* EXPR_FNUM */
     int imag;             /* EXPR_FNUM: a GNU imaginary constant — its type
                            * is complex and its value 0 + fnum*i */
+    int half_bits;        /* EXPR_CAST between a binary16 VALUE and the
+                           * type it travels between functions as
+                           * (ty_half_carrier): its bits, not its value */
     struct ldf *ldv;      /* EXPR_FNUM of type long double: its exact value
                            * (sema/ldfloat.h); NULL means (long double)fnum */
     const char *name;     /* EXPR_VAR, EXPR_CALL, EXPR_INCDEC target;
@@ -482,6 +485,12 @@ struct func {
      * (ty_scalar_struct_ret): 1 + the local the body uses in its place,
      * which irgen fills from the parameter at entry (sema); 0 otherwise */
     int param_scalar[MAX_PARAMS];
+    /* A binary16 parameter, which arrives as its carrier (ty_half_carrier):
+     * 1 + the local of its own type the body uses, filled at entry from
+     * the bits; 0 otherwise. half_ret: the result leaves as one. */
+    int half_param[MAX_PARAMS];
+    int half_ret;
+    unsigned char half_abi[MAX_PARAMS];  /* a carrier now (half_signature) */
     struct type *param_tys[MAX_PARAMS];
     struct type **var_tys;          /* sema: type of every var slot */
     int *var_aligns;                /* sema: __attribute__((aligned(N))) per

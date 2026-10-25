@@ -194,7 +194,7 @@ static const struct {
     { "_Float128", TOK_KW_FLOAT128 },
     { "__float128", TOK_KW_FLOAT128 },
     { "_Float16", TOK_KW_FLOAT16 },
-    { "__fp16", TOK_KW_FLOAT16 },
+    { "__fp16", TOK_KW_FP16 },
     { "_Bool", TOK_KW_BOOL },
     { "_Complex", TOK_KW_COMPLEX },
     { "__complex__", TOK_KW_COMPLEX },
@@ -947,6 +947,7 @@ static int cxx_number(struct lexer *lx, struct token *t)
         t->kind = TOK_FNUM;
         t->fnum_is_float = !ud && (*suf == 'f' || *suf == 'F');
         t->fnum_is_ld = !ud && (*suf == 'l' || *suf == 'L');
+        t->fnum_is_f16 = 0;
         t->fnum = lit_value(digits, t->fnum_is_float);
         t->fnum_is_imag = 0;
         t->text = digits;
@@ -1248,19 +1249,27 @@ static void lex_raw(struct lexer *lx)
             const char *numend = float_end(lx->p), *fend = numend;
             t->kind = TOK_FNUM;
             t->fnum_is_float = 0;
+            t->fnum_is_f16 = 0;
             t->fnum_is_ld = 0;
             t->fnum_is_imag = 0;
-            /* suffixes: at most one of f/l, and a GNU imaginary i/j on
+            /* suffixes: at most one of f/l/f16, and a GNU imaginary i/j on
              * either side of it (1.0fi, 1.0if, 2.5i) */
             for (;;) {
                 if ((*fend == 'i' || *fend == 'I' || *fend == 'j' ||
                      *fend == 'J') && !t->fnum_is_imag) {
                     t->fnum_is_imag = 1;
+                } else if ((*fend == 'f' || *fend == 'F') && fend[1] == '1' &&
+                           fend[2] == '6' && !t->fnum_is_float &&
+                           !t->fnum_is_ld && !t->fnum_is_f16) {
+                    t->fnum_is_f16 = 1;
+                    fend += 2;
                 } else if ((*fend == 'f' || *fend == 'F') &&
-                           !t->fnum_is_float && !t->fnum_is_ld) {
+                           !t->fnum_is_float && !t->fnum_is_ld &&
+                           !t->fnum_is_f16) {
                     t->fnum_is_float = 1;
                 } else if ((*fend == 'l' || *fend == 'L') &&
-                           !t->fnum_is_float && !t->fnum_is_ld) {
+                           !t->fnum_is_float && !t->fnum_is_ld &&
+                           !t->fnum_is_f16) {
                     t->fnum_is_ld = 1;
                 } else {
                     break;

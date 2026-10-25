@@ -224,7 +224,8 @@ supported. This section lists what is not.
 
 | Construct | Diagnostic |
 |---|---|
-| An object, `sizeof`, cast or call of `_Float16`, `__fp16` (a declaration may name it) | `'h' has incomplete type _Float16`, `sizeof of incomplete _Float16`, `cannot cast to _Float16`, `calling 'g' with incomplete return type _Float16` |
+| A `_Float16` through `...` | `'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, ...` |
+| A struct holding a `_Float16`, by value, with the ARM or RISC-V hard-float convention | `'f': a struct holding a _Float16, passed or returned by value, is not supported yet with the hard-float calling convention, ...` |
 | `_Float128`, `__float128` on x86-64 | ``_Float128 is not supported on x86-64: `long double` here is x87's 80-bit extended format, not IEEE binary128, so it is not the same type`` |
 | `_Float128` on Cortex-M, AVR and Apple arm64 | `_Float128 is not supported on this target: it has no 128-bit floating-point type` |
 | `_BitInt(N)` wider than 64 bits | `_BitInt(65) is wider than BITINT_MAXWIDTH, which is 64 here` |
@@ -640,7 +641,8 @@ audited:
 - `__attribute__((interrupt))` on ARMv7-A, MIPS64, LoongArch64, Xtensa,
   TriCore, PowerPC, RX, SPARC and ColdFire; GCC's MIPS
   `use_shadow_register_set` and `use_debug_exception_return`.
-- `_Float16`, `__fp16`, `asm goto`, nested functions,
+- A `_Float16` through `...`, and a struct of them by value with the
+  ARM or RISC-V hard-float convention; `asm goto`, nested functions,
   `__builtin_setjmp` and sixteen-byte atomics off x86-64 and AArch64
   (see [What each target compiles](../manual/limits.md)).
 - `-S` on Xtensa and RX.

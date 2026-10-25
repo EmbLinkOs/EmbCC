@@ -22,7 +22,8 @@ enum tok_kind {
     TOK_KW_LONG,
     TOK_KW_INT128,    /* GNU __int128 */
     TOK_KW_FLOAT128,  /* _Float128 / __float128 (IEEE binary128) */
-    TOK_KW_FLOAT16,   /* _Float16 / __fp16 (IEEE binary16) */
+    TOK_KW_FLOAT16,   /* _Float16 (IEEE binary16) */
+    TOK_KW_FP16,      /* __fp16: ARM's binary16, promoted to float */
     TOK_KW_FLOAT,
     TOK_KW_DOUBLE,
     TOK_KW_BOOL,
@@ -203,6 +204,8 @@ struct token {
                         * 0 + 2*i, a _Complex int */
     int fnum_is_imag;  /* TOK_FNUM: a GNU imaginary constant (an i/j
                         * suffix, before or after f/l): 0 + this*i */
+    int fnum_is_f16;   /* TOK_FNUM: an f16 suffix -> _Float16 (C23 Annex
+                        * X); `text` holds the digits, rounded once */
     int fnum_is_ld;    /* TOK_FNUM: an 'l' suffix -> long double; `text`
                         * then holds the digits (no suffix), which the
                         * exact conversion needs — a double would lose them */

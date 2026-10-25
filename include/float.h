@@ -67,4 +67,23 @@
 #define LDBL_TRUE_MIN    __LDBL_DENORM_MIN__
 #endif
 
+/* _Float16's (ISO/IEC TS 18661-3, C23 Annex X), on request, as GCC's and
+ * clang's float.h give them */
+#if defined __STDC_WANT_IEC_60559_TYPES_EXT__ && defined __FLT16_MANT_DIG__
+#define FLT16_MANT_DIG    __FLT16_MANT_DIG__
+#define FLT16_DIG         __FLT16_DIG__
+#define FLT16_MIN_EXP     __FLT16_MIN_EXP__
+#define FLT16_MIN_10_EXP  __FLT16_MIN_10_EXP__
+#define FLT16_MAX_EXP     __FLT16_MAX_EXP__
+#define FLT16_MAX_10_EXP  __FLT16_MAX_10_EXP__
+#define FLT16_MAX         __FLT16_MAX__
+#define FLT16_EPSILON     __FLT16_EPSILON__
+#define FLT16_MIN         __FLT16_MIN__
+#define FLT16_DECIMAL_DIG __FLT16_DECIMAL_DIG__
+#define FLT16_TRUE_MIN    __FLT16_DENORM_MIN__
+#if defined __STDC_VERSION__ && __STDC_VERSION__ > 201710L
+#define FLT16_NORM_MAX    __FLT16_NORM_MAX__
+#endif
+#endif
+
 #endif /* _FLOAT_H */
