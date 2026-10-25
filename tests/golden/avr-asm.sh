@@ -99,6 +99,55 @@ cmp -s "$out/p.want" "$out/p.got" || {
     exit 1; }
 pn=$(wc -l < "$out/p.want" | tr -d ' ')
 
+# ---- `.`-relative targets, against llvm-mc's own relocations ----------
+# The disassembly above shows a branch's packing; this shows where it
+# GOES. llvm-mc leaves each branch as a relocation naming its target
+# (.text + addend), so the target EmbCC encoded is compared with it --
+# `.±N` counts from the end of the branch, as GNU as reads it: `rjmp .+0`
+# is the next instruction and `rcall .` avr-gcc's two bytes of stack.
+# (EmbCC once counted from the start, and `rjmp .+0` jumped to itself.)
+cat > "$out/dot.S" <<'EOS'
+rjmp .
+rjmp .+0
+rcall .
+nop
+brne .-4
+rjmp .+2
+nop
+breq .+6
+brcs .-8
+rcall .-2
+1: nop
+rjmp 1b
+rjmp 2f
+nop
+2: nop
+EOS
+"$EMBCC" --target=avr -c "$out/dot.S" -o "$out/dot.o" 2> "$out/dot.err" || {
+    echo "EmbCC could not assemble the dot-relative branches:"
+    head -4 "$out/dot.err"; exit 1; }
+"$MC" -triple=avr -mcpu=atmega328p -filetype=obj "$out/dot.S" \
+    -o "$out/dotref.o" 2>/dev/null || {
+    echo "llvm-mc could not assemble the dot-relative branches"; exit 1; }
+# llvm-mc: "offset target" from each relocation, .text + addend
+llvm-readelf -r "$out/dotref.o" | grep -E 'R_AVR_(7|13)_PCREL' |
+    while read off info type val sym plus add; do
+        echo "$((0x$off)) $((0x$add))"
+    done > "$out/dot.want"
+# EmbCC: "offset target", the target off the disassembly's end-relative
+# displacement
+llvm-objdump -d --triple=avr --mcpu=atmega328p "$out/dot.o" |
+    grep -E '^ +[0-9a-f]+:.*(rjmp|rcall|br[a-z]+)[[:space:]]+\.[+-]' |
+    while read off rest; do
+        o=$((0x${off%:}))
+        d=${rest##*.}
+        echo "$o $((o + 2 + d))"
+    done > "$out/dot.got"
+[ -s "$out/dot.want" ] && cmp -s "$out/dot.want" "$out/dot.got" || {
+    echo "a branch goes somewhere other than llvm-mc sends it (offset target):"
+    diff "$out/dot.want" "$out/dot.got" | head -12; exit 1; }
+dn=$(wc -l < "$out/dot.want" | tr -d ' ')
+
 # ---- a whole source file, end to end ----------------------------------
 # The harness's startup: numeric local labels, a backward branch, lo8()/hi8()
 # against undefined symbols, `call` to an external, lpm and the X/Y/Z
@@ -193,7 +242,8 @@ cmp -s "$out/off.want" "$out/off.got" || {
     echo "a symbol's offset did not survive to the image:"
     diff "$out/off.want" "$out/off.got"; exit 1; }
 
-echo "all $n instruction forms assemble exactly as llvm-mc does, and all $pn
+echo "all $n instruction forms assemble exactly as llvm-mc does, all $dn
+branches go where llvm-mc's relocations send them, and all $pn
 PC-relative forms disassemble as the condition they name -- the half a
 byte comparison cannot grade, because llvm-mc relocates those fields
 instead of encoding them

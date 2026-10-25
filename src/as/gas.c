@@ -1022,6 +1022,15 @@ static const char *gx_operand_end(const char *p)
     return p;
 }
 
+/* What `.` is in a branch's `.±N`, past the instruction's start: on AVR
+ * the end of the (one-word) branch, as GNU as and llvm-mc read `rjmp
+ * .+0` there (src/arch/avr/asm.c want_disp); the start everywhere else.
+ * A label substituted as `.±N` comes off by as much. */
+static long dot_bias(const struct gas *g)
+{
+    return g->tgt->machine == EM_AVR ? 2 : 0;
+}
+
 static char *substitute(struct gas *g, const char *stmt, long pc,
                         int pass, char **ext, int *placeheld)
 {
@@ -1061,7 +1070,16 @@ static char *substitute(struct gas *g, const char *stmt, long pc,
             while (*p && is_symc((unsigned char)*p)) p++;
         }
         size_t n = (size_t)(p - s);
-        /* `.` alone is here: `b .` is a branch to itself */
+        /* `.` alone is here: `b .` is a branch to itself. `.+8` and
+         * `.-4` are already the `.±N` a target's operand takes, and go
+         * as they are: made `.+0+8`, RISC-V refused `j .+8` from a .S
+         * file and AVR branched to the wrong place. */
+        if (n == 1 && s[0] == '.' &&
+            (*skip_ws((char *)p) == '+' || *skip_ws((char *)p) == '-')) {
+            if (len + 2 >= cap) { cap = cap * 2 + 8; out = xrealloc(out, cap); }
+            out[len++] = '.';
+            continue;
+        }
         if (n == 1 && s[0] == '.') {
             if (len + 4 >= cap) { cap = cap * 2 + 8; out = xrealloc(out, cap); }
             memcpy(out + len, ".+0", 3);
@@ -1094,7 +1112,7 @@ static char *substitute(struct gas *g, const char *stmt, long pc,
                 struct sym *ly = sym_find(g, nm, strlen(nm));
                 if (ly && ly->sec >= 0) {
                     char rep[32];
-                    long disp = ly->value - pc;
+                    long disp = ly->value - pc - dot_bias(g);
                     int k = snprintf(rep, sizeof rep, ".%+ld", disp);
                     if (len + (size_t)k + 2 >= cap) {
                         cap = cap * 2 + (size_t)k; out = xrealloc(out, cap);
@@ -1159,7 +1177,7 @@ static char *substitute(struct gas *g, const char *stmt, long pc,
             }
             if (sy && sy->sec >= 0) {          /* a label in this file */
                 char rep[32];
-                long disp = sy->value - pc;
+                long disp = sy->value - pc - dot_bias(g);
                 int k = snprintf(rep, sizeof rep, ".%+ld", disp);
                 if (len + (size_t)k + 2 >= cap) { cap = cap * 2 + (size_t)k;
                                                   out = xrealloc(out, cap); }

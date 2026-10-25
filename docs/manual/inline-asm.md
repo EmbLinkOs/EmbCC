@@ -2573,8 +2573,11 @@ constants. A symbol name is not accepted in an inline template
 (`'buf)' is not a number, a register or an expression this assembler knows`).
 
 The target of a relative branch (`br...`, `rjmp`, `rcall`) must be
-written relative to `.`, the address of the start of the instruction
-(`brne .-4`); a bare number is refused with
+written relative to `.`, which counts from the end of the branch, as GNU
+as and llvm-mc read it for AVR: `rjmp .` and `rjmp .+0` go on to the next
+instruction (avr-gcc's two-cycle nop), `rcall .` pushes the address of the
+next one (the two bytes of stack avr-gcc's prologues take), and `dec r24`
+then `brne .-4` loops back to the `dec`. A bare number is refused with
 ``rjmp needs a target written relative to `.` (a label, or `.+4`); ...``.
 `jmp` and `call` take an absolute, even byte address written as a
 number; a `.`-relative target is refused for them. Labels are not
