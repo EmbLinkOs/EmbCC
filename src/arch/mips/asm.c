@@ -693,6 +693,28 @@ static int stmt_body(const char *stmt, int len, struct code *out,
         mips_add_trap(out, tok_is(&t[0], "sub"), d, a, b);
         return 0;
     }
+    if (n == 2 && tok_is(&t[0], "synci")) {
+        int base;
+        long long off;
+        if (!tok_mem(&t[1], &base, &off))
+            FAIL("synci wants offset(base)");
+        mips_synci(out, base, off);
+        return 0;
+    }
+    if (n == 3 && tok_is(&t[0], "rdhwr")) {
+        int r = tok_reg(&t[1]), hw = tok_reg(&t[2]);
+        if (r < 0 || hw < 0)
+            FAIL("rdhwr wants a register and a hardware register $0..$31");
+        mips_rdhwr(out, r, hw);
+        return 0;
+    }
+    if (n == 2 && tok_is(&t[0], "jr.hb")) {
+        int r = tok_reg(&t[1]);
+        if (r < 0) FAIL("jr.hb wants a register");
+        mips_jr_hb(out, r);
+        *xfer = 1;
+        return 0;
+    }
     if (n == 3 && tok_is(&t[0], "cache")) {
         int base;
         long long off;
@@ -1446,6 +1468,8 @@ void mipsasm_vocabulary(FILE *f)
     fprintf(f, "\tins $s0, $zero, 4, 8\n\tins $v0, $a3, 0, 1\n");
     fprintf(f, "\tmfc0 $t0, $12\n\tmfc0 $a0, $15, 1\n\tmtc0 $t1, $12, 0\n");
     fprintf(f, "\tmtc0 $zero, $13, 7\n\tteq $a0, $zero\n\tteq $t0, $t1, 7\n");
+    fprintf(f, "\tsynci 0($a0)\n\tsynci -32($t9)\n\tsynci 32767($sp)\n");
+    fprintf(f, "\trdhwr $v1, $1\n\trdhwr $t0, $29\n\tjr.hb $ra\n\tjr.hb $t9\n");
     for (const struct br_ent *e = br_tab; e->name; e++) {
         const char *regs = e->nregs == 2 ? "$a0, $t1, "
                          : e->nregs != 0 ? "$s2, " : "";
