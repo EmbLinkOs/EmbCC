@@ -647,6 +647,8 @@ int pass_divmod(struct ir_func *fn)
      * preq -- a DIV into the given fresh q is inserted before this MOD,
      * which then becomes a - q*b; movq -- this DIV becomes a copy of q */
     int *mulq = NULL, *preq = NULL, *movq = NULL;
+    int thumb_k = target_get() == TARGET_THUMB &&
+                  !getenv("EMBCC_NO_DIVMOD_CONST");
     for (int n = 0; n < fn->nins; n++) {
         struct ir_ins *i = &fn->ins[n];
         if (i->op == IR_LABEL || i->op == IR_ASM || i->op == IR_LANDING) {
@@ -659,8 +661,7 @@ int pass_divmod(struct ir_func *fn)
          * remainder is `udiv; mls` either way: paired, the quotient's
          * udiv is shared and `a - q*b` is one mls, because the multiply
          * keeps its constant in a register for it (mla_keeps_reg). */
-        int kok = target_get() == TARGET_THUMB && i->w == 4 &&
-                  !getenv("EMBCC_NO_DIVMOD_CONST");
+        int kok = thumb_k && i->w == 4;
         int pairable = (i->op == IR_MOD || i->op == IR_DIV) && !i->flt &&
                        !i->imm_b && (i->w == 4 || i->w == 8) &&
                        i->a >= 0 && i->b >= 0 && i->dst >= 0 &&

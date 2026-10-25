@@ -138,10 +138,10 @@ the sections nothing reaches, on every machine, for objects built with
 
 | Input or output | x86-64 | Every other target |
 |---|---|---|
-| `.s` and `.S` files (GNU syntax) | Refused: `no assembly-file support for x86_64-elf yet; its instruction encoder exists (inline __asm__ works) but this driver has not been wired to it` | Assembled, with GNU as's directives, macros, conditionals, sections, expressions, literal pools and branch relaxation; ARM's CMSIS and ST's startup files assemble to clang's object ([embas](../manual/tools/embas.md#gnu-syntax-assembly)) |
+| `.s` and `.S` files (GNU syntax) | Refused: `no assembly-file support for x86_64-elf yet; its instruction encoder exists (inline __asm__ works) but this driver has not been wired to it` | Assembled, with GNU as's directives, macros, conditionals, sections, expressions, literal pools and branch relaxation; ARM's CMSIS and ST's startup files assemble to clang's object. On AArch64 the instructions are those of its inline-asm vocabulary, the kernel's (no `ldp`/`stp` or arithmetic yet) ([embas](../manual/tools/embas.md#gnu-syntax-assembly)) |
 | `.asm` files (NASM syntax) | Assembled | Assembled as x86-64; see [Known defects](#known-defects) |
 | `-S` | `.byte` directives with the disassembly in comments | Refused on Xtensa and RX (see [What each target compiles](../manual/limits.md#-s-assembly-output)); elsewhere `.byte` directives without mnemonics; on MIPS a relocated instruction is written symbolically (`jal f`, `lui $2, %hi(g)`), because llvm-mc's MIPS `.reloc` knows none of those relocations |
-| File-scope `__asm__` | Labels, `.globl`, `.byte`/`.long`/`.quad` and the instructions `and`, `call`, `jmp`, `ret` | AArch64: labels, `.globl` and data directives, no instruction. Every other target: the GNU-syntax assembler's whole language, as in a `.S` file, into `.text` |
+| File-scope `__asm__` | Labels, `.globl`, `.byte`/`.long`/`.quad` and the instructions `and`, `call`, `jmp`, `ret` | Every other target: the GNU-syntax assembler, as in a `.S` file, into `.text`. On AArch64 its vocabulary is the kernel's: the system instructions, `mov`, `cmp`, `ldr`, `b`, `br`, `cbz`, `ret`, `nop`, `.inst`; no `ldp`/`stp` or arithmetic yet. Into Mach-O (Apple arm64) a block holds labels and data only |
 
 Any other instruction in a file-scope `asm` block is refused. On x86-64:
 
@@ -149,11 +149,12 @@ Any other instruction in a file-scope `asm` block is refused. On x86-64:
 file-scope asm instruction not supported: "movq %rdi, %rax" (EmbCC assembles .global/labels/.byte/.long/.quad and and/call/jmp/ret)
 ```
 
-On AArch64, every instruction is refused, including the four that
-x86-64 accepts:
+On Apple arm64, every instruction in a block is refused, including the
+four that x86-64 accepts, because the Mach-O writer takes no relocation
+type from an assembler:
 
 ```text
-file-scope asm instruction "ret": EmbCC assembles instructions for x86-64 only. On this target write the block as .byte/.long data (see lib/libc/src/setjmp).
+file-scope asm instruction "ret": EmbCC assembles a block's instructions on x86-64 (a few) and on every ELF target, not yet into Mach-O objects. On this target write the block as .byte/.long data (see lib/libc/src/setjmp).
 ```
 
 Inline `asm` inside a function is assembled on every target; its
@@ -275,7 +276,7 @@ implement, so they are errors:
 
 | Attribute | Diagnostic |
 |---|---|
-| `naked` (x86-64 and AArch64; supported on Cortex-M, RISC-V, MIPS32 and AVR) | `__attribute__((naked)) is not supported: on this target the body could only be assembled by the file-scope assembler's few instructions; it is supported on the ARM, RISC-V, MIPS and AVR targets` |
+| `naked` (x86-64 and Apple arm64; supported on every other target) | `__attribute__((naked)) is not supported: on this target the body could only be assembled by the file-scope assembler's few instructions; it is supported on every target but x86-64 and AArch64 for Darwin or Windows` |
 | `interrupt` (except on Cortex-M, AVR, RISC-V and MIPS32) | `__attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V and MIPS32 it is implemented)` |
 | `interrupt("user")` (RISC-V) | `__attribute__((interrupt("user"))) is not supported: user-mode interrupts (the N extension and its uret) were never ratified and are gone from the privileged spec, and GCC and clang no longer accept them` |
 | `keep_interrupts_masked` (except on MIPS32) | `__attribute__((keep_interrupts_masked)) is not supported: it modifies a MIPS interrupt handler, and only the MIPS32 target implements those` |
@@ -633,8 +634,9 @@ audited:
 - Debug information, thread-local storage and constructors in Mach-O
   and COFF objects; the Microsoft x64 data model and callee-saved
   registers; `.pdata`/`.xdata` unwind tables for Windows.
-- GNU-syntax assembly files for x86-64, and instructions in a
-  file-scope `asm` block on AArch64.
+- GNU-syntax assembly files for x86-64; on AArch64, an assembler for the
+  whole instruction set (its vocabulary is the kernel's), and blocks in
+  Mach-O objects.
 - Unwind tables, and so C++ exceptions, on every target but x86-64 and
   AArch64.
 - `__attribute__((interrupt))` on ARMv7-A, MIPS64, LoongArch64, Xtensa,

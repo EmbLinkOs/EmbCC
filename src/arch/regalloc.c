@@ -446,13 +446,43 @@ void ra_lset_del(struct ra_lset *s, int v)
         s->chg(v, 0, s->chg_ctx);
 }
 
-/* Make s the set live out of block b: live after its last instruction. */
+/* Make s the set live out of block b: live after its last instruction.
+ * The members come out in the block's order, as they always have (the
+ * interference graph's lists are built in it), but `chg` hears only of
+ * what changed: the set live into the block after it is mostly the same
+ * one, and a value held across a chain of 32,768 tests was removed and
+ * added again at every block -- Thumb's per-register counts (lo_cnt_chg)
+ * were most of the compile. */
 void ra_lset_out(struct ra_lset *s, const struct ra_live *lv, int b)
 {
-    while (s->n > 0)
-        ra_lset_del(s, s->mem[s->n - 1]);
-    for (int k = lv->out_off[b]; k < lv->out_off[b + 1]; k++)
-        ra_lset_add(s, lv->out_v[k]);
+    enum { KEPT = 1 << 30 };          /* above any position: nvr < 2^30 */
+    int lo = lv->out_off[b], hi = lv->out_off[b + 1];
+    for (int k = lo; k < hi; k++) {
+        int v = lv->out_v[k];
+        if (v >= 0 && v < s->nvr && s->pos[v] >= 0)
+            s->pos[v] |= KEPT;
+    }
+    for (int k = 0; k < s->n; k++) {    /* -2: a member that stays */
+        int v = s->mem[k];
+        if (s->pos[v] & KEPT) {
+            s->pos[v] = -2;
+            continue;
+        }
+        s->pos[v] = -1;
+        if (s->chg)
+            s->chg(v, 0, s->chg_ctx);
+    }
+    s->n = 0;
+    for (int k = lo; k < hi; k++) {
+        int v = lv->out_v[k];
+        if (v < 0 || v >= s->nvr || s->pos[v] >= 0)
+            continue;
+        int was = s->pos[v] == -2;
+        s->pos[v] = s->n;
+        s->mem[s->n++] = v;
+        if (!was && s->chg)
+            s->chg(v, 1, s->chg_ctx);
+    }
 }
 
 static void ra_lset_use_cb(int v, void *ctx) { ra_lset_add(ctx, v); }
@@ -2371,12 +2401,18 @@ int ra_fold_memoff(struct ir_func *fn, long lo, long hi, int w_addr,
     int *defs = xcalloc((size_t)nv, sizeof *defs);
     int *uses = xcalloc((size_t)nv, sizeof *uses);
     int *addr_uses = xcalloc((size_t)nv, sizeof *addr_uses);
+    int *defat = xmalloc((size_t)nv * sizeof *defat);  /* the first def */
     char *drop = xcalloc((size_t)(fn->nins ? fn->nins : 1), 1);
+    for (int v = 0; v < nv; v++)
+        defat[v] = -1;
     for (int v = 0; v < fn->nparams && v < nv; v++)
         defs[v]++;
     for (int n = 0; n < fn->nins; n++) {
         int d = ra_ins_def(&fn->ins[n]);
-        if (d >= 0 && d < nv) defs[d]++;
+        if (d >= 0 && d < nv) {
+            defs[d]++;
+            if (defat[d] < 0) defat[d] = n;
+        }
     }
     ra_count_vreg_uses(fn, uses);
     /* The loads and stores whose address each vreg is, in a list per
@@ -2436,13 +2472,8 @@ int ra_fold_memoff(struct ir_func *fn, long lo, long hi, int w_addr,
             if (x < fn->nvars || x >= nv || defs[x] != 1 || uses[x] != 1 ||
                 y < 0 || y >= nv || x == y)
                 continue;
-            int dx = -1;
-            for (int m = 0; m < n; m++)
-                if (fn->ins[m].dst == x && ra_ins_def(&fn->ins[m]) == x) {
-                    dx = m;
-                    break;
-                }
-            if (dx < 0)
+            int dx = defat[x];      /* x's one definition, before the sum */
+            if (dx < 0 || dx >= n || fn->ins[dx].dst != x)
                 continue;
             const struct ir_ins *a = &fn->ins[dx];
             int base = a->a;
@@ -2451,22 +2482,17 @@ int ra_fold_memoff(struct ir_func *fn, long lo, long hi, int w_addr,
                 base < 0 || base >= nv || defs[base] != 1 || base == q)
                 continue;
             int ok = 1;
-            for (int m = 0; m < fn->nins && ok; m++) {
+            for (int m = ahead[q]; m >= 0 && ok; m = anext[m]) {
                 const struct ir_ins *u = &fn->ins[m];
-                if ((u->op == IR_LOAD || u->op == IR_STORE) && u->a == q) {
-                    long off = (long)u->memoff + k;
-                    if (off < lo || off > hi - u->size ||
-                        (short_k && off > (long)short_k * u->size))
-                        ok = 0;
-                }
+                long off = (long)u->memoff + k;
+                if (off < lo || off > hi - u->size ||
+                    (short_k && off > (long)short_k * u->size))
+                    ok = 0;
             }
             if (!ok)
                 continue;
-            for (int m = 0; m < fn->nins; m++) {
-                struct ir_ins *u = &fn->ins[m];
-                if ((u->op == IR_LOAD || u->op == IR_STORE) && u->a == q)
-                    u->memoff += (int)k;
-            }
+            for (int m = ahead[q]; m >= 0; m = anext[m])
+                fn->ins[m].memoff += (int)k;
             if (side) i->b = base; else i->a = base;
             uses[x]--;
             uses[base]++;
@@ -2530,7 +2556,7 @@ int ra_fold_memoff(struct ir_func *fn, long lo, long hi, int w_addr,
             if (!drop[n]) fn->ins[j++] = fn->ins[n];
         fn->nins = j;
     }
-    free(defs); free(uses); free(addr_uses); free(drop);
+    free(defs); free(uses); free(addr_uses); free(drop); free(defat);
     free(ahead); free(anext);
     return changed;
 }

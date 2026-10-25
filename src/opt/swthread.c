@@ -199,6 +199,19 @@ static int swt_falls(struct ir_func *fn, const struct bb *b)
            op != IR_SWITCH && op != IR_IGOTO;
 }
 
+/* Does block b fall off the end of the function -- the implicit return
+ * of a function whose closing brace is reachable? That is a way out
+ * build_cfg lists no successor for: the last block, ending in `brnz c
+ * -> L`, has the one successor L and returns when c is zero. So it is
+ * no latch (the copy would drop the branch, "both ways lead on", and
+ * with it the return), and no block of the path (the copy branches
+ * the other way, to the block after it, which does not exist: it read
+ * past blabel and branched to label 0 or -1). So it is not copied. */
+static int swt_off_end(struct ir_func *fn, const struct bb *bb, int nbb, int b)
+{
+    return b == nbb - 1 && swt_falls(fn, &bb[b]);
+}
+
 /* An arrival: block p reaches block h (the path's head, or a latch) and
  * is sent to copy g instead. A copy: block blk (-1: the whole path to the
  * switch) for the case whose label is target. */
@@ -449,7 +462,7 @@ static int swt_one(struct ir_func *fn, int *budget)
     int *bsize = xmalloc((size_t)nbb * sizeof *bsize);
     for (int b = 0; b < nbb; b++) {
         bsize[b] = 0;
-        if (!swt_copyable(fn, &bb[b], &bsize[b]))
+        if (!swt_copyable(fn, &bb[b], &bsize[b]) || swt_off_end(fn, bb, nbb, b))
             bsize[b] = -1;
     }
 

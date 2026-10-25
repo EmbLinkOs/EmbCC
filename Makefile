@@ -108,6 +108,12 @@ PLATFORM ?= posix
 ifeq ($(filter posix iso,$(PLATFORM)),)
 $(error PLATFORM=$(PLATFORM) is not a host layer: EmbCC builds with PLATFORM=posix (the default) or PLATFORM=iso; if it came from the environment, unset it or say make PLATFORM=posix)
 endif
+# The POSIX layer runs the compiler on a thread with a big stack
+# (plat_run_on_stack): libpthread for a glibc older than 2.34, where the
+# threads are not yet in libc; macOS and newer glibc take -lpthread too.
+ifeq ($(PLATFORM),posix)
+PLATFORM_LIBS ?= -lpthread
+endif
 # Whether the host can run a program (src/platform/platform.h): `spawn` is
 # POSIX's posix_spawn, macOS and Linux; `none` is EmbLinkOS (no fork/exec)
 # and any host with only a C library, and the default with PLATFORM=iso.
@@ -438,7 +444,7 @@ platform-changed:
 	@mkdir -p $(BUILD); echo $(LINK_CONFIG) > $(PLATFORM_STAMP)
 
 embcc: $(OBJS) $(EMBDBG_CORE) $(PLATFORM_CHANGED)
-	$(CC) $(CFLAGS) -o $@ $(OBJS) $(EMBDBG_CORE)
+	$(CC) $(CFLAGS) -o $@ $(OBJS) $(EMBDBG_CORE) $(PLATFORM_LIBS)
 
 # The same compiler, linked INSIDE the object directory rather than at
 # ./embcc. tests/golden/host-agnostic.sh builds EmbCC twice, with two
@@ -448,7 +454,7 @@ embcc: $(OBJS) $(EMBDBG_CORE) $(PLATFORM_CHANGED)
 # own: `make CC=clang BUILD=/tmp/x /tmp/x/embcc`. The stamp too, so a
 # second TARGETS= into the same BUILD relinks it.
 $(BUILD)/embcc: $(OBJS) $(EMBDBG_CORE) $(PLATFORM_CHANGED)
-	$(CC) $(CFLAGS) -o $@ $(OBJS) $(EMBDBG_CORE)
+	$(CC) $(CFLAGS) -o $@ $(OBJS) $(EMBDBG_CORE) $(PLATFORM_LIBS)
 
 # embas — the standalone NASM/Intel-syntax assembler (A1, ARCHITECTURE §4). Reads
 # the kernel's hand-written .asm and emits ELF objects the same writer (src/elf)

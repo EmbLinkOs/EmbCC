@@ -287,14 +287,21 @@ int pass_cfgclean(struct ir_func *fn)
         if (fn->ins[n].op == IR_LABEL && fn->ins[n].label >= 0 &&
             fn->ins[n].label < fn->nlabels)
             at[fn->ins[n].label] = n;
+    /* the last of each run of labels on one spot: a switch's 100,000
+     * stacked `case` labels (GCC's limits-caselabels.c) were each walked
+     * past by every label of the run, quadratically */
+    int *last = xmalloc((size_t)fn->nins * sizeof *last);
+    for (int n = fn->nins - 1; n >= 0; n--)
+        last[n] = fn->ins[n].op == IR_LABEL && n + 1 < fn->nins &&
+                  fn->ins[n + 1].op == IR_LABEL ? last[n + 1] : n;
     for (int l = 0; l < fn->nlabels; l++) {
         int n = at[l];
         if (n < 0) continue;
-        /* skip any further labels on the same spot */
-        while (n + 1 < fn->nins && fn->ins[n + 1].op == IR_LABEL) n++;
+        n = last[n];                   /* past the labels on the same spot */
         if (n + 1 < fn->nins && fn->ins[n + 1].op == IR_JMP)
             fwd[l] = fn->ins[n + 1].label;
     }
+    free(last);
     /* Follow the chains, with a bound: `L: goto L` is a real loop and
      * must not be collapsed into itself. */
     for (int l = 0; l < fn->nlabels; l++) {
@@ -563,6 +570,29 @@ int pass_brdom(struct ir_func *fn)
     compute_idom(bb, order, norder);
     char *dead = xcalloc((size_t)fn->nins, 1);
     int changed = 0;
+    /* The blocks that end in a branch on each value, so a branch looks at
+     * those of its own value, not at every dominator: a chain of tests on
+     * different values walked the whole chain from each (quadratic, GCC's
+     * 20001226-1.c). A single-definition value is tested by a block or
+     * two. They are tried nearest first -- the deepest dominator -- which
+     * is the order the walk up met them in. */
+    int *vhead = xmalloc((size_t)(fn->nvregs ? fn->nvregs : 1) * sizeof *vhead);
+    int *vnext = xmalloc((size_t)(nbb ? nbb : 1) * sizeof *vnext);
+    int *cand = xmalloc((size_t)(nbb ? nbb : 1) * sizeof *cand);
+    for (int v = 0; v < fn->nvregs; v++)
+        vhead[v] = -1;
+    for (int D = 0; D < nbb; D++) {
+        int ed = bb[D].end - 1;
+        vnext[D] = -1;
+        if (ed < bb[D].start)
+            continue;
+        const struct ir_ins *j = &fn->ins[ed];
+        if ((j->op == IR_BRZ || j->op == IR_BRNZ) && j->a >= 0 &&
+            j->a < fn->nvregs) {
+            vnext[D] = vhead[j->a];
+            vhead[j->a] = D;
+        }
+    }
     for (int b = 0; b < nbb; b++) {
         int e = bb[b].end - 1;
         if (e < bb[b].start)
@@ -571,11 +601,23 @@ int pass_brdom(struct ir_func *fn)
         if ((i->op != IR_BRZ && i->op != IR_BRNZ) || i->a < 0 ||
             i->a >= fn->nvregs || d.cnt[i->a] != 1)
             continue;
-        int v = i->a;
-        for (int D = bb[b].idom; D >= 0 && D != b; D = bb[D].idom) {
+        int v = i->a, nc = 0;
+        for (int D = vhead[v]; D >= 0; D = vnext[D])
+            if (D != b && bb_dominates(bb, D, b))
+                cand[nc++] = D;
+        for (int x = 1; x < nc; x++) {      /* deepest first: by dpre, down */
+            int t = cand[x], y = x - 1;
+            while (y >= 0 && bb[cand[y]].dpre < bb[t].dpre) {
+                cand[y + 1] = cand[y];
+                y--;
+            }
+            cand[y + 1] = t;
+        }
+        for (int c = 0; c < nc; c++) {
+            int D = cand[c];
             int ed = bb[D].end - 1;
-            const struct ir_ins *j = ed >= bb[D].start ? &fn->ins[ed] : NULL;
-            if (j && (j->op == IR_BRZ || j->op == IR_BRNZ) && j->a == v &&
+            const struct ir_ins *j = &fn->ins[ed];   /* may be a JMP by now */
+            if ((j->op == IR_BRZ || j->op == IR_BRNZ) && j->a == v &&
                 j->label >= 0 && l2b[j->label] >= 0) {
                 int T = l2b[j->label], F = D + 1 < nbb ? D + 1 : -1;
                 int dt = bb[T].npred == 1 && bb_dominates(bb, T, b);
@@ -603,10 +645,9 @@ int pass_brdom(struct ir_func *fn)
                     break;
                 }
             }
-            if (D == 0)
-                break;
         }
     }
+    free(vhead); free(vnext); free(cand);
     if (changed) {
         int *newpos = fn->var_scope_lo
             ? xmalloc((size_t)(fn->nins + 1) * sizeof *newpos) : NULL;
