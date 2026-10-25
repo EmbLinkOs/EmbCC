@@ -856,6 +856,39 @@ int pass_fold(struct ir_func *fn)
             }
             continue;
         }
+        /* A conversion back to exactly what an exact widening started
+         * from is that value: (float)(double)x, (int)(double)i for an int
+         * of 32 bits or fewer (the double's 53-bit significand holds it),
+         * at the same signedness. msun's float functions take creal of a
+         * float complex into a float, which was __extendsfdf2 and
+         * __truncdfsf2 on every soft-float target. A signalling NaN is
+         * not quieted on the way, as GCC and clang do not quiet it
+         * either. The source must have one definition, so that it cannot
+         * have changed in between. */
+        if ((i->op == IR_F2F || i->op == IR_F2I) && i->a >= 0 &&
+            i->a < fn->nvregs && d.cnt[i->a] == 1 && d.ins[i->a] >= 0 &&
+            !getenv("EMBCC_NO_FOLD_ROUNDTRIP")) {
+            const struct ir_ins *in = &fn->ins[d.ins[i->a]];
+            int src = in->a;
+            int src_ok = src >= 0 && src < fn->nvregs && src != i->a &&
+                         d.cnt[src] == 1;
+            /* significand bits of a float of width w; 64 for long double,
+             * the narrower of x87's and binary128's */
+            int mant = in->w == 4 ? 24 : in->w == 8 ? 53 : 64;
+            if (src_ok && i->op == IR_F2F && in->op == IR_F2F &&
+                in->w > in->size && i->size == in->w && i->w == in->size) {
+                to_mov(i, src);
+                changed = 1;
+                continue;
+            }
+            if (src_ok && i->op == IR_F2I && in->op == IR_I2F &&
+                i->size == in->w && i->w == in->size && i->sign == in->sign &&
+                in->size * 8 <= mant) {
+                to_mov(i, src);
+                changed = 1;
+                continue;
+            }
+        }
         if (i->op == IR_EXT) {
             if (ka) {
                 to_const(i, fold_ext(A, i->size, i->sign, i->w));
