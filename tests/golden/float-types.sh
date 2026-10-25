@@ -14,13 +14,10 @@
 #                         explicit integer bit -- so it is NOT that type
 #                         and is refused by name. On ARMv7-M long double
 #                         is plain double, so there is no such type.
-#   _Float16 / __fp16     does not exist here at any width. It is an
-#                         incomplete type: a declaration may name it
-#                         (macOS's <math.h> declares __fabsf16 and its
-#                         kin), and an object, a call, a sizeof or a cast
-#                         is refused rather than widened to float, which
-#                         would give 24 bits of mantissa where the
-#                         program asked for 11 (THE RULE).
+#   _Float16 / __fp16     IEEE binary16 on every target, two bytes and
+#                         distinct types (tests/exec/float16.c checks
+#                         their arithmetic); a complex one, and a
+#                         _Float16 through `...`, are refused by name.
 set -u
 echo "TEST-MARKER float-types"
 . "$(dirname "$0")/../lib.sh"
@@ -109,23 +106,28 @@ else
     echo "SKIP the binary128 run: it belongs to the aarch64 matrix run"
 fi
 
-# ---- _Float16: declared, never a value, at every target ----------------
-printf '_Float16 h;\n'        > "$out/h1.c"
-printf '__fp16 h;\n'          > "$out/h2.c"
-printf 'extern _Float16 g(_Float16);\nextern _Float16 *p;\nint f(void) { return (int)sizeof(_Float16); }\n' > "$out/h3.c"
-printf 'extern _Float16 g(_Float16);\nextern _Float16 *p;\nvoid f(void) { g(*p); }\n' > "$out/h4.c"
-printf 'int f(float x) { return (int)(_Float16)x; }\n' > "$out/h5.c"
-for f in h1 h2 h3 h4 h5; do
+# ---- _Float16: binary16, at every target --------------------------------
+printf '%s\n' '_Float16 h; __fp16 p;' \
+    '_Static_assert(sizeof h == 2 && sizeof p == 2, "two bytes");' \
+    '_Static_assert(_Generic(h, _Float16: 1, default: 0), "a type");' \
+    '_Static_assert(_Generic(p, __fp16: 1, default: 0), "its own");' \
+    '_Static_assert(sizeof(h + h) == 2 && sizeof(p + p) == 4, "promotion");' \
+    > "$out/h1.c"
+for t in thumbv7em-none-eabi riscv32-unknown-elf avr x86_64-elf; do
+    "$EMBCC" --target=$t -fsyntax-only "$out/h1.c" 2> "$out/h1.err" || {
+        cat "$out/h1.err"; echo "$t: _Float16 and __fp16 are not two-byte types"
+        exit 1; }
+done
+printf '_Complex _Float16 z;\n' > "$out/h2.c"
+printf 'void g(int, ...);\nvoid f(_Float16 h) { g(1, h); }\n' > "$out/h3.c"
+for f in h2 h3; do
     if "$EMBCC" -fsyntax-only "$out/$f.c" 2> "$out/$f.err"; then
-        echo "$f: a value of a 16-bit float type was accepted, and none exists"; exit 1
+        echo "$f: was accepted"; exit 1
     fi
-    grep -q 'incomplete.* _Float16\|cannot cast to _Float16' "$out/$f.err" || {
-        echo "$f: the refusal does not name _Float16:"
+    grep -q '_Complex _Float16 is not supported yet\|through .\.\.\.. is not supported yet' \
+        "$out/$f.err" || { echo "$f: refused for another reason:"
         head -2 "$out/$f.err"; exit 1; }
 done
-printf 'extern _Float16 g(_Float16);\nextern __fp16 *p;\nextern _Float16 v;\nint f(void) { return p != 0; }\n' > "$out/h6.c"
-"$EMBCC" -fsyntax-only "$out/h6.c" 2> "$out/h6.err" || {
-    cat "$out/h6.err"; echo "h6: a declaration naming _Float16 was refused"; exit 1; }
 # the same rule for any incomplete type: a call returning or passing one
 # copies a value nobody has the size of. It compiled, and moved nothing.
 printf 'struct S;\nextern struct S s;\nextern struct S k(struct S);\nvoid f(void) { k(s); }\n' > "$out/inc.c"
@@ -140,7 +142,7 @@ if "$EMBCC" -fsyntax-only "$out/inc2.c" 2> "$out/inc2.err"; then
 fi
 grep -q "argument 1 has incomplete type struct S" "$out/inc2.err" || {
     cat "$out/inc2.err"; echo "the incomplete argument was refused for another reason"; exit 1; }
-echo "_Float16 and __fp16 may be declared; an object, a sizeof, a cast or a call is refused by name, as is a call with any incomplete type"
+echo "_Float16 and __fp16 are two-byte types of their own on four targets; a complex one and one through ... are refused by name, as is a call with any incomplete type"
 
 # ---- _Generic as a constant expression --------------------------------
 # It folds in the PARSER now, which is where a static assertion and an

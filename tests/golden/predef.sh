@@ -35,7 +35,10 @@ for arch in x86_64 aarch64 thumb thumbv6m thumbv8m thumbv8mbase armv7a riscv32 r
         sparc32)        triple=sparc-none-elf ;;
         *)              triple=$arch-elf ;;
     esac
-    out=$("$EMBCC" --target=$triple --dump-predef) || {
+    # (less __FLT16_* and __BFLT16_*: _Float16 and __bf16 are EmbCC's on
+    # every target, where most of the reference compilers have neither,
+    # and src/arch/predef.c adds their description to those tables)
+    out=$("$EMBCC" --target=$triple --dump-predef | grep -v '^#define __B*FLT16_') || {
         echo "--target=$triple --dump-predef exited nonzero"; exit 1; }
     # (a reference of another release than the table's is no reference:
     # tools/gen-predef.sh --reference-check says why)
@@ -43,7 +46,7 @@ for arch in x86_64 aarch64 thumb thumbv6m thumbv8m thumbv8mbase armv7a riscv32 r
     why=$(sh tools/gen-predef.sh --reference-check "$arch") &&
         sh tools/gen-predef.sh --reference "$arch" >/dev/null 2>&1 && gcc=yes
     if [ "$gcc" = yes ]; then
-        ref=$(sh tools/gen-predef.sh --reference "$arch")
+        ref=$(sh tools/gen-predef.sh --reference "$arch" | grep -v '^#define __B*FLT16_')
         if [ "$out" != "$ref" ]; then
             echo "$arch table disagrees with its reference gcc:"
             printf '%s\n' "$out" > "${TMPDIR:-/tmp}/predef.embcc.$$"

@@ -473,7 +473,9 @@ const struct predef_macro *predef_table(int *count)
     int dsp = thumb_dsp();
     int avr = avr_other_part();
     int pic32 = target_pic32_part() != NULL;
-    int f16 = !table_has(arch, narch, "__FLT16_MANT_DIG__");
+    /* (C only: the C++ front end has no _Float16, and libstdc++ declares
+     * one where __FLT16_MANT_DIG__ says it may) */
+    int f16 = !predef_is_cxx() && !table_has(arch, narch, "__FLT16_MANT_DIG__");
     if (!os && !fpu && !cmse && !rv && !dsp && !avr && !pic32 && !f16 &&
         target_fmt_get() == TGT_FMT_ELF) {
         *count = narch;

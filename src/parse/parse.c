@@ -1431,11 +1431,14 @@ static struct type *parse_stars(struct parser *ps, struct type *t);
 static struct expr *parse_cond(struct parser *ps);
 static struct expr *parse_expr(struct parser *ps);
 
-/* A _FloatN keyword's token (lex.c keeps its spelling for these) */
+/* A _FloatN keyword's token (lex.c keeps its spelling for these) that
+ * glibc may typedef for an older compiler (`typedef float _Float32;`).
+ * Not _Float16, a type of its own here, which `_Complex _Float16` must
+ * reach as one. */
 static int float_n_name(const struct token *t)
 {
     return (t->kind == TOK_KW_FLOAT || t->kind == TOK_KW_DOUBLE ||
-            t->kind == TOK_KW_FLOAT128 || t->kind == TOK_KW_FLOAT16) &&
+            t->kind == TOK_KW_FLOAT128) &&
            t->text && !strncmp(t->text, "_Float", 6);
 }
 static void mark_transparent(struct parser *ps, struct type *t);
