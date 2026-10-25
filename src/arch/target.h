@@ -358,6 +358,7 @@ int ppc_op_calls_helper(const struct ir_ins *i);    /* src/arch/ppc/codegen.c */
 int rx_op_calls_helper(const struct ir_ins *i);     /* src/arch/rx/codegen.c */
 int sparc_op_calls_helper(const struct ir_ins *i);  /* src/arch/sparc/codegen.c */
 int cf_op_calls_helper(const struct ir_ins *i);     /* src/arch/coldfire/codegen.c */
+int avr_op_calls_helper(const struct ir_ins *i);    /* src/arch/avr/codegen.c */
 
 /* Whether an unsigned 32-bit integer is WIDENED to 64 bits before a
  * conversion to or from floating point.

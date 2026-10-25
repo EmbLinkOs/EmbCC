@@ -139,7 +139,7 @@ static const struct backend_desc g_backends[] = {
 #if FAMILY_BUILT(avr)
     [TARGET_AVR] = {
         .family = "AVR", .codegen = codegen_unit_avr, .ra_at_o0 = 1,
-        .op_calls_helper = NULL,
+        .op_calls_helper = avr_op_calls_helper,
         .unwind_unwritten = "AVR .eh_frame",
         .cxx_exceptions = BACKEND_CXX_EXC_NONE,
         .firmware = 1, .ld_scripts = 1,

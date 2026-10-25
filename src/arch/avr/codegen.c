@@ -5124,6 +5124,14 @@ static int a_calls_helper(const struct ir_ins *i)
            i->op == IR_MOD;
 }
 
+/* ...and the optimizer's question, which the backend table hands it:
+ * unregistered, it heard that nothing on AVR calls a helper -- a divide
+ * included -- and decided by that (pass_divmagic, the unroller). */
+int avr_op_calls_helper(const struct ir_ins *i)
+{
+    return a_calls_helper(i);
+}
+
 static const char *a_saved_only(const struct ir_func *fn)
 {
     return g_a_novol && fn->nvregs <= g_a_nvr ? g_a_novol : NULL;
