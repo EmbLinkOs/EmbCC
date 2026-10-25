@@ -174,8 +174,8 @@ refc "__builtin_return_address(1)" 'only level 0' \
 refc "__builtin_frame_address(1)" 'only level 0' \
     'void *f(void){ return __builtin_frame_address(1); }'
 refc "__int128" '__int128 does not exist on this target' '__int128 x;'
-refc "an interrupt handler" '__attribute__((interrupt)) is not supported' \
-    'void __attribute__((interrupt("IRQ"))) f(void){}'
+# (an interrupt handler compiles: tests/golden/arm-a32-isr.sh, which
+# refuses its bad forms)
 refc "an M-profile special register in asm" 'the M-profile special registers do not exist here' \
     'int f(void){ int r; __asm__ volatile("mrs %0, primask" : "=r"(r)); return r; }'
 refc "cbz in asm" 'cbz is a Thumb instruction' \
@@ -198,7 +198,7 @@ grep -q 'C++ exceptions are not supported for armv7a-none-eabi' "$out/cxx.err" |
 "$EMBCC" --target=$T -fno-exceptions -c "$out/c.cc" -o /dev/null || {
     echo "C++ with -fno-exceptions was refused"; exit 1; }
 echo "the frame and return address above level 0, __int128,"
-echo "interrupt functions, an over-aligned scalar, Thumb and M-profile asm, a"
+echo "an over-aligned scalar, Thumb and M-profile asm, a"
 echo "condition on a sequence and C++ exceptions are each refused by name"
 
 # ---- and what ARM state does accept in asm, run through llvm-mc ----------

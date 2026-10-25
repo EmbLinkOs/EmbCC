@@ -8357,7 +8357,16 @@ static void check_func(struct unit *u, struct func *f)
                       target_get() == TARGET_RISCV64 ||
                       target_is_mips() ||
                       target_get() == TARGET_RX ||
-                      target_get() == TARGET_COLDFIRE)) {
+                      target_get() == TARGET_COLDFIRE ||
+                      (target_get() == TARGET_THUMB && target_arm_a32()))) {
+        /* ARM state with an FPU: the handler would change the VFP
+         * registers and FPSCR of the code it interrupted, which GCC does
+         * not save either (it asks for -mgeneral-regs-only) */
+        if (target_get() == TARGET_THUMB && target_thumb_fpu())
+            sema_error_line(u, f->line,
+                "interrupt handler '%s' on ARMv7-A with an FPU: it would not "
+                "save the VFP registers and FPSCR of the code it interrupts "
+                "-- compile it with -mfloat-abi=soft and no -mfpu", f->name);
         if (f->nparams || f->is_varargs)
             sema_error_line(u, f->line,
                 "interrupt handler '%s' takes parameters: the hardware "

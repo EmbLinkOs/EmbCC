@@ -422,6 +422,11 @@ struct func {
 #define ISR_SIGNAL      1
 #define ISR_INTERRUPT   2
 #define ISR_SUPERVISOR  3
+/* ARM state (ARMv7-A), GCC's interrupt("..."): IRQ is ISR_INTERRUPT */
+#define ISR_ARM_FIQ     4
+#define ISR_ARM_ABORT   5
+#define ISR_ARM_SWI     6
+#define ISR_ARM_UNDEF   7
 #define ISR_MIPS_VECTOR 0x10
 #define ISR_MASKED      0x100
 #define ISR_KIND(v)     ((v) & 0xff)

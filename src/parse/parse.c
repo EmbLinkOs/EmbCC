@@ -764,7 +764,7 @@ static const struct attr_entry attr_table[] = {
       "the handler would return with an ordinary return instead of the "
       "interrupt return the CPU needs, and without saving the registers "
       "(on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, "
-      "MIPS, RX and ColdFire it is implemented)" },
+      "MIPS, RX, ColdFire and ARMv7-A it is implemented)" },
     /* GCC's m68k spelling of the same thing, honoured on ColdFire (the
      * dispatch below); interrupt_thread is the Fido's, whose threads
      * switch register banks this target does not have. */
@@ -1061,6 +1061,28 @@ static int isr_kind(struct parser *ps, int line, const char *arg,
             "slot of the relocatable vector table by a $tableentry$ symbol "
             "that GNU ld's RX port gathers into one, and EmbLD builds no "
             "table from them; name the handler in your vector table");
+    /* ARM state: GCC's five kinds, which differ in where the return
+     * goes -- IRQ, FIQ and ABORT come back to lr - 4, SWI and UNDEF to
+     * lr. (Cortex-M reads no argument: its exception return is one.) */
+    if (a == TARGET_THUMB && target_arm_a32()) {
+        if (has_args && !arg)
+            parse_error_line(ps, line,
+                "interrupt's argument is a string on ARM: \"IRQ\", "
+                "\"FIQ\", \"ABORT\", \"SWI\" or \"UNDEF\"");
+        if (!arg || !strcmp(arg, "IRQ"))
+            return ISR_INTERRUPT;
+        if (!strcmp(arg, "FIQ"))
+            return ISR_ARM_FIQ;
+        if (!strcmp(arg, "ABORT"))
+            return ISR_ARM_ABORT;
+        if (!strcmp(arg, "SWI"))
+            return ISR_ARM_SWI;
+        if (!strcmp(arg, "UNDEF"))
+            return ISR_ARM_UNDEF;
+        parse_error_line(ps, line,
+            "interrupt wants \"IRQ\", \"FIQ\", \"ABORT\", \"SWI\" or "
+            "\"UNDEF\" on ARM, not \"%s\"", arg);
+    }
     if (a == TARGET_COLDFIRE && has_args)
         parse_error_line(ps, line,
             "interrupt takes no argument on ColdFire, as in GCC's m68k "
@@ -1276,8 +1298,7 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
                         "ignored", name);
                 else if (ae->disp == ATTR_REFUSED &&
                          !(attr_is(name, "interrupt") &&
-                           target_get() == TARGET_THUMB &&
-                           !target_arm_a32()) &&
+                           target_get() == TARGET_THUMB) &&
                          !(attr_is(name, "interrupt") &&
                            (target_get() == TARGET_RISCV32 ||
                             target_get() == TARGET_RISCV64 ||

@@ -1069,10 +1069,20 @@ semihosting exit.
 ### Limitations
 
 Refused by name: NEON (`--fpu=neon`), the Cortex-M FPUs, Thumb state (`--isa=thumb`, `.thumb` and `.thumb_func`), `__builtin_frame_address` and
-`__builtin_return_address` above level 0, `__attribute__((interrupt))` (an A-profile
-handler returns with `subs pc, lr, #4`), a scalar local aligned past 8,
-and C++ exceptions and unwind tables (C++ compiles with
-`--no-exceptions`). Inline assembly and `.s` files take the Cortex-M
+`__builtin_return_address` above level 0, an interrupt handler built
+for an FPU (its VFP registers would not be saved), a scalar local aligned
+past 8, and C++ exceptions and unwind tables (C++ compiles with
+`--no-exceptions`).
+
+`__attribute__((interrupt("IRQ")))` -- and `"FIQ"`, `"ABORT"`, `"SWI"`,
+`"UNDEF"`, as GCC spells them; no argument is IRQ -- makes an exception
+handler in ARM state: it pushes `r0`-`r3`, `r12` and `lr` with the
+callee-saved registers it uses (an even count, so an 8-aligned mode stack
+stays aligned, which it assumes, as GCC's handlers do), IRQ, FIQ and ABORT
+first take 4 off `lr`, and every kind returns with `ldm sp!, {..., pc}^`,
+which restores CPSR from the mode's SPSR. The vector table and each
+mode's stack are the program's to set up. tests/golden/arm-a32-isr.sh
+runs the generic timer's interrupt through the GIC on QEMU's virt board. Inline assembly and `.s` files take the Cortex-M
 vocabulary in ARM state -- the DSP extension's instructions (which every
 ARMv7-A part has) included, with `<arm_acle.h>` -- with a condition on any
 instruction, and add `mrs`/`msr` of `cpsr`, `mrc`/`mcr`, `ldrexd`/`strexd`

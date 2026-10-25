@@ -145,24 +145,31 @@ static int pm_reg(int r) { return r == R_SCR ? t_scr(r) : r; }
  * and never a return register, so nothing is lost by restoring it -- and
  * unlike r12 it keeps an all-low list in the 16-bit push/pop. GCC pads
  * the same way. */
-static unsigned save_mask_for(int nsave, const int *used, unsigned scr)
+static unsigned save_mask_for(int nsave, const int *used, unsigned scr,
+                              unsigned extra)
 {
-    unsigned m = (scr & T_SCR_ALL) | (1u << T_LR);
+    unsigned m = (scr & T_SCR_ALL) | (1u << T_LR) | extra;
     int n = 0;
     for (int k = 0; k < nsave; k++)
         m |= 1u << used[k];
     for (unsigned b = m; b; b &= b - 1)
         n++;
-    if (n & 1)
-        m |= 1u << 3;          /* r3: the pad */
+    /* the pad: r3, or past an interrupt handler's r0-r3 the first
+     * callee-saved register not in the set (pushed and popped, unused) */
+    for (int r = 3; (n & 1) && r <= 11; r = r == 3 ? 4 : r + 1)
+        if (!(m & (1u << r))) {
+            m |= 1u << r;
+            n++;
+        }
     return m;
 }
 
 /* The bytes that mask moves sp by -- what the stack-parameter offsets
  * are measured from, so it must be the same answer. */
-static long save_bytes_for(int nsave, const int *used, unsigned scr)
+static long save_bytes_for(int nsave, const int *used, unsigned scr,
+                           unsigned extra)
 {
-    unsigned m = save_mask_for(nsave, used, scr);
+    unsigned m = save_mask_for(nsave, used, scr, extra);
     long n = 0;
     for (int r = 0; r < 16; r++)
         if (m & (1u << r)) n++;
@@ -1127,7 +1134,8 @@ static int t_tail_ok(const struct ir_func *fn, int n)
         return 0;
     /* a cmse_nonsecure_entry function leaves through its own BXNS */
     if (fn->ret_abi.is_struct || fn->ret_abi.is_float || fn->is_varargs ||
-        fn->has_alloca || fn->neh || fn->cmse_entry)
+        fn->has_alloca || fn->neh || fn->cmse_entry ||
+        (t_isa_a32 && fn->src && fn->src->is_isr))
         return 0;
     if (n + 1 >= fn->nins) {
         if (fn->ret_abi.size)
@@ -7179,7 +7187,7 @@ static void t_record_cfi(struct t_fn *F, long code_off)
         ir_cfi_add(fn, (int)(F->cfi_va_end - code_off), IR_CFI_CFA_OFFSET, 0, cfa);
     }
     if (F->cfi_push_end >= 0) {
-        unsigned mask = save_mask_for(F->nsave, F->used_callee, F->scr_save);
+        unsigned mask = save_mask_for(F->nsave, F->used_callee, F->scr_save, F->isr_extra);
         int n = 0;
         for (int r = 0; r < 16; r++)
             n += (mask >> r) & 1;
@@ -7218,6 +7226,12 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
      * segfault this caused at -O0, where the allocator does not run. */
     memset(&F, 0, sizeof F);
     F.fn = fn; F.t = t; F.st = st;
+    /* ARM state's interrupt handlers (Cortex-M's need nothing: its
+     * exception entry saves r0-r3, r12 and lr, and bx lr returns) */
+    if (t_isa_a32 && fn->src && fn->src->is_isr) {
+        F.isr = ISR_KIND(fn->src->is_isr);
+        F.isr_extra = 0x100fu;              /* r0-r3, r12 */
+    }
     F.keep_vars = keep_vars;
     fn->nlines = 0;                 /* -g: this attempt's rows only */
     F.fix = NULL; F.nfix = F.capfix = 0;
@@ -7620,7 +7634,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
      * no variadic save area and no VLA frame base to set up. */
     F.nopush = F.leaf && !F.nsave && !F.nfsave && !F.frame &&
                !fn->is_varargs && !fn->has_alloca &&
-               !(F.scr_save & T_SCR_ALL);
+               !(F.scr_save & T_SCR_ALL) && !F.isr;
     /* No IR_RET and no tail call is not enough: a void function's body
      * falls off its end into the epilogue, so its last instruction must
      * be a jump or a trap too. */
@@ -7632,8 +7646,12 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
             /* __builtin_return_address reads the pushed lr */
             fn->ins[i].op == IR_FRAMEADDR)
             F.noret = 0;
+    /* IRQ, FIQ and ABORT are entered with lr 4 past where they return;
+     * the push then saves the return address the ldm ...^ takes back */
+    if (F.isr && F.isr != ISR_ARM_SWI && F.isr != ISR_ARM_UNDEF)
+        a32_addsubw(t, T_LR, T_LR, 4, 1);
     push_at = F.nopush || F.noret ? -1
-            : t_push(t, save_mask_for(F.nsave, F.used_callee, F.scr_save));
+            : t_push(t, save_mask_for(F.nsave, F.used_callee, F.scr_save, F.isr_extra));
     if (push_at >= 0)
         F.cfi_push_end = t->len;
     if (F.nfsave && !F.noret) {
@@ -7676,7 +7694,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
          * term that was missing. */
         long base = F.nopush ? 0 : F.noret ? F.frame
                   : F.frame + save_bytes_for(F.nsave, F.used_callee,
-                                             F.scr_save) +
+                                             F.scr_save, F.isr_extra) +
                     (long)F.nfsave * 4;
         F.entry_off = base;
         int pmv_dst[RA_MAXPOOL], pmv_src[RA_MAXPOOL], npmv = 0;
@@ -7956,7 +7974,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     } else if (tail_end) {
         if (!F.nopush)
             t_patch_push(t, push_at, save_mask_for(F.nsave, F.used_callee,
-                                                   F.scr_save));
+                                                   F.scr_save, F.isr_extra));
     } else {
     if (fn->has_alloca) {
         /* Release every VLA at once: sp back to the frame base, which
@@ -7971,7 +7989,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         /* The same set the prologue pushed: SAVE_MASK plus whatever
          * callee-saved registers the allocator took. Built here and
          * patched into the push below, so the two cannot disagree. */
-        unsigned mask = save_mask_for(F.nsave, F.used_callee, F.scr_save);
+        unsigned mask = save_mask_for(F.nsave, F.used_callee, F.scr_save, F.isr_extra);
         if (F.nopush && !fn->cmse_entry)
             t_bx(t, T_LR);
         else if (!F.nopush)
@@ -7991,6 +8009,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
             t_pop(t, mask);
             t_sp_adjust(t, 16, 0);
             t_bx(t, T_LR);
+        } else if (F.isr) {
+            a32_pop_exc(t, mask & ~(1u << T_LR));
         } else {
             t_pop(t, (mask & ~(1u << T_LR)) | (1u << T_PC));
         }
@@ -8171,7 +8191,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
      * program calling a variadic function 16 bytes short of what ran
      * (tests/golden/embrt.sh, floats2). */
     f->stack_bytes = (F.nopush ? 0 : F.noret ? (int)F.frame : (int)(F.frame + save_bytes_for(F.nsave, F.used_callee,
-                                                    F.scr_save) +
+                                                    F.scr_save, F.isr_extra) +
                            (long)F.nfsave * 4)) +
                      (fn->is_varargs ? 16 : 0);
     free(F.usecnt);

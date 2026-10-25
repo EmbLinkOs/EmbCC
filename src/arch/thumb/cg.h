@@ -147,6 +147,12 @@ struct t_fn {
     /* Which of the scratch registers r9-r11 the prologue saves: all of
      * them until a pass has shown which the body uses. */
     unsigned scr_save;
+    /* An ARM-state interrupt handler (ARMv7-A): the caller-saved
+     * registers it pushes besides (isr_extra, r0-r3 and r12), and its
+     * kind -- whether lr comes back 4 less, and the return is ldm ...^
+     * either way. 0 for anything else, Cortex-M's handlers included. */
+    unsigned isr_extra;
+    int isr;
     /* A leaf that saves nothing at all: no push, no pop, `bx lr`. Decided
      * per pass, once scr_save is known (see the pass loop). */
     int leaf, nopush;

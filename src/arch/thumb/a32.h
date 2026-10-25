@@ -102,6 +102,7 @@ void a32_add_sp(struct code *c, int rd, long off);
 void a32_sp_adjust(struct code *c, long imm, int sub);
 int  a32_push(struct code *c, unsigned mask);
 int  a32_pop(struct code *c, unsigned mask);
+int  a32_pop_exc(struct code *c, unsigned mask);   /* ldm sp!, {.., pc}^ */
 void a32_patch_mask(struct code *c, int at, unsigned mask);
 int  a32_ldm_stm(struct code *c, int rn, unsigned mask, int wback,
                  int before, int load);
