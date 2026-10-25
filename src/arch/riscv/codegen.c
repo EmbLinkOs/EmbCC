@@ -7621,15 +7621,18 @@ static void ab_str(unsigned char **p, size_t *n, size_t *cap, const char *s)
 
 unsigned char *riscv_build_attributes(size_t *len)
 {
-    /* I, M and A -- mul/div and the lr/sc atomics are emitted -- plus F
-     * and D as -march= says (with the Zicsr they imply), C when
+    /* I, M and A -- mul/div and the lr/sc atomics are emitted -- but A
+     * only where -march= has it (rv32imc's objects claimed it, and a
+     * linker merging attributes then marked the image as needing it),
+     * plus F and D as -march= says (with the Zicsr they imply), C when
      * target_riscv_rvc says so, and Zifencei when -march= named it: in
      * clang's order. A disassembler reads this to know which
      * instructions to decode. */
     char arch[96];
     int flen = target_riscv_flen();
-    snprintf(arch, sizeof arch, "rv%di2p1_m2p0_a2p1%s%s%s%s%s",
-             target_xlen(), flen ? "_f2p2" : "", flen == 64 ? "_d2p2" : "",
+    snprintf(arch, sizeof arch, "rv%di2p1_m2p0%s%s%s%s%s%s",
+             target_xlen(), target_riscv_atomics() ? "_a2p1" : "",
+             flen ? "_f2p2" : "", flen == 64 ? "_d2p2" : "",
              target_riscv_rvc() ? "_c2p0" : "", flen ? "_zicsr2p0" : "",
              target_riscv_zifencei() ? "_zifencei2p0" : "");
     unsigned char *a = NULL, *o = NULL;

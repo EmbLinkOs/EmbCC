@@ -17,7 +17,10 @@
 #  2. a program that takes the C library's locks and an atomic links from
 #     the noa runtime and libc with no A instruction in it -- and the same
 #     program linked for rv32imac does have them, so the check sees them
-#     (llvm-objdump prints them as <unknown> unless told of A).
+#     (llvm-objdump prints them as <unknown> unless told of A);
+#  3. the object's .riscv.attributes name no A either: they said
+#     rv32i2p1_m2p0_a2p1_c2p0 for rv32imc, and a linker merging them marked
+#     the image as needing the extension.
 set -u
 echo "TEST-MARKER riscv-noa"
 . "$(dirname "$0")/../lib.sh"
@@ -91,3 +94,9 @@ llvm-objdump -d "$out/noa.elf" | grep -qE 'jalr?[[:space:]].*<__atomic_fetch_add
 n=$(llvm-objdump -d --mattr=+a "$out/a.elf" | grep -cE "$A")
 [ "$n" -gt 0 ] || fail "rv32imac: no A instruction found, so the check above sees nothing"
 echo "riscv-noa: rv32imc links its own C library and runtime, with no A instruction ($n in the rv32imac image)"
+"$EMBCC" $T -march=rv32imc -O2 -c "$out/p.c" -o "$out/noa.o" ||
+    fail "-march=rv32imc: p.c does not compile"
+arch=$(llvm-readelf -A "$out/noa.o" | sed -n 's/^ *Value: \(rv32.*\)/\1/p')
+[ "$arch" = rv32i2p1_m2p0_c2p0 ] ||
+    fail "-march=rv32imc: .riscv.attributes name '$arch', not rv32i2p1_m2p0_c2p0"
+echo "riscv-noa: rv32imc's objects name $arch in .riscv.attributes"
