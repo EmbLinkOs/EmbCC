@@ -1186,7 +1186,7 @@ rules](#general-rules): `__builtin_va_arg_pack`, clang's
 `__builtin_elementwise_*`, `__builtin_reduce_*` and
 `__builtin_nontemporal_load`, `__builtin_cpu_supports` and
 `__builtin_cpu_init`, the target-specific families (`__builtin_ia32_*`,
-`__builtin_avr_*`), and Clang's `__c11_atomic_*`. `__builtin_addressof`, `__builtin_bit_cast`
+`__builtin_avr_*`). `__builtin_addressof`, `__builtin_bit_cast`
 and `__builtin_is_constant_evaluated` exist in C++ only; see
 [C++](cxx.md).
 
@@ -1222,6 +1222,18 @@ The `_n` and arithmetic forms take an integer or a pointer of 1, 2, 4,
 on an integer or pointer of 1, 2, 4, 8 or 16 bytes, not double`. The
 `__sync` builtins accept, and ignore, the trailing list of variables
 GCC allows.
+
+clang's `__c11_atomic_*` family -- `init`, `load`, `store`, `exchange`,
+`compare_exchange_strong` and `_weak`, `fetch_add`, `_sub`, `_and`,
+`_or`, `_xor` and `_nand`, `thread_fence`, `signal_fence` and
+`is_lock_free` -- are the `__atomic_*` builtins of the same names with
+clang's arguments (`init` is a relaxed store, and a compare-exchange's
+strength is in its name). `__c11_atomic_fetch_add` and `_fetch_sub` of an
+atomic pointer count elements, as C11's `atomic_fetch_add` does
+(7.17.7.5), where GCC's `__atomic_fetch_add` counts bytes; EmbCC's
+`<stdatomic.h>` adds and subtracts with them, so `atomic_fetch_add(&p, 1)`
+on an `_Atomic(int *)` moves `p` by one `int`, as with clang -- GCC's
+`<stdatomic.h>` moves it by one byte.
 
 On RISC-V the memory order of a read-modify-write or compare-exchange
 selects its `.aq` and `.rl` bits as clang's does: relaxed is bare,

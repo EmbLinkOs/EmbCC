@@ -1855,6 +1855,9 @@ static int is_lvalue(const struct expr *e)
 static int const_fold(const struct expr *e, long *out);
 static int aggregate_cast(struct unit *u, struct expr *e);
 struct scope;
+static void c11_atomic(struct unit *u, struct func *f, struct scope *sc,
+                       struct expr *e);
+static int c11_atomic_index(const char *name);
 static void check_atomic_call(struct unit *u, struct func *f,
                               struct scope *sc, struct expr *e,
                               enum atomic_kind ak);
@@ -5529,6 +5532,10 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             e->ty = ty_base(TY_VOID, 0);
             break;
         }
+        /* clang's __c11_atomic_*: GCC's of the same name, made so */
+        if (e->lhs->kind == EXPR_VAR && e->lhs->name &&
+            strncmp(e->lhs->name, "__c11_atomic_", 13) == 0)
+            c11_atomic(u, f, sc, e);
         /* The GCC atomic builtins, typed here and lowered in irgen. */
         if (e->lhs->kind == EXPR_VAR && e->lhs->name) {
             int aop;
@@ -7270,7 +7277,7 @@ int sema_has_builtin(const char *name)
      * __sync_*), so they are asked before the __builtin_ prefix. */
     if (atomic_builtin(name, &dummy_op) != AK_NONE)
         return 1;
-    if (strcmp(name, "__sync_synchronize") == 0)
+    if (strcmp(name, "__sync_synchronize") == 0 || c11_atomic_index(name) >= 0)
         return 1;
     if (strncmp(name, "__builtin_", 10) != 0)
         return 0;
@@ -7511,6 +7518,93 @@ enum atomic_kind atomic_builtin(const char *name, int *op)
     }
     *op = 0;
     return AK_NONE;
+}
+
+/* clang's __c11_atomic_* -- what its <stdatomic.h> is, and C11's
+ * <stdatomic.h> here for add and sub -- as the __atomic_ builtin of the
+ * same name, its arguments made GCC's: compare-exchange's weak flag,
+ * init's order (a relaxed store), is_lock_free's object pointer. And
+ * fetch_add and fetch_sub of an atomic POINTER count elements, as C11's
+ * atomic_fetch_add does (7.17.7.5: the object's value + the operand) and
+ * GCC's __atomic_fetch_add, which counts bytes, does not. A name not in
+ * the table stays as it is, and is an undeclared function. */
+/* argx: 'o' an order added (relaxed), 'n' a null object added, 's'/'w'
+ * the strong/weak flag inserted, 'p' a pointer's operand scaled */
+static const struct { const char *c11, *gcc; int nargs, argx; } c11_tab[] = {
+        { "init", "__atomic_store_n", 2, 'o' },
+        { "load", "__atomic_load_n", 2, 0 },
+        { "store", "__atomic_store_n", 3, 0 },
+        { "exchange", "__atomic_exchange_n", 3, 0 },
+        { "compare_exchange_strong", "__atomic_compare_exchange_n", 5, 's' },
+        { "compare_exchange_weak", "__atomic_compare_exchange_n", 5, 'w' },
+        { "fetch_add", "__atomic_fetch_add", 3, 'p' },
+        { "fetch_sub", "__atomic_fetch_sub", 3, 'p' },
+        { "fetch_and", "__atomic_fetch_and", 3, 0 },
+        { "fetch_or", "__atomic_fetch_or", 3, 0 },
+        { "fetch_xor", "__atomic_fetch_xor", 3, 0 },
+        { "fetch_nand", "__atomic_fetch_nand", 3, 0 },
+        { "thread_fence", "__atomic_thread_fence", 1, 0 },
+        { "signal_fence", "__atomic_signal_fence", 1, 0 },
+        { "is_lock_free", "__atomic_is_lock_free", 1, 'n' },
+};
+
+/* name's entry in c11_tab, or -1 */
+static int c11_atomic_index(const char *name)
+{
+    if (strncmp(name, "__c11_atomic_", 13) != 0)
+        return -1;
+    for (unsigned i = 0; i < sizeof c11_tab / sizeof c11_tab[0]; i++)
+        if (strcmp(name + 13, c11_tab[i].c11) == 0)
+            return (int)i;
+    return -1;
+}
+
+static void c11_atomic(struct unit *u, struct func *f, struct scope *sc,
+                       struct expr *e)
+{
+    int i = c11_atomic_index(e->lhs->name);
+    if (i < 0)
+        return;
+    if (e->nargs != c11_tab[i].nargs) {
+        sema_error_at(u, e->line, e->col, "%s takes %d arguments, as in clang",
+                e->lhs->name, c11_tab[i].nargs);
+        return;
+    }
+    struct expr **a = xcalloc((size_t)e->nargs + 2, sizeof *a);
+    int n = 0;
+    for (int k = 0; k < e->nargs; k++) {
+        if (k == 3 && (c11_tab[i].argx == 's' || c11_tab[i].argx == 'w')) {
+            a[n] = sx(EXPR_NUM, e->line);       /* the weak flag */
+            a[n]->num = c11_tab[i].argx == 'w';
+            a[n++]->ty = ty_base(TY_INT, 0);
+        }
+        a[n++] = e->args[k];
+    }
+    if (c11_tab[i].argx == 'o' || c11_tab[i].argx == 'n') {
+        a[n] = sx(EXPR_NUM, e->line);  /* relaxed; or no object, by size */
+        a[n++]->ty = ty_base(TY_INT, 0);
+    }
+    if (c11_tab[i].argx == 'p' && n == 3) {
+        check_expr(u, f, sc, a[0]);
+        struct type *pt = a[0]->ty && a[0]->ty->kind == TY_PTR
+                        ? a[0]->ty->pointee : NULL;
+        if (pt && pt->kind == TY_PTR && pt->pointee) {
+            long size = pt->pointee->kind == TY_VOID ? 1     /* GNU void * */
+                      : ty_size(pt->pointee);
+            if (size > 1) {
+                struct expr *m = sx(EXPR_BINOP, e->line);
+                m->op = B_MUL;
+                m->lhs = a[1];
+                m->rhs = sx(EXPR_NUM, e->line);
+                m->rhs->num = size;
+                m->rhs->ty = ty_int_of_size(target_ptr_size(), 0);
+                a[1] = m;
+            }
+        }
+    }
+    e->args = a;
+    e->nargs = n;
+    e->lhs->name = c11_tab[i].gcc;
 }
 
 /* The object an atomic builtin works on must be one the machines can move
