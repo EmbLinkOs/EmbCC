@@ -5262,20 +5262,52 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                 check_expr(u, f, sc, e);
                 break;
             }
-            /* GCC's __builtin_popcountg(x): the ones of any unsigned
-             * integer type, at its own width */
-            else if (strcmp(bn, "popcountg") == 0) {
-                if (e->nargs != 1)
-                    sema_error_at(u, e->line, e->col, "%s takes one argument",
-                            e->lhs->name);
-                check_expr(u, f, sc, e->args[0]);
-                if (!ty_is_integer(e->args[0]->ty) ||
-                    !e->args[0]->ty->is_unsigned)
+            /* GCC's type-generic bit builtins (clzg, ctzg, popcountg,
+             * parityg, ffsg, clrsbg) and C23's stdc_ ones: the operand
+             * at its own width, any unsigned integer type -- signed for
+             * ffsg and clrsbg -- but bool and an enum, as GCC takes */
+            else if (builtin_bitg(bn) != 0) {
+                int k = builtin_bitg(bn);
+                int rot = k == BG_ROTL || k == BG_ROTR;
+                int opt = k == BG_CLZ || k == BG_CTZ;
+                int sgn = k == BG_FFS || k == BG_CLRSB;
+                if (e->nargs < 1 || e->nargs > (rot || opt ? 2 : 1) ||
+                    (rot && e->nargs != 2)) {
+                    sema_error_at(u, e->line, e->col, "%s takes %s",
+                            e->lhs->name,
+                            rot ? "a value and an amount"
+                          : opt ? "a value, and what to answer for 0"
+                                : "one argument");
+                    e->ty = ty_base(TY_INT, 0);
+                    break;
+                }
+                for (int i = 0; i < e->nargs; i++)
+                    check_expr(u, f, sc, e->args[i]);
+                struct type *at = e->args[0]->ty;
+                int bits = ty_is_integer(at) ? bitg_bits(at) : 0;
+                if (!ty_is_integer(at) || at->kind == TY_BOOL || at->is_enum ||
+                    (sgn ? at->is_unsigned : !at->is_unsigned))
                     sema_error_at(u, e->line, e->col,
-                            "%s takes an unsigned integer, as in GCC",
-                            e->lhs->name);
+                            "%s takes %s integer type, as in GCC, not %s",
+                            e->lhs->name, sgn ? "a signed" : "an unsigned",
+                            ty_name(at));
+                else if ((bits > 64 && bits != 128) ||
+                         (rot && (bits & (bits - 1))))
+                    sema_error_at(u, e->line, e->col,
+                            "%s is not supported for %s: EmbCC computes it "
+                            "on 8 to 64 bits and on 128%s", e->lhs->name,
+                            ty_name(at),
+                            rot ? ", and rotates a power of two of them" : "");
+                if (e->nargs == 2) {
+                    need_integer(u, e->args[1], e->lhs->name);
+                    if (opt)
+                        e->args[1] = mk_cast(e->args[1], ty_base(TY_INT, 0));
+                }
                 e->name = e->lhs->name;
-                e->ty = ty_base(TY_INT, 0);
+                e->ty = k <= BG_CLRSB ? ty_base(TY_INT, 0)
+                      : k == BG_ONE ? ty_base(TY_BOOL, 0)
+                      : k >= BG_FLOOR ? ty_unqual(at)
+                      : ty_base(TY_INT, 1);
                 break;
             }
             /* clang's __builtin_assume(cond): a promise, not evaluated
@@ -5682,6 +5714,83 @@ static int addr_diff_fold(const struct expr *e, long *out)
     return 1;
 }
 
+/* A bit builtin of constants -- __builtin_popcount, clz, ctz, ffs,
+ * parity, clrsb and their l/ll forms, the type-generic ones and C23's
+ * stdc_ ones (bitg_eval), the byte swaps, clang's bit reversals and
+ * rotates -- folded: an integer constant expression in GCC and clang,
+ * so `_Static_assert(__builtin_popcount(M) == 4, "")`, a register
+ * field's shift as `__builtin_ctz(MASK)` in a table's initializer, or
+ * `char buf[__builtin_clz(1)]` are constants here too. clz and ctz of 0
+ * fold to the width, as GCC folds them. A 128-bit operand does not fold. */
+int bitbuiltin_fold(const char *bn, long a, const struct type *at, int nargs,
+                    long b, long *out, struct type **rty)
+{
+    static const int from_bitop[] = { 0, BG_CTZ, BG_CLZ, BG_POPCOUNT, BG_FFS,
+                                      BG_PARITY, BG_CLRSB };
+    int k, rank, bits;
+    if (!at || !ty_is_integer(at) || nargs < 1)
+        return 0;
+    if ((k = builtin_bitg(bn)) != 0) {
+        bits = bitg_bits(at);
+        if (bits > 64 || nargs > 2)
+            return 0;
+        *rty = k <= BG_CLRSB ? ty_base(TY_INT, 0)
+             : k == BG_ONE ? ty_base(TY_BOOL, 0)
+             : k >= BG_FLOOR ? ty_unqual((struct type *)at)
+             : ty_base(TY_INT, 1);
+        *out = (long)bitg_eval(k, (unsigned long long)a, bits, nargs == 2, b);
+        return 1;
+    }
+    if ((k = builtin_bitop(bn, &rank)) != 0) {
+        struct type *ut = rank == 3 ? ty_llong(1)
+                        : ty_base(rank == 2 ? TY_LONG : TY_INT, 1);
+        *rty = ty_base(TY_INT, 0);
+        *out = (long)bitg_eval(from_bitop[k], (unsigned long long)a,
+                               8 * ty_size(ut), 0, 0);
+        return 1;
+    }
+    if ((k = builtin_bitx(bn, &bits)) != 0) {
+        unsigned long long x = (unsigned long long)a, r = 0;
+        if (k == 1) {
+            for (int i = 0; i < bits; i++)
+                if (x >> i & 1)
+                    r |= 1ULL << (bits - 1 - i);
+        } else {
+            if (nargs != 2)
+                return 0;
+            r = bitg_eval(k == 2 ? BG_ROTL : BG_ROTR, x, bits, 1, b);
+        }
+        *rty = ty_uint_bits(bits);
+        *out = (long)r;
+        return 1;
+    }
+    if (strcmp(bn, "bswap16") == 0 || strcmp(bn, "bswap32") == 0 ||
+        strcmp(bn, "bswap64") == 0) {
+        int n = bn[5] == '1' ? 2 : bn[5] == '3' ? 4 : 8;
+        unsigned long long x = (unsigned long long)a, r = 0;
+        for (int i = 0; i < n; i++)
+            r |= (x >> (8 * i) & 0xff) << (8 * (n - 1 - i));
+        *rty = ty_int_of_size(n, 1);
+        *out = (long)r;
+        return 1;
+    }
+    return 0;
+}
+
+static int builtin_fold(const struct expr *e, long *out)
+{
+    long a, b = 0;
+    struct type *rt;
+    if (!e->name || strncmp(e->name, "__builtin_", 10) != 0 ||
+        e->nargs < 1 || !e->args[0]->ty || !const_fold(e->args[0], &a) ||
+        (e->nargs >= 2 && !const_fold(e->args[1], &b)) ||
+        !bitbuiltin_fold(e->name + 10, a, e->args[0]->ty, e->nargs, b, out,
+                         &rt))
+        return 0;
+    *out = cast_fold_value(rt, *out);
+    return 1;
+}
+
 static int const_fold(const struct expr *e, long *out)
 {
     long a, b;
@@ -5833,6 +5942,8 @@ static int const_fold(const struct expr *e, long *out)
             default: return 0;
             }
         }
+    case EXPR_CALL:
+        return builtin_fold(e, out);
     default:
         return 0;
     }
@@ -7056,7 +7167,7 @@ static const char *const g_named_builtins[] = {
     "trap", "unreachable", "setjmp", "longjmp",
     "FUNCTION", "FILE", "LINE", "speculation_safe_value", "assume",
     "fpclassify", "powi", "powif", "powil", "extract_return_addr",
-    "frob_return_addr", "debugtrap", "popcountg",
+    "frob_return_addr", "debugtrap",
     "va_arg", "va_copy", "va_end", "va_start",
     "add_overflow", "sub_overflow", "mul_overflow",
     "add_overflow_p", "sub_overflow_p", "mul_overflow_p",
@@ -7087,7 +7198,8 @@ int sema_has_builtin(const char *name)
         return 0;
     {
         const char *bn = name + 10;
-        if (builtin_bitop(bn, NULL) != 0 || builtin_bitx(bn, NULL) != 0)
+        if (builtin_bitop(bn, NULL) != 0 || builtin_bitx(bn, NULL) != 0 ||
+            builtin_bitg(bn) != 0)
             return 1;
         for (size_t i = 0;
              i < sizeof g_named_builtins / sizeof g_named_builtins[0]; i++)
@@ -7166,6 +7278,98 @@ int builtin_bitx(const char *bn, int *bits)
         if (bits)
             *bits = b;
         return (int)i + 1;
+    }
+    return 0;
+}
+
+int builtin_bitg(const char *bn)
+{
+    static const char *const ops[] = {
+        "clzg", "ctzg", "popcountg", "parityg", "ffsg", "clrsbg",
+        "stdc_leading_zeros", "stdc_leading_ones", "stdc_trailing_zeros",
+        "stdc_trailing_ones", "stdc_first_leading_zero",
+        "stdc_first_leading_one", "stdc_first_trailing_zero",
+        "stdc_first_trailing_one", "stdc_count_zeros", "stdc_count_ones",
+        "stdc_has_single_bit", "stdc_bit_width", "stdc_bit_floor",
+        "stdc_bit_ceil", "stdc_rotate_left", "stdc_rotate_right",
+    };
+    for (unsigned i = 0; i < sizeof ops / sizeof ops[0]; i++)
+        if (strcmp(bn, ops[i]) == 0)
+            return (int)i + BG_CLZ;
+    return 0;
+}
+
+int bitg_bits(const struct type *t)
+{
+    return t->bitint ? t->bitint : 8 * ty_size(t);
+}
+
+static int bg_clz(unsigned long long x, int bits)
+{
+    int n = 0;
+    while (n < bits && !(x >> (bits - 1 - n) & 1))
+        n++;
+    return n;
+}
+
+static int bg_ctz(unsigned long long x, int bits)
+{
+    int n = 0;
+    while (n < bits && !(x >> n & 1))
+        n++;
+    return n;
+}
+
+static int bg_pop(unsigned long long x)
+{
+    int n = 0;
+    for (; x; x &= x - 1)
+        n++;
+    return n;
+}
+
+unsigned long long bitg_eval(int kind, unsigned long long x, int bits,
+                             int has_n, long long n)
+{
+    unsigned long long m = bits == 64 ? ~0ULL : (1ULL << bits) - 1;
+    unsigned long long nx;
+    int k;
+    x &= m;
+    nx = ~x & m;
+    switch (kind) {
+    case BG_CLZ: return x ? (unsigned long long)bg_clz(x, bits)
+                          : has_n ? (unsigned long long)n : (unsigned long long)bits;
+    case BG_CTZ: return x ? (unsigned long long)bg_ctz(x, bits)
+                          : has_n ? (unsigned long long)n : (unsigned long long)bits;
+    case BG_POPCOUNT: case BG_CO: return (unsigned long long)bg_pop(x);
+    case BG_PARITY: return (unsigned long long)(bg_pop(x) & 1);
+    case BG_FFS: return x ? (unsigned long long)bg_ctz(x, bits) + 1 : 0;
+    case BG_CLRSB: return (unsigned long long)bg_clz(x >> (bits - 1) ? nx : x,
+                                                       bits) - 1;
+    case BG_LZ: return (unsigned long long)bg_clz(x, bits);
+    case BG_LO: return (unsigned long long)bg_clz(nx, bits);
+    case BG_TZ: return (unsigned long long)bg_ctz(x, bits);
+    case BG_TO: return (unsigned long long)bg_ctz(nx, bits);
+    case BG_FLZ: return nx ? (unsigned long long)bg_clz(nx, bits) + 1 : 0;
+    case BG_FLO: return x ? (unsigned long long)bg_clz(x, bits) + 1 : 0;
+    case BG_FTZ: return nx ? (unsigned long long)bg_ctz(nx, bits) + 1 : 0;
+    case BG_FTO: return x ? (unsigned long long)bg_ctz(x, bits) + 1 : 0;
+    case BG_CZ: return (unsigned long long)(bits - bg_pop(x));
+    case BG_ONE: return bg_pop(x) == 1;
+    case BG_BW: return (unsigned long long)(bits - bg_clz(x, bits));
+    case BG_FLOOR: return x ? 1ULL << (bits - 1 - bg_clz(x, bits)) : 0;
+    case BG_CEIL:
+        if (x <= 1)
+            return 1;
+        k = bits - bg_clz(x - 1, bits);
+        return k >= bits ? 0 : 1ULL << k;
+    case BG_ROTL: case BG_ROTR:
+        /* the amount modulo the width, which is a power of two: a
+         * negative one too, as its two's complement bits say */
+        k = (int)((unsigned long long)n & (unsigned long long)(bits - 1));
+        if (kind == BG_ROTR)
+            k = (bits - k) & (bits - 1);
+        return k ? ((x << k) | (x >> (bits - k))) & m : x;
     }
     return 0;
 }

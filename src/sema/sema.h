@@ -55,6 +55,35 @@ int builtin_bitop(const char *bn, int *width);
 int builtin_bitx(const char *bn, int *bits);
 struct type *ty_uint_bits(int bits);
 
+/* GCC's type-generic bit builtins (clzg and kin, GCC 14) and C23's
+ * stdc_ ones (GCC 15), by the name after "__builtin_", or 0: each counts
+ * at its operand's own width, whatever unsigned (or, for ffsg and clrsbg,
+ * signed) integer type that is. */
+enum {
+    BG_CLZ = 1, BG_CTZ, BG_POPCOUNT, BG_PARITY, BG_FFS, BG_CLRSB,
+    BG_LZ, BG_LO, BG_TZ, BG_TO, BG_FLZ, BG_FLO, BG_FTZ, BG_FTO,
+    BG_CZ, BG_CO, BG_ONE, BG_BW, BG_FLOOR, BG_CEIL, BG_ROTL, BG_ROTR
+};
+int builtin_bitg(const char *bn);
+/* A generic bit builtin's operand width in bits: its _BitInt width, or
+ * its size's. */
+int bitg_bits(const struct type *t);
+/* What one computes on an operand of `bits` bits (at most 64), the value
+ * as an unsigned of that width; `n` is clzg's or ctzg's value for 0 (when
+ * has_n) or a rotate's amount. The answer is in the result's type, as
+ * const_fold reads an integer: 0/1 for has_single_bit, the operand's
+ * bits for the floor, ceiling and rotates, a count otherwise. */
+unsigned long long bitg_eval(int kind, unsigned long long x, int bits,
+                             int has_n, long long n);
+/* A bit builtin of constant operands -- the bit family, the generic and
+ * stdc_ ones, the byte swaps, the bit reversals and rotates -- by the name
+ * after "__builtin_": `a` the first operand's value and `at` its type, `b`
+ * the second's when nargs is 2. 1 with *out the value, still to be
+ * brought to its type *rty; 0 when bn is none of them. sema's const_fold
+ * and the parser's (_Static_assert, an array size) both fold through it. */
+int bitbuiltin_fold(const char *bn, long a, const struct type *at, int nargs,
+                    long b, long *out, struct type **rty);
+
 /* Does the C front end implement this compiler-known name? This is the
  * answer `__has_builtin` gives, and it must not be able to drift from
  * what the compiler actually accepts.

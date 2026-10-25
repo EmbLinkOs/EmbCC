@@ -3176,6 +3176,16 @@ static int bctz(struct ir_func *fn, int x, int w)
     return bpopcount(fn, emit_bin(fn, IR_SUB, low, bk(fn, 1, w), w, 0), w);
 }
 
+/* ctz of an operand of `bits` bits, zero-extended into w: `bits` for 0,
+ * as clz's is, from a sentinel bit just above the operand (bctz alone
+ * counts to w's width: 32 for a 16-bit int). */
+static int bctz_bits(struct ir_func *fn, int x, int w, int bits)
+{
+    if (bits < w * 8)
+        x = emit_bin(fn, IR_OR, x, bk(fn, 1UL << bits, w), w, 0);
+    return bctz(fn, x, w);
+}
+
 /* `bits` is the operand type's width, which may be narrower than the
  * operation's w: a 16-bit int computed at four bytes, zero-extended. Its
  * leading zeros are counted within `bits`, not within w. */
@@ -3205,7 +3215,7 @@ static int gen_bitop(struct ir_func *fn, struct expr *e, int kind, int rank)
     int x = gen_convert(fn, gen_expr(fn, e->args[0]), e->args[0]->ty, ut);
     int r;
     switch (kind) {
-    case 1: r = bctz(fn, x, w); break;
+    case 1: r = bctz_bits(fn, x, w, bits); break;
     case 2: r = bclz(fn, x, w, bits); break;
     case 3: r = bpopcount(fn, x, w); break;
     case 4: {
@@ -3281,6 +3291,265 @@ static int gen_bitx(struct ir_func *fn, struct expr *e, int kind, int bits)
     if (bits < 32)
         r = emit_bin(fn, IR_AND, r, bk(fn, all, w), w, 0);
     return r;
+}
+
+/* 1 if x is not 0, as an unsigned of x's width */
+static int bnz(struct ir_func *fn, int x, int w)
+{
+    return gen_convert(fn, emit_cmp(fn, B_NE, x, bk(fn, 0, w), w, 0),
+                       ty_base(TY_INT, 0), ty_int_of_size(w, 1));
+}
+
+/* The forms the type-generic and stdc_ builtins share, given an operand's
+ * clz, ctz and popcount at width w -- for x and for its complement nx --
+ * and whether each is nonzero. clz and ctz answer `bits` for 0, so each
+ * form is arithmetic on them, with no branch. The result is at w, as an
+ * unsigned; -1 for the forms that are the operand's own type (the floor,
+ * the ceiling and the rotates), which the caller computes. */
+struct bg_parts {
+    int clz, ctz, pop, nz;        /* of x */
+    int nclz, nctz, nnz;          /* of ~x within its bits */
+};
+
+/* Which parts a form reads (BGP_*), so only those are computed: at -O0
+ * nothing would take the others away again. */
+enum { BGP_CLZ = 1, BGP_CTZ = 2, BGP_POP = 4, BGP_NZ = 8, BGP_NCLZ = 16,
+       BGP_NCTZ = 32, BGP_NNZ = 64 };
+
+static int bitg_needs(int kind, int nargs)
+{
+    switch (kind) {
+    case BG_CLZ: return BGP_CLZ | (nargs > 1 ? BGP_NZ : 0);
+    case BG_CTZ: return BGP_CTZ | (nargs > 1 ? BGP_NZ : 0);
+    case BG_LZ: case BG_BW: return BGP_CLZ;
+    case BG_TZ: return BGP_CTZ;
+    case BG_FFS: case BG_FTO: return BGP_CTZ | BGP_NZ;
+    case BG_FLO: return BGP_CLZ | BGP_NZ;
+    case BG_LO: return BGP_NCLZ;
+    case BG_TO: return BGP_NCTZ;
+    case BG_FLZ: return BGP_NCLZ | BGP_NNZ;
+    case BG_FTZ: return BGP_NCTZ | BGP_NNZ;
+    default: return BGP_POP;    /* popcount, parity, the counts, one bit */
+    }
+}
+
+static int bitg_count(struct ir_func *fn, struct expr *e, int kind, int bits,
+                      int w, const struct bg_parts *p)
+{
+    int one = bk(fn, 1, w);
+    switch (kind) {
+    case BG_CLZ: case BG_CTZ: {
+        int v = kind == BG_CLZ ? p->clz : p->ctz;
+        if (e->nargs < 2)
+            return v;
+        /* v + (x == 0) * (fallback - v): the fallback, an int, for 0 */
+        int fb = gen_convert(fn, gen_expr(fn, e->args[1]), e->args[1]->ty,
+                             ty_int_of_size(w, 1));
+        int z = emit_bin(fn, IR_XOR, p->nz, one, w, 0);
+        return emit_bin(fn, IR_ADD, v,
+                        emit_bin(fn, IR_MUL, emit_bin(fn, IR_SUB, fb, v, w, 0),
+                                 z, w, 0), w, 0);
+    }
+    case BG_POPCOUNT: case BG_CO: return p->pop;
+    case BG_PARITY: return emit_bin(fn, IR_AND, p->pop, one, w, 0);
+    case BG_LZ: return p->clz;
+    case BG_LO: return p->nclz;
+    case BG_TZ: return p->ctz;
+    case BG_TO: return p->nctz;
+    case BG_FFS: case BG_FTO:
+        return emit_bin(fn, IR_MUL, emit_bin(fn, IR_ADD, p->ctz, one, w, 0),
+                        p->nz, w, 0);
+    case BG_FLO:
+        return emit_bin(fn, IR_MUL, emit_bin(fn, IR_ADD, p->clz, one, w, 0),
+                        p->nz, w, 0);
+    case BG_FLZ:
+        return emit_bin(fn, IR_MUL, emit_bin(fn, IR_ADD, p->nclz, one, w, 0),
+                        p->nnz, w, 0);
+    case BG_FTZ:
+        return emit_bin(fn, IR_MUL, emit_bin(fn, IR_ADD, p->nctz, one, w, 0),
+                        p->nnz, w, 0);
+    case BG_CZ:
+        return emit_bin(fn, IR_SUB, bk(fn, (unsigned long)bits, w), p->pop,
+                        w, 0);
+    case BG_ONE:
+        return gen_convert(fn, emit_cmp(fn, B_EQ, p->pop, one, w, 0),
+                           ty_base(TY_INT, 0), ty_int_of_size(w, 1));
+    case BG_BW:
+        return emit_bin(fn, IR_SUB, bk(fn, (unsigned long)bits, w), p->clz,
+                        w, 0);
+    }
+    return -1;
+}
+
+static int gen_bitg128(struct ir_func *fn, struct expr *e, int kind);
+
+/* GCC's type-generic bit builtins and C23's stdc_ ones (sema.c
+ * builtin_bitg; bitg_eval is what each computes): the operand as an
+ * unsigned of its own bits, in a register of 4 bytes (up to 32 bits) or
+ * 8. A 128-bit one is two halves (gen_bitg128). */
+static int gen_bitg(struct ir_func *fn, struct expr *e, int kind)
+{
+    struct type *at = e->args[0]->ty;
+    int bits = bitg_bits(at);
+    if (bits == 128)
+        return gen_bitg128(fn, e, kind);
+    if (kind == BG_ROTL || kind == BG_ROTR)     /* a power of two of bits */
+        return gen_convert(fn, gen_bitx(fn, e, kind == BG_ROTL ? 2 : 3, bits),
+                           ty_uint_bits(bits), e->ty);
+    int w = bits > 32 ? 8 : 4;
+    struct type *ut = ty_int_of_size(w, 1);
+    unsigned long m = bits == 64 ? ~0UL : (1UL << bits) - 1;
+    int x = gen_convert(fn, gen_expr(fn, e->args[0]), at, ut);
+    if (bits < w * 8)
+        x = emit_bin(fn, IR_AND, x, bk(fn, m, w), w, 0);
+    int r;
+    if (kind == BG_CLRSB) {
+        /* the sign smeared over every bit, XORed off, the type's bits
+         * kept: the leading bits that copy the sign, less the sign */
+        int top = bits < w * 8
+                ? emit_bin(fn, IR_SHL, x, bk(fn, (unsigned long)(w * 8 - bits), w),
+                           w, 0)
+                : x;
+        int sign = emit_bin(fn, IR_SHR, top, bk(fn, (unsigned long)(w * 8 - 1), w),
+                            w, 1);
+        int t = emit_bin(fn, IR_AND, emit_bin(fn, IR_XOR, x, sign, w, 0),
+                         bk(fn, m, w), w, 0);
+        r = emit_bin(fn, IR_SUB, bclz(fn, t, w, bits), bk(fn, 1, w), w, 0);
+    } else if (kind == BG_FLOOR || kind == BG_CEIL) {
+        /* 1 << (bits - 1 - clz(x)), 0 for 0; and 2 << (bits - 1 -
+         * clz(x - 1)), which is 0 past the type, or 1 for x <= 1. The
+         * shift is masked to bits - 1, so 0's never reaches the width. */
+        int v = kind == BG_FLOOR
+              ? x : emit_bin(fn, IR_AND, emit_bin(fn, IR_SUB, x, bk(fn, 1, w), w, 0),
+                             bk(fn, m, w), w, 0);
+        int k = emit_bin(fn, IR_AND,
+                         emit_bin(fn, IR_SUB, bk(fn, (unsigned long)(bits - 1), w),
+                                  bclz(fn, v, w, bits), w, 0),
+                         bk(fn, (unsigned long)(bits - 1), w), w, 0);
+        if (kind == BG_FLOOR)
+            r = emit_bin(fn, IR_MUL,
+                         emit_bin(fn, IR_SHL, bk(fn, 1, w), k, w, 0),
+                         bnz(fn, x, w), w, 0);
+        else {
+            int le1 = gen_convert(fn, emit_cmp(fn, B_LE, x, bk(fn, 1, w), w, 0),
+                                  ty_base(TY_INT, 0), ut);
+            r = emit_bin(fn, IR_OR,
+                         emit_bin(fn, IR_AND,
+                                  emit_bin(fn, IR_SHL, bk(fn, 2, w), k, w, 0),
+                                  bk(fn, m, w), w, 0),
+                         le1, w, 0);
+        }
+    } else {
+        struct bg_parts p = { -1, -1, -1, -1, -1, -1, -1 };
+        int need = bitg_needs(kind, e->nargs);
+        int nx = need & (BGP_NCLZ | BGP_NCTZ | BGP_NNZ)
+               ? emit_bin(fn, IR_XOR, x, bk(fn, m, w), w, 0) : -1;
+        if (need & BGP_CLZ) p.clz = bclz(fn, x, w, bits);
+        if (need & BGP_CTZ) p.ctz = bctz_bits(fn, x, w, bits);
+        if (need & BGP_POP) p.pop = bpopcount(fn, x, w);
+        if (need & BGP_NZ) p.nz = bnz(fn, x, w);
+        if (need & BGP_NCLZ) p.nclz = bclz(fn, nx, w, bits);
+        if (need & BGP_NCTZ) p.nctz = bctz_bits(fn, nx, w, bits);
+        if (need & BGP_NNZ) p.nnz = bnz(fn, nx, w);
+        r = bitg_count(fn, e, kind, bits, w, &p);
+    }
+    return gen_convert(fn, r, ut, e->ty);
+}
+
+/* The same on 128 bits: the counts from the halves -- clz is the high
+ * half's, and the low half's added where the high one is 0 -- and the
+ * floor, ceiling and rotates on the 16-byte value itself. */
+static int gen_bitg128(struct ir_func *fn, struct expr *e, int kind)
+{
+    struct type *at = e->args[0]->ty;
+    struct type *u64 = ty_int_of_size(8, 1), *u128 = ty_int_of_size(16, 1);
+    int x = gen_convert(fn, gen_expr(fn, e->args[0]), at, u128);
+    int lo = gen_convert(fn, x, u128, u64);
+    int hi = gen_convert(fn, emit_bin(fn, IR_SHR, x, emit_const(fn, 64, 16),
+                                      16, 0), u128, u64);
+    int one = bk(fn, 1, 8), r;
+/* (each takes vregs, never an expression that emits: they read it twice) */
+#define BG_Z(v) emit_bin(fn, IR_XOR, bnz(fn, (v), 8), one, 8, 0)
+#define BG_CLZ128(l, h) emit_bin(fn, IR_ADD, bclz(fn, (h), 8, 64),            \
+        emit_bin(fn, IR_MUL, BG_Z(h), bclz(fn, (l), 8, 64), 8, 0), 8, 0)
+#define BG_CTZ128(l, h) emit_bin(fn, IR_ADD, bctz(fn, (l), 8),                \
+        emit_bin(fn, IR_MUL, BG_Z(l), bctz(fn, (h), 8), 8, 0), 8, 0)
+    if (kind == BG_CLRSB) {
+        int sign = emit_bin(fn, IR_SHR, hi, bk(fn, 63, 8), 8, 1);
+        int tlo = emit_bin(fn, IR_XOR, lo, sign, 8, 0);
+        int thi = emit_bin(fn, IR_XOR, hi, sign, 8, 0);
+        r = emit_bin(fn, IR_SUB, BG_CLZ128(tlo, thi), one, 8, 0);
+        return gen_convert(fn, r, u64, e->ty);
+    }
+    if (kind == BG_FLOOR || kind == BG_CEIL || kind == BG_ROTL ||
+        kind == BG_ROTR) {
+        int k, s16, t16;
+        if (kind == BG_ROTL || kind == BG_ROTR) {
+            int n = gen_convert(fn, gen_expr(fn, e->args[1]), e->args[1]->ty,
+                                u64);
+            int sh = emit_bin(fn, IR_AND, n, bk(fn, 127, 8), 8, 0);
+            int t = emit_bin(fn, IR_AND,
+                             emit_bin(fn, IR_SUB, bk(fn, 128, 8), sh, 8, 0),
+                             bk(fn, 127, 8), 8, 0);
+            s16 = gen_convert(fn, sh, u64, u128);
+            t16 = gen_convert(fn, t, u64, u128);
+            int left = kind == BG_ROTL;
+            r = emit_bin(fn, IR_OR,
+                         emit_bin(fn, left ? IR_SHL : IR_SHR, x, s16, 16, 0),
+                         emit_bin(fn, left ? IR_SHR : IR_SHL, x, t16, 16, 0),
+                         16, 0);
+            return gen_convert(fn, r, u128, e->ty);
+        }
+        int v = x, vlo = lo, vhi = hi;
+        if (kind == BG_CEIL) {
+            v = emit_bin(fn, IR_SUB, x, emit_const(fn, 1, 16), 16, 0);
+            vlo = gen_convert(fn, v, u128, u64);
+            vhi = gen_convert(fn, emit_bin(fn, IR_SHR, v, emit_const(fn, 64, 16),
+                                           16, 0), u128, u64);
+        }
+        k = emit_bin(fn, IR_AND,
+                     emit_bin(fn, IR_SUB, bk(fn, 127, 8), BG_CLZ128(vlo, vhi),
+                              8, 0),
+                     bk(fn, 127, 8), 8, 0);
+        int k16 = gen_convert(fn, k, u64, u128);
+        if (kind == BG_FLOOR) {
+            /* 0 for 0: the power ANDed with 0 - (x != 0) */
+            int nz16 = gen_convert(fn, bnz(fn, emit_bin(fn, IR_OR, lo, hi, 8, 0), 8),
+                                   u64, u128);
+            r = emit_bin(fn, IR_AND,
+                         emit_bin(fn, IR_SHL, emit_const(fn, 1, 16), k16, 16, 0),
+                         emit_bin(fn, IR_SUB, emit_const(fn, 0, 16), nz16, 16, 0),
+                         16, 0);
+        } else {
+            int le1 = gen_convert(fn, emit_cmp(fn, B_LE, x, emit_const(fn, 1, 16),
+                                               16, 0),
+                                  ty_base(TY_INT, 0), u128);
+            r = emit_bin(fn, IR_OR,
+                         emit_bin(fn, IR_SHL, emit_const(fn, 2, 16), k16, 16, 0),
+                         le1, 16, 0);
+        }
+        return gen_convert(fn, r, u128, e->ty);
+    }
+    struct bg_parts p = { -1, -1, -1, -1, -1, -1, -1 };
+    int need = bitg_needs(kind, e->nargs), nlo = -1, nhi = -1;
+    if (need & (BGP_NCLZ | BGP_NCTZ | BGP_NNZ)) {
+        nlo = emit_bin(fn, IR_XOR, lo, bk(fn, ~0UL, 8), 8, 0);
+        nhi = emit_bin(fn, IR_XOR, hi, bk(fn, ~0UL, 8), 8, 0);
+    }
+    if (need & BGP_CLZ) p.clz = BG_CLZ128(lo, hi);
+    if (need & BGP_CTZ) p.ctz = BG_CTZ128(lo, hi);
+    if (need & BGP_POP)
+        p.pop = emit_bin(fn, IR_ADD, bpopcount(fn, lo, 8),
+                         bpopcount(fn, hi, 8), 8, 0);
+    if (need & BGP_NZ) p.nz = bnz(fn, emit_bin(fn, IR_OR, lo, hi, 8, 0), 8);
+    if (need & BGP_NCLZ) p.nclz = BG_CLZ128(nlo, nhi);
+    if (need & BGP_NCTZ) p.nctz = BG_CTZ128(nlo, nhi);
+    if (need & BGP_NNZ) p.nnz = bnz(fn, emit_bin(fn, IR_OR, nlo, nhi, 8, 0), 8);
+#undef BG_Z
+#undef BG_CLZ128
+#undef BG_CTZ128
+    r = bitg_count(fn, e, kind, 128, 8, &p);
+    return gen_convert(fn, r, u64, e->ty);
 }
 
 /* __builtin_{add,sub,mul}_overflow(a, b, r): the operation as if in
@@ -4653,30 +4922,10 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             return emit_bin(fn, extract ? IR_ADD : IR_SUB, a,
                             emit_const(fn, sparc_ret_offset(fn), AW), AW, 1);
         }
-        /* __builtin_popcountg(x): at x's own width -- 4 bytes for a
-         * narrower one (zero-extended), 8, or two halves of 16 */
-        if (e->name && strcmp(e->name, "__builtin_popcountg") == 0) {
-            const struct type *at = e->args[0]->ty;
-            int sz = ty_size(at), r;
-            int x = gen_expr(fn, e->args[0]);
-            if (sz == 16) {
-                const struct type *u64 = ty_int_of_size(8, 1);
-                int lo = gen_convert(fn, x, at, u64);
-                int hi = gen_convert(fn,
-                                     emit_bin(fn, IR_SHR, x,
-                                              emit_const(fn, 64, 16), 16, 0),
-                                     at, u64);
-                r = emit_bin(fn, IR_ADD, bpopcount(fn, lo, 8),
-                             bpopcount(fn, hi, 8), 8, 0);
-                return gen_convert(fn, r, u64, ty_base(TY_INT, 0));
-            }
-            const struct type *ut = sz > 4 ? ty_int_of_size(8, 1)
-                                           : ty_int_of_size(4, 1);
-            int w = sz > 4 ? 8 : 4;
-            x = gen_convert(fn, x, at, ut);
-            r = bpopcount(fn, x, w);
-            return gen_convert(fn, r, ut, ty_base(TY_INT, 0));
-        }
+        /* GCC's type-generic bit builtins and C23's stdc_ ones */
+        if (e->name && strncmp(e->name, "__builtin_", 10) == 0 &&
+            builtin_bitg(e->name + 10) != 0)
+            return gen_bitg(fn, e, builtin_bitg(e->name + 10));
         /* GCC's __builtin_setjmp(buf) / __builtin_longjmp(buf, 1), onto
          * an ordinary setjmp: the jmp_buf sema made in this frame, its
          * address in buf[0], and the C library's _setjmp/_longjmp where

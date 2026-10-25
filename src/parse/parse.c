@@ -21,6 +21,7 @@ static int c23_words(void)
     return lex_c23_ext();
 }
 #include "../sema/type.h"
+#include "../sema/sema.h"   /* bitbuiltin_fold */
 
 /* Tags (struct/union/enum) live in their own namespace; typedef names
  * live in the ordinary one and must be known DURING parsing (the
@@ -3205,6 +3206,20 @@ static int size_fold(const struct expr *e, long *out)
             size_fold(e->args[0], &a)) {
             *out = a == 1 || a == 2 || a == 4 || a == 8;
             return 1;
+        }
+        /* the bit builtins of constants, as sema's const_fold folds them:
+         * `_Static_assert(__builtin_popcount(M) == 4, "")` is here */
+        if (e->lhs && e->lhs->kind == EXPR_VAR && e->nargs >= 1 &&
+            strncmp(e->lhs->name, "__builtin_", 10) == 0) {
+            struct type *rt;
+            b = 0;
+            if (size_fold(e->args[0], &a) &&
+                (e->nargs < 2 || size_fold(e->args[1], &b)) &&
+                bitbuiltin_fold(e->lhs->name + 10, a, ce_type(e->args[0]),
+                                e->nargs, b, out, &rt)) {
+                *out = cast_fold_value(rt, *out);
+                return 1;
+            }
         }
         return 0;
     case EXPR_NEG:

@@ -833,12 +833,48 @@ compiled.
 | `__builtin_parity(x)`, `parityl`, `parityll` | Number of one bits, modulo 2 |
 | `__builtin_ffs(x)`, `ffsl`, `ffsll` | One plus the index of the least significant one bit of an `int`, `long`, `long long`; 0 when `x` is 0 |
 | `__builtin_clrsb(x)`, `clrsbl`, `clrsbll` | Number of leading bits equal to the sign bit, not counting the sign bit, of an `int`, `long`, `long long` |
-| `__builtin_popcountg(x)` | Number of one bits of an unsigned integer of any width, `unsigned char` to `unsigned __int128`, counted at its own width (GCC 14's) |
 
 All return `int`, take an integer argument, and compile on every target.
 The operand width is the target's: `long` is 32 bits on Cortex-M, RV32
 and AVR, and `int` is 16 bits on AVR. GCC leaves `clz` and `ctz` of zero
-undefined; EmbCC returns a value, which code should not depend on.
+undefined; EmbCC returns the operand's width, as GCC folds them, which
+code should not depend on.
+
+GCC 14's type-generic forms count at the operand's own width, whatever
+unsigned integer type it is, `unsigned char` to `unsigned __int128` (and
+`_BitInt` up to 64 bits); `ffsg` and `clrsbg` take a signed one. `bool`
+and an enumeration are refused, as GCC refuses them (`__builtin_clzg
+takes an unsigned integer type, as in GCC, not int`). All return `int`:
+
+| Builtin | Result |
+|---|---|
+| `__builtin_clzg(x)`, `__builtin_clzg(x, z)` | Leading zero bits; `z`, an `int`, when `x` is 0 (without it, the width) |
+| `__builtin_ctzg(x)`, `__builtin_ctzg(x, z)` | Trailing zero bits; `z` when `x` is 0 |
+| `__builtin_popcountg(x)`, `__builtin_parityg(x)` | One bits; their number modulo 2 |
+| `__builtin_ffsg(x)`, `__builtin_clrsbg(x)` | As `ffs` and `clrsb`, at `x`'s width |
+
+C23's `<stdbit.h>` operations as builtins (GCC 15's), type-generic the
+same way -- EmbCC's own `<stdbit.h>` needs none of them, but code written
+for GCC calls them by name:
+
+| Builtin | Result |
+|---|---|
+| `__builtin_stdc_leading_zeros(x)`, `_leading_ones`, `_trailing_zeros`, `_trailing_ones` | The count, the width for an `x` that is all one or the other |
+| `__builtin_stdc_first_leading_zero(x)`, `_first_leading_one`, `_first_trailing_zero`, `_first_trailing_one` | One plus that bit's position, counted from its end; 0 when there is none |
+| `__builtin_stdc_count_zeros(x)`, `_count_ones` | The number of such bits |
+| `__builtin_stdc_has_single_bit(x)` | Whether `x` is a power of two, as `bool` |
+| `__builtin_stdc_bit_width(x)` | The bits needed to represent `x`: 0 for 0 |
+| `__builtin_stdc_bit_floor(x)`, `_bit_ceil(x)` | The largest power of two not above `x` (0 for 0) and the smallest not below it (1 for 0 and 1; 0 when it is past the type), in `x`'s type |
+| `__builtin_stdc_rotate_left(x, n)`, `_rotate_right(x, n)` | `x` rotated by `n` modulo the width -- a negative `n` the other way -- in `x`'s type |
+
+The counts are `unsigned int`. A width that is not a power of two is
+refused for the rotates, and above 64 bits only `__int128` is taken.
+
+Every builtin in this section -- and the byte swaps and clang's bit
+reversals and rotates below -- is a constant when its operands are, as in
+GCC and clang: `_Static_assert(__builtin_popcount(MASK) == 4, "")`, an
+array size, a case label, or a register field's shift written
+`__builtin_ctz(FIELD_MASK)` in a static table's initializer.
 
 clang's bit reversals and rotates take and return the unsigned type of
 their width (`uint8_t` to `uint64_t`):
@@ -1137,7 +1173,7 @@ macOS).
 
 These are refused as undeclared functions, as shown in [General
 rules](#general-rules): `__builtin_complex`, `__builtin___clear_cache`,
-`__builtin_va_arg_pack`, the C23 `__builtin_stdc_*` family, clang's
+`__builtin_va_arg_pack`, clang's
 `__builtin_elementwise_*`, `__builtin_reduce_*` and
 `__builtin_nontemporal_load`, `__builtin_cpu_supports` and
 `__builtin_cpu_init`, the target-specific families (`__builtin_ia32_*`,
