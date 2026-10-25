@@ -38,11 +38,14 @@ LD="${EMBCC_AARCH64_LD:-aarch64-elf-ld}"
     exit 1
 }
 
-# The two harness objects are the same for every test; rebuild them only
-# when missing or stale.
-for part in start semihost crt; do
+# The harness objects are the same for every test; rebuild them only
+# when missing or stale. (rtsj: lib/rt's __embcc_setjmp/__embcc_longjmp,
+# what __builtin_setjmp and __builtin_longjmp call -- newlib and libgcc
+# have no such pair)
+for part in start semihost crt rtsj; do
     src=$here/$part.$( [ "$part" = start ] && echo S || echo c )
     [ "$part" = crt ] && src=$here/../crt.c
+    [ "$part" = rtsj ] && src=$here/../../../lib/rt/builtin-setjmp.c
     if [ ! -f "$work/harness-$part.o" ] || [ "$src" -nt "$work/harness-$part.o" ]; then
         $GCC -ffreestanding -isystem "$NEWLIB/include" \
              -c "$src" -o "$work/harness-$part.o"
@@ -52,7 +55,7 @@ done
 LIBGCC=$(dirname "$($GCC -print-libgcc-file-name)")
 $LD -T "$here/link.ld" -o "$out" \
     "$work/harness-start.o" "$@" "$work/harness-semihost.o" \
-    "$work/harness-crt.o" $CXXLIBS \
+    "$work/harness-crt.o" "$work/harness-rtsj.o" $CXXLIBS \
     -L"$NEWLIB/lib" -lc -lm -L"$LIBGCC" -lgcc 2>&1 \
     | grep -v 'LOAD segment with RWX permissions' >&2 || true
 [ -f "$out" ]
