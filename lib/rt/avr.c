@@ -72,6 +72,54 @@ typedef long          s32_;
  * common case on this machine, an array index scaled by a struct size,
  * the backend does inline with shifts and never reaches here.
  */
+#ifdef __AVR_HAVE_MUL__
+/* ...except on a core with the hardware multiplier, which is every part
+ * -mmcu= takes: the ten 8x8 partial products that reach the low 32 bits,
+ * as libgcc's __mulsi3 makes them, accumulated in X (bytes 0-1) and Z
+ * (bytes 2-3). `mul` leaves its product in r1:r0 and so dirties r1, the
+ * zero register; `clr r1` puts it back before each carry it feeds, and
+ * eor leaves the carry flag alone. About forty cycles, where the loop
+ * below takes several hundred. The arguments are a in r22-r25 and b in
+ * r18-r21, the result goes back in r22-r25, and r0, r26, r27, r30 and r31
+ * are a call's to clobber. */
+__attribute__((naked)) s32_ __mulsi3(s32_ a, s32_ b)
+{
+    (void)a;
+    (void)b;
+    __asm__ volatile(
+        "mul r22, r18\n\t"          /* a0 b0: bytes 0-1 */
+        "movw r26, r0\n\t"
+        "mul r22, r20\n\t"          /* a0 b2: bytes 2-3 */
+        "movw r30, r0\n\t"
+        "mul r23, r19\n\t"          /* a1 b1 */
+        "add r30, r0\n\t"
+        "adc r31, r1\n\t"
+        "mul r24, r18\n\t"          /* a2 b0 */
+        "add r30, r0\n\t"
+        "adc r31, r1\n\t"
+        "mul r22, r21\n\t"          /* a0 b3, a1 b2, a2 b1, a3 b0: byte 3 */
+        "add r31, r0\n\t"
+        "mul r23, r20\n\t"
+        "add r31, r0\n\t"
+        "mul r24, r19\n\t"
+        "add r31, r0\n\t"
+        "mul r25, r18\n\t"
+        "add r31, r0\n\t"
+        "mul r22, r19\n\t"          /* a0 b1: bytes 1-2, carry into 3 */
+        "add r27, r0\n\t"
+        "adc r30, r1\n\t"
+        "clr r1\n\t"
+        "adc r31, r1\n\t"
+        "mul r23, r18\n\t"          /* a1 b0 */
+        "add r27, r0\n\t"
+        "adc r30, r1\n\t"
+        "clr r1\n\t"
+        "adc r31, r1\n\t"
+        "movw r22, r26\n\t"
+        "movw r24, r30\n\t"
+        "ret");
+}
+#else
 s32_ __mulsi3(s32_ a, s32_ b)
 {
     u32_ x = (u32_)a, y = (u32_)b, r = 0;
@@ -84,6 +132,7 @@ s32_ __mulsi3(s32_ a, s32_ b)
     }
     return (s32_)r;
 }
+#endif
 
 /* ---- unsigned divide and remainder ------------------------------------
  *
