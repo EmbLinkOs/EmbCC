@@ -998,6 +998,21 @@ static unsigned char *avr_demand(const struct a_fn *F)
         for (int n = fn->nins - 1; n >= 0; n--) {
             const struct ir_ins *i = &fn->ins[n];
             int nd = (i->dst >= 0 && i->dst < fn->nvregs) ? d.need[i->dst] : VW;
+            /* An asm reads an input's size (its lowering loads o->size
+             * bytes) and an address's two: `swap %0` on a char built its
+             * operand in four registers to use one. */
+            if (i->op == IR_ASM && i->asm_ir) {
+                const struct ir_asm *ia = i->asm_ir;
+                for (int k = 0; k < ia->nin; k++) {
+                    const struct ir_asm_op *o = &ia->in[k];
+                    int w = o->mem ? 2 : o->size;
+                    dem_raise(&d, o->temp, w >= 1 && w <= VW ? w : VW);
+                }
+                for (int k = 0; k < ia->nout; k++)
+                    if (!ia->out[k].val)
+                        dem_raise(&d, ia->out[k].temp, 2);
+                continue;
+            }
             if (!narrow_aware(i->op)) {
                 ra_each_use(i, dem_full, &d);
                 continue;
@@ -5186,11 +5201,12 @@ static void gen_ins(struct a_fn *F, int n)
          * the vocabulary in avr/asm.c. This only has to place the operands
          * and splice the bytes in.
          *
-         * Nothing is live in a register across an asm here, and that needs no
-         * argument: every value lives in a frame slot in this backend, so the
-         * only registers holding anything across the asm are Y (the frame
-         * pointer) and r1 (the zero register) -- and irgen refuses any
-         * template, operand or clobber that names either.
+         * A value may live in a register across an asm: irgen gives the
+         * allocator what the asm changes (ir_asm.clob -- its operands', its
+         * clobbers' and its template's registers, and a call's), and
+         * a_verify decodes the template's bytes like any others. Y (the
+         * frame pointer) and r1 (the zero register) it may never name:
+         * irgen refuses any template, operand or clobber that does.
          *
          * Z is the address scratch for a slot that ldd cannot reach. An
          * operand pinned to Z is therefore loaded LAST, after every other
@@ -5211,8 +5227,8 @@ static void gen_ins(struct a_fn *F, int n)
             for (int k = 0; k < ia->nout; k++) {
                 struct ir_asm_op *o = &ia->out[k];
                 late = o->reg >= AVR_X;
-                if (late != pass || !o->inout || o->mem)
-                    continue;
+                if (late != pass || !o->inout || o->mem || o->val)
+                    continue;            /* (a value's is an input) */
                 /* The address is in the slot; the VALUE is what it points at. */
                 vld(F, AVR_Z, o->temp, 0, 2);
                 for (int b = 0; b < o->size; b++)
@@ -5245,6 +5261,14 @@ static void gen_ins(struct a_fn *F, int n)
              * what the asm produced. */
             if (o->mem)
                 continue;
+            /* A value output (irg_asm_avr: the asm's only output) is the
+             * dst, into its home or slot. Nothing it names needs another
+             * operand's register, there being no other output. */
+            if (o->val) {
+                if (i->dst >= 0 && (!F->usecnt || F->usecnt[i->dst]))
+                    vst(F, i->dst, 0, o->reg, o->size);
+                continue;
+            }
             /* The output value is in o->reg..+size; o->temp holds the
              * ADDRESS to write it to. X is used for the address so that an
              * output sitting in Z is not the thing overwritten. */
@@ -5561,7 +5585,9 @@ static const struct ra_target AVR_RA = {
     a_ext_plain,
     0, /* atomic_in_reg */
     0, /* fp_reads_gpr */
-    0, /* asm_in_reg */
+    1, /* asm_in_reg: operands in homes (IR_ASM); a value live across
+        * one keeps out of what it changes (ir_asm.clob), and a_verify
+        * decodes its bytes all the same */
     NULL, /* remat_ok */
     NULL  /* call_target_in_reg */
 };
