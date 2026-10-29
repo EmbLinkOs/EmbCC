@@ -52,7 +52,10 @@ C library routine can call the runtime (printing a 128-bit value divides
 it). Archives are searched left to right with a final pass that
 revisits them, so a member pulled in late can still resolve against an
 earlier archive. Only the archive members a program references are
-linked.
+linked, and the embedded `libc.a` and `librt.a` have a section per
+function and per object, so an image linked with `--gc-sections` keeps
+only the functions it reaches inside those members
+([Embedded](embedded.md#leaving-out-what-is-never-called---gc-sections)).
 
 A missing library is reported by name rather than as a list of undefined
 symbols:
@@ -81,7 +84,9 @@ The driver looks for a target's files relative to its own executable:
 In a build tree the directory is `build/libc/x86_64` for `x86_64-elf`
 and `x86_64-emblink`, `build/libc/aarch64` for `aarch64-elf`,
 `build/libc/linux-x86_64` and `build/libc/linux-aarch64` for the Linux
-triples, and `build/libc/TRIPLE` for every other triple. `libcxx.a` is
+triples, `build/libc/darwin-aarch64` and `build/libc/darwin-x86_64` for
+macOS (`make rt-darwin-aarch64 rt-darwin-x86_64`), and
+`build/libc/TRIPLE` for every other triple. `libcxx.a` is
 under `build/libcxx/` in the same scheme. An installation has one
 directory per canonical triple and none for `x86_64-emblink`. The search
 for the installation itself, and `EMBCC_PREFIX`, are described in
@@ -162,7 +167,7 @@ freestanding `<limits.h>` for the type widths.
 | `<ctype.h>`, `<wctype.h>` | complete, for the `"C"` locale; the classification functions return 0 or 1 |
 | `<stdlib.h>` | `malloc` family with `aligned_alloc`; `strtol` family, `strtod`/`strtof`/`strtold`, `ato*`; `qsort` (heapsort) and `bsearch`; `rand`/`srand` (`RAND_MAX` is 2147483647); `abs`/`div` families; `atexit`, `exit`, `_Exit`, `abort`, `at_quick_exit`, `quick_exit`; the multibyte conversions without a state (`mblen`, `mbtowc`, `wctomb`, `mbstowcs`, `wcstombs`), in UTF-8; `getenv`; `system` (always reports no command processor) |
 | `<stdio.h>` | `FILE` streams with buffering, files by name, positioning (`fseek`, `ftell`, `fgetpos`, `fsetpos`, `rewind`), `remove`, `rename`, `tmpfile`, `tmpnam`, C11's exclusive `"x"` open mode, `setvbuf`, `ungetc`, `perror`, and the complete `printf` and `scanf` families (`v`, `f`, `s`, `sn` forms) |
-| `<math.h>`, `<tgmath.h>` | every C11 function at all three widths; `<tgmath.h>` chooses the width from every generic argument, as C11 7.25 says (`pow(2.0f, 3.0L)` is `powl`) |
+| `<math.h>`, `<tgmath.h>` | every C11 function at all three widths, `erf`, `erfc`, `lgamma` and `tgamma` FreeBSD's (accurate to an ulp or two; `lgamma` of a negative argument beside a zero of Γ loses digits, ~100 ulp at -2.75, as FreeBSD's does); C23's `sinpi`, `cospi`, `tanpi`, `asinpi`, `acospi`, `atanpi` and `atan2pi`; `signgam`, `lgamma_r`; `float_t`, `double_t`, `FP_ILOGB0` and `FP_ILOGBNAN`, and POSIX's `M_PI` family outside strict ISO mode; `<tgmath.h>` chooses the width from every generic argument, as C11 7.25 says (`pow(2.0f, 3.0L)` is `powl`) |
 | `<complex.h>` | complete: every function at all three widths |
 | `<fenv.h>` | exception flags and rounding modes, on x86-64 (`MXCSR`) and AArch64 (`FPSR`/`FPCR`) |
 | `<time.h>` | `time`, `clock`, `difftime`, `mktime`, `timegm`, `gmtime`, `localtime`, the `_r` forms, `asctime`, `ctime`, `strftime`, `timespec_get` |
@@ -217,10 +222,13 @@ does; a C17 program that parses `"0b1"` with base 0 gets 1, not 0. A
 prefix with no digit after it is not one: `strtol("0xz", &end, 16)` is 0
 and leaves `end` at the `x`.
 
-**`strtod`.** A decimal with at most 15 significant digits and a power
-of ten up to 10^22 is converted exactly. Other inputs may be one unit in
-the last place from the nearest value, which C11 permits. Hexadecimal
-input is exact.
+**`strtod`.** `strtod`, `strtof` and `strtold` are correctly rounded:
+the nearest value of the type, ties to even, for every input, each at its
+own precision -- a `long double` keeps the x87's 64 bits or binary128's
+113. Hexadecimal input is rounded the same way, and its binary exponent
+is optional (`strtod("0x1")` is 1). scanf's floating conversions and
+`wcstod` give the same answers; scanf keeps a numeral's first 900 digits
+and reads the rest as one, which can matter only to a `long double`.
 
 **Buffering.** `BUFSIZ` is 4096 and `FOPEN_MAX` is 32. `stdout` is fully
 buffered, or line-buffered when the backend reports it is a terminal;
@@ -463,16 +471,26 @@ not apply.
 
 | File | Routines | Built where |
 |---|---|---|
-| `int64.c` | `__divdi3` `__udivdi3` `__moddi3` `__umoddi3` | 32-bit targets except AVR |
-| `int128.c` | `__multi3` `__divti3` `__udivti3` `__modti3` `__umodti3` `__ashlti3` `__ashrti3` `__lshrti3` `__negti2` | targets with `__int128` (not RV64) |
+| `int64.c` | `__divdi3` `__udivdi3` `__moddi3` `__umoddi3` | the 32-bit targets but AVR |
+| `int128.c` | `__multi3` `__divti3` `__udivti3` `__modti3` `__umodti3` `__ashlti3` `__ashrti3` `__lshrti3` `__negti2` | the 64-bit targets, which have `__int128` |
 | `fp128.c` | conversions between 128-bit integers and `float`/`double`: `__floattidf` `__floatuntidf` `__floattisf` `__floatuntisf` `__fixdfti` `__fixunsdfti` `__fixsfti` `__fixunssfti` | as `int128.c` |
 | `complex.c` | `__mulsc3` `__muldc3` `__divsc3` `__divdc3` | every target |
-| `ldouble.c` | x86-64: the x87 `long double` conversions `__floattixf` `__floatuntixf` `__fixxfti` `__fixunsxfti` and `__mulxc3` `__divxc3`; AArch64: `__multc3` `__divtc3` | x86-64, AArch64 |
-| `softtf.c` | IEEE binary128 in software, AArch64's `long double`: `__addtf3` `__subtf3` `__multf3` `__divtf3` `__negtf2`, the comparisons `__eqtf2` ... `__unordtf2`, and the conversions `__extenddftf2` `__trunctfdf2` `__floatsitf` `__fixtfdi` ... | AArch64 |
-| `softfp.c` | binary32 and binary64 in software: `__addsf3` `__subsf3` `__mulsf3` `__divsf3` `__negsf2` and the `df` forms, comparisons (`__eqsf2` `__nesf2` `__ltsf2` `__lesf2` `__gtsf2` `__gesf2` `__unordsf2` and `df`), conversions to and from 32- and 64-bit integers, `__extendsfdf2`, `__truncdfsf2` | Cortex-M (all variants; built for the Cortex-M7's double-precision unit, only the eight conversions to and from 64-bit integers, `__fixdfdi` ... `__floatundisf`), RISC-V |
+| `half.c` | `_Float16` and `__bf16` to and from the wider formats, on the bits: libgcc's `__extendhfsf2` `__truncsfhf2` `__truncdfhf2` and `__truncxfhf2` (x87) or `__trunctfhf2` (binary128) on x86-64 and AArch64; libgcc's `__gnu_h2f_ieee` `__gnu_f2h_ieee` `__gnu_d2h_ieee` and the run-time ABI's `__aeabi_h2f` `__aeabi_f2h` `__aeabi_d2h` on ARM; EmbCC's own `__embcc_h2f` `__embcc_f2h` `__embcc_d2h` elsewhere; `__truncsfbf2` `__extendbfsf2`, `__truncdfbf2` where `double` is eight bytes and `__embcc_ll2bf` `__embcc_ull2bf` where it is four | every target |
+| `clear_cache.c` | `__clear_cache`, `__builtin___clear_cache`'s: AArch64's `dc cvau`/`ic ivau` by `CTR_EL0`'s line sizes, ARMv7-A's CP15 operations, Cortex-M's `dsb`/`isb`, RISC-V's `fence.i`, MIPS's `synci` loop returning by `jr.hb`, PowerPC's `dcbst`/`icbi`, SPARC's `flush`, LoongArch's `ibar` | every target |
+| `powi.c` | `__powisf2` `__powidf2`, and `__powixf2` (x87) or `__powitf2` (binary128) where `long double` is wider than `double`: `__builtin_powi` and kin | every target |
+| `builtin-setjmp.c` | `__embcc_setjmp` `__embcc_longjmp`, which `__builtin_setjmp` and `__builtin_longjmp` call: the C library's `setjmp` and `longjmp` under names no program has | every target but Darwin |
+| `atomic8.c` | libatomic's eight-byte entry points, which the compiler calls for every eight-byte atomic there: `__atomic_load_8` `__atomic_store_8` `__atomic_exchange_8` `__atomic_compare_exchange_8`, `__atomic_fetch_OP_8` and `__atomic_OP_fetch_8`; and the generic `__atomic_load` `__atomic_store` `__atomic_exchange` `__atomic_compare_exchange`, which take the size first | the 32-bit targets but AVR |
+| `atomic-riscv.c` | libatomic's sized entry points for every atomic on a core without the A extension (an ESP32-C3's `rv32imc`): `__atomic_exchange_N`, `__atomic_compare_exchange_N`, `__atomic_fetch_OP_N` and `__atomic_OP_fetch_N` | RISC-V |
+| `embtrace.c` | EmbTrace's recorder: `__cyg_profile_func_enter` and `__cyg_profile_func_exit`, which `-finstrument-functions` calls, and `embtrace_enable` `embtrace_reset` `embtrace_dump` `embtrace_clock` `embtrace_putc` | every target |
+| `ldouble.c` | x86-64: the x87 `long double` conversions `__floattixf` `__floatuntixf` `__fixxfti` `__fixunsxfti` and `__mulxc3` `__divxc3`; where `long double` is binary128: `__multc3` `__divtc3` | x86-64, AArch64, RISC-V, LoongArch, MIPS64, SPARC |
+| `softtf.c` | IEEE binary128 in software, `long double` where no instruction is behind it: `__addtf3` `__subtf3` `__multf3` `__divtf3` `__negtf2`, the comparisons `__eqtf2` ... `__unordtf2`, and the conversions `__extenddftf2` `__trunctfdf2` `__floatsitf` `__fixtfdi` ... | AArch64, RISC-V, LoongArch, MIPS64, SPARC |
+| `softfp.c` | binary32 and binary64 in software: `__addsf3` `__subsf3` `__mulsf3` `__divsf3` `__negsf2` and the `df` forms, comparisons (`__eqsf2` `__nesf2` `__ltsf2` `__lesf2` `__gtsf2` `__gesf2` `__unordsf2` and `df`), conversions to and from 32- and 64-bit integers, `__extendsfdf2`, `__truncdfsf2` | the embedded targets but AVR and RX; built for a double-precision unit (the Cortex-M7's, RISC-V's `ilp32d`), only the eight conversions to and from 64-bit integers, `__fixdfdi` ... `__floatundisf`, and for RV64's `lp64d` none |
 | `avr.c` | `__mulsi3` `__divsi3` `__udivsi3` `__modsi3` `__umodsi3` | AVR |
 | `avr64.c` | `__muldi3` `__divdi3` `__udivdi3` `__moddi3` `__umoddi3` | AVR |
-| `avrfp*.c` | binary32 in software, one object per group: `__addsf3`/`__subsf3`/`__negsf2`, `__mulsf3`, `__divsf3`, the comparisons including `__cmpsf2`, and the integer conversions | AVR |
+| `avrfp*.c` | binary32 in software, one object per group: `__addsf3`/`__subsf3`/`__negsf2`, `__mulsf3`, `__divsf3`, the comparisons including `__cmpsf2`, and the integer conversions | AVR, and RX, whose `double` is four bytes too |
+| `aeabi.c` | the ARM run-time ABI's names, which clang, GCC and the vendors' toolchains call and EmbCC's own code does not: `__aeabi_memcpy` `__aeabi_memmove` `__aeabi_memset` `__aeabi_memclr` and their 4- and 8-byte forms, `__aeabi_idiv` `__aeabi_uidiv` `__aeabi_idivmod` `__aeabi_uidivmod` where there is a divide instruction, `__aeabi_ldivmod` `__aeabi_uldivmod`, `__aeabi_lmul`, the 64-bit shifts and compares, and the soft-float arithmetic, comparisons and conversions (`__aeabi_fadd` ... `__aeabi_d2f`); all weak | every ARM triple |
+| `aeabidiv.c` | `__aeabi_idiv` `__aeabi_uidiv` `__aeabi_idivmod` `__aeabi_uidivmod` for an ARM core with no divide instruction; weak | ARMv6-M, ARMv7-A |
+| `armv6m.c` | what Thumb-1 has no instruction for: `__aeabi_lmul`, `__aeabi_llsl` `__aeabi_llsr` `__aeabi_lasr`, `__aeabi_memcpy` `__aeabi_memclr`, and the `__atomic_*` calls with interrupts masked; weak | ARMv6-M, and ARMv8-M Baseline without the atomics |
 | `unwind.c` | the DWARF CFI unwinder and the `_Unwind_*` API, plus `__register_frame_info` and `__deregister_frame_info` | Linux triples |
 
 On the ARM hard-float triples the helpers keep the base (core-register)
@@ -500,15 +518,24 @@ The same kind of note is given for the conversion routines (`__fix*`,
 
 ### Per-target archives
 
-| Triple | `librt.a` | Contents |
-|---|---|---|
-| `x86_64-linux-gnu` | yes | `int128.c`, `fp128.c`, `complex.c`, `ldouble.c`, `unwind.c` |
-| `aarch64-linux-gnu` | yes | `int128.c`, `fp128.c`, `complex.c`, `ldouble.c`, `softtf.c`, `unwind.c` |
-| `thumbv7m-none-eabi`, `thumbv7em-none-eabi`, `thumbv7em-none-eabihf`, `thumbv8m.main-none-eabi`, `thumbv8m.main-none-eabihf`, `riscv32-unknown-elf` | yes | `int64.c`, `softfp.c`, `complex.c` |
-| `thumbv6m-none-eabi` | yes | `armv6m.c` (the `__aeabi_*` divide, multiply, shift and block routines, and the `__atomic_*` calls), `int64.c`, `softfp.c`, `complex.c` |
-| `avr` | yes | `avr.c`, `avr64.c`, `avrfp*.c`, `complex.c` |
-| `x86_64-elf`, `aarch64-elf` | no | these link libgcc |
-| `riscv64-unknown-elf` | no | `int128.c` and `fp128.c` do not compile there; compile `softfp.c` and `complex.c` by hand |
+Each `librt.a` holds `complex.c`, `half.c`, `powi.c`, `clear_cache.c`
+and `embtrace.c`, and all but Darwin's `builtin-setjmp.c`; beyond those:
+
+| Triple | Also |
+|---|---|
+| `x86_64-elf`, `x86_64-linux-gnu` | `int128.c`, `fp128.c`, `ldouble.c`; on Linux `unwind.c` |
+| `aarch64-elf`, `aarch64-linux-gnu` | `int128.c`, `fp128.c`, `ldouble.c`, `softtf.c`; on Linux `unwind.c` |
+| `thumbv7m-none-eabi`, `thumbv7em-none-eabi`, `thumbv7em-none-eabihf`, `thumbv8m.main-none-eabi`, `thumbv8m.main-none-eabihf` | `aeabi.c`, `int64.c`, `softfp.c`, `atomic8.c` |
+| `thumbv8m.base-none-eabi` | the same, and `armv6m.c` |
+| `thumbv6m-none-eabi`, `armv7a-none-eabi`, `armv7a-none-eabihf` | `aeabi.c`, `aeabidiv.c`, `int64.c`, `softfp.c`, `atomic8.c`; on ARMv6-M `armv6m.c` |
+| `riscv32-unknown-elf`, each ABI | `int64.c`, `softfp.c`, `softtf.c`, `ldouble.c`, `atomic8.c`, `atomic-riscv.c` |
+| `riscv64-unknown-elf`, each ABI | `int128.c`, `fp128.c`, `softfp.c` (empty for `lp64d`), `softtf.c`, `ldouble.c`, `atomic-riscv.c` |
+| `loongarch64-unknown-elf`, `mips64-none-elf`, `mips64el-none-elf` | `int128.c`, `fp128.c`, `softfp.c`, `softtf.c`, `ldouble.c` |
+| `sparc-none-elf` | `int64.c`, `softfp.c`, `softtf.c`, `ldouble.c`, `atomic8.c` |
+| `mips-none-elf`, `mipsel-none-elf`, `powerpc-none-eabi`, `m68k-none-elf`, `tricore-none-elf`, `xtensa-none-elf` | `int64.c`, `softfp.c`, `atomic8.c` |
+| `rx-none-elf` | `int64.c`, `avrfp*.c`, `atomic8.c` |
+| `avr` | `avr.c`, `avr64.c`, `avrfp*.c` |
+| `aarch64-apple-darwin`, `x86_64-apple-darwin` | `int128.c`, `fp128.c`, `ldouble.c`, and on AArch64 `softtf.c`; linked after libSystem: the routines it does not export -- `__divdc3` and `__divsc3`, the 128-bit shifts and `__multi3` -- which clang takes from its own `libclang_rt.osx.a`. The archive is in the BSD format Apple's linker reads, as `embar` writes for Mach-O members |
 
 ## Building the libraries
 
@@ -524,7 +551,7 @@ scratch.
 | `make libc-linux-x86_64` | C library with the Linux backend, `crt1.o`, and `librt.a`, for `x86_64-linux-gnu` | `build/libc/linux-x86_64/{libc.a,crt1.o,librt.a}` |
 | `make libc-linux-aarch64` | the same for `aarch64-linux-gnu` | `build/libc/linux-aarch64/{libc.a,crt1.o,librt.a}` |
 | `make libc-linux` | both Linux C libraries | |
-| `make libc-embedded` | C library with the bare-metal backend, `--opt=size`, for each embedded target it builds on (all but `avr`) | `build/libc/TRIPLE/libc.a` |
+| `make libc-embedded` | C library with the bare-metal backend, `--opt=size --sections=functions,data`, for each embedded target it builds on (all but `avr`) | `build/libc/TRIPLE/libc.a` |
 | `make libc-emblinkos EMBLINKOS=DIR` | C library with the EmbLinkOS backend, `--opt=speed`; needs `DIR/user/lib/embk.h` (default `DIR` is `$HOME/EmbLinkOs`) | `build/libc/emblinkos/libc.a` |
 | `make libcxx-x86_64`, `make libcxx-aarch64` | C++ library for `x86_64-elf`, `aarch64-elf`, `--opt=speed` | `build/libcxx/x86_64/libcxx.a`, `build/libcxx/aarch64/libcxx.a` |
 | `make libcxx` | both of the above | |

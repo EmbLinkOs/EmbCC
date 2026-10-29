@@ -415,6 +415,9 @@ static void a64_place_info(const struct ir_arg *a, struct a64_cursor *cu,
     if (a->is_float) {                                  /* C.1 / C.5 */
         if (cu->nsrn < 8) {
             p->where = AP_V; p->reg = cu->nsrn++; p->nreg = 1; p->esz = p->size;
+        } else if (a->is_half && cu->darwin) {
+            p->size = 2;            /* a binary16, at its own size there */
+            to_stack(cu, p, 2, 2);
         } else {
             to_stack(cu, p, p->size, p->size);  /* 16: a long double */
         }
@@ -527,6 +530,36 @@ static void a64_place_arg(const struct ir_arg *a, int k, int sret_first,
  * function needs no frame at all. */
 static int g_a64_cheap_teardown;
 
+/* A call to one of _Float16's conversions (src/ir/irgen.c, half_fn) is
+ * one FCVT here: every ARMv8-A converts between half and single or
+ * double, and GCC calls no routine for it -- its libgcc for aarch64 has
+ * none of the three, so a freestanding program could not link the call.
+ * The argument and result stay where the call put them, v0, or w0 for
+ * the half where the convention passes it as an integer (macOS). 0 when
+ * this is no such call; else the conversion's source width in *from and
+ * destination width in *to, 2 for the half. */
+static int a64_half_cvt(const struct ir_ins *i, int *from, int *to)
+{
+    const char *nm = i->op == IR_CALL && !i->indirect && i->callee
+                   ? i->callee->name : NULL;
+    if (!nm || i->nargs != 1)
+        return 0;
+    if (!strcmp(nm, "__extendhfsf2")) { *from = 2; *to = 4; return 1; }
+    if (!strcmp(nm, "__truncsfhf2"))  { *from = 4; *to = 2; return 1; }
+    if (!strcmp(nm, "__truncdfhf2"))  { *from = 8; *to = 2; return 1; }
+    return 0;
+}
+
+static void a64_half_cvt_emit(struct code *t, const struct ir_ins *i,
+                              int from, int to)
+{
+    if (from == 2 && !i->argv[0].is_float)
+        a64_fmov_from_gpr(t, 0, 0, 4);          /* the bits, w0 to s0 */
+    a64_fcvt(t, 0, 0, from, to);
+    if (to == 2 && !i->flt)
+        a64_fmov_to_gpr(t, 0, 0, 4);            /* and back, zero above */
+}
+
 static int a64_tail_ok(const struct ir_func *fn, int n)
 {
     const struct ir_ins *i = &fn->ins[n];
@@ -534,8 +567,9 @@ static int a64_tail_ok(const struct ir_func *fn, int n)
     struct a64_argplan pl;
     int nret = 0;
 
+    int hf, ht;
     if (i->op != IR_CALL || i->indirect || i->call_varargs || i->retsize ||
-        i->flt || getenv("EMBCC_NO_TAILCALL"))
+        i->flt || getenv("EMBCC_NO_TAILCALL") || a64_half_cvt(i, &hf, &ht))
         return 0;
     if (fn->ret_abi.is_struct || fn->ret_abi.is_float || fn->is_varargs ||
         fn->has_alloca || fn->neh)
@@ -3138,6 +3172,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
         case IR_CALL: {
             struct a64_argplan pl[MAX_PARAMS];
             struct a64_cursor cu = { 0, 0, 0, 0, 0 };
+            int hcf, hct;
             for (int k = 0; k < i->nargs; k++)
                 a64_place_arg(&i->argv[k], k, i->sret_first, &cu, &pl[k],
                               i->call_varargs, i->call_nfixed);
@@ -3295,6 +3330,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                 cs.patch_off = a64_bl(t);
                 cs.target = i->callee;
                 PUSH(st->call, st->ncall, st->capcall, cs);
+            } else if (a64_half_cvt(i, &hcf, &hct)) {
+                a64_half_cvt_emit(t, i, hcf, hct);
             } else {
                 struct extcall ec = { 0, NULL, 0 };
                 ec.patch_off = a64_bl(t);

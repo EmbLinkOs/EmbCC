@@ -9,7 +9,7 @@
 /* [kind][is_unsigned] — TY_PTR/TY_ARRAY/TY_STRUCT handled separately.
  * Designated initializers so this table survives struct type growing.
  * _Bool is unsigned in both slots (it holds only 0 or 1). */
-static struct type bases[10][2] = {
+static struct type bases[11][2] = {
     { { .kind = TY_VOID }, { .kind = TY_VOID } },
     { { .kind = TY_BOOL, .is_unsigned = 1 },
       { .kind = TY_BOOL, .is_unsigned = 1 } },
@@ -24,7 +24,48 @@ static struct type bases[10][2] = {
     { { .kind = TY_LDOUBLE }, { .kind = TY_LDOUBLE } },
     /* GNU __int128: two eightbytes, 16-aligned (both ABIs) */
     { { .kind = TY_INT128 }, { .kind = TY_INT128, .is_unsigned = 1 } },
+    /* _Float16: IEEE binary16, two bytes (C23 Annex X, ISO/IEC TS
+     * 18661-3) */
+    { { .kind = TY_FLOAT16 }, { .kind = TY_FLOAT16 } },
 };
+
+/* ARM's __fp16: binary16 too, its own type because its arithmetic is
+ * float's (type.h, is_fp16) */
+static struct type fp16_type = { .kind = TY_FLOAT16, .is_fp16 = 1 };
+static struct type bf16_type = { .kind = TY_FLOAT16, .is_bf16 = 1 };
+
+struct type *ty_fp16(void) { return &fp16_type; }
+struct type *ty_bf16(void) { return &bf16_type; }
+
+/* As clang and GCC pass a _Float16: in the low half of an SSE, NEON or
+ * VFP register on x86-64, AArch64 and the ARM hard-float convention;
+ * NaN-boxed in an FPR under the RISC-V hard-float conventions; as a short
+ * in an integer register otherwise, sign-extended on RISC-V and LoongArch
+ * (their compilers load it with lh and ld.h), zero-extended on ARM. A
+ * target with no _Float16 convention of its own takes the last. */
+struct type *ty_half_carrier(int *nanbox)
+{
+    *nanbox = 0;
+    switch (target_get()) {
+    case TARGET_X86_64:
+    case TARGET_AARCH64:
+        return ty_base(TY_FLOAT, 0);
+    case TARGET_THUMB:
+        return target_thumb_hard_abi() ? ty_base(TY_FLOAT, 0)
+                                       : ty_base(TY_SHORT, 1);
+    case TARGET_RISCV32:
+    case TARGET_RISCV64:
+        if (target_riscv_abi_flen()) {
+            *nanbox = 1;
+            return ty_base(TY_FLOAT, 0);
+        }
+        return ty_base(TY_SHORT, 0);
+    case TARGET_LOONGARCH64:
+        return ty_base(TY_SHORT, 0);
+    default:
+        return ty_base(TY_SHORT, 1);
+    }
+}
 
 /* `long long`, which shares TY_LONG's kind and differs only in width on
  * a target where long is not already eight bytes. Its own rows because
@@ -673,6 +714,7 @@ int ty_size(const struct type *t)
      * conversions land differently from every other target here. */
     case TY_INT: return target_int_size();
     case TY_LONG: return t->is_llong ? 8 : target_long_size();
+    case TY_FLOAT16: return 2;
     case TY_FLOAT: return 4;
     /* Four on AVR, eight everywhere else -- a target property like
      * long double's, not a constant. */
@@ -738,7 +780,8 @@ int ty_compatible(const struct type *a, const struct type *b, int top)
         return 0;
     }
     if (a->kind != b->kind || a->is_unsigned != b->is_unsigned ||
-        a->bitint != b->bitint)
+        a->bitint != b->bitint || a->is_fp16 != b->is_fp16 ||
+        a->is_bf16 != b->is_bf16)
         return 0;
     const struct type *ca = a->canon ? a->canon : a;
     const struct type *cb = b->canon ? b->canon : b;
@@ -777,7 +820,8 @@ int ty_compatible(const struct type *a, const struct type *b, int top)
 int ty_equal(const struct type *a, const struct type *b)
 {
     if (a->kind != b->kind || a->is_unsigned != b->is_unsigned ||
-        a->bitint != b->bitint)
+        a->bitint != b->bitint || a->is_fp16 != b->is_fp16 ||
+        a->is_bf16 != b->is_bf16)
         return 0;
     /* `long` against `long long`. C says they are distinct types
      * whatever the target, but this compiler has always let them
@@ -843,7 +887,7 @@ int ty_is_xldouble(const struct type *t)
 int ty_is_float(const struct type *t)
 {
     return t->kind == TY_FLOAT || t->kind == TY_DOUBLE ||
-           t->kind == TY_LDOUBLE;
+           t->kind == TY_LDOUBLE || t->kind == TY_FLOAT16;
 }
 
 int ty_is_arith(const struct type *t)
@@ -1132,6 +1176,8 @@ const char *ty_name(const struct type *t)
     case TY_FLOAT: base = "float"; break;
     case TY_DOUBLE: base = "double"; break;
     case TY_LDOUBLE: base = "long double"; break;
+    case TY_FLOAT16: base = t->is_fp16 ? "__fp16"
+                          : t->is_bf16 ? "__bf16" : "_Float16"; break;
     case TY_INT128: base = t->is_unsigned ? "unsigned __int128" : "__int128";
         break;
     case TY_STRUCT:
@@ -1148,12 +1194,6 @@ const char *ty_name(const struct type *t)
             snprintf(eb, sizeof eb, "%s", ty_name(t->celem));
             snprintf(structbuf, sizeof structbuf, "%s _Complex", eb);
             base = structbuf;
-            break;
-        }
-        /* _Float16 is an incomplete struct of that tag (parse.c), which
-         * no program can spell: the name is a keyword */
-        if (t->tag && !strcmp(t->tag, "_Float16")) {
-            base = "_Float16";
             break;
         }
         snprintf(structbuf, sizeof structbuf, "%s %s",
@@ -1193,6 +1233,7 @@ const char *ty_name(const struct type *t)
 static int hfa_walk(const struct type *t, int *esz)
 {
     switch (t->kind) {
+    case TY_FLOAT16:            /* an HFA of halves: h0, h1, ... */
     case TY_FLOAT:
     case TY_DOUBLE:
     case TY_LDOUBLE: {
@@ -1265,6 +1306,8 @@ struct type *ty_promote(struct type *t)
     t = ty_unqual(t);
     if (t->bitint)      /* C23 6.3.1.1: a _BitInt is not promoted */
         return t;
+    if (t->is_fp16)     /* ARM's storage-only half: its value is a float */
+        return ty_base(TY_FLOAT, 0);
     if (t->kind == TY_CHAR || t->kind == TY_SHORT)
         return ty_base(TY_INT, t->is_unsigned &&
                                ty_size(t) >= ty_size(ty_base(TY_INT, 0)));
@@ -1328,6 +1371,17 @@ struct type *ty_arith_common(struct type *a, struct type *b)
         return ty_base(TY_DOUBLE, 0);
     if (a->kind == TY_FLOAT || b->kind == TY_FLOAT)
         return ty_base(TY_FLOAT, 0);
+    /* _Float16 and __bf16 outrank the integers and compute as themselves,
+     * and of the two _Float16 wins, as in GCC and clang; __fp16 is
+     * promoted to float first, whatever it meets */
+    if (a->kind == TY_FLOAT16 || b->kind == TY_FLOAT16) {
+        if (a->is_fp16 || b->is_fp16)
+            return ty_base(TY_FLOAT, 0);
+        if ((a->kind != TY_FLOAT16 || a->is_bf16) &&
+            (b->kind != TY_FLOAT16 || b->is_bf16))
+            return ty_bf16();
+        return ty_base(TY_FLOAT16, 0);
+    }
     a = ty_promote(a);
     b = ty_promote(b);
     if (a->bitint || b->bitint)

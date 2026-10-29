@@ -35,6 +35,13 @@ static const struct { const char *name; int enc; } sysregs[] = {
     { "far_el1",          A64_SYSREG(3, 0,  6, 0, 0) },
     { "par_el1",          A64_SYSREG(3, 0,  7, 4, 0) },
     { "midr_el1",         A64_SYSREG(3, 0,  0, 0, 0) },
+    /* the caches' geometry: CTR_EL0's line sizes are what a
+     * __clear_cache steps by (lib/rt/clear_cache.c) */
+    { "ctr_el0",          A64_SYSREG(3, 3,  0, 0, 1) },
+    { "dczid_el0",        A64_SYSREG(3, 3,  0, 0, 7) },
+    { "clidr_el1",        A64_SYSREG(3, 1,  0, 0, 1) },
+    { "ccsidr_el1",       A64_SYSREG(3, 1,  0, 0, 0) },
+    { "csselr_el1",       A64_SYSREG(3, 2,  0, 0, 0) },
     { "mpidr_el1",        A64_SYSREG(3, 0,  0, 0, 5) },
     { "id_aa64pfr0_el1",  A64_SYSREG(3, 0,  0, 4, 0) },
     { "id_aa64pfr1_el1",  A64_SYSREG(3, 0,  0, 4, 1) },

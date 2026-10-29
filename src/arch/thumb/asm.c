@@ -2163,10 +2163,9 @@ static int sym_operand(const char *p, long *addend, const char **end)
 {
     int n = 0;
     *addend = 0;
-    if (!(isalpha((unsigned char)p[0]) || p[0] == '_' || p[0] == '.'))
+    if (!asm_sym0((unsigned char)p[0]))
         return 0;
-    while (isalnum((unsigned char)p[n]) || p[n] == '_' || p[n] == '.' ||
-           p[n] == '$')
+    while (asm_symc((unsigned char)p[n]))
         n++;
     *end = p + n;
     while (isspace((unsigned char)**end)) (*end)++;

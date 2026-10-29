@@ -100,6 +100,41 @@ while [ "$i" -lt "$k" ]; do
     i=$((i + 1))
 done
 
+# ...and what src/arch/mips/asm.c makes of the doubleword forms written
+# as text -- daddu..drotrv, the shifts and their *32 spellings, dmult..
+# ddivu, dext/dins at their encodings' edges, dsbh/dshd/dclz/dclo, dmfc0/
+# dmtc0 and the doubleword memory forms -- which it did not know: MIPS64
+# inline asm and .s files had daddiu, ld and sd. mipsasmcheck --64 lists
+# them from asm.c's own tables and assembles each; llvm-mc assembles the
+# same lines.
+OBJCOPY=${EMBCC_LLVM_OBJCOPY:-llvm-objcopy}
+cc -std=c99 -Wall -Wextra -o "$out/mipsasmcheck" \
+   tools/mipsasmcheck/mipsasmcheck.c src/arch/mips/asm.c \
+   src/arch/mips/emit.c src/arch/code.c src/arch/target.c \
+   src/driver/util.c src/driver/diag.c src/platform/platform_common.c \
+   src/platform/platform_posix.c src/sema/type.c src/sema/ldfloat.c || {
+    echo "mipsasmcheck did not build"; exit 1; }
+"$out/mipsasmcheck" --64 --list > "$out/a64.s" || {
+    echo "mipsasmcheck --64 could not list its vocabulary"; exit 1; }
+na=$(wc -l < "$out/a64.s" | tr -d ' ')
+for bo in el be; do
+    [ $bo = el ] && arg=bytes || arg=bytes-be
+    [ $bo = el ] && tr=mips64el-unknown-elf || tr=mips64-unknown-elf
+    "$out/mipsasmcheck" --64 $arg > "$out/a64$bo.bin" 2> "$out/a64$bo.err" || {
+        echo "the assembler refused its own MIPS64 vocabulary:"
+        head -3 "$out/a64$bo.err"; exit 1; }
+    { printf '.set noreorder\n.set noat\n'; cat "$out/a64.s"; } > "$out/a64b.s"
+    "$MC" -triple=$tr -mcpu=mips64r2 -mattr=+soft-float -filetype=obj \
+        "$out/a64b.s" -o "$out/a64$bo.o" 2> "$out/a64$bo.mc" || {
+        echo "llvm-mc ($tr) rejected the MIPS64 assembler vocabulary:"
+        head -4 "$out/a64$bo.mc"; exit 1; }
+    "$OBJCOPY" -O binary --only-section=.text "$out/a64$bo.o" "$out/a64$bo.ref"
+    cmp -s "$out/a64$bo.bin" "$out/a64$bo.ref" || {
+        echo "a MIPS64 asm statement assembles otherwise than llvm-mc ($tr) does"
+        exit 1; }
+done
+echo "the assembler's $na MIPS64 statements assemble as llvm-mc's, in both byte orders"
+
 echo "all $n MIPS64r2 encodings agree with llvm-mc in both byte orders,"
 echo "every register in every field and both ends of every immediate;"
 echo "$(cat "$out/li.txt"); and $k encoder range checks each refuse"

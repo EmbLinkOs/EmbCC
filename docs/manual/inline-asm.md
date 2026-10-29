@@ -706,6 +706,11 @@ The body may contain:
   RISC-V and AVR).
   AVR's FreeRTOS port calls the scheduler this way from its naked yield.
 
+A naked function goes where a function would: into `.text`, into the
+section its `section` attribute names (`.ramfunc`, AVR's `.init3`), or,
+under `--sections=functions`, into a `.text.NAME` of its own, for
+`--gc-sections` to keep only when something refers to it.
+
 A naked function's parameters arrive in the registers the calling
 convention puts them in, for the asm to read. There is no warning for an
 unused parameter, and no error for a non-`void` function without a
@@ -718,7 +723,6 @@ These are refused, because a naked function has no frame for them:
 | any other statement | `naked function 'f' holds a statement that is not an asm or a call with no arguments; with no prologue there is no frame for it to run in` |
 | an operand that is not a constant | `operand 0 of the asm in naked function 'f' is not a constant ("i"); a naked function has no frame to load one from` |
 | an output operand | `the asm in naked function 'f' has an output; a naked function has no frame to put it in` |
-| a `section` attribute | `naked function 'f' in section '.ramfunc' is not supported yet: its body is assembled into .text` |
 | x86-64 and Apple arm64 | `__attribute__((naked)) is not supported: on this target the body could only be assembled by the file-scope assembler's few instructions; it is supported on every target but x86-64 and AArch64 for Darwin or Windows` |
 
 `tests/golden/freertos-cm3.sh` builds the FreeRTOS kernel and its GCC
@@ -1679,6 +1683,26 @@ There are no floating-point or coprocessor 1 instructions, no trapping
 `add`, `addi` or `sub`, no DSP, MIPS16 or microMIPS instructions, no
 `cache`, `pref` or `rdhwr`, and no `madd` or `msub`.
 
+On the MIPS64 targets (`mips64el-none-elf`, `mips64-none-elf`) the same
+vocabulary is joined by MIPS64r2's doubleword forms, each encoded as
+llvm-mc encodes it (tests/golden/mips64-encoding.sh), and the registers
+have their n64 names (`$a4`-`$a7` where o32 has `$t0`-`$t3`); `.set
+mips64r2` is accepted. On MIPS32 each is refused as `daddu is a MIPS64
+instruction`.
+
+| Instruction | Operands |
+|---|---|
+| `daddu`, `dsubu` `Rd, Rs, Rt`; `dsllv`, `dsrlv`, `dsrav`, `drotrv` `Rd, Rt, Rs` | |
+| `daddiu Rt, Rs, IMM` | 16-bit signed |
+| `dsll`, `dsrl`, `dsra`, `drotr` `Rd, Rt, SA` | 0 to 63 |
+| `dsll32`, `dsrl32`, `dsra32`, `drotr32` `Rd, Rt, SA` | 0 to 31 (a shift by 32 + SA) |
+| `ld`, `sd`, `lwu`, `lld`, `scd`, `ldl`, `ldr`, `sdl`, `sdr` | `Rt, OFF(Rs)` |
+| `dmult`, `dmultu` `Rs, Rt`; `ddiv`, `ddivu` | `$zero, Rs, Rt` only, as `div` |
+| `dext`, `dins` `Rt, Rs, POS, SIZE` | within the doubleword (`dextm`/`dextu`, `dinsm`/`dinsu` as POS and SIZE need) |
+| `dsbh`, `dshd`, `dclz`, `dclo` `Rd, Rs` | |
+| `dmfc0`, `dmtc0` `Rt, $N[, SEL]` | `SEL` 0 to 7 |
+| `dli Rd, IMM` | any 64-bit constant; the code generator's sequence |
+
 ### Callee-saved registers on MIPS32
 
 A template that names s0 to s7, gp, fp, ra, k0 or k1 is refused, and so
@@ -2553,8 +2577,11 @@ constants. A symbol name is not accepted in an inline template
 (`'buf)' is not a number, a register or an expression this assembler knows`).
 
 The target of a relative branch (`br...`, `rjmp`, `rcall`) must be
-written relative to `.`, the address of the start of the instruction
-(`brne .-4`); a bare number is refused with
+written relative to `.`, which counts from the end of the branch, as GNU
+as and llvm-mc read it for AVR: `rjmp .` and `rjmp .+0` go on to the next
+instruction (avr-gcc's two-cycle nop), `rcall .` pushes the address of the
+next one (the two bytes of stack avr-gcc's prologues take), and `dec r24`
+then `brne .-4` loops back to the `dec`. A bare number is refused with
 ``rjmp needs a target written relative to `.` (a label, or `.+4`); ...``.
 `jmp` and `call` take an absolute, even byte address written as a
 number; a `.`-relative target is refused for them. Labels are not

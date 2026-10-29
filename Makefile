@@ -226,6 +226,7 @@ FAMILY_SRCS_riscv := \
 	src/arch/riscv/options.c \
 	src/arch/riscv/emit.c \
 	src/arch/riscv/codegen.c \
+	src/arch/riscv/attrs.c \
 	src/arch/riscv/irgen.c \
 	src/arch/riscv/asm.c \
 	src/arch/riscv32/predef.c \
@@ -404,9 +405,10 @@ $(EMBDBG_CORE): tools/embdbg/embdbg.c tools/embdbg/embdbg_core.h
 # ...every target's of the families TARGETS builds: the hosted libraries of
 # x86 and AArch64 when they are built, and the embedded runtimes, whose
 # loops below run over the built families' triples (FAMILY_RT_*).
-RUNTIMES_x86 := libc-x86_64 libcxx-x86_64 libc-linux-x86_64 libcxx-linux-x86_64
+RUNTIMES_x86 := libc-x86_64 libcxx-x86_64 libc-linux-x86_64 libcxx-linux-x86_64 \
+                rt-darwin-x86_64
 RUNTIMES_aarch64 := libc-aarch64 libcxx-aarch64 libc-linux-aarch64 \
-                    libcxx-linux-aarch64
+                    libcxx-linux-aarch64 rt-darwin-aarch64
 RUNTIMES := $(foreach f,x86 aarch64,$(if $(call built,$(f)),$(RUNTIMES_$(f)))) \
             rt-embedded libc-embedded libcxx-embedded
 .PHONY: toolchain runtimes
@@ -687,7 +689,7 @@ EMBLS_SRCS = tools/embls/embls.c $(PLATFORM_SRCS) src/cpp/cpp.c src/lex/lex.c \
              src/arch/aarch64/codegen.c src/arch/aarch64/emit.c \
              src/arch/aarch64/asm.c src/arch/thumb/irgen.c src/arch/thumb/asm.c \
              src/arch/thumb/emit.c src/arch/thumb/a32.c src/arch/thumb/attrs.c \
-             src/arch/riscv/irgen.c \
+             src/arch/riscv/irgen.c src/arch/riscv/attrs.c \
              src/arch/riscv/asm.c src/arch/riscv/emit.c \
              src/arch/mips/irgen.c src/arch/mips/asm.c src/arch/mips/emit.c \
              src/arch/loongarch/irgen.c src/arch/loongarch/emit.c \
@@ -816,6 +818,8 @@ libc-x86_64: embcc embar
 	@rm -f $(BUILD)/libc/x86_64/libc.a
 	@$${EMBCC_X86_AR:-./embar} rcs $(BUILD)/libc/x86_64/libc.a $(BUILD)/libc/x86_64/*.o
 	@echo "libc: $(BUILD)/libc/x86_64/libc.a"
+	@EMBCC=./embcc sh tools/build-rt.sh x86_64-elf $(BUILD)/libc/x86_64 > /dev/null
+	@echo "rt: $(BUILD)/libc/x86_64/librt.a"
 
 libc-aarch64: embcc embar
 	@mkdir -p $(BUILD)/libc/aarch64
@@ -826,6 +830,21 @@ libc-aarch64: embcc embar
 	@rm -f $(BUILD)/libc/aarch64/libc.a
 	@$${EMBCC_AARCH64_AR:-./embar} rcs $(BUILD)/libc/aarch64/libc.a $(BUILD)/libc/aarch64/*.o
 	@echo "libc: $(BUILD)/libc/aarch64/libc.a"
+	@EMBCC=./embcc sh tools/build-rt.sh aarch64-elf $(BUILD)/libc/aarch64 > /dev/null
+	@echo "rt: $(BUILD)/libc/aarch64/librt.a"
+
+# EmbCC's compiler runtime for macOS (lib/rt, as Mach-O): the routines its
+# code calls that libSystem does not export -- __divdc3 for a complex
+# division, the 128-bit shifts and multiply, __muloti4 -- which clang takes
+# from its own libclang_rt.osx.a. The driver links it after -lSystem, so
+# what the system has comes from the system.
+rt-darwin-aarch64: embcc embar
+	@EMBCC=./embcc sh tools/build-rt.sh aarch64-apple-darwin $(BUILD)/libc/darwin-aarch64 > /dev/null
+	@echo "rt: $(BUILD)/libc/darwin-aarch64/librt.a"
+
+rt-darwin-x86_64: embcc embar
+	@EMBCC=./embcc sh tools/build-rt.sh x86_64-apple-darwin $(BUILD)/libc/darwin-x86_64 > /dev/null
+	@echo "rt: $(BUILD)/libc/darwin-x86_64/librt.a"
 
 # EmbLinkOS is a backend, not a second library: same sources, one different
 # file at the bottom. It needs that OS's ABI headers, so it is opt-in.
@@ -881,7 +900,7 @@ libc-linux-x86_64: embcc embar
 	    $(BUILD)/libc/linux-x86_64/*.o
 	@./embcc --target=x86_64-linux-gnu -c -O1 $(LIBC_INC) \
 	    lib/libc/os/linux/start.c -o $(BUILD)/libc/linux-x86_64/crt1.o
-	@mkdir -p $(BUILD)/libc/linux-x86_64/rt
+	@rm -rf $(BUILD)/libc/linux-x86_64/rt && mkdir -p $(BUILD)/libc/linux-x86_64/rt
 	@for f in $(RT_SRCS); do \
 	    o=$(BUILD)/libc/linux-x86_64/rt/$$(basename $$f .c).o; \
 	    ./embcc --target=x86_64-linux-gnu -c -O1 $$f -o $$o || exit 1; \
@@ -902,7 +921,7 @@ libc-linux-aarch64: embcc embar
 	    $(BUILD)/libc/linux-aarch64/libc.a $(BUILD)/libc/linux-aarch64/*.o
 	@./embcc --target=aarch64-linux-gnu -c -O1 $(LIBC_INC) \
 	    lib/libc/os/linux/start.c -o $(BUILD)/libc/linux-aarch64/crt1.o
-	@mkdir -p $(BUILD)/libc/linux-aarch64/rt
+	@rm -rf $(BUILD)/libc/linux-aarch64/rt && mkdir -p $(BUILD)/libc/linux-aarch64/rt
 	@for f in $(RT_SRCS); do \
 	    o=$(BUILD)/libc/linux-aarch64/rt/$$(basename $$f .c).o; \
 	    ./embcc --target=aarch64-linux-gnu -c -O1 $$f -o $$o || exit 1; \
@@ -924,6 +943,9 @@ libc-linux-aarch64: embcc embar
 # directory (tools/build-rt.sh says how each is built).
 RISCV_HF := riscv32-unknown-elf/ilp32f riscv32-unknown-elf/ilp32d \
             riscv64-unknown-elf/lp64f riscv64-unknown-elf/lp64d
+# ...and the soft-float ABI without the A extension (an ESP32-C3's rv32imc),
+# whose C library cannot hold the amo instructions of the others' locks
+RISCV_HF += riscv32-unknown-elf/noa riscv64-unknown-elf/noa
 RT_EMBEDDED_ALL := avr thumbv6m-none-eabi thumbv8m.base-none-eabi thumbv7m-none-eabi thumbv7em-none-eabi \
                thumbv7em-none-eabihf thumbv8m.main-none-eabi \
                thumbv8m.main-none-eabihf armv7a-none-eabi armv7a-none-eabihf riscv32-unknown-elf \
@@ -1023,8 +1045,10 @@ install: toolchain
 
 # The hosted triples' directories and where the build put them; the
 # embedded ones are RT_EMBEDDED's, each in a directory of its own name.
-INSTALL_PAIRS_x86 := "x86_64-elf:x86_64" "x86_64-linux-gnu:linux-x86_64"
-INSTALL_PAIRS_aarch64 := "aarch64-elf:aarch64" "aarch64-linux-gnu:linux-aarch64"
+INSTALL_PAIRS_x86 := "x86_64-elf:x86_64" "x86_64-linux-gnu:linux-x86_64" \
+                     "x86_64-apple-darwin:darwin-x86_64"
+INSTALL_PAIRS_aarch64 := "aarch64-elf:aarch64" "aarch64-linux-gnu:linux-aarch64" \
+                         "aarch64-apple-darwin:darwin-aarch64"
 install-files:
 	@echo "installing EmbCC $(VERSION) into $(DESTDIR)$(PREFIX)"
 	@mkdir -p $(DESTDIR)$(PREFIX)/bin

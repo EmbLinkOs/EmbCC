@@ -8,6 +8,7 @@
 
 #include "../driver/util.h"
 #include "../arch/target.h"
+#include "../sema/ldfloat.h"
 
 /* An identifier may hold the characters C11 Annex D lists, written in
  * UTF-8 as gcc and clang read them: `int café;`. Returns the length of
@@ -193,7 +194,8 @@ static const struct {
     { "_Float128", TOK_KW_FLOAT128 },
     { "__float128", TOK_KW_FLOAT128 },
     { "_Float16", TOK_KW_FLOAT16 },
-    { "__fp16", TOK_KW_FLOAT16 },
+    { "__fp16", TOK_KW_FP16 },
+    { "__bf16", TOK_KW_BF16 },
     { "_Bool", TOK_KW_BOOL },
     { "_Complex", TOK_KW_COMPLEX },
     { "__complex__", TOK_KW_COMPLEX },
@@ -815,6 +817,48 @@ static int has_digit_separator(const char *p)
     return 0;
 }
 
+/* A floating literal's value, from its text without the suffix: rounded
+ * once, correctly, to float when it is one -- an f suffix, or a double
+ * that is 32 bits on this target (AVR, RX) -- and to double otherwise, by
+ * the compiler's own exact arithmetic (sema/ldfloat.c). It was the host's
+ * strtod: a float literal rounded to double and then to float, the answer
+ * was whatever the host's C library gave, and macOS 27.2's aborts on
+ * 0.000000000009215456089201046196990319003816694021224975585937499999999,
+ * taking the compiler with it. */
+static double lit_value(const char *text, int is_float)
+{
+    int single = is_float || target_double_size() == 4;
+    struct ldf *v = ldf_from_text(text, single ? LDF_FLOAT : LDF_DOUBLE);
+    return v ? ldf_to_double(v) : 0;
+}
+
+/* The end of the floating literal at p, by C's syntax: a decimal or hex
+ * significand and its optional exponent (6.4.4.2) */
+static const char *float_end(const char *p)
+{
+    int hex = p[0] == '0' && (p[1] == 'x' || p[1] == 'X');
+    if (hex)
+        p += 2;
+    while (hex ? isxdigit((unsigned char)*p) : isdigit((unsigned char)*p))
+        p++;
+    if (*p == '.') {
+        p++;
+        while (hex ? isxdigit((unsigned char)*p) : isdigit((unsigned char)*p))
+            p++;
+    }
+    if (hex ? (*p == 'p' || *p == 'P') : (*p == 'e' || *p == 'E')) {
+        const char *q = p + 1;
+        if (*q == '+' || *q == '-')
+            q++;
+        if (isdigit((unsigned char)*q)) {
+            while (isdigit((unsigned char)*q))
+                q++;
+            p = q;
+        }
+    }
+    return p;
+}
+
 static int cxx_number(struct lexer *lx, struct token *t)
 {
     const char *p = lx->p, *q = p;
@@ -901,14 +945,13 @@ static int cxx_number(struct lexer *lx, struct token *t)
     }
     /* the value, from the digits and a standard suffix */
     if (is_float) {
-        char *fend;
         t->kind = TOK_FNUM;
-        t->fnum = strtod(digits, &fend);
         t->fnum_is_float = !ud && (*suf == 'f' || *suf == 'F');
         t->fnum_is_ld = !ud && (*suf == 'l' || *suf == 'L');
+        t->fnum_is_f16 = 0;
+        t->fnum = lit_value(digits, t->fnum_is_float);
         t->fnum_is_imag = 0;
-        if (t->fnum_is_ld || ud)
-            t->text = digits;
+        t->text = digits;
     } else {
         unsigned long v = bin ? strtoul(digits + 2, NULL, 2)
                               : strtoul(digits, NULL, 0);
@@ -1204,36 +1247,49 @@ static void lex_raw(struct lexer *lx)
                 looks_float = 1;
         }
         if (looks_float) {
-            char *fend;
-            double d = strtod(lx->p, &fend);
+            const char *numend = float_end(lx->p), *fend = numend;
             t->kind = TOK_FNUM;
-            t->fnum = d;
             t->fnum_is_float = 0;
+            t->fnum_is_f16 = 0;
             t->fnum_is_ld = 0;
             t->fnum_is_imag = 0;
-            char *numend = fend;
-            /* suffixes: at most one of f/l, and a GNU imaginary i/j on
+            /* suffixes: at most one of f/l/f16, and a GNU imaginary i/j on
              * either side of it (1.0fi, 1.0if, 2.5i) */
             for (;;) {
                 if ((*fend == 'i' || *fend == 'I' || *fend == 'j' ||
                      *fend == 'J') && !t->fnum_is_imag) {
                     t->fnum_is_imag = 1;
+                } else if ((*fend == 'f' || *fend == 'F') && fend[1] == '1' &&
+                           fend[2] == '6' && !t->fnum_is_float &&
+                           !t->fnum_is_ld && !t->fnum_is_f16) {
+                    t->fnum_is_f16 = 1;
+                    fend += 2;
+                } else if (((fend[0] == 'b' && fend[1] == 'f') ||
+                            (fend[0] == 'B' && fend[1] == 'F')) &&
+                           fend[2] == '1' && fend[3] == '6' &&
+                           !t->fnum_is_float && !t->fnum_is_ld &&
+                           !t->fnum_is_f16) {
+                    t->fnum_is_f16 = 2;          /* GCC's __bf16 suffix */
+                    fend += 3;
                 } else if ((*fend == 'f' || *fend == 'F') &&
-                           !t->fnum_is_float && !t->fnum_is_ld) {
+                           !t->fnum_is_float && !t->fnum_is_ld &&
+                           !t->fnum_is_f16) {
                     t->fnum_is_float = 1;
                 } else if ((*fend == 'l' || *fend == 'L') &&
-                           !t->fnum_is_float && !t->fnum_is_ld) {
+                           !t->fnum_is_float && !t->fnum_is_ld &&
+                           !t->fnum_is_f16) {
                     t->fnum_is_ld = 1;
-                    t->text = xstrndup(lx->p, (size_t)(numend - lx->p));
                 } else {
                     break;
                 }
                 fend++;
             }
+            t->text = xstrndup(lx->p, (size_t)(numend - lx->p));
+            t->fnum = lit_value(t->text, t->fnum_is_float);
             if (isalnum((unsigned char)*fend) || *fend == '.')
                 diag_fatal(lx->file, lx->line,
                            "malformed floating constant");
-            lx->p = fend;
+            lx->p = (char *)fend;
             return;
         }
     }

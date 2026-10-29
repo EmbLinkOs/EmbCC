@@ -56,7 +56,8 @@ echo "a / -7 and a % -7: one sdiv and one mls"
 [ "$(count rem_only '\tudiv\t')" = 1 ] && [ "$(count rem_only '\tmls\t')" = 1 ] || {
     echo "FAIL: a remainder alone should stay udiv and mls:"; cat "$out/d.dis"; exit 1; }
 echo "a remainder alone is still udiv and mls"
-"$EMBCC" --target=thumbv7em-none-eabi -O2 -c "$out/d.c" -o "$out/d.o" 2> "$out/cc.log" || {
+# (without unrolling, which copies the digit loop four times: a umull each)
+"$EMBCC" --target=thumbv7em-none-eabi -O2 --no-pass=unroll -c "$out/d.c" -o "$out/d.o" 2> "$out/cc.log" || {
     echo "FAIL: could not compile at -O2:"; cat "$out/cc.log"; exit 1; }
 "$OD" -d --no-show-raw-insn --triple=thumbv7em "$out/d.o" > "$out/d.dis"
 echo "-O2:"

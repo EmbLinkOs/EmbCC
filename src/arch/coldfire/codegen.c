@@ -2665,6 +2665,17 @@ static void gen_func(struct ir_func *fn, struct code *t, struct cf_sites *st,
                 F.used_callee[F.nsave++] = r;
         }
     }
+    /* An interrupt handler, as GCC's m68k port makes one (interrupt,
+     * interrupt_handler): the interrupted code's d0, d1, a0 and a1 saved
+     * too -- the scratch and helper registers, written here without the
+     * allocator knowing -- in the same a6-relative movem, and rte at the
+     * end, which takes back the SR and PC the exception stacked. GCC
+     * saves only those a leaf handler writes. */
+    if (f->is_isr) {
+        static const int scratch[4] = { D0, D1, A0, A1 };
+        for (int k = 0; k < 4; k++)
+            F.used_callee[F.nsave++] = scratch[k];
+    }
     layout(&F);
 
     F.label_off = xmalloc((size_t)(fn->nlabels + 1) * sizeof *F.label_off);
@@ -2742,7 +2753,10 @@ static void gen_func(struct ir_func *fn, struct code *t, struct cf_sites *st,
         cf_movem_load(t, fp_at(F.save_at), mask);
     }
     cf_unlk(t, CF_FP);
-    cf_rts(t);
+    if (f->is_isr)
+        cf_rte(t);
+    else
+        cf_rts(t);
 
     if (!form) {
         form = xcalloc((size_t)(F.nfix ? F.nfix : 1), 1);

@@ -50,6 +50,7 @@ struct sect {
 
 struct machow {
     int cputype, cpusubtype;
+    uint32_t minos;                /* LC_BUILD_VERSION's, as X.Y.Z nibbles */
     struct sect sect[MAX_SECTIONS];
     int nsect;
     struct buf syms;               /* struct nlist_64, packed */
@@ -58,11 +59,26 @@ struct machow {
     struct buf strtab;
 };
 
+void machow_set_min_os(struct machow *w, const char *version)
+{
+    unsigned v[3] = { 0, 0, 0 };
+    const char *p = version;
+    for (int k = 0; k < 3 && *p; k++) {
+        while (*p >= '0' && *p <= '9')
+            v[k] = v[k] * 10 + (unsigned)(*p++ - '0');
+        if (*p != '.')
+            break;
+        p++;
+    }
+    w->minos = (v[0] & 0xffff) << 16 | (v[1] & 0xff) << 8 | (v[2] & 0xff);
+}
+
 struct machow *machow_new(int cputype, int cpusubtype)
 {
     struct machow *w = xcalloc(1, sizeof *w);
     w->cputype = cputype;
     w->cpusubtype = cpusubtype;
+    w->minos = cputype == CPU_TYPE_ARM64 ? 11u << 16 : (10u << 16) | (13u << 8);
     /* Index 0 of a string table is the empty name, so the table starts
      * with the NUL that terminates it. */
     buf_append(&w->strtab, "", 1);
@@ -396,7 +412,7 @@ int machow_write(struct machow *w, const char *path)
     bv.cmd = LC_BUILD_VERSION;
     bv.cmdsize = (uint32_t)sizeof bv;
     bv.platform = PLATFORM_MACOS;
-    bv.minos = (11u << 16);          /* 11.0.0 */
+    bv.minos = w->minos;
     bv.sdk = 0;
     bv.ntools = 0;
     buf_append(&out, &bv, sizeof bv);

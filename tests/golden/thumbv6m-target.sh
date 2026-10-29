@@ -61,6 +61,9 @@ CEOF
 
 # ---- the preprocessor, against clang -------------------------------------
 v6=$("$EMBCC" --target=thumbv6m-none-eabi --dump-predef)
+# (less __BFLT16_*: __bf16 is EmbCC's on every target, and clang's ARMv6-M
+# has none -- src/arch/predef.c adds them, as predef.sh sets them aside)
+v6=$(printf '%s\n' "$v6" | grep -v '^#define __BFLT16_')
 for m in '__ARM_ARCH 6' '__ARM_ARCH_6M__ 1' '__ARM_ARCH_ISA_THUMB 1' \
          '__ARM_ARCH_PROFILE '"'M'" '__GCC_ATOMIC_INT_LOCK_FREE 1'; do
     printf '%s\n' "$v6" | grep -q "^#define $m\$" || {

@@ -19,23 +19,30 @@
  *
  * longjmp(env, 0) makes setjmp return 1 (C11 7.13.2.1p4). EmbCC's SPARC
  * is soft-float, and the ABI saves no FP register anyway. */
+/* The symbols' names: lib/rt/builtin-setjmp.c builds this file again as
+ * __builtin_setjmp's and __builtin_longjmp's own pair. */
+#ifndef SJ_SETJMP
+#define SJ_SETJMP  "setjmp"
+#define SJ_LONGJMP "longjmp"
+#endif
+
 #if defined(__sparc__) || defined(__sparc)
 
 __asm__(
 ".text\n"
-".globl setjmp\n"
-".type setjmp, #function\n"
-"setjmp:\n"
+".globl " SJ_SETJMP "\n"
+".type " SJ_SETJMP ", #function\n"
+ SJ_SETJMP ":\n"
 "    st %sp, [%o0]\n"
 "    st %o7, [%o0 + 4]\n"
 "    st %fp, [%o0 + 8]\n"
 "    retl\n"
 "    mov 0, %o0\n"
-".size setjmp, .-setjmp\n"
+".size " SJ_SETJMP ", .-" SJ_SETJMP "\n"
 
-".globl longjmp\n"
-".type longjmp, #function\n"
-"longjmp:\n"
+".globl " SJ_LONGJMP "\n"
+".type " SJ_LONGJMP ", #function\n"
+ SJ_LONGJMP ":\n"
 "    mov %o0, %g1\n"
 "    orcc %o1, %g0, %g2\n"
 "    be,a 1f\n"
@@ -48,7 +55,7 @@ __asm__(
 "    ld [%g1 + 4], %o7\n"
 "    retl\n"
 "    mov %g2, %o0\n"
-".size longjmp, .-longjmp\n"
+".size " SJ_LONGJMP ", .-" SJ_LONGJMP "\n"
 );
 
 #endif

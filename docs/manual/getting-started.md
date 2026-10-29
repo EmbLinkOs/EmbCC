@@ -438,13 +438,17 @@ Apple silicon:
 
 The link takes `-L`, `-l`, `-framework NAME` and `-Wl,` options;
 `-Wl,--gc-sections` and `-Wl,-Map=FILE` are passed as ld64's
-`-dead_strip` and `-map FILE`. `EMBCC_SHOW_LINK=1` prints the linker's
-command line.
+`-dead_strip` and `-map FILE`. After libSystem it links EmbCC's compiler
+runtime, for the routines its code calls that libSystem does not export
+(a complex division's `__divdc3`, the 128-bit shifts and multiply).
+`EMBCC_SHOW_LINK=1` prints the linker's command line.
 
 On an Intel Mac use `--target=x86_64-apple-darwin`. The driver also takes
 Apple's spelling of the same choice, `-arch arm64` or `-arch x86_64`, and
 the other flags Apple's toolchain and CMake pass: `-isysroot DIR`,
-`-mmacosx-version-min=V` (ignored) and `-pthread`.
+`-mmacosx-version-min=V` (the oldest macOS to run on, recorded in each
+object and given to the linker; 11.0 on arm64 and 10.13 on x86-64
+without it) and `-pthread`.
 
 The headers are the macOS SDK's, so a program sees the C library it links
 against, POSIX headers such as `<pthread.h>` and `<unistd.h>` included.

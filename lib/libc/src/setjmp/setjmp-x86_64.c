@@ -23,11 +23,18 @@
  * comments -- which is how the d8/d9 encoding in the aarch64 sibling was
  * caught being wrong.
  */
+/* The symbols' names: lib/rt/builtin-setjmp.c builds this file again as
+ * __builtin_setjmp's and __builtin_longjmp's own pair. */
+#ifndef SJ_SETJMP
+#define SJ_SETJMP  "setjmp"
+#define SJ_LONGJMP "longjmp"
+#endif
+
 #ifdef __x86_64__
 
 __asm__(
-".globl setjmp\n"
-"setjmp:\n"
+".globl " SJ_SETJMP "\n"
+ SJ_SETJMP ":\n"
 "    .byte 0x48,0x89,0x1f            # mov  %rbx, (%rdi)\n"
 "    .byte 0x48,0x89,0x6f,0x08       # mov  %rbp, 0x08(%rdi)\n"
 "    .byte 0x4c,0x89,0x67,0x10       # mov  %r12, 0x10(%rdi)\n"
@@ -45,8 +52,8 @@ __asm__(
 "    .byte 0x31,0xc0                 # xor  %eax, %eax\n"
 "    .byte 0xc3                      # ret\n"
 
-".globl longjmp\n"
-"longjmp:\n"
+".globl " SJ_LONGJMP "\n"
+ SJ_LONGJMP ":\n"
 "    .byte 0x48,0x8b,0x1f            # mov  (%rdi), %rbx\n"
 "    .byte 0x48,0x8b,0x6f,0x08       # mov  0x08(%rdi), %rbp\n"
 "    .byte 0x4c,0x8b,0x67,0x10       # mov  0x10(%rdi), %r12\n"

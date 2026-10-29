@@ -878,12 +878,21 @@ static int cmp_width(const struct a_fn *F, const struct ir_ins *i, int *sign)
     return wa > wb ? wa : wb;
 }
 
+static int avr_mul_wide16_ok(const struct a_fn *F, const struct ir_ins *i,
+                             int nb);
+
 static int need_of_use(const struct a_fn *F, const struct ir_ins *i, int opnd,
                        int nd)
 {
     const struct ir_func *fn = F->fn;
     switch (i->op) {
-    case IR_ADD: case IR_SUB: case IR_MUL:
+    case IR_MUL:
+        /* avr_mul_wide16 reads two bytes of each operand for all four of
+         * the product, the second zero when the value is a char */
+        if (nd > 2 && avr_mul_wide16_ok(F, i, nd))
+            return 2;
+        return nd;
+    case IR_ADD: case IR_SUB:
     case IR_AND: case IR_OR: case IR_XOR:
     case IR_NEG: case IR_BNOT: case IR_MOV:
         return nd;
@@ -3012,6 +3021,160 @@ static void gen_atomic8(struct a_fn *F, const struct ir_ins *i)
         vst(F, i->dst, 0, RA, n);
 }
 
+/* ---- a product of a byte or two: mul, inline --------------------------
+ *
+ * Every part -mmcu= takes is an ATmega, with the hardware multiplier:
+ * `mul a, b` leaves the 8x8 product in r1:r0. A product of which only the
+ * low byte or two is read -- an int times an int, a char times a char --
+ * is then a0*b0 with the cross terms a0*b1 and a1*b0 added into its high
+ * byte, and r1 cleared again for every other lowering that reads it as
+ * zero: seven instructions, avr-gcc's sequence, where a call to __mulsi3
+ * moved four bytes of each operand into place for it. A constant operand
+ * is loaded with ldi, and taken this way only when the shifts and adds of
+ * the constant path would be longer. An interrupt landing between the mul
+ * and the clr finds r1 dirty, which every handler here allows for. */
+static int avr_has_mul(void)
+{
+    return !getenv("EMBCC_AVR_NOMUL");
+}
+
+static int avr_mul_inline(struct a_fn *F, const struct ir_ins *i, int nb)
+{
+    struct code *t = F->t;
+    long k = 0;
+    int kb = const_b(F, i, &k);
+    if (!avr_has_mul() || nb > 2 || i->flt)
+        return 0;
+    if (kb) {
+        /* the shift-and-add path's length: a shift of each byte per bit
+         * below the top one, an add of each byte per bit set below it */
+        unsigned long m = (unsigned long)(k < 0 ? -k : k) & 0xffff;
+        int top = 0, pop = 0;
+        for (unsigned long v = m; v; v >>= 1) {
+            top++;
+            pop += (int)(v & 1);
+        }
+        if (m == 0 || (top - 1 + pop - 1) * nb + (k < 0 ? 2 * nb : 0) <= 7)
+            return 0;
+    }
+    int d = dst_reg(F, i, nb);
+    /* each operand where it lives, unless that is where the product goes
+     * (the cross terms read both operands after d's first write); else in
+     * a scratch half: the bank the product is not in */
+    int sc = d == RA ? RB : RA, ra, rb;
+    int ain = in_pair(F, i->a) && nb <= F->hw[i->a] &&
+              (F->loc[i->a] + nb <= d || F->loc[i->a] >= d + nb);
+    ra = ain ? F->loc[i->a] : sc;
+    if (!ain)
+        vld(F, ra, i->a, 0, nb);
+    if (kb) {
+        rb = sc + 2;
+        ldi4(F, rb, (unsigned long)k, nb);
+    } else {
+        int bin = in_pair(F, i->b) && nb <= F->hw[i->b] &&
+                  (F->loc[i->b] + nb <= d || F->loc[i->b] >= d + nb);
+        rb = bin ? F->loc[i->b] : sc + 2;
+        if (!bin)
+            vld(F, rb, i->b, 0, nb);
+    }
+    int k0 = kb ? (int)(k & 0xff) : -1, k1 = kb ? (int)((k >> 8) & 0xff) : -1;
+    avr_rr(t, AVR_MUL, ra, rb);             /* a0 b0 */
+    if (nb == 1) {
+        avr_rr(t, AVR_MOV, d, R_TMP);
+    } else if (!(d & 1)) {
+        avr_movw(t, d, R_TMP);
+    } else {
+        avr_rr(t, AVR_MOV, d, R_TMP);
+        avr_rr(t, AVR_MOV, d + 1, R_ZERO);
+    }
+    if (nb == 2) {
+        if (k1 != 0) {
+            avr_rr(t, AVR_MUL, ra, rb + 1);     /* a0 b1 */
+            avr_rr(t, AVR_ADD, d + 1, R_TMP);
+        }
+        if (k0 != 0) {
+            avr_rr(t, AVR_MUL, ra + 1, rb);     /* a1 b0 */
+            avr_rr(t, AVR_ADD, d + 1, R_TMP);
+        }
+    }
+    avr_rr(t, AVR_EOR, R_ZERO, R_ZERO);     /* clr r1 */
+    dst_done(F, i, d);
+    return 1;
+}
+
+/* ...and a full product of two values that fit 16 bits -- zero-extended
+ * from two bytes or one, or an unsigned constant below 2^16 -- which is
+ * what a division by a constant leaves (x * 52429 >> 19 is x / 10, see
+ * src/opt/divmagic.c): the four partial products, a0*b0 and a1*b1 into
+ * the low and high pairs, the cross terms added across the middle with
+ * their carry, r1 cleared before each carry into the top byte. Fourteen
+ * instructions where __mulsi3 was a call, or a constant's shifts and adds
+ * of four bytes were sixty. */
+static int avr_mul_wide16_ok(const struct a_fn *F, const struct ir_ins *i,
+                             int nb)
+{
+    const struct ir_func *fn = F->fn;
+    long k = 0;
+    if (i->op != IR_MUL || !avr_has_mul() || nb < 3 || i->flt ||
+        i->w != VW || !F->xw || i->a < 0 || i->a >= fn->nvregs ||
+        !F->xw[i->a] || F->xw[i->a] > 2 || F->xs[i->a])
+        return 0;
+    if (const_b(F, i, &k)) {
+        if (k < 0 || k > 0xffff)
+            return 0;
+        int top = 0, pop = 0;
+        for (unsigned long v = (unsigned long)k; v; v >>= 1) {
+            top++;
+            pop += (int)(v & 1);
+        }
+        return k && (top - 1 + pop - 1) * VW > 16;  /* else shifts and adds */
+    }
+    return i->b >= 0 && i->b < fn->nvregs && F->xw[i->b] &&
+           F->xw[i->b] <= 2 && !F->xs[i->b];
+}
+
+static int avr_mul_wide16(struct a_fn *F, const struct ir_ins *i, int nb)
+{
+    struct code *t = F->t;
+    long k = 0;
+    int kb = const_b(F, i, &k);
+    if (!avr_mul_wide16_ok(F, i, nb))
+        return 0;
+    /* Every home is a pair (A_POOL, r22, r24, X) and RA is r18, so d is
+     * even and movw reaches it. avr_demand counted on this path being
+     * taken: it gave the operands two bytes. */
+    int d = dst_reg(F, i, VW);
+    int sc = d == RA ? RB : RA, ra, rb;
+    int ain = in_pair(F, i->a) && F->hw[i->a] >= 2 &&
+              (F->loc[i->a] + 2 <= d || F->loc[i->a] >= d + VW);
+    ra = ain ? F->loc[i->a] : sc;
+    if (!ain)
+        vld(F, ra, i->a, 0, 2);
+    if (kb) {
+        rb = sc + 2;
+        ldi4(F, rb, (unsigned long)k, 2);
+    } else {
+        int bin = in_pair(F, i->b) && F->hw[i->b] >= 2 &&
+                  (F->loc[i->b] + 2 <= d || F->loc[i->b] >= d + VW);
+        rb = bin ? F->loc[i->b] : sc + 2;
+        if (!bin)
+            vld(F, rb, i->b, 0, 2);
+    }
+    avr_rr(t, AVR_MUL, ra, rb);             /* a0 b0: bytes 0-1 */
+    avr_movw(t, d, R_TMP);
+    avr_rr(t, AVR_MUL, ra + 1, rb + 1);     /* a1 b1: bytes 2-3 */
+    avr_movw(t, d + 2, R_TMP);
+    for (int c = 0; c < 2; c++) {           /* a0 b1, a1 b0: bytes 1-2 */
+        avr_rr(t, AVR_MUL, ra + c, rb + 1 - c);
+        avr_rr(t, AVR_ADD, d + 1, R_TMP);
+        avr_rr(t, AVR_ADC, d + 2, R_ZERO);
+        avr_rr(t, AVR_EOR, R_ZERO, R_ZERO); /* clr r1, the carry kept */
+        avr_rr(t, AVR_ADC, d + 3, R_ZERO);
+    }
+    dst_done(F, i, d);
+    return 1;
+}
+
 static void gen_ins(struct a_fn *F, int n)
 {
     struct ir_func *fn = F->fn;
@@ -3910,10 +4073,12 @@ static void gen_ins(struct a_fn *F, int n)
         long k;
         int hi, neg, nb = dw(F, i), d, ra;
 
-        if (!const_b(F, i, &k))
-            goto helper;               /* __mulsi3 */
         if (!nb)
             return;
+        if (avr_mul_inline(F, i, nb) || avr_mul_wide16(F, i, nb))
+            return;
+        if (!const_b(F, i, &k))
+            goto helper;               /* __mulsi3 */
         neg = k < 0;
         if (neg) k = -k;
         for (hi = 8 * VW - 1; hi > 0 && !((k >> hi) & 1); hi--)
@@ -5124,6 +5289,14 @@ static int a_calls_helper(const struct ir_ins *i)
            i->op == IR_MOD;
 }
 
+/* ...and the optimizer's question, which the backend table hands it:
+ * unregistered, it heard that nothing on AVR calls a helper -- a divide
+ * included -- and decided by that (pass_divmagic, the unroller). */
+int avr_op_calls_helper(const struct ir_ins *i)
+{
+    return a_calls_helper(i);
+}
+
 static const char *a_saved_only(const struct ir_func *fn)
 {
     return g_a_novol && fn->nvregs <= g_a_nvr ? g_a_novol : NULL;
@@ -5529,13 +5702,13 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
         a_refuse(fn, NULL, "an exception region");
     /* The width map BEFORE layout: a slot's size depends on it. */
     F.wide = avr_wide_map(fn);
+    const_map(&F);                  /* before avr_demand: avr_mul_wide16_ok */
     ext_info(&F);
     F.need = avr_demand(&F);
     if (fn->nvregs) {
         F.usecnt = xmalloc((size_t)fn->nvregs * sizeof *F.usecnt);
         ra_count_vreg_uses(fn, F.usecnt);
     }
-    const_map(&F);
     if (ra_mode != AVR_RA_NONE) {
         F.remat = xcalloc((size_t)(fn->nvregs ? fn->nvregs : 1), 1);
         for (int v = fn->nvars; v < fn->nvregs; v++)

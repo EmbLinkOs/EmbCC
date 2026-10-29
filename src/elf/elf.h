@@ -322,11 +322,36 @@ typedef struct {
 #define R_RISCV_LO12_I   27
 #define R_RISCV_LO12_S   28
 #define R_RISCV_RELAX    51
-/* Padding a relaxing linker may shrink. Like RELAX it carries no symbol,
- * and like RELAX it is safe to ignore: the assembler already emitted the
- * NOPs that make the alignment hold, and a linker that moves nothing
- * cannot invalidate it. */
+/* NOP padding for an alignment, in an object assembled for a relaxing
+ * linker: the assembler cannot know where the bytes before it will end
+ * up, so it emits the WORST case (alignment - 2 bytes) and the linker
+ * deletes what the final layout does not need. Not a hint: padding left
+ * whole leaves what follows misaligned. src/link/link.c, rv_align. */
 #define R_RISCV_ALIGN    43
+/* The others another toolchain's objects carry. A relaxing assembler
+ * cannot resolve even a branch within its own section, nor the
+ * difference of two labels, since the linker may move them: so the
+ * compressed branches come as relocations, and a difference (a jump
+ * table, DWARF, .eh_frame) as an ADD of one symbol and a SUB of the
+ * other at the same place -- or in ULEB128, as DWARF 5 writes lengths. */
+#define R_RISCV_ADD8     33
+#define R_RISCV_ADD16    34
+#define R_RISCV_ADD32    35
+#define R_RISCV_ADD64    36
+#define R_RISCV_SUB8     37
+#define R_RISCV_SUB16    38
+#define R_RISCV_SUB32    39
+#define R_RISCV_SUB64    40
+#define R_RISCV_RVC_BRANCH 44
+#define R_RISCV_RVC_JUMP   45
+#define R_RISCV_SUB6     52
+#define R_RISCV_SET6     53
+#define R_RISCV_SET8     54
+#define R_RISCV_SET16    55
+#define R_RISCV_SET32    56
+#define R_RISCV_32_PCREL 57
+#define R_RISCV_SET_ULEB128 60
+#define R_RISCV_SUB_ULEB128 61
 
 /* e_ident indices and values */
 #define EI_MAG0       0

@@ -29,6 +29,7 @@
 #define _TGMATH_H
 
 #include <math.h>
+#include <complex.h>
 
 #ifndef __cplusplus
 
@@ -71,29 +72,69 @@
  * double direction of nexttoward. The first decides alone. */
 #define __tgx(fn, x, y) __tg_pick(fn, __tg_rep(x))(x, y)
 
-#define acos(x)        __tg1(acos, x)
-#define asin(x)        __tg1(asin, x)
-#define atan(x)        __tg1(atan, x)
-#define acosh(x)       __tg1(acosh, x)
-#define asinh(x)       __tg1(asinh, x)
-#define atanh(x)       __tg1(atanh, x)
-#define cos(x)         __tg1(cos, x)
-#define sin(x)         __tg1(sin, x)
-#define tan(x)         __tg1(tan, x)
-#define cosh(x)        __tg1(cosh, x)
-#define sinh(x)        __tg1(sinh, x)
-#define tanh(x)        __tg1(tanh, x)
-#define exp(x)         __tg1(exp, x)
+/* A complex argument (C11 7.25p4-5): the functions with a complex form
+ * call it -- sqrt(z) is csqrt, fabs(z) cabs, and the width is the
+ * argument's, csqrtf for a float complex -- and pow is complex when
+ * either argument is, of the width both decide. */
+#define __tgc1(fn, cfn, x) _Generic((x),              \
+    float: fn##f,                                     \
+    long double: fn##l,                               \
+    float _Complex: cfn##f,                           \
+    double _Complex: cfn,                             \
+    long double _Complex: cfn##l,                     \
+    default: fn)(x)
+
+#define __tgc_rep(x) _Generic((x),                    \
+    float: 0.0f,                                      \
+    long double: 0.0L,                                \
+    float _Complex: (float _Complex)0,                \
+    double _Complex: (double _Complex)0,              \
+    long double _Complex: (long double _Complex)0,    \
+    default: 0.0)
+
+#define __tgc_pick(fn, cfn, t) _Generic((t),          \
+    float: fn##f,                                     \
+    long double: fn##l,                               \
+    float _Complex: cfn##f,                           \
+    double _Complex: cfn,                             \
+    long double _Complex: cfn##l,                     \
+    default: fn)
+
+#define __tgc2(fn, cfn, x, y)                                           \
+    __tgc_pick(fn, cfn, __tgc_rep(x) + __tgc_rep(y))(x, y)
+
+/* The complex-only ones take a real argument too, as a complex one with
+ * no imaginary part, at its width: carg(1.0f) is cargf. */
+#define __tgz1(cfn, x) _Generic((x),                  \
+    float: cfn##f,                                    \
+    float _Complex: cfn##f,                           \
+    long double: cfn##l,                              \
+    long double _Complex: cfn##l,                     \
+    default: cfn)(x)
+
+#define acos(x)        __tgc1(acos, cacos, x)
+#define asin(x)        __tgc1(asin, casin, x)
+#define atan(x)        __tgc1(atan, catan, x)
+#define acosh(x)       __tgc1(acosh, cacosh, x)
+#define asinh(x)       __tgc1(asinh, casinh, x)
+#define atanh(x)       __tgc1(atanh, catanh, x)
+#define cos(x)         __tgc1(cos, ccos, x)
+#define sin(x)         __tgc1(sin, csin, x)
+#define tan(x)         __tgc1(tan, ctan, x)
+#define cosh(x)        __tgc1(cosh, ccosh, x)
+#define sinh(x)        __tgc1(sinh, csinh, x)
+#define tanh(x)        __tgc1(tanh, ctanh, x)
+#define exp(x)         __tgc1(exp, cexp, x)
 #define exp2(x)        __tg1(exp2, x)
 #define expm1(x)       __tg1(expm1, x)
-#define log(x)         __tg1(log, x)
+#define log(x)         __tgc1(log, clog, x)
 #define log10(x)       __tg1(log10, x)
 #define log1p(x)       __tg1(log1p, x)
 #define log2(x)        __tg1(log2, x)
 #define logb(x)        __tg1(logb, x)
-#define sqrt(x)        __tg1(sqrt, x)
+#define sqrt(x)        __tgc1(sqrt, csqrt, x)
 #define cbrt(x)        __tg1(cbrt, x)
-#define fabs(x)        __tg1(fabs, x)
+#define fabs(x)        __tgc1(fabs, cabs, x)
 #define ceil(x)        __tg1(ceil, x)
 #define floor(x)       __tg1(floor, x)
 #define nearbyint(x)   __tg1(nearbyint, x)
@@ -118,7 +159,7 @@
 #define fmod(x, y)     __tg2(fmod, x, y)
 #define hypot(x, y)    __tg2(hypot, x, y)
 #define nextafter(x, y) __tg2(nextafter, x, y)
-#define pow(x, y)      __tg2(pow, x, y)
+#define pow(x, y)      __tgc2(pow, cpow, x, y)
 #define remainder(x, y) __tg2(remainder, x, y)
 #define scalbn(x, n)   __tgx(scalbn, x, n)
 #define scalbln(x, n)  __tgx(scalbln, x, n)
@@ -139,6 +180,30 @@
 #define fminimum_mag(x, y) __tg2(fminimum_mag, x, y)
 #define fmaximum_mag_num(x, y) __tg2(fmaximum_mag_num, x, y)
 #define fminimum_mag_num(x, y) __tg2(fminimum_mag_num, x, y)
+#define sinpi(x)       __tg1(sinpi, x)
+#define cospi(x)       __tg1(cospi, x)
+#define tanpi(x)       __tg1(tanpi, x)
+#define asinpi(x)      __tg1(asinpi, x)
+#define acospi(x)      __tg1(acospi, x)
+#define atanpi(x)      __tg1(atanpi, x)
+#define atan2pi(y, x)  __tg2(atan2pi, y, x)
+
+#define carg(z)        __tgz1(carg, z)
+#define conj(z)        __tgz1(conj, z)
+#define cproj(z)       __tgz1(cproj, z)
+/* the parts, at the argument's width, without a call (as <complex.h>) */
+#undef creal
+#undef cimag
+#define creal(z) _Generic((z),                                          \
+    float: (float)__real__ (z), float _Complex: (float)__real__ (z),    \
+    long double: (long double)__real__ (z),                             \
+    long double _Complex: (long double)__real__ (z),                    \
+    default: (double)__real__ (z))
+#define cimag(z) _Generic((z),                                          \
+    float: (float)__imag__ (z), float _Complex: (float)__imag__ (z),    \
+    long double: (long double)__imag__ (z),                             \
+    long double _Complex: (long double)__imag__ (z),                    \
+    default: (double)__imag__ (z))
 
 /* fma is the one that genuinely needs the right width: its whole
  * purpose is a single rounding, and computing it at a wider type and

@@ -37,6 +37,21 @@ void code_mark_data(struct code *c, int start, int end);
  * incompatible function pointer. A target with no such forms leaves the
  * hook NULL.
  */
+/* A character of a symbol in a target assembler's operand -- GNU as's
+ * [A-Za-z0-9_.$] and, at its start, not a digit -- and any byte from 0x80
+ * up: C lets a name hold UTF-8 letters (`größe`), src/as/gas.c reads the
+ * quoted spelling an assembler is given into the bare one, and a
+ * scanner that stopped at the first such byte misread the operand. */
+static inline int asm_sym0(int c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' ||
+           c == '.' || c >= 0x80;
+}
+static inline int asm_symc(int c)
+{
+    return asm_sym0(c) || (c >= '0' && c <= '9') || c == '$';
+}
+
 struct asm_symsite {
     int off;                     /* bytes from the start of this statement */
     int reloc;                   /* the target's relocation type */

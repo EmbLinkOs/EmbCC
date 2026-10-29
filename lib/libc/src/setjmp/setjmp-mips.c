@@ -12,6 +12,13 @@
  * return carries its `move $2, $0`, and longjmp computes val + (val == 0)
  * -- longjmp(env, 0) makes setjmp return 1 (C11 7.13.2.1p4) -- without
  * movn, which MIPS32r6 removed. */
+/* The symbols' names: lib/rt/builtin-setjmp.c builds this file again as
+ * __builtin_setjmp's and __builtin_longjmp's own pair. */
+#ifndef SJ_SETJMP
+#define SJ_SETJMP  "setjmp"
+#define SJ_LONGJMP "longjmp"
+#endif
+
 #if defined(__mips__)
 
 #if _MIPS_SIM == _ABI64
@@ -36,22 +43,22 @@ __asm__(
 ".text\n"
 ".set push\n"
 ".set noreorder\n"
-".globl setjmp\n"
-".type setjmp, @function\n"
-"setjmp:\n"
+".globl " SJ_SETJMP "\n"
+".type " SJ_SETJMP ", @function\n"
+ SJ_SETJMP ":\n"
 SJ_ALL(SJ_S)
 "    jr $31\n"
 "    move $2, $0\n"
-".size setjmp, .-setjmp\n"
+".size " SJ_SETJMP ", .-" SJ_SETJMP "\n"
 
-".globl longjmp\n"
-".type longjmp, @function\n"
-"longjmp:\n"
+".globl " SJ_LONGJMP "\n"
+".type " SJ_LONGJMP ", @function\n"
+ SJ_LONGJMP ":\n"
 SJ_ALL(SJ_L)
 "    sltiu $2, $5, 1\n"
 "    jr $31\n"
 "    addu $2, $2, $5\n"
-".size longjmp, .-longjmp\n"
+".size " SJ_LONGJMP ", .-" SJ_LONGJMP "\n"
 ".set pop\n"
 );
 

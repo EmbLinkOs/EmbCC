@@ -60,6 +60,9 @@ struct expr {
     double fnum;          /* EXPR_FNUM */
     int imag;             /* EXPR_FNUM: a GNU imaginary constant — its type
                            * is complex and its value 0 + fnum*i */
+    int half_bits;        /* EXPR_CAST between a binary16 VALUE and the
+                           * type it travels between functions as
+                           * (ty_half_carrier): its bits, not its value */
     struct ldf *ldv;      /* EXPR_FNUM of type long double: its exact value
                            * (sema/ldfloat.h); NULL means (long double)fnum */
     const char *name;     /* EXPR_VAR, EXPR_CALL, EXPR_INCDEC target;
@@ -373,6 +376,8 @@ struct global {
     int in_rodata;        /* driver: a const object, placed in .rodata
                            * after the string literals (ELF) */
     int named;            /* driver: 1 + index into the named sections, or 0 */
+    int sec_flags;        /* driver: that named section's SHF_* flags, as
+                           * the object gives them (-S writes the same) */
     int off;              /* driver: offset inside its section */
     int sym_ndx;          /* driver: symbol index */
 };
@@ -417,6 +422,11 @@ struct func {
 #define ISR_SIGNAL      1
 #define ISR_INTERRUPT   2
 #define ISR_SUPERVISOR  3
+/* ARM state (ARMv7-A), GCC's interrupt("..."): IRQ is ISR_INTERRUPT */
+#define ISR_ARM_FIQ     4
+#define ISR_ARM_ABORT   5
+#define ISR_ARM_SWI     6
+#define ISR_ARM_UNDEF   7
 #define ISR_MIPS_VECTOR 0x10
 #define ISR_MASKED      0x100
 #define ISR_KIND(v)     ((v) & 0xff)
@@ -482,6 +492,12 @@ struct func {
      * (ty_scalar_struct_ret): 1 + the local the body uses in its place,
      * which irgen fills from the parameter at entry (sema); 0 otherwise */
     int param_scalar[MAX_PARAMS];
+    /* A binary16 parameter, which arrives as its carrier (ty_half_carrier):
+     * 1 + the local of its own type the body uses, filled at entry from
+     * the bits; 0 otherwise. half_ret: the result leaves as one. */
+    int half_param[MAX_PARAMS];
+    int half_ret;
+    unsigned char half_abi[MAX_PARAMS];  /* a carrier now (half_signature) */
     struct type *param_tys[MAX_PARAMS];
     struct type **var_tys;          /* sema: type of every var slot */
     int *var_aligns;                /* sema: __attribute__((aligned(N))) per
@@ -639,6 +655,9 @@ struct topasm {
     int nrels;
     int text_off;        /* where the bytes landed in .text (driver) */
     int align;           /* what its start must be aligned to, 0 = any */
+    const char *section; /* the code section its bytes are in, when not
+                          * .text: a naked function's section attribute,
+                          * or a block's own `.section NAME,"ax"` */
     int *drange;         /* data in it, as [start, end) pairs ($d) */
     int ndrange;
     struct topasm *next;

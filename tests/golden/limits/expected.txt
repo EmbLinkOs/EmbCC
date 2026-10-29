@@ -1,7 +1,10 @@
 thumbv6m-none-eabi int128 no: __int128 does not exist on this target (it needs 64-bit registers; use long long)
 thumbv6m-none-eabi ldouble yes
-thumbv6m-none-eabi float16 no: arithmetic needs an arithmetic value, got _Float16
-thumbv6m-none-eabi fp16 no: 'x' has incomplete type _Float16
+thumbv6m-none-eabi float16 yes
+thumbv6m-none-eabi fp16 yes
+thumbv6m-none-eabi bf16 yes
+thumbv6m-none-eabi float16struct yes
+thumbv6m-none-eabi float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted 16-bit float among the variable arguments; convert it to double, as va_arg will read it
 thumbv6m-none-eabi bitint yes
 thumbv6m-none-eabi complexint yes
 thumbv6m-none-eabi vector yes
@@ -13,7 +16,7 @@ thumbv6m-none-eabi vla yes
 thumbv6m-none-eabi align32 yes
 thumbv6m-none-eabi frameaddr yes
 thumbv6m-none-eabi retaddr1 no: __builtin_return_address(1) is not supported on thumbv6m-none-eabi: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
-thumbv6m-none-eabi setjmp no: '__builtin_setjmp' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
+thumbv6m-none-eabi setjmp yes
 thumbv6m-none-eabi cgoto yes
 thumbv6m-none-eabi asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 thumbv6m-none-eabi nested no: expected ';' before '{' [E0002]
@@ -27,8 +30,11 @@ thumbv6m-none-eabi cxx yes
 thumbv6m-none-eabi cxxeh no: C++ exceptions are not supported for thumbv6m-none-eabi yet: EmbCC writes no ARM EHABI unwind tables (.ARM.exidx); compile with --no-exceptions
 thumbv7m-none-eabi int128 no: __int128 does not exist on this target (it needs 64-bit registers; use long long)
 thumbv7m-none-eabi ldouble yes
-thumbv7m-none-eabi float16 no: arithmetic needs an arithmetic value, got _Float16
-thumbv7m-none-eabi fp16 no: 'x' has incomplete type _Float16
+thumbv7m-none-eabi float16 yes
+thumbv7m-none-eabi fp16 yes
+thumbv7m-none-eabi bf16 yes
+thumbv7m-none-eabi float16struct yes
+thumbv7m-none-eabi float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted 16-bit float among the variable arguments; convert it to double, as va_arg will read it
 thumbv7m-none-eabi bitint yes
 thumbv7m-none-eabi complexint yes
 thumbv7m-none-eabi vector yes
@@ -40,7 +46,7 @@ thumbv7m-none-eabi vla yes
 thumbv7m-none-eabi align32 yes
 thumbv7m-none-eabi frameaddr yes
 thumbv7m-none-eabi retaddr1 no: __builtin_return_address(1) is not supported on thumbv7m-none-eabi: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
-thumbv7m-none-eabi setjmp no: '__builtin_setjmp' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
+thumbv7m-none-eabi setjmp yes
 thumbv7m-none-eabi cgoto yes
 thumbv7m-none-eabi asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 thumbv7m-none-eabi nested no: expected ';' before '{' [E0002]
@@ -54,8 +60,11 @@ thumbv7m-none-eabi cxx yes
 thumbv7m-none-eabi cxxeh no: C++ exceptions are not supported for thumbv7m-none-eabi yet: EmbCC writes no ARM EHABI unwind tables (.ARM.exidx); compile with --no-exceptions
 thumbv7em-none-eabihf int128 no: __int128 does not exist on this target (it needs 64-bit registers; use long long)
 thumbv7em-none-eabihf ldouble yes
-thumbv7em-none-eabihf float16 no: arithmetic needs an arithmetic value, got _Float16
-thumbv7em-none-eabihf fp16 no: 'x' has incomplete type _Float16
+thumbv7em-none-eabihf float16 yes
+thumbv7em-none-eabihf fp16 yes
+thumbv7em-none-eabihf bf16 yes
+thumbv7em-none-eabihf float16struct no: 'f': a struct holding a _Float16, passed or returned by value, is not supported yet with the hard-float calling convention, which puts each binary16 member in a floating-point register of its own; pass a pointer to it
+thumbv7em-none-eabihf float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted 16-bit float among the variable arguments; convert it to double, as va_arg will read it
 thumbv7em-none-eabihf bitint yes
 thumbv7em-none-eabihf complexint yes
 thumbv7em-none-eabihf vector yes
@@ -67,7 +76,7 @@ thumbv7em-none-eabihf vla yes
 thumbv7em-none-eabihf align32 yes
 thumbv7em-none-eabihf frameaddr yes
 thumbv7em-none-eabihf retaddr1 no: __builtin_return_address(1) is not supported on thumbv7em-none-eabihf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
-thumbv7em-none-eabihf setjmp no: '__builtin_setjmp' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
+thumbv7em-none-eabihf setjmp yes
 thumbv7em-none-eabihf cgoto yes
 thumbv7em-none-eabihf asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 thumbv7em-none-eabihf nested no: expected ';' before '{' [E0002]
@@ -81,8 +90,11 @@ thumbv7em-none-eabihf cxx yes
 thumbv7em-none-eabihf cxxeh no: C++ exceptions are not supported for thumbv7em-none-eabihf yet: EmbCC writes no ARM EHABI unwind tables (.ARM.exidx); compile with --no-exceptions
 thumbv8m.base-none-eabi int128 no: __int128 does not exist on this target (it needs 64-bit registers; use long long)
 thumbv8m.base-none-eabi ldouble yes
-thumbv8m.base-none-eabi float16 no: arithmetic needs an arithmetic value, got _Float16
-thumbv8m.base-none-eabi fp16 no: 'x' has incomplete type _Float16
+thumbv8m.base-none-eabi float16 yes
+thumbv8m.base-none-eabi fp16 yes
+thumbv8m.base-none-eabi bf16 yes
+thumbv8m.base-none-eabi float16struct yes
+thumbv8m.base-none-eabi float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted 16-bit float among the variable arguments; convert it to double, as va_arg will read it
 thumbv8m.base-none-eabi bitint yes
 thumbv8m.base-none-eabi complexint yes
 thumbv8m.base-none-eabi vector yes
@@ -94,7 +106,7 @@ thumbv8m.base-none-eabi vla yes
 thumbv8m.base-none-eabi align32 yes
 thumbv8m.base-none-eabi frameaddr yes
 thumbv8m.base-none-eabi retaddr1 no: __builtin_return_address(1) is not supported on thumbv8m.base-none-eabi: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
-thumbv8m.base-none-eabi setjmp no: '__builtin_setjmp' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
+thumbv8m.base-none-eabi setjmp yes
 thumbv8m.base-none-eabi cgoto yes
 thumbv8m.base-none-eabi asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 thumbv8m.base-none-eabi nested no: expected ';' before '{' [E0002]
@@ -108,8 +120,11 @@ thumbv8m.base-none-eabi cxx yes
 thumbv8m.base-none-eabi cxxeh no: C++ exceptions are not supported for thumbv8m.base-none-eabi yet: EmbCC writes no ARM EHABI unwind tables (.ARM.exidx); compile with --no-exceptions
 thumbv8m.main-none-eabi int128 no: __int128 does not exist on this target (it needs 64-bit registers; use long long)
 thumbv8m.main-none-eabi ldouble yes
-thumbv8m.main-none-eabi float16 no: arithmetic needs an arithmetic value, got _Float16
-thumbv8m.main-none-eabi fp16 no: 'x' has incomplete type _Float16
+thumbv8m.main-none-eabi float16 yes
+thumbv8m.main-none-eabi fp16 yes
+thumbv8m.main-none-eabi bf16 yes
+thumbv8m.main-none-eabi float16struct yes
+thumbv8m.main-none-eabi float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted 16-bit float among the variable arguments; convert it to double, as va_arg will read it
 thumbv8m.main-none-eabi bitint yes
 thumbv8m.main-none-eabi complexint yes
 thumbv8m.main-none-eabi vector yes
@@ -121,7 +136,7 @@ thumbv8m.main-none-eabi vla yes
 thumbv8m.main-none-eabi align32 yes
 thumbv8m.main-none-eabi frameaddr yes
 thumbv8m.main-none-eabi retaddr1 no: __builtin_return_address(1) is not supported on thumbv8m.main-none-eabi: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
-thumbv8m.main-none-eabi setjmp no: '__builtin_setjmp' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
+thumbv8m.main-none-eabi setjmp yes
 thumbv8m.main-none-eabi cgoto yes
 thumbv8m.main-none-eabi asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 thumbv8m.main-none-eabi nested no: expected ';' before '{' [E0002]
@@ -135,8 +150,11 @@ thumbv8m.main-none-eabi cxx yes
 thumbv8m.main-none-eabi cxxeh no: C++ exceptions are not supported for thumbv8m.main-none-eabi yet: EmbCC writes no ARM EHABI unwind tables (.ARM.exidx); compile with --no-exceptions
 armv7a-none-eabi int128 no: __int128 does not exist on this target (it needs 64-bit registers; use long long)
 armv7a-none-eabi ldouble yes
-armv7a-none-eabi float16 no: arithmetic needs an arithmetic value, got _Float16
-armv7a-none-eabi fp16 no: 'x' has incomplete type _Float16
+armv7a-none-eabi float16 yes
+armv7a-none-eabi fp16 yes
+armv7a-none-eabi bf16 yes
+armv7a-none-eabi float16struct yes
+armv7a-none-eabi float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted 16-bit float among the variable arguments; convert it to double, as va_arg will read it
 armv7a-none-eabi bitint yes
 armv7a-none-eabi complexint yes
 armv7a-none-eabi vector yes
@@ -148,11 +166,11 @@ armv7a-none-eabi vla yes
 armv7a-none-eabi align32 yes
 armv7a-none-eabi frameaddr yes
 armv7a-none-eabi retaddr1 no: __builtin_return_address(1) is not supported on armv7a-none-eabi: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
-armv7a-none-eabi setjmp no: '__builtin_setjmp' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
+armv7a-none-eabi setjmp yes
 armv7a-none-eabi cgoto yes
 armv7a-none-eabi asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 armv7a-none-eabi nested no: expected ';' before '{' [E0002]
-armv7a-none-eabi interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V and MIPS32 it is implemented)
+armv7a-none-eabi interrupt yes
 armv7a-none-eabi naked yes
 armv7a-none-eabi asmfile yes
 armv7a-none-eabi dashS yes
@@ -162,8 +180,11 @@ armv7a-none-eabi cxx yes
 armv7a-none-eabi cxxeh no: C++ exceptions are not supported for armv7a-none-eabi yet: EmbCC writes no ARM EHABI unwind tables (.ARM.exidx); compile with --no-exceptions
 riscv32-unknown-elf int128 no: __int128 does not exist on this target (it needs 64-bit registers; use long long)
 riscv32-unknown-elf ldouble yes
-riscv32-unknown-elf float16 no: arithmetic needs an arithmetic value, got _Float16
-riscv32-unknown-elf fp16 no: 'x' has incomplete type _Float16
+riscv32-unknown-elf float16 yes
+riscv32-unknown-elf fp16 yes
+riscv32-unknown-elf bf16 yes
+riscv32-unknown-elf float16struct yes
+riscv32-unknown-elf float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted 16-bit float among the variable arguments; convert it to double, as va_arg will read it
 riscv32-unknown-elf bitint yes
 riscv32-unknown-elf complexint yes
 riscv32-unknown-elf vector yes
@@ -175,7 +196,7 @@ riscv32-unknown-elf vla yes
 riscv32-unknown-elf align32 yes
 riscv32-unknown-elf frameaddr yes
 riscv32-unknown-elf retaddr1 no: __builtin_return_address(1) is not supported on riscv32-unknown-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
-riscv32-unknown-elf setjmp no: '__builtin_setjmp' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
+riscv32-unknown-elf setjmp yes
 riscv32-unknown-elf cgoto yes
 riscv32-unknown-elf asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 riscv32-unknown-elf nested no: expected ';' before '{' [E0002]
@@ -189,8 +210,11 @@ riscv32-unknown-elf cxx yes
 riscv32-unknown-elf cxxeh no: C++ exceptions are not supported for riscv32-unknown-elf yet: EmbCC writes no RISC-V .eh_frame; compile with --no-exceptions
 riscv64-unknown-elf int128 yes
 riscv64-unknown-elf ldouble yes
-riscv64-unknown-elf float16 no: arithmetic needs an arithmetic value, got _Float16
-riscv64-unknown-elf fp16 no: 'x' has incomplete type _Float16
+riscv64-unknown-elf float16 yes
+riscv64-unknown-elf fp16 yes
+riscv64-unknown-elf bf16 yes
+riscv64-unknown-elf float16struct yes
+riscv64-unknown-elf float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted 16-bit float among the variable arguments; convert it to double, as va_arg will read it
 riscv64-unknown-elf bitint yes
 riscv64-unknown-elf complexint yes
 riscv64-unknown-elf vector yes
@@ -202,7 +226,7 @@ riscv64-unknown-elf vla yes
 riscv64-unknown-elf align32 yes
 riscv64-unknown-elf frameaddr yes
 riscv64-unknown-elf retaddr1 no: __builtin_return_address(1) is not supported on riscv64-unknown-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
-riscv64-unknown-elf setjmp no: '__builtin_setjmp' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
+riscv64-unknown-elf setjmp yes
 riscv64-unknown-elf cgoto yes
 riscv64-unknown-elf asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 riscv64-unknown-elf nested no: expected ';' before '{' [E0002]
@@ -216,8 +240,11 @@ riscv64-unknown-elf cxx yes
 riscv64-unknown-elf cxxeh no: the RV64 backend cannot lower this operation yet (function _Z1fv) [landing w=8 size=4]
 avr int128 no: __int128 does not exist on this target (it needs 64-bit registers; use long long)
 avr ldouble yes
-avr float16 no: arithmetic needs an arithmetic value, got _Float16
-avr fp16 no: 'x' has incomplete type _Float16
+avr float16 yes
+avr fp16 yes
+avr bf16 yes
+avr float16struct yes
+avr float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted 16-bit float among the variable arguments; convert it to double, as va_arg will read it
 avr bitint yes
 avr complexint yes
 avr vector yes
@@ -229,7 +256,7 @@ avr vla yes
 avr align32 yes
 avr frameaddr yes
 avr retaddr1 no: __builtin_return_address(1) is not supported on avr: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
-avr setjmp no: '__builtin_setjmp' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
+avr setjmp yes
 avr cgoto yes
 avr asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 avr nested no: expected ';' before '{' [E0002]
@@ -243,8 +270,11 @@ avr cxx no: C++ is not yet supported for avr: the C++ lowering assumes a 32-bit 
 avr cxxeh no: C++ is not yet supported for avr: the C++ lowering assumes a 32-bit int and 4-byte pointers (integral promotions, member pointers, RTTI), and this target's are 16 bits
 mipsel-none-elf int128 no: __int128 does not exist on this target (it needs 64-bit registers; use long long)
 mipsel-none-elf ldouble yes
-mipsel-none-elf float16 no: arithmetic needs an arithmetic value, got _Float16
-mipsel-none-elf fp16 no: 'x' has incomplete type _Float16
+mipsel-none-elf float16 yes
+mipsel-none-elf fp16 yes
+mipsel-none-elf bf16 yes
+mipsel-none-elf float16struct yes
+mipsel-none-elf float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted 16-bit float among the variable arguments; convert it to double, as va_arg will read it
 mipsel-none-elf bitint yes
 mipsel-none-elf complexint yes
 mipsel-none-elf vector yes
@@ -256,7 +286,7 @@ mipsel-none-elf vla yes
 mipsel-none-elf align32 yes
 mipsel-none-elf frameaddr yes
 mipsel-none-elf retaddr1 no: __builtin_return_address(1) is not supported on mipsel-none-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
-mipsel-none-elf setjmp no: '__builtin_setjmp' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
+mipsel-none-elf setjmp yes
 mipsel-none-elf cgoto yes
 mipsel-none-elf asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 mipsel-none-elf nested no: expected ';' before '{' [E0002]
@@ -270,8 +300,11 @@ mipsel-none-elf cxx yes
 mipsel-none-elf cxxeh no: C++ exceptions are not supported for mipsel-none-elf yet: EmbCC writes no MIPS .eh_frame; compile with --no-exceptions
 mips-none-elf int128 no: __int128 does not exist on this target (it needs 64-bit registers; use long long)
 mips-none-elf ldouble yes
-mips-none-elf float16 no: arithmetic needs an arithmetic value, got _Float16
-mips-none-elf fp16 no: 'x' has incomplete type _Float16
+mips-none-elf float16 yes
+mips-none-elf fp16 yes
+mips-none-elf bf16 yes
+mips-none-elf float16struct yes
+mips-none-elf float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted 16-bit float among the variable arguments; convert it to double, as va_arg will read it
 mips-none-elf bitint yes
 mips-none-elf complexint yes
 mips-none-elf vector yes
@@ -283,7 +316,7 @@ mips-none-elf vla yes
 mips-none-elf align32 yes
 mips-none-elf frameaddr yes
 mips-none-elf retaddr1 no: __builtin_return_address(1) is not supported on mips-none-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
-mips-none-elf setjmp no: '__builtin_setjmp' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
+mips-none-elf setjmp yes
 mips-none-elf cgoto yes
 mips-none-elf asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 mips-none-elf nested no: expected ';' before '{' [E0002]
@@ -297,8 +330,11 @@ mips-none-elf cxx yes
 mips-none-elf cxxeh no: C++ exceptions are not supported for mips-none-elf yet: EmbCC writes no MIPS .eh_frame; compile with --no-exceptions
 mips64el-none-elf int128 yes
 mips64el-none-elf ldouble yes
-mips64el-none-elf float16 no: arithmetic needs an arithmetic value, got _Float16
-mips64el-none-elf fp16 no: 'x' has incomplete type _Float16
+mips64el-none-elf float16 yes
+mips64el-none-elf fp16 yes
+mips64el-none-elf bf16 yes
+mips64el-none-elf float16struct yes
+mips64el-none-elf float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted 16-bit float among the variable arguments; convert it to double, as va_arg will read it
 mips64el-none-elf bitint yes
 mips64el-none-elf complexint yes
 mips64el-none-elf vector yes
@@ -310,11 +346,11 @@ mips64el-none-elf vla yes
 mips64el-none-elf align32 yes
 mips64el-none-elf frameaddr yes
 mips64el-none-elf retaddr1 no: __builtin_return_address(1) is not supported on mips64el-none-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
-mips64el-none-elf setjmp no: '__builtin_setjmp' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
+mips64el-none-elf setjmp yes
 mips64el-none-elf cgoto yes
 mips64el-none-elf asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 mips64el-none-elf nested no: expected ';' before '{' [E0002]
-mips64el-none-elf interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V and MIPS32 it is implemented)
+mips64el-none-elf interrupt yes
 mips64el-none-elf naked yes
 mips64el-none-elf asmfile yes
 mips64el-none-elf dashS yes
@@ -324,8 +360,11 @@ mips64el-none-elf cxx yes
 mips64el-none-elf cxxeh no: the MIPS64 backend cannot lower this operation yet (function _Z1fv) [landing w=8 size=4]
 mips64-none-elf int128 yes
 mips64-none-elf ldouble yes
-mips64-none-elf float16 no: arithmetic needs an arithmetic value, got _Float16
-mips64-none-elf fp16 no: 'x' has incomplete type _Float16
+mips64-none-elf float16 yes
+mips64-none-elf fp16 yes
+mips64-none-elf bf16 yes
+mips64-none-elf float16struct yes
+mips64-none-elf float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted 16-bit float among the variable arguments; convert it to double, as va_arg will read it
 mips64-none-elf bitint yes
 mips64-none-elf complexint yes
 mips64-none-elf vector yes
@@ -337,11 +376,11 @@ mips64-none-elf vla yes
 mips64-none-elf align32 yes
 mips64-none-elf frameaddr yes
 mips64-none-elf retaddr1 no: __builtin_return_address(1) is not supported on mips64-none-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
-mips64-none-elf setjmp no: '__builtin_setjmp' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
+mips64-none-elf setjmp yes
 mips64-none-elf cgoto yes
 mips64-none-elf asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 mips64-none-elf nested no: expected ';' before '{' [E0002]
-mips64-none-elf interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V and MIPS32 it is implemented)
+mips64-none-elf interrupt yes
 mips64-none-elf naked yes
 mips64-none-elf asmfile yes
 mips64-none-elf dashS yes
@@ -351,8 +390,11 @@ mips64-none-elf cxx yes
 mips64-none-elf cxxeh no: C++ exceptions are not supported for mips64-none-elf yet: EmbCC writes no MIPS .eh_frame; compile with --no-exceptions
 loongarch64-unknown-elf int128 yes
 loongarch64-unknown-elf ldouble yes
-loongarch64-unknown-elf float16 no: arithmetic needs an arithmetic value, got _Float16
-loongarch64-unknown-elf fp16 no: 'x' has incomplete type _Float16
+loongarch64-unknown-elf float16 yes
+loongarch64-unknown-elf fp16 yes
+loongarch64-unknown-elf bf16 yes
+loongarch64-unknown-elf float16struct yes
+loongarch64-unknown-elf float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted 16-bit float among the variable arguments; convert it to double, as va_arg will read it
 loongarch64-unknown-elf bitint yes
 loongarch64-unknown-elf complexint yes
 loongarch64-unknown-elf vector yes
@@ -364,11 +406,11 @@ loongarch64-unknown-elf vla yes
 loongarch64-unknown-elf align32 yes
 loongarch64-unknown-elf frameaddr yes
 loongarch64-unknown-elf retaddr1 no: __builtin_return_address(1) is not supported on loongarch64-unknown-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
-loongarch64-unknown-elf setjmp no: '__builtin_setjmp' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
+loongarch64-unknown-elf setjmp yes
 loongarch64-unknown-elf cgoto yes
 loongarch64-unknown-elf asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 loongarch64-unknown-elf nested no: expected ';' before '{' [E0002]
-loongarch64-unknown-elf interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V and MIPS32 it is implemented)
+loongarch64-unknown-elf interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS, RX, ColdFire, TriCore and ARMv7-A it is implemented)
 loongarch64-unknown-elf naked yes
 loongarch64-unknown-elf asmfile yes
 loongarch64-unknown-elf dashS yes
@@ -378,8 +420,11 @@ loongarch64-unknown-elf cxx yes
 loongarch64-unknown-elf cxxeh no: the LoongArch64 backend cannot lower this operation yet (function _Z1fv) [landing w=8 size=4]
 xtensa-none-elf int128 no: __int128 does not exist on this target (it needs 64-bit registers; use long long)
 xtensa-none-elf ldouble yes
-xtensa-none-elf float16 no: arithmetic needs an arithmetic value, got _Float16
-xtensa-none-elf fp16 no: 'x' has incomplete type _Float16
+xtensa-none-elf float16 yes
+xtensa-none-elf fp16 yes
+xtensa-none-elf bf16 yes
+xtensa-none-elf float16struct yes
+xtensa-none-elf float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted 16-bit float among the variable arguments; convert it to double, as va_arg will read it
 xtensa-none-elf bitint yes
 xtensa-none-elf complexint yes
 xtensa-none-elf vector yes
@@ -391,22 +436,25 @@ xtensa-none-elf vla yes
 xtensa-none-elf align32 yes
 xtensa-none-elf frameaddr yes
 xtensa-none-elf retaddr1 no: __builtin_return_address(1) is not supported on xtensa-none-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
-xtensa-none-elf setjmp no: '__builtin_setjmp' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
+xtensa-none-elf setjmp yes
 xtensa-none-elf cgoto yes
 xtensa-none-elf asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 xtensa-none-elf nested no: expected ';' before '{' [E0002]
-xtensa-none-elf interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V and MIPS32 it is implemented)
+xtensa-none-elf interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS, RX, ColdFire, TriCore and ARMv7-A it is implemented)
 xtensa-none-elf naked yes
 xtensa-none-elf asmfile yes
-xtensa-none-elf dashS no: -S is not supported for xtensa-none-elf yet: compile with -c (there is no Xtensa assembler here to check the text against)
+xtensa-none-elf dashS yes
 xtensa-none-elf debug yes
 xtensa-none-elf unwind no: unwind tables are not supported for xtensa-none-elf yet (--unwind-tables, --exceptions): EmbCC writes no Xtensa .eh_frame
 xtensa-none-elf cxx yes
 xtensa-none-elf cxxeh no: C++ exceptions are not supported for xtensa-none-elf yet: EmbCC writes no Xtensa .eh_frame; compile with --no-exceptions
 tricore-none-elf int128 no: __int128 does not exist on this target (it needs 64-bit registers; use long long)
 tricore-none-elf ldouble yes
-tricore-none-elf float16 no: arithmetic needs an arithmetic value, got _Float16
-tricore-none-elf fp16 no: 'x' has incomplete type _Float16
+tricore-none-elf float16 yes
+tricore-none-elf fp16 yes
+tricore-none-elf bf16 yes
+tricore-none-elf float16struct yes
+tricore-none-elf float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted 16-bit float among the variable arguments; convert it to double, as va_arg will read it
 tricore-none-elf bitint yes
 tricore-none-elf complexint yes
 tricore-none-elf vector yes
@@ -418,11 +466,11 @@ tricore-none-elf vla yes
 tricore-none-elf align32 yes
 tricore-none-elf frameaddr yes
 tricore-none-elf retaddr1 no: __builtin_return_address(1) is not supported on tricore-none-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
-tricore-none-elf setjmp no: '__builtin_setjmp' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
+tricore-none-elf setjmp yes
 tricore-none-elf cgoto yes
 tricore-none-elf asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 tricore-none-elf nested no: expected ';' before '{' [E0002]
-tricore-none-elf interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V and MIPS32 it is implemented)
+tricore-none-elf interrupt yes
 tricore-none-elf naked yes
 tricore-none-elf asmfile yes
 tricore-none-elf dashS yes
@@ -432,8 +480,11 @@ tricore-none-elf cxx yes
 tricore-none-elf cxxeh no: C++ exceptions are not supported for tricore-none-elf yet: EmbCC writes no TriCore .eh_frame; compile with --no-exceptions
 rx-none-elf int128 no: __int128 does not exist on this target (it needs 64-bit registers; use long long)
 rx-none-elf ldouble yes
-rx-none-elf float16 no: arithmetic needs an arithmetic value, got _Float16
-rx-none-elf fp16 no: 'x' has incomplete type _Float16
+rx-none-elf float16 yes
+rx-none-elf fp16 yes
+rx-none-elf bf16 yes
+rx-none-elf float16struct yes
+rx-none-elf float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted 16-bit float among the variable arguments; convert it to double, as va_arg will read it
 rx-none-elf bitint yes
 rx-none-elf complexint yes
 rx-none-elf vector yes
@@ -445,22 +496,25 @@ rx-none-elf vla yes
 rx-none-elf align32 yes
 rx-none-elf frameaddr yes
 rx-none-elf retaddr1 no: __builtin_return_address(1) is not supported on rx-none-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
-rx-none-elf setjmp no: '__builtin_setjmp' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
+rx-none-elf setjmp yes
 rx-none-elf cgoto yes
 rx-none-elf asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 rx-none-elf nested no: expected ';' before '{' [E0002]
-rx-none-elf interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V and MIPS32 it is implemented)
+rx-none-elf interrupt yes
 rx-none-elf naked yes
 rx-none-elf asmfile yes
-rx-none-elf dashS no: -S is not supported for rx-none-elf yet: EmbCC writes no RX assembly text (use -c; .s files and inline asm do assemble)
+rx-none-elf dashS yes
 rx-none-elf debug yes
 rx-none-elf unwind no: unwind tables are not supported for rx-none-elf yet (--unwind-tables, --exceptions): EmbCC writes no RX .eh_frame
 rx-none-elf cxx yes
 rx-none-elf cxxeh no: C++ exceptions are not supported for rx-none-elf yet: EmbCC writes no RX .eh_frame; compile with --no-exceptions
 powerpc-none-eabi int128 no: __int128 does not exist on this target (it needs 64-bit registers; use long long)
 powerpc-none-eabi ldouble yes
-powerpc-none-eabi float16 no: arithmetic needs an arithmetic value, got _Float16
-powerpc-none-eabi fp16 no: 'x' has incomplete type _Float16
+powerpc-none-eabi float16 yes
+powerpc-none-eabi fp16 yes
+powerpc-none-eabi bf16 yes
+powerpc-none-eabi float16struct yes
+powerpc-none-eabi float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted 16-bit float among the variable arguments; convert it to double, as va_arg will read it
 powerpc-none-eabi bitint yes
 powerpc-none-eabi complexint yes
 powerpc-none-eabi vector yes
@@ -472,11 +526,11 @@ powerpc-none-eabi vla yes
 powerpc-none-eabi align32 yes
 powerpc-none-eabi frameaddr yes
 powerpc-none-eabi retaddr1 no: __builtin_return_address(1) is not supported on powerpc-none-eabi: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
-powerpc-none-eabi setjmp no: '__builtin_setjmp' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
+powerpc-none-eabi setjmp yes
 powerpc-none-eabi cgoto yes
 powerpc-none-eabi asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 powerpc-none-eabi nested no: expected ';' before '{' [E0002]
-powerpc-none-eabi interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V and MIPS32 it is implemented)
+powerpc-none-eabi interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS, RX, ColdFire, TriCore and ARMv7-A it is implemented)
 powerpc-none-eabi naked yes
 powerpc-none-eabi asmfile yes
 powerpc-none-eabi dashS yes
@@ -486,8 +540,11 @@ powerpc-none-eabi cxx yes
 powerpc-none-eabi cxxeh no: C++ exceptions are not supported for powerpc-none-eabi yet: EmbCC writes no PowerPC .eh_frame; compile with --no-exceptions
 sparc-none-elf int128 no: __int128 does not exist on this target (it needs 64-bit registers; use long long)
 sparc-none-elf ldouble yes
-sparc-none-elf float16 no: arithmetic needs an arithmetic value, got _Float16
-sparc-none-elf fp16 no: 'x' has incomplete type _Float16
+sparc-none-elf float16 yes
+sparc-none-elf fp16 yes
+sparc-none-elf bf16 yes
+sparc-none-elf float16struct yes
+sparc-none-elf float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted 16-bit float among the variable arguments; convert it to double, as va_arg will read it
 sparc-none-elf bitint yes
 sparc-none-elf complexint yes
 sparc-none-elf vector yes
@@ -499,11 +556,11 @@ sparc-none-elf vla yes
 sparc-none-elf align32 yes
 sparc-none-elf frameaddr yes
 sparc-none-elf retaddr1 no: __builtin_return_address(1) is not supported on sparc-none-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
-sparc-none-elf setjmp no: '__builtin_setjmp' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
+sparc-none-elf setjmp yes
 sparc-none-elf cgoto yes
 sparc-none-elf asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 sparc-none-elf nested no: expected ';' before '{' [E0002]
-sparc-none-elf interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V and MIPS32 it is implemented)
+sparc-none-elf interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS, RX, ColdFire, TriCore and ARMv7-A it is implemented)
 sparc-none-elf naked yes
 sparc-none-elf asmfile yes
 sparc-none-elf dashS yes
@@ -513,8 +570,11 @@ sparc-none-elf cxx yes
 sparc-none-elf cxxeh no: C++ exceptions are not supported for sparc-none-elf yet: EmbCC writes no SPARC .eh_frame; compile with --no-exceptions
 m68k-none-elf int128 no: __int128 does not exist on this target (it needs 64-bit registers; use long long)
 m68k-none-elf ldouble yes
-m68k-none-elf float16 no: arithmetic needs an arithmetic value, got _Float16
-m68k-none-elf fp16 no: 'x' has incomplete type _Float16
+m68k-none-elf float16 yes
+m68k-none-elf fp16 yes
+m68k-none-elf bf16 yes
+m68k-none-elf float16struct yes
+m68k-none-elf float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted 16-bit float among the variable arguments; convert it to double, as va_arg will read it
 m68k-none-elf bitint yes
 m68k-none-elf complexint yes
 m68k-none-elf vector yes
@@ -526,11 +586,11 @@ m68k-none-elf vla yes
 m68k-none-elf align32 yes
 m68k-none-elf frameaddr yes
 m68k-none-elf retaddr1 yes
-m68k-none-elf setjmp no: '__builtin_setjmp' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
+m68k-none-elf setjmp yes
 m68k-none-elf cgoto yes
 m68k-none-elf asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 m68k-none-elf nested no: expected ';' before '{' [E0002]
-m68k-none-elf interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V and MIPS32 it is implemented)
+m68k-none-elf interrupt yes
 m68k-none-elf naked yes
 m68k-none-elf asmfile yes
 m68k-none-elf dashS yes
@@ -540,8 +600,11 @@ m68k-none-elf cxx yes
 m68k-none-elf cxxeh no: C++ exceptions are not supported for m68k-none-elf yet: EmbCC writes no ColdFire .eh_frame; compile with --no-exceptions
 x86_64-elf int128 yes
 x86_64-elf ldouble yes
-x86_64-elf float16 no: arithmetic needs an arithmetic value, got _Float16
-x86_64-elf fp16 no: 'x' has incomplete type _Float16
+x86_64-elf float16 yes
+x86_64-elf fp16 yes
+x86_64-elf bf16 yes
+x86_64-elf float16struct yes
+x86_64-elf float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted 16-bit float among the variable arguments; convert it to double, as va_arg will read it
 x86_64-elf bitint yes
 x86_64-elf complexint yes
 x86_64-elf vector yes
@@ -553,11 +616,11 @@ x86_64-elf vla yes
 x86_64-elf align32 yes
 x86_64-elf frameaddr yes
 x86_64-elf retaddr1 yes
-x86_64-elf setjmp no: '__builtin_setjmp' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
+x86_64-elf setjmp yes
 x86_64-elf cgoto yes
 x86_64-elf asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 x86_64-elf nested no: expected ';' before '{' [E0002]
-x86_64-elf interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V and MIPS32 it is implemented)
+x86_64-elf interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS, RX, ColdFire, TriCore and ARMv7-A it is implemented)
 x86_64-elf naked no: __attribute__((naked)) is not supported: on this target the body could only be assembled by the file-scope assembler's few instructions; it is supported on every target but x86-64 and AArch64 for Darwin or Windows
 x86_64-elf asmfile no: no assembly-file support for x86_64-elf yet
 x86_64-elf dashS yes
@@ -567,8 +630,11 @@ x86_64-elf cxx yes
 x86_64-elf cxxeh yes
 aarch64-elf int128 yes
 aarch64-elf ldouble yes
-aarch64-elf float16 no: arithmetic needs an arithmetic value, got _Float16
-aarch64-elf fp16 no: 'x' has incomplete type _Float16
+aarch64-elf float16 yes
+aarch64-elf fp16 yes
+aarch64-elf bf16 yes
+aarch64-elf float16struct yes
+aarch64-elf float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted 16-bit float among the variable arguments; convert it to double, as va_arg will read it
 aarch64-elf bitint yes
 aarch64-elf complexint yes
 aarch64-elf vector yes
@@ -580,11 +646,11 @@ aarch64-elf vla yes
 aarch64-elf align32 yes
 aarch64-elf frameaddr yes
 aarch64-elf retaddr1 yes
-aarch64-elf setjmp no: '__builtin_setjmp' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
+aarch64-elf setjmp yes
 aarch64-elf cgoto yes
 aarch64-elf asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 aarch64-elf nested no: expected ';' before '{' [E0002]
-aarch64-elf interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V and MIPS32 it is implemented)
+aarch64-elf interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS, RX, ColdFire, TriCore and ARMv7-A it is implemented)
 aarch64-elf naked yes
 aarch64-elf asmfile yes
 aarch64-elf dashS yes
@@ -594,8 +660,11 @@ aarch64-elf cxx yes
 aarch64-elf cxxeh yes
 x86_64-linux-gnu int128 yes
 x86_64-linux-gnu ldouble yes
-x86_64-linux-gnu float16 no: arithmetic needs an arithmetic value, got _Float16
-x86_64-linux-gnu fp16 no: 'x' has incomplete type _Float16
+x86_64-linux-gnu float16 yes
+x86_64-linux-gnu fp16 yes
+x86_64-linux-gnu bf16 yes
+x86_64-linux-gnu float16struct yes
+x86_64-linux-gnu float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted 16-bit float among the variable arguments; convert it to double, as va_arg will read it
 x86_64-linux-gnu bitint yes
 x86_64-linux-gnu complexint yes
 x86_64-linux-gnu vector yes
@@ -607,11 +676,11 @@ x86_64-linux-gnu vla yes
 x86_64-linux-gnu align32 yes
 x86_64-linux-gnu frameaddr yes
 x86_64-linux-gnu retaddr1 yes
-x86_64-linux-gnu setjmp no: '__builtin_setjmp' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
+x86_64-linux-gnu setjmp yes
 x86_64-linux-gnu cgoto yes
 x86_64-linux-gnu asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 x86_64-linux-gnu nested no: expected ';' before '{' [E0002]
-x86_64-linux-gnu interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V and MIPS32 it is implemented)
+x86_64-linux-gnu interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS, RX, ColdFire, TriCore and ARMv7-A it is implemented)
 x86_64-linux-gnu naked no: __attribute__((naked)) is not supported: on this target the body could only be assembled by the file-scope assembler's few instructions; it is supported on every target but x86-64 and AArch64 for Darwin or Windows
 x86_64-linux-gnu asmfile no: no assembly-file support for x86_64-linux-gnu yet
 x86_64-linux-gnu dashS yes
@@ -621,8 +690,11 @@ x86_64-linux-gnu cxx yes
 x86_64-linux-gnu cxxeh yes
 aarch64-apple-darwin int128 yes
 aarch64-apple-darwin ldouble yes
-aarch64-apple-darwin float16 no: arithmetic needs an arithmetic value, got _Float16
-aarch64-apple-darwin fp16 no: 'x' has incomplete type _Float16
+aarch64-apple-darwin float16 yes
+aarch64-apple-darwin fp16 yes
+aarch64-apple-darwin bf16 yes
+aarch64-apple-darwin float16struct yes
+aarch64-apple-darwin float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted 16-bit float among the variable arguments; convert it to double, as va_arg will read it
 aarch64-apple-darwin bitint yes
 aarch64-apple-darwin complexint yes
 aarch64-apple-darwin vector yes
@@ -634,11 +706,11 @@ aarch64-apple-darwin vla yes
 aarch64-apple-darwin align32 yes
 aarch64-apple-darwin frameaddr yes
 aarch64-apple-darwin retaddr1 yes
-aarch64-apple-darwin setjmp no: '__builtin_setjmp' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
+aarch64-apple-darwin setjmp yes
 aarch64-apple-darwin cgoto yes
 aarch64-apple-darwin asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 aarch64-apple-darwin nested no: expected ';' before '{' [E0002]
-aarch64-apple-darwin interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V and MIPS32 it is implemented)
+aarch64-apple-darwin interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS, RX, ColdFire, TriCore and ARMv7-A it is implemented)
 aarch64-apple-darwin naked no: __attribute__((naked)) is not supported: on this target the body could only be assembled by the file-scope assembler's few instructions; it is supported on every target but x86-64 and AArch64 for Darwin or Windows
 aarch64-apple-darwin asmfile yes
 aarch64-apple-darwin dashS yes
@@ -648,8 +720,11 @@ aarch64-apple-darwin cxx yes
 aarch64-apple-darwin cxxeh yes
 x86_64-windows-gnu int128 no: __int128 in the signature of 'f' is not supported for a Windows target yet: EmbCC lowers its arithmetic to libgcc helpers whose arguments it places in the System V registers
 x86_64-windows-gnu ldouble no: long double in the signature of 'f' is not supported for a Windows target yet: there it travels by reference and returns through a hidden pointer, and EmbCC passes it on the stack by value
-x86_64-windows-gnu float16 no: arithmetic needs an arithmetic value, got _Float16
-x86_64-windows-gnu fp16 no: 'x' has incomplete type _Float16
+x86_64-windows-gnu float16 yes
+x86_64-windows-gnu fp16 yes
+x86_64-windows-gnu bf16 yes
+x86_64-windows-gnu float16struct yes
+x86_64-windows-gnu float16va no: 'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, and EmbCC does not yet place an unpromoted 16-bit float among the variable arguments; convert it to double, as va_arg will read it
 x86_64-windows-gnu bitint yes
 x86_64-windows-gnu complexint yes
 x86_64-windows-gnu vector yes
@@ -661,11 +736,11 @@ x86_64-windows-gnu vla yes
 x86_64-windows-gnu align32 yes
 x86_64-windows-gnu frameaddr yes
 x86_64-windows-gnu retaddr1 yes
-x86_64-windows-gnu setjmp no: '__builtin_setjmp' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
+x86_64-windows-gnu setjmp no: __builtin_setjmp is not supported for x86_64-windows-gnu: MinGW's setjmp takes a frame for its unwinder, and EmbCC does not lower onto it
 x86_64-windows-gnu cgoto yes
 x86_64-windows-gnu asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
 x86_64-windows-gnu nested no: expected ';' before '{' [E0002]
-x86_64-windows-gnu interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V and MIPS32 it is implemented)
+x86_64-windows-gnu interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS, RX, ColdFire, TriCore and ARMv7-A it is implemented)
 x86_64-windows-gnu naked no: __attribute__((naked)) is not supported: on this target the body could only be assembled by the file-scope assembler's few instructions; it is supported on every target but x86-64 and AArch64 for Darwin or Windows
 x86_64-windows-gnu asmfile no: no assembly-file support for x86_64-windows-gnu yet
 x86_64-windows-gnu dashS yes

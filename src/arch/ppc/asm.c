@@ -171,7 +171,7 @@ static int split(const char *stmt, int len, struct tok *t, int max)
     return n;
 }
 
-static int is_identc(int c) { return isalnum(c) || c == '_' || c == '.' || c == '$'; }
+static int is_identc(int c) { return asm_symc(c); }
 
 /* A general register: %_N (an operand irgen wrote), rN, %rN, sp, or a
  * number 0..31. 0 when the token is none of those. */
@@ -1556,7 +1556,7 @@ int ppcasm_is_word(const char *stmt, const char *w, int len)
 static int sym_operand(const char *p, int *slen, long *add)
 {
     int n = 0;
-    if (!(isalpha((unsigned char)p[0]) || p[0] == '_' || p[0] == '.'))
+    if (!asm_sym0((unsigned char)p[0]))
         return 0;
     if (p[0] == '.' && !(isalnum((unsigned char)p[1]) || p[1] == '_'))
         return 0;

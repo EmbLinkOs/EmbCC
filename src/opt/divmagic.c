@@ -186,6 +186,56 @@ static int dm_div32(struct ibuf *nb, struct ir_func *fn, int x, long D,
 }
 
 /* Replace 32-bit `x / C` and `x % C` with a multiply and shifts. */
+/* ---- a narrow dividend, on a machine with no high multiply ------------
+ *
+ * AVR's int is two bytes and its divide is a 32-iteration loop in lib/rt,
+ * hundreds of cycles; its multiply is the hardware's. An unsigned x known
+ * to fit 16 bits -- zero-extended from one or two bytes, read so from
+ * memory, or masked: non-negative, so a signed division of it by a
+ * positive d is the same one -- divided by d is (x * M) >> s, with M and
+ * s chosen so that x * M stays below 2^32: one 32-bit multiply, which the
+ * IR has, and a shift. For each s, M = ceil(2^s / d) is exact for every
+ * x <= B when B * (M * d - 2^s) < 2^s; the smallest such s is taken. x/10
+ * for x below 65536 is (x * 52429) >> 19. */
+static int dm_narrow_bound(const struct ir_func *fn, const struct defs *d,
+                           int x, unsigned long *B)
+{
+    if (x < 0 || x >= fn->nvregs || d->cnt[x] != 1 || d->ins[x] < 0)
+        return 0;
+    const struct ir_ins *e = &fn->ins[d->ins[x]];
+    if ((e->op == IR_EXT || e->op == IR_LOAD || e->op == IR_LDVAR) &&
+        !e->sign && !e->flt &&
+        (e->size == 1 || e->size == 2) && e->w == 4) {
+        *B = e->size == 1 ? 0xffUL : 0xffffUL;
+        return 1;
+    }
+    long m;
+    if (e->op == IR_AND && !e->flt && e->w == 4 &&
+        const_b((struct ir_func *)fn, (struct defs *)d, (struct ir_ins *)e, &m) &&
+        m >= 0 && m <= 0xffff) {
+        *B = (unsigned long)m;
+        return 1;
+    }
+    return 0;
+}
+
+static int dm_narrow_magic(unsigned long D, unsigned long B,
+                           unsigned long *M, int *sh)
+{
+    for (int s = 0; s <= 32; s++) {
+        unsigned long long two = 1ULL << s;
+        unsigned long long m = (two + D - 1) / D;
+        unsigned long long e = m * D - two;
+        if ((unsigned long long)B * e < two &&
+            (unsigned long long)B * m <= 0xffffffffULL) {
+            *M = (unsigned long)m;
+            *sh = s;
+            return 1;
+        }
+    }
+    return 0;
+}
+
 int pass_divmagic(struct ir_func *fn)
 {
     if (fn->nins == 0)
@@ -219,6 +269,15 @@ int pass_divmagic(struct ir_func *fn)
     }
     int mulh32 = narrow && target_has_mulh() && !getenv("EMBCC_NO_MULH");
     int pow2_only = narrow && !mulh32;
+    /* ...and a narrow unsigned dividend where a divide is a library call
+     * (dm_narrow_bound), not at -Os: the call is the shorter */
+    int narrow16 = 0;
+    if (pow2_only && !g_opt_size && !getenv("EMBCC_NO_DIV16")) {
+        struct ir_ins probe;
+        memset(&probe, 0, sizeof probe);
+        probe.op = IR_DIV; probe.w = 4; probe.sign = 0;
+        narrow16 = target_op_calls_helper(&probe);
+    }
     struct defs d;
     compute_defs(fn, &d);
     struct ibuf nb = { 0, 0, 0 };
@@ -236,6 +295,36 @@ int pass_divmagic(struct ir_func *fn)
             src->w != 4 || src->dst < 0 || !const_b(fn, &d, src, &D) ||
             D == 0 || D == 1 || (D == -1 && !(mulh32 && !src->sign))) {
             *ib_push(&nb) = *src;
+            continue;
+        }
+        unsigned long nB, nM;
+        int nsh;
+        /* (a signed division of a zero-extended dividend by a positive
+         * divisor is the unsigned one: `unsigned char / 10` is an int
+         * division after the promotion) */
+        if (narrow16 && D > 1 && D <= 0xffff &&
+            dm_narrow_bound(fn, &d, src->a, &nB) &&
+            dm_narrow_magic((unsigned long)D, nB, &nM, &nsh)) {
+            int is_mod16 = src->op == IR_MOD, x16 = src->a;
+            int t = dm_op(&nb, fn, IR_MUL, x16,
+                          dm_const(&nb, fn, (long)nM, 4, src), 4, 0, 0, src);
+            int q16 = nsh ? dm_op(&nb, fn, IR_SHR, t,
+                                  dm_const(&nb, fn, nsh, 4, src), 4, 0, 0, src)
+                          : t;
+            int mq16 = is_mod16 ? dm_op(&nb, fn, IR_MUL, q16,
+                                        dm_const(&nb, fn, D, 4, src), 4, 0, 0,
+                                        src)
+                                : -1;
+            struct ir_ins *out = ib_push(&nb);
+            memset(out, 0, sizeof *out);
+            if (is_mod16) {
+                out->op = IR_SUB; out->a = x16; out->b = mq16;
+            } else {
+                out->op = IR_MOV; out->a = q16; out->b = -1;
+            }
+            out->dst = src->dst; out->w = 4; out->sign = 0;
+            out->line = src->line; out->col = src->col;
+            changed = 1;
             continue;
         }
         if (pow2_only && !(src->sign &&

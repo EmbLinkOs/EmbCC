@@ -70,7 +70,7 @@ static const char *skipws(const char *p)
     return p;
 }
 
-static int idc(int c) { return isalnum(c) || c == '_' || c == '.' || c == '$'; }
+static int idc(int c) { return asm_symc(c); }
 
 /* A symbol NAME cannot begin with a digit -- that is a number. The
  * distinction matters only in avrasm_symform, where an operand is either a
@@ -78,8 +78,7 @@ static int idc(int c) { return isalnum(c) || c == '_' || c == '.' || c == '$'; }
  * symbol called "0xC1", which the linker then reported as undefined. A
  * plain `1` or `0x40` reaches the expression parser instead, which is where
  * every I/O address in a real source goes. */
-static int sym_start(int c) { return isalpha(c) || c == '_' || c == '.' ||
-                                     c == '$'; }
+static int sym_start(int c) { return asm_sym0(c) || c == '$'; }
 
 /* ---- registers -------------------------------------------------------- */
 
@@ -149,10 +148,13 @@ static int ptr_name(const char *s, int len)
  * complement, parentheses, character constants, and the byte-selection
  * functions lo8/hi8/hlo8/hh8 and their program-space forms.
  *
- * `.` is the address of the START of the current instruction, which is
- * GNU's convention. src/as/gas.c substitutes a label as `.±N`, so this is
- * how a branch to a label arrives and the only place the difference from
- * llvm-objdump's end-relative printing matters.
+ * In a relative branch's target, `.±N` counts from the END of the
+ * instruction, as GNU as and llvm-mc read it for AVR: `rjmp .` and `rjmp
+ * .+0` go on to the next instruction (the two-cycle nop avr-gcc writes,
+ * and `rcall .` the two bytes of stack its prologues take), `brne .-4`
+ * back to the word before a one-word branch. src/as/gas.c substitutes a
+ * label as `.±N` on that reckoning. (EmbCC counted from the START once:
+ * `rjmp .+0` was a jump to itself, and avr-gcc's idioms hung.)
  */
 struct expr_ctx {
     struct as *a;
@@ -643,7 +645,7 @@ static int want_disp(struct as *a, const struct oper *o, const char *what,
              o->imm);
         return 0;
     }
-    d = o->imm - 2;
+    d = o->imm;
     if (d & 1) {
         aerr(a, "%s: a displacement of %ld bytes is odd, and every AVR "
                 "instruction begins on a halfword", what, o->imm);
@@ -1081,6 +1083,8 @@ static int sym_operand(const char *p, long *addend, const char **end)
         return 0;
     while (idc((unsigned char)p[n]))
         n++;
+    if (n == 1 && p[0] == '.')
+        return 0;          /* `.` is the location, not a symbol: `.+2` */
     q = skipws(p + n);
     if (*q == '+' || *q == '-') {
         int neg = *q == '-';
@@ -1131,7 +1135,7 @@ int avrasm_symform(const char *stmt, struct asm_symform *f)
         int n = sym_operand(p, &f->addend, &end);
         if (!n || *end) return 0;
         f->sym_at = (int)(p - stmt); f->sym_len = n;
-        snprintf(f->encode, sizeof f->encode, "%.*s .+2", mnlen, mn);
+        snprintf(f->encode, sizeof f->encode, "%.*s .+0", mnlen, mn);
         f->site[0].off = 0; f->site[0].reloc = R_AVR_13_PCREL;
         f->nsites = 1;
         return 1;
@@ -1145,7 +1149,7 @@ int avrasm_symform(const char *stmt, struct asm_symform *f)
          * above: their FIRST operand is the flag. */
         if (n && !*end && find_insn(mn, mnlen)) {
             f->sym_at = (int)(p - stmt); f->sym_len = n;
-            snprintf(f->encode, sizeof f->encode, "%.*s .+2", mnlen, mn);
+            snprintf(f->encode, sizeof f->encode, "%.*s .+0", mnlen, mn);
             f->site[0].off = 0; f->site[0].reloc = R_AVR_7_PCREL;
             f->nsites = 1;
             return 1;
@@ -1324,9 +1328,9 @@ void avrasm_vocabulary(FILE *f)
                                 in->name, in->name, in->name); break;
         case F_PUSH: case F_POP:
                         fprintf(f, "%s r0\n%s r31\n", in->name, in->name); break;
-        /* `.` is the START of the instruction here, and the machine
-         * measures from the one after -- so `.+2` is a displacement of
-         * zero words and `.+128` is the top of the seven-bit field. */
+        /* `.` counts from the END of the branch, as the machine does --
+         * so `.+0` is a displacement of zero words and `.+126` is the top
+         * of the seven-bit field. */
         /* The PC-relative forms are NOT here: llvm-mc leaves a relocation
          * on a branch even to a label in its own section, so its bytes are
          * a placeholder and comparing them would grade nothing. They are
@@ -1350,12 +1354,14 @@ void avrasm_vocabulary(FILE *f)
  * cleanly and means the wrong thing is invisible to any other check.
  *
  * `f` prints the expected disassembly, `out` assembles the source. llvm's
- * AVR printer measures from the END of the instruction, where `.` in a
- * source measures from its START, so a source `.+2` prints as `.+0`.
+ * AVR printer and a source's `.` both measure from the END of the
+ * instruction, so a source `.+2` prints as `.+2` (tests/golden/avr-asm.sh
+ * also checks each target against llvm-mc's own relocation for it).
  */
 static void pcrel_walk(FILE *f, struct code *out, char *err, int errlen)
 {
-    static const int ds[5] = { 2, 4, 0, 128, -126 };   /* source bytes */
+    /* source bytes: zero, a word on and back, the 7-bit field's ends */
+    static const int ds[5] = { 0, 2, -2, 126, -128 };
     int i, j;
 
     for (i = 0; i < (int)(sizeof TAB / sizeof TAB[0]); i++) {
@@ -1367,8 +1373,8 @@ static void pcrel_walk(FILE *f, struct code *out, char *err, int errlen)
         else continue;
         for (j = 0; j < 5; j++) {
             long d = ds[j];
-            long words = (d - 2) / 2;
-            if ((d - 2) & 1) continue;
+            long words = d / 2;
+            if (d & 1) continue;
             if (words < lo || words > hi) continue;
             if (f) {
                 /* What llvm PRINTS, which is not always what a source

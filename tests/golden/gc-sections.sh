@@ -292,6 +292,39 @@ n=$("$RE" -S "$out/many.o" | grep -c ' \.text\.function_with')
     fail "300 functions: llvm-dwarfdump rejects the object"
 echo "300 functions: 300 sections, relocations for each, DWARF that verifies"
 
+# ---- Thumb code that addresses from Align(pc, 4) ---------------------------
+# A literal pool's ldrd (and a jump table's adr.w) counts from the word below
+# pc. In a section of its own, a function that started on a halfword had its
+# pool read two bytes off wherever the linker put it: lib/rt's 64-bit
+# division returned -1 for 5 / 10 in an image linked with --gc-sections.
+# Each ldrd must find its constant in its own section, laid out from 0, and
+# that section must ask the linker for at least a word.
+for O in -O2 -Os; do
+    o=$out/pc-align$O.o
+    "$EMBCC" --target=thumbv7em-none-eabi $O --sections=functions \
+        -c $d/pc-align.c -o "$o" || fail "pc-align.c $O"
+    llvm-objdump -d "$o" > "$o.dis"
+    llvm-objcopy --dump-section .text.mix="$o.mix" "$o" "$o.tmp" ||
+        fail "pc-align $O: no .text.mix"
+    n=0
+    for at in $(sed -n 's/.*ldrd.*\[pc, #[0-9]*\].*<mix+0x\([0-9a-f]*\)>.*/\1/p' "$o.dis"); do
+        # the eight bytes there, little-endian, as one number
+        v=$(od -An -tx1 -j $((0x$at)) -N 8 "$o.mix" |
+            awk '{ for (i = 1; i <= NF; i++) b[n++] = $i }
+                 END { s = ""; for (k = n - 1; k >= 0; k--) s = s b[k]; print s }')
+        case $v in
+            123456789abcdef1|0fedcba987654321) n=$((n + 1)) ;;
+            *) fail "pc-align $O: an ldrd in mix reads $v from the pool, not its constant" ;;
+        esac
+    done
+    [ "$n" -ge 2 ] || { grep ldrd "$o.dis"; fail "pc-align $O: mix loads $n constants from a pool, expected 2"; }
+    for s in mix sw; do
+        al=$("$RE" -S -W "$o" | awk -v s=".text.$s" '{ for (i = 1; i <= NF; i++) if ($i == s) print $NF }')
+        [ "${al:-0}" -ge 4 ] || fail "pc-align $O: .text.$s asks for $al-byte alignment, and its code addresses from Align(pc, 4)"
+    done
+done
+echo "Thumb: a function's literal pool and jump table hold wherever its section lands"
+
 # ---- refused ----------------------------------------------------------------
 if "$EMBLD" --print-gc-sections -e _start "$out/eh.o" -o "$out/x.elf" \
         2> "$out/r.txt"; then

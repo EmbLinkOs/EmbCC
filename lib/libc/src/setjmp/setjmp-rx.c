@@ -12,12 +12,19 @@
  * _setjmp and _longjmp in the object.
  *
  * longjmp(env, 0) makes setjmp return 1 (C11 7.13.2.1p4). */
+/* The symbols' names: lib/rt/builtin-setjmp.c builds this file again as
+ * __builtin_setjmp's and __builtin_longjmp's own pair. */
+#ifndef SJ_SETJMP
+#define SJ_SETJMP  "setjmp"
+#define SJ_LONGJMP "longjmp"
+#endif
+
 #if defined(__RX__)
 __asm__(
 ".text\n"
-".globl _setjmp\n"
-".type _setjmp, @function\n"
-"_setjmp:\n"
+".globl _" SJ_SETJMP "\n"
+".type _" SJ_SETJMP ", @function\n"
+"_" SJ_SETJMP ":\n"
 "    mov.l r6, [r1]\n"
 "    mov.l r7, 4[r1]\n"
 "    mov.l r8, 8[r1]\n"
@@ -32,10 +39,10 @@ __asm__(
 "    mov.l r2, 36[r1]\n"
 "    mov.l #0, r1\n"
 "    rts\n"
-".size _setjmp, .-_setjmp\n"
-".globl _longjmp\n"
-".type _longjmp, @function\n"
-"_longjmp:\n"
+".size _" SJ_SETJMP ", .-_" SJ_SETJMP "\n"
+".globl _" SJ_LONGJMP "\n"
+".type _" SJ_LONGJMP ", @function\n"
+"_" SJ_LONGJMP ":\n"
 "    mov.l [r1], r6\n"
 "    mov.l 4[r1], r7\n"
 "    mov.l 8[r1], r8\n"
@@ -51,6 +58,6 @@ __asm__(
 "    bne 1f\n"
 "    mov.l #1, r1\n"
 "1:  jmp r3\n"
-".size _longjmp, .-_longjmp\n"
+".size _" SJ_LONGJMP ", .-_" SJ_LONGJMP "\n"
 );
 #endif

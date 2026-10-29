@@ -14,11 +14,18 @@
  *
  *   jmp_buf: [0..9]=x19-x28 [10]=x29 [11]=x30 [12]=sp [13..20]=d8-d15
  */
+/* The symbols' names: lib/rt/builtin-setjmp.c builds this file again as
+ * __builtin_setjmp's and __builtin_longjmp's own pair. */
+#ifndef SJ_SETJMP
+#define SJ_SETJMP  "setjmp"
+#define SJ_LONGJMP "longjmp"
+#endif
+
 #ifdef __aarch64__
 
 __asm__(
-".globl setjmp\n"
-"setjmp:\n"
+".globl " SJ_SETJMP "\n"
+ SJ_SETJMP ":\n"
 "    .long 0xa9005013   // stp  x19, x20, [x0, #0]\n"
 "    .long 0xa9015815   // stp  x21, x22, [x0, #16]\n"
 "    .long 0xa9026017   // stp  x23, x24, [x0, #32]\n"
@@ -38,8 +45,8 @@ __asm__(
 "    .long 0x52800000   // mov  w0, #0\n"
 "    .long 0xd65f03c0   // ret\n"
 
-".globl longjmp\n"
-"longjmp:\n"
+".globl " SJ_LONGJMP "\n"
+ SJ_LONGJMP ":\n"
 "    .long 0xa9405013   // ldp  x19, x20, [x0, #0]\n"
 "    .long 0xa9415815   // ldp  x21, x22, [x0, #16]\n"
 "    .long 0xa9426017   // ldp  x23, x24, [x0, #32]\n"

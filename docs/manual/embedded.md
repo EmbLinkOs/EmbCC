@@ -129,9 +129,10 @@ The complete list of what each `librt.a` defines is in
 [Libraries](libraries.md#the-compiler-runtime-librt). The names are
 libgcc's, so an object compiled by EmbCC links against another
 toolchain's libgcc, and objects from GCC or Clang that call the libgcc
-names link against EmbCC's `librt.a`. EmbCC does not provide the ARM
-run-time ABI names (`__aeabi_ldivmod`, `__aeabi_fadd`, ...); an object
-from another ARM compiler that calls them must bring its own.
+names link against EmbCC's `librt.a`. On ARM it also has the run-time
+ABI's names, which other ARM compilers call and EmbCC's own code does
+not (`__aeabi_ldivmod`, `__aeabi_fadd`, `__aeabi_h2f`, ...), all weak,
+so an object from one of them links against it too.
 
 ### The runtime archive
 
@@ -342,6 +343,13 @@ Memory region         Used Size  Region Size  %age Used
              RAM:       1968 B        64 KB      3.00%
            FLASH:        844 B       256 KB      0.32%
 ```
+
+EmbCC's own libraries are built the same way: `lib/libc` and the runtime
+have a section per function and per object, so `--gc-sections` drops
+what a program does not reach inside them too, not only in its own
+files. On a Cortex-M4, `printf` brings 8 KB of code where it brought 16,
+and `strtod` with `snprintf`'s `%f` 19 KB where it brought 78. Linked
+without `--gc-sections`, an image is the size it always was.
 
 What is kept is what the entry symbol, `-u` and the script's `KEEP()`
 reach, through every relocation of everything kept. Some things are
@@ -998,6 +1006,21 @@ bits as clang's does (`atomic_fetch_add_explicit(p, 1,
 memory_order_relaxed)` is a bare `amoadd.w`, an acquire compare-exchange
 `lr.w.aq`/`sc.w`).
 
+Without the A extension (`--isa=rv32imc`, an ESP32-C3) there is no atomic
+read-modify-write instruction, so each one is a call to libatomic's sized
+routine, as GCC and clang make it there: `__atomic_fetch_add_4`,
+`__atomic_compare_exchange_1` and the rest. An aligned load or store is
+one instruction either way, and stays inline. EmbCC's runtime defines
+the routines (`lib/rt/atomic-riscv.c`) by masking interrupts:
+`mstatus.MIE` is cleared and read in one `csrrci`, and set again only if
+it was set, so they nest. That makes them atomic on one core with no
+other bus master, which is what such a part is. They need machine mode,
+and they are not atomic against a second core or DMA, so every one is
+weak, and an SDK or RTOS with another way replaces them by defining its
+own. The C library's locks are atomics too, so a program for such a part
+links the runtime and C library built without A, from
+`build/libc/<triple>/noa`; the driver picks them from `--isa=`.
+
 A one- or two-byte atomic works on the aligned word around it, as GCC's
 and LLVM's do: AND, OR and XOR are one AMO with the other lanes neutral,
 and the rest an `lr.w`/`sc.w` loop that rewrites only its lane. That is
@@ -1311,10 +1334,10 @@ embcc --target=avr --mcu=atmega328p --opt=size main.c -o fw.elf
     `.fini0` disables interrupts and stops in a loop.
   - A program adds a step to the sequence with code in `.init1`,
     `.init3`, `.init5`, `.init7`, `.init8` or `.fini8`..`.fini1`, without a
-    `ret`: the sections run into each other. It has to be a `.S` file:
-    EmbCC places a naked C function's body in `.text`, so avr-libc's
-    naked `.init3` function is refused (`naked function ... in section
-    '.init3' is not supported yet`).
+    `ret`: the sections run into each other. In a `.S` file, or in C as
+    avr-libc writes it: a naked function placed in the section,
+    `__attribute__((naked, used, section(".init3")))`, whose body is its
+    asm and nothing after it.
 - **The linker script**, when the link names none: `<part>.ld`
   (`lib/avr/avr5.ld` with the part's memories), avr-ld's layout: flash
   from 0 with the vectors, `PROGMEM` data, `.init0`..`.init9`, the code
@@ -1363,10 +1386,9 @@ A handler saves `r0`, `SREG`, `r1`, every call-clobbered register
 own body, and returns with `reti`. `signal` runs the body with interrupts
 disabled. `interrupt` re-enables them with `sei` at entry, so the handler
 can be interrupted. Interrupts are enabled globally with
-`__asm__ volatile("sei")` and disabled with `__asm__ volatile("cli" :::
-"memory")`. `__builtin_avr_sei`, `__builtin_avr_cli` and the other
-`__builtin_avr_*` functions are not implemented, although their
-`__BUILTIN_AVR_*` macros are predefined.
+`sei()` (`<avr/interrupt.h>`) or `__builtin_avr_sei()`, and disabled
+with `cli()` or `__builtin_avr_cli()`; avr-gcc's other `__builtin_avr_*`
+are there too ([Extensions](extensions.md)).
 
 ### avr-libc-compatible headers
 
@@ -1404,8 +1426,8 @@ Where they differ from avr-libc's:
   (`_delay_loop_2`) and wait at least the time asked. With a constant
   argument the count is worked out at compile time from `--opt=basic` up; at
   `--opt=none` it is computed at run time in software floating point, which
-  makes the delay longer. avr-libc's use `__builtin_avr_delay_cycles`,
-  which EmbCC does not have.
+  makes the delay longer. For a delay of exactly `n` cycles, which
+  avr-libc's `_delay_ms` builds on, call `__builtin_avr_delay_cycles(n)`.
 - `<avr/io.h>` in a `.S` file gives each register as its data-space
   address (`sts UDR0, r24`, `out _SFR_IO_ADDR(PORTB), r24`), as avr-libc's
   does; EmbCC defines `__ASSEMBLER__` for a `.S` file as GCC does.

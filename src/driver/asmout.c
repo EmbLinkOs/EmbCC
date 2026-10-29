@@ -21,10 +21,15 @@
  *
  * ---- what it is not ----
  *
- * x86-64 only. The aarch64 backend has no disassembler in this repository,
- * so `-S` for that target refuses rather than emitting something that looks
- * like assembly and is not (docs/internals/contributing.md's rule:
- * unsupported must fail, never be silently wrong).
+ * A disassembly. Only x86-64 has a decoder here, so only its text carries
+ * mnemonics, as comments; every other target's is its bytes with each
+ * relocation named, grouped by the target's length rule (RX has none, and
+ * its bytes go out in runs), and MIPS writes a relocated instruction
+ * symbolically. What cannot be spelt is refused rather than emitted wrong
+ * (docs/internals/contributing.md: unsupported must fail, never be
+ * silently wrong). tests/golden/asmout-roundtrip.sh reassembles every
+ * target's text -- with EmbCC's own assembler, and llvm-mc where it has
+ * the target -- and compares it with the object.
  */
 #include "asmout.h"
 
@@ -36,6 +41,9 @@
 
 #include "../arch/backend.h"
 #include "../arch/target.h"
+#if FAMILY_BUILT(arm)
+#include "../arch/thumb/attrs.h"
+#endif
 #include "../elf/elf.h"
 #include "../ir/ir.h"
 #include "../parse/ast.h"
@@ -83,6 +91,28 @@ static const char *asym(const char *n)
     return q;
 }
 
+/* A C name as the object spells it, which is what an assembler must be
+ * given: RX's ELF symbols carry the underscore its ABI prefixes
+ * (src/elf/write.c), and `int sw()` is `_sw` in RX assembly. Assembler
+ * names -- an asm block's labels, a section -- are already spelt so. */
+static const char *csym(const char *n)
+{
+    /* (target.c's, not the backend table's: tools/embls links this file
+     * and no code generator) */
+    const char *p = target_sym_prefix();
+    /* (not on an assembler-local name or a static's `.`-joined one, as
+     * the writer leaves those: `main.z`, `.Lcomplit.0`) */
+    if (n[0] == '\001')               /* an asm label: the name as given */
+        return asym(n + 1);
+    if (!p || !*p || n[0] == '.' || n[0] == '$')
+        return asym(n);
+    size_t pl = strlen(p), nl = strlen(n);
+    char *q = xmalloc(pl + nl + 1);
+    memcpy(q, p, pl);
+    memcpy(q + pl, n, nl + 1);
+    return asym(q);
+}
+
 /* One place in .text that names a symbol. Collected from what the backend
  * recorded, so this is the same information the ELF writer turns into
  * relocations — not a second derivation of it. */
@@ -92,6 +122,8 @@ struct site {
     const char *name;        /* the symbol, or NULL for a .rodata string */
     int str_off;             /* when name is NULL: offset inside .rodata */
     int kind;                /* enum reloc_kind */
+    int done;                /* -S wrote its .reloc */
+    int labeled;             /* a text site: its target's label is written */
 };
 
 static int site_cmp(const void *a, const void *b)
@@ -101,7 +133,7 @@ static int site_cmp(const void *a, const void *b)
 }
 
 /* The site whose field falls inside [lo, hi), or NULL. */
-static const struct site *site_in(const struct site *s, int n, int lo, int hi)
+static struct site *site_in(struct site *s, int n, int lo, int hi)
 {
     for (int i = 0; i < n; i++)
         if (s[i].off >= lo && s[i].off < hi)
@@ -109,8 +141,8 @@ static const struct site *site_in(const struct site *s, int n, int lo, int hi)
     return NULL;
 }
 
-/* Thumb, RISC-V and AVR: the file-scope asm blocks and naked functions,
- * with their labels and relocations (at the end of this file). */
+/* The file-scope asm blocks and naked functions, with their labels and
+ * relocations (at the end of this file). */
 static int blocks_by_reloc(void);
 static void blocks_emit(struct outbuf *b, struct unit *u,
                         const unsigned char *text, long from, long textlen);
@@ -125,6 +157,288 @@ static void str_label(char *out, size_t cap, const struct ir_unit *iu, int off)
             return;
         }
     snprintf(out, cap, ".LC_at_%d", off);
+}
+
+/* A relocation against a place in this object's own code -- an Xtensa
+ * literal-pool word holding a label's address, an AVR `jmp` too far for
+ * rjmp -- which the object makes against .text's section symbol plus the
+ * offset. An assembler is given a local label at that offset, which it
+ * relocates the same way. */
+static int text_site(int kind)
+{
+    return kind == RK_XTENSA_TEXT32 || kind == RK_AVR_TEXT_CALL;
+}
+
+static void text_label(char *out, size_t cap, int off)
+{
+    snprintf(out, cap, ".Ltext%d", off);
+}
+
+/* Define every text label that falls at pc, once each (sites are in .text
+ * order, so the first site naming an offset is the one that defines it).
+ * A target no instruction starts at is caught after the functions. */
+static void text_labels(struct outbuf *b, struct site *s, int n, long pc)
+{
+    for (int i = 0; i < n; i++) {
+        if (!text_site(s[i].kind) || s[i].str_off != pc)
+            continue;
+        s[i].labeled = 1;
+        int first = 1;
+        for (int j = 0; j < i; j++)
+            if (text_site(s[j].kind) && s[j].str_off == s[i].str_off)
+                first = 0;
+        if (first) {
+            char lab[32];
+            text_label(lab, sizeof lab, s[i].str_off);
+            ob_fmt(b, "%s:\n", lab);
+        }
+    }
+}
+
+/* A line of bytes holds at most one relocated field, and starts at every
+ * text label: shorten [pc, pc + len) to end where a second field or a
+ * label begins. A grouping that is exact never needs it; a coarse one
+ * (RX's runs, a pool word beside code) would otherwise lose the second
+ * relocation, or a label, without a word. */
+static int cut_group(const struct site *s, int n, long pc, int len)
+{
+    long first = -1;
+    for (int i = 0; i < n; i++) {
+        long at = s[i].off;
+        if (at >= pc && at < pc + len) {
+            if (first >= 0 && at > first)
+                len = (int)(at - pc);
+            else
+                first = at;
+        }
+        if (text_site(s[i].kind) && s[i].str_off > pc &&
+            s[i].str_off < pc + len)
+            len = (int)(s[i].str_off - pc);
+    }
+    return len;
+}
+
+static const char *type_sigil(void);
+
+/* The build attributes the object carries (src/arch/backends.c's
+ * elf_notes), as the directives that make them: ARM's .eabi_attribute,
+ * RISC-V's .attribute. Without them another assembler writes none, and a
+ * linker has nothing to refuse a soft-float object against a hard-float
+ * one with (Tag_ABI_VFP_args). Decoded from the bytes the object gets,
+ * so the two cannot disagree. */
+static unsigned long attr_uleb(const unsigned char *a, size_t n, size_t *i)
+{
+    unsigned long v = 0;
+    int sh = 0;
+    while (*i < n) {
+        unsigned char c = a[(*i)++];
+        v |= (unsigned long)(c & 0x7f) << sh;
+        sh += 7;
+        if (!(c & 0x80))
+            break;
+    }
+    return v;
+}
+
+static void attrs_emit(struct outbuf *b)
+{
+    unsigned char *a = NULL;
+    size_t n = 0;
+    const char *dir = NULL;
+    int arm = 0;
+#if FAMILY_BUILT(arm)
+    if (target_get() == TARGET_THUMB) {
+        a = arm_build_attributes(&n);
+        dir = ".eabi_attribute";
+        arm = 1;
+    }
+#endif
+#if FAMILY_BUILT(riscv)
+    if (target_get() == TARGET_RISCV32 || target_get() == TARGET_RISCV64) {
+        a = riscv_build_attributes(&n);
+        dir = ".attribute";
+    }
+#endif
+    if (!a)
+        return;
+    /* 'A', then vendor subsections (length, name), each holding
+     * sub-subsections (tag, length); only Tag_File's pairs are written */
+    size_t i = 1;
+    while (a[0] == 'A' && i + 4 <= n) {
+        size_t sub = (size_t)target_get_uint(a + i, 4);
+        size_t end = i + sub, j = i + 4;
+        if (sub < 5 || end > n)
+            break;
+        while (j < end && a[j])
+            j++;
+        j++;                                 /* the vendor's name */
+        while (j + 5 <= end) {
+            size_t at = j;
+            unsigned long tag = attr_uleb(a, end, &j);
+            size_t sz = (size_t)target_get_uint(a + j, 4);
+            size_t send = at + sz;
+            j += 4;
+            if (sz < 5 || send > end)
+                break;
+            while (tag == 1 && j < send) {
+                unsigned long t = attr_uleb(a, send, &j);
+                /* a string: ARM's CPU names and, past 32, an odd tag
+                 * (the ABI's rule); RISC-V's every odd tag */
+                int str = arm ? t == 4 || t == 5 || (t > 32 && (t & 1))
+                              : (t & 1);
+                if (str) {
+                    ob_fmt(b, "\t%s\t%lu, \"", dir, t);
+                    while (j < send && a[j])
+                        ob_fmt(b, "%c", a[j++]);
+                    j++;
+                    ob_str(b, "\"\n");
+                } else {
+                    ob_fmt(b, "\t%s\t%lu, %lu\n", dir, t,
+                           attr_uleb(a, send, &j));
+                }
+            }
+            j = send;
+        }
+        i = end;
+    }
+    free(a);
+}
+
+/* A file-scope asm block defines the name (its own .globl or .weak
+ * says how it binds). */
+static int topasm_defines(const struct unit *u, const char *name)
+{
+    for (const struct topasm *ta = u->topasm; ta; ta = ta->next)
+        for (int k = 0; k < ta->nsyms; k++)
+            if (!strcmp(ta->syms[k].name, name))
+                return 1;
+    return 0;
+}
+
+/* Which globals a data section holds, as main.c placed them. */
+enum gsec { GS_DATA, GS_BSS, GS_RODATA, GS_TDATA, GS_TBSS, GS_NAMED };
+
+static int gsec_holds(const struct global *g, enum gsec k, int named)
+{
+    if (g->absorbed || !g->defined || g->is_common)
+        return 0;
+    switch (k) {
+    case GS_DATA:   return !g->in_bss && !g->in_rodata && !g->is_tls && !g->named;
+    case GS_BSS:    return g->in_bss && !g->is_tls && !g->named;
+    case GS_RODATA: return g->in_rodata;
+    case GS_TDATA:  return g->is_tls && !g->in_bss;
+    case GS_TBSS:   return g->is_tls && g->in_bss;
+    case GS_NAMED:  return g->named == named;
+    }
+    return 0;
+}
+
+/* One data section's objects, each at the offset main.c gave it: the gap
+ * before it as zeros, then its bytes -- a pointer slot as the address it
+ * holds (ptr_slot), the rest as they are. `cur` is where the section
+ * already ends in the text (.rodata's strings), or -1 for nothing yet. */
+static void globals_emit(struct outbuf *b, struct unit *u,
+                         const struct ir_unit *iu, enum gsec k, int named,
+                         const char *name, long cur)
+{
+    int open = 0;
+    if (cur < 0)
+        cur = 0;
+    for (struct global *g = u->globals; g; g = g->next) {
+        if (!gsec_holds(g, k, named))
+            continue;
+        int sz = global_size(g);
+        int nobits = g->in_bss;
+        if (!open) {
+            switch (k) {
+            case GS_DATA:   ob_str(b, "\n\t.data\n"); break;
+            case GS_BSS:    ob_str(b, "\n\t.bss\n"); break;
+            case GS_RODATA: ob_str(b, "\n\t.section\t.rodata\n"); break;
+            case GS_TDATA:
+                ob_fmt(b, "\n\t.section\t.tdata,\"awT\",%sprogbits\n",
+                       type_sigil());
+                break;
+            case GS_TBSS:
+                ob_fmt(b, "\n\t.section\t.tbss,\"awT\",%snobits\n",
+                       type_sigil());
+                break;
+            case GS_NAMED:
+                ob_fmt(b, "\n\t.section\t%s,\"a%s%s\",%s%s\n", asym(name),
+                       g->sec_flags & SHF_WRITE ? "w" : "",
+                       g->sec_flags & SHF_EXECINSTR ? "x" : "", type_sigil(),
+                       nobits ? "nobits" : "progbits");
+                break;
+            }
+            open = 1;
+        }
+        /* the alignment as main.c computed it: the section claims the
+         * strictest, and the zeros below put the object where it was */
+        int al = g->ty ? ty_align(g->ty) : 1;
+        if (g->user_align > al)
+            al = g->user_align;
+        al = target_object_align(g->ty && g->ty->kind == TY_ARRAY, sz, al);
+        if (g->off < cur)
+            internal_error("-S: '%s' at offset %d overlaps the object "
+                           "before it", g->name, g->off);
+        if (g->off > cur)
+            ob_fmt(b, "\t.zero\t%ld\n", g->off - cur);
+        if (!g->is_static)
+            ob_fmt(b, "\t.%s\t%s\n", g->is_weak ? "weak" : "globl",
+                   csym(g->name));
+        ob_fmt(b, "\t.balign\t%d\n\t.type\t%s, %s%s\n%s:\n", al,
+               csym(g->name), type_sigil(),
+               g->is_tls ? "tls_object" : "object", csym(g->name));
+        /* an empty struct still takes a byte, as in the object */
+        int span = sz ? sz : 1;
+        unsigned char scalar[16];
+        const char *img = g->init_bytes;
+        int ilen = g->init_len;
+        if (!img && g->has_init && !nobits && g->ty &&
+            ty_size(g->ty) <= (int)sizeof scalar) {
+            memset(scalar, 0, sizeof scalar);
+            target_put_uint(scalar, ty_size(g->ty),
+                            (unsigned long)g->init);
+            img = (const char *)scalar;
+            ilen = ty_size(g->ty);
+        }
+        if (nobits || !img) {
+            ob_fmt(b, "\t.zero\t%d\n", span);
+        } else {
+            int at = 0;
+            while (at < span) {
+                const struct greloc *r = NULL;
+                for (int q = 0; q < g->nrelocs; q++)
+                    if (g->relocs[q].off == at) { r = &g->relocs[q]; break; }
+                if (r) {
+                    char sym[160];
+                    if (r->str)
+                        str_label(sym, sizeof sym, iu, r->str_off);
+                    else if (r->gtarget)
+                        snprintf(sym, sizeof sym, "%s", csym(r->gtarget->name));
+                    else if (r->ftarget)
+                        snprintf(sym, sizeof sym, "%s", csym(r->ftarget->name));
+                    else
+                        snprintf(sym, sizeof sym, "0");
+                    ptr_slot(b, sym, r->addend, r->ftarget != NULL);
+                    at += target_ptr_size();
+                    continue;
+                }
+                /* bytes up to the next relocation */
+                int stop = span;
+                for (int q = 0; q < g->nrelocs; q++)
+                    if (g->relocs[q].off > at && g->relocs[q].off < stop)
+                        stop = g->relocs[q].off;
+                ob_str(b, "\t.byte\t");
+                for (int j = at; j < stop; j++)
+                    ob_fmt(b, "%s%d", j > at ? "," : "",
+                           j < ilen ? (int)(unsigned char)img[j] : 0);
+                ob_str(b, "\n");
+                at = stop;
+            }
+        }
+        ob_fmt(b, "\t.size\t%s, %d\n", csym(g->name), sz);
+        cur = g->off + span;
+    }
 }
 
 /* The ELF relocation an assembler directive must name, and the addend the
@@ -244,6 +558,19 @@ static const char *reloc_name(int kind)
         case RK_ABS32:       return "R_TRICORE_32ABS";
         default:             return NULL;
         }
+    case TARGET_XTENSA:
+        switch (kind) {
+        case RK_CALL:          return "R_XTENSA_SLOT0_OP";  /* call8 */
+        case RK_ABS32:         return "R_XTENSA_32";
+        case RK_XTENSA_TEXT32: return "R_XTENSA_32";        /* a pool word */
+        default:               return NULL;
+        }
+    case TARGET_RX:
+        switch (kind) {
+        case RK_CALL:        return "R_RX_DIR24S_PCREL";    /* bsr.a and bra.a */
+        case RK_ABS32:       return "R_RX_DIR32";
+        default:             return NULL;
+        }
     case TARGET_PPC32:
         switch (kind) {
         case RK_CALL:          return "R_PPC_REL24";      /* bl and b alike */
@@ -323,6 +650,24 @@ static const char *mips_ls_name(int op)
     }
 }
 
+/* A block whose bytes are in a code section of their own (a naked
+ * function's section attribute): into it before the block, aligned as the
+ * object's section is, and back to .text after. */
+static void block_section(struct outbuf *b, const struct topasm *ta, int in)
+{
+    if (!ta->section)
+        return;
+    if (in) {
+        int al = target_get() == TARGET_AVR ? 2 : 4;
+        if (ta->align > al)
+            al = ta->align;
+        ob_fmt(b, "\t.section\t%s,\"ax\",%sprogbits\n\t.balign\t%d\n",
+               asym(ta->section), type_sigil(), al);
+    } else {
+        ob_str(b, "\t.text\n");
+    }
+}
+
 /* MIPS: the file-scope blocks and naked functions in .text, from `from`
  * to the end, with their labels and relocations -- written symbolically,
  * as the functions' are (llvm-mc's MIPS .reloc knows none of R_MIPS_26,
@@ -351,6 +696,7 @@ static void mips_emit_blocks(struct outbuf *b, const char *srcname,
         }
         if (!ta)
             break;
+        block_section(b, ta, 1);
         ob_fmt(b, ".Ltopasm%d:\n", nb);
         for (long k = 0; k <= ta->codelen; k++) {
             for (int j = 0; j < ta->nsyms; j++) {
@@ -359,11 +705,11 @@ static void mips_emit_blocks(struct outbuf *b, const char *srcname,
                     continue;
                 if (as->is_global)
                     ob_fmt(b, "\t.%s\t%s\n", as->is_weak ? "weak" : "globl",
-                           asym(as->name));
+                           csym(as->name));
                 if (as->type == ASMSYM_FUNC || as->type == ASMSYM_OBJECT)
-                    ob_fmt(b, "\t.type\t%s, @%s\n", asym(as->name),
+                    ob_fmt(b, "\t.type\t%s, @%s\n", csym(as->name),
                            as->type == ASMSYM_FUNC ? "function" : "object");
-                ob_fmt(b, "%s:\n", asym(as->name));
+                ob_fmt(b, "%s:\n", csym(as->name));
             }
             if (k == ta->codelen)
                 break;
@@ -378,7 +724,7 @@ static void mips_emit_blocks(struct outbuf *b, const char *srcname,
                     rt = (int)(w >> 16) & 31;
                 char sym[200];
                 if (r->target)
-                    snprintf(sym, sizeof sym, "%s%+ld", asym(r->target),
+                    snprintf(sym, sizeof sym, "%s%+ld", csym(r->target),
                              r->addend);
                 else
                     snprintf(sym, sizeof sym, ".Ltopasm%d%+ld", nb, r->addend);
@@ -423,8 +769,9 @@ static void mips_emit_blocks(struct outbuf *b, const char *srcname,
         }
         for (int j = 0; j < ta->nsyms; j++)
             if (ta->syms[j].size)
-                ob_fmt(b, "\t.size\t%s, %ld\n", asym(ta->syms[j].name),
+                ob_fmt(b, "\t.size\t%s, %ld\n", csym(ta->syms[j].name),
                        ta->syms[j].size);
+        block_section(b, ta, 0);
         pc = ta->text_off + ta->codelen;
         nb++;
     }
@@ -443,18 +790,18 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
     struct site *site = xcalloc((size_t)(nsite ? nsite : 1), sizeof *site);
     for (int i = 0; i < next; i++) {
         site[ns].off = ext[i].patch_off;
-        site[ns].name = ext[i].callee ? asym(ext[i].callee->name) : "?";
+        site[ns].name = ext[i].callee ? csym(ext[i].callee->name) : "?";
         site[ns++].kind = ext[i].tail ? RK_TAIL : RK_CALL;
     }
     for (int i = 0; i < nfs; i++) {
         site[ns].off = fs[i].patch_off;
-        site[ns].name = fs[i].target ? asym(fs[i].target->name) : "?";
+        site[ns].name = fs[i].target ? csym(fs[i].target->name) : "?";
         site[ns].addend = fs[i].addend;
         site[ns++].kind = fs[i].kind;
     }
     for (int i = 0; i < ngs; i++) {
         site[ns].off = gs[i].patch_off;
-        site[ns].name = gs[i].glob ? asym(gs[i].glob->name) : "?";
+        site[ns].name = gs[i].glob ? csym(gs[i].glob->name) : "?";
         site[ns++].kind = gs[i].kind;
     }
     for (int i = 0; i < nstrs; i++) {
@@ -474,6 +821,7 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
     if (target_get() == TARGET_THUMB)
         ob_str(b, arm_thumb() ? "\t.syntax unified\n\t.thumb\n"
                               : "\t.syntax unified\n\t.arm\n");
+    attrs_emit(b);
     /* MIPS: the code is already scheduled -- its delay slots are filled --
      * and uses $at itself, so the assembler may neither reorder, nor fill
      * a slot, nor expand a macro through $at. */
@@ -540,7 +888,7 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
         }
         if (!f->is_static)
             ob_fmt(b, "\t.%s\t%s\n", f->src->is_weak ? "weak" : "globl",
-                   asym(f->name));
+                   csym(f->name));
         if (arm_thumb())
             ob_fmt(b, "\t.thumb_func\n");
         /* A RISC-V interrupt handler is four-aligned with the C
@@ -550,12 +898,19 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
         if (f->src->is_isr && (target_get() == TARGET_RISCV32 ||
                                target_get() == TARGET_RISCV64))
             ob_str(b, "\t.p2align\t2\n");
-        ob_fmt(b, "\t.type\t%s, %sfunction\n%s:\n", asym(f->name),
-               type_sigil(), asym(f->name));
+        ob_fmt(b, "\t.type\t%s, %sfunction\n", csym(f->name),
+               type_sigil());
 
+        /* The symbol is at the function's ENTRY: Xtensa's literal pool
+         * comes first (l32r reaches only backwards), words of data that
+         * belong to the function and are not its code. */
+        long entry = lo + f->src->code_entry;
         long pc = lo;
         while (pc < hi) {
             char dis[256];
+            if (pc == entry)
+                ob_fmt(b, "%s:\n", csym(f->name));
+            text_labels(b, site, ns, pc);
             /* The target's own length rule first. It is exact on every
              * fixed-width machine and costs no disassembler; only
              * x86-64 returns 0 ("decode it to find out"), and only
@@ -567,14 +922,25 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
             int len = target_insn_len((const unsigned char *)text + pc,
                                       (int)(hi - pc));
 #if FAMILY_BUILT(x86)       /* the decoder is x86-64's (make TARGETS=) */
-            if (len < 1) {
+            if (len < 1 && target_get() == TARGET_X86_64) {
                 len = embdbg_decode_one(text + pc, (int)(hi - pc),
                                         (unsigned long)pc, dis);
-                have_dis = target_get() == TARGET_X86_64 && len >= 1;
+                have_dis = len >= 1;
             }
 #endif
+            /* RX is one to eight bytes with no rule short of decoding,
+             * and there is no RX decoder here: its bytes go out in runs
+             * -- data either way -- cut below wherever a relocation, a
+             * label or the entry needs a line of its own. */
             if (len < 1)
-                len = 1;
+                len = target_get() == TARGET_X86_64 ? 1 : 8;
+            if (pc < entry)
+                len = 4;                    /* a pool word */
+            if (len > hi - pc)
+                len = (int)(hi - pc);
+            if (pc < entry && pc + len > entry)
+                len = (int)(entry - pc);
+            len = cut_group(site, ns, pc, len);
             /* An absolute address in .text -- a jump table's entry -- is
              * data: eight bytes of their own, and what came before it
              * stops where it starts, so no decode of the bytes around a
@@ -586,8 +952,7 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
                     have_dis = 0;
                     break;
                 }
-            const struct site *st = site_in(site, ns, (int)pc,
-                                            (int)(pc + len));
+            struct site *st = site_in(site, ns, (int)pc, (int)(pc + len));
             /* RISC-V splits an address across auipc + addi, and the LOW
              * half's relocation names the auipc's ADDRESS rather than
              * the symbol -- that is how the psABI lets the linker find
@@ -627,7 +992,7 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
                 char sym[200];
                 long add = st->addend;
                 if (st->kind == RK_MIPS_TEXT26) {
-                    snprintf(sym, sizeof sym, "%s", asym(f->name));
+                    snprintf(sym, sizeof sym, "%s", csym(f->name));
                     add = (long)st->str_off - lo;
                 } else if (st->name) {
                     snprintf(sym, sizeof sym, "%s", st->name);
@@ -659,6 +1024,7 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
                     diag_fatal(srcname, 0, "-S cannot spell a MIPS "
                                "relocation of kind %d on instruction "
                                "0x%08lx", st->kind, w);
+                st->done = 1;
                 pc += len;
                 continue;
             }
@@ -682,7 +1048,9 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
             if (st) {
                 char sym[160];
                 if (st->name)
-                    snprintf(sym, sizeof sym, "%s", st->name);   /* the site table holds asym() names */
+                    snprintf(sym, sizeof sym, "%s", st->name);   /* the site table holds csym() names */
+                else if (text_site(st->kind))
+                    text_label(sym, sizeof sym, st->str_off);
                 else
                     str_label(sym, sizeof sym, iu, st->str_off);
                 const char *rt = reloc_name(st->kind);
@@ -715,12 +1083,24 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
                        st->kind == RK_RISCV_PCREL_LO12_I
                            ? 0L : addend_for(st->kind) + st->addend);
                 (void)tail;
+                st->done = 1;
             }
             pc += len;
         }
-        ob_fmt(b, "\t.size\t%s, .-%s\n", asym(f->name), asym(f->name));
+        ob_fmt(b, "\t.size\t%s, .-%s\n", csym(f->name), csym(f->name));
         prev_end = hi;
     }
+    /* Every relocation the backend recorded is in a function's code, and
+     * each must have been written -- as must the label each text site
+     * names. One lost here assembles cleanly into a different program. */
+    for (int k = 0; k < ns; k++)
+        if (!site[k].done || (text_site(site[k].kind) && !site[k].labeled))
+            diag_fatal(srcname, 0, "-S lost a relocation at .text+%d "
+                       "(kind %d%s); the object (-c) is correct, and "
+                       "emitting assembly that is not the object would be "
+                       "worse than refusing", site[k].off, site[k].kind,
+                       site[k].done ? ", its target starts no instruction"
+                                    : "");
     /* The asm blocks and naked functions, in .text after the functions:
      * their labels and relocations, where the targets below have them. */
     if (blocks_by_reloc() && u->topasm) {
@@ -753,20 +1133,33 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
             continue;
         if (!f->is_static)
             ob_fmt(b, "\t.%s\t%s\n", f->is_weak ? "weak" : "globl",
-                   asym(f->name));
-        ob_fmt(b, "\t.type\t%s, %sfunction\n", asym(f->name), type_sigil());
+                   csym(f->name));
+        ob_fmt(b, "\t.type\t%s, %sfunction\n", csym(f->name), type_sigil());
         ob_fmt(b, "\t.%s\t%s, %s\n",
                arm_thumb() ? "thumb_set" : "set",
-               asym(f->name), asym(f->alias_of));
+               csym(f->name), csym(f->alias_of));
+        /* its target's size too, as the object gives it (main.c) */
+        for (struct func *t = u->funcs; t; t = t->next)
+            if (!t->absorbed && t->has_defn && !strcmp(t->name, f->alias_of)) {
+                ob_fmt(b, "\t.size\t%s, %d\n", csym(f->name),
+                       t->code_len - t->code_entry);
+                break;
+            }
     }
     for (struct global *g = u->globals; g; g = g->next) {
         if (g->absorbed || !g->alias_of)
             continue;
         if (!g->is_static)
             ob_fmt(b, "\t.%s\t%s\n", g->is_weak ? "weak" : "globl",
-                   asym(g->name));
-        ob_fmt(b, "\t.type\t%s, %sobject\n", asym(g->name), type_sigil());
-        ob_fmt(b, "\t.set\t%s, %s\n", asym(g->name), asym(g->alias_of));
+                   csym(g->name));
+        ob_fmt(b, "\t.type\t%s, %sobject\n", csym(g->name), type_sigil());
+        ob_fmt(b, "\t.set\t%s, %s\n", csym(g->name), csym(g->alias_of));
+        for (struct global *t = u->globals; t; t = t->next)
+            if (!t->absorbed && t->defined && !strcmp(t->name, g->alias_of)) {
+                ob_fmt(b, "\t.size\t%s, %d\n", csym(g->name),
+                       global_size(t));
+                break;
+            }
     }
 
     /* .rodata: the string literals, each under the label the code refers
@@ -775,11 +1168,19 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
         ob_str(b, "\n\t.section\t.rodata\n");
         /* the object's .rodata is 16-aligned (main.c); an assembler's
          * starts at 1 unless told */
-        if (target_is_mips())
-            ob_str(b, "\t.p2align\t4\n");
+        ob_str(b, "\t.balign\t16\n");
+        long cur = 0;
         for (int i = 0; i < iu->nstrs; i++) {
-            if (iu->strs[i].align > 1)       /* the same gap irgen left */
+            /* the same gap irgen left, as zeros, so each string is at
+             * the offset the code's relocations were computed for */
+            if (iu->strs[i].off < cur)
+                internal_error("-S: string %d at .rodata+%d overlaps the "
+                               "one before it", i, iu->strs[i].off);
+            if (iu->strs[i].off > cur)
+                ob_fmt(b, "\t.zero\t%ld\n", iu->strs[i].off - cur);
+            if (iu->strs[i].align > 1)
                 ob_fmt(b, "\t.balign\t%d\n", iu->strs[i].align);
+            cur = iu->strs[i].off + iu->strs[i].len;
             ob_fmt(b, ".LC%d:\n", i);
             ob_str(b, "\t.byte\t");
             for (int k = 0; k < iu->strs[i].len; k++)
@@ -789,81 +1190,72 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
         }
     }
 
-    /* Globals defined here. An initialized one is bytes in .data; a zero
-     * one is .bss, where `.comm`-style reservation says the size without
-     * writing it. */
-    int any_data = 0;
-    for (struct global *g = u->globals; g; g = g->next) {
-        if (g->absorbed || !g->defined || g->is_extern)
-            continue;
-        int sz = global_size(g);
-        int al = g->ty ? ty_align(g->ty) : 1;
-        if (!sz)
-            continue;
-        if (!any_data) { ob_str(b, "\n"); any_data = 1; }
-        if (g->is_common) {           /* -fcommon: the linker places it */
-            ob_fmt(b, "\t.comm\t%s,%d,%d\n", asym(g->name), sz,
-                   g->user_align > al ? g->user_align : al);
-            continue;
-        }
-        if (!g->is_static)
-            ob_fmt(b, "\t.%s\t%s\n", g->is_weak ? "weak" : "globl",
-                   asym(g->name));
-        /* a const object is read-only data, as in the object (main.c) */
-        const char *sec = g->in_rodata ? "\t.section\t.rodata\n" : "\t.data\n";
-        if (g->init_bytes && g->init_len > 0) {
-            ob_str(b, sec);
-            /* .balign: a BYTE count everywhere. `.align N` is N bytes on
-             * x86 and 2^N on ARM, aarch64 and RISC-V, so an 8-aligned
-             * object reassembled 256-aligned there. */
-            ob_fmt(b, "\t.balign\t%d\n\t.type\t%s, %sobject\n%s:\n",
-                   al, asym(g->name), type_sigil(), asym(g->name));
-            /* A pointer slot in an initializer is an ADDRESS the linker
-             * fills in, not bytes: `static char *p = "hi";` holds a
-             * relocation, and emitting its zeroed bytes would produce a
-             * null pointer that links and then crashes. The byte runs
-             * between relocations are emitted as bytes; each relocated
-             * slot becomes a pointer-wide `symbol + addend` (ptr_slot). */
-            int k = 0;
-            while (k < sz) {
-                const struct greloc *r = NULL;
-                for (int q = 0; q < g->nrelocs; q++)
-                    if (g->relocs[q].off == k) { r = &g->relocs[q]; break; }
-                if (r) {
-                    char sym[160];
-                    if (r->str)
-                        str_label(sym, sizeof sym, iu, r->str_off);
-                    else if (r->gtarget)
-                        snprintf(sym, sizeof sym, "%s", asym(r->gtarget->name));
-                    else if (r->ftarget)
-                        snprintf(sym, sizeof sym, "%s", asym(r->ftarget->name));
-                    else
-                        snprintf(sym, sizeof sym, "0");
-                    ptr_slot(b, sym, r->addend, r->ftarget != NULL);
-                    k += target_ptr_size();
-                    continue;
-                }
-                /* bytes up to the next relocation */
-                int stop = sz;
-                for (int q = 0; q < g->nrelocs; q++)
-                    if (g->relocs[q].off > k && g->relocs[q].off < stop)
-                        stop = g->relocs[q].off;
-                ob_str(b, "\t.byte\t");
-                for (int j = k; j < stop; j++)
-                    ob_fmt(b, "%s%d", j > k ? "," : "",
-                           j < g->init_len
-                               ? (int)(unsigned char)g->init_bytes[j] : 0);
-                ob_str(b, "\n");
-                k = stop;
-            }
-        } else {
-            ob_fmt(b, "%s\t.balign\t%d\n\t.type\t%s, %sobject\n%s:\n"
-                      "\t.zero\t%d\n",
-                   g->in_rodata ? "\t.section\t.rodata\n" : "\t.bss\n",
-                   al, asym(g->name), type_sigil(), asym(g->name), sz);
-        }
-        ob_fmt(b, "\t.size\t%s, %d\n", asym(g->name), sz);
+    /* Globals defined here, where the object put them. main.c laid out
+     * every data section before this runs -- g->off, in_bss, in_rodata,
+     * named, is_tls -- and the text follows that layout, each object at
+     * its offset with the gap before it written as zeros, rather than
+     * deriving one of its own. The one it derived was the -S of another
+     * object: _Alignas(64) and a section attribute dropped, an empty
+     * struct left undefined, a TLS object put in .data. */
+    long rodata_end = 0;
+    for (int i = 0; i < iu->nstrs; i++)
+        if (iu->strs[i].off + iu->strs[i].len > rodata_end)
+            rodata_end = iu->strs[i].off + iu->strs[i].len;
+    globals_emit(b, u, iu, GS_DATA, 0, NULL, 0);
+    globals_emit(b, u, iu, GS_BSS, 0, NULL, 0);
+    globals_emit(b, u, iu, GS_RODATA, 0, NULL,
+                 rodata && iu->rodata_len > 0 ? rodata_end : -1);
+    globals_emit(b, u, iu, GS_TDATA, 0, NULL, 0);
+    globals_emit(b, u, iu, GS_TBSS, 0, NULL, 0);
+    for (int k = 1; ; k++) {
+        const struct global *first = NULL;
+        for (struct global *g = u->globals; g && !first; g = g->next)
+            if (!g->absorbed && g->defined && !g->is_common && g->named == k)
+                first = g;
+        if (!first)
+            break;
+        globals_emit(b, u, iu, GS_NAMED, k, first->section, 0);
     }
+    for (struct global *g = u->globals; g; g = g->next)
+        if (!g->absorbed && g->defined && g->is_common) {
+            /* -fcommon: the linker places it, at the alignment main.c
+             * left in its offset (SHN_COMMON's st_value) */
+            ob_fmt(b, "\t.comm\t%s,%d,%d\n", csym(g->name), global_size(g),
+                   g->off);
+        }
+
+    /* What the object binds besides its definitions: a WEAK reference to
+     * a symbol defined elsewhere -- undefined, and zero when nothing
+     * defines it, as an RTOS's optional hook is -- and each visibility
+     * asked for. An assembler makes a symbol of a .weak name even when
+     * nothing refers to it, so only the referenced ones are named, as
+     * the object has only those (main.c). */
+    for (struct func *f = u->funcs; f; f = f->next) {
+        if (f->absorbed || f->has_defn || f->alias_of || !f->is_weak ||
+            topasm_defines(u, f->name))
+            continue;
+        int refd = 0;
+        for (int i = 0; i < next && !refd; i++)
+            refd = ext[i].callee && !strcmp(ext[i].callee->name, f->name);
+        for (int i = 0; i < nfs && !refd; i++)
+            refd = fs[i].target && !strcmp(fs[i].target->name, f->name);
+        for (struct global *g = u->globals; g && !refd; g = g->next)
+            for (int q = 0; !g->absorbed && q < g->nrelocs && !refd; q++)
+                refd = g->relocs[q].ftarget &&
+                       !strcmp(g->relocs[q].ftarget->name, f->name);
+        if (refd)
+            ob_fmt(b, "\t.weak\t%s\n", csym(f->name));
+    }
+    for (struct global *g = u->globals; g; g = g->next)
+        if (!g->absorbed && !g->defined && !g->alias_of && g->is_weak &&
+            g->used && !topasm_defines(u, g->name))
+            ob_fmt(b, "\t.weak\t%s\n", csym(g->name));
+    for (struct func *f = u->funcs; f; f = f->next)
+        if (!f->absorbed && f->vis && strcmp(f->vis, "default"))
+            ob_fmt(b, "\t.%s\t%s\n", f->vis, csym(f->name));
+    for (struct global *g = u->globals; g; g = g->next)
+        if (!g->absorbed && g->vis && strcmp(g->vis, "default"))
+            ob_fmt(b, "\t.%s\t%s\n", g->vis, csym(g->name));
 
     /* __attribute__((constructor)) / ((destructor)). The object writer
      * puts these in SHT_INIT_ARRAY / SHT_FINI_ARRAY sections, so `-S`
@@ -906,7 +1298,7 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
                 if (!f->absorbed && f->has_defn &&
                     (pass == 0 ? f->is_ctor : f->is_dtor) &&
                     (pass == 0 ? f->ctor_prio : f->dtor_prio) == prio)
-                    ptr_slot(b, asym(f->name), 0, 1);
+                    ptr_slot(b, csym(f->name), 0, 1);
         }
 }
 
@@ -968,11 +1360,14 @@ struct bstate {
     int nlab, caplab;
 };
 
+/* Every target whose blocks src/as/gas.c assembled -- all but x86-64's
+ * (its own assembler) and MIPS's (written symbolically, above). It was
+ * five of them, and on the rest a block's relocations were left out of
+ * the text without a word: the RX setjmp a block called came out as a
+ * call to address zero. */
 static int blocks_by_reloc(void)
 {
-    enum target_arch a = target_get();
-    return a == TARGET_THUMB || a == TARGET_RISCV32 ||
-           a == TARGET_RISCV64 || a == TARGET_AVR || a == TARGET_LOONGARCH64;
+    return !target_is_mips() && target_get() != TARGET_X86_64;
 }
 
 static struct blabel *blabel_add(struct bstate *s, int blk, long off)
@@ -1050,7 +1445,8 @@ static void bplace(struct bstate *s, int blk, long x, long bit, int exact,
         if (target_get() == TARGET_THUMB && x > ta->rels[j].off &&
             x < ta->rels[j].off + 4 &&
             (t == R_ARM_ABS32 || t == R_ARM_THM_MOVW_ABS_NC ||
-             t == R_ARM_THM_MOVT_ABS))
+             t == R_ARM_THM_MOVT_ABS || t == R_ARM_MOVW_ABS_NC ||
+             t == R_ARM_MOVT_ABS))
             room = 0;
     }
     if (room) {
@@ -1092,7 +1488,7 @@ static void bresolve(const struct unit *u, struct bstate *s, int blk,
         bplace(s, blk, r->addend, 0, exact, out);
         return;
     }
-    out->sym = asym(r->target);
+    out->sym = csym(r->target);
     out->addend = r->addend;
     for (int i = 0; i < s->nlab; i++)
         if (s->lab[i].as && s->lab[i].as->is_global &&
@@ -1110,8 +1506,7 @@ static void bresolve(const struct unit *u, struct bstate *s, int blk,
             continue;
         long x = as->off + r->addend;
         /* the object ORs the bit in, so an odd place keeps its value */
-        long bit = target_get() == TARGET_THUMB &&
-                   as->type == ASMSYM_FUNC &&
+        long bit = arm_thumb() && as->type == ASMSYM_FUNC &&
                    (!r->elf_type || r->elf_type == R_ARM_ABS32) &&
                    !((s->blk[s->lab[i].blk]->text_off + x) & 1);
         if (!r->addend || !exact) {        /* the label, plus the addend */
@@ -1176,7 +1571,7 @@ static void blocks_emit(struct outbuf *b, struct unit *u,
                         const unsigned char *text, long from, long textlen)
 {
     struct bstate s;
-    int thumb = target_get() == TARGET_THUMB;
+    int thumb = arm_thumb();        /* (ARMv7-A's A32 state has no bit) */
     memset(&s, 0, sizeof s);
     for (const struct topasm *t = u->topasm; t; t = t->next)
         s.nblk++;
@@ -1199,11 +1594,11 @@ static void blocks_emit(struct outbuf *b, struct unit *u,
                 l->sym = 1;
                 l->ctype = as->type != ASMSYM_UNTYPED ? as->type
                          : thumb ? ASMSYM_UNTYPED : ASMSYM_FUNC;
-                l->name = asym(as->name);
+                l->name = csym(as->name);
             } else if (ct) {
                 l->sym = 1;
                 l->ctype = ct;
-                l->name = asym(as->name);
+                l->name = csym(as->name);
             } else {
                 l->name = bname(".Lasm%d.%s", i, as->name, 0);
             }
@@ -1224,6 +1619,7 @@ static void blocks_emit(struct outbuf *b, struct unit *u,
         ob_str(b, "\n");
         if (ta->text_off > pc)                 /* the padding before it */
             bytes_line(b, text + pc, ta->text_off - pc);
+        block_section(b, ta, 1);
         ob_fmt(b, "%s:\n", bname(".Lasm%d", i, NULL, 0));
         for (long k = 0; k <= ta->codelen; ) {
             /* the labels here, a block's own first */
@@ -1338,6 +1734,7 @@ static void blocks_emit(struct outbuf *b, struct unit *u,
             if (s.lab[j].blk == i && s.lab[j].sym && s.lab[j].as->size)
                 ob_fmt(b, "\t.size\t%s, %ld\n", s.lab[j].name,
                        s.lab[j].as->size);
+        block_section(b, ta, 0);
         pc = ta->text_off + ta->codelen;
     }
     if (textlen > pc)

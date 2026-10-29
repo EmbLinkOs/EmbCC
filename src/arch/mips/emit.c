@@ -63,10 +63,11 @@ enum { F2_MUL = 0x02, F2_CLZ = 0x20, F2_CLO = 0x21,     /* SPECIAL2 */
        F2_DCLZ = 0x24, F2_DCLO = 0x25 };
 enum { F3_EXT = 0x00, F3_DEXTM = 0x01, F3_DEXTU = 0x02,  /* SPECIAL3 */
        F3_DEXT = 0x03, F3_INS = 0x04, F3_DINSM = 0x05, F3_DINSU = 0x06,
-       F3_DINS = 0x07, F3_BSHFL = 0x20, F3_DBSHFL = 0x24 };
+       F3_DINS = 0x07, F3_BSHFL = 0x20, F3_DBSHFL = 0x24, F3_RDHWR = 0x3b };
 enum { BSHFL_WSBH = 0x02, BSHFL_SEB = 0x10, BSHFL_SEH = 0x18 };
 enum { DBSHFL_DSBH = 0x02, DBSHFL_DSHD = 0x05 };
-enum { RI_BLTZ = 0x00, RI_BGEZ = 0x01, RI_BGEZAL = 0x11 }; /* REGIMM's rt */
+enum { RI_BLTZ = 0x00, RI_BGEZ = 0x01, RI_BGEZAL = 0x11,  /* REGIMM's rt */
+       RI_SYNCI = 0x1f };
 
 static void need_reg(int r)
 {
@@ -675,6 +676,12 @@ void mips_jr(struct code *c, int rs)
 {
     mips_w(c, mips_enc_r(OP_SPECIAL, rs, 0, 0, 0, F_JR));
 }
+/* jr.hb: jr with the hint 0b10000 (bits 10..6), which also clears the
+ * instruction hazards -- what makes code synci flushed safe to run */
+void mips_jr_hb(struct code *c, int rs)
+{
+    mips_w(c, mips_enc_r(OP_SPECIAL, rs, 0, 0, 0x10, F_JR));
+}
 void mips_jalr(struct code *c, int rd, int rs)
 {
     mips_w(c, mips_enc_r(OP_SPECIAL, rs, 0, rd, 0, F_JALR));
@@ -738,6 +745,24 @@ void mips_cache(struct code *c, int op, int base, long long off)
     need_reg(base);
     need_field(op, 0, 31, "cache operation");
     mips_w(c, mips_enc_i(0x2f, base, op, imm16(off, 1, "cache offset")));
+}
+
+/* synci off(base): the caches made coherent for instruction fetch, one
+ * line (Release 2); its step is rdhwr $1's */
+void mips_synci(struct code *c, int base, long long off)
+{
+    need_reg(base);
+    mips_w(c, mips_enc_i(OP_REGIMM, base, RI_SYNCI,
+                         imm16(off, 1, "synci offset")));
+}
+
+/* rdhwr rt, $rd: a hardware register -- $1 the synci step, $2 the cycle
+ * counter, $29 the thread pointer (Release 2) */
+void mips_rdhwr(struct code *c, int rt, int rd)
+{
+    need_reg(rt);
+    need_field(rd, 0, 31, "hardware register");
+    mips_w(c, mips_enc_r(OP_SPECIAL3, 0, rt, rd, 0, F3_RDHWR));
 }
 
 /* COP0 with the CO bit: eret, deret and wait. */

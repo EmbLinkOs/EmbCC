@@ -35,7 +35,11 @@ for arch in x86_64 aarch64 thumb thumbv6m thumbv8m thumbv8mbase armv7a riscv32 r
         sparc32)        triple=sparc-none-elf ;;
         *)              triple=$arch-elf ;;
     esac
-    out=$("$EMBCC" --target=$triple --dump-predef) || {
+    # (less __FLT16_* and __BFLT16_*: _Float16 and __bf16 are EmbCC's on
+    # every target, where most of the reference compilers have neither,
+    # and src/arch/predef.c adds their description to those tables -- as
+    # it adds the __BUILTIN_AVR_* of avr-gcc's builtins clang's AVR lacks)
+    out=$("$EMBCC" --target=$triple --dump-predef | grep -vE '^#define (__B*FLT16_|__BUILTIN_AVR_(DELAY_CYCLES|FMULS?U?|INSERT_BITS|NOPS) )') || {
         echo "--target=$triple --dump-predef exited nonzero"; exit 1; }
     # (a reference of another release than the table's is no reference:
     # tools/gen-predef.sh --reference-check says why)
@@ -43,7 +47,7 @@ for arch in x86_64 aarch64 thumb thumbv6m thumbv8m thumbv8mbase armv7a riscv32 r
     why=$(sh tools/gen-predef.sh --reference-check "$arch") &&
         sh tools/gen-predef.sh --reference "$arch" >/dev/null 2>&1 && gcc=yes
     if [ "$gcc" = yes ]; then
-        ref=$(sh tools/gen-predef.sh --reference "$arch")
+        ref=$(sh tools/gen-predef.sh --reference "$arch" | grep -vE '^#define (__B*FLT16_|__BUILTIN_AVR_(DELAY_CYCLES|FMULS?U?|INSERT_BITS|NOPS) )')
         if [ "$out" != "$ref" ]; then
             echo "$arch table disagrees with its reference gcc:"
             printf '%s\n' "$out" > "${TMPDIR:-/tmp}/predef.embcc.$$"
@@ -115,7 +119,8 @@ else
                  "32 rv32ima ilp32" "32 rv32imafdc_zicsr_zifencei ilp32d" \
                  "32 rv32imafc -" "32 rv32gc -" \
                  "64 rv64gc lp64d" "64 rv64imafc lp64f" "64 rv64imafdc lp64" \
-                 "64 rv64imafdc lp64f" "64 rv64ima lp64" "64 rv64gc -"; do
+                 "64 rv64imafdc lp64f" "64 rv64ima lp64" "64 rv64gc -" \
+                 "32 rv32imc ilp32" "32 rv32imfc ilp32f" "64 rv64imc lp64"; do
         set -- $combo
         abiflag="-mabi=$3"; refabi=$3
         if [ "$3" = - ]; then
@@ -125,11 +130,14 @@ else
             esac
         fi
         # shellcheck disable=SC2086
+        # (the _Float16 and __bf16 description set aside, as above)
         "$EMBCC" --target=riscv$1-unknown-elf -march=$2 $abiflag \
-            --dump-predef | LC_ALL=C sort > "$tmpa" || {
+            --dump-predef | grep -vE '^#define (__B*FLT16_|__BUILTIN_AVR_(DELAY_CYCLES|FMULS?U?|INSERT_BITS|NOPS) )' |
+            LC_ALL=C sort > "$tmpa" || {
             echo "riscv$1 -march=$2 $abiflag: --dump-predef failed"; exit 1; }
         EMBCC_PREDEF_RV_MARCH=$2 EMBCC_PREDEF_RV_MABI=$refabi \
-            sh tools/gen-predef.sh --reference riscv$1 | LC_ALL=C sort > "$tmpb"
+            sh tools/gen-predef.sh --reference riscv$1 |
+            grep -vE '^#define (__B*FLT16_|__BUILTIN_AVR_(DELAY_CYCLES|FMULS?U?|INSERT_BITS|NOPS) )' | LC_ALL=C sort > "$tmpb"
         if ! cmp -s "$tmpa" "$tmpb"; then
             echo "riscv$1 -march=$2 $abiflag disagrees with clang:"
             diff "$tmpb" "$tmpa" | head -20

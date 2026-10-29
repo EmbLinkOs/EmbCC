@@ -16,10 +16,11 @@ extern "C" {
 
 /* C11 §7.3.9.3. A complex from two reals, without the multiply-by-I form,
  * which cannot make a value whose imaginary part is a NaN or an infinity
- * with the right sign. EmbCC makes __real__/__imag__ assignable, so this
- * builds the value directly -- here, in the header, so that a program
- * using CMPLX needs nothing of the library it links. (__cmplx and its
- * kin are in the library too, for objects built when CMPLX called them.) */
+ * with the right sign: GCC's __builtin_complex, which of constants is a
+ * constant, so CMPLX initializes a static object, as C11 asks. C++ has
+ * these inline functions, which build the value through the assignable
+ * __real__/__imag__. (__cmplx and its kin are in the library too, for
+ * objects built when CMPLX called them.) */
 static __inline__ double _Complex __embcc_cmplx(double __r, double __i)
 {
     double _Complex __z;
@@ -42,9 +43,15 @@ __embcc_cmplxl(long double __r, long double __i)
     __imag__ __z = __i;
     return __z;
 }
+#ifdef __cplusplus
 #define CMPLX(r, i)  __embcc_cmplx((double)(r), (double)(i))
 #define CMPLXF(r, i) __embcc_cmplxf((float)(r), (float)(i))
 #define CMPLXL(r, i) __embcc_cmplxl((long double)(r), (long double)(i))
+#else
+#define CMPLX(r, i)  __builtin_complex((double)(r), (double)(i))
+#define CMPLXF(r, i) __builtin_complex((float)(r), (float)(i))
+#define CMPLXL(r, i) __builtin_complex((long double)(r), (long double)(i))
+#endif
 
 /* §7.3.5-7.3.9, at each width */
 double creal(double _Complex), cimag(double _Complex);
@@ -83,6 +90,18 @@ long double _Complex casinl(long double _Complex), cacosl(long double _Complex);
 long double _Complex catanl(long double _Complex);
 long double _Complex casinhl(long double _Complex), cacoshl(long double _Complex);
 long double _Complex catanhl(long double _Complex);
+
+/* The parts as GCC and clang compile them: the part itself, not a call.
+ * C11 7.1.4 lets any library function be a macro as well; (creal)(z)
+ * and &creal are the functions. msun's float functions take creal of a
+ * float complex, which as a call widened it to double complex, called,
+ * and narrowed the answer -- csqrtf came out twice clang's size. */
+#define creal(z)  ((double)__real__ (z))
+#define cimag(z)  ((double)__imag__ (z))
+#define crealf(z) ((float)__real__ (z))
+#define cimagf(z) ((float)__imag__ (z))
+#define creall(z) ((long double)__real__ (z))
+#define cimagl(z) ((long double)__imag__ (z))
 
 #ifdef __cplusplus
 }

@@ -21,6 +21,7 @@ static int c23_words(void)
     return lex_c23_ext();
 }
 #include "../sema/type.h"
+#include "../sema/sema.h"   /* bitbuiltin_fold */
 
 /* Tags (struct/union/enum) live in their own namespace; typedef names
  * live in the ordinary one and must be known DURING parsing (the
@@ -465,6 +466,7 @@ static int tok_is_type_start(enum tok_kind k)
            k == TOK_KW_CONST || k == TOK_KW_VOLATILE ||
            k == TOK_KW_FLOAT || k == TOK_KW_DOUBLE || k == TOK_KW_BOOL ||
            k == TOK_KW_FLOAT128 || k == TOK_KW_FLOAT16 ||
+           k == TOK_KW_FP16 || k == TOK_KW_BF16 ||
            k == TOK_KW_COMPLEX || k == TOK_KW_BITINT ||
            k == TOK_KW_ALIGNAS || k == TOK_KW_TYPEOF || k == TOK_KW_ATOMIC ||
            /* __auto_type begins a declaration even though it names no
@@ -833,16 +835,32 @@ static const struct attr_entry attr_table[] = {
     { "interrupt", ATTR_REFUSED,
       "the handler would return with an ordinary return instead of the "
       "interrupt return the CPU needs, and without saving the registers "
-      "(on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V and "
-      "MIPS32 it is implemented)" },
+      "(on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, "
+      "MIPS, RX, ColdFire, TriCore and ARMv7-A it is implemented)" },
+    /* GCC's m68k spelling of the same thing, honoured on ColdFire (the
+     * dispatch below); interrupt_thread is the Fido's, whose threads
+     * switch register banks this target does not have. */
+    { "interrupt_handler", ATTR_REFUSED,
+      "it is the m68k port's interrupt handler, implemented on the "
+      "ColdFire target only" },
+    { "interrupt_thread", ATTR_REFUSED,
+      "it makes a Fido interrupt thread, which switches register banks "
+      "a ColdFire does not have; use __attribute__((interrupt))" },
+    /* RX's other kind, GCC's: registers banked in BPC and BPSW, returned
+     * from with rtfi. Unknown, it would only be warned about, and the
+     * handler built as an ordinary function would return with rts. */
+    { "fast_interrupt", ATTR_REFUSED,
+      "a fast interrupt returns with rtfi from BPC and BPSW, which EmbCC "
+      "does not emit; use __attribute__((interrupt)), which returns with "
+      "rte" },
     /* GCC's MIPS interrupt modifiers. keep_interrupts_masked is the one
      * whose meaning is a matter of two bits of the Status word the
      * prologue writes anyway (IE cleared with EXL, and no IPL), so MIPS32
-     * honours it; the other two change where the handler's registers or
-     * its return come from, and are refused there too. */
+     * and MIPS64 honour it; the other two change where the handler's
+     * registers or its return come from, and are refused there too. */
     { "keep_interrupts_masked", ATTR_REFUSED,
-      "it modifies a MIPS interrupt handler, and only the MIPS32 target "
-      "implements those" },
+      "it modifies a MIPS interrupt handler, and only the MIPS targets "
+      "implement those" },
     { "use_shadow_register_set", ATTR_REFUSED,
       "EmbCC does not switch register sets: the handler would save into "
       "and run on a shadow set's stack pointer it never read with rdpgpr" },
@@ -1068,9 +1086,19 @@ static void cmse_call_leftover(struct parser *ps)
  * else is refused rather than read as the default: a handler for the
  * wrong mode returns with the wrong instruction. Elsewhere the argument
  * is not read, as before. */
-static int isr_kind(struct parser *ps, int line, const char *arg)
+static int isr_kind(struct parser *ps, int line, const char *arg,
+                    int has_args)
 {
     enum target_arch a = target_get();
+    /* a number, or anything not a string: read as no argument, it made
+     * `interrupt(5)` the default handler without a word */
+    if (has_args && !arg && (a == TARGET_RISCV32 || a == TARGET_RISCV64 ||
+                             target_is_mips()))
+        parse_error_line(ps, line,
+            "interrupt's argument is a string on %s: %s",
+            target_is_mips() ? "MIPS" : "RISC-V",
+            target_is_mips() ? "\"eic\" or \"vector=sw0\" .. \"vector=hw5\""
+                             : "\"machine\" or \"supervisor\"");
     if (a == TARGET_RISCV32 || a == TARGET_RISCV64) {
         if (!arg || !strcmp(arg, "machine"))
             return ISR_INTERRUPT;
@@ -1086,7 +1114,7 @@ static int isr_kind(struct parser *ps, int line, const char *arg)
             "interrupt wants \"machine\" or \"supervisor\" on RISC-V, "
             "not \"%s\"", arg);
     }
-    if (a == TARGET_MIPS32) {
+    if (target_is_mips()) {
         static const char *const vec[8] = { "sw0", "sw1", "hw0", "hw1",
                                             "hw2", "hw3", "hw4", "hw5" };
         if (!arg || !strcmp(arg, "eic"))
@@ -1099,6 +1127,43 @@ static int isr_kind(struct parser *ps, int line, const char *arg)
             "interrupt wants \"eic\" or \"vector=sw0\" .. "
             "\"vector=hw5\" on MIPS, not \"%s\"", arg);
     }
+    if (a == TARGET_RX && has_args)
+        parse_error_line(ps, line,
+            "interrupt takes no argument on RX: GCC's interrupt(N) names a "
+            "slot of the relocatable vector table by a $tableentry$ symbol "
+            "that GNU ld's RX port gathers into one, and EmbLD builds no "
+            "table from them; name the handler in your vector table");
+    /* ARM state: GCC's five kinds, which differ in where the return
+     * goes -- IRQ, FIQ and ABORT come back to lr - 4, SWI and UNDEF to
+     * lr. (Cortex-M reads no argument: its exception return is one.) */
+    if (a == TARGET_THUMB && target_arm_a32()) {
+        if (has_args && !arg)
+            parse_error_line(ps, line,
+                "interrupt's argument is a string on ARM: \"IRQ\", "
+                "\"FIQ\", \"ABORT\", \"SWI\" or \"UNDEF\"");
+        if (!arg || !strcmp(arg, "IRQ"))
+            return ISR_INTERRUPT;
+        if (!strcmp(arg, "FIQ"))
+            return ISR_ARM_FIQ;
+        if (!strcmp(arg, "ABORT"))
+            return ISR_ARM_ABORT;
+        if (!strcmp(arg, "SWI"))
+            return ISR_ARM_SWI;
+        if (!strcmp(arg, "UNDEF"))
+            return ISR_ARM_UNDEF;
+        parse_error_line(ps, line,
+            "interrupt wants \"IRQ\", \"FIQ\", \"ABORT\", \"SWI\" or "
+            "\"UNDEF\" on ARM, not \"%s\"", arg);
+    }
+    if (a == TARGET_TRICORE && has_args)
+        parse_error_line(ps, line,
+            "interrupt takes no argument on TriCore: the handler's priority "
+            "and vector are its interrupt router's SRN and BIV, set at run "
+            "time");
+    if (a == TARGET_COLDFIRE && has_args)
+        parse_error_line(ps, line,
+            "interrupt takes no argument on ColdFire, as in GCC's m68k "
+            "port: the handler is installed by its vector table entry");
     return ISR_INTERRUPT;
 }
 
@@ -1199,8 +1264,10 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
             int aline = cur(ps)->line;
             int fkind = 0;
             long fidx = 0, ffirst = 0;
+            int has_args = 0;       /* something between the parentheses */
             if (cur(ps)->kind == TOK_LPAREN) {
                 advance(ps);
+                has_args = cur(ps)->kind != TOK_RPAREN;
                 if (name && attr_is(name, "mode")) {
                     /* GCC's machine modes, by the bytes of each; the
                      * floating ones (SF, DF...) are not taken */
@@ -1308,14 +1375,19 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
                         "ignored", name);
                 else if (ae->disp == ATTR_REFUSED &&
                          !(attr_is(name, "interrupt") &&
-                           target_get() == TARGET_THUMB &&
-                           !target_arm_a32()) &&
+                           target_get() == TARGET_THUMB) &&
                          !(attr_is(name, "interrupt") &&
                            (target_get() == TARGET_RISCV32 ||
                             target_get() == TARGET_RISCV64 ||
-                            target_get() == TARGET_MIPS32)) &&
+                            target_get() == TARGET_MIPS32 ||
+                            target_get() == TARGET_MIPS64 ||
+                            target_get() == TARGET_RX ||
+                            target_get() == TARGET_COLDFIRE ||
+                            target_get() == TARGET_TRICORE)) &&
+                         !(attr_is(name, "interrupt_handler") &&
+                           target_get() == TARGET_COLDFIRE) &&
                          !(attr_is(name, "keep_interrupts_masked") &&
-                           target_get() == TARGET_MIPS32) &&
+                           target_is_mips()) &&
                          !(attr_is(name, "naked") && target_asm_blocks()) &&
                          !((attr_is(name, "interrupt") ||
                             attr_is(name, "signal")) &&
@@ -1393,7 +1465,7 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
                 else if (attr_is(name, "progmem") && target_get() == TARGET_AVR)
                     out->progmem = 1;
                 else if (attr_is(name, "interrupt")) {
-                    int k = isr_kind(ps, aline, sarg);
+                    int k = isr_kind(ps, aline, sarg, has_args);
                     if (ISR_KIND(out->isr) && ISR_KIND(out->isr) != k &&
                         !(target_get() == TARGET_AVR &&
                           ISR_KIND(out->isr) == ISR_SIGNAL))
@@ -1402,6 +1474,8 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
                             "declaration");
                     out->isr = (out->isr & ISR_MASKED) | k;
                 }
+                else if (attr_is(name, "interrupt_handler"))
+                    out->isr = ISR_INTERRUPT;       /* ColdFire's, above */
                 else if (attr_is(name, "keep_interrupts_masked"))
                     out->isr |= ISR_MASKED;
                 else if (attr_is(name, "noreturn")) out->noreturn = 1;
@@ -1499,11 +1573,14 @@ static struct type *parse_stars(struct parser *ps, struct type *t);
 static struct expr *parse_cond(struct parser *ps);
 static struct expr *parse_expr(struct parser *ps);
 
-/* A _FloatN keyword's token (lex.c keeps its spelling for these) */
+/* A _FloatN keyword's token (lex.c keeps its spelling for these) that
+ * glibc may typedef for an older compiler (`typedef float _Float32;`).
+ * Not _Float16, a type of its own here, which `_Complex _Float16` must
+ * reach as one. */
 static int float_n_name(const struct token *t)
 {
     return (t->kind == TOK_KW_FLOAT || t->kind == TOK_KW_DOUBLE ||
-            t->kind == TOK_KW_FLOAT128 || t->kind == TOK_KW_FLOAT16) &&
+            t->kind == TOK_KW_FLOAT128) &&
            t->text && !strncmp(t->text, "_Float", 6);
 }
 static void mark_transparent(struct parser *ps, struct type *t);
@@ -2507,7 +2584,7 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
     /* base specifiers in any order: unsigned long int, long unsigned... */
     int uns = -1, nlong = 0, nshort = 0, nchar = 0, nint = 0, nvoid = 0;
     int nfloat = 0, ndouble = 0, nbool = 0, ncomplex = 0, n128 = 0;
-    int nf128 = 0, nf16 = 0;
+    int nf128 = 0, nf16 = 0, nfp16 = 0, nbf16 = 0;
     int any = 0, nbitint = 0, bline = 0, bcol = 0;
     long bits = 0;
     for (;;) {
@@ -2541,6 +2618,8 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
         else if (k == TOK_KW_INT128) n128++;
         else if (k == TOK_KW_FLOAT128) nf128++;
         else if (k == TOK_KW_FLOAT16) nf16++;
+        else if (k == TOK_KW_FP16) nfp16++;
+        else if (k == TOK_KW_BF16) nbf16++;
         else if (k == TOK_KW_SHORT) nshort++;
         else if (k == TOK_KW_CHAR) nchar++;
         else if (k == TOK_KW_INT) nint++;
@@ -2618,6 +2697,11 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
                         : ty_base(nlong ? TY_LONG : TY_INT, uns == 1);
         return ty_complex(it);
     }
+    if (ncomplex && (nf16 || nfp16 || nbf16))
+        parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                       "_Complex %s is not supported yet: EmbCC has no "
+                       "complex 16-bit floating-point arithmetic",
+                       nf16 ? "_Float16" : nfp16 ? "__fp16" : "__bf16");
     if (ncomplex) {
         /* `T _Complex` for a floating T; a bare _Complex means double, as
          * in gcc */
@@ -2629,25 +2713,16 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
                                   : nlong ? TY_LDOUBLE : TY_DOUBLE, 0);
         return ty_complex(el);
     }
-    if (nf16) {
-        /* binary16 is a WIDTH this compiler does not have. Adding it is
-         * a new TY_ kind through ty_size, ty_align, the usual arithmetic
-         * conversions, the IR's three float conversions and all four
-         * backends, plus __extendhfsf2/__truncsfhf2 on the soft-float
-         * ones -- not a spelling. Storing it as a float would silently
-         * give 24 bits of mantissa where the program asked for 11 (THE
-         * RULE). So it is an INCOMPLETE type: a declaration may name it
-         * -- macOS's <math.h> declares __fabsf16 and its kin
-         * unconditionally -- and a value of it cannot exist. A call, an
-         * object, a sizeof or a cast is refused as for any incomplete
-         * type, naming _Float16. */
+    if (nf16 || nfp16 || nbf16) {
+        /* IEEE binary16: _Float16 computes as itself, every operation
+         * rounded to half; __fp16, ARM's storage format, is promoted to
+         * float wherever it is read (type.h, is_fp16); __bf16 is
+         * bfloat16, computed as itself like _Float16 */
         if (any > 1)
             parse_error_at(ps, cur(ps)->line, cur(ps)->col,
-                       "_Float16 cannot combine with other specifiers");
-        static struct type *f16;
-        if (!f16)
-            f16 = ty_struct("_Float16", 0);
-        return f16;
+                       "%s cannot combine with other specifiers",
+                       nf16 ? "_Float16" : nfp16 ? "__fp16" : "__bf16");
+        return nf16 ? ty_base(TY_FLOAT16, 0) : nfp16 ? ty_fp16() : ty_bf16();
     }
     if (nf128) {
         if (any > 1)
@@ -3073,6 +3148,18 @@ static struct type *ce_type(const struct expr *e)
         }
         if (lt && rt && ty_is_arith(lt) && ty_is_arith(rt))
             return ty_arith_common(lt, rt);
+        /* A complex operand: the complex of the parts' common real type,
+         * as sema types it (cx_common). <tgmath.h>'s pow(z, 2.0f) picks
+         * cpowf by the type of such a sum, in a _Generic a static
+         * assertion folds here. */
+        if (lt && rt && (ty_is_complex(lt) || ty_is_complex(rt)) &&
+            (ty_is_complex(lt) || ty_is_arith(lt)) &&
+            (ty_is_complex(rt) || ty_is_arith(rt)) &&
+            (e->op == B_ADD || e->op == B_SUB || e->op == B_MUL ||
+             e->op == B_DIV))
+            return ty_complex(ty_arith_common(
+                ty_is_complex(lt) ? lt->celem : lt,
+                ty_is_complex(rt) ? rt->celem : rt));
         return NULL;
     }
     case EXPR_CALL: {
@@ -3275,6 +3362,20 @@ static int size_fold(const struct expr *e, long *out)
             size_fold(e->args[0], &a)) {
             *out = a == 1 || a == 2 || a == 4 || a == 8;
             return 1;
+        }
+        /* the bit builtins of constants, as sema's const_fold folds them:
+         * `_Static_assert(__builtin_popcount(M) == 4, "")` is here */
+        if (e->lhs && e->lhs->kind == EXPR_VAR && e->nargs >= 1 &&
+            strncmp(e->lhs->name, "__builtin_", 10) == 0) {
+            struct type *rt;
+            b = 0;
+            if (size_fold(e->args[0], &a) &&
+                (e->nargs < 2 || size_fold(e->args[1], &b)) &&
+                bitbuiltin_fold(e->lhs->name + 10, a, ce_type(e->args[0]),
+                                e->nargs, b, out, &rt)) {
+                *out = cast_fold_value(rt, *out);
+                return 1;
+            }
         }
         return 0;
     case EXPR_NEG:
@@ -3908,19 +4009,16 @@ void parse_set_single_precision_constant(int on) { g_single_prec = on; }
 static double single_value(struct parser *ps, const struct token *t)
 {
     double d = t->fnum;
-    /* the midpoint between FLT_MAX and 2^128, which rounds to infinity */
-    const double lim = 3.4028235677973366e38;
-    if (d >= lim || d <= -lim) {
-        unsigned long long bits = d > 0 ? 0x7ff0000000000000ULL
-                                        : 0xfff0000000000000ULL;
+    /* rounded once, from the digits -- not the double rounded again */
+    struct ldf *v = t->text ? ldf_from_text(t->text, LDF_FLOAT) : NULL;
+    float f = v ? (float)ldf_to_double(v) : (float)d;
+    if (f - f != 0) {
         if (d - d == 0)        /* finite as a double: the flag made it inf */
             diag_warn_at(ps->lx.file, t->line, t->col,
                          "floating constant exceeds the range of 'float' "
                          "(%s)", opt_typed("-fsingle-precision-constant"));
-        memcpy(&d, &bits, sizeof d);
-        return d;
+        return (double)f;
     }
-    float f = (float)d;
     if (f == 0 && d != 0)
         diag_warn_at(ps->lx.file, t->line, t->col,
                      "floating constant truncated to zero "
@@ -4002,6 +4100,17 @@ static struct expr *parse_primary(struct parser *ps)
         if (as_float && !t->fnum_is_float)
             e->fnum = single_value(ps, t);
         e->ty = ty_base(as_float ? TY_FLOAT : TY_DOUBLE, 0);
+        if (t->fnum_is_f16) {
+            /* rounded once, from the digits: a double rounded to half
+             * would be rounded twice */
+            int bf = t->fnum_is_f16 == 2;
+            struct ldf *h = ldf_from_text(t->text, bf ? LDF_BF16 : LDF_HALF);
+            if (!h || t->fnum_is_imag)
+                parse_error_line(ps, t->line, "malformed floating constant "
+                                 "'%s%s'", t->text, bf ? "bf16" : "f16");
+            e->ty = bf ? ty_bf16() : ty_base(TY_FLOAT16, 0);
+            e->fnum = ldf_to_double(h);
+        }
         if (t->fnum_is_imag) {
             e->imag = 1;
             e->ty = ty_complex(ty_base(as_float ? TY_FLOAT

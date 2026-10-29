@@ -104,10 +104,21 @@ refc "__builtin_return_address(1)" 'only level 0' \
     'void *f(void){ return __builtin_return_address(1); }'
 refc "__builtin_frame_address(1)" 'only level 0' \
     'void *f(void){ return __builtin_frame_address(1); }'
-refc "an interrupt handler" '__attribute__((interrupt)) is not supported' \
-    'void __attribute__((interrupt)) f(void){}'
-refc "a doubleword instruction in inline asm" 'is not in the MIPS vocabulary' \
-    'long f(long a){ long r; __asm__("daddu %0, %1, %1" : "=r"(r) : "r"(a)); return r; }'
+# an interrupt handler compiles (tests/golden/mips-isr.sh runs it), and so
+# do the doubleword instructions in inline asm (mips64-encoding.sh
+# referees them); on MIPS32 those are refused by name
+printf '%s\n' 'void __attribute__((interrupt("vector=hw0"))) h(void){}' \
+    'long f(long a){ long r; __asm__("daddu %0, %1, %1" : "=r"(r) : "r"(a)); return r; }' \
+    > "$out/ok64.c"
+"$EMBCC" --target=$T -c "$out/ok64.c" -o /dev/null || {
+    echo "an interrupt handler or a doubleword asm instruction was refused"; exit 1; }
+printf '%s\n' 'int f(int a){ int r; __asm__("daddu %0, %1, %1" : "=r"(r) : "r"(a)); return r; }' \
+    > "$out/d32.c"
+if "$EMBCC" --target=mipsel-none-elf -c "$out/d32.c" -o /dev/null 2> "$out/d32.err"; then
+    echo "a doubleword instruction was accepted on MIPS32"; exit 1
+fi
+grep -q 'daddu is a MIPS64 instruction' "$out/d32.err" || {
+    echo "daddu on MIPS32 was refused, but not by name:"; cat "$out/d32.err"; exit 1; }
 refc "a packed bit-field over 8 bytes, big-endian" \
     'across 9 bytes is not supported on a big-endian target (mips64-none-elf)' \
     'struct __attribute__((packed)) p { char c : 3; long v : 64; } g; long f(void){ return g.v; }' \
@@ -140,6 +151,6 @@ printf '%s\n' 'void v(int, ...); void f(__int128 x){ v(1, x); }' > "$out/v.c"
 "$EMBCC" --target=$T -c "$out/v.c" -o /dev/null || {
     echo "a variadic __int128 was refused"; exit 1; }
 echo "narrow and 16-byte atomics, the frame and return address,"
-echo "interrupt functions, an over-aligned scalar, MIPS64 instructions in"
-echo "inline asm, a 32-bit la, a wide packed bit-field big-endian and C++ exceptions"
-echo "big-endian are each refused by name"
+echo "an over-aligned scalar, MIPS64 instructions on MIPS32, a 32-bit la,"
+echo "a wide packed bit-field big-endian and C++ exceptions are each refused"
+echo "by name; interrupt handlers and doubleword inline asm compile"

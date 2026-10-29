@@ -140,7 +140,7 @@ the sections nothing reaches, on every machine, for objects built with
 |---|---|---|
 | `.s` and `.S` files (GNU syntax) | Refused: `no assembly-file support for x86_64-elf yet; its instruction encoder exists (inline __asm__ works) but this driver has not been wired to it` | Assembled, with GNU as's directives, macros, conditionals, sections, expressions, literal pools and branch relaxation; ARM's CMSIS and ST's startup files assemble to clang's object. On AArch64 the instructions are those of its inline-asm vocabulary, the kernel's (no `ldp`/`stp` or arithmetic yet) ([embas](../manual/tools/embas.md#gnu-syntax-assembly)) |
 | `.asm` files (NASM syntax) | Assembled | Assembled as x86-64; see [Known defects](#known-defects) |
-| `-S` | `.byte` directives with the disassembly in comments | Refused on Xtensa and RX (see [What each target compiles](../manual/limits.md#-s-assembly-output)); elsewhere `.byte` directives without mnemonics; on MIPS a relocated instruction is written symbolically (`jal f`, `lui $2, %hi(g)`), because llvm-mc's MIPS `.reloc` knows none of those relocations |
+| `-S` | `.byte` directives with the disassembly in comments | Elsewhere `.byte` directives without mnemonics; on MIPS a relocated instruction is written symbolically (`jal f`, `lui $2, %hi(g)`), because llvm-mc's MIPS `.reloc` knows none of those relocations. Every target's text reassembles into the object: checked with EmbCC's own assembler on all but x86-64, and with llvm-mc where it has the target |
 | File-scope `__asm__` | Labels, `.globl`, `.byte`/`.long`/`.quad` and the instructions `and`, `call`, `jmp`, `ret` | Every other target: the GNU-syntax assembler, as in a `.S` file, into `.text`. On AArch64 its vocabulary is the kernel's: the system instructions, `mov`, `cmp`, `ldr`, `b`, `br`, `cbz`, `ret`, `nop`, `.inst`; no `ldp`/`stp` or arithmetic yet. Into Mach-O (Apple arm64) a block holds labels and data only |
 
 Any other instruction in a file-scope `asm` block is refused. On x86-64:
@@ -225,7 +225,8 @@ supported. This section lists what is not.
 
 | Construct | Diagnostic |
 |---|---|
-| An object, `sizeof`, cast or call of `_Float16`, `__fp16` (a declaration may name it) | `'h' has incomplete type _Float16`, `sizeof of incomplete _Float16`, `cannot cast to _Float16`, `calling 'g' with incomplete return type _Float16` |
+| A `_Float16` through `...` | `'g': passing a _Float16 through '...' is not supported yet: it is not promoted there, ...` |
+| A struct holding a `_Float16`, by value, with the ARM or RISC-V hard-float convention | `'f': a struct holding a _Float16, passed or returned by value, is not supported yet with the hard-float calling convention, ...` |
 | `_Float128`, `__float128` on x86-64 | ``_Float128 is not supported on x86-64: `long double` here is x87's 80-bit extended format, not IEEE binary128, so it is not the same type`` |
 | `_Float128` on Cortex-M, AVR and Apple arm64 | `_Float128 is not supported on this target: it has no 128-bit floating-point type` |
 | `_BitInt(N)` wider than 64 bits | `_BitInt(65) is wider than BITINT_MAXWIDTH, which is 64 here` |
@@ -277,9 +278,9 @@ implement, so they are errors:
 | Attribute | Diagnostic |
 |---|---|
 | `naked` (x86-64 and Apple arm64; supported on every other target) | `__attribute__((naked)) is not supported: on this target the body could only be assembled by the file-scope assembler's few instructions; it is supported on every target but x86-64 and AArch64 for Darwin or Windows` |
-| `interrupt` (except on Cortex-M, AVR, RISC-V and MIPS32) | `__attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V and MIPS32 it is implemented)` |
+| `interrupt` (except on Cortex-M, ARMv7-A, AVR, RISC-V, MIPS, RX, ColdFire and TriCore) | `__attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS, RX, ColdFire, TriCore and ARMv7-A it is implemented)` |
 | `interrupt("user")` (RISC-V) | `__attribute__((interrupt("user"))) is not supported: user-mode interrupts (the N extension and its uret) were never ratified and are gone from the privileged spec, and GCC and clang no longer accept them` |
-| `keep_interrupts_masked` (except on MIPS32) | `__attribute__((keep_interrupts_masked)) is not supported: it modifies a MIPS interrupt handler, and only the MIPS32 target implements those` |
+| `keep_interrupts_masked` (except on MIPS32 and MIPS64) | `__attribute__((keep_interrupts_masked)) is not supported: it modifies a MIPS interrupt handler, and only the MIPS targets implement those` |
 | `use_shadow_register_set` | `__attribute__((use_shadow_register_set)) is not supported: EmbCC does not switch register sets: the handler would save into and run on a shadow set's stack pointer it never read with rdpgpr` |
 | `use_debug_exception_return` | `__attribute__((use_debug_exception_return)) is not supported: the handler would return with eret where the debug exception needs deret, and save DEPC as EPC` |
 | `interrupt`, `signal` in C++ (except `interrupt` on Cortex-M) | `__attribute__((interrupt)) is not supported in C++ yet: the handler would return with an ordinary return instead of the interrupt return, without saving the registers; write it in C` |
@@ -322,43 +323,18 @@ register across the call may not survive the second return.
 A builtin EmbCC does not provide is an undeclared function:
 
 ```text
-error: '__builtin_abs' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
+error: '__builtin_cpu_supports' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
 ```
 
 `__has_builtin` answers 0 for these. Among the GCC and Clang builtins
 that are missing:
 
-- The `__builtin_` spellings of most C library functions:
-  `__builtin_abs`, `__builtin_labs`, `__builtin_llabs`,
-  `__builtin_printf`, `__builtin_puts`, `__builtin_malloc`,
-  `__builtin_free`, and the math functions `__builtin_exp`,
-  `__builtin_log`, `__builtin_pow`, `__builtin_powi`, `__builtin_floor`,
-  `__builtin_ceil`, `__builtin_trunc`, `__builtin_round`,
-  `__builtin_fmin`, `__builtin_fmax`, `__builtin_fmod`, `__builtin_fma`,
-  `__builtin_ldexp` and `__builtin_frexp`. (`__builtin_memcpy`,
-  `memset`, `memmove`, `memcmp`, `memchr`, `strlen`, `strcmp`, `strcpy`,
-  `strchr`, `fabs`, `copysign` and `sqrt` are provided.)
-- `__builtin_isgreater`, `__builtin_isgreaterequal`,
-  `__builtin_isless`, `__builtin_islessequal`,
-  `__builtin_islessgreater`, `__builtin_isunordered` and
-  `__builtin_fpclassify`.
-- `__builtin_setjmp`, `__builtin_longjmp`, `__builtin___clear_cache`,
-  `__builtin_extract_return_addr`, `__builtin_debugtrap`.
-- `__builtin_complex`, `__builtin_classify_type`,
-  `__builtin_va_arg_pack`, `__builtin_assume`,
-  `__builtin_speculation_safe_value`, `__builtin_add_overflow_p`.
-- `__builtin_bitreverse*`, `__builtin_rotateleft*`,
-  `__builtin_popcountg` and the C23 `__builtin_stdc_*` family.
-- Vector builtins: `__builtin_shufflevector`, `__builtin_elementwise_*`,
-  `__builtin_reduce_*`, `__builtin_nontemporal_load`.
-- Target builtins: `__builtin_cpu_supports`, `__builtin_ia32_*`,
-  `__builtin_avr_*`.
-- Clang's `__c11_atomic_*` family. `_Atomic`, `<stdatomic.h>`, the
-  `__atomic_*` builtins and the `__sync_*` builtins are provided. Where
-  the machine's atomic instructions are a word -- RISC-V, MIPS,
-  LoongArch64, PowerPC, SPARC, TriCore, Xtensa -- a one- or two-byte
-  atomic is a loop on the aligned word around it that rewrites only its
-  lane (`docs/manual/targets.md`, each target's Atomics).
+- `__builtin_va_arg_pack`.
+- Vector builtins: `__builtin_elementwise_*`, `__builtin_reduce_*`,
+  `__builtin_nontemporal_load` (`__builtin_shufflevector` is provided).
+- Target builtins: `__builtin_cpu_supports`, `__builtin_cpu_init`,
+  `__builtin_ia32_*`; on AVR `__builtin_avr_flash_segment` and the
+  fixed-point ones.
 
 ### Code generation
 
@@ -642,10 +618,10 @@ audited:
 - `__attribute__((interrupt))` on ARMv7-A, MIPS64, LoongArch64, Xtensa,
   TriCore, PowerPC, RX, SPARC and ColdFire; GCC's MIPS
   `use_shadow_register_set` and `use_debug_exception_return`.
-- `_Float16`, `__fp16`, `asm goto`, nested functions,
-  `__builtin_setjmp` and sixteen-byte atomics off x86-64 and AArch64
+- A `_Float16` through `...`, and a struct of them by value with the
+  ARM or RISC-V hard-float convention; `asm goto`, nested functions,
+  and sixteen-byte atomics off x86-64 and AArch64
   (see [What each target compiles](../manual/limits.md)).
-- `-S` on Xtensa and RX.
 - On MIPS32, a delay slot filled from anywhere but the instruction just
   before the transfer (the branch target's first instruction, or one
   from before the `slt` a compare-and-branch needs).

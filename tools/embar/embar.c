@@ -28,6 +28,12 @@
  * common ones), for ELF32 and ELF64 little-endian members -- every target
  * EmbCC compiles for. A member in another format is archived without
  * index entries.
+ *
+ * An archive of Mach-O objects is written in the BSD format Apple's ld
+ * reads instead, which refuses the GNU one: each name inline after its
+ * header ("#1/N", padded so the object starts on eight bytes) and a
+ * "__.SYMDEF" table of ranlib entries -- every external symbol a member
+ * defines, from its LC_SYMTAB. Both formats are read back.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -120,6 +126,19 @@ static void load_archive(const char *path)
         int k = 0;
         if (h[58] != '`' || h[59] != '\n' || data + size > len)
             die("%s: a corrupt member header", path);
+        if (h[0] == '#' && h[1] == '1' && h[2] == '/') {
+            /* BSD: the name is the data's first N bytes, NUL-padded */
+            long nl = dec(h + 3, 13);
+            if (nl > size) die("%s: a corrupt member header", path);
+            while (k < nl && k < 255 && b[data + k]) nm[k] = (char)b[data + k], k++;
+            nm[k] = 0;
+            if (strncmp(nm, "__.SYMDEF", 9) == 0)
+                nm[0] = 0;                           /* the old index */
+            else
+                add_member(nm, b + data + nl, size - nl, 0);
+            off = data + size + (size & 1);
+            continue;
+        }
         if (h[0] == '/' && h[1] == '/')
             longnames = (const char *)b + data, nm[0] = 0;
         else if (h[0] == '/' && (h[1] == ' ' || h[1] == 0))
@@ -190,6 +209,47 @@ static void index_member(int mi)
     }
 }
 
+static int is_macho(int mi)
+{
+    const unsigned char *b = g_mem[mi].data;
+    return g_mem[mi].size >= 32 && rd(b, 4) == 0xfeedfacfUL;
+}
+
+/* A 64-bit little-endian Mach-O member's external definitions: its
+ * LC_SYMTAB's entries with N_EXT set that are not undefined (N_TYPE
+ * N_UNDF) and not debugging entries (N_STAB). */
+static void index_macho(int mi)
+{
+    const unsigned char *b = g_mem[mi].data;
+    long len = g_mem[mi].size;
+    unsigned long ncmds = rd(b + 16, 4), at = 32;
+    for (unsigned long c = 0; c < ncmds && (long)at + 8 <= len; c++) {
+        unsigned long cmd = rd(b + at, 4), cmdsize = rd(b + at + 4, 4);
+        if (cmd == 2 && (long)at + 24 <= len) {               /* LC_SYMTAB */
+            unsigned long symoff = rd(b + at + 8, 4), nsyms = rd(b + at + 12, 4);
+            unsigned long stroff = rd(b + at + 16, 4);
+            for (unsigned long k = 0; k < nsyms; k++) {
+                const unsigned char *y = b + symoff + 16 * k;
+                unsigned type = y[4];
+                if ((long)(symoff + 16 * (k + 1)) > len || (type & 0xe0) ||
+                    !(type & 1) || (type & 0x0e) == 0)
+                    continue;             /* N_STAB, not N_EXT, N_UNDF */
+                if (g_nsym == g_capsym) {
+                    g_capsym = g_capsym ? g_capsym * 2 : 256;
+                    g_sym = realloc(g_sym, (size_t)g_capsym * sizeof *g_sym);
+                    if (!g_sym) die("%s", "out of memory");
+                }
+                g_sym[g_nsym].member = mi;
+                g_sym[g_nsym].name = (const char *)b + stroff + rd(y, 4);
+                g_nsym++;
+            }
+        }
+        if (!cmdsize)
+            break;
+        at += cmdsize;
+    }
+}
+
 static void put_hdr(FILE *f, const char *name, long size)
 {
     /* The size field is ten characters: a member that does not fit would
@@ -210,7 +270,93 @@ static void be32(FILE *f, unsigned long v)
     fputc((int)(v >> 8) & 255, f);  fputc((int)v & 255, f);
 }
 
-static void write_archive(const char *path, int want_index)
+static void le32(FILE *f, unsigned long v)
+{
+    fputc((int)v & 255, f);        fputc((int)(v >> 8) & 255, f);
+    fputc((int)(v >> 16) & 255, f); fputc((int)(v >> 24) & 255, f);
+}
+
+/* A member's inline BSD name: the name and NULs to a length that puts its
+ * data, after the 60-byte header at `at`, on a multiple of eight. */
+static long bsd_namelen(const char *name, long at)
+{
+    long n = (long)strlen(name) + 1;
+    while ((at + 60 + n) % 8)
+        n++;
+    return n;
+}
+
+static void put_bsd(FILE *f, const char *name, long nl, long size)
+{
+    char nm[32];
+    long len = (long)strlen(name);
+    snprintf(nm, sizeof nm, "#1/%ld", nl);
+    put_hdr(f, nm, nl + size);
+    fwrite(name, 1, (size_t)len, f);
+    for (long k = len; k < nl; k++)
+        fputc(0, f);
+}
+
+/* The BSD format, for Mach-O members (see the top of the file) */
+static void write_bsd(const char *path, int want_index)
+{
+    long *at = xmalloc((size_t)(g_nmem + 1) * sizeof *at);
+    long *nl = xmalloc((size_t)(g_nmem + 1) * sizeof *nl);
+    long strsz = 0, symsz = 0, symnl = 0, off;
+    static const char symdef[] = "__.SYMDEF";
+    FILE *f;
+    g_nsym = 0;
+    if (want_index)
+        for (int i = 0; i < g_nmem; i++)
+            if (is_macho(i))
+                index_macho(i);
+    for (int s = 0; s < g_nsym; s++)
+        strsz += (long)strlen(g_sym[s].name) + 1;
+    while (strsz % 8)
+        strsz++;
+    off = 8;
+    if (want_index) {
+        symnl = bsd_namelen(symdef, off);
+        symsz = 4 + 8L * g_nsym + 4 + strsz;
+        off += 60 + symnl + symsz + ((symnl + symsz) & 1);
+    }
+    for (int i = 0; i < g_nmem; i++) {
+        long sz;
+        at[i] = off;
+        nl[i] = bsd_namelen(g_mem[i].name, off);
+        sz = nl[i] + g_mem[i].size;
+        off += 60 + sz + (sz & 1);
+    }
+    f = fopen(path, "wb");
+    if (!f) die("cannot write %s", path);
+    fwrite("!<arch>\n", 1, 8, f);
+    if (want_index) {
+        long so = 0;
+        put_bsd(f, symdef, symnl, symsz);
+        le32(f, 8UL * (unsigned long)g_nsym);
+        for (int s = 0; s < g_nsym; s++) {
+            le32(f, (unsigned long)so);
+            le32(f, (unsigned long)at[g_sym[s].member]);
+            so += (long)strlen(g_sym[s].name) + 1;
+        }
+        le32(f, (unsigned long)strsz);
+        for (int s = 0; s < g_nsym; s++)
+            fwrite(g_sym[s].name, 1, strlen(g_sym[s].name) + 1, f);
+        for (; so < strsz; so++)
+            fputc(0, f);
+        if ((symnl + symsz) & 1) fputc('\n', f);
+    }
+    for (int i = 0; i < g_nmem; i++) {
+        long sz = nl[i] + g_mem[i].size;
+        put_bsd(f, g_mem[i].name, nl[i], g_mem[i].size);
+        if (g_mem[i].size) fwrite(g_mem[i].data, 1, (size_t)g_mem[i].size, f);
+        if (sz & 1) fputc('\n', f);
+    }
+    if (fclose(f) != 0) die("cannot write %s", path);
+}
+
+/* The System V / GNU format (see the top of the file) */
+static void write_gnu(const char *path, int want_index)
 {
     long longsz = 0, *lname = xmalloc((size_t)(g_nmem + 1) * sizeof *lname);
     long *at = xmalloc((size_t)(g_nmem + 1) * sizeof *at);
@@ -264,6 +410,16 @@ static void write_archive(const char *path, int want_index)
         if (g_mem[i].size & 1) fputc('\n', f);
     }
     if (fclose(f) != 0) die("cannot write %s", path);
+}
+
+static void write_archive(const char *path, int want_index)
+{
+    for (int i = 0; i < g_nmem; i++)
+        if (is_macho(i)) {
+            write_bsd(path, want_index);
+            return;
+        }
+    write_gnu(path, want_index);
 }
 
 static void usage(void)

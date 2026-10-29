@@ -367,6 +367,10 @@ struct ir_ins {
          * loads fault (Xtensa) reads a 0 one a byte at a time. */
         int natural;
         int is_float;
+        /* a binary16 travelling as a float (ty_half_carrier): on Apple's
+         * arm64, whose stack packs a named argument at its own size, it
+         * takes two bytes there and not the float's four */
+        int is_half;
         int is_int128;
         int hfa_n, hfa_size;
         int byref;

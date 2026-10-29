@@ -55,14 +55,17 @@ static int is_alnum(char c)
            (c >= '0' && c <= '9');
 }
 
-/* In place: strip a trailing comment (# or /​* or ;) and surrounding
- * whitespace, and squeeze runs of whitespace to a single space so a line
- * splits on ' ' cleanly. Returns the cleaned string (same buffer). */
+/* In place: strip a trailing comment (# or /​* or ; or //, AArch64's) and
+ * surrounding whitespace, and squeeze runs of whitespace to a single space
+ * so a line splits on ' ' cleanly. Returns the cleaned string (same
+ * buffer). A `//` left in place once made `.long 0xa9005013 // stp x19,
+ * x20, [x0, #0]` count three values: the bytes were right and every label
+ * after it four bytes per comma too far on. */
 static char *clean(char *s)
 {
     for (char *p = s; *p; p++)
         if (*p == '#' || *p == ';' ||
-            (p[0] == '/' && p[1] == '*')) { *p = 0; break; }
+            (p[0] == '/' && (p[1] == '*' || p[1] == '/'))) { *p = 0; break; }
     while (is_ws(*s)) s++;
     char *out = s, *w = s;
     int sp = 0;

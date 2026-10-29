@@ -959,8 +959,16 @@ target's width), the base `i` -- or `g`, which is `imafd` with Zicsr and
 Zifencei -- then single-letter extensions in any order, then `_zicsr`
 and `_zifencei`. EmbCC emits I, M, A, F, D and C:
 
-- M and A are required (the code multiplies with `mul` and makes its
-  atomics with `lr`/`sc` and the AMOs);
+- M is required (the code multiplies and divides with `mul` and `div`);
+- A gives the atomics as `lr`/`sc` loops and AMOs. Without it, as on an
+  ESP32-C3 (`--isa=rv32imc`), every atomic exchange, compare-exchange and
+  fetch-and-op is a call to libatomic's sized routines
+  (`__atomic_fetch_add_4` and its kin), as GCC and clang make it, and an
+  aligned load or store stays one instruction. The program links the
+  runtime and C library built without A, from `<triple>/noa` (whose
+  routines mask interrupts: see [Embedded](embedded.md#atomics-the-a-extension)),
+  and the A extension's macros are left out (`__riscv_atomic`,
+  `__GCC_HAVE_SYNC_COMPARE_AND_SWAP_N`, with every lock-free macro 1);
 - F lets `float` arithmetic, comparisons, square roots and conversions
   run on the FPU, and D the same for `double`; D needs F;
 - without C nothing is compressed and `EF_RISCV_RVC` is clear.

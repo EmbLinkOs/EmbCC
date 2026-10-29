@@ -254,6 +254,12 @@ struct rv_fn {
      * value has no slot, and its IR_CONST emits nothing. */
     char *remat;
     long long *remat_v;
+    /* Per vreg: the local whose address a remat vreg is (an IR_ADDR made
+     * where it is read, and folded into the offset of a load or store
+     * through it -- `sw a0, 4(sp)` where it was the address kept in a
+     * slot of its own and loaded back for each access); -1 for a
+     * constant one; NULL for none. */
+    int *fa;
     long frame;          /* total bytes sp moves down by */
     long scratch_at;     /* where fn->scratch_bytes begins */
     long byref_at;       /* where the by-reference argument copies go */
@@ -565,6 +571,10 @@ static int rv_remat_ok(const struct ir_ins *i)
     long long v;
     if (g_rv_noremat < 0)
         g_rv_noremat = getenv("EMBCC_RV_NOREMAT") != NULL;
+    /* a local's address, one addi from the frame base -- or nothing at
+     * all, folded into the access (mem_base) */
+    if (!g_rv_noremat && i->op == IR_ADDR && !getenv("EMBCC_RV_NOFAREMAT"))
+        return 1;
     if (g_rv_noremat || i->op != IR_CONST || i->flt || i->w > 8)
         return 0;
     v = i->w == 4 ? (long long)(int)(unsigned int)(unsigned long)i->imm
@@ -1621,11 +1631,15 @@ static void rd(struct rv_fn *F, int v, int reg)
         return;
     }
     if (F->remat && F->remat[v]) {
-        rv_li(F->t, reg, F->remat_v[v], F->xlen);
+        if (F->fa && F->fa[v] >= 0)
+            addr_sp(F, reg, sslot(F, F->fa[v]));
+        else
+            rv_li(F->t, reg, F->remat_v[v], F->xlen);
         return;
     }
     ld_sp(F, reg, sslot(F, v), slot_bytes(F, v), 1);
 }
+
 
 static void wr(struct rv_fn *F, int v, int reg)
 {
@@ -1724,6 +1738,32 @@ static int rdr(struct rv_fn *F, int v, int scratch)
         return F->loc[v];
     rd(F, v, scratch);
     return scratch;
+}
+
+/* Where accesses at `memoff` .. memoff + span through address vreg a
+ * go: a frame address with no register (fa) is the frame base and the
+ * local's slot plus memoff, when the whole span still fits the 12-bit
+ * offset; anything else is the address in a register (rdr, into
+ * `scratch`) and memoff. */
+static int mem_base_span(struct rv_fn *F, int a, long memoff, long span,
+                         long *off, int scratch)
+{
+    if (F->fa && a >= 0 && a < F->fn->nvregs && F->fa[a] >= 0 &&
+        F->remat[a] && !in_reg(F, a)) {
+        long o = sslot(F, F->fa[a]) + memoff;
+        if (rv_fits(o, 12) && rv_fits(o + span, 12)) {
+            *off = o;
+            return F->fb;
+        }
+    }
+    *off = memoff;
+    return rdr(F, a, scratch);
+}
+
+static int mem_base(struct rv_fn *F, int a, long memoff, long *off,
+                    int scratch)
+{
+    return mem_base_span(F, a, memoff, 0, off, scratch);
 }
 
 static int wreg(struct rv_fn *F, int v, int scratch)
@@ -5242,16 +5282,18 @@ static void gen_ins(struct rv_fn *F, int n)
         return;
     }
     case IR_LOAD: {                    /* memoff: ra_fold_memoff's, or 0 */
-        int addr = rdr(F, i->a, ADDR);
+        long off;
+        int addr = mem_base(F, i->a, i->memoff, &off, ADDR);
         int d = wreg(F, i->dst, ACC);
-        rv_load(t, d, addr, i->memoff, i->size, i->sign, F->xlen);
+        rv_load(t, d, addr, (int)off, i->size, i->sign, F->xlen);
         wrote(F, i->dst, d);
         return;
     }
     case IR_STORE: {
-        int addr = rdr(F, i->a, ADDR);
+        long off;
+        int addr = mem_base(F, i->a, i->memoff, &off, ADDR);
         int val = rdr(F, i->b, ACC);
-        rv_store(t, val, addr, i->memoff, i->size, F->xlen);
+        rv_store(t, val, addr, (int)off, i->size, F->xlen);
         return;
     }
     case IR_EXT: {
@@ -5263,6 +5305,8 @@ static void gen_ins(struct rv_fn *F, int n)
     }
 
     case IR_ADDR: {
+        if (F->remat && i->dst >= 0 && F->remat[i->dst])
+            return;             /* made where it is read (rd, mem_base) */
         int d = wreg(F, i->dst, ACC);
         addr_sp(F, d, sslot(F, i->a));
         wrote(F, i->dst, d);
@@ -5329,14 +5373,17 @@ static void gen_ins(struct rv_fn *F, int n)
                     fload_v(F, i->a, RV_FA0, rfl.size[0] == 8);
                 } else {
                     int nf = 0, ng = 0;
-                    rd(F, i->a, ADDR);
+                    long bo;
+                    int base = mem_base_span(F, i->a, 0, fn->ret_abi.size,
+                                             &bo, ADDR);
                     for (int q = 0; q < rfl.n; q++) {
                         if (rfl.fp[q])
-                            rv_fload(t, RV_FA0 + nf++, ADDR, (int)rfl.off[q],
-                                     rfl.size[q] == 8);
+                            rv_fload(t, RV_FA0 + nf++, base,
+                                     (int)(bo + rfl.off[q]), rfl.size[q] == 8);
                         else
-                            rv_load(t, RV_A0 + ng++, ADDR, (int)rfl.off[q],
-                                    rfl.size[q], 1, F->xlen);
+                            rv_load(t, RV_A0 + ng++, base,
+                                    (int)(bo + rfl.off[q]), rfl.size[q], 1,
+                                    F->xlen);
                     }
                 }
             } else if (fn->ret_abi.is_struct) {
@@ -5360,18 +5407,21 @@ static void gen_ins(struct rv_fn *F, int n)
                 } else {
                     /* Small enough for a0:a1, PACKED -- the object's
                      * bytes, not its fields. */
-                    rd(F, i->a, ADDR);
+                    long bo;
+                    int base = mem_base_span(F, i->a, 0, size, &bo, ADDR);
                     for (int q = 0; (long)q * F->w < size; q++) {
                         long off = (long)q * F->w;
                         long left = size - off;
                         if (left >= F->w) {
-                            rv_load(t, RV_A0 + q, ADDR, (int)off, F->w, 0, F->xlen);
+                            rv_load(t, RV_A0 + q, base, (int)(bo + off), F->w,
+                                    0, F->xlen);
                         } else {
                             rv_mv(t, RV_A0 + q, RV_ZERO);
                             for (long b = off + left - 1; b >= off; b--) {
                                 rv_shift_imm(t, RV_SLL, RV_A0 + q, RV_A0 + q,
                                              8, 0, F->xlen);
-                                rv_load(t, SCR, ADDR, (int)b, 1, 0, F->xlen);
+                                rv_load(t, SCR, base, (int)(bo + b), 1, 0,
+                                        F->xlen);
                                 rv_alu(t, RV_OR, RV_A0 + q, RV_A0 + q, SCR, 0);
                             }
                         }
@@ -5709,6 +5759,11 @@ static void gen_ins(struct rv_fn *F, int n)
     case IR_XCHG: case IR_XADD: case IR_ARMW: {
         int aw = i->size;
         int addr, val, dst;
+        /* without the A extension irgen calls libatomic for every one of
+         * these (target_atomic_rmw_libcall): one here would trap */
+        if (!target_riscv_atomics())
+            internal_error("riscv: %s: an atomic read-modify-write without "
+                           "the A extension", fn->name);
         if (aw == 1 || aw == 2) {
             /* the word around it: see sub_lane. The shift is SUB_X
              * throughout, the address dead once it is made. */
@@ -5796,6 +5851,9 @@ static void gen_ins(struct rv_fn *F, int n)
     }
 
     case IR_CAS: case IR_CMPXCHG: {
+        if (!target_riscv_atomics())
+            internal_error("riscv: %s: a compare-and-swap without the A "
+                           "extension", fn->name);
         /* A compare-and-swap is a load-reserved/store-conditional loop: the
          * A extension has no single instruction for it.
          *
@@ -6588,6 +6646,7 @@ static void rv_record_cfi(struct rv_fn *F, long code_off)
                    RV_FP, F->frame);
 }
 
+
 static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
                      int xlen, int keep_vars)
 {
@@ -6795,6 +6854,15 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
             if (fn->ins[n].op == IR_CONST && d >= 0 && d < fn->nvregs &&
                 F.remat[d])
                 F.remat_v[d] = imm_val(&F, &fn->ins[n]);
+            if (fn->ins[n].op == IR_ADDR && d >= 0 && d < fn->nvregs &&
+                F.remat[d]) {
+                if (!F.fa) {
+                    F.fa = xmalloc((size_t)fn->nvregs * sizeof *F.fa);
+                    for (int v = 0; v < fn->nvregs; v++)
+                        F.fa[v] = -1;
+                }
+                F.fa[d] = fn->ins[n].a;
+            }
         }
         free(rm);
     }
@@ -7372,6 +7440,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
     free(F.slot);
     free(F.remat);
     free(F.remat_v);
+    free(F.fa);
     cg_note_labels(fn, F.label_off);
     free(F.label_off);
     free(F.fix);
@@ -7569,68 +7638,6 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
     }
     g_rv_pairs = 1;
     g_rv_lowregs = 1;
-}
-
-/* ---- .riscv.attributes ------------------------------------------------
- *
- * The RISC-V psABI's build attributes, in the same container as ARM's:
- * format 'A', a vendor subsection ("riscv") and a File sub-subsection of
- * tag/value pairs, both lengths counting themselves. Read back off
- * clang's object for the same triple rather than transcribed. */
-enum { Tag_RISCV_stack_align = 4, Tag_RISCV_arch = 5 };
-
-static void ab_put(unsigned char **p, size_t *n, size_t *cap, unsigned v)
-{
-    if (*n == *cap) {
-        *cap = *cap ? *cap * 2 : 64;
-        *p = xrealloc(*p, *cap);
-    }
-    (*p)[(*n)++] = (unsigned char)v;
-}
-
-static void ab_u32(unsigned char **p, size_t *n, size_t *cap, unsigned long v)
-{
-    for (int k = 0; k < 4; k++)
-        ab_put(p, n, cap, (unsigned)(v >> (8 * k)) & 0xff);
-}
-
-static void ab_str(unsigned char **p, size_t *n, size_t *cap, const char *s)
-{
-    while (*s)
-        ab_put(p, n, cap, (unsigned char)*s++);
-    ab_put(p, n, cap, 0);
-}
-
-unsigned char *riscv_build_attributes(size_t *len)
-{
-    /* I, M and A -- mul/div and the lr/sc atomics are emitted -- plus F
-     * and D as -march= says (with the Zicsr they imply), C when
-     * target_riscv_rvc says so, and Zifencei when -march= named it: in
-     * clang's order. A disassembler reads this to know which
-     * instructions to decode. */
-    char arch[96];
-    int flen = target_riscv_flen();
-    snprintf(arch, sizeof arch, "rv%di2p1_m2p0_a2p1%s%s%s%s%s",
-             target_xlen(), flen ? "_f2p2" : "", flen == 64 ? "_d2p2" : "",
-             target_riscv_rvc() ? "_c2p0" : "", flen ? "_zicsr2p0" : "",
-             target_riscv_zifencei() ? "_zifencei2p0" : "");
-    unsigned char *a = NULL, *o = NULL;
-    size_t na = 0, ca = 0, no = 0, co = 0;
-    ab_put(&a, &na, &ca, Tag_RISCV_stack_align);
-    ab_put(&a, &na, &ca, 16);                   /* uleb128 16 */
-    ab_put(&a, &na, &ca, Tag_RISCV_arch);
-    ab_str(&a, &na, &ca, arch);
-
-    ab_put(&o, &no, &co, 'A');                  /* format version */
-    ab_u32(&o, &no, &co, (unsigned long)(4 + sizeof "riscv" + 1 + 4 + na));
-    ab_str(&o, &no, &co, "riscv");
-    ab_put(&o, &no, &co, 1);                    /* Tag_File */
-    ab_u32(&o, &no, &co, (unsigned long)(1 + 4 + na));
-    for (size_t k = 0; k < na; k++)
-        ab_put(&o, &no, &co, a[k]);
-    free(a);
-    *len = no;
-    return o;
 }
 
 void codegen_unit_riscv(struct ir_unit *iu, struct code *text,

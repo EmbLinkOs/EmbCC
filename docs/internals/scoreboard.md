@@ -20,7 +20,7 @@ GCC cross-compiler here for most of them.
 | Section | What | How |
 |---|---|---|
 | 1. Speed | Estimated cycles | `tools/bench/run.sh` on the Cortex-M4 and RV32 boards at `-O2` and `-Os`, geomean over its kernels |
-| 2. Size | Code bytes | `lib/libc` at `-Os` for every target clang also has. Function sizes from `llvm-nm -S`, summed over the functions both compilers define. clang gets `-fno-inline-functions`, so a function is the same function in both. Math (fdlibm) is reported apart, because floating-point helpers dominate it. |
+| 2. Size | Code bytes | `lib/libc` at `-Os` for every target clang also has, AVR included. Function sizes from `llvm-nm -S`, summed two ways: per object (every function of each file both compilers build) and per function (the functions both define). clang gets `-fno-inline-functions`. Math (fdlibm, msun) is reported apart, because floating-point helpers dominate it. Steer by the per-object ratio: see [Reading it](#reading-it). |
 | 3. Compile speed | Wall clock | `lib/libc`, and EmbCC's own `src/`, one file at a time for `x86_64-elf` at `-O2`. Both compilers read `lib/libc/include`. Without those headers clang fails most of `src/` at once and looks fast. |
 | 4. Limitations | Refusals | Distinct refusal messages in `src/`: the constructs EmbCC names instead of compiling. The goal is zero. |
 
@@ -67,11 +67,38 @@ call-argument descriptors inline: 2.8 KB each, now 224 bytes.
 
 **Limitations:** 99 backend refusals and 85 front-end and driver refusals.
 
+## 2026-10-24
+
+On close-gaps (after #162's library work), against clang 23.1.0.
+
+**Speed** (`-O2` / `-Os`): Cortex-M4 1.102 / 1.103, RV32 1.058 / 1.104.
+Furthest behind: the linked-list walk on the M4 (1.39), fixed point
+(1.34 on both), the state machine (1.30 and 1.21), the matrix (1.20).
+Ahead on sort (M4 0.85) and crc (RV32 0.75).
+
+**Size**, per object (all / without math): Cortex-M4 1.135 / 1.081,
+Cortex-M0 1.167 / 1.137, RV32 1.278 / 1.123, RV64 1.279 / 1.120,
+x86-64 1.695 / 1.370, AArch64 1.492 / 1.261, MIPS32 1.266 / 1.153,
+PowerPC 1.220 / 1.110, SPARC 1.244 / 1.108, LoongArch64 1.145 / 1.100,
+AVR 1.527 / 1.385.
+
+**Compile speed:** `lib/libc` 0.18, `src/` 1.05.
+
+**Limitations:** 110 backend refusals and 43 front-end and driver
+refusals.
+
 ## Reading it
 
-- **A size ratio is per function.** One function's code can grow because
-  of a choice another target's output makes look obvious, so the per-target
-  tables are where to look next (`docs/internals/testing.md`, code size).
+- **Steer size by the per-object ratio.** EmbCC inlines a static function
+  that has one caller even where clang, given `-fno-inline-functions`,
+  keeps it. The per-function join then pairs the caller's whole body with
+  clang's small wrapper and leaves clang's static out of the sum: when
+  printf's engine became one such static, the Cortex-M4 read 1.40 per
+  function and 1.13 per object, with no code grown. Per object, both
+  compilers' bytes for the same file are counted, whoever inlined what.
+- **Look at the per-target tables next.** One function's code can grow
+  because of a choice another target's output makes look obvious
+  (`docs/internals/testing.md`, code size).
 - **Cycles are estimates.** They come from tools/bench's cost table (see
   `tools/bench/icount.c`), not from silicon. A kernel can move by
   placement alone under QEMU, so compare the instruction counts too.

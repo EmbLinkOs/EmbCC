@@ -127,6 +127,17 @@ struct t_fn {
      * one value. fl_end is -1 when there is none. */
     int fl_end, fl_reg;
     long fl_imm;
+    /* The last 16-bit adds/subs: where it ended and the register it
+     * wrote. Its Z is that register's == 0, so a branch on the register
+     * with nothing emitted since and no label placed needs no compare --
+     * `subs r0, #1; bne` where it was `subs; cmp r0, #0; bne`. zs_end is
+     * -1 when there is none. */
+    int zs_end, zs_reg;
+    /* The temps defined once by a 32-bit constant, and the constants
+     * (t_kval): kc_state 1 for one, 2 for any other temp; NULL until the
+     * first question. */
+    char *kc_state;
+    long *kc_val;
     /* The last store of a register to a frame slot (wr): where its code
      * ended, the register, the slot's offset and the base. A read of the
      * same slot with nothing emitted since and no label placed is the
@@ -136,6 +147,12 @@ struct t_fn {
     /* Which of the scratch registers r9-r11 the prologue saves: all of
      * them until a pass has shown which the body uses. */
     unsigned scr_save;
+    /* An ARM-state interrupt handler (ARMv7-A): the caller-saved
+     * registers it pushes besides (isr_extra, r0-r3 and r12), and its
+     * kind -- whether lr comes back 4 less, and the return is ldm ...^
+     * either way. 0 for anything else, Cortex-M's handlers included. */
+    unsigned isr_extra;
+    int isr;
     /* A leaf that saves nothing at all: no push, no pop, `bx lr`. Decided
      * per pass, once scr_save is known (see the pass loop). */
     int leaf, nopush;

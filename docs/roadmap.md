@@ -22,7 +22,7 @@ feeling. "Today" is the state at 0.0.1-beta (October 2026).
 | Wrong code | No open wrong-code bug. The random-program fuzzer runs clean on every QEMU board for each release. GCC's torture suite (`gcc.c-torture/execute`) passes on every board it compiles for. | Fuzzer clean on the boards it covers (x86-64, AArch64, Cortex-M4, Cortex-M0, RV32, RV64). The torture suite has only been run for compile acceptance. |
 | Testing on every change | Each pull request is built and tested on Linux and macOS by CI before it can merge. The full matrix and the fuzzer run every night. | No CI on pull requests. The matrix runs on a developer machine. |
 | Coverage | Every construct EmbCC refuses is either implemented or listed in the manual as permanent, with the reason and a workaround. At least 99% of the GCC torture files that GCC accepts are accepted. | 110 distinct backend refusals and 134 front-end and driver refusals in the source. 95.4% of the torture files GCC accepts are accepted. |
-| Code size | `-Os`, function by function against clang: at most 1.10 on Cortex-M and RISC-V, 1.25 on AVR. | Cortex-M4 1.13, Cortex-M0 1.20, RV32 1.18, RV64 1.18, AVR 1.43, x86-64 1.39, AArch64 1.33 (`tools/scoreboard.sh`, October 2026). |
+| Code size | `-Os`, object by object against clang: at most 1.10 on Cortex-M and RISC-V, 1.25 on AVR. | Cortex-M4 1.14, Cortex-M0 1.17, RV32 1.28, RV64 1.28, AVR 1.53, x86-64 1.70, AArch64 1.49; without math, Cortex-M4 1.08 and RISC-V 1.12 (`tools/scoreboard.sh`, 2026-10-24). |
 | Debugging | `-g` changes no code (already true). A variable held in a register is shown by the debugger, not reported as optimized out. Breakpoints, stepping and locals are checked through GDB on every board family EmbSim or QEMU runs. | `-g` changes no code on any target. No location lists yet, so register-held variables show as `<optimized out>`. `-g` is refused for Windows. |
 | Stable interface | EmbCC's own option names are final. GCC spellings are accepted by one compatibility layer. Removing anything follows the deprecation policy below. The default target is settled. | EmbCC's own option vocabulary is in place. The GCC compatibility layer is still spread through the driver. The default target is `x86_64-elf`. |
 | Real hardware | Programs built by EmbCC verified on at least one real board per major family: Cortex-M0+, Cortex-M3/M4, AVR, RISC-V, PIC32. `embflash` checked with a real probe. | Verified on QEMU and EmbSim only. |
@@ -134,16 +134,20 @@ GDB test on every board family, at `-O2`.
 
 Every refusal either implemented or declared permanent:
 
-- `asm goto`, `_Float16` and `__fp16`, global register variables,
-  `__builtin_setjmp`/`__builtin_longjmp`, nested functions (or a
-  permanent refusal, as clang has).
+- `asm goto`, global register variables, nested functions (or a
+  permanent refusal, as clang has). (`__builtin_setjmp`/
+  `__builtin_longjmp` are done, on every target but Windows.) (`_Float16` and `__fp16` are done:
+  a `_Float16` through `...`, and a struct of them by value with the ARM
+  and RISC-V hard-float conventions, remain.)
 - C++ exceptions on Cortex-M, RV32 and the other 32-bit targets (needs
   0.3.0's unwind tables). C++ on AVR, or a permanent refusal.
-- RISC-V without the A extension (`rv32imc`, the ESP32-C3's ISA).
+- RISC-V without the A extension (`rv32imc`, the ESP32-C3's ISA): done;
+  without M (`rv32ic`) and the E base (`rv32ec`, the CH32V003) remain.
 - The Microsoft x64 calling convention in full, so Windows objects link
   with other compilers' objects.
 - `embld` linking AArch64 programs; an AT&T-syntax x86-64 assembler for
-  `.s` files; `-S` on every target.
+  `.s` files. (`-S` on every target: done -- Xtensa and RX too, and the
+  text of every target but x86-64 reassembles with EmbCC's own assembler.)
 - A Windows host build of the whole toolchain.
 
 **Done when:** the refusal count is zero apart from the permanent list,

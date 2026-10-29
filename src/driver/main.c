@@ -137,12 +137,18 @@ static void print_usage(FILE *out)
 static const char *lib_triple(void)
 {
     static char buf[128];
-    int abi = target_riscv_abi_flen();
-    if (!abi)
+    int abi = target_riscv_abi_flen(), noa = !target_riscv_atomics();
+    if (!abi && !noa)
         return target_triple_now();
-    snprintf(buf, sizeof buf, "%s/%s%s", target_triple_now(),
-             target_get() == TARGET_RISCV64 ? "lp64" : "ilp32",
-             abi == 64 ? "d" : "f");
+    /* ...and one built without the A extension (an ESP32-C3's rv32imc) is
+     * a variant beside them, noa or ilp32f-noa: the C library's locks are
+     * amo instructions in the others, which that part has not got */
+    if (!abi)
+        snprintf(buf, sizeof buf, "%s/noa", target_triple_now());
+    else
+        snprintf(buf, sizeof buf, "%s/%s%s%s", target_triple_now(),
+                 target_get() == TARGET_RISCV64 ? "lp64" : "ilp32",
+                 abi == 64 ? "d" : "f", noa ? "-noa" : "");
     return buf;
 }
 
@@ -561,15 +567,32 @@ static void write_deps(const char *in, const char *obj)
 /* Functions with a section attribute: codegen lays them out after every
  * other function, grouped by section (compile_unit sorts them there), so
  * the code buffer is [.text's functions][group][group]...[file-scope
- * asm]. Each group becomes a section of its own, and .text is the two
- * outer slices. text_at() is the one translation from a code-buffer
- * offset -- which every site, symbol and table records -- to the section
- * it lands in and the offset there. */
+ * asm][a block's group]... -- a file-scope block whose bytes are in a
+ * code section of their own (a naked function's section attribute) is a
+ * group too, after the blocks before it. Each group becomes a section of
+ * its own, and .text is every byte no group holds, in order. The groups
+ * are in the order of their starts. text_at() is the one translation
+ * from a code-buffer offset -- which every site, symbol and table
+ * records -- to the section it lands in and the offset there. */
 static struct tgroup { const char *name; long start, end; int ndx, sym,
                        align; }
     *g_tg;
 static int g_ntg, g_captg;
 static long g_plain_end, g_groups_end;
+
+/* How many of the bytes before code-buffer offset off are not .text's:
+ * the functions' groups, [g_plain_end, g_groups_end) with the padding
+ * between them (which is in no section), and the blocks' groups after. */
+static long grouped_before(long off)
+{
+    long n = 0;
+    if (off > g_plain_end)
+        n += (off < g_groups_end ? off : g_groups_end) - g_plain_end;
+    for (int k = 0; k < g_ntg; k++)
+        if (g_tg[k].start >= g_groups_end && g_tg[k].start < off)
+            n += (g_tg[k].end < off ? g_tg[k].end : off) - g_tg[k].start;
+    return n;
+}
 /* .text's own alignment: the sixteen it always had, or the strictest
  * start among its functions -- aligned(256) on one is 256 only if the
  * section is */
@@ -584,8 +607,7 @@ static int text_at(long off, long *noff)
             *noff = off - g_tg[k].start;
             return k + 1;
         }
-    *noff = g_ntg && off >= g_groups_end ? off - (g_groups_end - g_plain_end)
-                                         : off;
+    *noff = off - grouped_before(off);
     return 0;
 }
 
@@ -646,6 +668,37 @@ static long code_ref(long off, int text_sym, int *sym)
 {
     long o;
     int gi = text_at(off, &o);
+    *sym = gi ? g_tg[gi - 1].sym : text_sym;
+    return o;
+}
+
+/* text_at for offset off within block ta: a block in a section of its
+ * own keeps every one of its labels there, the one at its very end too,
+ * where text_at would read the next byte's section. */
+static int block_at(const struct topasm *ta, long off, long *noff)
+{
+    if (ta->section)
+        for (int k = 0; k < g_ntg; k++)
+            if (g_tg[k].start == ta->text_off &&
+                g_tg[k].name == ta->section) {
+                *noff = off;
+                return k + 1;
+            }
+    return text_at(ta->text_off + off, noff);
+}
+
+static int block_sec(const struct topasm *ta, long off, int text_ndx)
+{
+    long o;
+    int gi = block_at(ta, off, &o);
+    return gi ? g_tg[gi - 1].ndx : text_ndx;
+}
+
+static long block_ref(const struct topasm *ta, long off, int text_sym,
+                      int *sym)
+{
+    long o;
+    int gi = block_at(ta, off, &o);
     *sym = gi ? g_tg[gi - 1].sym : text_sym;
     return o;
 }
@@ -1698,15 +1751,23 @@ static void naked_to_blocks(struct unit *u)
     for (struct func *f = u->funcs; f; f = f->next) {
         if (f->absorbed || !f->is_naked || !f->has_defn)
             continue;
-        if (f->section)
-            diag_fatal(f->file, f->line, "naked function '%s' in section "
-                       "'%s' is not supported yet: its body is assembled "
-                       "into .text", f->name, f->section);
         struct outbuf b = { NULL, 0, 0 };
         enum target_arch t = target_get();
         /* the object's name, `_f` on RX, as the block assembler reads it */
         const char *up = backend_get(t)->sym_prefix;
-        ob_fmt(&b, ".text\n.p2align %d\n", backend_get(t)->text_p2align);
+        /* Where any function would go: the section it names (a RAM
+         * function's, AVR's .init3 as avr-libc writes it), its own
+         * .text.NAME under --sections=functions, else .text. The block
+         * ends back in .text, where a naked function always left the
+         * file-scope assembler. */
+        const char *sec = f->section;
+        if (!sec && func_sections && target_fmt_get() == TGT_FMT_ELF)
+            sec = sec_named(".text.", f->name);
+        if (sec)
+            ob_fmt(&b, ".section \"%s\",\"ax\"\n", sec);
+        else
+            ob_str(&b, ".text\n");
+        ob_fmt(&b, ".p2align %d\n", backend_get(t)->text_p2align);
         if (f->is_weak)
             ob_fmt(&b, ".weak %s%s\n", up, f->name);
         else if (!f->is_static)
@@ -1722,6 +1783,8 @@ static void naked_to_blocks(struct unit *u)
         const struct stmt *first = f->body;     /* the statement list */
         naked_body_text(&b, f, first);
         ob_fmt(&b, ".size %s%s, .-%s%s\n", up, f->name, up, f->name);
+        if (sec)
+            ob_str(&b, ".text\n");
         ob_ch(&b, '\0');
         struct topasm *ta = xcalloc(1, sizeof *ta);
         ta->tmpl = b.p;
@@ -1871,9 +1934,15 @@ static int darwin_link(const char *in, const char *exe)
         }
     }
     if (!g_nostdlib && !g_nodefaultlibs) {
+        static char librt[1100];
         if (g_link_cxx || (in && lang_cxx))
             argv[n++] = "-lc++";
         argv[n++] = "-lSystem";
+        /* EmbCC's compiler runtime, after the system: the routines its
+         * code calls that libSystem has not got -- __divdc3, the 128-bit
+         * shifts and multiply (make rt-darwin-*) */
+        if (paths_target_file(lib_triple(), "librt.a", librt, sizeof librt))
+            argv[n++] = librt;
     }
     argv[n] = NULL;
     if (plat_getenv("EMBCC_SHOW_LINK")) {
@@ -2167,15 +2236,90 @@ static int glibc_link(const char *in, const char *exe)
  * writer is told by a leading \1 (LLVM's spelling of the same thing). */
 static const char *asm_link_name(const char *lab)
 {
-    if (target_fmt_get() != TGT_FMT_MACHO)
+    /* (and RX's ELF the same: its writer prefixes C names too, and an asm
+     * label is the symbol as written -- `asm("sect_start")` was
+     * `_sect_start`) */
+    const char *pre = target_fmt_get() == TGT_FMT_MACHO ? "_"
+                    : backend_get(target_get())->sym_prefix;
+    if (!pre || !*pre)
         return lab;
-    if (lab[0] == '_')
-        return lab + 1;
+    if (!strncmp(lab, pre, strlen(pre)) && lab[strlen(pre)])
+        return lab + strlen(pre);
     size_t n = strlen(lab);
     char *raw = xmalloc(n + 2);
     raw[0] = '\1';
     memcpy(raw + 1, lab, n + 1);
     return raw;
+}
+
+/* The symbol a name already has in the object being written: a function
+ * or object defined here -- an asm label can give a definition the name
+ * an extern declaration also has -- or 0 for none yet.
+ *
+ * Asked once per undefined name, so it is a table built on the first
+ * question, from the definitions, which all have their symbols by then: a
+ * walk of the unit per question made 100,000 extern functions in a table
+ * an hour's compile (many-declarations.sh). The first definition of a
+ * name wins, functions before objects, as the walk had it. */
+static struct {
+    const struct unit *u;
+    const char **names;
+    int *ndx;
+    size_t cap;
+} g_defs;
+
+static size_t defs_hash(const char *s)
+{
+    unsigned long long h = 1469598103934665603ULL;      /* FNV-1a */
+    while (*s) {
+        h ^= (unsigned char)*s++;
+        h *= 1099511628211ULL;
+    }
+    return (size_t)(h ^ (h >> 32));
+}
+
+static void defs_put(const char *name, int ndx)
+{
+    size_t m = g_defs.cap - 1, i = defs_hash(name) & m;
+    while (g_defs.names[i]) {
+        if (!strcmp(g_defs.names[i], name))
+            return;                                    /* the first wins */
+        i = (i + 1) & m;
+    }
+    g_defs.names[i] = name;
+    g_defs.ndx[i] = ndx;
+}
+
+static int defined_here(const struct unit *u, const char *name)
+{
+    if (g_defs.u != u) {
+        size_t n = 0;
+        for (const struct func *f = u->funcs; f; f = f->next)
+            n++;
+        for (const struct global *g = u->globals; g; g = g->next)
+            n++;
+        free(g_defs.names);
+        free(g_defs.ndx);
+        g_defs.cap = 64;
+        while (g_defs.cap < 2 * n + 2)
+            g_defs.cap *= 2;
+        g_defs.names = xcalloc(g_defs.cap, sizeof *g_defs.names);
+        g_defs.ndx = xcalloc(g_defs.cap, sizeof *g_defs.ndx);
+        g_defs.u = u;
+        for (const struct func *f = u->funcs; f; f = f->next)
+            if (!f->absorbed && f->sym_ndx && (f->has_defn || f->alias_of))
+                defs_put(f->name, f->sym_ndx);
+        for (const struct global *g = u->globals; g; g = g->next)
+            if (!g->absorbed && g->sym_ndx && (g->defined || g->alias_of))
+                defs_put(g->name, g->sym_ndx);
+    }
+    size_t m = g_defs.cap - 1, i = defs_hash(name) & m;
+    while (g_defs.names[i]) {
+        if (!strcmp(g_defs.names[i], name))
+            return g_defs.ndx[i];
+        i = (i + 1) & m;
+    }
+    return 0;
 }
 
 static void apply_asm_names(struct unit *u)
@@ -3315,6 +3459,9 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     for (int k = 0; k < nnamed; k++)
         if (!named[k].nobits && named[k].len)
             named[k].buf = xcalloc(1, (size_t)named[k].len);
+    for (struct global *g = u->globals; g; g = g->next)
+        if (g->named)
+            g->sec_flags = named[g->named - 1].flags;
     char *data = NULL;
     if (data_len)
         data = xcalloc(1, (size_t)data_len);
@@ -3415,13 +3562,32 @@ static int compile_unit(const char *in, const char *out, int pp_only)
              * `.balign 256` was at 256 in the object and at 16 in the
              * image */
             int al = target_get() == TARGET_AVR ? 2 : 4;
-            long shift = g_ntg ? g_groups_end - g_plain_end : 0;
             if (ta->align > al)
                 al = ta->align;
-            while ((text.len - shift) % al)
-                code_byte(&text, 0);
-            if (al > g_text_align)
-                g_text_align = al;
+            if (ta->section) {
+                /* a section of its own, starting at the block: aligned
+                 * by the section, with nothing before it to pad */
+                if (target_fmt_get() != TGT_FMT_ELF)
+                    diag_fatal(ta->file, ta->line, "assembly in section "
+                               "'%s' is not supported for %s output",
+                               ta->section,
+                               target_fmt_name(target_fmt_get()));
+                if (g_ntg == g_captg) {
+                    g_captg = g_captg ? 2 * g_captg : 16;
+                    g_tg = xrealloc(g_tg, (size_t)g_captg * sizeof *g_tg);
+                }
+                memset(&g_tg[g_ntg], 0, sizeof g_tg[g_ntg]);
+                g_tg[g_ntg].name = ta->section;
+                g_tg[g_ntg].start = text.len;
+                g_tg[g_ntg].end = text.len + ta->codelen;
+                g_tg[g_ntg].align = al;
+                g_ntg++;
+            } else {
+                while ((text.len - grouped_before(text.len)) % al)
+                    code_byte(&text, 0);
+                if (al > g_text_align)
+                    g_text_align = al;
+            }
         } else {
             code_align(&text, 16, 0x90);
         }
@@ -3498,9 +3664,8 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     /* -S: the same bytes, as text (src/driver/asmout.c). Everything the
      * emitter needs is in hand here -- the code, the string pool, and the
      * relocation sites the backend recorded. */
-    /* A target with no -S text (the registry's no_asm_text: Xtensa has no
-     * assembler here to check the text against, and RX no disassembler
-     * to write it) is refused by name rather than written unverified. */
+    /* A target with no -S text (the registry's no_asm_text, NULL on every
+     * target today) is refused by name rather than written unverified. */
     const char *no_asm_text = backend_get(ta)->no_asm_text;
     if (want_asm && no_asm_text)
         diag_fatal(NULL, 0, "-S is not supported for %s yet: %s",
@@ -3617,6 +3782,8 @@ static int compile_unit(const char *in, const char *out, int pp_only)
             ta == TARGET_AARCH64 ? CPU_TYPE_ARM64 : CPU_TYPE_X86_64,
             ta == TARGET_AARCH64 ? CPU_SUBTYPE_ARM64_ALL
                                  : CPU_SUBTYPE_X86_64_ALL);
+        if (g_macos_min)
+            machow_set_min_os(mw, g_macos_min);
 
         /* ---- 1. the bytes, before any section is handed over ---------
          *
@@ -4181,11 +4348,21 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     unsigned char *tbytes = (unsigned char *)text.p;
     long tlen = (long)text.len;
     if (g_ntg) {
-        tlen = g_plain_end + ((long)text.len - g_groups_end);
+        /* .text's functions, then what follows the functions' groups
+         * less the blocks' groups among it */
+        long at = g_groups_end, n = g_plain_end;
+        tlen = (long)text.len - grouped_before((long)text.len);
         tbytes = xmalloc((size_t)(tlen ? tlen : 1));
         memcpy(tbytes, text.p, (size_t)g_plain_end);
-        memcpy(tbytes + g_plain_end, (unsigned char *)text.p + g_groups_end,
-               (size_t)((long)text.len - g_groups_end));
+        for (int k = 0; k <= g_ntg; k++) {
+            if (k < g_ntg && g_tg[k].start < g_groups_end)
+                continue;                       /* a function's group */
+            long to = k < g_ntg ? g_tg[k].start : (long)text.len;
+            memcpy(tbytes + n, (unsigned char *)text.p + at, (size_t)(to - at));
+            n += to - at;
+            if (k < g_ntg)
+                at = g_tg[k].end;
+        }
     }
     int text_ndx = elfw_add_section(w, ".text", SHT_PROGBITS,
                                     SHF_ALLOC | SHF_EXECINSTR,
@@ -4484,14 +4661,14 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                     lg = g;
             if (!lf && !lg)
                 continue;
-            long loff = ta->text_off + as->off, lval;
-            text_at(loff, &lval);
+            long lval;
+            block_at(ta, as->off, &lval);
             if (lf)
                 lval = fn_sym_value(target_get(), lval);
             int lndx = elfw_add_symbol(
                 w, as->name, (Elf64_Addr)lval, (Elf64_Xword)as->size,
                 ELF64_ST_INFO(STB_LOCAL, lf ? STT_FUNC : STT_OBJECT),
-                (Elf64_Half)code_sec(loff, text_ndx));
+                (Elf64_Half)block_sec(ta, as->off, text_ndx));
             if (lf)
                 lf->sym_ndx = lndx;
             else
@@ -4576,7 +4753,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
             if (ta->syms[k].is_global) {
                 long toff;
                 const struct asmsym *as = &ta->syms[k];
-                text_at(ta->text_off + as->off, &toff);
+                block_at(ta, as->off, &toff);
                 /* Its type is what .type said. Untyped, it stays a
                  * function, as every label was -- except on Thumb, where
                  * a function's address carries bit 0 and gas leaves an
@@ -4592,7 +4769,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                 int ndx = elfw_add_symbol(
                     w, as->name, (Elf64_Addr)toff, (Elf64_Xword)as->size,
                     ELF64_ST_INFO(as->is_weak ? STB_WEAK : STB_GLOBAL, st),
-                    (Elf64_Half)text_ndx);
+                    (Elf64_Half)block_sec(ta, as->off, text_ndx));
                 for (struct func *f = u->funcs; f; f = f->next)
                     if (!f->absorbed && !f->has_defn && !f->sym_ndx &&
                         strcmp(f->name, ta->syms[k].name) == 0)
@@ -4606,9 +4783,13 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     /* extern-declared, used, never defined: the linker's problem --
      * unless a file-scope asm block defines it (sym_ndx, set above),
      * which gave the object a definition and an undefined symbol of
-     * the same name, and the C code's references went to the second. */
+     * the same name, and the C code's references went to the second.
+     * The same for a definition an asm label gave the name (`char
+     * s[4] __asm__("sect_start")` beside `extern void sect_start`). */
+    g_defs.u = NULL;        /* defined_here's table: this unit's, afresh */
     for (struct global *g = u->globals; g; g = g->next)
-        if (!g->absorbed && !g->defined && g->used && !g->sym_ndx)
+        if (!g->absorbed && !g->defined && g->used && !g->sym_ndx &&
+            !(g->sym_ndx = defined_here(u, g->name)))
             g->sym_ndx = elfw_add_symbol(
                 w, g->name, 0, 0,
                 ELF64_ST_INFO(g->is_weak ? STB_WEAK : STB_GLOBAL,
@@ -4619,6 +4800,8 @@ static int compile_unit(const char *in, const char *out, int pp_only)
      * the END of the call instruction, four bytes past r_offset. */
     for (int i = 0; i < next; i++) {
         struct func *callee = ext[i].callee;
+        if (!callee->sym_ndx)
+            callee->sym_ndx = defined_here(u, callee->name);
         if (!callee->sym_ndx)
             callee->sym_ndx =
                 elfw_add_symbol(w, callee->name, 0, 0,
@@ -4694,7 +4877,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
              * label: the block's start plus the label's offset, against
              * the section */
             if (!tn) {
-                addend = code_ref(ta->text_off + addend, text_sym, &sym);
+                addend = block_ref(ta, addend, text_sym, &sym);
                 code_rela(w, text_ndx, ta->text_off + ta->rels[r].off,
                           sym, etype, addend);
                 continue;
@@ -4712,8 +4895,8 @@ static int compile_unit(const char *in, const char *out, int pp_only)
             for (struct topasm *lb = u->topasm; lb && !sym; lb = lb->next)
                 for (int k = 0; k < lb->nsyms && !sym; k++)
                     if (strcmp(lb->syms[k].name, tn) == 0) {
-                        addend += code_ref(lb->text_off + lb->syms[k].off,
-                                           text_sym, &sym);
+                        addend += block_ref(lb, lb->syms[k].off,
+                                            text_sym, &sym);
                         /* a Thumb function's ADDRESS carries bit 0; a
                          * branch to it does not */
                         if (thumb_state() &&
@@ -4813,6 +4996,8 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                 /* a function pointer (a vtable): resolve to the function's
                  * symbol; an external, never-called one needs an UNDEF. */
                 if (!ft->sym_ndx)
+                    ft->sym_ndx = defined_here(u, ft->name);
+                if (!ft->sym_ndx)
                     ft->sym_ndx = elfw_add_symbol(
                         w, ft->name, 0, 0,
                         ELF64_ST_INFO(ft->is_weak ? STB_WEAK : STB_GLOBAL,
@@ -4852,6 +5037,8 @@ static int compile_unit(const char *in, const char *out, int pp_only)
      * address-taken external gets an UNDEF symbol like a called one. */
     for (int i = 0; i < nfs; i++) {
         struct func *tf = fs[i].target;
+        if (!tf->sym_ndx)
+            tf->sym_ndx = defined_here(u, tf->name);
         if (!tf->sym_ndx)
             tf->sym_ndx = elfw_add_symbol(
                 w, tf->name, 0, 0,
@@ -6269,6 +6456,7 @@ static int embcc_main(int argc, char **argv)
                                 "target's glibc)\n", opt_typed(argv[i]));
                 return 1;
             }
+            target_set_system_libc(g_libc_system);
         } else if (strncmp(argv[i], "--sysroot=", 10) == 0) {
             g_sysroot = argv[i] + 10;
         } else if (strncmp(argv[i], "--ld-path=", 10) == 0) {

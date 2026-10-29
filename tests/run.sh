@@ -251,7 +251,18 @@ for c in tests/exec/*.c tests/exec/${TARGET%-elf}/*.c; do
         # -lm: the corpus calls libm (cabs, sqrtf, ...), which glibc keeps
         # apart from libc; noexecstack: an x86_64-elf object, like GCC's
         # for that target, has no .note.GNU-stack to say so itself
-        if ! msg=$(cc -no-pie -Wl,-z,noexecstack -o "$exe" "$obj" -lm 2>&1); then
+        # and lib/rt's __embcc_setjmp pair, which __builtin_setjmp calls and
+        # no host library has -- built by the host's cc, as the QEMU
+        # harnesses build it with GCC (tests/harness/x86_64/link.sh)
+        rtsj_host=$out_dir/rtsj-host.o
+        if [ -z "${rtsj_built:-}" ]; then
+            cc -c lib/rt/builtin-setjmp.c -o "$rtsj_host" || {
+                bad "$c" "lib/rt/builtin-setjmp.c does not build for the host" ""
+                continue; }
+            rtsj_built=1
+        fi
+        if ! msg=$(cc -no-pie -Wl,-z,noexecstack -o "$exe" "$obj" \
+                       "$rtsj_host" -lm 2>&1); then
             bad "$c" "host link failed" "$msg"
             continue
         fi

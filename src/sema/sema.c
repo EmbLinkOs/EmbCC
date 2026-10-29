@@ -862,6 +862,144 @@ static struct expr *mk_cast(struct expr *inner, struct type *to)
     return c;
 }
 
+/* A node a builtin's rewrite builds, as the parser's new_expr would
+ * (positional, and room for four arguments), and its common shapes. */
+static struct expr *sx(enum expr_kind kind, int line)
+{
+    struct expr *e = xcalloc(1, sizeof *e);
+    e->kind = kind;
+    e->line = line;
+    e->desig_index = e->desig_index_hi = -1;
+    e->args = xcalloc(4, sizeof *e->args);
+    return e;
+}
+
+/* A cast of a node not yet checked, as the parser writes one (mk_cast
+ * wants its operand's type already) */
+static struct expr *sx_cast(struct expr *inner, struct type *to)
+{
+    struct expr *c = sx(EXPR_CAST, inner->line);
+    c->cast_ty = to;
+    c->rhs = inner;
+    return c;
+}
+
+static struct expr *sx_var(const char *name, int line)
+{
+    struct expr *e = sx(EXPR_VAR, line);
+    e->name = name;
+    return e;
+}
+
+static struct expr *sx_call1(const char *fname, struct expr *arg, int line)
+{
+    struct expr *e = sx(EXPR_CALL, line);
+    e->lhs = sx_var(fname, line);
+    e->args[0] = arg;
+    e->nargs = 1;
+    return e;
+}
+
+/* Each target's breakpoint instruction, as its debugger plants it:
+ * __builtin_debugtrap's template. */
+static const char *debugtrap_insn(void)
+{
+    switch (target_get()) {
+    case TARGET_X86_64:      return "int3";
+    case TARGET_AARCH64:     return "brk #0xf000";
+    case TARGET_THUMB:       return "bkpt #0";
+    case TARGET_RISCV32:
+    case TARGET_RISCV64:     return "ebreak";
+    case TARGET_AVR:
+    case TARGET_MIPS32:
+    case TARGET_MIPS64:      return "break";
+    case TARGET_LOONGARCH64: return "break 0";
+    case TARGET_TRICORE:     return "debug";
+    case TARGET_XTENSA:      return "break 1, 15";
+    case TARGET_PPC32:       return "trap";
+    case TARGET_SPARC32:     return "ta 1";
+    case TARGET_RX:          return "brk";
+    case TARGET_COLDFIRE:    return "halt";
+    }
+    return "";
+}
+
+static void check_expr(struct unit *u, struct func *f, struct scope *sc,
+                       struct expr *e);
+
+static struct stmt *sx_stmt(enum stmt_kind k, const struct expr *at)
+{
+    struct stmt *s = xcalloc(1, sizeof *s);
+    s->kind = k;
+    s->line = at->line;
+    s->col = at->col;
+    return s;
+}
+
+/* `({ PRE; __asm__ volatile (TMPL : "+r"(OUT) :: CLOBBERS); RESULT; })` in
+ * place of a builtin's call e: the instruction where the call was, as
+ * debugtrap and the AVR builtins have it. pre, out and result may each be
+ * NULL; without a result the value is void. */
+static void asm_in_place(struct unit *u, struct func *f, struct scope *sc,
+                         struct expr *e, const char *tmpl,
+                         const char *const *clob, int nclob,
+                         struct expr *pre, struct expr *out,
+                         struct expr *result)
+{
+    struct stmt *first = NULL, **link = &first;
+    if (pre) {
+        struct stmt *ps = sx_stmt(STMT_EXPR, e);
+        ps->expr = pre;
+        *link = ps;
+        link = &ps->next;
+    }
+    struct stmt *as = sx_stmt(STMT_ASM, e);
+    as->asm_s = xcalloc(1, sizeof *as->asm_s);
+    as->asm_s->tmpl = tmpl;
+    as->asm_s->is_volatile = 1;
+    as->asm_s->is_basic = !out;
+    if (out) {
+        as->asm_s->out = xcalloc(1, sizeof *as->asm_s->out);
+        as->asm_s->out[0].constraint = "+r";
+        as->asm_s->out[0].expr = out;
+        as->asm_s->nout = 1;
+    }
+    if (nclob) {
+        as->asm_s->clob = xcalloc((size_t)nclob, sizeof *as->asm_s->clob);
+        for (int i = 0; i < nclob; i++)
+            as->asm_s->clob[i] = clob[i];
+        as->asm_s->nclob = nclob;
+    }
+    *link = as;
+    link = &as->next;
+    if (result) {
+        struct stmt *rs = sx_stmt(STMT_EXPR, e);
+        rs->expr = result;
+        *link = rs;
+    }
+    struct stmt *blk = sx_stmt(STMT_BLOCK, e);
+    blk->body = first;
+    struct expr *se = sx(EXPR_STMTEXPR, e->line);
+    se->col = e->col;
+    se->body = blk;
+    *e = *se;
+    check_expr(u, f, sc, e);
+}
+
+static int avr_builtin_known(const char *b);
+static void avr_builtin(struct unit *u, struct func *f, struct scope *sc,
+                        struct expr *e, const char *b);
+
+static struct expr *sx_cond(struct expr *c, struct expr *t, struct expr *f)
+{
+    struct expr *e = sx(EXPR_COND, c->line);
+    e->args[0] = c;
+    e->nargs = 1;
+    e->lhs = t;
+    e->rhs = f;
+    return e;
+}
+
 /* C's integer promotions: everything narrower than int becomes int
  * (all narrow values fit, so the promoted type is always signed). */
 /* promote() and arith_common() live in src/sema/type.c now, as
@@ -878,9 +1016,83 @@ static struct type *promote(struct type *t) { return ty_promote(t); }
  * would hand printf garbage. */
 static struct type *default_arg_promote(struct type *t)
 {
-    if (t->kind == TY_FLOAT)
+    /* __fp16 too, as clang does; a _Float16 is not promoted (ISO/IEC TS
+     * 18661-3), and travels as itself */
+    if (t->kind == TY_FLOAT || t->is_fp16)
         return ty_base(TY_DOUBLE, 0);
     return promote(t);
+}
+
+/* Is there a binary16 in t, as a value or inside one passed by value? */
+static int has_half(const struct type *t)
+{
+    if (!t)
+        return 0;
+    if (t->kind == TY_FLOAT16)
+        return 1;
+    if (t->kind == TY_ARRAY)
+        return has_half(t->pointee);
+    if (t->kind == TY_STRUCT && t->complete && !t->is_complex)
+        for (int m = 0; m < t->nmembers; m++)
+            if (has_half(t->members[m].ty))
+                return 1;
+    return 0;
+}
+
+/* A binary16 by itself travels as its carrier (ty_half_carrier). A
+ * struct holding one is bytes to most conventions, and those pass it as
+ * they pass any struct; AArch64's makes a struct of halves a homogeneous
+ * aggregate, h0 to h3, which EmbCC passes (ty_hfa). The ARM hard-float
+ * convention does the same in S registers, and the RISC-V hard-float one
+ * flattens it into FPRs -- which EmbCC does not do yet. So there, and
+ * through `...` or a call without a prototype anywhere, it is refused
+ * rather than passed where no other compiler looks. A pointer to one is
+ * fine. */
+static int half_struct_by_regs(const struct type *t)
+{
+    return t && t->kind == TY_STRUCT && has_half(t) &&
+           ((target_get() == TARGET_THUMB && target_thumb_hard_abi()) ||
+            ((target_get() == TARGET_RISCV32 ||
+              target_get() == TARGET_RISCV64) && target_riscv_abi_flen()));
+}
+
+/* va: through `...` (or to a function without a prototype); else a
+ * struct holding a half, by value. t: the type, for its name */
+static void half_abi_refuse(struct unit *u, int line, int col,
+                            const char *fname, int va, const struct type *t)
+{
+    if (va)
+        sema_error_at(u, line, col,
+                      "%s%s%spassing a %s through '...' is not "
+                      "supported yet: it is not promoted there, and EmbCC "
+                      "does not yet place an unpromoted 16-bit float among "
+                      "the variable arguments; convert it to double, as "
+                      "va_arg will read it",
+                      fname ? "'" : "", fname ? fname : "", fname ? "': " : "",
+                      ty_name(t));
+    else
+        sema_error_at(u, line, col,
+                      "%s%s%sa struct holding a _Float16, passed or "
+                      "returned by value, is not supported yet with the "
+                      "hard-float calling convention, which puts each "
+                      "binary16 member in a floating-point register of its "
+                      "own; pass a pointer to it",
+                      fname ? "'" : "", fname ? fname : "", fname ? "': " : "");
+}
+
+/* v's bits as the carrier, or (to a binary16 type) a carrier's bits as
+ * the value: irgen's half_to_carrier and carrier_to_half */
+static struct expr *half_bits_cast(struct expr *inner, struct type *to)
+{
+    struct expr *c = xcalloc(1, sizeof *c);
+    c->kind = EXPR_CAST;
+    c->line = inner->line;
+    c->col = inner->col;
+    c->cast_ty = to;
+    c->rhs = inner;
+    c->ty = to;
+    c->half_bits = 1;
+    return c;
 }
 
 static struct type *arith_common(struct type *a, struct type *b)
@@ -1763,6 +1975,9 @@ static int is_lvalue(const struct expr *e)
 static int const_fold(const struct expr *e, long *out);
 static int aggregate_cast(struct unit *u, struct expr *e);
 struct scope;
+static void c11_atomic(struct unit *u, struct func *f, struct scope *sc,
+                       struct expr *e);
+static int c11_atomic_index(const char *name);
 static void check_atomic_call(struct unit *u, struct func *f,
                               struct scope *sc, struct expr *e,
                               enum atomic_kind ak);
@@ -2926,6 +3141,16 @@ static int cx_fold(const struct expr *e, enum ldf_fmt fmt, struct ldf **re,
         }
         return 0;
     }
+    case EXPR_CALL:
+        /* __builtin_complex(re, im), which a static initializer keeps
+         * as the call (its sema case): the parts, each a constant */
+        if (!e->name || strcmp(e->name, "__builtin_complex") != 0 ||
+            e->nargs != 2 || !cx_fold_real(e->args[0], fmt, &ar) ||
+            !cx_fold_real(e->args[1], fmt, &ai))
+            return 0;
+        *re = ar;
+        *im = ai;
+        return 1;
     default:
         return 0;
     }
@@ -3512,6 +3737,309 @@ static struct expr *generic_choice(struct unit *u, struct func *f,
     return chosen;
 }
 
+/* The builtins check_expr's EXPR_CALL hands here: clang's bit
+ * reversals and rotates, FUNCTION/FILE/LINE, complex,
+ * speculation_safe_value, fpclassify, powi, extract/frob_return_addr,
+ * __clear_cache, the AVR ones, debugtrap, the type-generic and stdc_ bit
+ * ones, and assume. 1 when bn was one of them. Out of check_expr itself
+ * because EmbCC is built without optimization: every local here sat in
+ * check_expr's frame, at every level of an expression's nesting, and
+ * 2000 unary minuses no longer fit in the stack (deep-nesting.sh). */
+static int check_builtin_more(struct unit *u, struct func *f,
+                              struct scope *sc, struct expr *e,
+                              const char *bn)
+{
+    /* clang's bitreverseN(x), rotateleftN(x, n), rotaterightN(x,
+     * n) for N 8, 16, 32 and 64: an unsigned value of exactly N
+     * bits; lowered in irgen (gen_bitx) */
+    if (builtin_bitx(bn, NULL) != 0) {
+        int bits, k = builtin_bitx(bn, &bits);
+        if (e->nargs != (k == 1 ? 1 : 2))
+            sema_error_at(u, e->line, e->col, "%s takes %s",
+                    e->lhs->name,
+                    k == 1 ? "one argument" : "a value and an amount");
+        for (int i = 0; i < e->nargs; i++) {
+            check_expr(u, f, sc, e->args[i]);
+            need_integer(u, e->args[i], e->lhs->name);
+        }
+        e->name = e->lhs->name;
+        e->ty = ty_uint_bits(bits);
+        return 1;
+    }
+    /* GCC's __builtin_FUNCTION(), __builtin_FILE() and
+     * __builtin_LINE(): where the call is (C has no default
+     * arguments, which is where they name the caller's place) */
+    else if (strcmp(bn, "FUNCTION") == 0 || strcmp(bn, "FILE") == 0 ||
+             strcmp(bn, "LINE") == 0) {
+        if (e->nargs)
+            sema_error_at(u, e->line, e->col, "%s takes no arguments",
+                    e->lhs->name);
+        if (bn[0] == 'L') {
+            e->kind = EXPR_NUM;
+            e->num = e->line;
+            e->ty = ty_base(TY_INT, 0);
+            return 1;
+        }
+        /* (outside a function -- a file-scope initializer, which
+         * sema checks as "<global initializer>" -- it is "", as
+         * GCC's and clang's are) */
+        const char *nm = bn[1] == 'U'
+                       ? (f->name[0] == '<' ? "" : f->name)
+                       : f->file ? f->file : diag_file(u);
+        e->kind = EXPR_STR;
+        e->name = nm;
+        e->num = (long)strlen(nm) + 1;
+        e->str_width = 1;
+        e->str_prefix = 0;
+        e->nargs = 0;
+        check_expr(u, f, sc, e);  /* the array/pointer type */
+        return 1;
+    }
+    /* GCC's __builtin_complex(re, im): the complex of their type
+     * from its two parts -- what CMPLX is, which a multiply by I
+     * cannot be when im is an infinity or a NaN. In a function,
+     * built in a fresh slot (cx_make); in a static initializer the
+     * call stays, typed, for cx_fold to fold, as C11 asks of CMPLX
+     * there */
+    else if (strcmp(bn, "complex") == 0) {
+        if (e->nargs != 2) {
+            sema_error_at(u, e->line, e->col,
+                    "__builtin_complex takes a real and an "
+                    "imaginary part");
+            e->ty = ty_base(TY_INT, 0);
+            return 1;
+        }
+        check_expr(u, f, sc, e->args[0]);
+        check_expr(u, f, sc, e->args[1]);
+        struct type *rt = ty_unqual(e->args[0]->ty),
+                    *it = ty_unqual(e->args[1]->ty);
+        if (!ty_is_float(rt) || ty_is_complex(rt) || !ty_is_float(it) ||
+            ty_is_complex(it) || ty_size(rt) != ty_size(it) ||
+            rt->kind != it->kind) {
+            sema_error_at(u, e->line, e->col,
+                    "__builtin_complex takes two parts of one real "
+                    "floating type, as in GCC, not %s and %s",
+                    ty_name(e->args[0]->ty), ty_name(e->args[1]->ty));
+            e->ty = ty_base(TY_INT, 0);
+            return 1;
+        }
+        if (cx_lowering()) {
+            *e = *cx_make(ty_complex(rt), e->args[0], e->args[1],
+                          e->line);
+            return 1;
+        }
+        e->name = e->lhs->name;
+        e->ty = ty_complex(rt);
+        return 1;
+    }
+    /* GCC's __builtin_speculation_safe_value(v[, fail]): v, the
+     * value in the code that runs -- a speculation barrier only
+     * matters on a core that speculates past a bounds check,
+     * which none of EmbCC's targets' code is built to fence */
+    else if (strcmp(bn, "speculation_safe_value") == 0) {
+        if (e->nargs < 1 || e->nargs > 2)
+            sema_error_at(u, e->line, e->col,
+                    "%s takes a value and an optional failure value",
+                    e->lhs->name);
+        for (int i = 0; i < e->nargs; i++)
+            check_expr(u, f, sc, e->args[i]);
+        if (e->nargs && !ty_is_integer(e->args[0]->ty) &&
+            e->args[0]->ty->kind != TY_PTR)
+            sema_error_at(u, e->line, e->col,
+                    "%s takes an integer or a pointer, got %s",
+                    e->lhs->name, ty_name(e->args[0]->ty));
+        *e = *e->args[0];
+        return 1;
+    }
+    /* __builtin_fpclassify(nan, inf, normal, subnormal, zero, x):
+     * GCC's, which glibc's fpclassify() is. The value goes to a
+     * local once, and the classes are the predicates' own, so
+     * every float width -- a 16-byte long double too -- is theirs:
+     * (t = x, isnan(t) ? nan : isinf(t) ? inf : isnormal(t) ?
+     * normal : t == 0 ? zero : subnormal) */
+    else if (strcmp(bn, "fpclassify") == 0) {
+        static int nfpc;
+        if (e->nargs != 6)
+            sema_error_at(u, e->line, e->col,
+                    "__builtin_fpclassify takes five class values "
+                    "and a floating-point value");
+        check_expr(u, f, sc, e->args[5]);
+        if (!ty_is_float(e->args[5]->ty))
+            sema_error_at(u, e->line, e->col,
+                    "__builtin_fpclassify takes a floating-point "
+                    "value last");
+        char *nm = xmalloc(32);
+        snprintf(nm, 32, "<fpclassify %d>", nfpc++);
+        scope_add(sc, nm, ty_unqual(e->args[5]->ty), NULL);
+        int ln = e->line;
+        struct expr *asg = sx(EXPR_ASSIGN, ln);
+        asg->lhs = sx_var(nm, ln);
+        asg->rhs = e->args[5];
+        struct expr *zero = sx(EXPR_BINOP, ln);
+        zero->op = B_EQ;
+        zero->lhs = sx_var(nm, ln);
+        zero->rhs = sx(EXPR_NUM, ln);
+        zero->rhs->ty = ty_base(TY_INT, 0);  /* (as the parser types one) */
+        struct expr *chain =
+            sx_cond(sx_call1("__builtin_isnan", sx_var(nm, ln), ln),
+                    e->args[0],
+            sx_cond(sx_call1("__builtin_isinf", sx_var(nm, ln), ln),
+                    e->args[1],
+            sx_cond(sx_call1("__builtin_isnormal", sx_var(nm, ln), ln),
+                    e->args[2],
+            sx_cond(zero, e->args[4], e->args[3]))));
+        struct expr *all = sx(EXPR_COMMA, ln);
+        all->lhs = asg;
+        all->rhs = chain;
+        *e = *all;
+        check_expr(u, f, sc, e);
+        return 1;
+    }
+    /* GCC's __builtin_powi(x, n), powif, powil: libgcc's
+     * __powi*f2 (lib/rt/powi.c), x to an int power */
+    else if (strcmp(bn, "powi") == 0 || strcmp(bn, "powif") == 0 ||
+             strcmp(bn, "powil") == 0) {
+        struct type *rt = bn[4] == 'f' ? ty_base(TY_FLOAT, 0)
+                        : bn[4] == 'l' ? ty_base(TY_LDOUBLE, 0)
+                        : ty_base(TY_DOUBLE, 0);
+        if (e->nargs != 2)
+            sema_error_at(u, e->line, e->col,
+                    "%s takes a value and an int power", e->lhs->name);
+        for (int i = 0; i < e->nargs; i++)
+            check_expr(u, f, sc, e->args[i]);
+        need_integer(u, e->args[1], e->lhs->name);
+        e->args[0] = mk_cast(e->args[0], rt);
+        e->args[1] = mk_cast(e->args[1], ty_base(TY_INT, 0));
+        e->name = e->lhs->name;
+        e->ty = rt;
+        return 1;
+    }
+    /* GCC's __builtin_extract_return_addr(a) and
+     * __builtin_frob_return_addr(a): the address a return goes
+     * to, from __builtin_return_address's, and back -- the same
+     * on every target here but SPARC's, whose call is followed by
+     * its delay slot and returns 8 past it */
+    else if (strcmp(bn, "extract_return_addr") == 0 ||
+             strcmp(bn, "frob_return_addr") == 0) {
+        if (e->nargs != 1)
+            sema_error_at(u, e->line, e->col, "%s takes an address",
+                    e->lhs->name);
+        check_expr(u, f, sc, e->args[0]);
+        e->args[0] = mk_cast(e->args[0], ty_ptr(ty_base(TY_VOID, 0)));
+        e->name = e->lhs->name;
+        e->ty = ty_ptr(ty_base(TY_VOID, 0));
+        return 1;
+    }
+    /* GCC's __builtin___clear_cache(begin, end): the instructions
+     * stored there made the ones fetched (irgen: libgcc's
+     * __clear_cache, or nothing where the caches are coherent) */
+    else if (strcmp(bn, "__clear_cache") == 0) {
+        if (e->nargs != 2)
+            sema_error_at(u, e->line, e->col,
+                    "__builtin___clear_cache takes where the code "
+                    "begins and where it ends");
+        for (int i = 0; i < e->nargs && i < 2; i++) {
+            check_expr(u, f, sc, e->args[i]);
+            struct type *at = e->args[i]->ty;
+            if (at->kind != TY_PTR && at->kind != TY_ARRAY)
+                sema_error_at(u, e->line, e->col,
+                        "__builtin___clear_cache takes two "
+                        "pointers, as in GCC, not %s", ty_name(at));
+            e->args[i] = mk_cast(e->args[i],
+                                 ty_ptr(ty_base(TY_VOID, 0)));
+        }
+        e->name = e->lhs->name;
+        e->ty = ty_base(TY_VOID, 0);
+        return 1;
+    }
+    /* avr-gcc's __builtin_avr_*, on AVR */
+    else if (strncmp(bn, "avr_", 4) == 0 && avr_builtin_known(bn + 4)) {
+        avr_builtin(u, f, sc, e, bn + 4);
+        return 1;
+    }
+    /* clang's __builtin_debugtrap(): a breakpoint the program
+     * carries on from -- not __builtin_trap's, which ends it.
+     * `({ __asm__ volatile ("<the target's breakpoint>"); })`, so
+     * the debugger stops at the call itself, as it does for
+     * clang's; where the instruction leaves the pc on itself
+     * (brk, bkpt, ebreak, break) the debugger steps over it. */
+    else if (strcmp(bn, "debugtrap") == 0) {
+        if (e->nargs)
+            sema_error_at(u, e->line, e->col, "%s takes no arguments",
+                    e->lhs->name);
+        asm_in_place(u, f, sc, e, debugtrap_insn(), NULL, 0, NULL,
+                     NULL, NULL);
+        return 1;
+    }
+    /* GCC's type-generic bit builtins (clzg, ctzg, popcountg,
+     * parityg, ffsg, clrsbg) and C23's stdc_ ones: the operand
+     * at its own width, any unsigned integer type -- signed for
+     * ffsg and clrsbg -- but bool and an enum, as GCC takes */
+    else if (builtin_bitg(bn) != 0) {
+        int k = builtin_bitg(bn);
+        int rot = k == BG_ROTL || k == BG_ROTR;
+        int opt = k == BG_CLZ || k == BG_CTZ;
+        int sgn = k == BG_FFS || k == BG_CLRSB;
+        if (e->nargs < 1 || e->nargs > (rot || opt ? 2 : 1) ||
+            (rot && e->nargs != 2)) {
+            sema_error_at(u, e->line, e->col, "%s takes %s",
+                    e->lhs->name,
+                    rot ? "a value and an amount"
+                  : opt ? "a value, and what to answer for 0"
+                        : "one argument");
+            e->ty = ty_base(TY_INT, 0);
+            return 1;
+        }
+        for (int i = 0; i < e->nargs; i++)
+            check_expr(u, f, sc, e->args[i]);
+        struct type *at = e->args[0]->ty;
+        int bits = ty_is_integer(at) ? bitg_bits(at) : 0;
+        if (!ty_is_integer(at) || at->kind == TY_BOOL || at->is_enum ||
+            (sgn ? at->is_unsigned : !at->is_unsigned))
+            sema_error_at(u, e->line, e->col,
+                    "%s takes %s integer type, as in GCC, not %s",
+                    e->lhs->name, sgn ? "a signed" : "an unsigned",
+                    ty_name(at));
+        else if ((bits > 64 && bits != 128) ||
+                 (rot && (bits & (bits - 1))))
+            sema_error_at(u, e->line, e->col,
+                    "%s is not supported for %s: EmbCC computes it "
+                    "on 8 to 64 bits and on 128%s", e->lhs->name,
+                    ty_name(at),
+                    rot ? ", and rotates a power of two of them" : "");
+        if (e->nargs == 2) {
+            need_integer(u, e->args[1], e->lhs->name);
+            if (opt)
+                e->args[1] = mk_cast(e->args[1], ty_base(TY_INT, 0));
+        }
+        e->name = e->lhs->name;
+        e->ty = k <= BG_CLRSB ? ty_base(TY_INT, 0)
+              : k == BG_ONE ? ty_base(TY_BOOL, 0)
+              : k >= BG_FLOOR ? ty_unqual(at)
+              : ty_base(TY_INT, 1);
+        return 1;
+    }
+    /* clang's __builtin_assume(cond): a promise, not evaluated
+     * (clang's rule); EmbCC takes nothing from it */
+    else if (strcmp(bn, "assume") == 0) {
+        if (e->nargs != 1)
+            sema_error_at(u, e->line, e->col, "%s takes a condition",
+                    e->lhs->name);
+        check_expr(u, f, sc, e->args[0]);
+        struct expr *z = xcalloc(1, sizeof *z);
+        z->kind = EXPR_NUM;
+        z->line = e->line;
+        z->ty = ty_base(TY_INT, 0);
+        e->kind = EXPR_CAST;
+        e->cast_ty = ty_base(TY_VOID, 0);
+        e->rhs = z;
+        e->nargs = 0;
+        e->ty = e->cast_ty;
+        return 1;
+    }
+    return 0;
+}
+
 static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                        struct expr *e)
 {
@@ -3700,10 +4228,19 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                 }
                 const char *sug = suggest_name(u, sc, e->name);
                 const char *hdr = header_declaring(e->name);
-                diag_error_at(diag_file(u), e->line, e->col,
-                              "'%s' is not declared in '%s' — for a call, "
-                              "add a prototype or define it first",
-                              e->name, f->name);
+                /* (a file-scope initializer is checked as a function of
+                 * sema's own, "<global initializer>", which is no name to
+                 * show anyone) */
+                if (f->name[0] == '<')
+                    diag_error_at(diag_file(u), e->line, e->col,
+                                  "'%s' is not declared at file scope — for "
+                                  "a call, add a prototype or define it first",
+                                  e->name);
+                else
+                    diag_error_at(diag_file(u), e->line, e->col,
+                                  "'%s' is not declared in '%s' — for a call, "
+                                  "add a prototype or define it first",
+                                  e->name, f->name);
                 diag_set_id("E0001");
                 if (hdr) {
                     /* The C library's own surface is fixed by the standard,
@@ -4147,10 +4684,12 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             sema_error_at(u, e->line, e->col,
                        "compound assignment needs an lvalue");
         need_modifiable(u, e->lhs, e->line, e->col, "assignment");
-        /* an eight-byte _Atomic `x op= v` whose op is a compare-exchange
-         * loop of libatomic calls keeps the expected value in a local */
-        if (e->lhs->ty->is_atomic && ty_size(e->lhs->ty) == 8 &&
-            target_atomic8_libcall())
+        /* an _Atomic `x op= v` whose op is a compare-exchange loop of
+         * libatomic calls (eight bytes on a 32-bit target, any width on
+         * RISC-V without the A extension) keeps the expected value in a
+         * local */
+        if (e->lhs->ty->is_atomic &&
+            target_atomic_rmw_libcall(ty_size(e->lhs->ty)))
             e->var_index = scope_add(sc, "<atomic expected>",
                                      e->lhs->ty, NULL);
         if ((ty_is_complex(e->lhs->ty) || ty_is_complex(e->rhs->ty)) &&
@@ -4995,6 +5534,8 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                 e->ty = ty_base(TY_VOID, 0);
                 break;
             }
+            else if (check_builtin_more(u, f, sc, e, bn))
+                break;
             /* The bit family: ctz clz popcount ffs parity clrsb, each with l
              * and ll forms taking long / long long. Lowered in irgen from
              * ordinary integer ops, on both targets alike. */
@@ -5051,6 +5592,55 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                 e->ty = ty_base(TY_INT, 0);
                 break;
             }
+            /* __builtin_setjmp(buf) and __builtin_longjmp(buf, 1), GCC's
+             * pair: lowered in irgen onto an ordinary setjmp whose jmp_buf
+             * lives in the caller's frame (lib/rt/builtin-setjmp.c says
+             * how); of buf's five words one holds that jmp_buf's address */
+            else if (strcmp(bn, "setjmp") == 0 || strcmp(bn, "longjmp") == 0) {
+                int lj = bn[0] == 'l';
+                if (target_os_get() == TGT_OS_WINDOWS)
+                    sema_error_at(u, e->line, e->col,
+                            "%s is not supported for %s: MinGW's setjmp "
+                            "takes a frame for its unwinder, and EmbCC does "
+                            "not lower onto it", e->lhs->name,
+                            target_triple_now());
+                if (e->nargs != (lj ? 2 : 1))
+                    sema_error_at(u, e->line, e->col,
+                            lj ? "__builtin_longjmp takes a buffer and 1"
+                               : "__builtin_setjmp takes a buffer");
+                for (int i = 0; i < e->nargs; i++)
+                    check_expr(u, f, sc, e->args[i]);
+                if (!e->args[0]->ty || (e->args[0]->ty->kind != TY_PTR &&
+                                        e->args[0]->ty->kind != TY_ARRAY))
+                    sema_error_at(u, e->line, e->col,
+                            "%s's buffer is a pointer (GCC's five words)",
+                            e->lhs->name);
+                if (lj) {
+                    long one;
+                    if (!const_fold(e->args[1], &one) || one != 1)
+                        sema_error_at(u, e->line, e->col,
+                                "__builtin_longjmp's second argument must be "
+                                "the constant 1, as in GCC");
+                    e->ty = ty_base(TY_VOID, 0);
+                } else {
+                    /* the jmp_buf, in this frame: lib/libc's size (AVR's
+                     * 24 bytes; glibc's and Apple's fit in 64 words) */
+                    struct type *jb =
+                        target_get() == TARGET_AVR
+                            ? ty_array(ty_base(TY_CHAR, 1), 24)
+                        : target_ptr_size() == 8
+                            ? ty_array(ty_base(TY_LONG, 0),
+                                       target_system_libc() ||
+                                       target_os_get() == TGT_OS_DARWIN
+                                           ? 64 : 32)
+                            : ty_array(ty_llong(0), 32);
+                    e->num = scope_add(sc, "<__builtin_setjmp buffer>", jb,
+                                       NULL);
+                    e->ty = ty_base(TY_INT, 0);
+                }
+                e->name = e->lhs->name;
+                break;
+            }
             /* control never reaches here -> a trap (ud2 / udf) */
             else if (strcmp(bn, "unreachable") == 0 || strcmp(bn, "trap") == 0) {
                 e->name = e->lhs->name;
@@ -5069,6 +5659,10 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             e->ty = ty_base(TY_VOID, 0);
             break;
         }
+        /* clang's __c11_atomic_*: GCC's of the same name, made so */
+        if (e->lhs->kind == EXPR_VAR && e->lhs->name &&
+            strncmp(e->lhs->name, "__c11_atomic_", 13) == 0)
+            c11_atomic(u, f, sc, e);
         /* The GCC atomic builtins, typed here and lowered in irgen. */
         if (e->lhs->kind == EXPR_VAR && e->lhs->name) {
             int aop;
@@ -5136,7 +5730,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
         /* A call makes a value of the return type and copies each
          * argument, so all of them must be complete (C11 6.5.2.2p1, p4):
          * a call through `extern struct S k(struct S);` passed and returned
-         * nothing at all. _Float16 is such a type (parse.c). */
+         * nothing at all. */
         if (ft->ret->kind == TY_STRUCT && !ft->ret->complete)
             sema_error_at(u, e->line, e->col,
                        "calling %s%s%swith incomplete return type %s",
@@ -5160,7 +5754,21 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             else /* variadic tail, or no prototype: the promotions */
                 e->args[i] = mk_cast(e->args[i],
                                      default_arg_promote(e->args[i]->ty));
+            if (e->args[i]->ty->kind == TY_FLOAT16 &&
+                i < ft->nptypes && !ft->noproto) {
+                int nb;
+                e->args[i] = half_bits_cast(e->args[i], ty_half_carrier(&nb));
+            } else if (e->args[i]->ty->kind == TY_FLOAT16 ||
+                       half_struct_by_regs(e->args[i]->ty)) {
+                half_abi_refuse(u, e->args[i]->line, e->args[i]->col,
+                                e->callee ? e->callee->name : NULL,
+                                e->args[i]->ty->kind == TY_FLOAT16,
+                                e->args[i]->ty);
+            }
         }
+        if (half_struct_by_regs(ft->ret))
+            half_abi_refuse(u, e->line, e->col,
+                            e->callee ? e->callee->name : NULL, 0, ft->ret);
         /* After the promotions, because those are what the variadic
          * tail actually carries: a float arrives as a double and a
          * short as an int, so %f of a float and %d of a short are both
@@ -5174,6 +5782,23 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
         if (e->ty && e->ty->kind == TY_STRUCT && sc && !e->res_local &&
             !predef_is_cxx() && ty_scalar_struct_ret(e->ty))
             e->res_local = 1 + scope_add(sc, "<struct result>", e->ty, NULL);
+        /* a binary16 result comes back as its carrier: the call becomes
+         * the operand of the cast that reads the value out of it, in
+         * place, so whatever holds this node holds the cast */
+        if (e->ty && e->ty->kind == TY_FLOAT16) {
+            struct expr *call = xmalloc(sizeof *call);
+            int nb;
+            *call = *e;
+            call->ty = ty_half_carrier(&nb);
+            memset(e, 0, sizeof *e);
+            e->kind = EXPR_CAST;
+            e->line = call->line;
+            e->col = call->col;
+            e->rhs = call;
+            e->cast_ty = e->ty = ft->ret;
+            e->half_bits = 1;
+            break;
+        }
         /* and an argument of one, in a prototyped position, travels as
          * the integer too */
         e->scalar_args = 0;
@@ -5298,6 +5923,83 @@ static int addr_diff_fold(const struct expr *e, long *out)
     if (esz <= 0)
         esz = 1;
     *out = (oa - ob) / esz;
+    return 1;
+}
+
+/* A bit builtin of constants -- __builtin_popcount, clz, ctz, ffs,
+ * parity, clrsb and their l/ll forms, the type-generic ones and C23's
+ * stdc_ ones (bitg_eval), the byte swaps, clang's bit reversals and
+ * rotates -- folded: an integer constant expression in GCC and clang,
+ * so `_Static_assert(__builtin_popcount(M) == 4, "")`, a register
+ * field's shift as `__builtin_ctz(MASK)` in a table's initializer, or
+ * `char buf[__builtin_clz(1)]` are constants here too. clz and ctz of 0
+ * fold to the width, as GCC folds them. A 128-bit operand does not fold. */
+int bitbuiltin_fold(const char *bn, long a, const struct type *at, int nargs,
+                    long b, long *out, struct type **rty)
+{
+    static const int from_bitop[] = { 0, BG_CTZ, BG_CLZ, BG_POPCOUNT, BG_FFS,
+                                      BG_PARITY, BG_CLRSB };
+    int k, rank, bits;
+    if (!at || !ty_is_integer(at) || nargs < 1)
+        return 0;
+    if ((k = builtin_bitg(bn)) != 0) {
+        bits = bitg_bits(at);
+        if (bits > 64 || nargs > 2)
+            return 0;
+        *rty = k <= BG_CLRSB ? ty_base(TY_INT, 0)
+             : k == BG_ONE ? ty_base(TY_BOOL, 0)
+             : k >= BG_FLOOR ? ty_unqual((struct type *)at)
+             : ty_base(TY_INT, 1);
+        *out = (long)bitg_eval(k, (unsigned long long)a, bits, nargs == 2, b);
+        return 1;
+    }
+    if ((k = builtin_bitop(bn, &rank)) != 0) {
+        struct type *ut = rank == 3 ? ty_llong(1)
+                        : ty_base(rank == 2 ? TY_LONG : TY_INT, 1);
+        *rty = ty_base(TY_INT, 0);
+        *out = (long)bitg_eval(from_bitop[k], (unsigned long long)a,
+                               8 * ty_size(ut), 0, 0);
+        return 1;
+    }
+    if ((k = builtin_bitx(bn, &bits)) != 0) {
+        unsigned long long x = (unsigned long long)a, r = 0;
+        if (k == 1) {
+            for (int i = 0; i < bits; i++)
+                if (x >> i & 1)
+                    r |= 1ULL << (bits - 1 - i);
+        } else {
+            if (nargs != 2)
+                return 0;
+            r = bitg_eval(k == 2 ? BG_ROTL : BG_ROTR, x, bits, 1, b);
+        }
+        *rty = ty_uint_bits(bits);
+        *out = (long)r;
+        return 1;
+    }
+    if (strcmp(bn, "bswap16") == 0 || strcmp(bn, "bswap32") == 0 ||
+        strcmp(bn, "bswap64") == 0) {
+        int n = bn[5] == '1' ? 2 : bn[5] == '3' ? 4 : 8;
+        unsigned long long x = (unsigned long long)a, r = 0;
+        for (int i = 0; i < n; i++)
+            r |= (x >> (8 * i) & 0xff) << (8 * (n - 1 - i));
+        *rty = ty_int_of_size(n, 1);
+        *out = (long)r;
+        return 1;
+    }
+    return 0;
+}
+
+static int builtin_fold(const struct expr *e, long *out)
+{
+    long a, b = 0;
+    struct type *rt;
+    if (!e->name || strncmp(e->name, "__builtin_", 10) != 0 ||
+        e->nargs < 1 || !e->args[0]->ty || !const_fold(e->args[0], &a) ||
+        (e->nargs >= 2 && !const_fold(e->args[1], &b)) ||
+        !bitbuiltin_fold(e->name + 10, a, e->args[0]->ty, e->nargs, b, out,
+                         &rt))
+        return 0;
+    *out = cast_fold_value(rt, *out);
     return 1;
 }
 
@@ -5452,6 +6154,8 @@ static int const_fold(const struct expr *e, long *out)
             default: return 0;
             }
         }
+    case EXPR_CALL:
+        return builtin_fold(e, out);
     default:
         return 0;
     }
@@ -5515,6 +6219,23 @@ static int const_fold128(const struct expr *e, struct w128 *out)
  * rounds to single precision. Returns 0 (not constant) if it can't reduce. */
 static struct ldf *const_fold_ld(const struct expr *e);
 
+/* v rounded to t's format, as the operation that made it rounds at run
+ * time: a float's (or a four-byte double's -- AVR's, RX's) or a half's.
+ * Folding a float sum in double and rounding only at the end gave
+ * (16777216.0f + 1.0f) - 16777216.0f the value 1, where every float
+ * machine gives 0. */
+static double fold_round(const struct type *t, double v)
+{
+    if (!t || !ty_is_float(t) || ty_is_xldouble(t))
+        return v;
+    if (ty_size(t) == 2)
+        return ldf_to_double(ldf_round(ldf_from_double(v),
+                                       t->is_bf16 ? LDF_BF16 : LDF_HALF));
+    if (ty_size(t) == 4)
+        return (double)(float)v;
+    return v;
+}
+
 static int const_fold_f(const struct expr *e, double *out)
 {
     double a, b; long iv;
@@ -5530,13 +6251,15 @@ static int const_fold_f(const struct expr *e, double *out)
         e->rhs->ty->kind == TY_LDOUBLE) {
         struct ldf *x = const_fold_ld(e->rhs);
         if (!x) return 0;
-        *out = ldf_to_double(ldf_round(x, e->ty->kind == TY_FLOAT ? LDF_FLOAT
-                                                                  : LDF_DOUBLE));
+        int sz = ty_size(e->ty);
+        *out = ldf_to_double(ldf_round(x, sz == 2 ? e->ty->is_bf16 ? LDF_BF16
+                                                                   : LDF_HALF
+                                        : sz == 4 ? LDF_FLOAT : LDF_DOUBLE));
         return 1;
     }
     switch (e->kind) {
     case EXPR_FNUM:
-        *out = e->fnum;
+        *out = fold_round(e->ty, e->fnum);
         return 1;
     case EXPR_NUM:
         *out = (double)e->num;      /* an integer constant used where a float is wanted */
@@ -5544,7 +6267,7 @@ static int const_fold_f(const struct expr *e, double *out)
     case EXPR_CAST:
         if (ty_is_float(e->ty)) {
             if (!const_fold_f(e->rhs, &a)) return 0;
-            *out = (e->ty->kind == TY_FLOAT) ? (double)(float)a : a;
+            *out = fold_round(e->ty, a);
             return 1;
         }
         if (ty_is_integer(e->ty)) {   /* (int)f : evaluate then truncate toward zero */
@@ -5560,10 +6283,11 @@ static int const_fold_f(const struct expr *e, double *out)
         if (!const_fold_f(e->lhs, &a) || !const_fold_f(e->rhs, &b))
             return 0;
         switch (e->op) {
-        case B_ADD: *out = a + b; return 1;
-        case B_SUB: *out = a - b; return 1;
-        case B_MUL: *out = a * b; return 1;
-        case B_DIV: *out = a / b; return 1;   /* x/0.0 is inf/nan -- valid float result */
+        case B_ADD: *out = fold_round(e->ty, a + b); return 1;
+        case B_SUB: *out = fold_round(e->ty, a - b); return 1;
+        case B_MUL: *out = fold_round(e->ty, a * b); return 1;
+        /* x/0.0 is inf/nan -- valid float result */
+        case B_DIV: *out = fold_round(e->ty, a / b); return 1;
         default: return 0;
         }
     default:
@@ -6514,7 +7238,12 @@ static void lower_static_bytes(struct unit *u, int line, int size,
                            "a static float initializer must be a constant "
                            "expression");
             unsigned long ubits;
-            if (v[k].ty->kind == TY_FLOAT || sz == 4) {
+            if (sz == 2) {                  /* binary16, or bfloat16 */
+                unsigned char hb[2];
+                ldf_encode(ldf_from_double(dv),
+                           v[k].ty->is_bf16 ? LDF_BF16 : LDF_HALF, hb);
+                ubits = (unsigned long)hb[0] | (unsigned long)hb[1] << 8;
+            } else if (v[k].ty->kind == TY_FLOAT || sz == 4) {
                 /* float, or a double that is binary32 (AVR, RX) */
                 float fv = (float)dv; unsigned int u32;
                 memcpy(&u32, &fv, 4); ubits = u32;
@@ -6647,7 +7376,10 @@ static const char *const g_named_builtins[] = {
     "copysign", "copysignf", "copysignl",
     "signbit", "signbitf", "signbitl",
     "isnan", "isinf", "isinf_sign", "isfinite", "isnormal",
-    "trap", "unreachable",
+    "trap", "unreachable", "setjmp", "longjmp",
+    "FUNCTION", "FILE", "LINE", "speculation_safe_value", "assume",
+    "fpclassify", "powi", "powif", "powil", "extract_return_addr",
+    "frob_return_addr", "debugtrap", "complex", "__clear_cache",
     "va_arg", "va_copy", "va_end", "va_start",
     "add_overflow", "sub_overflow", "mul_overflow",
     "add_overflow_p", "sub_overflow_p", "mul_overflow_p",
@@ -6662,6 +7394,256 @@ static const char *const g_named_builtins[] = {
     "shuffle", "shufflevector", "convertvector",
 };
 
+/* ---- avr-gcc's __builtin_avr_* ------------------------------------------
+ *
+ * On AVR only, as avr-gcc has them: the instructions sei, cli, sleep, wdr
+ * and nop in place (sei and cli as memory barriers, as avr-libc writes
+ * them), nops(n) for n nops, swap's nibbles exchanged, the fractional
+ * multiplies fmul, fmuls and fmulsu ((a * b) << 1 in 1.7 format),
+ * insert_bits(map, bits, val), and delay_cycles(n): a busy loop of
+ * exactly n cycles of an ATmega's clock, n a constant -- what avr-libc's
+ * <util/delay.h> is built on. (flash_segment needs __memx, and the
+ * fixed-point ones _Fract and _Accum, which EmbCC has not got.) */
+static const char *const g_avr_builtins[] = {
+    "nop", "sei", "cli", "sleep", "wdr", "swap", "fmul", "fmuls", "fmulsu",
+    "delay_cycles", "nops", "insert_bits", NULL
+};
+
+static int avr_builtin_known(const char *b)
+{
+    if (target_get() != TARGET_AVR)
+        return 0;
+    for (int i = 0; g_avr_builtins[i]; i++)
+        if (strcmp(b, g_avr_builtins[i]) == 0)
+            return 1;
+    return 0;
+}
+
+/* delay_cycles(n)'s code: a counter of one to four bytes in r24 up, counted
+ * down in a loop of 3, 4, 5 or 6 cycles a pass (dec/brne; sbiw/brne;
+ * subi/sbci/brne), the remainder in `rjmp .+0` (two cycles) and `nop`.
+ * The loops cost 3K, 4K + 1, 5K + 2 and 6K + 3 cycles with the ldi's: an
+ * ATmega's (AVR5's) timings, those avr-gcc counts by. Returns the
+ * registers clobbered. */
+static int avr_delay_text(unsigned long n, char *buf, size_t cap)
+{
+    static const char *const r[4] = { "r24", "r25", "r26", "r27" };
+    size_t len = 0;
+    int bytes = n < 6 ? 0 : n <= 765 ? 1 : n <= 262141UL ? 2
+              : n <= 83886077UL ? 3 : 4;
+    unsigned long k = 0, rem = n;
+    buf[0] = 0;
+#define DT(...) (len += (size_t)snprintf(buf + len, cap - len, __VA_ARGS__))
+    if (bytes) {
+        k = (n - (unsigned long)(bytes - 1)) / (unsigned long)(bytes + 2);
+        rem = (n - (unsigned long)(bytes - 1)) % (unsigned long)(bytes + 2);
+        for (int i = 0; i < bytes; i++)
+            DT("ldi %s, %lu\n", r[i], (k >> (8 * i)) & 0xff);
+        if (bytes == 1)
+            DT("dec r24\nbrne .-4\n");
+        else if (bytes == 2)
+            DT("sbiw r24, 1\nbrne .-4\n");
+        else {
+            DT("subi r24, 1\n");
+            for (int i = 1; i < bytes; i++)
+                DT("sbci %s, 0\n", r[i]);
+            DT("brne .-%d\n", 2 * bytes + 2);
+        }
+    }
+    for (; rem >= 2; rem -= 2)
+        DT("rjmp .+0\n");
+    if (rem)
+        DT("nop\n");
+#undef DT
+    return bytes;
+}
+
+static void avr_builtin(struct unit *u, struct func *f, struct scope *sc,
+                        struct expr *e, const char *b)
+{
+    static const char *const regs[4] = { "r24", "r25", "r26", "r27" };
+    static const char *const mem[1] = { "memory" };
+    int want = !strcmp(b, "swap") || !strcmp(b, "delay_cycles") ||
+               !strcmp(b, "nops") ? 1
+             : !strncmp(b, "fmul", 4) ? 2 : !strcmp(b, "insert_bits") ? 3 : 0;
+    if (e->nargs != want) {
+        sema_error_at(u, e->line, e->col, "%s takes %d argument%s, as in "
+                "avr-gcc", e->lhs->name, want, want == 1 ? "" : "s");
+        e->ty = ty_base(TY_INT, 0);
+        return;
+    }
+    for (int i = 0; i < e->nargs; i++) {
+        check_expr(u, f, sc, e->args[i]);
+        need_integer(u, e->args[i], e->lhs->name);
+    }
+    if (!want) {                        /* the instruction of the name */
+        int barrier = !strcmp(b, "sei") || !strcmp(b, "cli");
+        asm_in_place(u, f, sc, e, b, barrier ? mem : NULL, barrier, NULL,
+                     NULL, NULL);
+        return;
+    }
+    if (!strcmp(b, "delay_cycles") || !strcmp(b, "nops")) {
+        long n;
+        if (!fold_is_exact(e->args[0]) || !const_fold(e->args[0], &n) ||
+            n < 0 || (unsigned long long)n > 0xffffffffULL ||
+            (b[0] == 'n' && n > 4096)) {
+            sema_error_at(u, e->line, e->col, "%s takes a constant number of "
+                    "%s, as in avr-gcc (%s)", e->lhs->name,
+                    b[0] == 'n' ? "nops" : "cycles",
+                    b[0] == 'n' ? "0 to 4096" : "0 to 4294967295");
+            e->ty = ty_base(TY_VOID, 0);
+            return;
+        }
+        char *text;
+        int nreg = 0;
+        if (b[0] == 'n') {
+            text = xmalloc((size_t)n * 4 + 1);
+            text[0] = 0;
+            for (long i = 0; i < n; i++)
+                memcpy(text + 4 * i, "nop\n", 5);
+        } else {
+            text = xmalloc(512);
+            nreg = avr_delay_text((unsigned long)n, text, 512);
+        }
+        asm_in_place(u, f, sc, e, text, regs, nreg, NULL, NULL, NULL);
+        return;
+    }
+    struct type *u8 = ty_base(TY_CHAR, 1);
+    if (!strcmp(b, "swap")) {
+        /* (t = x, (unsigned char)(t << 4 | t >> 4)): the C, not an asm --
+         * an asm's operand goes through memory here, and the C is what a
+         * swap peephole would find */
+        char *nm = xmalloc(32);
+        static int nsw;
+        snprintf(nm, 32, "<avr_swap %d>", nsw++);
+        scope_add(sc, nm, u8, NULL);
+        struct expr *asg = sx(EXPR_ASSIGN, e->line);
+        asg->lhs = sx_var(nm, e->line);
+        asg->rhs = mk_cast(e->args[0], u8);
+        struct expr *hi = sx(EXPR_BINOP, e->line), *lo = sx(EXPR_BINOP, e->line);
+        hi->op = B_SHL;
+        hi->lhs = sx_var(nm, e->line);
+        hi->rhs = sx(EXPR_NUM, e->line);
+        hi->rhs->num = 4;
+        hi->rhs->ty = ty_base(TY_INT, 0);
+        lo->op = B_SHR;
+        lo->lhs = sx_var(nm, e->line);
+        lo->rhs = sx(EXPR_NUM, e->line);
+        lo->rhs->num = 4;
+        lo->rhs->ty = ty_base(TY_INT, 0);
+        struct expr *o = sx(EXPR_BINOP, e->line);
+        o->op = B_OR;
+        o->lhs = hi;
+        o->rhs = lo;
+        struct expr *c = sx(EXPR_COMMA, e->line);
+        c->lhs = asg;
+        c->rhs = sx_cast(o, u8);
+        *e = *c;
+        check_expr(u, f, sc, e);
+        return;
+    }
+    if (!strncmp(b, "fmul", 4)) {
+        /* (a * b) << 1, a 1.7 fraction times a 1.7 fraction: unsigned
+         * both (fmul), signed both (fmuls), or a signed times an unsigned
+         * (fmulsu), as the 16-bit result of the type the instruction
+         * gives */
+        int sa = b[4] == 's', sb = sa && b[5] != 'u';
+        struct type *it = ty_base(TY_INT, 0);
+        struct expr *m = sx(EXPR_BINOP, e->line);
+        m->op = B_MUL;
+        m->lhs = mk_cast(mk_cast(e->args[0], sa ? ty_int_of_size(1, 0) : u8), it);
+        m->rhs = mk_cast(mk_cast(e->args[1], sb ? ty_int_of_size(1, 0) : u8), it);
+        struct expr *sh = sx(EXPR_BINOP, e->line);
+        sh->op = B_SHL;
+        sh->lhs = sx_cast(m, ty_base(TY_INT, 1));
+        sh->rhs = sx(EXPR_NUM, e->line);
+        sh->rhs->num = 1;
+        sh->rhs->ty = it;
+        *e = *sx_cast(sh, ty_int_of_size(2, !sa));
+        check_expr(u, f, sc, e);
+        return;
+    }
+    /* insert_bits(map, bits, val): result bit i is bits' bit map[i] (map's
+     * nibble i, 0..7), or val's own bit i where the nibble is 0xf */
+    long map;
+    if (!fold_is_exact(e->args[0]) || !const_fold(e->args[0], &map)) {
+        sema_error_at(u, e->line, e->col, "__builtin_avr_insert_bits takes a "
+                "constant map, as in avr-gcc");
+        e->ty = u8;
+        return;
+    }
+    char *nb = xmalloc(32), *nv = xmalloc(32);
+    static int nib;
+    snprintf(nb, 32, "<avr_bits %d>", nib);
+    snprintf(nv, 32, "<avr_val %d>", nib++);
+    scope_add(sc, nb, u8, NULL);
+    scope_add(sc, nv, u8, NULL);
+    /* bits' bits grouped by how far each moves (i - src): one mask and
+     * one shift per distance, and val's bits by one mask -- an identity
+     * nibble needs no shift at all */
+    unsigned move[15] = { 0 }, vmask = 0;
+    for (int i = 0; i < 8; i++) {
+        int src = (int)((unsigned long)map >> (4 * i) & 0xf);
+        if (src > 7 && src != 0xf) {
+            sema_error_at(u, e->line, e->col, "__builtin_avr_insert_bits: "
+                    "nibble %d of the map is %d, which is no bit (0..7) and "
+                    "not 0xf", i, src);
+            src = 0xf;
+        }
+        if (src == 0xf)
+            vmask |= 1u << i;
+        else
+            move[i - src + 7] |= 1u << src;
+    }
+    struct expr *all = NULL;
+    for (int d = -7; d <= 8; d++) {
+        unsigned m = d == 8 ? vmask : move[d + 7];
+        if (!m)
+            continue;
+        struct expr *t = sx(EXPR_BINOP, e->line);   /* (v & m) */
+        t->op = B_AND;
+        t->lhs = sx_var(d == 8 ? nv : nb, e->line);
+        t->rhs = sx(EXPR_NUM, e->line);
+        t->rhs->num = m;
+        t->rhs->ty = ty_base(TY_INT, 0);
+        if (d != 8 && d != 0) {                     /* << d or >> -d */
+            struct expr *sh = sx(EXPR_BINOP, e->line);
+            sh->op = d > 0 ? B_SHL : B_SHR;
+            sh->lhs = t;
+            sh->rhs = sx(EXPR_NUM, e->line);
+            sh->rhs->num = d > 0 ? d : -d;
+            sh->rhs->ty = ty_base(TY_INT, 0);
+            t = sh;
+        }
+        if (!all)
+            all = t;
+        else {
+            struct expr *o = sx(EXPR_BINOP, e->line);
+            o->op = B_OR;
+            o->lhs = all;
+            o->rhs = t;
+            all = o;
+        }
+    }
+    if (!all) {                                     /* (no bit at all) */
+        all = sx(EXPR_NUM, e->line);
+        all->ty = ty_base(TY_INT, 0);
+    }
+    struct expr *a1 = sx(EXPR_ASSIGN, e->line);
+    a1->lhs = sx_var(nb, e->line);
+    a1->rhs = mk_cast(e->args[1], u8);
+    struct expr *a2 = sx(EXPR_ASSIGN, e->line);
+    a2->lhs = sx_var(nv, e->line);
+    a2->rhs = mk_cast(e->args[2], u8);
+    struct expr *c1 = sx(EXPR_COMMA, e->line), *c2 = sx(EXPR_COMMA, e->line);
+    c2->lhs = a2;
+    c2->rhs = sx_cast(all, u8);
+    c1->lhs = a1;
+    c1->rhs = c2;
+    *e = *c1;
+    check_expr(u, f, sc, e);
+}
+
 int sema_has_builtin(const char *name)
 {
     int dummy_op;
@@ -6672,13 +7654,15 @@ int sema_has_builtin(const char *name)
      * __sync_*), so they are asked before the __builtin_ prefix. */
     if (atomic_builtin(name, &dummy_op) != AK_NONE)
         return 1;
-    if (strcmp(name, "__sync_synchronize") == 0)
+    if (strcmp(name, "__sync_synchronize") == 0 || c11_atomic_index(name) >= 0)
         return 1;
     if (strncmp(name, "__builtin_", 10) != 0)
         return 0;
     {
         const char *bn = name + 10;
-        if (builtin_bitop(bn, NULL) != 0)
+        if (builtin_bitop(bn, NULL) != 0 || builtin_bitx(bn, NULL) != 0 ||
+            builtin_bitg(bn) != 0 ||
+            (strncmp(bn, "avr_", 4) == 0 && avr_builtin_known(bn + 4)))
             return 1;
         for (size_t i = 0;
              i < sizeof g_named_builtins / sizeof g_named_builtins[0]; i++)
@@ -6739,6 +7723,133 @@ int builtin_bitop(const char *bn, int *width)
     return 0;
 }
 
+/* clang's bitreverse8/16/32/64 (1) and rotateleft (2) / rotateright (3)
+ * of the same widths; *bits gets the width. 0 for anything else. */
+int builtin_bitx(const char *bn, int *bits)
+{
+    static const char *const ops[] = { "bitreverse", "rotateleft",
+                                       "rotateright" };
+    for (unsigned i = 0; i < sizeof ops / sizeof ops[0]; i++) {
+        size_t n = strlen(ops[i]);
+        if (strncmp(bn, ops[i], n) != 0)
+            continue;
+        const char *w = bn + n;
+        int b = !strcmp(w, "8") ? 8 : !strcmp(w, "16") ? 16
+              : !strcmp(w, "32") ? 32 : !strcmp(w, "64") ? 64 : 0;
+        if (!b)
+            continue;
+        if (bits)
+            *bits = b;
+        return (int)i + 1;
+    }
+    return 0;
+}
+
+int builtin_bitg(const char *bn)
+{
+    static const char *const ops[] = {
+        "clzg", "ctzg", "popcountg", "parityg", "ffsg", "clrsbg",
+        "stdc_leading_zeros", "stdc_leading_ones", "stdc_trailing_zeros",
+        "stdc_trailing_ones", "stdc_first_leading_zero",
+        "stdc_first_leading_one", "stdc_first_trailing_zero",
+        "stdc_first_trailing_one", "stdc_count_zeros", "stdc_count_ones",
+        "stdc_has_single_bit", "stdc_bit_width", "stdc_bit_floor",
+        "stdc_bit_ceil", "stdc_rotate_left", "stdc_rotate_right",
+    };
+    for (unsigned i = 0; i < sizeof ops / sizeof ops[0]; i++)
+        if (strcmp(bn, ops[i]) == 0)
+            return (int)i + BG_CLZ;
+    return 0;
+}
+
+int bitg_bits(const struct type *t)
+{
+    return t->bitint ? t->bitint : 8 * ty_size(t);
+}
+
+static int bg_clz(unsigned long long x, int bits)
+{
+    int n = 0;
+    while (n < bits && !(x >> (bits - 1 - n) & 1))
+        n++;
+    return n;
+}
+
+static int bg_ctz(unsigned long long x, int bits)
+{
+    int n = 0;
+    while (n < bits && !(x >> n & 1))
+        n++;
+    return n;
+}
+
+static int bg_pop(unsigned long long x)
+{
+    int n = 0;
+    for (; x; x &= x - 1)
+        n++;
+    return n;
+}
+
+unsigned long long bitg_eval(int kind, unsigned long long x, int bits,
+                             int has_n, long long n)
+{
+    unsigned long long m = bits == 64 ? ~0ULL : (1ULL << bits) - 1;
+    unsigned long long nx;
+    int k;
+    x &= m;
+    nx = ~x & m;
+    switch (kind) {
+    case BG_CLZ: return x ? (unsigned long long)bg_clz(x, bits)
+                          : has_n ? (unsigned long long)n : (unsigned long long)bits;
+    case BG_CTZ: return x ? (unsigned long long)bg_ctz(x, bits)
+                          : has_n ? (unsigned long long)n : (unsigned long long)bits;
+    case BG_POPCOUNT: case BG_CO: return (unsigned long long)bg_pop(x);
+    case BG_PARITY: return (unsigned long long)(bg_pop(x) & 1);
+    case BG_FFS: return x ? (unsigned long long)bg_ctz(x, bits) + 1 : 0;
+    case BG_CLRSB: return (unsigned long long)bg_clz(x >> (bits - 1) ? nx : x,
+                                                       bits) - 1;
+    case BG_LZ: return (unsigned long long)bg_clz(x, bits);
+    case BG_LO: return (unsigned long long)bg_clz(nx, bits);
+    case BG_TZ: return (unsigned long long)bg_ctz(x, bits);
+    case BG_TO: return (unsigned long long)bg_ctz(nx, bits);
+    case BG_FLZ: return nx ? (unsigned long long)bg_clz(nx, bits) + 1 : 0;
+    case BG_FLO: return x ? (unsigned long long)bg_clz(x, bits) + 1 : 0;
+    case BG_FTZ: return nx ? (unsigned long long)bg_ctz(nx, bits) + 1 : 0;
+    case BG_FTO: return x ? (unsigned long long)bg_ctz(x, bits) + 1 : 0;
+    case BG_CZ: return (unsigned long long)(bits - bg_pop(x));
+    case BG_ONE: return bg_pop(x) == 1;
+    case BG_BW: return (unsigned long long)(bits - bg_clz(x, bits));
+    case BG_FLOOR: return x ? 1ULL << (bits - 1 - bg_clz(x, bits)) : 0;
+    case BG_CEIL:
+        if (x <= 1)
+            return 1;
+        k = bits - bg_clz(x - 1, bits);
+        return k >= bits ? 0 : 1ULL << k;
+    case BG_ROTL: case BG_ROTR:
+        /* the amount modulo the width, which is a power of two: a
+         * negative one too, as its two's complement bits say */
+        k = (int)((unsigned long long)n & (unsigned long long)(bits - 1));
+        if (kind == BG_ROTR)
+            k = (bits - k) & (bits - 1);
+        return k ? ((x << k) | (x >> (bits - k))) & m : x;
+    }
+    return 0;
+}
+
+/* The unsigned type of exactly `bits` bits on this target. */
+struct type *ty_uint_bits(int bits)
+{
+    if (bits == 8)
+        return ty_base(TY_CHAR, 1);
+    if (bits == 16)
+        return ty_base(TY_SHORT, 1);
+    if (bits == 64)
+        return ty_llong(1);
+    return ty_size(ty_base(TY_INT, 1)) == 4 ? ty_base(TY_INT, 1)
+                                           : ty_base(TY_LONG, 1);
+}
+
 enum atomic_kind atomic_builtin(const char *name, int *op)
 {
     static const struct { const char *name; enum atomic_kind kind; } fixed[] = {
@@ -6785,6 +7896,93 @@ enum atomic_kind atomic_builtin(const char *name, int *op)
     }
     *op = 0;
     return AK_NONE;
+}
+
+/* clang's __c11_atomic_* -- what its <stdatomic.h> is, and C11's
+ * <stdatomic.h> here for add and sub -- as the __atomic_ builtin of the
+ * same name, its arguments made GCC's: compare-exchange's weak flag,
+ * init's order (a relaxed store), is_lock_free's object pointer. And
+ * fetch_add and fetch_sub of an atomic POINTER count elements, as C11's
+ * atomic_fetch_add does (7.17.7.5: the object's value + the operand) and
+ * GCC's __atomic_fetch_add, which counts bytes, does not. A name not in
+ * the table stays as it is, and is an undeclared function. */
+/* argx: 'o' an order added (relaxed), 'n' a null object added, 's'/'w'
+ * the strong/weak flag inserted, 'p' a pointer's operand scaled */
+static const struct { const char *c11, *gcc; int nargs, argx; } c11_tab[] = {
+        { "init", "__atomic_store_n", 2, 'o' },
+        { "load", "__atomic_load_n", 2, 0 },
+        { "store", "__atomic_store_n", 3, 0 },
+        { "exchange", "__atomic_exchange_n", 3, 0 },
+        { "compare_exchange_strong", "__atomic_compare_exchange_n", 5, 's' },
+        { "compare_exchange_weak", "__atomic_compare_exchange_n", 5, 'w' },
+        { "fetch_add", "__atomic_fetch_add", 3, 'p' },
+        { "fetch_sub", "__atomic_fetch_sub", 3, 'p' },
+        { "fetch_and", "__atomic_fetch_and", 3, 0 },
+        { "fetch_or", "__atomic_fetch_or", 3, 0 },
+        { "fetch_xor", "__atomic_fetch_xor", 3, 0 },
+        { "fetch_nand", "__atomic_fetch_nand", 3, 0 },
+        { "thread_fence", "__atomic_thread_fence", 1, 0 },
+        { "signal_fence", "__atomic_signal_fence", 1, 0 },
+        { "is_lock_free", "__atomic_is_lock_free", 1, 'n' },
+};
+
+/* name's entry in c11_tab, or -1 */
+static int c11_atomic_index(const char *name)
+{
+    if (strncmp(name, "__c11_atomic_", 13) != 0)
+        return -1;
+    for (unsigned i = 0; i < sizeof c11_tab / sizeof c11_tab[0]; i++)
+        if (strcmp(name + 13, c11_tab[i].c11) == 0)
+            return (int)i;
+    return -1;
+}
+
+static void c11_atomic(struct unit *u, struct func *f, struct scope *sc,
+                       struct expr *e)
+{
+    int i = c11_atomic_index(e->lhs->name);
+    if (i < 0)
+        return;
+    if (e->nargs != c11_tab[i].nargs) {
+        sema_error_at(u, e->line, e->col, "%s takes %d arguments, as in clang",
+                e->lhs->name, c11_tab[i].nargs);
+        return;
+    }
+    struct expr **a = xcalloc((size_t)e->nargs + 2, sizeof *a);
+    int n = 0;
+    for (int k = 0; k < e->nargs; k++) {
+        if (k == 3 && (c11_tab[i].argx == 's' || c11_tab[i].argx == 'w')) {
+            a[n] = sx(EXPR_NUM, e->line);       /* the weak flag */
+            a[n]->num = c11_tab[i].argx == 'w';
+            a[n++]->ty = ty_base(TY_INT, 0);
+        }
+        a[n++] = e->args[k];
+    }
+    if (c11_tab[i].argx == 'o' || c11_tab[i].argx == 'n') {
+        a[n] = sx(EXPR_NUM, e->line);  /* relaxed; or no object, by size */
+        a[n++]->ty = ty_base(TY_INT, 0);
+    }
+    if (c11_tab[i].argx == 'p' && n == 3) {
+        check_expr(u, f, sc, a[0]);
+        struct type *pt = a[0]->ty && a[0]->ty->kind == TY_PTR
+                        ? a[0]->ty->pointee : NULL;
+        if (pt && pt->kind == TY_PTR && pt->pointee) {
+            long size = pt->pointee->kind == TY_VOID ? 1     /* GNU void * */
+                      : ty_size(pt->pointee);
+            if (size > 1) {
+                struct expr *m = sx(EXPR_BINOP, e->line);
+                m->op = B_MUL;
+                m->lhs = a[1];
+                m->rhs = sx(EXPR_NUM, e->line);
+                m->rhs->num = size;
+                m->rhs->ty = ty_int_of_size(target_ptr_size(), 0);
+                a[1] = m;
+            }
+        }
+    }
+    e->args = a;
+    e->nargs = n;
+    e->lhs->name = c11_tab[i].gcc;
 }
 
 /* The object an atomic builtin works on must be one the machines can move
@@ -6936,13 +8134,13 @@ static void check_atomic_call(struct unit *u, struct func *f,
                         k + 1, name, ty_size(obj));
         }
     }
-    /* An eight-byte __sync compare-and-swap that is a libatomic call
-     * (target_atomic8_libcall) passes the expected value by address:
+    /* A __sync compare-and-swap that is a libatomic call
+     * (target_atomic_rmw_libcall) passes the expected value by address:
      * irgen keeps it in a hidden local. */
     if ((ak == AK_SYNC_VAL_CAS || ak == AK_SYNC_BOOL_CAS) &&
-        ty_size(obj) == 8 && target_atomic8_libcall())
+        target_atomic_rmw_libcall(ty_size(obj)))
         e->var_index = scope_add(sc, "<atomic expected>",
-                                 ty_int_of_size(8, 1), NULL);
+                                 ty_int_of_size(ty_size(obj), 1), NULL);
     switch (ak) {
     case AK_STORE_N: case AK_LOAD: case AK_STORE: case AK_EXCHANGE:
     case AK_SYNC_LOCK_RELEASE:
@@ -7982,6 +9180,10 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                     if (!ty_is_complex(s->expr->ty))
                         need_scalar(u, s->expr, "'return'");
                 s->expr = convert_assign(u, s->expr, f->ret_ty, "return");
+                if (f->half_ret) {
+                    int nb;
+                    s->expr = half_bits_cast(s->expr, ty_half_carrier(&nb));
+                }
             }
             break;
         case STMT_EXPR:
@@ -8170,7 +9372,7 @@ int is_noreturn_call(const struct expr *e)
         return 1;                       /* __attribute__((noreturn)) callee */
     static const char *const nr[] = {
         "exit", "abort", "_Exit", "diag_fatal",
-        "__builtin_unreachable", "__builtin_trap",
+        "__builtin_unreachable", "__builtin_trap", "__builtin_longjmp",
     };
     for (unsigned i = 0; i < sizeof nr / sizeof *nr; i++)
         if (strcmp(e->name, nr[i]) == 0)
@@ -8261,7 +9463,19 @@ static void check_func(struct unit *u, struct func *f)
      * both are refused. (AVR's backend refuses the same two itself.) */
     if (f->is_isr && (target_get() == TARGET_RISCV32 ||
                       target_get() == TARGET_RISCV64 ||
-                      target_get() == TARGET_MIPS32)) {
+                      target_is_mips() ||
+                      target_get() == TARGET_RX ||
+                      target_get() == TARGET_COLDFIRE ||
+                      target_get() == TARGET_TRICORE ||
+                      (target_get() == TARGET_THUMB && target_arm_a32()))) {
+        /* ARM state with an FPU: the handler would change the VFP
+         * registers and FPSCR of the code it interrupted, which GCC does
+         * not save either (it asks for -mgeneral-regs-only) */
+        if (target_get() == TARGET_THUMB && target_thumb_fpu())
+            sema_error_line(u, f->line,
+                "interrupt handler '%s' on ARMv7-A with an FPU: it would not "
+                "save the VFP registers and FPSCR of the code it interrupts "
+                "-- compile it with -mfloat-abi=soft and no -mfpu", f->name);
         if (f->nparams || f->is_varargs)
             sema_error_line(u, f->line,
                 "interrupt handler '%s' takes parameters: the hardware "
@@ -8274,14 +9488,22 @@ static void check_func(struct unit *u, struct func *f)
                 "return goes back to the interrupted instruction, and "
                 "nothing there receives it -- it must return void",
                 f->name);
-        if (target_get() == TARGET_MIPS32 && !ISR_KIND(f->is_isr))
+        if (target_is_mips() && !ISR_KIND(f->is_isr))
             sema_error_line(u, f->line,
                 "'%s' is keep_interrupts_masked but not an interrupt "
                 "handler: the modifier needs __attribute__((interrupt))",
                 f->name);
     }
 
+    if (half_struct_by_regs(f->ret_ty))
+        half_abi_refuse(u, f->line, 0, f->name, 0, f->ret_ty);
+    f->half_ret = f->ret_ty && f->ret_ty->kind == TY_FLOAT16;
     for (int i = 0; i < f->nparams; i++) {
+        if (half_struct_by_regs(f->param_tys[i]) ||
+            (f->noproto && has_half(f->param_tys[i])))
+            half_abi_refuse(u, f->line, 0, f->name,
+                            f->noproto && f->param_tys[i]->kind == TY_FLOAT16,
+                            f->param_tys[i]);
         if (scope_find(&sc, f->params[i]) >= 0)
             sema_error_line(u, f->line,
                        "duplicate parameter '%s' in '%s'",
@@ -8332,6 +9554,21 @@ static void check_func(struct unit *u, struct func *f)
          * that integer's: mem2reg then takes it as the register it came in */
         sc.vars[i].ty = ty_scalar_struct_ret(f->param_tys[i]);
         f->param_scalar[i] = c + 1;
+    }
+    /* A binary16 parameter arrives as its carrier (half_signature); the
+     * body uses a local of the half type, which irgen fills from the bits
+     * at entry, and the parameter's own slot is the carrier's. */
+    for (int i = 0; i < f->nparams && i < MAX_PARAMS; i++) {
+        f->half_param[i] = 0;
+        if (!f->param_tys[i] || f->param_tys[i]->kind != TY_FLOAT16)
+            continue;
+        int nb;
+        if (!f->is_naked && f->params[i]) {
+            int c = scope_add(&sc, "<half param>", f->param_tys[i], NULL);
+            sc.vars[i].alias = c + 1;
+            f->half_param[i] = c + 1;
+        }
+        sc.vars[i].ty = ty_half_carrier(&nb);
     }
     /* `int a[n][m]` arrives as int (*)[m]: its row size is computed at
      * entry from the parameters before it */
@@ -8475,6 +9712,24 @@ static void check_func(struct unit *u, struct func *f)
     }
     g_cx_sc = NULL;
     g_file = savefile;
+}
+
+/* A defined function's binary16 parameters and result as the carriers
+ * they travel as (ty_half_carrier), which the backends classify by: once
+ * every body in the unit has been checked, since a call reads the
+ * callee's type from these same fields (ty_func of ret_ty, param_tys)
+ * and must see _Float16 there. check_func made each return and each
+ * parameter's copy for this. */
+static void half_signature(struct func *f)
+{
+    int nb;
+    if (f->half_ret)
+        f->ret_ty = ty_half_carrier(&nb);
+    for (int i = 0; i < f->nparams && i < MAX_PARAMS; i++)
+        if (f->param_tys[i] && f->param_tys[i]->kind == TY_FLOAT16) {
+            f->param_tys[i] = ty_half_carrier(&nb);
+            f->half_abi[i] = 1;
+        }
 }
 
 static int g_gnu89_inline;
@@ -8969,6 +10224,9 @@ void sema_check(struct unit *u)
             check_func(u, canon);
         }
     }
+    for (struct func *f = u->funcs; f; f = f->next)
+        if (f->defined)
+            half_signature(find_func(u, f->name));
 
     /* -Wunused-function: a static nobody calls is dead in this unit, and
      * no other unit can reach it. (A non-static one may be called from

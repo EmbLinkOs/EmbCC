@@ -668,11 +668,10 @@ static int refuse_form(struct asm_symform *f, const char *stmt,
 static int sym_at(const char *p, int *slen, long *add)
 {
     int n = 0;
-    if (!(isalpha((unsigned char)p[0]) || p[0] == '_' ||
+    if (!((asm_sym0((unsigned char)p[0]) && p[0] != '.') ||
           (p[0] == '.' && (isalpha((unsigned char)p[1]) || p[1] == '_'))))
         return 0;
-    while (isalnum((unsigned char)p[n]) || p[n] == '_' || p[n] == '.' ||
-           p[n] == '$')
+    while (asm_symc((unsigned char)p[n]))
         n++;
     {
         int f;

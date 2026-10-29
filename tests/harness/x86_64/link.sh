@@ -38,9 +38,12 @@ OBJCOPY="${EMBCC_X86_OBJCOPY:-x86_64-elf-objcopy}"
     exit 1
 }
 
-for part in start sys crt; do
+# (rtsj: lib/rt's __embcc_setjmp/__embcc_longjmp, what __builtin_setjmp
+# and __builtin_longjmp call -- newlib and libgcc have no such pair)
+for part in start sys crt rtsj; do
     src=$here/$part.$( [ "$part" = start ] && echo S || echo c )
     [ "$part" = crt ] && src=$here/../crt.c
+    [ "$part" = rtsj ] && src=$here/../../../lib/rt/builtin-setjmp.c
     o=$work/harness-x86-$part.o
     if [ ! -f "$o" ] || [ "$src" -nt "$o" ]; then
         $GCC -ffreestanding -mno-red-zone -isystem "$NEWLIB/include" -c "$src" -o "$o"
@@ -50,7 +53,7 @@ done
 LIBGCC=$(dirname "$($GCC -print-libgcc-file-name)")
 $LD -n -z max-page-size=0x1000 -T "$here/link.ld" -o "$out.64" \
     "$work/harness-x86-start.o" "$@" "$work/harness-x86-sys.o" \
-    "$work/harness-x86-crt.o" $CXXLIBS \
+    "$work/harness-x86-crt.o" "$work/harness-x86-rtsj.o" $CXXLIBS \
     -L"$NEWLIB/lib" -lc -lm -L"$LIBGCC" -lgcc 2>&1 \
     | grep -v 'LOAD segment with RWX permissions' >&2 || true
 [ -f "$out.64" ]

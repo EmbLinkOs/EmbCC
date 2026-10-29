@@ -255,13 +255,46 @@ static int riscv_on(void)
 static int riscv_changes(void)
 {
     return riscv_on() && (target_riscv_flen() || !target_riscv_rvc() ||
-                          target_riscv_zifencei());
+                          target_riscv_zifencei() || !target_riscv_atomics());
+}
+
+/* Without the A extension (clang's rv32imc): no __riscv_a, no
+ * __GCC_HAVE_SYNC_COMPARE_AND_SWAP_N, and every lock-free answer 1,
+ * "sometimes" -- the read-modify-writes are libatomic calls. */
+static const char *const rv_lock_free[] = {
+    "__GCC_ATOMIC_BOOL_LOCK_FREE", "__GCC_ATOMIC_CHAR_LOCK_FREE",
+    "__GCC_ATOMIC_CHAR16_T_LOCK_FREE", "__GCC_ATOMIC_CHAR32_T_LOCK_FREE",
+    "__GCC_ATOMIC_WCHAR_T_LOCK_FREE", "__GCC_ATOMIC_SHORT_LOCK_FREE",
+    "__GCC_ATOMIC_INT_LOCK_FREE", "__GCC_ATOMIC_LONG_LOCK_FREE",
+    "__GCC_ATOMIC_LLONG_LOCK_FREE", "__GCC_ATOMIC_POINTER_LOCK_FREE",
+    "__CLANG_ATOMIC_BOOL_LOCK_FREE", "__CLANG_ATOMIC_CHAR_LOCK_FREE",
+    "__CLANG_ATOMIC_CHAR16_T_LOCK_FREE", "__CLANG_ATOMIC_CHAR32_T_LOCK_FREE",
+    "__CLANG_ATOMIC_WCHAR_T_LOCK_FREE", "__CLANG_ATOMIC_SHORT_LOCK_FREE",
+    "__CLANG_ATOMIC_INT_LOCK_FREE", "__CLANG_ATOMIC_LONG_LOCK_FREE",
+    "__CLANG_ATOMIC_LLONG_LOCK_FREE", "__CLANG_ATOMIC_POINTER_LOCK_FREE",
+};
+#define N_RV_LOCK_FREE (int)(sizeof rv_lock_free / sizeof *rv_lock_free)
+
+static int rv_noa_drops(const char *name)
+{
+    if (!riscv_on() || target_riscv_atomics())
+        return 0;
+    if (!strcmp(name, "__riscv_a") || !strcmp(name, "__riscv_atomic") ||
+        !strcmp(name, "__riscv_zaamo") || !strcmp(name, "__riscv_zalrsc") ||
+        !strncmp(name, "__GCC_HAVE_SYNC_COMPARE_AND_SWAP_", 33))
+        return 1;
+    for (int k = 0; k < N_RV_LOCK_FREE; k++)
+        if (!strcmp(name, rv_lock_free[k]))
+            return 1;
+    return 0;
 }
 
 static int riscv_drops(const char *name)
 {
     if (!riscv_on())
         return 0;
+    if (rv_noa_drops(name))
+        return 1;
     if (target_riscv_abi_flen() && strcmp(name, "__riscv_float_abi_soft") == 0)
         return 1;
     return !target_riscv_rvc() &&
@@ -298,6 +331,11 @@ static int riscv_adds(struct predef_macro *out)
     if (target_riscv_zifencei()) {
         out[n].name = "__riscv_zifencei"; out[n++].value = "2000000";
     }
+    if (!target_riscv_atomics())
+        for (int k = 0; k < N_RV_LOCK_FREE; k++) {
+            out[n].name = rv_lock_free[k];
+            out[n++].value = "1";
+        }
     return n;
 }
 
@@ -392,6 +430,69 @@ static int pic32_adds(struct predef_macro *m)
  * statement about the OBJECT FORMAT, so on a target that is not ELF it
  * is simply false, and a header that reads it would be told the wrong
  * thing. Dropped rather than overridden: there is no "__ELF__ 0". */
+/* _Float16 is EmbCC's on every target (src/ir/irgen.c, lib/rt/half.c),
+ * and its float.h-style description with it: the generated tables of
+ * the targets whose reference compiler has the type carry these
+ * already, and the others get them here. Clang's values. */
+static const struct predef_macro flt16_add[] = {
+    { "__FLT16_DECIMAL_DIG__", "5" },
+    { "__FLT16_DENORM_MIN__", "5.9604644775390625e-8F16" },
+    { "__FLT16_DIG__", "3" },
+    { "__FLT16_EPSILON__", "9.765625e-4F16" },
+    { "__FLT16_HAS_DENORM__", "1" },
+    { "__FLT16_HAS_INFINITY__", "1" },
+    { "__FLT16_HAS_QUIET_NAN__", "1" },
+    { "__FLT16_MANT_DIG__", "11" },
+    { "__FLT16_MAX_10_EXP__", "4" },
+    { "__FLT16_MAX_EXP__", "16" },
+    { "__FLT16_MAX__", "6.5504e+4F16" },
+    { "__FLT16_MIN_10_EXP__", "(-4)" },
+    { "__FLT16_MIN_EXP__", "(-13)" },
+    { "__FLT16_MIN__", "6.103515625e-5F16" },
+    { "__FLT16_NORM_MAX__", "6.5504e+4F16" },
+};
+
+/* avr-gcc's __builtin_avr_* that EmbCC has beyond those clang's AVR
+ * table names (src/sema/sema.c avr_builtin), each with the macro avr-gcc
+ * defines for it */
+static const struct predef_macro avr_builtin_add[] = {
+    { "__BUILTIN_AVR_DELAY_CYCLES", "1" },
+    { "__BUILTIN_AVR_FMUL", "1" },
+    { "__BUILTIN_AVR_FMULS", "1" },
+    { "__BUILTIN_AVR_FMULSU", "1" },
+    { "__BUILTIN_AVR_INSERT_BITS", "1" },
+    { "__BUILTIN_AVR_NOPS", "1" },
+};
+
+/* __bf16 is EmbCC's on every target too; GCC's values, as its x86-64 and
+ * AArch64 tables carry them */
+static const struct predef_macro bflt16_add[] = {
+    { "__BFLT16_DECIMAL_DIG__", "4" },
+    { "__BFLT16_DENORM_MIN__", "9.18354961579912115600575419704879436e-41BF16" },
+    { "__BFLT16_DIG__", "2" },
+    { "__BFLT16_EPSILON__", "7.81250000000000000000000000000000000e-3BF16" },
+    { "__BFLT16_HAS_DENORM__", "1" },
+    { "__BFLT16_HAS_INFINITY__", "1" },
+    { "__BFLT16_HAS_QUIET_NAN__", "1" },
+    { "__BFLT16_IS_IEC_60559__", "0" },
+    { "__BFLT16_MANT_DIG__", "8" },
+    { "__BFLT16_MAX_10_EXP__", "38" },
+    { "__BFLT16_MAX_EXP__", "128" },
+    { "__BFLT16_MAX__", "3.38953138925153547590470800371487867e+38BF16" },
+    { "__BFLT16_MIN_10_EXP__", "(-37)" },
+    { "__BFLT16_MIN_EXP__", "(-125)" },
+    { "__BFLT16_MIN__", "1.17549435082228750796873653722224568e-38BF16" },
+    { "__BFLT16_NORM_MAX__", "3.38953138925153547590470800371487867e+38BF16" },
+};
+
+static int table_has(const struct predef_macro *t, int n, const char *name)
+{
+    for (int i = 0; i < n; i++)
+        if (!strcmp(t[i].name, name))
+            return 1;
+    return 0;
+}
+
 static int contradicted(const char *name)
 {
     if (darwin_a64()) {
@@ -443,8 +544,15 @@ const struct predef_macro *predef_table(int *count)
     int dsp = thumb_dsp();
     int avr = avr_other_part();
     int pic32 = target_pic32_part() != NULL;
-    if (!os && !fpu && !cmse && !rv && !dsp && !avr && !pic32 &&
-        target_fmt_get() == TGT_FMT_ELF) {
+    /* (C only: the C++ front end has neither _Float16 nor __bf16, and
+     * libstdc++ declares each where __FLT16_DIG__ or __BFLT16_DIG__ says
+     * it may) */
+    int f16 = !predef_is_cxx() && !table_has(arch, narch, "__FLT16_MANT_DIG__");
+    int bf16 = !predef_is_cxx() &&
+               !table_has(arch, narch, "__BFLT16_MANT_DIG__");
+    int avrb = target_get() == TARGET_AVR;
+    if (!os && !fpu && !cmse && !rv && !dsp && !avr && !pic32 && !f16 &&
+        !bf16 && !avrb && target_fmt_get() == TGT_FMT_ELF) {
         *count = narch;
         return arch;
     }
@@ -452,7 +560,12 @@ const struct predef_macro *predef_table(int *count)
     static struct predef_macro *merged;
     static int nmerged;
     if (!merged) {
-        merged = xmalloc((size_t)(narch + nos + 40 + ndarwin_a64_model) *
+        merged = xmalloc((size_t)(narch + nos + 40 + N_RV_LOCK_FREE +
+                                  ndarwin_a64_model +
+                                  (int)(sizeof flt16_add / sizeof *flt16_add) +
+                                  (int)(sizeof bflt16_add / sizeof *bflt16_add) +
+                                  (int)(sizeof avr_builtin_add /
+                                        sizeof *avr_builtin_add)) *
                          sizeof *merged);
         for (int i = 0; i < narch; i++)
             if (!contradicted(arch[i].name))
@@ -479,6 +592,16 @@ const struct predef_macro *predef_table(int *count)
 #endif
         if (pic32)
             nmerged += pic32_adds(merged + nmerged);
+        if (f16)
+            for (size_t i = 0; i < sizeof flt16_add / sizeof *flt16_add; i++)
+                merged[nmerged++] = flt16_add[i];
+        if (bf16)
+            for (size_t i = 0; i < sizeof bflt16_add / sizeof *bflt16_add; i++)
+                merged[nmerged++] = bflt16_add[i];
+        if (avrb)
+            for (size_t i = 0; i < sizeof avr_builtin_add / sizeof *avr_builtin_add;
+                 i++)
+                merged[nmerged++] = avr_builtin_add[i];
         if (fpu && target_arm_a32()) {
             int v4 = target_arm_vfp(NULL) == 4;
             const struct predef_macro *add = v4 ? a32_vfp4_add : a32_vfp3_add;

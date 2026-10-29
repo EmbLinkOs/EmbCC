@@ -247,8 +247,10 @@ grep -q "IN: __vector_13" "$out/trace.log" || {
     echo "the hardware never dispatched to the handler. The vector slot is
     right, so either the interrupt was not enabled or the table is not at
     address 0"; exit 1; }
-# and the prologue really ran, in order
-awk '/IN: __vector_13/{n++} n==1' "$out/trace.log" > "$out/first"
+# and the prologue really ran, in order: every block QEMU translated of
+# the handler (QEMU 8.2 ends one at each 256-byte page, so a prologue can
+# straddle two)
+awk '/^IN:/{keep = /IN: __vector_13$/} keep' "$out/trace.log" > "$out/first"
 for want in "PUSH      r0" "IN        r0, \$63" "PUSH      r1" "EOR       r1, r1"; do
     grep -q "$want" "$out/first" || {
         echo "the handler was entered but its prologue did not run '$want':"

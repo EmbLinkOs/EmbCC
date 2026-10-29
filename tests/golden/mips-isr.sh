@@ -10,7 +10,7 @@
 #
 #   THE BAD FORMS are refused by name: parameters, a result, an argument
 #   that names no mode, keep_interrupts_masked alone, GCC's
-#   use_shadow_register_set and use_debug_exception_return, MIPS64.
+#   use_shadow_register_set and use_debug_exception_return.
 #
 #   THE SHAPE, against clang and against the rule: each form's Status
 #   sequence (the RIPL into IPL, IM0..IMn cleared, or IE with EXL), di and
@@ -34,9 +34,11 @@ set -u
 if [ "${MIPS_BE:-0}" = 1 ]; then
     NAME=mips-be-isr T=mips-none-elf CT=mips-unknown-elf
     QEMU=${EMBCC_QEMU_MIPSEB:-qemu-system-mips}
+    T64=mips64-none-elf QEMU64=${EMBCC_QEMU_MIPS64EB:-qemu-system-mips64}
 else
     NAME=mips-isr T=mipsel-none-elf CT=mipsel-unknown-elf
     QEMU=${EMBCC_QEMU_MIPS:-qemu-system-mipsel}
+    T64=mips64el-none-elf QEMU64=${EMBCC_QEMU_MIPS64:-qemu-system-mips64el}
 fi
 echo "TEST-MARKER $NAME"
 . "$(dirname "$0")/../lib.sh"
@@ -81,8 +83,6 @@ refuse $T '__attribute__((interrupt, use_debug_exception_return)) void h(void) {
     'use_debug_exception_return)) is not supported'
 refuse $T '__attribute__((interrupt)) void h(void); __attribute__((interrupt("vector=sw1"))) void h(void) { }' \
     'different kind of interrupt handler'
-refuse mips64el-none-elf '__attribute__((interrupt)) void h(void) { }' \
-    'interrupt)) is not supported'
 echo "the bad forms are refused by name"
 
 # ---- the shape --------------------------------------------------------
@@ -200,6 +200,36 @@ for O in -O0 -O1 -O2 -Os; do
 done
 [ -n "$OBJDUMP" ] && echo "each form's Status sequence, di/ehb, eret; clang's set when calling, exactly what is written otherwise, HI/LO when used; -O0..-Os"
 
+# MIPS64 (n64): the same handlers, every slot a doubleword -- the GPRs and
+# HI/LO saved with sd, EPC moved with dmfc0 and dmtc0 -- which a handler
+# saving only the low words would not do. (clang ignores the attribute on
+# MIPS64, with a warning; GCC implements it.)
+for O in -O0 -O2; do
+    [ -n "$OBJDUMP" ] || break
+    o=$out/shape64$O
+    "$EMBCC" --target=$T64 $O -c "$out/shape.c" -o "$o.o" ||
+        fail "$O: shape.c did not compile for $T64"
+    "$OBJDUMP" -d --no-show-raw-insn "$o.o" > "$o.dis"
+    for fn in eic hw5 sw0 masked calls mcalls big; do
+        b=$(fn_body "$o.dis" $fn)
+        for want in 'dmfc0[[:space:]]+\$27, \$14' 'dmtc0[[:space:]]+\$27, \$14' \
+                    'sd[[:space:]]+\$' 'ld[[:space:]]+\$' 'eret$'; do
+            echo "$b" | grep -qE "[[:space:]]$want" ||
+                { echo "$b"; fail "$T64 $O: $fn has no '$want'"; }
+        done
+        echo "$b" | grep -qE "[[:space:]]jr[[:space:]]+\\\$ra" &&
+            fail "$T64 $O: $fn returns with jr \$ra"
+        # no GPR is saved as a word: the stores to sp after the Status
+        # mtc0 (the saves, saves() reads the same block) are all sd
+        n=$(echo "$b" | awk '/mtc0.*\$12/ { on = 1; next }
+            on && ($2 == "sd" || $2 == "sw") && $4 ~ /\(\$sp\)$/ {
+                if ($2 == "sw") print; next }
+            on { exit }' | wc -l | tr -d ' ')
+        [ "$n" = 0 ] || { echo "$b"; fail "$T64 $O: $fn saves a register as a word"; }
+    done
+done
+[ -n "$OBJDUMP" ] && echo "MIPS64: every handler moves EPC with dmfc0/dmtc0 and saves doublewords"
+
 # ---- the run ----------------------------------------------------------
 command -v "$QEMU" >/dev/null 2>&1 || { echo "(SKIP: no $QEMU)"; exit 0; }
 want="A 0 0 1 1
@@ -234,3 +264,36 @@ for O in -O0 -O1 -O2 -Os; do
     echo "  $O: interrupts per phase A B C = $1 $2 $3, software interrupts $4, of them interrupted by the timer $5"
 done
 echo "every caller-saved register and HI/LO survive hundreds of timer interrupts per phase: masked, calling, and nested handlers, -O0..-Os"
+
+# ...and on MIPS64 (malta's 5KEc), with torture64.S: 64-bit patterns
+# whose upper halves are not the sign extension of the lower, so a word
+# saved where a doubleword is needed shows
+command -v "$QEMU64" >/dev/null 2>&1 || { echo "(SKIP the MIPS64 run: no $QEMU64)"; exit 0; }
+mkdir -p "$out/m64"
+export EMBCC_MIPS64_HARNESS="$PWD/$out/m64"
+for f in boot io; do
+    "$EMBCC" --target=$T64 -O1 -c tests/harness/mips/$f.c -o "$out/m64/$f.o" ||
+        fail "the harness does not compile for $T64"
+done
+"$EMBCC" --target=$T64 -c $d/torture64.S -o "$out/m64/torture.o" ||
+    fail "torture64.S does not assemble"
+for O in -O0 -O1 -O2 -Os; do
+    "$EMBCC" --target=$T64 $O -c $d/main.c -o "$out/m64/main$O.o" ||
+        fail "$T64 $O: main.c does not compile"
+    sh tests/harness/mips64/link.sh "$out/m64/t$O.elf" "$out/m64/main$O.o" \
+        "$out/m64/torture.o" || fail "$T64 $O: does not link"
+    tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-30}" --until "==EXIT [0-9]* ==" \
+        "$QEMU64" -M malta -cpu 5KEc -m 64 -display none -monitor none \
+        -serial null -serial null -serial stdio -no-reboot -icount shift=0 \
+        -kernel "$out/m64/t$O.elf" 2>/dev/null | tr -d '\r' > "$out/m64/t$O.out"
+    got=$(head -3 "$out/m64/t$O.out" | sed 's/ *$//')
+    if [ "$got" != "$want" ] || ! grep -q '==EXIT 42 ==' "$out/m64/t$O.out"; then
+        echo "$T64 $O: wanted"; echo "$want"; echo "and ==EXIT 42, got:"
+        head -c 400 "$out/m64/t$O.out"; echo
+        fail "$T64 $O: a handler changed the interrupted code's registers"
+    fi
+    set -- $(sed -n 4p "$out/m64/t$O.out")
+    [ "${6:-x}" = 0 ] || fail "$T64 $O: unexpected exceptions: $*"
+    echo "  MIPS64 $O: interrupts per phase A B C = $1 $2 $3, software interrupts $4, of them interrupted by the timer $5"
+done
+echo "MIPS64: every 64-bit register and HI/LO survive the same phases, -O0..-Os"

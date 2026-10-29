@@ -15,15 +15,22 @@
  * r0-r7, so r8-r11, sp and lr go through r1-r3 three at a time.
  *
  * longjmp(env, 0) makes setjmp return 1 (C11 7.13.2.1p4). */
+/* The symbols' names: lib/rt/builtin-setjmp.c builds this file again as
+ * __builtin_setjmp's and __builtin_longjmp's own pair. */
+#ifndef SJ_SETJMP
+#define SJ_SETJMP  "setjmp"
+#define SJ_LONGJMP "longjmp"
+#endif
+
 #if defined(__thumb__)
 
 #if defined(__thumb2__)
 __asm__(
 ".text\n"
-".globl setjmp\n"
-".type setjmp, %function\n"
+".globl " SJ_SETJMP "\n"
+".type " SJ_SETJMP ", %function\n"
 ".thumb_func\n"
-"setjmp:\n"
+ SJ_SETJMP ":\n"
 "    mov r12, sp\n"
 "    stmia r0, {r4-r12, lr}\n"
 #if defined(__ARM_FP)
@@ -32,12 +39,12 @@ __asm__(
 #endif
 "    movs r0, #0\n"
 "    bx lr\n"
-".size setjmp, .-setjmp\n"
+".size " SJ_SETJMP ", .-" SJ_SETJMP "\n"
 
-".globl longjmp\n"
-".type longjmp, %function\n"
+".globl " SJ_LONGJMP "\n"
+".type " SJ_LONGJMP ", %function\n"
 ".thumb_func\n"
-"longjmp:\n"
+ SJ_LONGJMP ":\n"
 #if defined(__ARM_FP)
 "    add r2, r0, #40\n"
 "    vldmia r2, {s16-s31}\n"
@@ -48,15 +55,15 @@ __asm__(
 "    bne 1f\n"
 "    movs r0, #1\n"
 "1:  bx lr\n"
-".size longjmp, .-longjmp\n"
+".size " SJ_LONGJMP ", .-" SJ_LONGJMP "\n"
 );
 #else
 __asm__(
 ".text\n"
-".globl setjmp\n"
-".type setjmp, %function\n"
+".globl " SJ_SETJMP "\n"
+".type " SJ_SETJMP ", %function\n"
 ".thumb_func\n"
-"setjmp:\n"
+ SJ_SETJMP ":\n"
 "    stmia r0!, {r4-r7}\n"
 "    mov r1, r8\n"
 "    mov r2, r9\n"
@@ -68,12 +75,12 @@ __asm__(
 "    stmia r0!, {r1-r3}\n"
 "    movs r0, #0\n"
 "    bx lr\n"
-".size setjmp, .-setjmp\n"
+".size " SJ_SETJMP ", .-" SJ_SETJMP "\n"
 
-".globl longjmp\n"
-".type longjmp, %function\n"
+".globl " SJ_LONGJMP "\n"
+".type " SJ_LONGJMP ", %function\n"
 ".thumb_func\n"
-"longjmp:\n"
+ SJ_LONGJMP ":\n"
 "    adds r0, #16\n"              /* r8 onwards, through r2-r7 */
 "    ldmia r0!, {r2-r7}\n"
 "    mov r8, r2\n"
@@ -88,7 +95,7 @@ __asm__(
 "    bne 1f\n"
 "    movs r0, #1\n"
 "1:  bx lr\n"
-".size longjmp, .-longjmp\n"
+".size " SJ_LONGJMP ", .-" SJ_LONGJMP "\n"
 );
 #endif
 

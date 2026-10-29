@@ -14,7 +14,12 @@
 # is how a program ends up without the routine it calls.
 #
 # -Os: this is firmware, and the library is linked into every image -- an
-# archive, so an image pays only for the members it uses.
+# archive, so an image pays only for the members it uses. And a section per
+# function and per object (--sections=functions,data), so an image linked
+# with --gc-sections pays only for the functions it reaches, not for every
+# function in the files they are in: printf on a Cortex-M4 is 8 KB where it
+# was 16, strtod with snprintf's %f 19 KB where it was 78. Linked without
+# --gc-sections the image is the same size as before.
 set -eu
 triple=$1
 out=$2
@@ -30,6 +35,15 @@ case $triple in
              ilp32d) flags="-march=rv32imafdc -mabi=ilp32d" ;;
              lp64f)  flags="-march=rv64imafc -mabi=lp64f" ;;
              lp64d)  flags="-march=rv64imafdc -mabi=lp64d" ;;
+             # without the A extension (an ESP32-C3's rv32imc)
+             noa) case $triple in
+                      riscv64*) flags="-march=rv64imc" ;;
+                      *)        flags="-march=rv32imc" ;;
+                  esac ;;
+             ilp32f-noa) flags="-march=rv32imfc -mabi=ilp32f" ;;
+             ilp32d-noa) flags="-march=rv32imfdc -mabi=ilp32d" ;;
+             lp64f-noa)  flags="-march=rv64imfc -mabi=lp64f" ;;
+             lp64d-noa)  flags="-march=rv64imfdc -mabi=lp64d" ;;
              *) echo "$0: no library variant '$abi' for $triple" >&2; exit 1 ;;
          esac ;;
 esac
@@ -46,7 +60,8 @@ for f in "$here"/lib/libc/src/*/*.c "$here"/lib/libc/src/math/fdlibm/*.c \
          "$here"/lib/libc/os/baremetal/backend.c; do
     o=$(echo "${f#$here/}" | tr / _ | sed 's/\.c$/.o/')
     # shellcheck disable=SC2086
-    "$EMBCC" --target="$triple" $flags -fenum-size-neutral -Os -I"$here/lib/libc/include" \
+    "$EMBCC" --target="$triple" $flags -fenum-size-neutral -Os --sections=functions,data \
+        -I"$here/lib/libc/include" \
         -I"$here/lib/libc/src/math" -c "$f" -o "$out/c/$o" || {
         echo "build-libc: ${f#$here/} does not compile for $triple" >&2
         exit 1; }

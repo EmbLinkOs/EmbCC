@@ -220,6 +220,12 @@ struct ldf {
 
 struct fmtinfo { int p; long emin, emax; int bias; };
 
+static int fmt_bytes(enum ldf_fmt f)
+{
+    return f == LDF_HALF || f == LDF_BF16 ? 2 : f == LDF_FLOAT ? 4
+         : f == LDF_DOUBLE ? 8 : 16;
+}
+
 static struct fmtinfo finfo(enum ldf_fmt f)
 {
     struct fmtinfo i;
@@ -227,6 +233,8 @@ static struct fmtinfo finfo(enum ldf_fmt f)
     case LDF_X87:    i.p = 64;  i.emin = -16382; i.emax = 16383; i.bias = 16383; break;
     case LDF_QUAD:   i.p = 113; i.emin = -16382; i.emax = 16383; i.bias = 16383; break;
     case LDF_DOUBLE: i.p = 53;  i.emin = -1022;  i.emax = 1023;  i.bias = 1023;  break;
+    case LDF_HALF:   i.p = 11;  i.emin = -14;    i.emax = 15;    i.bias = 15;    break;
+    case LDF_BF16:   i.p = 8;   i.emin = -126;   i.emax = 127;   i.bias = 127;   break;
     default:         i.p = 24;  i.emin = -126;   i.emax = 127;   i.bias = 127;   break;
     }
     return i;
@@ -525,7 +533,7 @@ static unsigned long low64(struct big m, long k)
 void ldf_encode(const struct ldf *a, enum ldf_fmt fmt, unsigned char *out)
 {
     struct fmtinfo fi = finfo(fmt);
-    int nbytes = fmt == LDF_DOUBLE ? 8 : fmt == LDF_FLOAT ? 4 : 16;
+    int nbytes = fmt_bytes(fmt);
     memset(out, 0, (size_t)nbytes);
     unsigned long biased = 0;
     struct big mant = big_new(1);            /* the stored significand field */
@@ -564,6 +572,10 @@ void ldf_encode(const struct ldf *a, enum ldf_fmt fmt, unsigned char *out)
         hi = low64(mant, 64) | biased << 48 | sign << 63;
     } else if (fmt == LDF_DOUBLE) {
         lo |= biased << 52 | sign << 63;
+    } else if (fmt == LDF_HALF) {
+        lo |= biased << 10 | sign << 15;
+    } else if (fmt == LDF_BF16) {
+        lo |= biased << 7 | sign << 15;
     } else {
         lo |= biased << 23 | sign << 31;
     }
@@ -590,7 +602,7 @@ void ldf_encode(const struct ldf *a, enum ldf_fmt fmt, unsigned char *out)
 struct ldf *ldf_from_bytes(const unsigned char *in, enum ldf_fmt fmt)
 {
     struct fmtinfo fi = finfo(fmt);
-    int nbytes = fmt == LDF_DOUBLE ? 8 : fmt == LDF_FLOAT ? 4 : 16;
+    int nbytes = fmt_bytes(fmt);
 
     unsigned long lo = 0, hi = 0;
     for (int i = 0; i < 8 && i < nbytes; i++)
@@ -618,6 +630,14 @@ struct ldf *ldf_from_bytes(const unsigned char *in, enum ldf_fmt fmt)
         neg = (int)(lo >> 63) & 1;
         biased = (lo >> 52) & 0x7ff;
         mant = big_from_u64(lo & 0xfffffffffffffUL);
+    } else if (fmt == LDF_HALF) {
+        neg = (int)(lo >> 15) & 1;
+        biased = (lo >> 10) & 0x1f;
+        mant = big_from_u64(lo & 0x3ffUL);
+    } else if (fmt == LDF_BF16) {
+        neg = (int)(lo >> 15) & 1;
+        biased = (lo >> 7) & 0xff;
+        mant = big_from_u64(lo & 0x7fUL);
     } else {
         neg = (int)(lo >> 31) & 1;
         biased = (lo >> 23) & 0xff;
@@ -682,7 +702,7 @@ long ldf_to_long(const struct ldf *a)
 int ldf_encode_target(const struct ldf *a, enum ldf_fmt fmt,
                       unsigned char *out)
 {
-    int n = fmt == LDF_FLOAT ? 4 : fmt == LDF_DOUBLE ? 8 : 16;
+    int n = fmt_bytes(fmt);
     ldf_encode(a, fmt, out);
     if (target_big_endian()) {
         if (fmt == LDF_X87)

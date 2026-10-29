@@ -103,8 +103,7 @@ refc "__builtin_frame_address(1)" 'only level 0' \
     'void *f(void){ return __builtin_frame_address(1); }'
 refc "__int128" '__int128 does not exist on this target' \
     '__int128 x;'
-refc "an interrupt handler" '__attribute__((interrupt)) is not supported' \
-    'void __attribute__((interrupt)) f(void){}'
+# (an interrupt handler compiles: tests/golden/tricore-isr.sh)
 printf 'int f(int x) { return x; }\n' > "$out/c.cc"
 # C++ compiles here without exceptions (tests/golden/cxx-embedded.sh runs
 # it); exceptions, on by default, are refused by name: there are no
@@ -134,7 +133,7 @@ grep -q 'R_TRICORE_15REL' "$out/as.err" || {
     echo "a conditional branch to a symbol was refused, but not by name:"
     cat "$out/as.err"; exit 1; }
 echo "narrow atomics, the frame and return address above level 0,"
-echo "__int128, interrupt functions, an over-aligned scalar, C++ exceptions and a"
+echo "__int128, an over-aligned scalar, C++ exceptions and a"
 echo "conditional branch to an external symbol are each refused by name"
 
 # ---- the link -------------------------------------------------------------

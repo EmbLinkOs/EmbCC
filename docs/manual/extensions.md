@@ -293,7 +293,8 @@ struct msg hello = { 5, { 'h', 'e', 'l', 'l', 'o' } };
 | Integer complex types (`_Complex int`) | Supported; see [Complex types](c-language.md#complex-types) |
 | `_Float32`, `_Float64` | The same types as `float` and `double` |
 | `_Float128`, `__float128` | AArch64 ELF and Linux targets, where `long double` is IEEE binary128. Refused on x86-64 (`_Float128 is not supported on x86-64: ...`) and on Apple arm64, Cortex-M and AVR (`_Float128 is not supported on this target: it has no 128-bit floating-point type`); on RISC-V its operations are refused like those of `long double` |
-| `_Float16`, `__fp16` | Not supported: ``_Float16/__fp16 is not supported: EmbCC has no 16-bit floating-point type, and widening it to `float` would give 24 bits of mantissa where the program asked for 11`` |
+| `_Float16`, `__fp16` | Supported on every target; see [Half-precision floating point](c-language.md#half-precision-floating-point). `_Float16` through `...` is refused |
+| `__bf16` (bfloat16), and the `bf16` constant suffix | Supported on every target, where GCC has it on x86-64, AArch64 and ARM; see [Half-precision floating point](c-language.md#half-precision-floating-point) |
 | `_Float32x`, `_Decimal32` and the other interchange and decimal types | Not supported (`expected a type before '_Float32x'`) |
 
 The size, alignment and format of each type per target are in
@@ -440,7 +441,7 @@ embcc: attr.c:1: warning: attribute 'frobnicate' is not one EmbCC knows, and is 
 | `warn_unused_result`, `[[nodiscard]]` | Discarding the result warns under [`--warn=unused-result`](diagnostics.md#--warnunused-result), on by default |
 | `weak` | On a definition, the symbol is weak and another definition overrides it at link time. On a declaration, the reference is weak: the function's address is null if no definition is linked. `weak` on any declaration of a function makes it weak |
 | `interrupt`, `signal` | Interrupt handlers. See [Interrupt handlers](#interrupt-handlers) |
-| `keep_interrupts_masked` | MIPS32 only, with `interrupt`: interrupts stay disabled in the handler. See [Interrupt handlers](#interrupt-handlers) |
+| `keep_interrupts_masked` | MIPS32 and MIPS64, with `interrupt`: interrupts stay disabled in the handler. See [Interrupt handlers](#interrupt-handlers) |
 
 `constructor(N)` and `destructor(N)` take a priority, as in GCC. The
 address goes in a section of its own, `.init_array.NNNNN` or
@@ -679,8 +680,10 @@ supported: REASON`:
 |---|---|
 | `cleanup` | `the cleanup function would never run` |
 | `ifunc` | `the resolver would never run and calls would go to it rather than to the implementation it picks` |
-| `interrupt` | On every target but Cortex-M, AVR, RISC-V and MIPS32; see [Interrupt handlers](#interrupt-handlers) |
-| `keep_interrupts_masked` | `it modifies a MIPS interrupt handler, and only the MIPS32 target implements those` (on every target but MIPS32) |
+| `interrupt` | On every target but Cortex-M, ARMv7-A, AVR, RISC-V, MIPS, RX, ColdFire and TriCore; see [Interrupt handlers](#interrupt-handlers) |
+| `interrupt_handler` | `it is the m68k port's interrupt handler, implemented on the ColdFire target only` (on every target but ColdFire) |
+| `interrupt_thread` | `it makes a Fido interrupt thread, which switches register banks a ColdFire does not have; use __attribute__((interrupt))` |
+| `keep_interrupts_masked` | `it modifies a MIPS interrupt handler, and only the MIPS targets implement those` (on every target but MIPS32 and MIPS64) |
 | `ms_abi` | `the arguments would be passed in System V's registers` |
 | `naked` | On x86-64 and Apple arm64; see [Naked functions](inline-asm.md#naked-functions) |
 | `signal` | On every target but AVR; see [Interrupt handlers](#interrupt-handlers) |
@@ -718,17 +721,21 @@ vector table, a startup routine and handlers for each board is in
 |---|---|---|
 | AVR | Implemented. The handler saves `r0`, `SREG`, `r1`, the call-clobbered registers and the frame pointer, clears `r1`, re-enables interrupts with `sei` on entry, and returns with `reti` | Implemented, as `interrupt` without the `sei`: interrupts stay disabled in the body |
 | Cortex-M | Accepted; the code is the same as without it, because the processor saves the caller-saved registers on exception entry and an ordinary return performs the exception return. An argument such as `interrupt("IRQ")` is accepted | Refused |
+| ARMv7-A | Implemented in ARM state, with GCC's `"IRQ"` (the default), `"FIQ"`, `"ABORT"`, `"SWI"` and `"UNDEF"`: the handler pushes `r0`-`r3`, `r12` and `lr` with the callee-saved registers it uses, IRQ, FIQ and ABORT first take 4 off `lr`, and it returns with `ldm sp!, {..., pc}^`. A handler built for an FPU is refused (its VFP registers would not be saved) | Refused |
 | RISC-V | Implemented, with `"machine"` (the default, returning with `mret`) and `"supervisor"` (`sret`). The handler saves the caller-saved registers it writes, and all of them, floating point included, when it calls; it is 4-byte aligned. `"user"` is refused | Refused |
-| MIPS32 | Implemented, with `"eic"` (the default), `"vector=sw0"`..`"vector=hw5"` and `keep_interrupts_masked`. The handler saves `EPC`, `Status`, the caller-saved registers it writes and `HI`/`LO`, all of them and `gp` when it calls, and returns with `eret`. `use_shadow_register_set` and `use_debug_exception_return` are refused | Refused |
-| x86-64, AArch64, MIPS64 and the other targets | Refused | Refused |
+| MIPS32, MIPS64 | Implemented, with `"eic"` (the default), `"vector=sw0"`..`"vector=hw5"` and `keep_interrupts_masked`. The handler saves `EPC`, `Status`, the caller-saved registers it writes and `HI`/`LO`, all of them and `gp` when it calls, and returns with `eret`; on MIPS64 every save is a doubleword and `EPC` moves with `dmfc0`/`dmtc0`, as GCC's n64 handlers have it (clang ignores the attribute there). `use_shadow_register_set` and `use_debug_exception_return` are refused | Refused |
+| Renesas RX | Implemented, as rx-elf-gcc makes it: the handler pushes the caller-saved `r1`-`r5`, `r14` and `r15` and the callee-saved registers it uses with `pushm`, and returns with `rte`. GCC's `interrupt(N)` (a vector-table slot for GNU ld to fill) and `fast_interrupt` are refused | Refused |
+| TriCore | Implemented, as HighTec's GCC makes it: the handler saves the lower context with `svlcx` (the hardware has saved the upper one) and returns with `rslcx` and `rfe`; it serves a trap as well. An argument is refused | Refused |
+| ColdFire | Implemented, as GCC's m68k port makes it, and spelled `interrupt_handler` too: the handler saves `d0`, `d1`, `a0` and `a1` with the callee-saved registers it uses in one `movem`, and returns with `rte`. `interrupt_thread` (the Fido's) and an argument are refused | Refused |
+| x86-64, AArch64 and the other targets | Refused | Refused |
 
-On RISC-V and MIPS32 a handler with parameters or a non-`void` result is
+On RISC-V, MIPS, RX, ColdFire, TriCore and ARMv7-A a handler with parameters or a non-`void` result is
 refused, and so is a function given two different kinds; the attribute
 may be on a prototype, on the definition or on both. In C++ the attribute
 is refused except on Cortex-M. The refusals read:
 
 ```text
-embcc: isr.c:2: error: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V and MIPS32 it is implemented)
+embcc: isr.c:2: error: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS, RX, ColdFire, TriCore and ARMv7-A it is implemented)
 embcc: isr.c:2: error: __attribute__((signal)) is not supported: an interrupt handler needs the machine's own return instruction and every register saved, which only the AVR backend does
 embcc: isr.c:2: error: interrupt handler 'isr' takes parameters: the hardware calls it, so nothing passes them, and they would be read out of whatever the interrupted code left in the argument registers
 embcc: isr.c:2: error: interrupt handler 'isr' returns a value: the interrupt return goes back to the interrupted instruction, and nothing there receives it -- it must return void
@@ -790,12 +797,22 @@ on AVR, without changing its type; it is read with `pgm_read_byte()` and
 the rest of `<avr/pgmspace.h>`. On other targets it is ignored with a
 `--warn=attributes` warning.
 
-The predefined macros `__BUILTIN_AVR_CLI`, `__BUILTIN_AVR_SEI`,
-`__BUILTIN_AVR_NOP`, `__BUILTIN_AVR_SLEEP`, `__BUILTIN_AVR_SWAP` and
-`__BUILTIN_AVR_WDR` are defined, but the `__builtin_avr_*` functions
-are not implemented (`'__builtin_avr_sei' is not declared in 'f' — for a
-call, add a prototype or define it first [E0001]`). Use inline
-assembly, for example `__asm__ volatile("sei")`.
+avr-gcc's `__builtin_avr_*` are there, each with the `__BUILTIN_AVR_*`
+macro avr-gcc predefines for it:
+
+| Builtin | Effect |
+|---|---|
+| `__builtin_avr_sei()`, `__builtin_avr_cli()` | `sei`, `cli`, as memory barriers (avr-libc's `sei()` and `cli()`) |
+| `__builtin_avr_sleep()`, `__builtin_avr_wdr()`, `__builtin_avr_nop()` | `sleep`, `wdr`, `nop` |
+| `__builtin_avr_nops(n)` | `n` nops, `n` a constant up to 4096 |
+| `__builtin_avr_delay_cycles(n)` | Exactly `n` cycles of an ATmega's clock, `n` a constant up to 4294967295: a loop on a counter of one to four bytes in `r24` up, and `rjmp .+0` and `nop` for the remainder |
+| `__builtin_avr_swap(x)` | `x`'s nibbles exchanged, an `unsigned char` |
+| `__builtin_avr_fmul(a, b)`, `fmuls`, `fmulsu` | `(a * b) << 1`, the product of two 1.7 fractions: unsigned, signed, signed by unsigned; `unsigned int` or `int` |
+| `__builtin_avr_insert_bits(map, bits, val)` | Bit `i` of the result is bit `map[i]` of `bits` (nibble `i` of the constant `map`, 0 to 7), or bit `i` of `val` where the nibble is 0xf |
+
+They are AVR's alone: on another target `__has_builtin` says no, and a
+call is an undeclared function. `__builtin_avr_flash_segment` (it needs
+`__memx`) and the fixed-point ones (`_Fract`, `_Accum`) are not there.
 
 ## Builtin functions
 
@@ -809,7 +826,7 @@ function name, such as `memcpy` or `printf`, as a builtin, with or without
 A `__builtin_` name EmbCC does not implement is an undeclared function:
 
 ```text
-embcc: f.c:1:29: error: '__builtin_shufflevector' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
+embcc: f.c:1:22: error: '__builtin_cpu_supports' is not declared in 'f' — for a call, add a prototype or define it first [E0001]
 ```
 
 Whether a builtin is available does not depend on the target, but its
@@ -831,7 +848,53 @@ compiled.
 All return `int`, take an integer argument, and compile on every target.
 The operand width is the target's: `long` is 32 bits on Cortex-M, RV32
 and AVR, and `int` is 16 bits on AVR. GCC leaves `clz` and `ctz` of zero
-undefined; EmbCC returns a value, which code should not depend on.
+undefined; EmbCC returns the operand's width, as GCC folds them, which
+code should not depend on.
+
+GCC 14's type-generic forms count at the operand's own width, whatever
+unsigned integer type it is, `unsigned char` to `unsigned __int128` (and
+`_BitInt` up to 64 bits); `ffsg` and `clrsbg` take a signed one. `bool`
+and an enumeration are refused, as GCC refuses them (`__builtin_clzg
+takes an unsigned integer type, as in GCC, not int`). All return `int`:
+
+| Builtin | Result |
+|---|---|
+| `__builtin_clzg(x)`, `__builtin_clzg(x, z)` | Leading zero bits; `z`, an `int`, when `x` is 0 (without it, the width) |
+| `__builtin_ctzg(x)`, `__builtin_ctzg(x, z)` | Trailing zero bits; `z` when `x` is 0 |
+| `__builtin_popcountg(x)`, `__builtin_parityg(x)` | One bits; their number modulo 2 |
+| `__builtin_ffsg(x)`, `__builtin_clrsbg(x)` | As `ffs` and `clrsb`, at `x`'s width |
+
+C23's `<stdbit.h>` operations as builtins (GCC 15's), type-generic the
+same way -- EmbCC's own `<stdbit.h>` needs none of them, but code written
+for GCC calls them by name:
+
+| Builtin | Result |
+|---|---|
+| `__builtin_stdc_leading_zeros(x)`, `_leading_ones`, `_trailing_zeros`, `_trailing_ones` | The count, the width for an `x` that is all one or the other |
+| `__builtin_stdc_first_leading_zero(x)`, `_first_leading_one`, `_first_trailing_zero`, `_first_trailing_one` | One plus that bit's position, counted from its end; 0 when there is none |
+| `__builtin_stdc_count_zeros(x)`, `_count_ones` | The number of such bits |
+| `__builtin_stdc_has_single_bit(x)` | Whether `x` is a power of two, as `bool` |
+| `__builtin_stdc_bit_width(x)` | The bits needed to represent `x`: 0 for 0 |
+| `__builtin_stdc_bit_floor(x)`, `_bit_ceil(x)` | The largest power of two not above `x` (0 for 0) and the smallest not below it (1 for 0 and 1; 0 when it is past the type), in `x`'s type |
+| `__builtin_stdc_rotate_left(x, n)`, `_rotate_right(x, n)` | `x` rotated by `n` modulo the width -- a negative `n` the other way -- in `x`'s type |
+
+The counts are `unsigned int`. A width that is not a power of two is
+refused for the rotates, and above 64 bits only `__int128` is taken.
+
+Every builtin in this section -- and the byte swaps and clang's bit
+reversals and rotates below -- is a constant when its operands are, as in
+GCC and clang: `_Static_assert(__builtin_popcount(MASK) == 4, "")`, an
+array size, a case label, or a register field's shift written
+`__builtin_ctz(FIELD_MASK)` in a static table's initializer.
+
+clang's bit reversals and rotates take and return the unsigned type of
+their width (`uint8_t` to `uint64_t`):
+
+| Builtin | Result |
+|---|---|
+| `__builtin_bitreverse8(x)`, `16`, `32`, `64` | `x` with the order of its bits reversed |
+| `__builtin_rotateleft8(x, n)`, `16`, `32`, `64` | `x` rotated left by `n` modulo the width |
+| `__builtin_rotateright8(x, n)`, `16`, `32`, `64` | `x` rotated right by `n` modulo the width |
 
 ### Byte swapping
 
@@ -893,6 +956,7 @@ are refused (`the RV32 backend cannot lower a 128-bit value yet ...`).
 | `__builtin_isfinite(x)` | 1 if `x` is neither infinite nor NaN |
 | `__builtin_isnormal(x)` | 1 if `x` is a normal number: not zero, subnormal, infinite or NaN |
 | `__builtin_isinff(x)`, `isinfl`, `isnanf`, `isnanl`, `finite`, `finitef`, `finitel` | The same as `__builtin_isinf`, `__builtin_isnan` and `__builtin_isfinite` |
+| `__builtin_fpclassify(nan, inf, normal, subnormal, zero, x)` | The argument naming `x`'s class: `nan` for a NaN, `inf` for an infinity, and so on. `x` is evaluated once; the five classes are `int` (glibc's `fpclassify` is this builtin) |
 
 `fabs` and `copysign` return the floating type their suffix names; the
 others return `int`. The classification builtins take a floating
@@ -900,6 +964,25 @@ argument of any type, and refuse an integer (`__builtin_isnan takes a
 floating-point argument`). All of them operate on the bits of the value:
 they do not round, raise no floating-point exception, and call no
 library.
+
+`__builtin_powi(x, n)`, `__builtin_powif` and `__builtin_powil` raise a
+`double`, `float` or `long double` `x` to the `int` power `n`, by
+squaring and multiplying over `n`'s bits and taking `1 / x^-n` for a
+negative `n`, as libgcc does. They are calls to libgcc's names,
+`__powidf2`, `__powisf2` and `__powixf2` (x87 `long double`) or
+`__powitf2` (binary128), which EmbCC's runtime defines on every target,
+so an object of GCC's that calls them links too. GCC documents no
+precision for them, and neither does EmbCC: a result can differ from
+`pow`'s in the last bit.
+
+`__builtin_complex(re, im)` is the complex of `re`'s and `im`'s type --
+both one real floating type, as GCC requires (`__builtin_complex takes
+two parts of one real floating type, as in GCC, not double and float`) --
+made of those two parts, whatever they are: an infinite or NaN imaginary
+part and a negative zero survive, which `re + im * I` does not keep. Of
+constants it is a constant, so EmbCC's `<complex.h>` defines C11's
+`CMPLX`, `CMPLXF` and `CMPLXL` with it, and they initialize a static
+object, as C11 asks.
 
 ### Floating-point comparisons
 
@@ -1001,10 +1084,11 @@ and 3. A `_FORTIFY_SOURCE` header reads that value as "do not check".
 | `__builtin_offsetof(type, designator)` | The byte offset of a member, as an integer constant expression. The designator may use `.member` and `[constant]`. This is what `<stddef.h>`'s `offsetof` expands to |
 | `__builtin_LINE()` | The line of the call, as an `int` constant |
 | `__builtin_FILE()` | The name of the source file, as a string literal |
+| `__builtin_FUNCTION()` | The name of the enclosing function, as `__func__` is; `""` outside a function |
+| `__builtin_assume(cond)` | Nothing: `cond` is not evaluated, and the promise is not used (clang's) |
+| `__builtin_speculation_safe_value(v)`, `(v, failval)` | `v`, an integer or a pointer. EmbCC hardens nothing against speculative execution, so there is no barrier and `failval` is not used |
 | `__builtin_expect(expr, value)`, `__builtin_expect_with_probability(expr, value, p)` | `expr`; the hint is discarded |
 | `__builtin_assume_aligned(ptr, align, ...)` | `ptr`; the hint is discarded |
-
-`__builtin_FUNCTION()` is not implemented; use `__func__`.
 
 ### Control flow
 
@@ -1013,9 +1097,16 @@ and 3. A `_FORTIFY_SOURCE` header reads that value as "do not check".
 | `__builtin_unreachable()` | Emits the target's trap instruction. Reaching it stops the program; it is not undefined behavior |
 | `__builtin_trap()` | Emits the target's trap instruction |
 | `__builtin_prefetch(addr, ...)` | Evaluates its arguments and emits nothing |
+| `__builtin___clear_cache(begin, end)` | Makes the instructions stored in `[begin, end)` the ones fetched, after a loader or a JIT writes code: a call to libgcc's `__clear_cache` -- each architecture's sequence in EmbCC's runtime, the system's on macOS and with glibc -- and nothing on x86-64, AVR, RX and ColdFire, as GCC emits on x86. The arguments are pointers (`__builtin___clear_cache takes two pointers, as in GCC, not int`) |
+| `__builtin_debugtrap()` | Emits the target's breakpoint instruction, inline: under a debugger the program stops there and can carry on; without one it stops with the breakpoint's signal or exception (clang's) |
 
 The trap is `ud2` on x86-64, `udf` on AArch64 and Cortex-M, `unimp`
-on RISC-V and `break` on MIPS32. AVR has no trapping instruction, and the trap is a jump to
+on RISC-V and `break` on MIPS32. The breakpoint is the one each target's
+debugger plants: `int3` on x86-64, `brk #0xf000` on AArch64 (lldb steps
+over it, as for clang's), `bkpt #0` on Cortex-M and ARMv7-A, `ebreak` on
+RISC-V, `break` on MIPS and AVR, `break 0` on LoongArch, `debug` on
+TriCore, `break 1, 15` on Xtensa, `trap` on PowerPC, `ta 1` on SPARC,
+`brk` on RX and `halt` on ColdFire. AVR has no trapping instruction, and the trap is a jump to
 itself. A call to either builtin ends a path for the missing-return
 check, as a call to a `noreturn` function does.
 
@@ -1027,6 +1118,7 @@ check, as a call to a `noreturn` function does.
 | `__builtin_alloca_with_align(size, align)` | As `__builtin_alloca`, aligned to `align` bits, which must be a constant power of two of at least 8 | All |
 | `__builtin_frame_address(level)` | The frame address of the current function (`level` 0) or of a caller, found by following the saved frame pointers | Any level: x86-64, AArch64, ColdFire. Level 0: Cortex-M, ARMv7-A, RISC-V, MIPS32, MIPS64, LoongArch, SPARC, PowerPC, Xtensa, TriCore, RX, AVR |
 | `__builtin_return_address(level)` | The return address of the current function (`level` 0) or of a caller | As `__builtin_frame_address` |
+| `__builtin_extract_return_addr(addr)`, `__builtin_frob_return_addr(addr)` | The address a function returns to, from `__builtin_return_address`'s, and back: `addr` itself, but on SPARC, whose return is past its call, `addr + 8` -- `addr + 12` in a function returning a struct or a `long double`, which returns past the caller's `unimp` word -- and `frob` takes it off, as GCC's | All |
 
 `level` must be a non-negative integer constant (`__builtin_frame_address
 needs a non-negative constant level`).
@@ -1081,17 +1173,30 @@ A function that calls `alloca` is never inlined.
 'f', which is not variadic`). Passing and retrieving structures through
 `...` is described in [C language](c-language.md).
 
+### `__builtin_setjmp` and `__builtin_longjmp`
+
+GCC's pair, for a jump with no C library behind it (a language
+runtime, an SJLJ unwinder): `__builtin_setjmp(buf)` returns 0, and 1
+when `__builtin_longjmp(buf, 1)` comes back to it, from anywhere below
+while the function that called `__builtin_setjmp` has not returned.
+`buf` is GCC's five words. EmbCC keeps an ordinary `jmp_buf` in that
+function's frame, stores its address in `buf[0]`, and calls the
+runtime's own setjmp and longjmp on it (lib/rt's, built from lib/libc's
+for every target; the system C library's `_setjmp` and `_longjmp` on
+Darwin and with `--libc=system`). As with `setjmp`, a local changed
+between the two and read after the jump must be `volatile`.
+`__builtin_longjmp` takes only the constant 1, as in GCC; both are
+refused on Windows (`x86_64-windows-gnu`), whose `_setjmp` takes a frame
+for its unwinder. clang has the pair on fewer targets (not on AArch64
+macOS).
+
 ### Builtins that are not supported
 
 These are refused as undeclared functions, as shown in [General
-rules](#general-rules): `__builtin_assume`,
-`__builtin_bitreverse32` and the other widths,
-`__builtin_rotateleft32` and the other rotates, `__builtin_complex`,
-`__builtin_fpclassify`, `__builtin_setjmp`,
-`__builtin___clear_cache`, `__builtin_FUNCTION`,
-`__builtin_speculation_safe_value`, `__builtin_shufflevector`, the
-target-specific families (`__builtin_ia32_*`, `__builtin_avr_*`), and
-Clang's `__c11_atomic_*`. `__builtin_addressof`, `__builtin_bit_cast`
+rules](#general-rules): `__builtin_va_arg_pack`, clang's
+`__builtin_elementwise_*`, `__builtin_reduce_*` and
+`__builtin_nontemporal_load`, `__builtin_cpu_supports` and
+`__builtin_cpu_init`, the x86 family (`__builtin_ia32_*`). `__builtin_addressof`, `__builtin_bit_cast`
 and `__builtin_is_constant_evaluated` exist in C++ only; see
 [C++](cxx.md).
 
@@ -1127,6 +1232,18 @@ The `_n` and arithmetic forms take an integer or a pointer of 1, 2, 4,
 on an integer or pointer of 1, 2, 4, 8 or 16 bytes, not double`. The
 `__sync` builtins accept, and ignore, the trailing list of variables
 GCC allows.
+
+clang's `__c11_atomic_*` family -- `init`, `load`, `store`, `exchange`,
+`compare_exchange_strong` and `_weak`, `fetch_add`, `_sub`, `_and`,
+`_or`, `_xor` and `_nand`, `thread_fence`, `signal_fence` and
+`is_lock_free` -- are the `__atomic_*` builtins of the same names with
+clang's arguments (`init` is a relaxed store, and a compare-exchange's
+strength is in its name). `__c11_atomic_fetch_add` and `_fetch_sub` of an
+atomic pointer count elements, as C11's `atomic_fetch_add` does
+(7.17.7.5), where GCC's `__atomic_fetch_add` counts bytes; EmbCC's
+`<stdatomic.h>` adds and subtracts with them, so `atomic_fetch_add(&p, 1)`
+on an `_Atomic(int *)` moves `p` by one `int`, as with clang -- GCC's
+`<stdatomic.h>` moves it by one byte.
 
 On RISC-V the memory order of a read-modify-write or compare-exchange
 selects its `.aq` and `.rl` bits as clang's does: relaxed is bare,

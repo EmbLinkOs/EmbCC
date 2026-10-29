@@ -62,7 +62,12 @@ static void put_u(unsigned v)
 
 int main(void)
 {
-    unsigned sum = 0, spin;
+    unsigned sum = 0;
+    /* the bound only ends a wait for a timer that never fires: QEMU runs
+     * the AVR faster than its 16 MHz while Timer1 keeps the host's time,
+     * and 60000 spins of 10 us were over before 30 ms had passed on a
+     * runner */
+    unsigned long spin;
     uint8_t i;
     UBRR0 = 8;                                   /* 115200 at 16 MHz */
     UCSR0B = _BV(TXEN0);
@@ -85,7 +90,7 @@ int main(void)
     TCCR1B = _BV(WGM12) | _BV(CS11) | _BV(CS10);
     TIMSK1 = _BV(OCIE1A);
     sei();
-    for (spin = 0; ticks < 3 && spin < 60000u; spin++)
+    for (spin = 0; ticks < 3 && spin < 600000UL; spin++)
         _delay_us(10);
     cli();
     TIMSK1 = 0;
@@ -94,7 +99,7 @@ int main(void)
     TIFR1 = _BV(TOV1);
     TIMSK1 = _BV(TOIE1);
     sei();
-    for (spin = 0; !bad && spin < 60000u; spin++)
+    for (spin = 0; !bad && spin < 600000UL; spin++)
         _delay_us(10);
     puts_P(PSTR("ticks "));
     put_u(ticks);

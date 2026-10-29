@@ -836,6 +836,17 @@ int a32_pop(struct code *c, unsigned mask)
     return at;
 }
 
+/* ldm sp!, {..., pc}^ -- an exception handler's return: with pc in the
+ * list and the S bit, CPSR comes back from the mode's SPSR. */
+int a32_pop_exc(struct code *c, unsigned mask)
+{
+    int at = c->len;
+    word(c, cc_take(), 0x08000000UL | 1UL << 23 | 1UL << 22 | 1UL << 21 |
+                       1UL << 20 | 13UL << 16 |
+                       ((mask & 0x5fffu) | 1u << 15));
+    return at;
+}
+
 void a32_patch_mask(struct code *c, int at, unsigned mask)
 {
     unsigned long w = rd_word(c, at);

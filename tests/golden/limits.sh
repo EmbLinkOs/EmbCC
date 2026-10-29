@@ -63,6 +63,17 @@ construct fp16 fp16.c "" '`__fp16`' <<'EOF'
 __fp16 x;
 float f(void) { return x; }
 EOF
+construct bf16 bf16.c "" '`__bf16`' <<'EOF'
+__bf16 f(__bf16 a, long long b) { return a + b; }
+EOF
+construct float16struct float16struct.c "" 'a struct holding a `_Float16`, by value' <<'EOF'
+struct h2 { _Float16 a, b; };
+struct h2 f(struct h2 p) { p.a += p.b; return p; }
+EOF
+construct float16va float16va.c "" 'a `_Float16` through `...`' <<'EOF'
+void g(int, ...);
+void f(_Float16 h) { g(1, h); }
+EOF
 construct bitint bitint.c "" '`_BitInt(N)`' <<'EOF'
 _BitInt(37) f(_BitInt(37) a) { return a * 3; }
 EOF

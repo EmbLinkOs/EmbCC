@@ -12,12 +12,19 @@
  *   jmp_buf, in words: [0..7] = r4-r11, [8] = sp, [9] = lr,
  *                      [10..25] = s16-s31
  */
+/* The symbols' names: lib/rt/builtin-setjmp.c builds this file again as
+ * __builtin_setjmp's and __builtin_longjmp's own pair. */
+#ifndef SJ_SETJMP
+#define SJ_SETJMP  "setjmp"
+#define SJ_LONGJMP "longjmp"
+#endif
+
 #if defined(__arm__) && !defined(__thumb__)
 
 __asm__(
-".globl setjmp\n"
-".type setjmp, %function\n"
-"setjmp:\n"
+".globl " SJ_SETJMP "\n"
+".type " SJ_SETJMP ", %function\n"
+ SJ_SETJMP ":\n"
 "    mov r12, sp\n"
 "    stmia r0, {r4-r12, lr}\n"
 #if defined(__ARM_FP)
@@ -26,11 +33,11 @@ __asm__(
 #endif
 "    mov r0, #0\n"
 "    bx lr\n"
-".size setjmp, .-setjmp\n"
+".size " SJ_SETJMP ", .-" SJ_SETJMP "\n"
 
-".globl longjmp\n"
-".type longjmp, %function\n"
-"longjmp:\n"
+".globl " SJ_LONGJMP "\n"
+".type " SJ_LONGJMP ", %function\n"
+ SJ_LONGJMP ":\n"
 #if defined(__ARM_FP)
 "    add r2, r0, #40\n"
 "    vldmia r2, {s16-s31}\n"
@@ -41,7 +48,7 @@ __asm__(
 "    movs r0, r1\n"
 "    moveq r0, #1\n"
 "    bx lr\n"
-".size longjmp, .-longjmp\n"
+".size " SJ_LONGJMP ", .-" SJ_LONGJMP "\n"
 );
 
 #endif

@@ -145,24 +145,31 @@ static int pm_reg(int r) { return r == R_SCR ? t_scr(r) : r; }
  * and never a return register, so nothing is lost by restoring it -- and
  * unlike r12 it keeps an all-low list in the 16-bit push/pop. GCC pads
  * the same way. */
-static unsigned save_mask_for(int nsave, const int *used, unsigned scr)
+static unsigned save_mask_for(int nsave, const int *used, unsigned scr,
+                              unsigned extra)
 {
-    unsigned m = (scr & T_SCR_ALL) | (1u << T_LR);
+    unsigned m = (scr & T_SCR_ALL) | (1u << T_LR) | extra;
     int n = 0;
     for (int k = 0; k < nsave; k++)
         m |= 1u << used[k];
     for (unsigned b = m; b; b &= b - 1)
         n++;
-    if (n & 1)
-        m |= 1u << 3;          /* r3: the pad */
+    /* the pad: r3, or past an interrupt handler's r0-r3 the first
+     * callee-saved register not in the set (pushed and popped, unused) */
+    for (int r = 3; (n & 1) && r <= 11; r = r == 3 ? 4 : r + 1)
+        if (!(m & (1u << r))) {
+            m |= 1u << r;
+            n++;
+        }
     return m;
 }
 
 /* The bytes that mask moves sp by -- what the stack-parameter offsets
  * are measured from, so it must be the same answer. */
-static long save_bytes_for(int nsave, const int *used, unsigned scr)
+static long save_bytes_for(int nsave, const int *used, unsigned scr,
+                           unsigned extra)
 {
-    unsigned m = save_mask_for(nsave, used, scr);
+    unsigned m = save_mask_for(nsave, used, scr, extra);
     long n = 0;
     for (int r = 0; r < 16; r++)
         if (m & (1u << r)) n++;
@@ -1127,7 +1134,8 @@ static int t_tail_ok(const struct ir_func *fn, int n)
         return 0;
     /* a cmse_nonsecure_entry function leaves through its own BXNS */
     if (fn->ret_abi.is_struct || fn->ret_abi.is_float || fn->is_varargs ||
-        fn->has_alloca || fn->neh || fn->cmse_entry)
+        fn->has_alloca || fn->neh || fn->cmse_entry ||
+        (t_isa_a32 && fn->src && fn->src->is_isr))
         return 0;
     if (n + 1 >= fn->nins) {
         if (fn->ret_abi.size)
@@ -3820,6 +3828,16 @@ static void vfp_load(struct t_fn *F, int v, int sreg)
         t_vldst(F->t, sreg, F->fb, (int)F->slot[v], 0, 0);
         return;
     }
+    /* a float constant made where it is read: vmov.f32 #imm when it is
+     * one of VFP's (0.5, 1.0, 10.0...), as vfp_const_d makes a double */
+    if (F->remat && v >= 0 && F->remat[v]) {
+        int k = t_vfp_imm8((unsigned long long)(unsigned long)
+                           (F->remat_v[v] & 0xffffffffL), 0);
+        if (k >= 0) {
+            t_vmov_imm(F->t, sreg, k, 0);
+            return;
+        }
+    }
     rd(F, v, T_ACC);                    /* the general path, via a core reg */
     t_vmov_core(F->t, sreg, T_ACC, 1);
 }
@@ -3935,6 +3953,12 @@ static void vfp_done(struct t_fn *F, int v, int sreg)
 static int vfp_operand_b(struct t_fn *F, const struct ir_ins *i, int sreg)
 {
     if (i->imm_b) {
+        int k = t_vfp_imm8((unsigned long long)(unsigned long)
+                           (i->imm & 0xffffffffL), 0);
+        if (k >= 0) {
+            t_vmov_imm(F->t, sreg, k, 0);
+            return sreg;
+        }
         t_mov_imm(F->t, T_ACC, (long)i->imm, 0);
         t_vmov_core(F->t, sreg, T_ACC, 1);
         return sreg;
@@ -4390,6 +4414,268 @@ static void t_select_cc(struct t_fn *F, const struct ir_ins *i, int cond,
  * immediate (t_select_imms). */
 #define SEL_OPR(F, v, scratch) (t_sel_imm((F), (v)) ? -1 : rdr((F), (v), scratch))
 
+/* ---- a clamp to a bit range: ssat, usat ---------------------------------
+ *
+ * `if (y > 32767) y = 32767; if (y < -32768) y = -32768;` saturates y to
+ * sixteen signed bits, which every ARMv7-M part does in one instruction,
+ * `ssat y, #16, y` -- and a clamp to [0, 2^n - 1] is `usat y, #n, y`.
+ * If-conversion leaves the two tests as two compare-and-selects, the
+ * second on the first's result, with the second `if`'s empty label
+ * between them or not; clang and GCC make the one instruction of them,
+ * where an IT block each took a compare, two moves and the constants
+ * built for both. Either half may come first, and each may be written
+ * either way round (`y > K ? K : y`, `y < K ? y : K`). */
+
+/* The constant temp v holds, when one IR_CONST is its only definition.
+ * The table is built on the first question, once per function. */
+static int t_kval(struct t_fn *F, int v, long *k)
+{
+    const struct ir_func *fn = F->fn;
+    if (v < fn->nvars || v >= fn->nvregs)
+        return 0;
+    if (!F->kc_state) {
+        int nv = fn->nvregs;
+        F->kc_state = xcalloc((size_t)nv, 1);  /* 1: a constant, 2: not */
+        F->kc_val = xcalloc((size_t)nv, sizeof *F->kc_val);
+        for (int n = 0; n < fn->nins; n++) {
+            const struct ir_ins *i = &fn->ins[n];
+            int d = ra_ins_def(i);
+            if (d < 0 || d >= nv)
+                continue;
+            if (!F->kc_state[d] && i->op == IR_CONST && !i->flt &&
+                i->w <= 4) {
+                F->kc_state[d] = 1;
+                F->kc_val[d] = (long)(int)i->imm;
+            } else {
+                F->kc_state[d] = 2;
+            }
+        }
+    }
+    if (F->kc_state[v] != 1)
+        return 0;
+    *k = F->kc_val[v];
+    return 1;
+}
+
+/* Does any instruction name label L as where it goes? */
+static int t_label_reached(const struct ir_func *fn, int L)
+{
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        switch (i->op) {
+        case IR_JMP: case IR_BRZ: case IR_BRNZ: case IR_LABELADDR:
+            if (i->label == L)
+                return 1;
+            break;
+        case IR_SWITCH:
+            if (i->label == L)
+                return 1;
+            for (int k = 0; k < fn->jt[i->jt].n; k++)
+                if (fn->jt[i->jt].labels[k] == L)
+                    return 1;
+            break;
+        case IR_LANDING: case IR_IGOTO:
+            return 1;               /* edges the IR does not spell */
+        default:
+            break;
+        }
+    }
+    return 0;
+}
+
+/* Instructions n and n + 1 as one half of a clamp, MIN(x, K) or MAX(x, K):
+ * a signed 32-bit compare of x with K, read by nothing but a select of x
+ * and K. */
+static int t_clamp_half(struct t_fn *F, int n, int *x, long *k, int *ismax)
+{
+    const struct ir_func *fn = F->fn;
+    if (n + 1 >= fn->nins || !F->usecnt)
+        return 0;
+    const struct ir_ins *c = &fn->ins[n], *s = &fn->ins[n + 1];
+    long kc, ka;
+    if (c->op != IR_CMP || c->flt || c->w != 4 || !c->sign || c->dst < 0 ||
+        c->a < 0 || F->wide[c->a] || in_freg(F, c->a) ||
+        !t_select_it_ok(F, s) || s->a != c->dst ||
+        F->usecnt[c->dst] != 1)
+        return 0;
+    if (c->imm_b)
+        kc = (long)(int)c->imm;
+    else if (!t_kval(F, c->b, &kc))
+        return 0;
+    int then_k = s->c == c->a && t_kval(F, s->b, &ka) && ka == kc;
+    int else_k = s->b == c->a && t_kval(F, s->c, &ka) && ka == kc;
+    int gt = c->pred == B_GT || c->pred == B_GE;
+    int lt = c->pred == B_LT || c->pred == B_LE;
+    if (then_k == else_k || (!gt && !lt))
+        return 0;
+    /* x > K ? K : x is the smaller, x < K ? K : x the larger, and with
+     * the arms the other way round, the other. At equality >= and <=
+     * choose K, which is x. */
+    *ismax = then_k ? lt : gt;
+    *x = c->a;
+    *k = kc;
+    return 1;
+}
+
+struct t_cnt { int v, n; };
+static void t_cnt_cb(int u, void *ctx)
+{
+    struct t_cnt *c = ctx;
+    if (u == c->v)
+        c->n++;
+}
+
+/* Is every read of temp v inside instructions [lo, hi)? Counted as
+ * usecnt counts them (ra_count_vreg_uses). */
+static int t_reads_within(const struct t_fn *F, int v, int lo, int hi)
+{
+    const struct ir_func *fn = F->fn;
+    struct t_cnt c = { v, 0 };
+    for (int m = lo; m < hi; m++)
+        ra_each_use(&fn->ins[m], t_cnt_cb, &c);
+    return c.n == F->usecnt[v];
+}
+
+/* The clamp starting at instruction n, which may be one of the constants
+ * the two halves compare with -- each half's IR_CONST comes just before
+ * it, and is emitted as the clamp is, not at all: the window skips the
+ * constants and the second `if`'s empty label wherever they fall, when
+ * nothing outside the window reads them. */
+static int t_clamp_sat(struct t_fn *F, int n)
+{
+    struct ir_func *fn = F->fn;
+    int x1, x2, max1, max2;
+    long k1, k2;
+    if (getenv("EMBCC_T_NOSAT") || !F->usecnt)
+        return 0;
+    int j = n;
+    while (j < fn->nins && j - n < 3 && fn->ins[j].op == IR_CONST)
+        j++;
+    if (!t_clamp_half(F, j, &x1, &k1, &max1))
+        return 0;
+    int s1 = fn->ins[j + 1].dst, m = j + 2;
+    while (m < fn->nins && m - j < 6 &&
+           (fn->ins[m].op == IR_CONST ||
+            (fn->ins[m].op == IR_LABEL &&
+             !t_label_reached(fn, fn->ins[m].label))))
+        m++;
+    /* the second half clamps the first's result, which nothing else reads */
+    if (!t_clamp_half(F, m, &x2, &k2, &max2) || x2 != s1 || max1 == max2 ||
+        F->usecnt[s1] != 2)
+        return 0;
+    for (int q = n; q < m; q++)
+        if (fn->ins[q].op == IR_CONST &&
+            (fn->ins[q].dst < 0 ||
+             !t_reads_within(F, fn->ins[q].dst, n, m + 2)))
+            return 0;
+    long hi = max1 ? k2 : k1, lo = max1 ? k1 : k2;
+    int sign, bits = 0;
+    if (lo == 0 && hi > 0 && (hi & (hi + 1)) == 0) {
+        sign = 0;                       /* [0, 2^n - 1]: usat #n, n 1..31 */
+        for (long v = hi; v; v >>= 1)
+            bits++;
+    } else if (lo < 0 && hi == -lo - 1 && (hi & (hi + 1)) == 0) {
+        sign = 1;                       /* [-2^(n-1), 2^(n-1) - 1]: ssat #n */
+        for (long v = hi; v; v >>= 1)
+            bits++;
+        bits++;
+    } else {
+        return 0;
+    }
+    int dst = fn->ins[m + 1].dst;
+    int rx = rdr(F, x1, T_ACC);
+    int d = wreg(F, dst, T_ACC);
+    t_sat(F->t, d, bits, rx, sign, 0, 0);
+    wrote(F, dst, d);
+    F->skip_next = m + 1 - n;
+    return 1;
+}
+
+/* ---- a rotate by a constant: ror --------------------------------------
+ *
+ * `x << k | x >> (32 - k)` is x rotated, which Thumb-2 does in one
+ * `ror rd, rn, #(32 - k)` -- and which an ALU operation takes as its
+ * shifted operand, so CRC's `(crc << 1 | crc >> 31) ^ b` is one `eor.w
+ * rd, rb, rc, ror #31`, as clang writes it, where it was a shift, an orr
+ * with the other shift, and the eor. The two shifts' bits never overlap,
+ * so an add or an exclusive or of them is the same rotate as the or. */
+
+/* Instructions n, n + 1, n + 2 as a rotate of a 32-bit x: the two shifts,
+ * either first, each read only by the combining operation. */
+static int t_rot_at(const struct t_fn *F, int n, int *x, int *ror, int *dst)
+{
+    const struct ir_func *fn = F->fn;
+    if (n + 2 >= fn->nins || !F->usecnt)
+        return 0;
+    const struct ir_ins *a = &fn->ins[n], *b = &fn->ins[n + 1];
+    const struct ir_ins *o = &fn->ins[n + 2];
+    const struct ir_ins *l = a->op == IR_SHL ? a : b;
+    const struct ir_ins *r = a->op == IR_SHL ? b : a;
+    if (l->op != IR_SHL || r->op != IR_SHR || r->sign || !l->imm_b ||
+        !r->imm_b || l->w != 4 || r->w != 4 || l->imm < 1 || l->imm > 31 ||
+        l->imm + r->imm != 32 || l->a != r->a || l->a < 0 ||
+        F->wide[l->a] || in_freg(F, l->a) || a->dst == a->a ||
+        l->dst < 0 || r->dst < 0 || l->dst == r->dst ||
+        F->usecnt[l->dst] != 1 || F->usecnt[r->dst] != 1)
+        return 0;
+    if ((o->op != IR_OR && o->op != IR_XOR && o->op != IR_ADD) || o->flt ||
+        o->imm_b || o->w != 4 || o->dst < 0 || F->wide[o->dst] ||
+        in_freg(F, o->dst) ||
+        !((o->a == l->dst && o->b == r->dst) ||
+          (o->a == r->dst && o->b == l->dst)))
+        return 0;
+    *x = l->a;
+    *ror = (int)r->imm;
+    *dst = o->dst;
+    return 1;
+}
+
+static int t_rotate(struct t_fn *F, int n)
+{
+    struct ir_func *fn = F->fn;
+    struct code *t = F->t;
+    int x, ror, dst;
+    if (getenv("EMBCC_T_NOROR") || !t_rot_at(F, n, &x, &ror, &dst))
+        return 0;
+    /* the next instruction's shifted operand, when that is its only
+     * reader and its other operand is in a register already (no scratch
+     * register is taken four instructions ahead of where the pool was
+     * computed) */
+    if (F->usecnt[dst] == 1 && n + 3 < fn->nins) {
+        const struct ir_ins *nx = &fn->ins[n + 3];
+        int comm = nx->op == IR_ADD || nx->op == IR_AND ||
+                   nx->op == IR_OR || nx->op == IR_XOR;
+        int op = nx->op == IR_ADD ? T_OP_ADD : nx->op == IR_SUB ? T_OP_SUB
+               : nx->op == IR_AND ? T_OP_AND : nx->op == IR_OR ? T_OP_ORR
+               : nx->op == IR_XOR ? T_OP_EOR : -1;
+        int other = -1;
+        if (op >= 0 && !nx->flt && !nx->imm_b && nx->w == 4 &&
+            nx->dst >= 0 && !F->wide[nx->dst] && !in_freg(F, nx->dst)) {
+            if (nx->b == dst && nx->a != dst)
+                other = nx->a;
+            else if (nx->a == dst && nx->b != dst && comm)
+                other = nx->b;
+            else if (nx->a == dst && nx->b != dst && op == T_OP_SUB)
+                other = nx->b, op = T_OP_RSB;
+        }
+        if (other >= 0 && in_reg(F, other) && !F->wide[other]) {
+            int rm = rdr(F, x, T_ACC);
+            int rn = F->loc[other];
+            int d = wreg(F, nx->dst, T_ACC);
+            t_alu_reg_shift(t, op, d, rn, rm, T_SH_ROR, ror, 0);
+            wrote(F, nx->dst, d);
+            F->skip_next = 3;
+            return 1;
+        }
+    }
+    int rm = rdr(F, x, T_ACC);
+    int d = wreg(F, dst, T_ACC);
+    t_shift_imm(t, T_SH_ROR, d, rm, ror, 0);
+    wrote(F, dst, d);
+    F->skip_next = 2;
+    return 1;
+}
+
 static void gen_ins(struct t_fn *F, int n)
 {
     struct ir_func *fn = F->fn;
@@ -4655,6 +4941,7 @@ static void gen_ins(struct t_fn *F, int n)
         F->label_off[i->label] = t->len;
         F->bc_end = -1;          /* something may branch here */
         F->fl_end = -1;          /* ...with other flags */
+        F->zs_end = -1;
         F->ls_end = -1;          /* ...and other registers */
         return;
     case IR_JMP:
@@ -4668,10 +4955,21 @@ static void gen_ins(struct t_fn *F, int n)
             jump_to(F, i->label);
         return;
     case IR_CONST: {
+        if (t_clamp_sat(F, n))
+            return;             /* a clamp's bound: ssat/usat (above) */
         if (t_sel_imm(F, i->dst))
             return;             /* the select moves it (t_select_imms) */
         if (F->remat && i->dst >= 0 && F->remat[i->dst])
             return;             /* made where it is read (rd) */
+        /* into an S register: vmov.f32 #imm when VFP has it */
+        if (in_freg(F, i->dst)) {
+            int k = t_vfp_imm8((unsigned long long)(unsigned long)
+                               (i->imm & 0xffffffffL), 0);
+            if (k >= 0) {
+                t_vmov_imm(t, F->floc[i->dst], k, 0);
+                return;
+            }
+        }
         /* Build the constant in the destination's OWN register when it
          * has one. Going through T_ACC and copying cost two extra
          * instructions on the commonest operation there is, and the
@@ -4792,6 +5090,25 @@ static void gen_ins(struct t_fn *F, int n)
                    !in_freg(F, fn->ins[k].dst) && !in_freg(F, fn->ins[k].a))
                 k++;
             const struct ir_ins *bx = k < fn->nins ? &fn->ins[k] : i;
+            /* ...and a select on it: `tst a, #k; ite ne` -- `(i & 31) == 0
+             * ? a : b`, where the and and a compare with 0 were two
+             * instructions and a register. The arms are where an IT
+             * block's moves take them (in registers, or immediates). */
+            if (k == n + 1 && t_select_it_ok(F, bx) && bx->a == i->dst &&
+                (in_reg(F, bx->b) || t_sel_imm(F, bx->b)) &&
+                (in_reg(F, bx->c) || t_sel_imm(F, bx->c)) &&
+                (!i->imm_b ? in_reg(F, i->b) : t_imm_ok(i->imm))) {
+                int rb = SEL_OPR(F, bx->b, T_TMP);
+                int rc = SEL_OPR(F, bx->c, T_ADDR);
+                int ra_ = rdr(F, i->a, T_ACC);
+                if (i->imm_b)
+                    t_tst_imm(t, ra_, i->imm);
+                else
+                    t_tst_reg(t, ra_, F->loc[i->b]);
+                t_select_cc(F, bx, T_NE, rb, rc);
+                F->skip_next = 1;
+                return;
+            }
             if ((bx->op == IR_BRZ || bx->op == IR_BRNZ) &&
                 bx->a == i->dst && bx->w == 4) {
                 int ra_ = rdr(F, i->a, T_ACC);
@@ -4902,6 +5219,8 @@ static void gen_ins(struct t_fn *F, int n)
             if ((i->op == IR_ADD || i->op == IR_SUB) && lo &&
                 (mg <= 7 || (d == ra_ && mg <= 255))) {
                 t_alu_imm(t, opm, d, ra_, mg, 1);
+                F->zs_end = t->len;
+                F->zs_reg = d;
             /* addw/subw reach any 0..4095 where the modified immediate
              * reaches only what it can rotate into place, and almost
              * every constant folded here is a small offset. */
@@ -5028,6 +5347,8 @@ static void gen_ins(struct t_fn *F, int n)
         return;
     }
     case IR_SHL: case IR_SHR: {
+        if (t_rotate(F, n))
+            return;
         int sh = i->op == IR_SHL ? T_SH_LSL : i->sign ? T_SH_ASR : T_SH_LSR;
         /* `(x >> s) & (2^k - 1)` with s + k <= 32 is the bitfield
          * x[s, s+k): one ubfx where the shift and the mask were two. The
@@ -5175,6 +5496,8 @@ static void gen_ins(struct t_fn *F, int n)
     }
 
     case IR_CMP: {
+        if (t_clamp_sat(F, n))
+            return;
         int cond = cond_for(i->pred, i->sign);
         /* Does the NEXT instruction branch on this result, and does
          * nothing else read it? Then the 0/1 never has to exist.
@@ -5322,6 +5645,12 @@ static void gen_ins(struct t_fn *F, int n)
             jump_if(F, i->op == IR_BRZ ? T_EQ : T_NE, i->label);
             return;
         }
+        if (i->w != 8 && F->zs_end == t->len && in_reg(F, i->a) &&
+            F->loc[i->a] == F->zs_reg && !getenv("EMBCC_T_NOZS")) {
+            /* the adds/subs just made set Z from this register */
+            jump_if(F, i->op == IR_BRZ ? T_EQ : T_NE, i->label);
+            return;
+        }
         if (i->w == 8 && t_wide_imm()) {
             /* where the halves are, and one orrs: Z is "both zero" */
             int al, ah;
@@ -5360,9 +5689,12 @@ static void gen_ins(struct t_fn *F, int n)
     case IR_LDVAR: {
         int d;
         if (i->w > 4) t_refuse(fn, i, "a 64-bit local");
-        if (in_freg(F, i->a) || in_freg(F, i->dst)) {
+        if (in_freg(F, i->a) || (in_freg(F, i->dst) && i->size == 4)) {
             /* A float local in s16-s31, or read into one: the value is
-             * all four bytes of it, so this is a move. */
+             * all four bytes of it, so this is a move. A narrower read
+             * into one -- a _Float16's bits, leaving as the float that
+             * carries them (ty_half_carrier) -- is an integer read below,
+             * which wrote() moves across. */
             if (i->size != 4)
                 internal_error("thumb: %s: a %d-byte read of a float in "
                                "an S register", fn->name, i->size);
@@ -6909,7 +7241,7 @@ static void t_record_cfi(struct t_fn *F, long code_off)
         ir_cfi_add(fn, (int)(F->cfi_va_end - code_off), IR_CFI_CFA_OFFSET, 0, cfa);
     }
     if (F->cfi_push_end >= 0) {
-        unsigned mask = save_mask_for(F->nsave, F->used_callee, F->scr_save);
+        unsigned mask = save_mask_for(F->nsave, F->used_callee, F->scr_save, F->isr_extra);
         int n = 0;
         for (int r = 0; r < 16; r++)
             n += (mask >> r) & 1;
@@ -6948,6 +7280,12 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
      * segfault this caused at -O0, where the allocator does not run. */
     memset(&F, 0, sizeof F);
     F.fn = fn; F.t = t; F.st = st;
+    /* ARM state's interrupt handlers (Cortex-M's need nothing: its
+     * exception entry saves r0-r3, r12 and lr, and bx lr returns) */
+    if (t_isa_a32 && fn->src && fn->src->is_isr) {
+        F.isr = ISR_KIND(fn->src->is_isr);
+        F.isr_extra = 0x100fu;              /* r0-r3, r12 */
+    }
     F.keep_vars = keep_vars;
     fn->nlines = 0;                 /* -g: this attempt's rows only */
     F.fix = NULL; F.nfix = F.capfix = 0;
@@ -6965,6 +7303,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     F.floc = NULL; F.nfsave = 0;
     F.bc_end = F.bc_fix = -1;
     F.fl_end = -1;
+    F.zs_end = -1;
     F.ls_end = -1;
     F.shortb = NULL; F.nshortb = 0;
     F.scr_save = T_SCR_ALL;
@@ -7263,6 +7602,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         F.skip_next = 0;
         F.bc_end = F.bc_fix = -1;
         F.fl_end = -1;
+        F.zs_end = -1;
+    F.zs_end = -1;
         F.ls_end = -1;
         rc_reset(&F);
         F.va_regsave = F.va_first = -1;
@@ -7273,21 +7614,28 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
             fn->var_off = NULL;
         }
     }
-    /* A Thumb function must start on a halfword, and that is all: this
-     * backend has no literal pool whose pc-relative loads would care
-     * where it sits (constants and addresses are movw/movt), and clang
-     * lays functions out at two as well. Rounding each up to four was
-     * a nop after every other one. A function with inline asm keeps the
-     * four, since its template may address relative to pc. */
+    /* A Thumb function must start on a halfword, and most need no more:
+     * constants and addresses are movw/movt, and clang lays functions
+     * out at two as well. Rounding each up to four was a nop after every
+     * other one. But the 64-bit literal pool's ldrd (t_lit64_load) and a
+     * jump table's adr.w address from Align(pc, 4), and their offsets
+     * are worked out from where the code sits in this buffer -- right
+     * only when the function starts on a word, in the buffer and in its
+     * section. With --sections=functions the section is the function's
+     * own, and at two its pool was read two bytes off wherever the
+     * linker put it on a halfword: lib/rt's 64-bit division returned -1
+     * for 5 / 10 in an image linked with --gc-sections. So a function
+     * with a pool, a switch (which may take the adr.w form) or inline
+     * asm (whose template may address relative to pc) starts on four. */
     /* Pad with halfword NOPs (bf00), not with a repeated 0xbf: that
      * byte pairs into 0xbfbf, which is an `itttt` — harmless, since
      * nothing branches there, but it makes every disassembly of the gap
      * between two functions look like a condition block. */
     /* An A32 function is word-aligned, as every A32 instruction is. */
     {
-        int al = t_isa_a32 ? 3 : 1;
+        int al = t_isa_a32 || F.lp_use ? 3 : 1;
         for (int k = 0; k < fn->nins; k++)
-            if (fn->ins[k].op == IR_ASM)
+            if (fn->ins[k].op == IR_ASM || fn->ins[k].op == IR_SWITCH)
                 al |= 3;
         /* ...and aligned(N), or an asm that aligns its own bytes
          * (`.p2align 3`), starts it on that */
@@ -7340,7 +7688,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
      * no variadic save area and no VLA frame base to set up. */
     F.nopush = F.leaf && !F.nsave && !F.nfsave && !F.frame &&
                !fn->is_varargs && !fn->has_alloca &&
-               !(F.scr_save & T_SCR_ALL);
+               !(F.scr_save & T_SCR_ALL) && !F.isr;
     /* No IR_RET and no tail call is not enough: a void function's body
      * falls off its end into the epilogue, so its last instruction must
      * be a jump or a trap too. */
@@ -7352,8 +7700,12 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
             /* __builtin_return_address reads the pushed lr */
             fn->ins[i].op == IR_FRAMEADDR)
             F.noret = 0;
+    /* IRQ, FIQ and ABORT are entered with lr 4 past where they return;
+     * the push then saves the return address the ldm ...^ takes back */
+    if (F.isr && F.isr != ISR_ARM_SWI && F.isr != ISR_ARM_UNDEF)
+        a32_addsubw(t, T_LR, T_LR, 4, 1);
     push_at = F.nopush || F.noret ? -1
-            : t_push(t, save_mask_for(F.nsave, F.used_callee, F.scr_save));
+            : t_push(t, save_mask_for(F.nsave, F.used_callee, F.scr_save, F.isr_extra));
     if (push_at >= 0)
         F.cfi_push_end = t->len;
     if (F.nfsave && !F.noret) {
@@ -7396,7 +7748,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
          * term that was missing. */
         long base = F.nopush ? 0 : F.noret ? F.frame
                   : F.frame + save_bytes_for(F.nsave, F.used_callee,
-                                             F.scr_save) +
+                                             F.scr_save, F.isr_extra) +
                     (long)F.nfsave * 4;
         F.entry_off = base;
         int pmv_dst[RA_MAXPOOL], pmv_src[RA_MAXPOOL], npmv = 0;
@@ -7676,7 +8028,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     } else if (tail_end) {
         if (!F.nopush)
             t_patch_push(t, push_at, save_mask_for(F.nsave, F.used_callee,
-                                                   F.scr_save));
+                                                   F.scr_save, F.isr_extra));
     } else {
     if (fn->has_alloca) {
         /* Release every VLA at once: sp back to the frame base, which
@@ -7691,7 +8043,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         /* The same set the prologue pushed: SAVE_MASK plus whatever
          * callee-saved registers the allocator took. Built here and
          * patched into the push below, so the two cannot disagree. */
-        unsigned mask = save_mask_for(F.nsave, F.used_callee, F.scr_save);
+        unsigned mask = save_mask_for(F.nsave, F.used_callee, F.scr_save, F.isr_extra);
         if (F.nopush && !fn->cmse_entry)
             t_bx(t, T_LR);
         else if (!F.nopush)
@@ -7711,6 +8063,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
             t_pop(t, mask);
             t_sp_adjust(t, 16, 0);
             t_bx(t, T_LR);
+        } else if (F.isr) {
+            a32_pop_exc(t, mask & ~(1u << T_LR));
         } else {
             t_pop(t, (mask & ~(1u << T_LR)) | (1u << T_PC));
         }
@@ -7891,7 +8245,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
      * program calling a variadic function 16 bytes short of what ran
      * (tests/golden/embrt.sh, floats2). */
     f->stack_bytes = (F.nopush ? 0 : F.noret ? (int)F.frame : (int)(F.frame + save_bytes_for(F.nsave, F.used_callee,
-                                                    F.scr_save) +
+                                                    F.scr_save, F.isr_extra) +
                            (long)F.nfsave * 4)) +
                      (fn->is_varargs ? 16 : 0);
     free(F.usecnt);
@@ -7911,6 +8265,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     free(F.lv_busy);
     free(F.rc_reg);
     free(F.remat);
+    free(F.kc_state);
+    free(F.kc_val);
     free(F.remat_v);
     free(F.rc_lmin);
     free(F.lp_use);

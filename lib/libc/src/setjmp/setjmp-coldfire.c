@@ -11,12 +11,19 @@
  *                      [11] = return address, [12] = sp at the call
  *
  * longjmp(env, 0) makes setjmp return 1 (C11 7.13.2.1p4). */
+/* The symbols' names: lib/rt/builtin-setjmp.c builds this file again as
+ * __builtin_setjmp's and __builtin_longjmp's own pair. */
+#ifndef SJ_SETJMP
+#define SJ_SETJMP  "setjmp"
+#define SJ_LONGJMP "longjmp"
+#endif
+
 #if defined(__mcoldfire__) || defined(__m68k__)
 __asm__(
 ".text\n"
-".globl setjmp\n"
-".type setjmp, @function\n"
-"setjmp:\n"
+".globl " SJ_SETJMP "\n"
+".type " SJ_SETJMP ", @function\n"
+ SJ_SETJMP ":\n"
 "    move.l 4(%sp), %a0\n"
 "    movem.l %d2-%d7/%a2-%a6, (%a0)\n"
 "    move.l (%sp), %d0\n"
@@ -24,10 +31,10 @@ __asm__(
 "    move.l %sp, 48(%a0)\n"
 "    clr.l %d0\n"
 "    rts\n"
-".size setjmp, .-setjmp\n"
-".globl longjmp\n"
-".type longjmp, @function\n"
-"longjmp:\n"
+".size " SJ_SETJMP ", .-" SJ_SETJMP "\n"
+".globl " SJ_LONGJMP "\n"
+".type " SJ_LONGJMP ", @function\n"
+ SJ_LONGJMP ":\n"
 "    move.l 4(%sp), %a0\n"
 "    move.l 8(%sp), %d0\n"
 "    movem.l (%a0), %d2-%d7/%a2-%a6\n"
@@ -38,6 +45,6 @@ __asm__(
 "    bne 1f\n"
 "    moveq #1, %d0\n"
 "1:  jmp (%a1)\n"
-".size longjmp, .-longjmp\n"
+".size " SJ_LONGJMP ", .-" SJ_LONGJMP "\n"
 );
 #endif

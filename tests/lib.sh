@@ -54,7 +54,14 @@ x86_gcc_c() {
 x86_link() {
     exe=$1; shift
     if [ "$EMBCC_X86_RUNNER" = host ]; then
-        cc -no-pie -Wl,-z,noexecstack -o "$exe" "$@" -lm   # as tests/run.sh links
+        # as tests/run.sh links, lib/rt's __embcc_setjmp pair too: what
+        # __builtin_setjmp calls, and no host library has
+        _rtsj=$(dirname "$exe")/rtsj-host.o
+        _rtsrc=$EMBCC_ROOT/lib/rt/builtin-setjmp.c
+        if [ ! -f "$_rtsj" ] || [ "$_rtsrc" -nt "$_rtsj" ]; then
+            cc -c "$_rtsrc" -o "$_rtsj.$$" && mv -f "$_rtsj.$$" "$_rtsj" || return 1
+        fi
+        cc -no-pie -Wl,-z,noexecstack -o "$exe" "$@" "$_rtsj" -lm
     else
         "$EMBCC_ROOT/tests/harness/x86_64/link.sh" -o "$exe" "$@"
     fi
@@ -219,14 +226,24 @@ no_gcc_reference() {
 }
 
 # gcc_too_old_for FILE: prints what of FILE's C the target's referee gcc
-# has not got, if anything -- _BitInt is GCC 14's, _Countof and the 0o
-# octal constants GCC 16's, and Ubuntu 24.04's cc is GCC 13, 26.04's 15.
+# has not got, if anything -- _BitInt and the type-generic bit builtins
+# (__builtin_popcountg and the rest) are GCC 14's, __builtin_stdc_* GCC
+# 15's, _Countof and the 0o octal constants GCC 16's, and Ubuntu 24.04's
+# cc is GCC 13, 26.04's 15.
 # Too old a referee is no reference, not a failure of the program;
 # EMBCC_X86_GCC names a newer one. A feature is asked of the referee only
-# for a program that uses it (gcc_has).
+# for a program that uses it (gcc_has). A builtin is asked where a
+# constant must be: an older gcc takes one it has not got as a function
+# it was not told of, and warns.
 gcc_too_old_for() {
     if grep -q '_BitInt' "$1" && ! gcc_has bitint 'unsigned _BitInt(12) x;'; then
         echo "the referee gcc has no _BitInt; GCC 14 and later have"
+    elif grep -Eq '__builtin_(clz|ctz|popcount|parity|ffs|clrsb)g\(' "$1" &&
+         ! gcc_has bitg '_Static_assert(__builtin_popcountg(3u) == 2, "");'; then
+        echo "the referee gcc has no type-generic bit builtins; GCC 14 and later have"
+    elif grep -q '__builtin_stdc_' "$1" &&
+         ! gcc_has stdcbit '_Static_assert(__builtin_stdc_rotate_left(1u, 1) == 2, "");'; then
+        echo "the referee gcc has no __builtin_stdc_ bit builtins; GCC 15 and later have"
     elif grep -q '_Countof' "$1" && ! gcc_has countof 'int a[3]; int n = _Countof(a);'; then
         echo "the referee gcc has no _Countof; GCC 16 and later have"
     elif grep -Eq '\b0[oO][0-7]' "$1" && ! gcc_has octal 'int n = 0o17;'; then

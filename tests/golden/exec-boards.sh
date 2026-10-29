@@ -16,6 +16,11 @@
 #          the ilp32f runtime and libc (build/libc/<triple>/ilp32f)
 #   rv32d  -march=rv32imafdc -mabi=ilp32d: doubles in f registers at RV32
 #   rv64d  -march=rv64gc -mabi=lp64d
+#   rv32noa, rv64noa  -march=rv32imc and rv64imc: no A extension (an
+#          ESP32-C3), so every atomic read-modify-write is a libatomic call
+#          (lib/rt/atomic-riscv.c), linked with that variant's runtime and
+#          libc (build/libc/<triple>/noa); each image is checked to hold no
+#          A instruction
 #
 # EMBCC_BOARDS="rv32f rv64d" runs just those, and
 # EMBCC_EXEC_ONLY="setjmp-longjmp vla" just those programs.
@@ -52,8 +57,8 @@ export EMBCC EMBLD
 
 boards=
 command -v "$QA" >/dev/null 2>&1 && boards="$boards m4 m4hf a7"
-command -v "$Q32" >/dev/null 2>&1 && boards="$boards rv32 rv32f rv32d"
-command -v "$Q64" >/dev/null 2>&1 && boards="$boards rv64 rv64d"
+command -v "$Q32" >/dev/null 2>&1 && boards="$boards rv32 rv32f rv32d rv32noa"
+command -v "$Q64" >/dev/null 2>&1 && boards="$boards rv64 rv64d rv64noa"
 [ -n "${EMBCC_BOARDS:-}" ] && boards=" $EMBCC_BOARDS"
 [ -n "$boards" ] || { echo "SKIP: no qemu-system-arm or -riscv32/64"; exit 0; }
 
@@ -62,8 +67,8 @@ triple() {
         m4) echo thumbv7em-none-eabi ;;
         m4hf) echo thumbv7em-none-eabihf ;;
         a7) echo armv7a-none-eabi ;;
-        rv32|rv32f|rv32d) echo riscv32-unknown-elf ;;
-        rv64|rv64d) echo riscv64-unknown-elf ;;
+        rv32|rv32f|rv32d|rv32noa) echo riscv32-unknown-elf ;;
+        rv64|rv64d|rv64noa) echo riscv64-unknown-elf ;;
     esac
 }
 # The -march/-mabi a board adds, and the runtime variant they link with
@@ -73,6 +78,8 @@ flags() {
         rv32f) echo "-march=rv32imafc -mabi=ilp32f" ;;
         rv32d) echo "-march=rv32imafdc -mabi=ilp32d" ;;
         rv64d) echo "-march=rv64gc -mabi=lp64d" ;;
+        rv32noa) echo "-march=rv32imc" ;;
+        rv64noa) echo "-march=rv64imc" ;;
     esac
 }
 variant() {
@@ -80,6 +87,8 @@ variant() {
         rv32f) echo riscv32-unknown-elf/ilp32f ;;
         rv32d) echo riscv32-unknown-elf/ilp32d ;;
         rv64d) echo riscv64-unknown-elf/lp64d ;;
+        rv32noa) echo riscv32-unknown-elf/noa ;;
+        rv64noa) echo riscv64-unknown-elf/noa ;;
         *) triple "$1" ;;
     esac
 }
@@ -203,6 +212,8 @@ case $b in
     rv32f) T="riscv32-unknown-elf -march=rv32imafc -mabi=ilp32f" ;;
     rv32d) T="riscv32-unknown-elf -march=rv32imafdc -mabi=ilp32d" ;;
     rv64d) T="riscv64-unknown-elf -march=rv64gc -mabi=lp64d" ;;
+    rv32noa) T="riscv32-unknown-elf -march=rv32imc" ;;
+    rv64noa) T="riscv64-unknown-elf -march=rv64imc" ;;
 esac
 L=$out/$b; o=$out/p/$name-$b$opt
 if ! "$EMBCC" --target=$T $opt -Dmain=prog_main -Ilib/libc/include \
@@ -218,6 +229,18 @@ case $b in
     rv*) EMBCC_RISCV_HARNESS=$L sh tests/harness/riscv/link.sh $o.elf \
             $o.o $L/drv.o $L/libc.a $L/librt.a > $o.lerr 2>&1 ;;
 esac || { echo "NA $name $b $opt: does not link: $(head -1 $o.lerr)"; exit 0; }
+case $b in
+    # The program's object, where code and data are apart: the image puts
+    # .rodata in the text segment, and a string can decode as an amo. The
+    # noa runtime and C library are tests/golden/riscv-noa.sh's to check.
+    # (--mattr=+a: without it llvm-objdump prints an A instruction as
+    # <unknown>, and the check would see none.)
+    *noa) if llvm-objdump -d --mattr=+a $o.o 2>/dev/null |
+              grep -qE '[[:space:]](lr|sc)\.[wd]|[[:space:]]amo[a-z]+\.[wd]'; then
+              echo "FAIL $name $b $opt: an A instruction in an image for a part without it"
+              exit 0
+          fi ;;
+esac
 case $b in
     m4|m4hf) sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-30}" "$QA" \
             -M mps2-an386 -cpu cortex-m4 -semihosting -nographic \

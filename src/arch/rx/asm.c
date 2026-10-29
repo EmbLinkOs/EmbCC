@@ -1303,12 +1303,11 @@ int rxasm_is_word(const char *stmt, const char *w, int len)
 static int sym_operand(const char *p, int *slen, long *add)
 {
     int n = 0;
-    if (!(isalpha((unsigned char)p[0]) || p[0] == '_' || p[0] == '.'))
+    if (!asm_sym0((unsigned char)p[0]))
         return 0;
     if (p[0] == '.' && !(isalnum((unsigned char)p[1]) || p[1] == '_'))
         return 0;
-    while (isalnum((unsigned char)p[n]) || p[n] == '_' || p[n] == '.' ||
-           p[n] == '$')
+    while (asm_symc((unsigned char)p[n]))
         n++;
     if (rxasm_gpr(p, n) >= 0)
         return 0;

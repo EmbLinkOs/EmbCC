@@ -799,7 +799,7 @@ static void layout(struct mips_fn *F)
         int n = 2 + (F->isr_hilo ? 2 : 0);
         for (int r = 0; r < 32; r++)
             n += (int)(F->isr_x >> r & 1);
-        F->isr_bytes = ((long)n * 4 + STACK_ALIGN - 1) &
+        F->isr_bytes = ((long)n * W + STACK_ALIGN - 1) &
                        ~(long)(STACK_ALIGN - 1);
         F->frame += F->isr_bytes;
     }
@@ -2546,8 +2546,10 @@ static void mips_restore(struct mips_fn *F, int ret)
  * External Interrupt Controller's priority level means; on a core
  * without one (malta's 24Kc) those bits are the pending lines, so a
  * handler there wants vector=hwN or keep_interrupts_masked -- as with
- * GCC. MIPS32r2 only: ext, ins, di and ehb are r2 instructions, and GCC
- * refuses the attribute below r2 too. */
+ * GCC. Release 2 only: ext, ins, di and ehb are r2 instructions, and GCC
+ * refuses the attribute below r2 too. On MIPS64 (r2) every slot is a
+ * doubleword -- the GPRs, HI and LO -- and EPC goes through dmfc0 and
+ * dmtc0, as GCC's n64 handlers have it. */
 
 /* The registers a call may clobber: at, v0-v1, a0-a3, t0-t9, ra. */
 static int mips_isr_cand(int r)
@@ -2656,17 +2658,18 @@ static int mips_isr_grow(struct mips_fn *F)
 }
 
 /* The registers' saves or restores, below EPC and Status at the top of
- * the area at `base`: GPRs from the top down in register order. */
+ * the area at `base`: GPRs from the top down in register order, a
+ * register's width each (MIPS64's are doublewords). */
 static void mips_isr_gprs(struct mips_fn *F, long base, int store)
 {
-    long off = base + F->isr_bytes - 8;
+    long off = base + F->isr_bytes - 2L * W;
     for (int r = 1; r < 32; r++)
         if (F->isr_x >> r & 1) {
-            off -= 4;
+            off -= W;
             if (store)
-                mips_store(F->t, r, MIPS_SP, (int)off, 4);
+                mips_store(F->t, r, MIPS_SP, (int)off, W);
             else
-                mips_load(F->t, r, MIPS_SP, (int)off, 4, 1);
+                mips_load(F->t, r, MIPS_SP, (int)off, W, 1);
         }
 }
 
@@ -2678,13 +2681,13 @@ static void mips_isr_hilo(struct mips_fn *F, long base, int store)
         return;
     if (store) {
         mips_mfhi(t, MIPS_K0);
-        mips_store(t, MIPS_K0, MIPS_SP, (int)base + 4, 4);
+        mips_store(t, MIPS_K0, MIPS_SP, (int)base + W, W);
         mips_mflo(t, MIPS_K0);
-        mips_store(t, MIPS_K0, MIPS_SP, (int)base, 4);
+        mips_store(t, MIPS_K0, MIPS_SP, (int)base, W);
     } else {
-        mips_load(t, MIPS_K0, MIPS_SP, (int)base + 4, 4, 1);
+        mips_load(t, MIPS_K0, MIPS_SP, (int)base + W, W, 1);
         mips_mthi(t, MIPS_K0);
-        mips_load(t, MIPS_K0, MIPS_SP, (int)base, 4, 1);
+        mips_load(t, MIPS_K0, MIPS_SP, (int)base, W, 1);
         mips_mtlo(t, MIPS_K0);
     }
 }
@@ -2696,17 +2699,17 @@ static void mips_isr_sp(struct mips_fn *F, long d)
     if (!d)
         return;
     if (fits16(d)) {
-        mips_alu_imm(F->t, MIPS_ADDIU, MIPS_SP, MIPS_SP, d);
+        mips_alu_imm(F->t, P_ADDIU, MIPS_SP, MIPS_SP, d);
         return;
     }
     mips_li(F->t, A_LO, d);
-    mips_alu(F->t, MIPS_ADDU, MIPS_SP, MIPS_SP, A_LO);
+    mips_alu(F->t, P_ADDU, MIPS_SP, MIPS_SP, A_LO);
 }
 
 /* (the lowest of the area's words: LO, when HI and LO are saved) */
 static long mips_isr_base(const struct mips_fn *F)
 {
-    return fits16(F->frame + 4) ? F->isr_at : 0;
+    return fits16(F->frame + W) ? F->isr_at : 0;
 }
 
 static void mips_isr_prologue(struct mips_fn *F)
@@ -2717,13 +2720,16 @@ static void mips_isr_prologue(struct mips_fn *F)
     long base = mips_isr_base(F), top = base + F->isr_bytes;
     if (eic)
         mips_mfc0(t, MIPS_K0, 13, 0);                 /* Cause */
-    mips_mfc0(t, MIPS_K1, 14, 0);                     /* EPC */
+    if (g_m64)
+        mips_dmfc0(t, MIPS_K1, 14, 0);                /* EPC, 64 bits */
+    else
+        mips_mfc0(t, MIPS_K1, 14, 0);                 /* EPC */
     mips_isr_sp(F, base ? -F->frame : -F->isr_bytes);
-    mips_store(t, MIPS_K1, MIPS_SP, (int)top - 4, 4);
+    mips_store(t, MIPS_K1, MIPS_SP, (int)top - W, W);
     mips_mfc0(t, MIPS_K1, 12, 0);                     /* Status */
     if (eic)
         mips_ext(t, MIPS_K0, MIPS_K0, 10, 6);         /* RIPL */
-    mips_store(t, MIPS_K1, MIPS_SP, (int)top - 8, 4);
+    mips_store(t, MIPS_K1, MIPS_SP, (int)top - 2 * W, 4);
     if (eic)
         mips_ins(t, MIPS_K1, MIPS_K0, 10, 6);         /* IPL = RIPL */
     else if (!masked)
@@ -2755,9 +2761,12 @@ static void mips_isr_epilogue(struct mips_fn *F)
         mips_ehb(t);
     }
     mips_isr_hilo(F, base, 0);           /* through k0: after the di */
-    mips_load(t, MIPS_K1, MIPS_SP, (int)top - 4, 4, 1);
-    mips_mtc0(t, MIPS_K1, 14, 0);
-    mips_load(t, MIPS_K1, MIPS_SP, (int)top - 8, 4, 1);
+    mips_load(t, MIPS_K1, MIPS_SP, (int)top - W, W, 1);
+    if (g_m64)
+        mips_dmtc0(t, MIPS_K1, 14, 0);
+    else
+        mips_mtc0(t, MIPS_K1, 14, 0);
+    mips_load(t, MIPS_K1, MIPS_SP, (int)top - 2 * W, 4, 1);
     mips_isr_sp(F, base ? F->frame : F->isr_bytes);
     mips_mtc0(t, MIPS_K1, 12, 0);
     mips_eret(t);

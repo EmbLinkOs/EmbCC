@@ -39,7 +39,7 @@ static int g_thumb_hard;    /* see target_thumb_hard_abi */
 static int g_thumb_hf_name; /* the triple asked for was an -eabihf one */
 /* RISC-V's -march= and -mabi= (target_riscv_flen and the rest): the C
  * extension on and no FPU by default, rv32imac/ilp32 and rv64imac/lp64. */
-static int g_rv_c = 1, g_rv_f, g_rv_d, g_rv_zifencei, g_rv_abi_flen;
+static int g_rv_c = 1, g_rv_a = 1, g_rv_f, g_rv_d, g_rv_zifencei, g_rv_abi_flen;
 /* ARMv7-A in ARM state (armv7a-none-eabi): the same AAPCS32 and data model
  * as the Cortex-M levels -- which is why it is this target and not a new
  * enum value -- with the A32 instruction set. See target_arm_a32. */
@@ -109,6 +109,13 @@ const char *target_builtin_default(void)
         if (target_family_built(i))
             return target_family_default(i);
     return "x86_64-elf";                /* nothing is built: refused later */
+}
+
+static int g_system_libc;
+void target_set_system_libc(int on) { g_system_libc = on; }
+int target_system_libc(void)
+{
+    return g_system_libc && g_os == TGT_OS_LINUX;
 }
 
 int target_insn_len(const unsigned char *p, int avail)
@@ -361,6 +368,11 @@ int target_arch_built(enum target_arch a)
 int target_is_mips(void)
 {
     return g_arch == TARGET_MIPS32 || g_arch == TARGET_MIPS64;
+}
+
+const char *target_sym_prefix(void)
+{
+    return g_arch == TARGET_RX ? "_" : NULL;
 }
 
 int target_ptr_size(void)       { return g_model[g_arch].ptr; }
@@ -1080,12 +1092,31 @@ int target_riscv_abi_flen(void)
     return g_rv_abi_flen;
 }
 int target_riscv_zifencei(void) { return g_rv_zifencei; }
-void target_set_riscv_isa(int f, int d, int c, int zifencei)
+int target_riscv_atomics(void)
 {
+    return (g_arch != TARGET_RISCV32 && g_arch != TARGET_RISCV64) || g_rv_a;
+}
+void target_set_riscv_isa(int a, int f, int d, int c, int zifencei)
+{
+    g_rv_a = a ? 1 : 0;
     g_rv_f = f ? 1 : 0;
     g_rv_d = d ? 1 : 0;
     g_rv_c = c ? 1 : 0;
     g_rv_zifencei = zifencei ? 1 : 0;
+}
+
+/* An atomic read-modify-write, exchange or compare-exchange of `size`
+ * bytes made by calling libatomic's sized routine (__atomic_fetch_add_4
+ * and its kin) rather than by an instruction: eight bytes where pointers
+ * are four, and every width on RISC-V without the A extension, which has
+ * no such instruction at all -- as GCC and clang do there. An aligned
+ * load or store is one access either way, and stays inline but for the
+ * eight-byte case (target_atomic8_libcall). */
+int target_atomic_rmw_libcall(int size)
+{
+    if (size == 8 && target_atomic8_libcall())
+        return 1;
+    return !target_riscv_atomics() && size <= 8;
 }
 void target_set_riscv_abi_flen(int flen) { g_rv_abi_flen = flen; }
 
@@ -1449,8 +1480,8 @@ long target_reloc_addend(enum target_arch a, enum reloc_kind k, long bias)
 }
 
 /* ELF relocation types by name, as an assembler's `.reloc` spells them:
- * the ones `embcc -S` writes for Cortex-M, RISC-V and AVR, and the ones
- * an object from these targets may carry beside them. One table read
+ * every one `embcc -S` writes, on every target whose text EmbCC's own
+ * assembler reads back, and the ones an object may carry beside them. One table read
  * both ways -- -S writes a name from a number (src/driver/asmout.c) and
  * the assembler reads it back (src/as/gas.c) -- so the two cannot
  * disagree about what a name means. */
@@ -1468,6 +1499,23 @@ static const struct reloc_spelling {
     { EM_ARM,   R_ARM_PREL31,          "R_ARM_PREL31" },
     { EM_ARM,   R_ARM_THM_MOVW_ABS_NC, "R_ARM_THM_MOVW_ABS_NC" },
     { EM_ARM,   R_ARM_THM_MOVT_ABS,    "R_ARM_THM_MOVT_ABS" },
+    { EM_ARM,   R_ARM_CALL,            "R_ARM_CALL" },
+    { EM_ARM,   R_ARM_JUMP24,          "R_ARM_JUMP24" },
+    { EM_ARM,   R_ARM_MOVW_ABS_NC,     "R_ARM_MOVW_ABS_NC" },
+    { EM_ARM,   R_ARM_MOVT_ABS,        "R_ARM_MOVT_ABS" },
+    { EM_AARCH64, R_AARCH64_ABS64,     "R_AARCH64_ABS64" },
+    { EM_AARCH64, R_AARCH64_ABS32,     "R_AARCH64_ABS32" },
+    { EM_AARCH64, R_AARCH64_PREL32,    "R_AARCH64_PREL32" },
+    { EM_AARCH64, R_AARCH64_ADR_PREL_PG_HI21, "R_AARCH64_ADR_PREL_PG_HI21" },
+    { EM_AARCH64, R_AARCH64_ADD_ABS_LO12_NC,  "R_AARCH64_ADD_ABS_LO12_NC" },
+    { EM_AARCH64, R_AARCH64_JUMP26,    "R_AARCH64_JUMP26" },
+    { EM_AARCH64, R_AARCH64_CALL26,    "R_AARCH64_CALL26" },
+    { EM_AARCH64, R_AARCH64_ADR_GOT_PAGE,     "R_AARCH64_ADR_GOT_PAGE" },
+    { EM_AARCH64, R_AARCH64_LD64_GOT_LO12_NC, "R_AARCH64_LD64_GOT_LO12_NC" },
+    { EM_AARCH64, R_AARCH64_TLSLE_ADD_TPREL_HI12,
+      "R_AARCH64_TLSLE_ADD_TPREL_HI12" },
+    { EM_AARCH64, R_AARCH64_TLSLE_ADD_TPREL_LO12_NC,
+      "R_AARCH64_TLSLE_ADD_TPREL_LO12_NC" },
     { EM_RISCV, R_RISCV_32,            "R_RISCV_32" },
     { EM_RISCV, R_RISCV_64,            "R_RISCV_64" },
     { EM_RISCV, R_RISCV_BRANCH,        "R_RISCV_BRANCH" },

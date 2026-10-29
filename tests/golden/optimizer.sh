@@ -218,6 +218,8 @@ echo "a stored value is not loaded back, and a punning union leaves no memory"
 # 9. A bottom-tested loop's back-edge copies run before its branch, which
 #    then goes to the header: no block of copies and a jump on every
 #    iteration (tests/exec/loop-latch-copies.c holds the execution side).
+#    Without unrolling, which copies this loop four times at -O2 and puts
+#    its exits' moves, each ending in a jump, after it.
 cat > "$out/latch.c" <<'EOF'
 int fib(int n)
 {
@@ -226,7 +228,8 @@ int fib(int n)
     return a;
 }
 EOF
-"$EMBCC" inspect ir --target="$TARGET" -O2 "$out/latch.c" > "$out/latch.ir" \
+"$EMBCC" inspect ir --target="$TARGET" -O2 --no-pass=unroll "$out/latch.c" \
+    > "$out/latch.ir" \
     2>/dev/null || { echo "FAIL: could not dump the latch IR"; exit 1; }
 awk '/^func @fib .*\{/,/^}/' "$out/latch.ir" | grep -q 'jmp' && {
     echo "FAIL: the loop's back edge is still a block of copies and a jump:"

@@ -143,13 +143,15 @@ typedef _Atomic uint64_t           atomic_uint_least64_t;
 
 /* Each returns the value BEFORE the operation, which is what makes
  * fetch_add a ticket dispenser: every caller gets a different number
- * and none is skipped. */
+ * and none is skipped. Add and subtract are clang's __c11_atomic forms,
+ * which on an atomic pointer count elements, as C11 asks (7.17.7.5) --
+ * GCC's __atomic_fetch_add, and GCC's <stdatomic.h>, count bytes. */
 #define atomic_fetch_add_explicit(obj, arg, order) \
-    __atomic_fetch_add((obj), (arg), (order))
+    __c11_atomic_fetch_add((obj), (arg), (order))
 #define atomic_fetch_add(obj, arg) \
     atomic_fetch_add_explicit((obj), (arg), memory_order_seq_cst)
 #define atomic_fetch_sub_explicit(obj, arg, order) \
-    __atomic_fetch_sub((obj), (arg), (order))
+    __c11_atomic_fetch_sub((obj), (arg), (order))
 #define atomic_fetch_sub(obj, arg) \
     atomic_fetch_sub_explicit((obj), (arg), memory_order_seq_cst)
 #define atomic_fetch_or_explicit(obj, arg, order) \
