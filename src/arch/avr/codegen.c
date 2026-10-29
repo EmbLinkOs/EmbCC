@@ -5177,32 +5177,36 @@ static void set_sp_from_y(struct code *t)
  *   it. avr-gcc does exactly this, and it is the reason an ISR is bigger
  *   than a function that does the same work.
  *
- * Everything this backend touches is saved, because a handler must leave
+ * Every register the body writes is saved, because a handler must leave
  * the interrupted code exactly as it found it and nothing here knows what
- * that code was using. That is r0, r1, SREG, the A and B scratch banks,
- * X, Z and the frame pointer -- seventeen pushes. A register allocator
- * would narrow it to what the body really uses; until then it is correct
- * and expensive, which is the right way round.
+ * that code was using: r0, r1 and SREG always, and of the rest what the
+ * emitted body writes -- every call-clobbered one if it calls anything
+ * (AVR_W_CALL), since the callee may. Which those are is read off the
+ * body's own bytes (avr_insn_writes), not guessed from the IR: the
+ * handler is generated, decoded, and generated again with that set until
+ * the two agree (gen_relaxed), and a handler whose body writes a
+ * register its prologue did not save is an internal error. The pairs the
+ * allocator took and Y are saved as an ordinary function saves them. A
+ * body with inline asm saves everything, as before: its bytes need not
+ * be instructions. avr-gcc saves the same set; `count++` came to 73
+ * instructions when every handler saved seventeen registers and kept its
+ * values in a frame.
  *
  * The order matters at one point only: SREG is read with `in` AFTER r0 is
  * safe to use and BEFORE anything sets a flag.
  */
-static const int ISR_SAVE[] = {
-    0, 1,                                  /* scratch and the zero register */
-    18, 19, 20, 21, 22, 23, 24, 25,        /* A and B */
-    26, 27,                                /* X */
-    30, 31,                                /* Z */
-    28, 29                                 /* Y, the frame pointer */
-};
+/* what a handler's own save covers: all but r0 and r1, pushed first */
+#define ISR_ALL 0xfffffffcUL
 
-static void isr_prologue(struct code *t, int kind)
+static void isr_prologue(struct code *t, int kind, unsigned long save)
 {
-    unsigned k;
     avr_push(t, 0);
     avr_in(t, R_TMP, IO_SREG);
     avr_push(t, R_TMP);                    /* SREG, through r0 */
-    for (k = 1; k < sizeof ISR_SAVE / sizeof ISR_SAVE[0]; k++)
-        avr_push(t, ISR_SAVE[k]);
+    avr_push(t, R_ZERO);
+    for (int r = 2; r < 32; r++)
+        if (save & (1UL << r))
+            avr_push(t, r);
     /* The body and everything it calls read r1 as zero. */
     avr_rr(t, AVR_EOR, R_ZERO, R_ZERO);
     /* `interrupt`, unlike `signal`, runs with interrupts enabled. */
@@ -5210,15 +5214,34 @@ static void isr_prologue(struct code *t, int kind)
         avr_bset(t, AVR_SREG_I);
 }
 
-static void isr_epilogue(struct code *t)
+static void isr_epilogue(struct code *t, unsigned long save)
 {
-    int k;
-    for (k = (int)(sizeof ISR_SAVE / sizeof ISR_SAVE[0]) - 1; k >= 1; k--)
-        avr_pop(t, ISR_SAVE[k]);
+    for (int r = 31; r >= 2; r--)
+        if (save & (1UL << r))
+            avr_pop(t, r);
+    avr_pop(t, R_ZERO);
     avr_pop(t, R_TMP);
     avr_out(t, IO_SREG, R_TMP);
     avr_pop(t, 0);
     avr_reti(t);
+}
+
+/* The handler being generated: the registers its prologue saves (ISR_ALL
+ * until its body has been decoded once), what else saves some (the
+ * allocator's pairs, and Y), and where its body's bytes are. */
+static unsigned long g_isr_save = ISR_ALL, g_isr_other;
+static long g_isr_lo, g_isr_hi;
+
+/* What the handler's body, as emitted, writes that it must save itself */
+static unsigned long isr_writes(const struct code *t)
+{
+    unsigned long w = 0;
+    for (long p = g_isr_lo; p < g_isr_hi; ) {
+        int len;
+        w |= avr_insn_writes(t->p + p, g_isr_hi - p, &len);
+        p += len;
+    }
+    return w & ISR_ALL & ~g_isr_other;
 }
 
 /* ---- register allocation ---------------------------------------------
@@ -5796,12 +5819,13 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
                      "an interrupt handler that returns a value: `reti` goes "
                      "back to the interrupted instruction, and nothing is "
                      "there to receive it");
-        isr_prologue(t, f->is_isr);
+        isr_prologue(t, f->is_isr, g_isr_save);
+        g_isr_lo = t->len;
     }
-    /* Y is pushed here for an ordinary function and was pushed by
-     * isr_prologue for a handler, so the frame arithmetic below is the
-     * same either way -- and the distance from Y to the incoming stack
-     * arguments stays exact, because a handler has none. */
+    /* The pairs and Y are pushed here for a handler as for an ordinary
+     * function, so the frame arithmetic below is the same either way --
+     * and the distance from Y to the incoming stack arguments stays
+     * exact, because a handler has none. */
     /* The pairs the allocator took, BEFORE Y: then the distance from Y
      * to the incoming stack arguments grows by exactly what was pushed. */
     for (i = 0; i < F.nsave; i++) {
@@ -5819,7 +5843,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
         struct argplace pl;
         int cursor = ARG_TOP;
         long stk = 0;
-        F.use_y = f->is_isr || fn->is_varargs || F.frame != 0 ||
+        F.use_y = fn->is_varargs || F.frame != 0 ||
                   F.sret_slot >= 0 || fn->has_alloca;
         /* __builtin_frame_address / _return_address read above Y */
         for (i = 0; i < fn->nins && !F.use_y; i++)
@@ -5831,7 +5855,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
             if (pl.nstk) F.use_y = 1;
         }
     }
-    if (!f->is_isr && F.use_y) {
+    if (F.use_y) {
         avr_push(t, 28);
         avr_push(t, 29);
     }
@@ -5996,19 +6020,17 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
     if (tail_end) {
         ;
     } else if (f->is_isr) {
-        if (F.frame)
-            add_const16(&F, AVR_Y, F.frame);
-        if (F.frame || fn->has_alloca)
-            set_sp_from_y(t);
-        /* The pairs the prologue pushed after isr_prologue's registers
-         * (r8-r17 a call's arguments are loaded into): popped first.
-         * Leaving them on the stack popped Y, Z, X and the rest from
-         * the wrong bytes, and reti returned to one of them. */
-        for (i = F.nsave - 1; i >= 0; i--) {
-            avr_pop(t, F.used_callee[i] + 1);
-            avr_pop(t, F.used_callee[i]);
-        }
-        isr_epilogue(t);
+        /* The frame, Y and the pairs the prologue pushed after
+         * isr_prologue's registers (r8-r17 a call's arguments are loaded
+         * into), as an ordinary function lets them go: popped first.
+         * Leaving them on the stack popped Y, Z, X and the rest from the
+         * wrong bytes, and reti returned to one of them. */
+        a_teardown(&F);
+        g_isr_hi = t->len;
+        g_isr_other = F.use_y ? 3UL << 28 : 0;
+        for (i = 0; i < F.nsave; i++)
+            g_isr_other |= 3UL << F.used_callee[i];
+        isr_epilogue(t, g_isr_save);
     } else {
         a_teardown(&F);
         avr_ret(t);
@@ -6058,11 +6080,14 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
     /* The frame, the pairs and Y the prologue pushed, the return address
      * the call (or the interrupt) pushed, and the most the body pushes
      * on top of all that for a moment (t_push). A handler's prologue also
-     * pushes everything in ISR_SAVE but Y (counted above), and SREG. */
+     * pushes r0, SREG, r1 and the registers it saves. */
     f->stack_bytes = (int)F.frame + 2 * F.nsave + 2 * F.use_y /* Y */ +
                      2 /* the return address */ + F.tpeak;
-    if (f->is_isr)
-        f->stack_bytes += (int)(sizeof ISR_SAVE / sizeof ISR_SAVE[0]) - 2 + 1;
+    if (f->is_isr) {
+        f->stack_bytes += 3;                 /* r0, SREG and r1 */
+        for (int r = 2; r < 32; r++)
+            f->stack_bytes += (int)((g_isr_save >> r) & 1);
+    }
     f->code_len = t->len - f->code_off;
     if (F.rx) {
         struct avr_relax *rx = F.rx;
@@ -6123,8 +6148,9 @@ static void avr_rollback(struct code *t, struct a_sites *st,
     st->ng = rb->ng; st->nf = rb->nf;
 }
 
-static int gen_relaxed(struct ir_func *fn, struct code *t, struct a_sites *st,
-                       int keep_vars, int mode, const struct avr_rollback *rb)
+static int gen_relaxed_once(struct ir_func *fn, struct code *t,
+                            struct a_sites *st, int keep_vars, int mode,
+                            const struct avr_rollback *rb)
 {
     struct avr_relax rx;
     unsigned char *pin = NULL;
@@ -6162,6 +6188,34 @@ static int gen_relaxed(struct ir_func *fn, struct code *t, struct a_sites *st,
     }
     free(rx.hint); free(rx.fits); free(pin);
     return t->len - rb->at;
+}
+
+/* ...and a handler until what its prologue saves is what its body
+ * writes. The body does not depend on the set -- a shorter prologue only
+ * moves it, and relaxation re-measures the branches -- so the second
+ * generation agrees with the first; the bound names a loop that did not. */
+static int gen_relaxed(struct ir_func *fn, struct code *t, struct a_sites *st,
+                       int keep_vars, int mode, const struct avr_rollback *rb)
+{
+    int len, has_asm = 0;
+    if (!fn->src->is_isr)
+        return gen_relaxed_once(fn, t, st, keep_vars, mode, rb);
+    for (int k = 0; k < fn->nins; k++)
+        if (fn->ins[k].op == IR_ASM)
+            has_asm = 1;
+    g_isr_save = ISR_ALL;
+    len = gen_relaxed_once(fn, t, st, keep_vars, mode, rb);
+    for (int round = 0; !has_asm; round++) {
+        unsigned long w = isr_writes(t);
+        if (w == g_isr_save)
+            break;
+        if (round == 4)
+            internal_error("avr: %s: the registers the handler saves and "
+                           "those its body writes did not agree", fn->name);
+        g_isr_save = w;
+        len = gen_relaxed_once(fn, t, st, keep_vars, mode, rb);
+    }
+    return len;
 }
 
 /* One allocation choice, generated until a_verify catches nothing: each
@@ -6223,7 +6277,7 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
     int best = AVR_RA_NONE, best_len = 0;
     int nv = fn->nvregs;
 
-    if (!g_a_regalloc || fn->src->is_isr ||
+    if (!g_a_regalloc ||
         (avr_knob("EMBCC_AVR_RA_ONLY") &&
          strcmp(avr_knob("EMBCC_AVR_RA_ONLY"), fn->name) != 0)) {
         gen_relaxed(fn, t, st, keep_vars, AVR_RA_NONE, &rb);
