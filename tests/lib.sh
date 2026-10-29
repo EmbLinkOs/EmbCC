@@ -232,15 +232,17 @@ no_gcc_reference() {
 # cc is GCC 13, 26.04's 15.
 # Too old a referee is no reference, not a failure of the program;
 # EMBCC_X86_GCC names a newer one. A feature is asked of the referee only
-# for a program that uses it (gcc_has).
+# for a program that uses it (gcc_has). A builtin is asked where a
+# constant must be: an older gcc takes one it has not got as a function
+# it was not told of, and warns.
 gcc_too_old_for() {
     if grep -q '_BitInt' "$1" && ! gcc_has bitint 'unsigned _BitInt(12) x;'; then
         echo "the referee gcc has no _BitInt; GCC 14 and later have"
     elif grep -Eq '__builtin_(clz|ctz|popcount|parity|ffs|clrsb)g\(' "$1" &&
-         ! gcc_has bitg 'int n(void) { return __builtin_popcountg(1u); }'; then
+         ! gcc_has bitg '_Static_assert(__builtin_popcountg(3u) == 2, "");'; then
         echo "the referee gcc has no type-generic bit builtins; GCC 14 and later have"
     elif grep -q '__builtin_stdc_' "$1" &&
-         ! gcc_has stdcbit 'unsigned n(void) { return __builtin_stdc_rotate_left(1u, 1); }'; then
+         ! gcc_has stdcbit '_Static_assert(__builtin_stdc_rotate_left(1u, 1) == 2, "");'; then
         echo "the referee gcc has no __builtin_stdc_ bit builtins; GCC 15 and later have"
     elif grep -q '_Countof' "$1" && ! gcc_has countof 'int a[3]; int n = _Countof(a);'; then
         echo "the referee gcc has no _Countof; GCC 16 and later have"
