@@ -3284,11 +3284,52 @@ static int avr_mul_wide16(struct a_fn *F, const struct ir_ins *i, int nb)
     return 1;
 }
 
+/* `REG |= BIT` and `REG &= ~BIT` on an I/O register sbi/cbi reach
+ * (0x20-0x3f): a one-byte load, an or or and of one bit, and the store of
+ * that back -- each value read by the next alone -- are one sbi or cbi,
+ * which reads and writes the register once as the three did. avr-gcc
+ * makes the same one instruction of PORTB |= 1; this was five, and three
+ * once the address was in the instructions. EMBCC_AVR_NO_SBI turns it off. */
+static int gen_bit_io(struct a_fn *F, int n)
+{
+    const struct ir_func *fn = F->fn;
+    const struct ir_ins *ld = &fn->ins[n], *op, *st;
+    if (n + 2 >= fn->nins || !F->usecnt || avr_knob("EMBCC_AVR_NO_SBI"))
+        return 0;
+    op = ld + 1;
+    st = ld + 2;
+    if (ld->op != IR_LOAD || ld->size != 1 || ld->flash ||
+        !is_direct(F, ld->a) || F->direct[ld->a] != 1 || ld->dst < 0 ||
+        F->usecnt[ld->dst] != 1)
+        return 0;
+    if ((op->op != IR_OR && op->op != IR_AND) || !op->imm_b ||
+        op->a != ld->dst || op->dst < 0 || F->usecnt[op->dst] != 1)
+        return 0;
+    if (st->op != IR_STORE || st->size != 1 || st->b != op->dst ||
+        !is_direct(F, st->a) || F->direct[st->a] != 1)
+        return 0;
+    long a = (F->cval[ld->a] + ld->memoff) & 0xffff;
+    if (((F->cval[st->a] + st->memoff) & 0xffff) != a || a < 0x20 || a > 0x3f)
+        return 0;
+    unsigned m = (unsigned)(op->op == IR_OR ? op->imm : ~op->imm) & 0xffu;
+    if (!m || (m & (m - 1)))
+        return 0;                        /* not one bit */
+    int bit = 0;
+    while (!(m & 1u)) { m >>= 1; bit++; }
+    if (op->op == IR_OR) avr_sbi(F->t, (int)(a - 0x20), bit);
+    else                 avr_cbi(F->t, (int)(a - 0x20), bit);
+    F->skip_next = 2;
+    return 1;
+}
+
 static void gen_ins(struct a_fn *F, int n)
 {
     struct ir_func *fn = F->fn;
     struct code *t = F->t;
     const struct ir_ins *i = &fn->ins[n];
+
+    if (i->op == IR_LOAD && gen_bit_io(F, n))
+        return;
 
     /* Everything this backend has not learned, named before anything is
      * emitted for it. The width test comes first because it applies to
@@ -6121,9 +6162,10 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
                 a_line_row(fn, t->len, fn->ins[i].line);
             F.tdepth = 0;
             gen_ins(&F, i);
-            if (F.skip_next) {          /* the compare emitted its branch */
+            if (F.skip_next) {          /* the compare emitted its branch,
+                                         * or sbi/cbi its or and store */
+                i += F.skip_next;
                 F.skip_next = 0;
-                i++;
             }
             if (fn->ins[first].dst >= 0 && fn->ins[first].dst == F.zv)
                 F.zv = -1;              /* Z's pointer was redefined */
