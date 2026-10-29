@@ -3133,7 +3133,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
 
     /* The groups, as codegen laid them out (the sort above). */
     g_plain_end = g_groups_end = (long)text.len;
-    g_text_align = 16;
+    g_text_align = target_section_align(1);
     for (int i = 0; i < iu->nfuncs; i++) {
         struct func *f = iu->funcs[i].src;
         if (f && !f->section && f->code_len > 0 &&
@@ -3163,9 +3163,12 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         }
         g_tg[g_ntg - 1].end = f->code_off + f->code_len;
         /* the strictest start in the group; one codegen did not say is
-         * given the sixteen every section had */
-        if ((f->code_align ? f->code_align : 16) > g_tg[g_ntg - 1].align)
-            g_tg[g_ntg - 1].align = f->code_align ? f->code_align : 16;
+         * given the target's least (target_section_align) */
+        {
+            int fa = f->code_align ? f->code_align : target_section_align(1);
+            if (fa > g_tg[g_ntg - 1].align)
+                g_tg[g_ntg - 1].align = fa;
+        }
         g_groups_end = f->code_off + f->code_len;
     }
     if (g_ntg && target_fmt_get() != TGT_FMT_ELF)
@@ -3511,7 +3514,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
 
     /* .rodata: the string literals, at the offsets irgen assigned, then
      * the const objects, each at its alignment. */
-    int rodata_len = iu->rodata_len, rodata_align = 16;
+    int rodata_len = iu->rodata_len, rodata_align = target_section_align(0);
     for (struct global *g = u->globals; g; g = g->next) {
         if (g->absorbed || !g->defined || !g->in_rodata)
             continue;
@@ -4973,7 +4976,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     for (int i = 0; i < ngs; i++) {
         int lo = riscv && gs[i].kind == RK_RISCV_PCREL_LO12_I;
         int gsym = gs[i].glob->sym_ndx;
-        long gadd = target_reloc_addend(ta, gs[i].kind, 0);
+        long gadd = target_reloc_addend(ta, gs[i].kind, 0) + gs[i].addend;
         if (lo)
             gadd = code_ref(gs[i].patch_off - 4, text_sym, &gsym);
         code_rela(w, text_ndx, gs[i].patch_off, gsym,

@@ -969,6 +969,18 @@ int target_object_align(int is_array, long size, int align)
         return 4;
     return align;
 }
+/* The least alignment an object's .text and .rodata start at. Sixteen,
+ * as every section had -- but on AVR, whose flash and SRAM are counted
+ * in bytes, the code's own word and no more: every object's .rodata
+ * (which AVR copies into SRAM) and .text began at a multiple of
+ * sixteen, up to fifteen bytes of each lost to padding. avr-gcc's are
+ * aligned 2 and 1. */
+int target_section_align(int text)
+{
+    if (g_arch == TARGET_AVR)
+        return text ? 2 : 1;
+    return 16;
+}
 int target_string_align(int width)
 {
     return width > 1 ? width : 1;

@@ -144,10 +144,10 @@ for v in __vector_13 __vector_14 __vector_15 __vector_16; do
         echo "$v pushes '$pu' and pops (reversed) '$po'"; exit 1; }
 done
 # ...and only those: a handler that adds one to a byte saves r0, SREG, r1
-# and what the load, the add and the store take -- not the seventeen
-# registers every handler once saved whatever it did
+# and the one register the lds, the add and the sts take, as avr-gcc's
+# does -- not the seventeen every handler once saved whatever it did
 np=$(grep -c '^push ' "$out/__vector_13.dis")
-[ "$np" -le 8 ] || {
+[ "$np" -le 4 ] || {
     echo "__vector_13 (n++) pushes $np registers:"; cat "$out/__vector_13.dis"
     exit 1; }
 # a handler that calls saves all that the callee may write

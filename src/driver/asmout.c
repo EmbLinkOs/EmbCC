@@ -802,6 +802,7 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
     for (int i = 0; i < ngs; i++) {
         site[ns].off = gs[i].patch_off;
         site[ns].name = gs[i].glob ? csym(gs[i].glob->name) : "?";
+        site[ns].addend = gs[i].addend;
         site[ns++].kind = gs[i].kind;
     }
     for (int i = 0; i < nstrs; i++) {
@@ -1166,9 +1167,9 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
      * to. Emitted as bytes, because a string may hold anything. */
     if (rodata && iu->rodata_len > 0) {
         ob_str(b, "\n\t.section\t.rodata\n");
-        /* the object's .rodata is 16-aligned (main.c); an assembler's
-         * starts at 1 unless told */
-        ob_str(b, "\t.balign\t16\n");
+        /* the object's .rodata is aligned as main.c aligns it
+         * (target_section_align); an assembler's starts at 1 unless told */
+        ob_fmt(b, "\t.balign\t%d\n", target_section_align(0));
         long cur = 0;
         for (int i = 0; i < iu->nstrs; i++) {
             /* the same gap irgen left, as zeros, so each string is at

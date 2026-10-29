@@ -209,6 +209,15 @@ struct a_fn {
      * is REBUILT where it is read (vld, vld_cc) rather than kept anywhere:
      * no home, no slot, and its IR_CONST emits nothing. */
     char *remat;
+    /* Per vreg: an address known when this is compiled -- a constant (1,
+     * cval) or a global's (2, dglob) -- that every use reads as the
+     * address of a load or a store. Those take it in the instruction:
+     * in/out in the I/O space, lds/sts elsewhere and for a global (an
+     * R_AVR_16 against it, with the byte's offset). It is kept nowhere,
+     * and its definition emits nothing. avr-gcc's form: `x = count` was
+     * two ldi, a movw into Z and the loads off Z, and PORTB through Z. */
+    char *direct;
+    struct global **dglob;
     /* The last store into a home (vst), and where the code stood after it:
      * a vld of the same value into the same registers with nothing emitted
      * since -- and no label placed -- has nothing to do. */
@@ -1060,6 +1069,7 @@ static int a_param_unused(const struct a_fn *F, int v)
     return 1;
 }
 
+static int is_direct(const struct a_fn *F, int v);
 static void layout(struct a_fn *F)
 {
     struct ir_func *fn = F->fn;
@@ -1227,7 +1237,7 @@ static void layout(struct a_fn *F)
             int has_cgoto = 0;
             for (int v = 0; v < nv; v++)
                 loc2[v] = (in_pair(F, v) || (F->remat && F->remat[v]) ||
-                           vw(F, v) != VW) ? 0 : -1;
+                           is_direct(F, v) || vw(F, v) != VW) ? 0 : -1;
             for (int n = 0; n < fn->nins; n++)
                 if (fn->ins[n].op == IR_IGOTO ||
                     fn->ins[n].op == IR_LABELADDR)
@@ -1243,8 +1253,9 @@ static void layout(struct a_fn *F)
         for (int v = fn->nvars; v < nv; v++) {
             int k;
             if (def[v] < 0 || in_pair(F, v) ||
-                (F->remat && F->remat[v]))
-                continue;      /* never defined, in a pair, or rebuilt */
+                (F->remat && F->remat[v]) || is_direct(F, v))
+                continue;      /* never defined, in a pair, rebuilt, or
+                                * named by the instructions that use it */
             if (vw(F, v) == VW && tslot) {
                 int ts = tslot[v - fn->nvars];
                 if (ts < 0)
@@ -1555,6 +1566,97 @@ static void z_add(struct code *t, long off)
     long neg = -off;
     avr_ri(t, AVR_SUBI, AVR_Z, (int)(neg & 0xff));
     avr_ri(t, AVR_SBCI, AVR_Z + 1, (int)((neg >> 8) & 0xff));
+}
+
+/* F->direct, from the constant map, the use counts and the width map */
+static int wide_ins(const struct a_fn *F, const struct ir_ins *i);
+static const char *avr_knob(const char *name);
+static void note_glob_at(struct a_sites *st, int at, struct global *g,
+                         enum reloc_kind k, long addend);
+static void direct_map(struct a_fn *F)
+{
+    const struct ir_func *fn = F->fn;
+    int nv = fn->nvregs ? fn->nvregs : 1;
+    int *uses = xcalloc((size_t)nv, sizeof *uses);
+    int *defs = xcalloc((size_t)nv, sizeof *defs);
+    int *bytes = xcalloc((size_t)nv, sizeof *bytes);
+    char *io = xcalloc((size_t)nv, 1);       /* every byte in the I/O space */
+    F->direct = xcalloc((size_t)nv, 1);
+    F->dglob = xcalloc((size_t)nv, sizeof *F->dglob);
+    if (!avr_knob("EMBCC_AVR_NO_DIRECT") && F->usecnt) {
+        for (int k = 0; k < fn->nins; k++) {
+            const struct ir_ins *i = &fn->ins[k];
+            if (i->dst >= 0 && i->dst < fn->nvregs)
+                defs[i->dst]++;
+            if ((i->op == IR_LOAD || i->op == IR_STORE) && !i->flash &&
+                i->a >= fn->nvars && i->a < fn->nvregs &&
+                i->size >= 1 && i->size <= 4 && !wide_ins(F, i)) {
+                long lo = F->cval[i->a] + i->memoff;
+                if (!uses[i->a])
+                    io[i->a] = 1;
+                if (F->cknown[i->a] != 1 || lo < 0x20 ||
+                    lo + i->size - 1 > 0x5f)
+                    io[i->a] = 0;
+                uses[i->a]++;
+                bytes[i->a] += i->size;
+            }
+        }
+        for (int k = 0; k < fn->nins; k++) {
+            const struct ir_ins *i = &fn->ins[k];
+            if (i->op == IR_GADDR && i->glob && i->dst >= fn->nvars &&
+                i->dst < fn->nvregs && defs[i->dst] == 1)
+                F->dglob[i->dst] = i->glob;
+        }
+        /* every use of it one of those: a store of the address itself, a
+         * compare or a pointer increment keeps it in a register. In the
+         * I/O space in/out is two bytes and always the answer. Elsewhere
+         * lds/sts is four bytes a byte where Z, loaded once (four), is
+         * two: faster always, and taken so -- but optimizing for size,
+         * only where it is no larger. A handler takes it whatever: Z
+         * not used is two registers it does not save. */
+        int small = target_opt_size() && !fn->src->is_isr;
+        for (int v = fn->nvars; v < fn->nvregs; v++) {
+            if (!uses[v] || uses[v] != F->usecnt[v])
+                continue;
+            if (small && !io[v] && 4 * bytes[v] > 4 + 2 * bytes[v])
+                continue;
+            if (F->cknown[v] == 1 && F->cval[v] >= 0 && F->cval[v] <= 0xffff)
+                F->direct[v] = 1;
+            else if (F->dglob[v])
+                F->direct[v] = 2;
+        }
+    }
+    free(uses);
+    free(defs);
+    free(bytes);
+    free(io);
+}
+
+static int is_direct(const struct a_fn *F, int v)
+{
+    return F->direct && v >= 0 && v < F->fn->nvregs && F->direct[v];
+}
+
+/* One byte at direct address v + off, into (or, `st`, out of) r */
+static void direct_access(struct a_fn *F, int st, int r, int v, long off)
+{
+    struct code *t = F->t;
+    if (F->direct[v] == 1) {
+        long a = (F->cval[v] + off) & 0xffff;
+        if (a >= 0x20 && a < 0x60) {             /* the I/O space */
+            if (st) avr_out(t, (int)(a - 0x20), r);
+            else    avr_in(t, r, (int)(a - 0x20));
+        } else if (st) {
+            avr_sts(t, (int)a, r);
+        } else {
+            avr_lds(t, r, (int)a);
+        }
+        return;
+    }
+    /* the address word, the instruction's second */
+    note_glob_at(F->st, t->len + 2, F->dglob[v], RK_AVR_ABS16, off);
+    if (st) avr_sts(t, 0, r);
+    else    avr_lds(t, r, 0);
 }
 
 static void vld(struct a_fn *F, int r, int v, long off, int n)
@@ -2238,8 +2340,8 @@ static void note_str(struct a_sites *st, int at, int idx, enum reloc_kind k)
     st->nstr++;
 }
 
-static void note_glob(struct a_sites *st, int at, struct global *g,
-                      enum reloc_kind k)
+static void note_glob_at(struct a_sites *st, int at, struct global *g,
+                         enum reloc_kind k, long addend)
 {
     if (st->ng == st->capg) {
         st->capg = st->capg ? st->capg * 2 : 16;
@@ -2248,7 +2350,14 @@ static void note_glob(struct a_sites *st, int at, struct global *g,
     st->g[st->ng].patch_off = at;
     st->g[st->ng].glob = g;
     st->g[st->ng].kind = k;
+    st->g[st->ng].addend = addend;
     st->ng++;
+}
+
+static void note_glob(struct a_sites *st, int at, struct global *g,
+                      enum reloc_kind k)
+{
+    note_glob_at(st, at, g, k, 0);
 }
 
 static void note_fn(struct a_sites *st, int at, struct func *target,
@@ -4452,6 +4561,14 @@ static void gen_ins(struct a_fn *F, int n)
             if (!ld)
                 return;
             int d = dst_reg(F, i, nb);       /* straight into its home */
+            if (is_direct(F, i->a)) {
+                for (int k = 0; k < ld; k++)
+                    direct_access(F, 0, d + k, i->a, i->memoff + k);
+                if (nb > i->size)
+                    extend(F, d, i->size, i->sign, nb);
+                dst_done(F, i, d);
+                return;
+            }
             vld(F, AVR_Z, i->a, 0, 2);
             if (i->flash) {
                 /* __flash: program memory, which LPM alone reads, through
@@ -4484,6 +4601,11 @@ static void gen_ins(struct a_fn *F, int n)
         {
         /* ...from its home when it has one, which touches no Z. */
         int src = rd_in(F, i->b, i->size, RA);
+        if (is_direct(F, i->a)) {        /* high first, as below */
+            for (int k = i->size - 1; k >= 0; k--)
+                direct_access(F, 1, src + k, i->a, i->memoff + k);
+            return;
+        }
         vld(F, AVR_Z, i->a, 0, 2);
         /* The HIGH byte first. A 16-bit timer, compare or ADC register
          * is written through the part's TEMP latch: the high byte waits
@@ -4567,6 +4689,8 @@ static void gen_ins(struct a_fn *F, int n)
      * it is from r16 up, and extended past its two bytes only as far as
      * anything reads -- a pointer in a pair is read as two. */
     case IR_STRADDR: case IR_GADDR: case IR_FADDR: {
+        if (is_direct(F, i->dst))       /* each access names it itself */
+            return;
         int nb = dw(F, i), d = addr_reg(F, i);
         if (!nb)
             return;
@@ -5484,6 +5608,8 @@ static char *avr_excl(const struct a_fn *F, int hw)
             x[v] = quad ? cw(F, v) < 3 || cw(F, v) > 4 : cw(F, v) > 2;
         if (F->remat && F->remat[v])
             x[v] = 1;                /* rebuilt where it is read */
+        if (is_direct(F, v))
+            x[v] = 1;                /* in the instructions that use it */
         if (g_a_nohome && v < g_a_nvr && g_a_nohome[v])
             x[v] = 1;                /* overwritten where it was (a_verify) */
     }
@@ -5752,6 +5878,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
                 if (s->c >= 0 && s->c < fn->nvregs) F.remat[s->c] = 0;
             }
     }
+    direct_map(&F);
     F.last_st.v = -1;
     F.zv = -1;
     if (ra_mode != AVR_RA_NONE)
@@ -6129,6 +6256,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
     free(F.cval);
     free(F.cknown);
     free(F.remat);
+    free(F.direct);
+    free(F.dglob);
     free(F.wide);
     free(F.loc);
     free(F.hw);

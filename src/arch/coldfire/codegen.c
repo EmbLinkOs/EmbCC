@@ -827,6 +827,7 @@ static void note_glob(struct cf_sites *st, int at, struct global *g)
     st->g[st->ng].patch_off = at;
     st->g[st->ng].glob = g;
     st->g[st->ng].kind = RK_ABS32;
+    st->g[st->ng].addend = 0;
     st->ng++;
 }
 
