@@ -9,6 +9,7 @@
 
 #include <stddef.h>
 #include <stdarg.h>
+#include <features.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -137,6 +138,84 @@ int vfscanf(FILE *__restrict f, const char *__restrict fmt, va_list ap)
                                                           __fmt(scanf, 2, 0);
 int vsscanf(const char *__restrict s, const char *__restrict fmt, va_list ap)
                                                           __fmt(scanf, 2, 0);
+
+/* POSIX's, which ISO C leaves to the program (see <features.h>) */
+#if defined(__EMB_POSIX)
+#ifndef _SSIZE_T_DECLARED
+#define _SSIZE_T_DECLARED
+typedef __PTRDIFF_TYPE__ ssize_t;
+#endif
+#ifndef _OFF_T_DECLARED
+#define _OFF_T_DECLARED
+typedef long off_t;
+#endif
+#define L_ctermid 9
+#define P_tmpdir  "/tmp"
+
+FILE   *fdopen(int fd, const char *mode);
+int     fileno(FILE *f);
+FILE   *fmemopen(void *__restrict buf, size_t size, const char *__restrict mode);
+FILE   *open_memstream(char **bufp, size_t *sizep);
+ssize_t getline(char **__restrict line, size_t *__restrict n,
+                FILE *__restrict f);
+ssize_t getdelim(char **__restrict line, size_t *__restrict n, int delim,
+                 FILE *__restrict f);
+int dprintf(int fd, const char *__restrict fmt, ...)      __fmt(printf, 2, 3);
+int vdprintf(int fd, const char *__restrict fmt, va_list ap)
+                                                          __fmt(printf, 2, 0);
+int asprintf(char **__restrict s, const char *__restrict fmt, ...)
+                                                          __fmt(printf, 2, 3);
+int vasprintf(char **__restrict s, const char *__restrict fmt, va_list ap)
+                                                          __fmt(printf, 2, 0);
+int     fseeko(FILE *f, off_t off, int whence);
+off_t   ftello(FILE *f);
+char   *ctermid(char *s);
+
+/* One lock around many calls: the stream's lock nests, so a thread that
+ * holds it may still call printf on the stream. */
+void flockfile(FILE *f);
+int  ftrylockfile(FILE *f);
+void funlockfile(FILE *f);
+int  getc_unlocked(FILE *f);
+int  getchar_unlocked(void);
+int  putc_unlocked(int c, FILE *f);
+int  putchar_unlocked(int c);
+#endif
+
+#if defined(__EMB_GNU)
+#ifndef _OFF64_T_DECLARED
+#define _OFF64_T_DECLARED
+typedef long long off64_t;
+#endif
+/* A stream on the caller's four functions: glibc's fopencookie. */
+typedef ssize_t cookie_read_function_t(void *cookie, char *buf, size_t n);
+typedef ssize_t cookie_write_function_t(void *cookie, const char *buf,
+                                        size_t n);
+typedef int cookie_seek_function_t(void *cookie, off64_t *off, int whence);
+typedef int cookie_close_function_t(void *cookie);
+typedef struct {
+    cookie_read_function_t  *read;
+    cookie_write_function_t *write;
+    cookie_seek_function_t  *seek;
+    cookie_close_function_t *close;
+} cookie_io_functions_t;
+FILE *fopencookie(void *cookie, const char *mode, cookie_io_functions_t io);
+
+int    fgetc_unlocked(FILE *f);
+int    fputc_unlocked(int c, FILE *f);
+int    fflush_unlocked(FILE *f);
+int    feof_unlocked(FILE *f);
+int    ferror_unlocked(FILE *f);
+void   clearerr_unlocked(FILE *f);
+int    fileno_unlocked(FILE *f);
+size_t fread_unlocked(void *__restrict p, size_t size, size_t n,
+                      FILE *__restrict f);
+size_t fwrite_unlocked(const void *__restrict p, size_t size, size_t n,
+                       FILE *__restrict f);
+int    fputs_unlocked(const char *__restrict s, FILE *__restrict f);
+void   setbuffer(FILE *f, char *buf, size_t n);
+void   setlinebuf(FILE *f);
+#endif
 
 #ifdef __cplusplus
 }

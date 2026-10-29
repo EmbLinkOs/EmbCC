@@ -11,6 +11,18 @@
 
 #include "../internal/lock.h"
 
+/* The four operations of a stream that is NOT a descriptor -- fmemopen's,
+ * open_memstream's, fopencookie's. Laid out as glibc's
+ * cookie_io_functions_t, which fopencookie copies in whole. A stream
+ * carries them only with F_COOKIE set; every other stream reads and
+ * writes its descriptor through the backend, as it always has. */
+struct __stream_io {
+    __PTRDIFF_TYPE__ (*read)(void *cookie, char *buf, size_t n);
+    __PTRDIFF_TYPE__ (*write)(void *cookie, const char *buf, size_t n);
+    int (*seek)(void *cookie, long long *off, int whence);
+    int (*close)(void *cookie);
+};
+
 struct _FILE {
     int fd;
     int flags;
@@ -27,6 +39,15 @@ struct _FILE {
      * files have nothing to say to each other. Last, so the positional
      * initialisers of the three standard streams stay readable. */
     __lock_t lock;
+    /* The lock NESTS, for POSIX's flockfile: a thread that holds a
+     * stream may call printf on it, which takes the lock again. owner is
+     * meaningful only while depth > 0 -- the thread holding it, by
+     * __os_thread_self, which is 0 for every caller where there are no
+     * threads, and there the depth alone does the counting. */
+    unsigned long owner;
+    int depth;
+    struct __stream_io io;         /* F_COOKIE streams only */
+    void *cookie;
 };
 
 #define F_READ   0x01
@@ -43,11 +64,24 @@ struct _FILE {
  * `ungot` holds a wide character: there are no byte reads to see it. */
 #define F_WIDE   0x80
 #define F_BYTE   0x100
+/* The stream is its io and cookie, not a descriptor (fd is -1). */
+#define F_COOKIE 0x200
 #define __byte_orient(f) \
     ((f)->flags & (F_WIDE | F_BYTE) ? (void)0 : (void)((f)->flags |= F_BYTE))
 
 void __stdio_flush_all(void);
 int  __stdio_flush(FILE *f);
+
+/* Opening, in three steps that every way of opening shares (fopen,
+ * fdopen, fopencookie, the memory streams): a free FILE, taken under the
+ * table's lock and marked F_USED, or NULL with EMFILE; the mode string's
+ * open flags and F_READ/F_WRITE/F_APPEND bits, or -1 with EINVAL; and the
+ * buffer, once the stream has its fd or io. A FILE claimed and then not
+ * wanted is given back with __stdio_unclaim. */
+FILE *__stdio_claim(void);
+void  __stdio_unclaim(FILE *f);
+int   __stdio_mode(const char *mode, int *oflags, int *acc);
+void  __stdio_setup(FILE *f, int acc);
 
 /* The unlocked halves, for callers that ALREADY hold f's lock.
  *

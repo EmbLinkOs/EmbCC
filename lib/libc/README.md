@@ -11,9 +11,11 @@ the duplication this project removes everywhere else.
 
 ## Layout
 
-    include/          the hosted C11 headers
+    include/          the hosted C11 headers, and POSIX's
     src/              the library, portable C
       string/ ctype/ stdlib/ stdio/ time/ math/
+      posix/          POSIX's modules with no C header of their own:
+                      libgen, fnmatch, getopt, search, err
       setjmp/         the one part that cannot be portable C
     os/<name>/        the backend: 11 primitives (os/backend.h)
       posixlike/      write/read/open/... -- the test harness, anything Unix

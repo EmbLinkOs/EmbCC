@@ -48,6 +48,7 @@
 #include "../backend.h"
 
 #include <stdlib.h>
+#include <string.h>
 
 void __libc_start(long *sp);
 int main(int argc, char **argv);
@@ -96,6 +97,7 @@ __asm__(
  * loop below runs zero times instead of failing to link.
  */
 typedef void (*initfn)(void);
+extern char *program_invocation_name, *program_invocation_short_name;
 extern initfn __init_array_start[] __attribute__((weak));
 extern initfn __init_array_end[] __attribute__((weak));
 extern initfn __fini_array_start[] __attribute__((weak));
@@ -131,6 +133,14 @@ void __libc_start(long *sp)
      * nothing copies the strings, which is correct -- they are in the
      * stack block the kernel built and they outlive the program. */
     environ = argv + argc + 1;
+
+    /* The name err(3) and warn(3) begin with (src/posix/err.c): argv[0],
+     * and the part of it after the last '/'. */
+    if (argc > 0 && argv[0]) {
+        program_invocation_name = argv[0];
+        char *slash = strrchr(argv[0], '/');
+        program_invocation_short_name = slash ? slash + 1 : argv[0];
+    }
 
     if (__fini_array_start != __fini_array_end)
         atexit(run_fini);

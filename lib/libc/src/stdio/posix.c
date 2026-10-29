@@ -1,0 +1,267 @@
+/* <stdio.h>'s POSIX functions beyond C's, and the GNU ones Unix programs
+ * reach for: streams on a descriptor (fdopen, fileno) or on a caller's
+ * functions (fopencookie), line reading of any length (getline,
+ * getdelim), printf to a descriptor or to new memory (dprintf, asprintf),
+ * the 64-bit offsets' names, and the unlocked forms.
+ *
+ * The memory streams, fmemopen and open_memstream, are memstream.c. */
+#include "file.h"
+
+#include <stdlib.h>
+#include <string.h>
+#include <errno.h>
+#include <stdint.h>
+
+#include "../../os/backend.h"
+
+/* A stream on a descriptor already open. The mode must not ask for more
+ * than the descriptor allows, but nothing here can ask the OS what that
+ * is, so a mismatch surfaces at the first read or write, as EBADF --
+ * where glibc would have refused at fdopen. "w" does NOT truncate: the
+ * file is already open and fdopen does not reopen it. */
+FILE *fdopen(int fd, const char *mode)
+{
+    int fl, acc;
+    if (fd < 0) {
+        errno = EBADF;
+        return NULL;
+    }
+    if (__stdio_mode(mode, &fl, &acc) < 0)
+        return NULL;
+    FILE *f = __stdio_claim();
+    if (!f)
+        return NULL;
+    f->fd = fd;
+    __stdio_setup(f, acc);
+    return f;
+}
+
+int fileno(FILE *f)
+{
+    if (!f || !(f->flags & F_USED) || (f->flags & F_COOKIE)) {
+        errno = EBADF;
+        return -1;
+    }
+    return f->fd;
+}
+
+/* A stream whose reads, writes, seeks and close are the caller's. */
+FILE *fopencookie(void *cookie, const char *mode, cookie_io_functions_t io)
+{
+    int fl, acc;
+    if (__stdio_mode(mode, &fl, &acc) < 0)
+        return NULL;
+    FILE *f = __stdio_claim();
+    if (!f)
+        return NULL;
+    f->flags |= F_COOKIE;
+    f->cookie = cookie;
+    f->io.read = io.read;
+    f->io.write = io.write;
+    f->io.seek = io.seek;
+    f->io.close = io.close;
+    __stdio_setup(f, acc);
+    return f;
+}
+
+/* ---- lines of any length --------------------------------------------- */
+
+/* Up to and including delim, NUL-terminated, in *line -- which is grown
+ * with realloc as the line needs, and allocated when it is NULL. The
+ * length, which may count NULs in the line; -1 at end of file with
+ * nothing read, or on error. The buffer exists afterwards even then, as
+ * glibc leaves it, so a caller's free(line) is always right. */
+ssize_t getdelim(char **restrict line, size_t *restrict n, int delim,
+                 FILE *restrict f)
+{
+    if (!line || !n || !f) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (!*line || *n == 0) {
+        char *p = realloc(*line, 128);
+        if (!p) {
+            errno = ENOMEM;
+            return -1;
+        }
+        *line = p;
+        *n = 128;
+    }
+    size_t len = 0;
+    __flockfile(f);
+    for (;;) {
+        int c = __getc_unlocked(f);
+        if (c == EOF)
+            break;
+        if (len + 2 > *n) {
+            size_t want = *n * 2;
+            if (want < *n || want > (size_t)PTRDIFF_MAX) {
+                __funlockfile(f);
+                errno = EOVERFLOW;
+                return -1;
+            }
+            char *p = realloc(*line, want);
+            if (!p) {
+                f->flags |= F_ERR;
+                __funlockfile(f);
+                errno = ENOMEM;
+                return -1;
+            }
+            *line = p;
+            *n = want;
+        }
+        (*line)[len++] = (char)c;
+        if (c == (unsigned char)delim)
+            break;
+    }
+    __funlockfile(f);
+    (*line)[len] = 0;
+    return len ? (ssize_t)len : -1;
+}
+
+ssize_t getline(char **restrict line, size_t *restrict n, FILE *restrict f)
+{
+    return getdelim(line, n, '\n', f);
+}
+
+/* ---- printf somewhere else ------------------------------------------- */
+
+/* To a descriptor, through a small buffer: one write per 256 bytes,
+ * not one per conversion, and no FILE. */
+struct fd_sink {
+    int fd, err;
+    size_t n;
+    char buf[256];
+};
+
+static void fd_flush(struct fd_sink *s)
+{
+    for (size_t off = 0; off < s->n && !s->err; ) {
+        long w = __os_write(s->fd, s->buf + off, s->n - off);
+        if (w <= 0)
+            s->err = 1;
+        else
+            off += (size_t)w;
+    }
+    s->n = 0;
+}
+
+static void sink_fd(void *ctx, const char *p, size_t n)
+{
+    struct fd_sink *s = ctx;
+    while (n) {
+        if (s->n == sizeof s->buf)
+            fd_flush(s);
+        size_t k = sizeof s->buf - s->n;
+        if (k > n)
+            k = n;
+        memcpy(s->buf + s->n, p, k);
+        s->n += k;
+        p += k;
+        n -= k;
+    }
+}
+
+int vdprintf(int fd, const char *restrict fmt, va_list ap)
+{
+    struct fd_sink s = { fd, 0, 0, { 0 } };
+    int r = __vformat(sink_fd, &s, fmt, ap);
+    fd_flush(&s);
+    return s.err ? -1 : r;
+}
+
+int dprintf(int fd, const char *restrict fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    int r = vdprintf(fd, fmt, ap);
+    va_end(ap);
+    return r;
+}
+
+/* To memory it allocates: vsnprintf twice, once to learn the length. On
+ * failure *s is NULL, which POSIX.1-2024 made the rule. */
+int vasprintf(char **restrict s, const char *restrict fmt, va_list ap)
+{
+    va_list again;
+    va_copy(again, ap);
+    int n = vsnprintf(NULL, 0, fmt, ap);
+    char *p = n < 0 ? NULL : malloc((size_t)n + 1);
+    if (p)
+        vsnprintf(p, (size_t)n + 1, fmt, again);
+    va_end(again);
+    *s = p;
+    return p ? n : -1;
+}
+
+int asprintf(char **restrict s, const char *restrict fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    int r = vasprintf(s, fmt, ap);
+    va_end(ap);
+    return r;
+}
+
+/* ---- offsets, buffering, the terminal --------------------------------- */
+
+int   fseeko(FILE *f, off_t off, int whence) { return fseek(f, off, whence); }
+off_t ftello(FILE *f)                        { return ftell(f); }
+
+void setbuffer(FILE *f, char *buf, size_t n)
+{
+    setvbuf(f, buf, buf ? _IOFBF : _IONBF, n);
+}
+
+void setlinebuf(FILE *f) { setvbuf(f, NULL, _IOLBF, 0); }
+
+/* The name of the controlling terminal, which on every Unix is this. */
+char *ctermid(char *s)
+{
+    static const char tty[] = "/dev/tty";
+    return s ? strcpy(s, tty) : (char *)tty;
+}
+
+/* ---- without the lock ------------------------------------------------
+ *
+ * For a caller that has taken it with flockfile: one lock around a loop
+ * of getc_unlocked is the point of having both. */
+int getc_unlocked(FILE *f)      { return __getc_unlocked(f); }
+int getchar_unlocked(void)      { return __getc_unlocked(stdin); }
+int putc_unlocked(int c, FILE *f) { return __putc_unlocked(c, f); }
+int putchar_unlocked(int c)     { return __putc_unlocked(c, stdout); }
+int fgetc_unlocked(FILE *f)     { return __getc_unlocked(f); }
+int fputc_unlocked(int c, FILE *f) { return __putc_unlocked(c, f); }
+int fflush_unlocked(FILE *f)    { return f ? __stdio_flush(f) : fflush(NULL); }
+int feof_unlocked(FILE *f)      { return (f->flags & F_EOF) != 0; }
+int ferror_unlocked(FILE *f)    { return (f->flags & F_ERR) != 0; }
+void clearerr_unlocked(FILE *f) { f->flags &= ~(F_EOF | F_ERR); }
+int fileno_unlocked(FILE *f)    { return fileno(f); }
+
+size_t fwrite_unlocked(const void *restrict p, size_t size, size_t n,
+                       FILE *restrict f)
+{
+    return __fwrite_unlocked(p, size, n, f);
+}
+
+size_t fread_unlocked(void *restrict p, size_t size, size_t n,
+                      FILE *restrict f)
+{
+    if (size == 0 || n == 0)
+        return 0;
+    unsigned char *q = p;
+    size_t total = size * n, got = 0;
+    while (got < total) {
+        int c = __getc_unlocked(f);
+        if (c == EOF)
+            break;
+        q[got++] = (unsigned char)c;
+    }
+    return got / size;
+}
+
+int fputs_unlocked(const char *restrict s, FILE *restrict f)
+{
+    size_t n = strlen(s);
+    return __fwrite_unlocked(s, 1, n, f) == n ? 0 : EOF;
+}

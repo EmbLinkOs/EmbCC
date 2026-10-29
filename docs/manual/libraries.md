@@ -154,6 +154,16 @@ system is reached through one small backend file (see
 `<stdlib.h>` `<stdnoreturn.h>` `<string.h>` `<tgmath.h>` `<threads.h>`
 `<time.h>` `<uchar.h>` `<wchar.h>` `<wctype.h>`
 
+and, of POSIX's, `<err.h>` `<fnmatch.h>` `<getopt.h>` `<libgen.h>`
+`<search.h>` `<strings.h>` `<sys/types.h>`. Where a C header also
+declares POSIX names (`getline` in `<stdio.h>`, `strtok_r` in
+`<string.h>`), `<features.h>` decides: they are declared unless the
+program asked for ISO C alone (`-std=c11` with no `_POSIX_C_SOURCE`,
+`_XOPEN_SOURCE`, `_DEFAULT_SOURCE`, `_BSD_SOURCE` or `_GNU_SOURCE`), and
+the GNU and BSD ones (`strchrnul`, `memrchr`, `clearenv`, `fopencookie`)
+are hidden too when the program names a POSIX version and nothing more,
+as with glibc.
+
 `<stddef.h>`, `<stdarg.h>`, `<stdbool.h>`, `<stdint.h>` and `<float.h>`
 come from the freestanding directory, and so do C23's `<stdbit.h>` and
 `<stdckdint.h>`, which a program with no C library has too. `<limits.h>` defines the library's
@@ -162,11 +172,12 @@ freestanding `<limits.h>` for the type widths.
 
 | Area | What is provided |
 |---|---|
-| `<string.h>` | all of C11 §7.24, plus `strdup`, `strndup`, `strnlen`, `stpcpy`, `stpncpy` and `mempcpy` |
+| `<string.h>` | all of C11 §7.24, plus `strdup`, `strndup`, `strnlen`, `stpcpy`, `stpncpy` and `mempcpy`; POSIX's `strtok_r`, `strerror_r` (XSI's, returning an error number), `strsep`, `strlcpy`, `strlcat`, `memmem`; and `strcasestr`, `memrchr`, `strchrnul`, `explicit_bzero`. Each beyond C is weak, as in `<strings.h>` |
 | `<strings.h>` | `bzero`, `bcopy`, `bcmp`, `index`, `rindex`, `strcasecmp`, `strncasecmp`, `ffs`. Each is defined weak, so a program's own `index` or `bcopy` takes its place |
 | `<ctype.h>`, `<wctype.h>` | complete, for the `"C"` locale; the classification functions return 0 or 1 |
-| `<stdlib.h>` | `malloc` family with `aligned_alloc`; `strtol` family, `strtod`/`strtof`/`strtold`, `ato*`; `qsort` (heapsort) and `bsearch`; `rand`/`srand` (`RAND_MAX` is 2147483647); `abs`/`div` families; `atexit`, `exit`, `_Exit`, `abort`, `at_quick_exit`, `quick_exit`; the multibyte conversions without a state (`mblen`, `mbtowc`, `wctomb`, `mbstowcs`, `wcstombs`), in UTF-8; `getenv`; `system` (always reports no command processor) |
-| `<stdio.h>` | `FILE` streams with buffering, files by name, positioning (`fseek`, `ftell`, `fgetpos`, `fsetpos`, `rewind`), `remove`, `rename`, `tmpfile`, `tmpnam`, C11's exclusive `"x"` open mode, `setvbuf`, `ungetc`, `perror`, and the complete `printf` and `scanf` families (`v`, `f`, `s`, `sn` forms) |
+| `<stdlib.h>` | `malloc` family with `aligned_alloc`; `strtol` family, `strtod`/`strtof`/`strtold`, `ato*`; `qsort` (heapsort) and `bsearch`; `rand`/`srand` (`RAND_MAX` is 2147483647); `abs`/`div` families; `atexit`, `exit`, `_Exit`, `abort`, `at_quick_exit`, `quick_exit`; the multibyte conversions without a state (`mblen`, `mbtowc`, `wctomb`, `mbstowcs`, `wcstombs`), in UTF-8; `getenv`; `system` (always reports no command processor). POSIX's: `setenv`, `unsetenv`, `putenv`, `clearenv`; `mkstemp`, `mkostemp`, `mkstemps`, `mkostemps`, `mkdtemp`, `mktemp`; `realpath`; `posix_memalign`, `memalign`, `reallocarray`; `qsort_r` (POSIX.1-2024's argument order, glibc's); `getsubopt`; `random`, `srandom`, `initstate`, `setstate`, the `*rand48` family and `rand_r`, each giving glibc's sequence for a seed |
+| `<stdio.h>` | `FILE` streams with buffering, files by name, positioning (`fseek`, `ftell`, `fgetpos`, `fsetpos`, `rewind`), `remove`, `rename`, `tmpfile`, `tmpnam`, C11's exclusive `"x"` open mode, `setvbuf`, `ungetc`, `perror`, and the complete `printf` and `scanf` families (`v`, `f`, `s`, `sn` forms). POSIX's: `fdopen`, `fileno`, `fmemopen`, `open_memstream`, `getline`, `getdelim`, `dprintf`, `asprintf` and their `v` forms, `fseeko`, `ftello`, `flockfile`, `ftrylockfile`, `funlockfile`, the `_unlocked` functions, `ctermid`; and GNU's `fopencookie`, `setbuffer`, `setlinebuf`. More streams may be open at once than `FOPEN_MAX`, which is C's minimum and not a limit here |
+| POSIX modules | `basename` and `dirname` (`<libgen.h>`, the POSIX ones, which may write into their argument); `fnmatch`, with glibc's flags including `FNM_CASEFOLD` and `FNM_LEADING_DIR`; `getopt`, `getopt_long` and `getopt_long_only`, which permute as glibc's and newlib's do (an option string starting with `+`, or `POSIXLY_CORRECT`, stops at the first operand); `<search.h>` complete, `tsearch` an AVL tree, `hsearch` growing past its `hcreate` size, and GNU's `hsearch_r` family and `tdestroy`; `<err.h>`'s `err`, `warn` and their `x` and `v` forms, which begin with `program_invocation_short_name` where startup has set it (Linux's does) |
 | `<math.h>`, `<tgmath.h>` | every C11 function at all three widths, `erf`, `erfc`, `lgamma` and `tgamma` FreeBSD's (accurate to an ulp or two; `lgamma` of a negative argument beside a zero of Γ loses digits, ~100 ulp at -2.75, as FreeBSD's does); C23's `sinpi`, `cospi`, `tanpi`, `asinpi`, `acospi`, `atanpi` and `atan2pi`; `signgam`, `lgamma_r`; `float_t`, `double_t`, `FP_ILOGB0` and `FP_ILOGBNAN`, and POSIX's `M_PI` family outside strict ISO mode; `<tgmath.h>` chooses the width from every generic argument, as C11 7.25 says (`pow(2.0f, 3.0L)` is `powl`) |
 | `<complex.h>` | complete: every function at all three widths |
 | `<fenv.h>` | exception flags and rounding modes, on x86-64 (`MXCSR`) and AArch64 (`FPSR`/`FPCR`) |
@@ -308,15 +319,25 @@ variables and `call_once` work on every target, threaded or not.
 `thread_local` is defined as `_Thread_local`.
 
 **Environment.** `getenv` reads the vector the startup code publishes in
-`environ`. `setenv` and `unsetenv` are declared in `<stdlib.h>` but not
-defined: a program that calls them fails to link.
+`environ`. The first change copies that vector into the heap; the strings
+`setenv` makes are freed when they are replaced or removed, the startup
+vector's and `putenv`'s never are (a `putenv` string IS the entry, and a
+later change to it changes the environment).
+
+**POSIX's choices.** Where POSIX lets an implementation choose, this one
+chose glibc's answer, except: `fmemopen` refuses a size of 0 (POSIX lets
+it); `open_memstream`'s length moves only when a write passes it, as
+POSIX says, so a seek to `SEEK_END` after rewriting the middle goes to
+the end and not to where the write stopped (glibc 2.36 differs); and
+`dirname("//")` is `"//"`, as glibc's is.
 
 ### Thread safety
 
 The library's shared state is locked. The heap has one lock; each
 `FILE` has its own, held for the whole of a call, so the output of one
 `printf` or `puts` is never interleaved with another thread's; the table
-of open streams has a third. The locks are futex-based: uncontended,
+of open streams has a third. A stream's lock nests: a thread that holds
+it with `flockfile` may still `printf` to the stream. The locks are futex-based: uncontended,
 locking and unlocking are one atomic instruction each. On a target whose
 backend has no futex the wait degrades to a yield, which is only reached
 when a lock is contended, and such a target has one thread.
@@ -331,16 +352,15 @@ forms of the time functions.
 
 | Missing | Notes |
 |---|---|
-| `setenv`, `unsetenv` | declared, not defined |
 | C11 Annex K (`*_s` functions) | |
-| POSIX extensions such as `fdopen`, `fileno`, `popen`, `strtok_r`, `strerror_r`, `fseeko`, `fmemopen` | |
+| POSIX's process, descriptor and filesystem interfaces (`<unistd.h>`, `<fcntl.h>`, `<sys/stat.h>`, `<dirent.h>`), `popen`, sockets, `pthread`, POSIX signals | |
 | a time-zone database, locales other than `"C"`, signal delivery | |
 
 ### glibc instead: `--libc=system`
 
 For a Linux target, `--libc=system` replaces this library with the
 system's own, glibc -- the way to POSIX threads, sockets and the rest of
-POSIX, none of which this library has. EmbCC does what GCC does:
+POSIX that this library has not got yet. EmbCC does what GCC does:
 
 | | With `--libc=system` |
 |---|---|

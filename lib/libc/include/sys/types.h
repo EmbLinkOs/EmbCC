@@ -22,8 +22,15 @@ typedef long time_t;
 typedef long clock_t;
 #endif
 
+/* declared once, whichever of this, <stdio.h> and <unistd.h> is first */
+#ifndef _SSIZE_T_DECLARED
+#define _SSIZE_T_DECLARED
 typedef __PTRDIFF_TYPE__ ssize_t;
+#endif
+#ifndef _OFF_T_DECLARED
+#define _OFF_T_DECLARED
 typedef long off_t;
+#endif
 typedef int pid_t;
 typedef unsigned int mode_t;
 typedef unsigned short uid_t;

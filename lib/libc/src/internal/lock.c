@@ -40,3 +40,10 @@ void __unlock(__lock_t *l)
         __os_futex_wake(&l->v, 1);
     }
 }
+
+int __trylock(__lock_t *l)
+{
+    int c = 0;
+    return __atomic_compare_exchange_n(&l->v, &c, 1, 0, __ATOMIC_ACQUIRE,
+                                       __ATOMIC_RELAXED) ? 0 : -1;
+}
