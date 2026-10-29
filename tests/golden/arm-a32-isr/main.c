@@ -121,8 +121,7 @@ static __attribute__((noinline)) unsigned long long mix(unsigned n)
 static int phase(const char *name, void (*h)(void), unsigned p,
                  unsigned long long want)
 {
-    unsigned bad, n;
-    unsigned long long got;
+    unsigned bad = 0, wrong = 0, n, rounds = 0;
     vectors[8 + 6] = (unsigned)h;               /* the IRQ slot */
     __asm__ volatile ("dsb\n\tisb" : : : "memory");
     period = p;
@@ -130,14 +129,20 @@ static int phase(const char *name, void (*h)(void), unsigned p,
     timer_arm(p);
     __asm__ volatile ("mcr p15, #0, %0, c14, c3, #1" : : "r"(1u));  /* enable */
     __asm__ volatile ("cpsie i" : : : "memory");
-    bad = torture(300000);
-    got = mix(200000);
+    /* again until twenty interrupts have landed in the work: QEMU's timer
+     * keeps the host's time, and on a fast runner one round can be over
+     * first (rx-isr's -O2 saw sixteen). The bound ends a timer that never
+     * fires. */
+    do {
+        bad |= torture(300000);
+        wrong |= mix(200000) != want;
+    } while (ticks < 20 && ++rounds < 40);
     __asm__ volatile ("cpsid i" : : : "memory");
     __asm__ volatile ("mcr p15, #0, %0, c14, c3, #1" : : "r"(0u));
     n = ticks;
     printf("%s: %u interrupts, torture %s, mix %s\n", name, n,
-           bad ? "CHANGED" : "kept", got == want ? "right" : "WRONG");
-    return bad || got != want || n < 20;
+           bad ? "CHANGED" : "kept", wrong ? "WRONG" : "right");
+    return bad || wrong || n < 20;
 }
 
 int main(void)

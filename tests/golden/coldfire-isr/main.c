@@ -130,22 +130,27 @@ static void sr_ipl(int level)
 static int phase(const char *name, void (*h)(void), unsigned period,
                  unsigned long long want)
 {
-    unsigned bad, n;
-    unsigned long long got;
+    unsigned bad = 0, wrong = 0, n, rounds = 0;
     VECTORS[64 + PIT0_SRC] = h;
     ticks = 0;
     PIT0_PCSR = 0;
     PIT0_PMR = (unsigned short)period;
     PIT0_PCSR = run;
     sr_ipl(0);
-    bad = torture(1000000);
-    got = mix(200000);
+    /* again until twenty interrupts have landed in the work: QEMU's timer
+     * keeps the host's time, and on a fast runner one round can be over
+     * first (rx-isr's -O2 saw sixteen). The bound ends a timer that never
+     * fires. */
+    do {
+        bad |= torture(1000000);
+        wrong |= mix(200000) != want;
+    } while (ticks < 20 && ++rounds < 40);
     sr_ipl(7);
     PIT0_PCSR = 0;
     n = ticks;
     printf("%s: %u interrupts, torture %s, mix %s\n", name, n,
-           bad ? "CHANGED" : "kept", got == want ? "right" : "WRONG");
-    return bad || got != want || n < 20;
+           bad ? "CHANGED" : "kept", wrong ? "WRONG" : "right");
+    return bad || wrong || n < 20;
 }
 
 int main(void)

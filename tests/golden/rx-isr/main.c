@@ -109,19 +109,23 @@ static __attribute__((noinline)) unsigned long long mix(unsigned n)
 static int phase(const char *name, void (*h)(void), unsigned period,
                  unsigned long long want)
 {
-    unsigned bad, n;
-    unsigned long long got;
+    unsigned bad = 0, wrong = 0, n, rounds = 0;
     vectors[CMI0] = h;
     ticks = 0;
     CMT0_CMCOR = (unsigned short)period;
     __asm__ volatile ("setpsw i");
-    bad = torture(1500000);
-    got = mix(400000);
+    /* again until twenty interrupts have landed in the work: QEMU's CMT
+     * keeps the host's time, and one round of -O2 code was over after
+     * sixteen on a fast runner. The bound ends a timer that never fires. */
+    do {
+        bad |= torture(1500000);
+        wrong |= mix(400000) != want;
+    } while (ticks < 20 && ++rounds < 40);
     __asm__ volatile ("clrpsw i");
     n = ticks;
     printf("%s: %u interrupts, torture %s, mix %s\n", name, n,
-           bad ? "CHANGED" : "kept", got == want ? "right" : "WRONG");
-    return bad || got != want || n < 20;
+           bad ? "CHANGED" : "kept", wrong ? "WRONG" : "right");
+    return bad || wrong || n < 20;
 }
 
 int main(void)
