@@ -547,20 +547,21 @@ static int fn_sret_bytes(const struct ir_func *fn)
 }
 
 /* The widest outgoing-argument area any call in this function needs. The
- * IR's own outgoing_bytes is the System V answer and does not apply. */
+ * IR's own outgoing_bytes is the System V answer and does not apply.
+ * Placed as the call places them (call_stack_bytes), the hidden pointer to
+ * a returned composite first: without it a call returning a struct had its
+ * arguments placed one register pair higher than they go, so an argument
+ * the pointer pushes onto the stack was not counted -- and landed on the
+ * frame's own slots (`o = g(s, k)` with a 17-byte struct: k went to Y+18,
+ * over the slot holding o's address; verify/fuzz/run-avr.sh). */
 static long outgoing_area(const struct ir_func *fn)
 {
     long most = 0;
     for (int n = 0; n < fn->nins; n++) {
         const struct ir_ins *i = &fn->ins[n];
-        struct argplace pl;
-        int cursor;
-        long stk = 0;
         if (i->op != IR_CALL)
             continue;
-        cursor = i->call_varargs ? -1 : ARG_TOP;
-        for (int k = 0; k < i->nargs; k++)
-            place_arg(i->argv[k].size, &cursor, &stk, &pl);
+        long stk = call_stack_bytes(i);
         if (stk > most)
             most = stk;
     }
