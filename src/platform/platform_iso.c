@@ -12,6 +12,8 @@
  * compiler was built with (EMBCC_DEFAULT_PREFIX). */
 #include "platform.h"
 
+#include <string.h>
+
 int plat_stderr_is_terminal(void)
 {
     return 0;
@@ -32,6 +34,12 @@ int plat_run_on_stack(int (*fn)(int, char **), int argc, char **argv)
 const char *plat_self_path(void)
 {
     return plat_argv0_path();
+}
+
+/* ISO C has no file identity: two directories are the same by spelling */
+int plat_same_dir(const char *a, const char *b)
+{
+    return strcmp(a, b) == 0;
 }
 
 /* ISO C cannot list a directory */

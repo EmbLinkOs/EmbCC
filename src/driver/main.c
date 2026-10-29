@@ -2535,6 +2535,22 @@ static int pic32_script(const char *path)
     return 0;
 }
 
+/* A default include directory the command line already named, as
+ * -I lib/libc/include: searched once, where the user put it, and as a
+ * system directory, which is GCC's rule. Twice, it broke #include_next --
+ * the C library's <limits.h> reaches the compiler's that way, and found
+ * ITSELF again in the second copy, include guard already set, so
+ * INT_MAX was never defined. */
+static int searched_already(const char *dir)
+{
+    for (int i = 0; i < nincdirs; i++)
+        if (plat_same_dir(incdirs[i], dir)) {
+            incdir_sys[i] = 1;
+            return 1;
+        }
+    return 0;
+}
+
 static void incdirs_with_defaults(void)
 {
     if (g_incdirs_done)
@@ -2616,6 +2632,8 @@ static void incdirs_with_defaults(void)
             cpp_set_config_data(cfgdata);
         }
         for (int k = 0; k < ndef && nincdirs < MAX_INCDIRS; k++) {
+            if (searched_already(def[k]))
+                continue;
             incdir_sys[nincdirs] = 1;
             incdirs[nincdirs++] = def[k];
         }
@@ -6811,8 +6829,19 @@ static int embcc_main(int argc, char **argv)
      * target, whose order is the SDK's and is set in full by
      * incdirs_with_defaults: from the source tree this put EmbCC's
      * <stddef.h> before the SDK's, so the tree's compiler and an installed
-     * one read different headers. */
-    if (nincdirs < MAX_INCDIRS && target_os_get() != TGT_OS_DARWIN) {
+     * one read different headers.
+     *
+     * Only when paths.c found no support files, though. When it did, its
+     * defaults already hold this directory, LAST and for a reason: it
+     * has a declarations-only <string.h>, and added here it came before
+     * the C library's, so <string.h> lost every POSIX declaration in it
+     * (strtok_r, strlcpy, ...) for any program built without -I. Run from
+     * $PATH, argv[0] has no '/', and this was ./include -- whatever
+     * directory the user happened to be in. */
+    int ndefault = 0;
+    paths_default_includes(&ndefault);
+    if (nincdirs < MAX_INCDIRS && target_os_get() != TGT_OS_DARWIN &&
+        ndefault == 0) {
         static char selfinc[4096];
         const char *slash = strrchr(argv[0], '/');
         if (slash)

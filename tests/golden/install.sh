@@ -54,6 +54,26 @@ EOF
     cat "$out/cc1.log"; exit 1; }
 echo "a build-tree binary finds its own headers: <stdio.h> with no -I"
 
+#    In the right ORDER, with and without the C library named by -I as
+#    well. With none, <string.h> is the C library's -- the compiler's own
+#    directory has a declarations-only one, which once came first and
+#    took strtok_r and the rest of POSIX's away. Named by -I too, the
+#    directory is searched once: twice, the C library's <limits.h> found
+#    itself again through #include_next and INT_MAX was never defined.
+cat > "$out/order.c" << 'EOF'
+#include <string.h>
+#include <limits.h>
+char *(*tok)(char *, const char *, char **) = strtok_r;
+int widest = INT_MAX, longest = PATH_MAX;
+EOF
+for inc in "" "-I$EMBCC_ROOT/lib/libc/include"; do
+    ( cd "$out" && "$EMBCC" --target=x86_64-linux-gnu $inc -c order.c \
+        -o order.o ) 2> "$out/order.log" || {
+        echo "FAIL: <string.h> and <limits.h> in the wrong order (${inc:-no -I}):"
+        cat "$out/order.log"; exit 1; }
+done
+echo "the C library's <string.h> first, and <limits.h> reaching the compiler's"
+
 # ---- 2. a staged install, and the copy that results ----------------------
 #
 # The install rule itself, into a DESTDIR -- which is what a package
