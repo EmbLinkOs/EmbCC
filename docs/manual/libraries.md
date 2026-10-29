@@ -486,6 +486,7 @@ not apply.
 | `softtf.c` | IEEE binary128 in software, `long double` where no instruction is behind it: `__addtf3` `__subtf3` `__multf3` `__divtf3` `__negtf2`, the comparisons `__eqtf2` ... `__unordtf2`, and the conversions `__extenddftf2` `__trunctfdf2` `__floatsitf` `__fixtfdi` ... | AArch64, RISC-V, LoongArch, MIPS64, SPARC |
 | `softfp.c` | binary32 and binary64 in software: `__addsf3` `__subsf3` `__mulsf3` `__divsf3` `__negsf2` and the `df` forms, comparisons (`__eqsf2` `__nesf2` `__ltsf2` `__lesf2` `__gtsf2` `__gesf2` `__unordsf2` and `df`), conversions to and from 32- and 64-bit integers, `__extendsfdf2`, `__truncdfsf2` | the embedded targets but AVR and RX; built for a double-precision unit (the Cortex-M7's, RISC-V's `ilp32d`), only the eight conversions to and from 64-bit integers, `__fixdfdi` ... `__floatundisf`, and for RV64's `lp64d` none |
 | `avr.c` | `__mulsi3` `__divsi3` `__udivsi3` `__modsi3` `__umodsi3` | AVR |
+| `avrdivmod.c` | avr-gcc's division routines, under their own register conventions, which an object from avr-gcc or clang calls for a `/` and a `%` at once: `__udivmodqi4` `__divmodqi4` (r24 by r22, quotient in r24, remainder in r25), `__udivmodhi4` `__divmodhi4` (r25:r24 by r23:r22, quotient in r23:r22, remainder in r25:r24), `__udivmodsi4` `__divmodsi4` (r25:r22 by r21:r18, quotient in r21:r18, remainder in r25:r22); each changes only its results, r0 and the flags; weak | AVR |
 | `avr64.c` | `__muldi3` `__divdi3` `__udivdi3` `__moddi3` `__umoddi3` | AVR |
 | `avrfp*.c` | binary32 in software, one object per group: `__addsf3`/`__subsf3`/`__negsf2`, `__mulsf3`, `__divsf3`, the comparisons including `__cmpsf2`, and the integer conversions | AVR, and RX, whose `double` is four bytes too |
 | `aeabi.c` | the ARM run-time ABI's names, which clang, GCC and the vendors' toolchains call and EmbCC's own code does not: `__aeabi_memcpy` `__aeabi_memmove` `__aeabi_memset` `__aeabi_memclr` and their 4- and 8-byte forms, `__aeabi_idiv` `__aeabi_uidiv` `__aeabi_idivmod` `__aeabi_uidivmod` where there is a divide instruction, `__aeabi_ldivmod` `__aeabi_uldivmod`, `__aeabi_lmul`, the 64-bit shifts and compares, and the soft-float arithmetic, comparisons and conversions (`__aeabi_fadd` ... `__aeabi_d2f`); all weak | every ARM triple |
@@ -534,7 +535,7 @@ and `embtrace.c`, and all but Darwin's `builtin-setjmp.c`; beyond those:
 | `sparc-none-elf` | `int64.c`, `softfp.c`, `softtf.c`, `ldouble.c`, `atomic8.c` |
 | `mips-none-elf`, `mipsel-none-elf`, `powerpc-none-eabi`, `m68k-none-elf`, `tricore-none-elf`, `xtensa-none-elf` | `int64.c`, `softfp.c`, `atomic8.c` |
 | `rx-none-elf` | `int64.c`, `avrfp*.c`, `atomic8.c` |
-| `avr` | `avr.c`, `avr64.c`, `avrfp*.c` |
+| `avr` | `avr.c`, `avr64.c`, `avrdivmod.c`, `avrfp*.c` |
 | `aarch64-apple-darwin`, `x86_64-apple-darwin` | `int128.c`, `fp128.c`, `ldouble.c`, and on AArch64 `softtf.c`; linked after libSystem: the routines it does not export -- `__divdc3` and `__divsc3`, the 128-bit shifts and `__multi3` -- which clang takes from its own `libclang_rt.osx.a`. The archive is in the BSD format Apple's linker reads, as `embar` writes for Mach-O members |
 
 ## Building the libraries

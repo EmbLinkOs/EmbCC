@@ -57,6 +57,7 @@ on aarch64 it is IEEE binary128 with no instruction behind it, so even
 | `int64.c` | 64-bit divide and remainder on the 32-bit targets |
 | `softfp.c` | binary32 and binary64 from the bits up, where no FPU has them |
 | `avr.c`, `avr64.c`, `avrfp*.c` | AVR's 32- and 64-bit multiply and divide, and its binary32 (RX's too: its `double` is four bytes) |
+| `avrdivmod.c` | avr-gcc's `__udivmodqi4` ... `__divmodsi4`, under their own register conventions, for objects from avr-gcc and clang; weak |
 | `half.c` | `_Float16` and `__bf16` to and from the wider formats, under each convention's names -- on ARM the RTABI's `__aeabi_h2f`/`f2h`/`d2h` as well |
 | `powi.c` | `__builtin_powi` and kin |
 | `clear_cache.c` | `__clear_cache`, each architecture's sequence |
