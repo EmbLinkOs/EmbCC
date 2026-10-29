@@ -28,6 +28,8 @@ UPDATE=0
 WHAT=${1:-all}
 EMBCC=${EMBCC:-$PWD/embcc}
 DIR=${EMBCC_TORTURE_DIR:-build/gcc-torture}
+# absolute: one.sh compiles each file from its own directory
+case $DIR in /*) ;; *) DIR=$PWD/$DIR ;; esac
 TORTURE=$DIR/gcc/testsuite/gcc.c-torture
 HERE=verify/torture
 EXP=$HERE/expected

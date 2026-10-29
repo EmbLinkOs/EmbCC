@@ -51,6 +51,7 @@ compile/20001205-1.c
 compile/20001212-1.c
 compile/20001221-1.c
 compile/20001222-1.c
+compile/20001226-1.c
 compile/200031109-1.c
 compile/20010102-1.c
 compile/20010107-1.c
@@ -660,7 +661,10 @@ compile/labels-3.c
 compile/lbug.c
 compile/libcall-1.c
 compile/limits-blockid.c
+compile/limits-caselabels.c
+compile/limits-declparen.c
 compile/limits-enumconst.c
+compile/limits-exprparen.c
 compile/limits-externalid.c
 compile/limits-externdecl.c
 compile/limits-idexternal.c
@@ -668,6 +672,7 @@ compile/limits-idinternal.c
 compile/limits-pointer.c
 compile/limits-stringlit.c
 compile/limits-structmem.c
+compile/limits-structnest.c
 compile/ll1.c
 compile/llbug.c
 compile/m2.c
@@ -2383,6 +2388,7 @@ execute/ffs-2.c
 execute/float-floor.c
 execute/floatunsisf-1.c
 execute/fprintf-1.c
+execute/fprintf-2.c
 execute/fprintf-chk-1.c
 execute/frame-address.c
 execute/func-ptr-1.c
@@ -3118,6 +3124,7 @@ execute/pr98853-2.c
 execute/pr99079.c
 execute/pr99751.c
 execute/printf-1.c
+execute/printf-2.c
 execute/printf-chk-1.c
 execute/pta-field-1.c
 execute/pta-field-2.c
@@ -3177,6 +3184,7 @@ execute/subcmp-1.c
 execute/switch-1.c
 execute/unroll-1.c
 execute/usad-run.c
+execute/user-printf.c
 execute/usmul.c
 execute/va-arg-1.c
 execute/va-arg-10.c
