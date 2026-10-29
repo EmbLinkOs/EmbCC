@@ -8,6 +8,7 @@
 #define _STRING_H
 
 #include <stddef.h>
+#include <features.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -48,6 +49,25 @@ char  *strndup(const char *s, size_t n);
 char  *stpcpy(char *__restrict d, const char *__restrict s);
 char  *stpncpy(char *__restrict d, const char *__restrict s, size_t n);
 void  *mempcpy(void *__restrict d, const void *__restrict s, size_t n);
+
+/* POSIX's, which ISO C leaves to the program (see <features.h>) */
+#if defined(__EMB_POSIX)
+char  *strtok_r(char *__restrict s, const char *__restrict sep,
+                char **__restrict save);
+/* XSI's form, returning 0 or an errno -- not GNU's, which returns the
+ * message and may ignore the buffer */
+int    strerror_r(int errnum, char *buf, size_t n);
+char  *strsep(char **sp, const char *sep);
+size_t strlcpy(char *__restrict d, const char *__restrict s, size_t n);
+size_t strlcat(char *__restrict d, const char *__restrict s, size_t n);
+void  *memmem(const void *hay, size_t hn, const void *needle, size_t nn);
+#endif
+#if defined(__EMB_GNU)
+char  *strcasestr(const char *h, const char *n);
+void  *memrchr(const void *s, int c, size_t n);
+char  *strchrnul(const char *s, int c);
+void   explicit_bzero(void *s, size_t n);
+#endif
 
 #ifdef __cplusplus
 }

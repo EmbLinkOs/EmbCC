@@ -93,3 +93,26 @@ char *strerror(int errnum)
     snprintf(unknown, sizeof unknown, "Unknown error %d", errnum);
     return unknown;
 }
+
+/* XSI's strerror_r: the message copied into the caller's buffer, so two
+ * threads asking at once do not share `unknown` above. 0, or ERANGE when
+ * the buffer was too small -- in which case it still holds as much of
+ * the message as fit, terminated, because a truncated message is more
+ * use to a person than an empty one. EINVAL for a number with no
+ * message, whose buffer says "Unknown error N" as strerror would. */
+int strerror_r(int errnum, char *buf, size_t n)
+{
+    int known = errnum >= 0 && (size_t)errnum < sizeof msg / sizeof msg[0] &&
+                msg[errnum];
+    char tmp[32];
+    const char *m = known ? msg[errnum] : tmp;
+    if (!known)
+        snprintf(tmp, sizeof tmp, "Unknown error %d", errnum);
+    size_t len = strlen(m);
+    if (n) {
+        size_t k = len < n - 1 ? len : n - 1;
+        memcpy(buf, m, k);
+        buf[k] = 0;
+    }
+    return !known ? EINVAL : len >= n ? ERANGE : 0;
+}
