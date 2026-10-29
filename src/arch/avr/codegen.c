@@ -3163,6 +3163,32 @@ static int avr_has_mul(void)
     return !getenv("EMBCC_AVR_NOMUL");
 }
 
+/* Two bytes of scratch for a multiply's operand: r18, r20, r22, r24 or Z
+ * (never a home), clear of the product [d, d + dn), of each operand read
+ * in place where it lives (h1, h2: -1 for none), and of the other
+ * operand's scratch (o). The operands' homes were not looked at: with b an
+ * eight-byte value homed in r18-r25, a was loaded into r18:r19 over it,
+ * and the product was a times a (verify/fuzz/run-avr.sh). Z is always
+ * left, the others being five pairs for at most three ranges. */
+static int mul_scratch(const struct a_fn *F, int d, int dn, int h1, int h2,
+                       int o)
+{
+    static const int cand[] = { RA, RA + 2, RB, RB + 2, AVR_Z };
+#define OVL(r, n, h, hn) ((r) < (h) + (hn) && (h) < (r) + (n))
+    for (unsigned k = 0; k < sizeof cand / sizeof cand[0]; k++) {
+        int r = cand[k];
+        if (OVL(r, 2, d, dn) || (o >= 0 && OVL(r, 2, o, 2)) ||
+            (h1 >= 0 && OVL(r, 2, F->loc[h1], F->hw[h1])) ||
+            (h2 >= 0 && OVL(r, 2, F->loc[h2], F->hw[h2])))
+            continue;
+        return r;
+    }
+#undef OVL
+    internal_error("avr: %s: no scratch pair for a multiply's operand",
+                   F->fn->name);
+    return AVR_Z;
+}
+
 static int avr_mul_inline(struct a_fn *F, const struct ir_ins *i, int nb)
 {
     struct code *t = F->t;
@@ -3185,23 +3211,24 @@ static int avr_mul_inline(struct a_fn *F, const struct ir_ins *i, int nb)
     int d = dst_reg(F, i, nb);
     /* each operand where it lives, unless that is where the product goes
      * (the cross terms read both operands after d's first write); else in
-     * a scratch half: the bank the product is not in */
-    int sc = d == RA ? RB : RA, ra, rb;
+     * a scratch half: a bank neither the product nor the other operand's
+     * home is in. The second check was missing: with b an eight-byte value
+     * homed in r18-r25, a was loaded into r18:r19 over it, and the
+     * product was a times a (verify/fuzz/run-avr.sh). No such bank, the
+     * helper call. */
     int ain = in_pair(F, i->a) && nb <= F->hw[i->a] &&
               (F->loc[i->a] + nb <= d || F->loc[i->a] >= d + nb);
-    ra = ain ? F->loc[i->a] : sc;
+    int bin = !kb && in_pair(F, i->b) && nb <= F->hw[i->b] &&
+              (F->loc[i->b] + nb <= d || F->loc[i->b] >= d + nb);
+    int ha = ain ? i->a : -1, hb = bin ? i->b : -1, ra, rb;
+    ra = ain ? F->loc[i->a] : mul_scratch(F, d, nb, ha, hb, -1);
+    rb = bin ? F->loc[i->b] : mul_scratch(F, d, nb, ha, hb, ain ? -1 : ra);
     if (!ain)
         vld(F, ra, i->a, 0, nb);
-    if (kb) {
-        rb = sc + 2;
+    if (kb)
         ldi4(F, rb, (unsigned long)k, nb);
-    } else {
-        int bin = in_pair(F, i->b) && nb <= F->hw[i->b] &&
-                  (F->loc[i->b] + nb <= d || F->loc[i->b] >= d + nb);
-        rb = bin ? F->loc[i->b] : sc + 2;
-        if (!bin)
-            vld(F, rb, i->b, 0, nb);
-    }
+    else if (!bin)
+        vld(F, rb, i->b, 0, nb);
     int k0 = kb ? (int)(k & 0xff) : -1, k1 = kb ? (int)((k >> 8) & 0xff) : -1;
     avr_rr(t, AVR_MUL, ra, rb);             /* a0 b0 */
     if (nb == 1) {
@@ -3269,22 +3296,21 @@ static int avr_mul_wide16(struct a_fn *F, const struct ir_ins *i, int nb)
      * even and movw reaches it. avr_demand counted on this path being
      * taken: it gave the operands two bytes. */
     int d = dst_reg(F, i, VW);
-    int sc = d == RA ? RB : RA, ra, rb;
+    /* the scratch bank clear of the product and of both operands' homes,
+     * as avr_mul_inline's: no such bank, the helper call */
     int ain = in_pair(F, i->a) && F->hw[i->a] >= 2 &&
               (F->loc[i->a] + 2 <= d || F->loc[i->a] >= d + VW);
-    ra = ain ? F->loc[i->a] : sc;
+    int bin = !kb && in_pair(F, i->b) && F->hw[i->b] >= 2 &&
+              (F->loc[i->b] + 2 <= d || F->loc[i->b] >= d + VW);
+    int ha = ain ? i->a : -1, hb = bin ? i->b : -1, ra, rb;
+    ra = ain ? F->loc[i->a] : mul_scratch(F, d, VW, ha, hb, -1);
+    rb = bin ? F->loc[i->b] : mul_scratch(F, d, VW, ha, hb, ain ? -1 : ra);
     if (!ain)
         vld(F, ra, i->a, 0, 2);
-    if (kb) {
-        rb = sc + 2;
+    if (kb)
         ldi4(F, rb, (unsigned long)k, 2);
-    } else {
-        int bin = in_pair(F, i->b) && F->hw[i->b] >= 2 &&
-                  (F->loc[i->b] + 2 <= d || F->loc[i->b] >= d + VW);
-        rb = bin ? F->loc[i->b] : sc + 2;
-        if (!bin)
-            vld(F, rb, i->b, 0, 2);
-    }
+    else if (!bin)
+        vld(F, rb, i->b, 0, 2);
     avr_rr(t, AVR_MUL, ra, rb);             /* a0 b0: bytes 0-1 */
     avr_movw(t, d, R_TMP);
     avr_rr(t, AVR_MUL, ra + 1, rb + 1);     /* a1 b1: bytes 2-3 */
