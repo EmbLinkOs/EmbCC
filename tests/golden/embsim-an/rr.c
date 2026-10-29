@@ -164,14 +164,24 @@ int main(void)
     for (;;) {
         *(volatile unsigned char *)0x53 = 1;                /* SMCR: SE, idle */
         __asm__ volatile("sleep");
+        /* got and ticks are two bytes, and the handlers write them:
+         * read with interrupts masked, or one lands between the bytes.
+         * After `sleep` both handlers are pending; the timer's runs
+         * first, and AVR runs ONE instruction of this code after its
+         * reti before taking the next -- which was the low byte's load,
+         * so a byte's arrival read as 0x00ff (got's -1 low, the byte's
+         * high), and a lost `q` ran the program to --max-insns. */
+        __asm__ volatile("cli" ::: "memory");
         int c = got;
+        long t = ticks;
+        __asm__ volatile("sei" ::: "memory");
         if (c < 0)
             continue;
         got = -1;
         puts_("got ");
         writec(c);
         puts_(" at tick ");
-        putn((long)ticks);
+        putn(t);
         puts_("\n");
         if (c == 'q')
             break;

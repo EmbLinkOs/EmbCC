@@ -142,13 +142,25 @@ profile_stack() {
 
     # the depth: the deepest path's .su frames, and no function deeper
     fr() { awk -v f="$1" '$1 == f { print $2 }' "$out/$tag.su"; }
+    hi=
     case $tag in
     m3) want=$(( $(fr reset) + $(fr main) + $(fr putn) + $(fr writec) )) ;;
     rv32) want=$(( $(fr _start) + $(fr main) + 5 * $(fr rec) )) ;;
-    avr) want=$(( $(fr main) + $(fr spin) + $(fr $isr) )) ;;
+    # AVR's handler saves only what it writes now (7 bytes, not 24), so
+    # the deepest path can be main;putn;writec -- whose .su frames are an
+    # upper bound, not the depth: putn's 15 counts a one-byte push its
+    # call to writec is not inside. So the depth is checked between the
+    # handler's path, exact, and the larger of the two.
+    avr) want=$(( $(fr main) + $(fr spin) + $(fr $isr) ))
+         hi=$(( $(fr main) + $(fr putn) + $(fr writec) ))
+         [ "$hi" -ge "$want" ] || hi=$want ;;
     esac
     got=$(sed -n 's/.*: \([0-9]*\) bytes used.*/\1/p' "$out/$tag.stack" | head -1)
-    [ "$got" = "$want" ] || { echo "FAIL $tag: the stack went $got bytes deep; the deepest path's frames add up to $want"; fail=1; }
+    if [ -n "$hi" ]; then
+        [ "$got" -ge "$want" ] && [ "$got" -le "$hi" ] || { echo "FAIL $tag: the stack went $got bytes deep; the handler's path is $want and main;putn;writec's frames add up to $hi"; fail=1; }
+    else
+        [ "$got" = "$want" ] || { echo "FAIL $tag: the stack went $got bytes deep; the deepest path's frames add up to $want"; fail=1; }
+    fi
     worst=$(awk 'NF >= 7 && $3 ~ /^[0-9]+$/ { if ($3 > m) m = $3 } END { print m + 0 }' "$out/$tag.stack")
     [ "$worst" = "$got" ] || { echo "FAIL $tag: the deepest function is $worst bytes deep, the stack $got"; fail=1; }
 
