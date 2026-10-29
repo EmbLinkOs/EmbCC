@@ -45,10 +45,17 @@ serve() {
     while [ ! -S "$sock" ] && [ $i -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
     "$EMBFLASH" "$@" --gdb "unix:$sock" --timeout 10 > "$out/$name.log" 2>&1 &
     fp=$!
-    # a programmer that loops forever fails here instead of hanging the run
+    # a programmer that loops forever fails here instead of hanging the run,
+    # and so does a server that does not end. Each is killed only when its
+    # time is up: the server writes its dump after the client has gone, and
+    # killing it the moment embflash ended failed a busy runner's
+    # "with no memory map" though both had done their part.
     ( i=0
       while [ $i -lt 600 ] && kill -0 $fp 2>/dev/null; do sleep 0.1; i=$((i + 1)); done
-      kill $fp $sp 2>/dev/null ) &
+      [ $i -lt 600 ] || kill $fp 2>/dev/null
+      j=0
+      while [ $j -lt 100 ] && kill -0 $sp 2>/dev/null; do sleep 0.1; j=$((j + 1)); done
+      [ $j -lt 100 ] || kill $sp 2>/dev/null ) &
     wd=$!
     wait $fp
     frc=$?
