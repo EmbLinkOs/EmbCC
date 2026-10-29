@@ -4584,8 +4584,11 @@ static void gen_ins(struct a_fn *F, int n)
         int ld = (i->vol || nb > i->size) ? i->size : nb;
         if (!ld)
             return;
-        if (nb <= ld && in_pair(F, i->dst)) {  /* no extension: in place */
-            vld(F, F->loc[i->dst], i->a, 0, ld);
+        /* In place when its home holds every byte read: a volatile local
+         * read whole and used in part was loaded past a pair, into what
+         * follows it -- Y, after a home in X. */
+        if (nb <= ld && in_pair(F, i->dst) && ld <= F->hw[i->dst]) {
+            vld(F, F->loc[i->dst], i->a, 0, ld);   /* no extension: in place */
             return;
         }
         vld(F, RA, i->a, 0, ld);
@@ -4617,9 +4620,16 @@ static void gen_ins(struct a_fn *F, int n)
             if (!ld)
                 return;
             int d = dst_reg(F, i, nb);       /* straight into its home */
+            /* A volatile access reads every byte, but only nb have a
+             * register: the rest go into r0 and are let go. Loaded into
+             * d + k, the bytes of a four-byte volatile of which two were
+             * read landed past the pair -- in r28:r29, the frame pointer,
+             * once the pair was X: every frame access after it went wild
+             * (the AVR fuzzer, run-avr.sh). */
+#define LD_REG(k) ((k) < nb ? d + (k) : R_TMP)
             if (is_direct(F, i->a)) {
                 for (int k = 0; k < ld; k++)
-                    direct_access(F, 0, d + k, i->a, i->memoff + k);
+                    direct_access(F, 0, LD_REG(k), i->a, i->memoff + k);
                 if (nb > i->size)
                     extend(F, d, i->size, i->sign, nb);
                 dst_done(F, i, d);
@@ -4632,7 +4642,7 @@ static void gen_ins(struct a_fn *F, int n)
                  * this pointer no longer. */
                 z_add(F->t, i->memoff);
                 for (int k = 0; k < ld; k++)
-                    avr_lpm(t, d + k, 1);
+                    avr_lpm(t, LD_REG(k), 1);
                 F->zv = -1;
                 if (nb > i->size)
                     extend(F, d, i->size, i->sign, nb);
@@ -4644,7 +4654,8 @@ static void gen_ins(struct a_fn *F, int n)
              * ra_fold_memoff folded in, and without moving Z, so the next
              * access through the same pointer finds it there. */
             for (int k = 0; k < ld; k++)
-                avr_ldd(t, d + k, AVR_Z, i->memoff + k);
+                avr_ldd(t, LD_REG(k), AVR_Z, i->memoff + k);
+#undef LD_REG
             if (nb > i->size)
                 extend(F, d, i->size, i->sign, nb);
             dst_done(F, i, d);
