@@ -22,16 +22,7 @@
 #include "posix.h"
 #include "resolv.h"
 
-struct conf {
-    struct sockaddr_storage ns[3];
-    socklen_t nslen[3];
-    int nns;
-    char search[6][256];
-    int nsearch;
-    int ndots, timeout, attempts;
-};
-
-static void add_ns(struct conf *c, const char *s)
+static void add_ns(struct __dns_conf *c, const char *s)
 {
     if (c->nns == 3)
         return;
@@ -49,7 +40,7 @@ static void add_ns(struct conf *c, const char *s)
     }
 }
 
-static void read_conf(struct conf *c)
+void __dns_read_conf(struct __dns_conf *c)
 {
     memset(c, 0, sizeof *c);
     c->ndots = 1;
@@ -171,7 +162,7 @@ int __dns_name(const unsigned char *m, int len, int off, char *out, int cap)
     return -1;
 }
 
-static unsigned id16(void)
+unsigned __dns_id16(void)
 {
     unsigned short r;
     if (__os_getentropy(&r, sizeof r) == 0)
@@ -222,62 +213,95 @@ static int ask_tcp(const struct sockaddr *ns, socklen_t nslen,
     return r;
 }
 
-/* One question to the servers in turn, attempts times round. The
- * answer's length, or -1: EAGAIN when nobody answered, ENOENT for a
- * name that does not exist (NXDOMAIN), EIO for a server failure. */
-static int ask(const struct conf *c, const char *name, int type,
+/* The length of the question section of the message q, or -1 */
+static int question_len(const unsigned char *q, int qlen);
+
+/* A message to the servers in turn, attempts times round, over UDP --
+ * and again over TCP when the answer comes truncated -- or over TCP
+ * only, with usevc. The first answer whose rcode is in the mask accept
+ * (bit n for rcode n): its length. Otherwise -1: EIO when servers
+ * answered only with other rcodes, ECONNREFUSED when they refused the
+ * datagram (no server at that port), EAGAIN when nobody answered. */
+int __dns_exchange(const struct __dns_conf *c, const unsigned char *q, int qlen,
+                   unsigned char *ans, int cap, unsigned accept, int usevc)
+{
+    int ql = question_len(q, qlen);
+    if (ql < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    int failed = EAGAIN, refused = 0;
+    for (int round = 0; round < c->attempts; round++)
+        for (int i = 0; i < c->nns; i++) {
+            const struct sockaddr *ns = (const struct sockaddr *)&c->ns[i];
+            long got = -1;
+            if (usevc) {
+                got = ask_tcp(ns, c->nslen[i], q, qlen, ans, cap, c->timeout);
+                if (got < 12)
+                    continue;
+            } else {
+                int fd = socket(ns->sa_family, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+                if (fd < 0)
+                    return -1;
+                if (connect(fd, ns, c->nslen[i]) < 0 ||
+                    send(fd, q, (size_t)qlen, 0) != qlen) {
+                    close(fd);
+                    continue;
+                }
+                struct pollfd p = { fd, POLLIN, 0 };
+                while (poll(&p, 1, c->timeout * 1000) > 0) {
+                    got = recv(fd, ans, (size_t)cap, 0);
+                    if (got < 0 && errno == ECONNREFUSED) {
+                        refused = 1;
+                        break;
+                    }
+                    /* the reply to THIS question: id, QR set, the same
+                     * question */
+                    if (got >= ql && ans[0] == q[0] && ans[1] == q[1] &&
+                        (ans[2] & 0x80) &&
+                        memcmp(ans + 12, q + 12, (size_t)(ql - 12)) == 0)
+                        break;
+                    got = -1;
+                }
+                close(fd);
+                if (got < 0)
+                    continue;
+                if (ans[2] & 0x02) {     /* TC: the whole answer, over TCP */
+                    int t = ask_tcp(ns, c->nslen[i], q, qlen, ans, cap,
+                                    c->timeout);
+                    if (t > 0)
+                        got = t;
+                }
+            }
+            if (accept >> (ans[3] & 0x0f) & 1)
+                return (int)got;
+            failed = EIO;
+        }
+    errno = failed == EAGAIN && refused ? ECONNREFUSED : failed;
+    return -1;
+}
+
+/* One question: the answer's length, or -1: EAGAIN when nobody
+ * answered, ENOENT for a name that does not exist (NXDOMAIN), EIO for a
+ * server failure. */
+static int ask(const struct __dns_conf *c, const char *name, int type,
                unsigned char *ans, int cap)
 {
     unsigned char q[300];
-    unsigned id = id16();
+    unsigned id = __dns_id16();
     int qlen = build_query(q, sizeof q, name, type, id);
     if (qlen < 0) {
         errno = EINVAL;
         return -1;
     }
-    int failed = EAGAIN;
-    for (int round = 0; round < c->attempts; round++)
-        for (int i = 0; i < c->nns; i++) {
-            const struct sockaddr *ns = (const struct sockaddr *)&c->ns[i];
-            int fd = socket(ns->sa_family, SOCK_DGRAM | SOCK_CLOEXEC, 0);
-            if (fd < 0)
-                return -1;
-            if (connect(fd, ns, c->nslen[i]) < 0 ||
-                send(fd, q, (size_t)qlen, 0) != qlen) {
-                close(fd);
-                continue;
-            }
-            struct pollfd p = { fd, POLLIN, 0 };
-            long got = -1;
-            while (poll(&p, 1, c->timeout * 1000) > 0) {
-                got = recv(fd, ans, (size_t)cap, 0);
-                /* the reply to THIS question: id, QR set, the same name */
-                if (got >= 12 && ans[0] == q[0] && ans[1] == q[1] &&
-                    (ans[2] & 0x80) && got >= qlen &&
-                    memcmp(ans + 12, q + 12, (size_t)(qlen - 12)) == 0)
-                    break;
-                got = -1;
-            }
-            close(fd);
-            if (got < 0)
-                continue;
-            if (ans[2] & 0x02) {     /* TC: the whole answer, over TCP */
-                int t = ask_tcp(ns, c->nslen[i], q, qlen, ans, cap,
-                                c->timeout);
-                if (t > 0)
-                    got = t;
-            }
-            int rcode = ans[3] & 0x0f;
-            if (rcode == 0)
-                return (int)got;
-            if (rcode == 3) {
-                errno = ENOENT;
-                return -1;
-            }
-            failed = EIO;
-        }
-    errno = failed;
-    return -1;
+    int got = __dns_exchange(c, q, qlen, ans, cap, 1u << 0 | 1u << 3, 0);
+    if (got < 0 && errno == ECONNREFUSED)
+        errno = EAGAIN;                /* to its callers, nobody answered */
+    if (got >= 0 && (ans[3] & 0x0f) == 3) {
+        errno = ENOENT;
+        return -1;
+    }
+    return got;
 }
 
 /* ---- reading an answer ---------------------------------------------------- */
@@ -293,6 +317,11 @@ static int skip_question(const unsigned char *m, int len)
         off += 4;
     }
     return off;
+}
+
+static int question_len(const unsigned char *q, int qlen)
+{
+    return qlen < 12 ? -1 : skip_question(q, qlen);
 }
 
 /* The records of `type` in the answer section, through cb; the canonical
@@ -332,8 +361,8 @@ int __dns_records(const unsigned char *m, int len, int type, char *canon,
  * then as it is. The answer as for ask(). */
 int __dns_lookup(const char *name, int type, unsigned char *ans, int cap)
 {
-    struct conf c;
-    read_conf(&c);
+    struct __dns_conf c;
+    __dns_read_conf(&c);
     int dots = 0;
     for (const char *p = name; *p; p++)
         dots += *p == '.';
