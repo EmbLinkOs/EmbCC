@@ -30,6 +30,11 @@
 #endif
 #define OPEN_MAX     32
 #define NGROUPS_MAX  32
+#define PTHREAD_KEYS_MAX               128
+#define PTHREAD_DESTRUCTOR_ITERATIONS    4
+#define PTHREAD_STACK_MIN            16384
+#define SEM_VALUE_MAX           0x7FFFFFFF
+#define SEM_NSEMS_MAX                  256
 #define SSIZE_MAX  __LONG_MAX__
 
 /* wchar_t's range. It belongs here rather than being assumed, because its

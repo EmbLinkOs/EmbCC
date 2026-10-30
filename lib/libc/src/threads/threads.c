@@ -1,83 +1,51 @@
-/* C11 threads, over the OS seam.
+/* C11 threads: POSIX's, under C's names (pthread.c holds the one
+ * implementation -- the thread table, thread-specific data, the futex
+ * word), and the same seam the C++ <mutex> and <thread> use, so a target
+ * that gains threads lights up all three at once.
  *
- * The same primitives the C++ <mutex> and <thread> use, so a target
- * that gains threads lights up both at once and neither library knows
- * which OS it is on. See lib/libc/os/backend.h.
- *
- * The locks here are the three-state futex mutex, for the reason given
- * at length in lib/libcxx/include/mutex: the uncontended path is one
- * compare-exchange and never enters the kernel, and two states are not
- * enough because unlock has to know whether anybody is waiting.
- */
+ * C11's timed waits take a DEADLINE on TIME_UTC, not a duration -- the
+ * reading this file once got wrong, which turned any real deadline into
+ * a wait of decades. */
+#define _GNU_SOURCE 1
 #include <threads.h>
+#include <pthread.h>
 #include <errno.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "../../os/backend.h"
+#include "thr.h"
 
-/* ---- threads ----------------------------------------------------------- */
+/* ---- threads ------------------------------------------------------------- */
 
-/* A C thread's function returns an int and the seam's takes none, so the
- * value is held here until somebody joins. One record per live thread,
- * in a small fixed table: a target with no threads never uses it, and
- * one with threads has a bounded number of C11 threads by construction
- * -- there is no way to create one without going through here. */
-#define MAXTHREADS 64
+/* A C thread's function returns an int and a POSIX one a pointer: the
+ * int travels in the pointer. */
+struct c11 { thrd_start_t fn; void *arg; };
 
-struct rec {
-    thrd_t id;
-    thrd_start_t fn;
-    void *arg;
-    int result;
-    int done;
-    int used;
-};
-
-static struct rec g_recs[MAXTHREADS];
-
-static struct rec *rec_of(thrd_t id)
+static void *c11_start(void *p)
 {
-    for (int i = 0; i < MAXTHREADS; i++)
-        if (g_recs[i].used && g_recs[i].id == id)
-            return &g_recs[i];
-    return NULL;
-}
-
-static void trampoline(void *p)
-{
-    struct rec *r = (struct rec *)p;
-    r->result = r->fn(r->arg);
-    r->done = 1;
+    struct c11 c = *(struct c11 *)p;
+    free(p);
+    return (void *)(intptr_t)c.fn(c.arg);
 }
 
 int thrd_create(thrd_t *thr, thrd_start_t func, void *arg)
 {
     if (!thr || !func)
         return thrd_error;
-    struct rec *r = NULL;
-    for (int i = 0; i < MAXTHREADS; i++)
-        if (!g_recs[i].used) {
-            r = &g_recs[i];
-            break;
-        }
-    if (!r)
+    struct c11 *c = malloc(sizeof *c);
+    if (!c)
         return thrd_nomem;
-    r->fn = func;
-    r->arg = arg;
-    r->result = 0;
-    r->done = 0;
-    r->used = 1;
-    unsigned long id = 0;
-    if (__os_thread_create(&id, trampoline, r) != 0) {
-        r->used = 0;
-        /* thrd_error, not thrd_nomem: there is nothing to run out of on
-         * a target with no threads, and a caller told nomem would
-         * sensibly retry. */
-        return errno == ENOMEM ? thrd_nomem : thrd_error;
+    c->fn = func;
+    c->arg = arg;
+    int e = __thr_create(thr, NULL, c11_start, c);
+    if (e) {
+        free(c);
+        /* thrd_error, not thrd_nomem, where there are no threads: a
+         * caller told nomem would sensibly retry */
+        return e == ENOMEM ? thrd_nomem : thrd_error;
     }
-    r->id = id;
-    *thr = id;
     return thrd_success;
 }
 
@@ -108,38 +76,25 @@ int thrd_sleep(const struct timespec *duration, struct timespec *remaining)
     return 0;
 }
 
+/* The program's first thread ending this way ends the program when the
+ * last thread does, with EXIT_SUCCESS, as C11 7.26.5.5 says. */
 _Noreturn void thrd_exit(int res)
 {
-    struct rec *r = rec_of((thrd_t)__os_thread_self());
-    if (r) {
-        r->result = res;
-        r->done = 1;
-    }
-    /* With no threads the only thread is the program, so ending it is
-     * ending the program -- which is what the standard says for the
-     * main thread anyway. */
-    exit(res);
+    pthread_exit((void *)(intptr_t)res);
 }
 
 int thrd_detach(thrd_t thr)
 {
-    struct rec *r = rec_of(thr);
-    if (__os_thread_detach(thr) != 0)
-        return thrd_error;
-    if (r)
-        r->used = 0;              /* nobody will join it: release the slot */
-    return thrd_success;
+    return pthread_detach(thr) ? thrd_error : thrd_success;
 }
 
 int thrd_join(thrd_t thr, int *res)
 {
-    if (__os_thread_join(thr) != 0)
+    void *v;
+    if (pthread_join(thr, &v))
         return thrd_error;
-    struct rec *r = rec_of(thr);
     if (res)
-        *res = r ? r->result : 0;
-    if (r)
-        r->used = 0;
+        *res = (int)(intptr_t)v;
     return thrd_success;
 }
 
@@ -158,14 +113,7 @@ int mtx_init(mtx_t *mtx, int type)
 
 void mtx_destroy(mtx_t *mtx) { (void)mtx; }
 
-static int mtx_try_raw(mtx_t *m)
-{
-    int expected = 0;
-    return __atomic_compare_exchange_n(&m->__state, &expected, 1, 0,
-                                       __ATOMIC_ACQUIRE, __ATOMIC_RELAXED);
-}
-
-int mtx_trylock(mtx_t *mtx)
+static int mtx_take(mtx_t *mtx, int try, const struct timespec *abs)
 {
     if (!mtx)
         return thrd_error;
@@ -175,55 +123,25 @@ int mtx_trylock(mtx_t *mtx)
         mtx->__count++;
         return thrd_success;
     }
-    if (!mtx_try_raw(mtx))
-        return thrd_busy;
+    if (try) {
+        if (!__word_trylock(&mtx->__state))
+            return thrd_busy;
+    } else if (__word_lock(&mtx->__state, abs, CLOCK_REALTIME)) {
+        return thrd_timedout;
+    }
     mtx->__owner = me;
     mtx->__count = 1;
     return thrd_success;
 }
 
-int mtx_lock(mtx_t *mtx)
-{
-    if (!mtx)
-        return thrd_error;
-    unsigned long me = __os_thread_self();
-    if ((mtx->__type & mtx_recursive) && mtx->__count &&
-        mtx->__owner == me) {
-        mtx->__count++;
-        return thrd_success;
-    }
-    for (;;) {
-        if (mtx_try_raw(mtx))
-            break;
-        /* Announce the wait BEFORE sleeping, or an unlock in between
-         * sees state 1, skips the wake, and leaves this thread asleep
-         * forever. */
-        int two = 2;
-        __atomic_exchange_n(&mtx->__state, two, __ATOMIC_ACQUIRE);
-        if (__atomic_load_n(&mtx->__state, __ATOMIC_RELAXED) == 2)
-            if (__os_futex_wait(&mtx->__state, 2, -1) < 0)
-                __os_thread_yield();
-    }
-    mtx->__owner = me;
-    mtx->__count = 1;
-    return thrd_success;
-}
+int mtx_lock(mtx_t *mtx) { return mtx_take(mtx, 0, NULL); }
+int mtx_trylock(mtx_t *mtx) { return mtx_take(mtx, 1, NULL); }
 
 int mtx_timedlock(mtx_t *__restrict mtx, const struct timespec *__restrict ts)
 {
-    if (!mtx)
+    if (!ts || ts->tv_nsec < 0 || ts->tv_nsec >= 1000000000L)
         return thrd_error;
-    if (mtx_trylock(mtx) == thrd_success)
-        return thrd_success;
-    long ns = ts ? ts->tv_sec * 1000000000L + ts->tv_nsec : 0;
-    /* A bounded wait must END. With no futex there is no second thread
-     * that could release it, so one more attempt is the whole of the
-     * wait -- see lib/libcxx/include/mutex on why polling a deadline is
-     * worse than useless when the clock may not advance either. */
-    if (__os_futex_wait(&mtx->__state, mtx->__state, ns) < 0)
-        return mtx_trylock(mtx) == thrd_success ? thrd_success
-                                                : thrd_timedout;
-    return mtx_trylock(mtx) == thrd_success ? thrd_success : thrd_timedout;
+    return mtx_take(mtx, 0, ts);
 }
 
 int mtx_unlock(mtx_t *mtx)
@@ -236,8 +154,7 @@ int mtx_unlock(mtx_t *mtx)
     }
     mtx->__owner = 0;
     mtx->__count = 0;
-    if (__atomic_exchange_n(&mtx->__state, 0, __ATOMIC_RELEASE) == 2)
-        __os_futex_wake(&mtx->__state, 1);
+    __word_unlock(&mtx->__state);
     return thrd_success;
 }
 
@@ -257,9 +174,6 @@ int cnd_signal(cnd_t *cond)
 {
     if (!cond)
         return thrd_error;
-    /* Bump first, wake second: a waiter about to sleep finds the
-     * number changed and does not sleep, so an early notify is not
-     * lost. */
     __atomic_fetch_add(&cond->__seq, 1, __ATOMIC_RELEASE);
     __os_futex_wake(&cond->__seq, 1);
     return thrd_success;
@@ -274,78 +188,76 @@ int cnd_broadcast(cnd_t *cond)
     return thrd_success;
 }
 
-int cnd_wait(cnd_t *cond, mtx_t *mtx)
+static int cnd_wait_until(cnd_t *cond, mtx_t *mtx, const struct timespec *abs)
 {
     if (!cond || !mtx)
         return thrd_error;
-    /* The sequence is read while the mutex is HELD, so a signal cannot
-     * slip between this read and the sleep without changing the number
-     * the sleep tests. That indivisibility is the whole reason a
-     * condition variable is a primitive. */
+    /* read with the mutex held: a signal after this moves the number the
+     * sleep compares, so it cannot fall between unlock and sleep */
     int s = __atomic_load_n(&cond->__seq, __ATOMIC_RELAXED);
-    mtx_unlock(mtx);
-    if (__os_futex_wait(&cond->__seq, s, -1) < 0)
-        __os_thread_yield();
-    mtx_lock(mtx);
-    return thrd_success;
-}
-
-int cnd_timedwait(cnd_t *__restrict cond, mtx_t *__restrict mtx,
-                  const struct timespec *__restrict ts)
-{
-    if (!cond || !mtx)
-        return thrd_error;
-    long ns = ts ? ts->tv_sec * 1000000000L + ts->tv_nsec : 0;
-    int s = __atomic_load_n(&cond->__seq, __ATOMIC_RELAXED);
-    mtx_unlock(mtx);
-    int r = __os_futex_wait(&cond->__seq, s, ns);
-    mtx_lock(mtx);
-    /* Timed out only if the sequence really did not move: a wakeup that
-     * raced with the timeout is a wakeup. */
-    if (r < 0 && __atomic_load_n(&cond->__seq, __ATOMIC_RELAXED) == s)
+    unsigned count = mtx->__count;
+    unsigned long owner = mtx->__owner;
+    mtx->__owner = 0;
+    mtx->__count = 0;
+    __word_unlock(&mtx->__state);
+    long ns = __thr_until(abs, CLOCK_REALTIME);
+    if (!abs || ns > 0) {
+        int saved = errno;
+        if (__os_futex_wait(&cond->__seq, s, ns) < 0 && errno == ENOSYS) {
+            /* one thread, nothing to signal it: a deadline is waited out */
+            __os_thread_yield();
+            while (abs && __atomic_load_n(&cond->__seq, __ATOMIC_RELAXED) == s &&
+                   __thr_until(abs, CLOCK_REALTIME) > 0)
+                __os_thread_yield();
+        }
+        errno = saved;
+    }
+    __word_lock(&mtx->__state, NULL, CLOCK_REALTIME);
+    mtx->__owner = owner;
+    mtx->__count = count;
+    if (abs && __atomic_load_n(&cond->__seq, __ATOMIC_RELAXED) == s &&
+        __thr_until(abs, CLOCK_REALTIME) == 0)
         return thrd_timedout;
     return thrd_success;
 }
 
-/* ---- call_once ----------------------------------------------------------- */
+int cnd_wait(cnd_t *cond, mtx_t *mtx) { return cnd_wait_until(cond, mtx, NULL); }
+
+int cnd_timedwait(cnd_t *__restrict cond, mtx_t *__restrict mtx,
+                  const struct timespec *__restrict ts)
+{
+    if (!ts || ts->tv_nsec < 0 || ts->tv_nsec >= 1000000000L)
+        return thrd_error;
+    return cnd_wait_until(cond, mtx, ts);
+}
+
+/* ---- call_once ------------------------------------------------------------ */
 
 void call_once(once_flag *flag, void (*func)(void))
 {
-    if (!flag || !func)
-        return;
-    /* Acquire on the fast path: a thread that sees "done" must also see
-     * everything the initializing thread wrote. */
-    if (__atomic_load_n(&flag->__state, __ATOMIC_ACQUIRE) == 2)
-        return;
-    for (;;) {
-        int e = 0;
-        if (__atomic_compare_exchange_n(&flag->__state, &e, 1, 0,
-                                        __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
-            func();
-            __atomic_store_n(&flag->__state, 2, __ATOMIC_RELEASE);
-            __os_futex_wake(&flag->__state, -1);
-            return;
-        }
-        if (e == 2)
-            return;
-        if (__os_futex_wait(&flag->__state, 1, -1) < 0)
-            __os_thread_yield();
-    }
+    if (flag && func)
+        pthread_once(&flag->__state, func);
 }
 
-/* ---- thread-specific storage --------------------------------------------- */
+/* ---- thread-specific storage ------------------------------------------- */
 
-/* Needs thread-local storage underneath, which this compiler does not
- * have. Reporting failure is the only honest answer: a key that every
- * thread shared would be a global under another name, and the failure
- * would not appear until two threads corrupted each other. */
+/* POSIX's keys: a table per thread in its record, so no thread-local
+ * storage is needed underneath -- one key works on every target. */
 int tss_create(tss_t *key, tss_dtor_t dtor)
 {
-    (void)key;
-    (void)dtor;
-    return thrd_error;
+    pthread_key_t k;
+    if (!key || pthread_key_create(&k, dtor))
+        return thrd_error;
+    *key = (tss_t)k;
+    return thrd_success;
 }
 
-void *tss_get(tss_t key) { (void)key; return NULL; }
-int tss_set(tss_t key, void *val) { (void)key; (void)val; return thrd_error; }
-void tss_delete(tss_t key) { (void)key; }
+void *tss_get(tss_t key) { return pthread_getspecific((pthread_key_t)key); }
+
+int tss_set(tss_t key, void *val)
+{
+    return pthread_setspecific((pthread_key_t)key, val) ? thrd_error
+                                                        : thrd_success;
+}
+
+void tss_delete(tss_t key) { pthread_key_delete((pthread_key_t)key); }

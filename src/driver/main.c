@@ -961,10 +961,14 @@ static int has_link_input_suffix(const char *p)
 }
 
 /* -lNAME, as a linker finds it: libNAME.a in each -L directory in order.
- * Three names are this toolchain's own, because a Makefile written for
- * arm-none-eabi-gcc says them: -lc and -lm are EmbCC's libc (its math is
- * in it), -lgcc is the compiler runtime, librt.a. Those return 1 having
- * found nothing to add, when the driver adds them itself anyway. */
+ * Some names are this toolchain's own, because Makefiles say them: -lc
+ * and -lm are EmbCC's libc (its math is in it), -lgcc is the compiler
+ * runtime, librt.a; and -lpthread, -ldl, -lrt and -lutil, which glibc
+ * since 2.34 keeps only as empty archives beside a libc that has their
+ * functions, as this one has POSIX threads, the clocks and openpty. A
+ * name the library lacks a function of (dlopen) still fails the link,
+ * naming the function. These return 1 having found nothing to add, when
+ * the driver adds them itself anyway. */
 static int find_lib(const char *name, char *out, size_t cap, int *own)
 {
     *own = 0;
@@ -973,10 +977,14 @@ static int find_lib(const char *name, char *out, size_t cap, int *own)
         if (plat_file_exists(out))
             return 1;
     }
-    if (!strcmp(name, "c") || !strcmp(name, "m") || !strcmp(name, "gcc")) {
-        *own = 1;
-        return 1;
-    }
+    static const char *const own_names[] = {
+        "c", "m", "gcc", "pthread", "dl", "rt", "util",
+    };
+    for (size_t k = 0; k < sizeof own_names / sizeof *own_names; k++)
+        if (!strcmp(name, own_names[k])) {
+            *own = 1;
+            return 1;
+        }
     return 0;
 }
 
@@ -6487,7 +6495,7 @@ static int embcc_main(int argc, char **argv)
         } else if (strcmp(argv[i], "-pthread") == 0) {
             /* POSIX threads: the C library's. With --libc=system,
              * glibc's: _REENTRANT and -lpthread, as GCC has it; EmbCC's
-             * own libc has none, and macOS's libSystem has them */
+             * own libc has them in libc.a, and macOS's in libSystem */
             g_pthread = 1;
         } else if (strcmp(argv[i], "-isysroot") == 0) {
             if (i + 1 >= argc) {

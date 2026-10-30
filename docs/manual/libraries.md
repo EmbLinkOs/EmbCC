@@ -155,10 +155,11 @@ system is reached through one small backend file (see
 `<time.h>` `<uchar.h>` `<wchar.h>` `<wctype.h>`
 
 and, of POSIX's and the common Unix ones, `<arpa/inet.h>` `<dirent.h>`
-`<endian.h>` `<err.h>` `<fcntl.h>` `<fnmatch.h>` `<getopt.h>` `<grp.h>`
-`<libgen.h>` `<malloc.h>` `<netdb.h>` `<netinet/in.h>` `<netinet/tcp.h>`
-`<paths.h>` `<poll.h>` `<pty.h>` `<pwd.h>` `<sched.h>` `<search.h>`
-`<spawn.h>` `<strings.h>` `<termios.h>` `<unistd.h>` `<utime.h>` and
+`<endian.h>` `<err.h>` `<fcntl.h>` `<fnmatch.h>` `<ftw.h>` `<getopt.h>` `<glob.h>` `<grp.h>` `<langinfo.h>`
+`<libgen.h>` `<malloc.h>` `<netdb.h>` `<netinet/in.h>` `<netinet/tcp.h>` `<nl_types.h>`
+`<paths.h>` `<poll.h>` `<pthread.h>` `<pty.h>` `<pwd.h>` `<sched.h>` `<search.h>`
+`<regex.h>` `<semaphore.h>`
+`<spawn.h>` `<strings.h>` `<syslog.h>` `<termios.h>` `<unistd.h>` `<utime.h>` and
 `<sys/file.h>` `<sys/ioctl.h>` `<sys/mman.h>` `<sys/param.h>`
 `<sys/random.h>` `<sys/resource.h>` `<sys/select.h>` `<sys/socket.h>`
 `<sys/stat.h>` `<sys/statvfs.h>` `<sys/sysmacros.h>` `<sys/time.h>`
@@ -207,7 +208,13 @@ freestanding `<limits.h>` for the type widths.
 | Users and groups | `<pwd.h>` and `<grp.h>` complete, from `/etc/passwd` and `/etc/group`: `getpwnam`, `getpwuid`, their `_r` forms, `getpwent` and its siblings, the same for groups, `getgrouplist`, `setgroups`, `initgroups` |
 | `<malloc.h>` | glibc's: `malloc_usable_size`, `memalign`, `valloc`, `pvalloc`, `mallinfo`, `mallinfo2`, `malloc_stats`; `mallopt` and `malloc_trim` are accepted and change nothing |
 | `<locale.h>` | `setlocale` and `localeconv`, one locale |
-| `<threads.h>` | threads, mutexes, condition variables, `call_once` |
+| `<threads.h>` | complete: threads, mutexes, condition variables, `call_once`, thread-specific storage |
+| `<pthread.h>` | threads (`pthread_create`, `join`, `detach`, `exit`, `self`, `equal`, `once`, `atfork`, GNU's `tryjoin_np`, `timedjoin_np`, `setname_np`, `getname_np`), their attributes, the three kinds of mutex with `timedlock` and POSIX.1-2024's `clocklock`, condition variables with a clock attribute and `clockwait`, read-write locks (readers first, as glibc's default), barriers, spin locks, thread-specific data (`pthread_key_create` and the rest, with destructor rounds). Process-shared objects, robust and priority-protocol mutexes are refused with `ENOTSUP`; `pthread_cancel` is `ENOTSUP`, as no call here is a cancellation point; a scheduling policy other than `SCHED_OTHER` is `EPERM` |
+| `<semaphore.h>` | unnamed semaphores: `sem_init`, `sem_wait`, `sem_trywait`, `sem_timedwait`, `sem_clockwait`, `sem_post`, `sem_getvalue`, `sem_destroy`. `sem_open` is `ENOSYS` and a process-shared `sem_init` `ENOTSUP`: both need memory and a futex another process can reach |
+| `<regex.h>` | POSIX's basic and extended syntax with glibc's numbers and messages, and GNU's `\+ \? \|` in basic syntax, `\< \> \b \B \w \W \s \S`, back-references in both, `REG_STARTEND`. The match is POSIX's -- leftmost, then longest -- found by backtracking; a pattern that would take more than 20 million steps at one position is `REG_ESPACE`, not a hang |
+| `<glob.h>`, `<ftw.h>` | `glob` and `globfree` with every flag glibc has (`GLOB_BRACE`, `GLOB_TILDE`, `GLOB_ONLYDIR`, `GLOB_PERIOD`, `GLOB_ALTDIRFUNC` among them), `glob_pattern_p`; `nftw` (with GNU's `FTW_ACTIONRETVAL`) and `ftw`, holding one directory open at a time whatever `fds` allows |
+| `<syslog.h>` | `openlog`, `syslog`, `vsyslog`, `closelog`, `setlogmask`: RFC 3164 lines to `/dev/log`, as glibc writes them. With nothing listening there a message is not dropped, as glibc drops it: it goes to `/dev/console` under `LOG_CONS` and to standard error otherwise |
+| `<langinfo.h>`, `<nl_types.h>` | `nl_langinfo` for the `"C"` locale -- its formats, names, `RADIXCHAR` and the yes/no expressions -- with `CODESET` "UTF-8", the encoding its multibyte functions use (glibc's plain "C" says "ANSI_X3.4-1968"); no message catalogs: `catopen` fails with `ENOENT` and `catgets` returns the program's own message |
 | `<wchar.h>`, `<uchar.h>` | wide strings, `wcsto*`, restartable UTF-8 conversions (`mbrtowc`, `wcrtomb`, `mbsrtowcs`, `wcsrtombs`), `btowc`, `wctob`, wide streams (`fgetwc`, `fputwc`, `fgetws`, `fputws`, `ungetwc`, `fwide` and the rest), the wide `printf` and `scanf` families, `wcsftime`, `mbrtoc16`/`c16rtomb`/`mbrtoc32`/`c32rtomb` |
 | `<stdatomic.h>` | the C11 interface over the compiler's atomic builtins; no library code |
 | `<stdbit.h>` (C23) | all fourteen operations at the five unsigned types and type-generic; each named function is also a macro over the compiler's bit builtins, so a call is the instruction, and the functions themselves are in `lib/libc` for a pointer to one |
@@ -365,11 +372,20 @@ backend's spawn -- `fork` and `exec` on Linux, the kernel's spawn on
 EmbLinkOS -- and `posix_spawnattr_setflags` refuses with `ENOTSUP` a flag
 that spawn cannot honour, rather than a spawn that would ignore it.
 
-**Threads.** `thrd_create` creates a thread where the backend can (Linux
-and EmbLinkOS) and returns `thrd_error` elsewhere. Mutexes, condition
-variables and `call_once` work on every target, threaded or not.
-`tss_create` always fails and `tss_get` returns a null pointer.
-`thread_local` is defined as `_Thread_local`.
+**Threads.** `pthread_create` and `thrd_create` start a thread where the
+backend can (Linux and EmbLinkOS); elsewhere they fail (`EAGAIN`,
+`thrd_error`) and everything else still works with the one thread there
+is -- locks, `once`, keys. One implementation serves both spellings, so a
+C11 thread's `tss_t` is a POSIX key. Each thread's keys live in a record
+the library keeps for it, so no thread-local storage is needed beneath
+them. `pthread_exit` returns to the start of its thread and runs the
+keys' destructors there; frames it leaves are not unwound, so a C++
+destructor between it and the thread's function does not run (as under
+musl). A thread's stack is the backend's: 8 MiB on Linux, mapped as it
+is used; `pthread_attr_setstacksize` is kept and reported, and
+`pthread_attr_setstack` is refused at `pthread_create`. Timed waits take
+an absolute time, POSIX's and C11's alike. `thread_local` is defined as
+`_Thread_local`.
 
 **Environment.** `getenv` reads the vector the startup code publishes in
 `environ`. The first change copies that vector into the heap; the strings
@@ -406,8 +422,8 @@ forms of the time functions.
 | Missing | Notes |
 |---|---|
 | C11 Annex K (`*_s` functions) | |
-| POSIX threads (`<pthread.h>`) and semaphores (`<semaphore.h>`) | C11's `<threads.h>` is provided |
-| `<regex.h>`, `<glob.h>`, `<wordexp.h>`, `<ftw.h>`, `<syslog.h>`, `<iconv.h>`, `<langinfo.h>`, `<nl_types.h>` | |
+| named and process-shared semaphores, process-shared locks, thread cancellation | see `<pthread.h>` and `<semaphore.h>` above |
+| `<wordexp.h>`, `<iconv.h>` | |
 | locales other than `"C"`, and the `_l` functions that take one | |
 | System V IPC, asynchronous I/O (`<aio.h>`), message queues | |
 
