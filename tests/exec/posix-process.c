@@ -149,6 +149,9 @@ static int run(void)
 
 int main(int argc, char **argv)
 {
+#ifdef EMBCC_TEST_HAS_FS
+    /* as the guest's /bin/sh -- only where there is a filesystem and a
+     * kernel to pass arguments: a board's startup promises no argc */
     if (argc >= 3 && !strcmp(argv[1], "-c"))
         return as_shell(argv[2]);
     /* argv[0] is the script's path when run as a script's interpreter */
@@ -159,11 +162,12 @@ int main(int argc, char **argv)
             line[strcspn(line, "\n")] = 0;
         return as_shell(line);
     }
-#ifdef EMBCC_TEST_HAS_FS
     int r = run();
     if (r)
         return r;
 #else
+    (void)argc;
+    (void)argv;
     char *av[] = { "x", NULL };
     pid_t pid;
     errno = 0;
