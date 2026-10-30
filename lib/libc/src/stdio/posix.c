@@ -19,7 +19,7 @@
  * is, so a mismatch surfaces at the first read or write, as EBADF --
  * where glibc would have refused at fdopen. "w" does NOT truncate: the
  * file is already open and fdopen does not reopen it. */
-FILE *fdopen(int fd, const char *mode)
+__attribute__((weak)) FILE *fdopen(int fd, const char *mode)
 {
     int fl, acc;
     if (fd < 0) {
@@ -36,7 +36,7 @@ FILE *fdopen(int fd, const char *mode)
     return f;
 }
 
-int fileno(FILE *f)
+__attribute__((weak)) int fileno(FILE *f)
 {
     if (!f || !(f->flags & F_USED) || (f->flags & F_COOKIE)) {
         errno = EBADF;
@@ -46,7 +46,7 @@ int fileno(FILE *f)
 }
 
 /* A stream whose reads, writes, seeks and close are the caller's. */
-FILE *fopencookie(void *cookie, const char *mode, cookie_io_functions_t io)
+__attribute__((weak)) FILE *fopencookie(void *cookie, const char *mode, cookie_io_functions_t io)
 {
     int fl, acc;
     if (__stdio_mode(mode, &fl, &acc) < 0)
@@ -71,7 +71,7 @@ FILE *fopencookie(void *cookie, const char *mode, cookie_io_functions_t io)
  * length, which may count NULs in the line; -1 at end of file with
  * nothing read, or on error. The buffer exists afterwards even then, as
  * glibc leaves it, so a caller's free(line) is always right. */
-ssize_t getdelim(char **restrict line, size_t *restrict n, int delim,
+__attribute__((weak)) ssize_t getdelim(char **restrict line, size_t *restrict n, int delim,
                  FILE *restrict f)
 {
     if (!line || !n || !f) {
@@ -119,7 +119,7 @@ ssize_t getdelim(char **restrict line, size_t *restrict n, int delim,
     return len ? (ssize_t)len : -1;
 }
 
-ssize_t getline(char **restrict line, size_t *restrict n, FILE *restrict f)
+__attribute__((weak)) ssize_t getline(char **restrict line, size_t *restrict n, FILE *restrict f)
 {
     return getdelim(line, n, '\n', f);
 }
@@ -162,7 +162,7 @@ static void sink_fd(void *ctx, const char *p, size_t n)
     }
 }
 
-int vdprintf(int fd, const char *restrict fmt, va_list ap)
+__attribute__((weak)) int vdprintf(int fd, const char *restrict fmt, va_list ap)
 {
     struct fd_sink s = { fd, 0, 0, { 0 } };
     int r = __vformat(sink_fd, &s, fmt, ap);
@@ -170,7 +170,7 @@ int vdprintf(int fd, const char *restrict fmt, va_list ap)
     return s.err ? -1 : r;
 }
 
-int dprintf(int fd, const char *restrict fmt, ...)
+__attribute__((weak)) int dprintf(int fd, const char *restrict fmt, ...)
 {
     va_list ap;
     va_start(ap, fmt);
@@ -181,7 +181,7 @@ int dprintf(int fd, const char *restrict fmt, ...)
 
 /* To memory it allocates: vsnprintf twice, once to learn the length. On
  * failure *s is NULL, which POSIX.1-2024 made the rule. */
-int vasprintf(char **restrict s, const char *restrict fmt, va_list ap)
+__attribute__((weak)) int vasprintf(char **restrict s, const char *restrict fmt, va_list ap)
 {
     va_list again;
     va_copy(again, ap);
@@ -194,7 +194,7 @@ int vasprintf(char **restrict s, const char *restrict fmt, va_list ap)
     return p ? n : -1;
 }
 
-int asprintf(char **restrict s, const char *restrict fmt, ...)
+__attribute__((weak)) int asprintf(char **restrict s, const char *restrict fmt, ...)
 {
     va_list ap;
     va_start(ap, fmt);
@@ -205,18 +205,18 @@ int asprintf(char **restrict s, const char *restrict fmt, ...)
 
 /* ---- offsets, buffering, the terminal --------------------------------- */
 
-int   fseeko(FILE *f, off_t off, int whence) { return fseek(f, off, whence); }
-off_t ftello(FILE *f)                        { return ftell(f); }
+__attribute__((weak)) int   fseeko(FILE *f, off_t off, int whence) { return fseek(f, off, whence); }
+__attribute__((weak)) off_t ftello(FILE *f)                        { return ftell(f); }
 
-void setbuffer(FILE *f, char *buf, size_t n)
+__attribute__((weak)) void setbuffer(FILE *f, char *buf, size_t n)
 {
     setvbuf(f, buf, buf ? _IOFBF : _IONBF, n);
 }
 
-void setlinebuf(FILE *f) { setvbuf(f, NULL, _IOLBF, 0); }
+__attribute__((weak)) void setlinebuf(FILE *f) { setvbuf(f, NULL, _IOLBF, 0); }
 
 /* The name of the controlling terminal, which on every Unix is this. */
-char *ctermid(char *s)
+__attribute__((weak)) char *ctermid(char *s)
 {
     static const char tty[] = "/dev/tty";
     return s ? strcpy(s, tty) : (char *)tty;
@@ -226,25 +226,25 @@ char *ctermid(char *s)
  *
  * For a caller that has taken it with flockfile: one lock around a loop
  * of getc_unlocked is the point of having both. */
-int getc_unlocked(FILE *f)      { return __getc_unlocked(f); }
-int getchar_unlocked(void)      { return __getc_unlocked(stdin); }
-int putc_unlocked(int c, FILE *f) { return __putc_unlocked(c, f); }
-int putchar_unlocked(int c)     { return __putc_unlocked(c, stdout); }
-int fgetc_unlocked(FILE *f)     { return __getc_unlocked(f); }
-int fputc_unlocked(int c, FILE *f) { return __putc_unlocked(c, f); }
-int fflush_unlocked(FILE *f)    { return f ? __stdio_flush(f) : fflush(NULL); }
-int feof_unlocked(FILE *f)      { return (f->flags & F_EOF) != 0; }
-int ferror_unlocked(FILE *f)    { return (f->flags & F_ERR) != 0; }
-void clearerr_unlocked(FILE *f) { f->flags &= ~(F_EOF | F_ERR); }
-int fileno_unlocked(FILE *f)    { return fileno(f); }
+__attribute__((weak)) int getc_unlocked(FILE *f)      { return __getc_unlocked(f); }
+__attribute__((weak)) int getchar_unlocked(void)      { return __getc_unlocked(stdin); }
+__attribute__((weak)) int putc_unlocked(int c, FILE *f) { return __putc_unlocked(c, f); }
+__attribute__((weak)) int putchar_unlocked(int c)     { return __putc_unlocked(c, stdout); }
+__attribute__((weak)) int fgetc_unlocked(FILE *f)     { return __getc_unlocked(f); }
+__attribute__((weak)) int fputc_unlocked(int c, FILE *f) { return __putc_unlocked(c, f); }
+__attribute__((weak)) int fflush_unlocked(FILE *f)    { return f ? __stdio_flush(f) : fflush(NULL); }
+__attribute__((weak)) int feof_unlocked(FILE *f)      { return (f->flags & F_EOF) != 0; }
+__attribute__((weak)) int ferror_unlocked(FILE *f)    { return (f->flags & F_ERR) != 0; }
+__attribute__((weak)) void clearerr_unlocked(FILE *f) { f->flags &= ~(F_EOF | F_ERR); }
+__attribute__((weak)) int fileno_unlocked(FILE *f)    { return fileno(f); }
 
-size_t fwrite_unlocked(const void *restrict p, size_t size, size_t n,
+__attribute__((weak)) size_t fwrite_unlocked(const void *restrict p, size_t size, size_t n,
                        FILE *restrict f)
 {
     return __fwrite_unlocked(p, size, n, f);
 }
 
-size_t fread_unlocked(void *restrict p, size_t size, size_t n,
+__attribute__((weak)) size_t fread_unlocked(void *restrict p, size_t size, size_t n,
                       FILE *restrict f)
 {
     if (size == 0 || n == 0)
@@ -260,7 +260,7 @@ size_t fread_unlocked(void *restrict p, size_t size, size_t n,
     return got / size;
 }
 
-int fputs_unlocked(const char *restrict s, FILE *restrict f)
+__attribute__((weak)) int fputs_unlocked(const char *restrict s, FILE *restrict f)
 {
     size_t n = strlen(s);
     return __fwrite_unlocked(s, 1, n, f) == n ? 0 : EOF;

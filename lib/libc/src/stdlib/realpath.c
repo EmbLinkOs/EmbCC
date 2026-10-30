@@ -117,7 +117,7 @@ static int resolve(const char *path, char *out, char *rest, char *link)
     return 0;
 }
 
-char *realpath(const char *restrict path, char *restrict resolved)
+__attribute__((weak)) char *realpath(const char *restrict path, char *restrict resolved)
 {
     if (!path) {
         errno = EINVAL;

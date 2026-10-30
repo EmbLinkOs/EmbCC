@@ -51,7 +51,7 @@ static int32_t next_raw(void)
     return (int32_t)(v >> 1);
 }
 
-void srandom(unsigned seed)
+__attribute__((weak)) void srandom(unsigned seed)
 {
     inited = 1;
     if (seed == 0)
@@ -76,7 +76,7 @@ void srandom(unsigned seed)
         next_raw();
 }
 
-long random(void)
+__attribute__((weak)) long random(void)
 {
     if (!inited)
         srandom(1);
@@ -90,7 +90,7 @@ static void save_position(void)
 
 /* A state of n bytes: the larger the state, the longer the period. Less
  * than 8 bytes holds nothing to generate from. */
-char *initstate(unsigned seed, char *buf, size_t n)
+__attribute__((weak)) char *initstate(unsigned seed, char *buf, size_t n)
 {
     if (n < 8) {
         errno = EINVAL;
@@ -109,7 +109,7 @@ char *initstate(unsigned seed, char *buf, size_t n)
     return old;
 }
 
-char *setstate(char *buf)
+__attribute__((weak)) char *setstate(char *buf)
 {
     int32_t *ns = (int32_t *)(void *)buf + 1;
     int t = ns[-1] % TYPES;
@@ -155,18 +155,18 @@ static uint64_t step48(unsigned short xs[3])
 }
 
 /* all 48 bits, as a fraction: exact, since a double holds 53 */
-double erand48(unsigned short xs[3]) { return (double)step48(xs) * 0x1p-48; }
-double drand48(void)                 { return erand48(x48); }
-long   nrand48(unsigned short xs[3]) { return (long)(step48(xs) >> 17); }
-long   lrand48(void)                 { return nrand48(x48); }
+__attribute__((weak)) double erand48(unsigned short xs[3]) { return (double)step48(xs) * 0x1p-48; }
+__attribute__((weak)) double drand48(void)                 { return erand48(x48); }
+__attribute__((weak)) long   nrand48(unsigned short xs[3]) { return (long)(step48(xs) >> 17); }
+__attribute__((weak)) long   lrand48(void)                 { return nrand48(x48); }
 /* the top 32 bits, signed */
-long jrand48(unsigned short xs[3])
+__attribute__((weak)) long jrand48(unsigned short xs[3])
 {
     return (long)(int32_t)(uint32_t)(step48(xs) >> 16);
 }
-long mrand48(void) { return jrand48(x48); }
+__attribute__((weak)) long mrand48(void) { return jrand48(x48); }
 
-void srand48(long seed)
+__attribute__((weak)) void srand48(long seed)
 {
     x48[0] = 0x330E;
     x48[1] = (unsigned short)seed;
@@ -175,7 +175,7 @@ void srand48(long seed)
     c48 = 0xB;
 }
 
-unsigned short *seed48(unsigned short s[3])
+__attribute__((weak)) unsigned short *seed48(unsigned short s[3])
 {
     static unsigned short old[3];
     for (int i = 0; i < 3; i++) {
@@ -187,7 +187,7 @@ unsigned short *seed48(unsigned short s[3])
     return old;
 }
 
-void lcong48(unsigned short p[7])
+__attribute__((weak)) void lcong48(unsigned short p[7])
 {
     for (int i = 0; i < 3; i++)
         x48[i] = p[i];
@@ -199,7 +199,7 @@ void lcong48(unsigned short p[7])
  *
  * Three steps of C's example generator, 11 + 10 + 10 bits of them: what
  * glibc returns, so the same seed gives the same numbers. */
-int rand_r(unsigned *seed)
+__attribute__((weak)) int rand_r(unsigned *seed)
 {
     unsigned next = *seed;
     next = next * 1103515245u + 12345u;

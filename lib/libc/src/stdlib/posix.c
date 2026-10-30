@@ -9,7 +9,7 @@
 /* aligned_alloc with POSIX's rules and POSIX's way of failing: an
  * alignment must be a power of two AND a multiple of sizeof(void *),
  * and the error is RETURNED, with errno left alone. */
-int posix_memalign(void **p, size_t align, size_t n)
+__attribute__((weak)) int posix_memalign(void **p, size_t align, size_t n)
 {
     if (align < sizeof(void *) || (align & (align - 1)) ||
         align % sizeof(void *))
@@ -25,11 +25,11 @@ int posix_memalign(void **p, size_t align, size_t n)
 }
 
 /* the old name, which code from before C11 still calls */
-void *memalign(size_t align, size_t n) { return aligned_alloc(align, n); }
+__attribute__((weak)) void *memalign(size_t align, size_t n) { return aligned_alloc(align, n); }
 
 /* realloc of n things of `size` bytes, refusing a count whose product
  * does not fit rather than allocating its wrapped-around remainder */
-void *reallocarray(void *p, size_t n, size_t size)
+__attribute__((weak)) void *reallocarray(void *p, size_t n, size_t size)
 {
     if (size && n > SIZE_MAX / size) {
         errno = ENOMEM;
@@ -43,7 +43,7 @@ void *reallocarray(void *p, size_t n, size_t size)
  * there, with *value at what followed '=' (or NULL), and *opt moved past
  * the comma. An unknown suboption is still consumed and *value is then
  * the whole of it, which is what a caller reports. */
-int getsubopt(char **opt, char *const *tokens, char **value)
+__attribute__((weak)) int getsubopt(char **opt, char *const *tokens, char **value)
 {
     char *s = *opt, *end = strchr(s, ',');
     if (end) {

@@ -54,7 +54,7 @@ static void fill(char *x)
  * failure that is not EEXIST and has already been returned. */
 #define TRIES (62 * 62 * 62)
 
-int mkostemps(char *t, int suffix, int flags)
+__attribute__((weak)) int mkostemps(char *t, int suffix, int flags)
 {
     char *x = xs(t, suffix);
     if (!x)
@@ -71,11 +71,11 @@ int mkostemps(char *t, int suffix, int flags)
     return -1;
 }
 
-int mkstemps(char *t, int suffix)  { return mkostemps(t, suffix, 0); }
-int mkostemp(char *t, int flags)   { return mkostemps(t, 0, flags); }
-int mkstemp(char *t)               { return mkostemps(t, 0, 0); }
+__attribute__((weak)) int mkstemps(char *t, int suffix)  { return mkostemps(t, suffix, 0); }
+__attribute__((weak)) int mkostemp(char *t, int flags)   { return mkostemps(t, 0, flags); }
+__attribute__((weak)) int mkstemp(char *t)               { return mkostemps(t, 0, 0); }
 
-char *mkdtemp(char *t)
+__attribute__((weak)) char *mkdtemp(char *t)
 {
     char *x = xs(t, 0);
     if (!x)
@@ -93,7 +93,7 @@ char *mkdtemp(char *t)
 
 /* A name nothing has: free if lstat finds nothing there. On failure the
  * template becomes the empty string, which is how mktemp reports one. */
-char *mktemp(char *t)
+__attribute__((weak)) char *mktemp(char *t)
 {
     char *x = xs(t, 0);
     if (!x) {

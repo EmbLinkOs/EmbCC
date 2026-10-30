@@ -61,12 +61,14 @@ char  *strsep(char **sp, const char *sep);
 size_t strlcpy(char *__restrict d, const char *__restrict s, size_t n);
 size_t strlcat(char *__restrict d, const char *__restrict s, size_t n);
 void  *memmem(const void *hay, size_t hn, const void *needle, size_t nn);
+char  *strsignal(int sig);
 #endif
 #if defined(__EMB_GNU)
 char  *strcasestr(const char *h, const char *n);
 void  *memrchr(const void *s, int c, size_t n);
 char  *strchrnul(const char *s, int c);
 void   explicit_bzero(void *s, size_t n);
+int    strverscmp(const char *a, const char *b);
 #endif
 
 #ifdef __cplusplus

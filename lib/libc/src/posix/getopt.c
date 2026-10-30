@@ -18,8 +18,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-char *optarg;
-int optind = 1, opterr = 1, optopt, optreset;
+__attribute__((weak)) char *optarg;
+__attribute__((weak)) int optind = 1, opterr = 1, optopt, optreset;
 
 static int optpos;      /* where in argv[optind] the next short option is */
 
@@ -234,18 +234,18 @@ static int long_permuting(int argc, char *const argv[], const char *opts,
     return r;
 }
 
-int getopt(int argc, char *const argv[], const char *opts)
+__attribute__((weak)) int getopt(int argc, char *const argv[], const char *opts)
 {
     return long_permuting(argc, argv, opts, NULL, NULL, 0);
 }
 
-int getopt_long(int argc, char *const argv[], const char *opts,
+__attribute__((weak)) int getopt_long(int argc, char *const argv[], const char *opts,
                 const struct option *lo, int *index)
 {
     return long_permuting(argc, argv, opts, lo, index, 0);
 }
 
-int getopt_long_only(int argc, char *const argv[], const char *opts,
+__attribute__((weak)) int getopt_long_only(int argc, char *const argv[], const char *opts,
                      const struct option *lo, int *index)
 {
     return long_permuting(argc, argv, opts, lo, index, 1);

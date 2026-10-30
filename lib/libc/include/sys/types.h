@@ -1,11 +1,16 @@
-/* <sys/types.h> -- POSIX's type names, as embedded code asks for them:
- * Microchip Harmony's toolchain_specifics.h includes it, and so does code
- * written against newlib. EmbCC's C library has no processes or files of
- * its own; these are the names, at newlib's widths, so that such code
- * compiles and its structures lay out as they did there.
+/* <sys/types.h> -- POSIX's type names.
+ *
+ * The widths are a hosted system's, on every target: a file's inode
+ * number and its device are 64 bits, its owner 32, so that struct stat
+ * says on EmbLinkOS what it says on Linux and a program's
+ * `ino_t` does not wrap at 65536 files. (They were newlib's widths once,
+ * 16 bits for most of them, from before this library had a <sys/stat.h>
+ * to fill them in; embedded code that names the types does not depend
+ * on their size.) off_t is a long: 64 bits on every target with a disk
+ * big enough to need it.
  *
  * time_t and clock_t are <time.h>'s, declared once whichever header comes
- * first; ssize_t is the signed type of size_t's width.
+ * first; so are ssize_t and off_t, <stdio.h>'s too.
  */
 #ifndef _SYS_TYPES_H
 #define _SYS_TYPES_H
@@ -31,19 +36,39 @@ typedef __PTRDIFF_TYPE__ ssize_t;
 #define _OFF_T_DECLARED
 typedef long off_t;
 #endif
+#ifndef _OFF64_T_DECLARED
+#define _OFF64_T_DECLARED
+typedef long long off64_t;
+#endif
+#ifndef _PID_T_DECLARED
+#define _PID_T_DECLARED
 typedef int pid_t;
+#endif
+#ifndef _MODE_T_DECLARED
+#define _MODE_T_DECLARED
 typedef unsigned int mode_t;
-typedef unsigned short uid_t;
-typedef unsigned short gid_t;
+#endif
+#ifndef _UID_T_DECLARED
+#define _UID_T_DECLARED
+typedef unsigned int uid_t;
+typedef unsigned int gid_t;
+#endif
 typedef unsigned int id_t;
-typedef short dev_t;
-typedef unsigned short ino_t;
-typedef unsigned short nlink_t;
-typedef long blkcnt_t;
+typedef unsigned long long dev_t;
+typedef unsigned long long ino_t;
+typedef unsigned long nlink_t;
+typedef long long blkcnt_t;
 typedef long blksize_t;
-typedef unsigned long useconds_t;
+typedef unsigned long long fsblkcnt_t;
+typedef unsigned long long fsfilcnt_t;
+typedef unsigned int useconds_t;
 typedef long suseconds_t;
-typedef long key_t;
+typedef int key_t;
+#ifndef _CLOCKID_T_DECLARED
+#define _CLOCKID_T_DECLARED
+typedef int clockid_t;
+#endif
+typedef void *timer_t;
 typedef long daddr_t;
 typedef char *caddr_t;
 
@@ -59,5 +84,7 @@ typedef uint8_t u_int8_t;
 typedef uint16_t u_int16_t;
 typedef uint32_t u_int32_t;
 typedef uint64_t u_int64_t;
+typedef int64_t quad_t;
+typedef uint64_t u_quad_t;
 
 #endif

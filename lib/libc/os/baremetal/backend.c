@@ -238,3 +238,7 @@ int __os_readdir(void *d, char *name, size_t n, int *type)
     return nosys();
 }
 void __os_closedir(void *d)                  { (void)d; }
+
+/* A bare-metal target has none of POSIX's operating system: every primitive
+ * of that half of the contract reports ENOSYS (os/absent.inc). */
+#include "../absent.inc"

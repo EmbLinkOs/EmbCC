@@ -132,14 +132,7 @@ void quick_exit(int status)
     _Exit(status);
 }
 
-void abort(void)
-{
-    /* SIGABRT would be raised here if this library had signals. Until then,
-     * a distinctive status is better than a silent stop. */
-    __stdio_flush_all();
-    __os_exit(134);              /* 128 + SIGABRT, what a shell reports */
-    for (;;) {}
-}
+/* abort is stdlib/signal.c's: it raises SIGABRT first. */
 
 int abs(int x)             { return x < 0 ? -x : x; }
 long labs(long x)          { return x < 0 ? -x : x; }

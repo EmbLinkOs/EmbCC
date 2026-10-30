@@ -15,6 +15,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #ifdef EMBCC_TEST_HAS_FS
 /* the six letters that replaced "XXXXXX" -- which may themselves include
@@ -24,8 +26,6 @@ static int filled(const char *name, size_t suffix)
     return memcmp(name + strlen(name) - suffix - 6, "XXXXXX", 6) != 0;
 }
 
-int __os_symlink(const char *target, const char *linkpath);
-int __os_mkdir(const char *path, unsigned mode);
 
 static int temporaries(void)
 {
@@ -67,9 +67,9 @@ static int temporaries(void)
 static int resolved(void)
 {
     char out[PATH_MAX], in[PATH_MAX];
-    if (__os_mkdir("/tmp/r", 0755) || __os_mkdir("/tmp/r/inner", 0755) ||
-        __os_symlink("inner", "/tmp/r/link") ||
-        __os_symlink("/tmp/r/inner/..", "/tmp/r/up"))
+    if (mkdir("/tmp/r", 0755) || mkdir("/tmp/r/inner", 0755) ||
+        symlink("inner", "/tmp/r/link") ||
+        symlink("/tmp/r/inner/..", "/tmp/r/up"))
         return 10;
     if (!realpath("/tmp/r/./inner/../inner/", out) ||
         strcmp(out, "/tmp/r/inner") != 0)
@@ -92,7 +92,7 @@ static int resolved(void)
     errno = 0;
     if (realpath("/tmp/r/file/x", out) || errno != ENOTDIR)
         return 16;
-    if (__os_symlink("loop", "/tmp/r/loop") || realpath("/tmp/r/loop", out) ||
+    if (symlink("loop", "/tmp/r/loop") || realpath("/tmp/r/loop", out) ||
         errno != ELOOP)
         return 17;
     return 0;

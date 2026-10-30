@@ -876,6 +876,7 @@ libc-emblinkos: embcc embar
 # member is a definition that arrives by accident.
 #   make libc-linux-x86_64   /   make libc-linux-aarch64
 LIBC_SRCS_LINUX := $(LIBC_SRCS_PORTABLE) lib/libc/os/linux/backend.c \
+                   lib/libc/os/linux/posix.c \
                    lib/libc/os/linux/thread.c lib/libc/os/linux/tls.c
 
 # lib/rt -- the COMPILER runtime, which is a different library from the C

@@ -14,10 +14,10 @@ void warn(const char *fmt, ...);
 void warnx(const char *fmt, ...);
 void vwarn(const char *fmt, va_list ap);
 void vwarnx(const char *fmt, va_list ap);
-_Noreturn void err(int status, const char *fmt, ...);
-_Noreturn void errx(int status, const char *fmt, ...);
-_Noreturn void verr(int status, const char *fmt, va_list ap);
-_Noreturn void verrx(int status, const char *fmt, va_list ap);
+__attribute__((__noreturn__)) void err(int status, const char *fmt, ...);
+__attribute__((__noreturn__)) void errx(int status, const char *fmt, ...);
+__attribute__((__noreturn__)) void verr(int status, const char *fmt, va_list ap);
+__attribute__((__noreturn__)) void verrx(int status, const char *fmt, va_list ap);
 
 #ifdef __cplusplus
 }

@@ -100,7 +100,7 @@ char *strerror(int errnum)
  * the message as fit, terminated, because a truncated message is more
  * use to a person than an empty one. EINVAL for a number with no
  * message, whose buffer says "Unknown error N" as strerror would. */
-int strerror_r(int errnum, char *buf, size_t n)
+__attribute__((weak)) int strerror_r(int errnum, char *buf, size_t n)
 {
     int known = errnum >= 0 && (size_t)errnum < sizeof msg / sizeof msg[0] &&
                 msg[errnum];

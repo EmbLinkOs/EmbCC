@@ -105,7 +105,7 @@ static const char *bracket(const char *p, int c, int flags, int *ok)
     return p + 1;
 }
 
-int fnmatch(const char *pat, const char *str, int flags)
+__attribute__((weak)) int fnmatch(const char *pat, const char *str, int flags)
 {
     const char *p = pat, *s = str;
     const char *star_p = NULL, *star_s = NULL;

@@ -120,6 +120,12 @@ void  qsort_r(void *base, size_t n, size_t size,
               int (*cmp)(const void *, const void *, void *), void *arg);
 int   getsubopt(char **opt, char *const *tokens, char **value);
 
+/* pseudo-terminals (src/posix/pty.c) */
+int   posix_openpt(int flags);
+int   grantpt(int fd);
+int   unlockpt(int fd);
+char *ptsname(int fd);
+
 /* the historical generators, each giving glibc's sequence for a seed */
 long  random(void);
 void  srandom(unsigned seed);
@@ -139,6 +145,7 @@ void   lcong48(unsigned short p[7]);
 
 #if defined(__EMB_GNU)
 int   clearenv(void);
+int   ptsname_r(int fd, char *buf, size_t n);
 int   mkstemps(char *tmpl, int suffix);
 int   mkostemps(char *tmpl, int suffix, int flags);
 void *memalign(size_t align, size_t n);

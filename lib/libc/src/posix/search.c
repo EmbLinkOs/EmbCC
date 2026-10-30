@@ -87,7 +87,7 @@ static struct node *insert(struct node *n, const void *key, cmp_fn cmp,
     return rebalance(n);
 }
 
-void *tsearch(const void *key, void **root, cmp_fn cmp)
+__attribute__((weak)) void *tsearch(const void *key, void **root, cmp_fn cmp)
 {
     if (!root)
         return NULL;
@@ -96,7 +96,7 @@ void *tsearch(const void *key, void **root, cmp_fn cmp)
     return found;
 }
 
-void *tfind(const void *key, void *const *root, cmp_fn cmp)
+__attribute__((weak)) void *tfind(const void *key, void *const *root, cmp_fn cmp)
 {
     if (!root)
         return NULL;
@@ -151,7 +151,7 @@ static struct node *del(struct node *n, const void *key, cmp_fn cmp,
 
 /* The deleted node's parent; for the root, which has none, any pointer
  * that is not null (POSIX's words) -- the root's address here. */
-void *tdelete(const void *restrict key, void **restrict root, cmp_fn cmp)
+__attribute__((weak)) void *tdelete(const void *restrict key, void **restrict root, cmp_fn cmp)
 {
     if (!root || !*root)
         return NULL;
@@ -179,13 +179,13 @@ static void walk(const struct node *n, void (*act)(const void *, VISIT, int),
     act(n, endorder, depth);
 }
 
-void twalk(const void *root, void (*act)(const void *, VISIT, int))
+__attribute__((weak)) void twalk(const void *root, void (*act)(const void *, VISIT, int))
 {
     if (root && act)
         walk(root, act, 0);
 }
 
-void tdestroy(void *root, void (*free_key)(void *))
+__attribute__((weak)) void tdestroy(void *root, void (*free_key)(void *))
 {
     struct node *n = root;
     if (!n)
@@ -240,7 +240,7 @@ static int resize(struct __htab *t, size_t want)
     return 0;
 }
 
-int hcreate_r(size_t nel, struct hsearch_data *h)
+__attribute__((weak)) int hcreate_r(size_t nel, struct hsearch_data *h)
 {
     struct __htab *t = calloc(1, sizeof *t);
     if (!t || resize(t, nel) < 0) {
@@ -252,7 +252,7 @@ int hcreate_r(size_t nel, struct hsearch_data *h)
     return 1;
 }
 
-void hdestroy_r(struct hsearch_data *h)
+__attribute__((weak)) void hdestroy_r(struct hsearch_data *h)
 {
     if (h && h->__tab) {
         free(h->__tab->e);
@@ -263,7 +263,7 @@ void hdestroy_r(struct hsearch_data *h)
 
 /* 1 with *ret at the entry, or 0 with errno: ESRCH for a FIND that found
  * nothing, ENOMEM for an ENTER there was no room for. */
-int hsearch_r(ENTRY item, ACTION action, ENTRY **ret, struct hsearch_data *h)
+__attribute__((weak)) int hsearch_r(ENTRY item, ACTION action, ENTRY **ret, struct hsearch_data *h)
 {
     struct __htab *t = h->__tab;
     ENTRY *e = slot(t, item.key);
@@ -290,16 +290,16 @@ int hsearch_r(ENTRY item, ACTION action, ENTRY **ret, struct hsearch_data *h)
 
 static struct hsearch_data global;
 
-int hcreate(size_t nel)
+__attribute__((weak)) int hcreate(size_t nel)
 {
     if (global.__tab)
         return 0;               /* one table at a time, as POSIX has it */
     return hcreate_r(nel, &global);
 }
 
-void hdestroy(void) { hdestroy_r(&global); }
+__attribute__((weak)) void hdestroy(void) { hdestroy_r(&global); }
 
-ENTRY *hsearch(ENTRY item, ACTION action)
+__attribute__((weak)) ENTRY *hsearch(ENTRY item, ACTION action)
 {
     ENTRY *r;
     if (!global.__tab)
@@ -309,7 +309,7 @@ ENTRY *hsearch(ENTRY item, ACTION action)
 
 /* ---- linear search, and queues ---------------------------------------- */
 
-void *lfind(const void *key, const void *base, size_t *nel, size_t width,
+__attribute__((weak)) void *lfind(const void *key, const void *base, size_t *nel, size_t width,
             cmp_fn cmp)
 {
     const char *p = base;
@@ -319,7 +319,7 @@ void *lfind(const void *key, const void *base, size_t *nel, size_t width,
     return NULL;
 }
 
-void *lsearch(const void *key, void *base, size_t *nel, size_t width,
+__attribute__((weak)) void *lsearch(const void *key, void *base, size_t *nel, size_t width,
               cmp_fn cmp)
 {
     void *p = lfind(key, base, nel, width, cmp);
@@ -335,7 +335,7 @@ void *lsearch(const void *key, void *base, size_t *nel, size_t width,
 struct qelem { struct qelem *next, *prev; };
 
 /* After pred, or as a one-element queue when pred is NULL. */
-void insque(void *elem, void *pred)
+__attribute__((weak)) void insque(void *elem, void *pred)
 {
     struct qelem *e = elem, *p = pred;
     if (!p) {
@@ -349,7 +349,7 @@ void insque(void *elem, void *pred)
         e->next->prev = e;
 }
 
-void remque(void *elem)
+__attribute__((weak)) void remque(void *elem)
 {
     struct qelem *e = elem;
     if (e->next)

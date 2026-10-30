@@ -66,11 +66,11 @@ void __funlockfile(FILE *f)
         __unlock(&f->lock);
 }
 
-void flockfile(FILE *f)   { __flockfile(f); }
-void funlockfile(FILE *f) { __funlockfile(f); }
+__attribute__((weak)) void flockfile(FILE *f)   { __flockfile(f); }
+__attribute__((weak)) void funlockfile(FILE *f) { __funlockfile(f); }
 
 /* 0 with the lock taken, nonzero when another thread has it. */
-int ftrylockfile(FILE *f)
+__attribute__((weak)) int ftrylockfile(FILE *f)
 {
     unsigned long me = __os_thread_self();
     if (__atomic_load_n(&f->depth, __ATOMIC_RELAXED) > 0 &&

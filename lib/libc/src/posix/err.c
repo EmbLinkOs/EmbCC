@@ -12,11 +12,11 @@
 #include <stdlib.h>
 #include <string.h>
 
-char *program_invocation_name, *program_invocation_short_name;
+__attribute__((weak)) char *program_invocation_name, *program_invocation_short_name;
 
-const char *getprogname(void) { return program_invocation_short_name; }
+__attribute__((weak)) const char *getprogname(void) { return program_invocation_short_name; }
 
-void setprogname(const char *name)
+__attribute__((weak)) void setprogname(const char *name)
 {
     const char *slash = strrchr(name, '/');
     program_invocation_short_name = (char *)(slash ? slash + 1 : name);
@@ -41,22 +41,22 @@ static void say(const char *fmt, va_list ap, int with_errno)
     funlockfile(stderr);
 }
 
-void vwarn(const char *fmt, va_list ap)  { say(fmt, ap, 1); }
-void vwarnx(const char *fmt, va_list ap) { say(fmt, ap, 0); }
+__attribute__((weak)) void vwarn(const char *fmt, va_list ap)  { say(fmt, ap, 1); }
+__attribute__((weak)) void vwarnx(const char *fmt, va_list ap) { say(fmt, ap, 0); }
 
-void verr(int status, const char *fmt, va_list ap)
+__attribute__((weak)) void verr(int status, const char *fmt, va_list ap)
 {
     say(fmt, ap, 1);
     exit(status);
 }
 
-void verrx(int status, const char *fmt, va_list ap)
+__attribute__((weak)) void verrx(int status, const char *fmt, va_list ap)
 {
     say(fmt, ap, 0);
     exit(status);
 }
 
-void warn(const char *fmt, ...)
+__attribute__((weak)) void warn(const char *fmt, ...)
 {
     va_list ap;
     va_start(ap, fmt);
@@ -64,7 +64,7 @@ void warn(const char *fmt, ...)
     va_end(ap);
 }
 
-void warnx(const char *fmt, ...)
+__attribute__((weak)) void warnx(const char *fmt, ...)
 {
     va_list ap;
     va_start(ap, fmt);
@@ -72,14 +72,14 @@ void warnx(const char *fmt, ...)
     va_end(ap);
 }
 
-void err(int status, const char *fmt, ...)
+__attribute__((weak)) void err(int status, const char *fmt, ...)
 {
     va_list ap;
     va_start(ap, fmt);
     verr(status, fmt, ap);
 }
 
-void errx(int status, const char *fmt, ...)
+__attribute__((weak)) void errx(int status, const char *fmt, ...)
 {
     va_list ap;
     va_start(ap, fmt);

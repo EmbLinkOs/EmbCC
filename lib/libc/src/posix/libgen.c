@@ -7,7 +7,7 @@
 #include <string.h>
 
 /* "usr/lib/" -> "lib", "/" -> "/", "" and NULL -> "." */
-char *basename(char *s)
+__attribute__((weak)) char *basename(char *s)
 {
     if (!s || !*s)
         return (char *)".";
@@ -24,7 +24,7 @@ char *basename(char *s)
  * with EXACTLY two slashes keeps both when only the root is left -- "//"
  * and "//a" give "//" -- because POSIX lets "//" name something other
  * than "/" (XBD 4.13), and glibc answers so. */
-char *dirname(char *s)
+__attribute__((weak)) char *dirname(char *s)
 {
     if (!s || !*s)
         return (char *)".";

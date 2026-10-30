@@ -31,7 +31,7 @@ static void sift(char *base, size_t size, size_t root, size_t n,
 /* POSIX.1-2024's qsort_r, the comparison told the caller's `arg` -- in
  * glibc's argument order, which POSIX adopted, and not the BSDs' older
  * one with arg first. */
-void qsort_r(void *base, size_t n, size_t size,
+__attribute__((weak)) void qsort_r(void *base, size_t n, size_t size,
              int (*cmp)(const void *, const void *, void *), void *arg)
 {
     if (n < 2 || size == 0)

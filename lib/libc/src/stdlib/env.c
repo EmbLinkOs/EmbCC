@@ -130,7 +130,7 @@ static int put(char *s, size_t n)
     return 0;
 }
 
-int setenv(const char *name, const char *value, int overwrite)
+__attribute__((weak)) int setenv(const char *name, const char *value, int overwrite)
 {
     if (bad_name(name)) {
         errno = EINVAL;
@@ -172,7 +172,7 @@ out:
 
 /* Every entry of the name goes, not the first: a startup vector may hold
  * two, and leaving the second would make the variable come back. */
-int unsetenv(const char *name)
+__attribute__((weak)) int unsetenv(const char *name)
 {
     if (bad_name(name)) {
         errno = EINVAL;
@@ -203,7 +203,7 @@ int unsetenv(const char *name)
 
 /* The caller's string itself becomes the entry. One without an '=' is
  * glibc's way of asking for an unsetenv, and is taken that way. */
-int putenv(char *s)
+__attribute__((weak)) int putenv(char *s)
 {
     char *eq = s ? strchr(s, '=') : 0;
     if (!eq)
@@ -218,7 +218,7 @@ int putenv(char *s)
     return r;
 }
 
-int clearenv(void)
+__attribute__((weak)) int clearenv(void)
 {
     __lock(&env_lock);
     while (nmade)
@@ -232,11 +232,4 @@ int clearenv(void)
     return 0;
 }
 
-/* §7.22.4.8: system(NULL) reports whether a command processor exists.
- * There is none here, so it reports 0 -- and a real command string gets
- * -1 rather than a silent success that ran nothing. */
-int system(const char *cmd)
-{
-    (void)cmd;
-    return cmd ? -1 : 0;
-}
+/* system() is src/posix/proc.c's: /bin/sh, through posix_spawn. */

@@ -110,7 +110,7 @@ static const struct __stream_io mem_io = {
 
 /* A NULL buf asks for one of size bytes, freed at close: useful only
  * with "+", since nothing else could read what was written there. */
-FILE *fmemopen(void *restrict buf, size_t size, const char *restrict mode)
+__attribute__((weak)) FILE *fmemopen(void *restrict buf, size_t size, const char *restrict mode)
 {
     int fl, acc;
     if (size == 0) {
@@ -214,7 +214,7 @@ static int dyn_close(void *c)
 static const struct __stream_io dyn_io = { NULL, dyn_write, dyn_seek,
                                            dyn_close };
 
-FILE *open_memstream(char **bufp, size_t *sizep)
+__attribute__((weak)) FILE *open_memstream(char **bufp, size_t *sizep)
 {
     if (!bufp || !sizep) {
         errno = EINVAL;

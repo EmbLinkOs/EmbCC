@@ -170,6 +170,10 @@ int vasprintf(char **__restrict s, const char *__restrict fmt, va_list ap)
 int     fseeko(FILE *f, off_t off, int whence);
 off_t   ftello(FILE *f);
 char   *ctermid(char *s);
+/* a command's output or input as a stream (src/posix/popen.c) */
+FILE   *popen(const char *cmd, const char *mode);
+int     pclose(FILE *f);
+int     renameat(int fromfd, const char *from, int tofd, const char *to);
 
 /* One lock around many calls: the stream's lock nests, so a thread that
  * holds it may still call printf on the stream. */

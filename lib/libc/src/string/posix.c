@@ -133,3 +133,59 @@ __attribute__((weak)) void explicit_bzero(void *s, size_t n)
 {
     memset_explicit(s, 0, n);
 }
+
+/* Strings compared as versions, so "file9" sorts before "file10" --
+ * glibc's state machine, whose order `ls -v` and versionsort users know:
+ * a digit run is an integer unless it starts with 0, when it is a
+ * fraction, and a fraction sorts before an integer. */
+#define VS_N 0        /* not in a number */
+#define VS_I 3        /* in an integer */
+#define VS_F 6        /* in a fraction */
+#define VS_Z 9        /* in leading zeros */
+#define VS_CMP 2
+#define VS_LEN 3
+
+__attribute__((weak)) int strverscmp(const char *a, const char *b)
+{
+    static const unsigned char next[] = {
+        /*        x     d     0 */
+        /* N */ VS_N, VS_I, VS_Z,
+        /* I */ VS_N, VS_I, VS_I,
+        /* F */ VS_N, VS_F, VS_F,
+        /* Z */ VS_N, VS_F, VS_Z,
+    };
+    static const signed char result[] = {
+        /*       x/x     x/d     x/0     d/x     d/d     d/0     0/x     0/d     0/0 */
+        /* N */ VS_CMP, VS_CMP, VS_CMP, VS_CMP, VS_LEN, VS_CMP, VS_CMP, VS_CMP, VS_CMP,
+        /* I */ VS_CMP, -1,     -1,     +1,     VS_LEN, VS_LEN, +1,     VS_LEN, VS_LEN,
+        /* F */ VS_CMP, VS_CMP, VS_CMP, VS_CMP, VS_CMP, VS_CMP, VS_CMP, VS_CMP, VS_CMP,
+        /* Z */ VS_CMP, +1,     +1,     -1,     VS_CMP, VS_CMP, -1,     VS_CMP, VS_CMP,
+    };
+    const unsigned char *p = (const unsigned char *)a,
+                        *q = (const unsigned char *)b;
+    if (p == q)
+        return 0;
+    unsigned c1 = *p++, c2 = *q++;
+    int state = VS_N + (c1 == '0') + (isdigit(c1) != 0);
+    int diff;
+    while ((diff = (int)c1 - (int)c2) == 0) {
+        if (!c1)
+            return 0;
+        state = next[state];
+        c1 = *p++;
+        c2 = *q++;
+        state += (c1 == '0') + (isdigit(c1) != 0);
+    }
+    state = result[state * 3 + (c2 == '0') + (isdigit(c2) != 0)];
+    switch (state) {
+    case VS_CMP:
+        return diff;
+    case VS_LEN:
+        while (isdigit(*p++))
+            if (!isdigit(*q++))
+                return 1;
+        return isdigit(*q) ? -1 : diff;
+    default:
+        return state;
+    }
+}

@@ -49,6 +49,12 @@
 #define LAT_PHDR   3
 #define LAT_PHENT  4
 #define LAT_PHNUM  5
+#define LAT_PAGESZ 6
+
+/* The page size the kernel reported, for sysconf (os/linux/posix.c):
+ * aarch64 kernels are built with 4, 16 or 64 KB pages, so it is asked,
+ * not assumed. 0 until startup has read the auxv. */
+unsigned long __libc_pagesize;
 #define LPT_TLS    7
 
 /* Just enough of a program header to find PT_TLS and read it. The
@@ -177,6 +183,7 @@ void __libc_tls_init(long *sp)
         if (a[0] == LAT_PHDR)  phdr = (const struct lphdr *)a[1];
         else if (a[0] == LAT_PHNUM) phnum = (unsigned long)a[1];
         else if (a[0] == LAT_PHENT) phent = (unsigned long)a[1];
+        else if (a[0] == LAT_PAGESZ) __libc_pagesize = (unsigned long)a[1];
     }
     if (!phdr || !phnum)
         return;                            /* nothing to find it with */
