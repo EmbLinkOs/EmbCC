@@ -75,4 +75,10 @@ int    strverscmp(const char *a, const char *b);
 }
 #endif
 
+/* strcasecmp and the other BSD names, which glibc's and newlib's
+ * <string.h> both bring along by default -- and code relies on it */
+#if defined(__EMB_GNU)
+#include <strings.h>
+#endif
+
 #endif

@@ -214,6 +214,7 @@ pid_t   vfork(void);
 int     chroot(const char *path);
 void   *sbrk(intptr_t increment);
 int     daemon(int nochdir, int noclose);
+char   *getpass(const char *prompt);    /* gone from POSIX in 2001; still called */
 #endif
 
 #ifdef __cplusplus

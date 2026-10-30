@@ -14,12 +14,20 @@ the duplication this project removes everywhere else.
     include/          the hosted C11 headers, and POSIX's
     src/              the library, portable C
       string/ ctype/ stdlib/ stdio/ time/ math/
-      posix/          POSIX's modules with no C header of their own:
+      posix/          POSIX above C: descriptors, files, directories,
+                      processes and spawn, popen, sockets and the resolver,
+                      terminals and ptys, users, mmap, poll, sysconf; and
                       libgen, fnmatch, getopt, search, err
       setjmp/         the one part that cannot be portable C
-    os/<name>/        the backend: 11 primitives (os/backend.h)
+    os/backend.h      the contract: 140 primitives, C's few and POSIX's many
+    os/absent.inc     each primitive as an ENOSYS failure, for what a backend
+                      has not got
+    os/<name>/        the backends
+      linux/          Linux system calls; no other libc underneath
+      emblinkos/      EmbLinkOS's syscall ABI; this is what replaced emlibc,
+                      and with LIBC=emblibc, newlib
+      baremetal/      a part with no OS
       posixlike/      write/read/open/... -- the test harness, anything Unix
-      emblinkos/      EmbLinkOS's syscall ABI; this is what replaced emlibc
 
 `src/setjmp/` holds one file per architecture, each wrapped whole in
 `#ifdef __x86_64__` / `#ifdef __aarch64__` so the build picks one and the
@@ -32,12 +40,18 @@ code: no function in this library has two bodies.
 system. A new OS implements those and gets the entire C library; nothing
 above the seam knows which OS it is on, and there are no `#ifdef`s there.
 
-EmbLinkOS is the proof. Its C library was `emlibc`; it is now
-`os/emblinkos/backend.c`, about 200 lines, and that OS gets the same
-printf, malloc and math as every other target.
+EmbLinkOS is the proof. Its C library was `emlibc`, then newlib with a
+retargeting file; it is now `os/emblinkos/backend.c`, and that OS gets the
+same printf, malloc, math, time zones, sockets and processes as every
+other target -- its whole userland builds on it (`make LIBC=emblibc` in
+EmbLinkOS).
+
+`tests/golden/libc-backends.sh` holds every backend to the whole contract.
 
 ## Status
 
 What exists and what does not is in `docs/manual/libraries.md`. The
-acceptance test is `tests/golden/libc.sh`: every program in `tests/exec`
-built and run against this library with no newlib at all.
+acceptance tests are `tests/golden/libc.sh` -- every program in
+`tests/exec` built and run against this library with no newlib at all --
+and `tests/golden/linux-libc-exec.sh`, which runs the POSIX programs on a
+Linux kernel, where each value was first checked against glibc's.

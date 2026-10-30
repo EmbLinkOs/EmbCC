@@ -494,6 +494,14 @@ int __os_spawn_flags(void)
            __OS_SPAWN_SETSIGMASK | __OS_SPAWN_SETSID;
 }
 
+/* fork carries out any action there is: nothing to refuse in advance */
+int __os_spawn_check(const struct __os_spawn_action *action, int count)
+{
+    (void)action;
+    (void)count;
+    return 0;
+}
+
 int __os_spawn(int *pid, const char *path,
                const struct __os_spawn_action *a, int na,
                const struct __os_spawn_attr *attr,

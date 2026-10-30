@@ -363,6 +363,19 @@ int __os_clock_gettime(int clock, struct __os_timespec *t)
     return -1;
 }
 
+/* The one limit this kernel has and can say: 64 descriptors a process
+ * (kernel/fs/fd.h's FD_MAX_OPEN), soft and hard alike. The others it
+ * does not keep, and an answer of "unlimited" would be a guess. */
+int __os_getrlimit(int resource, unsigned long long lim[2])
+{
+    if (resource != 7) {                     /* RLIMIT_NOFILE */
+        errno = ENOSYS;
+        return -1;
+    }
+    lim[0] = lim[1] = 64;
+    return 0;
+}
+
 int __os_clock_getres(int clock, struct __os_timespec *t)
 {
     long ns;
@@ -878,8 +891,15 @@ int __os_fcntl(int fd, int cmd, long arg)
                (r & EM_FD_APPEND ? __OS_O_APPEND : 0);
     }
     case __OS_F_SETFL: {
-        /* the access mode cannot change after open, and Linux ignores
-         * an attempt rather than failing it, so those bits are dropped */
+        /* The access mode cannot change after open, and an attempt is
+         * ignored, as Linux ignores it. A flag that cannot be set at all
+         * here (O_TRUNC, O_SYNC, O_ASYNC ...) is EINVAL -- this OS's
+         * rule, where Linux drops it -- so a program asking for one
+         * learns it did not happen. */
+        if (arg & ~(long)(3 | __OS_O_NONBLOCK | __OS_O_APPEND)) {   /* 3: O_ACCMODE */
+            errno = EINVAL;
+            return -1;
+        }
         int st_bits = (arg & __OS_O_NONBLOCK ? EM_FD_NONBLOCK : 0) |
                       (arg & __OS_O_APPEND ? EM_FD_APPEND : 0);
         return ret0(embk_syscall3(EMBK_SYS_fcntl, fd, 6, st_bits));
@@ -1032,6 +1052,25 @@ int __os_getgroups(int n, unsigned *list)
  * groups, identities or signals for them to set, and accepting one would
  * be a promise nothing keeps. */
 #define EM_ACTIONS (EMBK_SPAWN_ACTIONS_MAX - 3)
+
+/* What the kernel's spawn cannot take, refused as each action is added:
+ * more than EM_ACTIONS (three of its 64 slots are this library's), a path
+ * longer than it copies, a directory by descriptor (there is no way from
+ * one to its path), and an open flag the action has no bit for. */
+int __os_spawn_check(const struct __os_spawn_action *a, int count)
+{
+    if (count >= EM_ACTIONS)
+        return E2BIG;
+    if (a->kind == __OS_SPAWN_FCHDIR)
+        return ENOTSUP;
+    if (a->path && strlen(a->path) >= EM_PATH_MAX)
+        return ENAMETOOLONG;
+    if (a->kind == __OS_SPAWN_OPEN &&
+        (a->oflag & ~(3 | __OS_O_CREAT | __OS_O_EXCL | __OS_O_TRUNC |
+                      __OS_O_APPEND | __OS_O_NONBLOCK | __OS_O_CLOEXEC)))
+        return ENOTSUP;
+    return 0;
+}
 
 int __os_spawn(int *pid, const char *path, const struct __os_spawn_action *a,
                int na, const struct __os_spawn_attr *attr,
@@ -1577,6 +1616,7 @@ int __os_ioctl(int fd, unsigned long request, void *arg)
 #define OS_HAS_setid
 #define OS_HAS_getgroups
 #define OS_HAS_spawn
+#define OS_HAS_spawn_check
 #define OS_HAS_waitpid
 #define OS_HAS_clock_gettime
 #define OS_HAS_clock_getres
@@ -1587,6 +1627,7 @@ int __os_ioctl(int fd, unsigned long request, void *arg)
 #define OS_HAS_mprotect
 #define OS_HAS_uname
 #define OS_HAS_sysinfo
+#define OS_HAS_getrlimit
 #define OS_HAS_poll
 #define OS_HAS_socket
 #define OS_HAS_bind

@@ -849,27 +849,60 @@ rt-darwin-x86_64: embcc embar
 # EmbLinkOS is a backend, not a second library: same sources, one different
 # file at the bottom. It needs that OS's ABI headers, so it is opt-in.
 #   make libc-emblinkos EMBLINKOS=$HOME/EmbLinkOs
+#   make libc-emblinkos EMBLINKOS=... EMBLINKOS_ARCH=aarch64
+# x86_64's goes to build/libc/emblinkos, aarch64's to emblinkos-aarch64.
 EMBLINKOS ?= $(HOME)/EmbLinkOs
+EMBLINKOS_ARCH ?= x86_64
+ELOS_SUFFIX  = $(if $(filter aarch64,$(EMBLINKOS_ARCH)),-aarch64,)
+ELOS_LIBC    = $(BUILD)/libc/emblinkos$(ELOS_SUFFIX)
+ELOS_LIBCXX  = $(BUILD)/libcxx/emblinkos$(ELOS_SUFFIX)
+# --unwind-tables: every function gets its .eh_frame, as GCC gives every
+# x86-64 function by default. The unwinder needs its own frames' (without
+# them a throw's walk ends where it starts, in _Unwind_RaiseException), and a
+# throw from a C++ callback passes through C frames -- qsort's, bsearch's.
+ELOS_CC      = ./embcc --target=$(EMBLINKOS_ARCH)-elf --unwind-tables
 
 libc-emblinkos: embcc embar
 	@[ -f "$(EMBLINKOS)/user/lib/embk.h" ] || { \
 	    echo "libc-emblinkos: no $(EMBLINKOS)/user/lib/embk.h"; \
 	    echo "  set EMBLINKOS=/path/to/EmbLinkOs"; exit 1; }
-	@mkdir -p $(BUILD)/libc/emblinkos
+	@case "$(EMBLINKOS_ARCH)" in x86_64|aarch64) ;; *) \
+	    echo "libc-emblinkos: EMBLINKOS_ARCH is x86_64 or aarch64"; exit 1;; esac
+	@mkdir -p $(ELOS_LIBC)
 	@for f in $(LIBC_SRCS_PORTABLE) lib/libc/os/emblinkos/backend.c; do \
-	    o=$(BUILD)/libc/emblinkos/$$(echo $$f | tr / _ | sed 's/\.c$$/.o/'); \
-	    ./embcc -c -O2 $(LIBC_INC) -I$(EMBLINKOS)/user/lib $$f -o $$o || exit 1; \
+	    o=$(ELOS_LIBC)/$$(echo $$f | tr / _ | sed 's/\.c$$/.o/'); \
+	    $(ELOS_CC) -c -O2 $(LIBC_INC) -I$(EMBLINKOS)/user/lib $$f -o $$o || exit 1; \
 	done
-	@rm -f $(BUILD)/libc/emblinkos/libc.a $(BUILD)/libc/emblinkos/libm.a
-	@$${EMBCC_X86_AR:-./embar} rcs $(BUILD)/libc/emblinkos/libc.a \
-	    $(BUILD)/libc/emblinkos/*.o
+	@rm -f $(ELOS_LIBC)/libc.a $(ELOS_LIBC)/libm.a
+	@$${EMBCC_X86_AR:-./embar} rcs $(ELOS_LIBC)/libc.a $(ELOS_LIBC)/*.o
 	@# libm.a holds nothing: the math is in libc.a, as glibc's is, and an
 	@# empty one beside it keeps a program's -lm from finding another libc's
-	@printf '' > $(BUILD)/libc/emblinkos/libm-empty.c
-	@./embcc -c $(BUILD)/libc/emblinkos/libm-empty.c -o $(BUILD)/libc/emblinkos/libm-empty.o.x
-	@$${EMBCC_X86_AR:-./embar} rcs $(BUILD)/libc/emblinkos/libm.a \
-	    $(BUILD)/libc/emblinkos/libm-empty.o.x
-	@echo "libc: $(BUILD)/libc/emblinkos/libc.a (+ an empty libm.a)"
+	@printf '' > $(ELOS_LIBC)/libm-empty.c
+	@$(ELOS_CC) -c $(ELOS_LIBC)/libm-empty.c -o $(ELOS_LIBC)/libm-empty.o.x
+	@$${EMBCC_X86_AR:-./embar} rcs $(ELOS_LIBC)/libm.a $(ELOS_LIBC)/libm-empty.o.x
+	@# librt.a: the compiler runtime, with the unwinder C++'s exceptions
+	@# need -- its programs have no other (lib/rt/unwind.c says why)
+	@for f in $(RT_SRCS); do \
+	    o=$(ELOS_LIBC)/rt_$$(basename $$f .c).o.x; \
+	    $(ELOS_CC) -c -O2 -D__EMBCC_RT_UNWIND $$f -o $$o || exit 1; \
+	done
+	@rm -f $(ELOS_LIBC)/librt.a
+	@$${EMBCC_X86_AR:-./embar} rcs $(ELOS_LIBC)/librt.a $(ELOS_LIBC)/rt_*.o.x
+	@echo "libc: $(ELOS_LIBC)/libc.a (+ an empty libm.a, and librt.a)"
+
+# C++ on EmbLinkOS: lib/libcxx over this C library, compiled by EmbCC.
+#   make libcxx-emblinkos EMBLINKOS=$HOME/EmbLinkOs [EMBLINKOS_ARCH=aarch64]
+libcxx-emblinkos: embcc embar
+	@[ -f "$(EMBLINKOS)/user/lib/embk.h" ] || { \
+	    echo "libcxx-emblinkos: no $(EMBLINKOS)/user/lib/embk.h"; exit 1; }
+	@mkdir -p $(ELOS_LIBCXX)
+	@for f in $(LIBCXX_SRCS); do \
+	    o=$(ELOS_LIBCXX)/$$(basename $$f .cc).o; \
+	    $(ELOS_CC) -c -O2 -x c++ $(LIBCXX_INC) -I$(EMBLINKOS)/user/lib $$f -o $$o || exit 1; \
+	done
+	@rm -f $(ELOS_LIBCXX)/libcxx.a
+	@$${EMBCC_X86_AR:-./embar} rcs $(ELOS_LIBCXX)/libcxx.a $(ELOS_LIBCXX)/*.o
+	@echo "libcxx: $(ELOS_LIBCXX)/libcxx.a"
 
 # Linux, which is the first target this library reaches with NO other C
 # library underneath it: lib/libc/os/linux/backend.c issues syscalls, so
@@ -1237,7 +1270,7 @@ distclean: clean
 	rm -f config.mk
 
 .PHONY: all check test test-arm64 test-libstdcxx site libc libc-x86_64 libc-aarch64 \
-        libc-emblinkos libc-linux libc-linux-x86_64 libc-linux-aarch64 \
+        libc-emblinkos libcxx-emblinkos libc-linux libc-linux-x86_64 libc-linux-aarch64 \
         libcxx libcxx-x86_64 libcxx-aarch64 \
         libcxx-linux-x86_64 libcxx-linux-aarch64 libcxx-embedded \
         install install-files uninstall libc-linux-all clean distclean

@@ -9,8 +9,8 @@
  *
  * ---- why it is here rather than nowhere ----------------------------------
  *
- * Every other target EmbCC has gets this from the platform -- libgcc on
- * EmbLinkOS, libunwind inside libSystem on macOS. The static Linux
+ * Every other target EmbCC has gets this from the platform -- libunwind
+ * inside libSystem on macOS, libgcc on a bare x86_64-elf. The static Linux
  * target links against nothing, so it had neither, and a C++ program
  * that threw compiled and then failed at the link with an undefined
  * `_Unwind_Resume`. D-014's second amendment called this the harder
@@ -48,7 +48,11 @@
  */
 #include "rt.h"
 
-#if defined(__linux__) || defined(__EMBCC_LINUX__)
+/* EmbLinkOS too, where its library is built with __EMBCC_RT_UNWIND
+ * (make libc-emblinkos): its programs start with -nostartfiles, so
+ * libgcc's unwinder, which crtbegin's frame registration feeds, would
+ * find no tables -- and its linker script brackets .eh_frame for this. */
+#if defined(__linux__) || defined(__EMBCC_LINUX__) || defined(__EMBCC_RT_UNWIND)
 
 typedef unsigned long uw_word;
 typedef long uw_sword;
@@ -1022,4 +1026,4 @@ void *__deregister_frame_info(const void *b) { (void)b; return 0; }
 void __register_frame_info_bases(const void *b, void *o, void *t, void *d)
 { (void)b; (void)o; (void)t; (void)d; }
 
-#endif  /* Linux targets */
+#endif  /* Linux targets, and EmbLinkOS */

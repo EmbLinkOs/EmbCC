@@ -5,6 +5,8 @@
 #include <termios.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
+#include <fcntl.h>
+#include <string.h>
 
 #include "posix.h"
 
@@ -136,4 +138,59 @@ WEAK char *ttyname(int fd)
         return NULL;
     }
     return buf;
+}
+
+/* getpass, as glibc does it: the controlling terminal if /dev/tty opens,
+ * else standard input with the prompt on standard error; echo and the
+ * signal characters off while the line is typed, and the newline the
+ * user's Enter did not echo written afterwards. The line, without its
+ * newline, in a static buffer; longer lines are cut, never overflowed. */
+WEAK char *getpass(const char *prompt)
+{
+    static char buf[128];
+    int in = open("/dev/tty", O_RDWR | O_NOCTTY | O_CLOEXEC), out = in;
+    int own = in >= 0;
+    if (!own) {
+        in = STDIN_FILENO;
+        out = STDERR_FILENO;
+    }
+    struct termios old, t;
+    int quiet = 0;
+    if (tcgetattr(in, &old) == 0) {
+        t = old;
+        t.c_lflag &= ~(tcflag_t)(ECHO | ISIG);
+        quiet = tcsetattr(in, TCSAFLUSH, &t) == 0;
+    }
+    if (prompt && *prompt) {
+        size_t n = strlen(prompt);
+        for (size_t w = 0; w < n;) {
+            ssize_t r = write(out, prompt + w, n - w);
+            if (r <= 0)
+                break;
+            w += (size_t)r;
+        }
+    }
+    size_t n = 0;
+    int any = 0;
+    for (;;) {
+        char c;
+        ssize_t r = read(in, &c, 1);
+        if (r < 0 && errno == EINTR)
+            continue;
+        if (r <= 0)
+            break;
+        any = 1;
+        if (c == '\n')
+            break;
+        if (n + 1 < sizeof buf)
+            buf[n++] = c;
+    }
+    buf[n] = 0;
+    if (quiet) {
+        tcsetattr(in, TCSAFLUSH, &old);
+        (void)!write(out, "\n", 1);
+    }
+    if (own)
+        close(in);
+    return any ? buf : NULL;
 }

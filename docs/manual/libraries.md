@@ -15,8 +15,8 @@ program can rely on. Firmware-specific use of the runtime is in
 | Library | Source | Archive | Built for | Make target |
 |---|---|---|---|---|
 | C library | `lib/libc` | `libc.a` (+ `crt1.o` on Linux) | `x86_64-elf`, `aarch64-elf`, `x86_64-linux-gnu`, `aarch64-linux-gnu`, EmbLinkOS | `libc-x86_64`, `libc-aarch64`, `libc-linux-x86_64`, `libc-linux-aarch64`, `libc-emblinkos` |
-| C++ runtime and standard library | `lib/libcxx` | `libcxx.a` | `x86_64-elf`, `aarch64-elf`, `x86_64-linux-gnu`, `aarch64-linux-gnu`; the runtime alone (no exceptions) for 32-bit ARM and `riscv32-unknown-elf` | `libcxx-x86_64`, `libcxx-aarch64`, `libcxx-linux-x86_64`, `libcxx-linux-aarch64`, `libcxx-embedded` |
-| Compiler runtime | `lib/rt` | `librt.a` | `x86_64-linux-gnu`, `aarch64-linux-gnu`, and the embedded triples | `libc-linux-*` (Linux), `rt-embedded` (embedded) |
+| C++ runtime and standard library | `lib/libcxx` | `libcxx.a` | `x86_64-elf`, `aarch64-elf`, `x86_64-linux-gnu`, `aarch64-linux-gnu`, EmbLinkOS; the runtime alone (no exceptions) for 32-bit ARM and `riscv32-unknown-elf` | `libcxx-x86_64`, `libcxx-aarch64`, `libcxx-linux-x86_64`, `libcxx-linux-aarch64`, `libcxx-emblinkos`, `libcxx-embedded` |
+| Compiler runtime | `lib/rt` | `librt.a` | `x86_64-linux-gnu`, `aarch64-linux-gnu`, EmbLinkOS, and the embedded triples | `libc-linux-*` (Linux), `libc-emblinkos`, `rt-embedded` (embedded) |
 
 Every library is built per target by the `embcc` in the same tree, so it
 always matches the compiler's ABI. No library exists for the macOS or
@@ -154,15 +154,28 @@ system is reached through one small backend file (see
 `<stdlib.h>` `<stdnoreturn.h>` `<string.h>` `<tgmath.h>` `<threads.h>`
 `<time.h>` `<uchar.h>` `<wchar.h>` `<wctype.h>`
 
-and, of POSIX's, `<err.h>` `<fnmatch.h>` `<getopt.h>` `<libgen.h>`
-`<search.h>` `<strings.h>` `<sys/types.h>`. Where a C header also
+and, of POSIX's and the common Unix ones, `<arpa/inet.h>` `<dirent.h>`
+`<endian.h>` `<err.h>` `<fcntl.h>` `<fnmatch.h>` `<getopt.h>` `<grp.h>`
+`<libgen.h>` `<malloc.h>` `<netdb.h>` `<netinet/in.h>` `<netinet/tcp.h>`
+`<paths.h>` `<poll.h>` `<pty.h>` `<pwd.h>` `<sched.h>` `<search.h>`
+`<spawn.h>` `<strings.h>` `<termios.h>` `<unistd.h>` `<utime.h>` and
+`<sys/file.h>` `<sys/ioctl.h>` `<sys/mman.h>` `<sys/param.h>`
+`<sys/random.h>` `<sys/resource.h>` `<sys/select.h>` `<sys/socket.h>`
+`<sys/stat.h>` `<sys/statvfs.h>` `<sys/sysmacros.h>` `<sys/time.h>`
+`<sys/times.h>` `<sys/types.h>` `<sys/uio.h>` `<sys/un.h>`
+`<sys/utsname.h>` `<sys/wait.h>`. Where a C header also
 declares POSIX names (`getline` in `<stdio.h>`, `strtok_r` in
 `<string.h>`), `<features.h>` decides: they are declared unless the
 program asked for ISO C alone (`-std=c11` with no `_POSIX_C_SOURCE`,
 `_XOPEN_SOURCE`, `_DEFAULT_SOURCE`, `_BSD_SOURCE` or `_GNU_SOURCE`), and
 the GNU and BSD ones (`strchrnul`, `memrchr`, `clearenv`, `fopencookie`)
 are hidden too when the program names a POSIX version and nothing more,
-as with glibc.
+as with glibc. In the default mode `<string.h>` also brings
+`<strings.h>`, and `<stdlib.h>` `<alloca.h>`, as glibc's do.
+
+Every POSIX function is defined weak, so a program -- or an operating
+system's own support library linked beside this one -- may define any of
+them itself and its definition is the one used. C's names are strong.
 
 `<stddef.h>`, `<stdarg.h>`, `<stdbool.h>`, `<stdint.h>` and `<float.h>`
 come from the freestanding directory, and so do C23's `<stdbit.h>` and
@@ -181,9 +194,18 @@ freestanding `<limits.h>` for the type widths.
 | `<math.h>`, `<tgmath.h>` | every C11 function at all three widths, `erf`, `erfc`, `lgamma` and `tgamma` FreeBSD's (accurate to an ulp or two; `lgamma` of a negative argument beside a zero of Γ loses digits, ~100 ulp at -2.75, as FreeBSD's does); C23's `sinpi`, `cospi`, `tanpi`, `asinpi`, `acospi`, `atanpi` and `atan2pi`; `signgam`, `lgamma_r`; `float_t`, `double_t`, `FP_ILOGB0` and `FP_ILOGBNAN`, and POSIX's `M_PI` family outside strict ISO mode; `<tgmath.h>` chooses the width from every generic argument, as C11 7.25 says (`pow(2.0f, 3.0L)` is `powl`) |
 | `<complex.h>` | complete: every function at all three widths |
 | `<fenv.h>` | exception flags and rounding modes, on x86-64 (`MXCSR`) and AArch64 (`FPSR`/`FPCR`) |
-| `<time.h>` | `time`, `clock`, `difftime`, `mktime`, `timegm`, `gmtime`, `localtime`, the `_r` forms, `asctime`, `ctime`, `strftime`, `timespec_get` |
+| `<time.h>` | `time`, `clock`, `difftime`, `mktime`, `timegm`, `gmtime`, `localtime`, the `_r` forms, `asctime`, `ctime`, `strftime`, `timespec_get`. POSIX's: `tzset` with `tzname`, `timezone` and `daylight`; `strptime`; `tm_gmtoff` and `tm_zone` in `struct tm`; `clock_gettime`, `clock_getres`, `clock_settime`, `clock_nanosleep`, `nanosleep`; `<sys/time.h>`'s `gettimeofday`, `settimeofday`, `setitimer`, `getitimer`, `utimes`; `times` |
 | `<setjmp.h>` | `setjmp`/`longjmp` on every target: x86-64, AArch64, ARM state, Thumb (every Cortex-M, with s16-s31 where there is an FPU), RISC-V (with fs0-fs11 under F or D), MIPS o32 and n64, LoongArch64, PowerPC, SPARC, Xtensa, TriCore, ColdFire, RX, and on AVR in `lib/avr`. `jmp_buf` is 256 bytes everywhere but AVR, where it is 24 |
-| `<signal.h>` | `signal` and `raise` |
+| `<signal.h>` | `signal` and `raise`; POSIX's `sigaction` (with `SA_SIGINFO`, `SA_RESETHAND`, `SA_NODEFER`, `SA_RESTART`), `sigprocmask`, `pthread_sigmask`, `sigpending`, `sigsuspend`, `sigwait`, `sigwaitinfo`, `sigtimedwait`, `sigaltstack`, `kill`, `killpg`, `pthread_kill`, the `sigset_t` functions and GNU's `sigisemptyset`, `sigorset`, `sigandset`; `strsignal` (glibc's words), `psignal`, `psiginfo`, `siginterrupt`. See [Signals](#behavior-worth-knowing) for who delivers them |
+| `<unistd.h>`, `<fcntl.h>`, `<sys/uio.h>` | descriptors: `open`, `openat`, `creat`, `close`, `read`, `write`, `pread`, `pwrite`, `readv`, `writev`, `preadv`, `pwritev`, `lseek`, `dup`, `dup2`, `dup3`, `pipe`, `pipe2`, `fcntl` (descriptor and status flags, record locks), `flock`, `lockf`, `fsync`, `fdatasync`, `ftruncate`, `sync`, `isatty`, `ioctl`, `posix_fadvise`, `getentropy`, `getrandom` |
+| `<sys/stat.h>`, `<unistd.h>`, `<sys/statvfs.h>` | files: `stat`, `lstat`, `fstat`, `access`, `unlink`, `rmdir`, `link`, `symlink`, `readlink`, `truncate`, `mkdir`, `chdir`, `fchdir`, `getcwd`, `chmod`, `fchmod`, `umask`, `chown`, `lchown`, `fchown`, `mknod`, `mkfifo`, `futimens`, `utimensat`, `utime`, `utimes`, `lutimes`, `futimes`, `statvfs`, `fstatvfs`, `pathconf`, `fpathconf`, `chroot`, and every `*at` form (`fstatat`, `faccessat`, `unlinkat`, `linkat`, `symlinkat`, `readlinkat`, `renameat`, `mkdirat`, `fchmodat`, `fchownat`, `mknodat`, `mkfifoat`) |
+| `<dirent.h>` | `opendir`, `fdopendir`, `readdir`, `readdir_r`, `rewinddir`, `telldir`, `seekdir`, `closedir`, `dirfd`, `scandir`, `alphasort`, `versionsort`; `d_type` is filled |
+| Processes | `getpid`, `getppid`, the user and group ids and their `set` forms, `getgroups`, process groups and sessions (`getpgid`, `setpgid`, `getsid`, `setsid`, `getpgrp`, `setpgrp`), `getlogin`, `fork`, `vfork`, `_exit`, `execve` and every `exec` form (`execvp`'s search, and `/bin/sh` for a file that is not a program), `waitpid`, `wait`, `wait3`, `wait4`, `system`, `popen`, `pclose`, `sleep`, `usleep`, `pause`, `alarm`, `ualarm`, `daemon`; `<spawn.h>` complete, its attributes refused with `ENOTSUP` where the operating system cannot honour them |
+| System | `sysconf`, `confstr`, `uname`, `gethostname`, `sethostname`, `getpagesize`, `getdtablesize`, `getrlimit`, `setrlimit`, `getrusage`, `sched_yield` and the priority ranges; `<sys/mman.h>`'s `mmap`, `munmap`, `mprotect`, `msync`, `madvise`, `posix_madvise`, `mlock`, `munlock`, `shm_open`, `shm_unlink`; `<poll.h>`'s `poll`, `ppoll`, and `select`, `pselect` |
+| Sockets | `<sys/socket.h>` complete (`socket` to `recvmsg` and `sockatmark`, `accept4`, `socketpair`); `<arpa/inet.h>`: `inet_pton`, `inet_ntop`, `inet_aton`, `inet_addr`, `inet_network`, `inet_ntoa` and the byte-order functions; `<netdb.h>`: `getaddrinfo`, `getnameinfo`, `freeaddrinfo`, `gai_strerror`, `gethostbyname`, `gethostbyname2`, `gethostbyaddr`, `getservbyname`, `getservbyport`, `getprotobyname`, `getprotobynumber`, `herror`, `hstrerror`. A name is tried as a number, in `/etc/hosts`, by the operating system's own resolver where it has one (EmbLinkOS's), then by DNS to the servers `/etc/resolv.conf` names; services and protocols come from `/etc/services` and `/etc/protocols`, or without them from a table of IANA's well-known ones |
+| Terminals | `<termios.h>` complete (`tcgetattr` to `tcsetwinsize`, `cfmakeraw`, `cfsetspeed`), `ttyname`, `ttyname_r`, `getpass`; pseudo-terminals: `posix_openpt`, `grantpt`, `unlockpt`, `ptsname`, `ptsname_r`, and `<pty.h>`'s `openpty`, `login_tty`, `forkpty` |
+| Users and groups | `<pwd.h>` and `<grp.h>` complete, from `/etc/passwd` and `/etc/group`: `getpwnam`, `getpwuid`, their `_r` forms, `getpwent` and its siblings, the same for groups, `getgrouplist`, `setgroups`, `initgroups` |
+| `<malloc.h>` | glibc's: `malloc_usable_size`, `memalign`, `valloc`, `pvalloc`, `mallinfo`, `mallinfo2`, `malloc_stats`; `mallopt` and `malloc_trim` are accepted and change nothing |
 | `<locale.h>` | `setlocale` and `localeconv`, one locale |
 | `<threads.h>` | threads, mutexes, condition variables, `call_once` |
 | `<wchar.h>`, `<uchar.h>` | wide strings, `wcsto*`, restartable UTF-8 conversions (`mbrtowc`, `wcrtomb`, `mbsrtowcs`, `wcsrtombs`), `btowc`, `wctob`, wide streams (`fgetwc`, `fputwc`, `fgetws`, `fputws`, `ungetwc`, `fwide` and the rest), the wide `printf` and `scanf` families, `wcsftime`, `mbrtoc16`/`c16rtomb`/`mbrtoc32`/`c32rtomb` |
@@ -304,13 +326,44 @@ at once: the file lasts as long as the stream. `tmpnam`'s names are under
 `/tmp` too, each one no file had when it was made. A target with no
 filesystem has no temporary files: `tmpfile` returns a null pointer.
 
-**Time.** There is no time-zone database: `localtime` is `gmtime`,
-`tm_isdst` is 0, and `strftime`'s `%z` is `+0000`. `time` and `clock`
-return what the backend provides, which on the freestanding targets is
--1.
+**Time.** `localtime` follows `TZ` as POSIX writes it
+(`CET-1CEST,M3.5.0,M10.5.0/3`, with quoted names like `<+0530>-5:30`,
+`Jn` and `n` rules, and rule times past 24 hours or negative), or names a
+compiled zone file (`Europe/Paris`, `:Europe/Paris`) under `TZDIR` or
+`/usr/share/zoneinfo`, read whole: TZif versions 1 to 3, with the footer's
+rule for times after the last transition. With no `TZ`, `/etc/localtime`
+where there is one, UTC where there is not; a `TZ` that is neither is UTC
+named `"UTC"`, as no error is possible. `mktime` reads `tm_isdst` as glibc
+does at the hours the clocks change: 0 or 1 chooses between the two
+meanings of an ambiguous time and moves a missing one by the hour that is
+missing. `strptime` is glibc's in the `"C"` locale, down to its readings
+of fields it leaves unsaid (`tm_wday` and `tm_yday` once a date is read,
+and the date from `%U` or `%W` with a weekday). Two choices differ from
+glibc 2.36: a rule applies before 1970 too, and where glibc reads past its
+month table (day 366 of a common year, week 0) the calendar is followed.
+`time` and `clock` return what the backend provides, which on the
+freestanding targets is -1.
 
-**Signals.** The C model only: `raise` calls the handler directly, and
-nothing delivers a signal from outside.
+**Signals.** Two models, one interface. Where the kernel delivers signals
+(Linux), `sigaction` installs the handler with the kernel, and signals
+arrive from outside: `alarm`, `kill` from another process, a child's
+`SIGCHLD`. Elsewhere the library keeps the table itself -- the handlers, a
+mask, a pending set -- and is the only sender: `raise`, and `kill` of the
+program's own id, call the handler; a blocked signal waits in the pending
+set and is delivered when it is unblocked; a signal at its default action
+ends the program as the default says. `abort` raises `SIGABRT`, and if a
+handler returns, resets it and raises again. The same test program passes
+under both (`tests/exec/posix-signals.c`).
+
+**What the operating system cannot do.** A POSIX function whose primitive
+the backend has not got fails with `ENOSYS`, never with a made-up answer:
+on a board, `fork` is `ENOSYS`, and so is `socket`. `sysconf` answers -1
+for what it cannot know rather than guess. The `*at` functions use the
+backend's own where it has them, and otherwise turn the directory
+descriptor back into a path. `posix_spawn` runs a program through the
+backend's spawn -- `fork` and `exec` on Linux, the kernel's spawn on
+EmbLinkOS -- and `posix_spawnattr_setflags` refuses with `ENOTSUP` a flag
+that spawn cannot honour, rather than a spawn that would ignore it.
 
 **Threads.** `thrd_create` creates a thread where the backend can (Linux
 and EmbLinkOS) and returns `thrd_error` elsewhere. Mutexes, condition
@@ -353,14 +406,16 @@ forms of the time functions.
 | Missing | Notes |
 |---|---|
 | C11 Annex K (`*_s` functions) | |
-| POSIX's process, descriptor and filesystem interfaces (`<unistd.h>`, `<fcntl.h>`, `<sys/stat.h>`, `<dirent.h>`), `popen`, sockets, `pthread`, POSIX signals | |
-| a time-zone database, locales other than `"C"`, signal delivery | |
+| POSIX threads (`<pthread.h>`) and semaphores (`<semaphore.h>`) | C11's `<threads.h>` is provided |
+| `<regex.h>`, `<glob.h>`, `<wordexp.h>`, `<ftw.h>`, `<syslog.h>`, `<iconv.h>`, `<langinfo.h>`, `<nl_types.h>` | |
+| locales other than `"C"`, and the `_l` functions that take one | |
+| System V IPC, asynchronous I/O (`<aio.h>`), message queues | |
 
 ### glibc instead: `--libc=system`
 
 For a Linux target, `--libc=system` replaces this library with the
-system's own, glibc -- the way to POSIX threads, sockets and the rest of
-POSIX that this library has not got yet. EmbCC does what GCC does:
+system's own, glibc -- the way to POSIX threads, and to whatever else of
+glibc's this library has not got. EmbCC does what GCC does:
 
 | | With `--libc=system` |
 |---|---|
@@ -387,8 +442,8 @@ runtime is built on its own C library.
 ### Backends
 
 Everything above is portable C. An operating system is reached through
-the functions declared in `lib/libc/os/backend.h`, and one file per OS
-implements them:
+the 140 functions declared in `lib/libc/os/backend.h`, and one file per
+OS implements them. The C part is small:
 
 | Group | Functions | Without them |
 |---|---|---|
@@ -399,14 +454,28 @@ implements them:
 C++'s `<thread>`, `<mutex>` and the other synchronization headers are
 built on the thread group, and `<filesystem>` on the filesystem group.
 
+The rest, the second half of `backend.h`, is POSIX's: descriptors, the
+rest of the filesystem and its `*at` forms, directories, processes and
+spawn, signals, clocks and timers, mapped memory, the system's
+identity and limits, polling, sockets and the resolver, terminals. Each
+is shaped like the POSIX call it serves, and where a meaning needs a
+number (a flag, an `fcntl` command, a signal, an `ioctl` request, a
+socket address's layout) it is Linux's, which a backend whose kernel
+numbers it differently translates. All of it is optional:
+`os/absent.inc` defines each one as an `ENOSYS` failure, and a backend
+includes it after defining `OS_HAS_name` for each it implements itself.
+`tests/golden/libc-backends.sh` compiles every backend and fails if any
+of the 140 is missing from one, which would otherwise be a link error
+in the first program that called it.
+
 Four backends exist:
 
 | Backend | Used by | What it does |
 |---|---|---|
-| `os/posixlike/backend.c` | `libc-x86_64` and `libc-aarch64` (`x86_64-elf`, `aarch64-elf`) | forwards to `write`, `read`, `open`, `close`, `lseek`, `sbrk`, `_exit` and `isatty`, which the program or its environment must define. The thread functions (`thread_create`, `futex_wait`, ...) and filesystem functions (`fs_stat`, ...) are weak references: defined, they are used; absent, the group reports `ENOSYS`. `remove`, `rename`, `time`, `clock` and entropy report `ENOSYS`. |
-| `os/linux/` | `libc-linux-x86_64`, `libc-linux-aarch64` | issues Linux system calls directly, so a program needs no other C library and no dynamic loader. Provides `crt1.o` (the `_start` that calls `main` and `exit`), threads through `clone`, thread-local storage (per-thread `errno`), and the filesystem group. Static images only. |
-| `os/emblinkos/backend.c` | `libc-emblinkos` | EmbLinkOS's system calls, including threads and the filesystem group. `clock` reports failure. |
-| `os/baremetal/backend.c` | `libc-embedded` (the embedded targets) | for a part with no operating system, and needs nothing from the program: `write`, `read`, `open`, `close`, `lseek`, `sbrk`, `_exit` and `isatty` are defined WEAKLY with defaults (output discarded, input at end of file, a heap from the end of the image to the stack, `_exit` stops), and a program's own definition of any of them replaces the default. One thread, no clock, no filesystem: those report `ENOSYS`. |
+| `os/posixlike/backend.c` | `libc-x86_64` and `libc-aarch64` (`x86_64-elf`, `aarch64-elf`) | forwards to `write`, `read`, `open`, `close`, `lseek`, `sbrk`, `_exit` and `isatty`, which the program or its environment must define. The thread functions (`thread_create`, `futex_wait`, ...) and filesystem functions (`fs_stat`, ...) are weak references: defined, they are used; absent, the group reports `ENOSYS`. `remove`, `rename`, `time`, `clock` and entropy report `ENOSYS`, and so does POSIX's half (`os/absent.inc`); the program's own `kill`, `getpid` or `fork` replace the library's, being weak. |
+| `os/linux/` | `libc-linux-x86_64`, `libc-linux-aarch64` | issues Linux system calls directly, so a program needs no other C library and no dynamic loader. Provides `crt1.o` (the `_start` that calls `main` and `exit`), threads through `clone`, thread-local storage (per-thread `errno`), and all of POSIX's half: `fork`, `execve`, kernel-delivered signals, sockets, terminals. Static images only. |
+| `os/emblinkos/backend.c` | `libc-emblinkos` | EmbLinkOS's system calls, translated: its absolute-only paths (the working directory is kept here), its open flags and `d_type` numbers, its spawn in place of `fork` and `exec` (with descriptor, directory and environment actions), its IPv4 sockets and resolver, its terminal control. What it has not got -- `fork`, signals from outside, record locks, `mmap` of a file -- is `ENOSYS`. EmbLinkOS builds its whole userland on it with `make LIBC=emblibc`. `clock` reports failure. |
+| `os/baremetal/backend.c` | `libc-embedded` (the embedded targets) | for a part with no operating system, and needs nothing from the program: `write`, `read`, `open`, `close`, `lseek`, `sbrk`, `_exit` and `isatty` are defined WEAKLY with defaults (output discarded, input at end of file, a heap from the end of the image to the stack, `_exit` stops), and a program's own definition of any of them replaces the default. One thread, no clock, no filesystem: those report `ENOSYS`, as POSIX's half does (`os/absent.inc`) -- except signals, which the library delivers itself. |
 
 A new operating system needs one new backend file and nothing else.
 
@@ -442,8 +511,9 @@ depends on the target:
 | Target | Unwinder |
 |---|---|
 | `x86_64-linux-gnu`, `aarch64-linux-gnu` | EmbCC's own, `lib/rt/unwind.c`, in `librt.a` |
+| EmbLinkOS | the same, in the `librt.a` that `make libc-emblinkos` builds beside its `libc.a`; EmbLinkOS's linker script names `__eh_frame_start` and `__eh_frame_end` for it, as EmbLD does |
 | `x86_64-elf`, `aarch64-elf` | libgcc's; the program links `libgcc.a` (or `libgcc_eh.a`) |
-| EmbLinkOS, macOS | the platform's |
+| macOS | the platform's |
 | the embedded targets | none. C++ exceptions are refused on every embedded target, C++ code generation on AVR, and at RV64 a function that needs a landing pad is refused (see [Bare-metal programming](embedded.md#c-on-the-embedded-targets)) |
 
 `<unwind.h>` in the freestanding directory declares the level-I unwinder
@@ -572,7 +642,8 @@ scratch.
 | `make libc-linux-aarch64` | the same for `aarch64-linux-gnu` | `build/libc/linux-aarch64/{libc.a,crt1.o,librt.a}` |
 | `make libc-linux` | both Linux C libraries | |
 | `make libc-embedded` | C library with the bare-metal backend, `--opt=size --sections=functions,data`, for each embedded target it builds on (all but `avr`) | `build/libc/TRIPLE/libc.a` |
-| `make libc-emblinkos EMBLINKOS=DIR` | C library with the EmbLinkOS backend, `--opt=speed`; needs `DIR/user/lib/embk.h` (default `DIR` is `$HOME/EmbLinkOs`) | `build/libc/emblinkos/libc.a` |
+| `make libc-emblinkos EMBLINKOS=DIR` | C library with the EmbLinkOS backend, `--opt=speed`, an empty `libm.a`, and `librt.a` with the unwinder; needs `DIR/user/lib/embk.h` (default `DIR` is `$HOME/EmbLinkOs`) | `build/libc/emblinkos/{libc.a,libm.a,librt.a}` |
+| `make libcxx-emblinkos EMBLINKOS=DIR` | C++ library over the EmbLinkOS C library | `build/libcxx/emblinkos/libcxx.a` |
 | `make libcxx-x86_64`, `make libcxx-aarch64` | C++ library for `x86_64-elf`, `aarch64-elf`, `--opt=speed` | `build/libcxx/x86_64/libcxx.a`, `build/libcxx/aarch64/libcxx.a` |
 | `make libcxx` | both of the above | |
 | `make libcxx-linux-x86_64`, `make libcxx-linux-aarch64` | C++ library for the Linux triples | `build/libcxx/linux-x86_64/libcxx.a`, `build/libcxx/linux-aarch64/libcxx.a` |

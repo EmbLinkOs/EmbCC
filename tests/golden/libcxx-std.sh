@@ -227,8 +227,8 @@ int main()
     /* Both spellings have to work: the standard requires std::, and every
      * real implementation also leaves the global one, which code relies on. */
     std::size_t n = std::strlen("abc");
-    /* nine ints: our <time.h> lays tm out as C11 names it and nothing
-     * more -- glibc's is larger because it adds two non-standard fields. */
+    /* nine ints and the two fields glibc and BSD add, tm_gmtoff and
+     * tm_zone: our <time.h> lays tm out as glibc does, 56 bytes on LP64. */
     std::printf("%zu %d %g %d\n", n, std::toupper('a'), std::sqrt(4.0),
                 (int)sizeof(std::tm));
     assert(n == 3);
@@ -307,5 +307,5 @@ echo "and std::cout really prints, through our streambuf and our FILE"
 if run "$out/cheaders.cc"; then rc=0; else rc=$?; fi
 cat "$out/run.txt"
 [ "$rc" = 42 ] || { echo "FAIL: the <c*> program exited $rc"; exit 1; }
-want "3 65 2 36"
+want "3 65 2 56"            # struct tm with tm_gmtoff and tm_zone: glibc's 56
 echo "and both run on our own C++ runtime and C library"

@@ -358,7 +358,10 @@ int raise(int sig)
     return __raise_signal(sig);
 }
 
-/* With no kernel, this program is the only one there is to send to. */
+/* Where the kernel cannot send a signal, this program can still send
+ * one to itself -- the library delivers it. To any other process it is
+ * ENOSYS: there may well be one with that id (EmbLinkOS has processes,
+ * just no signals between them), and ESRCH would say there is not. */
 __attribute__((weak)) int kill(pid_t pid, int sig)
 {
     int saved = errno;
@@ -366,13 +369,12 @@ __attribute__((weak)) int kill(pid_t pid, int sig)
         return 0;
     if (errno != ENOSYS)
         return -1;
+    if (pid != 0 && pid != -1 && pid != (pid_t)__os_getid(__OS_ID_PID))
+        return -1;
     errno = saved;
     if (sig == 0)
         return 0;
-    if (pid == 0 || pid == -1 || pid == (pid_t)__os_getid(__OS_ID_PID))
-        return __raise_signal(sig);
-    errno = ESRCH;
-    return -1;
+    return __raise_signal(sig);
 }
 
 __attribute__((weak)) int killpg(pid_t pgrp, int sig)

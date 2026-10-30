@@ -26,6 +26,7 @@
 #                    program is also the guest's /bin/sh, which
 #                    posix-process.c is written to be (see it)
 #   posix-time.c     TZ rules, mktime's tm_isdst, %z/%Z, strptime
+#   malloc-gnu.c     <malloc.h>: usable sizes, mallinfo2, valloc/pvalloc
 #
 # At -O0 and -O2, each exiting 42. Skipped without a kernel for
 # tests/harness/linux (EMBCC_LINUX_KERNEL_X86_64 / _AARCH64).
@@ -38,7 +39,8 @@ rm -rf "${out:?}"; mkdir -p "$out/root/tmp"
 progs="tmpfile next-toward quick-exit multibyte-stdlib inttypes-formats
        tgmath-selection wide-streams wide-printf wide-scanf c23-library
        strtod-rounding math-special posix-files posix-strings posix-stdio
-       posix-fd posix-process posix-signals posix-net posix-time"
+       posix-fd posix-process posix-signals posix-net posix-time
+       malloc-gnu"
 
 A64LD=${EMBCC_AARCH64_LD:-aarch64-elf-ld}
 A64GCC=$(dirname "$(aarch64-elf-gcc -print-libgcc-file-name 2>/dev/null)")

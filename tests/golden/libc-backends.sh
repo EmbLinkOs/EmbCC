@@ -63,4 +63,30 @@ if [ -f "$EMBLINKOS/user/lib/embk.h" ]; then
 else
     echo "emblinkos: skipped (no $EMBLINKOS/user/lib/embk.h; set EMBLINKOS)"
 fi
+# The C++ library reaches the same primitives from its own headers, which
+# cannot include os/backend.h: its copies must be the contract's, or a
+# backend writes past a structure C++ allocated (a shorter __os_fileinfo
+# in <filesystem> once hung every status()). Fields and prototypes,
+# comments and spacing aside.
+body() {          # body FILE STRUCT -> the struct's fields, one per line
+    sed -n "/^struct $2 {/,/^};/p" "$1" | sed 's|/\*.*\*/||; s|^ *\*.*||; s|/\*.*||' |
+        tr -s ' ' | sed 's/^ //; s/ $//' | grep -v '^$'
+}
+for st in __os_fileinfo; do
+    for h in "$EMBCC_ROOT"/lib/libcxx/include/*; do
+        grep -q "^struct $st {" "$h" || continue
+        if [ "$(body "$L/os/backend.h" $st)" != "$(body "$h" $st)" ]; then
+            echo "FAIL: struct $st in lib/libcxx/include/$(basename "$h") is not os/backend.h's"
+            fail=1
+        fi
+    done
+done
+grep -h "^[a-z][^{=]*[ *]__os_[a-z_]*(.*);" "$EMBCC_ROOT"/lib/libcxx/include/* \
+        "$EMBCC_ROOT"/lib/libcxx/src/*.cc | tr -s ' ' | sort -u |
+while read -r line; do
+    n=$(echo "$line" | grep -o "__os_[a-z_]*" | head -1)
+    want=$(grep -h "^[a-z].*[ *]$n(" "$L/os/backend.h" | tr -s ' ' | head -1)
+    [ "$line" = "$want" ] || { echo "FAIL: libcxx declares [$line], the contract [$want]"; exit 1; }
+done || fail=1
+[ $fail = 0 ] && echo "lib/libcxx: its copies of the contract are the contract's"
 [ $fail = 0 ] || exit 1

@@ -366,6 +366,14 @@ int __os_spawn_flags(void)
 }
 #endif
 
+#ifndef OS_HAS_spawn_check
+int __os_spawn_check(const struct __os_spawn_action *action, int count)
+{
+    (void)action; (void)count;
+    return 0;
+}
+#endif
+
 #ifndef OS_HAS_spawn
 int __os_spawn(int *pid, const char *path, const struct __os_spawn_action *actions, int nactions, const struct __os_spawn_attr *attr, char *const argv[], char *const envp[])
 {

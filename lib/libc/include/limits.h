@@ -12,7 +12,9 @@
  * honest about what this library actually supports. */
 #define PATH_MAX   4096
 #define NAME_MAX    255
+#ifndef ARG_MAX                 /* a build may have its own, as glibc has none */
 #define ARG_MAX    32768
+#endif
 #define OPEN_MAX     32
 #define NGROUPS_MAX  32
 #define SSIZE_MAX  __LONG_MAX__

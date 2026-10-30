@@ -52,9 +52,16 @@ static int add(posix_spawn_file_actions_t *fa, int kind, int fd, int newfd,
 {
     if (!fa || !*fa)
         return EINVAL;
-    if (fd < 0 || (kind == __OS_SPAWN_DUP2 && newfd < 0))
+    /* POSIX's EBADF: negative, or at or past OPEN_MAX */
+    long max = sysconf(_SC_OPEN_MAX);
+    if (fd < 0 || (max > 0 && fd >= max) ||
+        (kind == __OS_SPAWN_DUP2 && (newfd < 0 || (max > 0 && newfd >= max))))
         return EBADF;
     struct __spawn_actions *s = *fa;
+    struct __os_spawn_action probe = { kind, fd, newfd, oflag, mode, path };
+    int no = __os_spawn_check(&probe, s->n);
+    if (no)
+        return no;
     if (s->n == s->cap) {
         int cap = s->cap ? 2 * s->cap : 8;
         struct __os_spawn_action *a = realloc(s->a, (size_t)cap * sizeof *a);

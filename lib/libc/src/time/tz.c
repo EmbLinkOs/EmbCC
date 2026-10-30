@@ -261,15 +261,40 @@ static long long be(const unsigned char *p, int n)
     return v;
 }
 
+/* The whole file, in a buffer that grows: a zone's is a few kilobytes,
+ * the largest under 100, and 256 KiB is the most this will hold -- less
+ * where size_t is 16 bits, as on AVR. */
+static unsigned char *slurp(FILE *f, size_t *n)
+{
+    size_t cap = 4096, len = 0;
+    unsigned char *buf = malloc(cap);
+    while (buf) {
+        len += fread(buf + len, 1, cap - len, f);
+        if (len < cap)
+            break;
+        if (cap >= 262144UL || cap > (size_t)-1 / 4) {
+            free(buf);
+            return NULL;
+        }
+        unsigned char *b = realloc(buf, cap * 2);
+        if (!b)
+            free(buf);
+        buf = b;
+        cap *= 2;
+    }
+    *n = len;
+    return buf;
+}
+
 static int load_tzif(const char *path, struct zone *z)
 {
     FILE *f = fopen(path, "rb");
     if (!f)
         return -1;
-    unsigned char *buf = malloc(1 << 18);
-    size_t n = buf ? fread(buf, 1, 1 << 18, f) : 0;
+    size_t n = 0;
+    unsigned char *buf = slurp(f, &n);
     fclose(f);
-    if (n < 44 || memcmp(buf, "TZif", 4)) {
+    if (!buf || n < 44 || memcmp(buf, "TZif", 4)) {
         free(buf);
         return -1;
     }
@@ -612,12 +637,14 @@ static void st_mon_mday_of(struct tm *tm, const struct st_state *st)
 {
     const unsigned short *c = st_yday[st_leap(tm)];
     int m = 0;
-    while (m < 11 && c[m + 1] <= tm->tm_yday)       /* day 366: Dec 32 */
+    /* (int): where int is 16 bits an unsigned short would promote to
+     * unsigned, and week 0's negative yday compare as huge */
+    while (m < 11 && (int)c[m + 1] <= tm->tm_yday)  /* day 366: Dec 32 */
         m++;
     if (!st->have_mon)
         tm->tm_mon = m;
     if (!st->have_mday)
-        tm->tm_mday = tm->tm_yday - c[m] + 1;
+        tm->tm_mday = tm->tm_yday - (int)c[m] + 1;
 }
 
 static const char *st_parse(const char *s, const char *fmt, struct tm *tm,
@@ -880,7 +907,7 @@ char *strptime(const char *restrict s, const char *restrict fmt,
     }
     if (st.want_xday && !st.have_yday &&
         (st.have_mon || (unsigned)tm->tm_mon <= 11))
-        tm->tm_yday = st_yday[st_leap(tm)][tm->tm_mon] + tm->tm_mday - 1;
+        tm->tm_yday = (int)st_yday[st_leap(tm)][tm->tm_mon] + tm->tm_mday - 1;
     if ((st.have_uweek || st.have_wweek) && st.have_wday) {
         /* the weekday of the year's first day places the week */
         int wday = tm->tm_wday, mday = tm->tm_mday, mon = tm->tm_mon;

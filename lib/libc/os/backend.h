@@ -460,6 +460,13 @@ struct __os_spawn_attr {
  * refuses the others with ENOTSUP at the moment they are set -- a flag
  * that would be silently ignored is a promise nobody keeps. */
 int  __os_spawn_flags(void);
+/* A file action as it is added, before it joins the list: 0, or the error
+ * number posix_spawn_file_actions_add* is to return for an action this
+ * backend's spawn could never carry out -- one too many, a path too long
+ * for it, a kind it has not got. `count` is how many the list holds
+ * already. The error then belongs to the call that asked for the
+ * impossible, not to a posix_spawn several calls later. */
+int  __os_spawn_check(const struct __os_spawn_action *action, int count);
 /* 0 with *pid set, or -1 with errno -- including an error in the child
  * before it ran path (a file action that failed, a path not found),
  * which the parent learns of here rather than as an exit status */

@@ -93,6 +93,14 @@ static int run(void)
         waitpid(sp, &st, 0) != sp)
         return 7;
     posix_spawn_file_actions_destroy(&fa);
+    /* a descriptor no process can have is EBADF from the call that names
+     * it (POSIX: negative, or OPEN_MAX or more), as glibc's is */
+    posix_spawn_file_actions_init(&fa);
+    if (posix_spawn_file_actions_adddup2(&fa, 0, (int)sysconf(_SC_OPEN_MAX)) !=
+            EBADF ||
+        posix_spawn_file_actions_addclose(&fa, -1) != EBADF)
+        return 16;
+    posix_spawn_file_actions_destroy(&fa);
     char b[64] = { 0 };
     FILE *f = fopen("/tmp/out", "r");
     if (!f || !fgets(b, sizeof b, f) || strcmp(b, "spawned output\n"))

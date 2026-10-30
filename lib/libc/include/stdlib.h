@@ -149,12 +149,18 @@ int   ptsname_r(int fd, char *buf, size_t n);
 int   mkstemps(char *tmpl, int suffix);
 int   mkostemps(char *tmpl, int suffix, int flags);
 void *memalign(size_t align, size_t n);
+void *valloc(size_t n);
 const char *getprogname(void);
 void  setprogname(const char *name);
 #endif
 
 #ifdef __cplusplus
 }
+#endif
+
+/* alloca, which glibc's <stdlib.h> declares by default */
+#if defined(__EMB_GNU)
+#include <alloca.h>
 #endif
 
 #endif
