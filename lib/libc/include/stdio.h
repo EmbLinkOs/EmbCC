@@ -174,6 +174,13 @@ char   *ctermid(char *s);
 FILE   *popen(const char *cmd, const char *mode);
 int     pclose(FILE *f);
 int     renameat(int fromfd, const char *from, int tofd, const char *to);
+#if defined(__EMB_GNU)
+#define RENAME_NOREPLACE (1 << 0)
+#define RENAME_EXCHANGE  (1 << 1)
+#define RENAME_WHITEOUT  (1 << 2)
+int     renameat2(int fromfd, const char *from, int tofd, const char *to,
+                  unsigned flags);
+#endif
 
 /* One lock around many calls: the stream's lock nests, so a thread that
  * holds it may still call printf on the stream. */

@@ -54,8 +54,8 @@ function hexval(s,   i, c, v, d) {
 }
 AWK
 
-verify_setjmp() {           # verify_setjmp <arch> <assembler> <directive> <w>
-    src=lib/libc/src/setjmp/setjmp-$1.c
+verify_setjmp() {           # verify_setjmp <arch> <assembler> <directive> <w> [file]
+    src=lib/libc/src/setjmp/${5:-setjmp}-$1.c
     command -v "$2" > /dev/null 2>&1 ||
         { echo "  ($1: $2 absent, not checked)"; return 0; }
     rm -f "$out/$1-bytes.txt" "$out/$1.s"
@@ -76,6 +76,10 @@ verify_setjmp() {           # verify_setjmp <arch> <assembler> <directive> <w>
 }
 verify_setjmp x86_64  "${EMBCC_REFEREE_AS:-x86_64-elf-as}"    byte 1
 verify_setjmp aarch64 "${EMBCC_AARCH64_AS:-aarch64-elf-as}" long 4
+# getcontext and the rest are written the same way, a block for Linux
+# (with the signal-mask calls) and one without: both are checked
+verify_setjmp x86_64  "${EMBCC_REFEREE_AS:-x86_64-elf-as}"    byte 1 ucontext
+verify_setjmp aarch64 "${EMBCC_AARCH64_AS:-aarch64-elf-as}" long 4 ucontext
 
 [ "${ARCH:-x86_64}" = x86_64 ] ||
     { echo "skipped: the libc harness is x86-64 (aarch64 next)"; exit 0; }

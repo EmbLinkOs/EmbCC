@@ -40,6 +40,8 @@ void *tfind(const void *key, void *const *root,
 void *tdelete(const void *__restrict key, void **__restrict root,
               int (*cmp)(const void *, const void *));
 void  twalk(const void *root, void (*action)(const void *, VISIT, int));
+void  twalk_r(const void *root, void (*action)(const void *, VISIT, void *),
+              void *closure);
 #if defined(__EMB_GNU)
 void  tdestroy(void *root, void (*free_key)(void *));
 #endif

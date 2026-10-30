@@ -196,6 +196,15 @@ int   ecvt_r(double v, int ndigit, int *__restrict decpt, int *__restrict sign,
              char *__restrict buf, size_t n);
 int   fcvt_r(double v, int ndigit, int *__restrict decpt, int *__restrict sign,
              char *__restrict buf, size_t n);
+char *qecvt(long double v, int ndigit, int *__restrict decpt, int *__restrict sign);
+char *qfcvt(long double v, int ndigit, int *__restrict decpt, int *__restrict sign);
+char *qgcvt(long double v, int ndigit, char *buf);
+int   qecvt_r(long double v, int ndigit, int *__restrict decpt,
+              int *__restrict sign, char *__restrict buf, size_t n);
+int   qfcvt_r(long double v, int ndigit, int *__restrict decpt,
+              int *__restrict sign, char *__restrict buf, size_t n);
+char *canonicalize_file_name(const char *path);
+int   getpt(void);
 uint32_t arc4random(void);
 void  arc4random_buf(void *buf, size_t n);
 uint32_t arc4random_uniform(uint32_t bound);

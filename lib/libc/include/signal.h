@@ -233,6 +233,23 @@ int  sigdelset(sigset_t *set, int sig);
 int  sigismember(const sigset_t *set, int sig);
 int  siginterrupt(int sig, int flag);
 void psignal(int sig, const char *msg);
+/* XSI's single-signal calls, and the BSD and System V forms */
+int  sighold(int sig);
+int  sigrelse(int sig);
+int  sigignore(int sig);
+int  sigpause(int sig);
+void (*sigset(int sig, void (*handler)(int)))(int);
+#if defined(__EMB_GNU)
+void (*bsd_signal(int sig, void (*handler)(int)))(int);
+void (*sysv_signal(int sig, void (*handler)(int)))(int);
+void (*ssignal(int sig, void (*handler)(int)))(int);
+int  gsignal(int sig);
+int  sigblock(int mask);
+int  tgkill(pid_t tgid, pid_t tid, int sig);
+int  sigsetmask(int mask);
+int  siggetmask(void);
+#define sigmask(sig) (1U << ((sig) - 1))
+#endif
 void psiginfo(const siginfo_t *info, const char *msg);
 int  pthread_kill(unsigned long thread, int sig);
 int  pthread_sigmask(int how, const sigset_t *__restrict set,

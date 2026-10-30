@@ -158,11 +158,12 @@ and, of POSIX's and the common Unix ones, `<aio.h>` `<arpa/inet.h>`
 `<dirent.h>` `<dlfcn.h>` `<elf.h>` `<endian.h>` `<err.h>` `<error.h>` `<fcntl.h>`
 `<fmtmsg.h>` `<fnmatch.h>` `<fts.h>` `<ftw.h>` `<getopt.h>` `<glob.h>` `<grp.h>`
 `<iconv.h>` `<ifaddrs.h>` `<langinfo.h>` `<libgen.h>` `<libintl.h>` `<link.h>`
-`<malloc.h>` `<monetary.h>` `<mqueue.h>` `<net/if.h>` `<netdb.h>` `<netinet/in.h>`
-`<netinet/tcp.h>` `<netpacket/packet.h>` `<nl_types.h>` `<paths.h>` `<poll.h>`
+`<malloc.h>` `<mntent.h>` `<monetary.h>` `<mqueue.h>` `<net/if.h>` `<netdb.h>`
+`<netinet/ether.h>` `<netinet/in.h>` `<netinet/tcp.h>` `<netpacket/packet.h>` `<nl_types.h>` `<paths.h>` `<poll.h>`
 `<pthread.h>` `<pty.h>` `<pwd.h>` `<regex.h>` `<sched.h>` `<search.h>`
 `<semaphore.h>` `<shadow.h>` `<spawn.h>` `<strings.h>` `<syslog.h>` `<termios.h>`
-`<unistd.h>` `<utime.h>` `<utmp.h>` `<utmpx.h>` `<wordexp.h>` and
+`<ucontext.h>` `<ulimit.h>` `<unistd.h>` `<utime.h>` `<utmp.h>` `<utmpx.h>`
+`<wordexp.h>` and
 `<sys/auxv.h>` `<sys/epoll.h>` `<sys/eventfd.h>` `<sys/file.h>` `<sys/inotify.h>`
 `<sys/ioctl.h>` `<sys/ipc.h>` `<sys/klog.h>` `<sys/mman.h>` `<sys/mount.h>`
 `<sys/msg.h>` `<sys/param.h>` `<sys/personality.h>` `<sys/prctl.h>`
@@ -170,7 +171,7 @@ and, of POSIX's and the common Unix ones, `<aio.h>` `<arpa/inet.h>`
 `<sys/sem.h>` `<sys/sendfile.h>` `<sys/shm.h>` `<sys/signalfd.h>`
 `<sys/socket.h>` `<sys/stat.h>` `<sys/statfs.h>` `<sys/statvfs.h>` `<sys/swap.h>`
 `<sys/syscall.h>` `<sys/sysinfo.h>` `<sys/sysmacros.h>` `<sys/time.h>`
-`<sys/timeb.h>` `<sys/timerfd.h>` `<sys/times.h>` `<sys/types.h>`
+`<sys/timeb.h>` `<sys/timerfd.h>` `<sys/times.h>` `<sys/types.h>` `<sys/ucontext.h>`
 `<sys/uio.h>` `<sys/un.h>` `<sys/utsname.h>` `<sys/vfs.h>` `<sys/wait.h>`
 `<sys/xattr.h>`. Where a C header also
 declares POSIX names (`getline` in `<stdio.h>`, `strtok_r` in
@@ -451,6 +452,8 @@ forms of the time functions.
 | locales other than `"C"` (`"C.UTF-8"` is `"C"`, whose encoding is UTF-8; the `_l` functions and `newlocale` work with that one) | |
 | System V IPC and POSIX message queues where the kernel is not Linux | `ENOSYS` |
 | GNU's `argp`, `obstack`, `argz`; the resolver's `res_*` and `dn_*`; Sun RPC | |
+| `<execinfo.h>` (`backtrace`) | C code here has no unwind tables unless built with `--unwind-tables` |
+| `getcontext` and the rest of `<ucontext.h>` on targets other than x86-64 and AArch64 | |
 
 ### glibc instead: `--libc=system`
 

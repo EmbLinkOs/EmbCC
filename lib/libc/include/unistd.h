@@ -224,9 +224,14 @@ int     setdomainname(const char *name, size_t n);
 int     vhangup(void);
 int     acct(const char *path);
 int     syncfs(int fd);
+int     execveat(int dirfd, const char *path, char *const argv[],
+                 char *const envp[], int flags);
 char   *getwd(char *buf);
 char   *getusershell(void);
 int     ttyslot(void);
+int     euidaccess(const char *path, int mode);
+int     eaccess(const char *path, int mode);
+int     group_member(gid_t gid);
 void    setusershell(void);
 void    endusershell(void);
 char   *get_current_dir_name(void);

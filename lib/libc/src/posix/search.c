@@ -185,6 +185,31 @@ __attribute__((weak)) void twalk(const void *root, void (*act)(const void *, VIS
         walk(root, act, 0);
 }
 
+/* glibc's twalk_r: the same order, no depth, the caller's closure */
+static void walk_r(const struct node *n, void (*act)(const void *, VISIT, void *),
+                   void *closure)
+{
+    if (!n->a[0] && !n->a[1]) {
+        act(n, leaf, closure);
+        return;
+    }
+    act(n, preorder, closure);
+    if (n->a[0])
+        walk_r(n->a[0], act, closure);
+    act(n, postorder, closure);
+    if (n->a[1])
+        walk_r(n->a[1], act, closure);
+    act(n, endorder, closure);
+}
+
+__attribute__((weak)) void twalk_r(const void *root,
+                                   void (*act)(const void *, VISIT, void *),
+                                   void *closure)
+{
+    if (root && act)
+        walk_r(root, act, closure);
+}
+
 __attribute__((weak)) void tdestroy(void *root, void (*free_key)(void *))
 {
     struct node *n = root;

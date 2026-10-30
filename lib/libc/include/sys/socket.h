@@ -152,6 +152,17 @@ int     sockatmark(int fd);
 int     socket(int domain, int type, int protocol);
 int     socketpair(int domain, int type, int protocol, int sv[2]);
 
+#if defined(__EMB_GNU)
+/* several messages in one call, Linux's (src/posix/linuxapi.c) */
+struct mmsghdr {
+    struct msghdr msg_hdr;
+    unsigned int msg_len;
+};
+struct timespec;
+int recvmmsg(int fd, struct mmsghdr *v, unsigned n, int flags, struct timespec *timeout);
+int sendmmsg(int fd, struct mmsghdr *v, unsigned n, int flags);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

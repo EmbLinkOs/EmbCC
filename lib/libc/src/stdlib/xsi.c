@@ -4,6 +4,7 @@
 #define _GNU_SOURCE 1
 #include <errno.h>
 #include <fcntl.h>
+#include <float.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -56,14 +57,14 @@ WEAK char *l64a(long n)
 /* The digits of |v| with `prec` of them after the point (fixed) or
  * `prec` significant ones (e), no point, no leading zeros, and the
  * position of the decimal point; into buf of n bytes. */
-static int cvt(double v, int prec, int fixed, int *decpt, int *sign,
+static int cvt(long double v, int prec, int fixed, int *decpt, int *sign,
                char *buf, size_t n)
 {
-    char tmp[512];
+    char tmp[LDBL_MAX_10_EXP + 360];   /* the widest %.340Lf there is */
     *sign = v < 0 || (v == 0 && 1 / v < 0);
     if (v < 0)
         v = -v;
-    if (v != v || v == __builtin_inf()) {
+    if (v != v || v == (long double)__builtin_inf()) {
         snprintf(buf, n, "%s", v != v ? "nan" : "inf");
         *decpt = 0;
         return 0;
@@ -73,7 +74,7 @@ static int cvt(double v, int prec, int fixed, int *decpt, int *sign,
     if (fixed) {
         if (prec > 340)
             prec = 340;
-        snprintf(tmp, sizeof tmp, "%.*f", prec, v);
+        snprintf(tmp, sizeof tmp, "%.*Lf", prec, v);
         char *dot = strchr(tmp, '.');
         int ip = dot ? (int)(dot - tmp) : (int)strlen(tmp);
         if (dot)
@@ -100,9 +101,9 @@ static int cvt(double v, int prec, int fixed, int *decpt, int *sign,
     }
     if (prec < 1)
         prec = 1;
-    if (prec > 17 + 300)
-        prec = 17 + 300;
-    snprintf(tmp, sizeof tmp, "%.*e", prec - 1, v);
+    if (prec > 340)
+        prec = 340;
+    snprintf(tmp, sizeof tmp, "%.*Le", prec - 1, v);
     char *e = strchr(tmp, 'e');
     int exp = atoi(e + 1);
     *e = 0;
@@ -145,6 +146,37 @@ WEAK char *fcvt(double v, int nd, int *restrict decpt, int *restrict sign)
 WEAK char *gcvt(double v, int nd, char *buf)
 {
     sprintf(buf, "%.*g", nd < 1 ? 1 : nd, v);
+    return buf;
+}
+
+/* the long double forms, glibc's q names */
+WEAK int qecvt_r(long double v, int nd, int *restrict decpt, int *restrict sign,
+                 char *restrict buf, size_t n)
+{
+    return cvt(v, nd, 0, decpt, sign, buf, n);
+}
+
+WEAK int qfcvt_r(long double v, int nd, int *restrict decpt, int *restrict sign,
+                 char *restrict buf, size_t n)
+{
+    return cvt(v, nd, 1, decpt, sign, buf, n);
+}
+
+WEAK char *qecvt(long double v, int nd, int *restrict decpt, int *restrict sign)
+{
+    static char buf[5000];
+    return cvt(v, nd, 0, decpt, sign, buf, sizeof buf) ? 0 : buf;
+}
+
+WEAK char *qfcvt(long double v, int nd, int *restrict decpt, int *restrict sign)
+{
+    static char buf[5000];
+    return cvt(v, nd, 1, decpt, sign, buf, sizeof buf) ? 0 : buf;
+}
+
+WEAK char *qgcvt(long double v, int nd, char *buf)
+{
+    sprintf(buf, "%.*Lg", nd < 1 ? 1 : nd, v);
     return buf;
 }
 

@@ -238,3 +238,94 @@ int feupdateenv(const fenv_t *envp)
         return -1;
     return feraiseexcept(raised);
 }
+
+/* ---- traps: an exception that interrupts, not just a flag (GNU's) -------------
+ *
+ * On x86-64 an exception is unmasked in both units a program may compute
+ * in: SSE (MXCSR, the masks in bits 7-12) and the x87 that long double
+ * uses (its control word, bits 0-5). On aarch64 FPCR's trap enables are
+ * optional in the architecture; one a core does not have reads back 0,
+ * and the call fails as glibc's does. Elsewhere there are no traps. */
+#if defined(__x86_64__)
+/* fnstcw (%rax) and fldcw (%rax) as their bytes, D9 /7 and D9 /5: the
+ * assembler here has no x87 control-word mnemonics */
+static unsigned short get_x87cw(void)
+{
+    unsigned short cw = 0;
+    __asm__ __volatile__(".byte 0xd9, 0x38" : : "a"(&cw) : "memory");
+    return cw;
+}
+static void set_x87cw(unsigned short cw)
+{
+    __asm__ __volatile__(".byte 0xd9, 0x28" : : "a"(&cw) : "memory");
+}
+static int traps(void) { return (int)(~get_mxcsr() >> 7) & FE_ALL_EXCEPT; }
+static int set_traps(int on, int ex)
+{
+    unsigned m = get_mxcsr();
+    unsigned short cw = get_x87cw();
+    unsigned bits = (unsigned)ex & FE_ALL_EXCEPT;
+    if (on) {
+        m &= ~(bits << 7);
+        cw = (unsigned short)(cw & ~bits);
+    } else {
+        m |= bits << 7;
+        cw = (unsigned short)(cw | bits);
+    }
+    set_mxcsr(m);
+    set_x87cw(cw);
+    return 0;
+}
+#elif defined(__aarch64__)
+static int traps(void) { return from_fpsr(get_fpcr() >> 8); }
+static int set_traps(int on, int ex)
+{
+    unsigned long bits = to_fpsr(ex) << 8, c = get_fpcr();
+    set_fpcr(on ? c | bits : c & ~bits);
+    return on && (get_fpcr() & bits) != bits ? -1 : 0;
+}
+#else
+static int traps(void) { return 0; }
+static int set_traps(int on, int ex) { return on && ex ? -1 : 0; }
+#endif
+
+__attribute__((weak)) int fegetexcept(void) { return traps(); }
+
+/* the exceptions trapped before, or -1 */
+__attribute__((weak)) int feenableexcept(int excepts)
+{
+    int old = traps();
+    return set_traps(1, excepts) ? -1 : old;
+}
+
+__attribute__((weak)) int fedisableexcept(int excepts)
+{
+    int old = traps();
+    return set_traps(0, excepts) ? -1 : old;
+}
+
+/* ---- C23's: the flags set without raising, a saved flag tested, and the
+ * control modes (rounding, traps) on their own ---------------------------------- */
+
+int fesetexcept(int excepts)
+{
+    write_flags(read_flags() | (excepts & FE_ALL_EXCEPT));
+    return 0;
+}
+
+int fetestexceptflag(const fexcept_t *flagp, int excepts)
+{
+    return (int)*flagp & excepts & FE_ALL_EXCEPT;
+}
+
+int fegetmode(femode_t *modep)
+{
+    modep->__cw = read_control();
+    return 0;
+}
+
+int fesetmode(const femode_t *modep)
+{
+    write_control(modep == FE_DFL_MODE ? __fe_dfl_env.__cw : modep->__cw);
+    return 0;
+}

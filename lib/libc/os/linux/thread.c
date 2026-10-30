@@ -395,3 +395,30 @@ unsigned long __os_thread_self(void)
 {
     return (unsigned long)self;
 }
+
+/* A thread of ours: the region it was given. The program's own first
+ * thread: from where its stack began (startup's stack pointer, tls.c)
+ * down by RLIMIT_STACK, as the kernel grows it -- glibc's answer too. */
+extern unsigned long __libc_stack_top;
+
+int __os_thread_stack(unsigned long id, void **addr, size_t *size)
+{
+    if (id) {
+        struct lthread *t = (struct lthread *)id;
+        *addr = t->stack;
+        *size = t->stacksz;
+        return 0;
+    }
+    if (!__libc_stack_top) {
+        errno = ENOSYS;
+        return -1;
+    }
+    unsigned long long lim[2];
+    unsigned long n = 8UL << 20;
+    if (__os_getrlimit(3 /* RLIMIT_STACK */, lim) == 0 && lim[0] != ~0ULL)
+        n = (unsigned long)lim[0];
+    unsigned long top = (__libc_stack_top + 4095) & ~4095UL;
+    *addr = (void *)(top - n);
+    *size = n;
+    return 0;
+}

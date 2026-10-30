@@ -125,6 +125,12 @@ int  __os_thread_detach(unsigned long id);
  * answer: there is exactly one thread and it needs no name. */
 unsigned long __os_thread_self(void);
 
+/* Where a thread's stack is: its lowest address and its size -- for
+ * pthread_getattr_np, which programs walking their own stack ask. id is
+ * __os_thread_create's, or __os_thread_self()'s for the thread that
+ * started the program. -1 (ENOSYS) where the backend does not know. */
+int  __os_thread_stack(unsigned long id, void **addr, size_t *size);
+
 /* Let another runnable thread have the processor. A no-op is a correct
  * implementation. */
 void __os_thread_yield(void);

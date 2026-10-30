@@ -6,6 +6,7 @@
  * priority-protocol mutexes, which need the kernel's help. */
 #define _GNU_SOURCE 1
 #include <pthread.h>
+#include <sched.h>
 #include <errno.h>
 #include <limits.h>
 #include <string.h>
@@ -608,5 +609,68 @@ WEAK int pthread_spin_trylock(pthread_spinlock_t *l)
 WEAK int pthread_spin_unlock(pthread_spinlock_t *l)
 {
     __atomic_store_n(l, 0, __ATOMIC_RELEASE);
+    return 0;
+}
+
+/* ---- the priority ceiling, kept for PTHREAD_PRIO_PROTECT's sake: the
+ * protocol itself is refused above, but the value is the attribute's -- */
+
+WEAK int pthread_mutexattr_getprioceiling(const pthread_mutexattr_t *__restrict a,
+                                          int *__restrict ceiling)
+{
+    *ceiling = a->__ceiling;
+    return 0;
+}
+
+WEAK int pthread_mutexattr_setprioceiling(pthread_mutexattr_t *a, int ceiling)
+{
+    if (ceiling < sched_get_priority_min(SCHED_FIFO) ||
+        ceiling > sched_get_priority_max(SCHED_FIFO))
+        return EINVAL;
+    a->__ceiling = ceiling;
+    return 0;
+}
+
+/* ---- GNU's older names --------------------------------------------------------- */
+
+WEAK int pthread_mutexattr_getrobust_np(const pthread_mutexattr_t *a, int *r)
+{
+    return pthread_mutexattr_getrobust(a, r);
+}
+
+WEAK int pthread_mutexattr_setrobust_np(pthread_mutexattr_t *a, int r)
+{
+    return pthread_mutexattr_setrobust(a, r);
+}
+
+WEAK int pthread_mutex_consistent_np(pthread_mutex_t *m)
+{
+    return pthread_mutex_consistent(m);
+}
+
+WEAK int pthread_mutexattr_getkind_np(const pthread_mutexattr_t *a, int *k)
+{
+    return pthread_mutexattr_gettype(a, k);
+}
+
+WEAK int pthread_mutexattr_setkind_np(pthread_mutexattr_t *a, int k)
+{
+    return pthread_mutexattr_settype(a, k);
+}
+
+/* which a rwlock prefers when both wait: kept, and read back; the lock
+ * here admits a reader while readers hold it, which is "reader" */
+WEAK int pthread_rwlockattr_getkind_np(const pthread_rwlockattr_t *a, int *k)
+{
+    *k = a->__kind;
+    return 0;
+}
+
+WEAK int pthread_rwlockattr_setkind_np(pthread_rwlockattr_t *a, int k)
+{
+    if (k < PTHREAD_RWLOCK_PREFER_READER_NP ||
+        k > PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP)
+        return EINVAL;
+    a->__kind = k;
     return 0;
 }

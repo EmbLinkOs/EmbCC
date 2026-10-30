@@ -171,6 +171,7 @@ size_t  wcsnrtombs(char *__restrict d, const wchar_t **__restrict s, size_t nwc,
 size_t  mbsnrtowcs(wchar_t *__restrict d, const char **__restrict s, size_t nms,
                    size_t len, mbstate_t *__restrict ps);
 int     wcwidth(wchar_t c);
+FILE   *open_wmemstream(wchar_t **bufp, size_t *sizep);
 int     wcswidth(const wchar_t *s, size_t n);
 #endif
 #if defined(__EMB_GNU)
@@ -185,6 +186,8 @@ int     fputws_unlocked(const wchar_t *__restrict s, FILE *__restrict f);
 wchar_t *wmempcpy(wchar_t *__restrict d, const wchar_t *__restrict s, size_t n);
 wchar_t *wcschrnul(const wchar_t *s, wchar_t c);
 wchar_t *wcswcs(const wchar_t *big, const wchar_t *little);
+long long wcstoq(const wchar_t *__restrict s, wchar_t **__restrict end, int base);
+unsigned long long wcstouq(const wchar_t *__restrict s, wchar_t **__restrict end, int base);
 double  wcstod_l(const wchar_t *__restrict s, wchar_t **__restrict end, locale_t l);
 float   wcstof_l(const wchar_t *__restrict s, wchar_t **__restrict end, locale_t l);
 long double wcstold_l(const wchar_t *__restrict s, wchar_t **__restrict end, locale_t l);

@@ -185,6 +185,71 @@ int *__errno_location(void);
 
 #define EILSEQ  84
 
+
+/* the rest of Linux's numbers, which a kernel can return and strerror
+ * names (glibc 2.36's list) */
+#define ENOTBLK         15
+#define ETXTBSY         26
+#define ECHRNG          44
+#define EL2NSYNC        45
+#define EL3HLT          46
+#define EL3RST          47
+#define ELNRNG          48
+#define EUNATCH         49
+#define ENOCSI          50
+#define EL2HLT          51
+#define EBADE           52
+#define EBADR           53
+#define EXFULL          54
+#define ENOANO          55
+#define EBADRQC         56
+#define EBADSLT         57
+#define EBFONT          59
+#define ENOSTR          60
+#define ENODATA         61
+#define ETIME           62
+#define ENOSR           63
+#define ENONET          64
+#define ENOPKG          65
+#define EREMOTE         66
+#define EADV            68
+#define ESRMNT          69
+#define ECOMM           70
+#define EMULTIHOP       72
+#define EDOTDOT         73
+#define ENOTUNIQ        76
+#define EBADFD          77
+#define EREMCHG         78
+#define ELIBACC         79
+#define ELIBBAD         80
+#define ELIBSCN         81
+#define ELIBMAX         82
+#define ELIBEXEC        83
+#define ERESTART        85
+#define ESTRPIPE        86
+#define EUSERS          87
+#define ESOCKTNOSUPPORT 94
+#define EPFNOSUPPORT    96
+#define ESHUTDOWN       108
+#define ETOOMANYREFS    109
+#define EHOSTDOWN       112
+#define ESTALE          116
+#define EUCLEAN         117
+#define ENOTNAM         118
+#define ENAVAIL         119
+#define EISNAM          120
+#define EREMOTEIO       121
+#define EDQUOT          122
+#define ENOMEDIUM       123
+#define EMEDIUMTYPE     124
+#define ENOKEY          126
+#define EKEYEXPIRED     127
+#define EKEYREVOKED     128
+#define EKEYREJECTED    129
+#define ERFKILL         132
+#define EHWPOISON       133
+#define EDEADLOCK       EDEADLK
+
 #endif
 
 /* the program's name, as startup found it in argv[0], and the part of

@@ -27,6 +27,8 @@ typedef struct {
     struct sched_param __param;
     size_t __stacksize, __guardsize;
     void *__stackaddr;
+    void *__affinity;          /* pthread_attr_setaffinity_np's set, a copy */
+    size_t __affsize;
 } pthread_attr_t;
 
 typedef struct {
@@ -36,7 +38,7 @@ typedef struct {
     unsigned __count;
     int __flags;
 } pthread_mutex_t;
-typedef struct { int __type, __pshared, __protocol, __robust; } pthread_mutexattr_t;
+typedef struct { int __type, __pshared, __protocol, __robust, __ceiling; } pthread_mutexattr_t;
 
 typedef struct { int __seq; int __clock; } pthread_cond_t;
 typedef struct { int __clock, __pshared; } pthread_condattr_t;
@@ -271,7 +273,34 @@ int  pthread_tryjoin_np(pthread_t t, void **result);
 int  pthread_timedjoin_np(pthread_t t, void **result,
                           const struct timespec *abstime);
 int  pthread_yield(void);
+int  pthread_clockjoin_np(pthread_t t, void **result, clockid_t clock,
+                          const struct timespec *abstime);
+int  pthread_setaffinity_np(pthread_t t, size_t n, const cpu_set_t *set);
+int  pthread_getaffinity_np(pthread_t t, size_t n, cpu_set_t *set);
+int  pthread_attr_setaffinity_np(pthread_attr_t *a, size_t n, const cpu_set_t *set);
+int  pthread_attr_getaffinity_np(const pthread_attr_t *a, size_t n, cpu_set_t *set);
+int  pthread_getattr_np(pthread_t t, pthread_attr_t *a);
+int  pthread_setattr_default_np(const pthread_attr_t *a);
+int  pthread_getattr_default_np(pthread_attr_t *a);
+union sigval;
+int  pthread_sigqueue(pthread_t t, int sig, const union sigval value);
+int  pthread_mutexattr_getrobust_np(const pthread_mutexattr_t *a, int *r);
+int  pthread_mutexattr_setrobust_np(pthread_mutexattr_t *a, int r);
+int  pthread_mutex_consistent_np(pthread_mutex_t *m);
+int  pthread_mutexattr_getkind_np(const pthread_mutexattr_t *a, int *k);
+int  pthread_mutexattr_setkind_np(pthread_mutexattr_t *a, int k);
+#define PTHREAD_RWLOCK_PREFER_READER_NP 0
+#define PTHREAD_RWLOCK_PREFER_WRITER_NP 1
+#define PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP 2
+int  pthread_rwlockattr_getkind_np(const pthread_rwlockattr_t *a, int *k);
+int  pthread_rwlockattr_setkind_np(pthread_rwlockattr_t *a, int k);
+int  pthread_attr_getstackaddr(const pthread_attr_t *a, void **addr);
+int  pthread_attr_setstackaddr(pthread_attr_t *a, void *addr);
+void pthread_kill_other_threads_np(void);
 #endif
+int  pthread_mutexattr_getprioceiling(const pthread_mutexattr_t *__restrict a,
+                                      int *__restrict ceiling);
+int  pthread_mutexattr_setprioceiling(pthread_mutexattr_t *a, int ceiling);
 
 /* <signal.h>'s, declared here too, as POSIX lists them in both */
 int  pthread_kill(pthread_t t, int sig);

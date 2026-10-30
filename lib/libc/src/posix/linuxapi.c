@@ -40,6 +40,8 @@
 #include <sys/sysinfo.h>
 #include <sys/timerfd.h>
 #include <sys/uio.h>
+#include <sys/socket.h>
+#include <stdio.h>
 #include <sys/utsname.h>
 #include <sys/xattr.h>
 
@@ -661,4 +663,69 @@ WEAK int prlimit(pid_t pid, int resource, const struct rlimit *newlim,
         return -1;
     return newlim ? setrlimit(resource, newlim) : 0;
 #endif
+}
+
+/* ---- the rest of Linux's newer calls ------------------------------------------ */
+
+WEAK ssize_t preadv2(int fd, const struct iovec *iov, int n, off_t off, int flags)
+{
+    if (!flags && off >= 0)
+        return preadv(fd, iov, n, off);
+#if LINUX
+    /* the kernel takes the offset as two words, low then high */
+    return S6(SYS_preadv2, fd, iov, n, off, 0, flags);
+#else
+    (void)iov; (void)n; (void)off;
+    errno = ENOSYS;
+    return -1;
+#endif
+}
+
+WEAK ssize_t pwritev2(int fd, const struct iovec *iov, int n, off_t off, int flags)
+{
+    if (!flags && off >= 0)
+        return pwritev(fd, iov, n, off);
+#if LINUX
+    return S6(SYS_pwritev2, fd, iov, n, off, 0, flags);
+#else
+    (void)iov; (void)n; (void)off;
+    errno = ENOSYS;
+    return -1;
+#endif
+}
+
+WEAK int recvmmsg(int fd, struct mmsghdr *v, unsigned n, int flags,
+                  struct timespec *timeout)
+{
+    return (int)S5(SYS_recvmmsg, fd, v, n, flags, timeout);
+}
+
+WEAK int sendmmsg(int fd, struct mmsghdr *v, unsigned n, int flags)
+{
+    return (int)S4(SYS_sendmmsg, fd, v, n, flags);
+}
+
+WEAK int renameat2(int fromfd, const char *from, int tofd, const char *to,
+                   unsigned flags)
+{
+    if (!flags)
+        return renameat(fromfd, from, tofd, to);
+    return (int)S5(SYS_renameat2, fromfd, from, tofd, to, flags);
+}
+
+WEAK int execveat(int dirfd, const char *path, char *const argv[],
+                  char *const envp[], int flags)
+{
+    return (int)S5(SYS_execveat, dirfd, path, argv, envp, flags);
+}
+
+WEAK int tgkill(pid_t tgid, pid_t tid, int sig)
+{
+    return (int)S3(SYS_tgkill, tgid, tid, sig);
+}
+
+WEAK int statx(int dirfd, const char *restrict path, int flags, unsigned mask,
+               struct statx *restrict buf)
+{
+    return (int)S5(SYS_statx, dirfd, path, flags, mask, buf);
 }

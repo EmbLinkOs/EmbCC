@@ -103,6 +103,48 @@ int    utimensat(int dirfd, const char *path, const struct timespec times[2],
 #define fstatat64 fstatat
 #endif
 
+#if defined(__EMB_GNU)
+int lchmod(const char *path, mode_t mode);
+#endif
+
+#if defined(__EMB_GNU)
+/* Linux's statx: what was asked for, and the birth time (linuxapi.c) */
+#include <stdint.h>
+struct statx_timestamp { int64_t tv_sec; uint32_t tv_nsec; int32_t __reserved; };
+struct statx {
+    uint32_t stx_mask, stx_blksize;
+    uint64_t stx_attributes;
+    uint32_t stx_nlink, stx_uid, stx_gid;
+    uint16_t stx_mode, __spare0;
+    uint64_t stx_ino, stx_size, stx_blocks, stx_attributes_mask;
+    struct statx_timestamp stx_atime, stx_btime, stx_ctime, stx_mtime;
+    uint32_t stx_rdev_major, stx_rdev_minor, stx_dev_major, stx_dev_minor;
+    uint64_t stx_mnt_id;
+    uint32_t stx_dio_mem_align, stx_dio_offset_align;
+    uint64_t __spare3[12];
+};
+#define STATX_TYPE        0x0001U
+#define STATX_MODE        0x0002U
+#define STATX_NLINK       0x0004U
+#define STATX_UID         0x0008U
+#define STATX_GID         0x0010U
+#define STATX_ATIME       0x0020U
+#define STATX_MTIME       0x0040U
+#define STATX_CTIME       0x0080U
+#define STATX_INO         0x0100U
+#define STATX_SIZE        0x0200U
+#define STATX_BLOCKS      0x0400U
+#define STATX_BASIC_STATS 0x07ffU
+#define STATX_BTIME       0x0800U
+#define STATX_MNT_ID      0x1000U
+#define STATX_ALL         0x0fffU
+#define AT_STATX_SYNC_AS_STAT 0x0000
+#define AT_STATX_FORCE_SYNC   0x2000
+#define AT_STATX_DONT_SYNC    0x4000
+int statx(int dirfd, const char *__restrict path, int flags, unsigned mask,
+          struct statx *__restrict buf);
+#endif
+
 #ifdef __cplusplus
 }
 #endif
