@@ -13,19 +13,6 @@
 
 #include "posix.h"
 
-/* the mode argument is there only when the flags create */
-WEAK int open(const char *path, int flags, ...)
-{
-    unsigned mode = 0;
-    if (flags & O_CREAT) {
-        va_list ap;
-        va_start(ap, flags);
-        mode = va_arg(ap, unsigned);
-        va_end(ap);
-    }
-    return __os_open(path, flags, (int)mode);
-}
-
 WEAK int openat(int dirfd, const char *path, int flags, ...)
 {
     unsigned mode = 0;
@@ -49,17 +36,6 @@ WEAK int creat(const char *path, mode_t mode)
     return __os_open(path, O_WRONLY | O_CREAT | O_TRUNC, (int)mode);
 }
 
-WEAK int close(int fd) { return __os_close(fd); }
-
-WEAK ssize_t read(int fd, void *buf, size_t n)
-{
-    return __os_read(fd, buf, n);
-}
-
-WEAK ssize_t write(int fd, const void *buf, size_t n)
-{
-    return __os_write(fd, buf, n);
-}
 
 WEAK ssize_t pread(int fd, void *buf, size_t n, off_t off)
 {
@@ -116,10 +92,6 @@ WEAK ssize_t pwritev(int fd, const struct iovec *iov, int n, off_t off)
     return total;
 }
 
-WEAK off_t lseek(int fd, off_t off, int whence)
-{
-    return __os_lseek(fd, off, whence);
-}
 
 WEAK int dup(int fd) { return __os_dup(fd, 0, 0); }
 WEAK int dup2(int fd, int newfd) { return __os_dup2(fd, newfd, 0); }
@@ -172,19 +144,6 @@ WEAK int fsync(int fd) { return __os_fsync(fd, 0); }
 WEAK int fdatasync(int fd) { return __os_fsync(fd, 1); }
 WEAK int ftruncate(int fd, off_t size) { return __os_ftruncate(fd, size); }
 WEAK void sync(void) { __os_sync(); }
-
-/* 0 with EBADF for a descriptor that is not open, ENOTTY for one that
- * is open on something else -- the backend's isatty says only yes or no */
-WEAK int isatty(int fd)
-{
-    if (__os_isatty(fd))
-        return 1;
-    struct __os_fileinfo fi;
-    if (__os_fstat(fd, &fi) < 0 && errno == EBADF)
-        return 0;
-    errno = ENOTTY;
-    return 0;
-}
 
 WEAK int ioctl(int fd, unsigned long request, ...)
 {

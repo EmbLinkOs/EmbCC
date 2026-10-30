@@ -869,7 +869,8 @@ libc-emblinkos: embcc embar
 	@case "$(EMBLINKOS_ARCH)" in x86_64|aarch64) ;; *) \
 	    echo "libc-emblinkos: EMBLINKOS_ARCH is x86_64 or aarch64"; exit 1;; esac
 	@mkdir -p $(ELOS_LIBC)
-	@for f in $(LIBC_SRCS_PORTABLE) lib/libc/os/emblinkos/backend.c; do \
+	@for f in $(LIBC_SRCS_PORTABLE) lib/libc/os/posix-names.c \
+	          lib/libc/os/emblinkos/backend.c; do \
 	    o=$(ELOS_LIBC)/$$(echo $$f | tr / _ | sed 's/\.c$$/.o/'); \
 	    $(ELOS_CC) -c -O2 $(LIBC_INC) -I$(EMBLINKOS)/user/lib $$f -o $$o || exit 1; \
 	done
@@ -914,7 +915,8 @@ libcxx-emblinkos: embcc embar
 # exactly once in an image, and a definition that arrives by archive
 # member is a definition that arrives by accident.
 #   make libc-linux-x86_64   /   make libc-linux-aarch64
-LIBC_SRCS_LINUX := $(LIBC_SRCS_PORTABLE) lib/libc/os/linux/backend.c \
+LIBC_SRCS_LINUX := $(LIBC_SRCS_PORTABLE) lib/libc/os/posix-names.c \
+                   lib/libc/os/linux/backend.c \
                    lib/libc/os/linux/posix.c \
                    lib/libc/os/linux/thread.c lib/libc/os/linux/tls.c
 

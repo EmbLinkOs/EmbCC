@@ -89,13 +89,6 @@ WEAK pid_t fork(void) { return __os_fork(); }
  * fork keeps too */
 WEAK pid_t vfork(void) { return __os_fork(); }
 
-WEAK _Noreturn void _exit(int status)
-{
-    __os_exit(status);
-    for (;;)
-        ;
-}
-
 WEAK int execve(const char *path, char *const argv[], char *const envp[])
 {
     return __os_execve(path, argv, envp);
@@ -419,10 +412,6 @@ WEAK useconds_t ualarm(useconds_t value, useconds_t interval)
         return 0;
     return (useconds_t)(old.vsec * 1000000 + old.vusec);
 }
-
-/* ---- the heap's edge, for programs from before malloc ---------------------- */
-
-WEAK void *sbrk(intptr_t increment) { return __os_sbrk((long)increment); }
 
 /* ---- detaching from the terminal ------------------------------------------
  *
