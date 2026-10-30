@@ -1013,6 +1013,32 @@ void _Unwind_DeleteException(struct _Unwind_Exception *exc)
         exc->exception_cleanup(_URC_FOREIGN_EXCEPTION_CAUGHT, exc);
 }
 
+/* libgcc's walk for backtraces: fn is called for each frame from the
+ * caller of this function out -- the last one being the first without
+ * an FDE (where the stack starts) -- until it returns other than
+ * _URC_NO_REASON. execinfo's backtrace is built on it. */
+typedef _Unwind_Reason_Code (*_Unwind_Trace_Fn)(struct _Unwind_Context *, void *);
+
+_Unwind_Reason_Code _Unwind_Backtrace(_Unwind_Trace_Fn fn, void *arg)
+{
+    struct uw_capture cap;
+    struct _Unwind_Context ctx;
+    struct fde f;
+    personality_fn pers;
+
+    __uw_capture(&cap);
+    start_context(&ctx, &cap);
+    if (!frame_at(&ctx, &f, &pers) || !step(&ctx, &f))
+        return _URC_END_OF_STACK;      /* this function's own frame, passed */
+    for (int depth = 0; depth < 10000; depth++) {
+        if (fn(&ctx, arg) != _URC_NO_REASON)
+            return _URC_FATAL_PHASE1_ERROR;
+        if (!frame_at(&ctx, &f, &pers) || !step(&ctx, &f))
+            return _URC_END_OF_STACK;
+    }
+    return _URC_FATAL_PHASE1_ERROR;    /* a cycle, not a stack */
+}
+
 /* ---- the frame-registration entry points -------------------------------
  *
  * A bare-metal image with no dynamic loader registers its tables by

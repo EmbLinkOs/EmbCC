@@ -41,6 +41,9 @@
 #   posix-lib3.c     XSI signals, open_wmemstream, traps, mntent, ether,
 #                    the pthread _np calls, errno's names, statx
 #   posix-ucontext.c getcontext/makecontext/swapcontext coroutines
+#   posix-lib4.c     argp's parsing and help, obstack, argz, backtrace, the
+#                    res_* name codecs and parser, getaddrinfo_a, getopt's
+#                    optind as GNU's permutes
 #
 # At -O0 and -O2, each exiting 42. Skipped without a kernel for
 # tests/harness/linux (EMBCC_LINUX_KERNEL_X86_64 / _AARCH64).
@@ -56,7 +59,7 @@ progs="tmpfile next-toward quick-exit multibyte-stdlib inttypes-formats
        posix-fd posix-process posix-signals posix-net posix-time
        malloc-gnu posix-threads posix-glob posix-regex posix-wordexp
        posix-iconv posix-lib2 posix-linux2 posix-sigjmp
-       posix-lib3 posix-ucontext"
+       posix-lib3 posix-ucontext posix-lib4"
 
 A64LD=${EMBCC_AARCH64_LD:-aarch64-elf-ld}
 A64GCC=$(dirname "$(aarch64-elf-gcc -print-libgcc-file-name 2>/dev/null)")

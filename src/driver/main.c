@@ -965,7 +965,9 @@ static int has_link_input_suffix(const char *p)
  * and -lm are EmbCC's libc (its math is in it), -lgcc is the compiler
  * runtime, librt.a; and -lpthread, -ldl, -lrt and -lutil, which glibc
  * since 2.34 keeps only as empty archives beside a libc that has their
- * functions, as this one has POSIX threads, the clocks and openpty. A
+ * functions, as this one has POSIX threads, the clocks and openpty --
+ * and -lresolv and -lanl, whose calls this libc has too (res_query,
+ * getaddrinfo_a). A
  * name the library lacks a function of (dlopen) still fails the link,
  * naming the function. These return 1 having found nothing to add, when
  * the driver adds them itself anyway. */
@@ -978,7 +980,7 @@ static int find_lib(const char *name, char *out, size_t cap, int *own)
             return 1;
     }
     static const char *const own_names[] = {
-        "c", "m", "gcc", "pthread", "dl", "rt", "util",
+        "c", "m", "gcc", "pthread", "dl", "rt", "util", "resolv", "anl",
     };
     for (size_t k = 0; k < sizeof own_names / sizeof *own_names; k++)
         if (!strcmp(name, own_names[k])) {
@@ -6053,8 +6055,9 @@ static int embcc_main(int argc, char **argv)
              *                       it gives
              *   -fwrapv             signed overflow wraps; nothing here
              *                       optimises on the assumption it cannot
-             *   -f[no-]omit-frame-pointer  x86-64 and aarch64 always keep
-             *                       one, ARMv7-M and RISC-V never do
+             *   -f[no-]omit-frame-pointer  aarch64 always keeps one,
+             *                       x86-64 where the function needs a
+             *                       frame, ARMv7-M and RISC-V never
              *
              * The opposite spellings are NOT accepted, because those
              * would be promises: see the refusals below. */
