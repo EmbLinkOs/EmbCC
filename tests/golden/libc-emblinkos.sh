@@ -72,8 +72,11 @@ EOF
 echo "the open flags in os/backend.h are the numbers this kernel uses"
 
 # ---- the same library, one different file --------------------------------
+# ...and one flag, as the Makefile builds it: crt0 hands over the TLS
+# template (os/tls-template.h), which is what makes errno per thread.
+TLS=-D__EMBLIBC_TLS_TEMPLATE
 back=lib/libc/os/emblinkos/backend.c
-"$EMBCC" -c -O2 -Ilib/libc/include -Ilib/libc/src/math \
+"$EMBCC" -c -O2 $TLS -Ilib/libc/include -Ilib/libc/src/math \
     -I"$EMBLINKOS/user/lib" "$back" -o "$out/backend.o" ||
     { echo "FAIL: the EmbLinkOS backend does not compile"; exit 1; }
 
@@ -93,7 +96,7 @@ mkdir -p "$out/lib"
 n=0
 for f in lib/libc/src/*/*.c lib/libc/src/math/fdlibm/*.c lib/libc/src/math/msun/*.c; do
     o="$out/lib/$(echo "$f" | tr / _ | sed 's/\.c$/.o/')"
-    "$EMBCC" -c -O2 -Ilib/libc/include -Ilib/libc/src/math \
+    "$EMBCC" -c -O2 $TLS -Ilib/libc/include -Ilib/libc/src/math \
         -I"$EMBLINKOS/user/lib" "$f" -o "$o" || {
         echo "FAIL: $f does not build for EmbLinkOS"; exit 1; }
     n=$((n + 1))
@@ -103,6 +106,18 @@ x86_64-elf-nm "$out"/lib/*.o | grep -E "U (embk_|EMBK_)" > "$out/leak.txt" &&
       echo "FAIL: the portable library references EmbLinkOS's ABI"; exit 1; }
 echo "$n portable objects build for EmbLinkOS, and not one of them
 references the kernel ABI -- the OS is confined to the backend"
+
+# errno is per thread here: thread-local storage, chosen by the template
+# crt0 hands over, which the library defines and crt0 only fills.
+e="$out/lib/lib_libc_src_stdlib_errno.o"
+x86_64-elf-nm "$e" | grep -q " B __emblibc_tls$" ||
+    { echo "FAIL: errno.o does not define __emblibc_tls"; exit 1; }
+x86_64-elf-readelf -sW "$e" | grep -q " TLS .* t_errno$" ||
+    { echo "FAIL: errno has no thread-local copy on EmbLinkOS"; exit 1; }
+x86_64-elf-nm "$out/backend.o" | grep -q " U __emblibc_tls$" ||
+    { echo "FAIL: the backend does not build threads' blocks from the template"
+      exit 1; }
+echo "errno is thread-local, and new threads get a block from crt0's template"
 
 # ---- the whole archive links ---------------------------------------------
 # What is genuinely external, which is not the same as what nm calls

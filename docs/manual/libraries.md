@@ -412,7 +412,10 @@ backend has no futex the wait degrades to a yield, which is only reached
 when a lock is contended, and such a target has one thread.
 
 `errno` is per thread on the Linux triples, where the C library sets up
-thread-local storage, and one variable elsewhere. Functions that keep
+thread-local storage, and on EmbLinkOS, whose `crt0` sets up the first
+thread's and hands the template over (`lib/libc/os/tls-template.h`) for
+the library to copy into every thread it starts. Elsewhere it is one
+variable. Functions that keep
 state between calls by definition (`strtok`, `rand`, `gmtime`,
 `localtime`, `asctime`, `ctime`) share it between threads; use the `_r`
 forms of the time functions.
@@ -490,7 +493,7 @@ Four backends exist:
 |---|---|---|
 | `os/posixlike/backend.c` | `libc-x86_64` and `libc-aarch64` (`x86_64-elf`, `aarch64-elf`) | forwards to `write`, `read`, `open`, `close`, `lseek`, `sbrk`, `_exit` and `isatty`, which the program or its environment must define. The thread functions (`thread_create`, `futex_wait`, ...) and filesystem functions (`fs_stat`, ...) are weak references: defined, they are used; absent, the group reports `ENOSYS`. `remove`, `rename`, `time`, `clock` and entropy report `ENOSYS`, and so does POSIX's half (`os/absent.inc`); the program's own `kill`, `getpid` or `fork` replace the library's, being weak. |
 | `os/linux/` | `libc-linux-x86_64`, `libc-linux-aarch64` | issues Linux system calls directly, so a program needs no other C library and no dynamic loader. Provides `crt1.o` (the `_start` that calls `main` and `exit`), threads through `clone`, thread-local storage (per-thread `errno`), and all of POSIX's half: `fork`, `execve`, kernel-delivered signals, sockets, terminals. Static images only. |
-| `os/emblinkos/backend.c` | `libc-emblinkos` | EmbLinkOS's system calls, translated: its absolute-only paths (the working directory is kept here), its open flags and `d_type` numbers, its spawn in place of `fork` and `exec` (with descriptor, directory and environment actions), its IPv4 sockets and resolver, its terminal control. What it has not got -- `fork`, signals from outside, record locks, `mmap` of a file -- is `ENOSYS`. EmbLinkOS builds its whole userland on it with `make LIBC=emblibc`. `clock` reports failure. |
+| `os/emblinkos/backend.c` | `libc-emblinkos` | EmbLinkOS's system calls, translated: its absolute-only paths (the working directory is kept here), its open flags and `d_type` numbers, its spawn in place of `fork` and `exec` (with descriptor, directory and environment actions), its IPv4 sockets and resolver, its terminal control. Threads get their own thread-local block, copied from the template `crt0` hands over, so `errno` and `__thread` variables are per thread. What it has not got -- `fork`, signals from outside, record locks, `mmap` of a file -- is `ENOSYS`. EmbLinkOS builds its whole userland on it with `make LIBC=emblibc`. `clock` reports failure. |
 | `os/baremetal/backend.c` | `libc-embedded` (the embedded targets) | for a part with no operating system, and needs nothing from the program: `write`, `read`, `open`, `close`, `lseek`, `sbrk`, `_exit` and `isatty` are defined WEAKLY with defaults (output discarded, input at end of file, a heap from the end of the image to the stack, `_exit` stops), and a program's own definition of any of them replaces the default. One thread, no clock, no filesystem: those report `ENOSYS`, as POSIX's half does (`os/absent.inc`) -- except signals, which the library delivers itself. |
 
 A new operating system needs one new backend file and nothing else.

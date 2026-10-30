@@ -17,10 +17,11 @@
  * else runs, and gives every clone()d thread its own. The freestanding
  * harnesses have no such step and no threads, so there errno is one
  * variable. EmbLinkOS has threads but only half the step: its crt0
- * builds a block for the first thread of a statically linked program,
- * and none for its dynamically linked apps or for a new thread -- so
- * there too errno is one variable, as newlib's was on that OS, until
- * the backend sets up each thread's block itself.
+ * builds the first thread's block and hands the template over
+ * (os/tls-template.h), and its backend copies that template into every
+ * new thread before the thread runs. Until the hand-over -- the first
+ * instructions of the program, or a startup that predates it -- there
+ * is no block to address, and errno is the one shared variable.
  *
  * The consequence of getting this wrong is worth stating plainly: a
  * shared errno under real threads is not a slow program, it is two
@@ -29,17 +30,38 @@
 #include <errno.h>
 
 #if defined(__linux__)
-#define ERRNO_STORAGE __thread
-#else
-#define ERRNO_STORAGE
-#endif
 
-static ERRNO_STORAGE int g_errno;
+static __thread int g_errno;
 
 int *__errno_location(void) { return &g_errno; }
+
+#elif defined(__EMBLIBC_TLS_TEMPLATE)
+
+#include "../../os/tls-template.h"
+
+struct __emblibc_tls __emblibc_tls;   /* startup fills it; see the header */
+
+static __thread int t_errno;
+static int g_errno;
+
+/* One load and a branch per access, against a call to the kernel to ask
+ * which thread this is. memsz goes nonzero once, before main and before
+ * any second thread can exist, so no thread ever sees it change. */
+int *__errno_location(void)
+{
+    return __emblibc_tls.memsz ? &t_errno : &g_errno;
+}
+
+#else
+
+static int g_errno;
+
+int *__errno_location(void) { return &g_errno; }
+
+#endif
 
 /* newlib spells the accessor `__errno`, and code built against its headers
  * -- a target's existing syscall shims, for instance -- calls that name.
  * Providing it costs one line and lets this library drop in where newlib
  * was without rebuilding everything around it. */
-int *__errno(void) { return &g_errno; }
+int *__errno(void) { return __errno_location(); }
