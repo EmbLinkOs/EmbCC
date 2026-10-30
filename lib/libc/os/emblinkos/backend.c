@@ -136,6 +136,11 @@ toolong:
     if (path_from(g_cwd, (path), buf, sizeof buf) < 0) \
         return -1
 
+/* The environment a child gets when its parent names none -- the
+ * EmbLinkOS default: nothing is inherited unless named. crt0 points
+ * environ here then, rather than at NULL, so getenv can walk it. */
+char *embk_empty_env[1] = { 0 };
+
 /* crt0 calls this once environ is installed: the child's starting
  * directory as its spawn named it, else PWD (how a native parent hands
  * one over), else the root. A PWD naming somewhere gone must not stop

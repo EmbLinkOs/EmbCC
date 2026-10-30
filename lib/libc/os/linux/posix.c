@@ -488,6 +488,12 @@ static void child_fail(int fd, int err)
         ;
 }
 
+int __os_spawn_flags(void)
+{
+    return __OS_SPAWN_RESETIDS | __OS_SPAWN_SETPGROUP | __OS_SPAWN_SETSIGDEF |
+           __OS_SPAWN_SETSIGMASK | __OS_SPAWN_SETSID;
+}
+
 int __os_spawn(int *pid, const char *path,
                const struct __os_spawn_action *a, int na,
                const struct __os_spawn_attr *attr,

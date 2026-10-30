@@ -75,12 +75,18 @@ int fstat(int fd, struct stat *st)
 int isatty(int fd) { (void)fd; return 1; }
 int getpid(void) { return 1; }
 
+/* newlib's raise ends here for a signal left at its default. EmbCC's C
+ * library has a kill of its own -- one process, so a signal to itself is
+ * delivered by the library -- and tests/golden/libc.sh builds this file
+ * with SYS_NO_KILL, so that one is not overridden by this. */
+#ifndef SYS_NO_KILL
 int kill(int pid, int sig)
 {
     (void)pid; (void)sig;
     errno = EINVAL;
     return -1;
 }
+#endif
 
 extern char __heap_start[], __heap_end[];
 

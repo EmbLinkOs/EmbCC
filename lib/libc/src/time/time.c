@@ -88,6 +88,8 @@ struct tm *gmtime_r(const time_t *restrict t, struct tm *restrict out)
     out->tm_mday = (int)d;
     out->tm_yday = (int)(days - days_from_civil(y, 1, 1));
     out->tm_isdst = 0;
+    out->tm_gmtoff = 0;
+    out->tm_zone = "GMT";        /* glibc's gmtime's name, which %Z prints */
     return out;
 }
 
@@ -112,20 +114,11 @@ time_t timegm(struct tm *tm)
     return out;
 }
 
-time_t mktime(struct tm *tm) { return timegm(tm); }
-
-/* No timezone database, so local time is UTC. That is a real limitation
- * and it is stated in the header rather than hidden behind a TZ variable
- * this library would silently ignore. */
-struct tm *localtime_r(const time_t *restrict t, struct tm *restrict out)
-{
-    return gmtime_r(t, out);
-}
+/* mktime, localtime and localtime_r are tz.c's: local time is the TZ's. */
 
 static struct tm tm_static;
 
 struct tm *gmtime(const time_t *t) { return gmtime_r(t, &tm_static); }
-struct tm *localtime(const time_t *t) { return gmtime_r(t, &tm_static); }
 
 double difftime(time_t end, time_t start) { return (double)(end - start); }
 
@@ -338,8 +331,14 @@ size_t strftime(char *restrict s, size_t max, const char *restrict fmt,
         case 'X': sb_fmt(&b, "%H:%M:%S", tm); break;
         case 'y': sb_num(&b, (tm->tm_year + 1900) % 100, 2, '0'); break;
         case 'Y': sb_num(&b, tm->tm_year + 1900, 0, '0'); break;
-        case 'z': sb_str(&b, "+0000"); break;  /* UTC, per localtime */
-        case 'Z': sb_str(&b, "UTC"); break;
+        case 'z': {                            /* +hhmm east of UTC */
+            long off = tm->tm_gmtoff, a = off < 0 ? -off : off;
+            sb_put(&b, off < 0 ? "-" : "+", 1);
+            sb_num(&b, a / 3600, 2, '0');
+            sb_num(&b, a / 60 % 60, 2, '0');
+            break;
+        }
+        case 'Z': sb_str(&b, tm->tm_zone ? tm->tm_zone : "UTC"); break;
         case '%': sb_put(&b, "%", 1); break;
         case 0:   f--; break;                  /* trailing '%': stop */
         default:  sb_put(&b, "%", 1); sb_put(&b, f, 1); break;

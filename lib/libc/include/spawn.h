@@ -21,19 +21,12 @@ extern "C" {
 #define POSIX_SPAWN_USEVFORK      0x40
 #define POSIX_SPAWN_SETSID        0x80
 
-typedef struct {
-    int __n, __cap;
-    struct __os_spawn_action *__a;
-    char **__paths;             /* copies of the paths, freed with it */
-} posix_spawn_file_actions_t;
-
-typedef struct {
-    short __flags;
-    pid_t __pgroup;
-    sigset_t __sigdefault, __sigmask;
-    int __policy;
-    struct sched_param __param;
-} posix_spawnattr_t;
+/* Opaque handles, which init allocates and destroy frees and sets back
+ * to NULL: POSIX lets them be anything, and a handle is what EmbLinkOS
+ * programs were written against (`posix_spawnattr_t a = NULL;`). A
+ * program that only uses the functions below cannot tell the difference. */
+typedef struct __spawn_actions *posix_spawn_file_actions_t;
+typedef struct __spawn_attr *posix_spawnattr_t;
 
 int posix_spawn(pid_t *__restrict pid, const char *__restrict path,
                 const posix_spawn_file_actions_t *actions,

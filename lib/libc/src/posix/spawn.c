@@ -1,7 +1,11 @@
 /* <spawn.h>: a list of file actions and a set of attributes, handed whole
  * to __os_spawn, which makes the process -- by fork and exec on Linux,
  * natively on EmbLinkOS. These functions return an error number, as
- * POSIX's spawn functions do, rather than setting errno. */
+ * POSIX's spawn functions do, rather than setting errno.
+ *
+ * The two types are handles: init allocates, destroy frees and sets the
+ * handle back to NULL, and a NULL handle -- or a pointer to one -- is
+ * EINVAL rather than a crash. */
 #include <spawn.h>
 #include <stdlib.h>
 #include <fcntl.h>
@@ -10,50 +14,65 @@
 
 #include "posix.h"
 
+struct __spawn_actions {
+    int n, cap;
+    struct __os_spawn_action *a;
+};
+
+struct __spawn_attr {
+    short flags;
+    pid_t pgroup;
+    sigset_t sigdefault, sigmask;
+    int policy;
+    struct sched_param param;
+};
+
 WEAK int posix_spawn_file_actions_init(posix_spawn_file_actions_t *fa)
 {
-    memset(fa, 0, sizeof *fa);
-    return 0;
+    if (!fa)
+        return EINVAL;
+    *fa = calloc(1, sizeof **fa);
+    return *fa ? 0 : ENOMEM;
 }
 
 WEAK int posix_spawn_file_actions_destroy(posix_spawn_file_actions_t *fa)
 {
-    for (int i = 0; i < fa->__n; i++)
-        free(fa->__paths[i]);
-    free(fa->__a);
-    free(fa->__paths);
-    memset(fa, 0, sizeof *fa);
+    if (!fa || !*fa)
+        return EINVAL;
+    for (int i = 0; i < (*fa)->n; i++)
+        free((char *)(*fa)->a[i].path);
+    free((*fa)->a);
+    free(*fa);
+    *fa = NULL;
     return 0;
 }
 
 static int add(posix_spawn_file_actions_t *fa, int kind, int fd, int newfd,
                const char *path, int oflag, mode_t mode)
 {
+    if (!fa || !*fa)
+        return EINVAL;
     if (fd < 0 || (kind == __OS_SPAWN_DUP2 && newfd < 0))
         return EBADF;
-    if (fa->__n == fa->__cap) {
-        int cap = fa->__cap ? 2 * fa->__cap : 8;
-        struct __os_spawn_action *a = realloc(fa->__a, cap * sizeof *a);
+    struct __spawn_actions *s = *fa;
+    if (s->n == s->cap) {
+        int cap = s->cap ? 2 * s->cap : 8;
+        struct __os_spawn_action *a = realloc(s->a, (size_t)cap * sizeof *a);
         if (!a)
             return ENOMEM;
-        fa->__a = a;
-        char **p = realloc(fa->__paths, cap * sizeof *p);
-        if (!p)
-            return ENOMEM;
-        fa->__paths = p;
-        fa->__cap = cap;
+        s->a = a;
+        s->cap = cap;
     }
     char *copy = NULL;
     if (path && !(copy = strdup(path)))
         return ENOMEM;
-    struct __os_spawn_action *a = &fa->__a[fa->__n];
+    struct __os_spawn_action *a = &s->a[s->n++];
     a->kind = kind;
     a->fd = fd;
     a->newfd = newfd;
     a->oflag = oflag;
     a->mode = mode;
     a->path = copy;
-    fa->__paths[fa->__n++] = copy;
     return 0;
 }
 
@@ -61,6 +80,8 @@ WEAK int posix_spawn_file_actions_addopen(posix_spawn_file_actions_t *restrict f
                                           int fd, const char *restrict path,
                                           int oflag, mode_t mode)
 {
+    if (!path || (oflag & O_ACCMODE) == O_ACCMODE)
+        return EINVAL;
     return add(fa, __OS_SPAWN_OPEN, fd, 0, path, oflag, mode);
 }
 
@@ -79,6 +100,8 @@ WEAK int posix_spawn_file_actions_adddup2(posix_spawn_file_actions_t *fa,
 WEAK int posix_spawn_file_actions_addchdir(posix_spawn_file_actions_t *restrict fa,
                                            const char *restrict path)
 {
+    if (!path)
+        return EINVAL;
     return add(fa, __OS_SPAWN_CHDIR, 0, 0, path, 0, 0);
 }
 
@@ -102,123 +125,127 @@ WEAK int posix_spawn_file_actions_addfchdir_np(posix_spawn_file_actions_t *fa,
 
 WEAK int posix_spawnattr_init(posix_spawnattr_t *a)
 {
-    memset(a, 0, sizeof *a);
-    return 0;
+    if (!a)
+        return EINVAL;
+    *a = calloc(1, sizeof **a);
+    return *a ? 0 : ENOMEM;
 }
 
-WEAK int posix_spawnattr_destroy(posix_spawnattr_t *a) { (void)a; return 0; }
+WEAK int posix_spawnattr_destroy(posix_spawnattr_t *a)
+{
+    if (!a || !*a)
+        return EINVAL;
+    free(*a);
+    *a = NULL;
+    return 0;
+}
 
 #define ALL_FLAGS (POSIX_SPAWN_RESETIDS | POSIX_SPAWN_SETPGROUP | \
                    POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK | \
                    POSIX_SPAWN_SETSCHEDPARAM | POSIX_SPAWN_SETSCHEDULER | \
                    POSIX_SPAWN_USEVFORK | POSIX_SPAWN_SETSID)
 
+/* An unknown flag is EINVAL. A known one this OS's spawn cannot honour is
+ * ENOTSUP, now, rather than a spawn that later ignores it -- including
+ * the scheduling ones, which no backend applies. USEVFORK is only a hint
+ * about how, and is always accepted. */
 WEAK int posix_spawnattr_setflags(posix_spawnattr_t *a, short flags)
 {
-    if (flags & ~ALL_FLAGS)
+    if (!a || !*a || (flags & ~ALL_FLAGS))
         return EINVAL;
-    a->__flags = flags;
+    int honoured = __os_spawn_flags() | POSIX_SPAWN_USEVFORK;
+    if (flags & ~honoured)
+        return ENOTSUP;
+    (*a)->flags = flags;
     return 0;
 }
 
-WEAK int posix_spawnattr_getflags(const posix_spawnattr_t *restrict a,
-                                  short *restrict flags)
-{
-    *flags = a->__flags;
-    return 0;
-}
+#define ATTR_GET(name, type, field) \
+    WEAK int posix_spawnattr_get##name(const posix_spawnattr_t *restrict a, \
+                                       type *restrict out) \
+    { \
+        if (!a || !*a || !out) \
+            return EINVAL; \
+        *out = (*a)->field; \
+        return 0; \
+    }
+
+ATTR_GET(flags, short, flags)
+ATTR_GET(pgroup, pid_t, pgroup)
+ATTR_GET(sigdefault, sigset_t, sigdefault)
+ATTR_GET(sigmask, sigset_t, sigmask)
+ATTR_GET(schedpolicy, int, policy)
+ATTR_GET(schedparam, struct sched_param, param)
 
 WEAK int posix_spawnattr_setpgroup(posix_spawnattr_t *a, pid_t g)
 {
-    a->__pgroup = g;
+    if (!a || !*a)
+        return EINVAL;
+    (*a)->pgroup = g;
     return 0;
 }
 
-WEAK int posix_spawnattr_getpgroup(const posix_spawnattr_t *restrict a,
-                                   pid_t *restrict g)
+WEAK int posix_spawnattr_setschedpolicy(posix_spawnattr_t *a, int p)
 {
-    *g = a->__pgroup;
+    if (!a || !*a)
+        return EINVAL;
+    (*a)->policy = p;
     return 0;
 }
 
 WEAK int posix_spawnattr_setsigdefault(posix_spawnattr_t *restrict a,
                                        const sigset_t *restrict s)
 {
-    a->__sigdefault = *s;
-    return 0;
-}
-
-WEAK int posix_spawnattr_getsigdefault(const posix_spawnattr_t *restrict a,
-                                       sigset_t *restrict s)
-{
-    *s = a->__sigdefault;
+    if (!a || !*a || !s)
+        return EINVAL;
+    (*a)->sigdefault = *s;
     return 0;
 }
 
 WEAK int posix_spawnattr_setsigmask(posix_spawnattr_t *restrict a,
                                     const sigset_t *restrict s)
 {
-    a->__sigmask = *s;
-    return 0;
-}
-
-WEAK int posix_spawnattr_getsigmask(const posix_spawnattr_t *restrict a,
-                                    sigset_t *restrict s)
-{
-    *s = a->__sigmask;
-    return 0;
-}
-
-WEAK int posix_spawnattr_setschedpolicy(posix_spawnattr_t *a, int p)
-{
-    a->__policy = p;
-    return 0;
-}
-
-WEAK int posix_spawnattr_getschedpolicy(const posix_spawnattr_t *restrict a,
-                                        int *restrict p)
-{
-    *p = a->__policy;
+    if (!a || !*a || !s)
+        return EINVAL;
+    (*a)->sigmask = *s;
     return 0;
 }
 
 WEAK int posix_spawnattr_setschedparam(posix_spawnattr_t *restrict a,
                                        const struct sched_param *restrict p)
 {
-    a->__param = *p;
+    if (!a || !*a || !p)
+        return EINVAL;
+    (*a)->param = *p;
     return 0;
 }
 
-WEAK int posix_spawnattr_getschedparam(const posix_spawnattr_t *restrict a,
-                                       struct sched_param *restrict p)
-{
-    *p = a->__param;
-    return 0;
-}
-
-/* The scheduling attributes are accepted and not applied: a backend has
- * no primitive for them, and a spawned program run at the default
- * policy is what every caller that asks for SCHED_OTHER wanted. */
+/* The environment is passed as given -- NULL included, which the child
+ * receives as no environment at all (EmbLinkOS's rule, and Linux's execve
+ * reads it the same way). The caller's errno is left as it was. */
 WEAK int posix_spawn(pid_t *restrict pid, const char *restrict path,
                      const posix_spawn_file_actions_t *fa,
                      const posix_spawnattr_t *restrict attr,
                      char *const argv[restrict], char *const envp[restrict])
 {
+    if (!path || (fa && !*fa) || (attr && !*attr))
+        return EINVAL;
+    if (!*path)
+        return ENOENT;
     struct __os_spawn_attr k = { 0, 0, 0, 0 };
     if (attr) {
-        k.flags = attr->__flags & (POSIX_SPAWN_RESETIDS |
-                                   POSIX_SPAWN_SETPGROUP |
-                                   POSIX_SPAWN_SETSIGDEF |
-                                   POSIX_SPAWN_SETSIGMASK |
-                                   POSIX_SPAWN_SETSID);
-        k.pgroup = attr->__pgroup;
-        k.sigdefault = attr->__sigdefault;
-        k.sigmask = attr->__sigmask;
+        k.flags = (*attr)->flags & (POSIX_SPAWN_RESETIDS |
+                                    POSIX_SPAWN_SETPGROUP |
+                                    POSIX_SPAWN_SETSIGDEF |
+                                    POSIX_SPAWN_SETSIGMASK |
+                                    POSIX_SPAWN_SETSID);
+        k.pgroup = (*attr)->pgroup;
+        k.sigdefault = (*attr)->sigdefault;
+        k.sigmask = (*attr)->sigmask;
     }
-    extern char **environ;
     int saved = errno, child;
-    if (__os_spawn(&child, path, fa ? fa->__a : NULL, fa ? fa->__n : 0,
-                   attr ? &k : NULL, argv, envp ? envp : environ) < 0) {
+    if (__os_spawn(&child, path, fa ? (*fa)->a : NULL, fa ? (*fa)->n : 0,
+                   attr ? &k : NULL, argv, envp) < 0) {
         int err = errno;
         errno = saved;
         return err;
@@ -230,17 +257,20 @@ WEAK int posix_spawn(pid_t *restrict pid, const char *restrict path,
 }
 
 /* exec*p's search, and its rule for a file the kernel cannot run
- * (ENOEXEC): /bin/sh runs it as a script */
+ * (ENOEXEC): /bin/sh runs it as a script. With no PATH, the system's
+ * program directories -- EmbLinkOS's /system/bin among them. */
 WEAK int posix_spawnp(pid_t *restrict pid, const char *restrict file,
                       const posix_spawn_file_actions_t *fa,
                       const posix_spawnattr_t *restrict attr,
                       char *const argv[restrict], char *const envp[restrict])
 {
+    if (!file)
+        return EINVAL;
     if (strchr(file, '/'))
         return posix_spawn(pid, file, fa, attr, argv, envp);
     const char *path = getenv("PATH");
     if (!path)
-        path = "/usr/local/bin:/bin:/usr/bin";
+        path = "/system/bin:/usr/local/bin:/bin:/usr/bin";
     size_t fl = strlen(file);
     int seen_eacces = 0;
     char buf[PATH_MAX];
@@ -271,6 +301,8 @@ WEAK int posix_spawnp(pid_t *restrict pid, const char *restrict file,
                 free(v);
                 return e;
             }
+            if (e == 0)
+                return 0;
             if (e == EACCES)
                 seen_eacces = 1;
             else if (e != ENOENT && e != ENOTDIR)

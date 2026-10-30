@@ -860,10 +860,16 @@ libc-emblinkos: embcc embar
 	    o=$(BUILD)/libc/emblinkos/$$(echo $$f | tr / _ | sed 's/\.c$$/.o/'); \
 	    ./embcc -c -O2 $(LIBC_INC) -I$(EMBLINKOS)/user/lib $$f -o $$o || exit 1; \
 	done
-	@rm -f $(BUILD)/libc/emblinkos/libc.a
+	@rm -f $(BUILD)/libc/emblinkos/libc.a $(BUILD)/libc/emblinkos/libm.a
 	@$${EMBCC_X86_AR:-./embar} rcs $(BUILD)/libc/emblinkos/libc.a \
 	    $(BUILD)/libc/emblinkos/*.o
-	@echo "libc: $(BUILD)/libc/emblinkos/libc.a"
+	@# libm.a holds nothing: the math is in libc.a, as glibc's is, and an
+	@# empty one beside it keeps a program's -lm from finding another libc's
+	@printf '' > $(BUILD)/libc/emblinkos/libm-empty.c
+	@./embcc -c $(BUILD)/libc/emblinkos/libm-empty.c -o $(BUILD)/libc/emblinkos/libm-empty.o.x
+	@$${EMBCC_X86_AR:-./embar} rcs $(BUILD)/libc/emblinkos/libm.a \
+	    $(BUILD)/libc/emblinkos/libm-empty.o.x
+	@echo "libc: $(BUILD)/libc/emblinkos/libc.a (+ an empty libm.a)"
 
 # Linux, which is the first target this library reaches with NO other C
 # library underneath it: lib/libc/os/linux/backend.c issues syscalls, so

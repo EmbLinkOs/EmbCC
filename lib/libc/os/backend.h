@@ -456,6 +456,10 @@ struct __os_spawn_attr {
     int pgroup;
     unsigned long long sigdefault, sigmask;
 };
+/* The attribute flags this backend's spawn honours. posix_spawnattr_setflags
+ * refuses the others with ENOTSUP at the moment they are set -- a flag
+ * that would be silently ignored is a promise nobody keeps. */
+int  __os_spawn_flags(void);
 /* 0 with *pid set, or -1 with errno -- including an error in the child
  * before it ran path (a file action that failed, a path not found),
  * which the parent learns of here rather than as an exit status */

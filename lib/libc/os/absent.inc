@@ -359,6 +359,13 @@ int __os_execve(const char *path, char *const argv[], char *const envp[])
 }
 #endif
 
+#ifndef OS_HAS_spawn_flags
+int __os_spawn_flags(void)
+{
+    return 0;
+}
+#endif
+
 #ifndef OS_HAS_spawn
 int __os_spawn(int *pid, const char *path, const struct __os_spawn_action *actions, int nactions, const struct __os_spawn_attr *attr, char *const argv[], char *const envp[])
 {
