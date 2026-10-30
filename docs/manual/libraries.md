@@ -159,7 +159,7 @@ and, of POSIX's and the common Unix ones, `<arpa/inet.h>` `<dirent.h>`
 `<libgen.h>` `<malloc.h>` `<netdb.h>` `<netinet/in.h>` `<netinet/tcp.h>` `<nl_types.h>`
 `<paths.h>` `<poll.h>` `<pthread.h>` `<pty.h>` `<pwd.h>` `<sched.h>` `<search.h>`
 `<regex.h>` `<semaphore.h>`
-`<spawn.h>` `<strings.h>` `<syslog.h>` `<termios.h>` `<unistd.h>` `<utime.h>` and
+`<spawn.h>` `<strings.h>` `<syslog.h>` `<termios.h>` `<unistd.h>` `<utime.h>` `<wordexp.h>` and
 `<sys/file.h>` `<sys/ioctl.h>` `<sys/mman.h>` `<sys/param.h>`
 `<sys/random.h>` `<sys/resource.h>` `<sys/select.h>` `<sys/socket.h>`
 `<sys/stat.h>` `<sys/statvfs.h>` `<sys/sysmacros.h>` `<sys/time.h>`
@@ -212,6 +212,7 @@ freestanding `<limits.h>` for the type widths.
 | `<pthread.h>` | threads (`pthread_create`, `join`, `detach`, `exit`, `self`, `equal`, `once`, `atfork`, GNU's `tryjoin_np`, `timedjoin_np`, `setname_np`, `getname_np`), their attributes, the three kinds of mutex with `timedlock` and POSIX.1-2024's `clocklock`, condition variables with a clock attribute and `clockwait`, read-write locks (readers first, as glibc's default), barriers, spin locks, thread-specific data (`pthread_key_create` and the rest, with destructor rounds). Process-shared objects, robust and priority-protocol mutexes are refused with `ENOTSUP`; `pthread_cancel` is `ENOTSUP`, as no call here is a cancellation point; a scheduling policy other than `SCHED_OTHER` is `EPERM` |
 | `<semaphore.h>` | unnamed semaphores: `sem_init`, `sem_wait`, `sem_trywait`, `sem_timedwait`, `sem_clockwait`, `sem_post`, `sem_getvalue`, `sem_destroy`. `sem_open` is `ENOSYS` and a process-shared `sem_init` `ENOTSUP`: both need memory and a futex another process can reach |
 | `<regex.h>` | POSIX's basic and extended syntax with glibc's numbers and messages, and GNU's `\+ \? \|` in basic syntax, `\< \> \b \B \w \W \s \S`, back-references in both, `REG_STARTEND`. The match is POSIX's -- leftmost, then longest -- found by backtracking; a pattern that would take more than 20 million steps at one position is `REG_ESPACE`, not a hang |
+| `<wordexp.h>` | Every expansion the shell does to a word, in its order: tildes, parameters (with all of `${...}`'s forms), command substitution (`/bin/sh -c`, its standard error discarded unless `WRDE_SHOWERR`), arithmetic, field splitting on `IFS`, pathname expansion, quote removal. glibc's numbers. Where glibc departs from the shell, this follows the shell: a quoted empty expansion is one empty word, an expansion's result is matched against files, arithmetic reads names and has every C operator, and `${x:?}` is `WRDE_BADVAL` |
 | `<glob.h>`, `<ftw.h>` | `glob` and `globfree` with every flag glibc has (`GLOB_BRACE`, `GLOB_TILDE`, `GLOB_ONLYDIR`, `GLOB_PERIOD`, `GLOB_ALTDIRFUNC` among them), `glob_pattern_p`; `nftw` (with GNU's `FTW_ACTIONRETVAL`) and `ftw`, holding one directory open at a time whatever `fds` allows |
 | `<syslog.h>` | `openlog`, `syslog`, `vsyslog`, `closelog`, `setlogmask`: RFC 3164 lines to `/dev/log`, as glibc writes them. With nothing listening there a message is not dropped, as glibc drops it: it goes to `/dev/console` under `LOG_CONS` and to standard error otherwise |
 | `<langinfo.h>`, `<nl_types.h>` | `nl_langinfo` for the `"C"` locale -- its formats, names, `RADIXCHAR` and the yes/no expressions -- with `CODESET` "UTF-8", the encoding its multibyte functions use (glibc's plain "C" says "ANSI_X3.4-1968"); no message catalogs: `catopen` fails with `ENOENT` and `catgets` returns the program's own message |
@@ -426,7 +427,7 @@ forms of the time functions.
 |---|---|
 | C11 Annex K (`*_s` functions) | |
 | named and process-shared semaphores, process-shared locks, thread cancellation | see `<pthread.h>` and `<semaphore.h>` above |
-| `<wordexp.h>`, `<iconv.h>` | |
+| `<iconv.h>` | |
 | locales other than `"C"`, and the `_l` functions that take one | |
 | System V IPC, asynchronous I/O (`<aio.h>`), message queues | |
 
