@@ -32,6 +32,7 @@
 #   posix-regex.c    regcomp/regexec, 88 cases with glibc's answers
 #   posix-wordexp.c  wordexp, 105 strings; its command substitutions run
 #                    this program as /bin/sh, as posix-process.c's do
+#   posix-iconv.c    iconv, 59 conversions with glibc's answers
 #
 # At -O0 and -O2, each exiting 42. Skipped without a kernel for
 # tests/harness/linux (EMBCC_LINUX_KERNEL_X86_64 / _AARCH64).
@@ -45,7 +46,8 @@ progs="tmpfile next-toward quick-exit multibyte-stdlib inttypes-formats
        tgmath-selection wide-streams wide-printf wide-scanf c23-library
        strtod-rounding math-special posix-files posix-strings posix-stdio
        posix-fd posix-process posix-signals posix-net posix-time
-       malloc-gnu posix-threads posix-glob posix-regex posix-wordexp"
+       malloc-gnu posix-threads posix-glob posix-regex posix-wordexp
+       posix-iconv"
 
 A64LD=${EMBCC_AARCH64_LD:-aarch64-elf-ld}
 A64GCC=$(dirname "$(aarch64-elf-gcc -print-libgcc-file-name 2>/dev/null)")
