@@ -77,9 +77,14 @@ static int wide(void)
     const wchar_t *wp = L"x\xe9y";
     char mb[16];
     CHECK(wcsnrtombs(mb, &wp, 2, sizeof mb, 0) == 3);
+    /* the planes above the first need a wchar_t wider than 16 bits,
+     * which Xtensa's (and Windows') is not */
     static const struct { int c, w; } ww[] = {
-        { 'a', 1 }, { 0x300, 0 }, { 0x4e00, 2 }, { 0x1f600, 2 }, { 0xad, 1 },
-        { 0x200b, 0 }, { 0x7f, -1 }, { 0xe000, 1 }, { 0x10ffff, -1 }, { 0xffff, -1 },
+        { 'a', 1 }, { 0x300, 0 }, { 0x4e00, 2 }, { 0xad, 1 },
+        { 0x200b, 0 }, { 0x7f, -1 }, { 0xe000, 1 }, { 0xffff, -1 },
+#if WCHAR_MAX > 0xffff
+        { 0x1f600, 2 }, { 0x10ffff, -1 },
+#endif
     };
     for (unsigned i = 0; i < sizeof ww / sizeof ww[0]; i++)
         CHECK(wcwidth(ww[i].c) == ww[i].w);
@@ -129,7 +134,13 @@ static int generators(void)
     CHECK(a64l("./") == 64 && !strcmp(l64a(123456), ".7S"));
     CHECK(!strcmp(l64a(-1), "zzzzz1") && a64l(".7S") == 123456);
     CHECK(rpmatch("yes") == 1 && rpmatch("No") == 0 && rpmatch("?") == -1);
-    CHECK(strtoq("-99", 0, 10) == -99 && arc4random_uniform(10) < 10);
+    CHECK(strtoq("-99", 0, 10) == -99);
+#ifdef EMBCC_TEST_HAS_FS
+    /* only where there is a system: on a board the bytes come from its
+     * clock and entropy source, and the comparisons of simulators that
+     * run this corpus want every program to run the same instructions */
+    CHECK(arc4random_uniform(10) < 10);
+#endif
     if (DBL_MANT_DIG != 53)
         return 0;
     int dp, sg;
