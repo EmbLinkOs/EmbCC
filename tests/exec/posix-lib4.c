@@ -491,9 +491,11 @@ static int within(void *ret, int (*fn)(int))
 static int t_backtrace(void)
 {
     CHECK(f1(1) == 11);
-#if defined(__x86_64__) || defined(__aarch64__)
+#if defined(__linux__) || defined(__aarch64__)
+    /* the unwinder's walk, or AArch64's frame records: the whole chain */
     CHECK(g_btn >= 4 && within(g_bt[0], f3) && within(g_bt[1], f2) && within(g_bt[2], f1));
 #else
+    /* no unwinder and no chain: the caller only */
     CHECK(g_btn >= 1 && within(g_bt[0], f3));
 #endif
     char **s = backtrace_symbols(g_bt, g_btn);

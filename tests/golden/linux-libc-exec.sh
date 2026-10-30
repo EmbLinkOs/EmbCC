@@ -84,13 +84,17 @@ for arch in x86_64 aarch64; do
                 fail=1; continue; }
             if [ $arch = x86_64 ]; then
                 "$EMBCC_ROOT/embld" -o "$out/$tag.bin" "$LIBDIR/crt1.o" \
-                    "$out/$tag.o" "$LIBDIR/libc.a" > "$out/$tag.ld" 2>&1
+                    "$out/$tag.o" "$LIBDIR/libc.a" "$LIBDIR/librt.a" \
+                    > "$out/$tag.ld" 2>&1
             else
                 # embld writes no AArch64 executable; binary128 arithmetic
                 # comes from libgcc, after libc.a (as tests/golden/linux.sh).
+                # librt.a before it, as the driver links: its unwinder is
+                # backtrace's, where libgcc's knows none of these frames.
                 "$A64LD" -static -T "$EMBCC_ROOT/lib/libc/os/linux/link.ld" \
                     -o "$out/$tag.bin" "$LIBDIR/crt1.o" "$out/$tag.o" \
-                    "$LIBDIR/libc.a" -L"$A64GCC" -lgcc > "$out/$tag.ld" 2>&1
+                    "$LIBDIR/libc.a" "$LIBDIR/librt.a" -L"$A64GCC" -lgcc \
+                    > "$out/$tag.ld" 2>&1
             fi || { echo "FAIL $tag: did not link"; head -3 "$out/$tag.ld"
                     fail=1; continue; }
             mkdir -p "$out/root/bin"
