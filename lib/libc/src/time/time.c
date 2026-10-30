@@ -13,6 +13,7 @@
  * of time_t, branch-free, and needs no table.
  */
 #include <time.h>
+#include <errno.h>
 
 #include <stdio.h>
 #include <string.h>
@@ -138,10 +139,22 @@ clock_t clock(void)
     return (clock_t)(ns / (1000000000L / CLOCKS_PER_SEC));
 }
 
+/* TIME_UTC is the backend's real-time clock, to the nanosecond where it
+ * has one -- a deadline for cnd_timedwait is "now plus a little", and a
+ * "now" rounded down to the second is a deadline already past -- and
+ * whole seconds from __os_time where it has only those. */
 int timespec_get(struct timespec *ts, int base)
 {
     if (base != TIME_UTC)
         return 0;
+    int saved = errno;
+    struct __os_timespec t;
+    if (__os_clock_gettime(0, &t) == 0) {
+        ts->tv_sec = (time_t)t.sec;
+        ts->tv_nsec = t.nsec;
+        return base;
+    }
+    errno = saved;
     long now = __os_time();
     if (now < 0)
         return 0;
@@ -150,11 +163,21 @@ int timespec_get(struct timespec *ts, int base)
     return base;
 }
 
-/* timespec_get counts whole seconds -- __os_time's -- so that is its
- * resolution; where there is no clock there is no TIME_UTC either. */
 int timespec_getres(struct timespec *ts, int base)
 {
-    if (base != TIME_UTC || __os_time() < 0)
+    if (base != TIME_UTC)
+        return 0;
+    int saved = errno;
+    struct __os_timespec t;
+    if (__os_clock_getres(0, &t) == 0) {
+        if (ts) {
+            ts->tv_sec = (time_t)t.sec;
+            ts->tv_nsec = t.nsec;
+        }
+        return base;
+    }
+    errno = saved;
+    if (__os_time() < 0)
         return 0;
     if (ts) {
         ts->tv_sec = 1;

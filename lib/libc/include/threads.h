@@ -78,9 +78,8 @@ typedef struct { int __state; } once_flag;
 #define ONCE_FLAG_INIT { 0 }
 #endif
 
-/* Thread-specific storage needs thread-local storage underneath, which
- * this compiler does not have; tss_create reports failure rather than
- * handing back a key that every thread shares. */
+/* Thread-specific storage: POSIX's keys (<pthread.h>), a table in each
+ * thread's record, so it needs no thread-local storage underneath. */
 typedef int tss_t;
 typedef void (*tss_dtor_t)(void *);
 #define TSS_DTOR_ITERATIONS 4

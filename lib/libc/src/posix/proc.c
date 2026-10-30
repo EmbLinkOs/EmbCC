@@ -83,7 +83,20 @@ WEAK int getlogin_r(char *name, size_t n)
 
 /* ---- fork and exec --------------------------------------------------------- */
 
-WEAK pid_t fork(void) { return __os_fork(); }
+/* pthread_atfork's handlers, when anything registered one: a weak
+ * reference, so a program that never names a pthread function does not
+ * link the thread library to fork */
+extern void __pthread_atfork_run(int phase) __attribute__((weak));
+
+WEAK pid_t fork(void)
+{
+    if (__pthread_atfork_run)
+        __pthread_atfork_run(0);
+    pid_t p = __os_fork();
+    if (__pthread_atfork_run && p >= 0)
+        __pthread_atfork_run(p == 0 ? 2 : 1);
+    return p;
+}
 
 /* vfork's one promise is that the child only execs or _exits, which a
  * fork keeps too */

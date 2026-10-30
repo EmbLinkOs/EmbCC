@@ -174,7 +174,7 @@ void  __libc_tls_free(void *tp);
  * actually touches are ever backed by memory, and the lowest page is
  * unmapped so running off the end faults instead of quietly writing
  * into whatever mmap put below it. */
-#define LSTACK_SIZE (1024 * 1024)
+#define LSTACK_SIZE (8 * 1024 * 1024)       /* glibc's default; mapped on demand */
 #define LGUARD_SIZE 4096
 
 struct lthread {
