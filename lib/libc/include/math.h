@@ -6,6 +6,8 @@
 #ifndef _MATH_H
 #define _MATH_H
 
+#include <features.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -56,7 +58,7 @@ int __signbitl(long double x);
  * isnan and isinf of nearly every argument it is given. */
 #define isfinite(x)   __builtin_isfinite(x)
 #define isnan(x)      __builtin_isnan(x)
-#define isinf(x)      __builtin_isinf(x)
+#define isinf(x)      __builtin_isinf_sign(x)   /* -1 for -inf, as glibc */
 #define isnormal(x)   __builtin_isnormal(x)
 #define signbit(x)    __builtin_signbit(x)
 /* ...and the comparisons that are quiet: a NaN operand is false (true for
@@ -231,6 +233,69 @@ __C23_MATH_DECL(double, )
 __C23_MATH_DECL(float, f)
 __C23_MATH_DECL(long double, l)
 #undef __C23_MATH_DECL
+
+/* C23's narrowing arithmetic, rounded once (math/more.c), total order,
+ * NaN payloads, canonical encodings, and glibc 2.36's fromfp family */
+#define FP_INT_UPWARD            0
+#define FP_INT_DOWNWARD          1
+#define FP_INT_TOWARDZERO        2
+#define FP_INT_TONEARESTFROMZERO 3
+#define FP_INT_TONEAREST         4
+#define FP_LLOGB0   (-__LONG_MAX__ - 1)
+#define FP_LLOGBNAN (-__LONG_MAX__ - 1)
+float fadd(double, double), fsub(double, double), fmul(double, double);
+float fdiv(double, double), fsqrt(double), ffma(double, double, double);
+float faddl(long double, long double), fsubl(long double, long double);
+float fmull(long double, long double), fdivl(long double, long double);
+float fsqrtl(long double), ffmal(long double, long double, long double);
+double daddl(long double, long double), dsubl(long double, long double);
+double dmull(long double, long double), ddivl(long double, long double);
+double dsqrtl(long double), dfmal(long double, long double, long double);
+#define __C23_MORE_DECL(T, S)                                               \
+    int totalorder##S(const T *, const T *);                                \
+    int totalordermag##S(const T *, const T *);                             \
+    T getpayload##S(const T *);                                             \
+    int setpayload##S(T *, T), setpayloadsig##S(T *, T);                    \
+    int canonicalize##S(T *, const T *);                                    \
+    long llogb##S(T);                                                       \
+    __INTMAX_TYPE__ fromfp##S(T, int, unsigned);                            \
+    __INTMAX_TYPE__ fromfpx##S(T, int, unsigned);                           \
+    __UINTMAX_TYPE__ ufromfp##S(T, int, unsigned);                          \
+    __UINTMAX_TYPE__ ufromfpx##S(T, int, unsigned);
+__C23_MORE_DECL(double, )
+__C23_MORE_DECL(float, f)
+__C23_MORE_DECL(long double, l)
+#undef __C23_MORE_DECL
+
+#if defined(__EMB_POSIX)
+/* XSI's Bessel functions of the first and second kind */
+double j0(double), j1(double), jn(int, double);
+double y0(double), y1(double), yn(int, double);
+double scalb(double, double);
+#endif
+#if defined(__EMB_GNU)
+float j0f(float), j1f(float), jnf(int, float);
+float y0f(float), y1f(float), ynf(int, float);
+long double j0l(long double), j1l(long double), jnl(int, long double);
+long double y0l(long double), y1l(long double), ynl(int, long double);
+double gamma(double), drem(double, double), pow10(double);
+double significand(double);
+float gammaf(float), dremf(float, float), pow10f(float), scalbf(float, float);
+float significandf(float);
+long double gammal(long double), dreml(long double, long double);
+long double pow10l(long double), scalbl(long double, long double);
+long double significandl(long double);
+long double lgammal_r(long double, int *);
+void sincos(double, double *, double *);
+void sincosf(float, float *, float *);
+void sincosl(long double, long double *, long double *);
+double fmaxmag(double, double), fminmag(double, double);
+float fmaxmagf(float, float), fminmagf(float, float);
+long double fmaxmagl(long double, long double), fminmagl(long double, long double);
+int finite(double), finitef(float), finitel(long double);
+int (isinf)(double), isinff(float), isinfl(long double);
+int (isnan)(double), isnanf(float), isnanl(long double);
+#endif
 
 #if __STDC_VERSION__ >= 202311L
 #define iszero(x)      ((x) == 0)

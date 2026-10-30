@@ -102,6 +102,28 @@ int raise(int sig);
 
 union sigval { int sival_int; void *sival_ptr; };
 
+/* how a timer or a message queue says something happened */
+#define SIGEV_SIGNAL    0
+#define SIGEV_NONE      1
+#define SIGEV_THREAD    2
+#define SIGEV_THREAD_ID 4
+struct sigevent {
+    union sigval sigev_value;
+    int sigev_signo;
+    int sigev_notify;
+    union {
+        struct {
+            void (*_function)(union sigval);
+            void *_attribute;           /* a pthread_attr_t *, or NULL */
+        } _thread;
+        int _tid;                       /* SIGEV_THREAD_ID: Linux's */
+        char __pad[64 - 2 * sizeof(int) - sizeof(union sigval)];
+    } __u;
+};
+#define sigev_notify_function   __u._thread._function
+#define sigev_notify_attributes __u._thread._attribute
+#define sigev_notify_thread_id  __u._tid
+
 /* Linux's siginfo_t: 128 bytes, the three ints first, then per-signal
  * fields at offset 16 on both 64-bit ABIs */
 typedef struct {
@@ -203,6 +225,7 @@ int  sigwaitinfo(const sigset_t *__restrict set, siginfo_t *__restrict info);
 int  sigtimedwait(const sigset_t *__restrict set, siginfo_t *__restrict info,
                   const struct timespec *__restrict timeout);
 int  sigaltstack(const stack_t *__restrict ss, stack_t *__restrict old);
+int  sigqueue(pid_t pid, int sig, const union sigval value);
 int  sigemptyset(sigset_t *set);
 int  sigfillset(sigset_t *set);
 int  sigaddset(sigset_t *set, int sig);

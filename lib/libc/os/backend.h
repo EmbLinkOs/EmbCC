@@ -87,6 +87,11 @@ int  __os_isatty(int fd);
  * 0 on success, -1 when the OS cannot provide them. */
 int  __os_getentropy(void *buf, size_t n);
 
+/* The auxiliary vector the kernel handed the program -- (type, value)
+ * pairs of longs ending with type 0 -- or NULL where there is none:
+ * getauxval and dl_iterate_phdr read it. */
+const long *__os_auxv(void);
+
 /* ---- threads, and blocking ------------------------------------------------
  *
  * Optional: a target that implements none of these is single-threaded,

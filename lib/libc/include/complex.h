@@ -6,6 +6,8 @@
 #ifndef _COMPLEX_H
 #define _COMPLEX_H
 
+#include <features.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -102,6 +104,13 @@ long double _Complex catanhl(long double _Complex);
 #define cimagf(z) ((float)__imag__ (z))
 #define creall(z) ((long double)__real__ (z))
 #define cimagl(z) ((long double)__imag__ (z))
+
+#if defined(__EMB_GNU)
+/* GNU's base-10 logarithm (math/more.c) */
+double _Complex clog10(double _Complex);
+float _Complex clog10f(float _Complex);
+long double _Complex clog10l(long double _Complex);
+#endif
 
 #ifdef __cplusplus
 }

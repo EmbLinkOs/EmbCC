@@ -2,6 +2,8 @@
 #ifndef _SYS_RESOURCE_H
 #define _SYS_RESOURCE_H
 
+#include <features.h>
+
 #include <sys/time.h>
 
 #ifdef __cplusplus
@@ -41,6 +43,26 @@ struct rusage {
 int getrlimit(int resource, struct rlimit *lim);
 int setrlimit(int resource, const struct rlimit *lim);
 int getrusage(int who, struct rusage *ru);
+
+
+#define PRIO_PROCESS 0
+#define PRIO_PGRP    1
+#define PRIO_USER    2
+int getpriority(int which, id_t who);
+#if defined(__EMB_GNU)
+int prlimit(pid_t pid, int resource, const struct rlimit *newlim,
+            struct rlimit *old);
+#endif
+int setpriority(int which, id_t who, int prio);
+
+#if defined(__EMB_GNU) || defined(_LARGEFILE64_SOURCE)
+/* off_t is 64 bits here: the large-file names are the same calls */
+#define rlim64_t rlim_t
+#define rlimit64 rlimit
+#define getrlimit64 getrlimit
+#define setrlimit64 setrlimit
+#define prlimit64 prlimit
+#endif
 
 #ifdef __cplusplus
 }

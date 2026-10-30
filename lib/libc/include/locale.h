@@ -8,7 +8,8 @@
  *
  * So `setlocale` accepts "C" and "" -- which the standard says is the
  * implementation-defined native locale, and here the native locale IS
- * "C" -- and returns NULL for anything else. That is the same interface
+ * "C" -- "POSIX", and "C.UTF-8", since this "C"'s multibyte encoding is
+ * UTF-8; it returns NULL for anything else. That is the same interface
  * a hosted library offers; a program that checks the result learns the
  * truth, and one that does not is running in "C" either way, which is
  * what it would have got.
@@ -34,6 +35,14 @@ extern "C" {
 #define LC_MONETARY 3
 #define LC_NUMERIC  4
 #define LC_TIME     5
+#define LC_MESSAGES 6
+/* GNU's, which name parts of a locale "C" has nothing for */
+#define LC_PAPER          7
+#define LC_NAME           8
+#define LC_ADDRESS        9
+#define LC_TELEPHONE      10
+#define LC_MEASUREMENT    11
+#define LC_IDENTIFICATION 12
 
 struct lconv {
     /* Numeric, and the only two the "C" locale gives content to. */
@@ -68,6 +77,30 @@ struct lconv {
 
 char *setlocale(int category, const char *locale);
 struct lconv *localeconv(void);
+
+/* POSIX's locale objects (src/stdlib/locale.c). There is one locale, so
+ * there is one object: newlocale gives it for every name setlocale
+ * accepts, and each _l function is its plain counterpart. */
+#include <bits/locale_t.h>
+#define LC_GLOBAL_LOCALE ((locale_t)-1L)
+#define LC_CTYPE_MASK          (1 << LC_CTYPE)
+#define LC_NUMERIC_MASK        (1 << LC_NUMERIC)
+#define LC_TIME_MASK           (1 << LC_TIME)
+#define LC_COLLATE_MASK        (1 << LC_COLLATE)
+#define LC_MONETARY_MASK       (1 << LC_MONETARY)
+#define LC_MESSAGES_MASK       (1 << LC_MESSAGES)
+#define LC_PAPER_MASK          (1 << LC_PAPER)
+#define LC_NAME_MASK           (1 << LC_NAME)
+#define LC_ADDRESS_MASK        (1 << LC_ADDRESS)
+#define LC_TELEPHONE_MASK      (1 << LC_TELEPHONE)
+#define LC_MEASUREMENT_MASK    (1 << LC_MEASUREMENT)
+#define LC_IDENTIFICATION_MASK (1 << LC_IDENTIFICATION)
+#define LC_ALL_MASK            0x1ffe
+locale_t newlocale(int mask, const char *name, locale_t base);
+locale_t duplocale(locale_t loc);
+void     freelocale(locale_t loc);
+locale_t uselocale(locale_t loc);
+struct lconv *localeconv_l(locale_t loc);
 
 #ifdef __cplusplus
 }

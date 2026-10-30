@@ -45,6 +45,12 @@ int nftw(const char *path,
                    struct FTW *ftw),
          int fds, int flags);
 
+#if defined(__EMB_GNU) || defined(_LARGEFILE64_SOURCE)
+/* off_t is 64 bits here: the large-file names are the same calls */
+#define ftw64 ftw
+#define nftw64 nftw
+#endif
+
 #ifdef __cplusplus
 }
 #endif

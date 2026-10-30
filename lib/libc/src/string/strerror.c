@@ -116,3 +116,93 @@ __attribute__((weak)) int strerror_r(int errnum, char *buf, size_t n)
     }
     return !known ? EINVAL : len >= n ? ERANGE : 0;
 }
+
+/* ---- glibc's: the macro's name, and the message without "Unknown" -------- */
+
+static const char *const names[] = {
+    [EPERM] = "EPERM",
+    [ENOENT] = "ENOENT",
+    [ESRCH] = "ESRCH",
+    [EINTR] = "EINTR",
+    [EIO] = "EIO",
+    [ENXIO] = "ENXIO",
+    [E2BIG] = "E2BIG",
+    [ENOEXEC] = "ENOEXEC",
+    [EBADF] = "EBADF",
+    [ECHILD] = "ECHILD",
+    [EAGAIN] = "EAGAIN",
+    [ENOMEM] = "ENOMEM",
+    [EACCES] = "EACCES",
+    [EFAULT] = "EFAULT",
+    [EBUSY] = "EBUSY",
+    [EEXIST] = "EEXIST",
+    [EXDEV] = "EXDEV",
+    [ENODEV] = "ENODEV",
+    [ENOTDIR] = "ENOTDIR",
+    [EISDIR] = "EISDIR",
+    [EINVAL] = "EINVAL",
+    [ENFILE] = "ENFILE",
+    [EMFILE] = "EMFILE",
+    [ENOTTY] = "ENOTTY",
+    [EFBIG] = "EFBIG",
+    [ENOSPC] = "ENOSPC",
+    [ESPIPE] = "ESPIPE",
+    [EROFS] = "EROFS",
+    [EMLINK] = "EMLINK",
+    [EPIPE] = "EPIPE",
+    [EDOM] = "EDOM",
+    [ERANGE] = "ERANGE",
+    [EDEADLK] = "EDEADLK",
+    [ENAMETOOLONG] = "ENAMETOOLONG",
+    [ENOLCK] = "ENOLCK",
+    [ENOSYS] = "ENOSYS",
+    [ENOTEMPTY] = "ENOTEMPTY",
+    [ELOOP] = "ELOOP",
+    [ENOMSG] = "ENOMSG",
+    [EIDRM] = "EIDRM",
+    [ENOLINK] = "ENOLINK",
+    [EPROTO] = "EPROTO",
+    [EBADMSG] = "EBADMSG",
+    [EOVERFLOW] = "EOVERFLOW",
+    [ENOTSOCK] = "ENOTSOCK",
+    [EDESTADDRREQ] = "EDESTADDRREQ",
+    [EMSGSIZE] = "EMSGSIZE",
+    [EPROTOTYPE] = "EPROTOTYPE",
+    [ENOPROTOOPT] = "ENOPROTOOPT",
+    [EPROTONOSUPPORT] = "EPROTONOSUPPORT",
+    [EOPNOTSUPP] = "EOPNOTSUPP",
+    [EAFNOSUPPORT] = "EAFNOSUPPORT",
+    [EADDRINUSE] = "EADDRINUSE",
+    [EADDRNOTAVAIL] = "EADDRNOTAVAIL",
+    [ENETDOWN] = "ENETDOWN",
+    [ENETUNREACH] = "ENETUNREACH",
+    [ENETRESET] = "ENETRESET",
+    [ECONNABORTED] = "ECONNABORTED",
+    [ECONNRESET] = "ECONNRESET",
+    [ENOBUFS] = "ENOBUFS",
+    [EISCONN] = "EISCONN",
+    [ENOTCONN] = "ENOTCONN",
+    [ETIMEDOUT] = "ETIMEDOUT",
+    [ECONNREFUSED] = "ECONNREFUSED",
+    [EHOSTUNREACH] = "EHOSTUNREACH",
+    [EALREADY] = "EALREADY",
+    [EINPROGRESS] = "EINPROGRESS",
+    [ECANCELED] = "ECANCELED",
+    [EOWNERDEAD] = "EOWNERDEAD",
+    [ENOTRECOVERABLE] = "ENOTRECOVERABLE",
+    [EILSEQ] = "EILSEQ",
+};
+
+__attribute__((weak)) const char *strerrorname_np(int errnum)
+{
+    if (errnum == 0)
+        return "0";
+    return errnum > 0 && (size_t)errnum < sizeof names / sizeof names[0] ?
+           names[errnum] : NULL;
+}
+
+__attribute__((weak)) const char *strerrordesc_np(int errnum)
+{
+    return errnum >= 0 && (size_t)errnum < sizeof msg / sizeof msg[0] ?
+           msg[errnum] : NULL;
+}

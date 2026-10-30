@@ -50,7 +50,7 @@ int fwide(FILE *f, int mode)
 
 /* One character in; WEOF at the end, and WEOF with *bad set on an encoding
  * error. */
-static wint_t getwc_unlocked(FILE *f, int *bad)
+static wint_t wide_getc_raw(FILE *f, int *bad)
 {
     wide_orient(f);
     if (f->ungot >= 0) {
@@ -80,7 +80,7 @@ static wint_t getwc_unlocked(FILE *f, int *bad)
     }
 }
 
-static wint_t putwc_unlocked(wchar_t c, FILE *f)
+static wint_t wide_putc_raw(wchar_t c, FILE *f)
 {
     wide_orient(f);
     char b[4];
@@ -100,7 +100,7 @@ wint_t fgetwc(FILE *f)
     if (!f)
         return WEOF;
     __flockfile(f);
-    wint_t c = getwc_unlocked(f, NULL);
+    wint_t c = wide_getc_raw(f, NULL);
     __funlockfile(f);
     return c;
 }
@@ -113,7 +113,7 @@ wint_t fputwc(wchar_t c, FILE *f)
     if (!f)
         return WEOF;
     __flockfile(f);
-    wint_t r = putwc_unlocked(c, f);
+    wint_t r = wide_putc_raw(c, f);
     __funlockfile(f);
     return r;
 }
@@ -148,7 +148,7 @@ wchar_t *fgetws(wchar_t *restrict s, int n, FILE *restrict f)
     int i = 0, bad = 0;
     __flockfile(f);
     while (i < n - 1) {
-        wint_t c = getwc_unlocked(f, &bad);
+        wint_t c = wide_getc_raw(f, &bad);
         if (c == WEOF)
             break;
         s[i++] = (wchar_t)c;
@@ -170,7 +170,7 @@ int fputws(const wchar_t *restrict s, FILE *restrict f)
     __flockfile(f);
     wide_orient(f);
     for (; *s; s++)
-        if (putwc_unlocked(*s, f) == WEOF) {
+        if (wide_putc_raw(*s, f) == WEOF) {
             r = EOF;
             break;
         }
@@ -283,7 +283,7 @@ static void sink_wfile(void *ctx, const wchar_t *s, size_t n)
 {
     struct wfile *w = ctx;
     for (size_t i = 0; i < n; i++)
-        if (putwc_unlocked(s[i], w->f) == WEOF)
+        if (wide_putc_raw(s[i], w->f) == WEOF)
             w->bad = 1;
 }
 
@@ -463,7 +463,7 @@ static int wscan(int (*get)(void *), void (*unget)(void *, int), void *ctx,
 
 static int get_wfile(void *ctx)
 {
-    wint_t c = getwc_unlocked((FILE *)ctx, NULL);
+    wint_t c = wide_getc_raw((FILE *)ctx, NULL);
     return c == WEOF ? EOF : (int)c;
 }
 
@@ -539,4 +539,22 @@ int swscanf(const wchar_t *restrict s, const wchar_t *restrict fmt, ...)
     int r = vswscanf(s, fmt, ap);
     va_end(ap);
     return r;
+}
+
+/* ---- the unlocked forms, GNU's: the lock nests, so these are the
+ * locked calls (see stdio/posix.c) -------------------------------------------------- */
+
+__attribute__((weak)) wint_t fgetwc_unlocked(FILE *f) { return fgetwc(f); }
+__attribute__((weak)) wint_t getwc_unlocked(FILE *f) { return fgetwc(f); }
+__attribute__((weak)) wint_t getwchar_unlocked(void) { return fgetwc(stdin); }
+__attribute__((weak)) wint_t fputwc_unlocked(wchar_t c, FILE *f) { return fputwc(c, f); }
+__attribute__((weak)) wint_t putwc_unlocked(wchar_t c, FILE *f) { return fputwc(c, f); }
+__attribute__((weak)) wint_t putwchar_unlocked(wchar_t c) { return fputwc(c, stdout); }
+__attribute__((weak)) wchar_t *fgetws_unlocked(wchar_t *restrict s, int n, FILE *restrict f)
+{
+    return fgetws(s, n, f);
+}
+__attribute__((weak)) int fputws_unlocked(const wchar_t *restrict s, FILE *restrict f)
+{
+    return fputws(s, f);
 }

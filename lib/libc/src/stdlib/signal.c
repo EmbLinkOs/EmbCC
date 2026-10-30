@@ -468,3 +468,51 @@ void abort(void)
     for (;;)
         ;
 }
+
+/* ---- sigsetjmp's other half (<setjmp.h>) -------------------------------------- */
+
+#include <setjmp.h>
+
+__attribute__((weak)) int __sigjmp_save(sigjmp_buf env, int savemask)
+{
+    env->__saved = savemask != 0;
+    if (savemask)
+        sigprocmask(SIG_BLOCK, NULL, &env->__mask);
+    return 0;
+}
+
+/* the mask first: leaving a handler by siglongjmp is what makes the
+ * signal it blocked deliverable again */
+__attribute__((weak)) void siglongjmp(sigjmp_buf env, int val)
+{
+    if (env->__saved)
+        sigprocmask(SIG_SETMASK, &env->__mask, NULL);
+    longjmp(env->__jb, val);
+}
+
+/* ---- glibc's names for signals ---------------------------------------------- */
+
+static const char *const g_abbrev[NSIG] = {
+    [SIGHUP] = "HUP", [SIGINT] = "INT", [SIGQUIT] = "QUIT", [SIGILL] = "ILL",
+    [SIGTRAP] = "TRAP", [SIGABRT] = "ABRT", [SIGBUS] = "BUS", [SIGFPE] = "FPE",
+    [SIGKILL] = "KILL", [SIGUSR1] = "USR1", [SIGSEGV] = "SEGV",
+    [SIGUSR2] = "USR2", [SIGPIPE] = "PIPE", [SIGALRM] = "ALRM",
+    [SIGTERM] = "TERM", [SIGSTKFLT] = "STKFLT", [SIGCHLD] = "CHLD",
+    [SIGCONT] = "CONT", [SIGSTOP] = "STOP", [SIGTSTP] = "TSTP",
+    [SIGTTIN] = "TTIN", [SIGTTOU] = "TTOU", [SIGURG] = "URG",
+    [SIGXCPU] = "XCPU", [SIGXFSZ] = "XFSZ", [SIGVTALRM] = "VTALRM",
+    [SIGPROF] = "PROF", [SIGWINCH] = "WINCH", [SIGIO] = "IO",
+    [SIGPWR] = "PWR", [SIGSYS] = "SYS",
+};
+
+/* "HUP" for SIGHUP; NULL for a number with no name */
+__attribute__((weak)) const char *sigabbrev_np(int sig)
+{
+    return valid(sig) ? g_abbrev[sig] : NULL;
+}
+
+/* strsignal's words, without its "Unknown signal N" */
+__attribute__((weak)) const char *sigdescr_np(int sig)
+{
+    return valid(sig) ? sys_siglist[sig] : NULL;
+}

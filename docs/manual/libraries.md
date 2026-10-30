@@ -154,17 +154,25 @@ system is reached through one small backend file (see
 `<stdlib.h>` `<stdnoreturn.h>` `<string.h>` `<tgmath.h>` `<threads.h>`
 `<time.h>` `<uchar.h>` `<wchar.h>` `<wctype.h>`
 
-and, of POSIX's and the common Unix ones, `<arpa/inet.h>` `<dirent.h>`
-`<endian.h>` `<err.h>` `<fcntl.h>` `<fnmatch.h>` `<ftw.h>` `<getopt.h>` `<glob.h>` `<grp.h>` `<langinfo.h>`
-`<libgen.h>` `<malloc.h>` `<netdb.h>` `<netinet/in.h>` `<netinet/tcp.h>` `<nl_types.h>`
-`<paths.h>` `<poll.h>` `<pthread.h>` `<pty.h>` `<pwd.h>` `<sched.h>` `<search.h>`
-`<regex.h>` `<semaphore.h>`
-`<iconv.h>` `<spawn.h>` `<strings.h>` `<syslog.h>` `<termios.h>` `<unistd.h>` `<utime.h>` `<wordexp.h>` and
-`<sys/file.h>` `<sys/ioctl.h>` `<sys/mman.h>` `<sys/param.h>`
-`<sys/random.h>` `<sys/resource.h>` `<sys/select.h>` `<sys/socket.h>`
-`<sys/stat.h>` `<sys/statvfs.h>` `<sys/sysmacros.h>` `<sys/time.h>`
-`<sys/times.h>` `<sys/types.h>` `<sys/uio.h>` `<sys/un.h>`
-`<sys/utsname.h>` `<sys/wait.h>`. Where a C header also
+and, of POSIX's and the common Unix ones, `<aio.h>` `<arpa/inet.h>`
+`<dirent.h>` `<dlfcn.h>` `<elf.h>` `<endian.h>` `<err.h>` `<error.h>` `<fcntl.h>`
+`<fmtmsg.h>` `<fnmatch.h>` `<fts.h>` `<ftw.h>` `<getopt.h>` `<glob.h>` `<grp.h>`
+`<iconv.h>` `<ifaddrs.h>` `<langinfo.h>` `<libgen.h>` `<libintl.h>` `<link.h>`
+`<malloc.h>` `<monetary.h>` `<mqueue.h>` `<net/if.h>` `<netdb.h>` `<netinet/in.h>`
+`<netinet/tcp.h>` `<netpacket/packet.h>` `<nl_types.h>` `<paths.h>` `<poll.h>`
+`<pthread.h>` `<pty.h>` `<pwd.h>` `<regex.h>` `<sched.h>` `<search.h>`
+`<semaphore.h>` `<shadow.h>` `<spawn.h>` `<strings.h>` `<syslog.h>` `<termios.h>`
+`<unistd.h>` `<utime.h>` `<utmp.h>` `<utmpx.h>` `<wordexp.h>` and
+`<sys/auxv.h>` `<sys/epoll.h>` `<sys/eventfd.h>` `<sys/file.h>` `<sys/inotify.h>`
+`<sys/ioctl.h>` `<sys/ipc.h>` `<sys/klog.h>` `<sys/mman.h>` `<sys/mount.h>`
+`<sys/msg.h>` `<sys/param.h>` `<sys/personality.h>` `<sys/prctl.h>`
+`<sys/random.h>` `<sys/reboot.h>` `<sys/resource.h>` `<sys/select.h>`
+`<sys/sem.h>` `<sys/sendfile.h>` `<sys/shm.h>` `<sys/signalfd.h>`
+`<sys/socket.h>` `<sys/stat.h>` `<sys/statfs.h>` `<sys/statvfs.h>` `<sys/swap.h>`
+`<sys/syscall.h>` `<sys/sysinfo.h>` `<sys/sysmacros.h>` `<sys/time.h>`
+`<sys/timeb.h>` `<sys/timerfd.h>` `<sys/times.h>` `<sys/types.h>`
+`<sys/uio.h>` `<sys/un.h>` `<sys/utsname.h>` `<sys/vfs.h>` `<sys/wait.h>`
+`<sys/xattr.h>`. Where a C header also
 declares POSIX names (`getline` in `<stdio.h>`, `strtok_r` in
 `<string.h>`), `<features.h>` decides: they are declared unless the
 program asked for ISO C alone (`-std=c11` with no `_POSIX_C_SOURCE`,
@@ -172,7 +180,19 @@ program asked for ISO C alone (`-std=c11` with no `_POSIX_C_SOURCE`,
 the GNU and BSD ones (`strchrnul`, `memrchr`, `clearenv`, `fopencookie`)
 are hidden too when the program names a POSIX version and nothing more,
 as with glibc. In the default mode `<string.h>` also brings
-`<strings.h>`, and `<stdlib.h>` `<alloca.h>`, as glibc's do.
+`<strings.h>`, and `<stdlib.h>` `<alloca.h>`, as glibc's do. The
+large-file names (`open64`, `stat64`, `fopen64` ...) are the same calls,
+off_t being 64 bits already: macros under `_GNU_SOURCE` or
+`_LARGEFILE64_SOURCE`, and symbols for a program that declares its own.
+
+Linux's own interfaces -- `<sys/epoll.h>` and the other descriptor
+kinds, `<sys/syscall.h>` and `syscall`, `statfs`, `sysinfo`, `prctl`,
+mounting, extended attributes, processor affinity, POSIX message queues
+and System V IPC -- are its system calls where the kernel is Linux.
+Elsewhere each fails with `ENOSYS`, unless it has a meaning the library
+can give without that kernel: `sendfile` and `copy_file_range` copy
+through a buffer, `statfs` comes from `statvfs`, `close_range` closes,
+locking memory where nothing pages already holds.
 
 Every POSIX function is defined weak, so a program -- or an operating
 system's own support library linked beside this one -- may define any of
@@ -428,8 +448,9 @@ forms of the time functions.
 |---|---|
 | C11 Annex K (`*_s` functions) | |
 | named and process-shared semaphores, process-shared locks, thread cancellation | see `<pthread.h>` and `<semaphore.h>` above |
-| locales other than `"C"`, and the `_l` functions that take one | |
-| System V IPC, asynchronous I/O (`<aio.h>`), message queues | |
+| locales other than `"C"` (`"C.UTF-8"` is `"C"`, whose encoding is UTF-8; the `_l` functions and `newlocale` work with that one) | |
+| System V IPC and POSIX message queues where the kernel is not Linux | `ENOSYS` |
+| GNU's `argp`, `obstack`, `argz`; the resolver's `res_*` and `dn_*`; Sun RPC | |
 
 ### glibc instead: `--libc=system`
 

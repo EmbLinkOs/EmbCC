@@ -11,6 +11,8 @@
 #include <string.h>
 #include <errno.h>
 #include <stdint.h>
+#include <unistd.h>
+#include <sys/stat.h>
 
 #include "../../os/backend.h"
 
@@ -264,4 +266,71 @@ __attribute__((weak)) int fputs_unlocked(const char *restrict s, FILE *restrict 
 {
     size_t n = strlen(s);
     return __fwrite_unlocked(s, 1, n, f) == n ? 0 : EOF;
+}
+
+/* ---- XSI's and GNU's leftovers ------------------------------------------------ */
+
+/* an int's bytes, as they are in memory */
+__attribute__((weak)) int getw(FILE *f)
+{
+    int w;
+    return fread(&w, sizeof w, 1, f) == 1 ? w : EOF;
+}
+
+__attribute__((weak)) int putw(int w, FILE *f)
+{
+    return fwrite(&w, sizeof w, 1, f) == 1 ? 0 : EOF;
+}
+
+/* A name for a new file: in $TMPDIR, else dir, else P_tmpdir, else
+ * /tmp -- the first that is a directory one can write to -- beginning
+ * with up to five bytes of prefix. The caller frees it. */
+__attribute__((weak)) char *tempnam(const char *dir, const char *prefix)
+{
+    const char *cand[4] = { getenv("TMPDIR"), dir, P_tmpdir, "/tmp" };
+    const char *d = 0;
+    for (int i = 0; i < 4 && !d; i++) {
+        struct stat st;
+        if (cand[i] && *cand[i] && stat(cand[i], &st) == 0 &&
+            S_ISDIR(st.st_mode) && access(cand[i], W_OK | X_OK) == 0)
+            d = cand[i];
+    }
+    if (!d) {
+        errno = ENOENT;
+        return NULL;
+    }
+    size_t pl = prefix ? strnlen(prefix, 5) : 0;
+    size_t dl = strlen(d);
+    while (dl > 1 && d[dl - 1] == '/')
+        dl--;
+    char *name = malloc(dl + 1 + pl + 6 + 1);
+    if (!name)
+        return NULL;
+    static const char abc[] =
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    for (int tries = 0; tries < 100; tries++) {
+        unsigned long long r;
+        if (getentropy(&r, sizeof r))
+            r = (unsigned long long)(uintptr_t)name * 2654435761u + (unsigned)tries;
+        memcpy(name, d, dl);
+        name[dl] = '/';
+        if (pl)
+            memcpy(name + dl + 1, prefix, pl);
+        for (int i = 0; i < 6; i++, r /= 62)
+            name[dl + 1 + pl + i] = abc[r % 62];
+        name[dl + 1 + pl + 6] = 0;
+        struct stat st;
+        if (lstat(name, &st) != 0 && errno == ENOENT)
+            return name;
+    }
+    free(name);
+    errno = EEXIST;
+    return NULL;
+}
+
+/* the unlocked forms: each call here takes its stream's lock anyway, and
+ * a program that already holds it (flockfile) may take it again */
+__attribute__((weak)) char *fgets_unlocked(char *restrict s, int n, FILE *restrict f)
+{
+    return fgets(s, n, f);
 }

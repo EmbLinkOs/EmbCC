@@ -319,3 +319,161 @@ WEAK int initgroups(const char *user, gid_t group)
         n = NGROUPS_MAX;
     return setgroups((size_t)n, list);
 }
+
+/* ---- reading any file of either format, and writing a line ---------------------- */
+
+#include <string.h>
+
+/* the next good entry of f into the caller's buffer: 0 with *res set, 0
+ * with *res NULL at the end (ENOENT, as glibc says), ERANGE when it does
+ * not fit -- the line is then read again by the next call */
+#define ENT_R(T, NAME, PARSE)                                                   \
+    static int NAME(FILE *f, T *e, char *buf, size_t n, T **res)               \
+    {                                                                           \
+        char line[1024];                                                        \
+        *res = NULL;                                                            \
+        for (;;) {                                                              \
+            long at = ftell(f);                                                 \
+            if (!f || !fgets(line, sizeof line, f))                             \
+                return ENOENT;                                                  \
+            if (line[0] == '#')                                                 \
+                continue;                                                       \
+            int r = PARSE(line, e, buf, n);                                     \
+            if (r == ERANGE) {                                                  \
+                if (at >= 0)                                                    \
+                    fseek(f, at, SEEK_SET);                                     \
+                return ERANGE;                                                  \
+            }                                                                   \
+            if (r == 0) {                                                       \
+                *res = e;                                                       \
+                return 0;                                                       \
+            }                                                                   \
+        }                                                                       \
+    }
+ENT_R(struct passwd, next_pw, parse_pw)
+ENT_R(struct group, next_gr, parse_gr)
+
+WEAK int getpwent_r(struct passwd *pw, char *buf, size_t n, struct passwd **res)
+{
+    if (!g_pwent && !(g_pwent = fopen("/etc/passwd", "r"))) {
+        *res = NULL;
+        return ENOENT;
+    }
+    return next_pw(g_pwent, pw, buf, n, res);
+}
+
+WEAK int getgrent_r(struct group *g, char *buf, size_t n, struct group **res)
+{
+    if (!g_grent && !(g_grent = fopen("/etc/group", "r"))) {
+        *res = NULL;
+        return ENOENT;
+    }
+    return next_gr(g_grent, g, buf, n, res);
+}
+
+WEAK int fgetpwent_r(FILE *f, struct passwd *pw, char *buf, size_t n,
+                     struct passwd **res)
+{
+    return next_pw(f, pw, buf, n, res);
+}
+
+WEAK int fgetgrent_r(FILE *f, struct group *g, char *buf, size_t n,
+                     struct group **res)
+{
+    return next_gr(f, g, buf, n, res);
+}
+
+WEAK struct passwd *fgetpwent(FILE *f)
+{
+    struct passwd *res;
+    errno = next_pw(f, &g_pw, g_pwbuf, sizeof g_pwbuf, &res);
+    return res;
+}
+
+WEAK struct group *fgetgrent(FILE *f)
+{
+    struct group *res;
+    errno = next_gr(f, &g_gr, g_grbuf, sizeof g_grbuf, &res);
+    return res;
+}
+
+WEAK int putpwent(const struct passwd *pw, FILE *f)
+{
+    if (!pw || !f || !pw->pw_name) {
+        errno = EINVAL;
+        return -1;
+    }
+    return fprintf(f, "%s:%s:%u:%u:%s:%s:%s\n", pw->pw_name,
+                   pw->pw_passwd ? pw->pw_passwd : "", (unsigned)pw->pw_uid,
+                   (unsigned)pw->pw_gid, pw->pw_gecos ? pw->pw_gecos : "",
+                   pw->pw_dir ? pw->pw_dir : "",
+                   pw->pw_shell ? pw->pw_shell : "") < 0 ? -1 : 0;
+}
+
+WEAK int putgrent(const struct group *g, FILE *f)
+{
+    if (!g || !f || !g->gr_name) {
+        errno = EINVAL;
+        return -1;
+    }
+    flockfile(f);
+    int r = fprintf(f, "%s:%s:%u:", g->gr_name, g->gr_passwd ? g->gr_passwd : "",
+                    (unsigned)g->gr_gid);
+    for (char **m = g->gr_mem; r >= 0 && m && *m; m++)
+        r = fprintf(f, m == g->gr_mem ? "%s" : ",%s", *m);
+    if (r >= 0)
+        r = fputc('\n', f);
+    funlockfile(f);
+    return r < 0 ? -1 : 0;
+}
+
+/* the old one: uid's /etc/passwd line, into a buffer it trusts is big */
+WEAK int getpw(uid_t uid, char *buf)
+{
+    struct passwd *pw = getpwuid(uid);
+    if (!pw)
+        return -1;
+    sprintf(buf, "%s:%s:%u:%u:%s:%s:%s", pw->pw_name, pw->pw_passwd,
+            (unsigned)pw->pw_uid, (unsigned)pw->pw_gid, pw->pw_gecos,
+            pw->pw_dir, pw->pw_shell);
+    return 0;
+}
+
+/* ---- /etc/shells ------------------------------------------------------------------ */
+
+static FILE *g_shells;
+static char g_shell[256];
+static int g_shell_default;    /* no file: the two glibc assumes */
+
+WEAK void setusershell(void)
+{
+    if (g_shells)
+        rewind(g_shells);
+    g_shell_default = 0;
+}
+
+WEAK void endusershell(void)
+{
+    if (g_shells)
+        fclose(g_shells);
+    g_shells = NULL;
+    g_shell_default = 0;
+}
+
+WEAK char *getusershell(void)
+{
+    if (!g_shells && !(g_shells = fopen("/etc/shells", "r"))) {
+        static const char *const dflt[] = { "/bin/sh", "/bin/csh" };
+        return g_shell_default < 2 ? (char *)dflt[g_shell_default++] : NULL;
+    }
+    while (fgets(g_shell, sizeof g_shell, g_shells)) {
+        char *p = g_shell;
+        while (*p == ' ' || *p == '\t')
+            p++;
+        if (*p != '/')
+            continue;          /* comments and blank lines */
+        p[strcspn(p, " \t\r\n#")] = 0;
+        return p;
+    }
+    return NULL;
+}

@@ -152,6 +152,78 @@ void *memalign(size_t align, size_t n);
 void *valloc(size_t n);
 const char *getprogname(void);
 void  setprogname(const char *name);
+
+/* the generators with the state in the caller's hands, glibc's layouts */
+#include <stdint.h>
+struct random_data {
+    int32_t *fptr, *rptr, *state;
+    int rand_type, rand_deg, rand_sep;
+    int32_t *end_ptr;
+};
+int   random_r(struct random_data *__restrict buf, int32_t *__restrict result);
+int   srandom_r(unsigned seed, struct random_data *buf);
+int   initstate_r(unsigned seed, char *__restrict state, size_t n,
+                  struct random_data *__restrict buf);
+int   setstate_r(char *__restrict state, struct random_data *__restrict buf);
+struct drand48_data {
+    unsigned short __x[3], __old_x[3], __c, __init;
+    unsigned long long __a;
+};
+int   drand48_r(struct drand48_data *__restrict d, double *__restrict r);
+int   erand48_r(unsigned short x[3], struct drand48_data *__restrict d,
+                double *__restrict r);
+int   lrand48_r(struct drand48_data *__restrict d, long *__restrict r);
+int   nrand48_r(unsigned short x[3], struct drand48_data *__restrict d,
+                long *__restrict r);
+int   mrand48_r(struct drand48_data *__restrict d, long *__restrict r);
+int   jrand48_r(unsigned short x[3], struct drand48_data *__restrict d,
+                long *__restrict r);
+int   srand48_r(long seed, struct drand48_data *d);
+int   seed48_r(unsigned short s[3], struct drand48_data *d);
+int   lcong48_r(unsigned short p[7], struct drand48_data *d);
+
+int   on_exit(void (*fn)(int status, void *arg), void *arg);
+char *secure_getenv(const char *name);
+int   getloadavg(double loads[], int n);
+int   rpmatch(const char *response);
+long long strtoq(const char *__restrict s, char **__restrict end, int base);
+unsigned long long strtouq(const char *__restrict s, char **__restrict end, int base);
+void  cfree(void *p);
+char *ecvt(double v, int ndigit, int *__restrict decpt, int *__restrict sign);
+char *fcvt(double v, int ndigit, int *__restrict decpt, int *__restrict sign);
+char *gcvt(double v, int ndigit, char *buf);
+int   ecvt_r(double v, int ndigit, int *__restrict decpt, int *__restrict sign,
+             char *__restrict buf, size_t n);
+int   fcvt_r(double v, int ndigit, int *__restrict decpt, int *__restrict sign,
+             char *__restrict buf, size_t n);
+uint32_t arc4random(void);
+void  arc4random_buf(void *buf, size_t n);
+uint32_t arc4random_uniform(uint32_t bound);
+#endif
+
+#if defined(__EMB_POSIX)
+/* XSI's radix-64 */
+long  a64l(const char *s);
+char *l64a(long v);
+#endif
+
+#if defined(__EMB_GNU)
+#include <bits/locale_t.h>
+double strtod_l(const char *__restrict s, char **__restrict end, locale_t l);
+float strtof_l(const char *__restrict s, char **__restrict end, locale_t l);
+long double strtold_l(const char *__restrict s, char **__restrict end, locale_t l);
+long strtol_l(const char *__restrict s, char **__restrict end, int base, locale_t l);
+unsigned long strtoul_l(const char *__restrict s, char **__restrict end, int base, locale_t l);
+long long strtoll_l(const char *__restrict s, char **__restrict end, int base, locale_t l);
+unsigned long long strtoull_l(const char *__restrict s, char **__restrict end, int base, locale_t l);
+#endif
+
+#if defined(__EMB_GNU) || defined(_LARGEFILE64_SOURCE)
+/* off_t is 64 bits here: the large-file names are the same calls */
+#define mkstemp64 mkstemp
+#define mkostemp64 mkostemp
+#define mkstemps64 mkstemps
+#define mkostemps64 mkostemps
 #endif
 
 #ifdef __cplusplus

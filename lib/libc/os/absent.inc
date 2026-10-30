@@ -737,3 +737,10 @@ int __os_unlockpt(int fd)
     (void)fd; ABSENT_RETURN(-1);
 }
 #endif
+
+#ifndef OS_HAS_auxv
+const long *__os_auxv(void)
+{
+    ABSENT_RETURN(0);
+}
+#endif

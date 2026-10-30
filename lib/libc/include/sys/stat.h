@@ -4,6 +4,8 @@
 #ifndef _SYS_STAT_H
 #define _SYS_STAT_H
 
+#include <features.h>
+
 #include <sys/types.h>
 
 #ifdef __cplusplus
@@ -92,6 +94,14 @@ mode_t umask(mode_t mask);
 int    futimens(int fd, const struct timespec times[2]);
 int    utimensat(int dirfd, const char *path, const struct timespec times[2],
                  int flags);
+
+#if defined(__EMB_GNU) || defined(_LARGEFILE64_SOURCE)
+/* off_t is 64 bits here: the large-file names are the same calls */
+#define stat64 stat
+#define fstat64 fstat
+#define lstat64 lstat
+#define fstatat64 fstatat
+#endif
 
 #ifdef __cplusplus
 }

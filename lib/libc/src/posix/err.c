@@ -85,3 +85,60 @@ __attribute__((weak)) void errx(int status, const char *fmt, ...)
     va_start(ap, fmt);
     verrx(status, fmt, ap);
 }
+
+/* ---- <error.h>, GNU's ------------------------------------------------------------
+ *
+ * The program's whole name (program_invocation_name, as glibc's error
+ * prints it), the message, ": " and the errno's words when errnum is
+ * not 0; stdout flushed first so the two streams stay in order, and an
+ * exit when status is not 0. */
+#include <error.h>
+
+__attribute__((weak)) void (*error_print_progname)(void);
+__attribute__((weak)) unsigned error_message_count;
+__attribute__((weak)) int error_one_per_line;
+
+static void report(int status, int errnum, const char *file, unsigned line,
+                   const char *fmt, va_list ap)
+{
+    fflush(stdout);
+    flockfile(stderr);
+    if (error_print_progname)
+        error_print_progname();
+    else if (program_invocation_name)
+        fprintf(stderr, file ? "%s:" : "%s: ", program_invocation_name);
+    if (file)
+        fprintf(stderr, "%s:%u: ", file, line);
+    vfprintf(stderr, fmt, ap);
+    if (errnum)
+        fprintf(stderr, ": %s", strerror(errnum));
+    fputc('\n', stderr);
+    funlockfile(stderr);
+    error_message_count++;
+    if (status)
+        exit(status);
+}
+
+__attribute__((weak)) void error(int status, int errnum, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    report(status, errnum, 0, 0, fmt, ap);
+    va_end(ap);
+}
+
+__attribute__((weak)) void error_at_line(int status, int errnum, const char *file,
+                                         unsigned line, const char *fmt, ...)
+{
+    static const char *last_file;
+    static unsigned last_line;
+    if (error_one_per_line && file && last_file && last_line == line &&
+        (last_file == file || !strcmp(last_file, file)))
+        return;
+    last_file = file;
+    last_line = line;
+    va_list ap;
+    va_start(ap, fmt);
+    report(status, errnum, file, line, fmt, ap);
+    va_end(ap);
+}

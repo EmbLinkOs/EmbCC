@@ -66,6 +66,10 @@ time_t mktime(struct tm *tm);
 /* Not in C11, but the honest name for what mktime does here, and what a
  * program that means UTC should call. */
 time_t timegm(struct tm *tm);
+time_t timelocal(struct tm *tm);
+int    dysize(int year);
+int    stime(const time_t *t);
+int    getdate_r(const char *__restrict s, struct tm *__restrict tm);
 struct tm *gmtime(const time_t *t);
 struct tm *localtime(const time_t *t);
 struct tm *gmtime_r(const time_t *__restrict t, struct tm *__restrict out);
@@ -101,6 +105,30 @@ int clock_settime(clockid_t clock, const struct timespec *t);
 int clock_nanosleep(clockid_t clock, int flags, const struct timespec *req,
                     struct timespec *rem);
 int nanosleep(const struct timespec *req, struct timespec *rem);
+#ifndef _PID_T_DECLARED
+#define _PID_T_DECLARED
+typedef int pid_t;
+#endif
+int clock_getcpuclockid(pid_t pid, clockid_t *clock);
+
+/* POSIX's per-process timers (src/time/timer.c) */
+struct itimerspec {
+    struct timespec it_interval;
+    struct timespec it_value;
+};
+struct sigevent;
+#ifndef _TIMER_T_DECLARED
+#define _TIMER_T_DECLARED
+typedef void *timer_t;
+#endif
+int timer_create(clockid_t clock, struct sigevent *__restrict ev,
+                 timer_t *__restrict timer);
+int timer_delete(timer_t timer);
+int timer_settime(timer_t timer, int flags,
+                  const struct itimerspec *__restrict value,
+                  struct itimerspec *__restrict old);
+int timer_gettime(timer_t timer, struct itimerspec *value);
+int timer_getoverrun(timer_t timer);
 
 /* TZ, as POSIX spells it ("CET-1CEST,M3.5.0,M10.5.0/3"), or a zone
  * file's name where the system has /usr/share/zoneinfo */
@@ -108,8 +136,21 @@ extern char *tzname[2];
 extern long timezone;
 extern int daylight;
 void tzset(void);
+/* XSI's */
+extern int getdate_err;
+struct tm *getdate(const char *s);
 char *strptime(const char *__restrict s, const char *__restrict fmt,
                struct tm *__restrict tm);
+#endif
+
+#if defined(__EMB_POSIX)
+#include <bits/locale_t.h>
+size_t strftime_l(char *__restrict s, size_t n, const char *__restrict fmt,
+                  const struct tm *__restrict tm, locale_t l);
+#endif
+#if defined(__EMB_GNU)
+char *strptime_l(const char *__restrict s, const char *__restrict fmt,
+                 struct tm *__restrict tm, locale_t l);
 #endif
 
 #ifdef __cplusplus

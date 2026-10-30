@@ -199,8 +199,38 @@ ssize_t write(int fd, const void *buf, size_t n);
 int     dup3(int fd, int newfd, int flags);
 int     pipe2(int fds[2], int flags);
 int     getentropy(void *buf, size_t n);
+int     getresuid(uid_t *ruid, uid_t *euid, uid_t *suid);
+int     getresgid(gid_t *rgid, gid_t *egid, gid_t *sgid);
+int     setresuid(uid_t ruid, uid_t euid, uid_t suid);
+int     setresgid(gid_t rgid, gid_t egid, gid_t sgid);
+int     fexecve(int fd, char *const argv[], char *const envp[]);
+int     nice(int incr);
+long    gethostid(void);
+void    swab(const void *__restrict from, void *__restrict to, ssize_t n);
 
 #if defined(__EMB_GNU)
+/* Linux's (src/posix/linuxapi.c); syscall exists only where there are
+ * system call numbers to give it (<sys/syscall.h>) */
+long    syscall(long number, ...);
+pid_t   gettid(void);
+ssize_t copy_file_range(int in, off_t *in_off, int out, off_t *out_off,
+                        size_t len, unsigned flags);
+#define CLOSE_RANGE_UNSHARE (1U << 1)
+#define CLOSE_RANGE_CLOEXEC (1U << 2)
+int     close_range(unsigned first, unsigned last, int flags);
+void    closefrom(int lowfd);
+int     getdomainname(char *name, size_t n);
+int     setdomainname(const char *name, size_t n);
+int     vhangup(void);
+int     acct(const char *path);
+int     syncfs(int fd);
+char   *getwd(char *buf);
+char   *getusershell(void);
+int     ttyslot(void);
+void    setusershell(void);
+void    endusershell(void);
+char   *get_current_dir_name(void);
+int     sethostid(long id);
 extern char **environ;
 int     execvpe(const char *file, char *const argv[], char *const envp[]);
 int     getpagesize(void);
@@ -215,6 +245,16 @@ int     chroot(const char *path);
 void   *sbrk(intptr_t increment);
 int     daemon(int nochdir, int noclose);
 char   *getpass(const char *prompt);    /* gone from POSIX in 2001; still called */
+#endif
+
+#if defined(__EMB_GNU) || defined(_LARGEFILE64_SOURCE)
+/* off_t is 64 bits here: the large-file names are the same calls */
+#define lseek64 lseek
+#define pread64 pread
+#define pwrite64 pwrite
+#define truncate64 truncate
+#define ftruncate64 ftruncate
+#define lockf64 lockf
 #endif
 
 #ifdef __cplusplus

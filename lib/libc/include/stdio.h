@@ -219,6 +219,30 @@ size_t fwrite_unlocked(const void *__restrict p, size_t size, size_t n,
 int    fputs_unlocked(const char *__restrict s, FILE *__restrict f);
 void   setbuffer(FILE *f, char *buf, size_t n);
 void   setlinebuf(FILE *f);
+char  *fgets_unlocked(char *__restrict s, int n, FILE *__restrict f);
+int    fcloseall(void);
+char  *tmpnam_r(char *s);
+#endif
+
+#if defined(__EMB_POSIX)
+/* XSI's, withdrawn from POSIX.1-2008 and still everywhere */
+int    getw(FILE *f);
+int    putw(int w, FILE *f);
+char  *tempnam(const char *dir, const char *prefix);
+#define L_cuserid 9
+char  *cuserid(char *s);
+#endif
+
+#if defined(__EMB_GNU) || defined(_LARGEFILE64_SOURCE)
+/* off_t is 64 bits here: the large-file names are the same calls */
+#define fopen64 fopen
+#define freopen64 freopen
+#define tmpfile64 tmpfile
+#define fseeko64 fseeko
+#define ftello64 ftello
+#define fgetpos64 fgetpos
+#define fsetpos64 fsetpos
+#define fpos64_t fpos_t
 #endif
 
 #ifdef __cplusplus

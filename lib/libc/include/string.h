@@ -71,6 +71,22 @@ void   explicit_bzero(void *s, size_t n);
 int    strverscmp(const char *a, const char *b);
 #endif
 
+#if defined(__EMB_POSIX)
+#include <bits/locale_t.h>
+int    strcoll_l(const char *a, const char *b, locale_t l);
+size_t strxfrm_l(char *__restrict d, const char *__restrict s, size_t n, locale_t l);
+char  *strerror_l(int err, locale_t l);
+#endif
+#if defined(__EMB_GNU)
+void  *rawmemchr(const void *s, int c);
+char  *strfry(char *s);
+void  *memfrob(void *s, size_t n);
+const char *strerrorname_np(int err);
+const char *strerrordesc_np(int err);
+const char *sigabbrev_np(int sig);
+const char *sigdescr_np(int sig);
+#endif
+
 #ifdef __cplusplus
 }
 #endif
