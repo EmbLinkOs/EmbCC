@@ -15,9 +15,12 @@
  * that is Linux: lib/libc/os/linux/tls.c finds PT_TLS through the
  * auxiliary vector, gives the first thread its copy before anything
  * else runs, and gives every clone()d thread its own. The freestanding
- * harnesses and EmbLinkOS have no such step, so there errno stays one
- * variable -- which is correct for them, because they are
- * single-threaded.
+ * harnesses have no such step and no threads, so there errno is one
+ * variable. EmbLinkOS has threads but only half the step: its crt0
+ * builds a block for the first thread of a statically linked program,
+ * and none for its dynamically linked apps or for a new thread -- so
+ * there too errno is one variable, as newlib's was on that OS, until
+ * the backend sets up each thread's block itself.
  *
  * The consequence of getting this wrong is worth stating plainly: a
  * shared errno under real threads is not a slow program, it is two

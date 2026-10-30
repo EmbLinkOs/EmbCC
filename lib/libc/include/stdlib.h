@@ -3,6 +3,7 @@
 #define _STDLIB_H
 
 #include <stddef.h>
+#include <features.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -105,8 +106,61 @@ div_t     div(int num, int den);
 ldiv_t    ldiv(long num, long den);
 lldiv_t   lldiv(long long num, long long den);
 
+/* POSIX's, which ISO C leaves to the program (see <features.h>) */
+#if defined(__EMB_POSIX)
+int   putenv(char *s);
+int   mkstemp(char *tmpl);
+int   mkostemp(char *tmpl, int flags);
+char *mkdtemp(char *tmpl);
+char *mktemp(char *tmpl);
+char *realpath(const char *__restrict path, char *__restrict resolved);
+int   posix_memalign(void **p, size_t align, size_t n);
+void *reallocarray(void *p, size_t n, size_t size);
+void  qsort_r(void *base, size_t n, size_t size,
+              int (*cmp)(const void *, const void *, void *), void *arg);
+int   getsubopt(char **opt, char *const *tokens, char **value);
+
+/* pseudo-terminals (src/posix/pty.c) */
+int   posix_openpt(int flags);
+int   grantpt(int fd);
+int   unlockpt(int fd);
+char *ptsname(int fd);
+
+/* the historical generators, each giving glibc's sequence for a seed */
+long  random(void);
+void  srandom(unsigned seed);
+char *initstate(unsigned seed, char *state, size_t n);
+char *setstate(char *state);
+int   rand_r(unsigned *seed);
+double drand48(void);
+double erand48(unsigned short x[3]);
+long   lrand48(void);
+long   nrand48(unsigned short x[3]);
+long   mrand48(void);
+long   jrand48(unsigned short x[3]);
+void   srand48(long seed);
+unsigned short *seed48(unsigned short s[3]);
+void   lcong48(unsigned short p[7]);
+#endif
+
+#if defined(__EMB_GNU)
+int   clearenv(void);
+int   ptsname_r(int fd, char *buf, size_t n);
+int   mkstemps(char *tmpl, int suffix);
+int   mkostemps(char *tmpl, int suffix, int flags);
+void *memalign(size_t align, size_t n);
+void *valloc(size_t n);
+const char *getprogname(void);
+void  setprogname(const char *name);
+#endif
+
 #ifdef __cplusplus
 }
+#endif
+
+/* alloca, which glibc's <stdlib.h> declares by default */
+#if defined(__EMB_GNU)
+#include <alloca.h>
 #endif
 
 #endif

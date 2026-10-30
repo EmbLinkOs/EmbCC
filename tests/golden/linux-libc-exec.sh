@@ -14,6 +14,19 @@
 #   tgmath-selection.c, wide-printf.c, wide-scanf.c, c23-library.c
 #   strtod-rounding.c  strtold at the x87's 64 bits and binary128's 113
 #   math-special.c   ilogbl and logbl at long double's range
+#   posix-files.c    mkstemp's family, realpath through links, fdopen,
+#                    and freopen keeping the stream it was given
+#   posix-strings.c, posix-stdio.c
+#                    POSIX's strings, getopt, generators, memory streams:
+#                    built with no -I, so <string.h> must be the C
+#                    library's and not the compiler's declarations-only one
+#   posix-fd.c, posix-process.c, posix-signals.c, posix-net.c
+#                    descriptors and the *at calls, fork/spawn/system/popen,
+#                    signals the kernel delivers, sockets and lookups. Each
+#                    program is also the guest's /bin/sh, which
+#                    posix-process.c is written to be (see it)
+#   posix-time.c     TZ rules, mktime's tm_isdst, %z/%Z, strptime
+#   malloc-gnu.c     <malloc.h>: usable sizes, mallinfo2, valloc/pvalloc
 #
 # At -O0 and -O2, each exiting 42. Skipped without a kernel for
 # tests/harness/linux (EMBCC_LINUX_KERNEL_X86_64 / _AARCH64).
@@ -25,7 +38,9 @@ out=$EMBCC_ROOT/tests/golden/out/linux-libc-exec
 rm -rf "${out:?}"; mkdir -p "$out/root/tmp"
 progs="tmpfile next-toward quick-exit multibyte-stdlib inttypes-formats
        tgmath-selection wide-streams wide-printf wide-scanf c23-library
-       strtod-rounding math-special"
+       strtod-rounding math-special posix-files posix-strings posix-stdio
+       posix-fd posix-process posix-signals posix-net posix-time
+       malloc-gnu"
 
 A64LD=${EMBCC_AARCH64_LD:-aarch64-elf-ld}
 A64GCC=$(dirname "$(aarch64-elf-gcc -print-libgcc-file-name 2>/dev/null)")
@@ -59,6 +74,9 @@ for arch in x86_64 aarch64; do
                     "$LIBDIR/libc.a" -L"$A64GCC" -lgcc > "$out/$tag.ld" 2>&1
             fi || { echo "FAIL $tag: did not link"; head -3 "$out/$tag.ld"
                     fail=1; continue; }
+            mkdir -p "$out/root/bin"
+            cp "$out/$tag.bin" "$out/root/bin/sh"
+            chmod 755 "$out/root/bin/sh"
             EMBCC_LINUX_ROOT=$out/root \
                 "$EMBCC_ROOT/tests/harness/linux/run.sh" $arch "$out/$tag.bin" \
                 > "$out/$tag.run" 2>&1

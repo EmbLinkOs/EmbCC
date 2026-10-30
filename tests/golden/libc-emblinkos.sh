@@ -108,7 +108,11 @@ references the kernel ABI -- the OS is confined to the backend"
 # What is genuinely external, which is not the same as what nm calls
 # undefined: a member that calls another member reports it undefined, so
 # the closure is (undefined - defined) across the whole archive.
-x86_64-elf-ar rcs "$out/libc.a" "$out"/lib/*.o "$out/backend.o"
+# os/posix-names.c: the POSIX names a kernel's backend gives (read, write,
+# _exit ...), which the Makefile builds for EmbLinkOS beside the backend
+"$EMBCC" -c -O2 -Ilib/libc/include lib/libc/os/posix-names.c \
+    -o "$out/posix-names.o" || { echo "FAIL: os/posix-names.c does not build"; exit 1; }
+x86_64-elf-ar rcs "$out/libc.a" "$out"/lib/*.o "$out/backend.o" "$out/posix-names.o"
 x86_64-elf-nm "$out/libc.a" > "$out/nm.txt"
 awk '$1 == "U" { print $2 }' "$out/nm.txt" | sort -u > "$out/undef.txt"
 awk 'NF == 3 && $2 != "U" { print $3 }' "$out/nm.txt" | sort -u \

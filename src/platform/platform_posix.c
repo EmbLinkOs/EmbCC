@@ -32,6 +32,13 @@
 #include <dirent.h>
 #endif
 #include <unistd.h>            /* isatty, readlink */
+/* stat, for plat_same_dir: a device and inode number that mean something.
+ * EmbLinkOS's newlib stat reports no inode, which would make every
+ * directory "the same", so there the answer is by spelling. */
+#if defined(__APPLE__) || defined(__linux__)
+#define PLAT_HAS_INODES 1
+#include <sys/stat.h>
+#endif
 /* threads, for plat_run_on_stack's big stack: macOS's and glibc's (in
  * libc from 2.34, -lpthread before). EmbLinkOS's newlib has none. */
 #if defined(__APPLE__) || defined(__linux__)
@@ -131,6 +138,27 @@ const char *plat_self_path(void)
             snprintf(buf, sizeof buf, "%s", a);
     }
     return buf[0] ? buf : NULL;
+}
+
+void plat_make_executable(const char *path)
+{
+#ifdef PLAT_HAS_INODES
+    mode_t mask = umask(0);
+    umask(mask);
+    chmod(path, 0777 & ~mask);
+#else
+    (void)path;
+#endif
+}
+
+int plat_same_dir(const char *a, const char *b)
+{
+#ifdef PLAT_HAS_INODES
+    struct stat sa, sb;
+    if (stat(a, &sa) == 0 && stat(b, &sb) == 0)
+        return sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino;
+#endif
+    return strcmp(a, b) == 0;
 }
 
 #ifndef PLAT_HAS_DIRENT

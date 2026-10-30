@@ -46,6 +46,18 @@ int plat_write_file(const char *path, const void *data, size_t len);
  * answer can be stale by the time the file is opened. */
 int plat_file_exists(const char *path);
 
+/* Whether two paths name the same directory: by the directory's identity
+ * where the host has one -- so a relative and an absolute spelling, or a
+ * symlink, are the same -- and by spelling elsewhere. What keeps one
+ * include directory from being searched twice. */
+int plat_same_dir(const char *a, const char *b);
+
+/* Mark a file just written as a program that can be run: the mode GNU ld
+ * gives its output, 0777 less the umask, where the host has modes. A
+ * linker whose executables cannot be executed has not finished the job.
+ * Nothing where the host has no such idea. */
+void plat_make_executable(const char *path);
+
 /* The names in a directory (not "." or ".."), malloc'd, NULL-terminated,
  * in no particular order; NULL when it cannot be read or the host cannot
  * list a directory at all (ISO C has no words for it), which callers treat

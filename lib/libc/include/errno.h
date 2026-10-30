@@ -187,6 +187,12 @@ int *__errno_location(void);
 
 #endif
 
+/* the program's name, as startup found it in argv[0], and the part of
+ * it after the last '/': GNU's, under _GNU_SOURCE as there */
+#if defined(_GNU_SOURCE)
+extern char *program_invocation_name, *program_invocation_short_name;
+#endif
+
 #ifdef __cplusplus
 }
 #endif

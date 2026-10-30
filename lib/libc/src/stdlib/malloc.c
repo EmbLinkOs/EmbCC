@@ -36,6 +36,8 @@
 #include <string.h>
 #include <errno.h>
 #include <stdint.h>
+#include <limits.h>
+#include <malloc.h>
 
 #include "../../os/backend.h"
 #include "../internal/lock.h"
@@ -127,8 +129,10 @@ static int abuts(struct blk *b, struct blk *n)
 static struct blk *grow(size_t need)
 {
     size_t chunk = ALIGN_UP(need + HDR);
-    if (chunk < 64 * 1024)
-        chunk = 64 * 1024;
+#if SIZE_MAX > 0xFFFF      /* with a 16-bit size_t, 64 KB is everything */
+    if (chunk < 64 * 1024UL)
+        chunk = 64 * 1024UL;
+#endif
     void *p = __os_sbrk((long)chunk);
     if (p == (void *)-1 && chunk > ALIGN_UP(need + HDR)) {
         chunk = ALIGN_UP(need + HDR);
@@ -413,4 +417,64 @@ void *aligned_alloc(size_t align, size_t n)
     void *p = do_aligned_alloc(align, n);
     __unlock(&heap_lock);
     return p;
+}
+
+/* ---- <malloc.h> ---------------------------------------------------------- */
+
+/* The block's payload, which may be more than was asked: sizes are kept
+ * rounded up, and a block too small to split is handed out whole. */
+__attribute__((weak)) size_t malloc_usable_size(void *p)
+{
+    if (!p)
+        return 0;
+    return BSIZE((struct blk *)((unsigned char *)p - HDR));
+}
+
+__attribute__((weak)) struct mallinfo2 mallinfo2(void)
+{
+    struct mallinfo2 m;
+    memset(&m, 0, sizeof m);
+    __lock(&heap_lock);
+    for (struct blk *b = g_head; b; b = b->next) {
+        m.arena += HDR + BSIZE(b);
+        if (BFREE(b)) {
+            m.ordblks++;
+            m.fordblks += BSIZE(b);
+        } else {
+            m.uordblks += BSIZE(b);
+        }
+    }
+    if (g_tail && BFREE(g_tail))
+        m.keepcost = BSIZE(g_tail);
+    __unlock(&heap_lock);
+    return m;
+}
+
+/* The old form, whose ints saturate rather than wrap. */
+__attribute__((weak)) struct mallinfo mallinfo(void)
+{
+    struct mallinfo2 w = mallinfo2();
+    struct mallinfo m;
+    memset(&m, 0, sizeof m);
+#define CLAMP(v) ((v) > (size_t)INT_MAX ? INT_MAX : (int)(v))
+    m.arena = CLAMP(w.arena);
+    m.ordblks = CLAMP(w.ordblks);
+    m.uordblks = CLAMP(w.uordblks);
+    m.fordblks = CLAMP(w.fordblks);
+    m.keepcost = CLAMP(w.keepcost);
+#undef CLAMP
+    return m;
+}
+
+__attribute__((weak)) int malloc_trim(size_t pad)
+{
+    (void)pad;
+    return 0;                     /* 0: no memory was given back */
+}
+
+__attribute__((weak)) int mallopt(int param, int value)
+{
+    (void)param;
+    (void)value;
+    return 0;                     /* 0: not applied */
 }

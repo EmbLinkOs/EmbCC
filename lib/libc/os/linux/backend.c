@@ -82,9 +82,14 @@ long __os_read(int fd, void *buf, size_t n)
  * test asserts that against <fcntl.h> rather than leaving it as a
  * comment.
  */
+/* The seam's open flags as this kernel numbers them (syscall.h says why
+ * O_DIRECTORY and O_NOFOLLOW move on aarch64). */
+int __linux_oflags(int seam);
+
 int __os_open(const char *path, int flags, int mode)
 {
-    return (int)ret(lsys4(LSYS_openat, LAT_FDCWD, (long)path, flags, mode));
+    return (int)ret(lsys4(LSYS_openat, LAT_FDCWD, (long)path,
+                          __linux_oflags(flags), mode));
 }
 
 int __os_close(int fd)
@@ -328,11 +333,23 @@ static unsigned long long makedev(unsigned maj, unsigned min)
          |  (unsigned long long)(min & 0x000000ffu);
 }
 
+/* statx of (dirfd, path, flags) into the seam's structure: shared with
+ * __os_fstat in posix.c, so stat and fstat cannot report one file two
+ * ways. */
+int __linux_statx(int dirfd, const char *path, int flags,
+                  struct __os_fileinfo *out);
+
 static int do_stat(const char *path, struct __os_fileinfo *out, int flags)
+{
+    return __linux_statx(LAT_FDCWD, path, flags, out);
+}
+
+int __linux_statx(int dirfd, const char *path, int flags,
+                  struct __os_fileinfo *out)
 {
     struct lstatx sx;
     memset(&sx, 0, sizeof sx);
-    long r = lsys5(LSYS_statx, LAT_FDCWD, (long)path,
+    long r = lsys5(LSYS_statx, dirfd, (long)path,
                    flags | LAT_STATX_SYNC_AS_STAT,
                    LSTATX_BASIC_STATS, (long)&sx);
     if (r < 0) {
@@ -348,8 +365,19 @@ static int do_stat(const char *path, struct __os_fileinfo *out, int flags)
         }
         return (int)fail(r);
     }
+    memset(out, 0, sizeof *out);
     out->size   = sx.stx_size;
     out->mtime  = (long)sx.stx_mtime.tv_sec;
+    out->mtime_nsec = (long)sx.stx_mtime.tv_nsec;
+    out->atime  = sx.stx_atime.tv_sec;
+    out->atime_nsec = (long)sx.stx_atime.tv_nsec;
+    out->ctime  = sx.stx_ctime.tv_sec;
+    out->ctime_nsec = (long)sx.stx_ctime.tv_nsec;
+    out->uid    = sx.stx_uid;
+    out->gid    = sx.stx_gid;
+    out->rdev   = makedev(sx.stx_rdev_major, sx.stx_rdev_minor);
+    out->blocks = (long long)sx.stx_blocks;
+    out->blksize = (long)sx.stx_blksize;
     out->mode   = sx.stx_mode & 07777u;
     out->type   = type_of_mode(sx.stx_mode);
     out->dev    = makedev(sx.stx_dev_major, sx.stx_dev_minor);

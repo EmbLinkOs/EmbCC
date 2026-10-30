@@ -12,6 +12,8 @@
 #ifndef _TIME_H
 #define _TIME_H
 
+#include <features.h>
+
 #include <stddef.h>
 
 #ifdef __cplusplus
@@ -38,17 +40,18 @@ struct tm {
     int tm_year;   /* years since 1900 */
     int tm_wday;   /* 0..6, Sunday is 0 */
     int tm_yday;   /* 0..365 */
-    int tm_isdst;  /* always 0: no timezone database */
-#if defined(__APPLE__)
-    /* Apple's C library has two more, and its mktime, localtime_r and
-     * gmtime_r fill them in: a 36-byte struct tm on the caller's stack
-     * was overrun by 20 bytes. */
+    int tm_isdst;  /* > 0 in daylight saving time */
+    /* POSIX.1-2024's (the BSDs' and glibc's long before): seconds east of
+     * UTC, and the zone's abbreviation. Apple's C library fills them too,
+     * and a struct tm without them was overrun by 20 bytes there. */
     long tm_gmtoff;
-    char *tm_zone;
-#endif
+    const char *tm_zone;
 };
 
+#ifndef _STRUCT_TIMESPEC_DECLARED    /* (and in <sys/stat.h>, <signal.h>) */
+#define _STRUCT_TIMESPEC_DECLARED
 struct timespec { time_t tv_sec; long tv_nsec; };
+#endif
 
 #define TIME_UTC 1
 
@@ -74,6 +77,40 @@ char *asctime_r(const struct tm *__restrict tm, char *__restrict buf);
 char *ctime_r(const time_t *__restrict t, char *__restrict buf);
 size_t strftime(char *__restrict s, size_t max, const char *__restrict fmt,
                 const struct tm *__restrict tm);
+
+/* POSIX's clocks and sleeps, and the time zone (src/posix/time.c) */
+#if defined(__EMB_POSIX)
+#define CLOCK_REALTIME           0
+#define CLOCK_MONOTONIC          1
+#define CLOCK_PROCESS_CPUTIME_ID 2
+#define CLOCK_THREAD_CPUTIME_ID  3
+#define CLOCK_MONOTONIC_RAW      4
+#define CLOCK_REALTIME_COARSE    5
+#define CLOCK_MONOTONIC_COARSE   6
+#define CLOCK_BOOTTIME           7
+#define TIMER_ABSTIME            1
+
+#ifndef _CLOCKID_T_DECLARED
+#define _CLOCKID_T_DECLARED
+typedef int clockid_t;
+#endif
+
+int clock_gettime(clockid_t clock, struct timespec *t);
+int clock_getres(clockid_t clock, struct timespec *t);
+int clock_settime(clockid_t clock, const struct timespec *t);
+int clock_nanosleep(clockid_t clock, int flags, const struct timespec *req,
+                    struct timespec *rem);
+int nanosleep(const struct timespec *req, struct timespec *rem);
+
+/* TZ, as POSIX spells it ("CET-1CEST,M3.5.0,M10.5.0/3"), or a zone
+ * file's name where the system has /usr/share/zoneinfo */
+extern char *tzname[2];
+extern long timezone;
+extern int daylight;
+void tzset(void);
+char *strptime(const char *__restrict s, const char *__restrict fmt,
+               struct tm *__restrict tm);
+#endif
 
 #ifdef __cplusplus
 }

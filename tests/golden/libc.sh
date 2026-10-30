@@ -95,11 +95,12 @@ H=tests/harness/x86_64
 # The harness's entry and syscall shims stay: they are the BACKEND this
 # library was designed to sit on (lib/libc/os/backend.h). Everything above
 # them -- buffering, formatting, allocation -- is ours.
+# Except kill: the library's own is the one a program here must reach.
 for part in start sys crt; do
     src=$H/$part.S; [ "$part" = sys ] && src=$H/sys.c
     [ "$part" = crt ] && src=$H/../crt.c
     $GCC -ffreestanding -mno-red-zone -isystem "$X86_NEWLIB/include" \
-        -c "$src" -o "$out/$part.o"
+        -DSYS_NO_KILL -c "$src" -o "$out/$part.o"
 done
 
 build_run() {              # build_run <source> <extra-cc-flags>

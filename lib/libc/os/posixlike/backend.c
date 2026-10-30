@@ -8,6 +8,7 @@
 #include "../backend.h"
 
 #include <errno.h>
+#include <string.h>
 #include <stddef.h>
 
 /* Provided by the target: the raw calls, with the classic signatures. A
@@ -217,6 +218,9 @@ int __os_stat(const char *path, struct __os_fileinfo *out)
         errno = ENOSYS;
         return -1;
     }
+    /* cleared, so the fields a harness's fs_stat does not know of --
+     * the owners and the other times -- read as zero, never as stack */
+    memset(out, 0, sizeof *out);
     return fs_stat(path, out);
 }
 
@@ -226,8 +230,10 @@ int __os_stat(const char *path, struct __os_fileinfo *out)
  * no lstat would be lying whichever we chose. */
 int __os_lstat(const char *path, struct __os_fileinfo *out)
 {
-    if (fs_lstat)
+    if (fs_lstat) {
+        memset(out, 0, sizeof *out);
         return fs_lstat(path, out);
+    }
     return __os_stat(path, out);
 }
 
@@ -363,3 +369,8 @@ void __os_closedir(void *dir)
     if (fs_closedir)
         fs_closedir(dir);
 }
+
+/* POSIX's operating system, the rest of the contract: this backend forwards
+ * nothing more, so every primitive of that half reports ENOSYS
+ * (os/absent.inc). The harnesses it serves have no processes or sockets. */
+#include "../absent.inc"

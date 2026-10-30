@@ -60,6 +60,9 @@ extern "C" {
 #define __OS_FT_FIFO      7
 #define __OS_FT_SOCKET    8
 
+/* lib/libc/os/backend.h's, field for field: the backend fills ALL of it,
+ * so a shorter copy here is a stack overwrite on every status() --
+ * tests/golden/libc-backends.sh compares the two. */
 struct __os_fileinfo {
     unsigned long long size;
     long mtime;
@@ -67,6 +70,12 @@ struct __os_fileinfo {
     int type;
     unsigned long long dev, ino;
     unsigned long long nlink;
+    unsigned int uid, gid;
+    unsigned long long rdev;
+    long long atime, ctime;
+    long atime_nsec, mtime_nsec, ctime_nsec;
+    long long blocks;
+    long blksize;
 };
 
 int  __os_stat(const char *path, struct __os_fileinfo *out);

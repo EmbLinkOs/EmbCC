@@ -38,5 +38,7 @@ typedef struct { volatile int v; } __lock_t;
 
 void __lock(__lock_t *l);
 void __unlock(__lock_t *l);
+/* 0 with the lock taken, -1 when it is held: no waiting. */
+int  __trylock(__lock_t *l);
 
 #endif
