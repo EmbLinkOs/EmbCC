@@ -34,6 +34,11 @@ struct __thr {
 int __thr_create(unsigned long *out, const void *attr,
                  void *(*fn)(void *), void *arg);
 
+/* fork's three moments (proc.c calls it through __atfork_hook, which
+ * the thread library sets as soon as it is used) */
+void __pthread_atfork_run(int phase);
+extern void (*__atfork_hook)(int phase);
+
 /* this thread's record, made on first need for one this library did not
  * start (the program's first thread, a C++ std::thread) */
 struct __thr *__thr_self(void);

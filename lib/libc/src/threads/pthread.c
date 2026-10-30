@@ -155,9 +155,11 @@ struct __thr *__thr_self(void)
     unsigned long me = __os_thread_self();
     __lock(&g_tlock);
     if (!g_main_known) {
-        /* the first thread to ask, before any other was started here */
+        /* the first thread to ask, before any other was started here;
+         * from now on a fork's child must hear that it has one thread */
         g_main_id = me;
         g_main_known = 1;
+        __atfork_hook = __pthread_atfork_run;
     }
     struct __thr *t = find_live(me);
     if (!t) {
@@ -488,6 +490,7 @@ WEAK int pthread_atfork(void (*prepare)(void), void (*parent)(void),
         __unlock(&g_tlock);
         return ENOMEM;
     }
+    __atfork_hook = __pthread_atfork_run;
     g_atfork[g_natfork].prepare = prepare;
     g_atfork[g_natfork].parent = parent;
     g_atfork[g_natfork].child = child;
@@ -496,10 +499,10 @@ WEAK int pthread_atfork(void (*prepare)(void), void (*parent)(void),
     return 0;
 }
 
-/* fork() calls this (proc.c, by a weak reference: a program that never
- * names a pthread function does not link this file): 0 before, 1 in the
- * parent after, 2 in the child. POSIX's order -- prepare handlers in
- * reverse of registration, the others forward. */
+/* fork() calls this (proc.c, through the hook pthread_atfork sets: a
+ * program that never names a pthread function does not link this file):
+ * 0 before, 1 in the parent after, 2 in the child. POSIX's order --
+ * prepare handlers in reverse of registration, the others forward. */
 void __pthread_atfork_run(int phase)
 {
     if (phase == 0) {

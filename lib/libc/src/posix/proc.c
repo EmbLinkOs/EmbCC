@@ -83,18 +83,21 @@ WEAK int getlogin_r(char *name, size_t n)
 
 /* ---- fork and exec --------------------------------------------------------- */
 
-/* pthread_atfork's handlers, when anything registered one: a weak
- * reference, so a program that never names a pthread function does not
- * link the thread library to fork */
-extern void __pthread_atfork_run(int phase) __attribute__((weak));
+/* pthread_atfork's handlers, when anything registered one. A pointer
+ * pthread_atfork sets, so that a program which never names a pthread
+ * function does not link the thread library to fork -- and not a weak
+ * reference, which left undefined has no PC-relative address in a
+ * position-independent program (EmbLinkOS links its apps PIE). */
+void (*__atfork_hook)(int phase);
 
 WEAK pid_t fork(void)
 {
-    if (__pthread_atfork_run)
-        __pthread_atfork_run(0);
+    void (*hook)(int) = __atfork_hook;
+    if (hook)
+        hook(0);
     pid_t p = __os_fork();
-    if (__pthread_atfork_run && p >= 0)
-        __pthread_atfork_run(p == 0 ? 2 : 1);
+    if (hook && p >= 0)
+        hook(p == 0 ? 2 : 1);
     return p;
 }
 
