@@ -52,6 +52,12 @@ int plat_file_exists(const char *path);
  * include directory from being searched twice. */
 int plat_same_dir(const char *a, const char *b);
 
+/* Mark a file just written as a program that can be run: the mode GNU ld
+ * gives its output, 0777 less the umask, where the host has modes. A
+ * linker whose executables cannot be executed has not finished the job.
+ * Nothing where the host has no such idea. */
+void plat_make_executable(const char *path);
+
 /* The names in a directory (not "." or ".."), malloc'd, NULL-terminated,
  * in no particular order; NULL when it cannot be read or the host cannot
  * list a directory at all (ISO C has no words for it), which callers treat

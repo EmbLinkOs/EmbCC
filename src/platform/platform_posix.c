@@ -140,6 +140,17 @@ const char *plat_self_path(void)
     return buf[0] ? buf : NULL;
 }
 
+void plat_make_executable(const char *path)
+{
+#ifdef PLAT_HAS_INODES
+    mode_t mask = umask(0);
+    umask(mask);
+    chmod(path, 0777 & ~mask);
+#else
+    (void)path;
+#endif
+}
+
 int plat_same_dir(const char *a, const char *b)
 {
 #ifdef PLAT_HAS_INODES

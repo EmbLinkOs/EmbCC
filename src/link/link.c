@@ -5167,6 +5167,7 @@ static void write_exec(struct linker *l, const char *out,
     }
     if (plat_write_file(out, img, (size_t)total) != 0)
         die("cannot write '%s'", out);
+    plat_make_executable(out);
     free(img);
 }
 
@@ -5268,6 +5269,7 @@ static void emit_embx(struct linker *l, const char *out, unsigned long long caps
 
     if (plat_write_file(out, img, (size_t)image_size) != 0)
         die("cannot write '%s'", out);
+    plat_make_executable(out);
     free(img);
     fprintf(stderr, "embld: wrote %s (EMBX, %d capabilit%s)\n",
             out, ncaps, ncaps == 1 ? "y" : "ies");
@@ -6642,6 +6644,7 @@ static void write_exec_script(struct linker *l, struct ls_script *sc,
     }
     if (plat_write_file(out, img, (size_t)total) != 0)
         die("cannot write '%s'", out);
+    plat_make_executable(out);
     free(img); free(em); free(fo); free(n_osec); free(n_dbg); free(dbg_at);
     free(symname); free(symstr.p); free(shstr.p);
 }

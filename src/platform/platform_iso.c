@@ -42,6 +42,12 @@ int plat_same_dir(const char *a, const char *b)
     return strcmp(a, b) == 0;
 }
 
+/* ISO C has no file modes */
+void plat_make_executable(const char *path)
+{
+    (void)path;
+}
+
 /* ISO C cannot list a directory */
 char **plat_list_dir(const char *path)
 {
