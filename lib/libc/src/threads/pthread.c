@@ -30,7 +30,10 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sched.h>
 #include <unistd.h>
+#include <signal.h>
+#include <sys/syscall.h>
 
 #include "../../os/backend.h"
 #include "../internal/lock.h"
@@ -166,6 +169,7 @@ struct __thr *__thr_self(void)
         t = calloc(1, sizeof *t);
         if (t) {
             t->id = me;
+            t->tid = gettid();
             link_thr(t);
         }
     }
@@ -270,14 +274,22 @@ static void start(void *p)
 {
     struct __thr *t = p;
     __atomic_store_n(&t->id, __os_thread_self(), __ATOMIC_RELEASE);
+    t->tid = gettid();
 #if defined(__linux__)
     g_me = t;
 #endif
+    if (t->aff) {              /* pthread_attr_setaffinity_np's */
+        sched_setaffinity(0, t->affsize, t->aff);
+        free(t->aff);
+        t->aff = 0;
+    }
     if (!setjmp(t->exit_to))
         t->result = t->fn(t->arg);
     run_dtors(t);
     finish(t);
 }
+
+const pthread_attr_t *__thr_default_attr(void);
 
 /* errno-style, for both spellings: ENOMEM and the backend's own reason
  * are kept apart here and mapped by each caller */
@@ -285,6 +297,8 @@ int __thr_create(pthread_t *out, const void *attr_,
                  void *(*fn)(void *), void *arg)
 {
     const pthread_attr_t *a = attr_;
+    if (!a)
+        a = __thr_default_attr();   /* pthread_setattr_default_np's */
     if (!out || !fn)
         return EINVAL;
     if (a && a->__stackaddr)
@@ -299,6 +313,15 @@ int __thr_create(pthread_t *out, const void *attr_,
     t->arg = arg;
     t->ours = 1;
     t->detached = a && a->__detach == PTHREAD_CREATE_DETACHED;
+    if (a && a->__affinity) {
+        t->aff = malloc(a->__affsize);
+        if (!t->aff) {
+            free(t);
+            return ENOMEM;
+        }
+        memcpy(t->aff, a->__affinity, a->__affsize);
+        t->affsize = a->__affsize;
+    }
     (void)__thr_self();        /* the creator has a record before any child */
     __lock(&g_tlock);
     link_thr(t);
@@ -343,7 +366,7 @@ WEAK pthread_t pthread_self(void) { return __os_thread_self(); }
 WEAK int pthread_equal(pthread_t a, pthread_t b) { return a == b; }
 
 static int join(pthread_t id, void **result, int wait,
-                const struct timespec *abs)
+                const struct timespec *abs, clockid_t clock)
 {
     if (id == __os_thread_self())
         return EDEADLK;
@@ -365,7 +388,7 @@ static int join(pthread_t id, void **result, int wait,
     if (abs) {
         /* the seam's join has no deadline: look until it is done */
         while (!__atomic_load_n(&t->done, __ATOMIC_ACQUIRE)) {
-            long ns = __thr_until(abs, CLOCK_REALTIME);
+            long ns = __thr_until(abs, clock);
             if (ns == 0)
                 return ETIMEDOUT;
             __os_sleep_ns(ns < 1000000 ? ns : 1000000);
@@ -386,15 +409,30 @@ static int join(pthread_t id, void **result, int wait,
     return 0;
 }
 
-WEAK int pthread_join(pthread_t t, void **result) { return join(t, result, 1, NULL); }
-WEAK int pthread_tryjoin_np(pthread_t t, void **result) { return join(t, result, 0, NULL); }
+WEAK int pthread_join(pthread_t t, void **result)
+{
+    return join(t, result, 1, NULL, CLOCK_REALTIME);
+}
+
+WEAK int pthread_tryjoin_np(pthread_t t, void **result)
+{
+    return join(t, result, 0, NULL, CLOCK_REALTIME);
+}
+
+WEAK int pthread_clockjoin_np(pthread_t t, void **result, clockid_t clock,
+                              const struct timespec *abstime)
+{
+    if (bad_time(abstime) || (clock != CLOCK_REALTIME && clock != CLOCK_MONOTONIC))
+        return EINVAL;
+    return join(t, result, 1, abstime, clock);
+}
 
 WEAK int pthread_timedjoin_np(pthread_t t, void **result,
                               const struct timespec *abstime)
 {
     if (bad_time(abstime))
         return EINVAL;
-    return join(t, result, 1, abstime);
+    return join(t, result, 1, abstime, CLOCK_REALTIME);
 }
 
 WEAK int pthread_detach(pthread_t id)
@@ -654,7 +692,12 @@ WEAK int pthread_attr_init(pthread_attr_t *a)
     return 0;
 }
 
-WEAK int pthread_attr_destroy(pthread_attr_t *a) { (void)a; return 0; }
+WEAK int pthread_attr_destroy(pthread_attr_t *a)
+{
+    free(a->__affinity);
+    a->__affinity = 0;
+    return 0;
+}
 
 WEAK int pthread_attr_getdetachstate(const pthread_attr_t *a, int *s)
 {
@@ -781,3 +824,162 @@ WEAK int pthread_attr_setscope(pthread_attr_t *a, int s)
     a->__scope = s;
     return 0;
 }
+
+/* ---- GNU's: processors, attributes of a running thread, defaults --------------- */
+
+WEAK int pthread_setaffinity_np(pthread_t id, size_t n, const cpu_set_t *set)
+{
+    struct __thr *t = named(id);
+    if (!t)
+        return ESRCH;
+    int saved = errno, e = 0;
+    if (sched_setaffinity(t->tid, n, set))
+        e = errno;
+    errno = saved;
+    return e;
+}
+
+WEAK int pthread_getaffinity_np(pthread_t id, size_t n, cpu_set_t *set)
+{
+    struct __thr *t = named(id);
+    if (!t)
+        return ESRCH;
+    int saved = errno, e = 0;
+    if (sched_getaffinity(t->tid, n, set))
+        e = errno;
+    errno = saved;
+    return e;
+}
+
+WEAK int pthread_attr_setaffinity_np(pthread_attr_t *a, size_t n,
+                                     const cpu_set_t *set)
+{
+    void *copy = 0;
+    if (set && n) {
+        if (!(copy = malloc(n)))
+            return ENOMEM;
+        memcpy(copy, set, n);
+    }
+    free(a->__affinity);
+    a->__affinity = copy;
+    a->__affsize = copy ? n : 0;
+    return 0;
+}
+
+/* none set: every processor */
+WEAK int pthread_attr_getaffinity_np(const pthread_attr_t *a, size_t n,
+                                     cpu_set_t *set)
+{
+    if (!a->__affinity) {
+        memset(set, 0xff, n);
+        return 0;
+    }
+    if (n < a->__affsize)
+        return EINVAL;
+    memcpy(set, a->__affinity, a->__affsize);
+    memset((char *)set + a->__affsize, 0, n - a->__affsize);
+    return 0;
+}
+
+/* a running thread's attributes, its stack where the backend can say */
+WEAK int pthread_getattr_np(pthread_t id, pthread_attr_t *a)
+{
+    struct __thr *t = named(id);
+    if (!t)
+        return ESRCH;
+    pthread_attr_init(a);
+    a->__detach = t->detached == 1 ? PTHREAD_CREATE_DETACHED
+                                   : PTHREAD_CREATE_JOINABLE;
+    void *addr;
+    size_t size;
+    int saved = errno;
+    if (__os_thread_stack(t->id, &addr, &size) == 0) {
+        a->__stackaddr = addr;
+        a->__stacksize = size;
+    }
+    errno = saved;
+    return 0;
+}
+
+static pthread_attr_t g_dflt;
+static int g_dflt_set;
+
+WEAK int pthread_setattr_default_np(const pthread_attr_t *a)
+{
+    if (a->__stackaddr || a->__detach != PTHREAD_CREATE_JOINABLE)
+        return EINVAL;         /* not attributes a default can carry */
+    void *aff = 0;
+    if (a->__affinity) {
+        if (!(aff = malloc(a->__affsize)))
+            return ENOMEM;
+        memcpy(aff, a->__affinity, a->__affsize);
+    }
+    __lock(&g_tlock);
+    free(g_dflt.__affinity);
+    g_dflt = *a;
+    g_dflt.__affinity = aff;
+    g_dflt_set = 1;
+    __unlock(&g_tlock);
+    return 0;
+}
+
+WEAK int pthread_getattr_default_np(pthread_attr_t *a)
+{
+    __lock(&g_tlock);
+    if (g_dflt_set) {
+        *a = g_dflt;
+        a->__affinity = 0;
+        a->__affsize = 0;
+        __unlock(&g_tlock);
+        return g_dflt.__affinity ?
+               pthread_attr_setaffinity_np(a, g_dflt.__affsize, g_dflt.__affinity) : 0;
+    }
+    __unlock(&g_tlock);
+    return pthread_attr_init(a);
+}
+
+const pthread_attr_t *__thr_default_attr(void)
+{
+    return g_dflt_set ? &g_dflt : 0;
+}
+
+/* a signal with a value, to one thread */
+WEAK int pthread_sigqueue(pthread_t id, int sig, const union sigval value)
+{
+    struct __thr *t = named(id);
+    if (!t)
+        return ESRCH;
+#if defined(__linux__)
+    siginfo_t si;
+    memset(&si, 0, sizeof si);
+    si.si_signo = sig;
+    si.si_code = SI_QUEUE;
+    si.si_pid = getpid();
+    si.si_uid = getuid();
+    si.si_value = value;
+    int saved = errno, e = 0;
+    if (syscall(SYS_rt_tgsigqueueinfo, (long)getpid(), (long)t->tid, (long)sig,
+                (long)&si))
+        e = errno;
+    errno = saved;
+    return e;
+#else
+    (void)value;
+    return pthread_kill(id, sig);
+#endif
+}
+
+WEAK int pthread_attr_getstackaddr(const pthread_attr_t *a, void **addr)
+{
+    *addr = a->__stackaddr;
+    return 0;
+}
+
+WEAK int pthread_attr_setstackaddr(pthread_attr_t *a, void *addr)
+{
+    a->__stackaddr = addr;
+    return 0;
+}
+
+/* LinuxThreads' leftover, before an exec: nothing to do with one process */
+WEAK void pthread_kill_other_threads_np(void) {}

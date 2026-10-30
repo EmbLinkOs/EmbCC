@@ -16,6 +16,9 @@ const char *inet_ntop(int family, const void *__restrict src,
 int         inet_pton(int family, const char *__restrict src,
                       void *__restrict dst);
 in_addr_t   inet_network(const char *s);
+in_addr_t   inet_lnaof(struct in_addr in);
+in_addr_t   inet_netof(struct in_addr in);
+struct in_addr inet_makeaddr(in_addr_t net, in_addr_t host);
 
 #ifdef __cplusplus
 }

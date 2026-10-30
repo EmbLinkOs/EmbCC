@@ -154,17 +154,26 @@ system is reached through one small backend file (see
 `<stdlib.h>` `<stdnoreturn.h>` `<string.h>` `<tgmath.h>` `<threads.h>`
 `<time.h>` `<uchar.h>` `<wchar.h>` `<wctype.h>`
 
-and, of POSIX's and the common Unix ones, `<arpa/inet.h>` `<dirent.h>`
-`<endian.h>` `<err.h>` `<fcntl.h>` `<fnmatch.h>` `<ftw.h>` `<getopt.h>` `<glob.h>` `<grp.h>` `<langinfo.h>`
-`<libgen.h>` `<malloc.h>` `<netdb.h>` `<netinet/in.h>` `<netinet/tcp.h>` `<nl_types.h>`
-`<paths.h>` `<poll.h>` `<pthread.h>` `<pty.h>` `<pwd.h>` `<sched.h>` `<search.h>`
-`<regex.h>` `<semaphore.h>`
-`<spawn.h>` `<strings.h>` `<syslog.h>` `<termios.h>` `<unistd.h>` `<utime.h>` and
-`<sys/file.h>` `<sys/ioctl.h>` `<sys/mman.h>` `<sys/param.h>`
-`<sys/random.h>` `<sys/resource.h>` `<sys/select.h>` `<sys/socket.h>`
-`<sys/stat.h>` `<sys/statvfs.h>` `<sys/sysmacros.h>` `<sys/time.h>`
-`<sys/times.h>` `<sys/types.h>` `<sys/uio.h>` `<sys/un.h>`
-`<sys/utsname.h>` `<sys/wait.h>`. Where a C header also
+and, of POSIX's and the common Unix ones, `<aio.h>` `<arpa/inet.h>`
+`<dirent.h>` `<dlfcn.h>` `<elf.h>` `<endian.h>` `<err.h>` `<error.h>` `<fcntl.h>`
+`<fmtmsg.h>` `<fnmatch.h>` `<fts.h>` `<ftw.h>` `<getopt.h>` `<glob.h>` `<grp.h>`
+`<iconv.h>` `<ifaddrs.h>` `<langinfo.h>` `<libgen.h>` `<libintl.h>` `<link.h>`
+`<malloc.h>` `<mntent.h>` `<monetary.h>` `<mqueue.h>` `<net/if.h>` `<netdb.h>`
+`<netinet/ether.h>` `<netinet/in.h>` `<netinet/tcp.h>` `<netpacket/packet.h>` `<nl_types.h>` `<paths.h>` `<poll.h>`
+`<pthread.h>` `<pty.h>` `<pwd.h>` `<regex.h>` `<sched.h>` `<search.h>`
+`<semaphore.h>` `<shadow.h>` `<spawn.h>` `<strings.h>` `<syslog.h>` `<termios.h>`
+`<ucontext.h>` `<ulimit.h>` `<unistd.h>` `<utime.h>` `<utmp.h>` `<utmpx.h>`
+`<wordexp.h>` and
+`<sys/auxv.h>` `<sys/epoll.h>` `<sys/eventfd.h>` `<sys/file.h>` `<sys/inotify.h>`
+`<sys/ioctl.h>` `<sys/ipc.h>` `<sys/klog.h>` `<sys/mman.h>` `<sys/mount.h>`
+`<sys/msg.h>` `<sys/param.h>` `<sys/personality.h>` `<sys/prctl.h>`
+`<sys/random.h>` `<sys/reboot.h>` `<sys/resource.h>` `<sys/select.h>`
+`<sys/sem.h>` `<sys/sendfile.h>` `<sys/shm.h>` `<sys/signalfd.h>`
+`<sys/socket.h>` `<sys/stat.h>` `<sys/statfs.h>` `<sys/statvfs.h>` `<sys/swap.h>`
+`<sys/syscall.h>` `<sys/sysinfo.h>` `<sys/sysmacros.h>` `<sys/time.h>`
+`<sys/timeb.h>` `<sys/timerfd.h>` `<sys/times.h>` `<sys/types.h>` `<sys/ucontext.h>`
+`<sys/uio.h>` `<sys/un.h>` `<sys/utsname.h>` `<sys/vfs.h>` `<sys/wait.h>`
+`<sys/xattr.h>`. Where a C header also
 declares POSIX names (`getline` in `<stdio.h>`, `strtok_r` in
 `<string.h>`), `<features.h>` decides: they are declared unless the
 program asked for ISO C alone (`-std=c11` with no `_POSIX_C_SOURCE`,
@@ -172,7 +181,19 @@ program asked for ISO C alone (`-std=c11` with no `_POSIX_C_SOURCE`,
 the GNU and BSD ones (`strchrnul`, `memrchr`, `clearenv`, `fopencookie`)
 are hidden too when the program names a POSIX version and nothing more,
 as with glibc. In the default mode `<string.h>` also brings
-`<strings.h>`, and `<stdlib.h>` `<alloca.h>`, as glibc's do.
+`<strings.h>`, and `<stdlib.h>` `<alloca.h>`, as glibc's do. The
+large-file names (`open64`, `stat64`, `fopen64` ...) are the same calls,
+off_t being 64 bits already: macros under `_GNU_SOURCE` or
+`_LARGEFILE64_SOURCE`, and symbols for a program that declares its own.
+
+Linux's own interfaces -- `<sys/epoll.h>` and the other descriptor
+kinds, `<sys/syscall.h>` and `syscall`, `statfs`, `sysinfo`, `prctl`,
+mounting, extended attributes, processor affinity, POSIX message queues
+and System V IPC -- are its system calls where the kernel is Linux.
+Elsewhere each fails with `ENOSYS`, unless it has a meaning the library
+can give without that kernel: `sendfile` and `copy_file_range` copy
+through a buffer, `statfs` comes from `statvfs`, `close_range` closes,
+locking memory where nothing pages already holds.
 
 Every POSIX function is defined weak, so a program -- or an operating
 system's own support library linked beside this one -- may define any of
@@ -212,6 +233,8 @@ freestanding `<limits.h>` for the type widths.
 | `<pthread.h>` | threads (`pthread_create`, `join`, `detach`, `exit`, `self`, `equal`, `once`, `atfork`, GNU's `tryjoin_np`, `timedjoin_np`, `setname_np`, `getname_np`), their attributes, the three kinds of mutex with `timedlock` and POSIX.1-2024's `clocklock`, condition variables with a clock attribute and `clockwait`, read-write locks (readers first, as glibc's default), barriers, spin locks, thread-specific data (`pthread_key_create` and the rest, with destructor rounds). Process-shared objects, robust and priority-protocol mutexes are refused with `ENOTSUP`; `pthread_cancel` is `ENOTSUP`, as no call here is a cancellation point; a scheduling policy other than `SCHED_OTHER` is `EPERM` |
 | `<semaphore.h>` | unnamed semaphores: `sem_init`, `sem_wait`, `sem_trywait`, `sem_timedwait`, `sem_clockwait`, `sem_post`, `sem_getvalue`, `sem_destroy`. `sem_open` is `ENOSYS` and a process-shared `sem_init` `ENOTSUP`: both need memory and a futex another process can reach |
 | `<regex.h>` | POSIX's basic and extended syntax with glibc's numbers and messages, and GNU's `\+ \? \|` in basic syntax, `\< \> \b \B \w \W \s \S`, back-references in both, `REG_STARTEND`. The match is POSIX's -- leftmost, then longest -- found by backtracking; a pattern that would take more than 20 million steps at one position is `REG_ESPACE`, not a hang |
+| `<iconv.h>` | UTF-8, UTF-16, UTF-32, UCS-2 and UCS-4 (each also as `LE` and `BE`), `WCHAR_T`, ASCII, ISO-8859-1, ISO-8859-15 and CP1252, any to any; names matched ignoring case and punctuation. As glibc: unmarked UTF-16 and UTF-32 write a byte-order mark and use the machine's order, `//IGNORE` drops what cannot be converted and reports `EILSEQ` at the end, and `//TRANSLIT` makes the same 1784 substitutions glibc's C locale makes (`EUR` for the euro sign, `1/2`, `(C)`), `?` for the rest. UTF-8 past U+10FFFF is refused, where glibc passes it |
+| `<wordexp.h>` | Every expansion the shell does to a word, in its order: tildes, parameters (with all of `${...}`'s forms), command substitution (`/bin/sh -c`, its standard error discarded unless `WRDE_SHOWERR`), arithmetic, field splitting on `IFS`, pathname expansion, quote removal. glibc's numbers. Where glibc departs from the shell, this follows the shell: a quoted empty expansion is one empty word, an expansion's result is matched against files, arithmetic reads names and has every C operator, and `${x:?}` is `WRDE_BADVAL` |
 | `<glob.h>`, `<ftw.h>` | `glob` and `globfree` with every flag glibc has (`GLOB_BRACE`, `GLOB_TILDE`, `GLOB_ONLYDIR`, `GLOB_PERIOD`, `GLOB_ALTDIRFUNC` among them), `glob_pattern_p`; `nftw` (with GNU's `FTW_ACTIONRETVAL`) and `ftw`, holding one directory open at a time whatever `fds` allows |
 | `<syslog.h>` | `openlog`, `syslog`, `vsyslog`, `closelog`, `setlogmask`: RFC 3164 lines to `/dev/log`, as glibc writes them. With nothing listening there a message is not dropped, as glibc drops it: it goes to `/dev/console` under `LOG_CONS` and to standard error otherwise |
 | `<langinfo.h>`, `<nl_types.h>` | `nl_langinfo` for the `"C"` locale -- its formats, names, `RADIXCHAR` and the yes/no expressions -- with `CODESET` "UTF-8", the encoding its multibyte functions use (glibc's plain "C" says "ANSI_X3.4-1968"); no message catalogs: `catopen` fails with `ENOENT` and `catgets` returns the program's own message |
@@ -412,7 +435,10 @@ backend has no futex the wait degrades to a yield, which is only reached
 when a lock is contended, and such a target has one thread.
 
 `errno` is per thread on the Linux triples, where the C library sets up
-thread-local storage, and one variable elsewhere. Functions that keep
+thread-local storage, and on EmbLinkOS, whose `crt0` sets up the first
+thread's and hands the template over (`lib/libc/os/tls-template.h`) for
+the library to copy into every thread it starts. Elsewhere it is one
+variable. Functions that keep
 state between calls by definition (`strtok`, `rand`, `gmtime`,
 `localtime`, `asctime`, `ctime`) share it between threads; use the `_r`
 forms of the time functions.
@@ -423,9 +449,11 @@ forms of the time functions.
 |---|---|
 | C11 Annex K (`*_s` functions) | |
 | named and process-shared semaphores, process-shared locks, thread cancellation | see `<pthread.h>` and `<semaphore.h>` above |
-| `<wordexp.h>`, `<iconv.h>` | |
-| locales other than `"C"`, and the `_l` functions that take one | |
-| System V IPC, asynchronous I/O (`<aio.h>`), message queues | |
+| locales other than `"C"` (`"C.UTF-8"` is `"C"`, whose encoding is UTF-8; the `_l` functions and `newlocale` work with that one) | |
+| System V IPC and POSIX message queues where the kernel is not Linux | `ENOSYS` |
+| GNU's `argp`, `obstack`, `argz`; the resolver's `res_*` and `dn_*`; Sun RPC | |
+| `<execinfo.h>` (`backtrace`) | C code here has no unwind tables unless built with `--unwind-tables` |
+| `getcontext` and the rest of `<ucontext.h>` on targets other than x86-64 and AArch64 | |
 
 ### glibc instead: `--libc=system`
 
@@ -490,7 +518,7 @@ Four backends exist:
 |---|---|---|
 | `os/posixlike/backend.c` | `libc-x86_64` and `libc-aarch64` (`x86_64-elf`, `aarch64-elf`) | forwards to `write`, `read`, `open`, `close`, `lseek`, `sbrk`, `_exit` and `isatty`, which the program or its environment must define. The thread functions (`thread_create`, `futex_wait`, ...) and filesystem functions (`fs_stat`, ...) are weak references: defined, they are used; absent, the group reports `ENOSYS`. `remove`, `rename`, `time`, `clock` and entropy report `ENOSYS`, and so does POSIX's half (`os/absent.inc`); the program's own `kill`, `getpid` or `fork` replace the library's, being weak. |
 | `os/linux/` | `libc-linux-x86_64`, `libc-linux-aarch64` | issues Linux system calls directly, so a program needs no other C library and no dynamic loader. Provides `crt1.o` (the `_start` that calls `main` and `exit`), threads through `clone`, thread-local storage (per-thread `errno`), and all of POSIX's half: `fork`, `execve`, kernel-delivered signals, sockets, terminals. Static images only. |
-| `os/emblinkos/backend.c` | `libc-emblinkos` | EmbLinkOS's system calls, translated: its absolute-only paths (the working directory is kept here), its open flags and `d_type` numbers, its spawn in place of `fork` and `exec` (with descriptor, directory and environment actions), its IPv4 sockets and resolver, its terminal control. What it has not got -- `fork`, signals from outside, record locks, `mmap` of a file -- is `ENOSYS`. EmbLinkOS builds its whole userland on it with `make LIBC=emblibc`. `clock` reports failure. |
+| `os/emblinkos/backend.c` | `libc-emblinkos` | EmbLinkOS's system calls, translated: its absolute-only paths (the working directory is kept here), its open flags and `d_type` numbers, its spawn in place of `fork` and `exec` (with descriptor, directory and environment actions), its IPv4 sockets and resolver, its terminal control. Threads get their own thread-local block, copied from the template `crt0` hands over, so `errno` and `__thread` variables are per thread. What it has not got -- `fork`, signals from outside, record locks, `mmap` of a file -- is `ENOSYS`. EmbLinkOS builds its whole userland on it with `make LIBC=emblibc`. `clock` reports failure. |
 | `os/baremetal/backend.c` | `libc-embedded` (the embedded targets) | for a part with no operating system, and needs nothing from the program: `write`, `read`, `open`, `close`, `lseek`, `sbrk`, `_exit` and `isatty` are defined WEAKLY with defaults (output discarded, input at end of file, a heap from the end of the image to the stack, `_exit` stops), and a program's own definition of any of them replaces the default. One thread, no clock, no filesystem: those report `ENOSYS`, as POSIX's half does (`os/absent.inc`) -- except signals, which the library delivers itself. |
 
 A new operating system needs one new backend file and nothing else.

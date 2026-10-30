@@ -36,6 +36,7 @@
  * lib/libc's <errno.h>, so a kernel error passes through as itself.
  */
 #include "../backend.h"
+#include "../tls-template.h"
 
 #include <errno.h>
 #include <stdlib.h>
@@ -488,9 +489,81 @@ int __os_getentropy(void *buf, size_t n)
 
 struct __os_start { void (*fn)(void *); void *arg; };
 
+/* ---- a new thread's thread-local block ----
+ *
+ * The kernel starts a thread with no thread pointer, and crt0 built a
+ * block for the first thread only. So the trampoline builds the new
+ * thread's from the template crt0 handed over (os/tls-template.h), in
+ * the same layout crt0 uses -- the LINKER's, which put every variable at
+ * a fixed offset from the pointer:
+ *
+ *   x86-64, variant II            aarch64, variant I
+ *   [ .tdata | .tbss ][ TCB ]     [ TCB ][ .tdata | .tbss ]
+ *                     ^TP         ^TP
+ *
+ * On the thread's own stack: it lives exactly as long as the thread, and
+ * nothing has to free it after the last access to errno, which free()
+ * itself could make. TLS_MAX keeps that well inside the kernel's 1 MiB
+ * stack slot; a program with a larger template gets EAGAIN from
+ * pthread_create, which is what POSIX says a lack of resources is. */
+#if defined(__x86_64__)
+#define TLS_TCB 64      /* the self-pointer at 0, and room for what the
+                         * psABI keeps above it; crt0 reserves the same */
+#else
+#define TLS_TCB 16      /* binutils' TCB_SIZE: part of every offset */
+#endif
+#define TLS_MAX (256UL * 1024)
+
+static unsigned long tls_round(unsigned long n, unsigned long a)
+{
+    return (n + a - 1) & ~(a - 1);
+}
+
+static unsigned long tls_align(void)
+{
+    return __emblibc_tls.align ? __emblibc_tls.align : 8;
+}
+
+/* the bytes a block takes, slack for aligning it included; 0 for none */
+static unsigned long tls_bytes(void)
+{
+    if (!__emblibc_tls.memsz)
+        return 0;
+    unsigned long a = tls_align();
+    return tls_round(__emblibc_tls.memsz, a) + tls_round(TLS_TCB, a) + a;
+}
+
+/* Lay the template out in `mem` and point the thread at it. Touches no
+ * errno until the pointer is installed: nothing before that can. */
+static void tls_install(char *mem)
+{
+    unsigned long a = tls_align();
+    unsigned long size = tls_round(__emblibc_tls.memsz, a);
+    unsigned long tp;
+    char *block;
+#if defined(__x86_64__)
+    tp = tls_round((unsigned long)mem + size, a);
+    block = (char *)(tp - size);
+    memset((void *)tp, 0, TLS_TCB);
+    *(unsigned long *)tp = tp;      /* `mov %fs:0, %reg` reads this */
+#else
+    unsigned long tcb = tls_round(TLS_TCB, a);
+    tp = tls_round((unsigned long)mem, a);
+    block = (char *)(tp + tcb);
+    memset((void *)tp, 0, tcb);
+#endif
+    memcpy(block, __emblibc_tls.image, __emblibc_tls.filesz);
+    memset(block + __emblibc_tls.filesz, 0, size - __emblibc_tls.filesz);
+    embk_syscall1(EMBK_SYS_set_fs_base, (int64_t)tp);
+}
+
 static void __os_thread_trampoline(long a)
 {
     struct __os_start *st = (struct __os_start *)(intptr_t)a;
+    unsigned long n = tls_bytes();
+    char mem[n ? n : 1];            /* lives until embk_thread_exit */
+    if (n)
+        tls_install(mem);
     void (*fn)(void *) = st->fn;
     void *arg = st->arg;
     free(st);
@@ -500,6 +573,10 @@ static void __os_thread_trampoline(long a)
 
 int __os_thread_create(unsigned long *id, void (*fn)(void *), void *arg)
 {
+    if (tls_bytes() > TLS_MAX) {
+        errno = EAGAIN;
+        return -1;
+    }
     struct __os_start *st = malloc(sizeof *st);
     if (!st) {
         errno = ENOMEM;

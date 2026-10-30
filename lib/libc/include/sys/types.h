@@ -68,7 +68,10 @@ typedef int key_t;
 #define _CLOCKID_T_DECLARED
 typedef int clockid_t;
 #endif
+#ifndef _TIMER_T_DECLARED
+#define _TIMER_T_DECLARED
 typedef void *timer_t;
+#endif
 typedef long daddr_t;
 typedef char *caddr_t;
 

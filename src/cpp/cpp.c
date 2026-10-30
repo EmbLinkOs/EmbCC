@@ -265,6 +265,29 @@ static size_t copy_literal(const char *p, struct tbuf *out)
 
 static void expand_text(struct src *s, const char *text, struct tbuf *out);
 
+/* A name a macro's own expansion produced while that macro was being
+ * expanded -- `#define m a.m` gives an `m` -- is never expanded again,
+ * however many times the text is rescanned afterwards: as an argument
+ * pre-expanded and then substituted into another macro's body, for one
+ * (C11 6.10.3.4p2). This text-based preprocessor keeps that as a byte
+ * in front of the name, which expand_text copies through and which
+ * paint_strip takes out wherever a line's expansion is finished. Before
+ * it, `R(s.m)` with `#define R(x) Q(x)` came out `s.a.a.a.m`; glibc's
+ * <signal.h> has `#define si_pid _sifields._kill.si_pid`. */
+#define PAINT '\x03'
+
+static void paint_strip(struct tbuf *b)
+{
+    if (!b->p)
+        return;
+    size_t k = 0;
+    for (size_t i = 0; i < b->len; i++)
+        if (b->p[i] != PAINT)
+            b->p[k++] = b->p[i];
+    b->len = k;
+    b->p[k] = 0;
+}
+
 /* Collects one macro argument (depth-0 comma or ')' ends it).
  * Returns chars consumed; *out gets the raw argument text, trimmed. */
 static size_t collect_arg(struct src *s, const char *p, struct tbuf *arg)
@@ -436,6 +459,8 @@ static char *subst_body(struct src *s, struct macro *m,
                      NULL);
             tb_putc(&out, '"');
             for (const char *r = raw[pi]; *r; r++) {
+                if (*r == PAINT)
+                    continue;
                 if (*r == '"' || *r == '\\')
                     tb_putc(&out, '\\');
                 tb_putc(&out, *r);
@@ -459,7 +484,13 @@ static char *subst_body(struct src *s, struct macro *m,
                 while (*q == ' ' || *q == '\t')
                     q++;
                 int pasted = (q[0] == '#' && q[1] == '#');
-                tb_puts(&out, pasted ? raw[pi] : exp[pi]);
+                if (pasted) {
+                    for (const char *r = raw[pi]; *r; r++)
+                        if (*r != PAINT)
+                            tb_putc(&out, *r);
+                } else {
+                    tb_puts(&out, exp[pi]);
+                }
             } else {
                 tb_putn(&out, p, n);
             }
@@ -647,6 +678,14 @@ static void expand_text(struct src *s, const char *text, struct tbuf *out)
             p += copy_literal(p, out);
             continue;
         }
+        if (*p == PAINT && is_id0(p[1])) {    /* painted: copied as it is */
+            size_t n = 1;
+            while (is_idc(p[n]))
+                n++;
+            tb_putn(out, p, n);
+            p += n;
+            continue;
+        }
         if (!is_id0(*p)) {
             tb_putc(out, *p++);
             continue;
@@ -706,6 +745,8 @@ static void expand_text(struct src *s, const char *text, struct tbuf *out)
 
         struct macro *m = find_macro(s->cpp, p, n);
         if (!m || m->expanding) {
+            if (m)
+                tb_putc(out, PAINT);   /* and so for good */
             tb_putn(out, p, n);
             p += n;
             continue;
@@ -739,7 +780,8 @@ static void expand_text(struct src *s, const char *text, struct tbuf *out)
             size_t tn = tmp.len;
             while (tn && is_idc(tmp.p[tn - 1]))
                 tn--;
-            if (tmp.len && tn < tmp.len && is_id0(tmp.p[tn])) {
+            if (tmp.len && tn < tmp.len && is_id0(tmp.p[tn]) &&
+                !(tn && tmp.p[tn - 1] == PAINT)) {
                 struct macro *fm = find_macro(s->cpp, tmp.p + tn,
                                               tmp.len - tn);
                 const char *q2 = p;
@@ -1383,6 +1425,7 @@ static long eval_if(struct src *s, const char *line)
     struct tbuf ex = { 0, 0, 0 };
     s->cpp->in_if = 1;
     expand_text(s, pre.p ? pre.p : "", &ex);
+    paint_strip(&ex);
     s->cpp->in_if = 0;
     free(pre.p);
     if (ex.p) {
@@ -1834,6 +1877,7 @@ static void do_include(struct src *s, const char *arg, struct tbuf *out,
     struct tbuf expd = { 0, 0, 0 };
     if (*p != '"' && *p != '<' && is_id0(*p)) {
         expand_text(s, p, &expd);
+        paint_strip(&expd);
         p = expd.p ? expd.p : "";
         while (*p == ' ' || *p == '\t')
             p++;
@@ -2712,6 +2756,7 @@ static void process_file(struct cpp *cpp, const char *path,
                 struct tbuf expb = { 0, 0, 0 };
                 g_marking = g_mark_system && !predef_is_cxx();
                 expand_text(&s, lineb.p ? lineb.p : "", &expb);
+                paint_strip(&expb);
                 g_marking = 0;
                 if (!expb.p) tb_putc(&expb, '\0'), expb.len = 0;
                 /* Expanded into a buffer of its own first, because

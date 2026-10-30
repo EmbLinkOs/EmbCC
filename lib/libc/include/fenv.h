@@ -98,6 +98,10 @@ typedef struct {
 } fenv_t;
 
 extern const fenv_t __fe_dfl_env;
+
+/* C23's control modes alone -- rounding and traps, no flags */
+typedef struct { unsigned int __cw; } femode_t;
+#define FE_DFL_MODE ((const femode_t *)-1L)
 #define FE_DFL_ENV (&__fe_dfl_env)
 
 #endif
@@ -115,6 +119,17 @@ int fegetenv(fenv_t *envp);
 int fesetenv(const fenv_t *envp);
 int feholdexcept(fenv_t *envp);
 int feupdateenv(const fenv_t *envp);
+
+#if !defined(__APPLE__)
+int fesetexcept(int excepts);
+int fetestexceptflag(const fexcept_t *flagp, int excepts);
+int fegetmode(femode_t *modep);
+int fesetmode(const femode_t *modep);
+/* GNU's traps: the exceptions that interrupt rather than set a flag */
+int feenableexcept(int excepts);
+int fedisableexcept(int excepts);
+int fegetexcept(void);
+#endif
 
 #ifdef __cplusplus
 }

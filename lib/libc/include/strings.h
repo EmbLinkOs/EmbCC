@@ -17,6 +17,12 @@ int   strcasecmp(const char *a, const char *b);
 int   strncasecmp(const char *a, const char *b, size_t n);
 int   ffs(int i);
 
+#include <bits/locale_t.h>
+int strcasecmp_l(const char *a, const char *b, locale_t l);
+int strncasecmp_l(const char *a, const char *b, size_t n, locale_t l);
+int ffsl(long v);
+int ffsll(long long v);
+
 #ifdef __cplusplus
 }
 #endif

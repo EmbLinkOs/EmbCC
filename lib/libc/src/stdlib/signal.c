@@ -468,3 +468,177 @@ void abort(void)
     for (;;)
         ;
 }
+
+/* ---- sigsetjmp's other half (<setjmp.h>) -------------------------------------- */
+
+#include <setjmp.h>
+
+__attribute__((weak)) int __sigjmp_save(sigjmp_buf env, int savemask)
+{
+    env->__saved = savemask != 0;
+    if (savemask)
+        sigprocmask(SIG_BLOCK, NULL, &env->__mask);
+    return 0;
+}
+
+/* the mask first: leaving a handler by siglongjmp is what makes the
+ * signal it blocked deliverable again */
+__attribute__((weak)) void siglongjmp(sigjmp_buf env, int val)
+{
+    if (env->__saved)
+        sigprocmask(SIG_SETMASK, &env->__mask, NULL);
+    longjmp(env->__jb, val);
+}
+
+/* ---- glibc's names for signals ---------------------------------------------- */
+
+static const char *const g_abbrev[NSIG] = {
+    [SIGHUP] = "HUP", [SIGINT] = "INT", [SIGQUIT] = "QUIT", [SIGILL] = "ILL",
+    [SIGTRAP] = "TRAP", [SIGABRT] = "ABRT", [SIGBUS] = "BUS", [SIGFPE] = "FPE",
+    [SIGKILL] = "KILL", [SIGUSR1] = "USR1", [SIGSEGV] = "SEGV",
+    [SIGUSR2] = "USR2", [SIGPIPE] = "PIPE", [SIGALRM] = "ALRM",
+    [SIGTERM] = "TERM", [SIGSTKFLT] = "STKFLT", [SIGCHLD] = "CHLD",
+    [SIGCONT] = "CONT", [SIGSTOP] = "STOP", [SIGTSTP] = "TSTP",
+    [SIGTTIN] = "TTIN", [SIGTTOU] = "TTOU", [SIGURG] = "URG",
+    [SIGXCPU] = "XCPU", [SIGXFSZ] = "XFSZ", [SIGVTALRM] = "VTALRM",
+    [SIGPROF] = "PROF", [SIGWINCH] = "WINCH", [SIGIO] = "IO",
+    [SIGPWR] = "PWR", [SIGSYS] = "SYS",
+};
+
+/* "HUP" for SIGHUP; NULL for a number with no name */
+__attribute__((weak)) const char *sigabbrev_np(int sig)
+{
+    return valid(sig) ? g_abbrev[sig] : NULL;
+}
+
+/* strsignal's words, without its "Unknown signal N" */
+__attribute__((weak)) const char *sigdescr_np(int sig)
+{
+    return valid(sig) ? sys_siglist[sig] : NULL;
+}
+
+/* ---- XSI's older interface: one signal at a time ------------------------------ */
+
+static int mask_one(int how, int sig)
+{
+    sigset_t s;
+    sigemptyset(&s);
+    if (sigaddset(&s, sig) < 0)
+        return -1;
+    return sigprocmask(how, &s, NULL);
+}
+
+__attribute__((weak)) int sighold(int sig) { return mask_one(SIG_BLOCK, sig); }
+__attribute__((weak)) int sigrelse(int sig) { return mask_one(SIG_UNBLOCK, sig); }
+
+__attribute__((weak)) int sigignore(int sig)
+{
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = SIG_IGN;
+    return sigaction(sig, &sa, NULL);
+}
+
+/* the mask less sig, until a signal arrives */
+__attribute__((weak)) int sigpause(int sig)
+{
+    sigset_t s;
+    sigprocmask(SIG_BLOCK, NULL, &s);
+    if (sigdelset(&s, sig) < 0)
+        return -1;
+    return sigsuspend(&s);
+}
+
+/* signal with SIG_HOLD: the disposition set and the signal unblocked, or
+ * the signal blocked; the previous disposition, SIG_HOLD if it was held */
+__attribute__((weak)) void (*sigset(int sig, void (*handler)(int)))(int)
+{
+    sigset_t s, old;
+    sigemptyset(&s);
+    if (sigaddset(&s, sig) < 0)
+        return SIG_ERR;
+    struct sigaction prev;
+    if (sigaction(sig, NULL, &prev) < 0)
+        return SIG_ERR;
+    if (handler == SIG_HOLD) {
+        if (sigprocmask(SIG_BLOCK, &s, &old) < 0)
+            return SIG_ERR;
+        return sigismember(&old, sig) ? SIG_HOLD : prev.sa_handler;
+    }
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = handler;
+    if (sigaction(sig, &sa, NULL) < 0 || sigprocmask(SIG_UNBLOCK, &s, &old) < 0)
+        return SIG_ERR;
+    return sigismember(&old, sig) ? SIG_HOLD : prev.sa_handler;
+}
+
+/* BSD's signal (the handler stays, calls restart) and System V's (reset
+ * before it runs, nothing restarts) */
+__attribute__((weak)) void (*bsd_signal(int sig, void (*handler)(int)))(int)
+{
+    struct sigaction sa, old;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = handler;
+    sa.sa_flags = SA_RESTART;
+    sigemptyset(&sa.sa_mask);
+    sigaddset(&sa.sa_mask, sig);
+    return sigaction(sig, &sa, &old) < 0 ? SIG_ERR : old.sa_handler;
+}
+
+__attribute__((weak)) void (*sysv_signal(int sig, void (*handler)(int)))(int)
+{
+    struct sigaction sa, old;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = handler;
+    sa.sa_flags = SA_RESETHAND | SA_NODEFER;
+    return sigaction(sig, &sa, &old) < 0 ? SIG_ERR : old.sa_handler;
+}
+
+/* the BSD masks: the first 32 signals as bits of an int */
+__attribute__((weak)) int sigblock(int mask)
+{
+    sigset_t s = (sigset_t)(unsigned)mask, old;
+    sigprocmask(SIG_BLOCK, &s, &old);
+    return (int)(unsigned)old;
+}
+
+__attribute__((weak)) int sigsetmask(int mask)
+{
+    sigset_t s = (sigset_t)(unsigned)mask, old;
+    sigprocmask(SIG_SETMASK, &s, &old);
+    return (int)(unsigned)old;
+}
+
+__attribute__((weak)) int siggetmask(void)
+{
+    sigset_t old;
+    sigprocmask(SIG_BLOCK, NULL, &old);
+    return (int)(unsigned)old;
+}
+
+/* System V's software signals: ssignal sets what gsignal calls */
+static void (*g_soft[NSIG])(int);
+
+__attribute__((weak)) void (*ssignal(int sig, void (*handler)(int)))(int)
+{
+    if (!valid(sig))
+        return SIG_ERR;
+    void (*old)(int) = g_soft[sig];
+    g_soft[sig] = handler;
+    return old ? old : SIG_DFL;
+}
+
+__attribute__((weak)) int gsignal(int sig)
+{
+    if (!valid(sig))
+        return 0;
+    void (*h)(int) = g_soft[sig];
+    if (!h || h == SIG_DFL)
+        return 0;
+    if (h == SIG_IGN)
+        return 1;
+    g_soft[sig] = SIG_DFL;
+    h(sig);
+    return 1;
+}

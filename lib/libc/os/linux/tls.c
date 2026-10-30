@@ -55,6 +55,8 @@
  * aarch64 kernels are built with 4, 16 or 64 KB pages, so it is asked,
  * not assumed. 0 until startup has read the auxv. */
 unsigned long __libc_pagesize;
+const long *__libc_auxv;        /* for __os_auxv (posix.c) */
+unsigned long __libc_stack_top; /* the first thread's, for __os_thread_stack */
 #define LPT_TLS    7
 
 /* Just enough of a program header to find PT_TLS and read it. The
@@ -176,6 +178,20 @@ void __libc_tls_init(long *sp)
     while (*e)
         e++;
     long *auxv = (long *)(e + 1);
+    __libc_auxv = auxv;
+    /* the stack's top: past the last argument and environment string,
+     * which the kernel put at its very end */
+    unsigned long top = (unsigned long)e;
+    for (char **v = (char **)(sp + 1); v < e; v++) {
+        if (!*v)
+            continue;
+        unsigned long end = (unsigned long)*v;
+        while (*(const char *)end)
+            end++;
+        if (end + 1 > top)
+            top = end + 1;
+    }
+    __libc_stack_top = top;
 
     const struct lphdr *phdr = NULL;
     unsigned long phnum = 0, phent = sizeof(struct lphdr);

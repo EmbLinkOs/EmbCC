@@ -3,6 +3,8 @@
 #ifndef _FCNTL_H
 #define _FCNTL_H
 
+#include <features.h>
+
 #include <sys/types.h>
 
 #ifdef __cplusplus
@@ -88,6 +90,45 @@ int openat(int dirfd, const char *path, int flags, ...);
 int creat(const char *path, mode_t mode);
 int fcntl(int fd, int cmd, ...);
 int posix_fadvise(int fd, off_t off, off_t len, int advice);
+int posix_fallocate(int fd, off_t off, off_t len);
+
+#if defined(__EMB_GNU)
+/* Linux's (src/posix/linuxapi.c); ENOSYS where it is not Linux */
+#define FALLOC_FL_KEEP_SIZE      0x01
+#define FALLOC_FL_PUNCH_HOLE     0x02
+#define FALLOC_FL_COLLAPSE_RANGE 0x08
+#define FALLOC_FL_ZERO_RANGE     0x10
+#define FALLOC_FL_INSERT_RANGE   0x20
+#define SPLICE_F_MOVE     1
+#define SPLICE_F_NONBLOCK 2
+#define SPLICE_F_MORE     4
+#define SPLICE_F_GIFT     8
+#define SYNC_FILE_RANGE_WAIT_BEFORE 1
+#define SYNC_FILE_RANGE_WRITE       2
+#define SYNC_FILE_RANGE_WAIT_AFTER  4
+struct iovec;
+int     fallocate(int fd, int mode, off_t off, off_t len);
+ssize_t readahead(int fd, off_t off, size_t count);
+int     sync_file_range(int fd, off_t off, off_t n, unsigned flags);
+ssize_t splice(int in, off_t *in_off, int out, off_t *out_off, size_t len,
+               unsigned flags);
+ssize_t tee(int in, int out, size_t len, unsigned flags);
+ssize_t vmsplice(int fd, const struct iovec *iov, size_t n, unsigned flags);
+#endif
+
+#if defined(__EMB_GNU) || defined(_LARGEFILE64_SOURCE)
+/* off_t is 64 bits here: the large-file names are the same calls */
+#define open64 open
+#define openat64 openat
+#define creat64 creat
+#define posix_fadvise64 posix_fadvise
+#define posix_fallocate64 posix_fallocate
+#define fallocate64 fallocate
+#define flock64 flock
+#define F_GETLK64 F_GETLK
+#define F_SETLK64 F_SETLK
+#define F_SETLKW64 F_SETLKW
+#endif
 
 #ifdef __cplusplus
 }

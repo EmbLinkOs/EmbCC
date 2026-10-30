@@ -6,6 +6,7 @@
 #define EMBLIBC_THR_H
 
 #include <setjmp.h>
+#include <stddef.h>
 #include <time.h>
 
 #define __THR_KEYS 128                /* PTHREAD_KEYS_MAX */
@@ -24,6 +25,9 @@ struct __thr {
     jmp_buf exit_to;
     void *tsd[__THR_KEYS];
     char name[16];
+    int tid;                          /* the kernel's id for it (gettid) */
+    void *aff;                        /* a CPU set to take on starting */
+    size_t affsize;
 };
 
 #ifndef WEAK

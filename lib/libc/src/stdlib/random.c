@@ -211,3 +211,178 @@ __attribute__((weak)) int rand_r(unsigned *seed)
     *seed = next;
     return (int)r;
 }
+
+/* ---- the reentrant forms, GNU's: the same generators, with the state in
+ * the caller's struct (glibc's layout) ---------------------------------------- */
+
+__attribute__((weak)) int random_r(struct random_data *b, int32_t *result)
+{
+    if (!b || !result) {
+        errno = EINVAL;
+        return -1;
+    }
+    int32_t *st = b->state;
+    if (b->rand_type == 0) {
+        st[0] = (int32_t)(((uint32_t)st[0] * 1103515245u + 12345u) & 0x7fffffff);
+        *result = st[0];
+        return 0;
+    }
+    uint32_t v = (uint32_t)*b->fptr + (uint32_t)*b->rptr;
+    *b->fptr = (int32_t)v;
+    *result = (int32_t)(v >> 1);
+    if (++b->fptr >= b->end_ptr) {
+        b->fptr = st;
+        ++b->rptr;
+    } else if (++b->rptr >= b->end_ptr) {
+        b->rptr = st;
+    }
+    return 0;
+}
+
+__attribute__((weak)) int srandom_r(unsigned seed, struct random_data *b)
+{
+    if (!b || b->rand_type < 0 || b->rand_type >= TYPES) {
+        errno = EINVAL;
+        return -1;
+    }
+    int32_t *st = b->state;
+    if (seed == 0)
+        seed = 1;
+    st[0] = (int32_t)seed;
+    if (b->rand_type == 0)
+        return 0;
+    int32_t word = (int32_t)seed;
+    for (int i = 1; i < b->rand_deg; i++) {
+        int32_t hi = word / 127773, lo = word % 127773;
+        word = 16807 * lo - 2836 * hi;
+        if (word < 0)
+            word += 2147483647;
+        st[i] = word;
+    }
+    b->fptr = st + b->rand_sep;
+    b->rptr = st;
+    int32_t discard;
+    for (int i = 10 * b->rand_deg; i > 0; i--)
+        random_r(b, &discard);
+    return 0;
+}
+
+__attribute__((weak)) int initstate_r(unsigned seed, char *buf, size_t n,
+                                      struct random_data *b)
+{
+    if (!b || n < 8) {
+        errno = EINVAL;
+        return -1;
+    }
+    int t = n < 32 ? 0 : n < 64 ? 1 : n < 128 ? 2 : n < 256 ? 3 : 4;
+    b->rand_type = t;
+    b->rand_deg = degrees[t];
+    b->rand_sep = seps[t];
+    int32_t *st = (int32_t *)(void *)buf + 1;
+    b->state = st;
+    b->end_ptr = st + degrees[t];
+    srandom_r(seed, b);
+    st[-1] = t == 0 ? 0 : (int32_t)(TYPES * (b->rptr - st) + t);
+    return 0;
+}
+
+__attribute__((weak)) int setstate_r(char *buf, struct random_data *b)
+{
+    if (!buf || !b) {
+        errno = EINVAL;
+        return -1;
+    }
+    int32_t *old = b->state;
+    old[-1] = b->rand_type == 0 ? 0
+              : (int32_t)(TYPES * (b->rptr - old) + b->rand_type);
+    int32_t *ns = (int32_t *)(void *)buf + 1;
+    int t = ns[-1] % TYPES;
+    if (t < 0 || t >= TYPES) {
+        errno = EINVAL;
+        return -1;
+    }
+    b->rand_type = t;
+    b->rand_deg = degrees[t];
+    b->rand_sep = seps[t];
+    if (t != 0) {
+        int rear = ns[-1] / TYPES;
+        b->rptr = ns + rear;
+        b->fptr = ns + (rear + b->rand_sep) % b->rand_deg;
+    }
+    b->state = ns;
+    b->end_ptr = ns + b->rand_deg;
+    return 0;
+}
+
+static uint64_t step48_r(unsigned short xs[3], struct drand48_data *d)
+{
+    uint64_t a = d->__init ? d->__a : 0x5DEECE66Dull;
+    unsigned short c = d->__init ? d->__c : 0xB;
+    uint64_t x = (uint64_t)xs[0] | (uint64_t)xs[1] << 16 | (uint64_t)xs[2] << 32;
+    x = (a * x + c) & 0xFFFFFFFFFFFFull;
+    xs[0] = (unsigned short)x;
+    xs[1] = (unsigned short)(x >> 16);
+    xs[2] = (unsigned short)(x >> 32);
+    return x;
+}
+
+__attribute__((weak)) int erand48_r(unsigned short xs[3], struct drand48_data *d,
+                                    double *r)
+{
+    *r = (double)step48_r(xs, d) * 0x1p-48;
+    return 0;
+}
+__attribute__((weak)) int drand48_r(struct drand48_data *d, double *r)
+{
+    return erand48_r(d->__x, d, r);
+}
+__attribute__((weak)) int nrand48_r(unsigned short xs[3], struct drand48_data *d,
+                                    long *r)
+{
+    *r = (long)(step48_r(xs, d) >> 17);
+    return 0;
+}
+__attribute__((weak)) int lrand48_r(struct drand48_data *d, long *r)
+{
+    return nrand48_r(d->__x, d, r);
+}
+__attribute__((weak)) int jrand48_r(unsigned short xs[3], struct drand48_data *d,
+                                    long *r)
+{
+    *r = (long)(int32_t)(uint32_t)(step48_r(xs, d) >> 16);
+    return 0;
+}
+__attribute__((weak)) int mrand48_r(struct drand48_data *d, long *r)
+{
+    return jrand48_r(d->__x, d, r);
+}
+__attribute__((weak)) int srand48_r(long seed, struct drand48_data *d)
+{
+    d->__x[0] = 0x330E;
+    d->__x[1] = (unsigned short)seed;
+    d->__x[2] = (unsigned short)((unsigned long)seed >> 16);
+    d->__a = 0x5DEECE66Dull;
+    d->__c = 0xB;
+    d->__init = 1;
+    return 0;
+}
+__attribute__((weak)) int seed48_r(unsigned short s[3], struct drand48_data *d)
+{
+    for (int i = 0; i < 3; i++) {
+        d->__old_x[i] = d->__x[i];
+        d->__x[i] = s[i];
+    }
+    d->__a = 0x5DEECE66Dull;
+    d->__c = 0xB;
+    d->__init = 1;
+    return 0;
+}
+__attribute__((weak)) int lcong48_r(unsigned short p[7], struct drand48_data *d)
+{
+    for (int i = 0; i < 3; i++)
+        d->__x[i] = p[i];
+    d->__a = (uint64_t)p[3] | (uint64_t)p[4] << 16 | (uint64_t)p[5] << 32;
+    d->__c = p[6];
+    d->__init = 1;
+    return 0;
+}

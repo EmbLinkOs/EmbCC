@@ -21,6 +21,8 @@
 #ifndef _SETJMP_H
 #define _SETJMP_H
 
+#include <features.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -50,10 +52,37 @@ void longjmp(jmp_buf env, int val);
  * this is the form that gives both without a wrapper frame. */
 #define setjmp(env) setjmp(env)
 
-/* The BSD spelling, which programs use to mean "no signal mask". This
- * library has no signal mask to save, so they are the same functions. */
+/* The BSD spelling, which programs use to mean "no signal mask": setjmp
+ * here never saves one, so they are the same functions. */
 #define _setjmp  setjmp
 #define _longjmp longjmp
+
+/* POSIX's sigsetjmp and siglongjmp: setjmp's buffer with the signal mask
+ * beside it. sigsetjmp saves the mask when asked and then IS setjmp --
+ * it must be, since only setjmp's own frame can be returned to twice --
+ * and siglongjmp puts the mask back before it jumps. */
+#if defined(__EMB_POSIX)
+#if defined(__APPLE__)
+#if defined(__aarch64__)
+typedef int sigjmp_buf[(14 + 8 + 2) * 2 + 1];
+#else
+typedef int sigjmp_buf[(9 * 2) + 3 + 16 + 1];
+#endif
+int  sigsetjmp(sigjmp_buf env, int savemask);
+void siglongjmp(sigjmp_buf env, int val);
+#else
+#include <bits/sigset.h>
+typedef struct {
+    jmp_buf __jb;
+    int __saved;               /* the mask below is to be restored */
+    sigset_t __mask;
+} sigjmp_buf[1];
+int  __sigjmp_save(sigjmp_buf env, int savemask);
+void siglongjmp(sigjmp_buf env, int val);
+#define sigsetjmp(env, savemask) \
+    (__sigjmp_save((env), (savemask)), setjmp((env)->__jb))
+#endif
+#endif
 
 #ifdef __cplusplus
 }

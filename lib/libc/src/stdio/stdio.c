@@ -181,6 +181,25 @@ void __stdio_flush_all(void)
             flush_if_used(&c->f[i]);
 }
 
+/* GNU's: every stream the program opened closed, and the three it was
+ * given flushed -- they are not the program's to close */
+__attribute__((weak)) int fcloseall(void)
+{
+    int r = 0;
+    __stdio_flush_all();
+    for (int i = 0; i < FOPEN_MAX; i++)
+        if (g_files[i].flags & F_USED)
+            r |= fclose(&g_files[i]);
+    __lock(&files_lock);
+    struct chunk *c = g_chunks;
+    __unlock(&files_lock);
+    for (; c; c = c->next)
+        for (int i = 0; i < CHUNK; i++)
+            if (c->f[i].flags & F_USED)
+                r |= fclose(&c->f[i]);
+    return r ? EOF : 0;
+}
+
 int fflush(FILE *f)
 {
     if (!f) { __stdio_flush_all(); return 0; }
@@ -697,6 +716,12 @@ char *tmpnam(char *s)
         }
     }
     return NULL;
+}
+
+/* GNU's: tmpnam that will not use its own buffer */
+__attribute__((weak)) char *tmpnam_r(char *s)
+{
+    return s ? tmpnam(s) : NULL;
 }
 
 FILE *tmpfile(void)

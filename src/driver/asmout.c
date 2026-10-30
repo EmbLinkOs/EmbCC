@@ -628,12 +628,13 @@ static const char *reloc_name(int kind)
 
 /* x86-64 counts a PC-relative displacement from the END of the
  * instruction and every other target here counts it from the start, so
- * the -4 that corrects for that is x86's alone. */
+ * the -4 that corrects for that is x86's alone -- and only for the kinds
+ * that ARE PC-relative: a TPOFF32 is an offset from the thread pointer.
+ * The object writer asks target_reloc_addend() the same question, so the
+ * text and the object cannot answer it differently. */
 static long addend_for(int kind)
 {
-    if (kind == RK_ABS64 || kind == RK_ABS32)
-        return 0;
-    return target_get() == TARGET_X86_64 ? -4 : 0;
+    return target_reloc_addend(target_get(), (enum reloc_kind)kind, 0);
 }
 
 /* MIPS: a load or store's mnemonic, from its major opcode, for a LO16

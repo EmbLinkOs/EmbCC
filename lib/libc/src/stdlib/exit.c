@@ -67,6 +67,30 @@ int __cxa_atexit(void (*f)(void *), void *arg, void *dso)
     return 0;
 }
 
+/* GNU's on_exit: a handler that is told the status. Kept on the same
+ * list, so the order is the one registrations were made in. */
+static int g_status;
+static struct { void (*fn)(int, void *); void *arg; } g_on[MAX_ATEXIT];
+static int g_on_n;
+
+static void call_on_exit(void *p)
+{
+    int i = (int)((char *)p - (char *)g_on) / (int)sizeof g_on[0];
+    g_on[i].fn(g_status, g_on[i].arg);
+}
+
+__attribute__((weak)) int on_exit(void (*fn)(int, void *), void *arg)
+{
+    if (!fn || g_on_n >= MAX_ATEXIT)
+        return -1;
+    g_on[g_on_n].fn = fn;
+    g_on[g_on_n].arg = arg;
+    if (__cxa_atexit(call_on_exit, &g_on[g_on_n], 0))
+        return -1;
+    g_on_n++;
+    return 0;
+}
+
 /* Run the handlers for one DSO, or for everything when `dso` is null.
  * g_n is re-read each time round because a destructor may register another
  * handler -- a static local first touched during shutdown does exactly
@@ -86,6 +110,7 @@ void __cxa_finalize(void *dso)
 
 void exit(int status)
 {
+    g_status = status;
     __cxa_finalize(0);           /* atexit and C++ static destructors */
     __stdio_flush_all();    /* buffered output is not optional on exit */
     if (g_overflow) {

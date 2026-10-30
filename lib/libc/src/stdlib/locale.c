@@ -33,19 +33,72 @@ static struct lconv c_locale = {
 
 static char current[] = "C";
 
+/* "" asks for the native locale, and here the native locale is "C";
+ * C.UTF-8 is "C" too, since this "C" encodes characters as UTF-8.
+ * Anything else is a locale this target does not have, and saying so is
+ * better than silently giving "C" under another name. */
+static int is_c(const char *name)
+{
+    return name[0] == '\0' || strcmp(name, "C") == 0 ||
+           strcmp(name, "POSIX") == 0 || strcmp(name, "C.UTF-8") == 0 ||
+           strcmp(name, "C.utf8") == 0 || strcmp(name, "C.utf-8") == 0;
+}
+
 char *setlocale(int category, const char *locale)
 {
-    if (category < LC_ALL || category > LC_TIME)
+    if (category < LC_ALL || category > LC_IDENTIFICATION)
         return NULL;
     if (!locale)
         return current;           /* a query: report what is in effect */
-    /* "" asks for the native locale, and here the native locale is "C".
-     * Anything else is a locale this target does not have, and saying
-     * so is better than silently giving "C" under another name. */
-    if (locale[0] == '\0' || strcmp(locale, "C") == 0 ||
-        strcmp(locale, "POSIX") == 0)
-        return current;
-    return NULL;
+    return is_c(locale) ? current : NULL;
 }
 
 struct lconv *localeconv(void) { return &c_locale; }
+
+/* ---- POSIX's locale objects ------------------------------------------------
+ *
+ * One locale, so one object. newlocale hands it out for any name
+ * setlocale accepts and refuses the rest as POSIX says (ENOENT), and
+ * freeing it is nothing to do. */
+#include <errno.h>
+
+struct __locale_struct { int unused; };
+static struct __locale_struct g_c;
+static locale_t g_used = LC_GLOBAL_LOCALE;
+
+__attribute__((weak)) locale_t newlocale(int mask, const char *name, locale_t base)
+{
+    (void)base;
+    if ((mask & ~LC_ALL_MASK) || !name) {
+        errno = EINVAL;
+        return 0;
+    }
+    if (!is_c(name)) {
+        errno = ENOENT;
+        return 0;
+    }
+    return &g_c;
+}
+
+__attribute__((weak)) locale_t duplocale(locale_t loc)
+{
+    (void)loc;
+    return &g_c;
+}
+
+__attribute__((weak)) void freelocale(locale_t loc) { (void)loc; }
+
+/* the locale in use, LC_GLOBAL_LOCALE until one is set */
+__attribute__((weak)) locale_t uselocale(locale_t loc)
+{
+    locale_t old = g_used;
+    if (loc)
+        g_used = loc;
+    return old;
+}
+
+__attribute__((weak)) struct lconv *localeconv_l(locale_t loc)
+{
+    (void)loc;
+    return &c_locale;
+}

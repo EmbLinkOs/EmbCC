@@ -1146,3 +1146,30 @@ int __os_unlockpt(int fd)
     int zero = 0;
     return ret0(lsys3(LSYS_ioctl, fd, LTIOCSPTLCK, (long)&zero));
 }
+
+/* ---- the auxiliary vector ---------------------------------------------------- */
+
+extern const long *__libc_auxv;   /* tls.c, from the initial stack */
+
+const long *__os_auxv(void) { return __libc_auxv; }
+
+/* ---- syscall(2) ----------------------------------------------------------------
+ *
+ * Six arguments always: a call that takes fewer ignores the rest, which
+ * is how the kernel's convention makes a variadic wrapper possible. */
+#include <stdarg.h>
+
+__attribute__((weak)) long syscall(long n, ...)
+{
+    va_list ap;
+    va_start(ap, n);
+    long a = va_arg(ap, long), b = va_arg(ap, long), c = va_arg(ap, long);
+    long d = va_arg(ap, long), e = va_arg(ap, long), f = va_arg(ap, long);
+    va_end(ap);
+    long r = lsys6(n, a, b, c, d, e, f);
+    if ((unsigned long)r > -4096UL) {      /* -4095..-1: an errno */
+        errno = (int)-r;
+        return -1;
+    }
+    return r;
+}

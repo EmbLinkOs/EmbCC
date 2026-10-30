@@ -83,3 +83,13 @@ __attribute__((weak)) int ffs(int i)
 {
     return __builtin_ffs(i);
 }
+
+__attribute__((weak)) int ffsl(long i)
+{
+    return __builtin_ffsl(i);
+}
+
+__attribute__((weak)) int ffsll(long long i)
+{
+    return __builtin_ffsll(i);
+}

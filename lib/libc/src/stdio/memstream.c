@@ -236,3 +236,127 @@ __attribute__((weak)) FILE *open_memstream(char **bufp, size_t *sizep)
     }
     return f;
 }
+
+/* ---- open_wmemstream ------------------------------------------------------
+ *
+ * open_memstream's twin in wide characters: *bufp is wchar_t, *sizep and
+ * every seek count wide characters. The stream is wide-oriented; what it
+ * hands this io is the characters already encoded (UTF-8, the one
+ * locale's), and they are decoded back here -- a character split between
+ * two writes waits in the state for the rest. */
+#include <wchar.h>
+
+struct wdyn {
+    wchar_t **bufp;
+    size_t *sizep;
+    wchar_t *buf;
+    size_t cap, pos, len;
+    mbstate_t st;
+};
+
+static void wpublish(struct wdyn *d)
+{
+    *d->bufp = d->buf;
+    *d->sizep = d->pos < d->len ? d->pos : d->len;
+}
+
+static int wroom(struct wdyn *d, size_t need)
+{
+    if (need + 1 <= d->cap)
+        return 0;
+    size_t cap = d->cap * 2 > need + 1 ? d->cap * 2 : need + 1;
+    wchar_t *p = realloc(d->buf, cap * sizeof *p);
+    if (!p) {
+        errno = ENOMEM;
+        return -1;
+    }
+    memset(p + d->cap, 0, (cap - d->cap) * sizeof *p);
+    d->buf = p;
+    d->cap = cap;
+    return 0;
+}
+
+static ssize_t wdyn_write(void *c, const char *b, size_t n)
+{
+    struct wdyn *d = c;
+    size_t i = 0;
+    while (i < n) {
+        wchar_t wc;
+        size_t r = mbrtowc(&wc, b + i, n - i, &d->st);
+        if (r == (size_t)-2)
+            return (ssize_t)n;     /* the rest of it comes next time */
+        if (r == (size_t)-1) {
+            memset(&d->st, 0, sizeof d->st);
+            wc = 0xFFFD;           /* a stray byte: the replacement character */
+            r = 1;
+        }
+        if (r == 0)
+            r = 1;                 /* an L'\0' written is a character too */
+        if (wroom(d, d->pos + 1))
+            return i ? (ssize_t)i : 0;
+        d->buf[d->pos++] = wc;
+        if (d->pos > d->len)
+            d->len = d->pos;
+        i += r;
+    }
+    d->buf[d->len] = 0;
+    wpublish(d);
+    return (ssize_t)n;
+}
+
+static int wdyn_seek(void *c, long long *off, int whence)
+{
+    struct wdyn *d = c;
+    long long base = whence == SEEK_SET ? 0
+                   : whence == SEEK_CUR ? (long long)d->pos
+                   : whence == SEEK_END ? (long long)d->len : -1;
+    if (base < 0 || *off < -base) {
+        errno = EINVAL;
+        return -1;
+    }
+    size_t pos = (size_t)(base + *off);
+    if (wroom(d, pos))
+        return -1;
+    d->pos = pos;
+    *off = (long long)d->pos;
+    wpublish(d);
+    return 0;
+}
+
+static int wdyn_close(void *c)
+{
+    wpublish(c);
+    free(c);
+    return 0;
+}
+
+static const struct __stream_io wdyn_io = { NULL, wdyn_write, wdyn_seek,
+                                            wdyn_close };
+
+__attribute__((weak)) FILE *open_wmemstream(wchar_t **bufp, size_t *sizep)
+{
+    if (!bufp || !sizep) {
+        errno = EINVAL;
+        return NULL;
+    }
+    struct wdyn *d = calloc(1, sizeof *d);
+    wchar_t *buf = calloc(16, sizeof *buf);
+    if (!d || !buf) {
+        free(d);
+        free(buf);
+        return NULL;
+    }
+    d->bufp = bufp;
+    d->sizep = sizep;
+    d->buf = buf;
+    d->cap = 16;
+    wpublish(d);
+    FILE *f = open_io(d, &wdyn_io, F_WRITE);
+    if (!f) {
+        free(buf);
+        free(d);
+        return NULL;
+    }
+    fwide(f, 1);
+    return f;
+}

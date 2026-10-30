@@ -2,6 +2,8 @@
 #ifndef _SYS_STATVFS_H
 #define _SYS_STATVFS_H
 
+#include <features.h>
+
 #include <sys/types.h>
 
 #ifdef __cplusplus
@@ -20,6 +22,12 @@ struct statvfs {
 
 int statvfs(const char *__restrict path, struct statvfs *__restrict out);
 int fstatvfs(int fd, struct statvfs *out);
+
+#if defined(__EMB_GNU) || defined(_LARGEFILE64_SOURCE)
+/* off_t is 64 bits here: the large-file names are the same calls */
+#define statvfs64 statvfs
+#define fstatvfs64 fstatvfs
+#endif
 
 #ifdef __cplusplus
 }

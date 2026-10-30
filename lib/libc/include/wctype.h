@@ -14,6 +14,8 @@
 #ifndef _WCTYPE_H
 #define _WCTYPE_H
 
+#include <features.h>
+
 #include <wchar.h>
 
 #ifdef __cplusplus
@@ -46,6 +48,28 @@ wctype_t wctype(const char *name);
 int iswctype(wint_t c, wctype_t type);
 wctrans_t wctrans(const char *name);
 wint_t towctrans(wint_t c, wctrans_t trans);
+
+#if defined(__EMB_POSIX)
+#include <bits/locale_t.h>
+int iswalnum_l(wint_t c, locale_t l);
+int iswalpha_l(wint_t c, locale_t l);
+int iswblank_l(wint_t c, locale_t l);
+int iswcntrl_l(wint_t c, locale_t l);
+int iswdigit_l(wint_t c, locale_t l);
+int iswgraph_l(wint_t c, locale_t l);
+int iswlower_l(wint_t c, locale_t l);
+int iswprint_l(wint_t c, locale_t l);
+int iswpunct_l(wint_t c, locale_t l);
+int iswspace_l(wint_t c, locale_t l);
+int iswupper_l(wint_t c, locale_t l);
+int iswxdigit_l(wint_t c, locale_t l);
+int iswctype_l(wint_t c, wctype_t t, locale_t l);
+wint_t towlower_l(wint_t c, locale_t l);
+wint_t towupper_l(wint_t c, locale_t l);
+wint_t towctrans_l(wint_t c, wctrans_t t, locale_t l);
+wctype_t wctype_l(const char *name, locale_t l);
+wctrans_t wctrans_l(const char *name, locale_t l);
+#endif
 
 #ifdef __cplusplus
 }

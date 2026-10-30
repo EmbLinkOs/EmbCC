@@ -56,6 +56,13 @@ void globfree(glob_t *g);
 int  glob_pattern_p(const char *pattern, int quote);
 #endif
 
+#if defined(__EMB_GNU) || defined(_LARGEFILE64_SOURCE)
+/* off_t is 64 bits here: the large-file names are the same calls */
+#define glob64_t glob_t
+#define glob64 glob
+#define globfree64 globfree
+#endif
+
 #ifdef __cplusplus
 }
 #endif

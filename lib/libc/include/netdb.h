@@ -73,6 +73,8 @@ struct addrinfo {
 #define NO_RECOVERY    3
 #define NO_DATA        4
 #define NO_ADDRESS     NO_DATA
+#define NETDB_INTERNAL (-1)   /* see errno */
+#define NETDB_SUCCESS  0
 
 extern int h_errno;
 
@@ -92,10 +94,63 @@ struct servent  *getservbyname(const char *name, const char *proto);
 struct servent  *getservbyport(int port, const char *proto);
 struct protoent *getprotobyname(const char *name);
 struct protoent *getprotobynumber(int proto);
+
+/* the databases one entry at a time (src/posix/netdb2.c) */
+struct netent {
+    char *n_name;
+    char **n_aliases;
+    int n_addrtype;
+    uint32_t n_net;            /* host order */
+};
+void             sethostent(int stayopen);
+struct hostent  *gethostent(void);
+void             endhostent(void);
+void             setservent(int stayopen);
+struct servent  *getservent(void);
+void             endservent(void);
+void             setprotoent(int stayopen);
+struct protoent *getprotoent(void);
+void             endprotoent(void);
+void             setnetent(int stayopen);
+struct netent   *getnetent(void);
+void             endnetent(void);
+struct netent   *getnetbyname(const char *name);
+struct netent   *getnetbyaddr(uint32_t net, int type);
+
 #if defined(__EMB_GNU)
 struct hostent  *gethostbyname2(const char *name, int family);
 const char      *hstrerror(int code);
 void             herror(const char *msg);
+int gethostbyname_r(const char *__restrict name, struct hostent *__restrict out,
+                    char *__restrict buf, size_t len,
+                    struct hostent **__restrict res, int *__restrict herr);
+int gethostbyname2_r(const char *__restrict name, int family,
+                     struct hostent *__restrict out, char *__restrict buf,
+                     size_t len, struct hostent **__restrict res,
+                     int *__restrict herr);
+int gethostbyaddr_r(const void *__restrict addr, socklen_t alen, int type,
+                    struct hostent *__restrict out, char *__restrict buf,
+                    size_t len, struct hostent **__restrict res,
+                    int *__restrict herr);
+int gethostent_r(struct hostent *__restrict out, char *__restrict buf,
+                 size_t len, struct hostent **__restrict res,
+                 int *__restrict herr);
+int getservbyname_r(const char *__restrict name, const char *__restrict proto,
+                    struct servent *__restrict out, char *__restrict buf,
+                    size_t len, struct servent **__restrict res);
+int getservbyport_r(int port, const char *__restrict proto,
+                    struct servent *__restrict out, char *__restrict buf,
+                    size_t len, struct servent **__restrict res);
+int getservent_r(struct servent *__restrict out, char *__restrict buf,
+                 size_t len, struct servent **__restrict res);
+int getprotobyname_r(const char *__restrict name, struct protoent *__restrict out,
+                     char *__restrict buf, size_t len,
+                     struct protoent **__restrict res);
+int getprotobynumber_r(int num, struct protoent *__restrict out,
+                       char *__restrict buf, size_t len,
+                       struct protoent **__restrict res);
+int getprotoent_r(struct protoent *__restrict out, char *__restrict buf,
+                  size_t len, struct protoent **__restrict res);
 #endif
 
 #ifdef __cplusplus

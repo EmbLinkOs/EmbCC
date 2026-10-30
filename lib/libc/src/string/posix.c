@@ -8,6 +8,7 @@
  * strlcpy -- many do, from before C libraries had one -- keeps it. */
 #include <string.h>
 #include <strings.h>
+#include <stdint.h>
 #include <ctype.h>
 
 /* strtok with the position kept by the caller. *save is NOT required to
@@ -188,4 +189,41 @@ __attribute__((weak)) int strverscmp(const char *a, const char *b)
     default:
         return state;
     }
+}
+
+/* ---- GNU's ------------------------------------------------------------------ */
+
+/* memchr with no bound: the caller knows c is there */
+__attribute__((weak)) void *rawmemchr(const void *s, int c)
+{
+    const unsigned char *p = s;
+    while (*p != (unsigned char)c)
+        p++;
+    return (void *)p;
+}
+
+/* the bytes of s in a random order, from rand_r on a seed of its own */
+__attribute__((weak)) char *strfry(char *s)
+{
+    static unsigned seed;
+    if (!seed)
+        seed = (unsigned)(uintptr_t)&seed ^ 0x5bd1e995u;
+    size_t n = strlen(s);
+    for (size_t i = n; i > 1; i--) {
+        seed = seed * 1103515245u + 12345u;
+        size_t j = (seed >> 8) % i;
+        char t = s[i - 1];
+        s[i - 1] = s[j];
+        s[j] = t;
+    }
+    return s;
+}
+
+/* each byte exclusive-or 42, which undoes itself */
+__attribute__((weak)) void *memfrob(void *s, size_t n)
+{
+    unsigned char *p = s;
+    while (n--)
+        *p++ ^= 42;
+    return s;
 }

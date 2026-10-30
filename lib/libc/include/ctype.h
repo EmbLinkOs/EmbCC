@@ -7,6 +7,8 @@
 #ifndef _CTYPE_H
 #define _CTYPE_H
 
+#include <features.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -40,6 +42,29 @@ int isupper(int c);
 int isxdigit(int c);
 int tolower(int c);
 int toupper(int c);
+
+#if defined(__EMB_POSIX)
+#include <bits/locale_t.h>
+int isalnum_l(int c, locale_t l);
+int isalpha_l(int c, locale_t l);
+int isblank_l(int c, locale_t l);
+int iscntrl_l(int c, locale_t l);
+int isdigit_l(int c, locale_t l);
+int isgraph_l(int c, locale_t l);
+int islower_l(int c, locale_t l);
+int isprint_l(int c, locale_t l);
+int ispunct_l(int c, locale_t l);
+int isspace_l(int c, locale_t l);
+int isupper_l(int c, locale_t l);
+int isxdigit_l(int c, locale_t l);
+int tolower_l(int c, locale_t l);
+int toupper_l(int c, locale_t l);
+/* XSI's, withdrawn from POSIX.1-2008 but in every C library */
+int isascii(int c);
+int toascii(int c);
+#define _tolower(c) tolower(c)
+#define _toupper(c) toupper(c)
+#endif
 
 #ifdef __cplusplus
 }

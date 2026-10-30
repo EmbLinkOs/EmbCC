@@ -30,6 +30,9 @@ enum {
 
 char *nl_langinfo(nl_item item);
 
+#include <bits/locale_t.h>
+char *nl_langinfo_l(nl_item item, locale_t l);
+
 #ifdef __cplusplus
 }
 #endif

@@ -80,3 +80,7 @@ int isxdigit(int c) { return (cls(c) & _CT_HEX) != 0; }
 
 int tolower(int c) { return isupper(c) ? c + ('a' - 'A') : c; }
 int toupper(int c) { return islower(c) ? c - ('a' - 'A') : c; }
+
+/* XSI's: is it 7-bit, and make it so */
+__attribute__((weak)) int isascii(int c) { return (unsigned)c < 0x80; }
+__attribute__((weak)) int toascii(int c) { return c & 0x7F; }

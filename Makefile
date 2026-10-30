@@ -861,6 +861,9 @@ ELOS_LIBCXX  = $(BUILD)/libcxx/emblinkos$(ELOS_SUFFIX)
 # them a throw's walk ends where it starts, in _Unwind_RaiseException), and a
 # throw from a C++ callback passes through C frames -- qsort's, bsearch's.
 ELOS_CC      = ./embcc --target=$(EMBLINKOS_ARCH)-elf --unwind-tables
+# The C library alone gets -D__EMBLIBC_TLS_TEMPLATE: that OS's crt0 hands
+# over the thread-local template (lib/libc/os/tls-template.h), which makes
+# errno per thread and gives each new thread its block.
 
 libc-emblinkos: embcc embar
 	@[ -f "$(EMBLINKOS)/user/lib/embk.h" ] || { \
@@ -872,7 +875,7 @@ libc-emblinkos: embcc embar
 	@for f in $(LIBC_SRCS_PORTABLE) lib/libc/os/posix-names.c \
 	          lib/libc/os/emblinkos/backend.c; do \
 	    o=$(ELOS_LIBC)/$$(echo $$f | tr / _ | sed 's/\.c$$/.o/'); \
-	    $(ELOS_CC) -c -O2 $(LIBC_INC) -I$(EMBLINKOS)/user/lib $$f -o $$o || exit 1; \
+	    $(ELOS_CC) -c -O2 -D__EMBLIBC_TLS_TEMPLATE $(LIBC_INC) -I$(EMBLINKOS)/user/lib $$f -o $$o || exit 1; \
 	done
 	@rm -f $(ELOS_LIBC)/libc.a $(ELOS_LIBC)/libm.a
 	@$${EMBCC_X86_AR:-./embar} rcs $(ELOS_LIBC)/libc.a $(ELOS_LIBC)/*.o

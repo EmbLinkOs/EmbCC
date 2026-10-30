@@ -2,7 +2,8 @@
  * deep inside, thread-specific data and its destructors, the three
  * kinds of mutex, condition variables with a deadline on either clock,
  * read-write locks, barriers, once, spin locks, semaphores, fork's
- * handlers -- and C11's spellings, whose deadlines are absolute.
+ * handlers, each thread's own errno and __thread variables -- and C11's
+ * spellings, whose deadlines are absolute.
  *
  * Every answer is glibc's (the program ran against glibc 2.36 too).
  * Where the target has no threads, pthread_create fails with EAGAIN and
@@ -250,8 +251,19 @@ static long g_spun;
 
 static void once_fn(void) { g_once_runs++; }
 
+/* errno and this are each thread's own, and this one starts as the
+ * program wrote it: a new thread's block is a copy of the template, not
+ * of whatever thread made it */
+static __thread int t_mine = 5;
+static int g_own_bad;
+
 static void *crowd(void *arg)
 {
+    int me = (int)(intptr_t)arg;
+    if (t_mine != 5)
+        __atomic_add_fetch(&g_own_bad, 1, __ATOMIC_SEQ_CST);
+    t_mine = 10 + me;
+    errno = 100 + me;
     pthread_once(&g_once, once_fn);
     pthread_rwlock_rdlock(&g_rw);
     int n = __atomic_add_fetch(&g_in_read, 1, __ATOMIC_SEQ_CST);
@@ -259,6 +271,10 @@ static void *crowd(void *arg)
         g_max_read = n;
     if (pthread_barrier_wait(&g_bar) == PTHREAD_BARRIER_SERIAL_THREAD)
         __atomic_add_fetch(&g_serial, 1, __ATOMIC_SEQ_CST);
+    /* every thread has written both by now: a shared one would hold the
+     * last writer's value in three of the four */
+    if (errno != 100 + me || t_mine != 10 + me)
+        __atomic_add_fetch(&g_own_bad, 1, __ATOMIC_SEQ_CST);
     __atomic_sub_fetch(&g_in_read, 1, __ATOMIC_SEQ_CST);
     pthread_rwlock_unlock(&g_rw);
     for (int i = 0; i < 2000; i++) {
@@ -283,7 +299,7 @@ static int others(void)
     pthread_spin_init(&g_spin, PTHREAD_PROCESS_PRIVATE);
     if (pthread_spin_trylock(&g_spin) || pthread_spin_trylock(&g_spin) != EBUSY ||
         pthread_spin_unlock(&g_spin))
-        return 42;
+        return 46;
     if (!threads_ok) {
         pthread_once(&g_once, once_fn);
         pthread_once(&g_once, once_fn);
@@ -293,13 +309,16 @@ static int others(void)
      * pass it until all four have the read lock */
     pthread_barrier_init(&g_bar, NULL, 4);
     pthread_t t[4];
+    t_mine = 1;
     for (int i = 0; i < 4; i++)
-        pthread_create(&t[i], NULL, crowd, NULL);
+        pthread_create(&t[i], NULL, crowd, (void *)(intptr_t)i);
     for (int i = 0; i < 4; i++)
         pthread_join(t[i], NULL);
     pthread_barrier_destroy(&g_bar);
     if (g_once_runs != 1 || g_serial != 1 || g_max_read != 4 || g_spun != 8000)
         return 44;
+    if (g_own_bad || t_mine != 1)
+        return 45;
     return 0;
 }
 

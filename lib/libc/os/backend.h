@@ -87,6 +87,11 @@ int  __os_isatty(int fd);
  * 0 on success, -1 when the OS cannot provide them. */
 int  __os_getentropy(void *buf, size_t n);
 
+/* The auxiliary vector the kernel handed the program -- (type, value)
+ * pairs of longs ending with type 0 -- or NULL where there is none:
+ * getauxval and dl_iterate_phdr read it. */
+const long *__os_auxv(void);
+
 /* ---- threads, and blocking ------------------------------------------------
  *
  * Optional: a target that implements none of these is single-threaded,
@@ -119,6 +124,12 @@ int  __os_thread_detach(unsigned long id);
 /* This thread's handle. 0 on a target with no threads, which is a valid
  * answer: there is exactly one thread and it needs no name. */
 unsigned long __os_thread_self(void);
+
+/* Where a thread's stack is: its lowest address and its size -- for
+ * pthread_getattr_np, which programs walking their own stack ask. id is
+ * __os_thread_create's, or __os_thread_self()'s for the thread that
+ * started the program. -1 (ENOSYS) where the backend does not know. */
+int  __os_thread_stack(unsigned long id, void **addr, size_t *size);
 
 /* Let another runnable thread have the processor. A no-op is a correct
  * implementation. */

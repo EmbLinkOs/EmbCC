@@ -30,6 +30,17 @@
 #   posix-threads.c  pthreads, semaphores and C11 threads, with real threads
 #   posix-glob.c     glob, nftw, ftw and syslog over a real tree
 #   posix-regex.c    regcomp/regexec, 88 cases with glibc's answers
+#   posix-wordexp.c  wordexp, 105 strings; its command substitutions run
+#                    this program as /bin/sh, as posix-process.c's do
+#   posix-iconv.c    iconv, 59 conversions with glibc's answers
+#   posix-lib2.c     locale objects, wide extras, generators, strfmon,
+#                    Bessel and C23 math, dlfcn, databases, utmpx, fts
+#   posix-linux2.c   waitid, timers, epoll and the other descriptors, IPC,
+#                    aio, interfaces, error(), on_exit -- Linux's kernel
+#   posix-sigjmp.c   sigsetjmp and siglongjmp, out of a handler too
+#   posix-lib3.c     XSI signals, open_wmemstream, traps, mntent, ether,
+#                    the pthread _np calls, errno's names, statx
+#   posix-ucontext.c getcontext/makecontext/swapcontext coroutines
 #
 # At -O0 and -O2, each exiting 42. Skipped without a kernel for
 # tests/harness/linux (EMBCC_LINUX_KERNEL_X86_64 / _AARCH64).
@@ -43,7 +54,9 @@ progs="tmpfile next-toward quick-exit multibyte-stdlib inttypes-formats
        tgmath-selection wide-streams wide-printf wide-scanf c23-library
        strtod-rounding math-special posix-files posix-strings posix-stdio
        posix-fd posix-process posix-signals posix-net posix-time
-       malloc-gnu posix-threads posix-glob posix-regex"
+       malloc-gnu posix-threads posix-glob posix-regex posix-wordexp
+       posix-iconv posix-lib2 posix-linux2 posix-sigjmp
+       posix-lib3 posix-ucontext"
 
 A64LD=${EMBCC_AARCH64_LD:-aarch64-elf-ld}
 A64GCC=$(dirname "$(aarch64-elf-gcc -print-libgcc-file-name 2>/dev/null)")
