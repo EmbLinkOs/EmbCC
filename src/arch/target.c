@@ -57,17 +57,21 @@ static int g_big_endian;
 int target_big_endian(void) { return g_big_endian; }
 void target_set_big_endian(int on) { g_big_endian = on ? 1 : 0; }
 
+/* n bytes of v, zero-extended past its eight (a zero-initialized
+ * aggregate's image is written through here whole) */
 void target_put_uint(unsigned char *p, int n, unsigned long long v)
 {
     for (int b = 0; b < n; b++)
-        p[g_big_endian ? n - 1 - b : b] = (unsigned char)(v >> (8 * b));
+        p[g_big_endian ? n - 1 - b : b] =
+            b < 8 ? (unsigned char)(v >> (8 * b)) : 0;
 }
 
 unsigned long long target_get_uint(const unsigned char *p, int n)
 {
     unsigned long long v = 0;
     for (int b = 0; b < n; b++)
-        v |= (unsigned long long)p[g_big_endian ? n - 1 - b : b] << (8 * b);
+        if (b < 8)
+            v |= (unsigned long long)p[g_big_endian ? n - 1 - b : b] << (8 * b);
     return v;
 }
 
@@ -964,6 +968,18 @@ int target_object_align(int is_array, long size, int align)
         size >= 4 && align < 4)
         return 4;
     return align;
+}
+/* The least alignment an object's .text and .rodata start at. Sixteen,
+ * as every section had -- but on AVR, whose flash and SRAM are counted
+ * in bytes, the code's own word and no more: every object's .rodata
+ * (which AVR copies into SRAM) and .text began at a multiple of
+ * sixteen, up to fifteen bytes of each lost to padding. avr-gcc's are
+ * aligned 2 and 1. */
+int target_section_align(int text)
+{
+    if (g_arch == TARGET_AVR)
+        return text ? 2 : 1;
+    return 16;
 }
 int target_string_align(int width)
 {

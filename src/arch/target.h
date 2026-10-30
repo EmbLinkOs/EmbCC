@@ -473,6 +473,7 @@ int target_string_align(int width);
  * char arrays (DATA_ALIGNMENT) -- code that reads a byte buffer a word at
  * a time is common there, and ARMv6-M faults where ARMv7-M did not. */
 int target_object_align(int is_array, long size, int align);
+int target_section_align(int text);
 void target_set_thumb_em(int on);
 
 /* Hardware floating point on ARMv7E-M (FPv4-SP-D16, the Cortex-M4F

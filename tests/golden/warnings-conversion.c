@@ -12,7 +12,7 @@ extern s16 sh; extern long l; extern unsigned long ul; extern float f;
 extern double d; extern _Bool bo; extern char ch;
 enum e { E0, E1 }; extern enum e ev;
 enum n { N0 = -1 }; extern enum n nv;
-struct bf { unsigned a : 3; int s : 4; unsigned one : 1; u8 c : 2; };
+struct bf { unsigned a : 3; int s : 4; unsigned one : 1; u8 c : 2; int s1 : 1; };
 extern struct bf bs;
 void take8(u8); void takeu(unsigned); void takei(int); void takef(float);
 void takeul(unsigned long);
@@ -112,6 +112,9 @@ void t(void)
     bs.a = i;                                   /* W:conversion */
     bs.a = 9;                                   /* W:overflow */
     bs.a = 7;
+    bs.s1 = 0;              /* a one-bit signed field holds 0 and -1 */
+    bs.s1 = -1;
+    bs.s1 = -2;                                 /* W:overflow */
     bs.s = 8;                                   /* W:conversion */
     bs.s = 7;
     bs.one = i > 0;

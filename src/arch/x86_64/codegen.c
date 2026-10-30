@@ -4303,7 +4303,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
         }
         case IR_GADDR: {
             int D = in_reg(i->dst);
-            struct gsite gs;
+            struct gsite gs = {0};
             if (i->glob->is_tls) {
                 /* Not an address in this image: an offset into a block
                  * that is different for every thread. So the thread

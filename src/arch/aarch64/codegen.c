@@ -2838,7 +2838,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
              * and ld says so rather than guessing: "target does not
              * have address". So the indirection is the rule there and
              * the exception elsewhere. */
-            struct gsite hi, lo;
+            struct gsite hi = {0}, lo = {0};
             int d = wr(i->dst, A64_ACC);      /* the home, as STRADDR */
             if (i->glob->is_tls) {
                 /* Not an address in this image: an offset into a block
