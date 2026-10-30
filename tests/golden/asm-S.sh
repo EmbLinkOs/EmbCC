@@ -71,6 +71,35 @@ cmp "$out/ref.txt" "$out/asm.txt" ||
     { echo "FAIL: reassembling -S gives different code"; exit 1; }
 echo "reassembled with $AS: .text byte-identical"
 
+# ---- a thread-local's offset is not PC-relative ---------------------------
+# x86-64 measures a rel32 from the END of its instruction, so a PC-relative
+# .reloc carries -4. TPOFF32 is an offset from the thread pointer and
+# carries nothing; given the -4 too, every __thread access assembled to
+# the variable four bytes below.
+# The code's relocations, which are the ones a .reloc writes; data's are
+# .quad lines, which an assembler is free to rebase on a section symbol.
+relocs() {
+    LC_ALL=C readelf -rW "$1" |
+        LC_ALL=C awk '/^Relocation section/ { t = ($3 == "'"'"'.rela.text'"'"'") }
+             t && /^0/ { $2 = ""; $4 = ""; print }' | LC_ALL=C sort
+}
+cat > "$out/tls.c" << 'EOF'
+__thread int t;
+__thread long u = 7;
+int *at(void) { return &t; }
+long get(void) { return u + t; }
+EOF
+"$EMBCC" -c "$out/tls.c" -o "$out/tls-ref.o"
+"$EMBCC" -S "$out/tls.c" -o "$out/tls.s"
+"$AS" "$out/tls.s" -o "$out/tls-asm.o"
+relocs "$out/tls-ref.o" > "$out/tls-ref.txt"
+relocs "$out/tls-asm.o" > "$out/tls-asm.txt"
+grep -q TPOFF32 "$out/tls-ref.txt" ||
+    { echo "FAIL: no TPOFF32 in the object"; exit 1; }
+diff "$out/tls-ref.txt" "$out/tls-asm.txt" ||
+    { echo "FAIL: -S spells a thread-local's relocation differently"; exit 1; }
+echo "__thread: -S then $AS gives the same TPOFF32 relocations as -c"
+
 # ---- and over the whole execution corpus ----------------------------------
 # Every program the suite runs, compiled both ways, compared byte for byte.
 ident=0; bad=0
@@ -87,8 +116,11 @@ for f in tests/exec/*.c; do
     fi
     ta=$(readelf -x .text "$out/a.o" 2>/dev/null | tail -n +3)
     tb=$(readelf -x .text "$out/b.o" 2>/dev/null | tail -n +3)
-    ra=$(readelf -rW "$out/a.o" | grep -c '^0' || true)
-    rb=$(readelf -rW "$out/b.o" | grep -c '^0' || true)
+    # Each relocation whole -- where, what kind, against what, plus what.
+    # A count let -S write `t-4` where the object had `t` for every
+    # thread-local access and still pass.
+    ra=$(relocs "$out/a.o")
+    rb=$(relocs "$out/b.o")
     if [ "$ta" = "$tb" ] && [ "$ra" = "$rb" ]; then
         ident=$((ident + 1))
     else
