@@ -451,15 +451,7 @@ check topasm-global-no-label \
     '__asm__(".global ghost\n  ret\n");
 int main(void) { return 0; }' \
     "has no label"
-check va-arg-struct-windows \
-    'typedef char *va_list;
-struct P { int x; int y; };
-int f(int n, ...) { va_list ap; __builtin_va_start(ap, n);
-     struct P p = __builtin_va_arg(ap, struct P); __builtin_va_end(ap);
-     return p.x; }
-int main(void) { return 0; }' \
-    "va_arg of a struct is not supported for a Windows target" \
-    --target=x86_64-windows-gnu
+# (va_arg of a struct on Windows is supported: tests/golden/win-coff-more.sh)
 check static-assert-false \
     '_Static_assert(sizeof(int) == 8, "int is not eight bytes");
 int main(void) { return 0; }' \

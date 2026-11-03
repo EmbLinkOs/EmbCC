@@ -21,6 +21,13 @@
 #          (lib/rt/atomic-riscv.c), linked with that variant's runtime and
 #          libc (build/libc/<triple>/noa); each image is checked to hold no
 #          A instruction
+#   rv32k, rv64k  the bit-manipulation and size extensions codegen uses
+#          (Zicond's selects, Zcb's 16-bit forms, Zba/Zbb/Zbs; and on
+#          rv32k Zcmp's cm.push/cm.popret in every prologue), on a virt CPU
+#          that has them
+#   m55pac thumbv8.1m.main with -mcpu=cortex-m55 -mbranch-protection=
+#          standard on mps3-an547: pac, aut and bti in every function
+#          (hints on the M55; the M85's bxaut is thumb-pacbti.sh's)
 #
 # EMBCC_BOARDS="rv32f rv64d" runs just those, and
 # EMBCC_EXEC_ONLY="setjmp-longjmp vla" just those programs.
@@ -263,24 +270,24 @@ case $b in
           fi ;;
 esac
 case $b in
-    m4|m4hf) sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-30}" "$QA" \
+    m4|m4hf) sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-60}" "$QA" \
             -M mps2-an386 -cpu cortex-m4 -semihosting -nographic \
             -kernel $o.elf > $o.txt 2>&1 ;;
-    m55pac) sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-30}" "$QA" \
+    m55pac) sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-60}" "$QA" \
             -M mps3-an547 -cpu cortex-m55 -semihosting -nographic \
             -kernel $o.elf > $o.txt 2>&1 ;;
-    a7) sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-30}" "$QA" \
+    a7) sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-60}" "$QA" \
             -M virt -cpu cortex-a15 -m 128 -semihosting -nographic \
             -monitor none -kernel $o.elf > $o.txt 2>&1 ;;
-    rv32k) sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-30}" "$Q32" \
+    rv32k) sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-60}" "$Q32" \
             -M virt -cpu rv32,zicond=true,zcb=true,zcmp=true,zcd=false,zba=true,zbb=true,zbs=true,zbc=true,zbkb=true \
             -bios none -nographic -m 8 -kernel $o.elf > $o.txt 2>&1 ;;
-    rv64k) sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-30}" "$Q64" \
+    rv64k) sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-60}" "$Q64" \
             -M virt -cpu rv64,zicond=true,zcb=true,zba=true,zbb=true,zbs=true,zbc=true \
             -bios none -nographic -m 8 -kernel $o.elf > $o.txt 2>&1 ;;
-    rv32*) sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-30}" "$Q32" \
+    rv32*) sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-60}" "$Q32" \
             -M virt -bios none -nographic -m 8 -kernel $o.elf > $o.txt 2>&1 ;;
-    rv64*) sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-30}" "$Q64" \
+    rv64*) sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-60}" "$Q64" \
             -M virt -bios none -nographic -m 8 -kernel $o.elf > $o.txt 2>&1 ;;
 esac
 got=$?

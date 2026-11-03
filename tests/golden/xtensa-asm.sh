@@ -263,8 +263,10 @@ refc "an unknown clobber" "is not an Xtensa register" \
     'void f(void){ __asm__ volatile("nop" ::: "eax"); }'
 refc "a symbol in a template" "inline asm cannot reach one" \
     'void g(void); void f(void){ __asm__ volatile("call8 g"); }'
-refc "a named label in a template" "are numeric" \
-    'void f(void){ __asm__ volatile("x: j x"); }'
+# (a named label: the template is assembled whole, labels and all)
+printf '%s\n' 'void f(void){ __asm__ volatile("x: j x"); }' > "$out/nl.c"
+"$EMBCC" --target=$T -c "$out/nl.c" -o "$out/nl.o" 2> "$out/nl.err" || {
+    echo "a named label in a template was refused:"; cat "$out/nl.err"; exit 1; }
 refc "x86's constraint letters" 'is not valid for Xtensa' \
     'int f(int x){ int r; __asm__("mov %0, %1" : "=r"(r) : "b"(x)); return r; }'
 refc "a 64-bit operand" 'is 8 bytes' \

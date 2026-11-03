@@ -49,7 +49,7 @@ refc "a register variable outside d0-d7/a2-a7" 'is not supported for TriCore asm
     'int f(void){ register int v __asm__("d9") = 1; __asm__ volatile("" : "+d"(v)); return v; }'
 refc "a symbol in a template" 'a symbol needs a relocation' \
     'void g(void); void f(void){ __asm__ volatile("call g"); }'
-refc "a named label in a template" "labels are numeric" \
+refc "a named label in a template (its branch a relocation)" "names the symbol 'x'" \
     'void f(void){ __asm__ volatile("x: j x"); }'
 refc "a branch constant out of range" "does not fit its 4 bits" \
     'void f(int x){ __asm__ volatile("jne %0, 10, .+4" :: "d"(x)); }'
