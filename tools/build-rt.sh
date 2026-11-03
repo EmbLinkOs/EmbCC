@@ -19,6 +19,8 @@
 #
 # -Os: this is firmware, and the runtime is linked into every image; a
 # section per function and object, as tools/build-libc.sh says why.
+# --stack-info: each routine's frame, calls and cycles, so that
+# `embcc --stack-report` follows a program into its helpers.
 set -eu
 triple=$1
 out=$2
@@ -66,7 +68,7 @@ for f in "$here"/lib/rt/*.c; do
         unwind/riscv*|unwind/mips*|unwind/xtensa*|unwind/tricore*|unwind/*linux*) uw=--unwind-tables ;;
     esac
     # shellcheck disable=SC2086
-    "$EMBCC" --target="$triple" $flags $uw -fenum-size-neutral -Os \
+    "$EMBCC" --target="$triple" $flags $uw -fenum-size-neutral -Os --stack-info \
         --sections=functions,data -c "$f" -o "$out/rt/$b.o" || {
         echo "build-rt: lib/rt/$b.c does not compile for $triple" >&2
         exit 1; }
@@ -139,7 +141,7 @@ if [ "$triple" = avr ]; then
     for f in "$here"/lib/avr/*.c; do
         b=$(basename "$f" .c)
         for n in $(sed -n 's/^#ifdef \(EMB_AVR_[A-Z0-9_]*\).*/\1/p' "$f"); do
-            "$EMBCC" --target=avr -mmcu=atmega328p -Os -Wall -Wextra -Werror \
+            "$EMBCC" --target=avr -mmcu=atmega328p -Os --stack-info -Wall -Wextra -Werror \
                 -D$n -c "$f" -o "$out/c/$b-$n.o" || {
                 echo "build-rt: lib/avr/$b.c ($n) does not compile" >&2
                 exit 1; }

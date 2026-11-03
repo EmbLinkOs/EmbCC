@@ -142,6 +142,7 @@ endif
 # The optimizer: the pass manager (opt.c) and one file per pass.
 OPT_SRCS := src/opt/opt.c \
 	src/opt/coldsink.c \
+	src/opt/wcet.c \
 	src/opt/alias.c \
 	src/opt/attrs.c \
 	src/opt/cfg.c \
@@ -327,6 +328,7 @@ SRCS := \
 	src/driver/iface.c \
 	src/driver/explain.c \
 	src/driver/options.c \
+	src/driver/stackinfo.c \
 	src/driver/paths.c \
 	src/link/link.c \
 	src/as/gas.c \
@@ -546,7 +548,7 @@ reference: embcc
 
 # embsim -- a simulator (Cortex-M, RISC-V, AVR): runs an image on a model of the board
 # QEMU models, counting instructions and estimating cycles with the
-# table tools/bench uses (tools/bench/cost.h). ISO C and libm; the
+# table tools/bench uses (src/arch/cost.h). ISO C and libm; the
 # modules are tools/embsim/sim.h's (docs/internals/embsim.md). The GDB
 # server's connection is net-posix.c; net-none.c builds it without one.
 EMBSIM_NET ?= tools/embsim/net-posix.c
@@ -597,7 +599,7 @@ EMBSIM_SRCS := tools/embsim/main.c tools/embsim/run.c tools/embsim/bus.c \
                $(EMBSIM_NET)
 EMBSIM_HDRS := tools/embsim/sim.h tools/embsim/cortexm.h tools/embsim/riscv.h \
                tools/embsim/avr.h \
-               tools/embsim/devices.h tools/embsim/net.h tools/bench/cost.h \
+               tools/embsim/devices.h tools/embsim/net.h src/arch/cost.h \
                tools/embsim/svd-map.h tools/embsvd/svd.h \
                tools/embsim/image.h tools/embsim/analysis.h \
                tools/embsim/disasm.h tools/embsim/mips.h tools/embsim/pic32.h \

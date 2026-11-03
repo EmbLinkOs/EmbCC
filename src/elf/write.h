@@ -29,6 +29,11 @@ void elfw_set_sym_prefix(struct elfw *w, const char *prefix);
 void elfw_set_flags(struct elfw *w, unsigned long flags);
 void elfw_free(struct elfw *w);
 void elfw_set_link(struct elfw *w, int sec, int link);
+int elfw_rela_count(struct elfw *w, int target_ndx);
+void elfw_rela_at(struct elfw *w, int target_ndx, int k, unsigned long *off,
+                  int *sym, int *type);
+const char *elfw_symbol_name(struct elfw *w, int sym);
+int elfw_symbol_type(struct elfw *w, int sym);
 
 /* Returns the section header index, for use as a symbol's st_shndx.
  * data may be NULL when size is 0. */

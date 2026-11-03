@@ -6,7 +6,7 @@
 #     EmbSim's. The output and the exit status must be the same. Where
 #     QEMU's instruction count can be had exactly (tools/bench's plugin),
 #     the count and the estimated cycles must be too, both from
-#     tools/bench/cost.h:
+#     src/arch/cost.h:
 #       m3    thumbv7m on the lm3s6965evb, -O0
 #       m4    thumbv7em soft float on the mps2-an386, -Os
 #       m4hf  thumbv7em-eabihf (FPv4-SP) on the mps2-an386, -O2

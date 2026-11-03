@@ -650,3 +650,42 @@ int elfw_write(struct elfw *w, const char *path)
     }
     return 0;
 }
+
+/* Reading back what the writer holds, for --stack-info (src/driver/
+ * stackinfo.c): the relocations applied to a section, and a symbol's
+ * name (the target's prefix taken off), type and section. */
+int elfw_rela_count(struct elfw *w, int target_ndx)
+{
+    if (target_ndx <= 0 || target_ndx >= w->nsec || !w->grp_of[target_ndx])
+        return 0;
+    return w->relagrp[w->grp_of[target_ndx] - 1].nrela;
+}
+
+void elfw_rela_at(struct elfw *w, int target_ndx, int k, unsigned long *off,
+                  int *sym, int *type)
+{
+    const struct rela_group *gp = &w->relagrp[w->grp_of[target_ndx] - 1];
+    const Elf64_Rela *r = (const Elf64_Rela *)gp->rela.p + k;
+    *off = (unsigned long)r->r_offset;
+    *sym = (int)ELF64_R_SYM(r->r_info);
+    *type = (int)ELF64_R_TYPE(r->r_info);
+}
+
+const char *elfw_symbol_name(struct elfw *w, int sym)
+{
+    if (sym <= 0 || sym >= w->nsym)
+        return NULL;
+    const Elf64_Sym *s = (const Elf64_Sym *)w->symtab.p + sym;
+    const char *n = (const char *)w->strtab.p + s->st_name;
+    size_t pl = w->sym_prefix ? strlen(w->sym_prefix) : 0;
+    if (pl && !strncmp(n, w->sym_prefix, pl))
+        n += pl;
+    return n;
+}
+
+int elfw_symbol_type(struct elfw *w, int sym)
+{
+    if (sym <= 0 || sym >= w->nsym)
+        return -1;
+    return ELF64_ST_TYPE(((const Elf64_Sym *)w->symtab.p + sym)->st_info);
+}

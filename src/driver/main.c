@@ -34,6 +34,7 @@
 
 #include "asmout.h"
 #include "options.h"
+#include "stackinfo.h"
 #include "iface.h"
 #include "inspect.h"
 #include "remark.h"
@@ -695,6 +696,12 @@ static long code_sym_value(enum target_arch a, long off)
     long o;
     text_at(off, &o);
     return fn_sym_value(a, o);
+}
+
+/* the section of group gi (text_at's answer), for stackinfo_emit */
+static int si_sec_of(int gi, int text_ndx)
+{
+    return gi ? g_tg[gi - 1].ndx : text_ndx;
 }
 
 static int code_sec(long off, int text_ndx)
@@ -6021,6 +6028,9 @@ lto_backend:
     eh_free(&eh);
     free(arr);
 
+    /* --stack-info: each function's frame, calls and cycles, for
+     * --stack-report (src/driver/stackinfo.c) */
+    stackinfo_emit(w, u, iu, &text, text_ndx, text_at, si_sec_of, in);
     int rc = elfw_write(w, out);
     elfw_free(w);
     return rc == 0 ? 0 : 1;
@@ -6424,6 +6434,8 @@ static int embcc_main(int argc, char **argv)
         }
         if (strcmp(argv[i], "--gcov-extract") == 0)
             return gcov_extract(argc - i - 1, argv + i + 1);
+        if (strcmp(argv[i], "--stack-report") == 0)
+            return stackinfo_report(argc - i - 1, argv + i + 1);
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             print_usage(stdout);
             opts_print_help(stdout);
@@ -6745,6 +6757,9 @@ static int embcc_main(int argc, char **argv)
                 p = e + 1;
             }
             g_cf_a64 = 1;
+        } else if (strcmp(argv[i], "--stack-info") == 0) {
+            stackinfo_set(1);
+            target_set_stack_info(1);
         } else if (strcmp(argv[i], "-fstack-clash-protection") == 0) {
             g_clash = 1;
         } else if (strcmp(argv[i], "-fno-stack-clash-protection") == 0) {

@@ -2414,7 +2414,8 @@ void ra_debug_pc_begin(struct ir_func *fn)
 {
     free(fn->ins_pc);
     fn->ins_pc = NULL;
-    if (target_debug_info() && fn->vreg_var && fn->nins) {
+    if (((target_debug_info() && fn->vreg_var) || target_stack_info()) &&
+        fn->nins) {
         fn->ins_pc = xmalloc(((size_t)fn->nins + 1) * sizeof *fn->ins_pc);
         for (int k = 0; k <= fn->nins; k++)
             fn->ins_pc[k] = -1;

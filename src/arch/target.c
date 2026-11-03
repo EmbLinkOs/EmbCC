@@ -98,6 +98,9 @@ int  target_pic(void)         { return g_pic; }
 static int g_cf;
 void target_set_cf(int mask)  { g_cf = mask; }
 int  target_cf(void)          { return g_cf; }
+static int g_stack_info;
+void target_set_stack_info(int on) { g_stack_info = on; }
+int  target_stack_info(void)       { return g_stack_info; }
 static int g_unwind_tables;
 void target_set_unwind_tables(int on) { g_unwind_tables = on; }
 int  target_unwind_tables(void)       { return g_unwind_tables; }

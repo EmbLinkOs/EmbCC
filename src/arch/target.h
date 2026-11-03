@@ -594,6 +594,10 @@ enum { CF_IBT = 1, CF_SHSTK = 2, CF_BTI = 4, CF_PAC = 8, CF_PAC_LEAF = 16,
        CF_PAC_BKEY = 32 };
 void target_set_cf(int mask);
 int  target_cf(void);
+/* --stack-info: every function's code offsets per instruction (ins_pc),
+ * which the timing bound reads, whether or not -g asks for them */
+void target_set_stack_info(int on);
+int  target_stack_info(void);
 /* Unwind tables (.eh_frame) will be written: the backends record their
  * prologues' CFI as -g has them do, for eh_emit_cfi. */
 void target_set_unwind_tables(int on);
