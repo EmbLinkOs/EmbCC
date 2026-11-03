@@ -91,6 +91,9 @@ int  target_keep_vars(void)       { return g_keep_vars; }
 void target_set_debug_info(int on) { g_debug_info = on ? 1 : 0; }
 int  target_debug_info(void)       { return g_debug_info; }
 int  target_opt_size(void)       { return g_opt_size; }
+static int g_pic;
+void target_set_pic(int mode) { g_pic = mode; }
+int  target_pic(void)         { return g_pic; }
 
 const char *target_default_name(void)
 {
@@ -1254,6 +1257,7 @@ int target_reloc_type(enum target_arch a, enum reloc_kind k)
          * with a PLT needs; one without treats them alike. */
         case RK_CALL:        return R_RISCV_CALL_PLT;
         case RK_RISCV_PCREL_HI20:   return R_RISCV_PCREL_HI20;
+        case RK_RISCV_GOT_HI20:     return R_RISCV_GOT_HI20;
         case RK_RISCV_PCREL_LO12_I: return R_RISCV_PCREL_LO12_I;
         case RK_ABS32:       return R_RISCV_32;
         /* ABS64 only at RV64: a 32-bit target has no 64-bit address to
@@ -1395,6 +1399,8 @@ int target_reloc_type(enum target_arch a, enum reloc_kind k)
         case RK_DATA_PREL32: return R_AARCH64_PREL32;
         case RK_GOT_PAGE: return R_AARCH64_ADR_GOT_PAGE;
         case RK_GOT_LO12: return R_AARCH64_LD64_GOT_LO12_NC;
+        case RK_TLSIE_PAGE: return R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21;
+        case RK_TLSIE_LO12: return R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC;
         case RK_TPREL_HI12: return R_AARCH64_TLSLE_ADD_TPREL_HI12;
         case RK_TPREL_LO12: return R_AARCH64_TLSLE_ADD_TPREL_LO12_NC;
         default:          return -1;
@@ -1410,6 +1416,8 @@ int target_reloc_type(enum target_arch a, enum reloc_kind k)
     case RK_ABS32:    return R_X86_64_32;
     case RK_DATA_PREL32: return R_X86_64_PC32;
     case RK_TPOFF32:  return R_X86_64_TPOFF32;
+    case RK_GOTPC32:  return R_X86_64_GOTPCREL;
+    case RK_GOTTPOFF: return R_X86_64_GOTTPOFF;
     default:          return -1;
     }
 }
@@ -1492,6 +1500,8 @@ long target_reloc_addend(enum target_arch a, enum reloc_kind k, long bias)
     switch (k) {
     case RK_CALL:
     case RK_PCREL32:
+    case RK_GOTPC32:
+    case RK_GOTTPOFF:
         return bias - 4;          /* x86-64 rel32 is measured from the END
                                    * of the instruction, four bytes on */
     default:

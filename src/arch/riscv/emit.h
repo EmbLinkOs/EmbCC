@@ -187,6 +187,7 @@ void rv_amo(struct code *c, enum rv_amo op, int rd, int rs1, int rs2,
  * register and has no unsigned form. The offset is a 12-bit signed field;
  * a frame deeper than 2047 bytes goes through a scratch in the codegen,
  * not here. */
+int rv_got_pair(struct code *c, int rd, int xlen);
 void rv_load(struct code *c, int rd, int rs1, int off, int size, int sign,
              int xlen);
 void rv_store(struct code *c, int rs2, int rs1, int off, int size, int xlen);

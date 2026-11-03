@@ -5336,8 +5336,10 @@ static void gen_ins(struct rv_fn *F, int n)
     case IR_GADDR:
         {
         int d = wreg(F, i->dst, ACC);     /* straight into its home */
-        int at = rv_pcrel_pair(t, d);
-        note_glob(F->st, at, i->glob, RK_RISCV_PCREL_HI20);
+        int got = cg_global_via_got(i->glob);
+        int at = got ? rv_got_pair(t, d, F->xlen) : rv_pcrel_pair(t, d);
+        note_glob(F->st, at, i->glob, got ? RK_RISCV_GOT_HI20
+                                          : RK_RISCV_PCREL_HI20);
         note_glob(F->st, at + 4, i->glob, RK_RISCV_PCREL_LO12_I);
         wrote(F, i->dst, d);
         }
@@ -5345,8 +5347,10 @@ static void gen_ins(struct rv_fn *F, int n)
     case IR_FADDR:
         {
         int d = wreg(F, i->dst, ACC);     /* straight into its home */
-        int at = rv_pcrel_pair(t, d);
-        note_fn(F->st, at, i->callee, RK_RISCV_PCREL_HI20);
+        int got = cg_func_via_got(i->callee);
+        int at = got ? rv_got_pair(t, d, F->xlen) : rv_pcrel_pair(t, d);
+        note_fn(F->st, at, i->callee, got ? RK_RISCV_GOT_HI20
+                                          : RK_RISCV_PCREL_HI20);
         note_fn(F->st, at + 4, i->callee, RK_RISCV_PCREL_LO12_I);
         wrote(F, i->dst, d);
         }

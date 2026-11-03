@@ -2858,6 +2858,23 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                 PUSH(st->g, st->ng, st->capg, lo);
                 goto gaddr_done;
             }
+            if (i->glob->is_tls && (target_pic() == TARGET_PIC ||
+                                    (target_pic() && !i->glob->defined))) {
+                /* -fPIC, or -fPIE and another module's: initial-exec --
+                 * the offset from the thread pointer is in the GOT */
+                hi.patch_off = a64_adrp(t, d);
+                hi.glob = i->glob;
+                hi.kind = RK_TLSIE_PAGE;
+                PUSH(st->g, st->ng, st->capg, hi);
+                lo.patch_off = t->len;
+                a64_ldr(t, d, d, 0, 8, 0, 8);
+                lo.glob = i->glob;
+                lo.kind = RK_TLSIE_LO12;
+                PUSH(st->g, st->ng, st->capg, lo);
+                a64_mrs_tpidr(t, A64_IP1);
+                a64_alu_reg(t, '+', d, d, A64_IP1, 8);
+                goto gaddr_done;
+            }
             if (i->glob->is_tls) {
                 /* Not an address in this image: an offset into a block
                  * that is different for every thread. adrp names a page
@@ -2873,8 +2890,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                 PUSH(st->g, st->ng, st->capg, lo);
                 goto gaddr_done;
             }
-            int got = !i->glob->defined &&
-                      (i->glob->is_weak || target_os_get() == TGT_OS_DARWIN);
+            int got = (!i->glob->defined &&
+                       (i->glob->is_weak || target_os_get() == TGT_OS_DARWIN)) ||
+                      cg_global_via_got(i->glob);
             hi.patch_off = a64_adrp(t, d);
             hi.glob = i->glob;
             hi.kind = got ? RK_GOT_PAGE : RK_ADR_HI21;
@@ -2896,9 +2914,10 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
         case IR_FADDR: {
             /* As IR_GADDR: on Darwin an undefined function has no
              * link-time address, so its address comes from the GOT. */
-            int got = !i->callee->has_defn &&
-                      (i->callee->is_weak ||
-                       target_os_get() == TGT_OS_DARWIN);
+            int got = (!i->callee->has_defn &&
+                       (i->callee->is_weak ||
+                        target_os_get() == TGT_OS_DARWIN)) ||
+                      cg_func_via_got(i->callee);
             struct fsite hi, lo;
             int d = wr(i->dst, A64_ACC);      /* the home, as STRADDR */
             hi.addend = lo.addend = 0;

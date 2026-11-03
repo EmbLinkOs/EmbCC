@@ -938,17 +938,17 @@ libc-linux-x86_64: embcc embar
 	@mkdir -p $(BUILD)/libc/linux-x86_64
 	@for f in $(LIBC_SRCS_LINUX); do \
 	    o=$(BUILD)/libc/linux-x86_64/$$(echo $$f | tr / _ | sed 's/\.c$$/.o/'); \
-	    ./embcc --target=x86_64-linux-gnu -c -O1 $(LIBC_INC) $$f -o $$o || exit 1; \
+	    ./embcc --target=x86_64-linux-gnu -c -O1 -fPIE $(LIBC_INC) $$f -o $$o || exit 1; \
 	done
 	@rm -f $(BUILD)/libc/linux-x86_64/libc.a
 	@$${EMBCC_X86_AR:-./embar} rcs $(BUILD)/libc/linux-x86_64/libc.a \
 	    $(BUILD)/libc/linux-x86_64/*.o
-	@./embcc --target=x86_64-linux-gnu -c -O1 $(LIBC_INC) \
+	@./embcc --target=x86_64-linux-gnu -c -O1 -fPIE $(LIBC_INC) \
 	    lib/libc/os/linux/start.c -o $(BUILD)/libc/linux-x86_64/crt1.o
 	@rm -rf $(BUILD)/libc/linux-x86_64/rt && mkdir -p $(BUILD)/libc/linux-x86_64/rt
 	@for f in $(RT_SRCS); do \
 	    o=$(BUILD)/libc/linux-x86_64/rt/$$(basename $$f .c).o; \
-	    ./embcc --target=x86_64-linux-gnu -c -O1 $$f -o $$o || exit 1; \
+	    ./embcc --target=x86_64-linux-gnu -c -O1 -fPIE $$f -o $$o || exit 1; \
 	done
 	@rm -f $(BUILD)/libc/linux-x86_64/librt.a
 	@$${EMBCC_X86_AR:-./embar} rcs $(BUILD)/libc/linux-x86_64/librt.a \
@@ -959,17 +959,17 @@ libc-linux-aarch64: embcc embar
 	@mkdir -p $(BUILD)/libc/linux-aarch64
 	@for f in $(LIBC_SRCS_LINUX); do \
 	    o=$(BUILD)/libc/linux-aarch64/$$(echo $$f | tr / _ | sed 's/\.c$$/.o/'); \
-	    ./embcc --target=aarch64-linux-gnu -c -O1 $(LIBC_INC) $$f -o $$o || exit 1; \
+	    ./embcc --target=aarch64-linux-gnu -c -O1 -fPIE $(LIBC_INC) $$f -o $$o || exit 1; \
 	done
 	@rm -f $(BUILD)/libc/linux-aarch64/libc.a
 	@$${EMBCC_AARCH64_AR:-./embar} rcs \
 	    $(BUILD)/libc/linux-aarch64/libc.a $(BUILD)/libc/linux-aarch64/*.o
-	@./embcc --target=aarch64-linux-gnu -c -O1 $(LIBC_INC) \
+	@./embcc --target=aarch64-linux-gnu -c -O1 -fPIE $(LIBC_INC) \
 	    lib/libc/os/linux/start.c -o $(BUILD)/libc/linux-aarch64/crt1.o
 	@rm -rf $(BUILD)/libc/linux-aarch64/rt && mkdir -p $(BUILD)/libc/linux-aarch64/rt
 	@for f in $(RT_SRCS); do \
 	    o=$(BUILD)/libc/linux-aarch64/rt/$$(basename $$f .c).o; \
-	    ./embcc --target=aarch64-linux-gnu -c -O1 $$f -o $$o || exit 1; \
+	    ./embcc --target=aarch64-linux-gnu -c -O1 -fPIE $$f -o $$o || exit 1; \
 	done
 	@rm -f $(BUILD)/libc/linux-aarch64/librt.a
 	@$${EMBCC_AARCH64_AR:-./embar} rcs \

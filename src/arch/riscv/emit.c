@@ -976,6 +976,19 @@ void rv_xret(struct code *c, int supervisor)
  * sites emitted this pair by hand and all three broke the moment the C
  * extension was switched on.
  */
+/* auipc rd, 0 ; l{w,d} rd, 0(rd): a symbol's address from its GOT slot
+ * (-fPIC/-fPIE), relocated as GOT_HI20 + PCREL_LO12_I */
+int rv_got_pair(struct code *c, int rd, int xlen)
+{
+    int save_rvc = g_rvc;
+    int at = c->len;
+    g_rvc = 0;
+    rv_auipc(c, rd, 0);
+    rv_load(c, rd, rd, 0, xlen / 8, 0, xlen);
+    g_rvc = save_rvc;
+    return at;
+}
+
 int rv_pcrel_pair(struct code *c, int rd)
 {
     int save_rvc = g_rvc;

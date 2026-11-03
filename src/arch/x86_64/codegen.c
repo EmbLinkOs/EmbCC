@@ -4312,6 +4312,17 @@ static void gen_func(struct ir_func *fn, struct code *text,
                  * slot ld makes (TLVP); irgen calls its thunk */
                 gs.patch_off = x86_mov_reg_rip(text, D ? g_loc[i->dst] : 0);
                 gs.kind = RK_TLVP;
+            } else if (i->glob->is_tls &&
+                       (target_pic() == TARGET_PIC ||
+                        (target_pic() && !i->glob->defined))) {
+                /* -fPIC, or -fPIE and another module's: initial-exec --
+                 * the offset from the thread pointer is in the GOT, which
+                 * the dynamic linker fills (a shared object's TLS block
+                 * has no offset the link can know) */
+                int r = D ? g_loc[i->dst] : 0;
+                gs.patch_off = x86_mov_reg_rip(text, r);
+                gs.kind = RK_GOTTPOFF;
+                x86_add_reg_fsbase(text, r);
             } else if (i->glob->is_tls) {
                 /* Not an address in this image: an offset into a block
                  * that is different for every thread. So the thread
@@ -4321,8 +4332,9 @@ static void gen_func(struct ir_func *fn, struct code *text,
                 x86_mov_reg_fsbase(text, r);
                 gs.patch_off = x86_add_reg_imm32_reloc(text, r);
                 gs.kind = RK_TPOFF32;
-            } else if (!i->glob->defined &&
-                       target_os_get() == TGT_OS_DARWIN) {
+            } else if ((!i->glob->defined &&
+                        target_os_get() == TGT_OS_DARWIN) ||
+                       cg_global_via_got(i->glob)) {
                 /* Darwin: a symbol of another image has no link-time
                  * address; its GOT slot does */
                 gs.patch_off = x86_mov_reg_rip(text, D ? g_loc[i->dst] : 0);
@@ -4340,7 +4352,8 @@ static void gen_func(struct ir_func *fn, struct code *text,
         case IR_FADDR: {
             int D = in_reg(i->dst);
             struct fsite fs;
-            if (!i->callee->has_defn && target_os_get() == TGT_OS_DARWIN) {
+            if ((!i->callee->has_defn && target_os_get() == TGT_OS_DARWIN) ||
+                cg_func_via_got(i->callee)) {
                 /* as IR_GADDR: through the GOT */
                 fs.patch_off = x86_mov_reg_rip(text, D ? g_loc[i->dst] : 0);
                 fs.kind = RK_GOTPC32;
@@ -4865,7 +4878,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
             {
                 const struct ir_ins *pv = i > fn->ins ? i - 1 : NULL;
                 if (in_reg(i->a) && g_loc[i->a] != REG_RCX &&
-                    target_fmt_get() == TGT_FMT_ELF &&
+                    target_fmt_get() == TGT_FMT_ELF && !target_pic() &&
                     !getenv("EMBCC_NO_SWIDX") &&
                     (i->w == 8 ||
                      (i->w == 4 && pv && pv->op == IR_LOAD &&
@@ -4900,7 +4913,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
              * against this function's own symbol, at each label's offset
              * into it (jtabs, resolved with the branches below). Mach-O
              * and COFF keep the offset table. */
-            if (target_fmt_get() == TGT_FMT_ELF) {
+            if (target_fmt_get() == TGT_FMT_ELF && !target_pic()) {
                 x86_jmp_rcx_reg8(text, idx);
                 code_align(text, 8, 0xcc);
                 int tab = text->len;

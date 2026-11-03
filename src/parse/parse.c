@@ -1596,7 +1596,7 @@ static struct expr *parse_comma(struct parser *ps);
 static int float_n_name(const struct token *t)
 {
     return (t->kind == TOK_KW_FLOAT || t->kind == TOK_KW_DOUBLE ||
-            t->kind == TOK_KW_FLOAT128) &&
+            t->kind == TOK_KW_FLOAT128 || t->kind == TOK_KW_FLOAT64X) &&
            t->text && !strncmp(t->text, "_Float", 6);
 }
 static void mark_transparent(struct parser *ps, struct type *t);
@@ -6894,8 +6894,14 @@ static int float_n_typedef(struct parser *ps, struct type *tbase)
     struct token *t = cur(ps);
     if (!float_n_name(t))
         return 0;
+    /* _Float32x is double, _Float64x long double (whatever its size) */
     int bits = atoi(t->text + 6);
-    if (!ty_is_float(tbase) || ty_size(tbase) * 8 != bits)
+    int ext = strchr(t->text, 'x') != NULL;
+    int ok = ty_is_float(tbase) &&
+             (ext ? (bits == 32 ? tbase->kind == TY_DOUBLE
+                                : tbase->kind == TY_LDOUBLE)
+                  : ty_size(tbase) * 8 == bits);
+    if (!ok)
         parse_error_at(ps, t->line, t->col,
                    "typedef %s %s: %s is a keyword, and this is not its type",
                    ty_name(tbase), t->text, t->text);

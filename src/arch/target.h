@@ -571,6 +571,13 @@ int  target_keep_vars(void);
  * source variable lives (ir_func.lines, ir_func.var_off). */
 void target_set_debug_info(int on);
 int  target_debug_info(void);
+/* Position-independent code: 0 none, TARGET_PIE for an executable
+ * (-fPIE: what it defines is its own, what it does not is reached
+ * through the GOT), TARGET_PIC for a shared object (-fPIC: any symbol
+ * another module may define is reached through the GOT as well). */
+enum { TARGET_PIE = 1, TARGET_PIC = 2 };
+void target_set_pic(int mode);
+int  target_pic(void);
 
 /* The other two dimensions. Both default to the freestanding ELF answer,
  * so a caller that has never heard of them reads the world exactly as it
@@ -711,7 +718,14 @@ enum reloc_kind {
     RK_TLVP_LO12, /* ... and the paired ldr of the descriptor's address */
     RK_TLVP,      /* Darwin x86-64: movq sym@TLVP(%rip), reg -- the same */
     RK_GOTPC32,   /* x86-64: movq sym@GOTPCREL(%rip), reg -- an undefined
-                   * symbol's address on Darwin, which only the GOT has */
+                   * symbol's address on Darwin, which only the GOT has,
+                   * and a preemptible one under -fPIC/-fPIE */
+    RK_GOTTPOFF,  /* x86-64: movq sym@gottpoff(%rip), reg -- a thread-
+                   * local's offset from the thread pointer, from the GOT
+                   * (initial-exec, -fPIC/-fPIE) */
+    RK_TLSIE_PAGE,/* aarch64: adrp to a thread-local's GOT slot holding
+                   * its offset from the thread pointer (initial-exec) */
+    RK_TLSIE_LO12,/* ... and the paired ldr */
     RK_GOT_PAGE,  /* aarch64: adrp to the page of the symbol's GOT slot */
     RK_GOT_LO12,  /* aarch64: the paired ldr's offset in that page — a
                    * weak symbol's address (0 when it is undefined, which
@@ -760,6 +774,9 @@ enum reloc_kind {
      * is how an assembler's `.Lpcrel_hi0` label resolves too. */
     RK_RISCV_PCREL_HI20,
     RK_RISCV_PCREL_LO12_I,
+    /* -fPIC/-fPIE: `auipc` to the symbol's GOT slot, its LO12 half the
+     * PCREL_LO12_I of a load, which reads the address there */
+    RK_RISCV_GOT_HI20,
     /* AVR. Two things make this target's relocations unlike the others'.
      *
      * An address is materialised a BYTE at a time, because the registers

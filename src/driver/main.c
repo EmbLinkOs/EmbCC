@@ -344,6 +344,13 @@ static const char *g_ld_path;      /* --linker=, GCC's --ld-path= */
 static const char *g_fuse_ld;      /* -fuse-ld=bfd|gold|lld */
 static int g_pthread;              /* -pthread */
 static int g_static_link;          /* -static */
+/* -shared, -pie, -static-pie: what the link makes (0 an ordinary
+ * executable); -fPIC/-fPIE say what the code is (target_pic), and a
+ * shared object or a PIE made from sources in the same command takes
+ * the matching one unless -fno-pic said otherwise */
+enum { LINK_EXEC, LINK_SHARED, LINK_PIE, LINK_STATIC_PIE };
+static int g_link_kind;
+static int g_pic_given;            /* a -f[no-]pic/pie option was seen */
 static int g_gnuc_given;           /* -fgnuc-version= */
 
 static int glibc_mode(void)
@@ -887,6 +894,11 @@ static int apply_wl(struct link_opts *lo)
             lo->print_gc_sections = 1;
         } else if (!strcmp(a, "--print-memory-usage")) {
             lo->print_memory_usage = 1;
+        } else if (!strcmp(a, "-pie") || !strcmp(a, "--pie") ||
+                   !strcmp(a, "--pic-executable")) {
+            lo->pie = 1;
+        } else if (!strcmp(a, "-no-pie") || !strcmp(a, "--no-pie")) {
+            lo->pie = 0;
         } else if ((v = wl_value("-Map", 0, &k)) ||
                    (v = wl_value("--Map", 0, &k))) {
             lo->map_file = v;
@@ -1115,6 +1127,16 @@ static int compile_and_link(const char *in, const char *out)
     memset(&lo, 0, sizeof lo);
     if (apply_wl(&lo))
         return 1;
+    if (g_link_kind == LINK_SHARED) {
+        fprintf(stderr, "embcc: error: -shared: EmbLD does not write shared "
+                        "objects yet; with --libc=system the system's "
+                        "linker (--linker=) makes them\n");
+        return 1;
+    }
+    /* -pie, -static-pie: an ET_DYN EmbLD relocates nothing in -- the
+     * start code applies its RELATIVE relocations -- so the two are one */
+    if (g_link_kind == LINK_PIE || g_link_kind == LINK_STATIC_PIE)
+        lo.pie = 1;
     if (g_entry)
         lo.entry = g_entry;
     lo.script = g_script;
@@ -2096,7 +2118,8 @@ static int glibc_link(const char *in, const char *exe)
         return 1;
     }
     const char *gccdir = NULL;
-    if (g_static_link && !g_nostdlib && !g_nodefaultlibs) {
+    if ((g_static_link || g_link_kind == LINK_STATIC_PIE) && !g_nostdlib &&
+        !g_nodefaultlibs) {
         gccdir = glibc_libgcc_dir();
         if (!gccdir) {
             fprintf(stderr, "embcc: error: a static program against glibc "
@@ -2145,9 +2168,19 @@ static int glibc_link(const char *in, const char *exe)
         argv[n++] = sysopt;
     }
     argv[n++] = "--eh-frame-hdr";
-    if (g_static_link) {
+    if (g_link_kind == LINK_SHARED) {
+        argv[n++] = "-shared";
+    } else if (g_link_kind == LINK_STATIC_PIE) {
+        argv[n++] = "-static";
+        argv[n++] = "-pie";
+        argv[n++] = "--no-dynamic-linker";
+        argv[n++] = "-z";
+        argv[n++] = "text";
+    } else if (g_static_link) {
         argv[n++] = "-static";
     } else {
+        if (g_link_kind == LINK_PIE)
+            argv[n++] = "-pie";
         argv[n++] = "-dynamic-linker";
         argv[n++] = arm64 ? "/lib/ld-linux-aarch64.so.1"
                           : "/lib64/ld-linux-x86-64.so.2";
@@ -2159,9 +2192,14 @@ static int glibc_link(const char *in, const char *exe)
         argv[n++] = g_entry;
     }
     if (start) {
-        snprintf(crt1, sizeof crt1, "%s/crt1.o", libdir);
+        /* glibc's entry: crt1.o, Scrt1.o for a PIE, rcrt1.o for a static
+         * PIE (it relocates itself); a shared object has none */
+        snprintf(crt1, sizeof crt1, "%s/%s", libdir,
+                 g_link_kind == LINK_PIE ? "Scrt1.o"
+                 : g_link_kind == LINK_STATIC_PIE ? "rcrt1.o" : "crt1.o");
         snprintf(crti, sizeof crti, "%s/crti.o", libdir);
-        argv[n++] = crt1;
+        if (g_link_kind != LINK_SHARED)
+            argv[n++] = crt1;
         argv[n++] = crti;
         argv[n++] = dso;
     }
@@ -2193,7 +2231,7 @@ static int glibc_link(const char *in, const char *exe)
     if (libs) {
         char librt[1100];
         static char rtcopy[1100];
-        if (g_static_link)
+        if (g_static_link || g_link_kind == LINK_STATIC_PIE)
             argv[n++] = "--start-group";
         if (g_pthread)
             argv[n++] = "-lpthread";
@@ -2213,7 +2251,7 @@ static int glibc_link(const char *in, const char *exe)
             snprintf(rtcopy, sizeof rtcopy, "%s", librt);
             argv[n++] = rtcopy;
         }
-        if (g_static_link)
+        if (g_static_link || g_link_kind == LINK_STATIC_PIE)
             argv[n++] = "--end-group";
     }
     if (start) {
@@ -2780,6 +2818,15 @@ static void write_module_interface(const char *out)
 
 static int compile_unit(const char *in, const char *out, int pp_only)
 {
+    if (target_pic() && target_fmt_get() == TGT_FMT_ELF &&
+        target_get() != TARGET_X86_64 && target_get() != TARGET_AARCH64 &&
+        target_get() != TARGET_RISCV32 && target_get() != TARGET_RISCV64) {
+        fprintf(stderr, "embcc: error: position-independent code (-fPIC, "
+                        "-fPIE, -shared, -pie) is written for x86-64, "
+                        "AArch64 and RISC-V; %s's is not yet\n",
+                target_triple_now());
+        return 1;
+    }
     char *src = read_file(in);
     diag_register_source(in, src);   /* so diagnostics can show its lines */
     predef_set_cxx(lang_cxx);
@@ -3501,7 +3548,12 @@ static int compile_unit(const char *in, const char *out, int pp_only)
             ot = ot->pointee;
         g->in_rodata = g->is_const && !g->is_tls && !g->section &&
                        ot && !ot->is_volatile &&
-                       target_fmt_get() == TGT_FMT_ELF;
+                       target_fmt_get() == TGT_FMT_ELF &&
+                       /* position-independent code: an address in it is
+                        * a dynamic relocation, which needs it writable
+                        * (.data) -- in .rodata it would be a text
+                        * relocation, refused in a shared object */
+                       !(target_pic() && g->nrelocs);
         if (g->in_rodata) {
             g->in_bss = 0;
             continue;
@@ -5113,8 +5165,10 @@ static int compile_unit(const char *in, const char *out, int pp_only)
             !(g->sym_ndx = defined_here(u, g->name)))
             g->sym_ndx = elfw_add_symbol(
                 w, g->name, 0, 0,
+                /* another module's thread-local is STT_TLS even here:
+                 * a linker matches it to a TLS definition by that */
                 ELF64_ST_INFO(g->is_weak ? STB_WEAK : STB_GLOBAL,
-                              STT_NOTYPE), SHN_UNDEF);
+                              g->is_tls ? STT_TLS : STT_NOTYPE), SHN_UNDEF);
 
     /* Every called external gets one UNDEF symbol, and every call site
      * a PLT32 relocation against it. addend -4: rel32 is relative to
@@ -6728,10 +6782,6 @@ static int embcc_main(int argc, char **argv)
                    strcmp(argv[i], "--coverage") == 0 ||
                    strcmp(argv[i], "-pg") == 0 ||
                    strcmp(argv[i], "-flto") == 0 ||
-                   strcmp(argv[i], "-fPIC") == 0 ||
-                   strcmp(argv[i], "-fpic") == 0 ||
-                   strcmp(argv[i], "-fPIE") == 0 ||
-                   strcmp(argv[i], "-fpie") == 0 ||
                    strcmp(argv[i], "-fstack-clash-protection") == 0 ||
                    strncmp(argv[i], "-fcf-protection", 15) == 0) {
             /* Refused BY NAME, every one. These do not describe a
@@ -6744,8 +6794,6 @@ static int embcc_main(int argc, char **argv)
              *   -fprofile-*, --coverage, -pg  no counters
              *   -flto        no bitcode, so a whole-program link is a
              *                plain one and the sizes mislead
-             *   -fPIC/-fpie  the code is position DEPENDENT; a shared
-             *                object built from it would relocate wrong
              *   -fstack-clash-protection, -fcf-protection  no probes,
              *                no landing pads
              */
@@ -6753,12 +6801,35 @@ static int embcc_main(int argc, char **argv)
                             "would emit ordinary code and the flag's "
                             "promise would not hold\n", opt_typed(argv[i]));
             return 1;
-        } else if (strcmp(argv[i], "-shared") == 0 ||
-                   strcmp(argv[i], "-static-pie") == 0) {
-            fprintf(stderr, "embcc: error: %s needs position-independent "
-                            "code, which EmbCC does not emit\n",
-                            opt_typed(argv[i]));
-            return 1;
+        } else if (strcmp(argv[i], "-fPIC") == 0 ||
+                   strcmp(argv[i], "-fpic") == 0) {
+            target_set_pic(TARGET_PIC);
+            g_pic_given = 1;
+        } else if (strcmp(argv[i], "-fPIE") == 0 ||
+                   strcmp(argv[i], "-fpie") == 0) {
+            target_set_pic(TARGET_PIE);
+            g_pic_given = 1;
+        } else if (strcmp(argv[i], "-fno-pic") == 0 ||
+                   strcmp(argv[i], "-fno-PIC") == 0 ||
+                   strcmp(argv[i], "-fno-pie") == 0 ||
+                   strcmp(argv[i], "-fno-PIE") == 0) {
+            target_set_pic(0);
+            g_pic_given = 1;
+        } else if (strcmp(argv[i], "-shared") == 0) {
+            g_link_kind = LINK_SHARED;
+            if (!g_pic_given)
+                target_set_pic(TARGET_PIC);
+        } else if (strcmp(argv[i], "-pie") == 0) {
+            g_link_kind = LINK_PIE;
+            if (!g_pic_given)
+                target_set_pic(TARGET_PIE);
+        } else if (strcmp(argv[i], "-static-pie") == 0) {
+            g_link_kind = LINK_STATIC_PIE;
+            if (!g_pic_given)
+                target_set_pic(TARGET_PIE);
+        } else if (strcmp(argv[i], "-no-pie") == 0 ||
+                   strcmp(argv[i], "-nopie") == 0) {
+            g_link_kind = LINK_EXEC;
         } else if (strcmp(argv[i], "-mno-sse") == 0 ||
                    strcmp(argv[i], "-mno-sse2") == 0 ||
                    strcmp(argv[i], "-mgeneral-regs-only") == 0) {

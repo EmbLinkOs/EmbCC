@@ -259,11 +259,8 @@ Accepted and ignored. The generated code is position-dependent and
 addresses data and calls RIP-relatively (calls carry
 `R_X86_64_PLT32`, data references `R_X86_64_PC32`), which also suits a
 kernel linked in the top 2 GiB (`--code-model=kernel`). The red zone is never
-used. Position-independent code is not available: `-fPIC`, `-fpic`,
-`-fPIE` and `-fpie` are refused with `embcc: error: -fPIC is not
-supported; EmbCC would emit ordinary code and the flag's promise would
-not hold`, and `-shared` and `-static-pie` with `embcc: error: -shared
-needs position-independent code, which EmbCC does not emit`.
+used. `-fPIC` and `-fPIE` write position-independent code, and `-shared`,
+`-pie` and `-static-pie` link it (see [Invoking](invoking.md#-fpic--fpic--fpie--fpie--fno-pic--fno-pie)).
 
 ### Calling convention: System V AMD64
 

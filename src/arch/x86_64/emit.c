@@ -1140,6 +1140,18 @@ void x86_mov_reg_fsbase(struct code *c, int reg)
     code_u32(c, 0);
 }
 
+/* `add %fs:0, reg`: the thread pointer added to an offset already in
+ * reg (initial-exec TLS). */
+void x86_add_reg_fsbase(struct code *c, int reg)
+{
+    code_byte(c, 0x64);                          /* FS prefix */
+    code_byte(c, 0x48 | ((reg & 8) ? 4 : 0));    /* REX.W (+REX.R) */
+    code_byte(c, 0x03);
+    code_byte(c, 0x04 | ((reg & 7) << 3));       /* mod=00 rm=100 (SIB) */
+    code_byte(c, 0x25);                          /* base=101 idx=100: disp32 */
+    code_u32(c, 0);
+}
+
 /* `add $imm32, reg`, with the immediate left for a relocation to fill.
  * Returns the offset of that field. The offset is negative on x86-64 --
  * the thread block sits BELOW the thread pointer -- which is why the

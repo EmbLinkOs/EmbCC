@@ -48,9 +48,9 @@ The file sets:
   is set), header dependencies and the archiver. CMake identifies a
   compiler by building a test file against the compilers it knows, and
   EmbCC is not one of them, so without this file it says "identification
-  is unknown" and applies no rules for it. `POSITION_INDEPENDENT_CODE` and
-  shared libraries reach EmbCC's refusal (`-fPIC is not supported`)
-  rather than building ordinary code;
+  is unknown" and applies no rules for it. `POSITION_INDEPENDENT_CODE`
+  passes `-fPIC`, which EmbCC writes on x86-64, AArch64 and RISC-V, and
+  a shared library links with `--libc=system`'s linker;
 - `CMAKE_SYSTEM_NAME` from the triple: `Generic` for a bare-metal triple
   (CMake's compiler checks then build a static library, not a program),
   `Linux`, `Darwin` or `Windows` otherwise;

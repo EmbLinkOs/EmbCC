@@ -53,6 +53,13 @@ void cg_note_labels(struct ir_func *fn, const int *label_off);
  * in a section of its own the buffer's offsets are the section's. 0 for
  * neither. The padding before the function is never run. */
 int cg_fn_align(const struct ir_func *fn);
+/* Position-independent code (target_pic): is the address of this
+ * function or global taken from the GOT? An undefined one's always (its
+ * module is not known), and under -fPIC a defined one another module
+ * may preempt too -- not static, not hidden or protected. A call is
+ * direct (the linker makes a PLT entry for an undefined callee). */
+int cg_func_via_got(const struct func *f);
+int cg_global_via_got(const struct global *g);
 
 struct extcall {
     int patch_off;        /* offset of the rel32 field in .text */
