@@ -462,6 +462,12 @@ int target_arm_a32(void);
  * compute in single and double precision (target_thumb_fpu_dp). */
 int target_arm_vfp(int *d32);
 void target_set_arm_vfp(int version, int d32);
+void target_set_arm_neon(int on);
+int target_arm_neon(void);
+void target_set_thumb_v81(int on);
+int target_thumb_v81(void);
+void target_set_thumb_mve(int level);
+int target_thumb_mve(void);
 /* The alignment a string literal of `width`-byte elements gets in .rodata.
  * Its element width: ARMv6-M reads L"..."[0] with LDR and MIPS with lw,
  * and a wide literal at an odd offset faults on both (a HardFault, an

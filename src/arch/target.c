@@ -31,6 +31,7 @@ static int g_thumb_arch = 7;
  * because nearly every question asked of level 6 has the same answer
  * here; the few that differ ask target_thumb_v8m_base(). */
 static int g_thumb_v8b;
+static int g_thumb_v81, g_thumb_mve;  /* ARMv8.1-M, and its MVE: see below */
 /* -mcmse: the Secure-side build of ARMv8-M's security extension. */
 static int g_thumb_cmse;
 static int g_thumb_fpu;     /* see target_thumb_fpu */
@@ -796,6 +797,10 @@ int target_from_triple(const char *triple, enum target_arch *out,
                  * `em` flag that says so. */
                 size_t n = strlen(triple);
                 g_thumb_hf_name = n > 6 && !strcmp(triple + n - 6, "eabihf");
+                /* thumbv8.1m.main: v8-M Mainline's level, and the .1 */
+                g_thumb_v81 = !strncmp(triple, "thumbv8.1m", 10) ||
+                              !strncmp(triple, "armv8.1m", 8);
+                g_thumb_mve = 0;
                 g_arm_a32 = t->sub == SUB_ARM_V7A;
                 g_thumb_v8b = t->sub == SUB_ARM_V8M_BASE;
                 switch (t->sub) {
@@ -974,6 +979,25 @@ void target_set_arm_vfp(int version, int d32)
     g_arm_vfp = version;
     g_arm_vfp_d32 = d32 ? 1 : 0;
 }
+/* ARMv7-A's Advanced SIMD unit (-mfpu=neon...): the NEON macros and
+ * <arm_neon.h> (whose intrinsics are lane by lane; no backend emits a
+ * NEON instruction of its own yet) */
+static int g_arm_neon;
+void target_set_arm_neon(int on) { g_arm_neon = on ? 1 : 0; }
+int target_arm_neon(void) { return g_arch == TARGET_THUMB && g_arm_neon; }
+
+/* ARMv8.1-M Mainline (Cortex-M55, M85): v8-M Mainline's code, and the
+ * M-profile Vector Extension it may add -- MVE's macros and <arm_mve.h>,
+ * whose intrinsics are lane by lane (no backend emits an MVE
+ * instruction of its own yet). mve: 0, 1 the integer half, 3 with
+ * floating point (__ARM_FEATURE_MVE's own values). */
+void target_set_thumb_v81(int on) { g_thumb_v81 = on ? 1 : 0; }
+int target_thumb_v81(void)
+{
+    return g_arch == TARGET_THUMB && g_thumb_arch == 8 && g_thumb_v81;
+}
+void target_set_thumb_mve(int level) { g_thumb_mve = level; }
+int target_thumb_mve(void) { return target_thumb_v81() ? g_thumb_mve : 0; }
 int target_thumb_arch(void) { return g_thumb_arch; }
 int target_object_align(int is_array, long size, int align)
 {
