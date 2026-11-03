@@ -209,6 +209,15 @@ struct a_fn {
      * is REBUILT where it is read (vld, vld_cc) rather than kept anywhere:
      * no home, no slot, and its IR_CONST emits nothing. */
     char *remat;
+    /* Per vreg: an address known when this is compiled -- a constant (1,
+     * cval) or a global's (2, dglob) -- that every use reads as the
+     * address of a load or a store. Those take it in the instruction:
+     * in/out in the I/O space, lds/sts elsewhere and for a global (an
+     * R_AVR_16 against it, with the byte's offset). It is kept nowhere,
+     * and its definition emits nothing. avr-gcc's form: `x = count` was
+     * two ldi, a movw into Z and the loads off Z, and PORTB through Z. */
+    char *direct;
+    struct global **dglob;
     /* The last store into a home (vst), and where the code stood after it:
      * a vld of the same value into the same registers with nothing emitted
      * since -- and no label placed -- has nothing to do. */
@@ -538,20 +547,21 @@ static int fn_sret_bytes(const struct ir_func *fn)
 }
 
 /* The widest outgoing-argument area any call in this function needs. The
- * IR's own outgoing_bytes is the System V answer and does not apply. */
+ * IR's own outgoing_bytes is the System V answer and does not apply.
+ * Placed as the call places them (call_stack_bytes), the hidden pointer to
+ * a returned composite first: without it a call returning a struct had its
+ * arguments placed one register pair higher than they go, so an argument
+ * the pointer pushes onto the stack was not counted -- and landed on the
+ * frame's own slots (`o = g(s, k)` with a 17-byte struct: k went to Y+18,
+ * over the slot holding o's address; verify/fuzz/run-avr.sh). */
 static long outgoing_area(const struct ir_func *fn)
 {
     long most = 0;
     for (int n = 0; n < fn->nins; n++) {
         const struct ir_ins *i = &fn->ins[n];
-        struct argplace pl;
-        int cursor;
-        long stk = 0;
         if (i->op != IR_CALL)
             continue;
-        cursor = i->call_varargs ? -1 : ARG_TOP;
-        for (int k = 0; k < i->nargs; k++)
-            place_arg(i->argv[k].size, &cursor, &stk, &pl);
+        long stk = call_stack_bytes(i);
         if (stk > most)
             most = stk;
     }
@@ -989,6 +999,21 @@ static unsigned char *avr_demand(const struct a_fn *F)
         for (int n = fn->nins - 1; n >= 0; n--) {
             const struct ir_ins *i = &fn->ins[n];
             int nd = (i->dst >= 0 && i->dst < fn->nvregs) ? d.need[i->dst] : VW;
+            /* An asm reads an input's size (its lowering loads o->size
+             * bytes) and an address's two: `swap %0` on a char built its
+             * operand in four registers to use one. */
+            if (i->op == IR_ASM && i->asm_ir) {
+                const struct ir_asm *ia = i->asm_ir;
+                for (int k = 0; k < ia->nin; k++) {
+                    const struct ir_asm_op *o = &ia->in[k];
+                    int w = o->mem ? 2 : o->size;
+                    dem_raise(&d, o->temp, w >= 1 && w <= VW ? w : VW);
+                }
+                for (int k = 0; k < ia->nout; k++)
+                    if (!ia->out[k].val)
+                        dem_raise(&d, ia->out[k].temp, 2);
+                continue;
+            }
             if (!narrow_aware(i->op)) {
                 ra_each_use(i, dem_full, &d);
                 continue;
@@ -1060,6 +1085,7 @@ static int a_param_unused(const struct a_fn *F, int v)
     return 1;
 }
 
+static int is_direct(const struct a_fn *F, int v);
 static void layout(struct a_fn *F)
 {
     struct ir_func *fn = F->fn;
@@ -1227,7 +1253,7 @@ static void layout(struct a_fn *F)
             int has_cgoto = 0;
             for (int v = 0; v < nv; v++)
                 loc2[v] = (in_pair(F, v) || (F->remat && F->remat[v]) ||
-                           vw(F, v) != VW) ? 0 : -1;
+                           is_direct(F, v) || vw(F, v) != VW) ? 0 : -1;
             for (int n = 0; n < fn->nins; n++)
                 if (fn->ins[n].op == IR_IGOTO ||
                     fn->ins[n].op == IR_LABELADDR)
@@ -1243,8 +1269,9 @@ static void layout(struct a_fn *F)
         for (int v = fn->nvars; v < nv; v++) {
             int k;
             if (def[v] < 0 || in_pair(F, v) ||
-                (F->remat && F->remat[v]))
-                continue;      /* never defined, in a pair, or rebuilt */
+                (F->remat && F->remat[v]) || is_direct(F, v))
+                continue;      /* never defined, in a pair, rebuilt, or
+                                * named by the instructions that use it */
             if (vw(F, v) == VW && tslot) {
                 int ts = tslot[v - fn->nvars];
                 if (ts < 0)
@@ -1555,6 +1582,97 @@ static void z_add(struct code *t, long off)
     long neg = -off;
     avr_ri(t, AVR_SUBI, AVR_Z, (int)(neg & 0xff));
     avr_ri(t, AVR_SBCI, AVR_Z + 1, (int)((neg >> 8) & 0xff));
+}
+
+/* F->direct, from the constant map, the use counts and the width map */
+static int wide_ins(const struct a_fn *F, const struct ir_ins *i);
+static const char *avr_knob(const char *name);
+static void note_glob_at(struct a_sites *st, int at, struct global *g,
+                         enum reloc_kind k, long addend);
+static void direct_map(struct a_fn *F)
+{
+    const struct ir_func *fn = F->fn;
+    int nv = fn->nvregs ? fn->nvregs : 1;
+    int *uses = xcalloc((size_t)nv, sizeof *uses);
+    int *defs = xcalloc((size_t)nv, sizeof *defs);
+    int *bytes = xcalloc((size_t)nv, sizeof *bytes);
+    char *io = xcalloc((size_t)nv, 1);       /* every byte in the I/O space */
+    F->direct = xcalloc((size_t)nv, 1);
+    F->dglob = xcalloc((size_t)nv, sizeof *F->dglob);
+    if (!avr_knob("EMBCC_AVR_NO_DIRECT") && F->usecnt) {
+        for (int k = 0; k < fn->nins; k++) {
+            const struct ir_ins *i = &fn->ins[k];
+            if (i->dst >= 0 && i->dst < fn->nvregs)
+                defs[i->dst]++;
+            if ((i->op == IR_LOAD || i->op == IR_STORE) && !i->flash &&
+                i->a >= fn->nvars && i->a < fn->nvregs &&
+                i->size >= 1 && i->size <= 4 && !wide_ins(F, i)) {
+                long lo = F->cval[i->a] + i->memoff;
+                if (!uses[i->a])
+                    io[i->a] = 1;
+                if (F->cknown[i->a] != 1 || lo < 0x20 ||
+                    lo + i->size - 1 > 0x5f)
+                    io[i->a] = 0;
+                uses[i->a]++;
+                bytes[i->a] += i->size;
+            }
+        }
+        for (int k = 0; k < fn->nins; k++) {
+            const struct ir_ins *i = &fn->ins[k];
+            if (i->op == IR_GADDR && i->glob && i->dst >= fn->nvars &&
+                i->dst < fn->nvregs && defs[i->dst] == 1)
+                F->dglob[i->dst] = i->glob;
+        }
+        /* every use of it one of those: a store of the address itself, a
+         * compare or a pointer increment keeps it in a register. In the
+         * I/O space in/out is two bytes and always the answer. Elsewhere
+         * lds/sts is four bytes a byte where Z, loaded once (four), is
+         * two: faster always, and taken so -- but optimizing for size,
+         * only where it is no larger. A handler takes it whatever: Z
+         * not used is two registers it does not save. */
+        int small = target_opt_size() && !fn->src->is_isr;
+        for (int v = fn->nvars; v < fn->nvregs; v++) {
+            if (!uses[v] || uses[v] != F->usecnt[v])
+                continue;
+            if (small && !io[v] && 4 * bytes[v] > 4 + 2 * bytes[v])
+                continue;
+            if (F->cknown[v] == 1 && F->cval[v] >= 0 && F->cval[v] <= 0xffff)
+                F->direct[v] = 1;
+            else if (F->dglob[v])
+                F->direct[v] = 2;
+        }
+    }
+    free(uses);
+    free(defs);
+    free(bytes);
+    free(io);
+}
+
+static int is_direct(const struct a_fn *F, int v)
+{
+    return F->direct && v >= 0 && v < F->fn->nvregs && F->direct[v];
+}
+
+/* One byte at direct address v + off, into (or, `st`, out of) r */
+static void direct_access(struct a_fn *F, int st, int r, int v, long off)
+{
+    struct code *t = F->t;
+    if (F->direct[v] == 1) {
+        long a = (F->cval[v] + off) & 0xffff;
+        if (a >= 0x20 && a < 0x60) {             /* the I/O space */
+            if (st) avr_out(t, (int)(a - 0x20), r);
+            else    avr_in(t, r, (int)(a - 0x20));
+        } else if (st) {
+            avr_sts(t, (int)a, r);
+        } else {
+            avr_lds(t, r, (int)a);
+        }
+        return;
+    }
+    /* the address word, the instruction's second */
+    note_glob_at(F->st, t->len + 2, F->dglob[v], RK_AVR_ABS16, off);
+    if (st) avr_sts(t, 0, r);
+    else    avr_lds(t, r, 0);
 }
 
 static void vld(struct a_fn *F, int r, int v, long off, int n)
@@ -2238,8 +2356,8 @@ static void note_str(struct a_sites *st, int at, int idx, enum reloc_kind k)
     st->nstr++;
 }
 
-static void note_glob(struct a_sites *st, int at, struct global *g,
-                      enum reloc_kind k)
+static void note_glob_at(struct a_sites *st, int at, struct global *g,
+                         enum reloc_kind k, long addend)
 {
     if (st->ng == st->capg) {
         st->capg = st->capg ? st->capg * 2 : 16;
@@ -2248,7 +2366,14 @@ static void note_glob(struct a_sites *st, int at, struct global *g,
     st->g[st->ng].patch_off = at;
     st->g[st->ng].glob = g;
     st->g[st->ng].kind = k;
+    st->g[st->ng].addend = addend;
     st->ng++;
+}
+
+static void note_glob(struct a_sites *st, int at, struct global *g,
+                      enum reloc_kind k)
+{
+    note_glob_at(st, at, g, k, 0);
 }
 
 static void note_fn(struct a_sites *st, int at, struct func *target,
@@ -3038,6 +3163,32 @@ static int avr_has_mul(void)
     return !getenv("EMBCC_AVR_NOMUL");
 }
 
+/* Two bytes of scratch for a multiply's operand: r18, r20, r22, r24 or Z
+ * (never a home), clear of the product [d, d + dn), of each operand read
+ * in place where it lives (h1, h2: -1 for none), and of the other
+ * operand's scratch (o). The operands' homes were not looked at: with b an
+ * eight-byte value homed in r18-r25, a was loaded into r18:r19 over it,
+ * and the product was a times a (verify/fuzz/run-avr.sh). Z is always
+ * left, the others being five pairs for at most three ranges. */
+static int mul_scratch(const struct a_fn *F, int d, int dn, int h1, int h2,
+                       int o)
+{
+    static const int cand[] = { RA, RA + 2, RB, RB + 2, AVR_Z };
+#define OVL(r, n, h, hn) ((r) < (h) + (hn) && (h) < (r) + (n))
+    for (unsigned k = 0; k < sizeof cand / sizeof cand[0]; k++) {
+        int r = cand[k];
+        if (OVL(r, 2, d, dn) || (o >= 0 && OVL(r, 2, o, 2)) ||
+            (h1 >= 0 && OVL(r, 2, F->loc[h1], F->hw[h1])) ||
+            (h2 >= 0 && OVL(r, 2, F->loc[h2], F->hw[h2])))
+            continue;
+        return r;
+    }
+#undef OVL
+    internal_error("avr: %s: no scratch pair for a multiply's operand",
+                   F->fn->name);
+    return AVR_Z;
+}
+
 static int avr_mul_inline(struct a_fn *F, const struct ir_ins *i, int nb)
 {
     struct code *t = F->t;
@@ -3060,23 +3211,24 @@ static int avr_mul_inline(struct a_fn *F, const struct ir_ins *i, int nb)
     int d = dst_reg(F, i, nb);
     /* each operand where it lives, unless that is where the product goes
      * (the cross terms read both operands after d's first write); else in
-     * a scratch half: the bank the product is not in */
-    int sc = d == RA ? RB : RA, ra, rb;
+     * a scratch half: a bank neither the product nor the other operand's
+     * home is in. The second check was missing: with b an eight-byte value
+     * homed in r18-r25, a was loaded into r18:r19 over it, and the
+     * product was a times a (verify/fuzz/run-avr.sh). No such bank, the
+     * helper call. */
     int ain = in_pair(F, i->a) && nb <= F->hw[i->a] &&
               (F->loc[i->a] + nb <= d || F->loc[i->a] >= d + nb);
-    ra = ain ? F->loc[i->a] : sc;
+    int bin = !kb && in_pair(F, i->b) && nb <= F->hw[i->b] &&
+              (F->loc[i->b] + nb <= d || F->loc[i->b] >= d + nb);
+    int ha = ain ? i->a : -1, hb = bin ? i->b : -1, ra, rb;
+    ra = ain ? F->loc[i->a] : mul_scratch(F, d, nb, ha, hb, -1);
+    rb = bin ? F->loc[i->b] : mul_scratch(F, d, nb, ha, hb, ain ? -1 : ra);
     if (!ain)
         vld(F, ra, i->a, 0, nb);
-    if (kb) {
-        rb = sc + 2;
+    if (kb)
         ldi4(F, rb, (unsigned long)k, nb);
-    } else {
-        int bin = in_pair(F, i->b) && nb <= F->hw[i->b] &&
-                  (F->loc[i->b] + nb <= d || F->loc[i->b] >= d + nb);
-        rb = bin ? F->loc[i->b] : sc + 2;
-        if (!bin)
-            vld(F, rb, i->b, 0, nb);
-    }
+    else if (!bin)
+        vld(F, rb, i->b, 0, nb);
     int k0 = kb ? (int)(k & 0xff) : -1, k1 = kb ? (int)((k >> 8) & 0xff) : -1;
     avr_rr(t, AVR_MUL, ra, rb);             /* a0 b0 */
     if (nb == 1) {
@@ -3144,22 +3296,21 @@ static int avr_mul_wide16(struct a_fn *F, const struct ir_ins *i, int nb)
      * even and movw reaches it. avr_demand counted on this path being
      * taken: it gave the operands two bytes. */
     int d = dst_reg(F, i, VW);
-    int sc = d == RA ? RB : RA, ra, rb;
+    /* the scratch bank clear of the product and of both operands' homes,
+     * as avr_mul_inline's: no such bank, the helper call */
     int ain = in_pair(F, i->a) && F->hw[i->a] >= 2 &&
               (F->loc[i->a] + 2 <= d || F->loc[i->a] >= d + VW);
-    ra = ain ? F->loc[i->a] : sc;
+    int bin = !kb && in_pair(F, i->b) && F->hw[i->b] >= 2 &&
+              (F->loc[i->b] + 2 <= d || F->loc[i->b] >= d + VW);
+    int ha = ain ? i->a : -1, hb = bin ? i->b : -1, ra, rb;
+    ra = ain ? F->loc[i->a] : mul_scratch(F, d, VW, ha, hb, -1);
+    rb = bin ? F->loc[i->b] : mul_scratch(F, d, VW, ha, hb, ain ? -1 : ra);
     if (!ain)
         vld(F, ra, i->a, 0, 2);
-    if (kb) {
-        rb = sc + 2;
+    if (kb)
         ldi4(F, rb, (unsigned long)k, 2);
-    } else {
-        int bin = in_pair(F, i->b) && F->hw[i->b] >= 2 &&
-                  (F->loc[i->b] + 2 <= d || F->loc[i->b] >= d + VW);
-        rb = bin ? F->loc[i->b] : sc + 2;
-        if (!bin)
-            vld(F, rb, i->b, 0, 2);
-    }
+    else if (!bin)
+        vld(F, rb, i->b, 0, 2);
     avr_rr(t, AVR_MUL, ra, rb);             /* a0 b0: bytes 0-1 */
     avr_movw(t, d, R_TMP);
     avr_rr(t, AVR_MUL, ra + 1, rb + 1);     /* a1 b1: bytes 2-3 */
@@ -3175,11 +3326,52 @@ static int avr_mul_wide16(struct a_fn *F, const struct ir_ins *i, int nb)
     return 1;
 }
 
+/* `REG |= BIT` and `REG &= ~BIT` on an I/O register sbi/cbi reach
+ * (0x20-0x3f): a one-byte load, an or or and of one bit, and the store of
+ * that back -- each value read by the next alone -- are one sbi or cbi,
+ * which reads and writes the register once as the three did. avr-gcc
+ * makes the same one instruction of PORTB |= 1; this was five, and three
+ * once the address was in the instructions. EMBCC_AVR_NO_SBI turns it off. */
+static int gen_bit_io(struct a_fn *F, int n)
+{
+    const struct ir_func *fn = F->fn;
+    const struct ir_ins *ld = &fn->ins[n], *op, *st;
+    if (n + 2 >= fn->nins || !F->usecnt || avr_knob("EMBCC_AVR_NO_SBI"))
+        return 0;
+    op = ld + 1;
+    st = ld + 2;
+    if (ld->op != IR_LOAD || ld->size != 1 || ld->flash ||
+        !is_direct(F, ld->a) || F->direct[ld->a] != 1 || ld->dst < 0 ||
+        F->usecnt[ld->dst] != 1)
+        return 0;
+    if ((op->op != IR_OR && op->op != IR_AND) || !op->imm_b ||
+        op->a != ld->dst || op->dst < 0 || F->usecnt[op->dst] != 1)
+        return 0;
+    if (st->op != IR_STORE || st->size != 1 || st->b != op->dst ||
+        !is_direct(F, st->a) || F->direct[st->a] != 1)
+        return 0;
+    long a = (F->cval[ld->a] + ld->memoff) & 0xffff;
+    if (((F->cval[st->a] + st->memoff) & 0xffff) != a || a < 0x20 || a > 0x3f)
+        return 0;
+    unsigned m = (unsigned)(op->op == IR_OR ? op->imm : ~op->imm) & 0xffu;
+    if (!m || (m & (m - 1)))
+        return 0;                        /* not one bit */
+    int bit = 0;
+    while (!(m & 1u)) { m >>= 1; bit++; }
+    if (op->op == IR_OR) avr_sbi(F->t, (int)(a - 0x20), bit);
+    else                 avr_cbi(F->t, (int)(a - 0x20), bit);
+    F->skip_next = 2;
+    return 1;
+}
+
 static void gen_ins(struct a_fn *F, int n)
 {
     struct ir_func *fn = F->fn;
     struct code *t = F->t;
     const struct ir_ins *i = &fn->ins[n];
+
+    if (i->op == IR_LOAD && gen_bit_io(F, n))
+        return;
 
     /* Everything this backend has not learned, named before anything is
      * emitted for it. The width test comes first because it applies to
@@ -4419,8 +4611,11 @@ static void gen_ins(struct a_fn *F, int n)
         int ld = (i->vol || nb > i->size) ? i->size : nb;
         if (!ld)
             return;
-        if (nb <= ld && in_pair(F, i->dst)) {  /* no extension: in place */
-            vld(F, F->loc[i->dst], i->a, 0, ld);
+        /* In place when its home holds every byte read: a volatile local
+         * read whole and used in part was loaded past a pair, into what
+         * follows it -- Y, after a home in X. */
+        if (nb <= ld && in_pair(F, i->dst) && ld <= F->hw[i->dst]) {
+            vld(F, F->loc[i->dst], i->a, 0, ld);   /* no extension: in place */
             return;
         }
         vld(F, RA, i->a, 0, ld);
@@ -4452,6 +4647,21 @@ static void gen_ins(struct a_fn *F, int n)
             if (!ld)
                 return;
             int d = dst_reg(F, i, nb);       /* straight into its home */
+            /* A volatile access reads every byte, but only nb have a
+             * register: the rest go into r0 and are let go. Loaded into
+             * d + k, the bytes of a four-byte volatile of which two were
+             * read landed past the pair -- in r28:r29, the frame pointer,
+             * once the pair was X: every frame access after it went wild
+             * (the AVR fuzzer, run-avr.sh). */
+#define LD_REG(k) ((k) < nb ? d + (k) : R_TMP)
+            if (is_direct(F, i->a)) {
+                for (int k = 0; k < ld; k++)
+                    direct_access(F, 0, LD_REG(k), i->a, i->memoff + k);
+                if (nb > i->size)
+                    extend(F, d, i->size, i->sign, nb);
+                dst_done(F, i, d);
+                return;
+            }
             vld(F, AVR_Z, i->a, 0, 2);
             if (i->flash) {
                 /* __flash: program memory, which LPM alone reads, through
@@ -4459,7 +4669,7 @@ static void gen_ins(struct a_fn *F, int n)
                  * this pointer no longer. */
                 z_add(F->t, i->memoff);
                 for (int k = 0; k < ld; k++)
-                    avr_lpm(t, d + k, 1);
+                    avr_lpm(t, LD_REG(k), 1);
                 F->zv = -1;
                 if (nb > i->size)
                     extend(F, d, i->size, i->sign, nb);
@@ -4471,7 +4681,8 @@ static void gen_ins(struct a_fn *F, int n)
              * ra_fold_memoff folded in, and without moving Z, so the next
              * access through the same pointer finds it there. */
             for (int k = 0; k < ld; k++)
-                avr_ldd(t, d + k, AVR_Z, i->memoff + k);
+                avr_ldd(t, LD_REG(k), AVR_Z, i->memoff + k);
+#undef LD_REG
             if (nb > i->size)
                 extend(F, d, i->size, i->sign, nb);
             dst_done(F, i, d);
@@ -4484,6 +4695,11 @@ static void gen_ins(struct a_fn *F, int n)
         {
         /* ...from its home when it has one, which touches no Z. */
         int src = rd_in(F, i->b, i->size, RA);
+        if (is_direct(F, i->a)) {        /* high first, as below */
+            for (int k = i->size - 1; k >= 0; k--)
+                direct_access(F, 1, src + k, i->a, i->memoff + k);
+            return;
+        }
         vld(F, AVR_Z, i->a, 0, 2);
         /* The HIGH byte first. A 16-bit timer, compare or ADC register
          * is written through the part's TEMP latch: the high byte waits
@@ -4567,6 +4783,8 @@ static void gen_ins(struct a_fn *F, int n)
      * it is from r16 up, and extended past its two bytes only as far as
      * anything reads -- a pointer in a pair is read as two. */
     case IR_STRADDR: case IR_GADDR: case IR_FADDR: {
+        if (is_direct(F, i->dst))       /* each access names it itself */
+            return;
         int nb = dw(F, i), d = addr_reg(F, i);
         if (!nb)
             return;
@@ -5021,11 +5239,12 @@ static void gen_ins(struct a_fn *F, int n)
          * the vocabulary in avr/asm.c. This only has to place the operands
          * and splice the bytes in.
          *
-         * Nothing is live in a register across an asm here, and that needs no
-         * argument: every value lives in a frame slot in this backend, so the
-         * only registers holding anything across the asm are Y (the frame
-         * pointer) and r1 (the zero register) -- and irgen refuses any
-         * template, operand or clobber that names either.
+         * A value may live in a register across an asm: irgen gives the
+         * allocator what the asm changes (ir_asm.clob -- its operands', its
+         * clobbers' and its template's registers, and a call's), and
+         * a_verify decodes the template's bytes like any others. Y (the
+         * frame pointer) and r1 (the zero register) it may never name:
+         * irgen refuses any template, operand or clobber that does.
          *
          * Z is the address scratch for a slot that ldd cannot reach. An
          * operand pinned to Z is therefore loaded LAST, after every other
@@ -5046,8 +5265,8 @@ static void gen_ins(struct a_fn *F, int n)
             for (int k = 0; k < ia->nout; k++) {
                 struct ir_asm_op *o = &ia->out[k];
                 late = o->reg >= AVR_X;
-                if (late != pass || !o->inout || o->mem)
-                    continue;
+                if (late != pass || !o->inout || o->mem || o->val)
+                    continue;            /* (a value's is an input) */
                 /* The address is in the slot; the VALUE is what it points at. */
                 vld(F, AVR_Z, o->temp, 0, 2);
                 for (int b = 0; b < o->size; b++)
@@ -5080,6 +5299,14 @@ static void gen_ins(struct a_fn *F, int n)
              * what the asm produced. */
             if (o->mem)
                 continue;
+            /* A value output (irg_asm_avr: the asm's only output) is the
+             * dst, into its home or slot. Nothing it names needs another
+             * operand's register, there being no other output. */
+            if (o->val) {
+                if (i->dst >= 0 && (!F->usecnt || F->usecnt[i->dst]))
+                    vst(F, i->dst, 0, o->reg, o->size);
+                continue;
+            }
             /* The output value is in o->reg..+size; o->temp holds the
              * ADDRESS to write it to. X is used for the address so that an
              * output sitting in Z is not the thing overwritten. */
@@ -5177,32 +5404,36 @@ static void set_sp_from_y(struct code *t)
  *   it. avr-gcc does exactly this, and it is the reason an ISR is bigger
  *   than a function that does the same work.
  *
- * Everything this backend touches is saved, because a handler must leave
+ * Every register the body writes is saved, because a handler must leave
  * the interrupted code exactly as it found it and nothing here knows what
- * that code was using. That is r0, r1, SREG, the A and B scratch banks,
- * X, Z and the frame pointer -- seventeen pushes. A register allocator
- * would narrow it to what the body really uses; until then it is correct
- * and expensive, which is the right way round.
+ * that code was using: r0, r1 and SREG always, and of the rest what the
+ * emitted body writes -- every call-clobbered one if it calls anything
+ * (AVR_W_CALL), since the callee may. Which those are is read off the
+ * body's own bytes (avr_insn_writes), not guessed from the IR: the
+ * handler is generated, decoded, and generated again with that set until
+ * the two agree (gen_relaxed), and a handler whose body writes a
+ * register its prologue did not save is an internal error. The pairs the
+ * allocator took and Y are saved as an ordinary function saves them. A
+ * body with inline asm saves everything, as before: its bytes need not
+ * be instructions. avr-gcc saves the same set; `count++` came to 73
+ * instructions when every handler saved seventeen registers and kept its
+ * values in a frame.
  *
  * The order matters at one point only: SREG is read with `in` AFTER r0 is
  * safe to use and BEFORE anything sets a flag.
  */
-static const int ISR_SAVE[] = {
-    0, 1,                                  /* scratch and the zero register */
-    18, 19, 20, 21, 22, 23, 24, 25,        /* A and B */
-    26, 27,                                /* X */
-    30, 31,                                /* Z */
-    28, 29                                 /* Y, the frame pointer */
-};
+/* what a handler's own save covers: all but r0 and r1, pushed first */
+#define ISR_ALL 0xfffffffcUL
 
-static void isr_prologue(struct code *t, int kind)
+static void isr_prologue(struct code *t, int kind, unsigned long save)
 {
-    unsigned k;
     avr_push(t, 0);
     avr_in(t, R_TMP, IO_SREG);
     avr_push(t, R_TMP);                    /* SREG, through r0 */
-    for (k = 1; k < sizeof ISR_SAVE / sizeof ISR_SAVE[0]; k++)
-        avr_push(t, ISR_SAVE[k]);
+    avr_push(t, R_ZERO);
+    for (int r = 2; r < 32; r++)
+        if (save & (1UL << r))
+            avr_push(t, r);
     /* The body and everything it calls read r1 as zero. */
     avr_rr(t, AVR_EOR, R_ZERO, R_ZERO);
     /* `interrupt`, unlike `signal`, runs with interrupts enabled. */
@@ -5210,15 +5441,34 @@ static void isr_prologue(struct code *t, int kind)
         avr_bset(t, AVR_SREG_I);
 }
 
-static void isr_epilogue(struct code *t)
+static void isr_epilogue(struct code *t, unsigned long save)
 {
-    int k;
-    for (k = (int)(sizeof ISR_SAVE / sizeof ISR_SAVE[0]) - 1; k >= 1; k--)
-        avr_pop(t, ISR_SAVE[k]);
+    for (int r = 31; r >= 2; r--)
+        if (save & (1UL << r))
+            avr_pop(t, r);
+    avr_pop(t, R_ZERO);
     avr_pop(t, R_TMP);
     avr_out(t, IO_SREG, R_TMP);
     avr_pop(t, 0);
     avr_reti(t);
+}
+
+/* The handler being generated: the registers its prologue saves (ISR_ALL
+ * until its body has been decoded once), what else saves some (the
+ * allocator's pairs, and Y), and where its body's bytes are. */
+static unsigned long g_isr_save = ISR_ALL, g_isr_other;
+static long g_isr_lo, g_isr_hi;
+
+/* What the handler's body, as emitted, writes that it must save itself */
+static unsigned long isr_writes(const struct code *t)
+{
+    unsigned long w = 0;
+    for (long p = g_isr_lo; p < g_isr_hi; ) {
+        int len;
+        w |= avr_insn_writes(t->p + p, g_isr_hi - p, &len);
+        p += len;
+    }
+    return w & ISR_ALL & ~g_isr_other;
 }
 
 /* ---- register allocation ---------------------------------------------
@@ -5373,7 +5623,9 @@ static const struct ra_target AVR_RA = {
     a_ext_plain,
     0, /* atomic_in_reg */
     0, /* fp_reads_gpr */
-    0, /* asm_in_reg */
+    1, /* asm_in_reg: operands in homes (IR_ASM); a value live across
+        * one keeps out of what it changes (ir_asm.clob), and a_verify
+        * decodes its bytes all the same */
     NULL, /* remat_ok */
     NULL  /* call_target_in_reg */
 };
@@ -5461,6 +5713,8 @@ static char *avr_excl(const struct a_fn *F, int hw)
             x[v] = quad ? cw(F, v) < 3 || cw(F, v) > 4 : cw(F, v) > 2;
         if (F->remat && F->remat[v])
             x[v] = 1;                /* rebuilt where it is read */
+        if (is_direct(F, v))
+            x[v] = 1;                /* in the instructions that use it */
         if (g_a_nohome && v < g_a_nvr && g_a_nohome[v])
             x[v] = 1;                /* overwritten where it was (a_verify) */
     }
@@ -5729,6 +5983,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
                 if (s->c >= 0 && s->c < fn->nvregs) F.remat[s->c] = 0;
             }
     }
+    direct_map(&F);
     F.last_st.v = -1;
     F.zv = -1;
     if (ra_mode != AVR_RA_NONE)
@@ -5796,12 +6051,13 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
                      "an interrupt handler that returns a value: `reti` goes "
                      "back to the interrupted instruction, and nothing is "
                      "there to receive it");
-        isr_prologue(t, f->is_isr);
+        isr_prologue(t, f->is_isr, g_isr_save);
+        g_isr_lo = t->len;
     }
-    /* Y is pushed here for an ordinary function and was pushed by
-     * isr_prologue for a handler, so the frame arithmetic below is the
-     * same either way -- and the distance from Y to the incoming stack
-     * arguments stays exact, because a handler has none. */
+    /* The pairs and Y are pushed here for a handler as for an ordinary
+     * function, so the frame arithmetic below is the same either way --
+     * and the distance from Y to the incoming stack arguments stays
+     * exact, because a handler has none. */
     /* The pairs the allocator took, BEFORE Y: then the distance from Y
      * to the incoming stack arguments grows by exactly what was pushed. */
     for (i = 0; i < F.nsave; i++) {
@@ -5819,7 +6075,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
         struct argplace pl;
         int cursor = ARG_TOP;
         long stk = 0;
-        F.use_y = f->is_isr || fn->is_varargs || F.frame != 0 ||
+        F.use_y = fn->is_varargs || F.frame != 0 ||
                   F.sret_slot >= 0 || fn->has_alloca;
         /* __builtin_frame_address / _return_address read above Y */
         for (i = 0; i < fn->nins && !F.use_y; i++)
@@ -5831,7 +6087,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
             if (pl.nstk) F.use_y = 1;
         }
     }
-    if (!f->is_isr && F.use_y) {
+    if (F.use_y) {
         avr_push(t, 28);
         avr_push(t, 29);
     }
@@ -5970,9 +6226,10 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
                 a_line_row(fn, t->len, fn->ins[i].line);
             F.tdepth = 0;
             gen_ins(&F, i);
-            if (F.skip_next) {          /* the compare emitted its branch */
+            if (F.skip_next) {          /* the compare emitted its branch,
+                                         * or sbi/cbi its or and store */
+                i += F.skip_next;
                 F.skip_next = 0;
-                i++;
             }
             if (fn->ins[first].dst >= 0 && fn->ins[first].dst == F.zv)
                 F.zv = -1;              /* Z's pointer was redefined */
@@ -5996,19 +6253,17 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
     if (tail_end) {
         ;
     } else if (f->is_isr) {
-        if (F.frame)
-            add_const16(&F, AVR_Y, F.frame);
-        if (F.frame || fn->has_alloca)
-            set_sp_from_y(t);
-        /* The pairs the prologue pushed after isr_prologue's registers
-         * (r8-r17 a call's arguments are loaded into): popped first.
-         * Leaving them on the stack popped Y, Z, X and the rest from
-         * the wrong bytes, and reti returned to one of them. */
-        for (i = F.nsave - 1; i >= 0; i--) {
-            avr_pop(t, F.used_callee[i] + 1);
-            avr_pop(t, F.used_callee[i]);
-        }
-        isr_epilogue(t);
+        /* The frame, Y and the pairs the prologue pushed after
+         * isr_prologue's registers (r8-r17 a call's arguments are loaded
+         * into), as an ordinary function lets them go: popped first.
+         * Leaving them on the stack popped Y, Z, X and the rest from the
+         * wrong bytes, and reti returned to one of them. */
+        a_teardown(&F);
+        g_isr_hi = t->len;
+        g_isr_other = F.use_y ? 3UL << 28 : 0;
+        for (i = 0; i < F.nsave; i++)
+            g_isr_other |= 3UL << F.used_callee[i];
+        isr_epilogue(t, g_isr_save);
     } else {
         a_teardown(&F);
         avr_ret(t);
@@ -6058,11 +6313,14 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
     /* The frame, the pairs and Y the prologue pushed, the return address
      * the call (or the interrupt) pushed, and the most the body pushes
      * on top of all that for a moment (t_push). A handler's prologue also
-     * pushes everything in ISR_SAVE but Y (counted above), and SREG. */
+     * pushes r0, SREG, r1 and the registers it saves. */
     f->stack_bytes = (int)F.frame + 2 * F.nsave + 2 * F.use_y /* Y */ +
                      2 /* the return address */ + F.tpeak;
-    if (f->is_isr)
-        f->stack_bytes += (int)(sizeof ISR_SAVE / sizeof ISR_SAVE[0]) - 2 + 1;
+    if (f->is_isr) {
+        f->stack_bytes += 3;                 /* r0, SREG and r1 */
+        for (int r = 2; r < 32; r++)
+            f->stack_bytes += (int)((g_isr_save >> r) & 1);
+    }
     f->code_len = t->len - f->code_off;
     if (F.rx) {
         struct avr_relax *rx = F.rx;
@@ -6104,6 +6362,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
     free(F.cval);
     free(F.cknown);
     free(F.remat);
+    free(F.direct);
+    free(F.dglob);
     free(F.wide);
     free(F.loc);
     free(F.hw);
@@ -6123,8 +6383,9 @@ static void avr_rollback(struct code *t, struct a_sites *st,
     st->ng = rb->ng; st->nf = rb->nf;
 }
 
-static int gen_relaxed(struct ir_func *fn, struct code *t, struct a_sites *st,
-                       int keep_vars, int mode, const struct avr_rollback *rb)
+static int gen_relaxed_once(struct ir_func *fn, struct code *t,
+                            struct a_sites *st, int keep_vars, int mode,
+                            const struct avr_rollback *rb)
 {
     struct avr_relax rx;
     unsigned char *pin = NULL;
@@ -6162,6 +6423,34 @@ static int gen_relaxed(struct ir_func *fn, struct code *t, struct a_sites *st,
     }
     free(rx.hint); free(rx.fits); free(pin);
     return t->len - rb->at;
+}
+
+/* ...and a handler until what its prologue saves is what its body
+ * writes. The body does not depend on the set -- a shorter prologue only
+ * moves it, and relaxation re-measures the branches -- so the second
+ * generation agrees with the first; the bound names a loop that did not. */
+static int gen_relaxed(struct ir_func *fn, struct code *t, struct a_sites *st,
+                       int keep_vars, int mode, const struct avr_rollback *rb)
+{
+    int len, has_asm = 0;
+    if (!fn->src->is_isr)
+        return gen_relaxed_once(fn, t, st, keep_vars, mode, rb);
+    for (int k = 0; k < fn->nins; k++)
+        if (fn->ins[k].op == IR_ASM)
+            has_asm = 1;
+    g_isr_save = ISR_ALL;
+    len = gen_relaxed_once(fn, t, st, keep_vars, mode, rb);
+    for (int round = 0; !has_asm; round++) {
+        unsigned long w = isr_writes(t);
+        if (w == g_isr_save)
+            break;
+        if (round == 4)
+            internal_error("avr: %s: the registers the handler saves and "
+                           "those its body writes did not agree", fn->name);
+        g_isr_save = w;
+        len = gen_relaxed_once(fn, t, st, keep_vars, mode, rb);
+    }
+    return len;
 }
 
 /* One allocation choice, generated until a_verify catches nothing: each
@@ -6223,7 +6512,7 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
     int best = AVR_RA_NONE, best_len = 0;
     int nv = fn->nvregs;
 
-    if (!g_a_regalloc || fn->src->is_isr ||
+    if (!g_a_regalloc ||
         (avr_knob("EMBCC_AVR_RA_ONLY") &&
          strcmp(avr_knob("EMBCC_AVR_RA_ONLY"), fn->name) != 0)) {
         gen_relaxed(fn, t, st, keep_vars, AVR_RA_NONE, &rb);

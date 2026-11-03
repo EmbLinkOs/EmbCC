@@ -58,8 +58,12 @@ command -v "$QEMU" >/dev/null 2>&1 || have_qemu=0
 # ---- the shape --------------------------------------------------------
 cat > "$out/shape.c" <<'EOF'
 volatile unsigned char n;
+volatile unsigned long L;
+void elsewhere(void);
 __attribute__((signal))    void __vector_13(void) { n++; }
 __attribute__((interrupt)) void __vector_14(void) { n++; }
+__attribute__((signal))    void __vector_15(void) { elsewhere(); n++; }
+__attribute__((signal))    void __vector_16(void) { L = L * 3 + (L >> 7); }
 void plain(void) { n++; }
 EOF
 "$EMBCC" --target=avr -O1 -c "$out/shape.c" -o "$out/shape.o" \
@@ -75,7 +79,40 @@ dis() {   # dis <symbol> -- the disassembly of one function
 command -v llvm-objdump >/dev/null 2>&1 || {
     echo "SKIP: no llvm-objdump"; exit 0; }
 
-for v in __vector_13 __vector_14; do
+# written <dis>: the registers the body writes -- every instruction
+# between the prologue's `clr r1` (and `sei`) and the epilogue's pops,
+# read from llvm-objdump's text, not from the compiler's own decoder. A
+# call writes what a callee may: r0, r18-r27, r30 and r31.
+written() {
+    awk '
+    function add(r) { if (r ~ /^r[0-9]+$/) w[substr(r, 2) + 0] = 1 }
+    function pair(r) { add(r); add("r" (substr(r, 2) + 1)) }
+    function ptr(o) { if (o ~ /^-?[XYZ]\+?$/) { gsub(/[-+]/, "", o)
+        pair(o == "X" ? "r26" : o == "Y" ? "r28" : "r30") } }
+    { line[NR] = $0 }
+    END {
+        for (lo = 1; lo <= NR && line[lo] != "clr r1"; lo++) ;
+        if (line[lo + 1] == "sei") lo++
+        hi = NR
+        while (hi > lo && line[hi - 1] ~ /^(pop r[0-9]+|out 0x3f, r0)$/) hi--
+        for (k = lo + 1; k < hi; k++) {
+            n = split(line[k], f, /[ ,]+/); op = f[1]
+            if (op ~ /^(call|rcall|icall|eicall)$/) {
+                add("r0"); for (r = 18; r <= 27; r++) add("r" r)
+                add("r30"); add("r31"); continue }
+            if (op ~ /^(movw|adiw|sbiw)$/) { pair(f[2]); continue }
+            if (op ~ /^(mul|muls|mulsu|fmul|fmuls|fmulsu)$/) { pair("r0"); continue }
+            if (op ~ /^(st|std|sts)$/) { ptr(f[2]); continue }
+            if (op == "ld") { add(f[2]); ptr(f[3]); continue }
+            if (op ~ /^(out|push|cp|cpc|cpi|cpse|sbrc|sbrs|sbic|sbis|cbi|sbi|bst|ret|reti|nop|sleep|wdr|sec|clc|sei|cli|bset|bclr)$/ ||
+                op ~ /^(rjmp|jmp|ijmp|br)/) continue
+            add(f[2])
+        }
+        for (r in w) print r
+    }' "$1" | sort -n
+}
+
+for v in __vector_13 __vector_14 __vector_15 __vector_16; do
     dis "$v" > "$out/$v.dis"
     head -1 "$out/$v.dis" | grep -q '^push r0$' || {
         echo "$v does not begin by saving r0 -- SREG is read through it:"
@@ -94,12 +131,29 @@ for v in __vector_13 __vector_14; do
         echo "$v does not end with reti. `ret` would leave interrupts
         masked for the rest of the program's life:"
         tail -3 "$out/$v.dis"; exit 1; }
-    # Everything this backend can touch must be saved: r0, r1, the two
-    # scratch banks, X, Z and the frame pointer.
-    for r in 0 1 18 19 20 21 22 23 24 25 26 27 28 29 30 31; do
+    # Every register the body writes is saved, and given back in the
+    # opposite order: the interrupted code finds what it left.
+    for r in $(written "$out/$v.dis"); do
         grep -q "^push r$r\$" "$out/$v.dis" || {
-            echo "$v does not save r$r, which this backend uses"; exit 1; }
+            echo "$v writes r$r and does not save it:"; cat "$out/$v.dis"
+            exit 1; }
     done
+    pu=$(sed -n 's/^push r//p' "$out/$v.dis" | tr '\n' ' ')
+    po=$(sed -n 's/^pop r//p' "$out/$v.dis" | sed '1!G;h;$!d' | tr '\n' ' ')
+    [ "$pu" = "$po" ] || {
+        echo "$v pushes '$pu' and pops (reversed) '$po'"; exit 1; }
+done
+# ...and only those: a handler that adds one to a byte saves r0, SREG, r1
+# and the one register the lds, the add and the sts take, as avr-gcc's
+# does -- not the seventeen every handler once saved whatever it did
+np=$(grep -c '^push ' "$out/__vector_13.dis")
+[ "$np" -le 4 ] || {
+    echo "__vector_13 (n++) pushes $np registers:"; cat "$out/__vector_13.dis"
+    exit 1; }
+# a handler that calls saves all that the callee may write
+for r in 18 19 20 21 22 23 24 25 26 27 30 31; do
+    grep -q "^push r$r\$" "$out/__vector_15.dis" || {
+        echo "__vector_15 calls and does not save r$r"; exit 1; }
 done
 
 # `signal` must NOT re-enable interrupts; `interrupt` must.

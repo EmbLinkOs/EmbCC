@@ -11,6 +11,7 @@ one built into it.
 | `gen2.py` | Integers of every width, `float` and `double`, structs by value, unions, bitfields, pointers into arrays and structs, function-pointer tables | x86-64, AArch64, Cortex-M4, RV32 (RV64 on request) | `run.sh` |
 | `gen3.py` | gen 2 plus `__int128` | x86-64, AArch64, RV64 | `run.sh -g 3` |
 | `gen4.py` | gen 3 plus `long double`, which is binary128 in software on RISC-V | RV32 and RV64; clang's build on the same board is the reference | `run4.sh` |
+| `gen2.py --avr` | gen 2 for a 16-bit `int` and a four-byte `double` (`i32` is `long`), small enough for 32 KB | AVR (EmbSim's uno); clang's build at `-O2` and `-O1`, agreeing, is the reference (its `-O0` miscompiles AVR) | `run-avr.sh` |
 
 `gen.py` is the integer-only first version. Its docstring states the
 rules that keep every generator free of undefined behaviour.
@@ -24,6 +25,7 @@ From the tree root, after `make embcc embld rt-embedded`. You need
 sh verify/fuzz/run.sh --selftest               # the runner can see a mismatch
 sh verify/fuzz/run.sh 1000 1199                # 200 programs, gen 2, -O0 and -O2
 sh verify/fuzz/run.sh -g 3 -O "-O0 -O2 -Os" 1 50
+sh verify/fuzz/run-avr.sh 1 100                 # AVR on EmbSim, -O0 -O2 -Os
 sh verify/fuzz/run.sh -b m4,rv32 1 100         # a subset of the boards
 sh verify/fuzz/run4.sh 64 1 50                 # long double on RV64
 ```

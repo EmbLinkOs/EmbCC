@@ -75,6 +75,7 @@ struct gsite {
     int patch_off;
     struct global *glob;
     enum reloc_kind kind;
+    long addend;          /* bytes past the global's start (AVR's lds/sts) */
 };
 
 /* Function-address sites (&f / passing f), against the function's symbol. */

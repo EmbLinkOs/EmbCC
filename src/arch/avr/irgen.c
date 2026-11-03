@@ -56,8 +56,15 @@
  * need to survive an asm. Ordered so that the common case takes a register
  * the immediate instructions can also reach, which is what a template
  * written with "d" in mind expects even when it says "r". */
+/* The registers an "r" operand is given, in the order tried: r24 first,
+ * where a char or an int is passed and returned, so `swap %0` on an
+ * argument it returns moves nothing (avr-gcc's two instructions); a
+ * four-byte operand from r22, where a long is. */
 static const int avr_asm_pool[] = {
-    18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 30, 31
+    24, 25, 22, 23, 20, 21, 18, 19, 26, 27, 30, 31
+};
+static const int avr_asm_pool4[] = {
+    22, 18, 26, 30, 24, 20
 };
 
 /* Is this register one EmbCC does not save around an asm? r2-r17 are
@@ -354,9 +361,11 @@ void irg_asm_avr(struct ir_func *fn, struct stmt *s)
                        "an asm operand of %d bytes needs %d consecutive "
                        "registers, which is more than this backend keeps "
                        "free across an asm", need, need);
-        for (unsigned k = 0; k < sizeof avr_asm_pool / sizeof avr_asm_pool[0];
-             k++) {
-            int base = avr_asm_pool[k], j, ok = 1;
+        const int *pool = need > 2 ? avr_asm_pool4 : avr_asm_pool;
+        unsigned npool = need > 2 ? sizeof avr_asm_pool4 / sizeof *avr_asm_pool4
+                                  : sizeof avr_asm_pool / sizeof *avr_asm_pool;
+        for (unsigned k = 0; k < npool; k++) {
+            int base = pool[k], j, ok = 1;
             if (need > 1 && (base & 1))
                 continue;              /* a pair starts on an even register */
             if (!avr_class_ok(cons[i], base))
@@ -395,7 +404,22 @@ void irg_asm_avr(struct ir_func *fn, struct stmt *s)
     ia->arange = c.arange;
     ia->narange = c.narange;
     ia->out = xcalloc((size_t)(a->nout ? a->nout : 1), sizeof *ia->out);
-    ia->in = xcalloc((size_t)(a->nin ? a->nin : 1), sizeof *ia->in);
+    ia->in = xcalloc((size_t)(a->nin + 1), sizeof *ia->in);
+    /* The one output of an asm that has one -- an integer or a pointer in
+     * registers -- is a VALUE: the asm's dst, stored to its lvalue after
+     * it, so a local it writes is not address-taken, has no slot and
+     * needs no pointer to it. A "+" one is that and an input in the same
+     * register, the variable's value before the asm: GCC's "+r"(x) is
+     * "=r"(x) : "0"(x). (Only of a variable: an lvalue with side effects
+     * would run them twice.) Anything else is written through its
+     * address, as before. `swap %0` on a "+r" char was 38 instructions,
+     * a frame and a pointer to it. */
+    int vout = -1, vaddr = -1;
+    if (a->nout == 1 && !asm_constraint_mem_only(a->out[0].constraint) &&
+        irg_asm_val_ok(a->out[0].expr, 4) &&
+        (!strchr(a->out[0].constraint, '+') ||
+         (a->out[0].expr->kind == EXPR_VAR && !a->out[0].expr->gref)))
+        vout = 0;
     for (int i = 0; i < a->nin; i++) {
         if (isimm[a->nout + i])
             continue;
@@ -411,14 +435,37 @@ void irg_asm_avr(struct ir_func *fn, struct stmt *s)
     for (int i = 0; i < a->nout; i++) {
         struct ir_asm_op *o = &ia->out[ia->nout++];
         o->reg = regs[i];
-        o->temp = gen_addr(fn, a->out[i].expr);
         o->size = sizes[i];
         o->inout = strchr(a->out[i].constraint, '+') != NULL;
         o->mem = asm_constraint_mem_only(a->out[i].constraint);
+        if (i == vout) {
+            o->val = 1;
+            o->temp = -1;
+            vaddr = irg_asm_out_addr(fn, a->out[i].expr);
+            if (o->inout) {
+                struct ir_asm_op *t = &ia->in[ia->nin++];
+                t->reg = regs[i];
+                t->size = sizes[i];
+                t->temp = gen_expr(fn, a->out[i].expr);
+            }
+        } else {
+            o->temp = gen_addr(fn, a->out[i].expr);
+        }
     }
+    /* What the asm changes, for a value live across it (regalloc.c):
+     * every register used[] holds -- the operands', the clobbers', the
+     * template's -- and, if the template calls, what a callee may: r0,
+     * r18-r27, r30 and r31. */
+    for (int r = 0; r < 32; r++)
+        if (used[r])
+            ia->clob |= 1UL << r;
+    if (strstr(a->tmpl, "call"))
+        ia->clob |= 0x1UL | 0x0ffc0000UL | 0xc0000000UL;
     struct ir_ins *ins = emit(fn);
     ins->op = IR_ASM;
     ins->asm_ir = ia;
-    ins->dst = -1;
+    ins->dst = vout >= 0 ? new_temp(fn) : -1;
     ins->a = ins->b = -1;
+    if (vout >= 0)
+        irg_asm_out_store(fn, a->out[vout].expr, vaddr, ins->dst);
 }

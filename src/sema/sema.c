@@ -1336,7 +1336,9 @@ static int cvt_fits(long v, int vuns, int prec, int tuns)
         return prec > 64;
     if (prec >= 64)
         return 1;
-    long max = (long)(~0UL >> (65 - prec));
+    /* (a one-bit signed field holds 0 and -1: the shift would be by 64,
+     * which x86 reads as 0 and ARM as 64) */
+    long max = prec > 1 ? (long)(~0UL >> (65 - prec)) : 0;
     return v >= -max - 1 && v <= max;
 }
 
@@ -6132,13 +6134,15 @@ static int const_fold(const struct expr *e, long *out)
             case B_XOR: *out = in_type(e, a ^ b); return 1;
             /* A shift by the width or more, or by a negative count, is
              * undefined, so it is not a constant expression: refused rather
-             * than answered with whatever the host's shifter does. */
+             * than answered with whatever the host's shifter does. One by 64
+             * or more of a wider type is const_fold128's to answer; these
+             * 64 bits cannot hold it. */
             case B_SHL:
-                if (b < 0 || b >= wbits) return 0;
+                if (b < 0 || b >= wbits || b >= 64) return 0;
                 *out = in_type(e, (long)(ua << b));
                 return 1;
             case B_SHR:
-                if (b < 0 || b >= wbits) return 0;
+                if (b < 0 || b >= wbits || b >= 64) return 0;
                 *out = in_type(e, u || (e->ty && e->ty->is_unsigned)
                                       ? (long)(ua >> b) : a >> b);
                 return 1;

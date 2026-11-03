@@ -208,11 +208,13 @@ static int ro_bytes(const struct global *g, long off, int size,
         unsigned char byte;
         if (g->init_bytes)
             byte = at < g->init_len ? (unsigned char)g->init_bytes[at] : 0;
-        else
-            byte = (unsigned char)(((unsigned long)g->init >>
-                                    (8 * (target_big_endian() ? gs - 1 - at
-                                                              : at)))
-                                   & 0xff);
+        else {
+            /* zero past the value's eight bytes, as target_put_uint writes
+             * the image (a zero-initialized aggregate's is all of it) */
+            long sig = target_big_endian() ? gs - 1 - at : at;
+            byte = sig < 8 ? (unsigned char)((unsigned long)g->init >> (8 * sig))
+                           : 0;
+        }
         v = v << 8 | byte;
     }
     *out = v;

@@ -237,6 +237,27 @@ cmp -s "$out/ioname.dis" "$out/ionum.dis" ||
 grep -q 'in	r0, 0x3f' "$out/ioname.dis" || { echo "no in r0, SREG in the naked body"; exit 1; }
 echo "  __SREG__, __SP_L__, __SP_H__ are 0x3f, 0x3d, 0x3e in inline asm, a naked body and file-scope asm"
 
+# ---- an output is a value ------------------------------------------
+# The asm's one output is its result, not a store through an address: a
+# local or an argument it writes stays in a register (it was a frame, a
+# pointer to it and loads through the pointer: 38 instructions for one
+# swap). "+r" on an argument it returns is the swap alone, as avr-gcc's;
+# "=r" into a char returned is the instruction and the ret.
+cat > "$out/val.c" <<'EOT'
+unsigned char sw(unsigned char x) { __asm__("swap %0" : "+r"(x)); return x; }
+unsigned char rd(void) { unsigned char v; __asm__ volatile("in %0, 0x23" : "=r"(v)); return v; }
+EOT
+"$EMBCC" --target=avr -O2 -c "$out/val.c" -o "$out/val.o" || {
+    echo "val.c does not compile"; exit 1; }
+for f in "sw swap" "rd in"; do
+    set -- $f
+    llvm-objdump -d --mcpu=atmega328p --no-show-raw-insn "$out/val.o" |
+        sed -n "/<$1>:/,/^\$/p" | grep -E '^ +[0-9a-f]+:' > "$out/val-$1.dis"
+    [ "$(wc -l < "$out/val-$1.dis" | tr -d ' ')" = 2 ] && grep -q "	$2" "$out/val-$1.dis" ||
+        { cat "$out/val-$1.dis"
+          echo "$1: an asm's value output is not the instruction and the ret"; exit 1; }
+done
+
 echo "inline asm works on a real ATmega328P at four optimisation levels: a
 critical section through SREG, the machine's own mul with the clr r1 the
 compiler will not emit for itself, %A/%B naming the bytes of a 16-bit
