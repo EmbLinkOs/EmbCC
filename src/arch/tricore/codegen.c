@@ -81,6 +81,7 @@ struct tc_sites {
 };
 
 struct tc_fn {
+    long cfi_frame_end, cfi_fp_end; /* the prologue's steps, for the CFI */
     int *usecnt;         /* per vreg: how many reads (fusion), or NULL */
     int skip_next;       /* the instruction after this one is already out */
     int keep_vars;
@@ -2500,8 +2501,22 @@ static void gen_ins(struct tc_fn *F, int n)
         copy_block(F, i->op == IR_MEMCPY, i->size, i->natural >= 4);
         return;
 
-    case IR_CALL:
+    case IR_CALL: {
+        long at = t->len;
         gen_call(F, n);
+        if (fn->neh)                        /* an LSDA call site */
+            ir_add_csite(fn, (int)(at - fn->src->code_off),
+                         (int)(t->len - fn->src->code_off),
+                         i->eh_region - 1);
+        return;
+    }
+    case IR_LANDING:
+        /* the unwinder's last ret left the exception in d2 and the
+         * selector in d3 (the lower context, which ret does not touch);
+         * every value is in its slot */
+        if (i->b >= 0)
+            wrote(F, i->b, 3);
+        wrote(F, i->dst, 2);
         return;
 
     case IR_RET:
@@ -3108,7 +3123,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct tc_sites *st,
     for (int v = 0; v < fn->nvregs; v++)
         if (F.nshr[v]) F.wide[v] = 0;
     F.fb = TC_SP;
-    if (g_tc_regalloc) {
+    /* (a function with exception regions keeps every value in its slot
+     * and makes no tail calls) */
+    if (g_tc_regalloc && !fn->neh) {
         /* At -O0 and -Og a source variable stays in its frame slot, so its
          * DW_AT_location is true (regalloc.h). */
         char *pin = keep_vars ? ra_debug_pin_vars(fn) : (char *)0;
@@ -3139,7 +3156,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct tc_sites *st,
         }
     }
     F.tail = NULL;
-    if (g_tc_regalloc && !keep_vars && !f->is_isr)  /* (an ISR leaves by rfe) */
+    if (g_tc_regalloc && !keep_vars && !f->is_isr && !fn->neh)
+        /* (an ISR leaves by rfe) */
         for (i = 0; i < fn->nins; i++)
             if (tc_tail_ok(&F, i)) {
                 if (!F.tail)
@@ -3173,6 +3191,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct tc_sites *st,
     int nfail = 0;
     t->len = len0;
     fn->nlines = nl0;
+    fn->ncsites = 0;
     F.st->next = se0; F.st->nstr = ss0; F.st->ng = sg0; F.st->nf = sf0;
     F.nfix = 0;
     for (i = 0; i <= fn->nlabels; i++)
@@ -3203,11 +3222,15 @@ static void gen_func(struct ir_func *fn, struct code *t, struct tc_sites *st,
      * interrupted instruction -- HighTec GCC's handler. */
     if (f->is_isr)
         tc_svlcx(t);
-    if (F.frame)
+    F.cfi_frame_end = F.cfi_fp_end = -1;
+    if (F.frame) {
         lea_off(&F, TC_SP, TC_SP, -F.frame);
+        F.cfi_frame_end = t->len;
+    }
     if (fn->has_alloca) {
         tc_mov_aa(t, AFB, TC_SP);
         F.fb = AFB;
+        F.cfi_fp_end = t->len;
     }
     gen_params(&F);
 
@@ -3273,6 +3296,27 @@ static void gen_func(struct ir_func *fn, struct code *t, struct tc_sites *st,
     }
 
     f->code_len = t->len - f->code_off;
+    if (target_debug_info() || target_unwind_tables()) {
+        /* the CFI: the CFA a10 + frame once the frame is made, the frame
+         * base under alloca. CALL saved the caller's registers in a
+         * context-save area, which no rule can name: an unwinder follows
+         * PCXI's chain (lib/rt/unwind.c). An interrupt handler gets no
+         * FDE. */
+        fn->ncfi = 0;
+        if (f->is_isr) {
+            fn->ncfi = -1;
+        } else {
+            if (F.cfi_frame_end >= 0)
+                ir_cfi_add(fn, (int)(F.cfi_frame_end - f->code_off),
+                           IR_CFI_CFA_OFFSET, 0, F.frame);
+            if (F.cfi_fp_end >= 0)
+                ir_cfi_add(fn, (int)(F.cfi_fp_end - f->code_off),
+                           IR_CFI_CFA_REG, 16 + AFB, F.frame);
+        }
+    }
+    for (int r = 0; r < fn->neh; r++)       /* where each landing pad is */
+        fn->eh[r].lp_off = (int)(F.label_off[fn->eh[r].lp_label] -
+                                 f->code_off);
     /* -g: DWARF numbers the registers as the machine; slots are
      * frame-base relative */
     ra_debug_finish(fn, t->len, F.loc, NULL, 0, F.slot, -1, F.wide, 1, 4);

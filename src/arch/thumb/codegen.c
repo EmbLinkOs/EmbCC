@@ -7703,7 +7703,12 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     /* No IR_RET and no tail call is not enough: a void function's body
      * falls off its end into the epilogue, so its last instruction must
      * be a jump or a trap too. */
+    /* ...and not under unwind tables: a throw unwinds through the
+     * function to its caller's landing pad, which wants lr and the
+     * callee-saved registers back (GCC's ARM_FT_VOLATILE has the same
+     * condition) */
     F.noret = !F.nopush && !keep_vars && !fn->is_varargs && fn->nins &&
+              !target_unwind_tables() &&
               (fn->ins[fn->nins - 1].op == IR_JMP ||
                fn->ins[fn->nins - 1].op == IR_UD2);
     for (i = 0; F.noret && i < fn->nins; i++)

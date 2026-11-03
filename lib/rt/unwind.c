@@ -57,7 +57,7 @@
  * is. */
 #if defined(__linux__) || defined(__EMBCC_LINUX__) || \
     defined(__EMBCC_RT_UNWIND) || defined(__riscv) || defined(__mips__) || \
-    defined(__XTENSA__)
+    defined(__XTENSA__) || defined(__tricore__)
 
 typedef unsigned long uw_word;
 typedef long uw_sword;
@@ -109,6 +109,21 @@ static const unsigned char uw_fcaptured[] = {
 # define UW_LP0    2
 # define UW_LP1    3
 static const unsigned char uw_captured[] = { 0 };
+#elif defined(__tricore__)
+/* d0-d15 are DWARF 0-15 and a0-a15 16-31. CALL saves the caller's upper
+ * context (a10-a15, d8-d15, PSW and the PCXI link) in a context-save
+ * area, so a frame is its pc, its a11 and sp, its PCXI (the link to its
+ * caller's CSA) in column 33, and the CSA holding its own context in
+ * column 32, which a resume needs. The landing pad reads d2 and d3, the
+ * lower context, which RET does not touch. */
+# define UW_NREG   34
+# define UW_RA     27          /* a11 */
+# define UW_SP     26          /* a10 */
+# define UW_CSA    32
+# define UW_PCXI   33
+# define UW_LP0    2
+# define UW_LP1    3
+static const unsigned char uw_captured[] = { UW_RA, UW_PCXI, UW_CSA };
 #elif defined(__mips__)
 /* $0-$31 are DWARF 0-31. Soft float only (EmbCC's o32 and n64), so the
  * callee-saved are all general: s0-s7, gp, fp and ra. */
@@ -315,6 +330,84 @@ void __attribute__((noinline, noreturn)) __uw_resume(struct uw_capture *r)
     __asm__ volatile("mov a0, %0\n"
                      "mov a1, %1\n"
                      "retw\n" : : "r"(a0), "r"(area + 4) : "memory");
+    for (;;) ;
+}
+#elif defined(__tricore__)
+/* ---- TriCore: the walk is the context-save areas' --------------------------
+ *
+ * Each CALL put the caller's upper context in a 16-word CSA -- PCXI (the
+ * link to the CSA before), PSW, a10, a11, d8-d11, a12-a15, d12-d15 --
+ * and pointed PCXI at it. So the CSA a frame's own call filled holds its
+ * sp, its return address and the link to its caller's: the stack of
+ * frames IS that list, and the .eh_frame FDEs say only where a function
+ * is and what its personality and LSDA are.
+ *
+ * The resume is RET's own: the CSAs above the handler's frame are made
+ * to return, one after another, through a stub that is only `ret` --
+ * each one's saved a11, which the RET before loads, is the stub's
+ * address -- and the last into the landing pad. So every abandoned CSA
+ * goes back on the free list as an ordinary return would put it, and
+ * the handler's frame gets its own upper context back. d2 and d3, the
+ * landing pad's, ride through untouched. */
+__asm__(".globl __uw_tc_ret\n"
+        "__uw_tc_ret:\n"
+        "ret\n"
+        /* the first RET of the chain, with a11 the stub's */
+        ".globl __uw_tc_go\n"
+        "__uw_tc_go:\n"
+        "movh.a a11, hi:__uw_tc_ret\n"
+        "lea a11, [a11]lo:__uw_tc_ret\n"
+        "dsync\n"
+        "ret\n");
+extern char __uw_tc_ret[], __uw_tc_go[];
+
+/* PCXI's link: segment in bits 19-16, the 64-byte unit in 15-0 */
+static uw_word *uw_tc_csa(uw_word link)
+{
+    link &= 0xfffffUL;
+    return link ? (uw_word *)(((link & 0xf0000UL) << 12) |
+                              ((link & 0xffffUL) << 6))
+                : (uw_word *)0;
+}
+
+/* The caller's state, copied out of the CSA its CALL here filled: that
+ * CSA goes back on the free list when this returns, and the next call
+ * reuses it. (Every CSA the walk reads after this one belongs to a frame
+ * that is still active, so it stays put.) */
+void __attribute__((noinline)) __uw_capture(struct uw_capture *out)
+{
+    uw_word pcxi;
+    const volatile uw_word *csa;
+    __asm__ volatile("dsync\n"
+                     "mfcr %0, pcxi" : "=d"(pcxi) : : "memory");
+    csa = uw_tc_csa(pcxi);
+    out->pc = (uw_word)__builtin_return_address(0);
+    out->saved[0] = csa[3];             /* the caller's a11 */
+    out->saved[1] = csa[0];             /* its PCXI */
+    out->saved[2] = 0;                  /* its own CSA: this one, gone */
+    out->sp = csa[2];
+    out->lp0 = out->lp1 = 0;
+}
+
+void __attribute__((noinline, noreturn)) __uw_resume(struct uw_capture *r)
+{
+    uw_word pcxi, *c, *target = (uw_word *)r->saved[2];
+    uw_word lp0 = r->lp0, lp1 = r->lp1;
+    __asm__ volatile("dsync\n"
+                     "mfcr %0, pcxi" : "=d"(pcxi) : : "memory");
+    c = uw_tc_csa(pcxi);
+    while (c && uw_tc_csa(c[0]) != target) {
+        c[3] = (uw_word)__uw_tc_ret;    /* its RET goes on returning */
+        c = uw_tc_csa(c[0]);
+    }
+    if (!c)
+        for (;;) ;
+    c[3] = r->pc;                       /* the last into the landing pad */
+    __asm__ volatile("mov d2, %0\n"
+                     "mov d3, %1\n"
+                     "ji %2\n"
+                     : : "d"(lp0), "d"(lp1), "a"(__uw_tc_go)
+                     : "d2", "d3", "memory");
     for (;;) ;
 }
 #elif defined(__mips__)
@@ -940,7 +1033,27 @@ static int run_cfi(const unsigned char *p, const unsigned char *end,
 /* Build the rule table for `pc` and apply it: `ctx` goes from
  * describing a frame to describing its CALLER. Returns 0 at the end of
  * the stack or on anything it cannot honour. */
-#ifdef __XTENSA__
+#if defined(__tricore__)
+/* the CSA list: a frame's PCXI links to the CSA holding its caller's a11,
+ * sp and PCXI */
+static int step(struct _Unwind_Context *ctx, const struct fde *f)
+{
+    const uw_word *up = uw_tc_csa(ctx->reg[UW_PCXI]);
+    (void)f;
+    if (!up || !ctx->reg[UW_RA])
+        return 0;
+    ctx->pc = ctx->reg[UW_RA];
+    ctx->reg[UW_RA] = up[3];
+    ctx->reg[UW_SP] = up[2];
+    ctx->reg[UW_PCXI] = up[0];
+    ctx->reg[UW_CSA] = (uw_word)up;
+    /* the frame's identity is its CSA, not its sp: a function that makes
+     * no frame (CALL saved everything it needed) shares its caller's sp,
+     * and phase two would stop at it */
+    ctx->cfa = (uw_word)up;
+    return 1;
+}
+#elif defined(__XTENSA__)
 /* the window save areas, as __uw_capture says: the caller's a0 and sp
  * sit 16 and 12 bytes below this frame's sp */
 static int step(struct _Unwind_Context *ctx, const struct fde *f)

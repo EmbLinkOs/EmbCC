@@ -1322,6 +1322,7 @@ int target_reloc_type(enum target_arch a, enum reloc_kind k)
         case RK_TRICORE_LO:  return R_TRICORE_LO;
         case RK_TRICORE_LO2: return R_TRICORE_LO2;
         case RK_ABS32:       return R_TRICORE_32ABS;
+        case RK_DATA_PREL32: return R_TRICORE_32REL;    /* .eh_frame's */
         default:             return -1;
         }
     }

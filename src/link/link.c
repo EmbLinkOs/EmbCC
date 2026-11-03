@@ -3913,6 +3913,11 @@ static void apply_tricore(struct linker *l, struct object *o, unsigned type,
         need_range(l, o, "R_TRICORE_32ABS", V, I32_MIN, 0xffffffffLL);
         put32(loc, (unsigned int)V);
         return;
+    case R_TRICORE_32REL:                   /* .eh_frame's */
+        V -= (long long)P;
+        need_range(l, o, "R_TRICORE_32REL", V, I32_MIN, I32_MAX);
+        put32(loc, (unsigned int)V);
+        return;
     case R_TRICORE_24REL: {
         long long dd = V - (long long)P;
         if (op1 != 0x1d && op1 != 0x6d && op1 != 0x5d)
