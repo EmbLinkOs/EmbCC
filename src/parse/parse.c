@@ -154,6 +154,9 @@ static void nameix_put(struct nameix *ix, const char *name, void *val)
 }
 
 struct parser {
+    int se_want;          /* the depth of a statement expression's block,
+                           * whose last value parse_block types (se_ty) */
+    struct type *se_ty;
     int cx_decl;          /* a C23 constexpr specifier was read: the
                            * declaration is static, const, and checked */
     /* a parenthesized declarator's matches (decl_skip_group), for the nest
@@ -1578,6 +1581,7 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
 static struct type *parse_stars(struct parser *ps, struct type *t);
 static struct expr *parse_cond(struct parser *ps);
 static struct expr *parse_expr(struct parser *ps);
+static struct expr *parse_comma(struct parser *ps);
 
 /* A _FloatN keyword's token (lex.c keeps its spelling for these) that
  * glibc may typedef for an older compiler (`typedef float _Float32;`).
@@ -2320,6 +2324,51 @@ static struct type *c89_implicit_int(struct parser *ps, int had_specifier)
     return had_specifier ? ty_base(TY_INT, 0) : NULL;
 }
 
+/* The type `auto` stands for until its initializer is parsed. */
+static struct type *ty_auto_placeholder(void)
+{
+    static struct type *t;
+    if (!t) {
+        t = xcalloc(1, sizeof *t);
+        t->kind = TY_INT;
+    }
+    return t;
+}
+
+static int is_auto_placeholder(const struct type *t)
+{
+    return t && (t == ty_auto_placeholder() || t->canon == ty_auto_placeholder());
+}
+
+/* A declarator of `auto`'s placeholder type takes its initializer's
+ * type, as an initialization converts it: an array or a function decays,
+ * the value's qualifiers go, and the declaration's own (const auto) are
+ * put back. Any other type is returned as declared. */
+static struct type *infer_auto(struct parser *ps, struct type *declared,
+                               struct expr *init, int line)
+{
+    if (!is_auto_placeholder(declared))
+        return declared;
+    if (!init)
+        parse_error_line(ps, line, "auto needs an initializer: there is nothing "
+                         "else to take the type from");
+    if (init->kind == EXPR_INITLIST && init->nelems == 1)
+        init = init->elems[0];
+    struct type *at = ce_type(init);
+    if (!at)
+        parse_error_line(ps, line, "auto cannot see the type of this initializer");
+    if (at->kind == TY_ARRAY)
+        at = ty_ptr(at->pointee);
+    else if (at->kind == TY_FUNC)
+        at = ty_ptr(at);
+    at = ty_unqual(at);
+    if (declared->is_const)
+        at = ty_const(at);
+    if (declared->is_volatile)
+        at = ty_volatile(at);
+    return at;
+}
+
 static struct type *parse_type_spec(struct parser *ps, int allow_body)
 {
     int q = 0;
@@ -2516,7 +2565,8 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
         if (at_type_start(ps)) {
             t = parse_type_name(ps, parse_type_spec(ps, 0));
         } else {
-            struct expr *e = parse_cond(ps);
+            /* any expression, comma and assignment included (C23 6.7.2.5) */
+            struct expr *e = parse_comma(ps);
             t = ce_type(e);
             if (!t)
                 parse_error_line(ps, line,
@@ -2554,6 +2604,31 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
         struct type *tt = parse_tagged(ps, k, allow_body, line);
         ps->alignas_out = saved;
         return tt;
+    }
+    /* C23's `auto` and GNU's __auto_type before a name and its
+     * initializer: a placeholder, which the declaration replaces with
+     * the initializer's type (infer_auto) -- at file scope, in a block,
+     * static or const, as anywhere a type would go. `auto int x;` is the
+     * old storage class, and stays that. */
+    if (cur(ps)->kind == TOK_KW_AUTOTYPE ||
+        (cur(ps)->kind == TOK_IDENT && !strcmp(cur(ps)->text, "auto") &&
+         c23_words() && lex_c_year() >= 1999)) {
+        struct lexer asave = ps->lx;
+        int gnu = cur(ps)->kind == TOK_KW_AUTOTYPE;
+        advance(ps);
+        if (cur(ps)->kind == TOK_IDENT && (gnu || !at_type_start(ps))) {
+            struct lexer nsave = ps->lx;
+            advance(ps);
+            while (cur(ps)->kind == TOK_KW_ATTRIBUTE || cur(ps)->kind == TOK_LBRACKET) {
+                ps->lx = nsave;
+                break;
+            }
+            int is_init = cur(ps)->kind == TOK_ASSIGN;
+            ps->lx = nsave;
+            if (is_init)
+                return ty_auto_placeholder();
+        }
+        ps->lx = asave;
     }
     /* a typedef name, when no specifier has appeared */
     if (cur(ps)->kind == TOK_IDENT) {
@@ -3024,8 +3099,46 @@ static struct type *ce_type(const struct expr *e)
          * the authoritative answer rather than a reconstruction.
          * Without it `typeof(2)` failed, and so did MIN(2, 5). */
         return e->ty;
-    case EXPR_VAR:
-        return fold_var_type(e->name);
+    case EXPR_VAR: {
+        struct type *vt = fold_var_type(e->name);
+        /* C23's true and false, names of last resort in sema too */
+        if (!vt && lex_c23_ext() &&
+            (!strcmp(e->name, "true") || !strcmp(e->name, "false")))
+            return ty_base(TY_BOOL, 0);
+        return vt;
+    }
+    case EXPR_INCDEC:
+    case EXPR_ASSIGN:
+    case EXPR_COMPOUND: {
+        /* `x++`, `x = e`, `x += e`: the operand's type, without its
+         * qualifiers, as the value is not an lvalue */
+        struct type *t = ce_type(e->lhs);
+        return t && t->kind != TY_ARRAY && t->kind != TY_FUNC ? ty_unqual(t) : NULL;
+    }
+    case EXPR_REAL:
+    case EXPR_IMAG: {
+        struct type *t = ce_type(e->rhs);
+        if (!t)
+            return NULL;
+        return ty_is_complex(t) ? t->celem : ty_is_arith(t) ? t : NULL;
+    }
+    case EXPR_STMTEXPR: {
+        /* `({ ...; e; })`: the last statement's value, when it is an
+         * expression statement; void otherwise -- typed by parse_block
+         * while the block's locals were in scope */
+        if (e->cast_ty)
+            return e->cast_ty;
+        const struct stmt *last = NULL;
+        for (const struct stmt *st = e->body ? e->body->body : NULL; st; st = st->next)
+            last = st;
+        if (last && last->kind == STMT_EXPR && last->expr) {
+            struct type *t = ce_type(last->expr);
+            if (t && t->kind == TY_ARRAY)
+                return ty_ptr(t->pointee);
+            return t ? ty_unqual(t) : NULL;
+        }
+        return ty_base(TY_VOID, 0);
+    }
     case EXPR_NEG: case EXPR_BNOT: {
         /* -x and ~x have x's PROMOTED type. Without this, -1u had no type
          * here and folded as the host's -1 rather than as 4294967295. */
@@ -4003,6 +4116,7 @@ static struct expr *new_expr(enum expr_kind kind, int line, int col)
 
 static struct expr *parse_expr(struct parser *ps);
 static struct expr *parse_comma(struct parser *ps);
+static struct expr *parse_comma(struct parser *ps);
 static struct expr *parse_unary(struct parser *ps);
 static struct expr *binop(enum binop op, struct expr *lhs,
                           struct expr *rhs);
@@ -4177,7 +4291,12 @@ static struct expr *parse_primary(struct parser *ps)
              * last statement when that is an expression statement. */
             ped_at(ps, t->line, t->col, 0, "a statement expression");
             e = new_expr(EXPR_STMTEXPR, t->line, t->col);
+            int se_save = ps->se_want;
+            ps->se_want = ps->blkdepth + 1;
+            ps->se_ty = NULL;
             e->body = parse_block(ps);
+            e->cast_ty = ps->se_ty;      /* its value's type, for typeof */
+            ps->se_want = se_save;
             expect(ps, TOK_RPAREN, "')' to close a statement expression");
             return e;
         }
@@ -5283,6 +5402,24 @@ static struct stmt *parse_block(struct parser *ps)
         ps->recover = save;
     }
     advance(ps); /* '}' */
+    /* A statement expression's block: the type of its value, taken while
+     * the block's own locals are still there to type it with */
+    if (ps->se_want == ps->blkdepth) {
+        const struct stmt *last = NULL;
+        for (const struct stmt *st = s->body; st; st = st->next)
+            last = st;
+        struct type *t = NULL;
+        if (last && last->kind == STMT_EXPR && last->expr) {
+            t = ce_type(last->expr);
+            if (t && t->kind == TY_ARRAY)
+                t = ty_ptr(t->pointee);
+            else if (t)
+                t = ty_unqual(t);
+        } else {
+            t = ty_base(TY_VOID, 0);
+        }
+        ps->se_ty = t;
+    }
     /* The block's __label__ names go out of scope with it, so the same
      * macro expanded again in this function gets fresh ones. */
     ps->nlmap = lmark;
@@ -5731,8 +5868,8 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
                 struct lexer nsave = ps->lx;
                 advance(ps);
                 if (cur(ps)->kind == TOK_ASSIGN) {
-                    ps->lx = nsave;          /* back to the name */
-                    goto auto_infer;
+                    ps->lx = asave;          /* parse_type_spec's placeholder */
+                    goto after_auto_kw;
                 }
                 ps->lx = nsave;
             }
@@ -5745,47 +5882,6 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
             }
             ps->lx = asave;
             (void)atok;
-        }
-        if (cur(ps)->kind == TOK_KW_AUTOTYPE) {
-            advance(ps);
-        auto_infer:;
-            int aline = cur(ps)->line;
-            const char *aname;
-            struct expr *init;
-            struct type *at;
-            if (cur(ps)->kind != TOK_IDENT)
-                parse_error_at(ps, cur(ps)->line, cur(ps)->col,
-                           "__auto_type needs a plain variable name");
-            aname = cur(ps)->text;
-            advance(ps);
-            if (cur(ps)->kind != TOK_ASSIGN)
-                parse_error_at(ps, cur(ps)->line, cur(ps)->col,
-                           "__auto_type needs an initializer: there is "
-                           "nothing else to take the type from");
-            advance(ps);
-            init = parse_cond(ps);
-            at = ce_type(init);
-            if (!at)
-                parse_error_line(ps, aline,
-                           "__auto_type cannot see the type of this "
-                           "initializer");
-            /* An array decays and a function designator becomes a
-             * pointer, as they do in any initialization. */
-            if (at->kind == TY_ARRAY)
-                at = ty_ptr(at->pointee);
-            /* and the value has no qualifiers: `__auto_type a = x;` with
-             * x a const int declares a plain int, as in GCC */
-            at = ty_unqual(at);
-            expect(ps, TOK_SEMI, "';'");
-            s = new_stmt(STMT_DECL, aline, 0);
-            s->dty = at;
-            s->name = aname;
-            /* `expr` is a declaration's INITIALIZER; `init` is the
-             * for-loop's first clause. Setting the wrong one compiled
-             * fine and left the variable zero. */
-            s->expr = init;
-            fold_local_add(aname, at);
-            return s;
         }
     after_auto_kw:;
         /* allow_body=1: a block-scope struct/union/enum DEFINITION is legal C
@@ -5933,6 +6029,7 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
                 advance(ps);
                 s->expr = parse_initializer(ps);
             }
+            s->dty = infer_auto(ps, s->dty, s->expr, s->line);
             const struct econst *cx_ec = NULL;
             if (is_cx) {
                 s->is_constexpr = 1;
@@ -6326,6 +6423,7 @@ static struct global *parse_global(struct parser *ps, struct type *ty,
             g->has_init = 1;
         }
     }
+    g->ty = infer_auto(ps, g->ty, g->init_expr, line);
     return g; /* caller handles ',' and ';' */
 }
 
@@ -7480,6 +7578,11 @@ fn_tail:
          * typeof of a macro argument, which in a function is almost
          * always a parameter. parse_top clears the table per
          * declaration, so these are scoped to this function. */
+        /* the function's own name is in scope in its body: `auto self =
+         * main;`, `typeof(f) *p` */
+        if (f->name && f->ret_ty)
+            fold_local_add(f->name, ty_func(f->ret_ty, f->param_tys, f->nparams,
+                                            f->is_varargs));
         for (int i = 0; i < f->nparams; i++)
             fold_local_add(f->params[i], f->param_tys[i]);
         for (int i = 0; i < ps->knr_nconv; i++)
