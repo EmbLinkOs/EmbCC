@@ -55,6 +55,7 @@ void __uw_arm_restore(const struct _Unwind_Context *) __attribute__((noreturn));
 # define UW_LOAD_D ""
 # define UW_CTX "64"
 #endif
+#if defined(__thumb__)
 #define UW_STUB(name, c_fn) \
     ".globl " name "\n" \
     ".type " name ", %function\n" \
@@ -107,6 +108,49 @@ __asm__(
     "ldr r0, [r0, #0]\n"
     "bx r2\n"
 );
+
+#else
+/* ARM state (armv7a-none-eabi): the same stubs in A32, whose three-operand
+ * forms reach r8-r12, lr and sp directly */
+#define UW_STUB(name, c_fn) \
+    ".globl " name "\n" \
+    ".type " name ", %function\n" \
+    name ":\n" \
+    "push {r4, lr}\n" \
+    "sub sp, sp, #" UW_CTX "\n" \
+    "mov r1, sp\n" \
+    "str r4, [r1, #16]\n" "str r5, [r1, #20]\n" \
+    "str r6, [r1, #24]\n" "str r7, [r1, #28]\n" \
+    "str r8, [r1, #32]\n" "str r9, [r1, #36]\n" \
+    "str r10, [r1, #40]\n" "str r11, [r1, #44]\n" \
+    "add r2, sp, #" UW_CTX "\n" "add r2, r2, #8\n" "str r2, [r1, #52]\n" \
+    "ldr r2, [sp, #" UW_CTX "]\n" "str r2, [r1, #16]\n" \
+    "str lr, [r1, #56]\n" "str lr, [r1, #60]\n" \
+    UW_SAVE_D \
+    "bl " c_fn "\n" \
+    "add sp, sp, #" UW_CTX "\n" \
+    "pop {r4, pc}\n"
+__asm__(
+    ".text\n"
+    ".syntax unified\n"
+    ".arm\n"
+    UW_STUB("_Unwind_RaiseException", "__uw_arm_raise")
+    UW_STUB("_Unwind_Resume", "__uw_arm_resume")
+    ".globl __uw_arm_restore\n"
+    ".type __uw_arm_restore, %function\n"
+    "__uw_arm_restore:\n"
+    UW_LOAD_D
+    "ldr r8, [r0, #32]\n" "ldr r9, [r0, #36]\n"
+    "ldr r10, [r0, #40]\n" "ldr r11, [r0, #44]\n"
+    "ldr r12, [r0, #48]\n" "ldr lr, [r0, #56]\n"
+    "ldr sp, [r0, #52]\n"
+    "ldr r4, [r0, #16]\n" "ldr r5, [r0, #20]\n"
+    "ldr r6, [r0, #24]\n" "ldr r7, [r0, #28]\n"
+    "ldr r2, [r0, #60]\n" "ldr r3, [r0, #12]\n"
+    "ldr r1, [r0, #4]\n" "ldr r0, [r0, #0]\n"
+    "bx r2\n"
+);
+#endif
 
 /* ---- the virtual register set -------------------------------------------- */
 

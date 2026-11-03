@@ -123,6 +123,17 @@ static long trip_count(struct ir_func *fn, struct bb *bb, int nbb, int h,
                     inside = 1;
             if (!inside) {
                 if (d->op == IR_CONST) { init = d->imm; ninit++; }
+                else if (d->op == IR_MOV) {
+                    /* v = mov k, k a constant */
+                    int got = 0;
+                    for (int q = 0; q < fn->nins && !got; q++)
+                        if (fn->ins[q].dst == d->a && fn->ins[q].op == IR_CONST) {
+                            init = fn->ins[q].imm;
+                            got = 1;
+                        }
+                    if (got) ninit++;
+                    else ok = 0;
+                }
                 else ok = 0;
                 continue;
             }

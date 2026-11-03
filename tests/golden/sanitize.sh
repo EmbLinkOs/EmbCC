@@ -264,17 +264,36 @@ else
 fi
 
 # ---- what it REFUSES --------------------------------------------------
-# A sanitizer that needs a runtime is refused BY NAME, not silently
-# dropped from the set -- "I asked for address and got nothing" is the
-# failure this is all meant to prevent (THE RULE).
-for s in address thread memory leak bounds object-size; do
+# A sanitizer EmbCC does not have is refused BY NAME, not silently
+# dropped from the set -- "I asked for leak and got nothing" is the
+# failure this is all meant to prevent (THE RULE). address and bounds
+# are accepted on any target (lib/san's libasan, irgen's subscript
+# checks); thread and memory need an operating system's threads and
+# mmap, and are refused on this bare-metal one, saying so
+# (tests/golden/sanitizers-runtime.sh runs all three on a host).
+for s in leak object-size; do
     if "$EMBCC" --target="$TARGET" -fsanitize=$s -c "$out/r.c" -o /dev/null \
          2> "$out/s.err"; then
-        echo "-fsanitize=$s was accepted, and there is no runtime for it"
+        echo "-fsanitize=$s was accepted, and EmbCC has no such check"
         exit 1
     fi
     grep -q "fsanitize=$s is not supported" "$out/s.err" || {
         echo "the refusal does not name $s:"; head -2 "$out/s.err"; exit 1; }
+done
+for s in address bounds; do
+    "$EMBCC" --target="$TARGET" -fsanitize=$s -c "$out/r.c" -o /dev/null \
+        2> "$out/s.err" || {
+        echo "-fsanitize=$s was refused:"; head -2 "$out/s.err"; exit 1; }
+done
+for s in thread memory; do
+    if "$EMBCC" --target="$TARGET" -fsanitize=$s -c "$out/r.c" -o /dev/null \
+         2> "$out/s.err"; then
+        echo "-fsanitize=$s was accepted for bare-metal $TARGET"
+        exit 1
+    fi
+    grep -q "fsanitize=$s is for a hosted target" "$out/s.err" || {
+        echo "the refusal of $s does not say why:"; head -2 "$out/s.err"
+        exit 1; }
 done
 # The spellings that mean "trap" are accepted, since trap is the only mode.
 for f in -fsanitize-trap=undefined -fsanitize-undefined-trap-on-error; do

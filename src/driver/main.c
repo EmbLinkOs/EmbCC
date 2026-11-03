@@ -6192,6 +6192,7 @@ static int embcc_main(int argc, char **argv)
      * asked for by name (it is the only mode, so this only has to be
      * accepted, not acted on). */
     unsigned san_mask = 0;
+    const char *san_spell = "-fsanitize=";   /* as the user typed it */
     int want_instr = 0;              /* -finstrument-functions */
     int short_wchar = 0;             /* -fshort-wchar, the last one wins */
     int short_enums = 0;             /* -fshort-enums, likewise */
@@ -7430,6 +7431,9 @@ static int embcc_main(int argc, char **argv)
              * exists to prevent. */
             int off = strncmp(argv[i], "-fno-", 5) == 0;
             const char *list = strchr(argv[i], '=');
+            if (!off && strncmp(argv[i], "-fsanitize=", 11) == 0)
+                san_spell = strncmp(opt_typed(argv[i]), "--", 2) == 0
+                            ? "--sanitize=" : "-fsanitize=";
             if (!list) {           /* -fsanitize-trap / ...-trap-on-error */
                 san_trap_asked = 1;
                 continue;
@@ -7990,23 +7994,24 @@ static int embcc_main(int argc, char **argv)
     {
         unsigned rt = san_mask & (SAN_ADDRESS | SAN_THREAD | SAN_MEMORY);
         if ((rt & SAN_ADDRESS) && (rt & (SAN_THREAD | SAN_MEMORY))) {
-            fprintf(stderr, "embcc: error: -fsanitize=address and -fsanitize=%s "
+            fprintf(stderr, "embcc: error: %saddress and %s%s "
                             "cannot be combined: each has its own shadow of "
-                            "memory\n", rt & SAN_THREAD ? "thread" : "memory");
+                            "memory\n", san_spell, san_spell,
+                            rt & SAN_THREAD ? "thread" : "memory");
             return 1;
         }
         if ((rt & SAN_THREAD) && (rt & SAN_MEMORY)) {
-            fprintf(stderr, "embcc: error: -fsanitize=thread and "
-                            "-fsanitize=memory cannot be combined\n");
+            fprintf(stderr, "embcc: error: %sthread and %smemory cannot "
+                            "be combined\n", san_spell, san_spell);
             return 1;
         }
         if ((rt & (SAN_THREAD | SAN_MEMORY)) && !target_is_hosted()) {
-            fprintf(stderr, "embcc: error: -fsanitize=%s is for a hosted "
+            fprintf(stderr, "embcc: error: %s%s is for a hosted "
                             "target (Linux, macOS): its runtime needs the "
                             "operating system's threads and memory mapping. "
-                            "On %s, -fsanitize=address works\n",
+                            "On %s, %saddress works\n", san_spell,
                             rt & SAN_THREAD ? "thread" : "memory",
-                            target_triple_now());
+                            target_triple_now(), san_spell);
             return 1;
         }
         if (rt && target_os_get() == TGT_OS_WINDOWS) {
