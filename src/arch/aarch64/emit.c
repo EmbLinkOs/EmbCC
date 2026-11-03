@@ -1078,3 +1078,77 @@ void a64_stxr(struct code *c, int ws, int rt, int rn, int size)
                 ((unsigned long)ws << 16) | ((unsigned long)rn << 5) |
                 (unsigned long)rt);
 }
+
+/* ---- Advanced SIMD: the lane-wise ops the vectorizer makes ----------------
+ *
+ * Each 128 bits wide (Q = 1), on an element of `es` bytes (the size
+ * field's 00 B, 01 H, 10 S, 11 D); llvm-objdump referees the bits
+ * (tests/golden/aarch64-simd.sh). */
+static unsigned a64_esz(int es) { return es == 1 ? 0 : es == 2 ? 1 : es == 4 ? 2 : 3; }
+
+void a64_v_bin(struct code *c, int op, int rd, int rn, int rm, int es)
+{
+    unsigned long w;
+    switch (op) {
+    case '+': w = 0x4e208400UL | a64_esz(es) << 22; break;   /* add */
+    case '-': w = 0x6e208400UL | a64_esz(es) << 22; break;   /* sub */
+    case '&': w = 0x4e201c00UL; break;                        /* and */
+    case '|': w = 0x4ea01c00UL; break;                        /* orr */
+    default:  w = 0x6e201c00UL; break;                        /* eor */
+    }
+    code_u32(c, w | (unsigned long)rm << 16 | (unsigned long)rn << 5 |
+                (unsigned long)rd);
+}
+
+/* shl, sshr, ushr #sh: immh:immb is esize + sh to the left, 2 * esize - sh
+ * to the right (sh in 1..esize for a right shift, 0..esize-1 left) */
+void a64_v_shift(struct code *c, int left, int sign, int rd, int rn, int es,
+                 int sh)
+{
+    int eb = es * 8;
+    unsigned long w = left ? 0x4f005400UL : sign ? 0x4f000400UL : 0x6f000400UL;
+    unsigned long ih = (unsigned long)(left ? eb + sh : 2 * eb - sh);
+    code_u32(c, w | ih << 16 | (unsigned long)rn << 5 | (unsigned long)rd);
+}
+
+/* dup vd.<T>, wn/xn: every lane the general register's low `es` bytes */
+void a64_v_dup(struct code *c, int rd, int rn, int es)
+{
+    unsigned long imm5 = es == 1 ? 1 : es == 2 ? 2 : es == 4 ? 4 : 8;
+    code_u32(c, 0x4e000c00UL | imm5 << 16 | (unsigned long)rn << 5 |
+                (unsigned long)rd);
+}
+
+/* the lanes' sum into lane 0 of vd: addv (b, h, s), addp (d) */
+void a64_v_addv(struct code *c, int rd, int rn, int es)
+{
+    if (es == 8)
+        code_u32(c, 0x5ef1b800UL | (unsigned long)rn << 5 | (unsigned long)rd);
+    else
+        code_u32(c, 0x4e31b800UL | a64_esz(es) << 22 | (unsigned long)rn << 5 |
+                    (unsigned long)rd);
+}
+
+/* lane 0 of vn into a general register, zero-extended: umov for a byte
+ * or a halfword, fmov for a word or a doubleword */
+void a64_v_lane0(struct code *c, int rd, int rn, int es)
+{
+    if (es == 1 || es == 2)
+        code_u32(c, 0x0e003c00UL | (es == 1 ? 1UL : 2UL) << 16 |
+                    (unsigned long)rn << 5 | (unsigned long)rd);
+    else if (es == 4)
+        code_u32(c, 0x1e260000UL | (unsigned long)rn << 5 | (unsigned long)rd);
+    else
+        code_u32(c, 0x9e660000UL | (unsigned long)rn << 5 | (unsigned long)rd);
+}
+
+/* sxtl/uxtl (the low half's lanes, each twice as wide), sxtl2/uxtl2 the
+ * high half's: [su]shll[2] by 0, immh:immb the source element's bits */
+void a64_v_widen(struct code *c, int rd, int rn, int es, int high, int sign)
+{
+    unsigned long w = sign ? 0x0f00a400UL : 0x2f00a400UL;
+    if (high)
+        w |= 0x40000000UL;
+    code_u32(c, w | (unsigned long)(es * 8) << 16 | (unsigned long)rn << 5 |
+                (unsigned long)rd);
+}

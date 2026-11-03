@@ -552,11 +552,11 @@ void opt_run(struct ir_unit *iu, int level)
     pass_default(P_MEM2REG, level >= 1);
     pass_default(P_GCSE,    level >= 2);
     pass_default(P_LICM,    level >= 1);
-    /* Vectorization is x86-64 for now: the aarch64 backend refuses the
-     * vector opcodes loudly (diag_fatal) rather than emitting something
-     * it has not been taught, so the pass must not hand it any. */
+    /* Vectorization where the backend lowers the vector opcodes: SSE2
+     * on x86-64, Advanced SIMD on AArch64 */
     pass_default(P_VEC,     level >= 2 && !size &&
-                            target_get() == TARGET_X86_64);
+                            (target_get() == TARGET_X86_64 ||
+                             target_get() == TARGET_AARCH64));
     pass_default(P_LOADCSE, level >= 1);
     pass_default(P_SCCP,    level >= 1);
     pass_default(P_INLINE,  level >= 1);   /* -O1: see g_inline_o1 */

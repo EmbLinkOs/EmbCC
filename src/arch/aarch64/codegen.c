@@ -1376,6 +1376,30 @@ static int q_off_ok(long off)
     return off >= 0 && off % 16 == 0 && off / 16 <= 0xfff;
 }
 
+/* A vector value's 16-byte slot into (out of) q register `q`: named off
+ * the frame base where the q offset reaches, else through A64_TMP */
+static void vslot_ld(struct code *t, const long *sd, int v, int q)
+{
+    if (!g_no_fp && q_off_ok(sd[v])) {
+        a64_ldr_q(t, q, FB, sd[v]);
+        return;
+    }
+    addr_of(t, A64_TMP, FB, sd[v]);
+    a64_ldr_q(t, q, A64_TMP, 0);
+}
+
+static void vslot_st(struct code *t, const long *sd, int v, int q)
+{
+    if (v < 0)
+        return;
+    if (!g_no_fp && q_off_ok(sd[v])) {
+        a64_str_q(t, q, FB, sd[v]);
+        return;
+    }
+    addr_of(t, A64_TMP, FB, sd[v]);
+    a64_str_q(t, q, A64_TMP, 0);
+}
+
 /* Copy `size` bytes from [src] to [dst]. Unrolled: struct copies in real
  * code are small, and an unrolled copy needs no spare register for a
  * counter. A very large aggregate therefore costs a long instruction run
@@ -3064,6 +3088,58 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
             wrote(t, sd, i->dst, d);
             break;
         }
+
+        /* ---- 128-bit vectors (the vectorizer's): Advanced SIMD --------
+         *
+         * Each value lives in its 16-byte slot (cg_wide_vregs marks it,
+         * and keeps it from the integer allocator); an operation works
+         * in v16 and v17, the FP scratch pair, which no allocation and no
+         * argument uses. The lanes are integers of i->size bytes. */
+        case IR_VLOAD: {
+            int ra = rd(t, sd, i->a, A64_ADDR);
+            a64_ldr_q(t, A64_FACC, ra, 0);
+            vslot_st(t, sd, i->dst, A64_FACC);
+            break;
+        }
+        case IR_VSTORE: {
+            vslot_ld(t, sd, i->b, A64_FACC);
+            int ra = rd(t, sd, i->a, A64_ADDR);
+            a64_str_q(t, A64_FACC, ra, 0);
+            break;
+        }
+        case IR_VBIN:
+            vslot_ld(t, sd, i->a, A64_FACC);
+            if (i->imm == '<' || i->imm == '>') {
+                a64_v_shift(t, i->imm == '<', i->sign, A64_FACC, A64_FACC,
+                            i->size, (int)i->c);
+            } else {
+                vslot_ld(t, sd, i->b, A64_FTMP);
+                a64_v_bin(t, (int)i->imm, A64_FACC, A64_FACC, A64_FTMP,
+                          i->size);
+            }
+            vslot_st(t, sd, i->dst, A64_FACC);
+            break;
+        case IR_VSPLAT: {
+            int ra = rd(t, sd, i->a, A64_ACC);
+            a64_v_dup(t, A64_FACC, ra, i->size);
+            vslot_st(t, sd, i->dst, A64_FACC);
+            break;
+        }
+        case IR_VREDADD: {
+            /* the lanes' sum, wrapping at the lane's width, zero-extended
+             * into the scalar (x86-64's movd/movq, the same value) */
+            vslot_ld(t, sd, i->a, A64_FACC);
+            a64_v_addv(t, A64_FACC, A64_FACC, i->size);
+            int d = wr(i->dst, A64_ACC);
+            a64_v_lane0(t, d, A64_FACC, i->size);
+            wrote(t, sd, i->dst, d);
+            break;
+        }
+        case IR_VWIDEN:
+            vslot_ld(t, sd, i->a, A64_FACC);
+            a64_v_widen(t, A64_FACC, A64_FACC, i->size, (int)i->c, i->sign);
+            vslot_st(t, sd, i->dst, A64_FACC);
+            break;
 
         case IR_BSWAP:
             ld_slot(t, sd, i->a, A64_ACC, 8, 0, 8);
