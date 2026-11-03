@@ -571,7 +571,7 @@ __asm__(".global _start\n"
 | `x86_64-apple-darwin` | a block with a label or a symbol reference is refused (below) |
 | `aarch64-apple-darwin` | directives and data only, and a block with a label or a symbol reference is refused (below) |
 | `x86_64-windows-gnu` | a block with a label or a symbol reference is refused (below) |
-| C++ (any target) | refused: `file-scope asm in C++ is not supported yet` |
+| C++ (any target) | as in C: the block goes to the C the C++ front end writes, and is assembled as a C unit's on that target |
 
 On Apple arm64, an instruction in a file-scope block is refused, whatever
 its mnemonic, because the Mach-O writer takes no relocation type from an

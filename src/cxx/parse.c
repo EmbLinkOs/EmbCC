@@ -268,6 +268,9 @@ static void parse_attrs(struct attrs *a)
 
 /* `__asm__("symbol")` after a declarator: the name to use in the object. */
 /* A GNU asm statement's string: adjacent literals are one. */
+const char **cx_top_asm;
+int cx_ntop_asm;
+
 static const char *asm_string(const char *what)
 {
     if (cx_kind() != TOK_STR)
@@ -5027,8 +5030,20 @@ static void parse_declaration(int toplevel, struct cstmt **out)
         }
         break;
     case TOK_KW_ASM:
-        if (toplevel)
-            cx_error(at, "file-scope asm in C++ is not supported yet");
+        if (toplevel) {
+            /* asm("...") at namespace scope: the block goes to the C
+             * output as it is (cx_emit_unit), where the C side assembles
+             * it as a C unit's */
+            cx_advance();
+            cx_expect(TOK_LPAREN, "'(' after asm");
+            const char *t = asm_string("the asm block");
+            cx_expect(TOK_RPAREN, "')' to close the asm block");
+            cx_expect(TOK_SEMI, "';' after the asm block");
+            cx_top_asm = xrealloc((void *)cx_top_asm,
+                                  (size_t)(cx_ntop_asm + 1) * sizeof *cx_top_asm);
+            cx_top_asm[cx_ntop_asm++] = t;
+            return;
+        }
         break;
     default:
         break;

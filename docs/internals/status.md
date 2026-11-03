@@ -363,7 +363,6 @@ Language refusals:
 | Construct | Diagnostic |
 |---|---|
 | `asm goto` | `asm goto in C++ is not supported yet` |
-| File-scope `asm` | `file-scope asm in C++ is not supported yet` |
 | `&&label` and computed `goto` | `label addresses are not supported in C++` |
 | `_Atomic` | `_Atomic is not supported in C++` |
 | An initializer on an array `new` | `an initializer for new[] is not supported yet` |

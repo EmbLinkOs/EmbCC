@@ -4834,5 +4834,7 @@ char *cx_emit_unit(void)
                   target_os_get() == TGT_OS_WINDOWS ? ".ctors"
                                                     : ".init_array");
     }
+    for (int k = 0; k < cx_ntop_asm; k++)
+        sb_printf(&out, "__asm__(%s);\n", c_quote(cx_top_asm[k]));
     return out.p ? out.p : cx_strdup("");
 }

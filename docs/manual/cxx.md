@@ -738,7 +738,6 @@ These are refused in C++:
 | Extension | Diagnostic |
 |---|---|
 | `asm goto` | `asm goto in C++ is not supported yet` |
-| File-scope `asm` | `file-scope asm in C++ is not supported yet` |
 | Label addresses (`&&label`) | `label addresses are not supported in C++` |
 | Computed `goto` | `computed goto is not supported in C++` |
 | `_Atomic` | `_Atomic is not supported in C++` |

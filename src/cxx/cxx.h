@@ -727,6 +727,9 @@ struct cfunc {
 };
 
 extern struct cfunc *cx_funcs;       /* all functions, declaration order */
+/* file-scope asm blocks' templates, in order, for the C output */
+extern const char **cx_top_asm;
+extern int cx_ntop_asm;
 void func_register(struct cfunc *f); /* append to cx_funcs */
 
 enum {
