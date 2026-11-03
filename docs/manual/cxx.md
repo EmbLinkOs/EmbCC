@@ -561,7 +561,7 @@ refuses it, with the diagnostic shown. Diagnostics are quoted without the
 | `z` and `uz` literal suffixes | Supported | |
 | `#elifdef`, `#elifndef` | Supported | |
 | `[[assume]]` | Accepted | |
-| Multidimensional subscript operator | Not supported | `'M' has no viable operator[]` |
+| Multidimensional subscript operator | Yes | `m[i, j]`, `m[]`, braced arguments, packs, a `static operator[]`; before C++23 `a[x, y]` is first read as a comma expression, as GCC does. |
 | `auto(x)`, `auto{x}` | Supported | A prvalue copy of `x`, of its decayed type. |
 
 ### C++26

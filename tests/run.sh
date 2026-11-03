@@ -316,12 +316,14 @@ for cc in tests/cxx/*.cc; do
         bad "$cc" "no '// expect-exit: N' line — cannot assert anything" ""
         continue
     fi
+    # (a `// std: c++23` line: the standard both compilers take; C++20 else)
+    std=$(sed -n 's|.*// std: *\(c++[0-9a-z]*\).*|\1|p' "$cc" | head -1)
     out_dir="tests/cxx/out/${TARGET%-elf}"
     mkdir -p "$out_dir"
     obj="$out_dir/$name.o"
     exe="$out_dir/$name"
     rm -f "$obj" "$exe"
-    if ! msg=$("$EMBCC" --target="$TARGET" -I"$cxx_newlib/include" -c "$cc" \
+    if ! msg=$("$EMBCC" --target="$TARGET" ${std:+-std=$std} -I"$cxx_newlib/include" -c "$cc" \
                    -o "$obj" 2>&1); then
         bad "$cc" "embcc failed" "$msg"
         continue

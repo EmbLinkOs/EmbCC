@@ -364,7 +364,6 @@ Language refusals:
 |---|---|
 | `asm goto` | as in C: `` `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that `` |
 | `_Atomic` | `_Atomic is not supported in C++` |
-| Multidimensional `operator[]` (C++23) | `'M' has no viable operator[]` |
 
 Function names in a template are looked up in two phases: ordinary
 lookup sees the declarations before the template, and argument-dependent

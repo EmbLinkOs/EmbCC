@@ -5671,17 +5671,58 @@ static struct cexpr *parse_postfix(struct cexpr *e)
             if (cx_kind_at(1) == TOK_LBRACKET)
                 return e;
             cx_advance();
-            struct cexpr *i = expr_parse();
-            cx_expect(TOK_RBRACKET, "']'");
             if (e->t->k == CT_CLASS) {
-                struct cexpr *args[2] = { e, i };
-                struct cexpr *o = overloaded("operator[]", args, 2, 1, at);
+                /* C++23: the brackets hold an argument list -- none, one,
+                 * several, braced, pack expansions -- for an operator[]
+                 * of any arity. Before C++23 `a[x, y]` is a comma
+                 * expression; each reading is tried when the other has no
+                 * viable operator[] (as GCC does), the standard's first. */
+                struct cexpr **items = NULL;
+                int ni = 0, cap = 0, braced = 0;
+                int saved = cx_in_targs;
+                cx_in_targs = 0;
+                while (cx_kind() != TOK_RBRACKET) {
+                    list_element(&items, &ni, &cap);
+                    if (!cx_accept(TOK_COMMA))
+                        break;
+                }
+                cx_in_targs = saved;
+                cx_expect(TOK_RBRACKET, "']'");
+                for (int k = 0; k < ni; k++)
+                    braced |= items[k]->k == E_INITLIST && !items[k]->t;
+                struct cexpr **multi = xmalloc((size_t)(ni + 1) * sizeof *multi);
+                multi[0] = e;
+                for (int k = 0; k < ni; k++)
+                    multi[k + 1] = items[k];
+                struct cexpr *one[2] = { e, NULL };
+                if (ni > 1 && !braced) {
+                    one[1] = items[0];
+                    for (int k = 1; k < ni; k++)
+                        one[1] = comma(one[1], items[k]);
+                }
+                int c23 = cx_std_at(at) >= 2023;
+                struct cexpr *o = NULL;
+                if (ni == 1 || !one[1] || c23)
+                    o = overloaded("operator[]", multi, ni + 1, 1, at);
+                if (!o && one[1])
+                    o = overloaded("operator[]", one, 2, 1, at);
+                if (!o && one[1] && !c23) {
+                    o = overloaded("operator[]", multi, ni + 1, 1, at);
+                    if (o)
+                        cx_pedantic(at, 2023, "an operator[] of several "
+                                              "arguments");
+                }
+                if (o && ni == 0)
+                    cx_pedantic(at, 2023, "an operator[] of no arguments");
                 if (!o)
-                    cx_error(at, "'%s' has no viable operator[]",
-                             ct_name(e->t));
+                    cx_error(at, "'%s' has no viable operator[] for %d "
+                                 "argument%s", ct_name(e->t), ni,
+                             ni == 1 ? "" : "s");
                 e = o;
                 continue;
             }
+            struct cexpr *i = expr_parse();
+            cx_expect(TOK_RBRACKET, "']'");
             struct cexpr *a = rvalue(e), *b = rvalue(i);
             if (b->t->k == CT_PTR && ct_is_integer(a->t)) {
                 struct cexpr *t = a;

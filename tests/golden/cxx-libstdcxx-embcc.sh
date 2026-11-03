@@ -54,18 +54,20 @@ n=0
 for cc in tests/libstdcxx/*.cc tests/cxx/*.cc; do
     [ -e "$cc" ] || continue
     name=$(basename "$cc" .cc)
+    # (a `// std: c++23` line: the standard both compilers take; C++20 else)
+    std=$(sed -n 's|.*// std: *\(c++[0-9a-z]*\).*|\1|p' "$cc" | head -1)
     case $cc in
     tests/cxx/*) inc="-I$NL/include" gxxinc="-I$NL/include" ;;
     *) inc="-I$INC -I$INC/$TARGET -I$NL/include" gxxinc="" ;;
     esac
     rm -f "$out/$name".*
     # shellcheck disable=SC2086
-    "$EMBCC" --target="$TARGET" $inc -c "$cc" -o "$out/$name.embcc.o" || {
+    "$EMBCC" --target="$TARGET" ${std:+-std=$std} $inc -c "$cc" -o "$out/$name.embcc.o" || {
         echo "$name: embcc failed"; exit 1; }
     EMBCC_REF_GXX=$MINE "$link" --cxx -o "$out/$name.embcc" \
         "$out/$name.embcc.o" || { echo "$name: link failed"; exit 1; }
     # shellcheck disable=SC2086
-    "$GXX" -std=c++20 $gxxinc -c "$cc" -o "$out/$name.gxx.o" || {
+    "$GXX" -std=${std:-c++20} $gxxinc -c "$cc" -o "$out/$name.gxx.o" || {
         echo "$name: g++ failed"; exit 1; }
     EMBCC_REF_GXX=$REF "$link" --cxx -o "$out/$name.gxx" \
         "$out/$name.gxx.o" || { echo "$name: link of g++ object failed"; exit 1; }
