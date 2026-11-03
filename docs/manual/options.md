@@ -136,7 +136,7 @@ EmbCC's own spellings come first. Where GCC spells the same thing differently, i
 | `--stack-clash-protection` | no stack-pointer step of more than a page, and each page touched | `-fstack-clash-protection` |
 | `--bounds-safety` | every subscript of an array, or of a counted_by member, checked: a trap when out of bounds | `-fbounds-safety` |
 | `--no-bounds-safety` | not | `-fno-bounds-safety` |
-| `--branch-protection=KIND` | AArch64: standard, bti, pac-ret[+leaf][+b-key], none | `-mbranch-protection=KIND` |
+| `--branch-protection=KIND` | AArch64 and ARMv8.1-M: standard, bti, pac-ret[+leaf][+b-key], none | `-mbranch-protection=KIND` |
 | `--cf-protection=KIND` | x86-64: full, branch, return, none | `-fcf-protection=KIND` |
 | `--profile-generate` | a build that records its profile, for --profile-use | `-fprofile-generate` |
 | `--profile-generate=DIR` | ...the profile in DIR | `-fprofile-generate=DIR` |

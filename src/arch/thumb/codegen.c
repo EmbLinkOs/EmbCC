@@ -145,6 +145,25 @@ static int pm_reg(int r) { return r == R_SCR ? t_scr(r) : r; }
  * and never a return register, so nothing is lost by restoring it -- and
  * unlike r12 it keeps an all-low list in the 16-bit push/pop. GCC pads
  * the same way. */
+/* a 32-bit Thumb instruction, first halfword first */
+static void t_w32(struct code *t, unsigned long w)
+{
+    code_u16(t, (unsigned)(w >> 16));
+    code_u16(t, (unsigned)(w & 0xffff));
+}
+
+/* the return of a function pac signed: bxaut r12, lr, sp with PACBTI,
+ * else aut r12, lr, sp (a hint there) and bx lr */
+static void t_pac_return(struct code *t)
+{
+    if (target_thumb_pacbti()) {
+        t_w32(t, 0xfb5ecf1du);
+    } else {
+        t_w32(t, 0xf3af802du);
+        t_bx(t, T_LR);
+    }
+}
+
 static unsigned save_mask_for(int nsave, const int *used, unsigned scr,
                               unsigned extra)
 {
@@ -7688,10 +7707,6 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
      * that: a variadic argument is placed exactly like a named one. */
     F.cfi_va_end = F.cfi_push_end = F.cfi_vsave_end = -1;
     F.cfi_frame_end = F.cfi_fp_end = -1;
-    if (fn->is_varargs) {
-        t_push(t, (1u << 0) | (1u << 1) | (1u << 2) | (1u << 3));
-        F.cfi_va_end = t->len;
-    }
     /* The mask is decided HERE, not patched at the end: its register
      * COUNT sets how far sp moves, which every stack-parameter offset
      * below is measured from. F.nsave is already known -- ra_allocate
@@ -7719,6 +7734,32 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
             /* __builtin_return_address reads the pushed lr */
             fn->ins[i].op == IR_FRAMEADDR)
             F.noret = 0;
+    /* ARMv8.1-M branch protection, as clang's: `bti` as a function's
+     * first instruction; `pac r12, lr, sp` (`pacbti` with BTI too) in a
+     * function that saves lr -- every one with +leaf -- r12 pushed with
+     * lr and the return `bxaut r12, lr, sp` (`aut` and `bx lr` on a part
+     * without PACBTI, where pac and aut are hints). Not in an interrupt
+     * handler or a CMSE entry, which return their own way. (The
+     * variadic save area goes down after it: pac signs the entry sp.) */
+    {
+        int cf = target_cf();
+        int v81 = target_thumb_v81() && !t_isa_a32;
+        F.pac = v81 && (cf & CF_PAC) && !F.isr && !fn->cmse_entry;
+        if (F.pac && (cf & CF_PAC_LEAF) && F.nopush)
+            F.nopush = 0;
+        if (F.nopush || F.noret)
+            F.pac = 0;
+        if (F.pac)
+            F.isr_extra |= 1u << 12;
+        if (F.pac)
+            t_w32(t, (cf & CF_BTI) ? 0xf3af800du : 0xf3af801du);  /* pacbti / pac */
+        else if (v81 && (cf & CF_BTI) && !F.isr)
+            t_w32(t, 0xf3af800fu);                               /* bti */
+    }
+    if (fn->is_varargs) {
+        t_push(t, (1u << 0) | (1u << 1) | (1u << 2) | (1u << 3));
+        F.cfi_va_end = t->len;
+    }
     /* IRQ, FIQ and ABORT are entered with lr 4 past where they return;
      * the push then saves the return address the ldm ...^ takes back */
     if (F.isr && F.isr != ISR_ARM_SWI && F.isr != ISR_ARM_UNDEF)
@@ -8088,7 +8129,15 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
              * before that. */
             t_pop(t, mask);
             t_sp_adjust(t, 16, 0);
-            t_bx(t, T_LR);
+            if (F.pac)
+                t_pac_return(t);
+            else
+                t_bx(t, T_LR);
+        } else if (F.pac) {
+            /* r12 and lr back, sp as pac saw it: authenticated, then
+             * the return */
+            t_pop(t, mask);
+            t_pac_return(t);
         } else if (F.isr) {
             a32_pop_exc(t, mask & ~(1u << T_LR));
         } else {

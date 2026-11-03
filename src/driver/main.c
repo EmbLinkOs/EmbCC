@@ -8525,10 +8525,19 @@ static int embcc_main(int argc, char **argv)
                     : "");
         return 1;
     }
-    if ((g_cf & (CF_BTI | CF_PAC)) && target_get() != TARGET_AARCH64) {
-        fprintf(stderr, "embcc: error: %s is AArch64's here "
-                        "(PAC and BTI); %s has none\n", g_bp_spell,
-                target_triple_now());
+    if ((g_cf & (CF_BTI | CF_PAC)) && target_get() != TARGET_AARCH64 &&
+        !target_thumb_v81()) {
+        fprintf(stderr, "embcc: error: %s is AArch64's and ARMv8.1-M "
+                        "Mainline's here (PAC and BTI); %s has none%s\n",
+                g_bp_spell, target_triple_now(),
+                target_get() == TARGET_THUMB
+                    ? " (-mcpu=cortex-m85, or -march=armv8.1-m.main+pacbti)"
+                    : "");
+        return 1;
+    }
+    if ((g_cf & CF_PAC_BKEY) && target_get() == TARGET_THUMB) {
+        fprintf(stderr, "embcc: error: %s: ARMv8.1-M has one key; +b-key "
+                        "is AArch64's\n", g_bp_spell);
         return 1;
     }
     (void)g_cf_x86;

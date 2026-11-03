@@ -32,6 +32,7 @@ static int g_thumb_arch = 7;
  * here; the few that differ ask target_thumb_v8m_base(). */
 static int g_thumb_v8b;
 static int g_thumb_v81, g_thumb_mve;  /* ARMv8.1-M, and its MVE: see below */
+static int g_thumb_pacbti;            /* ...and its PACBTI extension */
 /* -mcmse: the Secure-side build of ARMv8-M's security extension. */
 static int g_thumb_cmse;
 static int g_thumb_fpu;     /* see target_thumb_fpu */
@@ -998,6 +999,8 @@ int target_arm_neon(void) { return g_arch == TARGET_THUMB && g_arm_neon; }
  * instruction of its own yet). mve: 0, 1 the integer half, 3 with
  * floating point (__ARM_FEATURE_MVE's own values). */
 void target_set_thumb_v81(int on) { g_thumb_v81 = on ? 1 : 0; }
+void target_set_thumb_pacbti(int on) { g_thumb_pacbti = on ? 1 : 0; }
+int target_thumb_pacbti(void) { return target_thumb_v81() && g_thumb_pacbti; }
 int target_thumb_v81(void)
 {
     return g_arch == TARGET_THUMB && g_thumb_arch == 8 && g_thumb_v81;

@@ -201,7 +201,7 @@ OPT(BUILD, "--sbom=",       "FILE", NULL, "write the image's software bill of ma
 OPT(BUILD, "--sbom-format=", "FORMAT", NULL, "spdx (the default) or cyclonedx")
 OPT(BUILD, "--sbom-from",   NULL,   NULL,   "IMAGE [-o FILE]: an SBOM from a linked image built with --sbom")
 OPT(OPT,   "--no-bounds-safety", NULL, "-fno-bounds-safety", "not")
-OPT(OPT,   "--branch-protection=", "KIND", "-mbranch-protection=%", "AArch64: standard, bti, pac-ret[+leaf][+b-key], none")
+OPT(OPT,   "--branch-protection=", "KIND", "-mbranch-protection=%", "AArch64 and ARMv8.1-M: standard, bti, pac-ret[+leaf][+b-key], none")
 OPT(OPT,   "--cf-protection=", "KIND", "-fcf-protection=%", "x86-64: full, branch, return, none")
 OPT(OPT,   "--profile-generate", NULL, "-fprofile-generate", "a build that records its profile, for --profile-use")
 OPT(OPT,   "--profile-generate=", "DIR", "-fprofile-generate=%", "...the profile in DIR")

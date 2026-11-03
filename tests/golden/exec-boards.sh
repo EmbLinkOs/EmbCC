@@ -56,7 +56,7 @@ EMBLD=${EMBLD:-$PWD/embld}
 export EMBCC EMBLD
 
 boards=
-command -v "$QA" >/dev/null 2>&1 && boards="$boards m4 m4hf a7"
+command -v "$QA" >/dev/null 2>&1 && boards="$boards m4 m4hf a7 m55pac"
 command -v "$Q32" >/dev/null 2>&1 && boards="$boards rv32 rv32f rv32d rv32noa rv32k"
 command -v "$Q64" >/dev/null 2>&1 && boards="$boards rv64 rv64d rv64noa rv64k"
 [ -n "${EMBCC_BOARDS:-}" ] && boards=" $EMBCC_BOARDS"
@@ -67,6 +67,7 @@ triple() {
         m4) echo thumbv7em-none-eabi ;;
         m4hf) echo thumbv7em-none-eabihf ;;
         a7) echo armv7a-none-eabi ;;
+        m55pac) echo thumbv8.1m.main-none-eabi ;;
         rv32|rv32f|rv32d|rv32noa|rv32k) echo riscv32-unknown-elf ;;
         rv64|rv64d|rv64noa|rv64k) echo riscv64-unknown-elf ;;
     esac
@@ -75,6 +76,9 @@ triple() {
 # (tools/build-rt.sh: TRIPLE/ABI)
 flags() {
     case $1 in
+        # ARMv8.1-M branch protection in every function: pac/aut/bti
+        # are hints on the M55, so this runs what the M85 runs but bxaut
+        m55pac) echo "-mcpu=cortex-m55 -mbranch-protection=standard" ;;
         rv32f) echo "-march=rv32imafc -mabi=ilp32f" ;;
         rv32d) echo "-march=rv32imafdc -mabi=ilp32d" ;;
         rv64d) echo "-march=rv64gc -mabi=lp64d" ;;
@@ -93,6 +97,7 @@ variant() {
         rv32d) echo riscv32-unknown-elf/ilp32d ;;
         rv64d) echo riscv64-unknown-elf/lp64d ;;
         rv32noa) echo riscv32-unknown-elf/noa ;;
+        m55pac) echo thumbv8m.main-none-eabi ;;
         rv64noa) echo riscv64-unknown-elf/noa ;;
         *) triple "$1" ;;
     esac
@@ -157,6 +162,11 @@ for b in $boards; do
                     echo "FAIL: the M4 harness"; exit 1; }
             done
             "$EMBCC" --target=$T -O1 -c "$out/drv-m4.c" -o "$L/drv.o" ;;
+        m55pac) for f in boot io; do
+                "$EMBCC" --target=$T $FL -O1 -c tests/harness/thumb-m55/$f.c \
+                    -o "$L/$f.o" || { echo "FAIL: the M55 harness"; exit 1; }
+            done
+            "$EMBCC" --target=$T $FL -O1 -c "$out/drv-m4.c" -o "$L/drv.o" ;;
         a7) for f in boot io; do
                 "$EMBCC" --target=$T -O1 -c tests/harness/arm-a32/$f.c \
                     -o "$L/$f.o" || { echo "FAIL: the ARMv7-A harness"; exit 1; }
@@ -185,7 +195,8 @@ done
 SKIP32=" atomics-reg attr-layout bit-builtins c-extras2 enum-wide-values
  ext-add global-aggregates globals gnu-attr-positions long-double longs
  sizeof-cast static-local-init strings structs u64-float "
-# On the M4 only: complex.c, which clang's build fails there too.
+# On the M4 (and the M55, the same soft-float runtime): complex.c, which
+# clang's build fails there too.
 SKIPM4=" complex "
 # On the A7 only: alloca.c checks that alloca is 16-aligned, where AAPCS
 # gives 8 -- it passes or not by where sp happens to be, and clang's
@@ -199,19 +210,20 @@ cat > "$out/one.sh" <<'EOT'
 c=$1; opt=$2; b=$3; out=$4
 name=$(basename "$c" .c)
 case $b in
-    m4|m4hf|a7|rv32*) case "$SKIP32" in *" $name "*) exit 0 ;; esac ;;
+    m4|m4hf|a7|m55pac|rv32*) case "$SKIP32" in *" $name "*) exit 0 ;; esac ;;
 esac
 case $b in
     a7) case "$SKIPA7" in *" $name "*) exit 0 ;; esac ;;
 esac
 case $b in
-    m4|m4hf) case "$SKIPM4" in *" $name "*) exit 0 ;; esac ;;
+    m4|m4hf|m55pac) case "$SKIPM4" in *" $name "*) exit 0 ;; esac ;;
 esac
 expect=$(sed -n 's|.*// expect-exit: *\([0-9][0-9]*\).*|\1|p' "$c" | head -1)
 [ -n "$expect" ] || exit 0
 case $b in
     m4) T=thumbv7em-none-eabi ;; m4hf) T=thumbv7em-none-eabihf ;;
     a7) T=armv7a-none-eabi ;;
+    m55pac) T="thumbv8.1m.main-none-eabi -mcpu=cortex-m55 -mbranch-protection=standard" ;;
     rv32) T=riscv32-unknown-elf ;;
     rv64) T=riscv64-unknown-elf ;;
     rv32f) T="riscv32-unknown-elf -march=rv32imafc -mabi=ilp32f" ;;
@@ -230,6 +242,8 @@ if ! "$EMBCC" --target=$T $opt -Dmain=prog_main -Ilib/libc/include \
 fi
 case $b in
     m4|m4hf) EMBCC_THUMB_HARNESS=$L sh tests/harness/thumb-m4f/link.sh $o.elf \
+            $o.o $L/drv.o $L/libc.a $L/librt.a > $o.lerr 2>&1 ;;
+    m55pac) EMBCC_M55_HARNESS=$L sh tests/harness/thumb-m55/link.sh $o.elf \
             $o.o $L/drv.o $L/libc.a $L/librt.a > $o.lerr 2>&1 ;;
     a7) EMBCC_A32_HARNESS=$L sh tests/harness/arm-a32/link.sh $o.elf \
             $o.o $L/drv.o $L/libc.a $L/librt.a > $o.lerr 2>&1 ;;
@@ -251,6 +265,9 @@ esac
 case $b in
     m4|m4hf) sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-30}" "$QA" \
             -M mps2-an386 -cpu cortex-m4 -semihosting -nographic \
+            -kernel $o.elf > $o.txt 2>&1 ;;
+    m55pac) sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-30}" "$QA" \
+            -M mps3-an547 -cpu cortex-m55 -semihosting -nographic \
             -kernel $o.elf > $o.txt 2>&1 ;;
     a7) sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-30}" "$QA" \
             -M virt -cpu cortex-a15 -m 128 -semihosting -nographic \

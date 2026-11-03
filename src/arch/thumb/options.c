@@ -412,12 +412,16 @@ int thumb_target_option(const char *arg)
                         g_arm_march_fpu = "fpv5-sp-d16";
                 } else if (n == 6 && !strncmp(x, "+nomve", 6) && v81)
                     mve = 0;
+                else if (n == 7 && !strncmp(x, "+pacbti", 7) && v81)
+                    target_set_thumb_pacbti(1);
+                else if (n == 9 && !strncmp(x, "+nopacbti", 9) && v81)
+                    target_set_thumb_pacbti(0);
                 else
                     diag_fatal(NULL, 0, "%s: the extension '%.*s' "
                                "is not one EmbCC emits for that "
                                "architecture (+fp, +fp.dp, +nofp, +dsp "
-                               "or +nodsp on armv8-m.main, and +mve or "
-                               "+mve.fp on armv8.1-m.main)",
+                               "or +nodsp on armv8-m.main, and +mve, "
+                               "+mve.fp or +pacbti on armv8.1-m.main)",
                                opt_said("-march=", v), (int)n, x);
                 x = e;
             }
@@ -477,6 +481,7 @@ int thumb_target_option(const char *arg)
                 target_set_thumb_arch(8);
                 target_set_thumb_v81(1);
                 target_set_thumb_mve(3);
+                target_set_thumb_pacbti(!strcmp(v, "cortex-m85"));
             }
             if (!strcmp(v, "cortex-m3"))
                 target_set_thumb_em(0);

@@ -278,3 +278,25 @@ unprotected, on a core without PAC or BTI. The unwind information records
 the signed return address (`DW_CFA_AARCH64_negate_ra_state`), so a
 debugger and C++ exceptions unwind through it. `.note.gnu.property`
 records BTI and PAC for the linker.
+
+### ARMv8.1-M: PACBTI
+
+The same option on ARMv8.1-M Mainline (`thumbv8.1m.main-none-eabi` with
+`-mcpu=cortex-m55` or `cortex-m85`, or `-march=armv8.1-m.main`), as
+clang compiles it:
+
+| Kind | Effect |
+|---|---|
+| `pac-ret` | A function that saves `lr` starts with `pac r12, lr, sp`, pushes `r12` with `lr`, and returns with `bxaut r12, lr, sp`, which faults on a changed return address |
+| `pac-ret+leaf` | ...every function, which then pushes `r12` and `lr` |
+| `bti` | `bti` is each function's first instruction |
+| `standard` | both, `pacbti r12, lr, sp` doing the two at entry |
+
+`bxaut` is the PACBTI extension's own instruction (`-mcpu=cortex-m85`, or
+`-march=armv8.1-m.main+pacbti`, which also define `__ARM_FEATURE_PAUTH`
+and `__ARM_FEATURE_BTI`). Without the extension the return is `aut r12,
+lr, sp` and `bx lr`: `pac`, `aut` and `bti` are hints there, so the code
+runs, unprotected, on a Cortex-M55. `__ARM_FEATURE_BTI_DEFAULT` and
+`__ARM_FEATURE_PAC_DEFAULT` say what was asked for, on AArch64 too. An
+interrupt handler and a CMSE entry function keep their own returns.
+`+b-key` is refused: ARMv8.1-M has one key.

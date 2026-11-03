@@ -722,7 +722,8 @@ const struct predef_macro *predef_table(int *count)
     int avrb = target_get() == TARGET_AVR;
     int v81 = target_thumb_v81();
     if (!os && !fpu && !cmse && !rv && !dsp && !avr && !pic32 && !f16 &&
-        !bf16 && !avrb && !v81 && target_fmt_get() == TGT_FMT_ELF) {
+        !bf16 && !avrb && !v81 && !(target_cf() & (CF_BTI | CF_PAC)) &&
+        target_fmt_get() == TGT_FMT_ELF) {
         *count = narch;
         return arch;
     }
@@ -756,6 +757,27 @@ const struct predef_macro *predef_table(int *count)
             if (target_thumb_mve()) {
                 merged[nmerged].name = "__ARM_FEATURE_MVE";
                 merged[nmerged++].value = target_thumb_mve() == 3 ? "3" : "1";
+            }
+            if (target_thumb_pacbti()) {         /* (cortex-m85, +pacbti) */
+                merged[nmerged].name = "__ARM_FEATURE_PAUTH";
+                merged[nmerged++].value = "1";
+                merged[nmerged].name = "__ARM_FEATURE_BTI";
+                merged[nmerged++].value = "1";
+            }
+        }
+        /* -mbranch-protection's, as clang's: BTI landing pads, and the
+         * return-address signing -- bit 0 the A key, 1 the B, 2 leaves */
+        if (target_get() == TARGET_AARCH64 || v81) {
+            int cf = target_cf();
+            if (cf & CF_BTI) {
+                merged[nmerged].name = "__ARM_FEATURE_BTI_DEFAULT";
+                merged[nmerged++].value = "1";
+            }
+            if (cf & CF_PAC) {
+                static const char *const pv[] = { "1", "2", "5", "6" };
+                merged[nmerged].name = "__ARM_FEATURE_PAC_DEFAULT";
+                merged[nmerged++].value =
+                    pv[((cf & CF_PAC_BKEY) ? 1 : 0) + ((cf & CF_PAC_LEAF) ? 2 : 0)];
             }
         }
         if (dsp && target_thumb_arch() == 7)

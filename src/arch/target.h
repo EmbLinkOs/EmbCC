@@ -466,6 +466,11 @@ void target_set_arm_neon(int on);
 int target_arm_neon(void);
 void target_set_thumb_v81(int on);
 int target_thumb_v81(void);
+/* ARMv8.1-M's PACBTI extension (-mcpu=cortex-m85, -march=...+pacbti):
+ * bxaut, and __ARM_FEATURE_PAUTH/BTI. Without it a v8.1-M part still
+ * takes pac, aut and bti, which are hints there. */
+void target_set_thumb_pacbti(int on);
+int target_thumb_pacbti(void);
 void target_set_thumb_mve(int level);
 int target_thumb_mve(void);
 /* The alignment a string literal of `width`-byte elements gets in .rodata.
