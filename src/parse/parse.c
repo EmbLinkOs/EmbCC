@@ -476,6 +476,7 @@ static int tok_is_type_start(enum tok_kind k)
            k == TOK_KW_CONST || k == TOK_KW_VOLATILE ||
            k == TOK_KW_FLOAT || k == TOK_KW_DOUBLE || k == TOK_KW_BOOL ||
            k == TOK_KW_FLOAT128 || k == TOK_KW_FLOAT64X || k == TOK_KW_FLOAT16 ||
+           k == TOK_KW_DECIMAL32 || k == TOK_KW_DECIMAL64 || k == TOK_KW_DECIMAL128 ||
            k == TOK_KW_FP16 || k == TOK_KW_BF16 ||
            k == TOK_KW_COMPLEX || k == TOK_KW_BITINT ||
            k == TOK_KW_ALIGNAS || k == TOK_KW_TYPEOF || k == TOK_KW_ATOMIC ||
@@ -2712,7 +2713,7 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
     /* base specifiers in any order: unsigned long int, long unsigned... */
     int uns = -1, nlong = 0, nshort = 0, nchar = 0, nint = 0, nvoid = 0;
     int nfloat = 0, ndouble = 0, nbool = 0, ncomplex = 0, n128 = 0;
-    int nf128 = 0, nf16 = 0, nfp16 = 0, nbf16 = 0, nf64x = 0;
+    int nf128 = 0, nf16 = 0, nfp16 = 0, nbf16 = 0, nf64x = 0, ndec = 0;
     int any = 0, nbitint = 0, bline = 0, bcol = 0;
     long bits = 0;
     for (;;) {
@@ -2746,6 +2747,9 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
         else if (k == TOK_KW_INT128) n128++;
         else if (k == TOK_KW_FLOAT128) nf128++;
         else if (k == TOK_KW_FLOAT64X) nf64x++;
+        else if (k == TOK_KW_DECIMAL32) ndec = 4;
+        else if (k == TOK_KW_DECIMAL64) ndec = 8;
+        else if (k == TOK_KW_DECIMAL128) ndec = 16;
         else if (k == TOK_KW_FLOAT16) nf16++;
         else if (k == TOK_KW_FP16) nfp16++;
         else if (k == TOK_KW_BF16) nbf16++;
@@ -2852,6 +2856,17 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
                        "%s cannot combine with other specifiers",
                        nf16 ? "_Float16" : nfp16 ? "__fp16" : "__bf16");
         return nf16 ? ty_base(TY_FLOAT16, 0) : nfp16 ? ty_fp16() : ty_bf16();
+    }
+    if (ndec) {
+        if (any > 1)
+            parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                       "_Decimal%d cannot combine with other specifiers", 8 * ndec);
+        struct type *dt = ty_decimal(ndec);
+        if (!dt)
+            parse_error_at(ps, cur(ps)->line, cur(ps)->col, "decimal floating point "
+                           "is not supported for %s (GCC has it on x86-64 and "
+                           "AArch64 Linux, and so does EmbCC)", target_triple_now());
+        return dt;
     }
     if (nf64x) {
         /* C23's _Float64x: at least double's precision and more range --
@@ -4299,6 +4314,22 @@ static struct expr *parse_primary(struct parser *ps)
         return np;
     }
     case TOK_FNUM: {
+        if (t->fnum_dec) {
+            /* C23's decimal constant: its BID bits, encoded by the lexer */
+            e = new_expr(EXPR_FNUM, t->line, t->col);
+            e->ty = ty_decimal(t->fnum_dec);
+            if (!e->ty)
+                parse_error_at(ps, t->line, t->col, "decimal floating point is not "
+                               "supported for %s (GCC has it on x86-64 and AArch64 "
+                               "Linux, and so does EmbCC)", target_triple_now());
+            e->bigv = xcalloc(2, sizeof *e->bigv);
+            e->bigv[0] = t->dec_bits[0];
+            e->bigv[1] = t->dec_bits[1];
+            e->nbig = 2;
+            e->fnum = t->fnum;          /* for diagnostics only */
+            advance(ps);
+            return e;
+        }
         /* -fsingle-precision-constant: no suffix means float, as an
          * `f` would -- the type AND the value, so `double d = 0.1;`
          * holds 0.1f widened, which is what GCC's flag gives. */

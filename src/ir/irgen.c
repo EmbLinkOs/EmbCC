@@ -1537,12 +1537,19 @@ static int emit_tobool(struct ir_func *fn, int v, const struct type *from)
  * not, and a long double is too wide to test as bits at all. Returns the
  * temp to branch on, and its width in *w. */
 static int bitint_test(struct ir_func *fn, int addr, const struct type *t, int line);
+static int dec_truth(struct ir_func *fn, int v, struct type *t, int line);
+static int dec_convert(struct ir_func *fn, int v, struct type *from, struct type *to,
+                       int line);
 
 static int truth(struct ir_func *fn, int v, const struct type *t, int *w)
 {
     if (ty_is_wide_bitint(t)) {       /* a _BitInt of limbs: its address */
         *w = 4;
         return bitint_test(fn, v, t, 0);
+    }
+    if (t->is_dec) {                  /* a decimal: != 0, by the runtime */
+        *w = 4;
+        return dec_truth(fn, v, (struct type *)t, 0);
     }
     if (ty_is_float(t) || t->kind == TY_INT128) {   /* (no 16-byte branch) */
         *w = 4;
@@ -1778,6 +1785,10 @@ static int bf_from_int(struct ir_func *fn, int v, const struct type *from)
 int gen_convert(struct ir_func *fn, int v, const struct type *from,
                        const struct type *to)
 {
+    /* a decimal on either side: lib/rt/decimal.c's conversions */
+    if ((from->is_dec || to->is_dec) && from->is_dec != to->is_dec &&
+        to->kind != TY_VOID)
+        return dec_convert(fn, v, (struct type *)from, (struct type *)to, 0);
     int fsize = ty_size(from), tsize = ty_size(to);
     int fw = ty_w(from), tw = ty_w(to);
 
@@ -2216,8 +2227,9 @@ static int bitint_op(const struct expr *e)
     case EXPR_NUM: case EXPR_NEG: case EXPR_BNOT: case EXPR_INCDEC:
     case EXPR_COMPOUND:
         return is_wide(e);
-    case EXPR_BINOP:
-        return is_wide(e) || is_wide(e->lhs) || is_wide(e->rhs);
+    case EXPR_BINOP:   /* (&& and || test each side with truth()) */
+        return e->op != B_LAND && e->op != B_LOR &&
+               (is_wide(e) || is_wide(e->lhs) || is_wide(e->rhs));
     case EXPR_CAST:
         return is_wide(e) || is_wide(e->rhs);
     case EXPR_NOT:
@@ -2393,6 +2405,223 @@ static int gen_bitint(struct ir_func *fn, struct expr *e)
     }
     default:
         diag_fatal(fn->src ? fn->src->file : NULL, e->line, "internal: _BitInt expression");
+    }
+    return 0;
+}
+
+/* ---- C23 decimal floating types ---------------------------------------------
+ *
+ * A _Decimal value is carried as the binary type of its size and register
+ * class (ty_decimal), so loads, stores, copies, arguments and returns are
+ * those of that type, bit for bit -- and so are the ABI's registers: a
+ * float's, a double's, binary128's q register on AArch64. Every operation
+ * on one is a call into lib/rt/decimal.c, by libgcc's names, so EmbCC's
+ * and GCC's objects link either way. */
+static int is_dec(const struct type *t) { return t && t->is_dec; }
+
+static const char *dec_sfx(const struct type *t)
+{
+    return t->is_dec == 4 ? "sd" : t->is_dec == 8 ? "dd" : "td";
+}
+
+static int dec_call(struct ir_func *fn, const char *name, struct type *ret, int n,
+                    const int *vals, struct type *const *tys, int line)
+{
+    return libatomic_call(fn, xstrndup(name, strlen(name)), ret, n, vals, tys, line);
+}
+
+/* the constant's bits, interned and loaded as the decimal type */
+static int dec_const(struct ir_func *fn, const struct type *t, const unsigned long long b[2])
+{
+    int n = t->is_dec;
+    char *bytes = xcalloc(1, 16);
+    for (int i = 0; i < n; i++)
+        bytes[i] = (char)(b[i / 8] >> (8 * (i % 8)));
+    struct ir_ins *i = emit(fn);
+    i->op = IR_STRADDR;
+    i->label = ir_intern_aligned(cur_unit, bytes, n, n);
+    i->dst = new_temp(fn);
+    return emit_load(fn, i->dst, t);
+}
+
+static int dec_zero(struct ir_func *fn, const struct type *t)
+{
+    /* +0 with the smallest exponent: all bits zero */
+    unsigned long long z[2] = { 0, 0 };
+    return dec_const(fn, t, z);
+}
+
+/* a == b, a < b and the rest: libgcc's comparison routines and how each
+ * one's answer reads */
+static int dec_compare(struct ir_func *fn, enum binop op, int a, int b,
+                       struct type *t, int line)
+{
+    const char *fnm = op == B_EQ ? "eq" : op == B_NE ? "ne" : op == B_LT ? "lt"
+                    : op == B_LE ? "le" : op == B_GT ? "gt" : "ge";
+    char name[32];
+    snprintf(name, sizeof name, "__bid_%s%s2", fnm, dec_sfx(t));
+    struct type *tys[2] = { t, t };
+    int vals[2] = { a, b };
+    int r = dec_call(fn, name, ty_base(TY_INT, 0), 2, vals, tys, line);
+    enum binop rel = op == B_EQ ? B_EQ : op == B_NE ? B_NE : op;
+    return emit_cmp(fn, rel, r, emit_const(fn, 0, 4), 4, 1);
+}
+
+static int dec_truth(struct ir_func *fn, int v, struct type *t, int line)
+{
+    return dec_compare(fn, B_NE, v, dec_zero(fn, t), t, line);
+}
+
+/* v, of type from, converted to the type to; one of them decimal */
+static int dec_convert(struct ir_func *fn, int v, struct type *from, struct type *to,
+                       int line)
+{
+    char name[40];
+    if (is_dec(from) && is_dec(to)) {
+        if (from->is_dec == to->is_dec)
+            return v;
+        snprintf(name, sizeof name, "__bid_%s%s%s2",
+                 to->is_dec > from->is_dec ? "extend" : "trunc", dec_sfx(from), dec_sfx(to));
+        struct type *tys[1] = { from };
+        return dec_call(fn, name, to, 1, &v, tys, line);
+    }
+    if (is_dec(to)) {
+        if (from->kind == TY_BOOL)
+            from = ty_base(TY_INT, 0);
+        if (ty_is_float(from)) {
+            /* through double: float's and double's names */
+            struct type *bt = from->kind == TY_FLOAT ? from : ty_base(TY_DOUBLE, 0);
+            if (bt != from)
+                v = gen_convert(fn, v, from, bt);
+            const char *bs = bt->kind == TY_FLOAT ? "sf" : "df";
+            int wider = to->is_dec > ty_size(bt);
+            snprintf(name, sizeof name, "__bid_%s%s%s", wider || to->is_dec == ty_size(bt) ?
+                     "extend" : "trunc", bs, dec_sfx(to));
+            if (to->is_dec < ty_size(bt))
+                snprintf(name, sizeof name, "__bid_trunc%s%s", bs, dec_sfx(to));
+            struct type *tys[1] = { bt };
+            return dec_call(fn, name, to, 1, &v, tys, line);
+        }
+        /* an integer: through int or long long, by its signedness */
+        int wide = ty_size(from) > 4, uns = from->is_unsigned;
+        struct type *it = wide ? ty_llong(uns) : ty_base(TY_INT, uns);
+        v = gen_convert(fn, v, from, it);
+        snprintf(name, sizeof name, "__bid_float%s%s%s", uns ? "uns" : "", wide ? "di" : "si",
+                 dec_sfx(to));
+        struct type *tys[1] = { it };
+        return dec_call(fn, name, to, 1, &v, tys, line);
+    }
+    /* out of a decimal */
+    if (to->kind == TY_BOOL)
+        return gen_convert(fn, dec_truth(fn, v, from, line), ty_base(TY_INT, 0), to);
+    if (ty_is_float(to)) {
+        struct type *bt = to->kind == TY_FLOAT ? to : ty_base(TY_DOUBLE, 0);
+        const char *bs = bt->kind == TY_FLOAT ? "sf" : "df";
+        snprintf(name, sizeof name, "__bid_%s%s%s",
+                 ty_size(bt) > from->is_dec ? "extend" : "trunc", dec_sfx(from), bs);
+        if (from->is_dec == 4 && bt->kind == TY_FLOAT)
+            snprintf(name, sizeof name, "__bid_truncsdsf");
+        struct type *tys[1] = { from };
+        int r = dec_call(fn, name, bt, 1, &v, tys, line);
+        return bt == to ? r : gen_convert(fn, r, bt, to);
+    }
+    if (to->kind == TY_VOID)
+        return v;
+    int wide = ty_size(to) > 4, uns = to->is_unsigned;
+    struct type *it = wide ? ty_llong(uns) : ty_base(TY_INT, uns);
+    snprintf(name, sizeof name, "__bid_fix%s%s%s", uns ? "uns" : "", dec_sfx(from),
+             wide ? "di" : "si");
+    struct type *tys[1] = { from };
+    int r = dec_call(fn, name, it, 1, &v, tys, line);
+    return gen_convert(fn, r, it, to);
+}
+
+static int dec_op(const struct expr *e)
+{
+    switch (e->kind) {
+    case EXPR_FNUM: case EXPR_NEG: case EXPR_INCDEC: case EXPR_COMPOUND:
+        return is_dec(e->ty);
+    case EXPR_BINOP:   /* (&& and || test each side with truth()) */
+        return e->op != B_LAND && e->op != B_LOR &&
+               (is_dec(e->ty) || is_dec(e->lhs->ty) || is_dec(e->rhs->ty));
+    case EXPR_CAST:
+        return (is_dec(e->ty) || is_dec(e->rhs->ty)) &&
+               !(is_dec(e->ty) && is_dec(e->rhs->ty) && e->ty->is_dec == e->rhs->ty->is_dec);
+    case EXPR_NOT:
+        return is_dec(e->rhs->ty);
+    default:
+        return 0;
+    }
+}
+
+/* a op b in decimal type t */
+static int dec_arith(struct ir_func *fn, enum binop op, int a, int b, struct type *t,
+                     int line)
+{
+    const char *o = op == B_ADD ? "add" : op == B_SUB ? "sub" : op == B_MUL ? "mul" : "div";
+    if (op != B_ADD && op != B_SUB && op != B_MUL && op != B_DIV)
+        diag_fatal(fn->src ? fn->src->file : NULL, line, "%s has no operator %d",
+                   ty_name(t), (int)op);
+    char name[32];
+    snprintf(name, sizeof name, "__bid_%s%s3", o, dec_sfx(t));
+    struct type *tys[2] = { t, t };
+    int vals[2] = { a, b };
+    return dec_call(fn, name, t, 2, vals, tys, line);
+}
+
+static int gen_decimal(struct ir_func *fn, struct expr *e)
+{
+    switch (e->kind) {
+    case EXPR_FNUM:
+        if (!e->bigv)
+            diag_fatal(fn->src ? fn->src->file : NULL, e->line,
+                       "internal: a %s constant without its bits", ty_name(e->ty));
+        return dec_const(fn, e->ty, e->bigv);
+    case EXPR_CAST:
+        return dec_convert(fn, gen_expr(fn, e->rhs), e->rhs->ty, e->ty, e->line);
+    case EXPR_NEG: {
+        char name[32];
+        snprintf(name, sizeof name, "__embcc_bid_neg%s", dec_sfx(e->ty));
+        int v = gen_expr(fn, e->rhs);
+        struct type *tys[1] = { e->ty };
+        return dec_call(fn, name, e->ty, 1, &v, tys, e->line);
+    }
+    case EXPR_NOT: {
+        int v = gen_expr(fn, e->rhs);
+        int t = dec_truth(fn, v, e->rhs->ty, e->line);
+        return emit_cmp(fn, B_EQ, t, emit_const(fn, 0, 4), 4, 1);
+    }
+    case EXPR_BINOP: {
+        if (e->op == B_EQ || e->op == B_NE || e->op == B_LT || e->op == B_LE ||
+            e->op == B_GT || e->op == B_GE)
+            return dec_compare(fn, e->op, gen_expr(fn, e->lhs), gen_expr(fn, e->rhs),
+                               e->lhs->ty, e->line);
+        int a = gen_expr(fn, e->lhs), b = gen_expr(fn, e->rhs);
+        return dec_arith(fn, e->op, a, b, e->ty, e->line);
+    }
+    case EXPR_INCDEC: {
+        int lv = gen_addr(fn, e->lhs);
+        int old = emit_load(fn, lv, e->lhs->ty);
+        int one = dec_convert(fn, emit_const(fn, 1, 4), ty_base(TY_INT, 0), e->lhs->ty, e->line);
+        int nv = dec_arith(fn, e->delta > 0 ? B_ADD : B_SUB, old, one, e->lhs->ty, e->line);
+        emit_store(fn, lv, nv, e->lhs->ty);
+        return e->is_post ? old : nv;
+    }
+    case EXPR_COMPOUND: {
+        int lv = gen_addr(fn, e->lhs);
+        int old = emit_load(fn, lv, e->lhs->ty);
+        struct type *ct = e->cast_ty && is_dec(e->cast_ty) ? e->cast_ty : e->lhs->ty;
+        int a = dec_convert(fn, old, e->lhs->ty, ct, e->line);
+        int b = gen_expr(fn, e->rhs);
+        if (!ty_equal(e->rhs->ty, ct))
+            b = dec_convert(fn, b, e->rhs->ty, ct, e->line);
+        int r = dec_arith(fn, e->op, a, b, ct, e->line);
+        r = dec_convert(fn, r, ct, e->lhs->ty, e->line);
+        emit_store(fn, lv, r, e->lhs->ty);
+        return r;
+    }
+    default:
+        diag_fatal(fn->src ? fn->src->file : NULL, e->line, "internal: decimal expression");
     }
     return 0;
 }
@@ -4533,11 +4762,15 @@ static int gen_builtin_more(struct ir_func *fn, struct expr *e)
 
 static int gen_bitint(struct ir_func *fn, struct expr *e);
 static int bitint_op(const struct expr *e);
+static int gen_decimal(struct ir_func *fn, struct expr *e);
+static int dec_op(const struct expr *e);
 
 static int gen_expr_inner(struct ir_func *fn, struct expr *e)
 {
     if (e->ty && bitint_op(e))
         return gen_bitint(fn, e);
+    if (e->ty && dec_op(e))
+        return gen_decimal(fn, e);
     switch (e->kind) {
     case EXPR_NUM:
         return emit_const(fn, e->num, ty_w(e->ty));

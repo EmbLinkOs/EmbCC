@@ -102,7 +102,7 @@ int ty_generic_same(const struct type *a, const struct type *b)
     if (a->kind != b->kind || a->is_unsigned != b->is_unsigned ||
         a->is_llong != b->is_llong || a->is_volatile != b->is_volatile ||
         a->is_atomic != b->is_atomic || a->is_const != b->is_const ||
-        a->is_flash != b->is_flash)
+        a->is_flash != b->is_flash || a->is_dec != b->is_dec)
         return 0;
     if (a->kind == TY_CHAR && ty_is_plain_char(a) != ty_is_plain_char(b))
         return 0;
@@ -409,6 +409,37 @@ struct type *ty_ptr(struct type *pointee)
     t->kind = TY_PTR;
     t->pointee = pointee;
     return t;
+}
+
+/* Decimal floating point is GCC's on x86-64 and AArch64 (BID), and so
+ * here; Darwin's long double is a double, which leaves _Decimal128 no
+ * register of its own size, so not there. */
+int ty_decimal_ok(void)
+{
+    return (target_get() == TARGET_X86_64 || target_get() == TARGET_AARCH64) &&
+           target_os_get() != TGT_OS_DARWIN;
+}
+
+struct type *ty_decimal(int bytes)
+{
+    static struct type *made[3];
+    int k = bytes == 4 ? 0 : bytes == 8 ? 1 : 2;
+    if (!ty_decimal_ok())
+        return NULL;
+    if (!made[k]) {
+        struct type *t = xcalloc(1, sizeof *t);
+        if (bytes == 4)
+            *t = *ty_base(TY_FLOAT, 0);
+        else if (bytes == 8)
+            *t = *ty_base(TY_DOUBLE, 0);
+        else if (target_get() == TARGET_AARCH64)
+            *t = *ty_base(TY_LDOUBLE, 0);     /* binary128, in a q register */
+        else
+            *t = *ty_base(TY_INT128, 1);
+        t->is_dec = bytes;
+        made[k] = t;
+    }
+    return made[k];
 }
 
 struct type *ty_nullptr(void)
@@ -834,7 +865,7 @@ int ty_compatible(const struct type *a, const struct type *b, int top)
     }
     if (a->kind != b->kind || a->is_unsigned != b->is_unsigned ||
         a->bitint != b->bitint || a->is_fp16 != b->is_fp16 ||
-        a->is_bf16 != b->is_bf16)
+        a->is_bf16 != b->is_bf16 || a->is_dec != b->is_dec)
         return 0;
     const struct type *ca = a->canon ? a->canon : a;
     const struct type *cb = b->canon ? b->canon : b;
@@ -875,7 +906,7 @@ int ty_equal(const struct type *a, const struct type *b)
 {
     if (a->kind != b->kind || a->is_unsigned != b->is_unsigned ||
         a->bitint != b->bitint || a->is_fp16 != b->is_fp16 ||
-        a->is_bf16 != b->is_bf16)
+        a->is_bf16 != b->is_bf16 || a->is_dec != b->is_dec)
         return 0;
     /* `long` against `long long`. C says they are distinct types
      * whatever the target, but this compiler has always let them
@@ -925,7 +956,7 @@ int ty_is_integer(const struct type *t)
 {
     return t->kind == TY_BOOL || t->kind == TY_CHAR ||
            t->kind == TY_SHORT || t->kind == TY_INT || t->kind == TY_LONG ||
-           t->kind == TY_INT128 || (t->kind == TY_STRUCT && t->bitint);
+           (t->kind == TY_INT128 && !t->is_dec) || (t->kind == TY_STRUCT && t->bitint);
 }
 
 /* A long double with a representation of its own -- x87's 80 bits or a
@@ -938,6 +969,8 @@ int ty_is_xldouble(const struct type *t)
     return t && t->kind == TY_LDOUBLE && target_ldouble_size() > 8;
 }
 
+/* (x86-64's _Decimal128 travels as an unsigned __int128, in the integer
+ * registers: arithmetic, but not floating to the lowerings) */
 int ty_is_float(const struct type *t)
 {
     return t->kind == TY_FLOAT || t->kind == TY_DOUBLE ||
@@ -946,7 +979,7 @@ int ty_is_float(const struct type *t)
 
 int ty_is_arith(const struct type *t)
 {
-    return ty_is_integer(t) || ty_is_float(t);
+    return ty_is_integer(t) || ty_is_float(t) || t->is_dec;
 }
 
 int ty_is_scalar(const struct type *t)
@@ -1191,6 +1224,10 @@ const char *ty_name(const struct type *t)
     which = (which + 1) & 3;
     if (t->kind == TY_PTR && t->is_nullptr)
         return "nullptr_t";
+    if (t->is_dec && t->kind != TY_PTR) {
+        snprintf(buf, bufsz, "%s_Decimal%d", t->is_const ? "const " : "", 8 * t->is_dec);
+        return buf;
+    }
     const char *base;
     int stars = 0;
     int dims[4];
@@ -1419,6 +1456,12 @@ static struct type *bitint_common(struct type *a, struct type *b)
 
 struct type *ty_arith_common(struct type *a, struct type *b)
 {
+    /* C23's decimal types: the wider of two, and a decimal outranks every
+     * integer (sema refuses one with a binary floating operand) */
+    if (a->is_dec || b->is_dec) {
+        int n = a->is_dec > b->is_dec ? a->is_dec : b->is_dec;
+        return ty_decimal(n);
+    }
     /* Floating types outrank every integer, and long double > double >
      * float — the usual arithmetic conversions, floating half first. */
     if (a->kind == TY_LDOUBLE || b->kind == TY_LDOUBLE)

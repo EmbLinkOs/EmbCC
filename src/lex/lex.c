@@ -194,6 +194,9 @@ static const struct {
     { "_Float128", TOK_KW_FLOAT128 },
     { "_Float32x", TOK_KW_DOUBLE },
     { "_Float64x", TOK_KW_FLOAT64X },
+    { "_Decimal32", TOK_KW_DECIMAL32 },
+    { "_Decimal64", TOK_KW_DECIMAL64 },
+    { "_Decimal128", TOK_KW_DECIMAL128 },
     { "__float128", TOK_KW_FLOAT128 },
     { "_Float16", TOK_KW_FLOAT16 },
     { "__fp16", TOK_KW_FP16 },
@@ -1375,8 +1378,18 @@ static void lex_raw(struct lexer *lx)
             t->fnum_is_imag = 0;
             /* suffixes: at most one of f/l/f16, and a GNU imaginary i/j on
              * either side of it (1.0fi, 1.0if, 2.5i) */
+            t->fnum_dec = 0;
             for (;;) {
-                if ((*fend == 'i' || *fend == 'I' || *fend == 'j' ||
+                if (((fend[0] == 'd' || fend[0] == 'D') &&
+                     (fend[1] == 'f' || fend[1] == 'F' || fend[1] == 'd' ||
+                      fend[1] == 'D' || fend[1] == 'l' || fend[1] == 'L')) &&
+                    !t->fnum_is_float && !t->fnum_is_ld && !t->fnum_is_f16 &&
+                    !t->fnum_dec) {
+                    /* C23's df, dd and dl: _Decimal32, 64, 128 */
+                    int c = fend[1] | 32;
+                    t->fnum_dec = c == 'f' ? 4 : c == 'd' ? 8 : 16;
+                    fend += 1;
+                } else if ((*fend == 'i' || *fend == 'I' || *fend == 'j' ||
                      *fend == 'J') && !t->fnum_is_imag) {
                     t->fnum_is_imag = 1;
                 } else if ((*fend == 'f' || *fend == 'F') && fend[1] == '1' &&
@@ -1420,6 +1433,12 @@ static void lex_raw(struct lexer *lx)
             }
             t->text = xstrndup(lx->p, (size_t)(numend - lx->p));
             t->fnum = lit_value(t->text, t->fnum_is_float);
+            if (t->fnum_dec) {
+                if (t->text[0] == '0' && (t->text[1] == 'x' || t->text[1] == 'X'))
+                    diag_fatal(lx->file, lx->line, "a decimal floating constant "
+                               "cannot be hexadecimal");
+                lex_decimal_encode(t->text, t->fnum_dec, t->dec_bits);
+            }
             if (isalnum((unsigned char)*fend) || *fend == '.')
                 diag_fatal(lx->file, lx->line,
                            "malformed floating constant");
@@ -1876,4 +1895,149 @@ const char *tok_describe(const struct token *t)
         return buf;
     }
     return "?";
+}
+
+/* ---- decimal floating constants ---------------------------------------- */
+
+/* The BID encoding of the constant whose digits are text: its digits and
+ * exponent read exactly, then the first p significant ones kept, rounded
+ * half to even by the rest -- the quantum written (1.50dd keeps its two
+ * places), as GCC keeps it -- and fitted to the exponent range, past
+ * which it is an infinity or underflows. */
+void lex_decimal_encode(const char *text, int bytes, unsigned long long out[2])
+{
+    int p = bytes == 4 ? 7 : bytes == 8 ? 16 : 34;
+    int qmin = bytes == 4 ? -101 : bytes == 8 ? -398 : -6176;
+    int qmax = bytes == 4 ? 90 : bytes == 8 ? 369 : 6111;
+    int bias = -qmin;
+    char dig[128];
+    int nd = 0, dropped = 0, after = 0, seen_dot = 0, sticky = 0, rnd = -1;
+    long ex = 0;
+    const char *q = text;
+    for (; *q && *q != 'e' && *q != 'E'; q++) {
+        if (*q == '.') {
+            seen_dot = 1;
+            continue;
+        }
+        if (*q < '0' || *q > '9')
+            continue;                       /* a digit separator */
+        if (seen_dot)
+            after++;
+        if (nd == 0 && *q == '0')
+            continue;                       /* a leading zero */
+        if (nd < p)
+            dig[nd++] = *q;
+        else {
+            if (rnd < 0)
+                rnd = *q - '0';
+            else if (*q != '0')
+                sticky = 1;
+            dropped++;
+        }
+    }
+    if (*q == 'e' || *q == 'E')
+        ex = strtol(q + 1, NULL, 10);
+    long e = ex - after + dropped;
+    /* the coefficient, as two halves */
+    unsigned long long lo = 0, hi = 0;
+    for (int i = 0; i < nd; i++) {
+        /* (hi:lo) * 10 + d */
+        unsigned long long d = (unsigned long long)(dig[i] - '0');
+        unsigned long long l0 = (lo & 0xffffffffULL) * 10 + d;
+        unsigned long long l1 = (lo >> 32) * 10 + (l0 >> 32);
+        lo = (l1 << 32) | (l0 & 0xffffffffULL);
+        hi = hi * 10 + (l1 >> 32);
+    }
+    int ndig = nd;
+    /* below the smallest exponent: more digits go */
+    while (e < qmin && (lo || hi)) {
+        /* (hi:lo) / 10, the remainder the next round digit */
+        unsigned long long r = hi % 10;
+        hi /= 10;
+        unsigned long long x = (r << 32) | (lo >> 32);
+        unsigned long long qh = x / 10;
+        r = x % 10;
+        x = (r << 32) | (lo & 0xffffffffULL);
+        unsigned long long ql = x / 10;
+        r = x % 10;
+        lo = (qh << 32) | ql;
+        if (rnd > 0 || sticky)
+            sticky = 1;
+        if (rnd >= 0 && rnd != 0)
+            sticky = 1;
+        rnd = (int)r;
+        e++;
+        ndig--;
+    }
+    if (e < qmin)
+        e = qmin;
+    if (rnd > 5 || (rnd == 5 && (sticky || (lo & 1)))) {
+        /* + 1 */
+        lo++;
+        if (!lo)
+            hi++;
+        /* 10^p: one digit fewer, one more in the exponent */
+        int ten = 1;
+        unsigned long long tl = 1, th = 0;
+        for (int i = 0; i < p && ten; i++) {
+            unsigned long long l0 = (tl & 0xffffffffULL) * 10;
+            unsigned long long l1 = (tl >> 32) * 10 + (l0 >> 32);
+            tl = (l1 << 32) | (l0 & 0xffffffffULL);
+            th = th * 10 + (l1 >> 32);
+        }
+        if (tl == lo && th == hi) {
+            unsigned long long r = hi % 10;
+            hi /= 10;
+            unsigned long long x = (r << 32) | (lo >> 32);
+            unsigned long long qh = x / 10;
+            r = x % 10;
+            x = (r << 32) | (lo & 0xffffffffULL);
+            lo = (qh << 32) | (x / 10);
+            e++;
+        }
+    }
+    (void)ndig;
+    /* past the largest exponent: zeros padded on while they fit */
+    while (e > qmax && (lo || hi)) {
+        int digits = 0;
+        unsigned long long tl = lo, th = hi;
+        while (tl || th) {
+            unsigned long long r = th % 10;
+            th /= 10;
+            unsigned long long x = (r << 32) | (tl >> 32);
+            unsigned long long qh = x / 10;
+            r = x % 10;
+            x = (r << 32) | (tl & 0xffffffffULL);
+            tl = (qh << 32) | (x / 10);
+            digits++;
+        }
+        if (digits >= p)
+            break;
+        unsigned long long l0 = (lo & 0xffffffffULL) * 10;
+        unsigned long long l1 = (lo >> 32) * 10 + (l0 >> 32);
+        lo = (l1 << 32) | (l0 & 0xffffffffULL);
+        hi = hi * 10 + (l1 >> 32);
+        e--;
+    }
+    if (!lo && !hi && e > qmax)
+        e = qmax;
+    out[0] = out[1] = 0;
+    if (e > qmax) {                          /* an infinity */
+        if (bytes == 16)
+            out[1] = 0x1eULL << 58;
+        else
+            out[0] = 0x1eULL << (8 * bytes - 6);
+        return;
+    }
+    unsigned long long be = (unsigned long long)(e + bias);
+    if (bytes == 16) {
+        out[0] = lo;
+        out[1] = be << 49 | hi;
+        return;
+    }
+    int t = bytes == 4 ? 23 : 53, w = 8 * bytes;
+    if (lo >> t)
+        out[0] = 3ULL << (w - 3) | be << (t - 2) | (lo & ((1ULL << (t - 2)) - 1));
+    else
+        out[0] = be << t | lo;
 }

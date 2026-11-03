@@ -1105,6 +1105,20 @@ static struct type *arith_common(struct type *a, struct type *b)
     return ty_arith_common(a, b);
 }
 
+/* arith_common of an operator's operands, with C23's constraint that a
+ * decimal floating operand does not meet a binary floating one (6.3.1.8:
+ * neither converts to the other implicitly) */
+static struct type *arith_common_chk(struct unit *u, const struct expr *e,
+                                     struct type *a, struct type *b)
+{
+    if ((a->is_dec && ty_is_float(b) && !b->is_dec) ||
+        (b->is_dec && ty_is_float(a) && !a->is_dec))
+        sema_error_at(u, e->line, e->col, "%s and %s cannot be operands together: "
+                      "a decimal and a binary floating type do not convert "
+                      "to each other implicitly; cast one", ty_name(a), ty_name(b));
+    return arith_common(a, b);
+}
+
 static void need_scalar(struct unit *u, struct expr *e, const char *what)
 {
     if (!ty_is_scalar(e->ty))
@@ -4709,7 +4723,7 @@ static void check_expr_main(struct unit *u, struct func *f, struct scope *sc,
             e->lhs = cx_cast(e->lhs, e->ty);
             e->rhs = cx_cast(e->rhs, e->ty);
         } else if (ty_is_arith(a) && ty_is_arith(b)) {
-            e->ty = arith_common(a, b);
+            e->ty = arith_common_chk(u, e, a, b);
             cvt_check(u, e->lhs, e->ty, 0, e->line, e->col);
             cvt_check(u, e->rhs, e->ty, 0, e->line, e->col);
             e->lhs = mk_cast(e->lhs, e->ty);
@@ -4812,7 +4826,7 @@ static void check_expr_main(struct unit *u, struct func *f, struct scope *sc,
             need_integer(u, e->lhs, "this operator");
             need_integer(u, e->rhs, "this operator");
         }
-        e->cast_ty = arith_common(e->lhs->ty, e->rhs->ty);
+        e->cast_ty = arith_common_chk(u, e, e->lhs->ty, e->rhs->ty);
         cvt_compound(u, e);
         e->rhs = mk_cast(e->rhs, e->cast_ty);
         e->ty = e->lhs->ty;
@@ -5103,7 +5117,7 @@ static void check_expr_main(struct unit *u, struct func *f, struct scope *sc,
             } else {
                 need_arith(u, e->lhs, "arithmetic");
                 need_arith(u, e->rhs, "arithmetic");
-                e->ty = arith_common(lt, rt);
+                e->ty = arith_common_chk(u, e, lt, rt);
                 cvt_check(u, e->lhs, e->ty, 0, e->line, e->col);
                 cvt_check(u, e->rhs, e->ty, 0, e->line, e->col);
                 e->lhs = mk_cast(e->lhs, e->ty);
@@ -5138,7 +5152,7 @@ static void check_expr_main(struct unit *u, struct func *f, struct scope *sc,
             } else {
                 need_arith(u, e->lhs, "comparison");
                 need_arith(u, e->rhs, "comparison");
-                struct type *ct = arith_common(lt, rt);
+                struct type *ct = arith_common_chk(u, e, lt, rt);
                 /* -Wsign-compare: the conversion the standard prescribes
                  * turns the signed side unsigned, so a negative value
                  * compares as a very large one. Only worth saying when the
@@ -5170,7 +5184,7 @@ static void check_expr_main(struct unit *u, struct func *f, struct scope *sc,
         case B_DIV:
             need_arith(u, e->lhs, "arithmetic");
             need_arith(u, e->rhs, "arithmetic");
-            e->ty = arith_common(lt, rt);
+            e->ty = arith_common_chk(u, e, lt, rt);
             cvt_check(u, e->lhs, e->ty, 0, e->line, e->col);
             cvt_check(u, e->rhs, e->ty, 0, e->line, e->col);
             e->lhs = mk_cast(e->lhs, e->ty);
@@ -5179,7 +5193,7 @@ static void check_expr_main(struct unit *u, struct func *f, struct scope *sc,
         default: /* MOD AND OR XOR — integers only, as in C */
             need_integer(u, e->lhs, "this operator");
             need_integer(u, e->rhs, "this operator");
-            e->ty = arith_common(lt, rt);
+            e->ty = arith_common_chk(u, e, lt, rt);
             cvt_check(u, e->lhs, e->ty, 0, e->line, e->col);
             cvt_check(u, e->rhs, e->ty, 0, e->line, e->col);
             e->lhs = mk_cast(e->lhs, e->ty);
@@ -6345,6 +6359,10 @@ static double fold_round(const struct type *t, double v)
 static int const_fold_f(const struct expr *e, double *out)
 {
     double a, b; long iv;
+    /* a decimal value is not a binary one: nothing here folds it */
+    if ((e->ty && e->ty->is_dec) ||
+        (e->kind == EXPR_CAST && e->rhs && e->rhs->ty && e->rhs->ty->is_dec))
+        return 0;
     /* a long double subexpression folds exactly, then narrows ONCE (going
      * through a host double first would round twice) */
     if (e->ty && e->ty->kind == TY_LDOUBLE) {
@@ -7344,7 +7362,7 @@ static void lower_static_bytes(struct unit *u, int line, int size,
             continue;
         }
         /* A long double slot: its exact value in the target's format */
-        if (v[k].ty->kind == TY_LDOUBLE) {
+        if (v[k].ty->kind == TY_LDOUBLE && !v[k].ty->is_dec) {
             struct ldf *x = const_fold_ld(v[k].e);
             if (!x)
                 sema_error_line(u, line,
@@ -7358,6 +7376,47 @@ static void lower_static_bytes(struct unit *u, int line, int size,
              * double (16 copied the rest of lb, never written, over the
              * next member or past the image) */
             memcpy(bytes + v[k].off, lb, (size_t)lz);
+            continue;
+        }
+        /* a decimal slot: the constant's BID bits -- a decimal literal's
+         * own (narrowed or widened through its digits), an integer's or a
+         * binary floating constant's, encoded from their digits */
+        if (v[k].ty->is_dec) {
+            const struct expr *src = v[k].e;
+            while (src->kind == EXPR_CAST && src->rhs)
+                src = src->rhs;
+            char txt[96];
+            long iv2;
+            double dv2;
+            if (src->kind == EXPR_FNUM && src->ty && src->ty->is_dec && src->bigv &&
+                src->ty->is_dec == v[k].ty->is_dec) {
+                unsigned long long b2[2] = { src->bigv[0], src->bigv[1] };
+                for (int i = 0; i < v[k].ty->is_dec; i++)
+                    bytes[v[k].off + i] = (unsigned char)(b2[i / 8] >> (8 * (i % 8)));
+                continue;
+            }
+            if (src->ty && src->ty->is_dec)
+                sema_error_line(u, line, "a static %s initializer from another "
+                                "decimal type is not folded here; write the constant "
+                                "with this type's suffix", ty_name(v[k].ty));
+            else if (src->ty && ty_is_integer(src->ty) && const_fold(src, &iv2))
+                snprintf(txt, sizeof txt, src->ty->is_unsigned ? "%lu" : "%ld", iv2);
+            else if (const_fold_f(src, &dv2))
+                snprintf(txt, sizeof txt, "%.40e", dv2);
+            else
+                sema_error_line(u, line, "a static %s initializer must be a constant",
+                                ty_name(v[k].ty));
+            unsigned long long b2[2];
+            int neg = txt[0] == '-';
+            lex_decimal_encode(txt + neg, v[k].ty->is_dec, b2);
+            if (neg) {
+                if (v[k].ty->is_dec == 16)
+                    b2[1] |= 1ULL << 63;
+                else
+                    b2[0] |= 1ULL << (8 * v[k].ty->is_dec - 1);
+            }
+            for (int i = 0; i < v[k].ty->is_dec; i++)
+                bytes[v[k].off + i] = (unsigned char)(b2[i / 8] >> (8 * (i % 8)));
             continue;
         }
         /* A float/double slot: fold to the value, store its IEEE-754 bit
@@ -7420,7 +7479,7 @@ static void lower_static_bytes(struct unit *u, int line, int size,
                                 (unsigned long)lv[i]);
             continue;
         }
-        if (v[k].ty->kind == TY_INT128) {
+        if (v[k].ty->kind == TY_INT128 && !v[k].ty->is_dec) {
             struct w128 w;
             if (!const_fold128(v[k].e, &w))
                 sema_error_line(u, line,
