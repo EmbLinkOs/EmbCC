@@ -4818,6 +4818,9 @@ char *cx_emit_unit(void)
         sb_put(&out, "}");
         if (c->packed)
             sb_put(&out, " __attribute__((packed))");
+        else if (c->pack)             /* (a union under #pragma pack) */
+            sb_printf(&out, " __attribute__((packed, aligned(%ld)))",
+                      c->align);
         if (c->align_attr)
             sb_printf(&out, " __attribute__((aligned(%ld)))", c->align_attr);
         sb_put(&out, ";\n");

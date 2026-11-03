@@ -205,6 +205,12 @@ static void claimed_offset(struct cclass *m, int k, struct claim *cl)
     m->vbases[k].claimed = 1;
 }
 
+/* #pragma pack(N): no member, base or vptr aligned past N (as C) */
+static long pack_cap(const struct cclass *c, long a)
+{
+    return c->pack && a > c->pack ? c->pack : a;
+}
+
 static void layout(struct cclass *c)
 {
     long bits = 0, align = 1, size = 0;
@@ -235,7 +241,7 @@ static void layout(struct cclass *c)
         /* the vptr, at 0 (the primary virtual base's, or the class's),
          * aligned as a pointer is (one byte on AVR, two on ColdFire) */
         size = cx_ptr_size();
-        align = ct_align(ct_ptr(ct_basic(CT_VOID)));
+        align = pack_cap(c, ct_align(ct_ptr(ct_basic(CT_VOID))));
         bits = 8 * size;
     }
     /* the primary base first, at 0; then the other bases in order */
@@ -245,7 +251,7 @@ static void layout(struct cclass *c)
             struct cclass *bc = b->cls;
             if (b->is_virtual || (pass == 0) != (bc == c->primary))
                 continue;
-            long ba = bc->nvalign;
+            long ba = pack_cap(c, bc->nvalign);
             if (bc->empty) {
                 long off = 0;
                 if (esub_conflict(bc, off)) {
@@ -282,13 +288,14 @@ static void layout(struct cclass *c)
                                : ct_align(t);
         if (c->packed)
             fa = 1;
+        fa = pack_cap(c, fa);
         if (ms) {
             long tsize = fs * 8;
             long w = fl->bitwidth >= 0 ? fl->bitwidth : tsize;
             int isbf = fl->bitwidth >= 0, saved = ms_prev;
             long saved_size = ms_prev_size;
             if (fl->bitwidth < 0 && fl->align_attr > fa)
-                fa = fl->align_attr;
+                fa = pack_cap(c, fl->align_attr);
             if (!isbf || w != 0 || (ms_prev && ms_prev_w != 0))
                 if (fa > align)
                     align = fa;
@@ -337,6 +344,7 @@ static void layout(struct cclass *c)
         }
         if (fl->bitwidth < 0 && fl->align_attr > fa)
             fa = fl->align_attr;      /* alignas / aligned: even packed */
+        fa = pack_cap(c, fa);         /* ... but not #pragma pack */
         if (c->is_union) {
             fl->off = 0;
             long sz = fl->bitwidth >= 0 ? (fl->bitwidth + 7) / 8 : fs;
@@ -440,15 +448,15 @@ static void layout(struct cclass *c)
                     off += vc->nvalign;
             }
         } else {
-            off = round_up(dsize, vc->nvalign);
+            off = round_up(dsize, pack_cap(c, vc->nvalign));
             dsize = off + vc->nvsize;
         }
         v->off = off;
         esub_add(vc, off);
         if (off + vc->nvsize > size)
             size = off + vc->nvsize;
-        if (vc->nvalign > align)
-            align = vc->nvalign;
+        if (pack_cap(c, vc->nvalign) > align)
+            align = pack_cap(c, vc->nvalign);
     }
     for (int i = 0; i < c->nvbases; i++)
         claimed_offset(c, i, cl);
@@ -878,7 +886,9 @@ void class_complete(struct cclass *c)
     virtual_bases(c);
     layout(c);
     c->complete = 1;
-    c->explicit_layout = (c->nbases > 0 || c->dynamic) && !plain_layout(c);
+    c->explicit_layout = ((c->nbases > 0 || c->dynamic) && !plain_layout(c)) ||
+                         (c->pack && !c->is_union);   /* (offsets C's pack
+                                                       * would not know) */
     int named = 0;
     for (int i = 0; i < c->nfields; i++) {
         struct cfield *fl = c->fields[i];

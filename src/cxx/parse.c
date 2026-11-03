@@ -3965,6 +3965,8 @@ static struct cty *parse_class_body(struct cclass *c, enum tok_kind kw,
         inj->type = ct_class(c);
     }
     class_depth++;
+    int lbrace = cx_pos;
+    c->pack = cx_pack_at(lbrace);
     cx_expect(TOK_LBRACE, "'{'");
     int access = c->is_struct ? CA_PUBLIC : CA_PRIVATE;
     while (cx_kind() != TOK_RBRACE) {
@@ -3972,6 +3974,9 @@ static struct cty *parse_class_body(struct cclass *c, enum tok_kind kw,
             cx_error(at, "unterminated class '%s'", c->name ? c->name : "");
         parse_member(c, &access);
     }
+    if (cx_pack_between(lbrace, cx_pos + 1))
+        cx_error(at, "#pragma pack inside a class body is not supported: "
+                     "put it before the class");
     cx_advance();
     struct attrs ta;
     memset(&ta, 0, sizeof ta);

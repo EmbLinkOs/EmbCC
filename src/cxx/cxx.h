@@ -31,6 +31,8 @@ extern int cx_ntoks;
 extern int cx_pos;            /* the parser's cursor */
 
 void cx_tokenize(const char *file, const char *src);
+int cx_pack_at(int pos);               /* #pragma pack in effect there */
+int cx_pack_between(int from, int to); /* ... changed in (from, to)? */
 static inline struct ctok *cx_cur(void) { return &cx_toks[cx_pos]; }
 static inline struct ctok *cx_peek(int k)
 {
@@ -842,6 +844,7 @@ struct cclass {
     int vtable_done, rtti_used, rtti_done;
     long align_attr;          /* __attribute__((aligned)) / alignas */
     int packed;
+    int pack;                 /* #pragma pack(N): members' alignment cap */
     int is_final;             /* declared `final` */
     int explicit_spec;        /* an instance given as template<> ... */
     struct ctarg *inst_bound; /* ... the partial specialization's own

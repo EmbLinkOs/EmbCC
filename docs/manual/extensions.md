@@ -1503,6 +1503,10 @@ definition starts, including a definition inside a function. `_Pragma("pack(1)")
 is the same as `#pragma pack(1)`. The argument is not macro-expanded, as
 in GCC on ELF targets.
 
+In C++ the limit also caps the alignment of a class's bases and of its
+vptr, as in GCC and Clang; a class template's instances take the limit in
+effect where the template is defined, not where it is used.
+
 | Refused | Diagnostic |
 |---|---|
 | A value other than 0, 1, 2, 4, 8 or 16, or a macro name | `#pragma pack wants 1, 2, 4, 8 or 16` |
@@ -1510,9 +1514,8 @@ in GCC on ELF targets.
 | `pack(pop, ...)` with arguments | `#pragma pack(pop, ...) with a name or count is not supported` |
 | `pack(pop)` with nothing saved | `#pragma pack(pop) without a matching push` |
 | More than 32 nested pushes | `#pragma pack(push) nested too deeply` |
-| Inside a structure body | `#pragma pack inside a struct body is not supported: put it before the struct` |
+| Inside a structure body | `#pragma pack inside a struct body is not supported: put it before the struct` (C++: `... inside a class body ...: put it before the class`) |
 | Without parentheses, `#pragma pack 1` | `#pragma pack needs its arguments in parentheses` |
-| In C++ | `#pragma pack is not supported in C++: it would change the layout and EmbCC would ignore it. Use __attribute__((packed)) on the struct` |
 
 ### `#pragma once`
 

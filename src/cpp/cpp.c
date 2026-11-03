@@ -2377,15 +2377,11 @@ enum cond_state { COND_LIVE, COND_DEAD, COND_DONE };
  * declare. The arguments are NOT macro-expanded, as gcc does not expand
  * them on ELF targets: `pack(push, N)` with N a macro is a push labelled
  * N there (which the parser refuses), not a pack to N's value. `text`
- * starts after the word `pack`. C++'s parser has no use for the marker,
- * and there the pragma is still refused by name. */
+ * starts after the word `pack`. C++'s token array drops the marker and
+ * keeps where it was (cxx/tok.c). */
 static void emit_pack(struct src *s, const char *text, size_t n,
                       struct tbuf *out)
 {
-    if (cxx_has_builtin)
-        cerr(s, "#pragma pack is not supported in C++: it would change the "
-                "layout and EmbCC would ignore it. Use "
-                "__attribute__((packed)) on the struct", NULL);
     size_t i = 0;
     while (i < n && (text[i] == ' ' || text[i] == '\t'))
         i++;
