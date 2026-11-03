@@ -223,7 +223,9 @@ struct type *ty_half_carrier(int *nanbox);
  * alignment and calling convention, as the x86-64, AArch64 and RISC-V
  * ABIs lay out a _BitInt of up to 64 bits; `bitint` is N. A value of one
  * is always held as its low N bits, sign- or zero-extended (irgen). */
-#define TY_BITINT_MAXWIDTH 64
+#define TY_BITINT_MAXWIDTH 65535
+/* _BitInt(N > 64): a struct of limbs to the lowerings (type.c) */
+int ty_is_wide_bitint(const struct type *t);
 struct type *ty_bitint(int n, int is_unsigned);
 /* The integer type that is exactly `size` bytes wide, or NULL if the
  * target has none. Callers that want "the unsigned type of width w"

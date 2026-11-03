@@ -53,6 +53,10 @@ struct expr {
                            * u)x` as a compound literal -- which is not an
                            * lvalue */
     struct type *ty;      /* set by sema on every node */
+    unsigned long long *bigv; /* EXPR_NUM: a constant wider than 64 bits (a
+                               * wb literal), its limbs least significant
+                               * first; nbig of them */
+    int nbig;
     struct type *undecayed; /* sema: original array type when ty is the
                              * decayed pointer (sizeof needs it) */
     long num;             /* EXPR_NUM; EXPR_STR: element count incl NUL

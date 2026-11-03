@@ -3187,10 +3187,10 @@ char *cpp_process(const char *path, const char *src,
     define_macro(&boot, "__restrict__");
     defining_builtins = 0;
     define_macro(&boot, "__STDC__ 1");
-    /* C's _BitInt goes up to 64 bits (sema/type.h TY_BITINT_MAXWIDTH);
+    /* C's _BitInt goes up to 65535 bits (sema/type.h TY_BITINT_MAXWIDTH);
      * <limits.h> makes it BITINT_MAXWIDTH */
     if (!predef_is_cxx())
-        define_macro(&boot, "__BITINT_MAXWIDTH__ 64");
+        define_macro(&boot, "__BITINT_MAXWIDTH__ 65535");
     /* C17: the language EmbCC compiles is C11's (with C17's fixes),
      * _Atomic operators included, and much of C23's. It said C99, which
      * sent headers to their pre-C11 fallbacks -- newlib emulates

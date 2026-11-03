@@ -712,6 +712,40 @@ long lit_char_value(struct litch c, int pfx, int *uns, const char *file,
 /* C23's wb and uwb suffixes after an integer constant's digits, at *pp:
  * the constant is a _BitInt of the fewest bits that hold v (and its sign
  * bit, when signed). 1 when there was one, *pp past it. */
+/* The digits at p (radix 2, 8, 10 or 16, after its prefix), as limbs:
+ * how many limbs it took, 0 when it fits 64 bits. */
+static int big_digits(const char *p, const char *end, int radix,
+                      unsigned long long **out)
+{
+    int cap = 1024, n = 1;
+    unsigned long long *l = xcalloc((size_t)cap, sizeof *l);
+    for (; p < end; p++) {
+        int d = *p >= '0' && *p <= '9' ? *p - '0'
+              : *p >= 'a' && *p <= 'f' ? *p - 'a' + 10
+              : *p >= 'A' && *p <= 'F' ? *p - 'A' + 10 : -1;
+        if (d < 0 || d >= radix)
+            continue;                    /* a digit separator */
+        unsigned long long carry = (unsigned long long)d;
+        for (int i = 0; i < n; i++) {
+            /* l[i] * radix + carry, by 32-bit halves */
+            unsigned long long lo = (l[i] & 0xffffffffULL) * (unsigned long long)radix + carry;
+            unsigned long long hi = (l[i] >> 32) * (unsigned long long)radix + (lo >> 32);
+            l[i] = (hi << 32) | (lo & 0xffffffffULL);
+            carry = hi >> 32;
+        }
+        if (carry && n < cap)
+            l[n++] = carry;
+    }
+    while (n > 1 && !l[n - 1])
+        n--;
+    if (n == 1) {
+        free(l);
+        return 0;
+    }
+    *out = l;
+    return n;
+}
+
 static int bitint_suffix(struct lexer *lx, struct token *t, const char **pp,
                          unsigned long v, int has_u, int has_l)
 {
@@ -726,13 +760,47 @@ static int bitint_suffix(struct lexer *lx, struct token *t, const char **pp,
     if (has_l)
         diag_fatal(lx->file, lx->line, "a constant cannot be both long and "
                    "a _BitInt (wb)");
+    /* the digits again, as limbs, when they do not fit 64 bits */
+    t->num_big = NULL;
+    t->num_nbig = 0;
+    {
+        const char *d = lx->p;          /* the constant's first character */
+        if (d) {
+            int radix = 10;
+            if (d[0] == '0' && (d[1] == 'x' || d[1] == 'X'))
+                radix = 16, d += 2;
+            else if (d[0] == '0' && (d[1] == 'b' || d[1] == 'B'))
+                radix = 2, d += 2;
+            else if (d[0] == '0' && (d[1] == 'o' || d[1] == 'O'))
+                radix = 8, d += 2;
+            else if (d[0] == '0')
+                radix = 8;
+            const char *e = d;
+            while (isxdigit((unsigned char)*e) || *e == '\'')
+                e++;
+            if (radix == 10 || radix == 8)  /* no hex letters in these */
+                for (e = d; isdigit((unsigned char)*e) || *e == '\''; e++)
+                    ;
+            t->num_nbig = big_digits(d, e, radix, &t->num_big);
+        }
+    }
     int n = 0;
-    while (n < 64 && (v >> n))
-        n++;
+    if (t->num_nbig) {
+        unsigned long long top = t->num_big[t->num_nbig - 1];
+        n = 64 * (t->num_nbig - 1);
+        while (top) {
+            n++;
+            top >>= 1;
+        }
+        v = (unsigned long)t->num_big[0];
+    } else {
+        while (n < 64 && (v >> n))
+            n++;
+    }
     n = has_u ? (n ? n : 1) : n + 1 < 2 ? 2 : n + 1;
-    if (n > 64)
+    if (n > 65535)
         diag_fatal(lx->file, lx->line, "this constant needs a _BitInt(%d), "
-                   "wider than BITINT_MAXWIDTH, which is 64 here", n);
+                   "wider than BITINT_MAXWIDTH, which is 65535 here", n);
     lex_pedantic(lx->file, t->line, t->col, lex_quiet(lx), 2023,
                  "a _BitInt constant (wb)");
     t->kind = TOK_NUM;

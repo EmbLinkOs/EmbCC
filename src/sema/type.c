@@ -155,11 +155,53 @@ struct type *ty_llong(int is_unsigned)
     return &llongs[is_unsigned ? 1 : 0];
 }
 
+/* _BitInt(N) above 64 bits: an array of 64-bit limbs in a struct, which
+ * irgen and every backend handle as the aggregate it is in memory --
+ * copied, passed and returned as one (the psABIs' rule for these widths
+ * on x86-64 and AArch64 is a struct's) -- while sema types it as the
+ * integer it is (ty_is_integer). Its operators are calls into
+ * lib/rt/bitint.c (irgen's gen_bitint). One node per width. */
+static struct type *wide_bitint(int n, int is_unsigned)
+{
+    static struct type **made[2];
+    if (!made[0]) {
+        made[0] = xcalloc(TY_BITINT_MAXWIDTH + 1, sizeof *made[0]);
+        made[1] = xcalloc(TY_BITINT_MAXWIDTH + 1, sizeof *made[1]);
+    }
+    struct type **slot = &made[is_unsigned ? 1 : 0][n];
+    if (*slot)
+        return *slot;
+    int limbs = (n + 63) / 64;
+    struct type *t = xcalloc(1, sizeof *t);
+    t->kind = TY_STRUCT;
+    t->bitint = n;
+    t->is_unsigned = is_unsigned;
+    struct member *m = xcalloc(1, sizeof *m);
+    m->name = "__limbs";
+    m->ty = ty_array(ty_base(TY_LONG, 1), limbs);
+    if (target_long_size() != 8)
+        m->ty = ty_array(ty_llong(1), limbs);
+    /* AArch64's AAPCS64 aligns one to 16 bytes and rounds its size up to
+     * that; x86-64's psABI to 8 */
+    int align = target_get() == TARGET_AARCH64 ? 16 : 8;
+    ty_struct_layout(t, m, 1, 0, align, 0);
+    t->complete = 1;
+    *slot = t;
+    return t;
+}
+
+int ty_is_wide_bitint(const struct type *t)
+{
+    return t && t->kind == TY_STRUCT && t->bitint;
+}
+
 struct type *ty_bitint(int n, int is_unsigned)
 {
-    static struct type *made[2][TY_BITINT_MAXWIDTH + 1];
+    static struct type *made[2][65];
     if (n < (is_unsigned ? 1 : 2) || n > TY_BITINT_MAXWIDTH)
         return NULL;
+    if (n > 64)
+        return wide_bitint(n, is_unsigned);
     struct type **slot = &made[is_unsigned ? 1 : 0][n];
     if (!*slot) {
         struct type *t = xcalloc(1, sizeof *t);
@@ -883,7 +925,7 @@ int ty_is_integer(const struct type *t)
 {
     return t->kind == TY_BOOL || t->kind == TY_CHAR ||
            t->kind == TY_SHORT || t->kind == TY_INT || t->kind == TY_LONG ||
-           t->kind == TY_INT128;
+           t->kind == TY_INT128 || (t->kind == TY_STRUCT && t->bitint);
 }
 
 /* A long double with a representation of its own -- x87's 80 bits or a

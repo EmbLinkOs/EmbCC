@@ -1536,8 +1536,14 @@ static int emit_tobool(struct ir_func *fn, int v, const struct type *from)
  * compared with 0.0 as a float — -0.0 is false, which its bit pattern is
  * not, and a long double is too wide to test as bits at all. Returns the
  * temp to branch on, and its width in *w. */
+static int bitint_test(struct ir_func *fn, int addr, const struct type *t, int line);
+
 static int truth(struct ir_func *fn, int v, const struct type *t, int *w)
 {
+    if (ty_is_wide_bitint(t)) {       /* a _BitInt of limbs: its address */
+        *w = 4;
+        return bitint_test(fn, v, t, 0);
+    }
     if (ty_is_float(t) || t->kind == TY_INT128) {   /* (no 16-byte branch) */
         *w = 4;
         return emit_tobool(fn, v, t);
@@ -2135,6 +2141,260 @@ static int libatomic_call(struct ir_func *fn, const char *name,
         e.args[k] = &a[k];
     }
     return emit_call(fn, &e, vals, -1);
+}
+
+/* ---- _BitInt wider than 64 bits --------------------------------------------
+ *
+ * Such a value is a struct of limbs to everything here (ty_bitint), so an
+ * expression of one evaluates to its ADDRESS, as a struct's does: an
+ * object's own, or the local sema gave an operator's result (res_local).
+ * Each operator is a call into lib/rt/bitint.c, which takes the width
+ * negated for a signed type. */
+static int bi_bits(struct ir_func *fn, const struct type *t)
+{
+    long n = t->bitint;
+    return emit_const(fn, t->is_unsigned ? n : -n, ty_w(ty_base(TY_LONG, 0)));
+}
+
+static struct type *bi_ptr(void) { return ty_ptr(ty_base(TY_VOID, 0)); }
+
+static int bi_slot(struct ir_func *fn, struct expr *e)
+{
+    if (!e->res_local)
+        diag_fatal(fn->src ? fn->src->file : NULL, e->line,
+                   "internal: a _BitInt(%d) value has no slot", e->ty->bitint);
+    return local_addr(fn, e->res_local - 1);
+}
+
+/* op(d, a, b, bits) / op(d, a, bits) */
+static void bi_call3(struct ir_func *fn, const char *name, int d, int a, int b,
+                     const struct type *t, int line)
+{
+    struct type *P = bi_ptr(), *L = ty_base(TY_LONG, 0);
+    struct type *tys[4] = { P, P, P, L };
+    int vals[4] = { d, a, b, bi_bits(fn, t) };
+    libatomic_call(fn, name, ty_base(TY_VOID, 0), 4, vals, tys, line);
+}
+
+static void bi_call2(struct ir_func *fn, const char *name, int d, int a,
+                     const struct type *t, int line)
+{
+    struct type *P = bi_ptr(), *L = ty_base(TY_LONG, 0);
+    struct type *tys[3] = { P, P, L };
+    int vals[3] = { d, a, bi_bits(fn, t) };
+    libatomic_call(fn, name, ty_base(TY_VOID, 0), 3, vals, tys, line);
+}
+
+static int bitint_test(struct ir_func *fn, int addr, const struct type *t, int line)
+{
+    struct type *P = bi_ptr(), *L = ty_base(TY_LONG, 0);
+    struct type *tys[2] = { P, L };
+    int vals[2] = { addr, bi_bits(fn, t) };
+    return libatomic_call(fn, "__embcc_bi_test", ty_base(TY_INT, 0), 2, vals, tys, line);
+}
+
+/* a 64-bit integer value v of type from into the limbs at d */
+static void bi_from_int(struct ir_func *fn, int d, int v, const struct type *from,
+                        const struct type *to, int line)
+{
+    struct type *P = bi_ptr(), *U = ty_llong(1), *I = ty_base(TY_INT, 0);
+    int sgn = ty_signed_int(from);
+    int v64 = gen_convert(fn, v, from, ty_llong(!sgn));
+    struct type *tys[4] = { P, U, I, ty_base(TY_LONG, 0) };
+    int vals[4] = { d, v64, emit_const(fn, sgn, 4), bi_bits(fn, to) };
+    libatomic_call(fn, "__embcc_bi_from64", ty_base(TY_VOID, 0), 4, vals, tys, line);
+}
+
+static int is_wide(const struct expr *x) { return x && ty_is_wide_bitint(x->ty); }
+
+/* Whether e is an operation gen_bitint does: a value of a wide _BitInt
+ * made by an operator, or an operator on one that gives something else
+ * (a comparison, !, a conversion out). */
+static int bitint_op(const struct expr *e)
+{
+    switch (e->kind) {
+    case EXPR_NUM: case EXPR_NEG: case EXPR_BNOT: case EXPR_INCDEC:
+    case EXPR_COMPOUND:
+        return is_wide(e);
+    case EXPR_BINOP:
+        return is_wide(e) || is_wide(e->lhs) || is_wide(e->rhs);
+    case EXPR_CAST:
+        return is_wide(e) || is_wide(e->rhs);
+    case EXPR_NOT:
+        return is_wide(e->rhs);
+    default:
+        return 0;
+    }
+}
+
+static const char *bi_binop_fn(enum binop op)
+{
+    switch (op) {
+    case B_ADD: return "__embcc_bi_add";
+    case B_SUB: return "__embcc_bi_sub";
+    case B_MUL: return "__embcc_bi_mul";
+    case B_DIV: return "__embcc_bi_div";
+    case B_MOD: return "__embcc_bi_mod";
+    case B_AND: return "__embcc_bi_and";
+    case B_OR:  return "__embcc_bi_or";
+    case B_XOR: return "__embcc_bi_xor";
+    default:    return NULL;
+    }
+}
+
+/* a shift's count: any integer, the low 64 bits of a wide one */
+static int bi_count(struct ir_func *fn, struct expr *c)
+{
+    int v = gen_expr(fn, c);
+    if (is_wide(c)) {
+        struct type *P = bi_ptr(), *L = ty_base(TY_LONG, 0);
+        struct type *tys[2] = { P, L };
+        int vals[2] = { v, bi_bits(fn, c->ty) };
+        return libatomic_call(fn, "__embcc_bi_to64", ty_llong(1), 2, vals, tys, c->line);
+    }
+    return gen_convert(fn, v, c->ty, ty_llong(1));
+}
+
+static void bi_shift(struct ir_func *fn, int shl, int d, int a, struct expr *count,
+                     const struct type *t, int line)
+{
+    struct type *P = bi_ptr(), *L = ty_base(TY_LONG, 0);
+    struct type *tys[4] = { P, P, ty_llong(1), L };
+    int vals[4] = { d, a, bi_count(fn, count), bi_bits(fn, t) };
+    libatomic_call(fn, shl ? "__embcc_bi_shl" : "__embcc_bi_shr", ty_base(TY_VOID, 0), 4,
+                   vals, tys, line);
+}
+
+static int gen_bitint(struct ir_func *fn, struct expr *e)
+{
+    struct type *P = bi_ptr(), *L = ty_base(TY_LONG, 0);
+    switch (e->kind) {
+    case EXPR_NUM: {
+        int d = bi_slot(fn, e);
+        if (e->bigv) {
+            /* a wb constant over 64 bits: its limbs, stored */
+            int limbs = (e->ty->bitint + 63) / 64;
+            struct type *U = ty_llong(1);
+            for (int i = 0; i < limbs; i++) {
+                int at = i ? emit_bin(fn, IR_ADD, d, emit_const(fn, 8 * i, ty_w(P)),
+                                      ty_w(P), 0) : d;
+                emit_store(fn, at, emit_const(fn, i < e->nbig ? (long)e->bigv[i] : 0, 8), U);
+            }
+            return d;
+        }
+        struct type *from = e->ty->is_unsigned ? ty_llong(1) : ty_llong(0);
+        bi_from_int(fn, d, emit_const(fn, e->num, 8), from, e->ty, e->line);
+        return d;
+    }
+    case EXPR_CAST: {
+        struct type *to = e->ty, *from = e->rhs->ty;
+        if (ty_is_wide_bitint(to)) {
+            int d = bi_slot(fn, e);
+            int v = gen_expr(fn, e->rhs);
+            if (ty_is_wide_bitint(from)) {
+                struct type *tys[4] = { P, L, P, L };
+                int vals[4] = { d, bi_bits(fn, to), v, bi_bits(fn, from) };
+                libatomic_call(fn, "__embcc_bi_ext", ty_base(TY_VOID, 0), 4, vals, tys,
+                               e->line);
+            } else if (ty_is_float(from) || from->kind == TY_LDOUBLE) {
+                int dv = gen_convert(fn, v, from, ty_base(TY_DOUBLE, 0));
+                struct type *tys[3] = { P, ty_base(TY_DOUBLE, 0), L };
+                int vals[3] = { d, dv, bi_bits(fn, to) };
+                libatomic_call(fn, "__embcc_bi_from_double", ty_base(TY_VOID, 0), 3, vals,
+                               tys, e->line);
+            } else if (from->kind == TY_PTR) {
+                bi_from_int(fn, d, v, ty_base(TY_LONG, 1), to, e->line);
+            } else {
+                bi_from_int(fn, d, v, from, to, e->line);
+            }
+            return d;
+        }
+        /* out of a wide one */
+        int a = gen_expr(fn, e->rhs);
+        if (to->kind == TY_BOOL)
+            return gen_convert(fn, bitint_test(fn, a, from, e->line),
+                               ty_base(TY_INT, 0), to);
+        if (ty_is_float(to) || to->kind == TY_LDOUBLE) {
+            struct type *tys[2] = { P, L };
+            int vals[2] = { a, bi_bits(fn, from) };
+            int dv = libatomic_call(fn, "__embcc_bi_to_double", ty_base(TY_DOUBLE, 0), 2,
+                                    vals, tys, e->line);
+            return gen_convert(fn, dv, ty_base(TY_DOUBLE, 0), to);
+        }
+        if (to->kind == TY_VOID)
+            return a;
+        struct type *tys[2] = { P, L };
+        int vals[2] = { a, bi_bits(fn, from) };
+        int u = libatomic_call(fn, "__embcc_bi_to64", ty_llong(1), 2, vals, tys, e->line);
+        return gen_convert(fn, u, ty_llong(1), to);
+    }
+    case EXPR_NEG:
+    case EXPR_BNOT: {
+        int d = bi_slot(fn, e);
+        int a = gen_expr(fn, e->rhs);
+        bi_call2(fn, e->kind == EXPR_NEG ? "__embcc_bi_neg" : "__embcc_bi_not", d, a,
+                 e->ty, e->line);
+        return d;
+    }
+    case EXPR_NOT: {
+        int a = gen_expr(fn, e->rhs);
+        int t = bitint_test(fn, a, e->rhs->ty, e->line);
+        return emit_cmp(fn, B_EQ, t, emit_const(fn, 0, 4), 4, 1);
+    }
+    case EXPR_BINOP: {
+        if (e->op == B_SHL || e->op == B_SHR) {
+            int d = bi_slot(fn, e);
+            int a = gen_expr(fn, e->lhs);
+            bi_shift(fn, e->op == B_SHL, d, a, e->rhs, e->ty, e->line);
+            return d;
+        }
+        if (e->op == B_EQ || e->op == B_NE || e->op == B_LT || e->op == B_LE ||
+            e->op == B_GT || e->op == B_GE) {
+            /* sema converted both to their common type */
+            int a = gen_expr(fn, e->lhs), b = gen_expr(fn, e->rhs);
+            struct type *tys[3] = { P, P, L };
+            int vals[3] = { a, b, bi_bits(fn, e->lhs->ty) };
+            int c = libatomic_call(fn, "__embcc_bi_cmp", ty_base(TY_INT, 0), 3, vals, tys,
+                                   e->line);
+            return emit_cmp(fn, e->op, c, emit_const(fn, 0, 4), 4, 1);
+        }
+        const char *name = bi_binop_fn(e->op);
+        if (!name)
+            diag_fatal(fn->src ? fn->src->file : NULL, e->line,
+                       "internal: _BitInt operator %d", (int)e->op);
+        int d = bi_slot(fn, e);
+        int a = gen_expr(fn, e->lhs), b = gen_expr(fn, e->rhs);
+        bi_call3(fn, name, d, a, b, e->ty, e->line);
+        return d;
+    }
+    case EXPR_INCDEC: {
+        int lv = gen_addr(fn, e->lhs);
+        int d = e->is_post ? bi_slot(fn, e) : lv;
+        if (e->is_post)
+            bi_call2(fn, "__embcc_bi_copy", d, lv, e->ty, e->line);
+        struct type *tys[4] = { P, P, ty_llong(0), L };
+        int vals[4] = { lv, lv, emit_const(fn, e->delta, 8), bi_bits(fn, e->lhs->ty) };
+        libatomic_call(fn, "__embcc_bi_addi", ty_base(TY_VOID, 0), 4, vals, tys, e->line);
+        return d;
+    }
+    case EXPR_COMPOUND: {
+        int lv = gen_addr(fn, e->lhs);
+        if (e->op == B_SHL || e->op == B_SHR) {
+            bi_shift(fn, e->op == B_SHL, lv, lv, e->rhs, e->lhs->ty, e->line);
+            return lv;
+        }
+        const char *name = bi_binop_fn(e->op);
+        if (!name)
+            diag_fatal(fn->src ? fn->src->file : NULL, e->line,
+                       "internal: _BitInt operator %d", (int)e->op);
+        int b = gen_expr(fn, e->rhs);
+        bi_call3(fn, name, lv, lv, b, e->lhs->ty, e->line);
+        return lv;
+    }
+    default:
+        diag_fatal(fn->src ? fn->src->file : NULL, e->line, "internal: _BitInt expression");
+    }
+    return 0;
 }
 
 /* The conversions of lib/rt/half.c, which keeps the same table: where
@@ -4271,8 +4531,13 @@ static int gen_builtin_more(struct ir_func *fn, struct expr *e)
     return NOT_BUILTIN;
 }
 
+static int gen_bitint(struct ir_func *fn, struct expr *e);
+static int bitint_op(const struct expr *e);
+
 static int gen_expr_inner(struct ir_func *fn, struct expr *e)
 {
+    if (e->ty && bitint_op(e))
+        return gen_bitint(fn, e);
     switch (e->kind) {
     case EXPR_NUM:
         return emit_const(fn, e->num, ty_w(e->ty));

@@ -199,6 +199,9 @@ struct token {
                     * encoding prefix (C++ types 'a' as char, not int) */
     int num_uns;   /* TOK_NUM: type is unsigned (U suffix or hex range) */
     int num_bitint; /* TOK_NUM with C23's wb suffix: its _BitInt's width */
+    unsigned long long *num_big; /* ...and when that is over 64 bits, the
+                                  * value's limbs, least significant first */
+    int num_nbig;
     double fnum;   /* TOK_FNUM */
     int fnum_is_float; /* TOK_FNUM: an 'f' suffix -> float, else double */
     int num_is_imag;   /* TOK_NUM: GNU's integer imaginary constant, 2i:

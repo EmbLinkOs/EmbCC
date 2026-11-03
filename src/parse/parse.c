@@ -4195,6 +4195,10 @@ static struct expr *parse_primary(struct parser *ps)
     case TOK_NUM:
         e = new_expr(EXPR_NUM, t->line, t->col);
         e->num = t->num;
+        if (t->num_bitint > 64 && t->num_nbig) {   /* a wb constant over 64 bits */
+            e->bigv = t->num_big;
+            e->nbig = t->num_nbig;
+        }
         e->ty = t->num_bitint ? ty_bitint(t->num_bitint, t->num_uns)
               : t->char_lit && t->str_prefix == '8' ? ty_base(TY_CHAR, 1)
               : t->num_llong ? ty_llong(t->num_uns)

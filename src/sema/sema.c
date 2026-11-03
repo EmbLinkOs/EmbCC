@@ -776,6 +776,7 @@ static int c89_implicit_call(struct unit *u, struct scope *sc,
 
 static int is_null_const(const struct expr *e);
 static struct expr *mk_cast(struct expr *inner, struct type *to);
+static struct scope *g_cx_sc;   /* the function being checked (check_func) */
 static struct expr *vec_convert(struct unit *u, struct expr *rhs,
                                 struct type *to);
 static void vec_cast(struct unit *u, struct expr *e);
@@ -859,6 +860,10 @@ static struct expr *mk_cast(struct expr *inner, struct type *to)
     c->cast_ty = to;
     c->rhs = inner;
     c->ty = to;
+    /* to a _BitInt wider than 64 bits: the value needs a local of its
+     * own, in the function being checked (bitint_slot) */
+    if (ty_is_wide_bitint(to) && g_cx_sc)
+        c->res_local = 1 + scope_add(g_cx_sc, "<_BitInt>", to, NULL);
     return c;
 }
 
@@ -1839,7 +1844,8 @@ static struct expr *convert_assign(struct unit *u, struct expr *rhs,
          (ty_is_arith(rhs->ty) || ty_is_complex(rhs->ty))) ||
         (ty_is_complex(rhs->ty) && (ty_is_arith(to) || to->kind == TY_BOOL)))
         return cx_cast(rhs, to);
-    if (to->kind == TY_STRUCT || rhs->ty->kind == TY_STRUCT) {
+    if ((to->kind == TY_STRUCT || rhs->ty->kind == TY_STRUCT) &&
+        !(ty_is_arith(to) && ty_is_arith(rhs->ty))) {   /* (not a wide _BitInt) */
         /* a struct is copied as its bytes, by a copy that reads RAM;
          * from program memory that would be the wrong bytes */
         if (rhs->ty->is_flash)
@@ -2144,7 +2150,6 @@ static const char *suggest_name(struct unit *u, struct scope *sc,
 
 static int const_fold_f(const struct expr *e, double *out);
 static struct ldf *const_fold_ld(const struct expr *e);
-static struct scope *g_cx_sc;   /* the function being checked (check_func) */
 
 static int cx_lowering(void)
 {
@@ -4050,8 +4055,61 @@ static int check_builtin_more(struct unit *u, struct func *f,
     return 0;
 }
 
+static void check_expr_main(struct unit *u, struct func *f, struct scope *sc,
+                            struct expr *e);
+
+/* A node whose value is a _BitInt wider than 64 bits and new -- an
+ * operator's result, a conversion's, a constant -- gets a local to hold
+ * it, which irgen's gen_bitint computes into (an lvalue already has its
+ * object, and a call returning one its struct result). A compound
+ * assignment's right operand is converted to the target's type, so the
+ * runtime routine sees two operands of one width; a shift's count stays
+ * as it is. */
+static void bitint_slot(struct scope *sc, struct expr *e)
+{
+    if (!sc || !e->ty)
+        return;
+    if (e->kind == EXPR_COMPOUND && ty_is_wide_bitint(e->lhs->ty) &&
+        e->op != B_SHL && e->op != B_SHR && !ty_equal(e->rhs->ty, e->lhs->ty)) {
+        e->rhs = mk_cast(e->rhs, e->lhs->ty);
+        bitint_slot(sc, e->rhs);
+    }
+    if (!ty_is_wide_bitint(e->ty) || e->res_local)
+        return;
+    switch (e->kind) {
+    case EXPR_NUM: case EXPR_BINOP: case EXPR_NEG: case EXPR_BNOT:
+    case EXPR_CAST: case EXPR_INCDEC:
+        e->res_local = 1 + scope_add(sc, "<_BitInt>", e->ty, NULL);
+        break;
+    default:
+        break;
+    }
+}
+
+/* the conversions sema wrapped around an operand after checking it */
+static void bitint_slot_casts(struct scope *sc, struct expr *c)
+{
+    for (; c && c->kind == EXPR_CAST; c = c->rhs)
+        bitint_slot(sc, c);
+}
+
 static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                        struct expr *e)
+{
+    check_expr_main(u, f, sc, e);
+    bitint_slot(sc, e);
+    if (sc) {
+        bitint_slot_casts(sc, e->lhs);
+        bitint_slot_casts(sc, e->rhs);
+        for (int i = 0; i < e->nargs && e->args; i++)
+            bitint_slot_casts(sc, e->args[i]);
+        if (e->kind == EXPR_CAST)
+            bitint_slot_casts(sc, e->rhs);
+    }
+}
+
+static void check_expr_main(struct unit *u, struct func *f, struct scope *sc,
+                            struct expr *e)
 {
     stack_check(diag_file(u), e->line, 6);   /* `x + x + ... + x`, deep */
     switch (e->kind) {
@@ -4574,7 +4632,8 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             vec_cast(u, e);
             break;
         }
-        if (e->cast_ty->kind == TY_STRUCT && !ty_is_complex(e->cast_ty)) {
+        if (e->cast_ty->kind == TY_STRUCT && !ty_is_complex(e->cast_ty) &&
+            !e->cast_ty->bitint) {
             if (aggregate_cast(u, e))
                 check_expr(u, f, sc, e);    /* the compound literal */
             break;
@@ -6647,7 +6706,7 @@ static void flatten_one(struct unit *u, struct func *f, struct scope *sc,
     int whole = el->kind == EXPR_INITLIST || el->kind == EXPR_COMPLIT ||
                 (el->kind == EXPR_CAST && ty_equal(el->cast_ty, ty)) ||
                 (ty->kind != TY_ARRAY && ty->kind != TY_STRUCT) ||
-                ty_is_complex(ty) || str_inits_array(el, ty);
+                ty_is_complex(ty) || ty->bitint || str_inits_array(el, ty);
     if (!whole && ty->kind == TY_STRUCT) {
         if (el != g_init_checked) {
             check_expr(u, f, sc, el);
@@ -6863,7 +6922,7 @@ static void flatten_init(struct unit *u, struct func *f, struct scope *sc,
      * (aggregate_cast), checked once */
     if (init->kind == EXPR_CAST && init->cast_ty->kind == TY_STRUCT &&
         !ty_is_complex(init->cast_ty) && !ty_is_vector(init->cast_ty) &&
-        ty_equal(init->cast_ty, ty)) {
+        !init->cast_ty->bitint && ty_equal(init->cast_ty, ty)) {
         check_expr(u, f, sc, init->rhs);
         if (aggregate_cast(u, init)) {
             flatten_init(u, f, sc, init->lhs, ty, off, out);
@@ -6919,7 +6978,7 @@ static void flatten_init(struct unit *u, struct func *f, struct scope *sc,
         flatten_init(u, f, sc, init->elems[0], ty, off, out);
         return;
     }
-    if (ty->kind == TY_ARRAY || ty->kind == TY_STRUCT) {
+    if (ty->kind == TY_ARRAY || (ty->kind == TY_STRUCT && !ty->bitint)) {
         struct icur c = { init, 0 };
         flatten_agg(u, f, sc, &c, ty, off, out, 1, NULL, NULL);
         return;
@@ -7313,6 +7372,41 @@ static void lower_static_bytes(struct unit *u, int line, int size,
                 memcpy(&ubits, &dv, 8);
             }
             target_put_uint((unsigned char *)bytes + v[k].off, sz, ubits);
+            continue;
+        }
+        if (ty_is_wide_bitint(v[k].ty)) {
+            /* a _BitInt of limbs: the constant, extended by its own type's
+             * signedness over every limb, least significant first, the
+             * top limb's bits above N as the runtime keeps them */
+            const struct expr *src = v[k].e;
+            while (src->kind == EXPR_CAST && ty_is_wide_bitint(src->ty) && src->rhs)
+                src = src->rhs;
+            int n = v[k].ty->bitint, limbs = (n + 63) / 64;
+            unsigned long long lv[1024];
+            if (src->bigv) {
+                for (int i = 0; i < limbs; i++)
+                    lv[i] = i < src->nbig ? src->bigv[i] : 0;
+            } else {
+                long cv2;
+                if (!const_fold(src, &cv2))
+                    sema_error_line(u, line, "a static _BitInt(%d) initializer must "
+                                    "be an integer constant expression", n);
+                int neg = cv2 < 0 && !(src->ty && src->ty->is_unsigned &&
+                                       !ty_is_wide_bitint(src->ty));
+                for (int i = 0; i < limbs; i++)
+                    lv[i] = i ? (neg ? ~0ULL : 0) : (unsigned long long)cv2;
+            }
+            int top = n % 64;
+            if (top) {
+                unsigned long long mask = (1ULL << top) - 1;
+                if (!v[k].ty->is_unsigned && (lv[limbs - 1] >> (top - 1) & 1))
+                    lv[limbs - 1] |= ~mask;
+                else
+                    lv[limbs - 1] &= mask;
+            }
+            for (int i = 0; i < limbs; i++)
+                target_put_uint((unsigned char *)bytes + v[k].off + 8 * i, 8,
+                                (unsigned long)lv[i]);
             continue;
         }
         if (v[k].ty->kind == TY_INT128) {
