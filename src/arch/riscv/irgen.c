@@ -491,8 +491,26 @@ int riscv_imm_foldable64(int op, long imm)
         return 1;
     return riscv_half_ok(op, lo) && riscv_half_ok(op, hi);
 }
+/* Zbs: a single bit to set, clear or flip is bseti, bclri, binvi --
+ * as an immediate, the constant need not be built (the backend checks
+ * the bit once more against the value as li would make it, and builds
+ * it after all if that is not one bit) */
+static int zbs_single(int op, long imm)
+{
+    unsigned long u = (unsigned long)imm, lo = u & 0xffffffffUL;
+    if (!(target_riscv_ext() & RV_EXT_ZBS))
+        return 0;
+    if (op == IR_AND)
+        u = ~u, lo = ~lo & 0xffffffffUL;
+    else if (op != IR_OR && op != IR_XOR)
+        return 0;
+    return (u && !(u & (u - 1))) || (lo && !(lo & (lo - 1)));
+}
+
 int riscv_imm_foldable(int op, long imm)
 {
+    if (zbs_single(op, imm))
+        return 1;
     switch (op) {
     case IR_ADD: case IR_AND: case IR_OR: case IR_XOR:
         return imm >= -2048 && imm <= 2047;

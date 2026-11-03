@@ -77,7 +77,7 @@ int vn_key(struct ir_ins *i, int memver, struct vn *k)
         k->a = i->a; k->w = i->w; return 1;
     case IR_EXT:
         k->a = i->a; k->w = i->w; k->sign = i->sign; k->size = i->size; return 1;
-    case IR_BSWAP:
+    case IR_BSWAP: case IR_CLZ: case IR_CTZ: case IR_POPCNT:
         k->a = i->a; k->size = i->size; return 1;
     case IR_ADDR:                       /* &local: a frame-relative constant */
         k->a = i->a; return 1;

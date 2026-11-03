@@ -1121,6 +1121,16 @@ int target_riscv_abi_flen(void)
     return g_rv_abi_flen;
 }
 int target_riscv_zifencei(void) { return g_rv_zifencei; }
+
+/* The multi-letter extensions -march= named (RV_EXT_*): which of the
+ * bit-manipulation, half-precision and vector instructions the code may
+ * use. None by default, as clang's rv32imac/rv64imac has none. */
+static unsigned g_rv_ext;
+void target_set_riscv_ext(unsigned mask) { g_rv_ext = mask; }
+unsigned target_riscv_ext(void)
+{
+    return g_arch == TARGET_RISCV32 || g_arch == TARGET_RISCV64 ? g_rv_ext : 0;
+}
 int target_riscv_atomics(void)
 {
     return (g_arch != TARGET_RISCV32 && g_arch != TARGET_RISCV64) || g_rv_a;

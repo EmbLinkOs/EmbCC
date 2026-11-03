@@ -3719,6 +3719,8 @@ static int bswap_insn(int size)
     case TARGET_AVR: case TARGET_THUMB:
     case TARGET_LOONGARCH64:              /* revb.2h, revb.2w, revb.d */
         return 1;
+    case TARGET_RISCV32:                  /* Zbb's rev8, at 2 and 4 bytes */
+        return size <= 4 && (target_riscv_ext() & RV_EXT_ZBB);
     default:
         return 0;
     }
@@ -3768,8 +3770,31 @@ static int bswap_emit(struct ir_func *fn, int v, int size, int w)
     return i->dst;
 }
 
+/* Which bit counts the backend does as instructions (IR_CLZ, IR_CTZ,
+ * IR_POPCNT): RISC-V's Zbb, at XLEN and (cpopw, clzw, ctzw) at 32 bits;
+ * a 64-bit value on RV32 is a register pair, and keeps the sequence. */
+static int bitcnt_insn(int w)
+{
+    if (!(target_riscv_ext() & RV_EXT_ZBB))
+        return 0;
+    return w == 4 || (w == 8 && target_get() == TARGET_RISCV64);
+}
+
+static int bitcnt_emit(struct ir_func *fn, enum ir_op op, int x, int w)
+{
+    struct ir_ins *i = emit(fn);
+    i->op = op;
+    i->a = x;
+    i->size = w;
+    i->w = w;
+    i->dst = new_temp(fn);
+    return i->dst;
+}
+
 static int bpopcount(struct ir_func *fn, int x, int w)
 {
+    if (bitcnt_insn(w))
+        return bitcnt_emit(fn, IR_POPCNT, x, w);
     unsigned long m1 = w == 8 ? 0x5555555555555555UL : 0x55555555UL;
     unsigned long m2 = w == 8 ? 0x3333333333333333UL : 0x33333333UL;
     unsigned long m4 = w == 8 ? 0x0F0F0F0F0F0F0F0FUL : 0x0F0F0F0FUL;
@@ -3791,6 +3816,8 @@ static int bpopcount(struct ir_func *fn, int x, int w)
 
 static int bctz(struct ir_func *fn, int x, int w)
 {
+    if (bitcnt_insn(w))
+        return bitcnt_emit(fn, IR_CTZ, x, w);
     struct ir_ins *n = emit(fn);
     n->op = IR_NEG;
     n->a = x;
@@ -3815,6 +3842,15 @@ static int bctz_bits(struct ir_func *fn, int x, int w, int bits)
  * leading zeros are counted within `bits`, not within w. */
 static int bclz(struct ir_func *fn, int x, int w, int bits)
 {
+    if (bitcnt_insn(w)) {
+        /* counted in all of w's bits, of which the operand's are the low
+         * `bits`: the ones above them are zeros it does not have */
+        int z = bitcnt_emit(fn, IR_CLZ, x, w);
+        if (bits < w * 8)
+            z = emit_bin(fn, IR_SUB, z, bk(fn, (unsigned long)(w * 8 - bits), w),
+                         w, 0);
+        return z;
+    }
     for (int sh = 1; sh < bits; sh <<= 1)
         x = emit_bin(fn, IR_OR, x, emit_bin(fn, IR_SHR, x, bk(fn, (unsigned long)sh, w),
                                              w, 0), w, 0);

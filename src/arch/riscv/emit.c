@@ -217,7 +217,11 @@ unsigned rv_compress(unsigned long w, int xlen)
                 return 0x0002u | ((unsigned)(sh & 0x1f) << 2) |
                        ((unsigned)rd << 7) | ((unsigned)((sh >> 5) & 1) << 12);
         }
-        if (f3 == 5 && rdc >= 0 && rs1 == rd) {                 /* srli/srai */
+        /* srli/srai -- and only they: funct6 000000 or 010000 above the
+         * shift amount (Zbb's rev8, rori, orc.b and Zbs's bexti share the
+         * funct3, and were made c.srai) */
+        if (f3 == 5 && rdc >= 0 && rs1 == rd &&
+            ((f7 & ~1u) == 0 || (f7 & ~1u) == 0x20)) {
             int sh = (int)((w >> 20) & (xlen == 64 ? 0x3f : 0x1f));
             unsigned kind = (f7 & 0x20) ? 1u : 0u;              /* srai */
             if (sh != 0 && (xlen == 64 || sh < 32))
@@ -739,7 +743,10 @@ enum { RM_RNE = 0, RM_RTZ = 1, RM_DYN = 7 };
 static void fp_r(struct code *c, int f5, int dbl, int rm, int rd, int rs1,
                  int rs2)
 {
-    rv_w(c, rv_enc_r(OP_FP, rd, rm, rs1, rs2, (f5 << 2) | (dbl ? 1 : 0)));
+    /* the fmt field: single, double, or (exactly 2) Zfh's half -- a
+     * caller's dbl is any truth value otherwise */
+    rv_w(c, rv_enc_r(OP_FP, rd, rm, rs1, rs2,
+                     (f5 << 2) | (dbl == 2 ? 2 : dbl ? 1 : 0)));
 }
 
 /* The same, with the funct5 and the rounding mode spelled out: what the
@@ -756,7 +763,8 @@ void rv_fp_r4(struct code *c, int op, int dbl, int rm, int rd, int rs1,
 {
     rv_w(c, (unsigned long)op | (unsigned long)rd << 7 |
             (unsigned long)rm << 12 | (unsigned long)rs1 << 15 |
-            (unsigned long)rs2 << 20 | (unsigned long)(dbl ? 1 : 0) << 25 |
+            (unsigned long)rs2 << 20 |
+            (unsigned long)(dbl == 2 ? 2 : dbl ? 1 : 0) << 25 |
             (unsigned long)rs3 << 27);
 }
 
@@ -1091,4 +1099,74 @@ void rv_unimp(struct code *c)
 void rv_ebreak(struct code *c)
 {
     rv_w(c, enc_csr(0, RV_ZERO, RV_ZERO, 1));
+}
+
+/* ---- Zba, Zbb, Zbs --------------------------------------------------------
+ *
+ * The bit-manipulation instructions, each one row of the table below in
+ * the base formats' fields: an R-type's major opcode, funct3 and funct7,
+ * or an I-type's funct3 and the immediate's fixed bits (the unary ones,
+ * clz to rev8, are I-type with the whole immediate fixed; the shifts by
+ * a constant have it as funct6 above a 6-bit amount). The `w` forms of
+ * RV64 are the OP-32 / OP-IMM-32 major opcodes. llvm-mc is the referee
+ * (tests/golden/riscv-zb.sh). */
+static const struct { unsigned char op, f3; unsigned short f7; } zb_tab[] = {
+    [RV_ZB_ANDN]  = { 0x33, 7, 0x20 }, [RV_ZB_ORN]   = { 0x33, 6, 0x20 },
+    [RV_ZB_XNOR]  = { 0x33, 4, 0x20 },
+    [RV_ZB_MIN]   = { 0x33, 4, 0x05 }, [RV_ZB_MINU]  = { 0x33, 5, 0x05 },
+    [RV_ZB_MAX]   = { 0x33, 6, 0x05 }, [RV_ZB_MAXU]  = { 0x33, 7, 0x05 },
+    [RV_ZB_SH1ADD] = { 0x33, 2, 0x10 }, [RV_ZB_SH2ADD] = { 0x33, 4, 0x10 },
+    [RV_ZB_SH3ADD] = { 0x33, 6, 0x10 },
+    [RV_ZB_ADDUW] = { 0x3b, 0, 0x04 },
+    [RV_ZB_SH1ADDUW] = { 0x3b, 2, 0x10 }, [RV_ZB_SH2ADDUW] = { 0x3b, 4, 0x10 },
+    [RV_ZB_SH3ADDUW] = { 0x3b, 6, 0x10 },
+    [RV_ZB_BCLR]  = { 0x33, 1, 0x24 }, [RV_ZB_BEXT]  = { 0x33, 5, 0x24 },
+    [RV_ZB_BINV]  = { 0x33, 1, 0x34 }, [RV_ZB_BSET]  = { 0x33, 1, 0x14 },
+    [RV_ZB_ROL]   = { 0x33, 1, 0x30 }, [RV_ZB_ROR]   = { 0x33, 5, 0x30 },
+    [RV_ZB_ROLW]  = { 0x3b, 1, 0x30 }, [RV_ZB_RORW]  = { 0x3b, 5, 0x30 },
+};
+
+void rv_zb_r(struct code *c, int which, int rd, int rs1, int rs2)
+{
+    rv_w(c, rv_enc_r(zb_tab[which].op, rd, zb_tab[which].f3, rs1, rs2,
+                     zb_tab[which].f7));
+}
+
+/* clz, ctz, cpop (w32: clzw, ctzw, cpopw at RV64), sext.b, sext.h, rev8
+ * (its immediate names XLEN), orc.b, and zext.h (an R-type `pack`) */
+void rv_zb_unary(struct code *c, int which, int rd, int rs, int w32, int xlen)
+{
+    static const short imm[] = {
+        [RV_ZB_CLZ] = 0x600, [RV_ZB_CTZ] = 0x601, [RV_ZB_CPOP] = 0x602,
+        [RV_ZB_SEXTB] = 0x604, [RV_ZB_SEXTH] = 0x605,
+    };
+    switch (which) {
+    case RV_ZB_REV8:
+        rv_w(c, rv_enc_i(0x13, rd, 5, rs, xlen == 64 ? 0x6b8 : 0x698));
+        return;
+    case RV_ZB_ORCB:
+        rv_w(c, rv_enc_i(0x13, rd, 5, rs, 0x287));
+        return;
+    case RV_ZB_ZEXTH:
+        rv_w(c, rv_enc_r(xlen == 64 ? 0x3b : 0x33, rd, 4, rs, 0, 0x04));
+        return;
+    default:
+        rv_w(c, rv_enc_i(w32 && xlen == 64 ? 0x1b : 0x13, rd, 1, rs,
+                         imm[which]));
+    }
+}
+
+/* bclri, bseti, binvi, bexti, rori (w32: roriw), slli.uw: funct6 over a
+ * six-bit amount (five for the w forms) */
+void rv_zb_imm(struct code *c, int which, int rd, int rs, int amt, int w32)
+{
+    static const struct { unsigned char op, f3, f6; } t[] = {
+        [RV_ZB_BCLRI] = { 0x13, 1, 0x12 }, [RV_ZB_BSETI] = { 0x13, 1, 0x0a },
+        [RV_ZB_BINVI] = { 0x13, 1, 0x1a }, [RV_ZB_BEXTI] = { 0x13, 5, 0x12 },
+        [RV_ZB_RORI]  = { 0x13, 5, 0x18 }, [RV_ZB_SLLIUW] = { 0x1b, 1, 0x02 },
+    };
+    int op = t[which].op;
+    if (which == RV_ZB_RORI && w32)
+        op = 0x1b;                                  /* roriw */
+    rv_w(c, rv_enc_i(op, rd, t[which].f3, rs, (t[which].f6 << 6) | (amt & 63)));
 }

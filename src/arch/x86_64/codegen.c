@@ -5911,6 +5911,11 @@ static void gen_func(struct ir_func *fn, struct code *text,
             internal_error("a 32-bit widening multiply reached the x86-64 "
                            "code generator");
             break;
+        case IR_CLZ: case IR_CTZ: case IR_POPCNT:
+            /* irgen's bitcnt_insn says no here: the sequence instead */
+            internal_error("a bit-count instruction reached the x86-64 "
+                           "code generator");
+            break;
         case IR_OPCOUNT:                 /* not an opcode (ir.h) */
             internal_error("IR_OPCOUNT reached code generation");
         }

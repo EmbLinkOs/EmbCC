@@ -2028,6 +2028,18 @@ static void ext_reg(struct rv_fn *F, int rdst, int rs, int size, int sign)
         rv_alu_imm(F->t, RV_ADD, rdst, rs, 0, 1);         /* sext.w */
         return;
     }
+    /* Zbb's sext.b, sext.h and zext.h, and Zba's zext.w (add.uw rd, rs,
+     * zero): one instruction where the shifts are two */
+    unsigned ext = target_riscv_ext();
+    if ((ext & RV_EXT_ZBB) && size <= 2 && (sign || size == 2)) {
+        rv_zb_unary(F->t, sign ? (size == 1 ? RV_ZB_SEXTB : RV_ZB_SEXTH)
+                               : RV_ZB_ZEXTH, rdst, rs, 0, F->xlen);
+        return;
+    }
+    if ((ext & RV_EXT_ZBA) && size == 4 && !sign && F->xlen == 64) {
+        rv_zb_r(F->t, RV_ZB_ADDUW, rdst, rs, RV_ZERO);
+        return;
+    }
     rv_shift_imm(F->t, RV_SLL, rdst, rs, F->xlen - size * 8, 0, F->xlen);
     rv_shift_imm(F->t, sign ? RV_SRA : RV_SRL, rdst, rdst,
                  F->xlen - size * 8, 0, F->xlen);
@@ -3124,6 +3136,34 @@ static int rv_ind_tail_reg(const struct rv_fn *F, const struct ir_ins *i)
     return r >= RV_A0 && r <= RV_A0 + 7 && !rv_setup_writes(F, i, r);
 }
 
+/* Zfhmin (or Zfh): the half conversions irgen calls (__embcc_h2f,
+ * __embcc_f2h, __embcc_d2h: irgen.c's half_fn) are instructions, where
+ * the call's arguments and result travel in fa0 -- the F (or, for a
+ * double, D) ABI. 0: a call after all; else 1 widen, 2 narrow a float,
+ * 3 narrow a double. */
+static int rv_half_cvt(const struct ir_ins *i)
+{
+    const char *nm = i->op == IR_CALL && !i->indirect && i->callee
+                   ? i->callee->name : NULL;
+    if (!nm || i->nargs != 1 || !(target_riscv_ext() & RV_EXT_ZFHMIN) ||
+        target_riscv_abi_flen() < 32)
+        return 0;
+    if (!strcmp(nm, "__embcc_h2f"))
+        return 1;
+    if (!strcmp(nm, "__embcc_f2h"))
+        return 2;
+    if (!strcmp(nm, "__embcc_d2h") && target_riscv_abi_flen() == 64)
+        return 3;
+    return 0;
+}
+
+/* OP-FP with the half format (fmt 2): fcvt.s.h, fcvt.h.s, fcvt.h.d,
+ * fmv.h.x, fmv.x.h */
+static void rv_fp_h(struct code *t, int f5, int rm, int rd, int rs1, int rs2)
+{
+    rv_w(t, rv_enc_r(0x53, rd, rm, rs1, rs2, (f5 << 2) | 2));
+}
+
 static int rv_tail_ok(const struct rv_fn *F, int n)
 {
     const struct ir_func *fn = F->fn;
@@ -3133,7 +3173,7 @@ static int rv_tail_ok(const struct rv_fn *F, int n)
 
     if (i->op != IR_CALL || (i->indirect && !rv_ind_tail_reg(F, i)) ||
         i->call_varargs || i->retsize ||
-        i->flt || getenv("EMBCC_NO_TAILCALL"))
+        i->flt || getenv("EMBCC_NO_TAILCALL") || rv_half_cvt(i))
         return 0;
     if (fn->ret_abi.is_struct || fn->ret_abi.is_float)
         return 0;
@@ -3727,7 +3767,22 @@ static void gen_call(struct rv_fn *F, int n)
     }
 
     F->nstg = 0;
-    if (F->tail && F->tail[n]) {
+    int hk = rv_half_cvt(i);
+    if (hk == 1) {
+        /* the bits in a0 to a float in fa0 */
+        rv_fp_h(t, 0x1e, 0, RV_FT0, RV_A0, 0);              /* fmv.h.x */
+        rv_fp_r(t, 0x08, 0, 0, RV_FA0, RV_FT0, 2);          /* fcvt.s.h */
+    } else if (hk) {
+        /* fa0 to binary16, its bits into a0 zero-extended, as an
+         * unsigned short comes back */
+        rv_fp_h(t, 0x08, 7, RV_FT0, RV_FA0, hk == 3);       /* fcvt.h.s/d */
+        rv_fp_h(t, 0x1c, 0, RV_A0, RV_FT0, 0);              /* fmv.x.h */
+        rv_shift_imm(t, RV_SLL, RV_A0, RV_A0, F->xlen - 16, 0, F->xlen);
+        rv_shift_imm(t, RV_SRL, RV_A0, RV_A0, F->xlen - 16, 0, F->xlen);
+    }
+    if (hk) {
+        /* then the result as a call's */
+    } else if (F->tail && F->tail[n]) {
         /* The frame down, then a JUMP: the callee returns straight to
          * this function's caller, with ra as it came in. t1 carries the
          * far form's address, and nothing is live in it by now. */
@@ -3750,7 +3805,9 @@ static void gen_call(struct rv_fn *F, int n)
             F->skip_next = 1;         /* the IR_RET: not reached */
         return;
     }
-    if (i->indirect) {
+    if (hk) {
+        /* the conversion is done */
+    } else if (i->indirect) {
         /* In memory, the target is read last -- the arguments are
          * already in place, and SCR is not one of them. */
         if (tgt < 0) {
@@ -5010,6 +5067,18 @@ static void gen_ins(struct rv_fn *F, int n)
                : i->op == IR_XOR ? RV_XOR
                : -1;                           /* IR_MUL: not an ALU op */
         int logical = i->op == IR_AND || i->op == IR_OR || i->op == IR_XOR;
+        /* Zbb: `t = a ^ b; d = ~t`, t read nowhere else, is xnor */
+        if (i->op == IR_XOR && !i->imm_b &&
+            (target_riscv_ext() & RV_EXT_ZBB) && n + 1 < fn->nins &&
+            F->usecnt && i->dst >= 0 && F->usecnt[i->dst] == 1 &&
+            fn->ins[n + 1].op == IR_BNOT && fn->ins[n + 1].a == i->dst) {
+            int ra_ = rdr(F, i->a, ACC), rb_ = rdr(F, i->b, TMP);
+            int d = wreg(F, fn->ins[n + 1].dst, ACC);
+            rv_zb_r(t, RV_ZB_XNOR, d, ra_, rb_);
+            wrote(F, fn->ins[n + 1].dst, d);
+            F->skip_next = 1;
+            return;
+        }
         int ra_ = rdr(F, i->a, ACC);
         int rd_ = wreg(F, i->dst, ACC);
         if (i->imm_b && i->op != IR_MUL) {
@@ -5024,6 +5093,26 @@ static void gen_ins(struct rv_fn *F, int n)
                            (int)v, logical ? 0 : wordop);
                 wrote(F, i->dst, rd_);
                 return;
+            }
+            /* Zbs: one bit set, cleared or flipped -- the constant as
+             * `li` would make it (sign-extended at RV64 for a 32-bit
+             * value), so a 32-bit bit 31 is not a single bit there */
+            if (logical && (target_riscv_ext() & RV_EXT_ZBS)) {
+                unsigned long long m = (unsigned long long)v;
+                if (F->xlen == 32)
+                    m &= 0xffffffffULL;
+                if (i->op == IR_AND)
+                    m = F->xlen == 32 ? ~m & 0xffffffffULL : ~m;
+                if (m && !(m & (m - 1))) {
+                    int k = 0;
+                    while (!(m >> k & 1))
+                        k++;
+                    rv_zb_imm(t, i->op == IR_AND ? RV_ZB_BCLRI
+                                 : i->op == IR_OR ? RV_ZB_BSETI : RV_ZB_BINVI,
+                              rd_, ra_, k, 0);
+                    wrote(F, i->dst, rd_);
+                    return;
+                }
             }
         }
         {
@@ -5065,6 +5154,27 @@ static void gen_ins(struct rv_fn *F, int n)
         return;
     }
     case IR_SHL: case IR_SHR: {
+        /* Zba: `t = x << 1..3; d = t + y`, t read nowhere else -- the
+         * scaled index of an address, mostly -- is one shNadd. At XLEN
+         * only: a 32-bit sum at RV64 must come out sign-extended. */
+        if (i->op == IR_SHL && i->imm_b && i->imm >= 1 && i->imm <= 3 &&
+            (target_riscv_ext() & RV_EXT_ZBA) && !wordop &&
+            i->w == F->w && n + 1 < fn->nins && F->usecnt && i->dst >= 0 &&
+            F->usecnt[i->dst] == 1) {
+            const struct ir_ins *nx = &fn->ins[n + 1];
+            if (nx->op == IR_ADD && !nx->imm_b && nx->w == i->w &&
+                (nx->a == i->dst) != (nx->b == i->dst)) {
+                int other = nx->a == i->dst ? nx->b : nx->a;
+                int rx = rdr(F, i->a, ACC);
+                int ry = rdr(F, other, TMP);
+                int d = wreg(F, nx->dst, ACC);
+                rv_zb_r(t, i->imm == 1 ? RV_ZB_SH1ADD : i->imm == 2
+                           ? RV_ZB_SH2ADD : RV_ZB_SH3ADD, d, rx, ry);
+                wrote(F, nx->dst, d);
+                F->skip_next = 1;
+                return;
+            }
+        }
         int op = i->op == IR_SHL ? RV_SLL : i->sign ? RV_SRA : RV_SRL;
         int bits = wordop ? 32 : F->xlen;
         int ra_ = rdr(F, i->a, ACC);
@@ -5089,9 +5199,39 @@ static void gen_ins(struct rv_fn *F, int n)
         return;
     }
     case IR_BNOT: {
+        /* Zbb: `t = ~b; d = a & t` (| or ^), t read nowhere else, is
+         * andn (orn, xnor) */
+        if ((target_riscv_ext() & RV_EXT_ZBB) && n + 1 < fn->nins &&
+            F->usecnt && i->dst >= 0 && F->usecnt[i->dst] == 1) {
+            const struct ir_ins *nx = &fn->ins[n + 1];
+            if ((nx->op == IR_AND || nx->op == IR_OR || nx->op == IR_XOR) &&
+                !nx->imm_b && (nx->a == i->dst) != (nx->b == i->dst)) {
+                int other = nx->a == i->dst ? nx->b : nx->a;
+                int rb_ = rdr(F, i->a, TMP);
+                int ra_ = rdr(F, other, ACC);
+                int d = wreg(F, nx->dst, ACC);
+                rv_zb_r(t, nx->op == IR_AND ? RV_ZB_ANDN : nx->op == IR_OR
+                           ? RV_ZB_ORN : RV_ZB_XNOR, d, ra_, rb_);
+                wrote(F, nx->dst, d);
+                F->skip_next = 1;
+                return;
+            }
+        }
         int ra_ = rdr(F, i->a, ACC);
         int d = wreg(F, i->dst, ACC);
         rv_alu_imm(t, RV_XOR, d, ra_, -1, 0);
+        wrote(F, i->dst, d);
+        return;
+    }
+
+    case IR_CLZ: case IR_CTZ: case IR_POPCNT: {
+        /* Zbb (irgen's bitcnt_insn): XLEN wide, or the w forms for a
+         * 32-bit value at RV64 */
+        int ra_ = rdr(F, i->a, ACC);
+        int d = wreg(F, i->dst, ACC);
+        rv_zb_unary(t, i->op == IR_CLZ ? RV_ZB_CLZ : i->op == IR_CTZ
+                       ? RV_ZB_CTZ : RV_ZB_CPOP,
+                    d, ra_, i->size == 4 && F->xlen == 64, F->xlen);
         wrote(F, i->dst, d);
         return;
     }
@@ -5503,6 +5643,17 @@ static void gen_ins(struct rv_fn *F, int n)
 
     case IR_BSWAP: {
         int nbytes = i->size;
+        if (target_riscv_ext() & RV_EXT_ZBB) {
+            /* rev8, then the bytes down to the value's own width */
+            int ra_ = rdr(F, i->a, ACC);
+            int d = wreg(F, i->dst, ACC);
+            rv_zb_unary(t, RV_ZB_REV8, d, ra_, 0, F->xlen);
+            if (nbytes * 8 < F->xlen)
+                rv_shift_imm(t, RV_SRL, d, d, F->xlen - nbytes * 8, 0,
+                             F->xlen);
+            wrote(F, i->dst, d);
+            return;
+        }
         rd(F, i->a, ACC);
         rv_mv(t, TMP, RV_ZERO);
         for (int b = 0; b < nbytes; b++) {

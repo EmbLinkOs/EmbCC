@@ -146,6 +146,23 @@ void rv_shift_imm(struct code *c, int op, int rd, int rs1, int amt,
 enum { RV_MUL, RV_MULH, RV_MULHSU, RV_MULHU, RV_DIV, RV_DIVU, RV_REM, RV_REMU };
 void rv_muldiv(struct code *c, int op, int rd, int rs1, int rs2, int w);
 
+/* Zba, Zbb and Zbs (emit.c's table): two-register, unary and by-constant */
+enum rv_zb {
+    RV_ZB_ANDN, RV_ZB_ORN, RV_ZB_XNOR, RV_ZB_MIN, RV_ZB_MINU, RV_ZB_MAX,
+    RV_ZB_MAXU, RV_ZB_SH1ADD, RV_ZB_SH2ADD, RV_ZB_SH3ADD, RV_ZB_ADDUW,
+    RV_ZB_SH1ADDUW, RV_ZB_SH2ADDUW, RV_ZB_SH3ADDUW, RV_ZB_BCLR, RV_ZB_BEXT,
+    RV_ZB_BINV, RV_ZB_BSET, RV_ZB_ROL, RV_ZB_ROR, RV_ZB_ROLW, RV_ZB_RORW,
+    /* unary */
+    RV_ZB_CLZ, RV_ZB_CTZ, RV_ZB_CPOP, RV_ZB_SEXTB, RV_ZB_SEXTH, RV_ZB_REV8,
+    RV_ZB_ORCB, RV_ZB_ZEXTH,
+    /* by a constant */
+    RV_ZB_BCLRI, RV_ZB_BSETI, RV_ZB_BINVI, RV_ZB_BEXTI, RV_ZB_RORI,
+    RV_ZB_SLLIUW
+};
+void rv_zb_r(struct code *c, int which, int rd, int rs1, int rs2);
+void rv_zb_unary(struct code *c, int which, int rd, int rs, int w32, int xlen);
+void rv_zb_imm(struct code *c, int which, int rd, int rs, int amt, int w32);
+
 /* ---- the A extension: atomics ----------------------------------------
  *
  * Hazard3 (the RP2350's RISC-V core, and the RTOS requirements' fourth

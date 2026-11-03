@@ -979,6 +979,13 @@ int target_riscv_zifencei(void);
 int target_riscv_atomics(void);
 int target_atomic_rmw_libcall(int size);
 void target_set_riscv_isa(int a, int f, int d, int c, int zifencei);
+/* -march='s multi-letter extensions beyond Zicsr and Zifencei: Zba (shift
+ * and add), Zbb (basic bit manipulation), Zbs (single bits), Zfhmin and
+ * Zfh (half precision), and V (vectors); 0 on any other target */
+enum { RV_EXT_ZBA = 1, RV_EXT_ZBB = 2, RV_EXT_ZBS = 4, RV_EXT_ZFHMIN = 8,
+       RV_EXT_ZFH = 16, RV_EXT_V = 32 };
+void target_set_riscv_ext(unsigned mask);
+unsigned target_riscv_ext(void);
 void target_set_riscv_abi_flen(int flen);
 
 /* Does this target's object carry REL relocations -- the addend stored in

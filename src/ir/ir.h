@@ -187,6 +187,14 @@ enum ir_op {
     IR_MULW,   /* dst = the whole 64-bit product of 32-bit a and b
                 * (w 8, sign) -- mul + mulh, smull/umull, mult/multu */
 
+    /* ---- the bit counts, as instructions ----------------------------
+     * dst = the leading zeros, the trailing zeros, the set bits of a, an
+     * unsigned value of `size` bytes (4 or 8) computed at width w; clz
+     * and ctz of 0 are `size` * 8. Emitted only where the target has
+     * the instruction (irgen's bitcnt_insn: RISC-V's Zbb); everywhere
+     * else the builtins stay irgen's shifts, masks and multiply. */
+    IR_CLZ, IR_CTZ, IR_POPCNT,
+
     IR_OPCOUNT   /* not an opcode: the table size, so print and parse can
                    * agree on how many there are */
 };

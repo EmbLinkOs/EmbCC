@@ -414,9 +414,11 @@ static int fp_split(const struct tok *t, struct fpname *p)
 }
 
 /* the format suffix: 0 single, 1 double, -1 neither */
+/* s, d, or h (Zfh and Zfhmin's half, the fmt field's 2) */
 static int fp_fmt(const char *s)
 {
-    return !strcmp(s, "s") ? 0 : !strcmp(s, "d") ? 1 : -1;
+    return !strcmp(s, "s") ? 0 : !strcmp(s, "d") ? 1 : !strcmp(s, "h") ? 2
+                                                                        : -1;
 }
 
 /* an integer side of a conversion: RV_CVT_*, or -1 */
@@ -433,10 +435,27 @@ static int fp_ity(const char *s)
 static int fp_have(int dbl, const struct tok *m, char *err, int errlen)
 {
     int flen = target_riscv_flen();
+    if (dbl == 2) {
+        /* the half's loads, stores, moves and conversions are Zfhmin's;
+         * its arithmetic needs all of Zfh (fp_have_arith) */
+        if (!(target_riscv_ext() & RV_EXT_ZFHMIN))
+            FFAIL("%.*s needs the Zfhmin or Zfh extension, which -march= "
+                  "does not name", m->len, m->s);
+        return 0;
+    }
     if (flen < (dbl ? 64 : 32))
         FFAIL("%.*s needs the %s extension, which -march= does not name",
               m->len, m->s, dbl ? "D" : "F");
     return 0;
+}
+
+static int fp_have_arith(int dbl, const struct tok *m, char *err, int errlen)
+{
+    if (dbl == 2 && !(target_riscv_ext() & RV_EXT_ZFH))
+        FFAIL("%.*s is half-precision arithmetic, which needs Zfh (Zfhmin "
+              "has only its loads, stores, moves and conversions)",
+              m->len, m->s);
+    return fp_have(dbl, m, err, errlen);
 }
 
 /* The F/D statement t[0..n), if it is one: 1 encoded, 0 not an FP
@@ -501,10 +520,12 @@ static int fp_stmt(const struct tok *t, int n, struct code *out,
         }
     }
 
-    /* loads and stores: flw/fld fd, off(rs); fsw/fsd fs, off(rs) */
+    /* loads and stores: flw/fld/flh fd, off(rs); fsw/fsd/fsh fs, off(rs) */
     if (p.nparts == 1 && (!strcmp(p.base, "flw") || !strcmp(p.base, "fld") ||
-                          !strcmp(p.base, "fsw") || !strcmp(p.base, "fsd"))) {
-        int dbl = p.base[2] == 'd', store = p.base[1] == 's', fr, base;
+                          !strcmp(p.base, "fsw") || !strcmp(p.base, "fsd") ||
+                          !strcmp(p.base, "flh") || !strcmp(p.base, "fsh"))) {
+        int dbl = p.base[2] == 'd' ? 1 : p.base[2] == 'h' ? 2 : 0;
+        int store = p.base[1] == 's', fr, base;
         long long off;
         if (n != 3) FFAIL("%s takes a register and an address", p.base);
         if ((fr = tok_freg(&t[1])) < 0)
@@ -514,8 +535,12 @@ static int fp_stmt(const struct tok *t, int n, struct code *out,
         if (!rv_fits(off, 12))
             FFAIL("%s offset %lld does not fit a 12-bit field", p.base, off);
         if (fp_have(dbl, m, err, errlen)) return -1;
-        if (store) rv_fstore(out, fr, base, (int)off, dbl);
-        else       rv_fload(out, fr, base, (int)off, dbl);
+        if (dbl == 2)               /* flh/fsh: funct3 001 */
+            code_u32(out, store
+                     ? rv_enc_s(0x27, 1, base, fr, (int)off)
+                     : rv_enc_i(0x07, fr, 1, base, (int)off));
+        else if (store) rv_fstore(out, fr, base, (int)off, dbl);
+        else            rv_fload(out, fr, base, (int)off, dbl);
         return 1;
     }
 
@@ -524,10 +549,11 @@ static int fp_stmt(const struct tok *t, int n, struct code *out,
     if (!strcmp(p.base, "fmv") && p.nparts == 3) {
         int to_x = !strcmp(p.a, "x"), dbl, fd, rs;
         const char *f = to_x ? p.b : p.a, *x = to_x ? p.a : p.b;
-        if (strcmp(x, "x") || (strcmp(f, "w") && strcmp(f, "s") && strcmp(f, "d")))
+        if (strcmp(x, "x") || (strcmp(f, "w") && strcmp(f, "s") &&
+                               strcmp(f, "d") && strcmp(f, "h")))
             FFAIL("asm instruction \"%.*s\" is not in the RISC-V vocabulary",
                   m->len, m->s);
-        dbl = !strcmp(f, "d");
+        dbl = !strcmp(f, "d") ? 1 : !strcmp(f, "h") ? 2 : 0;
         if (n != 3) FFAIL("%.*s takes two registers", m->len, m->s);
         fd = to_x ? tok_reg(&t[1]) : tok_freg(&t[1]);
         rs = to_x ? tok_freg(&t[2]) : tok_reg(&t[2]);
@@ -559,7 +585,9 @@ static int fp_stmt(const struct tok *t, int n, struct code *out,
             exact = fa == 1 && ib <= RV_CVT_WU;
         } else if (fa >= 0 && fb >= 0 && fa != fb) {
             rd = tok_freg(&t[1]); rs = tok_freg(&t[2]);
-            dbl = fa; f5 = 0x08; rs2 = fb; ity = -1; exact = fa == 1;
+            /* widening is exact: to a double, or from a half */
+            dbl = fa; f5 = 0x08; rs2 = fb; ity = -1;
+            exact = fa == 1 || fb == 2;
         } else {
             FFAIL("asm instruction \"%.*s\" is not in the RISC-V vocabulary",
                   m->len, m->s);
@@ -571,7 +599,16 @@ static int fp_stmt(const struct tok *t, int n, struct code *out,
         rm = exact ? 0 : 7;
         if (n == 4 && (rm = tok_rm(&t[3])) < 0)
             FFAIL("\"%.*s\" is not a rounding mode", t[3].len, t[3].s);
-        if (fp_have(dbl || (f5 == 0x08), m, err, errlen)) return -1;
+        if (f5 == 0x08 && (fa == 2 || fb == 2)) {
+            /* to or from a half: Zfhmin, and D for the double side */
+            if (fp_have(2, m, err, errlen) ||
+                ((fa == 1 || fb == 1) && fp_have(1, m, err, errlen)))
+                return -1;
+        } else if (dbl == 2 || (ia >= 0 && fb == 2)) {
+            if (fp_have_arith(2, m, err, errlen)) return -1;
+        } else if (fp_have(dbl || (f5 == 0x08), m, err, errlen)) {
+            return -1;
+        }
         rv_fp_r(out, f5, dbl, rm, rd, rs, rs2);
         return 1;
     }
@@ -603,7 +640,7 @@ static int fp_stmt(const struct tok *t, int n, struct code *out,
                 if (rd < 0 || a < 0 || b < 0)
                     FFAIL("%.*s wants an integer register, then float ones",
                           m->len, m->s);
-                if (fp_have(fmt, m, err, errlen)) return -1;
+                if (fp_have_arith(fmt, m, err, errlen)) return -1;
                 rv_fp_r(out, cmp[k].f5, fmt, cmp[k].rm, rd, a, b);
                 return 1;
             }
@@ -628,7 +665,7 @@ static int fp_stmt(const struct tok *t, int n, struct code *out,
                 !strcmp(p.base, "fabs") || !strcmp(p.base, "fsqrt")) {
                 if (nr != 2 || (have_rm && strcmp(p.base, "fsqrt")))
                     FFAIL("%.*s takes two float registers", m->len, m->s);
-                if (fp_have(fmt, m, err, errlen)) return -1;
+                if (fp_have_arith(fmt, m, err, errlen)) return -1;
                 if (!strcmp(p.base, "fsqrt"))
                     rv_fp_r(out, 0x0b, fmt, rm, r[0], r[1], 0);
                 else
@@ -652,7 +689,7 @@ static int fp_stmt(const struct tok *t, int n, struct code *out,
                     if (nr != 3 || (have_rm && ar[k].rm >= 0))
                         FFAIL("%.*s takes three float registers%s", m->len, m->s,
                               ar[k].rm < 0 ? " [, rm]" : "");
-                    if (fp_have(fmt, m, err, errlen)) return -1;
+                    if (fp_have_arith(fmt, m, err, errlen)) return -1;
                     rv_fp_r(out, ar[k].f5, fmt, ar[k].rm >= 0 ? ar[k].rm : rm,
                             r[0], r[1], r[2]);
                     return 1;
@@ -669,7 +706,7 @@ static int fp_stmt(const struct tok *t, int n, struct code *out,
                         continue;
                     if (nr != 4)
                         FFAIL("%.*s takes four float registers [, rm]", m->len, m->s);
-                    if (fp_have(fmt, m, err, errlen)) return -1;
+                    if (fp_have_arith(fmt, m, err, errlen)) return -1;
                     rv_fp_r4(out, fm[k].op, fmt, rm, r[0], r[1], r[2], r[3]);
                     return 1;
                 }
@@ -977,6 +1014,106 @@ static int one_stmt(const char *stmt, int len, struct code *out,
             rv_alu(out, e->op, rd, rs, rb, e->w);
         }
         return 0;
+    }
+
+    /* ---- Zba, Zbb, Zbs: only where -march= has them, as GNU as -----
+     * (these before the ALU and shift tables, whose names they begin
+     * with: `sh1add`, `rori`) */
+    {
+        static const struct { const char *name; int which, ext, rv64; } zr[] = {
+            { "andn", RV_ZB_ANDN, RV_EXT_ZBB, 0 },
+            { "orn", RV_ZB_ORN, RV_EXT_ZBB, 0 },
+            { "xnor", RV_ZB_XNOR, RV_EXT_ZBB, 0 },
+            { "min", RV_ZB_MIN, RV_EXT_ZBB, 0 },
+            { "minu", RV_ZB_MINU, RV_EXT_ZBB, 0 },
+            { "max", RV_ZB_MAX, RV_EXT_ZBB, 0 },
+            { "maxu", RV_ZB_MAXU, RV_EXT_ZBB, 0 },
+            { "rol", RV_ZB_ROL, RV_EXT_ZBB, 0 },
+            { "ror", RV_ZB_ROR, RV_EXT_ZBB, 0 },
+            { "rolw", RV_ZB_ROLW, RV_EXT_ZBB, 1 },
+            { "rorw", RV_ZB_RORW, RV_EXT_ZBB, 1 },
+            { "sh1add", RV_ZB_SH1ADD, RV_EXT_ZBA, 0 },
+            { "sh2add", RV_ZB_SH2ADD, RV_EXT_ZBA, 0 },
+            { "sh3add", RV_ZB_SH3ADD, RV_EXT_ZBA, 0 },
+            { "add.uw", RV_ZB_ADDUW, RV_EXT_ZBA, 1 },
+            { "sh1add.uw", RV_ZB_SH1ADDUW, RV_EXT_ZBA, 1 },
+            { "sh2add.uw", RV_ZB_SH2ADDUW, RV_EXT_ZBA, 1 },
+            { "sh3add.uw", RV_ZB_SH3ADDUW, RV_EXT_ZBA, 1 },
+            { "bclr", RV_ZB_BCLR, RV_EXT_ZBS, 0 },
+            { "bext", RV_ZB_BEXT, RV_EXT_ZBS, 0 },
+            { "binv", RV_ZB_BINV, RV_EXT_ZBS, 0 },
+            { "bset", RV_ZB_BSET, RV_EXT_ZBS, 0 },
+        };
+        static const struct { const char *name; int which, w32, rv64; } zu[] = {
+            { "clz", RV_ZB_CLZ, 0, 0 }, { "ctz", RV_ZB_CTZ, 0, 0 },
+            { "cpop", RV_ZB_CPOP, 0, 0 }, { "clzw", RV_ZB_CLZ, 1, 1 },
+            { "ctzw", RV_ZB_CTZ, 1, 1 }, { "cpopw", RV_ZB_CPOP, 1, 1 },
+            { "sext.b", RV_ZB_SEXTB, 0, 0 }, { "sext.h", RV_ZB_SEXTH, 0, 0 },
+            { "rev8", RV_ZB_REV8, 0, 0 }, { "orc.b", RV_ZB_ORCB, 0, 0 },
+            { "zext.h", RV_ZB_ZEXTH, 0, 0 },
+        };
+        static const struct { const char *name; int which, ext, w32, rv64; } zi[] = {
+            { "bclri", RV_ZB_BCLRI, RV_EXT_ZBS, 0, 0 },
+            { "bseti", RV_ZB_BSETI, RV_EXT_ZBS, 0, 0 },
+            { "binvi", RV_ZB_BINVI, RV_EXT_ZBS, 0, 0 },
+            { "bexti", RV_ZB_BEXTI, RV_EXT_ZBS, 0, 0 },
+            { "rori", RV_ZB_RORI, RV_EXT_ZBB, 0, 0 },
+            { "roriw", RV_ZB_RORI, RV_EXT_ZBB, 1, 1 },
+            { "slli.uw", RV_ZB_SLLIUW, RV_EXT_ZBA, 0, 1 },
+        };
+        unsigned have = target_riscv_ext();
+        static const char *const extname[] = { "", "zba", "zbb", "", "zbs" };
+        for (unsigned k = 0; k < sizeof zr / sizeof *zr; k++) {
+            int rd, ra, rb;
+            if (!tok_is(&t[0], zr[k].name))
+                continue;
+            if (!(have & zr[k].ext))
+                FAIL("%s is a %s instruction, and -march= has no %s",
+                     zr[k].name, extname[zr[k].ext], extname[zr[k].ext]);
+            if (zr[k].rv64 && xlen != 64)
+                FAIL("%s is an RV64 instruction and this is RV32", zr[k].name);
+            if (n != 4) FAIL("%s takes three registers", zr[k].name);
+            rd = tok_reg(&t[1]); ra = tok_reg(&t[2]); rb = tok_reg(&t[3]);
+            if (rd < 0 || ra < 0 || rb < 0)
+                FAIL("%s wants registers", zr[k].name);
+            rv_zb_r(out, zr[k].which, rd, ra, rb);
+            return 0;
+        }
+        for (unsigned k = 0; k < sizeof zu / sizeof *zu; k++) {
+            int rd, ra;
+            if (!tok_is(&t[0], zu[k].name))
+                continue;
+            if (!(have & RV_EXT_ZBB))
+                FAIL("%s is a zbb instruction, and -march= has no zbb",
+                     zu[k].name);
+            if (zu[k].rv64 && xlen != 64)
+                FAIL("%s is an RV64 instruction and this is RV32", zu[k].name);
+            if (n != 3) FAIL("%s takes two registers", zu[k].name);
+            rd = tok_reg(&t[1]); ra = tok_reg(&t[2]);
+            if (rd < 0 || ra < 0) FAIL("%s wants registers", zu[k].name);
+            rv_zb_unary(out, zu[k].which, rd, ra, zu[k].w32, xlen);
+            return 0;
+        }
+        for (unsigned k = 0; k < sizeof zi / sizeof *zi; k++) {
+            long long v;
+            int rd, ra, bits;
+            if (!tok_is(&t[0], zi[k].name))
+                continue;
+            if (!(have & zi[k].ext))
+                FAIL("%s is a %s instruction, and -march= has no %s",
+                     zi[k].name, extname[zi[k].ext], extname[zi[k].ext]);
+            if (zi[k].rv64 && xlen != 64)
+                FAIL("%s is an RV64 instruction and this is RV32", zi[k].name);
+            if (n != 4) FAIL("%s takes two registers and an amount", zi[k].name);
+            rd = tok_reg(&t[1]); ra = tok_reg(&t[2]);
+            if (rd < 0 || ra < 0) FAIL("%s wants registers", zi[k].name);
+            bits = xlen == 64 && !zi[k].w32 ? 6 : 5;
+            if (!tok_imm(&t[3], &v) || v < 0 || v >= (1 << bits))
+                FAIL("%s's amount must be 0..%d here", zi[k].name,
+                     (1 << bits) - 1);
+            rv_zb_imm(out, zi[k].which, rd, ra, (int)v, zi[k].w32);
+            return 0;
+        }
     }
 
     /* ---- the M extension ---- */

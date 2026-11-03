@@ -373,7 +373,8 @@ static int riscv_on(void)
 static int riscv_changes(void)
 {
     return riscv_on() && (target_riscv_flen() || !target_riscv_rvc() ||
-                          target_riscv_zifencei() || !target_riscv_atomics());
+                          target_riscv_zifencei() || !target_riscv_atomics() ||
+                          target_riscv_ext());
 }
 
 /* Without the A extension (clang's rv32imc): no __riscv_a, no
@@ -448,6 +449,29 @@ static int riscv_adds(struct predef_macro *out)
     }
     if (target_riscv_zifencei()) {
         out[n].name = "__riscv_zifencei"; out[n++].value = "2000000";
+    }
+    /* the multi-letter extensions, as clang spells them (version 1.0) */
+    unsigned ext = target_riscv_ext();
+    if (ext & RV_EXT_ZBA) { out[n].name = "__riscv_zba"; out[n++].value = "1000000"; }
+    if (ext & RV_EXT_ZBB) { out[n].name = "__riscv_zbb"; out[n++].value = "1000000"; }
+    if (ext & RV_EXT_ZBS) { out[n].name = "__riscv_zbs"; out[n++].value = "1000000"; }
+    if (ext & RV_EXT_ZFHMIN) {
+        out[n].name = "__riscv_zfhmin"; out[n++].value = "1000000";
+    }
+    if (ext & RV_EXT_ZFH) { out[n].name = "__riscv_zfh"; out[n++].value = "1000000"; }
+    if (ext & RV_EXT_V) {
+        static const struct predef_macro v[] = {
+            { "__riscv_v", "1000000" }, { "__riscv_vector", "1" },
+            { "__riscv_v_elen", "64" }, { "__riscv_v_elen_fp", "64" },
+            { "__riscv_v_min_vlen", "128" },
+            { "__riscv_v_intrinsic", "1000000" },
+            { "__riscv_zve32f", "1000000" }, { "__riscv_zve32x", "1000000" },
+            { "__riscv_zve64d", "1000000" }, { "__riscv_zve64f", "1000000" },
+            { "__riscv_zve64x", "1000000" }, { "__riscv_zvl128b", "1000000" },
+            { "__riscv_zvl32b", "1000000" }, { "__riscv_zvl64b", "1000000" },
+        };
+        for (unsigned k = 0; k < sizeof v / sizeof *v; k++)
+            out[n++] = v[k];
     }
     if (!target_riscv_atomics())
         for (int k = 0; k < N_RV_LOCK_FREE; k++) {
