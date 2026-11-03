@@ -130,6 +130,10 @@ struct gas_target {
  * `.S` file's #include as by C's; NULL with 0 for none. */
 int gas_assemble(const char *in_path, const char *out_path, int preprocess,
                  const char **incdirs, int nincdirs);
+/* the target's ELF notes (ARM's attributes, RISC-V's ISA string), which
+ * the object gas_assemble writes carries; set before it */
+struct elfw;
+void gas_set_elf_notes(void (*notes)(struct elfw *w));
 
 /* Assembles one block of GNU-syntax text -- a file-scope __asm__, a naked
  * function's body -- from ta->tmpl (diagnostics at ta->file, ta->line

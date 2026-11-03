@@ -2971,6 +2971,7 @@ static int assemble_file(const char *in, const char *out)
         cpp_cmdline_define("__LANGUAGE_ASSEMBLY__=1", 0);
         cpp_cmdline_define("__LANGUAGE_ASSEMBLY=1", 0);
     }
+    gas_set_elf_notes(backend_get(target_get())->elf_notes);
     int rc = gas_assemble(in, out, kind == 2, incdirs, nincdirs);
     if (kind == 2)
         cpp_cmdline_define("__ASSEMBLER__", 1);

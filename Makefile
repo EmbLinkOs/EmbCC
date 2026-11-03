@@ -691,6 +691,7 @@ EMBLS_SRCS = tools/embls/embls.c $(PLATFORM_SRCS) src/cpp/cpp.c src/lex/lex.c \
              $(filter src/cxx/%,$(SRCS)) src/sema/sema.c src/ir/irgen.c \
              src/ir/irprint.c src/ir/irparse.c src/ir/gcov.c src/ir/sanitize.c \
              $(OPT_SRCS) src/debug/dwarf.c src/debug/eh.c src/elf/write.c \
+             src/as/gas.c \
              src/arch/code.c src/arch/regalloc.c src/arch/common.c \
              src/arch/x86_64/irgen.c src/arch/x86_64/codegen.c \
              src/arch/x86_64/emit.c src/arch/x86_64/topasm.c \

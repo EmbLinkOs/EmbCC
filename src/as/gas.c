@@ -3645,6 +3645,12 @@ static void pass_over(struct gas *g, const struct gline *lines, int nlines,
 
 /* ---- the object ------------------------------------------------------ */
 
+/* The target's own notes, handed in by the driver (backend_get's
+ * elf_notes): tools that link this file for its inline-asm half, as
+ * embls does, have no backend registry */
+static void (*g_elf_notes)(struct elfw *w);
+void gas_set_elf_notes(void (*notes)(struct elfw *w)) { g_elf_notes = notes; }
+
 static int write_object(struct gas *g, const char *out_path)
 {
     struct elfw *w = elfw_new(g->tgt->machine);
@@ -3860,8 +3866,8 @@ static int write_object(struct gas *g, const char *out_path)
      * (the registry's elf_notes): ARM's build attributes, RISC-V's ISA
      * string -- without it a disassembler knows only RV32I and C, and
      * showed a .S's fsd as <unknown> -- and MIPS's ABI flags */
-    if (backend_get(target_get())->elf_notes)
-        backend_get(target_get())->elf_notes(w);
+    if (g_elf_notes)
+        g_elf_notes(w);
     free(used);
     if (g->errors) { elfw_free(w); free(ndx); return 1; }
     int rc = elfw_write(w, out_path);
