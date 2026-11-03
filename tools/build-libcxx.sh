@@ -57,7 +57,7 @@ mkdir -p "$out/cxx"
 units="new guard atexit typeinfo dyncast noexcept"
 cxxflags="-fno-exceptions -fno-rtti"
 case $triple in
-    riscv*|thumb*) units="$units eh terminate"; cxxflags= ;;
+    riscv*|thumb*|mips*) units="$units eh terminate"; cxxflags= ;;
 esac
 for b in $units; do
     # shellcheck disable=SC2086

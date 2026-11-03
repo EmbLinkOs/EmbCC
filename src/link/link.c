@@ -3861,6 +3861,12 @@ static void apply_mips(struct linker *l, struct object *o, unsigned type,
         mips_put16(loc, (unsigned long)(d >> 2));
         return;
     }
+    case R_MIPS_PC32:               /* .eh_frame's */
+        if (c->isrel) A = (long long)(int)field;
+        V = (long long)S + A - (long long)P;
+        need_range(l, o, "R_MIPS_PC32", V, I32_MIN, I32_MAX);
+        mips_put_word(loc, (unsigned int)V);
+        return;
     case R_MIPS_GPREL16: case R_MIPS_GPREL32: case R_MIPS_LITERAL:
         die("%s: relocation %s: small-data (gp-relative) addressing, which "
             "this linker does not lay out; compile it with -G0", o->name,

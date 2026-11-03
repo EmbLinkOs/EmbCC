@@ -151,9 +151,10 @@ static const struct backend_desc g_backends[] = {
 #if FAMILY_BUILT(mips)
     [TARGET_MIPS32] = {
         .family = "MIPS", .codegen = codegen_unit_mips, .ra_at_o0 = 0,
+        .frame_sp = 29, .frame_ra = 31,     /* sp, ra */
         .op_calls_helper = mips_op_calls_helper,
-        .unwind_unwritten = "MIPS .eh_frame",
-        .cxx_exceptions = BACKEND_CXX_EXC_NONE,
+        .unwind_unwritten = NULL,
+        .cxx_exceptions = BACKEND_CXX_EXC_OK,
         .firmware = 1, .ld_scripts = 1,
         .call_insn = "jal", .call_delay_slot = 0, .sym_prefix = "",
         .imm_prefixed = 0, .text_p2align = 2,
@@ -162,9 +163,10 @@ static const struct backend_desc g_backends[] = {
         .elf_notes = mips_elf_notes },
     [TARGET_MIPS64] = {
         .family = "MIPS", .codegen = codegen_unit_mips, .ra_at_o0 = 0,
+        .frame_sp = 29, .frame_ra = 31,     /* sp, ra */
         .op_calls_helper = mips_op_calls_helper,
-        .unwind_unwritten = "MIPS .eh_frame",
-        .cxx_exceptions = BACKEND_CXX_EXC_BIG_ENDIAN,
+        .unwind_unwritten = NULL,
+        .cxx_exceptions = BACKEND_CXX_EXC_OK,
         .firmware = 1, .ld_scripts = 0,
         .call_insn = "jal", .call_delay_slot = 0, .sym_prefix = "",
         .imm_prefixed = 0, .text_p2align = 2,

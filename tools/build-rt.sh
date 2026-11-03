@@ -63,7 +63,7 @@ for f in "$here"/lib/rt/*.c; do
     # _Unwind_RaiseException and has to step out of it.
     uw=
     case $b/$triple in
-        unwind/riscv*|unwind/*linux*) uw=--unwind-tables ;;
+        unwind/riscv*|unwind/mips*|unwind/*linux*) uw=--unwind-tables ;;
     esac
     # shellcheck disable=SC2086
     "$EMBCC" --target="$triple" $flags $uw -fenum-size-neutral -Os \

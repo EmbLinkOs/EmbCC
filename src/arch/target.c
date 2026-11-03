@@ -1222,6 +1222,9 @@ int target_rel_put_addend(enum target_arch a, int type, unsigned char *field,
         put_w32(field, (w & 0xffff0000UL) |
                         (((unsigned long)addend >> 2) & 0xffffUL));
         return 1;
+    case R_MIPS_PC32:                   /* .eh_frame's */
+        put_w32(field, (unsigned long)addend & 0xffffffffUL);
+        return 1;
     default:
         return 0;
     }
@@ -1294,6 +1297,7 @@ int target_reloc_type(enum target_arch a, enum reloc_kind k)
         case RK_MIPS_TEXT26:  return R_MIPS_26;
         case RK_ABS32:        return R_MIPS_32;
         case RK_ABS64:        return R_MIPS_64;
+        case RK_DATA_PREL32:  return R_MIPS_PC32;   /* .eh_frame's */
         default:              return -1;
         }
     }
@@ -1306,6 +1310,7 @@ int target_reloc_type(enum target_arch a, enum reloc_kind k)
         case RK_MIPS_LO16:   return R_MIPS_LO16;
         case RK_MIPS_TEXT26: return R_MIPS_26;
         case RK_ABS32:       return R_MIPS_32;
+        case RK_DATA_PREL32: return R_MIPS_PC32;    /* .eh_frame's */
         default:             return -1;
         }
     }

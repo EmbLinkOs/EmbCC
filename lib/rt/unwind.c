@@ -52,10 +52,10 @@
  * (make libc-emblinkos): its programs start with -nostartfiles, so
  * libgcc's unwinder, which crtbegin's frame registration feeds, would
  * find no tables -- and its linker script brackets .eh_frame for this. */
-/* ...and RISC-V, bare metal too: an EmbCC RISC-V image links no
- * libgcc, and its .eh_frame is bracketed by EmbLD as Linux's is. */
+/* ...and RISC-V and MIPS, bare metal too: an EmbCC image there links
+ * no libgcc, and its .eh_frame is bracketed by EmbLD as Linux's is. */
 #if defined(__linux__) || defined(__EMBCC_LINUX__) || \
-    defined(__EMBCC_RT_UNWIND) || defined(__riscv)
+    defined(__EMBCC_RT_UNWIND) || defined(__riscv) || defined(__mips__)
 
 typedef unsigned long uw_word;
 typedef long uw_sword;
@@ -95,6 +95,17 @@ static const unsigned char uw_fcaptured[] = {
 };
 #  define UW_NFCAPT ((int)(sizeof uw_fcaptured / sizeof uw_fcaptured[0]))
 # endif
+#elif defined(__mips__)
+/* $0-$31 are DWARF 0-31. Soft float only (EmbCC's o32 and n64), so the
+ * callee-saved are all general: s0-s7, gp, fp and ra. */
+# define UW_NREG   32
+# define UW_RA     31
+# define UW_SP     29
+# define UW_LP0    4           /* a0 */
+# define UW_LP1    5           /* a1 */
+static const unsigned char uw_captured[] = {
+    31, 16, 17, 18, 19, 20, 21, 22, 23, 28, 30
+};
 #else
 # define UW_NREG   32
 # define UW_RA     30          /* x30, the link register */
@@ -231,6 +242,46 @@ UW_FLD("fs8", 8) UW_FLD("fs9", 9) UW_FLD("fs10", 10) UW_FLD("fs11", 11)
 UW_GL("t1", 14) UW_GL("a0", 15) UW_GL("a1", 16) UW_GL("sp", 13)
 "jr t1\n"
 );
+#elif defined(__mips__)
+/* Mnemonics again (src/arch/mips/asm.c), delay slots by hand. The
+ * buffer: the 11 callee-saved in uw_captured's order, sp, pc, lp0, lp1,
+ * a word each. The resume jumps through t9, which a PIC landing pad
+ * would want too. */
+# if defined(__mips64)
+#  define UW_S "sd"
+#  define UW_L "ld"
+#  define UW_W 8
+# else
+#  define UW_S "sw"
+#  define UW_L "lw"
+#  define UW_W 4
+# endif
+# define UW_STR_(x) #x
+# define UW_STR(x) UW_STR_(x)
+# define UW_GS(r, k) UW_S " $" r ", " UW_STR(k) "*" UW_STR(UW_W) "($a0)\n"
+# define UW_GL(r, k) UW_L " $" r ", " UW_STR(k) "*" UW_STR(UW_W) "($t0)\n"
+__asm__(
+".text\n"
+".set push\n"
+".set noreorder\n"
+".globl __uw_capture\n"
+"__uw_capture:\n"
+UW_GS("ra", 0) UW_GS("s0", 1) UW_GS("s1", 2) UW_GS("s2", 3)
+UW_GS("s3", 4) UW_GS("s4", 5) UW_GS("s5", 6) UW_GS("s6", 7)
+UW_GS("s7", 8) UW_GS("gp", 9) UW_GS("fp", 10) UW_GS("sp", 11)
+"jr $ra\n"
+UW_GS("ra", 12)
+".globl __uw_resume\n"
+"__uw_resume:\n"
+"move $t0, $a0\n"
+UW_GL("ra", 0) UW_GL("s0", 1) UW_GL("s1", 2) UW_GL("s2", 3)
+UW_GL("s3", 4) UW_GL("s4", 5) UW_GL("s5", 6) UW_GL("s6", 7)
+UW_GL("s7", 8) UW_GL("gp", 9) UW_GL("fp", 10)
+UW_GL("t9", 12) UW_GL("a0", 13) UW_GL("a1", 14)
+"jr $t9\n"
+UW_GL("sp", 11)
+".set pop\n"
+);
 #else
 __asm__(
 ".text\n"
@@ -289,8 +340,10 @@ typedef int _Unwind_Reason_Code;
 struct _Unwind_Exception;
 typedef void (*_Unwind_Exception_Cleanup_Fn)(int, struct _Unwind_Exception *);
 
+/* the class is eight bytes everywhere, as <unwind.h> and libgcc have it:
+ * at 32 bits an unsigned long shifted every argument after it */
 struct _Unwind_Exception {
-    unsigned long exception_class;
+    unsigned long long exception_class;
     _Unwind_Exception_Cleanup_Fn exception_cleanup;
     unsigned long private_1;
     unsigned long private_2;
@@ -315,7 +368,7 @@ struct _Unwind_Context {
     int signal_frame;
 };
 
-typedef _Unwind_Reason_Code (*personality_fn)(int, int, unsigned long,
+typedef _Unwind_Reason_Code (*personality_fn)(int, int, unsigned long long,
                                               struct _Unwind_Exception *,
                                               struct _Unwind_Context *);
 
@@ -327,9 +380,17 @@ typedef _Unwind_Reason_Code (*personality_fn)(int, int, unsigned long,
  * as one is how a port to a third machine breaks silently. */
 static uw_word rd_u8(const unsigned char **p)  { return *(*p)++; }
 
+/* The tables are in the target's byte order: big-endian MIPS reads its
+ * fields most significant byte first. */
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+# define UW_BYTE(p, i, n) ((uw_word)(p)[(n) - 1 - (i)])
+#else
+# define UW_BYTE(p, i, n) ((uw_word)(p)[i])
+#endif
+
 static uw_word rd_u16(const unsigned char **p)
 {
-    uw_word v = (uw_word)(*p)[0] | ((uw_word)(*p)[1] << 8);
+    uw_word v = UW_BYTE(*p, 0, 2) | (UW_BYTE(*p, 1, 2) << 8);
     *p += 2;
     return v;
 }
@@ -338,18 +399,19 @@ static uw_word rd_u32(const unsigned char **p)
 {
     uw_word v = 0;
     int i;
-    for (i = 0; i < 4; i++) v |= (uw_word)(*p)[i] << (8 * i);
+    for (i = 0; i < 4; i++) v |= UW_BYTE(*p, i, 4) << (8 * i);
     *p += 4;
     return v;
 }
 
 static uw_word rd_u64(const unsigned char **p)
 {
-    uw_word v = 0;
+    unsigned long long v = 0;
     int i;
-    for (i = 0; i < 8; i++) v |= (uw_word)(*p)[i] << (8 * i);
+    for (i = 0; i < 8; i++)
+        v |= (unsigned long long)UW_BYTE(*p, i, 8) << (8 * i);
     *p += 8;
-    return v;
+    return (uw_word)v;
 }
 
 static uw_word rd_uleb(const unsigned char **p)
