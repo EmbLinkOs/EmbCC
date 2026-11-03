@@ -533,6 +533,7 @@ static int g_clash;                  /* -fstack-clash-protection */
 /* -fcf-protection / -mbranch-protection (CF_* of target.h), and which
  * was given, for the target check */
 static int g_cf, g_cf_x86, g_cf_a64;
+static int g_bounds;                 /* -fbounds-safety, -fsanitize=bounds */
 /* -fsanitize=address, thread, memory: which runtime archives the link
  * takes (lib/san); -fsanitize-recover=address */
 static unsigned g_san_link;
@@ -6757,6 +6758,12 @@ static int embcc_main(int argc, char **argv)
                 p = e + 1;
             }
             g_cf_a64 = 1;
+        } else if (strcmp(argv[i], "-fbounds-safety") == 0 ||
+                   strcmp(argv[i], "--bounds-safety") == 0) {
+            g_bounds = 1;
+        } else if (strcmp(argv[i], "-fno-bounds-safety") == 0 ||
+                   strcmp(argv[i], "--no-bounds-safety") == 0) {
+            g_bounds = 0;
         } else if (strcmp(argv[i], "--stack-info") == 0) {
             stackinfo_set(1);
             target_set_stack_info(1);
@@ -7401,6 +7408,13 @@ static int embcc_main(int argc, char **argv)
                     bit = SAN_ADDRESS;
                 else if (n == 6 && !strncmp(p, "thread", 6))
                     bit = SAN_THREAD;
+                else if ((n == 6 && !strncmp(p, "bounds", 6)) ||
+                         (n == 12 && !strncmp(p, "array-bounds", 12)) ||
+                         (n == 13 && !strncmp(p, "bounds-strict", 13))) {
+                    /* the subscript checks (-fbounds-safety's) */
+                    g_bounds = !off;
+                    bit = 0;
+                }
                 else if ((n == 6 && !strncmp(p, "memory", 6)) ||
                          (n == 13 && !strncmp(p, "kernel-memory", 13)))
                     bit = SAN_MEMORY;
@@ -7968,6 +7982,7 @@ static int embcc_main(int argc, char **argv)
     gcov_set_flags(g_prof_partial, g_prof_abs);
     ssp_set(g_ssp_mode, g_ssp_buf);
     clash_set(g_clash);
+    irgen_set_bounds(g_bounds);
     if ((g_cf & (CF_IBT | CF_SHSTK)) && target_get() != TARGET_X86_64) {
         fprintf(stderr, "embcc: error: -fcf-protection is x86-64's (CET); on "
                         "%s it has no instructions%s\n", target_triple_now(),

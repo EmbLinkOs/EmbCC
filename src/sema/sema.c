@@ -5469,6 +5469,64 @@ static void check_expr_main(struct unit *u, struct func *f, struct scope *sc,
                      * nothing -- _FORTIFY_SOURCE would reject a write
                      * that fits. Unknown is a correct answer; a small
                      * one is not. */
+                    /* __builtin_dynamic_object_size of a flexible array
+                     * member with counted_by(n): n times the element,
+                     * read when it runs -- what GCC 15 and clang answer,
+                     * and what _FORTIFY_SOURCE=3 checks with. The base
+                     * is the argument's own (it is not used again). */
+                    struct expr *fm = e->args[0];
+                    while (fm->kind == EXPR_CAST && fm->col == 0 && fm->rhs)
+                        fm = fm->rhs;
+                    const struct type *ft = fm->undecayed ? fm->undecayed
+                                                          : fm->ty;
+                    struct member *cm = NULL;
+                    long coff = 0;
+                    if (known < 0 && !strcmp(bn, "dynamic_object_size") &&
+                        fm->kind == EXPR_MEMBER && fm->memb &&
+                        fm->memb->counted_by && ft && ft->kind == TY_ARRAY &&
+                        ft->count <= 0 && fm->lhs) {
+                        struct type *st = fm->is_arrow
+                            ? (fm->lhs->ty ? fm->lhs->ty->pointee : NULL)
+                            : fm->lhs->ty;
+                        cm = st ? ty_find_member_deep(st, fm->memb->counted_by,
+                                                      &coff) : NULL;
+                    }
+                    if (cm && cm->ty && ty_is_integer(cm->ty)) {
+                        struct type *szt = ty_int_of_size(target_ptr_size(), 1);
+                        long es = fm->memb->counted_bytes ? 1
+                                : ty_size(ft->pointee);
+                        struct expr *mem = xcalloc(1, sizeof *mem);
+                        mem->kind = EXPR_MEMBER;
+                        mem->line = e->line;
+                        mem->lhs = fm->lhs;
+                        mem->is_arrow = fm->is_arrow;
+                        mem->name = fm->memb->counted_by;
+                        mem->memb = cm;
+                        mem->ty = cm->ty;
+                        mem->var_index = -1;
+                        struct expr *cv = xcalloc(1, sizeof *cv);
+                        cv->kind = EXPR_CAST;
+                        cv->line = e->line;
+                        cv->rhs = mem;
+                        cv->ty = szt;
+                        cv->cast_ty = szt;
+                        cv->var_index = -1;
+                        struct expr *k = xcalloc(1, sizeof *k);
+                        k->kind = EXPR_NUM;
+                        k->line = e->line;
+                        k->num = es;
+                        k->ty = szt;
+                        k->var_index = -1;
+                        memset(e, 0, sizeof *e);
+                        e->kind = EXPR_BINOP;
+                        e->op = B_MUL;
+                        e->line = cv->line;
+                        e->lhs = cv;
+                        e->rhs = k;
+                        e->var_index = -1;
+                        e->ty = szt;
+                        break;
+                    }
                     e->kind = EXPR_NUM;
                     e->num = known >= 0 ? known : ((which & 2) ? 0 : -1);
                 }

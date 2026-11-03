@@ -102,6 +102,10 @@ struct attrs { int packed; int aligned; int weak; int noreturn;
                unsigned no_san;
                /* stack_protect (1) / no_stack_protector (-1) */
                int ssp;
+               /* counted_by(n) / sized_by(n) on a member: the member
+                * holding its count (elements, or bytes with sized_by) */
+               const char *counted_by;
+               int counted_bytes;
 };
 
 /* The `)` that closes a declarator's `(`: the lexer at it, under the `(`'s
@@ -258,6 +262,10 @@ struct parser {
      * it is off, an attribute in that position is still refused,
      * because then there really is nowhere for it to go. */
     struct attrs attr_slot;
+    /* clang's `T *__counted_by(n) p`: a counted_by between the `*` and
+     * the name, for the member being declared */
+    const char *ptr_counted_by;
+    int ptr_counted_bytes;
     int attr_carry_on;
     /* An attribute among the declaration specifiers -- `static const
      * __attribute__((aligned(4))) char t[4]`, as GCC takes it -- belongs
@@ -1001,9 +1009,10 @@ static const struct attr_entry attr_table[] = {
       "the resolver would never run and calls would go to it rather "
       "than to the implementation it picks" },
 
-    { "counted_by",  ATTR_NOOP,
-      "it tells __builtin_dynamic_object_size the length of a flexible "
-      "array member, and EmbCC has no object-size checking to tell" },
+    { "counted_by",  ATTR_HONOURED, NULL },
+    { "counted_by_or_null", ATTR_HONOURED, NULL },
+    { "sized_by",    ATTR_HONOURED, NULL },
+    { "sized_by_or_null", ATTR_HONOURED, NULL },
     { "access",      ATTR_NOOP,
       "it describes how a function reads and writes through a pointer "
       "argument, for warnings EmbCC does not issue" },
@@ -1332,6 +1341,17 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
                     if (out)
                         out->mode = b;
                     ps->mode_line = aline;
+                }
+                if (name && (attr_is(name, "counted_by") ||
+                             attr_is(name, "counted_by_or_null") ||
+                             attr_is(name, "sized_by") ||
+                             attr_is(name, "sized_by_or_null")) &&
+                    cur(ps)->kind == TOK_IDENT && out) {
+                    /* the member that holds this one's length, checked
+                     * under -fbounds-safety (src/ir/irgen.c) */
+                    out->counted_by = cur(ps)->text;
+                    out->counted_bytes = attr_is(name, "sized_by") ||
+                                         attr_is(name, "sized_by_or_null");
                 }
                 if (name && attr_is(name, "format") &&
                     cur(ps)->kind == TOK_IDENT) {
@@ -3079,6 +3099,10 @@ static struct type *parse_stars(struct parser *ps, struct type *t)
             /* mode(M) before any `*` changes the type the specifiers
              * named: `typedef int __attribute__((mode(SI))) int_t;`, a
              * member `E __attribute__((mode(byte))) a;` */
+            if (a.counted_by && stars) {
+                ps->ptr_counted_by = a.counted_by;
+                ps->ptr_counted_bytes = a.counted_bytes;
+            }
             if (a.mode && !stars)
                 t = apply_mode(ps, t, a.mode);
             if (a.vecsize && !stars)
@@ -3914,6 +3938,7 @@ static struct type *parse_struct_body(struct parser *ps, struct type *t,
         for (;;) { /* declarators share the base: int a, *b, c[4]; */
             int mline = cur(ps)->line;
             const char *mname;
+            ps->ptr_counted_by = NULL;       /* only this declarator's */
             struct type *mty = parse_declarator(ps, spec, &mname);
             /* A bitfield: `T name : width` or an anonymous `T : width`
              * (padding) / `T : 0` (a separator forcing the next field to a
@@ -3984,6 +4009,12 @@ static struct type *parse_struct_body(struct parser *ps, struct type *t,
                 mty = apply_vec(ps, mty, mat.vecsize);
             ms[n].name = mname;
             ms[n].ty = mty;
+            ms[n].counted_by = mat.counted_by ? mat.counted_by
+                                              : ps->ptr_counted_by;
+            ms[n].counted_bytes = mat.counted_by ? mat.counted_bytes
+                                                 : ps->ptr_counted_bytes;
+            ps->ptr_counted_by = NULL;
+            ps->ptr_counted_bytes = 0;
             ms[n].off = 0;
             ms[n].is_bitfield = is_bf;
             ms[n].bit_off = 0;

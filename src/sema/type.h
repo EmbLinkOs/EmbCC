@@ -49,6 +49,12 @@ struct member {
                            * bit there, and it is read and written a byte at a
                            * time over this many bytes (0: a unit access) */
     int user_align;       /* __attribute__((aligned(N))) on the member; 0 = none */
+    /* counted_by(name) / sized_by(name) (GCC 15's, clang's): the member
+     * of the same struct that holds this array's or pointer's length, in
+     * elements (or bytes); NULL when none. -fbounds-safety checks a
+     * subscript against it. */
+    const char *counted_by;
+    int counted_bytes;
 };
 
 /* A bit-field's first bit in MEMORY order -- bits from the first byte of

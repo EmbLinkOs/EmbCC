@@ -697,6 +697,7 @@ void irgen_set_sanitize(unsigned mask);
  * either may be NULL) */
 void irgen_set_instrument(int on, const char *funcs, const char *files);
 void irgen_set_opt_size(int on);       /* -Os: a switch table must be denser */
+void irgen_set_bounds(int on);         /* -fbounds-safety, -fsanitize=bounds */
 
 /* --coverage and the profile options (src/ir/gcov.c). gcov_set says
  * what to make: counters (-fprofile-arcs), notes (-ftest-coverage),

@@ -325,6 +325,78 @@ static int label_mark(struct ir_func *fn, struct func *f, const char *name,
     return f->nlabel_pos++;
 }
 
+/* ---- -fbounds-safety (and -fsanitize=bounds) --------------------------
+ *
+ * A subscript of something whose length is known is checked before the
+ * address is formed: the index, as unsigned, below the length -- or not
+ * above it, under `&` (one past the end is an address C allows) -- and a
+ * trap when it is not, as EmbCC's other checks trap. The length is:
+ *
+ *   - an array's own, declared (a local's, a global's, a member's, a row
+ *     of a two-dimensional one);
+ *   - a flexible array member's or a pointer member's counted_by(n) /
+ *     sized_by(n): member n of the same struct, read when the subscript
+ *     runs. For the flexible array the struct is the array's address less
+ *     its offset, so nothing is evaluated twice; for a pointer member the
+ *     struct's address is evaluated again, which is only done when that
+ *     has no side effect.
+ *
+ * Anything else -- a plain pointer -- has no length to check against. */
+static int g_bounds, g_bounds_addr;
+
+void irgen_set_bounds(int on) { g_bounds = on; }
+
+static void san_trap_if(struct ir_func *fn, int cond, int w);
+
+static void bounds_check(struct ir_func *fn, struct expr *pe, int p, int idx,
+                         int allow_end)
+{
+    struct expr *b = pe;
+    while (b && b->kind == EXPR_CAST && b->col == 0 && b->rhs)
+        b = b->rhs;
+    if (!b)
+        return;
+    const struct type *at = b->undecayed ? b->undecayed : b->ty;
+    int n = -1;
+    if (at && at->kind == TY_ARRAY && at->count > 0)
+        n = emit_const(fn, at->count, AW);
+    else if (b->kind == EXPR_MEMBER && b->memb && b->memb->counted_by) {
+        struct type *st = b->is_arrow ? (b->lhs->ty ? b->lhs->ty->pointee
+                                                    : NULL)
+                                      : b->lhs->ty;
+        long coff = 0;
+        struct member *cm = st ? ty_find_member_deep(st, b->memb->counted_by,
+                                                     &coff) : NULL;
+        if (!cm || !cm->ty || !ty_is_integer(cm->ty))
+            return;
+        int fam = at && at->kind == TY_ARRAY;
+        int base;
+        if (fam)
+            base = emit_bin(fn, IR_SUB, p, emit_const(fn, b->memb->off, AW),
+                            AW, 1);
+        else if (!rules_side_effects(b->lhs))
+            base = b->is_arrow ? gen_expr(fn, b->lhs) : gen_addr(fn, b->lhs);
+        else
+            return;
+        int ca = emit_bin(fn, IR_ADD, base, emit_const(fn, coff, AW), AW, 1);
+        int cnt = gen_convert(fn, emit_load(fn, ca, cm->ty), cm->ty,
+                              ty_intptr(1));
+        if (b->memb->counted_bytes) {
+            const struct type *et = fam ? at->pointee
+                                  : b->ty && b->ty->kind == TY_PTR
+                                    ? b->ty->pointee : NULL;
+            long es = et ? ty_size(et) : 1;
+            if (es > 1)
+                cnt = emit_bin(fn, IR_DIV, cnt, emit_const(fn, es, AW), AW, 0);
+        }
+        n = cnt;
+    }
+    if (n < 0)
+        return;
+    int bad = emit_cmp(fn, allow_end ? B_GT : B_GE, idx, n, AW, 0);
+    san_trap_if(fn, bad, 4);
+}
+
 /* An arm of an `if` that calls a noreturn or cold function -- abort(),
  * an error path -- is the unlikely one, as GCC predicts it. */
 static int arm_calls_cold(const struct ir_func *fn, int lo, int hi)
@@ -5210,7 +5282,15 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
                               : i->dst;
     }
     case EXPR_ADDR:
-        return gen_addr(fn, e->rhs);
+        /* &a[n] is an address C allows one past the end (bounds_check) */
+        if (g_bounds && e->rhs && e->rhs->kind == EXPR_DEREF &&
+            e->rhs->rhs && e->rhs->rhs->is_subscript)
+            g_bounds_addr = 1;
+        {
+            int r = gen_addr(fn, e->rhs);
+            g_bounds_addr = 0;
+            return r;
+        }
     case EXPR_CAST: {
         int v = gen_expr(fn, e->rhs);
         if (e->ty->kind == TY_VOID)
@@ -5371,6 +5451,9 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
                 /* ptr +/- int: scale the (already long) index */
                 struct expr *pe = lp ? e->lhs : e->rhs;
                 struct expr *ie = lp ? e->rhs : e->lhs;
+                /* `&a[n]`: this subscript's, not an inner one's */
+                int allow_end = g_bounds_addr;
+                g_bounds_addr = 0;
                 int p = gen_expr(fn, lp ? pe : ie);
                 int idx = gen_expr(fn, lp ? ie : pe);
                 if (!lp) {
@@ -5378,6 +5461,8 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
                     p = idx;
                     idx = t;
                 }
+                if (g_bounds && e->is_subscript && e->op == B_ADD)
+                    bounds_check(fn, pe, p, idx, allow_end);
                 struct type *pt = (lp ? lt : rt)->pointee;
                 int size = step_size(pt);
                 if (ty_is_vla(pt))
