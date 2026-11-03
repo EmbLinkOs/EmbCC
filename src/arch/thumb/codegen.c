@@ -2148,8 +2148,11 @@ static int t_nrvo_local(const struct t_fn *F)
             return -1;
         L = l;
     }
-    if (L < 0 || L >= fn->nvars || fn->locals[L].is_volatile ||
-        fn->locals[L].size != fn->ret_abi.size)
+    /* (and not a parameter: `v[l] = x; return v;` -- one arrives holding
+     * a value, which the buffer would not have; vsetq_lane came back
+     * with only its new lane) */
+    if (L < 0 || L >= fn->nvars || L < fn->nparams ||
+        fn->locals[L].is_volatile || fn->locals[L].size != fn->ret_abi.size)
         return -1;
     for (int n = 0; n < fn->nins; n++) {
         const struct ir_ins *i = &fn->ins[n];

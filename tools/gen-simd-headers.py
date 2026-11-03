@@ -447,6 +447,10 @@ def mve():
     o('#error "arm_mve.h: MVE is not enabled (-march=armv8.1-m.main+mve, or -mcpu=cortex-m55)"')
     o('#endif\n')
     o('typedef uint16_t mve_pred16_t;')
+    o('/* the bytes of *__s whose predicate bits are set, over *__d */')
+    o('static __inline__ void __mve_merge(void *__d, const void *__s, mve_pred16_t __p)')
+    o('{\n    for (int __j = 0; __j < 16; __j++)\n        if ((__p >> __j) & 1)\n'
+      '            ((unsigned char *)__d)[__j] = ((const unsigned char *)__s)[__j];\n}')
     o('typedef float float32_t;\n')
     for k, b in MVE_ELEMS:
         if k == 'f':
@@ -476,18 +480,31 @@ def mve_type(o, k, b):
     V, E = vtype(k, b, n), ctype(k, b)
     f = k == 'f'
     act = '((__p >> (__i * %d)) & 1)' % eb
+    if b == 64:
+        # MVE has 64-bit lanes only to move: no arithmetic, no
+        # comparison, no contiguous load (its gathers take other forms)
+        o.fn(E, 'vgetq_lane_%s' % t, '%s __v, const int __l' % V, '    return __v[__l];')
+        o.fn(V, 'vsetq_lane_%s' % t, '%s __x, %s __v, const int __l' % (E, V),
+             '    __v[__l] = __x;\n    return __v;')
+        o.fn(V, 'vuninitializedq_%s' % t, 'void', '    %s __r = { 0 };\n    return __r;' % V)
+        mve_reinterpret(o, k, b, t, V)
+        return
     o.fn(V, 'vld1q_%s' % t, 'const %s *__b' % E,
          '    %s __r;\n    memcpy(&__r, __b, 16);\n    return __r;' % V)
     o.fn('void', 'vst1q_%s' % t, '%s *__b, %s __v' % (E, V),
          '    memcpy(__b, &__v, 16);')
+    # predication is by BYTE: a lane's bytes are each its own bit's
     o.fn(V, 'vld1q_z_%s' % t, 'const %s *__b, mve_pred16_t __p' % E,
-         '    %s __r;\n%s\n    return __r;' % (V, loop(n, '__r[__i] = %s ? __b[__i] : 0;' % act)))
+         '    %s __r = { 0 };\n    __mve_merge(&__r, __b, __p);\n    return __r;' % V)
+    # ...but a store is by element: one is written when its lowest
+    # byte's bit is set (what a register write merges bytewise, memory
+    # takes whole)
     o.fn('void', 'vst1q_p_%s' % t, '%s *__b, %s __v, mve_pred16_t __p' % (E, V),
          loop(n, 'if (%s) __b[__i] = __v[__i];' % act))
     o.fn(V, 'vdupq_n_%s' % t, '%s __x' % E,
          '    %s __r;\n%s\n    return __r;' % (V, loop(n, '__r[__i] = __x;')))
     o.fn(V, 'vdupq_m_n_%s' % t, '%s __in, %s __x, mve_pred16_t __p' % (V, E),
-         '    %s __r;\n%s\n    return __r;' % (V, loop(n, '__r[__i] = %s ? __x : __in[__i];' % act)))
+         '    %s __t;\n%s\n    __mve_merge(&__in, &__t, __p);\n    return __in;' % (V, loop(n, '__t[__i] = __x;')))
     o.fn(E, 'vgetq_lane_%s' % t, '%s __v, const int __l' % V, '    return __v[__l];')
     o.fn(V, 'vsetq_lane_%s' % t, '%s __x, %s __v, const int __l' % (E, V),
          '    __v[__l] = __x;\n    return __v;')
@@ -500,13 +517,14 @@ def mve_type(o, k, b):
                 bt = E if sc else V
                 bx = '__b' if sc else '__b[__i]'
                 e = expr.replace('B', bx)
-                nm = '%s%s%s_%s' % (name, '_n' if sc else '', fm, t)
+                nm = '%s%s%s_%s' % (name, fm, '_n' if sc else '', t)   # vaddq_m_n_s32
                 if fm == '':
                     o.fn(V, nm, '%s __a, %s __b' % (V, bt),
                          '    %s __r;\n%s\n    return __r;' % (V, loop(n, '__r[__i] = %s;' % e)))
                 elif fm == '_m':
                     o.fn(V, nm, '%s __in, %s __a, %s __b, mve_pred16_t __p' % (V, V, bt),
-                         '    %s __r;\n%s\n    return __r;' % (V, loop(n, '__r[__i] = %s ? (%s)(%s) : __in[__i];' % (act, E, e))))
+                         '    %s __t;\n%s\n    __mve_merge(&__in, &__t, __p);\n    return __in;'
+                         % (V, loop(n, '__t[__i] = (%s)(%s);' % (E, e))))
                 else:
                     o.fn(V, nm, '%s __a, %s __b, mve_pred16_t __p' % (V, bt),
                          '    %s __r = { 0 };\n%s\n    return __r;' % (V, loop(n, 'if (%s) __r[__i] = %s;' % (act, e))))
@@ -527,9 +545,11 @@ def mve_type(o, k, b):
         three('vabdq', '(__a[__i] > B ? __a[__i] - B : B - __a[__i])')
         wide = 'int64_t' if k == 's' else 'uint64_t'
         three('vhaddq', '(%s)(((%s)__a[__i] + B) >> 1)' % (E, wide))
-        three('vqaddq', '(%s)__sat_%s%d((%s)__a[__i] + (%s)B)' % (E, k, b, wide, wide), scalar=True)
+        # (the saturating ones have no _x forms)
+        three('vqaddq', '(%s)__sat_%s%d((%s)__a[__i] + (%s)B)' % (E, k, b, wide, wide),
+              forms=('', '_m'), scalar=True)
         three('vqsubq', ('(%s)__sat_%s%d((int64_t)__a[__i] - (int64_t)B)' % (E, k, b)) if k == 's'
-              else '(__a[__i] > B ? __a[__i] - B : 0)', scalar=True)
+              else '(__a[__i] > B ? __a[__i] - B : 0)', forms=('', '_m'), scalar=True)
     if f:
         three('vmaxnmq', '(__a[__i] > B ? __a[__i] : B)')
         three('vminnmq', '(__a[__i] < B ? __a[__i] : B)')
@@ -538,7 +558,7 @@ def mve_type(o, k, b):
              '    %s __r;\n%s\n    return __r;' % (V, loop(n, '__r[__i] = __a[__i] + __b[__i] * __c[__i];')))
         o.fn(V, 'vfmaq_n_%s' % t, '%s __a, %s __b, %s __c' % (V, V, E),
              '    %s __r;\n%s\n    return __r;' % (V, loop(n, '__r[__i] = __a[__i] + __b[__i] * __c;')))
-    if b < 64:
+    if b < 64 and not f:
         o.fn(V, 'vmlaq_n_%s' % t, '%s __a, %s __b, %s __c' % (V, V, E),
              '    %s __r;\n%s\n    return __r;' % (V, loop(n, '__r[__i] = __a[__i] + __b[__i] * __c;')))
     if k == 's' or f:
@@ -576,7 +596,7 @@ def mve_type(o, k, b):
                  '    mve_pred16_t __r = 0;\n%s\n    return __r;' %
                  loop(n, 'if (__a[__i] %s %s) __r |= (mve_pred16_t)(0x%x << (__i * %d));' % (op, bx, full, eb)))
     o.fn(V, 'vpselq_%s' % t, '%s __a, %s __b, mve_pred16_t __p' % (V, V),
-         '    %s __r;\n%s\n    return __r;' % (V, loop(n, '__r[__i] = %s ? __a[__i] : __b[__i];' % act)))
+         '    __mve_merge(&__b, &__a, __p);\n    return __b;')
     # reductions: an integer's sum in 32 bits (64 for vaddlvq), its max/min
     if not f:
         acc = 'int32_t' if k == 's' else 'uint32_t'
@@ -606,7 +626,10 @@ def mve_type(o, k, b):
                  '    %s __r;\n%s\n    return __r;' % (V, loop(4, '__r[__i] = (float)__a[__i];')))
             o.fn(I, 'vcvtq_%s32_f32' % ik, '%s __a' % V,
                  '    %s __r;\n%s\n    return __r;' % (I, loop(4, '__r[__i] = __cvt_%s32(__a[__i]);' % ik)))
-    # reinterpretations
+    mve_reinterpret(o, k, b, t, V)
+
+
+def mve_reinterpret(o, k, b, t, V):
     for k2, b2 in MVE_ELEMS:
         if (k2, b2) == (k, b):
             continue
