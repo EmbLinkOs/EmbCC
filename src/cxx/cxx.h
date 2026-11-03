@@ -262,6 +262,7 @@ struct cvar {
                                * member sb_field of this hidden variable,
                                * or its element sb_index */
     struct cfield *sb_field;
+    struct cclass *sb_base;   /* ... of this base of it (its members') */
     int sb_index;
     int ce_state;             /* consteval.c: its object evaluated (2), being
                                * (1), only its address known (3) */

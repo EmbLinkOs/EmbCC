@@ -4937,7 +4937,8 @@ static void parse_linkage_spec(void)
 static int binding_follows(void);
 static struct cstmt *parse_structured_binding(struct cty *ds_type,
                                               struct cexpr *given,
-                                              const struct ctok *at);
+                                              const struct ctok *at,
+                                              const struct dspec *ds);
 static struct cstmt *decl_of(struct cvar *v, const struct ctok *at);
 
 static void parse_declaration(int toplevel, struct cstmt **out)
@@ -5081,10 +5082,7 @@ static void parse_declaration(int toplevel, struct cstmt **out)
     }
     if (ds.type && ds.type->k == CT_AUTO && !ds.type->dauto &&
         binding_follows()) {
-        if (toplevel)
-            cx_error(at, "a structured binding at namespace scope is not "
-                         "supported yet");
-        struct cstmt *d = parse_structured_binding(ds.type, NULL, at);
+        struct cstmt *d = parse_structured_binding(ds.type, NULL, at, &ds);
         if (out)
             *out = d;
         cx_expect(TOK_SEMI, "';' after the declaration");
@@ -5370,11 +5368,80 @@ static long tuple_size_of(struct cty *E, const struct ctok *at)
  * get<i>. The cursor at the `&` or `[`; ds_type: `auto` with its cv;
  * given: the initializer when a range-based for gives it (else it
  * follows). The declarations made, as a DECL chain. */
+/* Has c, or a base of it, a named non-static data member? */
+static int sb_has_fields(struct cclass *c)
+{
+    class_ensure(c);
+    for (int i = 0; i < c->nfields; i++)
+        if (c->fields[i]->name)
+            return 1;
+    for (int i = 0; i < c->nbases; i++)
+        if (sb_has_fields(c->bases[i].cls))
+            return 1;
+    return 0;
+}
+
+/* A structured binding's variable -- the hidden one, or a tuple-like
+ * name's reference: a local, a static or thread_local one in a function
+ * (C++20), or at namespace scope one of the unit's (internal: no other
+ * unit can name it), initialized in its order. NULL S_DECL for those. */
+static struct cvar *sb_new_var(const char *name, struct cty *t,
+                               const struct ctok *at, const struct dspec *ds,
+                               struct cstmt **decl)
+{
+    struct cvar *v;
+    *decl = NULL;
+    if (cx_curfn) {
+        v = new_local(name, t, at);
+        v->is_tls = ds && ds->is_thread_local;
+        v->is_static = v->is_tls || (ds && ds->storage == SK_STATIC);
+        if (v->is_static)
+            v->disc = static_disc(cx_curfn, name);
+        *decl = decl_of(v, at);
+        return v;
+    }
+    v = xcalloc(1, sizeof *v);
+    v->name = name;
+    v->type = t;
+    v->owner = cx_scope;
+    v->line = at->t.line;
+    v->col = at->t.col;
+    v->file = at->file;
+    v->is_static = 1;
+    v->defined = 1;
+    v->is_tls = ds && ds->is_thread_local;
+    v->cname = cx_scope == cx_global ? name : mangle_var(v, cx_scope);
+    gvar_register(v);
+    return v;
+}
+
+/* the S_DECL chain of a binding's variables (none at namespace scope) */
+static void sb_chain(struct cstmt **head, struct cstmt **tail,
+                     struct cstmt *d)
+{
+    if (!d)
+        return;
+    if (*tail)
+        (*tail)->more = d;
+    else
+        *head = d;
+    *tail = d;
+}
+
 static struct cstmt *parse_structured_binding(struct cty *ds_type,
                                               struct cexpr *given,
-                                              const struct ctok *at)
+                                              const struct ctok *at,
+                                              const struct dspec *ds)
 {
     cx_pedantic(at, 2017, "a structured binding");
+    if (ds && (ds->storage == SK_STATIC || ds->is_thread_local) && cx_curfn)
+        cx_pedantic(at, 2020, "a static or thread_local structured binding");
+    if (ds && (ds->storage == SK_EXTERN || ds->storage == SK_TYPEDEF ||
+               ds->is_inline || ds->is_constexpr))
+        cx_error(at, "a structured binding cannot be %s",
+                 ds->storage == SK_EXTERN ? "extern"
+                 : ds->storage == SK_TYPEDEF ? "a typedef"
+                 : ds->is_inline ? "inline" : "constexpr");
     struct cty *declared = ds_type;
     if (cx_accept(TOK_AMP))
         declared = ct_ref(ds_type, 0);
@@ -5407,7 +5474,9 @@ static struct cstmt *parse_structured_binding(struct cty *ds_type,
     if (na != 1)
         cx_error(at, "a structured binding is initialized by one value");
     /* the hidden variable */
-    struct cvar *e = new_local(cx_fmt("__cx_sb%d", cx_uid()), declared, at);
+    struct cstmt *head = NULL, *tail = NULL, *dd;
+    struct cvar *e = sb_new_var(cx_fmt("__cx_sb%d", cx_uid()), declared, at,
+                                ds, &dd);
     struct cexpr *src = args[0];
     if ((form == INIT_LIST || form == INIT_COPY_LIST) && src->na == 1)
         src = src->a[0];
@@ -5418,7 +5487,7 @@ static struct cstmt *parse_structured_binding(struct cty *ds_type,
     } else {
         init_variable_with(e, form, args, na, at);
     }
-    struct cstmt *head = decl_of(e, at), *tail = head;
+    sb_chain(&head, &tail, dd);
     struct cty *E = ct_strip_ref(e->type);
     long ts;
     if (E->k == CT_ARRAY) {
@@ -5468,47 +5537,75 @@ static struct cstmt *parse_structured_binding(struct cty *ds_type,
                 ? expr_call_named_targs(obj, "get", gi, 1, NULL, 0, ats[i])
                 : expr_call_named_targs(NULL, "get", gi, 1, &obj, 1, ats[i]);
             struct cty *rt = ct_ref(ty->type, g->vc != VC_LVALUE);
-            struct cvar *r = new_local(names[i], rt, ats[i]);
+            struct cvar *r = sb_new_var(names[i], rt, ats[i], ds, &dd);
             init_variable_with(r, INIT_COPY, &g, 1, ats[i]);
             struct csym *y = scope_add(cx_scope, CS_VAR, names[i]);
             y->var = r;
-            struct cstmt *d = decl_of(r, ats[i]);
-            tail->more = d;
-            tail = d;
+            sb_chain(&head, &tail, dd);
         }
         return head;
     }
     /* the names: parts of e */
     struct cfield *fls[64];
+    struct cclass *holder = NULL;
     if (E->k == CT_CLASS) {
+        /* the members are all of one class: E's, or the one base of it
+         * (at any depth) that has them (9.6/5) */
         struct cclass *c = E->cls;
         class_ensure(c);
+        holder = c;
+        for (;;) {
+            int own = 0;
+            for (int i = 0; i < holder->nfields; i++)
+                own |= holder->fields[i]->name != NULL;
+            struct cclass *next = NULL;
+            for (int i = 0; i < holder->nbases; i++) {
+                struct cclass *b = holder->bases[i].cls;
+                if (!sb_has_fields(b))
+                    continue;
+                if (own)
+                    cx_error(at, "cannot bind names to '%s': both '%s' and "
+                                 "its base '%s' have data members",
+                             ct_name(E), holder->name ? holder->name : "it",
+                             b->name ? b->name : "?");
+                if (next)
+                    cx_error(at, "cannot bind names to '%s': its data "
+                                 "members are in more than one base",
+                             ct_name(E));
+                next = b;
+            }
+            if (own || !next)
+                break;
+            holder = next;
+        }
         int k = 0;
-        for (int i = 0; i < c->nfields; i++) {
-            if (!c->fields[i]->name)
+        for (int i = 0; i < holder->nfields; i++) {
+            if (!holder->fields[i]->name)
                 continue;
             if (k < 64)
-                fls[k] = c->fields[i];
+                fls[k] = holder->fields[i];
             k++;
         }
-        if (!k)
-            for (int i = 0; i < c->nbases; i++)
-                if (c->bases[i].cls->nfields)
-                    cx_error(at, "binding the members of a base of '%s' is "
-                                 "not supported yet", ct_name(E));
         if (k != n)
             cx_error(at, "%d names bind '%s', which has %d members", n,
                      ct_name(E), k);
+        if (holder == c)
+            holder = NULL;
     }
     for (int i = 0; i < n; i++) {
         struct cvar *b = new_local(names[i], E->k == CT_ARRAY ? E->to
                                                               : fls[i]->type,
                                    ats[i]);
         b->sb_var = e;
-        if (E->k == CT_ARRAY)
+        /* (a name for part of a static object: nothing a lambda captures) */
+        b->is_local = e->is_local;
+        b->is_static = e->is_static;
+        if (E->k == CT_ARRAY) {
             b->sb_index = i;
-        else
+        } else {
             b->sb_field = fls[i];
+            b->sb_base = holder;
+        }
         struct csym *y = scope_add(cx_scope, CS_VAR, names[i]);
         y->var = b;
     }
@@ -5761,7 +5858,7 @@ static void parse_range_for(struct cstmt *s, const struct ctok *at,
     struct cstmt *dv;
     if (ds.type->k == CT_AUTO && !ds.type->dauto && binding_follows()) {
         struct cexpr *de = expr_deref(expr_var(bv));
-        dv = parse_structured_binding(ds.type, de, at);
+        dv = parse_structured_binding(ds.type, de, at, NULL);
         if (cx_kind() != TOK_COLON)
             cx_error(cx_cur(), "expected ':' in a range-based for");
     } else {

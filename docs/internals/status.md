@@ -364,7 +364,6 @@ Language refusals:
 |---|---|
 | `asm goto` | as in C: `` `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that `` |
 | `_Atomic` | `_Atomic is not supported in C++` |
-| A structured binding at namespace scope | `a structured binding at namespace scope is not supported yet` |
 | Explicit instantiation of a variable template | `explicit instantiation of a variable template is not supported yet` |
 | `#pragma pack` | `#pragma pack is not supported in C++: it would change the layout and EmbCC would ignore it. Use __attribute__((packed)) on the struct` |
 | Multidimensional `operator[]` (C++23) | `'M' has no viable operator[]` |

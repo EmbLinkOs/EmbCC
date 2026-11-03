@@ -4708,6 +4708,8 @@ static struct cexpr *name_expr(struct csym *y, const char *name,
             struct csym hidden = *y;
             hidden.var = v->sb_var;
             struct cexpr *base = name_expr(&hidden, v->sb_var->name, at);
+            if (v->sb_base)
+                base = to_base(base, v->sb_base, 0);
             if (v->sb_field)
                 return member_of(base, v->sb_field);
             return deref(binary(TOK_PLUS, rvalue(base),

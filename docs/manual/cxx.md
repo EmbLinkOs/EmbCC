@@ -496,7 +496,7 @@ refuses it, with the diagnostic shown. Diagnostics are quoted without the
 
 | Feature | Status | Notes |
 |---|---|---|
-| Structured bindings | Partial | Arrays, data members, tuple-like classes; in declarations and range-`for`; `static`; captured by lambdas. Members of a base class: `binding the members of a base of 'D' is not supported yet`. At namespace scope: `a structured binding at namespace scope is not supported yet` |
+| Structured bindings | Yes | Arrays, data members (the class's own, or of the one base that has them), tuple-like classes; in declarations and range-`for`, at namespace scope, `static` and `thread_local` in a function (C++20); captured by lambdas. |
 | `if constexpr` | Supported | The discarded branch is not instantiated. |
 | `if` with an initializer | Supported | |
 | `switch` with an initializer | Supported | `switch (init; cond)`, with a declaration in the condition too. |

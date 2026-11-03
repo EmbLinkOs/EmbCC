@@ -2791,6 +2791,37 @@ static void emit_local_static(struct sb *b, struct cstmt *s)
 {
     struct cvar *v = s->var;
     struct cty *t = v->type;
+    if (ct_is_ref(t) && v->init && v->init->k == E_ADDR &&
+        v->init->a[0]->k == E_TEMP) {
+        /* a temporary bound to a static reference lives as long: a static
+         * of its own, initialized (once, guarded) where the reference is;
+         * the reference, its address -- as at namespace scope */
+        struct cexpr *tmp = v->init->a[0];
+        struct cvar *tv = xcalloc(1, sizeof *tv);
+        tv->type = ct_unqual(tmp->t);
+        tv->name = tv->cname = cx_fmt("__cx_ref_%s", v->name ? v->name : "");
+        tv->is_local = 1;
+        tv->is_static = 1;
+        tv->is_tls = v->is_tls;
+        tv->disc = v->disc;
+        tv->fn = v->fn;
+        tv->line = v->line;
+        tv->file = v->file;
+        if (tv->type->k == CT_CLASS || tv->type->k == CT_ARRAY)
+            tv->ctor = tmp->a[0];
+        else
+            tv->init = tmp->a[0];
+        struct cstmt ts = *s;
+        ts.var = tv;
+        emit_local_static(b, &ts);
+        struct cexpr *ref = ex_new(E_VAR, tv->type, VC_LVALUE);
+        ref->var = tv;
+        struct cexpr *addr = xmalloc(sizeof *addr);
+        *addr = *v->init;
+        addr->a = xmalloc(sizeof *addr->a);
+        addr->a[0] = ref;
+        v->init = addr;
+    }
     char *guard;
     local_static_names(v, &guard);
     int shared = strncmp(v->cname, "_ZZ", 3) == 0;
@@ -4040,6 +4071,35 @@ static void emit_gvar(struct cvar *v)
     imm_expr(v->init);
     imm_expr(v->ctor);
     struct cty *t = v->type;
+    if (ct_is_ref(t) && v->init && v->init->k == E_ADDR &&
+        v->init->a[0]->k == E_TEMP) {
+        /* A temporary bound to a reference with static storage lives as
+         * long (6.7.7): an object of the unit's of its own, initialized
+         * in the reference's place in the order and destroyed at exit;
+         * the reference, its address. (In __cx_global_init's block it
+         * was gone, its destructor run, before main.) */
+        struct cexpr *tmp = v->init->a[0];
+        struct cvar *tv = xcalloc(1, sizeof *tv);
+        tv->type = ct_unqual(tmp->t);
+        tv->name = tv->cname = cx_fmt("__cx_gt%d", cx_uid());
+        tv->is_static = 1;
+        tv->is_tls = v->is_tls;
+        tv->defined = 1;
+        tv->line = v->line;
+        tv->file = v->file;
+        if (tv->type->k == CT_CLASS || tv->type->k == CT_ARRAY)
+            tv->ctor = tmp->a[0];
+        else
+            tv->init = tmp->a[0];
+        emit_gvar(tv);
+        struct cexpr *ref = ex_new(E_VAR, tv->type, VC_LVALUE);
+        ref->var = tv;
+        struct cexpr *addr = xmalloc(sizeof *addr);
+        *addr = *v->init;
+        addr->a = xmalloc(sizeof *addr->a);
+        addr->a[0] = ref;
+        v->init = addr;
+    }
     const char *st = v->is_static ? "static "
                      : (v->is_inline || v->weak) ? "__attribute__((weak)) "
                      : "";
