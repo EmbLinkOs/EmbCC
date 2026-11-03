@@ -58,8 +58,15 @@ rm -rf "$out/rt"
 mkdir -p "$out/rt"
 for f in "$here"/lib/rt/*.c; do
     b=$(basename "$f" .c)
+    # The unwinder, where it is built (RISC-V and the Linux targets: see
+    # lib/rt/unwind.c), with its own .eh_frame: a throw's walk begins in
+    # _Unwind_RaiseException and has to step out of it.
+    uw=
+    case $b/$triple in
+        unwind/riscv*|unwind/*linux*) uw=--unwind-tables ;;
+    esac
     # shellcheck disable=SC2086
-    "$EMBCC" --target="$triple" $flags -fenum-size-neutral -Os \
+    "$EMBCC" --target="$triple" $flags $uw -fenum-size-neutral -Os \
         --sections=functions,data -c "$f" -o "$out/rt/$b.o" || {
         echo "build-rt: lib/rt/$b.c does not compile for $triple" >&2
         exit 1; }

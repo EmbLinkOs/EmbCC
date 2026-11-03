@@ -578,6 +578,10 @@ int  target_debug_info(void);
 enum { TARGET_PIE = 1, TARGET_PIC = 2 };
 void target_set_pic(int mode);
 int  target_pic(void);
+/* Unwind tables (.eh_frame) will be written: the backends record their
+ * prologues' CFI as -g has them do, for eh_emit_cfi. */
+void target_set_unwind_tables(int on);
+int  target_unwind_tables(void);
 
 /* The other two dimensions. Both default to the freestanding ELF answer,
  * so a caller that has never heard of them reads the world exactly as it

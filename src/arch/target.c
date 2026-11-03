@@ -94,6 +94,9 @@ int  target_opt_size(void)       { return g_opt_size; }
 static int g_pic;
 void target_set_pic(int mode) { g_pic = mode; }
 int  target_pic(void)         { return g_pic; }
+static int g_unwind_tables;
+void target_set_unwind_tables(int on) { g_unwind_tables = on; }
+int  target_unwind_tables(void)       { return g_unwind_tables; }
 
 const char *target_default_name(void)
 {
@@ -1260,6 +1263,7 @@ int target_reloc_type(enum target_arch a, enum reloc_kind k)
         case RK_RISCV_GOT_HI20:     return R_RISCV_GOT_HI20;
         case RK_RISCV_PCREL_LO12_I: return R_RISCV_PCREL_LO12_I;
         case RK_ABS32:       return R_RISCV_32;
+        case RK_DATA_PREL32: return R_RISCV_32_PCREL;   /* .eh_frame's */
         /* ABS64 only at RV64: a 32-bit target has no 64-bit address to
          * relocate, and asking for one is a bug upstream rather than a
          * kind this table merely lacks. */

@@ -52,7 +52,10 @@
  * (make libc-emblinkos): its programs start with -nostartfiles, so
  * libgcc's unwinder, which crtbegin's frame registration feeds, would
  * find no tables -- and its linker script brackets .eh_frame for this. */
-#if defined(__linux__) || defined(__EMBCC_LINUX__) || defined(__EMBCC_RT_UNWIND)
+/* ...and RISC-V, bare metal too: an EmbCC RISC-V image links no
+ * libgcc, and its .eh_frame is bracketed by EmbLD as Linux's is. */
+#if defined(__linux__) || defined(__EMBCC_LINUX__) || \
+    defined(__EMBCC_RT_UNWIND) || defined(__riscv)
 
 typedef unsigned long uw_word;
 typedef long uw_sword;
@@ -72,6 +75,26 @@ typedef long uw_sword;
                                 * exception pointer */
 # define UW_LP1    1           /* rdx: and the selector */
 static const unsigned char uw_captured[] = { 3, 6, 12, 13, 14, 15 };
+#elif defined(__riscv)
+/* x0-x31 are DWARF 0-31 and f0-f31 32-63. The callee-saved: ra, s0-s1,
+ * s2-s11, and with an FPU fs0-fs1 and fs2-fs11 (f8, f9, f18-f27), whose
+ * values -- a double at RV32 -- are wider than a register here, so they
+ * travel in freg[] beside reg[] (UW_FREG0). */
+# define UW_NREG   64
+# define UW_RA     1
+# define UW_SP     2
+# define UW_LP0    10          /* a0 */
+# define UW_LP1    11          /* a1 */
+static const unsigned char uw_captured[] = {
+    1, 8, 9, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27
+};
+# if defined(__riscv_flen)
+#  define UW_FREG0 32
+static const unsigned char uw_fcaptured[] = {
+    8, 9, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27
+};
+#  define UW_NFCAPT ((int)(sizeof uw_fcaptured / sizeof uw_fcaptured[0]))
+# endif
 #else
 # define UW_NREG   32
 # define UW_RA     30          /* x30, the link register */
@@ -94,6 +117,9 @@ struct uw_capture {
     uw_word sp;
     uw_word pc;
     uw_word lp0, lp1;
+#ifdef UW_FREG0
+    unsigned long long fsaved[UW_NFCAPT] __attribute__((aligned(8)));
+#endif
 };
 
 void __uw_capture(struct uw_capture *out);
@@ -146,6 +172,64 @@ __asm__(
 /*  mov %rsi,%rsp      */ ".byte 0x48,0x89,0xf4\n"
 /*  jmp *%rcx          */ ".byte 0xff,0xe1\n"
 ".size __uw_resume,.-__uw_resume\n"
+);
+#elif defined(__riscv)
+/* RISC-V has a real assembler here (src/as), so these are mnemonics.
+ * The buffer: the 13 callee-saved in uw_captured's order, sp, pc, lp0,
+ * lp1 at XLEN/8 each, then (an FPU) fs0-fs11 as eight bytes each, from
+ * offset 72 (RV32) or 136 (RV64). */
+# if __riscv_xlen == 64
+#  define UW_S "sd"
+#  define UW_L "ld"
+#  define UW_W 8
+#  define UW_FB 136
+# else
+#  define UW_S "sw"
+#  define UW_L "lw"
+#  define UW_W 4
+#  define UW_FB 72
+# endif
+# if defined(__riscv_flen) && __riscv_flen == 64
+#  define UW_FS "fsd"
+#  define UW_FL "fld"
+# else
+#  define UW_FS "fsw"
+#  define UW_FL "flw"
+# endif
+# define UW_STR_(x) #x
+# define UW_STR(x) UW_STR_(x)
+# define UW_GS(r, k) UW_S " " r ", " UW_STR(k) "*" UW_STR(UW_W) "(a0)\n"
+# define UW_GL(r, k) UW_L " " r ", " UW_STR(k) "*" UW_STR(UW_W) "(t0)\n"
+# define UW_FSV(r, k) UW_FS " " r ", " UW_STR(UW_FB) "+" #k "*8(a0)\n"
+# define UW_FLD(r, k) UW_FL " " r ", " UW_STR(UW_FB) "+" #k "*8(t0)\n"
+__asm__(
+".text\n"
+".globl __uw_capture\n"
+"__uw_capture:\n"
+UW_GS("ra", 0) UW_GS("s0", 1) UW_GS("s1", 2) UW_GS("s2", 3)
+UW_GS("s3", 4) UW_GS("s4", 5) UW_GS("s5", 6) UW_GS("s6", 7)
+UW_GS("s7", 8) UW_GS("s8", 9) UW_GS("s9", 10) UW_GS("s10", 11)
+UW_GS("s11", 12) UW_GS("sp", 13) UW_GS("ra", 14)
+# ifdef __riscv_flen
+UW_FSV("fs0", 0) UW_FSV("fs1", 1) UW_FSV("fs2", 2) UW_FSV("fs3", 3)
+UW_FSV("fs4", 4) UW_FSV("fs5", 5) UW_FSV("fs6", 6) UW_FSV("fs7", 7)
+UW_FSV("fs8", 8) UW_FSV("fs9", 9) UW_FSV("fs10", 10) UW_FSV("fs11", 11)
+# endif
+"ret\n"
+".globl __uw_resume\n"
+"__uw_resume:\n"
+"mv t0, a0\n"
+UW_GL("ra", 0) UW_GL("s0", 1) UW_GL("s1", 2) UW_GL("s2", 3)
+UW_GL("s3", 4) UW_GL("s4", 5) UW_GL("s5", 6) UW_GL("s6", 7)
+UW_GL("s7", 8) UW_GL("s8", 9) UW_GL("s9", 10) UW_GL("s10", 11)
+UW_GL("s11", 12)
+# ifdef __riscv_flen
+UW_FLD("fs0", 0) UW_FLD("fs1", 1) UW_FLD("fs2", 2) UW_FLD("fs3", 3)
+UW_FLD("fs4", 4) UW_FLD("fs5", 5) UW_FLD("fs6", 6) UW_FLD("fs7", 7)
+UW_FLD("fs8", 8) UW_FLD("fs9", 9) UW_FLD("fs10", 10) UW_FLD("fs11", 11)
+# endif
+UW_GL("t1", 14) UW_GL("a0", 15) UW_GL("a1", 16) UW_GL("sp", 13)
+"jr t1\n"
 );
 #else
 __asm__(
@@ -218,6 +302,9 @@ struct _Unwind_Exception {
  * landing pad's arguments and the address to resume at. */
 struct _Unwind_Context {
     uw_word reg[UW_NREG];
+#ifdef UW_FREG0
+    unsigned long long freg[32];   /* f0-f31, at their full width */
+#endif
     uw_word cfa;
     uw_word pc;                    /* the return address into this frame */
     uw_word func_start;
@@ -765,6 +852,19 @@ static int step(struct _Unwind_Context *ctx, const struct fde *f)
         }
     }
 
+#ifdef UW_FREG0
+    /* the floating-point registers, from their own array: FLEN bytes at
+     * the place a rule names, where the uw_word above read only part */
+    for (i = UW_FREG0; i < UW_FREG0 + 32 && i < UW_NREG; i++)
+        if (st.reg[i].kind == RULE_OFFSET) {
+            const void *at = (const void *)(cfa + (uw_word)st.reg[i].off);
+# if __riscv_flen == 64
+            ctx->freg[i - UW_FREG0] = *(const unsigned long long *)at;
+# else
+            ctx->freg[i - UW_FREG0] = *(const unsigned int *)at;
+# endif
+        }
+#endif
     /* The return address column names where the caller's PC went. A rule
      * of UNDEFINED there is how the outermost frame says "stop" -- it is
      * what crt1 marks its entry point with, and following it would walk
@@ -922,6 +1022,10 @@ static _Unwind_Reason_Code unwind_phase2(struct _Unwind_Context *ctx,
                 int i;
                 for (i = 0; i < UW_NCAPT; i++)
                     regs.saved[i] = w.reg[uw_captured[i]];
+#ifdef UW_FREG0
+                for (i = 0; i < UW_NFCAPT; i++)
+                    regs.fsaved[i] = w.freg[uw_fcaptured[i]];
+#endif
                 regs.sp = w.reg[UW_SP];
                 regs.pc = w.landing_pad;
                 regs.lp0 = w.lp0;
@@ -951,6 +1055,10 @@ static int start_context(struct _Unwind_Context *ctx,
         ctx->reg[i] = 0;
     for (i = 0; i < UW_NCAPT; i++)
         ctx->reg[uw_captured[i]] = cap->saved[i];
+#ifdef UW_FREG0
+    for (i = 0; i < UW_NFCAPT; i++)
+        ctx->freg[uw_fcaptured[i]] = cap->fsaved[i];
+#endif
     ctx->reg[UW_SP] = cap->sp;
     ctx->pc = cap->pc;
     ctx->cfa = cap->sp;

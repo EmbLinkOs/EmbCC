@@ -65,6 +65,9 @@ struct eh_out {
 /* The tables for every function of iu with code (caller zero-inits out);
  * aarch64 when arm64. */
 void eh_emit(struct ir_unit *iu, int arm64, struct eh_out *out);
+/* The same from the backend's CFI records (ir_cfi), for every other
+ * target: sp and ra are its DWARF stack pointer and return address. */
+void eh_emit_cfi(struct ir_unit *iu, int sp, int ra, struct eh_out *out);
 void eh_free(struct eh_out *out);
 
 #endif

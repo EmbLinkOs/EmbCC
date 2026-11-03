@@ -4369,11 +4369,14 @@ static struct cexpr *parse_builtin(const char *name, const struct ctok *at)
     }
     if (strcmp(n, "eh_return_data_regno") == 0) {
         /* the DWARF registers a landing pad gets the exception object and
-         * selector in: 0 and 1 (rax and rdx; x0 and x1) */
+         * selector in: 0 and 1 (rax and rdx; x0 and x1), and RISC-V's a0
+         * and a1, 10 and 11 */
         cx_expect(TOK_LPAREN, "'('");
         long v = expr_parse_const("a register index");
         cx_expect(TOK_RPAREN, "')'");
-        return ex_int(v == 0 || v == 1 ? v : -1, ct_basic(CT_INT));
+        int base = target_get() == TARGET_RISCV32 ||
+                   target_get() == TARGET_RISCV64 ? 10 : 0;
+        return ex_int(v == 0 || v == 1 ? base + v : -1, ct_basic(CT_INT));
     }
     if (strcmp(n, "extend_pointer") == 0) {
         /* a pointer as an unwinder word: LP64, the same bits */

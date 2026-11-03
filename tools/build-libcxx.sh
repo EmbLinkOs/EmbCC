@@ -50,9 +50,18 @@ command -v "$AR" >/dev/null 2>&1 || [ -x "$AR" ] || AR=ar
 
 rm -rf "$out/cxx"
 mkdir -p "$out/cxx"
-for b in new guard atexit typeinfo dyncast noexcept; do
+# Where EmbCC writes C++ exceptions (the unwinder is lib/rt's), the
+# runtime has them: throw, the personality routine, std::terminate and
+# the type_info classes a catch matches by. Elsewhere it is the
+# -fno-exceptions -fno-rtti subset.
+units="new guard atexit typeinfo dyncast noexcept"
+cxxflags="-fno-exceptions -fno-rtti"
+case $triple in
+    riscv*) units="$units eh terminate"; cxxflags= ;;
+esac
+for b in $units; do
     # shellcheck disable=SC2086
-    "$EMBCC" --target="$triple" $flags -Os -fno-exceptions -fno-rtti -x c++ \
+    "$EMBCC" --target="$triple" $flags -Os $cxxflags -x c++ \
         -I"$here/lib/libcxx/include" -I"$here/lib/libc/include" \
         -c "$here/lib/libcxx/src/$b.cc" -o "$out/cxx/$b.o" || {
         echo "build-libcxx: lib/libcxx/src/$b.cc does not compile for $triple" >&2

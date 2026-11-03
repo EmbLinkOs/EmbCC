@@ -9595,8 +9595,9 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
             if (!is_lvalue(s->expr) || s->expr->ty->kind != TY_PTR)
                 sema_error_at(u, s->line, s->col, "a landing pad's exception "
                         "pointer must be a pointer lvalue");
+            /* a register's worth: `long`, 4 bytes on a 32-bit target */
             if (!is_lvalue(s->cond) || !ty_is_integer(s->cond->ty) ||
-                ty_size(s->cond->ty) != 8)
+                ty_size(s->cond->ty) != target_ptr_size())
                 sema_error_at(u, s->line, s->col, "a landing pad's selector "
                         "must be a long lvalue");
             for (int i = 0; i < s->neh_acts; i++) {

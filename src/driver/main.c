@@ -3382,6 +3382,12 @@ lto_backend:
      * MIPS. Backends whose ra_at_o0 is set allocate at -O0 too, for each
      * expression's temporaries, every source variable pinned to its slot;
      * EMBCC_O0_NORA=1 is the old -O0, for bisecting a difference. */
+    /* (the unwind decision below, made first: a backend records its
+     * prologues' CFI for .eh_frame only when it is asked) */
+    target_set_unwind_tables(
+        want_unwind > 0 || (lang_cxx && (want_unwind < 0 || want_exceptions)) ||
+        (want_unwind < 0 && target_is_hosted() &&
+         target_fmt_get() == TGT_FMT_ELF));
     {
         const struct backend_desc *bd = backend_get(ta);
         bd->codegen(iu, &text, &ext, &next, &strs, &nstrs, &gs, &ngs, &fs,
@@ -3939,8 +3945,11 @@ lto_backend:
                    lang_cxx && want_exceptions
                        ? ", and C++ without --no-exceptions" : "",
                    unwritten);
-    if (unwind)
+    if (unwind && (ta == TARGET_X86_64 || ta == TARGET_AARCH64))
         eh_emit(iu, ta == TARGET_AARCH64, &eh);
+    else if (unwind)
+        eh_emit_cfi(iu, backend_get(ta)->frame_sp, backend_get(ta)->frame_ra,
+                    &eh);
 
     /* -S: the same bytes, as text (src/driver/asmout.c). Everything the
      * emitter needs is in hand here -- the code, the string pool, and the
@@ -4994,8 +5003,8 @@ lto_backend:
     int eh_ndx = 0, lsda_ndx = 0;
     if (unwind)
         eh_ndx = elfw_add_section(w, ".eh_frame",
-                                  ta == TARGET_AARCH64 ? SHT_PROGBITS
-                                                       : SHT_X86_64_UNWIND,
+                                  ta != TARGET_X86_64 ? SHT_PROGBITS
+                                                      : SHT_X86_64_UNWIND,
                                   SHF_ALLOC, eh.frame.p,
                                   (Elf64_Xword)eh.frame.len, 8);
     if (eh.lsda.len)

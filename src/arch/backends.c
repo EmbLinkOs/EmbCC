@@ -112,8 +112,8 @@ static const struct backend_desc g_backends[] = {
     [TARGET_RISCV32] = {
         .family = "RISC-V", .codegen = codegen_unit_riscv, .ra_at_o0 = 1,
         .op_calls_helper = rv_op_calls_helper,
-        .unwind_unwritten = "RISC-V .eh_frame",
-        .cxx_exceptions = BACKEND_CXX_EXC_NONE,
+        .unwind_unwritten = NULL,          /* eh_emit_cfi */
+        .cxx_exceptions = BACKEND_CXX_EXC_OK,
         .firmware = 1, .ld_scripts = 1,
         .call_insn = "call", .call_delay_slot = 0, .sym_prefix = "",
         .imm_prefixed = 0, .text_p2align = 2,
@@ -125,7 +125,7 @@ static const struct backend_desc g_backends[] = {
     [TARGET_RISCV64] = {
         .family = "RISC-V", .codegen = codegen_unit_riscv, .ra_at_o0 = 1,
         .op_calls_helper = rv_op_calls_helper,
-        .unwind_unwritten = "RISC-V .eh_frame",
+        .unwind_unwritten = NULL,          /* eh_emit_cfi */
         .cxx_exceptions = BACKEND_CXX_EXC_OK,
         .firmware = 1, .ld_scripts = 1,
         .call_insn = "call", .call_delay_slot = 0, .sym_prefix = "",

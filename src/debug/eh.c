@@ -374,6 +374,124 @@ void eh_emit(struct ir_unit *iu, int arm64, struct eh_out *out)
     /* no zero terminator: the linked image's .eh_frame ends with one */
 }
 
+/* ---- .eh_frame from the backend's CFI records ----------------------
+ *
+ * The other backends record each prologue's steps as ir_cfi entries
+ * (ir_cfi_add) -- the same ones .debug_frame is made from (dwarf.c) --
+ * so their .eh_frame is that program, in .eh_frame's dress: a "zR" or
+ * "zPLR" CIE with PC-relative pointers, code alignment 1 and data
+ * alignment -1 (every offset in bytes), and an FDE per function with its
+ * LSDA when it has exception regions. At entry the CFA is the stack
+ * pointer and the return address is in its register (frame_sp,
+ * frame_ra, the backend registry's). */
+static int emit_cie_cfi(struct eh_out *o, int sp, int ra, int with_lsda)
+{
+    struct eh_buf *b = &o->frame;
+    int cie = b->len;
+    u32(b, 0);
+    u32(b, 0);
+    u8(b, 1);
+    u8(b, 'z');
+    if (with_lsda) {
+        u8(b, 'P');
+        u8(b, 'L');
+    }
+    u8(b, 'R');
+    u8(b, 0);
+    uleb(b, 1);                       /* code alignment */
+    sleb(b, -1);                      /* data alignment: bytes */
+    uleb(b, (unsigned long)ra);
+    if (with_lsda) {
+        uleb(b, 7);
+        u8(b, EH_PE_pcrel_sdata4);
+        reloc(o, 0, EHT_PERSONALITY, 0, NULL);
+        u8(b, EH_PE_pcrel_sdata4);
+    } else {
+        uleb(b, 1);
+    }
+    u8(b, EH_PE_pcrel_sdata4);
+    u8(b, CFA_def_cfa);
+    uleb(b, (unsigned long)sp);
+    uleb(b, 0);
+    close_entry(b, cie);
+    return cie;
+}
+
+void eh_emit_cfi(struct ir_unit *iu, int sp, int ra, struct eh_out *out)
+{
+    struct eh_buf *b = &out->frame;
+    int cie = emit_cie_cfi(out, sp, ra, 0), cie_lsda = -1;
+    for (int n = 0; n < iu->nfuncs; n++)
+        if (iu->funcs[n].neh && cie_lsda < 0)
+            cie_lsda = emit_cie_cfi(out, sp, ra, 1);
+    for (int n = 0; n < iu->nfuncs; n++) {
+        struct ir_func *fn = &iu->funcs[n];
+        struct func *f = fn->src;
+        /* ncfi -1: a function its backend cannot describe (an interrupt
+         * handler): no FDE, so a walk stops there rather than mislead */
+        if (!f || f->absorbed || !f->has_defn || f->code_len <= 0 ||
+            fn->ncfi < 0)
+            continue;
+        int lsda = -1;
+        if (fn->neh) {
+            lsda = out->lsda.len;
+            emit_lsda(out, fn);
+        }
+        long lo = f->code_off + f->code_entry;
+        int fde = b->len;
+        u32(b, 0);
+        u32(b, (unsigned long)(b->len - (lsda >= 0 ? cie_lsda : cie)));
+        reloc(out, 0, EHT_TEXT, lo, NULL);
+        u32(b, (unsigned long)(f->code_len - f->code_entry));
+        if (lsda >= 0) {
+            uleb(b, 4);
+            reloc(out, 0, EHT_LSDA, lsda, NULL);
+        } else {
+            uleb(b, 0);
+        }
+        int at = 0;
+        for (int k = 0; k < fn->ncfi; k++) {
+            const struct ir_cfi *c = &fn->cfi[k];
+            advance(b, &at, (int)(c->off - f->code_entry), 1);
+            switch (c->kind) {
+            case IR_CFI_CFA_OFFSET:
+                u8(b, CFA_def_cfa_offset);
+                uleb(b, (unsigned long)c->val);
+                break;
+            case IR_CFI_CFA_REG:
+                u8(b, CFA_def_cfa);
+                uleb(b, (unsigned long)c->reg);
+                uleb(b, (unsigned long)c->val);
+                break;
+            case IR_CFI_SAVED:
+                if (c->val <= 0 && c->reg < 64) {
+                    u8(b, CFA_offset | (unsigned)c->reg);
+                    uleb(b, (unsigned long)-c->val);
+                } else if (c->val <= 0) {
+                    u8(b, 0x05);                 /* offset_extended */
+                    uleb(b, (unsigned long)c->reg);
+                    uleb(b, (unsigned long)-c->val);
+                } else {
+                    u8(b, 0x11);                 /* offset_extended_sf */
+                    uleb(b, (unsigned long)c->reg);
+                    sleb(b, -c->val);
+                }
+                break;
+            }
+        }
+        close_entry(b, fde);
+        if (out->nfuncs == out->funccap) {
+            out->funccap = out->funccap ? out->funccap * 2 : 16;
+            out->funcs = xrealloc(out->funcs,
+                                  (size_t)out->funccap * sizeof *out->funcs);
+        }
+        out->funcs[out->nfuncs].code_off = f->code_off;
+        out->funcs[out->nfuncs].code_len = f->code_len;
+        out->funcs[out->nfuncs].lsda_off = lsda;
+        out->nfuncs++;
+    }
+}
+
 void eh_free(struct eh_out *out)
 {
     free(out->frame.p);

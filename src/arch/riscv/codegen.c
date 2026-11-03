@@ -5363,8 +5363,24 @@ static void gen_ins(struct rv_fn *F, int n)
         return;
     }
 
-    case IR_CALL:
+    case IR_CALL: {
+        long at = t->len;
         gen_call(F, n);
+        /* a call in an exception region: the LSDA's call-site entry */
+        if (fn->neh)
+            ir_add_csite(fn, (int)(at - fn->src->code_off),
+                         (int)(t->len - fn->src->code_off),
+                         i->eh_region - 1);
+        return;
+    }
+    case IR_LANDING:
+        /* the unwinder left the exception in a0 and the selector in a1
+         * (__builtin_eh_return_data_regno); a1 first to the scratch, so
+         * a home in a1 cannot lose it */
+        rv_mv(t, SCR, RV_A1);
+        wrote(F, i->dst, RV_A0);
+        if (i->b >= 0)
+            wrote(F, i->b, SCR);
         return;
 
     case IR_RET:
@@ -6682,7 +6698,11 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
     F.f4 = rv_f4_map(&F);
     F.fx = -1;
     F.fb = RV_SP;
-    if (g_rv_regalloc) {
+    /* A function with exception regions keeps every value in its slot,
+     * as on x86-64 and AArch64: a landing pad is entered from the
+     * unwinder, which restores only callee-saved registers, so a value
+     * the pad reads must be in memory. */
+    if (g_rv_regalloc && !fn->neh) {
         /* `wide` means two different things and they must not be
          * confused, which they were:
          *
@@ -6812,7 +6832,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
     /* An interrupt handler returns with mret or sret, so it makes no
      * tail call: the callee would return with ret. */
     F.isr = ISR_KIND(f->is_isr);
-    if (g_rv_regalloc && !keep_vars && !g_rv_o0 && !F.isr)
+    /* (nor does one with exception regions: a call there has a landing
+     * pad in this frame) */
+    if (g_rv_regalloc && !keep_vars && !g_rv_o0 && !F.isr && !fn->neh)
         for (i = 0; i < fn->nins; i++)
             if (rv_tail_ok(&F, i)) {
                 if (!F.tail)
@@ -6902,6 +6924,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
                                            fn->ins[i].asm_ir->narange);
     for (int pass = 0, again = 0; pass < 2; pass++) {
     F.fb = RV_SP;
+    fn->ncsites = 0;                /* (each emission's calls, its own) */
     if (pass || again) {
         t->len = len0;
         fn->nlines = nl0;
@@ -7440,8 +7463,11 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
     }
 
     f->code_len = t->len - f->code_off;
-    if (target_debug_info())
+    if (target_debug_info() || target_unwind_tables())
         rv_record_cfi(&F, f->code_off);
+    for (int r = 0; r < fn->neh; r++)       /* where each landing pad is */
+        fn->eh[r].lp_off = (int)(F.label_off[fn->eh[r].lp_label] -
+                                 f->code_off);
     /* -g: x0-x31 are DWARF 0-31, f0-f31 32-63; a slot is sp-relative,
      * as the frame base is; an RV32 pair is two registers in a row */
     ra_debug_finish(fn, t->len, F.loc, F.floc, 32, F.slot, -1, F.wide,

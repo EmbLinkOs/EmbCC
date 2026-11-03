@@ -5962,7 +5962,7 @@ static void gen_eh_region(struct ir_func *fn, struct stmt *s,
     i->op = IR_LANDING;
     i->dst = new_temp(fn);
     i->b = new_temp(fn);
-    i->w = 8;
+    i->w = target_ptr_size() == 8 ? 8 : 4;   /* a register each */
     int exc = i->dst, sel = i->b;
     emit_store(fn, gen_addr(fn, s->expr), exc, s->expr->ty);
     emit_store(fn, gen_addr(fn, s->cond), sel, s->cond->ty);
