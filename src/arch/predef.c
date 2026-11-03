@@ -209,12 +209,106 @@ static int darwin_a64(void)
     return target_get() == TARGET_AARCH64 && target_os_get() == TGT_OS_DARWIN;
 }
 
+/* MinGW-w64's macros, as clang's x86_64-w64-mingw32 has them: the
+ * platform, the calling-convention keywords MinGW's headers spell, and
+ * __SEH__, which says exceptions unwind through .pdata/.xdata */
 static const struct predef_macro os_windows[] = {
     { "_WIN32", "1" },
     { "_WIN64", "1" },
+    { "__WIN32", "1" },
+    { "__WIN32__", "1" },
+    { "__WIN64", "1" },
+    { "__WIN64__", "1" },
+    { "__WINNT", "1" },
+    { "__WINNT__", "1" },
+    { "WIN32", "1" },
+    { "WIN64", "1" },
+    { "WINNT", "1" },
     { "__MINGW32__", "1" },
     { "__MINGW64__", "1" },
+    { "__MSVCRT__", "1" },
+    { "__SEH__", "1" },
+    { "__declspec(a)", "__attribute__((a))" },
+    { "__cdecl", "__attribute__((__cdecl__))" },
+    { "_cdecl", "__attribute__((__cdecl__))" },
+    { "__stdcall", "__attribute__((__stdcall__))" },
+    { "_stdcall", "__attribute__((__stdcall__))" },
+    { "__fastcall", "__attribute__((__fastcall__))" },
+    { "_fastcall", "__attribute__((__fastcall__))" },
+    { "__thiscall", "__attribute__((__thiscall__))" },
+    { "_thiscall", "__attribute__((__thiscall__))" },
+    { "__pascal", "__attribute__((__pascal__))" },
+    { "_pascal", "__attribute__((__pascal__))" },
 };
+
+/* ...and its data model, LLP64: long four bytes, wchar_t and wint_t
+ * UTF-16 units, the 64-bit types long long (clang's mingw values) */
+static const struct predef_macro win64_model[] = {
+    { "__CHAR16_TYPE__", "unsigned short" },
+    { "__INT64_C(c)", "c##LL" },
+    { "__INT64_MAX__", "9223372036854775807LL" },
+    { "__INT64_TYPE__", "long long int" },
+    { "__INTMAX_C(c)", "c##LL" },
+    { "__INTMAX_MAX__", "9223372036854775807LL" },
+    { "__INTMAX_TYPE__", "long long int" },
+    { "__INTPTR_MAX__", "9223372036854775807LL" },
+    { "__INTPTR_TYPE__", "long long int" },
+    { "__INT_FAST16_MAX__", "32767" },
+    { "__INT_FAST16_TYPE__", "short" },
+    { "__INT_FAST16_WIDTH__", "16" },
+    { "__INT_FAST32_MAX__", "2147483647" },
+    { "__INT_FAST64_MAX__", "9223372036854775807LL" },
+    { "__INT_FAST64_TYPE__", "long long int" },
+    { "__INT_FAST8_MAX__", "127" },
+    { "__INT_FAST8_TYPE__", "signed char" },
+    { "__INT_FAST8_WIDTH__", "8" },
+    { "__INT_LEAST64_MAX__", "9223372036854775807LL" },
+    { "__INT_LEAST64_TYPE__", "long long int" },
+    { "__LONG_LONG_MAX__", "9223372036854775807LL" },
+    { "__LONG_MAX__", "2147483647L" },
+    { "__LONG_WIDTH__", "32" },
+    { "__PTRDIFF_MAX__", "9223372036854775807LL" },
+    { "__PTRDIFF_TYPE__", "long long int" },
+    { "__SIG_ATOMIC_MAX__", "2147483647" },
+    { "__SIZEOF_LONG__", "4" },
+    { "__SIZEOF_WCHAR_T__", "2" },
+    { "__SIZEOF_WINT_T__", "2" },
+    { "__SIZE_MAX__", "18446744073709551615ULL" },
+    { "__SIZE_TYPE__", "long long unsigned int" },
+    { "__UINT64_C(c)", "c##ULL" },
+    { "__UINT64_MAX__", "18446744073709551615ULL" },
+    { "__UINT64_TYPE__", "long long unsigned int" },
+    { "__UINTMAX_C(c)", "c##ULL" },
+    { "__UINTMAX_MAX__", "18446744073709551615ULL" },
+    { "__UINTMAX_TYPE__", "long long unsigned int" },
+    { "__UINTPTR_MAX__", "18446744073709551615ULL" },
+    { "__UINTPTR_TYPE__", "long long unsigned int" },
+    { "__UINT_FAST16_MAX__", "65535" },
+    { "__UINT_FAST16_TYPE__", "unsigned short" },
+    { "__UINT_FAST32_MAX__", "4294967295U" },
+    { "__UINT_FAST64_MAX__", "18446744073709551615ULL" },
+    { "__UINT_FAST64_TYPE__", "long long unsigned int" },
+    { "__UINT_FAST8_MAX__", "255" },
+    { "__UINT_FAST8_TYPE__", "unsigned char" },
+    { "__UINT_LEAST64_MAX__", "18446744073709551615ULL" },
+    { "__UINT_LEAST64_TYPE__", "long long unsigned int" },
+    { "__WCHAR_MAX__", "65535" },
+    { "__WCHAR_MIN__", "0" },
+    { "__WCHAR_TYPE__", "unsigned short" },
+    { "__WCHAR_WIDTH__", "16" },
+    { "__WINT_MAX__", "65535" },
+    { "__WINT_MIN__", "0" },
+    { "__WINT_TYPE__", "unsigned short" },
+    { "__WINT_WIDTH__", "16" },
+    { "__WCHAR_UNSIGNED__", "1" },
+    { "__WINT_UNSIGNED__", "1" },
+};
+static const int nwin64_model = (int)(sizeof win64_model / sizeof *win64_model);
+
+static int win64(void)
+{
+    return target_get() == TARGET_X86_64 && target_os_get() == TGT_OS_WINDOWS;
+}
 
 /* The FPU on ARMv7E-M and ARMv8-M, when -mfpu= and -mfloat-abi=softfp|hard
  * turn it on. The generated tables are the soft-float ones (see
@@ -526,6 +620,13 @@ static int contradicted(const char *name)
             if (strcmp(name, darwin_a64_model[i].name) == 0)
                 return 1;               /* replaced below */
     }
+    if (win64()) {
+        if (strcmp(name, "_LP64") == 0 || strcmp(name, "__LP64__") == 0)
+            return 1;
+        for (int i = 0; i < nwin64_model; i++)
+            if (strcmp(name, win64_model[i].name) == 0)
+                return 1;               /* replaced below */
+    }
     return (target_fmt_get() != TGT_FMT_ELF && strcmp(name, "__ELF__") == 0) ||
            thumb_fpu_drops(name) || riscv_drops(name) ||
            (thumb_dsp() && target_thumb_arch() == 7 &&
@@ -591,7 +692,7 @@ const struct predef_macro *predef_table(int *count)
     static int nmerged;
     if (!merged) {
         merged = xmalloc((size_t)(narch + nos + 40 + N_RV_LOCK_FREE +
-                                  ndarwin_a64_model +
+                                  ndarwin_a64_model + nwin64_model +
                                   (int)(sizeof flt16_add / sizeof *flt16_add) +
                                   (int)(sizeof bflt16_add / sizeof *bflt16_add) +
                                   (int)(sizeof avr_builtin_add /
@@ -605,6 +706,9 @@ const struct predef_macro *predef_table(int *count)
         if (darwin_a64())
             for (int i = 0; i < ndarwin_a64_model; i++)
                 merged[nmerged++] = darwin_a64_model[i];
+        if (win64())
+            for (int i = 0; i < nwin64_model; i++)
+                merged[nmerged++] = win64_model[i];
         if (cmse)
             merged[nmerged++] = thumb_cmse_add[0];
         if (dsp && target_thumb_arch() == 7)

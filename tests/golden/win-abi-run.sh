@@ -17,10 +17,10 @@
 # built the System V record instead, and read "r9" for the fifth and
 # sixth slots, even calling itself.
 #
-# The callee does not yet preserve what Windows says it must (rsi, rdi,
-# xmm6-15 -- the -Wwindows-abi warning names them), so the caller is
-# built never to keep anything there: what this checks is the argument
-# passing, which EmbCC's own objects must agree on with each other.
+# And what a Windows callee must preserve beyond System V's set -- rsi,
+# rdi and all 128 bits of xmm6-15: gcc's caller keeps values there, and
+# an assembly caller plants a canary in each around a callee that copies
+# a block (rep movsq: rsi and rdi) and keeps doubles live across a call.
 set -u
 echo "TEST-MARKER win-abi-run"
 . "$(dirname "$0")/../lib.sh"
@@ -70,6 +70,17 @@ long long vcopy(int n, ...)
  * four arguments must travel in its integer register as well */
 long long callv(long long (*f)(int, ...), int k)
 { double h = k * 0.5; return f(4, k, h, k + 1, h * 3); }
+/* everything a Win64 callee must give back, used: a block copy, and
+ * doubles enough to reach the high half of the pool (no constants: those
+ * would be relocations) */
+struct blk { long long w[24]; };
+long long clob(long long n, long long (*g)(long long))
+{ struct blk a, b; for (int i = 0; i < 24; i++) a.w[i] = n + i;
+  b = a;
+  double x = n, y = x + x, z = y + x, u = z * y, v = u - x, w = v / y,
+         p = w * u, q = p + z, r = q - y;
+  long long k = g(n);
+  return b.w[7] + k + (long long)(x + y + z + u + v + w + p + q + r); }
 E
 
 cat > "$out/caller.c" <<'E'
@@ -91,6 +102,43 @@ typedef double MS (*fstack_t)(double, double, double, double, double,
 typedef long long MS (*mixed_t)(int, double, long long, float, long long);
 typedef long long MS (*vints_t)(int, ...);
 typedef long long MS (*callv_t)(long long MS (*)(int, ...), int);
+typedef long long MS (*clob_t)(long long, long long MS (*)(long long));
+MS long long ident(long long n) { return n; }
+/* check(fn, n): calls fn(n, ident) the Microsoft way with a canary in
+ * rsi, rdi and both halves of xmm6-15; 0 when every one came back, else
+ * a bit per register lost (1 rsi, 2 rdi, 4 << k xmm(6+k)) */
+long long check(void *fn, long long n);
+__asm__(".text\n.globl check\ncheck:\n"
+        "push %rbx\npush %rbp\npush %r12\npush %r13\npush %r14\npush %r15\n"
+        "sub $56, %rsp\n"
+        "mov %rdi, %r12\nmov %rsi, %r13\n"
+        "movabs $0x5151515151515151, %rsi\nmovabs $0x7d7d7d7d7d7d7d7d, %rdi\n"
+#define CAN(k) "movabs $0x0" #k "0" #k "0" #k "0" #k "0" #k "0" #k "0" #k "0" #k ", %rax\n" \
+               "movq %rax, %xmm" #k "\npunpcklqdq %xmm" #k ", %xmm" #k "\n"
+        CAN(6) CAN(7) CAN(8) CAN(9)
+        "movabs $0x0a0a0a0a0a0a0a0a, %rax\nmovq %rax, %xmm10\npunpcklqdq %xmm10, %xmm10\n"
+        "movabs $0x0b0b0b0b0b0b0b0b, %rax\nmovq %rax, %xmm11\npunpcklqdq %xmm11, %xmm11\n"
+        "movabs $0x0c0c0c0c0c0c0c0c, %rax\nmovq %rax, %xmm12\npunpcklqdq %xmm12, %xmm12\n"
+        "movabs $0x0d0d0d0d0d0d0d0d, %rax\nmovq %rax, %xmm13\npunpcklqdq %xmm13, %xmm13\n"
+        "movabs $0x0e0e0e0e0e0e0e0e, %rax\nmovq %rax, %xmm14\npunpcklqdq %xmm14, %xmm14\n"
+        "movabs $0x0f0f0f0f0f0f0f0f, %rax\nmovq %rax, %xmm15\npunpcklqdq %xmm15, %xmm15\n"
+        "mov %r13, %rcx\nlea ident(%rip), %rdx\ncall *%r12\n"
+        "xor %ebx, %ebx\n"
+        "movabs $0x5151515151515151, %rax\ncmp %rax, %rsi\nje 1f\nor $1, %ebx\n1:\n"
+        "movabs $0x7d7d7d7d7d7d7d7d, %rax\ncmp %rax, %rdi\nje 1f\nor $2, %ebx\n1:\n"
+#define CHK(k, bit) "movabs $0x0" #k "0" #k "0" #k "0" #k "0" #k "0" #k "0" #k "0" #k ", %rax\n" \
+                    "movq %xmm" #k ", %rcx\ncmp %rax, %rcx\njne 2f\n" \
+                    "pshufd $0x4e, %xmm" #k ", %xmm0\nmovq %xmm0, %rcx\ncmp %rax, %rcx\nje 1f\n" \
+                    "2:\nor $" #bit ", %ebx\n1:\n"
+        CHK(6, 4) CHK(7, 8) CHK(8, 16) CHK(9, 32)
+#define CHKX(k, c, bit) "movabs $0x" c c c c c c c c ", %rax\n" \
+                    "movq %xmm" #k ", %rcx\ncmp %rax, %rcx\njne 2f\n" \
+                    "pshufd $0x4e, %xmm" #k ", %xmm0\nmovq %xmm0, %rcx\ncmp %rax, %rcx\nje 1f\n" \
+                    "2:\nor $" #bit ", %ebx\n1:\n"
+        CHKX(10, "0a", 64) CHKX(11, "0b", 128) CHKX(12, "0c", 256)
+        CHKX(13, "0d", 512) CHKX(14, "0e", 1024) CHKX(15, "0f", 2048)
+        "mov %rbx, %rax\nadd $56, %rsp\n"
+        "pop %r15\npop %r14\npop %r13\npop %r12\npop %rbp\npop %rbx\nret\n");
 /* gcc's own Microsoft-convention variadic function, for EmbCC to call */
 MS long long gvar(int n, ...)
 { __builtin_ms_va_list ap; long long t = 0; __builtin_ms_va_start(ap, n);
@@ -113,21 +161,22 @@ T t8(void) { return FN(vints_t, vints)(7, 1, 2, 3, 4, 5, 6, 7) != 1234567; }
 T t9(void) { return FN(vints_t, vmixd)(6, 1LL, 1.0, 3LL, 2.0, 5LL, 3.0) != 123456; }
 T t10(void) { return FN(vints_t, vcopy)(6, 1, 2, 3, 4, 5, 6) != 123456123456LL; }
 T t11(void) { return FN(callv_t, callv)(gvar, 3) != 3 * 1000 + 3 * 100 + 4 * 10 + 9; }
+T t12(void) { return check((void *)FN(clob_t, clob), 5) != 0; }
+T t13(void) { return FN(clob_t, clob)(5, ident) != 6901; }
 int main(void)
 {
     int bad = t1() | t2() << 1 | t3() << 2 | t4() << 3 | t5() << 4 |
               t6() << 5 | t7() << 6;
     int va = t8() | t9() << 1 | t10() << 2 | t11() << 3;
+    int keep = t12() | t13() << 1;
+    if (!bad && !va && keep)
+        bad = 120 + keep;
     if (!bad && va)
         bad = 100 + va;
     return bad ? bad : 42;
 }
 E
 
-# Win64 keeps rbx, rsi, rdi, r12-r15 and xmm6-15; EmbCC's callee keeps
-# only the System V set, so gcc must hold nothing in the difference.
-fixed="-ffixed-rsi -ffixed-rdi"
-for k in 6 7 8 9 10 11 12 13 14 15; do fixed="$fixed -ffixed-xmm$k"; done
 
 for opt in -O0 -O1 -O2; do
     b=$out/O${opt#-O}; mkdir -p "$b"
@@ -144,7 +193,7 @@ for opt in -O0 -O1 -O2; do
            awk '$2 == "T" { printf " -DOFF_%s=0x%s", $3, $1 }')
     # shellcheck disable=SC2086
     x86_gcc_c "$out/caller.c" -o "$b/caller.o" -O1 -mno-red-zone \
-        -DBLOB="\"$b/c.bin\"" $defs $fixed || {
+        -DBLOB="\"$b/c.bin\"" $defs || {
         echo "FAIL $opt: the gcc caller does not compile"; exit 1; }
     x86_link "$b/run" "$b/caller.o" > "$b/ln.log" 2>&1 || {
         echo "FAIL $opt: the test image does not link:"; cat "$b/ln.log"
@@ -155,7 +204,8 @@ for opt in -O0 -O1 -O2; do
         echo "FAIL $opt: exit $rc (a bit per wrong call, 42 is all right)"
         echo "      bits: 1 swap2, 2 rot3, 4 byref2, 8 byref5, 16 odd3,"
         echo "      32 fstack, 64 mixed; or 100 + bits: 1 vints, 2 vmixd,"
-        echo "      4 vcopy, 8 callv"; exit 1; }
+        echo "      4 vcopy, 8 callv; or 120 + bits: 1 a callee-saved"
+        echo "      register lost across clob, 2 clob's value"; exit 1; }
 done
 echo "EmbCC's Win64 code at -O0, -O1 and -O2 takes its arguments where"
 echo "gcc's ms_abi calls put them: float permutations, by-reference"

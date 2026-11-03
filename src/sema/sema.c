@@ -3102,8 +3102,8 @@ static void vec_shuffle(struct unit *u, struct func *f, struct scope *sc,
         pre = cx_comma(pre, pm);
     struct expr **lanes = xcalloc((size_t)n, sizeof *lanes);
     for (int k = 0; k < n; k++) {
-        struct expr *idx = cx_node(EXPR_BINOP, e->line, ty_base(TY_LONG, 0));
-        struct expr *mask = cx_node(EXPR_NUM, e->line, ty_base(TY_LONG, 0));
+        struct expr *idx = cx_node(EXPR_BINOP, e->line, ty_intptr(0));
+        struct expr *mask = cx_node(EXPR_NUM, e->line, ty_intptr(0));
         mask->num = (both ? 2 * n : n) - 1;
         idx->op = B_AND;
         idx->lhs = mk_cast(vec_lane(M, k), ty_base(TY_LONG, 0));
@@ -3232,8 +3232,8 @@ static void vla_prepare(struct unit *u, struct func *f, struct scope *sc,
         sema_error_at(u, t->vla_len->line, t->vla_len->col,
                 "size of array has non-integer type %s",
                 ty_name(t->vla_len->ty));
-    t->vla_len = mk_cast(t->vla_len, ty_base(TY_LONG, 0));
-    t->vla_size = scope_add(sc, "<vla size>", ty_base(TY_LONG, 1), NULL);
+    t->vla_len = mk_cast(t->vla_len, ty_intptr(0));
+    t->vla_size = scope_add(sc, "<vla size>", ty_intptr(1), NULL);
 }
 
 /* C2y's _Countof: how many elements an array has, of a type name or of
@@ -4810,7 +4810,7 @@ static void check_expr_main(struct unit *u, struct func *f, struct scope *sc,
             ptr_step_check(u, e->lhs->ty, 0, e->op == B_ADD ? "+= on" : "-= on",
                            e->line, e->col);
             need_integer(u, e->rhs, "pointer arithmetic");
-            e->rhs = mk_cast(e->rhs, ty_base(TY_LONG, 0));
+            e->rhs = mk_cast(e->rhs, ty_intptr(0));
             e->cast_ty = e->lhs->ty;
             e->ty = e->lhs->ty;
             break;
@@ -5117,7 +5117,7 @@ static void check_expr_main(struct unit *u, struct func *f, struct scope *sc,
                 void_step(u, e, pt);
                 ptr_step_check(u, pt, 0, "arithmetic on", e->line, e->col);
                 need_integer(u, *ip, "pointer arithmetic");
-                *ip = mk_cast(*ip, ty_base(TY_LONG, 0));
+                *ip = mk_cast(*ip, ty_intptr(0));
                 e->ty = pt;
             } else {
                 need_arith(u, e->lhs, "arithmetic");
@@ -5367,7 +5367,7 @@ static void check_expr_main(struct unit *u, struct func *f, struct scope *sc,
                     else if (abits / 8 > target_stack_align())
                         e->num = abits / 8;
                 }
-                e->args[0] = mk_cast(e->args[0], ty_base(TY_LONG, 1));
+                e->args[0] = mk_cast(e->args[0], ty_intptr(1));
                 e->nargs = 1;
                 e->name = "__builtin_alloca";
                 e->ty = ty_ptr(ty_base(TY_VOID, 0));
@@ -5730,7 +5730,7 @@ static void check_expr_main(struct unit *u, struct func *f, struct scope *sc,
                         target_get() == TARGET_AVR
                             ? ty_array(ty_base(TY_CHAR, 1), 24)
                         : target_ptr_size() == 8
-                            ? ty_array(ty_base(TY_LONG, 0),
+                            ? ty_array(ty_intptr(0),
                                        target_system_libc() ||
                                        target_os_get() == TGT_OS_DARWIN
                                            ? 64 : 32)
@@ -9249,7 +9249,7 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                 vla_prepare(u, f, sc, s->dty);
                 if (ty_is_vla(s->dty))
                     s->vla_sp = scope_add(sc, "<vla sp>",
-                                          ty_base(TY_LONG, 1), NULL);
+                                          ty_intptr(1), NULL);
             }
             if (s->expr && s->dty->kind == TY_ARRAY &&
                 s->expr->kind == EXPR_STR) {
@@ -9595,11 +9595,12 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
             if (!is_lvalue(s->expr) || s->expr->ty->kind != TY_PTR)
                 sema_error_at(u, s->line, s->col, "a landing pad's exception "
                         "pointer must be a pointer lvalue");
-            /* a register's worth: `long`, 4 bytes on a 32-bit target */
+            /* a register's worth: `long`, 4 bytes on a 32-bit target (and
+             * `long long` on Win64) */
             if (!is_lvalue(s->cond) || !ty_is_integer(s->cond->ty) ||
                 ty_size(s->cond->ty) != target_ptr_size())
                 sema_error_at(u, s->line, s->col, "a landing pad's selector "
-                        "must be a long lvalue");
+                        "must be a pointer-sized integer lvalue");
             for (int i = 0; i < s->neh_acts; i++) {
                 struct eh_act *a = &s->eh_acts[i];
                 if (!a->name)
@@ -9968,7 +9969,7 @@ static void check_func(struct unit *u, struct func *f)
         /* a static local keeps its scope index but needs no frame
          * storage — give it a pointer's worth and never address it */
         f->var_tys[i] = sc.vars[i].g || sc.vars[i].fdecl
-                        ? ty_base(TY_LONG, 0) : sc.vars[i].ty;
+                        ? ty_intptr(0) : sc.vars[i].ty;
         /* a VLA's slot holds the pointer to its run-time storage */
         if (ty_is_vla(f->var_tys[i]))
             f->var_tys[i] = ty_ptr(f->var_tys[i]->pointee);

@@ -12,6 +12,7 @@
 #include "emit.h"
 #include "../regalloc.h"
 #include "../predef.h"
+#include "disasm.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -221,6 +222,17 @@ static const int *x86_pool_for(const struct ir_func *fn, int *n)
     else if (at == 2)   { nb = NLEAF_AT;  base = LEAF_POOL_AT; }
     else if (div || at) { nb = NLEAF;     base = LEAF_POOL; }
     else                { nb = NLEAF_RDX; base = LEAF_POOL_RDX; }
+    if (target_win64_abi()) {
+        /* Win64 preserves rsi and rdi across a call, so one in the pool
+         * (as the caller-saved register it is to System V) would cost a
+         * save in every function that took it: the leaves especially */
+        int o = 0;
+        for (int k = 0; k < nb; k++)
+            if (base[k] != REG_RSI && base[k] != REG_RDI)
+                x86_pool_buf[o++] = base[k];
+        *n = o;
+        return x86_pool_buf;
+    }
     if (!x86_wants_rdi(fn)) { *n = nb; return base; }
     /* After the caller-saved ones already there (it is caller-saved too,
      * so it needs no prologue save) and before the callee-saved five. */
@@ -1782,6 +1794,37 @@ static void ld8(struct code *text, int reg, int disp)
     x86_load_reg_mem(text, reg, REG_RBP, disp, 8);
 }
 
+/* ---- Win64's libgcc helpers (MinGW) ----
+ *
+ * The Microsoft convention for the same routines System V calls with
+ * values in registers: a 128-bit integer or a long double argument by
+ * reference to a 16-aligned copy, a 128-bit result in xmm0 and a long
+ * double one through a pointer passed first -- clang's mingw sequences.
+ * Each call gets its 32 bytes of shadow space and the copies below rsp,
+ * which the frame keeps 16-aligned. */
+static void win_ti_copy(struct code *text, int slot, int at)
+{
+    for (int q = 0; q < 16; q += 8) {
+        x86_load_reg_mem(text, REG_RAX, REG_RBP, slot + q, 8);
+        x86_store_mem_reg(text, REG_RSP, at + q, REG_RAX, 8);
+    }
+}
+
+/* h(&a[, &b]) with the result in xmm0; b < 0 for none */
+static void win_ti_call(struct code *text, struct sites *st, const char *h,
+                        int a, int b)
+{
+    x86_alu_reg_imm(text, '-', REG_RSP, 64, 8);
+    win_ti_copy(text, a, 32);
+    if (b != -1) {
+        win_ti_copy(text, b, 48);
+        x86_lea_reg_basedisp(text, REG_RDX, REG_RSP, 48, 8);
+    }
+    x86_lea_reg_basedisp(text, REG_RCX, REG_RSP, 32, 8);
+    x86_call_helper(text, st, h);
+    x86_alu_reg_imm(text, '+', REG_RSP, 64, 8);
+}
+
 static void st8(struct code *text, int disp, int reg)
 {
     x86_store_mem_reg(text, REG_RBP, disp, reg, 8);
@@ -1867,6 +1910,15 @@ static void gen_i128(struct code *text, const int *sd, struct ir_ins *i,
         }
         break;
     case IR_MUL: case IR_DIV: case IR_MOD:
+        if (target_win64_abi()) {
+            win_ti_call(text, st, i->op == IR_MUL ? "__multi3"
+                                  : i->op == IR_DIV
+                                  ? (i->sign ? "__divti3" : "__udivti3")
+                                  : (i->sign ? "__modti3" : "__umodti3"),
+                        sd[i->a], sd[i->b]);
+            x86_movdqu_store(text, REG_RBP, d, 0);
+            break;
+        }
         ld8(text, REG_RDI, sd[i->a]);
         ld8(text, REG_RSI, sd[i->a] + 8);
         ld8(text, REG_RDX, sd[i->b]);
@@ -1879,6 +1931,23 @@ static void gen_i128(struct code *text, const int *sd, struct ir_ins *i,
         st8(text, d + 8, REG_RDX);
         break;
     case IR_SHL: case IR_SHR:
+        if (target_win64_abi()) {
+            /* the count, an int: its low 32 bits, from wherever it is */
+            if (g_wide && g_wide[i->b])
+                ld8(text, REG_RAX, sd[i->b]);
+            else
+                cg_load(text, sd, i->b, 8, 0, 8);
+            x86_alu_reg_imm(text, '-', REG_RSP, 64, 8);
+            x86_store_mem_reg(text, REG_RSP, 48, REG_RAX, 8);
+            win_ti_copy(text, sd[i->a], 32);
+            x86_load_reg_mem(text, REG_RDX, REG_RSP, 48, 4);
+            x86_lea_reg_basedisp(text, REG_RCX, REG_RSP, 32, 8);
+            x86_call_helper(text, st, i->op == IR_SHL ? "__ashlti3"
+                                      : i->sign ? "__ashrti3" : "__lshrti3");
+            x86_alu_reg_imm(text, '+', REG_RSP, 64, 8);
+            x86_movdqu_store(text, REG_RBP, d, 0);
+            break;
+        }
         /* the count: its low bits, from a narrow value or a wide one */
         if (g_wide && g_wide[i->b])
             ld8(text, REG_RAX, sd[i->b]);
@@ -1963,11 +2032,28 @@ static void gen_i128(struct code *text, const int *sd, struct ir_ins *i,
         break;
     case IR_I2F: {
         /* 128-bit integer -> float/double (xmm0) or long double (st0) */
-        ld8(text, REG_RDI, sd[i->a]);
-        ld8(text, REG_RSI, sd[i->a] + 8);
         const char *h = i->w == 4 ? (i->sign ? "__floattisf" : "__floatuntisf")
                       : i->w == 8 ? (i->sign ? "__floattidf" : "__floatuntidf")
                       : (i->sign ? "__floattixf" : "__floatuntixf");
+        if (target_win64_abi() && i->w == 16) {
+            /* long double comes back through the pointer in rcx */
+            x86_alu_reg_imm(text, '-', REG_RSP, 64, 8);
+            win_ti_copy(text, sd[i->a], 48);
+            x86_lea_reg_basedisp(text, REG_RCX, REG_RSP, 32, 8);
+            x86_lea_reg_basedisp(text, REG_RDX, REG_RSP, 48, 8);
+            x86_call_helper(text, st, h);
+            x86_x87_mem(text, 0xDB, 5, REG_RSP, 32);        /* fld tword */
+            x86_alu_reg_imm(text, '+', REG_RSP, 64, 8);
+            x86_x87_mem(text, 0xDB, 7, REG_RBP, d);         /* fstp tword */
+            break;
+        }
+        if (target_win64_abi()) {
+            win_ti_call(text, st, h, sd[i->a], -1);
+            x86_fst(text, sd, i->dst, 0, i->w);
+            break;
+        }
+        ld8(text, REG_RDI, sd[i->a]);
+        ld8(text, REG_RSI, sd[i->a] + 8);
         x86_call_helper(text, st, h);
         if (i->w == 16)
             x86_x87_mem(text, 0xDB, 7, REG_RBP, d);        /* fstp tword */
@@ -1980,6 +2066,19 @@ static void gen_i128(struct code *text, const int *sd, struct ir_ins *i,
         const char *h = i->size == 4 ? (i->sign ? "__fixsfti" : "__fixunssfti")
                       : i->size == 8 ? (i->sign ? "__fixdfti" : "__fixunsdfti")
                       : (i->sign ? "__fixxfti" : "__fixunsxfti");
+        if (target_win64_abi()) {
+            /* a long double by reference; the result in xmm0 */
+            if (i->size == 16) {
+                win_ti_call(text, st, h, sd[i->a], -1);
+            } else {
+                x86_fld(text, sd, i->a, 0, i->size);
+                x86_alu_reg_imm(text, '-', REG_RSP, 32, 8);
+                x86_call_helper(text, st, h);
+                x86_alu_reg_imm(text, '+', REG_RSP, 32, 8);
+            }
+            x86_movdqu_store(text, REG_RBP, d, 0);
+            break;
+        }
         if (i->size == 16) {
             x86_alu_reg_imm(text, '-', REG_RSP, 16, 8);
             for (int q = 0; q < 16; q += 8) {
@@ -2428,9 +2527,20 @@ static struct afold afold_build(struct ir_func *fn, const int *sd)
  * are in place. */
 static int g_pushonly, g_pad;
 
+/* Win64: what a function saves beyond the System V set -- rsi and rdi
+ * (bits 6 and 7) and xmm6-15 (bits 16 + n), each of which a Windows
+ * callee must preserve -- as the scan of its previous attempt found it
+ * touching them (win_scan); and where the xmm registers went. */
+static unsigned g_win_save;
+static int g_win_nx, g_win_xreg[10], g_win_xbase;
+/* ...and the jump tables in the code, which the scan must not decode */
+static int *g_win_tab, g_win_ntab, g_win_captab;
+
 static void restore_callee(struct code *text, const int *used_callee,
                            int nsave, int save_base)
 {
+    for (int k = 0; k < g_win_nx; k++)
+        x86_movaps_load(text, g_win_xreg[k], REG_RBP, g_win_xbase + 16 * k);
     if (g_pushonly) {
         if (g_pad)
             x86_pop_reg(text, 11);
@@ -2633,6 +2743,204 @@ static int x86_atomic_val(struct code *text, const int *sd, int v,
     return scratch;
 }
 
+/* ---- Win64: the prologue and its unwind codes ----------------------------
+ *
+ * Windows unwinds a frame from the codes in its UNWIND_INFO, and those
+ * can name a save only ABOVE the frame register's base -- so the frame
+ * register is set after the saves, as MinGW's GCC and MSVC set it:
+ *
+ *     push rbp; push the saved registers; sub rsp, pad + 16 * nx;
+ *     movaps [rsp + 16 * i], xmm; lea rbp, [rsp + pad + 16*nx + 8*nsave];
+ *     sub rsp, rest            (mov eax, rest; call ___chkstk_ms; sub
+ *                               rsp, rax from a page up)
+ *
+ * which leaves every slot where System V's `push rbp; mov rbp, rsp;
+ * push ...` puts it: rbp still points at the saved rbp. The unwinder
+ * then restores rsp from rbp (UWOP_SET_FPREG, its offset at most 224
+ * bytes, inside the 240 the field reaches) whatever alloca did, reads
+ * the xmm registers above that base and pops the rest. */
+enum { UWOP_PUSH_NONVOL = 0, UWOP_ALLOC_LARGE = 1, UWOP_ALLOC_SMALL = 2,
+       UWOP_SET_FPREG = 3, UWOP_SAVE_XMM128 = 8 };
+
+static int win_alloc_code(unsigned char *c, int at, long size)
+{
+    if (size <= 128) {
+        c[0] = (unsigned char)at;
+        c[1] = (unsigned char)(UWOP_ALLOC_SMALL | ((size / 8 - 1) << 4));
+        return 1;
+    }
+    if (size <= 524280) {
+        c[0] = (unsigned char)at;
+        c[1] = UWOP_ALLOC_LARGE;
+        c[2] = (unsigned char)(size / 8);
+        c[3] = (unsigned char)(size / 8 >> 8);
+        return 2;
+    }
+    c[0] = (unsigned char)at;
+    c[1] = (unsigned char)(UWOP_ALLOC_LARGE | (1 << 4));
+    for (int b = 0; b < 4; b++)
+        c[2 + b] = (unsigned char)((unsigned long)size >> (8 * b));
+    return 3;
+}
+
+static void win_prologue(struct func *f, struct code *text, struct sites *st,
+                         const int *used_callee, int nsave, int pad, long rest)
+{
+    /* the codes, in the order the prologue does them; written reversed */
+    unsigned char op[40][6];
+    int nslot[40], nop = 0;
+#define WIN_OP(nb) (nslot[nop] = (nb), op[nop++])
+    long base = f->code_off;
+    code_byte(text, 0x55);                          /* push rbp */
+    {
+        unsigned char *c = WIN_OP(1);
+        c[0] = (unsigned char)(text->len - base);
+        c[1] = UWOP_PUSH_NONVOL | (REG_RBP << 4);
+    }
+    for (int k = nsave - 1; k >= 0; k--) {
+        x86_push_reg(text, used_callee[k]);
+        unsigned char *c = WIN_OP(1);
+        c[0] = (unsigned char)(text->len - base);
+        c[1] = (unsigned char)(UWOP_PUSH_NONVOL | (used_callee[k] << 4));
+    }
+    int alloc1 = 8 * pad + 16 * g_win_nx;
+    if (alloc1) {
+        x86_sub_rsp(text, alloc1);
+        unsigned char c[6];
+        int n = win_alloc_code(c, (int)(text->len - base), alloc1);
+        memcpy(WIN_OP(n), c, sizeof c);
+    }
+    for (int k = 0; k < g_win_nx; k++) {
+        x86_movaps_store(text, REG_RSP, 16 * k, g_win_xreg[k]);
+        unsigned char *c = WIN_OP(2);
+        c[0] = (unsigned char)(text->len - base);
+        c[1] = (unsigned char)(UWOP_SAVE_XMM128 | (g_win_xreg[k] << 4));
+        c[2] = (unsigned char)k;                    /* offset / 16 */
+        c[3] = 0;
+    }
+    int fo = (alloc1 + 8 * nsave) / 16;
+    if (alloc1 + 8 * nsave)
+        x86_lea_reg_basedisp(text, REG_RBP, REG_RSP, alloc1 + 8 * nsave, 8);
+    else
+        x86_mov_reg_reg(text, REG_RBP, REG_RSP);
+    {
+        unsigned char *c = WIN_OP(1);
+        c[0] = (unsigned char)(text->len - base);
+        c[1] = UWOP_SET_FPREG;
+    }
+    if (rest >= 4096) {
+        /* a page or more at once: ___chkstk_ms (MinGW's libgcc) touches
+         * each page down to rsp - rax so the guard page is met in order */
+        x86_mov_reg_imm(text, REG_RAX, rest, 4);
+        x86_call_helper(text, st, "___chkstk_ms");
+        code_byte(text, 0x48); code_byte(text, 0x29);   /* sub rsp, rax */
+        code_byte(text, 0xc4);
+    } else {
+        x86_sub_rsp(text, (int)rest);
+    }
+    if (rest > 0) {
+        unsigned char c[6];
+        int n = win_alloc_code(c, (int)(text->len - base), rest);
+        memcpy(WIN_OP(n), c, sizeof c);
+    }
+#undef WIN_OP
+    int ncodes = 0;
+    for (int k = 0; k < nop; k++)
+        ncodes += nslot[k];
+    int len = 4 + 2 * (ncodes + (ncodes & 1));
+    free(f->win_uw);
+    unsigned char *u = xcalloc((size_t)len, 1);
+    u[0] = 1;                                       /* version 1 */
+    u[1] = (unsigned char)(text->len - base);       /* the prologue's size */
+    u[2] = (unsigned char)ncodes;
+    u[3] = (unsigned char)(REG_RBP | (fo << 4));
+    int at = 4;
+    for (int k = nop - 1; k >= 0; k--) {
+        memcpy(u + at, op[k], (size_t)(2 * nslot[k]));
+        at += 2 * nslot[k];
+    }
+    f->win_uw = u;
+    f->win_uw_len = len;
+}
+
+/* What an attempt's code touches of what Win64 makes callee-saved, read
+ * back from its bytes: a register named anywhere (rsi, rdi and their
+ * narrow names, xmm6-15), a string instruction (rsi and rdi implied), or
+ * a byte the decoder cannot place (all of it, to be safe). Reading the
+ * code rather than predicting it means no emitter can forget to say. */
+static unsigned win_touches(const char *s)
+{
+    unsigned need = 0;
+    const char *m = s;
+    while (*m == ' ' || *m == '\t')
+        m++;
+    if (strncmp(m, ".byte", 5) == 0)
+        return (1u << REG_RSI) | (1u << REG_RDI) | 0xffc00000u;
+    for (int pre = 0; pre < 3; pre++) {             /* rep, repne, lock */
+        static const char *const p[] = { "rep ", "repe ", "repz ", "repne ",
+                                         "repnz ", "lock " };
+        for (unsigned q = 0; q < sizeof p / sizeof *p; q++)
+            if (strncmp(m, p[q], strlen(p[q])) == 0) {
+                m += strlen(p[q]);
+                while (*m == ' ')
+                    m++;
+            }
+    }
+    static const char *const str[] = { "movs", "stos", "lods", "scas",
+                                       "cmps", "ins", "outs" };
+    for (unsigned q = 0; q < sizeof str / sizeof *str; q++) {
+        size_t n = strlen(str[q]);
+        if (strncmp(m, str[q], n) == 0 && strchr("bwlq", m[n]) && m[n] &&
+            (m[n + 1] == 0 || m[n + 1] == ' ' || m[n + 1] == '\t'))
+            need |= (1u << REG_RSI) | (1u << REG_RDI);
+    }
+    for (const char *p = strchr(s, '%'); p; p = strchr(p + 1, '%')) {
+        char r[8];
+        int n = 0;
+        while (n < 7 && ((p[1 + n] >= 'a' && p[1 + n] <= 'z') ||
+                         (p[1 + n] >= '0' && p[1 + n] <= '9')))
+            r[n] = p[1 + n], n++;
+        r[n] = 0;
+        if (!strcmp(r, "rsi") || !strcmp(r, "esi") || !strcmp(r, "si") ||
+            !strcmp(r, "sil"))
+            need |= 1u << REG_RSI;
+        if (!strcmp(r, "rdi") || !strcmp(r, "edi") || !strcmp(r, "di") ||
+            !strcmp(r, "dil"))
+            need |= 1u << REG_RDI;
+        if ((r[0] == 'x' || r[0] == 'y' || r[0] == 'z') && r[1] == 'm' &&
+            r[2] == 'm') {
+            int x = atoi(r + 3);
+            if (x >= 6 && x < 16)
+                need |= 1u << (16 + x);
+        }
+    }
+    return need;
+}
+
+static unsigned win_scan(const struct code *t, long from, long to)
+{
+    unsigned need = 0;
+    char buf[256];
+    for (long p = from; p < to;) {
+        int skip = 0;
+        for (int k = 0; k < g_win_ntab; k += 2)
+            if (p >= g_win_tab[k] && p < g_win_tab[k + 1]) {
+                p = g_win_tab[k + 1];           /* a jump table: data */
+                skip = 1;
+            }
+        if (skip)
+            continue;
+        int n = embdbg_decode_one(t->p + p, (int)(to - p), (unsigned long)p,
+                                  buf);
+        unsigned t1 = win_touches(buf);
+        if (t1 && getenv("EMBCC_WIN_SCAN"))
+            fprintf(stderr, "win_scan %lx: %s -> %x\n", (unsigned long)p, buf, t1);
+        need |= t1;
+        p += n > 0 ? n : 1;
+    }
+    return need;
+}
+
 static void gen_func(struct ir_func *fn, struct code *text,
                      struct sites *st)
 {
@@ -2679,7 +2987,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
      * When regalloc is off, loc is all -1 and nsave 0 — every path below is a
      * no-op, keeping -O0/-O1 byte-identical. g_loc is read by cg_load/cg_store/
      * cg_load_rcx via in_reg(). */
-    int used_callee[NCALLEE], nsave = 0;
+    int used_callee[NCALLEE + 2], nsave = 0;   /* (+ Win64's rsi, rdi) */
     int *loc = NULL;
     if (g_regalloc && !g_has_cgoto) {
         const struct ra_target *rt = &X86_RA;
@@ -2707,12 +3015,37 @@ static void gen_func(struct ir_func *fn, struct code *text,
         g_flt = NULL;
         g_floc = NULL;
     }
+    /* Win64: rsi and rdi join the pushes, and below them (after a pad
+     * that keeps the area 16-aligned) go the xmm registers -- all of it
+     * the save area at the top of the frame, so nothing else moves */
+    int win_pad = 0, win_slots = 0;
+    g_win_nx = 0;
+    if (target_win64_abi()) {
+        static const int sidi[2] = { REG_RSI, REG_RDI };
+        for (int q = 0; q < 2; q++) {
+            int have = 0;
+            if (!(g_win_save & (1u << sidi[q])))
+                continue;
+            for (int k = 0; k < nsave; k++)
+                if (used_callee[k] == sidi[q])
+                    have = 1;
+            if (!have)
+                used_callee[nsave++] = sidi[q];
+        }
+        for (int x = 6; x < 16; x++)
+            if (g_win_save & (1u << (16 + x)))
+                g_win_xreg[g_win_nx++] = x;
+        win_pad = nsave & 1;
+        win_slots = win_pad + 2 * g_win_nx;
+    }
     int save_base;
     int *inplace = x86_inplace_locals(fn);
     int *sd = layout_frame(fn, &frame, &scratch_base, &sret_slot,
-                           &va_save, &va_tag, nsave, &save_base, loc,
-                           inplace);
+                           &va_save, &va_tag, nsave + win_slots, &save_base,
+                           loc, inplace);
     free(inplace);
+    g_win_xbase = save_base;              /* the xmm area: the bottom */
+    save_base += 8 * win_slots;           /* the registers': the top */
     /* Set by the parameter pass below, read by IR_VA_START: how many
      * named arguments the integer and SSE register files hold, and the
      * rbp offset of the first stack-passed argument (the overflow area). */
@@ -2762,7 +3095,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
      * That is the SysV and the Win64 rule at once. */
     int frameless = g_regalloc && frame == 0 && nsave == 0 &&
                     !fn->has_alloca && !f->is_varargs && !g_keep_vars &&
-                    sret_slot == 0 && f->nparams <= 4;
+                    sret_slot == 0 && f->nparams <= 4 && !g_win_nx;
     /* A SIBLING call is not a call here: it leaves rsp exactly as it
      * found it and jumps, and the callee sees the stack our caller
      * aligned. A function whose only calls are tail calls needs no frame
@@ -2891,14 +3224,21 @@ static void gen_func(struct ir_func *fn, struct code *text,
             x86_push_reg(text, REG_RAX);
             f->cfi_push_end[f->cfi_npush++] = text->len - f->code_off;
         }
+    } else if (target_os_get() == TGT_OS_WINDOWS && !frameless) {
+        win_prologue(f, text, st, used_callee, nsave, win_pad,
+                     frame - 8 * (nsave + win_slots));
     } else {
+        if (target_os_get() == TGT_OS_WINDOWS) {    /* a leaf: no .pdata */
+            free(f->win_uw);
+            f->win_uw = NULL;
+        }
         x86_prologue(text, frameless ? frame : 0, frameless);
     }
     /* for the unwind tables: push rbp ends at +1, mov rbp,rsp at +4 */
     f->cfi_frameless = frameless;
     f->cfi_push = 1;
     f->cfi_frame = 4;
-    if (!frameless && !g_pushonly) {
+    if (!frameless && !g_pushonly && target_os_get() != TGT_OS_WINDOWS) {
         for (int k = nsave - 1; k >= 0; k--)
             x86_push_reg(text, used_callee[k]);
         x86_sub_rsp(text, frame - nsave * 8);
@@ -4951,6 +5291,13 @@ static void gen_func(struct ir_func *fn, struct code *text,
                 nbrs++;
                 code_u32(text, 0);
             }
+            if (g_win_ntab + 2 > g_win_captab) {
+                g_win_captab = g_win_captab ? g_win_captab * 2 : 16;
+                g_win_tab = xrealloc(g_win_tab,
+                                     (size_t)g_win_captab * sizeof *g_win_tab);
+            }
+            g_win_tab[g_win_ntab++] = tab;
+            g_win_tab[g_win_ntab++] = text->len;
             break;
         }
         case IR_CALL: {
@@ -5735,12 +6082,14 @@ void codegen_unit(struct ir_unit *iu, struct code *text,
         g_nshort = fn->nins + 1;
         g_short = xmalloc((size_t)g_nshort);
         memset(g_short, 1, (size_t)g_nshort);
+        g_win_save = 0;
         for (int round = 0; ; round++) {
             text->len = text0;
             st.ncall = ncall0; st.next = next0; st.nstr = nstr0;
             st.ng = ng0; st.nf = nf0;
             fn->nlines = 0;
             fn->ncsites = 0;
+            g_win_ntab = 0;
             free(fn->var_off); fn->var_off = NULL;
             g_brord = 0; g_grew = 0;
             /* A round per branch is the bound; past that something is
@@ -5748,9 +6097,20 @@ void codegen_unit(struct ir_unit *iu, struct code *text,
             if (round >= 12)
                 memset(g_short, 0, (size_t)g_nshort);
             gen_func(fn, text, &st);
+            /* Win64: once the layout is settled, what the code touches
+             * of the callee-saved set decides the saves, and a function
+             * that touched more than it saved is made again saving it */
+            if (!g_grew && target_win64_abi()) {
+                unsigned need = win_scan(text, fn->src->code_off, text->len);
+                if (need & ~g_win_save) {
+                    g_win_save |= need;
+                    continue;
+                }
+            }
             if (!g_grew)
                 break;
         }
+        g_win_nx = 0;
         free(g_short); g_short = NULL; g_nshort = 0;
     }
 

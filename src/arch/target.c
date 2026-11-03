@@ -394,7 +394,12 @@ int target_int_size(void)       { return g_model[g_arch].it; }
  * column directly would give BYTES, and the backend that divided it by 8
  * to get bytes got 1 and made every value a byte wide. */
 int target_xlen(void)           { return g_model[g_arch].ptr * 8; }
-int target_long_size(void)      { return g_model[g_arch].lng; }
+/* Win64 is LLP64: `long` stays four bytes beside eight-byte pointers */
+int target_long_size(void)
+{
+    return g_arch == TARGET_X86_64 && g_os == TGT_OS_WINDOWS
+           ? 4 : g_model[g_arch].lng;
+}
 int target_max_scalar_align(void) { return g_model[g_arch].maxal; }
 /* The most a GNU vector type is aligned to, 0 for its own size: GCC's 16
  * on x86-64 (without AVX) and AArch64, AAPCS's 8 on Arm, and clang's
@@ -552,12 +557,14 @@ int target_wchar_size(void)
 {
     if (g_short_wchar)
         return 2;
-    return g_arch == TARGET_XTENSA ? 2 : g_model[g_arch].it;
+    /* Xtensa's xtensa/elf.h, and Windows', where wchar_t is UTF-16 */
+    return g_arch == TARGET_XTENSA || g_os == TGT_OS_WINDOWS
+           ? 2 : g_model[g_arch].it;
 }
 
 int target_wchar_unsigned(void)
 {
-    if (g_short_wchar)
+    if (g_short_wchar || g_os == TGT_OS_WINDOWS)
         return 1;
     return darwin_a64() ? 0 : g_model[g_arch].wchar_uns;
 }

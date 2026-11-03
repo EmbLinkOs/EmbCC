@@ -174,10 +174,15 @@ static int size_t_is_long(void)
 }
 struct cty *ct_size_t(void)
 {
+    /* Win64's LLP64: unsigned long long, mangled y (_Znwy) */
+    if (target_long_size() < target_ptr_size())
+        return ct_basic(CT_ULLONG);
     return ct_basic(size_t_is_long() ? CT_ULONG : CT_UINT);
 }
 struct cty *ct_ptrdiff_t(void)
 {
+    if (target_long_size() < target_ptr_size())
+        return ct_basic(CT_LLONG);
     return ct_basic(size_t_is_long() ? CT_LONG : CT_INT);
 }
 

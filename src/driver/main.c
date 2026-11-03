@@ -4632,13 +4632,6 @@ lto_backend:
                            "a file-scope asm block with labels or symbol "
                            "references is not supported for a Windows "
                            "target yet");
-        for (struct func *f = u->funcs; f; f = f->next)
-            if (!f->absorbed && (f->is_ctor || f->is_dtor))
-                diag_fatal(f->file, f->line,
-                           "__attribute__((%s)) is not supported for a "
-                           "Windows target yet: it needs the .ctors/.dtors "
-                           "sections this COFF writer does not emit",
-                           f->is_ctor ? "constructor" : "destructor");
         for (struct global *g = u->globals; g; g = g->next)
             if (!g->absorbed && g->is_tls)
                 diag_fatal(g->file, g->line,
@@ -4646,61 +4639,45 @@ lto_backend:
                            "yet: Windows reaches a thread-local through a "
                            "_tls_index and a TLS directory this writer "
                            "does not emit");
-        /* The COFF writer has no named data sections: an object with one
-         * was given offset 0 of .data and laid over whatever was already
-         * there, so a store to either changed both. */
-        for (struct global *g = u->globals; g; g = g->next)
-            if (!g->absorbed && g->defined && g->section)
-                diag_fatal(g->file, g->line,
-                           "'%s': a variable's section attribute is not "
-                           "supported for COFF output", g->name);
-        if (unwind)
-            diag_fatal(in, 0,
-                       "C++ exceptions are not supported for a Windows "
-                       "target yet: the unwind tables go in .pdata and "
-                       ".xdata and neither is written");
+        (void)unwind;       /* .pdata and .xdata are written always */
 
-        /* The object format is right and the argument registers are
-         * now Microsoft's (refereed against clang by win-abi.sh), but
-         * the ABI around them is not: the data model is still LP64
-         * where Windows is LLP64, wchar_t is four bytes where it is
-         * two, and rsi, rdi, xmm6 and xmm7 -- which a Windows callee
-         * must preserve -- are used freely. Objects EmbCC compiles
-         * are consistent with each other, so a self-contained program
-         * works -- and a struct holding a `long`, or a caller in
-         * MinGW's libc keeping a double in xmm6, does not.
-         *
-         * (This used to name the argument registers as the gap, which
-         * stopped being true when the convention went in.)
-         *
-         * D-014 says a capability a triple lacks must be an error
-         * naming the triple rather than a silent fallback to another
-         * platform's behaviour, and this IS that fallback. It is a
-         * warning rather than an error only because refusing would
-         * leave the object writer untestable; it is on by default and
-         * fires on every Windows compile, so it cannot be mistaken for
-         * a finished target. */
-        diag_warn_opt(in, 0, 0, "windows-abi",
-                      "%s is not yet the Microsoft x64 ABI: `long` is "
-                      "8 bytes and wchar_t 4 (Windows has 4 and 2), and "
-                      "rsi, rdi, xmm6 and xmm7 are not preserved across "
-                      "a call: "
-                      "objects EmbCC compiles agree with each other and "
-                      "with nothing else",
-                      target_triple_now());
+        /* Every function that moves rsp or saves a register gets its
+         * UNWIND_INFO in .xdata and a .pdata entry pointing at it: what
+         * Windows unwinds with, for an exception and for longjmp alike
+         * (debug/eh.c, from the x86 backend's records). A C++ function
+         * with handlers names __gxx_personality_seh0, MinGW's, with its
+         * LSDA as the handler's data. COFF relocations carry no addend,
+         * so each field holds its own. */
+        struct eh_out weh;
+        memset(&weh, 0, sizeof weh);
+        eh_emit_win64(iu, &weh);
+        for (int i = 0; i < weh.nrelocs; i++) {
+            struct eh_reloc *r = &weh.relocs[i];
+            struct eh_buf *b = r->in_lsda == 2 ? &weh.pdata : &weh.frame;
+            long add = r->target == EHT_TEXT || r->target == EHT_XDATA
+                       ? r->addend : 0;
+            int n = r->kind == EHR_ABS64 ? 8 : 4;
+            for (int k = 0; k < n; k++)
+                b->p[r->off + k] =
+                    (unsigned char)((unsigned long long)add >> (8 * k));
+        }
 
-        /* 1. the bytes, before any section is handed over. */
+        /* 1. the bytes, before any section is handed over -- in .data,
+         * or in the variable's own named section (laid out above, as
+         * for ELF) */
         for (struct global *g = u->globals; g; g = g->next) {
-            if (g->absorbed || !g->defined || g->in_bss || g->named)
+            if (g->absorbed || !g->defined || g->in_bss)
                 continue;
+            char *img = g->named ? named[g->named - 1].buf : data;
+            long img_len = g->named ? named[g->named - 1].len : data_len;
             for (int i = 0; i < g->nrelocs; i++) {
                 long add = g->relocs[i].ftarget || g->relocs[i].gtarget
                            ? g->relocs[i].addend
                            : g->relocs[i].str_off + g->relocs[i].addend;
                 long at = g->off + g->relocs[i].off;
-                if (!data || at < 0 || at + 8 > data_len)
+                if (!img || at < 0 || at + 8 > img_len)
                     continue;
-                unsigned char *d = (unsigned char *)data + at;
+                unsigned char *d = (unsigned char *)img + at;
                 for (int b = 0; b < 8; b++)
                     d[b] = (unsigned char)((unsigned long long)add >> (b * 8));
             }
@@ -4743,6 +4720,81 @@ lto_backend:
                                       IMAGE_SCN_MEM_READ |
                                       IMAGE_SCN_MEM_WRITE,
                                       NULL, (unsigned)bss_len, bss_align);
+        /* constructors and destructors: MinGW's crt runs the pointers
+         * in .ctors and .dtors, a priority's in .ctors.NNNNN (65535 less
+         * it, which the linker's sort puts in order), as GCC and clang
+         * place them */
+        struct { const char *name; int sect, n; } xtor[32];
+        int nxtor = 0;
+        static unsigned char xtor_zero[8 * 256];
+        for (int pass = 0; pass < 2; pass++)
+            for (struct func *f = u->funcs; f; f = f->next) {
+                if (f->absorbed || !f->has_defn ||
+                    !(pass ? f->is_dtor : f->is_ctor))
+                    continue;
+                int prio = (pass ? f->dtor_prio : f->ctor_prio) - 1;
+                char nm[32];                /* (stored as priority + 1) */
+                if (prio >= 0 && prio != 65535)
+                    snprintf(nm, sizeof nm, "%s.%05d", pass ? ".dtors" : ".ctors",
+                             65535 - prio);
+                else
+                    snprintf(nm, sizeof nm, "%s", pass ? ".dtors" : ".ctors");
+                int k = 0;
+                while (k < nxtor && strcmp(xtor[k].name, nm) != 0)
+                    k++;
+                if (k == nxtor) {
+                    if (nxtor == (int)(sizeof xtor / sizeof *xtor))
+                        diag_fatal(f->file, f->line, "too many constructor "
+                                   "priorities in one unit");
+                    xtor[k].name = xstrndup(nm, strlen(nm));
+                    xtor[k].n = 0;
+                    nxtor++;
+                }
+                xtor[k].n++;
+            }
+        for (int k = 0; k < nxtor; k++) {
+            if (xtor[k].n > 256)
+                diag_fatal(in, 0, "more than 256 constructors in one unit");
+            xtor[k].sect = coffw_add_section(cw, xtor[k].name,
+                                             IMAGE_SCN_CNT_INITIALIZED_DATA |
+                                             IMAGE_SCN_MEM_READ |
+                                             IMAGE_SCN_MEM_WRITE,
+                                             xtor_zero, (unsigned)(8 * xtor[k].n),
+                                             8);
+            xtor[k].n = 0;                  /* the fill counter, below */
+        }
+        /* the named sections (`section` attributes, and the C++ front
+         * end's own), with COFF's spelling of each one's flags */
+        int *c_named = xcalloc((size_t)(nnamed ? nnamed : 1), sizeof *c_named);
+        for (int k = 0; k < nnamed; k++) {
+            unsigned fl = IMAGE_SCN_MEM_READ;
+            if (named[k].flags & SHF_EXECINSTR)
+                fl |= IMAGE_SCN_CNT_CODE | IMAGE_SCN_MEM_EXECUTE;
+            else if (named[k].nobits)
+                fl |= IMAGE_SCN_CNT_UNINITIALIZED_DATA;
+            else
+                fl |= IMAGE_SCN_CNT_INITIALIZED_DATA;
+            if (named[k].flags & SHF_WRITE)
+                fl |= IMAGE_SCN_MEM_WRITE;
+            c_named[k] = coffw_add_section(cw, named[k].name, fl,
+                                           named[k].nobits ? NULL
+                                                           : named[k].buf,
+                                           (unsigned)named[k].len,
+                                           named[k].align);
+        }
+        int c_xdata = 0, c_pdata = 0;
+        if (weh.frame.len)
+            c_xdata = coffw_add_section(cw, ".xdata",
+                                        IMAGE_SCN_CNT_INITIALIZED_DATA |
+                                        IMAGE_SCN_MEM_READ,
+                                        weh.frame.p, (unsigned)weh.frame.len,
+                                        4);
+        if (weh.pdata.len)
+            c_pdata = coffw_add_section(cw, ".pdata",
+                                        IMAGE_SCN_CNT_INITIALIZED_DATA |
+                                        IMAGE_SCN_MEM_READ,
+                                        weh.pdata.p, (unsigned)weh.pdata.len,
+                                        4);
 
         /* 3. symbols. .rdata gets a section symbol, because a string's
          * address is relocated against the SECTION rather than against
@@ -4754,7 +4806,8 @@ lto_backend:
                                            IMAGE_SYM_TYPE_NULL,
                                            IMAGE_SYM_CLASS_STATIC);
         for (struct func *f = u->funcs; f; f = f->next)
-            if (!f->absorbed && f->has_defn && (!f->is_static || f->used))
+            if (!f->absorbed && f->has_defn &&
+                (!f->is_static || f->used || f->is_ctor || f->is_dtor))
                 f->sym_ndx = coffw_add_symbol(
                     cw, f->name, (unsigned)f->code_off, c_text,
                     IMAGE_SYM_DTYPE_FUNCTION,
@@ -4763,7 +4816,8 @@ lto_backend:
         for (struct global *g = u->globals; g; g = g->next) {
             if (g->absorbed || !g->defined)
                 continue;
-            int sect = g->in_bss ? c_bss : c_data;
+            int sect = g->named ? c_named[g->named - 1]
+                     : g->in_bss ? c_bss : c_data;
             if (!sect)
                 continue;
             g->sym_ndx = coffw_add_symbol(
@@ -4813,9 +4867,11 @@ lto_backend:
             coffw_add_reloc(cw, c_text, (unsigned)fs[i].patch_off,
                             tf->sym_ndx - 1, target_coff_reloc(ta, fs[i].kind));
         }
-        /* Pointer slots in .data holding an address. */
+        /* Pointer slots in .data (or a named section) holding an
+         * address. */
         for (struct global *g = u->globals; g; g = g->next) {
-            if (g->absorbed || !g->defined || g->in_bss || !c_data)
+            int gsect = g->named ? c_named[g->named - 1] : c_data;
+            if (g->absorbed || !g->defined || g->in_bss || !gsect)
                 continue;
             for (int i = 0; i < g->nrelocs; i++) {
                 struct func *ft = g->relocs[i].ftarget;
@@ -4832,11 +4888,75 @@ lto_backend:
                 } else {
                     sym = c_rdata_sym;
                 }
-                coffw_add_reloc(cw, c_data,
+                coffw_add_reloc(cw, gsect,
                                 (unsigned)(g->off + g->relocs[i].off), sym,
                                 target_coff_reloc(ta, RK_ABS64));
             }
         }
+        /* .xdata's and .pdata's: image-relative (ADDR32NB) to code and
+         * to the unwind info, to the personality; a typeinfo's absolute */
+        if (weh.nrelocs) {
+            int s_text = coffw_add_symbol(cw, ".text", 0, c_text,
+                                          IMAGE_SYM_TYPE_NULL,
+                                          IMAGE_SYM_CLASS_STATIC);
+            int s_xdata = c_xdata
+                ? coffw_add_symbol(cw, ".xdata", 0, c_xdata,
+                                   IMAGE_SYM_TYPE_NULL,
+                                   IMAGE_SYM_CLASS_STATIC) : 0;
+            int s_pers = -1;
+            for (int i = 0; i < weh.nrelocs; i++) {
+                struct eh_reloc *r = &weh.relocs[i];
+                int sym;
+                switch (r->target) {
+                case EHT_TEXT:  sym = s_text; break;
+                case EHT_XDATA: sym = s_xdata; break;
+                case EHT_PERSONALITY:
+                    if (s_pers < 0)
+                        s_pers = coffw_add_symbol(
+                            cw, "__gxx_personality_seh0", 0,
+                            IMAGE_SYM_UNDEFINED, IMAGE_SYM_DTYPE_FUNCTION,
+                            IMAGE_SYM_CLASS_EXTERNAL);
+                    sym = s_pers;
+                    break;
+                default:
+                    if (!r->glob->sym_ndx)
+                        r->glob->sym_ndx = coffw_add_symbol(
+                            cw, r->glob->name, 0, IMAGE_SYM_UNDEFINED,
+                            IMAGE_SYM_TYPE_NULL,
+                            IMAGE_SYM_CLASS_EXTERNAL) + 1;
+                    sym = r->glob->sym_ndx - 1;
+                    break;
+                }
+                coffw_add_reloc(cw, r->in_lsda == 2 ? c_pdata : c_xdata,
+                                (unsigned)r->off, sym,
+                                r->kind == EHR_ABS64
+                                    ? IMAGE_REL_AMD64_ADDR64
+                                    : IMAGE_REL_AMD64_ADDR32NB);
+            }
+        }
+        eh_free(&weh);
+        for (int pass = 0; pass < 2; pass++)
+            for (struct func *f = u->funcs; f; f = f->next) {
+                if (f->absorbed || !f->has_defn ||
+                    !(pass ? f->is_dtor : f->is_ctor))
+                    continue;
+                int prio = (pass ? f->dtor_prio : f->ctor_prio) - 1;
+                char nm[32];                /* (stored as priority + 1) */
+                if (prio >= 0 && prio != 65535)
+                    snprintf(nm, sizeof nm, "%s.%05d", pass ? ".dtors" : ".ctors",
+                             65535 - prio);
+                else
+                    snprintf(nm, sizeof nm, "%s", pass ? ".dtors" : ".ctors");
+                for (int k = 0; k < nxtor; k++)
+                    if (strcmp(xtor[k].name, nm) == 0)
+                        coffw_add_reloc(cw, xtor[k].sect,
+                                        (unsigned)(8 * xtor[k].n++),
+                                        f->sym_ndx - 1,
+                                        IMAGE_REL_AMD64_ADDR64);
+            }
+        for (int k = 0; k < nxtor; k++)
+            free((char *)xtor[k].name);
+        free(c_named);
         free(ext); free(strs); free(gs); free(fs);
         int crc = coffw_write(cw, out);
         coffw_free(cw);

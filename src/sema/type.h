@@ -243,6 +243,10 @@ struct type *ty_int_of_size(int size, int is_unsigned);
  * wide as a pointer -- ILP32 and AVR -- and the long ones elsewhere. The
  * type of sizeof, _Alignof and offsetof, and of a pointer difference. */
 struct type *ty_size_t(void);
+/* An integer as wide as a pointer: `long`, but `long long` where long is
+ * narrower (Win64's LLP64) -- for an index added to a pointer, a VLA's
+ * size, a saved stack pointer. */
+struct type *ty_intptr(int is_unsigned);
 struct type *ty_ptrdiff_t(void);
 /* A copy of `t` marked `volatile` (or t itself if already). Base types are
  * interned singletons, so this returns a fresh non-interned node — safe because

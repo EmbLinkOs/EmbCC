@@ -107,7 +107,8 @@ static void reloc(struct eh_out *o, int in_lsda, int target, long addend,
         o->relocs = xrealloc(o->relocs,
                              (size_t)o->reloccap * sizeof *o->relocs);
     }
-    struct eh_buf *b = in_lsda ? &o->lsda : &o->frame;
+    struct eh_buf *b = in_lsda == 2 ? &o->pdata : in_lsda ? &o->lsda
+                                                          : &o->frame;
     struct eh_reloc *r = &o->relocs[o->nrelocs++];
     r->in_lsda = in_lsda;
     r->off = b->len;
@@ -214,12 +215,17 @@ static void emit_lsda(struct eh_out *o, struct ir_func *fn)
     free(first);
     u8(&o->lsda, EH_PE_omit);                 /* landing pads: from the
                                                * function's start */
+    /* Win64 (MinGW's libgcc, as clang writes it): absolute eight-byte
+     * typeinfo addresses, the image relocated as a whole */
+    int win = target_os_get() == TGT_OS_WINDOWS;
     if (fn->neh_types) {
-        u8(&o->lsda, target_os_get() == TGT_OS_DARWIN
+        u8(&o->lsda, win ? 0x00                /* DW_EH_PE_absptr */
+                     : target_os_get() == TGT_OS_DARWIN
                      ? EH_PE_indirect_pcrel_sdata4
                      : EH_PE_pcrel_sdata4);    /* the type table's */
         uleb(&o->lsda, (unsigned long)(1 + uleb_size((unsigned long)cs.len) +
-                                       cs.len + at.len + 4 * fn->neh_types));
+                                       cs.len + at.len +
+                                       (win ? 8 : 4) * fn->neh_types));
     } else {
         u8(&o->lsda, EH_PE_omit);
     }
@@ -230,10 +236,17 @@ static void emit_lsda(struct eh_out *o, struct ir_func *fn)
     /* the types, index n first: entry i sits 4*i bytes before the base */
     for (int i = fn->neh_types; i >= 1; i--) {
         struct global *g = fn->eh_types[i - 1];
-        if (g)
+        if (g && win) {
             reloc(o, 1, EHT_GLOBAL, 0, g);
-        else
+            o->relocs[o->nrelocs - 1].kind = EHR_ABS64;
+            u32(&o->lsda, 0);                 /* reloc() wrote four */
+        } else if (g) {
+            reloc(o, 1, EHT_GLOBAL, 0, g);
+        } else {
             u32(&o->lsda, 0);                 /* catch (...) */
+            if (win)
+                u32(&o->lsda, 0);
+        }
     }
     free(cs.p);
     free(at.p);
@@ -662,9 +675,50 @@ void eh_emit_arm(struct ir_unit *iu, struct eh_out *out)
     }
 }
 
+/* ---- Win64: .xdata and .pdata ---------------------------------------- */
+
+void eh_emit_win64(struct ir_unit *iu, struct eh_out *out)
+{
+    struct eh_buf *x = &out->frame;
+    for (int n = 0; n < iu->nfuncs; n++) {
+        struct ir_func *fn = &iu->funcs[n];
+        struct func *f = fn->src;
+        if (!f || f->absorbed || !f->has_defn || f->code_len <= 0 ||
+            !f->win_uw)
+            continue;
+        while (x->len & 3)
+            u8(x, 0);
+        int xoff = x->len;
+        for (int k = 0; k < f->win_uw_len; k++)
+            u8(x, f->win_uw[k]);
+        if (fn->neh) {
+            /* UNW_FLAG_EHANDLER | UNW_FLAG_UHANDLER: the personality's
+             * RVA, then its data -- the LSDA, which MinGW's
+             * _GCC_specific_handler finds right there (HandlerData) */
+            x->p[xoff] |= 3 << 3;
+            reloc_kind(out, 0, EHT_PERSONALITY, 0, EHR_RVA32);
+            int lbase = x->len, l0 = out->lsda.len, r0 = out->nrelocs;
+            emit_lsda(out, fn);
+            for (int k = l0; k < out->lsda.len; k++)
+                u8(x, out->lsda.p[k]);
+            for (int k = r0; k < out->nrelocs; k++)
+                if (out->relocs[k].in_lsda == 1) {
+                    out->relocs[k].in_lsda = 0;
+                    out->relocs[k].off += lbase - l0;
+                }
+            out->lsda.len = l0;
+        }
+        long lo = f->code_off + f->code_entry;
+        reloc_kind(out, 2, EHT_TEXT, lo, EHR_RVA32);
+        reloc_kind(out, 2, EHT_TEXT, f->code_off + f->code_len, EHR_RVA32);
+        reloc_kind(out, 2, EHT_XDATA, xoff, EHR_RVA32);
+    }
+}
+
 void eh_free(struct eh_out *out)
 {
     free(out->frame.p);
+    free(out->pdata.p);
     free(out->lsda.p);
     free(out->relocs);
     free(out->funcs);

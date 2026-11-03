@@ -210,6 +210,35 @@ void x86_movs_store_base(struct code *c, int base, int disp, int xmm,
     modrm_base(c, xmm, base, disp);
 }
 
+/* movaps [base+disp], xmm and back (0f 29 / 0f 28): Win64's saves of the
+ * callee-saved xmm6-15, whose slots are 16-aligned */
+void x86_movaps_store(struct code *c, int base, int disp, int xmm)
+{
+    int rex = 0x40 | ((xmm & 8) ? 4 : 0) | ((base & 8) ? 1 : 0);
+    if (rex != 0x40) code_byte(c, rex);
+    code_byte(c, 0x0f); code_byte(c, 0x29);
+    modrm_base(c, xmm, base, disp);
+}
+
+/* movdqu [base+disp], xmm (f3 0f 7f): a 128-bit result out of xmm0 into
+ * a slot that may not be 16-aligned */
+void x86_movdqu_store(struct code *c, int base, int disp, int xmm)
+{
+    code_byte(c, 0xf3);
+    int rex = 0x40 | ((xmm & 8) ? 4 : 0) | ((base & 8) ? 1 : 0);
+    if (rex != 0x40) code_byte(c, rex);
+    code_byte(c, 0x0f); code_byte(c, 0x7f);
+    modrm_base(c, xmm, base, disp);
+}
+
+void x86_movaps_load(struct code *c, int xmm, int base, int disp)
+{
+    int rex = 0x40 | ((xmm & 8) ? 4 : 0) | ((base & 8) ? 1 : 0);
+    if (rex != 0x40) code_byte(c, rex);
+    code_byte(c, 0x0f); code_byte(c, 0x28);
+    modrm_base(c, xmm, base, disp);
+}
+
 void x86_lea_reg_slot(struct code *c, int dst, int disp)
 {
     rex_rb(c, 1, dst, REG_RBP);

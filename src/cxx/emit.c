@@ -27,6 +27,12 @@
 #include "../driver/util.h"
 #include "../sema/w128.h"
 
+/* the exception pointer and the selector a landing pad is given: a
+ * register's worth, `long` -- `long long` under Win64's LLP64 */
+#define EH_LOCALS (target_long_size() < target_ptr_size()                  \
+                   ? "void *__cx_exc; long long __cx_sel;\n"                \
+                   : "void *__cx_exc; long __cx_sel;\n")
+
 /* ---- text buffers ---- */
 
 struct sb {
@@ -2637,6 +2643,16 @@ static char *guard_unset(const char *g)
  * other way round), else __cxa_atexit. */
 static char *atexit_call(const char *d, const char *obj)
 {
+    if (target_os_get() == TGT_OS_WINDOWS) {
+        /* MinGW: atexit through a thunk per object, as GCC and clang
+         * register them there (its crt has no __dso_handle) */
+        const char *name = cx_fmt("__cx_atx%d", cx_uid());
+        sb_printf(&out_decls, "static void %s(void);\n", name);
+        sb_printf(&out_thunks, "static void %s(void)\n{\n"
+                               "((void (*)(void *))%s)(%s);\n}\n",
+                  name, d, obj);
+        return cx_fmt("atexit(%s);\n", name);
+    }
     if (cx_arm32_abi())
         return cx_fmt("__aeabi_atexit(%s, (void (*)(void *))%s, "
                       "&__dso_handle);\n", obj, d);
@@ -3522,7 +3538,7 @@ static void emit_coroutine(struct cfunc *f)
         struct sb nb = { 0, 0, 0 };
         sb_printf(&nb, "%.*s", body_at, b.p);
         if (fn_eh)
-            sb_put(&nb, "void *__cx_exc; long __cx_sel;\n");
+            sb_put(&nb, EH_LOCALS);
         sb_printf(&nb, "%.*s", disp_at - body_at, b.p + body_at);
         sb_put(&nb, "switch (__cx_fr->__i) {\n");
         for (int k = 1; k <= ce.nsusp; k++)
@@ -3611,7 +3627,7 @@ static void emit_coroutine(struct cfunc *f)
     if (fn_eh) {
         struct sb nr = { 0, 0, 0 };
         sb_printf(&nr, "%.*s", ramp_at, r.p);
-        sb_put(&nr, "void *__cx_exc; long __cx_sel;\n");
+        sb_put(&nr, EH_LOCALS);
         sb_put(&nr, r.p + ramp_at);
         r = nr;
     }
@@ -3819,7 +3835,7 @@ static void emit_function(struct cfunc *f)
         /* the landing pads' exception pointer and selector */
         struct sb nb = { 0, 0, 0 };
         sb_printf(&nb, "%.*s", body_at, b.p);
-        sb_put(&nb, "void *__cx_exc; long __cx_sel;\n");
+        sb_put(&nb, EH_LOCALS);
         sb_put(&nb, b.p + body_at);
         b = nb;
     }
@@ -3931,7 +3947,7 @@ static void tls_wrapper(struct cvar *v)
         sb_put(&b, reg);
     sb_put(&b, "}\n");
     if (fn_eh)                      /* (its elements' cleanups) */
-        sb_insert(&b, at, "void *__cx_exc; long __cx_sel;\n");
+        sb_insert(&b, at, EH_LOCALS);
     eh_resume(sv);
     sb_printf(&b, "__attribute__((weak)) void *%s(void)\n{\n%s();\nreturn &%s;\n}\n",
               W, H, v->cname);
@@ -4649,7 +4665,10 @@ char *cx_emit_unit(void)
     if (need_thread_atexit)
         sb_put(&out, "extern void *__dso_handle;\n"
                      "int __cxa_thread_atexit(void (*)(void *), void *, void *);\n");
-    if (need_atexit || need_guard || out_init.len)
+    if ((need_atexit || need_guard || out_init.len) &&
+        target_os_get() == TGT_OS_WINDOWS)
+        sb_put(&out, "int atexit(void (*)(void));\n");
+    else if (need_atexit || need_guard || out_init.len)
         sb_put(&out, cx_arm32_abi()
                      ? "extern void *__dso_handle;\n"
                        "int __aeabi_atexit(void *, void (*)(void *), void *);\n"
@@ -4768,11 +4787,14 @@ char *cx_emit_unit(void)
     sb_put(&out, sb_str(&out_thunks));
     if (out_init.len) {
         sb_printf(&out, "static void __cx_global_init(void)\n{\n%s%s}\n",
-                  init_eh ? "void *__cx_exc; long __cx_sel;\n" : "",
+                  init_eh ? EH_LOCALS : "",
                   sb_str(&out_init));
-        sb_put(&out, "__attribute__((section(\".init_array\"), used)) "
-                     "static void (*__cx_global_init_p)(void) = "
-                     "__cx_global_init;\n");
+        /* (MinGW's crt runs .ctors, as GCC and clang place it there) */
+        sb_printf(&out, "__attribute__((section(\"%s\"), used)) "
+                        "static void (*__cx_global_init_p)(void) = "
+                        "__cx_global_init;\n",
+                  target_os_get() == TGT_OS_WINDOWS ? ".ctors"
+                                                    : ".init_array");
     }
     return out.p ? out.p : cx_strdup("");
 }

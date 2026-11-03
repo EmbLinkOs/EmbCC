@@ -1272,7 +1272,7 @@ int gen_expr(struct ir_func *fn, struct expr *e);
 static int type_size_val(struct ir_func *fn, const struct type *t)
 {
     if (ty_is_vla(t))
-        return emit_ldvar(fn, t->vla_size, ty_base(TY_LONG, 1));
+        return emit_ldvar(fn, t->vla_size, ty_intptr(1));
     return emit_const(fn, ty_size(t), AW);
 }
 
@@ -1290,7 +1290,7 @@ static void vla_eval_at(struct ir_func *fn, struct type *t, int typedef_here)
         return;                 /* sized where its typedef was reached */
     int n = gen_expr(fn, t->vla_len);
     int sz = emit_bin(fn, IR_MUL, n, type_size_val(fn, t->pointee), AW, 1);
-    emit_stvar(fn, t->vla_size, sz, ty_base(TY_LONG, 1));
+    emit_stvar(fn, t->vla_size, sz, ty_intptr(1));
 }
 
 static void vla_eval(struct ir_func *fn, struct type *t)
@@ -1312,7 +1312,7 @@ static void vla_release(struct ir_func *fn, int depth)
 {
     if (g_nvla <= depth)
         return;
-    int sp = emit_ldvar(fn, g_vla[depth].sp_slot, ty_base(TY_LONG, 1));
+    int sp = emit_ldvar(fn, g_vla[depth].sp_slot, ty_intptr(1));
     struct ir_ins *i = emit(fn);   /* operands first: emit() appends */
     i->op = IR_SPRESTORE;
     i->a = sp;
@@ -6275,7 +6275,7 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
             if (ty_is_vla(s->dty)) {
                 /* save sp, carve the array off the stack, keep its address
                  * in the variable's slot */
-                struct type *ul = ty_base(TY_LONG, 1);
+                struct type *ul = ty_intptr(1);
                 struct ir_ins *sv = emit(fn);
                 sv->op = IR_SPSAVE;
                 sv->dst = new_temp(fn);

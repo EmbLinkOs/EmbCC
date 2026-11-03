@@ -603,6 +603,11 @@ struct func {
     int cfi_push_end[17];
     int cfi_reg[16];
     long cfi_off[16];
+    /* Win64: the function's UNWIND_INFO (its header and unwind codes, no
+     * handler), which .xdata carries and .pdata points at; NULL for a
+     * leaf that moves neither rsp nor a callee-saved register */
+    unsigned char *win_uw;
+    int win_uw_len;
     int sym_ndx;          /* driver: symbol index (defined or UNDEF) */
 };
 

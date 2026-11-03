@@ -213,14 +213,25 @@ struct type *ty_bitint(int n, int is_unsigned)
     return *slot;
 }
 
+struct type *ty_intptr(int is_unsigned)
+{
+    return target_long_size() < target_ptr_size() ? ty_llong(is_unsigned)
+                                                  : ty_base(TY_LONG, is_unsigned);
+}
+
+/* (Win64, LLP64: unsigned long long, as MinGW's and MSVC's) */
 struct type *ty_size_t(void)
 {
+    if (target_long_size() < target_ptr_size())
+        return ty_llong(1);
     return ty_base(target_int_size() == target_ptr_size() &&
                    !target_long_size_types() ? TY_INT : TY_LONG, 1);
 }
 
 struct type *ty_ptrdiff_t(void)
 {
+    if (target_long_size() < target_ptr_size())
+        return ty_llong(0);
     return ty_base(target_int_size() == target_ptr_size() &&
                    !target_long_size_types() ? TY_INT : TY_LONG, 0);
 }
