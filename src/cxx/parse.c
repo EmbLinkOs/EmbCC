@@ -8644,6 +8644,20 @@ static void parse_explicit_instantiation(int is_extern)
     if (d.saved)
         cx_scope = d.saved;
     cx_expect(TOK_SEMI, "';'");
+    if (ft->k != CT_FUNC && d.vtmpl) {
+        /* template int v<int>; : a variable template's instance, defined
+         * here whether or not the unit uses it (extern: another unit's,
+         * though its weak copy may still be made for a use here) */
+        struct cvar *v = var_instance(d.vtmpl, d.targs, d.ntargs, at);
+        if (ft->k != CT_AUTO && !ct_same(ct_unqual(v->type), ct_unqual(ft)))
+            cx_error(at, "explicit instantiation of '%s' as %s, but it is %s",
+                     d.vtmpl->name, ct_name(ft), ct_name(v->type));
+        if (!is_extern) {
+            v->used = 1;
+            v->explicit_inst = 1;
+        }
+        return;
+    }
     if (ft->k != CT_FUNC) {
         /* template T A<X>::m; : a static data member of an instance —
          * defined here (its definition out of the class, replayed), or,
@@ -8651,8 +8665,9 @@ static void parse_explicit_instantiation(int is_extern)
         struct csym *y = d.qual && d.qual->k == SC_CLASS && d.name
                          ? scope_find_here(d.qual, d.name) : NULL;
         if (!y || y->k != CS_VAR)
-            cx_error(at, "explicit instantiation of a variable template is "
-                         "not supported yet");
+            cx_error(at, "'%s' is not a static data member of a class "
+                         "template's instance, or a variable template's",
+                     d.name ? d.name : "this");
         struct cvar *v = y->var;
         if (is_extern) {
             v->extern_inst = 1;

@@ -430,7 +430,7 @@ refuses it, with the diagnostic shown. Diagnostics are quoted without the
 | Class, function and member templates | Supported | |
 | Explicit and partial specialization | Supported | The most specialized partial specialization is chosen. |
 | Template template parameters | Supported | |
-| Explicit instantiation | Supported | Not for variable templates (C++14 row). |
+| Explicit instantiation | Supported | Classes, functions, members, and variable templates (`template int v<int>;`). |
 | Two-phase name lookup | Partial | Functions are bound at the definition, plus argument-dependent lookup at instantiation; dependent bases are not searched unqualified. See [Name lookup in templates](#name-lookup-in-templates). |
 | `export` templates | Not supported | C++11 removed them; `export` is the C++20 module keyword |
 | `throw`, `try`, `catch`, function-try-blocks, `throw()` | Supported | On the targets in [Targets](#targets). |
@@ -486,7 +486,7 @@ refuses it, with the diagnostic shown. Diagnostics are quoted without the
 | Init-captures | Supported | |
 | Return type deduction, `decltype(auto)` | Supported | |
 | Relaxed `constexpr` | Supported | Loops, local variables and assignment in constant evaluation. |
-| Variable templates | Partial | Explicit and partial specialization work. Explicit instantiation: `explicit instantiation of a variable template is not supported yet` |
+| Variable templates | Yes | Explicit and partial specialization, explicit instantiation (`template int v<int>;`, `extern template`). |
 | Binary literals, digit separators | Supported | |
 | `[[deprecated]]` | Partial | Accepted; no warning is issued. |
 | Sized deallocation | Supported | Deleting destructors call `operator delete(void *, std::size_t)`. |
