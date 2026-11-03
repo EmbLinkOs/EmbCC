@@ -28,7 +28,13 @@
 enum { EHT_TEXT,        /* .text's section symbol */
        EHT_LSDA,        /* .gcc_except_table's section symbol */
        EHT_PERSONALITY, /* __gxx_personality_v0 */
-       EHT_GLOBAL };    /* glob's own symbol (a typeinfo object) */
+       EHT_GLOBAL,      /* glob's own symbol (a typeinfo object) */
+       EHT_PR0, EHT_PR1 }; /* ARM: __aeabi_unwind_cpp_pr0/1, by R_ARM_NONE */
+
+/* how a field is relocated */
+enum { EHR_PREL32,      /* target - here, 32 bits */
+       EHR_PREL31,      /* ARM: the low 31 bits of target - here */
+       EHR_NONE };      /* ARM: no field, only a reference to the symbol */
 
 struct eh_reloc {
     int in_lsda;        /* the field is in .gcc_except_table, not .eh_frame */
@@ -36,6 +42,7 @@ struct eh_reloc {
     int target;         /* EHT_* */
     long addend;        /* the target's offset */
     struct global *glob;
+    int kind;           /* EHR_* */
 };
 
 struct eh_buf {
@@ -68,6 +75,11 @@ void eh_emit(struct ir_unit *iu, int arm64, struct eh_out *out);
 /* The same from the backend's CFI records (ir_cfi), for every other
  * target: sp and ra are its DWARF stack pointer and return address. */
 void eh_emit_cfi(struct ir_unit *iu, int sp, int ra, struct eh_out *out);
+/* 32-bit ARM: EHABI's tables, in frame (.ARM.exidx: two words a
+ * function, in address order) and lsda (.ARM.extab: the entries that do
+ * not fit a word, C++'s with their LSDA), each frame's unwinding made of
+ * the Thumb backend's CFI records. */
+void eh_emit_arm(struct ir_unit *iu, struct eh_out *out);
 void eh_free(struct eh_out *out);
 
 #endif

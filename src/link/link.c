@@ -2881,6 +2881,11 @@ static void define_orphan_brackets(struct linker *l,
             define_linker_symbol(l, sym, ob->start);
             snprintf(sym, sizeof sym, "__%s_end", n + 1);
             define_linker_symbol(l, sym, ob->end);
+        } else if (!strcmp(n, ".ARM.exidx")) {
+            /* EHABI's index, by the names GNU ld gives it, which an
+             * unwinder searches (lib/rt/unwind_arm.c, libgcc) */
+            define_linker_symbol(l, "__exidx_start", ob->start);
+            define_linker_symbol(l, "__exidx_end", ob->end);
         }
     }
 }

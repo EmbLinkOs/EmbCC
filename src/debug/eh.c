@@ -114,6 +114,7 @@ static void reloc(struct eh_out *o, int in_lsda, int target, long addend,
     r->target = target;
     r->addend = addend;
     r->glob = g;
+    r->kind = EHR_PREL32;
     u32(b, 0);                        /* the linker writes it */
 }
 
@@ -489,6 +490,175 @@ void eh_emit_cfi(struct ir_unit *iu, int sp, int ra, struct eh_out *out)
         out->funcs[out->nfuncs].code_len = f->code_len;
         out->funcs[out->nfuncs].lsda_off = lsda;
         out->nfuncs++;
+    }
+}
+
+/* ---- 32-bit ARM: EHABI ---------------------------------------------- */
+
+/* A frame's unwind opcodes (IHI 0038 9.3), from the Thumb prologue its
+ * CFI records describe: [16 bytes of varargs] push {regs} [vpush
+ * {d8..}] [sub sp, #frame] [mov r7, sp]. Undone in reverse: vsp = r7,
+ * vsp += frame, vpop, pop, vsp += 16. The return comes from lr unless pc
+ * was popped (the implicit finish). Returns the count. */
+static int arm_opcodes(const struct ir_func *fn, unsigned char *op)
+{
+    unsigned mask = 0;
+    int nd = 0, fp = 0, n = 0;
+    long total = 0, maxoff = 0x7fffffffL;
+    int have_core = 0;
+    for (int k = 0; k < fn->ncfi; k++) {
+        const struct ir_cfi *c = &fn->cfi[k];
+        if (c->kind == IR_CFI_CFA_OFFSET)
+            total = c->val;
+        else if (c->kind == IR_CFI_CFA_REG) {
+            total = c->val;
+            fp = c->reg == 7;
+        } else if (c->reg < 16) {
+            mask |= 1u << c->reg;
+            if (!have_core || -c->val < maxoff)
+                maxoff = -c->val;           /* the highest slot: nearest */
+            have_core = 1;
+        } else if (c->reg >= 256 + 8) {
+            nd++;
+        }
+    }
+    int npush = 0;
+    for (int r = 0; r < 16; r++)
+        npush += (mask >> r) & 1;
+    /* the varargs block: what lies above the highest pushed register */
+    long va = have_core ? maxoff - 4 : 0;
+    if (!have_core && fn->ncfi > 0 && fn->cfi[0].kind == IR_CFI_CFA_OFFSET &&
+        fn->cfi[0].val == 16 && fn->ncfi > 1)
+        va = 16;
+    long frame = total - va - 4L * npush - 8L * nd;
+    if (fp)
+        op[n++] = 0x97;                       /* vsp = r7 */
+    while (frame > 0) {
+        if (frame >= 0x204 + 4) {
+            unsigned long v = (unsigned long)(frame - 0x204) >> 2;
+            op[n++] = 0xb2;
+            do {
+                unsigned char byte = v & 0x7f;
+                v >>= 7;
+                if (v)
+                    byte |= 0x80;
+                op[n++] = byte;
+            } while (v);
+            frame -= 0x204 + (long)(((unsigned long)(frame - 0x204) >> 2) << 2);
+            continue;
+        }
+        long k = frame > 256 ? 256 : frame;
+        op[n++] = (unsigned char)((k - 4) >> 2);
+        frame -= k;
+    }
+    if (nd)
+        op[n++] = (unsigned char)(0xd0 | (nd - 1));   /* vpop d8..d(7+nd) */
+    /* one push stores its registers ascending, so r0-r3 lie below r4 and
+     * up: they come off first */
+    if (mask & 0xf) {
+        op[n++] = 0xb1;
+        op[n++] = (unsigned char)(mask & 0xf);
+    }
+    if (mask & 0xfff0) {
+        unsigned m = (mask & 0xfff0) >> 4;
+        op[n++] = (unsigned char)(0x80 | (m >> 8));
+        op[n++] = (unsigned char)(m & 0xff);
+    }
+    while (va > 0) {
+        long k = va > 256 ? 256 : va;
+        op[n++] = (unsigned char)((k - 4) >> 2);
+        va -= k;
+    }
+    return n;
+}
+
+static void reloc_kind(struct eh_out *o, int in_lsda, int target, long addend,
+                       int kind)
+{
+    reloc(o, in_lsda, target, addend, NULL);
+    o->relocs[o->nrelocs - 1].kind = kind;
+}
+
+/* `n` opcodes from op[start..] packed as words, MSB first, finish-padded */
+static void opcode_words(struct eh_buf *b, const unsigned char *op, int start,
+                         int n)
+{
+    for (int k = start; k < n; k += 4) {
+        unsigned long w = 0;
+        for (int j = 0; j < 4; j++)
+            w = (w << 8) | (k + j < n ? op[k + j] : 0xb0);
+        u32(b, w);
+    }
+}
+
+void eh_emit_arm(struct ir_unit *iu, struct eh_out *out)
+{
+    struct eh_buf *x = &out->frame, *t = &out->lsda;
+    for (int n = 0; n < iu->nfuncs; n++) {
+        struct ir_func *fn = &iu->funcs[n];
+        struct func *f = fn->src;
+        if (!f || f->absorbed || !f->has_defn || f->code_len <= 0)
+            continue;
+        reloc_kind(out, 0, EHT_TEXT, f->code_off + f->code_entry, EHR_PREL31);
+        if (fn->ncfi < 0) {
+            u32(x, 1);                         /* EXIDX_CANTUNWIND */
+            continue;
+        }
+        unsigned char op[64];
+        int nop = arm_opcodes(fn, op);
+        if (!fn->neh && nop <= 3) {
+            /* the short form inline: personality routine 0 */
+            unsigned long w = 0x80;
+            for (int j = 0; j < 3; j++)
+                w = (w << 8) | (j < nop ? op[j] : 0xb0);
+            u32(x, w);
+            /* the R_ARM_NONE that keeps pr0 in the link, at this word */
+            if (out->nrelocs == out->reloccap) {
+                out->reloccap = out->reloccap ? out->reloccap * 2 : 16;
+                out->relocs = xrealloc(out->relocs, (size_t)out->reloccap *
+                                                    sizeof *out->relocs);
+            }
+            struct eh_reloc *r = &out->relocs[out->nrelocs++];
+            memset(r, 0, sizeof *r);
+            r->off = x->len - 4;
+            r->target = EHT_PR0;
+            r->kind = EHR_NONE;
+            continue;
+        }
+        while (t->len % 4)
+            u8(t, 0);
+        reloc_kind(out, 0, EHT_LSDA, t->len, EHR_PREL31);
+        if (fn->neh) {
+            /* C++: __gxx_personality_v0, its opcode words, its LSDA */
+            reloc_kind(out, 1, EHT_PERSONALITY, 0, EHR_PREL31);
+            int nw = nop > 3 ? (nop - 3 + 3) / 4 : 0;
+            unsigned long w = (unsigned long)nw << 24;
+            for (int j = 0; j < 3; j++)
+                w |= (unsigned long)(j < nop ? op[j] : 0xb0) << (16 - 8 * j);
+            u32(t, w);
+            opcode_words(t, op, 3, nop);
+            emit_lsda(out, fn);
+        } else {
+            /* the long form: personality routine 1 */
+            int nw = nop > 2 ? (nop - 2 + 3) / 4 : 0;
+            unsigned long w = 0x81000000UL | ((unsigned long)nw << 16);
+            w |= (unsigned long)(nop > 0 ? op[0] : 0xb0) << 8;
+            w |= (unsigned long)(nop > 1 ? op[1] : 0xb0);
+            u32(t, w);
+            opcode_words(t, op, 2, nop);
+            if (out->nrelocs == out->reloccap) {
+                out->reloccap = out->reloccap ? out->reloccap * 2 : 16;
+                out->relocs = xrealloc(out->relocs, (size_t)out->reloccap *
+                                                    sizeof *out->relocs);
+            }
+            struct eh_reloc *r = &out->relocs[out->nrelocs++];
+            memset(r, 0, sizeof *r);
+            r->off = x->len - 4;
+            r->target = EHT_PR1;
+            r->kind = EHR_NONE;
+        }
+        while (t->len % 4)
+            u8(t, 0);
     }
 }
 

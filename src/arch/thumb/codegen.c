@@ -6605,7 +6605,12 @@ static void gen_ins(struct t_fn *F, int n)
         t_mov_reg(t, T_SP, rdr(F, i->a, T_ACC));
         return;
     case IR_LANDING:
-        t_refuse(fn, i, "an exception landing pad");
+        /* the unwinder left the exception in r0 and the selector in r1
+         * (EHABI); a function with regions keeps its values in slots, so
+         * these are stores, which touch neither */
+        if (i->b >= 0)
+            wrote(F, i->b, 1);
+        wrote(F, i->dst, 0);
         return;
     case IR_SWITCH: {
         /* A jump table in .text right after its dispatch, of 32-bit
@@ -7289,6 +7294,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     }
     F.keep_vars = keep_vars;
     fn->nlines = 0;                 /* -g: this attempt's rows only */
+    fn->ncsites = 0;
     F.fix = NULL; F.nfix = F.capfix = 0;
     F.wide = wide64_map(fn);
     frame_addr_map(&F);
@@ -7322,7 +7328,10 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
                 fn->ins[i].a = -1;
         }
     }
-    if (g_t_regalloc) {
+    /* with exception regions every value in its slot: a landing pad is
+     * entered from the unwinder, which restores the callee-saved
+     * registers only (as on the other targets) */
+    if (g_t_regalloc && !fn->neh) {
         /* nsave is what the allocator REPORTS it took, and the prologue
          * pushes exactly that -- so the two must be computed together.
          * The EMBCC_T_RA_MAX gate below therefore has to clear nsave as
@@ -7595,6 +7604,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
          * their $d mapping symbols fell on this pass's instructions */
         t->ndrange = nd0;
         fn->nlines = nl0;
+        fn->ncsites = 0;            /* (this pass's calls) */
         F.st->ncall = sc0; F.st->next = se0; F.st->nstr = ss0;
         F.st->ng = sg0; F.st->nf = sf0;
         F.nfix = 0;
@@ -8006,6 +8016,10 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         if (fn->ins_pc)
             fn->ins_pc[i] = t->len;
         gen_ins(&F, i);
+        if (fn->neh && fn->ins[i0].op == IR_CALL)   /* an LSDA call site */
+            ir_add_csite(fn, (int)(len0 - f->code_off),
+                         (int)(t->len - f->code_off),
+                         fn->ins[i0].eh_region - 1);
         F.lofree = 0;
         if (F.skip_next) {      /* the comparison emitted its branch too,
                                  * or a shift its consumer (and its load) */
@@ -8240,8 +8254,11 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     }
 
     f->code_len = t->len - f->code_off;
-    if (target_debug_info())
+    if (target_debug_info() || target_unwind_tables())
         t_record_cfi(&F, f->code_off);
+    for (int r = 0; r < fn->neh; r++)       /* where each landing pad is */
+        fn->eh[r].lp_off = (int)(F.label_off[fn->eh[r].lp_label] -
+                                 f->code_off);
     if (fn->ins_pc) {
         /* -g: r0-r15 are DWARF 0-15, s0-s31 64-95 and d0-d31 256-287;
          * a slot is relative to the frame base, as var_off's are; a

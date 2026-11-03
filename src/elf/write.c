@@ -161,6 +161,13 @@ void elfw_set_flags(struct elfw *w, unsigned long flags)
     w->eflags = (Elf64_Word)flags;
 }
 
+/* sh_link of section `sec`: the section it belongs to (SHF_LINK_ORDER --
+ * ARM's .ARM.exidx names its .text) */
+void elfw_set_link(struct elfw *w, int sec, int link)
+{
+    w->sec[sec].hdr.sh_link = (Elf64_Word)link;
+}
+
 void elfw_free(struct elfw *w)
 {
     if (!w)

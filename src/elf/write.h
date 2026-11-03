@@ -28,6 +28,7 @@ void elfw_set_sym_prefix(struct elfw *w, const char *prefix);
  * (target_elf_flags). elfw_new sets ARM's EABI version itself. */
 void elfw_set_flags(struct elfw *w, unsigned long flags);
 void elfw_free(struct elfw *w);
+void elfw_set_link(struct elfw *w, int sec, int link);
 
 /* Returns the section header index, for use as a symbol's st_shndx.
  * data may be NULL when size is 0. */

@@ -3947,6 +3947,8 @@ lto_backend:
                    unwritten);
     if (unwind && (ta == TARGET_X86_64 || ta == TARGET_AARCH64))
         eh_emit(iu, ta == TARGET_AARCH64, &eh);
+    else if (unwind && ta == TARGET_THUMB)
+        eh_emit_arm(iu, &eh);              /* EHABI: .ARM.exidx/.ARM.extab */
     else if (unwind)
         eh_emit_cfi(iu, backend_get(ta)->frame_sp, backend_get(ta)->frame_ra,
                     &eh);
@@ -5002,15 +5004,29 @@ lto_backend:
      * the exception tables */
     int eh_ndx = 0, lsda_ndx = 0;
     if (unwind)
-        eh_ndx = elfw_add_section(w, ".eh_frame",
-                                  ta != TARGET_X86_64 ? SHT_PROGBITS
-                                                      : SHT_X86_64_UNWIND,
-                                  SHF_ALLOC, eh.frame.p,
-                                  (Elf64_Xword)eh.frame.len, 8);
-    if (eh.lsda.len)
-        lsda_ndx = elfw_add_section(w, ".gcc_except_table", SHT_PROGBITS,
-                                    SHF_ALLOC, eh.lsda.p,
-                                    (Elf64_Xword)eh.lsda.len, 4);
+    {
+        int arm = ta == TARGET_THUMB;
+        if (unwind && arm) {
+            /* EHABI's: the index, linked to the code it describes */
+            eh_ndx = elfw_add_section(w, ".ARM.exidx", 0x70000001u
+                                      /* SHT_ARM_EXIDX */,
+                                      SHF_ALLOC | 0x80 /* SHF_LINK_ORDER */,
+                                      eh.frame.p, (Elf64_Xword)eh.frame.len,
+                                      4);
+            elfw_set_link(w, eh_ndx, text_ndx);
+        } else if (unwind) {
+            eh_ndx = elfw_add_section(w, ".eh_frame",
+                                      ta != TARGET_X86_64 ? SHT_PROGBITS
+                                                          : SHT_X86_64_UNWIND,
+                                      SHF_ALLOC, eh.frame.p,
+                                      (Elf64_Xword)eh.frame.len, 8);
+        }
+        if (eh.lsda.len)
+            lsda_ndx = elfw_add_section(w, arm ? ".ARM.extab"
+                                               : ".gcc_except_table",
+                                        SHT_PROGBITS, SHF_ALLOC, eh.lsda.p,
+                                        (Elf64_Xword)eh.lsda.len, 4);
+    }
     elfw_add_symbol(w, path_basename(in), 0, 0,
                     ELF64_ST_INFO(STB_LOCAL, STT_FILE), SHN_ABS);
     int lsda_sym = 0;
@@ -5611,10 +5627,22 @@ lto_backend:
     /* the unwind and exception tables' pointers, all PC-relative: into
      * .text and .gcc_except_table, to the personality routine, to the
      * catch types' typeinfo objects */
-    int personality_sym = 0;
+    int personality_sym = 0, pr_sym[2] = { 0, 0 };
     for (int i = 0; i < eh.nrelocs; i++) {
         struct eh_reloc *r = &eh.relocs[i];
         int sym;
+        if (r->target == EHT_PR0 || r->target == EHT_PR1) {
+            /* EHABI: the routine an index entry's compact model names,
+             * kept in the link by an R_ARM_NONE at the entry */
+            int k = r->target == EHT_PR1;
+            if (!pr_sym[k])
+                pr_sym[k] = elfw_add_symbol(
+                    w, k ? "__aeabi_unwind_cpp_pr1" : "__aeabi_unwind_cpp_pr0",
+                    0, 0, ELF64_ST_INFO(STB_GLOBAL, STT_NOTYPE), SHN_UNDEF);
+            elfw_add_rela(w, eh_ndx, (Elf64_Addr)r->off, pr_sym[k],
+                          R_ARM_NONE, 0);
+            continue;
+        }
         switch (r->target) {
         case EHT_TEXT:          /* a function's start: its section's */
             r->addend = code_ref(r->addend, text_sym, &sym);
@@ -5632,7 +5660,8 @@ lto_backend:
             break;
         }
         elfw_add_rela(w, r->in_lsda ? lsda_ndx : eh_ndx, (Elf64_Addr)r->off,
-                      sym, target_reloc_type(ta, RK_DATA_PREL32),
+                      sym, r->kind == EHR_PREL31 ? R_ARM_PREL31
+                           : target_reloc_type(ta, RK_DATA_PREL32),
                       target_reloc_addend(ta, RK_DATA_PREL32, r->addend));
     }
     eh_free(&eh);

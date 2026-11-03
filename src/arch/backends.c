@@ -97,8 +97,8 @@ static const struct backend_desc g_backends[] = {
     [TARGET_THUMB] = {
         .family = "ARM", .codegen = codegen_unit_thumb, .ra_at_o0 = 1,
         .op_calls_helper = t_op_calls_helper,
-        .unwind_unwritten = "ARM EHABI unwind tables (.ARM.exidx)",
-        .cxx_exceptions = BACKEND_CXX_EXC_NONE,
+        .unwind_unwritten = NULL,          /* eh_emit_arm: EHABI */
+        .cxx_exceptions = BACKEND_CXX_EXC_OK,
         .firmware = 1, .ld_scripts = 1,
         .call_insn = "bl", .call_delay_slot = 0, .sym_prefix = "",
         .imm_prefixed = 0, .text_p2align = 2,
