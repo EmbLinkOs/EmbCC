@@ -107,7 +107,7 @@ int ty_generic_same(const struct type *a, const struct type *b)
     if (a->kind == TY_CHAR && ty_is_plain_char(a) != ty_is_plain_char(b))
         return 0;
     if (a->kind == TY_PTR)
-        return ty_generic_same(a->pointee, b->pointee);
+        return a->is_nullptr == b->is_nullptr && ty_generic_same(a->pointee, b->pointee);
     if (a->kind == TY_ARRAY)
         return (a->count == b->count || a->vla_len || b->vla_len) &&
                ty_generic_same(a->pointee, b->pointee);
@@ -365,6 +365,16 @@ struct type *ty_ptr(struct type *pointee)
     struct type *t = xcalloc(1, sizeof *t);
     t->kind = TY_PTR;
     t->pointee = pointee;
+    return t;
+}
+
+struct type *ty_nullptr(void)
+{
+    static struct type *t;
+    if (!t) {
+        t = ty_ptr(ty_base(TY_VOID, 0));
+        t->is_nullptr = 1;
+    }
     return t;
 }
 
@@ -792,7 +802,8 @@ int ty_compatible(const struct type *a, const struct type *b, int top)
         return 0;
     switch (a->kind) {
     case TY_PTR:
-        return ty_compatible(a->pointee, b->pointee, 0);
+        return a->is_nullptr == b->is_nullptr &&
+               ty_compatible(a->pointee, b->pointee, 0);
     case TY_ARRAY: {
         int ka = a->count > 0, kb = b->count > 0;
         if (ka && kb && !a->vla_len && !b->vla_len && a->count != b->count)
@@ -838,7 +849,7 @@ int ty_equal(const struct type *a, const struct type *b)
     if (a->is_llong != b->is_llong && ty_size(a) != ty_size(b))
         return 0;
     if (a->kind == TY_PTR)
-        return ty_equal(a->pointee, b->pointee);
+        return a->is_nullptr == b->is_nullptr && ty_equal(a->pointee, b->pointee);
     if (a->kind == TY_ARRAY)   /* a VLA is compatible with any length */
         return (a->count == b->count || a->vla_len || b->vla_len) &&
                ty_equal(a->pointee, b->pointee);
@@ -1135,6 +1146,8 @@ const char *ty_name(const struct type *t)
     char *buf = bufs[which];
     size_t bufsz = sizeof bufs[0];
     which = (which + 1) & 3;
+    if (t->kind == TY_PTR && t->is_nullptr)
+        return "nullptr_t";
     const char *base;
     int stars = 0;
     int dims[4];

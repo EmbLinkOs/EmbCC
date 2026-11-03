@@ -1862,6 +1862,14 @@ static struct expr *convert_assign(struct unit *u, struct expr *rhs,
         cvt_check(u, rhs, to, g_cvt_bits, rhs->line, rhs->col);
         return mk_cast(rhs, to);
     }
+    if (to->kind == TY_PTR && to->is_nullptr) {
+        if ((rhs->ty->kind == TY_PTR && rhs->ty->is_nullptr) || is_null_const(rhs))
+            return mk_cast(rhs, to);
+        sema_error_at(u, rhs->line, rhs->col,
+                      "%s: a nullptr_t takes only nullptr, not %s", ctx,
+                      ty_name(rhs->ty));
+        return mk_cast(rhs, to);
+    }
     if (to->kind == TY_PTR) {
         /* AVR: a __flash pointer is a program-memory address, which a
          * generic pointer's loads would read from RAM -- the bytes at the

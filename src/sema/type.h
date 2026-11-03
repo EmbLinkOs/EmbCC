@@ -87,6 +87,9 @@ struct type {
                              * too. Ignored by ty_equal; sema keeps pointers to
                              * the two spaces apart. */
     int bitint;             /* _BitInt(N): N, the value's width (ty_bitint) */
+    int is_nullptr;         /* TY_PTR: C23's nullptr_t, typeof(nullptr) -- a
+                             * pointer to void in every lowering, distinct to
+                             * ty_equal and ty_compatible (ty_nullptr) */
     int is_enum;            /* an enumerated type: its underlying integer
                              * type in every other respect (ty_equal and
                              * the lowerings do not look), but GCC's
@@ -253,6 +256,8 @@ struct type *ty_scalar_struct_ret(struct type *t);
 struct type *ty_unqual(struct type *t);
 struct type *ty_atomic(struct type *t);
 struct type *ty_ptr(struct type *pointee);
+/* C23's nullptr_t: one node */
+struct type *ty_nullptr(void);
 struct type *ty_array(struct type *elem, int count);
 /* SysV x86-64: a struct that is exactly one long double (X87 + X87UP) —
  * returned in st0, where every other struct EmbCC returns goes through a

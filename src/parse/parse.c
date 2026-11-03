@@ -901,6 +901,10 @@ static const struct attr_entry attr_table[] = {
       "EmbCC does not eliminate repeated calls, so knowing a call could "
       "be eliminated buys nothing" },
     { "const",     ATTR_NOOP, "as pure: no calls are eliminated" },
+    /* C23's function-type attributes: their promises let a compiler
+     * merge calls, which EmbCC does not do for pure and const either */
+    { "unsequenced",  ATTR_NOOP, "as const: no calls are eliminated" },
+    { "reproducible", ATTR_NOOP, "as pure: no calls are eliminated" },
     { "malloc",    ATTR_NOOP,
       "it says the result aliases nothing, which only an alias analysis "
       "could use" },
@@ -4077,16 +4081,14 @@ static struct expr *parse_primary(struct parser *ps)
         advance(ps);
         return e;
     case TOK_KW_NULLPTR: {
-        /* C23 nullptr. Modelled as the null pointer constant `(void*)0`
-         * rather than as a distinct nullptr_t: everything a program
-         * does with it -- initialise a pointer, compare, pass -- is
-         * what a null pointer constant already does here, and the
-         * distinct type exists mainly for C++ overload resolution,
-         * which C has none of. */
+        /* C23 nullptr: a null pointer constant of its own type,
+         * nullptr_t -- lowered as `(void*)0`, which is all a program can
+         * do with it, but distinct to _Generic and typeof, and a
+         * nullptr_t object takes nothing but nullptr (C23 6.5.16.1) */
         struct expr *np = new_expr(EXPR_NUM, t->line, t->col);
         advance(ps);
         np->num = 0;
-        np->ty = ty_ptr(ty_base(TY_VOID, 0));
+        np->ty = ty_nullptr();
         return np;
     }
     case TOK_FNUM: {

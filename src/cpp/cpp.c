@@ -1160,7 +1160,7 @@ static int has_operator(const char *p, size_t n)
 {
     static const char *const ops[] = {
         "__has_include", "__has_include_next", "__has_builtin",
-        "__has_attribute", "__has_feature", "__has_extension",
+        "__has_attribute", "__has_feature", "__has_extension", "__has_embed",
     };
     for (size_t i = 0; i < sizeof ops / sizeof ops[0]; i++)
         if (strlen(ops[i]) == n && !memcmp(ops[i], p, n))
@@ -1249,6 +1249,8 @@ static int include_exists(struct src *s, const char *fname, int angle,
 
 /* At a feature-test operator's name (n chars at p): its value, the
  * cursor moved past its parenthesized operand. */
+static long eval_has_embed(struct src *s, const char *operand);
+
 static long eval_has(struct src *s, const char *p, size_t n,
                      const char **pp)
 {
@@ -1261,7 +1263,38 @@ static long eval_has(struct src *s, const char *p, size_t n,
     while (*q == ' ' || *q == '\t')
         q++;
     long v = 0;
-    if (n >= 13 && !memcmp(p, "__has_include", 13)) {
+    if (n == 11 && !memcmp(p, "__has_embed", 11)) {
+        /* the operand runs to the operator's own ')': the parameters'
+         * clauses have parentheses of their own */
+        const char *b = q;
+        int depth = 1;
+        while (*q && depth) {
+            if (*q == '"' || *q == '\'') {
+                char c = *q++;
+                while (*q && *q != c) {
+                    if (*q == '\\' && q[1])
+                        q++;
+                    q++;
+                }
+                if (*q)
+                    q++;
+                continue;
+            }
+            if (*q == '(')
+                depth++;
+            else if (*q == ')' && --depth == 0)
+                break;
+            q++;
+        }
+        if (*q != ')')
+            cerr(s, "malformed __has_embed", NULL);
+        size_t on = (size_t)(q - b);
+        char *operand = malloc(on + 1);
+        memcpy(operand, b, on);
+        operand[on] = 0;
+        v = eval_has_embed(s, operand);
+        free(operand);
+    } else if (n >= 13 && !memcmp(p, "__has_include", 13)) {
         int angle = *q == '<';
         if (!angle && *q != '"')
             cerr(s, "__has_include needs a header name", NULL);
@@ -1306,13 +1339,23 @@ static long eval_has(struct src *s, const char *p, size_t n,
             attr_name(b, an, name, sizeof name);
             v = gnu ? gnu_attribute(name) : cpp_attribute(name);
         } else if (n == 17 && !memcmp(p, "__has_c_attribute", 17)) {
-            /* Deliberately 0 for everything, and correct today: this
-             * asks about the C23 `[[...]]` form, which EmbCC's parser
-             * does not accept at all. When [[attr]] lands, this must
-             * answer from the same table that parses it -- answering
-             * yes before then would make a header write syntax the
-             * compiler rejects. */
-            v = 0;
+            /* C23's [[...]]: the standard attributes at the value C23
+             * gives each, and gnu:: ones as __has_attribute answers */
+            static const struct { const char *name; long v; } c23[] = {
+                { "deprecated", 201904 }, { "fallthrough", 201904 },
+                { "maybe_unused", 202106 }, { "nodiscard", 202003 },
+                { "noreturn", 202202 }, { "_Noreturn", 202202 },
+                { "unsequenced", 202207 }, { "reproducible", 202207 },
+            };
+            int gnu = (an > 5 && !memcmp(b, "gnu::", 5)) ||
+                      (an > 9 && !memcmp(b, "__gnu__::", 9));
+            attr_name(b, an, name, sizeof name);
+            if (gnu)
+                v = gnu_attribute(name);
+            else
+                for (size_t i = 0; i < sizeof c23 / sizeof c23[0]; i++)
+                    if (!strcmp(c23[i].name, name))
+                        v = c23[i].v;
         } else if ((n == 13 && !memcmp(p, "__has_feature", 13)) ||
                    (n == 15 && !memcmp(p, "__has_extension", 15))) {
             /* Clang's feature names. Only the ones EmbCC really has are
@@ -1794,71 +1837,273 @@ static int path_is_absolute(const char *f)
             (f[2] == '/' || f[2] == '\\'));
 }
 
-static void do_embed(struct src *s, const char *arg, struct tbuf *out)
-{
-    char fname[256];
-    char path[512];
-    const char *p = arg;
-    char *data = NULL;
-    long len = 0;
-    int angle;
+static long eval_if(struct src *s, const char *line);
 
+/* What an #embed directive or a __has_embed operand asks for: the
+ * resource, and the parameters. */
+struct embed_req {
+    char fname[256];
+    int angle;
+    long limit;                  /* -1: no limit() */
+    long offset;                 /* gnu::offset / clang::offset */
+    char *prefix, *suffix, *if_empty;   /* the tokens, or NULL */
+    int unknown;                 /* a parameter this compiler has not got */
+    int bad;                     /* malformed: the error is said */
+};
+
+static void embed_req_free(struct embed_req *r)
+{
+    free(r->prefix);
+    free(r->suffix);
+    free(r->if_empty);
+}
+
+/* The text of a parenthesized parameter clause at p (at its '('): a copy
+ * of what is inside, p moved past the ')'. NULL when it is unbalanced. */
+static char *embed_clause(const char **pp)
+{
+    const char *p = *pp;
+    if (*p != '(')
+        return NULL;
+    int depth = 0;
+    const char *b = p + 1;
+    for (; *p; p++) {
+        if (*p == '"' || *p == '\'') {
+            char q = *p++;
+            while (*p && *p != q) {
+                if (*p == '\\' && p[1])
+                    p++;
+                p++;
+            }
+            if (!*p)
+                return NULL;
+            continue;
+        }
+        if (*p == '(')
+            depth++;
+        else if (*p == ')' && --depth == 0)
+            break;
+    }
+    if (*p != ')')
+        return NULL;
+    size_t n = (size_t)(p - b);
+    char *c = malloc(n + 1);
+    memcpy(c, b, n);
+    c[n] = 0;
+    *pp = p + 1;
+    return c;
+}
+
+/* Parse an #embed's operand, or __has_embed's (in_has: stop at the
+ * operator's own ')', which is left for the caller). The operand is
+ * macro-replaced first when it does not start with a header name, as
+ * #include's is (C23 6.10.4.1). Returns where parsing stopped. */
+static const char *parse_embed(struct src *s, const char *arg, struct embed_req *r,
+                               int in_has, struct tbuf *expd)
+{
+    memset(r, 0, sizeof *r);
+    r->limit = -1;
+    const char *p = arg;
     while (*p == ' ' || *p == '\t')
         p++;
+    if (*p != '"' && *p != '<' && is_id0(*p)) {
+        /* (for __has_embed, the operand ends at the operator's ')': the
+         * caller has cut the text there) */
+        expand_text(s, p, expd);
+        paint_strip(expd);
+        p = expd->p ? expd->p : "";
+        while (*p == ' ' || *p == '\t')
+            p++;
+    }
     if (*p != '"' && *p != '<') {
         cerr(s, "#embed needs a file name", NULL);
-        return;
+        r->bad = 1;
+        return p;
     }
-    angle = *p == '<';
-    {
-        char close = angle ? '>' : '"';
-        size_t n = 0;
-        p++;
-        while (p[n] && p[n] != close && n < sizeof fname - 1)
-            n++;
-        if (p[n] != close) {
-            cerr(s, "malformed #embed", NULL);
-            return;
+    r->angle = *p == '<';
+    char close = r->angle ? '>' : '"';
+    size_t n = 0;
+    p++;
+    while (p[n] && p[n] != close && n < sizeof r->fname - 1)
+        n++;
+    if (p[n] != close) {
+        cerr(s, "malformed #embed", NULL);
+        r->bad = 1;
+        return p;
+    }
+    memcpy(r->fname, p, n);
+    r->fname[n] = 0;
+    p += n + 1;
+    for (;;) {
+        while (*p == ' ' || *p == '\t')
+            p++;
+        if (!*p || (in_has && *p == ')'))
+            break;
+        if (!is_id0(*p)) {
+            cerr(s, "malformed #embed parameter", NULL);
+            r->bad = 1;
+            return p;
         }
-        memcpy(fname, p, n);
-        fname[n] = 0;
-        p += n + 1;
+        /* the name, with a vendor prefix (gnu::offset) and the __x__
+         * spelling of each part reduced to x */
+        char name[64];
+        size_t k = 0;
+        for (int part = 0; part < 2; part++) {
+            const char *b = p;
+            while (is_idc(*p))
+                p++;
+            size_t pn = (size_t)(p - b);
+            if (pn > 4 && b[0] == '_' && b[1] == '_' && b[pn - 1] == '_' && b[pn - 2] == '_')
+                b += 2, pn -= 4;
+            if (k + pn + 3 >= sizeof name)
+                pn = 0;
+            memcpy(name + k, b, pn);
+            k += pn;
+            if (part == 0 && p[0] == ':' && p[1] == ':') {
+                memcpy(name + k, "::", 2);
+                k += 2;
+                p += 2;
+                continue;
+            }
+            break;
+        }
+        name[k] = 0;
+        while (*p == ' ' || *p == '\t')
+            p++;
+        char *clause = embed_clause(&p);
+        if (!clause) {
+            cerr(s, "#embed parameter '%s' needs a parenthesized argument", name);
+            r->bad = 1;
+            return p;
+        }
+        if (!strcmp(name, "limit") || !strcmp(name, "gnu::offset") ||
+            !strcmp(name, "clang::offset")) {
+            long v = eval_if(s, clause);
+            if (v < 0)
+                cerr(s, "#embed %s() is negative", name);
+            if (name[0] == 'l')
+                r->limit = v < 0 ? 0 : v;
+            else
+                r->offset = v < 0 ? 0 : v;
+            free(clause);
+        } else if (!strcmp(name, "prefix")) {
+            free(r->prefix);
+            r->prefix = clause;
+        } else if (!strcmp(name, "suffix")) {
+            free(r->suffix);
+            r->suffix = clause;
+        } else if (!strcmp(name, "if_empty")) {
+            free(r->if_empty);
+            r->if_empty = clause;
+        } else {
+            r->unknown = 1;
+            if (!in_has)
+                cerr(s, "#embed parameter '%s' is not one EmbCC has (limit, prefix, "
+                        "suffix, if_empty, gnu::offset)", name);
+            free(clause);
+        }
     }
-    while (*p == ' ' || *p == '\t')
-        p++;
-    if (*p)
-        cerr(s, "#embed parameters (limit, prefix, suffix, if_empty) are "
-                "not supported; ignoring one would embed the wrong bytes",
-             NULL);
+    return p;
+}
 
-    if (path_is_absolute(fname)) {
-        snprintf(path, sizeof path, "%s", fname);
-        data = read_file_or_null(path, &len);
-    } else if (!angle) {
+/* The resource, searched for as #include searches; NULL when absent. */
+static char *find_embed(struct src *s, const struct embed_req *r, long *len)
+{
+    char path[512];
+    char *data = NULL;
+    if (path_is_absolute(r->fname)) {
+        snprintf(path, sizeof path, "%s", r->fname);
+        return read_file_or_null(path, len);
+    }
+    if (!r->angle) {
         const char *slash = strrchr(s->file, '/');
         if (slash)
-            snprintf(path, sizeof path, "%.*s/%s",
-                     (int)(slash - s->file), s->file, fname);
+            snprintf(path, sizeof path, "%.*s/%s", (int)(slash - s->file), s->file,
+                     r->fname);
         else
-            snprintf(path, sizeof path, "%s", fname);
-        data = read_file_or_null(path, &len);
+            snprintf(path, sizeof path, "%s", r->fname);
+        data = read_file_or_null(path, len);
     }
-    for (int i = 0; !data && !path_is_absolute(fname) &&
-                    i < s->cpp->nincdirs; i++) {
-        snprintf(path, sizeof path, "%s/%s", s->cpp->incdirs[i], fname);
-        data = read_file_or_null(path, &len);
+    for (int i = 0; !data && i < s->cpp->nincdirs; i++) {
+        snprintf(path, sizeof path, "%s/%s", s->cpp->incdirs[i], r->fname);
+        data = read_file_or_null(path, len);
     }
-    if (!data) {
-        cerr(s, "cannot find the file to embed: \"%s\"", fname);
+    return data;
+}
+
+/* The bytes the parameters select: from offset, at most limit. */
+static void embed_window(const struct embed_req *r, long len, long *from, long *n)
+{
+    *from = r->offset < len ? r->offset : len;
+    *n = len - *from;
+    if (r->limit >= 0 && *n > r->limit)
+        *n = r->limit;
+}
+
+/* __has_embed's value: __STDC_EMBED_NOT_FOUND__ (0), _FOUND__ (1) or
+ * _EMPTY__ (2); 0 too for a parameter this compiler has not got, which
+ * is how a program asks whether it may use one. */
+static long eval_has_embed(struct src *s, const char *operand)
+{
+    struct embed_req r;
+    struct tbuf expd = { 0, 0, 0 };
+    parse_embed(s, operand, &r, 1, &expd);
+    free(expd.p);
+    long v = 0;
+    if (!r.bad && !r.unknown) {
+        long len = 0;
+        char *data = find_embed(s, &r, &len);
+        if (data) {
+            long from, n;
+            embed_window(&r, len, &from, &n);
+            v = n ? 1 : 2;
+            free(data);
+        }
+    }
+    embed_req_free(&r);
+    return v;
+}
+
+static void do_embed(struct src *s, const char *arg, struct tbuf *out)
+{
+    struct embed_req r;
+    struct tbuf expd = { 0, 0, 0 };
+    parse_embed(s, arg, &r, 0, &expd);
+    free(expd.p);
+    if (r.bad || r.unknown) {
+        embed_req_free(&r);
         return;
     }
-    for (long i = 0; i < len; i++) {
-        char num[8];
-        int k = snprintf(num, sizeof num, "%s%u", i ? "," : "",
-                         (unsigned)(unsigned char)data[i]);
-        tb_putn(out, num, (size_t)k);
+    long len = 0;
+    char *data = find_embed(s, &r, &len);
+    if (!data) {
+        cerr(s, "cannot find the file to embed: \"%s\"", r.fname);
+        embed_req_free(&r);
+        return;
+    }
+    long from, n;
+    embed_window(&r, len, &from, &n);
+    if (!n) {
+        if (r.if_empty)
+            tb_putn(out, r.if_empty, strlen(r.if_empty));
+    } else {
+        if (r.prefix) {
+            tb_putn(out, r.prefix, strlen(r.prefix));
+            tb_putc(out, ' ');
+        }
+        for (long i = 0; i < n; i++) {
+            char num[8];
+            int k = snprintf(num, sizeof num, "%s%u", i ? "," : "",
+                             (unsigned)(unsigned char)data[from + i]);
+            tb_putn(out, num, (size_t)k);
+        }
+        if (r.suffix) {
+            tb_putc(out, ' ');
+            tb_putn(out, r.suffix, strlen(r.suffix));
+        }
     }
     free(data);
+    embed_req_free(&r);
 }
 
 static void do_include(struct src *s, const char *arg, struct tbuf *out,
@@ -2979,6 +3224,11 @@ char *cpp_process(const char *path, const char *src,
         define_macro(&boot, "__GNUC_STDC_INLINE__ 1");
     }
     define_macro(&boot, "__STDC_HOSTED__ 1");
+    /* __has_embed's three answers (C23 6.10.1), in C++ too, as GCC and
+     * Clang give #embed to both */
+    define_macro(&boot, "__STDC_EMBED_NOT_FOUND__ 0");
+    define_macro(&boot, "__STDC_EMBED_FOUND__ 1");
+    define_macro(&boot, "__STDC_EMBED_EMPTY__ 2");
     if (predef_is_cxx()) {
         /* the C++ features EmbCC implements (docs/manual/cxx.md): each one
          * from the standard g++ first defines it in, at the value g++
