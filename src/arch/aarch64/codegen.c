@@ -2840,6 +2840,21 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
              * the exception elsewhere. */
             struct gsite hi = {0}, lo = {0};
             int d = wr(i->dst, A64_ACC);      /* the home, as STRADDR */
+            if (i->glob->is_tls && target_os_get() == TGT_OS_DARWIN) {
+                /* Darwin: the DESCRIPTOR's address, through the slot ld
+                 * makes for it (TLVP); irgen calls its thunk, which
+                 * answers this thread's copy (tlv_call) */
+                hi.patch_off = a64_adrp(t, d);
+                hi.glob = i->glob;
+                hi.kind = RK_TLVP_PAGE;
+                PUSH(st->g, st->ng, st->capg, hi);
+                lo.patch_off = t->len;
+                a64_ldr(t, d, d, 0, 8, 0, 8);
+                lo.glob = i->glob;
+                lo.kind = RK_TLVP_LO12;
+                PUSH(st->g, st->ng, st->capg, lo);
+                goto gaddr_done;
+            }
             if (i->glob->is_tls) {
                 /* Not an address in this image: an offset into a block
                  * that is different for every thread. adrp names a page

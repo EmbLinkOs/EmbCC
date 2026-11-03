@@ -7303,6 +7303,11 @@ static void lower_static_bytes(struct unit *u, int line, int size,
         int addr_slot = v[k].ty->kind == TY_PTR ||
                         (ty_is_integer(v[k].ty) && !v[k].bit_width &&
                          ty_size(v[k].ty) == target_ptr_size());
+        if (gt && gt->is_tls)
+            /* each thread has its own: no one address for the linker to
+             * write, as GCC and Clang say too */
+            sema_error_line(u, line, "the address of the thread-local '%s' is not a "
+                            "constant: each thread has its own", gt->name);
         if ((core && core->kind == EXPR_STR && addr_slot) ||
             ((gt || ft) && addr_slot)) {
             /* a pointer slot: zero bytes stay, the linker writes the address

@@ -3782,19 +3782,16 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                            "references is not supported for a Darwin "
                            "target yet: its bytes would be emitted but "
                            "its symbols and relocations dropped");
-        /* Mach-O has no .tdata/.tbss and no PT_TLS. Its thread-locals
-         * go through __thread_vars descriptors and a call to
-         * tlv_get_addr, which is a different mechanism rather than a
-         * different spelling -- and this writer emits none of it, so a
-         * __thread object silently DISAPPEARED from the output
-         * entirely. Refused by name instead. */
+        /* Mach-O has no .tdata/.tbss and no PT_TLS: a thread-local's
+         * symbol names a DESCRIPTOR in __thread_vars -- the thunk
+         * __tlv_bootstrap, a key, and where its first value is -- and the
+         * values are in __thread_data and __thread_bss under a local
+         * NAME$tlv$init. Code loads the descriptor (TLVP) and calls its
+         * thunk (irgen's tlv_call). */
+        int ntlv = 0;
         for (struct global *g = u->globals; g; g = g->next)
-            if (!g->absorbed && g->is_tls)
-                diag_fatal(g->file, g->line,
-                           "__thread is not supported for a Darwin target "
-                           "yet: Mach-O addresses a thread-local through "
-                           "a __thread_vars descriptor, which this writer "
-                           "does not emit");
+            if (!g->absorbed && g->defined && g->is_tls)
+                ntlv++;
         /* Mach-O gathers these from __DATA,__mod_init_func rather than
          * from an SHT_INIT_ARRAY section, and this writer emits no such
          * section. Dropping them would give back exactly the silent
@@ -3828,9 +3825,11 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                            ? g->relocs[i].addend
                            : g->relocs[i].str_off + g->relocs[i].addend;
                 long at = g->off + g->relocs[i].off;
-                if (!data || at < 0 || at + 8 > data_len)
+                char *img = g->is_tls ? tdata : data;      /* its first value */
+                long img_len = g->is_tls ? tdata_len : data_len;
+                if (!img || at < 0 || at + 8 > img_len)
                     continue;
-                unsigned char *d = (unsigned char *)data + at;
+                unsigned char *d = (unsigned char *)img + at;
                 for (int b = 0; b < 8; b++)
                     d[b] = (unsigned char)((unsigned long long)add >> (b * 8));
             }
@@ -3878,6 +3877,24 @@ static int compile_unit(const char *in, const char *out, int pp_only)
             m_bss = machow_add_section(mw, "__DATA", "__bss", S_ZEROFILL,
                                        NULL, (unsigned long long)bss_len,
                                        log2_align(bss_align));
+        int m_tdata = 0, m_tbss = 0, m_tv = 0;
+        if (tdata_len)
+            m_tdata = machow_add_section(mw, "__DATA", "__thread_data",
+                                         0x11 /* S_THREAD_LOCAL_REGULAR */, tdata,
+                                         (unsigned long long)tdata_len,
+                                         log2_align(tdata_align));
+        if (tbss_len)
+            m_tbss = machow_add_section(mw, "__DATA", "__thread_bss",
+                                        0x12 /* S_THREAD_LOCAL_ZEROFILL */, NULL,
+                                        (unsigned long long)tbss_len,
+                                        log2_align(tbss_align));
+        if (ntlv) {
+            unsigned char *tv = xcalloc((size_t)ntlv, 24);
+            m_tv = machow_add_section(mw, "__DATA", "__thread_vars",
+                                      0x13 /* S_THREAD_LOCAL_VARIABLES */, tv,
+                                      (unsigned long long)ntlv * 24, 3);
+            free(tv);
+        }
         for (int k = 0; k < nnamed; k++)
             named[k].ndx = machow_add_section(
                 mw, "__DATA", named[k].name,
@@ -3950,12 +3967,38 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                 f->sym_ndx = machow_add_symbol(mw, f->name,
                                                (unsigned long long)f->code_off,
                                                m_text, 0);
-        for (struct global *g = u->globals; g; g = g->next)
-            if (!g->absorbed && g->defined && g->is_static)
-                g->sym_ndx = machow_add_symbol(
-                    mw, g->name, (unsigned long long)g->off,
-                    g->named ? named[g->named - 1].ndx
-                             : g->in_bss ? m_bss : m_data, 0);
+        /* a thread-local's first value, and its descriptor's index */
+        int *tlv_init = ntlv ? xcalloc((size_t)ntlv, sizeof *tlv_init) : NULL;
+        {
+            int k = 0;
+            for (struct global *g = u->globals; g; g = g->next) {
+                if (g->absorbed || !g->defined || !g->is_tls)
+                    continue;
+                char nm[512];
+                snprintf(nm, sizeof nm, "%s$tlv$init", g->name);
+                tlv_init[k++] = machow_add_symbol(mw, nm, (unsigned long long)g->off,
+                                                  g->in_bss ? m_tbss : m_tdata, 0);
+            }
+        }
+        {
+            int k = 0;
+            for (struct global *g = u->globals; g; g = g->next) {
+                if (g->absorbed || !g->defined)
+                    continue;
+                if (g->is_tls) {
+                    if (g->is_static)
+                        g->sym_ndx = machow_add_symbol(mw, g->name,
+                                                       (unsigned long long)k * 24, m_tv, 0);
+                    k++;
+                    continue;
+                }
+                if (g->is_static)
+                    g->sym_ndx = machow_add_symbol(
+                        mw, g->name, (unsigned long long)g->off,
+                        g->named ? named[g->named - 1].ndx
+                                 : g->in_bss ? m_bss : m_data, 0);
+            }
+        }
 
         /* ---- 4. defined externals ------------------------------------ */
         for (struct func *f = u->funcs; f; f = f->next)
@@ -3963,13 +4006,27 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                 f->sym_ndx = (f->is_weak ? machow_add_symbol_weak
                                          : machow_add_symbol)(
                     mw, f->name, (unsigned long long)f->code_off, m_text, 1);
-        for (struct global *g = u->globals; g; g = g->next)
-            if (!g->absorbed && g->defined && !g->is_static)
-                g->sym_ndx = (g->is_weak ? machow_add_symbol_weak
-                                         : machow_add_symbol)(
-                    mw, g->name, (unsigned long long)g->off,
-                    g->named ? named[g->named - 1].ndx
-                             : g->in_bss ? m_bss : m_data, 1);
+        {
+            int k = 0;
+            for (struct global *g = u->globals; g; g = g->next) {
+                if (g->absorbed || !g->defined)
+                    continue;
+                if (g->is_tls) {
+                    if (!g->is_static)
+                        g->sym_ndx = (g->is_weak ? machow_add_symbol_weak
+                                                 : machow_add_symbol)(
+                            mw, g->name, (unsigned long long)k * 24, m_tv, 1);
+                    k++;
+                    continue;
+                }
+                if (!g->is_static)
+                    g->sym_ndx = (g->is_weak ? machow_add_symbol_weak
+                                             : machow_add_symbol)(
+                        mw, g->name, (unsigned long long)g->off,
+                        g->named ? named[g->named - 1].ndx
+                                 : g->in_bss ? m_bss : m_data, 1);
+            }
+        }
 
         /* ---- 5. undefined, all of them, before any relocation --------
          * Created up front rather than lazily where each is first
@@ -4003,6 +4060,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                         mw, ft->name, 0, 0, 1);
             }
         }
+        int tlv_boot = ntlv ? machow_add_symbol(mw, "_tlv_bootstrap", 0, 0, 1) : 0;
         int pers = 0;
         if (ncu)
             for (long k = 0; k < ncu; k++)
@@ -4074,12 +4132,23 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                     continue;
                 mt = target_macho_reloc(ta, RK_ABS64, &mpc, &mlen);
                 machow_add_reloc(mw,
-                                 g->named ? named[g->named - 1].ndx : m_data,
+                                 g->is_tls ? m_tdata
+                                 : g->named ? named[g->named - 1].ndx : m_data,
                                  (unsigned long long)(g->off +
                                                       g->relocs[i].off),
                                  sym, mt - 1, mpc, mlen, 0);
             }
         }
+
+        /* each descriptor: the thunk, then (after the key ld leaves
+         * zero) its first value */
+        for (int k = 0; k < ntlv; k++) {
+            int uns = ta == TARGET_AARCH64 ? ARM64_RELOC_UNSIGNED : X86_64_RELOC_UNSIGNED;
+            machow_add_reloc(mw, m_tv, (unsigned long long)k * 24, tlv_boot, uns, 0, 3, 0);
+            machow_add_reloc(mw, m_tv, (unsigned long long)k * 24 + 16, tlv_init[k], uns,
+                             0, 3, 0);
+        }
+        free(tlv_init);
 
         if (ncu) {
             for (long k = 0; k < ncu; k++) {

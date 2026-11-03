@@ -1098,6 +1098,17 @@ int x86_lea_reg_rip(struct code *c, int reg)
     return off;
 }
 
+/* movq disp32(%rip), reg: the disp32's offset (Darwin's TLVP load) */
+int x86_mov_reg_rip(struct code *c, int reg)
+{
+    code_byte(c, 0x48 | ((reg & 8) ? 4 : 0));    /* REX.W (+REX.R) */
+    code_byte(c, 0x8b);
+    code_byte(c, 0x05 | ((reg & 7) << 3));        /* mod=00 reg rm=101 = RIP */
+    int off = c->len;
+    code_u32(c, 0);
+    return off;
+}
+
 /* ---- local-exec thread-local storage -------------------------------------
  *
  * Two instructions. The first asks the CPU where THIS thread's block

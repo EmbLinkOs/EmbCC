@@ -105,8 +105,14 @@ static int fn_internal(const struct cfunc *f)
 
 static const char *fn_name(struct cfunc *f, int variant)
 {
-    if (f->asm_name)
-        return f->asm_name;
+    /* an asm label names the SYMBOL, which the C side must not prefix
+     * again (Darwin's underscore, glibc's and the SDK's `__asm("_x")`):
+     * a C name of its own, declared with the label (emit_fdecl) */
+    if (f->asm_name) {
+        if (!f->asm_cname)
+            f->asm_cname = cx_fmt("__cx_al%d", cx_uid());
+        return f->asm_cname;
+    }
     if (f->c_linkage)
         return f->name;
     if (f->local_inst || (f->cls && (f->cls->local || f->cls->anon))) {
@@ -285,10 +291,15 @@ static struct sb out_types, out_decls, out_vars, out_code, out_init;
 static struct sb out_rettypes;       /* typedefs of functions' return types */
 static struct sb out_rtti;      /* typeinfo objects */
 static struct sb out_vtables;
+static struct sb out_thunks;
 static struct cfunc **work;
 static int nwork, capwork;
 static struct cfunc *cur_fn;
-static int need_atexit, need_guard;
+static int need_atexit, need_guard, need_thread_atexit;
+struct cvar;
+static int tls_wrapped(struct cvar *v);
+static const char *tls_name(struct cvar *v, char which);
+static void tls_wrapper(struct cvar *v);
 
 static void need_fn(struct cfunc *f)
 {
@@ -1572,6 +1583,12 @@ static char *elv(struct cexpr *e)
         return cx_fmt("(*(%s)__cx_c)", ctype(ct_ptr(e->t)));
     case E_VAR:
         need_var(e->var);
+        if (tls_wrapped(e->var)) {
+            /* each thread's copy, made on its first use (tls_wrapper) */
+            tls_wrapper(e->var);
+            return cx_fmt("(*(%s)%s())", ctype(ct_ptr(e->var->type)),
+                          tls_name(e->var, 'W'));
+        }
         if (var_is_ptr(e->var))
             return cx_fmt("(*%s)", e->var->cname);
         return (char *)e->var->cname;
@@ -2567,19 +2584,38 @@ static void emit_local_static(struct sb *b, struct cstmt *s)
     char *dtor = destroy_text(cx_fmt("&%s", v->cname), t);
     const char *init_c = !dyn && ini ? cx_fmt(" = %s", cinit_text(t, ini))
                                      : "";
+    /* a block-scope thread_local is one object per thread, and so is its
+     * guard: no other thread can race for it, so no __cxa_guard */
+    const char *tl = v->is_tls ? "__thread " : "";
     if (shared) {
-        sb_printf(&out_vars, "__attribute__((weak)) %s%s;\n",
+        sb_printf(&out_vars, "__attribute__((weak)) %s%s%s;\n", tl,
                   cdecl(t, v->cname), init_c);
         if (dyn || dtor)
-            sb_printf(&out_vars, "__attribute__((weak)) %s %s;\n",
-                      guard_ctype(), guard);
+            sb_printf(&out_vars, "__attribute__((weak)) %s%s %s;\n", tl,
+                      v->is_tls ? "char" : guard_ctype(), guard);
     } else {
-        sb_printf(b, "static %s%s;\n", cdecl(t, v->cname), init_c);
+        sb_printf(b, "static %s%s%s;\n", tl, cdecl(t, v->cname), init_c);
         if (dyn || dtor)
-            sb_printf(b, "static %s %s;\n", guard_ctype(), guard);
+            sb_printf(b, "static %s%s %s;\n", tl,
+                      v->is_tls ? "char" : guard_ctype(), guard);
     }
     if (!dyn && !dtor)
         return;
+    if (v->is_tls) {
+        sb_printf(b, "if (!%s) {\n%s = 1;\n", guard, guard);
+        if (dyn)
+            stmt_init(b, v->cname, t, ini);
+        if (dtor) {
+            struct cfunc *d = class_dtor((t->k == CT_ARRAY ? t->to : t)->cls);
+            if (t->k == CT_CLASS && d) {
+                need_thread_atexit = 1;
+                sb_printf(b, "__cxa_thread_atexit((void (*)(void *))%s, &%s, "
+                             "&__dso_handle);\n", fn_name(d, 1), v->cname);
+            }
+        }
+        sb_put(b, "}\n");
+        return;
+    }
     need_guard = 1;
     sb_printf(b, "if (%s && __cxa_guard_acquire(&%s)) {\n", guard_unset(guard),
               guard);
@@ -3198,8 +3234,11 @@ static void emit_prototype(struct cfunc *f)
                       func_header(f, fn_name(f, 0), 0));
         return;
     }
-    sb_printf(&out_decls, "%s%s%s%s;\n", st, sec, fmt,
+    sb_printf(&out_decls, "%s%s%s%s", st, sec, fmt,
               func_header(f, fn_name(f, 1), 0));
+    if (f->asm_name)
+        sb_printf(&out_decls, " __asm__(\"%s\")", f->asm_name);
+    sb_put(&out_decls, ";\n");
 }
 
 /* The i-th direct base subobject of *this, as a C lvalue. */
@@ -3710,6 +3749,79 @@ static void emit_function(struct cfunc *f)
 
 /* ---- variables ---- */
 
+/* A namespace-scope thread_local whose initialization or destruction runs
+ * code: each thread's copy is made the first time that thread uses it, so
+ * every use goes through its Itanium wrapper, _ZTW<name>, which runs the
+ * init function _ZTH<name> -- guarded per thread -- and answers the
+ * thread's object; the destructor is registered with __cxa_thread_atexit.
+ * g++'s names, so a use in one compiler's object reaches a definition in
+ * the other's. An extern one of class type may be such an object, so it
+ * is reached the same way, through a weak wrapper. */
+static int tls_wrapped(struct cvar *v)
+{
+    if (!v->is_tls || v->is_local)
+        return 0;
+    struct cty *t = v->type, *e = t;
+    while (e->k == CT_ARRAY)
+        e = e->to;
+    int dtor = e->k == CT_CLASS && class_dtor(e->cls) != NULL;
+    if (!v->defined)
+        return e->k == CT_CLASS;
+    return need_guard_init(v) || dtor;
+}
+
+static const char *tls_name(struct cvar *v, char which)
+{
+    const char *n = v->cname;
+    if (!strncmp(n, "_Z", 2))
+        return cx_fmt("_ZT%c%s", which, n + 2);
+    return cx_fmt("_ZT%c%d%s", which, (int)strlen(n), n);
+}
+
+/* the wrapper, and for a defined object the init function, once */
+static void tls_wrapper(struct cvar *v)
+{
+    if (v->tls_wrapper_done)
+        return;
+    v->tls_wrapper_done = 1;
+    const char *W = tls_name(v, 'W'), *H = tls_name(v, 'H');
+    sb_printf(&out_decls, "void *%s(void);\n", W);
+    if (!v->defined) {
+        sb_printf(&out_decls, "extern void %s(void) __attribute__((weak));\n", H);
+        sb_printf(&out_thunks, "__attribute__((weak)) void *%s(void)\n{\nif (%s)\n%s();\n"
+                               "return &%s;\n}\n", W, H, H, v->cname);
+        return;
+    }
+    struct cty *t = v->type;
+    struct cexpr *ini = ct_is_ref(t) || !(t->k == CT_CLASS ||
+                                          t->k == CT_ARRAY) ? v->init
+                                                            : v->ctor;
+    int dyn = need_guard_init(v);
+    const char *g = cx_fmt("__cx_tlsg_%s", v->cname);
+    sb_printf(&out_decls, "void %s(void);\n", H);
+    struct sb b = { 0, 0, 0 };
+    sb_printf(&b, "static __thread char %s;\n", g);
+    sb_printf(&b, "void %s(void)\n{\nif (%s)\nreturn;\n%s = 1;\n", H, g, g);
+    if (dyn && ini)
+        stmt_init(&b, v->cname, t, ini);
+    if (t->k == CT_CLASS) {
+        struct cfunc *d = class_dtor(t->cls);
+        if (d) {
+            need_fn(d);
+            need_thread_atexit = 1;
+            sb_printf(&b, "__cxa_thread_atexit((void (*)(void *))%s, &%s, &__dso_handle);\n",
+                      fn_name(d, 1), v->cname);
+        }
+    } else if (t->k == CT_ARRAY && destroy_text(cx_fmt("&%s", v->cname), t)) {
+        cx_error(NULL, "a namespace-scope thread_local array of objects with "
+                       "destructors is not supported yet");
+    }
+    sb_put(&b, "}\n");
+    sb_printf(&b, "__attribute__((weak)) void *%s(void)\n{\n%s();\nreturn &%s;\n}\n",
+              W, H, v->cname);
+    sb_put(&out_thunks, sb_str(&b));
+}
+
 static void emit_gvar(struct cvar *v)
 {
     v->emitted = 1;
@@ -3742,6 +3854,10 @@ static void emit_gvar(struct cvar *v)
     else
         sb_printf(&out_vars, "%s%s%s%s;\n", st, tls, cdecl(t, v->cname),
                   sb_str(&attrs));
+    if (tls_wrapped(v)) {
+        tls_wrapper(v);             /* per thread, on first use */
+        return;
+    }
     /* an object every unit defines (an inline variable, a template's
      * static member): initialized by the first unit to get there, as its
      * guard variable says — Itanium's, so g++'s objects agree */
@@ -4145,7 +4261,6 @@ static void emit_rtti(struct cclass *c)
     sb_put(&out_rtti, " };\n");
 }
 
-static struct sb out_thunks;
 
 /* The thunks written so far in this unit (one definition each). */
 static const char **thunks_done;
@@ -4422,6 +4537,9 @@ char *cx_emit_unit(void)
             sb_printf(&out, " __attribute__((aligned(%ld)))", c->align_attr);
         sb_put(&out, ";\n");
     }
+    if (need_thread_atexit)
+        sb_put(&out, "extern void *__dso_handle;\n"
+                     "int __cxa_thread_atexit(void (*)(void *), void *, void *);\n");
     if (need_atexit || need_guard || out_init.len)
         sb_put(&out, cx_arm32_abi()
                      ? "extern void *__dso_handle;\n"

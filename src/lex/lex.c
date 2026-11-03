@@ -167,6 +167,8 @@ static const struct {
     { "co_await", TOK_CX_CO_AWAIT }, { "co_yield", TOK_CX_CO_YIELD },
     { "co_return", TOK_CX_CO_RETURN }, { "export", TOK_CX_EXPORT },
     { "thread_local", TOK_CX_THREAD_LOCAL }, { "register", TOK_CX_REGISTER },
+    /* GNU's spelling, which g++ takes in C++ as thread_local */
+    { "__thread", TOK_CX_THREAD_LOCAL },
     { "static_assert", TOK_KW_STATIC_ASSERT }, { "alignof", TOK_KW_ALIGNOF },
     { "alignas", TOK_KW_ALIGNAS }, { "__restrict", TOK_KW_RESTRICT },
     { "__restrict__", TOK_KW_RESTRICT },

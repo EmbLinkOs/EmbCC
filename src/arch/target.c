@@ -1446,6 +1446,8 @@ int target_macho_reloc(enum target_arch a, enum reloc_kind k,
         case RK_CALL:     t = ARM64_RELOC_BRANCH26;  pc = 1; break;
         case RK_ADR_HI21: t = ARM64_RELOC_PAGE21;    pc = 1; break;
         case RK_ADD_LO12: t = ARM64_RELOC_PAGEOFF12; pc = 0; break;
+        case RK_TLVP_PAGE: t = 8 /* ARM64_RELOC_TLVP_LOAD_PAGE21 */;    pc = 1; break;
+        case RK_TLVP_LO12: t = 9 /* ARM64_RELOC_TLVP_LOAD_PAGEOFF12 */; pc = 0; break;
         case RK_GOT_PAGE: t = ARM64_RELOC_GOT_LOAD_PAGE21;    pc = 1; break;
         case RK_GOT_LO12: t = ARM64_RELOC_GOT_LOAD_PAGEOFF12; pc = 0; break;
         case RK_ABS64:    t = ARM64_RELOC_UNSIGNED; pc = 0; len = 3; break;
@@ -1461,6 +1463,7 @@ int target_macho_reloc(enum target_arch a, enum reloc_kind k,
         switch (k) {
         case RK_CALL:    t = X86_64_RELOC_BRANCH;   pc = 1; break;
         case RK_PCREL32: t = X86_64_RELOC_SIGNED;   pc = 1; break;
+        case RK_TLVP:    t = 9 /* X86_64_RELOC_TLV */; pc = 1; break;
         case RK_ABS64:   t = X86_64_RELOC_UNSIGNED; pc = 0; len = 3; break;
         case RK_ABS32:   t = X86_64_RELOC_UNSIGNED; pc = 0; break;
         default: return 0;

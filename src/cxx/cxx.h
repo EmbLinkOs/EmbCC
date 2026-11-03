@@ -233,6 +233,7 @@ struct cvar {
     /* thread_local: one object per thread. Lowered to C's __thread,
      * which is the same storage under the other language's name. */
     int is_tls;
+    int tls_wrapper_done;     /* its _ZTW wrapper (and _ZTH) is emitted */
     int is_member_static;     /* a static data member */
     int explicit_spec;        /* a static member of an instance given its
                                * own (template<> T A<X>::m ...;): not the
@@ -668,6 +669,7 @@ struct cfunc {
     int fmt_kind, fmt_idx, fmt_first;
     const char *section;
     const char *asm_name;     /* `__asm__("name")`: the symbol instead */
+    const char *asm_cname;    /* the C name it has in the lowered C (fn_name) */
     const char **abi_tags;    /* __abi_tag__("...") (sorted) */
     int nabi_tags;
     int access;

@@ -466,6 +466,8 @@ static void emit_stvar(struct ir_func *fn, int v, int val,
     emit_stvar_slot(fn, v, val, t);
 }
 
+static int tlv_call(struct ir_func *fn, int desc);
+
 static int emit_gaddr(struct ir_func *fn, struct global *g)
 {
     struct ir_ins *i = emit(fn);
@@ -473,6 +475,10 @@ static int emit_gaddr(struct ir_func *fn, struct global *g)
     i->glob = g;
     i->glob_sym = ir_sym_global(cur_unit, g);
     i->dst = new_temp(fn);
+    /* Darwin's thread-locals: that was the descriptor's address, and its
+     * first word the thunk that gives this thread's copy */
+    if (g->is_tls && target_os_get() == TGT_OS_DARWIN)
+        return tlv_call(fn, i->dst);
     return i->dst;
 }
 
@@ -2152,6 +2158,36 @@ static int libatomic_call(struct ir_func *fn, const char *name,
         e.args[k] = &a[k];
     }
     return emit_call(fn, &e, vals, -1);
+}
+
+/* desc->thunk(desc): a Darwin thread-local's address, as an indirect call
+ * (the thunk keeps more registers than a call need, which is safe) */
+static int tlv_call(struct ir_func *fn, int desc)
+{
+    struct type *vp = ty_ptr(ty_base(TY_VOID, 0));
+    static struct type *ft, *fpt;
+    if (!ft) {
+        struct type *p[1] = { vp };
+        ft = ty_func(vp, p, 1, 0);
+        fpt = ty_ptr(ft);
+    }
+    int thunk = emit_load(fn, desc, fpt);
+    struct expr e, callee, a0, *av[1];
+    memset(&e, 0, sizeof e);
+    memset(&callee, 0, sizeof callee);
+    memset(&a0, 0, sizeof a0);
+    callee.kind = EXPR_VAR;
+    callee.ty = fpt;
+    a0.kind = EXPR_NUM;
+    a0.ty = vp;
+    av[0] = &a0;
+    e.kind = EXPR_CALL;
+    e.ty = vp;
+    e.lhs = &callee;
+    e.args = av;
+    e.nargs = 1;
+    int vals[1] = { desc };
+    return emit_call(fn, &e, vals, thunk);
 }
 
 /* ---- _BitInt wider than 64 bits --------------------------------------------

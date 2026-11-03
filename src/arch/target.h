@@ -707,6 +707,9 @@ enum reloc_kind {
     RK_ABS32,     /* an absolute 32-bit field (DWARF section offsets) */
     RK_DATA_PREL32, /* a 32-bit field holding target - its own address
                    * (unwind tables' pointers) */
+    RK_TLVP_PAGE, /* Darwin aarch64: adrp to a thread-local's descriptor slot */
+    RK_TLVP_LO12, /* ... and the paired ldr of the descriptor's address */
+    RK_TLVP,      /* Darwin x86-64: movq sym@TLVP(%rip), reg -- the same */
     RK_GOT_PAGE,  /* aarch64: adrp to the page of the symbol's GOT slot */
     RK_GOT_LO12,  /* aarch64: the paired ldr's offset in that page — a
                    * weak symbol's address (0 when it is undefined, which

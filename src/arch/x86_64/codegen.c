@@ -4304,7 +4304,12 @@ static void gen_func(struct ir_func *fn, struct code *text,
         case IR_GADDR: {
             int D = in_reg(i->dst);
             struct gsite gs = {0};
-            if (i->glob->is_tls) {
+            if (i->glob->is_tls && target_os_get() == TGT_OS_DARWIN) {
+                /* Darwin: the descriptor's address, loaded through the
+                 * slot ld makes (TLVP); irgen calls its thunk */
+                gs.patch_off = x86_mov_reg_rip(text, D ? g_loc[i->dst] : 0);
+                gs.kind = RK_TLVP;
+            } else if (i->glob->is_tls) {
                 /* Not an address in this image: an offset into a block
                  * that is different for every thread. So the thread
                  * pointer is read first and the offset added to it,
