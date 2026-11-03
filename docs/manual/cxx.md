@@ -453,7 +453,7 @@ refuses it, with the diagnostic shown. Diagnostics are quoted without the
 | Lambdas | Supported | Captures by copy, by reference, `this`, capture defaults; conversion of a captureless lambda to a function pointer. |
 | Range-based `for` | Supported | Over arrays, `begin`/`end` members or functions found by ADL, and braced lists. |
 | `constexpr` | Supported | See [Constant evaluation](#constant-evaluation). |
-| `std::initializer_list`, list-initialization | Partial | Needs `<initializer_list>`; without it: `std::initializer_list is not declared (#include <initializer_list>)`. An initializer on array `new`: `an initializer for new[] is not supported yet`. Narrowing conversions are not diagnosed. |
+| `std::initializer_list`, list-initialization | Partial | Needs `<initializer_list>`; without it: `std::initializer_list is not declared (#include <initializer_list>)`. Array `new` takes a list (`new T[n]{a, b}`, `new T[]{a, b}`, C++20's `new T[n](a, b)`): the leading elements from it, with brace elision, the rest value-initialized; a run-time bound shorter than the list throws `std::bad_array_new_length` (traps without exceptions). Narrowing conversions are not diagnosed. |
 | `enum class`, fixed underlying types, opaque enum declarations | Supported | |
 | `static_assert` | Supported | `static assertion failed: MESSAGE` |
 | `nullptr`, `std::nullptr_t` | Supported | |

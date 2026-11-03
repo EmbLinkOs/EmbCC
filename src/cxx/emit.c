@@ -342,6 +342,7 @@ static char *dealloc_rest(struct cfunc *fn, const char *size, long align);
 
 static int any_vtable;
 static int need_dyncast;
+static int need_badlen;        /* __cxa_throw_bad_array_new_length */
 static const char *typeinfo_sym(struct cty *t);
 static const char *ptr_typeinfo(struct cty *t);
 
@@ -1217,9 +1218,20 @@ static char *new_text(struct cexpr *e)
     }
     /* new T[n]: [cookie holding n] then the elements */
     char *n = cx_fmt("__cx_n%d", u), *m = cx_fmt("__cx_m%d", u);
-    sb_printf(&b, "({ __cx_size_t %s = %s; char *%s = (char *)%s(%s * "
-                  "%ldUL + %ldUL", n, ev(e->count), m, fn_name(e->fn, 1), n,
-              ct_size(el), e->cookie);
+    sb_printf(&b, "({ __cx_size_t %s = %s; ", n, ev(e->count));
+    long cn;
+    if (e->nelems && !(e->count && expr_const(e->count, &cn))) {
+        /* a run-time bound under the list's length: before allocating */
+        if (eh_on) {
+            need_badlen = 1;
+            sb_printf(&b, "if (%s < %dUL) __cxa_throw_bad_array_new_length(); ",
+                      n, e->nelems);
+        } else {
+            sb_printf(&b, "if (%s < %dUL) __builtin_trap(); ", n, e->nelems);
+        }
+    }
+    sb_printf(&b, "char *%s = (char *)%s(%s * %ldUL + %ldUL", m,
+              fn_name(e->fn, 1), n, ct_size(el), e->cookie);
     for (int i = 1; i < e->na; i++)
         sb_printf(&b, ", %s", ev(e->a[i]));
     sb_put(&b, "); ");
@@ -1232,10 +1244,45 @@ static char *new_text(struct cexpr *e)
                   e->cookie - (long)cx_ptr_size(), n);
     sb_printf(&b, "%s = (%s)(%s + %ldUL); ", cdecl(pt, p), ctype(pt), m,
               e->cookie);
-    if (e->init)
-        sb_printf(&b, "for (__cx_size_t __cx_i%d = 0; __cx_i%d < %s; "
+    /* if an element's initialization throws, the ones built are
+     * destroyed (elem_init's undo) and the storage goes back to the
+     * matching operator delete[] (not after placement new) */
+    int throws = e->init && !cx_expr_nothrow(e->init);
+    for (int k = 0; k < e->nelems; k++)
+        throws |= !cx_expr_nothrow(e->elems[k]);
+    struct sb s = { 0, 0, 0 };
+    int lp = -1;
+    const char *free_it = NULL;
+    if (eh_on && e->na == 1 && throws) {
+        struct cty *be = el;
+        while (be->k == CT_ARRAY)
+            be = be->to;
+        struct cfunc *df = dealloc_fn(be, 0, 1, 1);
+        need_fn(df);
+        free_it = cx_fmt("%s(%s%s);", fn_name(df, 1), m,
+                         dealloc_rest(df, cx_fmt("%s * %ldUL + %ldUL", n,
+                                                 ct_size(el), e->cookie),
+                                      over_alignment(be)));
+        lp = eh_open(&s);
+    }
+    if (e->nelems) {
+        /* the list's elements, then the rest value-initialized */
+        sb_printf(&s, "__cx_size_t __cx_i%d = 0; ", u);
+        for (int k = 0; k < e->nelems; k++)
+            sb_printf(&s, "{ %s} __cx_i%d++; ",
+                      elem_init(p, u, el, e->elems[k]), u);
+        if (e->init)
+            sb_printf(&s, "for (; __cx_i%d < %s; __cx_i%d++) { %s} ", u, n,
+                      u, elem_init(p, u, el, e->init));
+    } else if (e->init) {
+        sb_printf(&s, "for (__cx_size_t __cx_i%d = 0; __cx_i%d < %s; "
                       "__cx_i%d++) { %s} ", u, u, n, u,
                   elem_init(p, u, el, e->init));
+    }
+    if (lp >= 0)
+        eh_close(&s, lp, free_it);
+    if (s.p)
+        sb_put(&b, sb_str(&s));
     sb_printf(&b, "%s; })", p);
     return b.p;
 }
@@ -2454,6 +2501,9 @@ static int has_await(struct cexpr *e)
             return 1;
     if (e->k == E_NEW && (has_await(e->count) || has_await(e->init)))
         return 1;
+    for (int i = 0; e->k == E_NEW && i < e->nelems; i++)
+        if (has_await(e->elems[i]))
+            return 1;
     if (e->binit && e->t && e->t->k == CT_CLASS)
         for (int i = 0; i < e->t->cls->nbases; i++)
             if (has_await(e->binit[i]))
@@ -2553,6 +2603,8 @@ static void hoist_awaits(struct cexpr *e)
     if (e->k == E_NEW) {
         hoist_awaits(e->count);
         hoist_awaits(e->init);
+        for (int i = 0; i < e->nelems; i++)
+            hoist_awaits(e->elems[i]);
     }
     if (e->binit && e->t && e->t->k == CT_CLASS)
         for (int i = 0; i < e->t->cls->nbases; i++)
@@ -4612,7 +4664,7 @@ char *cx_emit_unit(void)
     init_eh = 0;
     need_pmf = 0;
     need_valist_tag = 0;
-    any_vtable = any_pure = need_dyncast = 0;
+    any_vtable = any_pure = need_dyncast = need_badlen = 0;
     memset(&out_rtti, 0, sizeof out_rtti);
     memset(&out_rtti_decl, 0, sizeof out_rtti_decl);
     memset(&out_vtables, 0, sizeof out_vtables);
@@ -4770,6 +4822,8 @@ char *cx_emit_unit(void)
             emit_prototype(f);
     if (any_pure)
         sb_put(&out, "void __cxa_pure_virtual(void);\n");
+    if (need_badlen)
+        sb_put(&out, "void __cxa_throw_bad_array_new_length(void);\n");
     if (need_dyncast)
         sb_printf(&out, "void *__dynamic_cast(void *, void *, void *, %s);\n"
                         "void __cxa_bad_cast(void);\n",

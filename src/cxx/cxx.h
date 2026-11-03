@@ -994,7 +994,10 @@ struct cexpr {
     struct cstmt *body;       /* E_STMTEXPR */
     struct cty *alloc_t;      /* E_NEW/E_DELETE: the object (element) type */
     struct cexpr *count;      /* E_NEW[]: the element count */
-    struct cexpr *init;       /* E_NEW: the object's initialization */
+    struct cexpr *init;       /* E_NEW: the object's initialization; of
+                               * new[]: each element's past `elems` */
+    struct cexpr **elems;     /* E_NEW[] with a list: the first elements' */
+    int nelems;
     long cookie;              /* E_NEW/E_DELETE[]: array cookie bytes */
     int is_array;             /* E_NEW/E_DELETE: [] form */
     int zero;                 /* E_CONSTRUCT: zero-initialize first */

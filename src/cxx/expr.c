@@ -37,6 +37,11 @@ static int expr_nothrow(struct cexpr *e)
         if (!func_nothrow(e->fn) || !expr_nothrow(e->init) ||
             !expr_nothrow(e->count))
             return 0;
+        for (int i = 0; i < e->nelems; i++)
+            if (!expr_nothrow(e->elems[i]))
+                return 0;
+        if (e->nelems && !(e->count && expr_const(e->count, &(long){0})))
+            return 0;           /* (std::bad_array_new_length) */
         break;
     case E_DYNCAST:
         if (e->zero)
@@ -3795,6 +3800,7 @@ static struct cexpr *parse_new(const struct ctok *at, int global)
         nplace = call_args(&place);       /* (packs expanded) */
     struct cty *t;
     struct cexpr *count = NULL;
+    int unbounded = 0;
     if (cx_kind() == TOK_LPAREN) {
         cx_advance();
         t = parse_type_id();
@@ -3803,7 +3809,10 @@ static struct cexpr *parse_new(const struct ctok *at, int global)
         t = parse_new_type_id();
         if (cx_kind() == TOK_LBRACKET) {
             cx_advance();
-            count = expr_parse();
+            if (cx_kind() == TOK_RBRACKET)
+                unbounded = 1;            /* new T[]{...}: the list's */
+            else
+                count = expr_parse();
             cx_expect(TOK_RBRACKET, "']'");
             /* further bounds are constants: part of the element type */
             long dims[8];
@@ -3817,7 +3826,11 @@ static struct cexpr *parse_new(const struct ctok *at, int global)
                 t = ct_array(t, dims[--nd]);
         }
     }
-    if (t->k == CT_ARRAY && !count) {
+    if (t->k == CT_ARRAY && t->n < 0 && !count) {
+        unbounded = 1;                    /* new T[]{...}: the list's */
+        t = t->to;
+    }
+    if (t->k == CT_ARRAY && !count && !unbounded) {
         count = ex_int(t->n, ct_size_t());
         t = t->to;
     }
@@ -3829,6 +3842,9 @@ static struct cexpr *parse_new(const struct ctok *at, int global)
     enum init_form form = INIT_DEFAULT;
     struct cexpr **args = NULL;
     int na = 0;
+    if (unbounded && cx_kind() != TOK_LPAREN && cx_kind() != TOK_LBRACE)
+        cx_error(at, "new %s[] needs an initializer to give it a length",
+                 ct_name(t));
     if (cx_kind() == TOK_LPAREN) {
         form = INIT_DIRECT;
         na = call_args(&args);            /* (packs expanded) */
@@ -3847,15 +3863,51 @@ static struct cexpr *parse_new(const struct ctok *at, int global)
     e->col = at->t.col;
     e->file = at->file;
     e->alloc_t = t;
-    e->is_array = count != NULL;
+    e->is_array = count != NULL || unbounded;
     struct cty *elem = t;
     while (elem->k == CT_ARRAY)
         elem = elem->to;
-    if (count) {
-        if (form != INIT_DEFAULT && form != INIT_VALUE)
-            cx_error(at, "an initializer for new[] is not supported yet");
+    if (count || unbounded) {
+        /* new T[n]{a, b} and (C++20) new T[n](a, b): the array is
+         * aggregate-initialized -- the leading elements from the items,
+         * with brace elision, the rest value-initialized (7.6.2.8) */
+        if (form == INIT_LIST || form == INIT_DIRECT) {
+            struct cexpr **items = form == INIT_LIST ? args[0]->a : args;
+            int nitems = form == INIT_LIST ? args[0]->na : na;
+            struct cexpr *s1 = nitems == 1 ? items[0] : NULL;
+            if (s1 && s1->k == E_STR && t->k != CT_ARRAY &&
+                string_fits(s1, t)) {
+                /* new char[]{"abc"}: the string's characters, its NUL */
+                e->nelems = (int)s1->slen;
+                e->elems = xmalloc((size_t)e->nelems * sizeof *e->elems);
+                for (int k = 0; k < e->nelems; k++) {
+                    struct cexpr *ch = expr_deref(
+                        expr_binary(TOK_PLUS, s1, ex_int(k, ct_size_t())));
+                    e->elems[k] = init_object(t, INIT_COPY, &ch, 1, at);
+                }
+            } else {
+                for (int idx = 0; idx < nitems; ) {
+                    e->elems = xrealloc(e->elems, (size_t)(e->nelems + 1) *
+                                                      sizeof *e->elems);
+                    e->elems[e->nelems++] =
+                        init_from_items(t, items, nitems, &idx, at);
+                }
+            }
+            form = INIT_VALUE;
+        }
+        if (unbounded)
+            count = ex_int(e->nelems, ct_size_t());
+        /* a constant bound shorter than the list is an error now; a
+         * run-time one, std::bad_array_new_length when it happens */
+        long cn;
+        int known = e->nelems && expr_const(count, &cn);
+        if (known && cn < e->nelems)
+            cx_error(at, "%d initializers for a new[] of %ld element%s",
+                     e->nelems, cn, cn == 1 ? "" : "s");
         e->count = convert(count, ct_size_t(), "an array new's size");
-        e->init = init_object(t, form, NULL, 0, at);
+        /* (a list that is every element needs no default constructor) */
+        e->init = known && cn == e->nelems ? NULL
+                                           : init_object(t, form, NULL, 0, at);
         if (elem->k == CT_CLASS && class_dtor(elem->cls))
             e->cookie = cx_array_cookie(elem);
     } else {
