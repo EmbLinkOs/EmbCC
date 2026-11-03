@@ -1086,6 +1086,12 @@ static int cxx_number(struct lexer *lx, struct token *t)
         int has_u = 0, has_l = 0;
         t->num_llong = 0;
         t->char_lit = 0;
+        t->num_spell = digits[0] == '0' && digits[1] >= '0' &&
+                       digits[1] <= '9' && v ? 1 : 0;
+        for (const char *s = suf; !ud && *s; s++) {
+            if (*s == 'l') t->num_spell |= 2;
+            if (*s == 'u' || *s == 'U') t->num_spell |= 4;
+        }
         if (!ud)
             for (const char *s = suf; *s; s++) {
                 if (*s == 'u' || *s == 'U')
@@ -1321,6 +1327,12 @@ static void lex_raw(struct lexer *lx)
         int has_u = 0, has_l = 0;
         t->num_llong = 0;
         t->char_lit = 0;
+        t->num_spell = 0;
+        for (const char *s = q; *s == 'u' || *s == 'U' || *s == 'l' ||
+                                *s == 'L'; s++) {
+            if (*s == 'l') t->num_spell |= 2;
+            if (*s == 'u' || *s == 'U') t->num_spell |= 4;
+        }
         while (*q == 'u' || *q == 'U' || *q == 'l' || *q == 'L') {
             if (*q == 'u' || *q == 'U')
                 has_u = 1;
@@ -1463,6 +1475,14 @@ static void lex_raw(struct lexer *lx)
         t->num_llong = 0;
         t->char_lit = 0;
         t->num_is_imag = 0;
+        t->num_spell = lx->p[0] == '0' && lx->p[1] >= '0' && lx->p[1] <= '9'
+                       && v ? 1 : 0;
+        for (const char *s = end; *s == 'u' || *s == 'U' || *s == 'l' ||
+                                  *s == 'L' || *s == 'i' || *s == 'I' ||
+                                  *s == 'j' || *s == 'J'; s++) {
+            if (*s == 'l') t->num_spell |= 2;
+            if (*s == 'u' || *s == 'U') t->num_spell |= 4;
+        }
         while (*end == 'u' || *end == 'U' || *end == 'l' || *end == 'L' ||
                (!t->num_is_imag && (*end == 'i' || *end == 'I' ||
                                     *end == 'j' || *end == 'J'))) {

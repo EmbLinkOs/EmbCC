@@ -200,6 +200,9 @@ struct token {
     int char_lit;  /* TOK_NUM from a character constant; str_prefix holds its
                     * encoding prefix (C++ types 'a' as char, not int) */
     int num_uns;   /* TOK_NUM: type is unsigned (U suffix or hex range) */
+    int num_spell; /* TOK_NUM: as written -- 1 octal (and not 0), 2 a
+                    * lowercase l in its suffix, 4 a u or U suffix
+                    * (MISRA 7.1-7.3, src/sema/rules.c) */
     int num_bitint; /* TOK_NUM with C23's wb suffix: its _BitInt's width */
     unsigned long long *num_big; /* ...and when that is over 64 bits, the
                                   * value's limbs, least significant first */

@@ -510,6 +510,7 @@ static int tok_is_type_start(enum tok_kind k)
 #define Q_FLASH  8
 
 static int attr_is(const char *n, const char *base);
+static void rule_restrict(struct parser *ps);
 
 /* AVR's `__flash`, which this target's predefined macro spells as clang
  * does, `__attribute__((__address_space__(1)))`: a qualifier, wherever
@@ -638,7 +639,7 @@ static int skip_quals(struct parser *ps)
             continue;
         }
         if (k == TOK_KW_CONST) { vol |= Q_CONST; advance(ps); continue; }
-        if (k == TOK_KW_RESTRICT) { advance(ps); continue; }
+        if (k == TOK_KW_RESTRICT) { rule_restrict(ps); advance(ps); continue; }
         if (k == TOK_KW_VOLATILE) { vol |= Q_VOL; advance(ps); continue; }
         if (k == TOK_KW_ATOMIC) {
             /* `_Atomic(type)` is a specifier, not a qualifier — leave it for the
@@ -2070,6 +2071,13 @@ static void warn_no_prototype(struct parser *ps)
     diag_warn_opt(ps->lx.file, cur(ps)->line, cur(ps)->col,
                   "strict-prototypes",
                   "function declaration isn't a prototype: say (void)");
+    rules_report(ps->lx.file, cur(ps)->line, cur(ps)->col, "misra-8.2", "");
+}
+
+/* MISRA 8.14: restrict, which the types keep no trace of */
+static void rule_restrict(struct parser *ps)
+{
+    rules_report(ps->lx.file, cur(ps)->line, cur(ps)->col, "misra-8.14", "");
 }
 
 static struct type *parse_fn_params_named(struct parser *ps, struct type *ret,
@@ -2808,6 +2816,7 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
         else if (k == TOK_KW_VOID) nvoid++;
         else if (k == TOK_KW_CONST || k == TOK_KW_VOLATILE ||
                  k == TOK_KW_RESTRICT) {
+            if (k == TOK_KW_RESTRICT) rule_restrict(ps);
             if (k == TOK_KW_VOLATILE) *vol |= Q_VOL;
             if (k == TOK_KW_CONST) *vol |= Q_CONST;
             advance(ps); continue;
@@ -4335,6 +4344,15 @@ static struct expr *parse_primary(struct parser *ps)
     case TOK_NUM:
         e = new_expr(EXPR_NUM, t->line, t->col);
         e->num = t->num;
+        /* MISRA 7.1-7.3: the constant as it was written */
+        if (!t->char_lit) {
+            if (t->num_spell & 1)
+                rules_report(ps->lx.file, t->line, t->col, "misra-7.1", "");
+            if (t->num_spell & 2)
+                rules_report(ps->lx.file, t->line, t->col, "misra-7.3", "");
+            if (t->num_uns && !(t->num_spell & 4) && !t->num_bitint)
+                rules_report(ps->lx.file, t->line, t->col, "misra-7.2", "");
+        }
         if (t->num_bitint > 64 && t->num_nbig) {   /* a wb constant over 64 bits */
             e->bigv = t->num_big;
             e->nbig = t->num_nbig;

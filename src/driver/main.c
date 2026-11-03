@@ -3197,6 +3197,8 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         diag_terminated(sema_error_count());
         return 1;                     /* (--fix still gets its turn) */
     }
+    /* --misra, --cert and the rules named one by one (src/sema/rules.c) */
+    rules_check(u);
     /* The stages that read the analysed tree. They come after sema so the
      * types printed are the resolved ones -- an AST dump with every type
      * shown as "?" would answer a question nobody asks. */
@@ -6895,7 +6897,33 @@ static int embcc_main(int argc, char **argv)
             diag_enable_warning("format", lv >= 1);
             diag_enable_warning("format-nonliteral", lv >= 2);
             diag_enable_warning("format-security", lv >= 2);
+        } else if (strcmp(argv[i], "--misra") == 0 ||
+                   strncmp(argv[i], "--misra=", 8) == 0 ||
+                   strcmp(argv[i], "--cert") == 0 ||
+                   strcmp(argv[i], "--no-misra") == 0 ||
+                   strcmp(argv[i], "--no-cert") == 0) {
+            /* a coding standard's every rule (src/sema/rules.def); one
+             * rule is --warn=misra-15.5 / --no-warn=misra-15.5 */
+            const char *pre = strstr(argv[i], "misra") ? "misra-" : "cert-";
+            int on = strncmp(argv[i], "--no-", 5) != 0;
+            if (argv[i][7] == '=' && strcmp(argv[i] + 8, "2023") &&
+                strcmp(argv[i] + 8, "2012")) {
+                fprintf(stderr, "embcc: error: --misra=%s: the rules are "
+                                "MISRA C:2023's (2012's numbering is the "
+                                "same for these)\n", argv[i] + 8);
+                return 1;
+            }
+            for (int k = 0; k < rules_count(); k++)
+                if (!strncmp(rules_name(k), pre, strlen(pre)))
+                    diag_enable_warning(rules_name(k), on);
         } else if (strncmp(argv[i], "-Wno-", 5) == 0) {
+            if (!strcmp(argv[i] + 5, "misra") || !strcmp(argv[i] + 5, "cert")) {
+                const char *pre = argv[i][5] == 'm' ? "misra-" : "cert-";
+                for (int k = 0; k < rules_count(); k++)
+                    if (!strncmp(rules_name(k), pre, strlen(pre)))
+                        diag_enable_warning(rules_name(k), 0);
+                continue;
+            }
             diag_enable_warning(argv[i] + 5, 0);
         } else if (argv[i][0] == '-' && argv[i][1] == 'W') {
             /* -Wname turns one on; a name EmbCC does not have is accepted
@@ -6908,6 +6936,13 @@ static int embcc_main(int argc, char **argv)
              * A warning rather than an error, which is what GCC does,
              * because a build should not stop over a diagnostic it
              * asked for and this compiler does not have. */
+            if (!strcmp(argv[i] + 2, "misra") || !strcmp(argv[i] + 2, "cert")) {
+                const char *pre = argv[i][2] == 'm' ? "misra-" : "cert-";
+                for (int k = 0; k < rules_count(); k++)
+                    if (!strncmp(rules_name(k), pre, strlen(pre)))
+                        diag_enable_warning(rules_name(k), 1);
+                continue;
+            }
             if (!diag_enable_warning(argv[i] + 2, 1) &&
                 !diag_always_error(argv[i] + 2))
                 fprintf(stderr, "embcc: warning: %s is not a warning EmbCC "

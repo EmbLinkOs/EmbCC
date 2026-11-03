@@ -4942,6 +4942,10 @@ static void check_expr_main(struct unit *u, struct func *f, struct scope *sc,
                 break;
             }
         }
+        /* MISRA 13.6: here, before the operand is folded away */
+        if (!e->cast_ty && e->rhs && rules_side_effects(e->rhs))
+            rules_report(f && f->file ? f->file : u->file, e->line, e->col,
+                         "misra-13.6", "");
         if (!e->cast_ty) {
             check_expr(u, f, sc, e->rhs);
             struct type *rt = e->rhs->undecayed ? e->rhs->undecayed
@@ -10618,4 +10622,10 @@ void sema_check(struct unit *u)
             sema_error_line(u, f->line,
                        "static function '%s' is called but never defined",
                        f->name);
+}
+
+/* const_fold, for the rules checker (src/sema/rules.c) */
+int sema_const_fold(const struct expr *e, long *out)
+{
+    return const_fold(e, out);
 }

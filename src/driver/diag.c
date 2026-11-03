@@ -784,6 +784,11 @@ static struct warn_opt g_warns[] = {
      * (on, and GCC's error -- here its profile is ignored instead) */
     { "missing-profile",      1,  0,    0 },
     { "coverage-mismatch",    1,  0,    0 },
+    /* the coding standards' rules (src/sema/rules.def): off unless named,
+     * or turned on by --misra / --cert */
+#define RULE(n, s, i, c, t) { n, 0, 0, 0 },
+#include "../sema/rules.def"
+#undef RULE
     /* -pedantic: what the C standard -std= names does not have -- a
      * later standard's feature, or a GNU extension (lex_pedantic);
      * -pedantic-errors makes each an error */
@@ -1071,6 +1076,9 @@ int diag_warning_default_on(int i) { return g_warns[i].on; }
  * (`embcc --reference=warnings`) is printed from these and the table
  * above, and refuses to print if a warning has no line here. */
 static const struct { const char *name, *implied, *what; } g_warn_doc[] = {
+#define RULE(n, s, i, c, t) { n, n[0] == 'm' ? "misra" : "cert", s " " i " (" c "): " t },
+#include "../sema/rules.def"
+#undef RULE
     { "address", NULL, "a function name tested in an `if` condition, or compared with a null pointer constant" },
     { "arith-conversion", NULL, "as `--warn=conversion`, also for arithmetic whose operands each fit the target type" },
     { "attributes", NULL, "an attribute EmbCC does not know, or one it accepts but does not implement" },
