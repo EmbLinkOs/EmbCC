@@ -5861,6 +5861,7 @@ static const char *ag_set(int k, const char **constraint)
 {
     *constraint = "=r";
     switch (target_get()) {
+    case TARGET_X86_64: return ag_fmt("movl $%d, %%k[__embcc_sel]", k);
     case TARGET_AARCH64: return ag_fmt("mov %%w[__embcc_sel], #%d", k);
     case TARGET_THUMB:          /* (ARMv6-M and v8-M Baseline: movs only;
                                  * the pool's first registers are low) */
@@ -5889,6 +5890,7 @@ static const char *ag_set(int k, const char **constraint)
 static const char *ag_jump(const char *label)
 {
     switch (target_get()) {
+    case TARGET_X86_64: return ag_fmt("jmp %s", label);
     case TARGET_AARCH64: case TARGET_THUMB: case TARGET_LOONGARCH64:
     case TARGET_PPC32:
         return ag_fmt("b %s", label);

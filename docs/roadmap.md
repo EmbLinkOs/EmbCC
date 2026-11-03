@@ -134,7 +134,7 @@ GDB test on every board family, at `-O2`.
 
 Every refusal either implemented or declared permanent:
 
-- `asm goto` on x86-64 (done elsewhere: it needs an AT&T assembler there), global register variables, nested functions (or a
+- global register variables, nested functions (or a
   permanent refusal, as clang has). (`__builtin_setjmp`/
   `__builtin_longjmp` are done, on every target but Windows.) (`_Float16` and `__fp16` are done:
   a `_Float16` through `...`, and a struct of them by value with the ARM

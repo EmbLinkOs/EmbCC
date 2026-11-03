@@ -618,11 +618,11 @@ x86_64-elf frameaddr yes
 x86_64-elf retaddr1 yes
 x86_64-elf setjmp yes
 x86_64-elf cgoto yes
-x86_64-elf asmgoto no: `asm goto` is not supported for x86_64-elf: its inline assembler has no branch for the template to take
+x86_64-elf asmgoto yes
 x86_64-elf nested no: expected ';' before '{' [E0002]
 x86_64-elf interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS, RX, ColdFire, TriCore and ARMv7-A it is implemented)
 x86_64-elf naked no: __attribute__((naked)) is not supported: on this target the body could only be assembled by the file-scope assembler's few instructions; it is supported on every target but x86-64 and AArch64 for Darwin or Windows
-x86_64-elf asmfile no: no assembly-file support for x86_64-elf yet
+x86_64-elf asmfile yes
 x86_64-elf dashS yes
 x86_64-elf debug yes
 x86_64-elf unwind yes
@@ -678,11 +678,11 @@ x86_64-linux-gnu frameaddr yes
 x86_64-linux-gnu retaddr1 yes
 x86_64-linux-gnu setjmp yes
 x86_64-linux-gnu cgoto yes
-x86_64-linux-gnu asmgoto no: `asm goto` is not supported for x86_64-linux-gnu: its inline assembler has no branch for the template to take
+x86_64-linux-gnu asmgoto yes
 x86_64-linux-gnu nested no: expected ';' before '{' [E0002]
 x86_64-linux-gnu interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS, RX, ColdFire, TriCore and ARMv7-A it is implemented)
 x86_64-linux-gnu naked no: __attribute__((naked)) is not supported: on this target the body could only be assembled by the file-scope assembler's few instructions; it is supported on every target but x86-64 and AArch64 for Darwin or Windows
-x86_64-linux-gnu asmfile no: no assembly-file support for x86_64-linux-gnu yet
+x86_64-linux-gnu asmfile yes
 x86_64-linux-gnu dashS yes
 x86_64-linux-gnu debug yes
 x86_64-linux-gnu unwind yes
@@ -738,7 +738,7 @@ x86_64-windows-gnu frameaddr yes
 x86_64-windows-gnu retaddr1 yes
 x86_64-windows-gnu setjmp no: __builtin_setjmp is not supported for x86_64-windows-gnu: MinGW's setjmp takes a frame for its unwinder, and EmbCC does not lower onto it
 x86_64-windows-gnu cgoto yes
-x86_64-windows-gnu asmgoto no: `asm goto` is not supported for x86_64-windows-gnu: its inline assembler has no branch for the template to take
+x86_64-windows-gnu asmgoto yes
 x86_64-windows-gnu nested no: expected ';' before '{' [E0002]
 x86_64-windows-gnu interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS, RX, ColdFire, TriCore and ARMv7-A it is implemented)
 x86_64-windows-gnu naked no: __attribute__((naked)) is not supported: on this target the body could only be assembled by the file-scope assembler's few instructions; it is supported on every target but x86-64 and AArch64 for Darwin or Windows

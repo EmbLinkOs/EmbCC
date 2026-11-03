@@ -1,13 +1,16 @@
 // asm goto in C++, as in C: the front end hands the statement on to the C
 // it lowers to, labels and all -- here from a member function and a
-// template, the label blocks reached only from the asm. Plain C++ where
-// EmbCC's inline assembler has no branch for the template (x86-64).
+// template, the label blocks reached only from the asm. Plain C++ on a
+// target this file has no template for.
 // expect-exit: 42
 struct Sign {
     int of(int x) const
     {
 #if defined(__aarch64__)
         __asm__ goto("cbz %w0, %l[zero]\n\tcmp %w0, #0\n\tb.lt %l[neg]"
+                     :: "r"(x) : "cc" : zero, neg);
+#elif defined(__x86_64__)
+        __asm__ goto("testl %0, %0\n\tjz %l[zero]\n\tjs %l[neg]"
                      :: "r"(x) : "cc" : zero, neg);
 #else
         if (x == 0) goto zero;
@@ -25,6 +28,8 @@ template <class T> int is_small(T v)
 {
 #if defined(__aarch64__)
     __asm__ goto("cmp %0, #10\n\tb.lo %l1" :: "r"(v) : "cc" : yes);
+#elif defined(__x86_64__)
+    __asm__ goto("cmpq $10, %0\n\tjb %l1" :: "r"(v) : "cc" : yes);
 #else
     if (v < 10) goto yes;
 #endif

@@ -28,6 +28,7 @@
 #include "../arch/coldfire/asm.h"
 #include "../arch/sparc/asm.h"
 #include "../arch/ppc/asm.h"
+#include "../arch/x86_64/att.h"
 #include "../arch/backend.h"
 #include "../parse/ast.h"
 
@@ -4028,6 +4029,23 @@ static const struct gas_target TRICORE_GAS = {
 };
 #endif
 
+/* x86-64, ELF: AT&T syntax (src/arch/x86_64/att.c). Symbols are its
+ * symform's -- call/jmp sym (PLT32), jcc (PC32), sym(%rip) (PC32 or
+ * GOTPCREL), $sym (32, 32S or 64) -- and `.long`/`.quad sym` the generic
+ * ones; jmp and jcc relax by levels (two bytes where they reach). `#`
+ * starts a comment. */
+#if FAMILY_BUILT(x86)
+static const struct gas_target X86_GAS = {
+    EM_X86_64, 0, x86att_assemble, x86att_is_reg,
+    0, 0, 0,
+    R_X86_64_32, R_X86_64_64,
+    0, 0, x86att_symform, 0,
+    0, x86att_is_word, NULL, NULL, NULL,
+    0, x86att_set_level, x86att_took_level, NULL,
+    x86att_is_transfer, NULL
+};
+#endif
+
 /* RX (RXv1). Its symbol forms are rxasm_symform's: `mov.l #sym, rd`
  * (R_RX_DIR32), and a branch to a symbol defined elsewhere (bra/bsr .a
  * R_RX_DIR24S_PCREL, beq/bne .w R_RX_DIR16S_PCREL, another condition .b
@@ -4111,6 +4129,11 @@ static const struct gas_target PPC_GAS = {
 static const struct gas_target *target_for(void)
 {
     switch (target_get()) {
+#if FAMILY_BUILT(x86)
+    case TARGET_X86_64:      /* (gas writes ELF: not Mach-O or COFF) */
+        return target_os_get() == TGT_OS_DARWIN ||
+               target_os_get() == TGT_OS_WINDOWS ? NULL : &X86_GAS;
+#endif
 #if FAMILY_BUILT(m68k)
     case TARGET_COLDFIRE: return &CF_GAS;
 #endif
@@ -4307,9 +4330,21 @@ int gas_assemble(const char *in_path, const char *out_path, int preprocess,
     return rc;
 }
 
+/* An inline template is never an object of its own, so x86-64's
+ * assembler serves it on Darwin and Windows too (target_for refuses
+ * them: this file writes ELF) */
+static const struct gas_target *target_for_inline(void)
+{
+#if FAMILY_BUILT(x86)
+    if (target_get() == TARGET_X86_64)
+        return &X86_GAS;
+#endif
+    return target_for();
+}
+
 int gas_template_has_labels(const char *text)
 {
-    const struct gas_target *t = target_for();
+    const struct gas_target *t = target_for_inline();
     const char *p = text;
     while (*p) {
         while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' ||
@@ -4332,7 +4367,7 @@ int gas_assemble_inline(const char *file, int line, const char *text,
 {
     struct gas g;
     struct gexp gx;
-    const struct gas_target *t = target_for();
+    const struct gas_target *t = target_for_inline();
     err[0] = 0;
     if (!t) {
         snprintf(err, (size_t)errlen, "a label in an asm template is not "

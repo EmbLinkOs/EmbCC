@@ -194,6 +194,7 @@ FAMILY_SRCS_x86 := \
 	src/arch/x86_64/emit.c \
 	src/arch/x86_64/topasm.c \
 	src/arch/x86_64/as.c \
+	src/arch/x86_64/att.c \
 	src/arch/x86_64/disasm.c \
 	src/arch/x86_64/predef.c \
 	src/arch/x86_64/predef_cxx.c
@@ -693,7 +694,8 @@ EMBLS_SRCS = tools/embls/embls.c $(PLATFORM_SRCS) src/cpp/cpp.c src/lex/lex.c \
              src/arch/code.c src/arch/regalloc.c src/arch/common.c \
              src/arch/x86_64/irgen.c src/arch/x86_64/codegen.c \
              src/arch/x86_64/emit.c src/arch/x86_64/topasm.c \
-             src/arch/x86_64/as.c src/arch/x86_64/disasm.c src/arch/aarch64/irgen.c \
+             src/arch/x86_64/as.c src/arch/x86_64/att.c src/arch/x86_64/disasm.c \
+             src/arch/aarch64/irgen.c \
              src/arch/aarch64/codegen.c src/arch/aarch64/emit.c \
              src/arch/aarch64/asm.c src/arch/thumb/irgen.c src/arch/thumb/asm.c \
              src/arch/thumb/emit.c src/arch/thumb/a32.c src/arch/thumb/attrs.c \

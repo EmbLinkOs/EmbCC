@@ -152,13 +152,7 @@ Compiles on every target.
 
 ## `asm goto`
 
-Refused on 3 of the 25 targets.
-
-- Refused on `x86_64-elf`, `x86_64-linux-gnu`, `x86_64-windows-gnu`:
-
-  ```text
-  'asm goto' is not supported for TARGET: its inline assembler has no branch for the template to take
-  ```
+Compiles on every target.
 
 ## nested functions
 
@@ -192,9 +186,9 @@ Refused on 4 of the 25 targets.
 
 ## an assembly source (`.s`) with an instruction
 
-Refused on 3 of the 25 targets.
+Refused on 1 of the 25 targets.
 
-- Refused on `x86_64-elf`, `x86_64-linux-gnu`, `x86_64-windows-gnu`:
+- Refused on `x86_64-windows-gnu`:
 
   ```text
   no assembly-file support for TARGET yet
@@ -316,11 +310,11 @@ Refused on 6 of the 25 targets.
 | `powerpc-none-eabi` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | yes | no | no | yes | yes | yes | yes | no | yes | no |
 | `sparc-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | yes | no | no | yes | yes | yes | yes | no | yes | no |
 | `m68k-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | no |
-| `x86_64-elf` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | no | no | no | no | no | yes | yes | yes | yes | yes |
+| `x86_64-elf` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | no | no | no | yes | yes | yes | yes | yes | yes |
 | `aarch64-elf` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | no | no | yes | yes | yes | yes | yes | yes | yes |
-| `x86_64-linux-gnu` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | no | no | no | no | no | yes | yes | yes | yes | yes |
+| `x86_64-linux-gnu` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | no | no | no | yes | yes | yes | yes | yes | yes |
 | `aarch64-apple-darwin` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | no | no | no | yes | yes | yes | yes | yes | yes |
-| `x86_64-windows-gnu` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | no | yes | no | no | no | no | no | yes | yes | yes | yes | yes |
+| `x86_64-windows-gnu` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | no | yes | yes | no | no | no | no | yes | yes | yes | yes | yes |
 
 The columns are the sections above, in order:
 - `int128`: `__int128`

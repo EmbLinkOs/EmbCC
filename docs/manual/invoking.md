@@ -1662,7 +1662,10 @@ when a header is deleted.
 ### Assembly input
 
 A `.s` or `.S` file is assembled by EmbCC's built-in GNU-syntax assembler
-for the selected target: AArch64, ARM (Thumb), RISC-V, MIPS32 or AVR. A `.S` file
+for the selected target: AArch64, ARM (Thumb), RISC-V, MIPS32, AVR, the
+other embedded families, or x86-64 in AT&T syntax for an ELF target
+(`x86_64-elf`, `x86_64-linux-gnu`; not Mach-O or COFF, which the
+assembler does not write). A `.S` file
 is preprocessed first; `-D` and `-U` apply, but the `-I` and `--system-include`
 directories are not searched (a `#include "file"` beside the source is
 found). The inline-assembly vocabulary of each target is listed in

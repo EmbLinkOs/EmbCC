@@ -44,9 +44,13 @@ On AArch64, ARM Cortex-M, RISC-V and AVR, EmbCC first substitutes the
 operands into the template text and then assembles the text with the
 same assembler that handles `.s` and `.S` files for that target (see
 [Assembly input](invoking.md#assembly-input)). On x86-64 the template is
-AT&T syntax and is read by a separate encoder that resolves each operand
-reference as it encodes the instruction; it is unrelated to the
-NASM-syntax assembler used for `.asm` files ([embas](tools/embas.md)).
+AT&T syntax and is first read by the original encoder, which resolves
+each operand reference as it encodes the instruction (the vocabulary
+listed under [x86-64](#x86-64)); a template it does not take is
+substituted as GCC does it and assembled whole by the x86-64 AT&T
+assembler that also reads `.s` files (see [Full AT&T syntax](#full-att-syntax)).
+Both are unrelated to the NASM-syntax assembler used for `.asm` files
+([embas](tools/embas.md)).
 On MIPS32 the operands are substituted the same way, and the text is
 assembled by the same MIPS32 assembler that reads `.s` and `.S` files.
 
@@ -130,7 +134,7 @@ long add_named(long a, long b)
 |---|---|
 | `volatile` | Accepted, also spelled `__volatile__` and `__volatile`. It changes nothing: EmbCC treats every `asm` statement as volatile. |
 | `inline` | Not accepted in C: `expected '(' after asm before 'inline'`. |
-| `goto` | Supported on every target but x86-64. The fourth `:` lists the C labels; the template names them as `%l[name]` or `%lN`, N counting the outputs, the inputs and then the labels, as in GCC. Outputs may be given and hold on every path. |
+| `goto` | Supported on every target. The fourth `:` lists the C labels; the template names them as `%l[name]` or `%lN`, N counting the outputs, the inputs and then the labels, as in GCC. Outputs may be given and hold on every path. |
 
 `asm goto` is lowered without anything the optimizer has to be taught:
 each label operand becomes a label of the template's own, where a short
@@ -139,11 +143,7 @@ the template's end; after the asm, the selector picks the C label with an
 ordinary branch. A taken branch therefore costs a few instructions more
 than in GCC, and the C labels' code is never mistaken for unreachable.
 The stubs use numeric labels from 900 up, which a template should not
-define itself. On x86-64, whose inline assembler has no branch:
-
-```text
-`asm goto` is not supported for x86_64-linux-gnu: its inline assembler has no branch for the template to take
-```
+define itself.
 
 ### Output operands
 
@@ -859,9 +859,42 @@ hardware; bind them with the fixed-register constraints (`a`, `b`, `c`,
 | `mov %%ax, %%SEG` | segment register (`es`, `cs`, `ss`, `ds`, `fs`, `gs`) |
 | `mov $IMM, %%ax` | 16-bit immediate |
 
-There is no `movl`, `movb`, `movw`, `lea`, `xchg`, `lock`, `test`,
-`jmp`, `jcc`, `call`, `ret`, `ud2` or `int3`, and no memory operand for
-the arithmetic instructions.
+What this vocabulary does not have -- `movl`, `lea`, `xchg`, `lock`,
+`test`, `jmp`, `jcc`, labels, memory operands with an index -- goes to
+the full assembler below.
+
+### Full AT&T syntax
+
+A template the vocabulary above does not take is assembled in GNU as's
+own AT&T syntax, with GCC's operand rules:
+
+- `%N` and `%[name]` name the operand's register at the width of its C
+  type (`%eax` for an `int`, `%rax` for a `long`); the modifiers `%bN`,
+  `%hN`, `%wN`, `%kN` and `%qN` give the 8-bit low, 8-bit high, 16-, 32-
+  and 64-bit names; an `x` operand is `%xmmN`;
+- an `m` operand is `(%reg)`, the register holding its address, so
+  `lock cmpxchgl %2, %1` with `"+m"(*p)` addresses `*p`;
+- a constant operand is `$N`, and `%cN` is `N`; `%=` is a number unique
+  to the statement; `%%` is `%`;
+- the instructions are the integer set (`mov` in every form, `movzx` and
+  `movsx` (`movzbl`, `movslq`, ...), `lea`, the ALU group, `test`, `inc`,
+  `dec`, `neg`, `not`, `mul`, `imul` in all three forms, `div`, `idiv`,
+  the shifts and rotates with `shld`/`shrd`, `push`, `pop`, `xchg`,
+  `cmpxchg`, `cmpxchg8b`/`16b`, `xadd`, `bsf`, `bsr`, `popcnt`, `lzcnt`,
+  `tzcnt`, `bt`/`bts`/`btr`/`btc`, `bswap`, `setcc`, `cmovcc`), control
+  flow (`jmp`, `jcc`, `call`, `ret`, indirect `*%reg` / `*mem`), the
+  prefixes `lock`, `rep`, `repe`, `repne`, the string instructions, port
+  I/O, the system instructions (`lgdt` ... `xrstor64`, `rdrand`,
+  `wrfsbase`, control and debug registers, segment registers), and SSE
+  and SSE2 scalar and packed arithmetic, moves, logic, comparisons,
+  conversions, shuffles and shifts;
+- every addressing mode: `disp(base, index, scale)`, `(%rip)`, a segment
+  override (`%fs:0x28`), an absolute address;
+- labels (`1:` with `1b`/`1f`, or named): the template is assembled whole,
+  jumps two bytes where they reach.
+
+Its encodings are llvm-mc's, instruction for instruction
+(`tests/golden/x86-att-asm.sh`).
 
 The port I/O instructions ignore their operands: `inb $0x60, %%al` is
 encoded as `inb %dx, %al`. Use the `"a"` and `"Nd"` (or `"d"`)
@@ -2690,16 +2723,14 @@ In summary, compared with GCC:
   under [Directives in a template](#directives-in-a-template), can appear
   in a template, and a function template cannot refer to a symbol on any
   target.
-- `asm goto` is not supported on x86-64; `asm inline` and flag-output
-  constraints are not supported. Flag outputs are not always refused (see [x86-64](#x86-64)
+- `asm inline` and flag-output constraints are not supported. Flag outputs are not always refused (see [x86-64](#x86-64)
   and [AArch64](#aarch64)).
 - `m` outputs do not work (except on MIPS32, Xtensa, SPARC and PowerPC,
   where the operand's register holds the address), and `m` inputs are a
   register holding the
   address rather than a memory reference.
 - On x86-64 and RISC-V, `i` and `n` give a register, not an immediate.
-- Labels inside a function template are supported on every target but
-  x86-64, where only the `leaq Nf(%%rip)` form is.
+- Labels inside a function template are supported on every target.
 - Register variables are not supported on ARM Cortex-M and RISC-V, are
   limited to x0-x11 and x13-x15 on AArch64, and are not supported at
   file scope on any target.

@@ -2,10 +2,15 @@
  * value picks, two from one asm, %l[name] and %lN (counted past the
  * outputs and inputs), an output on the fall-through path, the label
  * blocks kept at -O2 though only the asm reaches them, inside a loop. And
- * a label inside an ordinary template (a loop in asm). Plain C where
- * EmbCC's inline assembler has no branch for the template (x86-64). */
+ * a label inside an ordinary template (a loop in asm). Plain C on a
+ * target this file has no template for. */
 // expect-exit: 42
-#if defined(__aarch64__)
+#if defined(__x86_64__)
+#define CLASSIFY(x) __asm__ goto("testl %0, %0\n\tjz %l[zero]\n\tjs %l2" \
+                                 :: "r"(x) : "cc" : zero, neg)
+#define TRIPLE(r, n) __asm__("xorl %0, %0\n1:\n\taddl $3, %0\n\tdecl %1\n\tjnz 1b" \
+                             : "=&r"(r), "+r"(n) :: "cc")
+#elif defined(__aarch64__)
 #define CLASSIFY(x) __asm__ goto("cbz %w0, %l[zero]\n\tcmp %w0, #0\n\tb.lt %l2" \
                                  :: "r"(x) : "cc" : zero, neg)
 #define TRIPLE(r, n) __asm__("mov %w0, #0\n1:\n\tadd %w0, %w0, #3\n\tsub %w1, %w1, #1\n\tcbnz %w1, 1b" \
