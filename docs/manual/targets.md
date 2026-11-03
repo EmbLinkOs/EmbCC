@@ -1123,7 +1123,7 @@ and their calling conventions.
 | B (Zba, Zbb, Zbs) | `-march=..._zba_zbb_zbs` or `b`: shift-and-add for indexing, `clz`/`ctz`/`cpop` for the bit builtins, `rev8` for byte swaps, `andn`/`orn`/`xnor`, `min`/`max`, `sext`/`zext`, single-bit set/clear/invert/extract. |
 | Zicond | `_zicond`: a `?:` the optimizer made a select is `czero.eqz`, `czero.nez` and `or`, with no branch. |
 | Zca, Zcb | `_zca` is C without its floating-point loads and stores; `_zcb` adds the 16-bit `c.lbu`, `c.lhu`, `c.lh`, `c.sb`, `c.sh`, `c.zext.b`, `c.sext.b`, `c.zext.h`, `c.sext.h`, `c.zext.w`, `c.not` and `c.mul`, which the compressor uses wherever an instruction fits one. |
-| Zcmp | `_zcmp`: `cm.push`, `cm.pop`, `cm.popret`, `cm.popretz`, `cm.mva01s` and `cm.mvsa01` in assembly and inline asm; prologues do not use them yet. Refused together with C and D (Zcd shares its encodings). |
+| Zcmp | `_zcmp`: a function that calls saves `ra` and its s-registers with one `cm.push` and returns with `cm.popret` (`cm.pop` before a tail call), the frame laid out as the spec stores them; an interrupt handler and a variadic function keep the ordinary sequence. `cm.popretz`, `cm.mva01s` and `cm.mvsa01` in assembly and inline asm. Refused together with C and D (Zcd shares its encodings). |
 | Zbc, Zbkb, Zbkc, Zbkx | `clmul`/`clmulh` (and Zbc's `clmulr`), `pack`/`packh`/`packw`, `brev8`, `zip`/`unzip`, `xperm4`/`xperm8`, and Zbkb's share of Zbb's instructions, in assembly and inline asm. |
 | Zfhmin, Zfh | Half-precision conversions (Zfhmin) and arithmetic (Zfh) on `_Float16` in f registers; needs F. |
 | V | `riscv_vector.h`'s intrinsics, as instructions; needs F and D. |

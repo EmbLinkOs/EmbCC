@@ -83,7 +83,7 @@ flags() {
         # the bit-manipulation and size extensions codegen uses: Zicond's
         # branchless selects, Zcb's 16-bit forms, Zba/Zbb/Zbs (and Zbc,
         # Zbkb, which it does not, to have -march= take them)
-        rv32k) echo "-march=rv32imac_zicond_zcb_zba_zbb_zbs_zbc_zbkb" ;;
+        rv32k) echo "-march=rv32imac_zicond_zcb_zcmp_zba_zbb_zbs_zbc_zbkb" ;;
         rv64k) echo "-march=rv64imac_zicond_zcb_zba_zbb_zbs_zbc" ;;
     esac
 }
@@ -219,7 +219,7 @@ case $b in
     rv64d) T="riscv64-unknown-elf -march=rv64gc -mabi=lp64d" ;;
     rv32noa) T="riscv32-unknown-elf -march=rv32imc" ;;
     rv64noa) T="riscv64-unknown-elf -march=rv64imc" ;;
-    rv32k) T="riscv32-unknown-elf -march=rv32imac_zicond_zcb_zba_zbb_zbs_zbc_zbkb" ;;
+    rv32k) T="riscv32-unknown-elf -march=rv32imac_zicond_zcb_zcmp_zba_zbb_zbs_zbc_zbkb" ;;
     rv64k) T="riscv64-unknown-elf -march=rv64imac_zicond_zcb_zba_zbb_zbs_zbc" ;;
 esac
 L=$out/$b; o=$out/p/$name-$b$opt
@@ -256,7 +256,7 @@ case $b in
             -M virt -cpu cortex-a15 -m 128 -semihosting -nographic \
             -monitor none -kernel $o.elf > $o.txt 2>&1 ;;
     rv32k) sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-30}" "$Q32" \
-            -M virt -cpu rv32,zicond=true,zcb=true,zba=true,zbb=true,zbs=true,zbc=true,zbkb=true \
+            -M virt -cpu rv32,zicond=true,zcb=true,zcmp=true,zcd=false,zba=true,zbb=true,zbs=true,zbc=true,zbkb=true \
             -bios none -nographic -m 8 -kernel $o.elf > $o.txt 2>&1 ;;
     rv64k) sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-30}" "$Q64" \
             -M virt -cpu rv64,zicond=true,zcb=true,zba=true,zbb=true,zbs=true,zbc=true \

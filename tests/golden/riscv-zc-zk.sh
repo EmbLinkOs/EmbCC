@@ -122,3 +122,21 @@ grep -E '^ *[0-9a-f]+: [0-9a-f]{4}[[:space:]]+lbu' "$out/g.dis" > /dev/null ||
 grep -E '^ *[0-9a-f]+: [0-9a-f]{4}[[:space:]]+zext.h' "$out/g.dis" > /dev/null ||
     fail "no 16-bit zext.h (c.zext.h) under Zcb: $(cat "$out/g.dis")"
 echo "codegen: a select is czero.eqz/czero.nez with no branch; Zcb's 16-bit forms are used"
+
+# Zcmp: a function that saves registers pushes and pops them with
+# cm.push / cm.popret (a tail call's cm.pop); the slots are the spec's --
+# ra BELOW the s-registers, which __builtin_return_address reads (the
+# exec corpus's frame-builtins.c on the rv32k board runs it)
+cat > "$out/p.c" <<'EOF2'
+int g(int);
+int f(int a, int b) { int x = g(a); int y = g(b + x); return x * y + g(x - y); }
+EOF2
+"$EMBCC" --target=riscv32-unknown-elf -march=rv32imac_zcmp -O2 \
+    -c "$out/p.c" -o "$out/p.o" || fail "the Zcmp sample does not compile"
+"$OD" -d --mattr=+zcmp,+c "$out/p.o" > "$out/p.dis"
+grep -q 'cm.push[[:space:]]*{ra, s0-s1}, -16' "$out/p.dis" &&
+    grep -q 'cm.popret[[:space:]]*{ra, s0-s1}, 16' "$out/p.dis" ||
+    fail "no cm.push/cm.popret prologue under Zcmp: $(cat "$out/p.dis")"
+! grep -qE '[[:space:]](sw|lw)[[:space:]]+(ra|s0|s1),' "$out/p.dis" ||
+    fail "a save or restore beside cm.push/cm.popret: $(cat "$out/p.dis")"
+echo "Zcmp: the saves are cm.push, the restores and return cm.popret"

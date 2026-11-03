@@ -232,6 +232,8 @@ struct rv_fn {
     int stg_v[MAX_PARAMS], nstg;
     long stg_off[MAX_PARAMS];
     int used_callee[RA_MAXPOOL];  /* the callee-saved ones it took */
+    int zcmp, zcmp_rlist;         /* Zcmp: cm.push/cm.popret, its list */
+    long zcmp_base;               /* ...and the bytes the list takes */
     int pair_used[9], npair;      /* callee-saved pairs rv_pair_alloc took */
     int nsave;
     struct code *t;
@@ -1419,6 +1421,10 @@ static void layout(struct rv_fn *F)
          * needed none pays for none, which is what makes the
          * caller-saved-first preference order worth having. */
         F->save_at = F->ra_slot - (long)F->nsave * F->w;
+        if (F->zcmp) {                /* cm.push's order: ra below them */
+            F->ra_slot = F->frame - (long)(F->nsave + 1) * F->w;
+            F->save_at = F->ra_slot + F->w;
+        }
     }
     /* An interrupt handler's saves, at the very top: sixteen-byte
      * aligned, so nothing below moves with how many there are, and
@@ -3225,9 +3231,49 @@ static int rv_tail_ok(const struct rv_fn *F, int n)
 /* The epilogue's restores: the callee-saved registers, ra when it was
  * saved, and the frame. Shared by the epilogue and a tail call, which
  * must leave exactly the state the epilogue's `ret` would. */
+/* Zcmp's push and pops: the list, and an adjustment of base + 16 *
+ * spimm (spimm 0..3) of the frame, the rest of which an addi makes */
+static long zcmp_adj(const struct rv_fn *F)
+{
+    return F->frame < F->zcmp_base + 48 ? F->frame : F->zcmp_base + 48;
+}
+
+static void zcmp_op(struct rv_fn *F, unsigned base)
+{
+    long spimm = (zcmp_adj(F) - F->zcmp_base) / 16;
+    code_u16(F->t, base | (unsigned)F->zcmp_rlist << 4 | (unsigned)spimm << 2);
+}
+
+static void rv_restore_ex(struct rv_fn *F, int ret);
+
 static void rv_restore(struct rv_fn *F)
 {
+    rv_restore_ex(F, 0);
+}
+
+/* ...and, with ret, the return too (Zcmp's cm.popret) */
+static void rv_restore_ex(struct rv_fn *F, int ret)
+{
     struct code *t = F->t;
+    if (F->zcmp) {
+        for (int k = 0; k < F->nfsave; k++)
+            fld_sp(F, F->fused[k], F->fsave_at + (long)k * 8,
+                   target_riscv_abi_flen() == 64);
+        long rest = F->frame - zcmp_adj(F);
+        if (rest && rv_fits(rest, 12)) {
+            rv_alu_imm(t, RV_ADD, RV_SP, RV_SP, (int)rest, 0);
+        } else if (rest) {
+            rv_li(t, RV_T0, rest, F->xlen);
+            rv_alu(t, RV_ADD, RV_SP, RV_SP, RV_T0, 0);
+        }
+        zcmp_op(F, ret ? 0xbe02u : 0xba02u);      /* cm.popret / cm.pop */
+        return;
+    }
+    if (ret) {
+        rv_restore_ex(F, 0);
+        rv_ret(t);
+        return;
+    }
     for (int k = 0; k < F->nsave; k++)
         ld_sp(F, F->used_callee[k], F->save_at + (long)k * F->w, F->w, 1);
     for (int k = 0; k < F->nfsave; k++)
@@ -7054,6 +7100,36 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
         }
         free(rm);
     }
+    /* Zcmp: the saves become cm.push's, whose list is ra and s0..sN,
+     * stored from the highest register down (the spec's loop from x27
+     * to x1): sN at the top of the frame, s0 below it, ra at the bottom
+     * -- layout() puts ra_slot there and the list s0..sN upward from it.
+     * The list is a prefix, so s-registers the allocator did not take
+     * are saved too (cm.push stores them anyway), and s10 alone is not
+     * a list: s11 then. */
+    F.zcmp = 0;
+    if ((target_riscv_ext() & RV_EXT_ZCMP) && !F.isr && !fn->is_varargs &&
+        !F.leaf && !getenv("EMBCC_RV_NO_ZCMP")) {
+        int top = -1, ok = 1;
+        for (int k = 0; k < F.nsave; k++) {
+            int r = F.used_callee[k], s = r == 8 ? 0 : r == 9 ? 1
+                                          : r >= 18 && r <= 27 ? r - 16 : -1;
+            if (s < 0)
+                ok = 0;
+            else if (s > top)
+                top = s;
+        }
+        if (ok) {
+            if (top == 10)
+                top = 11;
+            F.nsave = 0;
+            for (int s = 0; s <= top; s++)
+                F.used_callee[F.nsave++] = s == 0 ? 8 : s == 1 ? 9 : s + 16;
+            F.zcmp = 1;
+            F.zcmp_rlist = top == 11 ? 15 : top + 5;
+            F.zcmp_base = ((long)(F.nsave + 1) * F.w + 15) / 16 * 16;
+        }
+    }
   fx_again:
     layout(&F);
 
@@ -7157,6 +7233,16 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
     F.cfi_frame_end = F.cfi_saves_end = F.cfi_fp_end = -1;
     if (F.isr) {
         rv_isr_prologue(&F);
+    } else if (F.zcmp) {
+        zcmp_op(&F, 0xb802u);                     /* cm.push */
+        long rest = F.frame - zcmp_adj(&F);
+        if (rest && rv_fits(-rest, 12)) {
+            rv_alu_imm(t, RV_ADD, RV_SP, RV_SP, (int)-rest, 0);
+        } else if (rest) {
+            rv_li(t, RV_T0, -rest, xlen);
+            rv_alu(t, RV_ADD, RV_SP, RV_SP, RV_T0, 0);
+        }
+        F.cfi_frame_end = t->len;
     } else if (F.frame) {
         if (rv_fits(-F.frame, 12)) {
             rv_alu_imm(t, RV_ADD, RV_SP, RV_SP, (int)-F.frame, 0);
@@ -7166,9 +7252,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
         }
         F.cfi_frame_end = t->len;
     }
-    if (!F.leaf && !F.isr)
+    if (!F.leaf && !F.isr && !F.zcmp)
         st_sp(&F, RV_RA, F.ra_slot, F.w);
-    for (i = 0; i < F.nsave; i++)
+    for (i = 0; i < F.nsave && !F.zcmp; i++)
         st_sp(&F, F.used_callee[i], F.save_at + (long)i * F.w, F.w);
     /* the callee-saved f registers, as wide as the ABI preserves them */
     for (i = 0; i < F.nfsave; i++)
@@ -7488,8 +7574,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
     if (F.isr) {
         rv_isr_epilogue(&F);
     } else {
-        rv_restore(&F);
-        rv_ret(t);
+        rv_restore_ex(&F, 1);
     }
     }
 
