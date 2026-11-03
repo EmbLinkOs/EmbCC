@@ -427,6 +427,9 @@ static int t_resolv(void)
     CHECK(ns_parserr(&h, ns_s_an, 1, &rr) == -1 && errno == ENODEV);
     CHECK(ns_initparse(m, len + 1, &h) == -1 && errno == EMSGSIZE);  /* a byte too many */
 
+#ifdef EMBCC_TEST_HAS_FS
+    /* a random id, from the clock or the entropy: not on the boards, whose
+     * runs EmbSim and QEMU must count alike */
     unsigned char q[64];
     res_init();
     int n = res_mkquery(QUERY, "www.example.com", C_IN, T_MX, 0, 0, 0, q, sizeof q);
@@ -437,11 +440,14 @@ static int t_resolv(void)
     CHECK(n == 33 && !memcmp(q + 2, want, sizeof want));
     CHECK(res_mkquery(QUERY, "abc.de", C_IN, T_A, 0, 0, 0, q, 23) == -1 &&
           res_mkquery(QUERY, "abc.de", C_IN, T_A, 0, 0, 0, q, 24) == 24);
+#endif
     return 0;
 }
 
+/* threads and the clock (gai_suspend's timeout): not on the boards */
 static int t_gai(void)
 {
+#ifdef EMBCC_TEST_HAS_FS
     struct addrinfo hint;
     memset(&hint, 0, sizeof hint);
     hint.ai_flags = AI_NUMERICHOST;
@@ -465,6 +471,7 @@ static int t_gai(void)
     freeaddrinfo(a.ar_result);
     const struct gaicb *none[] = { 0 };
     CHECK(gai_suspend(none, 1, &ts) == EAI_ALLDONE);
+#endif
     CHECK(!strcmp(gai_strerror(EAI_INPROGRESS), "Processing request in progress"));
     return 0;
 }
@@ -498,9 +505,13 @@ static int t_backtrace(void)
     /* no unwinder and no chain: the caller only */
     CHECK(g_btn >= 1 && within(g_bt[0], f3));
 #endif
+#ifdef EMBCC_TEST_HAS_FS
+    /* the addresses as text: not on the boards, where EmbSim's image and
+     * QEMU's are linked at different addresses and must count alike */
     char **s = backtrace_symbols(g_bt, g_btn);
     CHECK(s && strchr(s[0], '[') && strchr(s[g_btn - 1], ']'));
     free(s);
+#endif
     return 0;
 }
 
