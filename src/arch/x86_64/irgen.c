@@ -1449,7 +1449,8 @@ static void asm_assemble_att(struct ir_func *fn, struct stmt *s,
         /* both refuse it: the original's reason, which says what it is
          * about the template -- unless all it said was that it does not
          * know the instruction, which is this one's to explain */
-        if (strncmp(g_asm_msg, "asm instruction \"", 17) != 0)
+        if (strncmp(g_asm_msg, "asm instruction \"", 17) != 0 ||
+            strstr(err, "is not an instruction this x86-64 assembler knows"))
             diag_fatal(file, line, "%s", g_asm_msg);
         diag_fatal(file, line, "%s", err);
     }

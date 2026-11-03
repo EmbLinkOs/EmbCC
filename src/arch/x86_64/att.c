@@ -1241,6 +1241,10 @@ int x86att_assemble(const char *text, struct code *out, char *err, int errlen)
     g_err = err;
     g_errlen = errlen;
     err[0] = 0;
+    if (text[0] == '\001') {      /* x86att_symform's refusal: its reason */
+        snprintf(err, (size_t)errlen, "%s", text + 1);
+        return -1;
+    }
     const char *p = text;
     while (*p) {
         const char *st = p;
