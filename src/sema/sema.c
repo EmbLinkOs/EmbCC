@@ -4123,6 +4123,8 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             for (; ec; ec = ec->next)
                 if (strcmp(ec->name, e->name) == 0)
                     break;
+            if (ec && ec->has_object)
+                ec = NULL;   /* a constexpr: the object, whose value folds */
             /* '<=' not '<': an enum is COMPLETE before the declarator that
              * uses it in the same declaration (`enum { A, B } g = B;`), so a
              * same-item (same seq) reference is legal -- the same reasoning the
@@ -6013,6 +6015,20 @@ static int builtin_fold(const struct expr *e, long *out)
     return 1;
 }
 
+/* The initializer of the C23 constexpr object e names -- a scalar one,
+ * whose value is the name's in a constant expression -- or NULL. */
+static const struct expr *constexpr_value(const struct expr *e)
+{
+    const struct global *g = e->gref;
+    if (!g || !g->is_constexpr || !g->constexpr_init || !e->ty ||
+        !(ty_is_arith(e->ty) || e->ty->kind == TY_PTR))
+        return NULL;
+    const struct expr *ci = g->constexpr_init;
+    if (ci->kind == EXPR_INITLIST)
+        ci = ci->nelems == 1 ? ci->elems[0] : NULL;
+    return ci && ci->ty ? ci : NULL;
+}
+
 static int const_fold(const struct expr *e, long *out)
 {
     long a, b;
@@ -6027,6 +6043,14 @@ static int const_fold(const struct expr *e, long *out)
     case EXPR_NUM:
         *out = e->num;
         return 1;
+    case EXPR_VAR: {
+        /* a C23 constexpr object: its value, as its own type holds it */
+        const struct expr *ci = constexpr_value(e);
+        if (!ci || !const_fold(ci, out))
+            return 0;
+        *out = cast_fold_value(e->ty, *out);
+        return 1;
+    }
     case EXPR_ADDR:
         return addr_fold(e->rhs, out);
     case EXPR_CAST:
@@ -6273,6 +6297,22 @@ static int const_fold_f(const struct expr *e, double *out)
     case EXPR_FNUM:
         *out = fold_round(e->ty, e->fnum);
         return 1;
+    case EXPR_VAR: {
+        const struct expr *ci = constexpr_value(e);
+        if (!ci)
+            return 0;
+        if (ty_is_float(ci->ty) || ci->ty->kind == TY_LDOUBLE) {
+            if (!const_fold_f(ci, out))
+                return 0;
+        } else {
+            long iv2;
+            if (!const_fold(ci, &iv2))
+                return 0;
+            *out = ci->ty->is_unsigned ? (double)(unsigned long)iv2 : (double)iv2;
+        }
+        *out = fold_round(e->ty, *out);
+        return 1;
+    }
     case EXPR_NUM:
         *out = (double)e->num;      /* an integer constant used where a float is wanted */
         return 1;
@@ -6318,6 +6358,16 @@ static struct ldf *const_fold_ld(const struct expr *e)
     double d;
     long iv;
     switch (e->kind) {
+    case EXPR_VAR: {
+        const struct expr *ci = constexpr_value(e);
+        if (!ci)
+            return NULL;
+        if (ci->ty->kind == TY_LDOUBLE)
+            return const_fold_ld(ci);
+        if (!const_fold_f(ci, &d))
+            return NULL;
+        return ldf_from_double(d);
+    }
     case EXPR_FNUM:
         if (e->ldv) return e->ldv;
         return ldf_from_double(e->ty && e->ty->kind == TY_FLOAT
@@ -7308,6 +7358,36 @@ static void lower_static_bytes(struct unit *u, int line, int size,
     *out_nrel = nrel;
 }
 
+/* C23 6.7.1: a constexpr object's initializer must give its value
+ * exactly -- `constexpr float f = 0.1;` is refused, as 0.1 is no float
+ * -- and must be a constant (flatten_init has said so for an aggregate
+ * leaf; a scalar is folded here). */
+static void check_constexpr(struct unit *u, const struct global *g)
+{
+    if (!g->is_constexpr || !g->constexpr_init)
+        return;
+    const struct expr *ci = g->constexpr_init;
+    if (ci->kind == EXPR_INITLIST)
+        ci = ci->nelems == 1 ? ci->elems[0] : NULL;
+    if (!ci || !ci->ty || !(ty_is_float(g->ty) || g->ty->kind == TY_LDOUBLE))
+        return;
+    double v, w;
+    if (!const_fold_f(ci, &v)) {
+        sema_error_line(u, g->line, "constexpr '%s' needs a constant initializer; "
+                        "this one is not one", g->name);
+        return;
+    }
+    if (ty_is_integer(ci->ty)) {
+        long iv;
+        if (const_fold(ci, &iv))
+            v = ci->ty->is_unsigned ? (double)(unsigned long)iv : (double)iv;
+    }
+    w = fold_round(g->ty, v);
+    if (w != v && !(v != v && w != w))
+        sema_error_line(u, g->line, "constexpr '%s': %.17g is not exactly a %s, and "
+                        "C23 wants it exactly", g->name, v, ty_name(g->ty));
+}
+
 /* Reduce every file-scope global's aggregate/relocatable initializer to
  * its byte image + relocations, now that types and sizes are settled. */
 static void lower_globals(struct unit *u)
@@ -7338,6 +7418,7 @@ static void lower_globals(struct unit *u)
         } else
             flatten_init(u, &gf, &sc, g->init_expr, g->ty, 0, &ib);
         g_in_static_init--;
+        check_constexpr(u, g);
         char what[96];
         snprintf(what, sizeof what, "'%s'", g->name);
         g->fam_extra = init_overhang(u, g->line, what, g->ty, ib.v, ib.n, 1);
@@ -9081,6 +9162,11 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                 g->ty = s->dty;
                 g->is_static = 1;
                 g->is_const = s->obj_const;   /* a lookup table: .rodata */
+                g->is_constexpr = s->is_constexpr;
+                g->constexpr_init = s->is_constexpr ? s->expr : NULL;
+                g->name = s->name;          /* (for the check's message) */
+                check_constexpr(u, g);
+                g->name = nm;
                 /* `static __thread` inside a function is still one
                  * object per thread -- the scope decides who can NAME
                  * it, not how many there are. */
@@ -10140,6 +10226,8 @@ static void check_var_aliases(struct unit *u)
 static void check_econst_names(struct unit *u)
 {
     for (const struct econst *ec = u->econsts; ec; ec = ec->next) {
+        if (ec->has_object)
+            continue;               /* a constexpr names its own object */
         const struct global *g = find_global(u, ec->name);
         const struct func *fn = g ? NULL : find_func(u, ec->name);
         int line = g ? g->line : fn ? fn->line : 0;

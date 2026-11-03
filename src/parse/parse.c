@@ -154,6 +154,8 @@ static void nameix_put(struct nameix *ix, const char *name, void *val)
 }
 
 struct parser {
+    int cx_decl;          /* a C23 constexpr specifier was read: the
+                           * declaration is static, const, and checked */
     /* a parenthesized declarator's matches (decl_skip_group), for the nest
      * being read; decl_depth counts the declarators open, and the table
      * is emptied when the outermost one returns */
@@ -1634,7 +1636,10 @@ static struct type *parse_type_spec_attrs(struct parser *ps, int allow_body,
                                           struct attrs *a);
 static void parse_static_assert(struct parser *ps);
 static int at_pack(struct parser *ps);
-static int parse_constexpr(struct parser *ps);
+static int take_constexpr(struct parser *ps);
+static const struct econst *constexpr_declarator(struct parser *ps, const char *kname,
+                                                 struct type *kt, struct expr *kinit,
+                                                 int kline, int file_scope);
 static void parse_pack(struct parser *ps);
 static int at_weak(struct parser *ps);
 static void parse_weak(struct parser *ps);
@@ -5648,7 +5653,13 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
         while (cur(ps)->kind == TOK_KW_STATIC ||
                cur(ps)->kind == TOK_KW_THREAD ||
                cur(ps)->kind == TOK_KW_ALIGNAS ||
-               cur(ps)->kind == TOK_KW_ATTRIBUTE) {
+               cur(ps)->kind == TOK_KW_ATTRIBUTE ||
+               (cur(ps)->kind == TOK_IDENT && c23_words() &&
+                !strcmp(cur(ps)->text, "constexpr"))) {
+            if (cur(ps)->kind == TOK_IDENT) {
+                take_constexpr(ps);    /* `static constexpr int k` */
+                continue;
+            }
             if (cur(ps)->kind == TOK_KW_ALIGNAS) {
                 consume_alignas(ps);       /* accumulates ps->alignas_out */
                 continue;
@@ -5703,12 +5714,7 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
          * typeof and sizeof use, so the whole of it is: record the
          * value under the name. A non-constant initializer is
          * refused, which is what makes it constexpr and not const. */
-        if (cur(ps)->kind == TOK_IDENT && c23_words() &&
-            strcmp(cur(ps)->text, "constexpr") == 0) {
-            int kline = cur(ps)->line;
-            if (parse_constexpr(ps))
-                return new_stmt(STMT_BLOCK, kline, 0);   /* declares only */
-        }
+        take_constexpr(ps);    /* then parsed as a declaration, below */
         /* C23 spells __auto_type `auto`, reusing the storage-class
          * keyword that meant nothing. The two are distinguished by
          * what follows: `auto x = e;` infers, `auto int x;` is the
@@ -5789,6 +5795,12 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
          * documented limitation, not a miscompile. */
         struct type *base = parse_type_spec_attrs(ps, 1, &lead);
         int spec_const = ps->spec_const;
+        int is_cx = ps->cx_decl;
+        ps->cx_decl = 0;
+        if (is_cx) {
+            local_static = 1;           /* its value is known: one copy */
+            spec_const = 1;
+        }
         /* `int static n;`, `const static char t[]` */
         int late = late_storage(ps, &base, &spec_const);
         if (late & SC_STATIC)
@@ -5921,6 +5933,11 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
                 advance(ps);
                 s->expr = parse_initializer(ps);
             }
+            const struct econst *cx_ec = NULL;
+            if (is_cx) {
+                s->is_constexpr = 1;
+                cx_ec = constexpr_declarator(ps, dname, s->dty, s->expr, s->line, 0);
+            }
             /* Record this local's type for a later `sizeof(name)`, inferring
              * an omitted array size from a string or brace initializer (as
              * sema does for codegen) so the size is available now. */
@@ -5941,7 +5958,7 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
                             ft = ty_array_sized(ft->pointee, n);
                     }
                 }
-                fold_local_add(dname, ft);
+                fold_local_add_ec(dname, ft, cx_ec);
             }
             /* checked AFTER the initializer, because `char a[] = "..."`
              * takes its size from the literal */
@@ -6343,89 +6360,94 @@ static void parse_static_assert(struct parser *ps)
                    msg ? msg : "(no message)");
 }
 
-/* C23 `constexpr int k = 5;` -- a named constant, usable wherever an
- * integer constant expression is, at file scope as in a block: the value
- * is recorded under the name the way an enumerator's is, which size_fold
- * and sema already resolve -- with the declared type, which an
- * enumerator's int would truncate (`constexpr long long big =
- * 5000000000;` was 705032704). A non-constant initializer is refused,
- * which is what makes it constexpr and not const, and so is a value the
- * type cannot hold exactly (C23 6.7.1). Returns 0, consuming nothing,
- * when `constexpr` is a variable's name rather than C23's keyword. */
-static int parse_constexpr(struct parser *ps)
+/* C23 `constexpr T k = init;` -- an object, const and of static storage
+ * here, whose value is known at translation time: the declaration is
+ * parsed as any other (the specifier sets ps->cx_decl), and this checks
+ * one declarator of it, with its initializer, once both are parsed. An
+ * integer one is also a named constant for what folds while parsing
+ * (array sizes, case labels): at file scope in the unit's list, which
+ * sema then passes over for the object; in a block only in that block's
+ * table, so it goes out of scope with the block. Floating and other
+ * values fold in sema from the object's initializer. A value the type
+ * cannot hold exactly is refused (C23 6.7.1), as is a non-constant
+ * initializer; a pointer must be null. */
+static const struct econst *constexpr_declarator(struct parser *ps, const char *kname,
+                                                 struct type *kt, struct expr *kinit,
+                                                 int kline, int file_scope)
 {
-    struct lexer ksave = ps->lx;
-    advance(ps);
-    if (!at_type_start(ps)) {
-        ps->lx = ksave;
-        return 0;
+    if (!kinit) {
+        parse_error_line(ps, kline, "constexpr '%s' needs an initializer", kname);
+        return NULL;
     }
-    int kline = cur(ps)->line;
-    struct type *kb = parse_type_spec(ps, 1);
-    if (!kb)
-        parse_error_at(ps, cur(ps)->line, cur(ps)->col, "constexpr needs a type");
-    for (;;) {
-        const char *kname;
-        struct type *kt = parse_declarator(ps, kb, &kname);
-        long kv;
-        if (!kname)
-            parse_error_line(ps, kline, "constexpr needs a name");
-        if (!ty_is_integer(kt))
-            parse_error_line(ps, kline, "constexpr '%s' of type %s is not "
-                             "supported: EmbCC takes integer constants",
-                             kname, ty_name(kt));
-        if (cur(ps)->kind != TOK_ASSIGN)
-            parse_error_line(ps, kline, "constexpr '%s' needs an initializer",
-                             kname);
-        advance(ps);
-        struct expr *kinit = parse_cond(ps);
-        if (!size_fold(kinit, &kv))
-            parse_error_line(ps, kline, "constexpr '%s' needs a constant "
-                             "initializer; this one is not one", kname);
-        int bits = 8 * ty_size(kt);
-        /* At 64 bits the fold's long holds either reading of the bits,
-         * so the initializer's own type says which it is: ULLONG_MAX
-         * is not a long long, and -1 is not an unsigned long long. */
-        struct type *it = ce_type(kinit);
-        int ibig = kv < 0 && it && ty_is_integer(it) && it->is_unsigned;
-        if (kt->kind == TY_BOOL ? (kv != 0 && kv != 1)
-            : bits < 64 ? (kt->is_unsigned
-                            ? (kv < 0 || kv >= (1L << bits))
-                            : (kv < -(1L << (bits - 1)) ||
-                               kv >= (1L << (bits - 1))))
-            : kv < 0 && (kt->is_unsigned ? !ibig : ibig)) {
-            if (ibig)
-                parse_error_line(ps, kline, "constexpr '%s': %lu does not "
-                                 "fit %s, and C23 wants it exactly", kname,
-                                 (unsigned long)kv, ty_name(kt));
-            parse_error_line(ps, kline, "constexpr '%s': %ld does not fit "
-                             "%s, and C23 wants it exactly", kname, kv,
-                             ty_name(kt));
-        }
-        /* One list holds every named constant, so a second of the same
-         * name would never be found: the first one answers for both. */
+    if (kt->kind == TY_PTR && kinit->kind != EXPR_INITLIST) {
+        long pv;
+        if (!size_fold(kinit, &pv) || pv != 0)
+            parse_error_line(ps, kline, "constexpr '%s': a constexpr pointer must "
+                             "be null", kname);
+        return NULL;
+    }
+    if (!ty_is_integer(kt))
+        return NULL;                /* sema checks the rest */
+    long kv;
+    if (kinit->kind == EXPR_INITLIST && kinit->nelems == 1)
+        kinit = kinit->elems[0];
+    if (!size_fold(kinit, &kv))
+        parse_error_line(ps, kline, "constexpr '%s' needs a constant "
+                         "initializer; this one is not one", kname);
+    int bits = 8 * ty_size(kt);
+    /* At 64 bits the fold's long holds either reading of the bits,
+     * so the initializer's own type says which it is: ULLONG_MAX
+     * is not a long long, and -1 is not an unsigned long long. */
+    struct type *it = ce_type(kinit);
+    int ibig = kv < 0 && it && ty_is_integer(it) && it->is_unsigned;
+    if (kt->kind == TY_BOOL ? (kv != 0 && kv != 1)
+        : bits < 64 ? (kt->is_unsigned
+                        ? (kv < 0 || kv >= (1L << bits))
+                        : (kv < -(1L << (bits - 1)) ||
+                           kv >= (1L << (bits - 1))))
+        : kv < 0 && (kt->is_unsigned ? !ibig : ibig)) {
+        if (ibig)
+            parse_error_line(ps, kline, "constexpr '%s': %lu does not "
+                             "fit %s, and C23 wants it exactly", kname,
+                             (unsigned long)kv, ty_name(kt));
+        parse_error_line(ps, kline, "constexpr '%s': %ld does not fit "
+                         "%s, and C23 wants it exactly", kname, kv,
+                         ty_name(kt));
+    }
+    struct econst *kc = xcalloc(1, sizeof *kc);
+    kc->name = kname;
+    kc->val = kv;
+    kc->ty = kt;
+    kc->seq = ps->seq;
+    kc->line = kline;
+    kc->has_object = 1;
+    if (file_scope) {
         const struct econst *dup = fold_econst(kname);
         if (dup)
             parse_error_line(ps, kline, "'%s' is already a named constant "
-                             "(line %d); EmbCC does not yet let one "
-                             "enumerator or constexpr shadow another", kname,
-                             dup->line);
-        econst_shadow_check(ps, kname, kline);
-        struct econst *kc = xcalloc(1, sizeof *kc);
-        kc->name = kname;
-        kc->val = kv;
-        kc->ty = kt;
-        kc->seq = ps->seq;
-        kc->line = kline;
-        kc->in_block = ps->blkdepth > 0;
+                             "(line %d)", kname, dup->line);
         *ps->econst_tail = kc;
         ps->econst_tail = &kc->next;
-        fold_local_add_ec(kname, kt, kc);
-        if (cur(ps)->kind != TOK_COMMA)
-            break;
-        advance(ps);
+    } else {
+        kc->in_block = 1;
     }
-    expect(ps, TOK_SEMI, "';'");
+    return kc;
+}
+
+/* `constexpr` as a declaration specifier, at cur: consumed, and the
+ * declaration marked, when C23's words are on and a type follows. */
+static int take_constexpr(struct parser *ps)
+{
+    if (cur(ps)->kind != TOK_IDENT || !c23_words() ||
+        strcmp(cur(ps)->text, "constexpr") != 0)
+        return 0;
+    struct lexer ksave = ps->lx;
+    advance(ps);
+    if (!at_type_start(ps) && cur(ps)->kind != TOK_KW_STATIC) {
+        ps->lx = ksave;             /* a variable called constexpr */
+        return 0;
+    }
+    ps->cx_decl = 1;
     return 1;
 }
 
@@ -6899,10 +6921,16 @@ static void parse_top(struct parser *ps, struct unit *u,
             break;
         }
     }
-    /* C23 `constexpr int N = 4;` at file scope, `static` or not */
-    if (cur(ps)->kind == TOK_IDENT && c23_words() &&
-        !strcmp(cur(ps)->text, "constexpr") && parse_constexpr(ps))
-        return;
+    /* C23 `constexpr int N = 4;` at file scope, `static` or not: an
+     * object of internal linkage, const, checked declarator by declarator */
+    int is_cx = 0;
+    if (take_constexpr(ps)) {
+        ps->cx_decl = 0;
+        is_cx = 1;
+        is_static = 1;
+        if (cur(ps)->kind == TOK_KW_STATIC)
+            advance(ps);            /* `constexpr static int k` */
+    }
     if (cur(ps)->kind == TOK_KW_TYPEDEF) {
         if (is_static || is_extern)
             parse_error_at(ps, cur(ps)->line, cur(ps)->col,
@@ -6938,7 +6966,7 @@ static void parse_top(struct parser *ps, struct unit *u,
     if (cur(ps)->kind == TOK_IDENT)
         reject_reserved(ps, cur(ps)->text, cur(ps)->line, cur(ps)->col);
     struct type *base = parse_type_spec_attrs(ps, 1, &at);
-    int spec_const = ps->spec_const;
+    int spec_const = ps->spec_const || is_cx;
     if (!base)
         base = c89_implicit_int(ps, is_static || is_extern || is_inline ||
                                     is_tls || at.noreturn);
@@ -7140,6 +7168,11 @@ static void parse_top(struct parser *ps, struct unit *u,
             g->vis = at.vis;
             g->is_tls = is_tls;
             g->is_const = gconst;
+            if (is_cx) {
+                g->is_constexpr = 1;
+                g->constexpr_init = g->init_expr;
+                constexpr_declarator(ps, gname, g->ty, g->init_expr, gline, 1);
+            }
             g->section = at.progmem ? ".progmem.data" : at.section;
             if (at.address && !is_extern)
                 parse_error_line(ps, at.address, "__attribute__((address)) on the definition of '%s' is not "

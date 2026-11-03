@@ -262,6 +262,7 @@ struct stmt {
     const char *name;     /* STMT_DECL */
     struct type *dty;     /* STMT_DECL: declared type */
     int is_static;        /* STMT_DECL: a static local -> its own global */
+    int is_constexpr;     /* STMT_DECL: C23 constexpr (and so static, const) */
     int obj_const;        /* STMT_DECL: the object itself is const (its
                            * type, arrays aside, is const-qualified) */
     int is_tls;           /* STMT_DECL: `static __thread` -> a TLS global */
@@ -348,6 +349,10 @@ struct global {
     int is_tls;
     const char *section;  /* __attribute__((section("name"))), or NULL */
     int has_init;
+    int is_constexpr;     /* C23 constexpr: a const object whose value is
+                           * known now -- constexpr_init folds in sema's
+                           * constant expressions as the name's value */
+    struct expr *constexpr_init;
     int is_const;         /* the object is const: `const int t[4]`,
                            * `char *const p` -- not `const char *p` */
     int count_from_init;  /* an unsized array sized by its brace list at
@@ -602,6 +607,9 @@ struct econst {
     int seq;
     int line;
     int in_block;         /* declared inside a function body */
+    int has_object;       /* a C23 constexpr's: the name is an object too,
+                           * which sema resolves it to (the value folds
+                           * from the object's initializer there) */
     struct econst *next;
 };
 
