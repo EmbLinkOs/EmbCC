@@ -102,6 +102,11 @@ void riscv_options_done(void)
                 { "zba", RV_EXT_ZBA }, { "zbb", RV_EXT_ZBB },
                 { "zbs", RV_EXT_ZBS }, { "zfhmin", RV_EXT_ZFHMIN },
                 { "zfh", RV_EXT_ZFH | RV_EXT_ZFHMIN },
+                { "zicond", RV_EXT_ZICOND }, { "zbc", RV_EXT_ZBC },
+                { "zbkb", RV_EXT_ZBKB }, { "zbkc", RV_EXT_ZBKC },
+                { "zbkx", RV_EXT_ZBKX }, { "zca", RV_EXT_ZCA },
+                { "zcb", RV_EXT_ZCB | RV_EXT_ZCA },
+                { "zcmp", RV_EXT_ZCMP | RV_EXT_ZCA },
             };
             int known = 0;
             for (unsigned k = 0; k < sizeof multi / sizeof *multi; k++)
@@ -113,9 +118,27 @@ void riscv_options_done(void)
                 continue;
             diag_fatal(NULL, 0, "%s: the '%.*s' extension is not "
                        "supported: EmbCC accepts zicsr, zifencei, zba, zbb, "
-                       "zbs, zfhmin and zfh after the single-letter ones",
+                       "zbs, zbc, zbkb, zbkc, zbkx, zicond, zca, zcb, zcmp, "
+                       "zfhmin and zfh after the single-letter ones",
                        isa_said, (int)n, e);
         }
+        /* Zca is C's integer half: on its own, the compressed encoder's
+         * floating-point forms (Zcf, Zcd) are what it must not use, so
+         * with F or D it needs C itself; Zcmp's push/pop encodings are
+         * Zcd's, so the two cannot be had together (the spec's rule) */
+        if ((ext & RV_EXT_ZCA) && !c) {
+            if (f || d)
+                diag_fatal(NULL, 0, "%s: Zca without C, with F or D, is "
+                           "not supported: EmbCC's compressed encoder uses "
+                           "c.flw/c.fld with them; add c, or drop f and d",
+                           isa_said);
+            c = 1;
+        }
+        if ((ext & RV_EXT_ZCMP) && c && d)
+            diag_fatal(NULL, 0, "%s: Zcmp and Zcd (C with D) share their "
+                       "encodings and cannot be had together: use "
+                       "zca_zcmp without c, or drop zcmp", isa_said);
+
         if ((ext & RV_EXT_ZFHMIN) && !f)
             diag_fatal(NULL, 0, "%s: %s needs F (half precision is built "
                        "on the floating-point registers): add f", isa_said,

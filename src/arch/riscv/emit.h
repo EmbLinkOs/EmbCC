@@ -160,6 +160,7 @@ enum rv_zb {
     RV_ZB_SLLIUW
 };
 void rv_zb_r(struct code *c, int which, int rd, int rs1, int rs2);
+void rv_czero(struct code *c, int nez, int rd, int rs1, int rs2);
 void rv_zb_unary(struct code *c, int which, int rd, int rs, int w32, int xlen);
 void rv_zb_imm(struct code *c, int which, int rd, int rs, int amt, int w32);
 

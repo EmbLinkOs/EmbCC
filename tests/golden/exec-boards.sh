@@ -57,8 +57,8 @@ export EMBCC EMBLD
 
 boards=
 command -v "$QA" >/dev/null 2>&1 && boards="$boards m4 m4hf a7"
-command -v "$Q32" >/dev/null 2>&1 && boards="$boards rv32 rv32f rv32d rv32noa"
-command -v "$Q64" >/dev/null 2>&1 && boards="$boards rv64 rv64d rv64noa"
+command -v "$Q32" >/dev/null 2>&1 && boards="$boards rv32 rv32f rv32d rv32noa rv32k"
+command -v "$Q64" >/dev/null 2>&1 && boards="$boards rv64 rv64d rv64noa rv64k"
 [ -n "${EMBCC_BOARDS:-}" ] && boards=" $EMBCC_BOARDS"
 [ -n "$boards" ] || { echo "SKIP: no qemu-system-arm or -riscv32/64"; exit 0; }
 
@@ -67,8 +67,8 @@ triple() {
         m4) echo thumbv7em-none-eabi ;;
         m4hf) echo thumbv7em-none-eabihf ;;
         a7) echo armv7a-none-eabi ;;
-        rv32|rv32f|rv32d|rv32noa) echo riscv32-unknown-elf ;;
-        rv64|rv64d|rv64noa) echo riscv64-unknown-elf ;;
+        rv32|rv32f|rv32d|rv32noa|rv32k) echo riscv32-unknown-elf ;;
+        rv64|rv64d|rv64noa|rv64k) echo riscv64-unknown-elf ;;
     esac
 }
 # The -march/-mabi a board adds, and the runtime variant they link with
@@ -80,6 +80,11 @@ flags() {
         rv64d) echo "-march=rv64gc -mabi=lp64d" ;;
         rv32noa) echo "-march=rv32imc" ;;
         rv64noa) echo "-march=rv64imc" ;;
+        # the bit-manipulation and size extensions codegen uses: Zicond's
+        # branchless selects, Zcb's 16-bit forms, Zba/Zbb/Zbs (and Zbc,
+        # Zbkb, which it does not, to have -march= take them)
+        rv32k) echo "-march=rv32imac_zicond_zcb_zba_zbb_zbs_zbc_zbkb" ;;
+        rv64k) echo "-march=rv64imac_zicond_zcb_zba_zbb_zbs_zbc" ;;
     esac
 }
 variant() {
@@ -214,6 +219,8 @@ case $b in
     rv64d) T="riscv64-unknown-elf -march=rv64gc -mabi=lp64d" ;;
     rv32noa) T="riscv32-unknown-elf -march=rv32imc" ;;
     rv64noa) T="riscv64-unknown-elf -march=rv64imc" ;;
+    rv32k) T="riscv32-unknown-elf -march=rv32imac_zicond_zcb_zba_zbb_zbs_zbc_zbkb" ;;
+    rv64k) T="riscv64-unknown-elf -march=rv64imac_zicond_zcb_zba_zbb_zbs_zbc" ;;
 esac
 L=$out/$b; o=$out/p/$name-$b$opt
 if ! "$EMBCC" --target=$T $opt -Dmain=prog_main -Ilib/libc/include \
@@ -248,6 +255,12 @@ case $b in
     a7) sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-30}" "$QA" \
             -M virt -cpu cortex-a15 -m 128 -semihosting -nographic \
             -monitor none -kernel $o.elf > $o.txt 2>&1 ;;
+    rv32k) sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-30}" "$Q32" \
+            -M virt -cpu rv32,zicond=true,zcb=true,zba=true,zbb=true,zbs=true,zbc=true,zbkb=true \
+            -bios none -nographic -m 8 -kernel $o.elf > $o.txt 2>&1 ;;
+    rv64k) sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-30}" "$Q64" \
+            -M virt -cpu rv64,zicond=true,zcb=true,zba=true,zbb=true,zbs=true,zbc=true \
+            -bios none -nographic -m 8 -kernel $o.elf > $o.txt 2>&1 ;;
     rv32*) sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-30}" "$Q32" \
             -M virt -bios none -nographic -m 8 -kernel $o.elf > $o.txt 2>&1 ;;
     rv64*) sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-30}" "$Q64" \

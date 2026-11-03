@@ -459,6 +459,19 @@ static int riscv_adds(struct predef_macro *out)
         out[n].name = "__riscv_zfhmin"; out[n++].value = "1000000";
     }
     if (ext & RV_EXT_ZFH) { out[n].name = "__riscv_zfh"; out[n++].value = "1000000"; }
+    {
+        static const struct { unsigned bit; const char *name; } more[] = {
+            { RV_EXT_ZICOND, "__riscv_zicond" }, { RV_EXT_ZBC, "__riscv_zbc" },
+            { RV_EXT_ZBKB, "__riscv_zbkb" }, { RV_EXT_ZBKC, "__riscv_zbkc" },
+            { RV_EXT_ZBKX, "__riscv_zbkx" }, { RV_EXT_ZCA, "__riscv_zca" },
+            { RV_EXT_ZCB, "__riscv_zcb" }, { RV_EXT_ZCMP, "__riscv_zcmp" },
+        };
+        for (unsigned k = 0; k < sizeof more / sizeof *more; k++)
+            if (ext & more[k].bit) {
+                out[n].name = more[k].name;
+                out[n++].value = "1000000";
+            }
+    }
     if (ext & RV_EXT_V) {
         static const struct predef_macro v[] = {
             { "__riscv_v", "1000000" }, { "__riscv_vector", "1" },

@@ -1003,7 +1003,13 @@ void target_set_riscv_isa(int a, int f, int d, int c, int zifencei);
  * and add), Zbb (basic bit manipulation), Zbs (single bits), Zfhmin and
  * Zfh (half precision), and V (vectors); 0 on any other target */
 enum { RV_EXT_ZBA = 1, RV_EXT_ZBB = 2, RV_EXT_ZBS = 4, RV_EXT_ZFHMIN = 8,
-       RV_EXT_ZFH = 16, RV_EXT_V = 32 };
+       RV_EXT_ZFH = 16, RV_EXT_V = 32,
+       /* Zicond (czero), Zbc/Zbkc (carry-less multiply), Zbkb (pack,
+        * brev8, zip), Zbkx (crossbar permutes), Zca (C without its
+        * floating-point loads), Zcb (more 16-bit forms), Zcmp (push/pop) */
+       RV_EXT_ZICOND = 64, RV_EXT_ZBC = 128, RV_EXT_ZBKB = 256,
+       RV_EXT_ZBKC = 512, RV_EXT_ZBKX = 1024, RV_EXT_ZCA = 2048,
+       RV_EXT_ZCB = 4096, RV_EXT_ZCMP = 8192 };
 void target_set_riscv_ext(unsigned mask);
 unsigned target_riscv_ext(void);
 void target_set_riscv_abi_flen(int flen);

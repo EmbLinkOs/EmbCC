@@ -5354,6 +5354,16 @@ static void gen_ins(struct rv_fn *F, int n)
         } else {
             cond = i->size == 4 ? rd32(F, i->a, SCR) : rdr(F, i->a, SCR);
         }
+        if (target_riscv_ext() & RV_EXT_ZICOND) {
+            /* Zicond: (b if cond) | (c if not), no branch */
+            int rb = rdr(F, i->b, A_HI), rc = rdr(F, i->c, SCR2);
+            rv_czero(t, 0, A_HI, rb, cond);
+            rv_czero(t, 1, SCR2, rc, cond);
+            int d = wreg(F, i->dst, ACC);
+            rv_alu(t, RV_OR, d, A_HI, SCR2, 0);
+            wrote(F, i->dst, d);
+            return;
+        }
         int d = wreg(F, i->dst, ACC);
         take_c = rv_b_placeholder(t, RV_BEQ, cond, RV_ZERO);
         rd(F, i->b, d);

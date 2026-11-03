@@ -1120,6 +1120,16 @@ and their calling conventions.
 | F | With `--isa=...f...`: `float` add, subtract, multiply, divide, square root, comparisons and conversions to and from the integers a register holds are instructions (`fadd.s`, `feq.s`, `fcvt.w.s` ... ); a float lives in an f register (`ft3`-`ft11`, and `fs0`-`fs11` where the ABI preserves them). |
 | D | With `--isa=...d...` (or `g`): the same for `double`, and the conversions between the two. At RV32 a double crosses to an integer register pair through eight bytes of frame. |
 | C | Compressed instructions, emitted wherever an encoding allows (unless `--isa=` leaves out `c`). The object's `e_flags` has `EF_RISCV_RVC` set. |
+| B (Zba, Zbb, Zbs) | `-march=..._zba_zbb_zbs` or `b`: shift-and-add for indexing, `clz`/`ctz`/`cpop` for the bit builtins, `rev8` for byte swaps, `andn`/`orn`/`xnor`, `min`/`max`, `sext`/`zext`, single-bit set/clear/invert/extract. |
+| Zicond | `_zicond`: a `?:` the optimizer made a select is `czero.eqz`, `czero.nez` and `or`, with no branch. |
+| Zca, Zcb | `_zca` is C without its floating-point loads and stores; `_zcb` adds the 16-bit `c.lbu`, `c.lhu`, `c.lh`, `c.sb`, `c.sh`, `c.zext.b`, `c.sext.b`, `c.zext.h`, `c.sext.h`, `c.zext.w`, `c.not` and `c.mul`, which the compressor uses wherever an instruction fits one. |
+| Zcmp | `_zcmp`: `cm.push`, `cm.pop`, `cm.popret`, `cm.popretz`, `cm.mva01s` and `cm.mvsa01` in assembly and inline asm; prologues do not use them yet. Refused together with C and D (Zcd shares its encodings). |
+| Zbc, Zbkb, Zbkc, Zbkx | `clmul`/`clmulh` (and Zbc's `clmulr`), `pack`/`packh`/`packw`, `brev8`, `zip`/`unzip`, `xperm4`/`xperm8`, and Zbkb's share of Zbb's instructions, in assembly and inline asm. |
+| Zfhmin, Zfh | Half-precision conversions (Zfhmin) and arithmetic (Zfh) on `_Float16` in f registers; needs F. |
+| V | `riscv_vector.h`'s intrinsics, as instructions; needs F and D. |
+
+Each one defines its `__riscv_<name>` macro (`1000000`, as clang does) and
+appears in the object's `.riscv.attributes` architecture string.
 
 Without F a floating-point operation is a call to a soft-float helper
 (`__addsf3`, `__adddf3`, ...); with F alone so is every `double` one; and

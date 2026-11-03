@@ -53,19 +53,27 @@ unsigned char *riscv_build_attributes(size_t *len)
     unsigned ext = target_riscv_ext();
     /* (V, and the multi-letter ones in clang's canonical order: Zi*,
      * Zf*, Zb*, then V's Zve and Zvl) */
-    snprintf(arch, sizeof arch, "rv%di2p1_m2p0%s%s%s%s%s%s%s%s%s%s%s%s%s%s",
+    snprintf(arch, sizeof arch, "rv%di2p1_m2p0%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s",
              target_xlen(), target_riscv_atomics() ? "_a2p1" : "",
              flen ? "_f2p2" : "", flen == 64 ? "_d2p2" : "",
              target_riscv_rvc() ? "_c2p0" : "",
              (ext & (RV_EXT_ZBA | RV_EXT_ZBB | RV_EXT_ZBS)) ==
                  (RV_EXT_ZBA | RV_EXT_ZBB | RV_EXT_ZBS) ? "_b1p0" : "",
              (ext & RV_EXT_V) ? "_v1p0" : "",
+             (ext & RV_EXT_ZICOND) ? "_zicond1p0" : "",
              flen ? "_zicsr2p0" : "",
              target_riscv_zifencei() ? "_zifencei2p0" : "",
              (ext & RV_EXT_ZFH) ? "_zfh1p0" : "",
              (ext & RV_EXT_ZFHMIN) ? "_zfhmin1p0" : "",
+             (ext & RV_EXT_ZCA) ? "_zca1p0" : "",
+             (ext & RV_EXT_ZCB) ? "_zcb1p0" : "",
+             (ext & RV_EXT_ZCMP) ? "_zcmp1p0" : "",
              (ext & RV_EXT_ZBA) ? "_zba1p0" : "",
              (ext & RV_EXT_ZBB) ? "_zbb1p0" : "",
+             (ext & RV_EXT_ZBC) ? "_zbc1p0" : "",
+             (ext & RV_EXT_ZBKB) ? "_zbkb1p0" : "",
+             (ext & RV_EXT_ZBKC) ? "_zbkc1p0" : "",
+             (ext & RV_EXT_ZBKX) ? "_zbkx1p0" : "",
              (ext & RV_EXT_ZBS) ? "_zbs1p0" : "",
              (ext & RV_EXT_V) ? "_zve32f1p0_zve32x1p0_zve64d1p0_zve64f1p0"
                                 "_zve64x1p0_zvl128b1p0_zvl32b1p0_zvl64b1p0"

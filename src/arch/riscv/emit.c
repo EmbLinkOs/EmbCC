@@ -2,6 +2,7 @@
 #include "emit.h"
 
 #include "../../driver/util.h"
+#include "../target.h"
 
 const int rv_argreg[RV_NARGREG] = {
     RV_A0, RV_A1, RV_A2, RV_A3, RV_A4, RV_A5, RV_A6, RV_A7
@@ -151,8 +152,65 @@ static unsigned cr_ca(unsigned op, unsigned f6, int rd_, unsigned f2, int rs2_)
            (f6 << 10);
 }
 
+/* Zcb's 16-bit forms, for an instruction rv_compress has none for: the
+ * byte and halfword loads and stores at small offsets, and the in-place
+ * extensions, not and mul (encodings from the Zc spec, checked against
+ * llvm-mc) */
+static unsigned zcb_compress(unsigned long w, int xlen, unsigned ext)
+{
+    unsigned op = (unsigned)(w & 0x7f), f3 = (unsigned)((w >> 12) & 7);
+    unsigned f7 = (unsigned)((w >> 25) & 0x7f);
+    int rd = (int)((w >> 7) & 0x1f), rs1 = (int)((w >> 15) & 0x1f);
+    int rs2 = (int)((w >> 20) & 0x1f);
+    int immi = (int)((w >> 20) & 0xfff);
+    int imms = (int)((((w >> 25) & 0x7f) << 5) | ((w >> 7) & 0x1f));
+    int rdc = rd >= 8 && rd < 16 ? rd - 8 : -1;
+    int r1c = rs1 >= 8 && rs1 < 16 ? rs1 - 8 : -1;
+    int r2c = rs2 >= 8 && rs2 < 16 ? rs2 - 8 : -1;
+    if (op == 0x03 && rdc >= 0 && r1c >= 0) {           /* loads */
+        if (f3 == 4 && immi >= 0 && immi <= 3)          /* c.lbu */
+            return 0x8000u | (unsigned)r1c << 7 | (unsigned)(immi & 1) << 6 |
+                   (unsigned)((immi >> 1) & 1) << 5 | (unsigned)rdc << 2;
+        if ((f3 == 5 || f3 == 1) && (immi == 0 || immi == 2))  /* c.lhu, c.lh */
+            return 0x8400u | (unsigned)r1c << 7 | (f3 == 1 ? 1u << 6 : 0) |
+                   (unsigned)(immi >> 1) << 5 | (unsigned)rdc << 2;
+    }
+    if (op == 0x23 && r1c >= 0 && r2c >= 0) {           /* stores */
+        if (f3 == 0 && imms >= 0 && imms <= 3)          /* c.sb */
+            return 0x8800u | (unsigned)r1c << 7 | (unsigned)(imms & 1) << 6 |
+                   (unsigned)((imms >> 1) & 1) << 5 | (unsigned)r2c << 2;
+        if (f3 == 1 && (imms == 0 || imms == 2))        /* c.sh */
+            return 0x8c00u | (unsigned)r1c << 7 | (unsigned)(imms >> 1) << 5 |
+                   (unsigned)r2c << 2;
+    }
+    if (rdc < 0 || rs1 != rd)
+        return 0;
+    unsigned u = 0x9c61u | (unsigned)rdc << 7;          /* 100111 rd' 11 ... 01 */
+    if (op == 0x13 && f3 == 7 && immi == 0xff)          /* andi rd, rd, 255 */
+        return u;                                       /* c.zext.b */
+    if (op == 0x13 && f3 == 4 && immi == 0xfff)         /* xori rd, rd, -1 */
+        return u | 5u << 2;                             /* c.not */
+    if ((ext & RV_EXT_ZBB) && op == 0x13 && f3 == 1 && (immi == 0x604 || immi == 0x605))
+        return u | (immi == 0x604 ? 1u : 3u) << 2;      /* c.sext.b, c.sext.h */
+    if ((ext & RV_EXT_ZBB) && f7 == 0x04 && f3 == 4 && rs2 == 0 &&
+        op == (xlen == 64 ? 0x3bu : 0x33u))
+        return u | 2u << 2;                             /* c.zext.h */
+    if (xlen == 64 && (ext & RV_EXT_ZBA) && op == 0x3b && f3 == 0 &&
+        f7 == 0x04 && rs2 == 0)                         /* add.uw rd, rd, x0 */
+        return u | 4u << 2;                             /* c.zext.w */
+    if (op == 0x33 && f3 == 0 && f7 == 0x01 && r2c >= 0)    /* mul rd, rd, rs2 */
+        return 0x9c41u | (unsigned)rdc << 7 | (unsigned)r2c << 2;  /* c.mul */
+    return 0;
+}
+
 unsigned rv_compress(unsigned long w, int xlen)
 {
+    unsigned ext = target_riscv_ext();
+    if (ext & RV_EXT_ZCB) {
+        unsigned z = zcb_compress(w, xlen, ext);
+        if (z)
+            return z;
+    }
     unsigned op    = (unsigned)(w & 0x7f);
     int rd         = (int)((w >> 7) & 0x1f);
     unsigned f3    = (unsigned)((w >> 12) & 7);
@@ -482,6 +540,12 @@ void rv_w(struct code *c, unsigned long w)
         }
     }
     code_u32(c, w);
+}
+
+/* Zicond: rd = rs2 == 0 ? 0 : rs1 (eqz), rs2 != 0 ? 0 : rs1 (nez) */
+void rv_czero(struct code *c, int nez, int rd, int rs1, int rs2)
+{
+    rv_w(c, rv_enc_r(0x33, rd, nez ? 7 : 5, rs1, rs2, 0x07));
 }
 
 void rv_mv(struct code *c, int rd, int rs)

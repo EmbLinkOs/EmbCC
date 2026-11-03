@@ -130,7 +130,7 @@ refuse riscv64-unknown-elf "-march=rv64imac has no D extension" -mabi=lp64d
 refuse riscv32-unknown-elf "has no F extension" -march=rv32imac -mabi=ilp32f
 refuse riscv32-unknown-elf "the D extension needs F" -march=rv32imadc
 refuse riscv32-unknown-elf "V needs F and D" -march=rv32imacv
-refuse riscv32-unknown-elf "the 'zbc' extension is not supported" -march=rv32imac_zbc
+refuse riscv32-unknown-elf "the 'zkne' extension is not supported" -march=rv32imac_zkne
 refuse riscv32-unknown-elf "EmbCC needs the M extension" -march=rv32iac
 refuse riscv32-unknown-elf "use --target=riscv64-unknown-elf" -march=rv64gc
 refuse riscv64-unknown-elf "is a 32-bit ABI" -march=rv64gc -mabi=ilp32d
