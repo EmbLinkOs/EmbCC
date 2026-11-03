@@ -60,8 +60,11 @@ case $triple in
     riscv*|thumb*|mips*|xtensa*|tricore*) units="$units eh terminate"; cxxflags= ;;
 esac
 for b in $units; do
+    # (each object in a section of its own: typeinfo's two hundred
+    # fundamental type_infos are RAM on AVR, and a link drops the unused)
     # shellcheck disable=SC2086
-    "$EMBCC" --target="$triple" $flags -Os $cxxflags -x c++ \
+    "$EMBCC" --target="$triple" $flags -Os --sections=functions,data \
+        $cxxflags -x c++ \
         -I"$here/lib/libcxx/include" -I"$here/lib/libc/include" \
         -c "$here/lib/libcxx/src/$b.cc" -o "$out/cxx/$b.o" || {
         echo "build-libcxx: lib/libcxx/src/$b.cc does not compile for $triple" >&2

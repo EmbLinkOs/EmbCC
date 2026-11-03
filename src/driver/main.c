@@ -409,7 +409,16 @@ static int lang_cxx;
 static int want_unwind = -1;
 
 /* C++ exceptions (-fno-exceptions turns them off, as g++'s). */
-static int want_exceptions = 1;
+/* -1 until an option says: then on, but off for C++ on AVR, which has
+ * no unwinder (avr-gcc ships none either, and Arduino builds pass
+ * -fno-exceptions); an explicit --exceptions there is refused by name */
+static int want_exceptions = -1;
+static int exceptions_on(void)
+{
+    if (want_exceptions < 0)
+        return target_get() != TARGET_AVR;
+    return want_exceptions;
+}
 static int want_rtti = 1;
 
 /* --emit-c: print the C a C++ unit lowers to, instead of compiling it. */
@@ -2901,7 +2910,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         diag_register_source(in, src);  /* so diagnostics can show its lines */
     predef_set_cxx(lang_cxx);
     if (lang_cxx)
-        cpp_set_cxx(cxx_has_builtin, want_exceptions);
+        cpp_set_cxx(cxx_has_builtin, exceptions_on());
     /* EmbCC's own headers, AFTER every -I the caller gave: a project
      * that ships its own <stdio.h> must win, or nothing we install can
      * ever be overridden. They are added here rather than at option
@@ -2934,20 +2943,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
             fputs(pp, stdout);
         return 0;
     }
-    if (lang_cxx && !syntax_only && target_get() == TARGET_AVR) {
-        /* The front end lays a class out by AVR's sizes, but its lowering
-         * still writes a 32-bit int's promotions, enumerations and
-         * literals, a `long` member-pointer adjustment and RTTI base
-         * offsets one pointer wide -- each wrong where int and pointers
-         * are 16 bits -- and no AVR C++ runtime is built. */
-        fprintf(stderr,
-                "embcc: error: C++ is not yet supported for %s: the C++ "
-                "lowering assumes a 32-bit int and 4-byte pointers (integral "
-                "promotions, member pointers, RTTI), and this target's are "
-                "16 bits\n", target_triple_now());
-        return 1;
-    }
-    if (lang_cxx && !syntax_only && want_exceptions &&
+    if (lang_cxx && !syntax_only && exceptions_on() &&
         cxx_exceptions_unwritten()) {
         /* Exceptions need the unwinder's tables and a personality routine
          * reading them: ARM EHABI's .ARM.exidx on ARM, DWARF .eh_frame
@@ -2961,7 +2957,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         return 1;
     }
     if (lang_cxx) {
-        cxx_set_exceptions(want_exceptions);
+        cxx_set_exceptions(exceptions_on());
         cxx_set_rtti(want_rtti);
         pp = cxx_translate(in, pp);
         time_mark("C++ front end");
@@ -3385,7 +3381,7 @@ lto_backend:
     /* (the unwind decision below, made first: a backend records its
      * prologues' CFI for .eh_frame only when it is asked) */
     target_set_unwind_tables(
-        want_unwind > 0 || (lang_cxx && (want_unwind < 0 || want_exceptions)) ||
+        want_unwind > 0 || (lang_cxx && (want_unwind < 0 || exceptions_on())) ||
         (want_unwind < 0 && target_is_hosted() &&
          target_fmt_get() == TGT_FMT_ELF));
     {
@@ -3921,7 +3917,7 @@ lto_backend:
      * nothing to unwind into on a kernel's stack, and the tables are
      * pure size there. */
     int unwind = want_unwind > 0 ||
-                 (lang_cxx && (want_unwind < 0 || want_exceptions)) ||
+                 (lang_cxx && (want_unwind < 0 || exceptions_on())) ||
                  (want_unwind < 0 && target_is_hosted() &&
                   target_fmt_get() == TGT_FMT_ELF);
     /* eh_emit writes x86-64's and AArch64's tables -- their register
@@ -3932,7 +3928,7 @@ lto_backend:
      * stopped every C++ unit there. An explicit request, or exceptions,
      * is refused by name below. */
     const char *unwritten = backend_get(ta)->unwind_unwritten;
-    if (unwind && unwritten && lang_cxx && want_unwind < 0 && !want_exceptions)
+    if (unwind && unwritten && lang_cxx && want_unwind < 0 && !exceptions_on())
         unwind = 0;
     /* An explicit request, or C++ with exceptions, where the tables are
      * not written: refused by name, naming the tables (the registry's
@@ -3942,7 +3938,7 @@ lto_backend:
                             "%s yet (--unwind-tables, --exceptions%s): "
                             "EmbCC writes no %s",
                    target_triple_now(),
-                   lang_cxx && want_exceptions
+                   lang_cxx && exceptions_on()
                        ? ", and C++ without --no-exceptions" : "",
                    unwritten);
     if (unwind && (ta == TARGET_X86_64 || ta == TARGET_AARCH64))

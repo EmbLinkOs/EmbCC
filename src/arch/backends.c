@@ -179,7 +179,7 @@ static const struct backend_desc g_backends[] = {
         .family = "LoongArch", .codegen = codegen_unit_loongarch, .ra_at_o0 = 1,
         .op_calls_helper = la_op_calls_helper,
         .unwind_unwritten = "LoongArch .eh_frame",
-        .cxx_exceptions = BACKEND_CXX_EXC_OK,
+        .cxx_exceptions = BACKEND_CXX_EXC_NONE,
         .firmware = 1, .ld_scripts = 0,
         .call_insn = "bl", .call_delay_slot = 0, .sym_prefix = "",
         .imm_prefixed = 0, .text_p2align = 2,

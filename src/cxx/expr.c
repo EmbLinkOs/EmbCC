@@ -3356,6 +3356,23 @@ static struct cexpr *conditional(struct cexpr *c, struct cexpr *a,
     e->a = xmalloc(3 * sizeof *e->a);
     e->a[0] = c;
     e->na = 3;
+    /* [expr.cond]/2: an arm that is a throw-expression takes the other
+     * arm's type and value category -- `n > 0 ? throw E{n} : n` -- and
+     * in C it is the throw, then a value of that type that is never
+     * reached (the throw does not return) */
+    if ((a->k == E_THROW && bt->k != CT_VOID) ||
+        (b->k == E_THROW && at->k != CT_VOID)) {
+        int ta = a->k == E_THROW;
+        struct cexpr *thr = ta ? a : b, *other = ta ? b : a;
+        struct cexpr *none = ex_deref(ex_cast(ex_int(0, ct_basic(CT_LONG)),
+                                              ct_ptr(other->t)));
+        struct cexpr *z = ex2(E_COMMA, other->t, other->vc, thr, none);
+        e->a[1] = ta ? z : a;
+        e->a[2] = ta ? b : z;
+        e->t = other->t;
+        e->vc = other->vc;
+        return e;
+    }
     if (at->k == CT_VOID || bt->k == CT_VOID) {
         if (at->k != bt->k)
             ex_error(a, "one arm of ?: is void and the other is not");

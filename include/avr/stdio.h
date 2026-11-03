@@ -6,9 +6,10 @@
  *
  * On AVR the library (lib/avr) has sprintf, snprintf, vsprintf,
  * vsnprintf and these four, with avr-libc's conversions (%S for a string
- * in flash; floating point prints "?", as avr-libc's default does). It
- * has no streams: printf, puts, FILE and fdevopen are declared by the C
- * library's header and not in the AVR library. */
+ * in flash; floating point prints "?", as avr-libc's default does), and
+ * stdout without a FILE: printf, vprintf, puts and their _P forms send
+ * each character to putchar, which the board defines (a UART). FILE and
+ * fdevopen are declared by the C library's header and not in it. */
 #include_next <stdio.h>
 
 #ifndef _EMB_AVR_STDIO_H
@@ -18,6 +19,9 @@
 #include <stddef.h>
 
 int sprintf_P(char *s, const char *fmt_P, ...);
+int printf_P(const char *fmt_P, ...);
+int vprintf_P(const char *fmt_P, va_list ap);
+int puts_P(const char *s_P);
 int snprintf_P(char *s, size_t n, const char *fmt_P, ...);
 int vsprintf_P(char *s, const char *fmt_P, va_list ap);
 int vsnprintf_P(char *s, size_t n, const char *fmt_P, va_list ap);

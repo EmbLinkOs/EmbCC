@@ -405,7 +405,12 @@ static char *int_lit(long v, struct cty *t)
     switch (t->k) {
     case CT_BOOL:
         return v ? "1" : "0";
-    case CT_UINT: case CT_CHAR32:
+    case CT_UINT:
+        /* (AVR's int is sixteen bits) */
+        if (target_int_size() == 2)
+            return cx_fmt("%luU", (unsigned long)v & 0xffffUL);
+        return cx_fmt("%luU", (unsigned long)v & 0xffffffffUL);
+    case CT_CHAR32:
         return cx_fmt("%luU", (unsigned long)v & 0xffffffffUL);
     case CT_WCHAR:
         if (target_wchar_unsigned())
@@ -436,6 +441,12 @@ static char *int_lit(long v, struct cty *t)
     }
     if (v == INT_MIN)
         return "(-2147483647-1)";
+    /* the least 16-bit int: 32768 alone does not fit one, so -32768
+     * would be a long */
+    if (v == -32768 && target_int_size() == 2 &&
+        (t->k == CT_INT || t->k == CT_SHORT || t->k == CT_SCHAR ||
+         t->k == CT_CHAR))
+        return "(-32767-1)";
     return v < 0 ? cx_fmt("(%ld)", v) : cx_fmt("%ld", v);
 }
 
@@ -675,7 +686,7 @@ static char *destroy_text(const char *addr, struct cty *t)
             return NULL;
         need_fn(d);
         int u = cx_uid();
-        return cx_fmt("{ %s = (%s)(%s); for (unsigned long __cx_i%d = %ldUL; "
+        return cx_fmt("{ %s = (%s)(%s); for (__cx_size_t __cx_i%d = %ldUL; "
                       "__cx_i%d-- > 0; ) %s(&__cx_p%d[__cx_i%d]); }",
                       cdecl(ct_ptr(e), cx_fmt("__cx_p%d", u)),
                       ctype(ct_ptr(e)), addr, u, n, u, fn_name(d, 1), u, u);
@@ -853,7 +864,7 @@ static char *pmcall_text(struct cexpr *e, const char *dest);
  * object's vtable, then the rest of the path. */
 static char *vbase_addr(const char *p, struct cexpr *e)
 {
-    return cx_fmt("%s + *(long *)(*(char **)%s + %ldL) + %ldL", p, p,
+    return cx_fmt("%s + *(__cx_ptrdiff_t *)(*(char **)%s + %ldL) + %ldL", p, p,
                   e->vbindex, e->ival);
 }
 
@@ -952,10 +963,12 @@ static char *overflow_text(struct cexpr *e)
          *r = cx_fmt("__cx_or%d", u);
     const char *sym = op == 'a' ? "+" : op == 's' ? "-" : "*";
     if (sz < 8) {
-        /* exact in long, then does it fit */
-        return cx_fmt("({ long %s = (long)(%s), %s = (long)(%s); "
-                      "long %s = %s %s %s; %s __cx_op%d = %s; "
-                      "*__cx_op%d = (%s)%s; (_Bool)(%s != (long)(%s)%s); })",
+        /* exact in long long (a long is 32 bits on ILP32 and Win64, where
+         * a 32-bit product did not fit it), then does it fit */
+        return cx_fmt("({ long long %s = (long long)(%s), %s = (long long)(%s); "
+                      "long long %s = %s %s %s; %s __cx_op%d = %s; "
+                      "*__cx_op%d = (%s)%s; "
+                      "(_Bool)(%s != (long long)(%s)%s); })",
                       a, ev(e->a[0]), b, ev(e->a[1]), r, a, sym, b, pty, u,
                       ev(e->a[2]), u, ctype(rt), r, r, ctype(rt), r);
     }
@@ -963,10 +976,10 @@ static char *overflow_text(struct cexpr *e)
      * unsigned form does, then the overflow read off the operands */
     int wide = sz == 16;
     const char *w = wide ? (uns ? "unsigned __int128" : "__int128")
-                         : (uns ? "unsigned long" : "long");
-    const char *uw = wide ? "unsigned __int128" : "unsigned long";
+                         : (uns ? "unsigned long long" : "long long");
+    const char *uw = wide ? "unsigned __int128" : "unsigned long long";
     const char *smin = wide ? "((__int128)((unsigned __int128)1 << 127))"
-                            : "(-9223372036854775807L - 1)";
+                            : "(-9223372036854775807LL - 1)";
     char *test;
     if (uns)
         test = op == 'a' ? cx_fmt("%s < %s", r, a)
@@ -1105,10 +1118,10 @@ static char *pmf_this(const char *m, const char *o)
 static char *pmf_fn(const char *m, const char *ob)
 {
     return arm_pmf()
-           ? cx_fmt("((%s.adj & 1) ? *(void **)(*(char **)%s + (long)%s.ptr)"
-                    " : %s.ptr)", m, ob, m, m)
-           : cx_fmt("(((long)%s.ptr & 1) ? *(void **)(*(char **)%s + (long)"
-                    "%s.ptr - 1) : %s.ptr)", m, ob, m, m);
+           ? cx_fmt("((%s.adj & 1) ? *(void **)(*(char **)%s + "
+                    "(__cx_ptrdiff_t)%s.ptr) : %s.ptr)", m, ob, m, m)
+           : cx_fmt("(((__cx_ptrdiff_t)%s.ptr & 1) ? *(void **)(*(char **)%s"
+                    " + (__cx_ptrdiff_t)%s.ptr - 1) : %s.ptr)", m, ob, m, m);
 }
 
 static char *pmcall_text(struct cexpr *e, const char *dest)
@@ -1146,7 +1159,7 @@ static char *throw_text(struct cexpr *e)
     int u = cx_uid();
     char *x = cx_fmt("__cx_x%d", u);
     struct sb b = { 0, 0, 0 };
-    sb_printf(&b, "({ void *%s = ((void *(*)(unsigned long))"
+    sb_printf(&b, "({ void *%s = ((void *(*)(__cx_size_t))"
                   "__cxa_allocate_exception)(%ldUL); ", x, ct_size(t));
     einit(&b, cx_fmt("(*(%s)%s)", ctype(ct_ptr(t)), x), t, e->a[0]);
     struct cfunc *d = t->k == CT_CLASS ? class_dtor(t->cls) : NULL;
@@ -1198,7 +1211,7 @@ static char *new_text(struct cexpr *e)
     }
     /* new T[n]: [cookie holding n] then the elements */
     char *n = cx_fmt("__cx_n%d", u), *m = cx_fmt("__cx_m%d", u);
-    sb_printf(&b, "({ unsigned long %s = %s; char *%s = (char *)%s(%s * "
+    sb_printf(&b, "({ __cx_size_t %s = %s; char *%s = (char *)%s(%s * "
                   "%ldUL + %ldUL", n, ev(e->count), m, fn_name(e->fn, 1), n,
               ct_size(el), e->cookie);
     for (int i = 1; i < e->na; i++)
@@ -1206,15 +1219,15 @@ static char *new_text(struct cexpr *e)
     sb_put(&b, "); ");
     if (e->cookie && cx_arm32_abi())
         /* ARM: the element size, then the count, at the start */
-        sb_printf(&b, "((unsigned long *)%s)[0] = %ldUL; "
-                      "((unsigned long *)%s)[1] = %s; ", m, ct_size(el), m, n);
+        sb_printf(&b, "((__cx_size_t *)%s)[0] = %ldUL; "
+                      "((__cx_size_t *)%s)[1] = %s; ", m, ct_size(el), m, n);
     else if (e->cookie)       /* the count, just before the elements */
-        sb_printf(&b, "*(unsigned long *)(%s + %ldUL) = %s; ", m,
+        sb_printf(&b, "*(__cx_size_t *)(%s + %ldUL) = %s; ", m,
                   e->cookie - (long)cx_ptr_size(), n);
     sb_printf(&b, "%s = (%s)(%s + %ldUL); ", cdecl(pt, p), ctype(pt), m,
               e->cookie);
     if (e->init)
-        sb_printf(&b, "for (unsigned long __cx_i%d = 0; __cx_i%d < %s; "
+        sb_printf(&b, "for (__cx_size_t __cx_i%d = 0; __cx_i%d < %s; "
                       "__cx_i%d++) { %s} ", u, u, n, u,
                   elem_init(p, u, el, e->init));
     sb_printf(&b, "%s; })", p);
@@ -1266,8 +1279,8 @@ static char *delete_text(struct cexpr *e)
         need_fn(e->dtor);
         /* the count: the cookie's last word (ARM: its second) */
         long at = cx_arm32_abi() ? e->cookie - 4 : cx_ptr_size();
-        sb_printf(&b, "unsigned long __cx_n%d = *(unsigned long *)((char *)"
-                      "%s - %ld); for (unsigned long __cx_i%d = __cx_n%d; "
+        sb_printf(&b, "__cx_size_t __cx_n%d = *(__cx_size_t *)((char *)"
+                      "%s - %ld); for (__cx_size_t __cx_i%d = __cx_n%d; "
                       "__cx_i%d-- > 0; ) %s(&%s[__cx_i%d]); ", u, p, at, u, u,
                   u, fn_name(e->dtor, 1), p, u);
         sb_printf(&b, "%s((char *)%s - %ldUL%s); ", fn_name(e->fn, 1), p,
@@ -1305,7 +1318,7 @@ static char *array_assign_text(struct cexpr *e)
     long n;
     struct cty *el = array_flat(e->a[0]->t, &n);
     struct cty *pt = ct_ptr(ct_unqual(el));
-    return cx_fmt("({ %s = (%s)%s; %s = (%s)%s; for (unsigned long __cx_ci "
+    return cx_fmt("({ %s = (%s)%s; %s = (%s)%s; for (__cx_size_t __cx_ci "
                   "= 0; __cx_ci < %ldUL; __cx_ci++) (void)%s; })",
                   cdecl(pt, "__cx_cd"), ctype(pt), eaddr(e->a[0]),
                   cdecl(pt, "__cx_cs"), ctype(pt), eaddr(e->a[1]), n,
@@ -1359,7 +1372,7 @@ static char *ev(struct cexpr *e)
         need_dyncast = 1;
         if (e->is_array)        /* to void *: the object's start */
             return cx_fmt("({ char *__cx_p%d = (char *)%s; __cx_p%d ? (void *)"
-                          "(__cx_p%d + ((long *)*(void ***)__cx_p%d)[-2]) : "
+                          "(__cx_p%d + ((__cx_ptrdiff_t *)*(void ***)__cx_p%d)[-2]) : "
                           "(void *)0; })", u, ev(e->a[0]), u, u, u);
         return cx_fmt("({ void *__cx_p%d = (void *)%s; __cx_p%d = __cx_p%d ? "
                       "__dynamic_cast(__cx_p%d, %s, %s, %ldL) : (void *)0; "
@@ -1424,7 +1437,7 @@ static char *ev(struct cexpr *e)
             /* rdrand/rdseed (a 64-bit register), carry set: a value */
             int u = cx_uid();
             struct cty *vt = e->a[0]->t->to;
-            return cx_fmt("({ unsigned long __cx_rv%d; unsigned char "
+            return cx_fmt("({ unsigned long long __cx_rv%d; unsigned char "
                           "__cx_ok%d; __asm__ volatile(\"%s %%0; setc %%1\" : "
                           "\"=r\"(__cx_rv%d), \"=qm\"(__cx_ok%d) :: \"cc\"); "
                           "*(%s)%s = (%s)__cx_rv%d; (int)__cx_ok%d; })",
@@ -1843,7 +1856,7 @@ static void einit(struct sb *b, const char *dest, struct cty *t,
             if (lp >= 0)
                 eh_close(&s, lp, cx_fmt("while (__cx_ci > 0) { __cx_ci--; "
                                         "%s }", undo));
-            sb_printf(b, "{ %s = (%s)&(%s); %s = (%s)%s; for (unsigned long "
+            sb_printf(b, "{ %s = (%s)&(%s); %s = (%s)%s; for (__cx_size_t "
                          "__cx_ci = 0; __cx_ci < %ldUL; __cx_ci++) { %s} } ",
                       cdecl(pt, "__cx_cd"), ctype(pt), dest,
                       cdecl(pt, "__cx_cs"), ctype(pt), eaddr(init->a[0]), n,
@@ -1864,7 +1877,7 @@ static void einit(struct sb *b, const char *dest, struct cty *t,
             }
             int u = cx_uid();
             char *body = elem_init(cx_fmt("__cx_a%d", u), u, el, init->init);
-            sb_printf(b, "{ %s = (%s)&(%s); for (unsigned long __cx_i%d = 0; "
+            sb_printf(b, "{ %s = (%s)&(%s); for (__cx_size_t __cx_i%d = 0; "
                          "__cx_i%d < %ldUL; __cx_i%d++) { %s} } ",
                       cdecl(ct_ptr(el), cx_fmt("__cx_a%d", u)),
                       ctype(ct_ptr(el)), dest, u, u, n, u, body);
@@ -3408,7 +3421,7 @@ static void store_vptrs(struct sb *b, struct cclass *c, const char *vtt)
                           : cx_fmt("(void **)%s + %d", class_sym(c, "_ZTV"),
                                    v->point);
         const char *at = v->virt
-                         ? cx_fmt("(char *)this + *(long *)(*(char **)this + "
+                         ? cx_fmt("(char *)this + *(__cx_ptrdiff_t *)(*(char **)this + "
                                   "%ldL) + %ldL", v->vbindex, v->off)
                          : cx_fmt("(char *)this + %ldL", v->off);
         sb_printf(b, "*(void ***)(%s) = (void **)%s;\n", at, val);
@@ -4339,9 +4352,15 @@ static void emit_rtti(struct cclass *c)
                        : si ? "20__si_class_type_info"
                        : "21__vmi_class_type_info";
     /* __vmi_class_type_info's two unsigned ints (flags, base count) are
-     * one word where a pointer is eight bytes and two where it is four */
-    int ilp32 = cx_ptr_size() == 4;
-    int words = c->nbases == 0 ? 2 : si ? 3 : 3 + ilp32 + 2 * c->nbases;
+     * one word where a pointer is eight bytes and two where an int is as
+     * wide as a pointer (ILP32, and AVR's sixteen bits); each base's
+     * long __offset_flags is one word, or two on AVR, whose long is twice
+     * its pointer */
+    int ilp32 = target_int_size() == cx_ptr_size();
+    int lw = target_long_size() > cx_ptr_size()
+             ? target_long_size() / cx_ptr_size() : 1;
+    int words = c->nbases == 0 ? 2 : si ? 3
+              : 3 + ilp32 + (1 + lw) * c->nbases;
     if (home == 0) {
         sb_printf(&out_rtti_decl, "extern void *%s[];\n", ti);
         return;
@@ -4378,8 +4397,17 @@ static void emit_rtti(struct cclass *c)
             long of = (long)((unsigned long)at << 8) |
                       (b->access == CA_PUBLIC ? 2 : 0) |
                       (b->is_virtual ? 1 : 0);
-            sb_printf(&out_rtti, ", (void *)%s, (void *)%ldL",
-                      class_sym(b->cls, "_ZTI"), of);
+            if (lw == 2)        /* its halves, in the target's order */
+                sb_printf(&out_rtti, ", (void *)%s, (void *)%ldU, "
+                                     "(void *)%ldU",
+                          class_sym(b->cls, "_ZTI"),
+                          target_big_endian() ? (of >> 16) & 0xffff
+                                              : of & 0xffff,
+                          target_big_endian() ? of & 0xffff
+                                              : (of >> 16) & 0xffff);
+            else
+                sb_printf(&out_rtti, ", (void *)%s, (void *)%ldL",
+                          class_sym(b->cls, "_ZTI"), of);
         }
     }
     sb_put(&out_rtti, " };\n");
@@ -4428,7 +4456,7 @@ static const char *thunk_for(struct cfunc *f, int deleting, long delta,
     sb_printf(&out_thunks, "%s%s\n{\nchar *__cx_t = (char *)this + %ldL;\n",
               st, func_header(&tmp, name, 1), delta);
     if (vcall)
-        sb_printf(&out_thunks, "__cx_t += *(long *)(*(char **)__cx_t + "
+        sb_printf(&out_thunks, "__cx_t += *(__cx_ptrdiff_t *)(*(char **)__cx_t + "
                                "%ldL);\n", vcall);
     sb_printf(&out_thunks, "%s%s(%s);\n}\n",
               f->type->to->k == CT_VOID && !sret ? "" : "return ", target,
@@ -4623,6 +4651,12 @@ char *cx_emit_unit(void)
     fx_end(save);
 
     struct sb out = { 0, 0, 0 };
+    /* size_t, by the name the lowering writes it in (the C it makes is
+     * not preprocessed again, so __SIZE_TYPE__ would not do): unsigned
+     * int on AVR and ILP32, long or long long elsewhere */
+    char *tdefs = cx_fmt("typedef %s __cx_size_t;\ntypedef %s __cx_ptrdiff_t;\n",
+                         ctype(ct_size_t()), ctype(ct_ptrdiff_t()));
+    sb_put(&out, tdefs);
     /* classes: tags first, then definitions in completion order */
     for (int i = 0; i < cx_nclasses; i++)
         sb_printf(&out, "%s %s;\n", cx_classes[i]->is_union ? "union"
@@ -4691,14 +4725,14 @@ char *cx_emit_unit(void)
                     strstr(parts[i], "__builtin_memmove(") != NULL;
     }
     if (use_set)
-        sb_put(&out, "void *memset(void *, int, unsigned long);\n");
+        sb_put(&out, "void *memset(void *, int, __cx_size_t);\n");
     if (use_move)
-        sb_put(&out, "void *memmove(void *, const void *, unsigned long);\n");
+        sb_put(&out, "void *memmove(void *, const void *, __cx_size_t);\n");
     if (eh_used) {
         /* the C++ ABI's exception functions — called through casts, so a
          * declaration of the program's own (<cxxabi.h>) serves as well */
         static const char *const abi[][2] = {
-            { "__cxa_allocate_exception", "void *%s(unsigned long);\n" },
+            { "__cxa_allocate_exception", "void *%s(__cx_size_t);\n" },
             { "__cxa_throw", "void %s(void *, void *, void (*)(void *));\n" },
             { "__cxa_rethrow", "void %s(void);\n" },
             { "__cxa_begin_catch", "void *%s(void *);\n" },
@@ -4716,15 +4750,16 @@ char *cx_emit_unit(void)
         }
     }
     if (use_cpy)
-        sb_put(&out, "void *memcpy(void *, const void *, unsigned long);\n");
+        sb_put(&out, "void *memcpy(void *, const void *, __cx_size_t);\n");
     for (struct cfunc *f = cx_funcs; f; f = f->all_next)
         if (f->declared)
             emit_prototype(f);
     if (any_pure)
         sb_put(&out, "void __cxa_pure_virtual(void);\n");
     if (need_dyncast)
-        sb_put(&out, "void *__dynamic_cast(void *, void *, void *, long);\n"
-                     "void __cxa_bad_cast(void);\n");
+        sb_printf(&out, "void *__dynamic_cast(void *, void *, void *, %s);\n"
+                        "void __cxa_bad_cast(void);\n",
+                  ctype(ct_ptrdiff_t()));     /* the hint: a ptrdiff_t */
     sb_put(&out, sb_str(&out_rettypes));
     sb_put(&out, sb_str(&out_decls));
     sb_put(&out, sb_str(&out_rtti_decl));
@@ -4733,11 +4768,14 @@ char *cx_emit_unit(void)
     if (need_pmf || need_srcloc || need_valist_tag) {
         /* whatever above names it is written first */
         struct sb pre = { 0, 0, 0 };
+        sb_put(&pre, tdefs);        /* (again below: C11 allows it) */
         if (need_valist_tag)
             sb_put(&pre, "struct __va_list_tag { int *__va_stk; "
                          "int *__va_reg; int __va_ndx; };\n");
         if (need_pmf)
-            sb_put(&pre, "struct __cx_pmf { void *ptr; long adj; };\n");
+            /* { the function or vtable offset, the adjustment }: a
+             * pointer and a ptrdiff_t (Itanium 2.3) */
+            sb_put(&pre, "struct __cx_pmf { void *ptr; __cx_ptrdiff_t adj; };\n");
         if (need_srcloc)
             sb_put(&pre, "struct __cx_srcloc { const char *file, *func; "
                          "unsigned line, col; };\n");
