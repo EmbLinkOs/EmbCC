@@ -45,6 +45,11 @@ int cg_call_local(const struct func *caller, const struct func *callee);
 struct ir_func;
 struct ir_ins;
 int cg_label_mark(const struct ir_ins *i);
+/* A call of a function that returns twice -- setjmp and its kin, vfork,
+ * getcontext, or one marked returns_twice: its second return is an
+ * indirect jump, which -fcf-protection and -mbranch-protection=bti give
+ * a landing pad right after the call. */
+int cg_returns_twice(const struct ir_ins *i);
 void cg_note_labels(struct ir_func *fn, const int *label_off);
 
 /* The boundary a function's first instruction must be on beyond its

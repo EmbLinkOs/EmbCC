@@ -713,6 +713,11 @@ struct unit;
  * irgen; and the instrumentation, after the optimizer. san_asan_locals
  * is sema's: which locals get redzones (sema.h declares it too). */
 void san_set_runtime(unsigned mask, int recover);
+void ssp_set(int mode, int bufsize);   /* -fstack-protector[-strong|-all|-explicit] */
+void clash_set(int on);                /* -fstack-clash-protection */
+int clash_on(void);
+void clash_instrument(struct ir_unit *iu);
+int ssp_mode(void);
 unsigned san_runtime(void);
 const char *san_ctor_source(void);
 void san_globals(struct unit *u);

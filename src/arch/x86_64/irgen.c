@@ -991,6 +991,71 @@ static void asm_assemble(struct ir_func *fn, struct stmt *s,
                     }
                 }
             }
+            /* a thread block's word: `mov %%fs:0x28, %dst` and the store
+             * `mov %src, %%gs:N` -- the segment's override prefix, and an
+             * absolute disp32 (SIB with no base or index), as GCC's
+             * stack-protector and TLS code read them */
+            a_ws(&p);
+            if (reg < 0 && p[0] == '%' && p[1] == '%' &&
+                (p[2] == 'f' || p[2] == 'g') && p[3] == 's' && p[4] == ':') {
+                unsigned char seg = p[2] == 'f' ? 0x64 : 0x65;
+                const char *q = p + 5;
+                long disp = strtol(q, (char **)&q, 0);
+                p = q;
+                a_comma(&p, file, line, tmpl);
+                a_ws(&p);
+                int dst = (p[0] == '%' && p[1] == '%')
+                        ? a_regname(&p, file, line, tmpl)
+                        : a_opreg(&p, opregs, opnames, nops, file, line, tmpl);
+                code[n++] = seg;
+                code[n++] = (unsigned char)(0x48 | (dst >= 8 ? 4 : 0));
+                code[n++] = 0x8b;
+                code[n++] = (unsigned char)(0x04 | ((dst & 7) << 3));
+                code[n++] = 0x25;
+                for (int k = 0; k < 4; k++)
+                    code[n++] = (unsigned char)(disp >> (8 * k));
+                goto asm_next;
+            }
+            {
+                const char *q = p;
+                int sreg = -2;
+                if (reg >= 0)
+                    sreg = reg;
+                else if (q[0] == '%' && q[1] == '%' &&
+                         !((q[2] == 'f' || q[2] == 'g') && q[3] == 's'))
+                    sreg = -3;                       /* a named register */
+                if (sreg != -2) {
+                    const char *r = q;
+                    if (sreg == -3) {
+                        r += 2;
+                        while ((*r >= 'a' && *r <= 'z') || (*r >= '0' && *r <= '9'))
+                            r++;
+                    }
+                    a_ws(&r);
+                    if (*r == ',') {
+                        r++;
+                        a_ws(&r);
+                        if (r[0] == '%' && r[1] == '%' &&
+                            (r[2] == 'f' || r[2] == 'g') && r[3] == 's' &&
+                            r[4] == ':') {
+                            if (sreg == -3)
+                                sreg = a_regname(&p, file, line, tmpl);
+                            unsigned char seg = r[2] == 'f' ? 0x64 : 0x65;
+                            const char *d = r + 5;
+                            long disp = strtol(d, (char **)&d, 0);
+                            p = d;
+                            code[n++] = seg;
+                            code[n++] = (unsigned char)(0x48 | (sreg >= 8 ? 4 : 0));
+                            code[n++] = 0x89;
+                            code[n++] = (unsigned char)(0x04 | ((sreg & 7) << 3));
+                            code[n++] = 0x25;
+                            for (int k = 0; k < 4; k++)
+                                code[n++] = (unsigned char)(disp >> (8 * k));
+                            goto asm_next;
+                        }
+                    }
+                }
+            }
             int src_reg = -1, src_imm_valid = 0;
             long src_imm = 0;
             /* --- source operand --- */

@@ -329,6 +329,34 @@ int elfw_write(struct elfw *w, const char *path)
             elfw_add_section(w, ".note.GNU-stack", SHT_PROGBITS, 0, NULL,
                              0, 1);
     }
+    /* -fcf-protection / -mbranch-protection: what the code was built
+     * for, in GNU_PROPERTY_*_FEATURE_1_AND -- the linker ANDs the inputs'
+     * and the loader turns the hardware on when every object says so */
+    int cf = target_cf();
+    unsigned bits = 0, prop = 0;
+    if (target_get() == TARGET_X86_64) {
+        prop = 0xc0000002u;
+        bits = (cf & CF_IBT ? 1u : 0) | (cf & CF_SHSTK ? 2u : 0);
+    } else if (target_get() == TARGET_AARCH64) {
+        prop = 0xc0000000u;
+        bits = (cf & CF_BTI ? 1u : 0) | (cf & CF_PAC ? 2u : 0);
+    }
+    if (bits && target_fmt_get() == TGT_FMT_ELF) {
+        unsigned char n[32];
+        memset(n, 0, sizeof n);
+        int be = target_big_endian();
+        unsigned wd[6] = { 4, 16, 5, 0, prop, 4 };
+        for (int k = 0; k < 6; k++)
+            for (int b = 0; b < 4; b++)
+                n[4 * k + b] = (unsigned char)(wd[k] >> (be ? 24 - 8 * b
+                                                             : 8 * b));
+        /* the name is bytes, not a word */
+        memcpy(n + 12, "GNU", 4);
+        for (int b = 0; b < 4; b++)
+            n[24 + b] = (unsigned char)(bits >> (be ? 24 - 8 * b : 8 * b));
+        elfw_add_section(w, ".note.gnu.property", SHT_NOTE, SHF_ALLOC, n,
+                         sizeof n, 8);
+    }
     /* Materialize the bookkeeping sections after the user's: one
      * .rela.<target> per relocation group (sh_link/sh_info patched below
      * once the symtab index exists), then .symtab/.strtab/.shstrtab. The

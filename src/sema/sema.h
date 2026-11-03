@@ -10,6 +10,12 @@ void sema_check(struct unit *u);
 /* -fsanitize=address (src/ir/sanitize.c): which of f's nvars locals get
  * redzones -- 1 each in a new array -- or NULL */
 char *san_asan_locals(struct func *f, int nvars);
+/* -fstack-protector (src/ir/sanitize.c): the locals a protected f's
+ * canary guards -- 1 address-taken, 2 an aggregate -- or NULL; *on says
+ * whether f is protected at all */
+char *ssp_locals(struct func *f, int nvars, int has_vla, int *on);
+/* -fstack-clash-protection: the locals that leave a large frame */
+char *clash_locals(struct func *f, int nvars);
 
 /* GNU89 inline semantics (-fgnu89-inline, -std=gnu89): `inline` alone
  * is an external definition and `extern inline` an inline-only one --

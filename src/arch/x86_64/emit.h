@@ -208,6 +208,7 @@ int x86_jnz_rel8(struct code *c);
 int x86_jmp_rel8(struct code *c);
 int x86_jcc_rel8(struct code *c, int setcc);
 void x86_jmp_reg(struct code *c, int reg);        /* jmp *reg (computed goto) */
+void x86_endbr64(struct code *c);                 /* CET's landing pad */
 void x86_jmp_rcx_rax8(struct code *c);   /* jmp *(%rcx,%rax,8) */
 void x86_jmp_rcx_reg8(struct code *c, int reg);   /* jmp *(%rcx,%reg,8) */
 void x86_movsxd_rax_tab(struct code *c);          /* movsxd rax, dword [rcx + rax*4] */

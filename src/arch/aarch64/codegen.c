@@ -2128,11 +2128,26 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
     /* -fstack-usage: the frame plus the 16-byte record the prologue
      * pushes (x29 and x30). */
     f->stack_bytes = frameless ? 0 : (int)(fr.size + 16);
+    /* -mbranch-protection: the entry signs x30 (pac-ret: a function that
+     * saves it, or every one with +leaf), which also makes it a landing
+     * pad for an indirect call; or, with bti alone, it is `bti c` */
+    int cf = target_cf(), pre = 0;
+    f->cfi_pac = 0;
+    g_a64_auth = 0;
+    if ((cf & CF_PAC) && (!frameless || (cf & CF_PAC_LEAF))) {
+        a64_word(t, cf & CF_PAC_BKEY ? 0xd503237fUL : 0xd503233fUL);
+        g_a64_auth = cf & CF_PAC_BKEY ? 0xd50323ffUL : 0xd50323bfUL;
+        pre = 4;
+        f->cfi_pac = 4;
+    } else if (cf & CF_BTI) {
+        a64_word(t, 0xd503245fUL);                  /* bti c */
+        pre = 4;
+    }
     if (!frameless)
         a64_prologue(t, fr.size);
     /* for the unwind tables: stp x29, x30 ends at +4, mov x29, sp at +8 */
-    f->cfi_push = 4;
-    f->cfi_frame = 8;
+    f->cfi_push = pre + 4;
+    f->cfi_frame = pre + 8;
     f->cfi_nsaved = 0;
     /* The allocator's callee-saved registers, saved FIRST so that every
      * save in this prologue is complete by one program point -- the
@@ -2324,6 +2339,19 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
 
     /* Label offsets and the branches waiting on them. */
     int *loff = xmalloc((size_t)(fn->nlabels ? fn->nlabels : 1) * sizeof *loff);
+    /* -mbranch-protection=bti: where an indirect branch lands -- a jump
+     * table's targets and every label whose address is taken -- is a
+     * `bti j` */
+    char *bti_lbl = (target_cf() & CF_BTI)
+                  ? xcalloc((size_t)(fn->nlabels ? fn->nlabels : 1), 1) : NULL;
+    for (int n = 0; bti_lbl && n < fn->nins; n++)
+        if (fn->ins[n].op == IR_LABELADDR && fn->ins[n].label >= 0 &&
+            fn->ins[n].label < fn->nlabels)
+            bti_lbl[fn->ins[n].label] = 1;
+    for (int j = 0; bti_lbl && j < fn->njt; j++)
+        for (int k = 0; k < fn->jt[j].n; k++)
+            if (fn->jt[j].labels[k] >= 0 && fn->jt[j].labels[k] < fn->nlabels)
+                bti_lbl[fn->jt[j].labels[k]] = 1;
     for (int l = 0; l < fn->nlabels; l++)
         loff[l] = -1;
     struct a64_fix *fix = NULL;
@@ -3170,6 +3198,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
 
         case IR_LABEL:
             loff[i->label] = t->len;
+            if (bti_lbl && i->label >= 0 && i->label < fn->nlabels &&
+                bti_lbl[i->label])
+                a64_word(t, 0xd503249fUL);          /* bti j */
             break;
 
         case IR_JMP: {
@@ -3418,6 +3449,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                 }
                 if (!frameless)
                     a64_teardown(t, fr.size);
+                else if (g_a64_auth)
+                    a64_word(t, g_a64_auth);
                 if (cg_call_local(fn->src, i->callee)) {
                     struct a64_callsite cs;
                     cs.patch_off = a64_b(t);   /* patched as a bl is: imm26 */
@@ -3778,6 +3811,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
             break;
         }
         case IR_LANDING:
+            if (target_cf() & CF_BTI)
+                a64_word(t, 0xd503249fUL);          /* bti j: the unwinder br's here */
             /* the unwinder left the exception in x0, the selector in x1 */
             st_slot(t, sd, i->dst, 0, 8);
             st_slot(t, sd, i->b, 1, 8);
@@ -3788,6 +3823,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                        (int)i->op, f->name);
             break;
         }
+        if ((target_cf() & CF_BTI) && cg_returns_twice(i))
+            a64_word(t, 0xd503249fUL);              /* bti j: longjmp's br */
         if (i->op == IR_CALL && fn->neh)
             ir_add_csite(fn, ins_start - f->code_off, t->len - f->code_off,
                          i->eh_region - 1);
@@ -3808,6 +3845,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
         k += pair;
     }
     if (frameless) {
+        if (g_a64_auth)
+            a64_word(t, g_a64_auth);
         a64_ret(t);
     } else if (fn->has_alloca) {
         a64_ldr(t, A64_FBREG, A64_FBREG, fr.fb_save, 8, 0, 8);
@@ -3878,7 +3917,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
     free(g_a64_afold.ok); free(g_a64_afold.disp);
     g_a64_afold.ok = NULL; g_a64_afold.disp = NULL;
     cg_note_labels(fn, loff);
-    free(loff); free(fix); free(retfix); free(sd);
+    free(loff); free(fix); free(retfix); free(sd); free(bti_lbl);
 }
 
 /* ---- the unit -------------------------------------------------------- */

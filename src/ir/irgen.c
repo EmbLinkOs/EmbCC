@@ -6864,6 +6864,70 @@ static void collect_locals(struct ir_func *fn, struct stmt *s)
 
 static void gen_func_(struct ir_func *fn, struct func *f);
 
+/* -fstack-protector: the guard, an external object of the C library's (or
+ * lib/rt's), and the canary checked against it before every return:
+ * `if (*canary != __stack_chk_guard) __stack_chk_fail();` */
+static struct global *ssp_guard(void)
+{
+    struct unit *u = cur_unit->src;
+    struct global **tail = &u->globals;
+    for (struct global *g = u->globals; g; g = g->next) {
+        if (!g->absorbed && !strcmp(g->name, "__stack_chk_guard"))
+            return g;
+        tail = &g->next;
+    }
+    /* `extern uintptr_t __stack_chk_guard;`, as the unit's own */
+    struct global *g = xcalloc(1, sizeof *g);
+    g->name = "__stack_chk_guard";
+    g->ty = ty_intptr(1);
+    g->is_extern = 1;
+    g->file = u->file;
+    g->seq = -1;
+    g->def_seq = -1;
+    g->used = 1;
+    *tail = g;
+    return g;
+}
+
+static void ssp_check(struct ir_func *fn, int canary)
+{
+    int n0 = fn->nins, ns = 0, cap = 0;
+    struct ir_slice *sl = NULL;
+    struct type *ut = ty_intptr(1);
+    for (int n = 0; n < n0; n++) {
+        if (fn->ins[n].op != IR_RET)
+            continue;
+        if (ns == cap) {
+            cap = cap ? cap * 2 : 8;
+            sl = xrealloc(sl, (size_t)cap * sizeof *sl);
+        }
+        int line = fn->ins[n].line;
+        sl[ns].at = n;
+        sl[ns].lo = fn->nins;
+        int c = emit_load(fn, canary, ut);
+        fn->ins[fn->nins - 1].vol = 1;
+        int g = emit_load(fn, emit_gaddr(fn, ssp_guard()), ut);
+        int ne = emit_cmp(fn, B_NE, c, g, ty_w(ut), 0);
+        int ok = new_label(fn);
+        emit_brz(fn, ne, 4, ok);
+        struct func *ff = libatomic_fn("__stack_chk_fail", ty_base(TY_VOID, 0),
+                                       0, NULL);
+        ff->is_noreturn = 1;
+        ff->is_nothrow = 1;
+        (void)libatomic_call(fn, "__stack_chk_fail", ty_base(TY_VOID, 0), 0,
+                             NULL, NULL, line);
+        emit(fn)->op = IR_UD2;
+        emit_label(fn, ok);
+        for (int k = sl[ns].lo; k < fn->nins; k++)
+            fn->ins[k].line = line;
+        sl[ns].hi = fn->nins;
+        ns++;
+    }
+    if (ns)
+        ir_splice(fn, n0, fn->nins, sl, ns);
+    free(sl);
+}
+
 /* -fsanitize=address: the frame's block unpoisoned before every return,
  * since the stack under it is the next call's */
 static void asan_frame_release(struct ir_func *fn, int base, long size)
@@ -7071,8 +7135,59 @@ static void gen_func_(struct ir_func *fn, struct func *f)
         }
         free(voff);
     }
+    /* -fstack-protector: the guarded locals in one block -- the
+     * address-taken scalars lowest, the aggregates above them -- and the
+     * canary at its top, a copy of __stack_chk_guard; compared before
+     * every return (ssp_check, below) */
+    int ssp_canary = -1;
+    if (f->ssp_on) {
+        long off = 0, bal = 16;
+        long *voff = xcalloc((size_t)(f->nvars ? f->nvars : 1), sizeof *voff);
+        for (int pass = 1; pass <= 2; pass++)
+            for (int v = 0; f->var_ssp && v < f->nvars; v++) {
+                if (f->var_ssp[v] != pass || !f->var_indirect ||
+                    !f->var_indirect[v])
+                    continue;
+                long al = f->var_ind_align[v] > 1 ? f->var_ind_align[v] : 1;
+                if (al > bal)
+                    bal = al;
+                off = (off + al - 1) & -al;
+                voff[v] = off;
+                off += ty_size(f->var_indirect[v]);
+            }
+        long P = AW;
+        off = (off + P - 1) & -P;
+        long canary_off = off;
+        long size = off + P;
+        int sz = emit_const(fn, size + bal - 1, AW);
+        struct ir_ins *a = emit(fn);
+        a->op = IR_ALLOCA;
+        a->a = sz;
+        a->dst = new_temp(fn);
+        int adst = a->dst;
+        int base = emit_bin(fn, IR_AND,
+                            emit_bin(fn, IR_ADD, adst,
+                                     emit_const(fn, bal - 1, AW), AW, 1),
+                            emit_const(fn, -bal, AW), AW, 1);
+        fn->has_alloca = 1;
+        for (int v = 0; f->var_ssp && v < f->nvars; v++) {
+            if (!f->var_ssp[v] || !f->var_indirect || !f->var_indirect[v])
+                continue;
+            int p = emit_bin(fn, IR_ADD, base, emit_const(fn, voff[v], AW),
+                             AW, 1);
+            emit_stvar_slot(fn, v, p, ty_ptr(f->var_indirect[v]));
+        }
+        ssp_canary = emit_bin(fn, IR_ADD, base, emit_const(fn, canary_off, AW),
+                              AW, 1);
+        struct type *ut = ty_intptr(1);
+        int g = emit_load(fn, emit_gaddr(fn, ssp_guard()), ut);
+        emit_store(fn, ssp_canary, g, ut);
+        fn->ins[fn->nins - 1].vol = 1;
+        free(voff);
+    }
     for (int v = 0; f->var_indirect && v < f->nvars; v++) {
-        if (!f->var_indirect[v] || (f->var_asan && f->var_asan[v]))
+        if (!f->var_indirect[v] || (f->var_asan && f->var_asan[v]) ||
+            (f->var_ssp && f->var_ssp[v]))
             continue;
         long al = f->var_ind_align[v];
         int size = emit_const(fn, ty_size(f->var_indirect[v]) + al - 1, AW);
@@ -7157,6 +7272,8 @@ static void gen_func_(struct ir_func *fn, struct func *f)
         }
     if (asan_base >= 0)
         asan_frame_release(fn, asan_base, asan_size);
+    if (ssp_canary >= 0)
+        ssp_check(fn, ssp_canary);
     if (gcov_active())
         gcov_function(cur_unit, fn, f);
     for (int i = 0; i < g_nlabels_used; i++)

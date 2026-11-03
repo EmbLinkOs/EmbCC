@@ -1061,3 +1061,239 @@ static void msan_func(struct ir_unit *iu, struct ir_func *fn)
     free(read);
     free(slot);
 }
+
+/* ---- -fstack-protector -----------------------------------------------
+ *
+ * GCC's modes: 1 a function with a character array of at least
+ * --param=ssp-buffer-size bytes (8) -- in a struct or not -- or a VLA;
+ * 2 (-strong) one with any array or a local whose address is taken;
+ * 3 (-all) every function; 4 (-explicit) only one marked stack_protect.
+ * stack_protect asks for it in any mode, no_stack_protector refuses it.
+ *
+ * A protected function's arrays, structs and address-taken scalars are
+ * carved by irgen from one block (scalars lowest, arrays above them) with
+ * the canary at its top, so an overrun from any of them reaches the
+ * canary before anything else of the frame; the canary is compared with
+ * __stack_chk_guard before every return, and __stack_chk_fail called
+ * when it changed. */
+static int g_ssp_mode, g_ssp_buf = 8;
+
+void ssp_set(int mode, int bufsize)
+{
+    g_ssp_mode = mode;
+    if (bufsize > 0)
+        g_ssp_buf = bufsize;
+}
+
+int ssp_mode(void) { return g_ssp_mode; }
+
+static int has_char_array(const struct type *t, int min)
+{
+    if (!t)
+        return 0;
+    if (t->kind == TY_ARRAY) {
+        const struct type *e = t->pointee;
+        if (e && e->kind == TY_CHAR && ty_size(t) >= min)
+            return 1;
+        return has_char_array(e, min);
+    }
+    if (t->kind == TY_STRUCT)
+        for (int k = 0; k < t->nmembers; k++)
+            if (has_char_array(t->members[k].ty, min))
+                return 1;
+    return 0;
+}
+
+char *ssp_locals(struct func *f, int nvars, int has_vla, int *on)
+{
+    *on = 0;
+    if (!f->body || f->is_naked || f->attr_ssp < 0 ||
+        !strncmp(f->name, "__stack_chk", 11) || !strncmp(f->name, "__embcc_", 8))
+        return NULL;
+    int mode = f->attr_ssp > 0 ? (g_ssp_mode > 2 && g_ssp_mode != 4
+                                  ? g_ssp_mode : 2)
+                               : g_ssp_mode;
+    if (!mode || (mode == 4 && f->attr_ssp <= 0))
+        return NULL;
+    char *m = xcalloc((size_t)(nvars ? nvars : 1), 1);
+    walk_stmt(f->body, m, nvars);          /* address taken */
+    int want = mode == 3 || has_vla;
+    for (int v = 0; v < nvars && !want; v++) {
+        const struct type *t = f->var_tys[v];
+        if (!t)
+            continue;
+        if (mode == 1)
+            want = has_char_array(t, g_ssp_buf);
+        else
+            want = t->kind == TY_ARRAY || m[v];
+    }
+    if (!want) {
+        free(m);
+        return NULL;
+    }
+    for (int v = 0; v < nvars; v++) {
+        const struct type *t = f->var_tys[v];
+        if (t && (t->kind == TY_ARRAY || t->kind == TY_STRUCT))
+            m[v] = m[v] ? 1 : 2;           /* 2: an aggregate, carved high */
+    }
+    *on = 1;
+    return m;
+}
+
+/* ---- -fstack-clash-protection --------------------------------------------
+ *
+ * A guard page below the stack stops a stack that grows into it only when
+ * something touches it: a frame or an alloca that moves the stack pointer
+ * by more than a page in one step can step over the guard into whatever
+ * lies beyond. Here no step is more than a page, and every page is
+ * touched as it is reached:
+ *
+ *   - an alloca (a VLA, __builtin_alloca, a local sema moved off the
+ *     frame) is taken a page at a time, each page's lowest byte written,
+ *     then the rest, written too -- the same block, since the pieces are
+ *     contiguous below each other;
+ *   - a function whose locals would make a frame of more than half a page
+ *     has its large ones (64 bytes and up) taken off the frame that way
+ *     (sema, clash_locals), so the fixed frame stays under a page.
+ *
+ * Backend-independent: every target's IR_ALLOCA is a stack-pointer move. */
+static int g_clash;
+
+void clash_set(int on) { g_clash = on; }
+int clash_on(void) { return g_clash; }
+
+/* which of f's locals leave the frame: 1 each, or NULL */
+char *clash_locals(struct func *f, int nvars)
+{
+    if (!g_clash || f->is_naked)
+        return NULL;
+    long total = 0;
+    for (int v = 0; v < nvars; v++)
+        if (f->var_tys[v] && !ty_is_vla(f->var_tys[v]))
+            total += ty_size(f->var_tys[v]);
+    if (total <= 2048)
+        return NULL;
+    char *m = xcalloc((size_t)nvars, 1);
+    for (int v = 0; v < nvars; v++)
+        if (f->var_tys[v] && !ty_is_vla(f->var_tys[v]) &&
+            ty_size(f->var_tys[v]) >= 64)
+            m[v] = 1;
+    return m;
+}
+
+#define PROBE_PAGE 4096
+
+static void probe_store(struct ir_func *fn, int at)
+{
+    struct ir_ins *z = emit(fn);
+    z->op = IR_CONST;
+    z->imm = 0;
+    z->w = 4;
+    z->dst = fn->nvregs++;
+    int zv = z->dst;
+    struct ir_ins *s = emit(fn);
+    s->op = IR_STORE;
+    s->a = at;
+    s->b = zv;
+    s->size = 1;
+    s->vol = 1;
+}
+
+static void clash_func(struct ir_func *fn)
+{
+    int n0 = fn->nins, ns = 0, cap = 0;
+    struct ir_slice *sl = NULL;
+    int P = target_ptr_size(), W = P == 8 ? 8 : 4;
+    for (int n = 0; n < n0; n++) {
+        if (fn->ins[n].op != IR_ALLOCA)
+            continue;
+        int size = fn->ins[n].a, line = fn->ins[n].line, dst = fn->ins[n].dst;
+        if (ns + 2 > cap) {
+            cap = cap ? cap * 2 : 8;
+            sl = xrealloc(sl, (size_t)cap * sizeof *sl);
+        }
+        /* before: rest = size; while (rest > PAGE) { p = alloca(PAGE);
+         * *p = 0; rest -= PAGE; } -- then the alloca of rest itself */
+        sl[ns].at = n;
+        sl[ns].lo = fn->nins;
+        int rest = fn->nvregs++;
+        struct ir_ins *mv = emit(fn);
+        mv->op = IR_MOV;
+        mv->dst = rest;
+        mv->a = size;
+        int top = fn->nlabels++, done = fn->nlabels++;
+        struct ir_ins *l = emit(fn);
+        l->op = IR_LABEL;
+        l->label = top;
+        struct ir_ins *c = emit(fn);
+        c->op = IR_CMP;
+        c->pred = B_GT;
+        c->a = rest;
+        c->imm = PROBE_PAGE;
+        c->imm_b = 1;
+        c->w = W;
+        c->sign = 0;
+        c->dst = fn->nvregs++;
+        int cv = c->dst;
+        struct ir_ins *b = emit(fn);
+        b->op = IR_BRZ;
+        b->a = cv;
+        b->w = 4;
+        b->label = done;
+        struct ir_ins *pg = emit(fn);
+        pg->op = IR_CONST;
+        pg->imm = PROBE_PAGE;
+        pg->w = W;
+        pg->dst = fn->nvregs++;
+        int pgv = pg->dst;
+        struct ir_ins *al = emit(fn);
+        al->op = IR_ALLOCA;
+        al->a = pgv;
+        al->w = W;
+        al->dst = fn->nvregs++;
+        int pv = al->dst;
+        probe_store(fn, pv);
+        struct ir_ins *sub = emit(fn);
+        sub->op = IR_SUB;
+        sub->dst = rest;
+        sub->a = rest;
+        sub->imm = PROBE_PAGE;
+        sub->imm_b = 1;
+        sub->w = W;
+        struct ir_ins *j = emit(fn);
+        j->op = IR_JMP;
+        j->label = top;
+        struct ir_ins *dl = emit(fn);
+        dl->op = IR_LABEL;
+        dl->label = done;
+        for (int k = sl[ns].lo; k < fn->nins; k++) {
+            fn->ins[k].line = line;
+            fn->ins[k].synth = 1;
+        }
+        sl[ns].hi = fn->nins;
+        ns++;
+        fn->ins[n].a = rest;
+        /* after: the last piece touched too */
+        sl[ns].at = n + 1;
+        sl[ns].lo = fn->nins;
+        probe_store(fn, dst);
+        for (int k = sl[ns].lo; k < fn->nins; k++) {
+            fn->ins[k].line = line;
+            fn->ins[k].synth = 1;
+        }
+        sl[ns].hi = fn->nins;
+        ns++;
+    }
+    if (ns)
+        ir_splice(fn, n0, fn->nins, sl, ns);
+    free(sl);
+}
+
+void clash_instrument(struct ir_unit *iu)
+{
+    if (!g_clash)
+        return;
+    for (int k = 0; k < iu->nfuncs; k++)
+        if (iu->funcs[k].nins && iu->funcs[k].has_alloca)
+            clash_func(&iu->funcs[k]);
+}

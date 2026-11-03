@@ -340,6 +340,12 @@ void eh_emit(struct ir_unit *iu, int arm64, struct eh_out *out)
             uleb(b, 0);
         }
         int at = 0;
+        /* pac-ret: from after paciasp the saved return address is signed,
+         * and an unwinder strips it (DW_CFA_AARCH64_negate_ra_state) */
+        if (arm64 && f->cfi_pac) {
+            advance(b, &at, f->cfi_pac, code_align);
+            u8(b, 0x2d);
+        }
         if (f->cfi_frameless) {
             /* Nothing to say: the CIE's opening rule already describes
              * this function from entry to return. */

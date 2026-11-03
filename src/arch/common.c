@@ -144,6 +144,20 @@ int cg_label_mark(const struct ir_ins *i)
     return i->op == IR_LABELADDR && i->vol;
 }
 
+int cg_returns_twice(const struct ir_ins *i)
+{
+    if (i->op != IR_CALL || i->indirect || !i->callee || !i->callee->name)
+        return 0;
+    static const char *const names[] = {
+        "setjmp", "_setjmp", "sigsetjmp", "__sigsetjmp", "savectx", "vfork",
+        "getcontext", "__builtin_setjmp", NULL
+    };
+    for (int k = 0; names[k]; k++)
+        if (!strcmp(i->callee->name, names[k]))
+            return 1;
+    return 0;
+}
+
 void cg_note_labels(struct ir_func *fn, const int *label_off)
 {
     struct func *f = fn->src;

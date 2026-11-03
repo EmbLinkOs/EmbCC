@@ -128,6 +128,7 @@ void a64_str(struct code *c, int rt, int rn, long off, int size);
 /* ---- frame ---------------------------------------------------------- */
 /* stp x29,x30,[sp,#-16]! ; mov x29,sp ; sub sp,sp,#framesize */
 void a64_prologue(struct code *c, int framesize);
+extern unsigned long g_a64_auth;          /* see a64_teardown */
 /* add sp,sp,#framesize ; ldp x29,x30,[sp],#16 ; ret */
 void a64_teardown(struct code *c, int framesize);
 void a64_epilogue(struct code *c, int framesize);

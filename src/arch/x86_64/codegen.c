@@ -3057,6 +3057,17 @@ static void gen_func(struct ir_func *fn, struct code *text,
                              * sizeof *label_off);
     for (int i = 0; i < fn->nlabels; i++)
         label_off[i] = -1;
+    /* -fcf-protection=branch: the labels an indirect jump lands on -- a
+     * computed goto's (every label whose address is taken, in the code or
+     * in static data) -- start with endbr64; a jump table's jmp is
+     * `notrack`, as GCC's, so its targets need none */
+    int ibt = (target_cf() & CF_IBT) && target_fmt_get() == TGT_FMT_ELF;
+    char *ibt_lbl = ibt ? xcalloc((size_t)(fn->nlabels ? fn->nlabels : 1), 1)
+                        : NULL;
+    for (int n = 0; ibt && n < fn->nins; n++)
+        if (fn->ins[n].op == IR_LABELADDR && fn->ins[n].label >= 0 &&
+            fn->ins[n].label < fn->nlabels)
+            ibt_lbl[fn->ins[n].label] = 1;
     struct brsite *brs = NULL;
     int nbrs = 0, capbrs = 0;
     /* absolute jump-table entries awaiting their labels (IR_SWITCH) */
@@ -3196,6 +3207,12 @@ static void gen_func(struct ir_func *fn, struct code *text,
         code_align(text, falign, 0x90);
     f->code_off = text->len;
     f->code_align = falign;
+    /* -fcf-protection=branch: the entry an indirect call lands on */
+    int cf_pre = 0;
+    if (ibt) {
+        x86_endbr64(text);
+        cf_pre = 4;
+    }
 
     /* The frame record, then the callee-saved registers, then the rest
      * of the frame. They go out as PUSHES: the save area is the top of
@@ -3236,8 +3253,8 @@ static void gen_func(struct ir_func *fn, struct code *text,
     }
     /* for the unwind tables: push rbp ends at +1, mov rbp,rsp at +4 */
     f->cfi_frameless = frameless;
-    f->cfi_push = 1;
-    f->cfi_frame = 4;
+    f->cfi_push = 1 + cf_pre;
+    f->cfi_frame = 4 + cf_pre;
     if (!frameless && !g_pushonly && target_os_get() != TGT_OS_WINDOWS) {
         for (int k = nsave - 1; k >= 0; k--)
             x86_push_reg(text, used_callee[k]);
@@ -5102,6 +5119,9 @@ static void gen_func(struct ir_func *fn, struct code *text,
         case IR_LABEL:
             cg_reset();      /* a merge point: RAX is unknown here */
             label_off[i->label] = text->len;
+            if (ibt_lbl && i->label >= 0 && i->label < fn->nlabels &&
+                ibt_lbl[i->label])
+                x86_endbr64(text);
             break;
         case IR_JMP:
             /* A jump whose target label is the next thing EMITTED is
@@ -5254,6 +5274,8 @@ static void gen_func(struct ir_func *fn, struct code *text,
              * into it (jtabs, resolved with the branches below). Mach-O
              * and COFF keep the offset table. */
             if (target_fmt_get() == TGT_FMT_ELF && !target_pic()) {
+                if (ibt)
+                    code_byte(text, 0x3e);              /* notrack */
                 x86_jmp_rcx_reg8(text, idx);
                 code_align(text, 8, 0xcc);
                 int tab = text->len;
@@ -5274,6 +5296,8 @@ static void gen_func(struct ir_func *fn, struct code *text,
             }
             x86_movsxd_rax_tab(text);
             x86_alu_rr(text, '+', REG_RAX, REG_RCX, 8);
+            if (ibt)
+                code_byte(text, 0x3e);                  /* notrack */
             x86_jmp_reg(text, REG_RAX);
             code_align(text, 4, 0xcc);                  /* int3 padding */
             int tab = text->len;
@@ -5899,7 +5923,10 @@ static void gen_func(struct ir_func *fn, struct code *text,
             }
             break;
         case IR_LANDING:
-            /* the unwinder left the exception in rax, the selector in rdx */
+            /* the unwinder left the exception in rax, the selector in rdx;
+             * it jumps here indirectly */
+            if (ibt)
+                x86_endbr64(text);
             cg_reset();
             cg_store(text, sd, i->dst, 8);
             x86_mov_reg_reg(text, REG_RAX, REG_RDX);
@@ -5922,6 +5949,9 @@ static void gen_func(struct ir_func *fn, struct code *text,
         if (i->op == IR_CALL && fn->neh)
             ir_add_csite(fn, ins_start - f->code_off, text->len - f->code_off,
                          i->eh_region - 1);
+        /* a second return from setjmp is longjmp's indirect jump */
+        if (ibt && i->op == IR_CALL && !tail_made && cg_returns_twice(i))
+            x86_endbr64(text);
         if (g_regalloc && (tail_made || i->op == IR_RET ||
                            i->op == IR_JMP || i->op == IR_UD2))
             dead = 1;
@@ -6003,6 +6033,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
     free(brs);
     cg_note_labels(fn, label_off);
     free(label_off);
+    free(ibt_lbl);
     if (fn->ins_pc) {
         /* -g: where each vreg lives, as DWARF numbers its registers
          * (rax rdx rcx rbx rsi rdi rbp rsp r8-r15, xmm0 17) */

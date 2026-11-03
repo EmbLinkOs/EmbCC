@@ -664,6 +664,11 @@ void a64_prologue(struct code *c, int framesize)
 
 /* The frame down and the frame record reloaded -- the epilogue short of
  * its `ret`, which a tail call replaces with a branch. */
+/* -mbranch-protection=pac-ret: the function signed x30 on entry
+ * (paciasp / pacibsp), and authenticates it once it is back in the
+ * register -- autiasp / autibsp, here, or 0 when it signs nothing */
+unsigned long g_a64_auth;
+
 void a64_teardown(struct code *c, int framesize)
 {
     if (framesize > 0 &&
@@ -672,6 +677,8 @@ void a64_teardown(struct code *c, int framesize)
         a64_word(c, 0x910003BFUL);        /* mov sp, x29 */
     }
     a64_word(c, 0xA8C17BFDUL);            /* ldp x29, x30, [sp], #16 */
+    if (g_a64_auth)
+        a64_word(c, g_a64_auth);
 }
 
 void a64_epilogue(struct code *c, int framesize)

@@ -1791,6 +1791,12 @@ void x86_jmp_rcx_reg8(struct code *c, int reg)
     code_byte(c, 0xc0 | ((reg & 7) << 3) | 1);
 }
 
+void x86_endbr64(struct code *c)
+{
+    code_byte(c, 0xf3); code_byte(c, 0x0f); code_byte(c, 0x1e);
+    code_byte(c, 0xfa);
+}
+
 void x86_jmp_reg(struct code *c, int reg)
 {
     if (reg >= 8) code_byte(c, 0x41);     /* REX.B for r8..r15 */

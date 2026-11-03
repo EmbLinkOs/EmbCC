@@ -10009,6 +10009,29 @@ static void check_func(struct unit *u, struct func *f)
             !f->var_tys[i] || ty_is_vla(f->var_tys[i]) || sc.vars[i].asm_reg ||
             ty_size(f->var_tys[i]) <= 0)
             f->var_asan[i] = 0;
+    /* -fstack-protector: the same, below a canary (AddressSanitizer's
+     * redzones already do better, so not with it) */
+    f->var_ssp = NULL;
+    f->ssp_on = 0;
+    if (!f->var_asan) {
+        int vla = 0;
+        for (int i = 0; i < sc.n; i++)
+            if (f->var_tys[i] && ty_is_vla(f->var_tys[i]))
+                vla = 1;
+        f->var_ssp = ssp_locals(f, sc.n, vla, &f->ssp_on);
+        for (int i = 0; f->var_ssp && i < sc.n; i++)
+            if (i < f->nparams || sc.vars[i].g || sc.vars[i].fdecl ||
+                !f->var_tys[i] || ty_is_vla(f->var_tys[i]) ||
+                sc.vars[i].asm_reg || ty_size(f->var_tys[i]) <= 0)
+                f->var_ssp[i] = 0;
+    }
+    /* -fstack-clash-protection: a large frame's large locals off it, onto
+     * the probed allocas (src/ir/sanitize.c) */
+    char *clash = clash_locals(f, sc.n);
+    for (int i = 0; clash && i < sc.n; i++)
+        if (i < f->nparams || sc.vars[i].g || sc.vars[i].fdecl ||
+            sc.vars[i].asm_reg)
+            clash[i] = 0;
     for (int i = f->nparams; i < sc.n; i++) {
         struct type *t = f->var_tys[i];
         if (sc.vars[i].g || sc.vars[i].fdecl || !t || ty_is_vla(t) ||
@@ -10017,7 +10040,8 @@ static void check_func(struct unit *u, struct func *f)
         int al = ty_align(t);
         if (f->var_aligns[i] > al)
             al = f->var_aligns[i];
-        if (al <= target_stack_align() && !(f->var_asan && f->var_asan[i]))
+        if (al <= target_stack_align() && !(f->var_asan && f->var_asan[i]) &&
+            !(f->var_ssp && f->var_ssp[i]) && !(clash && clash[i]))
             continue;
         if (!f->var_indirect) {
             f->var_indirect = xcalloc((size_t)sc.n, sizeof *f->var_indirect);
@@ -10029,6 +10053,7 @@ static void check_func(struct unit *u, struct func *f)
         f->var_tys[i] = ty_ptr(t);
         f->var_aligns[i] = 0;
     }
+    free(clash);
     free(sc.vars);
     free(sc.same);
     if (sc.ix) {
@@ -10252,6 +10277,8 @@ static void merge_decls(struct unit *u)
         canon->attr_cold |= f->attr_cold;
         canon->attr_no_profile |= f->attr_no_profile;
         canon->attr_no_san |= f->attr_no_san;
+        if (f->attr_ssp)
+            canon->attr_ssp = f->attr_ssp;
         /* aligned(N) on any declaration, the strictest (GCC's align-3.c
          * puts it on the prototype) */
         if (f->user_align > canon->user_align)

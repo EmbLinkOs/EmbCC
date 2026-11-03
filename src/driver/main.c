@@ -525,6 +525,13 @@ static const char *g_dumpbase;
  * g_cur_exe is the image a compile_and_link unit goes into, which names
  * its notes (x-t.gcno for `t.c -o x`, as GCC and clang do). */
 static int g_cov_arcs, g_cov_notes, g_cov_link, g_cov_update;
+/* -fstack-protector[-strong|-all|-explicit] (1..4) and
+ * --param=ssp-buffer-size= (src/ir/sanitize.c) */
+static int g_ssp_mode, g_ssp_buf = 8;
+static int g_clash;                  /* -fstack-clash-protection */
+/* -fcf-protection / -mbranch-protection (CF_* of target.h), and which
+ * was given, for the target check */
+static int g_cf, g_cf_x86, g_cf_a64;
 /* -fsanitize=address, thread, memory: which runtime archives the link
  * takes (lib/san); -fsanitize-recover=address */
 static unsigned g_san_link;
@@ -3346,6 +3353,7 @@ lto_backend:
     opt_run(iu, opt_for_size ? OPT_SIZE : opt_level);
     time_mark("optimization");
     san_instrument(iu);
+    clash_instrument(iu);
     target_set_opt_size(opt_for_size);
     apply_asm_names(u);
 
@@ -6693,14 +6701,74 @@ static int embcc_main(int argc, char **argv)
             access_set_enabled(0);
         } else if (strcmp(argv[i], "-faccess-control") == 0) {
             access_set_enabled(1);
+        } else if (strcmp(argv[i], "-fcf-protection") == 0 ||
+                   strncmp(argv[i], "-fcf-protection=", 16) == 0) {
+            /* x86-64 CET: branch (endbr64 landing pads), return (the
+             * shadow stack), full both, none neither, check accepted */
+            const char *m = argv[i][15] == '=' ? argv[i] + 16 : "full";
+            g_cf &= ~(CF_IBT | CF_SHSTK);
+            if (!strcmp(m, "full")) g_cf |= CF_IBT | CF_SHSTK;
+            else if (!strcmp(m, "branch")) g_cf |= CF_IBT;
+            else if (!strcmp(m, "return")) g_cf |= CF_SHSTK;
+            else if (strcmp(m, "none") && strcmp(m, "check")) {
+                fprintf(stderr, "embcc: error: -fcf-protection=%s: the "
+                                "kinds are full, branch, return, none\n", m);
+                return 1;
+            }
+            g_cf_x86 = 1;
+        } else if (strncmp(argv[i], "-mbranch-protection=", 20) == 0) {
+            /* AArch64: none, standard (bti+pac-ret), bti, and
+             * pac-ret[+leaf][+b-key], joined by '+' */
+            const char *m = argv[i] + 20;
+            g_cf &= ~(CF_BTI | CF_PAC | CF_PAC_LEAF | CF_PAC_BKEY);
+            for (const char *p = m; *p; ) {
+                const char *e = strchr(p, '+');
+                size_t n = e ? (size_t)(e - p) : strlen(p);
+                if (n == 4 && !strncmp(p, "none", 4)) ;
+                else if (n == 8 && !strncmp(p, "standard", 8))
+                    g_cf |= CF_BTI | CF_PAC;
+                else if (n == 3 && !strncmp(p, "bti", 3)) g_cf |= CF_BTI;
+                else if (n == 7 && !strncmp(p, "pac-ret", 7)) g_cf |= CF_PAC;
+                else if (n == 4 && !strncmp(p, "leaf", 4)) g_cf |= CF_PAC_LEAF;
+                else if (n == 5 && !strncmp(p, "b-key", 5)) g_cf |= CF_PAC_BKEY;
+                else {
+                    fprintf(stderr, "embcc: error: -mbranch-protection=%s: "
+                                    "the parts are none, standard, bti, "
+                                    "pac-ret, +leaf and +b-key\n", m);
+                    return 1;
+                }
+                if (!e) break;
+                p = e + 1;
+            }
+            g_cf_a64 = 1;
+        } else if (strcmp(argv[i], "-fstack-clash-protection") == 0) {
+            g_clash = 1;
+        } else if (strcmp(argv[i], "-fno-stack-clash-protection") == 0) {
+            g_clash = 0;
         } else if (strcmp(argv[i], "-fno-stack-protector") == 0) {
-            /* what EmbCC does: it emits no stack protection. The positive
-             * forms are refused below rather than quietly ignored. */
-        } else if (strncmp(argv[i], "-fstack-protector", 17) == 0) {
-            fprintf(stderr, "embcc: '%s' is not supported (EmbCC emits no "
-                            "stack protection); -fno-stack-protector is\n",
-                    opt_typed(argv[i]));
-            return 1;
+            g_ssp_mode = 0;
+        } else if (strcmp(argv[i], "-fstack-protector") == 0) {
+            g_ssp_mode = 1;
+        } else if (strcmp(argv[i], "-fstack-protector-strong") == 0) {
+            g_ssp_mode = 2;
+        } else if (strcmp(argv[i], "-fstack-protector-all") == 0) {
+            g_ssp_mode = 3;
+        } else if (strcmp(argv[i], "-fstack-protector-explicit") == 0) {
+            g_ssp_mode = 4;
+        } else if (strncmp(argv[i], "--param=ssp-buffer-size=", 24) == 0 ||
+                   (strcmp(argv[i], "--param") == 0 && i + 1 < argc &&
+                    strncmp(argv[i + 1], "ssp-buffer-size=", 16) == 0)) {
+            const char *v = argv[i][7] == '=' ? argv[i] + 24
+                                              : argv[++i] + 16;
+            g_ssp_buf = atoi(v);
+        } else if (strncmp(argv[i], "-mstack-protector-guard=", 24) == 0 ||
+                   strncmp(argv[i], "-mstack-protector-guard-reg=", 28) == 0 ||
+                   strncmp(argv[i], "-mstack-protector-guard-offset=", 31) == 0 ||
+                   strncmp(argv[i], "-mstack-protector-guard-symbol=", 31) == 0) {
+            /* accepted: the guard is __stack_chk_guard on every target --
+             * on x86-64 Linux, lib/rt's copy of the thread block's (the
+             * %fs:0x28 GCC reads) -- so the canary holds the same value
+             * whichever is named */
         } else if (strcmp(argv[i], "-fno-rtti") == 0) {
             want_rtti = 0;
         } else if (strcmp(argv[i], "-frtti") == 0) {
@@ -7388,9 +7456,7 @@ static int embcc_main(int argc, char **argv)
         } else if (strncmp(argv[i], "-fsanitize", 10) == 0 ||
                    strncmp(argv[i], "-fprofile", 9) == 0 ||
                    strcmp(argv[i], "-fcoverage-mapping") == 0 ||
-                   strcmp(argv[i], "-pg") == 0 ||
-                   strcmp(argv[i], "-fstack-clash-protection") == 0 ||
-                   strncmp(argv[i], "-fcf-protection", 15) == 0) {
+                   strcmp(argv[i], "-pg") == 0) {
             /* Refused BY NAME, every one. These do not describe a
              * preference the compiler may decline -- each is a promise
              * about the code, and accepting one while emitting
@@ -7403,8 +7469,7 @@ static int embcc_main(int argc, char **argv)
              *                no counters, or none in that format: the
              *                gcov ones (--coverage, -fprofile-generate,
              *                -fprofile-use) are above
-             *   -fstack-clash-protection, -fcf-protection  no probes,
-             *                no landing pads
+             *   -pg      no mcount calls
              */
             fprintf(stderr, "embcc: error: %s is not supported; EmbCC "
                             "would emit ordinary code and the flag's "
@@ -7840,6 +7905,23 @@ static int embcc_main(int argc, char **argv)
     }
     irgen_set_instrument(want_instr, instr_funcs, instr_files);
     gcov_set_flags(g_prof_partial, g_prof_abs);
+    ssp_set(g_ssp_mode, g_ssp_buf);
+    clash_set(g_clash);
+    if ((g_cf & (CF_IBT | CF_SHSTK)) && target_get() != TARGET_X86_64) {
+        fprintf(stderr, "embcc: error: -fcf-protection is x86-64's (CET); on "
+                        "%s it has no instructions%s\n", target_triple_now(),
+                target_get() == TARGET_AARCH64
+                    ? " -- AArch64's are -mbranch-protection=standard" : "");
+        return 1;
+    }
+    if ((g_cf & (CF_BTI | CF_PAC)) && target_get() != TARGET_AARCH64) {
+        fprintf(stderr, "embcc: error: -mbranch-protection is AArch64's here "
+                        "(PAC and BTI); %s has none\n", target_triple_now());
+        return 1;
+    }
+    (void)g_cf_x86;
+    (void)g_cf_a64;
+    target_set_cf(g_cf);
     gcov_set_use(g_prof_use_on ? "" : NULL);  /* each unit's file: compile */
     gcov_set(g_cov_arcs, g_cov_notes,
              g_cov_update == 1 ||

@@ -584,6 +584,16 @@ int  target_debug_info(void);
 enum { TARGET_PIE = 1, TARGET_PIC = 2 };
 void target_set_pic(int mode);
 int  target_pic(void);
+/* Control-flow hardening: -fcf-protection (x86-64: CF_IBT, endbr64 where
+ * an indirect branch lands, notrack on a jump table's; CF_SHSTK, the
+ * shadow stack's note) and -mbranch-protection (AArch64: CF_BTI, bti c/j
+ * landing pads; CF_PAC, return addresses signed with paciasp/autiasp --
+ * CF_PAC_BKEY for the B key, CF_PAC_LEAF in a leaf too). Each says so in
+ * the object's .note.gnu.property. */
+enum { CF_IBT = 1, CF_SHSTK = 2, CF_BTI = 4, CF_PAC = 8, CF_PAC_LEAF = 16,
+       CF_PAC_BKEY = 32 };
+void target_set_cf(int mask);
+int  target_cf(void);
 /* Unwind tables (.eh_frame) will be written: the backends record their
  * prologues' CFI as -g has them do, for eh_emit_cfi. */
 void target_set_unwind_tables(int on);

@@ -100,6 +100,8 @@ struct attrs { int packed; int aligned; int weak; int noreturn;
                 * the rest: which -fsanitize= checks leave the function
                 * alone (SAN_* bits, src/ir/ir.h) */
                unsigned no_san;
+               /* stack_protect (1) / no_stack_protector (-1) */
+               int ssp;
 };
 
 /* The `)` that closes a declarator's `(`: the lexer at it, under the `(`'s
@@ -909,6 +911,8 @@ static const struct attr_entry attr_table[] = {
       "EmbCC does no type-based alias analysis, so not doing it is "
       "already what this asks for" },
     { "no_sanitize", ATTR_HONOURED, NULL },
+    { "stack_protect", ATTR_HONOURED, NULL },
+    { "no_stack_protector", ATTR_HONOURED, NULL },
     { "no_sanitize_address", ATTR_HONOURED, NULL },
     { "no_address_safety_analysis", ATTR_HONOURED, NULL },
     { "no_sanitize_thread", ATTR_HONOURED, NULL },
@@ -1517,6 +1521,8 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
                 else if (attr_is(name, "fallthrough")) out->fallthrough = 1;
                 else if (attr_is(name, "no_instrument_function"))
                     out->no_instrument = 1;
+                else if (attr_is(name, "stack_protect")) out->ssp = 1;
+                else if (attr_is(name, "no_stack_protector")) out->ssp = -1;
                 else if (attr_is(name, "no_sanitize")) {
                     const char *q = sarg ? sarg : "";
                     if (strstr(q, "address")) out->no_san |= SAN_ADDRESS;
@@ -7445,6 +7451,7 @@ static void parse_top(struct parser *ps, struct unit *u,
     if (at.cold) f->attr_cold = 1;
     if (at.no_profile) f->attr_no_profile = 1;
     f->attr_no_san |= at.no_san;
+    if (at.ssp) f->attr_ssp = at.ssp;
     if (at.aligned > f->user_align) f->user_align = at.aligned;
     f->attr_gnu_inline = at.gnu_inline;
     f->pcs = at.pcs;
@@ -7469,11 +7476,7 @@ static void parse_top(struct parser *ps, struct unit *u,
                 if (at.cold) f->attr_cold = 1;
                 if (at.no_profile) f->attr_no_profile = 1;
                 f->attr_no_san |= at.no_san;
-    f->attr_no_san |= at.no_san;
-    if (at.hot) f->attr_hot = 1;
-    if (at.cold) f->attr_cold = 1;
-    if (at.no_profile) f->attr_no_profile = 1;
-    f->attr_no_san |= at.no_san;
+                if (at.ssp) f->attr_ssp = at.ssp;
                 if (at.aligned > f->user_align) f->user_align = at.aligned;
                 f->attr_gnu_inline = at.gnu_inline;
                 f->pcs = at.pcs;
@@ -7587,6 +7590,7 @@ static void parse_top(struct parser *ps, struct unit *u,
     if (at.cold) f->attr_cold = 1;
     if (at.no_profile) f->attr_no_profile = 1;
     f->attr_no_san |= at.no_san;
+    if (at.ssp) f->attr_ssp = at.ssp;
     if (at.aligned > f->user_align) f->user_align = at.aligned;
     f->attr_gnu_inline = at.gnu_inline;
     f->pcs = at.pcs;
@@ -7736,6 +7740,7 @@ fn_tail:
     if (at.cold) f->attr_cold = 1;
     if (at.no_profile) f->attr_no_profile = 1;
     f->attr_no_san |= at.no_san;
+    if (at.ssp) f->attr_ssp = at.ssp;
     if (at.aligned > f->user_align) f->user_align = at.aligned;
     f->attr_gnu_inline = at.gnu_inline;
     f->pcs = at.pcs;

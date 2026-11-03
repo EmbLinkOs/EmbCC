@@ -472,6 +472,12 @@ struct func {
                                * to a call of it is an unlikely one */
     int attr_no_profile;      /* no_profile_instrument_function */
     unsigned attr_no_san;     /* no_sanitize(...): SAN_* bits it opts out of */
+    int attr_ssp;             /* stack_protect 1, no_stack_protector -1 */
+    /* -fstack-protector: the locals the canary guards (sema; each one
+     * var_indirect, carved by irgen below the canary), and whether the
+     * function has a canary at all; NULL / 0 when not */
+    char *var_ssp;
+    int ssp_on;
     /* -fsanitize=address: the locals given redzones (sema), each one
      * var_indirect, carved from one block by irgen; NULL when none */
     char *var_asan;
@@ -611,6 +617,9 @@ struct func {
      * frame register set, and the callee-saved registers it stores in its
      * frame (DWARF numbers; slots relative to the CFA) */
     int cfi_push, cfi_frame, cfi_saved_at, cfi_nsaved;
+    /* AArch64 -mbranch-protection=pac-ret: x30 is signed from this offset
+     * on (DW_CFA_AARCH64_negate_ra_state), 0 when it is not */
+    int cfi_pac;
     /* No frame record at all: a leaf that needs no frame pushes no rbp
      * and never moves rsp, so the CIE's opening rule -- CFA is rsp+8,
      * return address at CFA-8 -- holds for the whole function and the
