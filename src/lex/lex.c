@@ -192,6 +192,8 @@ static const struct {
     { "_Float32", TOK_KW_FLOAT },
     { "_Float64", TOK_KW_DOUBLE },
     { "_Float128", TOK_KW_FLOAT128 },
+    { "_Float32x", TOK_KW_DOUBLE },
+    { "_Float64x", TOK_KW_FLOAT64X },
     { "__float128", TOK_KW_FLOAT128 },
     { "_Float16", TOK_KW_FLOAT16 },
     { "__fp16", TOK_KW_FP16 },
@@ -472,6 +474,23 @@ static struct litch decode_escape(const char **p, const char *file, int line)
     case '?': (*p)++; c.v = '?'; return c;
     case 'x': {
         (*p)++;
+        if (**p == '{') {           /* C2y's (and C++23's) \x{...} */
+            (*p)++;
+            unsigned long v = 0;
+            int d, n = 0, big = 0;
+            while ((d = hex_val((unsigned char)**p)) >= 0) {
+                if (v >> 60)
+                    big = 1;
+                v = v * 16 + (unsigned long)d;
+                (*p)++;
+                n++;
+            }
+            if (!n || **p != '}')
+                diag_fatal(file, line, "\\x{...} needs hex digits and a closing '}'");
+            (*p)++;
+            c.v = big ? ~0UL : v;
+            return c;
+        }
         if (hex_val((unsigned char)**p) < 0)
             diag_fatal(file, line, "\\x used with no following hex digits");
         /* Every digit belongs to the escape, however many: the VALUE is
@@ -494,8 +513,20 @@ static struct litch decode_escape(const char **p, const char *file, int line)
          * code point, which is ENCODED at the literal's width. */
         int want = ch == 'u' ? 4 : 8;
         (*p)++;
-        unsigned long v;
-        if (!hex_digits(p, want, &v))
+        unsigned long v = 0;
+        if (ch == 'u' && **p == '{') {   /* \u{...}: any number of digits */
+            (*p)++;
+            int d, n = 0;
+            while ((d = hex_val((unsigned char)**p)) >= 0 && v <= 0x10FFFF) {
+                v = v * 16 + (unsigned long)d;
+                (*p)++;
+                n++;
+            }
+            if (!n || **p != '}')
+                diag_fatal(file, line, "\\u{...} needs hex digits and a closing '}'");
+            (*p)++;
+            want = 4;
+        } else if (!hex_digits(p, want, &v))
             diag_fatal(file, line, "\\%c needs %d hex digits", ch, want);
         if (v >= 0xD800 && v <= 0xDFFF)
             diag_fatal(file, line, "\\%c%0*lX is not a valid universal character "
@@ -507,6 +538,25 @@ static struct litch decode_escape(const char **p, const char *file, int line)
         c.raw = 0;
         return c;
     }
+    case 'o':                       /* C2y's \o{...}: octal, any length */
+        (*p)++;
+        if (**p == '{') {
+            (*p)++;
+            unsigned long v = 0;
+            int n = 0;
+            while (**p >= '0' && **p <= '7') {
+                v = v * 8 + (unsigned long)(**p - '0');
+                (*p)++;
+                n++;
+            }
+            if (!n || **p != '}')
+                diag_fatal(file, line, "\\o{...} needs octal digits and a closing '}'");
+            (*p)++;
+            c.v = v;
+            return c;
+        }
+        diag_fatal(file, line, "unknown escape '\\o' in a literal");
+        return c;
     default:
         if (ch >= '0' && ch <= '7') {     /* octal, at most three digits */
             unsigned long v = 0;
@@ -1334,6 +1384,20 @@ static void lex_raw(struct lexer *lx)
                            !t->fnum_is_ld && !t->fnum_is_f16) {
                     t->fnum_is_f16 = 1;
                     fend += 2;
+                } else if ((*fend == 'f' || *fend == 'F') &&
+                           ((fend[1] == '3' && fend[2] == '2') ||
+                            (fend[1] == '6' && fend[2] == '4') ||
+                            (fend[1] == '1' && fend[2] == '2' && fend[3] == '8')) &&
+                           !t->fnum_is_float && !t->fnum_is_ld && !t->fnum_is_f16) {
+                    /* C23's f32 (float), f64 and f32x (double), f64x and
+                     * f128 (long double, where it is that wide) */
+                    int n128 = fend[1] == '1';
+                    int x = !n128 && (fend[3] == 'x' || fend[3] == 'X');
+                    if (fend[1] == '3' && !x)
+                        t->fnum_is_float = 1;
+                    else if (n128 || (fend[1] == '6' && x))
+                        t->fnum_is_ld = 1;
+                    fend += n128 ? 3 : 2 + x;
                 } else if (((fend[0] == 'b' && fend[1] == 'f') ||
                             (fend[0] == 'B' && fend[1] == 'F')) &&
                            fend[2] == '1' && fend[3] == '6' &&

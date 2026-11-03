@@ -154,6 +154,9 @@ static void nameix_put(struct nameix *ix, const char *name, void *val)
 }
 
 struct parser {
+    int decl_in_cond;     /* a C2y if/switch declaration: it may end at
+                           * the ')' as well as at ';' */
+    const char *decl_last_name;   /* the last declarator's name */
     int se_want;          /* the depth of a statement expression's block,
                            * whose last value parse_block types (se_ty) */
     struct type *se_ty;
@@ -470,7 +473,7 @@ static int tok_is_type_start(enum tok_kind k)
            k == TOK_KW_STRUCT || k == TOK_KW_UNION || k == TOK_KW_ENUM ||
            k == TOK_KW_CONST || k == TOK_KW_VOLATILE ||
            k == TOK_KW_FLOAT || k == TOK_KW_DOUBLE || k == TOK_KW_BOOL ||
-           k == TOK_KW_FLOAT128 || k == TOK_KW_FLOAT16 ||
+           k == TOK_KW_FLOAT128 || k == TOK_KW_FLOAT64X || k == TOK_KW_FLOAT16 ||
            k == TOK_KW_FP16 || k == TOK_KW_BF16 ||
            k == TOK_KW_COMPLEX || k == TOK_KW_BITINT ||
            k == TOK_KW_ALIGNAS || k == TOK_KW_TYPEOF || k == TOK_KW_ATOMIC ||
@@ -2668,7 +2671,7 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
     /* base specifiers in any order: unsigned long int, long unsigned... */
     int uns = -1, nlong = 0, nshort = 0, nchar = 0, nint = 0, nvoid = 0;
     int nfloat = 0, ndouble = 0, nbool = 0, ncomplex = 0, n128 = 0;
-    int nf128 = 0, nf16 = 0, nfp16 = 0, nbf16 = 0;
+    int nf128 = 0, nf16 = 0, nfp16 = 0, nbf16 = 0, nf64x = 0;
     int any = 0, nbitint = 0, bline = 0, bcol = 0;
     long bits = 0;
     for (;;) {
@@ -2701,6 +2704,7 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
         else if (k == TOK_KW_LONG) nlong++;
         else if (k == TOK_KW_INT128) n128++;
         else if (k == TOK_KW_FLOAT128) nf128++;
+        else if (k == TOK_KW_FLOAT64X) nf64x++;
         else if (k == TOK_KW_FLOAT16) nf16++;
         else if (k == TOK_KW_FP16) nfp16++;
         else if (k == TOK_KW_BF16) nbf16++;
@@ -2807,6 +2811,19 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
                        "%s cannot combine with other specifiers",
                        nf16 ? "_Float16" : nfp16 ? "__fp16" : "__bf16");
         return nf16 ? ty_base(TY_FLOAT16, 0) : nfp16 ? ty_fp16() : ty_bf16();
+    }
+    if (nf64x) {
+        /* C23's _Float64x: at least double's precision and more range --
+         * long double, where that is wider than double (x87's extended,
+         * binary128) */
+        if (any > 1)
+            parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                       "_Float64x cannot combine with other specifiers");
+        if (ty_size(ty_base(TY_LDOUBLE, 0)) <= 8)
+            parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                       "_Float64x is not supported on this target: its long "
+                       "double is no wider than double");
+        return ty_base(TY_LDOUBLE, 0);
     }
     if (nf128) {
         if (any > 1)
@@ -3326,10 +3343,12 @@ static struct type *ce_type(const struct expr *e)
  * both ask, so the value and the type of one _Generic agree. */
 static const struct expr *generic_choice(const struct expr *e)
 {
-    struct type *ct = ce_type(e->lhs);
+    struct type *ct = e->lhs ? ce_type(e->lhs) : e->cast_ty;
     const struct expr *chosen = NULL, *deflt = NULL;
     if (!ct)
         return NULL;
+    if (!e->lhs)
+        goto choose;               /* a type operand: as written */
     /* The controlling expression undergoes lvalue conversion, so an
      * array matches `char *` and not `char[4]` -- which is the whole
      * reason `_Generic("s", char *: ...)` works. ce_type answers
@@ -3343,6 +3362,7 @@ static const struct expr *generic_choice(const struct expr *e)
     /* The same strict test sema makes: ty_equal lets `long` match
      * `long long`, and a folded _Generic then disagreed with the one
      * sema resolves in the same unit. */
+choose:
     for (int i = 0; i < e->ngen; i++) {
         if (!e->gtypes[i]) { deflt = e->gexprs[i]; continue; }
         if (ty_generic_same(ct, e->gtypes[i])) { chosen = e->gexprs[i]; break; }
@@ -4169,7 +4189,14 @@ static struct expr *parse_primary(struct parser *ps)
         advance(ps);
         expect(ps, TOK_LPAREN, "'(' after _Generic");
         e = new_expr(EXPR_GENERIC, t->line, t->col);
-        e->lhs = parse_expr(ps);          /* the controlling expression */
+        if (at_type_start(ps)) {
+            /* C2y: a type name, used as written -- no lvalue conversion,
+             * so its qualifiers count */
+            e->cast_ty = parse_type_name(ps, parse_type_spec(ps, 0));
+            e->lhs = NULL;
+        } else {
+            e->lhs = parse_expr(ps);      /* the controlling expression */
+        }
         int cap = 0;
         while (cur(ps)->kind == TOK_COMMA) {
             advance(ps);
@@ -5618,6 +5645,49 @@ static struct stmt *parse_eh_region(struct parser *ps)
     return s;
 }
 
+/* C2y's declaration in an if or switch: `(int x = g(); x > 0)`, or
+ * `(int x = g())` whose condition is x. At the '(' already consumed: the
+ * declaration (or NULL when there is none) and the condition, *cond.
+ * The caller makes a block of the two, which is the declared names'
+ * scope. */
+static struct stmt *cond_decl(struct parser *ps, struct expr **cond)
+{
+    if (!at_type_start(ps) && !at_attribute(ps)) {
+        *cond = parse_comma(ps);
+        return NULL;
+    }
+    int line = cur(ps)->line, col = cur(ps)->col;
+    ped_at(ps, line, col, 2025, "a declaration in an if or switch");
+    ps->decl_in_cond = 1;
+    ps->decl_last_name = NULL;
+    struct stmt *d = parse_stmt(ps, 1);
+    ps->decl_in_cond = 0;
+    if (ps->decl_last_name) {
+        struct expr *v = new_expr(EXPR_VAR, line, col);
+        v->name = ps->decl_last_name;
+        *cond = v;
+    } else {
+        *cond = parse_comma(ps);
+    }
+    ps->decl_last_name = NULL;
+    return d;
+}
+
+/* The block a C2y if/switch declaration makes: the declaration, then the
+ * statement itself. */
+static struct stmt *cond_decl_block(struct stmt *decl, struct stmt *s)
+{
+    if (!decl)
+        return s;
+    struct stmt *blk = new_stmt(STMT_BLOCK, s->line, s->col);
+    blk->body = decl;
+    struct stmt *t = decl;
+    while (t->next)
+        t = t->next;
+    t->next = s;
+    return blk;
+}
+
 static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
 {
     stack_check(ps->lx.file, cur(ps)->line, 6);  /* `{{{ }}}`, `if if if` */
@@ -6091,6 +6161,15 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
             }
             break;
         }
+        if (ps->decl_in_cond && cur(ps)->kind == TOK_RPAREN) {
+            /* `if (int x = g())`: the declaration is the condition */
+            struct stmt *last = head;
+            while (last && last->next)
+                last = last->next;
+            ps->decl_last_name = last ? last->name : NULL;
+            return head;
+        }
+        ps->decl_last_name = NULL;
         expect(ps, TOK_SEMI, "';'");
         return head;
     }
@@ -6167,17 +6246,21 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
         expect(ps, TOK_SEMI, "';'");
         return s;
     case TOK_KW_IF:
+    {
+        int fmark = g_nfold_locals;   /* a C2y declaration's names */
         s = new_stmt(STMT_IF, t->line, t->col);
         advance(ps);
         expect(ps, TOK_LPAREN, "'('");
-        s->cond = parse_comma(ps);       /* an expression: commas too */
+        struct stmt *decl = cond_decl(ps, &s->cond);  /* an expression: commas too */
         expect(ps, TOK_RPAREN, "')'");
         s->thn = parse_controlled(ps);
         if (cur(ps)->kind == TOK_KW_ELSE) {
             advance(ps);
             s->els = parse_controlled(ps);
         }
-        return s;
+        g_nfold_locals = fmark;
+        return cond_decl_block(decl, s);
+    }
     case TOK_KW_WHILE:
         s = new_stmt(STMT_WHILE, t->line, t->col);
         advance(ps);
@@ -6234,7 +6317,8 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
         s = new_stmt(STMT_SWITCH, t->line, t->col);
         advance(ps);
         expect(ps, TOK_LPAREN, "'('");
-        s->cond = parse_comma(ps);
+        int sw_fmark = g_nfold_locals;
+        struct stmt *sw_decl = cond_decl(ps, &s->cond);
         expect(ps, TOK_RPAREN, "')'");
         s->body = parse_controlled(ps);
         /* `switch (x) case 4: case 0: f();`: a label is a marker in a
@@ -6257,7 +6341,8 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
             }
             s->body = blk;
         }
-        return s;
+        g_nfold_locals = sw_fmark;
+        return cond_decl_block(sw_decl, s);
     case TOK_KW_CASE:
         /* a position MARKER in the switch body's list, not a wrapper —
          * C's fallthrough is what forces that shape */

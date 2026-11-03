@@ -3721,10 +3721,12 @@ static int sc_nonneg(const struct expr *e)
 static struct expr *generic_choice(struct unit *u, struct func *f,
                                    struct scope *sc, struct expr *e)
 {
-    check_expr(u, f, sc, e->lhs);
+    if (e->lhs)
+        check_expr(u, f, sc, e->lhs);
     struct expr *chosen = NULL, *deflt = NULL;
-    /* lvalue conversion drops the operand's own qualifiers */
-    const struct type *ct = ty_unqual(e->lhs->ty);
+    /* lvalue conversion drops the operand's own qualifiers -- an
+     * expression's, not a type name's (C2y), which is used as written */
+    const struct type *ct = e->lhs ? ty_unqual(e->lhs->ty) : e->cast_ty;
     int nmatch = 0;
     for (int i = 0; i < e->ngen; i++) {
         if (!e->gtypes[i]) { deflt = e->gexprs[i]; continue; }
@@ -3748,7 +3750,7 @@ static struct expr *generic_choice(struct unit *u, struct func *f,
     if (!chosen)
         sema_error_at(u, e->line, e->col,
                    "no _Generic association matches type %s",
-                   ty_name(e->lhs->ty));
+                   ty_name(ct));
     return chosen;
 }
 

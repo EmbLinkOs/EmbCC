@@ -22,6 +22,7 @@ enum tok_kind {
     TOK_KW_LONG,
     TOK_KW_INT128,    /* GNU __int128 */
     TOK_KW_FLOAT128,  /* _Float128 / __float128 (IEEE binary128) */
+    TOK_KW_FLOAT64X,  /* _Float64x: long double, where it is wider than double */
     TOK_KW_FLOAT16,   /* _Float16 (IEEE binary16) */
     TOK_KW_FP16,      /* __fp16: ARM's binary16, promoted to float */
     TOK_KW_BF16,      /* __bf16: bfloat16 */
