@@ -12,9 +12,11 @@ template <int N> int sq = N * N;
 template int zero<int>;
 template const double two<double>;
 template int n::sq<3 + 4>;
-extern template long zero<long>;
+extern template long zero<long>;     // another unit's -- here, below
 
 extern "C" int *sq7_address() { return &n::sq<7>; }
+
+template long zero<long>;            // (the definition `extern` promised)
 
 int main()
 {
