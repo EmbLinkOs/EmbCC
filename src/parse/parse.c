@@ -91,6 +91,11 @@ struct attrs { int packed; int aligned; int weak; int noreturn;
                int mode;
                int transparent;       /* transparent_union */
                int vecsize;           /* vector_size(N): the bytes */
+               /* hot / cold: where the function goes (.text.hot,
+                * .text.unlikely) and, for cold, how it is optimized and
+                * how likely a path to a call of it is (src/ir/gcov.c);
+                * no_profile_instrument_function: no --coverage counters */
+               int hot, cold, no_profile;
 };
 
 /* The `)` that closes a declarator's `(`: the lexer at it, under the `(`'s
@@ -903,8 +908,9 @@ static const struct attr_entry attr_table[] = {
     { "no_sanitize_address", ATTR_NOOP, "EmbCC has no sanitizers" },
     { "no_sanitize_undefined", ATTR_NOOP, "EmbCC has no sanitizers" },
     { "no_instrument_function", ATTR_HONOURED, NULL },
-    { "hot",       ATTR_NOOP, "EmbCC does not reorder code by frequency" },
-    { "cold",      ATTR_NOOP, "EmbCC does not reorder code by frequency" },
+    { "hot",       ATTR_HONOURED, NULL },
+    { "cold",      ATTR_HONOURED, NULL },
+    { "no_profile_instrument_function", ATTR_HONOURED, NULL },
     { "flatten",   ATTR_NOOP,
       "EmbCC's inliner works from the call site, not from a whole "
       "function's subtree" },
@@ -1503,6 +1509,10 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
                 else if (attr_is(name, "fallthrough")) out->fallthrough = 1;
                 else if (attr_is(name, "no_instrument_function"))
                     out->no_instrument = 1;
+                else if (attr_is(name, "hot")) out->hot = 1;
+                else if (attr_is(name, "cold")) out->cold = 1;
+                else if (attr_is(name, "no_profile_instrument_function"))
+                    out->no_profile = 1;
                 else if (attr_is(name, "gnu_inline")) out->gnu_inline = 1;
                 else if (attr_is(name, "deprecated")) out->deprecated = 1;
                 else if (attr_is(name, "warn_unused_result"))
@@ -7403,6 +7413,9 @@ static void parse_top(struct parser *ps, struct unit *u,
     f->attr_always_inline = at.always_inline;
     f->attr_noinline = at.noinline;
     if (at.no_instrument) f->attr_no_instrument = 1;
+    if (at.hot) f->attr_hot = 1;
+    if (at.cold) f->attr_cold = 1;
+    if (at.no_profile) f->attr_no_profile = 1;
     if (at.aligned > f->user_align) f->user_align = at.aligned;
     f->attr_gnu_inline = at.gnu_inline;
     f->pcs = at.pcs;
@@ -7423,6 +7436,12 @@ static void parse_top(struct parser *ps, struct unit *u,
                 f->attr_always_inline = at.always_inline;
                 f->attr_noinline = at.noinline;
                 if (at.no_instrument) f->attr_no_instrument = 1;
+                if (at.hot) f->attr_hot = 1;
+                if (at.cold) f->attr_cold = 1;
+                if (at.no_profile) f->attr_no_profile = 1;
+    if (at.hot) f->attr_hot = 1;
+    if (at.cold) f->attr_cold = 1;
+    if (at.no_profile) f->attr_no_profile = 1;
                 if (at.aligned > f->user_align) f->user_align = at.aligned;
                 f->attr_gnu_inline = at.gnu_inline;
                 f->pcs = at.pcs;
@@ -7532,6 +7551,9 @@ static void parse_top(struct parser *ps, struct unit *u,
     f->attr_always_inline = at.always_inline;
     f->attr_noinline = at.noinline;
     if (at.no_instrument) f->attr_no_instrument = 1;
+    if (at.hot) f->attr_hot = 1;
+    if (at.cold) f->attr_cold = 1;
+    if (at.no_profile) f->attr_no_profile = 1;
     if (at.aligned > f->user_align) f->user_align = at.aligned;
     f->attr_gnu_inline = at.gnu_inline;
     f->pcs = at.pcs;
@@ -7677,6 +7699,9 @@ fn_tail:
     f->attr_always_inline = at.always_inline;
     f->attr_noinline = at.noinline;
     if (at.no_instrument) f->attr_no_instrument = 1;
+    if (at.hot) f->attr_hot = 1;
+    if (at.cold) f->attr_cold = 1;
+    if (at.no_profile) f->attr_no_profile = 1;
     if (at.aligned > f->user_align) f->user_align = at.aligned;
     f->attr_gnu_inline = at.gnu_inline;
     f->pcs = at.pcs;

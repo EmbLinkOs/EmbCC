@@ -514,6 +514,21 @@ static const char *g_specs;
  * it to the compiler it runs for each source of a link). */
 static int g_save_temps;
 static const char *g_dumpbase;
+/* --coverage and the profile options (src/ir/gcov.c): counters, notes,
+ * and libgcov at the link; -fprofile-update (0 single, 1 atomic, 2
+ * prefer-atomic); -fprofile-dir / -fprofile-generate=DIR, where the
+ * .gcda files go; -fprofile-use[=PATH]; -fprofile-note=, the .gcno's
+ * name; GCC's file filters; -fprofile-prefix-path=, the part of an
+ * object's path a profile directory's names leave out; -fprofile-abs-
+ * path, absolute source names in the notes; -fprofile-partial-training,
+ * which leaves a function the profile never ran optimized as usual.
+ * g_cur_exe is the image a compile_and_link unit goes into, which names
+ * its notes (x-t.gcno for `t.c -o x`, as GCC and clang do). */
+static int g_cov_arcs, g_cov_notes, g_cov_link, g_cov_update;
+static int g_prof_use_on, g_prof_abs, g_prof_partial;
+static const char *g_prof_dir, *g_prof_use, *g_prof_note;
+static const char *g_prof_filter, *g_prof_exclude, *g_prof_prefix;
+static const char *g_cur_exe;
 
 /* The make rule: "target: source header...", wrapped as GCC wraps it, and
  * with -MP a bare rule per header so a deleted header does not break the
@@ -1108,7 +1123,9 @@ static int compile_and_link(const char *in, const char *out)
     char *lto = NULL;
     if (want_lto && lto_link_inputs(out ? out : "a.out", &lto))
         return 1;
+    g_cur_exe = out ? out : "a.out";
     int rc = compile_and_link_(in, out);
+    g_cur_exe = NULL;
     if (lto) {
         remove(lto);
         free(lto);
@@ -1365,6 +1382,18 @@ static int compile_and_link_(const char *in, const char *out)
             inputs[n++] = a;
         }
     }
+    /* libgcov (--coverage, -fprofile-generate, -lgcov): before libc,
+     * whose stdio it writes the .gcda files with */
+    char libgcov[1024];
+    if (g_cov_link) {
+        if (!paths_target_file(triple, "libgcov.a", libgcov, sizeof libgcov)) {
+            missing_runtime("libgcov.a", triple, 0);
+            if (in)
+                remove(obj);
+            return 1;
+        }
+        inputs[n++] = libgcov;
+    }
     if (have_cxx)
         inputs[n++] = libcxx;
     if (have_libc && (std || want_libc))
@@ -1418,6 +1447,86 @@ static const char *base_name(const char *p)
 {
     const char *sl = strrchr(p, '/');
     return sl ? sl + 1 : p;
+}
+
+/* ---- the coverage files' names -------------------------------------
+ *
+ * GCC's and clang's: the object's name without its suffix -- build/x
+ * for `-c x.c -o build/x.o` -- or, for a source compiled and linked in
+ * one command, the image's and the source's, joined by a dash (x-t for
+ * `t.c -o x`); -dumpbase NAME outright. The .gcno is written there; the
+ * program writes the .gcda at the same place made absolute, or under
+ * -fprofile-dir with the absolute path's slashes made '#'. */
+static char *gcov_base(const char *in, const char *out)
+{
+    if (g_dumpbase)
+        return xstrndup(g_dumpbase, strlen(g_dumpbase));
+    if (g_cur_exe) {
+        char *o = strip_ext(g_cur_exe), *s = strip_ext(base_name(in));
+        size_t n = strlen(o) + strlen(s) + 2;
+        char *b = xmalloc(n);
+        snprintf(b, n, "%s-%s", o, s);
+        free(o);
+        free(s);
+        return b;
+    }
+    return strip_ext(out ? out : base_name(in));
+}
+
+static char *abs_path(const char *p)
+{
+    const char *cwd = plat_cwd();
+    if (p[0] == '/' || !cwd)
+        return xstrndup(p, strlen(p));
+    while (p[0] == '.' && p[1] == '/')
+        p += 2;
+    size_t n = strlen(cwd) + strlen(p) + 2;
+    char *r = xmalloc(n);
+    snprintf(r, n, "%s/%s", cwd, p);
+    return r;
+}
+
+static char *gcov_data_path(const char *in, const char *out,
+                            const char *dir)
+{
+    char *base = gcov_base(in, out), *ab = abs_path(base);
+    free(base);
+    char *r;
+    if (dir) {
+        char *d = abs_path(dir);
+        const char *m = ab;
+        size_t pl = g_prof_prefix ? strlen(g_prof_prefix) : 0;
+        if (pl && !strncmp(m, g_prof_prefix, pl))
+            for (m += pl; *m == '/'; m++)
+                ;
+        size_t n = strlen(d) + strlen(m) + 8;
+        r = xmalloc(n);
+        snprintf(r, n, "%s/%s.gcda", d, m);
+        for (char *q = r + strlen(d) + 1; *q; q++)
+            if (*q == '/')
+                *q = '#';
+        free(d);
+    } else {
+        size_t n = strlen(ab) + 6;
+        r = xmalloc(n);
+        snprintf(r, n, "%s.gcda", ab);
+    }
+    free(ab);
+    return r;
+}
+
+/* -fprofile-use's file: PATH itself when it names a .gcda, else the
+ * unit's name under PATH (a directory), else where -fprofile-generate
+ * put it */
+static char *gcov_use_path(const char *in, const char *out)
+{
+    if (g_prof_use && *g_prof_use) {
+        size_t n = strlen(g_prof_use);
+        if (n > 5 && !strcmp(g_prof_use + n - 5, ".gcda"))
+            return xstrndup(g_prof_use, n);
+        return gcov_data_path(in, out, g_prof_use);
+    }
+    return gcov_data_path(in, out, g_prof_dir);
 }
 
 static int save_temps(int argc, char **argv, const char *in, const char *out,
@@ -1566,9 +1675,10 @@ static int multi_source(int argc, char **argv, const char *output,
                 size_t ln = strlen(exe) + 32;
                 tmp[next] = xmalloc(ln);
                 snprintf(tmp[next], ln, "%s.embcc-tmp-%d.o", exe, next + 1);
-                /* -save-temps: named after the image and the source, as
-                 * for one source (save_temps), not after the temporary */
-                if (g_save_temps && !g_dumpbase) {
+                /* -save-temps, --coverage: named after the image and the
+                 * source, as for one source (save_temps, gcov_base), not
+                 * after the temporary */
+                if ((g_save_temps || g_cov_arcs || g_cov_notes) && !g_dumpbase) {
                     char *o = strip_ext(exe), *sb = strip_ext(base_name(
                                                          g_srcs[next]));
                     size_t bn = strlen(o) + strlen(sb) + 2;
@@ -1994,6 +2104,11 @@ static int darwin_link(const char *in, const char *exe)
     }
     if (!g_nostdlib && !g_nodefaultlibs) {
         static char librt[1100];
+        static char libgcov[1100];
+        if (g_cov_link &&
+            paths_target_file(lib_triple(), "libgcov.a", libgcov,
+                              sizeof libgcov))
+            argv[n++] = libgcov;
         if (g_link_cxx || (in && lang_cxx))
             argv[n++] = "-lc++";
         argv[n++] = "-lSystem";
@@ -2261,6 +2376,11 @@ static int glibc_link(const char *in, const char *exe)
         static char rtcopy[1100];
         if (g_static_link || g_link_kind == LINK_STATIC_PIE)
             argv[n++] = "--start-group";
+        static char libgcov[1100];
+        if (g_cov_link &&
+            paths_target_file(lib_triple(), "libgcov.a", libgcov,
+                              sizeof libgcov))
+            argv[n++] = libgcov;
         if (g_pthread)
             argv[n++] = "-lpthread";
         argv[n++] = "-lc";
@@ -2998,6 +3118,20 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     }
     if (want_lto && !g_lto_collect)
         g_lto_payload = pp;           /* (the C++ front end's, for C++) */
+    /* --coverage: the unit's counters, its record, and the constructor
+     * that hands the record to libgcov (gcov_ctor_source) */
+    unsigned cov_stamp = 0;
+    if (gcov_active() && in) {
+        cov_stamp = gcov_crc32(gcov_crc32(0, in, strlen(in)), pp, strlen(pp));
+        if (gcov_arcs()) {
+            const char *c = gcov_ctor_source();
+            size_t a = strlen(pp), b = strlen(c);
+            char *q = xmalloc(a + b + 1);
+            memcpy(q, pp, a);
+            memcpy(q + a, c, b + 1);
+            pp = q;
+        }
+    }
     u = parse_unit(in, pp);
     time_mark("parse");
     if (lang_cxx) {
@@ -3109,8 +3243,35 @@ static int compile_unit(const char *in, const char *out, int pp_only)
             f->used = f->is_root = 1;
 
     remarks_enable(want_remarks || why_decision != NULL);
+    char *cov_gcda = NULL;
+    if (gcov_active() && in) {
+        char *src = g_prof_abs ? abs_path(in) : xstrndup(in, strlen(in));
+        cov_gcda = gcov_data_path(in, out, g_prof_dir);
+        if (g_prof_use_on) {
+            char *use = gcov_use_path(in, out);
+            gcov_set_use(use);
+        }
+        gcov_unit_begin(u, src, cov_gcda, cov_stamp);
+    }
     iu = irgen(u);
     time_mark("IR generation");
+    if (gcov_active() && in) {
+        gcov_unit_end(u);
+        if (g_cov_notes) {
+            char *nb = NULL;
+            if (!g_prof_note) {
+                char *b = gcov_base(in, out);
+                size_t n = strlen(b) + 6;
+                nb = xmalloc(n);
+                snprintf(nb, n, "%s.gcno", b);
+                free(b);
+            }
+            if (gcov_write_notes(g_prof_note ? g_prof_note : nb) != 0)
+                diag_fatal(g_prof_note ? g_prof_note : nb, 0,
+                           "cannot write the coverage notes");
+            free(nb);
+        }
+    }
     if (g_lto_collect) {
         /* -flto at the link: this unit is kept for the merge */
         if (g_lto_n == LTO_MAX)
@@ -3326,6 +3487,29 @@ lto_backend:
         ob_free(&b);
         return 0;
     }
+
+    /* Hot and cold functions apart, as GCC places them: a cold one --
+     * __attribute__((cold)), or one the profile (-fprofile-use) never ran
+     * -- in .text.unlikely, a hot one in .text.hot, so the code that runs
+     * is together (one cache, one flash prefetch line) and the rest out
+     * of its way. With -ffunction-sections, each its own .unlikely. or
+     * .hot. section. ELF only, and not for a function that named its
+     * section. */
+    if (target_fmt_get() == TGT_FMT_ELF)
+        for (int i = 0; i < iu->nfuncs; i++) {
+            struct func *f = iu->funcs[i].src;
+            if (!f || f->section)
+                continue;
+            int cold = f->attr_cold || f->prof_heat == IR_HEAT_COLD;
+            int hot = !cold && (f->attr_hot || f->prof_heat == IR_HEAT_HOT);
+            if (cold || hot) {
+                const char *base = cold ? ".text.unlikely" : ".text.hot";
+                f->section = func_sections
+                    ? sec_named(cold ? ".text.unlikely." : ".text.hot.",
+                                f->name)
+                    : base;
+            }
+        }
 
     /* -ffunction-sections: a section of its own for each function that
      * did not ask for one. Named here, after the optimizer, which has
@@ -6184,6 +6368,8 @@ static int embcc_main(int argc, char **argv)
             print_version();
             return 0;
         }
+        if (strcmp(argv[i], "--gcov-extract") == 0)
+            return gcov_extract(argc - i - 1, argv + i + 1);
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             print_usage(stdout);
             opts_print_help(stdout);
@@ -7054,10 +7240,85 @@ static int embcc_main(int argc, char **argv)
                 p = e + 1;
             }
             continue;
+        } else if (strcmp(argv[i], "--coverage") == 0 ||
+                   strcmp(argv[i], "-coverage") == 0) {
+            /* GCC's: counters and notes, and libgcov at the link */
+            g_cov_arcs = g_cov_notes = g_cov_link = 1;
+        } else if (strncmp(argv[i], "--coverage-version=", 19) == 0) {
+            if (gcov_set_version(argv[i] + 19) != 0) {
+                fprintf(stderr, "embcc: error: --coverage-version=%s: the "
+                                "versions are gcc, llvm, or one as GCC "
+                                "spells it from GCC 9 on (\"B62*\", "
+                                "\"A93*\")\n", argv[i] + 19);
+                return 1;
+            }
+        } else if (strcmp(argv[i], "-fprofile-arcs") == 0) {
+            g_cov_arcs = g_cov_link = 1;
+        } else if (strcmp(argv[i], "-fno-profile-arcs") == 0) {
+            g_cov_arcs = 0;
+        } else if (strcmp(argv[i], "-ftest-coverage") == 0) {
+            g_cov_notes = 1;
+        } else if (strcmp(argv[i], "-fno-test-coverage") == 0) {
+            g_cov_notes = 0;
+        } else if (strcmp(argv[i], "-fprofile-generate") == 0 ||
+                   strncmp(argv[i], "-fprofile-generate=", 19) == 0) {
+            /* counters without notes, for -fprofile-use to read back */
+            g_cov_arcs = g_cov_link = 1;
+            if (argv[i][18] == '=')
+                g_prof_dir = argv[i] + 19;
+        } else if (strcmp(argv[i], "-fprofile-use") == 0 ||
+                   strncmp(argv[i], "-fprofile-use=", 14) == 0) {
+            g_prof_use_on = 1;
+            g_prof_use = argv[i][13] == '=' ? argv[i] + 14 : NULL;
+        } else if (strcmp(argv[i], "-fno-profile-use") == 0) {
+            g_prof_use_on = 0;
+        } else if (strncmp(argv[i], "-fprofile-dir=", 14) == 0) {
+            g_prof_dir = argv[i] + 14;
+        } else if (strncmp(argv[i], "-fprofile-note=", 15) == 0) {
+            g_prof_note = argv[i] + 15;
+        } else if (strncmp(argv[i], "-fprofile-update=", 17) == 0) {
+            const char *m = argv[i] + 17;
+            if (!strcmp(m, "single")) g_cov_update = 0;
+            else if (!strcmp(m, "atomic")) g_cov_update = 1;
+            else if (!strcmp(m, "prefer-atomic")) g_cov_update = 2;
+            else {
+                fprintf(stderr, "embcc: error: -fprofile-update=%s: the "
+                                "ways are single, atomic and "
+                                "prefer-atomic\n", m);
+                return 1;
+            }
+        } else if (strncmp(argv[i], "-fprofile-filter-files=", 23) == 0) {
+            g_prof_filter = argv[i] + 23;
+        } else if (strncmp(argv[i], "-fprofile-exclude-files=", 24) == 0) {
+            g_prof_exclude = argv[i] + 24;
+        } else if (strncmp(argv[i], "-fprofile-prefix-path=", 22) == 0) {
+            g_prof_prefix = argv[i] + 22;
+        } else if (strcmp(argv[i], "-fprofile-abs-path") == 0) {
+            g_prof_abs = 1;
+        } else if (strcmp(argv[i], "-fprofile-partial-training") == 0) {
+            g_prof_partial = 1;
+        } else if (strcmp(argv[i], "-fprofile-correction") == 0 ||
+                   strcmp(argv[i], "-fno-profile-correction") == 0 ||
+                   strcmp(argv[i], "-fprofile-reorder-functions") == 0 ||
+                   strcmp(argv[i], "-fno-profile-reorder-functions") == 0 ||
+                   strcmp(argv[i], "-fbranch-probabilities") == 0 ||
+                   strcmp(argv[i], "-fno-branch-probabilities") == 0 ||
+                   strcmp(argv[i], "-fprofile-values") == 0 ||
+                   strcmp(argv[i], "-fno-profile-values") == 0 ||
+                   strcmp(argv[i], "-fvpt") == 0 ||
+                   strcmp(argv[i], "-fno-vpt") == 0 ||
+                   strncmp(argv[i], "-fprofile-reproducible=", 23) == 0 ||
+                   strncmp(argv[i], "-fprofile-prefix-map=", 21) == 0) {
+            /* accepted: the profile is solved by flow (it tolerates the
+             * inconsistencies -fprofile-correction smooths), hot and
+             * cold functions are always placed apart, the branch
+             * probabilities are what -fprofile-use reads, and value
+             * profiles only feed optimizations (EmbCC makes none of
+             * them). The counters are the same in every run of the same
+             * program, which is what =serial asks. */
         } else if (strncmp(argv[i], "-fsanitize", 10) == 0 ||
                    strncmp(argv[i], "-fprofile", 9) == 0 ||
                    strcmp(argv[i], "-fcoverage-mapping") == 0 ||
-                   strcmp(argv[i], "--coverage") == 0 ||
                    strcmp(argv[i], "-pg") == 0 ||
                    strcmp(argv[i], "-fstack-clash-protection") == 0 ||
                    strncmp(argv[i], "-fcf-protection", 15) == 0) {
@@ -7068,7 +7329,11 @@ static int embcc_main(int argc, char **argv)
              * does the wrong thing:
              *
              *   -fsanitize=  no checks would be inserted
-             *   -fprofile-*, --coverage, -pg  no counters
+             *   -fprofile-instr-*, -fprofile-sample-use,
+             *   -fprofile-info-section, -fcoverage-mapping, -pg
+             *                no counters, or none in that format: the
+             *                gcov ones (--coverage, -fprofile-generate,
+             *                -fprofile-use) are above
              *   -fstack-clash-protection, -fcf-protection  no probes,
              *                no landing pads
              */
@@ -7237,6 +7502,8 @@ static int embcc_main(int argc, char **argv)
             }
             incdir_sys[nincdirs] = 1;
             incdirs[nincdirs++] = dir;
+        } else if (strcmp(argv[i], "-lgcov") == 0) {
+            g_cov_link = 1;          /* EmbCC's libgcov, wherever linked */
         } else if ((argv[i][0] == '-' && argv[i][1] == 'l') ||
                    (argv[i][0] == '-' && argv[i][1] == 'L') ||
                    (argv[i][0] == '-' && argv[i][1] == 'T' &&
@@ -7467,6 +7734,19 @@ static int embcc_main(int argc, char **argv)
      * constant non-zero divisor leaves nothing behind. */
     irgen_set_sanitize(san_mask);
     irgen_set_instrument(want_instr, instr_funcs, instr_files);
+    gcov_set_flags(g_prof_partial, g_prof_abs);
+    gcov_set_use(g_prof_use_on ? "" : NULL);  /* each unit's file: compile */
+    gcov_set(g_cov_arcs, g_cov_notes,
+             g_cov_update == 1 ||
+                 (g_cov_update == 2 && !target_atomic8_libcall()),
+             g_prof_filter, g_prof_exclude);
+    if ((g_cov_arcs || g_cov_notes || g_prof_use_on) && want_lto) {
+        fprintf(stderr, "embcc: error: --coverage and the profile options "
+                        "are not for -flto yet: the counters are placed "
+                        "when each unit is compiled, and an -flto unit is "
+                        "compiled again at the link\n");
+        return 1;
+    }
     irgen_set_opt_size(opt_for_size);
     if (short_wchar) {
         /* wchar_t is unsigned short (sema's ty_wchar, the lexer's L""

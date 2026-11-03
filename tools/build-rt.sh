@@ -74,6 +74,16 @@ done
 rm -f "$out/librt.a"
 "$AR" rcs "$out/librt.a" "$out"/rt/*.o
 
+# libgcov.a, beside it: what --coverage and -fprofile-generate link
+# (lib/gcov/gcov.c), never itself instrumented
+# shellcheck disable=SC2086
+"$EMBCC" --target="$triple" $flags -fenum-size-neutral -Os \
+    --sections=functions,data -c "$here/lib/gcov/gcov.c" -o "$out/rt/gcov.o.x" || {
+    echo "build-rt: lib/gcov/gcov.c does not compile for $triple" >&2
+    exit 1; }
+rm -f "$out/libgcov.a"
+"$AR" rcs "$out/libgcov.a" "$out/rt/gcov.o.x"
+
 # PIC32 (mipsel with --mcu=): EmbCC's startup, the same for every part;
 # the driver makes each part's linker script from its device pack.
 if [ "$triple" = mipsel-none-elf ]; then

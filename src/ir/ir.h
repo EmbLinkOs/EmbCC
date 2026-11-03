@@ -20,6 +20,9 @@
  * true `size` (1/2/4/8); LDVAR/LOAD extend on the way in (per `sign`),
  * STVAR/STORE truncate on the way out. `sign` also picks signed vs
  * unsigned division, shift, and comparison. */
+enum { IR_HEAT_COLD = 1, IR_HEAT_NORMAL = 2, IR_HEAT_HOT = 3 };
+static inline int ir_prob_flip(int p) { return p ? 1002 - p : 0; }
+
 enum ir_op {
     IR_CONST, /* dst = imm            (w) */
     IR_MOV,   /* dst = a              (full temp-to-temp copy) */
@@ -305,6 +308,17 @@ struct ir_ins {
     int flash;               /* LOAD: from AVR program memory (__flash), read
                               * with LPM. Set with vol, so no pass folds it into
                               * an ordinary load or a memcpy (irgen emit_load) */
+    /* What the profile (-fprofile-use), __builtin_expect, a cold callee
+     * or a cold attribute says about how often this runs: IR_HEAT_*, 0
+     * when nothing is known. Every instruction of a block carries its
+     * block's, so a pass that moves an instruction keeps it. Read by the
+     * layout pass (cold code to the function's end), the inliner and the
+     * loop passes; codegen never looks. */
+    unsigned char heat;
+    /* IR_BRZ/IR_BRNZ: 1 + the per-mille probability that the branch is
+     * TAKEN (1..1001); 0 unknown. A pass that inverts a branch flips it
+     * (ir_prob_flip). */
+    short prob;
     long imm;                /* IR_CONST; also the folded value when imm_b */
     int imm_b;               /* ADD/SUB/AND/OR/XOR/CMP: operand b is the constant
                               * in `imm` (an immediate), not vreg b — set by the
@@ -679,6 +693,34 @@ void irgen_set_sanitize(unsigned mask);
  * either may be NULL) */
 void irgen_set_instrument(int on, const char *funcs, const char *files);
 void irgen_set_opt_size(int on);       /* -Os: a switch table must be denser */
+
+/* --coverage and the profile options (src/ir/gcov.c). gcov_set says
+ * what to make: counters (-fprofile-arcs), notes (-ftest-coverage),
+ * atomic counters (-fprofile-update=atomic), and which files (GCC's
+ * -fprofile-filter-files / -fprofile-exclude-files regex lists);
+ * gcov_set_use the .gcda -fprofile-use reads. Per unit: gcov_unit_begin
+ * after the parse, gcov_function on each function irgen finishes,
+ * gcov_unit_end after irgen (it sizes and fills the two objects
+ * gcov_ctor_source declared), gcov_write_notes for the .gcno. */
+struct unit;
+void gcov_set(int arcs, int notes, int atomic, const char *filter,
+              const char *exclude);
+void gcov_set_use(const char *gcda);
+void gcov_set_flags(int partial, int abs);
+int gcov_arcs(void);
+int gcov_active(void);
+const char *gcov_ctor_source(void);
+void gcov_unit_begin(struct unit *u, const char *src, const char *gcda,
+                     unsigned stamp);
+void gcov_function(struct ir_unit *iu, struct ir_func *fn, struct func *f);
+void gcov_unit_end(struct unit *u);
+int gcov_write_notes(const char *gcno);
+int gcov_extract(int nlogs, char **logs);  /* embcc --gcov-extract */
+int gcov_set_version(const char *v);       /* --coverage-version=; -1 bad */
+unsigned gcov_crc32(unsigned c, const void *p, unsigned long n);
+/* irgen's half: *(counters + off) += 1, 64 bits, atomically if asked */
+void irgen_counter_incr(struct ir_func *fn, struct global *ctrs, long off,
+                        int atomic);
 /* A new table of n entries (all -1) in fn; its index. */
 int ir_jt_add(struct ir_func *fn, int n);
 /* A copy of src's table `jt` in dst, every label moved up by lbase (the

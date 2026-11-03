@@ -457,6 +457,8 @@ else; `__attribute__((noinline))` refuses. A refusal is recorded as an
 callee with one caller and an `always_inline` one; `g_inline_o1`),
 `callee-not-defined-here`, `would-be-recursive`,
 `callee-computes-in-__int128`, `callee-is-noinline`, `callee-is-weak`,
+`cold-call-site` and `callee-is-cold` (a call the profile, `__builtin_expect`
+or a cold callee marks cold; a hot site gets four times the budget),
 `callee-is-varargs`,
 `callee-too-large`, `callee-has-exception-regions`, `returns-a-struct`,
 `parameter-is-not-a-simple-scalar`, `returns-a-value-wider-than-a-vreg`,

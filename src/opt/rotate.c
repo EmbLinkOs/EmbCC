@@ -211,6 +211,7 @@ static int rotate_one(struct ir_func *fn)
                 struct ir_ins *nbr = ib_push(&nb);
                 *nbr = *br;
                 nbr->op = br->op == IR_BRZ ? IR_BRNZ : IR_BRZ;
+                nbr->prob = (short)ir_prob_flip(br->prob);
                 nbr->label = Lbody;
                 { struct lcopy lc = { tbl, fn->nvregs, 0 };
                   each_read(nbr, lcopy_cb, &lc); }

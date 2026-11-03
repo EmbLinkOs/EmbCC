@@ -325,6 +325,47 @@ static int label_mark(struct ir_func *fn, struct func *f, const char *name,
     return f->nlabel_pos++;
 }
 
+/* An arm of an `if` that calls a noreturn or cold function -- abort(),
+ * an error path -- is the unlikely one, as GCC predicts it. */
+static int arm_calls_cold(const struct ir_func *fn, int lo, int hi)
+{
+    for (int n = lo; n < hi; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        if (i->op == IR_CALL && !i->indirect && i->callee &&
+            (i->callee->is_noreturn || i->callee->attr_cold))
+            return 1;
+    }
+    return 0;
+}
+
+static void heat_cold(struct ir_func *fn, int lo, int hi)
+{
+    for (int n = lo; n < hi; n++)
+        if (!fn->ins[n].heat)
+            fn->ins[n].heat = IR_HEAT_COLD;
+}
+
+/* What is known of which way an `if` goes: __builtin_expect on its
+ * condition, else a cold call in one arm and not the other. The unlikely
+ * arm's code is cold (the layout pass moves it out of the way), and the
+ * branch, which skips the then-arm, says how likely it is taken. */
+static void if_heat(struct ir_func *fn, const struct expr *cond, int br,
+                    int t0, int t1, int e0, int e1)
+{
+    int hint = cond->expect_hint;
+    if (!hint) {
+        int ct = arm_calls_cold(fn, t0, t1), ce = arm_calls_cold(fn, e0, e1);
+        hint = ct && !ce ? -1 : ce && !ct ? 1 : 0;
+    }
+    if (hint < 0) {
+        heat_cold(fn, t0, t1);
+        fn->ins[br].prob = 1 + 900;
+    } else if (hint > 0) {
+        heat_cold(fn, e0, e1);
+        fn->ins[br].prob = 1 + 100;
+    }
+}
+
 static void label_data_marks(struct ir_func *fn, struct func *f)
 {
     struct unit *u = cur_unit->src;
@@ -6480,17 +6521,23 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
             int l_else = new_label(fn);
             int cw;
             int c = truth(fn, gen_expr(fn, s->cond), s->cond->ty, &cw);
+            int br = fn->nins;
             emit_brz(fn, c, cw, l_else);
+            int t0 = fn->nins, e0 = 0, e1 = 0;
             gen_stmt(fn, s->thn, loop);
+            int t1 = fn->nins;
             if (s->els) {
                 int l_end = new_label(fn);
                 emit_jmp(fn, l_end);
                 emit_label(fn, l_else);
+                e0 = fn->nins;
                 gen_stmt(fn, s->els, loop);
+                e1 = fn->nins;
                 emit_label(fn, l_end);
             } else {
                 emit_label(fn, l_else);
             }
+            if_heat(fn, s->cond, br, t0, t1, e0, e1);
             break;
         }
         case STMT_DO: {
@@ -7020,6 +7067,8 @@ static void gen_func(struct ir_func *fn, struct func *f)
             fn->var_scope_lo[v] = 0;
             fn->var_scope_hi[v] = fn->nins;
         }
+    if (gcov_active())
+        gcov_function(cur_unit, fn, f);
     for (int i = 0; i < g_nlabels_used; i++)
         if (!g_labels[i].defined)
             diag_fatal(fn->file, g_labels[i].line,
@@ -7076,4 +7125,28 @@ int asm_constraint_mem_only(const char *c)
         any = 1;
     }
     return any;
+}
+
+/* --coverage's counter: *(ctrs + off) += 1 (src/ir/gcov.c). A plain
+ * load, add and store, as GCC's -fprofile-update=single; atomic, a
+ * relaxed fetch-and-add -- an instruction, or libatomic's routine where
+ * the target has none for 64 bits. */
+void irgen_counter_incr(struct ir_func *fn, struct global *ctrs, long off,
+                        int atomic)
+{
+    struct type *t = ty_int_of_size(8, 1);
+    int a = emit_gaddr(fn, ctrs);
+    if (off)
+        a = emit_bin(fn, IR_ADD, a, emit_const(fn, off, AW), AW, 0);
+    int one = emit_const(fn, 1, 8);
+    if (atomic) {
+        (void)atomic_rmw_mo(fn, IR_XADD, 0, a, one, t, IR_MO_RELAXED, -1,
+                            g_cur_line);
+        return;
+    }
+    int v = emit_load(fn, a, t);
+    fn->ins[fn->nins - 1].natural = 1;
+    v = emit_bin(fn, IR_ADD, v, one, 8, 0);
+    emit_store(fn, a, v, t);
+    fn->ins[fn->nins - 1].natural = 1;
 }

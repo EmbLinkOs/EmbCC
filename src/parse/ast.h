@@ -44,6 +44,10 @@ enum binop {
 
 struct expr {
     enum expr_kind kind;
+    /* __builtin_expect(x, c) and __builtin_expect_with_probability, which
+     * sema replaces with x: 1 when x is expected true, -1 false, 0 no
+     * hint. irgen makes the unlikely arm of an `if` cold (IR heat). */
+    int expect_hint;
     int line;
     int col;              /* 1-based column, for caret diagnostics (0 = unknown) */
     int quiet;            /* parsed in a system header, a system macro or
@@ -458,6 +462,13 @@ struct func {
     int attr_used, attr_unused, attr_always_inline, attr_noinline;
     int attr_no_instrument;  /* no_instrument_function: -finstrument-functions
                               * leaves it alone (sticky across declarations) */
+    int attr_hot, attr_cold;  /* hot / cold: .text.hot / .text.unlikely; a
+                               * cold one is optimized for size and a path
+                               * to a call of it is an unlikely one */
+    int attr_no_profile;      /* no_profile_instrument_function */
+    int prof_heat;            /* -fprofile-use: IR_HEAT_COLD when the profile
+                               * never ran it, IR_HEAT_HOT for the hottest;
+                               * 0 when no profile speaks for it */
     int attr_deprecated, attr_warn_unused_result;
     /* C11 6.7.4p7. This declaration said `inline` / `extern`, and the
      * function carries __attribute__((gnu_inline)). Sema folds every

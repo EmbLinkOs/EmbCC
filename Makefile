@@ -141,6 +141,7 @@ endif
 # aarch64/ (src/arch/README.md; docs/manual/targets.md for what each supports).
 # The optimizer: the pass manager (opt.c) and one file per pass.
 OPT_SRCS := src/opt/opt.c \
+	src/opt/coldsink.c \
 	src/opt/alias.c \
 	src/opt/attrs.c \
 	src/opt/cfg.c \
@@ -358,6 +359,7 @@ SRCS := \
 	src/ir/irgen.c \
 	src/ir/irprint.c \
 	src/ir/irparse.c \
+	src/ir/gcov.c \
 	$(OPT_SRCS) \
 	src/debug/dwarf.c \
 	src/debug/eh.c \
@@ -680,7 +682,7 @@ EMBLS_SRCS = tools/embls/embls.c $(PLATFORM_SRCS) src/cpp/cpp.c src/lex/lex.c \
              src/arch/thumbv8mbase/predef.c src/arch/thumbv8mbase/predef_cxx.c \
              src/arch/armv7a/predef.c src/arch/armv7a/predef_cxx.c \
              $(filter src/cxx/%,$(SRCS)) src/sema/sema.c src/ir/irgen.c \
-             src/ir/irprint.c src/ir/irparse.c \
+             src/ir/irprint.c src/ir/irparse.c src/ir/gcov.c \
              $(OPT_SRCS) src/debug/dwarf.c src/debug/eh.c src/elf/write.c \
              src/arch/code.c src/arch/regalloc.c src/arch/common.c \
              src/arch/x86_64/irgen.c src/arch/x86_64/codegen.c \
@@ -892,6 +894,9 @@ libc-emblinkos: embcc embar
 	done
 	@rm -f $(ELOS_LIBC)/librt.a
 	@$${EMBCC_X86_AR:-./embar} rcs $(ELOS_LIBC)/librt.a $(ELOS_LIBC)/rt_*.o.x
+	@$(ELOS_CC) -c -O2 lib/gcov/gcov.c -o $(ELOS_LIBC)/gcov.o.x
+	@rm -f $(ELOS_LIBC)/libgcov.a
+	@$${EMBCC_X86_AR:-./embar} rcs $(ELOS_LIBC)/libgcov.a $(ELOS_LIBC)/gcov.o.x
 	@echo "libc: $(ELOS_LIBC)/libc.a (+ an empty libm.a, and librt.a)"
 
 # C++ on EmbLinkOS: lib/libcxx over this C library, compiled by EmbCC.
@@ -953,7 +958,12 @@ libc-linux-x86_64: embcc embar
 	@rm -f $(BUILD)/libc/linux-x86_64/librt.a
 	@$${EMBCC_X86_AR:-./embar} rcs $(BUILD)/libc/linux-x86_64/librt.a \
 	    $(BUILD)/libc/linux-x86_64/rt/*.o
-	@echo "libc: $(BUILD)/libc/linux-x86_64/libc.a + librt.a + crt1.o"
+	@./embcc --target=x86_64-linux-gnu -c -O1 -fPIE lib/gcov/gcov.c \
+	    -o $(BUILD)/libc/linux-x86_64/rt/gcov.o.x
+	@rm -f $(BUILD)/libc/linux-x86_64/libgcov.a
+	@$${EMBCC_X86_AR:-./embar} rcs $(BUILD)/libc/linux-x86_64/libgcov.a \
+	    $(BUILD)/libc/linux-x86_64/rt/gcov.o.x
+	@echo "libc: $(BUILD)/libc/linux-x86_64/libc.a + librt.a + libgcov.a + crt1.o"
 
 libc-linux-aarch64: embcc embar
 	@mkdir -p $(BUILD)/libc/linux-aarch64
@@ -974,7 +984,12 @@ libc-linux-aarch64: embcc embar
 	@rm -f $(BUILD)/libc/linux-aarch64/librt.a
 	@$${EMBCC_AARCH64_AR:-./embar} rcs \
 	    $(BUILD)/libc/linux-aarch64/librt.a $(BUILD)/libc/linux-aarch64/rt/*.o
-	@echo "libc: $(BUILD)/libc/linux-aarch64/libc.a + librt.a + crt1.o"
+	@./embcc --target=aarch64-linux-gnu -c -O1 -fPIE lib/gcov/gcov.c \
+	    -o $(BUILD)/libc/linux-aarch64/rt/gcov.o.x
+	@rm -f $(BUILD)/libc/linux-aarch64/libgcov.a
+	@$${EMBCC_AARCH64_AR:-./embar} rcs $(BUILD)/libc/linux-aarch64/libgcov.a \
+	    $(BUILD)/libc/linux-aarch64/rt/gcov.o.x
+	@echo "libc: $(BUILD)/libc/linux-aarch64/libc.a + librt.a + libgcov.a + crt1.o"
 
 # The compiler runtime for each EMBEDDED target, as an archive per triple.
 # These had no rule at all: a firmware build for any of the four targets the
@@ -1127,7 +1142,7 @@ install-files:
 	             $(foreach t,$(RT_EMBEDDED),"$(t):$(t)"); do \
 	    triple=$${pair%%:*}; dir=$${pair#*:}; \
 	    mkdir -p $(LIBROOT)/$$triple; \
-	    for f in libc.a librt.a crt1.o; do \
+	    for f in libc.a librt.a libgcov.a crt1.o; do \
 	        [ -f $(BUILD)/libc/$$dir/$$f ] && \
 	            cp $(BUILD)/libc/$$dir/$$f $(LIBROOT)/$$triple/$$f; \
 	    done; \

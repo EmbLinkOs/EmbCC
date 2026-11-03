@@ -5602,7 +5602,19 @@ static void check_expr_main(struct unit *u, struct func *f, struct scope *sc,
                                "%s takes at least two arguments", e->lhs->name);
                 for (int i = 0; i < e->nargs; i++)
                     check_expr(u, f, sc, e->args[i]);
+                long cv;
+                int hint = 0;
+                if (strcmp(bn, "assume_aligned") != 0 && e->nargs >= 2 &&
+                    const_fold(e->args[1], &cv)) {
+                    hint = cv ? 1 : -1;
+                    /* ...with a probability below a half: the other way */
+                    if (e->nargs >= 3 && e->args[2]->kind == EXPR_FNUM &&
+                        e->args[2]->fnum < 0.5)
+                        hint = -hint;
+                }
                 *e = *e->args[0];
+                if (hint)
+                    e->expect_hint = hint;
                 break;
             }
             /* __builtin_constant_p: is the argument a compile-time constant?
@@ -10227,6 +10239,9 @@ static void merge_decls(struct unit *u)
          * (EmbTrace's own hooks, a clock) -- instrumenting one of those
          * recursed through the hook forever */
         canon->attr_no_instrument |= f->attr_no_instrument;
+        canon->attr_hot |= f->attr_hot;
+        canon->attr_cold |= f->attr_cold;
+        canon->attr_no_profile |= f->attr_no_profile;
         /* aligned(N) on any declaration, the strictest (GCC's align-3.c
          * puts it on the prototype) */
         if (f->user_align > canon->user_align)

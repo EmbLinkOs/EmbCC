@@ -120,6 +120,12 @@ int plat_run_on_stack(int (*fn)(int, char **), int argc, char **argv);
  */
 const char *plat_self_path(void);
 
+/* The current directory, or NULL on a host with none to give (ISO C has
+ * no such idea). Owned by the platform layer; it does not change. What
+ * a .gcno records as the directory the build ran in, and what makes an
+ * object's .gcda path absolute. */
+const char *plat_cwd(void);
+
 /* argv[0], handed over by the driver before anything asks where the
  * program is: the answer every C host can give. plat_argv0_path returns it
  * when it names a path (has a '/' or '\\'), else NULL. Both are in

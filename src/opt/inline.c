@@ -72,6 +72,13 @@
 #define INLINE_TWO_CALLEE  200   /* ...and for one of two calls to a static (-O2) */
 #define INLINE_MAX_CALLER 800    /* stop expanding a caller past this many ins */
 #define INLINE_MAX_PER_FUNC 64   /* and cap inlines per caller, for termination */
+/* A call site the profile says is hot (-fprofile-use: IR_HEAT_HOT) is
+ * where a copy pays: four times the budget. A cold one, or a call of a
+ * cold function, is not inlined at all, unless it is the callee's only
+ * call (which costs nothing) or always_inline. In a cold caller the
+ * budget is -Os's. */
+#define INLINE_HOT_CALLEE 96
+static int g_site_hot, g_site_size;
 
 /* -Os: a much smaller budget, and WHY it needed one.
  *
@@ -202,7 +209,9 @@ static int inlinable(struct ir_func *cf, int force, int sole, const char **why,
      * would not inline the call, it would emit a wrong one. The remark
      * still names whichever test refused, so a function marked
      * always_inline that was not inlined says why. */
-    int budget = g_opt_size ? INLINE_SIZE_CALLEE : INLINE_MAX_CALLEE;
+    int small = g_opt_size || g_site_size;
+    int budget = small ? INLINE_SIZE_CALLEE
+               : g_site_hot ? INLINE_HOT_CALLEE : INLINE_MAX_CALLEE;
     if (!force && cf->nins > budget &&
         !(sole == 1 && cf->nins <= INLINE_SOLE_CALLEE) &&
         !(sole == 2 && !g_opt_size && cf->nins <= INLINE_TWO_CALLEE)) {
@@ -567,12 +576,24 @@ static void inline_unit_(struct ir_unit *iu)
                     why = "not-declared-inline";  /* -fno-inline-functions */
                 else {
                     sole = sole_static_caller(iu, in->callee);
+                    int fcold = fn->src && (fn->src->attr_cold ||
+                                            fn->src->prof_heat == IR_HEAT_COLD);
+                    int ccold = in->callee->attr_cold ||
+                                in->callee->prof_heat == IR_HEAT_COLD;
                     if (g_inline_o1 && !in->callee->attr_always_inline &&
                         sole != 1)
                         why = "not-a-sole-callee-at-O1";
-                    else
+                    else if ((in->heat == IR_HEAT_COLD || ccold) &&
+                             !in->callee->attr_always_inline && sole != 1)
+                        why = in->heat == IR_HEAT_COLD ? "cold-call-site"
+                                                       : "callee-is-cold";
+                    else {
+                        g_site_hot = in->heat == IR_HEAT_HOT && !fcold;
+                        g_site_size = fcold;
                         ok = inlinable(c, in->callee->attr_always_inline,
                                        sole, &why, detail, sizeof detail);
+                        g_site_hot = g_site_size = 0;
+                    }
                 }
                 if (!ok) {
                     remark_add("inline", "not-inlined", in->callee->name, why,

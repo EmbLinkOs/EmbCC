@@ -36,6 +36,11 @@ const char *plat_self_path(void)
     return plat_argv0_path();
 }
 
+const char *plat_cwd(void)
+{
+    return NULL;
+}
+
 /* ISO C has no file identity: two directories are the same by spelling */
 int plat_same_dir(const char *a, const char *b)
 {

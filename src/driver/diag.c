@@ -779,6 +779,11 @@ static struct warn_opt g_warns[] = {
      * value: on by default (clang's choice; GCC's -Wall), since C allows
      * it only while no caller uses the value */
     { "return-type",          1,  1,    0 },
+    /* -fprofile-use: a unit with no .gcda (GCC's, on by default), and a
+     * function whose shape is not the one the profile was taken from
+     * (on, and GCC's error -- here its profile is ignored instead) */
+    { "missing-profile",      1,  0,    0 },
+    { "coverage-mismatch",    1,  0,    0 },
     /* -pedantic: what the C standard -std= names does not have -- a
      * later standard's feature, or a GNU extension (lex_pedantic);
      * -pedantic-errors makes each an error */
@@ -1071,6 +1076,7 @@ static const struct { const char *name, *implied, *what; } g_warn_doc[] = {
     { "attributes", NULL, "an attribute EmbCC does not know, or one it accepts but does not implement" },
     { "cast-qual", NULL, "a cast that removes `const` or `volatile` from the type a pointer points to" },
     { "conversion", NULL, "an implicit conversion that may change an integer's value, or an integer converted to a floating type that cannot hold all its values" },
+    { "coverage-mismatch", NULL, "`-fprofile-use` and a function that is not the one the profile was taken from: its source or its options changed; its profile is ignored" },
     { "deprecated-declarations", NULL, "a use of a function or variable declared `deprecated`" },
     { "discarded-qualifiers", NULL, "a pointer conversion that drops the pointed-to type's `const`" },
     { "div-by-zero", NULL, "integer division or remainder by a constant zero" },
@@ -1083,6 +1089,7 @@ static const struct { const char *name, *implied, *what; } g_warn_doc[] = {
     { "logical-op", NULL, "`a && a` or `a || a` with identical operands" },
     { "maybe-uninitialized", NULL, "a local variable read on a path where only some paths wrote it" },
     { "missing-declarations", NULL, "a function with external linkage defined with no declaration before it (when `--warn=missing-prototypes` is off)" },
+    { "missing-profile", NULL, "`-fprofile-use` and no profile for this unit: the program was not run since `-fprofile-generate` built it, or its `.gcda` is somewhere else (`-fprofile-use=PATH`)" },
     { "missing-prototypes", NULL, "a function with external linkage defined with no prototype before it" },
     { "multichar", NULL, "a character constant of more than one character, `'ab'`" },
     { "nested-externs", NULL, "an `extern` declaration inside a function body" },
