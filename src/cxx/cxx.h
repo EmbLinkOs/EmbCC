@@ -952,9 +952,10 @@ enum cexpr_kind {
                    * what it returns: 0 void, 1 bool, 2 a handle (a[2] its
                    * address) — and the value a[3], await_resume(); coro
                    * 1 the initial suspend, 2 the final */
-    E_DEFARG      /* a member function's default argument, unread: its
+    E_DEFARG,     /* a member function's default argument, unread: its
                    * tokens at ival, read in dscope when a call first
                    * uses it (the class complete, 7.2.2); then a[0] */
+    E_LABADDR     /* GNU's &&label: text the label's name, type void * */
 };
 
 enum { VC_PRVALUE, VC_LVALUE, VC_XVALUE };
@@ -1378,6 +1379,9 @@ struct casm {
     int nout, nin;
     const char **clobs;
     int nclob;
+    int is_goto;              /* asm goto: labels, the fourth section */
+    const char **labels;
+    int nlabel;
 };
 
 /* ---- coroutines (coro.c) ---- */

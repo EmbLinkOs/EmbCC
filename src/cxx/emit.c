@@ -522,9 +522,10 @@ static char *w128_lit(struct w128 w, struct cty *t);
  * value, unless its constraint wants memory and it is an lvalue) */
 static void emit_asm(struct sb *b, struct casm *a)
 {
-    sb_printf(b, "__asm__ %s%s(%s", a->is_volatile ? "volatile " : "",
-              a->is_inline ? "inline " : "", c_quote(a->tmpl));
-    int sections = a->nclob ? 3 : a->nin ? 2 : a->nout ? 1 : 0;
+    sb_printf(b, "__asm__ %s%s%s(%s", a->is_volatile ? "volatile " : "",
+              a->is_inline ? "inline " : "", a->is_goto ? "goto " : "",
+              c_quote(a->tmpl));
+    int sections = a->is_goto ? 3 : a->nclob ? 3 : a->nin ? 2 : a->nout ? 1 : 0;
     for (int k = 1; k <= sections; k++) {
         sb_put(b, " :");
         struct casm_op *ops = k == 1 ? a->outs : a->ins;
@@ -543,6 +544,11 @@ static void emit_asm(struct sb *b, struct casm *a)
                       k == 1 || (mem && o->e->vc != VC_PRVALUE)
                       ? elv(o->e) : ev(o->e));
         }
+    }
+    if (a->is_goto) {
+        sb_put(b, " :");
+        for (int i = 0; i < a->nlabel; i++)
+            sb_printf(b, "%s%s", i ? ", " : " ", a->labels[i]);
     }
     sb_put(b, ");\n");
 }
@@ -1344,6 +1350,8 @@ static char *ev(struct cexpr *e)
         return str_lit(e);
     case E_NULLPTR:
         return "((void *)0)";
+    case E_LABADDR:
+        return cx_fmt("(&&%s)", e->text);
     case E_VAR: case E_DEREF: case E_MEMBER: case E_TEMP:
         return elv(e);
     case E_FUNC:
@@ -2251,7 +2259,7 @@ static int c_const(struct cexpr *e)
     if (ce_ok && e->t && ct_is_integer(e->t) && ce_value(e, &w))
         return 1;
     switch (e->k) {
-    case E_INT: case E_FLT: case E_STR: case E_NULLPTR:
+    case E_INT: case E_FLT: case E_STR: case E_NULLPTR: case E_LABADDR:
         return 1;
     case E_FUNC:
         return 1;
@@ -3237,6 +3245,12 @@ static void emit_stmt(struct sb *b, struct cstmt *s)
         return;
     }
     case S_GOTO: {
+        if (!s->label) {
+            /* computed: the block's cleanups are the program's own, as
+             * with g++ (its target may be any label in the function) */
+            sb_printf(b, "goto *(%s);\n", full_value(s->e));
+            return;
+        }
         struct cstmt *l = find_label(cur_fn->body, s->label);
         if (!l)
             cx_error(NULL, "label '%s' used but not defined", s->label);

@@ -335,8 +335,8 @@ static struct cstmt *parse_asm_stmt(const struct ctok *at)
             a->is_volatile = 1;
         else if (cx_accept(TOK_KW_INLINE))
             a->is_inline = 1;
-        else if (cx_kind() == TOK_KW_GOTO)
-            cx_error(cx_cur(), "asm goto in C++ is not supported yet");
+        else if (cx_accept(TOK_KW_GOTO))
+            a->is_goto = 1;        /* GNU's asm goto: labels it may jump to */
         else
             break;
     }
@@ -350,9 +350,8 @@ static struct cstmt *parse_asm_stmt(const struct ctok *at)
             part += 1;
         else
             break;
-        if (part > 3)
-            cx_error(cx_cur(), "asm goto labels in C++ are not supported "
-                               "yet");
+        if (part > 4 || (part == 4 && !a->is_goto))
+            cx_error(cx_cur(), "a fourth asm section, labels, is asm goto's");
         if (part == 1 && cx_kind() != TOK_COLON &&
             cx_kind() != TOK_COLONCOLON)
             a->nout = asm_operands(&a->outs, 1);
@@ -364,6 +363,15 @@ static struct cstmt *parse_asm_stmt(const struct ctok *at)
                 a->clobs = xrealloc(a->clobs, (size_t)(a->nclob + 1) *
                                               sizeof *a->clobs);
                 a->clobs[a->nclob++] = asm_string("a clobber");
+                if (!cx_accept(TOK_COMMA))
+                    break;
+            }
+        else if (part == 4)
+            while (cx_kind() == TOK_IDENT) {
+                a->labels = xrealloc(a->labels, (size_t)(a->nlabel + 1) *
+                                                sizeof *a->labels);
+                a->labels[a->nlabel++] = cx_cur()->t.text;
+                cx_advance();
                 if (!cx_accept(TOK_COMMA))
                     break;
             }
@@ -6339,8 +6347,14 @@ static struct cstmt *parse_stmt_or_none(void)
     case TOK_KW_GOTO:
         s = st_new(S_GOTO);
         cx_advance();
+        if (cx_accept(TOK_STAR)) {
+            /* GNU's computed goto: goto *expr; (a void *, &&label's) */
+            s->e = rvalue(expr_parse());
+            cx_expect(TOK_SEMI, "';' after goto");
+            return s;
+        }
         if (cx_kind() != TOK_IDENT)
-            cx_error(cx_cur(), "computed goto is not supported in C++");
+            cx_error(cx_cur(), "expected a label after goto");
         s->label = cx_cur()->t.text;
         cx_advance();
         cx_expect(TOK_SEMI, "';' after goto");

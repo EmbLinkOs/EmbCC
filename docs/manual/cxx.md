@@ -737,9 +737,7 @@ These are refused in C++:
 
 | Extension | Diagnostic |
 |---|---|
-| `asm goto` | `asm goto in C++ is not supported yet` |
-| Label addresses (`&&label`) | `label addresses are not supported in C++` |
-| Computed `goto` | `computed goto is not supported in C++` |
+| `asm goto` | as in C: `` `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that `` |
 | `_Atomic` | `_Atomic is not supported in C++` |
 | A variable-length array of class type | `a variable-length array of S is not supported` |
 | `sizeof` of a variable-length array | `sizeof a variable-length array is not supported` |

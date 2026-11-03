@@ -362,8 +362,7 @@ Language refusals:
 
 | Construct | Diagnostic |
 |---|---|
-| `asm goto` | `asm goto in C++ is not supported yet` |
-| `&&label` and computed `goto` | `label addresses are not supported in C++` |
+| `asm goto` | as in C: `` `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that `` |
 | `_Atomic` | `_Atomic is not supported in C++` |
 | An initializer on an array `new` | `an initializer for new[] is not supported yet` |
 | A structured binding at namespace scope | `a structured binding at namespace scope is not supported yet` |

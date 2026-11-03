@@ -5818,9 +5818,18 @@ static struct cexpr *parse_unary(void)
         cx_expect(TOK_RPAREN, "')'");
         return ex_int(expr_nothrow(e), ct_basic(CT_BOOL));
     }
-    case TOK_ANDAND:
-        cx_error(at, "label addresses are not supported in C++");
-        return NULL;
+    case TOK_ANDAND: {
+        /* GNU's &&label, as in C: the C output spells it the same, its
+         * labels keeping their names */
+        cx_advance();
+        if (cx_kind() != TOK_IDENT)
+            cx_error(cx_cur(), "expected a label after '&&'");
+        struct cexpr *e = ex_new(E_LABADDR, ct_ptr(ct_basic(CT_VOID)),
+                                 VC_PRVALUE);
+        e->text = cx_cur()->t.text;
+        cx_advance();
+        return e;
+    }
     case TOK_CX_CO_AWAIT:
         cx_advance();
         return coro_await(parse_cast(), 0, at);
