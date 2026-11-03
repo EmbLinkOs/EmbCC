@@ -1332,6 +1332,7 @@ int target_reloc_type(enum target_arch a, enum reloc_kind k)
         /* a literal-pool word, a data pointer, a DWARF offset */
         case RK_ABS32:       return R_XTENSA_32;
         case RK_XTENSA_TEXT32: return R_XTENSA_32;
+        case RK_DATA_PREL32: return R_XTENSA_32_PCREL;  /* .eh_frame's */
         default:             return -1;
         }
     }

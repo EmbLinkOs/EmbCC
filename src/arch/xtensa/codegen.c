@@ -94,6 +94,7 @@ struct xt_lit {
 };
 
 struct xt_fn {
+    long cfi_frame_end, cfi_fp_end; /* the prologue's steps, for the CFI */
     int *usecnt;         /* per vreg: how many reads (fusion), or NULL */
     int skip_next;       /* the instruction after this one is already out */
     int keep_vars;
@@ -2743,8 +2744,20 @@ static void gen_ins(struct xt_fn *F, int n)
         copy_block(F, i->op == IR_MEMCPY, i->size, i->natural >= 4);
         return;
 
-    case IR_CALL:
+    case IR_CALL: {
+        long at = t->len, lo = fn->src->code_off + fn->src->code_entry;
         gen_call(F, n);
+        if (fn->neh)                        /* an LSDA call site */
+            ir_add_csite(fn, (int)(at - lo), (int)(t->len - lo),
+                         i->eh_region - 1);
+        return;
+    }
+    case IR_LANDING:
+        /* the unwinder's window underflow left the exception in a2 and
+         * the selector in a3; every value is in its slot */
+        if (i->b >= 0)
+            wrote(F, i->b, XT_A3);
+        wrote(F, i->dst, XT_A2);
         return;
 
     case IR_RET:
@@ -3396,7 +3409,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct xt_sites *st,
     for (int v = 0; v < fn->nvregs; v++)
         if (F.nshr[v]) F.wide[v] = 0;
     F.fb = XT_SP;
-    if (g_xt_regalloc) {
+    /* (a function with exception regions keeps every value in its slot:
+     * its landing pads arrive with a2 and a3 the unwinder's) */
+    if (g_xt_regalloc && !fn->neh) {
         char *pin = keep_vars ? ra_debug_pin_vars(fn) : (char *)0;
         int *pair = g_xt_pairs ? pair_alloc(fn, &F, pin) : NULL;
         F.loc = ra_allocate(fn, &XT_RATGT, F.wide, pin, F.used_callee,
@@ -3451,6 +3466,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct xt_sites *st,
     int nfail = 0;
     t->len = len0;
     fn->nlines = nl0;
+    fn->ncsites = 0;
     F.st->next = se0; F.st->nstr = ss0; F.st->ng = sg0; F.st->nf = sf0;
     F.nfix = 0;
     F.nlit = 0;
@@ -3483,15 +3499,18 @@ static void gen_func(struct ir_func *fn, struct code *t, struct xt_sites *st,
         xt_alu(t, XT_ADD, XT_A8, XT_SP, XT_A8);
         xt_movsp(t, XT_SP, XT_A8);
     }
+    F.cfi_frame_end = t->len;
     /* A variadic function keeps every argument register in its save area,
      * where va_arg finds the unnamed ones and the prologue the named. */
     if (fn->is_varargs)
         for (int k = 0; k < NARGW; k++)
             st_sp(&F, IN_ARG(k), F.va_save + 4L * k, 4);
     place_params(&F);
+    F.cfi_fp_end = -1;
     if (fn->has_alloca) {
         xt_mov(t, FBREG, XT_SP);
         F.fb = FBREG;
+        F.cfi_fp_end = t->len;
     }
 
     ra_debug_pc_begin(fn);
@@ -3546,6 +3565,22 @@ static void gen_func(struct ir_func *fn, struct code *t, struct xt_sites *st,
     code_mark_data(t, F.pool_at, F.pool_at + 4 * F.npool);
 
     f->code_len = t->len - f->code_off;
+    if (target_debug_info() || target_unwind_tables()) {
+        /* the CFI: the CFA sp + frame once entry (and movsp) made the
+         * frame, the frame base under alloca. The windowed ABI saves
+         * nothing a rule could name: a caller's a0-a3 are in the save
+         * area below its callee's sp once the windows spill, which is
+         * where an unwinder reads them (lib/rt/unwind.c), as GCC's does */
+        fn->ncfi = 0;
+        ir_cfi_add(fn, (int)(F.cfi_frame_end - f->code_off),
+                   IR_CFI_CFA_OFFSET, 0, F.frame);
+        if (F.cfi_fp_end >= 0)
+            ir_cfi_add(fn, (int)(F.cfi_fp_end - f->code_off),
+                       IR_CFI_CFA_REG, FBREG, F.frame);
+    }
+    for (int r = 0; r < fn->neh; r++)       /* where each landing pad is */
+        fn->eh[r].lp_off = (int)(F.label_off[fn->eh[r].lp_label] -
+                                 (f->code_off + f->code_entry));
     /* -g: DWARF numbers the registers as the machine; slots are
      * frame-base relative */
     ra_debug_finish(fn, t->len, F.loc, NULL, 0, F.slot, -1, F.wide, 1, 4);

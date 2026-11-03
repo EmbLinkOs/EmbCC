@@ -201,9 +201,10 @@ static const struct backend_desc g_backends[] = {
 #if FAMILY_BUILT(xtensa)
     [TARGET_XTENSA] = {
         .family = "Xtensa", .codegen = codegen_unit_xtensa, .ra_at_o0 = 0,
+        .frame_sp = 1, .frame_ra = 0,       /* a1, a0 */
         .op_calls_helper = xtensa_op_calls_helper,
-        .unwind_unwritten = "Xtensa .eh_frame",
-        .cxx_exceptions = BACKEND_CXX_EXC_NONE,
+        .unwind_unwritten = NULL,
+        .cxx_exceptions = BACKEND_CXX_EXC_OK,
         .firmware = 1, .ld_scripts = 0,
         .call_insn = "call", .call_delay_slot = 0, .sym_prefix = "",
         .imm_prefixed = 0, .text_p2align = 2,

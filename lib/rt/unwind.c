@@ -52,10 +52,12 @@
  * (make libc-emblinkos): its programs start with -nostartfiles, so
  * libgcc's unwinder, which crtbegin's frame registration feeds, would
  * find no tables -- and its linker script brackets .eh_frame for this. */
-/* ...and RISC-V and MIPS, bare metal too: an EmbCC image there links
- * no libgcc, and its .eh_frame is bracketed by EmbLD as Linux's is. */
+/* ...and RISC-V, MIPS and Xtensa, bare metal too: an EmbCC image there
+ * links no libgcc, and its .eh_frame is bracketed by EmbLD as Linux's
+ * is. */
 #if defined(__linux__) || defined(__EMBCC_LINUX__) || \
-    defined(__EMBCC_RT_UNWIND) || defined(__riscv) || defined(__mips__)
+    defined(__EMBCC_RT_UNWIND) || defined(__riscv) || defined(__mips__) || \
+    defined(__XTENSA__)
 
 typedef unsigned long uw_word;
 typedef long uw_sword;
@@ -95,6 +97,18 @@ static const unsigned char uw_fcaptured[] = {
 };
 #  define UW_NFCAPT ((int)(sizeof uw_fcaptured / sizeof uw_fcaptured[0]))
 # endif
+#elif defined(__XTENSA__)
+/* The windowed ABI: a0-a15 are DWARF 0-15, and a frame is described by
+ * its pc, its sp (a1) and its a0, the return address into its caller.
+ * Nothing else is needed or restorable: a frame's other registers come
+ * back from the window save areas (see the walk below). The landing pad
+ * reads a2 and a3 in its own window. */
+# define UW_NREG   16
+# define UW_RA     0
+# define UW_SP     1
+# define UW_LP0    2
+# define UW_LP1    3
+static const unsigned char uw_captured[] = { 0 };
 #elif defined(__mips__)
 /* $0-$31 are DWARF 0-31. Soft float only (EmbCC's o32 and n64), so the
  * callee-saved are all general: s0-s7, gp, fp and ra. */
@@ -242,6 +256,67 @@ UW_FLD("fs8", 8) UW_FLD("fs9", 9) UW_FLD("fs10", 10) UW_FLD("fs11", 11)
 UW_GL("t1", 14) UW_GL("a0", 15) UW_GL("a1", 16) UW_GL("sp", 13)
 "jr t1\n"
 );
+#elif defined(__XTENSA__)
+/* ---- Xtensa: the walk is the register windows' ----------------------------
+ *
+ * A call8 rotates the window; when the 16 (or 32, or 64) physical
+ * registers run out the hardware spills the oldest frame's: its a0-a3
+ * into the 16 bytes below its CALLEE's sp, its a4-a7 into the 16 bytes
+ * at its caller's sp - 32. So once every older window is spilled, the
+ * stack holds a linked list: at sp - 16, the caller's a0 (its return
+ * address) and at sp - 12 its sp. That is how libgcc's Xtensa unwinder
+ * walks too; the .eh_frame FDEs say only where a function is and what
+ * its personality and LSDA are.
+ *
+ * The spill is a chain of calls deep enough to overflow every window
+ * (twelve call8 frames are 96 registers, more than any LX core has).
+ * The resume is the hardware's own underflow: with the windows spilled,
+ * a retw whose a0 is the landing pad (call8's window bits on top) finds
+ * its caller's window empty and reloads it from below ITS sp -- which is
+ * pointed at a four-word area holding the handler frame's a0, sp and the
+ * landing pad's a2 and a3. a4-a7 come from the frame's own save area,
+ * where its spill put them. */
+static void __attribute__((noinline)) uw_xt_spill(int n)
+{
+    if (n > 0)
+        uw_xt_spill(n - 1);
+    __asm__ volatile("" ::: "memory");      /* no tail call */
+}
+
+/* a return address's pc: a0's top two bits are the window increment;
+ * the code's own region supplies them */
+static uw_word uw_xt_pc(uw_word ra)
+{
+    return (ra & 0x3fffffffUL) | ((uw_word)&uw_xt_spill & 0xc0000000UL);
+}
+
+void __attribute__((noinline)) __uw_capture(struct uw_capture *out)
+{
+    uw_word sp, ra;
+    uw_xt_spill(12);
+    __asm__ volatile("mov %0, a1" : "=r"(sp));
+    __asm__ volatile("mov %0, a0" : "=r"(ra));
+    out->pc = uw_xt_pc(ra);                 /* in the caller */
+    out->saved[0] = ((volatile uw_word *)sp)[-4];   /* the caller's a0 */
+    out->sp = ((volatile uw_word *)sp)[-3];         /* and its sp */
+    out->lp0 = out->lp1 = 0;
+}
+
+void __attribute__((noinline, noreturn)) __uw_resume(struct uw_capture *r)
+{
+    static uw_word area[4];     /* static: this frame is abandoned */
+    uw_word a0;
+    area[0] = r->saved[0];
+    area[1] = r->sp;
+    area[2] = r->lp0;
+    area[3] = r->lp1;
+    a0 = (r->pc & 0x3fffffffUL) | 0x80000000UL;     /* as call8 left it */
+    uw_xt_spill(12);
+    __asm__ volatile("mov a0, %0\n"
+                     "mov a1, %1\n"
+                     "retw\n" : : "r"(a0), "r"(area + 4) : "memory");
+    for (;;) ;
+}
 #elif defined(__mips__)
 /* Mnemonics again (src/arch/mips/asm.c), delay slots by hand. The
  * buffer: the 11 callee-saved in uw_captured's order, sp, pc, lp0, lp1,
@@ -865,6 +940,22 @@ static int run_cfi(const unsigned char *p, const unsigned char *end,
 /* Build the rule table for `pc` and apply it: `ctx` goes from
  * describing a frame to describing its CALLER. Returns 0 at the end of
  * the stack or on anything it cannot honour. */
+#ifdef __XTENSA__
+/* the window save areas, as __uw_capture says: the caller's a0 and sp
+ * sit 16 and 12 bytes below this frame's sp */
+static int step(struct _Unwind_Context *ctx, const struct fde *f)
+{
+    uw_word sp = ctx->reg[UW_SP], ra = ctx->reg[UW_RA];
+    (void)f;
+    if (!ra || !sp)
+        return 0;
+    ctx->pc = uw_xt_pc(ra);
+    ctx->reg[UW_RA] = ((const uw_word *)sp)[-4];
+    ctx->reg[UW_SP] = ((const uw_word *)sp)[-3];
+    ctx->cfa = ctx->reg[UW_SP];
+    return 1;
+}
+#else
 static int step(struct _Unwind_Context *ctx, const struct fde *f)
 {
     struct cfi_state st, initial;
@@ -945,6 +1036,7 @@ static int step(struct _Unwind_Context *ctx, const struct fde *f)
     }
     return 1;
 }
+#endif
 
 /* ---- the accessors a personality routine uses --------------------------- */
 

@@ -1020,7 +1020,7 @@ static void frame_pad(struct dbuf *b, int start)
 static void emit_frame(struct dwarf_out *out, struct dbuf *b,
                        struct ir_unit *iu)
 {
-    if (!out->frame_ra)
+    if (!out->frame_sp)
         return;
     int cie = b->len;
     db_u32(b, 0);                        /* length, patched */

@@ -4443,6 +4443,9 @@ static void apply_xtensa(struct linker *l, struct object *o, unsigned type,
     case R_XTENSA_32:
         put32(loc, (unsigned int)(V + (long long)get32loc(loc)));
         return;
+    case R_XTENSA_32_PCREL:                 /* .eh_frame's */
+        put32(loc, (unsigned int)(V - (long long)P));
+        return;
     case R_XTENSA_SLOT0_OP: {
         unsigned long w = (unsigned long)loc[0] | ((unsigned long)loc[1] << 8) |
                           ((unsigned long)loc[2] << 16);

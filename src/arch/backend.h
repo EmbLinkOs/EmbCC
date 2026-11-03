@@ -306,7 +306,8 @@ struct backend_desc {
     /* -g's call frame information (.debug_frame, src/debug/dwarf.c):
      * the DWARF numbers of the stack pointer and of the register the
      * return address arrives in, for a backend that records its prologue
-     * (ir_cfi_add). 0 for frame_ra: no .debug_frame for this target. */
+     * (ir_cfi_add). 0 for frame_sp: no .debug_frame for this target
+     * (Xtensa's return address IS register 0, a0). */
     int frame_sp, frame_ra;
 };
 
