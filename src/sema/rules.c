@@ -238,6 +238,7 @@ static void assigned(const struct expr *v, const struct type *to,
 {
     if (!v || !to)
         return;
+    at = strip(at);
     if (is_string(v) && char_ptr_nonconst(to)) {
         R("misra-7.4", at, "");
         R("cert-str30", at, "");
@@ -1189,7 +1190,8 @@ void rules_check(struct unit *u)
         g_file = g->file ? g->file : u->file;
         struct expr at;
         memset(&at, 0, sizeof at);
-        at.line = g->line;
+        at.line = g->name_line ? g->name_line : g->line;
+        at.col = g->name_line ? g->name_col : 0;
         if (g->is_extern && g->ty->kind == TY_ARRAY && g->ty->count <= 0)
             R("misra-8.11", &at, g->name);
         int depth = 0;
@@ -1216,7 +1218,8 @@ void rules_check(struct unit *u)
         g_file = f->file ? f->file : u->file;
         struct expr at;
         memset(&at, 0, sizeof at);
-        at.line = f->line;
+        at.line = f->name_line ? f->name_line : f->line;
+        at.col = f->name_line ? f->name_col : 0;
         if (f->def_inline && !f->is_static)
             R("misra-8.10", &at, f->name);
         if (f->name && (!strncmp(f->name, "__", 2) ||

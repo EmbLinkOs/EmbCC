@@ -3207,9 +3207,10 @@ static void gen_func(struct ir_func *fn, struct code *text,
         code_align(text, falign, 0x90);
     f->code_off = text->len;
     f->code_align = falign;
-    /* -fcf-protection=branch: the entry an indirect call lands on */
+    /* -fcf-protection=branch: the entry an indirect call lands on (none
+     * for nocf_check, which promises no indirect call reaches it) */
     int cf_pre = 0;
-    if (ibt) {
+    if (ibt && !f->attr_nocf) {
         x86_endbr64(text);
         cf_pre = 4;
     }

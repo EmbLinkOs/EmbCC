@@ -698,6 +698,9 @@ void irgen_set_sanitize(unsigned mask);
 void irgen_set_instrument(int on, const char *funcs, const char *files);
 void irgen_set_opt_size(int on);       /* -Os: a switch table must be denser */
 void irgen_set_bounds(int on);         /* -fbounds-safety, -fsanitize=bounds */
+/* a hosted target's failed check reports itself (lib/rt/ubsan.c): the
+ * checks whose why bit (irgen.c's SAN_FAIL) is set; recover: go on */
+void irgen_set_ub_report(unsigned whys, int recover);
 
 /* --coverage and the profile options (src/ir/gcov.c). gcov_set says
  * what to make: counters (-fprofile-arcs), notes (-ftest-coverage),

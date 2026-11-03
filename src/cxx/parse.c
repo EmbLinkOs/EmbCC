@@ -7962,6 +7962,22 @@ void parse_template_decl(struct cclass *cls, int access)
     template_decl_rest(cls, access, at, home, ps, np, req_s, req_e);
 }
 
+
+/* Two template heads that can declare one template: the same kinds of
+ * parameter, packs where packs are. `template<size_t N, class... T>
+ * get(variant<T...>&)` and `template<class U, class... T> get(variant<
+ * T...>&)` have the same function parameters and are two templates:
+ * compared by those alone, the second's body became the first's, and the
+ * first's own definition a third template. */
+static int same_tparam_kinds(const struct ctparam *a, const struct ctparam *b,
+                             int n)
+{
+    for (int i = 0; i < n; i++)
+        if (a[i].kind != b[i].kind || !a[i].pack != !b[i].pack)
+            return 0;
+    return 1;
+}
+
 static void template_decl_rest(struct cclass *cls, int access,
                                const struct ctok *at, struct cscope *home,
                                struct ctparam *ps, int np, int req_s,
@@ -8365,6 +8381,7 @@ static void template_decl_rest(struct cclass *cls, int access,
          * differ only where a pattern cannot compare them) */
         for (struct cfunc *g = *set; g; g = g->next)
             if (g->tmpl && g->tmpl->nparams == np &&
+                same_tparam_kinds(g->tmpl->params, ps, np) &&
                 same_signature(g->type, t) &&
                 (!has_body || !g->tmpl->has_body)) {
                 if (!ds.is_friend)

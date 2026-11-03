@@ -25,9 +25,9 @@ thumbv6m-none-eabi naked yes
 thumbv6m-none-eabi asmfile yes
 thumbv6m-none-eabi dashS yes
 thumbv6m-none-eabi debug yes
-thumbv6m-none-eabi unwind no: unwind tables are not supported for thumbv6m-none-eabi yet (--unwind-tables, --exceptions): EmbCC writes no ARM EHABI unwind tables (.ARM.exidx)
+thumbv6m-none-eabi unwind yes
 thumbv6m-none-eabi cxx yes
-thumbv6m-none-eabi cxxeh no: C++ exceptions are not supported for thumbv6m-none-eabi yet: EmbCC writes no ARM EHABI unwind tables (.ARM.exidx); compile with --no-exceptions
+thumbv6m-none-eabi cxxeh yes
 thumbv7m-none-eabi int128 no: __int128 does not exist on this target (it needs 64-bit registers; use long long)
 thumbv7m-none-eabi ldouble yes
 thumbv7m-none-eabi float16 yes
@@ -55,9 +55,9 @@ thumbv7m-none-eabi naked yes
 thumbv7m-none-eabi asmfile yes
 thumbv7m-none-eabi dashS yes
 thumbv7m-none-eabi debug yes
-thumbv7m-none-eabi unwind no: unwind tables are not supported for thumbv7m-none-eabi yet (--unwind-tables, --exceptions): EmbCC writes no ARM EHABI unwind tables (.ARM.exidx)
+thumbv7m-none-eabi unwind yes
 thumbv7m-none-eabi cxx yes
-thumbv7m-none-eabi cxxeh no: C++ exceptions are not supported for thumbv7m-none-eabi yet: EmbCC writes no ARM EHABI unwind tables (.ARM.exidx); compile with --no-exceptions
+thumbv7m-none-eabi cxxeh yes
 thumbv7em-none-eabihf int128 no: __int128 does not exist on this target (it needs 64-bit registers; use long long)
 thumbv7em-none-eabihf ldouble yes
 thumbv7em-none-eabihf float16 yes
@@ -85,9 +85,9 @@ thumbv7em-none-eabihf naked yes
 thumbv7em-none-eabihf asmfile yes
 thumbv7em-none-eabihf dashS yes
 thumbv7em-none-eabihf debug yes
-thumbv7em-none-eabihf unwind no: unwind tables are not supported for thumbv7em-none-eabihf yet (--unwind-tables, --exceptions): EmbCC writes no ARM EHABI unwind tables (.ARM.exidx)
+thumbv7em-none-eabihf unwind yes
 thumbv7em-none-eabihf cxx yes
-thumbv7em-none-eabihf cxxeh no: C++ exceptions are not supported for thumbv7em-none-eabihf yet: EmbCC writes no ARM EHABI unwind tables (.ARM.exidx); compile with --no-exceptions
+thumbv7em-none-eabihf cxxeh yes
 thumbv8m.base-none-eabi int128 no: __int128 does not exist on this target (it needs 64-bit registers; use long long)
 thumbv8m.base-none-eabi ldouble yes
 thumbv8m.base-none-eabi float16 yes
@@ -115,9 +115,9 @@ thumbv8m.base-none-eabi naked yes
 thumbv8m.base-none-eabi asmfile yes
 thumbv8m.base-none-eabi dashS yes
 thumbv8m.base-none-eabi debug yes
-thumbv8m.base-none-eabi unwind no: unwind tables are not supported for thumbv8m.base-none-eabi yet (--unwind-tables, --exceptions): EmbCC writes no ARM EHABI unwind tables (.ARM.exidx)
+thumbv8m.base-none-eabi unwind yes
 thumbv8m.base-none-eabi cxx yes
-thumbv8m.base-none-eabi cxxeh no: C++ exceptions are not supported for thumbv8m.base-none-eabi yet: EmbCC writes no ARM EHABI unwind tables (.ARM.exidx); compile with --no-exceptions
+thumbv8m.base-none-eabi cxxeh yes
 thumbv8m.main-none-eabi int128 no: __int128 does not exist on this target (it needs 64-bit registers; use long long)
 thumbv8m.main-none-eabi ldouble yes
 thumbv8m.main-none-eabi float16 yes
@@ -145,9 +145,9 @@ thumbv8m.main-none-eabi naked yes
 thumbv8m.main-none-eabi asmfile yes
 thumbv8m.main-none-eabi dashS yes
 thumbv8m.main-none-eabi debug yes
-thumbv8m.main-none-eabi unwind no: unwind tables are not supported for thumbv8m.main-none-eabi yet (--unwind-tables, --exceptions): EmbCC writes no ARM EHABI unwind tables (.ARM.exidx)
+thumbv8m.main-none-eabi unwind yes
 thumbv8m.main-none-eabi cxx yes
-thumbv8m.main-none-eabi cxxeh no: C++ exceptions are not supported for thumbv8m.main-none-eabi yet: EmbCC writes no ARM EHABI unwind tables (.ARM.exidx); compile with --no-exceptions
+thumbv8m.main-none-eabi cxxeh yes
 armv7a-none-eabi int128 no: __int128 does not exist on this target (it needs 64-bit registers; use long long)
 armv7a-none-eabi ldouble yes
 armv7a-none-eabi float16 yes
@@ -175,9 +175,9 @@ armv7a-none-eabi naked yes
 armv7a-none-eabi asmfile yes
 armv7a-none-eabi dashS yes
 armv7a-none-eabi debug yes
-armv7a-none-eabi unwind no: unwind tables are not supported for armv7a-none-eabi yet (--unwind-tables, --exceptions): EmbCC writes no ARM EHABI unwind tables (.ARM.exidx)
+armv7a-none-eabi unwind yes
 armv7a-none-eabi cxx yes
-armv7a-none-eabi cxxeh no: C++ exceptions are not supported for armv7a-none-eabi yet: EmbCC writes no ARM EHABI unwind tables (.ARM.exidx); compile with --no-exceptions
+armv7a-none-eabi cxxeh yes
 riscv32-unknown-elf int128 no: __int128 does not exist on this target (it needs 64-bit registers; use long long)
 riscv32-unknown-elf ldouble yes
 riscv32-unknown-elf float16 yes
@@ -205,9 +205,9 @@ riscv32-unknown-elf naked yes
 riscv32-unknown-elf asmfile yes
 riscv32-unknown-elf dashS yes
 riscv32-unknown-elf debug yes
-riscv32-unknown-elf unwind no: unwind tables are not supported for riscv32-unknown-elf yet (--unwind-tables, --exceptions): EmbCC writes no RISC-V .eh_frame
+riscv32-unknown-elf unwind yes
 riscv32-unknown-elf cxx yes
-riscv32-unknown-elf cxxeh no: C++ exceptions are not supported for riscv32-unknown-elf yet: EmbCC writes no RISC-V .eh_frame; compile with --no-exceptions
+riscv32-unknown-elf cxxeh yes
 riscv64-unknown-elf int128 yes
 riscv64-unknown-elf ldouble yes
 riscv64-unknown-elf float16 yes
@@ -235,9 +235,9 @@ riscv64-unknown-elf naked yes
 riscv64-unknown-elf asmfile yes
 riscv64-unknown-elf dashS yes
 riscv64-unknown-elf debug yes
-riscv64-unknown-elf unwind no: unwind tables are not supported for riscv64-unknown-elf yet (--unwind-tables, --exceptions): EmbCC writes no RISC-V .eh_frame
+riscv64-unknown-elf unwind yes
 riscv64-unknown-elf cxx yes
-riscv64-unknown-elf cxxeh no: the RV64 backend cannot lower this operation yet (function _Z1fv) [landing w=8 size=4]
+riscv64-unknown-elf cxxeh yes
 avr int128 no: __int128 does not exist on this target (it needs 64-bit registers; use long long)
 avr ldouble yes
 avr float16 yes
@@ -266,8 +266,8 @@ avr asmfile yes
 avr dashS yes
 avr debug yes
 avr unwind no: unwind tables are not supported for avr yet (--unwind-tables, --exceptions): EmbCC writes no AVR .eh_frame
-avr cxx no: C++ is not yet supported for avr: the C++ lowering assumes a 32-bit int and 4-byte pointers (integral promotions, member pointers, RTTI), and this target's are 16 bits
-avr cxxeh no: C++ is not yet supported for avr: the C++ lowering assumes a 32-bit int and 4-byte pointers (integral promotions, member pointers, RTTI), and this target's are 16 bits
+avr cxx yes
+avr cxxeh no: 'try' with exceptions disabled (-fno-exceptions)
 mipsel-none-elf int128 no: __int128 does not exist on this target (it needs 64-bit registers; use long long)
 mipsel-none-elf ldouble yes
 mipsel-none-elf float16 yes
@@ -295,9 +295,9 @@ mipsel-none-elf naked yes
 mipsel-none-elf asmfile yes
 mipsel-none-elf dashS yes
 mipsel-none-elf debug yes
-mipsel-none-elf unwind no: unwind tables are not supported for mipsel-none-elf yet (--unwind-tables, --exceptions): EmbCC writes no MIPS .eh_frame
+mipsel-none-elf unwind yes
 mipsel-none-elf cxx yes
-mipsel-none-elf cxxeh no: C++ exceptions are not supported for mipsel-none-elf yet: EmbCC writes no MIPS .eh_frame; compile with --no-exceptions
+mipsel-none-elf cxxeh yes
 mips-none-elf int128 no: __int128 does not exist on this target (it needs 64-bit registers; use long long)
 mips-none-elf ldouble yes
 mips-none-elf float16 yes
@@ -325,9 +325,9 @@ mips-none-elf naked yes
 mips-none-elf asmfile yes
 mips-none-elf dashS yes
 mips-none-elf debug yes
-mips-none-elf unwind no: unwind tables are not supported for mips-none-elf yet (--unwind-tables, --exceptions): EmbCC writes no MIPS .eh_frame
+mips-none-elf unwind yes
 mips-none-elf cxx yes
-mips-none-elf cxxeh no: C++ exceptions are not supported for mips-none-elf yet: EmbCC writes no MIPS .eh_frame; compile with --no-exceptions
+mips-none-elf cxxeh yes
 mips64el-none-elf int128 yes
 mips64el-none-elf ldouble yes
 mips64el-none-elf float16 yes
@@ -355,9 +355,9 @@ mips64el-none-elf naked yes
 mips64el-none-elf asmfile yes
 mips64el-none-elf dashS yes
 mips64el-none-elf debug yes
-mips64el-none-elf unwind no: unwind tables are not supported for mips64el-none-elf yet (--unwind-tables, --exceptions): EmbCC writes no MIPS .eh_frame
+mips64el-none-elf unwind yes
 mips64el-none-elf cxx yes
-mips64el-none-elf cxxeh no: the MIPS64 backend cannot lower this operation yet (function _Z1fv) [landing w=8 size=4]
+mips64el-none-elf cxxeh yes
 mips64-none-elf int128 yes
 mips64-none-elf ldouble yes
 mips64-none-elf float16 yes
@@ -385,9 +385,9 @@ mips64-none-elf naked yes
 mips64-none-elf asmfile yes
 mips64-none-elf dashS yes
 mips64-none-elf debug yes
-mips64-none-elf unwind no: unwind tables are not supported for mips64-none-elf yet (--unwind-tables, --exceptions): EmbCC writes no MIPS .eh_frame
+mips64-none-elf unwind yes
 mips64-none-elf cxx yes
-mips64-none-elf cxxeh no: C++ exceptions are not supported for mips64-none-elf yet: EmbCC writes no MIPS .eh_frame; compile with --no-exceptions
+mips64-none-elf cxxeh yes
 loongarch64-unknown-elf int128 yes
 loongarch64-unknown-elf ldouble yes
 loongarch64-unknown-elf float16 yes
@@ -417,7 +417,7 @@ loongarch64-unknown-elf dashS yes
 loongarch64-unknown-elf debug yes
 loongarch64-unknown-elf unwind no: unwind tables are not supported for loongarch64-unknown-elf yet (--unwind-tables, --exceptions): EmbCC writes no LoongArch .eh_frame
 loongarch64-unknown-elf cxx yes
-loongarch64-unknown-elf cxxeh no: the LoongArch64 backend cannot lower this operation yet (function _Z1fv) [landing w=8 size=4]
+loongarch64-unknown-elf cxxeh no: C++ exceptions are not supported for loongarch64-unknown-elf yet: EmbCC writes no LoongArch .eh_frame; compile with --no-exceptions
 xtensa-none-elf int128 no: __int128 does not exist on this target (it needs 64-bit registers; use long long)
 xtensa-none-elf ldouble yes
 xtensa-none-elf float16 yes
@@ -445,9 +445,9 @@ xtensa-none-elf naked yes
 xtensa-none-elf asmfile yes
 xtensa-none-elf dashS yes
 xtensa-none-elf debug yes
-xtensa-none-elf unwind no: unwind tables are not supported for xtensa-none-elf yet (--unwind-tables, --exceptions): EmbCC writes no Xtensa .eh_frame
+xtensa-none-elf unwind yes
 xtensa-none-elf cxx yes
-xtensa-none-elf cxxeh no: C++ exceptions are not supported for xtensa-none-elf yet: EmbCC writes no Xtensa .eh_frame; compile with --no-exceptions
+xtensa-none-elf cxxeh yes
 tricore-none-elf int128 no: __int128 does not exist on this target (it needs 64-bit registers; use long long)
 tricore-none-elf ldouble yes
 tricore-none-elf float16 yes
@@ -475,9 +475,9 @@ tricore-none-elf naked yes
 tricore-none-elf asmfile yes
 tricore-none-elf dashS yes
 tricore-none-elf debug yes
-tricore-none-elf unwind no: unwind tables are not supported for tricore-none-elf yet (--unwind-tables, --exceptions): EmbCC writes no TriCore .eh_frame
+tricore-none-elf unwind yes
 tricore-none-elf cxx yes
-tricore-none-elf cxxeh no: C++ exceptions are not supported for tricore-none-elf yet: EmbCC writes no TriCore .eh_frame; compile with --no-exceptions
+tricore-none-elf cxxeh yes
 rx-none-elf int128 no: __int128 does not exist on this target (it needs 64-bit registers; use long long)
 rx-none-elf ldouble yes
 rx-none-elf float16 yes
@@ -701,7 +701,7 @@ aarch64-apple-darwin vector yes
 aarch64-apple-darwin atomic1 yes
 aarch64-apple-darwin atomic8 yes
 aarch64-apple-darwin atomic16 yes
-aarch64-apple-darwin tls no: __thread is not supported for a Darwin target yet: Mach-O addresses a thread-local through a __thread_vars descriptor, which this writer does not emit
+aarch64-apple-darwin tls yes
 aarch64-apple-darwin vla yes
 aarch64-apple-darwin align32 yes
 aarch64-apple-darwin frameaddr yes
@@ -714,7 +714,7 @@ aarch64-apple-darwin interrupt no: __attribute__((interrupt)) is not supported: 
 aarch64-apple-darwin naked no: __attribute__((naked)) is not supported: on this target the body could only be assembled by the file-scope assembler's few instructions; it is supported on every target but x86-64 and AArch64 for Darwin or Windows
 aarch64-apple-darwin asmfile yes
 aarch64-apple-darwin dashS yes
-aarch64-apple-darwin debug warns: -g: no debug information for aarch64-apple-darwin yet; tests/golden/out/limits/src/plain.c is compiled without it
+aarch64-apple-darwin debug yes
 aarch64-apple-darwin unwind yes
 aarch64-apple-darwin cxx yes
 aarch64-apple-darwin cxxeh yes
@@ -745,6 +745,6 @@ x86_64-windows-gnu naked no: __attribute__((naked)) is not supported: on this ta
 x86_64-windows-gnu asmfile no: no assembly-file support for x86_64-windows-gnu yet
 x86_64-windows-gnu dashS yes
 x86_64-windows-gnu debug no: -g is not supported for a Windows target yet: its debug information goes in CodeView records this does not write, and emitting DWARF under a COFF name would be worse than refusing
-x86_64-windows-gnu unwind no: C++ exceptions are not supported for a Windows target yet: the unwind tables go in .pdata and .xdata and neither is written
-x86_64-windows-gnu cxx no: C++ exceptions are not supported for a Windows target yet: the unwind tables go in .pdata and .xdata and neither is written
-x86_64-windows-gnu cxxeh no: C++ exceptions are not supported for a Windows target yet: the unwind tables go in .pdata and .xdata and neither is written
+x86_64-windows-gnu unwind yes
+x86_64-windows-gnu cxx yes
+x86_64-windows-gnu cxxeh yes

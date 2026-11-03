@@ -72,8 +72,14 @@ refopt -mabi=32 'n64 ABI'
 refopt -EB 'little-endian'
 refopt -mabicalls '-mabicalls is not supported'
 refopt -G8 'no data in .sdata'
+# unwind tables (the C++ exceptions' and a debugger's): .eh_frame
 for o in -funwind-tables -fasynchronous-unwind-tables -fexceptions; do
-    refopt $o 'unwind tables are not supported for mips64el-none-elf yet'
+    "$EMBCC" --target=$T $o -c "$out/f.c" -o "$out/uw.o" || {
+        echo "$o was refused"; exit 1; }
+    if command -v "$RE" >/dev/null 2>&1; then
+        "$RE" -S "$out/uw.o" | grep -q eh_frame || {
+            echo "$o wrote no .eh_frame"; exit 1; }
+    fi
 done
 "$EMBCC" --target=mips64-none-elf -EB -c "$out/f.c" -o /dev/null || {
     echo "-EB was refused for mips64-none-elf"; exit 1; }
@@ -135,14 +141,9 @@ grep -q 'la loads a 32-bit address' "$out/la.err" || {
 grep -q 'load it from a \.dword holding the symbol$' "$out/la.err" || {
     echo "la's refusal was cut short:"; cat "$out/la.err"; exit 1; }
 printf 'int f(int x) { return x; }\n' > "$out/c.cc"
-# C++ compiles here without exceptions (tests/golden/cxx-embedded.sh runs
-# it); exceptions, on by default, are refused by name: there are no
-# unwind tables for this target
-if "$EMBCC" --target=mips64-none-elf -c "$out/c.cc" -o /dev/null 2> "$out/cxx.err"; then
-    echo "C++ with exceptions was accepted"; exit 1
-fi
-grep -q 'C++ exceptions are not supported for mips64-none-elf' "$out/cxx.err" || {
-    echo "C++ exceptions were refused, but not by name:"; cat "$out/cxx.err"; exit 1; }
+# C++ with exceptions (on by default): unwind tables and the EH runtime
+"$EMBCC" --target=mips64-none-elf -c "$out/c.cc" -o /dev/null 2> "$out/cxx.err" || {
+    echo "C++ with exceptions was refused:"; cat "$out/cxx.err"; exit 1; }
 "$EMBCC" --target=mips64-none-elf -fno-exceptions -c "$out/c.cc" -o /dev/null || {
     echo "C++ with -fno-exceptions does not compile"; exit 1; }
 # ...and an __int128 variadic argument is accepted: placed at an even slot,
@@ -152,5 +153,5 @@ printf '%s\n' 'void v(int, ...); void f(__int128 x){ v(1, x); }' > "$out/v.c"
     echo "a variadic __int128 was refused"; exit 1; }
 echo "narrow and 16-byte atomics, the frame and return address,"
 echo "an over-aligned scalar, MIPS64 instructions on MIPS32, a 32-bit la,"
-echo "a wide packed bit-field big-endian and C++ exceptions are each refused"
+echo "a wide packed bit-field big-endian are each refused"
 echo "by name; interrupt handlers and doubleword inline asm compile"

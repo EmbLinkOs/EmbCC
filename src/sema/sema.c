@@ -6178,16 +6178,106 @@ static int builtin_fold(const struct expr *e, long *out)
     return 1;
 }
 
+static int is_aggregate_ty(const struct type *t)
+{
+    return t && (t->kind == TY_STRUCT || t->kind == TY_ARRAY);
+}
+
+/* The initializer of the member e (a `.`, of a constexpr object or of a
+ * member of one) names, from the object's brace list: positional and
+ * `.field` elements, nested braces. *zero when the list leaves it out
+ * (it is 0). NULL when it cannot be told here -- an element whose braces
+ * are elided, a designator with more steps, an anonymous member, a
+ * union's member other than the one initialized. */
+static const struct expr *member_init(const struct expr *e, int *zero)
+{
+    *zero = 0;
+    if (e->kind != EXPR_MEMBER || e->is_arrow || !e->memb || !e->lhs ||
+        !e->lhs->ty || e->lhs->ty->kind != TY_STRUCT)
+        return NULL;
+    const struct expr *b = e->lhs, *init;
+    if (b->kind == EXPR_VAR) {
+        const struct global *g = b->gref;
+        if (!g || !g->is_constexpr || !g->constexpr_init)
+            return NULL;
+        init = g->constexpr_init;
+    } else if (b->kind == EXPR_MEMBER) {
+        init = member_init(b, zero);
+        if (!init || *zero)
+            return init;
+    } else {
+        return NULL;
+    }
+    if (init->kind != EXPR_INITLIST)
+        return NULL;
+    const struct type *st = b->ty;
+    int want = -1;
+    for (int k = 0; k < st->nmembers; k++)
+        if (st->members[k].name && e->memb->name &&
+            !strcmp(st->members[k].name, e->memb->name))
+            want = k;
+    if (want < 0)
+        return NULL;
+    int idx = 0;
+    for (int k = 0; k < init->nelems; k++) {
+        const struct expr *el = init->elems[k];
+        if (el->desig_field) {
+            if (el->desig_next)
+                return NULL;
+            idx = -1;
+            for (int q = 0; q < st->nmembers; q++)
+                if (st->members[q].name &&
+                    !strcmp(st->members[q].name, el->desig_field))
+                    idx = q;
+            if (idx < 0)
+                return NULL;
+        } else if (el->desig_index >= 0) {
+            return NULL;
+        }
+        if (idx >= st->nmembers)
+            return NULL;
+        if (is_aggregate_ty(st->members[idx].ty) && el->kind != EXPR_INITLIST)
+            return NULL;            /* braces elided: not counted here */
+        if (idx == want)
+            return el;
+        if (st->is_union && !el->desig_field)
+            return NULL;            /* the union holds another member */
+        idx++;
+    }
+    if (st->is_union)
+        return NULL;
+    *zero = 1;
+    return init;
+}
+
+static const struct expr g_zero_value = { .kind = EXPR_NUM };
+
 /* The initializer of the C23 constexpr object e names -- a scalar one,
- * whose value is the name's in a constant expression -- or NULL. */
+ * whose value is the name's in a constant expression -- or NULL. A
+ * member of a constexpr structure or union is a named constant too
+ * (C23 6.6p7). */
 static const struct expr *constexpr_value(const struct expr *e)
 {
-    const struct global *g = e->gref;
-    if (!g || !g->is_constexpr || !g->constexpr_init || !e->ty ||
-        !(ty_is_arith(e->ty) || e->ty->kind == TY_PTR))
+    if (!e->ty || !(ty_is_arith(e->ty) || e->ty->kind == TY_PTR))
         return NULL;
-    const struct expr *ci = g->constexpr_init;
-    if (ci->kind == EXPR_INITLIST)
+    const struct expr *ci;
+    if (e->kind == EXPR_MEMBER) {
+        int zero;
+        ci = member_init(e, &zero);
+        if (ci && zero) {
+            /* left out of the list: 0, of the member's type */
+            static struct expr z;
+            z = g_zero_value;
+            z.ty = e->ty;
+            return &z;
+        }
+    } else {
+        const struct global *g = e->gref;
+        if (!g || !g->is_constexpr || !g->constexpr_init)
+            return NULL;
+        ci = g->constexpr_init;
+    }
+    if (ci && ci->kind == EXPR_INITLIST)
         ci = ci->nelems == 1 ? ci->elems[0] : NULL;
     return ci && ci->ty ? ci : NULL;
 }
@@ -6206,8 +6296,33 @@ static int const_fold(const struct expr *e, long *out)
     case EXPR_NUM:
         *out = e->num;
         return 1;
-    case EXPR_VAR: {
-        /* a C23 constexpr object: its value, as its own type holds it */
+    case EXPR_DEREF: {
+        /* "str"[k] (a subscript is DEREF of an is_subscript +): the
+         * character, as GCC folds it; a narrow literal, k in its bounds */
+        const struct expr *b = e->rhs;
+        if (!b || b->kind != EXPR_BINOP || b->op != B_ADD || !e->ty ||
+            !ty_is_integer(e->ty) || ty_size(e->ty) != 1)
+            return 0;
+        const struct expr *s = b->lhs, *ix = b->rhs;
+        while (s && s->kind == EXPR_CAST)
+            s = s->rhs;
+        if (s && s->kind != EXPR_STR) {
+            s = b->rhs;
+            ix = b->lhs;
+            while (s && s->kind == EXPR_CAST)
+                s = s->rhs;
+        }
+        long k;
+        if (!s || s->kind != EXPR_STR || (s->str_width && s->str_width != 1) ||
+            !s->name || !const_fold(ix, &k) || k < 0 || k >= s->num)
+            return 0;
+        *out = cast_fold_value(e->ty, (long)(unsigned char)s->name[k]);
+        return 1;
+    }
+    case EXPR_VAR:
+    case EXPR_MEMBER: {
+        /* a C23 constexpr object (or a member of one): its value, as its
+         * own type holds it */
         const struct expr *ci = constexpr_value(e);
         if (!ci || !const_fold(ci, out))
             return 0;
@@ -6464,7 +6579,8 @@ static int const_fold_f(const struct expr *e, double *out)
     case EXPR_FNUM:
         *out = fold_round(e->ty, e->fnum);
         return 1;
-    case EXPR_VAR: {
+    case EXPR_VAR:
+    case EXPR_MEMBER: {
         const struct expr *ci = constexpr_value(e);
         if (!ci)
             return 0;
@@ -6525,7 +6641,8 @@ static struct ldf *const_fold_ld(const struct expr *e)
     double d;
     long iv;
     switch (e->kind) {
-    case EXPR_VAR: {
+    case EXPR_VAR:
+    case EXPR_MEMBER: {
         const struct expr *ci = constexpr_value(e);
         if (!ci)
             return NULL;
@@ -7240,6 +7357,30 @@ static int resolve_addr(struct expr *e, struct global **gt,
     return 0;
 }
 
+/* `c ? A : B` whose condition is a constant is the arm it picks, an
+ * address constant when that arm is one (GCC and clang take
+ * `static const char *p = N > 1 ? "many" : "one";`). The node, under
+ * any casts, becomes that arm; a non-constant condition is left, for the
+ * lowering to refuse. */
+static void pick_static_arm(struct expr *e)
+{
+    for (int guard = 0; e && guard < 64; guard++) {
+        if (e->kind == EXPR_CAST) {
+            e = e->rhs;
+            continue;
+        }
+        if (e->kind != EXPR_COND || !e->args || !e->args[0])
+            return;
+        long c;
+        if (!const_fold(e->args[0], &c))
+            return;
+        struct expr *arm = c ? (e->lhs ? e->lhs : e->args[0]) : e->rhs;
+        if (!arm)
+            return;
+        *e = *arm;
+    }
+}
+
 /* Lower flattened initializer leaves into a static object's byte image
  * plus a relocation list. Shared by file-scope globals and static locals
  * — both have static storage, so every leaf must reduce to constant
@@ -7332,6 +7473,7 @@ static void lower_static_bytes(struct unit *u, int line, int size,
     int nrel = 0, caprel = 0;
     g_nldiff = 0;
     for (int k = 0; k < n; k++) {
+        pick_static_arm(v[k].e);
         struct expr *core = v[k].e;
         while (core && core->kind == EXPR_CAST)
             core = core->rhs;
@@ -7633,7 +7775,8 @@ static void check_constexpr(struct unit *u, const struct global *g)
     w = fold_round(g->ty, v);
     if (w != v && !(v != v && w != w))
         sema_error_line(u, g->line, "constexpr '%s': %.17g is not exactly a %s, and "
-                        "C23 wants it exactly", g->name, v, ty_name(g->ty));
+                        "C23 wants it exactly", g->name, v,
+                        ty_name(g->ty->canon ? g->ty->canon : g->ty));
 }
 
 /* Reduce every file-scope global's aggregate/relocatable initializer to
@@ -10341,6 +10484,7 @@ static void merge_decls(struct unit *u)
         canon->attr_no_san |= f->attr_no_san;
         if (f->attr_ssp)
             canon->attr_ssp = f->attr_ssp;
+        canon->attr_nocf |= f->attr_nocf;
         /* aligned(N) on any declaration, the strictest (GCC's align-3.c
          * puts it on the prototype) */
         if (f->user_align > canon->user_align)

@@ -960,13 +960,13 @@ static void mem_expr(struct expr *e, struct mstate *m, int ctx)
         mem_expr(e->inits[k].e, m, 1);
 }
 
-static void leaks_at(struct mstate *m, int line, int returned)
+static void leaks_at(struct mstate *m, int line, int col, int returned)
 {
     for (int k = 0; k < m->n; k++)
         if ((m->st[k] == M_ALLOC || m->st[k] == M_CHECKED) &&
             m->var[k] != returned && g_mfn && m->var[k] < g_mfn->nvars &&
             m->var[k] >= g_mfn->nparams)
-            report("analyzer-malloc-leak", line, 0,
+            report("analyzer-malloc-leak", line, col,
                    "the memory allocated on line %d is lost here: nothing "
                    "points to it when the function returns", m->line[k]);
 }
@@ -1000,7 +1000,7 @@ static int mem_stmt(struct stmt *s, struct mstate *m)
                        "'%s' returned after it was freed",
                        strip(s->expr)->name);
             mem_expr(s->expr, m, 1);
-            leaks_at(m, s->line, rv);
+            leaks_at(m, s->line, s->col, rv);
             return 1;
         }
         case STMT_IF: {
@@ -1084,7 +1084,7 @@ static void analyze_memory(struct unit *u)
                                         ? f->body->body : f->body;
                  s; s = s->next)
                 last = s->line;
-            leaks_at(&m, last, -1);
+            leaks_at(&m, last, 0, -1);
         }
     }
     g_mfn = NULL;

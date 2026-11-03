@@ -9,8 +9,27 @@
 #include "../driver/util.h"
 #include "../arch/target.h"
 #include "../sema/ldfloat.h"
+#include "../arch/predef.h"
 
-/* An identifier may hold the characters C11 Annex D lists, written in
+#include "xid.h"
+
+static int in_ranges(const unsigned int (*r)[2], int n, unsigned long c)
+{
+    int lo = 0, hi = n - 1;
+    while (lo <= hi) {
+        int mid = (lo + hi) / 2;
+        if (c < r[mid][0])
+            hi = mid - 1;
+        else if (c > r[mid][1])
+            lo = mid + 1;
+        else
+            return 1;
+    }
+    return 0;
+}
+
+/* An identifier may hold the characters C11 Annex D lists -- in C23, the
+ * Unicode XID_Start and XID_Continue ones (UAX #31, xid.h) -- written in
  * UTF-8 as gcc and clang read them: `int café;`. Returns the length of
  * the UTF-8 sequence at p when it encodes one of them -- and, for an
  * identifier's first character, not one D.2 rules out there (combining
@@ -58,6 +77,13 @@ int lex_ident_utf8(const char *p, int first)
     }
     if ((n == 3 && c < 0x800) || (n == 4 && (c < 0x10000 || c > 0x10FFFF)))
         return 0;
+    if (lex_c_year() >= 2023 && !predef_is_cxx()) {
+        if (first)
+            return in_ranges(xid_start, (int)(sizeof xid_start /
+                                              sizeof xid_start[0]), c) ? n : 0;
+        return in_ranges(xid_continue, (int)(sizeof xid_continue /
+                                             sizeof xid_continue[0]), c) ? n : 0;
+    }
     int ok = 0;
     if (c >= 0x10000)                 /* planes 1-14, less their last two */
         ok = c <= 0xEFFFD && (c & 0xFFFF) <= 0xFFFD;
@@ -1599,6 +1625,7 @@ static void lex_raw(struct lexer *lx)
     case '?': t->kind = TOK_QUESTION; break;
     case ':':
         if (lx->cxx && lx->p[1] == ':') { t->kind = TOK_COLONCOLON; lx->p++; }
+        else if (lx->p[1] == '>') { t->kind = TOK_RBRACKET; lx->p++; }
         else t->kind = TOK_COLON;
         break;
     case '+':
@@ -1625,6 +1652,7 @@ static void lex_raw(struct lexer *lx)
         break;
     case '%':
         if (lx->p[1] == '=') { t->kind = TOK_PERCENTEQ; lx->p++; }
+        else if (lx->p[1] == '>') { t->kind = TOK_RBRACE; lx->p++; }
         else t->kind = TOK_PERCENT;
         break;
     case '^':
@@ -1650,7 +1678,16 @@ static void lex_raw(struct lexer *lx)
         else t->kind = TOK_PIPE;
         break;
     case '<':
-        if (lx->p[1] == '<' && lx->p[2] == '=') {
+        /* <: and <%; in C++ `<::` is < :: unless a : or > follows it
+         * (C++11 [lex.pptoken]), so std::vector<::T> still parses */
+        if (lx->p[1] == ':' &&
+            !(lx->cxx && lx->p[2] == ':' && lx->p[3] != ':' && lx->p[3] != '>')) {
+            t->kind = TOK_LBRACKET;
+            lx->p++;
+        } else if (lx->p[1] == '%') {
+            t->kind = TOK_LBRACE;
+            lx->p++;
+        } else if (lx->p[1] == '<' && lx->p[2] == '=') {
             t->kind = TOK_SHLEQ;
             lx->p += 2;
         } else if (lx->p[1] == '<') {

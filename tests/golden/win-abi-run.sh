@@ -184,7 +184,9 @@ for opt in -O0 -O1 -O2; do
         -o "$b/c.obj" 2> "$b/cc.log" || {
         echo "FAIL $opt: embcc could not compile the callee:"
         grep -v 'warn=windows-abi' "$b/cc.log"; exit 1; }
-    if llvm-objdump -r "$b/c.obj" | grep -q IMAGE_REL; then
+    # (.pdata's relocations, against .text and .xdata, are the unwind
+    # table's, which the test image does not need)
+    if llvm-objdump -r -j .text "$b/c.obj" | grep -q IMAGE_REL; then
         echo "FAIL $opt: the callee has relocations; its bytes cannot be"
         echo "      moved into the test image as they are"; exit 1
     fi

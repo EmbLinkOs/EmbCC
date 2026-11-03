@@ -57,7 +57,7 @@ mkdir -p "$out/cxx"
 units="new guard atexit typeinfo dyncast noexcept"
 cxxflags="-fno-exceptions -fno-rtti"
 case $triple in
-    riscv*|thumb*|mips*|xtensa*|tricore*) units="$units eh terminate"; cxxflags= ;;
+    riscv*|thumb*|armv7a*|mips*|xtensa*|tricore*) units="$units eh terminate"; cxxflags= ;;
 esac
 for b in $units; do
     # (each object in a section of its own: typeinfo's two hundred

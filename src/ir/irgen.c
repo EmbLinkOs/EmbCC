@@ -347,6 +347,11 @@ static int g_bounds, g_bounds_addr;
 void irgen_set_bounds(int on) { g_bounds = on; }
 
 static void san_trap_if(struct ir_func *fn, int cond, int w);
+/* what a check finds, for the report a hosted target's failed check makes
+ * (lib/rt/ubsan.c's list): 1 signed overflow, 2 division by zero, 3 the
+ * most negative value / -1, 4 a shift count, 5 an index, 6 -INT_MIN */
+static int g_ub_why;
+#define SAN_FAIL(why, ...) (g_ub_why = (why), san_trap_if(__VA_ARGS__))
 
 static void bounds_check(struct ir_func *fn, struct expr *pe, int p, int idx,
                          int allow_end)
@@ -394,7 +399,7 @@ static void bounds_check(struct ir_func *fn, struct expr *pe, int p, int idx,
     if (n < 0)
         return;
     int bad = emit_cmp(fn, allow_end ? B_GT : B_GE, idx, n, AW, 0);
-    san_trap_if(fn, bad, 4);
+    SAN_FAIL(5, fn, bad, 4);
 }
 
 /* An arm of an `if` that calls a noreturn or cold function -- abort(),
@@ -5241,7 +5246,7 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             /* -x is representable for every x but the most negative,
              * where it is the one value the type cannot hold. */
             int w = ty_w(e->ty);
-            san_trap_if(fn, emit_cmp(fn, B_EQ, v,
+            SAN_FAIL(6, fn, emit_cmp(fn, B_EQ, v,
                                      emit_const(fn, san_min(w), w), w, 1), w);
         }
         struct ir_ins *i = emit(fn);
@@ -5996,12 +6001,44 @@ static void emit_instr_call(struct ir_func *fn, struct func *f,
 }
 unsigned irgen_sanitize(void) { return g_san; }
 
-/* if (cond) trap; */
+/* On a hosted target a failed check says what and where before it
+ * stops (or, recovering, goes on): the checks of g_ub_report's bits. */
+static unsigned g_ub_report;
+static int g_ub_recover;
+
+void irgen_set_ub_report(unsigned whys, int recover)
+{
+    g_ub_report = whys;
+    g_ub_recover = recover;
+}
+
+/* if (cond) trap; -- or report, then trap (the report aborts; the trap
+ * is the stop should it return), or report and go on */
 static void san_trap_if(struct ir_func *fn, int cond, int w)
 {
     int ok = new_label(fn);
     emit_brz(fn, cond, w, ok);
-    emit(fn)->op = IR_UD2;
+    if (g_ub_report & (1u << g_ub_why)) {
+        const char *file = pmap_apply(fn->file ? fn->file : "?", PMAP_MACRO);
+        size_t n = strlen(file) + 1;
+        struct ir_ins *sa = emit(fn);
+        sa->op = IR_STRADDR;
+        sa->label = ir_intern_aligned(cur_unit, xstrndup(file, n - 1),
+                                      (int)n, 1);
+        sa->dst = new_temp(fn);
+        int vals[5];
+        vals[0] = emit_const(fn, g_ub_why, AW);
+        vals[1] = sa->dst;
+        vals[2] = emit_const(fn, g_cur_line, AW);
+        vals[3] = emit_const(fn, g_cur_col, AW);
+        vals[4] = emit_const(fn, g_ub_recover, AW);
+        irgen_san_call(cur_unit, fn, "__embcc_ubsan_fail", 5, vals,
+                       g_cur_line);
+        if (!g_ub_recover)
+            emit(fn)->op = IR_UD2;
+    } else {
+        emit(fn)->op = IR_UD2;
+    }
     emit_label(fn, ok);
 }
 
@@ -6027,19 +6064,19 @@ static int san_bin(struct ir_func *fn, enum ir_op op, int a, int b,
          * count and an over-wide one are different bugs and neither is
          * what the hardware does -- x86 masks the count to 5 or 6 bits,
          * so `x << 32` silently returns x. */
-        san_trap_if(fn, emit_cmp(fn, B_GE, b, emit_const(fn, w * 8, w),
+        SAN_FAIL(4, fn, emit_cmp(fn, B_GE, b, emit_const(fn, w * 8, w),
                                  w, 0), w);
-        san_trap_if(fn, emit_cmp(fn, B_LT, b, emit_const(fn, 0, w),
+        SAN_FAIL(4, fn, emit_cmp(fn, B_LT, b, emit_const(fn, 0, w),
                                  w, 1), w);
     }
 
     if ((g_san & SAN_DIVIDE) && (op == IR_DIV || op == IR_MOD)) {
-        san_trap_if(fn, emit_cmp(fn, B_EQ, b, emit_const(fn, 0, w), w, 0), w);
+        SAN_FAIL(2, fn, emit_cmp(fn, B_EQ, b, emit_const(fn, 0, w), w, 0), w);
         if (sign)
             /* INT_MIN / -1 has no representable answer, and on x86 it
              * raises #DE rather than wrapping -- so this one is a
              * crash today and a named trap after. */
-            san_trap_if(fn,
+            SAN_FAIL(3, fn,
                 emit_bin(fn, IR_AND,
                     emit_cmp(fn, B_EQ, a, emit_const(fn, san_min(w), w), w, 1),
                     emit_cmp(fn, B_EQ, b, emit_const(fn, -1, w), w, 1),
@@ -6059,11 +6096,11 @@ static int san_bin(struct ir_func *fn, enum ir_op op, int a, int b,
                         emit_cmp(fn, B_EQ, a, emit_const(fn, -1, w), w, 1),
                         emit_cmp(fn, B_EQ, b, emit_const(fn, san_min(w), w),
                                  w, 1), w, 1);
-            san_trap_if(fn, mn, w);
+            SAN_FAIL(1, fn, mn, w);
             /* guard the division: only when a != 0 */
             int ok = new_label(fn);
             emit_brz(fn, nz, w, ok);
-            san_trap_if(fn,
+            SAN_FAIL(1, fn,
                 emit_cmp(fn, B_NE, emit_bin(fn, IR_DIV, r, a, w, 1), b,
                          w, 1), w);
             emit_label(fn, ok);
@@ -6079,7 +6116,7 @@ static int san_bin(struct ir_func *fn, enum ir_op op, int a, int b,
                                      emit_bin(fn, IR_XOR, b, r, w, 1), w, 1)
               : emit_bin(fn, IR_AND, emit_bin(fn, IR_XOR, a, b, w, 1),
                                      emit_bin(fn, IR_XOR, a, r, w, 1), w, 1);
-        san_trap_if(fn, emit_cmp(fn, B_LT, t, emit_const(fn, 0, w), w, 1), w);
+        SAN_FAIL(1, fn, emit_cmp(fn, B_LT, t, emit_const(fn, 0, w), w, 1), w);
         return r;
     }
     return emit_bin(fn, op, a, b, w, sign);

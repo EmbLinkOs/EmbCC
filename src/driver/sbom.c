@@ -104,11 +104,13 @@ static int file_info(const char *path, char sha[65], char lic[96])
     return 0;
 }
 
-void sbom_emit_unit(struct elfw *w, const char *src, int ndeps,
-                    const char *(*dep)(int), int (*dep_sys)(int))
+unsigned char *sbom_unit_record(const char *src, int ndeps,
+                                const char *(*dep)(int), int (*dep_sys)(int),
+                                long *len)
 {
+    *len = 0;
     if (!sbom_embed())
-        return;
+        return NULL;
     struct outbuf b = { NULL, 0, 0 };
     ob_str(&b, "ESBOM 1\n");
     ob_fmt(&b, "C\tEmbCC\t%s\n", EMBCC_VERSION);
@@ -126,9 +128,20 @@ void sbom_emit_unit(struct elfw *w, const char *src, int ndeps,
         ob_fmt(&b, "H\t%s\t%s\t%s\t%d\n", sha, lic, pmap_apply(p, PMAP_DEBUG),
                dep_sys ? dep_sys(k) : 0);
     }
-    elfw_add_section(w, ".debug_embcc_sbom", 1 /* SHT_PROGBITS */, 0, b.p,
-                     (Elf64_Xword)b.n, 1);
-    free(b.p);
+    *len = (long)b.n;
+    return (unsigned char *)b.p;
+}
+
+void sbom_emit_unit(struct elfw *w, const char *src, int ndeps,
+                    const char *(*dep)(int), int (*dep_sys)(int))
+{
+    long n;
+    unsigned char *b = sbom_unit_record(src, ndeps, dep, dep_sys, &n);
+    if (!b)
+        return;
+    elfw_add_section(w, ".debug_embcc_sbom", 1 /* SHT_PROGBITS */, 0, b,
+                     (Elf64_Xword)n, 1);
+    free(b);
 }
 
 /* ---- the bill ------------------------------------------------------- */
@@ -176,7 +189,7 @@ int sbom_write(const char *image, const char *out_path)
     int nf = 0;
     const char *triple = target_triple_now(), *ver = EMBCC_VERSION;
     long sl = 0;
-    unsigned char *s = stackinfo_elf_section(d, n, ".debug_embcc_sbom", &sl);
+    unsigned char *s = stackinfo_section(d, n, "sbom", &sl);
     /* the units' records: one ESBOM block each, concatenated */
     for (long at = 0; s && at < sl; ) {
         long e = at;

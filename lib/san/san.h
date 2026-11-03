@@ -193,6 +193,24 @@ static NOSH int san_backtrace(uptr *pcs, int max, uptr first_pc)
     return n;
 }
 
+#if SAN_HOSTED
+/* dladdr's answer: the same four fields first in glibc's and libSystem's
+ * Dl_info. Weak: a static C library without it leaves the frames bare. */
+struct san_dlinfo {
+    const char *fname;
+    void *fbase;
+    const char *sname;
+    void *saddr;
+};
+int dladdr(const void *, struct san_dlinfo *) WEAK;
+#endif
+
+/* Each frame as LLVM's runtimes print it before symbolizing:
+ *   #1 0x100003f40 in main+0x24 (/path/prog+0x3f40)
+ * the function where the dynamic symbol table names it, and always the
+ * module and the offset into it, which addr2line, atos and
+ * llvm-symbolizer turn into a file and line. A return address is looked
+ * up one byte back, in the call. */
 static NOSH void san_print_stack(const uptr *pcs, int n)
 {
     for (int i = 0; i < n; i++) {
@@ -200,6 +218,26 @@ static NOSH void san_print_stack(const uptr *pcs, int n)
         san_dec((u64)i);
         san_puts(" ");
         san_hex(pcs[i]);
+#if SAN_HOSTED
+        struct san_dlinfo di;
+        di.fname = di.sname = 0;
+        di.fbase = di.saddr = 0;
+        if (dladdr && dladdr((const void *)(pcs[i] - (i ? 1 : 0)), &di)) {
+            if (di.sname && di.saddr) {
+                san_puts(" in ");
+                san_puts(di.sname);
+                san_puts("+");
+                san_hex(pcs[i] - (uptr)di.saddr);
+            }
+            if (di.fname) {
+                san_puts(" (");
+                san_puts(di.fname);
+                san_puts("+");
+                san_hex(pcs[i] - (uptr)di.fbase);
+                san_puts(")");
+            }
+        }
+#endif
         san_puts("\n");
     }
 }

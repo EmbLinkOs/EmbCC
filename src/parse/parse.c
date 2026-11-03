@@ -102,6 +102,8 @@ struct attrs { int packed; int aligned; int weak; int noreturn;
                unsigned no_san;
                /* stack_protect (1) / no_stack_protector (-1) */
                int ssp;
+               /* nocf_check: no endbr64 at the entry */
+               int nocf;
                /* counted_by(n) / sized_by(n) on a member: the member
                 * holding its count (elements, or bytes with sized_by) */
                const char *counted_by;
@@ -478,10 +480,15 @@ static void reject_reserved(struct parser *ps, const char *name, int line, int c
     for (size_t i = 0;
          i < sizeof reserved_unsupported / sizeof reserved_unsupported[0];
          i++)
-        if (strcmp(reserved_unsupported[i], name) == 0)
-            parse_error_at(ps, line, col,
-                    "'%s' is not supported yet (see docs/manual/c-language.md)",
-                    name);
+        if (strcmp(reserved_unsupported[i], name) == 0) {
+            if (!strcmp(name, "register"))
+                parse_error_at(ps, line, col, "'register' is not allowed "
+                               "here: C allows it on a block-scope object "
+                               "and on a parameter (C11 6.9p2 for file "
+                               "scope)");
+            parse_error_at(ps, line, col, "'%s' is a statement, and is not "
+                           "allowed here", name);
+        }
 }
 
 /* ---- types ---- */
@@ -922,6 +929,7 @@ static const struct attr_entry attr_table[] = {
     { "no_sanitize", ATTR_HONOURED, NULL },
     { "stack_protect", ATTR_HONOURED, NULL },
     { "no_stack_protector", ATTR_HONOURED, NULL },
+    { "nocf_check", ATTR_HONOURED, NULL },
     { "no_sanitize_address", ATTR_HONOURED, NULL },
     { "no_address_safety_analysis", ATTR_HONOURED, NULL },
     { "no_sanitize_thread", ATTR_HONOURED, NULL },
@@ -1544,6 +1552,7 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
                     out->no_instrument = 1;
                 else if (attr_is(name, "stack_protect")) out->ssp = 1;
                 else if (attr_is(name, "no_stack_protector")) out->ssp = -1;
+                else if (attr_is(name, "nocf_check")) out->nocf = 1;
                 else if (attr_is(name, "no_sanitize")) {
                     const char *q = sarg ? sarg : "";
                     if (strstr(q, "address")) out->no_san |= SAN_ADDRESS;
@@ -1715,6 +1724,8 @@ static int take_constexpr(struct parser *ps);
 static const struct econst *constexpr_declarator(struct parser *ps, const char *kname,
                                                  struct type *kt, struct expr *kinit,
                                                  int kline, int file_scope);
+static void cx_members(struct parser *ps, const char *path, struct type *st,
+                       const struct expr *init, int line, int file_scope);
 static void parse_pack(struct parser *ps);
 static int at_weak(struct parser *ps);
 static void parse_weak(struct parser *ps);
@@ -3322,10 +3333,42 @@ static struct type *ce_type(const struct expr *e)
     }
     case EXPR_CAST:
         return e->cast_ty;
-    case EXPR_COMPLIT:
-        /* `sizeof (struct s){ 1, 2 }`: the literal's type (an unsized
-         * array's count is the initializer's, unknown here) */
-        return e->cast_ty && !ty_incomplete(e->cast_ty) ? e->cast_ty : NULL;
+    case EXPR_COMPLIT: {
+        /* `sizeof (struct s){ 1, 2 }`: the literal's type; an unsized
+         * array's count is its brace list's, `(int[]){ 1, 2, [5] = 3 }`
+         * six, `(char[]){ "abc" }` four */
+        struct type *t = e->cast_ty;
+        if (!t)
+            return NULL;
+        if (!ty_incomplete(t))
+            return t;
+        const struct expr *il = e->lhs;
+        if (t->kind != TY_ARRAY || !t->pointee || ty_incomplete(t->pointee) ||
+            !il || il->kind != EXPR_INITLIST)
+            return NULL;
+        if (il->nelems == 1 && il->elems[0]->kind == EXPR_STR &&
+            ty_size(t->pointee) == (il->elems[0]->str_width
+                                    ? il->elems[0]->str_width : 1))
+            return ty_array(t->pointee, (int)il->elems[0]->num);
+        long n = 0, at = 0;
+        for (int k = 0; k < il->nelems; k++) {
+            const struct expr *el = il->elems[k];
+            if (el->desig_field)
+                return NULL;
+            if ((t->pointee->kind == TY_STRUCT ||
+                 t->pointee->kind == TY_ARRAY) && el->kind != EXPR_INITLIST)
+                return NULL;            /* braces elided: not counted here */
+            if (el->desig_index >= 0)
+                at = el->desig_index_hi >= 0 ? el->desig_index_hi
+                                             : el->desig_index;
+            if (el->desig_next)
+                return NULL;
+            at++;
+            if (at > n)
+                n = at;
+        }
+        return ty_array(t->pointee, (int)n);
+    }
     case EXPR_COMMA: {
         /* the right operand's value, so an array or a function decays:
          * `sizeof (1, foo)` is a pointer's size */
@@ -3576,6 +3619,35 @@ static int size_fold(const struct expr *e, long *out)
          * `enum { N = 3 }` says, and this folded it to three. */
         const struct fold_local *fl = fold_local_find(e->name);
         const struct econst *ec = fl ? fl->ec : fold_econst(e->name);
+        if (!ec)
+            return 0;
+        *out = ec->val;
+        return 1;
+    }
+    case EXPR_MEMBER: {
+        /* a member of a constexpr structure (cx_members): its path's
+         * named constant, unless a later declaration hides the object */
+        char path[256];
+        const struct expr *b = e;
+        int n = 0;
+        const char *parts[16];
+        while (b && b->kind == EXPR_MEMBER && !b->is_arrow && n < 16) {
+            parts[n++] = b->name;
+            b = b->lhs;
+        }
+        if (!b || b->kind != EXPR_VAR || n == 16 || !b->name)
+            return 0;
+        int at = snprintf(path, sizeof path, "%s", b->name);
+        for (int k = n - 1; k >= 0 && at < (int)sizeof path; k--)
+            at += snprintf(path + at, sizeof path - (size_t)at, ".%s",
+                           parts[k] ? parts[k] : "");
+        if (at >= (int)sizeof path)
+            return 0;
+        const struct fold_local *fl = fold_local_find(path);
+        const struct fold_local *bl = fold_local_find(b->name);
+        if (bl && (!fl || bl > fl))
+            return 0;               /* the object is hidden */
+        const struct econst *ec = fl ? fl->ec : fold_econst(path);
         if (!ec)
             return 0;
         *out = ec->val;
@@ -6324,6 +6396,9 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
             if (is_cx) {
                 s->is_constexpr = 1;
                 cx_ec = constexpr_declarator(ps, dname, s->dty, s->expr, s->line, 0);
+                /* C23 6.7.1: the object's type is const-qualified */
+                s->dty = ty_const(s->dty);
+                s->obj_const = 1;
             }
             /* Record this local's type for a later `sizeof(name)`, inferring
              * an omitted array size from a string or brace initializer (as
@@ -6346,6 +6421,8 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
                     }
                 }
                 fold_local_add_ec(dname, ft, cx_ec);
+                if (is_cx && s->dty->kind == TY_STRUCT)
+                    cx_members(ps, dname, s->dty, s->expr, s->line, 0);
             }
             /* checked AFTER the initializer, because `char a[] = "..."`
              * takes its size from the literal */
@@ -6774,6 +6851,93 @@ static void parse_static_assert(struct parser *ps)
  * values fold in sema from the object's initializer. A value the type
  * cannot hold exactly is refused (C23 6.7.1), as is a non-constant
  * initializer; a pointer must be null. */
+/* A named constant for a member of a constexpr object: an econst named
+ * by its path, "s.a.b", which size_fold looks a `.` chain up by. */
+static void cx_register(struct parser *ps, char *name, struct type *ty,
+                        long val, int line, int file_scope)
+{
+    struct econst *kc = xcalloc(1, sizeof *kc);
+    kc->name = name;
+    kc->val = val;
+    kc->ty = ty;
+    kc->seq = ps->seq;
+    kc->line = line;
+    kc->has_object = 1;
+    if (file_scope) {
+        *ps->econst_tail = kc;
+        ps->econst_tail = &kc->next;
+    } else {
+        kc->in_block = 1;
+        fold_local_add_ec(name, ty, kc);
+    }
+}
+
+/* C23 6.6p7: a member of a constexpr structure or union is a named
+ * constant. Each integer member, at any depth, from the brace list init
+ * (NULL: all zero) -- positional and `.field` elements; a list this does
+ * not follow (elided braces, a longer designator) registers nothing for
+ * the rest, and sema still folds what it can. A union's one initialized
+ * member only. */
+static void cx_members(struct parser *ps, const char *path, struct type *st,
+                       const struct expr *init, int line, int file_scope)
+{
+    if (!st || st->kind != TY_STRUCT || st->nmembers <= 0 ||
+        st->nmembers > 4096)
+        return;
+    if (init && init->kind != EXPR_INITLIST)
+        return;
+    const struct expr **ei = xcalloc((size_t)st->nmembers, sizeof *ei);
+    int ok = 1, idx = 0, last = init && init->nelems ? -1 : 0;
+    for (int k = 0; init && ok && k < init->nelems; k++) {
+        const struct expr *el = init->elems[k];
+        if (el->desig_field) {
+            idx = -1;
+            for (int q = 0; q < st->nmembers; q++)
+                if (st->members[q].name &&
+                    !strcmp(st->members[q].name, el->desig_field))
+                    idx = q;
+            if (idx < 0 || el->desig_next)
+                ok = 0;
+        } else if (el->desig_index >= 0) {
+            ok = 0;
+        }
+        if (!ok || idx >= st->nmembers)
+            break;
+        struct type *mt = st->members[idx].ty;
+        if (mt && (mt->kind == TY_STRUCT || mt->kind == TY_ARRAY) &&
+            el->kind != EXPR_INITLIST)
+            ok = 0;                 /* braces elided */
+        else
+            ei[idx] = el;
+        last = idx;
+        idx++;
+    }
+    for (int q = 0; ok && q < st->nmembers; q++) {
+        const struct member *m = &st->members[q];
+        if (st->is_union && q != (last < 0 ? 0 : last))
+            continue;
+        if (!m->name || m->is_bitfield || !m->ty)
+            continue;
+        size_t n = strlen(path) + strlen(m->name) + 2;
+        char *nm = xmalloc(n);
+        snprintf(nm, n, "%s.%s", path, m->name);
+        if (m->ty->kind == TY_STRUCT) {
+            cx_members(ps, nm, m->ty, ei[q], line, file_scope);
+            continue;
+        }
+        if (!ty_is_integer(m->ty))
+            continue;
+        const struct expr *v = ei[q];
+        if (v && v->kind == EXPR_INITLIST)
+            v = v->nelems == 1 ? v->elems[0] : NULL;
+        long val = 0;
+        if (ei[q] && (!v || !size_fold(v, &val)))
+            continue;
+        cx_register(ps, nm, m->ty, val, line, file_scope);
+    }
+    free(ei);
+}
+
 static const struct econst *constexpr_declarator(struct parser *ps, const char *kname,
                                                  struct type *kt, struct expr *kinit,
                                                  int kline, int file_scope)
@@ -6789,6 +6953,9 @@ static const struct econst *constexpr_declarator(struct parser *ps, const char *
                              "be null", kname);
         return NULL;
     }
+    if (kt->kind == TY_STRUCT && file_scope)    /* (a block's: its caller,
+                                                  * after the object) */
+        cx_members(ps, kname, kt, kinit, kline, file_scope);
     if (!ty_is_integer(kt))
         return NULL;                /* sema checks the rest */
     long kv;
@@ -7501,6 +7668,7 @@ static void parse_top(struct parser *ps, struct unit *u,
     if (at.no_profile) f->attr_no_profile = 1;
     f->attr_no_san |= at.no_san;
     if (at.ssp) f->attr_ssp = at.ssp;
+    if (at.nocf) f->attr_nocf = 1;
     if (at.aligned > f->user_align) f->user_align = at.aligned;
     f->attr_gnu_inline = at.gnu_inline;
     f->pcs = at.pcs;
@@ -7526,6 +7694,7 @@ static void parse_top(struct parser *ps, struct unit *u,
                 if (at.no_profile) f->attr_no_profile = 1;
                 f->attr_no_san |= at.no_san;
                 if (at.ssp) f->attr_ssp = at.ssp;
+                if (at.nocf) f->attr_nocf = 1;
                 if (at.aligned > f->user_align) f->user_align = at.aligned;
                 f->attr_gnu_inline = at.gnu_inline;
                 f->pcs = at.pcs;
@@ -7591,6 +7760,8 @@ static void parse_top(struct parser *ps, struct unit *u,
                 g->is_constexpr = 1;
                 g->constexpr_init = g->init_expr;
                 constexpr_declarator(ps, gname, g->ty, g->init_expr, gline, 1);
+                g->ty = ty_const(g->ty);
+                g->is_const = 1;
             }
             g->section = at.progmem ? ".progmem.data" : at.section;
             if (at.address && !is_extern)
@@ -7640,6 +7811,7 @@ static void parse_top(struct parser *ps, struct unit *u,
     if (at.no_profile) f->attr_no_profile = 1;
     f->attr_no_san |= at.no_san;
     if (at.ssp) f->attr_ssp = at.ssp;
+    if (at.nocf) f->attr_nocf = 1;
     if (at.aligned > f->user_align) f->user_align = at.aligned;
     f->attr_gnu_inline = at.gnu_inline;
     f->pcs = at.pcs;
@@ -7790,6 +7962,7 @@ fn_tail:
     if (at.no_profile) f->attr_no_profile = 1;
     f->attr_no_san |= at.no_san;
     if (at.ssp) f->attr_ssp = at.ssp;
+    if (at.nocf) f->attr_nocf = 1;
     if (at.aligned > f->user_align) f->user_align = at.aligned;
     f->attr_gnu_inline = at.gnu_inline;
     f->pcs = at.pcs;

@@ -772,6 +772,9 @@ static struct warn_opt g_warns[] = {
     /* 'ab': an int of implementation-defined value (GCC's and clang's
      * is computed here), on by default as in GCC */
     { "multichar",            1,  0,    0 },
+    /* a // comment a backslash-newline continues, or a slash-star
+     * inside a slash-star comment (GCC's -Wcomment, in -Wall) */
+    { "comment",              0,  1,    0 },
     /* C89's `return x;` in a void function: GCC lets it through with
      * this warning, on by default (from C99 on it is an error) */
     { "return-mismatch",      1,  0,    0 },
@@ -1107,6 +1110,7 @@ static const struct { const char *name, *implied, *what; } g_warn_doc[] = {
     { "missing-profile", NULL, "`-fprofile-use` and no profile for this unit: the program was not run since `-fprofile-generate` built it, or its `.gcda` is somewhere else (`-fprofile-use=PATH`)" },
     { "missing-prototypes", NULL, "a function with external linkage defined with no prototype before it" },
     { "multichar", NULL, "a character constant of more than one character, `'ab'`" },
+    { "comment", NULL, "a `//` comment that a backslash at the end of its line continues on the next, or `/*` inside a `/* ... */` comment" },
     { "nested-externs", NULL, "an `extern` declaration inside a function body" },
     { "old-style-declaration", NULL, "a storage class or `inline` after the type specifiers: `const static int t[]`, `int static n`" },
     { "implicit-int", NULL, "under `--permissive`, a declaration with no type, which C89 read as `int`: `static x = 3;`, `f() { ... }`" },

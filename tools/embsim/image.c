@@ -306,7 +306,10 @@ int image_sym(const struct image *m, const char *name, u32 *addr)
 
 static int add_file(struct image *m, const char *dir, const char *name)
 {
-    size_t dl = dir && *dir && name[0] != '/' ? strlen(dir) : 0;
+    /* (a directory of "." -- the compilation's, as EmbCC names it when
+     * the build is reproducible -- adds nothing to the path) */
+    size_t dl = dir && *dir && strcmp(dir, ".") && name[0] != '/'
+                ? strlen(dir) : 0;
     char *p = xalloc(dl + strlen(name) + 2);
     if (dl) {
         memcpy(p, dir, dl);

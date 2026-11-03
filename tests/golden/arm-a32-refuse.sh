@@ -101,7 +101,9 @@ refopt() {          # refopt OPTION PATTERN
 refopt -mthumb '-mthumb is not supported on armv7a-none-eabi'
 refopt -mcpu=cortex-m4 '-mcpu=cortex-m4 is not supported on armv7a-none-eabi'
 refopt -mcpu=cortex-r5 '-mcpu=cortex-r5 is not supported on armv7a-none-eabi'
-refopt -mfpu=neon '-mfpu=neon is not supported on armv7a-none-eabi'
+# NEON (Advanced SIMD): accepted, and the intrinsics' macro defined
+"$EMBCC" --target=$T -mfpu=neon -mfloat-abi=softfp --dump-predef | grep -q '^#define __ARM_NEON ' || {
+    echo "-mfpu=neon does not define __ARM_NEON"; exit 1; }
 refopt -mfpu=fpv4-sp-d16 '-mfpu=fpv4-sp-d16 is not supported on armv7a-none-eabi'
 refopt -mfloat-abi=hard '-mfloat-abi=hard needs an FPU to use'
 refopt -mfloat-abi=softfp '-mfloat-abi=softfp needs an FPU to use'
@@ -109,7 +111,7 @@ refopt -mno-unaligned-access '-mno-unaligned-access is not supported'
 refopt -mbig-endian 'little-endian'
 echo "the ARMv7-A/ARM-state/soft-float flags are accepted, others refused"
 
-# ---- hard float: the VFPv3/VFPv4 units, NEON's SIMD refused ----------------
+# ---- hard float: the VFPv3/VFPv4 units ---------------------------------------
 m=$("$EMBCC" --target=armv7a-none-eabihf -dumpmachine)
 [ "$m" = armv7a-none-eabihf ] || { echo "armv7a-none-eabihf is '$m'"; exit 1; }
 m=$("$EMBCC" --target=$T -mfpu=vfpv4 -mfloat-abi=hard -dumpmachine)
@@ -146,7 +148,7 @@ if command -v "$RE" >/dev/null 2>&1; then
     done
 fi
 echo "armv7a-none-eabihf and -mfpu=vfpv3[-d16]/vfpv4[-d16]: the macros and"
-echo "  attributes of each unit; NEON and the Cortex-M units refused"
+echo "  attributes of each unit; the Cortex-M units refused"
 
 # ---- the constructs ----------------------------------------------------------
 refc() {            # refc WHAT PATTERN SOURCE
@@ -189,17 +191,14 @@ refc ".thumb in file-scope asm" '.thumb: EmbCC assembles ARM (A32) code' \
 # C++ compiles here (the ARM C++ ABI, tests/golden/cxx-embedded.sh), but
 # not with exceptions: EmbCC writes no EHABI unwind tables
 printf 'int f(int x) { return x; }\n' > "$out/c.cc"
-if "$EMBCC" --target=$T -c "$out/c.cc" -o /dev/null 2> "$out/cxx.err"; then
-    echo "C++ with exceptions was accepted"; exit 1
-fi
-grep -q 'C++ exceptions are not supported for armv7a-none-eabi' "$out/cxx.err" || {
-    echo "C++ exceptions were refused, but not by name:"; cat "$out/cxx.err"
-    exit 1; }
+# C++ with exceptions (on by default): unwind tables and the EH runtime
+"$EMBCC" --target=$T -c "$out/c.cc" -o /dev/null 2> "$out/cxx.err" || {
+    echo "C++ with exceptions was refused:"; cat "$out/cxx.err"; exit 1; }
 "$EMBCC" --target=$T -fno-exceptions -c "$out/c.cc" -o /dev/null || {
     echo "C++ with -fno-exceptions was refused"; exit 1; }
 echo "the frame and return address above level 0, __int128,"
 echo "an over-aligned scalar, Thumb and M-profile asm, a"
-echo "condition on a sequence and C++ exceptions are each refused by name"
+echo "condition on a sequence are each refused by name"
 
 # ---- and what ARM state does accept in asm, run through llvm-mc ----------
 MC=${EMBCC_LLVM_MC:-llvm-mc}

@@ -38,6 +38,7 @@ void cpp_cmdline_define(const char *text, int undef);
 /* -dM: cpp_process returns the macros defined at the end of the file, a
  * #define each, instead of the preprocessed text (GCC's -E -dM) */
 void cpp_set_dump_macros(int on);
+void cpp_set_hosted(int on);       /* -ffreestanding: __STDC_HOSTED__ 0 */
 /* Compiling C (not -E): bracket what a system header's macro expands to
  * with LEX_SYS_ON/OFF, so -pedantic stays quiet about it (lex.h). Text
  * for anything but the C lexer -- the assembler's -- must not have them.

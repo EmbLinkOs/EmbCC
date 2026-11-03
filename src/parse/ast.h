@@ -473,6 +473,7 @@ struct func {
     int attr_no_profile;      /* no_profile_instrument_function */
     unsigned attr_no_san;     /* no_sanitize(...): SAN_* bits it opts out of */
     int attr_ssp;             /* stack_protect 1, no_stack_protector -1 */
+    int attr_nocf;            /* nocf_check: no IBT landing pad at entry */
     /* -fstack-protector: the locals the canary guards (sema; each one
      * var_indirect, carved by irgen below the canary), and whether the
      * function has a canary at all; NULL / 0 when not */

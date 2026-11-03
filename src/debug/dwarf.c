@@ -60,7 +60,7 @@
 #define DW_LNCT_path          0x1
 #define DW_LNCT_directory_index 0x2
 #define DW_RLE_end_of_list    0x00
-#define DW_RLE_start_end      0x07
+#define DW_RLE_start_end      0x06    /* (0x07 is start_length; loclists' 7 is start_end) */
 #define DW_LLE_end_of_list    0x00
 #define DW_LLE_offset_pair    0x04
 #define DW_LLE_base_address   0x06

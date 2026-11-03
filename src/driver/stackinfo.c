@@ -101,13 +101,20 @@ static int is_handler(const struct func *f)
     return !strncmp(n, "__vector_", 9);
 }
 
-void stackinfo_emit(struct elfw *w, struct unit *u, struct ir_unit *iu,
-                    const struct code *text, int text_ndx,
-                    int (*text_at)(long off, long *o),
-                    int (*sec_of)(int gi, int text_ndx), const char *src)
+/* The calls a function's code makes, from its relocations or its
+ * object writer's list: each one's offset from the function's start and
+ * its callee's name. */
+struct si_ref { long off; const char *name; };
+typedef int (*si_refs_fn)(void *ctx, const struct func *f,
+                          struct si_ref **out);
+
+static unsigned char *si_record(struct unit *u, struct ir_unit *iu,
+                                const struct code *text, si_refs_fn refs,
+                                void *ctx, const char *src, long *len)
 {
+    *len = 0;
     if (!g_si)
-        return;
+        return NULL;
     struct outbuf rec = { NULL, 0, 0 }, pool = { NULL, 0, 0 };
     unsigned unit_name = pool_add(&pool, src ? src : "?");
     /* the functions whose address is taken: in code (IR_FADDR) or in data */
@@ -174,20 +181,12 @@ void stackinfo_emit(struct elfw *w, struct unit *u, struct ir_unit *iu,
             cs[ncs].times = mult[n];
             ncs++;
         }
-        long o0;
-        int gi = text_at(f->code_off, &o0);
-        int sec = sec_of(gi, text_ndx);
-        int nr = elfw_rela_count(w, sec);
+        struct si_ref *rv = NULL;
+        int nr = refs ? refs(ctx, f, &rv) : 0;
         for (int r = 0; r < nr; r++) {
-            unsigned long off;
-            int sym, type;
-            elfw_rela_at(w, sec, r, &off, &sym, &type);
-            if ((long)off < o0 || (long)off >= o0 + f->code_len)
-                continue;
-            const char *sn = elfw_symbol_name(w, sym);
-            int st = elfw_symbol_type(w, sym);
-            if (!sn || !*sn || sn[0] == '.' || st == 3 /* STT_SECTION */ ||
-                st == 1 /* STT_OBJECT */ || !strcmp(sn, f->name))
+            long off = rv[r].off;
+            const char *sn = rv[r].name;
+            if (!sn || !*sn || sn[0] == '.' || !strcmp(sn, f->name))
                 continue;
             int known = 0;
             for (struct global *g = u->globals; g && !known; g = g->next)
@@ -207,7 +206,7 @@ void stackinfo_emit(struct elfw *w, struct unit *u, struct ir_unit *iu,
             if (fn->ins_pc)
                 for (int n = 0; n < fn->nins; n++)
                     if (fn->ins_pc[n] >= 0 &&
-                        fn->ins_pc[n] <= f->code_off + ((long)off - o0))
+                        fn->ins_pc[n] <= f->code_off + off)
                         t = mult[n];
             cs = xrealloc(cs, (size_t)(ncs + 1) * sizeof *cs);
             cs[ncs].name = sn;
@@ -215,6 +214,7 @@ void stackinfo_emit(struct elfw *w, struct unit *u, struct ir_unit *iu,
             cs[ncs].times = t;
             ncs++;
         }
+        free(rv);
         put32(&rec, pool_add(&pool, f->name));
         put32(&rec, flags);
         put32(&rec, (unsigned long)(f->stack_bytes > 0 ? f->stack_bytes : 0));
@@ -250,10 +250,90 @@ void stackinfo_emit(struct elfw *w, struct unit *u, struct ir_unit *iu,
     put32(&b, unit_name);
     ob_add(&b, rec.p ? rec.p : "", rec.n);
     ob_add(&b, pool.p ? pool.p : "", pool.n);
-    elfw_add_section(w, ".debug_embcc_stack", 1 /* SHT_PROGBITS */, 0,
-                     b.p, (Elf64_Xword)b.n, 1);
     free(rec.p);
     free(pool.p);
+    *len = (long)b.n;
+    return (unsigned char *)b.p;
+}
+
+/* ELF: the calls are the relocations of the function's section against
+ * functions (not sections, not objects) */
+struct elf_ctx {
+    struct elfw *w;
+    int text_ndx;
+    int (*text_at)(long off, long *o);
+    int (*sec_of)(int gi, int text_ndx);
+};
+
+static int elf_refs(void *ctx, const struct func *f, struct si_ref **out)
+{
+    struct elf_ctx *c = ctx;
+    long o0;
+    int gi = c->text_at(f->code_off, &o0);
+    int sec = c->sec_of(gi, c->text_ndx);
+    int nr = elfw_rela_count(c->w, sec), n = 0;
+    struct si_ref *v = NULL;
+    for (int r = 0; r < nr; r++) {
+        unsigned long off;
+        int sym, type;
+        elfw_rela_at(c->w, sec, r, &off, &sym, &type);
+        if ((long)off < o0 || (long)off >= o0 + f->code_len)
+            continue;
+        int st = elfw_symbol_type(c->w, sym);
+        if (st == 3 /* STT_SECTION */ || st == 1 /* STT_OBJECT */)
+            continue;
+        v = xrealloc(v, (size_t)(n + 1) * sizeof *v);
+        v[n].off = (long)off - o0;
+        v[n].name = elfw_symbol_name(c->w, sym);
+        n++;
+    }
+    *out = v;
+    return n;
+}
+
+void stackinfo_emit(struct elfw *w, struct unit *u, struct ir_unit *iu,
+                    const struct code *text, int text_ndx,
+                    int (*text_at)(long off, long *o),
+                    int (*sec_of)(int gi, int text_ndx), const char *src)
+{
+    struct elf_ctx c = { w, text_ndx, text_at, sec_of };
+    long n;
+    unsigned char *b = si_record(u, iu, text, elf_refs, &c, src, &n);
+    if (!b)
+        return;
+    elfw_add_section(w, ".debug_embcc_stack", 1 /* SHT_PROGBITS */, 0,
+                     b, (Elf64_Xword)n, 1);
+    free(b);
+}
+
+/* Mach-O and COFF: the calls are the object writer's list of calls to
+ * functions not defined here, at offsets into the unit's code */
+struct call_ctx { const struct si_call *v; int n; };
+
+static int call_refs(void *ctx, const struct func *f, struct si_ref **out)
+{
+    struct call_ctx *c = ctx;
+    struct si_ref *v = NULL;
+    int n = 0;
+    for (int k = 0; k < c->n; k++) {
+        if (c->v[k].off < f->code_off || c->v[k].off >= f->code_off + f->code_len)
+            continue;
+        v = xrealloc(v, (size_t)(n + 1) * sizeof *v);
+        v[n].off = c->v[k].off - f->code_off;
+        v[n].name = c->v[k].name;
+        n++;
+    }
+    *out = v;
+    return n;
+}
+
+unsigned char *stackinfo_record(struct unit *u, struct ir_unit *iu,
+                                const struct code *text,
+                                const struct si_call *calls, int ncalls,
+                                const char *src, long *len)
+{
+    struct call_ctx c = { calls, ncalls };
+    return si_record(u, iu, text, call_refs, &c, src, len);
 }
 
 /* ======================================================================
@@ -279,7 +359,6 @@ struct sfn {
 
 static struct sfn *g_s;
 static int g_ns;
-static const char *const *g_units;
 
 static unsigned rd(const unsigned char *p)
 {
@@ -347,9 +426,13 @@ static void analyze(int i)
             if (!f->why || !strstr(f->why, "recursive"))
                 f->why = g_s[j].why;
         }
-        if (!g_s[j].cycles_known || times == UNB)
+        if (!g_s[j].cycles_known || times == UNB) {
             f->cycles_known = 0;
-        if (g_s[j].worst_stack > deepest) {
+            if (!f->why)
+                f->why = times == UNB && g_s[j].cycles_known
+                         ? "a call in a loop with no bound" : g_s[j].why;
+        }
+        if (f->next < 0 || g_s[j].worst_stack > deepest) {
             deepest = g_s[j].worst_stack;
             f->next = j;
         }
@@ -365,11 +448,18 @@ static void analyze(int i)
             any = 1;
             g_s[j].called = 1;
             analyze(j);
-            if (!g_s[j].stack_known)
+            if (!g_s[j].stack_known) {
                 f->stack_known = 0;
-            if (!g_s[j].cycles_known || times == UNB)
+                if (!f->why)
+                    f->why = g_s[j].why;
+            }
+            if (!g_s[j].cycles_known || times == UNB) {
                 f->cycles_known = 0;
-            if (g_s[j].worst_stack > deepest) {
+                if (!f->why)
+                    f->why = times == UNB && g_s[j].cycles_known
+                             ? "a call in a loop with no bound" : g_s[j].why;
+            }
+            if (f->next < 0 || g_s[j].worst_stack > deepest) {
                 deepest = g_s[j].worst_stack;
                 f->next = j;
             }
@@ -386,6 +476,93 @@ static void analyze(int i)
     f->worst_stack = f->frame + deepest;
     f->worst_cycles = cyc;
     f->state = 2;
+}
+
+static unsigned char *macho_section(const unsigned char *d, long n,
+                                    const char *seg, const char *sect,
+                                    long *len)
+{
+    /* 64-bit, little-endian: arm64 and x86-64, the Mach-O targets */
+    if (n < 32 || rd(d) != 0xfeedfacfu)
+        return NULL;
+    unsigned ncmds = rd(d + 16);
+    long at = 32;
+    for (unsigned k = 0; k < ncmds && at + 8 <= n; k++) {
+        unsigned cmd = rd(d + at), size = rd(d + at + 4);
+        if (size < 8 || at + (long)size > n)
+            return NULL;
+        if (cmd == 0x19 /* LC_SEGMENT_64 */ && size >= 72) {
+            unsigned ns = rd(d + at + 64);
+            for (unsigned s = 0; s < ns && 72 + 80 * (long)(s + 1) <= (long)size; s++) {
+                const unsigned char *h = d + at + 72 + 80 * s;
+                unsigned long sz = rd(h + 40) | (unsigned long)rd(h + 44) << 32;
+                unsigned long off = rd(h + 48);
+                if (!strncmp((const char *)h, sect, 16) &&
+                    !strncmp((const char *)h + 16, seg, 16) &&
+                    off + sz <= (unsigned long)n) {
+                    *len = (long)sz;
+                    return (unsigned char *)d + off;
+                }
+            }
+        }
+        at += size;
+    }
+    return NULL;
+}
+
+static unsigned char *coff_section(const unsigned char *d, long n,
+                                   const char *want, long *len)
+{
+    long h = 0;
+    if (n >= 64 && d[0] == 'M' && d[1] == 'Z') {     /* a PE image */
+        h = (long)rd(d + 0x3c);
+        if (h < 0 || h + 24 > n || memcmp(d + h, "PE\0\0", 4))
+            return NULL;
+        h += 4;
+    }
+    if (h + 20 > n)
+        return NULL;
+    unsigned mach = (unsigned)(d[h] | d[h + 1] << 8);
+    if (mach != 0x8664 && mach != 0xaa64 && mach != 0x14c)
+        return NULL;
+    unsigned nsec = (unsigned)(d[h + 2] | d[h + 3] << 8);
+    unsigned long symp = rd(d + h + 8), nsym = rd(d + h + 12);
+    unsigned opt = (unsigned)(d[h + 16] | d[h + 17] << 8);
+    unsigned long strt = symp + nsym * 18;
+    long s0 = h + 20 + (long)opt;
+    for (unsigned k = 0; k < nsec && s0 + 40 * (long)(k + 1) <= n; k++) {
+        const unsigned char *s = d + s0 + 40 * k;
+        char name[256];
+        if (s[0] == '/' && symp) {
+            unsigned long o = strtoul((const char *)s + 1, NULL, 10);
+            if (strt + o >= (unsigned long)n)
+                continue;
+            snprintf(name, sizeof name, "%s", (const char *)d + strt + o);
+        } else {
+            memcpy(name, s, 8);
+            name[8] = 0;
+        }
+        unsigned long sz = rd(s + 16), off = rd(s + 20);
+        if (!strcmp(name, want) && off + sz <= (unsigned long)n) {
+            *len = (long)sz;
+            return (unsigned char *)d + off;
+        }
+    }
+    return NULL;
+}
+
+unsigned char *stackinfo_section(const unsigned char *d, long n,
+                                 const char *which, long *len)
+{
+    char elf[64], mo[17];
+    snprintf(elf, sizeof elf, ".debug_embcc_%s", which);
+    snprintf(mo, sizeof mo, "__%s", which);
+    unsigned char *s = stackinfo_elf_section(d, n, elf, len);
+    if (!s)
+        s = macho_section(d, n, "__EMBCC", mo, len);
+    if (!s)
+        s = coff_section(d, n, elf, len);
+    return s;
 }
 
 unsigned char *stackinfo_elf_section(const unsigned char *d, long n,
@@ -459,7 +636,7 @@ int stackinfo_report(int argc, char **argv)
         return 1;
     }
     long sl = 0;
-    unsigned char *s = stackinfo_elf_section(d, n, ".debug_embcc_stack", &sl);
+    unsigned char *s = stackinfo_section(d, n, "stack", &sl);
     if (!s) {
         fprintf(stderr, "embcc: error: '%s' has no stack information: "
                         "compile with --stack-info (and do not strip)\n", file);
@@ -504,7 +681,6 @@ int stackinfo_report(int argc, char **argv)
         nunits++;
         at += bytes ? bytes : 1;
     }
-    g_units = units;
     for (int i = 0; i < g_ns; i++)
         analyze(i);
     /* the roots */

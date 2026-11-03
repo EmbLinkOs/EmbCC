@@ -45,6 +45,7 @@ static void tb_putc(struct tbuf *b, char c) { tb_putn(b, &c, 1); }
 /* ---- macro table ---- */
 
 static int g_dump_macros;              /* -dM: print the macros, not the text */
+static int g_hosted = 1;      /* __STDC_HOSTED__: 0 under -ffreestanding */
 
 struct macro {
     const char *name;
@@ -1729,8 +1730,22 @@ static int read_logical_line(struct src *s, struct tbuf *out, int *nl)
             const char *cb = s->p + 2;
             if (!predef_is_cxx())
                 lex_pedantic(s->file, s->line, 0, 0, 1999, "a // comment");
-            while (*s->p && *s->p != '\n')
+            int at = s->line + *nl, said = 0;
+            while (*s->p && *s->p != '\n') {
+                if (s->p[0] == '\\' && s->p[1] == '\n') {
+                    if (!said)
+                        diag_warn_opt(s->file, at, 0, "comment",
+                                      "multi-line comment: the "
+                                      "backslash at the end of this // "
+                                      "comment continues it on the next "
+                                      "line");
+                    said = 1;
+                    s->p += 2;
+                    (*nl)++;
+                    continue;
+                }
                 s->p++;
+            }
             if (fallthrough_comment(cb, s->p))
                 diag_fallthrough_comment(s->file, s->line + *nl);
             continue;
@@ -1738,9 +1753,17 @@ static int read_logical_line(struct src *s, struct tbuf *out, int *nl)
         if (c == '/' && s->p[1] == '*') {
             s->p += 2;
             const char *cb = s->p;
+            int nested = 0;
             while (*s->p && !(s->p[0] == '*' && s->p[1] == '/')) {
                 if (*s->p == '\n')
                     (*nl)++;
+                if (s->p[0] == '/' && s->p[1] == '*' && !nested) {
+                    diag_warn_opt(s->file, s->line + *nl, 0, "comment",
+                                  "\"/*\" within a comment: comments do "
+                                  "not nest, and the first \"*/\" ends "
+                                  "this one");
+                    nested = 1;
+                }
                 s->p++;
             }
             if (!*s->p)
@@ -2210,6 +2233,48 @@ static void do_include(struct src *s, const char *arg, struct tbuf *out,
 
 static int defining_builtins;
 
+
+/* A macro body's digraphs %:%: and %: are its ## and # (C95), so the
+ * expansion, which reads # and ##, needs to know nothing of them.
+ * Rewritten in place, outside string and character literals; the <% of
+ * `<%:` is a brace, not the start of a %:. */
+static void digraph_hashes(char *b)
+{
+    char *w = b;
+    for (const char *r = b; *r; ) {
+        if (*r == '"' || *r == '\'') {
+            char q = *r;
+            *w++ = *r++;
+            while (*r && *r != q) {
+                if (*r == '\\' && r[1])
+                    *w++ = *r++;
+                *w++ = *r++;
+            }
+            if (*r)
+                *w++ = *r++;
+            continue;
+        }
+        if (r[0] == '<' && r[1] == '%') {
+            *w++ = *r++;
+            *w++ = *r++;
+            continue;
+        }
+        if (r[0] == '%' && r[1] == ':' && r[2] == '%' && r[3] == ':') {
+            *w++ = '#';
+            *w++ = '#';
+            r += 4;
+            continue;
+        }
+        if (r[0] == '%' && r[1] == ':') {
+            *w++ = '#';
+            r += 2;
+            continue;
+        }
+        *w++ = *r++;
+    }
+    *w = 0;
+}
+
 static void define_macro(struct src *s, const char *line)
 {
     const char *p = line;
@@ -2277,7 +2342,11 @@ static void define_macro(struct src *s, const char *line)
     }
     while (*p == ' ' || *p == '\t')
         p++;
-    m->body = xstrndup(p, strlen(p));
+    {
+        char *body = xstrndup(p, strlen(p));
+        digraph_hashes(body);
+        m->body = body;
+    }
 
     struct macro *old = find_macro(s->cpp, m->name, strlen(m->name));
     if (old && old->builtin) {
@@ -3265,12 +3334,13 @@ static void process_file(struct cpp *cpp, const char *path,
             if (cond[i] != COND_LIVE)
                 live = 0;
 
-        if (*lp == '#') {
+        int dg = lp[0] == '%' && lp[1] == ':';  /* the digraph %:, C95 */
+        if (*lp == '#' || dg) {
             if (g_gmf && live && cpp->depth == 0) {
                 tb_puts(&g_gmf_text, lineb.p);  /* (an import reads it) */
                 tb_putc(&g_gmf_text, '\n');
             }
-            lp++;
+            lp += dg ? 2 : 1;
             while (*lp == ' ' || *lp == '\t')
                 lp++;
             size_t dn = 0;
@@ -3693,7 +3763,23 @@ char *cpp_process(const char *path, const char *src,
         define_macro(&boot, m);
         define_macro(&boot, "__GNUC_STDC_INLINE__ 1");
     }
-    define_macro(&boot, "__STDC_HOSTED__ 1");
+    /* 0 under -ffreestanding, as GCC's: a freestanding program's
+     * library is only the freestanding headers */
+    define_macro(&boot, g_hosted ? "__STDC_HOSTED__ 1" : "__STDC_HOSTED__ 0");
+    /* char16_t and char32_t hold UTF-16 and UTF-32 (C11 6.10.8.2) */
+    define_macro(&boot, "__STDC_UTF_16__ 1");
+    define_macro(&boot, "__STDC_UTF_32__ 1");
+    /* Annex F: float and double are IEEE binary32 and binary64, their
+     * operations rounded as IEC 60559 says, on every target but AVR,
+     * whose double is 32 bits (as avr-gcc's) */
+    if (!predef_is_cxx() && target_get() != TARGET_AVR) {
+        define_macro(&boot, "__STDC_IEC_559__ 1");
+        define_macro(&boot, "__STDC_IEC_559_COMPLEX__ 1");
+        if (lex_c_year() >= 2023) {
+            define_macro(&boot, "__STDC_IEC_60559_BFP__ 202311L");
+            define_macro(&boot, "__STDC_IEC_60559_COMPLEX__ 202311L");
+        }
+    }
     /* __has_embed's three answers (C23 6.10.1), in C++ too, as GCC and
      * Clang give #embed to both */
     define_macro(&boot, "__STDC_EMBED_NOT_FOUND__ 0");
@@ -3890,3 +3976,4 @@ char *cpp_process(const char *path, const char *src,
 }
 
 void cpp_set_dump_macros(int on) { g_dump_macros = on; }
+void cpp_set_hosted(int on) { g_hosted = on; }

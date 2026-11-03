@@ -534,7 +534,11 @@ static int g_clash;                  /* -fstack-clash-protection */
 /* -fcf-protection / -mbranch-protection (CF_* of target.h), and which
  * was given, for the target check */
 static int g_cf, g_cf_x86, g_cf_a64;
+static const char *g_cf_spell = "-fcf-protection";   /* as typed */
+static const char *g_bp_spell = "-mbranch-protection";
 static int g_bounds;                 /* -fbounds-safety, -fsanitize=bounds */
+static int g_bounds_san;             /* ...and it was -fsanitize=bounds */
+static int g_ub_recover;             /* -fsanitize-recover=undefined */
 /* -fsanitize=address, thread, memory: which runtime archives the link
  * takes (lib/san); -fsanitize-recover=address */
 static unsigned g_san_link;
@@ -700,6 +704,27 @@ static long code_sym_value(enum target_arch a, long off)
     return fn_sym_value(a, o);
 }
 
+/* --stack-info and --sbom for a Mach-O or COFF object: the records
+ * ELF's stackinfo_emit and sbom_emit_unit put in .debug_embcc_*, built
+ * from the writer's list of calls to functions not defined here */
+static unsigned char *unit_stack_record(struct unit *u, struct ir_unit *iu,
+                                        const struct code *text,
+                                        const struct extcall *ext, int next,
+                                        const char *in, long *len)
+{
+    *len = 0;
+    if (!stackinfo_on())
+        return NULL;
+    struct si_call *sc = xmalloc((size_t)(next ? next : 1) * sizeof *sc);
+    for (int i = 0; i < next; i++) {
+        sc[i].off = ext[i].patch_off;
+        sc[i].name = ext[i].callee->name;
+    }
+    unsigned char *b = stackinfo_record(u, iu, text, sc, next, in, len);
+    free(sc);
+    return b;
+}
+
 /* the section of group gi (text_at's answer), for stackinfo_emit */
 static int si_sec_of(int gi, int text_ndx)
 {
@@ -765,6 +790,34 @@ static long block_ref(const struct topasm *ta, long off, int text_sym,
 }
 
 static int compile_unit(const char *in, const char *out, int pp_only);
+static int g_pp_no_markers;   /* -P: -E's output without its # N "file" lines */
+
+/* -E's text without its line markers, for -P: the lines that are only
+ * `# N "file" ...` dropped, and a run of empty lines they leave kept to
+ * one (GCC's -P keeps at most eight; one reads the same) */
+static char *drop_markers(const char *pp)
+{
+    size_t n = strlen(pp);
+    char *o = xmalloc(n + 1), *w = o;
+    int blank = 0;
+    for (const char *p = pp; *p; ) {
+        const char *e = strchr(p, '\n');
+        size_t len = e ? (size_t)(e - p) : strlen(p);
+        int marker = p[0] == '#' && p[1] == ' ' && p[2] >= '0' && p[2] <= '9';
+        int empty = len == 0;
+        if (!marker && !(empty && blank)) {
+            memcpy(w, p, len);
+            w += len;
+            if (e)
+                *w++ = '\n';
+        }
+        if (!marker)
+            blank = empty;
+        p += len + (e ? 1 : 0);
+    }
+    *w = 0;
+    return o;
+}
 
 /* GNU C's static label data, once codegen has laid every function out
  * (cg_note_labels): `&&a` in a pointer slot is its function's symbol plus
@@ -3115,6 +3168,8 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         /* -E -o FILE writes FILE, as GCC's does (the output used to go
          * to standard output whatever -o said, and `cc -E x.c -o x.i`
          * left no x.i). */
+        if (g_pp_no_markers)
+            pp = drop_markers(pp);
         if (out && plat_write_file(out, pp, strlen(pp)) != 0)
             diag_fatal(out, 0, "cannot write the file");
         if (!out)
@@ -4702,6 +4757,12 @@ lto_backend:
                              (unsigned long long)ext[i].patch_off,
                              ext[i].callee->sym_ndx, mt - 1, mpc, mlen, 0);
         }
+        long m_si_n = 0, m_sb_n = 0;
+        unsigned char *m_si = unit_stack_record(u, iu, &text, ext, next, in,
+                                                &m_si_n);
+        unsigned char *m_sb = sbom_unit_record(in, cpp_dep_count(),
+                                               cpp_dep_path,
+                                               cpp_dep_is_system, &m_sb_n);
         free(ext);
 
         /* The offset goes in UNBIASED -- see target_macho_reloc's note:
@@ -4852,6 +4913,16 @@ lto_backend:
             dwarf_free(&dw);
         }
 
+        if (m_si)
+            machow_add_section(mw, "__EMBCC", "__stack",
+                               S_REGULAR | 0x10000000u /* NO_DEAD_STRIP */,
+                               m_si, (unsigned long long)m_si_n, 0);
+        if (m_sb)
+            machow_add_section(mw, "__EMBCC", "__sbom",
+                               S_REGULAR | 0x10000000u /* NO_DEAD_STRIP */,
+                               m_sb, (unsigned long long)m_sb_n, 0);
+        free(m_si);
+        free(m_sb);
         int mrc = machow_write(mw, out);
         machow_free(mw);
         return mrc != 0;
@@ -5210,6 +5281,24 @@ lto_backend:
         for (int k = 0; k < nxtor; k++)
             free((char *)xtor[k].name);
         free(c_named);
+        {
+            long n_si = 0, n_sb = 0;
+            unsigned char *b_si = unit_stack_record(u, iu, &text, ext, next,
+                                                    in, &n_si);
+            unsigned char *b_sb = sbom_unit_record(in, cpp_dep_count(),
+                                                   cpp_dep_path,
+                                                   cpp_dep_is_system, &n_sb);
+            unsigned fl = IMAGE_SCN_CNT_INITIALIZED_DATA |
+                          IMAGE_SCN_MEM_DISCARDABLE | IMAGE_SCN_MEM_READ;
+            if (b_si)
+                coffw_add_section(cw, ".debug_embcc_stack", fl, b_si,
+                                  (unsigned)n_si, 1);
+            if (b_sb)
+                coffw_add_section(cw, ".debug_embcc_sbom", fl, b_sb,
+                                  (unsigned)n_sb, 1);
+            free(b_si);
+            free(b_sb);
+        }
         free(ext); free(strs); free(gs); free(fs);
         int crc = coffw_write(cw, out);
         coffw_free(cw);
@@ -6632,6 +6721,9 @@ static int embcc_main(int argc, char **argv)
             cpp_set_dump_macros(1);
         } else if (strcmp(argv[i], "-E") == 0) {
             pp_only = 1;
+        } else if (strcmp(argv[i], "-P") == 0 ||
+                   strcmp(argv[i], "--no-line-markers") == 0) {
+            g_pp_no_markers = 1;
         } else if (strcmp(argv[i], "-ggdb") == 0 ||
                    strcmp(argv[i], "-g1") == 0 ||
                    strcmp(argv[i], "-g2") == 0 ||
@@ -6744,15 +6836,19 @@ static int embcc_main(int argc, char **argv)
             else if (!strcmp(m, "branch")) g_cf |= CF_IBT;
             else if (!strcmp(m, "return")) g_cf |= CF_SHSTK;
             else if (strcmp(m, "none") && strcmp(m, "check")) {
-                fprintf(stderr, "embcc: error: -fcf-protection=%s: the "
-                                "kinds are full, branch, return, none\n", m);
+                fprintf(stderr, "embcc: error: %s: the kinds are full, "
+                                "branch, return, none\n", opt_typed(argv[i]));
                 return 1;
             }
             g_cf_x86 = 1;
+            g_cf_spell = strncmp(opt_typed(argv[i]), "--", 2) == 0
+                         ? "--cf-protection" : "-fcf-protection";
         } else if (strncmp(argv[i], "-mbranch-protection=", 20) == 0) {
             /* AArch64: none, standard (bti+pac-ret), bti, and
              * pac-ret[+leaf][+b-key], joined by '+' */
             const char *m = argv[i] + 20;
+            g_bp_spell = strncmp(opt_typed(argv[i]), "--", 2) == 0
+                         ? "--branch-protection" : "-mbranch-protection";
             g_cf &= ~(CF_BTI | CF_PAC | CF_PAC_LEAF | CF_PAC_BKEY);
             for (const char *p = m; *p; ) {
                 const char *e = strchr(p, '+');
@@ -6765,9 +6861,9 @@ static int embcc_main(int argc, char **argv)
                 else if (n == 4 && !strncmp(p, "leaf", 4)) g_cf |= CF_PAC_LEAF;
                 else if (n == 5 && !strncmp(p, "b-key", 5)) g_cf |= CF_PAC_BKEY;
                 else {
-                    fprintf(stderr, "embcc: error: -mbranch-protection=%s: "
-                                    "the parts are none, standard, bti, "
-                                    "pac-ret, +leaf and +b-key\n", m);
+                    fprintf(stderr, "embcc: error: %s: the parts are none, "
+                                    "standard, bti, pac-ret, +leaf and "
+                                    "+b-key\n", opt_typed(argv[i]));
                     return 1;
                 }
                 if (!e) break;
@@ -7107,8 +7203,11 @@ static int embcc_main(int argc, char **argv)
                            "-finstrument-functions-exclude-file-list=",
                            41) == 0) {
             instr_files = argv[i] + 41;
-        } else if (strcmp(argv[i], "-ffreestanding") == 0 ||
-                   strcmp(argv[i], "-fno-builtin") == 0 ||
+        } else if (strcmp(argv[i], "-ffreestanding") == 0) {
+            /* a freestanding program: __STDC_HOSTED__ is 0; the code is
+             * the same, EmbCC having no hosted assumptions to drop */
+            cpp_set_hosted(0);
+        } else if (strcmp(argv[i], "-fno-builtin") == 0 ||
                    strcmp(argv[i], "-fno-strict-aliasing") == 0 ||
                    strcmp(argv[i], "-fstrict-aliasing") == 0 ||
                    strcmp(argv[i], "-fwrapv") == 0 ||
@@ -7434,7 +7533,8 @@ static int embcc_main(int argc, char **argv)
             if (!off && strncmp(argv[i], "-fsanitize=", 11) == 0)
                 san_spell = strncmp(opt_typed(argv[i]), "--", 2) == 0
                             ? "--sanitize=" : "-fsanitize=";
-            if (!list) {           /* -fsanitize-trap / ...-trap-on-error */
+            if (!list || strncmp(argv[i], "-fsanitize-trap", 15) == 0) {
+                /* -fsanitize-trap[=...], ...-trap-on-error */
                 san_trap_asked = 1;
                 continue;
             }
@@ -7463,6 +7563,7 @@ static int embcc_main(int argc, char **argv)
                          (n == 13 && !strncmp(p, "bounds-strict", 13))) {
                     /* the subscript checks (-fbounds-safety's) */
                     g_bounds = !off;
+                    g_bounds_san = !off;
                     bit = 0;
                 }
                 else if ((n == 6 && !strncmp(p, "memory", 6)) ||
@@ -7490,6 +7591,11 @@ static int embcc_main(int argc, char **argv)
             const char *l = strchr(argv[i], '=') + 1;
             if (strstr(l, "address") || strstr(l, "all"))
                 g_san_recover = !no;
+            if (strstr(l, "undefined") || strstr(l, "all") ||
+                strstr(l, "signed-integer-overflow") ||
+                strstr(l, "integer-divide-by-zero") || strstr(l, "shift") ||
+                strstr(l, "bounds"))
+                g_ub_recover = !no;
         } else if (strcmp(argv[i], "-fsanitize-address-use-after-scope") == 0 ||
                    strcmp(argv[i], "-fno-sanitize-address-use-after-scope") == 0 ||
                    strcmp(argv[i], "-static-libasan") == 0 ||
@@ -7991,6 +8097,18 @@ static int embcc_main(int argc, char **argv)
      * optimizer folds away the ones whose operands it knows -- a
      * constant non-zero divisor leaves nothing behind. */
     irgen_set_sanitize(san_mask & (SAN_OVERFLOW | SAN_DIVIDE | SAN_SHIFT));
+    /* On a hosted target a failed check says what and where, as clang's
+     * and GCC's runtimes do (lib/rt/ubsan.c, in librt); -fsanitize-trap
+     * keeps the trap, and so does a board, and -fbounds-safety's own
+     * checks, which are a trap by design. */
+    if (target_is_hosted() && !san_trap_asked) {
+        unsigned whys = 0;
+        if (san_mask & SAN_OVERFLOW) whys |= 1u << 1 | 1u << 6;
+        if (san_mask & SAN_DIVIDE) whys |= 1u << 2 | 1u << 3;
+        if (san_mask & SAN_SHIFT) whys |= 1u << 4;
+        if (g_bounds_san) whys |= 1u << 5;
+        irgen_set_ub_report(whys, g_ub_recover);
+    }
     {
         unsigned rt = san_mask & (SAN_ADDRESS | SAN_THREAD | SAN_MEMORY);
         if ((rt & SAN_ADDRESS) && (rt & (SAN_THREAD | SAN_MEMORY))) {
@@ -8034,15 +8152,21 @@ static int embcc_main(int argc, char **argv)
     clash_set(g_clash);
     irgen_set_bounds(g_bounds);
     if ((g_cf & (CF_IBT | CF_SHSTK)) && target_get() != TARGET_X86_64) {
-        fprintf(stderr, "embcc: error: -fcf-protection is x86-64's (CET); on "
-                        "%s it has no instructions%s\n", target_triple_now(),
+        fprintf(stderr, "embcc: error: %s is x86-64's (CET); on "
+                        "%s it has no instructions%s%s\n", g_cf_spell,
+                target_triple_now(),
                 target_get() == TARGET_AARCH64
-                    ? " -- AArch64's are -mbranch-protection=standard" : "");
+                    ? " -- AArch64's are " : "",
+                target_get() == TARGET_AARCH64
+                    ? (g_cf_spell[1] == '-' ? "--branch-protection=standard"
+                                            : "-mbranch-protection=standard")
+                    : "");
         return 1;
     }
     if ((g_cf & (CF_BTI | CF_PAC)) && target_get() != TARGET_AARCH64) {
-        fprintf(stderr, "embcc: error: -mbranch-protection is AArch64's here "
-                        "(PAC and BTI); %s has none\n", target_triple_now());
+        fprintf(stderr, "embcc: error: %s is AArch64's here "
+                        "(PAC and BTI); %s has none\n", g_bp_spell,
+                target_triple_now());
         return 1;
     }
     (void)g_cf_x86;

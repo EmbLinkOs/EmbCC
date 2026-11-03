@@ -85,19 +85,18 @@ accept riscv64-unknown-elf -mabi=lp64
 echo "accepted silently: $(echo $EVERYWHERE | wc -w | tr -d ' ') flags on" \
      "every target, the ARM and RISC-V ABI and machine flags on theirs"
 
-# The two that do speak, once, and still succeed.
+# -fanalyzer is EmbCC's analyzer (--analyze), which finds nothing in t.c;
+# -specs= speaks once, and still succeeds.
 err=$("$EMBCC" --target=thumbv7em-none-eabi -c "$out/t.c" -o "$out/t.o" \
       -fanalyzer 2>&1) || fail "-fanalyzer was refused: $err"
-[ "$(echo "$err" | wc -l | tr -d ' ')" = 1 ] &&
-    echo "$err" | grep -q 'no static analyzer' ||
-    fail "-fanalyzer should warn once that it checks nothing: $err"
+[ -z "$err" ] || fail "-fanalyzer found something in a clean file: $err"
 printf 'void _start(void) { for (;;); }\n' > "$out/s.c"
 err=$("$EMBCC" --target=x86_64-elf "$out/s.c" -nostdlib -o "$out/s.elf" \
       -specs=nano.specs 2>&1) || fail "-specs= stopped a link: $err"
 [ "$(echo "$err" | wc -l | tr -d ' ')" = 1 ] &&
     echo "$err" | grep -q 'specs=nano.specs is ignored' ||
     fail "-specs= should be noted once at the link: $err"
-echo "-fanalyzer warns, and -specs= is noted at the link, once each"
+echo "-fanalyzer analyzes (silently, for a clean file), and -specs= is noted at the link, once"
 
 # ---- 2. refused, by name ----------------------------------------------------
 # refuse TARGET SUBSTRING FLAG... (FILE: t.c unless the last flag is one)
@@ -130,8 +129,8 @@ refuse riscv32-unknown-elf "-mabi=ilp32e is not supported" -mabi=ilp32e
 refuse riscv64-unknown-elf "-march=rv64imac has no D extension" -mabi=lp64d
 refuse riscv32-unknown-elf "has no F extension" -march=rv32imac -mabi=ilp32f
 refuse riscv32-unknown-elf "the D extension needs F" -march=rv32imadc
-refuse riscv32-unknown-elf "the 'v' extension is not supported" -march=rv32imafcv
-refuse riscv32-unknown-elf "the 'zba' extension is not supported" -march=rv32imac_zba
+refuse riscv32-unknown-elf "V needs F and D" -march=rv32imacv
+refuse riscv32-unknown-elf "the 'zbc' extension is not supported" -march=rv32imac_zbc
 refuse riscv32-unknown-elf "EmbCC needs the M extension" -march=rv32iac
 refuse riscv32-unknown-elf "use --target=riscv64-unknown-elf" -march=rv64gc
 refuse riscv64-unknown-elf "is a 32-bit ABI" -march=rv64gc -mabi=ilp32d

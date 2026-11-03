@@ -76,6 +76,50 @@ static unsigned long block_cycles(const unsigned char *code, int lo, int hi,
 }
 
 /* the trip count of the loop headed at h (blocks in[]), or -1 */
+/* v as base + k: through the copies and constant steps that make it, as
+ * far as each has one definition (a merge temp is written twice and is
+ * not one value: -2, which no check accepts). base -1 is no base: v is
+ * the constant k. A vreg with no definition (a parameter) or one of
+ * another kind is its own base. */
+static int lin_ndefs(const struct ir_func *fn, int v, int *at)
+{
+    int n = 0;
+    for (int q = 0; q < fn->nins; q++)
+        if (fn->ins[q].dst == v && fn->ins[q].op != IR_STORE) {
+            n++;
+            *at = q;
+        }
+    return n;
+}
+
+static int lin(const struct ir_func *fn, int v, long *k)
+{
+    *k = 0;
+    for (int depth = 0; depth < 16; depth++) {
+        int at = -1, nd = lin_ndefs(fn, v, &at);
+        if (nd > 1)
+            return -2;          /* not one value: matches nothing */
+        if (nd == 0)
+            return v;
+        const struct ir_ins *d = &fn->ins[at];
+        if (d->op == IR_CONST) {
+            *k += d->imm;
+            return -1;
+        }
+        if (d->op == IR_MOV) {
+            v = d->a;
+            continue;
+        }
+        if ((d->op == IR_ADD || d->op == IR_SUB) && d->imm_b) {
+            *k += d->op == IR_ADD ? d->imm : -d->imm;
+            v = d->a;
+            continue;
+        }
+        return v;
+    }
+    return v;
+}
+
 static long trip_count(struct ir_func *fn, struct bb *bb, int nbb, int h,
                        const char *in)
 {
@@ -95,24 +139,28 @@ static long trip_count(struct ir_func *fn, struct bb *bb, int nbb, int h,
             }
         if (!c)
             continue;
-        long lim;
+        /* the limit: a constant, or a value fixed before the loop plus
+         * one (ivsr's `end = p + 64` for a pointer stepped through) */
+        long lim = 0;
+        int lim_base = c->imm_b ? -1 : lin(fn, c->b, &lim);
         if (c->imm_b)
             lim = c->imm;
-        else {
-            int found = 0;
-            for (int n = 0; n < fn->nins && !found; n++)
-                if (fn->ins[n].dst == c->b && fn->ins[n].op == IR_CONST) {
-                    lim = fn->ins[n].imm;
-                    found = 1;
-                }
-            if (!found)
+        if (lim_base >= 0) {
+            /* fixed: no definition of the base inside the loop */
+            int inloop = 0;
+            for (int q = 0; q < fn->nins; q++)
+                if (fn->ins[q].dst == lim_base)
+                    for (int r = 0; r < nbb; r++)
+                        if (in[r] && q >= bb[r].start && q < bb[r].end)
+                            inloop = 1;
+            if (inloop)
                 continue;
         }
         int v = c->a;
         /* the induction variable: every def in the loop a step by a
          * constant (through copies), one def outside a constant */
         long step = 0, init = 0;
-        int ok = 1, ninit = 0, nstep = 0;
+        int ok = 1, ninit = 0, nstep = 0, init_base = -1;
         for (int n = 0; n < fn->nins && ok; n++) {
             const struct ir_ins *d = &fn->ins[n];
             if (d->dst != v)
@@ -122,19 +170,19 @@ static long trip_count(struct ir_func *fn, struct bb *bb, int nbb, int h,
                 if (in[q] && n >= bb[q].start && n < bb[q].end)
                     inside = 1;
             if (!inside) {
-                if (d->op == IR_CONST) { init = d->imm; ninit++; }
-                else if (d->op == IR_MOV) {
-                    /* v = mov k, k a constant */
-                    int got = 0;
-                    for (int q = 0; q < fn->nins && !got; q++)
-                        if (fn->ins[q].dst == d->a && fn->ins[q].op == IR_CONST) {
-                            init = fn->ins[q].imm;
-                            got = 1;
-                        }
-                    if (got) ninit++;
-                    else ok = 0;
+                /* the start: a constant, or the limit's base plus one */
+                if (d->op == IR_CONST) {
+                    init = d->imm;
+                    init_base = -1;
+                } else if (d->op == IR_MOV) {
+                    init_base = lin(fn, d->a, &init);
+                } else if ((d->op == IR_ADD || d->op == IR_SUB) && d->imm_b) {
+                    init_base = lin(fn, d->a, &init);
+                    init += d->op == IR_ADD ? d->imm : -d->imm;
+                } else {
+                    ok = 0;
                 }
-                else ok = 0;
+                ninit++;
                 continue;
             }
             if ((d->op == IR_ADD || d->op == IR_SUB) && d->imm_b && d->a == v) {
@@ -157,7 +205,8 @@ static long trip_count(struct ir_func *fn, struct bb *bb, int nbb, int h,
                 ok = 0;
             }
         }
-        if (!ok || ninit != 1 || nstep != 1 || !step)
+        if (!ok || ninit != 1 || nstep != 1 || !step ||
+            init_base < -1 || init_base != lim_base)
             continue;
         long span = lim - init;
         if ((span > 0) != (step > 0) && span)

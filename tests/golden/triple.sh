@@ -126,13 +126,13 @@ rm -f "$out/o.o"
 writer exists:"; cat "$out/err.txt"; exit 1; }
 [ -s "$out/o.o" ] || { echo "FAIL: it wrote no object"; exit 1; }
 
-#    ...and the parts of the ABI it does NOT implement (LP64 `long`,
-#    rsi, rdi and xmm6-7 not preserved) are said out loud on every
-#    compile, because emitting them under a Windows triple is exactly
-#    the silent fallback this rule forbids.
-grep -q '\[--warn=windows-abi\]' "$out/err.txt" || {
-    echo "FAIL: nothing warned that the ABI is not yet Microsoft's:"
-    cat "$out/err.txt"; exit 1; }
+#    ...and it is Microsoft's ABI: LLP64 (a 4-byte `long`), rsi, rdi and
+#    xmm6-15 preserved, .pdata/.xdata unwind -- so the compile says
+#    nothing (it once warned on every one, [--warn=windows-abi]).
+[ ! -s "$out/err.txt" ] || {
+    echo "FAIL: a Windows compile said something:"; cat "$out/err.txt"; exit 1; }
+"$EMBCC" --target=x86_64-windows-gnu --dump-predef | grep -q '^#define __SIZEOF_LONG__ 4$' || {
+    echo "FAIL: x86_64-windows-gnu's long is not LLP64's 4 bytes"; exit 1; }
 
 win_refuses() {                   # win_refuses SOURCE EXPECTED-TEXT
     printf '%s\n' "$1" > "$out/w.c"
@@ -151,12 +151,16 @@ win_refuses() {                   # win_refuses SOURCE EXPECTED-TEXT
 }
 win_refuses '__thread int x; int main(void){return x;}' \
             '__thread is not supported for a Windows target'
-win_refuses '__attribute__((constructor)) static void c(void){}
-int main(void){return 0;}' \
-            'not supported for a Windows target'
+# a constructor: a .ctors entry, which MinGW's startup code runs
+printf '__attribute__((constructor)) static void c(void){}\nint main(void){return 0;}\n' > "$out/w.c"
+"$EMBCC" --target=x86_64-windows-gnu -c "$out/w.c" -o "$out/w.o" || {
+    echo "FAIL: a Windows constructor was refused"; exit 1; }
+if command -v llvm-objdump >/dev/null 2>&1; then
+    llvm-objdump -h "$out/w.o" | grep -q '\.ctors' || {
+        echo "FAIL: a Windows constructor has no .ctors entry"; exit 1; }
+fi
 echo "every format has a writer now, so the rule is checked one level
-up: the capabilities Windows lacks each refuse by name, and the
-convention it has not got yet warns on every compile"
+up: the capabilities Windows lacks each refuse by name"
 
 # 6. ...and the parts that DO work for such a target keep working, which
 #    is why the triple is in the table before its writer exists: the
