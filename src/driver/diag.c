@@ -789,6 +789,10 @@ static struct warn_opt g_warns[] = {
 #define RULE(n, s, i, c, t) { n, 0, 0, 0 },
 #include "../sema/rules.def"
 #undef RULE
+    /* the static analyzer's (src/sema/analyze.def): --analyze */
+#define CHECK(n, t) { n, 0, 0, 0 },
+#include "../sema/analyze.def"
+#undef CHECK
     /* -pedantic: what the C standard -std= names does not have -- a
      * later standard's feature, or a GNU extension (lex_pedantic);
      * -pedantic-errors makes each an error */
@@ -1079,6 +1083,9 @@ static const struct { const char *name, *implied, *what; } g_warn_doc[] = {
 #define RULE(n, s, i, c, t) { n, n[0] == 'm' ? "misra" : "cert", s " " i " (" c "): " t },
 #include "../sema/rules.def"
 #undef RULE
+#define CHECK(n, t) { n, "analyze", t },
+#include "../sema/analyze.def"
+#undef CHECK
     { "address", NULL, "a function name tested in an `if` condition, or compared with a null pointer constant" },
     { "arith-conversion", NULL, "as `--warn=conversion`, also for arithmetic whose operands each fit the target type" },
     { "attributes", NULL, "an attribute EmbCC does not know, or one it accepts but does not implement" },

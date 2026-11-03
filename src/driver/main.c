@@ -3197,8 +3197,10 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         diag_terminated(sema_error_count());
         return 1;                     /* (--fix still gets its turn) */
     }
-    /* --misra, --cert and the rules named one by one (src/sema/rules.c) */
+    /* --misra, --cert and the rules named one by one (src/sema/rules.c),
+     * then --analyze's (src/sema/analyze.c) */
     rules_check(u);
+    analyze_unit(u);
     /* The stages that read the analysed tree. They come after sema so the
      * types printed are the resolved ones -- an AST dump with every type
      * shown as "?" would answer a question nobody asks. */
@@ -6897,6 +6899,15 @@ static int embcc_main(int argc, char **argv)
             diag_enable_warning("format", lv >= 1);
             diag_enable_warning("format-nonliteral", lv >= 2);
             diag_enable_warning("format-security", lv >= 2);
+        } else if (strcmp(argv[i], "--analyze") == 0 ||
+                   strcmp(argv[i], "-fanalyzer") == 0 ||
+                   strcmp(argv[i], "--no-analyze") == 0 ||
+                   strcmp(argv[i], "-fno-analyzer") == 0) {
+            /* the static analyzer: interrupt handlers' sharing and the
+             * memory checks, every one (src/sema/analyze.def) */
+            int on = strstr(argv[i], "no-") == NULL;
+            for (int k = 0; k < analyze_count(); k++)
+                diag_enable_warning(analyze_name(k), on);
         } else if (strcmp(argv[i], "--misra") == 0 ||
                    strncmp(argv[i], "--misra=", 8) == 0 ||
                    strcmp(argv[i], "--cert") == 0 ||

@@ -159,6 +159,8 @@ OPT(DIAG, "--color=",       "WHEN", "-fdiagnostics-color=%", "auto, always or ne
 OPT(DIAG, "--max-errors=",  "N",    "-fmax-errors=%", "stop after N errors")
 OPT(DIAG, "--explain=",     "ID",   NULL,   "what a diagnostic means, and the fix")
 OPT(DIAG, "--fix",          NULL,   NULL,   "apply the fix-its EmbCC proposes")
+OPT(DIAG, "--analyze",      NULL,   "-fanalyzer", "the static analyzer: what interrupt handlers share unsafely, double free, use after free, leaks")
+OPT(DIAG, "--no-analyze",   NULL,   "-fno-analyzer", "not")
 OPT(DIAG, "--misra",        NULL,   NULL,   "check the MISRA C:2023 rules a compiler can decide (each one --warn=misra-N.M)")
 OPT(DIAG, "--misra=",       "YEAR", NULL,   "...2023 (or 2012, the same numbers)")
 OPT(DIAG, "--no-misra",     NULL,   NULL,   "none of them")

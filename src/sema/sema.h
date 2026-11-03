@@ -15,6 +15,12 @@ void rules_report(const char *file, int line, int col, const char *name,
                   const char *detail);
 int rules_side_effects(const struct expr *e);
 int sema_const_fold(const struct expr *e, long *out);
+/* The static analyzer (src/sema/analyze.c, analyze.def): run after the
+ * rules; its checks, for the driver */
+void analyze_unit(struct unit *u);
+int analyze_count(void);
+const char *analyze_name(int i);
+const char *analyze_text(int i);
 int rules_count(void);
 const char *rules_name(int i);
 const char *rules_text(int i);

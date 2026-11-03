@@ -39,6 +39,10 @@ static const struct type *declared_type(const struct expr *v)
 {
     if (!v || v->kind != EXPR_VAR)
         return NULL;
+    if (v->undecayed)
+        return v->undecayed;
+    if (v->gref)
+        return v->gref->ty;
     if (g_fn && v->var_index >= 0 && v->var_index < g_fn->nvars &&
         g_fn->var_tys && g_fn->var_tys[v->var_index])
         return g_fn->var_tys[v->var_index];

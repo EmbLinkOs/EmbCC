@@ -1,0 +1,19 @@
+/* The static analyzer's findings (src/sema/analyze.c), each a warning:
+ * --analyze (GCC's -fanalyzer) turns them all on. The isr- ones are
+ * EmbCC's -- what an interrupt handler shares with the code it
+ * interrupts -- and the analyzer- ones are GCC's names for the same
+ * findings, so a build that names them for GCC names them here.
+ *
+ *   CHECK(NAME, TEXT) */
+
+CHECK("isr-shared-nonvolatile", "an object an interrupt handler writes and other code reads (or the other way), not volatile: the compiler may keep it in a register, and never see the change")
+CHECK("isr-race-rmw", "a read-modify-write (x++, x |= m, x = x + 1) of an object an interrupt handler also writes, outside a critical section: an interrupt between the read and the write loses its update")
+CHECK("isr-torn-access", "an access wider than the machine reads or writes at once, of an object an interrupt handler also accesses, outside a critical section: one side can see half of the other's update")
+CHECK("isr-unsafe-call", "an interrupt handler, or a function it calls, calling one that is not safe there: it allocates, locks, blocks or does stdio")
+CHECK("isr-reentrancy", "a function that both an interrupt handler and the code it interrupts call, and that keeps state in a static object: an interrupt in the middle of it corrupts that state")
+CHECK("isr-critical-unbalanced", "a critical section (interrupts disabled) still open where the function returns")
+CHECK("analyzer-double-free", "memory freed twice")
+CHECK("analyzer-use-after-free", "memory used after it was freed")
+CHECK("analyzer-malloc-leak", "memory a function allocated and lost: no pointer to it is left when it returns")
+CHECK("analyzer-possible-null-dereference", "the result of an allocation dereferenced before it was checked for NULL")
+CHECK("analyzer-null-dereference", "a null pointer dereferenced")
