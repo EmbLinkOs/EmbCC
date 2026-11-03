@@ -380,6 +380,7 @@ struct global {
 
     int defined;          /* sema, canonical: some declaration defines it */
     int absorbed;         /* sema: merged into an earlier node */
+    struct global *lto_def; /* -flto: the unit that defines it, another */
     int used;
     int in_bss;           /* driver: no initializer -> .bss, else .data */
     int is_common;        /* driver: -fcommon made this tentative
@@ -534,6 +535,7 @@ struct func {
                            * those sizes at entry */
     int declared;         /* sema: declaration has been reached */
     int absorbed;         /* sema: merged into an earlier node — skip */
+    struct func *lto_def; /* -flto: its definition, in another unit */
     int used;             /* sema: at least one call resolves here */
     /* ---- inferred, not declared ------------------------------------
      *

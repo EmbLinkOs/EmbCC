@@ -640,6 +640,11 @@ struct ir_unit {
     struct ir_str *strs;
     int nstrs, capstrs;
     int rodata_len;
+    /* open-addressed indexes (entry: index + 1) over syms and strs, so
+     * interning is not a scan: a whole program under -flto has hundreds
+     * of thousands of each */
+    int *symh, symh_cap, symh_n;
+    int *strh, strh_cap, strh_n;
 };
 
 /* Intern a symbol, returning its index. Interning by name means the same

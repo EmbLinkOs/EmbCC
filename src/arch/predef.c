@@ -141,11 +141,35 @@ static const struct predef_macro os_linux[] = {
     { "__unix__", "1" },
     { "__unix", "1" },
 };
+/* The macOS SDK asks the compiler what it is in two places EmbCC must
+ * answer as clang does: <libkern/OSByteOrder.h> by __LITTLE_ENDIAN__
+ * ("Unknown endianess" without it), and <TargetConditionals.h> by the
+ * TARGET_OS_ and TARGET_CPU_ macros clang 17 predefines (or else by
+ * __APPLE_CC__ with __GNUC__; "unknown compiler" with neither). */
+#define DARWIN_COMMON \
+    { "__APPLE__", "1" }, \
+    { "__MACH__", "1" }, \
+    { "__LITTLE_ENDIAN__", "1" }, \
+    { "__unix__", "1" }, \
+    { "__unix", "1" }, \
+    { "TARGET_OS_MAC", "1" }, { "TARGET_OS_OSX", "1" }, \
+    { "TARGET_OS_IPHONE", "0" }, { "TARGET_OS_IOS", "0" }, \
+    { "TARGET_OS_TV", "0" }, { "TARGET_OS_WATCH", "0" }, \
+    { "TARGET_OS_VISION", "0" }, { "TARGET_OS_MACCATALYST", "0" }, \
+    { "TARGET_OS_DRIVERKIT", "0" }, { "TARGET_OS_SIMULATOR", "0" }, \
+    { "TARGET_OS_EMBEDDED", "0" }, { "TARGET_OS_UNIX", "0" }, \
+    { "TARGET_OS_WIN32", "0" }, { "TARGET_OS_WINDOWS", "0" }, \
+    { "TARGET_OS_LINUX", "0" }, { "TARGET_OS_UIKITFORMAC", "0" }, \
+    { "TARGET_RT_LITTLE_ENDIAN", "1" }, { "TARGET_RT_BIG_ENDIAN", "0" }, \
+    { "TARGET_RT_64_BIT", "1" }, { "TARGET_RT_MAC_MACHO", "1" }, \
+    { "TARGET_RT_MAC_CFM", "0" }
 static const struct predef_macro os_darwin[] = {
-    { "__APPLE__", "1" },
-    { "__MACH__", "1" },
-    { "__unix__", "1" },
-    { "__unix", "1" },
+    DARWIN_COMMON,
+    { "TARGET_CPU_ARM64", "1" }, { "TARGET_CPU_X86_64", "0" },
+};
+static const struct predef_macro os_darwin_x86[] = {
+    DARWIN_COMMON,
+    { "TARGET_CPU_X86_64", "1" }, { "TARGET_CPU_ARM64", "0" },
 };
 /* ...and on arm64 the generated aarch64 table (gcc's, AAPCS64) is wrong
  * about the data model target.c's darwin_a64 describes. These replace
@@ -525,7 +549,13 @@ const struct predef_macro *predef_table(int *count)
         os = os_linux;   nos = (int)(sizeof os_linux / sizeof *os_linux);
         break;
     case TGT_OS_DARWIN:
-        os = os_darwin;  nos = (int)(sizeof os_darwin / sizeof *os_darwin);
+        if (target_get() == TARGET_X86_64) {
+            os = os_darwin_x86;
+            nos = (int)(sizeof os_darwin_x86 / sizeof *os_darwin_x86);
+        } else {
+            os = os_darwin;
+            nos = (int)(sizeof os_darwin / sizeof *os_darwin);
+        }
         break;
     case TGT_OS_WINDOWS:
         os = os_windows; nos = (int)(sizeof os_windows / sizeof *os_windows);

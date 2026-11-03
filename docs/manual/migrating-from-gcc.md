@@ -75,7 +75,6 @@ EmbCC keeps GCC's form exactly:
   always: no optimization assumes overflow cannot happen.
 - **Some GCC flags are refused** rather than ignored, when EmbCC cannot do
   what they ask:
-  - `-flto`;
   - `-fsanitize=address` (EmbCC's sanitizer checks trap: `-fsanitize=undefined
     -fsanitize-trap` is accepted).
 

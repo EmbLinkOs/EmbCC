@@ -52,15 +52,61 @@ static int g_synth;
  * without a parse tree. Linear search -- a unit mentions tens of symbols,
  * not thousands, and a hash here would cost more than it saves.
  */
+static unsigned ir_hash(const char *p, int n)
+{
+    unsigned h = 2166136261u;
+    for (int k = 0; k < n; k++)
+        h = (h ^ (unsigned char)p[k]) * 16777619u;
+    return h;
+}
+
+/* (re)build an index of cap slots over n entries, keyed by key(i) */
+static int *ir_index(int n, int *cap, unsigned (*key)(const struct ir_unit *, int),
+                     const struct ir_unit *u)
+{
+    *cap = 64;
+    while (*cap < 2 * n + 2)
+        *cap *= 2;
+    int *h = xcalloc((size_t)*cap, sizeof *h);
+    for (int i = 0; i < n; i++) {
+        unsigned k = key(u, i) & (unsigned)(*cap - 1);
+        while (h[k])
+            k = (k + 1) & (unsigned)(*cap - 1);
+        h[k] = i + 1;
+    }
+    return h;
+}
+
+static unsigned sym_key(const struct ir_unit *u, int i)
+{
+    return ir_hash(u->syms[i].name, (int)strlen(u->syms[i].name)) ^
+           (unsigned)u->syms[i].is_func;
+}
+
+static unsigned str_key(const struct ir_unit *u, int i)
+{
+    return ir_hash(u->strs[i].bytes, u->strs[i].len);
+}
+
 static int sym_intern(struct ir_unit *u, const char *name, int is_func,
                       int defined, int is_weak, int is_varargs,
                       int sret_first, int is_nothrow)
 {
     if (!name)
         return -1;
-    for (int i = 0; i < u->nsyms; i++)
+    if (!u->symh || 2 * u->nsyms + 2 > u->symh_cap || u->symh_n != u->nsyms) {
+        free(u->symh);              /* (or something appended without it) */
+        u->symh = ir_index(u->nsyms, &u->symh_cap, sym_key, u);
+    }
+    unsigned k = (ir_hash(name, (int)strlen(name)) ^ (unsigned)is_func) &
+                 (unsigned)(u->symh_cap - 1);
+    for (; u->symh[k]; k = (k + 1) & (unsigned)(u->symh_cap - 1)) {
+        int i = u->symh[k] - 1;
         if (!strcmp(u->syms[i].name, name) && u->syms[i].is_func == is_func)
             return i;
+    }
+    u->symh[k] = u->nsyms + 1;
+    u->symh_n = u->nsyms + 1;       /* (it is, with this one) */
     if (u->nsyms == u->capsyms) {
         u->capsyms = u->capsyms ? u->capsyms * 2 : 32;
         u->syms = xrealloc(u->syms, (size_t)u->capsyms * sizeof *u->syms);
@@ -1447,10 +1493,20 @@ int ir_intern_string(struct ir_unit *iu, const char *bytes, int len)
 int ir_intern_aligned(struct ir_unit *iu, const char *bytes, int len,
                       int align)
 {
-    for (int i = 0; i < iu->nstrs; i++)
+    if (!iu->strh || 2 * iu->nstrs + 2 > iu->strh_cap ||
+        iu->strh_n != iu->nstrs) {
+        free(iu->strh);
+        iu->strh = ir_index(iu->nstrs, &iu->strh_cap, str_key, iu);
+    }
+    unsigned k = ir_hash(bytes, len) & (unsigned)(iu->strh_cap - 1);
+    for (; iu->strh[k]; k = (k + 1) & (unsigned)(iu->strh_cap - 1)) {
+        int i = iu->strh[k] - 1;
         if (iu->strs[i].len == len && iu->strs[i].off % align == 0 &&
             memcmp(iu->strs[i].bytes, bytes, (size_t)len) == 0)
             return i;
+    }
+    iu->strh[k] = iu->nstrs + 1;
+    iu->strh_n = iu->nstrs + 1;
     if (iu->nstrs == iu->capstrs) {
         iu->capstrs = iu->capstrs ? iu->capstrs * 2 : 8;
         iu->strs = xrealloc(iu->strs,

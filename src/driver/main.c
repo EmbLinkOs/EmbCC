@@ -297,6 +297,8 @@ static int nincdirs;
  * (self-host builds without -g). */
 static int want_debug;
 static int want_split_dwarf;     /* -gsplit-dwarf */
+static int want_lto;             /* -flto (see compile_unit) */
+static int g_user_no_warn;       /* -w */
 /* -fstack-usage: write FILE.su beside the object, one line per function,
  * in gcc's format (`file:line:name<TAB>bytes<TAB>qualifier`) so the
  * tools that already read those files read these. It is the number a
@@ -1088,7 +1090,24 @@ static int link_bounded(const char **inputs, int n, const char *exe,
     return lrc;
 }
 
+static int lto_link_inputs(const char *out, char **tmp);
+static int compile_and_link_(const char *in, const char *out);
+
+/* -flto: the objects that carry their C become one, then the link */
 static int compile_and_link(const char *in, const char *out)
+{
+    char *lto = NULL;
+    if (want_lto && lto_link_inputs(out ? out : "a.out", &lto))
+        return 1;
+    int rc = compile_and_link_(in, out);
+    if (lto) {
+        remove(lto);
+        free(lto);
+    }
+    return rc;
+}
+
+static int compile_and_link_(const char *in, const char *out)
 {
     if (target_os_get() == TGT_OS_DARWIN)
         return darwin_link(in, out);
@@ -2816,8 +2835,58 @@ static void write_module_interface(const char *out)
         diag_fatal(path, 0, "cannot write the module interface");
 }
 
+/* ---- link-time optimization ---------------------------------------
+ *
+ * -flto at a compile writes the object as always, and beside its code
+ * the C the unit came to -- preprocessed, and the C++ front end's for a
+ * C++ unit -- in a section .embcc.lto (SHF_EXCLUDE: a link without LTO
+ * drops it, and the object links as it is). A link with -flto reads that
+ * text back from each object that has it, takes each through the front
+ * end and irgen again (lto_collect), merges the units into one
+ * (lto_merge): an external declaration is the definition another unit
+ * gives, a `static` name another unit also uses is renamed NAME.lto.N,
+ * and every external the rest of the link does not name becomes static.
+ * Then the optimizer and one backend run over the whole program, and the
+ * object they make is linked in place of the units it came from. */
+static const char *g_lto_text;        /* collect: the unit's C, as read */
+static int g_lto_collect, g_lto_back;
+static struct unit *g_lto_u;          /* back: the merged program */
+static struct ir_unit *g_lto_iu;
+static const char *g_lto_payload;     /* compile: the C to keep in .o */
+#define LTO_MAX 256
+static struct unit *g_lto_units[LTO_MAX];
+static struct ir_unit *g_lto_irs[LTO_MAX];
+static int g_lto_n;
+
+/* What .embcc.lto holds: a line saying what it is and the unit's name,
+ * then its C. */
+static char *lto_payload(const char *in, size_t *n)
+{
+    size_t tn = strlen(g_lto_payload), hn = strlen(in) + 32;
+    char *p = xmalloc(hn + tn + 1);
+    int k = snprintf(p, hn, "EMBCC-LTO 1 %s\n", in);
+    memcpy(p + k, g_lto_payload, tn + 1);
+    *n = (size_t)k + tn;
+    return p;
+}
+
+struct fidx { struct func *f; int k; };
+static int fidx_cmp(const void *a, const void *b)
+{
+    unsigned long x = (unsigned long)((const struct fidx *)a)->f;
+    unsigned long y = (unsigned long)((const struct fidx *)b)->f;
+    return x < y ? -1 : x > y;
+}
+
 static int compile_unit(const char *in, const char *out, int pp_only)
 {
+    struct unit *u = NULL;
+    struct ir_unit *iu = NULL;
+    if (g_lto_back) {
+        u = g_lto_u;
+        iu = g_lto_iu;
+        goto lto_backend;
+    }
     if (target_pic() && target_fmt_get() == TGT_FMT_ELF &&
         target_get() != TARGET_X86_64 && target_get() != TARGET_AARCH64 &&
         target_get() != TARGET_RISCV32 && target_get() != TARGET_RISCV64) {
@@ -2827,8 +2896,9 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                 target_triple_now());
         return 1;
     }
-    char *src = read_file(in);
-    diag_register_source(in, src);   /* so diagnostics can show its lines */
+    char *src = g_lto_text ? (char *)g_lto_text : read_file(in);
+    if (!g_lto_text)
+        diag_register_source(in, src);  /* so diagnostics can show its lines */
     predef_set_cxx(lang_cxx);
     if (lang_cxx)
         cpp_set_cxx(cxx_has_builtin, want_exceptions);
@@ -2845,7 +2915,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     int mark = cpp_set_mark_system(!pp_only);
     if (lang_cxx)
         module_dirs_for(out);
-    char *pp = cpp_process(in, src, incdirs, nincdirs);
+    char *pp = g_lto_text ? src : cpp_process(in, src, incdirs, nincdirs);
     cpp_set_mark_system(mark);
     if (lang_cxx && !pp_only)
         write_module_interface(out);
@@ -2930,7 +3000,9 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         lex_set_c_std(2017, 0);
         lex_set_pedantic(0);
     }
-    struct unit *u = parse_unit(in, pp);
+    if (want_lto && !g_lto_collect)
+        g_lto_payload = pp;           /* (the C++ front end's, for C++) */
+    u = parse_unit(in, pp);
     time_mark("parse");
     if (lang_cxx) {
         lex_set_c_std(c_year, c_gnu);
@@ -3041,8 +3113,18 @@ static int compile_unit(const char *in, const char *out, int pp_only)
             f->used = f->is_root = 1;
 
     remarks_enable(want_remarks || why_decision != NULL);
-    struct ir_unit *iu = irgen(u);
+    iu = irgen(u);
     time_mark("IR generation");
+    if (g_lto_collect) {
+        /* -flto at the link: this unit is kept for the merge */
+        if (g_lto_n == LTO_MAX)
+            diag_fatal(in, 0, "-flto: more than %d units", LTO_MAX);
+        g_lto_units[g_lto_n] = u;
+        g_lto_irs[g_lto_n] = iu;
+        g_lto_n++;
+        return 0;
+    }
+lto_backend:
     /* -O0 and -Og keep every source variable in its slot, the optimizer
      * and the backends both; -g only describes what they did. */
     target_set_keep_vars(opt_level == 0 || opt_for_debug);
@@ -3136,6 +3218,14 @@ static int compile_unit(const char *in, const char *out, int pp_only)
             if (!f->is_static || f->is_root)
                 { reach[k] = 1; work[nw++] = k; }
         }
+        /* function -> its index, sorted by address: a whole program
+         * (-flto) has as many calls as functions times a few thousand */
+        struct fidx *fx = xmalloc((size_t)(nf ? nf : 1) * sizeof *fx);
+        for (int k = 0; k < nf; k++) {
+            fx[k].f = iu->funcs[k].src;
+            fx[k].k = k;
+        }
+        qsort(fx, (size_t)nf, sizeof *fx, fidx_cmp);
         while (nw) {
             struct ir_func *fn = &iu->funcs[work[--nw]];
             for (int n = 0; n < fn->nins; n++) {
@@ -3145,13 +3235,29 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                 else if (i->op == IR_FADDR)           t = i->callee;
                 if (!t)
                     continue;
-                for (int k = 0; k < nf; k++)
-                    if (iu->funcs[k].src == t && !reach[k]) {
-                        reach[k] = 1; work[nw++] = k;
+                int lo = 0, hi = nf - 1;
+                while (lo <= hi) {
+                    int mid = (lo + hi) / 2;
+                    if (fx[mid].f == t) {
+                        /* (several entries may share one src: each) */
+                        int a = mid, b = mid;
+                        while (a > 0 && fx[a - 1].f == t) a--;
+                        while (b + 1 < nf && fx[b + 1].f == t) b++;
+                        for (int q = a; q <= b; q++)
+                            if (!reach[fx[q].k]) {
+                                reach[fx[q].k] = 1;
+                                work[nw++] = fx[q].k;
+                            }
                         break;
                     }
+                    if ((unsigned long)fx[mid].f < (unsigned long)t)
+                        lo = mid + 1;
+                    else
+                        hi = mid - 1;
+                }
             }
         }
+        free(fx);
         for (int k = 0; k < nf; k++) {
             struct func *f = iu->funcs[k].src;
             if (!f || f->absorbed || !f->has_defn || !f->is_static)
@@ -4162,6 +4268,15 @@ static int compile_unit(const char *in, const char *out, int pp_only)
          * as they are); a code address is relocated against __text, and
          * a global's against its symbol, below once there is one. */
         int m_dw[DWARF_NSEC] = { 0 };
+        if (want_lto && g_lto_payload && !g_lto_back) {
+            /* -flto (above): in __DWARF, which ld leaves in the objects */
+            size_t pn = 0;
+            char *pl = lto_payload(in, &pn);
+            machow_add_section(mw, "__DWARF", "__embcc_lto",
+                               S_REGULAR | 0x02000000u /* S_ATTR_DEBUG */,
+                               pl, (unsigned long long)pn, 0);
+            free(pl);
+        }
         if (want_debug) {
             for (int i = 0; i < dw.nrelocs; i++) {
                 struct dwarf_reloc *r = &dw.relocs[i];
@@ -4866,6 +4981,14 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         for (int s = 0; s < DWARF_NSEC; s++)
             if (dw.seclen[s] && !dwarf_section_is_dwo(s))
                 dwsec_ndx[s] = add_debug_section(w, s, &dw);
+    /* -flto: the unit's C, for a link with -flto to compile again with
+     * the rest of the program; SHF_EXCLUDE, so any other link drops it */
+    if (want_lto && g_lto_payload && !g_lto_back) {
+        size_t pn = 0;
+        char *pl = lto_payload(in, &pn);
+        elfw_add_section(w, ".embcc.lto", SHT_PROGBITS, 0x80000000u, pl,
+                         (Elf64_Xword)pn, 1);
+    }
     /* the unwind tables (x86-64 gives .eh_frame its own section type) and
      * the exception tables */
     int eh_ndx = 0, lsda_ndx = 0;
@@ -6282,6 +6405,7 @@ static int embcc_main(int argc, char **argv)
             /* GCC's old spelling of -Werror=implicit-function-declaration,
              * and as that one, what EmbCC always does */
         } else if (strcmp(argv[i], "-w") == 0) {
+            g_user_no_warn = 1;
             diag_set_no_warnings(1);
         } else if (strcmp(argv[i], "-pedantic") == 0) {
             /* what the standard -std= names does not have (lex_pedantic) */
@@ -6781,7 +6905,6 @@ static int embcc_main(int argc, char **argv)
                    strcmp(argv[i], "-fcoverage-mapping") == 0 ||
                    strcmp(argv[i], "--coverage") == 0 ||
                    strcmp(argv[i], "-pg") == 0 ||
-                   strcmp(argv[i], "-flto") == 0 ||
                    strcmp(argv[i], "-fstack-clash-protection") == 0 ||
                    strncmp(argv[i], "-fcf-protection", 15) == 0) {
             /* Refused BY NAME, every one. These do not describe a
@@ -6792,8 +6915,6 @@ static int embcc_main(int argc, char **argv)
              *
              *   -fsanitize=  no checks would be inserted
              *   -fprofile-*, --coverage, -pg  no counters
-             *   -flto        no bitcode, so a whole-program link is a
-             *                plain one and the sizes mislead
              *   -fstack-clash-protection, -fcf-protection  no probes,
              *                no landing pads
              */
@@ -6801,6 +6922,20 @@ static int embcc_main(int argc, char **argv)
                             "would emit ordinary code and the flag's "
                             "promise would not hold\n", opt_typed(argv[i]));
             return 1;
+        } else if (strcmp(argv[i], "-flto") == 0 ||
+                   strncmp(argv[i], "-flto=", 6) == 0) {
+            /* -flto=thin, =full, =auto, =N: one whole-program merge */
+            want_lto = 1;
+        } else if (strcmp(argv[i], "-fno-lto") == 0) {
+            want_lto = 0;
+        } else if (strcmp(argv[i], "-ffat-lto-objects") == 0 ||
+                   strcmp(argv[i], "-fno-fat-lto-objects") == 0 ||
+                   strcmp(argv[i], "-fuse-linker-plugin") == 0 ||
+                   strcmp(argv[i], "-fno-use-linker-plugin") == 0 ||
+                   strncmp(argv[i], "-flto-partition=", 16) == 0 ||
+                   strncmp(argv[i], "-flto-compression-level=", 24) == 0) {
+            /* accepted: an -flto object always has its code as well (it
+             * links without LTO), and the merge needs no plugin */
         } else if (strcmp(argv[i], "-fPIC") == 0 ||
                    strcmp(argv[i], "-fpic") == 0) {
             target_set_pic(TARGET_PIC);
@@ -7395,6 +7530,492 @@ static int embcc_main(int argc, char **argv)
                                      "support but an object file does not; "
                                      "name a file\n"), 1));
     return done(compile(input, output ? output : default_output(input), 0));
+}
+
+
+
+static unsigned long lto_uint(const unsigned char *p, int w, int be)
+{
+    unsigned long v = 0;
+    for (int k = 0; k < w; k++)
+        v |= (unsigned long)p[be ? w - 1 - k : k] << (8 * k);
+    return v;
+}
+static char *xstrdup_n(const char *s) { return xstrndup(s, strlen(s)); }
+
+/* ---- -flto at the link (see the note before compile_unit) ---------- */
+
+/* The .embcc.lto section of an ELF or Mach-O object in buf, or NULL;
+ * *n its size. */
+static const char *lto_section(const unsigned char *b, long len, long *n)
+{
+    if (len >= 64 && b[0] == 0x7f && b[1] == 'E' && b[2] == 'L' && b[3] == 'F') {
+        int c64 = b[4] == 2, be = b[5] == 2;
+#define LU(p, w) lto_uint((p), (w), be)
+        unsigned long shoff = c64 ? LU(b + 40, 8) : LU(b + 32, 4);
+        int shentsize = (int)LU(b + (c64 ? 58 : 46), 2);
+        int shnum = (int)LU(b + (c64 ? 60 : 48), 2);
+        int shstrndx = (int)LU(b + (c64 ? 62 : 50), 2);
+        if (!shoff || shoff + (unsigned long)shnum * (unsigned long)shentsize >
+                          (unsigned long)len || shstrndx >= shnum)
+            return NULL;
+        const unsigned char *ss = b + shoff + (long)shstrndx * shentsize;
+        unsigned long stroff = c64 ? LU(ss + 24, 8) : LU(ss + 16, 4);
+        for (int i = 0; i < shnum; i++) {
+            const unsigned char *sh = b + shoff + (long)i * shentsize;
+            unsigned long name = LU(sh, 4);
+            unsigned long off = c64 ? LU(sh + 24, 8) : LU(sh + 16, 4);
+            unsigned long size = c64 ? LU(sh + 32, 8) : LU(sh + 20, 4);
+            if (stroff + name + 11 <= (unsigned long)len &&
+                !memcmp(b + stroff + name, ".embcc.lto", 11) &&
+                off + size <= (unsigned long)len) {
+                *n = (long)size;
+                return (const char *)b + off;
+            }
+        }
+#undef LU
+        return NULL;
+    }
+    if (len >= 32 && lto_uint(b, 4, 0) == 0xfeedfacfUL) {     /* Mach-O 64 */
+        unsigned long ncmds = lto_uint(b + 16, 4, 0);
+        long at = 32;
+        for (unsigned long c = 0; c < ncmds && at + 8 <= len; c++) {
+            unsigned long cmd = lto_uint(b + at, 4, 0);
+            unsigned long csz = lto_uint(b + at + 4, 4, 0);
+            if (cmd == 0x19 && at + 72 <= len) {               /* LC_SEGMENT_64 */
+                unsigned long nsects = lto_uint(b + at + 64, 4, 0);
+                for (unsigned long k = 0; k < nsects; k++) {
+                    const unsigned char *sc = b + at + 72 + k * 80;
+                    if (sc + 80 > b + len)
+                        break;
+                    if (!strncmp((const char *)sc, "__embcc_lto", 16)) {
+                        unsigned long size = lto_uint(sc + 40, 8, 0);
+                        unsigned long off = lto_uint(sc + 48, 4, 0);
+                        if (off + size <= (unsigned long)len) {
+                            *n = (long)size;
+                            return (const char *)b + off;
+                        }
+                    }
+                }
+            }
+            if (!csz)
+                break;
+            at += (long)csz;
+        }
+    }
+    return NULL;
+}
+
+/* The names an object (or each member of an archive) leaves undefined,
+ * added to names[] -- what the part of the link LTO does not see wants
+ * from the part it does. ELF only; a Mach-O or other input says
+ * "unknown", and then nothing is made static. */
+static int lto_undef_names(const char *path, const char ***names, int *n,
+                           int *cap)
+{
+    long len = 0;
+    unsigned char *b = (unsigned char *)plat_read_file(path, &len);
+    if (!b)
+        return 0;
+    int ok = 1;
+    long at = 0, end = len;
+    int ar = len >= 8 && !memcmp(b, "!<arch>\n", 8);
+    if (ar)
+        at = 8;
+    while (at < end) {
+        const unsigned char *o = b + at;
+        long olen = end - at;
+        if (ar) {
+            if (at + 60 > end)
+                break;
+            olen = strtol((const char *)b + at + 48, NULL, 10);
+            o = b + at + 60;
+            at += 60 + olen + (olen & 1);
+        } else {
+            at = end;
+        }
+        if (olen < 64 || o[0] != 0x7f || o[1] != 'E') {
+            if (!ar)
+                ok = 0;
+            continue;
+        }
+        int c64 = o[4] == 2, be = o[5] == 2;
+        unsigned long shoff = c64 ? lto_uint(o + 40, 8, be)
+                                  : lto_uint(o + 32, 4, be);
+        int shentsize = (int)lto_uint(o + (c64 ? 58 : 46), 2, be);
+        int shnum = (int)lto_uint(o + (c64 ? 60 : 48), 2, be);
+        if (shoff + (unsigned long)shnum * (unsigned long)shentsize >
+            (unsigned long)olen)
+            continue;
+        for (int i = 0; i < shnum; i++) {
+            const unsigned char *sh = o + shoff + (long)i * shentsize;
+            if (lto_uint(sh + 4, 4, be) != 2)            /* SHT_SYMTAB */
+                continue;
+            unsigned long soff = c64 ? lto_uint(sh + 24, 8, be)
+                                     : lto_uint(sh + 16, 4, be);
+            unsigned long ssz = c64 ? lto_uint(sh + 32, 8, be)
+                                    : lto_uint(sh + 20, 4, be);
+            unsigned long link = lto_uint(sh + (c64 ? 40 : 24), 4, be);
+            const unsigned char *str = o + shoff + (long)link * shentsize;
+            unsigned long stroff = c64 ? lto_uint(str + 24, 8, be)
+                                       : lto_uint(str + 16, 4, be);
+            int esz = c64 ? 24 : 16;
+            for (unsigned long k = (unsigned long)esz; k + (unsigned long)esz <= ssz;
+                 k += (unsigned long)esz) {
+                const unsigned char *sy = o + soff + k;
+                unsigned shndx = (unsigned)lto_uint(sy + (c64 ? 6 : 14), 2, be);
+                unsigned long name = lto_uint(sy, 4, be);
+                if (shndx != 0 || !name || stroff + name >= (unsigned long)olen)
+                    continue;                            /* defined, or none */
+                if (*n == *cap) {
+                    *cap = *cap ? *cap * 2 : 256;
+                    *names = xrealloc(*names, (size_t)*cap * sizeof **names);
+                }
+                (*names)[(*n)++] = xstrdup_n((const char *)o + stroff + name);
+            }
+        }
+    }
+    free(b);
+    return ok;
+}
+
+/* A name -> pointer table (and a count per name), open-addressed: the
+ * merge asks it once per declaration, and a program has hundreds of
+ * thousands of those (each unit's headers declare everything). */
+struct lto_ht { const char **k; void **v; int *n; unsigned cap, used; };
+
+static unsigned lto_hash(const char *s)
+{
+    unsigned h = 2166136261u;
+    while (*s)
+        h = (h ^ (unsigned char)*s++) * 16777619u;
+    return h;
+}
+
+static unsigned lto_slot(struct lto_ht *t, const char *key)
+{
+    if (2 * (t->used + 1) > t->cap) {
+        struct lto_ht o = *t;
+        t->cap = o.cap ? o.cap * 2 : 1024;
+        t->k = xcalloc(t->cap, sizeof *t->k);
+        t->v = xcalloc(t->cap, sizeof *t->v);
+        t->n = xcalloc(t->cap, sizeof *t->n);
+        t->used = 0;
+        for (unsigned i = 0; i < o.cap; i++)
+            if (o.k[i]) {
+                unsigned j = lto_hash(o.k[i]) & (t->cap - 1);
+                while (t->k[j])
+                    j = (j + 1) & (t->cap - 1);
+                t->k[j] = o.k[i];
+                t->v[j] = o.v[i];
+                t->n[j] = o.n[i];
+                t->used++;
+            }
+        free(o.k); free(o.v); free(o.n);
+    }
+    unsigned j = lto_hash(key) & (t->cap - 1);
+    while (t->k[j] && strcmp(t->k[j], key))
+        j = (j + 1) & (t->cap - 1);
+    if (!t->k[j]) {
+        t->k[j] = key;
+        t->used++;
+    }
+    return j;
+}
+
+static void *lto_get(struct lto_ht *t, const char *key)
+{
+    if (!t->cap)
+        return NULL;
+    unsigned j = lto_hash(key) & (t->cap - 1);
+    while (t->k[j] && strcmp(t->k[j], key))
+        j = (j + 1) & (t->cap - 1);
+    return t->k[j] ? t->v[j] : NULL;
+}
+
+static int lto_count(struct lto_ht *t, const char *key)
+{
+    if (!t->cap)
+        return 0;
+    unsigned j = lto_hash(key) & (t->cap - 1);
+    while (t->k[j] && strcmp(t->k[j], key))
+        j = (j + 1) & (t->cap - 1);
+    return t->k[j] ? t->n[j] : 0;
+}
+
+/* Every unit lto_collect kept, as one: lists joined, string literals
+ * interned again (each STRADDR renumbered), each external declaration
+ * pointed at the definition another unit has, a static name another unit
+ * also uses renamed, and -- for a program, not a shared object -- every
+ * external nothing outside the merged units names made static, which is
+ * what lets the optimizer inline it and drop it. */
+static void lto_merge(int internalize, const char **keep, int nkeep)
+{
+    struct unit *U = xcalloc(1, sizeof *U);
+    struct ir_unit *IU = xcalloc(1, sizeof *IU);
+    *U = *g_lto_units[0];
+    U->funcs = NULL; U->globals = NULL; U->topasm = NULL; U->weaks = NULL;
+    U->econsts = NULL;
+    IU->src = U;
+    struct func **ft = &U->funcs;
+    struct global **gt = &U->globals;
+    struct topasm **tt = &U->topasm;
+    int nf = 0;
+    for (int k = 0; k < g_lto_n; k++)
+        nf += g_lto_irs[k]->nfuncs;
+    IU->funcs = xcalloc((size_t)(nf ? nf : 1), sizeof *IU->funcs);
+    for (int k = 0; k < g_lto_n; k++) {
+        struct unit *u = g_lto_units[k];
+        struct ir_unit *iu = g_lto_irs[k];
+        /* string literals: interned in the whole program's pool */
+        int *smap = xmalloc((size_t)(iu->nstrs ? iu->nstrs : 1) * sizeof *smap);
+        for (int i = 0; i < iu->nstrs; i++)
+            smap[i] = ir_intern_aligned(IU, iu->strs[i].bytes, iu->strs[i].len,
+                                        iu->strs[i].align);
+        for (int f = 0; f < iu->nfuncs; f++) {
+            struct ir_func *fn = &iu->funcs[f];
+            for (int i = 0; i < fn->nins; i++)
+                if (fn->ins[i].op == IR_STRADDR && fn->ins[i].label >= 0 &&
+                    fn->ins[i].label < iu->nstrs)
+                    fn->ins[i].label = smap[fn->ins[i].label];
+            IU->funcs[IU->nfuncs++] = *fn;
+        }
+        free(smap);
+        for (struct func *f = u->funcs; f; ) {
+            struct func *nx = f->next;
+            *ft = f; ft = &f->next; f->next = NULL;
+            f = nx;
+        }
+        for (struct global *g = u->globals; g; ) {
+            struct global *nx = g->next;
+            *gt = g; gt = &g->next; g->next = NULL;
+            g = nx;
+        }
+        for (struct topasm *t = u->topasm; t; ) {
+            struct topasm *nx = t->next;
+            *tt = t; tt = &t->next; t->next = NULL;
+            t = nx;
+        }
+    }
+    /* ---- external names: one definition each ---- */
+    struct lto_ht fdefs = { 0 }, gdefs = { 0 };
+    for (struct func *f = U->funcs; f; f = f->next)
+        if (!f->absorbed && !f->is_static && f->has_defn) {
+            unsigned j = lto_slot(&fdefs, f->name);
+            struct func *d = fdefs.v[j];
+            if (!d || d->is_weak)
+                fdefs.v[j] = f;
+        }
+    for (struct func *f = U->funcs; f; f = f->next)
+        if (!f->absorbed && !f->is_static && !f->has_defn) {
+            struct func *def = lto_get(&fdefs, f->name);
+            if (def) {
+                f->lto_def = def;
+                f->absorbed = 1;
+            }
+        }
+    for (struct global *g = U->globals; g; g = g->next)
+        if (!g->absorbed && !g->is_static && g->defined) {
+            unsigned j = lto_slot(&gdefs, g->name);
+            struct global *d = gdefs.v[j];
+            if (!d || (!d->has_init && g->has_init))
+                gdefs.v[j] = g;
+        }
+    for (struct global *g = U->globals; g; g = g->next)
+        if (!g->absorbed && !g->is_static) {
+            struct global *def = lto_get(&gdefs, g->name);
+            if (def && def != g) {
+                g->lto_def = def;
+                g->absorbed = 1;
+            }
+        }
+#define FDEF(f) ((f) && (f)->lto_def ? (f)->lto_def : (f))
+#define GDEF(g) ((g) && (g)->lto_def ? (g)->lto_def : (g))
+    for (int f = 0; f < IU->nfuncs; f++) {
+        struct ir_func *fn = &IU->funcs[f];
+        for (int i = 0; i < fn->nins; i++) {
+            fn->ins[i].callee = FDEF(fn->ins[i].callee);
+            fn->ins[i].glob = GDEF(fn->ins[i].glob);
+        }
+        for (int t = 0; t < fn->neh_types; t++)
+            fn->eh_types[t] = GDEF(fn->eh_types[t]);
+    }
+    for (struct global *g = U->globals; g; g = g->next)
+        for (int r = 0; r < g->nrelocs; r++) {
+            g->relocs[r].ftarget = FDEF(g->relocs[r].ftarget);
+            g->relocs[r].gtarget = GDEF(g->relocs[r].gtarget);
+        }
+#undef FDEF
+#undef GDEF
+    /* ---- a static name another unit uses too: NAME.lto.N ---- */
+    {
+        struct lto_ht names = { 0 };
+        for (struct func *f = U->funcs; f; f = f->next)
+            if (!f->absorbed)
+                { unsigned j_ = lto_slot(&names, f->name); names.n[j_]++; }
+        for (struct global *g = U->globals; g; g = g->next)
+            if (!g->absorbed)
+                { unsigned j_ = lto_slot(&names, g->name); names.n[j_]++; }
+        int n = 0;
+        for (struct func *f = U->funcs; f; f = f->next)
+            if (!f->absorbed && f->is_static && !f->asm_name &&
+                lto_count(&names, f->name) > 1) {
+                char *nm = xmalloc(strlen(f->name) + 24);
+                sprintf(nm, "%s.lto.%d", f->name, n++);
+                f->name = nm;
+            }
+        for (struct global *g = U->globals; g; g = g->next)
+            if (!g->absorbed && g->is_static && !g->asm_name &&
+                lto_count(&names, g->name) > 1) {
+                char *nm = xmalloc(strlen(g->name) + 24);
+                sprintf(nm, "%s.lto.%d", g->name, n++);
+                g->name = nm;
+            }
+    }
+    /* ---- internalize: what nothing outside names ---- */
+    if (internalize) {
+        struct lto_ht kept = { 0 }, aliased = { 0 };
+        for (int k = 0; k < nkeep; k++)
+            { unsigned j_ = lto_slot(&kept, keep[k]); kept.v[j_] = (void *)1; }
+        for (struct func *a = U->funcs; a; a = a->next)
+            if (!a->absorbed && a->alias_of)
+                { unsigned j_ = lto_slot(&aliased, a->alias_of); aliased.v[j_] = (void *)1; }
+        for (struct global *a = U->globals; a; a = a->next)
+            if (!a->absorbed && a->alias_of)
+                { unsigned j_ = lto_slot(&aliased, a->alias_of); aliased.v[j_] = (void *)1; }
+        for (struct func *f = U->funcs; f; f = f->next) {
+            if (f->absorbed || f->is_static || !f->has_defn || f->is_weak ||
+                f->is_root || f->is_ctor || f->is_dtor || f->is_isr ||
+                f->attr_used || f->alias_of || f->asm_name || f->vis ||
+                !strcmp(f->name, "main") ||
+                (g_entry && !strcmp(f->name, g_entry)) ||
+                lto_get(&kept, f->name))
+                continue;
+            if (!lto_get(&aliased, f->name)) {
+                /* (emitted, as an external was: reachability decides) */
+                f->is_static = 1;
+                f->used = 1;
+            }
+        }
+        for (struct global *g = U->globals; g; g = g->next) {
+            if (g->absorbed || g->is_static || !g->defined || g->is_weak ||
+                g->attr_used || g->alias_of || g->asm_name || g->vis ||
+                g->section || g->is_common ||
+                lto_get(&kept, g->name) || lto_get(&aliased, g->name))
+                continue;
+            g->is_static = 1;
+            g->used = 1;
+        }
+    }
+    /* the symbol table the IR prints by: every name again */
+    for (int f = 0; f < IU->nfuncs; f++) {
+        struct ir_func *fn = &IU->funcs[f];
+        for (int i = 0; i < fn->nins; i++) {
+            if (fn->ins[i].callee)
+                ir_sym_func(IU, fn->ins[i].callee);
+            if (fn->ins[i].glob)
+                ir_sym_global(IU, fn->ins[i].glob);
+        }
+    }
+    g_lto_u = U;
+    g_lto_iu = IU;
+}
+
+/* -flto: the inputs that carry their C are compiled again as one
+ * program into *tmp, which takes the first one's place among the link's
+ * inputs; the others leave the list. 0, or 1 after an error. */
+static int lto_link_inputs(const char *out, char **tmp)
+{
+    *tmp = NULL;
+    int idx[LTO_MAX], n = 0;
+    char *bufs[LTO_MAX];
+    const char *texts[LTO_MAX], *names[LTO_MAX];
+    for (int k = 0; k < g_nlink_in && n < LTO_MAX; k++) {
+        long len = 0, pn = 0;
+        unsigned char *b = (unsigned char *)plat_read_file(g_link_in[k], &len);
+        const char *pl = b ? lto_section(b, len, &pn) : NULL;
+        if (!pl || pn < 13 || memcmp(pl, "EMBCC-LTO 1 ", 12)) {
+            free(b);
+            continue;
+        }
+        const char *nl = memchr(pl, '\n', (size_t)pn);
+        if (!nl) {
+            free(b);
+            continue;
+        }
+        names[n] = xstrndup(pl + 12, (size_t)(nl - pl - 12));
+        texts[n] = xstrndup(nl + 1, (size_t)(pl + pn - nl - 1));
+        bufs[n] = (char *)b;
+        idx[n++] = k;
+    }
+    if (!n)
+        return 0;
+    /* what the rest of the link names (and the runtime's libraries,
+     * which call main and may call what a program defines) */
+    const char **keep = NULL;
+    int nkeep = 0, capkeep = 0, known = g_link_kind != LINK_SHARED;
+    for (int k = 0; k < g_nlink_in && known; k++) {
+        int lto = 0;
+        for (int j = 0; j < n; j++)
+            lto |= idx[j] == k;
+        if (!lto)
+            known = lto_undef_names(g_link_in[k], &keep, &nkeep, &capkeep);
+    }
+    if (known && (target_os_get() != TGT_OS_DARWIN && !glibc_mode())) {
+        static const char *const rt[] = { "libc.a", "librt.a", "crt1.o",
+                                          "libcxx.a" };
+        for (int k = 0; k < 4; k++) {
+            char p[1024];
+            if (paths_target_file(lib_triple(), rt[k], p, sizeof p))
+                lto_undef_names(p, &keep, &nkeep, &capkeep);
+        }
+    }
+    /* (with the system's C library, its shared objects are not read: what
+     * they call by name in a program is main and the entry, kept below) */
+    /* (its warnings were said when each unit was compiled; read again,
+     * the C no longer knows which of it came from a system header) */
+    int saved_cxx = lang_cxx;
+    lang_cxx = 0;
+    diag_set_no_warnings(1);
+    g_lto_collect = 1;
+    g_lto_n = 0;
+    int rc = 0;
+    for (int j = 0; j < n && !rc; j++) {
+        g_lto_text = texts[j];
+        rc = compile_unit(names[j], NULL, 0);
+    }
+    g_lto_text = NULL;
+    g_lto_collect = 0;
+    lang_cxx = saved_cxx;
+    diag_set_no_warnings(g_user_no_warn);
+    if (rc)
+        return 1;
+    lto_merge(known, keep, nkeep);
+    char *obj = xmalloc(strlen(out) + 24);
+    sprintf(obj, "%s.embcc-lto.o", out);
+    g_lto_back = 1;
+    rc = compile_unit(names[0], obj, 0);
+    g_lto_back = 0;
+    for (int j = 0; j < n; j++)
+        free(bufs[j]);
+    if (rc) {
+        remove(obj);
+        free(obj);
+        return 1;
+    }
+    /* the merged object where the first unit was; the rest gone */
+    int w = 0;
+    for (int k = 0; k < g_nlink_in; k++) {
+        int j = 0;
+        while (j < n && idx[j] != k)
+            j++;
+        if (j < n && j > 0)
+            continue;
+        g_link_in[w++] = j == 0 && j < n ? obj : g_link_in[k];
+    }
+    g_nlink_in = w;
+    *tmp = obj;
+    return 0;
 }
 
 int main(int argc, char **argv)

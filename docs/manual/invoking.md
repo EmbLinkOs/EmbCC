@@ -18,8 +18,7 @@ Each option is one of three kinds, and its entry says which:
   behaves the way it asks, or because doing nothing is harmless. Each such
   entry says which.
 - **Refused.** The option names a promise about the generated code that
-  EmbCC cannot keep (position independence, stack protection, profiling,
-  link-time optimization, and so on). The driver stops with an error that
+  EmbCC cannot keep (stack-clash protection, profiling, and so on). The driver stops with an error that
   names the option, so a build never receives an object that silently
   lacks what it asked for.
 
@@ -2155,9 +2154,9 @@ across units, and EmbCC does not.
 
 ### `-fno-isolate-erroneous-paths-dereference`, `-fno-move-loop-invariants`, `-fno-ipa-sra`, `-fno-lto`
 
-Accepted and without effect. EmbCC turns no null dereference into a
-trap, and has no passes under the other three names; `-fno-lto` is the
-default (`-flto` is [refused](#refused-options)). EmbCC's loop-invariant
+Accepted. EmbCC turns no null dereference into a trap and has no passes
+under the next two names; `-fno-lto` turns off `-flto` (see
+[Link-time optimization](optimization.md#link-time-optimization)). EmbCC's loop-invariant
 motion is the `licm` pass, turned off with `--no-pass=licm`.
 
 ### `-fsanitize-trap`, `-fsanitize-trap=LIST`, `-fsanitize-undefined-trap-on-error`
@@ -2305,7 +2304,6 @@ what EmbCC's spellings get.
 
 | Option | Message |
 |---|---|
-| `-flto` | (same form) |
 | `-fprofile-*`, `--coverage`, `-fcoverage-mapping`, `-pg` | (same form) |
 | `-fstack-clash-protection`, `-fcf-protection`, `-fcf-protection=...` | (same form) |
 | `-fsanitize*` other than the forms in [`--sanitize`](#--sanitizelist---no-sanitizelist) | (same form) |
