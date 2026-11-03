@@ -363,6 +363,9 @@ for it: link with MinGW's toolchain.
   `__int128` are passed by reference to a copy the caller makes; a
   `long double` comes back through a hidden pointer passed first, and an
   `__int128` in `xmm0`, as MinGW's GCC and clang return them.
+- A file-scope `__asm__` block's labels are symbols (`.globl` ones
+  external), and its calls and `.quad`/`.long` fields are relocations, so
+  a C declaration the block defines binds to it.
 - `va_arg` reads a structure of 1, 2, 4 or 8 bytes from its slot, and any
   other structure, a `long double` or an `__int128` through the pointer
   in its slot.
@@ -378,7 +381,7 @@ These are refused by name:
 
 | Construct | Diagnostic |
 |---|---|
-| file-scope `__asm__` with labels or symbols | `a file-scope asm block with labels or symbol references is not supported for a Windows target yet` |
+| a file-scope `__asm__` block's `.section` | `file-scope asm section ".boot" is not supported: EmbCC places every byte of a block in .text, where this data would not be writable; define it in C` (as on every x86-64 target) |
 
 ### Predefined macros
 

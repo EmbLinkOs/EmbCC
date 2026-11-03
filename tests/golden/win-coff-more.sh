@@ -105,3 +105,24 @@ EOF
 "$EMBCC" $W -O1 -c "$out/v.c" -o "$out/v.obj" 2> "$out/v.err" ||
     fail "va_arg of a struct or __int128 was refused: $(cat "$out/v.err")"
 echo "va_arg of a structure and of __int128 compiles for Windows"
+
+# ---- 4. a file-scope asm block's labels and fields --------------------------
+cat > "$out/a.c" <<'ASM'
+void helper(void);
+int value;
+__asm__(".globl helper\nhelper:\n call target\n ret\n.globl table\ntable:\n .quad helper\n .quad value\n");
+void use(void) { helper(); }
+ASM
+"$EMBCC" $W -c "$out/a.c" -o "$out/a.obj" 2> "$out/a.err" ||
+    fail "a file-scope asm block with symbols was refused: $(cat "$out/a.err")"
+if [ -n "$OD" ]; then
+    "$OD" -dr "$out/a.obj" > "$out/a.dis"
+    grep -q 'IMAGE_REL_AMD64_REL32[[:space:]]*target' "$out/a.dis" || fail "the block's call has no relocation"
+    grep -q 'IMAGE_REL_AMD64_ADDR64[[:space:]]*helper' "$out/a.dis" || fail "the .quad helper has no relocation"
+    grep -q 'IMAGE_REL_AMD64_ADDR64[[:space:]]*value' "$out/a.dis" || fail "the .quad value has no relocation"
+fi
+if [ -n "$NM" ]; then
+    "$NM" "$out/a.obj" | grep -q ' T helper$' || fail "helper is not the block's global label"
+    ! "$NM" "$out/a.obj" | grep -q ' U helper$' || fail "C's call of helper went to a second, undefined helper"
+fi
+echo "a file-scope asm block's labels are symbols and its fields relocations"

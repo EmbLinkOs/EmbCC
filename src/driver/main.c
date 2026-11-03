@@ -4957,11 +4957,30 @@ lto_backend:
                                "('%s') is not supported for a Windows "
                                "target yet", iu->funcs[i].src->name);
         for (struct topasm *tas = u->topasm; tas; tas = tas->next)
-            if (tas->nsyms || tas->nrels)
+            if ((tas->nsyms || tas->nrels) && tas->section)
                 diag_fatal(tas->file, tas->line,
                            "a file-scope asm block with labels or symbol "
-                           "references is not supported for a Windows "
-                           "target yet");
+                           "references in a section of its own ('%s') is "
+                           "not supported for a Windows target yet",
+                           tas->section);
+        /* A block's fields hold their addends before .text is handed
+         * over (a COFF relocation has none): a call's rel32 is measured
+         * from the field's end, so ELF's -4 becomes 0, and a field
+         * against one of the block's own local labels is relative to
+         * .text, so the block's place is in it */
+        for (struct topasm *tas = u->topasm; tas; tas = tas->next)
+            for (int r = 0; r < tas->nrels; r++) {
+                const struct asmrel *ar = &tas->rels[r];
+                int pc = ar->kind == ASMREL_PC32 ||
+                         ar->elf_type == R_X86_64_PC32 ||
+                         ar->elf_type == R_X86_64_PLT32;
+                int w8 = !pc && (ar->kind == ASMREL_ABS64 ||
+                                 ar->elf_type == R_X86_64_64);
+                long v = ar->addend + (pc ? 4 : 0) +
+                         (ar->target ? 0 : tas->text_off);
+                target_put_uint(text.p + tas->text_off + ar->off, w8 ? 8 : 4,
+                                (unsigned long)v);
+            }
         (void)unwind;       /* .pdata and .xdata are written always */
 
         /* Every function that moves rsp or saves a register gets its
@@ -5237,6 +5256,41 @@ lto_backend:
                              : IMAGE_SYM_CLASS_EXTERNAL) + 1;
         }
         free(emv);
+        /* A file-scope block's labels: global ones external, the rest
+         * static; a function or object C declares and the block defines
+         * is that symbol. And .text's own, for a field against a local
+         * label. */
+        int asm_text_sym = -1, nasym = 0;
+        const char **asym_name = NULL;
+        int *asym_ndx = NULL;
+        for (struct topasm *tas = u->topasm; tas; tas = tas->next) {
+            if (tas->nrels && asm_text_sym < 0)
+                asm_text_sym = coffw_add_symbol(cw, ".text", 0, c_text,
+                                                IMAGE_SYM_TYPE_NULL,
+                                                IMAGE_SYM_CLASS_STATIC);
+            for (int k = 0; k < tas->nsyms; k++) {
+                const struct asmsym *as = &tas->syms[k];
+                int ndx = coffw_add_symbol(
+                    cw, as->name, (unsigned)(tas->text_off + as->off), c_text,
+                    as->type == ASMSYM_FUNC ? IMAGE_SYM_DTYPE_FUNCTION
+                                            : IMAGE_SYM_TYPE_NULL,
+                    as->is_global ? IMAGE_SYM_CLASS_EXTERNAL
+                                  : IMAGE_SYM_CLASS_STATIC);
+                asym_name = xrealloc(asym_name, (size_t)(nasym + 1) * sizeof *asym_name);
+                asym_ndx = xrealloc(asym_ndx, (size_t)(nasym + 1) * sizeof *asym_ndx);
+                asym_name[nasym] = as->name;
+                asym_ndx[nasym++] = ndx;
+                for (struct func *f = u->funcs; f; f = f->next)
+                    if (!f->absorbed && !f->has_defn && !f->sym_ndx &&
+                        !strcmp(f->name, as->name))
+                        f->sym_ndx = ndx + 1;
+                for (struct global *g = u->globals; g; g = g->next)
+                    if (!g->absorbed && !g->defined && !g->sym_ndx &&
+                        !strcmp(g->name, as->name))
+                        g->sym_ndx = ndx + 1;
+            }
+        }
+
         /* Undefined: section zero with a ZERO value. A nonzero value
          * there would make it a COMMON rather than a reference. */
         for (struct global *g = u->globals; g; g = g->next)
@@ -5377,6 +5431,55 @@ lto_backend:
         for (int k = 0; k < nxtor; k++)
             free((char *)xtor[k].name);
         free(c_named);
+        /* a block's fields: against the name's symbol -- a function, an
+         * object, a label, or one undefined symbol per name -- or .text */
+        {
+            const char **un = NULL;
+            int *us = NULL, nu = 0;
+            for (struct topasm *tas = u->topasm; tas; tas = tas->next)
+                for (int r = 0; r < tas->nrels; r++) {
+                    const struct asmrel *ar = &tas->rels[r];
+                    const char *tn = ar->target;
+                    int sym = -1;
+                    if (!tn)
+                        sym = asm_text_sym;
+                    for (struct func *f = u->funcs; tn && sym < 0 && f; f = f->next)
+                        if (!f->absorbed && f->sym_ndx && !strcmp(f->name, tn))
+                            sym = f->sym_ndx - 1;
+                    for (struct global *g = u->globals; tn && sym < 0 && g; g = g->next)
+                        if (!g->absorbed && g->sym_ndx && !strcmp(g->name, tn))
+                            sym = g->sym_ndx - 1;
+                    for (int k = 0; tn && sym < 0 && k < nasym; k++)
+                        if (!strcmp(asym_name[k], tn))
+                            sym = asym_ndx[k];
+                    for (int k = 0; tn && sym < 0 && k < nu; k++)
+                        if (!strcmp(un[k], tn))
+                            sym = us[k];
+                    if (sym < 0) {
+                        sym = coffw_add_symbol(cw, tn, 0, IMAGE_SYM_UNDEFINED,
+                                               IMAGE_SYM_TYPE_NULL,
+                                               IMAGE_SYM_CLASS_EXTERNAL);
+                        un = xrealloc(un, (size_t)(nu + 1) * sizeof *un);
+                        us = xrealloc(us, (size_t)(nu + 1) * sizeof *us);
+                        un[nu] = tn;
+                        us[nu++] = sym;
+                    }
+                    int pc = ar->kind == ASMREL_PC32 ||
+                             ar->elf_type == R_X86_64_PC32 ||
+                             ar->elf_type == R_X86_64_PLT32;
+                    int w8 = !pc && (ar->kind == ASMREL_ABS64 ||
+                                     ar->elf_type == R_X86_64_64);
+                    coffw_add_reloc(cw, c_text,
+                                    (unsigned)(tas->text_off + ar->off), sym,
+                                    pc ? IMAGE_REL_AMD64_REL32
+                                    : w8 ? IMAGE_REL_AMD64_ADDR64
+                                         : IMAGE_REL_AMD64_ADDR32);
+                }
+            free(un);
+            free(us);
+        }
+        free(asym_name);
+        free(asym_ndx);
         /* -g's relocations: a code or data address is 64 bits against
          * .text or the variable's symbol; an offset into another debug
          * section is SECREL, which the link makes relative to that

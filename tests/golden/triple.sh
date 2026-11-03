@@ -149,8 +149,8 @@ win_refuses() {                   # win_refuses SOURCE EXPECTED-TEXT
         echo "FAIL: refused, and still wrote a file"; exit 1; }
     return 0
 }
-win_refuses '__asm__(".globl helper\nhelper: ret");' \
-            'a file-scope asm block with labels or symbol references is not supported for a Windows'
+win_refuses '__asm__(".section .boot,\"ax\"\n.globl helper\nhelper: ret");' \
+            'file-scope asm section .* is not supported'
 # a constructor: a .ctors entry, which MinGW's startup code runs
 printf '__attribute__((constructor)) static void c(void){}\nint main(void){return 0;}\n' > "$out/w.c"
 "$EMBCC" --target=x86_64-windows-gnu -c "$out/w.c" -o "$out/w.o" || {
