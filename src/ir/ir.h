@@ -453,6 +453,8 @@ struct ir_ins {
                               * (type.h ty_x87_ret): 1 one long double in st0,
                               * 2 a long double _Complex in st0/st1 */
     int scratch;             /* frame offset of the returned struct */
+    int ret_ldref;           /* IR_CALL, Microsoft x64: a long double result
+                              * through a hidden pointer to `scratch` */
     struct ir_asm *asm_ir;   /* IR_ASM */
     int eh_region;           /* IR_CALL: 1 + the innermost exception region
                               * it is in (ir_func.eh), 0 if none */

@@ -1654,6 +1654,9 @@ int ir_intern_aligned(struct ir_unit *iu, const char *bytes, int len,
 static int win64_byref(const struct type *t)
 {
     int sz;
+    /* MinGW's: a long double (x87's, in 16 bytes) and an __int128 too */
+    if (t && (t->kind == TY_LDOUBLE || t->kind == TY_INT128))
+        return 1;
     if (!t || t->kind != TY_STRUCT)
         return 0;
     sz = ty_size(t);
@@ -4710,6 +4713,15 @@ static int emit_call(struct ir_func *fn, struct expr *e, const int *args,
             (target_get() == TARGET_AARCH64 || !ty_x87_ret(rty)))
             ireg = 1;
     }
+    /* MinGW returns a long double through a hidden pointer, passed first,
+     * to 16 bytes of this frame's scratch */
+    if (target_win64_abi() && rty->kind == TY_LDOUBLE) {
+        ireg = 1;
+        i->ret_ldref = 1;
+        fn->scratch_bytes = (fn->scratch_bytes + 15) & ~15;
+        i->scratch = fn->scratch_bytes;
+        fn->scratch_bytes += 16;
+    }
     for (int k = 0; k < e->nargs; k++) {
         struct type *at = e->args[k]->ty;
         if (k < 64 && (e->scalar_args >> k & 1))
@@ -4772,37 +4784,6 @@ static int emit_call(struct ir_func *fn, struct expr *e, const int *args,
                 ar->copy_off = fn->scratch_bytes;
                 fn->scratch_bytes += (ar->size + 15) & ~15;
             }
-            /* Two types whose Windows answer is not a variation on
-             * System V's, each refused with the reason that is
-             * actually true -- a refusal that misstates why is a
-             * smaller version of the same dishonesty as passing it
-             * wrongly.
-             *
-             *   __int128 arithmetic is lowered to libgcc helper
-             *   calls (__multi3, __floattidf) whose arguments this
-             *   backend places in System V's registers. On Windows
-             *   those helpers take Microsoft's, so the call would
-             *   be wrong before the type ever is.
-             *
-             *   long double is 16 bytes on MinGW and travels BY
-             *   REFERENCE, returned through a hidden pointer like a
-             *   large aggregate. EmbCC passes it on the stack by
-             *   value and returns it in st0, which is System V's
-             *   answer to a different question. */
-            if (ar->is_int128)
-                diag_fatal(fn->file, e->line,
-                           "passing __int128 is not supported for a "
-                           "Windows target yet: EmbCC lowers its "
-                           "arithmetic to libgcc helpers whose "
-                           "arguments it places in the System V "
-                           "registers");
-            if (at->kind == TY_LDOUBLE)
-                diag_fatal(fn->file, e->line,
-                           "passing long double is not supported for "
-                           "a Windows target yet: there it travels by "
-                           "reference and returns through a hidden "
-                           "pointer, and EmbCC passes it on the stack "
-                           "by value");
             if (ireg >= 4) {
                 ar->on_stack = 1;
                 /* Stack arguments begin ABOVE the 32 bytes of
@@ -7142,28 +7123,6 @@ static void gen_func_(struct ir_func *fn, struct func *f)
      * has to exist for that to matter. Checking only the call sites
      * left `long double g(long double)` compiling silently with System
      * V's answer. */
-    if (target_win64_abi()) {
-        for (int k = 0; k <= f->nparams; k++) {
-            struct type *t = k < f->nparams ? f->param_tys[k] : f->ret_ty;
-            if (!t)
-                continue;
-            if (t->kind == TY_INT128)
-                diag_fatal(f->file, f->line,
-                           "__int128 in the signature of '%s' is not "
-                           "supported for a Windows target yet: EmbCC "
-                           "lowers its arithmetic to libgcc helpers whose "
-                           "arguments it places in the System V registers",
-                           f->name);
-            if (t->kind == TY_LDOUBLE)
-                diag_fatal(f->file, f->line,
-                           "long double in the signature of '%s' is not "
-                           "supported for a Windows target yet: there it "
-                           "travels by reference and returns through a "
-                           "hidden pointer, and EmbCC passes it on the "
-                           "stack by value", f->name);
-        }
-    }
-
     /* The ABI facts about each parameter, decided here where the types are
      * still in hand. */
     if (f->nparams > 0) {

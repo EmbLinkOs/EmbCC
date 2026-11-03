@@ -748,8 +748,9 @@ static int *layout_frame(struct ir_func *fn, int *frame_out,
      * pointer in rdi; it must survive until the return, so it gets a
      * slot of its own. */
     *sret_slot_out = 0;
-    if (f->ret_ty->kind == TY_STRUCT && ty_classify(f->ret_ty, rcls) == 0 &&
-        !ty_x87_ret(f->ret_ty)) {
+    if ((f->ret_ty->kind == TY_STRUCT && ty_classify(f->ret_ty, rcls) == 0 &&
+         !ty_x87_ret(f->ret_ty)) ||
+        (target_win64_abi() && f->ret_ty->kind == TY_LDOUBLE)) {
         running += 8;
         *sret_slot_out = -running;
     }
@@ -3341,9 +3342,10 @@ static void gen_func(struct ir_func *fn, struct code *text,
          * parameters arrive on the caller's stack at [rbp+16...]. */
         int ireg = 0, freg = 0;
         enum arg_class rcls[2];
-        int ret_mem = f->ret_ty->kind == TY_STRUCT &&
-                      ty_classify(f->ret_ty, rcls) == 0 &&
-                      !ty_x87_ret(f->ret_ty);
+        int ret_mem = (f->ret_ty->kind == TY_STRUCT &&
+                       ty_classify(f->ret_ty, rcls) == 0 &&
+                       !ty_x87_ret(f->ret_ty)) ||
+                      (target_win64_abi() && f->ret_ty->kind == TY_LDOUBLE);
         if (ret_mem) {
             x86_store_arg(text, ireg++, sret_slot);
         }
@@ -5344,8 +5346,12 @@ static void gen_func(struct ir_func *fn, struct code *text,
                     struct ir_arg *a = &i->argv[k];
                     if (!a->byref)
                         continue;
-                    /* a->vreg holds the struct's ADDRESS, not its value. */
-                    x86_load_reg_mem(text, REG_RCX, REG_RBP, sd[a->vreg], 8);
+                    /* a->vreg holds the struct's ADDRESS, not its value;
+                     * a long double's or an __int128's is its own slot */
+                    if (a->is_struct)
+                        x86_load_reg_mem(text, REG_RCX, REG_RBP, sd[a->vreg], 8);
+                    else
+                        x86_lea_reg_slot(text, REG_RCX, sd[a->vreg]);
                     for (int off = 0; off < a->size; off += 8) {
                         int chunk = a->size - off >= 8 ? 8 : a->size - off;
                         x86_load_reg_mem(text, REG_RAX, REG_RCX, off, chunk);
@@ -5371,6 +5377,13 @@ static void gen_func(struct ir_func *fn, struct code *text,
                 struct ir_arg *a = &i->argv[k];
                 if (!a->on_stack)
                     continue;
+                if (a->byref && target_win64_abi()) {
+                    /* the slot holds the copy's address: the struct's
+                     * bytes went there, and the callee read a pointer */
+                    x86_lea_reg_slot(text, REG_RAX, scratch_base + a->copy_off);
+                    x86_store_mem_reg(text, REG_RSP, a->stk_off, REG_RAX, 8);
+                    continue;
+                }
                 if (!a->is_struct && a->size == 16) {
                     /* long double: its 16 bytes, from its own slot */
                     for (int q = 0; q < 16; q += 8) {
@@ -5460,7 +5473,8 @@ static void gen_func(struct ir_func *fn, struct code *text,
              * first real argument, so the callee wrote its result
              * through whatever that happened to be. */
             int sret_lea = 0;
-            if (i->retsize && i->retnclass == 0 && !i->ret_x87) {
+            if ((i->retsize && i->retnclass == 0 && !i->ret_x87) ||
+                i->ret_ldref) {
                 /* Recorded, not emitted: this writes argument register
                  * zero, and the parallel move below still has to READ
                  * the registers its sources live in -- one of which can
@@ -5706,6 +5720,17 @@ static void gen_func(struct ir_func *fn, struct code *text,
                 cg_store(text, sd, i->dst, 8);
                 break;
             }
+            if (i->ret_ldref) {
+                /* the long double the callee wrote into our scratch */
+                if (i->dst >= 0)
+                    for (int q = 0; q < 16; q += 8) {
+                        x86_load_reg_mem(text, REG_RAX, REG_RBP,
+                                         scratch_base + i->scratch + q, 8);
+                        x86_store_mem_reg(text, REG_RBP, sd[i->dst] + q,
+                                          REG_RAX, 8);
+                    }
+                break;
+            }
             /* A result nothing reads -- every void call has a temp for
              * one -- stays in rax/xmm0: copying it home was a `mov
              * %rax,%r8` after each of them. Temps only: a local's value
@@ -5718,6 +5743,13 @@ static void gen_func(struct ir_func *fn, struct code *text,
             if (i->flt && i->w == 16)      /* long double comes back in st0 */
                 x86_x87_mem(text, 0xDB, 7, REG_RBP, sd[i->dst]);
             else if (i->w == 16) {         /* an __int128 in rax:rdx */
+                if (target_win64_abi()) {  /* (MinGW's: in xmm0) */
+                    x86_movq_gpr_xmm(text, REG_RAX, 0, 8);
+                    code_byte(text, 0x66); code_byte(text, 0x0f);  /* pshufd */
+                    code_byte(text, 0x70); code_byte(text, 0xc0);  /* xmm0, */
+                    code_byte(text, 0x4e);                         /* xmm0, 0x4e */
+                    x86_movq_gpr_xmm(text, REG_RDX, 0, 8);
+                }
                 x86_store_mem_reg(text, REG_RBP, sd[i->dst], REG_RAX, 8);
                 x86_store_mem_reg(text, REG_RBP, sd[i->dst] + 8, REG_RDX, 8);
             } else if (i->flt)
@@ -5900,6 +5932,24 @@ static void gen_func(struct ir_func *fn, struct code *text,
             } else if (i->a >= 0 && f->ret_ty->kind == TY_INT128) {
                 x86_load_reg_mem(text, REG_RAX, REG_RBP, sd[i->a], 8);
                 x86_load_reg_mem(text, REG_RDX, REG_RBP, sd[i->a] + 8, 8);
+                if (target_win64_abi()) {
+                    /* MinGW's: in xmm0, the low half first */
+                    x86_movq_xmm_gpr(text, 0, REG_RAX, 8);
+                    x86_movq_xmm_gpr(text, 1, REG_RDX, 8);
+                    code_byte(text, 0x66); code_byte(text, 0x0f);  /* punpcklqdq */
+                    code_byte(text, 0x6c); code_byte(text, 0xc1);  /* xmm0, xmm1 */
+                }
+            } else if (i->a >= 0 && i->flt && i->w == 16 &&
+                       target_win64_abi()) {
+                /* MinGW's long double: into the caller's buffer, whose
+                 * address goes back in rax */
+                x86_load_slot(text, sret_slot, 8, 0, 8);
+                x86_mov_reg_reg(text, REG_RCX, REG_RAX);
+                for (int q = 0; q < 16; q += 8) {
+                    x86_load_reg_mem(text, REG_RAX, REG_RBP, sd[i->a] + q, 8);
+                    x86_store_mem_reg(text, REG_RCX, q, REG_RAX, 8);
+                }
+                x86_mov_reg_reg(text, REG_RAX, REG_RCX);
             } else if (i->a >= 0 && i->flt && i->w == 16) {
                 x86_x87_mem(text, 0xDB, 5, REG_RBP, sd[i->a]);   /* -> st0 */
             } else if (i->a >= 0 && i->flt) {

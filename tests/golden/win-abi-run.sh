@@ -77,6 +77,21 @@ long long vstruct(int n, ...)
   __int128 q = va_arg(ap, __int128);
   va_end(ap);
   return n + s.a * 10 + s.b * 100 + t.c * 1000 + (long long)q * 10000; }
+/* long double and __int128 in a signature: by reference to the caller's
+ * copy, a long double returned through a hidden pointer passed first, an
+ * __int128 in xmm0 -- MinGW's (no constants: those are relocations) */
+long double ldadd(long double a, long double b) { return a + b + b; }
+__int128 i128mix(__int128 a, long long b) { return a + b; }
+long double ld5(long long a, long long b, long long c, long long d,
+                long double e) { return e + a + d; }
+/* EmbCC as the caller of a by-reference struct past the fourth slot: the
+ * slot holds the copy's ADDRESS (it held the struct's first 16 bytes) */
+long long callbig(long long (*f)(long long, long long, long long, long long,
+                                 struct big), struct big s)
+{ return f(1, 2, 3, 4, s); }
+/* ...and EmbCC calling one, through a pointer */
+long double callld(long double (*f)(long double, long double), long double x)
+{ return f(x, x + x); }
 /* ...and EmbCC as the CALLER of someone else's variadic function, through
  * a pointer so that no relocation is needed: a double among the first
  * four arguments must travel in its integer register as well */
@@ -177,6 +192,25 @@ T t12(void) { return check((void *)FN(clob_t, clob), 5) != 0; }
 T t13(void) { return FN(clob_t, clob)(5, ident) != 6901; }
 struct s8 { int a, b; };
 struct s12 { int a, b, c; };
+typedef long double MS (*ldadd_t)(long double, long double);
+typedef __int128 MS (*i128mix_t)(__int128, long long);
+typedef long double MS (*ld5_t)(long long, long long, long long, long long,
+                                long double);
+typedef long double MS (*callld_t)(long double MS (*)(long double, long double),
+                                   long double);
+MS long double gld(long double a, long double b) { return b - a / 4; }
+typedef long long MS (*callbig_t)(long long MS (*)(long long, long long,
+                                                   long long, long long,
+                                                   struct big), struct big);
+MS long long gbig(long long a, long long b, long long c, long long d,
+                  struct big s) { return a + b + c + d + s.x * 10 + s.z * 100; }
+T t19(void) { struct big s = { 5, 6, 7 };
+              return FN(callbig_t, callbig)(gbig, s) != 10 + 50 + 700; }
+T t15(void) { return FN(ldadd_t, ldadd)(1.5L, 2.0L) != 5.5L; }
+T t16(void) { __int128 a = ((__int128)3 << 64) | 5;
+              return FN(i128mix_t, i128mix)(a, -1) != (((__int128)3 << 64) | 4); }
+T t17(void) { return FN(ld5_t, ld5)(1, 2, 3, 4, 2.5L) != 7.5L; }
+T t18(void) { return FN(callld_t, callld)(gld, 8.0L) != 14.0L; }
 T t14(void) { struct s8 s = { 1, 2 }; struct s12 t = { 0, 0, 3 };
               __int128 q = ((__int128)5 << 64) | 4;
               return FN(vints_t, vstruct)(9, s, t, q) != 9 + 10 + 200 + 3000 + 40000; }
@@ -185,11 +219,14 @@ int main(void)
     int bad = t1() | t2() << 1 | t3() << 2 | t4() << 3 | t5() << 4 |
               t6() << 5 | t7() << 6;
     int va = t8() | t9() << 1 | t10() << 2 | t11() << 3 | t14() << 4;
+    int wide = t15() | t16() << 1 | t17() << 2 | t18() << 3 | t19() << 4;
     int keep = t12() | t13() << 1;
     if (!bad && !va && keep)
         bad = 120 + keep;
     if (!bad && va)
         bad = 100 + va;
+    if (!bad && wide)
+        bad = 80 + wide;
     return bad ? bad : 42;
 }
 E

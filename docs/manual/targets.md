@@ -359,6 +359,10 @@ for it: link with MinGW's toolchain.
 - Constructors and destructors go in `.ctors` and `.dtors`, which MinGW's
   startup runs, and a named section (`__attribute__((section))`) is its
   own COFF section.
+- A `long double` (x87's 80 bits in 16 bytes, as MinGW's) and an
+  `__int128` are passed by reference to a copy the caller makes; a
+  `long double` comes back through a hidden pointer passed first, and an
+  `__int128` in `xmm0`, as MinGW's GCC and clang return them.
 - `va_arg` reads a structure of 1, 2, 4 or 8 bytes from its slot, and any
   other structure, a `long double` or an `__int128` through the pointer
   in its slot.
@@ -374,8 +378,6 @@ These are refused by name:
 
 | Construct | Diagnostic |
 |---|---|
-| `long double` in a function's signature | `long double in the signature of 'f' is not supported for a Windows target yet: there it travels by reference and returns through a hidden pointer, and EmbCC passes it on the stack by value` |
-| `__int128` in a function's signature | `__int128 in the signature of 'f' is not supported for a Windows target yet: EmbCC lowers its arithmetic to libgcc helpers whose arguments it places in the System V registers` |
 | file-scope `__asm__` with labels or symbols | `a file-scope asm block with labels or symbol references is not supported for a Windows target yet` |
 
 ### Predefined macros
