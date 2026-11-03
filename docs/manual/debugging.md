@@ -26,28 +26,58 @@ code](#-g-does-not-change-the-generated-code)). See
 [Optimized code](#optimized-code) for what a debugger can rely on above
 `--opt=none` and `--opt=debug`.
 
-### `-ggdb`, `-g1`, `-g2`, `-g3`, `-gdwarf`, `-gdwarf-2`, `-gdwarf-3`, `-gdwarf-4`
+### `-ggdb`, `-g1`, `-g2`, `-g3`, `-gdwarf`
 
-Each of these is the same as `-g`. EmbCC emits one kind of debug
-information, DWARF 4, at one level of detail, so a level or a version
-that asks for no more than that is accepted. In particular `-g1` does
-not limit the output to line tables, and `-g3` does not add macro
-information.
+Each of these is the same as `-g`. EmbCC emits debug information at one
+level of detail. In particular `-g1` does not limit the output to line
+tables, and `-g3` does not add macro information.
 
-### `-gdwarf-5`, `-gsplit-dwarf`, `-gz`
+### `-gdwarf-5`, `-gdwarf-4`
 
-Refused, because EmbCC cannot produce what they ask for:
+`-g` writes DWARF 5, as GCC 11 and Clang 14 do: version 5 unit and line
+table headers, `.debug_rnglists` for a unit whose code is in several
+sections, and `.debug_loclists` for location lists. `-gdwarf-4` writes
+DWARF 4 instead, with `.debug_ranges` and `.debug_loc`, for an older
+debugger. `-gdwarf-2` and `-gdwarf-3` also write DWARF 4. Any other
+version is refused:
 
 ```text
-embcc: error: -gdwarf-5 is not supported; EmbCC emits DWARF 4, uncompressed and in one piece
+embcc: error: -gdwarf-6: EmbCC writes DWARF 4 or 5
 ```
 
-Any other `-gdwarf-N` gets the same message.
+### `-gsplit-dwarf`
+
+Writes most of the debug information to a second file, `FILE.dwo`
+beside `FILE.o`, as GCC names it. The object keeps a skeleton unit
+(`DW_TAG_skeleton_unit`, with `DW_AT_dwo_name` and `DW_AT_addr_base`),
+the line table, the frame descriptions and `.debug_addr`. The `.dwo`
+file holds the types, functions and variables in `.debug_info.dwo`,
+`.debug_abbrev.dwo` and `.debug_loclists.dwo`, and it is never
+relocated: every address in it is an index into the object's
+`.debug_addr` (`DW_FORM_addrx`, `DW_OP_addrx`, `DW_LLE_base_addressx`).
+The two units carry the same `DW_AT_dwo_id`. Split DWARF is DWARF 5, so
+`-gsplit-dwarf` writes version 5 whatever `-gdwarf-N` says. The linker
+does not read `.dwo` files. A debugger finds each one by its name in the
+skeleton, which is the path given to `-o` with `.dwo` in place of `.o`.
+
+### `-gz`, `-gz=zlib`, `-gz=none`
+
+`-gz` compresses every debug section with zlib and marks it
+`SHF_COMPRESSED`, behind an `Elf32_Chdr` or `Elf64_Chdr` header
+(`ELFCOMPRESS_ZLIB`). Relocations still address the uncompressed bytes,
+as the ELF specification says. EmbLD inflates a compressed debug section
+from any compiler before merging it, and `llvm-objcopy
+--decompress-debug-sections` gives back the bytes `-g` alone writes.
+`-gz=none` turns compression off again. Other formats are refused:
+
+```text
+embcc: error: -gz=zstd: EmbCC compresses debug sections with zlib (-gz=zlib) or not at all (-gz=none)
+```
 
 ### Options that are not accepted
 
-`-g0`, `-gline-tables-only`, `-gcolumn-info`, `-gno-...`, `-gz=...`
-and `-fdebug-prefix-map=OLD=NEW` are not recognized:
+`-g0`, `-gline-tables-only`, `-gcolumn-info`, `-gno-...` and
+`-fdebug-prefix-map=OLD=NEW` are not recognized:
 
 ```text
 embcc: error: unknown argument '-g0'
@@ -129,9 +159,9 @@ The frame base, against which every variable's location is given:
 Every parameter and every local variable of a function is described,
 with its name, its type and a location. The location is a single offset
 from the frame base (`DW_OP_fbreg`) when the variable lives in its
-stack slot, and empty (`<optimized out>`) when the optimized code keeps
-it somewhere else (see [Optimized code](#optimized-code)). There are no
-location lists and no register locations yet.
+stack slot. When the optimized code keeps it in registers, the location
+is a location list: the register or slot holding it over each range of
+code (see [Optimized code](#optimized-code)).
 
 An array or structure aligned beyond what the stack guarantees (for
 example `char buf[64] __attribute__((aligned(64)))`) is stored in a
@@ -274,22 +304,34 @@ lifetime, and the debug information names that slot. `--opt=debug` is `--opt=bas
 with this one difference: the optimizer still removes work, but every
 source variable stays in memory, where a debugger reads it.
 
-At `--opt=basic` and above, the optimizer keeps many variables in registers, or
-turns them into temporaries that no longer exist as one value. Such a
-variable's location is empty, which the debugger prints as
-`<optimized out>`. Variables that remain in their slot have that slot's
-location, which is always right:
+At `--opt=basic` and above, the optimizer takes most variables out of
+memory. Each value such a variable takes is followed into the temporary
+that holds it, and the temporary into its register or slot, so the
+variable's location is a location list. Each range of code where the
+value is live gives one entry: `DW_OP_reg5 RDI` over the loop,
+`DW_OP_fbreg -24` where it was spilled. A value in two registers (a
+64-bit value on a 32-bit machine) is `DW_OP_piece`s of both, and on AVR
+each byte is its own register. Outside those ranges the debugger prints
+`<optimized out>`. In particular, that is the case after the variable's
+last use, where its register may already hold something else.
+
+Variables that remain in their slot have that slot's location, which is
+always right:
 
 - A local the code still reads or writes in memory is in its slot.
 - A parameter that has a slot is stored there on entry, so the slot
-  holds the value it arrived with. Once the function assigns it after the
-  optimizer has taken it out of memory, its location is empty instead.
+  holds the value it arrived with. If the optimizer takes it out of
+  memory and the function then assigns it, it gets a location list as
+  any other variable.
 - A `volatile` local is the exception at every level: it is never
   promoted, forwarded or given a register, so its slot always holds its
   current value.
 
-There are no location lists yet: a variable in a register is described
-as optimized out, rather than as being in that register.
+Where two of a variable's values are live at once, because the old one
+is still read after the new one is made, the list names the newer one.
+A value the optimizer computes without keeping it (folded into an
+address, or into a vector register) is not followed there: the list
+names the register that last held it as a scalar, or nothing.
 
 Also, at `--opt=basic` and above:
 

@@ -1214,6 +1214,217 @@ static int dbgsec_for(struct linker *l, const char *name)
     }
 }
 
+/* ---- inflate (RFC 1950/1951): a compressed debug section's bytes ----
+ *
+ * An input .debug_* section may be SHF_COMPRESSED (-gz, EmbCC's or
+ * GCC's): relocations address its bytes before compression, so it is
+ * inflated first and merged as any other. Stored, fixed and dynamic
+ * blocks, after the canonical-code decoder of zlib's puff.c. */
+struct infl {
+    const unsigned char *in;
+    long inlen, inpos;
+    unsigned bitbuf;
+    int bitcnt;
+    unsigned char *out;
+    long outlen, outcap;
+    int bad;
+};
+struct inhuff { short count[16]; short symbol[320]; };
+static unsigned int get32loc(const unsigned char *p);
+
+static int infl_bits(struct infl *s, int need)
+{
+    long val = s->bitbuf;
+    while (s->bitcnt < need) {
+        if (s->inpos >= s->inlen) {
+            s->bad = 1;
+            return 0;
+        }
+        val |= (long)s->in[s->inpos++] << s->bitcnt;
+        s->bitcnt += 8;
+    }
+    s->bitbuf = (unsigned)(val >> need);
+    s->bitcnt -= need;
+    return (int)(val & ((1L << need) - 1));
+}
+
+static void infl_put(struct infl *s, unsigned char c)
+{
+    if (s->outlen == s->outcap) {
+        s->outcap = s->outcap ? s->outcap * 2 : 4096;
+        s->out = xrealloc(s->out, (size_t)s->outcap);
+    }
+    s->out[s->outlen++] = c;
+}
+
+static int infl_decode(struct infl *s, const struct inhuff *h)
+{
+    int code = 0, first = 0, index = 0;
+    for (int len = 1; len < 16; len++) {
+        code |= infl_bits(s, 1);
+        int count = h->count[len];
+        if (code - count < first)
+            return h->symbol[index + (code - first)];
+        index += count;
+        first += count;
+        first <<= 1;
+        code <<= 1;
+        if (s->bad)
+            return -1;
+    }
+    s->bad = 1;
+    return -1;
+}
+
+static void infl_build(struct inhuff *h, const short *length, int n)
+{
+    short offs[16];
+    for (int len = 0; len < 16; len++)
+        h->count[len] = 0;
+    for (int sym = 0; sym < n; sym++)
+        h->count[length[sym]]++;
+    offs[1] = 0;
+    for (int len = 1; len < 15; len++)
+        offs[len + 1] = (short)(offs[len] + h->count[len]);
+    for (int sym = 0; sym < n; sym++)
+        if (length[sym])
+            h->symbol[offs[length[sym]]++] = (short)sym;
+}
+
+static const short in_lbase[29] = {
+    3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59,
+    67, 83, 99, 115, 131, 163, 195, 227, 258 };
+static const short in_lext[29] = {
+    0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4,
+    5, 5, 5, 5, 0 };
+static const short in_dbase[30] = {
+    1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513,
+    769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577 };
+static const short in_dext[30] = {
+    0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10,
+    11, 11, 12, 12, 13, 13 };
+
+static void infl_codes(struct infl *s, const struct inhuff *lc,
+                       const struct inhuff *dc)
+{
+    for (;;) {
+        int sym = infl_decode(s, lc);
+        if (s->bad || sym < 0)
+            return;
+        if (sym < 256) {
+            infl_put(s, (unsigned char)sym);
+        } else if (sym == 256) {
+            return;
+        } else {
+            sym -= 257;
+            if (sym >= 29) {
+                s->bad = 1;
+                return;
+            }
+            int len = in_lbase[sym] + infl_bits(s, in_lext[sym]);
+            int ds = infl_decode(s, dc);
+            if (s->bad || ds < 0 || ds >= 30) {
+                s->bad = 1;
+                return;
+            }
+            long dist = in_dbase[ds] + infl_bits(s, in_dext[ds]);
+            if (dist > s->outlen) {
+                s->bad = 1;
+                return;
+            }
+            while (len--)
+                infl_put(s, s->out[s->outlen - dist]);
+        }
+    }
+}
+
+/* the zlib stream p[0..n) inflated, *outlen bytes; NULL when damaged */
+static unsigned char *inflate_zlib(const unsigned char *p, long n,
+                                   long *outlen)
+{
+    struct infl s;
+    memset(&s, 0, sizeof s);
+    if (n < 2 || (p[0] & 0x0f) != 8 || ((p[0] << 8) | p[1]) % 31)
+        return NULL;
+    s.in = p + 2;
+    s.inlen = n - 2;
+    int last;
+    do {
+        last = infl_bits(&s, 1);
+        int type = infl_bits(&s, 2);
+        if (type == 0) {                 /* stored */
+            s.bitbuf = 0;
+            s.bitcnt = 0;
+            if (s.inpos + 4 > s.inlen) { s.bad = 1; break; }
+            long len = s.in[s.inpos] | (s.in[s.inpos + 1] << 8);
+            s.inpos += 4;
+            if (s.inpos + len > s.inlen) { s.bad = 1; break; }
+            while (len--)
+                infl_put(&s, s.in[s.inpos++]);
+        } else if (type == 1) {          /* fixed codes */
+            static struct inhuff lc, dc;
+            static int built;
+            if (!built) {
+                short l[288];
+                int k = 0;
+                for (; k < 144; k++) l[k] = 8;
+                for (; k < 256; k++) l[k] = 9;
+                for (; k < 280; k++) l[k] = 7;
+                for (; k < 288; k++) l[k] = 8;
+                infl_build(&lc, l, 288);
+                for (k = 0; k < 30; k++) l[k] = 5;
+                infl_build(&dc, l, 30);
+                built = 1;
+            }
+            infl_codes(&s, &lc, &dc);
+        } else if (type == 2) {          /* dynamic codes */
+            static const short order[19] = { 16, 17, 18, 0, 8, 7, 9, 6, 10, 5,
+                                             11, 4, 12, 3, 13, 2, 14, 1, 15 };
+            int nlen = infl_bits(&s, 5) + 257, ndist = infl_bits(&s, 5) + 1;
+            int ncode = infl_bits(&s, 4) + 4;
+            short l[320];
+            struct inhuff lc, dc;
+            if (nlen > 286 || ndist > 30) { s.bad = 1; break; }
+            for (int k = 0; k < 19; k++)
+                l[order[k]] = k < ncode ? (short)infl_bits(&s, 3) : 0;
+            infl_build(&lc, l, 19);
+            for (int k = 0; k < nlen + ndist && !s.bad;) {
+                int sym = infl_decode(&s, &lc), len = 0, rep;
+                if (sym < 0) { s.bad = 1; break; }
+                if (sym < 16) {
+                    l[k++] = (short)sym;
+                    continue;
+                }
+                if (sym == 16) {
+                    if (!k) { s.bad = 1; break; }
+                    len = l[k - 1];
+                    rep = 3 + infl_bits(&s, 2);
+                } else if (sym == 17) {
+                    rep = 3 + infl_bits(&s, 3);
+                } else {
+                    rep = 11 + infl_bits(&s, 7);
+                }
+                if (k + rep > nlen + ndist) { s.bad = 1; break; }
+                while (rep--)
+                    l[k++] = (short)len;
+            }
+            if (s.bad)
+                break;
+            infl_build(&lc, l, nlen);
+            infl_build(&dc, l + nlen, ndist);
+            infl_codes(&s, &lc, &dc);
+        } else {
+            s.bad = 1;
+        }
+    } while (!last && !s.bad);
+    if (s.bad) {
+        free(s.out);
+        return NULL;
+    }
+    *outlen = s.outlen;
+    return s.out ? s.out : xcalloc(1, 1);
+}
+
 static void dbg_append(struct dbgsec *d, const unsigned char *p, long n)
 {
     if (d->len + n > d->cap) {
@@ -1276,12 +1487,34 @@ static void collect_sections(struct linker *l, struct object *o)
              * landed at is what its relocations resolve against. */
             const char *nm = o->shstr + sh->sh_name;
             if (l->keep_debug && sh->sh_type == SHT_PROGBITS &&
-                strncmp(nm, ".debug_", 7) == 0 && sh->sh_size) {
+                strncmp(nm, ".debug_", 7) == 0 && sh->sh_size &&
+                !(sh->sh_flags & 0x80000000u /* SHF_EXCLUDE */)) {
                 int d = dbgsec_for(l, nm);
                 o->dbg_sec[i] = d;
                 o->dbg_off[i] = l->dbgsecs[d].len;
-                dbg_append(&l->dbgsecs[d], o->buf + sh->sh_offset,
-                           (long)sh->sh_size);
+                if (sh->sh_flags & 0x800 /* SHF_COMPRESSED */) {
+                    /* an Elf32/64_Chdr, then ELFCOMPRESS_ZLIB's stream */
+                    const unsigned char *c = o->buf + sh->sh_offset;
+                    int hn = o->elf32 ? 12 : 24;
+                    long zn = 0;
+                    unsigned ctype = o->big_endian
+                        ? ((unsigned)c[0] << 24 | (unsigned)c[1] << 16 |
+                           (unsigned)c[2] << 8 | c[3])
+                        : get32loc(c);
+                    unsigned char *z = sh->sh_size > (unsigned long)hn &&
+                                       ctype == 1 /* ELFCOMPRESS_ZLIB */
+                        ? inflate_zlib(c + hn, (long)sh->sh_size - hn, &zn)
+                        : NULL;
+                    if (!z)
+                        die("'%s': %s is compressed in a way EmbLD cannot "
+                            "read (it reads zlib, -gz=zlib)",
+                            o->name ? o->name : "?", nm);
+                    dbg_append(&l->dbgsecs[d], z, zn);
+                    free(z);
+                } else {
+                    dbg_append(&l->dbgsecs[d], o->buf + sh->sh_offset,
+                               (long)sh->sh_size);
+                }
             }
             continue;
         }

@@ -474,6 +474,22 @@ struct ir_cfi { int off, kind, reg; long val; };
 /* `line`/`col` are where the variable was DECLARED (R3). A diagnostic or a
  * remark about a variable has to point at the variable, not at the function
  * that happens to contain it. */
+/* Where a variable is over [lo, hi) of .text: a register (DWARF number),
+ * a frame-base offset, or a register pair (val the low half's register,
+ * val2 the high's, each `piece` bytes). */
+enum { IR_LOC_NONE, IR_LOC_REG, IR_LOC_FB, IR_LOC_REGPAIR,
+       IR_LOC_REGRUN /* val2 registers from val, `piece` bytes each */ };
+struct ir_dbgloc {
+    int lo, hi;
+    int kind;
+    int val, val2, piece;
+};
+/* A vreg's home, as a backend reports it to ra_debug_locs. */
+struct ir_vhome {
+    int kind;                  /* IR_LOC_* */
+    int val, val2, piece;
+};
+
 struct ir_dbgvar {
     const char *name;
     int vreg;
@@ -556,6 +572,18 @@ struct ir_func {
     struct ir_dbgvar *dbgvars; /* -g: params + locals (irgen) */
     int ndbgvars, dbgvarcap;
     int *var_off;            /* -g: rbp-relative slot offset per vreg (codegen) */
+    /* -g, optimized code: what follows a variable mem2reg took out of
+     * memory. vreg_var[t] is 1 + the variable's vreg when temp t holds
+     * its value (mem2reg; nvreg_var long, so a temp made later reads 0);
+     * ins_pc[k] the .text offset instruction k's code starts at, nins + 1
+     * long (codegen); dbglocs[d] the code ranges and homes of dbgvars[d]
+     * that make its DWARF location list (ra_debug_locs). Metadata only:
+     * nothing reads them to make code. */
+    int *vreg_var;
+    int nvreg_var;
+    int *ins_pc;
+    struct ir_dbgloc **dbglocs;
+    int *ndbglocs;
 /* A var_off for a variable with NO location: its slot is never written in
  * the code the function became (the optimizer kept the value in a
  * temporary). The DIE then says so with an empty location -- a debugger

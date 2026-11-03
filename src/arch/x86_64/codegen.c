@@ -3266,8 +3266,11 @@ static void gen_func(struct ir_func *fn, struct code *text,
     int dead = 0, tail_made = 0, rmw_op = -1, rmw_ld = -1;
     g_cmem_ins = NULL;
     g_rmwf_ld = g_rmwf_op = -1;
+    ra_debug_pc_begin(fn);
     for (int n = 0; n < fn->nins; n++) {
         struct ir_ins *i = &fn->ins[n];
+        if (fn->ins_pc)
+            fn->ins_pc[n] = text->len;
         if (dead) {
             if (i->op != IR_LABEL && i->op != IR_LANDING)
                 continue;
@@ -5635,6 +5638,31 @@ static void gen_func(struct ir_func *fn, struct code *text,
     free(brs);
     cg_note_labels(fn, label_off);
     free(label_off);
+    if (fn->ins_pc) {
+        /* -g: where each vreg lives, as DWARF numbers its registers
+         * (rax rdx rcx rbx rsi rdi rbp rsp r8-r15, xmm0 17) */
+        static const int dw[16] = { 0, 2, 1, 3, 7, 6, 4, 5,
+                                    8, 9, 10, 11, 12, 13, 14, 15 };
+        fn->ins_pc[fn->nins] = text->len;
+        struct ir_vhome *h = xcalloc((size_t)(fn->nvregs ? fn->nvregs : 1),
+                                     sizeof *h);
+        for (int v = 0; v < fn->nvregs; v++) {
+            if (g_wide && g_wide[v])
+                continue;
+            if (is_flt(v) && g_floc && g_floc[v] >= 0) {
+                h[v].kind = IR_LOC_REG;
+                h[v].val = 17 + g_floc[v];
+            } else if (in_reg(v) && g_loc[v] < 16) {
+                h[v].kind = IR_LOC_REG;
+                h[v].val = dw[g_loc[v]];
+            } else if (sd[v] != DEAD_SLOT_OFF) {
+                h[v].kind = IR_LOC_FB;
+                h[v].val = sd[v];
+            }
+        }
+        ra_debug_locs(fn, h);
+        free(h);
+    }
     afold_free(&g_afold);
     g_afold.ok = NULL; g_afold.disp = NULL;
     free(sd);

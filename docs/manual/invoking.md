@@ -1449,13 +1449,14 @@ status.
 
 ### `-g`, `--debug`
 
-Emit DWARF version 4 debug information (`.debug_info`, `.debug_abbrev`,
-`.debug_line`) on every ELF target. See [Debugging](debugging.md).
+Emit DWARF version 5 debug information (`.debug_info`, `.debug_abbrev`,
+`.debug_line`, and `.debug_loclists` for the variables the optimizer
+keeps in registers) on every ELF target. See [Debugging](debugging.md).
 
-`-g1`, `-g2`, `-g3`, `-ggdb`, `-gdwarf`, `-gdwarf-2`, `-gdwarf-3` and
-`-gdwarf-4` are all accepted and mean `-g`: EmbCC emits one kind of debug
-information, so a level or version that asks for no more than DWARF 4
-gets exactly that.
+`-g1`, `-g2`, `-g3`, `-ggdb` and `-gdwarf` mean `-g`. `-gdwarf-4` (and
+`-gdwarf-2`, `-gdwarf-3`) writes DWARF 4, and `-gdwarf-5` DWARF 5.
+`-gsplit-dwarf` puts most of it in `FILE.dwo`, and `-gz` compresses the
+debug sections with zlib.
 
 `-g` can change the code generated. On some targets it keeps a frame and
 a stack home for each variable, and it disables tail calls on ARMv7-M, so
@@ -1475,16 +1476,16 @@ setting you ship with if you compare code size.
 
 ### Refused debugging options
 
-A DWARF version EmbCC does not emit, split DWARF and compressed debug
-sections are refused rather than downgraded:
+A DWARF version EmbCC does not write, and a compression format other
+than zlib, are refused rather than replaced:
 
 ```text
-embcc: error: -gdwarf-5 is not supported; EmbCC emits DWARF 4, uncompressed and in one piece
+embcc: error: -gdwarf-6: EmbCC writes DWARF 4 or 5
+embcc: error: -gz=zstd: EmbCC compresses debug sections with zlib (-gz=zlib) or not at all (-gz=none)
 ```
 
-The same message is given for `-gsplit-dwarf` and `-gz`. `-g0` and
-`-gline-tables-only` are not accepted (unknown argument); to compile
-without debug information, omit `-g`.
+`-g0` and `-gline-tables-only` are not accepted (unknown argument); to
+compile without debug information, omit `-g`.
 
 ### `--stack-usage`
 
@@ -2266,7 +2267,8 @@ what EmbCC's spellings get.
 | `--sanitize=NAME` for a check EmbCC does not have | `--sanitize=NAME is not supported: EmbCC's sanitizer inserts checks that TRAP ...` |
 | `-fstack-protector`, `-fstack-protector-all`, `-fstack-protector-strong`, `-fstack-protector-explicit` | `embcc: '-fstack-protector...' is not supported (EmbCC emits no stack protection); -fno-stack-protector is` |
 | `-shared`, `-static-pie` | `embcc: error: -shared needs position-independent code, which EmbCC does not emit` |
-| `-gdwarf-5` (any version but 2 to 4), `-gsplit-dwarf`, `-gz` | `embcc: error: -gdwarf-5 is not supported; EmbCC emits DWARF 4, uncompressed and in one piece` |
+| `-gdwarf-N` for a version other than 2 to 5 | `embcc: error: -gdwarf-6: EmbCC writes DWARF 4 or 5` |
+| `-gz=FORMAT` other than `zlib` and `none` | `embcc: error: -gz=zstd: EmbCC compresses debug sections with zlib (-gz=zlib) or not at all (-gz=none)` |
 | `--isa=arm` | `--isa=arm is not supported: a Cortex-M has no ARM instruction set, only Thumb` |
 | `--no-unaligned-access` (ARM) | `--no-unaligned-access is not supported: EmbCC's ARMv7-M code uses word and halfword loads and stores at unaligned addresses ...` |
 | `--abi=apcs-gnu`, `--abi=atpcs`, `--abi=iwmmxt` (ARM) | `--abi=apcs-gnu is not supported: EmbCC emits the AAPCS ...` |

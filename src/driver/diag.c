@@ -1049,7 +1049,7 @@ int diag_always_error(const char *name)
 {
     /* (under --permissive it is a warning, which -Werror may still make
      * an error) */
-    return !strcmp(name, "implicit-function-declaration") && !lex_permissive();
+    return !strcmp(name, "implicit-function-declaration") && !diag_permissive();
 }
 
 /* The names, for --help. */
@@ -1198,6 +1198,10 @@ void diag_set_color(int mode)    { g_color = mode; }
 void diag_set_max_errors(int n)  { g_max_errors = n; }
 void diag_set_werror(int on)     { g_werror = on; }
 void diag_set_no_warnings(int on){ g_no_warnings = on; }
+static int g_diag_permissive;
+void diag_set_permissive(int on) { g_diag_permissive = on; }
+int diag_permissive(void) { return g_diag_permissive; }
+
 void diag_set_parseable_fixits(int on) { g_parseable_fixits = on; }
 int  diag_error_count(void)      { return g_errors; }
 /* How many warnings were REPORTED -- not to be confused with

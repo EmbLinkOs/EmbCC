@@ -2335,9 +2335,12 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
      * abort() ended `b .` and then an epilogue nothing reached. */
     int dead = 0, fell = 1;
 
+    ra_debug_pc_begin(fn);
     for (int n = 0; n < fn->nins; n++) {
         struct ir_ins *i = &fn->ins[n];
         int ins_start = t->len;
+        if (fn->ins_pc)
+            fn->ins_pc[n] = t->len;
         if (n == skip_ret)
             continue;
         if (dead) {
@@ -3720,6 +3723,29 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
     }
     }
     a64_lit_flush(t);
+    if (fn->ins_pc) {
+        /* -g: where each vreg lives -- x0-x30 are DWARF 0-30, v0-v31
+         * 64-95, and a slot is x29-relative as var_off's are */
+        fn->ins_pc[fn->nins] = t->len;
+        struct ir_vhome *h = xcalloc((size_t)(fn->nvregs ? fn->nvregs : 1),
+                                     sizeof *h);
+        for (int v = 0; v < fn->nvregs; v++) {
+            if (g_a64_wide && g_a64_wide[v])
+                continue;
+            if (a64_is_flt(v) && a64_in_freg(v)) {
+                h[v].kind = IR_LOC_REG;
+                h[v].val = 64 + g_a64_floc[v];
+            } else if (!a64_is_flt(v) && a64_in_reg(v)) {
+                h[v].kind = IR_LOC_REG;
+                h[v].val = g_a64_loc[v];
+            } else if (sd[v] != A64_DEAD_SLOT) {
+                h[v].kind = IR_LOC_FB;
+                h[v].val = (int)(sd[v] - fr.size);
+            }
+        }
+        ra_debug_locs(fn, h);
+        free(h);
+    }
     g_fb = A64_SP;
     a64_frame_base = A64_SP;
     free(g_a64_wide);

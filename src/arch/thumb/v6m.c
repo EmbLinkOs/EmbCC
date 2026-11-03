@@ -4502,8 +4502,11 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         }
 
         /* ---- body ---- */
+        ra_debug_pc_begin(fn);
         for (i = 0; i < fn->nins; i++) {
             pool_point(&F, v6_est(&F, i), 1);
+            if (fn->ins_pc)
+                fn->ins_pc[i] = t->len;
             unsigned rpush = 0;
             F.ins_mask = 0;
             ra_each_use(&fn->ins[i], ins_mask_of, &F);
@@ -4808,6 +4811,9 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     f->code_len = t->len - f->code_off;
     if (target_debug_info())
         v6_record_cfi(&F, f->code_off);
+    /* -g: r0-r7 are DWARF 0-7; slots are frame-base relative; a pair is
+     * two registers in a row */
+    ra_debug_finish(fn, t->len, F.loc, NULL, 0, F.slot, -1, F.wide, 1, 4);
     /* ...and the variadic register save area pushed before it */
     f->stack_bytes = (F.nopush ? 0 : (int)(F.frame +
                                            mask_bytes(save_mask6(&F, F.scr_save)))) +

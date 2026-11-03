@@ -46,6 +46,27 @@
 #define DW_FORM_ref4          0x13
 #define DW_FORM_sec_offset    0x17
 #define DW_FORM_exprloc       0x18
+#define DW_FORM_udata         0x0f
+#define DW_FORM_addrx         0x1b
+#define DW_FORM_loclistx      0x22
+#define DW_UT_skeleton        0x04
+#define DW_UT_split_compile   0x05
+#define DW_TAG_skeleton_unit  0x4a
+#define DW_AT_dwo_name        0x76
+#define DW_AT_addr_base       0x73
+#define DW_OP_addrx           0xa1
+#define DW_LLE_base_addressx  0x01
+#define DW_UT_compile         0x01
+#define DW_LNCT_path          0x1
+#define DW_LNCT_directory_index 0x2
+#define DW_RLE_end_of_list    0x00
+#define DW_RLE_start_end      0x07
+#define DW_LLE_end_of_list    0x00
+#define DW_LLE_offset_pair    0x04
+#define DW_LLE_base_address   0x06
+#define DW_OP_reg0            0x50
+#define DW_OP_regx            0x90
+#define DW_OP_piece           0x93
 #define DW_LANG_C99           0x000c
 /* DW_ATE base-type encodings */
 #define DW_ATE_boolean        0x02
@@ -124,6 +145,74 @@
 #define AB_SUBRANGE     18   /* subrange_type with its upper bound */
 #define AB_SUBRANGE_NB  19   /* subrange_type, no bound ([] / a VLA) */
 #define AB_CU_RANGES    20   /* compile_unit whose code is in several sections */
+#define AB_PARAM_T_LL   21   /* formal_parameter, with type, location list */
+#define AB_PARAM_LL     22
+#define AB_VAR_T_LL     23   /* variable, with type, location list */
+#define AB_VAR_LL       24
+
+static int dw_ver = 5;
+
+void dwarf_set_version(int v) { dw_ver = v == 4 ? 4 : 5; }
+int dwarf_version(void) { return dw_ver; }
+
+/* -gsplit-dwarf: what goes to the .dwo, and the object's address table
+ * the .dwo's addresses index (each a relocation in .debug_addr) */
+static const char *dw_dwo;
+#define dw_split (dw_dwo != NULL)
+struct dw_addr { int target; long addend; struct global *g; int end; };
+static struct dw_addr *dw_addrs;
+static int dw_naddr, dw_capaddr;
+/* ...and where each location list starts in .debug_loclists.dwo, which
+ * DW_FORM_loclistx numbers */
+static int *dw_lloff;
+static int dw_nll, dw_capll;
+
+void dwarf_set_split(const char *dwo_name)
+{
+    dw_dwo = dwo_name;
+    if (dwo_name)
+        dw_ver = 5;
+}
+
+int dwarf_section_is_dwo(int sec)
+{
+    return sec == DWSEC_INFO_DWO || sec == DWSEC_ABBREV_DWO ||
+           sec == DWSEC_LOC_DWO;
+}
+
+static int addr_index(int target, long addend, struct global *g, int end)
+{
+    for (int k = 0; k < dw_naddr; k++)
+        if (dw_addrs[k].target == target && dw_addrs[k].addend == addend &&
+            dw_addrs[k].g == g && dw_addrs[k].end == end)
+            return k;
+    if (dw_naddr == dw_capaddr) {
+        dw_capaddr = dw_capaddr ? dw_capaddr * 2 : 16;
+        dw_addrs = xrealloc(dw_addrs, (size_t)dw_capaddr * sizeof *dw_addrs);
+    }
+    dw_addrs[dw_naddr].target = target;
+    dw_addrs[dw_naddr].addend = addend;
+    dw_addrs[dw_naddr].g = g;
+    dw_addrs[dw_naddr].end = end;
+    return dw_naddr++;
+}
+
+const char *dwarf_section_name(int sec)
+{
+    switch (sec) {
+    case DWSEC_ABBREV: return ".debug_abbrev";
+    case DWSEC_INFO:   return ".debug_info";
+    case DWSEC_LINE:   return ".debug_line";
+    case DWSEC_RANGES: return dw_ver >= 5 ? ".debug_rnglists" : ".debug_ranges";
+    case DWSEC_FRAME:  return ".debug_frame";
+    case DWSEC_LOC:    return dw_ver >= 5 ? ".debug_loclists" : ".debug_loc";
+    case DWSEC_ADDR:   return ".debug_addr";
+    case DWSEC_INFO_DWO:   return ".debug_info.dwo";
+    case DWSEC_ABBREV_DWO: return ".debug_abbrev.dwo";
+    case DWSEC_LOC_DWO:    return ".debug_loclists.dwo";
+    }
+    return "";
+}
 
 /* Line-program standard opcodes */
 #define DW_LNS_copy           0x01
@@ -268,13 +357,19 @@ static void emit_abbrev(struct dbuf *b)
         DW_AT_name,      DW_FORM_string, DW_AT_comp_dir, DW_FORM_string,
         DW_AT_low_pc,    DW_FORM_addr,   DW_AT_ranges,   DW_FORM_sec_offset,
         DW_AT_stmt_list, DW_FORM_sec_offset };
-    static const unsigned char sub[] = {
+    unsigned char sub[] = {
         DW_AT_name,       DW_FORM_string, DW_AT_low_pc,     DW_FORM_addr,
         DW_AT_high_pc,    DW_FORM_addr,   DW_AT_frame_base, DW_FORM_exprloc };
-    static const unsigned char sub_t[] = {
+    unsigned char sub_t[] = {
         DW_AT_name,       DW_FORM_string, DW_AT_type,       DW_FORM_ref4,
         DW_AT_low_pc,     DW_FORM_addr,   DW_AT_high_pc,    DW_FORM_addr,
         DW_AT_frame_base, DW_FORM_exprloc };
+    if (dw_split) {
+        /* the .dwo's: an address is an index into .debug_addr, and the
+         * end is a length, which needs none */
+        sub[3] = sub_t[5] = DW_FORM_addrx;
+        sub[5] = sub_t[7] = DW_FORM_data4;
+    }
     static const unsigned char param_t[] = {
         DW_AT_name, DW_FORM_string, DW_AT_type, DW_FORM_ref4,
         DW_AT_location, DW_FORM_exprloc };
@@ -300,7 +395,8 @@ static void emit_abbrev(struct dbuf *b)
     static const unsigned char array[] = { DW_AT_type, DW_FORM_ref4 };
     static const unsigned char subrange[] = { DW_AT_upper_bound, DW_FORM_data4 };
 
-    one_abbrev(b, AB_CU,         DW_TAG_compile_unit,     DW_CHILDREN_yes, cu, 7);
+    one_abbrev(b, AB_CU,         DW_TAG_compile_unit,     DW_CHILDREN_yes, cu,
+               dw_split ? 4 : 7);   /* (split: its pc and lines the skeleton's) */
     one_abbrev(b, AB_SUBPROGRAM, DW_TAG_subprogram,       DW_CHILDREN_yes, sub, 4);
     one_abbrev(b, AB_PARAM_T,    DW_TAG_formal_parameter, DW_CHILDREN_no, param_t, 3);
     one_abbrev(b, AB_PARAM,      DW_TAG_formal_parameter, DW_CHILDREN_no, param, 2);
@@ -320,6 +416,17 @@ static void emit_abbrev(struct dbuf *b)
     one_abbrev(b, AB_SUBRANGE,    DW_TAG_subrange_type,  DW_CHILDREN_no, subrange, 1);
     one_abbrev(b, AB_SUBRANGE_NB, DW_TAG_subrange_type,  DW_CHILDREN_no, subrange, 0);
     one_abbrev(b, AB_CU_RANGES,   DW_TAG_compile_unit,   DW_CHILDREN_yes, cu_ranges, 7);
+    unsigned char param_t_ll[] = {
+        DW_AT_name, DW_FORM_string, DW_AT_type, DW_FORM_ref4,
+        DW_AT_location, DW_FORM_sec_offset };
+    unsigned char param_ll[] = {
+        DW_AT_name, DW_FORM_string, DW_AT_location, DW_FORM_sec_offset };
+    if (dw_split)
+        param_t_ll[5] = param_ll[3] = DW_FORM_loclistx;
+    one_abbrev(b, AB_PARAM_T_LL, DW_TAG_formal_parameter, DW_CHILDREN_no, param_t_ll, 3);
+    one_abbrev(b, AB_PARAM_LL,   DW_TAG_formal_parameter, DW_CHILDREN_no, param_ll, 2);
+    one_abbrev(b, AB_VAR_T_LL,   DW_TAG_variable,         DW_CHILDREN_no, param_t_ll, 3);
+    one_abbrev(b, AB_VAR_LL,     DW_TAG_variable,         DW_CHILDREN_no, param_ll, 2);
     db_uleb(b, 0);                       /* end of the abbrev table */
 }
 
@@ -564,10 +671,19 @@ static void emit_globals(struct dwarf_out *out, struct dbuf *b,
         db_uleb(b, AB_VAR_T);
         db_str(b, g->name);
         db_u32(b, (unsigned long)toff);
+        long dsp = target_get() == TARGET_AVR ? AVR_DATA_SPACE : 0;
+        if (dw_split) {
+            struct dbuf e = { 0, 0, 0 };
+            db_u8(&e, DW_OP_addrx);
+            db_uleb(&e, (unsigned long)addr_index(DWTGT_GLOBAL, dsp, g, 0));
+            db_uleb(b, (unsigned long)e.len);
+            for (int k = 0; k < e.len; k++) db_u8(b, e.p[k]);
+            free(e.p);
+            continue;
+        }
         db_uleb(b, (unsigned long)(1 + addr_bytes()));
         db_u8(b, DW_OP_addr);
-        reloc(out, DWSEC_INFO, b->len, addr_bytes(), DWTGT_GLOBAL,
-              target_get() == TARGET_AVR ? AVR_DATA_SPACE : 0);
+        reloc(out, DWSEC_INFO, b->len, addr_bytes(), DWTGT_GLOBAL, dsp);
         out->relocs[out->nrelocs - 1].glob = g;
         db_addr(b, 0);
     }
@@ -575,26 +691,142 @@ static void emit_globals(struct dwarf_out *out, struct dbuf *b,
 
 /* --- .debug_info: a compile_unit with children — the type DIEs, then one
  * subprogram DIE per function carrying its parameters and locals. --- */
+/* One location's expression: a register, a frame-base offset, or a
+ * register pair in pieces. */
+static void loc_expr(struct dbuf *e, const struct ir_dbgloc *l)
+{
+    int r[2] = { l->val, l->val2 };
+    switch (l->kind) {
+    case IR_LOC_FB:
+        db_u8(e, DW_OP_fbreg);
+        db_sleb(e, l->val);
+        break;
+    case IR_LOC_REGRUN:
+        for (int k = 0; k < l->val2; k++) {
+            int rk = l->val + k;
+            if (rk < 32) {
+                db_u8(e, DW_OP_reg0 + (unsigned)rk);
+            } else {
+                db_u8(e, DW_OP_regx);
+                db_uleb(e, (unsigned long)rk);
+            }
+            if (l->val2 > 1) {
+                db_u8(e, DW_OP_piece);
+                db_uleb(e, (unsigned long)l->piece);
+            }
+        }
+        break;
+    case IR_LOC_REG:
+    case IR_LOC_REGPAIR:
+        for (int k = 0; k < (l->kind == IR_LOC_REGPAIR ? 2 : 1); k++) {
+            if (r[k] < 32) {
+                db_u8(e, DW_OP_reg0 + (unsigned)r[k]);
+            } else {
+                db_u8(e, DW_OP_regx);
+                db_uleb(e, (unsigned long)r[k]);
+            }
+            if (l->kind == IR_LOC_REGPAIR) {
+                db_u8(e, DW_OP_piece);
+                db_uleb(e, (unsigned long)l->piece);
+            }
+        }
+        break;
+    }
+}
+
+/* A variable's location list, at the end of `b` (.debug_loclists or
+ * .debug_loc): the function's start as the base, then each range as
+ * offsets from it. */
+static void emit_loclist(struct dwarf_out *out, struct dbuf *b,
+                         const struct ir_dbgloc *l, int n, long base)
+{
+    if (dw_split) {
+        db_u8(b, DW_LLE_base_addressx);
+        db_uleb(b, (unsigned long)addr_index(DWTGT_TEXT, base, NULL, 0));
+    } else if (dw_ver >= 5) {
+        db_u8(b, DW_LLE_base_address);
+        reloc(out, DWSEC_LOC, b->len, addr_bytes(), DWTGT_TEXT, base);
+        db_addr(b, 0);
+    } else {
+        /* a base address selection entry: the largest address, then
+         * the base */
+        db_addr(b, addr_bytes() == 8 ? ~0UL : addr_bytes() == 4
+                                            ? 0xffffffffUL : 0xffffUL);
+        reloc(out, DWSEC_LOC, b->len, addr_bytes(), DWTGT_TEXT, base);
+        db_addr(b, 0);
+    }
+    for (int k = 0; k < n; k++) {
+        struct dbuf e = { 0, 0, 0 };
+        loc_expr(&e, &l[k]);
+        if (dw_ver >= 5) {
+            db_u8(b, DW_LLE_offset_pair);
+            db_uleb(b, (unsigned long)(l[k].lo - base));
+            db_uleb(b, (unsigned long)(l[k].hi - base));
+            db_uleb(b, (unsigned long)e.len);
+        } else {
+            db_addr(b, (unsigned long)(l[k].lo - base));
+            db_addr(b, (unsigned long)(l[k].hi - base));
+            db_u16(b, (unsigned)e.len);
+        }
+        for (int i = 0; i < e.len; i++)
+            db_u8(b, e.p[i]);
+        free(e.p);
+    }
+    if (dw_ver >= 5) {
+        db_u8(b, DW_LLE_end_of_list);
+    } else {
+        db_addr(b, 0);
+        db_addr(b, 0);
+    }
+}
+
+/* .debug_rnglists' and .debug_loclists' header (7.28, 7.29): length,
+ * version, address size, no segment selector, no offset table. */
+static int list_header(struct dbuf *b)
+{
+    int at = b->len;
+    db_u32(b, 0);                        /* unit_length — backpatched */
+    db_u16(b, 5);
+    db_u8(b, (unsigned char)addr_bytes());
+    db_u8(b, 0);
+    db_u32(b, 0);
+    return at;
+}
+
 static void emit_info(struct dwarf_out *out, struct dbuf *b,
+                      struct dbuf *loc,
                       struct ir_unit *iu, const char *filename,
                       long text_lo, long text_hi, int split)
 {
     int len_at = b->len;
     db_u32(b, 0);                        /* unit_length — backpatched */
     int after_len = b->len;
-    db_u16(b, 4);                        /* version */
-    reloc(out, DWSEC_INFO, b->len, 4, DWTGT_ABBREV, 0);
+    db_u16(b, (unsigned)dw_ver);         /* version */
+    if (dw_ver >= 5) {
+        /* DWARF 5: the unit's type, then address_size before the
+         * abbreviations' offset (7.5.1.1) */
+        db_u8(b, dw_split ? DW_UT_split_compile : DW_UT_compile);
+        db_u8(b, (unsigned char)addr_bytes());
+    }
+    if (!dw_split)
+        reloc(out, DWSEC_INFO, b->len, 4, DWTGT_ABBREV, 0);
     db_u32(b, 0);                        /* debug_abbrev_offset (reloc) */
-    db_u8(b, (unsigned char)addr_bytes());   /* address_size */
+    if (dw_ver < 5)
+        db_u8(b, (unsigned char)addr_bytes());   /* address_size */
+    if (dw_split)
+        db_u64(b, 0);                    /* dwo_id, patched (emit_all) */
 
-    db_uleb(b, split ? AB_CU_RANGES : AB_CU);
+    db_uleb(b, split && !dw_split ? AB_CU_RANGES : AB_CU);
     db_str(b, "EmbCC");                  /* DW_AT_producer */
     db_u16(b, DW_LANG_C99);              /* DW_AT_language */
     db_str(b, filename);                 /* DW_AT_name */
     db_str(b, ".");                      /* DW_AT_comp_dir (deterministic) */
-    if (split) {
+    if (dw_split) {
+        /* (the skeleton has the unit's extent and its line table) */
+    } else if (split) {
         db_addr(b, 0);                    /* DW_AT_low_pc: base 0 */
-        reloc(out, DWSEC_INFO, b->len, 4, DWTGT_RANGES, 0);
+        /* (.debug_rnglists' list is past its 12-byte header) */
+        reloc(out, DWSEC_INFO, b->len, 4, DWTGT_RANGES, dw_ver >= 5 ? 12 : 0);
         db_u32(b, 0);                     /* DW_AT_ranges (reloc) */
     } else {
         reloc(out, DWSEC_INFO, b->len, addr_bytes(), DWTGT_TEXT, text_lo);
@@ -602,8 +834,10 @@ static void emit_info(struct dwarf_out *out, struct dbuf *b,
         reloc_end(out, DWSEC_INFO, b->len, addr_bytes(), text_hi);
         db_addr(b, 0);                    /* DW_AT_high_pc (reloc) */
     }
-    reloc(out, DWSEC_INFO, b->len, 4, DWTGT_LINE, 0);
-    db_u32(b, 0);                        /* DW_AT_stmt_list (reloc) */
+    if (!dw_split) {
+        reloc(out, DWSEC_INFO, b->len, 4, DWTGT_LINE, 0);
+        db_u32(b, 0);                    /* DW_AT_stmt_list (reloc) */
+    }
 
     /* Every variable's type, emitted up front as CU children so the
      * subprogram DIEs below can reference them (a DIE can't be emitted in the
@@ -629,10 +863,15 @@ static void emit_info(struct dwarf_out *out, struct dbuf *b,
         db_uleb(b, rtoff >= 0 ? AB_SUBPROGRAM_T : AB_SUBPROGRAM);
         db_str(b, fn->name);
         if (rtoff >= 0) db_u32(b, (unsigned long)rtoff);  /* return type */
-        reloc(out, DWSEC_INFO, b->len, addr_bytes(), DWTGT_TEXT, lo);
-        db_addr(b, 0);                   /* low_pc */
-        reloc_end(out, DWSEC_INFO, b->len, addr_bytes(), hi);
-        db_addr(b, 0);                   /* high_pc */
+        if (dw_split) {
+            db_uleb(b, (unsigned long)addr_index(DWTGT_TEXT, lo, NULL, 0));
+            db_u32(b, (unsigned long)(hi - lo));     /* high_pc: a length */
+        } else {
+            reloc(out, DWSEC_INFO, b->len, addr_bytes(), DWTGT_TEXT, lo);
+            db_addr(b, 0);               /* low_pc */
+            reloc_end(out, DWSEC_INFO, b->len, addr_bytes(), hi);
+            db_addr(b, 0);               /* high_pc */
+        }
         /* frame_base. x86-64 and aarch64 set a frame pointer in the
          * prologue and never move it, so it is one byte and no offset.
          *
@@ -708,12 +947,34 @@ static void emit_info(struct dwarf_out *out, struct dbuf *b,
         for (int v = 0; v < fn->ndbgvars; v++) {
             struct ir_dbgvar *dv = &fn->dbgvars[v];
             int toff = type_lookup(&tm, dv->ty);
-            int code = dv->is_param ? (toff >= 0 ? AB_PARAM_T : AB_PARAM)
-                                    : (toff >= 0 ? AB_VAR_T : AB_VAR);
+            /* a variable the optimizer took out of memory: where it is,
+             * range by range (ra_debug_locs) */
+            int ll = fn->ndbglocs && fn->ndbglocs[v] > 0 &&
+                     (fn->var_off[dv->vreg] == IR_VAR_NO_LOC || dv->moved);
+            int code = dv->is_param
+                ? (toff >= 0 ? (ll ? AB_PARAM_T_LL : AB_PARAM_T)
+                             : (ll ? AB_PARAM_LL : AB_PARAM))
+                : (toff >= 0 ? (ll ? AB_VAR_T_LL : AB_VAR_T)
+                             : (ll ? AB_VAR_LL : AB_VAR));
             db_uleb(b, code);
             db_str(b, dv->name);
             if (toff >= 0) db_u32(b, (unsigned long)toff);
-            loc_fbreg(b, fn->var_off[dv->vreg]);
+            if (ll && dw_split) {
+                if (dw_nll == dw_capll) {
+                    dw_capll = dw_capll ? dw_capll * 2 : 16;
+                    dw_lloff = xrealloc(dw_lloff,
+                                        (size_t)dw_capll * sizeof *dw_lloff);
+                }
+                dw_lloff[dw_nll] = loc->len;
+                db_uleb(b, (unsigned long)dw_nll++);
+                emit_loclist(out, loc, fn->dbglocs[v], fn->ndbglocs[v], lo);
+            } else if (ll) {
+                reloc(out, DWSEC_INFO, b->len, 4, DWTGT_LOC, loc->len);
+                db_u32(b, 0);
+                emit_loclist(out, loc, fn->dbglocs[v], fn->ndbglocs[v], lo);
+            } else {
+                loc_fbreg(b, fn->var_off[dv->vreg]);
+            }
         }
         db_u8(b, 0);                     /* end of this subprogram's children */
     }
@@ -926,7 +1187,11 @@ static void emit_line(struct dwarf_out *out, struct dbuf *b,
     int len_at = b->len;
     db_u32(b, 0);                        /* unit_length — backpatched */
     int after_len = b->len;
-    db_u16(b, 4);                        /* version */
+    db_u16(b, (unsigned)dw_ver);         /* version */
+    if (dw_ver >= 5) {
+        db_u8(b, (unsigned char)addr_bytes());  /* address_size */
+        db_u8(b, 0);                     /* segment_selector_size */
+    }
     int hdr_len_at = b->len;
     db_u32(b, 0);                        /* header_length — backpatched */
     int after_hdr_len = b->len;
@@ -940,13 +1205,32 @@ static void emit_line(struct dwarf_out *out, struct dbuf *b,
     static const unsigned char oplen[12] =
         { 0, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 1 };
     for (int i = 0; i < 12; i++) db_u8(b, oplen[i]);
-    db_u8(b, 0);                         /* include_directories: none */
-    /* file_names: one entry, the source file */
-    db_str(b, filename);
-    db_uleb(b, 0);                       /* dir index */
-    db_uleb(b, 0);                       /* mtime (deterministic) */
-    db_uleb(b, 0);                       /* size */
-    db_u8(b, 0);                         /* end of file_names */
+    if (dw_ver >= 5) {
+        /* DWARF 5 (6.2.4.1): each table says its entries' form. One
+         * directory, the compilation's; files 0 (the unit) and 1 (what
+         * the program's file register starts at) both the source, as
+         * GCC writes them. */
+        db_u8(b, 1);                     /* directory_entry_format_count */
+        db_uleb(b, DW_LNCT_path); db_uleb(b, DW_FORM_string);
+        db_uleb(b, 1);                   /* directories_count */
+        db_str(b, ".");
+        db_u8(b, 2);                     /* file_name_entry_format_count */
+        db_uleb(b, DW_LNCT_path); db_uleb(b, DW_FORM_string);
+        db_uleb(b, DW_LNCT_directory_index); db_uleb(b, DW_FORM_udata);
+        db_uleb(b, 2);                   /* file_names_count */
+        for (int k = 0; k < 2; k++) {
+            db_str(b, filename);
+            db_uleb(b, 0);
+        }
+    } else {
+        db_u8(b, 0);                     /* include_directories: none */
+        /* file_names: one entry, the source file */
+        db_str(b, filename);
+        db_uleb(b, 0);                   /* dir index */
+        db_uleb(b, 0);                   /* mtime (deterministic) */
+        db_uleb(b, 0);                   /* size */
+        db_u8(b, 0);                     /* end of file_names */
+    }
 
     /* backpatch header_length (bytes from here to end of header) */
     unsigned long hlen = (unsigned long)(b->len - after_hdr_len);
@@ -958,6 +1242,101 @@ static void emit_line(struct dwarf_out *out, struct dbuf *b,
 
     unsigned long ulen = (unsigned long)(b->len - after_len);
     db_patch_u32(b, len_at, ulen);
+}
+
+/* -gsplit-dwarf: the .dwo's sections from what emit_info and emit_abbrev
+ * made (ab, in, lc), and in their place the object's skeleton unit and
+ * abbreviation, and .debug_addr. A dwo_id ties the two units: a hash of
+ * the .dwo unit's DIEs, deterministic as everything here. */
+static void emit_split(struct dwarf_out *out, struct dbuf *ab,
+                       struct dbuf *in, struct dbuf *lc,
+                       const char *filename, long lo, long hi, int ranges)
+{
+    unsigned long id = 1469598103934665603UL;
+    for (int k = 20; k < in->len; k++)
+        id = (id ^ in->p[k]) * 1099511628211UL;
+    for (const char *q = filename; *q; q++)
+        id = (id ^ (unsigned char)*q) * 1099511628211UL;
+    /* unit_length 4, version 2, unit_type 1, address_size 1, abbrev 4 */
+    db_patch_u32(in, 0, (unsigned long)(in->len - 4));
+    struct dbuf idb = { 0, 0, 0 };
+    db_u64(&idb, id);
+    memcpy(in->p + 12, idb.p, 8);
+    out->sec[DWSEC_INFO_DWO] = in->p;   out->seclen[DWSEC_INFO_DWO] = in->len;
+    out->sec[DWSEC_ABBREV_DWO] = ab->p; out->seclen[DWSEC_ABBREV_DWO] = ab->len;
+    if (dw_nll) {
+        /* .debug_loclists.dwo: its header, an offset per list (from the
+         * end of the offsets, which DW_FORM_loclistx numbers), the lists */
+        struct dbuf l = { 0, 0, 0 };
+        db_u32(&l, 0);
+        db_u16(&l, 5);
+        db_u8(&l, (unsigned char)addr_bytes());
+        db_u8(&l, 0);
+        db_u32(&l, (unsigned long)dw_nll);
+        for (int k = 0; k < dw_nll; k++)
+            db_u32(&l, (unsigned long)(dw_nll * 4 + dw_lloff[k]));
+        for (int k = 0; k < lc->len; k++)
+            db_u8(&l, lc->p[k]);
+        db_patch_u32(&l, 0, (unsigned long)(l.len - 4));
+        out->sec[DWSEC_LOC_DWO] = l.p;
+        out->seclen[DWSEC_LOC_DWO] = l.len;
+    }
+    free(lc->p);
+    lc->p = NULL;
+    /* .debug_addr: its header (7.27), then each address, relocated */
+    struct dbuf ad = { 0, 0, 0 };
+    db_u32(&ad, 0);
+    db_u16(&ad, 5);
+    db_u8(&ad, (unsigned char)addr_bytes());
+    db_u8(&ad, 0);
+    for (int k = 0; k < dw_naddr; k++) {
+        reloc(out, DWSEC_ADDR, ad.len, addr_bytes(), dw_addrs[k].target,
+              dw_addrs[k].addend);
+        out->relocs[out->nrelocs - 1].glob = dw_addrs[k].g;
+        out->relocs[out->nrelocs - 1].end = dw_addrs[k].end;
+        db_addr(&ad, 0);
+    }
+    db_patch_u32(&ad, 0, (unsigned long)(ad.len - 4));
+    out->sec[DWSEC_ADDR] = ad.p;
+    out->seclen[DWSEC_ADDR] = ad.len;
+    /* the skeleton's abbreviation and unit */
+    struct dbuf sa = { 0, 0, 0 }, sk = { 0, 0, 0 };
+    unsigned char sk_pairs[] = {
+        DW_AT_comp_dir, DW_FORM_string, DW_AT_dwo_name, DW_FORM_string,
+        DW_AT_low_pc, DW_FORM_addr, DW_AT_high_pc, DW_FORM_addr,
+        DW_AT_stmt_list, DW_FORM_sec_offset, DW_AT_addr_base,
+        DW_FORM_sec_offset };
+    if (ranges)
+        sk_pairs[7] = DW_FORM_sec_offset, sk_pairs[6] = DW_AT_ranges;
+    one_abbrev(&sa, 1, DW_TAG_skeleton_unit, DW_CHILDREN_no, sk_pairs, 6);
+    db_uleb(&sa, 0);
+    db_u32(&sk, 0);
+    db_u16(&sk, 5);
+    db_u8(&sk, DW_UT_skeleton);
+    db_u8(&sk, (unsigned char)addr_bytes());
+    reloc(out, DWSEC_INFO, sk.len, 4, DWTGT_ABBREV, 0);
+    db_u32(&sk, 0);
+    db_u64(&sk, id);
+    db_uleb(&sk, 1);
+    db_str(&sk, ".");
+    db_str(&sk, dw_dwo);
+    if (ranges) {
+        db_addr(&sk, 0);
+        reloc(out, DWSEC_INFO, sk.len, 4, DWTGT_RANGES, 12);
+        db_u32(&sk, 0);
+    } else {
+        reloc(out, DWSEC_INFO, sk.len, addr_bytes(), DWTGT_TEXT, lo);
+        db_addr(&sk, 0);
+        reloc_end(out, DWSEC_INFO, sk.len, addr_bytes(), hi);
+        db_addr(&sk, 0);
+    }
+    reloc(out, DWSEC_INFO, sk.len, 4, DWTGT_LINE, 0);
+    db_u32(&sk, 0);
+    reloc(out, DWSEC_INFO, sk.len, 4, DWTGT_ADDR, 8);
+    db_u32(&sk, 0);
+    db_patch_u32(&sk, 0, (unsigned long)(sk.len - 4));
+    in->p = sk.p; in->len = sk.len;
+    ab->p = sa.p; ab->len = sa.len;
 }
 
 static void emit_all(struct ir_unit *iu, const char *filename,
@@ -979,25 +1358,46 @@ static void emit_all(struct ir_unit *iu, const char *filename,
     }
 
     struct dbuf ab = { 0, 0, 0 }, in = { 0, 0, 0 }, ln = { 0, 0, 0 },
-                rg = { 0, 0, 0 }, fr = { 0, 0, 0 };
+                rg = { 0, 0, 0 }, fr = { 0, 0, 0 }, lc = { 0, 0, 0 };
+    dw_naddr = 0;
+    dw_nll = 0;
+    int lc_at = dw_ver >= 5 && !dw_split ? list_header(&lc) : -1;
+    int lc_empty = lc.len;
     emit_abbrev(&ab);
     emit_frame(out, &fr, iu);
-    emit_info(out, &in, iu, filename, lo, hi, split);
+    emit_info(out, &in, &lc, iu, filename, lo, hi, split);
     emit_line(out, &ln, iu, filename);
+    if (dw_split) {
+        emit_split(out, &ab, &in, &lc, filename, lo, hi, split);
+        lc.len = 0;                      /* (the .dwo's now) */
+    } else if (lc.len == lc_empty) {
+        lc.len = 0;                      /* no list: no section */
+    } else if (lc_at >= 0) {
+        db_patch_u32(&lc, lc_at, (unsigned long)(lc.len - lc_at - 4));
+    }
     if (split) {
-        /* .debug_ranges: [begin, end) per function, each relocated into
-         * the function's own section; a pair of zeros ends the list */
+        /* the ranges: [begin, end) per function, each relocated into the
+         * function's own section -- .debug_rnglists' start_end entries
+         * (DWARF 5), or .debug_ranges' address pairs ended by two zeros */
+        int rg_at = dw_ver >= 5 ? list_header(&rg) : -1;
         for (int n = 0; n < iu->nfuncs; n++) {
             if (iu->funcs[n].src->code_len <= 0) continue;
             long f_lo = iu->funcs[n].src->code_off;
+            if (dw_ver >= 5)
+                db_u8(&rg, DW_RLE_start_end);
             reloc(out, DWSEC_RANGES, rg.len, addr_bytes(), DWTGT_TEXT, f_lo);
             db_addr(&rg, 0);
             reloc_end(out, DWSEC_RANGES, rg.len, addr_bytes(),
                       f_lo + iu->funcs[n].src->code_len);
             db_addr(&rg, 0);
         }
-        db_addr(&rg, 0);
-        db_addr(&rg, 0);
+        if (dw_ver >= 5) {
+            db_u8(&rg, DW_RLE_end_of_list);
+            db_patch_u32(&rg, rg_at, (unsigned long)(rg.len - rg_at - 4));
+        } else {
+            db_addr(&rg, 0);
+            db_addr(&rg, 0);
+        }
     }
 
     out->sec[DWSEC_ABBREV] = ab.p; out->seclen[DWSEC_ABBREV] = ab.len;
@@ -1005,6 +1405,7 @@ static void emit_all(struct ir_unit *iu, const char *filename,
     out->sec[DWSEC_LINE]   = ln.p; out->seclen[DWSEC_LINE]   = ln.len;
     out->sec[DWSEC_RANGES] = rg.p; out->seclen[DWSEC_RANGES] = rg.len;
     out->sec[DWSEC_FRAME]  = fr.p; out->seclen[DWSEC_FRAME]  = fr.len;
+    out->sec[DWSEC_LOC]    = lc.p; out->seclen[DWSEC_LOC]    = lc.len;
 }
 
 void ir_cfi_add(struct ir_func *fn, int off, int kind, int reg, long val)
@@ -1036,4 +1437,127 @@ void dwarf_free(struct dwarf_out *out)
 {
     for (int i = 0; i < DWARF_NSEC; i++) free(out->sec[i]);
     free(out->relocs);
+}
+
+/* ---- -gz: zlib (RFC 1950/1951) for the compressed debug sections ------
+ *
+ * One deflate block with the fixed Huffman codes: LZ77 matches found
+ * through a hash of three bytes, chained back over the 32K window. Debug
+ * sections are repetitive (the same attribute forms, the same few
+ * opcodes), so this takes most of what a dynamic-code compressor would,
+ * in a page of code -- and every reader of SHF_COMPRESSED reads it. */
+struct zbits { struct dbuf b; unsigned long acc; int n; };
+
+static void zput(struct zbits *z, unsigned long v, int n)  /* LSB first */
+{
+    z->acc |= v << z->n;
+    z->n += n;
+    while (z->n >= 8) {
+        db_u8(&z->b, (unsigned)(z->acc & 0xff));
+        z->acc >>= 8;
+        z->n -= 8;
+    }
+}
+
+static void zput_rev(struct zbits *z, unsigned v, int n)   /* a Huffman code */
+{
+    unsigned r = 0;
+    for (int k = 0; k < n; k++)
+        r |= ((v >> k) & 1u) << (n - 1 - k);
+    zput(z, r, n);
+}
+
+static void zlit(struct zbits *z, int c)                   /* 0..287 */
+{
+    if (c < 144)      zput_rev(z, 0x30u + (unsigned)c, 8);
+    else if (c < 256) zput_rev(z, 0x190u + (unsigned)(c - 144), 9);
+    else if (c < 280) zput_rev(z, (unsigned)(c - 256), 7);
+    else              zput_rev(z, 0xc0u + (unsigned)(c - 280), 8);
+}
+
+static const unsigned short z_lbase[29] = {
+    3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59,
+    67, 83, 99, 115, 131, 163, 195, 227, 258 };
+static const unsigned char z_lext[29] = {
+    0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4,
+    5, 5, 5, 5, 0 };
+static const unsigned short z_dbase[30] = {
+    1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513,
+    769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577 };
+static const unsigned char z_dext[30] = {
+    0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10,
+    11, 11, 12, 12, 13, 13 };
+
+unsigned char *dwarf_zlib(const unsigned char *p, int n, int *outlen)
+{
+    enum { HBITS = 15, WIN = 32768, MAXCHAIN = 64 };
+    struct zbits z;
+    memset(&z, 0, sizeof z);
+    db_u8(&z.b, 0x78);                   /* CMF: deflate, 32K window */
+    db_u8(&z.b, 0x9c);                   /* FLG: (0x789c % 31 == 0) */
+    zput(&z, 1, 1);                      /* BFINAL */
+    zput(&z, 1, 2);                      /* BTYPE 01: fixed codes */
+    int *head = xmalloc((size_t)(1 << HBITS) * sizeof *head);
+    int *prev = xmalloc((size_t)(n ? n : 1) * sizeof *prev);
+    for (int k = 0; k < (1 << HBITS); k++)
+        head[k] = -1;
+#define ZHASH(i) ((((unsigned)p[i] << 10) ^ ((unsigned)p[(i) + 1] << 5) ^ \
+                   (unsigned)p[(i) + 2]) & ((1u << HBITS) - 1))
+    int i = 0;
+    while (i < n) {
+        int best = 0, dist = 0;
+        if (i + 2 < n) {
+            unsigned h = ZHASH(i);
+            int c = head[h], chain = 0;
+            while (c >= 0 && i - c <= WIN && chain++ < MAXCHAIN) {
+                int l = 0, max = n - i < 258 ? n - i : 258;
+                while (l < max && p[c + l] == p[i + l])
+                    l++;
+                if (l > best) {
+                    best = l;
+                    dist = i - c;
+                    if (l == max)
+                        break;
+                }
+                c = prev[c];
+            }
+        }
+        int adv = best >= 3 ? best : 1;
+        if (best >= 3) {
+            int lc = 0;
+            while (lc < 28 && z_lbase[lc + 1] <= best)
+                lc++;
+            zlit(&z, 257 + lc);
+            zput(&z, (unsigned long)(best - z_lbase[lc]), z_lext[lc]);
+            int dc = 0;
+            while (dc < 29 && z_dbase[dc + 1] <= dist)
+                dc++;
+            zput_rev(&z, (unsigned)dc, 5);
+            zput(&z, (unsigned long)(dist - z_dbase[dc]), z_dext[dc]);
+        } else {
+            zlit(&z, p[i]);
+        }
+        for (int k = 0; k < adv; k++, i++)
+            if (i + 2 < n) {
+                unsigned h = ZHASH(i);
+                prev[i] = head[h];
+                head[h] = i;
+            }
+    }
+#undef ZHASH
+    zlit(&z, 256);                       /* end of block */
+    if (z.n)
+        zput(&z, 0, 8 - z.n);
+    unsigned long a = 1, b = 0;          /* Adler-32, big-endian */
+    for (int k = 0; k < n; k++) {
+        a = (a + p[k]) % 65521;
+        b = (b + a) % 65521;
+    }
+    unsigned long ad = (b << 16) | a;
+    for (int k = 3; k >= 0; k--)
+        db_u8(&z.b, (unsigned)((ad >> (8 * k)) & 0xff));
+    free(head);
+    free(prev);
+    *outlen = z.b.len;
+    return z.b.p;
 }

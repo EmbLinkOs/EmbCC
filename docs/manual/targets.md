@@ -2410,7 +2410,7 @@ links under `--mcu=`, and the AVR library, `libc.a` from `lib/avr`
 
 ### Debugging
 
-`-g` writes DWARF 4 that `llvm-dwarfdump --verify` accepts and that gdb
+`-g` writes DWARF 5 (`-gdwarf-4`: 4) that `llvm-dwarfdump --verify` accepts and that gdb
 (`set architecture avr`) and [EmbDBG](tools/embdbg.md) read, at `--opt=none`
 and above:
 
@@ -2431,10 +2431,12 @@ and above:
   the function is declared; the body's rows follow wherever the source
   line changes.
 - **Optimized code.** At `--opt=basic` and above, a variable the optimizer took
-  out of memory has an empty location, which a debugger shows as
-  `<optimized out>`; so does a parameter that is assigned after it was
-  taken out of memory. A parameter that is never assigned keeps its
-  slot, which the prologue writes.
+  out of memory has a location list. Where its value is in registers,
+  each byte is the register that holds it (`DW_OP_reg24 DW_OP_piece 1
+  DW_OP_reg25 DW_OP_piece 1` for an `int` in `r24:r25`), and where it is
+  in a slot, the slot. Elsewhere a debugger shows `<optimized out>`. A
+  parameter that is never assigned keeps its slot, which the prologue
+  writes.
 - **Globals** the unit defines are described with their type.
 
 `-g` turns off this backend's register allocation at `--opt=basic` and above, so

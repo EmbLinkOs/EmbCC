@@ -296,6 +296,7 @@ static int nincdirs;
  * byte-for-byte as before, which is what keeps the M3 self-host fixed point
  * (self-host builds without -g). */
 static int want_debug;
+static int want_split_dwarf;     /* -gsplit-dwarf */
 /* -fstack-usage: write FILE.su beside the object, one line per function,
  * in gcc's format (`file:line:name<TAB>bytes<TAB>qualifier`) so the
  * tools that already read those files read these. It is the number a
@@ -2701,6 +2702,38 @@ static const char *cxx_unwind_tables_name(void)
     return backend_get(target_get())->unwind_unwritten;
 }
 
+/* A debug section, as written: -gz compresses it (SHF_COMPRESSED: an
+ * Elf32/64_Chdr, ELFCOMPRESS_ZLIB, then the stream -- relocations still
+ * address the bytes before compression, which is how a linker reads
+ * them). A .dwo's sections are SHF_EXCLUDE, as GCC's are. */
+static int want_gz;              /* -gz, -gz=zlib */
+
+static int add_debug_section(struct elfw *w, int s, struct dwarf_out *dw)
+{
+    Elf64_Xword flags = dwarf_section_is_dwo(s) ? 0x80000000u : 0;
+    if (!want_gz)
+        return elfw_add_section(w, dwarf_section_name(s), SHT_PROGBITS,
+                                flags, dw->sec[s], (Elf64_Xword)dw->seclen[s],
+                                1);
+    int zn = 0;
+    unsigned char *z = dwarf_zlib(dw->sec[s], dw->seclen[s], &zn);
+    int e32 = target_ptr_size() <= 4, hn = e32 ? 12 : 24;
+    unsigned char *c = xcalloc((size_t)(hn + zn), 1);
+    target_put_uint(c, 4, 1);                          /* ELFCOMPRESS_ZLIB */
+    if (e32) {
+        target_put_uint(c + 4, 4, (unsigned long)dw->seclen[s]);
+        target_put_uint(c + 8, 4, 1);                  /* ch_addralign */
+    } else {
+        target_put_uint(c + 8, 8, (unsigned long)dw->seclen[s]);
+        target_put_uint(c + 16, 8, 1);
+    }
+    memcpy(c + hn, z, (size_t)zn);
+    free(z);
+    return elfw_add_section(w, dwarf_section_name(s), SHT_PROGBITS,
+                            flags | 0x800 /* SHF_COMPRESSED */, c,
+                            (Elf64_Xword)(hn + zn), e32 ? 4 : 8);
+}
+
 /* One .init_array/.fini_array section of the object: constructors
  * (kind 0) or destructors (1) of one priority (prio: N + 1, 0 none). */
 struct ctorarr { int kind, prio, ndx, n, at; };
@@ -3677,6 +3710,18 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     /* -g: build the DWARF line sections now (needs each func's code_off/len,
      * set by codegen). Off, dw stays empty and nothing below fires. */
     struct dwarf_out dw = { { 0 }, { 0 }, 0, 0, 0, 0, 0 };
+    const char *dwo_path = NULL;
+    if (want_debug && want_split_dwarf && out) {
+        /* -gsplit-dwarf: FILE.o's .dwo is FILE.dwo, as GCC names it */
+        size_t n = strlen(out);
+        char *d = xmalloc(n + 5);
+        memcpy(d, out, n + 1);
+        if (n > 2 && !strcmp(d + n - 2, ".o"))
+            d[n - 2] = 0;
+        strcat(d, ".dwo");
+        dwo_path = d;
+    }
+    dwarf_set_split(dwo_path);
     if (want_debug) {
         dw.frame_sp = backend_get(target_get())->frame_sp;
         dw.frame_ra = backend_get(target_get())->frame_ra;
@@ -4706,16 +4751,11 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     /* -g: the three DWARF sections (non-alloc, so no load cost; stripped
      * from a shipped image without touching the code). Their indices feed
      * the relocation-target lookup below. */
-    static const char *const dwsec_name[DWARF_NSEC] =
-        { ".debug_abbrev", ".debug_info", ".debug_line", ".debug_ranges",
-          ".debug_frame" };
-    int dwsec_ndx[DWARF_NSEC] = { 0, 0, 0, 0, 0 };
+    int dwsec_ndx[DWARF_NSEC] = { 0 };
     if (want_debug)
         for (int s = 0; s < DWARF_NSEC; s++)
-            if (dw.seclen[s])     /* .debug_ranges only when split */
-                dwsec_ndx[s] = elfw_add_section(
-                    w, dwsec_name[s], SHT_PROGBITS, 0, dw.sec[s],
-                    (Elf64_Xword)dw.seclen[s], 1);
+            if (dw.seclen[s] && !dwarf_section_is_dwo(s))
+                dwsec_ndx[s] = add_debug_section(w, s, &dw);
     /* the unwind tables (x86-64 gives .eh_frame its own section type) and
      * the exception tables */
     int eh_ndx = 0, lsda_ndx = 0;
@@ -4800,7 +4840,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     /* -g: STT_SECTION symbols for the debug sections, so the line/info
      * fields can relocate against them (DWTGT_ABBREV/DWTGT_LINE). Added here
      * in the local block — the writer refuses a local after any global. */
-    int dwsym[DWARF_NSEC] = { 0, 0, 0, 0, 0 };
+    int dwsym[DWARF_NSEC] = { 0 };
     if (want_debug)
         for (int s = 0; s < DWARF_NSEC; s++)
             if (dwsec_ndx[s])
@@ -5286,6 +5326,8 @@ static int compile_unit(const char *in, const char *out, int pp_only)
             int sym = r->target == DWTGT_ABBREV ? dwsym[DWSEC_ABBREV]
                     : r->target == DWTGT_RANGES ? dwsym[DWSEC_RANGES]
                     : r->target == DWTGT_FRAME  ? dwsym[DWSEC_FRAME]
+                    : r->target == DWTGT_LOC    ? dwsym[DWSEC_LOC]
+                    : r->target == DWTGT_ADDR   ? dwsym[DWSEC_ADDR]
                     :                             dwsym[DWSEC_LINE];
             long add = r->addend;
             /* A code address is in whichever section its function is
@@ -5306,6 +5348,18 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                           target_reloc_type(ta, r->width == 8 ? RK_ABS64
                                                               : RK_ABS32),
                           add);
+        }
+        if (dwo_path) {
+            /* the .dwo: its sections alone, nothing to relocate, marked
+             * SHF_EXCLUDE as GCC's are (a link leaves them out) */
+            struct elfw *dwo = elfw_new(target_elf_machine(target_get()));
+            elfw_set_flags(dwo, target_elf_flags(target_get()));
+            for (int s = 0; s < DWARF_NSEC; s++)
+                if (dw.seclen[s] && dwarf_section_is_dwo(s))
+                    add_debug_section(dwo, s, &dw);
+            if (elfw_write(dwo, dwo_path) != 0)
+                diag_fatal(dwo_path, 0, "cannot write the file");
+            elfw_free(dwo);
         }
         dwarf_free(&dw);
     }
@@ -5924,23 +5978,35 @@ static int embcc_main(int argc, char **argv)
                    strcmp(argv[i], "-g1") == 0 ||
                    strcmp(argv[i], "-g2") == 0 ||
                    strcmp(argv[i], "-g3") == 0 ||
-                   strcmp(argv[i], "-gdwarf") == 0 ||
-                   strcmp(argv[i], "-gdwarf-2") == 0 ||
+                   strcmp(argv[i], "-gdwarf") == 0) {
+            /* a level: -g (DWARF 5, the default) */
+            want_debug = 1;
+        } else if (strcmp(argv[i], "-gdwarf-2") == 0 ||
                    strcmp(argv[i], "-gdwarf-3") == 0 ||
                    strcmp(argv[i], "-gdwarf-4") == 0) {
-            /* All of these mean -g here. EmbCC emits one kind of debug
-             * information -- DWARF 4 -- so a level or a version that
-             * asks for no more than that is simply -g. A version it
-             * does NOT emit is refused below rather than quietly
-             * downgraded: a build that asked for DWARF 5 and got 4
-             * would find out from its debugger. */
+            /* DWARF 4, which a version 2 or 3 reader of what EmbCC
+             * writes (line tables, base types, locations) also takes */
             want_debug = 1;
-        } else if (strncmp(argv[i], "-gdwarf-", 8) == 0 ||
-                   strcmp(argv[i], "-gsplit-dwarf") == 0 ||
-                   strcmp(argv[i], "-gz") == 0) {
-            fprintf(stderr, "embcc: error: %s is not supported; EmbCC "
-                            "emits DWARF 4, uncompressed and in one "
-                            "piece\n", opt_typed(argv[i]));
+            dwarf_set_version(4);
+        } else if (strcmp(argv[i], "-gdwarf-5") == 0) {
+            want_debug = 1;
+            dwarf_set_version(5);
+        } else if (strncmp(argv[i], "-gdwarf-", 8) == 0) {
+            fprintf(stderr, "embcc: error: %s: EmbCC writes DWARF 4 or 5\n",
+                    opt_typed(argv[i]));
+            return 1;
+        } else if (strcmp(argv[i], "-gsplit-dwarf") == 0) {
+            want_debug = 1;
+            want_split_dwarf = 1;
+        } else if (strcmp(argv[i], "-gz") == 0 ||
+                   strcmp(argv[i], "-gz=zlib") == 0) {
+            want_gz = 1;
+        } else if (strcmp(argv[i], "-gz=none") == 0) {
+            want_gz = 0;
+        } else if (strncmp(argv[i], "-gz=", 4) == 0) {
+            fprintf(stderr, "embcc: error: %s: EmbCC compresses debug "
+                            "sections with zlib (-gz=zlib) or not at all "
+                            "(-gz=none)\n", opt_typed(argv[i]));
             return 1;
         } else if (strcmp(argv[i], "-g") == 0) {
             want_debug = 1;

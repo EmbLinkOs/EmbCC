@@ -164,6 +164,10 @@ int  diag_set_werror_for(const char *name, int on); /* -W[no-]error=NAME;
 void diag_set_no_warnings(int on);     /* -w: drop them */
 int  diag_error_count(void);           /* for the driver's exit status */
 void diag_set_parseable_fixits(int on); /* GCC's fix-it: lines */
+/* --permissive (lex_set_permissive sets it): C89's implicit int and
+ * implicit declarations are warnings, not errors */
+void diag_set_permissive(int on);
+int diag_permissive(void);
 /* --fix: do the edits the fix-its describe, in the files they name.
  * Returns how many were applied. */
 int diag_apply_fixits(void);

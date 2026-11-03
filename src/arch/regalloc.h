@@ -343,6 +343,17 @@ char *ra_debug_pin_vars(const struct ir_func *fn);
 int ra_var_in_slot(const struct ir_func *fn, int v);
 int ra_var_home(const struct ir_func *fn, int v, int has_slot, long off);
 
+/* -g, optimized code: a backend that records each instruction's offset
+ * (ra_debug_pc_begin before its emission loop, ins_pc[k] at instruction
+ * k, ins_pc[nins] at the end) and knows each vreg's home hands both to
+ * ra_debug_locs, which fills ir_func.dbglocs: the location lists of the
+ * variables mem2reg took out of memory. */
+void ra_debug_pc_begin(struct ir_func *fn);
+void ra_debug_locs(struct ir_func *fn, const struct ir_vhome *home);
+void ra_debug_finish(struct ir_func *fn, int end_pc, const int *loc,
+                     const int *floc, int fbase, const long *slot, long nosl,
+                     const char *wide, int wide_mode, int piece);
+
 /* What a backend knows about slot assignment that this layer does not. */
 struct ra_slots {
     /* Per-vreg physical register, or NULL when the allocator is off. A

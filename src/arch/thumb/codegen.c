@@ -7969,6 +7969,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     rc_reset(&F);
     int *ldepth = target_opt_size() ? (int *)0 : t_loop_depth(fn);
     g_t_loop_bytes = 0;
+    ra_debug_pc_begin(fn);
     for (i = 0; i < fn->nins; i++) {
         int was_tail = F.tail && F.tail[i] && F.nopush;
         int len0 = t->len, i0 = i;
@@ -8002,6 +8003,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         F.flags_dead_ins = !F.tst_br && (fn->ins[i].op == IR_CALL ||
                                          fn->ins[i].op == IR_STORE ||
                                          fn->ins[i].op == IR_RET);
+        if (fn->ins_pc)
+            fn->ins_pc[i] = t->len;
         gen_ins(&F, i);
         F.lofree = 0;
         if (F.skip_next) {      /* the comparison emitted its branch too,
@@ -8239,6 +8242,40 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     f->code_len = t->len - f->code_off;
     if (target_debug_info())
         t_record_cfi(&F, f->code_off);
+    if (fn->ins_pc) {
+        /* -g: r0-r15 are DWARF 0-15, s0-s31 64-95 and d0-d31 256-287;
+         * a slot is relative to the frame base, as var_off's are; a
+         * pair is two registers in a row */
+        fn->ins_pc[fn->nins] = t->len;
+        int nv = fn->nvregs ? fn->nvregs : 1;
+        struct ir_vhome *h = xcalloc((size_t)nv, sizeof *h);
+        char *dbl = xcalloc((size_t)nv, 1);
+        for (int k = 0; k < fn->nins; k++) {
+            int d = ra_ins_def(&fn->ins[k]);
+            if (d >= 0 && d < nv && fn->ins[k].w == 8)
+                dbl[d] = 1;
+        }
+        for (int v = 0; v < fn->nvregs; v++) {
+            if (F.floc && F.floc[v] >= 0) {
+                h[v].kind = IR_LOC_REG;
+                h[v].val = dbl[v] ? 256 + F.floc[v] / 2 : 64 + F.floc[v];
+            } else if (F.loc && F.loc[v] >= 0 && F.wide && F.wide[v]) {
+                h[v].kind = IR_LOC_REGPAIR;
+                h[v].val = F.loc[v];
+                h[v].val2 = F.loc[v] + 1;
+                h[v].piece = 4;
+            } else if (F.loc && F.loc[v] >= 0) {
+                h[v].kind = IR_LOC_REG;
+                h[v].val = F.loc[v];
+            } else if (F.slot && F.slot[v] >= 0) {
+                h[v].kind = IR_LOC_FB;
+                h[v].val = (int)F.slot[v];
+            }
+        }
+        ra_debug_locs(fn, h);
+        free(h);
+        free(dbl);
+    }
     /* What -fstack-usage reports: the registers the prologue pushed
      * plus everything sub sp reserved -- and a variadic function's
      * register save area, r0-r3, which it pushes first and apart from
