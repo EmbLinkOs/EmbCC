@@ -460,8 +460,8 @@ refuses it, with the diagnostic shown. Diagnostics are quoted without the
 | Local classes; anonymous unions and structures in classes | Supported | |
 | Bit-fields, also in classes with bases or virtual functions | Supported | |
 | Function-local `static` objects | Supported | Initialization is guarded by `__cxa_guard_acquire` and `__cxa_guard_release`. |
-| Namespace-scope objects with constructors and destructors | Partial | Constructors run from `.init_array`, in definition order within a unit; destructors are registered with `__cxa_atexit`. An array of objects with destructors at namespace scope: `a namespace-scope array of objects with destructors is not supported yet` |
-| Copying or assigning a class whose member is an array of a class with a non-trivial copy or assignment | Not supported | `copying an array of 'S' is not supported yet`; `assigning an array of objects is not supported yet` |
+| Namespace-scope objects with constructors and destructors | Supported | Constructors run from `.init_array`, in definition order within a unit; destructors are registered with `__cxa_atexit`. An array of them is destroyed last element first; a `thread_local` array when its thread ends. |
+| Copying or assigning a class whose member is an array of a class with a non-trivial copy or assignment | Supported | Element by element, in order; the elements already copied are destroyed if a copy throws. |
 
 ### C++11
 

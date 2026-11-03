@@ -710,6 +710,8 @@ enum reloc_kind {
     RK_TLVP_PAGE, /* Darwin aarch64: adrp to a thread-local's descriptor slot */
     RK_TLVP_LO12, /* ... and the paired ldr of the descriptor's address */
     RK_TLVP,      /* Darwin x86-64: movq sym@TLVP(%rip), reg -- the same */
+    RK_GOTPC32,   /* x86-64: movq sym@GOTPCREL(%rip), reg -- an undefined
+                   * symbol's address on Darwin, which only the GOT has */
     RK_GOT_PAGE,  /* aarch64: adrp to the page of the symbol's GOT slot */
     RK_GOT_LO12,  /* aarch64: the paired ldr's offset in that page — a
                    * weak symbol's address (0 when it is undefined, which

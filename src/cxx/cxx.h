@@ -994,6 +994,10 @@ struct cexpr {
     long cookie;              /* E_NEW/E_DELETE[]: array cookie bytes */
     int is_array;             /* E_NEW/E_DELETE: [] form */
     int zero;                 /* E_CONSTRUCT: zero-initialize first */
+    int elemwise;             /* E_CONSTRUCT from array a[0], E_ASSIGN of
+                               * arrays: element by element, init doing
+                               * one (reading __cx_cs[__cx_ci], writing
+                               * __cx_cd[__cx_ci]) */
     int adl;                  /* E_OVL: an unqualified name — argument-
                                * dependent lookup adds candidates */
     int memptr;               /* E_OVL: written &C::f — to become a pointer
@@ -1026,6 +1030,8 @@ struct cexpr *ex_materialize(struct cexpr *e);   /* a prvalue's temporary */
 struct cexpr *ex_member(struct cexpr *obj, struct cfield *fl);
 /* `l op r` (op a TOK_ assignment operator), overloaded or built-in. */
 struct cexpr *expr_assign(int op, struct cexpr *l, struct cexpr *r);
+struct cexpr *array_copy(struct cty *t, struct cexpr *src, int move);
+struct cexpr *array_elem_var(const char *cname, struct cty *t);
 /* A class that is passed and returned through memory (Itanium: not
  * trivially copyable or destructible): by reference to a temporary, into
  * a return slot. */

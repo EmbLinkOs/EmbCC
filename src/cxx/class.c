@@ -1062,18 +1062,55 @@ static struct cexpr *source_member(struct cexpr *other, struct cfield *fl,
     return m;
 }
 
-/* A member array copied as a whole: its bytes, when its elements are
- * trivially copyable. */
-static struct cexpr *array_copy(struct cfield *fl, struct cexpr *src)
+/* The element of an array a loop copying it is at: an lvalue of type t,
+ * spelled `cname` in C (__cx_cs[__cx_ci], __cx_cd[__cx_ci]). */
+struct cexpr *array_elem_var(const char *cname, struct cty *t)
 {
-    struct cty *e = base_elem(fl->type);
-    if (e->k == CT_CLASS && !e->cls->trivial_copy)
-        cx_error(cx_cur(), "copying an array of '%s' is not supported yet",
-                 e->cls->name ? e->cls->name : "class");
-    struct cexpr *r = ex_new(E_CONSTRUCT, fl->type, VC_PRVALUE);
+    struct cvar *v = xcalloc(1, sizeof *v);
+    v->name = v->cname = cname;
+    v->type = t;
+    v->is_local = 1;
+    v->fn = cx_curfn;
+    struct cexpr *e = ex_new(E_VAR, t, VC_LVALUE);
+    e->var = v;
+    return e;
+}
+
+/* An element of array type t read from by a copy: the element class,
+ * as const as the array, an xvalue when moved. */
+static struct cexpr *array_source_elem(struct cty *t, int move)
+{
+    unsigned q = t->q;
+    while (t->k == CT_ARRAY) {
+        t = t->to;
+        q |= t->q;
+    }
+    struct cexpr *e = array_elem_var("__cx_cs[__cx_ci]", ct_qual(t, q));
+    if (!move)
+        return e;
+    struct cexpr *x = ex_new(E_CAST, e->t, VC_XVALUE);
+    x->a = xmalloc(sizeof *x->a);
+    x->a[0] = e;
+    x->na = 1;
+    x->lvcast = 1;
+    return x;
+}
+
+/* An array of type t copied as a whole from src: its bytes, when its elements are
+ * trivially copyable; else each element by its copy (move) constructor,
+ * in order. */
+struct cexpr *array_copy(struct cty *t, struct cexpr *src, int move)
+{
+    struct cty *e = base_elem(t);
+    struct cexpr *r = ex_new(E_CONSTRUCT, t, VC_PRVALUE);
     r->a = xmalloc(sizeof *r->a);
     r->a[0] = src;
     r->na = 1;
+    if (e->k == CT_CLASS && !e->cls->trivial_copy) {
+        struct cexpr *s = array_source_elem(src->t, move);
+        r->init = init_object(ct_unqual(e), INIT_DIRECT, &s, 1, NULL);
+        r->elemwise = 1;
+    }
     return r;
 }
 
@@ -1151,7 +1188,7 @@ void define_implicit(struct cfunc *f)
             if (ct_is_ref(fl->type))
                 f->meminit[i] = bind_ref(m, fl->type, "a copy");
             else if (fl->type->k == CT_ARRAY)
-                f->meminit[i] = array_copy(fl, m);
+                f->meminit[i] = array_copy(fl->type, m, move);
             else
                 f->meminit[i] = init_object(fl->type, INIT_DIRECT, &m, 1,
                                             NULL);
@@ -1185,7 +1222,24 @@ void define_implicit(struct cfunc *f)
                                    "assignment is deleted", c->name);
             struct cexpr *m = source_member(other, fl, move);
             struct cstmt *st = st_new(S_EXPR);
-            if (fl->type->k == CT_ARRAY) {
+            struct cty *el = base_elem(fl->type);
+            if (fl->type->k == CT_ARRAY && el->k == CT_CLASS &&
+                !el->cls->trivial_assign) {
+                /* each element by its assignment, in order */
+                struct cexpr *a = ex_new(E_ASSIGN, ct_basic(CT_VOID),
+                                         VC_PRVALUE);
+                a->op = TOK_ASSIGN;
+                a->a = xmalloc(2 * sizeof *a->a);
+                a->a[0] = ex_member(self, fl);
+                a->a[1] = m;
+                a->na = 2;
+                a->elemwise = 1;
+                a->init = expr_assign(TOK_ASSIGN,
+                                      array_elem_var("__cx_cd[__cx_ci]",
+                                                     ct_unqual(el)),
+                                      array_source_elem(m->t, move));
+                st->e = a;
+            } else if (fl->type->k == CT_ARRAY) {
                 struct cexpr *dst = ex_member(self, fl);
                 struct cexpr *cp = ex_new(E_BUILTIN,
                                           ct_ptr(ct_basic(CT_VOID)),
@@ -1196,10 +1250,6 @@ void define_implicit(struct cfunc *f)
                 cp->a[1] = ex_addr(m);
                 cp->a[2] = ex_int(ct_size(fl->type), ct_size_t());
                 cp->na = 3;
-                struct cty *el = base_elem(fl->type);
-                if (el->k == CT_CLASS && !el->cls->trivial_assign)
-                    cx_error(cx_cur(), "assigning an array of objects is "
-                                       "not supported yet");
                 st->e = cp;
             } else {
                 st->e = expr_assign(TOK_ASSIGN, ex_member(self, fl), m);

@@ -74,6 +74,15 @@ static const char *sb_str(struct sb *b)
     return b->p ? b->p : "";
 }
 
+/* s put into b at offset at, what follows moved up */
+static void sb_insert(struct sb *b, size_t at, const char *s)
+{
+    size_t n = strlen(s), tail = b->len - at;
+    sb_putn(b, s, n);               /* (room; the bytes are rewritten) */
+    memmove(b->p + at + n, b->p + at, tail);
+    memcpy(b->p + at, s, n);
+}
+
 /* ---- names ---- */
 
 static int is_c_keyword(const char *n)
@@ -296,6 +305,7 @@ static struct cfunc **work;
 static int nwork, capwork;
 static struct cfunc *cur_fn;
 static int need_atexit, need_guard, need_thread_atexit;
+static int init_eh;           /* __cx_global_init has cleanup regions */
 struct cvar;
 static int tls_wrapped(struct cvar *v);
 static const char *tls_name(struct cvar *v, char which);
@@ -536,6 +546,34 @@ static int fn_eh;             /* this function has regions: its __cx_exc
 static int eh_used;           /* the unit calls the ABI's EH functions */
 static int eh_lp[1024];       /* the open regions' pads, innermost last */
 static int neh_lp;
+
+/* Writing another function in the middle of one (a thread_local's
+ * initialization, made on first use): its regions are its own. */
+struct eh_saved {
+    int fn_eh, n;
+    int *lp;
+};
+
+static struct eh_saved eh_suspend(void)
+{
+    struct eh_saved sv = { fn_eh, neh_lp, NULL };
+    if (neh_lp) {
+        sv.lp = xmalloc((size_t)neh_lp * sizeof *sv.lp);
+        memcpy(sv.lp, eh_lp, (size_t)neh_lp * sizeof *sv.lp);
+    }
+    fn_eh = 0;
+    neh_lp = 0;
+    return sv;
+}
+
+static void eh_resume(struct eh_saved sv)
+{
+    if (sv.n)
+        memcpy(eh_lp, sv.lp, (size_t)sv.n * sizeof *sv.lp);
+    free(sv.lp);
+    neh_lp = sv.n;
+    fn_eh = sv.fn_eh;
+}
 
 static int eh_open(struct sb *b)
 {
@@ -1243,10 +1281,37 @@ static void emit_stmt(struct sb *b, struct cstmt *s);
 static void emit_block_items(struct sb *b, struct cstmt *first);
 
 /* e's value, in C. */
+/* The element type and count of array type t, its dimensions flat. */
+static struct cty *array_flat(struct cty *t, long *n)
+{
+    *n = 1;
+    while (t->k == CT_ARRAY) {
+        *n *= t->n;
+        t = t->to;
+    }
+    return t;
+}
+
+/* An array assigned element by element (one of objects whose copy
+ * assignment is not trivial), as an expression. */
+static char *array_assign_text(struct cexpr *e)
+{
+    long n;
+    struct cty *el = array_flat(e->a[0]->t, &n);
+    struct cty *pt = ct_ptr(ct_unqual(el));
+    return cx_fmt("({ %s = (%s)%s; %s = (%s)%s; for (unsigned long __cx_ci "
+                  "= 0; __cx_ci < %ldUL; __cx_ci++) (void)%s; })",
+                  cdecl(pt, "__cx_cd"), ctype(pt), eaddr(e->a[0]),
+                  cdecl(pt, "__cx_cs"), ctype(pt), eaddr(e->a[1]), n,
+                  ev(e->init));
+}
+
 static char *ev(struct cexpr *e)
 {
     long v;
     struct w128 iw;
+    if (e->k == E_ASSIGN && e->elemwise)
+        return array_assign_text(e);
     if (e->t && ct_is_integer(e->t) && e->k != E_INT && expr_fold(e, &v))
         return int_lit(v, e->t);
     if (imm_value(e, &iw))
@@ -1759,6 +1824,26 @@ static void einit(struct sb *b, const char *dest, struct cty *t,
         }
         break;
     case E_CONSTRUCT:
+        if (init->t->k == CT_ARRAY && init->elemwise) {
+            /* copied element by element: those built are destroyed if
+             * one's constructor throws */
+            long n;
+            struct cty *el = array_flat(init->t, &n);
+            struct cty *pt = ct_ptr(ct_unqual(el));
+            struct sb s = { 0, 0, 0 };
+            char *undo = eh_on ? destroy_text("&__cx_cd[__cx_ci]", el) : NULL;
+            int lp = undo ? eh_open(&s) : -1;
+            einit(&s, "__cx_cd[__cx_ci]", el, init->init);
+            if (lp >= 0)
+                eh_close(&s, lp, cx_fmt("while (__cx_ci > 0) { __cx_ci--; "
+                                        "%s }", undo));
+            sb_printf(b, "{ %s = (%s)&(%s); %s = (%s)%s; for (unsigned long "
+                         "__cx_ci = 0; __cx_ci < %ldUL; __cx_ci++) { %s} } ",
+                      cdecl(pt, "__cx_cd"), ctype(pt), dest,
+                      cdecl(pt, "__cx_cs"), ctype(pt), eaddr(init->a[0]), n,
+                      s.p ? s.p : "");
+            return;
+        }
         if (init->t->k == CT_ARRAY && !init->fn && init->na == 1) {
             sb_printf(b, "__builtin_memcpy(&(%s), %s, %ldUL); ", dest,
                       eaddr(init->a[0]), ct_size(init->t));
@@ -2559,6 +2644,49 @@ static char *atexit_call(const char *d, const char *obj)
                   d, obj);
 }
 
+/* A function destroying an array of type t at its argument, last
+ * element first -- what __cxa_atexit registers for a static array of
+ * objects with destructors -- or NULL when they are trivial. */
+static int gvar_has_effects(struct cvar *v);
+
+static const char *array_dtor_fn(struct cty *t)
+{
+    char *d = destroy_text("__cx_a", t);
+    if (!d)
+        return NULL;
+    const char *name = cx_fmt("__cx_adtor%d", cx_uid());
+    sb_printf(&out_decls, "static void %s(void *);\n", name);
+    sb_printf(&out_thunks, "static void %s(void *__cx_a)\n{\n%s\n}\n", name,
+              d);
+    return name;
+}
+
+/* The registration of the destructor of static object `obj` of type t
+ * (a class, or an array of them): at exit, or per thread at the
+ * thread's end. NULL when nothing is to be destroyed. */
+static char *dtor_registration(struct cty *t, const char *obj, int per_thread)
+{
+    const char *fn = NULL;
+    if (t->k == CT_CLASS) {
+        struct cfunc *d = class_dtor(t->cls);
+        if (d) {
+            need_fn(d);
+            fn = fn_name(d, 1);
+        }
+    } else if (t->k == CT_ARRAY) {
+        fn = array_dtor_fn(t);
+    }
+    if (!fn)
+        return NULL;
+    if (per_thread) {
+        need_thread_atexit = 1;
+        return cx_fmt("__cxa_thread_atexit((void (*)(void *))%s, %s, "
+                      "&__dso_handle);\n", fn, obj);
+    }
+    need_atexit = 1;
+    return atexit_call(fn, obj);
+}
+
 static int need_guard_init(struct cvar *v)
 {
     struct cty *t = v->type;
@@ -2605,14 +2733,8 @@ static void emit_local_static(struct sb *b, struct cstmt *s)
         sb_printf(b, "if (!%s) {\n%s = 1;\n", guard, guard);
         if (dyn)
             stmt_init(b, v->cname, t, ini);
-        if (dtor) {
-            struct cfunc *d = class_dtor((t->k == CT_ARRAY ? t->to : t)->cls);
-            if (t->k == CT_CLASS && d) {
-                need_thread_atexit = 1;
-                sb_printf(b, "__cxa_thread_atexit((void (*)(void *))%s, &%s, "
-                             "&__dso_handle);\n", fn_name(d, 1), v->cname);
-            }
-        }
+        if (dtor)
+            sb_put(b, dtor_registration(t, cx_fmt("&%s", v->cname), 1));
         sb_put(b, "}\n");
         return;
     }
@@ -2625,13 +2747,8 @@ static void emit_local_static(struct sb *b, struct cstmt *s)
         stmt_init(b, v->cname, t, ini);
     if (lp >= 0)
         eh_close(b, lp, cx_fmt("__cxa_guard_abort(&%s);", guard));
-    if (dtor) {
-        struct cfunc *d = class_dtor((t->k == CT_ARRAY ? t->to : t)->cls);
-        if (t->k == CT_CLASS && d) {
-            need_atexit = 1;
-            sb_put(b, atexit_call(fn_name(d, 1), cx_fmt("&%s", v->cname)));
-        }
-    }
+    if (dtor)
+        sb_put(b, dtor_registration(t, cx_fmt("&%s", v->cname), 0));
     sb_printf(b, "__cxa_guard_release(&%s);\n}\n", guard);
 }
 
@@ -3801,22 +3918,21 @@ static void tls_wrapper(struct cvar *v)
     sb_printf(&out_decls, "void %s(void);\n", H);
     struct sb b = { 0, 0, 0 };
     sb_printf(&b, "static __thread char %s;\n", g);
-    sb_printf(&b, "void %s(void)\n{\nif (%s)\nreturn;\n%s = 1;\n", H, g, g);
+    /* (made while some function is being written: its regions are not
+     * this function's) */
+    struct eh_saved sv = eh_suspend();
+    sb_printf(&b, "void %s(void)\n{\n", H);
+    size_t at = b.len;
+    sb_printf(&b, "if (%s)\nreturn;\n%s = 1;\n", g, g);
     if (dyn && ini)
         stmt_init(&b, v->cname, t, ini);
-    if (t->k == CT_CLASS) {
-        struct cfunc *d = class_dtor(t->cls);
-        if (d) {
-            need_fn(d);
-            need_thread_atexit = 1;
-            sb_printf(&b, "__cxa_thread_atexit((void (*)(void *))%s, &%s, &__dso_handle);\n",
-                      fn_name(d, 1), v->cname);
-        }
-    } else if (t->k == CT_ARRAY && destroy_text(cx_fmt("&%s", v->cname), t)) {
-        cx_error(NULL, "a namespace-scope thread_local array of objects with "
-                       "destructors is not supported yet");
-    }
+    char *reg = dtor_registration(t, cx_fmt("&%s", v->cname), 1);
+    if (reg)
+        sb_put(&b, reg);
     sb_put(&b, "}\n");
+    if (fn_eh)                      /* (its elements' cleanups) */
+        sb_insert(&b, at, "void *__cx_exc; long __cx_sel;\n");
+    eh_resume(sv);
     sb_printf(&b, "__attribute__((weak)) void *%s(void)\n{\n%s();\nreturn &%s;\n}\n",
               W, H, v->cname);
     sb_put(&out_thunks, sb_str(&b));
@@ -3864,7 +3980,7 @@ static void emit_gvar(struct cvar *v)
     const char *guard = NULL;
     if (!v->is_static && (v->is_inline || v->weak) &&
         strncmp(v->cname, "_Z", 2) == 0 &&
-        (dyn || (t->k == CT_CLASS && class_dtor(t->cls)))) {
+        (dyn || gvar_has_effects(v))) {
         guard = cx_fmt("_ZGV%s", v->cname + 2);
         sb_printf(&out_vars, "__attribute__((weak)) %s %s;\n",
                   guard_ctype(), guard);
@@ -3873,22 +3989,14 @@ static void emit_gvar(struct cvar *v)
     }
     if (dyn) {
         line_marker(&out_init, v->line, v->file);
+        struct eh_saved sv = eh_suspend();
         stmt_init(&out_init, v->cname, t, ini);
+        init_eh |= fn_eh;
+        eh_resume(sv);
     }
-    if (t->k == CT_CLASS) {
-        struct cfunc *d = class_dtor(t->cls);
-        if (d) {
-            need_fn(d);
-            need_atexit = 1;
-            sb_put(&out_init, atexit_call(fn_name(d, 1),
-                                          cx_fmt("&%s", v->cname)));
-        }
-    } else if (t->k == CT_ARRAY) {
-        char *d = destroy_text(cx_fmt("&%s", v->cname), t);
-        if (d)
-            cx_error(NULL, "a namespace-scope array of objects with "
-                           "destructors is not supported yet");
-    }
+    char *reg = dtor_registration(t, cx_fmt("&%s", v->cname), 0);
+    if (reg)
+        sb_put(&out_init, reg);
     if (guard)
         sb_put(&out_init, "}\n");
 }
@@ -4443,6 +4551,7 @@ char *cx_emit_unit(void)
     memset(&out_rettypes, 0, sizeof out_rettypes);
     nwork = 0;
     need_atexit = need_guard = 0;
+    init_eh = 0;
     need_pmf = 0;
     need_valist_tag = 0;
     any_vtable = any_pure = need_dyncast = 0;
@@ -4658,7 +4767,8 @@ char *cx_emit_unit(void)
     sb_put(&out, sb_str(&out_code));
     sb_put(&out, sb_str(&out_thunks));
     if (out_init.len) {
-        sb_printf(&out, "static void __cx_global_init(void)\n{\n%s}\n",
+        sb_printf(&out, "static void __cx_global_init(void)\n{\n%s%s}\n",
+                  init_eh ? "void *__cx_exc; long __cx_sel;\n" : "",
                   sb_str(&out_init));
         sb_put(&out, "__attribute__((section(\".init_array\"), used)) "
                      "static void (*__cx_global_init_p)(void) = "

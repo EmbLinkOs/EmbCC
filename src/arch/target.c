@@ -1464,6 +1464,7 @@ int target_macho_reloc(enum target_arch a, enum reloc_kind k,
         case RK_CALL:    t = X86_64_RELOC_BRANCH;   pc = 1; break;
         case RK_PCREL32: t = X86_64_RELOC_SIGNED;   pc = 1; break;
         case RK_TLVP:    t = 9 /* X86_64_RELOC_TLV */; pc = 1; break;
+        case RK_GOTPC32: t = 3 /* X86_64_RELOC_GOT_LOAD */; pc = 1; break;
         case RK_ABS64:   t = X86_64_RELOC_UNSIGNED; pc = 0; len = 3; break;
         case RK_ABS32:   t = X86_64_RELOC_UNSIGNED; pc = 0; break;
         default: return 0;

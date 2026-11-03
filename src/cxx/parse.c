@@ -5308,18 +5308,8 @@ static struct cstmt *parse_structured_binding(struct cty *ds_type,
         src = src->a[0];
     if (!ct_is_ref(declared) && src->t->k == CT_ARRAY) {
         /* an array: copied, element by element */
-        struct cty *el = src->t;
-        while (el->k == CT_ARRAY)
-            el = el->to;
-        if (el->k == CT_CLASS && !el->cls->trivial_copy)
-            cx_error(at, "copying an array of '%s' is not supported yet",
-                     ct_name(el));
         e->type = ct_qual(src->t, declared->q);
-        struct cexpr *cp = ex_new(E_CONSTRUCT, e->type, VC_PRVALUE);
-        cp->a = xmalloc(sizeof *cp->a);
-        cp->a[0] = src;
-        cp->na = 1;
-        e->ctor = cp;
+        e->ctor = array_copy(e->type, src, src->vc != VC_LVALUE);
     } else {
         init_variable_with(e, form, args, na, at);
     }

@@ -335,8 +335,6 @@ Darwin triples, each with its own diagnostic:
 | Construct | Diagnostic |
 |---|---|
 | `-g` | Warning, and the object is compiled without debug information: `-g: no debug information for aarch64-apple-darwin yet; d.c is compiled without it` |
-| `__thread` | `__thread is not supported for a Darwin target yet: Mach-O addresses a thread-local through a __thread_vars descriptor, which this writer does not emit` |
-| `__attribute__((constructor))`, `destructor` | `__attribute__((constructor)) is not supported for a Darwin target yet: it needs a __DATA,__mod_init_func section this Mach-O writer does not emit` |
 | file-scope `__asm__` with labels or symbols | `a file-scope asm block with labels or symbol references is not supported for a Darwin target yet: its bytes would be emitted but its symbols and relocations dropped` |
 | `__attribute__((alias))` | `alias attribute on 'g' is not supported for Mach-O output` |
 | `__attribute__((section))` on a function | `a function's section attribute is not supported for Mach-O output` |

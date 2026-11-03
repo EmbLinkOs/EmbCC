@@ -4318,6 +4318,12 @@ static void gen_func(struct ir_func *fn, struct code *text,
                 x86_mov_reg_fsbase(text, r);
                 gs.patch_off = x86_add_reg_imm32_reloc(text, r);
                 gs.kind = RK_TPOFF32;
+            } else if (!i->glob->defined &&
+                       target_os_get() == TGT_OS_DARWIN) {
+                /* Darwin: a symbol of another image has no link-time
+                 * address; its GOT slot does */
+                gs.patch_off = x86_mov_reg_rip(text, D ? g_loc[i->dst] : 0);
+                gs.kind = RK_GOTPC32;
             } else {
                 gs.patch_off = D ? x86_lea_reg_rip(text, g_loc[i->dst])
                                  : x86_lea_rax_rip(text);
@@ -4331,10 +4337,16 @@ static void gen_func(struct ir_func *fn, struct code *text,
         case IR_FADDR: {
             int D = in_reg(i->dst);
             struct fsite fs;
-            fs.patch_off = D ? x86_lea_reg_rip(text, g_loc[i->dst])
-                             : x86_lea_rax_rip(text);
+            if (!i->callee->has_defn && target_os_get() == TGT_OS_DARWIN) {
+                /* as IR_GADDR: through the GOT */
+                fs.patch_off = x86_mov_reg_rip(text, D ? g_loc[i->dst] : 0);
+                fs.kind = RK_GOTPC32;
+            } else {
+                fs.patch_off = D ? x86_lea_reg_rip(text, g_loc[i->dst])
+                                 : x86_lea_rax_rip(text);
+                fs.kind = RK_PCREL32;
+            }
             fs.target = i->callee;
-            fs.kind = RK_PCREL32;
             fs.addend = 0;
             PUSH(st->f, st->nf, st->capf, fs);
             if (!D) cg_store(text, sd, i->dst, 8);

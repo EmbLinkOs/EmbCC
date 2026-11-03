@@ -3792,18 +3792,59 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         for (struct global *g = u->globals; g; g = g->next)
             if (!g->absorbed && g->defined && g->is_tls)
                 ntlv++;
-        /* Mach-O gathers these from __DATA,__mod_init_func rather than
-         * from an SHT_INIT_ARRAY section, and this writer emits no such
-         * section. Dropping them would give back exactly the silent
-         * failure this attribute was implemented to end. */
-        for (struct func *f = u->funcs; f; f = f->next)
-            if (!f->absorbed && (f->is_ctor || f->is_dtor))
-                diag_fatal(f->file, f->line,
-                           "__attribute__((%s)) is not supported for a "
-                           "Darwin target yet: it needs a "
-                           "__DATA,__mod_init_func section this Mach-O "
-                           "writer does not emit",
-                           f->is_ctor ? "constructor" : "destructor");
+        /* Constructors: dyld calls each pointer in __DATA,__mod_init_func
+         * (S_MOD_INIT_FUNC_POINTERS), in order -- by priority here, the
+         * numbered ones ascending ahead of the plain ones, as the ELF
+         * path's sorted .init_array. Destructors: dyld no longer runs
+         * __mod_term_func, so they are listed in __DATA,__embcc_dtors and
+         * lib/rt's __embcc_register_dtors, last in __mod_init_func, hands
+         * them to __cxa_atexit -- clang's way, a registration at start.
+         * A section named .init_array (C++'s __cx_global_init) or
+         * .fini_array is the same thing spelled the ELF way. */
+        int nmi = 0, ndt = 0, named_fini = 0;
+        struct func **mi = NULL, **dt = NULL;
+        for (int pass = 0; pass < 2; pass++) {
+            for (struct func *f = u->funcs; f; f = f->next) {
+                if (f->absorbed || !f->has_defn)
+                    continue;
+                if (f->is_ctor) {
+                    if (pass)
+                        mi[nmi] = f;
+                    nmi++;
+                }
+                if (f->is_dtor) {
+                    if (pass)
+                        dt[ndt] = f;
+                    ndt++;
+                }
+            }
+            if (!pass) {
+                mi = xcalloc((size_t)nmi + 2, sizeof *mi);
+                dt = xcalloc((size_t)ndt + 1, sizeof *dt);
+                nmi = ndt = 0;
+            }
+        }
+        for (int pass = 0; pass < 2; pass++) {
+            struct func **v = pass ? dt : mi;
+            int n = pass ? ndt : nmi;
+            for (int i = 1; i < n; i++)          /* stable, by priority */
+                for (int j = i; j > 0; j--) {
+                    int pa = pass ? v[j - 1]->dtor_prio : v[j - 1]->ctor_prio;
+                    int pb = pass ? v[j]->dtor_prio : v[j]->ctor_prio;
+                    unsigned ka = pa ? (unsigned)pa : ~0u;
+                    unsigned kb = pb ? (unsigned)pb : ~0u;
+                    if (ka <= kb)
+                        break;
+                    struct func *tmp = v[j];
+                    v[j] = v[j - 1];
+                    v[j - 1] = tmp;
+                }
+        }
+        for (int k = 0; k < nnamed; k++)
+            if (strncmp(named[k].name, ".fini_array", 11) == 0)
+                named_fini = 1;
+        int need_dreg = ndt || named_fini;
+        int m_modinit = 0, m_dtors = 0;
         struct machow *mw = machow_new(
             ta == TARGET_AARCH64 ? CPU_TYPE_ARM64 : CPU_TYPE_X86_64,
             ta == TARGET_AARCH64 ? CPU_SUBTYPE_ARM64_ALL
@@ -3895,10 +3936,32 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                                       (unsigned long long)ntlv * 24, 3);
             free(tv);
         }
+        if (nmi + need_dreg) {
+            void *z = xcalloc((size_t)(nmi + need_dreg), 8);
+            m_modinit = machow_add_section(mw, "__DATA", "__mod_init_func",
+                                           0x9 /* S_MOD_INIT_FUNC_POINTERS */,
+                                           z, (unsigned long long)(nmi +
+                                                                   need_dreg) * 8,
+                                           3);
+            free(z);
+        }
+        if (ndt) {
+            void *z = xcalloc((size_t)ndt, 8);
+            m_dtors = machow_add_section(mw, "__DATA", "__embcc_dtors",
+                                         S_REGULAR, z,
+                                         (unsigned long long)ndt * 8, 3);
+            free(z);
+        }
         for (int k = 0; k < nnamed; k++)
             named[k].ndx = machow_add_section(
-                mw, "__DATA", named[k].name,
-                named[k].nobits ? S_ZEROFILL : S_REGULAR,
+                mw, "__DATA",
+                strncmp(named[k].name, ".init_array", 11) == 0
+                    ? "__mod_init_func"
+                : strncmp(named[k].name, ".fini_array", 11) == 0
+                    ? "__embcc_dtors" : named[k].name,
+                strncmp(named[k].name, ".init_array", 11) == 0
+                    ? 0x9 /* S_MOD_INIT_FUNC_POINTERS */
+                : named[k].nobits ? S_ZEROFILL : S_REGULAR,
                 named[k].nobits ? NULL : named[k].buf,
                 (unsigned long long)named[k].len,
                 named[k].align <= 1 ? 0 : named[k].align <= 2 ? 1
@@ -4140,6 +4203,24 @@ static int compile_unit(const char *in, const char *out, int pp_only)
             }
         }
 
+        {
+            int uns = ta == TARGET_AARCH64 ? ARM64_RELOC_UNSIGNED
+                                           : X86_64_RELOC_UNSIGNED;
+            for (int k = 0; k < nmi; k++)
+                machow_add_reloc(mw, m_modinit, (unsigned long long)k * 8,
+                                 mi[k]->sym_ndx, uns, 0, 3, 0);
+            if (need_dreg)
+                machow_add_reloc(mw, m_modinit, (unsigned long long)nmi * 8,
+                                 machow_add_symbol(mw,
+                                                   "__embcc_register_dtors",
+                                                   0, 0, 1),
+                                 uns, 0, 3, 0);
+            for (int k = 0; k < ndt; k++)
+                machow_add_reloc(mw, m_dtors, (unsigned long long)k * 8,
+                                 dt[k]->sym_ndx, uns, 0, 3, 0);
+            free(mi);
+            free(dt);
+        }
         /* each descriptor: the thunk, then (after the key ld leaves
          * zero) its first value */
         for (int k = 0; k < ntlv; k++) {
