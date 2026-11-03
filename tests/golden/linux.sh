@@ -686,11 +686,15 @@ notify blocked and woke through the futex, and each thread had its own
 thread_local while the creator's kept the template's value"
 
 # A Makefile written for glibc names the libraries glibc split out once
-# and keeps as empty archives now (2.34): -lpthread -ldl -lrt -lutil.
-# EmbCC's libc has their functions, so the driver takes the names as its
-# own, as it takes -lm, and the program links and runs.
+# and keeps as empty archives now (2.34): -lpthread -ldl -lrt -lutil; and
+# -lresolv and -lanl, for what glibc still keeps there. EmbCC's libc has
+# their functions, so the driver takes the names as its own, as it takes
+# -lm, and the program links and runs.
 cat > "$out/glibcnames.c" << 'GN'
+#define _GNU_SOURCE 1
+#include <netdb.h>
 #include <pthread.h>
+#include <resolv.h>
 #include <time.h>
 static void *f(void *a) { return a; }
 int main(void)
@@ -698,15 +702,18 @@ int main(void)
     pthread_t t;
     void *r;
     struct timespec ts;
+    static const unsigned char root[1];
+    static struct gaicb g;
     if (pthread_create(&t, 0, f, (void *)42) || pthread_join(t, &r) ||
-        clock_gettime(CLOCK_MONOTONIC, &ts))
+        clock_gettime(CLOCK_MONOTONIC, &ts) || dn_skipname(root, root + 1) != 1 ||
+        gai_error(&g) != 0)
         return 1;
     return (int)(long)r;
 }
 GN
 "$EMBCC" --target="$triple" "$out/glibcnames.c" -pthread -lpthread -ldl \
-    -lrt -lutil -lm -o "$out/glibcnames" 2> "$out/glibcnames-ld.log" || {
-    echo "FAIL: -lpthread -ldl -lrt -lutil -lm did not link:"
+    -lrt -lutil -lresolv -lanl -lm -o "$out/glibcnames" 2> "$out/glibcnames-ld.log" || {
+    echo "FAIL: -lpthread -ldl -lrt -lutil -lresolv -lanl -lm did not link:"
     cat "$out/glibcnames-ld.log"; exit 1; }
 set +e
 if [ "$runner" = native ]; then
@@ -718,4 +725,4 @@ fi
 rc=$?
 set -e
 [ "$rc" = 42 ] || { echo "FAIL: the -lpthread program exited $rc, wanted 42"; exit 1; }
-echo "and -lpthread -ldl -lrt -lutil -lm, glibc's names, link through the driver"
+echo "and -lpthread -ldl -lrt -lutil -lresolv -lanl -lm, glibc's names, link through the driver"

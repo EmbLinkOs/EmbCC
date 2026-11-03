@@ -41,6 +41,9 @@
 #   posix-lib3.c     XSI signals, open_wmemstream, traps, mntent, ether,
 #                    the pthread _np calls, errno's names, statx
 #   posix-ucontext.c getcontext/makecontext/swapcontext coroutines
+#   posix-lib4.c     argp's parsing and help, obstack, argz, backtrace, the
+#                    res_* name codecs and parser, getaddrinfo_a, getopt's
+#                    optind as GNU's permutes
 #
 # At -O0 and -O2, each exiting 42. Skipped without a kernel for
 # tests/harness/linux (EMBCC_LINUX_KERNEL_X86_64 / _AARCH64).
@@ -56,7 +59,7 @@ progs="tmpfile next-toward quick-exit multibyte-stdlib inttypes-formats
        posix-fd posix-process posix-signals posix-net posix-time
        malloc-gnu posix-threads posix-glob posix-regex posix-wordexp
        posix-iconv posix-lib2 posix-linux2 posix-sigjmp
-       posix-lib3 posix-ucontext"
+       posix-lib3 posix-ucontext posix-lib4"
 
 A64LD=${EMBCC_AARCH64_LD:-aarch64-elf-ld}
 A64GCC=$(dirname "$(aarch64-elf-gcc -print-libgcc-file-name 2>/dev/null)")
@@ -81,13 +84,17 @@ for arch in x86_64 aarch64; do
                 fail=1; continue; }
             if [ $arch = x86_64 ]; then
                 "$EMBCC_ROOT/embld" -o "$out/$tag.bin" "$LIBDIR/crt1.o" \
-                    "$out/$tag.o" "$LIBDIR/libc.a" > "$out/$tag.ld" 2>&1
+                    "$out/$tag.o" "$LIBDIR/libc.a" "$LIBDIR/librt.a" \
+                    > "$out/$tag.ld" 2>&1
             else
                 # embld writes no AArch64 executable; binary128 arithmetic
                 # comes from libgcc, after libc.a (as tests/golden/linux.sh).
+                # librt.a before it, as the driver links: its unwinder is
+                # backtrace's, where libgcc's knows none of these frames.
                 "$A64LD" -static -T "$EMBCC_ROOT/lib/libc/os/linux/link.ld" \
                     -o "$out/$tag.bin" "$LIBDIR/crt1.o" "$out/$tag.o" \
-                    "$LIBDIR/libc.a" -L"$A64GCC" -lgcc > "$out/$tag.ld" 2>&1
+                    "$LIBDIR/libc.a" "$LIBDIR/librt.a" -L"$A64GCC" -lgcc \
+                    > "$out/$tag.ld" 2>&1
             fi || { echo "FAIL $tag: did not link"; head -3 "$out/$tag.ld"
                     fail=1; continue; }
             mkdir -p "$out/root/bin"

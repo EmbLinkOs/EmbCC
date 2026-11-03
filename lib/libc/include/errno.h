@@ -256,6 +256,10 @@ int *__errno_location(void);
  * it after the last '/': GNU's, under _GNU_SOURCE as there */
 #if defined(_GNU_SOURCE)
 extern char *program_invocation_name, *program_invocation_short_name;
+#ifndef __error_t_defined
+#define __error_t_defined 1
+typedef int error_t;           /* an errno value, as argz and argp return */
+#endif
 #endif
 
 #ifdef __cplusplus

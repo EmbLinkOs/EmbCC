@@ -151,6 +151,38 @@ int getprotobynumber_r(int num, struct protoent *__restrict out,
                        struct protoent **__restrict res);
 int getprotoent_r(struct protoent *__restrict out, char *__restrict buf,
                   size_t len, struct protoent **__restrict res);
+
+/* GNU's codes besides POSIX's, and getaddrinfo_a's */
+#define EAI_NODATA      (-5)
+#define EAI_ADDRFAMILY  (-9)
+#define EAI_INPROGRESS  (-100)
+#define EAI_CANCELED    (-101)
+#define EAI_NOTCANCELED (-102)
+#define EAI_ALLDONE     (-103)
+#define EAI_INTR        (-104)
+#define EAI_IDN_ENCODE  (-105)
+
+/* getaddrinfo_a's request (src/posix/gai_a.c): the getaddrinfo
+ * arguments, and its result when gai_error says it is done */
+struct gaicb {
+    const char *ar_name;
+    const char *ar_service;
+    const struct addrinfo *ar_request;
+    struct addrinfo *ar_result;
+    int __return;
+    int __state;
+    int __glibc_reserved[4];
+};
+
+#define GAI_WAIT   0
+#define GAI_NOWAIT 1
+
+struct sigevent;
+struct timespec;
+int getaddrinfo_a(int mode, struct gaicb *list[], int ent, struct sigevent *sig);
+int gai_suspend(const struct gaicb *const list[], int ent, const struct timespec *timeout);
+int gai_error(struct gaicb *req);
+int gai_cancel(struct gaicb *req);
 #endif
 
 #ifdef __cplusplus

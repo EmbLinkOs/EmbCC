@@ -575,6 +575,14 @@ WEAK const char *gai_strerror(int code)
     case EAI_MEMORY:   return "Memory allocation failure";
     case EAI_SYSTEM:   return "System error";
     case EAI_OVERFLOW: return "Argument buffer overflow";
+    case EAI_NODATA:      return "No address associated with hostname";
+    case EAI_ADDRFAMILY:  return "Address family for hostname not supported";
+    case EAI_INPROGRESS:  return "Processing request in progress";
+    case EAI_CANCELED:    return "Request canceled";
+    case EAI_NOTCANCELED: return "Request not canceled";
+    case EAI_ALLDONE:     return "All requests done";
+    case EAI_INTR:        return "Interrupted by a signal";
+    case EAI_IDN_ENCODE:  return "Parameter string not correctly encoded";
     }
     return "Unknown error";
 }

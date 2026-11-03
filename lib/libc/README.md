@@ -17,7 +17,8 @@ the duplication this project removes everywhere else.
       posix/          POSIX above C: descriptors, files, directories,
                       processes and spawn, popen, sockets and the resolver,
                       terminals and ptys, users, mmap, poll, sysconf; and
-                      libgen, fnmatch, getopt, search, err
+                      libgen, fnmatch, getopt, search, err; and GNU's argp,
+                      obstack, argz, backtrace, the res_* resolver API
       setjmp/         the one part that cannot be portable C
     os/backend.h      the contract: 140 primitives, C's few and POSIX's many
     os/absent.inc     each primitive as an ENOSYS failure, for what a backend
