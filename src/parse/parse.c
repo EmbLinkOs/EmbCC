@@ -2358,7 +2358,7 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
  * removed it; NULL there, and where nothing says a declaration starts. */
 static struct type *c89_implicit_int(struct parser *ps, int had_specifier)
 {
-    if (lex_c_year() >= 1999)
+    if (lex_c_year() >= 1999 && !lex_permissive())
         return NULL;
     if (!had_specifier && cur(ps)->kind == TOK_IDENT) {
         struct lexer save = ps->lx;
@@ -2366,6 +2366,11 @@ static struct type *c89_implicit_int(struct parser *ps, int had_specifier)
         had_specifier = cur(ps)->kind == TOK_LPAREN;   /* `main() {` */
         ps->lx = save;
     }
+    if (had_specifier && lex_c_year() >= 1999)
+        /* --permissive: kept, and said, in GCC's words */
+        diag_warn_opt(ps->lx.file, cur(ps)->line, cur(ps)->col, "implicit-int",
+                      "type defaults to 'int' in declaration of '%s'",
+                      cur(ps)->kind == TOK_IDENT ? cur(ps)->text : "(anonymous)");
     return had_specifier ? ty_base(TY_INT, 0) : NULL;
 }
 

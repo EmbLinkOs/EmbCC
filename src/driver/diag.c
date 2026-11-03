@@ -11,6 +11,7 @@
  * flush runs from atexit. What they print is what they always printed.
  */
 #include "util.h"
+#include "../lex/lex.h"
 #include "../platform/platform.h"
 
 #include <ctype.h>
@@ -750,6 +751,10 @@ static struct warn_opt g_warns[] = {
     /* `const static int t[]`: a storage class after the type, which C
      * calls obsolescent and GCC reports in -Wextra */
     { "old-style-declaration", 0, 0,    1 },
+    /* --permissive's two: C89's implicit int and implicit declaration,
+     * kept in a later standard and said every time, as GCC says them */
+    { "implicit-int",         1,  0,    0 },
+    { "implicit-function-declaration", 1, 0, 0 },
 
     /* ---- conversions that may change a value (sema, cvt_check) ----
      *
@@ -1042,7 +1047,9 @@ void diag_enable_group(int wall, int wextra)
  * the build log claim the check was missing when it is stricter. */
 int diag_always_error(const char *name)
 {
-    return !strcmp(name, "implicit-function-declaration");
+    /* (under --permissive it is a warning, which -Werror may still make
+     * an error) */
+    return !strcmp(name, "implicit-function-declaration") && !lex_permissive();
 }
 
 /* The names, for --help. */
@@ -1080,6 +1087,8 @@ static const struct { const char *name, *implied, *what; } g_warn_doc[] = {
     { "multichar", NULL, "a character constant of more than one character, `'ab'`" },
     { "nested-externs", NULL, "an `extern` declaration inside a function body" },
     { "old-style-declaration", NULL, "a storage class or `inline` after the type specifiers: `const static int t[]`, `int static n`" },
+    { "implicit-int", NULL, "under `--permissive`, a declaration with no type, which C89 read as `int`: `static x = 3;`, `f() { ... }`" },
+    { "implicit-function-declaration", NULL, "under `--permissive`, a call to a function nothing declared, which C89 declared `extern int f();`" },
     { "overflow", NULL, "an integer constant converted to a type that cannot hold it as a signed or as an unsigned value: `unsigned char c = 300;`" },
     { "pedantic", NULL, "a construct the C standard `--std` names does not have: a later standard's (`0b101` before C23, `_Bool` in C89) or a GNU extension (`({ ... })`, `case 1 ... 3`, `x ?: y`), except after `__extension__`. `--pedantic` turns it on and `--pedantic-errors` makes it an error; either also takes C23's keywords away from a GNU dialect before C23" },
     { "parentheses", NULL, "a comparison as an unparenthesized operand of `&`, `|` or `^`: `reg & MASK == 0`" },

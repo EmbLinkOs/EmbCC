@@ -5887,6 +5887,11 @@ static int embcc_main(int argc, char **argv)
             /* one warning made an error, or exempted from -Werror */
             int on = argv[i][2] == 'e';
             const char *nm = argv[i] + (on ? 8 : 11);
+            /* GCC 14's way to keep old code building: the two that are
+             * errors from C99 on become the --permissive warnings */
+            if (!on && (!strcmp(nm, "implicit-int") ||
+                        !strcmp(nm, "implicit-function-declaration")))
+                lex_set_permissive(1);
             if (diag_always_error(nm)) {
                 /* an error already; -Wno-error= cannot make it less */
                 if (!on)
@@ -6018,6 +6023,8 @@ static int embcc_main(int argc, char **argv)
              * passes no enum type -- EmbCC's libc and librt -- so it links
              * with code built either way */
             target_set_enum_neutral(1);
+        } else if (strcmp(argv[i], "-fpermissive") == 0) {
+            lex_set_permissive(1);
         } else if (strcmp(argv[i], "-fshort-enums") == 0 ||
                    strcmp(argv[i], "-fno-short-enums") == 0) {
             /* every enum the smallest integer type its values fit, as

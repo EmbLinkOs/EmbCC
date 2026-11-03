@@ -753,9 +753,14 @@ static struct global *find_global(struct unit *u, const char *name)
 static int c89_implicit_call(struct unit *u, struct scope *sc,
                              const struct expr *callee)
 {
-    if (lex_c_year() >= 1999 || callee->kind != EXPR_VAR || !callee->name ||
-        scope_find(sc, callee->name) >= 0 || find_global(u, callee->name))
+    if ((lex_c_year() >= 1999 && !lex_permissive()) || callee->kind != EXPR_VAR ||
+        !callee->name || scope_find(sc, callee->name) >= 0 ||
+        find_global(u, callee->name))
         return 0;
+    if (lex_c_year() >= 1999)       /* --permissive: kept, and said */
+        diag_warn_opt(diag_file(u), callee->line, callee->col,
+                      "implicit-function-declaration",
+                      "implicit declaration of function '%s'", callee->name);
     if (find_func(u, callee->name))
         return 1;           /* declared or defined later in the file */
     struct func *fd = xcalloc(1, sizeof *fd);

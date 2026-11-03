@@ -293,6 +293,12 @@ void lex_set_c_std(int year, int gnu)
     g_c_gnu = gnu;
 }
 
+/* -fpermissive: C89's implicit int and implicit declarations kept in
+ * every later standard, each warned about, as GCC 14 gives legacy code */
+static int g_permissive;
+void lex_set_permissive(int on) { g_permissive = on; }
+int lex_permissive(void) { return g_permissive; }
+
 int lex_c_year(void) { return g_c_year; }
 int lex_c_gnu(void) { return g_c_gnu; }
 void lex_set_pedantic(int on) { g_c_pedantic = on; }

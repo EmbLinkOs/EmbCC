@@ -270,6 +270,8 @@ void lex_decimal_encode(const char *text, int bytes, unsigned long long out[2]);
  * modes (as GCC reads them). */
 void lex_set_c_std(int year, int gnu);
 int lex_c_year(void);
+void lex_set_permissive(int on);
+int lex_permissive(void);
 int lex_c_gnu(void);
 /* -pedantic (or -pedantic-errors): diagnose what the standard -std= names
  * does not have. It also takes away EmbCC's own extension of a GNU
