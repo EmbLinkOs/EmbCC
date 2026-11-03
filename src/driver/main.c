@@ -3004,11 +3004,16 @@ static int compile_unit(const char *in, const char *out, int pp_only)
      * The code is the same with or without -g (backends ignore it), so
      * the object is written without debug information, and the build is
      * told so -- not stopped: every CMake Debug build passes -g. */
-    if (want_debug && target_fmt_get() == TGT_FMT_MACHO) {
-        fprintf(stderr, "embcc: warning: -g: no debug information for %s "
-                        "yet; %s is compiled without it\n",
-                target_triple_now(), in);
-        want_debug = 0;
+    if (want_debug && target_fmt_get() == TGT_FMT_MACHO &&
+        (want_split_dwarf || want_gz)) {
+        /* Darwin's DWARF stays in the objects, where ld's debug map
+         * points dsymutil and lldb: there is nothing to split off, and
+         * Mach-O has no compressed sections */
+        fprintf(stderr, "embcc: error: %s is not for a Darwin target: its "
+                        "DWARF stays in the objects, where the debug map "
+                        "finds it\n", want_split_dwarf ? "-gsplit-dwarf"
+                                                      : "-gz");
+        return 1;
     }
     target_set_debug_info(want_debug);
     opt_run(iu, opt_for_size ? OPT_SIZE : opt_level);
@@ -4099,6 +4104,40 @@ static int compile_unit(const char *in, const char *out, int pp_only)
             free(cu);
         }
 
+        /* -g: the DWARF, in __DWARF. A field that names an offset in
+         * another debug section holds that offset (Mach-O does not
+         * relocate those: dsymutil and lldb read each object's sections
+         * as they are); a code address is relocated against __text, and
+         * a global's against its symbol, below once there is one. */
+        int m_dw[DWARF_NSEC] = { 0 };
+        if (want_debug) {
+            for (int i = 0; i < dw.nrelocs; i++) {
+                struct dwarf_reloc *r = &dw.relocs[i];
+                long v = r->addend;
+                if (r->target == DWTGT_TEXT)
+                    v += (long)machow_section_addr(mw, m_text);
+                else if (r->target == DWTGT_GLOBAL)
+                    v += (long)machow_section_addr(
+                             mw, (r->glob->named ? named[r->glob->named - 1].ndx
+                                  : r->glob->in_bss ? m_bss : m_data)) +
+                         r->glob->off;
+                target_put_uint(dw.sec[r->in_sec] + r->off, r->width,
+                                (unsigned long)v);
+            }
+            for (int ds = 0; ds < DWARF_NSEC; ds++) {
+                if (!dw.seclen[ds] || dwarf_section_is_dwo(ds))
+                    continue;
+                char nm[32];
+                snprintf(nm, sizeof nm, "__%s", dwarf_section_name(ds) + 1);
+                m_dw[ds] = machow_add_section(mw, "__DWARF", nm,
+                                              S_REGULAR | 0x02000000u
+                                              /* S_ATTR_DEBUG */,
+                                              dw.sec[ds],
+                                              (unsigned long long)dw.seclen[ds],
+                                              0);
+            }
+        }
+
         /* ---- 3. LOCAL symbols, all of them, first --------------------
          *
          * Mach-O orders its symbol table locals, defined externals,
@@ -4362,6 +4401,25 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                 }
         }
         eh_free(&eh);
+        if (want_debug) {
+            for (int i = 0; i < dw.nrelocs; i++) {
+                struct dwarf_reloc *r = &dw.relocs[i];
+                int len = r->width == 8 ? 3 : 2;
+                if (r->target == DWTGT_TEXT)
+                    machow_add_reloc_sect(mw, m_dw[r->in_sec],
+                                          (unsigned long long)r->off, m_text,
+                                          len);
+                else if (r->target == DWTGT_GLOBAL)
+                    /* against its section, the field its address there:
+                     * what lldb's debug map translates, as clang's */
+                    machow_add_reloc_sect(mw, m_dw[r->in_sec],
+                                          (unsigned long long)r->off,
+                                          (r->glob->named
+                                           ? named[r->glob->named - 1].ndx
+                                           : r->glob->in_bss ? m_bss : m_data), len);
+            }
+            dwarf_free(&dw);
+        }
 
         int mrc = machow_write(mw, out);
         machow_free(mw);

@@ -1463,10 +1463,8 @@ a stack home for each variable, and it disables tail calls on ARMv7-M, so
 that the debugger can find every variable. Build with the same `-g`
 setting you ship with if you compare code size.
 
-`-g` is refused in three situations, each with an error naming the cause:
+`-g` is refused in two situations, each with an error naming the cause:
 
-- for the `-apple-darwin` targets (`-g is not supported for a Darwin
-  target yet: its DWARF goes in a __DWARF segment this does not write ...`);
 - for `x86_64-windows-gnu` (`-g is not supported for a Windows target
   yet: its debug information goes in CodeView records this does not
   write ...`);

@@ -206,15 +206,19 @@ a debugger can find its address but not its type.
 | Thumb (Cortex-M) | Yes | |
 | RISC-V, RV32 and RV64 | Yes | Tested with gdb under QEMU (RV32). See [Known problems](#known-problems). |
 | AVR | Yes | Tested with gdb and with EmbDBG under QEMU (`-M uno`). |
-| Any Darwin target (Mach-O) | No | Compiled without debug information, with a warning. |
+| Any Darwin target (Mach-O) | Yes | Tested with lldb (AArch64). The DWARF is in `__DWARF`, as clang writes it. |
 | Any Windows target (COFF) | Refused | |
 
-For a Darwin target, `-g` gives a warning and the object has no debug
-information; the code is the same either way. Its DWARF belongs in a
-`__DWARF` segment that EmbCC does not write yet:
+For a Darwin target the DWARF is written to the object's `__DWARF`
+segment (`__debug_info`, `__debug_line`, `__debug_loclists`, ...), with
+`S_ATTR_DEBUG`. Code and data addresses are relocated against their
+sections, as clang's are. The linker leaves the DWARF in the objects and
+records a debug map, from which lldb reads it, and `dsymutil` collects it
+into a `.dSYM` bundle. `-gsplit-dwarf` and `-gz` have no Mach-O form and
+are refused:
 
 ```text
-embcc: warning: -g: no debug information for aarch64-apple-darwin yet; d.c is compiled without it
+embcc: error: -gsplit-dwarf is not for a Darwin target: its DWARF stays in the objects, where the debug map finds it
 ```
 
 For a Windows target the compilation stops:

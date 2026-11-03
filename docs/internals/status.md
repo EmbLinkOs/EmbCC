@@ -421,7 +421,6 @@ and `x86_64-apple-darwin` follows System V; see
 
 | Construct | Diagnostic |
 |---|---|
-| `-g` | Warning, and the object is compiled without debug information: `-g: no debug information for aarch64-apple-darwin yet; d.c is compiled without it` |
 | File-scope `asm` with labels or symbol references | `a file-scope asm block with labels or symbol references is not supported for a Darwin target yet: its bytes would be emitted but its symbols and relocations dropped` |
 | `alias` | `alias attribute on 'h' is not supported for Mach-O output` |
 | `section` on a function | `a function's section attribute is not supported for Mach-O output` |
