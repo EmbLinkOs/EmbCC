@@ -672,6 +672,252 @@ def mve_generic(o):
         '%s: vst1q_%s%d' % (vtype(k, b, 128 // b), k, b) for k, b in ptrs))
 
 
+# ---------------------------------------------------------------------------
+# RISC-V V
+# ---------------------------------------------------------------------------
+
+VLEN = 128
+LMULS = [('mf8', 0.125), ('mf4', 0.25), ('mf2', 0.5), ('m1', 1), ('m2', 2),
+         ('m4', 4), ('m8', 8)]
+
+
+def rvv_types():
+    """(kind, sew, lmul-name, lmul) of every type: SEW/LMUL <= ELEN 64"""
+    out = []
+    for k in ('i', 'u', 'f'):
+        for sew in (8, 16, 32, 64):
+            if k == 'f' and sew < 32:
+                continue                       # (half needs Zvfh)
+            for ln, lm in LMULS:
+                if sew / lm > 64:
+                    continue
+                out.append((k, sew, ln, lm))
+    return out
+
+
+def rvv_names(k, sew, ln):
+    base = {'i': 'int', 'u': 'uint', 'f': 'float'}[k]
+    V = 'v%s%d%s_t' % (base, sew, ln)
+    E = {'i': 'int%d_t' % sew, 'u': 'uint%d_t' % sew,
+         'f': 'float' if sew == 32 else 'double'}[k]
+    sfx = '%s%d%s' % (k, sew, ln)
+    return V, E, sfx
+
+
+def rvv():
+    o = Out()
+    o(HEAD % """ * The RISC-V Vector extension's C intrinsics (v1.0, "riscv_vector.h"): the
+ * vector types of every SEW and LMUL, the masks, vsetvl, unit-stride and
+ * strided loads and stores, integer and floating-point arithmetic (and
+ * their masked _m forms), logic, shifts, comparisons to a mask, merges,
+ * the reductions, scalar moves, widening adds and multiplies, the
+ * conversions and reinterpretations -- lane by lane over GNU vectors,
+ * for a VLEN of 128 bits (the least V allows): a vector-length-agnostic
+ * program, which asks vsetvl how far to go, runs as on any machine.
+ * The elements past vl are left as the first operand had them (the
+ * tail-agnostic policy allows anything there).""")
+    o('#ifndef __EMBCC_RISCV_VECTOR_H\n#define __EMBCC_RISCV_VECTOR_H\n')
+    o('#include <stddef.h>\n#include <stdint.h>\n#include <string.h>\n')
+    o('#ifndef __riscv_v_intrinsic')
+    o('#error "riscv_vector.h: the V extension is not enabled (-march=rv64gcv)"')
+    o('#endif\n')
+    for n in (1, 2, 4, 8, 16, 32, 64):
+        lanes = VLEN // n
+        o('typedef uint8_t vbool%d_t __attribute__((__vector_size__(%d)));' % (n, lanes))
+    for k, sew, ln, lm in rvv_types():
+        V, E, _ = rvv_names(k, sew, ln)
+        o('typedef %s %s __attribute__((__vector_size__(%d)));' % (E, V, int(VLEN // 8 * lm)))
+    o()
+    for sew in (8, 16, 32, 64):
+        for ln, lm in LMULS:
+            if sew / lm > 64:
+                continue
+            vlmax = int(VLEN * lm // sew)
+            o.fn('size_t', '__riscv_vsetvl_e%d%s' % (sew, ln), 'size_t __avl',
+                 '    return __avl < %d ? __avl : %d;' % (vlmax, vlmax))
+            o.fn('size_t', '__riscv_vsetvlmax_e%d%s' % (sew, ln), 'void',
+                 '    return %d;' % vlmax)
+    for k, sew, ln, lm in rvv_types():
+        rvv_type(o, k, sew, ln, lm)
+    for n in (1, 2, 4, 8, 16, 32, 64):
+        rvv_mask(o, n)
+    o('\n#endif')
+    return o.text()
+
+
+def rvv_mask(o, n):
+    M = 'vbool%d_t' % n
+    lanes = VLEN // n
+    for nm, op in (('vmand', '&'), ('vmor', '|'), ('vmxor', '^'),
+                   ('vmandn', '& !'), ('vmorn', '| !'), ('vmnand', 'NAND')):
+        e = '!(__a[__i] & __b[__i])' if op == 'NAND' else '__a[__i] %s __b[__i]' % op
+        o.fn(M, '__riscv_%s_mm_b%d' % (nm, n), '%s __a, %s __b, size_t __vl' % (M, M),
+             '    %s __r = __a;\n    for (size_t __i = 0; __i < __vl && __i < %d; __i++)\n'
+             '        __r[__i] = (%s) ? 1 : 0;\n    return __r;' % (M, lanes, e))
+    o.fn(M, '__riscv_vmnot_m_b%d' % n, '%s __a, size_t __vl' % M,
+         '    %s __r = __a;\n    for (size_t __i = 0; __i < __vl && __i < %d; __i++)\n'
+         '        __r[__i] = !__a[__i];\n    return __r;' % (M, lanes))
+    o.fn('unsigned long', '__riscv_vcpop_m_b%d' % n, '%s __a, size_t __vl' % M,
+         '    unsigned long __c = 0;\n    for (size_t __i = 0; __i < __vl && __i < %d; __i++)\n'
+         '        __c += __a[__i] != 0;\n    return __c;' % lanes)
+    o.fn('long', '__riscv_vfirst_m_b%d' % n, '%s __a, size_t __vl' % M,
+         '    for (size_t __i = 0; __i < __vl && __i < %d; __i++)\n'
+         '        if (__a[__i])\n            return (long)__i;\n    return -1;' % lanes)
+    o.fn(M, '__riscv_vmset_m_b%d' % n, 'size_t __vl',
+         '    %s __r = { 0 };\n    for (size_t __i = 0; __i < __vl && __i < %d; __i++)\n'
+         '        __r[__i] = 1;\n    return __r;' % (M, lanes))
+    o.fn(M, '__riscv_vmclr_m_b%d' % n, 'size_t __vl',
+         '    %s __r = { 0 };\n    (void)__vl;\n    return __r;' % M)
+
+
+def rvv_type(o, k, sew, ln, lm):
+    V, E, t = rvv_names(k, sew, ln)
+    n = int(VLEN * lm // sew)
+    ratio = int(sew / lm)
+    M = 'vbool%d_t' % ratio
+    f = k == 'f'
+    lp = '    for (size_t __i = 0; __i < __vl && __i < %d; __i++)\n        ' % n
+
+    def fn(ret, name, params, body):
+        o.fn(ret, '__riscv_' + name, params, body)
+
+    fn(V, 'vle%d_v_%s' % (sew, t), 'const %s *__b, size_t __vl' % E,
+       '    %s __r = { 0 };\n%s__r[__i] = __b[__i];\n    return __r;' % (V, lp))
+    fn('void', 'vse%d_v_%s' % (sew, t), '%s *__b, %s __v, size_t __vl' % (E, V),
+       '%s__b[__i] = __v[__i];' % lp)
+    fn(V, 'vle%d_v_%s_m' % (sew, t), '%s __m, const %s *__b, size_t __vl' % (M, E),
+       '    %s __r = { 0 };\n%sif (__m[__i]) __r[__i] = __b[__i];\n    return __r;' % (V, lp))
+    fn('void', 'vse%d_v_%s_m' % (sew, t), '%s __m, %s *__b, %s __v, size_t __vl' % (M, E, V),
+       '%sif (__m[__i]) __b[__i] = __v[__i];' % lp)
+    fn(V, 'vlse%d_v_%s' % (sew, t), 'const %s *__b, ptrdiff_t __s, size_t __vl' % E,
+       '    %s __r = { 0 };\n%smemcpy(&__r[__i], (const char *)__b + (ptrdiff_t)__i * __s, sizeof __r[0]);\n    return __r;' % (V, lp))
+    fn('void', 'vsse%d_v_%s' % (sew, t), '%s *__b, ptrdiff_t __s, %s __v, size_t __vl' % (E, V),
+       '%s{ %s __x = __v[__i]; memcpy((char *)__b + (ptrdiff_t)__i * __s, &__x, sizeof __x); }' % (lp, E))
+    # splats and scalar moves
+    mv = 'vfmv' if f else 'vmv'
+    xs = 'f' if f else 'x'
+    fn(V, '%s_v_%s_%s' % (mv, xs, t), '%s __x, size_t __vl' % E,
+       '    %s __r = { 0 };\n%s__r[__i] = __x;\n    return __r;' % (V, lp))
+    fn(V, 'vmv_v_v_%s' % t, '%s __a, size_t __vl' % V,
+       '    %s __r = { 0 };\n%s__r[__i] = __a[__i];\n    return __r;' % (V, lp))
+    fn(E, '%s_%s_s_%s_%s' % (mv, xs, t, {'i': 'i', 'u': 'u', 'f': 'f'}[k] + str(sew)), '%s __a' % V,
+       '    return __a[0];')
+    fn(V, '%s_s_%s_%s' % (mv, xs, t), '%s __x, size_t __vl' % E,
+       '    %s __r = { 0 };\n    if (__vl) __r[0] = __x;\n    return __r;' % V)
+
+    def vv(name, expr, masked=False, sx=None):
+        """the .vv form, and (sx) the .vx/.vf form"""
+        fn(V, '%s_vv_%s' % (name, t), '%s __a, %s __b, size_t __vl' % (V, V),
+           '    %s __r = __a;\n%s__r[__i] = %s;\n    return __r;' % (V, lp, expr.replace('B', '__b[__i]')))
+        if sx:
+            fn(V, '%s_%s_%s' % (name, sx, t), '%s __a, %s __b, size_t __vl' % (V, E),
+               '    %s __r = __a;\n%s__r[__i] = %s;\n    return __r;' % (V, lp, expr.replace('B', '__b')))
+        if masked:
+            fn(V, '%s_vv_%s_m' % (name, t), '%s __m, %s __a, %s __b, size_t __vl' % (M, V, V),
+               '    %s __r = __a;\n%sif (__m[__i]) __r[__i] = %s;\n    return __r;' % (V, lp, expr.replace('B', '__b[__i]')))
+
+    if not f:
+        vv('vadd', '__a[__i] + B', masked=True, sx='vx')
+        vv('vsub', '__a[__i] - B', masked=True, sx='vx')
+        fn(V, 'vrsub_vx_%s' % t, '%s __a, %s __b, size_t __vl' % (V, E),
+           '    %s __r = __a;\n%s__r[__i] = __b - __a[__i];\n    return __r;' % (V, lp))
+        vv('vmul', '__a[__i] * B', masked=True, sx='vx')
+        sg = k == 'i'
+        vv('vdiv' if sg else 'vdivu', '(B == 0 ? (%s)-1 : %s)' % (E, '(__a[__i] == %s && B == -1 ? __a[__i] : __a[__i] / B)' % ('INT%d_MIN' % sew) if sg else '__a[__i] / B'), sx='vx')
+        vv('vrem' if sg else 'vremu', '(B == 0 ? __a[__i] : %s)' % ('(__a[__i] == INT%d_MIN && B == -1 ? 0 : __a[__i] %% B)' % sew if sg else '__a[__i] % B'), sx='vx')
+        vv('vand', '__a[__i] & B', masked=True, sx='vx')
+        vv('vor', '__a[__i] | B', masked=True, sx='vx')
+        vv('vxor', '__a[__i] ^ B', masked=True, sx='vx')
+        vv('vmin' if sg else 'vminu', '(__a[__i] < B ? __a[__i] : B)', sx='vx')
+        vv('vmax' if sg else 'vmaxu', '(__a[__i] > B ? __a[__i] : B)', sx='vx')
+        U = 'v%s%d%s_t' % ('uint', sew, ln)
+        for nm, sh in (('vsll', '<<'), ('vsrl' if not sg else None, '>>'), ('vsra' if sg else None, '>>')):
+            if not nm:
+                continue
+            fn(V, '%s_vv_%s' % (nm, t), '%s __a, %s __b, size_t __vl' % (V, U),
+               '    %s __r = __a;\n%s__r[__i] = (%s)(__a[__i] %s (__b[__i] & %d));\n    return __r;' % (V, lp, E, sh, sew - 1))
+            fn(V, '%s_vx_%s' % (nm, t), '%s __a, size_t __b, size_t __vl' % V,
+               '    %s __r = __a;\n%s__r[__i] = (%s)(__a[__i] %s (__b & %d));\n    return __r;' % (V, lp, E, sh, sew - 1))
+        fn(V, 'vnot_v_%s' % t, '%s __a, size_t __vl' % V,
+           '    %s __r = __a;\n%s__r[__i] = (%s)~__a[__i];\n    return __r;' % (V, lp, E))
+        if sg:
+            fn(V, 'vneg_v_%s' % t, '%s __a, size_t __vl' % V,
+               '    %s __r = __a;\n%s__r[__i] = (%s)(0 - __a[__i]);\n    return __r;' % (V, lp, E))
+        cmps = [('vmseq', '=='), ('vmsne', '!=')] + (
+            [('vmslt', '<'), ('vmsle', '<='), ('vmsgt', '>'), ('vmsge', '>=')] if sg else
+            [('vmsltu', '<'), ('vmsleu', '<='), ('vmsgtu', '>'), ('vmsgeu', '>=')])
+    else:
+        vv('vfadd', '__a[__i] + B', masked=True, sx='vf')
+        vv('vfsub', '__a[__i] - B', masked=True, sx='vf')
+        vv('vfmul', '__a[__i] * B', masked=True, sx='vf')
+        vv('vfdiv', '__a[__i] / B', sx='vf')
+        vv('vfmin', '(__a[__i] < B ? __a[__i] : B)', sx='vf')
+        vv('vfmax', '(__a[__i] > B ? __a[__i] : B)', sx='vf')
+        fn(V, 'vfrsub_vf_%s' % t, '%s __a, %s __b, size_t __vl' % (V, E),
+           '    %s __r = __a;\n%s__r[__i] = __b - __a[__i];\n    return __r;' % (V, lp))
+        fn(V, 'vfmacc_vv_%s' % t, '%s __d, %s __a, %s __b, size_t __vl' % (V, V, V),
+           '    %s __r = __d;\n%s__r[__i] = __d[__i] + __a[__i] * __b[__i];\n    return __r;' % (V, lp))
+        fn(V, 'vfmacc_vf_%s' % t, '%s __d, %s __a, %s __b, size_t __vl' % (V, E, V),
+           '    %s __r = __d;\n%s__r[__i] = __d[__i] + __a * __b[__i];\n    return __r;' % (V, lp))
+        for nm, e in (('vfneg', '-__a[__i]'), ('vfabs', '__a[__i] < 0 ? -__a[__i] : __a[__i]'),
+                      ('vfsqrt', '__builtin_sqrt%s(__a[__i])' % ('f' if sew == 32 else ''))):
+            fn(V, '%s_v_%s' % (nm, t), '%s __a, size_t __vl' % V,
+               '    %s __r = __a;\n%s__r[__i] = %s;\n    return __r;' % (V, lp, e))
+        cmps = [('vmfeq', '=='), ('vmfne', '!='), ('vmflt', '<'), ('vmfle', '<='),
+                ('vmfgt', '>'), ('vmfge', '>=')]
+        I = 'vint%d%s_t' % (sew, ln)
+        IE = 'int%d_t' % sew
+        # toward zero, saturating -- and a NaN to the largest, as RISC-V's
+        # fcvt does (ARM's gives 0)
+        fn(I, 'vfcvt_rtz_x_f_v_i%d%s' % (sew, ln), '%s __a, size_t __vl' % V,
+           '    %s __r = { 0 };\n%s__r[__i] = __a[__i] != __a[__i] ? INT%d_MAX : (%s)__cvt_s%d(__a[__i]);\n    return __r;'
+           % (I, lp, sew, IE, 32 if sew == 32 else 64))
+        fn(V, 'vfcvt_f_x_v_%s' % t, '%s __a, size_t __vl' % I,
+           '    %s __r = { 0 };\n%s__r[__i] = (%s)__a[__i];\n    return __r;' % (V, lp, E))
+    for nm, op in cmps:
+        fn(M, '%s_vv_%s_b%d' % (nm, t, ratio), '%s __a, %s __b, size_t __vl' % (V, V),
+           '    %s __r = { 0 };\n%s__r[__i] = __a[__i] %s __b[__i];\n    return __r;' % (M, lp, op))
+        fn(M, '%s_v%s_%s_b%d' % (nm, 'f' if f else 'x', t, ratio), '%s __a, %s __b, size_t __vl' % (V, E),
+           '    %s __r = { 0 };\n%s__r[__i] = __a[__i] %s __b;\n    return __r;' % (M, lp, op))
+    fn(V, 'vmerge_vvm_%s' % t if not f else 'vmerge_vvm_%s' % t, '%s __a, %s __b, %s __m, size_t __vl' % (V, V, M),
+       '    %s __r = __a;\n%s__r[__i] = __m[__i] ? __b[__i] : __a[__i];\n    return __r;' % (V, lp))
+    fn(V, '%s_v%sm_%s' % ('vfmerge' if f else 'vmerge', 'f' if f else 'x', t), '%s __a, %s __b, %s __m, size_t __vl' % (V, E, M),
+       '    %s __r = __a;\n%s__r[__i] = __m[__i] ? __b : __a[__i];\n    return __r;' % (V, lp))
+    # reductions into an LMUL=1 vector's element 0
+    V1, _, t1 = rvv_names(k, sew, 'm1')
+    reds = [('vfredusum', '+'), ('vfredosum', '+'), ('vfredmax', 'max'), ('vfredmin', 'min')] if f else \
+        [('vredsum', '+'), ('vredand', '&'), ('vredor', '|'), ('vredxor', '^'),
+         ('vredmax' if k == 'i' else 'vredmaxu', 'max'), ('vredmin' if k == 'i' else 'vredminu', 'min')]
+    for nm, op in reds:
+        if op == 'max':
+            st = '__s = __a[__i] > __s ? __a[__i] : __s;'
+        elif op == 'min':
+            st = '__s = __a[__i] < __s ? __a[__i] : __s;'
+        else:
+            st = '__s = __s %s __a[__i];' % op
+        fn(V1, '%s_vs_%s_%s' % (nm, t, t1), '%s __a, %s __b, size_t __vl' % (V, V1),
+           '    %s __s = __b[0];\n%s%s\n    %s __r = __b;\n    __r[0] = __s;\n    return __r;' % (E, lp, st, V1))
+    # widening: twice the SEW at twice the LMUL
+    if not f and sew < 64 and lm < 8:
+        wln = [x for x, y in LMULS if y == lm * 2][0]
+        W, WE, wt = rvv_names(k, sew * 2, wln)
+        uu = '' if k == 'i' else 'u'
+        for nm, e in (('vwadd%s' % uu, '(%s)__a[__i] + (%s)B' % (WE, WE)),
+                      ('vwsub%s' % uu, '(%s)__a[__i] - (%s)B' % (WE, WE)),
+                      ('vwmul%s' % uu, '(%s)__a[__i] * (%s)B' % (WE, WE))):
+            fn(W, '%s_vv_%s' % (nm, wt), '%s __a, %s __b, size_t __vl' % (V, V),
+               '    %s __r = { 0 };\n%s__r[__i] = %s;\n    return __r;' % (W, lp, e.replace('B', '__b[__i]')))
+            fn(W, '%s_vx_%s' % (nm, wt), '%s __a, %s __b, size_t __vl' % (V, E),
+               '    %s __r = { 0 };\n%s__r[__i] = %s;\n    return __r;' % (W, lp, e.replace('B', '__b')))
+    # reinterpretations: the same SEW and LMUL, another kind
+    for k2 in ('i', 'u', 'f'):
+        if k2 == k or (k2 == 'f' and sew < 32):
+            continue
+        V2, _, t2 = rvv_names(k2, sew, ln)
+        fn(V2, 'vreinterpret_v_%s_%s' % (t, t2), '%s __a' % V,
+           '    %s __r;\n    memcpy(&__r, &__a, sizeof __r);\n    return __r;' % V2)
+
+
 def write(name, text):
     path = os.path.join(INC, name)
     with open(path, 'w') as f:
@@ -686,6 +932,10 @@ def main():
     t = mve()
     t = t.replace('typedef float float32_t;', 'typedef float float32_t;' + NEON_HELPERS, 1)
     write('arm_mve.h', t)
+    t = rvv()
+    t = t.replace('#include <string.h>\n', '#include <string.h>\n' + NEON_HELPERS.split('/* saturation')[0] +
+                  NEON_HELPERS[NEON_HELPERS.index('/* a float to an integer'):], 1)
+    write('riscv_vector.h', t)
 
 
 if __name__ == '__main__':
