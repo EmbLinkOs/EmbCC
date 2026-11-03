@@ -4537,10 +4537,15 @@ static void check_expr_main(struct unit *u, struct func *f, struct scope *sc,
         int sized_by_init = ty->kind == TY_ARRAY && ty->count == 0 &&
                             e->lhs->kind == EXPR_INITLIST;
         e->cast_ty = ty;
-        if (g_in_static_init) {
+        if (g_in_static_init || e->complit_sc) {
             /* Static storage: the literal is an anonymous global, and this
              * node becomes a reference to it (so `&(T){...}` in a static
-             * initializer lowers to a relocation like any `&global`). */
+             * initializer lowers to a relocation like any `&global`) --
+             * and in a function, a C23 `(static T){...}`, constexpr (also
+             * const) or thread_local one (one per thread) */
+            int csc = e->complit_sc;
+            if (csc)
+                g_in_static_init++;
             struct initbuf ib = { 0, 0, 0 };
             if (sized_by_init)
                 ty = init_sized(u, e->line, ty->pointee,
@@ -4560,6 +4565,10 @@ static void check_expr_main(struct unit *u, struct func *f, struct scope *sc,
             g->defined = 1;
             g->used = 1;
             g->has_init = 1;   /* it has real bytes -> .data, not .bss */
+            g->is_const = (csc & 2) != 0;
+            g->is_tls = (csc & 4) != 0;
+            if (csc)
+                g_in_static_init--;
             g->fam_extra = init_overhang(u, e->line, "a compound literal",
                                          ty, ib.v, ib.n, 1);
             lower_static_bytes(u, e->line, global_size(g), ib.v, ib.n,
@@ -9132,6 +9141,36 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                     diag_warn_opt(diag_file(u), s->line, s->col, "vla",
                                   "variable length array '%s' is used",
                                   s->name);
+                if (ty_is_vla(s->dty) && s->expr &&
+                    s->expr->kind == EXPR_INITLIST && s->expr->nelems == 0 &&
+                    !predef_is_cxx()) {
+                    /* C23's `T a[n] = {}`: zero, at run time, as the
+                     * size is -- a memset of sizeof a after the
+                     * declaration, which the statement list checks next */
+                    struct expr *v1 = sx(EXPR_VAR, s->line), *v2 = sx(EXPR_VAR, s->line);
+                    v1->name = v2->name = s->name;
+                    struct expr *sz = sx(EXPR_SIZEOF, s->line);
+                    sz->rhs = v2;
+                    struct expr *zero = sx(EXPR_NUM, s->line);
+                    zero->num = 0;
+                    zero->ty = ty_base(TY_INT, 0);
+                    struct expr *callee = sx(EXPR_VAR, s->line);
+                    callee->name = "__builtin_memset";
+                    struct expr *call = sx(EXPR_CALL, s->line);
+                    call->lhs = callee;
+                    call->name = callee->name;
+                    call->args[0] = v1;
+                    call->args[1] = zero;
+                    call->args[2] = sz;
+                    call->nargs = 3;
+                    struct stmt *zs = xcalloc(1, sizeof *zs);
+                    zs->kind = STMT_EXPR;
+                    zs->line = s->line;
+                    zs->expr = call;
+                    zs->next = s->next;
+                    s->next = zs;
+                    s->expr = NULL;
+                }
                 if (ty_is_vla(s->dty) && s->expr)
                     sema_error_at(u, s->line, s->col,
                             "variable length array '%s' cannot be "

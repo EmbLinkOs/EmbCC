@@ -57,6 +57,9 @@ struct expr {
                                * wb literal), its limbs least significant
                                * first; nbig of them */
     int nbig;
+    int complit_sc;       /* EXPR_COMPLIT: C23 storage classes in it --
+                           * 1 static, 2 constexpr (static, const), 4
+                           * thread_local (static, per thread) */
     struct type *undecayed; /* sema: original array type when ty is the
                              * decayed pointer (sizeof needs it) */
     long num;             /* EXPR_NUM; EXPR_STR: element count incl NUL

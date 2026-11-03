@@ -154,6 +154,8 @@ static void nameix_put(struct nameix *ix, const char *name, void *val)
 }
 
 struct parser {
+    int enum_redef;       /* C23: an enum defined again, whose enumerators
+                           * may repeat with the same values */
     int decl_in_cond;     /* a C2y if/switch declaration: it may end at
                            * the ')' as well as at ';' */
     const char *decl_last_name;   /* the last declarator's name */
@@ -2161,6 +2163,24 @@ static int g_short_enums;
 void parse_set_short_enums(int on) { g_short_enums = on; }
 
 /* struct/union/enum specifier, after the keyword was consumed. */
+/* C23's test for a tag defined twice: the same members, in the same
+ * order, with the same names, types, widths and places. */
+static int same_struct_content(const struct type *a, const struct type *b)
+{
+    if (a->is_union != b->is_union || a->nmembers != b->nmembers ||
+        ty_size(a) != ty_size(b) || ty_align(a) != ty_align(b))
+        return 0;
+    for (int i = 0; i < a->nmembers; i++) {
+        const struct member *x = &a->members[i], *y = &b->members[i];
+        if ((x->name == NULL) != (y->name == NULL) ||
+            (x->name && strcmp(x->name, y->name)) || x->off != y->off ||
+            x->is_bitfield != y->is_bitfield || x->bit_width != y->bit_width ||
+            x->bit_off != y->bit_off || !ty_equal(x->ty, y->ty))
+            return 0;
+    }
+    return 1;
+}
+
 static struct type *parse_tagged(struct parser *ps, enum tag_kind kind,
                                  int allow_body, int line)
 {
@@ -2221,6 +2241,7 @@ static struct type *parse_tagged(struct parser *ps, enum tag_kind kind,
                        kind == TAG_ENUM ? "enums" : "structs/unions");
         struct type *t = NULL;
         struct tagdef *etd = NULL;
+        struct type *redef_of = NULL;    /* C23: a second definition of it */
         if (tag) {
             struct tagdef *td = find_tag(ps, tag);
             /* A definition in an inner block declares a NEW type, hiding
@@ -2233,10 +2254,17 @@ static struct type *parse_tagged(struct parser *ps, enum tag_kind kind,
                 if (td->kind != kind)
                     parse_error_line(ps, line,
                                "'%s' is a different kind of tag", tag);
-                if (kind != TAG_ENUM && td->ty->complete)
-                    parse_error_line(ps, line,
-                               "redefinition of '%s'", tag);
-                t = td->ty;
+                if (kind != TAG_ENUM && td->ty->complete) {
+                    /* C23 6.7.2.3: the same tag defined again with the
+                     * same content is the same type; parsed into a fresh
+                     * one, compared, then dropped */
+                    if (lex_c_year() < 2023 && !lex_c23_ext())
+                        parse_error_line(ps, line, "redefinition of '%s'", tag);
+                    redef_of = td->ty;
+                    t = ty_struct(tag, kind == TAG_UNION);
+                } else {
+                    t = td->ty;
+                }
             } else {
                 td = push_tag(ps, tag, kind,
                               kind != TAG_ENUM
@@ -2253,7 +2281,13 @@ static struct type *parse_tagged(struct parser *ps, enum tag_kind kind,
              * both; a trailing set that is not packed is the declarator's,
              * so it is put back */
             int packed = lead.packed || g_short_enums;
+            /* C23: an enum defined again with the same enumerators */
+            int redef_enum = etd && etd->ty && (lex_c_year() >= 2023 || lex_c23_ext());
+            ps->enum_redef = redef_enum;
             struct type *et = parse_enum_body(ps, NULL, packed);
+            ps->enum_redef = 0;
+            if (redef_enum)
+                return etd->ty;
             if (!packed && at_attribute(ps)) {
                 struct lexer save = ps->lx;
                 struct attrs trail = { 0 };
@@ -2275,7 +2309,14 @@ static struct type *parse_tagged(struct parser *ps, enum tag_kind kind,
                 etd->ty = et;
             return et;
         }
-        return parse_struct_body(ps, t, &lead);
+        struct type *bt = parse_struct_body(ps, t, &lead);
+        if (redef_of) {
+            if (!same_struct_content(redef_of, bt))
+                parse_error_line(ps, line, "redefinition of '%s' with different "
+                                 "content", tag);
+            return redef_of;
+        }
+        return bt;
     }
 
     if (!tag)
@@ -4043,11 +4084,17 @@ static struct type *parse_enum_body(struct parser *ps, struct type *fixed,
                                  "the underlying type %s cannot represent",
                                  name, val, ty_name(fixed));
         }
+        int again = 0;      /* the same enumerator, of an enum defined again */
         for (struct econst *ec = ps->unit->econsts; ec; ec = ec->next)
-            if (strcmp(ec->name, name) == 0)
-                parse_error_line(ps, line,
-                           "duplicate enumerator '%s'", name);
-        econst_shadow_check(ps, name, line);
+            if (strcmp(ec->name, name) == 0) {
+                if (ps->enum_redef && ec->val == val && !ec->has_object)
+                    again = 1;
+                else
+                    parse_error_line(ps, line,
+                               "duplicate enumerator '%s'", name);
+            }
+        if (!again)
+            econst_shadow_check(ps, name, line);
         if (big) {
             anybig = 1;
             if ((unsigned long)val > hi) hi = (unsigned long)val;
@@ -4073,8 +4120,10 @@ static struct type *parse_enum_body(struct parser *ps, struct type *fixed,
                  ? ty_promote(vt)
                : big ? u64 : s64;
         ec->seq = ps->seq;
-        *ps->econst_tail = ec;
-        ps->econst_tail = &ec->next;
+        if (!again) {
+            *ps->econst_tail = ec;
+            ps->econst_tail = &ec->next;
+        }
         if (cur(ps)->kind != TOK_COMMA)
             break;
         advance(ps); /* trailing comma before '}' is fine, as in C99 */
@@ -4750,14 +4799,44 @@ static struct expr *parse_unary(struct parser *ps)
         /* a cast, or a parenthesized expression — peek one token */
         struct lexer save = ps->lx;
         advance(ps);
+        /* C23: storage classes before a compound literal's type --
+         * `(static int[]){ 1, 2 }`, constexpr, thread_local, register */
+        int csc = 0;
+        for (;;) {
+            if (cur(ps)->kind == TOK_KW_STATIC)
+                csc |= 1;
+            else if (cur(ps)->kind == TOK_KW_THREAD)
+                csc |= 4;
+            else if (cur(ps)->kind == TOK_IDENT && c23_words() &&
+                     !strcmp(cur(ps)->text, "constexpr"))
+                csc |= 2;
+            else if (cur(ps)->kind == TOK_IDENT && !strcmp(cur(ps)->text, "register"))
+                csc |= 8;
+            else
+                break;
+            advance(ps);
+        }
+        if (csc && !at_type_start(ps)) {
+            ps->lx = save;
+            csc = 0;
+            advance(ps);
+        }
         if (at_type_start(ps)) {
             struct type *ct = parse_type_name(ps, parse_type_spec(ps, 0));
             expect(ps, TOK_RPAREN, "')'");
+            if (csc && cur(ps)->kind != TOK_LBRACE)
+                parse_error_at(ps, cur(ps)->line, cur(ps)->col, "a storage class "
+                               "here makes a compound literal, which needs a brace "
+                               "initializer");
             /* `(type){ ... }` is a compound literal (an unnamed object),
              * not a cast — it can even take postfix operators. */
             if (cur(ps)->kind == TOK_LBRACE) {
                 ped_at(ps, t->line, t->col, 1999, "a compound literal");
+                if (csc)
+                    ped_at(ps, t->line, t->col, 2023,
+                           "a storage class in a compound literal");
                 e = new_expr(EXPR_COMPLIT, t->line, t->col);
+                e->complit_sc = csc & 7;
                 e->cast_ty = ct;
                 e->lhs = parse_initializer(ps);
                 return parse_postfix_ops(ps, e);
