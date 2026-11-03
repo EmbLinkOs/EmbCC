@@ -3624,7 +3624,9 @@ static struct type *parse_array_dims(struct parser *ps, struct type *t)
     struct expr *dexpr[16];  /* each dimension's expression (NULL for []) */
     int dvar[16];            /* 1 = not a constant: a VLA dimension */
     int ndims = 0;
-    while (cur(ps)->kind == TOK_LBRACKET) {
+    /* `[[` is a C23 attribute after the declarator, not a bound: left for
+     * the attribute parse that follows every declarator */
+    while (cur(ps)->kind == TOK_LBRACKET && !at_attribute(ps)) {
         advance(ps);
         /* `int a[static 16]`, `char s[const restrict]`: a parameter's
          * outermost bound may say the argument is never null and holds
@@ -3960,6 +3962,12 @@ static struct type *parse_enum_body(struct parser *ps, struct type *fixed,
         int line = cur(ps)->line;
         struct type *vt = NULL;
         advance(ps);
+        /* `A [[deprecated]] = 1`: C23's place for an enumerator's
+         * attributes (and GNU's __attribute__ there) */
+        if (at_attribute(ps)) {
+            struct attrs eat = { 0 };
+            parse_attributes(ps, &eat);
+        }
         if (cur(ps)->kind == TOK_ASSIGN) {
             advance(ps);
             int vline = cur(ps)->line, vcol = cur(ps)->col;
@@ -6179,7 +6187,7 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
         s = new_stmt(STMT_FOR, t->line, t->col);
         advance(ps);
         expect(ps, TOK_LPAREN, "'('");
-        if (at_type_start(ps)) {
+        if (at_type_start(ps) || at_attribute(ps)) {
             if (lex_c_year() < 1999)
                 parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                         "a declaration in a for loop's first clause is "
