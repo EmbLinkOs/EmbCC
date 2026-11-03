@@ -4346,13 +4346,30 @@ lto_backend:
          * would produce an object whose `_start` had no symbol and
          * whose `.quad main` was eight zeroes -- machine code that
          * links and jumps to address zero. So it is refused by name. */
-        for (struct topasm *tas = u->topasm; tas; tas = tas->next)
-            if (tas->nsyms || tas->nrels)
+        /* A block's labels are symbols and its calls relocations, below
+         * (phases 3 to 6). An address field cannot be: the block is in
+         * __text, and ld64 links no absolute address there. */
+        for (struct topasm *tas = u->topasm; tas; tas = tas->next) {
+            if ((tas->nsyms || tas->nrels) && tas->section)
                 diag_fatal(tas->file, tas->line,
-                           "a file-scope asm block with labels or symbol "
-                           "references is not supported for a Darwin "
-                           "target yet: its bytes would be emitted but "
-                           "its symbols and relocations dropped");
+                           "a file-scope asm block with labels in a section "
+                           "of its own is not supported for a Darwin "
+                           "target yet");
+            for (int r = 0; r < tas->nrels; r++) {
+                if (tas->rels[r].kind != ASMREL_PC32 || ta == TARGET_AARCH64)
+                    diag_fatal(tas->file, tas->line,
+                               "an address in a file-scope asm block is not "
+                               "supported for a Darwin target: the block is "
+                               "in __text, where macOS links no absolute "
+                               "address (a text relocation); define the "
+                               "table in C");
+                if (!tas->rels[r].target)
+                    diag_fatal(tas->file, tas->line,
+                               "a file-scope asm block's field against a "
+                               "local label is not supported for a Darwin "
+                               "target yet");
+            }
+        }
         /* Mach-O has no .tdata/.tbss and no PT_TLS: a thread-local's
          * symbol names a DESCRIPTOR in __thread_vars -- the thunk
          * __tlv_bootstrap, a key, and where its first value is -- and the
@@ -4429,6 +4446,17 @@ lto_backend:
          * them, so every field that carries a value has to hold it
          * already. Mach-O relocations have no addend of their own: the
          * value lives in the word being patched. */
+        /* (a block's: a call's rel32 is relative to the field's end, so
+         * ELF's -4 becomes 0; a .quad holds its addend) */
+        for (struct topasm *tas = u->topasm; tas; tas = tas->next)
+            for (int r = 0; r < tas->nrels; r++) {
+                const struct asmrel *ar = &tas->rels[r];
+                int pc = ar->kind == ASMREL_PC32;
+                target_put_uint(text.p + tas->text_off + ar->off, pc ? 4 : 8,
+                                (unsigned long)(ar->addend + (pc ? 4 : 0)));
+            }
+        const char **masm_name = NULL;
+        int *masm_ndx = NULL, nmasm = 0;
         for (struct global *g = u->globals; g; g = g->next) {
             if (g->absorbed || !g->defined || g->in_bss || g->named)
                 continue;
@@ -4677,6 +4705,37 @@ lto_backend:
             }
         }
 
+        /* a block's labels, as written (Darwin's assembly spells C's f
+         * as _f): the local ones here, the global ones with the defined
+         * externals */
+        for (int pass = 0; pass < 2; pass++) {
+            for (struct topasm *tas = u->topasm; tas; tas = tas->next)
+                for (int k = 0; k < tas->nsyms; k++) {
+                    const struct asmsym *as = &tas->syms[k];
+                    if (!as->is_global != !pass)
+                        continue;
+                    int ndx = machow_add_symbol_raw(
+                        mw, as->name,
+                        (unsigned long long)(tas->text_off + as->off), m_text,
+                        as->is_global);
+                    masm_name = xrealloc(masm_name, (size_t)(nmasm + 1) * sizeof *masm_name);
+                    masm_ndx = xrealloc(masm_ndx, (size_t)(nmasm + 1) * sizeof *masm_ndx);
+                    masm_name[nmasm] = as->name;
+                    masm_ndx[nmasm++] = ndx;
+                    const char *cn = as->name[0] == '_' ? as->name + 1 : NULL;
+                    for (struct func *f = u->funcs; cn && f; f = f->next)
+                        if (!f->absorbed && !f->has_defn && !f->sym_ndx &&
+                            !strcmp(f->name, cn))
+                            f->sym_ndx = ndx;
+                    for (struct global *g = u->globals; cn && g; g = g->next)
+                        if (!g->absorbed && !g->defined && !g->sym_ndx &&
+                            !strcmp(g->name, cn))
+                            g->sym_ndx = ndx;
+                }
+            if (pass == 0)
+                break;              /* the global ones after the externals */
+        }
+
         /* ---- 4. defined externals ------------------------------------ */
         for (struct func *f = u->funcs; f; f = f->next)
             if (!f->absorbed && f->has_defn && !f->is_static)
@@ -4704,6 +4763,29 @@ lto_backend:
                                  : g->in_bss ? m_bss : m_data, 1);
             }
         }
+
+        for (struct topasm *tas = u->topasm; tas; tas = tas->next)
+            for (int k = 0; k < tas->nsyms; k++) {
+                const struct asmsym *as = &tas->syms[k];
+                if (!as->is_global)
+                    continue;
+                int ndx = machow_add_symbol_raw(
+                    mw, as->name, (unsigned long long)(tas->text_off + as->off),
+                    m_text, 1);
+                masm_name = xrealloc(masm_name, (size_t)(nmasm + 1) * sizeof *masm_name);
+                masm_ndx = xrealloc(masm_ndx, (size_t)(nmasm + 1) * sizeof *masm_ndx);
+                masm_name[nmasm] = as->name;
+                masm_ndx[nmasm++] = ndx;
+                const char *cn = as->name[0] == '_' ? as->name + 1 : NULL;
+                for (struct func *f = u->funcs; cn && f; f = f->next)
+                    if (!f->absorbed && !f->has_defn && !f->sym_ndx &&
+                        !strcmp(f->name, cn))
+                        f->sym_ndx = ndx;
+                for (struct global *g = u->globals; cn && g; g = g->next)
+                    if (!g->absorbed && !g->defined && !g->sym_ndx &&
+                        !strcmp(g->name, cn))
+                        g->sym_ndx = ndx;
+            }
 
         /* ---- 5. undefined, all of them, before any relocation --------
          * Created up front rather than lazily where each is first
@@ -4737,6 +4819,43 @@ lto_backend:
                         mw, ft->name, 0, 0, 1);
             }
         }
+        int *masm_rel = NULL;          /* each block field's symbol */
+        {
+            int nrel = 0;
+            for (struct topasm *tas = u->topasm; tas; tas = tas->next)
+                nrel += tas->nrels;
+            masm_rel = xcalloc((size_t)(nrel ? nrel : 1), sizeof *masm_rel);
+            const char **un = NULL;
+            int *us = NULL, nu = 0, at = 0;
+            for (struct topasm *tas = u->topasm; tas; tas = tas->next)
+                for (int r = 0; r < tas->nrels; r++, at++) {
+                    const char *tn = tas->rels[r].target;
+                    const char *cn = tn[0] == '_' ? tn + 1 : NULL;
+                    int sym = 0;
+                    for (int k = 0; !sym && k < nmasm; k++)
+                        if (!strcmp(masm_name[k], tn))
+                            sym = masm_ndx[k];
+                    for (struct func *f = u->funcs; cn && !sym && f; f = f->next)
+                        if (!f->absorbed && f->sym_ndx && !strcmp(f->name, cn))
+                            sym = f->sym_ndx;
+                    for (struct global *g = u->globals; cn && !sym && g; g = g->next)
+                        if (!g->absorbed && g->sym_ndx && !strcmp(g->name, cn))
+                            sym = g->sym_ndx;
+                    for (int k = 0; !sym && k < nu; k++)
+                        if (!strcmp(un[k], tn))
+                            sym = us[k];
+                    if (!sym) {
+                        sym = machow_add_symbol_raw(mw, tn, 0, 0, 1);
+                        un = xrealloc(un, (size_t)(nu + 1) * sizeof *un);
+                        us = xrealloc(us, (size_t)(nu + 1) * sizeof *us);
+                        un[nu] = tn;
+                        us[nu++] = sym;
+                    }
+                    masm_rel[at] = sym;
+                }
+            free(un);
+            free(us);
+        }
         int tlv_boot = ntlv ? machow_add_symbol(mw, "_tlv_bootstrap", 0, 0, 1) : 0;
         int pers = 0;
         if (ncu)
@@ -4756,6 +4875,25 @@ lto_backend:
             machow_add_reloc(mw, m_text,
                              (unsigned long long)ext[i].patch_off,
                              ext[i].callee->sym_ndx, mt - 1, mpc, mlen, 0);
+        }
+        {
+            int at = 0;
+            for (struct topasm *tas = u->topasm; tas; tas = tas->next)
+                for (int r = 0; r < tas->nrels; r++, at++) {
+                    int pc = tas->rels[r].kind == ASMREL_PC32;
+                    machow_add_reloc(mw, m_text,
+                                     (unsigned long long)(tas->text_off +
+                                                          tas->rels[r].off),
+                                     masm_rel[at],
+                                     pc ? X86_64_RELOC_BRANCH
+                                        : ta == TARGET_AARCH64
+                                          ? ARM64_RELOC_UNSIGNED
+                                          : X86_64_RELOC_UNSIGNED,
+                                     pc, pc ? 2 : 3, 0);
+                }
+            free(masm_rel);
+            free(masm_name);
+            free(masm_ndx);
         }
         long m_si_n = 0, m_sb_n = 0;
         unsigned char *m_si = unit_stack_record(u, iu, &text, ext, next, in,

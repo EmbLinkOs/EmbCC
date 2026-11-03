@@ -331,7 +331,7 @@ Darwin triples, each with its own diagnostic:
 
 | Construct | Diagnostic |
 |---|---|
-| file-scope `__asm__` with labels or symbols | `a file-scope asm block with labels or symbol references is not supported for a Darwin target yet: its bytes would be emitted but its symbols and relocations dropped` |
+| an address (`.quad sym`) in a file-scope `__asm__` block | `an address in a file-scope asm block is not supported for a Darwin target: the block is in __text, where macOS links no absolute address (a text relocation); define the table in C` |
 | `__attribute__((alias))` | `alias attribute on 'g' is not supported for Mach-O output` |
 | `__attribute__((section))` on a function | `a function's section attribute is not supported for Mach-O output` |
 

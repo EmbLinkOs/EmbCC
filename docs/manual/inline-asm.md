@@ -584,13 +584,14 @@ file-scope asm instruction "ret": EmbCC assembles a block's instructions on x86-
 A block written as data (`.byte`, `.long`, `.quad`, labels and the
 directives above) assembles there.
 
-On Darwin and Windows targets the bytes of a block would be emitted
-without its symbols and relocations, so a block with any label or symbol
-reference is refused:
+On Darwin and Windows a block's labels are symbols too (`.globl` ones
+external; on Darwin a C function `f` is the label `_f`), and its calls are
+relocations. Windows takes its `.quad` and `.long` fields as relocations
+as well. Darwin cannot: the block is in `__text`, and macOS links no
+absolute address there, so an address field is refused:
 
 ```text
-a file-scope asm block with labels or symbol references is not supported for a Darwin target yet: its bytes would be emitted but its symbols and relocations dropped
-a file-scope asm block with labels or symbol references is not supported for a Windows target yet
+an address in a file-scope asm block is not supported for a Darwin target: the block is in __text, where macOS links no absolute address (a text relocation); define the table in C
 ```
 
 ### On Cortex-M, RISC-V, MIPS32 and AVR

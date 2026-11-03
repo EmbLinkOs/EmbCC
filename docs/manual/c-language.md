@@ -333,15 +333,10 @@ The errors for the "No" entries:
 |---|---|
 | `long double` or `_Float128` arithmetic on RISC-V, `__int128` arithmetic on RV64 | `the RV64 backend cannot lower a 128-bit value yet (function f) [...]` (`RV32` on RV32) |
 | `long double` in a signature on Windows | `long double in the signature of 'f' is not supported for a Windows target yet: there it travels by reference and returns through a hidden pointer, and EmbCC passes it on the stack by value` |
-| `long double _Complex` arithmetic on Windows | `passing long double is not supported for a Windows target yet: there it travels by reference and returns through a hidden pointer, and EmbCC passes it on the stack by value` |
-| `__int128` in a signature on Windows | `__int128 in the signature of 'f' is not supported for a Windows target yet: EmbCC lowers its arithmetic to libgcc helpers whose arguments it places in the System V registers` |
 | `__int128` on a 32-bit target or AVR | `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |
 | `_Float128` on x86-64 | `` _Float128 is not supported on x86-64: `long double` here is x87's 80-bit extended format, not IEEE binary128, so it is not the same type `` |
 | `_Float128` where `long double` is not 16 bytes | `_Float128 is not supported on this target: it has no 128-bit floating-point type` |
 | An `_Atomic` object wider than the machine moves at once (16 bytes) | `an atomic access of 16 bytes is not one access on this target (it moves 8 at once): the halves could be split by an interrupt or another core` |
-| `_Thread_local` on macOS | `__thread is not supported for a Darwin target yet: Mach-O addresses a thread-local through a __thread_vars descriptor, which this writer does not emit` |
-| `_Thread_local` on Windows | `__thread is not supported for a Windows target yet: Windows reaches a thread-local through a _tls_index and a TLS directory this writer does not emit` |
-| `va_arg` of a structure on Windows | `va_arg of a struct is not supported for a Windows target yet` |
 
 The text in square brackets names the internal operation that could not
 be lowered.
