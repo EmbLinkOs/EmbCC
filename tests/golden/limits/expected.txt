@@ -18,7 +18,7 @@ thumbv6m-none-eabi frameaddr yes
 thumbv6m-none-eabi retaddr1 no: __builtin_return_address(1) is not supported on thumbv6m-none-eabi: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
 thumbv6m-none-eabi setjmp yes
 thumbv6m-none-eabi cgoto yes
-thumbv6m-none-eabi asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
+thumbv6m-none-eabi asmgoto yes
 thumbv6m-none-eabi nested no: expected ';' before '{' [E0002]
 thumbv6m-none-eabi interrupt yes
 thumbv6m-none-eabi naked yes
@@ -48,7 +48,7 @@ thumbv7m-none-eabi frameaddr yes
 thumbv7m-none-eabi retaddr1 no: __builtin_return_address(1) is not supported on thumbv7m-none-eabi: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
 thumbv7m-none-eabi setjmp yes
 thumbv7m-none-eabi cgoto yes
-thumbv7m-none-eabi asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
+thumbv7m-none-eabi asmgoto yes
 thumbv7m-none-eabi nested no: expected ';' before '{' [E0002]
 thumbv7m-none-eabi interrupt yes
 thumbv7m-none-eabi naked yes
@@ -78,7 +78,7 @@ thumbv7em-none-eabihf frameaddr yes
 thumbv7em-none-eabihf retaddr1 no: __builtin_return_address(1) is not supported on thumbv7em-none-eabihf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
 thumbv7em-none-eabihf setjmp yes
 thumbv7em-none-eabihf cgoto yes
-thumbv7em-none-eabihf asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
+thumbv7em-none-eabihf asmgoto yes
 thumbv7em-none-eabihf nested no: expected ';' before '{' [E0002]
 thumbv7em-none-eabihf interrupt yes
 thumbv7em-none-eabihf naked yes
@@ -108,7 +108,7 @@ thumbv8m.base-none-eabi frameaddr yes
 thumbv8m.base-none-eabi retaddr1 no: __builtin_return_address(1) is not supported on thumbv8m.base-none-eabi: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
 thumbv8m.base-none-eabi setjmp yes
 thumbv8m.base-none-eabi cgoto yes
-thumbv8m.base-none-eabi asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
+thumbv8m.base-none-eabi asmgoto yes
 thumbv8m.base-none-eabi nested no: expected ';' before '{' [E0002]
 thumbv8m.base-none-eabi interrupt yes
 thumbv8m.base-none-eabi naked yes
@@ -138,7 +138,7 @@ thumbv8m.main-none-eabi frameaddr yes
 thumbv8m.main-none-eabi retaddr1 no: __builtin_return_address(1) is not supported on thumbv8m.main-none-eabi: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
 thumbv8m.main-none-eabi setjmp yes
 thumbv8m.main-none-eabi cgoto yes
-thumbv8m.main-none-eabi asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
+thumbv8m.main-none-eabi asmgoto yes
 thumbv8m.main-none-eabi nested no: expected ';' before '{' [E0002]
 thumbv8m.main-none-eabi interrupt yes
 thumbv8m.main-none-eabi naked yes
@@ -168,7 +168,7 @@ armv7a-none-eabi frameaddr yes
 armv7a-none-eabi retaddr1 no: __builtin_return_address(1) is not supported on armv7a-none-eabi: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
 armv7a-none-eabi setjmp yes
 armv7a-none-eabi cgoto yes
-armv7a-none-eabi asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
+armv7a-none-eabi asmgoto yes
 armv7a-none-eabi nested no: expected ';' before '{' [E0002]
 armv7a-none-eabi interrupt yes
 armv7a-none-eabi naked yes
@@ -198,7 +198,7 @@ riscv32-unknown-elf frameaddr yes
 riscv32-unknown-elf retaddr1 no: __builtin_return_address(1) is not supported on riscv32-unknown-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
 riscv32-unknown-elf setjmp yes
 riscv32-unknown-elf cgoto yes
-riscv32-unknown-elf asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
+riscv32-unknown-elf asmgoto yes
 riscv32-unknown-elf nested no: expected ';' before '{' [E0002]
 riscv32-unknown-elf interrupt yes
 riscv32-unknown-elf naked yes
@@ -228,7 +228,7 @@ riscv64-unknown-elf frameaddr yes
 riscv64-unknown-elf retaddr1 no: __builtin_return_address(1) is not supported on riscv64-unknown-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
 riscv64-unknown-elf setjmp yes
 riscv64-unknown-elf cgoto yes
-riscv64-unknown-elf asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
+riscv64-unknown-elf asmgoto yes
 riscv64-unknown-elf nested no: expected ';' before '{' [E0002]
 riscv64-unknown-elf interrupt yes
 riscv64-unknown-elf naked yes
@@ -258,7 +258,7 @@ avr frameaddr yes
 avr retaddr1 no: __builtin_return_address(1) is not supported on avr: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
 avr setjmp yes
 avr cgoto yes
-avr asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
+avr asmgoto yes
 avr nested no: expected ';' before '{' [E0002]
 avr interrupt yes
 avr naked yes
@@ -288,7 +288,7 @@ mipsel-none-elf frameaddr yes
 mipsel-none-elf retaddr1 no: __builtin_return_address(1) is not supported on mipsel-none-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
 mipsel-none-elf setjmp yes
 mipsel-none-elf cgoto yes
-mipsel-none-elf asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
+mipsel-none-elf asmgoto yes
 mipsel-none-elf nested no: expected ';' before '{' [E0002]
 mipsel-none-elf interrupt yes
 mipsel-none-elf naked yes
@@ -318,7 +318,7 @@ mips-none-elf frameaddr yes
 mips-none-elf retaddr1 no: __builtin_return_address(1) is not supported on mips-none-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
 mips-none-elf setjmp yes
 mips-none-elf cgoto yes
-mips-none-elf asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
+mips-none-elf asmgoto yes
 mips-none-elf nested no: expected ';' before '{' [E0002]
 mips-none-elf interrupt yes
 mips-none-elf naked yes
@@ -348,7 +348,7 @@ mips64el-none-elf frameaddr yes
 mips64el-none-elf retaddr1 no: __builtin_return_address(1) is not supported on mips64el-none-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
 mips64el-none-elf setjmp yes
 mips64el-none-elf cgoto yes
-mips64el-none-elf asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
+mips64el-none-elf asmgoto yes
 mips64el-none-elf nested no: expected ';' before '{' [E0002]
 mips64el-none-elf interrupt yes
 mips64el-none-elf naked yes
@@ -378,7 +378,7 @@ mips64-none-elf frameaddr yes
 mips64-none-elf retaddr1 no: __builtin_return_address(1) is not supported on mips64-none-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
 mips64-none-elf setjmp yes
 mips64-none-elf cgoto yes
-mips64-none-elf asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
+mips64-none-elf asmgoto yes
 mips64-none-elf nested no: expected ';' before '{' [E0002]
 mips64-none-elf interrupt yes
 mips64-none-elf naked yes
@@ -408,7 +408,7 @@ loongarch64-unknown-elf frameaddr yes
 loongarch64-unknown-elf retaddr1 no: __builtin_return_address(1) is not supported on loongarch64-unknown-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
 loongarch64-unknown-elf setjmp yes
 loongarch64-unknown-elf cgoto yes
-loongarch64-unknown-elf asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
+loongarch64-unknown-elf asmgoto yes
 loongarch64-unknown-elf nested no: expected ';' before '{' [E0002]
 loongarch64-unknown-elf interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS, RX, ColdFire, TriCore and ARMv7-A it is implemented)
 loongarch64-unknown-elf naked yes
@@ -438,7 +438,7 @@ xtensa-none-elf frameaddr yes
 xtensa-none-elf retaddr1 no: __builtin_return_address(1) is not supported on xtensa-none-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
 xtensa-none-elf setjmp yes
 xtensa-none-elf cgoto yes
-xtensa-none-elf asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
+xtensa-none-elf asmgoto yes
 xtensa-none-elf nested no: expected ';' before '{' [E0002]
 xtensa-none-elf interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS, RX, ColdFire, TriCore and ARMv7-A it is implemented)
 xtensa-none-elf naked yes
@@ -468,7 +468,7 @@ tricore-none-elf frameaddr yes
 tricore-none-elf retaddr1 no: __builtin_return_address(1) is not supported on tricore-none-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
 tricore-none-elf setjmp yes
 tricore-none-elf cgoto yes
-tricore-none-elf asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
+tricore-none-elf asmgoto yes
 tricore-none-elf nested no: expected ';' before '{' [E0002]
 tricore-none-elf interrupt yes
 tricore-none-elf naked yes
@@ -498,7 +498,7 @@ rx-none-elf frameaddr yes
 rx-none-elf retaddr1 no: __builtin_return_address(1) is not supported on rx-none-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
 rx-none-elf setjmp yes
 rx-none-elf cgoto yes
-rx-none-elf asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
+rx-none-elf asmgoto yes
 rx-none-elf nested no: expected ';' before '{' [E0002]
 rx-none-elf interrupt yes
 rx-none-elf naked yes
@@ -528,7 +528,7 @@ powerpc-none-eabi frameaddr yes
 powerpc-none-eabi retaddr1 no: __builtin_return_address(1) is not supported on powerpc-none-eabi: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
 powerpc-none-eabi setjmp yes
 powerpc-none-eabi cgoto yes
-powerpc-none-eabi asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
+powerpc-none-eabi asmgoto yes
 powerpc-none-eabi nested no: expected ';' before '{' [E0002]
 powerpc-none-eabi interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS, RX, ColdFire, TriCore and ARMv7-A it is implemented)
 powerpc-none-eabi naked yes
@@ -558,7 +558,7 @@ sparc-none-elf frameaddr yes
 sparc-none-elf retaddr1 no: __builtin_return_address(1) is not supported on sparc-none-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
 sparc-none-elf setjmp yes
 sparc-none-elf cgoto yes
-sparc-none-elf asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
+sparc-none-elf asmgoto yes
 sparc-none-elf nested no: expected ';' before '{' [E0002]
 sparc-none-elf interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS, RX, ColdFire, TriCore and ARMv7-A it is implemented)
 sparc-none-elf naked yes
@@ -588,7 +588,7 @@ m68k-none-elf frameaddr yes
 m68k-none-elf retaddr1 yes
 m68k-none-elf setjmp yes
 m68k-none-elf cgoto yes
-m68k-none-elf asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
+m68k-none-elf asmgoto yes
 m68k-none-elf nested no: expected ';' before '{' [E0002]
 m68k-none-elf interrupt yes
 m68k-none-elf naked yes
@@ -618,7 +618,7 @@ x86_64-elf frameaddr yes
 x86_64-elf retaddr1 yes
 x86_64-elf setjmp yes
 x86_64-elf cgoto yes
-x86_64-elf asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
+x86_64-elf asmgoto no: `asm goto` is not supported for x86_64-elf: its inline assembler has no branch for the template to take
 x86_64-elf nested no: expected ';' before '{' [E0002]
 x86_64-elf interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS, RX, ColdFire, TriCore and ARMv7-A it is implemented)
 x86_64-elf naked no: __attribute__((naked)) is not supported: on this target the body could only be assembled by the file-scope assembler's few instructions; it is supported on every target but x86-64 and AArch64 for Darwin or Windows
@@ -648,7 +648,7 @@ aarch64-elf frameaddr yes
 aarch64-elf retaddr1 yes
 aarch64-elf setjmp yes
 aarch64-elf cgoto yes
-aarch64-elf asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
+aarch64-elf asmgoto yes
 aarch64-elf nested no: expected ';' before '{' [E0002]
 aarch64-elf interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS, RX, ColdFire, TriCore and ARMv7-A it is implemented)
 aarch64-elf naked yes
@@ -678,7 +678,7 @@ x86_64-linux-gnu frameaddr yes
 x86_64-linux-gnu retaddr1 yes
 x86_64-linux-gnu setjmp yes
 x86_64-linux-gnu cgoto yes
-x86_64-linux-gnu asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
+x86_64-linux-gnu asmgoto no: `asm goto` is not supported for x86_64-linux-gnu: its inline assembler has no branch for the template to take
 x86_64-linux-gnu nested no: expected ';' before '{' [E0002]
 x86_64-linux-gnu interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS, RX, ColdFire, TriCore and ARMv7-A it is implemented)
 x86_64-linux-gnu naked no: __attribute__((naked)) is not supported: on this target the body could only be assembled by the file-scope assembler's few instructions; it is supported on every target but x86-64 and AArch64 for Darwin or Windows
@@ -708,7 +708,7 @@ aarch64-apple-darwin frameaddr yes
 aarch64-apple-darwin retaddr1 yes
 aarch64-apple-darwin setjmp yes
 aarch64-apple-darwin cgoto yes
-aarch64-apple-darwin asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
+aarch64-apple-darwin asmgoto yes
 aarch64-apple-darwin nested no: expected ';' before '{' [E0002]
 aarch64-apple-darwin interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS, RX, ColdFire, TriCore and ARMv7-A it is implemented)
 aarch64-apple-darwin naked no: __attribute__((naked)) is not supported: on this target the body could only be assembled by the file-scope assembler's few instructions; it is supported on every target but x86-64 and AArch64 for Darwin or Windows
@@ -718,8 +718,8 @@ aarch64-apple-darwin debug yes
 aarch64-apple-darwin unwind yes
 aarch64-apple-darwin cxx yes
 aarch64-apple-darwin cxxeh yes
-x86_64-windows-gnu int128 no: __int128 in the signature of 'f' is not supported for a Windows target yet: EmbCC lowers its arithmetic to libgcc helpers whose arguments it places in the System V registers
-x86_64-windows-gnu ldouble no: long double in the signature of 'f' is not supported for a Windows target yet: there it travels by reference and returns through a hidden pointer, and EmbCC passes it on the stack by value
+x86_64-windows-gnu int128 yes
+x86_64-windows-gnu ldouble yes
 x86_64-windows-gnu float16 yes
 x86_64-windows-gnu fp16 yes
 x86_64-windows-gnu bf16 yes
@@ -730,21 +730,21 @@ x86_64-windows-gnu complexint yes
 x86_64-windows-gnu vector yes
 x86_64-windows-gnu atomic1 yes
 x86_64-windows-gnu atomic8 yes
-x86_64-windows-gnu atomic16 no: __int128 in the signature of 'f' is not supported for a Windows target yet: EmbCC lowers its arithmetic to libgcc helpers whose arguments it places in the System V registers
-x86_64-windows-gnu tls no: __thread is not supported for a Windows target yet: Windows reaches a thread-local through a _tls_index and a TLS directory this writer does not emit
+x86_64-windows-gnu atomic16 yes
+x86_64-windows-gnu tls yes
 x86_64-windows-gnu vla yes
 x86_64-windows-gnu align32 yes
 x86_64-windows-gnu frameaddr yes
 x86_64-windows-gnu retaddr1 yes
 x86_64-windows-gnu setjmp no: __builtin_setjmp is not supported for x86_64-windows-gnu: MinGW's setjmp takes a frame for its unwinder, and EmbCC does not lower onto it
 x86_64-windows-gnu cgoto yes
-x86_64-windows-gnu asmgoto no: `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
+x86_64-windows-gnu asmgoto no: `asm goto` is not supported for x86_64-windows-gnu: its inline assembler has no branch for the template to take
 x86_64-windows-gnu nested no: expected ';' before '{' [E0002]
 x86_64-windows-gnu interrupt no: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V, MIPS, RX, ColdFire, TriCore and ARMv7-A it is implemented)
 x86_64-windows-gnu naked no: __attribute__((naked)) is not supported: on this target the body could only be assembled by the file-scope assembler's few instructions; it is supported on every target but x86-64 and AArch64 for Darwin or Windows
 x86_64-windows-gnu asmfile no: no assembly-file support for x86_64-windows-gnu yet
 x86_64-windows-gnu dashS yes
-x86_64-windows-gnu debug no: -g is not supported for a Windows target yet: its debug information goes in CodeView records this does not write, and emitting DWARF under a COFF name would be worse than refusing
+x86_64-windows-gnu debug yes
 x86_64-windows-gnu unwind yes
 x86_64-windows-gnu cxx yes
 x86_64-windows-gnu cxxeh yes

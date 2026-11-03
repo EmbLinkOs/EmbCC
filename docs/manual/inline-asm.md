@@ -50,6 +50,13 @@ NASM-syntax assembler used for `.asm` files ([embas](tools/embas.md)).
 On MIPS32 the operands are substituted the same way, and the text is
 assembled by the same MIPS32 assembler that reads `.s` and `.S` files.
 
+A template that defines a label -- `1:` with `1b`/`1f`, or a named one
+-- is assembled whole by the file assembler on every target but x86-64,
+so it may branch within itself: a loop, a skip. Its labels are its own
+(two templates may both use `1:`); a branch to a symbol outside it, a
+second section, and an alignment wider than an instruction are refused,
+since its bytes land at an unknown place in the function.
+
 A template is assembled only when its function is emitted. An `asm`
 statement in a function that is never emitted, such as an unused
 `static inline` function in a header, is not assembled, and an unknown
@@ -123,10 +130,19 @@ long add_named(long a, long b)
 |---|---|
 | `volatile` | Accepted, also spelled `__volatile__` and `__volatile`. It changes nothing: EmbCC treats every `asm` statement as volatile. |
 | `inline` | Not accepted in C: `expected '(' after asm before 'inline'`. |
-| `goto` | Not supported; refused with the diagnostic below. |
+| `goto` | Supported on every target but x86-64. The fourth `:` lists the C labels; the template names them as `%l[name]` or `%lN`, N counting the outputs, the inputs and then the labels, as in GCC. Outputs may be given and hold on every path. |
+
+`asm goto` is lowered without anything the optimizer has to be taught:
+each label operand becomes a label of the template's own, where a short
+stub sets a hidden selector register (an extra output) and branches to
+the template's end; after the asm, the selector picks the C label with an
+ordinary branch. A taken branch therefore costs a few instructions more
+than in GCC, and the C labels' code is never mistaken for unreachable.
+The stubs use numeric labels from 900 up, which a template should not
+define itself. On x86-64, whose inline assembler has no branch:
 
 ```text
-`asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
+`asm goto` is not supported for x86_64-linux-gnu: its inline assembler has no branch for the template to take
 ```
 
 ### Output operands
@@ -2674,18 +2690,16 @@ In summary, compared with GCC:
   under [Directives in a template](#directives-in-a-template), can appear
   in a template, and a function template cannot refer to a symbol on any
   target.
-- `asm goto`, `asm inline` and flag-output constraints are not
-  supported. Flag outputs are not always refused (see [x86-64](#x86-64)
+- `asm goto` is not supported on x86-64; `asm inline` and flag-output
+  constraints are not supported. Flag outputs are not always refused (see [x86-64](#x86-64)
   and [AArch64](#aarch64)).
 - `m` outputs do not work (except on MIPS32, Xtensa, SPARC and PowerPC,
   where the operand's register holds the address), and `m` inputs are a
   register holding the
   address rather than a memory reference.
 - On x86-64 and RISC-V, `i` and `n` give a register, not an immediate.
-- Labels inside a function template are supported only for the x86-64
-  `leaq Nf(%%rip)` form and as numeric labels (`1:`, `1b`) on Xtensa,
-  TriCore, SPARC, PowerPC, RX and ColdFire;
-  elsewhere branches use numeric displacements.
+- Labels inside a function template are supported on every target but
+  x86-64, where only the `leaq Nf(%%rip)` form is.
 - Register variables are not supported on ARM Cortex-M and RISC-V, are
   limited to x0-x11 and x13-x15 on AArch64, and are not supported at
   file scope on any target.

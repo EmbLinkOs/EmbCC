@@ -24,6 +24,7 @@
  * function spills a0-a7 immediately below the caller's stack arguments,
  * so one pointer walks from the registers straight into them.
  */
+#include "../../as/gas.h"
 #include "../../ir/irgen_int.h"
 
 #include "../target.h"
@@ -340,7 +341,7 @@ void irg_asm_riscv(struct ir_func *fn, struct stmt *s)
                           names, nops);
     struct code c = { 0 };
     char err[512];
-    if (rvasm_assemble(text, &c, err, sizeof err) != 0 ||
+    if (GAS_INLINE(rvasm_assemble, file, s->line, text, &c, err, sizeof err) != 0 ||
         code_asm_settle(&c, target_riscv_rvc() ? 2 : 4, CODE_FILL_RISCV,
                         err, sizeof err) < 0)
         diag_fatal(file, s->line, "%s", err);

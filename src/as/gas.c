@@ -121,7 +121,7 @@ struct gas {
     /* How many times each numeric local label has been DEFINED so far in
      * this pass. Reset between passes so both agree. (NLOCAL of them: GNU
      * as takes any number, and a startup file counts past 9.) */
-    int local_n[100];
+    int local_n[1000];
     int cur;                /* current section */
     int npcrel;             /* .Lpcrel_hiN counter */
     int line;               /* for diagnostics */
@@ -1298,10 +1298,26 @@ static int extern_form(struct gas *g, const char *stmt, long pc, int pass,
          (strncmp(p, "b.w", 3) == 0 && isspace((unsigned char)p[3])))) {
         struct code tmp = { 0 };
         char err[256];
+        /* ARMv6-M and v8-M Baseline have no wide b: in pass 1 a label
+         * further down is not yet known and lands here, so it is sized as
+         * the narrow form it will be; one really elsewhere has no branch
+         * that reaches it */
+        int thumb1 = !arm_a32(g) && (target_thumb_arch() == 6 ||
+                                     target_thumb_v8m_base());
+        if (thumb1 && pass == 2) {
+            gerr(g, "'b %s': %s has no branch to a symbol in another "
+                    "section or file (its b reaches 2KB, and only inside "
+                    "one); use bl, or ldr and bx", ext,
+                 target_thumb_v8m_base() ? "ARMv8-M Baseline" : "ARMv6-M");
+            return 1;
+        }
         if (pass == 2)
             fix_add(g, g->cur, pc, ext,
                     arm_a32(g) ? R_ARM_JUMP24 : R_ARM_THM_JUMP24, 0);
-        if (g->tgt->encode("b .+0", &tmp, err, sizeof err) != 0)
+        if (thumb1)
+            tasm_set_wide(0);   /* (not the statement before's) */
+        if (g->tgt->encode(thumb1 ? "b.n .+4" : "b .+0", &tmp, err,
+                           sizeof err) != 0)
             gerr(g, "%s", err);
         else
             emit_bytes(g, (const unsigned char *)tmp.p, tmp.len);
@@ -4289,6 +4305,81 @@ int gas_assemble(const char *in_path, const char *out_path, int preprocess,
     if (text != src) free(text);
     free(src);
     return rc;
+}
+
+int gas_template_has_labels(const char *text)
+{
+    const struct gas_target *t = target_for();
+    const char *p = text;
+    while (*p) {
+        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' ||
+               (*p == ';' && !(t && t->comment_char == ';')))
+            p++;
+        const char *w = p;
+        while (*p && (isalnum((unsigned char)*p) || *p == '_' || *p == '.' ||
+                      *p == '$'))
+            p++;
+        if (p > w && *p == ':' && p[1] != ':')
+            return 1;
+        while (*p && *p != '\n' && !(*p == ';' && !(t && t->comment_char == ';')))
+            p++;
+    }
+    return 0;
+}
+
+int gas_assemble_inline(const char *file, int line, const char *text,
+                        struct code *out, char *err, int errlen)
+{
+    struct gas g;
+    struct gexp gx;
+    const struct gas_target *t = target_for();
+    err[0] = 0;
+    if (!t) {
+        snprintf(err, (size_t)errlen, "a label in an asm template is not "
+                 "supported for %s", target_triple_now());
+        return -1;
+    }
+    memset(&g, 0, sizeof g);
+    g.path = file;
+    g.line_base = line > 0 ? line - 1 : 0;
+    g.tgt = t;
+    sec_init(&g);
+    gas_run(&g, &gx, text, file);
+    for (int i = 0; i < g.nsecs && !g.errors; i++)
+        if (i != SEC_TEXT && (g.secs[i].c.len || g.secs[i].size))
+            snprintf(err, (size_t)errlen, "an asm template with labels that "
+                     "puts bytes in section %s is not supported: its bytes "
+                     "are the function's", g.secs[i].name);
+    if (!err[0] && !g.errors && g.nfix)
+        snprintf(err, (size_t)errlen, "an asm template with labels that "
+                 "names the symbol '%s' is not supported: only its own "
+                 "labels; pass an address in an operand", g.fix[0].sym);
+    if (!err[0] && !g.errors && g.secs[SEC_TEXT].align > 4)
+        snprintf(err, (size_t)errlen, "an alignment of %ld in an asm "
+                 "template with labels is not supported: where the "
+                 "template lands in the function is not known to it",
+                 g.secs[SEC_TEXT].align);
+    if (!err[0] && g.errors)
+        snprintf(err, (size_t)errlen, "the asm template above does not "
+                 "assemble");
+    if (!err[0]) {
+        struct gsec *tx = &g.secs[SEC_TEXT];
+        for (int i = 0; i < tx->c.len; i++)
+            code_byte(out, tx->c.p[i]);
+        for (int i = 0; i < g.nmaps; i++) {
+            if (g.maps[i].sec != SEC_TEXT || g.maps[i].kind != 'd')
+                continue;
+            long end = tx->c.len;
+            for (int k = i + 1; k < g.nmaps; k++)
+                if (g.maps[k].sec == SEC_TEXT && g.maps[k].off > g.maps[i].off) {
+                    end = g.maps[k].off;
+                    break;
+                }
+            code_mark_data(out, (int)g.maps[i].off, (int)end);
+        }
+    }
+    gas_free(&g, &gx);
+    return err[0] ? -1 : 0;
 }
 
 /* A name the block uses, as the driver knows names: on RX a C symbol is

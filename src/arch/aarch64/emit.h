@@ -96,6 +96,8 @@ void a64_rev(struct code *c, int rd, int rn, int size);
 /* ---- compare -------------------------------------------------------- */
 int  a64_cmp_imm(struct code *c, int rn, long imm, int w);
 void a64_cmp_reg(struct code *c, int rn, int rm, int w);
+int  a64_addsub_s_imm(struct code *c, int sub, int rd, int rn, long imm, int w);
+void a64_addsub_s_reg(struct code *c, int sub, int rd, int rn, int rm, int w);
 void a64_cset(struct code *c, int rd, int cond);
 void a64_csel(struct code *c, int rd, int rn, int rm, int cond, int w);
 

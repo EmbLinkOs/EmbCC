@@ -9,6 +9,7 @@
  * -- a `float` arrives as a `double`, and a struct larger than 8 bytes
  * arrives as the address of the caller's copy.
  */
+#include "../../as/gas.h"
 #include "../../ir/irgen_int.h"
 
 #include "../target.h"
@@ -262,7 +263,7 @@ void irg_asm_tricore(struct ir_func *fn, struct stmt *s)
                           names, nops);
     struct code c = { 0 };
     char err[512];
-    if (tcasm_assemble(text, &c, err, sizeof err) != 0)
+    if (GAS_INLINE(tcasm_assemble, file, s->line, text, &c, err, sizeof err) != 0)
         diag_fatal(file, s->line, "%s", err);
     free(text);
 

@@ -10,6 +10,7 @@
  * words. A `float` arrives as a `double`; a struct of any size is its own
  * bytes, by value -- there is no by-reference rule in o32.
  */
+#include "../../as/gas.h"
 #include "../../ir/irgen_int.h"
 
 #include "../target.h"
@@ -327,7 +328,7 @@ void irg_asm_mips(struct ir_func *fn, struct stmt *s)
                             names, nops);
     struct code c = { 0 };
     char err[512];
-    if (mipsasm_assemble(text, &c, err, sizeof err) != 0)
+    if (GAS_INLINE(mipsasm_assemble, file, s->line, text, &c, err, sizeof err) != 0)
         diag_fatal(file, s->line, "%s", err);
     /* Its alignments: to four at most, which every instruction has, so
      * they pad as at the template's start. A larger one would pad by where

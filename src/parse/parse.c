@@ -2,6 +2,7 @@
 #include <stdarg.h>
 #include "parse.h"
 
+#include <ctype.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -5803,8 +5804,255 @@ static void parse_asm_operands(struct parser *ps, struct asm_operand **out,
     }
 }
 
-/* GCC extended asm: asm [volatile] ( template
- *     [ : outputs [ : inputs [ : clobbers ] ] ] ) ;  */
+/* a string, printf's way, and a buffer grown by it (asm goto's) */
+static const char *ag_fmt(const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(NULL, 0, fmt, ap);
+    va_end(ap);
+    char *r = xmalloc((size_t)n + 1);
+    va_start(ap, fmt);
+    vsnprintf(r, (size_t)n + 1, fmt, ap);
+    va_end(ap);
+    return r;
+}
+
+struct agb {
+    char *p;
+    size_t len, cap;
+};
+
+static void agb_putn(struct agb *b, const char *s, size_t n)
+{
+    if (b->len + n + 1 > b->cap) {
+        b->cap = (b->len + n + 1) * 2;
+        b->p = xrealloc(b->p, b->cap);
+    }
+    memcpy(b->p + b->len, s, n);
+    b->len += n;
+    b->p[b->len] = 0;
+}
+
+static void agb_putc(struct agb *b, char c)
+{
+    agb_putn(b, &c, 1);
+}
+
+static void agb_printf(struct agb *b, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(NULL, 0, fmt, ap);
+    va_end(ap);
+    char *t = xmalloc((size_t)n + 1);
+    va_start(ap, fmt);
+    vsnprintf(t, (size_t)n + 1, fmt, ap);
+    va_end(ap);
+    agb_putn(b, t, (size_t)n);
+    free(t);
+}
+
+/* `asm goto`'s branch out of the template, per target: an instruction
+ * setting the selector register %[__embcc_sel] to K, and a branch to a
+ * label of the template's own. NULL: this target's inline assembler has
+ * no branch (x86-64's is a small vocabulary, not an assembler). */
+static const char *ag_set(int k, const char **constraint)
+{
+    *constraint = "=r";
+    switch (target_get()) {
+    case TARGET_AARCH64: return ag_fmt("mov %%w[__embcc_sel], #%d", k);
+    case TARGET_THUMB:          /* (ARMv6-M and v8-M Baseline: movs only;
+                                 * the pool's first registers are low) */
+        return ag_fmt("%s %%[__embcc_sel], #%d",
+                      !target_arm_a32() && (target_thumb_arch() == 6 ||
+                                            target_thumb_v8m_base())
+                          ? "movs" : "mov", k);
+    case TARGET_RISCV32: case TARGET_RISCV64:
+    case TARGET_MIPS32: case TARGET_MIPS64: case TARGET_PPC32:
+        return ag_fmt("li %%[__embcc_sel], %d", k);
+    case TARGET_LOONGARCH64: return ag_fmt("ori %%[__embcc_sel], $zero, %d", k);
+    case TARGET_AVR:
+        *constraint = "=d";
+        return ag_fmt("ldi %%[__embcc_sel], %d", k);
+    case TARGET_XTENSA: return ag_fmt("movi %%[__embcc_sel], %d", k);
+    case TARGET_TRICORE: return ag_fmt("mov %%[__embcc_sel], %d", k);
+    case TARGET_SPARC32: return ag_fmt("mov %d, %%[__embcc_sel]", k);
+    case TARGET_COLDFIRE:
+        *constraint = "=d";
+        return ag_fmt("moveq #%d, %%[__embcc_sel]", k);
+    case TARGET_RX: return ag_fmt("mov #%d, %%[__embcc_sel]", k);
+    default: return NULL;
+    }
+}
+
+static const char *ag_jump(const char *label)
+{
+    switch (target_get()) {
+    case TARGET_AARCH64: case TARGET_THUMB: case TARGET_LOONGARCH64:
+    case TARGET_PPC32:
+        return ag_fmt("b %s", label);
+    case TARGET_MIPS32: case TARGET_MIPS64:
+        return ag_fmt("b %s\n\tnop", label);
+    case TARGET_RISCV32: case TARGET_RISCV64: case TARGET_XTENSA:
+    case TARGET_TRICORE:
+        return ag_fmt("j %s", label);
+    case TARGET_AVR: return ag_fmt("rjmp %s", label);
+    case TARGET_SPARC32: return ag_fmt("ba %s\n\tnop", label);
+    case TARGET_COLDFIRE: case TARGET_RX: return ag_fmt("bra %s", label);
+    default: return NULL;
+    }
+}
+
+#define AG_LABEL 900       /* the stubs' numeric labels: past any a
+                              * template would number its own */
+
+/* `asm goto (T : outs : ins : clobbers : l1, l2)`, at its last `:`.
+ * Lowered without a terminator the optimizer would need teaching: each
+ * label operand becomes a label of the template's own, where a stub sets
+ * a hidden selector output and branches to the template's end, and the
+ * asm is followed by `if (sel == k) goto lk;` -- real edges, which every
+ * pass already honours. The template keeps its operands' numbers: the
+ * selector is the last output, so a number past the outputs is moved up
+ * one, and %lN / %l[name] (N counting outputs, inputs, then labels, as
+ * GCC does) name the stubs. */
+static struct stmt *asm_goto(struct parser *ps, struct stmt *s)
+{
+    struct asm_stmt *a = s->asm_s;
+    int line = s->line, col = s->col;
+    if (cur(ps)->kind != TOK_COLON)
+        parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                       "`asm goto` needs its labels after a fourth ':'");
+    advance(ps);
+    const char *labels[64];
+    int nl = 0;
+    while (cur(ps)->kind == TOK_IDENT) {
+        if (nl == 64)
+            parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                           "more than 64 labels in an `asm goto`");
+        labels[nl++] = cur(ps)->text;
+        advance(ps);
+        if (cur(ps)->kind != TOK_COMMA)
+            break;
+        advance(ps);
+    }
+    expect(ps, TOK_RPAREN, "')' to close asm");
+    expect(ps, TOK_SEMI, "';'");
+    if (nl == 0)
+        parse_error_at(ps, line, col, "`asm goto` with no labels");
+    const char *cons;
+    if (!ag_set(0, &cons) || !ag_jump("1f"))
+        parse_error_at(ps, line, col,
+                       "`asm goto` is not supported for %s: its inline "
+                       "assembler has no branch for the template to take",
+                       target_triple_now());
+    /* the template, renumbered, then the stubs */
+    struct agb b = { 0, 0, 0 };
+    int nout = a->nout, nin = a->nin;
+    const char *t = a->tmpl;
+    while (*t) {
+        if (*t != '%') {
+            agb_putc(&b, *t++);
+            continue;
+        }
+        if (t[1] == '%' || t[1] == '=') {
+            agb_putc(&b, *t++);
+            agb_putc(&b, *t++);
+            continue;
+        }
+        const char *m = t + 1;
+        while (isalpha((unsigned char)*m))
+            m++;
+        int modl = m == t + 2 && t[1] == 'l';
+        if (isdigit((unsigned char)*m)) {
+            int n = 0;
+            const char *d = m;
+            while (isdigit((unsigned char)*d))
+                n = n * 10 + (*d++ - '0');
+            if (modl && n >= nout + nin) {
+                if (n - nout - nin >= nl)
+                    parse_error_at(ps, line, col, "asm goto operand %%l%d "
+                                   "names no label", n);
+                agb_printf(&b, "%df", AG_LABEL + 1 + n - nout - nin);
+            } else {
+                agb_putn(&b, t, (size_t)(m - t));
+                agb_printf(&b, "%d", n >= nout ? n + 1 : n);
+            }
+            t = d;
+            continue;
+        }
+        if (*m == '[' && modl) {
+            const char *e = strchr(m, ']');
+            int k = -1;
+            for (int i = 0; e && i < nl; i++)
+                if ((size_t)(e - m - 1) == strlen(labels[i]) &&
+                    !strncmp(m + 1, labels[i], (size_t)(e - m - 1)))
+                    k = i;
+            if (k >= 0) {
+                agb_printf(&b, "%df", AG_LABEL + 1 + k);
+                t = e + 1;
+                continue;
+            }
+        }
+        agb_putc(&b, *t++);
+    }
+    /* (numeric local labels: the file assembler resolves them itself on
+     * every target, where a named one is a symbol AVR, LoongArch and
+     * TriCore relocate; every reference is forward) */
+    const char *end = ag_fmt("%df", AG_LABEL);
+    agb_printf(&b, "\n\t%s\n\t%s\n", ag_set(0, &cons), ag_jump(end));
+    for (int i = 0; i < nl; i++)
+        agb_printf(&b, "%d:\n\t%s\n\t%s\n", AG_LABEL + 1 + i,
+                   ag_set(i + 1, &cons), ag_jump(end));
+    agb_printf(&b, "%d:\n", AG_LABEL);
+    a->tmpl = b.p;
+    /* the selector: an output, named, the last */
+    static int seq;
+    char *nm = xmalloc(32);
+    snprintf(nm, 32, "asmgoto.%d", seq++);
+    a->out = xrealloc(a->out, (size_t)(nout + 1) * sizeof *a->out);
+    struct asm_operand *so = &a->out[nout];
+    memset(so, 0, sizeof *so);
+    so->name = "__embcc_sel";
+    so->constraint = cons;
+    so->expr = new_expr(EXPR_VAR, line, col);
+    so->expr->name = nm;
+    a->nout = nout + 1;
+    int cc = 0;
+    for (int i = 0; i < a->nclob; i++)
+        cc |= !strcmp(a->clob[i], "cc");
+    if (!cc) {
+        a->clob = xrealloc(a->clob, (size_t)(a->nclob + 1) * sizeof *a->clob);
+        a->clob[a->nclob++] = "cc";
+    }
+    /* { unsigned char sel; asm(...); if (sel == 1) goto l1; ... } */
+    struct stmt *d = new_stmt(STMT_DECL, line, 0);
+    d->dty = ty_int_of_size(1, 1);
+    d->name = nm;
+    struct stmt *tail = d;
+    d->next = s;
+    tail = s;
+    for (int i = 0; i < nl; i++) {
+        struct stmt *g = new_stmt(STMT_GOTO, line, col);
+        g->name = label_map(ps, labels[i]);
+        struct expr *v = new_expr(EXPR_VAR, line, col);
+        v->name = nm;
+        struct expr *k = new_expr(EXPR_NUM, line, col);
+        k->num = i + 1;
+        k->ty = ty_base(TY_INT, 0);
+        struct stmt *f = new_stmt(STMT_IF, line, col);
+        f->cond = binop(B_EQ, v, k);
+        f->thn = g;
+        tail->next = f;
+        tail = f;
+    }
+    struct stmt *blk = new_stmt(STMT_BLOCK, line, col);
+    blk->body = d;
+    return blk;
+}
+
+/* GCC extended asm: asm [volatile] [goto] ( template
+ *     [ : outputs [ : inputs [ : clobbers [ : labels ] ] ] ] ) ;  */
 static struct stmt *parse_asm_stmt(struct parser *ps)
 {
     struct stmt *s = new_stmt(STMT_ASM, cur(ps)->line, cur(ps)->col);
@@ -5831,13 +6079,14 @@ static struct stmt *parse_asm_stmt(struct parser *ps)
      * Accepting the syntax and ignoring either is worse than not
      * accepting it, so this says what is missing instead of failing
      * with "expected '(' after asm". */
-    if (cur(ps)->kind == TOK_KW_GOTO)
-        parse_error_at(ps, cur(ps)->line, cur(ps)->col,
-                   "`asm goto` is not supported: its template branches to a "
-                   "label, which needs a patchable placeholder in each "
-                   "backend's inline assembler and CFG edges the optimizer "
-                   "honours. Use a normal asm that sets a value and branch "
-                   "on that");
+    int is_goto = 0;
+    if (cur(ps)->kind == TOK_KW_GOTO) {
+        is_goto = 1;
+        a->is_volatile = 1;       /* (asm goto is volatile: GCC) */
+        advance(ps);
+        if (cur(ps)->kind == TOK_KW_VOLATILE)
+            advance(ps);
+    }
     expect(ps, TOK_LPAREN, "'(' after asm");
     a->tmpl = parse_str_literal(ps, "an asm template string");
     a->is_basic = cur(ps)->kind != TOK_COLON;
@@ -5870,6 +6119,8 @@ static struct stmt *parse_asm_stmt(struct parser *ps)
             advance(ps);
         }
     }
+    if (is_goto)
+        return asm_goto(ps, s);
     expect(ps, TOK_RPAREN, "')' to close asm");
     expect(ps, TOK_SEMI, "';'");
     return s;

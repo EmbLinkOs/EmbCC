@@ -14,6 +14,7 @@
  * function pushes r0-r3 immediately below the caller's stack arguments,
  * so that one pointer walks from the registers straight into them.
  */
+#include "../../as/gas.h"
 #include "../../ir/irgen_int.h"
 
 #include <ctype.h>
@@ -324,7 +325,7 @@ void irg_asm_thumb(struct ir_func *fn, struct stmt *s)
     tasm_set_arch(target_thumb_v8m_base() ? TASM_V8M_BASE
                                               : target_thumb_arch());
     tasm_set_dsp(target_thumb_em());
-    if (tasm_assemble(text, &c, err, sizeof err) != 0)
+    if (GAS_INLINE(tasm_assemble, file, s->line, text, &c, err, sizeof err) != 0)
         diag_fatal(file, s->line, "%s", err);
     if (tasm_open())
         diag_fatal(file, s->line, "the asm ends inside an IT block, which "

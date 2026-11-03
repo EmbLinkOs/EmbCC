@@ -450,6 +450,25 @@ int a64_cmp_imm(struct code *c, int rn, long imm, int w)
     return addsub_imm(c, 0x71000000UL, 31, rn, imm, w);        /* CMP */
 }
 
+/* ADDS / SUBS Rd, Rn, #imm (a negative one the other way round), and
+ * with a register: the flag-setting forms an asm loop counts down with.
+ * 0 when the immediate does not fit. */
+int a64_addsub_s_imm(struct code *c, int sub, int rd, int rn, long imm, int w)
+{
+    if (imm < 0) {
+        imm = -imm;
+        sub = !sub;
+    }
+    return addsub_imm(c, sub ? 0x71000000UL : 0x31000000UL, rd, rn, imm, w);
+}
+
+void a64_addsub_s_reg(struct code *c, int sub, int rd, int rn, int rm, int w)
+{
+    a64_word(c, (sub ? 0x6B000000UL : 0x2B000000UL) | sf(w) |
+                ((unsigned long)rm << 16) | ((unsigned long)rn << 5) |
+                (unsigned long)rd);
+}
+
 void a64_cmp_reg(struct code *c, int rn, int rm, int w)
 {
     /* CMP is SUBS ZR, Rn, Rm. */

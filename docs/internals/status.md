@@ -242,7 +242,7 @@ RISC-V).
 
 | Construct | Diagnostic |
 |---|---|
-| `asm goto` | `` `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that `` |
+| `asm goto` on x86-64 | `` `asm goto` is not supported for TARGET: its inline assembler has no branch for the template to take `` |
 | Nested function definitions | A syntax error: `expected ';' before '{'` |
 | K&R (old-style) function definitions | A syntax error: `expected a parameter type before 'a'` |
 | C23 `u8` character constants (`u8'a'`) | A syntax error |
@@ -362,7 +362,7 @@ Language refusals:
 
 | Construct | Diagnostic |
 |---|---|
-| `asm goto` | as in C: `` `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that `` |
+| `asm goto` on x86-64 | as in C: `` `asm goto` is not supported for TARGET: its inline assembler has no branch for the template to take `` |
 | `_Atomic` | `_Atomic is not supported in C++` |
 
 Function names in a template are looked up in two phases: ordinary
@@ -599,7 +599,7 @@ audited:
   TriCore, PowerPC, RX, SPARC and ColdFire; GCC's MIPS
   `use_shadow_register_set` and `use_debug_exception_return`.
 - A `_Float16` through `...`, and a struct of them by value with the
-  ARM or RISC-V hard-float convention; `asm goto`, nested functions,
+  ARM or RISC-V hard-float convention; `asm goto` on x86-64, nested functions,
   and sixteen-byte atomics off x86-64 and AArch64
   (see [What each target compiles](../manual/limits.md)).
 - On MIPS32, a delay slot filled from anywhere but the instruction just
