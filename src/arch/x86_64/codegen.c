@@ -4671,7 +4671,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
                  * slot ld makes (TLVP); irgen calls its thunk */
                 gs.patch_off = x86_mov_reg_rip(text, D ? g_loc[i->dst] : 0);
                 gs.kind = RK_TLVP;
-            } else if (i->glob->is_tls &&
+            } else if (i->glob->is_tls && !target_win64_abi() &&
                        (target_pic() == TARGET_PIC ||
                         (target_pic() && !i->glob->defined))) {
                 /* -fPIC, or -fPIE and another module's: initial-exec --
@@ -4682,7 +4682,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
                 gs.patch_off = x86_mov_reg_rip(text, r);
                 gs.kind = RK_GOTTPOFF;
                 x86_add_reg_fsbase(text, r);
-            } else if (i->glob->is_tls) {
+            } else if (i->glob->is_tls && !target_win64_abi()) {
                 /* Not an address in this image: an offset into a block
                  * that is different for every thread. So the thread
                  * pointer is read first and the offset added to it,

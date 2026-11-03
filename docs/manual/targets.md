@@ -359,6 +359,16 @@ for it: link with MinGW's toolchain.
 - Constructors and destructors go in `.ctors` and `.dtors`, which MinGW's
   startup runs, and a named section (`__attribute__((section))`) is its
   own COFF section.
+- `va_arg` reads a structure of 1, 2, 4 or 8 bytes from its slot, and any
+  other structure, a `long double` or an `__int128` through the pointer
+  in its slot.
+- `-g` writes DWARF in `.debug_*` sections, as MinGW's GCC does; gdb reads
+  it from the linked image. (A function in a section of its own is
+  refused with `-g` for now.)
+- `__thread` and `_Thread_local` are emulated TLS, MinGW GCC's model: a
+  variable's symbol is its control object `__emutls_v.NAME`, and an access
+  calls libgcc's `__emutls_get_address`, so objects link with MinGW GCC's
+  and clang's `-femulated-tls` ones.
 
 These are refused by name:
 
@@ -366,9 +376,6 @@ These are refused by name:
 |---|---|
 | `long double` in a function's signature | `long double in the signature of 'f' is not supported for a Windows target yet: there it travels by reference and returns through a hidden pointer, and EmbCC passes it on the stack by value` |
 | `__int128` in a function's signature | `__int128 in the signature of 'f' is not supported for a Windows target yet: EmbCC lowers its arithmetic to libgcc helpers whose arguments it places in the System V registers` |
-| `va_arg` of a structure | `va_arg of a struct is not supported for a Windows target yet` |
-| `-g` | `-g is not supported for a Windows target yet: its debug information goes in CodeView records this does not write, and emitting DWARF under a COFF name would be worse than refusing` |
-| `__thread` | `__thread is not supported for a Windows target yet: Windows reaches a thread-local through a _tls_index and a TLS directory this writer does not emit` |
 | file-scope `__asm__` with labels or symbols | `a file-scope asm block with labels or symbol references is not supported for a Windows target yet` |
 
 ### Predefined macros

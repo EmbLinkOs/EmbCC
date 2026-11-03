@@ -631,6 +631,7 @@ static void emit_stvar(struct ir_func *fn, int v, int val,
 }
 
 static int tlv_call(struct ir_func *fn, int desc);
+static int emutls_call(struct ir_func *fn, int ctrl);
 
 static int emit_gaddr(struct ir_func *fn, struct global *g)
 {
@@ -643,6 +644,10 @@ static int emit_gaddr(struct ir_func *fn, struct global *g)
      * first word the thunk that gives this thread's copy */
     if (g->is_tls && target_os_get() == TGT_OS_DARWIN)
         return tlv_call(fn, i->dst);
+    /* MinGW's (emutls, GCC's model there): that was the variable's control
+     * object, and __emutls_get_address gives this thread's copy */
+    if (g->is_tls && target_win64_abi())
+        return emutls_call(fn, i->dst);
     return i->dst;
 }
 
@@ -2336,6 +2341,22 @@ static int libatomic_call(struct ir_func *fn, const char *name,
 
 /* desc->thunk(desc): a Darwin thread-local's address, as an indirect call
  * (the thunk keeps more registers than a call need, which is safe) */
+/* MinGW's thread-locals, as its GCC makes them (emutls): a variable's
+ * symbol is its control object __emutls_v.NAME -- its size, its
+ * alignment, a word for the runtime and the template of its first value
+ * -- and libgcc's __emutls_get_address(&it) gives this thread's copy,
+ * made from the template the first time a thread asks. */
+static int emutls_call(struct ir_func *fn, int ctrl)
+{
+    struct type *vp = ty_ptr(ty_base(TY_VOID, 0));
+    struct type *tys[1] = { vp };
+    int vals[1] = { ctrl };
+    struct func *cf = libatomic_fn("__emutls_get_address", vp, 1, tys);
+    cf->is_nothrow = 1;
+    return libatomic_call(fn, "__emutls_get_address", vp, 1, vals, tys,
+                          g_cur_line);
+}
+
 static int tlv_call(struct ir_func *fn, int desc)
 {
     struct type *vp = ty_ptr(ty_base(TY_VOID, 0));

@@ -188,7 +188,7 @@ EmbCC's own spellings come first. Where GCC spells the same thing differently, i
 | `--call-graph=su` | ...with each function's stack | `-fcallgraph-info=su` |
 | `--time-report` | how long each phase took | `-ftime-report` |
 | `--sanitize=LIST` | address, thread, memory (with their runtimes); undefined, ... (checks that trap) | `-fsanitize=LIST` |
-| `--sanitize-recover=LIST` | report and go on: address | `-fsanitize-recover=LIST` |
+| `--sanitize-recover=LIST` | report and go on: address, undefined (and its checks), all | `-fsanitize-recover=LIST` |
 | `--no-sanitize=LIST` | not these checks | `-fno-sanitize=LIST` |
 | `--coverage` | count every line and branch: FILE.gcno now, FILE.gcda when the program runs, for gcov |  |
 | `--coverage-files=REGEX` | ...only in the files these match (;-separated) | `-fprofile-filter-files=REGEX` |

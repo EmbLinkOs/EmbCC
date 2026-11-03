@@ -447,6 +447,10 @@ void ir_print_unit(struct outbuf *b, const struct ir_unit *u)
             else if (ch == '\t') ob_str(b, "\\t");
             else if (ch == '"')  ob_str(b, "\\\"");
             else if (ch == '\\') ob_str(b, "\\\\");
+            else if ((unsigned char)ch < 0x20 || ch == 0x7f)
+                /* a NUL or another control byte: the text is lines,
+                 * and the parser stopped at a raw NUL ("PE\0\0") */
+                ob_fmt(b, "\\x%02x", (unsigned char)ch);
             else                 ob_ch(b, ch);
         }
         ob_str(b, "\"\n");

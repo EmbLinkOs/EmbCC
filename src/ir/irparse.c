@@ -32,6 +32,7 @@
 #include "ir.h"
 
 #include <stdio.h>
+#include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -676,6 +677,13 @@ struct ir_unit *ir_parse(const char *file, char *text)
             for (const char *c = q + 1; *c && *c != '"'; c++) {
                 if (*c != '\\') { ob_ch(&b, *c); continue; }
                 c++;
+                if (*c == 'x' && isxdigit((unsigned char)c[1]) &&
+                    isxdigit((unsigned char)c[2])) {
+                    char hx[3] = { c[1], c[2], 0 };
+                    ob_ch(&b, (char)strtol(hx, NULL, 16));
+                    c += 2;
+                    continue;
+                }
                 ob_ch(&b, *c == 'n' ? '\n' : *c == 't' ? '\t' : *c);
             }
             /* ir_intern_string keeps the POINTER, so the bytes have to

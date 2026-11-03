@@ -87,21 +87,28 @@ static int va_struct_sysv(struct ir_func *fn, struct expr *e, int ap,
 
 /* va_arg on Microsoft x64: the list is a pointer walking eight-byte
  * slots -- the home area the prologue filled from rcx..r9, then the
- * caller's stack arguments. A variadic float is a double there. What
- * travels by reference on Windows (long double, __int128; structs are
- * refused in sema) is refused by name rather than read as a value. */
+ * caller's stack arguments. A variadic float is a double there. A
+ * structure of 1, 2, 4 or 8 bytes is in its slot; any other, and a long
+ * double or an __int128, is a pointer in the slot to the caller's copy
+ * (as MinGW's GCC and clang pass them). */
 static int va_arg_win64(struct ir_func *fn, struct expr *e)
 {
     struct type *rt = e->ty;
     struct type *ptr = ty_base(TY_LONG, 1);
-    if (rt->kind == TY_LDOUBLE || rt->kind == TY_INT128)
-        diag_fatal(fn->file, e->line,
-                   "va_arg of %s is not supported for a Windows target yet: "
-                   "there it travels by reference", ty_name(rt));
     int apa = gen_addr(fn, e->lhs);
     int cur = emit_load(fn, apa, ptr);
     emit_store(fn, apa, emit_bin(fn, IR_ADD, cur, emit_const(fn, 8, 8), 8, 1),
                ptr);
+    if (rt->kind == TY_STRUCT) {
+        long size = ty_size(rt);
+        int dst = irg_va_struct_slot(fn, e);
+        int src = size == 1 || size == 2 || size == 4 || size == 8
+                  ? cur : emit_load(fn, cur, ptr);
+        irg_va_copy(fn, dst, 0, src, size);
+        return dst;
+    }
+    if (rt->kind == TY_LDOUBLE || rt->kind == TY_INT128)
+        return emit_load(fn, emit_load(fn, cur, ptr), rt);
     if (ty_is_float(rt)) {
         int v = emit_load(fn, cur, ty_base(TY_DOUBLE, 0));
         if (rt->kind == TY_FLOAT) {

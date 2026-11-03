@@ -5044,13 +5044,6 @@ static void check_expr_main(struct unit *u, struct func *f, struct scope *sc,
             if (!e->cast_ty->complete)
                 sema_error_at(u, e->line, e->col,
                            "va_arg of incomplete %s", ty_name(e->cast_ty));
-            /* Windows passes a struct of any other size than 1, 2, 4 or
-             * 8 bytes by reference, and its va_list is a bare pointer:
-             * neither is what the walk below does there. */
-            if (target_win64_abi())
-                sema_error_at(u, e->line, e->col,
-                           "va_arg of a struct is not supported for a "
-                           "Windows target yet");
             /* The value of a struct expression is an object's address:
              * the argument's bytes, wherever the walk finds them (a
              * register save area, the stack, behind a pointer), are

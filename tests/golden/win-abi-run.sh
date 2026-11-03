@@ -65,6 +65,18 @@ long long vcopy(int n, ...)
   for (int i = 0; i < n; i++) a = a * 10 + va_arg(ap, int);
   for (int i = 0; i < n; i++) b = b * 10 + va_arg(aq, int);
   va_end(aq); va_end(ap); return a * 1000000 + b; }
+/* va_arg of structures and of __int128: an 8-byte one in its slot, a
+ * 12-byte one and the __int128 by reference to the caller's copy (the low
+ * half only: a shift of it would call a helper, a relocation) */
+struct s8 { int a, b; };
+struct s12 { int a, b, c; };
+long long vstruct(int n, ...)
+{ va_list ap; va_start(ap, n);
+  struct s8 s = va_arg(ap, struct s8);
+  struct s12 t = va_arg(ap, struct s12);
+  __int128 q = va_arg(ap, __int128);
+  va_end(ap);
+  return n + s.a * 10 + s.b * 100 + t.c * 1000 + (long long)q * 10000; }
 /* ...and EmbCC as the CALLER of someone else's variadic function, through
  * a pointer so that no relocation is needed: a double among the first
  * four arguments must travel in its integer register as well */
@@ -163,11 +175,16 @@ T t10(void) { return FN(vints_t, vcopy)(6, 1, 2, 3, 4, 5, 6) != 123456123456LL; 
 T t11(void) { return FN(callv_t, callv)(gvar, 3) != 3 * 1000 + 3 * 100 + 4 * 10 + 9; }
 T t12(void) { return check((void *)FN(clob_t, clob), 5) != 0; }
 T t13(void) { return FN(clob_t, clob)(5, ident) != 6901; }
+struct s8 { int a, b; };
+struct s12 { int a, b, c; };
+T t14(void) { struct s8 s = { 1, 2 }; struct s12 t = { 0, 0, 3 };
+              __int128 q = ((__int128)5 << 64) | 4;
+              return FN(vints_t, vstruct)(9, s, t, q) != 9 + 10 + 200 + 3000 + 40000; }
 int main(void)
 {
     int bad = t1() | t2() << 1 | t3() << 2 | t4() << 3 | t5() << 4 |
               t6() << 5 | t7() << 6;
-    int va = t8() | t9() << 1 | t10() << 2 | t11() << 3;
+    int va = t8() | t9() << 1 | t10() << 2 | t11() << 3 | t14() << 4;
     int keep = t12() | t13() << 1;
     if (!bad && !va && keep)
         bad = 120 + keep;

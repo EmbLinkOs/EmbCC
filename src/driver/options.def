@@ -180,7 +180,7 @@ OPT(DEBUG, "--call-graph",  NULL,   "-fcallgraph-info", "write FILE.ci: the call
 OPT(DEBUG, "--call-graph=su", NULL, "-fcallgraph-info=su", "...with each function's stack")
 OPT(DEBUG, "--time-report", NULL,   "-ftime-report", "how long each phase took")
 OPT(DEBUG, "--sanitize=",   "LIST", "-fsanitize=%", "address, thread, memory (with their runtimes); undefined, ... (checks that trap)")
-OPT(DEBUG, "--sanitize-recover=", "LIST", "-fsanitize-recover=%", "report and go on: address")
+OPT(DEBUG, "--sanitize-recover=", "LIST", "-fsanitize-recover=%", "report and go on: address, undefined (and its checks), all")
 OPT(DEBUG, "--no-sanitize=", "LIST", "-fno-sanitize=%", "not these checks")
 OPT(DEBUG, "--coverage",    NULL,   NULL,   "count every line and branch: FILE.gcno now, FILE.gcda when the program runs, for gcov")
 OPT(DEBUG, "--coverage-files=", "REGEX", "-fprofile-filter-files=%", "...only in the files these match (;-separated)")

@@ -4944,25 +4944,24 @@ lto_backend:
          * so the -4 that ELF's PC32 needs is absent here, and carrying
          * it over would displace every call by four bytes.
          */
+        /* -g: DWARF in .debug_* sections, as MinGW's GCC writes it (gdb
+         * reads it; CodeView is MSVC's). The code is one .text here; a
+         * function in a section of its own would need its addresses
+         * against that section, which this does not do yet. */
         if (want_debug)
-            diag_fatal(in, 0,
-                       "-g is not supported for a Windows target yet: its "
-                       "debug information goes in CodeView records this "
-                       "does not write, and emitting DWARF under a COFF "
-                       "name would be worse than refusing");
+            for (int i = 0; i < iu->nfuncs; i++)
+                if (iu->funcs[i].src && iu->funcs[i].src->section &&
+                    iu->funcs[i].src->code_len > 0)
+                    diag_fatal(in, 0,
+                               "-g with a function in a section of its own "
+                               "('%s') is not supported for a Windows "
+                               "target yet", iu->funcs[i].src->name);
         for (struct topasm *tas = u->topasm; tas; tas = tas->next)
             if (tas->nsyms || tas->nrels)
                 diag_fatal(tas->file, tas->line,
                            "a file-scope asm block with labels or symbol "
                            "references is not supported for a Windows "
                            "target yet");
-        for (struct global *g = u->globals; g; g = g->next)
-            if (!g->absorbed && g->is_tls)
-                diag_fatal(g->file, g->line,
-                           "__thread is not supported for a Windows target "
-                           "yet: Windows reaches a thread-local through a "
-                           "_tls_index and a TLS directory this writer "
-                           "does not emit");
         (void)unwind;       /* .pdata and .xdata are written always */
 
         /* Every function that moves rsp or saves a register gets its
@@ -5106,6 +5105,64 @@ lto_backend:
                                            (unsigned)named[k].len,
                                            named[k].align);
         }
+        /* thread-locals, emutls's way (irgen's emutls_call): the first
+         * values, as laid out for .tdata, in .rdata$emutls (each one's
+         * __emutls_t.NAME); and a control object of four words each,
+         * __emutls_v.NAME, in .data$emutls -- size, alignment, the
+         * runtime's word, and the template (0: zeros, a .tbss one) */
+        int c_emt = 0, c_emv = 0, nemu = 0;
+        for (struct global *g = u->globals; g; g = g->next)
+            if (!g->absorbed && g->defined && g->is_tls)
+                nemu++;
+        unsigned char *emv = NULL;
+        if (nemu) {
+            if (tdata_len)
+                c_emt = coffw_add_section(cw, ".rdata$emutls",
+                                          IMAGE_SCN_CNT_INITIALIZED_DATA |
+                                          IMAGE_SCN_MEM_READ,
+                                          tdata, (unsigned)tdata_len,
+                                          tdata_align);
+            emv = xcalloc((size_t)nemu, 32);
+            int k = 0;
+            for (struct global *g = u->globals; g; g = g->next) {
+                if (g->absorbed || !g->defined || !g->is_tls)
+                    continue;
+                long sz = ty_size(g->ty) + g->fam_extra;
+                long al = ty_align(g->ty);
+                if (g->user_align > al)
+                    al = g->user_align;
+                target_put_uint(emv + 32 * k, 8, (unsigned long)sz);
+                target_put_uint(emv + 32 * k + 8, 8, (unsigned long)al);
+                if (!g->in_bss)         /* the template's address: its */
+                    target_put_uint(emv + 32 * k + 24, 8,   /* offset */
+                                    (unsigned long)g->off);
+                k++;
+            }
+            c_emv = coffw_add_section(cw, ".data$emutls",
+                                      IMAGE_SCN_CNT_INITIALIZED_DATA |
+                                      IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE,
+                                      emv, (unsigned)(32 * nemu), 8);
+        }
+        /* -g's sections, each field holding its addend (a COFF relocation
+         * has none), named in full through the string table */
+        int c_dw[DWARF_NSEC] = { 0 };
+        if (want_debug) {
+            for (int i = 0; i < dw.nrelocs; i++) {
+                struct dwarf_reloc *r = &dw.relocs[i];
+                target_put_uint(dw.sec[r->in_sec] + r->off, r->width,
+                                (unsigned long)r->addend);
+            }
+            for (int ds = 0; ds < DWARF_NSEC; ds++) {
+                if (!dw.seclen[ds] || dwarf_section_is_dwo(ds))
+                    continue;
+                c_dw[ds] = coffw_add_section(cw, dwarf_section_name(ds),
+                                             IMAGE_SCN_CNT_INITIALIZED_DATA |
+                                             IMAGE_SCN_MEM_DISCARDABLE |
+                                             IMAGE_SCN_MEM_READ,
+                                             dw.sec[ds],
+                                             (unsigned)dw.seclen[ds], 1);
+            }
+        }
         int c_xdata = 0, c_pdata = 0;
         if (weh.frame.len)
             c_xdata = coffw_add_section(cw, ".xdata",
@@ -5129,6 +5186,17 @@ lto_backend:
             c_rdata_sym = coffw_add_symbol(cw, ".rdata", 0, c_rdata,
                                            IMAGE_SYM_TYPE_NULL,
                                            IMAGE_SYM_CLASS_STATIC);
+        /* -g: what its fields are relative to, a symbol per section */
+        int dw_sym[DWARF_NSEC], dw_text_sym = -1;
+        for (int ds = 0; ds < DWARF_NSEC; ds++)
+            dw_sym[ds] = c_dw[ds]
+                ? coffw_add_symbol(cw, dwarf_section_name(ds), 0, c_dw[ds],
+                                   IMAGE_SYM_TYPE_NULL, IMAGE_SYM_CLASS_STATIC)
+                : -1;
+        if (want_debug)
+            dw_text_sym = coffw_add_symbol(cw, ".text", 0, c_text,
+                                           IMAGE_SYM_TYPE_NULL,
+                                           IMAGE_SYM_CLASS_STATIC);
         for (struct func *f = u->funcs; f; f = f->next)
             if (!f->absorbed && f->has_defn &&
                 (!f->is_static || f->used || f->is_ctor || f->is_dtor))
@@ -5137,9 +5205,28 @@ lto_backend:
                     IMAGE_SYM_DTYPE_FUNCTION,
                     f->is_static ? IMAGE_SYM_CLASS_STATIC
                                  : IMAGE_SYM_CLASS_EXTERNAL) + 1;
-        for (struct global *g = u->globals; g; g = g->next) {
+        int c_emt_sym = c_emt ? coffw_add_symbol(cw, ".rdata$emutls", 0,
+                                                 c_emt, IMAGE_SYM_TYPE_NULL,
+                                                 IMAGE_SYM_CLASS_STATIC) : -1;
+        for (struct global *g = u->globals, *gk = NULL; g; g = g->next) {
             if (g->absorbed || !g->defined)
                 continue;
+            if (g->is_tls) {
+                int k = 0;
+                for (gk = u->globals; gk != g; gk = gk->next)
+                    if (!gk->absorbed && gk->defined && gk->is_tls)
+                        k++;
+                char nm[512];
+                snprintf(nm, sizeof nm, "__emutls_v.%s", g->name);
+                g->sym_ndx = coffw_add_symbol(
+                    cw, nm, (unsigned)(32 * k), c_emv, IMAGE_SYM_TYPE_NULL,
+                    g->is_static ? IMAGE_SYM_CLASS_STATIC
+                                 : IMAGE_SYM_CLASS_EXTERNAL) + 1;
+                if (!g->in_bss && c_emt_sym >= 0)
+                    coffw_add_reloc(cw, c_emv, (unsigned)(32 * k + 24),
+                                    c_emt_sym, IMAGE_REL_AMD64_ADDR64);
+                continue;
+            }
             int sect = g->named ? c_named[g->named - 1]
                      : g->in_bss ? c_bss : c_data;
             if (!sect)
@@ -5149,13 +5236,18 @@ lto_backend:
                 g->is_static ? IMAGE_SYM_CLASS_STATIC
                              : IMAGE_SYM_CLASS_EXTERNAL) + 1;
         }
+        free(emv);
         /* Undefined: section zero with a ZERO value. A nonzero value
          * there would make it a COMMON rather than a reference. */
         for (struct global *g = u->globals; g; g = g->next)
-            if (!g->absorbed && !g->defined && g->used)
+            if (!g->absorbed && !g->defined && g->used) {
+                char nm[512];
+                snprintf(nm, sizeof nm, g->is_tls ? "__emutls_v.%s" : "%s",
+                         g->name);
                 g->sym_ndx = coffw_add_symbol(
-                    cw, g->name, 0, IMAGE_SYM_UNDEFINED,
+                    cw, nm, 0, IMAGE_SYM_UNDEFINED,
                     IMAGE_SYM_TYPE_NULL, IMAGE_SYM_CLASS_EXTERNAL) + 1;
+            }
 
         /* 4. relocations. */
         for (int i = 0; i < next; i++) {
@@ -5174,10 +5266,14 @@ lto_backend:
                             c_rdata_sym, target_coff_reloc(ta, strs[i].kind));
         for (int i = 0; i < ngs; i++) {
             struct global *g = gs[i].glob;
-            if (!g->sym_ndx)
+            if (!g->sym_ndx) {
+                char nm[512];
+                snprintf(nm, sizeof nm, g->is_tls ? "__emutls_v.%s" : "%s",
+                         g->name);
                 g->sym_ndx = coffw_add_symbol(
-                    cw, g->name, 0, IMAGE_SYM_UNDEFINED,
+                    cw, nm, 0, IMAGE_SYM_UNDEFINED,
                     IMAGE_SYM_TYPE_NULL, IMAGE_SYM_CLASS_EXTERNAL) + 1;
+            }
             coffw_add_reloc(cw, c_text, (unsigned)gs[i].patch_off,
                             g->sym_ndx - 1, target_coff_reloc(ta, gs[i].kind));
         }
@@ -5281,6 +5377,33 @@ lto_backend:
         for (int k = 0; k < nxtor; k++)
             free((char *)xtor[k].name);
         free(c_named);
+        /* -g's relocations: a code or data address is 64 bits against
+         * .text or the variable's symbol; an offset into another debug
+         * section is SECREL, which the link makes relative to that
+         * section in the image */
+        if (want_debug) {
+            for (int i = 0; i < dw.nrelocs; i++) {
+                struct dwarf_reloc *r = &dw.relocs[i];
+                int ts = r->target == DWTGT_ABBREV ? DWSEC_ABBREV
+                       : r->target == DWTGT_RANGES ? DWSEC_RANGES
+                       : r->target == DWTGT_FRAME  ? DWSEC_FRAME
+                       : r->target == DWTGT_LOC    ? DWSEC_LOC
+                       : r->target == DWTGT_ADDR   ? DWSEC_ADDR
+                       :                             DWSEC_LINE;
+                int sym = r->target == DWTGT_TEXT ? dw_text_sym
+                        : r->target == DWTGT_GLOBAL ? r->glob->sym_ndx - 1
+                        : dw_sym[ts];
+                int addr = r->target == DWTGT_TEXT || r->target == DWTGT_GLOBAL;
+                if (sym < 0 || !c_dw[r->in_sec])
+                    internal_error("-g: a COFF debug relocation with no "
+                                   "symbol (section %d, target %d)",
+                                   r->in_sec, r->target);
+                coffw_add_reloc(cw, c_dw[r->in_sec], (unsigned)r->off, sym,
+                                addr ? (r->width == 8 ? IMAGE_REL_AMD64_ADDR64
+                                                      : IMAGE_REL_AMD64_ADDR32NB)
+                                     : IMAGE_REL_AMD64_SECREL);
+            }
+        }
         {
             long n_si = 0, n_sb = 0;
             unsigned char *b_si = unit_stack_record(u, iu, &text, ext, next,
