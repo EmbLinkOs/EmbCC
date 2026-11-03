@@ -20,6 +20,12 @@
 struct cfunc *cx_curfn;
 struct cstmt *cx_curblk;
 int cx_extern_c;
+/* Inside a module the unit imports (cpp's __embcc_import_begin ...
+ * __embcc_import_end): its interface's object has its definitions, so
+ * here a function with external linkage is declared, not defined, and so
+ * is a variable -- what is inline, constexpr, a template or internal
+ * keeps its body, as each unit using it needs it. */
+static int cx_imported;
 struct cfunc *cx_funcs;
 static struct cfunc *funcs_tail;
 struct cvar **cx_gvars;
@@ -3548,6 +3554,27 @@ static void declare_global_var(struct dspec *ds, struct declarator *d,
         v->is_constexpr = 1;
         v->type = t = ct_qual(t, CQ_CONST);
     }
+    if (cx_imported && !v->is_static && !v->is_inline &&
+        !ds->is_constexpr && !v->defined) {
+        /* an imported module's variable: its interface defines it */
+        if (cx_accept(TOK_ASSIGN)) {
+            int depth = 0;
+            while (cx_kind() != TOK_EOF &&
+                   !(depth == 0 && (cx_kind() == TOK_COMMA ||
+                                    cx_kind() == TOK_SEMI))) {
+                enum tok_kind k = cx_kind();
+                if (k == TOK_LPAREN || k == TOK_LBRACE || k == TOK_LBRACKET)
+                    depth++;
+                else if (k == TOK_RPAREN || k == TOK_RBRACE ||
+                         k == TOK_RBRACKET)
+                    depth--;
+                cx_advance();
+            }
+        } else if (cx_kind() == TOK_LBRACE || cx_kind() == TOK_LPAREN) {
+            cx_skip_balanced();
+        }
+        return;
+    }
     /* `extern "C" int x;` (the linkage-specification's one declaration)
      * declares, as if written extern; inside extern "C" { } it defines */
     int is_def = (ds->storage != SK_EXTERN && cx_extern_c != 1) ||
@@ -4953,8 +4980,52 @@ static void parse_declaration(int toplevel, struct cstmt **out)
         parse_template_decl(enclosing_class(cx_scope), CA_PUBLIC);
         return;
     case TOK_CX_EXPORT:
-        cx_error(at, "modules are not supported");
+        /* C++20: export a declaration, a { } of them, or the module */
+        if (!toplevel)
+            cx_error(at, "'export' belongs at namespace scope");
+        cx_need_std(at, 2020, "'export' (modules)");
+        cx_advance();
+        if (cx_kind() == TOK_IDENT && !strcmp(cx_cur()->t.text, "module")) {
+            while (cx_kind() != TOK_SEMI && cx_kind() != TOK_EOF)
+                cx_advance();
+            cx_accept(TOK_SEMI);
+            return;
+        }
+        if (cx_accept(TOK_LBRACE)) {
+            while (cx_kind() != TOK_RBRACE) {
+                if (cx_kind() == TOK_EOF)
+                    cx_error(at, "unterminated 'export {'");
+                parse_declaration(1, NULL);
+            }
+            cx_advance();
+            return;
+        }
+        parse_declaration(1, NULL);
         return;
+    case TOK_IDENT:
+        if (!toplevel)
+            break;
+        if (!strcmp(at->t.text, "__embcc_import_begin") ||
+            !strcmp(at->t.text, "__embcc_import_end")) {
+            /* (cpp's: an imported module's declarations between) */
+            cx_imported += at->t.text[15] == 'b' ? 1 : -1;
+            while (cx_kind() != TOK_SEMI && cx_kind() != TOK_EOF)
+                cx_advance();
+            cx_accept(TOK_SEMI);
+            return;
+        }
+        if (!strcmp(at->t.text, "module") &&
+            (cx_kind_at(1) == TOK_SEMI || cx_kind_at(1) == TOK_COLON ||
+             (cx_kind_at(1) == TOK_IDENT &&
+              (cx_kind_at(2) == TOK_SEMI || cx_kind_at(2) == TOK_DOT ||
+               cx_kind_at(2) == TOK_COLON)))) {
+            /* module; / module M; / module :private; (cpp read them) */
+            while (cx_kind() != TOK_SEMI && cx_kind() != TOK_EOF)
+                cx_advance();
+            cx_accept(TOK_SEMI);
+            return;
+        }
+        break;
     case TOK_KW_ASM:
         if (toplevel)
             cx_error(at, "file-scope asm in C++ is not supported yet");
@@ -5072,6 +5143,17 @@ static void parse_declaration(int toplevel, struct cstmt **out)
                 (cx_kind() == TOK_LBRACE || cx_kind() == TOK_COLON)) {
                 /* replaying one member's definition: not this one */
                 skip_declaration();
+                if (d.saved)
+                    cx_scope = d.saved;
+                return;
+            }
+            if ((cx_kind() == TOK_LBRACE || cx_kind() == TOK_COLON ||
+                 cx_kind() == TOK_CX_TRY) && cx_imported && toplevel &&
+                !f->is_inline && !f->is_constexpr && !f->tmpl &&
+                !(f->is_static && !f->cls)) {
+                struct cfunc scratch;
+                memset(&scratch, 0, sizeof scratch);
+                skip_body(&scratch);     /* (the interface defines it) */
                 if (d.saved)
                     cx_scope = d.saved;
                 return;

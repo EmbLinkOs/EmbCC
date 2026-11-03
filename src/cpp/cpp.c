@@ -2750,6 +2750,463 @@ static const char *trigraphs(const char *src)
     return out;
 }
 
+/* ---- C++20 modules ----
+ *
+ * `module` and `import` lines are the preprocessor's (P1857), and so are
+ * modules here. Compiling an interface unit (`export module M;`) also
+ * yields its binary module interface, M.ebmi: the global module
+ * fragment's directives as written, then the purview as preprocessed --
+ * the unit's own macros already applied, the importer's never. An import
+ * reads the directives again (so a header both include is read once, its
+ * guard holding) and copies the purview as it is, between
+ * `__embcc_import_begin` and `__embcc_import_end`, where the parser
+ * takes its definitions as declarations (the interface's object has
+ * them). An import inside a purview is kept as `%%IMPORT M`, so each
+ * module is read once however many import it. A header unit,
+ * `import <h>;`, is that header included. */
+static const char **g_mod_dirs;
+static int g_nmod_dirs;
+static char *g_mod_name;          /* this unit's module */
+static int g_mod_iface;           /* an interface unit: its BMI is made */
+static int g_gmf;                 /* in the global module fragment */
+static struct tbuf g_gmf_text;    /* ... its directives, as written */
+static long g_purview_at, g_private_at;
+static char g_purview_marker[600];
+struct mod_splice { long from, to; char *text; };
+static struct mod_splice *g_splices;
+static int g_nsplices, g_capsplices;
+static char **g_imported;
+static int g_nimported, g_capimported;
+static char *g_bmi;
+
+void cpp_set_module_dirs(const char **dirs, int n)
+{
+    g_mod_dirs = dirs;
+    g_nmod_dirs = n;
+}
+
+/* The interface this unit exports, as M.ebmi holds it, and its module's
+ * name; NULL when it is not an interface unit. */
+const char *cpp_module_interface(const char **name)
+{
+    *name = g_mod_name;
+    return g_bmi;
+}
+
+static void modules_reset(void)
+{
+    g_mod_name = NULL;
+    g_mod_iface = g_gmf = 0;
+    g_gmf_text.len = 0;
+    if (g_gmf_text.p)
+        g_gmf_text.p[0] = 0;
+    g_purview_at = g_private_at = -1;
+    g_nsplices = 0;
+    g_nimported = 0;
+    g_bmi = NULL;
+}
+
+static int mod_word(const char *p, const char *w)
+{
+    size_t n = strlen(w);
+    return strncmp(p, w, n) == 0 && !is_idc(p[n]);
+}
+
+static const char *mod_ws(const char *p)
+{
+    while (*p == ' ' || *p == '\t')
+        p++;
+    return p;
+}
+
+/* A module name -- a.b.c, with a :partition -- at *pp, or NULL. */
+static char *mod_name_at(const char **pp, int partition_ok)
+{
+    const char *p = *pp, *start = p;
+    for (;;) {
+        if (!is_id0(*p))
+            return NULL;
+        while (is_idc(*p))
+            p++;
+        if (*p == '.') {
+            p++;
+            continue;
+        }
+        if (*p == ':' && partition_ok && p[1] != ':') {
+            partition_ok = 0;
+            p = mod_ws(p + 1);
+            continue;
+        }
+        break;
+    }
+    struct tbuf n = { 0, 0, 0 };
+    for (const char *q = start; q < p; q++)
+        if (*q != ' ' && *q != '\t')
+            tb_putc(&n, *q);
+    *pp = p;
+    return n.p;
+}
+
+static void mod_note_splice(long from, long to, const char *name, int exp)
+{
+    if (g_purview_at < 0 || from < g_purview_at)
+        return;
+    if (g_nsplices == g_capsplices) {
+        g_capsplices = g_capsplices ? 2 * g_capsplices : 8;
+        g_splices = xrealloc(g_splices,
+                             (size_t)g_capsplices * sizeof *g_splices);
+    }
+    char *t = xmalloc(strlen(name) + 24);
+    sprintf(t, "%%%%IMPORT %s%s\n", exp ? "export " : "", name);
+    g_splices[g_nsplices++] = (struct mod_splice){ from, to, t };
+}
+
+static void process_file(struct cpp *cpp, const char *path,
+                         const char *src, struct tbuf *out, int incdir_idx);
+
+static void import_module(struct src *s, struct tbuf *out, const char *name,
+                          int exp)
+{
+    for (int i = 0; i < g_nimported; i++)
+        if (strcmp(g_imported[i], name) == 0) {
+            mod_note_splice(out->len, out->len, name, exp);
+            return;
+        }
+    if (g_nimported == g_capimported) {
+        g_capimported = g_capimported ? 2 * g_capimported : 8;
+        g_imported = xrealloc(g_imported,
+                              (size_t)g_capimported * sizeof *g_imported);
+    }
+    g_imported[g_nimported++] = xstrndup(name, strlen(name));
+    char file[512];
+    size_t k = 0;
+    for (const char *q = name; *q && k < 400; q++)
+        file[k++] = *q == ':' ? '-' : *q;
+    file[k] = 0;
+    char *text = NULL, path[1024];
+    long len = 0;
+    for (int i = -1; !text && i < g_nmod_dirs; i++) {
+        snprintf(path, sizeof path, "%s/%s.ebmi", i < 0 ? "." : g_mod_dirs[i],
+                 file);
+        text = read_file_or_null(path, &len);
+    }
+    if (!text && (strcmp(name, "std") == 0 ||
+                  strcmp(name, "std.compat") == 0)) {
+        /* C++23's standard library module: every standard header the
+         * library has, read as an include (its macros are the
+         * library's, as a header unit's would be) */
+        static const char std_module[] =
+            "#if __has_include(<algorithm>)\n#include <algorithm>\n#endif\n"
+            "#if __has_include(<any>)\n#include <any>\n#endif\n"
+            "#if __has_include(<array>)\n#include <array>\n#endif\n"
+            "#if __has_include(<atomic>)\n#include <atomic>\n#endif\n"
+            "#if __has_include(<barrier>)\n#include <barrier>\n#endif\n"
+            "#if __has_include(<bit>)\n#include <bit>\n#endif\n"
+            "#if __has_include(<bitset>)\n#include <bitset>\n#endif\n"
+            "#if __has_include(<cassert>)\n#include <cassert>\n#endif\n"
+            "#if __has_include(<cctype>)\n#include <cctype>\n#endif\n"
+            "#if __has_include(<cerrno>)\n#include <cerrno>\n#endif\n"
+            "#if __has_include(<cfenv>)\n#include <cfenv>\n#endif\n"
+            "#if __has_include(<cfloat>)\n#include <cfloat>\n#endif\n"
+            "#if __has_include(<charconv>)\n#include <charconv>\n#endif\n"
+            "#if __has_include(<chrono>)\n#include <chrono>\n#endif\n"
+            "#if __has_include(<cinttypes>)\n#include <cinttypes>\n#endif\n"
+            "#if __has_include(<climits>)\n#include <climits>\n#endif\n"
+            "#if __has_include(<clocale>)\n#include <clocale>\n#endif\n"
+            "#if __has_include(<cmath>)\n#include <cmath>\n#endif\n"
+            "#if __has_include(<compare>)\n#include <compare>\n#endif\n"
+            "#if __has_include(<complex>)\n#include <complex>\n#endif\n"
+            "#if __has_include(<concepts>)\n#include <concepts>\n#endif\n"
+            "#if __has_include(<condition_variable>)\n#include <condition_variable>\n#endif\n"
+            "#if __has_include(<coroutine>)\n#include <coroutine>\n#endif\n"
+            "#if __has_include(<csetjmp>)\n#include <csetjmp>\n#endif\n"
+            "#if __has_include(<csignal>)\n#include <csignal>\n#endif\n"
+            "#if __has_include(<cstdarg>)\n#include <cstdarg>\n#endif\n"
+            "#if __has_include(<cstddef>)\n#include <cstddef>\n#endif\n"
+            "#if __has_include(<cstdint>)\n#include <cstdint>\n#endif\n"
+            "#if __has_include(<cstdio>)\n#include <cstdio>\n#endif\n"
+            "#if __has_include(<cstdlib>)\n#include <cstdlib>\n#endif\n"
+            "#if __has_include(<cstring>)\n#include <cstring>\n#endif\n"
+            "#if __has_include(<ctime>)\n#include <ctime>\n#endif\n"
+            "#if __has_include(<cuchar>)\n#include <cuchar>\n#endif\n"
+            "#if __has_include(<cwchar>)\n#include <cwchar>\n#endif\n"
+            "#if __has_include(<cwctype>)\n#include <cwctype>\n#endif\n"
+            "#if __has_include(<deque>)\n#include <deque>\n#endif\n"
+            "#if __has_include(<exception>)\n#include <exception>\n#endif\n"
+            "#if __has_include(<execution>)\n#include <execution>\n#endif\n"
+            "#if __has_include(<expected>)\n#include <expected>\n#endif\n"
+            "#if __has_include(<filesystem>)\n#include <filesystem>\n#endif\n"
+            "#if __has_include(<flat_map>)\n#include <flat_map>\n#endif\n"
+            "#if __has_include(<flat_set>)\n#include <flat_set>\n#endif\n"
+            "#if __has_include(<format>)\n#include <format>\n#endif\n"
+            "#if __has_include(<forward_list>)\n#include <forward_list>\n#endif\n"
+            "#if __has_include(<fstream>)\n#include <fstream>\n#endif\n"
+            "#if __has_include(<functional>)\n#include <functional>\n#endif\n"
+            "#if __has_include(<future>)\n#include <future>\n#endif\n"
+            "#if __has_include(<generator>)\n#include <generator>\n#endif\n"
+            "#if __has_include(<initializer_list>)\n#include <initializer_list>\n#endif\n"
+            "#if __has_include(<iomanip>)\n#include <iomanip>\n#endif\n"
+            "#if __has_include(<ios>)\n#include <ios>\n#endif\n"
+            "#if __has_include(<iosfwd>)\n#include <iosfwd>\n#endif\n"
+            "#if __has_include(<iostream>)\n#include <iostream>\n#endif\n"
+            "#if __has_include(<istream>)\n#include <istream>\n#endif\n"
+            "#if __has_include(<iterator>)\n#include <iterator>\n#endif\n"
+            "#if __has_include(<latch>)\n#include <latch>\n#endif\n"
+            "#if __has_include(<limits>)\n#include <limits>\n#endif\n"
+            "#if __has_include(<list>)\n#include <list>\n#endif\n"
+            "#if __has_include(<locale>)\n#include <locale>\n#endif\n"
+            "#if __has_include(<map>)\n#include <map>\n#endif\n"
+            "#if __has_include(<mdspan>)\n#include <mdspan>\n#endif\n"
+            "#if __has_include(<memory>)\n#include <memory>\n#endif\n"
+            "#if __has_include(<memory_resource>)\n#include <memory_resource>\n#endif\n"
+            "#if __has_include(<mutex>)\n#include <mutex>\n#endif\n"
+            "#if __has_include(<new>)\n#include <new>\n#endif\n"
+            "#if __has_include(<numbers>)\n#include <numbers>\n#endif\n"
+            "#if __has_include(<numeric>)\n#include <numeric>\n#endif\n"
+            "#if __has_include(<optional>)\n#include <optional>\n#endif\n"
+            "#if __has_include(<ostream>)\n#include <ostream>\n#endif\n"
+            "#if __has_include(<print>)\n#include <print>\n#endif\n"
+            "#if __has_include(<queue>)\n#include <queue>\n#endif\n"
+            "#if __has_include(<random>)\n#include <random>\n#endif\n"
+            "#if __has_include(<ranges>)\n#include <ranges>\n#endif\n"
+            "#if __has_include(<ratio>)\n#include <ratio>\n#endif\n"
+            "#if __has_include(<regex>)\n#include <regex>\n#endif\n"
+            "#if __has_include(<scoped_allocator>)\n#include <scoped_allocator>\n#endif\n"
+            "#if __has_include(<semaphore>)\n#include <semaphore>\n#endif\n"
+            "#if __has_include(<set>)\n#include <set>\n#endif\n"
+            "#if __has_include(<shared_mutex>)\n#include <shared_mutex>\n#endif\n"
+            "#if __has_include(<source_location>)\n#include <source_location>\n#endif\n"
+            "#if __has_include(<span>)\n#include <span>\n#endif\n"
+            "#if __has_include(<spanstream>)\n#include <spanstream>\n#endif\n"
+            "#if __has_include(<sstream>)\n#include <sstream>\n#endif\n"
+            "#if __has_include(<stack>)\n#include <stack>\n#endif\n"
+            "#if __has_include(<stacktrace>)\n#include <stacktrace>\n#endif\n"
+            "#if __has_include(<stdexcept>)\n#include <stdexcept>\n#endif\n"
+            "#if __has_include(<stdfloat>)\n#include <stdfloat>\n#endif\n"
+            "#if __has_include(<stop_token>)\n#include <stop_token>\n#endif\n"
+            "#if __has_include(<streambuf>)\n#include <streambuf>\n#endif\n"
+            "#if __has_include(<string>)\n#include <string>\n#endif\n"
+            "#if __has_include(<string_view>)\n#include <string_view>\n#endif\n"
+            "#if __has_include(<syncstream>)\n#include <syncstream>\n#endif\n"
+            "#if __has_include(<system_error>)\n#include <system_error>\n#endif\n"
+            "#if __has_include(<thread>)\n#include <thread>\n#endif\n"
+            "#if __has_include(<tuple>)\n#include <tuple>\n#endif\n"
+            "#if __has_include(<type_traits>)\n#include <type_traits>\n#endif\n"
+            "#if __has_include(<typeindex>)\n#include <typeindex>\n#endif\n"
+            "#if __has_include(<typeinfo>)\n#include <typeinfo>\n#endif\n"
+            "#if __has_include(<unordered_map>)\n#include <unordered_map>\n#endif\n"
+            "#if __has_include(<unordered_set>)\n#include <unordered_set>\n#endif\n"
+            "#if __has_include(<utility>)\n#include <utility>\n#endif\n"
+            "#if __has_include(<valarray>)\n#include <valarray>\n#endif\n"
+            "#if __has_include(<variant>)\n#include <variant>\n#endif\n"
+            "#if __has_include(<vector>)\n#include <vector>\n#endif\n"
+            "#if __has_include(<version>)\n#include <version>\n#endif\n"
+            ;
+        s->cpp->depth++;
+        process_file(s->cpp, "<std module>", std_module, out, -1);
+        s->cpp->depth--;
+        char marker[600];
+        snprintf(marker, sizeof marker, "# %d \"%s\"\n", s->line, s->file);
+        tb_puts(out, marker);
+        return;
+    }
+    if (!text)
+        cerr(s, "module '%s' not found: compile its interface unit first "
+                "(it writes NAME.ebmi), or name the directory with "
+                "--module-dir", name);
+    if (strncmp(text, "EMBCC-BMI 1\nsource ", 19) != 0)
+        cerr(s, "'%s' is not an EmbCC module interface", path);
+    const char *srcpath = text + 19;
+    char *nl = strchr(srcpath, '\n');
+    char *purview = strstr(text, "\n%%PURVIEW\n");
+    if (!nl || !purview)
+        cerr(s, "'%s' is damaged", path);
+    *nl = 0;
+    *purview = 0;
+    purview += 11;
+    long from = out->len;
+    tb_puts(out, "\n__embcc_import_begin ");
+    tb_puts(out, name);
+    tb_puts(out, " ;\n");
+    /* The fragment's own #defines configure its headers, and do not
+     * reach the importer: each name it defines or undefines is put back
+     * as it was. (Its headers' macros stay, guards with them, so a
+     * header both include is read once.) */
+    const char *gmf = nl + 1;
+    struct { const char *name; size_t n; struct macro *old; } own[64];
+    int nown = 0;
+    for (const char *p = gmf; *p && nown < 64;) {
+        const char *q = mod_ws(p);
+        if (*q == '#') {
+            q = mod_ws(q + 1);
+            int d = mod_word(q, "define"), u = mod_word(q, "undef");
+            if (d || u) {
+                q = mod_ws(q + (d ? 6 : 5));
+                size_t n = 0;
+                while (is_idc(q[n]))
+                    n++;
+                if (n) {
+                    own[nown].name = q;
+                    own[nown].n = n;
+                    own[nown].old = find_macro(s->cpp, q, n);
+                    nown++;
+                }
+            }
+        }
+        const char *e = strchr(p, '\n');
+        p = e ? e + 1 : p + strlen(p);
+    }
+    s->cpp->depth++;
+    process_file(s->cpp, xstrndup(srcpath, strlen(srcpath)), gmf, out, -1);
+    for (int i = nown - 1; i >= 0; i--) {
+        struct macro *cur;
+        while ((cur = find_macro(s->cpp, own[i].name, own[i].n)) &&
+               cur != own[i].old)
+            undef_macro(s->cpp, own[i].name, own[i].n);
+        if (own[i].old && !find_macro(s->cpp, own[i].name, own[i].n))
+            add_macro(s->cpp, own[i].old);
+    }
+    /* the purview, as the interface unit's preprocessing left it; its
+     * own imports read here, once each */
+    for (const char *p = purview; *p;) {
+        const char *e = strchr(p, '\n');
+        size_t n = e ? (size_t)(e - p + 1) : strlen(p);
+        if (strncmp(p, "%%IMPORT ", 9) == 0) {
+            const char *q = p + 9;
+            int x = mod_word(q, "export");
+            if (x)
+                q = mod_ws(q + 6);
+            char *iname = xstrndup(q, n - (size_t)(q - p) - (e ? 1 : 0));
+            import_module(s, out, iname, x);
+        } else {
+            tb_putn(out, p, n);
+        }
+        p += n;
+    }
+    s->cpp->depth--;
+    tb_puts(out, "\n__embcc_import_end ;\n");
+    long to = out->len;
+    char marker[600];
+    snprintf(marker, sizeof marker, "# %d \"%s\"\n", s->line, s->file);
+    tb_puts(out, marker);
+    mod_note_splice(from, to, name, exp);
+}
+
+/* A `module` or `import` line (C++20): handled, 1; else 0. */
+static int module_line(struct src *s, const char *lp, struct tbuf *out)
+{
+    const char *p = lp;
+    int exp = 0;
+    if (mod_word(p, "export")) {
+        const char *q = mod_ws(p + 6);
+        if (!mod_word(q, "module") && !mod_word(q, "import"))
+            return 0;
+        exp = 1;
+        p = q;
+    }
+    if (mod_word(p, "module")) {
+        const char *q = mod_ws(p + 6);
+        if (*q == ';' && !exp) {                  /* module; */
+            if (s->cpp->depth)
+                return 0;
+            g_gmf = 1;
+            tb_puts(out, "module ;");
+            return 1;
+        }
+        if (*q == ':') {                          /* module :private; */
+            const char *r = mod_ws(q + 1);
+            if (!mod_word(r, "private") || *mod_ws(r + 7) != ';')
+                return 0;
+            if (g_private_at < 0)
+                g_private_at = (long)out->len;
+            tb_puts(out, "module : private ;");
+            return 1;
+        }
+        char *name = mod_name_at(&q, 1);
+        if (!name || *mod_ws(q) != ';')
+            return 0;
+        if (s->cpp->depth)
+            cerr(s, "a module declaration belongs in the unit's own file, "
+                    "not in a header", NULL);
+        g_gmf = 0;
+        g_mod_name = name;
+        tb_puts(out, exp ? "export module " : "module ");
+        tb_puts(out, name);
+        tb_puts(out, " ;\n");
+        if (exp) {
+            g_mod_iface = 1;
+            g_purview_at = (long)out->len;
+            snprintf(g_purview_marker, sizeof g_purview_marker,
+                     "# %d \"%s\"\n", s->line + 1, s->file);
+        } else if (!strchr(name, ':')) {
+            /* an implementation unit: its interface, imported */
+            import_module(s, out, name, 0);
+        }
+        return 1;
+    }
+    if (!mod_word(p, "import"))
+        return 0;
+    const char *q = mod_ws(p + 6);
+    if (*q == '<' || *q == '"') {                 /* a header unit */
+        char close = *q == '<' ? '>' : '"';
+        const char *e = strchr(q + 1, close);
+        if (!e || *mod_ws(e + 1) != ';')
+            return 0;
+        char *arg = xstrndup(q, (size_t)(e - q + 1));
+        do_include(s, arg, out, 0);
+        return 1;
+    }
+    char *name;
+    if (*q == ':') {                              /* import :part; */
+        q = mod_ws(q + 1);
+        char *part = mod_name_at(&q, 0);
+        if (!part || *mod_ws(q) != ';')
+            return 0;
+        if (!g_mod_name)
+            cerr(s, "'import :%s' names a partition, and this unit is not "
+                    "part of a module", part);
+        size_t pn = strcspn(g_mod_name, ":");
+        name = xmalloc(pn + strlen(part) + 2);
+        memcpy(name, g_mod_name, pn);
+        name[pn] = ':';
+        strcpy(name + pn + 1, part);
+    } else {
+        name = mod_name_at(&q, 1);
+        if (!name || *mod_ws(q) != ';')
+            return 0;
+    }
+    import_module(s, out, name, exp);
+    return 1;
+}
+
+/* After the unit: its interface, when it is one. */
+static void make_bmi(const char *path, struct tbuf *out)
+{
+    if (!g_mod_iface || g_purview_at < 0)
+        return;
+    long end = g_private_at >= 0 ? g_private_at : (long)out->len;
+    struct tbuf b = { 0, 0, 0 };
+    tb_puts(&b, "EMBCC-BMI 1\nsource ");
+    tb_puts(&b, path);
+    tb_puts(&b, "\n");
+    if (g_gmf_text.p)
+        tb_puts(&b, g_gmf_text.p);
+    tb_puts(&b, "\n%%PURVIEW\n");
+    tb_puts(&b, g_purview_marker);
+    long at = g_purview_at;
+    for (int i = 0; i < g_nsplices && g_splices[i].from < end; i++) {
+        tb_putn(&b, out->p + at, (size_t)(g_splices[i].from - at));
+        if (b.len && b.p[b.len - 1] != '\n')
+            tb_putc(&b, '\n');
+        tb_puts(&b, g_splices[i].text);
+        at = g_splices[i].to;
+    }
+    if (end > at)
+        tb_putn(&b, out->p + at, (size_t)(end - at));
+    tb_putc(&b, '\n');
+    g_bmi = b.p;
+}
+
 static void process_file(struct cpp *cpp, const char *path,
                          const char *src, struct tbuf *out, int incdir_idx)
 {
@@ -2808,6 +3265,10 @@ static void process_file(struct cpp *cpp, const char *path,
                 live = 0;
 
         if (*lp == '#') {
+            if (g_gmf && live && cpp->depth == 0) {
+                tb_puts(&g_gmf_text, lineb.p);  /* (an import reads it) */
+                tb_putc(&g_gmf_text, '\n');
+            }
             lp++;
             while (*lp == ' ' || *lp == '\t')
                 lp++;
@@ -2973,6 +3434,14 @@ static void process_file(struct cpp *cpp, const char *path,
             continue;
         }
 
+        if (live && predef_is_cxx() && cxx_std >= 2020 &&
+            (*lp == 'e' || *lp == 'm' || *lp == 'i') &&
+            (s.line = startline, module_line(&s, lp, out))) {
+            for (int i = 0; i < nl; i++)
+                tb_putc(out, '\n');
+            s.line = startline + nl;
+            continue;
+        }
         if (live) {
             /* Pull continuation lines while a function-like macro
              * invocation is still open (see needs_more_input). */
@@ -3380,7 +3849,9 @@ char *cpp_process(const char *path, const char *src,
         process_file(&cpp, ipath, text, &out, idx);
         cpp.depth--;
     }
+    modules_reset();
     process_file(&cpp, path, src, &out, -1);
+    make_bmi(path, &out);
     emit_config(&cpp, &out);
     if (g_dump_macros) {
         /* -dM: the output is every macro defined once the file has been

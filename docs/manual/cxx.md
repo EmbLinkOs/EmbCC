@@ -11,8 +11,7 @@ also listed in [Invoking EmbCC](invoking.md).
 
 EmbCC parses C++20 with GNU extensions. Most of the core language of
 C++98 through C++20 is implemented, and several C++23 features are too.
-The largest gaps are modules, two-phase name lookup, and parts of
-constant evaluation. The [feature tables](#language-features) give the
+The largest gap is parts of constant evaluation. The [feature tables](#language-features) give the
 status of each feature and the exact diagnostic for each refusal.
 
 C++ is supported on the x86-64 and AArch64 ELF targets. There, objects
@@ -50,6 +49,7 @@ A file is compiled as C++ when its name ends in one of these suffixes:
 | Suffix | |
 |---|---|
 | `.cc`, `.cpp`, `.cxx`, `.C`, `.c++`, `.cp`, `.CPP`, `.ii` | C++ source |
+| `.cppm`, `.ixx`, `.mpp`, `.ccm`, `.cxxm`, `.c++m` | C++ source, usually a module interface unit (see [Modules](#modules)) |
 
 The suffix test is case-sensitive: `.C` and `.CPP` are C++, `.c` is C. A
 `.ii` file is preprocessed again like any other C++ source.
@@ -451,7 +451,7 @@ refuses it, with the diagnostic shown. Diagnostics are quoted without the
 | Template template parameters | Supported | |
 | Explicit instantiation | Supported | Not for variable templates (C++14 row). |
 | Two-phase name lookup | Partial | Functions are bound at the definition, plus argument-dependent lookup at instantiation; dependent bases are not searched unqualified. See [Name lookup in templates](#name-lookup-in-templates). |
-| `export` templates | Not supported | `modules are not supported` |
+| `export` templates | Not supported | C++11 removed them; `export` is the C++20 module keyword |
 | `throw`, `try`, `catch`, function-try-blocks, `throw()` | Supported | On the targets in [Targets](#targets). |
 | `typeid`, `dynamic_cast`, `std::type_info` | Supported | Errors under `--no-rtti`. |
 | `static_cast`, `const_cast`, `reinterpret_cast` | Supported | |
@@ -547,7 +547,7 @@ refuses it, with the diagnostic shown. Diagnostics are quoted without the
 | `constinit` | Partial | Accepted and not checked. |
 | Designated initializers | Supported | Member designators in declaration order. |
 | Coroutines: `co_await`, `co_yield`, `co_return` | Supported | Symmetric transfer, `await_transform`, promise allocation functions. `co_await` in the initializer of a `static` local: `co_await here is not supported yet` |
-| Modules | Not supported | `export`: `modules are not supported`. `module` and `import`: `expected a declaration before 'module'`, `expected a declaration before 'import'` |
+| Modules | Supported | Named modules, partitions, implementation units, header units, `import std;`. See [Modules](#modules). |
 | `using enum` | Supported | |
 | Template parameter lists on lambdas; lambdas in unevaluated operands; default-constructible captureless lambdas; `[=, this]` | Supported | |
 | Pack expansion in an init-capture (`[...xs = a]`) | Not supported | `expected a capture` |
@@ -631,6 +631,49 @@ Two differences remain:
 Substitution failure (SFINAE), partial ordering of function templates,
 deduction through alias templates and constraint checking follow the
 standard.
+
+### Modules
+
+From `--std=c++20`, `module` and `import` lines are read by the
+preprocessor, as C++20 specifies. Compiling an interface unit, one that
+begins `export module NAME;`, writes `NAME.ebmi` beside its object, or
+into the directory `--module-dir=DIR` names. A partition `NAME:PART`
+writes `NAME-PART.ebmi`. `import NAME;` looks for the file in the
+current directory, in each `--module-dir`, in each
+`-fprebuilt-module-path=DIR`, and beside the object being compiled. Its
+interface unit is compiled first:
+
+```sh
+embcc --std=c++20 -c math.cppm -o math.o     # writes math.ebmi
+embcc --std=c++20 -c main.cpp -o main.o      # import math;
+embcc math.o main.o -o prog
+```
+
+An `.ebmi` file holds the global module fragment's directives as
+written, and the purview as preprocessed. An import reads the directives
+again, so a header that both units include is read once. It then reads
+the purview without expanding the importer's macros. Macros defined in
+the module are not visible to the importer.
+
+The interface unit's object holds its definitions. In the importer, a
+function or variable with external linkage is only declared. What every
+unit needs keeps its definition: templates, `inline` and `constexpr`
+functions, inline variables, and names with internal linkage.
+
+- An implementation unit, `module NAME;`, imports its interface.
+- `import :PART;` imports a partition of the unit's own module.
+- `export import` re-exports a module.
+- `module :private;` ends what the interface exports.
+- A header unit, `import <vector>;` or `import "x.h";`, includes the
+  header, and its macros are visible.
+- `import std;` and `import std.compat;` read every standard header the
+  library has.
+
+Two differences from the standard remain. Names a module does not export
+are visible to the importer, though the standard hides them. Entities
+attached to a module are mangled as if they were not, as g++ did before
+version 15, so two modules that define the same exported name collide
+at link time. `__cpp_modules` is not defined.
 
 ### Constant evaluation
 

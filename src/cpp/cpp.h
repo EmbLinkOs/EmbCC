@@ -28,6 +28,10 @@ void cpp_set_cxx(int (*has_builtin)(const char *name), int exceptions);
 /* -fgnuc-version=: define __GNUC__ and its family in C units (0: not). */
 void cpp_set_gnuc_version(int major, int minor, int patch);
 void cpp_set_cxx_std(int year, int strict);
+/* C++20 modules: the directories an import looks in (after "."), and the
+ * interface an `export module` unit makes (NULL when it is not one). */
+void cpp_set_module_dirs(const char **dirs, int n);
+const char *cpp_module_interface(const char **name);
 void cpp_set_cxx_char8(int on);             /* -fchar8_t */
 /* -DNAME[=VALUE] (undef 0) or -UNAME (undef 1), before cpp_process */
 void cpp_cmdline_define(const char *text, int undef);

@@ -2705,6 +2705,46 @@ static const char *cxx_unwind_tables_name(void)
  * (kind 0) or destructors (1) of one priority (prio: N + 1, 0 none). */
 struct ctorarr { int kind, prio, ndx, n, at; };
 
+/* C++20 modules: where an interface unit's NAME.ebmi goes (--module-dir,
+ * else beside the object), and where an import looks (each --module-dir
+ * and -fprebuilt-module-path, then the object's directory). */
+static const char *mod_dirs[64];
+static int nmod_dirs;
+static const char *mod_out_dir;
+
+static const char *dir_of(const char *path)
+{
+    const char *sl = path ? strrchr(path, '/') : NULL;
+    return sl ? xstrndup(path, (size_t)(sl - path)) : ".";
+}
+
+static void module_dirs_for(const char *out)
+{
+    static const char *dirs[66];
+    int n = 0;
+    for (int i = 0; i < nmod_dirs; i++)
+        dirs[n++] = mod_dirs[i];
+    if (!mod_out_dir)
+        dirs[n++] = dir_of(out);
+    cpp_set_module_dirs(dirs, n);
+}
+
+static void write_module_interface(const char *out)
+{
+    const char *name;
+    const char *bmi = cpp_module_interface(&name);
+    if (!bmi)
+        return;
+    const char *dir = mod_out_dir ? mod_out_dir : dir_of(out);
+    char path[1024];
+    size_t k = (size_t)snprintf(path, sizeof path, "%s/", dir);
+    for (const char *q = name; *q && k < sizeof path - 8; q++)
+        path[k++] = *q == ':' ? '-' : *q;
+    snprintf(path + k, sizeof path - k, ".ebmi");
+    if (plat_write_file(path, bmi, strlen(bmi)) != 0)
+        diag_fatal(path, 0, "cannot write the module interface");
+}
+
 static int compile_unit(const char *in, const char *out, int pp_only)
 {
     char *src = read_file(in);
@@ -2723,8 +2763,12 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     /* text compiled marks what system macros expanded to, for -pedantic;
      * text printed (-E) is the text */
     int mark = cpp_set_mark_system(!pp_only);
+    if (lang_cxx)
+        module_dirs_for(out);
     char *pp = cpp_process(in, src, incdirs, nincdirs);
     cpp_set_mark_system(mark);
+    if (lang_cxx && !pp_only)
+        write_module_interface(out);
     time_mark("preprocess");
     if (dep_mode && dep_only) {       /* -M/-MM: the rule is the output */
         write_deps(in, out);
@@ -5340,7 +5384,10 @@ static int done(int rc)
 static int has_cxx_suffix(const char *s)
 {
     static const char *const sfx[] = { ".cc", ".cpp", ".cxx", ".C", ".c++",
-                                       ".cp", ".CPP", ".ii" };
+                                       ".cp", ".CPP", ".ii",
+                                       /* module interface units */
+                                       ".cppm", ".ixx", ".mpp", ".ccm",
+                                       ".cxxm", ".c++m" };
     size_t n = strlen(s);
     for (size_t i = 0; i < sizeof sfx / sizeof sfx[0]; i++) {
         size_t k = strlen(sfx[i]);
@@ -6598,6 +6645,17 @@ static int embcc_main(int argc, char **argv)
                    strncmp(argv[i], "-mcmodel=", 9) == 0) {
             /* accepted: EmbCC never uses MMX or the red zone, and its default
              * code model already suits the kernel's higher-half link. */
+        } else if (strncmp(argv[i], "-fmodule-dir=", 13) == 0 ||
+                   strncmp(argv[i], "-fprebuilt-module-path=", 23) == 0) {
+            int out_too = argv[i][3] == 'o';
+            const char *d = strchr(argv[i], '=') + 1;
+            if (nmod_dirs < 64)
+                mod_dirs[nmod_dirs++] = d;
+            if (out_too && !mod_out_dir)
+                mod_out_dir = d;
+        } else if (strcmp(argv[i], "-fmodules") == 0 ||
+                   strcmp(argv[i], "-fmodules-ts") == 0) {
+            /* accepted: C++20 modules are on from -std=c++20 */
         } else if (strcmp(argv[i], "-include") == 0) {
             if (i + 1 == argc) {
                 fprintf(stderr, "embcc: -include needs a file\n");
