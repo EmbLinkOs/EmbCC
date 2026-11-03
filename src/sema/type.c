@@ -146,6 +146,7 @@ struct type *ty_str_elem(int prefix)
     return prefix == 'L' ? ty_wchar()
          : prefix == 'U' ? ty_base(i16 ? TY_LONG : TY_INT, 1)
          : prefix == 'u' ? ty_base(i16 ? TY_INT : TY_SHORT, 1)
+         : prefix == '8' ? ty_base(TY_CHAR, 1)      /* C23's char8_t */
          : ty_plain_char();
 }
 

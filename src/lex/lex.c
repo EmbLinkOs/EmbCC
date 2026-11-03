@@ -1147,9 +1147,11 @@ static void lex_raw(struct lexer *lx)
         }
         if (adv) {
             lx->p += adv;
-            /* a u8 string is plain char in C, a u8 character unsigned
-             * char (C23); C++20 makes both char8_t. Marked '8'. */
-            pfx = adv == 1 ? q[0] : lx->cxx || q[2] == '\'' ? '8' : 0;
+            /* a u8 string is plain char in C17, and char8_t -- unsigned
+             * char -- in C23, as a u8 character is; C++20 makes both
+             * char8_t. Marked '8'. */
+            pfx = adv == 1 ? q[0]
+                : lx->cxx || q[2] == '\'' || lex_c_year() >= 2023 ? '8' : 0;
             if (*lx->p == '"') {
                 t->str_width = w;
                 t->str_prefix = (char)pfx;
