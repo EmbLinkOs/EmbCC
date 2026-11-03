@@ -116,6 +116,7 @@ void rv_patch_pcrel_pair(struct code *c, int at, int target);
 int rv_far_placeholder(struct code *c, int rd);  /* auipc rd; jalr x0, rd */
 void rv_set_compress(int on, int xlen);
 int  rv_compress_enabled(void);
+void rv_set_ext_source(unsigned (*hook)(void));   /* target_riscv_ext */
 
 /* ---- arithmetic and logic ------------------------------------------- */
 

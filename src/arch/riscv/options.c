@@ -5,6 +5,7 @@
  * `options_done`); this moved here from the driver. */
 #include "../backend.h"
 #include "../target.h"
+#include "emit.h"
 #include "../../driver/util.h"
 
 #include <stdlib.h>
@@ -30,6 +31,7 @@ static const char *g_rv_march, *g_rv_mabi;
  * The default is today's: rv32imac/ilp32 and rv64imac/lp64. */
 void riscv_options_done(void)
 {
+    rv_set_ext_source(target_riscv_ext);
     /* GCC's bare-metal riscv64-unknown-elf toolchain is multilib: it
      * builds RV32 under -march=rv32..., which is how a CMake toolchain
      * file written for it (and the SiFive and xPack toolchains' docs)

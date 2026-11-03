@@ -203,9 +203,15 @@ static unsigned zcb_compress(unsigned long w, int xlen, unsigned ext)
     return 0;
 }
 
+/* -march='s extensions (Zcb's forms), asked through a hook the compiler
+ * installs (riscv_options_done): embld links this file without the
+ * target layer, and has none */
+static unsigned (*g_rv_ext_hook)(void);
+void rv_set_ext_source(unsigned (*hook)(void)) { g_rv_ext_hook = hook; }
+
 unsigned rv_compress(unsigned long w, int xlen)
 {
-    unsigned ext = target_riscv_ext();
+    unsigned ext = g_rv_ext_hook ? g_rv_ext_hook() : 0;
     if (ext & RV_EXT_ZCB) {
         unsigned z = zcb_compress(w, xlen, ext);
         if (z)
