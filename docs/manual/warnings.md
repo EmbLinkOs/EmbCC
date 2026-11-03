@@ -30,6 +30,7 @@ Every warning EmbCC has, generated from the compiler's own table by `embcc --ref
 | `--warn=cert-msc30` | CERT C MSC30-C (medium): rand, which is not good enough for anything that matters | `--warn=cert` |
 | `--warn=cert-str30` | CERT C STR30-C (low): a string literal assigned to a pointer through which it may be modified | `--warn=cert` |
 | `--warn=cert-str31` | CERT C STR31-C (high): gets, which cannot be told the size of its buffer | `--warn=cert` |
+| `--warn=comment` | A `//` comment that a backslash at the end of its line continues on the next, or `/*` inside a `/* ... */` comment | `--warn=all` |
 | `--warn=conversion` | An implicit conversion that may change an integer's value, or an integer converted to a floating type that cannot hold all its values | neither set |
 | `--warn=coverage-mismatch` | `-fprofile-use` and a function that is not the one the profile was taken from: its source or its options changed; its profile is ignored | on by default |
 | `--warn=deprecated-declarations` | A use of a function or variable declared `deprecated` | on by default |
@@ -143,6 +144,5 @@ Every warning EmbCC has, generated from the compiler's own table by `embcc --ref
 | `--warn=unused-result` | A discarded result of a function declared `warn_unused_result` or `[[nodiscard]]` | on by default |
 | `--warn=unused-variable` | A local variable that is never used | `--warn=all` |
 | `--warn=vla` | A variable length array, or a `typedef` of one | neither set |
-| `--warn=windows-abi` | A compile for a Windows target, whose ABI EmbCC does not yet fully implement | on by default |
 
 GCC's spellings work too: `-WNAME`, `-Wno-NAME`, `-Werror=NAME` ([Migrating from GCC](migrating-from-gcc.md)).

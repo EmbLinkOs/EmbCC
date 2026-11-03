@@ -86,3 +86,11 @@ fi
 "$EMBCC" --target=aarch64-linux-gnu -O2 -mbranch-protection=pac-ret+b-key -c "$src/cf.c" \
     -o "$out/b.o" && "$OD" -d "$out/b.o" | grep -q pacibsp || fail "b-key: no pacibsp"
 echo "-mbranch-protection: pac-ret, bti, the note and the unwind tables"
+
+# ---- nocf_check: no landing pad, at that function only -------------------
+printf '__attribute__((nocf_check)) int a(void) { return 1; }\nint b(void) { return 2; }\n' > "$out/nocf.c"
+"$EMBCC" --target=x86_64-linux-gnu --cf-protection=branch -c "$out/nocf.c" -o "$out/nocf.o" ||
+    fail "nocf_check was refused"
+"$OD" -d "$out/nocf.o" | sed -n '/<a>:/,/^$/p' | grep -q endbr64 && fail "nocf_check kept a's endbr64"
+"$OD" -d "$out/nocf.o" | sed -n '/<b>:/,/^$/p' | grep -q endbr64 || fail "b lost its endbr64"
+echo "nocf_check: no endbr64 on that function"

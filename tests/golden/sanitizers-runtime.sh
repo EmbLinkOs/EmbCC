@@ -71,3 +71,11 @@ for O in -O0 -O2; do
 done
 echo "address, thread and memory: every bug reported by kind, every correct
 run clean, at -O0 and -O2"
+
+# ---- a report's frames are named, with the module and offset ---------------
+printf '#include <stdlib.h>\nint main(int c, char **v) { (void)v; int *p = malloc(8 * sizeof *p); p[c + 7] = 1; free(p); return 0; }\n' > "$out/nm.c"
+"$EMBCC" --target=$T -g --sanitize=address "$out/nm.c" -o "$out/nm" || fail "the named-frames build"
+"$out/nm" > /dev/null 2> "$out/nm.err"
+grep -q '#0 0x[0-9a-f]* in main+0x[0-9a-f]* (.*nm+0x[0-9a-f]*)' "$out/nm.err" ||
+    fail "frame #0 is not named main with its module offset: $(sed -n 1,6p "$out/nm.err")"
+echo "a report's frames say their function and module+offset"

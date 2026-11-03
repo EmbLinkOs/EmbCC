@@ -16,12 +16,15 @@ is in [C++ support](cxx.md).
 
 EmbCC compiles one C dialect:
 
-- the C17 language, which is C11 with the corrections of ISO/IEC 9899:2018;
-- the subset of C23 listed under [C23](#c23);
+- C23 (ISO/IEC 9899:2024), with the C17 behaviour where C23 changed
+  the meaning of a construct and `--std=` names an earlier standard;
+- several features of the C2y working draft, listed under
+  [Later drafts](#later-drafts);
 - the GNU extensions described in [Extensions](extensions.md).
 
-`--std=` does not select a different dialect, and `__STDC_VERSION__` is
-`201710L` whatever it names.
+`--std=` selects `__STDC_VERSION__` and the few rules that differ between
+the standards: `202311L` under `--std=c23` or `gnu23`, and `201710L`
+under the default, `gnu17`.
 
 As a rule, a construct EmbCC does not implement is refused with an error
 that names it. The exceptions are the places where EmbCC accepts a
@@ -134,12 +137,13 @@ define `__GNUC__` when compiling C.
 | Macro | Value |
 |---|---|
 | `__STDC__` | `1` |
-| `__STDC_VERSION__` | `201710L`, for every `--std=` value |
-| `__STDC_HOSTED__` | `1`, also with `--freestanding` |
+| `__STDC_VERSION__` | The standard `--std=` names: `202311L` for C23, `201710L` for C17 and the default `gnu17`, `201112L` for C11, `199901L` for C99, `199409L` for C95 and `202500L` for C2y; not defined for C89 |
+| `__STDC_HOSTED__` | `1`; `0` under `--freestanding` (`-ffreestanding`) |
 | `__FILE__`, `__LINE__` | Supported; `#line` changes both |
 | `__DATE__`, `__TIME__` | Supported; `SOURCE_DATE_EPOCH` sets them, as in GCC. See [Implementation-defined behavior](implementation-defined.md#preprocessing-directives). |
-| `__STDC_IEC_559__`, `__STDC_IEC_559_COMPLEX__` | Not defined |
-| `__STDC_ISO_10646__`, `__STDC_MB_MIGHT_NEQ_WC__`, `__STDC_UTF_16__`, `__STDC_UTF_32__` | Not defined |
+| `__STDC_IEC_559__`, `__STDC_IEC_559_COMPLEX__` | `1` on every target but AVR, whose `double` is 32 bits. Under `--std=c23`, also `__STDC_IEC_60559_BFP__` and `__STDC_IEC_60559_COMPLEX__`, `202311L` |
+| `__STDC_UTF_16__`, `__STDC_UTF_32__` | `1`: `char16_t` and `char32_t` hold UTF-16 and UTF-32 |
+| `__STDC_ISO_10646__`, `__STDC_MB_MIGHT_NEQ_WC__` | Not defined: they describe the C library's `wchar_t`, and a library that has them defines them |
 | `__STDC_ANALYZABLE__`, `__STDC_LIB_EXT1__` | Not defined |
 | `__STDC_NO_ATOMICS__`, `__STDC_NO_COMPLEX__`, `__STDC_NO_THREADS__`, `__STDC_NO_VLA__` | Not defined |
 
@@ -149,15 +153,15 @@ define `__GNUC__` when compiling C.
 |---|---|---|
 | Declarations, expressions and statements | Supported | Except as listed in this table and under [Feature notes](#feature-notes). |
 | Function prototypes | Supported | |
-| Empty parameter list `int f();` | Partial | Means "no parameters", as in C23. See [Empty parameter lists](#empty-parameter-lists). |
-| Old-style (K&R) function definitions | Not supported | `int add(a, b) int a, b; { ... }` gives `expected a parameter type before 'a'`. C23 removed them. |
-| Implicit `int` | Not supported | `static x = 3;` gives `expected a type before 'x'`. C99 removed it. |
-| Implicit function declarations | Not supported | `'foo' is not declared in 'main' — for a call, add a prototype or define it first [E0001]`. C99 removed them. |
+| Empty parameter list `int f();` | Supported | Before C23, a declaration with unspecified parameters; under `--std=c23`, "no parameters". See [Empty parameter lists](#empty-parameter-lists). |
+| Old-style (K&R) function definitions | Supported | `int add(a, b) int a, b; { ... }`. The parameters are promoted as the standard says. C23 removed them; EmbCC still accepts them there, as GCC does. |
+| Implicit `int` | Partial | Under `--permissive` (GCC's `-fpermissive`), `static x = 3;` declares an `int`, with a warning: `type defaults to 'int' in declaration of 'x' [--warn=implicit-int]`. Without it, as in GCC 14: `expected a type before 'x'`. C99 removed it. |
+| Implicit function declarations | Partial | Under `--permissive`, a call of an undeclared function declares it `int f()`, with a warning: `implicit declaration of function 'foo' [--warn=implicit-function-declaration]`. Without it: `'foo' is not declared in 'main' — for a call, add a prototype or define it first [E0001]`. C99 removed them. |
 | Reaching the `}` of a non-`void` function | Supported | A warning, on by default, except in `main`: `control may reach the end of 'f', which returns int [--warn=return-type] [E0008]`. See [Functions that can reach their closing brace](#functions-that-can-reach-their-closing-brace). |
 | `return;` in a non-`void` function | Supported | The caller must not use the value. From C99 on, where it is a constraint violation: `'g' returns int; 'return' needs a value`. |
 | `return x;` in a `void` function | Supported | `x` is evaluated and dropped, with a warning that is on by default: `returning a value from void 'f' [--warn=return-mismatch]` (an error under `--pedantic-errors`, and from C99 on). A `void` `x`, `return f();`, is a GNU C form: see [Smaller GNU C forms](extensions.md#smaller-gnu-c-forms). |
 | `auto` storage class | Supported | `auto int x;` |
-| `register` storage class | Partial | Accepted on block-scope objects and on parameters, where it is a hint the allocator does not need. At file scope, which C does not allow: `'register' is not supported yet (see docs/manual/c-language.md)`. Taking the address of a `register` object is not diagnosed. Any other storage class on a parameter: `a parameter can have no storage class but 'register'`. |
+| `register` storage class | Partial | Accepted on block-scope objects and on parameters, where it is a hint the allocator does not need. At file scope, which C does not allow: `'register' is not allowed here: C allows it on a block-scope object and on a parameter (C11 6.9p2 for file scope)`. Taking the address of a `register` object is not diagnosed. Any other storage class on a parameter: `a parameter can have no storage class but 'register'`. |
 | Storage class after the type, `const static int t[]`, `int static n`, `long typedef L` | Partial | Obsolescent (C17 6.11.5), and `-Wold-style-declaration` (`-Wextra`) reports it, as in GCC. At block scope `extern` and `typedef` must come first: `at block scope, write 'extern' first in the declaration`. |
 | `const` | Supported | See [Const qualification](#const-qualification). |
 | `volatile` | Supported | |
@@ -175,7 +179,7 @@ define `__GNUC__` when compiling C.
 
 | Feature | Status | Notes |
 |---|---|---|
-| Digraphs `<:` `:>` `<%` `%>` `%:` `%:%:` | Not supported | Read as separate punctuators. `int a<:2:>;` gives `expected ';' before '<' [E0002]`; a `%:define` line is not a directive. |
+| Digraphs `<:` `:>` `<%` `%>` `%:` `%:%:` | Supported | The same tokens as `[` `]` `{` `}` `#` `##`, in directives and in macros; `#` of a digraph spells it as written. |
 | `<iso646.h>` | Supported | |
 | `<wchar.h>`, `<wctype.h>` | Supported | Provided by the C library; see [Libraries](libraries.md). |
 
@@ -189,17 +193,17 @@ define `__GNUC__` when compiling C.
 | `_Bool` and `<stdbool.h>` | Supported | |
 | `inline` | Yes | See [Inline functions](#inline-functions). |
 | `restrict` | Supported | Accepted. EmbCC does not use it for optimization. |
-| Variable length arrays | Partial | See [Variable length arrays](#variable-length-arrays). Not available on AVR. |
+| Variable length arrays | Supported | On every target, AVR included. See [Variable length arrays](#variable-length-arrays). |
 | Variably modified types: pointers to VLAs, VLA parameters `int a[n][m]`, `[*]` | Supported | A definition evaluates its parameters' lengths on entry, the outermost too, though the parameter is a pointer: `int a[i++]` increments `i`. A length is an assignment-expression, so `int a[i += 2]` is one. |
 | `static` and qualifiers in array parameters, `int a[static 4]` | Supported | The qualifiers apply to the pointer the parameter becomes: `int a[const 4]` is `int *const a`. `static` promises at least that many elements and changes no code. Outside a parameter: `expected an expression, got 'static'`. |
 | Flexible array members | Supported | An initializer for the flexible member is accepted only on a static object, which is a GNU extension. On an automatic object: `'l' is not static, so its flexible array member 'd' cannot be initialized: the object has no room for the elements`. |
 | Designated initializers | Supported | |
-| Compound literals | Partial | At file scope, an array compound literal that converts to a pointer is refused: `int *p = (int[]){ 1, 2, 3 };` gives `a scalar takes exactly one initializer`. `&(int){ 3 }` at file scope, structure compound literals and array compound literals in a block work. Storage-class specifiers in a compound literal are C23; see the [C23](#c23) table. |
+| Compound literals | Supported | At file scope and in a block, `int *p = (int[]){ 1, 2, 3 };` included. Storage-class specifiers in a compound literal are C23; see the [C23](#c23) table. |
 | Non-constant initializers for automatic aggregates | Supported | |
 | `_Complex` and `<complex.h>` | Partial | `float`, `double` and `long double` complex types. Static initializers are limited. See [Complex types](#complex-types). |
 | `_Imaginary` | Not supported | Not a keyword; a declaration that uses it is a syntax error. |
 | Hexadecimal floating constants `0x1.8p1` | Supported | |
-| Universal character names | Partial | In character constants and string literals. In an identifier one is refused, `int caf\u00e9;` gives `character '\' is not supported yet`; write the character in UTF-8 instead. |
+| Universal character names | Supported | In character constants, string literals and identifiers: `int caf\u00e9;` is the identifier `café`. |
 | `__func__` | Supported | |
 | Variadic macros, `__VA_ARGS__` | Supported | |
 | Empty macro arguments | Supported | |
@@ -209,7 +213,7 @@ define `__GNUC__` when compiling C.
 | Trailing comma in an enumerator list | Supported | |
 | `main` returns 0 when it reaches `}` | Supported | |
 | Integer division truncates toward zero | Supported | |
-| `__STDC_IEC_559__` and the other conditional feature macros | Not supported | Not defined; see [Predefined macros](#predefined-macros). |
+| `__STDC_IEC_559__` and the other conditional feature macros | Supported | `__STDC_IEC_559__` (and C23's `__STDC_IEC_60559_BFP__`) where `float` and `double` are IEEE binary32 and binary64, which is every target but AVR, whose `double` is 32 bits; `__STDC_IEC_559_COMPLEX__` with them. See [Predefined macros](#predefined-macros). |
 
 ## C11
 
@@ -221,11 +225,11 @@ define `__GNUC__` when compiling C.
 | `_Generic` | Supported | See [Generic selection](#generic-selection). With no matching association and no `default`: `no _Generic association matches type double`. |
 | `_Atomic` qualifier and `_Atomic(T)` specifier | Partial | Integer and pointer types only; sizes depend on the target. See [Atomic types](#atomic-types). |
 | `<stdatomic.h>` | Supported | See [Atomic types](#atomic-types). |
-| `_Thread_local` | Partial | Per-thread storage on the x86-64 and AArch64 ELF, EmbLinkOS and Linux targets; refused on macOS and Windows; one shared instance on Cortex-M, RISC-V, MIPS32 and AVR. See [Target-dependent features](#target-dependent-features). At block scope without `static` or `extern`: `a block-scope __thread object must also be static: an automatic one is already private to the call`. |
+| `_Thread_local` | Partial | Per-thread storage on the x86-64 and AArch64 ELF, EmbLinkOS, Linux and macOS targets; refused on Windows; one shared instance on Cortex-M, RISC-V, MIPS32 and AVR. See [Target-dependent features](#target-dependent-features). At block scope without `static` or `extern`: `a block-scope __thread object must also be static: an automatic one is already private to the call`. |
 | Anonymous structures and unions | Supported | |
 | `char16_t`, `char32_t`, `u"..."`, `U"..."`, `u'x'`, `U'x'`, `u8"..."` | Supported | `<uchar.h>` is provided by the C library. |
 | `max_align_t` | Supported | Aligned as `long double` or `long long`, whichever is stricter: 16 bytes on x86-64, AArch64 and RISC-V, 8 on Cortex-M and MIPS32, 1 on AVR. |
-| `CMPLX`, `CMPLXF`, `CMPLXL` | Partial | Defined as function calls, so they cannot initialize a static object. See [Complex types](#complex-types). |
+| `CMPLX`, `CMPLXF`, `CMPLXL` | Supported | Constant expressions when their operands are, so they initialize a static object. See [Complex types](#complex-types). |
 | Extended identifiers (C11 Annex D) | Supported | Written as UTF-8; a universal character name in an identifier is refused (see the [C99](#c99) table). Any other non-ASCII byte outside a literal: `byte 0xc3 is not part of a character C allows here (identifiers take UTF-8 letters, C11 Annex D)`. |
 | Optional features: VLAs, complex types, atomics, threads | Supported | All four are provided, subject to [Target-dependent features](#target-dependent-features). |
 
@@ -241,61 +245,62 @@ C17's value, `201710L`.
 | `bool`, `true`, `false` keywords | Supported | `true` and `false` have type `bool`. After `#include <stdbool.h>` they are the macros `1` and `0`, of type `int`. |
 | `alignas`, `alignof`, `static_assert`, `thread_local` keywords | Supported | |
 | `static_assert` with one operand | Supported | A failed assertion: `static assertion failed: (no message)`. |
-| `nullptr` | Partial | Its type is `void *`, not `nullptr_t`. `<stddef.h>` does not declare `nullptr_t`: `expected a type before 'nullptr_t'`. |
-| `constexpr` objects | Partial | Integer types only. See [Constexpr objects](#constexpr-objects). |
-| `auto` type inference | Partial | At block scope only. See [Type inference](#type-inference). |
-| `typeof`, `typeof_unqual` | Partial | Not every expression form. See [Type inference](#type-inference). |
-| Attributes `[[...]]` | Partial | Not in every position. See [Attributes](#attributes). |
+| `nullptr`, `nullptr_t` | Supported | `nullptr` has type `nullptr_t`, which `<stddef.h>` declares. It converts to every pointer type and to `bool`. |
+| `constexpr` objects | Supported | Of every object type: integer, floating, pointer (null only), structure, union and array. See [Constexpr objects](#constexpr-objects). |
+| `auto` type inference | Supported | At file and block scope, with `const`, `static` and the other specifiers. See [Type inference](#type-inference). |
+| `typeof`, `typeof_unqual` | Supported | Of every type name and expression. See [Type inference](#type-inference). |
+| Attributes `[[...]]` | Supported | In every position the standard allows. See [Attributes](#attributes). |
 | `[[deprecated]]` | Supported | A use warns: `'g' is deprecated [--warn=deprecated-declarations]`. A message argument is accepted and not printed. |
 | `[[fallthrough]]` | Supported | Accepted. EmbCC does not warn about fall-through. |
 | `[[maybe_unused]]` | Supported | Suppresses `--warn=unused-variable`, `--warn=unused-function` and, on a parameter, `--warn=unused-parameter` for the declaration. |
 | `[[nodiscard]]` | Supported | Discarding the result warns: `result of 'f' is discarded, and it is declared warn_unused_result [--warn=unused-result]`. A message argument is accepted and not printed. |
 | `[[noreturn]]`, `[[_Noreturn]]` | Supported | |
-| `[[unsequenced]]`, `[[reproducible]]` | Not supported | Ignored with a warning: `attribute 'unsequenced' is not one EmbCC knows, and is ignored [--warn=attributes]`. |
-| `__has_c_attribute` | Partial | Defined, and evaluates to 0 for every attribute. |
+| `[[unsequenced]]`, `[[reproducible]]` | Supported | Accepted on a function. EmbCC infers what a function reads and writes itself, and eliminates no call on the strength of the promise. |
+| `__has_c_attribute` | Supported | The standard attributes' dates (`__has_c_attribute(nodiscard)` is `202003L`), and 0 for an attribute EmbCC does not know. |
 | `__has_include` | Supported | |
 | `#elifdef`, `#elifndef` | Supported | |
 | `#warning` | Supported | Prints `warning: #warning: TEXT`. |
-| `#embed` | Partial | Without parameters only. See [Embedding binary data](#embedding-binary-data). |
-| `__has_embed` | Not supported | Not defined. In `#if` it is an unknown identifier followed by parentheses: `trailing junk in #if expression`. |
+| `#embed` | Supported | With the `limit`, `prefix`, `suffix` and `if_empty` parameters. See [Embedding binary data](#embedding-binary-data). |
+| `__has_embed` | Supported | `__STDC_EMBED_FOUND__`, `__STDC_EMBED_EMPTY__` or `__STDC_EMBED_NOT_FOUND__`, with the same parameters. |
 | `__VA_OPT__` | Supported | |
 | `true` and `false` in `#if` | Supported | |
 | Binary constants `0b1010` | Supported | Also in `#if`. |
 | Digit separators `1'000'000` | Supported | In integer and floating constants, and in `#if`. |
 | `u8` character constants `u8'a'` | Supported | Of type `unsigned char`. |
-| `char8_t`; `u8"..."` of type `unsigned char[]` | Partial | `<uchar.h>` declares `char8_t` under `-std=c23`, with `mbrtoc8` and `c8rtomb`. `u8"..."` has C17's type, `char[]`. |
-| `_BitInt(N)`, the `wb` and `uwb` suffixes | Partial | N up to 64, which is `BITINT_MAXWIDTH`; wider is refused: `_BitInt(65) is wider than BITINT_MAXWIDTH, which is 64 here`. Arithmetic in the type wraps at N bits, a `_BitInt` is not promoted to `int`, and conversions rank it by its width. Laid out and passed as the x86-64, AArch64 and RISC-V ABIs say, so calls between EmbCC and GCC agree. See [Integers](implementation-defined.md). |
+| `char8_t`; `u8"..."` of type `unsigned char[]` | Supported | Under `--std=c23`, `u8"..."` is `unsigned char[]`, and `<uchar.h>` declares `char8_t`, `mbrtoc8` and `c8rtomb`. Before C23 it is C17's `char[]`. |
+| `_BitInt(N)`, the `wb` and `uwb` suffixes | Supported | N up to 65535, which is `BITINT_MAXWIDTH`. Arithmetic in the type wraps at N bits, a `_BitInt` is not promoted to `int`, and conversions rank it by its width. Laid out and passed as each target's ABI says, so calls between EmbCC and GCC agree. See [Integers](implementation-defined.md). |
 | Enumerations with a fixed underlying type, `enum E : unsigned char` | Partial | The enumeration and its constants have the underlying type, and `enum E : short;` declares it ahead of its definition. A value the underlying type cannot represent is not diagnosed. See [Enumeration constants](#enumeration-constants). A non-integer type: `an enum's underlying type must be an integer type`. |
-| Enumeration constants outside the range of `int` | Partial | The enumeration and its constants take a type that can represent every value. A value of 2^63 or more is read as negative. See [Enumeration constants](#enumeration-constants). |
-| Empty initializer `= {}` | Partial | Zero-initializes any object except a VLA, which is refused: `variable length array 'a' cannot be initialized`. See [Initializers](#initializers). |
+| Enumeration constants outside the range of `int` | Supported | The enumeration and its constants take a type that can represent every value, `unsigned long long` for one of 2^63 or more. See [Enumeration constants](#enumeration-constants). |
+| Empty initializer `= {}` | Supported | Zero-initializes any object, a VLA included. See [Initializers](#initializers). |
 | Labels before declarations and at the end of a compound statement | Supported | |
 | Unnamed parameters in a function definition | Supported | `void on_tick(void *) { ... }`. The parameter takes its argument's place and has no name in the debug information; `--warn=unused-parameter` does not report it. |
-| Redefinition of a tag with the same content | Not supported | `redefinition of 'P'` |
-| Storage-class specifiers in compound literals, `(static int[]){ 1 }` | Not supported | `expected an expression, got 'static'` |
+| Redefinition of a tag with the same content | Supported | A second definition with the same members is the same type. |
+| Storage-class specifiers in compound literals, `(static int[]){ 1 }` | Supported | `static`, `constexpr`, `register` and `thread_local`. A `static` one has static storage, so a function may return its address. |
 | `()` means `(void)`; K&R definitions removed | Supported | See [Empty parameter lists](#empty-parameter-lists). |
 | Trigraphs removed | Supported | EmbCC never replaces trigraphs. |
-| `_Decimal32`, `_Decimal64`, `_Decimal128` | Not supported | `expected a type before '_Decimal32'` |
-| `_Float32`, `_Float64` | Partial | The same types as `float` and `double`. The `f32` and `f64` constant suffixes are refused: `malformed floating constant`. |
+| `_Decimal32`, `_Decimal64`, `_Decimal128` | Supported | IEEE 754 decimal in the BID encoding, as GCC uses on x86-64 and AArch64, with the `df`, `dd` and `dl` suffixes. The arithmetic is in `librt`. |
+| `_Float32`, `_Float64` | Supported | The same types as `float` and `double`, with the `f32` and `f64` constant suffixes. |
 | `_Float128` | Partial | The same type as `long double` where that is IEEE binary128. See [Target-dependent features](#target-dependent-features). |
 | `_Float16` | Supported | IEEE binary16 on every target, each operation rounded to it; the `f16` constant suffix. Through `...` it is refused. GNU's `__bf16` (bfloat16) too. See [Half-precision floating point](#half-precision-floating-point). |
-| `_Float32x`, `_Float64x` | Not supported | `expected a type before '_Float32x'` |
+| `_Float32x`, `_Float64x` | Supported | `double`, and the target's `long double` where that is wider than `double`; the `f32x` and `f64x` suffixes. |
 | `unreachable()` in `<stddef.h>` | Supported | Under `-std=c23`; it is `__builtin_unreachable()`. |
 | Width macros `INT_WIDTH`, `INT8_WIDTH`, ... | Supported | `<limits.h>` and `<stdint.h>`. |
 | `<stdbit.h>`, `<stdckdint.h>` | Supported | Freestanding headers; see [Libraries](libraries.md). |
 | `__STDC_VERSION__` of `202311L` | Supported | Under `--std=c23` or `gnu23`; the default, `gnu17`, is `201710L`. |
-| Identifiers per Unicode UAX #31 | Not supported | Identifiers use the C11 Annex D character ranges. |
+| Identifiers per Unicode UAX #31 | Supported | An identifier starts with an `XID_Start` character or `_`, and continues with `XID_Continue` characters, from Unicode 16.0, written in UTF-8 or as universal character names. |
 
 ### Later drafts
 
-The following features of the C2y working draft are not supported:
+These features of the C2y working draft are supported, under every
+`--std=`:
 
-| Feature | Diagnostic |
+| Feature | Example |
 |---|---|
-| `_Countof(a)` | `'_Countof' is not declared in 'f' — for a call, add a prototype or define it first [E0001]` |
-| Octal prefix `0o17` | `malformed integer constant` |
-| Delimited escapes `'\o{101}'` | `unknown escape '\o' in a literal` |
-| Declarations in `if` and `switch`, `if (int x = g(); x > 0)` | `expected an expression, got 'int'` |
-| A type name as the controlling operand of `_Generic` | `expected an expression, got 'int'` |
+| `_Countof(a)`, the number of elements of an array | `_Countof(a) == 4` |
+| The octal prefix `0o` | `0o17` is 15 |
+| Delimited escapes | `'\o{101}'`, `'\x{41}'`, `'\u{1F600}'` |
+| Declarations in `if` and `switch` | `if (int x = g(); x > 0)` |
+| A type name as the controlling operand of `_Generic` | `_Generic(int, int: 1, default: 0)` |
 
 Case ranges, `case 1 ... 3:`, are accepted as a GNU extension; see
 [Extensions](extensions.md).
@@ -305,9 +310,7 @@ Case ranges, `case 1 ... 3:`, are accepted as a GNU extension; see
 The language features whose availability depends on the target. The
 targets are described in [Targets](targets.md): "x86-64" covers the ELF,
 EmbLinkOS and Linux triples, "AArch64" covers the ELF, EmbLinkOS and
-Linux triples, and "Cortex-M" covers every `thumb*` triple. Every compile
-for the Windows target also prints the `--warn=windows-abi` warning described
-there.
+Linux triples, and "Cortex-M" covers every `thumb*` triple.
 
 | Feature | x86-64 | x86-64 macOS | x86-64 Windows | AArch64 | Apple arm64 | Cortex-M | RV32 | RV64 | AVR |
 |---|---|---|---|---|---|---|---|---|---|
@@ -319,7 +322,7 @@ there.
 | `__int128` | Yes | Yes | Not in a function signature | Yes | Yes | No | No | Declarations and `sizeof` only | No |
 | `_Float128` | No | No | No | Yes | No | No | Declarations and `sizeof` only | Declarations and `sizeof` only | No |
 | `_Atomic` operators | 1 to 8 bytes | 1 to 8 bytes | 1 to 8 bytes | 1 to 8 bytes | 1 to 8 bytes | 1 to 8 bytes; 8 by a `lib/rt` call | 1 to 8 bytes; 8 by a `lib/rt` call | 1 to 8 bytes | 1 to 8 bytes, with interrupts masked |
-| `_Thread_local` | Per thread | No | No | Per thread | No | One shared instance | One shared instance | One shared instance | One shared instance |
+| `_Thread_local` | Per thread | Per thread | No | Per thread | Per thread | One shared instance | One shared instance | One shared instance | One shared instance |
 
 "One shared instance" means the object is placed in `.tbss` but addressed
 as an ordinary static object; see [Targets](targets.md#summary).
@@ -382,9 +385,10 @@ around it is an error (`'case' outside of a switch`).
 
 ### Empty parameter lists
 
-A function declarator with an empty parameter list, `int f();`, declares
-a function with no parameters, as in C23, whatever `--std=` says. Code
-that relies on the older meaning, "parameters not specified", is refused:
+Under `--std=c23`, a function declarator with an empty parameter list,
+`int f();`, declares a function with no parameters. Before C23 it means
+"parameters not specified", and a call to it is not checked. Under C23,
+code that relies on the older meaning is refused:
 
 | Code | Diagnostic |
 |---|---|
@@ -805,71 +809,46 @@ EmbCC limits, are handled as follows:
 
 ### Constexpr objects
 
-`constexpr` declares a named integer constant, at file scope or in a
-block, usable wherever an integer constant expression is:
+`constexpr` declares a named constant, at file scope or in a block. An
+integer one is usable wherever an integer constant expression is, and so
+is a member of a `constexpr` structure or union:
 
 ```c
 constexpr int N = 4;
-constexpr long long BIG = 5000000000;
+constexpr double SCALE = 0.25;
+constexpr struct { int w, h; } SIZE = { 320, 240 };
 int table[N];
+static_assert(SIZE.w * SIZE.h == 76800);
 ```
+
+The object is `const`, and has storage like any other, so its address can
+be taken.
 
 | Case | Diagnostic |
 |---|---|
-| A non-integer type (floating, pointer, structure) | `constexpr 'd' of type double is not supported: EmbCC takes integer constants` |
 | A value the type cannot represent exactly | `constexpr 'c': 300 does not fit unsigned char, and C23 wants it exactly` |
 | A non-constant initializer | `constexpr 'k' needs a constant initializer; this one is not one` |
 | No initializer | `constexpr 'k' needs an initializer` |
-| Assignment to the object | `assignment target is not an lvalue` |
-| Taking its address, `&k` | `'&' needs a variable or *pointer` |
-
-A `constexpr` name has no storage, which is why its address cannot be
-taken. `typeof` and `auto` cannot see its type (see
-[Type inference](#type-inference)).
+| Assignment to the object | `assignment of read-only 'k' (its type is const int)` |
 
 ### Type inference
 
-`typeof(...)` and `typeof_unqual(...)` accept a type name or an
+`typeof(...)` and `typeof_unqual(...)` accept any type name or
 expression. `auto` (C23) and `__auto_type` (GNU) declare an object whose
-type is that of its initializer. All three determine an expression's type
-before the rest of the semantic analysis, and accept these expression
-forms: identifiers of objects (including parameters and function
-pointers), integer, floating, character and narrow string constants,
-`nullptr`, casts, calls, subscripts, `*`, `&` of an object, `.` and `->`,
-unary `-`, `!` and `~`, the binary arithmetic, bitwise, shift,
-comparison and logical operators, pointer arithmetic and `?:`. The type follows the
-usual conversions: `typeof(c + c)` with `char c` is `int`, and
-`typeof(arr)` keeps the array type.
+type is that of its initializer, at file scope and in a block. The type
+follows the usual conversions: `typeof(c + c)` with `char c` is `int`,
+`typeof(arr)` keeps the array type, and `auto a = arr;` is a pointer, as
+in C23.
 
-Other forms are refused: compound literals, `sizeof` and `_Alignof`,
-`++` and `--`, assignments, the comma operator, a function name, wide
-string literals, `__real__` and `__imag__`, `_Generic`, statement
-expressions, and enumeration and `constexpr` constants (including
-`true` and `false`). The diagnostic is
-
-```text
-error: typeof of an unsupported expression
+```c
+auto limit = 1000u;                 /* unsigned int */
+static auto table = (int[]){ 1, 2, 3 };   /* int * */
+typeof_unqual(const volatile short) s;     /* short */
 ```
 
-for `typeof`, and for `auto` and `__auto_type`
-
-```text
-error: __auto_type cannot see the type of this initializer
-```
-
-An assignment or comma expression inside `typeof` is a syntax error,
-for example `expected ')' after typeof before ','`.
-
-`auto` infers a type only at block scope, for one declarator, with an
-initializer and no other specifiers before it except `static`:
-
-| Declaration | Diagnostic |
-|---|---|
-| `auto g = 3L;` at file scope | `expected a type before 'auto'` |
-| `auto x;`, `const auto x = 1;` | `expected a type in this declaration, found 'auto'` |
-| `auto a = 1, b = 2;` | `expected ';' before ',' [E0002]` |
-
-`auto int x;` is the C89 storage class and is accepted.
+`auto` needs an initializer: `auto x;` gives `expected a type in this
+declaration, found 'auto'`. With several declarators, `auto a = 1, b =
+2.0;`, each infers its own type. `auto int x;` is the C89 storage class.
 
 ### Attributes
 
@@ -881,21 +860,23 @@ attribute namespace is dropped, so `[[gnu::packed]]` and `[[packed]]`
 are the same attribute. The GNU attributes and how each is handled are
 listed in [Extensions](extensions.md).
 
-`[[...]]` is accepted in these positions:
+`[[...]]` is accepted in every position C23 gives it:
 
 - at the start of a declaration, at file scope and in a block;
 - after `struct`, `union` or `enum`: `struct [[gnu::packed]] S { ... };`;
-- before a parameter declaration: `int f([[maybe_unused]] int a)`;
+- after a declarator's identifier, `int x [[maybe_unused]];`, and after an
+  array declarator, `int a[3] [[maybe_unused]];`;
+- on an enumerator, `enum E { OLD [[deprecated]], NEW };`;
+- before a parameter declaration and after its declarator;
 - after a function declarator: `void f(void) [[gnu::noinline]];`;
+- after a `*`, `int * [[gnu::aligned(8)]] p;`;
 - before a statement, including the empty attribute statement
   `[[fallthrough]];` and an empty list `[[]]`.
 
-It is refused after the declarator of an object, and after an array
-declarator, with `expected an expression, got '['`, and on an
-enumerator with `expected '}' before '['`. An attribute at the start of a
-declaration that declares no object or function,
-`[[gnu::packed]] struct S { ... };`, applies to nothing and is ignored
-without a diagnostic; put a type attribute after the `struct` keyword.
+An attribute at the start of a declaration that declares no object or
+function, `[[gnu::packed]] struct S { ... };`, applies to nothing and is
+ignored without a diagnostic. Put a type attribute after the `struct`
+keyword.
 
 An attribute EmbCC does not know is ignored with a `--warn=attributes`
 warning, as for the GNU syntax.
@@ -916,13 +897,31 @@ name first in the directory of the file that contains the directive,
 then in the include directories; an angle-bracketed name in the include
 directories only. An empty file expands to nothing.
 
+The standard parameters are supported:
+
+| Parameter | Effect |
+|---|---|
+| `limit(N)` | At most `N` bytes |
+| `prefix(TOKENS)` | `TOKENS` before the bytes, when there are any |
+| `suffix(TOKENS)` | `TOKENS` after the bytes, when there are any |
+| `if_empty(TOKENS)` | `TOKENS` instead, when there are no bytes |
+| `gnu::offset(N)`, `clang::offset(N)` | Skip the first `N` bytes |
+
+```c
+static const char banner[] = {
+#embed "banner.txt" suffix(, 0)     /* a NUL-terminated string */
+};
+```
+
+The file name may be given by a macro, `#embed LOGO`. A vendor parameter
+EmbCC does not know is refused, since ignoring one could embed the wrong
+bytes: `#embed parameter 'acme::thing' is not one EmbCC has (limit,
+prefix, suffix, if_empty, gnu::offset)`. `__has_embed("file" params)` is `__STDC_EMBED_FOUND__` (1),
+`__STDC_EMBED_EMPTY__` (2) or `__STDC_EMBED_NOT_FOUND__` (0).
+
 | Case | Diagnostic |
 |---|---|
-| Any parameter (`limit`, `prefix`, `suffix`, `if_empty`, or a vendor one) | `#embed parameters (limit, prefix, suffix, if_empty) are not supported; ignoring one would embed the wrong bytes` |
-| A file name given by a macro, `#embed FILE` | `#embed needs a file name` |
 | A file that is not found | `cannot find the file to embed: "logo.bin"` |
-
-`__has_embed` is not supported.
 
 ### Headers
 
@@ -955,18 +954,12 @@ operators (`#include_next`, `__has_include_next`, `__has_builtin`,
 |---|---|---|
 | Source character set | Supported | Source files are read as UTF-8. A leading byte-order mark is skipped. |
 | Trigraphs | Not supported | Never replaced. |
-| Line splicing | Partial | A backslash-newline is removed between tokens, in directives and inside identifiers and numbers. Inside a string literal or character constant it is an error (shown below the table). At the end of a `//` comment it does not continue the comment: the next line is compiled as code. |
+| Line splicing | Supported | A backslash-newline is removed everywhere, as translation phase 2 says: between tokens, in directives, inside identifiers, numbers, string literals and character constants, and at the end of a `//` comment, which then continues on the next line, and `--warn=comment` (GCC's `-Wcomment`, in `--warn=all`) says so. |
 | Comments | Supported | Each comment is replaced by one space. |
-| Digraphs | Not supported | See [C95](#c95-amendment-1). |
-| Universal character names | Partial | In character constants and string literals only; see the [C99](#c99) table. |
+| Digraphs | Supported | See [C95](#c95-amendment-1). |
+| Universal character names | Supported | See the [C99](#c99) table. |
 | String literal concatenation | Supported | |
 
-A backslash-newline inside a string literal or character constant gives:
-
-```text
-error: unknown escape '\
-' in a literal
-```
 
 ### Directives
 
@@ -982,7 +975,7 @@ error: unknown escape '\
 | `#warning TEXT` | Supported | A warning: `#warning: TEXT`. |
 | `#pragma` | Partial | `pack`, `once`, `push_macro`, `pop_macro` and `weak` are acted on (see [Extensions](extensions.md#pragmas)). Every other pragma, including the `STDC` pragmas, is ignored without a diagnostic. |
 | `_Pragma("...")` | Supported | The same as the corresponding `#pragma`. |
-| `#embed` | Partial | See [Embedding binary data](#embedding-binary-data). |
+| `#embed` | Supported | With the `limit`, `prefix`, `suffix` and `if_empty` parameters. See [Embedding binary data](#embedding-binary-data). |
 | `#` alone (null directive) | Supported | |
 | Any other directive | | In a group that is being compiled, an error: `unknown directive '#ident'`. In a group skipped by a conditional, ignored. |
 
@@ -1022,5 +1015,5 @@ between variadic arguments is dropped.
 |---|---|---|
 | `defined NAME`, `defined(NAME)` | Supported | |
 | `__has_include(<file>)`, `__has_include("file")` | Supported | `#ifdef __has_include` is true. |
-| `__has_c_attribute(NAME)` | Partial | Defined (`#ifdef __has_c_attribute` is true), and 0 for every name. |
-| `__has_embed(...)` | Not supported | Not defined; see the [C23](#c23) table. |
+| `__has_c_attribute(NAME)` | Supported | The date of a standard attribute EmbCC has, and 0 for any other; see the [C23](#c23) table. |
+| `__has_embed(...)` | Supported | See [Embedding binary data](#embedding-binary-data). |

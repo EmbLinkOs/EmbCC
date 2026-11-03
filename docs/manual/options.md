@@ -11,6 +11,7 @@ EmbCC's own spellings come first. Where GCC spells the same thing differently, i
 | `-c` | compile to an object; do not link |  |
 | `-S` | write assembly (NAME.s) instead of an object |  |
 | `-E` | preprocess only, to standard output |  |
+| `--no-line-markers` | with -E: no # N "file" lines in the output | `-P` |
 | `-o FILE` | where to write the result |  |
 | `-j N` | compile N sources at once (-j alone: one per processor) |  |
 | `--syntax-only` | check the source; write nothing | `-fsyntax-only` |
@@ -37,7 +38,7 @@ EmbCC's own spellings come first. Where GCC spells the same thing differently, i
 | `--system-include=DIR` | search DIR for headers, as a system directory | `-isystem DIR` |
 | `--include=FILE` | include FILE before the source | `-include FILE` |
 | `--no-std-include` | do not search EmbCC's own headers | `-nostdinc` |
-| `--freestanding` | accepted: EmbCC makes no hosted assumptions to turn off | `-ffreestanding` |
+| `--freestanding` | a freestanding program: __STDC_HOSTED__ is 0 (the code is the same) | `-ffreestanding` |
 | `--no-builtins` | accepted: only the __builtin_ names are built-ins | `-fno-builtin` |
 | `--no-builtin=NAME` | accepted, for the same reason | `-fno-builtin-NAME` |
 | `--char=signed` | plain char is signed | `-fsigned-char` |

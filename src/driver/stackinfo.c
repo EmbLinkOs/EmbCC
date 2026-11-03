@@ -604,7 +604,7 @@ unsigned char *stackinfo_elf_section(const unsigned char *d, long n,
 static const char *trap_frame(unsigned target)
 {
     switch (target) {
-    case TARGET_THUMB: return "32 bytes (Cortex-M's eight-word frame; 104 with the FPU's lazy context)";
+    case TARGET_THUMB: return "32 bytes (Cortex-M's eight-word frame; 26 words, 104 bytes, with the FPU's context)";
     case TARGET_AVR: return "2 bytes (the return address; 3 on a part with a 22-bit PC)";
     default: return "0 bytes (the handler's own prologue saves what it needs)";
     }

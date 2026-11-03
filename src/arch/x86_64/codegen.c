@@ -110,9 +110,10 @@ static const int LEAF_POOL_AT[NLEAF_AT] = { 8, 9, 10, 11,
                                             3 /*rbx*/, 12, 13, 14, 15 };
 
 /* The FLOATING-POINT pool, which was xmm8-15 (see below for why it
- * moved). Win64 makes xmm6-15 callee-saved, and neither the pool's xmm6
- * nor the xmm7 scratch is saved under it: one of the gaps the
- * -Wwindows-abi warning names on every Windows compile. */
+ * moved). Win64 makes xmm6-15 callee-saved: a Windows function saves
+ * the ones its code writes (the prologue finds them in the bytes it
+ * emitted), so the pool's xmm6 and the xmm7 scratch are kept for the
+ * caller there. */
 #define X86_FP_ALLOC 1    /* see the note below */
 #define NX86_FPOOL 7
 static const int X86_FPOOL[NX86_FPOOL] = { 0, 1, 2, 3, 4, 5, 6 };

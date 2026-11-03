@@ -1140,22 +1140,6 @@ embcc: var.c:3:9: warning: unused variable 'unused' [--warn=unused-variable]
           ^~~~~~
 ```
 
-#### `--warn=windows-abi`
-
-Issued once for every object file written for a Windows target
-(`--target=x86_64-windows-gnu` or `x86_64-w64-mingw32`): the code EmbCC
-generates for Windows is not yet fully the Microsoft x64 ABI. `long` is
-8 bytes and `wchar_t` 4 (Windows has 4 and 2), and `rsi`, `rdi`, `xmm6`
-and `xmm7` are not preserved across calls, so objects EmbCC compiles
-agree with each other but not with code built by other compilers. On by
-default. The warning carries a file name but no line, and is not issued
-for `--syntax-only`, `-E` or `-S`. See [Targets](targets.md) for the
-state of the Windows target.
-
-```text
-embcc: win.c: warning: x86_64-windows-gnu is not yet the Microsoft x64 ABI: `long` is 8 bytes and wchar_t 4 (Windows has 4 and 2), and rsi, rdi, xmm6 and xmm7 are not preserved across a call: objects EmbCC compiles agree with each other and with nothing else [--warn=windows-abi]
-```
-
 ### Warnings no option controls
 
 These warnings have no `--warn=` option and no `[--warn=...]` tag. `--no-warnings` suppresses

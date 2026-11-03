@@ -65,3 +65,15 @@ names = [c['name'] for c in b['components']]
 assert '/build/src/a.c' in names and '/build/src/cfg.h' in names, names
 EOF2
 echo "the same bytes from two directories, and an SPDX and a CycloneDX bill"
+
+# ---- Mach-O: the bill of a Darwin image lists its files ----------------------
+if [ "$(uname -s)-$(uname -m)" = Darwin-arm64 ]; then
+    printf '// SPDX-License-Identifier: MIT\n#include <stdint.h>\nint main(void) { return 0; }\n' > "$out/app.c"
+    "$EMBCC" --target=arm64-apple-darwin --sbom "$out/app.c" -o "$out/app" \
+        --sbom="$out/app.spdx.json" || fail "the Darwin --sbom build"
+    grep -q '"fileName": ".*app.c"' "$out/app.spdx.json" || fail "the Darwin bill lists no app.c"
+    grep -q '"fileName": ".*stdint.h"' "$out/app.spdx.json" || fail "the Darwin bill lists no header"
+    "$EMBCC" --sbom-from "$out/app" | grep -q '"fileName": ".*app.c"' ||
+        fail "--sbom-from does not read a Mach-O image's records"
+    echo "a Darwin image's bill lists its source and headers"
+fi

@@ -6841,14 +6841,12 @@ static int embcc_main(int argc, char **argv)
                 return 1;
             }
             g_cf_x86 = 1;
-            g_cf_spell = strncmp(opt_typed(argv[i]), "--", 2) == 0
-                         ? "--cf-protection" : "-fcf-protection";
+            g_cf_spell = opt_typed(argv[i]);   /* (its value too) */
         } else if (strncmp(argv[i], "-mbranch-protection=", 20) == 0) {
             /* AArch64: none, standard (bti+pac-ret), bti, and
              * pac-ret[+leaf][+b-key], joined by '+' */
             const char *m = argv[i] + 20;
-            g_bp_spell = strncmp(opt_typed(argv[i]), "--", 2) == 0
-                         ? "--branch-protection" : "-mbranch-protection";
+            g_bp_spell = opt_typed(argv[i]);
             g_cf &= ~(CF_BTI | CF_PAC | CF_PAC_LEAF | CF_PAC_BKEY);
             for (const char *p = m; *p; ) {
                 const char *e = strchr(p, '+');

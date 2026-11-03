@@ -673,11 +673,6 @@ static struct warn_opt g_warns[] = {
     /* On by default in GCC: a pointer that loses its pointee's const
      * lets the program write a read-only object without a cast. */
     { "discarded-qualifiers", 1,  0,    0 },
-    /* On by default and hard to miss on purpose: a Windows object
-     * EmbCC builds today passes arguments the way System V does, and
-     * that is wrong against anything EmbCC did not compile. It goes
-     * away when the Microsoft x64 convention lands. */
-    { "windows-abi",          1,  0,    0 },
 
     /* ---- the statically-decidable ones ----
      *
@@ -1136,7 +1131,6 @@ static const struct { const char *name, *implied, *what; } g_warn_doc[] = {
     { "unused-result", NULL, "a discarded result of a function declared `warn_unused_result` or `[[nodiscard]]`" },
     { "unused-variable", NULL, "a local variable that is never used" },
     { "vla", NULL, "a variable length array, or a `typedef` of one" },
-    { "windows-abi", NULL, "a compile for a Windows target, whose ABI EmbCC does not yet fully implement" },
 };
 
 static int warn_doc(const char *name)

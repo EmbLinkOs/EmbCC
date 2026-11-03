@@ -146,6 +146,8 @@ avr|--mcu=atmega8|-mmcu=atmega8| is not supported
 xtensa-none-elf|--abi=call0|-mabi=call0| is not supported
 xtensa-none-elf|--endian=big|-mbig-endian| is not supported
 x86_64-elf|--sanitize=thread|-fsanitize=thread| is for a hosted target
+thumbv7em-none-eabi|--cf-protection=full|-fcf-protection=full| is x86-64's (CET)
+x86_64-linux-gnu|--branch-protection=bti|-mbranch-protection=bti| is AArch64's here
 LIST
 : > "$out/said-bad.txt"
 while IFS="|" read -r t ours gcc rest; do

@@ -832,7 +832,7 @@ static int loop_exits(const struct stmt *s, int depth)
 }
 
 /* the statements of a function, with its returns counted for 15.5 */
-static int g_nret, g_ret_last;
+static int g_nret;
 static int g_ngoto_labels;
 static const char *g_labels[256];
 static int g_label_line[256], g_nlabels, g_label_used[256];
@@ -890,7 +890,6 @@ static void walk_stmt(struct stmt *s)
             break;
         case STMT_RETURN:
             g_nret++;
-            g_ret_last = !s->next;
             if (s->expr) {
                 const struct expr *x = strip(s->expr);
                 if (x && x->kind == EXPR_ADDR) {
@@ -1236,7 +1235,6 @@ void rules_check(struct unit *u)
             if (f->params[k] && !stmt_uses_var(f->body, k))
                 R("misra-2.7", &at, f->params[k]);
         g_nret = 0;
-        g_ret_last = 0;
         g_nlabels = 0;
         collect_labels(f->body);
         stmt_labels_by_address(f->body);

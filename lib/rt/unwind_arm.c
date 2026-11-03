@@ -85,6 +85,7 @@ __asm__(
     ".syntax unified\n"
     ".thumb\n"
     UW_STUB("_Unwind_RaiseException", "__uw_arm_raise")
+    UW_STUB("_Unwind_Resume_or_Rethrow", "__uw_arm_raise")
     UW_STUB("_Unwind_Resume", "__uw_arm_resume")
     ".globl __uw_arm_restore\n"
     ".type __uw_arm_restore, %function\n"
@@ -135,6 +136,7 @@ __asm__(
     ".syntax unified\n"
     ".arm\n"
     UW_STUB("_Unwind_RaiseException", "__uw_arm_raise")
+    UW_STUB("_Unwind_Resume_or_Rethrow", "__uw_arm_raise")
     UW_STUB("_Unwind_Resume", "__uw_arm_resume")
     ".globl __uw_arm_restore\n"
     ".type __uw_arm_restore, %function\n"
@@ -461,8 +463,10 @@ static _Unwind_Reason_Code phase2(_Unwind_Control_Block *ucbp,
         _Unwind_Reason_Code r = pers(st, ucbp, c);
         st = _US_UNWIND_FRAME_STARTING;
         if (r == _URC_INSTALL_CONTEXT) {
-            c->r[R_PC] |= 1;               /* Thumb */
-            __uw_arm_restore(c);
+#if defined(__thumb__)
+            c->r[R_PC] |= 1;               /* Thumb: every function is */
+#endif
+            __uw_arm_restore(c);           /* (ARM state: as SetIP kept it) */
         }
         if (r != _URC_CONTINUE_UNWIND)
             return _URC_FAILURE;
@@ -498,10 +502,10 @@ void __uw_arm_resume(_Unwind_Control_Block *ucbp, _Unwind_Context *entry)
     __builtin_trap();
 }
 
-_Unwind_Reason_Code _Unwind_Resume_or_Rethrow(_Unwind_Control_Block *ucbp)
-{
-    return _Unwind_RaiseException(ucbp);
-}
+/* _Unwind_Resume_or_Rethrow is a stub of its own, above: a C function
+ * calling _Unwind_RaiseException put a frame between the rethrowing code
+ * and the walk -- on ARMv6-M, where it is no tail call, the walk began in
+ * that frame, which no table describes, and popped garbage. */
 
 void _Unwind_DeleteException(_Unwind_Control_Block *ucbp)
 {
@@ -538,9 +542,13 @@ _Unwind_Ptr _Unwind_GetIPInfo(_Unwind_Context *c, int *before)
     return c->r[R_PC] & ~1u;
 }
 
+/* The frame's own instruction set stays: its pc's bit 0 (the return
+ * address it was reached by) is set in Thumb code and clear in ARM code,
+ * and the landing pad is in the same function. Setting it always sent
+ * an ARM-state handler into Thumb state. */
 void _Unwind_SetIP(_Unwind_Context *c, _Unwind_Ptr v)
 {
-    c->r[R_PC] = (uw32)v | 1;
+    c->r[R_PC] = ((uw32)v & ~1u) | (c->r[R_PC] & 1u);
 }
 
 _Unwind_Word _Unwind_GetCFA(_Unwind_Context *c)

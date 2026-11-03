@@ -48,7 +48,6 @@ int analyze_count(void) { return NCHECKS; }
 const char *analyze_name(int i) { return g_checks[i]; }
 
 static const char *g_file;
-static struct unit *g_unit;
 
 static void report(const char *name, int line, int col, const char *fmt, ...)
 {
@@ -1094,7 +1093,6 @@ void analyze_unit(struct unit *u)
 {
     if (!any_on())
         return;
-    g_unit = u;
     analyze_isr(u);
     analyze_unsafe(u);
     analyze_memory(u);

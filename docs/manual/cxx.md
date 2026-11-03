@@ -20,19 +20,17 @@ by g++ and with libstdc++, and exceptions propagate between the two. The
 headers and the sources of GCC's libstdc++ compile with EmbCC. EmbCC
 also ships its own C++ runtime and standard library (`lib/libcxx`).
 
-On the Darwin and Windows targets C++ works with restrictions. On the
-32-bit ARM targets (Cortex-M and ARM state) and on `riscv32-unknown-elf`
-C++ is supported without exceptions (`--no-exceptions`), with or without
-RTTI, following the ARM C++ ABI and the Itanium ABI's 32-bit form;
-objects link with clang++'s. The same holds on MIPS32 (both byte
-orders), big-endian MIPS64, PowerPC, SPARC, ColdFire, Xtensa, TriCore and
-RX, with the generic Itanium ABI laid out by each target's data model and
-byte order; on MIPS, SPARC and PowerPC objects link with clang++'s, and on
-Xtensa with g++'s. On `riscv64-unknown-elf`, `mips64el-none-elf` and
-`loongarch64-unknown-elf` C++ is not supported: a unit compiles when
-exceptions are turned off (`--no-exceptions`), and is not tested. With
-exceptions on it is refused, since EmbCC writes no unwind tables for these
-machines. On AVR EmbCC refuses to generate code for C++. See
+C++ is compiled for every target. Exceptions are thrown and caught on the
+x86-64 and AArch64 targets (ELF, Linux, macOS and Windows), on the 32-bit
+ARM targets (Cortex-M and ARM state, with ARM EHABI's `.ARM.exidx`
+tables), on RISC-V at both widths, on MIPS32 and MIPS64 in either byte
+order, on Xtensa (the windowed ABI's own unwinder) and on TriCore (an
+unwinder that walks the CSA chain). On PowerPC, SPARC, ColdFire, RX and
+LoongArch a unit with exceptions is refused by name, and compiles with
+`--no-exceptions`. On AVR, C++ compiles with exceptions off, its default
+there. Each target follows its C++ ABI (the ARM C++ ABI on ARM, the
+Itanium ABI's generic form laid out by the target's data model and byte
+order elsewhere), and objects link with clang++'s and g++'s. See
 [Targets](#targets).
 
 EmbCC compiles C++ by lowering it to C, which the C front end, the
@@ -223,14 +221,14 @@ this:
 |---|---|---|---|
 | `x86_64-elf`, `aarch64-elf`, `-emblink` | Supported | Supported | `libcxx.a`, or libsupc++/libstdc++; libgcc's unwinder |
 | `x86_64-linux-gnu`, `aarch64-linux-gnu` | Supported | Supported | `libcxx.a`; the unwinder in EmbCC's `librt.a` |
-| `arm64-apple-darwin` | Supported | Supported | the system's C++ runtime |
-| `x86_64-apple-darwin` | Supported | Objects do not link | the system's C++ runtime |
-| `x86_64-windows-gnu` | Restricted | Not supported | none |
-| `riscv64-unknown-elf`, `mips64el-none-elf`, `loongarch64-unknown-elf` | Not supported; compiles with `--no-exceptions`, untested | Refused | none |
-| 32-bit ARM: Cortex-M (`thumbv6m-none-eabi`, `thumbv7m-none-eabi`, `thumbv7em-none-eabi[hf]`, `thumbv8m.main-none-eabi[hf]`) and `armv7a-none-eabi[hf]` | Supported with `--no-exceptions` | Refused | the embedded `libcxx.a` (`make libcxx-embedded`) |
-| `riscv32-unknown-elf` | Supported with `--no-exceptions` | Refused | the embedded `libcxx.a` (`make libcxx-embedded`) |
-| `mipsel-none-elf`, `mips-none-elf`, `mips64-none-elf`, `powerpc-none-eabi`, `sparc-none-elf`, `m68k-none-elf`, `xtensa-none-elf`, `tricore-none-elf`, `rx-none-elf` | Supported with `--no-exceptions` | Refused | the embedded `libcxx.a` (`make libcxx-embedded`) |
-| `avr` | Refused | Not supported | none |
+| `arm64-apple-darwin`, `x86_64-apple-darwin` | Supported | Supported | the system's C++ runtime |
+| `x86_64-windows-gnu` | Supported | Supported: `.pdata`/`.xdata`, `__gxx_personality_seh0` | MinGW's libstdc++ (objects only: link with MinGW's toolchain) |
+| 32-bit ARM: Cortex-M (`thumbv6m-none-eabi`, `thumbv7m-none-eabi`, `thumbv7em-none-eabi[hf]`, `thumbv8m.main-none-eabi[hf]`) and `armv7a-none-eabi[hf]` | Supported | Supported: ARM EHABI | the embedded `libcxx.a` (`make libcxx-embedded`) |
+| `riscv32-unknown-elf`, `riscv64-unknown-elf` | Supported | Supported | the embedded `libcxx.a` |
+| `mipsel-none-elf`, `mips-none-elf`, `mips64el-none-elf`, `mips64-none-elf` | Supported | Supported | the embedded `libcxx.a` |
+| `xtensa-none-elf`, `tricore-none-elf` | Supported | Supported | the embedded `libcxx.a` |
+| `powerpc-none-eabi`, `sparc-none-elf`, `m68k-none-elf`, `rx-none-elf`, `loongarch64-unknown-elf` | Supported | Refused by name: `C++ exceptions are not supported for TARGET yet: EmbCC writes no ... .eh_frame; compile with --no-exceptions` | the embedded `libcxx.a` |
+| `avr` | Supported | Off by default | the embedded `libcxx.a`, linked with `--gc-sections` |
 
 **x86-64 and AArch64 ELF.** These are the C++ targets. `libcxx.a` is
 built for `x86_64-elf`, `aarch64-elf`, `x86_64-linux-gnu` and
@@ -381,45 +379,28 @@ each of these boards under QEMU (Malta for MIPS, `ppce500`, LEON3,
 `mcf5208evb`, the Xtensa `sim` board, the TriCore test board and RX's
 `gdbsim`) at `--opt=none`, `--opt=basic`, `--opt=speed` and `--opt=size`, and each prints what the host's
 clang++ build prints. The run-time library is the embedded `libcxx.a`, as
-above (without `__aeabi_atexit`'s caller, which is ARM's). Exceptions are
-refused by name, as on ARM, because EmbCC writes no unwind tables for
-these machines:
+above (without `__aeabi_atexit`'s caller, which is ARM's). It runs
+`tests/cxx-embedded/exceptions.cc` too, where the target has them: a
+throw caught by type and by base class, a rethrow, and the destructors
+of the objects the throw leaves, on ARM (EHABI), RISC-V, MIPS, Xtensa
+and TriCore. Where exceptions are not written yet, the unit
+is refused by name:
 
 ```text
-embcc: error: C++ exceptions are not supported for mips-none-elf yet: EmbCC writes no MIPS .eh_frame; compile with -fno-exceptions
+embcc: error: C++ exceptions are not supported for sparc-none-elf yet: EmbCC writes no SPARC .eh_frame; compile with --no-exceptions
 ```
 
-**AVR.** EmbCC refuses to generate code for a C++ unit there, whether with
-`-c`, `-S` or `--emit-c`. The front end lays classes out by AVR's sizes,
-but its lowering still assumes a 32-bit `int` (integral promotions,
-enumerations, literals), a member pointer's adjustment as wide as a
-`long`, and RTTI's base offsets one pointer wide; and no AVR C++ runtime
-is built.
+**AVR.** C++ follows AVR's two-byte `int` and pointers: `size_t` and
+`ptrdiff_t` are the target's, array cookies, member pointers, vtable
+slots and RTTI's base offsets are laid out by them, and literals have
+AVR's types. `lib/avr` gives the runtime what it needs (`malloc`,
+`stdout`, `atexit`, `abort`), and `libcxx.a` is built with a section per
+function, so a link with `--gc-sections` keeps only what a program uses
+of it. Exceptions are off by default; asked for, they are refused by
+name, as above.
 
-```text
-embcc: error: C++ is not yet supported for avr: the C++ lowering assumes a 32-bit int and 4-byte pointers (integral promotions, member pointers, RTTI), and this target's are 16 bits
-```
-
-`--syntax-only`, which writes nothing, is accepted.
-
-**`riscv64-unknown-elf`.** The front end's data model is the target's,
-and a C++ unit compiles, but C++ is not supported there:
-
-- No `libcxx.a` is built for the target.
-- Exceptions are not implemented. With exceptions on, any function that
-  needs a landing pad is refused, and that includes a function whose
-  local object has a destructor:
-
-  ```text
-  error: the RV64 backend cannot lower this operation yet (function F) [landing w=8 size=4]
-  ```
-
-- The `.eh_frame` section a C++ unit gets cannot be used by an unwinder;
-  `--no-unwind-tables` removes it.
-
-A unit compiled with `--no-exceptions --no-unwind-tables` (and
-`--no-rtti`, there being no runtime to supply `type_info`) produces an
-object, but EmbCC does not test C++ on this target.
+**`riscv64-unknown-elf`.** C++ is supported, with exceptions and RTTI,
+on the RV64 boards `tests/golden/cxx-embedded.sh` runs.
 
 ## Language features
 

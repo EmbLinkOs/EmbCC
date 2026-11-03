@@ -726,9 +726,7 @@ name is what `--print-target`, `--version` and diagnostics print.
 
 The ARM sub-architecture also follows from `--cpu=` and the float ABI, so
 `--target=thumbv7m-none-eabi --cpu=cortex-m4` reports itself as
-`thumbv7em-none-eabi`. Every compile for `x86_64-windows-gnu` prints the
-`--warn=windows-abi` warning, because the Windows calling convention is not yet
-complete. What each target supports is in [Targets](targets.md).
+`thumbv7em-none-eabi`. What each target supports is in [Targets](targets.md).
 
 ### The default target
 

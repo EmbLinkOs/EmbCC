@@ -45,3 +45,52 @@ if "$EMBCC" --stack-report "$out/l.elf" --stack-limit=8 > /dev/null 2>&1; then
     fail "--stack-limit=8 passed a 32-byte frame: $(cat "$out/l.txt")"
 fi
 echo "--stack-report: the paths, the bounds, the unknowns and the limit"
+
+# ---- the path through a frame of no bytes, unknown cycles' reason ----------
+# fill tail-calls sum and neither pushes anything at -O2 on Thumb: the path
+# still names them. At -O1, ivsr makes fill's loop a pointer compared with
+# base + 64, which is counted (16 trips). A callee's unknown cycles say why.
+cat > "$out/z.c" <<'EOF2'
+__attribute__((noinline)) int sum(const int *a) { int s = 0; for (int i = 0; i < 16; i++) s += a[i]; return s; }
+__attribute__((noinline)) int fill(int *a) { for (int i = 0; i < 16; i++) a[i] = i; return sum(a); }
+volatile int g;
+__attribute__((noinline)) int spin(int n) { int k = 0; while (n > 0) { n -= g; k++; } return k; }
+int main(void) { int buf[16]; return fill(buf) + spin(g); }
+EOF2
+for o in -O1 -O2; do
+    "$EMBCC" --target=$T $o --stack-info -c "$out/z.c" -o "$out/z$o.o" || fail "z.c $o"
+    "$EMBCC" --stack-report "$out/z$o.o" > "$out/z$o.txt" 2>&1
+    ! grep -q 'unknown: ?' "$out/z$o.txt" || fail "$o: an unknown with no reason: $(cat "$out/z$o.txt")"
+    grep -q 'unknown: a call in a loop with no bound\|unknown: a loop with no bound' "$out/z$o.txt" ||
+        fail "$o: spin's loop is not the reason: $(cat "$out/z$o.txt")"
+done
+# (sum and fill alone, with a main that calls nothing unbounded)
+printf '__attribute__((noinline)) int fill(int *a);\nint main(void) { int b[16]; return fill(b); }\n' > "$out/fm.c"
+sed -n '1,2p' "$out/z.c" > "$out/fz.c"
+for o in -O1 -O2; do
+    "$EMBCC" --target=$T $o --stack-info -c "$out/fz.c" -o "$out/fz.o" &&
+    "$EMBCC" --target=$T $o --stack-info -c "$out/fm.c" -o "$out/fm.o" &&
+    "$EMBLD" -T "$out/m.ld" -e main "$out/fz.o" "$out/fm.o" -o "$out/fz.elf" ||
+        fail "$o: the counted-loop build"
+    "$EMBCC" --stack-report "$out/fz.elf" > "$out/fz$o.txt" 2>&1
+    # (at -O2 fill tail-calls sum and neither pushes: still on the path)
+    grep -q '^main .* [0-9][0-9]*  main > fill > sum' "$out/fz$o.txt" ||
+        fail "$o: no bound, or the path stops short of sum: $(cat "$out/fz$o.txt")"
+done
+echo "--stack-report: a path through frames of no bytes, the reason for unknown cycles, ivsr's loops counted"
+
+# ---- Mach-O: the records survive ld64, in an __EMBCC segment -----------------
+if [ "$(uname -s)-$(uname -m)" = Darwin-arm64 ]; then
+    "$EMBCC" --target=arm64-apple-darwin -O2 --stack-info "$out/z.c" -o "$out/zd" ||
+        fail "the Mach-O build"
+    "$EMBCC" --stack-report "$out/zd" > "$out/zd.txt" 2>&1 ||
+        fail "--stack-report on a Mach-O image: $(cat "$out/zd.txt")"
+    grep -q '^main ' "$out/zd.txt" || fail "Mach-O: no main: $(cat "$out/zd.txt")"
+    echo "--stack-report reads a Mach-O image"
+fi
+"$EMBCC" --target=x86_64-windows-gnu -O2 --stack-info -c "$out/z.c" -o "$out/zw.obj" 2>/dev/null ||
+    fail "the COFF build"
+"$EMBCC" --stack-report "$out/zw.obj" > "$out/zw.txt" 2>&1 ||
+    fail "--stack-report on a COFF object: $(cat "$out/zw.txt")"
+grep -q '^main .*  main > ' "$out/zw.txt" || fail "COFF: no path: $(cat "$out/zw.txt")"
+echo "--stack-report reads a COFF object"

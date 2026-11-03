@@ -21,7 +21,7 @@ little-endian but the big-endian MIPS ones, `mips-none-elf` and
 |---|---|---|---|---|
 | [x86-64](#x86-64) | `x86_64-elf`, `x86_64-emblink`, `x86_64-linux-gnu` | ELF64 | System V AMD64 | `embcc` (integrated `embld`) |
 | [x86-64 macOS](#macos-mach-o) | `x86_64-apple-darwin` | Mach-O | System V AMD64 | the system linker |
-| [x86-64 Windows](#windows-coff) | `x86_64-windows-gnu` | COFF | Microsoft x64, incomplete | an external linker |
+| [x86-64 Windows](#windows-coff) | `x86_64-windows-gnu` | COFF | Microsoft x64 (LLP64) | an external linker |
 | [AArch64](#aarch64) | `aarch64-elf`, `aarch64-emblink`, `aarch64-linux-gnu` | ELF64 | AAPCS64 | an external linker |
 | [Apple arm64](#apple-arm64) | `aarch64-apple-darwin` | Mach-O | Apple arm64 | the system linker |
 | [ARM Cortex-M](#arm-cortex-m) | `thumbv6m-none-eabi`, `thumbv8m.base-none-eabi`, `thumbv7m-none-eabi`, `thumbv7em-none-eabi`, `thumbv7em-none-eabihf`, `thumbv8m.main-none-eabi`, `thumbv8m.main-none-eabihf` | ELF32 | AAPCS32, AAPCS-VFP | `embld` |
@@ -41,7 +41,7 @@ little-endian but the big-endian MIPS ones, `mips-none-elf` and
 |---|---|---|---|---|---|---|
 | x86-64 ELF, EmbLinkOS, Linux | Primary target | SSE2; x87 for `long double` | DWARF | 1, 2, 4, 8, 16 bytes | Local-exec TLS | Yes, with exceptions |
 | x86-64 macOS | Objects for the system linker | SSE2; x87 for `long double` | Refused | 1, 2, 4, 8, 16 bytes | Refused | Yes, with exceptions |
-| x86-64 Windows | Objects only; warns on every compile | SSE2 | Refused | 1, 2, 4, 8, 16 bytes | Refused | Refused |
+| x86-64 Windows | Objects only | SSE2 | Refused | 1, 2, 4, 8, 16 bytes | Refused | Refused |
 | AArch64 ELF, EmbLinkOS, Linux | Supported | FP/SIMD; `long double` in software | DWARF | 1, 2, 4, 8, 16 bytes | Local-exec TLS | Yes, with exceptions |
 | Apple arm64 | Objects for the system linker | FP/SIMD | Refused | 1, 2, 4, 8, 16 bytes | Refused | Yes, with exceptions |
 | Cortex-M, soft float | Bare metal | Software | DWARF | 1, 2, 4 bytes | One shared instance | Without exceptions |
@@ -197,8 +197,8 @@ Notes on the table:
   and the 128-bit divides through lib/rt.
 - On AVR every type has alignment 1, so `struct { char c; int i; }` is
   three bytes.
-- Windows uses the LP64 model here, which is not Microsoft's; see
-  [Windows](#windows-coff).
+- Windows is LLP64, as Microsoft's compilers and MinGW's are: `long` is
+  4 bytes and `wchar_t` 2; see [Windows](#windows-coff).
 - `max_align_t` is declared by `<stddef.h>` in C++ only.
 
 ## Options common to all targets
@@ -337,17 +337,12 @@ Darwin triples, each with its own diagnostic:
 
 #### Windows (COFF)
 
-`x86_64-windows-gnu` produces AMD64 COFF objects. No program built this
-way has been run on Windows, and EmbCC provides no C library for it.
-Every compile prints a warning, which is on by default and can be
-silenced with `--no-warn=windows-abi`:
+`x86_64-windows-gnu` produces AMD64 COFF objects in the Microsoft x64
+ABI, which link with MinGW's (clang's `x86_64-w64-windows-gnu` and
+MinGW GCC's). EmbCC provides no C library for Windows and does not link
+for it: link with MinGW's toolchain.
 
-```text
-embcc: f.c: warning: x86_64-windows-gnu is not yet the Microsoft x64 ABI: `long` is 8 bytes and wchar_t 4 (Windows has 4 and 2), and rsi, rdi, xmm6 and xmm7 are not preserved across a call: objects EmbCC compiles agree with each other and with nothing else [--warn=windows-abi]
-```
-
-What EmbCC does implement of the Microsoft x64 convention:
-
+- LLP64: `long` is 4 bytes and `wchar_t` 2.
 - The first four arguments travel by position: slot *n* uses the *n*th
   of `rcx`, `rdx`, `r8`, `r9` for an integer and `xmm0`–`xmm3` for a
   floating-point value. The caller reserves 32 bytes of shadow space.
@@ -357,24 +352,24 @@ What EmbCC does implement of the Microsoft x64 convention:
   the integer register of its slot. `va_list` is a `char *` walking
   eight-byte slots; a variadic function stores `rcx`–`r9` into the home
   area, and `va_copy` is an assignment.
+- `rbx`, `rbp`, `rdi`, `rsi`, `r12`–`r15` and `xmm6`–`xmm15` are preserved
+  across a call.
+- Each function has its `.pdata` and `.xdata` unwind entries, so C++
+  exceptions (`__gxx_personality_seh0`) and the system's stack walk work.
+- Constructors and destructors go in `.ctors` and `.dtors`, which MinGW's
+  startup runs, and a named section (`__attribute__((section))`) is its
+  own COFF section.
 
-What is not Microsoft's, beyond the points the warning names, and is
-refused:
+These are refused by name:
 
 | Construct | Diagnostic |
 |---|---|
 | `long double` in a function's signature | `long double in the signature of 'f' is not supported for a Windows target yet: there it travels by reference and returns through a hidden pointer, and EmbCC passes it on the stack by value` |
 | `__int128` in a function's signature | `__int128 in the signature of 'f' is not supported for a Windows target yet: EmbCC lowers its arithmetic to libgcc helpers whose arguments it places in the System V registers` |
 | `va_arg` of a structure | `va_arg of a struct is not supported for a Windows target yet` |
-| `va_arg` of `long double` or `__int128` | `va_arg of long double is not supported for a Windows target yet: there it travels by reference` |
 | `-g` | `-g is not supported for a Windows target yet: its debug information goes in CodeView records this does not write, and emitting DWARF under a COFF name would be worse than refusing` |
 | `__thread` | `__thread is not supported for a Windows target yet: Windows reaches a thread-local through a _tls_index and a TLS directory this writer does not emit` |
-| `__attribute__((constructor))`, `destructor` | `__attribute__((constructor)) is not supported for a Windows target yet: it needs the .ctors/.dtors sections this COFF writer does not emit` |
 | file-scope `__asm__` with labels or symbols | `a file-scope asm block with labels or symbol references is not supported for a Windows target yet` |
-| any C++ translation unit | `C++ exceptions are not supported for a Windows target yet: the unwind tables go in .pdata and .xdata and neither is written` |
-
-C++ is refused even with `--no-exceptions`, because C++ always gets
-unwind tables.
 
 ### Predefined macros
 
