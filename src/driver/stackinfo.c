@@ -388,8 +388,8 @@ static void analyze(int i)
     f->state = 2;
 }
 
-static unsigned char *elf_section(const unsigned char *d, long n,
-                                  const char *want, long *len)
+unsigned char *stackinfo_elf_section(const unsigned char *d, long n,
+                                     const char *want, long *len)
 {
     if (n < 52 || memcmp(d, "\177ELF", 4))
         return NULL;
@@ -459,7 +459,7 @@ int stackinfo_report(int argc, char **argv)
         return 1;
     }
     long sl = 0;
-    unsigned char *s = elf_section(d, n, ".debug_embcc_stack", &sl);
+    unsigned char *s = stackinfo_elf_section(d, n, ".debug_embcc_stack", &sl);
     if (!s) {
         fprintf(stderr, "embcc: error: '%s' has no stack information: "
                         "compile with --stack-info (and do not strip)\n", file);

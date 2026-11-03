@@ -219,6 +219,12 @@ EMBCC_NORETURN void fatal_unwind(void);
  */
 struct outbuf { char *p; size_t n, cap; };
 
+/* -ffile-prefix-map=OLD=NEW and -f{macro,debug,profile}-prefix-map: a
+ * path's OLD prefix written as NEW, in what each kind names */
+enum { PMAP_MACRO = 1, PMAP_DEBUG = 2, PMAP_PROFILE = 4 };
+int pmap_add(const char *spec, int kinds);     /* -1: no '=' */
+const char *pmap_apply(const char *path, int kind);
+
 void ob_add(struct outbuf *b, const char *s, size_t n);
 void ob_str(struct outbuf *b, const char *s);
 void ob_ch(struct outbuf *b, char c);

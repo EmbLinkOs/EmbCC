@@ -1424,6 +1424,7 @@ void ir_cfi_add(struct ir_func *fn, int off, int kind, int reg, long val)
 void dwarf_emit(struct ir_unit *iu, const char *filename,
                 struct dwarf_out *out)
 {
+    filename = pmap_apply(filename, PMAP_DEBUG);   /* -fdebug-prefix-map */
     emit_all(iu, filename, out, 0);
 }
 

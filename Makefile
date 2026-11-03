@@ -329,6 +329,7 @@ SRCS := \
 	src/driver/explain.c \
 	src/driver/options.c \
 	src/driver/stackinfo.c \
+	src/driver/sbom.c \
 	src/driver/paths.c \
 	src/link/link.c \
 	src/as/gas.c \

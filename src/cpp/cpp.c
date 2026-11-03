@@ -606,7 +606,8 @@ static int dynamic_macro(struct src *s, const char *name, size_t n,
     } else if (IS("__INCLUDE_LEVEL__")) {
         snprintf(buf, bufsz, "%d", s->cpp->depth);
     } else if (IS("__FILE_NAME__") || IS("__BASE_FILE__")) {
-        const char *f = IS("__BASE_FILE__") ? s->cpp->base_file : s->file;
+        const char *f = pmap_apply(IS("__BASE_FILE__") ? s->cpp->base_file
+                                                       : s->file, PMAP_MACRO);
         const char *slash = strrchr(f ? f : "", '/');
         if (IS("__FILE_NAME__") && slash)
             f = slash + 1;
@@ -722,7 +723,7 @@ static void expand_text(struct src *s, const char *text, struct tbuf *out)
         /* dynamic predefined macros */
         if (n == 8 && !memcmp(p, "__FILE__", 8)) {
             tb_putc(out, '"');
-            tb_puts(out, s->file);
+            tb_puts(out, pmap_apply(s->file, PMAP_MACRO));
             tb_putc(out, '"');
             p += n;
             continue;

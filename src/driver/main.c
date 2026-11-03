@@ -35,6 +35,7 @@
 #include "asmout.h"
 #include "options.h"
 #include "stackinfo.h"
+#include "sbom.h"
 #include "iface.h"
 #include "inspect.h"
 #include "remark.h"
@@ -1152,6 +1153,13 @@ static int compile_and_link(const char *in, const char *out)
     g_cur_exe = out ? out : "a.out";
     int rc = compile_and_link_(in, out);
     g_cur_exe = NULL;
+    /* --sbom=FILE: the image's bill, once it exists */
+    if (rc == 0 && sbom_file()) {
+        for (int k = 0; k < g_nlink_in; k++)
+            if (g_link_in[k][0] != '-')
+                sbom_note_input(g_link_in[k]);
+        rc = sbom_write(out ? out : "a.out", sbom_file());
+    }
     if (lto) {
         remove(lto);
         free(lto);
@@ -1448,6 +1456,9 @@ static int compile_and_link_(const char *in, const char *out)
     }
 
     rc = link_bounded(inputs, n, exe, &lo);
+    for (int k = 0; k < n && sbom_file(); k++)
+        if (inputs[k] != obj)
+            sbom_note_input(inputs[k]);
     if (in)
         remove(obj);
     if (have_pic32_proc)
@@ -6032,6 +6043,8 @@ lto_backend:
     /* --stack-info: each function's frame, calls and cycles, for
      * --stack-report (src/driver/stackinfo.c) */
     stackinfo_emit(w, u, iu, &text, text_ndx, text_at, si_sec_of, in);
+    /* --sbom: the source and its headers, with their hashes */
+    sbom_emit_unit(w, in, cpp_dep_count(), cpp_dep_path, cpp_dep_is_system);
     int rc = elfw_write(w, out);
     elfw_free(w);
     return rc == 0 ? 0 : 1;
@@ -6437,6 +6450,8 @@ static int embcc_main(int argc, char **argv)
             return gcov_extract(argc - i - 1, argv + i + 1);
         if (strcmp(argv[i], "--stack-report") == 0)
             return stackinfo_report(argc - i - 1, argv + i + 1);
+        if (strcmp(argv[i], "--sbom-from") == 0)
+            return sbom_from(argc - i - 1, argv + i + 1);
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             print_usage(stdout);
             opts_print_help(stdout);
@@ -6758,12 +6773,43 @@ static int embcc_main(int argc, char **argv)
                 p = e + 1;
             }
             g_cf_a64 = 1;
+        } else if (strncmp(argv[i], "-ffile-prefix-map=", 18) == 0 ||
+                   strncmp(argv[i], "-fdebug-prefix-map=", 19) == 0 ||
+                   strncmp(argv[i], "-fmacro-prefix-map=", 19) == 0 ||
+                   strncmp(argv[i], "-fprofile-prefix-map=", 21) == 0 ||
+                   strncmp(argv[i], "--prefix-map=", 13) == 0) {
+            /* reproducible builds: OLD=NEW, in __FILE__ (macro), the
+             * DWARF (debug), the gcov notes (profile), or all (file) */
+            const char *a = argv[i];
+            int kinds = a[2] == 'f' && a[3] == 'd' ? PMAP_DEBUG
+                      : a[2] == 'f' && a[3] == 'm' ? PMAP_MACRO
+                      : a[2] == 'f' && a[3] == 'p' ? PMAP_PROFILE
+                      : PMAP_MACRO | PMAP_DEBUG | PMAP_PROFILE;
+            if (pmap_add(strchr(a, '=') + 1, kinds) != 0) {
+                fprintf(stderr, "embcc: error: %s: the form is OLD=NEW\n",
+                        opt_typed(a));
+                return 1;
+            }
+        } else if (strcmp(argv[i], "-frandom-seed") == 0 ||
+                   strncmp(argv[i], "-frandom-seed=", 14) == 0) {
+            /* accepted: nothing EmbCC writes is random, so every build of
+             * the same input is the same already */
         } else if (strcmp(argv[i], "-fbounds-safety") == 0 ||
                    strcmp(argv[i], "--bounds-safety") == 0) {
             g_bounds = 1;
         } else if (strcmp(argv[i], "-fno-bounds-safety") == 0 ||
                    strcmp(argv[i], "--no-bounds-safety") == 0) {
             g_bounds = 0;
+        } else if (strcmp(argv[i], "--sbom") == 0) {
+            sbom_set(NULL, 1);
+        } else if (strncmp(argv[i], "--sbom=", 7) == 0) {
+            sbom_set(argv[i] + 7, 1);
+        } else if (strncmp(argv[i], "--sbom-format=", 14) == 0) {
+            if (sbom_set_format(argv[i] + 14) != 0) {
+                fprintf(stderr, "embcc: error: --sbom-format=%s: spdx or "
+                                "cyclonedx\n", argv[i] + 14);
+                return 1;
+            }
         } else if (strcmp(argv[i], "--stack-info") == 0) {
             stackinfo_set(1);
             target_set_stack_info(1);
@@ -7519,8 +7565,7 @@ static int embcc_main(int argc, char **argv)
                    strcmp(argv[i], "-fno-profile-values") == 0 ||
                    strcmp(argv[i], "-fvpt") == 0 ||
                    strcmp(argv[i], "-fno-vpt") == 0 ||
-                   strncmp(argv[i], "-fprofile-reproducible=", 23) == 0 ||
-                   strncmp(argv[i], "-fprofile-prefix-map=", 21) == 0) {
+                   strncmp(argv[i], "-fprofile-reproducible=", 23) == 0) {
             /* accepted: the profile is solved by flow (it tolerates the
              * inconsistencies -fprofile-correction smooths), hot and
              * cold functions are always placed apart, the branch

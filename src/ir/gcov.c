@@ -151,6 +151,7 @@ void gcov_set_flags(int partial, int abs)
 
 static const char *note_file(const char *file)
 {
+    file = pmap_apply(file, PMAP_PROFILE);
     if (!g_abs || !file || file[0] == '/' || file[0] == '<' || !plat_cwd())
         return file;
     size_t n = strlen(plat_cwd()) + strlen(file) + 2;
@@ -443,7 +444,7 @@ int gcov_write_notes(const char *gcno)
     if (g_bytes)
         put32(&b, 0);                    /* checksum: GCC writes 0 too */
     const char *cwd = plat_cwd();
-    put_str(&b, cwd ? cwd : ".");
+    put_str(&b, cwd ? pmap_apply(cwd, PMAP_PROFILE) : ".");
     put32(&b, 1);                        /* it says which blocks never ran */
     ob_add(&b, g_nb.p, g_nb.n);
     put32(&b, 0);

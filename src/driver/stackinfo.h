@@ -13,4 +13,7 @@ void stackinfo_emit(struct elfw *w, struct unit *u, struct ir_unit *iu,
                     int (*text_at)(long off, long *o),
                     int (*sec_of)(int gi, int text_ndx), const char *src);
 int stackinfo_report(int argc, char **argv);
+/* an ELF file's section by name (any class and byte order), or NULL */
+unsigned char *stackinfo_elf_section(const unsigned char *d, long n,
+                                     const char *want, long *len);
 #endif
