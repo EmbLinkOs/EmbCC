@@ -450,7 +450,7 @@ refuses it, with the diagnostic shown. Diagnostics are quoted without the
 | Explicit and partial specialization | Supported | The most specialized partial specialization is chosen. |
 | Template template parameters | Supported | |
 | Explicit instantiation | Supported | Not for variable templates (C++14 row). |
-| Two-phase name lookup | Not supported | Names in a template are looked up when it is instantiated; see [Name lookup in templates](#name-lookup-in-templates). |
+| Two-phase name lookup | Partial | Functions are bound at the definition, plus argument-dependent lookup at instantiation; dependent bases are not searched unqualified. See [Name lookup in templates](#name-lookup-in-templates). |
 | `export` templates | Not supported | `modules are not supported` |
 | `throw`, `try`, `catch`, function-try-blocks, `throw()` | Supported | On the targets in [Targets](#targets). |
 | `typeid`, `dynamic_cast`, `std::type_info` | Supported | Errors under `--no-rtti`. |
@@ -599,12 +599,14 @@ for them, and `--pedantic` reports them before C++26.
 ### Name lookup in templates
 
 A template's tokens are kept, and each instantiation parses them again
-with the template arguments bound. Two-phase lookup is therefore not
-implemented:
+with the template arguments bound. Lookup follows the two phases of the
+standard:
 
-- A name that does not depend on a template parameter is looked up at
-  the point of instantiation, not at the template's definition. In this
-  program g++ calls `g(double)`; EmbCC calls `g(int)`:
+- Ordinary unqualified and qualified lookup of a function name in a
+  template sees the functions declared before the template's
+  definition. Functions declared later are found only by
+  argument-dependent lookup at the point of instantiation. In this
+  program both g++ and EmbCC call `g(double)`:
 
   ```cpp
   void g(double);
@@ -613,8 +615,16 @@ implemented:
   int x = f<int>();
   ```
 
-- An unqualified name is found in a dependent base class, where the
-  standard requires `this->`.
+- An unqualified name is not looked up in a base class whose specifier
+  names a template parameter. Write `this->m()` or `B<T>::m()` to reach
+  its members.
+
+Two differences remain:
+
+- Variables, types and namespaces are looked up at the point of
+  instantiation, not at the definition. A program sees a difference only
+  when such a name is declared after the template and also found before
+  it.
 - The body of a template that is never instantiated is not checked; an
   undeclared name in it is not diagnosed.
 

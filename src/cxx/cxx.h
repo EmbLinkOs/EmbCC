@@ -313,6 +313,9 @@ struct csym {
     int access;               /* in a class: CA_* */
     struct csym *next;        /* in the scope's list */
     struct csym *hnext;       /* in the lookup hash chain */
+    struct csym *vis;         /* FUNC: the overloads declared before a
+                               * replayed template's tokens, once made */
+    int nvis;                 /* ... how many */
 };
 
 enum { CA_PUBLIC, CA_PROTECTED, CA_PRIVATE };
@@ -630,6 +633,9 @@ struct cfunc {
     const char **pnames;      /* parameter names (np of them) */
     struct cexpr **defargs;   /* default arguments, per parameter (or NULL) */
     struct cscope *owner;     /* namespace or class scope */
+    int pos;                  /* a namespace's: cx_pos + 1 where declared;
+                               * a template replayed from earlier tokens
+                               * does not see it (0: seen everywhere) */
     struct cclass *cls;       /* a member function */
     int is_static;            /* static member, or internal linkage */
     int is_inline;            /* inline (incl. defined in a class body) */
@@ -763,6 +769,9 @@ struct cbase {
                                * its offset (bytes from the address point) */
     int claimed;              /* ... a subobject's primary base: at its
                                * address, taking no space of its own */
+    int dep;                  /* its specifier names a template parameter:
+                               * unqualified lookup does not search it
+                               * (13.8.3.2) */
 };
 
 /* A slot of a vtable: the final overrider it calls, and how to get there

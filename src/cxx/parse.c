@@ -2187,6 +2187,8 @@ static struct cfunc *declare_function(struct dspec *ds, struct declarator *d,
     f->name = d->name;
     f->type = ft;
     f->owner = target;
+    if (target->k == SC_NAMESPACE && !(ds->is_friend && !d->qual))
+        f->pos = cx_pos + 1;
     f->cls = cls;
     f->line = d->at ? d->at->t.line : 0;
     f->col = d->at ? d->at->t.col : 0;
@@ -3692,9 +3694,29 @@ static void parse_bases(struct cclass *c)
     } while (cx_accept(TOK_COMMA));
 }
 
+/* Tokens [from, to) name a template parameter (not as a member's name
+ * after ::, . or ->): a base they specify is dependent. */
+static int names_tparam(int from, int to)
+{
+    for (int i = from; i < to; i++) {
+        if (cx_toks[i].t.kind != TOK_IDENT)
+            continue;
+        if (i > from) {
+            enum tok_kind k = cx_toks[i - 1].t.kind;
+            if (k == TOK_COLONCOLON || k == TOK_DOT || k == TOK_ARROW)
+                continue;
+        }
+        struct csym *y = lookup_raw(cx_scope, cx_toks[i].t.text);
+        if (y && y->scope && y->scope->k == SC_TEMPLATE)
+            return 1;
+    }
+    return 0;
+}
+
 static void add_base(struct cclass *c, const struct ctok *at, int virt,
                      int access, int *cap)
 {
+    int from = cx_pos;
     {
         struct cty *t;
         int n;
@@ -3729,6 +3751,7 @@ static void add_base(struct cclass *c, const struct ctok *at, int virt,
         cb->cls = b;
         cb->is_virtual = virt;
         cb->access = access;
+        cb->dep = names_tparam(from, cx_pos);
     }
 }
 
@@ -8228,6 +8251,8 @@ static void template_decl_rest(struct cclass *cls, int access,
         f->type = t;
         f->tmpl = tm;
         f->owner = home;
+        if (home->k == SC_NAMESPACE && !ds.is_friend)
+            f->pos = cx_pos + 1;
         f->cls = ds.is_friend ? NULL : ocls;
         f->hidden_friend = ds.is_friend && !d.qual;
         f->is_ctor = d.kind == DN_CTOR;
