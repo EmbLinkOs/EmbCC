@@ -682,10 +682,8 @@ static void annotate(struct ir_func *fn, struct func *f, struct gblk *B,
 void irgen_counter_incr(struct ir_func *fn, struct global *ctrs, long off,
                         int atomic);
 
-/* The function's code with the counters in: `ins` of what to put where
- * (sorted by position), the old instructions' new places for the
- * metadata that names instruction positions. */
-struct gins { int at, lo, hi; };
+/* The function's code with the counters in (ir_splice, ir.h). */
+#define gins ir_slice
 
 static int gins_cmp(const void *a, const void *b)
 {
@@ -694,8 +692,8 @@ static int gins_cmp(const void *a, const void *b)
                           : (x->lo < y->lo ? -1 : x->lo > y->lo);
 }
 
-static void splice(struct ir_func *fn, int n0, int slices_end,
-                   struct gins *gi, int ng)
+void ir_splice(struct ir_func *fn, int n0, int slices_end,
+               struct ir_slice *gi, int ng)
 {
     qsort(gi, (size_t)ng, sizeof *gi, gins_cmp);
     int total = fn->nins;           /* n0 code + slices + trampolines */
@@ -1205,7 +1203,7 @@ void gcov_function(struct ir_unit *iu, struct ir_func *fn, struct func *f)
             j->line = line;
             j->synth = 1;
         }
-        splice(fn, n0, trampolines, gi, ng);
+        ir_splice(fn, n0, trampolines, gi, ng);
         free(gi);
         g_nctrs += nct;
     }

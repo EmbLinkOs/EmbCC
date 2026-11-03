@@ -96,6 +96,10 @@ struct attrs { int packed; int aligned; int weak; int noreturn;
                 * how likely a path to a call of it is (src/ir/gcov.c);
                 * no_profile_instrument_function: no --coverage counters */
                int hot, cold, no_profile;
+               /* no_sanitize("address,thread"), no_sanitize_address and
+                * the rest: which -fsanitize= checks leave the function
+                * alone (SAN_* bits, src/ir/ir.h) */
+               unsigned no_san;
 };
 
 /* The `)` that closes a declarator's `(`: the lexer at it, under the `(`'s
@@ -904,9 +908,13 @@ static const struct attr_entry attr_table[] = {
     { "may_alias",  ATTR_NOOP,
       "EmbCC does no type-based alias analysis, so not doing it is "
       "already what this asks for" },
-    { "no_sanitize", ATTR_NOOP, "EmbCC has no sanitizers to turn off" },
-    { "no_sanitize_address", ATTR_NOOP, "EmbCC has no sanitizers" },
-    { "no_sanitize_undefined", ATTR_NOOP, "EmbCC has no sanitizers" },
+    { "no_sanitize", ATTR_HONOURED, NULL },
+    { "no_sanitize_address", ATTR_HONOURED, NULL },
+    { "no_address_safety_analysis", ATTR_HONOURED, NULL },
+    { "no_sanitize_thread", ATTR_HONOURED, NULL },
+    { "no_sanitize_memory", ATTR_HONOURED, NULL },
+    { "no_sanitize_undefined", ATTR_HONOURED, NULL },
+    { "disable_sanitizer_instrumentation", ATTR_HONOURED, NULL },
     { "no_instrument_function", ATTR_HONOURED, NULL },
     { "hot",       ATTR_HONOURED, NULL },
     { "cold",      ATTR_HONOURED, NULL },
@@ -1509,6 +1517,26 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
                 else if (attr_is(name, "fallthrough")) out->fallthrough = 1;
                 else if (attr_is(name, "no_instrument_function"))
                     out->no_instrument = 1;
+                else if (attr_is(name, "no_sanitize")) {
+                    const char *q = sarg ? sarg : "";
+                    if (strstr(q, "address")) out->no_san |= SAN_ADDRESS;
+                    if (strstr(q, "thread")) out->no_san |= SAN_THREAD;
+                    if (strstr(q, "memory")) out->no_san |= SAN_MEMORY;
+                    if (strstr(q, "undefined") || strstr(q, "overflow") ||
+                        strstr(q, "shift") || strstr(q, "divide"))
+                        out->no_san |= SAN_OVERFLOW | SAN_DIVIDE | SAN_SHIFT;
+                }
+                else if (attr_is(name, "no_sanitize_address") ||
+                         attr_is(name, "no_address_safety_analysis"))
+                    out->no_san |= SAN_ADDRESS;
+                else if (attr_is(name, "no_sanitize_thread"))
+                    out->no_san |= SAN_THREAD;
+                else if (attr_is(name, "no_sanitize_memory"))
+                    out->no_san |= SAN_MEMORY;
+                else if (attr_is(name, "no_sanitize_undefined"))
+                    out->no_san |= SAN_OVERFLOW | SAN_DIVIDE | SAN_SHIFT;
+                else if (attr_is(name, "disable_sanitizer_instrumentation"))
+                    out->no_san = ~0u;
                 else if (attr_is(name, "hot")) out->hot = 1;
                 else if (attr_is(name, "cold")) out->cold = 1;
                 else if (attr_is(name, "no_profile_instrument_function"))
@@ -7416,6 +7444,7 @@ static void parse_top(struct parser *ps, struct unit *u,
     if (at.hot) f->attr_hot = 1;
     if (at.cold) f->attr_cold = 1;
     if (at.no_profile) f->attr_no_profile = 1;
+    f->attr_no_san |= at.no_san;
     if (at.aligned > f->user_align) f->user_align = at.aligned;
     f->attr_gnu_inline = at.gnu_inline;
     f->pcs = at.pcs;
@@ -7439,9 +7468,12 @@ static void parse_top(struct parser *ps, struct unit *u,
                 if (at.hot) f->attr_hot = 1;
                 if (at.cold) f->attr_cold = 1;
                 if (at.no_profile) f->attr_no_profile = 1;
+                f->attr_no_san |= at.no_san;
+    f->attr_no_san |= at.no_san;
     if (at.hot) f->attr_hot = 1;
     if (at.cold) f->attr_cold = 1;
     if (at.no_profile) f->attr_no_profile = 1;
+    f->attr_no_san |= at.no_san;
                 if (at.aligned > f->user_align) f->user_align = at.aligned;
                 f->attr_gnu_inline = at.gnu_inline;
                 f->pcs = at.pcs;
@@ -7554,6 +7586,7 @@ static void parse_top(struct parser *ps, struct unit *u,
     if (at.hot) f->attr_hot = 1;
     if (at.cold) f->attr_cold = 1;
     if (at.no_profile) f->attr_no_profile = 1;
+    f->attr_no_san |= at.no_san;
     if (at.aligned > f->user_align) f->user_align = at.aligned;
     f->attr_gnu_inline = at.gnu_inline;
     f->pcs = at.pcs;
@@ -7702,6 +7735,7 @@ fn_tail:
     if (at.hot) f->attr_hot = 1;
     if (at.cold) f->attr_cold = 1;
     if (at.no_profile) f->attr_no_profile = 1;
+    f->attr_no_san |= at.no_san;
     if (at.aligned > f->user_align) f->user_align = at.aligned;
     f->attr_gnu_inline = at.gnu_inline;
     f->pcs = at.pcs;

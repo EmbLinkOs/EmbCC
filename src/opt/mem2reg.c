@@ -519,6 +519,15 @@ int pass_mem2reg(struct ir_func *fn)
         struct ir_ins *c = ib_push(&nb);
         c->op = IR_CONST; c->dst = undef[p]; c->imm = 0;
         c->w = fn->locals[ploc[p]].size == 8 ? 8 : 4;
+        /* -fsanitize=memory: the read of the slot itself, which nothing
+         * can fold and whose shadow says it was never written -- a
+         * zero would be a defined value, and the read would go unseen */
+        if (san_runtime() & SAN_MEMORY) {
+            c->op = IR_LDVAR;
+            c->a = ploc[p];
+            c->size = fn->locals[ploc[p]].size;
+            c->sign = 1;
+        }
         /* The seed for a variable read before it is written: it stands for
          * a value the program never produced, so it corresponds to no
          * source construct at all. The §9.1 exception, marked so the

@@ -315,6 +315,10 @@ struct ir_ins {
      * layout pass (cold code to the function's end), the inliner and the
      * loop passes; codegen never looks. */
     unsigned char heat;
+    /* IR_LOAD/IR_STORE: an atomic load or store (C11 atomics, __atomic_*,
+     * _Atomic objects) -- for -fsanitize=thread, which treats it as the
+     * synchronization it is rather than as a racing access */
+    unsigned char atomic;
     /* IR_BRZ/IR_BRNZ: 1 + the per-mille probability that the branch is
      * TAKEN (1..1001); 0 unknown. A pass that inverts a branch flips it
      * (ir_prob_flip). */
@@ -687,7 +691,7 @@ struct ir_unit *irgen(struct unit *u);
  * an exception at the offending operation -- a breakpoint under a
  * debugger, and a stop rather than a wrong value without one, which is
  * the point on a board. */
-enum { SAN_OVERFLOW = 1, SAN_DIVIDE = 2, SAN_SHIFT = 4 };
+/* (the SAN_* bits are in parse/ast.h, for the attributes that name them) */
 void irgen_set_sanitize(unsigned mask);
 /* -finstrument-functions, with GCC's two exclusion lists (comma-separated;
  * either may be NULL) */
@@ -703,6 +707,22 @@ void irgen_set_opt_size(int on);       /* -Os: a switch table must be denser */
  * gcov_unit_end after irgen (it sizes and fills the two objects
  * gcov_ctor_source declared), gcov_write_notes for the .gcno. */
 struct unit;
+/* -fsanitize=address, thread, memory (src/ir/sanitize.c): the mask of the
+ * ones with a runtime, and recovery (-fsanitize-recover); the C a unit
+ * gets (the global table's constructor); its globals' redzones, after
+ * irgen; and the instrumentation, after the optimizer. san_asan_locals
+ * is sema's: which locals get redzones (sema.h declares it too). */
+void san_set_runtime(unsigned mask, int recover);
+unsigned san_runtime(void);
+const char *san_ctor_source(void);
+void san_globals(struct unit *u);
+void san_instrument(struct ir_unit *iu);
+void irgen_san_call(struct ir_unit *iu, struct ir_func *fn, const char *name,
+                    int n, const int *vals, int line);
+int irgen_san_call_ret(struct ir_unit *iu, struct ir_func *fn,
+                       const char *name, int n, const int *vals, int line,
+                       int ret);
+struct func *irgen_func_renamed(const struct func *f, const char *name);
 void gcov_set(int arcs, int notes, int atomic, const char *filter,
               const char *exclude);
 void gcov_set_use(const char *gcda);
@@ -718,6 +738,15 @@ int gcov_write_notes(const char *gcno);
 int gcov_extract(int nlogs, char **logs);  /* embcc --gcov-extract */
 int gcov_set_version(const char *v);       /* --coverage-version=; -1 bad */
 unsigned gcov_crc32(unsigned c, const void *p, unsigned long n);
+/* Code made at a function's end moved into it: fn's first n0 instructions
+ * are its code, [n0, slices_end) the slices, and what follows stays at
+ * the end. Each slice [lo, hi) goes before old instruction `at` (n0: after
+ * the last), taking that instruction's line; the exception regions and
+ * the locals' lexical ranges move with the code. */
+struct ir_slice { int at, lo, hi; };
+void ir_splice(struct ir_func *fn, int n0, int slices_end,
+               struct ir_slice *sl, int ns);
+
 /* irgen's half: *(counters + off) += 1, 64 bits, atomically if asked */
 void irgen_counter_incr(struct ir_func *fn, struct global *ctrs, long off,
                         int atomic);

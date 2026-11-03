@@ -84,6 +84,21 @@ rm -f "$out/librt.a"
 rm -f "$out/libgcov.a"
 "$AR" rcs "$out/libgcov.a" "$out/rt/gcov.o.x"
 
+# The sanitizers' runtimes (lib/san), never themselves instrumented:
+# libasan.a for every target, libtsan.a and libmsan.a where there are an
+# operating system's threads and mmap to build on
+sans=asan
+case $triple in *-apple-darwin*|*linux*) sans="asan tsan msan" ;; esac
+for s in $sans; do
+    # shellcheck disable=SC2086
+    "$EMBCC" --target="$triple" $flags -fenum-size-neutral -O1 \
+        --sections=functions,data -c "$here/lib/san/$s.c" -o "$out/rt/$s.o.x" || {
+        echo "build-rt: lib/san/$s.c does not compile for $triple" >&2
+        exit 1; }
+    rm -f "$out/lib$s.a"
+    "$AR" rcs "$out/lib$s.a" "$out/rt/$s.o.x"
+done
+
 # PIC32 (mipsel with --mcu=): EmbCC's startup, the same for every part;
 # the driver makes each part's linker script from its device pack.
 if [ "$triple" = mipsel-none-elf ]; then

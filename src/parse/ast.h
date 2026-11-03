@@ -29,6 +29,11 @@ enum expr_kind { EXPR_NUM, EXPR_FNUM, EXPR_STR, EXPR_VAR, EXPR_BINOP, EXPR_CALL,
                                     * value a landing pad sees for catch
                                     * type ti (name; 0 = catch-all) */
 
+/* -fsanitize's checks (src/ir/irgen.c's trap checks; src/ir/sanitize.c
+ * and lib/san for the ones with a runtime) and no_sanitize's mask */
+enum { SAN_OVERFLOW = 1, SAN_DIVIDE = 2, SAN_SHIFT = 4,
+       SAN_ADDRESS = 8, SAN_THREAD = 16, SAN_MEMORY = 32 };
+
 struct stmt;   /* a statement expression `({ ... })` carries a block */
 
 /* B_LAND/B_LOR are short-circuit: irgen lowers them to branches, they
@@ -466,6 +471,10 @@ struct func {
                                * cold one is optimized for size and a path
                                * to a call of it is an unlikely one */
     int attr_no_profile;      /* no_profile_instrument_function */
+    unsigned attr_no_san;     /* no_sanitize(...): SAN_* bits it opts out of */
+    /* -fsanitize=address: the locals given redzones (sema), each one
+     * var_indirect, carved from one block by irgen; NULL when none */
+    char *var_asan;
     int prof_heat;            /* -fprofile-use: IR_HEAT_COLD when the profile
                                * never ran it, IR_HEAT_HOT for the hottest;
                                * 0 when no profile speaks for it */

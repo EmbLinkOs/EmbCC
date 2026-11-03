@@ -525,6 +525,17 @@ static const char *g_dumpbase;
  * g_cur_exe is the image a compile_and_link unit goes into, which names
  * its notes (x-t.gcno for `t.c -o x`, as GCC and clang do). */
 static int g_cov_arcs, g_cov_notes, g_cov_link, g_cov_update;
+/* -fsanitize=address, thread, memory: which runtime archives the link
+ * takes (lib/san); -fsanitize-recover=address */
+static unsigned g_san_link;
+static int g_san_recover;
+
+/* the sanitizer runtime's archive */
+static const char *san_archive(void)
+{
+    return g_san_link & SAN_THREAD ? "libtsan.a"
+         : g_san_link & SAN_MEMORY ? "libmsan.a" : "libasan.a";
+}
 static int g_prof_use_on, g_prof_abs, g_prof_partial;
 static const char *g_prof_dir, *g_prof_use, *g_prof_note;
 static const char *g_prof_filter, *g_prof_exclude, *g_prof_prefix;
@@ -1384,6 +1395,19 @@ static int compile_and_link_(const char *in, const char *out)
     }
     /* libgcov (--coverage, -fprofile-generate, -lgcov): before libc,
      * whose stdio it writes the .gcda files with */
+    /* -fsanitize=address, thread, memory: its runtime (lib/san), before
+     * libc, whose malloc and threads it builds on */
+    char libsan[1024];
+    if (g_san_link) {
+        const char *nm = san_archive();
+        if (!paths_target_file(triple, nm, libsan, sizeof libsan)) {
+            missing_runtime(nm, triple, 0);
+            if (in)
+                remove(obj);
+            return 1;
+        }
+        inputs[n++] = libsan;
+    }
     char libgcov[1024];
     if (g_cov_link) {
         if (!paths_target_file(triple, "libgcov.a", libgcov, sizeof libgcov)) {
@@ -2104,7 +2128,11 @@ static int darwin_link(const char *in, const char *exe)
     }
     if (!g_nostdlib && !g_nodefaultlibs) {
         static char librt[1100];
-        static char libgcov[1100];
+        static char libgcov[1100], libsan[1100];
+        if (g_san_link &&
+            paths_target_file(lib_triple(), san_archive(), libsan,
+                              sizeof libsan))
+            argv[n++] = libsan;
         if (g_cov_link &&
             paths_target_file(lib_triple(), "libgcov.a", libgcov,
                               sizeof libgcov))
@@ -2376,7 +2404,11 @@ static int glibc_link(const char *in, const char *exe)
         static char rtcopy[1100];
         if (g_static_link || g_link_kind == LINK_STATIC_PIE)
             argv[n++] = "--start-group";
-        static char libgcov[1100];
+        static char libgcov[1100], libsan[1100];
+        if (g_san_link &&
+            paths_target_file(lib_triple(), san_archive(), libsan,
+                              sizeof libsan))
+            argv[n++] = libsan;
         if (g_cov_link &&
             paths_target_file(lib_triple(), "libgcov.a", libgcov,
                               sizeof libgcov))
@@ -3120,6 +3152,14 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         g_lto_payload = pp;           /* (the C++ front end's, for C++) */
     /* --coverage: the unit's counters, its record, and the constructor
      * that hands the record to libgcov (gcov_ctor_source) */
+    if ((san_runtime() & SAN_ADDRESS) && in) {
+        const char *c = san_ctor_source();
+        size_t a = strlen(pp), b = strlen(c);
+        char *q = xmalloc(a + b + 1);
+        memcpy(q, pp, a);
+        memcpy(q + a, c, b + 1);
+        pp = q;
+    }
     unsigned cov_stamp = 0;
     if (gcov_active() && in) {
         cov_stamp = gcov_crc32(gcov_crc32(0, in, strlen(in)), pp, strlen(pp));
@@ -3255,6 +3295,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     }
     iu = irgen(u);
     time_mark("IR generation");
+    san_globals(u);
     if (gcov_active() && in) {
         gcov_unit_end(u);
         if (g_cov_notes) {
@@ -3304,6 +3345,7 @@ lto_backend:
     target_set_debug_info(want_debug);
     opt_run(iu, opt_for_size ? OPT_SIZE : opt_level);
     time_mark("optimization");
+    san_instrument(iu);
     target_set_opt_size(opt_for_size);
     apply_asm_names(u);
 
@@ -7225,14 +7267,21 @@ static int embcc_main(int argc, char **argv)
                     bit = SAN_SHIFT;
                 else if (n == 4 && !strncmp(p, "trap", 4))
                     bit = 0;       /* -fsanitize-trap=... names checks */
+                else if ((n == 7 && !strncmp(p, "address", 7)) ||
+                         (n == 14 && !strncmp(p, "kernel-address", 14)))
+                    bit = SAN_ADDRESS;
+                else if (n == 6 && !strncmp(p, "thread", 6))
+                    bit = SAN_THREAD;
+                else if ((n == 6 && !strncmp(p, "memory", 6)) ||
+                         (n == 13 && !strncmp(p, "kernel-memory", 13)))
+                    bit = SAN_MEMORY;
                 else
                     diag_fatal(NULL, 0,
-                        "%s%.*s is not supported: EmbCC's "
-                        "sanitizer inserts checks that TRAP, and this one "
-                        "needs a runtime library to report through. The "
-                        "ones it has are undefined, "
+                        "%s%.*s is not supported. EmbCC's sanitizers are "
+                        "address, thread and memory, with their runtimes "
+                        "(lib/san), and undefined, "
                         "signed-integer-overflow, integer-divide-by-zero "
-                        "and shift",
+                        "and shift, which trap",
                         strncmp(opt_typed(argv[i]), "--", 2) == 0
                             ? "--sanitize=" : "-fsanitize=", (int)n, p);
                 if (off) san_mask &= ~bit; else san_mask |= bit;
@@ -7240,6 +7289,26 @@ static int embcc_main(int argc, char **argv)
                 p = e + 1;
             }
             continue;
+        } else if (strncmp(argv[i], "-fsanitize-recover=", 19) == 0 ||
+                   strncmp(argv[i], "-fno-sanitize-recover=", 22) == 0) {
+            /* recover: report and go on rather than stop (address only;
+             * the trap checks always stop) */
+            int no = argv[i][2] == 'n';
+            const char *l = strchr(argv[i], '=') + 1;
+            if (strstr(l, "address") || strstr(l, "all"))
+                g_san_recover = !no;
+        } else if (strcmp(argv[i], "-fsanitize-address-use-after-scope") == 0 ||
+                   strcmp(argv[i], "-fno-sanitize-address-use-after-scope") == 0 ||
+                   strcmp(argv[i], "-static-libasan") == 0 ||
+                   strcmp(argv[i], "-static-libtsan") == 0 ||
+                   strcmp(argv[i], "-static-libsan") == 0 ||
+                   strcmp(argv[i], "-shared-libsan") == 0 ||
+                   strcmp(argv[i], "-fsanitize-memory-track-origins") == 0 ||
+                   strncmp(argv[i], "-fsanitize-memory-track-origins=", 32) == 0) {
+            /* accepted: a local's scope is its function here (its
+             * redzones are made good at the return), the runtimes are
+             * archives, and an uninitialized read is reported where it is
+             * used, without the origin of the value */
         } else if (strcmp(argv[i], "--coverage") == 0 ||
                    strcmp(argv[i], "-coverage") == 0) {
             /* GCC's: counters and notes, and libgcov at the link */
@@ -7732,7 +7801,43 @@ static int embcc_main(int argc, char **argv)
     /* The checks are inserted by irgen, as ordinary IR, so at -O2 the
      * optimizer folds away the ones whose operands it knows -- a
      * constant non-zero divisor leaves nothing behind. */
-    irgen_set_sanitize(san_mask);
+    irgen_set_sanitize(san_mask & (SAN_OVERFLOW | SAN_DIVIDE | SAN_SHIFT));
+    {
+        unsigned rt = san_mask & (SAN_ADDRESS | SAN_THREAD | SAN_MEMORY);
+        if ((rt & SAN_ADDRESS) && (rt & (SAN_THREAD | SAN_MEMORY))) {
+            fprintf(stderr, "embcc: error: -fsanitize=address and -fsanitize=%s "
+                            "cannot be combined: each has its own shadow of "
+                            "memory\n", rt & SAN_THREAD ? "thread" : "memory");
+            return 1;
+        }
+        if ((rt & SAN_THREAD) && (rt & SAN_MEMORY)) {
+            fprintf(stderr, "embcc: error: -fsanitize=thread and "
+                            "-fsanitize=memory cannot be combined\n");
+            return 1;
+        }
+        if ((rt & (SAN_THREAD | SAN_MEMORY)) && !target_is_hosted()) {
+            fprintf(stderr, "embcc: error: -fsanitize=%s is for a hosted "
+                            "target (Linux, macOS): its runtime needs the "
+                            "operating system's threads and memory mapping. "
+                            "On %s, -fsanitize=address works\n",
+                            rt & SAN_THREAD ? "thread" : "memory",
+                            target_triple_now());
+            return 1;
+        }
+        if (rt && target_os_get() == TGT_OS_WINDOWS) {
+            fprintf(stderr, "embcc: error: the sanitizers are not for "
+                            "Windows yet: their runtimes reserve the shadow "
+                            "with mmap\n");
+            return 1;
+        }
+        if (rt && want_lto) {
+            fprintf(stderr, "embcc: error: -fsanitize=address, thread and "
+                            "memory are not for -flto yet\n");
+            return 1;
+        }
+        san_set_runtime(rt, g_san_recover);
+        g_san_link = rt;
+    }
     irgen_set_instrument(want_instr, instr_funcs, instr_files);
     gcov_set_flags(g_prof_partial, g_prof_abs);
     gcov_set_use(g_prof_use_on ? "" : NULL);  /* each unit's file: compile */

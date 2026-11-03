@@ -7,6 +7,9 @@
  * first error. On success every EXPR_VAR has a var_index, every
  * EXPR_CALL a callee, and every func its nvars. */
 void sema_check(struct unit *u);
+/* -fsanitize=address (src/ir/sanitize.c): which of f's nvars locals get
+ * redzones -- 1 each in a new array -- or NULL */
+char *san_asan_locals(struct func *f, int nvars);
 
 /* GNU89 inline semantics (-fgnu89-inline, -std=gnu89): `inline` alone
  * is an external definition and `extern inline` an inline-only one --

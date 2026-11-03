@@ -3070,6 +3070,7 @@ static int atomic_load(struct ir_func *fn, int addr, const struct type *t,
     int v = emit_load(fn, addr, t);
     fn->ins[fn->nins - 1].vol = 1;
     fn->ins[fn->nins - 1].natural = 1;
+    fn->ins[fn->nins - 1].atomic = 1;
     if (atomic_arm())
         emit(fn)->op = IR_FENCE;          /* acquire */
     return v;
@@ -3093,6 +3094,7 @@ static void atomic_store(struct ir_func *fn, int addr, int val,
     emit_store(fn, addr, val, t);
     fn->ins[fn->nins - 1].vol = 1;
     fn->ins[fn->nins - 1].natural = 1;
+    fn->ins[fn->nins - 1].atomic = 1;
     emit(fn)->op = IR_FENCE;              /* seq_cst: published before what follows */
 }
 
@@ -6860,7 +6862,45 @@ static void collect_locals(struct ir_func *fn, struct stmt *s)
     }
 }
 
+static void gen_func_(struct ir_func *fn, struct func *f);
+
+/* -fsanitize=address: the frame's block unpoisoned before every return,
+ * since the stack under it is the next call's */
+static void asan_frame_release(struct ir_func *fn, int base, long size)
+{
+    int n0 = fn->nins, ns = 0, cap = 0;
+    struct ir_slice *sl = NULL;
+    struct type *up = ty_intptr(1), *tys[2] = { up, up };
+    for (int n = 0; n < n0; n++) {
+        if (fn->ins[n].op != IR_RET)
+            continue;
+        if (ns == cap) {
+            cap = cap ? cap * 2 : 8;
+            sl = xrealloc(sl, (size_t)cap * sizeof *sl);
+        }
+        sl[ns].at = n;
+        sl[ns].lo = fn->nins;
+        int v[2] = { base, emit_const(fn, size, AW) };
+        (void)libatomic_call(fn, "__embcc_asan_unpoison", ty_base(TY_VOID, 0),
+                             2, v, tys, fn->ins[n].line);
+        sl[ns].hi = fn->nins;
+        ns++;
+    }
+    if (ns)
+        ir_splice(fn, n0, fn->nins, sl, ns);
+    free(sl);
+}
+
+/* no_sanitize(...) turns this function's trap checks off */
 static void gen_func(struct ir_func *fn, struct func *f)
+{
+    unsigned saved = g_san;
+    g_san &= ~f->attr_no_san;
+    gen_func_(fn, f);
+    g_san = saved;
+}
+
+static void gen_func_(struct ir_func *fn, struct func *f)
 {
     fn->src = f;
     /* Copied, not referenced: see struct ir_func. */
@@ -6983,8 +7023,56 @@ static void gen_func(struct ir_func *fn, struct func *f)
      * alignment, and its slot keeps the address -- for the whole
      * function, so a goto past its declaration cannot skip the carving
      * and a loop around it cannot grow the stack. */
+    /* -fsanitize=address: the locals that could be overrun (sema's
+     * var_asan), in ONE block, each 32-aligned with at least 32 bytes of
+     * redzone after it and 32 before the first, all of it poisoned on
+     * entry but the locals themselves (lib/san/asan.c); made good again
+     * before each return, below */
+    int asan_base = -1;
+    long asan_size = 0;
+    if (f->var_asan) {
+        long off = 32, bal = 32;
+        long *voff = xcalloc((size_t)f->nvars, sizeof *voff);
+        for (int v = 0; v < f->nvars; v++) {
+            if (!f->var_asan[v] || !f->var_indirect || !f->var_indirect[v])
+                continue;
+            long al = f->var_ind_align[v] > 32 ? f->var_ind_align[v] : 32;
+            if (al > bal)
+                bal = al;
+            off = (off + al - 1) & -al;
+            voff[v] = off;
+            long sz = ty_size(f->var_indirect[v]);
+            off += sz + 32 + (32 - sz % 32) % 32;
+        }
+        asan_size = off;
+        int sz = emit_const(fn, asan_size + bal - 1, AW);
+        struct ir_ins *a = emit(fn);
+        a->op = IR_ALLOCA;
+        a->a = sz;
+        a->dst = new_temp(fn);
+        asan_base = emit_bin(fn, IR_AND,
+                             emit_bin(fn, IR_ADD, a->dst,
+                                      emit_const(fn, bal - 1, AW), AW, 1),
+                             emit_const(fn, -bal, AW), AW, 1);
+        fn->has_alloca = 1;
+        struct type *up = ty_intptr(1), *tys[2] = { up, up };
+        int pv[2] = { asan_base, emit_const(fn, asan_size, AW) };
+        (void)libatomic_call(fn, "__embcc_asan_frame_poison",
+                             ty_base(TY_VOID, 0), 2, pv, tys, f->line);
+        for (int v = 0; v < f->nvars; v++) {
+            if (!f->var_asan[v] || !f->var_indirect || !f->var_indirect[v])
+                continue;
+            int p = emit_bin(fn, IR_ADD, asan_base,
+                             emit_const(fn, voff[v], AW), AW, 1);
+            emit_stvar_slot(fn, v, p, ty_ptr(f->var_indirect[v]));
+            int uv[2] = { p, emit_const(fn, ty_size(f->var_indirect[v]), AW) };
+            (void)libatomic_call(fn, "__embcc_asan_unpoison",
+                                 ty_base(TY_VOID, 0), 2, uv, tys, f->line);
+        }
+        free(voff);
+    }
     for (int v = 0; f->var_indirect && v < f->nvars; v++) {
-        if (!f->var_indirect[v])
+        if (!f->var_indirect[v] || (f->var_asan && f->var_asan[v]))
             continue;
         long al = f->var_ind_align[v];
         int size = emit_const(fn, ty_size(f->var_indirect[v]) + al - 1, AW);
@@ -7067,6 +7155,8 @@ static void gen_func(struct ir_func *fn, struct func *f)
             fn->var_scope_lo[v] = 0;
             fn->var_scope_hi[v] = fn->nins;
         }
+    if (asan_base >= 0)
+        asan_frame_release(fn, asan_base, asan_size);
     if (gcov_active())
         gcov_function(cur_unit, fn, f);
     for (int i = 0; i < g_nlabels_used; i++)
@@ -7149,4 +7239,59 @@ void irgen_counter_incr(struct ir_func *fn, struct global *ctrs, long off,
     v = emit_bin(fn, IR_ADD, v, one, 8, 0);
     emit_store(fn, a, v, t);
     fn->ins[fn->nins - 1].natural = 1;
+}
+
+/* -fsanitize's runtime calls, made after the optimizer (src/ir/sanitize.c):
+ * name(vals...), every argument an address-sized integer, returning
+ * nothing -- an ordinary call, classified for the target as irgen does
+ * a source call, appended to fn. A function of the runtime: no throw,
+ * and no reading or writing of memory the optimizer would care about,
+ * since it runs after the optimizer. */
+void irgen_san_call(struct ir_unit *iu, struct ir_func *fn, const char *name,
+                    int n, const int *vals, int line)
+{
+    (void)irgen_san_call_ret(iu, fn, name, n, vals, line, 0);
+}
+
+/* ...and one that returns an address-sized integer (ret), its vreg */
+int irgen_san_call_ret(struct ir_unit *iu, struct ir_func *fn,
+                       const char *name, int n, const int *vals, int line,
+                       int ret)
+{
+    struct ir_unit *saved = cur_unit;
+    cur_unit = iu;
+    struct type *up = ty_intptr(1);
+    struct type *rt = ret ? up : ty_base(TY_VOID, 0);
+    struct type *tys[5] = { up, up, up, up, up };
+    struct func *cf = libatomic_fn(name, rt, n, tys);
+    cf->is_nothrow = 1;
+    int v = libatomic_call(fn, name, rt, n, vals, tys, line);
+    cur_unit = saved;
+    return v;
+}
+
+/* A declaration like `f`'s under another name: what a call -fsanitize
+ * renames (malloc to the runtime's) is given, so the call keeps its own
+ * classification. One per name. */
+struct func *irgen_func_renamed(const struct func *f, const char *name)
+{
+    static struct func **made;
+    static int nmade, capmade;
+    for (int k = 0; k < nmade; k++)
+        if (!strcmp(made[k]->name, name))
+            return made[k];
+    struct func *g = xmalloc(sizeof *g);
+    *g = *f;
+    g->name = name;
+    g->asm_name = NULL;
+    g->has_defn = 0;
+    g->is_static = 0;
+    g->is_weak = 0;
+    g->next = NULL;
+    if (nmade == capmade) {
+        capmade = capmade ? capmade * 2 : 32;
+        made = xrealloc(made, (size_t)capmade * sizeof *made);
+    }
+    made[nmade++] = g;
+    return g;
 }

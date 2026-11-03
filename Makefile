@@ -360,6 +360,7 @@ SRCS := \
 	src/ir/irprint.c \
 	src/ir/irparse.c \
 	src/ir/gcov.c \
+	src/ir/sanitize.c \
 	$(OPT_SRCS) \
 	src/debug/dwarf.c \
 	src/debug/eh.c \
@@ -682,7 +683,7 @@ EMBLS_SRCS = tools/embls/embls.c $(PLATFORM_SRCS) src/cpp/cpp.c src/lex/lex.c \
              src/arch/thumbv8mbase/predef.c src/arch/thumbv8mbase/predef_cxx.c \
              src/arch/armv7a/predef.c src/arch/armv7a/predef_cxx.c \
              $(filter src/cxx/%,$(SRCS)) src/sema/sema.c src/ir/irgen.c \
-             src/ir/irprint.c src/ir/irparse.c src/ir/gcov.c \
+             src/ir/irprint.c src/ir/irparse.c src/ir/gcov.c src/ir/sanitize.c \
              $(OPT_SRCS) src/debug/dwarf.c src/debug/eh.c src/elf/write.c \
              src/arch/code.c src/arch/regalloc.c src/arch/common.c \
              src/arch/x86_64/irgen.c src/arch/x86_64/codegen.c \
@@ -963,7 +964,14 @@ libc-linux-x86_64: embcc embar
 	@rm -f $(BUILD)/libc/linux-x86_64/libgcov.a
 	@$${EMBCC_X86_AR:-./embar} rcs $(BUILD)/libc/linux-x86_64/libgcov.a \
 	    $(BUILD)/libc/linux-x86_64/rt/gcov.o.x
-	@echo "libc: $(BUILD)/libc/linux-x86_64/libc.a + librt.a + libgcov.a + crt1.o"
+	@for s in asan tsan msan; do \
+	    ./embcc --target=x86_64-linux-gnu -c -O1 -fPIE lib/san/$$s.c \
+	        -o $(BUILD)/libc/linux-x86_64/rt/$$s.o.x || exit 1; \
+	    rm -f $(BUILD)/libc/linux-x86_64/lib$$s.a; \
+	    $${EMBCC_X86_AR:-./embar} rcs $(BUILD)/libc/linux-x86_64/lib$$s.a \
+	        $(BUILD)/libc/linux-x86_64/rt/$$s.o.x || exit 1; \
+	done
+	@echo "libc: $(BUILD)/libc/linux-x86_64/libc.a + librt.a + libgcov.a + lib{a,t,m}san.a + crt1.o"
 
 libc-linux-aarch64: embcc embar
 	@mkdir -p $(BUILD)/libc/linux-aarch64
@@ -989,7 +997,14 @@ libc-linux-aarch64: embcc embar
 	@rm -f $(BUILD)/libc/linux-aarch64/libgcov.a
 	@$${EMBCC_AARCH64_AR:-./embar} rcs $(BUILD)/libc/linux-aarch64/libgcov.a \
 	    $(BUILD)/libc/linux-aarch64/rt/gcov.o.x
-	@echo "libc: $(BUILD)/libc/linux-aarch64/libc.a + librt.a + libgcov.a + crt1.o"
+	@for s in asan tsan msan; do \
+	    ./embcc --target=aarch64-linux-gnu -c -O1 -fPIE lib/san/$$s.c \
+	        -o $(BUILD)/libc/linux-aarch64/rt/$$s.o.x || exit 1; \
+	    rm -f $(BUILD)/libc/linux-aarch64/lib$$s.a; \
+	    $${EMBCC_AARCH64_AR:-./embar} rcs $(BUILD)/libc/linux-aarch64/lib$$s.a \
+	        $(BUILD)/libc/linux-aarch64/rt/$$s.o.x || exit 1; \
+	done
+	@echo "libc: $(BUILD)/libc/linux-aarch64/libc.a + librt.a + libgcov.a + lib{a,t,m}san.a + crt1.o"
 
 # The compiler runtime for each EMBEDDED target, as an archive per triple.
 # These had no rule at all: a firmware build for any of the four targets the
@@ -1142,7 +1157,7 @@ install-files:
 	             $(foreach t,$(RT_EMBEDDED),"$(t):$(t)"); do \
 	    triple=$${pair%%:*}; dir=$${pair#*:}; \
 	    mkdir -p $(LIBROOT)/$$triple; \
-	    for f in libc.a librt.a libgcov.a crt1.o; do \
+	    for f in libc.a librt.a libgcov.a libasan.a libtsan.a libmsan.a crt1.o; do \
 	        [ -f $(BUILD)/libc/$$dir/$$f ] && \
 	            cp $(BUILD)/libc/$$dir/$$f $(LIBROOT)/$$triple/$$f; \
 	    done; \

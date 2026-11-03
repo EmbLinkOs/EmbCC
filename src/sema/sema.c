@@ -10000,6 +10000,15 @@ static void check_func(struct unit *u, struct func *f)
      * stack promises no alignment at all, that is any aligned local. */
     f->var_indirect = NULL;
     f->var_ind_align = NULL;
+    /* -fsanitize=address: the locals that could be overrun get redzones,
+     * and so storage of their own, the same way (irgen carves them all
+     * from one block, src/ir/sanitize.c) */
+    f->var_asan = san_asan_locals(f, sc.n);
+    for (int i = 0; f->var_asan && i < sc.n; i++)
+        if (i < f->nparams || sc.vars[i].g || sc.vars[i].fdecl ||
+            !f->var_tys[i] || ty_is_vla(f->var_tys[i]) || sc.vars[i].asm_reg ||
+            ty_size(f->var_tys[i]) <= 0)
+            f->var_asan[i] = 0;
     for (int i = f->nparams; i < sc.n; i++) {
         struct type *t = f->var_tys[i];
         if (sc.vars[i].g || sc.vars[i].fdecl || !t || ty_is_vla(t) ||
@@ -10008,7 +10017,7 @@ static void check_func(struct unit *u, struct func *f)
         int al = ty_align(t);
         if (f->var_aligns[i] > al)
             al = f->var_aligns[i];
-        if (al <= target_stack_align())
+        if (al <= target_stack_align() && !(f->var_asan && f->var_asan[i]))
             continue;
         if (!f->var_indirect) {
             f->var_indirect = xcalloc((size_t)sc.n, sizeof *f->var_indirect);
@@ -10242,6 +10251,7 @@ static void merge_decls(struct unit *u)
         canon->attr_hot |= f->attr_hot;
         canon->attr_cold |= f->attr_cold;
         canon->attr_no_profile |= f->attr_no_profile;
+        canon->attr_no_san |= f->attr_no_san;
         /* aligned(N) on any declaration, the strictest (GCC's align-3.c
          * puts it on the prototype) */
         if (f->user_align > canon->user_align)
@@ -10559,6 +10569,10 @@ void sema_check(struct unit *u)
              * same. Warning anyway would train the reader to ignore
              * the warning. */
             !f->attr_unused && !f->attr_used &&
+            /* a constructor or destructor is called by the startup code
+             * and exit: being in .init_array is its use (GCC says
+             * nothing of one either) */
+            !f->is_ctor && !f->is_dtor &&
             /* A `static inline` in a header is a helper offered to every
              * unit that includes it, most of which use some of them --
              * clang does not report one, and GCC no inline one at all. */
