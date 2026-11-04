@@ -7,7 +7,8 @@ Black Magic Probe all speak it. The server runs the part's flash algorithm.
 `embflash` reads the image, erases and writes the flash, verifies it, and
 can start the program. A part with an STK500 serial bootloader, such as an
 Arduino Uno with Optiboot, needs no server: `--stk500` programs it
-directly. This page is the command reference.
+directly. Neither does an ESP32, through its ROM: `--esp`. This page is the
+command reference.
 
 ## Synopsis
 
@@ -16,6 +17,8 @@ embflash IMAGE --gdb TARGET [--base ADDR] [--verify] [--run]
                [--entry ADDR] [--vector-table ADDR] [--monitor CMD]...
                [--dry-run] [--timeout SECONDS] [-v]
 embflash IMAGE --stk500 serial:DEV[@BAUD] [--base ADDR] [--verify]
+               [--no-reset] [--timeout SECONDS]
+embflash IMAGE --esp serial:DEV[@BAUD] [--base ADDR] [--verify]
                [--no-reset] [--timeout SECONDS]
 ```
 
@@ -111,6 +114,34 @@ The baud rate is 115200 when left out; older Arduino bootloaders take 57600.
    `--monitor`, `--entry` and `--vector-table` belong to `--gdb` and are
    refused here.
 
+## The Espressif ROM: --esp
+
+`--esp serial:DEV[@BAUD]` programs an ESP32 through the serial download
+mode in its ROM, the protocol esptool speaks, at 115200 baud unless given.
+The image's bytes go to flash at their addresses. A raw `.bin` goes at
+`--base`: 0x1000 is where the ESP32's ROM boots from.
+
+1. **Into the ROM.** A development board's auto-reset circuit ties DTR to
+   IO0 and RTS to EN, each through an inverting transistor. `embflash`
+   holds EN low, pulls IO0 low, and releases EN, as esptool's classic reset
+   does: the chip starts in download mode. On a board without the circuit,
+   hold BOOT while pressing EN and pass `--no-reset`.
+2. **Sync.** The sync request is sent up to ten times. The ROM answers it
+   several times over, and the extra answers are drained.
+3. **The chip.** The chip-detect register (0x40001000) names it. The ESP32,
+   `0x00f01d83`, is the one known, with 4 MiB of flash assumed. Any other
+   value is refused, and so is an image beyond the flash.
+4. **Writing.** The flash is attached and its parameters given. Then each
+   piece of the image is erased (`FLASH_BEGIN`) and written in blocks of
+   1024 bytes, each with its checksum. `--verify` asks the ROM for the MD5
+   of each piece as written and compares it with the image's.
+5. **Start.** `FLASH_END`, then an EN pulse with IO0 high, starts the
+   program from flash. `--no-reset` leaves the chip in the ROM.
+
+The ROM writes at 115200 baud, about 10 KiB/s. An image tool makes the
+bootable image itself, with the header, segments and checksum the ROM loads;
+`embflash` writes what it is given.
+
 ## Examples
 
 ```sh
@@ -128,6 +159,9 @@ embflash fw.elf --gdb serial:/dev/ttyACM0 --verify --run
 
 # an Arduino Uno through Optiboot, on the ATmega16U2's USB serial port
 embflash fw.hex --stk500 serial:/dev/cu.usbmodem1101 --verify
+
+# an ESP32 development board, its image where the ROM boots from
+embflash app.bin --esp serial:/dev/cu.usbserial-0001 --base 0x1000 --verify
 
 # what would be written, with no target
 embflash fw.bin --base 0x08000000 --dry-run
@@ -159,6 +193,10 @@ with an error is reported with that error.
   a board.
 - `--stk500` knows the ATmega328 family only. STK500 version 2, which the
   Arduino Mega's bootloader speaks, is not implemented.
+- `--esp` knows the ESP32 only, assumes 4 MiB of flash and writes at the
+  ROM's 115200 baud. Faster rates (`CHANGE_BAUDRATE`), the flasher stub,
+  compression and other chips are not implemented. It has been tested
+  against a model of the ROM, not yet against a chip.
 - Option bytes, mass erase and read-out protection are server-specific.
   Reach them with `--monitor`.
 - The transports need POSIX sockets and termios. Elsewhere `embflash`
@@ -209,3 +247,21 @@ with no address loaded, and a command Optiboot does not know. The checks:
 - an image over the bootloader, an unknown signature, a bootloader that
   never answers, a byte that reads back wrong, and `--run` are each
   refused with exit status 2.
+
+`tests/golden/embflash-esp.sh` runs against
+`tests/golden/embflash/fakeesprom.py`. That model of the ESP32 ROM runs on a
+pseudo-terminal and reports:
+
+- a block with a wrong checksum, out of sequence, or outside the erased
+  range;
+- an unescaped SLIP frame;
+- a write before the flash is attached.
+
+The checks:
+
+- a binary holding every byte value lands byte for byte at 0x1000, and the
+  ROM's MD5 matches;
+- a HEX image in two pieces lands the same way;
+- a ROM that misses three syncs is still synced;
+- an unknown chip, a ROM that never answers, a wrong MD5 and an image beyond
+  the flash are each refused with exit status 2.
