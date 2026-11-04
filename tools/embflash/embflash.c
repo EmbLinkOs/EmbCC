@@ -37,11 +37,18 @@
  * sends a command to the server first (`reset halt` for OpenOCD), one per
  * flag.
  *
+ * --stk500 serial:DEV[@BAUD] takes --gdb's place for a part with a serial
+ * bootloader that speaks STK500 version 1: Optiboot on an Arduino Uno and
+ * its kin. The DTR line resets the board into the bootloader, the part is
+ * named by its signature, the image is written in the part's flash pages
+ * (never over the bootloader), --verify reads every page back, and leaving
+ * programming mode starts the program.
+ *
  * ISO C for everything but the transports, which are POSIX sockets and
  * termios; docs/manual/tools/embflash.md is the reference. Real probes are
  * reached through their GDB servers -- this program has been tested against
  * QEMU and against a server that models a part's flash, not yet against
- * hardware. */
+ * hardware; the STK500 path against a model of Optiboot. */
 #define _POSIX_C_SOURCE 200809L
 #define _DARWIN_C_SOURCE 1          /* and the baud rates POSIX leaves out */
 #define _DEFAULT_SOURCE 1
@@ -64,6 +71,7 @@
 #include <sys/un.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <sys/ioctl.h>
 #endif
 
 typedef unsigned long long u64;
@@ -943,6 +951,171 @@ static int image_word(u64 a, int n, int big, u64 *out)
 
 /* ==== main ================================================================ */
 
+/* ==== STK500 version 1: Optiboot ============================================
+ *
+ * Each command ends with CRC_EOP (0x20); the bootloader answers INSYNC
+ * (0x14), the command's bytes, then OK (0x10). Addresses are in 16-bit
+ * words; a page is written whole (Optiboot erases it first). Only what
+ * Optiboot answers is used: sync, the signature, load address, program and
+ * read page, enter and leave programming mode. */
+#define STK_OK          0x10
+#define STK_INSYNC      0x14
+#define STK_CRC_EOP     0x20
+#define STK_GET_SYNC    0x30
+#define STK_ENTER_PROG  0x50
+#define STK_LEAVE_PROG  0x51
+#define STK_LOAD_ADDR   0x55
+#define STK_PROG_PAGE   0x64
+#define STK_READ_PAGE   0x74
+#define STK_READ_SIGN   0x75
+
+struct avr_part { const char *name; unsigned char sig[3]; u32 flash, page, boot; };
+static const struct avr_part g_avr_parts[] = {
+    /* the boot size is Optiboot's, as the Uno's fuses reserve it */
+    { "ATmega328P",  { 0x1E, 0x95, 0x0F }, 32768, 128, 512 },
+    { "ATmega328",   { 0x1E, 0x95, 0x14 }, 32768, 128, 512 },
+    { "ATmega328PB", { 0x1E, 0x95, 0x16 }, 32768, 128, 512 },
+};
+
+/* the reply to a command: INSYNC, n bytes into out, OK; 0 when it is not */
+static int stk_reply(unsigned char *out, size_t n)
+{
+    int c = rx_byte();
+    if (c != STK_INSYNC)
+        return 0;
+    for (size_t i = 0; i < n; i++) {
+        c = rx_byte();
+        if (c < 0)
+            return 0;
+        if (out)
+            out[i] = (unsigned char)c;
+    }
+    return rx_byte() == STK_OK;
+}
+
+static void stk_cmd(const unsigned char *cmd, size_t n, unsigned char *out, size_t outn,
+                    const char *what)
+{
+    tx((const char *)cmd, n);
+    if (!stk_reply(out, outn))
+        die("the bootloader did not answer %s", what);
+}
+
+#ifdef EMBFLASH_POSIX
+/* DTR (and RTS) down then up: the Arduino's reset, through its capacitor,
+ * as avrdude's "arduino" programmer gives it. A line without modem control
+ * lines (a pseudo-terminal) just goes on. */
+static void stk_reset(void)
+{
+    int lines = TIOCM_DTR | TIOCM_RTS;
+    if (ioctl(g_fd, TIOCMBIC, &lines) == 0) {
+        usleep(250 * 1000);
+        ioctl(g_fd, TIOCMBIS, &lines);
+        usleep(50 * 1000);
+    }
+    tcflush(g_fd, TCIFLUSH);
+}
+#else
+static void stk_reset(void) {}
+#endif
+
+static void stk500_flash(const char *target, int verify, int no_reset)
+{
+    if (strncmp(target, "serial:", 7) != 0)
+        die("--stk500 %s: the bootloader is reached on a serial line, serial:DEV[@BAUD]", target);
+    open_target(target);
+    if (!no_reset)
+        stk_reset();
+
+    /* sync: the bootloader listens for about a second after the reset */
+    int saved = g_timeout_ms, synced = 0;
+    g_timeout_ms = 300;
+    for (int attempt = 0; attempt < 10 && !synced; attempt++) {
+        static const unsigned char sync[] = { STK_GET_SYNC, STK_CRC_EOP };
+        tx((const char *)sync, sizeof sync);
+        synced = stk_reply(NULL, 0);
+#ifdef EMBFLASH_POSIX
+        if (!synced)
+            tcflush(g_fd, TCIFLUSH);
+#endif
+    }
+    g_timeout_ms = saved;
+    if (!synced)
+        die("%s: no STK500 bootloader answered (is it the board's port, and at this baud rate?)",
+            target + 7);
+
+    unsigned char sig[3];
+    static const unsigned char rsig[] = { STK_READ_SIGN, STK_CRC_EOP };
+    stk_cmd(rsig, sizeof rsig, sig, 3, "the signature request");
+    const struct avr_part *part = NULL;
+    for (size_t i = 0; i < sizeof g_avr_parts / sizeof g_avr_parts[0]; i++)
+        if (!memcmp(g_avr_parts[i].sig, sig, 3))
+            part = &g_avr_parts[i];
+    if (!part)
+        die("signature %02X %02X %02X: not a part this programmer knows", sig[0], sig[1], sig[2]);
+    u32 app = part->flash - part->boot;
+    for (int k = 0; k < g_nch; k++)
+        if (g_ch[k].addr + g_ch[k].len > app)
+            die("the image reaches 0x%llx; the %s's application flash ends at 0x%x, where "
+                "the bootloader begins", g_ch[k].addr + g_ch[k].len, part->name, app);
+
+    static const unsigned char enter[] = { STK_ENTER_PROG, STK_CRC_EOP };
+    stk_cmd(enter, sizeof enter, NULL, 0, "enter programming mode");
+
+    /* every page the image touches, padded with the erased value */
+    u32 npages = app / part->page, written = 0;
+    unsigned char *page = xmalloc(part->page);
+    unsigned char *back = xmalloc(part->page);
+    for (int pass = 0; pass < (verify ? 2 : 1); pass++) {
+        for (u32 pg = 0; pg < npages; pg++) {
+            u64 lo = (u64)pg * part->page, hi = lo + part->page;
+            int touched = 0;
+            memset(page, 0xFF, part->page);
+            for (int k = 0; k < g_nch; k++) {
+                u64 a = g_ch[k].addr, e = a + g_ch[k].len;
+                if (e <= lo || a >= hi)
+                    continue;
+                u64 s = a > lo ? a : lo, t = e < hi ? e : hi;
+                memcpy(page + (s - lo), g_ch[k].b + (s - a), (size_t)(t - s));
+                touched = 1;
+            }
+            if (!touched)
+                continue;
+            u32 word = (u32)(lo / 2);
+            unsigned char la[4] = { STK_LOAD_ADDR, (unsigned char)(word & 0xFF),
+                                    (unsigned char)(word >> 8), STK_CRC_EOP };
+            stk_cmd(la, sizeof la, NULL, 0, "load address");
+            unsigned char hdr[4] = { 0, (unsigned char)(part->page >> 8),
+                                     (unsigned char)(part->page & 0xFF), 'F' };
+            if (pass == 0) {
+                hdr[0] = STK_PROG_PAGE;
+                tx((const char *)hdr, sizeof hdr);
+                tx((const char *)page, part->page);
+                static const char eop = STK_CRC_EOP;
+                tx(&eop, 1);
+                if (!stk_reply(NULL, 0))
+                    die("the bootloader did not accept the page at 0x%llx", lo);
+                written++;
+            } else {
+                unsigned char rd[5] = { STK_READ_PAGE, hdr[1], hdr[2], 'F', STK_CRC_EOP };
+                stk_cmd(rd, sizeof rd, back, part->page, "read page");
+                for (u32 i = 0; i < part->page; i++)
+                    if (back[i] != page[i])
+                        die("verification failed at 0x%llx: 0x%02x read, 0x%02x written",
+                            lo + i, back[i], page[i]);
+            }
+        }
+    }
+    free(page);
+    free(back);
+    static const unsigned char leave[] = { STK_LEAVE_PROG, STK_CRC_EOP };
+    stk_cmd(leave, sizeof leave, NULL, 0, "leave programming mode");
+    printf("embflash: wrote %u page%s of %u bytes to the %s through its bootloader\n", written,
+           written == 1 ? "" : "s", part->page, part->name);
+    if (verify)
+        printf("embflash: verified\n");
+}
+
 static u64 parse_num(const char *s, const char *what)
 {
     char *e;
@@ -958,6 +1131,7 @@ static void usage(void)
         "usage: embflash IMAGE --gdb TARGET [--base ADDR] [--verify] [--run]\n"
         "                [--entry ADDR] [--vector-table ADDR] [--monitor CMD]...\n"
         "                [--dry-run] [--timeout SECONDS] [-v]\n"
+        "       embflash IMAGE --stk500 serial:DEV[@BAUD] [--verify] [--no-reset]\n"
         "  TARGET: HOST:PORT | unix:PATH | serial:DEV[@BAUD]\n"
         "  IMAGE:  ELF, Intel HEX (.hex), S-records (.srec .s19 .s37 .mot),\n"
         "          or raw bytes (.bin with --base)\n");
@@ -966,7 +1140,8 @@ static void usage(void)
 
 int main(int argc, char **argv)
 {
-    const char *image = NULL, *target = NULL;
+    const char *image = NULL, *target = NULL, *stk500 = NULL;
+    int no_reset = 0;
     const char *monitor[16];
     int nmon = 0, verify = 0, run = 0, dry = 0, have_base = 0;
     int have_entry_opt = 0, have_vt = 0;
@@ -974,6 +1149,8 @@ int main(int argc, char **argv)
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
         if (!strcmp(a, "--gdb") && i + 1 < argc) target = argv[++i];
+        else if (!strcmp(a, "--stk500") && i + 1 < argc) stk500 = argv[++i];
+        else if (!strcmp(a, "--no-reset")) no_reset = 1;
         else if (!strcmp(a, "--base") && i + 1 < argc) {
             base = parse_num(argv[++i], "--base"); have_base = 1;
         } else if (!strcmp(a, "--entry") && i + 1 < argc) {
@@ -994,9 +1171,16 @@ int main(int argc, char **argv)
         else if (!image) image = a;
         else die("one image at a time (%s and %s)", image, a);
     }
-    if (!image || (!target && !dry))
+    if (!image || (!target && !stk500 && !dry) || (target && stk500))
         usage();
     load_image(image, have_base, base);
+    if (stk500 && !dry) {
+        if (run || nmon || have_entry_opt || have_vt)
+            die("--stk500: the bootloader starts the program itself; --run, --monitor, --entry "
+                "and --vector-table are for --gdb");
+        stk500_flash(stk500, verify, no_reset);
+        return 0;
+    }
 
     u64 total = 0;
     for (int k = 0; k < g_nch; k++)

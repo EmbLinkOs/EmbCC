@@ -5,7 +5,9 @@ serial protocol. That one protocol reaches nearly every way of programming
 a part: QEMU's gdbstub, OpenOCD, pyOCD, SEGGER's J-Link GDB server and the
 Black Magic Probe all speak it. The server runs the part's flash algorithm.
 `embflash` reads the image, erases and writes the flash, verifies it, and
-can start the program. This page is the command reference.
+can start the program. A part with an STK500 serial bootloader, such as an
+Arduino Uno with Optiboot, needs no server: `--stk500` programs it
+directly. This page is the command reference.
 
 ## Synopsis
 
@@ -13,6 +15,8 @@ can start the program. This page is the command reference.
 embflash IMAGE --gdb TARGET [--base ADDR] [--verify] [--run]
                [--entry ADDR] [--vector-table ADDR] [--monitor CMD]...
                [--dry-run] [--timeout SECONDS] [-v]
+embflash IMAGE --stk500 serial:DEV[@BAUD] [--base ADDR] [--verify]
+               [--no-reset] [--timeout SECONDS]
 ```
 
 `TARGET` is where the server listens:
@@ -77,6 +81,36 @@ name** in the server's target description (`qXfer:features:read`), so
 
 Without `--run`, `embflash` detaches (`D`) and leaves the target halted.
 
+## A serial bootloader: --stk500
+
+`--stk500 serial:DEV[@BAUD]` takes `--gdb`'s place for an AVR part with a
+bootloader that speaks STK500 version 1. Optiboot, the Arduino Uno's, does.
+The baud rate is 115200 when left out; older Arduino bootloaders take 57600.
+
+1. **Reset.** DTR and RTS go down for 250 ms, then up: through the board's
+   capacitor that resets the part into its bootloader. `--no-reset` leaves
+   the lines alone, for a board reset by hand.
+2. **Sync.** `embflash` sends the sync request until the bootloader answers,
+   up to ten times within three seconds.
+3. **The part.** The signature names it, and so its flash, page and
+   bootloader sizes:
+
+   | Part | Signature | Flash | Page | Bootloader |
+   |---|---|---|---|---|
+   | ATmega328P | `1E 95 0F` | 32 KiB | 128 B | 512 B |
+   | ATmega328 | `1E 95 14` | 32 KiB | 128 B | 512 B |
+   | ATmega328PB | `1E 95 16` | 32 KiB | 128 B | 512 B |
+
+   Any other signature is refused. An image that reaches the bootloader
+   (0x7E00 on these parts) is refused before anything is written.
+4. **Pages.** Every page the image touches is written whole. The bytes of
+   the page the image does not give are the erased `0xff`, and pages it
+   does not touch keep their contents. `--verify` reads every written page
+   back and names the first byte that differs.
+5. **Start.** Leaving programming mode starts the program. `--run`,
+   `--monitor`, `--entry` and `--vector-table` belong to `--gdb` and are
+   refused here.
+
 ## Examples
 
 ```sh
@@ -91,6 +125,9 @@ embflash fw.hex --gdb localhost:3333 --monitor "reset halt" --verify
 
 # a Black Magic Probe
 embflash fw.elf --gdb serial:/dev/ttyACM0 --verify --run
+
+# an Arduino Uno through Optiboot, on the ATmega16U2's USB serial port
+embflash fw.hex --stk500 serial:/dev/cu.usbmodem1101 --verify
 
 # what would be written, with no target
 embflash fw.bin --base 0x08000000 --dry-run
@@ -117,7 +154,11 @@ with an error is reported with that error.
 ## Limits
 
 - `embflash` has been tested against QEMU and against a server that models
-  a part's flash. It has **not yet** been tested against real probes.
+  a part's flash. It has **not yet** been tested against real probes. The
+  STK500 path has been tested against a model of Optiboot, not yet against
+  a board.
+- `--stk500` knows the ATmega328 family only. STK500 version 2, which the
+  Arduino Mega's bootloader speaks, is not implemented.
 - Option bytes, mass erase and read-out protection are server-specific.
   Reach them with `--monitor`.
 - The transports need POSIX sockets and termios. Elsewhere `embflash`
@@ -155,3 +196,16 @@ The checks:
 
 Each of these checks has been seen to fail against a mutant of
 `embflash` (18 of them).
+
+`tests/golden/embflash-stk500.sh` runs against
+`tests/golden/embflash/fakeoptiboot.py`. That model of Optiboot runs on a
+pseudo-terminal and reports a page that is not whole or aligned, a write
+with no address loaded, and a command Optiboot does not know. The checks:
+
+- a HEX image with pieces in three pages, one partial, lands byte for byte,
+  and is verified;
+- a raw binary at `--base 0` lands the same way;
+- a bootloader that misses the first three syncs is still synced;
+- an image over the bootloader, an unknown signature, a bootloader that
+  never answers, a byte that reads back wrong, and `--run` are each
+  refused with exit status 2.
