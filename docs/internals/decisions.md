@@ -560,3 +560,21 @@ writing into a part whose layout it does not know.
 EEPROM and fuses are not implemented. Native USB probes (ST-LINK,
 CMSIS-DAP) are a separate, larger decision; until then they are reached
 through their GDB servers.
+
+## D-023: embflash programs an ESP32 through its ROM
+
+**Decision.** `embflash --esp serial:DEV[@BAUD]` programs an ESP32 through
+the serial download mode in its ROM, without esptool. It uses a
+development board's DTR/RTS auto-reset to enter the ROM, the chip-detect
+register to name the chip, flash begin, data and end in 1024-byte blocks,
+and the ROM's MD5 to verify, at the ROM's own baud rate. It makes no
+image: writing the bytes it is given at their addresses is its whole job.
+
+**Why.** As with D-022, no GDB server reaches the ROM, and the protocol is
+small enough to model without the chip. Writing only what it is given keeps
+the boot image format, which differs between Espressif's chips, in the
+tool that knows the chip's memory map.
+
+**Status.** Current. The ESP32 only, 4 MiB of flash assumed. Faster baud
+rates, the RAM-loaded flasher stub, compressed writes and other chips
+(the ESP32-C3's and S3's chip IDs) are not implemented.
