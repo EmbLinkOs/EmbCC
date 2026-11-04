@@ -1376,6 +1376,30 @@ static int q_off_ok(long off)
     return off >= 0 && off % 16 == 0 && off / 16 <= 0xfff;
 }
 
+/* A vector value's 16-byte slot into (out of) q register `q`: named off
+ * the frame base where the q offset reaches, else through A64_TMP */
+static void vslot_ld(struct code *t, const long *sd, int v, int q)
+{
+    if (!g_no_fp && q_off_ok(sd[v])) {
+        a64_ldr_q(t, q, FB, sd[v]);
+        return;
+    }
+    addr_of(t, A64_TMP, FB, sd[v]);
+    a64_ldr_q(t, q, A64_TMP, 0);
+}
+
+static void vslot_st(struct code *t, const long *sd, int v, int q)
+{
+    if (v < 0)
+        return;
+    if (!g_no_fp && q_off_ok(sd[v])) {
+        a64_str_q(t, q, FB, sd[v]);
+        return;
+    }
+    addr_of(t, A64_TMP, FB, sd[v]);
+    a64_str_q(t, q, A64_TMP, 0);
+}
+
 /* Copy `size` bytes from [src] to [dst]. Unrolled: struct copies in real
  * code are small, and an unrolled copy needs no spare register for a
  * counter. A very large aggregate therefore costs a long instruction run
@@ -2104,11 +2128,26 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
     /* -fstack-usage: the frame plus the 16-byte record the prologue
      * pushes (x29 and x30). */
     f->stack_bytes = frameless ? 0 : (int)(fr.size + 16);
+    /* -mbranch-protection: the entry signs x30 (pac-ret: a function that
+     * saves it, or every one with +leaf), which also makes it a landing
+     * pad for an indirect call; or, with bti alone, it is `bti c` */
+    int cf = target_cf(), pre = 0;
+    f->cfi_pac = 0;
+    g_a64_auth = 0;
+    if ((cf & CF_PAC) && (!frameless || (cf & CF_PAC_LEAF))) {
+        a64_word(t, cf & CF_PAC_BKEY ? 0xd503237fUL : 0xd503233fUL);
+        g_a64_auth = cf & CF_PAC_BKEY ? 0xd50323ffUL : 0xd50323bfUL;
+        pre = 4;
+        f->cfi_pac = 4;
+    } else if (cf & CF_BTI) {
+        a64_word(t, 0xd503245fUL);                  /* bti c */
+        pre = 4;
+    }
     if (!frameless)
         a64_prologue(t, fr.size);
     /* for the unwind tables: stp x29, x30 ends at +4, mov x29, sp at +8 */
-    f->cfi_push = 4;
-    f->cfi_frame = 8;
+    f->cfi_push = pre + 4;
+    f->cfi_frame = pre + 8;
     f->cfi_nsaved = 0;
     /* The allocator's callee-saved registers, saved FIRST so that every
      * save in this prologue is complete by one program point -- the
@@ -2300,6 +2339,19 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
 
     /* Label offsets and the branches waiting on them. */
     int *loff = xmalloc((size_t)(fn->nlabels ? fn->nlabels : 1) * sizeof *loff);
+    /* -mbranch-protection=bti: where an indirect branch lands -- a jump
+     * table's targets and every label whose address is taken -- is a
+     * `bti j` */
+    char *bti_lbl = (target_cf() & CF_BTI)
+                  ? xcalloc((size_t)(fn->nlabels ? fn->nlabels : 1), 1) : NULL;
+    for (int n = 0; bti_lbl && n < fn->nins; n++)
+        if (fn->ins[n].op == IR_LABELADDR && fn->ins[n].label >= 0 &&
+            fn->ins[n].label < fn->nlabels)
+            bti_lbl[fn->ins[n].label] = 1;
+    for (int j = 0; bti_lbl && j < fn->njt; j++)
+        for (int k = 0; k < fn->jt[j].n; k++)
+            if (fn->jt[j].labels[k] >= 0 && fn->jt[j].labels[k] < fn->nlabels)
+                bti_lbl[fn->jt[j].labels[k]] = 1;
     for (int l = 0; l < fn->nlabels; l++)
         loff[l] = -1;
     struct a64_fix *fix = NULL;
@@ -2335,9 +2387,12 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
      * abort() ended `b .` and then an epilogue nothing reached. */
     int dead = 0, fell = 1;
 
+    ra_debug_pc_begin(fn);
     for (int n = 0; n < fn->nins; n++) {
         struct ir_ins *i = &fn->ins[n];
         int ins_start = t->len;
+        if (fn->ins_pc)
+            fn->ins_pc[n] = t->len;
         if (n == skip_ret)
             continue;
         if (dead) {
@@ -2840,6 +2895,38 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
              * the exception elsewhere. */
             struct gsite hi = {0}, lo = {0};
             int d = wr(i->dst, A64_ACC);      /* the home, as STRADDR */
+            if (i->glob->is_tls && target_os_get() == TGT_OS_DARWIN) {
+                /* Darwin: the DESCRIPTOR's address, through the slot ld
+                 * makes for it (TLVP); irgen calls its thunk, which
+                 * answers this thread's copy (tlv_call) */
+                hi.patch_off = a64_adrp(t, d);
+                hi.glob = i->glob;
+                hi.kind = RK_TLVP_PAGE;
+                PUSH(st->g, st->ng, st->capg, hi);
+                lo.patch_off = t->len;
+                a64_ldr(t, d, d, 0, 8, 0, 8);
+                lo.glob = i->glob;
+                lo.kind = RK_TLVP_LO12;
+                PUSH(st->g, st->ng, st->capg, lo);
+                goto gaddr_done;
+            }
+            if (i->glob->is_tls && (target_pic() == TARGET_PIC ||
+                                    (target_pic() && !i->glob->defined))) {
+                /* -fPIC, or -fPIE and another module's: initial-exec --
+                 * the offset from the thread pointer is in the GOT */
+                hi.patch_off = a64_adrp(t, d);
+                hi.glob = i->glob;
+                hi.kind = RK_TLSIE_PAGE;
+                PUSH(st->g, st->ng, st->capg, hi);
+                lo.patch_off = t->len;
+                a64_ldr(t, d, d, 0, 8, 0, 8);
+                lo.glob = i->glob;
+                lo.kind = RK_TLSIE_LO12;
+                PUSH(st->g, st->ng, st->capg, lo);
+                a64_mrs_tpidr(t, A64_IP1);
+                a64_alu_reg(t, '+', d, d, A64_IP1, 8);
+                goto gaddr_done;
+            }
             if (i->glob->is_tls) {
                 /* Not an address in this image: an offset into a block
                  * that is different for every thread. adrp names a page
@@ -2855,8 +2942,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                 PUSH(st->g, st->ng, st->capg, lo);
                 goto gaddr_done;
             }
-            int got = !i->glob->defined &&
-                      (i->glob->is_weak || target_os_get() == TGT_OS_DARWIN);
+            int got = (!i->glob->defined &&
+                       (i->glob->is_weak || target_os_get() == TGT_OS_DARWIN)) ||
+                      cg_global_via_got(i->glob);
             hi.patch_off = a64_adrp(t, d);
             hi.glob = i->glob;
             hi.kind = got ? RK_GOT_PAGE : RK_ADR_HI21;
@@ -2878,9 +2966,10 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
         case IR_FADDR: {
             /* As IR_GADDR: on Darwin an undefined function has no
              * link-time address, so its address comes from the GOT. */
-            int got = !i->callee->has_defn &&
-                      (i->callee->is_weak ||
-                       target_os_get() == TGT_OS_DARWIN);
+            int got = (!i->callee->has_defn &&
+                       (i->callee->is_weak ||
+                        target_os_get() == TGT_OS_DARWIN)) ||
+                      cg_func_via_got(i->callee);
             struct fsite hi, lo;
             int d = wr(i->dst, A64_ACC);      /* the home, as STRADDR */
             hi.addend = lo.addend = 0;
@@ -3028,6 +3117,58 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
             break;
         }
 
+        /* ---- 128-bit vectors (the vectorizer's): Advanced SIMD --------
+         *
+         * Each value lives in its 16-byte slot (cg_wide_vregs marks it,
+         * and keeps it from the integer allocator); an operation works
+         * in v16 and v17, the FP scratch pair, which no allocation and no
+         * argument uses. The lanes are integers of i->size bytes. */
+        case IR_VLOAD: {
+            int ra = rd(t, sd, i->a, A64_ADDR);
+            a64_ldr_q(t, A64_FACC, ra, 0);
+            vslot_st(t, sd, i->dst, A64_FACC);
+            break;
+        }
+        case IR_VSTORE: {
+            vslot_ld(t, sd, i->b, A64_FACC);
+            int ra = rd(t, sd, i->a, A64_ADDR);
+            a64_str_q(t, A64_FACC, ra, 0);
+            break;
+        }
+        case IR_VBIN:
+            vslot_ld(t, sd, i->a, A64_FACC);
+            if (i->imm == '<' || i->imm == '>') {
+                a64_v_shift(t, i->imm == '<', i->sign, A64_FACC, A64_FACC,
+                            i->size, (int)i->c);
+            } else {
+                vslot_ld(t, sd, i->b, A64_FTMP);
+                a64_v_bin(t, (int)i->imm, A64_FACC, A64_FACC, A64_FTMP,
+                          i->size);
+            }
+            vslot_st(t, sd, i->dst, A64_FACC);
+            break;
+        case IR_VSPLAT: {
+            int ra = rd(t, sd, i->a, A64_ACC);
+            a64_v_dup(t, A64_FACC, ra, i->size);
+            vslot_st(t, sd, i->dst, A64_FACC);
+            break;
+        }
+        case IR_VREDADD: {
+            /* the lanes' sum, wrapping at the lane's width, zero-extended
+             * into the scalar (x86-64's movd/movq, the same value) */
+            vslot_ld(t, sd, i->a, A64_FACC);
+            a64_v_addv(t, A64_FACC, A64_FACC, i->size);
+            int d = wr(i->dst, A64_ACC);
+            a64_v_lane0(t, d, A64_FACC, i->size);
+            wrote(t, sd, i->dst, d);
+            break;
+        }
+        case IR_VWIDEN:
+            vslot_ld(t, sd, i->a, A64_FACC);
+            a64_v_widen(t, A64_FACC, A64_FACC, i->size, (int)i->c, i->sign);
+            vslot_st(t, sd, i->dst, A64_FACC);
+            break;
+
         case IR_BSWAP:
             ld_slot(t, sd, i->a, A64_ACC, 8, 0, 8);
             a64_rev(t, A64_ACC, A64_ACC, i->size);
@@ -3057,6 +3198,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
 
         case IR_LABEL:
             loff[i->label] = t->len;
+            if (bti_lbl && i->label >= 0 && i->label < fn->nlabels &&
+                bti_lbl[i->label])
+                a64_word(t, 0xd503249fUL);          /* bti j */
             break;
 
         case IR_JMP: {
@@ -3305,6 +3449,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                 }
                 if (!frameless)
                     a64_teardown(t, fr.size);
+                else if (g_a64_auth)
+                    a64_word(t, g_a64_auth);
                 if (cg_call_local(fn->src, i->callee)) {
                     struct a64_callsite cs;
                     cs.patch_off = a64_b(t);   /* patched as a bl is: imm26 */
@@ -3665,6 +3811,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
             break;
         }
         case IR_LANDING:
+            if (target_cf() & CF_BTI)
+                a64_word(t, 0xd503249fUL);          /* bti j: the unwinder br's here */
             /* the unwinder left the exception in x0, the selector in x1 */
             st_slot(t, sd, i->dst, 0, 8);
             st_slot(t, sd, i->b, 1, 8);
@@ -3675,6 +3823,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                        (int)i->op, f->name);
             break;
         }
+        if ((target_cf() & CF_BTI) && cg_returns_twice(i))
+            a64_word(t, 0xd503249fUL);              /* bti j: longjmp's br */
         if (i->op == IR_CALL && fn->neh)
             ir_add_csite(fn, ins_start - f->code_off, t->len - f->code_off,
                          i->eh_region - 1);
@@ -3695,6 +3845,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
         k += pair;
     }
     if (frameless) {
+        if (g_a64_auth)
+            a64_word(t, g_a64_auth);
         a64_ret(t);
     } else if (fn->has_alloca) {
         a64_ldr(t, A64_FBREG, A64_FBREG, fr.fb_save, 8, 0, 8);
@@ -3705,6 +3857,29 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
     }
     }
     a64_lit_flush(t);
+    if (fn->ins_pc) {
+        /* -g: where each vreg lives -- x0-x30 are DWARF 0-30, v0-v31
+         * 64-95, and a slot is x29-relative as var_off's are */
+        fn->ins_pc[fn->nins] = t->len;
+        struct ir_vhome *h = xcalloc((size_t)(fn->nvregs ? fn->nvregs : 1),
+                                     sizeof *h);
+        for (int v = 0; v < fn->nvregs; v++) {
+            if (g_a64_wide && g_a64_wide[v])
+                continue;
+            if (a64_is_flt(v) && a64_in_freg(v)) {
+                h[v].kind = IR_LOC_REG;
+                h[v].val = 64 + g_a64_floc[v];
+            } else if (!a64_is_flt(v) && a64_in_reg(v)) {
+                h[v].kind = IR_LOC_REG;
+                h[v].val = g_a64_loc[v];
+            } else if (sd[v] != A64_DEAD_SLOT) {
+                h[v].kind = IR_LOC_FB;
+                h[v].val = (int)(sd[v] - fr.size);
+            }
+        }
+        ra_debug_locs(fn, h);
+        free(h);
+    }
     g_fb = A64_SP;
     a64_frame_base = A64_SP;
     free(g_a64_wide);
@@ -3742,7 +3917,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
     free(g_a64_afold.ok); free(g_a64_afold.disp);
     g_a64_afold.ok = NULL; g_a64_afold.disp = NULL;
     cg_note_labels(fn, loff);
-    free(loff); free(fix); free(retfix); free(sd);
+    free(loff); free(fix); free(retfix); free(sd); free(bti_lbl);
 }
 
 /* ---- the unit -------------------------------------------------------- */

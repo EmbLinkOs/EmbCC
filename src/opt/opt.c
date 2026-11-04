@@ -552,11 +552,11 @@ void opt_run(struct ir_unit *iu, int level)
     pass_default(P_MEM2REG, level >= 1);
     pass_default(P_GCSE,    level >= 2);
     pass_default(P_LICM,    level >= 1);
-    /* Vectorization is x86-64 for now: the aarch64 backend refuses the
-     * vector opcodes loudly (diag_fatal) rather than emitting something
-     * it has not been taught, so the pass must not hand it any. */
+    /* Vectorization where the backend lowers the vector opcodes: SSE2
+     * on x86-64, Advanced SIMD on AArch64 */
     pass_default(P_VEC,     level >= 2 && !size &&
-                            target_get() == TARGET_X86_64);
+                            (target_get() == TARGET_X86_64 ||
+                             target_get() == TARGET_AARCH64));
     pass_default(P_LOADCSE, level >= 1);
     pass_default(P_SCCP,    level >= 1);
     pass_default(P_INLINE,  level >= 1);   /* -O1: see g_inline_o1 */
@@ -605,6 +605,18 @@ void opt_run(struct ir_unit *iu, int level)
      * function: everything else -- value numbering, copy propagation,
      * dead code, and all of the loop passes -- works on it unchanged. */
     for (int f = 0; f < iu->nfuncs; f++) {
+        /* A cold function -- __attribute__((cold)), or one the profile
+         * never ran -- is optimized for size: it runs rarely if at all,
+         * so the bytes are what it costs. */
+        struct func *sf = iu->funcs[f].src;
+        int cold = level >= 1 && sf &&
+                   (sf->attr_cold || sf->prof_heat == IR_HEAT_COLD);
+        int s_size = g_opt_size, s_vec = g_pass[P_VEC].on,
+            s_unroll = g_pass[P_UNROLL].on, s_sw = g_pass[P_SWTHREAD].on;
+        if (cold) {
+            g_opt_size = 1;
+            g_pass[P_VEC].on = g_pass[P_UNROLL].on = g_pass[P_SWTHREAD].on = 0;
+        }
         opt_func(&iu->funcs[f]);
         pass_latch_copies(&iu->funcs[f]);
         if (pass_thread_copies(&iu->funcs[f]))
@@ -613,6 +625,15 @@ void opt_run(struct ir_unit *iu, int level)
          * block whose update this moves next to them. */
         if (level >= 1)
             pass_sinkupd(&iu->funcs[f]);
+        /* the cold blocks to the end, once nothing else will move code */
+        if (level >= 1 && !cold)
+            pass_coldsink(&iu->funcs[f]);
+        if (cold) {
+            g_opt_size = s_size;
+            g_pass[P_VEC].on = s_vec;
+            g_pass[P_UNROLL].on = s_unroll;
+            g_pass[P_SWTHREAD].on = s_sw;
+        }
         pass_x86_loadop(&iu->funcs[f]);     /* last: nothing reorders after */
     }
 }

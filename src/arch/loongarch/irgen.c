@@ -8,6 +8,7 @@
  * reference -- and its va_list is the same bare pointer, so that routine,
  * which reads only the pointer width, is right here too (read off clang:
  * `v(0, x)` with an __int128 x puts x in a2:a3). */
+#include "../../as/gas.h"
 #include "../../ir/irgen_int.h"
 
 #include "../target.h"
@@ -253,7 +254,7 @@ void irg_asm_loongarch(struct ir_func *fn, struct stmt *s)
                           names, nops);
     struct code c = { 0 };
     char err[512];
-    if (laasm_assemble(text, &c, err, sizeof err) != 0)
+    if (GAS_INLINE(laasm_assemble, file, s->line, text, &c, err, sizeof err) != 0)
         diag_fatal(file, s->line, "%s", err);
     /* Its alignments: to four at most, which every instruction has, so
      * they pad as at the template's start. A larger one would pad by where

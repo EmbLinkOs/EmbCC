@@ -56,6 +56,7 @@ struct machow {
     struct buf syms;               /* struct nlist_64, packed */
     int nsyms;
     int symrank;                   /* 0 local, 1 defined external, 2 undef */
+    int has_tlv;                   /* __thread_vars: MH_HAS_TLV_DESCRIPTORS */
     struct buf strtab;
 };
 
@@ -183,7 +184,10 @@ int machow_add_section(struct machow *w, const char *segname,
     unsigned long long a = 1ULL << align;
     s->addr = w->nsect ? round_up(w->sect[w->nsect - 1].addr +
                                   w->sect[w->nsect - 1].size, a) : 0;
-    s->zerofill = (flags & 0xff) == S_ZEROFILL;
+    s->zerofill = (flags & 0xff) == S_ZEROFILL ||
+                  (flags & 0xff) == 0x12;     /* S_THREAD_LOCAL_ZEROFILL */
+    if ((flags & 0xff) == 0x13)               /* S_THREAD_LOCAL_VARIABLES */
+        w->has_tlv = 1;
     if (!s->zerofill && size)
         buf_append(&s->data, data, (size_t)size);
     return ++w->nsect;              /* 1-based, as n_sect wants */
@@ -366,7 +370,7 @@ int machow_write(struct machow *w, const char *path)
     mh.filetype = MH_OBJECT;
     mh.ncmds = ncmds;
     mh.sizeofcmds = sizeofcmds;
-    mh.flags = MH_SUBSECTIONS_VIA_SYMBOLS;
+    mh.flags = MH_SUBSECTIONS_VIA_SYMBOLS | (w->has_tlv ? 0x00800000u : 0);
     buf_append(&out, &mh, sizeof mh);
 
     struct segment_command_64 sg;

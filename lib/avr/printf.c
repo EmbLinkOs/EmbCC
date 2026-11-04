@@ -26,6 +26,7 @@ struct __emb_avr_out {
     char *buf;
     size_t cap;         /* bytes the buffer holds, the terminator among them */
     size_t n;           /* characters produced, written or not */
+    void (*sink)(char); /* or each character to this instead (printf) */
 };
 
 int __emb_avr_vformat(struct __emb_avr_out *o, const char *fmt, int pgm,
@@ -35,7 +36,9 @@ int __emb_avr_vformat(struct __emb_avr_out *o, const char *fmt, int pgm,
 
 static void put(struct __emb_avr_out *o, char c)
 {
-    if (o->n + 1 < o->cap)
+    if (o->sink)
+        o->sink(c);
+    else if (o->n + 1 < o->cap)
         o->buf[o->n] = c;
     o->n++;
 }
@@ -262,11 +265,14 @@ int __emb_avr_vformat(struct __emb_avr_out *o, const char *fmt, int pgm,
 }
 #endif /* EMB_AVR_VFORMAT */
 
-#ifndef EMB_AVR_VFORMAT
+#if defined(EMB_AVR_SPRINTF) || defined(EMB_AVR_SNPRINTF) || \
+    defined(EMB_AVR_VSPRINTF) || defined(EMB_AVR_VSNPRINTF) || \
+    defined(EMB_AVR_SPRINTF_P) || defined(EMB_AVR_SNPRINTF_P) || \
+    defined(EMB_AVR_VSPRINTF_P) || defined(EMB_AVR_VSNPRINTF_P)
 /* Into a buffer of `cap` bytes, terminated whenever there is room. */
 static int to_buf(char *s, size_t cap, const char *fmt, int pgm, va_list ap)
 {
-    struct __emb_avr_out o = { s, cap, 0 };
+    struct __emb_avr_out o = { s, cap, 0, 0 };
     int r = __emb_avr_vformat(&o, fmt, pgm, ap);
     if (cap)
         s[o.n < cap ? o.n : cap - 1] = 0;
@@ -346,6 +352,137 @@ int sprintf_P(char *s, const char *fmt, ...)
     va_start(ap, fmt);
     int r = to_buf(s, NOLIMIT, fmt, 1, ap);
     va_end(ap);
+    return r;
+}
+#endif
+
+/* ---- the stream: stdout, one character at a time ------------------------
+ *
+ * There is no FILE here and no buffer: printf, vprintf, puts and their _P
+ * forms hand each character to putchar, which the board supplies -- a
+ * UART, as an Arduino sketch's Serial is -- and which does nothing until
+ * it does (avr-libc's stdout is likewise nothing until fdevopen). */
+#if defined(EMB_AVR_PRINTF) || defined(EMB_AVR_VPRINTF) || \
+    defined(EMB_AVR_PRINTF_P) || defined(EMB_AVR_VPRINTF_P)
+static void to_putchar(char c)
+{
+    putchar((unsigned char)c);
+}
+
+static int to_out(const char *fmt, int pgm, va_list ap)
+{
+    struct __emb_avr_out o = { 0, 0, 0, to_putchar };
+    return __emb_avr_vformat(&o, fmt, pgm, ap);
+}
+#endif
+
+#ifdef EMB_AVR_PRINTF
+int printf(const char *__restrict fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    int r = to_out(fmt, 0, ap);
+    va_end(ap);
+    return r;
+}
+#endif
+
+#ifdef EMB_AVR_VPRINTF
+int vprintf(const char *__restrict fmt, va_list ap)
+{
+    return to_out(fmt, 0, ap);
+}
+#endif
+
+#ifdef EMB_AVR_PRINTF_P
+int printf_P(const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    int r = to_out(fmt, 1, ap);
+    va_end(ap);
+    return r;
+}
+#endif
+
+#ifdef EMB_AVR_VPRINTF_P
+int vprintf_P(const char *fmt, va_list ap)
+{
+    return to_out(fmt, 1, ap);
+}
+#endif
+
+#ifdef EMB_AVR_PUTS
+int puts(const char *s)
+{
+    while (*s)
+        putchar((unsigned char)*s++);
+    putchar('\n');
+    return 1;
+}
+#endif
+
+#ifdef EMB_AVR_PUTS_P
+int puts_P(const char *s)
+{
+    char c;
+    while ((c = *(const __flash char *)(uint16_t)s++) != 0)
+        putchar((unsigned char)c);
+    putchar('\n');
+    return 1;
+}
+#endif
+
+#ifdef EMB_AVR_PUTCHAR
+/* the default: no device. A board's own putchar replaces it (this is
+ * the archive's last resort, and weak besides) */
+__attribute__((weak)) int putchar(int c)
+{
+    return (unsigned char)c;
+}
+#endif
+
+#ifdef EMB_AVR_STDOUT
+/* stdout, stderr and stdin as names: this library has no FILE behind
+ * them, and fflush has nothing to flush (each character went out as it
+ * was made) -- but code written for a hosted C library names them */
+FILE *stdin, *stdout, *stderr;
+#endif
+
+#ifdef EMB_AVR_FFLUSH
+int fflush(FILE *f)
+{
+    (void)f;
+    return 0;
+}
+#endif
+
+#ifdef EMB_AVR_FPUTS
+/* to stdout or stderr alike: the one device */
+int fputs(const char *__restrict s, FILE *__restrict f)
+{
+    (void)f;
+    while (*s)
+        putchar((unsigned char)*s++);
+    return 1;
+}
+#endif
+
+#ifdef EMB_AVR_FPRINTF
+int fprintf(FILE *__restrict f, const char *__restrict fmt, ...)
+{
+    (void)f;
+    va_list ap;
+    va_start(ap, fmt);
+    struct __emb_avr_out o = { 0, 0, 0, 0 };
+    o.sink = 0;
+    int r;
+    {
+        extern int vprintf(const char *__restrict, va_list);
+        r = vprintf(fmt, ap);
+    }
+    va_end(ap);
+    (void)o;
     return r;
 }
 #endif

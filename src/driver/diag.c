@@ -11,6 +11,7 @@
  * flush runs from atexit. What they print is what they always printed.
  */
 #include "util.h"
+#include "../lex/lex.h"
 #include "../platform/platform.h"
 
 #include <ctype.h>
@@ -672,11 +673,6 @@ static struct warn_opt g_warns[] = {
     /* On by default in GCC: a pointer that loses its pointee's const
      * lets the program write a read-only object without a cast. */
     { "discarded-qualifiers", 1,  0,    0 },
-    /* On by default and hard to miss on purpose: a Windows object
-     * EmbCC builds today passes arguments the way System V does, and
-     * that is wrong against anything EmbCC did not compile. It goes
-     * away when the Microsoft x64 convention lands. */
-    { "windows-abi",          1,  0,    0 },
 
     /* ---- the statically-decidable ones ----
      *
@@ -750,6 +746,10 @@ static struct warn_opt g_warns[] = {
     /* `const static int t[]`: a storage class after the type, which C
      * calls obsolescent and GCC reports in -Wextra */
     { "old-style-declaration", 0, 0,    1 },
+    /* --permissive's two: C89's implicit int and implicit declaration,
+     * kept in a later standard and said every time, as GCC says them */
+    { "implicit-int",         1,  0,    0 },
+    { "implicit-function-declaration", 1, 0, 0 },
 
     /* ---- conversions that may change a value (sema, cvt_check) ----
      *
@@ -767,6 +767,9 @@ static struct warn_opt g_warns[] = {
     /* 'ab': an int of implementation-defined value (GCC's and clang's
      * is computed here), on by default as in GCC */
     { "multichar",            1,  0,    0 },
+    /* a // comment a backslash-newline continues, or a slash-star
+     * inside a slash-star comment (GCC's -Wcomment, in -Wall) */
+    { "comment",              0,  1,    0 },
     /* C89's `return x;` in a void function: GCC lets it through with
      * this warning, on by default (from C99 on it is an error) */
     { "return-mismatch",      1,  0,    0 },
@@ -774,6 +777,20 @@ static struct warn_opt g_warns[] = {
      * value: on by default (clang's choice; GCC's -Wall), since C allows
      * it only while no caller uses the value */
     { "return-type",          1,  1,    0 },
+    /* -fprofile-use: a unit with no .gcda (GCC's, on by default), and a
+     * function whose shape is not the one the profile was taken from
+     * (on, and GCC's error -- here its profile is ignored instead) */
+    { "missing-profile",      1,  0,    0 },
+    { "coverage-mismatch",    1,  0,    0 },
+    /* the coding standards' rules (src/sema/rules.def): off unless named,
+     * or turned on by --misra / --cert */
+#define RULE(n, s, i, c, t) { n, 0, 0, 0 },
+#include "../sema/rules.def"
+#undef RULE
+    /* the static analyzer's (src/sema/analyze.def): --analyze */
+#define CHECK(n, t) { n, 0, 0, 0 },
+#include "../sema/analyze.def"
+#undef CHECK
     /* -pedantic: what the C standard -std= names does not have -- a
      * later standard's feature, or a GNU extension (lex_pedantic);
      * -pedantic-errors makes each an error */
@@ -1042,7 +1059,9 @@ void diag_enable_group(int wall, int wextra)
  * the build log claim the check was missing when it is stricter. */
 int diag_always_error(const char *name)
 {
-    return !strcmp(name, "implicit-function-declaration");
+    /* (under --permissive it is a warning, which -Werror may still make
+     * an error) */
+    return !strcmp(name, "implicit-function-declaration") && !diag_permissive();
 }
 
 /* The names, for --help. */
@@ -1059,11 +1078,18 @@ int diag_warning_default_on(int i) { return g_warns[i].on; }
  * (`embcc --reference=warnings`) is printed from these and the table
  * above, and refuses to print if a warning has no line here. */
 static const struct { const char *name, *implied, *what; } g_warn_doc[] = {
+#define RULE(n, s, i, c, t) { n, n[0] == 'm' ? "misra" : "cert", s " " i " (" c "): " t },
+#include "../sema/rules.def"
+#undef RULE
+#define CHECK(n, t) { n, "analyze", t },
+#include "../sema/analyze.def"
+#undef CHECK
     { "address", NULL, "a function name tested in an `if` condition, or compared with a null pointer constant" },
     { "arith-conversion", NULL, "as `--warn=conversion`, also for arithmetic whose operands each fit the target type" },
     { "attributes", NULL, "an attribute EmbCC does not know, or one it accepts but does not implement" },
     { "cast-qual", NULL, "a cast that removes `const` or `volatile` from the type a pointer points to" },
     { "conversion", NULL, "an implicit conversion that may change an integer's value, or an integer converted to a floating type that cannot hold all its values" },
+    { "coverage-mismatch", NULL, "`-fprofile-use` and a function that is not the one the profile was taken from: its source or its options changed; its profile is ignored" },
     { "deprecated-declarations", NULL, "a use of a function or variable declared `deprecated`" },
     { "discarded-qualifiers", NULL, "a pointer conversion that drops the pointed-to type's `const`" },
     { "div-by-zero", NULL, "integer division or remainder by a constant zero" },
@@ -1076,10 +1102,14 @@ static const struct { const char *name, *implied, *what; } g_warn_doc[] = {
     { "logical-op", NULL, "`a && a` or `a || a` with identical operands" },
     { "maybe-uninitialized", NULL, "a local variable read on a path where only some paths wrote it" },
     { "missing-declarations", NULL, "a function with external linkage defined with no declaration before it (when `--warn=missing-prototypes` is off)" },
+    { "missing-profile", NULL, "`-fprofile-use` and no profile for this unit: the program was not run since `-fprofile-generate` built it, or its `.gcda` is somewhere else (`-fprofile-use=PATH`)" },
     { "missing-prototypes", NULL, "a function with external linkage defined with no prototype before it" },
     { "multichar", NULL, "a character constant of more than one character, `'ab'`" },
+    { "comment", NULL, "a `//` comment that a backslash at the end of its line continues on the next, or `/*` inside a `/* ... */` comment" },
     { "nested-externs", NULL, "an `extern` declaration inside a function body" },
     { "old-style-declaration", NULL, "a storage class or `inline` after the type specifiers: `const static int t[]`, `int static n`" },
+    { "implicit-int", NULL, "under `--permissive`, a declaration with no type, which C89 read as `int`: `static x = 3;`, `f() { ... }`" },
+    { "implicit-function-declaration", NULL, "under `--permissive`, a call to a function nothing declared, which C89 declared `extern int f();`" },
     { "overflow", NULL, "an integer constant converted to a type that cannot hold it as a signed or as an unsigned value: `unsigned char c = 300;`" },
     { "pedantic", NULL, "a construct the C standard `--std` names does not have: a later standard's (`0b101` before C23, `_Bool` in C89) or a GNU extension (`({ ... })`, `case 1 ... 3`, `x ?: y`), except after `__extension__`. `--pedantic` turns it on and `--pedantic-errors` makes it an error; either also takes C23's keywords away from a GNU dialect before C23" },
     { "parentheses", NULL, "a comparison as an unparenthesized operand of `&`, `|` or `^`: `reg & MASK == 0`" },
@@ -1101,7 +1131,6 @@ static const struct { const char *name, *implied, *what; } g_warn_doc[] = {
     { "unused-result", NULL, "a discarded result of a function declared `warn_unused_result` or `[[nodiscard]]`" },
     { "unused-variable", NULL, "a local variable that is never used" },
     { "vla", NULL, "a variable length array, or a `typedef` of one" },
-    { "windows-abi", NULL, "a compile for a Windows target, whose ABI EmbCC does not yet fully implement" },
 };
 
 static int warn_doc(const char *name)
@@ -1189,6 +1218,10 @@ void diag_set_color(int mode)    { g_color = mode; }
 void diag_set_max_errors(int n)  { g_max_errors = n; }
 void diag_set_werror(int on)     { g_werror = on; }
 void diag_set_no_warnings(int on){ g_no_warnings = on; }
+static int g_diag_permissive;
+void diag_set_permissive(int on) { g_diag_permissive = on; }
+int diag_permissive(void) { return g_diag_permissive; }
+
 void diag_set_parseable_fixits(int on) { g_parseable_fixits = on; }
 int  diag_error_count(void)      { return g_errors; }
 /* How many warnings were REPORTED -- not to be confused with

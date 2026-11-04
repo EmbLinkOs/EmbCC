@@ -1140,22 +1140,6 @@ embcc: var.c:3:9: warning: unused variable 'unused' [--warn=unused-variable]
           ^~~~~~
 ```
 
-#### `--warn=windows-abi`
-
-Issued once for every object file written for a Windows target
-(`--target=x86_64-windows-gnu` or `x86_64-w64-mingw32`): the code EmbCC
-generates for Windows is not yet fully the Microsoft x64 ABI. `long` is
-8 bytes and `wchar_t` 4 (Windows has 4 and 2), and `rsi`, `rdi`, `xmm6`
-and `xmm7` are not preserved across calls, so objects EmbCC compiles
-agree with each other but not with code built by other compilers. On by
-default. The warning carries a file name but no line, and is not issued
-for `--syntax-only`, `-E` or `-S`. See [Targets](targets.md) for the
-state of the Windows target.
-
-```text
-embcc: win.c: warning: x86_64-windows-gnu is not yet the Microsoft x64 ABI: `long` is 8 bytes and wchar_t 4 (Windows has 4 and 2), and rsi, rdi, xmm6 and xmm7 are not preserved across a call: objects EmbCC compiles agree with each other and with nothing else [--warn=windows-abi]
-```
-
 ### Warnings no option controls
 
 These warnings have no `--warn=` option and no `[--warn=...]` tag. `--no-warnings` suppresses
@@ -1293,7 +1277,7 @@ holds both.
 
 | Pass | Decisions | Reasons |
 |---|---|---|
-| `inline` | `inlined`, `not-inlined` | `small-enough`, `always_inline`; `callee-too-large`, `not-always_inline-at-O0`, `not-a-sole-callee-at-O1`, `callee-not-defined-here`, `would-be-recursive`, `callee-is-noinline`, `callee-is-weak`, `callee-is-varargs`, `callee-computes-in-__int128`, `callee-has-exception-regions`, `returns-a-struct`, `parameter-is-not-a-simple-scalar`, `returns-a-value-wider-than-a-vreg`, `callee-uses-va_start`, `callee-has-a-vla`, `callee-uses-a-computed-goto`, `callee-calls-a-struct-returning-function` |
+| `inline` | `inlined`, `not-inlined` | `small-enough`, `always_inline`; `callee-too-large`, `not-always_inline-at-O0`, `not-a-sole-callee-at-O1`, `callee-not-defined-here`, `would-be-recursive`, `callee-is-noinline`, `callee-is-weak`, `cold-call-site`, `callee-is-cold`, `callee-is-varargs`, `callee-computes-in-__int128`, `callee-has-exception-regions`, `returns-a-struct`, `parameter-is-not-a-simple-scalar`, `returns-a-value-wider-than-a-vreg`, `callee-uses-va_start`, `callee-has-a-vla`, `callee-uses-a-computed-goto`, `callee-calls-a-struct-returning-function` |
 | `mem2reg` | `promoted-to-register`, `kept-in-memory` (one per local variable, at its declaration) | `scalar-and-never-addressed`; `address-is-taken`, `declared-volatile`, `read-is-volatile`, `write-is-volatile`, `read-is-partial-or-extending`, `write-is-partial`, `not-a-scalar-integer-pointer-or-float`, `not-4-or-8-bytes`, `type-unknown` |
 | `sroa` | `split-into-scalars`, `kept-whole` (one per aggregate local) | `address-never-escapes`; `address-escapes`, `address-held-in-a-reassigned-temp`, `declared-volatile`, `access-is-volatile`, `access-is-not-1-2-4-or-8-bytes`, `access-runs-outside-the-object`, `two-accesses-overlap-at-different-widths`, `too-many-pieces`, `too-large-to-split`, `is-a-wide-scalar`, `is-a-variable-length-array` |
 | `sccp` | `branch-always-jumps`, `branch-never-jumps` | `condition-is-a-constant` |

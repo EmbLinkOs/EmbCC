@@ -311,8 +311,10 @@ refc "an unknown clobber" "is not a SPARC register" \
     'void f(void){ __asm__ volatile("nop" ::: "eax"); }'
 refc "a symbol in a template" "inline asm cannot reach one" \
     'void g(void); void f(void){ __asm__ volatile("call g\n nop"); }'
-refc "a named label in a template" "are numeric" \
-    'void f(void){ __asm__ volatile("x: ba x\n nop"); }'
+# (a named label: the template is assembled whole, labels and all)
+printf '%s\n' 'void f(void){ __asm__ volatile("x: ba x\n nop"); }' > "$out/nl.c"
+"$EMBCC" --target=$T -c "$out/nl.c" -o "$out/nl.o" 2> "$out/nl.err" || {
+    echo "a named label in a template was refused:"; cat "$out/nl.err"; exit 1; }
 refc "x86's constraint letters" 'is not valid for SPARC' \
     'int f(int x){ int r; __asm__("mov %1, %0" : "=r"(r) : "a"(x)); return r; }'
 refc "a 64-bit operand" 'is 8 bytes' \

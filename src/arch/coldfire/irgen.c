@@ -9,6 +9,7 @@
  * int is promoted -- is right-justified in its word, big-endian
  * (docs/internals/coldfire-plan.md).
  */
+#include "../../as/gas.h"
 #include "../../ir/irgen_int.h"
 #include "asm.h"
 #include "emit.h"
@@ -271,7 +272,7 @@ void irg_asm_coldfire(struct ir_func *fn, struct stmt *s)
                                         isimm, ismem, names, nops);
     struct code c = { 0 };
     char err[512];
-    if (cfasm_assemble(text, &c, err, sizeof err) != 0)
+    if (GAS_INLINE(cfasm_assemble, file, s->line, text, &c, err, sizeof err) != 0)
         diag_fatal(file, s->line, "%s", err);
     free(text);
 

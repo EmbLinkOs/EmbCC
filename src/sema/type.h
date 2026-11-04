@@ -49,6 +49,12 @@ struct member {
                            * bit there, and it is read and written a byte at a
                            * time over this many bytes (0: a unit access) */
     int user_align;       /* __attribute__((aligned(N))) on the member; 0 = none */
+    /* counted_by(name) / sized_by(name) (GCC 15's, clang's): the member
+     * of the same struct that holds this array's or pointer's length, in
+     * elements (or bytes); NULL when none. -fbounds-safety checks a
+     * subscript against it. */
+    const char *counted_by;
+    int counted_bytes;
 };
 
 /* A bit-field's first bit in MEMORY order -- bits from the first byte of
@@ -87,6 +93,14 @@ struct type {
                              * too. Ignored by ty_equal; sema keeps pointers to
                              * the two spaces apart. */
     int bitint;             /* _BitInt(N): N, the value's width (ty_bitint) */
+    int is_dec;             /* C23's decimal floating types: 4, 8 or 16 for
+                             * _Decimal32, 64, 128 -- a float, a double, and
+                             * binary128 (AArch64) or unsigned __int128
+                             * (x86-64) of the same bytes and register class,
+                             * whose every operation is a call (gen_decimal) */
+    int is_nullptr;         /* TY_PTR: C23's nullptr_t, typeof(nullptr) -- a
+                             * pointer to void in every lowering, distinct to
+                             * ty_equal and ty_compatible (ty_nullptr) */
     int is_enum;            /* an enumerated type: its underlying integer
                              * type in every other respect (ty_equal and
                              * the lowerings do not look), but GCC's
@@ -220,7 +234,9 @@ struct type *ty_half_carrier(int *nanbox);
  * alignment and calling convention, as the x86-64, AArch64 and RISC-V
  * ABIs lay out a _BitInt of up to 64 bits; `bitint` is N. A value of one
  * is always held as its low N bits, sign- or zero-extended (irgen). */
-#define TY_BITINT_MAXWIDTH 64
+#define TY_BITINT_MAXWIDTH 65535
+/* _BitInt(N > 64): a struct of limbs to the lowerings (type.c) */
+int ty_is_wide_bitint(const struct type *t);
 struct type *ty_bitint(int n, int is_unsigned);
 /* The integer type that is exactly `size` bytes wide, or NULL if the
  * target has none. Callers that want "the unsigned type of width w"
@@ -233,6 +249,10 @@ struct type *ty_int_of_size(int size, int is_unsigned);
  * wide as a pointer -- ILP32 and AVR -- and the long ones elsewhere. The
  * type of sizeof, _Alignof and offsetof, and of a pointer difference. */
 struct type *ty_size_t(void);
+/* An integer as wide as a pointer: `long`, but `long long` where long is
+ * narrower (Win64's LLP64) -- for an index added to a pointer, a VLA's
+ * size, a saved stack pointer. */
+struct type *ty_intptr(int is_unsigned);
 struct type *ty_ptrdiff_t(void);
 /* A copy of `t` marked `volatile` (or t itself if already). Base types are
  * interned singletons, so this returns a fresh non-interned node — safe because
@@ -253,6 +273,11 @@ struct type *ty_scalar_struct_ret(struct type *t);
 struct type *ty_unqual(struct type *t);
 struct type *ty_atomic(struct type *t);
 struct type *ty_ptr(struct type *pointee);
+/* C23's nullptr_t: one node */
+struct type *ty_nullptr(void);
+/* _Decimal32/64/128 (bytes 4, 8, 16); NULL where the target has none */
+struct type *ty_decimal(int bytes);
+int ty_decimal_ok(void);
 struct type *ty_array(struct type *elem, int count);
 /* SysV x86-64: a struct that is exactly one long double (X87 + X87UP) —
  * returned in st0, where every other struct EmbCC returns goes through a

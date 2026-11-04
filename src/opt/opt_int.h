@@ -340,6 +340,7 @@ int pass_guardjump(struct ir_func *fn);
 void tm_sweep(struct ir_func *fn);
 int pass_tailmerge(struct ir_func *fn);
 int pass_retdup(struct ir_func *fn);
+int pass_coldsink(struct ir_func *fn);      /* cold blocks to the end */
 
 /* vectorize.c */
 int addr_of_iv(struct ir_func *fn, struct defs *d, struct vecloop *L,

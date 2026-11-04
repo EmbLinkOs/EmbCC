@@ -145,6 +145,25 @@ static int pm_reg(int r) { return r == R_SCR ? t_scr(r) : r; }
  * and never a return register, so nothing is lost by restoring it -- and
  * unlike r12 it keeps an all-low list in the 16-bit push/pop. GCC pads
  * the same way. */
+/* a 32-bit Thumb instruction, first halfword first */
+static void t_w32(struct code *t, unsigned long w)
+{
+    code_u16(t, (unsigned)(w >> 16));
+    code_u16(t, (unsigned)(w & 0xffff));
+}
+
+/* the return of a function pac signed: bxaut r12, lr, sp with PACBTI,
+ * else aut r12, lr, sp (a hint there) and bx lr */
+static void t_pac_return(struct code *t)
+{
+    if (target_thumb_pacbti()) {
+        t_w32(t, 0xfb5ecf1du);
+    } else {
+        t_w32(t, 0xf3af802du);
+        t_bx(t, T_LR);
+    }
+}
+
 static unsigned save_mask_for(int nsave, const int *used, unsigned scr,
                               unsigned extra)
 {
@@ -2148,8 +2167,11 @@ static int t_nrvo_local(const struct t_fn *F)
             return -1;
         L = l;
     }
-    if (L < 0 || L >= fn->nvars || fn->locals[L].is_volatile ||
-        fn->locals[L].size != fn->ret_abi.size)
+    /* (and not a parameter: `v[l] = x; return v;` -- one arrives holding
+     * a value, which the buffer would not have; vsetq_lane came back
+     * with only its new lane) */
+    if (L < 0 || L >= fn->nvars || L < fn->nparams ||
+        fn->locals[L].is_volatile || fn->locals[L].size != fn->ret_abi.size)
         return -1;
     for (int n = 0; n < fn->nins; n++) {
         const struct ir_ins *i = &fn->ins[n];
@@ -6605,7 +6627,12 @@ static void gen_ins(struct t_fn *F, int n)
         t_mov_reg(t, T_SP, rdr(F, i->a, T_ACC));
         return;
     case IR_LANDING:
-        t_refuse(fn, i, "an exception landing pad");
+        /* the unwinder left the exception in r0 and the selector in r1
+         * (EHABI); a function with regions keeps its values in slots, so
+         * these are stores, which touch neither */
+        if (i->b >= 0)
+            wrote(F, i->b, 1);
+        wrote(F, i->dst, 0);
         return;
     case IR_SWITCH: {
         /* A jump table in .text right after its dispatch, of 32-bit
@@ -7289,6 +7316,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     }
     F.keep_vars = keep_vars;
     fn->nlines = 0;                 /* -g: this attempt's rows only */
+    fn->ncsites = 0;
     F.fix = NULL; F.nfix = F.capfix = 0;
     F.wide = wide64_map(fn);
     frame_addr_map(&F);
@@ -7322,7 +7350,10 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
                 fn->ins[i].a = -1;
         }
     }
-    if (g_t_regalloc) {
+    /* with exception regions every value in its slot: a landing pad is
+     * entered from the unwinder, which restores the callee-saved
+     * registers only (as on the other targets) */
+    if (g_t_regalloc && !fn->neh) {
         /* nsave is what the allocator REPORTS it took, and the prologue
          * pushes exactly that -- so the two must be computed together.
          * The EMBCC_T_RA_MAX gate below therefore has to clear nsave as
@@ -7595,6 +7626,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
          * their $d mapping symbols fell on this pass's instructions */
         t->ndrange = nd0;
         fn->nlines = nl0;
+        fn->ncsites = 0;            /* (this pass's calls) */
         F.st->ncall = sc0; F.st->next = se0; F.st->nstr = ss0;
         F.st->ng = sg0; F.st->nf = sf0;
         F.nfix = 0;
@@ -7675,10 +7707,6 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
      * that: a variadic argument is placed exactly like a named one. */
     F.cfi_va_end = F.cfi_push_end = F.cfi_vsave_end = -1;
     F.cfi_frame_end = F.cfi_fp_end = -1;
-    if (fn->is_varargs) {
-        t_push(t, (1u << 0) | (1u << 1) | (1u << 2) | (1u << 3));
-        F.cfi_va_end = t->len;
-    }
     /* The mask is decided HERE, not patched at the end: its register
      * COUNT sets how far sp moves, which every stack-parameter offset
      * below is measured from. F.nsave is already known -- ra_allocate
@@ -7693,7 +7721,12 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     /* No IR_RET and no tail call is not enough: a void function's body
      * falls off its end into the epilogue, so its last instruction must
      * be a jump or a trap too. */
+    /* ...and not under unwind tables: a throw unwinds through the
+     * function to its caller's landing pad, which wants lr and the
+     * callee-saved registers back (GCC's ARM_FT_VOLATILE has the same
+     * condition) */
     F.noret = !F.nopush && !keep_vars && !fn->is_varargs && fn->nins &&
+              !target_unwind_tables() &&
               (fn->ins[fn->nins - 1].op == IR_JMP ||
                fn->ins[fn->nins - 1].op == IR_UD2);
     for (i = 0; F.noret && i < fn->nins; i++)
@@ -7701,6 +7734,32 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
             /* __builtin_return_address reads the pushed lr */
             fn->ins[i].op == IR_FRAMEADDR)
             F.noret = 0;
+    /* ARMv8.1-M branch protection, as clang's: `bti` as a function's
+     * first instruction; `pac r12, lr, sp` (`pacbti` with BTI too) in a
+     * function that saves lr -- every one with +leaf -- r12 pushed with
+     * lr and the return `bxaut r12, lr, sp` (`aut` and `bx lr` on a part
+     * without PACBTI, where pac and aut are hints). Not in an interrupt
+     * handler or a CMSE entry, which return their own way. (The
+     * variadic save area goes down after it: pac signs the entry sp.) */
+    {
+        int cf = target_cf();
+        int v81 = target_thumb_v81() && !t_isa_a32;
+        F.pac = v81 && (cf & CF_PAC) && !F.isr && !fn->cmse_entry;
+        if (F.pac && (cf & CF_PAC_LEAF) && F.nopush)
+            F.nopush = 0;
+        if (F.nopush || F.noret)
+            F.pac = 0;
+        if (F.pac)
+            F.isr_extra |= 1u << 12;
+        if (F.pac)
+            t_w32(t, (cf & CF_BTI) ? 0xf3af800du : 0xf3af801du);  /* pacbti / pac */
+        else if (v81 && (cf & CF_BTI) && !F.isr)
+            t_w32(t, 0xf3af800fu);                               /* bti */
+    }
+    if (fn->is_varargs) {
+        t_push(t, (1u << 0) | (1u << 1) | (1u << 2) | (1u << 3));
+        F.cfi_va_end = t->len;
+    }
     /* IRQ, FIQ and ABORT are entered with lr 4 past where they return;
      * the push then saves the return address the ldm ...^ takes back */
     if (F.isr && F.isr != ISR_ARM_SWI && F.isr != ISR_ARM_UNDEF)
@@ -7969,6 +8028,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     rc_reset(&F);
     int *ldepth = target_opt_size() ? (int *)0 : t_loop_depth(fn);
     g_t_loop_bytes = 0;
+    ra_debug_pc_begin(fn);
     for (i = 0; i < fn->nins; i++) {
         int was_tail = F.tail && F.tail[i] && F.nopush;
         int len0 = t->len, i0 = i;
@@ -8002,7 +8062,13 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         F.flags_dead_ins = !F.tst_br && (fn->ins[i].op == IR_CALL ||
                                          fn->ins[i].op == IR_STORE ||
                                          fn->ins[i].op == IR_RET);
+        if (fn->ins_pc)
+            fn->ins_pc[i] = t->len;
         gen_ins(&F, i);
+        if (fn->neh && fn->ins[i0].op == IR_CALL)   /* an LSDA call site */
+            ir_add_csite(fn, (int)(len0 - f->code_off),
+                         (int)(t->len - f->code_off),
+                         fn->ins[i0].eh_region - 1);
         F.lofree = 0;
         if (F.skip_next) {      /* the comparison emitted its branch too,
                                  * or a shift its consumer (and its load) */
@@ -8063,7 +8129,15 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
              * before that. */
             t_pop(t, mask);
             t_sp_adjust(t, 16, 0);
-            t_bx(t, T_LR);
+            if (F.pac)
+                t_pac_return(t);
+            else
+                t_bx(t, T_LR);
+        } else if (F.pac) {
+            /* r12 and lr back, sp as pac saw it: authenticated, then
+             * the return */
+            t_pop(t, mask);
+            t_pac_return(t);
         } else if (F.isr) {
             a32_pop_exc(t, mask & ~(1u << T_LR));
         } else {
@@ -8237,8 +8311,45 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     }
 
     f->code_len = t->len - f->code_off;
-    if (target_debug_info())
+    if (target_debug_info() || target_unwind_tables())
         t_record_cfi(&F, f->code_off);
+    for (int r = 0; r < fn->neh; r++)       /* where each landing pad is */
+        fn->eh[r].lp_off = (int)(F.label_off[fn->eh[r].lp_label] -
+                                 f->code_off);
+    if (fn->ins_pc) {
+        /* -g: r0-r15 are DWARF 0-15, s0-s31 64-95 and d0-d31 256-287;
+         * a slot is relative to the frame base, as var_off's are; a
+         * pair is two registers in a row */
+        fn->ins_pc[fn->nins] = t->len;
+        int nv = fn->nvregs ? fn->nvregs : 1;
+        struct ir_vhome *h = xcalloc((size_t)nv, sizeof *h);
+        char *dbl = xcalloc((size_t)nv, 1);
+        for (int k = 0; k < fn->nins; k++) {
+            int d = ra_ins_def(&fn->ins[k]);
+            if (d >= 0 && d < nv && fn->ins[k].w == 8)
+                dbl[d] = 1;
+        }
+        for (int v = 0; v < fn->nvregs; v++) {
+            if (F.floc && F.floc[v] >= 0) {
+                h[v].kind = IR_LOC_REG;
+                h[v].val = dbl[v] ? 256 + F.floc[v] / 2 : 64 + F.floc[v];
+            } else if (F.loc && F.loc[v] >= 0 && F.wide && F.wide[v]) {
+                h[v].kind = IR_LOC_REGPAIR;
+                h[v].val = F.loc[v];
+                h[v].val2 = F.loc[v] + 1;
+                h[v].piece = 4;
+            } else if (F.loc && F.loc[v] >= 0) {
+                h[v].kind = IR_LOC_REG;
+                h[v].val = F.loc[v];
+            } else if (F.slot && F.slot[v] >= 0) {
+                h[v].kind = IR_LOC_FB;
+                h[v].val = (int)F.slot[v];
+            }
+        }
+        ra_debug_locs(fn, h);
+        free(h);
+        free(dbl);
+    }
     /* What -fstack-usage reports: the registers the prologue pushed
      * plus everything sub sp reserved -- and a variadic function's
      * register save area, r0-r3, which it pushes first and apart from

@@ -15,7 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../bench/cost.h"
+#include "../../src/arch/cost.h"
 #include "cortexm.h"
 #include "devices.h"
 

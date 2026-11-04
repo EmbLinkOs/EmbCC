@@ -34,6 +34,8 @@
 
 #include "asmout.h"
 #include "options.h"
+#include "stackinfo.h"
+#include "sbom.h"
 #include "iface.h"
 #include "inspect.h"
 #include "remark.h"
@@ -296,6 +298,9 @@ static int nincdirs;
  * byte-for-byte as before, which is what keeps the M3 self-host fixed point
  * (self-host builds without -g). */
 static int want_debug;
+static int want_split_dwarf;     /* -gsplit-dwarf */
+static int want_lto;             /* -flto (see compile_unit) */
+static int g_user_no_warn;       /* -w */
 /* -fstack-usage: write FILE.su beside the object, one line per function,
  * in gcc's format (`file:line:name<TAB>bytes<TAB>qualifier`) so the
  * tools that already read those files read these. It is the number a
@@ -343,6 +348,13 @@ static const char *g_ld_path;      /* --linker=, GCC's --ld-path= */
 static const char *g_fuse_ld;      /* -fuse-ld=bfd|gold|lld */
 static int g_pthread;              /* -pthread */
 static int g_static_link;          /* -static */
+/* -shared, -pie, -static-pie: what the link makes (0 an ordinary
+ * executable); -fPIC/-fPIE say what the code is (target_pic), and a
+ * shared object or a PIE made from sources in the same command takes
+ * the matching one unless -fno-pic said otherwise */
+enum { LINK_EXEC, LINK_SHARED, LINK_PIE, LINK_STATIC_PIE };
+static int g_link_kind;
+static int g_pic_given;            /* a -f[no-]pic/pie option was seen */
 static int g_gnuc_given;           /* -fgnuc-version= */
 
 static int glibc_mode(void)
@@ -399,7 +411,16 @@ static int lang_cxx;
 static int want_unwind = -1;
 
 /* C++ exceptions (-fno-exceptions turns them off, as g++'s). */
-static int want_exceptions = 1;
+/* -1 until an option says: then on, but off for C++ on AVR, which has
+ * no unwinder (avr-gcc ships none either, and Arduino builds pass
+ * -fno-exceptions); an explicit --exceptions there is refused by name */
+static int want_exceptions = -1;
+static int exceptions_on(void)
+{
+    if (want_exceptions < 0)
+        return target_get() != TARGET_AVR;
+    return want_exceptions;
+}
 static int want_rtti = 1;
 
 /* --emit-c: print the C a C++ unit lowers to, instead of compiling it. */
@@ -495,6 +516,44 @@ static const char *g_specs;
  * it to the compiler it runs for each source of a link). */
 static int g_save_temps;
 static const char *g_dumpbase;
+/* --coverage and the profile options (src/ir/gcov.c): counters, notes,
+ * and libgcov at the link; -fprofile-update (0 single, 1 atomic, 2
+ * prefer-atomic); -fprofile-dir / -fprofile-generate=DIR, where the
+ * .gcda files go; -fprofile-use[=PATH]; -fprofile-note=, the .gcno's
+ * name; GCC's file filters; -fprofile-prefix-path=, the part of an
+ * object's path a profile directory's names leave out; -fprofile-abs-
+ * path, absolute source names in the notes; -fprofile-partial-training,
+ * which leaves a function the profile never ran optimized as usual.
+ * g_cur_exe is the image a compile_and_link unit goes into, which names
+ * its notes (x-t.gcno for `t.c -o x`, as GCC and clang do). */
+static int g_cov_arcs, g_cov_notes, g_cov_link, g_cov_update;
+/* -fstack-protector[-strong|-all|-explicit] (1..4) and
+ * --param=ssp-buffer-size= (src/ir/sanitize.c) */
+static int g_ssp_mode, g_ssp_buf = 8;
+static int g_clash;                  /* -fstack-clash-protection */
+/* -fcf-protection / -mbranch-protection (CF_* of target.h), and which
+ * was given, for the target check */
+static int g_cf, g_cf_x86, g_cf_a64;
+static const char *g_cf_spell = "-fcf-protection";   /* as typed */
+static const char *g_bp_spell = "-mbranch-protection";
+static int g_bounds;                 /* -fbounds-safety, -fsanitize=bounds */
+static int g_bounds_san;             /* ...and it was -fsanitize=bounds */
+static int g_ub_recover;             /* -fsanitize-recover=undefined */
+/* -fsanitize=address, thread, memory: which runtime archives the link
+ * takes (lib/san); -fsanitize-recover=address */
+static unsigned g_san_link;
+static int g_san_recover;
+
+/* the sanitizer runtime's archive */
+static const char *san_archive(void)
+{
+    return g_san_link & SAN_THREAD ? "libtsan.a"
+         : g_san_link & SAN_MEMORY ? "libmsan.a" : "libasan.a";
+}
+static int g_prof_use_on, g_prof_abs, g_prof_partial;
+static const char *g_prof_dir, *g_prof_use, *g_prof_note;
+static const char *g_prof_filter, *g_prof_exclude, *g_prof_prefix;
+static const char *g_cur_exe;
 
 /* The make rule: "target: source header...", wrapped as GCC wraps it, and
  * with -MP a bare rule per header so a deleted header does not break the
@@ -645,6 +704,33 @@ static long code_sym_value(enum target_arch a, long off)
     return fn_sym_value(a, o);
 }
 
+/* --stack-info and --sbom for a Mach-O or COFF object: the records
+ * ELF's stackinfo_emit and sbom_emit_unit put in .debug_embcc_*, built
+ * from the writer's list of calls to functions not defined here */
+static unsigned char *unit_stack_record(struct unit *u, struct ir_unit *iu,
+                                        const struct code *text,
+                                        const struct extcall *ext, int next,
+                                        const char *in, long *len)
+{
+    *len = 0;
+    if (!stackinfo_on())
+        return NULL;
+    struct si_call *sc = xmalloc((size_t)(next ? next : 1) * sizeof *sc);
+    for (int i = 0; i < next; i++) {
+        sc[i].off = ext[i].patch_off;
+        sc[i].name = ext[i].callee->name;
+    }
+    unsigned char *b = stackinfo_record(u, iu, text, sc, next, in, len);
+    free(sc);
+    return b;
+}
+
+/* the section of group gi (text_at's answer), for stackinfo_emit */
+static int si_sec_of(int gi, int text_ndx)
+{
+    return gi ? g_tg[gi - 1].ndx : text_ndx;
+}
+
 static int code_sec(long off, int text_ndx)
 {
     long o;
@@ -704,6 +790,34 @@ static long block_ref(const struct topasm *ta, long off, int text_sym,
 }
 
 static int compile_unit(const char *in, const char *out, int pp_only);
+static int g_pp_no_markers;   /* -P: -E's output without its # N "file" lines */
+
+/* -E's text without its line markers, for -P: the lines that are only
+ * `# N "file" ...` dropped, and a run of empty lines they leave kept to
+ * one (GCC's -P keeps at most eight; one reads the same) */
+static char *drop_markers(const char *pp)
+{
+    size_t n = strlen(pp);
+    char *o = xmalloc(n + 1), *w = o;
+    int blank = 0;
+    for (const char *p = pp; *p; ) {
+        const char *e = strchr(p, '\n');
+        size_t len = e ? (size_t)(e - p) : strlen(p);
+        int marker = p[0] == '#' && p[1] == ' ' && p[2] >= '0' && p[2] <= '9';
+        int empty = len == 0;
+        if (!marker && !(empty && blank)) {
+            memcpy(w, p, len);
+            w += len;
+            if (e)
+                *w++ = '\n';
+        }
+        if (!marker)
+            blank = empty;
+        p += len + (e ? 1 : 0);
+    }
+    *w = 0;
+    return o;
+}
 
 /* GNU C's static label data, once codegen has laid every function out
  * (cg_note_labels): `&&a` in a pointer slot is its function's symbol plus
@@ -886,6 +1000,11 @@ static int apply_wl(struct link_opts *lo)
             lo->print_gc_sections = 1;
         } else if (!strcmp(a, "--print-memory-usage")) {
             lo->print_memory_usage = 1;
+        } else if (!strcmp(a, "-pie") || !strcmp(a, "--pie") ||
+                   !strcmp(a, "--pic-executable")) {
+            lo->pie = 1;
+        } else if (!strcmp(a, "-no-pie") || !strcmp(a, "--no-pie")) {
+            lo->pie = 0;
         } else if ((v = wl_value("-Map", 0, &k)) ||
                    (v = wl_value("--Map", 0, &k))) {
             lo->map_file = v;
@@ -1077,7 +1196,33 @@ static int link_bounded(const char **inputs, int n, const char *exe,
     return lrc;
 }
 
+static int lto_link_inputs(const char *out, char **tmp);
+static int compile_and_link_(const char *in, const char *out);
+
+/* -flto: the objects that carry their C become one, then the link */
 static int compile_and_link(const char *in, const char *out)
+{
+    char *lto = NULL;
+    if (want_lto && lto_link_inputs(out ? out : "a.out", &lto))
+        return 1;
+    g_cur_exe = out ? out : "a.out";
+    int rc = compile_and_link_(in, out);
+    g_cur_exe = NULL;
+    /* --sbom=FILE: the image's bill, once it exists */
+    if (rc == 0 && sbom_file()) {
+        for (int k = 0; k < g_nlink_in; k++)
+            if (g_link_in[k][0] != '-')
+                sbom_note_input(g_link_in[k]);
+        rc = sbom_write(out ? out : "a.out", sbom_file());
+    }
+    if (lto) {
+        remove(lto);
+        free(lto);
+    }
+    return rc;
+}
+
+static int compile_and_link_(const char *in, const char *out)
 {
     if (target_os_get() == TGT_OS_DARWIN)
         return darwin_link(in, out);
@@ -1116,6 +1261,16 @@ static int compile_and_link(const char *in, const char *out)
     memset(&lo, 0, sizeof lo);
     if (apply_wl(&lo))
         return 1;
+    if (g_link_kind == LINK_SHARED) {
+        fprintf(stderr, "embcc: error: -shared: EmbLD does not write shared "
+                        "objects yet; with --libc=system the system's "
+                        "linker (--linker=) makes them\n");
+        return 1;
+    }
+    /* -pie, -static-pie: an ET_DYN EmbLD relocates nothing in -- the
+     * start code applies its RELATIVE relocations -- so the two are one */
+    if (g_link_kind == LINK_PIE || g_link_kind == LINK_STATIC_PIE)
+        lo.pie = 1;
     if (g_entry)
         lo.entry = g_entry;
     lo.script = g_script;
@@ -1316,6 +1471,31 @@ static int compile_and_link(const char *in, const char *out)
             inputs[n++] = a;
         }
     }
+    /* libgcov (--coverage, -fprofile-generate, -lgcov): before libc,
+     * whose stdio it writes the .gcda files with */
+    /* -fsanitize=address, thread, memory: its runtime (lib/san), before
+     * libc, whose malloc and threads it builds on */
+    char libsan[1024];
+    if (g_san_link) {
+        const char *nm = san_archive();
+        if (!paths_target_file(triple, nm, libsan, sizeof libsan)) {
+            missing_runtime(nm, triple, 0);
+            if (in)
+                remove(obj);
+            return 1;
+        }
+        inputs[n++] = libsan;
+    }
+    char libgcov[1024];
+    if (g_cov_link) {
+        if (!paths_target_file(triple, "libgcov.a", libgcov, sizeof libgcov)) {
+            missing_runtime("libgcov.a", triple, 0);
+            if (in)
+                remove(obj);
+            return 1;
+        }
+        inputs[n++] = libgcov;
+    }
     if (have_cxx)
         inputs[n++] = libcxx;
     if (have_libc && (std || want_libc))
@@ -1331,6 +1511,9 @@ static int compile_and_link(const char *in, const char *out)
     }
 
     rc = link_bounded(inputs, n, exe, &lo);
+    for (int k = 0; k < n && sbom_file(); k++)
+        if (inputs[k] != obj)
+            sbom_note_input(inputs[k]);
     if (in)
         remove(obj);
     if (have_pic32_proc)
@@ -1369,6 +1552,86 @@ static const char *base_name(const char *p)
 {
     const char *sl = strrchr(p, '/');
     return sl ? sl + 1 : p;
+}
+
+/* ---- the coverage files' names -------------------------------------
+ *
+ * GCC's and clang's: the object's name without its suffix -- build/x
+ * for `-c x.c -o build/x.o` -- or, for a source compiled and linked in
+ * one command, the image's and the source's, joined by a dash (x-t for
+ * `t.c -o x`); -dumpbase NAME outright. The .gcno is written there; the
+ * program writes the .gcda at the same place made absolute, or under
+ * -fprofile-dir with the absolute path's slashes made '#'. */
+static char *gcov_base(const char *in, const char *out)
+{
+    if (g_dumpbase)
+        return xstrndup(g_dumpbase, strlen(g_dumpbase));
+    if (g_cur_exe) {
+        char *o = strip_ext(g_cur_exe), *s = strip_ext(base_name(in));
+        size_t n = strlen(o) + strlen(s) + 2;
+        char *b = xmalloc(n);
+        snprintf(b, n, "%s-%s", o, s);
+        free(o);
+        free(s);
+        return b;
+    }
+    return strip_ext(out ? out : base_name(in));
+}
+
+static char *abs_path(const char *p)
+{
+    const char *cwd = plat_cwd();
+    if (p[0] == '/' || !cwd)
+        return xstrndup(p, strlen(p));
+    while (p[0] == '.' && p[1] == '/')
+        p += 2;
+    size_t n = strlen(cwd) + strlen(p) + 2;
+    char *r = xmalloc(n);
+    snprintf(r, n, "%s/%s", cwd, p);
+    return r;
+}
+
+static char *gcov_data_path(const char *in, const char *out,
+                            const char *dir)
+{
+    char *base = gcov_base(in, out), *ab = abs_path(base);
+    free(base);
+    char *r;
+    if (dir) {
+        char *d = abs_path(dir);
+        const char *m = ab;
+        size_t pl = g_prof_prefix ? strlen(g_prof_prefix) : 0;
+        if (pl && !strncmp(m, g_prof_prefix, pl))
+            for (m += pl; *m == '/'; m++)
+                ;
+        size_t n = strlen(d) + strlen(m) + 8;
+        r = xmalloc(n);
+        snprintf(r, n, "%s/%s.gcda", d, m);
+        for (char *q = r + strlen(d) + 1; *q; q++)
+            if (*q == '/')
+                *q = '#';
+        free(d);
+    } else {
+        size_t n = strlen(ab) + 6;
+        r = xmalloc(n);
+        snprintf(r, n, "%s.gcda", ab);
+    }
+    free(ab);
+    return r;
+}
+
+/* -fprofile-use's file: PATH itself when it names a .gcda, else the
+ * unit's name under PATH (a directory), else where -fprofile-generate
+ * put it */
+static char *gcov_use_path(const char *in, const char *out)
+{
+    if (g_prof_use && *g_prof_use) {
+        size_t n = strlen(g_prof_use);
+        if (n > 5 && !strcmp(g_prof_use + n - 5, ".gcda"))
+            return xstrndup(g_prof_use, n);
+        return gcov_data_path(in, out, g_prof_use);
+    }
+    return gcov_data_path(in, out, g_prof_dir);
 }
 
 static int save_temps(int argc, char **argv, const char *in, const char *out,
@@ -1517,9 +1780,10 @@ static int multi_source(int argc, char **argv, const char *output,
                 size_t ln = strlen(exe) + 32;
                 tmp[next] = xmalloc(ln);
                 snprintf(tmp[next], ln, "%s.embcc-tmp-%d.o", exe, next + 1);
-                /* -save-temps: named after the image and the source, as
-                 * for one source (save_temps), not after the temporary */
-                if (g_save_temps && !g_dumpbase) {
+                /* -save-temps, --coverage: named after the image and the
+                 * source, as for one source (save_temps, gcov_base), not
+                 * after the temporary */
+                if ((g_save_temps || g_cov_arcs || g_cov_notes) && !g_dumpbase) {
                     char *o = strip_ext(exe), *sb = strip_ext(base_name(
                                                          g_srcs[next]));
                     size_t bn = strlen(o) + strlen(sb) + 2;
@@ -1945,6 +2209,15 @@ static int darwin_link(const char *in, const char *exe)
     }
     if (!g_nostdlib && !g_nodefaultlibs) {
         static char librt[1100];
+        static char libgcov[1100], libsan[1100];
+        if (g_san_link &&
+            paths_target_file(lib_triple(), san_archive(), libsan,
+                              sizeof libsan))
+            argv[n++] = libsan;
+        if (g_cov_link &&
+            paths_target_file(lib_triple(), "libgcov.a", libgcov,
+                              sizeof libgcov))
+            argv[n++] = libgcov;
         if (g_link_cxx || (in && lang_cxx))
             argv[n++] = "-lc++";
         argv[n++] = "-lSystem";
@@ -2097,7 +2370,8 @@ static int glibc_link(const char *in, const char *exe)
         return 1;
     }
     const char *gccdir = NULL;
-    if (g_static_link && !g_nostdlib && !g_nodefaultlibs) {
+    if ((g_static_link || g_link_kind == LINK_STATIC_PIE) && !g_nostdlib &&
+        !g_nodefaultlibs) {
         gccdir = glibc_libgcc_dir();
         if (!gccdir) {
             fprintf(stderr, "embcc: error: a static program against glibc "
@@ -2146,9 +2420,19 @@ static int glibc_link(const char *in, const char *exe)
         argv[n++] = sysopt;
     }
     argv[n++] = "--eh-frame-hdr";
-    if (g_static_link) {
+    if (g_link_kind == LINK_SHARED) {
+        argv[n++] = "-shared";
+    } else if (g_link_kind == LINK_STATIC_PIE) {
+        argv[n++] = "-static";
+        argv[n++] = "-pie";
+        argv[n++] = "--no-dynamic-linker";
+        argv[n++] = "-z";
+        argv[n++] = "text";
+    } else if (g_static_link) {
         argv[n++] = "-static";
     } else {
+        if (g_link_kind == LINK_PIE)
+            argv[n++] = "-pie";
         argv[n++] = "-dynamic-linker";
         argv[n++] = arm64 ? "/lib/ld-linux-aarch64.so.1"
                           : "/lib64/ld-linux-x86-64.so.2";
@@ -2160,9 +2444,14 @@ static int glibc_link(const char *in, const char *exe)
         argv[n++] = g_entry;
     }
     if (start) {
-        snprintf(crt1, sizeof crt1, "%s/crt1.o", libdir);
+        /* glibc's entry: crt1.o, Scrt1.o for a PIE, rcrt1.o for a static
+         * PIE (it relocates itself); a shared object has none */
+        snprintf(crt1, sizeof crt1, "%s/%s", libdir,
+                 g_link_kind == LINK_PIE ? "Scrt1.o"
+                 : g_link_kind == LINK_STATIC_PIE ? "rcrt1.o" : "crt1.o");
         snprintf(crti, sizeof crti, "%s/crti.o", libdir);
-        argv[n++] = crt1;
+        if (g_link_kind != LINK_SHARED)
+            argv[n++] = crt1;
         argv[n++] = crti;
         argv[n++] = dso;
     }
@@ -2194,8 +2483,17 @@ static int glibc_link(const char *in, const char *exe)
     if (libs) {
         char librt[1100];
         static char rtcopy[1100];
-        if (g_static_link)
+        if (g_static_link || g_link_kind == LINK_STATIC_PIE)
             argv[n++] = "--start-group";
+        static char libgcov[1100], libsan[1100];
+        if (g_san_link &&
+            paths_target_file(lib_triple(), san_archive(), libsan,
+                              sizeof libsan))
+            argv[n++] = libsan;
+        if (g_cov_link &&
+            paths_target_file(lib_triple(), "libgcov.a", libgcov,
+                              sizeof libgcov))
+            argv[n++] = libgcov;
         if (g_pthread)
             argv[n++] = "-lpthread";
         argv[n++] = "-lc";
@@ -2214,7 +2512,7 @@ static int glibc_link(const char *in, const char *exe)
             snprintf(rtcopy, sizeof rtcopy, "%s", librt);
             argv[n++] = rtcopy;
         }
-        if (g_static_link)
+        if (g_static_link || g_link_kind == LINK_STATIC_PIE)
             argv[n++] = "--end-group";
     }
     if (start) {
@@ -2675,6 +2973,7 @@ static int assemble_file(const char *in, const char *out)
         cpp_cmdline_define("__LANGUAGE_ASSEMBLY__=1", 0);
         cpp_cmdline_define("__LANGUAGE_ASSEMBLY=1", 0);
     }
+    gas_set_elf_notes(backend_get(target_get())->elf_notes);
     int rc = gas_assemble(in, out, kind == 2, incdirs, nincdirs);
     if (kind == 2)
         cpp_cmdline_define("__ASSEMBLER__", 1);
@@ -2703,17 +3002,149 @@ static const char *cxx_unwind_tables_name(void)
     return backend_get(target_get())->unwind_unwritten;
 }
 
+/* A debug section, as written: -gz compresses it (SHF_COMPRESSED: an
+ * Elf32/64_Chdr, ELFCOMPRESS_ZLIB, then the stream -- relocations still
+ * address the bytes before compression, which is how a linker reads
+ * them). A .dwo's sections are SHF_EXCLUDE, as GCC's are. */
+static int want_gz;              /* -gz, -gz=zlib */
+
+static int add_debug_section(struct elfw *w, int s, struct dwarf_out *dw)
+{
+    Elf64_Xword flags = dwarf_section_is_dwo(s) ? 0x80000000u : 0;
+    if (!want_gz)
+        return elfw_add_section(w, dwarf_section_name(s), SHT_PROGBITS,
+                                flags, dw->sec[s], (Elf64_Xword)dw->seclen[s],
+                                1);
+    int zn = 0;
+    unsigned char *z = dwarf_zlib(dw->sec[s], dw->seclen[s], &zn);
+    int e32 = target_ptr_size() <= 4, hn = e32 ? 12 : 24;
+    unsigned char *c = xcalloc((size_t)(hn + zn), 1);
+    target_put_uint(c, 4, 1);                          /* ELFCOMPRESS_ZLIB */
+    if (e32) {
+        target_put_uint(c + 4, 4, (unsigned long)dw->seclen[s]);
+        target_put_uint(c + 8, 4, 1);                  /* ch_addralign */
+    } else {
+        target_put_uint(c + 8, 8, (unsigned long)dw->seclen[s]);
+        target_put_uint(c + 16, 8, 1);
+    }
+    memcpy(c + hn, z, (size_t)zn);
+    free(z);
+    return elfw_add_section(w, dwarf_section_name(s), SHT_PROGBITS,
+                            flags | 0x800 /* SHF_COMPRESSED */, c,
+                            (Elf64_Xword)(hn + zn), e32 ? 4 : 8);
+}
+
 /* One .init_array/.fini_array section of the object: constructors
  * (kind 0) or destructors (1) of one priority (prio: N + 1, 0 none). */
 struct ctorarr { int kind, prio, ndx, n, at; };
 
+/* C++20 modules: where an interface unit's NAME.ebmi goes (--module-dir,
+ * else beside the object), and where an import looks (each --module-dir
+ * and -fprebuilt-module-path, then the object's directory). */
+static const char *mod_dirs[64];
+static int nmod_dirs;
+static const char *mod_out_dir;
+
+static const char *dir_of(const char *path)
+{
+    const char *sl = path ? strrchr(path, '/') : NULL;
+    return sl ? xstrndup(path, (size_t)(sl - path)) : ".";
+}
+
+static void module_dirs_for(const char *out)
+{
+    static const char *dirs[66];
+    int n = 0;
+    for (int i = 0; i < nmod_dirs; i++)
+        dirs[n++] = mod_dirs[i];
+    if (!mod_out_dir)
+        dirs[n++] = dir_of(out);
+    cpp_set_module_dirs(dirs, n);
+}
+
+static void write_module_interface(const char *out)
+{
+    const char *name;
+    const char *bmi = cpp_module_interface(&name);
+    if (!bmi)
+        return;
+    const char *dir = mod_out_dir ? mod_out_dir : dir_of(out);
+    char path[1024];
+    size_t k = (size_t)snprintf(path, sizeof path, "%s/", dir);
+    for (const char *q = name; *q && k < sizeof path - 8; q++)
+        path[k++] = *q == ':' ? '-' : *q;
+    snprintf(path + k, sizeof path - k, ".ebmi");
+    if (plat_write_file(path, bmi, strlen(bmi)) != 0)
+        diag_fatal(path, 0, "cannot write the module interface");
+}
+
+/* ---- link-time optimization ---------------------------------------
+ *
+ * -flto at a compile writes the object as always, and beside its code
+ * the C the unit came to -- preprocessed, and the C++ front end's for a
+ * C++ unit -- in a section .embcc.lto (SHF_EXCLUDE: a link without LTO
+ * drops it, and the object links as it is). A link with -flto reads that
+ * text back from each object that has it, takes each through the front
+ * end and irgen again (lto_collect), merges the units into one
+ * (lto_merge): an external declaration is the definition another unit
+ * gives, a `static` name another unit also uses is renamed NAME.lto.N,
+ * and every external the rest of the link does not name becomes static.
+ * Then the optimizer and one backend run over the whole program, and the
+ * object they make is linked in place of the units it came from. */
+static const char *g_lto_text;        /* collect: the unit's C, as read */
+static int g_lto_collect, g_lto_back;
+static struct unit *g_lto_u;          /* back: the merged program */
+static struct ir_unit *g_lto_iu;
+static const char *g_lto_payload;     /* compile: the C to keep in .o */
+#define LTO_MAX 256
+static struct unit *g_lto_units[LTO_MAX];
+static struct ir_unit *g_lto_irs[LTO_MAX];
+static int g_lto_n;
+
+/* What .embcc.lto holds: a line saying what it is and the unit's name,
+ * then its C. */
+static char *lto_payload(const char *in, size_t *n)
+{
+    size_t tn = strlen(g_lto_payload), hn = strlen(in) + 32;
+    char *p = xmalloc(hn + tn + 1);
+    int k = snprintf(p, hn, "EMBCC-LTO 1 %s\n", in);
+    memcpy(p + k, g_lto_payload, tn + 1);
+    *n = (size_t)k + tn;
+    return p;
+}
+
+struct fidx { struct func *f; int k; };
+static int fidx_cmp(const void *a, const void *b)
+{
+    unsigned long x = (unsigned long)((const struct fidx *)a)->f;
+    unsigned long y = (unsigned long)((const struct fidx *)b)->f;
+    return x < y ? -1 : x > y;
+}
+
 static int compile_unit(const char *in, const char *out, int pp_only)
 {
-    char *src = read_file(in);
-    diag_register_source(in, src);   /* so diagnostics can show its lines */
+    struct unit *u = NULL;
+    struct ir_unit *iu = NULL;
+    if (g_lto_back) {
+        u = g_lto_u;
+        iu = g_lto_iu;
+        goto lto_backend;
+    }
+    if (target_pic() && target_fmt_get() == TGT_FMT_ELF &&
+        target_get() != TARGET_X86_64 && target_get() != TARGET_AARCH64 &&
+        target_get() != TARGET_RISCV32 && target_get() != TARGET_RISCV64) {
+        fprintf(stderr, "embcc: error: position-independent code (-fPIC, "
+                        "-fPIE, -shared, -pie) is written for x86-64, "
+                        "AArch64 and RISC-V; %s's is not yet\n",
+                target_triple_now());
+        return 1;
+    }
+    char *src = g_lto_text ? (char *)g_lto_text : read_file(in);
+    if (!g_lto_text)
+        diag_register_source(in, src);  /* so diagnostics can show its lines */
     predef_set_cxx(lang_cxx);
     if (lang_cxx)
-        cpp_set_cxx(cxx_has_builtin, want_exceptions);
+        cpp_set_cxx(cxx_has_builtin, exceptions_on());
     /* EmbCC's own headers, AFTER every -I the caller gave: a project
      * that ships its own <stdio.h> must win, or nothing we install can
      * ever be overridden. They are added here rather than at option
@@ -2725,8 +3156,12 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     /* text compiled marks what system macros expanded to, for -pedantic;
      * text printed (-E) is the text */
     int mark = cpp_set_mark_system(!pp_only);
-    char *pp = cpp_process(in, src, incdirs, nincdirs);
+    if (lang_cxx)
+        module_dirs_for(out);
+    char *pp = g_lto_text ? src : cpp_process(in, src, incdirs, nincdirs);
     cpp_set_mark_system(mark);
+    if (lang_cxx && !pp_only)
+        write_module_interface(out);
     time_mark("preprocess");
     if (dep_mode && dep_only) {       /* -M/-MM: the rule is the output */
         write_deps(in, out);
@@ -2736,26 +3171,15 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         /* -E -o FILE writes FILE, as GCC's does (the output used to go
          * to standard output whatever -o said, and `cc -E x.c -o x.i`
          * left no x.i). */
+        if (g_pp_no_markers)
+            pp = drop_markers(pp);
         if (out && plat_write_file(out, pp, strlen(pp)) != 0)
             diag_fatal(out, 0, "cannot write the file");
         if (!out)
             fputs(pp, stdout);
         return 0;
     }
-    if (lang_cxx && !syntax_only && target_get() == TARGET_AVR) {
-        /* The front end lays a class out by AVR's sizes, but its lowering
-         * still writes a 32-bit int's promotions, enumerations and
-         * literals, a `long` member-pointer adjustment and RTTI base
-         * offsets one pointer wide -- each wrong where int and pointers
-         * are 16 bits -- and no AVR C++ runtime is built. */
-        fprintf(stderr,
-                "embcc: error: C++ is not yet supported for %s: the C++ "
-                "lowering assumes a 32-bit int and 4-byte pointers (integral "
-                "promotions, member pointers, RTTI), and this target's are "
-                "16 bits\n", target_triple_now());
-        return 1;
-    }
-    if (lang_cxx && !syntax_only && want_exceptions &&
+    if (lang_cxx && !syntax_only && exceptions_on() &&
         cxx_exceptions_unwritten()) {
         /* Exceptions need the unwinder's tables and a personality routine
          * reading them: ARM EHABI's .ARM.exidx on ARM, DWARF .eh_frame
@@ -2769,7 +3193,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         return 1;
     }
     if (lang_cxx) {
-        cxx_set_exceptions(want_exceptions);
+        cxx_set_exceptions(exceptions_on());
         cxx_set_rtti(want_rtti);
         pp = cxx_translate(in, pp);
         time_mark("C++ front end");
@@ -2808,7 +3232,31 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         lex_set_c_std(2017, 0);
         lex_set_pedantic(0);
     }
-    struct unit *u = parse_unit(in, pp);
+    if (want_lto && !g_lto_collect)
+        g_lto_payload = pp;           /* (the C++ front end's, for C++) */
+    /* --coverage: the unit's counters, its record, and the constructor
+     * that hands the record to libgcov (gcov_ctor_source) */
+    if ((san_runtime() & SAN_ADDRESS) && in) {
+        const char *c = san_ctor_source();
+        size_t a = strlen(pp), b = strlen(c);
+        char *q = xmalloc(a + b + 1);
+        memcpy(q, pp, a);
+        memcpy(q + a, c, b + 1);
+        pp = q;
+    }
+    unsigned cov_stamp = 0;
+    if (gcov_active() && in) {
+        cov_stamp = gcov_crc32(gcov_crc32(0, in, strlen(in)), pp, strlen(pp));
+        if (gcov_arcs()) {
+            const char *c = gcov_ctor_source();
+            size_t a = strlen(pp), b = strlen(c);
+            char *q = xmalloc(a + b + 1);
+            memcpy(q, pp, a);
+            memcpy(q + a, c, b + 1);
+            pp = q;
+        }
+    }
+    u = parse_unit(in, pp);
     time_mark("parse");
     if (lang_cxx) {
         lex_set_c_std(c_year, c_gnu);
@@ -2826,6 +3274,10 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         diag_terminated(sema_error_count());
         return 1;                     /* (--fix still gets its turn) */
     }
+    /* --misra, --cert and the rules named one by one (src/sema/rules.c),
+     * then --analyze's (src/sema/analyze.c) */
+    rules_check(u);
+    analyze_unit(u);
     /* The stages that read the analysed tree. They come after sema so the
      * types printed are the resolved ones -- an AST dump with every type
      * shown as "?" would answer a question nobody asks. */
@@ -2919,8 +3371,46 @@ static int compile_unit(const char *in, const char *out, int pp_only)
             f->used = f->is_root = 1;
 
     remarks_enable(want_remarks || why_decision != NULL);
-    struct ir_unit *iu = irgen(u);
+    char *cov_gcda = NULL;
+    if (gcov_active() && in) {
+        char *src = g_prof_abs ? abs_path(in) : xstrndup(in, strlen(in));
+        cov_gcda = gcov_data_path(in, out, g_prof_dir);
+        if (g_prof_use_on) {
+            char *use = gcov_use_path(in, out);
+            gcov_set_use(use);
+        }
+        gcov_unit_begin(u, src, cov_gcda, cov_stamp);
+    }
+    iu = irgen(u);
     time_mark("IR generation");
+    san_globals(u);
+    if (gcov_active() && in) {
+        gcov_unit_end(u);
+        if (g_cov_notes) {
+            char *nb = NULL;
+            if (!g_prof_note) {
+                char *b = gcov_base(in, out);
+                size_t n = strlen(b) + 6;
+                nb = xmalloc(n);
+                snprintf(nb, n, "%s.gcno", b);
+                free(b);
+            }
+            if (gcov_write_notes(g_prof_note ? g_prof_note : nb) != 0)
+                diag_fatal(g_prof_note ? g_prof_note : nb, 0,
+                           "cannot write the coverage notes");
+            free(nb);
+        }
+    }
+    if (g_lto_collect) {
+        /* -flto at the link: this unit is kept for the merge */
+        if (g_lto_n == LTO_MAX)
+            diag_fatal(in, 0, "-flto: more than %d units", LTO_MAX);
+        g_lto_units[g_lto_n] = u;
+        g_lto_irs[g_lto_n] = iu;
+        g_lto_n++;
+        return 0;
+    }
+lto_backend:
     /* -O0 and -Og keep every source variable in its slot, the optimizer
      * and the backends both; -g only describes what they did. */
     target_set_keep_vars(opt_level == 0 || opt_for_debug);
@@ -2929,15 +3419,22 @@ static int compile_unit(const char *in, const char *out, int pp_only)
      * The code is the same with or without -g (backends ignore it), so
      * the object is written without debug information, and the build is
      * told so -- not stopped: every CMake Debug build passes -g. */
-    if (want_debug && target_fmt_get() == TGT_FMT_MACHO) {
-        fprintf(stderr, "embcc: warning: -g: no debug information for %s "
-                        "yet; %s is compiled without it\n",
-                target_triple_now(), in);
-        want_debug = 0;
+    if (want_debug && target_fmt_get() == TGT_FMT_MACHO &&
+        (want_split_dwarf || want_gz)) {
+        /* Darwin's DWARF stays in the objects, where ld's debug map
+         * points dsymutil and lldb: there is nothing to split off, and
+         * Mach-O has no compressed sections */
+        fprintf(stderr, "embcc: error: %s is not for a Darwin target: its "
+                        "DWARF stays in the objects, where the debug map "
+                        "finds it\n", want_split_dwarf ? "-gsplit-dwarf"
+                                                      : "-gz");
+        return 1;
     }
     target_set_debug_info(want_debug);
     opt_run(iu, opt_for_size ? OPT_SIZE : opt_level);
     time_mark("optimization");
+    san_instrument(iu);
+    clash_instrument(iu);
     target_set_opt_size(opt_for_size);
     apply_asm_names(u);
 
@@ -3009,6 +3506,14 @@ static int compile_unit(const char *in, const char *out, int pp_only)
             if (!f->is_static || f->is_root)
                 { reach[k] = 1; work[nw++] = k; }
         }
+        /* function -> its index, sorted by address: a whole program
+         * (-flto) has as many calls as functions times a few thousand */
+        struct fidx *fx = xmalloc((size_t)(nf ? nf : 1) * sizeof *fx);
+        for (int k = 0; k < nf; k++) {
+            fx[k].f = iu->funcs[k].src;
+            fx[k].k = k;
+        }
+        qsort(fx, (size_t)nf, sizeof *fx, fidx_cmp);
         while (nw) {
             struct ir_func *fn = &iu->funcs[work[--nw]];
             for (int n = 0; n < fn->nins; n++) {
@@ -3018,13 +3523,29 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                 else if (i->op == IR_FADDR)           t = i->callee;
                 if (!t)
                     continue;
-                for (int k = 0; k < nf; k++)
-                    if (iu->funcs[k].src == t && !reach[k]) {
-                        reach[k] = 1; work[nw++] = k;
+                int lo = 0, hi = nf - 1;
+                while (lo <= hi) {
+                    int mid = (lo + hi) / 2;
+                    if (fx[mid].f == t) {
+                        /* (several entries may share one src: each) */
+                        int a = mid, b = mid;
+                        while (a > 0 && fx[a - 1].f == t) a--;
+                        while (b + 1 < nf && fx[b + 1].f == t) b++;
+                        for (int q = a; q <= b; q++)
+                            if (!reach[fx[q].k]) {
+                                reach[fx[q].k] = 1;
+                                work[nw++] = fx[q].k;
+                            }
                         break;
                     }
+                    if ((unsigned long)fx[mid].f < (unsigned long)t)
+                        lo = mid + 1;
+                    else
+                        hi = mid - 1;
+                }
             }
         }
+        free(fx);
         for (int k = 0; k < nf; k++) {
             struct func *f = iu->funcs[k].src;
             if (!f || f->absorbed || !f->has_defn || !f->is_static)
@@ -3098,6 +3619,29 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         return 0;
     }
 
+    /* Hot and cold functions apart, as GCC places them: a cold one --
+     * __attribute__((cold)), or one the profile (-fprofile-use) never ran
+     * -- in .text.unlikely, a hot one in .text.hot, so the code that runs
+     * is together (one cache, one flash prefetch line) and the rest out
+     * of its way. With -ffunction-sections, each its own .unlikely. or
+     * .hot. section. ELF only, and not for a function that named its
+     * section. */
+    if (target_fmt_get() == TGT_FMT_ELF)
+        for (int i = 0; i < iu->nfuncs; i++) {
+            struct func *f = iu->funcs[i].src;
+            if (!f || f->section)
+                continue;
+            int cold = f->attr_cold || f->prof_heat == IR_HEAT_COLD;
+            int hot = !cold && (f->attr_hot || f->prof_heat == IR_HEAT_HOT);
+            if (cold || hot) {
+                const char *base = cold ? ".text.unlikely" : ".text.hot";
+                f->section = func_sections
+                    ? sec_named(cold ? ".text.unlikely." : ".text.hot.",
+                                f->name)
+                    : base;
+            }
+        }
+
     /* -ffunction-sections: a section of its own for each function that
      * did not ask for one. Named here, after the optimizer, which has
      * no business with sections, and before the backend, for which a
@@ -3149,6 +3693,12 @@ static int compile_unit(const char *in, const char *out, int pp_only)
      * MIPS. Backends whose ra_at_o0 is set allocate at -O0 too, for each
      * expression's temporaries, every source variable pinned to its slot;
      * EMBCC_O0_NORA=1 is the old -O0, for bisecting a difference. */
+    /* (the unwind decision below, made first: a backend records its
+     * prologues' CFI for .eh_frame only when it is asked) */
+    target_set_unwind_tables(
+        want_unwind > 0 || (lang_cxx && (want_unwind < 0 || exceptions_on())) ||
+        (want_unwind < 0 && target_is_hosted() &&
+         target_fmt_get() == TGT_FMT_ELF));
     {
         const struct backend_desc *bd = backend_get(ta);
         bd->codegen(iu, &text, &ext, &next, &strs, &nstrs, &gs, &ngs, &fs,
@@ -3421,7 +3971,12 @@ static int compile_unit(const char *in, const char *out, int pp_only)
             ot = ot->pointee;
         g->in_rodata = g->is_const && !g->is_tls && !g->section &&
                        ot && !ot->is_volatile &&
-                       target_fmt_get() == TGT_FMT_ELF;
+                       target_fmt_get() == TGT_FMT_ELF &&
+                       /* position-independent code: an address in it is
+                        * a dynamic relocation, which needs it writable
+                        * (.data) -- in .rodata it would be a text
+                        * relocation, refused in a shared object */
+                       !(target_pic() && g->nrelocs);
         if (g->in_rodata) {
             g->in_bss = 0;
             continue;
@@ -3635,6 +4190,18 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     /* -g: build the DWARF line sections now (needs each func's code_off/len,
      * set by codegen). Off, dw stays empty and nothing below fires. */
     struct dwarf_out dw = { { 0 }, { 0 }, 0, 0, 0, 0, 0 };
+    const char *dwo_path = NULL;
+    if (want_debug && want_split_dwarf && out) {
+        /* -gsplit-dwarf: FILE.o's .dwo is FILE.dwo, as GCC names it */
+        size_t n = strlen(out);
+        char *d = xmalloc(n + 5);
+        memcpy(d, out, n + 1);
+        if (n > 2 && !strcmp(d + n - 2, ".o"))
+            d[n - 2] = 0;
+        strcat(d, ".dwo");
+        dwo_path = d;
+    }
+    dwarf_set_split(dwo_path);
     if (want_debug) {
         dw.frame_sp = backend_get(target_get())->frame_sp;
         dw.frame_ra = backend_get(target_get())->frame_ra;
@@ -3665,7 +4232,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
      * nothing to unwind into on a kernel's stack, and the tables are
      * pure size there. */
     int unwind = want_unwind > 0 ||
-                 (lang_cxx && (want_unwind < 0 || want_exceptions)) ||
+                 (lang_cxx && (want_unwind < 0 || exceptions_on())) ||
                  (want_unwind < 0 && target_is_hosted() &&
                   target_fmt_get() == TGT_FMT_ELF);
     /* eh_emit writes x86-64's and AArch64's tables -- their register
@@ -3676,7 +4243,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
      * stopped every C++ unit there. An explicit request, or exceptions,
      * is refused by name below. */
     const char *unwritten = backend_get(ta)->unwind_unwritten;
-    if (unwind && unwritten && lang_cxx && want_unwind < 0 && !want_exceptions)
+    if (unwind && unwritten && lang_cxx && want_unwind < 0 && !exceptions_on())
         unwind = 0;
     /* An explicit request, or C++ with exceptions, where the tables are
      * not written: refused by name, naming the tables (the registry's
@@ -3686,11 +4253,16 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                             "%s yet (--unwind-tables, --exceptions%s): "
                             "EmbCC writes no %s",
                    target_triple_now(),
-                   lang_cxx && want_exceptions
+                   lang_cxx && exceptions_on()
                        ? ", and C++ without --no-exceptions" : "",
                    unwritten);
-    if (unwind)
+    if (unwind && (ta == TARGET_X86_64 || ta == TARGET_AARCH64))
         eh_emit(iu, ta == TARGET_AARCH64, &eh);
+    else if (unwind && ta == TARGET_THUMB)
+        eh_emit_arm(iu, &eh);              /* EHABI: .ARM.exidx/.ARM.extab */
+    else if (unwind)
+        eh_emit_cfi(iu, backend_get(ta)->frame_sp, backend_get(ta)->frame_ra,
+                    &eh);
 
     /* -S: the same bytes, as text (src/driver/asmout.c). Everything the
      * emitter needs is in hand here -- the code, the string pool, and the
@@ -3777,38 +4349,93 @@ static int compile_unit(const char *in, const char *out, int pp_only)
          * would produce an object whose `_start` had no symbol and
          * whose `.quad main` was eight zeroes -- machine code that
          * links and jumps to address zero. So it is refused by name. */
-        for (struct topasm *tas = u->topasm; tas; tas = tas->next)
-            if (tas->nsyms || tas->nrels)
+        /* A block's labels are symbols and its calls relocations, below
+         * (phases 3 to 6). An address field cannot be: the block is in
+         * __text, and ld64 links no absolute address there. */
+        for (struct topasm *tas = u->topasm; tas; tas = tas->next) {
+            if ((tas->nsyms || tas->nrels) && tas->section)
                 diag_fatal(tas->file, tas->line,
-                           "a file-scope asm block with labels or symbol "
-                           "references is not supported for a Darwin "
-                           "target yet: its bytes would be emitted but "
-                           "its symbols and relocations dropped");
-        /* Mach-O has no .tdata/.tbss and no PT_TLS. Its thread-locals
-         * go through __thread_vars descriptors and a call to
-         * tlv_get_addr, which is a different mechanism rather than a
-         * different spelling -- and this writer emits none of it, so a
-         * __thread object silently DISAPPEARED from the output
-         * entirely. Refused by name instead. */
+                           "a file-scope asm block with labels in a section "
+                           "of its own is not supported for a Darwin "
+                           "target yet");
+            for (int r = 0; r < tas->nrels; r++) {
+                if (tas->rels[r].kind != ASMREL_PC32 || ta == TARGET_AARCH64)
+                    diag_fatal(tas->file, tas->line,
+                               "an address in a file-scope asm block is not "
+                               "supported for a Darwin target: the block is "
+                               "in __text, where macOS links no absolute "
+                               "address (a text relocation); define the "
+                               "table in C");
+                if (!tas->rels[r].target)
+                    diag_fatal(tas->file, tas->line,
+                               "a file-scope asm block's field against a "
+                               "local label is not supported for a Darwin "
+                               "target yet");
+            }
+        }
+        /* Mach-O has no .tdata/.tbss and no PT_TLS: a thread-local's
+         * symbol names a DESCRIPTOR in __thread_vars -- the thunk
+         * __tlv_bootstrap, a key, and where its first value is -- and the
+         * values are in __thread_data and __thread_bss under a local
+         * NAME$tlv$init. Code loads the descriptor (TLVP) and calls its
+         * thunk (irgen's tlv_call). */
+        int ntlv = 0;
         for (struct global *g = u->globals; g; g = g->next)
-            if (!g->absorbed && g->is_tls)
-                diag_fatal(g->file, g->line,
-                           "__thread is not supported for a Darwin target "
-                           "yet: Mach-O addresses a thread-local through "
-                           "a __thread_vars descriptor, which this writer "
-                           "does not emit");
-        /* Mach-O gathers these from __DATA,__mod_init_func rather than
-         * from an SHT_INIT_ARRAY section, and this writer emits no such
-         * section. Dropping them would give back exactly the silent
-         * failure this attribute was implemented to end. */
-        for (struct func *f = u->funcs; f; f = f->next)
-            if (!f->absorbed && (f->is_ctor || f->is_dtor))
-                diag_fatal(f->file, f->line,
-                           "__attribute__((%s)) is not supported for a "
-                           "Darwin target yet: it needs a "
-                           "__DATA,__mod_init_func section this Mach-O "
-                           "writer does not emit",
-                           f->is_ctor ? "constructor" : "destructor");
+            if (!g->absorbed && g->defined && g->is_tls)
+                ntlv++;
+        /* Constructors: dyld calls each pointer in __DATA,__mod_init_func
+         * (S_MOD_INIT_FUNC_POINTERS), in order -- by priority here, the
+         * numbered ones ascending ahead of the plain ones, as the ELF
+         * path's sorted .init_array. Destructors: dyld no longer runs
+         * __mod_term_func, so they are listed in __DATA,__embcc_dtors and
+         * lib/rt's __embcc_register_dtors, last in __mod_init_func, hands
+         * them to __cxa_atexit -- clang's way, a registration at start.
+         * A section named .init_array (C++'s __cx_global_init) or
+         * .fini_array is the same thing spelled the ELF way. */
+        int nmi = 0, ndt = 0, named_fini = 0;
+        struct func **mi = NULL, **dt = NULL;
+        for (int pass = 0; pass < 2; pass++) {
+            for (struct func *f = u->funcs; f; f = f->next) {
+                if (f->absorbed || !f->has_defn)
+                    continue;
+                if (f->is_ctor) {
+                    if (pass)
+                        mi[nmi] = f;
+                    nmi++;
+                }
+                if (f->is_dtor) {
+                    if (pass)
+                        dt[ndt] = f;
+                    ndt++;
+                }
+            }
+            if (!pass) {
+                mi = xcalloc((size_t)nmi + 2, sizeof *mi);
+                dt = xcalloc((size_t)ndt + 1, sizeof *dt);
+                nmi = ndt = 0;
+            }
+        }
+        for (int pass = 0; pass < 2; pass++) {
+            struct func **v = pass ? dt : mi;
+            int n = pass ? ndt : nmi;
+            for (int i = 1; i < n; i++)          /* stable, by priority */
+                for (int j = i; j > 0; j--) {
+                    int pa = pass ? v[j - 1]->dtor_prio : v[j - 1]->ctor_prio;
+                    int pb = pass ? v[j]->dtor_prio : v[j]->ctor_prio;
+                    unsigned ka = pa ? (unsigned)pa : ~0u;
+                    unsigned kb = pb ? (unsigned)pb : ~0u;
+                    if (ka <= kb)
+                        break;
+                    struct func *tmp = v[j];
+                    v[j] = v[j - 1];
+                    v[j - 1] = tmp;
+                }
+        }
+        for (int k = 0; k < nnamed; k++)
+            if (strncmp(named[k].name, ".fini_array", 11) == 0)
+                named_fini = 1;
+        int need_dreg = ndt || named_fini;
+        int m_modinit = 0, m_dtors = 0;
         struct machow *mw = machow_new(
             ta == TARGET_AARCH64 ? CPU_TYPE_ARM64 : CPU_TYPE_X86_64,
             ta == TARGET_AARCH64 ? CPU_SUBTYPE_ARM64_ALL
@@ -3822,6 +4449,17 @@ static int compile_unit(const char *in, const char *out, int pp_only)
          * them, so every field that carries a value has to hold it
          * already. Mach-O relocations have no addend of their own: the
          * value lives in the word being patched. */
+        /* (a block's: a call's rel32 is relative to the field's end, so
+         * ELF's -4 becomes 0; a .quad holds its addend) */
+        for (struct topasm *tas = u->topasm; tas; tas = tas->next)
+            for (int r = 0; r < tas->nrels; r++) {
+                const struct asmrel *ar = &tas->rels[r];
+                int pc = ar->kind == ASMREL_PC32;
+                target_put_uint(text.p + tas->text_off + ar->off, pc ? 4 : 8,
+                                (unsigned long)(ar->addend + (pc ? 4 : 0)));
+            }
+        const char **masm_name = NULL;
+        int *masm_ndx = NULL, nmasm = 0;
         for (struct global *g = u->globals; g; g = g->next) {
             if (g->absorbed || !g->defined || g->in_bss || g->named)
                 continue;
@@ -3830,9 +4468,11 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                            ? g->relocs[i].addend
                            : g->relocs[i].str_off + g->relocs[i].addend;
                 long at = g->off + g->relocs[i].off;
-                if (!data || at < 0 || at + 8 > data_len)
+                char *img = g->is_tls ? tdata : data;      /* its first value */
+                long img_len = g->is_tls ? tdata_len : data_len;
+                if (!img || at < 0 || at + 8 > img_len)
                     continue;
-                unsigned char *d = (unsigned char *)data + at;
+                unsigned char *d = (unsigned char *)img + at;
                 for (int b = 0; b < 8; b++)
                     d[b] = (unsigned char)((unsigned long long)add >> (b * 8));
             }
@@ -3880,10 +4520,50 @@ static int compile_unit(const char *in, const char *out, int pp_only)
             m_bss = machow_add_section(mw, "__DATA", "__bss", S_ZEROFILL,
                                        NULL, (unsigned long long)bss_len,
                                        log2_align(bss_align));
+        int m_tdata = 0, m_tbss = 0, m_tv = 0;
+        if (tdata_len)
+            m_tdata = machow_add_section(mw, "__DATA", "__thread_data",
+                                         0x11 /* S_THREAD_LOCAL_REGULAR */, tdata,
+                                         (unsigned long long)tdata_len,
+                                         log2_align(tdata_align));
+        if (tbss_len)
+            m_tbss = machow_add_section(mw, "__DATA", "__thread_bss",
+                                        0x12 /* S_THREAD_LOCAL_ZEROFILL */, NULL,
+                                        (unsigned long long)tbss_len,
+                                        log2_align(tbss_align));
+        if (ntlv) {
+            unsigned char *tv = xcalloc((size_t)ntlv, 24);
+            m_tv = machow_add_section(mw, "__DATA", "__thread_vars",
+                                      0x13 /* S_THREAD_LOCAL_VARIABLES */, tv,
+                                      (unsigned long long)ntlv * 24, 3);
+            free(tv);
+        }
+        if (nmi + need_dreg) {
+            void *z = xcalloc((size_t)(nmi + need_dreg), 8);
+            m_modinit = machow_add_section(mw, "__DATA", "__mod_init_func",
+                                           0x9 /* S_MOD_INIT_FUNC_POINTERS */,
+                                           z, (unsigned long long)(nmi +
+                                                                   need_dreg) * 8,
+                                           3);
+            free(z);
+        }
+        if (ndt) {
+            void *z = xcalloc((size_t)ndt, 8);
+            m_dtors = machow_add_section(mw, "__DATA", "__embcc_dtors",
+                                         S_REGULAR, z,
+                                         (unsigned long long)ndt * 8, 3);
+            free(z);
+        }
         for (int k = 0; k < nnamed; k++)
             named[k].ndx = machow_add_section(
-                mw, "__DATA", named[k].name,
-                named[k].nobits ? S_ZEROFILL : S_REGULAR,
+                mw, "__DATA",
+                strncmp(named[k].name, ".init_array", 11) == 0
+                    ? "__mod_init_func"
+                : strncmp(named[k].name, ".fini_array", 11) == 0
+                    ? "__embcc_dtors" : named[k].name,
+                strncmp(named[k].name, ".init_array", 11) == 0
+                    ? 0x9 /* S_MOD_INIT_FUNC_POINTERS */
+                : named[k].nobits ? S_ZEROFILL : S_REGULAR,
                 named[k].nobits ? NULL : named[k].buf,
                 (unsigned long long)named[k].len,
                 named[k].align <= 1 ? 0 : named[k].align <= 2 ? 1
@@ -3932,6 +4612,49 @@ static int compile_unit(const char *in, const char *out, int pp_only)
             free(cu);
         }
 
+        /* -g: the DWARF, in __DWARF. A field that names an offset in
+         * another debug section holds that offset (Mach-O does not
+         * relocate those: dsymutil and lldb read each object's sections
+         * as they are); a code address is relocated against __text, and
+         * a global's against its symbol, below once there is one. */
+        int m_dw[DWARF_NSEC] = { 0 };
+        if (want_lto && g_lto_payload && !g_lto_back) {
+            /* -flto (above): in __DWARF, which ld leaves in the objects */
+            size_t pn = 0;
+            char *pl = lto_payload(in, &pn);
+            machow_add_section(mw, "__DWARF", "__embcc_lto",
+                               S_REGULAR | 0x02000000u /* S_ATTR_DEBUG */,
+                               pl, (unsigned long long)pn, 0);
+            free(pl);
+        }
+        if (want_debug) {
+            for (int i = 0; i < dw.nrelocs; i++) {
+                struct dwarf_reloc *r = &dw.relocs[i];
+                long v = r->addend;
+                if (r->target == DWTGT_TEXT)
+                    v += (long)machow_section_addr(mw, m_text);
+                else if (r->target == DWTGT_GLOBAL)
+                    v += (long)machow_section_addr(
+                             mw, (r->glob->named ? named[r->glob->named - 1].ndx
+                                  : r->glob->in_bss ? m_bss : m_data)) +
+                         r->glob->off;
+                target_put_uint(dw.sec[r->in_sec] + r->off, r->width,
+                                (unsigned long)v);
+            }
+            for (int ds = 0; ds < DWARF_NSEC; ds++) {
+                if (!dw.seclen[ds] || dwarf_section_is_dwo(ds))
+                    continue;
+                char nm[32];
+                snprintf(nm, sizeof nm, "__%s", dwarf_section_name(ds) + 1);
+                m_dw[ds] = machow_add_section(mw, "__DWARF", nm,
+                                              S_REGULAR | 0x02000000u
+                                              /* S_ATTR_DEBUG */,
+                                              dw.sec[ds],
+                                              (unsigned long long)dw.seclen[ds],
+                                              0);
+            }
+        }
+
         /* ---- 3. LOCAL symbols, all of them, first --------------------
          *
          * Mach-O orders its symbol table locals, defined externals,
@@ -3952,12 +4675,69 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                 f->sym_ndx = machow_add_symbol(mw, f->name,
                                                (unsigned long long)f->code_off,
                                                m_text, 0);
-        for (struct global *g = u->globals; g; g = g->next)
-            if (!g->absorbed && g->defined && g->is_static)
-                g->sym_ndx = machow_add_symbol(
-                    mw, g->name, (unsigned long long)g->off,
-                    g->named ? named[g->named - 1].ndx
-                             : g->in_bss ? m_bss : m_data, 0);
+        /* a thread-local's first value, and its descriptor's index */
+        int *tlv_init = ntlv ? xcalloc((size_t)ntlv, sizeof *tlv_init) : NULL;
+        {
+            int k = 0;
+            for (struct global *g = u->globals; g; g = g->next) {
+                if (g->absorbed || !g->defined || !g->is_tls)
+                    continue;
+                char nm[512];
+                snprintf(nm, sizeof nm, "%s$tlv$init", g->name);
+                tlv_init[k++] = machow_add_symbol(mw, nm, (unsigned long long)g->off,
+                                                  g->in_bss ? m_tbss : m_tdata, 0);
+            }
+        }
+        {
+            int k = 0;
+            for (struct global *g = u->globals; g; g = g->next) {
+                if (g->absorbed || !g->defined)
+                    continue;
+                if (g->is_tls) {
+                    if (g->is_static)
+                        g->sym_ndx = machow_add_symbol(mw, g->name,
+                                                       (unsigned long long)k * 24, m_tv, 0);
+                    k++;
+                    continue;
+                }
+                if (g->is_static)
+                    g->sym_ndx = machow_add_symbol(
+                        mw, g->name, (unsigned long long)g->off,
+                        g->named ? named[g->named - 1].ndx
+                                 : g->in_bss ? m_bss : m_data, 0);
+            }
+        }
+
+        /* a block's labels, as written (Darwin's assembly spells C's f
+         * as _f): the local ones here, the global ones with the defined
+         * externals */
+        for (int pass = 0; pass < 2; pass++) {
+            for (struct topasm *tas = u->topasm; tas; tas = tas->next)
+                for (int k = 0; k < tas->nsyms; k++) {
+                    const struct asmsym *as = &tas->syms[k];
+                    if (!as->is_global != !pass)
+                        continue;
+                    int ndx = machow_add_symbol_raw(
+                        mw, as->name,
+                        (unsigned long long)(tas->text_off + as->off), m_text,
+                        as->is_global);
+                    masm_name = xrealloc(masm_name, (size_t)(nmasm + 1) * sizeof *masm_name);
+                    masm_ndx = xrealloc(masm_ndx, (size_t)(nmasm + 1) * sizeof *masm_ndx);
+                    masm_name[nmasm] = as->name;
+                    masm_ndx[nmasm++] = ndx;
+                    const char *cn = as->name[0] == '_' ? as->name + 1 : NULL;
+                    for (struct func *f = u->funcs; cn && f; f = f->next)
+                        if (!f->absorbed && !f->has_defn && !f->sym_ndx &&
+                            !strcmp(f->name, cn))
+                            f->sym_ndx = ndx;
+                    for (struct global *g = u->globals; cn && g; g = g->next)
+                        if (!g->absorbed && !g->defined && !g->sym_ndx &&
+                            !strcmp(g->name, cn))
+                            g->sym_ndx = ndx;
+                }
+            if (pass == 0)
+                break;              /* the global ones after the externals */
+        }
 
         /* ---- 4. defined externals ------------------------------------ */
         for (struct func *f = u->funcs; f; f = f->next)
@@ -3965,13 +4745,50 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                 f->sym_ndx = (f->is_weak ? machow_add_symbol_weak
                                          : machow_add_symbol)(
                     mw, f->name, (unsigned long long)f->code_off, m_text, 1);
-        for (struct global *g = u->globals; g; g = g->next)
-            if (!g->absorbed && g->defined && !g->is_static)
-                g->sym_ndx = (g->is_weak ? machow_add_symbol_weak
-                                         : machow_add_symbol)(
-                    mw, g->name, (unsigned long long)g->off,
-                    g->named ? named[g->named - 1].ndx
-                             : g->in_bss ? m_bss : m_data, 1);
+        {
+            int k = 0;
+            for (struct global *g = u->globals; g; g = g->next) {
+                if (g->absorbed || !g->defined)
+                    continue;
+                if (g->is_tls) {
+                    if (!g->is_static)
+                        g->sym_ndx = (g->is_weak ? machow_add_symbol_weak
+                                                 : machow_add_symbol)(
+                            mw, g->name, (unsigned long long)k * 24, m_tv, 1);
+                    k++;
+                    continue;
+                }
+                if (!g->is_static)
+                    g->sym_ndx = (g->is_weak ? machow_add_symbol_weak
+                                             : machow_add_symbol)(
+                        mw, g->name, (unsigned long long)g->off,
+                        g->named ? named[g->named - 1].ndx
+                                 : g->in_bss ? m_bss : m_data, 1);
+            }
+        }
+
+        for (struct topasm *tas = u->topasm; tas; tas = tas->next)
+            for (int k = 0; k < tas->nsyms; k++) {
+                const struct asmsym *as = &tas->syms[k];
+                if (!as->is_global)
+                    continue;
+                int ndx = machow_add_symbol_raw(
+                    mw, as->name, (unsigned long long)(tas->text_off + as->off),
+                    m_text, 1);
+                masm_name = xrealloc(masm_name, (size_t)(nmasm + 1) * sizeof *masm_name);
+                masm_ndx = xrealloc(masm_ndx, (size_t)(nmasm + 1) * sizeof *masm_ndx);
+                masm_name[nmasm] = as->name;
+                masm_ndx[nmasm++] = ndx;
+                const char *cn = as->name[0] == '_' ? as->name + 1 : NULL;
+                for (struct func *f = u->funcs; cn && f; f = f->next)
+                    if (!f->absorbed && !f->has_defn && !f->sym_ndx &&
+                        !strcmp(f->name, cn))
+                        f->sym_ndx = ndx;
+                for (struct global *g = u->globals; cn && g; g = g->next)
+                    if (!g->absorbed && !g->defined && !g->sym_ndx &&
+                        !strcmp(g->name, cn))
+                        g->sym_ndx = ndx;
+            }
 
         /* ---- 5. undefined, all of them, before any relocation --------
          * Created up front rather than lazily where each is first
@@ -4005,6 +4822,44 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                         mw, ft->name, 0, 0, 1);
             }
         }
+        int *masm_rel = NULL;          /* each block field's symbol */
+        {
+            int nrel = 0;
+            for (struct topasm *tas = u->topasm; tas; tas = tas->next)
+                nrel += tas->nrels;
+            masm_rel = xcalloc((size_t)(nrel ? nrel : 1), sizeof *masm_rel);
+            const char **un = NULL;
+            int *us = NULL, nu = 0, at = 0;
+            for (struct topasm *tas = u->topasm; tas; tas = tas->next)
+                for (int r = 0; r < tas->nrels; r++, at++) {
+                    const char *tn = tas->rels[r].target;
+                    const char *cn = tn[0] == '_' ? tn + 1 : NULL;
+                    int sym = 0;
+                    for (int k = 0; !sym && k < nmasm; k++)
+                        if (!strcmp(masm_name[k], tn))
+                            sym = masm_ndx[k];
+                    for (struct func *f = u->funcs; cn && !sym && f; f = f->next)
+                        if (!f->absorbed && f->sym_ndx && !strcmp(f->name, cn))
+                            sym = f->sym_ndx;
+                    for (struct global *g = u->globals; cn && !sym && g; g = g->next)
+                        if (!g->absorbed && g->sym_ndx && !strcmp(g->name, cn))
+                            sym = g->sym_ndx;
+                    for (int k = 0; !sym && k < nu; k++)
+                        if (!strcmp(un[k], tn))
+                            sym = us[k];
+                    if (!sym) {
+                        sym = machow_add_symbol_raw(mw, tn, 0, 0, 1);
+                        un = xrealloc(un, (size_t)(nu + 1) * sizeof *un);
+                        us = xrealloc(us, (size_t)(nu + 1) * sizeof *us);
+                        un[nu] = tn;
+                        us[nu++] = sym;
+                    }
+                    masm_rel[at] = sym;
+                }
+            free(un);
+            free(us);
+        }
+        int tlv_boot = ntlv ? machow_add_symbol(mw, "_tlv_bootstrap", 0, 0, 1) : 0;
         int pers = 0;
         if (ncu)
             for (long k = 0; k < ncu; k++)
@@ -4024,6 +4879,31 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                              (unsigned long long)ext[i].patch_off,
                              ext[i].callee->sym_ndx, mt - 1, mpc, mlen, 0);
         }
+        {
+            int at = 0;
+            for (struct topasm *tas = u->topasm; tas; tas = tas->next)
+                for (int r = 0; r < tas->nrels; r++, at++) {
+                    int pc = tas->rels[r].kind == ASMREL_PC32;
+                    machow_add_reloc(mw, m_text,
+                                     (unsigned long long)(tas->text_off +
+                                                          tas->rels[r].off),
+                                     masm_rel[at],
+                                     pc ? X86_64_RELOC_BRANCH
+                                        : ta == TARGET_AARCH64
+                                          ? ARM64_RELOC_UNSIGNED
+                                          : X86_64_RELOC_UNSIGNED,
+                                     pc, pc ? 2 : 3, 0);
+                }
+            free(masm_rel);
+            free(masm_name);
+            free(masm_ndx);
+        }
+        long m_si_n = 0, m_sb_n = 0;
+        unsigned char *m_si = unit_stack_record(u, iu, &text, ext, next, in,
+                                                &m_si_n);
+        unsigned char *m_sb = sbom_unit_record(in, cpp_dep_count(),
+                                               cpp_dep_path,
+                                               cpp_dep_is_system, &m_sb_n);
         free(ext);
 
         /* The offset goes in UNBIASED -- see target_macho_reloc's note:
@@ -4076,12 +4956,41 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                     continue;
                 mt = target_macho_reloc(ta, RK_ABS64, &mpc, &mlen);
                 machow_add_reloc(mw,
-                                 g->named ? named[g->named - 1].ndx : m_data,
+                                 g->is_tls ? m_tdata
+                                 : g->named ? named[g->named - 1].ndx : m_data,
                                  (unsigned long long)(g->off +
                                                       g->relocs[i].off),
                                  sym, mt - 1, mpc, mlen, 0);
             }
         }
+
+        {
+            int uns = ta == TARGET_AARCH64 ? ARM64_RELOC_UNSIGNED
+                                           : X86_64_RELOC_UNSIGNED;
+            for (int k = 0; k < nmi; k++)
+                machow_add_reloc(mw, m_modinit, (unsigned long long)k * 8,
+                                 mi[k]->sym_ndx, uns, 0, 3, 0);
+            if (need_dreg)
+                machow_add_reloc(mw, m_modinit, (unsigned long long)nmi * 8,
+                                 machow_add_symbol(mw,
+                                                   "__embcc_register_dtors",
+                                                   0, 0, 1),
+                                 uns, 0, 3, 0);
+            for (int k = 0; k < ndt; k++)
+                machow_add_reloc(mw, m_dtors, (unsigned long long)k * 8,
+                                 dt[k]->sym_ndx, uns, 0, 3, 0);
+            free(mi);
+            free(dt);
+        }
+        /* each descriptor: the thunk, then (after the key ld leaves
+         * zero) its first value */
+        for (int k = 0; k < ntlv; k++) {
+            int uns = ta == TARGET_AARCH64 ? ARM64_RELOC_UNSIGNED : X86_64_RELOC_UNSIGNED;
+            machow_add_reloc(mw, m_tv, (unsigned long long)k * 24, tlv_boot, uns, 0, 3, 0);
+            machow_add_reloc(mw, m_tv, (unsigned long long)k * 24 + 16, tlv_init[k], uns,
+                             0, 3, 0);
+        }
+        free(tlv_init);
 
         if (ncu) {
             for (long k = 0; k < ncu; k++) {
@@ -4125,7 +5034,36 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                 }
         }
         eh_free(&eh);
+        if (want_debug) {
+            for (int i = 0; i < dw.nrelocs; i++) {
+                struct dwarf_reloc *r = &dw.relocs[i];
+                int len = r->width == 8 ? 3 : 2;
+                if (r->target == DWTGT_TEXT)
+                    machow_add_reloc_sect(mw, m_dw[r->in_sec],
+                                          (unsigned long long)r->off, m_text,
+                                          len);
+                else if (r->target == DWTGT_GLOBAL)
+                    /* against its section, the field its address there:
+                     * what lldb's debug map translates, as clang's */
+                    machow_add_reloc_sect(mw, m_dw[r->in_sec],
+                                          (unsigned long long)r->off,
+                                          (r->glob->named
+                                           ? named[r->glob->named - 1].ndx
+                                           : r->glob->in_bss ? m_bss : m_data), len);
+            }
+            dwarf_free(&dw);
+        }
 
+        if (m_si)
+            machow_add_section(mw, "__EMBCC", "__stack",
+                               S_REGULAR | 0x10000000u /* NO_DEAD_STRIP */,
+                               m_si, (unsigned long long)m_si_n, 0);
+        if (m_sb)
+            machow_add_section(mw, "__EMBCC", "__sbom",
+                               S_REGULAR | 0x10000000u /* NO_DEAD_STRIP */,
+                               m_sb, (unsigned long long)m_sb_n, 0);
+        free(m_si);
+        free(m_sb);
         int mrc = machow_write(mw, out);
         machow_free(mw);
         return mrc != 0;
@@ -4147,87 +5085,82 @@ static int compile_unit(const char *in, const char *out, int pp_only)
          * so the -4 that ELF's PC32 needs is absent here, and carrying
          * it over would displace every call by four bytes.
          */
+        /* -g: DWARF in .debug_* sections, as MinGW's GCC writes it (gdb
+         * reads it; CodeView is MSVC's). The code is one .text here; a
+         * function in a section of its own would need its addresses
+         * against that section, which this does not do yet. */
         if (want_debug)
-            diag_fatal(in, 0,
-                       "-g is not supported for a Windows target yet: its "
-                       "debug information goes in CodeView records this "
-                       "does not write, and emitting DWARF under a COFF "
-                       "name would be worse than refusing");
+            for (int i = 0; i < iu->nfuncs; i++)
+                if (iu->funcs[i].src && iu->funcs[i].src->section &&
+                    iu->funcs[i].src->code_len > 0)
+                    diag_fatal(in, 0,
+                               "-g with a function in a section of its own "
+                               "('%s') is not supported for a Windows "
+                               "target yet", iu->funcs[i].src->name);
         for (struct topasm *tas = u->topasm; tas; tas = tas->next)
-            if (tas->nsyms || tas->nrels)
+            if ((tas->nsyms || tas->nrels) && tas->section)
                 diag_fatal(tas->file, tas->line,
                            "a file-scope asm block with labels or symbol "
-                           "references is not supported for a Windows "
-                           "target yet");
-        for (struct func *f = u->funcs; f; f = f->next)
-            if (!f->absorbed && (f->is_ctor || f->is_dtor))
-                diag_fatal(f->file, f->line,
-                           "__attribute__((%s)) is not supported for a "
-                           "Windows target yet: it needs the .ctors/.dtors "
-                           "sections this COFF writer does not emit",
-                           f->is_ctor ? "constructor" : "destructor");
-        for (struct global *g = u->globals; g; g = g->next)
-            if (!g->absorbed && g->is_tls)
-                diag_fatal(g->file, g->line,
-                           "__thread is not supported for a Windows target "
-                           "yet: Windows reaches a thread-local through a "
-                           "_tls_index and a TLS directory this writer "
-                           "does not emit");
-        /* The COFF writer has no named data sections: an object with one
-         * was given offset 0 of .data and laid over whatever was already
-         * there, so a store to either changed both. */
-        for (struct global *g = u->globals; g; g = g->next)
-            if (!g->absorbed && g->defined && g->section)
-                diag_fatal(g->file, g->line,
-                           "'%s': a variable's section attribute is not "
-                           "supported for COFF output", g->name);
-        if (unwind)
-            diag_fatal(in, 0,
-                       "C++ exceptions are not supported for a Windows "
-                       "target yet: the unwind tables go in .pdata and "
-                       ".xdata and neither is written");
+                           "references in a section of its own ('%s') is "
+                           "not supported for a Windows target yet",
+                           tas->section);
+        /* A block's fields hold their addends before .text is handed
+         * over (a COFF relocation has none): a call's rel32 is measured
+         * from the field's end, so ELF's -4 becomes 0, and a field
+         * against one of the block's own local labels is relative to
+         * .text, so the block's place is in it */
+        for (struct topasm *tas = u->topasm; tas; tas = tas->next)
+            for (int r = 0; r < tas->nrels; r++) {
+                const struct asmrel *ar = &tas->rels[r];
+                int pc = ar->kind == ASMREL_PC32 ||
+                         ar->elf_type == R_X86_64_PC32 ||
+                         ar->elf_type == R_X86_64_PLT32;
+                int w8 = !pc && (ar->kind == ASMREL_ABS64 ||
+                                 ar->elf_type == R_X86_64_64);
+                long v = ar->addend + (pc ? 4 : 0) +
+                         (ar->target ? 0 : tas->text_off);
+                target_put_uint(text.p + tas->text_off + ar->off, w8 ? 8 : 4,
+                                (unsigned long)v);
+            }
+        (void)unwind;       /* .pdata and .xdata are written always */
 
-        /* The object format is right and the argument registers are
-         * now Microsoft's (refereed against clang by win-abi.sh), but
-         * the ABI around them is not: the data model is still LP64
-         * where Windows is LLP64, wchar_t is four bytes where it is
-         * two, and rsi, rdi, xmm6 and xmm7 -- which a Windows callee
-         * must preserve -- are used freely. Objects EmbCC compiles
-         * are consistent with each other, so a self-contained program
-         * works -- and a struct holding a `long`, or a caller in
-         * MinGW's libc keeping a double in xmm6, does not.
-         *
-         * (This used to name the argument registers as the gap, which
-         * stopped being true when the convention went in.)
-         *
-         * D-014 says a capability a triple lacks must be an error
-         * naming the triple rather than a silent fallback to another
-         * platform's behaviour, and this IS that fallback. It is a
-         * warning rather than an error only because refusing would
-         * leave the object writer untestable; it is on by default and
-         * fires on every Windows compile, so it cannot be mistaken for
-         * a finished target. */
-        diag_warn_opt(in, 0, 0, "windows-abi",
-                      "%s is not yet the Microsoft x64 ABI: `long` is "
-                      "8 bytes and wchar_t 4 (Windows has 4 and 2), and "
-                      "rsi, rdi, xmm6 and xmm7 are not preserved across "
-                      "a call: "
-                      "objects EmbCC compiles agree with each other and "
-                      "with nothing else",
-                      target_triple_now());
+        /* Every function that moves rsp or saves a register gets its
+         * UNWIND_INFO in .xdata and a .pdata entry pointing at it: what
+         * Windows unwinds with, for an exception and for longjmp alike
+         * (debug/eh.c, from the x86 backend's records). A C++ function
+         * with handlers names __gxx_personality_seh0, MinGW's, with its
+         * LSDA as the handler's data. COFF relocations carry no addend,
+         * so each field holds its own. */
+        struct eh_out weh;
+        memset(&weh, 0, sizeof weh);
+        eh_emit_win64(iu, &weh);
+        for (int i = 0; i < weh.nrelocs; i++) {
+            struct eh_reloc *r = &weh.relocs[i];
+            struct eh_buf *b = r->in_lsda == 2 ? &weh.pdata : &weh.frame;
+            long add = r->target == EHT_TEXT || r->target == EHT_XDATA
+                       ? r->addend : 0;
+            int n = r->kind == EHR_ABS64 ? 8 : 4;
+            for (int k = 0; k < n; k++)
+                b->p[r->off + k] =
+                    (unsigned char)((unsigned long long)add >> (8 * k));
+        }
 
-        /* 1. the bytes, before any section is handed over. */
+        /* 1. the bytes, before any section is handed over -- in .data,
+         * or in the variable's own named section (laid out above, as
+         * for ELF) */
         for (struct global *g = u->globals; g; g = g->next) {
-            if (g->absorbed || !g->defined || g->in_bss || g->named)
+            if (g->absorbed || !g->defined || g->in_bss)
                 continue;
+            char *img = g->named ? named[g->named - 1].buf : data;
+            long img_len = g->named ? named[g->named - 1].len : data_len;
             for (int i = 0; i < g->nrelocs; i++) {
                 long add = g->relocs[i].ftarget || g->relocs[i].gtarget
                            ? g->relocs[i].addend
                            : g->relocs[i].str_off + g->relocs[i].addend;
                 long at = g->off + g->relocs[i].off;
-                if (!data || at < 0 || at + 8 > data_len)
+                if (!img || at < 0 || at + 8 > img_len)
                     continue;
-                unsigned char *d = (unsigned char *)data + at;
+                unsigned char *d = (unsigned char *)img + at;
                 for (int b = 0; b < 8; b++)
                     d[b] = (unsigned char)((unsigned long long)add >> (b * 8));
             }
@@ -4270,6 +5203,139 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                                       IMAGE_SCN_MEM_READ |
                                       IMAGE_SCN_MEM_WRITE,
                                       NULL, (unsigned)bss_len, bss_align);
+        /* constructors and destructors: MinGW's crt runs the pointers
+         * in .ctors and .dtors, a priority's in .ctors.NNNNN (65535 less
+         * it, which the linker's sort puts in order), as GCC and clang
+         * place them */
+        struct { const char *name; int sect, n; } xtor[32];
+        int nxtor = 0;
+        static unsigned char xtor_zero[8 * 256];
+        for (int pass = 0; pass < 2; pass++)
+            for (struct func *f = u->funcs; f; f = f->next) {
+                if (f->absorbed || !f->has_defn ||
+                    !(pass ? f->is_dtor : f->is_ctor))
+                    continue;
+                int prio = (pass ? f->dtor_prio : f->ctor_prio) - 1;
+                char nm[32];                /* (stored as priority + 1) */
+                if (prio >= 0 && prio != 65535)
+                    snprintf(nm, sizeof nm, "%s.%05d", pass ? ".dtors" : ".ctors",
+                             65535 - prio);
+                else
+                    snprintf(nm, sizeof nm, "%s", pass ? ".dtors" : ".ctors");
+                int k = 0;
+                while (k < nxtor && strcmp(xtor[k].name, nm) != 0)
+                    k++;
+                if (k == nxtor) {
+                    if (nxtor == (int)(sizeof xtor / sizeof *xtor))
+                        diag_fatal(f->file, f->line, "too many constructor "
+                                   "priorities in one unit");
+                    xtor[k].name = xstrndup(nm, strlen(nm));
+                    xtor[k].n = 0;
+                    nxtor++;
+                }
+                xtor[k].n++;
+            }
+        for (int k = 0; k < nxtor; k++) {
+            if (xtor[k].n > 256)
+                diag_fatal(in, 0, "more than 256 constructors in one unit");
+            xtor[k].sect = coffw_add_section(cw, xtor[k].name,
+                                             IMAGE_SCN_CNT_INITIALIZED_DATA |
+                                             IMAGE_SCN_MEM_READ |
+                                             IMAGE_SCN_MEM_WRITE,
+                                             xtor_zero, (unsigned)(8 * xtor[k].n),
+                                             8);
+            xtor[k].n = 0;                  /* the fill counter, below */
+        }
+        /* the named sections (`section` attributes, and the C++ front
+         * end's own), with COFF's spelling of each one's flags */
+        int *c_named = xcalloc((size_t)(nnamed ? nnamed : 1), sizeof *c_named);
+        for (int k = 0; k < nnamed; k++) {
+            unsigned fl = IMAGE_SCN_MEM_READ;
+            if (named[k].flags & SHF_EXECINSTR)
+                fl |= IMAGE_SCN_CNT_CODE | IMAGE_SCN_MEM_EXECUTE;
+            else if (named[k].nobits)
+                fl |= IMAGE_SCN_CNT_UNINITIALIZED_DATA;
+            else
+                fl |= IMAGE_SCN_CNT_INITIALIZED_DATA;
+            if (named[k].flags & SHF_WRITE)
+                fl |= IMAGE_SCN_MEM_WRITE;
+            c_named[k] = coffw_add_section(cw, named[k].name, fl,
+                                           named[k].nobits ? NULL
+                                                           : named[k].buf,
+                                           (unsigned)named[k].len,
+                                           named[k].align);
+        }
+        /* thread-locals, emutls's way (irgen's emutls_call): the first
+         * values, as laid out for .tdata, in .rdata$emutls (each one's
+         * __emutls_t.NAME); and a control object of four words each,
+         * __emutls_v.NAME, in .data$emutls -- size, alignment, the
+         * runtime's word, and the template (0: zeros, a .tbss one) */
+        int c_emt = 0, c_emv = 0, nemu = 0;
+        for (struct global *g = u->globals; g; g = g->next)
+            if (!g->absorbed && g->defined && g->is_tls)
+                nemu++;
+        unsigned char *emv = NULL;
+        if (nemu) {
+            if (tdata_len)
+                c_emt = coffw_add_section(cw, ".rdata$emutls",
+                                          IMAGE_SCN_CNT_INITIALIZED_DATA |
+                                          IMAGE_SCN_MEM_READ,
+                                          tdata, (unsigned)tdata_len,
+                                          tdata_align);
+            emv = xcalloc((size_t)nemu, 32);
+            int k = 0;
+            for (struct global *g = u->globals; g; g = g->next) {
+                if (g->absorbed || !g->defined || !g->is_tls)
+                    continue;
+                long sz = ty_size(g->ty) + g->fam_extra;
+                long al = ty_align(g->ty);
+                if (g->user_align > al)
+                    al = g->user_align;
+                target_put_uint(emv + 32 * k, 8, (unsigned long)sz);
+                target_put_uint(emv + 32 * k + 8, 8, (unsigned long)al);
+                if (!g->in_bss)         /* the template's address: its */
+                    target_put_uint(emv + 32 * k + 24, 8,   /* offset */
+                                    (unsigned long)g->off);
+                k++;
+            }
+            c_emv = coffw_add_section(cw, ".data$emutls",
+                                      IMAGE_SCN_CNT_INITIALIZED_DATA |
+                                      IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE,
+                                      emv, (unsigned)(32 * nemu), 8);
+        }
+        /* -g's sections, each field holding its addend (a COFF relocation
+         * has none), named in full through the string table */
+        int c_dw[DWARF_NSEC] = { 0 };
+        if (want_debug) {
+            for (int i = 0; i < dw.nrelocs; i++) {
+                struct dwarf_reloc *r = &dw.relocs[i];
+                target_put_uint(dw.sec[r->in_sec] + r->off, r->width,
+                                (unsigned long)r->addend);
+            }
+            for (int ds = 0; ds < DWARF_NSEC; ds++) {
+                if (!dw.seclen[ds] || dwarf_section_is_dwo(ds))
+                    continue;
+                c_dw[ds] = coffw_add_section(cw, dwarf_section_name(ds),
+                                             IMAGE_SCN_CNT_INITIALIZED_DATA |
+                                             IMAGE_SCN_MEM_DISCARDABLE |
+                                             IMAGE_SCN_MEM_READ,
+                                             dw.sec[ds],
+                                             (unsigned)dw.seclen[ds], 1);
+            }
+        }
+        int c_xdata = 0, c_pdata = 0;
+        if (weh.frame.len)
+            c_xdata = coffw_add_section(cw, ".xdata",
+                                        IMAGE_SCN_CNT_INITIALIZED_DATA |
+                                        IMAGE_SCN_MEM_READ,
+                                        weh.frame.p, (unsigned)weh.frame.len,
+                                        4);
+        if (weh.pdata.len)
+            c_pdata = coffw_add_section(cw, ".pdata",
+                                        IMAGE_SCN_CNT_INITIALIZED_DATA |
+                                        IMAGE_SCN_MEM_READ,
+                                        weh.pdata.p, (unsigned)weh.pdata.len,
+                                        4);
 
         /* 3. symbols. .rdata gets a section symbol, because a string's
          * address is relocated against the SECTION rather than against
@@ -4280,17 +5346,49 @@ static int compile_unit(const char *in, const char *out, int pp_only)
             c_rdata_sym = coffw_add_symbol(cw, ".rdata", 0, c_rdata,
                                            IMAGE_SYM_TYPE_NULL,
                                            IMAGE_SYM_CLASS_STATIC);
+        /* -g: what its fields are relative to, a symbol per section */
+        int dw_sym[DWARF_NSEC], dw_text_sym = -1;
+        for (int ds = 0; ds < DWARF_NSEC; ds++)
+            dw_sym[ds] = c_dw[ds]
+                ? coffw_add_symbol(cw, dwarf_section_name(ds), 0, c_dw[ds],
+                                   IMAGE_SYM_TYPE_NULL, IMAGE_SYM_CLASS_STATIC)
+                : -1;
+        if (want_debug)
+            dw_text_sym = coffw_add_symbol(cw, ".text", 0, c_text,
+                                           IMAGE_SYM_TYPE_NULL,
+                                           IMAGE_SYM_CLASS_STATIC);
         for (struct func *f = u->funcs; f; f = f->next)
-            if (!f->absorbed && f->has_defn && (!f->is_static || f->used))
+            if (!f->absorbed && f->has_defn &&
+                (!f->is_static || f->used || f->is_ctor || f->is_dtor))
                 f->sym_ndx = coffw_add_symbol(
                     cw, f->name, (unsigned)f->code_off, c_text,
                     IMAGE_SYM_DTYPE_FUNCTION,
                     f->is_static ? IMAGE_SYM_CLASS_STATIC
                                  : IMAGE_SYM_CLASS_EXTERNAL) + 1;
-        for (struct global *g = u->globals; g; g = g->next) {
+        int c_emt_sym = c_emt ? coffw_add_symbol(cw, ".rdata$emutls", 0,
+                                                 c_emt, IMAGE_SYM_TYPE_NULL,
+                                                 IMAGE_SYM_CLASS_STATIC) : -1;
+        for (struct global *g = u->globals, *gk = NULL; g; g = g->next) {
             if (g->absorbed || !g->defined)
                 continue;
-            int sect = g->in_bss ? c_bss : c_data;
+            if (g->is_tls) {
+                int k = 0;
+                for (gk = u->globals; gk != g; gk = gk->next)
+                    if (!gk->absorbed && gk->defined && gk->is_tls)
+                        k++;
+                char nm[512];
+                snprintf(nm, sizeof nm, "__emutls_v.%s", g->name);
+                g->sym_ndx = coffw_add_symbol(
+                    cw, nm, (unsigned)(32 * k), c_emv, IMAGE_SYM_TYPE_NULL,
+                    g->is_static ? IMAGE_SYM_CLASS_STATIC
+                                 : IMAGE_SYM_CLASS_EXTERNAL) + 1;
+                if (!g->in_bss && c_emt_sym >= 0)
+                    coffw_add_reloc(cw, c_emv, (unsigned)(32 * k + 24),
+                                    c_emt_sym, IMAGE_REL_AMD64_ADDR64);
+                continue;
+            }
+            int sect = g->named ? c_named[g->named - 1]
+                     : g->in_bss ? c_bss : c_data;
             if (!sect)
                 continue;
             g->sym_ndx = coffw_add_symbol(
@@ -4298,13 +5396,53 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                 g->is_static ? IMAGE_SYM_CLASS_STATIC
                              : IMAGE_SYM_CLASS_EXTERNAL) + 1;
         }
+        free(emv);
+        /* A file-scope block's labels: global ones external, the rest
+         * static; a function or object C declares and the block defines
+         * is that symbol. And .text's own, for a field against a local
+         * label. */
+        int asm_text_sym = -1, nasym = 0;
+        const char **asym_name = NULL;
+        int *asym_ndx = NULL;
+        for (struct topasm *tas = u->topasm; tas; tas = tas->next) {
+            if (tas->nrels && asm_text_sym < 0)
+                asm_text_sym = coffw_add_symbol(cw, ".text", 0, c_text,
+                                                IMAGE_SYM_TYPE_NULL,
+                                                IMAGE_SYM_CLASS_STATIC);
+            for (int k = 0; k < tas->nsyms; k++) {
+                const struct asmsym *as = &tas->syms[k];
+                int ndx = coffw_add_symbol(
+                    cw, as->name, (unsigned)(tas->text_off + as->off), c_text,
+                    as->type == ASMSYM_FUNC ? IMAGE_SYM_DTYPE_FUNCTION
+                                            : IMAGE_SYM_TYPE_NULL,
+                    as->is_global ? IMAGE_SYM_CLASS_EXTERNAL
+                                  : IMAGE_SYM_CLASS_STATIC);
+                asym_name = xrealloc(asym_name, (size_t)(nasym + 1) * sizeof *asym_name);
+                asym_ndx = xrealloc(asym_ndx, (size_t)(nasym + 1) * sizeof *asym_ndx);
+                asym_name[nasym] = as->name;
+                asym_ndx[nasym++] = ndx;
+                for (struct func *f = u->funcs; f; f = f->next)
+                    if (!f->absorbed && !f->has_defn && !f->sym_ndx &&
+                        !strcmp(f->name, as->name))
+                        f->sym_ndx = ndx + 1;
+                for (struct global *g = u->globals; g; g = g->next)
+                    if (!g->absorbed && !g->defined && !g->sym_ndx &&
+                        !strcmp(g->name, as->name))
+                        g->sym_ndx = ndx + 1;
+            }
+        }
+
         /* Undefined: section zero with a ZERO value. A nonzero value
          * there would make it a COMMON rather than a reference. */
         for (struct global *g = u->globals; g; g = g->next)
-            if (!g->absorbed && !g->defined && g->used)
+            if (!g->absorbed && !g->defined && g->used) {
+                char nm[512];
+                snprintf(nm, sizeof nm, g->is_tls ? "__emutls_v.%s" : "%s",
+                         g->name);
                 g->sym_ndx = coffw_add_symbol(
-                    cw, g->name, 0, IMAGE_SYM_UNDEFINED,
+                    cw, nm, 0, IMAGE_SYM_UNDEFINED,
                     IMAGE_SYM_TYPE_NULL, IMAGE_SYM_CLASS_EXTERNAL) + 1;
+            }
 
         /* 4. relocations. */
         for (int i = 0; i < next; i++) {
@@ -4323,10 +5461,14 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                             c_rdata_sym, target_coff_reloc(ta, strs[i].kind));
         for (int i = 0; i < ngs; i++) {
             struct global *g = gs[i].glob;
-            if (!g->sym_ndx)
+            if (!g->sym_ndx) {
+                char nm[512];
+                snprintf(nm, sizeof nm, g->is_tls ? "__emutls_v.%s" : "%s",
+                         g->name);
                 g->sym_ndx = coffw_add_symbol(
-                    cw, g->name, 0, IMAGE_SYM_UNDEFINED,
+                    cw, nm, 0, IMAGE_SYM_UNDEFINED,
                     IMAGE_SYM_TYPE_NULL, IMAGE_SYM_CLASS_EXTERNAL) + 1;
+            }
             coffw_add_reloc(cw, c_text, (unsigned)gs[i].patch_off,
                             g->sym_ndx - 1, target_coff_reloc(ta, gs[i].kind));
         }
@@ -4340,9 +5482,11 @@ static int compile_unit(const char *in, const char *out, int pp_only)
             coffw_add_reloc(cw, c_text, (unsigned)fs[i].patch_off,
                             tf->sym_ndx - 1, target_coff_reloc(ta, fs[i].kind));
         }
-        /* Pointer slots in .data holding an address. */
+        /* Pointer slots in .data (or a named section) holding an
+         * address. */
         for (struct global *g = u->globals; g; g = g->next) {
-            if (g->absorbed || !g->defined || g->in_bss || !c_data)
+            int gsect = g->named ? c_named[g->named - 1] : c_data;
+            if (g->absorbed || !g->defined || g->in_bss || !gsect)
                 continue;
             for (int i = 0; i < g->nrelocs; i++) {
                 struct func *ft = g->relocs[i].ftarget;
@@ -4359,10 +5503,168 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                 } else {
                     sym = c_rdata_sym;
                 }
-                coffw_add_reloc(cw, c_data,
+                coffw_add_reloc(cw, gsect,
                                 (unsigned)(g->off + g->relocs[i].off), sym,
                                 target_coff_reloc(ta, RK_ABS64));
             }
+        }
+        /* .xdata's and .pdata's: image-relative (ADDR32NB) to code and
+         * to the unwind info, to the personality; a typeinfo's absolute */
+        if (weh.nrelocs) {
+            int s_text = coffw_add_symbol(cw, ".text", 0, c_text,
+                                          IMAGE_SYM_TYPE_NULL,
+                                          IMAGE_SYM_CLASS_STATIC);
+            int s_xdata = c_xdata
+                ? coffw_add_symbol(cw, ".xdata", 0, c_xdata,
+                                   IMAGE_SYM_TYPE_NULL,
+                                   IMAGE_SYM_CLASS_STATIC) : 0;
+            int s_pers = -1;
+            for (int i = 0; i < weh.nrelocs; i++) {
+                struct eh_reloc *r = &weh.relocs[i];
+                int sym;
+                switch (r->target) {
+                case EHT_TEXT:  sym = s_text; break;
+                case EHT_XDATA: sym = s_xdata; break;
+                case EHT_PERSONALITY:
+                    if (s_pers < 0)
+                        s_pers = coffw_add_symbol(
+                            cw, "__gxx_personality_seh0", 0,
+                            IMAGE_SYM_UNDEFINED, IMAGE_SYM_DTYPE_FUNCTION,
+                            IMAGE_SYM_CLASS_EXTERNAL);
+                    sym = s_pers;
+                    break;
+                default:
+                    if (!r->glob->sym_ndx)
+                        r->glob->sym_ndx = coffw_add_symbol(
+                            cw, r->glob->name, 0, IMAGE_SYM_UNDEFINED,
+                            IMAGE_SYM_TYPE_NULL,
+                            IMAGE_SYM_CLASS_EXTERNAL) + 1;
+                    sym = r->glob->sym_ndx - 1;
+                    break;
+                }
+                coffw_add_reloc(cw, r->in_lsda == 2 ? c_pdata : c_xdata,
+                                (unsigned)r->off, sym,
+                                r->kind == EHR_ABS64
+                                    ? IMAGE_REL_AMD64_ADDR64
+                                    : IMAGE_REL_AMD64_ADDR32NB);
+            }
+        }
+        eh_free(&weh);
+        for (int pass = 0; pass < 2; pass++)
+            for (struct func *f = u->funcs; f; f = f->next) {
+                if (f->absorbed || !f->has_defn ||
+                    !(pass ? f->is_dtor : f->is_ctor))
+                    continue;
+                int prio = (pass ? f->dtor_prio : f->ctor_prio) - 1;
+                char nm[32];                /* (stored as priority + 1) */
+                if (prio >= 0 && prio != 65535)
+                    snprintf(nm, sizeof nm, "%s.%05d", pass ? ".dtors" : ".ctors",
+                             65535 - prio);
+                else
+                    snprintf(nm, sizeof nm, "%s", pass ? ".dtors" : ".ctors");
+                for (int k = 0; k < nxtor; k++)
+                    if (strcmp(xtor[k].name, nm) == 0)
+                        coffw_add_reloc(cw, xtor[k].sect,
+                                        (unsigned)(8 * xtor[k].n++),
+                                        f->sym_ndx - 1,
+                                        IMAGE_REL_AMD64_ADDR64);
+            }
+        for (int k = 0; k < nxtor; k++)
+            free((char *)xtor[k].name);
+        free(c_named);
+        /* a block's fields: against the name's symbol -- a function, an
+         * object, a label, or one undefined symbol per name -- or .text */
+        {
+            const char **un = NULL;
+            int *us = NULL, nu = 0;
+            for (struct topasm *tas = u->topasm; tas; tas = tas->next)
+                for (int r = 0; r < tas->nrels; r++) {
+                    const struct asmrel *ar = &tas->rels[r];
+                    const char *tn = ar->target;
+                    int sym = -1;
+                    if (!tn)
+                        sym = asm_text_sym;
+                    for (struct func *f = u->funcs; tn && sym < 0 && f; f = f->next)
+                        if (!f->absorbed && f->sym_ndx && !strcmp(f->name, tn))
+                            sym = f->sym_ndx - 1;
+                    for (struct global *g = u->globals; tn && sym < 0 && g; g = g->next)
+                        if (!g->absorbed && g->sym_ndx && !strcmp(g->name, tn))
+                            sym = g->sym_ndx - 1;
+                    for (int k = 0; tn && sym < 0 && k < nasym; k++)
+                        if (!strcmp(asym_name[k], tn))
+                            sym = asym_ndx[k];
+                    for (int k = 0; tn && sym < 0 && k < nu; k++)
+                        if (!strcmp(un[k], tn))
+                            sym = us[k];
+                    if (sym < 0) {
+                        sym = coffw_add_symbol(cw, tn, 0, IMAGE_SYM_UNDEFINED,
+                                               IMAGE_SYM_TYPE_NULL,
+                                               IMAGE_SYM_CLASS_EXTERNAL);
+                        un = xrealloc(un, (size_t)(nu + 1) * sizeof *un);
+                        us = xrealloc(us, (size_t)(nu + 1) * sizeof *us);
+                        un[nu] = tn;
+                        us[nu++] = sym;
+                    }
+                    int pc = ar->kind == ASMREL_PC32 ||
+                             ar->elf_type == R_X86_64_PC32 ||
+                             ar->elf_type == R_X86_64_PLT32;
+                    int w8 = !pc && (ar->kind == ASMREL_ABS64 ||
+                                     ar->elf_type == R_X86_64_64);
+                    coffw_add_reloc(cw, c_text,
+                                    (unsigned)(tas->text_off + ar->off), sym,
+                                    pc ? IMAGE_REL_AMD64_REL32
+                                    : w8 ? IMAGE_REL_AMD64_ADDR64
+                                         : IMAGE_REL_AMD64_ADDR32);
+                }
+            free(un);
+            free(us);
+        }
+        free(asym_name);
+        free(asym_ndx);
+        /* -g's relocations: a code or data address is 64 bits against
+         * .text or the variable's symbol; an offset into another debug
+         * section is SECREL, which the link makes relative to that
+         * section in the image */
+        if (want_debug) {
+            for (int i = 0; i < dw.nrelocs; i++) {
+                struct dwarf_reloc *r = &dw.relocs[i];
+                int ts = r->target == DWTGT_ABBREV ? DWSEC_ABBREV
+                       : r->target == DWTGT_RANGES ? DWSEC_RANGES
+                       : r->target == DWTGT_FRAME  ? DWSEC_FRAME
+                       : r->target == DWTGT_LOC    ? DWSEC_LOC
+                       : r->target == DWTGT_ADDR   ? DWSEC_ADDR
+                       :                             DWSEC_LINE;
+                int sym = r->target == DWTGT_TEXT ? dw_text_sym
+                        : r->target == DWTGT_GLOBAL ? r->glob->sym_ndx - 1
+                        : dw_sym[ts];
+                int addr = r->target == DWTGT_TEXT || r->target == DWTGT_GLOBAL;
+                if (sym < 0 || !c_dw[r->in_sec])
+                    internal_error("-g: a COFF debug relocation with no "
+                                   "symbol (section %d, target %d)",
+                                   r->in_sec, r->target);
+                coffw_add_reloc(cw, c_dw[r->in_sec], (unsigned)r->off, sym,
+                                addr ? (r->width == 8 ? IMAGE_REL_AMD64_ADDR64
+                                                      : IMAGE_REL_AMD64_ADDR32NB)
+                                     : IMAGE_REL_AMD64_SECREL);
+            }
+        }
+        {
+            long n_si = 0, n_sb = 0;
+            unsigned char *b_si = unit_stack_record(u, iu, &text, ext, next,
+                                                    in, &n_si);
+            unsigned char *b_sb = sbom_unit_record(in, cpp_dep_count(),
+                                                   cpp_dep_path,
+                                                   cpp_dep_is_system, &n_sb);
+            unsigned fl = IMAGE_SCN_CNT_INITIALIZED_DATA |
+                          IMAGE_SCN_MEM_DISCARDABLE | IMAGE_SCN_MEM_READ;
+            if (b_si)
+                coffw_add_section(cw, ".debug_embcc_stack", fl, b_si,
+                                  (unsigned)n_si, 1);
+            if (b_sb)
+                coffw_add_section(cw, ".debug_embcc_sbom", fl, b_sb,
+                                  (unsigned)n_sb, 1);
+            free(b_si);
+            free(b_sb);
         }
         free(ext); free(strs); free(gs); free(fs);
         int crc = coffw_write(cw, out);
@@ -4514,29 +5816,46 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     /* -g: the three DWARF sections (non-alloc, so no load cost; stripped
      * from a shipped image without touching the code). Their indices feed
      * the relocation-target lookup below. */
-    static const char *const dwsec_name[DWARF_NSEC] =
-        { ".debug_abbrev", ".debug_info", ".debug_line", ".debug_ranges",
-          ".debug_frame" };
-    int dwsec_ndx[DWARF_NSEC] = { 0, 0, 0, 0, 0 };
+    int dwsec_ndx[DWARF_NSEC] = { 0 };
     if (want_debug)
         for (int s = 0; s < DWARF_NSEC; s++)
-            if (dw.seclen[s])     /* .debug_ranges only when split */
-                dwsec_ndx[s] = elfw_add_section(
-                    w, dwsec_name[s], SHT_PROGBITS, 0, dw.sec[s],
-                    (Elf64_Xword)dw.seclen[s], 1);
+            if (dw.seclen[s] && !dwarf_section_is_dwo(s))
+                dwsec_ndx[s] = add_debug_section(w, s, &dw);
+    /* -flto: the unit's C, for a link with -flto to compile again with
+     * the rest of the program; SHF_EXCLUDE, so any other link drops it */
+    if (want_lto && g_lto_payload && !g_lto_back) {
+        size_t pn = 0;
+        char *pl = lto_payload(in, &pn);
+        elfw_add_section(w, ".embcc.lto", SHT_PROGBITS, 0x80000000u, pl,
+                         (Elf64_Xword)pn, 1);
+    }
     /* the unwind tables (x86-64 gives .eh_frame its own section type) and
      * the exception tables */
     int eh_ndx = 0, lsda_ndx = 0;
     if (unwind)
-        eh_ndx = elfw_add_section(w, ".eh_frame",
-                                  ta == TARGET_AARCH64 ? SHT_PROGBITS
-                                                       : SHT_X86_64_UNWIND,
-                                  SHF_ALLOC, eh.frame.p,
-                                  (Elf64_Xword)eh.frame.len, 8);
-    if (eh.lsda.len)
-        lsda_ndx = elfw_add_section(w, ".gcc_except_table", SHT_PROGBITS,
-                                    SHF_ALLOC, eh.lsda.p,
-                                    (Elf64_Xword)eh.lsda.len, 4);
+    {
+        int arm = ta == TARGET_THUMB;
+        if (unwind && arm) {
+            /* EHABI's: the index, linked to the code it describes */
+            eh_ndx = elfw_add_section(w, ".ARM.exidx", 0x70000001u
+                                      /* SHT_ARM_EXIDX */,
+                                      SHF_ALLOC | 0x80 /* SHF_LINK_ORDER */,
+                                      eh.frame.p, (Elf64_Xword)eh.frame.len,
+                                      4);
+            elfw_set_link(w, eh_ndx, text_ndx);
+        } else if (unwind) {
+            eh_ndx = elfw_add_section(w, ".eh_frame",
+                                      ta != TARGET_X86_64 ? SHT_PROGBITS
+                                                          : SHT_X86_64_UNWIND,
+                                      SHF_ALLOC, eh.frame.p,
+                                      (Elf64_Xword)eh.frame.len, 8);
+        }
+        if (eh.lsda.len)
+            lsda_ndx = elfw_add_section(w, arm ? ".ARM.extab"
+                                               : ".gcc_except_table",
+                                        SHT_PROGBITS, SHF_ALLOC, eh.lsda.p,
+                                        (Elf64_Xword)eh.lsda.len, 4);
+    }
     elfw_add_symbol(w, path_basename(in), 0, 0,
                     ELF64_ST_INFO(STB_LOCAL, STT_FILE), SHN_ABS);
     int lsda_sym = 0;
@@ -4608,7 +5927,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     /* -g: STT_SECTION symbols for the debug sections, so the line/info
      * fields can relocate against them (DWTGT_ABBREV/DWTGT_LINE). Added here
      * in the local block — the writer refuses a local after any global. */
-    int dwsym[DWARF_NSEC] = { 0, 0, 0, 0, 0 };
+    int dwsym[DWARF_NSEC] = { 0 };
     if (want_debug)
         for (int s = 0; s < DWARF_NSEC; s++)
             if (dwsec_ndx[s])
@@ -4823,8 +6142,10 @@ static int compile_unit(const char *in, const char *out, int pp_only)
             !(g->sym_ndx = defined_here(u, g->name)))
             g->sym_ndx = elfw_add_symbol(
                 w, g->name, 0, 0,
+                /* another module's thread-local is STT_TLS even here:
+                 * a linker matches it to a TLS definition by that */
                 ELF64_ST_INFO(g->is_weak ? STB_WEAK : STB_GLOBAL,
-                              STT_NOTYPE), SHN_UNDEF);
+                              g->is_tls ? STT_TLS : STT_NOTYPE), SHN_UNDEF);
 
     /* Every called external gets one UNDEF symbol, and every call site
      * a PLT32 relocation against it. addend -4: rel32 is relative to
@@ -5094,6 +6415,8 @@ static int compile_unit(const char *in, const char *out, int pp_only)
             int sym = r->target == DWTGT_ABBREV ? dwsym[DWSEC_ABBREV]
                     : r->target == DWTGT_RANGES ? dwsym[DWSEC_RANGES]
                     : r->target == DWTGT_FRAME  ? dwsym[DWSEC_FRAME]
+                    : r->target == DWTGT_LOC    ? dwsym[DWSEC_LOC]
+                    : r->target == DWTGT_ADDR   ? dwsym[DWSEC_ADDR]
                     :                             dwsym[DWSEC_LINE];
             long add = r->addend;
             /* A code address is in whichever section its function is
@@ -5115,16 +6438,40 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                                                               : RK_ABS32),
                           add);
         }
+        if (dwo_path) {
+            /* the .dwo: its sections alone, nothing to relocate, marked
+             * SHF_EXCLUDE as GCC's are (a link leaves them out) */
+            struct elfw *dwo = elfw_new(target_elf_machine(target_get()));
+            elfw_set_flags(dwo, target_elf_flags(target_get()));
+            for (int s = 0; s < DWARF_NSEC; s++)
+                if (dw.seclen[s] && dwarf_section_is_dwo(s))
+                    add_debug_section(dwo, s, &dw);
+            if (elfw_write(dwo, dwo_path) != 0)
+                diag_fatal(dwo_path, 0, "cannot write the file");
+            elfw_free(dwo);
+        }
         dwarf_free(&dw);
     }
 
     /* the unwind and exception tables' pointers, all PC-relative: into
      * .text and .gcc_except_table, to the personality routine, to the
      * catch types' typeinfo objects */
-    int personality_sym = 0;
+    int personality_sym = 0, pr_sym[2] = { 0, 0 };
     for (int i = 0; i < eh.nrelocs; i++) {
         struct eh_reloc *r = &eh.relocs[i];
         int sym;
+        if (r->target == EHT_PR0 || r->target == EHT_PR1) {
+            /* EHABI: the routine an index entry's compact model names,
+             * kept in the link by an R_ARM_NONE at the entry */
+            int k = r->target == EHT_PR1;
+            if (!pr_sym[k])
+                pr_sym[k] = elfw_add_symbol(
+                    w, k ? "__aeabi_unwind_cpp_pr1" : "__aeabi_unwind_cpp_pr0",
+                    0, 0, ELF64_ST_INFO(STB_GLOBAL, STT_NOTYPE), SHN_UNDEF);
+            elfw_add_rela(w, eh_ndx, (Elf64_Addr)r->off, pr_sym[k],
+                          R_ARM_NONE, 0);
+            continue;
+        }
         switch (r->target) {
         case EHT_TEXT:          /* a function's start: its section's */
             r->addend = code_ref(r->addend, text_sym, &sym);
@@ -5142,12 +6489,18 @@ static int compile_unit(const char *in, const char *out, int pp_only)
             break;
         }
         elfw_add_rela(w, r->in_lsda ? lsda_ndx : eh_ndx, (Elf64_Addr)r->off,
-                      sym, target_reloc_type(ta, RK_DATA_PREL32),
+                      sym, r->kind == EHR_PREL31 ? R_ARM_PREL31
+                           : target_reloc_type(ta, RK_DATA_PREL32),
                       target_reloc_addend(ta, RK_DATA_PREL32, r->addend));
     }
     eh_free(&eh);
     free(arr);
 
+    /* --stack-info: each function's frame, calls and cycles, for
+     * --stack-report (src/driver/stackinfo.c) */
+    stackinfo_emit(w, u, iu, &text, text_ndx, text_at, si_sec_of, in);
+    /* --sbom: the source and its headers, with their hashes */
+    sbom_emit_unit(w, in, cpp_dep_count(), cpp_dep_path, cpp_dep_is_system);
     int rc = elfw_write(w, out);
     elfw_free(w);
     return rc == 0 ? 0 : 1;
@@ -5192,7 +6545,10 @@ static int done(int rc)
 static int has_cxx_suffix(const char *s)
 {
     static const char *const sfx[] = { ".cc", ".cpp", ".cxx", ".C", ".c++",
-                                       ".cp", ".CPP", ".ii" };
+                                       ".cp", ".CPP", ".ii",
+                                       /* module interface units */
+                                       ".cppm", ".ixx", ".mpp", ".ccm",
+                                       ".cxxm", ".c++m" };
     size_t n = strlen(s);
     for (size_t i = 0; i < sizeof sfx / sizeof sfx[0]; i++) {
         size_t k = strlen(sfx[i]);
@@ -5292,6 +6648,7 @@ static int embcc_main(int argc, char **argv)
      * asked for by name (it is the only mode, so this only has to be
      * accepted, not acted on). */
     unsigned san_mask = 0;
+    const char *san_spell = "-fsanitize=";   /* as the user typed it */
     int want_instr = 0;              /* -finstrument-functions */
     int short_wchar = 0;             /* -fshort-wchar, the last one wins */
     int short_enums = 0;             /* -fshort-enums, likewise */
@@ -5546,6 +6903,12 @@ static int embcc_main(int argc, char **argv)
             print_version();
             return 0;
         }
+        if (strcmp(argv[i], "--gcov-extract") == 0)
+            return gcov_extract(argc - i - 1, argv + i + 1);
+        if (strcmp(argv[i], "--stack-report") == 0)
+            return stackinfo_report(argc - i - 1, argv + i + 1);
+        if (strcmp(argv[i], "--sbom-from") == 0)
+            return sbom_from(argc - i - 1, argv + i + 1);
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             print_usage(stdout);
             opts_print_help(stdout);
@@ -5725,27 +7088,42 @@ static int embcc_main(int argc, char **argv)
             cpp_set_dump_macros(1);
         } else if (strcmp(argv[i], "-E") == 0) {
             pp_only = 1;
+        } else if (strcmp(argv[i], "-P") == 0 ||
+                   strcmp(argv[i], "--no-line-markers") == 0) {
+            g_pp_no_markers = 1;
         } else if (strcmp(argv[i], "-ggdb") == 0 ||
                    strcmp(argv[i], "-g1") == 0 ||
                    strcmp(argv[i], "-g2") == 0 ||
                    strcmp(argv[i], "-g3") == 0 ||
-                   strcmp(argv[i], "-gdwarf") == 0 ||
-                   strcmp(argv[i], "-gdwarf-2") == 0 ||
+                   strcmp(argv[i], "-gdwarf") == 0) {
+            /* a level: -g (DWARF 5, the default) */
+            want_debug = 1;
+        } else if (strcmp(argv[i], "-gdwarf-2") == 0 ||
                    strcmp(argv[i], "-gdwarf-3") == 0 ||
                    strcmp(argv[i], "-gdwarf-4") == 0) {
-            /* All of these mean -g here. EmbCC emits one kind of debug
-             * information -- DWARF 4 -- so a level or a version that
-             * asks for no more than that is simply -g. A version it
-             * does NOT emit is refused below rather than quietly
-             * downgraded: a build that asked for DWARF 5 and got 4
-             * would find out from its debugger. */
+            /* DWARF 4, which a version 2 or 3 reader of what EmbCC
+             * writes (line tables, base types, locations) also takes */
             want_debug = 1;
-        } else if (strncmp(argv[i], "-gdwarf-", 8) == 0 ||
-                   strcmp(argv[i], "-gsplit-dwarf") == 0 ||
-                   strcmp(argv[i], "-gz") == 0) {
-            fprintf(stderr, "embcc: error: %s is not supported; EmbCC "
-                            "emits DWARF 4, uncompressed and in one "
-                            "piece\n", opt_typed(argv[i]));
+            dwarf_set_version(4);
+        } else if (strcmp(argv[i], "-gdwarf-5") == 0) {
+            want_debug = 1;
+            dwarf_set_version(5);
+        } else if (strncmp(argv[i], "-gdwarf-", 8) == 0) {
+            fprintf(stderr, "embcc: error: %s: EmbCC writes DWARF 4 or 5\n",
+                    opt_typed(argv[i]));
+            return 1;
+        } else if (strcmp(argv[i], "-gsplit-dwarf") == 0) {
+            want_debug = 1;
+            want_split_dwarf = 1;
+        } else if (strcmp(argv[i], "-gz") == 0 ||
+                   strcmp(argv[i], "-gz=zlib") == 0) {
+            want_gz = 1;
+        } else if (strcmp(argv[i], "-gz=none") == 0) {
+            want_gz = 0;
+        } else if (strncmp(argv[i], "-gz=", 4) == 0) {
+            fprintf(stderr, "embcc: error: %s: EmbCC compresses debug "
+                            "sections with zlib (-gz=zlib) or not at all "
+                            "(-gz=none)\n", opt_typed(argv[i]));
             return 1;
         } else if (strcmp(argv[i], "-g") == 0) {
             want_debug = 1;
@@ -5815,14 +7193,116 @@ static int embcc_main(int argc, char **argv)
             access_set_enabled(0);
         } else if (strcmp(argv[i], "-faccess-control") == 0) {
             access_set_enabled(1);
+        } else if (strcmp(argv[i], "-fcf-protection") == 0 ||
+                   strncmp(argv[i], "-fcf-protection=", 16) == 0) {
+            /* x86-64 CET: branch (endbr64 landing pads), return (the
+             * shadow stack), full both, none neither, check accepted */
+            const char *m = argv[i][15] == '=' ? argv[i] + 16 : "full";
+            g_cf &= ~(CF_IBT | CF_SHSTK);
+            if (!strcmp(m, "full")) g_cf |= CF_IBT | CF_SHSTK;
+            else if (!strcmp(m, "branch")) g_cf |= CF_IBT;
+            else if (!strcmp(m, "return")) g_cf |= CF_SHSTK;
+            else if (strcmp(m, "none") && strcmp(m, "check")) {
+                fprintf(stderr, "embcc: error: %s: the kinds are full, "
+                                "branch, return, none\n", opt_typed(argv[i]));
+                return 1;
+            }
+            g_cf_x86 = 1;
+            g_cf_spell = opt_typed(argv[i]);   /* (its value too) */
+        } else if (strncmp(argv[i], "-mbranch-protection=", 20) == 0) {
+            /* AArch64: none, standard (bti+pac-ret), bti, and
+             * pac-ret[+leaf][+b-key], joined by '+' */
+            const char *m = argv[i] + 20;
+            g_bp_spell = opt_typed(argv[i]);
+            g_cf &= ~(CF_BTI | CF_PAC | CF_PAC_LEAF | CF_PAC_BKEY);
+            for (const char *p = m; *p; ) {
+                const char *e = strchr(p, '+');
+                size_t n = e ? (size_t)(e - p) : strlen(p);
+                if (n == 4 && !strncmp(p, "none", 4)) ;
+                else if (n == 8 && !strncmp(p, "standard", 8))
+                    g_cf |= CF_BTI | CF_PAC;
+                else if (n == 3 && !strncmp(p, "bti", 3)) g_cf |= CF_BTI;
+                else if (n == 7 && !strncmp(p, "pac-ret", 7)) g_cf |= CF_PAC;
+                else if (n == 4 && !strncmp(p, "leaf", 4)) g_cf |= CF_PAC_LEAF;
+                else if (n == 5 && !strncmp(p, "b-key", 5)) g_cf |= CF_PAC_BKEY;
+                else {
+                    fprintf(stderr, "embcc: error: %s: the parts are none, "
+                                    "standard, bti, pac-ret, +leaf and "
+                                    "+b-key\n", opt_typed(argv[i]));
+                    return 1;
+                }
+                if (!e) break;
+                p = e + 1;
+            }
+            g_cf_a64 = 1;
+        } else if (strncmp(argv[i], "-ffile-prefix-map=", 18) == 0 ||
+                   strncmp(argv[i], "-fdebug-prefix-map=", 19) == 0 ||
+                   strncmp(argv[i], "-fmacro-prefix-map=", 19) == 0 ||
+                   strncmp(argv[i], "-fprofile-prefix-map=", 21) == 0 ||
+                   strncmp(argv[i], "--prefix-map=", 13) == 0) {
+            /* reproducible builds: OLD=NEW, in __FILE__ (macro), the
+             * DWARF (debug), the gcov notes (profile), or all (file) */
+            const char *a = argv[i];
+            int kinds = a[2] == 'f' && a[3] == 'd' ? PMAP_DEBUG
+                      : a[2] == 'f' && a[3] == 'm' ? PMAP_MACRO
+                      : a[2] == 'f' && a[3] == 'p' ? PMAP_PROFILE
+                      : PMAP_MACRO | PMAP_DEBUG | PMAP_PROFILE;
+            if (pmap_add(strchr(a, '=') + 1, kinds) != 0) {
+                fprintf(stderr, "embcc: error: %s: the form is OLD=NEW\n",
+                        opt_typed(a));
+                return 1;
+            }
+        } else if (strcmp(argv[i], "-frandom-seed") == 0 ||
+                   strncmp(argv[i], "-frandom-seed=", 14) == 0) {
+            /* accepted: nothing EmbCC writes is random, so every build of
+             * the same input is the same already */
+        } else if (strcmp(argv[i], "-fbounds-safety") == 0 ||
+                   strcmp(argv[i], "--bounds-safety") == 0) {
+            g_bounds = 1;
+        } else if (strcmp(argv[i], "-fno-bounds-safety") == 0 ||
+                   strcmp(argv[i], "--no-bounds-safety") == 0) {
+            g_bounds = 0;
+        } else if (strcmp(argv[i], "--sbom") == 0) {
+            sbom_set(NULL, 1);
+        } else if (strncmp(argv[i], "--sbom=", 7) == 0) {
+            sbom_set(argv[i] + 7, 1);
+        } else if (strncmp(argv[i], "--sbom-format=", 14) == 0) {
+            if (sbom_set_format(argv[i] + 14) != 0) {
+                fprintf(stderr, "embcc: error: --sbom-format=%s: spdx or "
+                                "cyclonedx\n", argv[i] + 14);
+                return 1;
+            }
+        } else if (strcmp(argv[i], "--stack-info") == 0) {
+            stackinfo_set(1);
+            target_set_stack_info(1);
+        } else if (strcmp(argv[i], "-fstack-clash-protection") == 0) {
+            g_clash = 1;
+        } else if (strcmp(argv[i], "-fno-stack-clash-protection") == 0) {
+            g_clash = 0;
         } else if (strcmp(argv[i], "-fno-stack-protector") == 0) {
-            /* what EmbCC does: it emits no stack protection. The positive
-             * forms are refused below rather than quietly ignored. */
-        } else if (strncmp(argv[i], "-fstack-protector", 17) == 0) {
-            fprintf(stderr, "embcc: '%s' is not supported (EmbCC emits no "
-                            "stack protection); -fno-stack-protector is\n",
-                    opt_typed(argv[i]));
-            return 1;
+            g_ssp_mode = 0;
+        } else if (strcmp(argv[i], "-fstack-protector") == 0) {
+            g_ssp_mode = 1;
+        } else if (strcmp(argv[i], "-fstack-protector-strong") == 0) {
+            g_ssp_mode = 2;
+        } else if (strcmp(argv[i], "-fstack-protector-all") == 0) {
+            g_ssp_mode = 3;
+        } else if (strcmp(argv[i], "-fstack-protector-explicit") == 0) {
+            g_ssp_mode = 4;
+        } else if (strncmp(argv[i], "--param=ssp-buffer-size=", 24) == 0 ||
+                   (strcmp(argv[i], "--param") == 0 && i + 1 < argc &&
+                    strncmp(argv[i + 1], "ssp-buffer-size=", 16) == 0)) {
+            const char *v = argv[i][7] == '=' ? argv[i] + 24
+                                              : argv[++i] + 16;
+            g_ssp_buf = atoi(v);
+        } else if (strncmp(argv[i], "-mstack-protector-guard=", 24) == 0 ||
+                   strncmp(argv[i], "-mstack-protector-guard-reg=", 28) == 0 ||
+                   strncmp(argv[i], "-mstack-protector-guard-offset=", 31) == 0 ||
+                   strncmp(argv[i], "-mstack-protector-guard-symbol=", 31) == 0) {
+            /* accepted: the guard is __stack_chk_guard on every target --
+             * on x86-64 Linux, lib/rt's copy of the thread block's (the
+             * %fs:0x28 GCC reads) -- so the canary holds the same value
+             * whichever is named */
         } else if (strcmp(argv[i], "-fno-rtti") == 0) {
             want_rtti = 0;
         } else if (strcmp(argv[i], "-frtti") == 0) {
@@ -5889,6 +7369,11 @@ static int embcc_main(int argc, char **argv)
             /* one warning made an error, or exempted from -Werror */
             int on = argv[i][2] == 'e';
             const char *nm = argv[i] + (on ? 8 : 11);
+            /* GCC 14's way to keep old code building: the two that are
+             * errors from C99 on become the --permissive warnings */
+            if (!on && (!strcmp(nm, "implicit-int") ||
+                        !strcmp(nm, "implicit-function-declaration")))
+                lex_set_permissive(1);
             if (diag_always_error(nm)) {
                 /* an error already; -Wno-error= cannot make it less */
                 if (!on)
@@ -5904,6 +7389,7 @@ static int embcc_main(int argc, char **argv)
             /* GCC's old spelling of -Werror=implicit-function-declaration,
              * and as that one, what EmbCC always does */
         } else if (strcmp(argv[i], "-w") == 0) {
+            g_user_no_warn = 1;
             diag_set_no_warnings(1);
         } else if (strcmp(argv[i], "-pedantic") == 0) {
             /* what the standard -std= names does not have (lex_pedantic) */
@@ -5943,7 +7429,42 @@ static int embcc_main(int argc, char **argv)
             diag_enable_warning("format", lv >= 1);
             diag_enable_warning("format-nonliteral", lv >= 2);
             diag_enable_warning("format-security", lv >= 2);
+        } else if (strcmp(argv[i], "--analyze") == 0 ||
+                   strcmp(argv[i], "-fanalyzer") == 0 ||
+                   strcmp(argv[i], "--no-analyze") == 0 ||
+                   strcmp(argv[i], "-fno-analyzer") == 0) {
+            /* the static analyzer: interrupt handlers' sharing and the
+             * memory checks, every one (src/sema/analyze.def) */
+            int on = strstr(argv[i], "no-") == NULL;
+            for (int k = 0; k < analyze_count(); k++)
+                diag_enable_warning(analyze_name(k), on);
+        } else if (strcmp(argv[i], "--misra") == 0 ||
+                   strncmp(argv[i], "--misra=", 8) == 0 ||
+                   strcmp(argv[i], "--cert") == 0 ||
+                   strcmp(argv[i], "--no-misra") == 0 ||
+                   strcmp(argv[i], "--no-cert") == 0) {
+            /* a coding standard's every rule (src/sema/rules.def); one
+             * rule is --warn=misra-15.5 / --no-warn=misra-15.5 */
+            const char *pre = strstr(argv[i], "misra") ? "misra-" : "cert-";
+            int on = strncmp(argv[i], "--no-", 5) != 0;
+            if (argv[i][7] == '=' && strcmp(argv[i] + 8, "2023") &&
+                strcmp(argv[i] + 8, "2012")) {
+                fprintf(stderr, "embcc: error: --misra=%s: the rules are "
+                                "MISRA C:2023's (2012's numbering is the "
+                                "same for these)\n", argv[i] + 8);
+                return 1;
+            }
+            for (int k = 0; k < rules_count(); k++)
+                if (!strncmp(rules_name(k), pre, strlen(pre)))
+                    diag_enable_warning(rules_name(k), on);
         } else if (strncmp(argv[i], "-Wno-", 5) == 0) {
+            if (!strcmp(argv[i] + 5, "misra") || !strcmp(argv[i] + 5, "cert")) {
+                const char *pre = argv[i][5] == 'm' ? "misra-" : "cert-";
+                for (int k = 0; k < rules_count(); k++)
+                    if (!strncmp(rules_name(k), pre, strlen(pre)))
+                        diag_enable_warning(rules_name(k), 0);
+                continue;
+            }
             diag_enable_warning(argv[i] + 5, 0);
         } else if (argv[i][0] == '-' && argv[i][1] == 'W') {
             /* -Wname turns one on; a name EmbCC does not have is accepted
@@ -5956,6 +7477,13 @@ static int embcc_main(int argc, char **argv)
              * A warning rather than an error, which is what GCC does,
              * because a build should not stop over a diagnostic it
              * asked for and this compiler does not have. */
+            if (!strcmp(argv[i] + 2, "misra") || !strcmp(argv[i] + 2, "cert")) {
+                const char *pre = argv[i][2] == 'm' ? "misra-" : "cert-";
+                for (int k = 0; k < rules_count(); k++)
+                    if (!strncmp(rules_name(k), pre, strlen(pre)))
+                        diag_enable_warning(rules_name(k), 1);
+                continue;
+            }
             if (!diag_enable_warning(argv[i] + 2, 1) &&
                 !diag_always_error(argv[i] + 2))
                 fprintf(stderr, "embcc: warning: %s is not a warning EmbCC "
@@ -6020,6 +7548,8 @@ static int embcc_main(int argc, char **argv)
              * passes no enum type -- EmbCC's libc and librt -- so it links
              * with code built either way */
             target_set_enum_neutral(1);
+        } else if (strcmp(argv[i], "-fpermissive") == 0) {
+            lex_set_permissive(1);
         } else if (strcmp(argv[i], "-fshort-enums") == 0 ||
                    strcmp(argv[i], "-fno-short-enums") == 0) {
             /* every enum the smallest integer type its values fit, as
@@ -6038,8 +7568,11 @@ static int embcc_main(int argc, char **argv)
                            "-finstrument-functions-exclude-file-list=",
                            41) == 0) {
             instr_files = argv[i] + 41;
-        } else if (strcmp(argv[i], "-ffreestanding") == 0 ||
-                   strcmp(argv[i], "-fno-builtin") == 0 ||
+        } else if (strcmp(argv[i], "-ffreestanding") == 0) {
+            /* a freestanding program: __STDC_HOSTED__ is 0; the code is
+             * the same, EmbCC having no hosted assumptions to drop */
+            cpp_set_hosted(0);
+        } else if (strcmp(argv[i], "-fno-builtin") == 0 ||
                    strcmp(argv[i], "-fno-strict-aliasing") == 0 ||
                    strcmp(argv[i], "-fstrict-aliasing") == 0 ||
                    strcmp(argv[i], "-fwrapv") == 0 ||
@@ -6363,7 +7896,11 @@ static int embcc_main(int argc, char **argv)
              * exists to prevent. */
             int off = strncmp(argv[i], "-fno-", 5) == 0;
             const char *list = strchr(argv[i], '=');
-            if (!list) {           /* -fsanitize-trap / ...-trap-on-error */
+            if (!off && strncmp(argv[i], "-fsanitize=", 11) == 0)
+                san_spell = strncmp(opt_typed(argv[i]), "--", 2) == 0
+                            ? "--sanitize=" : "-fsanitize=";
+            if (!list || strncmp(argv[i], "-fsanitize-trap", 15) == 0) {
+                /* -fsanitize-trap[=...], ...-trap-on-error */
                 san_trap_asked = 1;
                 continue;
             }
@@ -6382,14 +7919,29 @@ static int embcc_main(int argc, char **argv)
                     bit = SAN_SHIFT;
                 else if (n == 4 && !strncmp(p, "trap", 4))
                     bit = 0;       /* -fsanitize-trap=... names checks */
+                else if ((n == 7 && !strncmp(p, "address", 7)) ||
+                         (n == 14 && !strncmp(p, "kernel-address", 14)))
+                    bit = SAN_ADDRESS;
+                else if (n == 6 && !strncmp(p, "thread", 6))
+                    bit = SAN_THREAD;
+                else if ((n == 6 && !strncmp(p, "bounds", 6)) ||
+                         (n == 12 && !strncmp(p, "array-bounds", 12)) ||
+                         (n == 13 && !strncmp(p, "bounds-strict", 13))) {
+                    /* the subscript checks (-fbounds-safety's) */
+                    g_bounds = !off;
+                    g_bounds_san = !off;
+                    bit = 0;
+                }
+                else if ((n == 6 && !strncmp(p, "memory", 6)) ||
+                         (n == 13 && !strncmp(p, "kernel-memory", 13)))
+                    bit = SAN_MEMORY;
                 else
                     diag_fatal(NULL, 0,
-                        "%s%.*s is not supported: EmbCC's "
-                        "sanitizer inserts checks that TRAP, and this one "
-                        "needs a runtime library to report through. The "
-                        "ones it has are undefined, "
+                        "%s%.*s is not supported. EmbCC's sanitizers are "
+                        "address, thread and memory, with their runtimes "
+                        "(lib/san), and undefined, "
                         "signed-integer-overflow, integer-divide-by-zero "
-                        "and shift",
+                        "and shift, which trap",
                         strncmp(opt_typed(argv[i]), "--", 2) == 0
                             ? "--sanitize=" : "-fsanitize=", (int)n, p);
                 if (off) san_mask &= ~bit; else san_mask |= bit;
@@ -6397,18 +7949,110 @@ static int embcc_main(int argc, char **argv)
                 p = e + 1;
             }
             continue;
+        } else if (strncmp(argv[i], "-fsanitize-recover=", 19) == 0 ||
+                   strncmp(argv[i], "-fno-sanitize-recover=", 22) == 0) {
+            /* recover: report and go on rather than stop (address only;
+             * the trap checks always stop) */
+            int no = argv[i][2] == 'n';
+            const char *l = strchr(argv[i], '=') + 1;
+            if (strstr(l, "address") || strstr(l, "all"))
+                g_san_recover = !no;
+            if (strstr(l, "undefined") || strstr(l, "all") ||
+                strstr(l, "signed-integer-overflow") ||
+                strstr(l, "integer-divide-by-zero") || strstr(l, "shift") ||
+                strstr(l, "bounds"))
+                g_ub_recover = !no;
+        } else if (strcmp(argv[i], "-fsanitize-address-use-after-scope") == 0 ||
+                   strcmp(argv[i], "-fno-sanitize-address-use-after-scope") == 0 ||
+                   strcmp(argv[i], "-static-libasan") == 0 ||
+                   strcmp(argv[i], "-static-libtsan") == 0 ||
+                   strcmp(argv[i], "-static-libsan") == 0 ||
+                   strcmp(argv[i], "-shared-libsan") == 0 ||
+                   strcmp(argv[i], "-fsanitize-memory-track-origins") == 0 ||
+                   strncmp(argv[i], "-fsanitize-memory-track-origins=", 32) == 0) {
+            /* accepted: a local's scope is its function here (its
+             * redzones are made good at the return), the runtimes are
+             * archives, and an uninitialized read is reported where it is
+             * used, without the origin of the value */
+        } else if (strcmp(argv[i], "--coverage") == 0 ||
+                   strcmp(argv[i], "-coverage") == 0) {
+            /* GCC's: counters and notes, and libgcov at the link */
+            g_cov_arcs = g_cov_notes = g_cov_link = 1;
+        } else if (strncmp(argv[i], "--coverage-version=", 19) == 0) {
+            if (gcov_set_version(argv[i] + 19) != 0) {
+                fprintf(stderr, "embcc: error: --coverage-version=%s: the "
+                                "versions are gcc, llvm, or one as GCC "
+                                "spells it from GCC 9 on (\"B62*\", "
+                                "\"A93*\")\n", argv[i] + 19);
+                return 1;
+            }
+        } else if (strcmp(argv[i], "-fprofile-arcs") == 0) {
+            g_cov_arcs = g_cov_link = 1;
+        } else if (strcmp(argv[i], "-fno-profile-arcs") == 0) {
+            g_cov_arcs = 0;
+        } else if (strcmp(argv[i], "-ftest-coverage") == 0) {
+            g_cov_notes = 1;
+        } else if (strcmp(argv[i], "-fno-test-coverage") == 0) {
+            g_cov_notes = 0;
+        } else if (strcmp(argv[i], "-fprofile-generate") == 0 ||
+                   strncmp(argv[i], "-fprofile-generate=", 19) == 0) {
+            /* counters without notes, for -fprofile-use to read back */
+            g_cov_arcs = g_cov_link = 1;
+            if (argv[i][18] == '=')
+                g_prof_dir = argv[i] + 19;
+        } else if (strcmp(argv[i], "-fprofile-use") == 0 ||
+                   strncmp(argv[i], "-fprofile-use=", 14) == 0) {
+            g_prof_use_on = 1;
+            g_prof_use = argv[i][13] == '=' ? argv[i] + 14 : NULL;
+        } else if (strcmp(argv[i], "-fno-profile-use") == 0) {
+            g_prof_use_on = 0;
+        } else if (strncmp(argv[i], "-fprofile-dir=", 14) == 0) {
+            g_prof_dir = argv[i] + 14;
+        } else if (strncmp(argv[i], "-fprofile-note=", 15) == 0) {
+            g_prof_note = argv[i] + 15;
+        } else if (strncmp(argv[i], "-fprofile-update=", 17) == 0) {
+            const char *m = argv[i] + 17;
+            if (!strcmp(m, "single")) g_cov_update = 0;
+            else if (!strcmp(m, "atomic")) g_cov_update = 1;
+            else if (!strcmp(m, "prefer-atomic")) g_cov_update = 2;
+            else {
+                fprintf(stderr, "embcc: error: -fprofile-update=%s: the "
+                                "ways are single, atomic and "
+                                "prefer-atomic\n", m);
+                return 1;
+            }
+        } else if (strncmp(argv[i], "-fprofile-filter-files=", 23) == 0) {
+            g_prof_filter = argv[i] + 23;
+        } else if (strncmp(argv[i], "-fprofile-exclude-files=", 24) == 0) {
+            g_prof_exclude = argv[i] + 24;
+        } else if (strncmp(argv[i], "-fprofile-prefix-path=", 22) == 0) {
+            g_prof_prefix = argv[i] + 22;
+        } else if (strcmp(argv[i], "-fprofile-abs-path") == 0) {
+            g_prof_abs = 1;
+        } else if (strcmp(argv[i], "-fprofile-partial-training") == 0) {
+            g_prof_partial = 1;
+        } else if (strcmp(argv[i], "-fprofile-correction") == 0 ||
+                   strcmp(argv[i], "-fno-profile-correction") == 0 ||
+                   strcmp(argv[i], "-fprofile-reorder-functions") == 0 ||
+                   strcmp(argv[i], "-fno-profile-reorder-functions") == 0 ||
+                   strcmp(argv[i], "-fbranch-probabilities") == 0 ||
+                   strcmp(argv[i], "-fno-branch-probabilities") == 0 ||
+                   strcmp(argv[i], "-fprofile-values") == 0 ||
+                   strcmp(argv[i], "-fno-profile-values") == 0 ||
+                   strcmp(argv[i], "-fvpt") == 0 ||
+                   strcmp(argv[i], "-fno-vpt") == 0 ||
+                   strncmp(argv[i], "-fprofile-reproducible=", 23) == 0) {
+            /* accepted: the profile is solved by flow (it tolerates the
+             * inconsistencies -fprofile-correction smooths), hot and
+             * cold functions are always placed apart, the branch
+             * probabilities are what -fprofile-use reads, and value
+             * profiles only feed optimizations (EmbCC makes none of
+             * them). The counters are the same in every run of the same
+             * program, which is what =serial asks. */
         } else if (strncmp(argv[i], "-fsanitize", 10) == 0 ||
                    strncmp(argv[i], "-fprofile", 9) == 0 ||
                    strcmp(argv[i], "-fcoverage-mapping") == 0 ||
-                   strcmp(argv[i], "--coverage") == 0 ||
-                   strcmp(argv[i], "-pg") == 0 ||
-                   strcmp(argv[i], "-flto") == 0 ||
-                   strcmp(argv[i], "-fPIC") == 0 ||
-                   strcmp(argv[i], "-fpic") == 0 ||
-                   strcmp(argv[i], "-fPIE") == 0 ||
-                   strcmp(argv[i], "-fpie") == 0 ||
-                   strcmp(argv[i], "-fstack-clash-protection") == 0 ||
-                   strncmp(argv[i], "-fcf-protection", 15) == 0) {
+                   strcmp(argv[i], "-pg") == 0) {
             /* Refused BY NAME, every one. These do not describe a
              * preference the compiler may decline -- each is a promise
              * about the code, and accepting one while emitting
@@ -6416,24 +8060,60 @@ static int embcc_main(int argc, char **argv)
              * does the wrong thing:
              *
              *   -fsanitize=  no checks would be inserted
-             *   -fprofile-*, --coverage, -pg  no counters
-             *   -flto        no bitcode, so a whole-program link is a
-             *                plain one and the sizes mislead
-             *   -fPIC/-fpie  the code is position DEPENDENT; a shared
-             *                object built from it would relocate wrong
-             *   -fstack-clash-protection, -fcf-protection  no probes,
-             *                no landing pads
+             *   -fprofile-instr-*, -fprofile-sample-use,
+             *   -fprofile-info-section, -fcoverage-mapping, -pg
+             *                no counters, or none in that format: the
+             *                gcov ones (--coverage, -fprofile-generate,
+             *                -fprofile-use) are above
+             *   -pg      no mcount calls
              */
             fprintf(stderr, "embcc: error: %s is not supported; EmbCC "
                             "would emit ordinary code and the flag's "
                             "promise would not hold\n", opt_typed(argv[i]));
             return 1;
-        } else if (strcmp(argv[i], "-shared") == 0 ||
-                   strcmp(argv[i], "-static-pie") == 0) {
-            fprintf(stderr, "embcc: error: %s needs position-independent "
-                            "code, which EmbCC does not emit\n",
-                            opt_typed(argv[i]));
-            return 1;
+        } else if (strcmp(argv[i], "-flto") == 0 ||
+                   strncmp(argv[i], "-flto=", 6) == 0) {
+            /* -flto=thin, =full, =auto, =N: one whole-program merge */
+            want_lto = 1;
+        } else if (strcmp(argv[i], "-fno-lto") == 0) {
+            want_lto = 0;
+        } else if (strcmp(argv[i], "-ffat-lto-objects") == 0 ||
+                   strcmp(argv[i], "-fno-fat-lto-objects") == 0 ||
+                   strcmp(argv[i], "-fuse-linker-plugin") == 0 ||
+                   strcmp(argv[i], "-fno-use-linker-plugin") == 0 ||
+                   strncmp(argv[i], "-flto-partition=", 16) == 0 ||
+                   strncmp(argv[i], "-flto-compression-level=", 24) == 0) {
+            /* accepted: an -flto object always has its code as well (it
+             * links without LTO), and the merge needs no plugin */
+        } else if (strcmp(argv[i], "-fPIC") == 0 ||
+                   strcmp(argv[i], "-fpic") == 0) {
+            target_set_pic(TARGET_PIC);
+            g_pic_given = 1;
+        } else if (strcmp(argv[i], "-fPIE") == 0 ||
+                   strcmp(argv[i], "-fpie") == 0) {
+            target_set_pic(TARGET_PIE);
+            g_pic_given = 1;
+        } else if (strcmp(argv[i], "-fno-pic") == 0 ||
+                   strcmp(argv[i], "-fno-PIC") == 0 ||
+                   strcmp(argv[i], "-fno-pie") == 0 ||
+                   strcmp(argv[i], "-fno-PIE") == 0) {
+            target_set_pic(0);
+            g_pic_given = 1;
+        } else if (strcmp(argv[i], "-shared") == 0) {
+            g_link_kind = LINK_SHARED;
+            if (!g_pic_given)
+                target_set_pic(TARGET_PIC);
+        } else if (strcmp(argv[i], "-pie") == 0) {
+            g_link_kind = LINK_PIE;
+            if (!g_pic_given)
+                target_set_pic(TARGET_PIE);
+        } else if (strcmp(argv[i], "-static-pie") == 0) {
+            g_link_kind = LINK_STATIC_PIE;
+            if (!g_pic_given)
+                target_set_pic(TARGET_PIE);
+        } else if (strcmp(argv[i], "-no-pie") == 0 ||
+                   strcmp(argv[i], "-nopie") == 0) {
+            g_link_kind = LINK_EXEC;
         } else if (strcmp(argv[i], "-mno-sse") == 0 ||
                    strcmp(argv[i], "-mno-sse2") == 0 ||
                    strcmp(argv[i], "-mgeneral-regs-only") == 0) {
@@ -6444,6 +8124,17 @@ static int embcc_main(int argc, char **argv)
                    strncmp(argv[i], "-mcmodel=", 9) == 0) {
             /* accepted: EmbCC never uses MMX or the red zone, and its default
              * code model already suits the kernel's higher-half link. */
+        } else if (strncmp(argv[i], "-fmodule-dir=", 13) == 0 ||
+                   strncmp(argv[i], "-fprebuilt-module-path=", 23) == 0) {
+            int out_too = argv[i][3] == 'o';
+            const char *d = strchr(argv[i], '=') + 1;
+            if (nmod_dirs < 64)
+                mod_dirs[nmod_dirs++] = d;
+            if (out_too && !mod_out_dir)
+                mod_out_dir = d;
+        } else if (strcmp(argv[i], "-fmodules") == 0 ||
+                   strcmp(argv[i], "-fmodules-ts") == 0) {
+            /* accepted: C++20 modules are on from -std=c++20 */
         } else if (strcmp(argv[i], "-include") == 0) {
             if (i + 1 == argc) {
                 fprintf(stderr, "embcc: -include needs a file\n");
@@ -6541,6 +8232,8 @@ static int embcc_main(int argc, char **argv)
             }
             incdir_sys[nincdirs] = 1;
             incdirs[nincdirs++] = dir;
+        } else if (strcmp(argv[i], "-lgcov") == 0) {
+            g_cov_link = 1;          /* EmbCC's libgcov, wherever linked */
         } else if ((argv[i][0] == '-' && argv[i][1] == 'l') ||
                    (argv[i][0] == '-' && argv[i][1] == 'L') ||
                    (argv[i][0] == '-' && argv[i][1] == 'T' &&
@@ -6769,8 +8462,103 @@ static int embcc_main(int argc, char **argv)
     /* The checks are inserted by irgen, as ordinary IR, so at -O2 the
      * optimizer folds away the ones whose operands it knows -- a
      * constant non-zero divisor leaves nothing behind. */
-    irgen_set_sanitize(san_mask);
+    irgen_set_sanitize(san_mask & (SAN_OVERFLOW | SAN_DIVIDE | SAN_SHIFT));
+    /* On a hosted target a failed check says what and where, as clang's
+     * and GCC's runtimes do (lib/rt/ubsan.c, in librt); -fsanitize-trap
+     * keeps the trap, and so does a board, and -fbounds-safety's own
+     * checks, which are a trap by design. */
+    if (target_is_hosted() && !san_trap_asked) {
+        unsigned whys = 0;
+        if (san_mask & SAN_OVERFLOW) whys |= 1u << 1 | 1u << 6;
+        if (san_mask & SAN_DIVIDE) whys |= 1u << 2 | 1u << 3;
+        if (san_mask & SAN_SHIFT) whys |= 1u << 4;
+        if (g_bounds_san) whys |= 1u << 5;
+        irgen_set_ub_report(whys, g_ub_recover);
+    }
+    {
+        unsigned rt = san_mask & (SAN_ADDRESS | SAN_THREAD | SAN_MEMORY);
+        if ((rt & SAN_ADDRESS) && (rt & (SAN_THREAD | SAN_MEMORY))) {
+            fprintf(stderr, "embcc: error: %saddress and %s%s "
+                            "cannot be combined: each has its own shadow of "
+                            "memory\n", san_spell, san_spell,
+                            rt & SAN_THREAD ? "thread" : "memory");
+            return 1;
+        }
+        if ((rt & SAN_THREAD) && (rt & SAN_MEMORY)) {
+            fprintf(stderr, "embcc: error: %sthread and %smemory cannot "
+                            "be combined\n", san_spell, san_spell);
+            return 1;
+        }
+        if ((rt & (SAN_THREAD | SAN_MEMORY)) && !target_is_hosted()) {
+            fprintf(stderr, "embcc: error: %s%s is for a hosted "
+                            "target (Linux, macOS): its runtime needs the "
+                            "operating system's threads and memory mapping. "
+                            "On %s, %saddress works\n", san_spell,
+                            rt & SAN_THREAD ? "thread" : "memory",
+                            target_triple_now(), san_spell);
+            return 1;
+        }
+        if (rt && target_os_get() == TGT_OS_WINDOWS) {
+            fprintf(stderr, "embcc: error: the sanitizers are not for "
+                            "Windows yet: their runtimes reserve the shadow "
+                            "with mmap\n");
+            return 1;
+        }
+        if (rt && want_lto) {
+            fprintf(stderr, "embcc: error: -fsanitize=address, thread and "
+                            "memory are not for -flto yet\n");
+            return 1;
+        }
+        san_set_runtime(rt, g_san_recover);
+        g_san_link = rt;
+    }
     irgen_set_instrument(want_instr, instr_funcs, instr_files);
+    gcov_set_flags(g_prof_partial, g_prof_abs);
+    ssp_set(g_ssp_mode, g_ssp_buf);
+    clash_set(g_clash);
+    irgen_set_bounds(g_bounds);
+    if ((g_cf & (CF_IBT | CF_SHSTK)) && target_get() != TARGET_X86_64) {
+        fprintf(stderr, "embcc: error: %s is x86-64's (CET); on "
+                        "%s it has no instructions%s%s\n", g_cf_spell,
+                target_triple_now(),
+                target_get() == TARGET_AARCH64
+                    ? " -- AArch64's are " : "",
+                target_get() == TARGET_AARCH64
+                    ? (g_cf_spell[1] == '-' ? "--branch-protection=standard"
+                                            : "-mbranch-protection=standard")
+                    : "");
+        return 1;
+    }
+    if ((g_cf & (CF_BTI | CF_PAC)) && target_get() != TARGET_AARCH64 &&
+        !target_thumb_v81()) {
+        fprintf(stderr, "embcc: error: %s is AArch64's and ARMv8.1-M "
+                        "Mainline's here (PAC and BTI); %s has none%s\n",
+                g_bp_spell, target_triple_now(),
+                target_get() == TARGET_THUMB
+                    ? " (-mcpu=cortex-m85, or -march=armv8.1-m.main+pacbti)"
+                    : "");
+        return 1;
+    }
+    if ((g_cf & CF_PAC_BKEY) && target_get() == TARGET_THUMB) {
+        fprintf(stderr, "embcc: error: %s: ARMv8.1-M has one key; +b-key "
+                        "is AArch64's\n", g_bp_spell);
+        return 1;
+    }
+    (void)g_cf_x86;
+    (void)g_cf_a64;
+    target_set_cf(g_cf);
+    gcov_set_use(g_prof_use_on ? "" : NULL);  /* each unit's file: compile */
+    gcov_set(g_cov_arcs, g_cov_notes,
+             g_cov_update == 1 ||
+                 (g_cov_update == 2 && !target_atomic8_libcall()),
+             g_prof_filter, g_prof_exclude);
+    if ((g_cov_arcs || g_cov_notes || g_prof_use_on) && want_lto) {
+        fprintf(stderr, "embcc: error: --coverage and the profile options "
+                        "are not for -flto yet: the counters are placed "
+                        "when each unit is compiled, and an -flto unit is "
+                        "compiled again at the link\n");
+        return 1;
+    }
     irgen_set_opt_size(opt_for_size);
     if (short_wchar) {
         /* wchar_t is unsigned short (sema's ty_wchar, the lexer's L""
@@ -6988,6 +8776,492 @@ static int embcc_main(int argc, char **argv)
                                      "support but an object file does not; "
                                      "name a file\n"), 1));
     return done(compile(input, output ? output : default_output(input), 0));
+}
+
+
+
+static unsigned long lto_uint(const unsigned char *p, int w, int be)
+{
+    unsigned long v = 0;
+    for (int k = 0; k < w; k++)
+        v |= (unsigned long)p[be ? w - 1 - k : k] << (8 * k);
+    return v;
+}
+static char *xstrdup_n(const char *s) { return xstrndup(s, strlen(s)); }
+
+/* ---- -flto at the link (see the note before compile_unit) ---------- */
+
+/* The .embcc.lto section of an ELF or Mach-O object in buf, or NULL;
+ * *n its size. */
+static const char *lto_section(const unsigned char *b, long len, long *n)
+{
+    if (len >= 64 && b[0] == 0x7f && b[1] == 'E' && b[2] == 'L' && b[3] == 'F') {
+        int c64 = b[4] == 2, be = b[5] == 2;
+#define LU(p, w) lto_uint((p), (w), be)
+        unsigned long shoff = c64 ? LU(b + 40, 8) : LU(b + 32, 4);
+        int shentsize = (int)LU(b + (c64 ? 58 : 46), 2);
+        int shnum = (int)LU(b + (c64 ? 60 : 48), 2);
+        int shstrndx = (int)LU(b + (c64 ? 62 : 50), 2);
+        if (!shoff || shoff + (unsigned long)shnum * (unsigned long)shentsize >
+                          (unsigned long)len || shstrndx >= shnum)
+            return NULL;
+        const unsigned char *ss = b + shoff + (long)shstrndx * shentsize;
+        unsigned long stroff = c64 ? LU(ss + 24, 8) : LU(ss + 16, 4);
+        for (int i = 0; i < shnum; i++) {
+            const unsigned char *sh = b + shoff + (long)i * shentsize;
+            unsigned long name = LU(sh, 4);
+            unsigned long off = c64 ? LU(sh + 24, 8) : LU(sh + 16, 4);
+            unsigned long size = c64 ? LU(sh + 32, 8) : LU(sh + 20, 4);
+            if (stroff + name + 11 <= (unsigned long)len &&
+                !memcmp(b + stroff + name, ".embcc.lto", 11) &&
+                off + size <= (unsigned long)len) {
+                *n = (long)size;
+                return (const char *)b + off;
+            }
+        }
+#undef LU
+        return NULL;
+    }
+    if (len >= 32 && lto_uint(b, 4, 0) == 0xfeedfacfUL) {     /* Mach-O 64 */
+        unsigned long ncmds = lto_uint(b + 16, 4, 0);
+        long at = 32;
+        for (unsigned long c = 0; c < ncmds && at + 8 <= len; c++) {
+            unsigned long cmd = lto_uint(b + at, 4, 0);
+            unsigned long csz = lto_uint(b + at + 4, 4, 0);
+            if (cmd == 0x19 && at + 72 <= len) {               /* LC_SEGMENT_64 */
+                unsigned long nsects = lto_uint(b + at + 64, 4, 0);
+                for (unsigned long k = 0; k < nsects; k++) {
+                    const unsigned char *sc = b + at + 72 + k * 80;
+                    if (sc + 80 > b + len)
+                        break;
+                    if (!strncmp((const char *)sc, "__embcc_lto", 16)) {
+                        unsigned long size = lto_uint(sc + 40, 8, 0);
+                        unsigned long off = lto_uint(sc + 48, 4, 0);
+                        if (off + size <= (unsigned long)len) {
+                            *n = (long)size;
+                            return (const char *)b + off;
+                        }
+                    }
+                }
+            }
+            if (!csz)
+                break;
+            at += (long)csz;
+        }
+    }
+    return NULL;
+}
+
+/* The names an object (or each member of an archive) leaves undefined,
+ * added to names[] -- what the part of the link LTO does not see wants
+ * from the part it does. ELF only; a Mach-O or other input says
+ * "unknown", and then nothing is made static. */
+static int lto_undef_names(const char *path, const char ***names, int *n,
+                           int *cap)
+{
+    long len = 0;
+    unsigned char *b = (unsigned char *)plat_read_file(path, &len);
+    if (!b)
+        return 0;
+    int ok = 1;
+    long at = 0, end = len;
+    int ar = len >= 8 && !memcmp(b, "!<arch>\n", 8);
+    if (ar)
+        at = 8;
+    while (at < end) {
+        const unsigned char *o = b + at;
+        long olen = end - at;
+        if (ar) {
+            if (at + 60 > end)
+                break;
+            olen = strtol((const char *)b + at + 48, NULL, 10);
+            o = b + at + 60;
+            at += 60 + olen + (olen & 1);
+        } else {
+            at = end;
+        }
+        if (olen < 64 || o[0] != 0x7f || o[1] != 'E') {
+            if (!ar)
+                ok = 0;
+            continue;
+        }
+        int c64 = o[4] == 2, be = o[5] == 2;
+        unsigned long shoff = c64 ? lto_uint(o + 40, 8, be)
+                                  : lto_uint(o + 32, 4, be);
+        int shentsize = (int)lto_uint(o + (c64 ? 58 : 46), 2, be);
+        int shnum = (int)lto_uint(o + (c64 ? 60 : 48), 2, be);
+        if (shoff + (unsigned long)shnum * (unsigned long)shentsize >
+            (unsigned long)olen)
+            continue;
+        for (int i = 0; i < shnum; i++) {
+            const unsigned char *sh = o + shoff + (long)i * shentsize;
+            if (lto_uint(sh + 4, 4, be) != 2)            /* SHT_SYMTAB */
+                continue;
+            unsigned long soff = c64 ? lto_uint(sh + 24, 8, be)
+                                     : lto_uint(sh + 16, 4, be);
+            unsigned long ssz = c64 ? lto_uint(sh + 32, 8, be)
+                                    : lto_uint(sh + 20, 4, be);
+            unsigned long link = lto_uint(sh + (c64 ? 40 : 24), 4, be);
+            const unsigned char *str = o + shoff + (long)link * shentsize;
+            unsigned long stroff = c64 ? lto_uint(str + 24, 8, be)
+                                       : lto_uint(str + 16, 4, be);
+            int esz = c64 ? 24 : 16;
+            for (unsigned long k = (unsigned long)esz; k + (unsigned long)esz <= ssz;
+                 k += (unsigned long)esz) {
+                const unsigned char *sy = o + soff + k;
+                unsigned shndx = (unsigned)lto_uint(sy + (c64 ? 6 : 14), 2, be);
+                unsigned long name = lto_uint(sy, 4, be);
+                if (shndx != 0 || !name || stroff + name >= (unsigned long)olen)
+                    continue;                            /* defined, or none */
+                if (*n == *cap) {
+                    *cap = *cap ? *cap * 2 : 256;
+                    *names = xrealloc(*names, (size_t)*cap * sizeof **names);
+                }
+                (*names)[(*n)++] = xstrdup_n((const char *)o + stroff + name);
+            }
+        }
+    }
+    free(b);
+    return ok;
+}
+
+/* A name -> pointer table (and a count per name), open-addressed: the
+ * merge asks it once per declaration, and a program has hundreds of
+ * thousands of those (each unit's headers declare everything). */
+struct lto_ht { const char **k; void **v; int *n; unsigned cap, used; };
+
+static unsigned lto_hash(const char *s)
+{
+    unsigned h = 2166136261u;
+    while (*s)
+        h = (h ^ (unsigned char)*s++) * 16777619u;
+    return h;
+}
+
+static unsigned lto_slot(struct lto_ht *t, const char *key)
+{
+    if (2 * (t->used + 1) > t->cap) {
+        struct lto_ht o = *t;
+        t->cap = o.cap ? o.cap * 2 : 1024;
+        t->k = xcalloc(t->cap, sizeof *t->k);
+        t->v = xcalloc(t->cap, sizeof *t->v);
+        t->n = xcalloc(t->cap, sizeof *t->n);
+        t->used = 0;
+        for (unsigned i = 0; i < o.cap; i++)
+            if (o.k[i]) {
+                unsigned j = lto_hash(o.k[i]) & (t->cap - 1);
+                while (t->k[j])
+                    j = (j + 1) & (t->cap - 1);
+                t->k[j] = o.k[i];
+                t->v[j] = o.v[i];
+                t->n[j] = o.n[i];
+                t->used++;
+            }
+        free(o.k); free(o.v); free(o.n);
+    }
+    unsigned j = lto_hash(key) & (t->cap - 1);
+    while (t->k[j] && strcmp(t->k[j], key))
+        j = (j + 1) & (t->cap - 1);
+    if (!t->k[j]) {
+        t->k[j] = key;
+        t->used++;
+    }
+    return j;
+}
+
+static void *lto_get(struct lto_ht *t, const char *key)
+{
+    if (!t->cap)
+        return NULL;
+    unsigned j = lto_hash(key) & (t->cap - 1);
+    while (t->k[j] && strcmp(t->k[j], key))
+        j = (j + 1) & (t->cap - 1);
+    return t->k[j] ? t->v[j] : NULL;
+}
+
+static int lto_count(struct lto_ht *t, const char *key)
+{
+    if (!t->cap)
+        return 0;
+    unsigned j = lto_hash(key) & (t->cap - 1);
+    while (t->k[j] && strcmp(t->k[j], key))
+        j = (j + 1) & (t->cap - 1);
+    return t->k[j] ? t->n[j] : 0;
+}
+
+/* Every unit lto_collect kept, as one: lists joined, string literals
+ * interned again (each STRADDR renumbered), each external declaration
+ * pointed at the definition another unit has, a static name another unit
+ * also uses renamed, and -- for a program, not a shared object -- every
+ * external nothing outside the merged units names made static, which is
+ * what lets the optimizer inline it and drop it. */
+static void lto_merge(int internalize, const char **keep, int nkeep)
+{
+    struct unit *U = xcalloc(1, sizeof *U);
+    struct ir_unit *IU = xcalloc(1, sizeof *IU);
+    *U = *g_lto_units[0];
+    U->funcs = NULL; U->globals = NULL; U->topasm = NULL; U->weaks = NULL;
+    U->econsts = NULL;
+    IU->src = U;
+    struct func **ft = &U->funcs;
+    struct global **gt = &U->globals;
+    struct topasm **tt = &U->topasm;
+    int nf = 0;
+    for (int k = 0; k < g_lto_n; k++)
+        nf += g_lto_irs[k]->nfuncs;
+    IU->funcs = xcalloc((size_t)(nf ? nf : 1), sizeof *IU->funcs);
+    for (int k = 0; k < g_lto_n; k++) {
+        struct unit *u = g_lto_units[k];
+        struct ir_unit *iu = g_lto_irs[k];
+        /* string literals: interned in the whole program's pool */
+        int *smap = xmalloc((size_t)(iu->nstrs ? iu->nstrs : 1) * sizeof *smap);
+        for (int i = 0; i < iu->nstrs; i++)
+            smap[i] = ir_intern_aligned(IU, iu->strs[i].bytes, iu->strs[i].len,
+                                        iu->strs[i].align);
+        for (int f = 0; f < iu->nfuncs; f++) {
+            struct ir_func *fn = &iu->funcs[f];
+            for (int i = 0; i < fn->nins; i++)
+                if (fn->ins[i].op == IR_STRADDR && fn->ins[i].label >= 0 &&
+                    fn->ins[i].label < iu->nstrs)
+                    fn->ins[i].label = smap[fn->ins[i].label];
+            IU->funcs[IU->nfuncs++] = *fn;
+        }
+        free(smap);
+        for (struct func *f = u->funcs; f; ) {
+            struct func *nx = f->next;
+            *ft = f; ft = &f->next; f->next = NULL;
+            f = nx;
+        }
+        for (struct global *g = u->globals; g; ) {
+            struct global *nx = g->next;
+            *gt = g; gt = &g->next; g->next = NULL;
+            g = nx;
+        }
+        for (struct topasm *t = u->topasm; t; ) {
+            struct topasm *nx = t->next;
+            *tt = t; tt = &t->next; t->next = NULL;
+            t = nx;
+        }
+    }
+    /* ---- external names: one definition each ---- */
+    struct lto_ht fdefs = { 0 }, gdefs = { 0 };
+    for (struct func *f = U->funcs; f; f = f->next)
+        if (!f->absorbed && !f->is_static && f->has_defn) {
+            unsigned j = lto_slot(&fdefs, f->name);
+            struct func *d = fdefs.v[j];
+            if (!d || d->is_weak)
+                fdefs.v[j] = f;
+        }
+    for (struct func *f = U->funcs; f; f = f->next)
+        if (!f->absorbed && !f->is_static && !f->has_defn) {
+            struct func *def = lto_get(&fdefs, f->name);
+            if (def) {
+                f->lto_def = def;
+                f->absorbed = 1;
+            }
+        }
+    for (struct global *g = U->globals; g; g = g->next)
+        if (!g->absorbed && !g->is_static && g->defined) {
+            unsigned j = lto_slot(&gdefs, g->name);
+            struct global *d = gdefs.v[j];
+            if (!d || (!d->has_init && g->has_init))
+                gdefs.v[j] = g;
+        }
+    for (struct global *g = U->globals; g; g = g->next)
+        if (!g->absorbed && !g->is_static) {
+            struct global *def = lto_get(&gdefs, g->name);
+            if (def && def != g) {
+                g->lto_def = def;
+                g->absorbed = 1;
+            }
+        }
+#define FDEF(f) ((f) && (f)->lto_def ? (f)->lto_def : (f))
+#define GDEF(g) ((g) && (g)->lto_def ? (g)->lto_def : (g))
+    for (int f = 0; f < IU->nfuncs; f++) {
+        struct ir_func *fn = &IU->funcs[f];
+        for (int i = 0; i < fn->nins; i++) {
+            fn->ins[i].callee = FDEF(fn->ins[i].callee);
+            fn->ins[i].glob = GDEF(fn->ins[i].glob);
+        }
+        for (int t = 0; t < fn->neh_types; t++)
+            fn->eh_types[t] = GDEF(fn->eh_types[t]);
+    }
+    for (struct global *g = U->globals; g; g = g->next)
+        for (int r = 0; r < g->nrelocs; r++) {
+            g->relocs[r].ftarget = FDEF(g->relocs[r].ftarget);
+            g->relocs[r].gtarget = GDEF(g->relocs[r].gtarget);
+        }
+#undef FDEF
+#undef GDEF
+    /* ---- a static name another unit uses too: NAME.lto.N ---- */
+    {
+        struct lto_ht names = { 0 };
+        for (struct func *f = U->funcs; f; f = f->next)
+            if (!f->absorbed)
+                { unsigned j_ = lto_slot(&names, f->name); names.n[j_]++; }
+        for (struct global *g = U->globals; g; g = g->next)
+            if (!g->absorbed)
+                { unsigned j_ = lto_slot(&names, g->name); names.n[j_]++; }
+        int n = 0;
+        for (struct func *f = U->funcs; f; f = f->next)
+            if (!f->absorbed && f->is_static && !f->asm_name &&
+                lto_count(&names, f->name) > 1) {
+                char *nm = xmalloc(strlen(f->name) + 24);
+                sprintf(nm, "%s.lto.%d", f->name, n++);
+                f->name = nm;
+            }
+        for (struct global *g = U->globals; g; g = g->next)
+            if (!g->absorbed && g->is_static && !g->asm_name &&
+                lto_count(&names, g->name) > 1) {
+                char *nm = xmalloc(strlen(g->name) + 24);
+                sprintf(nm, "%s.lto.%d", g->name, n++);
+                g->name = nm;
+            }
+    }
+    /* ---- internalize: what nothing outside names ---- */
+    if (internalize) {
+        struct lto_ht kept = { 0 }, aliased = { 0 };
+        for (int k = 0; k < nkeep; k++)
+            { unsigned j_ = lto_slot(&kept, keep[k]); kept.v[j_] = (void *)1; }
+        for (struct func *a = U->funcs; a; a = a->next)
+            if (!a->absorbed && a->alias_of)
+                { unsigned j_ = lto_slot(&aliased, a->alias_of); aliased.v[j_] = (void *)1; }
+        for (struct global *a = U->globals; a; a = a->next)
+            if (!a->absorbed && a->alias_of)
+                { unsigned j_ = lto_slot(&aliased, a->alias_of); aliased.v[j_] = (void *)1; }
+        for (struct func *f = U->funcs; f; f = f->next) {
+            if (f->absorbed || f->is_static || !f->has_defn || f->is_weak ||
+                f->is_root || f->is_ctor || f->is_dtor || f->is_isr ||
+                f->attr_used || f->alias_of || f->asm_name || f->vis ||
+                !strcmp(f->name, "main") ||
+                (g_entry && !strcmp(f->name, g_entry)) ||
+                lto_get(&kept, f->name))
+                continue;
+            if (!lto_get(&aliased, f->name)) {
+                /* (emitted, as an external was: reachability decides) */
+                f->is_static = 1;
+                f->used = 1;
+            }
+        }
+        for (struct global *g = U->globals; g; g = g->next) {
+            if (g->absorbed || g->is_static || !g->defined || g->is_weak ||
+                g->attr_used || g->alias_of || g->asm_name || g->vis ||
+                g->section || g->is_common ||
+                lto_get(&kept, g->name) || lto_get(&aliased, g->name))
+                continue;
+            g->is_static = 1;
+            g->used = 1;
+        }
+    }
+    /* the symbol table the IR prints by: every name again */
+    for (int f = 0; f < IU->nfuncs; f++) {
+        struct ir_func *fn = &IU->funcs[f];
+        for (int i = 0; i < fn->nins; i++) {
+            if (fn->ins[i].callee)
+                ir_sym_func(IU, fn->ins[i].callee);
+            if (fn->ins[i].glob)
+                ir_sym_global(IU, fn->ins[i].glob);
+        }
+    }
+    g_lto_u = U;
+    g_lto_iu = IU;
+}
+
+/* -flto: the inputs that carry their C are compiled again as one
+ * program into *tmp, which takes the first one's place among the link's
+ * inputs; the others leave the list. 0, or 1 after an error. */
+static int lto_link_inputs(const char *out, char **tmp)
+{
+    *tmp = NULL;
+    int idx[LTO_MAX], n = 0;
+    char *bufs[LTO_MAX];
+    const char *texts[LTO_MAX], *names[LTO_MAX];
+    for (int k = 0; k < g_nlink_in && n < LTO_MAX; k++) {
+        long len = 0, pn = 0;
+        unsigned char *b = (unsigned char *)plat_read_file(g_link_in[k], &len);
+        const char *pl = b ? lto_section(b, len, &pn) : NULL;
+        if (!pl || pn < 13 || memcmp(pl, "EMBCC-LTO 1 ", 12)) {
+            free(b);
+            continue;
+        }
+        const char *nl = memchr(pl, '\n', (size_t)pn);
+        if (!nl) {
+            free(b);
+            continue;
+        }
+        names[n] = xstrndup(pl + 12, (size_t)(nl - pl - 12));
+        texts[n] = xstrndup(nl + 1, (size_t)(pl + pn - nl - 1));
+        bufs[n] = (char *)b;
+        idx[n++] = k;
+    }
+    if (!n)
+        return 0;
+    /* what the rest of the link names (and the runtime's libraries,
+     * which call main and may call what a program defines) */
+    const char **keep = NULL;
+    int nkeep = 0, capkeep = 0, known = g_link_kind != LINK_SHARED;
+    for (int k = 0; k < g_nlink_in && known; k++) {
+        int lto = 0;
+        for (int j = 0; j < n; j++)
+            lto |= idx[j] == k;
+        if (!lto)
+            known = lto_undef_names(g_link_in[k], &keep, &nkeep, &capkeep);
+    }
+    if (known && (target_os_get() != TGT_OS_DARWIN && !glibc_mode())) {
+        static const char *const rt[] = { "libc.a", "librt.a", "crt1.o",
+                                          "libcxx.a" };
+        for (int k = 0; k < 4; k++) {
+            char p[1024];
+            if (paths_target_file(lib_triple(), rt[k], p, sizeof p))
+                lto_undef_names(p, &keep, &nkeep, &capkeep);
+        }
+    }
+    /* (with the system's C library, its shared objects are not read: what
+     * they call by name in a program is main and the entry, kept below) */
+    /* (its warnings were said when each unit was compiled; read again,
+     * the C no longer knows which of it came from a system header) */
+    int saved_cxx = lang_cxx;
+    lang_cxx = 0;
+    diag_set_no_warnings(1);
+    g_lto_collect = 1;
+    g_lto_n = 0;
+    int rc = 0;
+    for (int j = 0; j < n && !rc; j++) {
+        g_lto_text = texts[j];
+        rc = compile_unit(names[j], NULL, 0);
+    }
+    g_lto_text = NULL;
+    g_lto_collect = 0;
+    lang_cxx = saved_cxx;
+    diag_set_no_warnings(g_user_no_warn);
+    if (rc)
+        return 1;
+    lto_merge(known, keep, nkeep);
+    char *obj = xmalloc(strlen(out) + 24);
+    sprintf(obj, "%s.embcc-lto.o", out);
+    g_lto_back = 1;
+    rc = compile_unit(names[0], obj, 0);
+    g_lto_back = 0;
+    for (int j = 0; j < n; j++)
+        free(bufs[j]);
+    if (rc) {
+        remove(obj);
+        free(obj);
+        return 1;
+    }
+    /* the merged object where the first unit was; the rest gone */
+    int w = 0;
+    for (int k = 0; k < g_nlink_in; k++) {
+        int j = 0;
+        while (j < n && idx[j] != k)
+            j++;
+        if (j < n && j > 0)
+            continue;
+        g_link_in[w++] = j == 0 && j < n ? obj : g_link_in[k];
+    }
+    g_nlink_in = w;
+    *tmp = obj;
+    return 0;
 }
 
 int main(int argc, char **argv)

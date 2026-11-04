@@ -5,6 +5,7 @@
  * `options_done`); this moved here from the driver. */
 #include "../backend.h"
 #include "../target.h"
+#include "emit.h"
 #include "../../driver/util.h"
 
 #include <stdlib.h>
@@ -30,6 +31,7 @@ static const char *g_rv_march, *g_rv_mabi;
  * The default is today's: rv32imac/ilp32 and rv64imac/lp64. */
 void riscv_options_done(void)
 {
+    rv_set_ext_source(target_riscv_ext);
     /* GCC's bare-metal riscv64-unknown-elf toolchain is multilib: it
      * builds RV32 under -march=rv32..., which is how a CMake toolchain
      * file written for it (and the SiFive and xPack toolchains' docs)
@@ -42,6 +44,7 @@ void riscv_options_done(void)
         target_set(TARGET_RISCV32);
     int rv64 = target_get() == TARGET_RISCV64;
     int f = 0, d = 0, c = 1, m = 1, a = 1, zifencei = 0, abi;
+    unsigned ext = 0;
     if (!rv64 && target_get() != TARGET_RISCV32)
         return;
     /* the options as the user typed them, for the messages below */
@@ -75,10 +78,14 @@ void riscv_options_done(void)
             case 'f': f = 1; break;
             case 'd': d = 1; break;
             case 'c': c = 1; break;
+            /* B is Zba, Zbb and Zbs together (ratified 2024); V the
+             * vector extension, which needs F and D (Zve64d) */
+            case 'b': ext |= RV_EXT_ZBA | RV_EXT_ZBB | RV_EXT_ZBS; break;
+            case 'v': ext |= RV_EXT_V; break;
             default:
                 diag_fatal(NULL, 0, "%s: the '%c' extension is not "
-                           "supported: EmbCC emits I, M, A, F, D and C "
-                           "(and no version numbers)", isa_said, *p);
+                           "supported: EmbCC emits I, M, A, F, D, C, B and "
+                           "V (and no version numbers)", isa_said, *p);
             }
         }
         while (*p == '_') {
@@ -93,10 +100,55 @@ void riscv_options_done(void)
                 zifencei = 1;
                 continue;
             }
+            static const struct { const char *nm; unsigned bit; } multi[] = {
+                { "zba", RV_EXT_ZBA }, { "zbb", RV_EXT_ZBB },
+                { "zbs", RV_EXT_ZBS }, { "zfhmin", RV_EXT_ZFHMIN },
+                { "zfh", RV_EXT_ZFH | RV_EXT_ZFHMIN },
+                { "zicond", RV_EXT_ZICOND }, { "zbc", RV_EXT_ZBC },
+                { "zbkb", RV_EXT_ZBKB }, { "zbkc", RV_EXT_ZBKC },
+                { "zbkx", RV_EXT_ZBKX }, { "zca", RV_EXT_ZCA },
+                { "zcb", RV_EXT_ZCB | RV_EXT_ZCA },
+                { "zcmp", RV_EXT_ZCMP | RV_EXT_ZCA },
+            };
+            int known = 0;
+            for (unsigned k = 0; k < sizeof multi / sizeof *multi; k++)
+                if (strlen(multi[k].nm) == n && !strncmp(e, multi[k].nm, n)) {
+                    ext |= multi[k].bit;
+                    known = 1;
+                }
+            if (known)
+                continue;
             diag_fatal(NULL, 0, "%s: the '%.*s' extension is not "
-                       "supported: EmbCC accepts zicsr and zifencei after "
-                       "the single-letter ones", isa_said, (int)n, e);
+                       "supported: EmbCC accepts zicsr, zifencei, zba, zbb, "
+                       "zbs, zbc, zbkb, zbkc, zbkx, zicond, zca, zcb, zcmp, "
+                       "zfhmin and zfh after the single-letter ones",
+                       isa_said, (int)n, e);
         }
+        /* Zca is C's integer half: on its own, the compressed encoder's
+         * floating-point forms (Zcf, Zcd) are what it must not use, so
+         * with F or D it needs C itself; Zcmp's push/pop encodings are
+         * Zcd's, so the two cannot be had together (the spec's rule) */
+        if ((ext & RV_EXT_ZCA) && !c) {
+            if (f || d)
+                diag_fatal(NULL, 0, "%s: Zca without C, with F or D, is "
+                           "not supported: EmbCC's compressed encoder uses "
+                           "c.flw/c.fld with them; add c, or drop f and d",
+                           isa_said);
+            c = 1;
+        }
+        if ((ext & RV_EXT_ZCMP) && c && d)
+            diag_fatal(NULL, 0, "%s: Zcmp and Zcd (C with D) share their "
+                       "encodings and cannot be had together: use "
+                       "zca_zcmp without c, or drop zcmp", isa_said);
+
+        if ((ext & RV_EXT_ZFHMIN) && !f)
+            diag_fatal(NULL, 0, "%s: %s needs F (half precision is built "
+                       "on the floating-point registers): add f", isa_said,
+                       (ext & RV_EXT_ZFH) ? "Zfh" : "Zfhmin");
+        if ((ext & RV_EXT_V) && !d)
+            diag_fatal(NULL, 0, "%s: V needs F and D (its floating-point "
+                       "elements are Zve64d's): add f and d, or use g",
+                       isa_said);
         if (d && !f)
             diag_fatal(NULL, 0, "%s: the D extension needs F (double "
                        "precision is built on the single-precision "
@@ -135,6 +187,7 @@ void riscv_options_done(void)
                        abi == 64 ? "imafdc" : "imafc");
     }
     target_set_riscv_isa(a, f, d, c, zifencei);
+    target_set_riscv_ext(ext);
     target_set_riscv_abi_flen(abi);
 }
 

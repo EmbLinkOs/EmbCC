@@ -2,6 +2,7 @@
 #include "emit.h"
 
 #include "../../driver/util.h"
+#include "../target.h"
 
 const int rv_argreg[RV_NARGREG] = {
     RV_A0, RV_A1, RV_A2, RV_A3, RV_A4, RV_A5, RV_A6, RV_A7
@@ -151,8 +152,71 @@ static unsigned cr_ca(unsigned op, unsigned f6, int rd_, unsigned f2, int rs2_)
            (f6 << 10);
 }
 
+/* Zcb's 16-bit forms, for an instruction rv_compress has none for: the
+ * byte and halfword loads and stores at small offsets, and the in-place
+ * extensions, not and mul (encodings from the Zc spec, checked against
+ * llvm-mc) */
+static unsigned zcb_compress(unsigned long w, int xlen, unsigned ext)
+{
+    unsigned op = (unsigned)(w & 0x7f), f3 = (unsigned)((w >> 12) & 7);
+    unsigned f7 = (unsigned)((w >> 25) & 0x7f);
+    int rd = (int)((w >> 7) & 0x1f), rs1 = (int)((w >> 15) & 0x1f);
+    int rs2 = (int)((w >> 20) & 0x1f);
+    int immi = (int)((w >> 20) & 0xfff);
+    int imms = (int)((((w >> 25) & 0x7f) << 5) | ((w >> 7) & 0x1f));
+    int rdc = rd >= 8 && rd < 16 ? rd - 8 : -1;
+    int r1c = rs1 >= 8 && rs1 < 16 ? rs1 - 8 : -1;
+    int r2c = rs2 >= 8 && rs2 < 16 ? rs2 - 8 : -1;
+    if (op == 0x03 && rdc >= 0 && r1c >= 0) {           /* loads */
+        if (f3 == 4 && immi >= 0 && immi <= 3)          /* c.lbu */
+            return 0x8000u | (unsigned)r1c << 7 | (unsigned)(immi & 1) << 6 |
+                   (unsigned)((immi >> 1) & 1) << 5 | (unsigned)rdc << 2;
+        if ((f3 == 5 || f3 == 1) && (immi == 0 || immi == 2))  /* c.lhu, c.lh */
+            return 0x8400u | (unsigned)r1c << 7 | (f3 == 1 ? 1u << 6 : 0) |
+                   (unsigned)(immi >> 1) << 5 | (unsigned)rdc << 2;
+    }
+    if (op == 0x23 && r1c >= 0 && r2c >= 0) {           /* stores */
+        if (f3 == 0 && imms >= 0 && imms <= 3)          /* c.sb */
+            return 0x8800u | (unsigned)r1c << 7 | (unsigned)(imms & 1) << 6 |
+                   (unsigned)((imms >> 1) & 1) << 5 | (unsigned)r2c << 2;
+        if (f3 == 1 && (imms == 0 || imms == 2))        /* c.sh */
+            return 0x8c00u | (unsigned)r1c << 7 | (unsigned)(imms >> 1) << 5 |
+                   (unsigned)r2c << 2;
+    }
+    if (rdc < 0 || rs1 != rd)
+        return 0;
+    unsigned u = 0x9c61u | (unsigned)rdc << 7;          /* 100111 rd' 11 ... 01 */
+    if (op == 0x13 && f3 == 7 && immi == 0xff)          /* andi rd, rd, 255 */
+        return u;                                       /* c.zext.b */
+    if (op == 0x13 && f3 == 4 && immi == 0xfff)         /* xori rd, rd, -1 */
+        return u | 5u << 2;                             /* c.not */
+    if ((ext & RV_EXT_ZBB) && op == 0x13 && f3 == 1 && (immi == 0x604 || immi == 0x605))
+        return u | (immi == 0x604 ? 1u : 3u) << 2;      /* c.sext.b, c.sext.h */
+    if ((ext & RV_EXT_ZBB) && f7 == 0x04 && f3 == 4 && rs2 == 0 &&
+        op == (xlen == 64 ? 0x3bu : 0x33u))
+        return u | 2u << 2;                             /* c.zext.h */
+    if (xlen == 64 && (ext & RV_EXT_ZBA) && op == 0x3b && f3 == 0 &&
+        f7 == 0x04 && rs2 == 0)                         /* add.uw rd, rd, x0 */
+        return u | 4u << 2;                             /* c.zext.w */
+    if (op == 0x33 && f3 == 0 && f7 == 0x01 && r2c >= 0)    /* mul rd, rd, rs2 */
+        return 0x9c41u | (unsigned)rdc << 7 | (unsigned)r2c << 2;  /* c.mul */
+    return 0;
+}
+
+/* -march='s extensions (Zcb's forms), asked through a hook the compiler
+ * installs (riscv_options_done): embld links this file without the
+ * target layer, and has none */
+static unsigned (*g_rv_ext_hook)(void);
+void rv_set_ext_source(unsigned (*hook)(void)) { g_rv_ext_hook = hook; }
+
 unsigned rv_compress(unsigned long w, int xlen)
 {
+    unsigned ext = g_rv_ext_hook ? g_rv_ext_hook() : 0;
+    if (ext & RV_EXT_ZCB) {
+        unsigned z = zcb_compress(w, xlen, ext);
+        if (z)
+            return z;
+    }
     unsigned op    = (unsigned)(w & 0x7f);
     int rd         = (int)((w >> 7) & 0x1f);
     unsigned f3    = (unsigned)((w >> 12) & 7);
@@ -217,7 +281,11 @@ unsigned rv_compress(unsigned long w, int xlen)
                 return 0x0002u | ((unsigned)(sh & 0x1f) << 2) |
                        ((unsigned)rd << 7) | ((unsigned)((sh >> 5) & 1) << 12);
         }
-        if (f3 == 5 && rdc >= 0 && rs1 == rd) {                 /* srli/srai */
+        /* srli/srai -- and only they: funct6 000000 or 010000 above the
+         * shift amount (Zbb's rev8, rori, orc.b and Zbs's bexti share the
+         * funct3, and were made c.srai) */
+        if (f3 == 5 && rdc >= 0 && rs1 == rd &&
+            ((f7 & ~1u) == 0 || (f7 & ~1u) == 0x20)) {
             int sh = (int)((w >> 20) & (xlen == 64 ? 0x3f : 0x1f));
             unsigned kind = (f7 & 0x20) ? 1u : 0u;              /* srai */
             if (sh != 0 && (xlen == 64 || sh < 32))
@@ -480,6 +548,12 @@ void rv_w(struct code *c, unsigned long w)
     code_u32(c, w);
 }
 
+/* Zicond: rd = rs2 == 0 ? 0 : rs1 (eqz), rs2 != 0 ? 0 : rs1 (nez) */
+void rv_czero(struct code *c, int nez, int rd, int rs1, int rs2)
+{
+    rv_w(c, rv_enc_r(0x33, rd, nez ? 7 : 5, rs1, rs2, 0x07));
+}
+
 void rv_mv(struct code *c, int rd, int rs)
 {
     rv_w(c, rv_enc_i(OP_IMM, rd, 0, rs, 0));
@@ -739,7 +813,10 @@ enum { RM_RNE = 0, RM_RTZ = 1, RM_DYN = 7 };
 static void fp_r(struct code *c, int f5, int dbl, int rm, int rd, int rs1,
                  int rs2)
 {
-    rv_w(c, rv_enc_r(OP_FP, rd, rm, rs1, rs2, (f5 << 2) | (dbl ? 1 : 0)));
+    /* the fmt field: single, double, or (exactly 2) Zfh's half -- a
+     * caller's dbl is any truth value otherwise */
+    rv_w(c, rv_enc_r(OP_FP, rd, rm, rs1, rs2,
+                     (f5 << 2) | (dbl == 2 ? 2 : dbl ? 1 : 0)));
 }
 
 /* The same, with the funct5 and the rounding mode spelled out: what the
@@ -756,7 +833,8 @@ void rv_fp_r4(struct code *c, int op, int dbl, int rm, int rd, int rs1,
 {
     rv_w(c, (unsigned long)op | (unsigned long)rd << 7 |
             (unsigned long)rm << 12 | (unsigned long)rs1 << 15 |
-            (unsigned long)rs2 << 20 | (unsigned long)(dbl ? 1 : 0) << 25 |
+            (unsigned long)rs2 << 20 |
+            (unsigned long)(dbl == 2 ? 2 : dbl ? 1 : 0) << 25 |
             (unsigned long)rs3 << 27);
 }
 
@@ -976,6 +1054,19 @@ void rv_xret(struct code *c, int supervisor)
  * sites emitted this pair by hand and all three broke the moment the C
  * extension was switched on.
  */
+/* auipc rd, 0 ; l{w,d} rd, 0(rd): a symbol's address from its GOT slot
+ * (-fPIC/-fPIE), relocated as GOT_HI20 + PCREL_LO12_I */
+int rv_got_pair(struct code *c, int rd, int xlen)
+{
+    int save_rvc = g_rvc;
+    int at = c->len;
+    g_rvc = 0;
+    rv_auipc(c, rd, 0);
+    rv_load(c, rd, rd, 0, xlen / 8, 0, xlen);
+    g_rvc = save_rvc;
+    return at;
+}
+
 int rv_pcrel_pair(struct code *c, int rd)
 {
     int save_rvc = g_rvc;
@@ -1078,4 +1169,74 @@ void rv_unimp(struct code *c)
 void rv_ebreak(struct code *c)
 {
     rv_w(c, enc_csr(0, RV_ZERO, RV_ZERO, 1));
+}
+
+/* ---- Zba, Zbb, Zbs --------------------------------------------------------
+ *
+ * The bit-manipulation instructions, each one row of the table below in
+ * the base formats' fields: an R-type's major opcode, funct3 and funct7,
+ * or an I-type's funct3 and the immediate's fixed bits (the unary ones,
+ * clz to rev8, are I-type with the whole immediate fixed; the shifts by
+ * a constant have it as funct6 above a 6-bit amount). The `w` forms of
+ * RV64 are the OP-32 / OP-IMM-32 major opcodes. llvm-mc is the referee
+ * (tests/golden/riscv-zb.sh). */
+static const struct { unsigned char op, f3; unsigned short f7; } zb_tab[] = {
+    [RV_ZB_ANDN]  = { 0x33, 7, 0x20 }, [RV_ZB_ORN]   = { 0x33, 6, 0x20 },
+    [RV_ZB_XNOR]  = { 0x33, 4, 0x20 },
+    [RV_ZB_MIN]   = { 0x33, 4, 0x05 }, [RV_ZB_MINU]  = { 0x33, 5, 0x05 },
+    [RV_ZB_MAX]   = { 0x33, 6, 0x05 }, [RV_ZB_MAXU]  = { 0x33, 7, 0x05 },
+    [RV_ZB_SH1ADD] = { 0x33, 2, 0x10 }, [RV_ZB_SH2ADD] = { 0x33, 4, 0x10 },
+    [RV_ZB_SH3ADD] = { 0x33, 6, 0x10 },
+    [RV_ZB_ADDUW] = { 0x3b, 0, 0x04 },
+    [RV_ZB_SH1ADDUW] = { 0x3b, 2, 0x10 }, [RV_ZB_SH2ADDUW] = { 0x3b, 4, 0x10 },
+    [RV_ZB_SH3ADDUW] = { 0x3b, 6, 0x10 },
+    [RV_ZB_BCLR]  = { 0x33, 1, 0x24 }, [RV_ZB_BEXT]  = { 0x33, 5, 0x24 },
+    [RV_ZB_BINV]  = { 0x33, 1, 0x34 }, [RV_ZB_BSET]  = { 0x33, 1, 0x14 },
+    [RV_ZB_ROL]   = { 0x33, 1, 0x30 }, [RV_ZB_ROR]   = { 0x33, 5, 0x30 },
+    [RV_ZB_ROLW]  = { 0x3b, 1, 0x30 }, [RV_ZB_RORW]  = { 0x3b, 5, 0x30 },
+};
+
+void rv_zb_r(struct code *c, int which, int rd, int rs1, int rs2)
+{
+    rv_w(c, rv_enc_r(zb_tab[which].op, rd, zb_tab[which].f3, rs1, rs2,
+                     zb_tab[which].f7));
+}
+
+/* clz, ctz, cpop (w32: clzw, ctzw, cpopw at RV64), sext.b, sext.h, rev8
+ * (its immediate names XLEN), orc.b, and zext.h (an R-type `pack`) */
+void rv_zb_unary(struct code *c, int which, int rd, int rs, int w32, int xlen)
+{
+    static const short imm[] = {
+        [RV_ZB_CLZ] = 0x600, [RV_ZB_CTZ] = 0x601, [RV_ZB_CPOP] = 0x602,
+        [RV_ZB_SEXTB] = 0x604, [RV_ZB_SEXTH] = 0x605,
+    };
+    switch (which) {
+    case RV_ZB_REV8:
+        rv_w(c, rv_enc_i(0x13, rd, 5, rs, xlen == 64 ? 0x6b8 : 0x698));
+        return;
+    case RV_ZB_ORCB:
+        rv_w(c, rv_enc_i(0x13, rd, 5, rs, 0x287));
+        return;
+    case RV_ZB_ZEXTH:
+        rv_w(c, rv_enc_r(xlen == 64 ? 0x3b : 0x33, rd, 4, rs, 0, 0x04));
+        return;
+    default:
+        rv_w(c, rv_enc_i(w32 && xlen == 64 ? 0x1b : 0x13, rd, 1, rs,
+                         imm[which]));
+    }
+}
+
+/* bclri, bseti, binvi, bexti, rori (w32: roriw), slli.uw: funct6 over a
+ * six-bit amount (five for the w forms) */
+void rv_zb_imm(struct code *c, int which, int rd, int rs, int amt, int w32)
+{
+    static const struct { unsigned char op, f3, f6; } t[] = {
+        [RV_ZB_BCLRI] = { 0x13, 1, 0x12 }, [RV_ZB_BSETI] = { 0x13, 1, 0x0a },
+        [RV_ZB_BINVI] = { 0x13, 1, 0x1a }, [RV_ZB_BEXTI] = { 0x13, 5, 0x12 },
+        [RV_ZB_RORI]  = { 0x13, 5, 0x18 }, [RV_ZB_SLLIUW] = { 0x1b, 1, 0x02 },
+    };
+    int op = t[which].op;
+    if (which == RV_ZB_RORI && w32)
+        op = 0x1b;                                  /* roriw */
+    rv_w(c, rv_enc_i(op, rd, t[which].f3, rs, (t[which].f6 << 6) | (amt & 63)));
 }

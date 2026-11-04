@@ -7,6 +7,32 @@
  * first error. On success every EXPR_VAR has a var_index, every
  * EXPR_CALL a callee, and every func its nvars. */
 void sema_check(struct unit *u);
+/* The coding-standard rules (src/sema/rules.c, rules.def): the checker,
+ * run after sema; one finding, which says nothing unless its rule is on;
+ * whether an expression has a side effect; the rules, for the driver */
+void rules_check(struct unit *u);
+void rules_report(const char *file, int line, int col, const char *name,
+                  const char *detail);
+int rules_side_effects(const struct expr *e);
+int sema_const_fold(const struct expr *e, long *out);
+/* The static analyzer (src/sema/analyze.c, analyze.def): run after the
+ * rules; its checks, for the driver */
+void analyze_unit(struct unit *u);
+int analyze_count(void);
+const char *analyze_name(int i);
+const char *analyze_text(int i);
+int rules_count(void);
+const char *rules_name(int i);
+const char *rules_text(int i);
+/* -fsanitize=address (src/ir/sanitize.c): which of f's nvars locals get
+ * redzones -- 1 each in a new array -- or NULL */
+char *san_asan_locals(struct func *f, int nvars);
+/* -fstack-protector (src/ir/sanitize.c): the locals a protected f's
+ * canary guards -- 1 address-taken, 2 an aggregate -- or NULL; *on says
+ * whether f is protected at all */
+char *ssp_locals(struct func *f, int nvars, int has_vla, int *on);
+/* -fstack-clash-protection: the locals that leave a large frame */
+char *clash_locals(struct func *f, int nvars);
 
 /* GNU89 inline semantics (-fgnu89-inline, -std=gnu89): `inline` alone
  * is an external definition and `extern inline` an inline-only one --

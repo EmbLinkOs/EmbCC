@@ -77,8 +77,14 @@ refopt -EB 'little-endian'
 refopt -mabicalls '-mabicalls is not supported'
 refopt -G8 'no data in .sdata'
 refopt -mfpu=fpv4-sp-d16 'ARM option'
+# unwind tables (the C++ exceptions' and a debugger's): .eh_frame
 for o in -funwind-tables -fasynchronous-unwind-tables -fexceptions; do
-    refopt $o 'unwind tables are not supported for mipsel-none-elf yet'
+    "$EMBCC" --target=$T $o -c "$out/f.c" -o "$out/uw.o" || {
+        echo "$o was refused"; exit 1; }
+    if command -v "$RE" >/dev/null 2>&1; then
+        "$RE" -S "$out/uw.o" | grep -q eh_frame || {
+            echo "$o wrote no .eh_frame"; exit 1; }
+    fi
 done
 "$EMBCC" --target=$T -fno-asynchronous-unwind-tables -c "$out/f.c" -o /dev/null || {
     echo "-fno-asynchronous-unwind-tables was refused"; exit 1; }
@@ -128,16 +134,11 @@ refc "__int128" '__int128 does not exist on this target' \
 refc "an interrupt handler with a parameter" "interrupt handler 'f' takes parameters" \
     'void __attribute__((interrupt)) f(int x){ (void)x; }'
 printf 'int f(int x) { return x; }\n' > "$out/c.cc"
-# C++ compiles here without exceptions (tests/golden/cxx-embedded.sh runs
-# it); exceptions, on by default, are refused by name: there are no
-# unwind tables for this target
-if "$EMBCC" --target=$T -c "$out/c.cc" -o /dev/null 2> "$out/cxx.err"; then
-    echo "C++ with exceptions was accepted"; exit 1
-fi
-grep -q 'C++ exceptions are not supported for mipsel-none-elf' "$out/cxx.err" || {
-    echo "C++ exceptions were refused, but not by name:"; cat "$out/cxx.err"; exit 1; }
+# C++ with exceptions (on by default): unwind tables and the EH runtime
+"$EMBCC" --target=$T -c "$out/c.cc" -o /dev/null 2> "$out/cxx.err" || {
+    echo "C++ with exceptions was refused:"; cat "$out/cxx.err"; exit 1; }
 "$EMBCC" --target=$T -fno-exceptions -c "$out/c.cc" -o /dev/null || {
     echo "C++ with -fno-exceptions does not compile"; exit 1; }
 echo "narrow atomics, the frame and return address above level 0,"
-echo "__int128, an interrupt handler with parameters, an over-aligned scalar and C++ exceptions are each"
+echo "__int128, an interrupt handler with parameters, an over-aligned scalar are each"
 echo "refused by name (assembly is mips-gas.sh's and mips-exc.sh's)"

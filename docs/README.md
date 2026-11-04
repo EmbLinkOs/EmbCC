@@ -33,6 +33,10 @@ Start with the [overview](manual/overview.md) and
 | [Warning reference](manual/warnings.md) | Every warning, what it diagnoses, what turns it on (generated) |
 | [Optimization](manual/optimization.md) | `-O` levels and `-f` options |
 | [Debugging](manual/debugging.md) | `-g`, DWARF, and debugging programs |
+| [Coverage and profile-guided optimization](manual/coverage-and-profiles.md) | `--coverage` for gcov and llvm-cov, a board's counts from its console, `--profile-use` |
+| [Run-time checks and hardening](manual/runtime-checks.md) | The sanitizers, `--bounds-safety`, stack protector, stack-clash probes, CET, PAC and BTI |
+| [Static analysis](manual/static-analysis.md) | MISRA C and CERT C rules, `--analyze`, and each entry point's worst-case stack and cycles |
+| [Reproducible builds and SBOMs](manual/reproducible-builds.md) | Prefix maps, `SOURCE_DATE_EPOCH`, and an SPDX or CycloneDX bill of materials |
 | [Bare-metal programming](manual/embedded.md) | Freestanding programs on the boards |
 | [Libraries](manual/libraries.md) | The C library, the C++ library, the compiler runtime |
 

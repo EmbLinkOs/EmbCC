@@ -33,8 +33,8 @@ struct Plain { int a, b; };
 Plain plain = { 5, 6 };          // constant: no code at all
 
 struct Config {
-    int baud;
-    constexpr Config(int b) : baud(b) {}
+    long baud;                // (long: 115200 is past a 16-bit int)
+    constexpr Config(long b) : baud(b) {}
 };
 constexpr Config cfg(115200);    // constexpr constructor: constant
 
@@ -72,7 +72,7 @@ Tracer third("third");
 
 int main()
 {
-    printf("main: order %d dyn_int %d plain %d %d baud %d\n", order, dyn_int,
+    printf("main: order %d dyn_int %d plain %d %d baud %ld\n", order, dyn_int,
            plain.a, plain.b, cfg.baud);
     printf("names %s %s %s\n", first.name, drivers::second.name, third.name);
     printf("before singleton order %d\n", order);

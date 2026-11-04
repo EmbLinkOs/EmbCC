@@ -29,6 +29,11 @@ enum expr_kind { EXPR_NUM, EXPR_FNUM, EXPR_STR, EXPR_VAR, EXPR_BINOP, EXPR_CALL,
                                     * value a landing pad sees for catch
                                     * type ti (name; 0 = catch-all) */
 
+/* -fsanitize's checks (src/ir/irgen.c's trap checks; src/ir/sanitize.c
+ * and lib/san for the ones with a runtime) and no_sanitize's mask */
+enum { SAN_OVERFLOW = 1, SAN_DIVIDE = 2, SAN_SHIFT = 4,
+       SAN_ADDRESS = 8, SAN_THREAD = 16, SAN_MEMORY = 32 };
+
 struct stmt;   /* a statement expression `({ ... })` carries a block */
 
 /* B_LAND/B_LOR are short-circuit: irgen lowers them to branches, they
@@ -44,6 +49,10 @@ enum binop {
 
 struct expr {
     enum expr_kind kind;
+    /* __builtin_expect(x, c) and __builtin_expect_with_probability, which
+     * sema replaces with x: 1 when x is expected true, -1 false, 0 no
+     * hint. irgen makes the unlikely arm of an `if` cold (IR heat). */
+    int expect_hint;
     int line;
     int col;              /* 1-based column, for caret diagnostics (0 = unknown) */
     int quiet;            /* parsed in a system header, a system macro or
@@ -53,6 +62,13 @@ struct expr {
                            * u)x` as a compound literal -- which is not an
                            * lvalue */
     struct type *ty;      /* set by sema on every node */
+    unsigned long long *bigv; /* EXPR_NUM: a constant wider than 64 bits (a
+                               * wb literal), its limbs least significant
+                               * first; nbig of them */
+    int nbig;
+    int complit_sc;       /* EXPR_COMPLIT: C23 storage classes in it --
+                           * 1 static, 2 constexpr (static, const), 4
+                           * thread_local (static, per thread) */
     struct type *undecayed; /* sema: original array type when ty is the
                              * decayed pointer (sizeof needs it) */
     long num;             /* EXPR_NUM; EXPR_STR: element count incl NUL
@@ -262,6 +278,7 @@ struct stmt {
     const char *name;     /* STMT_DECL */
     struct type *dty;     /* STMT_DECL: declared type */
     int is_static;        /* STMT_DECL: a static local -> its own global */
+    int is_constexpr;     /* STMT_DECL: C23 constexpr (and so static, const) */
     int obj_const;        /* STMT_DECL: the object itself is const (its
                            * type, arrays aside, is const-qualified) */
     int is_tls;           /* STMT_DECL: `static __thread` -> a TLS global */
@@ -348,6 +365,10 @@ struct global {
     int is_tls;
     const char *section;  /* __attribute__((section("name"))), or NULL */
     int has_init;
+    int is_constexpr;     /* C23 constexpr: a const object whose value is
+                           * known now -- constexpr_init folds in sema's
+                           * constant expressions as the name's value */
+    struct expr *constexpr_init;
     int is_const;         /* the object is const: `const int t[4]`,
                            * `char *const p` -- not `const char *p` */
     int count_from_init;  /* an unsized array sized by its brace list at
@@ -368,6 +389,7 @@ struct global {
 
     int defined;          /* sema, canonical: some declaration defines it */
     int absorbed;         /* sema: merged into an earlier node */
+    struct global *lto_def; /* -flto: the unit that defines it, another */
     int used;
     int in_bss;           /* driver: no initializer -> .bss, else .data */
     int is_common;        /* driver: -fcommon made this tentative
@@ -445,6 +467,24 @@ struct func {
     int attr_used, attr_unused, attr_always_inline, attr_noinline;
     int attr_no_instrument;  /* no_instrument_function: -finstrument-functions
                               * leaves it alone (sticky across declarations) */
+    int attr_hot, attr_cold;  /* hot / cold: .text.hot / .text.unlikely; a
+                               * cold one is optimized for size and a path
+                               * to a call of it is an unlikely one */
+    int attr_no_profile;      /* no_profile_instrument_function */
+    unsigned attr_no_san;     /* no_sanitize(...): SAN_* bits it opts out of */
+    int attr_ssp;             /* stack_protect 1, no_stack_protector -1 */
+    int attr_nocf;            /* nocf_check: no IBT landing pad at entry */
+    /* -fstack-protector: the locals the canary guards (sema; each one
+     * var_indirect, carved by irgen below the canary), and whether the
+     * function has a canary at all; NULL / 0 when not */
+    char *var_ssp;
+    int ssp_on;
+    /* -fsanitize=address: the locals given redzones (sema), each one
+     * var_indirect, carved from one block by irgen; NULL when none */
+    char *var_asan;
+    int prof_heat;            /* -fprofile-use: IR_HEAT_COLD when the profile
+                               * never ran it, IR_HEAT_HOT for the hottest;
+                               * 0 when no profile speaks for it */
     int attr_deprecated, attr_warn_unused_result;
     /* C11 6.7.4p7. This declaration said `inline` / `extern`, and the
      * function carries __attribute__((gnu_inline)). Sema folds every
@@ -522,6 +562,7 @@ struct func {
                            * those sizes at entry */
     int declared;         /* sema: declaration has been reached */
     int absorbed;         /* sema: merged into an earlier node — skip */
+    struct func *lto_def; /* -flto: its definition, in another unit */
     int used;             /* sema: at least one call resolves here */
     /* ---- inferred, not declared ------------------------------------
      *
@@ -577,6 +618,9 @@ struct func {
      * frame register set, and the callee-saved registers it stores in its
      * frame (DWARF numbers; slots relative to the CFA) */
     int cfi_push, cfi_frame, cfi_saved_at, cfi_nsaved;
+    /* AArch64 -mbranch-protection=pac-ret: x30 is signed from this offset
+     * on (DW_CFA_AARCH64_negate_ra_state), 0 when it is not */
+    int cfi_pac;
     /* No frame record at all: a leaf that needs no frame pushes no rbp
      * and never moves rsp, so the CIE's opening rule -- CFA is rsp+8,
      * return address at CFA-8 -- holds for the whole function and the
@@ -589,6 +633,11 @@ struct func {
     int cfi_push_end[17];
     int cfi_reg[16];
     long cfi_off[16];
+    /* Win64: the function's UNWIND_INFO (its header and unwind codes, no
+     * handler), which .xdata carries and .pdata points at; NULL for a
+     * leaf that moves neither rsp nor a callee-saved register */
+    unsigned char *win_uw;
+    int win_uw_len;
     int sym_ndx;          /* driver: symbol index (defined or UNDEF) */
 };
 
@@ -602,6 +651,9 @@ struct econst {
     int seq;
     int line;
     int in_block;         /* declared inside a function body */
+    int has_object;       /* a C23 constexpr's: the name is an object too,
+                           * which sema resolves it to (the value folds
+                           * from the object's initializer there) */
     struct econst *next;
 };
 

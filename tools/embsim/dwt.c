@@ -1,6 +1,6 @@
 /* dwt.c -- the Cortex-M's data watchpoint and trace unit, at 0xE0001000:
  * only its cycle counter, CYCCNT, which counts the cost model's estimate
- * (tools/bench/cost.h) while CTRL.CYCCNTENA is set. The rest reads as
+ * (src/arch/cost.h) while CTRL.CYCCNTENA is set. The rest reads as
  * zero. */
 #include <stdlib.h>
 

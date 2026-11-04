@@ -96,6 +96,8 @@ void a64_rev(struct code *c, int rd, int rn, int size);
 /* ---- compare -------------------------------------------------------- */
 int  a64_cmp_imm(struct code *c, int rn, long imm, int w);
 void a64_cmp_reg(struct code *c, int rn, int rm, int w);
+int  a64_addsub_s_imm(struct code *c, int sub, int rd, int rn, long imm, int w);
+void a64_addsub_s_reg(struct code *c, int sub, int rd, int rn, int rm, int w);
 void a64_cset(struct code *c, int rd, int cond);
 void a64_csel(struct code *c, int rd, int rn, int rm, int cond, int w);
 
@@ -128,6 +130,7 @@ void a64_str(struct code *c, int rt, int rn, long off, int size);
 /* ---- frame ---------------------------------------------------------- */
 /* stp x29,x30,[sp,#-16]! ; mov x29,sp ; sub sp,sp,#framesize */
 void a64_prologue(struct code *c, int framesize);
+extern unsigned long g_a64_auth;          /* see a64_teardown */
 /* add sp,sp,#framesize ; ldp x29,x30,[sp],#16 ; ret */
 void a64_teardown(struct code *c, int framesize);
 void a64_epilogue(struct code *c, int framesize);
@@ -209,6 +212,14 @@ void a64_sys(struct code *c, int op1, int crn, int crm, int op2, int rt);
 void a64_exception(struct code *c, int kind, int imm);
 /* 128-bit SIMD&FP load/store, [rn, #off] with off a multiple of 16. */
 void a64_ldr_q(struct code *c, int qt, int rn, long off);
+/* Advanced SIMD, 128 bits, elements of es bytes (emit.c) */
+void a64_v_bin(struct code *c, int op, int rd, int rn, int rm, int es);
+void a64_v_shift(struct code *c, int left, int sign, int rd, int rn, int es,
+                 int sh);
+void a64_v_dup(struct code *c, int rd, int rn, int es);
+void a64_v_addv(struct code *c, int rd, int rn, int es);
+void a64_v_lane0(struct code *c, int rd, int rn, int es);
+void a64_v_widen(struct code *c, int rd, int rn, int es, int high, int sign);
 void a64_str_q(struct code *c, int qt, int rn, long off);
 
 /* ---- exclusive access (the atomics' retry loop) ---------------------- */

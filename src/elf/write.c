@@ -161,6 +161,13 @@ void elfw_set_flags(struct elfw *w, unsigned long flags)
     w->eflags = (Elf64_Word)flags;
 }
 
+/* sh_link of section `sec`: the section it belongs to (SHF_LINK_ORDER --
+ * ARM's .ARM.exidx names its .text) */
+void elfw_set_link(struct elfw *w, int sec, int link)
+{
+    w->sec[sec].hdr.sh_link = (Elf64_Word)link;
+}
+
 void elfw_free(struct elfw *w)
 {
     if (!w)
@@ -321,6 +328,34 @@ int elfw_write(struct elfw *w, const char *path)
         if (!have)
             elfw_add_section(w, ".note.GNU-stack", SHT_PROGBITS, 0, NULL,
                              0, 1);
+    }
+    /* -fcf-protection / -mbranch-protection: what the code was built
+     * for, in GNU_PROPERTY_*_FEATURE_1_AND -- the linker ANDs the inputs'
+     * and the loader turns the hardware on when every object says so */
+    int cf = target_cf();
+    unsigned bits = 0, prop = 0;
+    if (target_get() == TARGET_X86_64) {
+        prop = 0xc0000002u;
+        bits = (cf & CF_IBT ? 1u : 0) | (cf & CF_SHSTK ? 2u : 0);
+    } else if (target_get() == TARGET_AARCH64) {
+        prop = 0xc0000000u;
+        bits = (cf & CF_BTI ? 1u : 0) | (cf & CF_PAC ? 2u : 0);
+    }
+    if (bits && target_fmt_get() == TGT_FMT_ELF) {
+        unsigned char n[32];
+        memset(n, 0, sizeof n);
+        int be = target_big_endian();
+        unsigned wd[6] = { 4, 16, 5, 0, prop, 4 };
+        for (int k = 0; k < 6; k++)
+            for (int b = 0; b < 4; b++)
+                n[4 * k + b] = (unsigned char)(wd[k] >> (be ? 24 - 8 * b
+                                                             : 8 * b));
+        /* the name is bytes, not a word */
+        memcpy(n + 12, "GNU", 4);
+        for (int b = 0; b < 4; b++)
+            n[24 + b] = (unsigned char)(bits >> (be ? 24 - 8 * b : 8 * b));
+        elfw_add_section(w, ".note.gnu.property", SHT_NOTE, SHF_ALLOC, n,
+                         sizeof n, 8);
     }
     /* Materialize the bookkeeping sections after the user's: one
      * .rela.<target> per relocation group (sh_link/sh_info patched below
@@ -614,4 +649,43 @@ int elfw_write(struct elfw *w, const char *path)
         return -1;
     }
     return 0;
+}
+
+/* Reading back what the writer holds, for --stack-info (src/driver/
+ * stackinfo.c): the relocations applied to a section, and a symbol's
+ * name (the target's prefix taken off), type and section. */
+int elfw_rela_count(struct elfw *w, int target_ndx)
+{
+    if (target_ndx <= 0 || target_ndx >= w->nsec || !w->grp_of[target_ndx])
+        return 0;
+    return w->relagrp[w->grp_of[target_ndx] - 1].nrela;
+}
+
+void elfw_rela_at(struct elfw *w, int target_ndx, int k, unsigned long *off,
+                  int *sym, int *type)
+{
+    const struct rela_group *gp = &w->relagrp[w->grp_of[target_ndx] - 1];
+    const Elf64_Rela *r = (const Elf64_Rela *)gp->rela.p + k;
+    *off = (unsigned long)r->r_offset;
+    *sym = (int)ELF64_R_SYM(r->r_info);
+    *type = (int)ELF64_R_TYPE(r->r_info);
+}
+
+const char *elfw_symbol_name(struct elfw *w, int sym)
+{
+    if (sym <= 0 || sym >= w->nsym)
+        return NULL;
+    const Elf64_Sym *s = (const Elf64_Sym *)w->symtab.p + sym;
+    const char *n = (const char *)w->strtab.p + s->st_name;
+    size_t pl = w->sym_prefix ? strlen(w->sym_prefix) : 0;
+    if (pl && !strncmp(n, w->sym_prefix, pl))
+        n += pl;
+    return n;
+}
+
+int elfw_symbol_type(struct elfw *w, int sym)
+{
+    if (sym <= 0 || sym >= w->nsym)
+        return -1;
+    return ELF64_ST_TYPE(((const Elf64_Sym *)w->symtab.p + sym)->st_info);
 }

@@ -19,6 +19,7 @@
  * copy. A float arrives as a double. This is clang's walk for
  * powerpc-none-eabi, read off its code (docs/internals/powerpc-plan.md).
  */
+#include "../../as/gas.h"
 #include "../../ir/irgen_int.h"
 
 #include "../target.h"
@@ -446,7 +447,7 @@ void irg_asm_ppc(struct ir_func *fn, struct stmt *s)
                              : ppc_subst(file, s->line, a->tmpl, regs, imms,
                                          isimm, ismem, names, nops);
     struct code c = { 0 };
-    if (ppcasm_assemble(text, &c, err, sizeof err) != 0)
+    if (GAS_INLINE(ppcasm_assemble, file, s->line, text, &c, err, sizeof err) != 0)
         diag_fatal(file, s->line, "%s", err);
     free(text);
 

@@ -18,6 +18,9 @@ set -u
 here=$(dirname "$0")
 xlen=${2:-64}
 QEMU=${EMBCC_QEMU_RISCV:-qemu-system-riscv$xlen}
+# EMBCC_RISCV_CPU: a -cpu for the extensions a test turns on
+# (rv64,zba=true,zbb=true,...); QEMU's default otherwise
 "$here/../qrun.sh" "${EMBCC_QEMU_TIMEOUT:-10}" "$QEMU" \
-    -M virt -bios none -nographic -m 8 -kernel "$1" 2>/dev/null
+    -M virt ${EMBCC_RISCV_CPU:+-cpu "$EMBCC_RISCV_CPU"} -bios none -nographic \
+    -m 8 -kernel "$1" 2>/dev/null
 exit 0

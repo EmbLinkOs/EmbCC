@@ -36,6 +36,10 @@ static FILE *out(struct analysis *a)
 static u32 rd32(struct analysis *a, u32 addr, int *ok)
 {
     u32 v = 0;
+    /* a MIPS address in kseg0 or kseg1 is the physical address the bus
+     * answers once its top three bits are off (the stack is in kseg0) */
+    if (a->arch == AN_MIPS && addr >= 0x80000000u && addr < 0xc0000000u)
+        addr &= 0x1fffffffu;
     if (bus_debug_read(&a->s->bus, addr, 4, &v))
         *ok = 0;
     return v;

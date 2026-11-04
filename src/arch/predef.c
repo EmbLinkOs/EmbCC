@@ -141,11 +141,35 @@ static const struct predef_macro os_linux[] = {
     { "__unix__", "1" },
     { "__unix", "1" },
 };
+/* The macOS SDK asks the compiler what it is in two places EmbCC must
+ * answer as clang does: <libkern/OSByteOrder.h> by __LITTLE_ENDIAN__
+ * ("Unknown endianess" without it), and <TargetConditionals.h> by the
+ * TARGET_OS_ and TARGET_CPU_ macros clang 17 predefines (or else by
+ * __APPLE_CC__ with __GNUC__; "unknown compiler" with neither). */
+#define DARWIN_COMMON \
+    { "__APPLE__", "1" }, \
+    { "__MACH__", "1" }, \
+    { "__LITTLE_ENDIAN__", "1" }, \
+    { "__unix__", "1" }, \
+    { "__unix", "1" }, \
+    { "TARGET_OS_MAC", "1" }, { "TARGET_OS_OSX", "1" }, \
+    { "TARGET_OS_IPHONE", "0" }, { "TARGET_OS_IOS", "0" }, \
+    { "TARGET_OS_TV", "0" }, { "TARGET_OS_WATCH", "0" }, \
+    { "TARGET_OS_VISION", "0" }, { "TARGET_OS_MACCATALYST", "0" }, \
+    { "TARGET_OS_DRIVERKIT", "0" }, { "TARGET_OS_SIMULATOR", "0" }, \
+    { "TARGET_OS_EMBEDDED", "0" }, { "TARGET_OS_UNIX", "0" }, \
+    { "TARGET_OS_WIN32", "0" }, { "TARGET_OS_WINDOWS", "0" }, \
+    { "TARGET_OS_LINUX", "0" }, { "TARGET_OS_UIKITFORMAC", "0" }, \
+    { "TARGET_RT_LITTLE_ENDIAN", "1" }, { "TARGET_RT_BIG_ENDIAN", "0" }, \
+    { "TARGET_RT_64_BIT", "1" }, { "TARGET_RT_MAC_MACHO", "1" }, \
+    { "TARGET_RT_MAC_CFM", "0" }
 static const struct predef_macro os_darwin[] = {
-    { "__APPLE__", "1" },
-    { "__MACH__", "1" },
-    { "__unix__", "1" },
-    { "__unix", "1" },
+    DARWIN_COMMON,
+    { "TARGET_CPU_ARM64", "1" }, { "TARGET_CPU_X86_64", "0" },
+};
+static const struct predef_macro os_darwin_x86[] = {
+    DARWIN_COMMON,
+    { "TARGET_CPU_X86_64", "1" }, { "TARGET_CPU_ARM64", "0" },
 };
 /* ...and on arm64 the generated aarch64 table (gcc's, AAPCS64) is wrong
  * about the data model target.c's darwin_a64 describes. These replace
@@ -185,12 +209,106 @@ static int darwin_a64(void)
     return target_get() == TARGET_AARCH64 && target_os_get() == TGT_OS_DARWIN;
 }
 
+/* MinGW-w64's macros, as clang's x86_64-w64-mingw32 has them: the
+ * platform, the calling-convention keywords MinGW's headers spell, and
+ * __SEH__, which says exceptions unwind through .pdata/.xdata */
 static const struct predef_macro os_windows[] = {
     { "_WIN32", "1" },
     { "_WIN64", "1" },
+    { "__WIN32", "1" },
+    { "__WIN32__", "1" },
+    { "__WIN64", "1" },
+    { "__WIN64__", "1" },
+    { "__WINNT", "1" },
+    { "__WINNT__", "1" },
+    { "WIN32", "1" },
+    { "WIN64", "1" },
+    { "WINNT", "1" },
     { "__MINGW32__", "1" },
     { "__MINGW64__", "1" },
+    { "__MSVCRT__", "1" },
+    { "__SEH__", "1" },
+    { "__declspec(a)", "__attribute__((a))" },
+    { "__cdecl", "__attribute__((__cdecl__))" },
+    { "_cdecl", "__attribute__((__cdecl__))" },
+    { "__stdcall", "__attribute__((__stdcall__))" },
+    { "_stdcall", "__attribute__((__stdcall__))" },
+    { "__fastcall", "__attribute__((__fastcall__))" },
+    { "_fastcall", "__attribute__((__fastcall__))" },
+    { "__thiscall", "__attribute__((__thiscall__))" },
+    { "_thiscall", "__attribute__((__thiscall__))" },
+    { "__pascal", "__attribute__((__pascal__))" },
+    { "_pascal", "__attribute__((__pascal__))" },
 };
+
+/* ...and its data model, LLP64: long four bytes, wchar_t and wint_t
+ * UTF-16 units, the 64-bit types long long (clang's mingw values) */
+static const struct predef_macro win64_model[] = {
+    { "__CHAR16_TYPE__", "unsigned short" },
+    { "__INT64_C(c)", "c##LL" },
+    { "__INT64_MAX__", "9223372036854775807LL" },
+    { "__INT64_TYPE__", "long long int" },
+    { "__INTMAX_C(c)", "c##LL" },
+    { "__INTMAX_MAX__", "9223372036854775807LL" },
+    { "__INTMAX_TYPE__", "long long int" },
+    { "__INTPTR_MAX__", "9223372036854775807LL" },
+    { "__INTPTR_TYPE__", "long long int" },
+    { "__INT_FAST16_MAX__", "32767" },
+    { "__INT_FAST16_TYPE__", "short" },
+    { "__INT_FAST16_WIDTH__", "16" },
+    { "__INT_FAST32_MAX__", "2147483647" },
+    { "__INT_FAST64_MAX__", "9223372036854775807LL" },
+    { "__INT_FAST64_TYPE__", "long long int" },
+    { "__INT_FAST8_MAX__", "127" },
+    { "__INT_FAST8_TYPE__", "signed char" },
+    { "__INT_FAST8_WIDTH__", "8" },
+    { "__INT_LEAST64_MAX__", "9223372036854775807LL" },
+    { "__INT_LEAST64_TYPE__", "long long int" },
+    { "__LONG_LONG_MAX__", "9223372036854775807LL" },
+    { "__LONG_MAX__", "2147483647L" },
+    { "__LONG_WIDTH__", "32" },
+    { "__PTRDIFF_MAX__", "9223372036854775807LL" },
+    { "__PTRDIFF_TYPE__", "long long int" },
+    { "__SIG_ATOMIC_MAX__", "2147483647" },
+    { "__SIZEOF_LONG__", "4" },
+    { "__SIZEOF_WCHAR_T__", "2" },
+    { "__SIZEOF_WINT_T__", "2" },
+    { "__SIZE_MAX__", "18446744073709551615ULL" },
+    { "__SIZE_TYPE__", "long long unsigned int" },
+    { "__UINT64_C(c)", "c##ULL" },
+    { "__UINT64_MAX__", "18446744073709551615ULL" },
+    { "__UINT64_TYPE__", "long long unsigned int" },
+    { "__UINTMAX_C(c)", "c##ULL" },
+    { "__UINTMAX_MAX__", "18446744073709551615ULL" },
+    { "__UINTMAX_TYPE__", "long long unsigned int" },
+    { "__UINTPTR_MAX__", "18446744073709551615ULL" },
+    { "__UINTPTR_TYPE__", "long long unsigned int" },
+    { "__UINT_FAST16_MAX__", "65535" },
+    { "__UINT_FAST16_TYPE__", "unsigned short" },
+    { "__UINT_FAST32_MAX__", "4294967295U" },
+    { "__UINT_FAST64_MAX__", "18446744073709551615ULL" },
+    { "__UINT_FAST64_TYPE__", "long long unsigned int" },
+    { "__UINT_FAST8_MAX__", "255" },
+    { "__UINT_FAST8_TYPE__", "unsigned char" },
+    { "__UINT_LEAST64_MAX__", "18446744073709551615ULL" },
+    { "__UINT_LEAST64_TYPE__", "long long unsigned int" },
+    { "__WCHAR_MAX__", "65535" },
+    { "__WCHAR_MIN__", "0" },
+    { "__WCHAR_TYPE__", "unsigned short" },
+    { "__WCHAR_WIDTH__", "16" },
+    { "__WINT_MAX__", "65535" },
+    { "__WINT_MIN__", "0" },
+    { "__WINT_TYPE__", "unsigned short" },
+    { "__WINT_WIDTH__", "16" },
+    { "__WCHAR_UNSIGNED__", "1" },
+    { "__WINT_UNSIGNED__", "1" },
+};
+static const int nwin64_model = (int)(sizeof win64_model / sizeof *win64_model);
+
+static int win64(void)
+{
+    return target_get() == TARGET_X86_64 && target_os_get() == TGT_OS_WINDOWS;
+}
 
 /* The FPU on ARMv7E-M and ARMv8-M, when -mfpu= and -mfloat-abi=softfp|hard
  * turn it on. The generated tables are the soft-float ones (see
@@ -255,7 +373,8 @@ static int riscv_on(void)
 static int riscv_changes(void)
 {
     return riscv_on() && (target_riscv_flen() || !target_riscv_rvc() ||
-                          target_riscv_zifencei() || !target_riscv_atomics());
+                          target_riscv_zifencei() || !target_riscv_atomics() ||
+                          target_riscv_ext());
 }
 
 /* Without the A extension (clang's rv32imc): no __riscv_a, no
@@ -330,6 +449,42 @@ static int riscv_adds(struct predef_macro *out)
     }
     if (target_riscv_zifencei()) {
         out[n].name = "__riscv_zifencei"; out[n++].value = "2000000";
+    }
+    /* the multi-letter extensions, as clang spells them (version 1.0) */
+    unsigned ext = target_riscv_ext();
+    if (ext & RV_EXT_ZBA) { out[n].name = "__riscv_zba"; out[n++].value = "1000000"; }
+    if (ext & RV_EXT_ZBB) { out[n].name = "__riscv_zbb"; out[n++].value = "1000000"; }
+    if (ext & RV_EXT_ZBS) { out[n].name = "__riscv_zbs"; out[n++].value = "1000000"; }
+    if (ext & RV_EXT_ZFHMIN) {
+        out[n].name = "__riscv_zfhmin"; out[n++].value = "1000000";
+    }
+    if (ext & RV_EXT_ZFH) { out[n].name = "__riscv_zfh"; out[n++].value = "1000000"; }
+    {
+        static const struct { unsigned bit; const char *name; } more[] = {
+            { RV_EXT_ZICOND, "__riscv_zicond" }, { RV_EXT_ZBC, "__riscv_zbc" },
+            { RV_EXT_ZBKB, "__riscv_zbkb" }, { RV_EXT_ZBKC, "__riscv_zbkc" },
+            { RV_EXT_ZBKX, "__riscv_zbkx" }, { RV_EXT_ZCA, "__riscv_zca" },
+            { RV_EXT_ZCB, "__riscv_zcb" }, { RV_EXT_ZCMP, "__riscv_zcmp" },
+        };
+        for (unsigned k = 0; k < sizeof more / sizeof *more; k++)
+            if (ext & more[k].bit) {
+                out[n].name = more[k].name;
+                out[n++].value = "1000000";
+            }
+    }
+    if (ext & RV_EXT_V) {
+        static const struct predef_macro v[] = {
+            { "__riscv_v", "1000000" }, { "__riscv_vector", "1" },
+            { "__riscv_v_elen", "64" }, { "__riscv_v_elen_fp", "64" },
+            { "__riscv_v_min_vlen", "128" },
+            { "__riscv_v_intrinsic", "1000000" },
+            { "__riscv_zve32f", "1000000" }, { "__riscv_zve32x", "1000000" },
+            { "__riscv_zve64d", "1000000" }, { "__riscv_zve64f", "1000000" },
+            { "__riscv_zve64x", "1000000" }, { "__riscv_zvl128b", "1000000" },
+            { "__riscv_zvl32b", "1000000" }, { "__riscv_zvl64b", "1000000" },
+        };
+        for (unsigned k = 0; k < sizeof v / sizeof *v; k++)
+            out[n++] = v[k];
     }
     if (!target_riscv_atomics())
         for (int k = 0; k < N_RV_LOCK_FREE; k++) {
@@ -502,11 +657,19 @@ static int contradicted(const char *name)
             if (strcmp(name, darwin_a64_model[i].name) == 0)
                 return 1;               /* replaced below */
     }
+    if (win64()) {
+        if (strcmp(name, "_LP64") == 0 || strcmp(name, "__LP64__") == 0)
+            return 1;
+        for (int i = 0; i < nwin64_model; i++)
+            if (strcmp(name, win64_model[i].name) == 0)
+                return 1;               /* replaced below */
+    }
     return (target_fmt_get() != TGT_FMT_ELF && strcmp(name, "__ELF__") == 0) ||
            thumb_fpu_drops(name) || riscv_drops(name) ||
            (thumb_dsp() && target_thumb_arch() == 7 &&
             strcmp(name, "__ARM_ARCH_7M__") == 0) ||
            (target_thumb_cmse() && strcmp(name, "__ARM_FEATURE_CMSE") == 0) ||
+           (target_thumb_v81() && strcmp(name, "__ARM_ARCH_8M_MAIN__") == 0) ||
            (avr_other_part() && strcmp(name, "__AVR_ATmega328P__") == 0);
 }
 
@@ -525,7 +688,13 @@ const struct predef_macro *predef_table(int *count)
         os = os_linux;   nos = (int)(sizeof os_linux / sizeof *os_linux);
         break;
     case TGT_OS_DARWIN:
-        os = os_darwin;  nos = (int)(sizeof os_darwin / sizeof *os_darwin);
+        if (target_get() == TARGET_X86_64) {
+            os = os_darwin_x86;
+            nos = (int)(sizeof os_darwin_x86 / sizeof *os_darwin_x86);
+        } else {
+            os = os_darwin;
+            nos = (int)(sizeof os_darwin / sizeof *os_darwin);
+        }
         break;
     case TGT_OS_WINDOWS:
         os = os_windows; nos = (int)(sizeof os_windows / sizeof *os_windows);
@@ -551,8 +720,10 @@ const struct predef_macro *predef_table(int *count)
     int bf16 = !predef_is_cxx() &&
                !table_has(arch, narch, "__BFLT16_MANT_DIG__");
     int avrb = target_get() == TARGET_AVR;
+    int v81 = target_thumb_v81();
     if (!os && !fpu && !cmse && !rv && !dsp && !avr && !pic32 && !f16 &&
-        !bf16 && !avrb && target_fmt_get() == TGT_FMT_ELF) {
+        !bf16 && !avrb && !v81 && !(target_cf() & (CF_BTI | CF_PAC)) &&
+        target_fmt_get() == TGT_FMT_ELF) {
         *count = narch;
         return arch;
     }
@@ -561,7 +732,7 @@ const struct predef_macro *predef_table(int *count)
     static int nmerged;
     if (!merged) {
         merged = xmalloc((size_t)(narch + nos + 40 + N_RV_LOCK_FREE +
-                                  ndarwin_a64_model +
+                                  ndarwin_a64_model + nwin64_model +
                                   (int)(sizeof flt16_add / sizeof *flt16_add) +
                                   (int)(sizeof bflt16_add / sizeof *bflt16_add) +
                                   (int)(sizeof avr_builtin_add /
@@ -575,8 +746,40 @@ const struct predef_macro *predef_table(int *count)
         if (darwin_a64())
             for (int i = 0; i < ndarwin_a64_model; i++)
                 merged[nmerged++] = darwin_a64_model[i];
+        if (win64())
+            for (int i = 0; i < nwin64_model; i++)
+                merged[nmerged++] = win64_model[i];
         if (cmse)
             merged[nmerged++] = thumb_cmse_add[0];
+        if (v81) {                  /* ARMv8.1-M Mainline, and its MVE */
+            merged[nmerged].name = "__ARM_ARCH_8_1M_MAIN__";
+            merged[nmerged++].value = "1";
+            if (target_thumb_mve()) {
+                merged[nmerged].name = "__ARM_FEATURE_MVE";
+                merged[nmerged++].value = target_thumb_mve() == 3 ? "3" : "1";
+            }
+            if (target_thumb_pacbti()) {         /* (cortex-m85, +pacbti) */
+                merged[nmerged].name = "__ARM_FEATURE_PAUTH";
+                merged[nmerged++].value = "1";
+                merged[nmerged].name = "__ARM_FEATURE_BTI";
+                merged[nmerged++].value = "1";
+            }
+        }
+        /* -mbranch-protection's, as clang's: BTI landing pads, and the
+         * return-address signing -- bit 0 the A key, 1 the B, 2 leaves */
+        if (target_get() == TARGET_AARCH64 || v81) {
+            int cf = target_cf();
+            if (cf & CF_BTI) {
+                merged[nmerged].name = "__ARM_FEATURE_BTI_DEFAULT";
+                merged[nmerged++].value = "1";
+            }
+            if (cf & CF_PAC) {
+                static const char *const pv[] = { "1", "2", "5", "6" };
+                merged[nmerged].name = "__ARM_FEATURE_PAC_DEFAULT";
+                merged[nmerged++].value =
+                    pv[((cf & CF_PAC_BKEY) ? 1 : 0) + ((cf & CF_PAC_LEAF) ? 2 : 0)];
+            }
+        }
         if (dsp && target_thumb_arch() == 7)
             merged[nmerged++] = thumb_v7em_add[0];
         if (dsp)
@@ -611,6 +814,14 @@ const struct predef_macro *predef_table(int *count)
                 merged[nmerged++] = add[i];
             if (target_thumb_hard_abi())
                 merged[nmerged++] = thumb_hard_add[0];
+            if (target_arm_neon()) {       /* clang's, with -mfpu=neon */
+                static const struct predef_macro neon_add[] = {
+                    { "__ARM_NEON", "1" }, { "__ARM_NEON__", "1" },
+                    { "__ARM_NEON_FP", "0x4" },
+                };
+                for (size_t k = 0; k < sizeof neon_add / sizeof *neon_add; k++)
+                    merged[nmerged++] = neon_add[k];
+            }
         } else if (fpu) {
             for (size_t i = 0; i < sizeof thumb_fpu_add / sizeof *thumb_fpu_add; i++) {
                 if (i == 0 && target_thumb_fpu_dp())

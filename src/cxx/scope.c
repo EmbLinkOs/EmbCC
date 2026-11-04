@@ -160,6 +160,48 @@ static struct csym *merge_sets(struct csym *y, struct csym *z)
     return m;
 }
 
+/* Two-phase lookup (13.8.4): a template's tokens replayed at its
+ * instantiation see, by ordinary lookup, the functions declared before
+ * them -- those after are found by argument-dependent lookup only. The
+ * cursor is where the replay reads, so code read in order sees all. */
+static struct csym *declared_before(struct csym *y)
+{
+    if (see_hidden || y->k != CS_FUNC)
+        return y;
+    int h = cx_pos + 1, n = 0, late = 0;
+    for (struct cfunc *f = y->fns; f; f = f->next) {
+        if (f->pos > h)
+            late = 1;
+        else
+            n++;
+    }
+    if (!late)
+        return y;
+    if (!n)
+        return NULL;
+    if (y->vis && y->nvis == n)
+        return y->vis;
+    struct csym *m = xmalloc(sizeof *m);
+    *m = *y;
+    m->hnext = m->next = m->vis = NULL;
+    m->fns = NULL;
+    struct cfunc **tail = &m->fns;
+    for (struct cfunc *g = y->fns; g; g = g->next) {
+        if (g->pos > h)
+            continue;
+        struct cfunc *og = g->alias_of ? g->alias_of : g;
+        struct cfunc *a = xmalloc(sizeof *a);
+        *a = *og;
+        a->alias_of = og;
+        a->next = NULL;
+        *tail = a;
+        tail = &a->next;
+    }
+    y->vis = m;
+    y->nvis = n;
+    return m;
+}
+
 /* A name in `s` or in a namespace a using-directive in `s` nominates
  * (transitively; `depth` guards a cycle of directives) — an inline
  * namespace's among them. Functions found in more than one are one
@@ -171,6 +213,8 @@ static struct csym *find_with_usings(struct cscope *s, const char *name,
                           : scope_find_here(s, name);
     if (y && !see_hidden && only_hidden_friends(y))
         y = NULL;                 /* (a hidden friend: not for this) */
+    if (y && !tags && !(y = declared_before(y)))
+        y = scope_find_tag(s, name);
     if (depth > 16 || (y && (tags || y->k != CS_FUNC)))
         return y;
     for (int i = 0; i < s->nusings; i++) {
@@ -221,10 +265,43 @@ static struct csym *find_in(struct cscope *s, const char *name)
     return find_with_usings(s, name, 0, 0);
 }
 
+/* Unqualified, from inside a class: its members and its non-dependent
+ * bases' -- a base its specifier names through a template parameter is
+ * searched only when asked (this->x, B<T>::x; 13.8.3.2). */
+static struct csym *find_unqual(struct cscope *s, const char *name)
+{
+    if (s->k != SC_CLASS)
+        return find_with_usings(s, name, 0, 0);
+    struct cclass *c = s->cls;
+    int dep = 0;
+    class_ensure(c);
+    for (int i = 0; i < c->nbases; i++)
+        dep |= c->bases[i].dep;
+    if (!dep)
+        return class_member(c, name);
+    struct csym *y = scope_find_here(c->scope, name);
+    if (y)
+        return y;
+    struct csym *found = NULL;
+    for (int i = 0; i < c->nbases; i++) {
+        if (c->bases[i].dep)
+            continue;
+        struct csym *z = class_member(c->bases[i].cls, name);
+        if (!z || z == found)
+            continue;
+        if (found && !(z->k == CS_CLASS && found->k == CS_CLASS &&
+                       z->type->cls == found->type->cls))
+            class_lookup_ambiguous = 1;
+        if (!found)
+            found = z;
+    }
+    return found;
+}
+
 struct csym *lookup(struct cscope *from, const char *name)
 {
     for (struct cscope *s = from; s; s = s->parent) {
-        struct csym *y = find_in(s, name);
+        struct csym *y = find_unqual(s, name);
         if (y)
             return y->k == CS_PACK ? pack_current(y) : y;
     }
@@ -235,7 +312,7 @@ struct csym *lookup(struct cscope *from, const char *name)
 struct csym *lookup_raw(struct cscope *from, const char *name)
 {
     for (struct cscope *s = from; s; s = s->parent) {
-        struct csym *y = find_in(s, name);
+        struct csym *y = find_unqual(s, name);
         if (y)
             return y;
     }

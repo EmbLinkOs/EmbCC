@@ -242,7 +242,6 @@ RISC-V).
 
 | Construct | Diagnostic |
 |---|---|
-| `asm goto` | `` `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that `` |
 | Nested function definitions | A syntax error: `expected ';' before '{'` |
 | K&R (old-style) function definitions | A syntax error: `expected a parameter type before 'a'` |
 | C23 `u8` character constants (`u8'a'`) | A syntax error |
@@ -352,65 +351,47 @@ target:
 | x86-64 and AArch64 ELF | Supported, with exceptions, RTTI and `libcxx.a`. |
 | Apple arm64 | Supported, with exceptions, against the system's C++ runtime. |
 | macOS x86-64 | An object that uses exceptions does not link: Apple's linker reports `ld: fixup error (kind=x86_64_rip) ... target '___cxa_allocate_exception' does not have address`. Compile with `-fno-exceptions`. |
-| Windows x86-64 | Only with `-fno-exceptions -fno-unwind-tables`. Otherwise every unit is refused: `C++ exceptions are not supported for a Windows target yet: the unwind tables go in .pdata and .xdata and neither is written` |
-| 32-bit ARM (Cortex-M, ARM state), RV32 | Supported with `-fno-exceptions`, with or without RTTI: the data model is the target's, the Itanium ABI's 32-bit form with the ARM C++ ABI's changes on ARM, checked against clang++ by `tests/golden/cxx-abi-ilp32.sh` and run on six boards by `tests/golden/cxx-embedded.sh`; runtime from `make libcxx-embedded`. Exceptions are refused: `C++ exceptions are not supported for thumbv7m-none-eabi yet: EmbCC writes no ARM EHABI unwind tables (.ARM.exidx); compile with -fno-exceptions`. |
-| MIPS (`mipsel-none-elf`, `mips-none-elf`, `mips64-none-elf`), PowerPC, SPARC, ColdFire, Xtensa, TriCore, RX | Supported with `-fno-exceptions`, as on 32-bit ARM and RV32; runtime from `make libcxx-embedded`. |
-| AVR | Not supported: `C++ is not yet supported for avr: the C++ lowering assumes a 32-bit int and 4-byte pointers (integral promotions, member pointers, RTTI), and this target's are 16 bits`. `-fsyntax-only`, `-E` and `-c -M` still run. |
-| RV64, `mips64el-none-elf`, LoongArch64 | Not supported. Code is generated with `-fno-exceptions`, but no `libcxx.a` is built, and on RV64 a function that needs a landing pad is refused: `the RV64 backend cannot lower this operation yet (function F) [landing w=8 size=4]`. |
+| Windows x86-64 | Supported, with exceptions (`.pdata`/`.xdata`, `__gxx_personality_seh0`), against MinGW's libstdc++. |
+| 32-bit ARM (Cortex-M, ARM state), RISC-V (RV32, RV64), MIPS (all four) | Supported, with exceptions (ARM EHABI on ARM) and RTTI, checked against clang++ by `tests/golden/cxx-abi-ilp32.sh` and run on the boards by `tests/golden/cxx-embedded.sh`; runtime from `make libcxx-embedded`. |
+| Xtensa, TriCore | Supported, with exceptions (Xtensa's window walk, TriCore's CSA chain). |
+| PowerPC, SPARC, ColdFire, RX, LoongArch64 | Supported with `--no-exceptions`; with them a unit is refused by name: `C++ exceptions are not supported for TARGET yet: EmbCC writes no ... .eh_frame; compile with --no-exceptions`. |
+| AVR | Supported, with AVR's two-byte `int` and pointers; exceptions off by default, refused by name when asked for. |
 
 Language refusals:
 
 | Construct | Diagnostic |
 |---|---|
-| Modules | `modules are not supported` |
-| `asm goto` | `asm goto in C++ is not supported yet` |
-| File-scope `asm` | `file-scope asm in C++ is not supported yet` |
-| `&&label` and computed `goto` | `label addresses are not supported in C++` |
 | `_Atomic` | `_Atomic is not supported in C++` |
-| An initializer on an array `new` | `an initializer for new[] is not supported yet` |
-| A structured binding at namespace scope | `a structured binding at namespace scope is not supported yet` |
-| Explicit instantiation of a variable template | `explicit instantiation of a variable template is not supported yet` |
-| `#pragma pack` | `#pragma pack is not supported in C++: it would change the layout and EmbCC would ignore it. Use __attribute__((packed)) on the struct` |
-| `auto(x)` (C++23) | `expected an expression before 'auto'` |
-| Multidimensional `operator[]` (C++23) | `'M' has no viable operator[]` |
 
-Two-phase name lookup is not implemented: a template is parsed again at
-each instantiation, so a non-dependent name is looked up at the point of
-instantiation. Several ill-formed constructs are accepted without a
-diagnostic. Both are described in
+Function names in a template are looked up in two phases: ordinary
+lookup sees the declarations before the template, and argument-dependent
+lookup the rest at instantiation; a base named through a template
+parameter is not searched unqualified. Several ill-formed constructs are
+accepted without a diagnostic; see
 [C++ support](../manual/cxx.md#notes-on-partial-support).
 
 ## ABI limitations
 
 ### Windows
 
-Every compile for `x86_64-windows-gnu` (or its alias
-`x86_64-w64-mingw32`) prints this warning. It is on by default and
-`-Wno-windows-abi` silences it:
-
-```text
-embcc: f.c: warning: x86_64-windows-gnu is not yet the Microsoft x64 ABI: `long` is 8 bytes and wchar_t 4 (Windows has 4 and 2), and rsi, rdi, xmm6 and xmm7 are not preserved across a call: objects EmbCC compiles agree with each other and with nothing else [--warn=windows-abi]
-```
-
-Argument registers, shadow space, by-reference passing of aggregates and
-the Microsoft `va_list` are implemented; see
-[Windows](../manual/targets.md#windows-coff). No program built for this
-target has run on Windows, and EmbCC provides no C library for it.
-These are refused:
+`x86_64-windows-gnu` (or its alias `x86_64-w64-mingw32`) is the Microsoft
+x64 ABI as MinGW has it: LLP64, the four slots and the shadow space,
+aggregates other than 1, 2, 4 and 8 bytes by reference, `long double` and
+`__int128` by reference (a `long double` returned through a hidden
+pointer, an `__int128` in `xmm0`), the Microsoft `va_list`, `rsi`, `rdi`
+and `xmm6`-`xmm15` preserved, `.pdata`/`.xdata` unwind, `.ctors`,
+DWARF under `-g` and emulated TLS; see
+[Windows](../manual/targets.md#windows-coff). `tests/golden/win-abi-run.sh`
+has gcc's `ms_abi` callers call EmbCC's code and the other way round. No
+program built for this target has run on Windows, and EmbCC provides no
+C library for it. These are refused:
 
 | Construct | Diagnostic |
 |---|---|
-| `long double` in a function's signature | `long double in the signature of 'f' is not supported for a Windows target yet: there it travels by reference and returns through a hidden pointer, and EmbCC passes it on the stack by value` |
-| `__int128` in a function's signature | `__int128 in the signature of 'f' is not supported for a Windows target yet: EmbCC lowers its arithmetic to libgcc helpers whose arguments it places in the System V registers` |
-| `va_arg` of a structure | `va_arg of a struct is not supported for a Windows target yet` |
-| `va_arg` of `long double` or `__int128` | `va_arg of long double is not supported for a Windows target yet: there it travels by reference` |
-| `-g` | `-g is not supported for a Windows target yet: its debug information goes in CodeView records this does not write, and emitting DWARF under a COFF name would be worse than refusing` |
-| `__thread` | `__thread is not supported for a Windows target yet: Windows reaches a thread-local through a _tls_index and a TLS directory this writer does not emit` |
-| `constructor`, `destructor` | `__attribute__((constructor)) is not supported for a Windows target yet: it needs the .ctors/.dtors sections this COFF writer does not emit` |
-| File-scope `asm` with labels or symbol references | `a file-scope asm block with labels or symbol references is not supported for a Windows target yet` |
+| A file-scope `asm` block's `.section` | `file-scope asm section ".boot" is not supported: EmbCC places every byte of a block in .text, where this data would not be writable; define it in C` |
+| `-g` with a function in a section of its own | `-g with a function in a section of its own ('f') is not supported for a Windows target yet` |
 | `alias` | `alias attribute on 'h' is not supported for COFF output` |
 | `section` on a function | `a function's section attribute is not supported for COFF output` |
-| `section` on a variable | `'v': a variable's section attribute is not supported for COFF output` |
 
 ### Darwin
 
@@ -421,10 +402,7 @@ and `x86_64-apple-darwin` follows System V; see
 
 | Construct | Diagnostic |
 |---|---|
-| `-g` | Warning, and the object is compiled without debug information: `-g: no debug information for aarch64-apple-darwin yet; d.c is compiled without it` |
-| `__thread` | `__thread is not supported for a Darwin target yet: Mach-O addresses a thread-local through a __thread_vars descriptor, which this writer does not emit` |
-| `constructor`, `destructor` | `__attribute__((constructor)) is not supported for a Darwin target yet: it needs a __DATA,__mod_init_func section this Mach-O writer does not emit` |
-| File-scope `asm` with labels or symbol references | `a file-scope asm block with labels or symbol references is not supported for a Darwin target yet: its bytes would be emitted but its symbols and relocations dropped` |
+| An address (`.quad sym`) in a file-scope `asm` block | `an address in a file-scope asm block is not supported for a Darwin target: the block is in __text, where macOS links no absolute address (a text relocation); define the table in C` |
 | `alias` | `alias attribute on 'h' is not supported for Mach-O output` |
 | `section` on a function | `a function's section attribute is not supported for Mach-O output` |
 
@@ -619,7 +597,7 @@ audited:
   TriCore, PowerPC, RX, SPARC and ColdFire; GCC's MIPS
   `use_shadow_register_set` and `use_debug_exception_return`.
 - A `_Float16` through `...`, and a struct of them by value with the
-  ARM or RISC-V hard-float convention; `asm goto`, nested functions,
+  ARM or RISC-V hard-float convention; nested functions,
   and sixteen-byte atomics off x86-64 and AArch64
   (see [What each target compiles](../manual/limits.md)).
 - On MIPS32, a delay slot filled from anywhere but the instruction just

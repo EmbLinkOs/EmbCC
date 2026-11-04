@@ -19,6 +19,8 @@ int cx_pos;
 int cx_half_gt;
 void *cx_sfinae;
 
+static void strip_packs(void);
+
 void cx_tokenize(const char *file, const char *src)
 {
     struct lexer lx;
@@ -38,7 +40,113 @@ void cx_tokenize(const char *file, const char *src)
             break;
         lex_next(&lx);
     }
+    strip_packs();
     cx_pos = 0;
+}
+
+/* `#pragma pack(...)`, which the preprocessor hands on as
+ * `__embcc_pack(args)`: taken out of the token array, each change kept
+ * with the position of the token after it. A class's members are aligned
+ * by the value in effect where its body starts (cx_pack_at); a template's
+ * instance replays its definition's tokens, so it has its definition's.
+ * (n), (), (push), (push, n), (pop), (show), as in C. */
+struct pack_ev {
+    int pos;
+    int push, pop, set, n;
+};
+static struct pack_ev *pack_evs;
+static int npack_evs, cap_pack_evs;
+
+int cx_pack_at(int pos)
+{
+    int cur = 0, stack[32], depth = 0;
+    for (int i = 0; i < npack_evs && pack_evs[i].pos <= pos; i++) {
+        const struct pack_ev *e = &pack_evs[i];
+        if (e->pop) {
+            cur = depth ? stack[--depth] : 0;
+            continue;
+        }
+        if (e->push && depth < 32)
+            stack[depth++] = cur;
+        if (e->set)
+            cur = e->n;
+    }
+    return cur;
+}
+
+/* Is there a pack change in (from, to)? (A class body's: refused.) */
+int cx_pack_between(int from, int to)
+{
+    for (int i = 0; i < npack_evs; i++)
+        if (pack_evs[i].pos > from && pack_evs[i].pos < to)
+            return 1;
+    return 0;
+}
+
+static void strip_packs(void)
+{
+    int out = 0, depth = 0;
+    npack_evs = 0;
+    for (int i = 0; i < cx_ntoks; i++) {
+        struct ctok *k = &cx_toks[i];
+        if (!(k->t.kind == TOK_IDENT && strcmp(k->t.text, "__embcc_pack") == 0 &&
+              i + 1 < cx_ntoks && cx_toks[i + 1].t.kind == TOK_LPAREN)) {
+            cx_toks[out++] = *k;
+            continue;
+        }
+        struct pack_ev e = { out, 0, 0, 0, 0 };
+        int j = i + 2;
+        struct ctok *a = &cx_toks[j];
+        if (a->t.kind == TOK_IDENT && (!strcmp(a->t.text, "push") ||
+                                      !strcmp(a->t.text, "pop") ||
+                                      !strcmp(a->t.text, "show"))) {
+            const char *w = a->t.text;
+            j++;
+            if (!strcmp(w, "pop")) {
+                if (cx_toks[j].t.kind != TOK_RPAREN)
+                    cx_error(k, "#pragma pack(pop, ...) with a name or count "
+                                "is not supported");
+                if (depth == 0)
+                    cx_error(k, "#pragma pack(pop) without a matching push");
+                depth--;
+                e.pop = 1;
+            } else if (!strcmp(w, "push")) {
+                e.push = 1;
+                if (depth++ == 32)
+                    cx_error(k, "#pragma pack(push) nested too deeply");
+                if (cx_toks[j].t.kind == TOK_COMMA) {
+                    j++;
+                    if (cx_toks[j].t.kind == TOK_IDENT)
+                        cx_error(k, "#pragma pack(push, name) is not "
+                                    "supported");
+                    e.set = 1;
+                }
+            }
+        } else if (a->t.kind != TOK_RPAREN) {
+            e.set = 1;
+        } else {
+            e.set = 1;                     /* pack(): back to none */
+            e.n = 0;
+        }
+        if (e.set && cx_toks[j].t.kind != TOK_RPAREN) {
+            long v = cx_toks[j].t.num;
+            if (cx_toks[j].t.kind != TOK_NUM ||
+                (v != 0 && v != 1 && v != 2 && v != 4 && v != 8 && v != 16))
+                cx_error(k, "#pragma pack wants 1, 2, 4, 8 or 16");
+            e.n = (int)v;
+            j++;
+        }
+        if (cx_toks[j].t.kind != TOK_RPAREN)
+            cx_error(k, "')' to close #pragma pack");
+        if (npack_evs == cap_pack_evs) {
+            cap_pack_evs = cap_pack_evs ? cap_pack_evs * 2 : 8;
+            pack_evs = xrealloc(pack_evs,
+                                (size_t)cap_pack_evs * sizeof *pack_evs);
+        }
+        pack_evs[npack_evs++] = e;
+        i = j;                             /* (past the `)`) */
+    }
+    cx_ntoks = out;
 }
 
 void cx_advance(void)

@@ -70,8 +70,10 @@ refopt -mtc13 'not a TriCore 1.6 core'
 refopt -mcpu=tc1.3.1 'not a TriCore 1.6 core'
 refopt -mhard-float '-mhard-float is not supported'
 refopt -mfpu=fpv4-sp-d16 'ARM option'
+# unwind tables (C++ exceptions': the CSA-chain unwinder reads them)
 for o in -funwind-tables -fasynchronous-unwind-tables -fexceptions; do
-    refopt $o 'unwind tables are not supported for tricore-none-elf yet'
+    "$EMBCC" --target=$T $o -c "$out/f.c" -o /dev/null || {
+        echo "$o was refused"; exit 1; }
 done
 echo "the TriCore 1.6 cores and soft float are accepted, other cores refused"
 
@@ -105,14 +107,9 @@ refc "__int128" '__int128 does not exist on this target' \
     '__int128 x;'
 # (an interrupt handler compiles: tests/golden/tricore-isr.sh)
 printf 'int f(int x) { return x; }\n' > "$out/c.cc"
-# C++ compiles here without exceptions (tests/golden/cxx-embedded.sh runs
-# it); exceptions, on by default, are refused by name: there are no
-# unwind tables for this target
-if "$EMBCC" --target=$T -c "$out/c.cc" -o /dev/null 2> "$out/cxx.err"; then
-    echo "C++ with exceptions was accepted"; exit 1
-fi
-grep -q 'C++ exceptions are not supported for tricore-none-elf' "$out/cxx.err" || {
-    echo "C++ exceptions were refused, but not by name:"; cat "$out/cxx.err"; exit 1; }
+# C++ with exceptions (on by default), and without
+"$EMBCC" --target=$T -c "$out/c.cc" -o /dev/null 2> "$out/cxx.err" || {
+    echo "C++ with exceptions was refused:"; cat "$out/cxx.err"; exit 1; }
 "$EMBCC" --target=$T -fno-exceptions -c "$out/c.cc" -o /dev/null || {
     echo "C++ with -fno-exceptions does not compile"; exit 1; }
 # .s/.S files, file-scope blocks and naked functions are the assembler's

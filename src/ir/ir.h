@@ -20,6 +20,9 @@
  * true `size` (1/2/4/8); LDVAR/LOAD extend on the way in (per `sign`),
  * STVAR/STORE truncate on the way out. `sign` also picks signed vs
  * unsigned division, shift, and comparison. */
+enum { IR_HEAT_COLD = 1, IR_HEAT_NORMAL = 2, IR_HEAT_HOT = 3 };
+static inline int ir_prob_flip(int p) { return p ? 1002 - p : 0; }
+
 enum ir_op {
     IR_CONST, /* dst = imm            (w) */
     IR_MOV,   /* dst = a              (full temp-to-temp copy) */
@@ -187,6 +190,14 @@ enum ir_op {
     IR_MULW,   /* dst = the whole 64-bit product of 32-bit a and b
                 * (w 8, sign) -- mul + mulh, smull/umull, mult/multu */
 
+    /* ---- the bit counts, as instructions ----------------------------
+     * dst = the leading zeros, the trailing zeros, the set bits of a, an
+     * unsigned value of `size` bytes (4 or 8) computed at width w; clz
+     * and ctz of 0 are `size` * 8. Emitted only where the target has
+     * the instruction (irgen's bitcnt_insn: RISC-V's Zbb); everywhere
+     * else the builtins stay irgen's shifts, masks and multiply. */
+    IR_CLZ, IR_CTZ, IR_POPCNT,
+
     IR_OPCOUNT   /* not an opcode: the table size, so print and parse can
                    * agree on how many there are */
 };
@@ -297,6 +308,21 @@ struct ir_ins {
     int flash;               /* LOAD: from AVR program memory (__flash), read
                               * with LPM. Set with vol, so no pass folds it into
                               * an ordinary load or a memcpy (irgen emit_load) */
+    /* What the profile (-fprofile-use), __builtin_expect, a cold callee
+     * or a cold attribute says about how often this runs: IR_HEAT_*, 0
+     * when nothing is known. Every instruction of a block carries its
+     * block's, so a pass that moves an instruction keeps it. Read by the
+     * layout pass (cold code to the function's end), the inliner and the
+     * loop passes; codegen never looks. */
+    unsigned char heat;
+    /* IR_LOAD/IR_STORE: an atomic load or store (C11 atomics, __atomic_*,
+     * _Atomic objects) -- for -fsanitize=thread, which treats it as the
+     * synchronization it is rather than as a racing access */
+    unsigned char atomic;
+    /* IR_BRZ/IR_BRNZ: 1 + the per-mille probability that the branch is
+     * TAKEN (1..1001); 0 unknown. A pass that inverts a branch flips it
+     * (ir_prob_flip). */
+    short prob;
     long imm;                /* IR_CONST; also the folded value when imm_b */
     int imm_b;               /* ADD/SUB/AND/OR/XOR/CMP: operand b is the constant
                               * in `imm` (an immediate), not vreg b — set by the
@@ -427,6 +453,8 @@ struct ir_ins {
                               * (type.h ty_x87_ret): 1 one long double in st0,
                               * 2 a long double _Complex in st0/st1 */
     int scratch;             /* frame offset of the returned struct */
+    int ret_ldref;           /* IR_CALL, Microsoft x64: a long double result
+                              * through a hidden pointer to `scratch` */
     struct ir_asm *asm_ir;   /* IR_ASM */
     int eh_region;           /* IR_CALL: 1 + the innermost exception region
                               * it is in (ir_func.eh), 0 if none */
@@ -474,6 +502,22 @@ struct ir_cfi { int off, kind, reg; long val; };
 /* `line`/`col` are where the variable was DECLARED (R3). A diagnostic or a
  * remark about a variable has to point at the variable, not at the function
  * that happens to contain it. */
+/* Where a variable is over [lo, hi) of .text: a register (DWARF number),
+ * a frame-base offset, or a register pair (val the low half's register,
+ * val2 the high's, each `piece` bytes). */
+enum { IR_LOC_NONE, IR_LOC_REG, IR_LOC_FB, IR_LOC_REGPAIR,
+       IR_LOC_REGRUN /* val2 registers from val, `piece` bytes each */ };
+struct ir_dbgloc {
+    int lo, hi;
+    int kind;
+    int val, val2, piece;
+};
+/* A vreg's home, as a backend reports it to ra_debug_locs. */
+struct ir_vhome {
+    int kind;                  /* IR_LOC_* */
+    int val, val2, piece;
+};
+
 struct ir_dbgvar {
     const char *name;
     int vreg;
@@ -556,6 +600,18 @@ struct ir_func {
     struct ir_dbgvar *dbgvars; /* -g: params + locals (irgen) */
     int ndbgvars, dbgvarcap;
     int *var_off;            /* -g: rbp-relative slot offset per vreg (codegen) */
+    /* -g, optimized code: what follows a variable mem2reg took out of
+     * memory. vreg_var[t] is 1 + the variable's vreg when temp t holds
+     * its value (mem2reg; nvreg_var long, so a temp made later reads 0);
+     * ins_pc[k] the .text offset instruction k's code starts at, nins + 1
+     * long (codegen); dbglocs[d] the code ranges and homes of dbgvars[d]
+     * that make its DWARF location list (ra_debug_locs). Metadata only:
+     * nothing reads them to make code. */
+    int *vreg_var;
+    int nvreg_var;
+    int *ins_pc;
+    struct ir_dbgloc **dbglocs;
+    int *ndbglocs;
 /* A var_off for a variable with NO location: its slot is never written in
  * the code the function became (the optimizer kept the value in a
  * temporary). The DIE then says so with an empty location -- a debugger
@@ -612,6 +668,11 @@ struct ir_unit {
     struct ir_str *strs;
     int nstrs, capstrs;
     int rodata_len;
+    /* open-addressed indexes (entry: index + 1) over syms and strs, so
+     * interning is not a scan: a whole program under -flto has hundreds
+     * of thousands of each */
+    int *symh, symh_cap, symh_n;
+    int *strh, strh_cap, strh_n;
 };
 
 /* Intern a symbol, returning its index. Interning by name means the same
@@ -632,12 +693,74 @@ struct ir_unit *irgen(struct unit *u);
  * an exception at the offending operation -- a breakpoint under a
  * debugger, and a stop rather than a wrong value without one, which is
  * the point on a board. */
-enum { SAN_OVERFLOW = 1, SAN_DIVIDE = 2, SAN_SHIFT = 4 };
+/* (the SAN_* bits are in parse/ast.h, for the attributes that name them) */
 void irgen_set_sanitize(unsigned mask);
 /* -finstrument-functions, with GCC's two exclusion lists (comma-separated;
  * either may be NULL) */
 void irgen_set_instrument(int on, const char *funcs, const char *files);
 void irgen_set_opt_size(int on);       /* -Os: a switch table must be denser */
+void irgen_set_bounds(int on);         /* -fbounds-safety, -fsanitize=bounds */
+/* a hosted target's failed check reports itself (lib/rt/ubsan.c): the
+ * checks whose why bit (irgen.c's SAN_FAIL) is set; recover: go on */
+void irgen_set_ub_report(unsigned whys, int recover);
+
+/* --coverage and the profile options (src/ir/gcov.c). gcov_set says
+ * what to make: counters (-fprofile-arcs), notes (-ftest-coverage),
+ * atomic counters (-fprofile-update=atomic), and which files (GCC's
+ * -fprofile-filter-files / -fprofile-exclude-files regex lists);
+ * gcov_set_use the .gcda -fprofile-use reads. Per unit: gcov_unit_begin
+ * after the parse, gcov_function on each function irgen finishes,
+ * gcov_unit_end after irgen (it sizes and fills the two objects
+ * gcov_ctor_source declared), gcov_write_notes for the .gcno. */
+struct unit;
+/* -fsanitize=address, thread, memory (src/ir/sanitize.c): the mask of the
+ * ones with a runtime, and recovery (-fsanitize-recover); the C a unit
+ * gets (the global table's constructor); its globals' redzones, after
+ * irgen; and the instrumentation, after the optimizer. san_asan_locals
+ * is sema's: which locals get redzones (sema.h declares it too). */
+void san_set_runtime(unsigned mask, int recover);
+void ssp_set(int mode, int bufsize);   /* -fstack-protector[-strong|-all|-explicit] */
+void clash_set(int on);                /* -fstack-clash-protection */
+int clash_on(void);
+void clash_instrument(struct ir_unit *iu);
+int ssp_mode(void);
+unsigned san_runtime(void);
+const char *san_ctor_source(void);
+void san_globals(struct unit *u);
+void san_instrument(struct ir_unit *iu);
+void irgen_san_call(struct ir_unit *iu, struct ir_func *fn, const char *name,
+                    int n, const int *vals, int line);
+int irgen_san_call_ret(struct ir_unit *iu, struct ir_func *fn,
+                       const char *name, int n, const int *vals, int line,
+                       int ret);
+struct func *irgen_func_renamed(const struct func *f, const char *name);
+void gcov_set(int arcs, int notes, int atomic, const char *filter,
+              const char *exclude);
+void gcov_set_use(const char *gcda);
+void gcov_set_flags(int partial, int abs);
+int gcov_arcs(void);
+int gcov_active(void);
+const char *gcov_ctor_source(void);
+void gcov_unit_begin(struct unit *u, const char *src, const char *gcda,
+                     unsigned stamp);
+void gcov_function(struct ir_unit *iu, struct ir_func *fn, struct func *f);
+void gcov_unit_end(struct unit *u);
+int gcov_write_notes(const char *gcno);
+int gcov_extract(int nlogs, char **logs);  /* embcc --gcov-extract */
+int gcov_set_version(const char *v);       /* --coverage-version=; -1 bad */
+unsigned gcov_crc32(unsigned c, const void *p, unsigned long n);
+/* Code made at a function's end moved into it: fn's first n0 instructions
+ * are its code, [n0, slices_end) the slices, and what follows stays at
+ * the end. Each slice [lo, hi) goes before old instruction `at` (n0: after
+ * the last), taking that instruction's line; the exception regions and
+ * the locals' lexical ranges move with the code. */
+struct ir_slice { int at, lo, hi; };
+void ir_splice(struct ir_func *fn, int n0, int slices_end,
+               struct ir_slice *sl, int ns);
+
+/* irgen's half: *(counters + off) += 1, 64 bits, atomically if asked */
+void irgen_counter_incr(struct ir_func *fn, struct global *ctrs, long off,
+                        int atomic);
 /* A new table of n entries (all -1) in fn; its index. */
 int ir_jt_add(struct ir_func *fn, int n);
 /* A copy of src's table `jt` in dst, every label moved up by lbase (the

@@ -1,6 +1,7 @@
 /* aarch64's share of IR generation: the AAPCS64 va_arg walk and extended asm
  * through the aarch64 inline-asm vocabulary (asm.c). Built from irgen's
  * helpers (src/ir/irgen_int.h). */
+#include "../../as/gas.h"
 #include "../../ir/irgen_int.h"
 
 #include <ctype.h>
@@ -399,7 +400,7 @@ void irg_asm_arm64(struct ir_func *fn, struct stmt *s)
                            names, nops);
     struct code c = { 0 };
     char err[512];
-    if (a64asm_assemble(text, &c, err, sizeof err) != 0 ||
+    if (GAS_INLINE(a64asm_assemble, file, s->line, text, &c, err, sizeof err) != 0 ||
         code_asm_settle(&c, 4, CODE_FILL_A64, err, sizeof err) < 0)
         diag_fatal(file, s->line, "%s", err);
     free(text);

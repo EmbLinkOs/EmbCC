@@ -11,6 +11,7 @@ EmbCC's own spellings come first. Where GCC spells the same thing differently, i
 | `-c` | compile to an object; do not link |  |
 | `-S` | write assembly (NAME.s) instead of an object |  |
 | `-E` | preprocess only, to standard output |  |
+| `--no-line-markers` | with -E: no # N "file" lines in the output | `-P` |
 | `-o FILE` | where to write the result |  |
 | `-j N` | compile N sources at once (-j alone: one per processor) |  |
 | `--syntax-only` | check the source; write nothing | `-fsyntax-only` |
@@ -20,6 +21,11 @@ EmbCC's own spellings come first. Where GCC spells the same thing differently, i
 | `--emit-c` | print the C a C++ unit lowers to |  |
 | `--emit-interfaces` | write the unit's interface record instead of an object |  |
 | `--emit-empty-object FILE` | write an empty object for this target (it must come first) |  |
+| `--prefix-map=OLD=NEW` | write a path under OLD as under NEW, in __FILE__, the DWARF and the gcov notes (reproducible builds) | `-ffile-prefix-map=OLD=NEW` |
+| `--sbom` | record in the object its source and headers, with their hashes, for a link's --sbom= |  |
+| `--sbom=FILE` | write the image's software bill of materials (SPDX 2.3 JSON; --sbom-format=cyclonedx) |  |
+| `--sbom-format=FORMAT` | spdx (the default) or cyclonedx |  |
+| `--sbom-from` | IMAGE [-o FILE]: an SBOM from a linked image built with --sbom |  |
 
 ## The language
 
@@ -32,13 +38,15 @@ EmbCC's own spellings come first. Where GCC spells the same thing differently, i
 | `--system-include=DIR` | search DIR for headers, as a system directory | `-isystem DIR` |
 | `--include=FILE` | include FILE before the source | `-include FILE` |
 | `--no-std-include` | do not search EmbCC's own headers | `-nostdinc` |
-| `--freestanding` | accepted: EmbCC makes no hosted assumptions to turn off | `-ffreestanding` |
+| `--freestanding` | a freestanding program: __STDC_HOSTED__ is 0 (the code is the same) | `-ffreestanding` |
 | `--no-builtins` | accepted: only the __builtin_ names are built-ins | `-fno-builtin` |
 | `--no-builtin=NAME` | accepted, for the same reason | `-fno-builtin-NAME` |
 | `--char=signed` | plain char is signed | `-fsigned-char` |
 | `--char=unsigned` | plain char is unsigned | `-funsigned-char` |
 | `--wchar=short` | wchar_t is 16 bits | `-fshort-wchar` |
 | `--wchar=int` | wchar_t is the target's default | `-fno-short-wchar` |
+| `--module-dir=DIR` | C++ modules: write interfaces (NAME.ebmi) to DIR and look for them there | `-fmodule-dir=DIR` |
+| `--permissive` | old C: implicit int and implicit function declarations, warned | `-fpermissive` |
 | `--enums=short` | an enum is the smallest type its values fit | `-fshort-enums` |
 | `--enums=int` | an enum is int-sized | `-fno-short-enums` |
 | `--enums=neutral` | objects that link with either enum size (for libraries) | `-fenum-size-neutral` |
@@ -88,6 +96,7 @@ EmbCC's own spellings come first. Where GCC spells the same thing differently, i
 
 | Option | What it does | Also accepted |
 |---|---|---|
+| `--lto` | link-time optimization: an -flto link compiles the units again as one program | `-flto` |
 | `-O LEVEL` | 0, 1, 2, 3, s, z or g: none, basic, speed, max, size, min-size or debug |  |
 | `--opt=none` | no optimization: each statement as written | `-O0` |
 | `--opt=basic` | the passes that only remove work: never larger code | `-O1` |
@@ -119,6 +128,21 @@ EmbCC's own spellings come first. Where GCC spells the same thing differently, i
 | `--no-instrument-functions` | do not | `-fno-instrument-functions` |
 | `--instrument-exclude-files=LIST` | ...except in these files (comma-separated) | `-finstrument-functions-exclude-file-list=LIST` |
 | `--instrument-exclude-functions=LIST` | ...except these functions | `-finstrument-functions-exclude-function-list=LIST` |
+| `--stack-protector` | a canary below the return address of a function with a character array | `-fstack-protector` |
+| `--stack-protector=strong` | ...of one with any array or a local whose address is taken | `-fstack-protector-strong` |
+| `--stack-protector=all` | ...of every function | `-fstack-protector-all` |
+| `--stack-protector=explicit` | ...of a function marked stack_protect | `-fstack-protector-explicit` |
+| `--no-stack-protector` | no canaries | `-fno-stack-protector` |
+| `--stack-clash-protection` | no stack-pointer step of more than a page, and each page touched | `-fstack-clash-protection` |
+| `--bounds-safety` | every subscript of an array, or of a counted_by member, checked: a trap when out of bounds | `-fbounds-safety` |
+| `--no-bounds-safety` | not | `-fno-bounds-safety` |
+| `--branch-protection=KIND` | AArch64 and ARMv8.1-M: standard, bti, pac-ret[+leaf][+b-key], none | `-mbranch-protection=KIND` |
+| `--cf-protection=KIND` | x86-64: full, branch, return, none | `-fcf-protection=KIND` |
+| `--profile-generate` | a build that records its profile, for --profile-use | `-fprofile-generate` |
+| `--profile-generate=DIR` | ...the profile in DIR | `-fprofile-generate=DIR` |
+| `--profile-use` | optimize by the recorded profile: hot and cold code, branches, inlining | `-fprofile-use` |
+| `--profile-use=PATH` | ...the profile in PATH (a .gcda, or a directory) | `-fprofile-use=PATH` |
+| `--profile-dir=DIR` | where profiles are written and read | `-fprofile-dir=DIR` |
 
 ## Warnings and diagnostics
 
@@ -141,6 +165,13 @@ EmbCC's own spellings come first. Where GCC spells the same thing differently, i
 | `--max-errors=N` | stop after N errors | `-fmax-errors=N` |
 | `--explain=ID` | what a diagnostic means, and the fix |  |
 | `--fix` | apply the fix-its EmbCC proposes |  |
+| `--analyze` | the static analyzer: what interrupt handlers share unsafely, double free, use after free, leaks | `-fanalyzer` |
+| `--no-analyze` | not | `-fno-analyzer` |
+| `--misra` | check the MISRA C:2023 rules a compiler can decide (each one --warn=misra-N.M) |  |
+| `--misra=YEAR` | ...2023 (or 2012, the same numbers) |  |
+| `--no-misra` | none of them |  |
+| `--cert` | check the CERT C rules a compiler can decide (each one --warn=cert-XXXNN) |  |
+| `--no-cert` | none of them |  |
 | `--remarks` | say what the optimizer did and did not do | `-fremarks` |
 | `--remarks=json` | ...as JSON | `-fremarks=json` |
 
@@ -151,11 +182,20 @@ EmbCC's own spellings come first. Where GCC spells the same thing differently, i
 | `-g` | debug information (DWARF) |  |
 | `--debug` | the same | `-g` |
 | `--stack-usage` | write FILE.su: each function's frame | `-fstack-usage` |
+| `--stack-info` | put each function's frame, calls and worst-case cycles in the object, for --stack-report |  |
+| `--stack-report` | IMAGE [--stack-limit=N]: the program's worst-case stack and cycles, from a --stack-info build |  |
 | `--call-graph` | write FILE.ci: the call graph | `-fcallgraph-info` |
 | `--call-graph=su` | ...with each function's stack | `-fcallgraph-info=su` |
 | `--time-report` | how long each phase took | `-ftime-report` |
-| `--sanitize=LIST` | checks that trap on undefined behaviour: undefined, ... | `-fsanitize=LIST` |
+| `--sanitize=LIST` | address, thread, memory (with their runtimes); undefined, ... (checks that trap) | `-fsanitize=LIST` |
+| `--sanitize-recover=LIST` | report and go on: address, undefined (and its checks), all | `-fsanitize-recover=LIST` |
 | `--no-sanitize=LIST` | not these checks | `-fno-sanitize=LIST` |
+| `--coverage` | count every line and branch: FILE.gcno now, FILE.gcda when the program runs, for gcov |  |
+| `--coverage-files=REGEX` | ...only in the files these match (;-separated) | `-fprofile-filter-files=REGEX` |
+| `--coverage-exclude-files=REGEX` | ...except the files these match | `-fprofile-exclude-files=REGEX` |
+| `--coverage-update=WAY` | how a counter is added to: single, atomic, prefer-atomic | `-fprofile-update=WAY` |
+| `--coverage-version=VERSION` | the files' gcov generation: gcc (GCC 12 on, the default), llvm (what llvm-cov reads), or a GCC version string |  |
+| `--gcov-extract` | write the .gcda files a board printed (a console log: the files, or -) |  |
 
 ## Dependencies
 
@@ -234,16 +274,19 @@ GCC flags EmbCC reads, either because they change nothing here or so as to refus
 | `-mno-mmx` | x86-64 |
 | `-mno-80387` | x86-64 |
 | `-mmacosx-version-min=*` | --macos-min= |
-| `-fno-pic` | accepted: firmware is not position-independent |
+| `-fno-pic` | position-dependent code (the default) |
 | `-fno-PIC` | accepted |
 | `-fno-pie` | accepted |
 | `-fno-PIE` | accepted |
-| `-fpic` | position-independent code |
-| `-fPIC` | position-independent code |
+| `-fpic` | position-independent code, for a shared object (x86-64, AArch64, RISC-V) |
+| `-fPIC` | position-independent code, for a shared object (x86-64, AArch64, RISC-V) |
 | `-fpie` | a position-independent executable |
 | `-fPIE` | a position-independent executable |
 | `-fno-plt` | accepted |
-| `-shared` | a shared library |
+| `-shared` | a shared library (--libc=system's linker) |
+| `-pie` | a position-independent executable |
+| `-no-pie` | an ordinary executable |
+| `-nopie` | -no-pie |
 | `-static-pie` | a static position-independent executable |
 | `-pthread` | POSIX threads: with --libc=system, glibc's (_REENTRANT, -lpthread) |
 | `-fuse-ld=*` | the system's linker for --libc=system: bfd, gold or lld (ld.NAME) |
@@ -270,15 +313,33 @@ GCC flags EmbCC reads, either because they change nothing here or so as to refus
 | `-fno-ipa-sra` | accepted |
 | `-fno-lto` | accepted |
 | `-flto` | link-time optimization |
-| `-fstack-protector*` | stack canaries |
-| `-fno-stack-protector` | accepted |
-| `-fstack-clash-protection` | stack probing |
-| `-fcf-protection*` | control-flow protection |
+| `-flto=*` | --lto (thin, full, auto, N: one whole-program merge) |
+| `-flto-partition=*` | accepted: the merge is one partition |
+| `-flto-compression-level=*` | accepted |
+| `-ffat-lto-objects` | accepted: an --lto object always has its code too |
+| `-fno-fat-lto-objects` | accepted |
+| `-fuse-linker-plugin` | accepted: the merge needs no plugin |
+| `-fno-use-linker-plugin` | accepted |
+| `-fstack-protector*` | --stack-protector (-strong, -all, -explicit) |
+| `-fno-stack-protector` | no canaries (the default) |
+| `--param=ssp-buffer-size=*` | the smallest character array -fstack-protector guards (8) |
+| `--param` | with ssp-buffer-size=N |
+| `-fdebug-prefix-map=*` | --prefix-map=, for the DWARF only |
+| `-fmacro-prefix-map=*` | --prefix-map=, for __FILE__ only |
+| `-fprofile-prefix-map=*` | --prefix-map=, for the gcov notes only |
+| `-frandom-seed*` | accepted: EmbCC's output has no randomness |
+| `-mstack-protector-guard*` | accepted: the guard is __stack_chk_guard |
+| `-fstack-clash-protection` | --stack-clash-protection |
+| `-fno-stack-clash-protection` | no probes (the default) |
+| `-fcf-protection*` | x86-64 CET: endbr64 landing pads and the shadow-stack note (full, branch, return, none) |
 | `-fasynchronous-unwind-tables` | --unwind-tables |
 | `-fno-asynchronous-unwind-tables` | --no-unwind-tables |
 | `-fno-function-sections` | the default |
 | `-fno-data-sections` | the default |
 | `-ffp-contract=*` | --fp-contract= |
+| `-fmodules` | accepted: C++20 modules are on from -std=c++20 |
+| `-fmodules-ts` | accepted |
+| `-fprebuilt-module-path=*` | --module-dir=, for reading only |
 | `-W` | -Wextra |
 | `-Wl,*` | --linker-arg= (comma-separated) |
 | `-Wa,*` | --assembler-arg= (comma-separated) |
@@ -293,15 +354,35 @@ GCC flags EmbCC reads, either because they change nothing here or so as to refus
 | `-g1` | -g |
 | `-g2` | -g |
 | `-g3` | -g |
-| `-gdwarf*` | -g; EmbCC writes DWARF 4 |
-| `-gsplit-dwarf` | split DWARF |
-| `-gz` | compressed debug sections |
+| `-gdwarf` | -g |
+| `-gdwarf-2` | DWARF 4, which a version 2 reader of it also takes |
+| `-gdwarf-3` | DWARF 4, which a version 3 reader of it also takes |
+| `-gdwarf-4` | DWARF 4 (-g writes DWARF 5) |
+| `-gdwarf-5` | DWARF 5, as -g |
+| `-gsplit-dwarf` | split DWARF: most of it in FILE.dwo |
+| `-gz` | zlib-compressed debug sections (-gz=zlib, -gz=none) |
+| `-gz=*` | -gz=zlib compresses, -gz=none does not |
 | `-fcallgraph-info*` | --call-graph |
 | `-fsanitize*` | the sanitizers |
 | `-fno-sanitize=*` | accepted |
-| `-fprofile*` | profiling |
-| `-fcoverage-mapping` | coverage |
-| `--coverage` | coverage |
+| `-fno-sanitize-recover=*` | stop at the first report (the default) |
+| `-fno-sanitize-address-use-after-scope` | accepted |
+| `-fsanitize-memory-track-origins*` | accepted: a report says where the value is used |
+| `-static-libasan` | accepted: the runtimes are archives |
+| `-static-libtsan` | accepted |
+| `-static-libsan` | accepted |
+| `-shared-libsan` | accepted |
+| `-fprofile*` | the gcov profile options; -fprofile-instr-* (clang's format) refused |
+| `-fno-profile*` | accepted |
+| `-ftest-coverage` | the .gcno |
+| `-fno-test-coverage` | accepted |
+| `-coverage` | --coverage |
+| `-lgcov` | libgcov, for --coverage |
+| `-fbranch-probabilities` | accepted: --profile-use |
+| `-fno-branch-probabilities` | accepted |
+| `-fvpt` | accepted |
+| `-fno-vpt` | accepted |
+| `-fcoverage-mapping` | clang's coverage format: refused (--coverage) |
 | `-pg` | gprof profiling |
 | `-M` | the make rule, system headers included, instead of compiling |
 | `-MD` | --deps-all= |

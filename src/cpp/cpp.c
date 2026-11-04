@@ -45,6 +45,7 @@ static void tb_putc(struct tbuf *b, char c) { tb_putn(b, &c, 1); }
 /* ---- macro table ---- */
 
 static int g_dump_macros;              /* -dM: print the macros, not the text */
+static int g_hosted = 1;      /* __STDC_HOSTED__: 0 under -ffreestanding */
 
 struct macro {
     const char *name;
@@ -606,7 +607,8 @@ static int dynamic_macro(struct src *s, const char *name, size_t n,
     } else if (IS("__INCLUDE_LEVEL__")) {
         snprintf(buf, bufsz, "%d", s->cpp->depth);
     } else if (IS("__FILE_NAME__") || IS("__BASE_FILE__")) {
-        const char *f = IS("__BASE_FILE__") ? s->cpp->base_file : s->file;
+        const char *f = pmap_apply(IS("__BASE_FILE__") ? s->cpp->base_file
+                                                       : s->file, PMAP_MACRO);
         const char *slash = strrchr(f ? f : "", '/');
         if (IS("__FILE_NAME__") && slash)
             f = slash + 1;
@@ -722,7 +724,7 @@ static void expand_text(struct src *s, const char *text, struct tbuf *out)
         /* dynamic predefined macros */
         if (n == 8 && !memcmp(p, "__FILE__", 8)) {
             tb_putc(out, '"');
-            tb_puts(out, s->file);
+            tb_puts(out, pmap_apply(s->file, PMAP_MACRO));
             tb_putc(out, '"');
             p += n;
             continue;
@@ -1160,7 +1162,7 @@ static int has_operator(const char *p, size_t n)
 {
     static const char *const ops[] = {
         "__has_include", "__has_include_next", "__has_builtin",
-        "__has_attribute", "__has_feature", "__has_extension",
+        "__has_attribute", "__has_feature", "__has_extension", "__has_embed",
     };
     for (size_t i = 0; i < sizeof ops / sizeof ops[0]; i++)
         if (strlen(ops[i]) == n && !memcmp(ops[i], p, n))
@@ -1249,6 +1251,8 @@ static int include_exists(struct src *s, const char *fname, int angle,
 
 /* At a feature-test operator's name (n chars at p): its value, the
  * cursor moved past its parenthesized operand. */
+static long eval_has_embed(struct src *s, const char *operand);
+
 static long eval_has(struct src *s, const char *p, size_t n,
                      const char **pp)
 {
@@ -1261,7 +1265,38 @@ static long eval_has(struct src *s, const char *p, size_t n,
     while (*q == ' ' || *q == '\t')
         q++;
     long v = 0;
-    if (n >= 13 && !memcmp(p, "__has_include", 13)) {
+    if (n == 11 && !memcmp(p, "__has_embed", 11)) {
+        /* the operand runs to the operator's own ')': the parameters'
+         * clauses have parentheses of their own */
+        const char *b = q;
+        int depth = 1;
+        while (*q && depth) {
+            if (*q == '"' || *q == '\'') {
+                char c = *q++;
+                while (*q && *q != c) {
+                    if (*q == '\\' && q[1])
+                        q++;
+                    q++;
+                }
+                if (*q)
+                    q++;
+                continue;
+            }
+            if (*q == '(')
+                depth++;
+            else if (*q == ')' && --depth == 0)
+                break;
+            q++;
+        }
+        if (*q != ')')
+            cerr(s, "malformed __has_embed", NULL);
+        size_t on = (size_t)(q - b);
+        char *operand = malloc(on + 1);
+        memcpy(operand, b, on);
+        operand[on] = 0;
+        v = eval_has_embed(s, operand);
+        free(operand);
+    } else if (n >= 13 && !memcmp(p, "__has_include", 13)) {
         int angle = *q == '<';
         if (!angle && *q != '"')
             cerr(s, "__has_include needs a header name", NULL);
@@ -1306,13 +1341,23 @@ static long eval_has(struct src *s, const char *p, size_t n,
             attr_name(b, an, name, sizeof name);
             v = gnu ? gnu_attribute(name) : cpp_attribute(name);
         } else if (n == 17 && !memcmp(p, "__has_c_attribute", 17)) {
-            /* Deliberately 0 for everything, and correct today: this
-             * asks about the C23 `[[...]]` form, which EmbCC's parser
-             * does not accept at all. When [[attr]] lands, this must
-             * answer from the same table that parses it -- answering
-             * yes before then would make a header write syntax the
-             * compiler rejects. */
-            v = 0;
+            /* C23's [[...]]: the standard attributes at the value C23
+             * gives each, and gnu:: ones as __has_attribute answers */
+            static const struct { const char *name; long v; } c23[] = {
+                { "deprecated", 201904 }, { "fallthrough", 201904 },
+                { "maybe_unused", 202106 }, { "nodiscard", 202003 },
+                { "noreturn", 202202 }, { "_Noreturn", 202202 },
+                { "unsequenced", 202207 }, { "reproducible", 202207 },
+            };
+            int gnu = (an > 5 && !memcmp(b, "gnu::", 5)) ||
+                      (an > 9 && !memcmp(b, "__gnu__::", 9));
+            attr_name(b, an, name, sizeof name);
+            if (gnu)
+                v = gnu_attribute(name);
+            else
+                for (size_t i = 0; i < sizeof c23 / sizeof c23[0]; i++)
+                    if (!strcmp(c23[i].name, name))
+                        v = c23[i].v;
         } else if ((n == 13 && !memcmp(p, "__has_feature", 13)) ||
                    (n == 15 && !memcmp(p, "__has_extension", 15))) {
             /* Clang's feature names. Only the ones EmbCC really has are
@@ -1685,8 +1730,22 @@ static int read_logical_line(struct src *s, struct tbuf *out, int *nl)
             const char *cb = s->p + 2;
             if (!predef_is_cxx())
                 lex_pedantic(s->file, s->line, 0, 0, 1999, "a // comment");
-            while (*s->p && *s->p != '\n')
+            int at = s->line + *nl, said = 0;
+            while (*s->p && *s->p != '\n') {
+                if (s->p[0] == '\\' && s->p[1] == '\n') {
+                    if (!said)
+                        diag_warn_opt(s->file, at, 0, "comment",
+                                      "multi-line comment: the "
+                                      "backslash at the end of this // "
+                                      "comment continues it on the next "
+                                      "line");
+                    said = 1;
+                    s->p += 2;
+                    (*nl)++;
+                    continue;
+                }
                 s->p++;
+            }
             if (fallthrough_comment(cb, s->p))
                 diag_fallthrough_comment(s->file, s->line + *nl);
             continue;
@@ -1694,9 +1753,17 @@ static int read_logical_line(struct src *s, struct tbuf *out, int *nl)
         if (c == '/' && s->p[1] == '*') {
             s->p += 2;
             const char *cb = s->p;
+            int nested = 0;
             while (*s->p && !(s->p[0] == '*' && s->p[1] == '/')) {
                 if (*s->p == '\n')
                     (*nl)++;
+                if (s->p[0] == '/' && s->p[1] == '*' && !nested) {
+                    diag_warn_opt(s->file, s->line + *nl, 0, "comment",
+                                  "\"/*\" within a comment: comments do "
+                                  "not nest, and the first \"*/\" ends "
+                                  "this one");
+                    nested = 1;
+                }
                 s->p++;
             }
             if (!*s->p)
@@ -1794,71 +1861,273 @@ static int path_is_absolute(const char *f)
             (f[2] == '/' || f[2] == '\\'));
 }
 
-static void do_embed(struct src *s, const char *arg, struct tbuf *out)
-{
-    char fname[256];
-    char path[512];
-    const char *p = arg;
-    char *data = NULL;
-    long len = 0;
-    int angle;
+static long eval_if(struct src *s, const char *line);
 
+/* What an #embed directive or a __has_embed operand asks for: the
+ * resource, and the parameters. */
+struct embed_req {
+    char fname[256];
+    int angle;
+    long limit;                  /* -1: no limit() */
+    long offset;                 /* gnu::offset / clang::offset */
+    char *prefix, *suffix, *if_empty;   /* the tokens, or NULL */
+    int unknown;                 /* a parameter this compiler has not got */
+    int bad;                     /* malformed: the error is said */
+};
+
+static void embed_req_free(struct embed_req *r)
+{
+    free(r->prefix);
+    free(r->suffix);
+    free(r->if_empty);
+}
+
+/* The text of a parenthesized parameter clause at p (at its '('): a copy
+ * of what is inside, p moved past the ')'. NULL when it is unbalanced. */
+static char *embed_clause(const char **pp)
+{
+    const char *p = *pp;
+    if (*p != '(')
+        return NULL;
+    int depth = 0;
+    const char *b = p + 1;
+    for (; *p; p++) {
+        if (*p == '"' || *p == '\'') {
+            char q = *p++;
+            while (*p && *p != q) {
+                if (*p == '\\' && p[1])
+                    p++;
+                p++;
+            }
+            if (!*p)
+                return NULL;
+            continue;
+        }
+        if (*p == '(')
+            depth++;
+        else if (*p == ')' && --depth == 0)
+            break;
+    }
+    if (*p != ')')
+        return NULL;
+    size_t n = (size_t)(p - b);
+    char *c = malloc(n + 1);
+    memcpy(c, b, n);
+    c[n] = 0;
+    *pp = p + 1;
+    return c;
+}
+
+/* Parse an #embed's operand, or __has_embed's (in_has: stop at the
+ * operator's own ')', which is left for the caller). The operand is
+ * macro-replaced first when it does not start with a header name, as
+ * #include's is (C23 6.10.4.1). Returns where parsing stopped. */
+static const char *parse_embed(struct src *s, const char *arg, struct embed_req *r,
+                               int in_has, struct tbuf *expd)
+{
+    memset(r, 0, sizeof *r);
+    r->limit = -1;
+    const char *p = arg;
     while (*p == ' ' || *p == '\t')
         p++;
+    if (*p != '"' && *p != '<' && is_id0(*p)) {
+        /* (for __has_embed, the operand ends at the operator's ')': the
+         * caller has cut the text there) */
+        expand_text(s, p, expd);
+        paint_strip(expd);
+        p = expd->p ? expd->p : "";
+        while (*p == ' ' || *p == '\t')
+            p++;
+    }
     if (*p != '"' && *p != '<') {
         cerr(s, "#embed needs a file name", NULL);
-        return;
+        r->bad = 1;
+        return p;
     }
-    angle = *p == '<';
-    {
-        char close = angle ? '>' : '"';
-        size_t n = 0;
-        p++;
-        while (p[n] && p[n] != close && n < sizeof fname - 1)
-            n++;
-        if (p[n] != close) {
-            cerr(s, "malformed #embed", NULL);
-            return;
+    r->angle = *p == '<';
+    char close = r->angle ? '>' : '"';
+    size_t n = 0;
+    p++;
+    while (p[n] && p[n] != close && n < sizeof r->fname - 1)
+        n++;
+    if (p[n] != close) {
+        cerr(s, "malformed #embed", NULL);
+        r->bad = 1;
+        return p;
+    }
+    memcpy(r->fname, p, n);
+    r->fname[n] = 0;
+    p += n + 1;
+    for (;;) {
+        while (*p == ' ' || *p == '\t')
+            p++;
+        if (!*p || (in_has && *p == ')'))
+            break;
+        if (!is_id0(*p)) {
+            cerr(s, "malformed #embed parameter", NULL);
+            r->bad = 1;
+            return p;
         }
-        memcpy(fname, p, n);
-        fname[n] = 0;
-        p += n + 1;
+        /* the name, with a vendor prefix (gnu::offset) and the __x__
+         * spelling of each part reduced to x */
+        char name[64];
+        size_t k = 0;
+        for (int part = 0; part < 2; part++) {
+            const char *b = p;
+            while (is_idc(*p))
+                p++;
+            size_t pn = (size_t)(p - b);
+            if (pn > 4 && b[0] == '_' && b[1] == '_' && b[pn - 1] == '_' && b[pn - 2] == '_')
+                b += 2, pn -= 4;
+            if (k + pn + 3 >= sizeof name)
+                pn = 0;
+            memcpy(name + k, b, pn);
+            k += pn;
+            if (part == 0 && p[0] == ':' && p[1] == ':') {
+                memcpy(name + k, "::", 2);
+                k += 2;
+                p += 2;
+                continue;
+            }
+            break;
+        }
+        name[k] = 0;
+        while (*p == ' ' || *p == '\t')
+            p++;
+        char *clause = embed_clause(&p);
+        if (!clause) {
+            cerr(s, "#embed parameter '%s' needs a parenthesized argument", name);
+            r->bad = 1;
+            return p;
+        }
+        if (!strcmp(name, "limit") || !strcmp(name, "gnu::offset") ||
+            !strcmp(name, "clang::offset")) {
+            long v = eval_if(s, clause);
+            if (v < 0)
+                cerr(s, "#embed %s() is negative", name);
+            if (name[0] == 'l')
+                r->limit = v < 0 ? 0 : v;
+            else
+                r->offset = v < 0 ? 0 : v;
+            free(clause);
+        } else if (!strcmp(name, "prefix")) {
+            free(r->prefix);
+            r->prefix = clause;
+        } else if (!strcmp(name, "suffix")) {
+            free(r->suffix);
+            r->suffix = clause;
+        } else if (!strcmp(name, "if_empty")) {
+            free(r->if_empty);
+            r->if_empty = clause;
+        } else {
+            r->unknown = 1;
+            if (!in_has)
+                cerr(s, "#embed parameter '%s' is not one EmbCC has (limit, prefix, "
+                        "suffix, if_empty, gnu::offset)", name);
+            free(clause);
+        }
     }
-    while (*p == ' ' || *p == '\t')
-        p++;
-    if (*p)
-        cerr(s, "#embed parameters (limit, prefix, suffix, if_empty) are "
-                "not supported; ignoring one would embed the wrong bytes",
-             NULL);
+    return p;
+}
 
-    if (path_is_absolute(fname)) {
-        snprintf(path, sizeof path, "%s", fname);
-        data = read_file_or_null(path, &len);
-    } else if (!angle) {
+/* The resource, searched for as #include searches; NULL when absent. */
+static char *find_embed(struct src *s, const struct embed_req *r, long *len)
+{
+    char path[512];
+    char *data = NULL;
+    if (path_is_absolute(r->fname)) {
+        snprintf(path, sizeof path, "%s", r->fname);
+        return read_file_or_null(path, len);
+    }
+    if (!r->angle) {
         const char *slash = strrchr(s->file, '/');
         if (slash)
-            snprintf(path, sizeof path, "%.*s/%s",
-                     (int)(slash - s->file), s->file, fname);
+            snprintf(path, sizeof path, "%.*s/%s", (int)(slash - s->file), s->file,
+                     r->fname);
         else
-            snprintf(path, sizeof path, "%s", fname);
-        data = read_file_or_null(path, &len);
+            snprintf(path, sizeof path, "%s", r->fname);
+        data = read_file_or_null(path, len);
     }
-    for (int i = 0; !data && !path_is_absolute(fname) &&
-                    i < s->cpp->nincdirs; i++) {
-        snprintf(path, sizeof path, "%s/%s", s->cpp->incdirs[i], fname);
-        data = read_file_or_null(path, &len);
+    for (int i = 0; !data && i < s->cpp->nincdirs; i++) {
+        snprintf(path, sizeof path, "%s/%s", s->cpp->incdirs[i], r->fname);
+        data = read_file_or_null(path, len);
     }
-    if (!data) {
-        cerr(s, "cannot find the file to embed: \"%s\"", fname);
+    return data;
+}
+
+/* The bytes the parameters select: from offset, at most limit. */
+static void embed_window(const struct embed_req *r, long len, long *from, long *n)
+{
+    *from = r->offset < len ? r->offset : len;
+    *n = len - *from;
+    if (r->limit >= 0 && *n > r->limit)
+        *n = r->limit;
+}
+
+/* __has_embed's value: __STDC_EMBED_NOT_FOUND__ (0), _FOUND__ (1) or
+ * _EMPTY__ (2); 0 too for a parameter this compiler has not got, which
+ * is how a program asks whether it may use one. */
+static long eval_has_embed(struct src *s, const char *operand)
+{
+    struct embed_req r;
+    struct tbuf expd = { 0, 0, 0 };
+    parse_embed(s, operand, &r, 1, &expd);
+    free(expd.p);
+    long v = 0;
+    if (!r.bad && !r.unknown) {
+        long len = 0;
+        char *data = find_embed(s, &r, &len);
+        if (data) {
+            long from, n;
+            embed_window(&r, len, &from, &n);
+            v = n ? 1 : 2;
+            free(data);
+        }
+    }
+    embed_req_free(&r);
+    return v;
+}
+
+static void do_embed(struct src *s, const char *arg, struct tbuf *out)
+{
+    struct embed_req r;
+    struct tbuf expd = { 0, 0, 0 };
+    parse_embed(s, arg, &r, 0, &expd);
+    free(expd.p);
+    if (r.bad || r.unknown) {
+        embed_req_free(&r);
         return;
     }
-    for (long i = 0; i < len; i++) {
-        char num[8];
-        int k = snprintf(num, sizeof num, "%s%u", i ? "," : "",
-                         (unsigned)(unsigned char)data[i]);
-        tb_putn(out, num, (size_t)k);
+    long len = 0;
+    char *data = find_embed(s, &r, &len);
+    if (!data) {
+        cerr(s, "cannot find the file to embed: \"%s\"", r.fname);
+        embed_req_free(&r);
+        return;
+    }
+    long from, n;
+    embed_window(&r, len, &from, &n);
+    if (!n) {
+        if (r.if_empty)
+            tb_putn(out, r.if_empty, strlen(r.if_empty));
+    } else {
+        if (r.prefix) {
+            tb_putn(out, r.prefix, strlen(r.prefix));
+            tb_putc(out, ' ');
+        }
+        for (long i = 0; i < n; i++) {
+            char num[8];
+            int k = snprintf(num, sizeof num, "%s%u", i ? "," : "",
+                             (unsigned)(unsigned char)data[from + i]);
+            tb_putn(out, num, (size_t)k);
+        }
+        if (r.suffix) {
+            tb_putc(out, ' ');
+            tb_putn(out, r.suffix, strlen(r.suffix));
+        }
     }
     free(data);
+    embed_req_free(&r);
 }
 
 static void do_include(struct src *s, const char *arg, struct tbuf *out,
@@ -1964,6 +2233,48 @@ static void do_include(struct src *s, const char *arg, struct tbuf *out,
 
 static int defining_builtins;
 
+
+/* A macro body's digraphs %:%: and %: are its ## and # (C95), so the
+ * expansion, which reads # and ##, needs to know nothing of them.
+ * Rewritten in place, outside string and character literals; the <% of
+ * `<%:` is a brace, not the start of a %:. */
+static void digraph_hashes(char *b)
+{
+    char *w = b;
+    for (const char *r = b; *r; ) {
+        if (*r == '"' || *r == '\'') {
+            char q = *r;
+            *w++ = *r++;
+            while (*r && *r != q) {
+                if (*r == '\\' && r[1])
+                    *w++ = *r++;
+                *w++ = *r++;
+            }
+            if (*r)
+                *w++ = *r++;
+            continue;
+        }
+        if (r[0] == '<' && r[1] == '%') {
+            *w++ = *r++;
+            *w++ = *r++;
+            continue;
+        }
+        if (r[0] == '%' && r[1] == ':' && r[2] == '%' && r[3] == ':') {
+            *w++ = '#';
+            *w++ = '#';
+            r += 4;
+            continue;
+        }
+        if (r[0] == '%' && r[1] == ':') {
+            *w++ = '#';
+            r += 2;
+            continue;
+        }
+        *w++ = *r++;
+    }
+    *w = 0;
+}
+
 static void define_macro(struct src *s, const char *line)
 {
     const char *p = line;
@@ -2031,7 +2342,11 @@ static void define_macro(struct src *s, const char *line)
     }
     while (*p == ' ' || *p == '\t')
         p++;
-    m->body = xstrndup(p, strlen(p));
+    {
+        char *body = xstrndup(p, strlen(p));
+        digraph_hashes(body);
+        m->body = body;
+    }
 
     struct macro *old = find_macro(s->cpp, m->name, strlen(m->name));
     if (old && old->builtin) {
@@ -2062,15 +2377,11 @@ enum cond_state { COND_LIVE, COND_DEAD, COND_DONE };
  * declare. The arguments are NOT macro-expanded, as gcc does not expand
  * them on ELF targets: `pack(push, N)` with N a macro is a push labelled
  * N there (which the parser refuses), not a pack to N's value. `text`
- * starts after the word `pack`. C++'s parser has no use for the marker,
- * and there the pragma is still refused by name. */
+ * starts after the word `pack`. C++'s token array drops the marker and
+ * keeps where it was (cxx/tok.c). */
 static void emit_pack(struct src *s, const char *text, size_t n,
                       struct tbuf *out)
 {
-    if (cxx_has_builtin)
-        cerr(s, "#pragma pack is not supported in C++: it would change the "
-                "layout and EmbCC would ignore it. Use "
-                "__attribute__((packed)) on the struct", NULL);
     size_t i = 0;
     while (i < n && (text[i] == ' ' || text[i] == '\t'))
         i++;
@@ -2505,6 +2816,463 @@ static const char *trigraphs(const char *src)
     return out;
 }
 
+/* ---- C++20 modules ----
+ *
+ * `module` and `import` lines are the preprocessor's (P1857), and so are
+ * modules here. Compiling an interface unit (`export module M;`) also
+ * yields its binary module interface, M.ebmi: the global module
+ * fragment's directives as written, then the purview as preprocessed --
+ * the unit's own macros already applied, the importer's never. An import
+ * reads the directives again (so a header both include is read once, its
+ * guard holding) and copies the purview as it is, between
+ * `__embcc_import_begin` and `__embcc_import_end`, where the parser
+ * takes its definitions as declarations (the interface's object has
+ * them). An import inside a purview is kept as `%%IMPORT M`, so each
+ * module is read once however many import it. A header unit,
+ * `import <h>;`, is that header included. */
+static const char **g_mod_dirs;
+static int g_nmod_dirs;
+static char *g_mod_name;          /* this unit's module */
+static int g_mod_iface;           /* an interface unit: its BMI is made */
+static int g_gmf;                 /* in the global module fragment */
+static struct tbuf g_gmf_text;    /* ... its directives, as written */
+static long g_purview_at, g_private_at;
+static char g_purview_marker[600];
+struct mod_splice { long from, to; char *text; };
+static struct mod_splice *g_splices;
+static int g_nsplices, g_capsplices;
+static char **g_imported;
+static int g_nimported, g_capimported;
+static char *g_bmi;
+
+void cpp_set_module_dirs(const char **dirs, int n)
+{
+    g_mod_dirs = dirs;
+    g_nmod_dirs = n;
+}
+
+/* The interface this unit exports, as M.ebmi holds it, and its module's
+ * name; NULL when it is not an interface unit. */
+const char *cpp_module_interface(const char **name)
+{
+    *name = g_mod_name;
+    return g_bmi;
+}
+
+static void modules_reset(void)
+{
+    g_mod_name = NULL;
+    g_mod_iface = g_gmf = 0;
+    g_gmf_text.len = 0;
+    if (g_gmf_text.p)
+        g_gmf_text.p[0] = 0;
+    g_purview_at = g_private_at = -1;
+    g_nsplices = 0;
+    g_nimported = 0;
+    g_bmi = NULL;
+}
+
+static int mod_word(const char *p, const char *w)
+{
+    size_t n = strlen(w);
+    return strncmp(p, w, n) == 0 && !is_idc(p[n]);
+}
+
+static const char *mod_ws(const char *p)
+{
+    while (*p == ' ' || *p == '\t')
+        p++;
+    return p;
+}
+
+/* A module name -- a.b.c, with a :partition -- at *pp, or NULL. */
+static char *mod_name_at(const char **pp, int partition_ok)
+{
+    const char *p = *pp, *start = p;
+    for (;;) {
+        if (!is_id0(*p))
+            return NULL;
+        while (is_idc(*p))
+            p++;
+        if (*p == '.') {
+            p++;
+            continue;
+        }
+        if (*p == ':' && partition_ok && p[1] != ':') {
+            partition_ok = 0;
+            p = mod_ws(p + 1);
+            continue;
+        }
+        break;
+    }
+    struct tbuf n = { 0, 0, 0 };
+    for (const char *q = start; q < p; q++)
+        if (*q != ' ' && *q != '\t')
+            tb_putc(&n, *q);
+    *pp = p;
+    return n.p;
+}
+
+static void mod_note_splice(long from, long to, const char *name, int exp)
+{
+    if (g_purview_at < 0 || from < g_purview_at)
+        return;
+    if (g_nsplices == g_capsplices) {
+        g_capsplices = g_capsplices ? 2 * g_capsplices : 8;
+        g_splices = xrealloc(g_splices,
+                             (size_t)g_capsplices * sizeof *g_splices);
+    }
+    char *t = xmalloc(strlen(name) + 24);
+    sprintf(t, "%%%%IMPORT %s%s\n", exp ? "export " : "", name);
+    g_splices[g_nsplices++] = (struct mod_splice){ from, to, t };
+}
+
+static void process_file(struct cpp *cpp, const char *path,
+                         const char *src, struct tbuf *out, int incdir_idx);
+
+static void import_module(struct src *s, struct tbuf *out, const char *name,
+                          int exp)
+{
+    for (int i = 0; i < g_nimported; i++)
+        if (strcmp(g_imported[i], name) == 0) {
+            mod_note_splice(out->len, out->len, name, exp);
+            return;
+        }
+    if (g_nimported == g_capimported) {
+        g_capimported = g_capimported ? 2 * g_capimported : 8;
+        g_imported = xrealloc(g_imported,
+                              (size_t)g_capimported * sizeof *g_imported);
+    }
+    g_imported[g_nimported++] = xstrndup(name, strlen(name));
+    char file[512];
+    size_t k = 0;
+    for (const char *q = name; *q && k < 400; q++)
+        file[k++] = *q == ':' ? '-' : *q;
+    file[k] = 0;
+    char *text = NULL, path[1024];
+    long len = 0;
+    for (int i = -1; !text && i < g_nmod_dirs; i++) {
+        snprintf(path, sizeof path, "%s/%s.ebmi", i < 0 ? "." : g_mod_dirs[i],
+                 file);
+        text = read_file_or_null(path, &len);
+    }
+    if (!text && (strcmp(name, "std") == 0 ||
+                  strcmp(name, "std.compat") == 0)) {
+        /* C++23's standard library module: every standard header the
+         * library has, read as an include (its macros are the
+         * library's, as a header unit's would be) */
+        static const char std_module[] =
+            "#if __has_include(<algorithm>)\n#include <algorithm>\n#endif\n"
+            "#if __has_include(<any>)\n#include <any>\n#endif\n"
+            "#if __has_include(<array>)\n#include <array>\n#endif\n"
+            "#if __has_include(<atomic>)\n#include <atomic>\n#endif\n"
+            "#if __has_include(<barrier>)\n#include <barrier>\n#endif\n"
+            "#if __has_include(<bit>)\n#include <bit>\n#endif\n"
+            "#if __has_include(<bitset>)\n#include <bitset>\n#endif\n"
+            "#if __has_include(<cassert>)\n#include <cassert>\n#endif\n"
+            "#if __has_include(<cctype>)\n#include <cctype>\n#endif\n"
+            "#if __has_include(<cerrno>)\n#include <cerrno>\n#endif\n"
+            "#if __has_include(<cfenv>)\n#include <cfenv>\n#endif\n"
+            "#if __has_include(<cfloat>)\n#include <cfloat>\n#endif\n"
+            "#if __has_include(<charconv>)\n#include <charconv>\n#endif\n"
+            "#if __has_include(<chrono>)\n#include <chrono>\n#endif\n"
+            "#if __has_include(<cinttypes>)\n#include <cinttypes>\n#endif\n"
+            "#if __has_include(<climits>)\n#include <climits>\n#endif\n"
+            "#if __has_include(<clocale>)\n#include <clocale>\n#endif\n"
+            "#if __has_include(<cmath>)\n#include <cmath>\n#endif\n"
+            "#if __has_include(<compare>)\n#include <compare>\n#endif\n"
+            "#if __has_include(<complex>)\n#include <complex>\n#endif\n"
+            "#if __has_include(<concepts>)\n#include <concepts>\n#endif\n"
+            "#if __has_include(<condition_variable>)\n#include <condition_variable>\n#endif\n"
+            "#if __has_include(<coroutine>)\n#include <coroutine>\n#endif\n"
+            "#if __has_include(<csetjmp>)\n#include <csetjmp>\n#endif\n"
+            "#if __has_include(<csignal>)\n#include <csignal>\n#endif\n"
+            "#if __has_include(<cstdarg>)\n#include <cstdarg>\n#endif\n"
+            "#if __has_include(<cstddef>)\n#include <cstddef>\n#endif\n"
+            "#if __has_include(<cstdint>)\n#include <cstdint>\n#endif\n"
+            "#if __has_include(<cstdio>)\n#include <cstdio>\n#endif\n"
+            "#if __has_include(<cstdlib>)\n#include <cstdlib>\n#endif\n"
+            "#if __has_include(<cstring>)\n#include <cstring>\n#endif\n"
+            "#if __has_include(<ctime>)\n#include <ctime>\n#endif\n"
+            "#if __has_include(<cuchar>)\n#include <cuchar>\n#endif\n"
+            "#if __has_include(<cwchar>)\n#include <cwchar>\n#endif\n"
+            "#if __has_include(<cwctype>)\n#include <cwctype>\n#endif\n"
+            "#if __has_include(<deque>)\n#include <deque>\n#endif\n"
+            "#if __has_include(<exception>)\n#include <exception>\n#endif\n"
+            "#if __has_include(<execution>)\n#include <execution>\n#endif\n"
+            "#if __has_include(<expected>)\n#include <expected>\n#endif\n"
+            "#if __has_include(<filesystem>)\n#include <filesystem>\n#endif\n"
+            "#if __has_include(<flat_map>)\n#include <flat_map>\n#endif\n"
+            "#if __has_include(<flat_set>)\n#include <flat_set>\n#endif\n"
+            "#if __has_include(<format>)\n#include <format>\n#endif\n"
+            "#if __has_include(<forward_list>)\n#include <forward_list>\n#endif\n"
+            "#if __has_include(<fstream>)\n#include <fstream>\n#endif\n"
+            "#if __has_include(<functional>)\n#include <functional>\n#endif\n"
+            "#if __has_include(<future>)\n#include <future>\n#endif\n"
+            "#if __has_include(<generator>)\n#include <generator>\n#endif\n"
+            "#if __has_include(<initializer_list>)\n#include <initializer_list>\n#endif\n"
+            "#if __has_include(<iomanip>)\n#include <iomanip>\n#endif\n"
+            "#if __has_include(<ios>)\n#include <ios>\n#endif\n"
+            "#if __has_include(<iosfwd>)\n#include <iosfwd>\n#endif\n"
+            "#if __has_include(<iostream>)\n#include <iostream>\n#endif\n"
+            "#if __has_include(<istream>)\n#include <istream>\n#endif\n"
+            "#if __has_include(<iterator>)\n#include <iterator>\n#endif\n"
+            "#if __has_include(<latch>)\n#include <latch>\n#endif\n"
+            "#if __has_include(<limits>)\n#include <limits>\n#endif\n"
+            "#if __has_include(<list>)\n#include <list>\n#endif\n"
+            "#if __has_include(<locale>)\n#include <locale>\n#endif\n"
+            "#if __has_include(<map>)\n#include <map>\n#endif\n"
+            "#if __has_include(<mdspan>)\n#include <mdspan>\n#endif\n"
+            "#if __has_include(<memory>)\n#include <memory>\n#endif\n"
+            "#if __has_include(<memory_resource>)\n#include <memory_resource>\n#endif\n"
+            "#if __has_include(<mutex>)\n#include <mutex>\n#endif\n"
+            "#if __has_include(<new>)\n#include <new>\n#endif\n"
+            "#if __has_include(<numbers>)\n#include <numbers>\n#endif\n"
+            "#if __has_include(<numeric>)\n#include <numeric>\n#endif\n"
+            "#if __has_include(<optional>)\n#include <optional>\n#endif\n"
+            "#if __has_include(<ostream>)\n#include <ostream>\n#endif\n"
+            "#if __has_include(<print>)\n#include <print>\n#endif\n"
+            "#if __has_include(<queue>)\n#include <queue>\n#endif\n"
+            "#if __has_include(<random>)\n#include <random>\n#endif\n"
+            "#if __has_include(<ranges>)\n#include <ranges>\n#endif\n"
+            "#if __has_include(<ratio>)\n#include <ratio>\n#endif\n"
+            "#if __has_include(<regex>)\n#include <regex>\n#endif\n"
+            "#if __has_include(<scoped_allocator>)\n#include <scoped_allocator>\n#endif\n"
+            "#if __has_include(<semaphore>)\n#include <semaphore>\n#endif\n"
+            "#if __has_include(<set>)\n#include <set>\n#endif\n"
+            "#if __has_include(<shared_mutex>)\n#include <shared_mutex>\n#endif\n"
+            "#if __has_include(<source_location>)\n#include <source_location>\n#endif\n"
+            "#if __has_include(<span>)\n#include <span>\n#endif\n"
+            "#if __has_include(<spanstream>)\n#include <spanstream>\n#endif\n"
+            "#if __has_include(<sstream>)\n#include <sstream>\n#endif\n"
+            "#if __has_include(<stack>)\n#include <stack>\n#endif\n"
+            "#if __has_include(<stacktrace>)\n#include <stacktrace>\n#endif\n"
+            "#if __has_include(<stdexcept>)\n#include <stdexcept>\n#endif\n"
+            "#if __has_include(<stdfloat>)\n#include <stdfloat>\n#endif\n"
+            "#if __has_include(<stop_token>)\n#include <stop_token>\n#endif\n"
+            "#if __has_include(<streambuf>)\n#include <streambuf>\n#endif\n"
+            "#if __has_include(<string>)\n#include <string>\n#endif\n"
+            "#if __has_include(<string_view>)\n#include <string_view>\n#endif\n"
+            "#if __has_include(<syncstream>)\n#include <syncstream>\n#endif\n"
+            "#if __has_include(<system_error>)\n#include <system_error>\n#endif\n"
+            "#if __has_include(<thread>)\n#include <thread>\n#endif\n"
+            "#if __has_include(<tuple>)\n#include <tuple>\n#endif\n"
+            "#if __has_include(<type_traits>)\n#include <type_traits>\n#endif\n"
+            "#if __has_include(<typeindex>)\n#include <typeindex>\n#endif\n"
+            "#if __has_include(<typeinfo>)\n#include <typeinfo>\n#endif\n"
+            "#if __has_include(<unordered_map>)\n#include <unordered_map>\n#endif\n"
+            "#if __has_include(<unordered_set>)\n#include <unordered_set>\n#endif\n"
+            "#if __has_include(<utility>)\n#include <utility>\n#endif\n"
+            "#if __has_include(<valarray>)\n#include <valarray>\n#endif\n"
+            "#if __has_include(<variant>)\n#include <variant>\n#endif\n"
+            "#if __has_include(<vector>)\n#include <vector>\n#endif\n"
+            "#if __has_include(<version>)\n#include <version>\n#endif\n"
+            ;
+        s->cpp->depth++;
+        process_file(s->cpp, "<std module>", std_module, out, -1);
+        s->cpp->depth--;
+        char marker[600];
+        snprintf(marker, sizeof marker, "# %d \"%s\"\n", s->line, s->file);
+        tb_puts(out, marker);
+        return;
+    }
+    if (!text)
+        cerr(s, "module '%s' not found: compile its interface unit first "
+                "(it writes NAME.ebmi), or name the directory with "
+                "--module-dir", name);
+    if (strncmp(text, "EMBCC-BMI 1\nsource ", 19) != 0)
+        cerr(s, "'%s' is not an EmbCC module interface", path);
+    const char *srcpath = text + 19;
+    char *nl = strchr(srcpath, '\n');
+    char *purview = strstr(text, "\n%%PURVIEW\n");
+    if (!nl || !purview)
+        cerr(s, "'%s' is damaged", path);
+    *nl = 0;
+    *purview = 0;
+    purview += 11;
+    long from = out->len;
+    tb_puts(out, "\n__embcc_import_begin ");
+    tb_puts(out, name);
+    tb_puts(out, " ;\n");
+    /* The fragment's own #defines configure its headers, and do not
+     * reach the importer: each name it defines or undefines is put back
+     * as it was. (Its headers' macros stay, guards with them, so a
+     * header both include is read once.) */
+    const char *gmf = nl + 1;
+    struct { const char *name; size_t n; struct macro *old; } own[64];
+    int nown = 0;
+    for (const char *p = gmf; *p && nown < 64;) {
+        const char *q = mod_ws(p);
+        if (*q == '#') {
+            q = mod_ws(q + 1);
+            int d = mod_word(q, "define"), u = mod_word(q, "undef");
+            if (d || u) {
+                q = mod_ws(q + (d ? 6 : 5));
+                size_t n = 0;
+                while (is_idc(q[n]))
+                    n++;
+                if (n) {
+                    own[nown].name = q;
+                    own[nown].n = n;
+                    own[nown].old = find_macro(s->cpp, q, n);
+                    nown++;
+                }
+            }
+        }
+        const char *e = strchr(p, '\n');
+        p = e ? e + 1 : p + strlen(p);
+    }
+    s->cpp->depth++;
+    process_file(s->cpp, xstrndup(srcpath, strlen(srcpath)), gmf, out, -1);
+    for (int i = nown - 1; i >= 0; i--) {
+        struct macro *cur;
+        while ((cur = find_macro(s->cpp, own[i].name, own[i].n)) &&
+               cur != own[i].old)
+            undef_macro(s->cpp, own[i].name, own[i].n);
+        if (own[i].old && !find_macro(s->cpp, own[i].name, own[i].n))
+            add_macro(s->cpp, own[i].old);
+    }
+    /* the purview, as the interface unit's preprocessing left it; its
+     * own imports read here, once each */
+    for (const char *p = purview; *p;) {
+        const char *e = strchr(p, '\n');
+        size_t n = e ? (size_t)(e - p + 1) : strlen(p);
+        if (strncmp(p, "%%IMPORT ", 9) == 0) {
+            const char *q = p + 9;
+            int x = mod_word(q, "export");
+            if (x)
+                q = mod_ws(q + 6);
+            char *iname = xstrndup(q, n - (size_t)(q - p) - (e ? 1 : 0));
+            import_module(s, out, iname, x);
+        } else {
+            tb_putn(out, p, n);
+        }
+        p += n;
+    }
+    s->cpp->depth--;
+    tb_puts(out, "\n__embcc_import_end ;\n");
+    long to = out->len;
+    char marker[600];
+    snprintf(marker, sizeof marker, "# %d \"%s\"\n", s->line, s->file);
+    tb_puts(out, marker);
+    mod_note_splice(from, to, name, exp);
+}
+
+/* A `module` or `import` line (C++20): handled, 1; else 0. */
+static int module_line(struct src *s, const char *lp, struct tbuf *out)
+{
+    const char *p = lp;
+    int exp = 0;
+    if (mod_word(p, "export")) {
+        const char *q = mod_ws(p + 6);
+        if (!mod_word(q, "module") && !mod_word(q, "import"))
+            return 0;
+        exp = 1;
+        p = q;
+    }
+    if (mod_word(p, "module")) {
+        const char *q = mod_ws(p + 6);
+        if (*q == ';' && !exp) {                  /* module; */
+            if (s->cpp->depth)
+                return 0;
+            g_gmf = 1;
+            tb_puts(out, "module ;");
+            return 1;
+        }
+        if (*q == ':') {                          /* module :private; */
+            const char *r = mod_ws(q + 1);
+            if (!mod_word(r, "private") || *mod_ws(r + 7) != ';')
+                return 0;
+            if (g_private_at < 0)
+                g_private_at = (long)out->len;
+            tb_puts(out, "module : private ;");
+            return 1;
+        }
+        char *name = mod_name_at(&q, 1);
+        if (!name || *mod_ws(q) != ';')
+            return 0;
+        if (s->cpp->depth)
+            cerr(s, "a module declaration belongs in the unit's own file, "
+                    "not in a header", NULL);
+        g_gmf = 0;
+        g_mod_name = name;
+        tb_puts(out, exp ? "export module " : "module ");
+        tb_puts(out, name);
+        tb_puts(out, " ;\n");
+        if (exp) {
+            g_mod_iface = 1;
+            g_purview_at = (long)out->len;
+            snprintf(g_purview_marker, sizeof g_purview_marker,
+                     "# %d \"%s\"\n", s->line + 1, s->file);
+        } else if (!strchr(name, ':')) {
+            /* an implementation unit: its interface, imported */
+            import_module(s, out, name, 0);
+        }
+        return 1;
+    }
+    if (!mod_word(p, "import"))
+        return 0;
+    const char *q = mod_ws(p + 6);
+    if (*q == '<' || *q == '"') {                 /* a header unit */
+        char close = *q == '<' ? '>' : '"';
+        const char *e = strchr(q + 1, close);
+        if (!e || *mod_ws(e + 1) != ';')
+            return 0;
+        char *arg = xstrndup(q, (size_t)(e - q + 1));
+        do_include(s, arg, out, 0);
+        return 1;
+    }
+    char *name;
+    if (*q == ':') {                              /* import :part; */
+        q = mod_ws(q + 1);
+        char *part = mod_name_at(&q, 0);
+        if (!part || *mod_ws(q) != ';')
+            return 0;
+        if (!g_mod_name)
+            cerr(s, "'import :%s' names a partition, and this unit is not "
+                    "part of a module", part);
+        size_t pn = strcspn(g_mod_name, ":");
+        name = xmalloc(pn + strlen(part) + 2);
+        memcpy(name, g_mod_name, pn);
+        name[pn] = ':';
+        strcpy(name + pn + 1, part);
+    } else {
+        name = mod_name_at(&q, 1);
+        if (!name || *mod_ws(q) != ';')
+            return 0;
+    }
+    import_module(s, out, name, exp);
+    return 1;
+}
+
+/* After the unit: its interface, when it is one. */
+static void make_bmi(const char *path, struct tbuf *out)
+{
+    if (!g_mod_iface || g_purview_at < 0)
+        return;
+    long end = g_private_at >= 0 ? g_private_at : (long)out->len;
+    struct tbuf b = { 0, 0, 0 };
+    tb_puts(&b, "EMBCC-BMI 1\nsource ");
+    tb_puts(&b, path);
+    tb_puts(&b, "\n");
+    if (g_gmf_text.p)
+        tb_puts(&b, g_gmf_text.p);
+    tb_puts(&b, "\n%%PURVIEW\n");
+    tb_puts(&b, g_purview_marker);
+    long at = g_purview_at;
+    for (int i = 0; i < g_nsplices && g_splices[i].from < end; i++) {
+        tb_putn(&b, out->p + at, (size_t)(g_splices[i].from - at));
+        if (b.len && b.p[b.len - 1] != '\n')
+            tb_putc(&b, '\n');
+        tb_puts(&b, g_splices[i].text);
+        at = g_splices[i].to;
+    }
+    if (end > at)
+        tb_putn(&b, out->p + at, (size_t)(end - at));
+    tb_putc(&b, '\n');
+    g_bmi = b.p;
+}
+
 static void process_file(struct cpp *cpp, const char *path,
                          const char *src, struct tbuf *out, int incdir_idx)
 {
@@ -2562,8 +3330,13 @@ static void process_file(struct cpp *cpp, const char *path,
             if (cond[i] != COND_LIVE)
                 live = 0;
 
-        if (*lp == '#') {
-            lp++;
+        int dg = lp[0] == '%' && lp[1] == ':';  /* the digraph %:, C95 */
+        if (*lp == '#' || dg) {
+            if (g_gmf && live && cpp->depth == 0) {
+                tb_puts(&g_gmf_text, lineb.p);  /* (an import reads it) */
+                tb_putc(&g_gmf_text, '\n');
+            }
+            lp += dg ? 2 : 1;
             while (*lp == ' ' || *lp == '\t')
                 lp++;
             size_t dn = 0;
@@ -2728,6 +3501,14 @@ static void process_file(struct cpp *cpp, const char *path,
             continue;
         }
 
+        if (live && predef_is_cxx() && cxx_std >= 2020 &&
+            (*lp == 'e' || *lp == 'm' || *lp == 'i') &&
+            (s.line = startline, module_line(&s, lp, out))) {
+            for (int i = 0; i < nl; i++)
+                tb_putc(out, '\n');
+            s.line = startline + nl;
+            continue;
+        }
         if (live) {
             /* Pull continuation lines while a function-like macro
              * invocation is still open (see needs_more_input). */
@@ -2942,10 +3723,10 @@ char *cpp_process(const char *path, const char *src,
     define_macro(&boot, "__restrict__");
     defining_builtins = 0;
     define_macro(&boot, "__STDC__ 1");
-    /* C's _BitInt goes up to 64 bits (sema/type.h TY_BITINT_MAXWIDTH);
+    /* C's _BitInt goes up to 65535 bits (sema/type.h TY_BITINT_MAXWIDTH);
      * <limits.h> makes it BITINT_MAXWIDTH */
     if (!predef_is_cxx())
-        define_macro(&boot, "__BITINT_MAXWIDTH__ 64");
+        define_macro(&boot, "__BITINT_MAXWIDTH__ 65535");
     /* C17: the language EmbCC compiles is C11's (with C17's fixes),
      * _Atomic operators included, and much of C23's. It said C99, which
      * sent headers to their pre-C11 fallbacks -- newlib emulates
@@ -2978,7 +3759,28 @@ char *cpp_process(const char *path, const char *src,
         define_macro(&boot, m);
         define_macro(&boot, "__GNUC_STDC_INLINE__ 1");
     }
-    define_macro(&boot, "__STDC_HOSTED__ 1");
+    /* 0 under -ffreestanding, as GCC's: a freestanding program's
+     * library is only the freestanding headers */
+    define_macro(&boot, g_hosted ? "__STDC_HOSTED__ 1" : "__STDC_HOSTED__ 0");
+    /* char16_t and char32_t hold UTF-16 and UTF-32 (C11 6.10.8.2) */
+    define_macro(&boot, "__STDC_UTF_16__ 1");
+    define_macro(&boot, "__STDC_UTF_32__ 1");
+    /* Annex F: float and double are IEEE binary32 and binary64, their
+     * operations rounded as IEC 60559 says, on every target but AVR,
+     * whose double is 32 bits (as avr-gcc's) */
+    if (!predef_is_cxx() && target_get() != TARGET_AVR) {
+        define_macro(&boot, "__STDC_IEC_559__ 1");
+        define_macro(&boot, "__STDC_IEC_559_COMPLEX__ 1");
+        if (lex_c_year() >= 2023) {
+            define_macro(&boot, "__STDC_IEC_60559_BFP__ 202311L");
+            define_macro(&boot, "__STDC_IEC_60559_COMPLEX__ 202311L");
+        }
+    }
+    /* __has_embed's three answers (C23 6.10.1), in C++ too, as GCC and
+     * Clang give #embed to both */
+    define_macro(&boot, "__STDC_EMBED_NOT_FOUND__ 0");
+    define_macro(&boot, "__STDC_EMBED_FOUND__ 1");
+    define_macro(&boot, "__STDC_EMBED_EMPTY__ 2");
     if (predef_is_cxx()) {
         /* the C++ features EmbCC implements (docs/manual/cxx.md): each one
          * from the standard g++ first defines it in, at the value g++
@@ -3130,7 +3932,9 @@ char *cpp_process(const char *path, const char *src,
         process_file(&cpp, ipath, text, &out, idx);
         cpp.depth--;
     }
+    modules_reset();
     process_file(&cpp, path, src, &out, -1);
+    make_bmi(path, &out);
     emit_config(&cpp, &out);
     if (g_dump_macros) {
         /* -dM: the output is every macro defined once the file has been
@@ -3168,3 +3972,4 @@ char *cpp_process(const char *path, const char *src,
 }
 
 void cpp_set_dump_macros(int on) { g_dump_macros = on; }
+void cpp_set_hosted(int on) { g_hosted = on; }

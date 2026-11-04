@@ -52,15 +52,61 @@ static int g_synth;
  * without a parse tree. Linear search -- a unit mentions tens of symbols,
  * not thousands, and a hash here would cost more than it saves.
  */
+static unsigned ir_hash(const char *p, int n)
+{
+    unsigned h = 2166136261u;
+    for (int k = 0; k < n; k++)
+        h = (h ^ (unsigned char)p[k]) * 16777619u;
+    return h;
+}
+
+/* (re)build an index of cap slots over n entries, keyed by key(i) */
+static int *ir_index(int n, int *cap, unsigned (*key)(const struct ir_unit *, int),
+                     const struct ir_unit *u)
+{
+    *cap = 64;
+    while (*cap < 2 * n + 2)
+        *cap *= 2;
+    int *h = xcalloc((size_t)*cap, sizeof *h);
+    for (int i = 0; i < n; i++) {
+        unsigned k = key(u, i) & (unsigned)(*cap - 1);
+        while (h[k])
+            k = (k + 1) & (unsigned)(*cap - 1);
+        h[k] = i + 1;
+    }
+    return h;
+}
+
+static unsigned sym_key(const struct ir_unit *u, int i)
+{
+    return ir_hash(u->syms[i].name, (int)strlen(u->syms[i].name)) ^
+           (unsigned)u->syms[i].is_func;
+}
+
+static unsigned str_key(const struct ir_unit *u, int i)
+{
+    return ir_hash(u->strs[i].bytes, u->strs[i].len);
+}
+
 static int sym_intern(struct ir_unit *u, const char *name, int is_func,
                       int defined, int is_weak, int is_varargs,
                       int sret_first, int is_nothrow)
 {
     if (!name)
         return -1;
-    for (int i = 0; i < u->nsyms; i++)
+    if (!u->symh || 2 * u->nsyms + 2 > u->symh_cap || u->symh_n != u->nsyms) {
+        free(u->symh);              /* (or something appended without it) */
+        u->symh = ir_index(u->nsyms, &u->symh_cap, sym_key, u);
+    }
+    unsigned k = (ir_hash(name, (int)strlen(name)) ^ (unsigned)is_func) &
+                 (unsigned)(u->symh_cap - 1);
+    for (; u->symh[k]; k = (k + 1) & (unsigned)(u->symh_cap - 1)) {
+        int i = u->symh[k] - 1;
         if (!strcmp(u->syms[i].name, name) && u->syms[i].is_func == is_func)
             return i;
+    }
+    u->symh[k] = u->nsyms + 1;
+    u->symh_n = u->nsyms + 1;       /* (it is, with this one) */
     if (u->nsyms == u->capsyms) {
         u->capsyms = u->capsyms ? u->capsyms * 2 : 32;
         u->syms = xrealloc(u->syms, (size_t)u->capsyms * sizeof *u->syms);
@@ -279,6 +325,124 @@ static int label_mark(struct ir_func *fn, struct func *f, const char *name,
     return f->nlabel_pos++;
 }
 
+/* ---- -fbounds-safety (and -fsanitize=bounds) --------------------------
+ *
+ * A subscript of something whose length is known is checked before the
+ * address is formed: the index, as unsigned, below the length -- or not
+ * above it, under `&` (one past the end is an address C allows) -- and a
+ * trap when it is not, as EmbCC's other checks trap. The length is:
+ *
+ *   - an array's own, declared (a local's, a global's, a member's, a row
+ *     of a two-dimensional one);
+ *   - a flexible array member's or a pointer member's counted_by(n) /
+ *     sized_by(n): member n of the same struct, read when the subscript
+ *     runs. For the flexible array the struct is the array's address less
+ *     its offset, so nothing is evaluated twice; for a pointer member the
+ *     struct's address is evaluated again, which is only done when that
+ *     has no side effect.
+ *
+ * Anything else -- a plain pointer -- has no length to check against. */
+static int g_bounds, g_bounds_addr;
+
+void irgen_set_bounds(int on) { g_bounds = on; }
+
+static void san_trap_if(struct ir_func *fn, int cond, int w);
+/* what a check finds, for the report a hosted target's failed check makes
+ * (lib/rt/ubsan.c's list): 1 signed overflow, 2 division by zero, 3 the
+ * most negative value / -1, 4 a shift count, 5 an index, 6 -INT_MIN */
+static int g_ub_why;
+#define SAN_FAIL(why, ...) (g_ub_why = (why), san_trap_if(__VA_ARGS__))
+
+static void bounds_check(struct ir_func *fn, struct expr *pe, int p, int idx,
+                         int allow_end)
+{
+    struct expr *b = pe;
+    while (b && b->kind == EXPR_CAST && b->col == 0 && b->rhs)
+        b = b->rhs;
+    if (!b)
+        return;
+    const struct type *at = b->undecayed ? b->undecayed : b->ty;
+    int n = -1;
+    if (at && at->kind == TY_ARRAY && at->count > 0)
+        n = emit_const(fn, at->count, AW);
+    else if (b->kind == EXPR_MEMBER && b->memb && b->memb->counted_by) {
+        struct type *st = b->is_arrow ? (b->lhs->ty ? b->lhs->ty->pointee
+                                                    : NULL)
+                                      : b->lhs->ty;
+        long coff = 0;
+        struct member *cm = st ? ty_find_member_deep(st, b->memb->counted_by,
+                                                     &coff) : NULL;
+        if (!cm || !cm->ty || !ty_is_integer(cm->ty))
+            return;
+        int fam = at && at->kind == TY_ARRAY;
+        int base;
+        if (fam)
+            base = emit_bin(fn, IR_SUB, p, emit_const(fn, b->memb->off, AW),
+                            AW, 1);
+        else if (!rules_side_effects(b->lhs))
+            base = b->is_arrow ? gen_expr(fn, b->lhs) : gen_addr(fn, b->lhs);
+        else
+            return;
+        int ca = emit_bin(fn, IR_ADD, base, emit_const(fn, coff, AW), AW, 1);
+        int cnt = gen_convert(fn, emit_load(fn, ca, cm->ty), cm->ty,
+                              ty_intptr(1));
+        if (b->memb->counted_bytes) {
+            const struct type *et = fam ? at->pointee
+                                  : b->ty && b->ty->kind == TY_PTR
+                                    ? b->ty->pointee : NULL;
+            long es = et ? ty_size(et) : 1;
+            if (es > 1)
+                cnt = emit_bin(fn, IR_DIV, cnt, emit_const(fn, es, AW), AW, 0);
+        }
+        n = cnt;
+    }
+    if (n < 0)
+        return;
+    int bad = emit_cmp(fn, allow_end ? B_GT : B_GE, idx, n, AW, 0);
+    SAN_FAIL(5, fn, bad, 4);
+}
+
+/* An arm of an `if` that calls a noreturn or cold function -- abort(),
+ * an error path -- is the unlikely one, as GCC predicts it. */
+static int arm_calls_cold(const struct ir_func *fn, int lo, int hi)
+{
+    for (int n = lo; n < hi; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        if (i->op == IR_CALL && !i->indirect && i->callee &&
+            (i->callee->is_noreturn || i->callee->attr_cold))
+            return 1;
+    }
+    return 0;
+}
+
+static void heat_cold(struct ir_func *fn, int lo, int hi)
+{
+    for (int n = lo; n < hi; n++)
+        if (!fn->ins[n].heat)
+            fn->ins[n].heat = IR_HEAT_COLD;
+}
+
+/* What is known of which way an `if` goes: __builtin_expect on its
+ * condition, else a cold call in one arm and not the other. The unlikely
+ * arm's code is cold (the layout pass moves it out of the way), and the
+ * branch, which skips the then-arm, says how likely it is taken. */
+static void if_heat(struct ir_func *fn, const struct expr *cond, int br,
+                    int t0, int t1, int e0, int e1)
+{
+    int hint = cond->expect_hint;
+    if (!hint) {
+        int ct = arm_calls_cold(fn, t0, t1), ce = arm_calls_cold(fn, e0, e1);
+        hint = ct && !ce ? -1 : ce && !ct ? 1 : 0;
+    }
+    if (hint < 0) {
+        heat_cold(fn, t0, t1);
+        fn->ins[br].prob = 1 + 900;
+    } else if (hint > 0) {
+        heat_cold(fn, e0, e1);
+        fn->ins[br].prob = 1 + 100;
+    }
+}
+
 static void label_data_marks(struct ir_func *fn, struct func *f)
 {
     struct unit *u = cur_unit->src;
@@ -466,6 +630,9 @@ static void emit_stvar(struct ir_func *fn, int v, int val,
     emit_stvar_slot(fn, v, val, t);
 }
 
+static int tlv_call(struct ir_func *fn, int desc);
+static int emutls_call(struct ir_func *fn, int ctrl);
+
 static int emit_gaddr(struct ir_func *fn, struct global *g)
 {
     struct ir_ins *i = emit(fn);
@@ -473,6 +640,14 @@ static int emit_gaddr(struct ir_func *fn, struct global *g)
     i->glob = g;
     i->glob_sym = ir_sym_global(cur_unit, g);
     i->dst = new_temp(fn);
+    /* Darwin's thread-locals: that was the descriptor's address, and its
+     * first word the thunk that gives this thread's copy */
+    if (g->is_tls && target_os_get() == TGT_OS_DARWIN)
+        return tlv_call(fn, i->dst);
+    /* MinGW's (emutls, GCC's model there): that was the variable's control
+     * object, and __emutls_get_address gives this thread's copy */
+    if (g->is_tls && target_win64_abi())
+        return emutls_call(fn, i->dst);
     return i->dst;
 }
 
@@ -1220,7 +1395,7 @@ int gen_expr(struct ir_func *fn, struct expr *e);
 static int type_size_val(struct ir_func *fn, const struct type *t)
 {
     if (ty_is_vla(t))
-        return emit_ldvar(fn, t->vla_size, ty_base(TY_LONG, 1));
+        return emit_ldvar(fn, t->vla_size, ty_intptr(1));
     return emit_const(fn, ty_size(t), AW);
 }
 
@@ -1238,7 +1413,7 @@ static void vla_eval_at(struct ir_func *fn, struct type *t, int typedef_here)
         return;                 /* sized where its typedef was reached */
     int n = gen_expr(fn, t->vla_len);
     int sz = emit_bin(fn, IR_MUL, n, type_size_val(fn, t->pointee), AW, 1);
-    emit_stvar(fn, t->vla_size, sz, ty_base(TY_LONG, 1));
+    emit_stvar(fn, t->vla_size, sz, ty_intptr(1));
 }
 
 static void vla_eval(struct ir_func *fn, struct type *t)
@@ -1260,7 +1435,7 @@ static void vla_release(struct ir_func *fn, int depth)
 {
     if (g_nvla <= depth)
         return;
-    int sp = emit_ldvar(fn, g_vla[depth].sp_slot, ty_base(TY_LONG, 1));
+    int sp = emit_ldvar(fn, g_vla[depth].sp_slot, ty_intptr(1));
     struct ir_ins *i = emit(fn);   /* operands first: emit() appends */
     i->op = IR_SPRESTORE;
     i->a = sp;
@@ -1441,10 +1616,20 @@ int ir_intern_string(struct ir_unit *iu, const char *bytes, int len)
 int ir_intern_aligned(struct ir_unit *iu, const char *bytes, int len,
                       int align)
 {
-    for (int i = 0; i < iu->nstrs; i++)
+    if (!iu->strh || 2 * iu->nstrs + 2 > iu->strh_cap ||
+        iu->strh_n != iu->nstrs) {
+        free(iu->strh);
+        iu->strh = ir_index(iu->nstrs, &iu->strh_cap, str_key, iu);
+    }
+    unsigned k = ir_hash(bytes, len) & (unsigned)(iu->strh_cap - 1);
+    for (; iu->strh[k]; k = (k + 1) & (unsigned)(iu->strh_cap - 1)) {
+        int i = iu->strh[k] - 1;
         if (iu->strs[i].len == len && iu->strs[i].off % align == 0 &&
             memcmp(iu->strs[i].bytes, bytes, (size_t)len) == 0)
             return i;
+    }
+    iu->strh[k] = iu->nstrs + 1;
+    iu->strh_n = iu->nstrs + 1;
     if (iu->nstrs == iu->capstrs) {
         iu->capstrs = iu->capstrs ? iu->capstrs * 2 : 8;
         iu->strs = xrealloc(iu->strs,
@@ -1469,6 +1654,9 @@ int ir_intern_aligned(struct ir_unit *iu, const char *bytes, int len,
 static int win64_byref(const struct type *t)
 {
     int sz;
+    /* MinGW's: a long double (x87's, in 16 bytes) and an __int128 too */
+    if (t && (t->kind == TY_LDOUBLE || t->kind == TY_INT128))
+        return 1;
     if (!t || t->kind != TY_STRUCT)
         return 0;
     sz = ty_size(t);
@@ -1536,8 +1724,21 @@ static int emit_tobool(struct ir_func *fn, int v, const struct type *from)
  * compared with 0.0 as a float — -0.0 is false, which its bit pattern is
  * not, and a long double is too wide to test as bits at all. Returns the
  * temp to branch on, and its width in *w. */
+static int bitint_test(struct ir_func *fn, int addr, const struct type *t, int line);
+static int dec_truth(struct ir_func *fn, int v, struct type *t, int line);
+static int dec_convert(struct ir_func *fn, int v, struct type *from, struct type *to,
+                       int line);
+
 static int truth(struct ir_func *fn, int v, const struct type *t, int *w)
 {
+    if (ty_is_wide_bitint(t)) {       /* a _BitInt of limbs: its address */
+        *w = 4;
+        return bitint_test(fn, v, t, 0);
+    }
+    if (t->is_dec) {                  /* a decimal: != 0, by the runtime */
+        *w = 4;
+        return dec_truth(fn, v, (struct type *)t, 0);
+    }
     if (ty_is_float(t) || t->kind == TY_INT128) {   /* (no 16-byte branch) */
         *w = 4;
         return emit_tobool(fn, v, t);
@@ -1772,6 +1973,10 @@ static int bf_from_int(struct ir_func *fn, int v, const struct type *from)
 int gen_convert(struct ir_func *fn, int v, const struct type *from,
                        const struct type *to)
 {
+    /* a decimal on either side: lib/rt/decimal.c's conversions */
+    if ((from->is_dec || to->is_dec) && from->is_dec != to->is_dec &&
+        to->kind != TY_VOID)
+        return dec_convert(fn, v, (struct type *)from, (struct type *)to, 0);
     int fsize = ty_size(from), tsize = ty_size(to);
     int fw = ty_w(from), tw = ty_w(to);
 
@@ -2137,6 +2342,524 @@ static int libatomic_call(struct ir_func *fn, const char *name,
     return emit_call(fn, &e, vals, -1);
 }
 
+/* desc->thunk(desc): a Darwin thread-local's address, as an indirect call
+ * (the thunk keeps more registers than a call need, which is safe) */
+/* MinGW's thread-locals, as its GCC makes them (emutls): a variable's
+ * symbol is its control object __emutls_v.NAME -- its size, its
+ * alignment, a word for the runtime and the template of its first value
+ * -- and libgcc's __emutls_get_address(&it) gives this thread's copy,
+ * made from the template the first time a thread asks. */
+static int emutls_call(struct ir_func *fn, int ctrl)
+{
+    struct type *vp = ty_ptr(ty_base(TY_VOID, 0));
+    struct type *tys[1] = { vp };
+    int vals[1] = { ctrl };
+    struct func *cf = libatomic_fn("__emutls_get_address", vp, 1, tys);
+    cf->is_nothrow = 1;
+    return libatomic_call(fn, "__emutls_get_address", vp, 1, vals, tys,
+                          g_cur_line);
+}
+
+static int tlv_call(struct ir_func *fn, int desc)
+{
+    struct type *vp = ty_ptr(ty_base(TY_VOID, 0));
+    static struct type *ft, *fpt;
+    if (!ft) {
+        struct type *p[1] = { vp };
+        ft = ty_func(vp, p, 1, 0);
+        fpt = ty_ptr(ft);
+    }
+    int thunk = emit_load(fn, desc, fpt);
+    struct expr e, callee, a0, *av[1];
+    memset(&e, 0, sizeof e);
+    memset(&callee, 0, sizeof callee);
+    memset(&a0, 0, sizeof a0);
+    callee.kind = EXPR_VAR;
+    callee.ty = fpt;
+    a0.kind = EXPR_NUM;
+    a0.ty = vp;
+    av[0] = &a0;
+    e.kind = EXPR_CALL;
+    e.ty = vp;
+    e.lhs = &callee;
+    e.args = av;
+    e.nargs = 1;
+    int vals[1] = { desc };
+    return emit_call(fn, &e, vals, thunk);
+}
+
+/* ---- _BitInt wider than 64 bits --------------------------------------------
+ *
+ * Such a value is a struct of limbs to everything here (ty_bitint), so an
+ * expression of one evaluates to its ADDRESS, as a struct's does: an
+ * object's own, or the local sema gave an operator's result (res_local).
+ * Each operator is a call into lib/rt/bitint.c, which takes the width
+ * negated for a signed type. */
+static int bi_bits(struct ir_func *fn, const struct type *t)
+{
+    long n = t->bitint;
+    return emit_const(fn, t->is_unsigned ? n : -n, ty_w(ty_base(TY_LONG, 0)));
+}
+
+static struct type *bi_ptr(void) { return ty_ptr(ty_base(TY_VOID, 0)); }
+
+static int bi_slot(struct ir_func *fn, struct expr *e)
+{
+    if (!e->res_local)
+        diag_fatal(fn->src ? fn->src->file : NULL, e->line,
+                   "internal: a _BitInt(%d) value has no slot", e->ty->bitint);
+    return local_addr(fn, e->res_local - 1);
+}
+
+/* op(d, a, b, bits) / op(d, a, bits) */
+static void bi_call3(struct ir_func *fn, const char *name, int d, int a, int b,
+                     const struct type *t, int line)
+{
+    struct type *P = bi_ptr(), *L = ty_base(TY_LONG, 0);
+    struct type *tys[4] = { P, P, P, L };
+    int vals[4] = { d, a, b, bi_bits(fn, t) };
+    libatomic_call(fn, name, ty_base(TY_VOID, 0), 4, vals, tys, line);
+}
+
+static void bi_call2(struct ir_func *fn, const char *name, int d, int a,
+                     const struct type *t, int line)
+{
+    struct type *P = bi_ptr(), *L = ty_base(TY_LONG, 0);
+    struct type *tys[3] = { P, P, L };
+    int vals[3] = { d, a, bi_bits(fn, t) };
+    libatomic_call(fn, name, ty_base(TY_VOID, 0), 3, vals, tys, line);
+}
+
+static int bitint_test(struct ir_func *fn, int addr, const struct type *t, int line)
+{
+    struct type *P = bi_ptr(), *L = ty_base(TY_LONG, 0);
+    struct type *tys[2] = { P, L };
+    int vals[2] = { addr, bi_bits(fn, t) };
+    return libatomic_call(fn, "__embcc_bi_test", ty_base(TY_INT, 0), 2, vals, tys, line);
+}
+
+/* a 64-bit integer value v of type from into the limbs at d */
+static void bi_from_int(struct ir_func *fn, int d, int v, const struct type *from,
+                        const struct type *to, int line)
+{
+    struct type *P = bi_ptr(), *U = ty_llong(1), *I = ty_base(TY_INT, 0);
+    int sgn = ty_signed_int(from);
+    int v64 = gen_convert(fn, v, from, ty_llong(!sgn));
+    struct type *tys[4] = { P, U, I, ty_base(TY_LONG, 0) };
+    int vals[4] = { d, v64, emit_const(fn, sgn, 4), bi_bits(fn, to) };
+    libatomic_call(fn, "__embcc_bi_from64", ty_base(TY_VOID, 0), 4, vals, tys, line);
+}
+
+static int is_wide(const struct expr *x) { return x && ty_is_wide_bitint(x->ty); }
+
+/* Whether e is an operation gen_bitint does: a value of a wide _BitInt
+ * made by an operator, or an operator on one that gives something else
+ * (a comparison, !, a conversion out). */
+static int bitint_op(const struct expr *e)
+{
+    switch (e->kind) {
+    case EXPR_NUM: case EXPR_NEG: case EXPR_BNOT: case EXPR_INCDEC:
+    case EXPR_COMPOUND:
+        return is_wide(e);
+    case EXPR_BINOP:   /* (&& and || test each side with truth()) */
+        return e->op != B_LAND && e->op != B_LOR &&
+               (is_wide(e) || is_wide(e->lhs) || is_wide(e->rhs));
+    case EXPR_CAST:
+        return is_wide(e) || is_wide(e->rhs);
+    case EXPR_NOT:
+        return is_wide(e->rhs);
+    default:
+        return 0;
+    }
+}
+
+static const char *bi_binop_fn(enum binop op)
+{
+    switch (op) {
+    case B_ADD: return "__embcc_bi_add";
+    case B_SUB: return "__embcc_bi_sub";
+    case B_MUL: return "__embcc_bi_mul";
+    case B_DIV: return "__embcc_bi_div";
+    case B_MOD: return "__embcc_bi_mod";
+    case B_AND: return "__embcc_bi_and";
+    case B_OR:  return "__embcc_bi_or";
+    case B_XOR: return "__embcc_bi_xor";
+    default:    return NULL;
+    }
+}
+
+/* a shift's count: any integer, the low 64 bits of a wide one */
+static int bi_count(struct ir_func *fn, struct expr *c)
+{
+    int v = gen_expr(fn, c);
+    if (is_wide(c)) {
+        struct type *P = bi_ptr(), *L = ty_base(TY_LONG, 0);
+        struct type *tys[2] = { P, L };
+        int vals[2] = { v, bi_bits(fn, c->ty) };
+        return libatomic_call(fn, "__embcc_bi_to64", ty_llong(1), 2, vals, tys, c->line);
+    }
+    return gen_convert(fn, v, c->ty, ty_llong(1));
+}
+
+static void bi_shift(struct ir_func *fn, int shl, int d, int a, struct expr *count,
+                     const struct type *t, int line)
+{
+    struct type *P = bi_ptr(), *L = ty_base(TY_LONG, 0);
+    struct type *tys[4] = { P, P, ty_llong(1), L };
+    int vals[4] = { d, a, bi_count(fn, count), bi_bits(fn, t) };
+    libatomic_call(fn, shl ? "__embcc_bi_shl" : "__embcc_bi_shr", ty_base(TY_VOID, 0), 4,
+                   vals, tys, line);
+}
+
+static int gen_bitint(struct ir_func *fn, struct expr *e)
+{
+    struct type *P = bi_ptr(), *L = ty_base(TY_LONG, 0);
+    switch (e->kind) {
+    case EXPR_NUM: {
+        int d = bi_slot(fn, e);
+        if (e->bigv) {
+            /* a wb constant over 64 bits: its limbs, stored */
+            int limbs = (e->ty->bitint + 63) / 64;
+            struct type *U = ty_llong(1);
+            for (int i = 0; i < limbs; i++) {
+                int at = i ? emit_bin(fn, IR_ADD, d, emit_const(fn, 8 * i, ty_w(P)),
+                                      ty_w(P), 0) : d;
+                emit_store(fn, at, emit_const(fn, i < e->nbig ? (long)e->bigv[i] : 0, 8), U);
+            }
+            return d;
+        }
+        struct type *from = e->ty->is_unsigned ? ty_llong(1) : ty_llong(0);
+        bi_from_int(fn, d, emit_const(fn, e->num, 8), from, e->ty, e->line);
+        return d;
+    }
+    case EXPR_CAST: {
+        struct type *to = e->ty, *from = e->rhs->ty;
+        if (ty_is_wide_bitint(to)) {
+            int d = bi_slot(fn, e);
+            int v = gen_expr(fn, e->rhs);
+            if (ty_is_wide_bitint(from)) {
+                struct type *tys[4] = { P, L, P, L };
+                int vals[4] = { d, bi_bits(fn, to), v, bi_bits(fn, from) };
+                libatomic_call(fn, "__embcc_bi_ext", ty_base(TY_VOID, 0), 4, vals, tys,
+                               e->line);
+            } else if (ty_is_float(from) || from->kind == TY_LDOUBLE) {
+                int dv = gen_convert(fn, v, from, ty_base(TY_DOUBLE, 0));
+                struct type *tys[3] = { P, ty_base(TY_DOUBLE, 0), L };
+                int vals[3] = { d, dv, bi_bits(fn, to) };
+                libatomic_call(fn, "__embcc_bi_from_double", ty_base(TY_VOID, 0), 3, vals,
+                               tys, e->line);
+            } else if (from->kind == TY_PTR) {
+                bi_from_int(fn, d, v, ty_base(TY_LONG, 1), to, e->line);
+            } else {
+                bi_from_int(fn, d, v, from, to, e->line);
+            }
+            return d;
+        }
+        /* out of a wide one */
+        int a = gen_expr(fn, e->rhs);
+        if (to->kind == TY_BOOL)
+            return gen_convert(fn, bitint_test(fn, a, from, e->line),
+                               ty_base(TY_INT, 0), to);
+        if (ty_is_float(to) || to->kind == TY_LDOUBLE) {
+            struct type *tys[2] = { P, L };
+            int vals[2] = { a, bi_bits(fn, from) };
+            int dv = libatomic_call(fn, "__embcc_bi_to_double", ty_base(TY_DOUBLE, 0), 2,
+                                    vals, tys, e->line);
+            return gen_convert(fn, dv, ty_base(TY_DOUBLE, 0), to);
+        }
+        if (to->kind == TY_VOID)
+            return a;
+        struct type *tys[2] = { P, L };
+        int vals[2] = { a, bi_bits(fn, from) };
+        int u = libatomic_call(fn, "__embcc_bi_to64", ty_llong(1), 2, vals, tys, e->line);
+        return gen_convert(fn, u, ty_llong(1), to);
+    }
+    case EXPR_NEG:
+    case EXPR_BNOT: {
+        int d = bi_slot(fn, e);
+        int a = gen_expr(fn, e->rhs);
+        bi_call2(fn, e->kind == EXPR_NEG ? "__embcc_bi_neg" : "__embcc_bi_not", d, a,
+                 e->ty, e->line);
+        return d;
+    }
+    case EXPR_NOT: {
+        int a = gen_expr(fn, e->rhs);
+        int t = bitint_test(fn, a, e->rhs->ty, e->line);
+        return emit_cmp(fn, B_EQ, t, emit_const(fn, 0, 4), 4, 1);
+    }
+    case EXPR_BINOP: {
+        if (e->op == B_SHL || e->op == B_SHR) {
+            int d = bi_slot(fn, e);
+            int a = gen_expr(fn, e->lhs);
+            bi_shift(fn, e->op == B_SHL, d, a, e->rhs, e->ty, e->line);
+            return d;
+        }
+        if (e->op == B_EQ || e->op == B_NE || e->op == B_LT || e->op == B_LE ||
+            e->op == B_GT || e->op == B_GE) {
+            /* sema converted both to their common type */
+            int a = gen_expr(fn, e->lhs), b = gen_expr(fn, e->rhs);
+            struct type *tys[3] = { P, P, L };
+            int vals[3] = { a, b, bi_bits(fn, e->lhs->ty) };
+            int c = libatomic_call(fn, "__embcc_bi_cmp", ty_base(TY_INT, 0), 3, vals, tys,
+                                   e->line);
+            return emit_cmp(fn, e->op, c, emit_const(fn, 0, 4), 4, 1);
+        }
+        const char *name = bi_binop_fn(e->op);
+        if (!name)
+            diag_fatal(fn->src ? fn->src->file : NULL, e->line,
+                       "internal: _BitInt operator %d", (int)e->op);
+        int d = bi_slot(fn, e);
+        int a = gen_expr(fn, e->lhs), b = gen_expr(fn, e->rhs);
+        bi_call3(fn, name, d, a, b, e->ty, e->line);
+        return d;
+    }
+    case EXPR_INCDEC: {
+        int lv = gen_addr(fn, e->lhs);
+        int d = e->is_post ? bi_slot(fn, e) : lv;
+        if (e->is_post)
+            bi_call2(fn, "__embcc_bi_copy", d, lv, e->ty, e->line);
+        struct type *tys[4] = { P, P, ty_llong(0), L };
+        int vals[4] = { lv, lv, emit_const(fn, e->delta, 8), bi_bits(fn, e->lhs->ty) };
+        libatomic_call(fn, "__embcc_bi_addi", ty_base(TY_VOID, 0), 4, vals, tys, e->line);
+        return d;
+    }
+    case EXPR_COMPOUND: {
+        int lv = gen_addr(fn, e->lhs);
+        if (e->op == B_SHL || e->op == B_SHR) {
+            bi_shift(fn, e->op == B_SHL, lv, lv, e->rhs, e->lhs->ty, e->line);
+            return lv;
+        }
+        const char *name = bi_binop_fn(e->op);
+        if (!name)
+            diag_fatal(fn->src ? fn->src->file : NULL, e->line,
+                       "internal: _BitInt operator %d", (int)e->op);
+        int b = gen_expr(fn, e->rhs);
+        bi_call3(fn, name, lv, lv, b, e->lhs->ty, e->line);
+        return lv;
+    }
+    default:
+        diag_fatal(fn->src ? fn->src->file : NULL, e->line, "internal: _BitInt expression");
+    }
+    return 0;
+}
+
+/* ---- C23 decimal floating types ---------------------------------------------
+ *
+ * A _Decimal value is carried as the binary type of its size and register
+ * class (ty_decimal), so loads, stores, copies, arguments and returns are
+ * those of that type, bit for bit -- and so are the ABI's registers: a
+ * float's, a double's, binary128's q register on AArch64. Every operation
+ * on one is a call into lib/rt/decimal.c, by libgcc's names, so EmbCC's
+ * and GCC's objects link either way. */
+static int is_dec(const struct type *t) { return t && t->is_dec; }
+
+static const char *dec_sfx(const struct type *t)
+{
+    return t->is_dec == 4 ? "sd" : t->is_dec == 8 ? "dd" : "td";
+}
+
+static int dec_call(struct ir_func *fn, const char *name, struct type *ret, int n,
+                    const int *vals, struct type *const *tys, int line)
+{
+    return libatomic_call(fn, xstrndup(name, strlen(name)), ret, n, vals, tys, line);
+}
+
+/* the constant's bits, interned and loaded as the decimal type */
+static int dec_const(struct ir_func *fn, const struct type *t, const unsigned long long b[2])
+{
+    int n = t->is_dec;
+    char *bytes = xcalloc(1, 16);
+    for (int i = 0; i < n; i++)
+        bytes[i] = (char)(b[i / 8] >> (8 * (i % 8)));
+    struct ir_ins *i = emit(fn);
+    i->op = IR_STRADDR;
+    i->label = ir_intern_aligned(cur_unit, bytes, n, n);
+    i->dst = new_temp(fn);
+    return emit_load(fn, i->dst, t);
+}
+
+static int dec_zero(struct ir_func *fn, const struct type *t)
+{
+    /* +0 with the smallest exponent: all bits zero */
+    unsigned long long z[2] = { 0, 0 };
+    return dec_const(fn, t, z);
+}
+
+/* a == b, a < b and the rest: libgcc's comparison routines and how each
+ * one's answer reads */
+static int dec_compare(struct ir_func *fn, enum binop op, int a, int b,
+                       struct type *t, int line)
+{
+    const char *fnm = op == B_EQ ? "eq" : op == B_NE ? "ne" : op == B_LT ? "lt"
+                    : op == B_LE ? "le" : op == B_GT ? "gt" : "ge";
+    char name[32];
+    snprintf(name, sizeof name, "__bid_%s%s2", fnm, dec_sfx(t));
+    struct type *tys[2] = { t, t };
+    int vals[2] = { a, b };
+    int r = dec_call(fn, name, ty_base(TY_INT, 0), 2, vals, tys, line);
+    enum binop rel = op == B_EQ ? B_EQ : op == B_NE ? B_NE : op;
+    return emit_cmp(fn, rel, r, emit_const(fn, 0, 4), 4, 1);
+}
+
+static int dec_truth(struct ir_func *fn, int v, struct type *t, int line)
+{
+    return dec_compare(fn, B_NE, v, dec_zero(fn, t), t, line);
+}
+
+/* v, of type from, converted to the type to; one of them decimal */
+static int dec_convert(struct ir_func *fn, int v, struct type *from, struct type *to,
+                       int line)
+{
+    char name[40];
+    if (is_dec(from) && is_dec(to)) {
+        if (from->is_dec == to->is_dec)
+            return v;
+        snprintf(name, sizeof name, "__bid_%s%s%s2",
+                 to->is_dec > from->is_dec ? "extend" : "trunc", dec_sfx(from), dec_sfx(to));
+        struct type *tys[1] = { from };
+        return dec_call(fn, name, to, 1, &v, tys, line);
+    }
+    if (is_dec(to)) {
+        if (from->kind == TY_BOOL)
+            from = ty_base(TY_INT, 0);
+        if (ty_is_float(from)) {
+            /* through double: float's and double's names */
+            struct type *bt = from->kind == TY_FLOAT ? from : ty_base(TY_DOUBLE, 0);
+            if (bt != from)
+                v = gen_convert(fn, v, from, bt);
+            const char *bs = bt->kind == TY_FLOAT ? "sf" : "df";
+            int wider = to->is_dec > ty_size(bt);
+            snprintf(name, sizeof name, "__bid_%s%s%s", wider || to->is_dec == ty_size(bt) ?
+                     "extend" : "trunc", bs, dec_sfx(to));
+            if (to->is_dec < ty_size(bt))
+                snprintf(name, sizeof name, "__bid_trunc%s%s", bs, dec_sfx(to));
+            struct type *tys[1] = { bt };
+            return dec_call(fn, name, to, 1, &v, tys, line);
+        }
+        /* an integer: through int or long long, by its signedness */
+        int wide = ty_size(from) > 4, uns = from->is_unsigned;
+        struct type *it = wide ? ty_llong(uns) : ty_base(TY_INT, uns);
+        v = gen_convert(fn, v, from, it);
+        snprintf(name, sizeof name, "__bid_float%s%s%s", uns ? "uns" : "", wide ? "di" : "si",
+                 dec_sfx(to));
+        struct type *tys[1] = { it };
+        return dec_call(fn, name, to, 1, &v, tys, line);
+    }
+    /* out of a decimal */
+    if (to->kind == TY_BOOL)
+        return gen_convert(fn, dec_truth(fn, v, from, line), ty_base(TY_INT, 0), to);
+    if (ty_is_float(to)) {
+        struct type *bt = to->kind == TY_FLOAT ? to : ty_base(TY_DOUBLE, 0);
+        const char *bs = bt->kind == TY_FLOAT ? "sf" : "df";
+        snprintf(name, sizeof name, "__bid_%s%s%s",
+                 ty_size(bt) > from->is_dec ? "extend" : "trunc", dec_sfx(from), bs);
+        if (from->is_dec == 4 && bt->kind == TY_FLOAT)
+            snprintf(name, sizeof name, "__bid_truncsdsf");
+        struct type *tys[1] = { from };
+        int r = dec_call(fn, name, bt, 1, &v, tys, line);
+        return bt == to ? r : gen_convert(fn, r, bt, to);
+    }
+    if (to->kind == TY_VOID)
+        return v;
+    int wide = ty_size(to) > 4, uns = to->is_unsigned;
+    struct type *it = wide ? ty_llong(uns) : ty_base(TY_INT, uns);
+    snprintf(name, sizeof name, "__bid_fix%s%s%s", uns ? "uns" : "", dec_sfx(from),
+             wide ? "di" : "si");
+    struct type *tys[1] = { from };
+    int r = dec_call(fn, name, it, 1, &v, tys, line);
+    return gen_convert(fn, r, it, to);
+}
+
+static int dec_op(const struct expr *e)
+{
+    switch (e->kind) {
+    case EXPR_FNUM: case EXPR_NEG: case EXPR_INCDEC: case EXPR_COMPOUND:
+        return is_dec(e->ty);
+    case EXPR_BINOP:   /* (&& and || test each side with truth()) */
+        return e->op != B_LAND && e->op != B_LOR &&
+               (is_dec(e->ty) || is_dec(e->lhs->ty) || is_dec(e->rhs->ty));
+    case EXPR_CAST:
+        return (is_dec(e->ty) || is_dec(e->rhs->ty)) &&
+               !(is_dec(e->ty) && is_dec(e->rhs->ty) && e->ty->is_dec == e->rhs->ty->is_dec);
+    case EXPR_NOT:
+        return is_dec(e->rhs->ty);
+    default:
+        return 0;
+    }
+}
+
+/* a op b in decimal type t */
+static int dec_arith(struct ir_func *fn, enum binop op, int a, int b, struct type *t,
+                     int line)
+{
+    const char *o = op == B_ADD ? "add" : op == B_SUB ? "sub" : op == B_MUL ? "mul" : "div";
+    if (op != B_ADD && op != B_SUB && op != B_MUL && op != B_DIV)
+        diag_fatal(fn->src ? fn->src->file : NULL, line, "%s has no operator %d",
+                   ty_name(t), (int)op);
+    char name[32];
+    snprintf(name, sizeof name, "__bid_%s%s3", o, dec_sfx(t));
+    struct type *tys[2] = { t, t };
+    int vals[2] = { a, b };
+    return dec_call(fn, name, t, 2, vals, tys, line);
+}
+
+static int gen_decimal(struct ir_func *fn, struct expr *e)
+{
+    switch (e->kind) {
+    case EXPR_FNUM:
+        if (!e->bigv)
+            diag_fatal(fn->src ? fn->src->file : NULL, e->line,
+                       "internal: a %s constant without its bits", ty_name(e->ty));
+        return dec_const(fn, e->ty, e->bigv);
+    case EXPR_CAST:
+        return dec_convert(fn, gen_expr(fn, e->rhs), e->rhs->ty, e->ty, e->line);
+    case EXPR_NEG: {
+        char name[32];
+        snprintf(name, sizeof name, "__embcc_bid_neg%s", dec_sfx(e->ty));
+        int v = gen_expr(fn, e->rhs);
+        struct type *tys[1] = { e->ty };
+        return dec_call(fn, name, e->ty, 1, &v, tys, e->line);
+    }
+    case EXPR_NOT: {
+        int v = gen_expr(fn, e->rhs);
+        int t = dec_truth(fn, v, e->rhs->ty, e->line);
+        return emit_cmp(fn, B_EQ, t, emit_const(fn, 0, 4), 4, 1);
+    }
+    case EXPR_BINOP: {
+        if (e->op == B_EQ || e->op == B_NE || e->op == B_LT || e->op == B_LE ||
+            e->op == B_GT || e->op == B_GE)
+            return dec_compare(fn, e->op, gen_expr(fn, e->lhs), gen_expr(fn, e->rhs),
+                               e->lhs->ty, e->line);
+        int a = gen_expr(fn, e->lhs), b = gen_expr(fn, e->rhs);
+        return dec_arith(fn, e->op, a, b, e->ty, e->line);
+    }
+    case EXPR_INCDEC: {
+        int lv = gen_addr(fn, e->lhs);
+        int old = emit_load(fn, lv, e->lhs->ty);
+        int one = dec_convert(fn, emit_const(fn, 1, 4), ty_base(TY_INT, 0), e->lhs->ty, e->line);
+        int nv = dec_arith(fn, e->delta > 0 ? B_ADD : B_SUB, old, one, e->lhs->ty, e->line);
+        emit_store(fn, lv, nv, e->lhs->ty);
+        return e->is_post ? old : nv;
+    }
+    case EXPR_COMPOUND: {
+        int lv = gen_addr(fn, e->lhs);
+        int old = emit_load(fn, lv, e->lhs->ty);
+        struct type *ct = e->cast_ty && is_dec(e->cast_ty) ? e->cast_ty : e->lhs->ty;
+        int a = dec_convert(fn, old, e->lhs->ty, ct, e->line);
+        int b = gen_expr(fn, e->rhs);
+        if (!ty_equal(e->rhs->ty, ct))
+            b = dec_convert(fn, b, e->rhs->ty, ct, e->line);
+        int r = dec_arith(fn, e->op, a, b, ct, e->line);
+        r = dec_convert(fn, r, ct, e->lhs->ty, e->line);
+        emit_store(fn, lv, r, e->lhs->ty);
+        return r;
+    }
+    default:
+        diag_fatal(fn->src ? fn->src->file : NULL, e->line, "internal: decimal expression");
+    }
+    return 0;
+}
+
 /* The conversions of lib/rt/half.c, which keeps the same table: where
  * the machine passes a _Float16 in the low bits of a floating-point
  * register (x86-64, AArch64) libgcc's names, the half travelling as
@@ -2448,6 +3171,7 @@ static int atomic_load(struct ir_func *fn, int addr, const struct type *t,
     int v = emit_load(fn, addr, t);
     fn->ins[fn->nins - 1].vol = 1;
     fn->ins[fn->nins - 1].natural = 1;
+    fn->ins[fn->nins - 1].atomic = 1;
     if (atomic_arm())
         emit(fn)->op = IR_FENCE;          /* acquire */
     return v;
@@ -2471,6 +3195,7 @@ static void atomic_store(struct ir_func *fn, int addr, int val,
     emit_store(fn, addr, val, t);
     fn->ins[fn->nins - 1].vol = 1;
     fn->ins[fn->nins - 1].natural = 1;
+    fn->ins[fn->nins - 1].atomic = 1;
     emit(fn)->op = IR_FENCE;              /* seq_cst: published before what follows */
 }
 
@@ -3138,6 +3863,8 @@ static int bswap_insn(int size)
     case TARGET_AVR: case TARGET_THUMB:
     case TARGET_LOONGARCH64:              /* revb.2h, revb.2w, revb.d */
         return 1;
+    case TARGET_RISCV32:                  /* Zbb's rev8, at 2 and 4 bytes */
+        return size <= 4 && (target_riscv_ext() & RV_EXT_ZBB);
     default:
         return 0;
     }
@@ -3187,8 +3914,31 @@ static int bswap_emit(struct ir_func *fn, int v, int size, int w)
     return i->dst;
 }
 
+/* Which bit counts the backend does as instructions (IR_CLZ, IR_CTZ,
+ * IR_POPCNT): RISC-V's Zbb, at XLEN and (cpopw, clzw, ctzw) at 32 bits;
+ * a 64-bit value on RV32 is a register pair, and keeps the sequence. */
+static int bitcnt_insn(int w)
+{
+    if (!(target_riscv_ext() & RV_EXT_ZBB))
+        return 0;
+    return w == 4 || (w == 8 && target_get() == TARGET_RISCV64);
+}
+
+static int bitcnt_emit(struct ir_func *fn, enum ir_op op, int x, int w)
+{
+    struct ir_ins *i = emit(fn);
+    i->op = op;
+    i->a = x;
+    i->size = w;
+    i->w = w;
+    i->dst = new_temp(fn);
+    return i->dst;
+}
+
 static int bpopcount(struct ir_func *fn, int x, int w)
 {
+    if (bitcnt_insn(w))
+        return bitcnt_emit(fn, IR_POPCNT, x, w);
     unsigned long m1 = w == 8 ? 0x5555555555555555UL : 0x55555555UL;
     unsigned long m2 = w == 8 ? 0x3333333333333333UL : 0x33333333UL;
     unsigned long m4 = w == 8 ? 0x0F0F0F0F0F0F0F0FUL : 0x0F0F0F0FUL;
@@ -3210,6 +3960,8 @@ static int bpopcount(struct ir_func *fn, int x, int w)
 
 static int bctz(struct ir_func *fn, int x, int w)
 {
+    if (bitcnt_insn(w))
+        return bitcnt_emit(fn, IR_CTZ, x, w);
     struct ir_ins *n = emit(fn);
     n->op = IR_NEG;
     n->a = x;
@@ -3234,6 +3986,15 @@ static int bctz_bits(struct ir_func *fn, int x, int w, int bits)
  * leading zeros are counted within `bits`, not within w. */
 static int bclz(struct ir_func *fn, int x, int w, int bits)
 {
+    if (bitcnt_insn(w)) {
+        /* counted in all of w's bits, of which the operand's are the low
+         * `bits`: the ones above them are zeros it does not have */
+        int z = bitcnt_emit(fn, IR_CLZ, x, w);
+        if (bits < w * 8)
+            z = emit_bin(fn, IR_SUB, z, bk(fn, (unsigned long)(w * 8 - bits), w),
+                         w, 0);
+        return z;
+    }
     for (int sh = 1; sh < bits; sh <<= 1)
         x = emit_bin(fn, IR_OR, x, emit_bin(fn, IR_SHR, x, bk(fn, (unsigned long)sh, w),
                                              w, 0), w, 0);
@@ -3952,6 +4713,15 @@ static int emit_call(struct ir_func *fn, struct expr *e, const int *args,
             (target_get() == TARGET_AARCH64 || !ty_x87_ret(rty)))
             ireg = 1;
     }
+    /* MinGW returns a long double through a hidden pointer, passed first,
+     * to 16 bytes of this frame's scratch */
+    if (target_win64_abi() && rty->kind == TY_LDOUBLE) {
+        ireg = 1;
+        i->ret_ldref = 1;
+        fn->scratch_bytes = (fn->scratch_bytes + 15) & ~15;
+        i->scratch = fn->scratch_bytes;
+        fn->scratch_bytes += 16;
+    }
     for (int k = 0; k < e->nargs; k++) {
         struct type *at = e->args[k]->ty;
         if (k < 64 && (e->scalar_args >> k & 1))
@@ -4014,37 +4784,6 @@ static int emit_call(struct ir_func *fn, struct expr *e, const int *args,
                 ar->copy_off = fn->scratch_bytes;
                 fn->scratch_bytes += (ar->size + 15) & ~15;
             }
-            /* Two types whose Windows answer is not a variation on
-             * System V's, each refused with the reason that is
-             * actually true -- a refusal that misstates why is a
-             * smaller version of the same dishonesty as passing it
-             * wrongly.
-             *
-             *   __int128 arithmetic is lowered to libgcc helper
-             *   calls (__multi3, __floattidf) whose arguments this
-             *   backend places in System V's registers. On Windows
-             *   those helpers take Microsoft's, so the call would
-             *   be wrong before the type ever is.
-             *
-             *   long double is 16 bytes on MinGW and travels BY
-             *   REFERENCE, returned through a hidden pointer like a
-             *   large aggregate. EmbCC passes it on the stack by
-             *   value and returns it in st0, which is System V's
-             *   answer to a different question. */
-            if (ar->is_int128)
-                diag_fatal(fn->file, e->line,
-                           "passing __int128 is not supported for a "
-                           "Windows target yet: EmbCC lowers its "
-                           "arithmetic to libgcc helpers whose "
-                           "arguments it places in the System V "
-                           "registers");
-            if (at->kind == TY_LDOUBLE)
-                diag_fatal(fn->file, e->line,
-                           "passing long double is not supported for "
-                           "a Windows target yet: there it travels by "
-                           "reference and returns through a hidden "
-                           "pointer, and EmbCC passes it on the stack "
-                           "by value");
             if (ireg >= 4) {
                 ar->on_stack = 1;
                 /* Stack arguments begin ABOVE the 32 bytes of
@@ -4271,8 +5010,17 @@ static int gen_builtin_more(struct ir_func *fn, struct expr *e)
     return NOT_BUILTIN;
 }
 
+static int gen_bitint(struct ir_func *fn, struct expr *e);
+static int bitint_op(const struct expr *e);
+static int gen_decimal(struct ir_func *fn, struct expr *e);
+static int dec_op(const struct expr *e);
+
 static int gen_expr_inner(struct ir_func *fn, struct expr *e)
 {
+    if (e->ty && bitint_op(e))
+        return gen_bitint(fn, e);
+    if (e->ty && dec_op(e))
+        return gen_decimal(fn, e);
     switch (e->kind) {
     case EXPR_NUM:
         return emit_const(fn, e->num, ty_w(e->ty));
@@ -4500,7 +5248,7 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             /* -x is representable for every x but the most negative,
              * where it is the one value the type cannot hold. */
             int w = ty_w(e->ty);
-            san_trap_if(fn, emit_cmp(fn, B_EQ, v,
+            SAN_FAIL(6, fn, emit_cmp(fn, B_EQ, v,
                                      emit_const(fn, san_min(w), w), w, 1), w);
         }
         struct ir_ins *i = emit(fn);
@@ -4541,7 +5289,15 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
                               : i->dst;
     }
     case EXPR_ADDR:
-        return gen_addr(fn, e->rhs);
+        /* &a[n] is an address C allows one past the end (bounds_check) */
+        if (g_bounds && e->rhs && e->rhs->kind == EXPR_DEREF &&
+            e->rhs->rhs && e->rhs->rhs->is_subscript)
+            g_bounds_addr = 1;
+        {
+            int r = gen_addr(fn, e->rhs);
+            g_bounds_addr = 0;
+            return r;
+        }
     case EXPR_CAST: {
         int v = gen_expr(fn, e->rhs);
         if (e->ty->kind == TY_VOID)
@@ -4702,6 +5458,9 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
                 /* ptr +/- int: scale the (already long) index */
                 struct expr *pe = lp ? e->lhs : e->rhs;
                 struct expr *ie = lp ? e->rhs : e->lhs;
+                /* `&a[n]`: this subscript's, not an inner one's */
+                int allow_end = g_bounds_addr;
+                g_bounds_addr = 0;
                 int p = gen_expr(fn, lp ? pe : ie);
                 int idx = gen_expr(fn, lp ? ie : pe);
                 if (!lp) {
@@ -4709,6 +5468,8 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
                     p = idx;
                     idx = t;
                 }
+                if (g_bounds && e->is_subscript && e->op == B_ADD)
+                    bounds_check(fn, pe, p, idx, allow_end);
                 struct type *pt = (lp ? lt : rt)->pointee;
                 int size = step_size(pt);
                 if (ty_is_vla(pt))
@@ -5242,12 +6003,44 @@ static void emit_instr_call(struct ir_func *fn, struct func *f,
 }
 unsigned irgen_sanitize(void) { return g_san; }
 
-/* if (cond) trap; */
+/* On a hosted target a failed check says what and where before it
+ * stops (or, recovering, goes on): the checks of g_ub_report's bits. */
+static unsigned g_ub_report;
+static int g_ub_recover;
+
+void irgen_set_ub_report(unsigned whys, int recover)
+{
+    g_ub_report = whys;
+    g_ub_recover = recover;
+}
+
+/* if (cond) trap; -- or report, then trap (the report aborts; the trap
+ * is the stop should it return), or report and go on */
 static void san_trap_if(struct ir_func *fn, int cond, int w)
 {
     int ok = new_label(fn);
     emit_brz(fn, cond, w, ok);
-    emit(fn)->op = IR_UD2;
+    if (g_ub_report & (1u << g_ub_why)) {
+        const char *file = pmap_apply(fn->file ? fn->file : "?", PMAP_MACRO);
+        size_t n = strlen(file) + 1;
+        struct ir_ins *sa = emit(fn);
+        sa->op = IR_STRADDR;
+        sa->label = ir_intern_aligned(cur_unit, xstrndup(file, n - 1),
+                                      (int)n, 1);
+        sa->dst = new_temp(fn);
+        int vals[5];
+        vals[0] = emit_const(fn, g_ub_why, AW);
+        vals[1] = sa->dst;
+        vals[2] = emit_const(fn, g_cur_line, AW);
+        vals[3] = emit_const(fn, g_cur_col, AW);
+        vals[4] = emit_const(fn, g_ub_recover, AW);
+        irgen_san_call(cur_unit, fn, "__embcc_ubsan_fail", 5, vals,
+                       g_cur_line);
+        if (!g_ub_recover)
+            emit(fn)->op = IR_UD2;
+    } else {
+        emit(fn)->op = IR_UD2;
+    }
     emit_label(fn, ok);
 }
 
@@ -5273,19 +6066,19 @@ static int san_bin(struct ir_func *fn, enum ir_op op, int a, int b,
          * count and an over-wide one are different bugs and neither is
          * what the hardware does -- x86 masks the count to 5 or 6 bits,
          * so `x << 32` silently returns x. */
-        san_trap_if(fn, emit_cmp(fn, B_GE, b, emit_const(fn, w * 8, w),
+        SAN_FAIL(4, fn, emit_cmp(fn, B_GE, b, emit_const(fn, w * 8, w),
                                  w, 0), w);
-        san_trap_if(fn, emit_cmp(fn, B_LT, b, emit_const(fn, 0, w),
+        SAN_FAIL(4, fn, emit_cmp(fn, B_LT, b, emit_const(fn, 0, w),
                                  w, 1), w);
     }
 
     if ((g_san & SAN_DIVIDE) && (op == IR_DIV || op == IR_MOD)) {
-        san_trap_if(fn, emit_cmp(fn, B_EQ, b, emit_const(fn, 0, w), w, 0), w);
+        SAN_FAIL(2, fn, emit_cmp(fn, B_EQ, b, emit_const(fn, 0, w), w, 0), w);
         if (sign)
             /* INT_MIN / -1 has no representable answer, and on x86 it
              * raises #DE rather than wrapping -- so this one is a
              * crash today and a named trap after. */
-            san_trap_if(fn,
+            SAN_FAIL(3, fn,
                 emit_bin(fn, IR_AND,
                     emit_cmp(fn, B_EQ, a, emit_const(fn, san_min(w), w), w, 1),
                     emit_cmp(fn, B_EQ, b, emit_const(fn, -1, w), w, 1),
@@ -5305,11 +6098,11 @@ static int san_bin(struct ir_func *fn, enum ir_op op, int a, int b,
                         emit_cmp(fn, B_EQ, a, emit_const(fn, -1, w), w, 1),
                         emit_cmp(fn, B_EQ, b, emit_const(fn, san_min(w), w),
                                  w, 1), w, 1);
-            san_trap_if(fn, mn, w);
+            SAN_FAIL(1, fn, mn, w);
             /* guard the division: only when a != 0 */
             int ok = new_label(fn);
             emit_brz(fn, nz, w, ok);
-            san_trap_if(fn,
+            SAN_FAIL(1, fn,
                 emit_cmp(fn, B_NE, emit_bin(fn, IR_DIV, r, a, w, 1), b,
                          w, 1), w);
             emit_label(fn, ok);
@@ -5325,7 +6118,7 @@ static int san_bin(struct ir_func *fn, enum ir_op op, int a, int b,
                                      emit_bin(fn, IR_XOR, b, r, w, 1), w, 1)
               : emit_bin(fn, IR_AND, emit_bin(fn, IR_XOR, a, b, w, 1),
                                      emit_bin(fn, IR_XOR, a, r, w, 1), w, 1);
-        san_trap_if(fn, emit_cmp(fn, B_LT, t, emit_const(fn, 0, w), w, 1), w);
+        SAN_FAIL(1, fn, emit_cmp(fn, B_LT, t, emit_const(fn, 0, w), w, 1), w);
         return r;
     }
     return emit_bin(fn, op, a, b, w, sign);
@@ -5372,7 +6165,7 @@ static void gen_eh_region(struct ir_func *fn, struct stmt *s,
     i->op = IR_LANDING;
     i->dst = new_temp(fn);
     i->b = new_temp(fn);
-    i->w = 8;
+    i->w = target_ptr_size() == 8 ? 8 : 4;   /* a register each */
     int exc = i->dst, sel = i->b;
     emit_store(fn, gen_addr(fn, s->expr), exc, s->expr->ty);
     emit_store(fn, gen_addr(fn, s->cond), sel, s->cond->ty);
@@ -5685,7 +6478,7 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
             if (ty_is_vla(s->dty)) {
                 /* save sp, carve the array off the stack, keep its address
                  * in the variable's slot */
-                struct type *ul = ty_base(TY_LONG, 1);
+                struct type *ul = ty_intptr(1);
                 struct ir_ins *sv = emit(fn);
                 sv->op = IR_SPSAVE;
                 sv->dst = new_temp(fn);
@@ -5854,17 +6647,23 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
             int l_else = new_label(fn);
             int cw;
             int c = truth(fn, gen_expr(fn, s->cond), s->cond->ty, &cw);
+            int br = fn->nins;
             emit_brz(fn, c, cw, l_else);
+            int t0 = fn->nins, e0 = 0, e1 = 0;
             gen_stmt(fn, s->thn, loop);
+            int t1 = fn->nins;
             if (s->els) {
                 int l_end = new_label(fn);
                 emit_jmp(fn, l_end);
                 emit_label(fn, l_else);
+                e0 = fn->nins;
                 gen_stmt(fn, s->els, loop);
+                e1 = fn->nins;
                 emit_label(fn, l_end);
             } else {
                 emit_label(fn, l_else);
             }
+            if_heat(fn, s->cond, br, t0, t1, e0, e1);
             break;
         }
         case STMT_DO: {
@@ -6187,7 +6986,109 @@ static void collect_locals(struct ir_func *fn, struct stmt *s)
     }
 }
 
+static void gen_func_(struct ir_func *fn, struct func *f);
+
+/* -fstack-protector: the guard, an external object of the C library's (or
+ * lib/rt's), and the canary checked against it before every return:
+ * `if (*canary != __stack_chk_guard) __stack_chk_fail();` */
+static struct global *ssp_guard(void)
+{
+    struct unit *u = cur_unit->src;
+    struct global **tail = &u->globals;
+    for (struct global *g = u->globals; g; g = g->next) {
+        if (!g->absorbed && !strcmp(g->name, "__stack_chk_guard"))
+            return g;
+        tail = &g->next;
+    }
+    /* `extern uintptr_t __stack_chk_guard;`, as the unit's own */
+    struct global *g = xcalloc(1, sizeof *g);
+    g->name = "__stack_chk_guard";
+    g->ty = ty_intptr(1);
+    g->is_extern = 1;
+    g->file = u->file;
+    g->seq = -1;
+    g->def_seq = -1;
+    g->used = 1;
+    *tail = g;
+    return g;
+}
+
+static void ssp_check(struct ir_func *fn, int canary)
+{
+    int n0 = fn->nins, ns = 0, cap = 0;
+    struct ir_slice *sl = NULL;
+    struct type *ut = ty_intptr(1);
+    for (int n = 0; n < n0; n++) {
+        if (fn->ins[n].op != IR_RET)
+            continue;
+        if (ns == cap) {
+            cap = cap ? cap * 2 : 8;
+            sl = xrealloc(sl, (size_t)cap * sizeof *sl);
+        }
+        int line = fn->ins[n].line;
+        sl[ns].at = n;
+        sl[ns].lo = fn->nins;
+        int c = emit_load(fn, canary, ut);
+        fn->ins[fn->nins - 1].vol = 1;
+        int g = emit_load(fn, emit_gaddr(fn, ssp_guard()), ut);
+        int ne = emit_cmp(fn, B_NE, c, g, ty_w(ut), 0);
+        int ok = new_label(fn);
+        emit_brz(fn, ne, 4, ok);
+        struct func *ff = libatomic_fn("__stack_chk_fail", ty_base(TY_VOID, 0),
+                                       0, NULL);
+        ff->is_noreturn = 1;
+        ff->is_nothrow = 1;
+        (void)libatomic_call(fn, "__stack_chk_fail", ty_base(TY_VOID, 0), 0,
+                             NULL, NULL, line);
+        emit(fn)->op = IR_UD2;
+        emit_label(fn, ok);
+        for (int k = sl[ns].lo; k < fn->nins; k++)
+            fn->ins[k].line = line;
+        sl[ns].hi = fn->nins;
+        ns++;
+    }
+    if (ns)
+        ir_splice(fn, n0, fn->nins, sl, ns);
+    free(sl);
+}
+
+/* -fsanitize=address: the frame's block unpoisoned before every return,
+ * since the stack under it is the next call's */
+static void asan_frame_release(struct ir_func *fn, int base, long size)
+{
+    int n0 = fn->nins, ns = 0, cap = 0;
+    struct ir_slice *sl = NULL;
+    struct type *up = ty_intptr(1), *tys[2] = { up, up };
+    for (int n = 0; n < n0; n++) {
+        if (fn->ins[n].op != IR_RET)
+            continue;
+        if (ns == cap) {
+            cap = cap ? cap * 2 : 8;
+            sl = xrealloc(sl, (size_t)cap * sizeof *sl);
+        }
+        sl[ns].at = n;
+        sl[ns].lo = fn->nins;
+        int v[2] = { base, emit_const(fn, size, AW) };
+        (void)libatomic_call(fn, "__embcc_asan_unpoison", ty_base(TY_VOID, 0),
+                             2, v, tys, fn->ins[n].line);
+        sl[ns].hi = fn->nins;
+        ns++;
+    }
+    if (ns)
+        ir_splice(fn, n0, fn->nins, sl, ns);
+    free(sl);
+}
+
+/* no_sanitize(...) turns this function's trap checks off */
 static void gen_func(struct ir_func *fn, struct func *f)
+{
+    unsigned saved = g_san;
+    g_san &= ~f->attr_no_san;
+    gen_func_(fn, f);
+    g_san = saved;
+}
+
+static void gen_func_(struct ir_func *fn, struct func *f)
 {
     fn->src = f;
     /* Copied, not referenced: see struct ir_func. */
@@ -6222,28 +7123,6 @@ static void gen_func(struct ir_func *fn, struct func *f)
      * has to exist for that to matter. Checking only the call sites
      * left `long double g(long double)` compiling silently with System
      * V's answer. */
-    if (target_win64_abi()) {
-        for (int k = 0; k <= f->nparams; k++) {
-            struct type *t = k < f->nparams ? f->param_tys[k] : f->ret_ty;
-            if (!t)
-                continue;
-            if (t->kind == TY_INT128)
-                diag_fatal(f->file, f->line,
-                           "__int128 in the signature of '%s' is not "
-                           "supported for a Windows target yet: EmbCC "
-                           "lowers its arithmetic to libgcc helpers whose "
-                           "arguments it places in the System V registers",
-                           f->name);
-            if (t->kind == TY_LDOUBLE)
-                diag_fatal(f->file, f->line,
-                           "long double in the signature of '%s' is not "
-                           "supported for a Windows target yet: there it "
-                           "travels by reference and returns through a "
-                           "hidden pointer, and EmbCC passes it on the "
-                           "stack by value", f->name);
-        }
-    }
-
     /* The ABI facts about each parameter, decided here where the types are
      * still in hand. */
     if (f->nparams > 0) {
@@ -6310,8 +7189,107 @@ static void gen_func(struct ir_func *fn, struct func *f)
      * alignment, and its slot keeps the address -- for the whole
      * function, so a goto past its declaration cannot skip the carving
      * and a loop around it cannot grow the stack. */
+    /* -fsanitize=address: the locals that could be overrun (sema's
+     * var_asan), in ONE block, each 32-aligned with at least 32 bytes of
+     * redzone after it and 32 before the first, all of it poisoned on
+     * entry but the locals themselves (lib/san/asan.c); made good again
+     * before each return, below */
+    int asan_base = -1;
+    long asan_size = 0;
+    if (f->var_asan) {
+        long off = 32, bal = 32;
+        long *voff = xcalloc((size_t)f->nvars, sizeof *voff);
+        for (int v = 0; v < f->nvars; v++) {
+            if (!f->var_asan[v] || !f->var_indirect || !f->var_indirect[v])
+                continue;
+            long al = f->var_ind_align[v] > 32 ? f->var_ind_align[v] : 32;
+            if (al > bal)
+                bal = al;
+            off = (off + al - 1) & -al;
+            voff[v] = off;
+            long sz = ty_size(f->var_indirect[v]);
+            off += sz + 32 + (32 - sz % 32) % 32;
+        }
+        asan_size = off;
+        int sz = emit_const(fn, asan_size + bal - 1, AW);
+        struct ir_ins *a = emit(fn);
+        a->op = IR_ALLOCA;
+        a->a = sz;
+        a->dst = new_temp(fn);
+        asan_base = emit_bin(fn, IR_AND,
+                             emit_bin(fn, IR_ADD, a->dst,
+                                      emit_const(fn, bal - 1, AW), AW, 1),
+                             emit_const(fn, -bal, AW), AW, 1);
+        fn->has_alloca = 1;
+        struct type *up = ty_intptr(1), *tys[2] = { up, up };
+        int pv[2] = { asan_base, emit_const(fn, asan_size, AW) };
+        (void)libatomic_call(fn, "__embcc_asan_frame_poison",
+                             ty_base(TY_VOID, 0), 2, pv, tys, f->line);
+        for (int v = 0; v < f->nvars; v++) {
+            if (!f->var_asan[v] || !f->var_indirect || !f->var_indirect[v])
+                continue;
+            int p = emit_bin(fn, IR_ADD, asan_base,
+                             emit_const(fn, voff[v], AW), AW, 1);
+            emit_stvar_slot(fn, v, p, ty_ptr(f->var_indirect[v]));
+            int uv[2] = { p, emit_const(fn, ty_size(f->var_indirect[v]), AW) };
+            (void)libatomic_call(fn, "__embcc_asan_unpoison",
+                                 ty_base(TY_VOID, 0), 2, uv, tys, f->line);
+        }
+        free(voff);
+    }
+    /* -fstack-protector: the guarded locals in one block -- the
+     * address-taken scalars lowest, the aggregates above them -- and the
+     * canary at its top, a copy of __stack_chk_guard; compared before
+     * every return (ssp_check, below) */
+    int ssp_canary = -1;
+    if (f->ssp_on) {
+        long off = 0, bal = 16;
+        long *voff = xcalloc((size_t)(f->nvars ? f->nvars : 1), sizeof *voff);
+        for (int pass = 1; pass <= 2; pass++)
+            for (int v = 0; f->var_ssp && v < f->nvars; v++) {
+                if (f->var_ssp[v] != pass || !f->var_indirect ||
+                    !f->var_indirect[v])
+                    continue;
+                long al = f->var_ind_align[v] > 1 ? f->var_ind_align[v] : 1;
+                if (al > bal)
+                    bal = al;
+                off = (off + al - 1) & -al;
+                voff[v] = off;
+                off += ty_size(f->var_indirect[v]);
+            }
+        long P = AW;
+        off = (off + P - 1) & -P;
+        long canary_off = off;
+        long size = off + P;
+        int sz = emit_const(fn, size + bal - 1, AW);
+        struct ir_ins *a = emit(fn);
+        a->op = IR_ALLOCA;
+        a->a = sz;
+        a->dst = new_temp(fn);
+        int adst = a->dst;
+        int base = emit_bin(fn, IR_AND,
+                            emit_bin(fn, IR_ADD, adst,
+                                     emit_const(fn, bal - 1, AW), AW, 1),
+                            emit_const(fn, -bal, AW), AW, 1);
+        fn->has_alloca = 1;
+        for (int v = 0; f->var_ssp && v < f->nvars; v++) {
+            if (!f->var_ssp[v] || !f->var_indirect || !f->var_indirect[v])
+                continue;
+            int p = emit_bin(fn, IR_ADD, base, emit_const(fn, voff[v], AW),
+                             AW, 1);
+            emit_stvar_slot(fn, v, p, ty_ptr(f->var_indirect[v]));
+        }
+        ssp_canary = emit_bin(fn, IR_ADD, base, emit_const(fn, canary_off, AW),
+                              AW, 1);
+        struct type *ut = ty_intptr(1);
+        int g = emit_load(fn, emit_gaddr(fn, ssp_guard()), ut);
+        emit_store(fn, ssp_canary, g, ut);
+        fn->ins[fn->nins - 1].vol = 1;
+        free(voff);
+    }
     for (int v = 0; f->var_indirect && v < f->nvars; v++) {
-        if (!f->var_indirect[v])
+        if (!f->var_indirect[v] || (f->var_asan && f->var_asan[v]) ||
+            (f->var_ssp && f->var_ssp[v]))
             continue;
         long al = f->var_ind_align[v];
         int size = emit_const(fn, ty_size(f->var_indirect[v]) + al - 1, AW);
@@ -6394,6 +7372,12 @@ static void gen_func(struct ir_func *fn, struct func *f)
             fn->var_scope_lo[v] = 0;
             fn->var_scope_hi[v] = fn->nins;
         }
+    if (asan_base >= 0)
+        asan_frame_release(fn, asan_base, asan_size);
+    if (ssp_canary >= 0)
+        ssp_check(fn, ssp_canary);
+    if (gcov_active())
+        gcov_function(cur_unit, fn, f);
     for (int i = 0; i < g_nlabels_used; i++)
         if (!g_labels[i].defined)
             diag_fatal(fn->file, g_labels[i].line,
@@ -6450,4 +7434,83 @@ int asm_constraint_mem_only(const char *c)
         any = 1;
     }
     return any;
+}
+
+/* --coverage's counter: *(ctrs + off) += 1 (src/ir/gcov.c). A plain
+ * load, add and store, as GCC's -fprofile-update=single; atomic, a
+ * relaxed fetch-and-add -- an instruction, or libatomic's routine where
+ * the target has none for 64 bits. */
+void irgen_counter_incr(struct ir_func *fn, struct global *ctrs, long off,
+                        int atomic)
+{
+    struct type *t = ty_int_of_size(8, 1);
+    int a = emit_gaddr(fn, ctrs);
+    if (off)
+        a = emit_bin(fn, IR_ADD, a, emit_const(fn, off, AW), AW, 0);
+    int one = emit_const(fn, 1, 8);
+    if (atomic) {
+        (void)atomic_rmw_mo(fn, IR_XADD, 0, a, one, t, IR_MO_RELAXED, -1,
+                            g_cur_line);
+        return;
+    }
+    int v = emit_load(fn, a, t);
+    fn->ins[fn->nins - 1].natural = 1;
+    v = emit_bin(fn, IR_ADD, v, one, 8, 0);
+    emit_store(fn, a, v, t);
+    fn->ins[fn->nins - 1].natural = 1;
+}
+
+/* -fsanitize's runtime calls, made after the optimizer (src/ir/sanitize.c):
+ * name(vals...), every argument an address-sized integer, returning
+ * nothing -- an ordinary call, classified for the target as irgen does
+ * a source call, appended to fn. A function of the runtime: no throw,
+ * and no reading or writing of memory the optimizer would care about,
+ * since it runs after the optimizer. */
+void irgen_san_call(struct ir_unit *iu, struct ir_func *fn, const char *name,
+                    int n, const int *vals, int line)
+{
+    (void)irgen_san_call_ret(iu, fn, name, n, vals, line, 0);
+}
+
+/* ...and one that returns an address-sized integer (ret), its vreg */
+int irgen_san_call_ret(struct ir_unit *iu, struct ir_func *fn,
+                       const char *name, int n, const int *vals, int line,
+                       int ret)
+{
+    struct ir_unit *saved = cur_unit;
+    cur_unit = iu;
+    struct type *up = ty_intptr(1);
+    struct type *rt = ret ? up : ty_base(TY_VOID, 0);
+    struct type *tys[5] = { up, up, up, up, up };
+    struct func *cf = libatomic_fn(name, rt, n, tys);
+    cf->is_nothrow = 1;
+    int v = libatomic_call(fn, name, rt, n, vals, tys, line);
+    cur_unit = saved;
+    return v;
+}
+
+/* A declaration like `f`'s under another name: what a call -fsanitize
+ * renames (malloc to the runtime's) is given, so the call keeps its own
+ * classification. One per name. */
+struct func *irgen_func_renamed(const struct func *f, const char *name)
+{
+    static struct func **made;
+    static int nmade, capmade;
+    for (int k = 0; k < nmade; k++)
+        if (!strcmp(made[k]->name, name))
+            return made[k];
+    struct func *g = xmalloc(sizeof *g);
+    *g = *f;
+    g->name = name;
+    g->asm_name = NULL;
+    g->has_defn = 0;
+    g->is_static = 0;
+    g->is_weak = 0;
+    g->next = NULL;
+    if (nmade == capmade) {
+        capmade = capmade ? capmade * 2 : 32;
+        made = xrealloc(made, (size_t)capmade * sizeof *made);
+    }
+    made[nmade++] = g;
+    return g;
 }

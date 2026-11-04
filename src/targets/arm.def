@@ -65,6 +65,12 @@ TRIPLE("thumbv8m.main-none-eabi",   THUMB,       NONE,    ELF,   CANONICAL, ARM_
 TRIPLE("thumbv8m.main",             THUMB,       NONE,    ELF,   ALIAS,     ARM_V8M_MAIN, PLAIN)
 TRIPLE("thumbv8m-none-eabi",        THUMB,       NONE,    ELF,   ALIAS,     ARM_V8M_MAIN, PLAIN)
 TRIPLE("armv8m.main-none-eabi",     THUMB,       NONE,    ELF,   ALIAS,     ARM_V8M_MAIN, PLAIN)
+/* ARMv8.1-M Mainline (Cortex-M55, M85): the same level, the name noting
+ * the .1 (target_thumb_v81) -- its code is v8-M Mainline's, and MVE is
+ * what -march=armv8.1-m.main+mve[.fp] or -mcpu=cortex-m55 adds */
+TRIPLE("thumbv8.1m.main-none-eabi", THUMB,       NONE,    ELF,   ALIAS,     ARM_V8M_MAIN, PLAIN)
+TRIPLE("thumbv8.1m.main",           THUMB,       NONE,    ELF,   ALIAS,     ARM_V8M_MAIN, PLAIN)
+TRIPLE("armv8.1m.main-none-eabi",   THUMB,       NONE,    ELF,   ALIAS,     ARM_V8M_MAIN, PLAIN)
 
 /* The hard-float spellings, as LLVM and Rust name them: the part's
  * FPU (FPv4-SP-D16 on a Cortex-M4F, FPv5-SP-D16 on a Cortex-M33) and
@@ -93,3 +99,4 @@ TRIPLE("armv7a-unknown-none-eabihf", THUMB,      NONE,    ELF,   ALIAS,     ARM_
 
 /* ARMv8-M Mainline with the hard-float convention (see thumbv7em-none-eabihf). */
 TRIPLE("thumbv8m.main-none-eabihf", THUMB,       NONE,    ELF,   CANONICAL, ARM_V8M_MAIN, HF)
+TRIPLE("thumbv8.1m.main-none-eabihf", THUMB,     NONE,    ELF,   ALIAS,     ARM_V8M_MAIN, HF)

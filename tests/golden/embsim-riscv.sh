@@ -6,7 +6,7 @@
 #     tests/exec program is built with lib/libc and lib/rt for the ABI
 #     and run on qemu-system-riscv32/64 -M virt and on EmbSim's virt.
 #     The output, the exit status (the test device's), the instruction
-#     count and the estimated cycles (tools/bench/cost.h, through QEMU's
+#     count and the estimated cycles (src/arch/cost.h, through QEMU's
 #     counting plugin tools/bench/icount.c) must be the same:
 #       rv32    riscv32-unknown-elf, ilp32 (rv32imac)      -O0 -O2 -Os
 #       rv32d   -march=rv32imafdc -mabi=ilp32d              -O0 -O2

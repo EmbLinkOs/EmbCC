@@ -31,6 +31,8 @@ static int g_thumb_arch = 7;
  * because nearly every question asked of level 6 has the same answer
  * here; the few that differ ask target_thumb_v8m_base(). */
 static int g_thumb_v8b;
+static int g_thumb_v81, g_thumb_mve;  /* ARMv8.1-M, and its MVE: see below */
+static int g_thumb_pacbti;            /* ...and its PACBTI extension */
 /* -mcmse: the Secure-side build of ARMv8-M's security extension. */
 static int g_thumb_cmse;
 static int g_thumb_fpu;     /* see target_thumb_fpu */
@@ -91,6 +93,18 @@ int  target_keep_vars(void)       { return g_keep_vars; }
 void target_set_debug_info(int on) { g_debug_info = on ? 1 : 0; }
 int  target_debug_info(void)       { return g_debug_info; }
 int  target_opt_size(void)       { return g_opt_size; }
+static int g_pic;
+void target_set_pic(int mode) { g_pic = mode; }
+int  target_pic(void)         { return g_pic; }
+static int g_cf;
+void target_set_cf(int mask)  { g_cf = mask; }
+int  target_cf(void)          { return g_cf; }
+static int g_stack_info;
+void target_set_stack_info(int on) { g_stack_info = on; }
+int  target_stack_info(void)       { return g_stack_info; }
+static int g_unwind_tables;
+void target_set_unwind_tables(int on) { g_unwind_tables = on; }
+int  target_unwind_tables(void)       { return g_unwind_tables; }
 
 const char *target_default_name(void)
 {
@@ -388,7 +402,12 @@ int target_int_size(void)       { return g_model[g_arch].it; }
  * column directly would give BYTES, and the backend that divided it by 8
  * to get bytes got 1 and made every value a byte wide. */
 int target_xlen(void)           { return g_model[g_arch].ptr * 8; }
-int target_long_size(void)      { return g_model[g_arch].lng; }
+/* Win64 is LLP64: `long` stays four bytes beside eight-byte pointers */
+int target_long_size(void)
+{
+    return g_arch == TARGET_X86_64 && g_os == TGT_OS_WINDOWS
+           ? 4 : g_model[g_arch].lng;
+}
 int target_max_scalar_align(void) { return g_model[g_arch].maxal; }
 /* The most a GNU vector type is aligned to, 0 for its own size: GCC's 16
  * on x86-64 (without AVX) and AArch64, AAPCS's 8 on Arm, and clang's
@@ -546,12 +565,14 @@ int target_wchar_size(void)
 {
     if (g_short_wchar)
         return 2;
-    return g_arch == TARGET_XTENSA ? 2 : g_model[g_arch].it;
+    /* Xtensa's xtensa/elf.h, and Windows', where wchar_t is UTF-16 */
+    return g_arch == TARGET_XTENSA || g_os == TGT_OS_WINDOWS
+           ? 2 : g_model[g_arch].it;
 }
 
 int target_wchar_unsigned(void)
 {
-    if (g_short_wchar)
+    if (g_short_wchar || g_os == TGT_OS_WINDOWS)
         return 1;
     return darwin_a64() ? 0 : g_model[g_arch].wchar_uns;
 }
@@ -783,6 +804,10 @@ int target_from_triple(const char *triple, enum target_arch *out,
                  * `em` flag that says so. */
                 size_t n = strlen(triple);
                 g_thumb_hf_name = n > 6 && !strcmp(triple + n - 6, "eabihf");
+                /* thumbv8.1m.main: v8-M Mainline's level, and the .1 */
+                g_thumb_v81 = !strncmp(triple, "thumbv8.1m", 10) ||
+                              !strncmp(triple, "armv8.1m", 8);
+                g_thumb_mve = 0;
                 g_arm_a32 = t->sub == SUB_ARM_V7A;
                 g_thumb_v8b = t->sub == SUB_ARM_V8M_BASE;
                 switch (t->sub) {
@@ -961,6 +986,27 @@ void target_set_arm_vfp(int version, int d32)
     g_arm_vfp = version;
     g_arm_vfp_d32 = d32 ? 1 : 0;
 }
+/* ARMv7-A's Advanced SIMD unit (-mfpu=neon...): the NEON macros and
+ * <arm_neon.h> (whose intrinsics are lane by lane; no backend emits a
+ * NEON instruction of its own yet) */
+static int g_arm_neon;
+void target_set_arm_neon(int on) { g_arm_neon = on ? 1 : 0; }
+int target_arm_neon(void) { return g_arch == TARGET_THUMB && g_arm_neon; }
+
+/* ARMv8.1-M Mainline (Cortex-M55, M85): v8-M Mainline's code, and the
+ * M-profile Vector Extension it may add -- MVE's macros and <arm_mve.h>,
+ * whose intrinsics are lane by lane (no backend emits an MVE
+ * instruction of its own yet). mve: 0, 1 the integer half, 3 with
+ * floating point (__ARM_FEATURE_MVE's own values). */
+void target_set_thumb_v81(int on) { g_thumb_v81 = on ? 1 : 0; }
+void target_set_thumb_pacbti(int on) { g_thumb_pacbti = on ? 1 : 0; }
+int target_thumb_pacbti(void) { return target_thumb_v81() && g_thumb_pacbti; }
+int target_thumb_v81(void)
+{
+    return g_arch == TARGET_THUMB && g_thumb_arch == 8 && g_thumb_v81;
+}
+void target_set_thumb_mve(int level) { g_thumb_mve = level; }
+int target_thumb_mve(void) { return target_thumb_v81() ? g_thumb_mve : 0; }
 int target_thumb_arch(void) { return g_thumb_arch; }
 int target_object_align(int is_array, long size, int align)
 {
@@ -1108,6 +1154,16 @@ int target_riscv_abi_flen(void)
     return g_rv_abi_flen;
 }
 int target_riscv_zifencei(void) { return g_rv_zifencei; }
+
+/* The multi-letter extensions -march= named (RV_EXT_*): which of the
+ * bit-manipulation, half-precision and vector instructions the code may
+ * use. None by default, as clang's rv32imac/rv64imac has none. */
+static unsigned g_rv_ext;
+void target_set_riscv_ext(unsigned mask) { g_rv_ext = mask; }
+unsigned target_riscv_ext(void)
+{
+    return g_arch == TARGET_RISCV32 || g_arch == TARGET_RISCV64 ? g_rv_ext : 0;
+}
 int target_riscv_atomics(void)
 {
     return (g_arch != TARGET_RISCV32 && g_arch != TARGET_RISCV64) || g_rv_a;
@@ -1216,6 +1272,9 @@ int target_rel_put_addend(enum target_arch a, int type, unsigned char *field,
         put_w32(field, (w & 0xffff0000UL) |
                         (((unsigned long)addend >> 2) & 0xffffUL));
         return 1;
+    case R_MIPS_PC32:                   /* .eh_frame's */
+        put_w32(field, (unsigned long)addend & 0xffffffffUL);
+        return 1;
     default:
         return 0;
     }
@@ -1254,8 +1313,10 @@ int target_reloc_type(enum target_arch a, enum reloc_kind k)
          * with a PLT needs; one without treats them alike. */
         case RK_CALL:        return R_RISCV_CALL_PLT;
         case RK_RISCV_PCREL_HI20:   return R_RISCV_PCREL_HI20;
+        case RK_RISCV_GOT_HI20:     return R_RISCV_GOT_HI20;
         case RK_RISCV_PCREL_LO12_I: return R_RISCV_PCREL_LO12_I;
         case RK_ABS32:       return R_RISCV_32;
+        case RK_DATA_PREL32: return R_RISCV_32_PCREL;   /* .eh_frame's */
         /* ABS64 only at RV64: a 32-bit target has no 64-bit address to
          * relocate, and asking for one is a bug upstream rather than a
          * kind this table merely lacks. */
@@ -1286,6 +1347,7 @@ int target_reloc_type(enum target_arch a, enum reloc_kind k)
         case RK_MIPS_TEXT26:  return R_MIPS_26;
         case RK_ABS32:        return R_MIPS_32;
         case RK_ABS64:        return R_MIPS_64;
+        case RK_DATA_PREL32:  return R_MIPS_PC32;   /* .eh_frame's */
         default:              return -1;
         }
     }
@@ -1298,6 +1360,7 @@ int target_reloc_type(enum target_arch a, enum reloc_kind k)
         case RK_MIPS_LO16:   return R_MIPS_LO16;
         case RK_MIPS_TEXT26: return R_MIPS_26;
         case RK_ABS32:       return R_MIPS_32;
+        case RK_DATA_PREL32: return R_MIPS_PC32;    /* .eh_frame's */
         default:             return -1;
         }
     }
@@ -1309,6 +1372,7 @@ int target_reloc_type(enum target_arch a, enum reloc_kind k)
         case RK_TRICORE_LO:  return R_TRICORE_LO;
         case RK_TRICORE_LO2: return R_TRICORE_LO2;
         case RK_ABS32:       return R_TRICORE_32ABS;
+        case RK_DATA_PREL32: return R_TRICORE_32REL;    /* .eh_frame's */
         default:             return -1;
         }
     }
@@ -1319,6 +1383,7 @@ int target_reloc_type(enum target_arch a, enum reloc_kind k)
         /* a literal-pool word, a data pointer, a DWARF offset */
         case RK_ABS32:       return R_XTENSA_32;
         case RK_XTENSA_TEXT32: return R_XTENSA_32;
+        case RK_DATA_PREL32: return R_XTENSA_32_PCREL;  /* .eh_frame's */
         default:             return -1;
         }
     }
@@ -1395,6 +1460,8 @@ int target_reloc_type(enum target_arch a, enum reloc_kind k)
         case RK_DATA_PREL32: return R_AARCH64_PREL32;
         case RK_GOT_PAGE: return R_AARCH64_ADR_GOT_PAGE;
         case RK_GOT_LO12: return R_AARCH64_LD64_GOT_LO12_NC;
+        case RK_TLSIE_PAGE: return R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21;
+        case RK_TLSIE_LO12: return R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC;
         case RK_TPREL_HI12: return R_AARCH64_TLSLE_ADD_TPREL_HI12;
         case RK_TPREL_LO12: return R_AARCH64_TLSLE_ADD_TPREL_LO12_NC;
         default:          return -1;
@@ -1410,6 +1477,8 @@ int target_reloc_type(enum target_arch a, enum reloc_kind k)
     case RK_ABS32:    return R_X86_64_32;
     case RK_DATA_PREL32: return R_X86_64_PC32;
     case RK_TPOFF32:  return R_X86_64_TPOFF32;
+    case RK_GOTPC32:  return R_X86_64_GOTPCREL;
+    case RK_GOTTPOFF: return R_X86_64_GOTTPOFF;
     default:          return -1;
     }
 }
@@ -1446,6 +1515,8 @@ int target_macho_reloc(enum target_arch a, enum reloc_kind k,
         case RK_CALL:     t = ARM64_RELOC_BRANCH26;  pc = 1; break;
         case RK_ADR_HI21: t = ARM64_RELOC_PAGE21;    pc = 1; break;
         case RK_ADD_LO12: t = ARM64_RELOC_PAGEOFF12; pc = 0; break;
+        case RK_TLVP_PAGE: t = 8 /* ARM64_RELOC_TLVP_LOAD_PAGE21 */;    pc = 1; break;
+        case RK_TLVP_LO12: t = 9 /* ARM64_RELOC_TLVP_LOAD_PAGEOFF12 */; pc = 0; break;
         case RK_GOT_PAGE: t = ARM64_RELOC_GOT_LOAD_PAGE21;    pc = 1; break;
         case RK_GOT_LO12: t = ARM64_RELOC_GOT_LOAD_PAGEOFF12; pc = 0; break;
         case RK_ABS64:    t = ARM64_RELOC_UNSIGNED; pc = 0; len = 3; break;
@@ -1461,6 +1532,8 @@ int target_macho_reloc(enum target_arch a, enum reloc_kind k,
         switch (k) {
         case RK_CALL:    t = X86_64_RELOC_BRANCH;   pc = 1; break;
         case RK_PCREL32: t = X86_64_RELOC_SIGNED;   pc = 1; break;
+        case RK_TLVP:    t = 9 /* X86_64_RELOC_TLV */; pc = 1; break;
+        case RK_GOTPC32: t = 3 /* X86_64_RELOC_GOT_LOAD */; pc = 1; break;
         case RK_ABS64:   t = X86_64_RELOC_UNSIGNED; pc = 0; len = 3; break;
         case RK_ABS32:   t = X86_64_RELOC_UNSIGNED; pc = 0; break;
         default: return 0;
@@ -1488,6 +1561,8 @@ long target_reloc_addend(enum target_arch a, enum reloc_kind k, long bias)
     switch (k) {
     case RK_CALL:
     case RK_PCREL32:
+    case RK_GOTPC32:
+    case RK_GOTTPOFF:
         return bias - 4;          /* x86-64 rel32 is measured from the END
                                    * of the instruction, four bytes on */
     default:

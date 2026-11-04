@@ -80,7 +80,7 @@ file but the network one compiles with EmbCC itself. Everything is in
 | `disasm.h`, `disasm.c` | one Thumb, RISC-V, MIPS32 or PIC24F instruction as text, for the fault report; `--disassemble`'s listing of an image |
 | `record.c` | `--input`, `--record`, `--replay`: the UART's input, the record of a run's inputs, the replay |
 
-The cost of each instruction comes from `tools/bench/cost.h`, the table
+The cost of each instruction comes from `src/arch/cost.h`, the table
 the bench uses in QEMU, so the two estimates cannot drift (`arm_cost`,
 `rv_cost`).
 
