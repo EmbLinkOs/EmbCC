@@ -541,3 +541,22 @@ releases), the FPU, `cmse_nonsecure_caller()`, and entry functions or
 Non-secure calls with arguments on the stack are refused by name; the
 last is what clang refuses too.
 
+## D-022: embflash programs an STK500 bootloader itself
+
+**Decision.** `embflash --stk500 serial:DEV[@BAUD]` programs a part whose
+serial bootloader speaks STK500 version 1, Optiboot on the Arduino Uno,
+without a GDB server or avrdude. It implements only what Optiboot answers:
+sync, the signature, load address, program and read page, and enter and
+leave programming mode. It knows the ATmega328 family by signature, with
+Optiboot's 512-byte bootloader reserved.
+
+**Why.** No GDB server reaches a bootloader on a serial line, so `--gdb`
+could not program the most common hobby board at all. The protocol is
+small, and a model of it can test every rule without a board. Refusing an
+unknown signature and an image over the bootloader keeps `embflash` from
+writing into a part whose layout it does not know.
+
+**Status.** Current. Other parts, STK500 version 2 (the Mega's bootloader),
+EEPROM and fuses are not implemented. Native USB probes (ST-LINK,
+CMSIS-DAP) are a separate, larger decision; until then they are reached
+through their GDB servers.
