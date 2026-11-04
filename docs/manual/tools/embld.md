@@ -44,7 +44,7 @@ runs in-process when it links a program itself; see
 shared libraries, does not produce position-independent executables, and
 emits no PLT and no dynamic sections. Without a linker script the layout
 is fixed (see [Image layout](#image-layout)) and the options below adjust
-it; with one (`-T`, ARM and RISC-V) the script lays the image out (see
+it; with one (`-T`: ARM, RISC-V, AVR, Xtensa and MIPS32) the script lays the image out (see
 [Linker scripts](#linker-scripts)).
 
 ### Supported machines
@@ -277,9 +277,9 @@ On ARM, the entry symbol's Thumb bit is kept in the ELF entry point.
 ### Linker scripts
 
 `-T SCRIPT` lays the image out by a GNU ld linker script instead, for ARM,
-RISC-V and AVR images (another machine is refused: `embld: -T: a linker
-script is supported for ARM, RISC-V and AVR images only (this one is
-machine 8)`): the script a CMSIS, STM32CubeMX, vendor SDK, avr-libc or
+RISC-V, AVR, Xtensa and MIPS32 images (another machine is refused: `embld: -T:
+a linker script is supported for ARM, RISC-V, AVR, Xtensa and MIPS32 images
+only (this one is machine 62)`): the script a CMSIS, STM32CubeMX, vendor SDK, avr-libc or
 RTOS project already has. It replaces `-Tstack` and `--lma-offset`,
 which are refused with it, and the linker defines no bracket symbols of
 its own except `__start_NAME` and `__stop_NAME` for an output section
@@ -404,6 +404,20 @@ copy and zeroing loops need the brackets: `__data_load`, `__data_start`,
 avr-libc's `__data_load_start` names. `tests/golden/avr-ldscript.sh` links
 the same program with a script and with `-Ttext`/`-Tdata` and runs both
 on QEMU's ATmega328P.
+
+#### Xtensa scripts
+
+An Xtensa script places sections as any other does (D-024), and it is what an ESP32 image needs:
+the ESP32's instruction RAM takes only 32-bit loads, so its byte data, `.rodata` with the
+strings, must go to the data RAM, which `-Ttext`/`-Tdata` cannot say. EmbCC puts each
+function's literal pool in `.text` just before the function, so `*(.text .text.*)` keeps every
+pool within `l32r`'s reach. Objects from GCC with separate `.literal` sections want them before
+their code, as ESP-IDF's scripts write `*(.literal .text .literal.* .text.*)`. A literal a script
+places after its `l32r`, or more than 256 KiB before it, is refused where the relocation is
+applied, naming the fix. A script has no `-Tstack` entry stub, so the startup sets `sp` and PS
+itself, as an ESP32's ROM leaves them set for its entry. `tests/golden/xtensa-ldscript.sh` links
+a program under an ESP32-like layout (code at one region, `.rodata`, `.data` and `.bss` at
+another) and runs it on QEMU's sim machine.
 
 ### Garbage collection
 

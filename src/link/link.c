@@ -6145,9 +6145,13 @@ static void ls_check_overlap(struct ls_script *sc)
 
 static void ls_layout(struct linker *l, struct ls_script *sc, int orphan_mode)
 {
+    /* Xtensa (D-024): the layout is the generic one. Its relocations check
+     * their own reach: an l32r whose literal a script put after it, or out
+     * of its 256 KiB, is refused where it is applied, naming the fix. */
     if (l->machine != EM_ARM && l->machine != EM_RISCV &&
-        l->machine != EM_AVR && !(l->machine == EM_MIPS && l->elf32))
-        die("-T: a linker script is supported for ARM, RISC-V, AVR and "
+        l->machine != EM_AVR && l->machine != EM_XTENSA &&
+        !(l->machine == EM_MIPS && l->elf32))
+        die("-T: a linker script is supported for ARM, RISC-V, AVR, Xtensa and "
             "MIPS32 images only (this one is machine %u)",
             (unsigned)l->machine);
     /* A region every output section names must exist, whether or not
