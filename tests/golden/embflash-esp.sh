@@ -12,6 +12,11 @@
 #   - a ROM that misses the first syncs is synced with all the same;
 #   - an unknown chip, a ROM that never answers, a wrong MD5 and an image
 #     beyond the flash are each refused with an error that names them;
+#   - --read: the flash read back 64 bytes a request, at an unaligned
+#     address and length and to the end of the flash (all), the bytes the
+#     model's; a reply the line loses is asked again; a byte changed on the
+#     line fails the ROM's MD5 of the range; a range past the flash, or an
+#     image with --read, is refused;
 #   - the rate: 460800 is asked of the ROM by default (CHANGE_BAUDRATE),
 #     @921600 is asked for when given, @115200 keeps the ROM's; the model
 #     checks the line's rate on every command, so a programmer that does not
@@ -66,6 +71,28 @@ with open(f"{out}/fw.hex", "w") as f:
 with open(f"{out}/big.bin", "wb") as f:
     f.write(b"\x00" * 4096)
 EOF
+
+# read NAME "MODEL OPTIONS" EMBFLASH ARGS...: as flash, for --read, which
+# takes no image
+read() {
+    name=$1; mopts=$2; shift 2
+    rm -f "$out/$name.port"
+    python3 $here/fakeesprom.py "$out/$name.port" "$out/$name.dump" $mopts > "$out/$name.srv" 2>&1 &
+    sp=$!
+    i=0
+    while [ ! -s "$out/$name.port" ] && [ $i -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+    "$EMBFLASH" --esp "serial:$(cat "$out/$name.port")" --timeout 5 "$@" > "$out/$name.log" 2>&1
+    frc=$?
+    i=0
+    while kill -0 $sp 2>/dev/null && [ $i -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+    [ $i -lt 100 ] || { kill $sp; echo "FAIL: $name: the ROM model did not end"; exit 1; }
+    wait $sp
+    src=$?
+}
+
+pattern() { # FILE ADDR LEN: FILE holds the --fill pattern's LEN bytes at ADDR
+    python3 -c "import sys; d=open(sys.argv[1],'rb').read(); a=int(sys.argv[2],0); n=int(sys.argv[3],0); sys.exit(d != bytes(((a + i) * 7 + 3) & 0xFF for i in range(n)))" "$@"
+}
 
 # flash NAME "MODEL OPTIONS" EMBFLASH ARGS...: a fresh model, embflash against
 # it at serial:PORT$rate; $frc and $src are the exit statuses, $out/NAME.log
@@ -134,6 +161,30 @@ flash md5 "--corrupt-md5" "$out/fw.bin" --base 0x1000 --verify
 
 flash big "" "$out/big.bin" --base 0x3FF800
 [ $frc -eq 2 ] && grep -q "beyond the ESP32's 4 MiB of flash" "$out/big.log" || fail "big: $(cat "$out/big.log")"
+
+read rd "--fill" --read 0x1234 1000 "$out/rd.bin"
+[ $frc -eq 0 ] && [ $src -eq 0 ] || { cat "$out/rd.log" "$out/rd.srv"; fail "--read: embflash $frc, model $src"; }
+pattern "$out/rd.bin" 0x1234 1000 || fail "--read: not the flash's bytes"
+grep -q "read 1000 bytes of the ESP32's flash from 0x1234" "$out/rd.log" && grep -q "verified (MD5)" "$out/rd.log" ||
+    fail "--read: $(cat "$out/rd.log")"
+
+read rdall "--fill" --read 0x3FF000 all "$out/rdall.bin"
+[ $frc -eq 0 ] && [ $src -eq 0 ] || { cat "$out/rdall.log"; fail "--read all: embflash $frc, model $src"; }
+pattern "$out/rdall.bin" 0x3FF000 4096 || fail "--read all: not the last 4 KiB"
+
+read rddrop "--fill --drop-read 5" --read 0 1K "$out/rddrop.bin"
+[ $frc -eq 0 ] && [ $src -eq 0 ] || { cat "$out/rddrop.log"; fail "--read, a reply lost: embflash $frc, model $src"; }
+pattern "$out/rddrop.bin" 0 1024 || fail "--read, a reply lost: not the flash's bytes"
+grep -q "1 request asked again" "$out/rddrop.log" || fail "--read, a reply lost: $(cat "$out/rddrop.log")"
+
+read rdbad "--fill --corrupt-read 0x123" --read 0 1K "$out/rdbad.bin"
+[ $frc -eq 2 ] && grep -q "do not have the flash's MD5" "$out/rdbad.log" || fail "--read, a byte changed: $(cat "$out/rdbad.log")"
+[ -e "$out/rdbad.bin" ] && fail "--read, a byte changed: the file was written"
+
+read rdpast "" --read 0x3FF000 8K "$out/rdpast.bin"
+[ $frc -eq 2 ] && grep -q "beyond the ESP32's 4 MiB of flash" "$out/rdpast.log" || fail "--read past the flash: $(cat "$out/rdpast.log")"
+"$EMBFLASH" "$out/fw.bin" --esp serial:/dev/null --read 0 1K "$out/no.bin" > "$out/rdimg.log" 2>&1
+[ $? -eq 2 ] && grep -q "and no image" "$out/rdimg.log" || fail "--read with an image: $(cat "$out/rdimg.log")"
 
 EMBCC=${EMBCC:-./embcc}
 EMBLD=${EMBLD:-./embld}

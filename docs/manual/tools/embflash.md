@@ -21,6 +21,7 @@ embflash IMAGE --stk500 serial:DEV[@BAUD] [--base ADDR] [--verify]
 embflash IMAGE --esp serial:DEV[@BAUD] [--base ADDR] [--verify]
                [--no-reset] [--ram] [--console SECONDS] [--timeout SECONDS]
 embflash ELF --esp-image FILE
+embflash --esp serial:DEV[@BAUD] --read ADDR SIZE|all FILE
 ```
 
 `TARGET` is where the server listens:
@@ -170,6 +171,27 @@ On an ESP32-D0WD-V3 board with a CP2102, 256 KiB went in 28.9 s at
 (39 KiB/s), each verified. Past 460800 the time is mostly the ROM writing
 the flash, one 1024-byte block per answer.
 
+### Reading the flash: --read
+
+`--read ADDR SIZE FILE` reads the ESP32's flash into `FILE` instead of
+writing it, as esptool's `read-flash` does. `SIZE` is a number of bytes,
+with `K` or `M` for KiB and MiB, or `all` for the rest of the flash from
+`ADDR`.
+
+- **The reads.** `READ_FLASH_SLOW`, the ROM's own read, 64 bytes a request.
+  A reply the line loses is asked again, after half a second, and the
+  count of those is printed.
+- **The check.** The ROM's MD5 of the whole range is compared with the
+  bytes received. A difference fails the run and no file is written.
+- **The speed.** On the board, 25 KiB/s at 460800 and 45 KiB/s at 921600:
+  all 4 MiB in 91 s. The 64-byte limit is the ROM's, and a flasher stub in
+  RAM would read faster.
+
+```sh
+# the whole flash, as a backup before the first write
+embflash --esp serial:/dev/cu.usbserial-0001@921600 --read 0 all backup.bin
+```
+
 ### The image
 
 For an ELF in RAM only, the image is esptool's format, byte for byte
@@ -274,7 +296,7 @@ with an error is reported with that error.
 - `--stk500` knows the ATmega328 family only. STK500 version 2, which the
   Arduino Mega's bootloader speaks, is not implemented.
 - `--esp` knows the ESP32 only and assumes 4 MiB of flash and DIO at
-  40 MHz. The flasher stub, compression, reading the flash back, ESP-IDF's
+  40 MHz. The flasher stub, compression, ESP-IDF's
   app images and partition table (an IDF program needs IDF's bootloader),
   PSRAM, and other chips (S2, S3, C3...) are not implemented.
 - Option bytes, mass erase and read-out protection are server-specific.

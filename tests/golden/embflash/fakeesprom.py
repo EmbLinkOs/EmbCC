@@ -2,13 +2,15 @@
 """A model of the ESP32 ROM's serial download mode on a pseudo-terminal.
 
     fakeesprom.py PORTFILE DUMP [--magic 00f01d83] [--silent] [--ignore-syncs N]
-                  [--corrupt-md5] [--deaf-above BAUD]
+                  [--corrupt-md5] [--deaf-above BAUD] [--fill] [--drop-read N]
+                  [--corrupt-read ADDR]
 
 Writes the pseudo-terminal's device path to PORTFILE and answers what the
 ESP32's ROM answers, in SLIP frames with its four status bytes: sync (several
 times over, as the ROM does), the chip-detect register, SPI attach and
 parameters, flash begin and data, the MD5 of a flash range, and the
-RAM loader (MEM_BEGIN, MEM_DATA, MEM_END), and CHANGE_BAUDRATE, after which
+RAM loader (MEM_BEGIN, MEM_DATA, MEM_END), READ_FLASH_SLOW (64 bytes an
+answer, whatever was asked, as the ROM's), and CHANGE_BAUDRATE, after which
 every command must come at the new rate: the pseudo-terminal's rate, which
 the programmer sets, is checked against the ROM's on each one. FLASH_END is
 answered with error
@@ -27,7 +29,11 @@ command the model does not know. --silent never answers; --deaf-above
 answers nothing once the rate is above BAUD, as an adapter that cannot carry
 it; --ignore-syncs
 drops the first N syncs, as a chip still in reset does; --corrupt-md5 answers
-a wrong digest."""
+a wrong digest. --fill starts the flash as byte i = (7 i + 3) mod 256 rather
+than erased; --drop-read N loses the answer to the Nth READ_FLASH_SLOW (from
+1), as the line can; --corrupt-read ADDR flips a bit of the byte at ADDR in
+what READ_FLASH_SLOW answers, but not in the flash the MD5 is of. A
+programmer that only read and hangs up ends it with 0."""
 import hashlib
 import os
 import pty
@@ -52,6 +58,9 @@ def main(argv):
     ignore = int(opt("--ignore-syncs", "0"))
     corrupt = "--corrupt-md5" in opts
     deaf = int(opt("--deaf-above", "0"))
+    drop_read = int(opt("--drop-read", "0"))
+    corrupt_read = int(opt("--corrupt-read", "-1"), 0)
+    reads = 0
     rate = 115200  # the ROM's, at reset
     codes = {getattr(termios, f"B{r}"): r for r in (9600, 19200, 38400, 57600, 115200, 230400,
                                                       460800, 921600) if hasattr(termios, f"B{r}")}
@@ -60,7 +69,8 @@ def main(argv):
     os.close(slave)  # the programmer's open is the only one: its close is a hang-up
     with open(portfile, "w") as f:
         f.write(path)
-    flash = bytearray(b"\xff" * FLASH)
+    flash = bytearray(bytes((i * 7 + 3) & 0xFF for i in range(256)) * (FLASH // 256)
+                      if "--fill" in opts else b"\xff" * FLASH)
     attached = False
     region = None  # (offset, size, blocks, block size, next sequence number)
     ram = []  # [address, size, blocks, block size, next sequence, bytes]
@@ -87,7 +97,7 @@ def main(argv):
             except OSError:
                 got = b""
             if not got:
-                if heard and wrote:
+                if heard and (wrote or reads):
                     with open(dump, "wb") as f:
                         f.write(flash)
                     sys.exit(0)
@@ -217,6 +227,19 @@ def main(argv):
             if corrupt:
                 digest = digest[:-1] + ("0" if digest[-1] != "0" else "1")
             reply(cmd, data=digest.encode())
+        elif cmd == 0x0E:
+            if not attached:
+                rule("READ_FLASH_SLOW before SPI_ATTACH")
+            addr, n = struct.unpack("<II", data)
+            if n > 64 or addr + n > FLASH:
+                rule(f"READ_FLASH_SLOW of {n} bytes at 0x{addr:x}: the ROM reads 64 at most")
+            reads += 1
+            if reads == drop_read:
+                continue
+            block = bytearray(flash[addr:addr + 64].ljust(64, b"\xff"))
+            if addr <= corrupt_read < addr + n:
+                block[corrupt_read - addr] ^= 0x01
+            reply(cmd, data=bytes(block))
         elif cmd == 0x05:
             rsize, nblk, bsize, off = struct.unpack("<IIII", data)
             if nblk * bsize < rsize or rsize % 4:
