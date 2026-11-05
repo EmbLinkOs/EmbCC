@@ -509,7 +509,10 @@ static void tx(const char *p, size_t n)
     }
 }
 
-/* one byte, or -1 after the timeout */
+/* while the console reads: a hang-up ends it rather than the run */
+static int g_hangup_ends;
+
+/* one byte, or -1 after the timeout (-2 at a hang-up, under g_hangup_ends) */
 static int rx_byte(void)
 {
     static unsigned char buf[4096];
@@ -521,6 +524,8 @@ static int rx_byte(void)
     if (r <= 0)
         return -1;
     ssize_t n = read(g_fd, buf, sizeof buf);
+    if (n <= 0 && g_hangup_ends)
+        return -2;
     if (n <= 0)
         die("the server closed the connection");
     have = (size_t)n; at = 0;
@@ -534,6 +539,44 @@ static void open_target(const char *t)
 static void tx(const char *p, size_t n) { (void)p; (void)n; }
 static int rx_byte(void) { return -1; }
 #endif
+
+/* milliseconds on a clock that only goes forward */
+static long long now_ms(void)
+{
+#ifdef EMBFLASH_POSIX
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+#else
+    return 0;
+#endif
+}
+
+/* What the program prints, read through the same open port for SECONDS:
+ * reopening it would pulse the board's auto-reset and start the chip over.
+ * A port that hangs up ends it. */
+static void serial_console(int seconds)
+{
+    int saved = g_timeout_ms;
+    g_timeout_ms = 200;
+    g_hangup_ends = 1;
+    printf("embflash: the console, %d s\n", seconds);
+    fflush(stdout);
+    for (long long until = now_ms() + (long long)seconds * 1000; now_ms() < until; ) {
+        int c = rx_byte();
+        if (c == -2)
+            break;
+        if (c < 0)
+            continue;
+        putchar(c);
+        if (c == '\n')
+            fflush(stdout);
+    }
+    fflush(stdout);
+    g_hangup_ends = 0;
+    g_timeout_ms = saved;
+}
+
 
 /* ==== the GDB remote serial protocol ======================================
  *
@@ -1027,7 +1070,7 @@ static void stk_reset(void)
 static void stk_reset(void) {}
 #endif
 
-static void stk500_flash(const char *target, int verify, int no_reset)
+static void stk500_flash(const char *target, int verify, int no_reset, int console)
 {
     if (strncmp(target, "serial:", 7) != 0)
         die("--stk500 %s: the bootloader is reached on a serial line, serial:DEV[@BAUD]", target);
@@ -1122,6 +1165,8 @@ static void stk500_flash(const char *target, int verify, int no_reset)
            written == 1 ? "" : "s", part->page, part->name);
     if (verify)
         printf("embflash: verified\n");
+    if (console)                        /* Optiboot starts the program on leaving */
+        serial_console(console);
 }
 
 /* ==== the Espressif ROM's serial download mode ============================
@@ -1169,18 +1214,6 @@ static void esp_send(int cmd, const unsigned char *data, size_t n, u32 checksum)
     out[k++] = 0xC0;
     tx((const char *)out, k);
     free(out);
-}
-
-/* milliseconds on a clock that only goes forward */
-static long long now_ms(void)
-{
-#ifdef EMBFLASH_POSIX
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-#else
-    return 0;
-#endif
 }
 
 /* the next frame's bytes, unescaped, into buf (at most cap); its length, or
@@ -1462,28 +1495,6 @@ static void esp_enter_rom(void) {}
 static void esp_run(void) {}
 #endif
 
-/* What the program prints, read through the same open port: reopening
- * it would pulse the auto-reset and start the chip over */
-static void esp_console(int seconds)
-{
-    int saved = g_timeout_ms;
-    g_timeout_ms = 200;
-    printf("embflash: the console, %d s\n", seconds);
-    fflush(stdout);
-    for (long waited = 0; waited < (long)seconds * 1000; ) {
-        int c = rx_byte();
-        if (c < 0) {
-            waited += 200;
-            continue;
-        }
-        putchar(c);
-        if (c == '\n')
-            fflush(stdout);
-    }
-    fflush(stdout);
-    g_timeout_ms = saved;
-}
-
 /* Into RAM and run, as esptool's load-ram: each piece in 0x1800-byte
  * blocks (MEM_BEGIN, MEM_DATA), then MEM_END with the entry, which the ROM
  * jumps to; nothing is written to flash */
@@ -1569,7 +1580,7 @@ static void esp_flash(const char *target, int verify, int no_reset, int ram, int
     if (ram) {
         esp_ram();
         if (console)
-            esp_console(console);
+            serial_console(console);
         return;
     }
     unsigned char att[8] = { 0 };       /* the default SPI pins; the ESP32 ROM wants 8 bytes */
@@ -1633,7 +1644,7 @@ static void esp_flash(const char *target, int verify, int no_reset, int ram, int
     if (verify)
         printf("embflash: verified (MD5)\n");
     if (console)
-        esp_console(console);
+        serial_console(console);
 }
 
 static u64 parse_num(const char *s, const char *what)
@@ -1652,6 +1663,7 @@ static void usage(void)
         "                [--entry ADDR] [--vector-table ADDR] [--monitor CMD]...\n"
         "                [--dry-run] [--timeout SECONDS] [-v]\n"
         "       embflash IMAGE --stk500 serial:DEV[@BAUD] [--verify] [--no-reset]\n"
+        "                [--console SECONDS]\n"
         "       embflash IMAGE --esp serial:DEV[@BAUD] [--base ADDR] [--verify] [--no-reset]\n"
         "                [--ram] [--console SECONDS]\n"
         "       embflash ELF --esp-image FILE\n"
@@ -1703,8 +1715,10 @@ int main(int argc, char **argv)
     if (!image || (!target && !stk500 && !esp && !esp_out && !dry) ||
         (!!target + !!stk500 + !!esp + !!esp_out) > 1)
         usage();
-    if ((ram || console) && !esp)
-        die("--ram and --console are --esp's");
+    if (ram && !esp)
+        die("--ram is --esp's");
+    if (console && !esp && !stk500)
+        die("--console reads a serial bootloader's port: --esp or --stk500");
     /* an ELF for the ESP32's ROM is laid out as its image, which goes to
      * flash at --base (0x1000, where the ROM boots from, by default) */
     int esp_elf = 0;
@@ -1740,7 +1754,7 @@ int main(int argc, char **argv)
                 "--vector-table are for --gdb", stk500 ? "stk500" : "esp",
                 stk500 ? "bootloader" : "ROM");
         if (stk500)
-            stk500_flash(stk500, verify, no_reset);
+            stk500_flash(stk500, verify, no_reset, console);
         else
             esp_flash(esp, verify, no_reset, ram, console);
         return 0;

@@ -7,7 +7,8 @@
 Writes the pseudo-terminal's device path to PORTFILE, answers what Optiboot
 answers (sync, signature, enter/leave programming mode, load address, program
 and read page) and, when programming mode is left, writes the 32 KiB flash to
-DUMP and exits 0; when the programmer hangs up first it exits 3. Any rule a
+DUMP, prints a line on the port as the program would, and exits 0; when the
+programmer hangs up first it exits 3. Any rule a
 programmer breaks is reported on stderr with exit status 1: a page that is not
 whole or not page-aligned, a write with no address loaded, a command it does
 not know. --silent never answers; --ignore-syncs
@@ -126,6 +127,7 @@ def main(argv):
             reply()
             with open(dump, "wb") as f:
                 f.write(flash)
+            os.write(master, b"hello from the sketch\r\n")
             time.sleep(0.2)
             return 0
         else:

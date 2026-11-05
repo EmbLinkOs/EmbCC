@@ -17,7 +17,7 @@ embflash IMAGE --gdb TARGET [--base ADDR] [--verify] [--run]
                [--entry ADDR] [--vector-table ADDR] [--monitor CMD]...
                [--dry-run] [--timeout SECONDS] [-v]
 embflash IMAGE --stk500 serial:DEV[@BAUD] [--base ADDR] [--verify]
-               [--no-reset] [--timeout SECONDS]
+               [--no-reset] [--console SECONDS] [--timeout SECONDS]
 embflash IMAGE --esp serial:DEV[@BAUD] [--base ADDR] [--verify]
                [--no-reset] [--ram] [--console SECONDS] [--timeout SECONDS]
 embflash ELF --esp-image FILE
@@ -111,9 +111,11 @@ The baud rate is 115200 when left out; older Arduino bootloaders take 57600.
    the page the image does not give are the erased `0xff`, and pages it
    does not touch keep their contents. `--verify` reads every written page
    back and names the first byte that differs.
-5. **Start.** Leaving programming mode starts the program. `--run`,
-   `--monitor`, `--entry` and `--vector-table` belong to `--gdb` and are
-   refused here.
+5. **Start.** Leaving programming mode starts the program. `--console
+   SECONDS` then prints what it writes on the serial line, through the same
+   open port: reopening the port resets an Uno and starts the program over.
+   `--run`, `--monitor`, `--entry` and `--vector-table` belong to `--gdb`
+   and are refused here.
 
 ## The Espressif ROM: --esp
 
@@ -186,8 +188,10 @@ embflash fw.hex --gdb localhost:3333 --monitor "reset halt" --verify
 # a Black Magic Probe
 embflash fw.elf --gdb serial:/dev/ttyACM0 --verify --run
 
-# an Arduino Uno through Optiboot, on the ATmega16U2's USB serial port
-embflash fw.hex --stk500 serial:/dev/cu.usbmodem1101 --verify
+# an Arduino Uno through Optiboot, on the ATmega16U2's USB serial port,
+# then what the program prints
+embcc --target=avr -mmcu=atmega328p -Os blink.c -o blink.elf
+embflash blink.elf --stk500 serial:/dev/cu.usbmodem1101 --verify --console 5
 
 # an ESP32 development board: the ELF, as the image the ROM boots, with its output
 embflash app.elf --esp serial:/dev/cu.usbserial-0001 --verify --console 5
@@ -224,8 +228,9 @@ with an error is reported with that error.
 
 - `embflash` has been tested against QEMU and against a server that models
   a part's flash. It has **not yet** been tested against real probes. The
-  STK500 path has been tested against a model of Optiboot, not yet against
-  a board. The `--esp` path has been tested on an ESP32-D0WD-V3 development
+  `--stk500` path has been tested on an Arduino Uno R3 (an ATmega328P
+  behind an ATmega16U2): 1.7 KiB written and read back in 1.2 s. The
+  `--esp` path has been tested on an ESP32-D0WD-V3 development
   board (revision v3.1, 4 MiB of flash, a CP2102 bridge): an ELF made into
   the image and booted from 0x1000, an ELF run from RAM, and 28 KiB written
   and verified in 7 s.
