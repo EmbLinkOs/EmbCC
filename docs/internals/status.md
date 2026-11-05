@@ -122,7 +122,7 @@ use it.
 There is no position-independent code, no shared library and no dynamic
 linking. `-fPIC`, `-shared` and the related options are refused (see
 [Options](#options)). EmbLD reads GNU ld linker scripts (`embld -T`) for
-ARM, RISC-V, AVR and MIPS32 images, not yet for the other targets:
+ARM, RISC-V, AVR, Xtensa and MIPS32 images, not yet for the other targets:
 
 ```text
 embld: -T: a linker script is supported for ARM, RISC-V, AVR, Xtensa and MIPS32 images only (this one is machine 62)

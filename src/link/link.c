@@ -4252,7 +4252,9 @@ static void apply_xtensa(struct linker *l, struct object *o, unsigned type,
                 die("%s: an l32r at 0x%llx cannot reach its literal '%s' at "
                     "0x%llx: l32r reaches 256 KiB BACKWARDS, so a literal "
                     "must be placed before the code that loads it (compile "
-                    "with -mtext-section-literals)", o->name,
+                    "with -mtext-section-literals; under a linker "
+                    "script, put .literal before .text, as "
+                    "*(.literal .text .literal.* .text.*))", o->name,
                     (unsigned long long)P, l->rel_sym, (unsigned long long)V);
             w = (w & 0xffUL) | (((unsigned long)(r >> 2) & 0xffffUL) << 8);
         } else {

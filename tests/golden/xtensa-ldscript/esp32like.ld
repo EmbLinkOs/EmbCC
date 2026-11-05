@@ -36,5 +36,5 @@ SECTIONS
     . = ALIGN(4);
     __bss_end = .;
   } > DRAM
-  __stack_top = 0x60800000;
+  __stack_top = ORIGIN(DRAM) + LENGTH(DRAM);   /* the region's top */
 }

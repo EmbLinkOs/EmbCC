@@ -31,8 +31,14 @@ if command -v python3 >/dev/null 2>&1; then
     python3 $here/sections.py "$out/prog.elf" > "$out/sections.txt"
     grep -q '^\.text 0x60010000 ' "$out/sections.txt" || fail "text: $(cat "$out/sections.txt")"
     grep -q '^\.rodata 0x60400000 ' "$out/sections.txt" || fail "rodata not in DRAM: $(cat "$out/sections.txt")"
+    # (fixed-width hex, so comparing the strings compares the addresses)
     awk '$1 == ".data" || $1 == ".bss" { if ($2 < "0x60400000") bad = 1 } END { exit bad }' \
         "$out/sections.txt" || fail "data: $(cat "$out/sections.txt")"
+    # .data runs in DRAM and is stored after the code, in IRAM (AT> IRAM)
+    data=$(awk '$1 == ".data" { print $2 }' "$out/sections.txt")
+    awk -v d="$data" '$1 == "LOAD" && $2 == d { ok = $3 >= "0x60010000" && $3 < "0x60110000" }
+                      END { exit !ok }' "$out/sections.txt" ||
+        fail ".data is not stored in IRAM: $(cat "$out/sections.txt")"
 fi
 
 "$EMBLD" -T $here/esp32like.ld -Tstack 0x60800000 "$out/reset.o" "$out/boot.o" "$out/io.o" \
