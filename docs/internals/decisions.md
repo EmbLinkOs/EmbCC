@@ -602,3 +602,20 @@ back. The ESP32 only, 4 MiB of
 flash assumed. The RAM-loaded flasher stub, compressed
 writes, fast reads and other chips (the ESP32-C3's and S3's
 chip IDs) are not implemented.
+
+## D-024: embld lays out Xtensa images from linker scripts
+
+**Decision.** `-T` takes a linker script for Xtensa images, through the same layout engine as
+ARM, RISC-V, AVR and MIPS32. Before, only `-Ttext`, `-Tdata` and `-Tstack` placed one.
+
+**Why.** An ESP32's instruction RAM takes only 32-bit loads, so its `.rodata` must not sit with
+the code, and EmbLinkRTOS's ESP32 port needs code, read-only data and data in three regions:
+IRAM, DRAM and the data's load address. The engine has nothing machine-specific to add for
+Xtensa. Its relocations check their own reach: `l32r` reaches only backwards and by 256 KiB,
+`call8` by 512 KiB, and each refuses a layout that breaks it, naming the fix. The alternative,
+Espressif's GCC and binutils, is a second toolchain of several hundred megabytes for one target
+family, and it would leave EmbLinkRTOS's ESP32 images the only ones EmbCC cannot link.
+
+**Status.** Current. `tests/golden/xtensa-ldscript.sh` runs an ESP32-like layout on QEMU's
+sim machine. There is no entry stub under a script, so the startup sets `sp` and PS, as an
+ESP32's ROM leaves them for its entry.
