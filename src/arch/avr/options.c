@@ -25,11 +25,16 @@
 #include <string.h>
 
 static const struct avr_mcu avr_mcus[] = {
-    /* name          macro                  flash   RAMEND  EEPROM vectors */
-    { "atmega328p", "__AVR_ATmega328P__", 32768, 0x08ff, 1024, 26 },
-    { "atmega328",  "__AVR_ATmega328__",  32768, 0x08ff, 1024, 26 },
-    { "atmega168p", "__AVR_ATmega168P__", 16384, 0x04ff,  512, 26 },
-    { "atmega168",  "__AVR_ATmega168__",  16384, 0x04ff,  512, 26 },
+    /* name          macro                  flash   RAMEND  EEPROM vectors SRAM  PC arch */
+    { "atmega328p", "__AVR_ATmega328P__",  32768, 0x08ff, 1024, 26, 0x100, 2, 5 },
+    { "atmega328",  "__AVR_ATmega328__",   32768, 0x08ff, 1024, 26, 0x100, 2, 5 },
+    { "atmega168p", "__AVR_ATmega168P__",  16384, 0x04ff,  512, 26, 0x100, 2, 5 },
+    { "atmega168",  "__AVR_ATmega168__",   16384, 0x04ff,  512, 26, 0x100, 2, 5 },
+    /* the Arduino Mega's: the same core, more of everything; the 2560's
+     * flash is past what a 16-bit word address reaches, so its calls push
+     * a 3-byte PC (avr6), and both read flash past 64 KiB with elpm */
+    { "atmega1280", "__AVR_ATmega1280__", 131072, 0x21ff, 4096, 57, 0x200, 2, 51 },
+    { "atmega2560", "__AVR_ATmega2560__", 262144, 0x21ff, 4096, 57, 0x200, 3, 6 },
 };
 
 static const struct avr_mcu *g_mcu;
@@ -58,18 +63,19 @@ static void set_mcu(const char *arg, const char *v)
     for (unsigned i = 0; i < sizeof avr_mcus / sizeof avr_mcus[0]; i++)
         if (strcmp(v, avr_mcus[i].name) == 0) {
             g_mcu = &avr_mcus[i];
+            target_avr_set_arch(g_mcu->arch);
             return;
         }
     if (avr4_sibling(v))
         diag_fatal(NULL, 0, "%s is not supported: the %s is an avr4 part, "
                    "with no jmp or call instruction, and EmbCC's AVR code "
-                   "calls with `call` (it generates for the avr5 core: "
-                   "--mcu=atmega328p, atmega328, atmega168p or atmega168)",
+                   "calls with `call` (it generates for the avr5, avr51 and avr6 "
+                   "cores: --mcu=atmega328p, atmega328, atmega168p, atmega168, "
+                   "atmega1280 or atmega2560)",
                    opt_typed(arg), v);
-    diag_fatal(NULL, 0, "%s is not supported: EmbCC's AVR backend generates "
-               "code for the ATmega328P's avr5 core, and knows the memories "
-               "and vectors of atmega328p, atmega328, atmega168p and "
-               "atmega168 alone", opt_typed(arg));
+    diag_fatal(NULL, 0, "%s is not supported: EmbCC's AVR backend knows the "
+               "memories and vectors of atmega328p, atmega328, atmega168p, "
+               "atmega168, atmega1280 and atmega2560 alone", opt_typed(arg));
 }
 
 int avr_target_option(const char *arg)

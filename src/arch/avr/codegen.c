@@ -581,12 +581,23 @@ static long outgoing_area(const struct ir_func *fn)
  *      Y+frame+4   the return address, low byte
  *      Y+frame+5   the first incoming stack argument
  *
+ * On an avr6 part (the ATmega2560) a call pushes a 3-byte PC, its bits
+ * 16-21 at the lowest address: the return address takes Y+frame+3 to +5,
+ * and the arguments start one byte higher (avr_pc_bytes).
+ *
  * Which is why r28/r29 are pushed LAST of anything this prologue pushes:
  * the distance from Y to the incoming arguments must not depend on how
  * many other registers were saved. Nothing else is saved here yet, so the
  * five is exact -- and when something is, it goes below this pair.
  */
-#define INCOMING_AT 5
+#define INCOMING_AT (3 + avr_pc_bytes())
+
+/* what a call pushes: 2 bytes, or 3 on avr6 */
+static int avr_pc_bytes(void)
+{
+    const struct avr_mcu *m = target_avr_mcu();
+    return m ? m->pc_bytes : 2;
+}
 
 /* ---- where each slot goes ----------------------------------------------
  *
@@ -3395,7 +3406,9 @@ static void gen_ins(struct a_fn *F, int n)
                             "__builtin_return_address in an interrupt "
                             "handler");
         int nb = dw(F, i), d = addr_reg(F, i);
-        long hi = F->frame + F->in_at - 2;   /* the return address's high */
+        /* the return address's bits 8-15; on avr6 its bits 16-21 are the
+         * byte below, and a function pointer is the low 16 bits */
+        long hi = F->frame + F->in_at - 2;
         if (!nb)
             return;
         if (i->imm == 2) {
@@ -3403,7 +3416,7 @@ static void gen_ins(struct a_fn *F, int n)
             ld_slot(F, d, hi + 1, 1);
         } else {
             y_to(F, d);
-            add_const16(F, d, hi - 1);
+            add_const16(F, d, F->frame + F->in_at - avr_pc_bytes() - 1);
         }
         if (nb > 2)
             extend(F, d, 2, 0, nb);
@@ -6318,7 +6331,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
      * on top of all that for a moment (t_push). A handler's prologue also
      * pushes r0, SREG, r1 and the registers it saves. */
     f->stack_bytes = (int)F.frame + 2 * F.nsave + 2 * F.use_y /* Y */ +
-                     2 /* the return address */ + F.tpeak;
+                     avr_pc_bytes() /* the return address */ + F.tpeak;
     if (f->is_isr) {
         f->stack_bytes += 3;                 /* r0, SREG and r1 */
         for (int r = 2; r < 32; r++)

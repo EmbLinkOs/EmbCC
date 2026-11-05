@@ -24,16 +24,16 @@ out=tests/golden/out/reference-pages
 rm -rf "$out"; mkdir -p "$out"
 fail() { echo "FAIL: $*"; exit 1; }
 
-for p in options warnings targets; do
+for p in options warnings targets boards; do
     "$EMBCC" --reference=$p > "$out/$p.md" 2> "$out/$p.err" ||
         { cat "$out/$p.err"; fail "--reference=$p"; }
     [ -s "$out/$p.md" ] || fail "--reference=$p printed nothing"
 done
 
 # ---- the committed pages are what the compiler prints ---------------------
-# (docs/manual/: options.md, warnings.md, target-list.md; `make reference`
+# (docs/manual/: options.md, warnings.md, target-list.md, board-list.md; `make reference`
 # regenerates them)
-for pair in options:options warnings:warnings targets:target-list; do
+for pair in options:options warnings:warnings targets:target-list boards:board-list; do
     p=${pair%%:*} f=docs/manual/${pair#*:}.md
     cmp -s "$out/$p.md" "$f" || { diff "$f" "$out/$p.md" | head -8
         fail "$f is not what --reference=$p prints: run make reference"; }
@@ -65,7 +65,7 @@ done < "$out/t.names" > "$out/t.missing"
 echo "reference-pages: all $nt target spellings, each canonical one with what it runs on"
 
 # ---- every table well formed ------------------------------------------------
-for p in options warnings targets; do
+for p in options warnings targets boards; do
     # a row's cells: its '|' that are not escaped (\|), less one
     awk -v page=$p '
         /^\|/ {

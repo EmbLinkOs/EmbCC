@@ -43,6 +43,47 @@ static const struct opt opts[] = {
 };
 #define NOPTS ((int)(sizeof opts / sizeof opts[0]))
 
+/* ---- the boards ----------------------------------------------------------
+ *
+ * --board=NAME stands for the options a board's program is compiled with
+ * (its target, its part, its clock as F_CPU, its runtime's flags) and for
+ * what the link adds: the startup and the board's runtime (lib/boards,
+ * built beside the target's library by tools/build-rt.sh), and the
+ * board's linker script, or the part's. <board.h> is the board's
+ * (include/boards/DIR), the same names on every board. */
+static const struct embcc_board boards[] = {
+    { "uno", "Arduino Uno (ATmega328P, 16 MHz, Optiboot)", "avr", "atmega328p",
+      "-DF_CPU=16000000UL", "uno", "board-uno.o", NULL,
+      "--stk500 serial:PORT (115200)" },
+    { "nano", "Arduino Nano (ATmega328P, 16 MHz, Optiboot)", "avr", "atmega328p",
+      "-DF_CPU=16000000UL -DBOARD_NANO=1", "uno", "board-uno.o", NULL,
+      "--stk500 serial:PORT (115200; serial:PORT@57600 for the old bootloader)" },
+    { "mega2560", "Arduino Mega 2560 (ATmega2560, 16 MHz, the STK500v2 bootloader)", "avr",
+      "atmega2560", "-DF_CPU=16000000UL", "mega2560", "board-mega2560.o", NULL,
+      "--stk500v2 serial:PORT (115200)" },
+    { "esp32-devkit", "ESP32 DevKit (ESP32-WROOM-32, 40 MHz from the ROM, 4 MiB flash)",
+      "xtensa-esp32-elf", NULL, "-mtext-section-literals", "esp32-devkit",
+      "esp32-crt0.o esp32-start.o board-esp32-devkit.o", "esp32.ld",
+      "--esp serial:PORT (460800)" },
+};
+#define NBOARDS ((int)(sizeof boards / sizeof boards[0]))
+static const struct embcc_board *g_board;
+
+const struct embcc_board *opts_board(void) { return g_board; }
+
+void opts_print_boards(FILE *out)
+{
+    fprintf(out, "# Board reference\n\nEvery board `--board=` accepts, generated from EmbCC's "
+                 "board table (`src/driver/options.c`) by `embcc --reference=boards`. "
+                 "[Boards](boards.md) is the guide: what a board's program gets, `<board.h>`, "
+                 "and putting it on the board.\n\n");
+    fprintf(out, "| Board | What it is | Target | Programmed with |\n|---|---|---|---|\n");
+    for (int k = 0; k < NBOARDS; k++)
+        fprintf(out, "| `%s` | %s | `%s`%s%s%s | `embflash %s` |\n", boards[k].name,
+                boards[k].title, boards[k].target, boards[k].mcu ? " `--mcu=" : "",
+                boards[k].mcu ? boards[k].mcu : "", boards[k].mcu ? "`" : "", boards[k].flash);
+}
+
 /* The rewritten argument vector. */
 struct strvec { char **v; int n, cap; };
 static void strvec_push(struct strvec *s, char *a)
@@ -131,12 +172,71 @@ static void remember(const char *internal, const char *spelling,
     free(t);
 }
 
+/* argv[i] is --board=NAME or --board NAME: the board (i past its value), or
+ * NULL when it is not one */
+static const char *board_arg(int argc, char **argv, int *i)
+{
+    const char *a = argv[*i];
+    if (strncmp(a, "--board=", 8) == 0)
+        return a + 8;
+    if (strcmp(a, "--board") == 0 && *i + 1 < argc)
+        return argv[++*i];
+    return NULL;
+}
+
 int opts_normalize(int *argc, char ***argv)
 {
     struct strvec out = { 0, 0, 0 };
     int changed = 0;
+    for (int i = 1; i < *argc; i++) {
+        int j = i;
+        const char *b = board_arg(*argc, *argv, &j);
+        if (!b)
+            continue;
+        const struct embcc_board *bd = NULL;
+        for (int k = 0; k < NBOARDS; k++)
+            if (strcmp(b, boards[k].name) == 0)
+                bd = &boards[k];
+        if (!bd) {
+            fprintf(stderr, "embcc: error: --board=%s: not a board EmbCC knows; it knows:\n", b);
+            for (int k = 0; k < NBOARDS; k++)
+                fprintf(stderr, "embcc:   %-14s %s\n", boards[k].name, boards[k].title);
+            return -1;
+        }
+        if (g_board && g_board != bd) {
+            fprintf(stderr, "embcc: error: --board=%s and --board=%s: one board at a time\n",
+                    g_board->name, bd->name);
+            return -1;
+        }
+        for (int k = 1; k < *argc; k++)
+            if (strncmp((*argv)[k], "--target=", 9) == 0 &&
+                strcmp((*argv)[k] + 9, bd->target) != 0) {
+                fprintf(stderr, "embcc: error: --board=%s is a %s board, and %s names "
+                        "another target\n", bd->name, bd->target, (*argv)[k]);
+                return -1;
+            }
+        g_board = bd;
+        i = j;
+    }
     for (int i = 0; i < *argc; i++) {
         const char *a = (*argv)[i];
+        if (i > 0 && g_board) {
+            int j = i;
+            if (board_arg(*argc, *argv, &j)) {
+                /* what the board stands for, in its place */
+                char t[160];
+                snprintf(t, sizeof t, "--target=%s", g_board->target);
+                expand(&out, t, "");
+                if (g_board->mcu) {
+                    snprintf(t, sizeof t, "-mmcu=%s", g_board->mcu);
+                    expand(&out, t, "");
+                }
+                expand(&out, g_board->flags, "");
+                i = j;
+                changed = 1;
+                continue;
+            }
+        }
         const char *val;
         int sep;
         const struct opt *o = i > 0 && a[0] == '-' ? lookup(a, &val, &sep)

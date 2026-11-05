@@ -18,10 +18,15 @@ embflash IMAGE --gdb TARGET [--base ADDR] [--verify] [--run]
                [--dry-run] [--timeout SECONDS] [-v]
 embflash IMAGE --stk500 serial:DEV[@BAUD] [--base ADDR] [--verify]
                [--no-reset] [--console SECONDS] [--timeout SECONDS]
+embflash IMAGE --stk500v2 serial:DEV[@BAUD] [--base ADDR] [--verify]
+               [--no-reset] [--console SECONDS] [--timeout SECONDS]
 embflash IMAGE --esp serial:DEV[@BAUD] [--base ADDR] [--verify]
                [--no-reset] [--ram] [--console SECONDS] [--timeout SECONDS]
+               [--no-stub] [--no-compress]
 embflash ELF --esp-image FILE
 embflash --esp serial:DEV[@BAUD] --read ADDR SIZE|all FILE
+embflash --esp serial:DEV[@BAUD] --erase-flash | --erase-region ADDR SIZE
+embflash ELF [--board=BOARD] [--verify] [--console SECONDS]
 ```
 
 `TARGET` is where the server listens:
@@ -86,6 +91,33 @@ name** in the server's target description (`qXfer:features:read`), so
 
 Without `--run`, `embflash` detaches (`D`) and leaves the target halted.
 
+## The port
+
+A serial target's device may be left to `embflash`: `serial:auto`, or
+`serial:` with no device (`serial:@57600` keeps a rate). The port is the
+board's USB serial port, found in `/dev` by the names its bridge takes. The
+names are tried in tiers, and a tier with a single port is the answer:
+
+| Programmer | First | Then |
+|---|---|---|
+| `--stk500` | an Arduino's ATmega16U2: `cu.usbmodem*`, `ttyACM*` | a clone's CH340 or CP210x: `cu.wchusbserial*`, `cu.usbserial*`, `cu.SLAB_USBtoUART*`, `ttyUSB*` |
+| `--esp` | a CP210x or CH340: `cu.usbserial*`, `cu.SLAB_USBtoUART*`, `cu.wchusbserial*`, `ttyUSB*` | a native USB port: `cu.usbmodem*`, `ttyACM*` |
+
+Two ports in one tier are named, and nothing is written: the device has
+to be given. So an Uno and an ESP32 board plugged in together are each
+found, but two of either are not.
+
+An ELF with no programmer named takes its machine's: an AVR program goes
+through Optiboot (`--stk500 serial:auto`), an Xtensa one through the
+ESP32's ROM (`--esp serial:auto`). `--board=BOARD` names it the same way:
+`uno` and `nano` for Optiboot, `esp32-devkit` for the ROM
+([Boards](../boards.md)).
+
+```sh
+embcc --board=uno blink.c -o blink.elf
+embflash blink.elf --verify --console 5      # Optiboot, at the Uno's port
+```
+
 ## A serial bootloader: --stk500
 
 `--stk500 serial:DEV[@BAUD]` takes `--gdb`'s place for an AVR part with a
@@ -105,9 +137,13 @@ The baud rate is 115200 when left out; older Arduino bootloaders take 57600.
    | ATmega328P | `1E 95 0F` | 32 KiB | 128 B | 512 B |
    | ATmega328 | `1E 95 14` | 32 KiB | 128 B | 512 B |
    | ATmega328PB | `1E 95 16` | 32 KiB | 128 B | 512 B |
+   | ATmega1280 | `1E 97 03` | 128 KiB | 256 B | 4 KiB |
+   | ATmega2560 | `1E 98 01` | 256 KiB | 256 B | 8 KiB |
 
    Any other signature is refused. An image that reaches the bootloader
-   (0x7E00 on these parts) is refused before anything is written.
+   (0x7E00 on the 328 parts) is refused before anything is written. The
+   Arduino Mega 1280's ATmegaBOOT speaks version 1 at 57600; the Mega
+   2560's bootloader speaks version 2 ([below](#stk500-version-2---stk500v2)).
 4. **Pages.** Every page the image touches is written whole. The bytes of
    the page the image does not give are the erased `0xff`, and pages it
    does not touch keep their contents. `--verify` reads every written page
@@ -117,6 +153,24 @@ The baud rate is 115200 when left out; older Arduino bootloaders take 57600.
    open port: reopening the port resets an Uno and starts the program over.
    `--run`, `--monitor`, `--entry` and `--vector-table` belong to `--gdb`
    and are refused here.
+
+### STK500 version 2: --stk500v2
+
+`--stk500v2 serial:DEV[@BAUD]` is the same programming through the
+Arduino Mega 2560's bootloader, which speaks Atmel's AVR068: a message is
+`0x1b`, a sequence number, a 16-bit size, `0x0e`, the body and the xor of
+all of it, and the answer echoes the number. `embflash` signs on (up to
+ten times while the bootloader starts), enters programming mode, reads
+the signature byte by byte, and for every page the image touches loads
+its word address (bit 31 set past 64K words, as avrdude sends it) and
+programs it, 256 bytes; `--verify` reads them back. Leaving programming
+mode starts the program. 115200 baud when left out.
+
+An ELF whose `e_flags` name the avr6 core (an ATmega2560 program) goes to
+`--stk500v2` by itself, and an avr51 one (the ATmega1280) to `--stk500`
+at 57600; `--board=mega2560` is `--stk500v2`. It has been tested against
+`tests/golden/embflash/fakestk500v2.py`, a model written from AVR068, and
+not yet against a board.
 
 ## The Espressif ROM: --esp
 
@@ -166,10 +220,42 @@ esptool's default. `@921600` is faster where the USB adapter carries it;
    ROM. A `--ram` load goes back to 115200 before `MEM_END`, so the program
    starts at the rate a cold boot gives it.
 
-On an ESP32-D0WD-V3 board with a CP2102, 256 KiB went in 28.9 s at
-115200 (9 KiB/s), 9.4 s at 460800 (27 KiB/s) and 6.5 s at 921600
-(39 KiB/s), each verified. Past 460800 the time is mostly the ROM writing
-the flash, one 1024-byte block per answer.
+Steps 4 and 5 go through embflash's flasher stub unless `--no-stub` is
+given ([below](#the-flasher-stub)). Through the ROM alone, on an
+ESP32-D0WD-V3 board with a CP2102, 256 KiB went in 28.9 s at 115200
+(9 KiB/s), 9.4 s at 460800 (27 KiB/s) and 6.5 s at 921600 (39 KiB/s),
+each verified. Past 460800 the time is mostly the ROM writing the flash,
+one 1024-byte block per answer.
+
+### The flasher stub
+
+A program of 3.5 KiB, `tools/embflash/esp32stub.c`, built by EmbCC and
+carried in `embflash` as bytes, is loaded into RAM through the ROM (after
+the flash is attached and the rate set) and takes the line over. Its
+packets are the ROM's, and it adds:
+
+- **16 KiB blocks**, so a block's answer is waited for a sixteenth as often.
+- **Compressed blocks**, each in LZ4's block format on its own.
+  `--no-compress` sends them as they are.
+- **A streamed read**: 4 KiB frames, eight in flight, each acknowledged,
+  then the stub's MD5 of them, a piece of 256 KiB at a time. A piece with a
+  short frame or a different MD5 is read again, up to three times.
+- **Its own MD5** of a range, for `--verify`.
+- **Erasing**: `--erase-flash` erases the whole chip and `--erase-region
+  ADDR SIZE` whole 4 KiB sectors, waiting for the flash to finish.
+
+The flash is written with the ROM's own routines, the ones its loader
+uses, at addresses read off the chip. On the board, at 921600:
+
+| | The ROM | The stub |
+|---|---|---|
+| 256 KiB of random bytes | 6.5 s | 5.9 s |
+| 1 MiB of text | 27 s or so | 11.9 s, 98 KiB sent |
+| 300 KiB of program, 4000 functions | 7.5 s | 5.8 s, 214 KiB sent |
+| the whole 4 MiB read back | 91 s | 58 s (70 KiB/s) |
+
+`--no-stub` keeps the ROM's loader for all of it: the stub is the newer
+path, and the ROM's is the one esptool's `--no-stub` takes.
 
 ### Reading the flash: --read
 
@@ -178,14 +264,14 @@ writing it, as esptool's `read-flash` does. `SIZE` is a number of bytes,
 with `K` or `M` for KiB and MiB, or `all` for the rest of the flash from
 `ADDR`.
 
-- **The reads.** `READ_FLASH_SLOW`, the ROM's own read, 64 bytes a request.
-  A reply the line loses is asked again, after half a second, and the
-  count of those is printed.
-- **The check.** The ROM's MD5 of the whole range is compared with the
-  bytes received. A difference fails the run and no file is written.
-- **The speed.** On the board, 25 KiB/s at 460800 and 45 KiB/s at 921600:
-  all 4 MiB in 91 s. The 64-byte limit is the ROM's, and a flasher stub in
-  RAM would read faster.
+- **The reads.** Through the stub, the streamed read above. With
+  `--no-stub`, `READ_FLASH_SLOW`, the ROM's own read, 64 bytes a request;
+  a reply the line loses is asked again after half a second.
+- **The check.** Each piece against the stub's MD5 of what it sent, and
+  then the whole range against the MD5 of the flash, read again. A
+  difference fails the run and no file is written.
+- **The speed.** At 921600, 70 KiB/s through the stub (the line's rate,
+  about), 45 KiB/s through the ROM: all 4 MiB in 58 s or 91 s.
 
 ```sh
 # the whole flash, as a backup before the first write
@@ -293,12 +379,14 @@ with an error is reported with that error.
   board (revision v3.1, 4 MiB of flash, a CP2102 bridge): an ELF made into
   the image and booted from 0x1000, an ELF run from RAM, and 28 KiB written
   and verified in 7 s.
-- `--stk500` knows the ATmega328 family only. STK500 version 2, which the
-  Arduino Mega's bootloader speaks, is not implemented.
+- `--stk500` and `--stk500v2` know the ATmega328 family and the Mega's
+  ATmega1280 and ATmega2560. EEPROM, fuses and lock bits are not written.
+  `--stk500v2` has been tested against a model only.
 - `--esp` knows the ESP32 only and assumes 4 MiB of flash and DIO at
-  40 MHz. The flasher stub, compression, ESP-IDF's
-  app images and partition table (an IDF program needs IDF's bootloader),
-  PSRAM, and other chips (S2, S3, C3...) are not implemented.
+  40 MHz. ESP-IDF's app images and partition table (an IDF program needs
+  IDF's bootloader), PSRAM, and other chips (S2, S3, C3...) are not
+  implemented. The stub runs at the rate the ROM was set to: a CP2102
+  carries 921600 at most.
 - Option bytes, mass erase and read-out protection are server-specific.
   Reach them with `--monitor`.
 - The transports need POSIX sockets and termios. Elsewhere `embflash`

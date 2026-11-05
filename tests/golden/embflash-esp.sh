@@ -77,7 +77,7 @@ EOF
 read() {
     name=$1; mopts=$2; shift 2
     rm -f "$out/$name.port"
-    python3 $here/fakeesprom.py "$out/$name.port" "$out/$name.dump" $mopts > "$out/$name.srv" 2>&1 &
+    python3 $here/fakeesprom.py "$out/$name.port" "$out/$name.dump" $mopts --stub tools/embflash/esp32stub.inc > "$out/$name.srv" 2>&1 &
     sp=$!
     i=0
     while [ ! -s "$out/$name.port" ] && [ $i -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
@@ -100,7 +100,7 @@ pattern() { # FILE ADDR LEN: FILE holds the --fill pattern's LEN bytes at ADDR
 flash() {
     name=$1; mopts=$2; shift 2
     rm -f "$out/$name.port"
-    python3 $here/fakeesprom.py "$out/$name.port" "$out/$name.dump" $mopts > "$out/$name.srv" 2>&1 &
+    python3 $here/fakeesprom.py "$out/$name.port" "$out/$name.dump" $mopts --stub tools/embflash/esp32stub.inc > "$out/$name.srv" 2>&1 &
     sp=$!
     i=0
     while [ ! -s "$out/$name.port" ] && [ $i -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
@@ -121,10 +121,34 @@ flash bin "" "$out/fw.bin" --base 0x1000 --verify
 [ $frc -eq 0 ] || { cat "$out/bin.log"; fail "bin: embflash exited $frc"; }
 [ $src -eq 0 ] || { cat "$out/bin.srv"; fail "bin: the ROM model saw a broken rule"; }
 region "$out/bin.dump" 0x1000 "$out/fw.bin" || fail "bin: the flash is not the image"
-grep -q "wrote 4 blocks of 1024 bytes to the ESP32's flash" "$out/bin.log" || fail "bin: $(cat "$out/bin.log")"
+grep -q "wrote 3256 bytes to the ESP32's flash through the stub" "$out/bin.log" || fail "bin: $(cat "$out/bin.log")"
 grep -q "verified (MD5)" "$out/bin.log" || fail "bin: no MD5 verification"
 grep -q "at 460800 baud" "$out/bin.log" || fail "bin: not at 460800 by default: $(cat "$out/bin.log")"
 grep -q "now at 460800 baud" "$out/bin.srv" || fail "bin: the ROM was not asked for 460800"
+
+# the ROM's own loader, --no-stub: 1 KiB blocks
+flash binrom "" "$out/fw.bin" --base 0x1000 --verify --no-stub
+[ $frc -eq 0 ] && [ $src -eq 0 ] || { cat "$out/binrom.log" "$out/binrom.srv"; fail "--no-stub: embflash $frc, model $src"; }
+region "$out/binrom.dump" 0x1000 "$out/fw.bin" || fail "--no-stub: the flash is not the image"
+grep -q "wrote 4 blocks of 1024 bytes to the ESP32's flash" "$out/binrom.log" || fail "--no-stub: $(cat "$out/binrom.log")"
+
+# the stub: a compressible image goes in fewer bytes, decoded by the model's
+# own LZ4 decoder; --no-compress sends it as it is
+python3 -c "
+import sys
+t = b''.join(b'line %05d: the quick brown fox jumps over the lazy dog\\n' % i for i in range(1200))
+open(sys.argv[1], 'wb').write(t)" "$out/text.bin"
+tsize=$(wc -c < "$out/text.bin" | tr -d ' ')
+flash lz "" "$out/text.bin" --base 0x20000 --verify
+[ $frc -eq 0 ] && [ $src -eq 0 ] || { cat "$out/lz.log" "$out/lz.srv"; fail "compressed: embflash $frc, model $src"; }
+region "$out/lz.dump" 0x20000 "$out/text.bin" || fail "compressed: the flash is not the image"
+sent=$(sed -n 's/.*through the stub at [0-9]* baud, \([0-9]*\) sent compressed.*/\1/p' "$out/lz.log")
+[ -n "$sent" ] && [ "$sent" -lt $((tsize / 2)) ] || fail "compressed: $sent of $tsize bytes sent: $(cat "$out/lz.log")"
+flash plain "" "$out/text.bin" --base 0x20000 --verify --no-compress
+[ $frc -eq 0 ] && [ $src -eq 0 ] || { cat "$out/plain.log" "$out/plain.srv"; fail "--no-compress: embflash $frc, model $src"; }
+region "$out/plain.dump" 0x20000 "$out/text.bin" || fail "--no-compress: the flash is not the image"
+grep -q ", $tsize sent," "$out/plain.log" || fail "--no-compress: $(cat "$out/plain.log")"
+echo "  the stub: $tsize bytes of text in $sent compressed, and as they are with --no-compress"
 
 rate=@921600; flash r921 "" "$out/fw.bin" --base 0x1000 --verify
 [ $frc -eq 0 ] && [ $src -eq 0 ] || { cat "$out/r921.log" "$out/r921.srv"; fail "@921600: embflash $frc, model $src"; }
@@ -172,14 +196,37 @@ read rdall "--fill" --read 0x3FF000 all "$out/rdall.bin"
 [ $frc -eq 0 ] && [ $src -eq 0 ] || { cat "$out/rdall.log"; fail "--read all: embflash $frc, model $src"; }
 pattern "$out/rdall.bin" 0x3FF000 4096 || fail "--read all: not the last 4 KiB"
 
-read rddrop "--fill --drop-read 5" --read 0 1K "$out/rddrop.bin"
+read rddrop "--fill --drop-read 5" --read 0 1K "$out/rddrop.bin" --no-stub
 [ $frc -eq 0 ] && [ $src -eq 0 ] || { cat "$out/rddrop.log"; fail "--read, a reply lost: embflash $frc, model $src"; }
 pattern "$out/rddrop.bin" 0 1024 || fail "--read, a reply lost: not the flash's bytes"
 grep -q "1 request asked again" "$out/rddrop.log" || fail "--read, a reply lost: $(cat "$out/rddrop.log")"
 
-read rdbad "--fill --corrupt-read 0x123" --read 0 1K "$out/rdbad.bin"
+read rdbad "--fill --corrupt-read 0x123" --read 0 1K "$out/rdbad.bin" --no-stub
 [ $frc -eq 2 ] && grep -q "do not have the flash's MD5" "$out/rdbad.log" || fail "--read, a byte changed: $(cat "$out/rdbad.log")"
 [ -e "$out/rdbad.bin" ] && fail "--read, a byte changed: the file was written"
+read rdbads "--fill --corrupt-read 0x1123" --read 0 8K "$out/rdbads.bin"
+[ $frc -eq 2 ] && grep -q "do not have the stub's MD5" "$out/rdbads.log" || fail "--read through the stub, a byte changed: $(cat "$out/rdbads.log")"
+[ -e "$out/rdbads.bin" ] && fail "--read through the stub, a byte changed: the file was written"
+read rdbig "--fill" --read 0x10000 100000 "$out/rdbig.bin"
+[ $frc -eq 0 ] && [ $src -eq 0 ] || { cat "$out/rdbig.log"; fail "--read through the stub: embflash $frc, model $src"; }
+pattern "$out/rdbig.bin" 0x10000 100000 || fail "--read through the stub: not the flash's bytes"
+
+# erasing, through the stub
+read erall "--fill" --erase-flash
+[ $frc -eq 0 ] && [ $src -eq 0 ] || { cat "$out/erall.log" "$out/erall.srv"; fail "--erase-flash: embflash $frc, model $src"; }
+python3 -c "import sys; sys.exit(open(sys.argv[1],'rb').read() != b'\xff' * (4 << 20))" "$out/erall.dump" ||
+    fail "--erase-flash: the flash is not all erased"
+read ereg "--fill" --erase-region 0x10000 0x2000
+[ $frc -eq 0 ] && [ $src -eq 0 ] || { cat "$out/ereg.log" "$out/ereg.srv"; fail "--erase-region: embflash $frc, model $src"; }
+python3 -c "
+import sys
+d = open(sys.argv[1], 'rb').read()
+want = bytes((i * 7 + 3) & 0xFF for i in range(256)) * (len(d) // 256)
+sys.exit(d[0x10000:0x12000] != b'\xff' * 0x2000 or d[:0x10000] != want[:0x10000] or d[0x12000:] != want[0x12000:])" "$out/ereg.dump" ||
+    fail "--erase-region: not 0x10000-0x12000 alone erased"
+"$EMBFLASH" --esp serial:/dev/null --erase-region 0x10010 0x1000 > "$out/eodd.log" 2>&1
+[ $? -eq 2 ] && grep -q "whole 4 KiB sectors" "$out/eodd.log" || fail "--erase-region off a sector: $(cat "$out/eodd.log")"
+echo "  the stub: a streamed read and its MD5, --erase-flash, --erase-region"
 
 read rdpast "" --read 0x3FF000 8K "$out/rdpast.bin"
 [ $frc -eq 2 ] && grep -q "beyond the ESP32's 4 MiB of flash" "$out/rdpast.log" || fail "--read past the flash: $(cat "$out/rdpast.log")"
@@ -295,6 +342,12 @@ PY
     [ "$want" = "$have" ] || fail "esp32boot.inc was built from another esp32boot.c: run tools/embflash/esp32boot.sh (and try it on a board)"
     EMBCC=$EMBCC EMBLD=$EMBLD EMBFLASH=$EMBFLASH sh tools/embflash/esp32boot.sh "$out/esp32boot.inc" > "$out/stub.log" 2>&1 ||
         fail "the boot stub does not build: $(cat "$out/stub.log")"
+    # the flasher stub likewise: its source and script, and it builds
+    want=$(sed -n 's/^#define ESP32STUB_SOURCE "\(.*\)"$/\1/p' tools/embflash/esp32stub.inc)
+    have=$(cat tools/embflash/esp32stub.c tools/embflash/esp32stub.ld | python3 -c "import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())")
+    [ "$want" = "$have" ] || fail "esp32stub.inc was built from another esp32stub.c or .ld: run tools/embflash/esp32stub.sh (and try it on a board)"
+    EMBCC=$EMBCC EMBLD=$EMBLD EMBFLASH=$EMBFLASH sh tools/embflash/esp32stub.sh "$out/esp32stub.inc" > "$out/fstub.log" 2>&1 ||
+        fail "the flasher stub does not build: $(cat "$out/fstub.log")"
     echo "  an ELF: its ESP32 image, to flash at 0x1000, to RAM and run with its console"
 fi
 

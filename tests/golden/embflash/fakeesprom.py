@@ -3,7 +3,7 @@
 
     fakeesprom.py PORTFILE DUMP [--magic 00f01d83] [--silent] [--ignore-syncs N]
                   [--corrupt-md5] [--deaf-above BAUD] [--fill] [--drop-read N]
-                  [--corrupt-read ADDR]
+                  [--corrupt-read ADDR] [--stub INC]
 
 Writes the pseudo-terminal's device path to PORTFILE and answers what the
 ESP32's ROM answers, in SLIP frames with its four status bytes: sync (several
@@ -33,9 +33,18 @@ a wrong digest. --fill starts the flash as byte i = (7 i + 3) mod 256 rather
 than erased; --drop-read N loses the answer to the Nth READ_FLASH_SLOW (from
 1), as the line can; --corrupt-read ADDR flips a bit of the byte at ADDR in
 what READ_FLASH_SLOW answers, but not in the flash the MD5 is of. A
-programmer that only read and hangs up ends it with 0."""
+programmer that only read and hangs up ends it with 0.
+
+--stub INC (tools/embflash/esp32stub.inc) models embflash's flasher stub:
+a MEM_END to its entry, after RAM loads that are its pieces byte for byte,
+starts it -- the greeting frame "EMBS" -- and from then on the stub's
+commands are answered as esp32stub.c answers them: blocks up to 16 KiB,
+LZ4-compressed blocks (FLASH_LZ_BEGIN/DATA, decoded here by a decoder of
+the model's own), the MD5 as 16 bytes, READ_FLASH streamed and
+acknowledged, ERASE_FLASH and ERASE_REGION."""
 import hashlib
 import os
+import re
 import pty
 import select
 import struct
@@ -44,6 +53,55 @@ import termios
 import time
 
 FLASH = 4 << 20
+
+
+def lz4_decode(src, cap):
+    """LZ4's block format (the model's own decoder): None for a bad block"""
+    out, i = bytearray(), 0
+    while i < len(src):
+        t = src[i]; i += 1
+        lit = t >> 4
+        if lit == 15:
+            while True:
+                if i >= len(src):
+                    return None
+                c = src[i]; i += 1; lit += c
+                if c != 255:
+                    break
+        if i + lit > len(src):
+            return None
+        out += src[i:i + lit]; i += lit
+        if i >= len(src):
+            break
+        if i + 2 > len(src):
+            return None
+        off = src[i] | src[i + 1] << 8; i += 2
+        if off == 0 or off > len(out):
+            return None
+        ml = t & 15
+        if ml == 15:
+            while True:
+                if i >= len(src):
+                    return None
+                c = src[i]; i += 1; ml += c
+                if c != 255:
+                    break
+        for _ in range(ml + 4):
+            out.append(out[-off])
+        if len(out) > cap:
+            return None
+    return bytes(out) if len(out) <= cap else None
+
+
+def stub_inc(path):
+    """the stub's entry and pieces, from esp32stub.inc"""
+    inc = open(path).read()
+    entry = int(re.search(r"ESP32STUB_ENTRY 0x([0-9a-f]+)u", inc).group(1), 16)
+    pieces = {}
+    for addr, n, k in re.findall(r"\{ 0x([0-9a-f]+)u, (\d+), g_esp32stub_(\d+) \}", inc):
+        body = re.search(r"g_esp32stub_%s\[\d+\] = \{(.*?)\};" % k, inc, re.S).group(1)
+        pieces[int(addr, 16)] = bytes(int(x, 16) for x in re.findall(r"0x([0-9a-f]{2})", body))
+    return entry, pieces
 
 
 def main(argv):
@@ -61,6 +119,9 @@ def main(argv):
     drop_read = int(opt("--drop-read", "0"))
     corrupt_read = int(opt("--corrupt-read", "-1"), 0)
     reads = 0
+    stub_entry, stub_pieces = stub_inc(opt("--stub")) if opt("--stub") else (None, None)
+    stub = False
+    wr = None  # the stub's open write: [address, end, next sequence, lz]
     rate = 115200  # the ROM's, at reset
     codes = {getattr(termios, f"B{r}"): r for r in (9600, 19200, 38400, 57600, 115200, 230400,
                                                       460800, 921600) if hasattr(termios, f"B{r}")}
@@ -159,6 +220,93 @@ def main(argv):
             rule(f"command 0x{cmd:02x}: size {size}, {len(data)} bytes")
         if host_rate() != rate:
             rule(f"command 0x{cmd:02x} sent at {host_rate()} baud; the ROM is at {rate}")
+        if stub:
+            if cmd == 0x08:
+                reply(cmd)
+            elif cmd in (0x02, 0xE0):
+                esize, nblk, bsize, off = struct.unpack("<IIII", data)
+                if off % 0x1000 or bsize > 16384 or off + esize > FLASH:
+                    reply(cmd, status=(1, 5))
+                    continue
+                lo, hi = off, (off + esize + 0xFFF) & ~0xFFF
+                flash[lo:hi] = b"\xff" * (hi - lo)
+                wr = [off, hi, 0, cmd == 0xE0]
+                reply(cmd)
+            elif cmd in (0x03, 0xE1):
+                if wr is None or (cmd == 0xE1) != wr[3]:
+                    rule(f"stub: 0x{cmd:02x} with no FLASH{'_LZ' if cmd == 0xE1 else ''}_BEGIN")
+                n, seq, ulen, _ = struct.unpack_from("<IIII", data)
+                block = data[16:]
+                if n != len(block) or seq != wr[2]:
+                    rule(f"stub: block {seq} of {len(block)} bytes ({n} said) where {wr[2]} was due")
+                sm = 0xEF
+                for c in block:
+                    sm ^= c
+                if sm != checksum & 0xFF:
+                    reply(cmd, status=(1, 7))
+                    continue
+                if cmd == 0xE1:
+                    out = lz4_decode(block, 16384)
+                    if out is None or len(out) != ulen:
+                        rule(f"stub: block {seq} does not decode to its {ulen} bytes")
+                    block = out
+                elif len(block) > 16384:
+                    rule(f"stub: a block of {len(block)} bytes, more than 16 KiB")
+                w = (len(block) + 3) & ~3
+                if wr[0] + w > wr[1]:
+                    rule(f"stub: a block past the erased region (0x{wr[0]:x} + {w})")
+                flash[wr[0]:wr[0] + w] = block.ljust(w, b"\xff")
+                wr[0] += w
+                wr[2] += 1
+                wrote = True
+                reply(cmd)
+            elif cmd == 0x13:
+                addr, n, _, _ = struct.unpack("<IIII", data)
+                dg = bytearray(hashlib.md5(bytes(flash[addr:addr + n])).digest())
+                if corrupt:
+                    dg[0] ^= 1
+                reply(cmd, data=bytes(dg))
+            elif cmd == 0xD0:
+                flash[:] = b"\xff" * FLASH
+                wrote = True
+                reply(cmd)
+            elif cmd == 0xD1:
+                off, n = struct.unpack("<II", data)
+                if off % 0x1000 or n % 0x1000:
+                    reply(cmd, status=(1, 5))
+                    continue
+                flash[off:off + n] = b"\xff" * n
+                wrote = True
+                reply(cmd)
+            elif cmd == 0xD2:
+                off, n, pkt, inflight = struct.unpack("<IIII", data)
+                reply(cmd)
+                sent = acked = 0
+                body = bytearray(flash[off:off + n])
+                if off <= corrupt_read < off + n:
+                    body[corrupt_read - off] ^= 1
+                reads += 1
+                while acked < n:
+                    if sent < n and sent - acked < pkt * inflight:
+                        k = min(pkt, n - sent)
+                        frm = bytes(body[sent:sent + k])
+                        os.write(master, b"\xc0" + frm.replace(b"\xdb", b"\xdb\xdd").replace(b"\xc0", b"\xdb\xdc") + b"\xc0")
+                        sent += k
+                        continue
+                    ack = frame()
+                    if len(ack) != 4:
+                        rule(f"stub: a READ_FLASH acknowledgement of {len(ack)} bytes")
+                    acked = struct.unpack("<I", ack)[0]
+                    if acked > sent:
+                        rule(f"stub: {acked} acknowledged, {sent} sent")
+                dg = hashlib.md5(bytes(flash[off:off + n])).digest()
+                os.write(master, b"\xc0" + dg.replace(b"\xdb", b"\xdb\xdd").replace(b"\xc0", b"\xdb\xdc") + b"\xc0")
+            elif cmd == 0x04:
+                wr = None
+                reply(cmd)
+            else:
+                rule(f"stub: unknown command 0x{cmd:02x}")
+            continue
         if cmd == 0x08:
             if data != b"\x07\x07\x12\x20" + b"\x55" * 32:
                 rule("a sync with the wrong pattern")
@@ -269,6 +417,17 @@ def main(argv):
             for load in ram:
                 if len(load[5]) != load[1]:
                     rule(f"RAM load at 0x{load[0]:x}: {len(load[5])} of {load[1]} bytes")
+            if stub_entry is not None and entry == stub_entry:
+                loaded = {load[0]: bytes(load[5]) for load in ram}
+                for a, b in stub_pieces.items():
+                    pad = b.ljust((len(b) + 3) & ~3, b"\0")
+                    if loaded.get(a) != pad:
+                        rule(f"the stub's piece at 0x{a:x} was not loaded as esp32stub.inc has it")
+                reply(cmd)
+                os.write(master, b"\xc0EMBS\xc0")
+                stub = True
+                ram = []
+                continue
             reply(cmd)
             with open(dump, "w") as f:
                 for load in ram:

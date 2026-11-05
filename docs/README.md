@@ -23,6 +23,8 @@ Start with the [overview](manual/overview.md) and
 | [Migrating from GCC](manual/migrating-from-gcc.md) | Switching a GCC build to EmbCC, and what differs |
 | [Targets](manual/targets.md) | Triples, `-m` options, data models, ABIs, predefined macros, object formats |
 | [Target list](manual/target-list.md) | Every `--target`, what it runs on, and its data model (generated) |
+| [Boards](manual/boards.md) | `--board=`: a development board's program, `<board.h>`, and putting it on the board |
+| [Board list](manual/board-list.md) | Every `--board`, its part and how it is programmed (generated) |
 | [What each target compiles](manual/limits.md) | 27 constructs on 25 targets: compiled, warned or refused, and the message (generated, checked by a test) |
 | [C language support](manual/c-language.md) | `-std=`, and the status of each C89–C23 feature |
 | [Implementation-defined behavior](manual/implementation-defined.md) | EmbCC's choices, in C17 Annex J.3 order |

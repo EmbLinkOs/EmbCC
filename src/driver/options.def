@@ -87,6 +87,7 @@ OPT(LANG, "--no-strict-aliasing", NULL, "-fno-strict-aliasing", "accepted; nothi
 
 /* ---- the target ------------------------------------------------------ */
 OPT(TARGET, "--target=",    "TARGET", NULL, "what to compile for (an unknown name lists them all)")
+OPT(TARGET, "--board=",     "BOARD", NULL, "a development board: its target, part and clock, its startup and runtime, and <board.h> (uno, nano, mega2560, esp32-devkit; --reference=boards lists them)")
 OPT(TARGET, "--cpu=",       "CPU",  "-mcpu=%", "the processor: cortex-m4, cortex-m0plus, ...")
 OPT(TARGET, "--fpu=",       "FPU",  "-mfpu=%", "the floating-point unit: fpv4-sp-d16, fpv5-d16, ...")
 OPT(TARGET, "--float-abi=", "ABI",  "-mfloat-abi=%", "soft, softfp or hard")

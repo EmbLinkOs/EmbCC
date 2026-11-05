@@ -506,7 +506,7 @@ embpack: tools/embpack/embpack.c
 # (QEMU, OpenOCD, pyOCD, J-Link's GDB server, the Black Magic Probe):
 # flash erased and programmed by the server's algorithm, RAM written,
 # verified, run (tools/embflash). ISO C, POSIX sockets and termios.
-embflash: tools/embflash/embflash.c tools/embflash/esp32boot.inc
+embflash: tools/embflash/embflash.c tools/embflash/esp32boot.inc tools/embflash/esp32stub.inc
 	$(CC) $(CFLAGS) -o $@ tools/embflash/embflash.c
 
 # embtrace -- what a program built with -finstrument-functions did: calls,
@@ -546,6 +546,7 @@ reference: embcc
 	./embcc --reference=options > docs/manual/options.md
 	./embcc --reference=warnings > docs/manual/warnings.md
 	./embcc --reference=targets > docs/manual/target-list.md
+	./embcc --reference=boards > docs/manual/board-list.md
 .PHONY: reference
 
 # embsim -- a simulator (Cortex-M, RISC-V, AVR): runs an image on a model of the board
@@ -1030,7 +1031,7 @@ RISCV_HF := riscv32-unknown-elf/ilp32f riscv32-unknown-elf/ilp32d \
 # ...and the soft-float ABI without the A extension (an ESP32-C3's rv32imc),
 # whose C library cannot hold the amo instructions of the others' locks
 RISCV_HF += riscv32-unknown-elf/noa riscv64-unknown-elf/noa
-RT_EMBEDDED_ALL := avr thumbv6m-none-eabi thumbv8m.base-none-eabi thumbv7m-none-eabi thumbv7em-none-eabi \
+RT_EMBEDDED_ALL := avr avr/avr6 thumbv6m-none-eabi thumbv8m.base-none-eabi thumbv7m-none-eabi thumbv7em-none-eabi \
                thumbv7em-none-eabihf thumbv8m.main-none-eabi \
                thumbv8m.main-none-eabihf armv7a-none-eabi armv7a-none-eabihf riscv32-unknown-elf \
                riscv64-unknown-elf $(RISCV_HF) mipsel-none-elf mips-none-elf loongarch64-unknown-elf tricore-none-elf \
@@ -1043,7 +1044,7 @@ FAMILY_RT_arm := thumbv6m-none-eabi thumbv8m.base-none-eabi \
                  thumbv8m.main-none-eabi thumbv8m.main-none-eabihf \
                  armv7a-none-eabi armv7a-none-eabihf
 FAMILY_RT_riscv := riscv32-unknown-elf riscv64-unknown-elf $(RISCV_HF)
-FAMILY_RT_avr := avr
+FAMILY_RT_avr := avr avr/avr6
 FAMILY_RT_mips := mipsel-none-elf mips-none-elf mips64el-none-elf \
                   mips64-none-elf
 FAMILY_RT_loongarch := loongarch64-unknown-elf
@@ -1172,10 +1173,13 @@ install-files:
 	    done; \
 	    [ -f $(BUILD)/libcxx/$$dir/libcxx.a ] && \
 	        cp $(BUILD)/libcxx/$$dir/libcxx.a $(LIBROOT)/$$triple/libcxx.a; \
+	    for f in $(BUILD)/libc/$$dir/board-*.o $(BUILD)/libc/$$dir/esp32-*.o \
+	             $(BUILD)/libc/$$dir/esp32.ld; do \
+	        [ -f $$f ] && cp $$f $(LIBROOT)/$$triple/; done; \
 	    case $$triple in *-linux-gnu) \
 	        cp lib/libc/os/linux/link.ld $(LIBROOT)/$$triple/link.ld ;; \
-	    avr) for f in $(BUILD)/libc/avr/crt*.o $(BUILD)/libc/avr/*.ld; do \
-	        [ -f $$f ] && cp $$f $(LIBROOT)/avr/; done ;; \
+	    avr|avr/avr6) for f in $(BUILD)/libc/$$dir/crt*.o $(BUILD)/libc/$$dir/*.ld; do \
+	        [ -f $$f ] && cp $$f $(LIBROOT)/$$triple/; done ;; \
 	    esac; \
 	    true; \
 	done

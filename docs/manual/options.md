@@ -70,6 +70,7 @@ EmbCC's own spellings come first. Where GCC spells the same thing differently, i
 | Option | What it does | Also accepted |
 |---|---|---|
 | `--target=TARGET` | what to compile for (an unknown name lists them all) |  |
+| `--board=BOARD` | a development board: its target, part and clock, its startup and runtime, and <board.h> (uno, nano, mega2560, esp32-devkit; --reference=boards lists them) |  |
 | `--cpu=CPU` | the processor: cortex-m4, cortex-m0plus, ... | `-mcpu=CPU` |
 | `--fpu=FPU` | the floating-point unit: fpv4-sp-d16, fpv5-d16, ... | `-mfpu=FPU` |
 | `--float-abi=ABI` | soft, softfp or hard | `-mfloat-abi=ABI` |
