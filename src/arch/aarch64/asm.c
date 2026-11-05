@@ -518,11 +518,69 @@ static void assemble_stmt(struct actx *a, char *st)
         (void)w2;
         if (rm >= 0) a64_cmp_reg(a->out, rn, rm, w1 ? 4 : 8);
         else {
-            /* `cmp rn, #k` is `subs xzr, rn, #k`, which the existing
-             * sub-immediate encoder gives with xzr as its result. */
+            /* `cmp rn, #k` is `subs xzr, rn, #k`: SUBS, which sets the
+             * flags and whose 31 is xzr. (SUB was used once: no flags,
+             * and its 31 is sp -- `cmp w0, #0` wrote the stack pointer.) */
             long v = imm(a, ops[0 + 1]);
-            if (!a->failed) a64_sub_imm(a->out, 31, rn, v, w1 ? 4 : 8);
+            if (!a->failed && !a64_cmp_imm(a->out, rn, v, w1 ? 4 : 8))
+                fail(a, "'cmp' immediate %ld does not fit 12 bits", v);
         }
+        return;
+    }
+    /* adds/subs rd, rn, #k | rm; cmn rn, #k | rm (adds zr); tst rn, rm */
+    if ((strcmp(mn, "adds") == 0 || strcmp(mn, "subs") == 0) && n == 3) {
+        int w1 = 0, w2 = 0, w3 = 0;
+        int rd = gpr(a, ops[0], &w1);
+        int rn = gpr(a, ops[1], &w2);
+        int rm = maybe_gpr(ops[2], &w3);
+        if (a->failed) return;
+        (void)w2; (void)w3;
+        if (rm >= 0) {
+            a64_addsub_s_reg(a->out, mn[0] == 's', rd, rn, rm, w1 ? 4 : 8);
+        } else {
+            long v = imm(a, ops[2]);
+            if (!a->failed &&
+                !a64_addsub_s_imm(a->out, mn[0] == 's', rd, rn, v, w1 ? 4 : 8))
+                fail(a, "'%s' immediate %ld does not fit 12 bits", mn, v);
+        }
+        return;
+    }
+    if (strcmp(mn, "cmn") == 0 && n == 2) {
+        int w1 = 0, w2 = 0;
+        int rn = gpr(a, ops[0], &w1);
+        int rm = maybe_gpr(ops[1], &w2);
+        if (a->failed) return;
+        (void)w2;
+        if (rm >= 0) {
+            a64_addsub_s_reg(a->out, 0, 31, rn, rm, w1 ? 4 : 8);
+        } else {
+            long v = imm(a, ops[1]);
+            if (!a->failed && !a64_addsub_s_imm(a->out, 0, 31, rn, v, w1 ? 4 : 8))
+                fail(a, "'cmn' immediate %ld does not fit 12 bits", v);
+        }
+        return;
+    }
+    if ((strcmp(mn, "tbz") == 0 || strcmp(mn, "tbnz") == 0) && n == 3) {
+        int w1 = 0;
+        int rt = gpr(a, ops[0], &w1);
+        if (a->failed) return;
+        long bit = imm(a, ops[1]);
+        long v = imm(a, ops[2]);
+        if (a->failed) return;
+        if (bit < 0 || bit > (w1 ? 31 : 63)) {
+            fail(a, "'%s' bit %ld is not in the register", mn, bit);
+            return;
+        }
+        if (v & 3 || v < -32768 || v > 32764) {
+            fail(a, "'%s' offset %ld is not a multiple of 4 within 32KB",
+                 mn, v);
+            return;
+        }
+        a64_word(a->out, (mn[2] == 'n' ? 0x37000000UL : 0x36000000UL) |
+                         ((unsigned long)(bit >> 5) << 31) |
+                         ((unsigned long)(bit & 31) << 19) |
+                         (((unsigned long)(v >> 2) & 0x3fff) << 5) |
+                         (unsigned long)rt);
         return;
     }
     if (strcmp(mn, "ret") == 0 && n == 0) { a64_ret(a->out); return; }

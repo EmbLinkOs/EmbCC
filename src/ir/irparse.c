@@ -32,6 +32,7 @@
 #include "ir.h"
 
 #include <stdio.h>
+#include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -345,7 +346,7 @@ static void parse_ins(struct p *p, char *first, const char *rest)
             in->imm = strtol(word(p), NULL, 10);
             break;
         case IR_MOV: case IR_NEG: case IR_BNOT: case IR_BSWAP:
-        case IR_SQRT:
+        case IR_SQRT: case IR_CLZ: case IR_CTZ: case IR_POPCNT:
             in->a = vreg(p, word(p));
             break;
         case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV: case IR_MOD:
@@ -676,6 +677,13 @@ struct ir_unit *ir_parse(const char *file, char *text)
             for (const char *c = q + 1; *c && *c != '"'; c++) {
                 if (*c != '\\') { ob_ch(&b, *c); continue; }
                 c++;
+                if (*c == 'x' && isxdigit((unsigned char)c[1]) &&
+                    isxdigit((unsigned char)c[2])) {
+                    char hx[3] = { c[1], c[2], 0 };
+                    ob_ch(&b, (char)strtol(hx, NULL, 16));
+                    c += 2;
+                    continue;
+                }
                 ob_ch(&b, *c == 'n' ? '\n' : *c == 't' ? '\t' : *c);
             }
             /* ir_intern_string keeps the POINTER, so the bytes have to

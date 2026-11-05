@@ -44,11 +44,22 @@ On AArch64, ARM Cortex-M, RISC-V and AVR, EmbCC first substitutes the
 operands into the template text and then assembles the text with the
 same assembler that handles `.s` and `.S` files for that target (see
 [Assembly input](invoking.md#assembly-input)). On x86-64 the template is
-AT&T syntax and is read by a separate encoder that resolves each operand
-reference as it encodes the instruction; it is unrelated to the
-NASM-syntax assembler used for `.asm` files ([embas](tools/embas.md)).
+AT&T syntax and is first read by the original encoder, which resolves
+each operand reference as it encodes the instruction (the vocabulary
+listed under [x86-64](#x86-64)); a template it does not take is
+substituted as GCC does it and assembled whole by the x86-64 AT&T
+assembler that also reads `.s` files (see [Full AT&T syntax](#full-att-syntax)).
+Both are unrelated to the NASM-syntax assembler used for `.asm` files
+([embas](tools/embas.md)).
 On MIPS32 the operands are substituted the same way, and the text is
 assembled by the same MIPS32 assembler that reads `.s` and `.S` files.
+
+A template that defines a label -- `1:` with `1b`/`1f`, or a named one
+-- is assembled whole by the file assembler on every target but x86-64,
+so it may branch within itself: a loop, a skip. Its labels are its own
+(two templates may both use `1:`); a branch to a symbol outside it, a
+second section, and an alignment wider than an instruction are refused,
+since its bytes land at an unknown place in the function.
 
 A template is assembled only when its function is emitted. An `asm`
 statement in a function that is never emitted, such as an unused
@@ -123,11 +134,16 @@ long add_named(long a, long b)
 |---|---|
 | `volatile` | Accepted, also spelled `__volatile__` and `__volatile`. It changes nothing: EmbCC treats every `asm` statement as volatile. |
 | `inline` | Not accepted in C: `expected '(' after asm before 'inline'`. |
-| `goto` | Not supported; refused with the diagnostic below. |
+| `goto` | Supported on every target. The fourth `:` lists the C labels; the template names them as `%l[name]` or `%lN`, N counting the outputs, the inputs and then the labels, as in GCC. Outputs may be given and hold on every path. |
 
-```text
-`asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
-```
+`asm goto` is lowered without anything the optimizer has to be taught:
+each label operand becomes a label of the template's own, where a short
+stub sets a hidden selector register (an extra output) and branches to
+the template's end; after the asm, the selector picks the C label with an
+ordinary branch. A taken branch therefore costs a few instructions more
+than in GCC, and the C labels' code is never mistaken for unreachable.
+The stubs use numeric labels from 900 up, which a template should not
+define itself.
 
 ### Output operands
 
@@ -571,7 +587,7 @@ __asm__(".global _start\n"
 | `x86_64-apple-darwin` | a block with a label or a symbol reference is refused (below) |
 | `aarch64-apple-darwin` | directives and data only, and a block with a label or a symbol reference is refused (below) |
 | `x86_64-windows-gnu` | a block with a label or a symbol reference is refused (below) |
-| C++ (any target) | refused: `file-scope asm in C++ is not supported yet` |
+| C++ (any target) | as in C: the block goes to the C the C++ front end writes, and is assembled as a C unit's on that target |
 
 On Apple arm64, an instruction in a file-scope block is refused, whatever
 its mnemonic, because the Mach-O writer takes no relocation type from an
@@ -584,13 +600,14 @@ file-scope asm instruction "ret": EmbCC assembles a block's instructions on x86-
 A block written as data (`.byte`, `.long`, `.quad`, labels and the
 directives above) assembles there.
 
-On Darwin and Windows targets the bytes of a block would be emitted
-without its symbols and relocations, so a block with any label or symbol
-reference is refused:
+On Darwin and Windows a block's labels are symbols too (`.globl` ones
+external; on Darwin a C function `f` is the label `_f`), and its calls are
+relocations. Windows takes its `.quad` and `.long` fields as relocations
+as well. Darwin cannot: the block is in `__text`, and macOS links no
+absolute address there, so an address field is refused:
 
 ```text
-a file-scope asm block with labels or symbol references is not supported for a Darwin target yet: its bytes would be emitted but its symbols and relocations dropped
-a file-scope asm block with labels or symbol references is not supported for a Windows target yet
+an address in a file-scope asm block is not supported for a Darwin target: the block is in __text, where macOS links no absolute address (a text relocation); define the table in C
 ```
 
 ### On Cortex-M, RISC-V, MIPS32 and AVR
@@ -842,9 +859,42 @@ hardware; bind them with the fixed-register constraints (`a`, `b`, `c`,
 | `mov %%ax, %%SEG` | segment register (`es`, `cs`, `ss`, `ds`, `fs`, `gs`) |
 | `mov $IMM, %%ax` | 16-bit immediate |
 
-There is no `movl`, `movb`, `movw`, `lea`, `xchg`, `lock`, `test`,
-`jmp`, `jcc`, `call`, `ret`, `ud2` or `int3`, and no memory operand for
-the arithmetic instructions.
+What this vocabulary does not have -- `movl`, `lea`, `xchg`, `lock`,
+`test`, `jmp`, `jcc`, labels, memory operands with an index -- goes to
+the full assembler below.
+
+### Full AT&T syntax
+
+A template the vocabulary above does not take is assembled in GNU as's
+own AT&T syntax, with GCC's operand rules:
+
+- `%N` and `%[name]` name the operand's register at the width of its C
+  type (`%eax` for an `int`, `%rax` for a `long`); the modifiers `%bN`,
+  `%hN`, `%wN`, `%kN` and `%qN` give the 8-bit low, 8-bit high, 16-, 32-
+  and 64-bit names; an `x` operand is `%xmmN`;
+- an `m` operand is `(%reg)`, the register holding its address, so
+  `lock cmpxchgl %2, %1` with `"+m"(*p)` addresses `*p`;
+- a constant operand is `$N`, and `%cN` is `N`; `%=` is a number unique
+  to the statement; `%%` is `%`;
+- the instructions are the integer set (`mov` in every form, `movzx` and
+  `movsx` (`movzbl`, `movslq`, ...), `lea`, the ALU group, `test`, `inc`,
+  `dec`, `neg`, `not`, `mul`, `imul` in all three forms, `div`, `idiv`,
+  the shifts and rotates with `shld`/`shrd`, `push`, `pop`, `xchg`,
+  `cmpxchg`, `cmpxchg8b`/`16b`, `xadd`, `bsf`, `bsr`, `popcnt`, `lzcnt`,
+  `tzcnt`, `bt`/`bts`/`btr`/`btc`, `bswap`, `setcc`, `cmovcc`), control
+  flow (`jmp`, `jcc`, `call`, `ret`, indirect `*%reg` / `*mem`), the
+  prefixes `lock`, `rep`, `repe`, `repne`, the string instructions, port
+  I/O, the system instructions (`lgdt` ... `xrstor64`, `rdrand`,
+  `wrfsbase`, control and debug registers, segment registers), and SSE
+  and SSE2 scalar and packed arithmetic, moves, logic, comparisons,
+  conversions, shuffles and shifts;
+- every addressing mode: `disp(base, index, scale)`, `(%rip)`, a segment
+  override (`%fs:0x28`), an absolute address;
+- labels (`1:` with `1b`/`1f`, or named): the template is assembled whole,
+  jumps two bytes where they reach.
+
+Its encodings are llvm-mc's, instruction for instruction
+(`tests/golden/x86-att-asm.sh`).
 
 The port I/O instructions ignore their operands: `inb $0x60, %%al` is
 encoded as `inb %dx, %al`. Use the `"a"` and `"Nd"` (or `"d"`)
@@ -2673,18 +2723,14 @@ In summary, compared with GCC:
   under [Directives in a template](#directives-in-a-template), can appear
   in a template, and a function template cannot refer to a symbol on any
   target.
-- `asm goto`, `asm inline` and flag-output constraints are not
-  supported. Flag outputs are not always refused (see [x86-64](#x86-64)
+- `asm inline` and flag-output constraints are not supported. Flag outputs are not always refused (see [x86-64](#x86-64)
   and [AArch64](#aarch64)).
 - `m` outputs do not work (except on MIPS32, Xtensa, SPARC and PowerPC,
   where the operand's register holds the address), and `m` inputs are a
   register holding the
   address rather than a memory reference.
 - On x86-64 and RISC-V, `i` and `n` give a register, not an immediate.
-- Labels inside a function template are supported only for the x86-64
-  `leaq Nf(%%rip)` form and as numeric labels (`1:`, `1b`) on Xtensa,
-  TriCore, SPARC, PowerPC, RX and ColdFire;
-  elsewhere branches use numeric displacements.
+- Labels inside a function template are supported on every target.
 - Register variables are not supported on ARM Cortex-M and RISC-V, are
   limited to x0-x11 and x13-x15 on AArch64, and are not supported at
   file scope on any target.

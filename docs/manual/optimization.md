@@ -189,6 +189,51 @@ while the code generator works at level 0.
 The pass options described below are independent of their position on
 the command line: `-fno-sccp -O2` and `-O2 -fno-sccp` are the same.
 
+## Link-time optimization
+
+`--lto` (GCC: `-flto`) optimizes a program across its units. At a
+compile (`-c`), the object is written as always, with its code, and
+also holds the unit's C in a section `.embcc.lto`. That C is
+preprocessed, and for a C++ unit it is what the C++ front end made. The
+section is `SHF_EXCLUDE` (`__DWARF,__embcc_lto` on Darwin), so a link
+without `--lto` drops it and the object links as it is.
+
+A link with `--lto` reads that section back from every object named on
+the link line and compiles the units again as one program:
+
+1. Each unit goes through the front end and IR generation again, with
+   its warnings off, because they were given when it was compiled.
+2. The units are merged. Each external declaration is the definition
+   another unit gives. A `static` name that two units both use is
+   renamed `NAME.lto.N`.
+3. Every function and variable with external linkage becomes `static`
+   when nothing outside the merged units names it. EmbCC reads the
+   undefined symbols of the link's other objects and archives, and of
+   its own C library and runtime. `main`, the entry point, weak
+   symbols, anything `used`, a constructor or destructor, and a
+   symbol with an `alias`, an asm label, a section or a visibility
+   keep their linkage. Nothing becomes static for `-shared`.
+4. The optimizer runs over the whole program, at the link's `--opt`
+   level, so a call into another unit can be inlined. The unreachable
+   functions are dropped, as `static` ones are in one unit. One
+   backend then writes one object, and that object is linked in place
+   of the units it came from.
+
+```sh
+embcc --opt=speed --lto -c a.c -o a.o
+embcc --opt=speed --lto -c b.c -o b.o
+embcc --opt=speed --lto a.o b.o -o prog
+```
+
+`-flto=thin`, `=full`, `=auto` and `=N` all mean the same whole-program
+merge. `-fno-lto` turns it off, and `-ffat-lto-objects`,
+`-fno-fat-lto-objects`, `-fuse-linker-plugin` and `-flto-partition=` are
+accepted, since an `--lto` object always has its code. Members of an
+archive are linked as their code, not merged. A unit compiled with
+options that change its meaning (`-D`, `--std`) keeps them, because its
+C is already preprocessed and checked. The optimization level and the
+target are the link's.
+
 ## What each level enables
 
 | | `--opt=none` | `--opt=basic` | `--opt=speed` | `--opt=size` |
@@ -1044,5 +1089,5 @@ the command line.
 | `-fomit-frame-pointer`, `-fno-omit-frame-pointer` | Accepted, no effect. See [Frame pointer](#frame-pointer). |
 | `-ffunction-sections`, `-fdata-sections` | `--sections=functions`, `--sections=data`: a section per function and per object, for the linker's `--gc-sections`. See [Invoking](invoking.md#--sectionsfunctions---sectionsdata). |
 | `-ffast-math`, `-ffp-contract=...` | `--fast-math`, `--fp-contract=...`: accepted, no effect. `-fno-fast-math` is not accepted. |
-| `-flto` | Refused: `embcc: error: -flto is not supported; EmbCC would emit ordinary code and the flag's promise would not hold` |
+| `-flto`, `-flto=thin`, `-flto=full`, `-flto=auto`, `-flto=N` | `--lto`: see [Link-time optimization](#link-time-optimization). |
 | `__attribute__((optimize(...)))`, `hot`, `cold`, `flatten` | Accepted, no effect. The level applies to the whole compilation. |

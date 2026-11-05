@@ -68,10 +68,13 @@ void thumb_options_done(void)
      * -mfpu=vfpv3-d16 -mfloat-abi=hard: the unit every Cortex-A with an
      * FPU has. */
     if (target_arm_a32()) {
-        static const struct { const char *name; int ver, d32; } units[] = {
-            { "vfpv3-d16", 3, 0 }, { "vfpv3", 3, 1 }, { "vfp3", 3, 1 },
-            { "vfpv4-d16", 4, 0 }, { "vfpv4", 4, 1 }, { "vfp4", 4, 1 },
-            { NULL, 0, 0 }
+        static const struct { const char *name; int ver, d32, neon; } units[] = {
+            { "vfpv3-d16", 3, 0, 0 }, { "vfpv3", 3, 1, 0 }, { "vfp3", 3, 1, 0 },
+            { "vfpv4-d16", 4, 0, 0 }, { "vfpv4", 4, 1, 0 }, { "vfp4", 4, 1, 0 },
+            /* NEON's unit, which is VFPv3 (VFPv4 with -vfpv4) and D32 */
+            { "neon", 3, 1, 1 }, { "neon-vfpv3", 3, 1, 1 },
+            { "neon-fp16", 3, 1, 1 }, { "neon-vfpv4", 4, 1, 1 },
+            { NULL, 0, 0, 0 }
         };
         int hfa = target_thumb_hf_name(), unit = -1;
         const char *a = g_arm_float_abi ? g_arm_float_abi : hfa ? "hard" : "soft";
@@ -88,9 +91,9 @@ void thumb_options_done(void)
         if (named && unit < 0)
             diag_fatal(NULL, 0, "%s is not supported on %s: EmbCC "
                        "emits VFPv3 or VFPv4 (--fpu=vfpv3-d16, vfpv3, "
-                       "vfpv4-d16, vfpv4) there, and no NEON (Advanced SIMD) "
-                       "instruction", opt_said("-mfpu=", u),
-                       target_triple_now());
+                       "vfpv4-d16, vfpv4) there, or NEON's (neon, "
+                       "neon-vfpv3, neon-fp16, neon-vfpv4)",
+                       opt_said("-mfpu=", u), target_triple_now());
         if (!strcmp(a, "soft"))
             return;                    /* no FPU instructions, as GCC reads it */
         if (!named)
@@ -101,12 +104,15 @@ void thumb_options_done(void)
         target_set_thumb_fpu(1);
         target_set_thumb_fpu_dp(1);
         target_set_arm_vfp(units[unit].ver, units[unit].d32);
+        target_set_arm_neon(units[unit].neon);
         return;
     }
     /* An -eabihf triple is shorthand for the part's FPU and the hard
      * convention; a flag that says otherwise wins, as with clang. */
     int hf = target_thumb_hf_name();
-    int m7 = g_arm_cpu && strcmp(g_arm_cpu, "cortex-m7") == 0;
+    int m7 = g_arm_cpu && (strcmp(g_arm_cpu, "cortex-m7") == 0 ||
+                           strcmp(g_arm_cpu, "cortex-m55") == 0 ||
+                           strcmp(g_arm_cpu, "cortex-m85") == 0);
     const char *hf_fpu = target_thumb_arch() >= 8 ? "fpv5-sp-d16"
                        : m7 ? "fpv5-d16" : "fpv4-sp-d16";
     const char *abi = g_arm_float_abi ? g_arm_float_abi : hf ? "hard" : "soft";
@@ -362,7 +368,7 @@ int thumb_target_option(const char *arg)
         if (strncmp(arg, "-march=", 7) == 0) {
             const char *plus = strchr(v, '+');
             size_t bl = plus ? (size_t)(plus - v) : strlen(v);
-            int arch, em = 0, base8 = 0;
+            int arch, em = 0, base8 = 0, v81 = 0, mve = 0;
             if ((bl == 7 && !strncmp(v, "armv6-m", 7)) ||
                 (bl == 8 && !strncmp(v, "armv6s-m", 8)))
                 arch = 6;
@@ -374,11 +380,14 @@ int thumb_target_option(const char *arg)
                 arch = 6, base8 = 1;
             else if (bl == 12 && !strncmp(v, "armv8-m.main", 12))
                 arch = 8;
+            else if (bl == 14 && !strncmp(v, "armv8.1-m.main", 14))
+                arch = 8, v81 = 1;
             else
                 diag_fatal(NULL, 0, "%s is not an architecture "
                            "EmbCC emits for a Cortex-M: armv6-m, "
                            "armv6s-m, armv7-m, armv7e-m, armv8-m.base, "
-                           "armv8-m.main", opt_said("-march=", v));
+                           "armv8-m.main, armv8.1-m.main",
+                           opt_said("-march=", v));
             for (const char *x = plus; x && *x; ) {
                 const char *e = strchr(x + 1, '+');
                 size_t n = e ? (size_t)(e - x) : strlen(x);
@@ -393,11 +402,26 @@ int thumb_target_option(const char *arg)
                     em = 1;
                 else if (n == 6 && !strncmp(x, "+nodsp", 6) && arch == 8)
                     em = 0;
+                /* MVE, which includes the DSP set: integer, or with
+                 * floating point (and the FPU it needs) */
+                else if (n == 4 && !strncmp(x, "+mve", 4) && v81)
+                    mve = mve > 1 ? mve : 1, em = 1;
+                else if (n == 7 && !strncmp(x, "+mve.fp", 7) && v81) {
+                    mve = 3, em = 1;
+                    if (!g_arm_march_fpu)
+                        g_arm_march_fpu = "fpv5-sp-d16";
+                } else if (n == 6 && !strncmp(x, "+nomve", 6) && v81)
+                    mve = 0;
+                else if (n == 7 && !strncmp(x, "+pacbti", 7) && v81)
+                    target_set_thumb_pacbti(1);
+                else if (n == 9 && !strncmp(x, "+nopacbti", 9) && v81)
+                    target_set_thumb_pacbti(0);
                 else
                     diag_fatal(NULL, 0, "%s: the extension '%.*s' "
                                "is not one EmbCC emits for that "
-                               "architecture (+fp, +fp.dp, +nofp, and +dsp "
-                               "or +nodsp on armv8-m.main)",
+                               "architecture (+fp, +fp.dp, +nofp, +dsp "
+                               "or +nodsp on armv8-m.main, and +mve, "
+                               "+mve.fp or +pacbti on armv8.1-m.main)",
                                opt_said("-march=", v), (int)n, x);
                 x = e;
             }
@@ -407,6 +431,8 @@ int thumb_target_option(const char *arg)
                 target_set_thumb_arch(arch);
                 target_set_thumb_em(em);
             }
+            target_set_thumb_v81(v81);
+            target_set_thumb_mve(mve);
             return 1;
         }
         if (strncmp(arg, "-mcpu=", 6) == 0) {
@@ -448,17 +474,27 @@ int thumb_target_option(const char *arg)
                 target_set_thumb_arch(7);
             if (!target_arm_a32() && !strcmp(v, "cortex-m33"))
                 target_set_thumb_arch(8);
+            /* ARMv8.1-M with MVE and its floating point, as clang's
+             * -mcpu=cortex-m55 and m85 have them */
+            int m55 = !strcmp(v, "cortex-m55") || !strcmp(v, "cortex-m85");
+            if (!target_arm_a32() && m55) {
+                target_set_thumb_arch(8);
+                target_set_thumb_v81(1);
+                target_set_thumb_mve(3);
+                target_set_thumb_pacbti(!strcmp(v, "cortex-m85"));
+            }
             if (!strcmp(v, "cortex-m3"))
                 target_set_thumb_em(0);
             else if (!strcmp(v, "cortex-m4") || !strcmp(v, "cortex-m7") ||
-                     !strcmp(v, "cortex-m33"))
+                     !strcmp(v, "cortex-m33") || m55)
                 target_set_thumb_em(1);
             else
                 diag_fatal(NULL, 0, "%s is not a part EmbCC knows: "
                            "it emits ARMv6-M (cortex-m0, m0plus, m1), "
                            "ARMv8-M Baseline (cortex-m23), ARMv7-M and "
-                           "ARMv7E-M (cortex-m3, m4, m7) and ARMv8-M "
-                           "Mainline (cortex-m33)", opt_said("-mcpu=", v));
+                           "ARMv7E-M (cortex-m3, m4, m7), ARMv8-M "
+                           "Mainline (cortex-m33) and ARMv8.1-M Mainline "
+                           "(cortex-m55, m85)", opt_said("-mcpu=", v));
             /* Kept for thumb_options_done: which unit the part's
              * -eabihf name implies depends on which part it is. */
             g_arm_cpu = v;

@@ -26,7 +26,15 @@ extern "C" {
 #define L_tmpnam 1024
 #define TMP_MAX 308915776
 #else
+#if __SIZEOF_POINTER__ < 8
+/* a microcontroller's (every 32- and 16-bit target EmbCC has is one): a
+ * stream's buffer is RAM counted in kilobytes -- a Cortex-M0 may have 16,
+ * and stdin's and stdout's at 4096 each took half of it -- so a line's
+ * worth, as newlib's small-memory builds keep */
+#define BUFSIZ 256
+#else
 #define BUFSIZ 4096
+#endif
 #define FOPEN_MAX 32
 #define FILENAME_MAX 4096
 #define L_tmpnam 32

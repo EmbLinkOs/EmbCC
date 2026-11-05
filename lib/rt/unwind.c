@@ -52,7 +52,12 @@
  * (make libc-emblinkos): its programs start with -nostartfiles, so
  * libgcc's unwinder, which crtbegin's frame registration feeds, would
  * find no tables -- and its linker script brackets .eh_frame for this. */
-#if defined(__linux__) || defined(__EMBCC_LINUX__) || defined(__EMBCC_RT_UNWIND)
+/* ...and RISC-V, MIPS and Xtensa, bare metal too: an EmbCC image there
+ * links no libgcc, and its .eh_frame is bracketed by EmbLD as Linux's
+ * is. */
+#if defined(__linux__) || defined(__EMBCC_LINUX__) || \
+    defined(__EMBCC_RT_UNWIND) || defined(__riscv) || defined(__mips__) || \
+    defined(__XTENSA__) || defined(__tricore__)
 
 typedef unsigned long uw_word;
 typedef long uw_sword;
@@ -72,6 +77,64 @@ typedef long uw_sword;
                                 * exception pointer */
 # define UW_LP1    1           /* rdx: and the selector */
 static const unsigned char uw_captured[] = { 3, 6, 12, 13, 14, 15 };
+#elif defined(__riscv)
+/* x0-x31 are DWARF 0-31 and f0-f31 32-63. The callee-saved: ra, s0-s1,
+ * s2-s11, and with an FPU fs0-fs1 and fs2-fs11 (f8, f9, f18-f27), whose
+ * values -- a double at RV32 -- are wider than a register here, so they
+ * travel in freg[] beside reg[] (UW_FREG0). */
+# define UW_NREG   64
+# define UW_RA     1
+# define UW_SP     2
+# define UW_LP0    10          /* a0 */
+# define UW_LP1    11          /* a1 */
+static const unsigned char uw_captured[] = {
+    1, 8, 9, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27
+};
+# if defined(__riscv_flen)
+#  define UW_FREG0 32
+static const unsigned char uw_fcaptured[] = {
+    8, 9, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27
+};
+#  define UW_NFCAPT ((int)(sizeof uw_fcaptured / sizeof uw_fcaptured[0]))
+# endif
+#elif defined(__XTENSA__)
+/* The windowed ABI: a0-a15 are DWARF 0-15, and a frame is described by
+ * its pc, its sp (a1) and its a0, the return address into its caller.
+ * Nothing else is needed or restorable: a frame's other registers come
+ * back from the window save areas (see the walk below). The landing pad
+ * reads a2 and a3 in its own window. */
+# define UW_NREG   16
+# define UW_RA     0
+# define UW_SP     1
+# define UW_LP0    2
+# define UW_LP1    3
+static const unsigned char uw_captured[] = { 0 };
+#elif defined(__tricore__)
+/* d0-d15 are DWARF 0-15 and a0-a15 16-31. CALL saves the caller's upper
+ * context (a10-a15, d8-d15, PSW and the PCXI link) in a context-save
+ * area, so a frame is its pc, its a11 and sp, its PCXI (the link to its
+ * caller's CSA) in column 33, and the CSA holding its own context in
+ * column 32, which a resume needs. The landing pad reads d2 and d3, the
+ * lower context, which RET does not touch. */
+# define UW_NREG   34
+# define UW_RA     27          /* a11 */
+# define UW_SP     26          /* a10 */
+# define UW_CSA    32
+# define UW_PCXI   33
+# define UW_LP0    2
+# define UW_LP1    3
+static const unsigned char uw_captured[] = { UW_RA, UW_PCXI, UW_CSA };
+#elif defined(__mips__)
+/* $0-$31 are DWARF 0-31. Soft float only (EmbCC's o32 and n64), so the
+ * callee-saved are all general: s0-s7, gp, fp and ra. */
+# define UW_NREG   32
+# define UW_RA     31
+# define UW_SP     29
+# define UW_LP0    4           /* a0 */
+# define UW_LP1    5           /* a1 */
+static const unsigned char uw_captured[] = {
+    31, 16, 17, 18, 19, 20, 21, 22, 23, 28, 30
+};
 #else
 # define UW_NREG   32
 # define UW_RA     30          /* x30, the link register */
@@ -94,6 +157,9 @@ struct uw_capture {
     uw_word sp;
     uw_word pc;
     uw_word lp0, lp1;
+#ifdef UW_FREG0
+    unsigned long long fsaved[UW_NFCAPT] __attribute__((aligned(8)));
+#endif
 };
 
 void __uw_capture(struct uw_capture *out);
@@ -146,6 +212,243 @@ __asm__(
 /*  mov %rsi,%rsp      */ ".byte 0x48,0x89,0xf4\n"
 /*  jmp *%rcx          */ ".byte 0xff,0xe1\n"
 ".size __uw_resume,.-__uw_resume\n"
+);
+#elif defined(__riscv)
+/* RISC-V has a real assembler here (src/as), so these are mnemonics.
+ * The buffer: the 13 callee-saved in uw_captured's order, sp, pc, lp0,
+ * lp1 at XLEN/8 each, then (an FPU) fs0-fs11 as eight bytes each, from
+ * offset 72 (RV32) or 136 (RV64). */
+# if __riscv_xlen == 64
+#  define UW_S "sd"
+#  define UW_L "ld"
+#  define UW_W 8
+#  define UW_FB 136
+# else
+#  define UW_S "sw"
+#  define UW_L "lw"
+#  define UW_W 4
+#  define UW_FB 72
+# endif
+# if defined(__riscv_flen) && __riscv_flen == 64
+#  define UW_FS "fsd"
+#  define UW_FL "fld"
+# else
+#  define UW_FS "fsw"
+#  define UW_FL "flw"
+# endif
+# define UW_STR_(x) #x
+# define UW_STR(x) UW_STR_(x)
+# define UW_GS(r, k) UW_S " " r ", " UW_STR(k) "*" UW_STR(UW_W) "(a0)\n"
+# define UW_GL(r, k) UW_L " " r ", " UW_STR(k) "*" UW_STR(UW_W) "(t0)\n"
+# define UW_FSV(r, k) UW_FS " " r ", " UW_STR(UW_FB) "+" #k "*8(a0)\n"
+# define UW_FLD(r, k) UW_FL " " r ", " UW_STR(UW_FB) "+" #k "*8(t0)\n"
+__asm__(
+".text\n"
+".globl __uw_capture\n"
+"__uw_capture:\n"
+UW_GS("ra", 0) UW_GS("s0", 1) UW_GS("s1", 2) UW_GS("s2", 3)
+UW_GS("s3", 4) UW_GS("s4", 5) UW_GS("s5", 6) UW_GS("s6", 7)
+UW_GS("s7", 8) UW_GS("s8", 9) UW_GS("s9", 10) UW_GS("s10", 11)
+UW_GS("s11", 12) UW_GS("sp", 13) UW_GS("ra", 14)
+# ifdef __riscv_flen
+UW_FSV("fs0", 0) UW_FSV("fs1", 1) UW_FSV("fs2", 2) UW_FSV("fs3", 3)
+UW_FSV("fs4", 4) UW_FSV("fs5", 5) UW_FSV("fs6", 6) UW_FSV("fs7", 7)
+UW_FSV("fs8", 8) UW_FSV("fs9", 9) UW_FSV("fs10", 10) UW_FSV("fs11", 11)
+# endif
+"ret\n"
+".globl __uw_resume\n"
+"__uw_resume:\n"
+"mv t0, a0\n"
+UW_GL("ra", 0) UW_GL("s0", 1) UW_GL("s1", 2) UW_GL("s2", 3)
+UW_GL("s3", 4) UW_GL("s4", 5) UW_GL("s5", 6) UW_GL("s6", 7)
+UW_GL("s7", 8) UW_GL("s8", 9) UW_GL("s9", 10) UW_GL("s10", 11)
+UW_GL("s11", 12)
+# ifdef __riscv_flen
+UW_FLD("fs0", 0) UW_FLD("fs1", 1) UW_FLD("fs2", 2) UW_FLD("fs3", 3)
+UW_FLD("fs4", 4) UW_FLD("fs5", 5) UW_FLD("fs6", 6) UW_FLD("fs7", 7)
+UW_FLD("fs8", 8) UW_FLD("fs9", 9) UW_FLD("fs10", 10) UW_FLD("fs11", 11)
+# endif
+UW_GL("t1", 14) UW_GL("a0", 15) UW_GL("a1", 16) UW_GL("sp", 13)
+"jr t1\n"
+);
+#elif defined(__XTENSA__)
+/* ---- Xtensa: the walk is the register windows' ----------------------------
+ *
+ * A call8 rotates the window; when the 16 (or 32, or 64) physical
+ * registers run out the hardware spills the oldest frame's: its a0-a3
+ * into the 16 bytes below its CALLEE's sp, its a4-a7 into the 16 bytes
+ * at its caller's sp - 32. So once every older window is spilled, the
+ * stack holds a linked list: at sp - 16, the caller's a0 (its return
+ * address) and at sp - 12 its sp. That is how libgcc's Xtensa unwinder
+ * walks too; the .eh_frame FDEs say only where a function is and what
+ * its personality and LSDA are.
+ *
+ * The spill is a chain of calls deep enough to overflow every window
+ * (twelve call8 frames are 96 registers, more than any LX core has).
+ * The resume is the hardware's own underflow: with the windows spilled,
+ * a retw whose a0 is the landing pad (call8's window bits on top) finds
+ * its caller's window empty and reloads it from below ITS sp -- which is
+ * pointed at a four-word area holding the handler frame's a0, sp and the
+ * landing pad's a2 and a3. a4-a7 come from the frame's own save area,
+ * where its spill put them. */
+static void __attribute__((noinline)) uw_xt_spill(int n)
+{
+    if (n > 0)
+        uw_xt_spill(n - 1);
+    __asm__ volatile("" ::: "memory");      /* no tail call */
+}
+
+/* a return address's pc: a0's top two bits are the window increment;
+ * the code's own region supplies them */
+static uw_word uw_xt_pc(uw_word ra)
+{
+    return (ra & 0x3fffffffUL) | ((uw_word)&uw_xt_spill & 0xc0000000UL);
+}
+
+void __attribute__((noinline)) __uw_capture(struct uw_capture *out)
+{
+    uw_word sp, ra;
+    uw_xt_spill(12);
+    __asm__ volatile("mov %0, a1" : "=r"(sp));
+    __asm__ volatile("mov %0, a0" : "=r"(ra));
+    out->pc = uw_xt_pc(ra);                 /* in the caller */
+    out->saved[0] = ((volatile uw_word *)sp)[-4];   /* the caller's a0 */
+    out->sp = ((volatile uw_word *)sp)[-3];         /* and its sp */
+    out->lp0 = out->lp1 = 0;
+}
+
+void __attribute__((noinline, noreturn)) __uw_resume(struct uw_capture *r)
+{
+    static uw_word area[4];     /* static: this frame is abandoned */
+    uw_word a0;
+    area[0] = r->saved[0];
+    area[1] = r->sp;
+    area[2] = r->lp0;
+    area[3] = r->lp1;
+    a0 = (r->pc & 0x3fffffffUL) | 0x80000000UL;     /* as call8 left it */
+    uw_xt_spill(12);
+    __asm__ volatile("mov a0, %0\n"
+                     "mov a1, %1\n"
+                     "retw\n" : : "r"(a0), "r"(area + 4) : "memory");
+    for (;;) ;
+}
+#elif defined(__tricore__)
+/* ---- TriCore: the walk is the context-save areas' --------------------------
+ *
+ * Each CALL put the caller's upper context in a 16-word CSA -- PCXI (the
+ * link to the CSA before), PSW, a10, a11, d8-d11, a12-a15, d12-d15 --
+ * and pointed PCXI at it. So the CSA a frame's own call filled holds its
+ * sp, its return address and the link to its caller's: the stack of
+ * frames IS that list, and the .eh_frame FDEs say only where a function
+ * is and what its personality and LSDA are.
+ *
+ * The resume is RET's own: the CSAs above the handler's frame are made
+ * to return, one after another, through a stub that is only `ret` --
+ * each one's saved a11, which the RET before loads, is the stub's
+ * address -- and the last into the landing pad. So every abandoned CSA
+ * goes back on the free list as an ordinary return would put it, and
+ * the handler's frame gets its own upper context back. d2 and d3, the
+ * landing pad's, ride through untouched. */
+__asm__(".globl __uw_tc_ret\n"
+        "__uw_tc_ret:\n"
+        "ret\n"
+        /* the first RET of the chain, with a11 the stub's */
+        ".globl __uw_tc_go\n"
+        "__uw_tc_go:\n"
+        "movh.a a11, hi:__uw_tc_ret\n"
+        "lea a11, [a11]lo:__uw_tc_ret\n"
+        "dsync\n"
+        "ret\n");
+extern char __uw_tc_ret[], __uw_tc_go[];
+
+/* PCXI's link: segment in bits 19-16, the 64-byte unit in 15-0 */
+static uw_word *uw_tc_csa(uw_word link)
+{
+    link &= 0xfffffUL;
+    return link ? (uw_word *)(((link & 0xf0000UL) << 12) |
+                              ((link & 0xffffUL) << 6))
+                : (uw_word *)0;
+}
+
+/* The caller's state, copied out of the CSA its CALL here filled: that
+ * CSA goes back on the free list when this returns, and the next call
+ * reuses it. (Every CSA the walk reads after this one belongs to a frame
+ * that is still active, so it stays put.) */
+void __attribute__((noinline)) __uw_capture(struct uw_capture *out)
+{
+    uw_word pcxi;
+    const volatile uw_word *csa;
+    __asm__ volatile("dsync\n"
+                     "mfcr %0, pcxi" : "=d"(pcxi) : : "memory");
+    csa = uw_tc_csa(pcxi);
+    out->pc = (uw_word)__builtin_return_address(0);
+    out->saved[0] = csa[3];             /* the caller's a11 */
+    out->saved[1] = csa[0];             /* its PCXI */
+    out->saved[2] = 0;                  /* its own CSA: this one, gone */
+    out->sp = csa[2];
+    out->lp0 = out->lp1 = 0;
+}
+
+void __attribute__((noinline, noreturn)) __uw_resume(struct uw_capture *r)
+{
+    uw_word pcxi, *c, *target = (uw_word *)r->saved[2];
+    uw_word lp0 = r->lp0, lp1 = r->lp1;
+    __asm__ volatile("dsync\n"
+                     "mfcr %0, pcxi" : "=d"(pcxi) : : "memory");
+    c = uw_tc_csa(pcxi);
+    while (c && uw_tc_csa(c[0]) != target) {
+        c[3] = (uw_word)__uw_tc_ret;    /* its RET goes on returning */
+        c = uw_tc_csa(c[0]);
+    }
+    if (!c)
+        for (;;) ;
+    c[3] = r->pc;                       /* the last into the landing pad */
+    __asm__ volatile("mov d2, %0\n"
+                     "mov d3, %1\n"
+                     "ji %2\n"
+                     : : "d"(lp0), "d"(lp1), "a"(__uw_tc_go)
+                     : "d2", "d3", "memory");
+    for (;;) ;
+}
+#elif defined(__mips__)
+/* Mnemonics again (src/arch/mips/asm.c), delay slots by hand. The
+ * buffer: the 11 callee-saved in uw_captured's order, sp, pc, lp0, lp1,
+ * a word each. The resume jumps through t9, which a PIC landing pad
+ * would want too. */
+# if defined(__mips64)
+#  define UW_S "sd"
+#  define UW_L "ld"
+#  define UW_W 8
+# else
+#  define UW_S "sw"
+#  define UW_L "lw"
+#  define UW_W 4
+# endif
+# define UW_STR_(x) #x
+# define UW_STR(x) UW_STR_(x)
+# define UW_GS(r, k) UW_S " $" r ", " UW_STR(k) "*" UW_STR(UW_W) "($a0)\n"
+# define UW_GL(r, k) UW_L " $" r ", " UW_STR(k) "*" UW_STR(UW_W) "($t0)\n"
+__asm__(
+".text\n"
+".set push\n"
+".set noreorder\n"
+".globl __uw_capture\n"
+"__uw_capture:\n"
+UW_GS("ra", 0) UW_GS("s0", 1) UW_GS("s1", 2) UW_GS("s2", 3)
+UW_GS("s3", 4) UW_GS("s4", 5) UW_GS("s5", 6) UW_GS("s6", 7)
+UW_GS("s7", 8) UW_GS("gp", 9) UW_GS("fp", 10) UW_GS("sp", 11)
+"jr $ra\n"
+UW_GS("ra", 12)
+".globl __uw_resume\n"
+"__uw_resume:\n"
+"move $t0, $a0\n"
+UW_GL("ra", 0) UW_GL("s0", 1) UW_GL("s1", 2) UW_GL("s2", 3)
+UW_GL("s3", 4) UW_GL("s4", 5) UW_GL("s5", 6) UW_GL("s6", 7)
+UW_GL("s7", 8) UW_GL("gp", 9) UW_GL("fp", 10)
+UW_GL("t9", 12) UW_GL("a0", 13) UW_GL("a1", 14)
+"jr $t9\n"
+UW_GL("sp", 11)
+".set pop\n"
 );
 #else
 __asm__(
@@ -205,8 +508,10 @@ typedef int _Unwind_Reason_Code;
 struct _Unwind_Exception;
 typedef void (*_Unwind_Exception_Cleanup_Fn)(int, struct _Unwind_Exception *);
 
+/* the class is eight bytes everywhere, as <unwind.h> and libgcc have it:
+ * at 32 bits an unsigned long shifted every argument after it */
 struct _Unwind_Exception {
-    unsigned long exception_class;
+    unsigned long long exception_class;
     _Unwind_Exception_Cleanup_Fn exception_cleanup;
     unsigned long private_1;
     unsigned long private_2;
@@ -218,6 +523,9 @@ struct _Unwind_Exception {
  * landing pad's arguments and the address to resume at. */
 struct _Unwind_Context {
     uw_word reg[UW_NREG];
+#ifdef UW_FREG0
+    unsigned long long freg[32];   /* f0-f31, at their full width */
+#endif
     uw_word cfa;
     uw_word pc;                    /* the return address into this frame */
     uw_word func_start;
@@ -228,7 +536,7 @@ struct _Unwind_Context {
     int signal_frame;
 };
 
-typedef _Unwind_Reason_Code (*personality_fn)(int, int, unsigned long,
+typedef _Unwind_Reason_Code (*personality_fn)(int, int, unsigned long long,
                                               struct _Unwind_Exception *,
                                               struct _Unwind_Context *);
 
@@ -240,9 +548,17 @@ typedef _Unwind_Reason_Code (*personality_fn)(int, int, unsigned long,
  * as one is how a port to a third machine breaks silently. */
 static uw_word rd_u8(const unsigned char **p)  { return *(*p)++; }
 
+/* The tables are in the target's byte order: big-endian MIPS reads its
+ * fields most significant byte first. */
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+# define UW_BYTE(p, i, n) ((uw_word)(p)[(n) - 1 - (i)])
+#else
+# define UW_BYTE(p, i, n) ((uw_word)(p)[i])
+#endif
+
 static uw_word rd_u16(const unsigned char **p)
 {
-    uw_word v = (uw_word)(*p)[0] | ((uw_word)(*p)[1] << 8);
+    uw_word v = UW_BYTE(*p, 0, 2) | (UW_BYTE(*p, 1, 2) << 8);
     *p += 2;
     return v;
 }
@@ -251,18 +567,19 @@ static uw_word rd_u32(const unsigned char **p)
 {
     uw_word v = 0;
     int i;
-    for (i = 0; i < 4; i++) v |= (uw_word)(*p)[i] << (8 * i);
+    for (i = 0; i < 4; i++) v |= UW_BYTE(*p, i, 4) << (8 * i);
     *p += 4;
     return v;
 }
 
 static uw_word rd_u64(const unsigned char **p)
 {
-    uw_word v = 0;
+    unsigned long long v = 0;
     int i;
-    for (i = 0; i < 8; i++) v |= (uw_word)(*p)[i] << (8 * i);
+    for (i = 0; i < 8; i++)
+        v |= (unsigned long long)UW_BYTE(*p, i, 8) << (8 * i);
     *p += 8;
-    return v;
+    return (uw_word)v;
 }
 
 static uw_word rd_uleb(const unsigned char **p)
@@ -716,6 +1033,42 @@ static int run_cfi(const unsigned char *p, const unsigned char *end,
 /* Build the rule table for `pc` and apply it: `ctx` goes from
  * describing a frame to describing its CALLER. Returns 0 at the end of
  * the stack or on anything it cannot honour. */
+#if defined(__tricore__)
+/* the CSA list: a frame's PCXI links to the CSA holding its caller's a11,
+ * sp and PCXI */
+static int step(struct _Unwind_Context *ctx, const struct fde *f)
+{
+    const uw_word *up = uw_tc_csa(ctx->reg[UW_PCXI]);
+    (void)f;
+    if (!up || !ctx->reg[UW_RA])
+        return 0;
+    ctx->pc = ctx->reg[UW_RA];
+    ctx->reg[UW_RA] = up[3];
+    ctx->reg[UW_SP] = up[2];
+    ctx->reg[UW_PCXI] = up[0];
+    ctx->reg[UW_CSA] = (uw_word)up;
+    /* the frame's identity is its CSA, not its sp: a function that makes
+     * no frame (CALL saved everything it needed) shares its caller's sp,
+     * and phase two would stop at it */
+    ctx->cfa = (uw_word)up;
+    return 1;
+}
+#elif defined(__XTENSA__)
+/* the window save areas, as __uw_capture says: the caller's a0 and sp
+ * sit 16 and 12 bytes below this frame's sp */
+static int step(struct _Unwind_Context *ctx, const struct fde *f)
+{
+    uw_word sp = ctx->reg[UW_SP], ra = ctx->reg[UW_RA];
+    (void)f;
+    if (!ra || !sp)
+        return 0;
+    ctx->pc = uw_xt_pc(ra);
+    ctx->reg[UW_RA] = ((const uw_word *)sp)[-4];
+    ctx->reg[UW_SP] = ((const uw_word *)sp)[-3];
+    ctx->cfa = ctx->reg[UW_SP];
+    return 1;
+}
+#else
 static int step(struct _Unwind_Context *ctx, const struct fde *f)
 {
     struct cfi_state st, initial;
@@ -765,6 +1118,19 @@ static int step(struct _Unwind_Context *ctx, const struct fde *f)
         }
     }
 
+#ifdef UW_FREG0
+    /* the floating-point registers, from their own array: FLEN bytes at
+     * the place a rule names, where the uw_word above read only part */
+    for (i = UW_FREG0; i < UW_FREG0 + 32 && i < UW_NREG; i++)
+        if (st.reg[i].kind == RULE_OFFSET) {
+            const void *at = (const void *)(cfa + (uw_word)st.reg[i].off);
+# if __riscv_flen == 64
+            ctx->freg[i - UW_FREG0] = *(const unsigned long long *)at;
+# else
+            ctx->freg[i - UW_FREG0] = *(const unsigned int *)at;
+# endif
+        }
+#endif
     /* The return address column names where the caller's PC went. A rule
      * of UNDEFINED there is how the outermost frame says "stop" -- it is
      * what crt1 marks its entry point with, and following it would walk
@@ -783,6 +1149,7 @@ static int step(struct _Unwind_Context *ctx, const struct fde *f)
     }
     return 1;
 }
+#endif
 
 /* ---- the accessors a personality routine uses --------------------------- */
 
@@ -922,6 +1289,10 @@ static _Unwind_Reason_Code unwind_phase2(struct _Unwind_Context *ctx,
                 int i;
                 for (i = 0; i < UW_NCAPT; i++)
                     regs.saved[i] = w.reg[uw_captured[i]];
+#ifdef UW_FREG0
+                for (i = 0; i < UW_NFCAPT; i++)
+                    regs.fsaved[i] = w.freg[uw_fcaptured[i]];
+#endif
                 regs.sp = w.reg[UW_SP];
                 regs.pc = w.landing_pad;
                 regs.lp0 = w.lp0;
@@ -951,6 +1322,10 @@ static int start_context(struct _Unwind_Context *ctx,
         ctx->reg[i] = 0;
     for (i = 0; i < UW_NCAPT; i++)
         ctx->reg[uw_captured[i]] = cap->saved[i];
+#ifdef UW_FREG0
+    for (i = 0; i < UW_NFCAPT; i++)
+        ctx->freg[uw_fcaptured[i]] = cap->fsaved[i];
+#endif
     ctx->reg[UW_SP] = cap->sp;
     ctx->pc = cap->pc;
     ctx->cfa = cap->sp;

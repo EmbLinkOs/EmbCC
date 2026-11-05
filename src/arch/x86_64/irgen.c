@@ -4,6 +4,8 @@
 #include "../../ir/irgen_int.h"
 
 #include <ctype.h>
+#include <setjmp.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,6 +15,8 @@
 #include "../../sema/type.h"
 #include "../target.h"
 #include "../code.h"
+#include "../../as/gas.h"
+#include "att.h"
 
 /* va_arg of a struct (SysV 3.5.7): classified like an argument. When
  * every eightbyte finds a register of its class still unread, it is
@@ -87,21 +91,28 @@ static int va_struct_sysv(struct ir_func *fn, struct expr *e, int ap,
 
 /* va_arg on Microsoft x64: the list is a pointer walking eight-byte
  * slots -- the home area the prologue filled from rcx..r9, then the
- * caller's stack arguments. A variadic float is a double there. What
- * travels by reference on Windows (long double, __int128; structs are
- * refused in sema) is refused by name rather than read as a value. */
+ * caller's stack arguments. A variadic float is a double there. A
+ * structure of 1, 2, 4 or 8 bytes is in its slot; any other, and a long
+ * double or an __int128, is a pointer in the slot to the caller's copy
+ * (as MinGW's GCC and clang pass them). */
 static int va_arg_win64(struct ir_func *fn, struct expr *e)
 {
     struct type *rt = e->ty;
     struct type *ptr = ty_base(TY_LONG, 1);
-    if (rt->kind == TY_LDOUBLE || rt->kind == TY_INT128)
-        diag_fatal(fn->file, e->line,
-                   "va_arg of %s is not supported for a Windows target yet: "
-                   "there it travels by reference", ty_name(rt));
     int apa = gen_addr(fn, e->lhs);
     int cur = emit_load(fn, apa, ptr);
     emit_store(fn, apa, emit_bin(fn, IR_ADD, cur, emit_const(fn, 8, 8), 8, 1),
                ptr);
+    if (rt->kind == TY_STRUCT) {
+        long size = ty_size(rt);
+        int dst = irg_va_struct_slot(fn, e);
+        int src = size == 1 || size == 2 || size == 4 || size == 8
+                  ? cur : emit_load(fn, cur, ptr);
+        irg_va_copy(fn, dst, 0, src, size);
+        return dst;
+    }
+    if (rt->kind == TY_LDOUBLE || rt->kind == TY_INT128)
+        return emit_load(fn, emit_load(fn, cur, ptr), rt);
     if (ty_is_float(rt)) {
         int v = emit_load(fn, cur, ty_base(TY_DOUBLE, 0));
         if (rt->kind == TY_FLOAT) {
@@ -533,6 +544,24 @@ static void asm_operand_uses(const char *tmpl, const char *const *names,
     }
 }
 
+/* While the original vocabulary is tried (asm_assemble), its refusals
+ * return here instead of ending the compilation: what it cannot take,
+ * GNU as's syntax may (asm_assemble_att). */
+static jmp_buf *g_asm_try;
+static char g_asm_msg[512];      /* ...and what it said */
+
+static void asm_fatal(const char *file, int line, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(g_asm_msg, sizeof g_asm_msg, fmt, ap);
+    va_end(ap);
+    if (g_asm_try)
+        longjmp(*g_asm_try, 1);
+    diag_fatal(file, line, "%s", g_asm_msg);
+}
+#define ASM_FATAL asm_fatal
+
 static void asm_directive_x86(const char *file, int line,
                               const struct asm_stmt *a,
                               const char *const *opnames, int nops,
@@ -572,7 +601,7 @@ static void asm_directive_x86(const char *file, int line,
                     !strncmp(opnames[j], p + i + 1, (size_t)(e - i - 1)))
                     k = j;
             if (e >= cut || k < 0)
-                diag_fatal(file, line, "asm: unknown operand %%%.*s in "
+                ASM_FATAL(file, line, "asm: unknown operand %%%.*s in "
                            "\"%.*s\"", e - i + 1, p + i, cut, p);
             i = e + 1;
         } else if (i < cut && p[i] >= '0' && p[i] <= '9') {
@@ -580,17 +609,17 @@ static void asm_directive_x86(const char *file, int line,
             while (i < cut && p[i] >= '0' && p[i] <= '9')
                 k = k * 10 + (p[i++] - '0');
             if (k >= nops)
-                diag_fatal(file, line, "asm operand %%%d out of range in "
+                ASM_FATAL(file, line, "asm operand %%%d out of range in "
                            "\"%.*s\"", k, cut, p);
         } else {
-            diag_fatal(file, line, "asm template modifier '%%%c' is not "
+            ASM_FATAL(file, line, "asm template modifier '%%%c' is not "
                        "supported in a directive (%%c0 prints a constant)",
                        i < cut ? p[i] : ' ');
         }
         const struct asm_operand *op = k < a->nout ? &a->out[k]
                                                    : &a->in[k - a->nout];
         if (!op->is_imm)
-            diag_fatal(file, line, "%%%s%d names a register operand, which a "
+            ASM_FATAL(file, line, "%%%s%d names a register operand, which a "
                        "directive cannot hold; %%c prints a constant, and "
                        "wants an \"i\" or \"n\" operand", bare ? "c" : "",
                        k);
@@ -606,9 +635,9 @@ static void asm_directive_x86(const char *file, int line,
         dirs.align_bytes = target_fmt_get() != TGT_FMT_MACHO;
         r = code_asm_directive(buf, (int)n, acc, &dirs, err, sizeof err);
         if (r < 0)
-            diag_fatal(file, line, "%s", err);
+            ASM_FATAL(file, line, "%s", err);
         if (!r)
-            diag_fatal(file, line, "asm directive \"%.*s\" is not supported",
+            ASM_FATAL(file, line, "asm directive \"%.*s\" is not supported",
                        (int)n, buf);
     }
     free(buf);
@@ -621,9 +650,9 @@ static void asm_directive_x86(const char *file, int line,
  * only the vocabulary real low-level C needs — the syscall trap plus the
  * kernel's hardware instructions (port I/O, control/segment/MSR access,
  * fences, TLB, descriptor tables). Anything else is refused loudly. */
-static void asm_assemble(struct ir_func *fn, struct stmt *s,
-                         const int *opregs, const char *const *opnames,
-                         int nops, struct ir_asm *ia)
+static void asm_assemble_old(struct ir_func *fn, struct stmt *s,
+                             const int *opregs, const char *const *opnames,
+                             int nops, struct ir_asm *ia)
 {
     const char *file = fn->file;
     int line = s->line;
@@ -672,7 +701,7 @@ static void asm_assemble(struct ir_func *fn, struct stmt *s,
             while (*p >= '0' && *p <= '9')
                 idx = idx * 10 + (*p++ - '0');
             if (idx >= nops)
-                diag_fatal(file, line,
+                ASM_FATAL(file, line,
                            "asm operand %%%d out of range in \"%s\"",
                            idx, tmpl);
             reg = opregs[idx];
@@ -694,7 +723,7 @@ static void asm_assemble(struct ir_func *fn, struct stmt *s,
         }
         if (mlen == 3 && strncmp(m, "int", 3) == 0) {
             if (*p != '$')
-                diag_fatal(file, line, "asm 'int' wants $vector: \"%s\"",
+                ASM_FATAL(file, line, "asm 'int' wants $vector: \"%s\"",
                            tmpl);
             p++;
             long imm = 0;
@@ -712,7 +741,7 @@ static void asm_assemble(struct ir_func *fn, struct stmt *s,
                 imm = imm * base + d;
             }
             if (imm < 0 || imm > 255)
-                diag_fatal(file, line, "asm 'int' vector %ld out of range",
+                ASM_FATAL(file, line, "asm 'int' vector %ld out of range",
                            imm);
             code[n++] = 0xcd;
             code[n++] = (unsigned char)imm;
@@ -723,14 +752,14 @@ static void asm_assemble(struct ir_func *fn, struct stmt *s,
                                  strncmp(m, "rdseed", 6) == 0)) {
             /* rdrand is 0F C7 /6, rdseed the same opcode with /7 */
             if (reg < 0)
-                diag_fatal(file, line, "asm '%.6s' wants %%N: \"%s\"", m, tmpl);
+                ASM_FATAL(file, line, "asm '%.6s' wants %%N: \"%s\"", m, tmpl);
             code[n++] = (unsigned char)(0x48 | (reg >= 8 ? 1 : 0)); /* REX.W(.B) */
             code[n++] = 0x0f;
             code[n++] = 0xc7;
             code[n++] = (unsigned char)((m[2] == 's' ? 0xf8 : 0xf0) | (reg & 7));
         } else if (mlen == 4 && strncmp(m, "setc", 4) == 0) {
             if (reg < 0)
-                diag_fatal(file, line, "asm 'setc' wants %%N: \"%s\"", tmpl);
+                ASM_FATAL(file, line, "asm 'setc' wants %%N: \"%s\"", tmpl);
             if (reg >= 4)  /* REX to name spl/bpl/sil/dil or r8b.. as a byte */
                 code[n++] = (unsigned char)(0x40 | (reg >= 8 ? 1 : 0));
             code[n++] = 0x0f;
@@ -742,17 +771,17 @@ static void asm_assemble(struct ir_func *fn, struct stmt *s,
              * `reg` already holds the FIRST operand (%src); parse `,%dst`. */
             int is_sd = m[5] == 'd';
             if (reg < 16)
-                diag_fatal(file, line,
+                ASM_FATAL(file, line,
                            "asm '%.*s' operands must be 'x' (xmm): \"%s\"",
                            mlen, m, tmpl);
             int src = reg;
             if (*p != ',')
-                diag_fatal(file, line,
+                ASM_FATAL(file, line,
                            "asm '%.*s' wants %%src,%%dst: \"%s\"", mlen, m, tmpl);
             p++;
             while (*p == ' ' || *p == '\t') p++;
             if (*p != '%' || !(p[1] >= '0' && p[1] <= '9'))
-                diag_fatal(file, line,
+                ASM_FATAL(file, line,
                            "asm '%.*s' destination must be %%N: \"%s\"",
                            mlen, m, tmpl);
             p++;
@@ -760,11 +789,11 @@ static void asm_assemble(struct ir_func *fn, struct stmt *s,
             while (*p >= '0' && *p <= '9')
                 idx2 = idx2 * 10 + (*p++ - '0');
             if (idx2 >= nops)
-                diag_fatal(file, line,
+                ASM_FATAL(file, line,
                            "asm operand %%%d out of range in \"%s\"", idx2, tmpl);
             int dst = opregs[idx2];
             if (dst < 16)
-                diag_fatal(file, line,
+                ASM_FATAL(file, line,
                            "asm '%.*s' destination must be 'x' (xmm): \"%s\"",
                            mlen, m, tmpl);
             int s = src - 16, d = dst - 16;
@@ -844,7 +873,7 @@ static void asm_assemble(struct ir_func *fn, struct stmt *s,
                         if (is_port) port_reg = reg; else data_reg = reg;
                     } else if (*p == '$') {
                         if (!is_port)
-                            diag_fatal(file, line, "asm: %.*s's data operand "
+                            ASM_FATAL(file, line, "asm: %.*s's data operand "
                                        "is al/ax/eax, not an immediate, in "
                                        "\"%s\"", mlen, m, tmpl);
                         port = a_imm(&p, file, line, tmpl);
@@ -858,19 +887,19 @@ static void asm_assemble(struct ir_func *fn, struct stmt *s,
                     a_ws(&p);
                     if (k == 0) {
                         if (*p != ',')
-                            diag_fatal(file, line, "asm: %.*s wants two "
+                            ASM_FATAL(file, line, "asm: %.*s wants two "
                                        "operands in \"%s\"", mlen, m, tmpl);
                         p++;
                     }
                 }
                 if (data_reg != 0)
-                    diag_fatal(file, line, "asm: %.*s moves through "
+                    ASM_FATAL(file, line, "asm: %.*s moves through "
                                "al/ax/eax, in \"%s\"", mlen, m, tmpl);
                 if (port < 0 && port_reg != 2)
-                    diag_fatal(file, line, "asm: %.*s's port is dx or an "
+                    ASM_FATAL(file, line, "asm: %.*s's port is dx or an "
                                "immediate, in \"%s\"", mlen, m, tmpl);
                 if (port > 255)
-                    diag_fatal(file, line, "asm: an immediate port is 0..255, "
+                    ASM_FATAL(file, line, "asm: an immediate port is 0..255, "
                                "in \"%s\"", tmpl);
             }
             if (sz == 'w')
@@ -919,14 +948,14 @@ static void asm_assemble(struct ir_func *fn, struct stmt *s,
         else if (mlen == 4 && strncmp(m, "leaq", 4) == 0) {
             a_ws(&p);
             if (!(*p >= '0' && *p <= '9'))
-                diag_fatal(file, line, "asm leaq expects a local label in "
+                ASM_FATAL(file, line, "asm leaq expects a local label in "
                            "\"%s\"", tmpl);
             int num = 0;
             while (*p >= '0' && *p <= '9') num = num * 10 + (*p++ - '0');
             if (*p == 'f' || *p == 'b') p++;      /* forward/backward marker */
             a_ws(&p);
             if (strncmp(p, "(%%rip)", 7) != 0)
-                diag_fatal(file, line, "asm leaq expects `Nf(%%%%rip)` in "
+                ASM_FATAL(file, line, "asm leaq expects `Nf(%%%%rip)` in "
                            "\"%s\"", tmpl);
             p += 7;
             a_comma(&p, file, line, tmpl);
@@ -991,6 +1020,71 @@ static void asm_assemble(struct ir_func *fn, struct stmt *s,
                     }
                 }
             }
+            /* a thread block's word: `mov %%fs:0x28, %dst` and the store
+             * `mov %src, %%gs:N` -- the segment's override prefix, and an
+             * absolute disp32 (SIB with no base or index), as GCC's
+             * stack-protector and TLS code read them */
+            a_ws(&p);
+            if (reg < 0 && p[0] == '%' && p[1] == '%' &&
+                (p[2] == 'f' || p[2] == 'g') && p[3] == 's' && p[4] == ':') {
+                unsigned char seg = p[2] == 'f' ? 0x64 : 0x65;
+                const char *q = p + 5;
+                long disp = strtol(q, (char **)&q, 0);
+                p = q;
+                a_comma(&p, file, line, tmpl);
+                a_ws(&p);
+                int dst = (p[0] == '%' && p[1] == '%')
+                        ? a_regname(&p, file, line, tmpl)
+                        : a_opreg(&p, opregs, opnames, nops, file, line, tmpl);
+                code[n++] = seg;
+                code[n++] = (unsigned char)(0x48 | (dst >= 8 ? 4 : 0));
+                code[n++] = 0x8b;
+                code[n++] = (unsigned char)(0x04 | ((dst & 7) << 3));
+                code[n++] = 0x25;
+                for (int k = 0; k < 4; k++)
+                    code[n++] = (unsigned char)(disp >> (8 * k));
+                goto asm_next;
+            }
+            {
+                const char *q = p;
+                int sreg = -2;
+                if (reg >= 0)
+                    sreg = reg;
+                else if (q[0] == '%' && q[1] == '%' &&
+                         !((q[2] == 'f' || q[2] == 'g') && q[3] == 's'))
+                    sreg = -3;                       /* a named register */
+                if (sreg != -2) {
+                    const char *r = q;
+                    if (sreg == -3) {
+                        r += 2;
+                        while ((*r >= 'a' && *r <= 'z') || (*r >= '0' && *r <= '9'))
+                            r++;
+                    }
+                    a_ws(&r);
+                    if (*r == ',') {
+                        r++;
+                        a_ws(&r);
+                        if (r[0] == '%' && r[1] == '%' &&
+                            (r[2] == 'f' || r[2] == 'g') && r[3] == 's' &&
+                            r[4] == ':') {
+                            if (sreg == -3)
+                                sreg = a_regname(&p, file, line, tmpl);
+                            unsigned char seg = r[2] == 'f' ? 0x64 : 0x65;
+                            const char *d = r + 5;
+                            long disp = strtol(d, (char **)&d, 0);
+                            p = d;
+                            code[n++] = seg;
+                            code[n++] = (unsigned char)(0x48 | (sreg >= 8 ? 4 : 0));
+                            code[n++] = 0x89;
+                            code[n++] = (unsigned char)(0x04 | ((sreg & 7) << 3));
+                            code[n++] = 0x25;
+                            for (int k = 0; k < 4; k++)
+                                code[n++] = (unsigned char)(disp >> (8 * k));
+                            goto asm_next;
+                        }
+                    }
+                }
+            }
             int src_reg = -1, src_imm_valid = 0;
             long src_imm = 0;
             /* --- source operand --- */
@@ -1041,7 +1135,7 @@ static void asm_assemble(struct ir_func *fn, struct stmt *s,
             /* --- destination: memory, a control register, or a GPR --- */
             if (a_is_mem(p)) {                        /* mov %src, disp(%base) */
                 if (src_imm_valid)
-                    diag_fatal(file, line, "asm: mov $imm to memory unsupported "
+                    ASM_FATAL(file, line, "asm: mov $imm to memory unsupported "
                                "in \"%s\"", tmpl);
                 long disp;
                 int base = a_mem(&p, opregs, opnames, nops, file, line, tmpl,
@@ -1171,7 +1265,7 @@ static void asm_assemble(struct ir_func *fn, struct stmt *s,
             int r;
             if (to_mem) {
                 if (strncmp(p, "%%xmm0", 6) != 0)
-                    diag_fatal(file, line, "asm movdqa source must be "
+                    ASM_FATAL(file, line, "asm movdqa source must be "
                                "%%%%xmm0 in \"%s\"", tmpl);
                 p += 6;
                 a_comma(&p, file, line, tmpl);
@@ -1181,7 +1275,7 @@ static void asm_assemble(struct ir_func *fn, struct stmt *s,
                 a_comma(&p, file, line, tmpl);
                 a_ws(&p);
                 if (strncmp(p, "%%xmm0", 6) != 0)
-                    diag_fatal(file, line, "asm movdqa dest must be "
+                    ASM_FATAL(file, line, "asm movdqa dest must be "
                                "%%%%xmm0 in \"%s\"", tmpl);
                 p += 6;
             }
@@ -1191,7 +1285,7 @@ static void asm_assemble(struct ir_func *fn, struct stmt *s,
             code[n++] = (unsigned char)(to_mem ? 0x7f : 0x6f);
             code[n++] = (unsigned char)(r & 7);        /* mod00 reg=xmm0 rm=r */
         } else {
-            diag_fatal(file, line,
+            ASM_FATAL(file, line,
                        "asm instruction \"%.*s\" not supported", mlen, m);
         }
         /* discard any operand text this mnemonic did not itself consume
@@ -1209,7 +1303,7 @@ static void asm_assemble(struct ir_func *fn, struct stmt *s,
         for (int j = 0; j < nlab; j++)
             if (labels[j].num == fixups[i].num) off = labels[j].off;
         if (off < 0)
-            diag_fatal(file, line, "asm: local label %d not defined in "
+            ASM_FATAL(file, line, "asm: local label %d not defined in "
                        "\"%s\"", fixups[i].num, tmpl);
         int disp = off - (fixups[i].patch + 4);
         /* an alignment between the two pads by where the template lands,
@@ -1217,7 +1311,7 @@ static void asm_assemble(struct ir_func *fn, struct stmt *s,
         for (int k = 0; k + 3 < acc.narange; k += 4)
             if ((acc.arange[k] > off && acc.arange[k] <= fixups[i].patch) ||
                 (acc.arange[k] > fixups[i].patch && acc.arange[k] <= off))
-                diag_fatal(file, line, "asm: an alignment between local "
+                ASM_FATAL(file, line, "asm: an alignment between local "
                            "label %d and the leaq that addresses it is not "
                            "supported in \"%s\"", fixups[i].num, tmpl);
         for (int b = 0; b < 4; b++)
@@ -1229,6 +1323,163 @@ static void asm_assemble(struct ir_func *fn, struct stmt *s,
     ia->ndrange = acc.ndrange;
     ia->arange = acc.arange;
     ia->narange = acc.narange;
+}
+
+/* A GPR's name at a width: 8 (with hi, ah..bh), 16, 32 or 64 bits */
+static const char *gpr_name(int r, int size, int hi)
+{
+    static const char *const n64[] = { "rax","rcx","rdx","rbx","rsp","rbp","rsi","rdi" };
+    static const char *const n32[] = { "eax","ecx","edx","ebx","esp","ebp","esi","edi" };
+    static const char *const n16[] = { "ax","cx","dx","bx","sp","bp","si","di" };
+    static const char *const n8[] = { "al","cl","dl","bl","spl","bpl","sil","dil" };
+    static const char *const nh[] = { "ah","ch","dh","bh" };
+    static char buf[8][8];
+    static int k;
+    char *b = buf[k++ & 7];
+    if (hi && r < 4)
+        return nh[r];
+    if (r < 8)
+        return size == 8 ? n64[r] : size == 4 ? n32[r] : size == 2 ? n16[r] : n8[r];
+    snprintf(b, 8, "r%d%s", r, size == 8 ? "" : size == 4 ? "d" : size == 2 ? "w" : "b");
+    return b;
+}
+
+/* GNU as's syntax, the whole of it (att.c), for a template the original
+ * vocabulary does not cover: the operands substituted as GCC does --
+ * a register named at its operand's width, or as a b/h/w/k/q modifier
+ * says; an "m" operand as (%reg), the register holding its address; a
+ * constant as $N (%cN: N); %= a number of its own -- then the text
+ * assembled, labels and all (gas_assemble_inline when it has some). */
+static void asm_assemble_att(struct ir_func *fn, struct stmt *s,
+                             const int *opregs, const char *const *opnames,
+                             int nops, struct ir_asm *ia)
+{
+    const char *file = fn->file;
+    int line = s->line;
+    struct asm_stmt *a = s->asm_s;
+    static int uniq;
+    int u = ++uniq;
+    size_t cap = strlen(a->tmpl) * 3 + 64, len = 0;
+    char *out = xmalloc(cap);
+#define PUT(str) do { size_t l_ = strlen(str);                               \
+        if (len + l_ + 1 >= cap) { cap = (cap + l_) * 2; out = xrealloc(out, cap); } \
+        memcpy(out + len, str, l_); len += l_; } while (0)
+    for (const char *p = a->tmpl; *p; ) {
+        char one[2] = { *p, 0 };
+        if (*p != '%' || a->is_basic) {
+            PUT(one);
+            p++;
+            continue;
+        }
+        if (p[1] == '%') { PUT("%"); p += 2; continue; }
+        if (p[1] == '=') {
+            char b[16];
+            snprintf(b, sizeof b, "%d", u);
+            PUT(b);
+            p += 2;
+            continue;
+        }
+        const char *m = p + 1;
+        char mod = 0;
+        if (isalpha((unsigned char)*m) && (isdigit((unsigned char)m[1]) || m[1] == '['))
+            mod = *m++;
+        int idx = -1;
+        const char *e = m;
+        if (isdigit((unsigned char)*m)) {
+            idx = 0;
+            while (isdigit((unsigned char)*e))
+                idx = idx * 10 + (*e++ - '0');
+        } else if (*m == '[') {
+            const char *c = strchr(m, ']');
+            for (int k = 0; c && k < nops; k++)
+                if (opnames[k] && (size_t)(c - m - 1) == strlen(opnames[k]) &&
+                    !strncmp(m + 1, opnames[k], (size_t)(c - m - 1)))
+                    idx = k;
+            e = c ? c + 1 : m;
+        }
+        if (idx < 0 || idx >= nops) {
+            /* a register written %name in a basic-asm-like way: keep it */
+            PUT(one);
+            p++;
+            continue;
+        }
+        p = e;
+        int nout = a->nout;
+        const struct asm_operand *op = idx < nout ? &a->out[idx] : &a->in[idx - nout];
+        int r = opregs[idx];
+        char b[64];
+        if (r < 0 || (op->is_imm && mod == 'c')) {
+            snprintf(b, sizeof b, mod == 'c' || mod == 'P' ? "%lld" : "$%lld",
+                     (long long)op->imm);
+            PUT(b);
+            continue;
+        }
+        if (r >= 16) {
+            snprintf(b, sizeof b, "%%xmm%d", r - 16);
+            PUT(b);
+            continue;
+        }
+        if (asm_constraint_mem_only(op->constraint)) {
+            snprintf(b, sizeof b, "(%%%s)", gpr_name(r, 8, 0));
+            PUT(b);
+            continue;
+        }
+        int size = op->expr && op->expr->ty ? ty_size(op->expr->ty) : 8;
+        if (size > 8 || size <= 0) size = 8;
+        if (size == 3) size = 4;
+        if (size > 4 && size < 8) size = 8;
+        int hi = 0;
+        switch (mod) {
+        case 'b': size = 1; break;
+        case 'h': size = 1; hi = 1; break;
+        case 'w': size = 2; break;
+        case 'k': size = 4; break;
+        case 'q': size = 8; break;
+        default: break;
+        }
+        snprintf(b, sizeof b, "%%%s", gpr_name(r, size, hi));
+        PUT(b);
+    }
+    out[len] = 0;
+#undef PUT
+    struct code c;
+    memset(&c, 0, sizeof c);
+    char err[512];
+    if (GAS_INLINE(x86att_assemble, file, line, out, &c, err, sizeof err) != 0) {
+        /* both refuse it: the original's reason, which says what it is
+         * about the template -- unless all it said was that it does not
+         * know the instruction, which is this one's to explain */
+        if (strncmp(g_asm_msg, "asm instruction \"", 17) != 0 ||
+            strstr(err, "is not an instruction this x86-64 assembler knows"))
+            diag_fatal(file, line, "%s", g_asm_msg);
+        diag_fatal(file, line, "%s", err);
+    }
+    free(out);
+    ia->code = c.p;
+    ia->codelen = c.len;
+    ia->drange = c.drange;
+    ia->ndrange = c.ndrange;
+    ia->arange = c.arange;
+    ia->narange = c.narange;
+}
+
+/* The original vocabulary first -- what it takes keeps the meaning it has
+ * always had (a %N names the whole register; `lgdt %0` the address in
+ * one) -- and GNU as's syntax for what it does not. */
+static void asm_assemble(struct ir_func *fn, struct stmt *s,
+                         const int *opregs, const char *const *opnames,
+                         int nops, struct ir_asm *ia)
+{
+    jmp_buf jb;
+    jmp_buf *save = g_asm_try;
+    g_asm_try = &jb;
+    if (!setjmp(jb)) {
+        asm_assemble_old(fn, s, opregs, opnames, nops, ia);
+        g_asm_try = save;
+        return;
+    }
+    g_asm_try = save;
+    asm_assemble_att(fn, s, opregs, opnames, nops, ia);
 }
 
 /* Map a hard-register spelling (any width: rax/eax/ax/al/ah, r8/r8d/r8w/r8b,

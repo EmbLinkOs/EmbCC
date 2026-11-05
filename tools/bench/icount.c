@@ -46,7 +46,7 @@
 #include <string.h>
 #include <qemu-plugin.h>
 
-#include "cost.h"
+#include "../../src/arch/cost.h"
 
 QEMU_PLUGIN_EXPORT int qemu_plugin_version = QEMU_PLUGIN_VERSION;
 

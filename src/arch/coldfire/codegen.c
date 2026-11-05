@@ -45,6 +45,7 @@
 #include "../../sema/type.h"
 
 #include <stdio.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -2732,7 +2733,10 @@ static void gen_func(struct ir_func *fn, struct code *t, struct cf_sites *st,
         if (in_reg(&F, p))
             cf_move(t, 4, fp_at(F.slot[p]), reg_ea(F.loc[p]));
 
+    ra_debug_pc_begin(fn);
     for (i = 0; i < fn->nins; i++) {
+        if (fn->ins_pc)
+            fn->ins_pc[i] = t->len;
         gen_ins(&F, i);
         if (F.skip_next) {
             F.skip_next = 0;
@@ -2822,6 +2826,15 @@ static void gen_func(struct ir_func *fn, struct code *t, struct cf_sites *st,
     }
 
     f->code_len = t->len - f->code_off;
+    if (fn->ins_pc) {
+        /* -g: registers as the machine numbers them; each slot
+         * where the object starts in it, as var_off's */
+        long *sl = xmalloc((size_t)(fn->nvregs ? fn->nvregs : 1) * sizeof *sl);
+        for (int v = 0; v < fn->nvregs; v++)
+            sl[v] = F.slot[v] == NOSLOT ? LONG_MIN : obj_slot(&F, v);
+        ra_debug_finish(fn, t->len, F.loc, NULL, 0, sl, LONG_MIN, F.wide, 2, 4);
+        free(sl);
+    }
     f->stack_bytes = (int)F.frame;
     free(F.usecnt);
     free(F.slot);

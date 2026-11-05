@@ -292,6 +292,13 @@ struct linker {
     int nvns, capvns;
     int lb_thumb1;             /* the image is ARMv6-M: no MOVW/MOVT */
     int gc_sections;           /* --gc-sections */
+    /* -pie: the RELATIVE relocations apply_relocs collects (each a
+     * place and the value it must hold), and the synthetic .rela.dyn
+     * and .dynamic they go in (insec indices, -1 when not a PIE) */
+    int pie;
+    Elf64_Addr *rel_at, *rel_val;
+    int nrel, caprel;
+    int rela_sec, dyn_sec;
     int print_gc;              /* --print-gc-sections */
     const char *const *gc_undefs;  /* -u: roots too */
     int gc_nundefs;
@@ -1214,6 +1221,217 @@ static int dbgsec_for(struct linker *l, const char *name)
     }
 }
 
+/* ---- inflate (RFC 1950/1951): a compressed debug section's bytes ----
+ *
+ * An input .debug_* section may be SHF_COMPRESSED (-gz, EmbCC's or
+ * GCC's): relocations address its bytes before compression, so it is
+ * inflated first and merged as any other. Stored, fixed and dynamic
+ * blocks, after the canonical-code decoder of zlib's puff.c. */
+struct infl {
+    const unsigned char *in;
+    long inlen, inpos;
+    unsigned bitbuf;
+    int bitcnt;
+    unsigned char *out;
+    long outlen, outcap;
+    int bad;
+};
+struct inhuff { short count[16]; short symbol[320]; };
+static unsigned int get32loc(const unsigned char *p);
+
+static int infl_bits(struct infl *s, int need)
+{
+    long val = s->bitbuf;
+    while (s->bitcnt < need) {
+        if (s->inpos >= s->inlen) {
+            s->bad = 1;
+            return 0;
+        }
+        val |= (long)s->in[s->inpos++] << s->bitcnt;
+        s->bitcnt += 8;
+    }
+    s->bitbuf = (unsigned)(val >> need);
+    s->bitcnt -= need;
+    return (int)(val & ((1L << need) - 1));
+}
+
+static void infl_put(struct infl *s, unsigned char c)
+{
+    if (s->outlen == s->outcap) {
+        s->outcap = s->outcap ? s->outcap * 2 : 4096;
+        s->out = xrealloc(s->out, (size_t)s->outcap);
+    }
+    s->out[s->outlen++] = c;
+}
+
+static int infl_decode(struct infl *s, const struct inhuff *h)
+{
+    int code = 0, first = 0, index = 0;
+    for (int len = 1; len < 16; len++) {
+        code |= infl_bits(s, 1);
+        int count = h->count[len];
+        if (code - count < first)
+            return h->symbol[index + (code - first)];
+        index += count;
+        first += count;
+        first <<= 1;
+        code <<= 1;
+        if (s->bad)
+            return -1;
+    }
+    s->bad = 1;
+    return -1;
+}
+
+static void infl_build(struct inhuff *h, const short *length, int n)
+{
+    short offs[16];
+    for (int len = 0; len < 16; len++)
+        h->count[len] = 0;
+    for (int sym = 0; sym < n; sym++)
+        h->count[length[sym]]++;
+    offs[1] = 0;
+    for (int len = 1; len < 15; len++)
+        offs[len + 1] = (short)(offs[len] + h->count[len]);
+    for (int sym = 0; sym < n; sym++)
+        if (length[sym])
+            h->symbol[offs[length[sym]]++] = (short)sym;
+}
+
+static const short in_lbase[29] = {
+    3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59,
+    67, 83, 99, 115, 131, 163, 195, 227, 258 };
+static const short in_lext[29] = {
+    0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4,
+    5, 5, 5, 5, 0 };
+static const short in_dbase[30] = {
+    1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513,
+    769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577 };
+static const short in_dext[30] = {
+    0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10,
+    11, 11, 12, 12, 13, 13 };
+
+static void infl_codes(struct infl *s, const struct inhuff *lc,
+                       const struct inhuff *dc)
+{
+    for (;;) {
+        int sym = infl_decode(s, lc);
+        if (s->bad || sym < 0)
+            return;
+        if (sym < 256) {
+            infl_put(s, (unsigned char)sym);
+        } else if (sym == 256) {
+            return;
+        } else {
+            sym -= 257;
+            if (sym >= 29) {
+                s->bad = 1;
+                return;
+            }
+            int len = in_lbase[sym] + infl_bits(s, in_lext[sym]);
+            int ds = infl_decode(s, dc);
+            if (s->bad || ds < 0 || ds >= 30) {
+                s->bad = 1;
+                return;
+            }
+            long dist = in_dbase[ds] + infl_bits(s, in_dext[ds]);
+            if (dist > s->outlen) {
+                s->bad = 1;
+                return;
+            }
+            while (len--)
+                infl_put(s, s->out[s->outlen - dist]);
+        }
+    }
+}
+
+/* the zlib stream p[0..n) inflated, *outlen bytes; NULL when damaged */
+static unsigned char *inflate_zlib(const unsigned char *p, long n,
+                                   long *outlen)
+{
+    struct infl s;
+    memset(&s, 0, sizeof s);
+    if (n < 2 || (p[0] & 0x0f) != 8 || ((p[0] << 8) | p[1]) % 31)
+        return NULL;
+    s.in = p + 2;
+    s.inlen = n - 2;
+    int last;
+    do {
+        last = infl_bits(&s, 1);
+        int type = infl_bits(&s, 2);
+        if (type == 0) {                 /* stored */
+            s.bitbuf = 0;
+            s.bitcnt = 0;
+            if (s.inpos + 4 > s.inlen) { s.bad = 1; break; }
+            long len = s.in[s.inpos] | (s.in[s.inpos + 1] << 8);
+            s.inpos += 4;
+            if (s.inpos + len > s.inlen) { s.bad = 1; break; }
+            while (len--)
+                infl_put(&s, s.in[s.inpos++]);
+        } else if (type == 1) {          /* fixed codes */
+            static struct inhuff lc, dc;
+            static int built;
+            if (!built) {
+                short l[288];
+                int k = 0;
+                for (; k < 144; k++) l[k] = 8;
+                for (; k < 256; k++) l[k] = 9;
+                for (; k < 280; k++) l[k] = 7;
+                for (; k < 288; k++) l[k] = 8;
+                infl_build(&lc, l, 288);
+                for (k = 0; k < 30; k++) l[k] = 5;
+                infl_build(&dc, l, 30);
+                built = 1;
+            }
+            infl_codes(&s, &lc, &dc);
+        } else if (type == 2) {          /* dynamic codes */
+            static const short order[19] = { 16, 17, 18, 0, 8, 7, 9, 6, 10, 5,
+                                             11, 4, 12, 3, 13, 2, 14, 1, 15 };
+            int nlen = infl_bits(&s, 5) + 257, ndist = infl_bits(&s, 5) + 1;
+            int ncode = infl_bits(&s, 4) + 4;
+            short l[320];
+            struct inhuff lc, dc;
+            if (nlen > 286 || ndist > 30) { s.bad = 1; break; }
+            for (int k = 0; k < 19; k++)
+                l[order[k]] = k < ncode ? (short)infl_bits(&s, 3) : 0;
+            infl_build(&lc, l, 19);
+            for (int k = 0; k < nlen + ndist && !s.bad;) {
+                int sym = infl_decode(&s, &lc), len = 0, rep;
+                if (sym < 0) { s.bad = 1; break; }
+                if (sym < 16) {
+                    l[k++] = (short)sym;
+                    continue;
+                }
+                if (sym == 16) {
+                    if (!k) { s.bad = 1; break; }
+                    len = l[k - 1];
+                    rep = 3 + infl_bits(&s, 2);
+                } else if (sym == 17) {
+                    rep = 3 + infl_bits(&s, 3);
+                } else {
+                    rep = 11 + infl_bits(&s, 7);
+                }
+                if (k + rep > nlen + ndist) { s.bad = 1; break; }
+                while (rep--)
+                    l[k++] = (short)len;
+            }
+            if (s.bad)
+                break;
+            infl_build(&lc, l, nlen);
+            infl_build(&dc, l + nlen, ndist);
+            infl_codes(&s, &lc, &dc);
+        } else {
+            s.bad = 1;
+        }
+    } while (!last && !s.bad);
+    if (s.bad) {
+        free(s.out);
+        return NULL;
+    }
+    *outlen = s.outlen;
+    return s.out ? s.out : xcalloc(1, 1);
+}
+
 static void dbg_append(struct dbgsec *d, const unsigned char *p, long n)
 {
     if (d->len + n > d->cap) {
@@ -1276,12 +1494,34 @@ static void collect_sections(struct linker *l, struct object *o)
              * landed at is what its relocations resolve against. */
             const char *nm = o->shstr + sh->sh_name;
             if (l->keep_debug && sh->sh_type == SHT_PROGBITS &&
-                strncmp(nm, ".debug_", 7) == 0 && sh->sh_size) {
+                strncmp(nm, ".debug_", 7) == 0 && sh->sh_size &&
+                !(sh->sh_flags & 0x80000000u /* SHF_EXCLUDE */)) {
                 int d = dbgsec_for(l, nm);
                 o->dbg_sec[i] = d;
                 o->dbg_off[i] = l->dbgsecs[d].len;
-                dbg_append(&l->dbgsecs[d], o->buf + sh->sh_offset,
-                           (long)sh->sh_size);
+                if (sh->sh_flags & 0x800 /* SHF_COMPRESSED */) {
+                    /* an Elf32/64_Chdr, then ELFCOMPRESS_ZLIB's stream */
+                    const unsigned char *c = o->buf + sh->sh_offset;
+                    int hn = o->elf32 ? 12 : 24;
+                    long zn = 0;
+                    unsigned ctype = o->big_endian
+                        ? ((unsigned)c[0] << 24 | (unsigned)c[1] << 16 |
+                           (unsigned)c[2] << 8 | c[3])
+                        : get32loc(c);
+                    unsigned char *z = sh->sh_size > (unsigned long)hn &&
+                                       ctype == 1 /* ELFCOMPRESS_ZLIB */
+                        ? inflate_zlib(c + hn, (long)sh->sh_size - hn, &zn)
+                        : NULL;
+                    if (!z)
+                        die("'%s': %s is compressed in a way EmbLD cannot "
+                            "read (it reads zlib, -gz=zlib)",
+                            o->name ? o->name : "?", nm);
+                    dbg_append(&l->dbgsecs[d], z, zn);
+                    free(z);
+                } else {
+                    dbg_append(&l->dbgsecs[d], o->buf + sh->sh_offset,
+                               (long)sh->sh_size);
+                }
             }
             continue;
         }
@@ -2641,6 +2881,11 @@ static void define_orphan_brackets(struct linker *l,
             define_linker_symbol(l, sym, ob->start);
             snprintf(sym, sizeof sym, "__%s_end", n + 1);
             define_linker_symbol(l, sym, ob->end);
+        } else if (!strcmp(n, ".ARM.exidx")) {
+            /* EHABI's index, by the names GNU ld gives it, which an
+             * unwinder searches (lib/rt/unwind_arm.c, libgcc) */
+            define_linker_symbol(l, "__exidx_start", ob->start);
+            define_linker_symbol(l, "__exidx_end", ob->end);
         }
     }
 }
@@ -3616,6 +3861,12 @@ static void apply_mips(struct linker *l, struct object *o, unsigned type,
         mips_put16(loc, (unsigned long)(d >> 2));
         return;
     }
+    case R_MIPS_PC32:               /* .eh_frame's */
+        if (c->isrel) A = (long long)(int)field;
+        V = (long long)S + A - (long long)P;
+        need_range(l, o, "R_MIPS_PC32", V, I32_MIN, I32_MAX);
+        mips_put_word(loc, (unsigned int)V);
+        return;
     case R_MIPS_GPREL16: case R_MIPS_GPREL32: case R_MIPS_LITERAL:
         die("%s: relocation %s: small-data (gp-relative) addressing, which "
             "this linker does not lay out; compile it with -G0", o->name,
@@ -3660,6 +3911,11 @@ static void apply_tricore(struct linker *l, struct object *o, unsigned type,
         return;
     case R_TRICORE_32ABS:
         need_range(l, o, "R_TRICORE_32ABS", V, I32_MIN, 0xffffffffLL);
+        put32(loc, (unsigned int)V);
+        return;
+    case R_TRICORE_32REL:                   /* .eh_frame's */
+        V -= (long long)P;
+        need_range(l, o, "R_TRICORE_32REL", V, I32_MIN, I32_MAX);
         put32(loc, (unsigned int)V);
         return;
     case R_TRICORE_24REL: {
@@ -4192,6 +4448,9 @@ static void apply_xtensa(struct linker *l, struct object *o, unsigned type,
     case R_XTENSA_32:
         put32(loc, (unsigned int)(V + (long long)get32loc(loc)));
         return;
+    case R_XTENSA_32_PCREL:                 /* .eh_frame's */
+        put32(loc, (unsigned int)(V - (long long)P));
+        return;
     case R_XTENSA_SLOT0_OP: {
         unsigned long w = (unsigned long)loc[0] | ((unsigned long)loc[1] << 8) |
                           ((unsigned long)loc[2] << 16);
@@ -4284,6 +4543,55 @@ static Elf64_Addr arm_veneer_addr(struct linker *l, const struct insec *ts,
                                   long long A, int arm);
 static int arm_veneer_scan(struct linker *l);
 #define VENEER_MAX_ROUNDS 8
+
+/* -pie: the field at P holds `v`, an address in this image: an
+ * R_X86_64_RELATIVE says so to the start code, which adds where the
+ * image was loaded */
+static void pie_relative(struct linker *l, Elf64_Addr P, Elf64_Addr v)
+{
+    if (l->nrel == l->caprel) {
+        l->caprel = l->caprel ? l->caprel * 2 : 256;
+        l->rel_at = xrealloc(l->rel_at, (size_t)l->caprel * sizeof *l->rel_at);
+        l->rel_val = xrealloc(l->rel_val,
+                              (size_t)l->caprel * sizeof *l->rel_val);
+    }
+    l->rel_at[l->nrel] = P;
+    l->rel_val[l->nrel] = v;
+    l->nrel++;
+}
+
+/* an absolute symbol (SHN_ABS): its value moves with nothing */
+static int sym_is_abs(const struct object *o, Elf64_Word symi)
+{
+    return symi < (Elf64_Word)o->nsym && o->syms[symi].st_shndx == SHN_ABS;
+}
+
+/* -pie: how many R_X86_64_64 an input carries into sections the image
+ * keeps -- each may be a RELATIVE -- so .rela.dyn is sized before the
+ * layout that places it */
+static long pie_count(struct linker *l)
+{
+    long n = 0;
+    for (int i = 0; i < l->nobj; i++) {
+        struct object *o = l->objs[i];
+        for (int k = 0; k < o->nsh; k++) {
+            Elf64_Shdr *rsh = sh_at(o, k);
+            if (rsh->sh_type != SHT_RELA)
+                continue;
+            int target = (int)rsh->sh_info;
+            if (target <= 0 || target >= o->nsh || o->sec_out[target] < 0)
+                continue;
+            const unsigned char *rb = o->buf + rsh->sh_offset;
+            long m = (long)(rsh->sh_size / sizeof(Elf64_Rela));
+            for (long j = 0; j < m; j++) {
+                const Elf64_Rela *r = (const Elf64_Rela *)(rb + j * 24);
+                if (ELF64_R_TYPE(r->r_info) == R_X86_64_64)
+                    n++;
+            }
+        }
+    }
+    return n;
+}
 
 static void apply_relocs(struct linker *l, struct object *o)
 {
@@ -4655,13 +4963,82 @@ static void apply_relocs(struct linker *l, struct object *o)
             switch (type) {
             case R_X86_64_64:
                 put64(loc, (unsigned long long)(S + A));
+                if (l->pie && ts && !uw && !sym_is_abs(o, symi))
+                    pie_relative(l, P, S + (Elf64_Addr)A);
+                break;
+            case R_X86_64_GOTPCREL:
+            case R_X86_64_GOTPCRELX:
+            case R_X86_64_REX_GOTPCRELX:
+                /* A load of the symbol's address from its GOT slot. In
+                 * an image that holds every symbol there is no GOT: the
+                 * load becomes the address it would read -- `mov
+                 * x@GOTPCREL(%rip), r` a `lea x(%rip), r` (ld's
+                 * relaxation), and for an undefined weak symbol, whose
+                 * address is 0, `mov $0, r`. A call or jump through the
+                 * slot becomes a direct one. */
+                if (r_offset >= 2 && loc[-2] == 0x8b && r_offset >= 3) {
+                    if (uw) {
+                        int reg = ((loc[-1] >> 3) & 7) |
+                                  ((loc[-3] & 4) ? 8 : 0);
+                        loc[-3] = (unsigned char)(0x48 | ((reg & 8) ? 1 : 0));
+                        loc[-2] = 0xc7;
+                        loc[-1] = (unsigned char)(0xc0 | (reg & 7));
+                        put32(loc, 0);
+                        break;
+                    }
+                    loc[-2] = 0x8d;
+                } else if (r_offset >= 2 && loc[-2] == 0xff &&
+                           (loc[-1] == 0x15 || loc[-1] == 0x25)) {
+                    /* call *x@GOTPCREL(%rip) -> addr32 call x; jmp *...
+                     * -> nop; jmp x: the rel32 stays where it was */
+                    int jmp = loc[-1] == 0x25;
+                    loc[-2] = jmp ? 0x90 : 0x67;
+                    loc[-1] = 0xe8 + (jmp ? 1 : 0);
+                } else {
+                    die("%s: R_X86_64_GOTPCREL on an instruction EmbLD does "
+                        "not rewrite (a mov, call or jmp is what it "
+                        "relaxes); symbol '%s'", o->name, l->rel_sym);
+                }
+                need_range(l, o, "R_X86_64_GOTPCREL",
+                           (long long)S + A - (long long)P, I32_MIN, I32_MAX);
+                put32(loc, (unsigned int)(long)((long long)S + A -
+                                                (long long)P));
+                break;
+            case R_X86_64_GOTTPOFF:
+                /* Initial-exec TLS, `mov x@gottpoff(%rip), r`: the one
+                 * module's thread block is this image's, so the offset is
+                 * known -- `mov $tpoff, r` (local-exec), as ld relaxes it */
+                if (!l->tls_size)
+                    die("%s: a thread-local relocation, but the image has "
+                        "no thread block", o->name);
+                if (r_offset < 3 || loc[-2] != 0x8b)
+                    die("%s: R_X86_64_GOTTPOFF on an instruction EmbLD does "
+                        "not rewrite (it relaxes a mov)", o->name);
+                {
+                    int reg = ((loc[-1] >> 3) & 7) | ((loc[-3] & 4) ? 8 : 0);
+                    long long v = (long long)S - (long long)l->tls_start -
+                                  (long long)l->tls_size;
+                    need_range(l, o, "R_X86_64_GOTTPOFF", v, I32_MIN, I32_MAX);
+                    loc[-3] = (unsigned char)(0x48 | ((reg & 8) ? 1 : 0));
+                    loc[-2] = 0xc7;
+                    loc[-1] = (unsigned char)(0xc0 | (reg & 7));
+                    put32(loc, (unsigned int)(long)v);
+                }
                 break;
             case R_X86_64_32:
+                if (l->pie && ts)
+                    die("%s: R_X86_64_32 against '%s' in a position-"
+                        "independent executable: recompile with -fPIE",
+                        o->name, l->rel_sym);
                 need_range(l, o, "R_X86_64_32", (long long)S + A, 0,
                            0xffffffffLL);
                 put32(loc, (unsigned int)(S + A));
                 break;
             case R_X86_64_32S:
+                if (l->pie && ts)
+                    die("%s: R_X86_64_32S against '%s' in a position-"
+                        "independent executable: recompile with -fPIE",
+                        o->name, l->rel_sym);
                 need_range(l, o, "R_X86_64_32S", (long long)S + A,
                            I32_MIN, I32_MAX);
                 put32(loc, (unsigned int)(S + A));
@@ -4774,8 +5151,11 @@ static void write_exec(struct linker *l, const char *out,
      * 0xffffff6c: QEMU loaded no vector table and the Cortex-M locked
      * up at reset, for any program with a thread_local in it. */
     int ntls = tls_memsz ? 1 : 0;
-    int hdrs_in_text = ntls && !l->data_base;
-    int nph = 2 + ntls;
+    /* -pie: the headers mapped too (PT_PHDR is how the start code finds
+     * the load bias), and PT_PHDR and PT_DYNAMIC beside the others */
+    int pie = l->pie && l->dyn_sec >= 0;
+    int hdrs_in_text = (ntls || pie) && !l->data_base;
+    int nph = 2 + ntls + (pie ? 2 : 0);
     /* File layout: ehdr, 2 phdrs, then the text bytes at a file offset
      * congruent to their vaddr mod PAGE, then the data bytes likewise.
      * The kernel loader maps PT_LOAD by (offset, vaddr, filesz, memsz);
@@ -4917,7 +5297,7 @@ static void write_exec(struct linker *l, const char *out,
      * that knows about the narrower layout instead of two shapes of
      * header threaded through everything above. */
     Elf64_Ehdr ehbuf;
-    Elf64_Phdr phbuf[3];
+    Elf64_Phdr phbuf[5];
     Elf64_Ehdr *eh = &ehbuf;
     memset(&ehbuf, 0, sizeof ehbuf);
     memset(phbuf, 0, sizeof phbuf);
@@ -4928,7 +5308,7 @@ static void write_exec(struct linker *l, const char *out,
     eh->e_ident[EI_CLASS] = l->elf32 ? ELFCLASS32 : ELFCLASS64;
     eh->e_ident[EI_DATA] = ELFDATA2LSB;
     eh->e_ident[EI_VERSION] = EV_CURRENT;
-    eh->e_type = ET_EXEC;              /* never ET_DYN — TARGET_ABI §4b */
+    eh->e_type = pie ? ET_DYN : ET_EXEC;   /* ET_DYN only for -pie */
     eh->e_machine = (Elf64_Half)(l->machine ? l->machine : EM_X86_64);
     eh->e_version = EV_CURRENT;
     /* The entry is a Thumb address on ARM and carries the low bit from
@@ -4996,6 +5376,29 @@ static void write_exec(struct linker *l, const char *out,
         ph[2].p_filesz = tls_filesz;
         ph[2].p_memsz = tls_memsz;
         ph[2].p_align = tls_align;
+    }
+    if (pie) {
+        /* PT_PHDR first, as the gABI wants it; PT_DYNAMIC last */
+        int nold = 2 + ntls;
+        for (int k = nold; k > 0; k--)
+            ph[k] = ph[k - 1];
+        memset(&ph[0], 0, sizeof ph[0]);
+        ph[0].p_type = PT_PHDR;
+        ph[0].p_flags = PF_R;
+        ph[0].p_offset = ehsz;
+        ph[0].p_vaddr = ph[1].p_vaddr + ehsz;
+        ph[0].p_paddr = ph[0].p_vaddr;
+        ph[0].p_filesz = ph[0].p_memsz = (Elf64_Xword)nph * phsz;
+        ph[0].p_align = 8;
+        struct insec *ds = &l->insecs[l->dyn_sec];
+        Elf64_Phdr *pd = &ph[nold + 1];
+        memset(pd, 0, sizeof *pd);
+        pd->p_type = PT_DYNAMIC;
+        pd->p_flags = PF_R | PF_W;
+        pd->p_offset = data_off + (ds->vaddr - data_start);
+        pd->p_vaddr = pd->p_paddr = ds->vaddr;
+        pd->p_filesz = pd->p_memsz = ds->size;
+        pd->p_align = 8;
     }
 
     if (l->elf32) {
@@ -7410,6 +7813,8 @@ int embld_link(const char **inputs, int ninputs, const char *out,
 {
     struct linker l;
     memset(&l, 0, sizeof l);
+    l.rela_sec = l.dyn_sec = -1;
+    l.pie = opts && opts->pie;
     /* Carry DWARF into the image. A build without -g has no .debug_*
      * to collect, so this costs nothing there; with -g it is the
      * difference between an executable gdb can open and one it cannot. */
@@ -7603,6 +8008,24 @@ int embld_link(const char **inputs, int ninputs, const char *out,
         add_entry_stub(&l);
     }
 
+    if (l.pie) {
+        /* -pie: room for every RELATIVE the inputs may need, and the
+         * dynamic section that points the start code at them */
+        if (l.machine != EM_X86_64)
+            die("-pie: EmbLD makes position-independent executables for "
+                "x86-64; link this target's with its own linker");
+        long n = pie_count(&l);
+        l.rela_sec = add_synth(&l, ".rela.dyn", n * 24, 8, OSEC_DATA,
+                               xcalloc((size_t)(n ? n : 1), 24));
+        l.dyn_sec = add_synth(&l, ".dynamic", 6 * 16, 8, OSEC_DATA,
+                              xcalloc(6, 16));
+        for (int k = 0; k < 2; k++) {
+            struct insec *ds = &l.insecs[k ? l.dyn_sec : l.rela_sec];
+            ds->seg = SEG_DATA;
+            ds->shflags = SHF_ALLOC | SHF_WRITE;
+        }
+    }
+
     Elf64_Addr text_start, data_start;
     Elf64_Xword text_size, data_filesz, data_memsz;
     struct osec_bound bounds[OSEC_COUNT + MAX_ORPHANS];
@@ -7636,6 +8059,8 @@ int embld_link(const char **inputs, int ninputs, const char *out,
     define_orphan_brackets(&l, bounds);
     define_end_symbols(&l, data_start + data_memsz);   /* L1: kernel_end/_end */
     define_firmware_symbols(&l, data_start, data_filesz, data_memsz);
+    if (l.pie)
+        define_linker_symbol(&l, "_DYNAMIC", l.insecs[l.dyn_sec].vaddr);
 
     /* Every input is loaded by now, which is what this question needs:
      * whether the SET of objects can be linked at all. See
@@ -7651,6 +8076,32 @@ int embld_link(const char **inputs, int ninputs, const char *out,
 
     for (int i = 0; i < l.nobj; i++)
         apply_relocs(&l, l.objs[i]);
+    if (l.pie) {
+        /* .rela.dyn: R_X86_64_RELATIVE per absolute pointer; .dynamic:
+         * where they are, and that this is a PIE */
+        struct insec *rs = &l.insecs[l.rela_sec], *ds = &l.insecs[l.dyn_sec];
+        if ((Elf64_Xword)l.nrel * 24 > rs->size)
+            internal_error("-pie: %d RELATIVE relocations, room for %ld",
+                           l.nrel, (long)(rs->size / 24));
+        unsigned char *rp = (unsigned char *)rs->data;
+        for (int k = 0; k < l.nrel; k++) {
+            put64(rp + k * 24, l.rel_at[k]);
+            put64(rp + k * 24 + 8, R_X86_64_RELATIVE);
+            put64(rp + k * 24 + 16, l.rel_val[k]);
+        }
+        static const long tag[6] = { 7 /* DT_RELA */, 8 /* DT_RELASZ */,
+                                     9 /* DT_RELAENT */,
+                                     0x6ffffffbL /* DT_FLAGS_1 */,
+                                     0x6ffffff9L /* DT_RELACOUNT */, 0 };
+        unsigned long val[6] = { rs->vaddr, (unsigned long)l.nrel * 24, 24,
+                                 0x08000000UL /* DF_1_PIE */,
+                                 (unsigned long)l.nrel, 0 };
+        unsigned char *dp = (unsigned char *)ds->data;
+        for (int k = 0; k < 6; k++) {
+            put64(dp + k * 16, (unsigned long long)tag[k]);
+            put64(dp + k * 16 + 8, val[k]);
+        }
+    }
     if (opts && opts->map_file)
         write_map(&l, NULL, bounds, opts->map_file);
     if (opts && opts->print_memory_usage)

@@ -289,16 +289,25 @@ else
     head -3 "$out/a.err" | sed 's/^/     | /'; fail=1
 fi
 
-# x86-64 keeps its own NASM-syntax assembler (embas) and is not wired
-# to this driver, so it still refuses by name rather than half-working.
+# x86-64 assembles AT&T syntax (tests/golden/x86-att-asm.sh): this
+# file's RISC-V statements are refused by name, the instruction named;
+# and a target whose objects this assembler does not write (COFF) says so
 if "$EMBCC" --target=x86_64-elf -c "$out/plain.s" -o /dev/null \
      2> "$out/b3.txt"; then
-    echo "  (x86-64 assembles .s too)"
+    echo "FAIL: x86-64 assembled a RISC-V file"; fail=1
 else
-    grep -q 'assembly-file support' "$out/b3.txt" || {
+    grep -q "is not an instruction this x86-64 assembler knows" "$out/b3.txt" || {
         echo "FAIL: x86-64's refusal does not explain itself"
         head -1 "$out/b3.txt" | sed 's/^/     | /'; fail=1; }
-    echo "  a target without a file assembler refuses by name"
+fi
+if "$EMBCC" --target=x86_64-windows-gnu -c "$out/plain.s" -o /dev/null \
+     2> "$out/b4.txt"; then
+    echo "FAIL: a COFF target assembled a .s"; fail=1
+else
+    grep -q 'assembly-file support' "$out/b4.txt" || {
+        echo "FAIL: the COFF refusal does not explain itself"
+        head -1 "$out/b4.txt" | sed 's/^/     | /'; fail=1; }
+    echo "  x86-64 names a foreign instruction; a COFF target refuses .s by name"
 fi
 [ "$fail" -eq 0 ] && echo "  unknown symbols and directives are each refused"
 

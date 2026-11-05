@@ -45,7 +45,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../bench/cost.h"
+#include "../../src/arch/cost.h"
 #include "devices.h"
 #include "mips.h"
 

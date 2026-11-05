@@ -18,7 +18,7 @@ yet the Microsoft x64 ABI ([Windows](targets.md#windows-coff)).
 
 ## `__int128`
 
-Refused on 17 of the 25 targets.
+Refused on 16 of the 25 targets.
 
 - Refused on `thumbv6m-none-eabi`, `thumbv7m-none-eabi`, `thumbv7em-none-eabihf`, `thumbv8m.base-none-eabi`, `thumbv8m.main-none-eabi`, `armv7a-none-eabi`, `riscv32-unknown-elf`, `avr`, `mipsel-none-elf`, `mips-none-elf`, `xtensa-none-elf`, `tricore-none-elf`, `rx-none-elf`, `powerpc-none-eabi`, `sparc-none-elf`, `m68k-none-elf`:
 
@@ -26,21 +26,9 @@ Refused on 17 of the 25 targets.
   __int128 does not exist on this target (it needs 64-bit registers; use long long)
   ```
 
-- Refused on `x86_64-windows-gnu`:
-
-  ```text
-  __int128 in the signature of 'f' is not supported for a Windows target yet: EmbCC lowers its arithmetic to libgcc helpers whose arguments it places in the System V registers
-  ```
-
 ## `long double` arithmetic
 
-Refused on 1 of the 25 targets.
-
-- Refused on `x86_64-windows-gnu`:
-
-  ```text
-  long double in the signature of 'f' is not supported for a Windows target yet: there it travels by reference and returns through a hidden pointer, and EmbCC passes it on the stack by value
-  ```
+Compiles on every target.
 
 ## `_Float16`
 
@@ -96,7 +84,7 @@ Compiles on every target.
 
 ## sixteen-byte compare-and-swap
 
-Refused on 21 of the 25 targets.
+Refused on 20 of the 25 targets.
 
 - Refused on `thumbv6m-none-eabi`, `thumbv7m-none-eabi`, `thumbv7em-none-eabihf`, `thumbv8m.base-none-eabi`, `thumbv8m.main-none-eabi`, `armv7a-none-eabi`, `riscv32-unknown-elf`, `avr`, `mipsel-none-elf`, `mips-none-elf`, `xtensa-none-elf`, `tricore-none-elf`, `rx-none-elf`, `powerpc-none-eabi`, `sparc-none-elf`, `m68k-none-elf`:
 
@@ -122,27 +110,9 @@ Refused on 21 of the 25 targets.
   the LoongArch64 backend cannot lower a sixteen-byte atomic (the LA64 base ISA has no 128-bit ll/sc or am* instruction) yet (function f) [cas16 w=16 size=16]
   ```
 
-- Refused on `x86_64-windows-gnu`:
-
-  ```text
-  __int128 in the signature of 'f' is not supported for a Windows target yet: EmbCC lowers its arithmetic to libgcc helpers whose arguments it places in the System V registers
-  ```
-
 ## `_Thread_local`
 
-Refused on 2 of the 25 targets.
-
-- Refused on `aarch64-apple-darwin`:
-
-  ```text
-  __thread is not supported for a Darwin target yet: Mach-O addresses a thread-local through a __thread_vars descriptor, which this writer does not emit
-  ```
-
-- Refused on `x86_64-windows-gnu`:
-
-  ```text
-  __thread is not supported for a Windows target yet: Windows reaches a thread-local through a _tls_index and a TLS directory this writer does not emit
-  ```
+Compiles on every target.
 
 ## variable-length arrays
 
@@ -182,13 +152,7 @@ Compiles on every target.
 
 ## `asm goto`
 
-Refused on 25 of the 25 targets.
-
-- Refused on `thumbv6m-none-eabi`, `thumbv7m-none-eabi`, `thumbv7em-none-eabihf`, `thumbv8m.base-none-eabi`, `thumbv8m.main-none-eabi`, `armv7a-none-eabi`, `riscv32-unknown-elf`, `riscv64-unknown-elf`, `avr`, `mipsel-none-elf`, `mips-none-elf`, `mips64el-none-elf`, `mips64-none-elf`, `loongarch64-unknown-elf`, `xtensa-none-elf`, `tricore-none-elf`, `rx-none-elf`, `powerpc-none-eabi`, `sparc-none-elf`, `m68k-none-elf`, `x86_64-elf`, `aarch64-elf`, `x86_64-linux-gnu`, `aarch64-apple-darwin`, `x86_64-windows-gnu`:
-
-  ```text
-  'asm goto' is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
-  ```
+Compiles on every target.
 
 ## nested functions
 
@@ -222,9 +186,9 @@ Refused on 4 of the 25 targets.
 
 ## an assembly source (`.s`) with an instruction
 
-Refused on 3 of the 25 targets.
+Refused on 1 of the 25 targets.
 
-- Refused on `x86_64-elf`, `x86_64-linux-gnu`, `x86_64-windows-gnu`:
+- Refused on `x86_64-windows-gnu`:
 
   ```text
   no assembly-file support for TARGET yet
@@ -236,35 +200,11 @@ Compiles on every target.
 
 ## `-g` (DWARF)
 
-Refused on 1 of the 25 targets.
-
-- Refused on `x86_64-windows-gnu`:
-
-  ```text
-  -g is not supported for a Windows target yet: its debug information goes in CodeView records this does not write, and emitting DWARF under a COFF name would be worse than refusing
-  ```
-
-- A warning on `aarch64-apple-darwin`:
-
-  ```text
-  -g: no debug information for TARGET yet; tests/golden/out/limits/src/plain.c is compiled without it
-  ```
+Compiles on every target.
 
 ## `--unwind-tables`
 
-Refused on 21 of the 25 targets.
-
-- Refused on `thumbv6m-none-eabi`, `thumbv7m-none-eabi`, `thumbv7em-none-eabihf`, `thumbv8m.base-none-eabi`, `thumbv8m.main-none-eabi`, `armv7a-none-eabi`:
-
-  ```text
-  unwind tables are not supported for TARGET yet (--unwind-tables, --exceptions): EmbCC writes no ARM EHABI unwind tables (.ARM.exidx)
-  ```
-
-- Refused on `riscv32-unknown-elf`, `riscv64-unknown-elf`:
-
-  ```text
-  unwind tables are not supported for TARGET yet (--unwind-tables, --exceptions): EmbCC writes no RISC-V .eh_frame
-  ```
+Refused on 6 of the 25 targets.
 
 - Refused on `avr`:
 
@@ -272,28 +212,10 @@ Refused on 21 of the 25 targets.
   unwind tables are not supported for TARGET yet (--unwind-tables, --exceptions): EmbCC writes no AVR .eh_frame
   ```
 
-- Refused on `mipsel-none-elf`, `mips-none-elf`, `mips64el-none-elf`, `mips64-none-elf`:
-
-  ```text
-  unwind tables are not supported for TARGET yet (--unwind-tables, --exceptions): EmbCC writes no MIPS .eh_frame
-  ```
-
 - Refused on `loongarch64-unknown-elf`:
 
   ```text
   unwind tables are not supported for TARGET yet (--unwind-tables, --exceptions): EmbCC writes no LoongArch .eh_frame
-  ```
-
-- Refused on `xtensa-none-elf`:
-
-  ```text
-  unwind tables are not supported for TARGET yet (--unwind-tables, --exceptions): EmbCC writes no Xtensa .eh_frame
-  ```
-
-- Refused on `tricore-none-elf`:
-
-  ```text
-  unwind tables are not supported for TARGET yet (--unwind-tables, --exceptions): EmbCC writes no TriCore .eh_frame
   ```
 
 - Refused on `rx-none-elf`:
@@ -320,84 +242,24 @@ Refused on 21 of the 25 targets.
   unwind tables are not supported for TARGET yet (--unwind-tables, --exceptions): EmbCC writes no ColdFire .eh_frame
   ```
 
-- Refused on `x86_64-windows-gnu`:
-
-  ```text
-  C++ exceptions are not supported for a Windows target yet: the unwind tables go in .pdata and .xdata and neither is written
-  ```
-
 ## C++ (without exceptions)
 
-Refused on 2 of the 25 targets.
-
-- Refused on `avr`:
-
-  ```text
-  C++ is not yet supported for TARGET: the C++ lowering assumes a 32-bit int and 4-byte pointers (integral promotions, member pointers, RTTI), and this target's are 16 bits
-  ```
-
-- Refused on `x86_64-windows-gnu`:
-
-  ```text
-  C++ exceptions are not supported for a Windows target yet: the unwind tables go in .pdata and .xdata and neither is written
-  ```
+Compiles on every target.
 
 ## C++ exceptions
 
-Refused on 21 of the 25 targets.
-
-- Refused on `thumbv6m-none-eabi`, `thumbv7m-none-eabi`, `thumbv7em-none-eabihf`, `thumbv8m.base-none-eabi`, `thumbv8m.main-none-eabi`, `armv7a-none-eabi`:
-
-  ```text
-  C++ exceptions are not supported for TARGET yet: EmbCC writes no ARM EHABI unwind tables (.ARM.exidx); compile with --no-exceptions
-  ```
-
-- Refused on `riscv32-unknown-elf`:
-
-  ```text
-  C++ exceptions are not supported for TARGET yet: EmbCC writes no RISC-V .eh_frame; compile with --no-exceptions
-  ```
-
-- Refused on `riscv64-unknown-elf`:
-
-  ```text
-  the RV64 backend cannot lower this operation yet (function _Z1fv) [landing w=8 size=4]
-  ```
+Refused on 6 of the 25 targets.
 
 - Refused on `avr`:
 
   ```text
-  C++ is not yet supported for TARGET: the C++ lowering assumes a 32-bit int and 4-byte pointers (integral promotions, member pointers, RTTI), and this target's are 16 bits
-  ```
-
-- Refused on `mipsel-none-elf`, `mips-none-elf`, `mips64-none-elf`:
-
-  ```text
-  C++ exceptions are not supported for TARGET yet: EmbCC writes no MIPS .eh_frame; compile with --no-exceptions
-  ```
-
-- Refused on `mips64el-none-elf`:
-
-  ```text
-  the MIPS64 backend cannot lower this operation yet (function _Z1fv) [landing w=8 size=4]
+  'try' with exceptions disabled (-fno-exceptions)
   ```
 
 - Refused on `loongarch64-unknown-elf`:
 
   ```text
-  the LoongArch64 backend cannot lower this operation yet (function _Z1fv) [landing w=8 size=4]
-  ```
-
-- Refused on `xtensa-none-elf`:
-
-  ```text
-  C++ exceptions are not supported for TARGET yet: EmbCC writes no Xtensa .eh_frame; compile with --no-exceptions
-  ```
-
-- Refused on `tricore-none-elf`:
-
-  ```text
-  C++ exceptions are not supported for TARGET yet: EmbCC writes no TriCore .eh_frame; compile with --no-exceptions
+  C++ exceptions are not supported for TARGET yet: EmbCC writes no LoongArch .eh_frame; compile with --no-exceptions
   ```
 
 - Refused on `rx-none-elf`:
@@ -424,41 +286,35 @@ Refused on 21 of the 25 targets.
   C++ exceptions are not supported for TARGET yet: EmbCC writes no ColdFire .eh_frame; compile with --no-exceptions
   ```
 
-- Refused on `x86_64-windows-gnu`:
-
-  ```text
-  C++ exceptions are not supported for a Windows target yet: the unwind tables go in .pdata and .xdata and neither is written
-  ```
-
 ## The whole matrix
 
 | Target | int128 | ldouble | float16 | fp16 | bf16 | float16struct | float16va | bitint | complexint | vector | atomic1 | atomic8 | atomic16 | tls | vla | align32 | frameaddr | retaddr1 | setjmp | cgoto | asmgoto | nested | interrupt | naked | asmfile | dashS | debug | unwind | cxx | cxxeh |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| `thumbv6m-none-eabi` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
-| `thumbv7m-none-eabi` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
-| `thumbv7em-none-eabihf` | no | yes | yes | yes | yes | no | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
-| `thumbv8m.base-none-eabi` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
-| `thumbv8m.main-none-eabi` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
-| `armv7a-none-eabi` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
-| `riscv32-unknown-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
-| `riscv64-unknown-elf` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
-| `avr` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | no | no | yes | yes | yes | yes | yes | no | no | no |
-| `mipsel-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
-| `mips-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
-| `mips64el-none-elf` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
-| `mips64-none-elf` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
-| `loongarch64-unknown-elf` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | no | no | no | yes | yes | yes | yes | no | yes | no |
-| `xtensa-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | no | no | no | yes | yes | yes | yes | no | yes | no |
-| `tricore-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
-| `rx-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
-| `powerpc-none-eabi` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | no | no | no | yes | yes | yes | yes | no | yes | no |
-| `sparc-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | no | no | no | yes | yes | yes | yes | no | yes | no |
-| `m68k-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | yes | no | no | yes | yes | yes | yes | yes | no | yes | no |
-| `x86_64-elf` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | no | no | no | no | no | yes | yes | yes | yes | yes |
-| `aarch64-elf` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | no | no | no | yes | yes | yes | yes | yes | yes | yes |
-| `x86_64-linux-gnu` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | no | no | no | no | no | yes | yes | yes | yes | yes |
-| `aarch64-apple-darwin` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | no | no | no | no | yes | yes | warns | yes | yes | yes |
-| `x86_64-windows-gnu` | no | no | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | no | yes | yes | yes | yes | no | yes | no | no | no | no | no | yes | no | no | no | no |
+| `thumbv6m-none-eabi` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | yes | yes |
+| `thumbv7m-none-eabi` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | yes | yes |
+| `thumbv7em-none-eabihf` | no | yes | yes | yes | yes | no | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | yes | yes |
+| `thumbv8m.base-none-eabi` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | yes | yes |
+| `thumbv8m.main-none-eabi` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | yes | yes |
+| `armv7a-none-eabi` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | yes | yes |
+| `riscv32-unknown-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | yes | yes |
+| `riscv64-unknown-elf` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | yes | yes |
+| `avr` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | no |
+| `mipsel-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | yes | yes |
+| `mips-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | yes | yes |
+| `mips64el-none-elf` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | yes | yes |
+| `mips64-none-elf` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | yes | yes |
+| `loongarch64-unknown-elf` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | yes | no | no | yes | yes | yes | yes | no | yes | no |
+| `xtensa-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | yes | no | no | yes | yes | yes | yes | yes | yes | yes |
+| `tricore-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | yes | yes |
+| `rx-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | no |
+| `powerpc-none-eabi` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | yes | no | no | yes | yes | yes | yes | no | yes | no |
+| `sparc-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | yes | no | no | yes | yes | yes | yes | no | yes | no |
+| `m68k-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | no |
+| `x86_64-elf` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | no | no | no | yes | yes | yes | yes | yes | yes |
+| `aarch64-elf` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | no | no | yes | yes | yes | yes | yes | yes | yes |
+| `x86_64-linux-gnu` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | no | no | no | yes | yes | yes | yes | yes | yes |
+| `aarch64-apple-darwin` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | no | no | no | yes | yes | yes | yes | yes | yes |
+| `x86_64-windows-gnu` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | no | yes | yes | no | no | no | no | yes | yes | yes | yes | yes |
 
 The columns are the sections above, in order:
 - `int128`: `__int128`

@@ -115,6 +115,18 @@ int embdbg_decode_one(const unsigned char *code, int n, unsigned long addr,
             else     sprintf(out, "%s    %s,%s", alu[a].mn, reg, rm);
             return i;
         }
+        /* ...and the accumulator forms: OP al, imm8 / OP eax, imm32 */
+        if (op == bs + 4) {
+            sprintf(out, "%s    $0x%x,%%al", alu[a].mn, code[i]);
+            return i + 1;
+        }
+        if (op == bs + 5) {
+            long imm = opsz == 2 ? (long)(short)(code[i] | code[i + 1] << 8)
+                                 : rd_s32(code + i);
+            sprintf(out, "%s    $0x%lx,%%%s", alu[a].mn, imm,
+                    regname(opsz, 0));
+            return i + (opsz == 2 ? 2 : 4);
+        }
     }
     if (op == 0x88 || op == 0x89 || op == 0x8a || op == 0x8b) {   /* mov */
         int byte = !(op & 1), dir = (op >> 1) & 1, sz = byte ? 1 : opsz;
@@ -318,6 +330,19 @@ int embdbg_decode_one(const unsigned char *code, int n, unsigned long addr,
     /* ---- two-byte 0F opcodes ---- */
     if (op == 0x0f) {
         unsigned char o2 = code[i++];
+        if (o2 == 0x0b) { sprintf(out, "ud2"); return i; }
+        if (o2 == 0xae) {               /* the fences, ldmxcsr, stmxcsr */
+            unsigned char m = code[i];
+            if (m == 0xe8) { sprintf(out, "lfence"); return i + 1; }
+            if (m == 0xf0) { sprintf(out, "mfence"); return i + 1; }
+            if (m == 0xf8) { sprintf(out, "sfence"); return i + 1; }
+            int r = modrm(code, &i, rex, 4, 0, rm);
+            static const char *const G[8] = { "fxsave", "fxrstor", "ldmxcsr",
+                                              "stmxcsr", "xsave", "xrstor",
+                                              "xsaveopt", "clflush" };
+            sprintf(out, "%-6s %s", G[r & 7], rm);
+            return i;
+        }
         if (o2 >= 0x80 && o2 <= 0x8f) { long rel = rd_s32(code + i); i += 4;
             sprintf(out, "j%-5s 0x%lx", CC[o2 - 0x80], addr + i + rel); return i; }
         if (o2 >= 0x90 && o2 <= 0x9f) { int r = modrm(code, &i, rex, 1, 0, rm);

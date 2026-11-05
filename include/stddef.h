@@ -14,6 +14,9 @@ typedef decltype(nullptr) nullptr_t;
 typedef __WCHAR_TYPE__ wchar_t;
 typedef __WINT_TYPE__ wint_t;
 #define NULL ((void *)0)
+#if __STDC_VERSION__ >= 202311L
+typedef typeof(nullptr) nullptr_t;
+#endif
 #endif
 /* The most strictly aligned scalar type, as GCC's stddef.h lays it out,
  * in C11 as in C++: 16 bytes' alignment on x86-64, AArch64 and RISC-V,

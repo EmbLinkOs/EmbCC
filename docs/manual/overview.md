@@ -172,7 +172,7 @@ detail of each target's ABI, options and predefined macros.
 | RISC-V RV64 | `riscv64-unknown-elf` | ELF64 | LP64 | Bare metal, RV64IMAC; linked by `embld`. |
 | AVR | `avr` | ELF32 | 16-bit `int` and pointers, 32-bit `long`, 4-byte `double` | Bare metal, ATmega328P; linked by `embld`. |
 | macOS | `x86_64-apple-darwin`, `aarch64-apple-darwin` | Mach-O | LP64 | Objects for the system linker. `-g` and `__thread` are refused. |
-| Windows | `x86_64-windows-gnu` | COFF | LP64 | Objects only, not yet the Microsoft x64 ABI; every compile warns (`--warn=windows-abi`). No C library. |
+| Windows | `x86_64-windows-gnu` | COFF | LLP64 | Objects only, in the Microsoft x64 ABI, with `.pdata` unwind; they link with MinGW's. No C library. |
 
 `x86_64-elf` and `x86_64-emblink` produce the same code and differ only
 in their predefined macros: `x86_64-emblink` defines `__emblink__`,
@@ -246,6 +246,15 @@ For people compiling code with EmbCC:
 - [Optimization](optimization.md): the `-O` levels and the `-f` options.
 - [Debugging](debugging.md): `-g`, the DWARF EmbCC emits, and the
   debuggers that read it.
+- [Coverage and profile-guided optimization](coverage-and-profiles.md):
+  `--coverage`, gcov and llvm-cov, coverage on a board, and
+  `--profile-use`.
+- [Run-time checks and hardening](runtime-checks.md): the sanitizers,
+  bounds safety, the stack protector and control-flow protection.
+- [Static analysis](static-analysis.md): MISRA C and CERT C, the
+  analyzer, and worst-case stack and cycle bounds.
+- [Reproducible builds and SBOMs](reproducible-builds.md): the same bytes
+  from any directory, and a bill of materials for an image.
 - The tool reference pages: [embas](tools/embas.md),
   [embld](tools/embld.md), [embread](tools/embread.md),
   [embdbg](tools/embdbg.md), [embls](tools/embls.md),

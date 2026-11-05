@@ -1637,7 +1637,7 @@ CPU and data memory sections (DS70204, DS70202):
 
 ## Counting
 
-Each instruction gets the cost in `tools/bench/cost.h`, the table
+Each instruction gets the cost in `src/arch/cost.h`, the table
 tools/bench uses in QEMU. On the Cortex-M that covers loads, multiples,
 divides, VFP division and square root, and 2 cycles more for a taken
 branch. On RISC-V (a plain in-order pipeline, at either width): 1, a

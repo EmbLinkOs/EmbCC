@@ -26,14 +26,18 @@
  * is a macro, not an enum terminator: EmbCC's own subset (which must compile
  * this file for self-hosting) folds only integer literals, not enum
  * constants, in an array bound. */
-#define DWARF_NSEC 5
-enum { DWSEC_ABBREV, DWSEC_INFO, DWSEC_LINE, DWSEC_RANGES, DWSEC_FRAME };
+#define DWARF_NSEC 10
+enum { DWSEC_ABBREV, DWSEC_INFO, DWSEC_LINE, DWSEC_RANGES, DWSEC_FRAME,
+       DWSEC_LOC, DWSEC_ADDR,
+       /* -gsplit-dwarf: the .dwo file's (no relocations: an address is an
+        * index into the object's .debug_addr) */
+       DWSEC_INFO_DWO, DWSEC_ABBREV_DWO, DWSEC_LOC_DWO };
 
 /* What a relocation binds against — the driver resolves each to the matching
  * section symbol (STT_SECTION). DWTGT_TEXT is the code the addresses point
  * into; the rest are self-references between debug sections. */
 enum { DWTGT_TEXT, DWTGT_ABBREV, DWTGT_LINE, DWTGT_RANGES, DWTGT_GLOBAL,
-       DWTGT_FRAME };
+       DWTGT_FRAME, DWTGT_LOC, DWTGT_ADDR };
 
 struct dwarf_reloc {
     int in_sec;      /* DWSEC_* the field lives in */
@@ -58,7 +62,7 @@ struct dwarf_out {
     int nrelocs, reloccap;
     /* Set by the caller before dwarf_emit: the DWARF numbers of the stack
      * pointer and of the return address's register, for .debug_frame
-     * (the backend registry's frame_sp and frame_ra); frame_ra 0 writes
+     * (the backend registry's frame_sp and frame_ra); frame_sp 0 writes
      * no .debug_frame. Passed in rather than looked up, so this file
      * needs no backend linked beside it (embls links it alone). */
     int frame_sp, frame_ra;
@@ -79,5 +83,21 @@ void dwarf_emit(struct ir_unit *iu, const char *filename,
 void dwarf_emit_split(struct ir_unit *iu, const char *filename,
                       struct dwarf_out *out);
 void dwarf_free(struct dwarf_out *out);
+
+/* The DWARF version written: 5 (the default, as GCC 11 and Clang 14) or
+ * 4. Sections and forms follow it: .debug_rnglists and .debug_loclists
+ * in 5, .debug_ranges and .debug_loc in 4. */
+void dwarf_set_version(int v);
+int dwarf_version(void);
+/* The name of debug section DWSEC_* in the object, for the version. */
+const char *dwarf_section_name(int sec);
+/* -gsplit-dwarf (DWARF 5): the object keeps a skeleton unit, the line
+ * table, the frames and .debug_addr; the rest goes to the .dwo named here
+ * (DW_AT_dwo_name), in the sections dwarf_section_is_dwo says. NULL: one
+ * piece. */
+void dwarf_set_split(const char *dwo_name);
+/* bytes p[0..n) as a zlib stream (-gz), malloc'd, its length *outlen */
+unsigned char *dwarf_zlib(const unsigned char *p, int n, int *outlen);
+int dwarf_section_is_dwo(int sec);
 
 #endif

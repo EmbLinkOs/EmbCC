@@ -28,6 +28,7 @@
 #include "../arch/coldfire/asm.h"
 #include "../arch/sparc/asm.h"
 #include "../arch/ppc/asm.h"
+#include "../arch/x86_64/att.h"
 #include "../arch/backend.h"
 #include "../parse/ast.h"
 
@@ -121,7 +122,7 @@ struct gas {
     /* How many times each numeric local label has been DEFINED so far in
      * this pass. Reset between passes so both agree. (NLOCAL of them: GNU
      * as takes any number, and a startup file counts past 9.) */
-    int local_n[100];
+    int local_n[1000];
     int cur;                /* current section */
     int npcrel;             /* .Lpcrel_hiN counter */
     int line;               /* for diagnostics */
@@ -1298,10 +1299,26 @@ static int extern_form(struct gas *g, const char *stmt, long pc, int pass,
          (strncmp(p, "b.w", 3) == 0 && isspace((unsigned char)p[3])))) {
         struct code tmp = { 0 };
         char err[256];
+        /* ARMv6-M and v8-M Baseline have no wide b: in pass 1 a label
+         * further down is not yet known and lands here, so it is sized as
+         * the narrow form it will be; one really elsewhere has no branch
+         * that reaches it */
+        int thumb1 = !arm_a32(g) && (target_thumb_arch() == 6 ||
+                                     target_thumb_v8m_base());
+        if (thumb1 && pass == 2) {
+            gerr(g, "'b %s': %s has no branch to a symbol in another "
+                    "section or file (its b reaches 2KB, and only inside "
+                    "one); use bl, or ldr and bx", ext,
+                 target_thumb_v8m_base() ? "ARMv8-M Baseline" : "ARMv6-M");
+            return 1;
+        }
         if (pass == 2)
             fix_add(g, g->cur, pc, ext,
                     arm_a32(g) ? R_ARM_JUMP24 : R_ARM_THM_JUMP24, 0);
-        if (g->tgt->encode("b .+0", &tmp, err, sizeof err) != 0)
+        if (thumb1)
+            tasm_set_wide(0);   /* (not the statement before's) */
+        if (g->tgt->encode(thumb1 ? "b.n .+4" : "b .+0", &tmp, err,
+                           sizeof err) != 0)
             gerr(g, "%s", err);
         else
             emit_bytes(g, (const unsigned char *)tmp.p, tmp.len);
@@ -3628,6 +3645,12 @@ static void pass_over(struct gas *g, const struct gline *lines, int nlines,
 
 /* ---- the object ------------------------------------------------------ */
 
+/* The target's own notes, handed in by the driver (backend_get's
+ * elf_notes): tools that link this file for its inline-asm half, as
+ * embls does, have no backend registry */
+static void (*g_elf_notes)(struct elfw *w);
+void gas_set_elf_notes(void (*notes)(struct elfw *w)) { g_elf_notes = notes; }
+
 static int write_object(struct gas *g, const char *out_path)
 {
     struct elfw *w = elfw_new(g->tgt->machine);
@@ -3843,8 +3866,8 @@ static int write_object(struct gas *g, const char *out_path)
      * (the registry's elf_notes): ARM's build attributes, RISC-V's ISA
      * string -- without it a disassembler knows only RV32I and C, and
      * showed a .S's fsd as <unknown> -- and MIPS's ABI flags */
-    if (backend_get(target_get())->elf_notes)
-        backend_get(target_get())->elf_notes(w);
+    if (g_elf_notes)
+        g_elf_notes(w);
     free(used);
     if (g->errors) { elfw_free(w); free(ndx); return 1; }
     int rc = elfw_write(w, out_path);
@@ -4012,6 +4035,23 @@ static const struct gas_target TRICORE_GAS = {
 };
 #endif
 
+/* x86-64, ELF: AT&T syntax (src/arch/x86_64/att.c). Symbols are its
+ * symform's -- call/jmp sym (PLT32), jcc (PC32), sym(%rip) (PC32 or
+ * GOTPCREL), $sym (32, 32S or 64) -- and `.long`/`.quad sym` the generic
+ * ones; jmp and jcc relax by levels (two bytes where they reach). `#`
+ * starts a comment. */
+#if FAMILY_BUILT(x86)
+static const struct gas_target X86_GAS = {
+    EM_X86_64, 0, x86att_assemble, x86att_is_reg,
+    0, 0, 0,
+    R_X86_64_32, R_X86_64_64,
+    0, 0, x86att_symform, 0,
+    0, x86att_is_word, NULL, NULL, NULL,
+    0, x86att_set_level, x86att_took_level, NULL,
+    x86att_is_transfer, NULL
+};
+#endif
+
 /* RX (RXv1). Its symbol forms are rxasm_symform's: `mov.l #sym, rd`
  * (R_RX_DIR32), and a branch to a symbol defined elsewhere (bra/bsr .a
  * R_RX_DIR24S_PCREL, beq/bne .w R_RX_DIR16S_PCREL, another condition .b
@@ -4095,6 +4135,11 @@ static const struct gas_target PPC_GAS = {
 static const struct gas_target *target_for(void)
 {
     switch (target_get()) {
+#if FAMILY_BUILT(x86)
+    case TARGET_X86_64:      /* (gas writes ELF: not Mach-O or COFF) */
+        return target_os_get() == TGT_OS_DARWIN ||
+               target_os_get() == TGT_OS_WINDOWS ? NULL : &X86_GAS;
+#endif
 #if FAMILY_BUILT(m68k)
     case TARGET_COLDFIRE: return &CF_GAS;
 #endif
@@ -4289,6 +4334,93 @@ int gas_assemble(const char *in_path, const char *out_path, int preprocess,
     if (text != src) free(text);
     free(src);
     return rc;
+}
+
+/* An inline template is never an object of its own, so x86-64's
+ * assembler serves it on Darwin and Windows too (target_for refuses
+ * them: this file writes ELF) */
+static const struct gas_target *target_for_inline(void)
+{
+#if FAMILY_BUILT(x86)
+    if (target_get() == TARGET_X86_64)
+        return &X86_GAS;
+#endif
+    return target_for();
+}
+
+int gas_template_has_labels(const char *text)
+{
+    const struct gas_target *t = target_for_inline();
+    const char *p = text;
+    while (*p) {
+        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' ||
+               (*p == ';' && !(t && t->comment_char == ';')))
+            p++;
+        const char *w = p;
+        while (*p && (isalnum((unsigned char)*p) || *p == '_' || *p == '.' ||
+                      *p == '$'))
+            p++;
+        if (p > w && *p == ':' && p[1] != ':')
+            return 1;
+        while (*p && *p != '\n' && !(*p == ';' && !(t && t->comment_char == ';')))
+            p++;
+    }
+    return 0;
+}
+
+int gas_assemble_inline(const char *file, int line, const char *text,
+                        struct code *out, char *err, int errlen)
+{
+    struct gas g;
+    struct gexp gx;
+    const struct gas_target *t = target_for_inline();
+    err[0] = 0;
+    if (!t) {
+        snprintf(err, (size_t)errlen, "a label in an asm template is not "
+                 "supported for %s", target_triple_now());
+        return -1;
+    }
+    memset(&g, 0, sizeof g);
+    g.path = file;
+    g.line_base = line > 0 ? line - 1 : 0;
+    g.tgt = t;
+    sec_init(&g);
+    gas_run(&g, &gx, text, file);
+    for (int i = 0; i < g.nsecs && !g.errors; i++)
+        if (i != SEC_TEXT && (g.secs[i].c.len || g.secs[i].size))
+            snprintf(err, (size_t)errlen, "an asm template with labels that "
+                     "puts bytes in section %s is not supported: its bytes "
+                     "are the function's", g.secs[i].name);
+    if (!err[0] && !g.errors && g.nfix)
+        snprintf(err, (size_t)errlen, "an asm template with labels that "
+                 "names the symbol '%s' is not supported: only its own "
+                 "labels; pass an address in an operand", g.fix[0].sym);
+    if (!err[0] && !g.errors && g.secs[SEC_TEXT].align > 4)
+        snprintf(err, (size_t)errlen, "an alignment of %ld in an asm "
+                 "template with labels is not supported: where the "
+                 "template lands in the function is not known to it",
+                 g.secs[SEC_TEXT].align);
+    if (!err[0] && g.errors)
+        snprintf(err, (size_t)errlen, "the asm template above does not "
+                 "assemble");
+    if (!err[0]) {
+        struct gsec *tx = &g.secs[SEC_TEXT];
+        for (int i = 0; i < tx->c.len; i++)
+            code_byte(out, tx->c.p[i]);
+        for (int i = 0; i < g.nmaps; i++) {
+            if (g.maps[i].sec != SEC_TEXT || g.maps[i].kind != 'd')
+                continue;
+            long end = tx->c.len;
+            for (int k = i + 1; k < g.nmaps; k++)
+                if (g.maps[k].sec == SEC_TEXT && g.maps[k].off > g.maps[i].off) {
+                    end = g.maps[k].off;
+                    break;
+                }
+            code_mark_data(out, (int)g.maps[i].off, (int)end);
+        }
+    }
+    gas_free(&g, &gx);
+    return err[0] ? -1 : 0;
 }
 
 /* A name the block uses, as the driver knows names: on RX a C symbol is

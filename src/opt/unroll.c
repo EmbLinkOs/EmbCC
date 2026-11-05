@@ -882,6 +882,7 @@ static void unrx_sink(struct ir_func *fn, const struct unrx_runs *R)
         for (int k = 0; k < R->n; k++)
             if (n == R->lo[k] - 1 && (q->op == IR_BRZ || q->op == IR_BRNZ)) {
                 q->op = q->op == IR_BRZ ? IR_BRNZ : IR_BRZ;
+                q->prob = (short)ir_prob_flip(q->prob);
                 q->label = lbl[k];
             }
     }
@@ -1076,6 +1077,7 @@ static int unrx_one(struct ir_func *fn, char *seen, int nseen)
                          * last: the loop goes on into the next copy, and
                          * leaves where it would have fallen out */
                         q.op = q.op == IR_BRNZ ? IR_BRZ : IR_BRNZ;
+                        q.prob = (short)ir_prob_flip(q.prob);
                         q.label = unrx_target(fn, &S, Lexit, cur, carried,
                                               nvr);
                     } else if (n2 != L.hi - 1) {

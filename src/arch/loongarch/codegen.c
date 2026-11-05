@@ -3675,8 +3675,11 @@ static void gen_func(struct ir_func *fn, struct code *t, struct la_sites *st,
     }
 
     int tail_end = 0;        /* the body's last act is a tail call */
+    ra_debug_pc_begin(fn);
     for (i = 0; i < fn->nins; i++) {
         int was_tail = F.tail && F.tail[i];
+        if (fn->ins_pc)
+            fn->ins_pc[i] = t->len;
         gen_ins(&F, i);
         if (F.skip_next) {          /* the comparison emitted its branch */
             F.skip_next = 0;
@@ -3759,6 +3762,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct la_sites *st,
     }
 
     f->code_len = t->len - f->code_off;
+    /* -g: DWARF numbers the registers as the machine; slots are
+     * frame-base relative */
+    ra_debug_finish(fn, t->len, F.loc, NULL, 0, F.slot, -1, F.wide, 0, 4);
     f->stack_bytes = (int)F.frame;     /* what -fstack-usage reports */
     free(F.usecnt);
     free(F.tail);

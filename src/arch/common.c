@@ -144,6 +144,20 @@ int cg_label_mark(const struct ir_ins *i)
     return i->op == IR_LABELADDR && i->vol;
 }
 
+int cg_returns_twice(const struct ir_ins *i)
+{
+    if (i->op != IR_CALL || i->indirect || !i->callee || !i->callee->name)
+        return 0;
+    static const char *const names[] = {
+        "setjmp", "_setjmp", "sigsetjmp", "__sigsetjmp", "savectx", "vfork",
+        "getcontext", "__builtin_setjmp", NULL
+    };
+    for (int k = 0; names[k]; k++)
+        if (!strcmp(i->callee->name, names[k]))
+            return 1;
+    return 0;
+}
+
 void cg_note_labels(struct ir_func *fn, const int *label_off)
 {
     struct func *f = fn->src;
@@ -444,4 +458,32 @@ int cg_fn_align(const struct ir_func *fn)
             m = a;
     }
     return m;
+}
+
+static int cg_local_vis(const char *vis)
+{
+    return vis && (strcmp(vis, "hidden") == 0 || strcmp(vis, "internal") == 0 ||
+                   strcmp(vis, "protected") == 0);
+}
+
+int cg_func_via_got(const struct func *f)
+{
+    int pic = target_pic();
+    if (!pic || target_fmt_get() != TGT_FMT_ELF)
+        return 0;
+    if (!f->has_defn)
+        return !(cg_local_vis(f->vis) && !f->is_weak);
+    return pic == TARGET_PIC && !f->is_static && !cg_local_vis(f->vis);
+}
+
+int cg_global_via_got(const struct global *g)
+{
+    int pic = target_pic();
+    if (!pic || target_fmt_get() != TGT_FMT_ELF)
+        return 0;
+    if (!g->defined)
+        /* hidden and not weak: this module defines it (the linker's
+         * __ehdr_start, a library's internal symbol), PC-relative */
+        return !(cg_local_vis(g->vis) && !g->is_weak);
+    return pic == TARGET_PIC && !g->is_static && !cg_local_vis(g->vis);
 }

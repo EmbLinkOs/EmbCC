@@ -48,6 +48,7 @@ for t in $targets; do
     sz() { echo "$m" | sed -n "s/^#define $1 //p"; }
     case $(sz __SIZEOF_INT__)/$(sz __SIZEOF_LONG__)/$(sz __SIZEOF_POINTER__) in
     4/8/8) ct=x86_64-unknown-linux-gnu ;;
+    4/4/8) ct=x86_64-w64-windows-gnu ;;     # LLP64
     4/4/4) ct=armv7-none-eabi ;;
     2/4/2) ct=avr ;;
     *) echo "$t: no clang target with its sizes"; fail=1; continue ;;

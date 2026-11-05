@@ -46,7 +46,7 @@ static const void *base_addr(const __base_class_type_info *b, const void *addr)
     long off = b->offset();
     if (b->is_virtual()) {
         const char *const *vptr = *reinterpret_cast<const char *const *const *>(addr);
-        off = *reinterpret_cast<const long *>(
+        off = *reinterpret_cast<const std::ptrdiff_t *>(  /* a slot */
                   reinterpret_cast<const char *>(vptr) + off);
     }
     return reinterpret_cast<const char *>(addr) + off;

@@ -232,6 +232,8 @@ struct rv_fn {
     int stg_v[MAX_PARAMS], nstg;
     long stg_off[MAX_PARAMS];
     int used_callee[RA_MAXPOOL];  /* the callee-saved ones it took */
+    int zcmp, zcmp_rlist;         /* Zcmp: cm.push/cm.popret, its list */
+    long zcmp_base;               /* ...and the bytes the list takes */
     int pair_used[9], npair;      /* callee-saved pairs rv_pair_alloc took */
     int nsave;
     struct code *t;
@@ -1419,6 +1421,10 @@ static void layout(struct rv_fn *F)
          * needed none pays for none, which is what makes the
          * caller-saved-first preference order worth having. */
         F->save_at = F->ra_slot - (long)F->nsave * F->w;
+        if (F->zcmp) {                /* cm.push's order: ra below them */
+            F->ra_slot = F->frame - (long)(F->nsave + 1) * F->w;
+            F->save_at = F->ra_slot + F->w;
+        }
     }
     /* An interrupt handler's saves, at the very top: sixteen-byte
      * aligned, so nothing below moves with how many there are, and
@@ -2026,6 +2032,18 @@ static void ext_reg(struct rv_fn *F, int rdst, int rs, int size, int sign)
     }
     if (size == 4 && sign && F->xlen == 64) {
         rv_alu_imm(F->t, RV_ADD, rdst, rs, 0, 1);         /* sext.w */
+        return;
+    }
+    /* Zbb's sext.b, sext.h and zext.h, and Zba's zext.w (add.uw rd, rs,
+     * zero): one instruction where the shifts are two */
+    unsigned ext = target_riscv_ext();
+    if ((ext & RV_EXT_ZBB) && size <= 2 && (sign || size == 2)) {
+        rv_zb_unary(F->t, sign ? (size == 1 ? RV_ZB_SEXTB : RV_ZB_SEXTH)
+                               : RV_ZB_ZEXTH, rdst, rs, 0, F->xlen);
+        return;
+    }
+    if ((ext & RV_EXT_ZBA) && size == 4 && !sign && F->xlen == 64) {
+        rv_zb_r(F->t, RV_ZB_ADDUW, rdst, rs, RV_ZERO);
         return;
     }
     rv_shift_imm(F->t, RV_SLL, rdst, rs, F->xlen - size * 8, 0, F->xlen);
@@ -3124,6 +3142,34 @@ static int rv_ind_tail_reg(const struct rv_fn *F, const struct ir_ins *i)
     return r >= RV_A0 && r <= RV_A0 + 7 && !rv_setup_writes(F, i, r);
 }
 
+/* Zfhmin (or Zfh): the half conversions irgen calls (__embcc_h2f,
+ * __embcc_f2h, __embcc_d2h: irgen.c's half_fn) are instructions, where
+ * the call's arguments and result travel in fa0 -- the F (or, for a
+ * double, D) ABI. 0: a call after all; else 1 widen, 2 narrow a float,
+ * 3 narrow a double. */
+static int rv_half_cvt(const struct ir_ins *i)
+{
+    const char *nm = i->op == IR_CALL && !i->indirect && i->callee
+                   ? i->callee->name : NULL;
+    if (!nm || i->nargs != 1 || !(target_riscv_ext() & RV_EXT_ZFHMIN) ||
+        target_riscv_abi_flen() < 32)
+        return 0;
+    if (!strcmp(nm, "__embcc_h2f"))
+        return 1;
+    if (!strcmp(nm, "__embcc_f2h"))
+        return 2;
+    if (!strcmp(nm, "__embcc_d2h") && target_riscv_abi_flen() == 64)
+        return 3;
+    return 0;
+}
+
+/* OP-FP with the half format (fmt 2): fcvt.s.h, fcvt.h.s, fcvt.h.d,
+ * fmv.h.x, fmv.x.h */
+static void rv_fp_h(struct code *t, int f5, int rm, int rd, int rs1, int rs2)
+{
+    rv_w(t, rv_enc_r(0x53, rd, rm, rs1, rs2, (f5 << 2) | 2));
+}
+
 static int rv_tail_ok(const struct rv_fn *F, int n)
 {
     const struct ir_func *fn = F->fn;
@@ -3133,7 +3179,7 @@ static int rv_tail_ok(const struct rv_fn *F, int n)
 
     if (i->op != IR_CALL || (i->indirect && !rv_ind_tail_reg(F, i)) ||
         i->call_varargs || i->retsize ||
-        i->flt || getenv("EMBCC_NO_TAILCALL"))
+        i->flt || getenv("EMBCC_NO_TAILCALL") || rv_half_cvt(i))
         return 0;
     if (fn->ret_abi.is_struct || fn->ret_abi.is_float)
         return 0;
@@ -3185,9 +3231,49 @@ static int rv_tail_ok(const struct rv_fn *F, int n)
 /* The epilogue's restores: the callee-saved registers, ra when it was
  * saved, and the frame. Shared by the epilogue and a tail call, which
  * must leave exactly the state the epilogue's `ret` would. */
+/* Zcmp's push and pops: the list, and an adjustment of base + 16 *
+ * spimm (spimm 0..3) of the frame, the rest of which an addi makes */
+static long zcmp_adj(const struct rv_fn *F)
+{
+    return F->frame < F->zcmp_base + 48 ? F->frame : F->zcmp_base + 48;
+}
+
+static void zcmp_op(struct rv_fn *F, unsigned base)
+{
+    long spimm = (zcmp_adj(F) - F->zcmp_base) / 16;
+    code_u16(F->t, base | (unsigned)F->zcmp_rlist << 4 | (unsigned)spimm << 2);
+}
+
+static void rv_restore_ex(struct rv_fn *F, int ret);
+
 static void rv_restore(struct rv_fn *F)
 {
+    rv_restore_ex(F, 0);
+}
+
+/* ...and, with ret, the return too (Zcmp's cm.popret) */
+static void rv_restore_ex(struct rv_fn *F, int ret)
+{
     struct code *t = F->t;
+    if (F->zcmp) {
+        for (int k = 0; k < F->nfsave; k++)
+            fld_sp(F, F->fused[k], F->fsave_at + (long)k * 8,
+                   target_riscv_abi_flen() == 64);
+        long rest = F->frame - zcmp_adj(F);
+        if (rest && rv_fits(rest, 12)) {
+            rv_alu_imm(t, RV_ADD, RV_SP, RV_SP, (int)rest, 0);
+        } else if (rest) {
+            rv_li(t, RV_T0, rest, F->xlen);
+            rv_alu(t, RV_ADD, RV_SP, RV_SP, RV_T0, 0);
+        }
+        zcmp_op(F, ret ? 0xbe02u : 0xba02u);      /* cm.popret / cm.pop */
+        return;
+    }
+    if (ret) {
+        rv_restore_ex(F, 0);
+        rv_ret(t);
+        return;
+    }
     for (int k = 0; k < F->nsave; k++)
         ld_sp(F, F->used_callee[k], F->save_at + (long)k * F->w, F->w, 1);
     for (int k = 0; k < F->nfsave; k++)
@@ -3727,7 +3813,22 @@ static void gen_call(struct rv_fn *F, int n)
     }
 
     F->nstg = 0;
-    if (F->tail && F->tail[n]) {
+    int hk = rv_half_cvt(i);
+    if (hk == 1) {
+        /* the bits in a0 to a float in fa0 */
+        rv_fp_h(t, 0x1e, 0, RV_FT0, RV_A0, 0);              /* fmv.h.x */
+        rv_fp_r(t, 0x08, 0, 0, RV_FA0, RV_FT0, 2);          /* fcvt.s.h */
+    } else if (hk) {
+        /* fa0 to binary16, its bits into a0 zero-extended, as an
+         * unsigned short comes back */
+        rv_fp_h(t, 0x08, 7, RV_FT0, RV_FA0, hk == 3);       /* fcvt.h.s/d */
+        rv_fp_h(t, 0x1c, 0, RV_A0, RV_FT0, 0);              /* fmv.x.h */
+        rv_shift_imm(t, RV_SLL, RV_A0, RV_A0, F->xlen - 16, 0, F->xlen);
+        rv_shift_imm(t, RV_SRL, RV_A0, RV_A0, F->xlen - 16, 0, F->xlen);
+    }
+    if (hk) {
+        /* then the result as a call's */
+    } else if (F->tail && F->tail[n]) {
         /* The frame down, then a JUMP: the callee returns straight to
          * this function's caller, with ra as it came in. t1 carries the
          * far form's address, and nothing is live in it by now. */
@@ -3750,7 +3851,9 @@ static void gen_call(struct rv_fn *F, int n)
             F->skip_next = 1;         /* the IR_RET: not reached */
         return;
     }
-    if (i->indirect) {
+    if (hk) {
+        /* the conversion is done */
+    } else if (i->indirect) {
         /* In memory, the target is read last -- the arguments are
          * already in place, and SCR is not one of them. */
         if (tgt < 0) {
@@ -5010,6 +5113,18 @@ static void gen_ins(struct rv_fn *F, int n)
                : i->op == IR_XOR ? RV_XOR
                : -1;                           /* IR_MUL: not an ALU op */
         int logical = i->op == IR_AND || i->op == IR_OR || i->op == IR_XOR;
+        /* Zbb: `t = a ^ b; d = ~t`, t read nowhere else, is xnor */
+        if (i->op == IR_XOR && !i->imm_b &&
+            (target_riscv_ext() & RV_EXT_ZBB) && n + 1 < fn->nins &&
+            F->usecnt && i->dst >= 0 && F->usecnt[i->dst] == 1 &&
+            fn->ins[n + 1].op == IR_BNOT && fn->ins[n + 1].a == i->dst) {
+            int ra_ = rdr(F, i->a, ACC), rb_ = rdr(F, i->b, TMP);
+            int d = wreg(F, fn->ins[n + 1].dst, ACC);
+            rv_zb_r(t, RV_ZB_XNOR, d, ra_, rb_);
+            wrote(F, fn->ins[n + 1].dst, d);
+            F->skip_next = 1;
+            return;
+        }
         int ra_ = rdr(F, i->a, ACC);
         int rd_ = wreg(F, i->dst, ACC);
         if (i->imm_b && i->op != IR_MUL) {
@@ -5024,6 +5139,26 @@ static void gen_ins(struct rv_fn *F, int n)
                            (int)v, logical ? 0 : wordop);
                 wrote(F, i->dst, rd_);
                 return;
+            }
+            /* Zbs: one bit set, cleared or flipped -- the constant as
+             * `li` would make it (sign-extended at RV64 for a 32-bit
+             * value), so a 32-bit bit 31 is not a single bit there */
+            if (logical && (target_riscv_ext() & RV_EXT_ZBS)) {
+                unsigned long long m = (unsigned long long)v;
+                if (F->xlen == 32)
+                    m &= 0xffffffffULL;
+                if (i->op == IR_AND)
+                    m = F->xlen == 32 ? ~m & 0xffffffffULL : ~m;
+                if (m && !(m & (m - 1))) {
+                    int k = 0;
+                    while (!(m >> k & 1))
+                        k++;
+                    rv_zb_imm(t, i->op == IR_AND ? RV_ZB_BCLRI
+                                 : i->op == IR_OR ? RV_ZB_BSETI : RV_ZB_BINVI,
+                              rd_, ra_, k, 0);
+                    wrote(F, i->dst, rd_);
+                    return;
+                }
             }
         }
         {
@@ -5065,6 +5200,27 @@ static void gen_ins(struct rv_fn *F, int n)
         return;
     }
     case IR_SHL: case IR_SHR: {
+        /* Zba: `t = x << 1..3; d = t + y`, t read nowhere else -- the
+         * scaled index of an address, mostly -- is one shNadd. At XLEN
+         * only: a 32-bit sum at RV64 must come out sign-extended. */
+        if (i->op == IR_SHL && i->imm_b && i->imm >= 1 && i->imm <= 3 &&
+            (target_riscv_ext() & RV_EXT_ZBA) && !wordop &&
+            i->w == F->w && n + 1 < fn->nins && F->usecnt && i->dst >= 0 &&
+            F->usecnt[i->dst] == 1) {
+            const struct ir_ins *nx = &fn->ins[n + 1];
+            if (nx->op == IR_ADD && !nx->imm_b && nx->w == i->w &&
+                (nx->a == i->dst) != (nx->b == i->dst)) {
+                int other = nx->a == i->dst ? nx->b : nx->a;
+                int rx = rdr(F, i->a, ACC);
+                int ry = rdr(F, other, TMP);
+                int d = wreg(F, nx->dst, ACC);
+                rv_zb_r(t, i->imm == 1 ? RV_ZB_SH1ADD : i->imm == 2
+                           ? RV_ZB_SH2ADD : RV_ZB_SH3ADD, d, rx, ry);
+                wrote(F, nx->dst, d);
+                F->skip_next = 1;
+                return;
+            }
+        }
         int op = i->op == IR_SHL ? RV_SLL : i->sign ? RV_SRA : RV_SRL;
         int bits = wordop ? 32 : F->xlen;
         int ra_ = rdr(F, i->a, ACC);
@@ -5089,9 +5245,39 @@ static void gen_ins(struct rv_fn *F, int n)
         return;
     }
     case IR_BNOT: {
+        /* Zbb: `t = ~b; d = a & t` (| or ^), t read nowhere else, is
+         * andn (orn, xnor) */
+        if ((target_riscv_ext() & RV_EXT_ZBB) && n + 1 < fn->nins &&
+            F->usecnt && i->dst >= 0 && F->usecnt[i->dst] == 1) {
+            const struct ir_ins *nx = &fn->ins[n + 1];
+            if ((nx->op == IR_AND || nx->op == IR_OR || nx->op == IR_XOR) &&
+                !nx->imm_b && (nx->a == i->dst) != (nx->b == i->dst)) {
+                int other = nx->a == i->dst ? nx->b : nx->a;
+                int rb_ = rdr(F, i->a, TMP);
+                int ra_ = rdr(F, other, ACC);
+                int d = wreg(F, nx->dst, ACC);
+                rv_zb_r(t, nx->op == IR_AND ? RV_ZB_ANDN : nx->op == IR_OR
+                           ? RV_ZB_ORN : RV_ZB_XNOR, d, ra_, rb_);
+                wrote(F, nx->dst, d);
+                F->skip_next = 1;
+                return;
+            }
+        }
         int ra_ = rdr(F, i->a, ACC);
         int d = wreg(F, i->dst, ACC);
         rv_alu_imm(t, RV_XOR, d, ra_, -1, 0);
+        wrote(F, i->dst, d);
+        return;
+    }
+
+    case IR_CLZ: case IR_CTZ: case IR_POPCNT: {
+        /* Zbb (irgen's bitcnt_insn): XLEN wide, or the w forms for a
+         * 32-bit value at RV64 */
+        int ra_ = rdr(F, i->a, ACC);
+        int d = wreg(F, i->dst, ACC);
+        rv_zb_unary(t, i->op == IR_CLZ ? RV_ZB_CLZ : i->op == IR_CTZ
+                       ? RV_ZB_CTZ : RV_ZB_CPOP,
+                    d, ra_, i->size == 4 && F->xlen == 64, F->xlen);
         wrote(F, i->dst, d);
         return;
     }
@@ -5213,6 +5399,16 @@ static void gen_ins(struct rv_fn *F, int n)
             cond = SCR;
         } else {
             cond = i->size == 4 ? rd32(F, i->a, SCR) : rdr(F, i->a, SCR);
+        }
+        if (target_riscv_ext() & RV_EXT_ZICOND) {
+            /* Zicond: (b if cond) | (c if not), no branch */
+            int rb = rdr(F, i->b, A_HI), rc = rdr(F, i->c, SCR2);
+            rv_czero(t, 0, A_HI, rb, cond);
+            rv_czero(t, 1, SCR2, rc, cond);
+            int d = wreg(F, i->dst, ACC);
+            rv_alu(t, RV_OR, d, A_HI, SCR2, 0);
+            wrote(F, i->dst, d);
+            return;
         }
         int d = wreg(F, i->dst, ACC);
         take_c = rv_b_placeholder(t, RV_BEQ, cond, RV_ZERO);
@@ -5336,8 +5532,10 @@ static void gen_ins(struct rv_fn *F, int n)
     case IR_GADDR:
         {
         int d = wreg(F, i->dst, ACC);     /* straight into its home */
-        int at = rv_pcrel_pair(t, d);
-        note_glob(F->st, at, i->glob, RK_RISCV_PCREL_HI20);
+        int got = cg_global_via_got(i->glob);
+        int at = got ? rv_got_pair(t, d, F->xlen) : rv_pcrel_pair(t, d);
+        note_glob(F->st, at, i->glob, got ? RK_RISCV_GOT_HI20
+                                          : RK_RISCV_PCREL_HI20);
         note_glob(F->st, at + 4, i->glob, RK_RISCV_PCREL_LO12_I);
         wrote(F, i->dst, d);
         }
@@ -5345,8 +5543,10 @@ static void gen_ins(struct rv_fn *F, int n)
     case IR_FADDR:
         {
         int d = wreg(F, i->dst, ACC);     /* straight into its home */
-        int at = rv_pcrel_pair(t, d);
-        note_fn(F->st, at, i->callee, RK_RISCV_PCREL_HI20);
+        int got = cg_func_via_got(i->callee);
+        int at = got ? rv_got_pair(t, d, F->xlen) : rv_pcrel_pair(t, d);
+        note_fn(F->st, at, i->callee, got ? RK_RISCV_GOT_HI20
+                                          : RK_RISCV_PCREL_HI20);
         note_fn(F->st, at + 4, i->callee, RK_RISCV_PCREL_LO12_I);
         wrote(F, i->dst, d);
         }
@@ -5359,8 +5559,24 @@ static void gen_ins(struct rv_fn *F, int n)
         return;
     }
 
-    case IR_CALL:
+    case IR_CALL: {
+        long at = t->len;
         gen_call(F, n);
+        /* a call in an exception region: the LSDA's call-site entry */
+        if (fn->neh)
+            ir_add_csite(fn, (int)(at - fn->src->code_off),
+                         (int)(t->len - fn->src->code_off),
+                         i->eh_region - 1);
+        return;
+    }
+    case IR_LANDING:
+        /* the unwinder left the exception in a0 and the selector in a1
+         * (__builtin_eh_return_data_regno); a1 first to the scratch, so
+         * a home in a1 cannot lose it */
+        rv_mv(t, SCR, RV_A1);
+        wrote(F, i->dst, RV_A0);
+        if (i->b >= 0)
+            wrote(F, i->b, SCR);
         return;
 
     case IR_RET:
@@ -5483,6 +5699,17 @@ static void gen_ins(struct rv_fn *F, int n)
 
     case IR_BSWAP: {
         int nbytes = i->size;
+        if (target_riscv_ext() & RV_EXT_ZBB) {
+            /* rev8, then the bytes down to the value's own width */
+            int ra_ = rdr(F, i->a, ACC);
+            int d = wreg(F, i->dst, ACC);
+            rv_zb_unary(t, RV_ZB_REV8, d, ra_, 0, F->xlen);
+            if (nbytes * 8 < F->xlen)
+                rv_shift_imm(t, RV_SRL, d, d, F->xlen - nbytes * 8, 0,
+                             F->xlen);
+            wrote(F, i->dst, d);
+            return;
+        }
         rd(F, i->a, ACC);
         rv_mv(t, TMP, RV_ZERO);
         for (int b = 0; b < nbytes; b++) {
@@ -6678,7 +6905,11 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
     F.f4 = rv_f4_map(&F);
     F.fx = -1;
     F.fb = RV_SP;
-    if (g_rv_regalloc) {
+    /* A function with exception regions keeps every value in its slot,
+     * as on x86-64 and AArch64: a landing pad is entered from the
+     * unwinder, which restores only callee-saved registers, so a value
+     * the pad reads must be in memory. */
+    if (g_rv_regalloc && !fn->neh) {
         /* `wide` means two different things and they must not be
          * confused, which they were:
          *
@@ -6808,7 +7039,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
     /* An interrupt handler returns with mret or sret, so it makes no
      * tail call: the callee would return with ret. */
     F.isr = ISR_KIND(f->is_isr);
-    if (g_rv_regalloc && !keep_vars && !g_rv_o0 && !F.isr)
+    /* (nor does one with exception regions: a call there has a landing
+     * pad in this frame) */
+    if (g_rv_regalloc && !keep_vars && !g_rv_o0 && !F.isr && !fn->neh)
         for (i = 0; i < fn->nins; i++)
             if (rv_tail_ok(&F, i)) {
                 if (!F.tail)
@@ -6867,6 +7100,36 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
         }
         free(rm);
     }
+    /* Zcmp: the saves become cm.push's, whose list is ra and s0..sN,
+     * stored from the highest register down (the spec's loop from x27
+     * to x1): sN at the top of the frame, s0 below it, ra at the bottom
+     * -- layout() puts ra_slot there and the list s0..sN upward from it.
+     * The list is a prefix, so s-registers the allocator did not take
+     * are saved too (cm.push stores them anyway), and s10 alone is not
+     * a list: s11 then. */
+    F.zcmp = 0;
+    if ((target_riscv_ext() & RV_EXT_ZCMP) && !F.isr && !fn->is_varargs &&
+        !F.leaf && !getenv("EMBCC_RV_NO_ZCMP")) {
+        int top = -1, ok = 1;
+        for (int k = 0; k < F.nsave; k++) {
+            int r = F.used_callee[k], s = r == 8 ? 0 : r == 9 ? 1
+                                          : r >= 18 && r <= 27 ? r - 16 : -1;
+            if (s < 0)
+                ok = 0;
+            else if (s > top)
+                top = s;
+        }
+        if (ok) {
+            if (top == 10)
+                top = 11;
+            F.nsave = 0;
+            for (int s = 0; s <= top; s++)
+                F.used_callee[F.nsave++] = s == 0 ? 8 : s == 1 ? 9 : s + 16;
+            F.zcmp = 1;
+            F.zcmp_rlist = top == 11 ? 15 : top + 5;
+            F.zcmp_base = ((long)(F.nsave + 1) * F.w + 15) / 16 * 16;
+        }
+    }
   fx_again:
     layout(&F);
 
@@ -6898,6 +7161,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
                                            fn->ins[i].asm_ir->narange);
     for (int pass = 0, again = 0; pass < 2; pass++) {
     F.fb = RV_SP;
+    fn->ncsites = 0;                /* (each emission's calls, its own) */
     if (pass || again) {
         t->len = len0;
         fn->nlines = nl0;
@@ -6969,6 +7233,16 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
     F.cfi_frame_end = F.cfi_saves_end = F.cfi_fp_end = -1;
     if (F.isr) {
         rv_isr_prologue(&F);
+    } else if (F.zcmp) {
+        zcmp_op(&F, 0xb802u);                     /* cm.push */
+        long rest = F.frame - zcmp_adj(&F);
+        if (rest && rv_fits(-rest, 12)) {
+            rv_alu_imm(t, RV_ADD, RV_SP, RV_SP, (int)-rest, 0);
+        } else if (rest) {
+            rv_li(t, RV_T0, -rest, xlen);
+            rv_alu(t, RV_ADD, RV_SP, RV_SP, RV_T0, 0);
+        }
+        F.cfi_frame_end = t->len;
     } else if (F.frame) {
         if (rv_fits(-F.frame, 12)) {
             rv_alu_imm(t, RV_ADD, RV_SP, RV_SP, (int)-F.frame, 0);
@@ -6978,9 +7252,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
         }
         F.cfi_frame_end = t->len;
     }
-    if (!F.leaf && !F.isr)
+    if (!F.leaf && !F.isr && !F.zcmp)
         st_sp(&F, RV_RA, F.ra_slot, F.w);
-    for (i = 0; i < F.nsave; i++)
+    for (i = 0; i < F.nsave && !F.zcmp; i++)
         st_sp(&F, F.used_callee[i], F.save_at + (long)i * F.w, F.w);
     /* the callee-saved f registers, as wide as the ABI preserves them */
     for (i = 0; i < F.nfsave; i++)
@@ -7270,8 +7544,11 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
     }
 
     int tail_end = 0;        /* the body's last act is a tail call */
+    ra_debug_pc_begin(fn);
     for (i = 0; i < fn->nins; i++) {
         int was_tail = F.tail && F.tail[i];
+        if (fn->ins_pc)
+            fn->ins_pc[i] = t->len;
         gen_ins(&F, i);
         if (F.skip_next) {          /* the comparison emitted its branch */
             F.skip_next = 0;
@@ -7297,8 +7574,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
     if (F.isr) {
         rv_isr_epilogue(&F);
     } else {
-        rv_restore(&F);
-        rv_ret(t);
+        rv_restore_ex(&F, 1);
     }
     }
 
@@ -7433,8 +7709,15 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
     }
 
     f->code_len = t->len - f->code_off;
-    if (target_debug_info())
+    if (target_debug_info() || target_unwind_tables())
         rv_record_cfi(&F, f->code_off);
+    for (int r = 0; r < fn->neh; r++)       /* where each landing pad is */
+        fn->eh[r].lp_off = (int)(F.label_off[fn->eh[r].lp_label] -
+                                 f->code_off);
+    /* -g: x0-x31 are DWARF 0-31, f0-f31 32-63; a slot is sp-relative,
+     * as the frame base is; an RV32 pair is two registers in a row */
+    ra_debug_finish(fn, t->len, F.loc, F.floc, 32, F.slot, -1, F.wide,
+                    F.xlen == 32 ? 1 : 0, 4);
     f->stack_bytes = (int)F.frame;     /* what -fstack-usage reports */
     free(F.usecnt);
     free(F.tail);

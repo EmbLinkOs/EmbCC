@@ -74,6 +74,8 @@ void x86_lea_rax_slot(struct code *c, int disp);  /* lea rax,[rbp+disp] */
 int x86_lea_rax_rip(struct code *c);
 /* Same into an arbitrary register (for -O2 register-resident address temps). */
 int x86_lea_reg_rip(struct code *c, int reg);
+int x86_mov_reg_rip(struct code *c, int reg);
+void x86_add_reg_fsbase(struct code *c, int reg);
 /* Local-exec TLS: read the thread pointer, then add the object's
  * offset within the thread block (a relocation fills it). */
 void x86_mov_reg_fsbase(struct code *c, int reg);
@@ -136,6 +138,9 @@ void x86_store_mem_reg(struct code *c, int base, int disp, int src, int size);
 void x86_movs_load_base(struct code *c, int xmm, int base, int disp, int w);
 void x86_movs_store_base(struct code *c, int base, int disp, int xmm, int w);
 void x86_lea_reg_slot(struct code *c, int dst, int disp); /* lea r,[rbp+d] */
+void x86_movaps_store(struct code *c, int base, int disp, int xmm);
+void x86_movaps_load(struct code *c, int xmm, int base, int disp);
+void x86_movdqu_store(struct code *c, int base, int disp, int xmm);
 void x86_lea_reg_basedisp(struct code *c, int dst, int base, int disp, int w);
 void x86_lea_reg_baseindex(struct code *c, int dst, int base, int index,
                            int scale, int w);
@@ -203,6 +208,7 @@ int x86_jnz_rel8(struct code *c);
 int x86_jmp_rel8(struct code *c);
 int x86_jcc_rel8(struct code *c, int setcc);
 void x86_jmp_reg(struct code *c, int reg);        /* jmp *reg (computed goto) */
+void x86_endbr64(struct code *c);                 /* CET's landing pad */
 void x86_jmp_rcx_rax8(struct code *c);   /* jmp *(%rcx,%rax,8) */
 void x86_jmp_rcx_reg8(struct code *c, int reg);   /* jmp *(%rcx,%reg,8) */
 void x86_movsxd_rax_tab(struct code *c);          /* movsxd rax, dword [rcx + rax*4] */

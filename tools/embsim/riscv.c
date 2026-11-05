@@ -9,7 +9,7 @@
  * mstatus's MIE, MPIE and MPP; the interrupts are the CLINT's software
  * and timer interrupts (clint.c), through mip and mie, and WFI waits for
  * them. The counters are the run's: mcycle is the estimated cycles
- * (tools/bench/cost.h's RV32 table), minstret the instructions, and the
+ * (src/arch/cost.h's RV32 table), minstret the instructions, and the
  * CLINT's mtime counts with mcycle.
  *
  * Memory is the bus at 32 bits: an RV64 address above 4 GiB is an access
@@ -24,7 +24,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../bench/cost.h"
+#include "../../src/arch/cost.h"
 #include "devices.h"
 #include "riscv.h"
 

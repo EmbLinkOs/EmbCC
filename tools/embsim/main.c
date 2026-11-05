@@ -8,7 +8,7 @@
  * and embsim-mips.sh run the exec corpus on both, and the output (and
  * but on MIPS the instruction count) must be the same. It counts the
  * instructions it executes and estimates their cycles with the table
- * tools/bench uses (tools/bench/cost.h) -- on the AVR, exactly
+ * tools/bench uses (src/arch/cost.h) -- on the AVR, exactly
  * -- and the timers (SysTick, DWT's CYCCNT, the CLINT's mtime, the AVR's
  * Timer/Counter1) advance by it, so a timed run gives the same answer
  * every time.

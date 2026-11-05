@@ -18,6 +18,7 @@ int writes_temp(enum ir_op op)
     case IR_NEG: case IR_BNOT: case IR_CMP:
     case IR_LDVAR: case IR_ADDR: case IR_STRADDR: case IR_GADDR:
     case IR_FADDR: case IR_LOAD: case IR_EXT: case IR_BSWAP: case IR_SQRT:
+    case IR_CLZ: case IR_CTZ: case IR_POPCNT:
     case IR_I2F: case IR_F2I: case IR_F2F: case IR_BITCAST:
     case IR_CALL: case IR_XCHG:
     case IR_XADD: case IR_CMPXCHG: case IR_ARMW: case IR_CAS: case IR_CAS16:
@@ -50,6 +51,7 @@ int is_pure(enum ir_op op)
     case IR_NEG: case IR_BNOT: case IR_CMP:
     case IR_LDVAR: case IR_ADDR: case IR_STRADDR: case IR_GADDR:
     case IR_FADDR: case IR_EXT: case IR_BSWAP: case IR_SQRT:
+    case IR_CLZ: case IR_CTZ: case IR_POPCNT:
     case IR_I2F: case IR_F2I: case IR_F2F: case IR_BITCAST:
     case IR_SELECT:        /* both arms are values; it cannot trap */
     case IR_LABELADDR:     /* the address of a label is a constant */
@@ -124,6 +126,7 @@ void each_read(struct ir_ins *i, void (*cb)(int *, void *), void *ctx)
     case IR_MOV: case IR_NEG: case IR_BNOT:
     case IR_I2F: case IR_F2I: case IR_F2F: case IR_BITCAST:
     case IR_EXT: case IR_BSWAP: case IR_SQRT:
+    case IR_CLZ: case IR_CTZ: case IR_POPCNT:
     case IR_LDVAR: case IR_ADDR: case IR_LOAD:
     case IR_MEMZERO: case IR_VA_START: case IR_STVAR:
     case IR_ALLOCA: case IR_SPRESTORE:

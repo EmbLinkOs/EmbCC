@@ -322,10 +322,12 @@ if command -v llvm-dwarfdump > /dev/null 2>&1; then
             echo "the -g file does not compile at $o"; exit 1; }
         llvm-dwarfdump "$out/g.o" > "$out/g.dw" 2>&1
         for v in a b s; do
-            loc=$(grep -A3 "DW_AT_name	(\"$v\")" "$out/g.dw" | grep 'DW_AT_location')
+            # (a location list's entries are on the lines after it)
+            loc=$(grep -A4 "DW_AT_name	(\"$v\")" "$out/g.dw" |
+                  sed -n '/DW_AT_location/,$p' | tr -s ' \n' ' ')
             case $o,$loc in
             -Og,*DW_OP_fbreg*) ;;
-            -Os,*DW_OP_fbreg*|-Os,*'<empty>'*) ;;
+            -Os,*DW_OP_fbreg*|-Os,*'<empty>'*|-Os,*DW_OP_reg*) ;;
             *) echo "-g $o: '$v' has the location '$loc'"; exit 1 ;;
             esac
         done

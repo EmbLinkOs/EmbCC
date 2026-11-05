@@ -19,6 +19,7 @@
 
 #include "../driver/util.h"
 #include "../driver/remark.h"
+#include "target.h"
 
 /* The vreg WRITTEN by an instruction (its def), or -1. Kept in lockstep with
  * what codegen actually stores (cg_store / the STVAR store). Each temp is a
@@ -31,7 +32,7 @@ int ra_ins_def(const struct ir_ins *in)
     case IR_NEG: case IR_BNOT: case IR_CMP: case IR_LDVAR: case IR_ADDR:
     case IR_STRADDR: case IR_GADDR: case IR_FADDR: case IR_LOAD: case IR_EXT:
     case IR_I2F: case IR_F2I: case IR_F2F: case IR_BITCAST:
-    case IR_BSWAP: case IR_SQRT:
+    case IR_BSWAP: case IR_SQRT: case IR_CLZ: case IR_CTZ: case IR_POPCNT:
     case IR_SHL:
     case IR_SHR: case IR_XCHG: case IR_XADD: case IR_CMPXCHG:
     case IR_ARMW: case IR_CAS: case IR_CAS16: case IR_FRAMEADDR:
@@ -69,6 +70,7 @@ void ra_each_use(const struct ir_ins *s, void (*cb)(int v, void *ctx),
 #define U(v) do { int _v = (v); if (_v >= 0) cb(_v, ctx); } while (0)
     switch (s->op) {
     case IR_MOV: case IR_NEG: case IR_BNOT: case IR_EXT: case IR_BSWAP:
+    case IR_CLZ: case IR_CTZ: case IR_POPCNT:
     case IR_SQRT:
     case IR_I2F: case IR_F2I: case IR_F2F: case IR_BITCAST:
     case IR_LOAD: case IR_LDVAR:
@@ -2289,6 +2291,174 @@ int ra_var_in_slot(const struct ir_func *fn, int v)
 int ra_var_home(const struct ir_func *fn, int v, int has_slot, long off)
 {
     return has_slot && ra_var_in_slot(fn, v) ? (int)off : IR_VAR_NO_LOC;
+}
+
+/* -g: each promoted variable's location list. A temp mem2reg tagged as
+ * holding variable L (ir_func.vreg_var) gives L its home over every
+ * instruction it is live into -- from the instruction after the one that
+ * wrote it to the last that reads it. Where two of L's temps are live at
+ * once (the old value kept for a later read), the one written last is
+ * the variable. Consecutive instructions with one home make one range,
+ * in .text offsets (ins_pc). Read-only: the code is already made. */
+void ra_debug_locs(struct ir_func *fn, const struct ir_vhome *home)
+{
+    if (!fn->ins_pc || !fn->vreg_var || !fn->ndbgvars || !fn->nins)
+        return;
+    int nvr = fn->nvregs, nd = fn->ndbgvars, nins = fn->nins;
+    /* An instruction a backend emitted with the one before it (a fusion)
+     * has no offset of its own: it starts where the next one does, and
+     * so is empty. */
+    for (int k = nins - 1; k >= 0; k--)
+        if (fn->ins_pc[k] < 0)
+            fn->ins_pc[k] = fn->ins_pc[k + 1];
+    if (fn->ins_pc[nins] < 0)
+        return;
+    /* variable vreg -> its dbgvar; temp -> its variable's dbgvar */
+    int *dof = xmalloc((size_t)(nvr ? nvr : 1) * sizeof *dof);
+    for (int v = 0; v < nvr; v++)
+        dof[v] = -1;
+    int any = 0;
+    for (int v = 0; v < nvr && v < fn->nvreg_var; v++) {
+        int L = fn->vreg_var[v] - 1;
+        if (L < 0)
+            continue;
+        for (int d = 0; d < nd; d++)
+            if (fn->dbgvars[d].vreg == L) {
+                dof[v] = d;
+                any = 1;
+                break;
+            }
+    }
+    if (!any) {
+        free(dof);
+        return;
+    }
+    /* where each temp is first written: the later one is the newer value */
+    int *defat = xmalloc((size_t)(nvr ? nvr : 1) * sizeof *defat);
+    for (int v = 0; v < nvr; v++)
+        defat[v] = v < fn->nvars ? -1 : nins;   /* (a parameter: entry) */
+    for (int k = 0; k < nins; k++) {
+        int d = ra_ins_def(&fn->ins[k]);
+        if (d >= 0 && d < nvr && defat[d] > k)
+            defat[d] = k;
+    }
+    int *cur = xmalloc((size_t)nd * (size_t)nins * sizeof *cur);
+    for (long q = 0; q < (long)nd * nins; q++)
+        cur[q] = -1;
+    int *first = xmalloc((size_t)(nvr ? nvr : 1) * sizeof *first);
+    int *last = xmalloc((size_t)(nvr ? nvr : 1) * sizeof *last);
+    struct ra_live *lv = ra_live_compute(fn, first, last);
+    free(first);
+    free(last);
+    struct ra_lset ls;
+    ra_lset_init(&ls, nvr);
+    for (int b = 0; b < lv->nbb; b++) {
+        ra_lset_out(&ls, lv, b);
+        for (int k = lv->bstart[b + 1] - 1; k >= lv->bstart[b]; k--) {
+            ra_lset_step(&ls, &fn->ins[k]);      /* now: live into k */
+            for (int m = 0; m < ls.n; m++) {
+                int t = ls.mem[m], d = dof[t];
+                if (d < 0 || home[t].kind == IR_LOC_NONE)
+                    continue;
+                int *c = &cur[(long)d * nins + k];
+                if (*c < 0 || defat[t] > defat[*c] ||
+                    (defat[t] == defat[*c] && t > *c))
+                    *c = t;
+            }
+        }
+    }
+    ra_lset_free(&ls);
+    ra_live_free(lv);
+    if (!fn->dbglocs) {
+        fn->dbglocs = xcalloc((size_t)nd, sizeof *fn->dbglocs);
+        fn->ndbglocs = xcalloc((size_t)nd, sizeof *fn->ndbglocs);
+    }
+    for (int d = 0; d < nd; d++) {
+        struct ir_dbgloc *list = NULL;
+        int n = 0, cap = 0;
+        for (int k = 0; k < nins; k++) {
+            int t = cur[(long)d * nins + k];
+            int lo = fn->ins_pc[k], hi = fn->ins_pc[k + 1];
+            if (t < 0 || hi <= lo)
+                continue;
+            const struct ir_vhome *h = &home[t];
+            if (n && list[n - 1].hi == lo && list[n - 1].kind == h->kind &&
+                list[n - 1].val == h->val && list[n - 1].val2 == h->val2) {
+                list[n - 1].hi = hi;
+                continue;
+            }
+            if (n == cap) {
+                cap = cap ? cap * 2 : 8;
+                list = xrealloc(list, (size_t)cap * sizeof *list);
+            }
+            list[n].lo = lo;
+            list[n].hi = hi;
+            list[n].kind = h->kind;
+            list[n].val = h->val;
+            list[n].val2 = h->val2;
+            list[n].piece = h->piece;
+            n++;
+        }
+        free(fn->dbglocs[d]);
+        fn->dbglocs[d] = list;
+        fn->ndbglocs[d] = n;
+    }
+    free(cur);
+    free(defat);
+    free(dof);
+}
+
+/* -g: room for each instruction's code offset (ir_func.ins_pc), when the
+ * function has a variable mem2reg followed; NULL otherwise. */
+void ra_debug_pc_begin(struct ir_func *fn)
+{
+    free(fn->ins_pc);
+    fn->ins_pc = NULL;
+    if (((target_debug_info() && fn->vreg_var) || target_stack_info()) &&
+        fn->nins) {
+        fn->ins_pc = xmalloc(((size_t)fn->nins + 1) * sizeof *fn->ins_pc);
+        for (int k = 0; k <= fn->nins; k++)
+            fn->ins_pc[k] = -1;
+    }
+}
+
+/* -g: the end of the function's code, and each vreg's home from the
+ * shape most backends keep -- a general register (loc, or -1), a
+ * floating-point one (floc, or -1; either array may be NULL) and a slot
+ * (slot[v] != nosl: an offset from the DWARF frame base). A general
+ * register r is DWARF number r, a floating-point one fbase + r. A value
+ * wide[v] marks (wide may be NULL) is two registers: wide_mode 1 says in
+ * a row, loc[v] holding the low `piece` bytes; 2 that no register
+ * describes it, and only its slot does. */
+void ra_debug_finish(struct ir_func *fn, int end_pc, const int *loc,
+                     const int *floc, int fbase, const long *slot, long nosl,
+                     const char *wide, int wide_mode, int piece)
+{
+    if (!fn->ins_pc)
+        return;
+    fn->ins_pc[fn->nins] = end_pc;
+    struct ir_vhome *h = xcalloc((size_t)(fn->nvregs ? fn->nvregs : 1),
+                                 sizeof *h);
+    for (int v = 0; v < fn->nvregs; v++) {
+        int w = wide && wide[v];
+        if (floc && floc[v] >= 0) {
+            h[v].kind = IR_LOC_REG;
+            h[v].val = fbase + floc[v];
+        } else if (loc && loc[v] >= 0 && w && wide_mode == 1) {
+            h[v].kind = IR_LOC_REGPAIR;
+            h[v].val = loc[v];
+            h[v].val2 = loc[v] + 1;
+            h[v].piece = piece;
+        } else if (loc && loc[v] >= 0 && !w) {
+            h[v].kind = IR_LOC_REG;
+            h[v].val = loc[v];
+        } else if (slot && slot[v] != nosl) {
+            h[v].kind = IR_LOC_FB;
+            h[v].val = (int)slot[v];
+        }
+    }
+    ra_debug_locs(fn, h);
+    free(h);
 }
 
 char *ra_debug_pin_vars(const struct ir_func *fn)

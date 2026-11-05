@@ -152,6 +152,7 @@ struct t_fn {
      * kind -- whether lr comes back 4 less, and the return is ldm ...^
      * either way. 0 for anything else, Cortex-M's handlers included. */
     unsigned isr_extra;
+    int pac;                  /* PACBTI: pac at entry, r12 pushed, bxaut */
     int isr;
     /* A leaf that saves nothing at all: no push, no pop, `bx lr`. Decided
      * per pass, once scr_save is known (see the pass loop). */

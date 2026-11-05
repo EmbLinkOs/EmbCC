@@ -67,6 +67,7 @@
 #include "../../sema/type.h"
 
 #include <stdio.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -112,6 +113,9 @@ struct mips_sites {
 };
 
 struct mips_fn {
+    /* the prologue's steps, for the CFI (-g, unwind tables): where the
+     * frame is made, the registers saved, the frame pointer set; -1 none */
+    long cfi_frame_end, cfi_saves_end, cfi_fp_end;
     int *usecnt;         /* per vreg: how many reads (fusion), or NULL */
     int skip_next;       /* the instruction after this one is already out */
     int keep_vars;
@@ -3675,8 +3679,21 @@ static void gen_ins(struct mips_fn *F, int n)
         copy_block(F, i->op == IR_MEMCPY, i->size, i->natural >= 4);
         return;
 
-    case IR_CALL:
+    case IR_CALL: {
+        long at = t->len;
         gen_call(F, n);
+        if (fn->neh)                        /* an LSDA call site */
+            ir_add_csite(fn, (int)(at - fn->src->code_off),
+                         (int)(t->len - fn->src->code_off),
+                         i->eh_region - 1);
+        return;
+    }
+    case IR_LANDING:
+        /* the unwinder left the exception in a0 and the selector in a1;
+         * with regions every value is in its slot, so these are stores */
+        if (i->b >= 0)
+            wrote(F, i->b, MIPS_A0 + 1);
+        wrote(F, i->dst, MIPS_A0);
         return;
 
     case IR_RET:
@@ -4357,6 +4374,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct mips_sites *st,
     F.fn = fn; F.t = t; F.st = st;
     F.keep_vars = keep_vars;
     fn->nlines = 0;                 /* -g: this attempt's rows only */
+    fn->ncsites = 0;
     F.wide = wide_map(fn);
     /* (the high word of a register pair, shifted, is a MIPS32 idea: at
      * MIPS64 a pair value is never in registers) */
@@ -4364,7 +4382,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct mips_sites *st,
     for (int v = 0; F.nshr && v < fn->nvregs; v++)
         if (F.nshr[v]) F.wide[v] = 0;
     F.fb = MIPS_SP;
-    if (g_mips_regalloc) {
+    /* (a function with exception regions keeps every value in its slot:
+     * the unwinder restores only the callee-saved registers) */
+    if (g_mips_regalloc && !fn->neh) {
         /* At -O0 and -Og a source variable stays in its frame slot, so its
          * DW_AT_location is true (regalloc.h). */
         char *pin = keep_vars ? ra_debug_pin_vars(fn) : (char *)0;
@@ -4406,7 +4426,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct mips_sites *st,
     /* an interrupt handler returns with eret: no tail call, whose callee
      * would return with jr ra */
     F.isr = f->is_isr;
-    if (g_mips_regalloc && !keep_vars && !F.isr)
+    if (g_mips_regalloc && !keep_vars && !F.isr && !fn->neh)
         for (i = 0; i < fn->nins; i++)
             if (mips_tail_ok(&F, i)) {
                 if (!F.tail)
@@ -4471,6 +4491,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct mips_sites *st,
 
     /* The prologue. t0 builds a large frame's size: no argument has been
      * touched yet. */
+    F.cfi_frame_end = F.cfi_saves_end = F.cfi_fp_end = -1;
     if (F.isr) {
         mips_isr_prologue(&F);
     } else if (F.frame) {
@@ -4480,14 +4501,18 @@ static void gen_func(struct ir_func *fn, struct code *t, struct mips_sites *st,
             mips_li(t, A_LO, -F.frame);
             mips_alu(t, P_ADDU, MIPS_SP, MIPS_SP, A_LO);
         }
+        F.cfi_frame_end = t->len;
     }
     if (!F.leaf && !F.isr)
         st_sp(&F, MIPS_RA, F.ra_slot, W);
     for (i = 0; i < F.nsave; i++)
         st_sp(&F, F.used_callee[i], F.save_at + (long)i * W, W);
+    if (!F.isr && (!F.leaf || F.nsave))
+        F.cfi_saves_end = t->len;
     if (fn->has_alloca) {
         mips_mv(t, MIPS_FP, MIPS_SP);
         F.fb = MIPS_FP;
+        F.cfi_fp_end = t->len;
     }
     /* A variadic function stores its argument registers where they and
      * the stack words are one block: a0-a3 into the home area its caller
@@ -4614,8 +4639,11 @@ static void gen_func(struct ir_func *fn, struct code *t, struct mips_sites *st,
 
     {
         int tail_end = 0;
+        ra_debug_pc_begin(fn);
         for (i = 0; i < fn->nins; i++) {
             int was_tail = F.tail && F.tail[i];
+            if (fn->ins_pc)
+                fn->ins_pc[i] = t->len;
             gen_ins(&F, i);
             if (F.skip_next) {
                 F.skip_next = 0;
@@ -4696,6 +4724,43 @@ static void gen_func(struct ir_func *fn, struct code *t, struct mips_sites *st,
     }
 
     f->code_len = t->len - f->code_off;
+    if (target_debug_info() || target_unwind_tables()) {
+        /* the CFI: the CFA sp + frame once the frame is made, ra and the
+         * saved registers in their slots (DWARF numbers the GPRs as the
+         * machine), the frame pointer under alloca */
+        fn->ncfi = 0;
+        if (F.isr) {
+            fn->ncfi = -1;
+        } else {
+            if (F.cfi_frame_end >= 0)
+                ir_cfi_add(fn, (int)(F.cfi_frame_end - f->code_off),
+                           IR_CFI_CFA_OFFSET, 0, F.frame);
+            if (F.cfi_saves_end >= 0) {
+                int at = (int)(F.cfi_saves_end - f->code_off);
+                if (!F.leaf)
+                    ir_cfi_add(fn, at, IR_CFI_SAVED, MIPS_RA,
+                               F.ra_slot - F.frame);
+                for (i = 0; i < F.nsave; i++)
+                    ir_cfi_add(fn, at, IR_CFI_SAVED, F.used_callee[i],
+                               F.save_at + (long)i * W - F.frame);
+            }
+            if (F.cfi_fp_end >= 0)
+                ir_cfi_add(fn, (int)(F.cfi_fp_end - f->code_off),
+                           IR_CFI_CFA_REG, MIPS_FP, F.frame);
+        }
+    }
+    for (int r = 0; r < fn->neh; r++)       /* where each landing pad is */
+        fn->eh[r].lp_off = (int)(F.label_off[fn->eh[r].lp_label] -
+                                 f->code_off);
+    if (fn->ins_pc) {
+        /* -g: registers as the machine numbers them; each slot
+         * where the object starts in it, as var_off's */
+        long *sl = xmalloc((size_t)(fn->nvregs ? fn->nvregs : 1) * sizeof *sl);
+        for (int v = 0; v < fn->nvregs; v++)
+            sl[v] = F.slot[v] == -1 ? LONG_MIN : obj_slot(&F, v);
+        ra_debug_finish(fn, t->len, F.loc, NULL, 0, sl, LONG_MIN, F.wide, 2, 4);
+        free(sl);
+    }
     f->stack_bytes = (int)F.frame;
     free(F.usecnt);
     free(F.tail);

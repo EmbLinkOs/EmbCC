@@ -34,7 +34,28 @@ namespace __cxxabiv1 {
  * routine that sees a different class is looking at another language's
  * exception passing through: it may run cleanups, but it must not try to
  * read a type_info out of it. */
-static const _Unwind_Exception_Class kCxxClass = 0x474e5543432b2b00UL;
+static const _Unwind_Exception_Class kCxxClass = 0x474e5543432b2b00ULL;
+
+/* The class in the header: eight bytes, an integer in the Itanium
+ * header and characters in ARM's control block (EHABI), whose order is
+ * the string's. */
+static void set_class(_Unwind_Exception *u)
+{
+#ifdef __EMBCC_ARM_EHABI
+    memcpy(u->exception_class, "GNUCC++", 8);
+#else
+    u->exception_class = kCxxClass;
+#endif
+}
+
+static _Unwind_Exception_Class class_of(const _Unwind_Exception *u)
+{
+#ifdef __EMBCC_ARM_EHABI
+    return memcmp(u->exception_class, "GNUCC++", 8) == 0 ? kCxxClass : 0;
+#else
+    return u->exception_class;
+#endif
+}
 
 struct __cxa_exception {
     /* First, as the 64-bit Itanium ABI lays it out, and it is what
@@ -121,7 +142,7 @@ extern "C" void __cxa_throw(void *thrown, std::type_info *ti,
     __cxa_exception *h = header_of(thrown);
     h->exceptionType = ti;
     h->exceptionDestructor = dtor;
-    h->unwindHeader.exception_class = kCxxClass;
+    set_class(&h->unwindHeader);
     h->unwindHeader.exception_cleanup = exception_cleanup;
     __cxa_get_globals()->uncaughtExceptions++;
 
@@ -153,7 +174,7 @@ extern "C" void __cxa_rethrow()
 extern "C" void *__cxa_begin_catch(void *exc) noexcept
 {
     _Unwind_Exception *ue = static_cast<_Unwind_Exception *>(exc);
-    if (ue->exception_class != kCxxClass) {
+    if (class_of(ue) != kCxxClass) {
         /* A foreign exception caught by `catch (...)`. There is no C++
          * object in it, so there is nothing to hand back and nothing to
          * put on the caught list. */
@@ -290,7 +311,7 @@ extern "C" void __cxa_rethrow_primary_exception(void *obj)
     h->referenceCount++;
     h->handlerCount = 0;
     h->nextException = nullptr;
-    h->unwindHeader.exception_class = kCxxClass;
+    set_class(&h->unwindHeader);
     __cxa_get_globals()->uncaughtExceptions++;
     _Unwind_RaiseException(&h->unwindHeader);
     std::terminate();
@@ -299,7 +320,7 @@ extern "C" void __cxa_rethrow_primary_exception(void *obj)
 extern "C" void *__cxa_get_exception_ptr(void *exc) noexcept
 {
     _Unwind_Exception *ue = static_cast<_Unwind_Exception *>(exc);
-    if (ue->exception_class != kCxxClass)
+    if (class_of(ue) != kCxxClass)
         return exc;
     __cxa_exception *h = reinterpret_cast<__cxa_exception *>(
         reinterpret_cast<char *>(ue) - offsetof(__cxa_exception, unwindHeader));
@@ -500,10 +521,65 @@ static bool can_catch(const type_info *catch_ti, const type_info *thrown,
 
 /* ---- the personality routine ----------------------------------------- */
 
+#ifdef __EMBCC_ARM_EHABI
+static _Unwind_Reason_Code
+personality(int version, _Unwind_Action actions,
+            _Unwind_Exception_Class exc_class,
+            _Unwind_Exception *ue, _Unwind_Context *ctx);
+
+/* EHABI's form of it (IHI 0038 7.2): told a state, not actions; the
+ * frame is identified by its stack pointer, which the search records in
+ * the control block's barrier cache; and a frame it does not stop at it
+ * unwinds itself. The control block goes in r12 for the LSDA's accessors
+ * (lib/rt/unwind_arm.c), as GCC's unwinder leaves it. */
+extern "C" _Unwind_Reason_Code
+__gxx_personality_v0(_Unwind_State state, _Unwind_Control_Block *ucbp,
+                     _Unwind_Context *ctx)
+{
+    _uw sp = 0, self = (_uw)(unsigned long)ucbp;
+    _Unwind_VRS_Get(ctx, _UVRSC_CORE, 13, _UVRSD_UINT32, &sp);
+    _Unwind_VRS_Set(ctx, _UVRSC_CORE, 12, _UVRSD_UINT32, &self);
+    _Unwind_Action actions;
+    switch (state & _US_ACTION_MASK) {
+    case _US_VIRTUAL_UNWIND_FRAME:
+        actions = _UA_SEARCH_PHASE;
+        break;
+    case _US_UNWIND_FRAME_STARTING:
+        actions = _UA_CLEANUP_PHASE;
+        if (ucbp->barrier_cache.sp == sp)
+            actions |= _UA_HANDLER_FRAME;
+        break;
+    case _US_UNWIND_FRAME_RESUME:
+        goto unwind;                /* its cleanup ran: on to the caller */
+    default:
+        return _URC_FAILURE;
+    }
+    {
+        _Unwind_Reason_Code r = personality(1, actions, class_of(ucbp), ucbp,
+                                            ctx);
+        if (r == _URC_HANDLER_FOUND) {
+            ucbp->barrier_cache.sp = sp;
+            return r;
+        }
+        if (r != _URC_CONTINUE_UNWIND)
+            return r;
+    }
+unwind:
+    if (__gnu_unwind_frame(ucbp, ctx) != _URC_OK)
+        return _URC_FAILURE;
+    return _URC_CONTINUE_UNWIND;
+}
+
+static _Unwind_Reason_Code
+personality(int version, _Unwind_Action actions,
+            _Unwind_Exception_Class exc_class,
+            _Unwind_Exception *ue, _Unwind_Context *ctx)
+#else
 extern "C" _Unwind_Reason_Code
 __gxx_personality_v0(int version, _Unwind_Action actions,
                      _Unwind_Exception_Class exc_class,
                      _Unwind_Exception *ue, _Unwind_Context *ctx)
+#endif
 {
     if (version != 1)
         return _URC_FATAL_PHASE1_ERROR;

@@ -9,6 +9,7 @@
 // bytes are big-endian (MIPS, SPARC, PowerPC, ColdFire), shows any
 // difference here as a line the host does not print. Each line printed is
 // one property; the host's clang++ build prints the same.
+// embedded-skip: avr  (an `int b : 20` is wider than its 16-bit int)
 #include <stdio.h>
 #include <stddef.h>
 #include <stdint.h>

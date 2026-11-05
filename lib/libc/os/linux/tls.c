@@ -66,6 +66,58 @@ struct lphdr {
     unsigned long long p_offset, p_vaddr, p_paddr, p_filesz, p_memsz, p_align;
 };
 
+/* ---- a position-independent image (-pie, -static-pie) ---------------
+ *
+ * Loaded wherever the kernel chose, it is relocated here, first: every
+ * absolute pointer it holds was written for the address it was linked
+ * at, and the image's R_*_RELATIVE relocations (in PT_DYNAMIC's DT_RELA)
+ * say where they are -- each `bias + addend`. The bias is where the
+ * program headers are (AT_PHDR) less where PT_PHDR says they were
+ * linked, which needs nothing absolute to find. An ordinary executable
+ * has neither PT_PHDR nor PT_DYNAMIC and is left alone. Until this is
+ * done nothing may read a pointer from data, which is why it is all
+ * locals and the auxiliary vector. */
+#define LPT_DYNAMIC 2
+#define LPT_PHDR    6
+#define LDT_NULL    0
+#define LDT_RELA    7
+#define LDT_RELASZ  8
+#if defined(__x86_64__)
+#define LR_RELATIVE 8                      /* R_X86_64_RELATIVE */
+#else
+#define LR_RELATIVE 1027                   /* R_AARCH64_RELATIVE */
+#endif
+unsigned long __libc_load_bias;            /* also for dl_iterate_phdr */
+
+static void self_relocate(const struct lphdr *phdr, unsigned long phnum,
+                          unsigned long phent)
+{
+    if (!phdr)
+        return;
+    const struct lphdr *dyn = NULL, *self = NULL;
+    for (unsigned long i = 0; i < phnum; i++) {
+        const struct lphdr *p =
+            (const struct lphdr *)((const char *)phdr + i * phent);
+        if (p->p_type == LPT_DYNAMIC) dyn = p;
+        if (p->p_type == LPT_PHDR)    self = p;
+    }
+    if (!dyn || !self)
+        return;
+    unsigned long bias = (unsigned long)phdr - (unsigned long)self->p_vaddr;
+    unsigned long rela = 0, relasz = 0;
+    for (const long *d = (const long *)(bias + dyn->p_vaddr); d[0] != LDT_NULL;
+         d += 2) {
+        if (d[0] == LDT_RELA)   rela = (unsigned long)d[1];
+        if (d[0] == LDT_RELASZ) relasz = (unsigned long)d[1];
+    }
+    for (unsigned long k = 0; k + 24 <= relasz; k += 24) {
+        const unsigned long *r = (const unsigned long *)(bias + rela + k);
+        if ((r[1] & 0xffffffffUL) == LR_RELATIVE)
+            *(unsigned long *)(bias + r[0]) = bias + r[2];
+    }
+    __libc_load_bias = bias;
+}
+
 /* The template, found once. filesz bytes to copy and (memsz - filesz)
  * to zero: .tdata is the initialised part and .tbss the rest, and the
  * program header describes them as one run. */
@@ -201,6 +253,7 @@ void __libc_tls_init(long *sp)
         else if (a[0] == LAT_PHENT) phent = (unsigned long)a[1];
         else if (a[0] == LAT_PAGESZ) __libc_pagesize = (unsigned long)a[1];
     }
+    self_relocate(phdr, phnum, phent);
     if (!phdr || !phnum)
         return;                            /* nothing to find it with */
 
@@ -209,7 +262,8 @@ void __libc_tls_init(long *sp)
             (const struct lphdr *)((const char *)phdr + i * phent);
         if (p->p_type != LPT_TLS)
             continue;
-        tpl_image  = (const char *)(unsigned long)p->p_vaddr;
+        tpl_image  = (const char *)(unsigned long)(p->p_vaddr +
+                                                   __libc_load_bias);
         tpl_filesz = (unsigned long)p->p_filesz;
         tpl_memsz  = (unsigned long)p->p_memsz;
         tpl_align  = (unsigned long)p->p_align;

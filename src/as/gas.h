@@ -130,6 +130,10 @@ struct gas_target {
  * `.S` file's #include as by C's; NULL with 0 for none. */
 int gas_assemble(const char *in_path, const char *out_path, int preprocess,
                  const char **incdirs, int nincdirs);
+/* the target's ELF notes (ARM's attributes, RISC-V's ISA string), which
+ * the object gas_assemble writes carries; set before it */
+struct elfw;
+void gas_set_elf_notes(void (*notes)(struct elfw *w));
 
 /* Assembles one block of GNU-syntax text -- a file-scope __asm__, a naked
  * function's body -- from ta->tmpl (diagnostics at ta->file, ta->line
@@ -138,5 +142,21 @@ int gas_assemble(const char *in_path, const char *out_path, int preprocess,
  * switches sections is refused. */
 struct topasm;
 int gas_assemble_block(struct topasm *ta);
+
+/* An inline asm template that defines a label (`1:`, `loop:`): the
+ * statement assemblers know no labels, so a template with one is run
+ * through this whole assembler instead, its operands already in
+ * registers. Its bytes are code at an unknown place in a function, so a
+ * symbol, a second section, or an alignment past an instruction's is
+ * refused. 0, or -1 with err set (the errors themselves already said). */
+int gas_template_has_labels(const char *text);
+int gas_assemble_inline(const char *file, int line, const char *text,
+                        struct code *out, char *err, int errlen);
+/* A backend's template assembly: its statement assembler `enc`, or this
+ * one for a template with labels. */
+#define GAS_INLINE(enc, file, line, text, c, err, errlen)                    \
+    (gas_template_has_labels(text)                                        \
+         ? gas_assemble_inline(file, line, text, c, err, (int)(errlen))    \
+         : enc(text, c, err, errlen))
 
 #endif

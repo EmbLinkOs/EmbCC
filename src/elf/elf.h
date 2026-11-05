@@ -209,6 +209,7 @@ typedef struct {
 #define R_X86_64_PC32          2
 #define R_X86_64_PLT32         4
 #define R_X86_64_GOTPCREL      9
+#define R_X86_64_RELATIVE      8
 #define R_X86_64_32           10
 #define R_X86_64_32S          11
 #define R_X86_64_PC64         24
@@ -218,6 +219,7 @@ typedef struct {
  * thread pointer, which the LINKER computes once it knows how big the
  * whole thread block is. x86-64 puts the block below the thread
  * pointer, so the value is negative. */
+#define R_X86_64_GOTTPOFF     22
 #define R_X86_64_TPOFF32      23
 
 /* aarch64 (ELF for the Arm 64-bit Architecture, §4.6.3). Only the four
@@ -235,6 +237,8 @@ typedef struct {
 /* Local-exec TLS, the aarch64 half of the same idea, as an add pair
  * because the offset does not fit one instruction. aarch64 puts the
  * block ABOVE the thread pointer, so the value is positive. */
+#define R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21   541
+#define R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC 542
 #define R_AARCH64_TLSLE_ADD_TPREL_HI12    549
 /* _NC: no overflow check. 550 is the CHECKING variant of the same
  * field, and it is the wrong one here -- the low add legitimately
@@ -316,6 +320,7 @@ typedef struct {
 #define R_RISCV_CALL     18
 #define R_RISCV_CALL_PLT 19
 #define R_RISCV_PCREL_HI20   23
+#define R_RISCV_GOT_HI20     20
 #define R_RISCV_PCREL_LO12_I 24
 #define R_RISCV_PCREL_LO12_S 25
 #define R_RISCV_HI20     26
@@ -768,4 +773,16 @@ typedef struct {
 
 #define ELF64_ST_INFO(bind, type) ((Elf64_Uchar)(((bind) << 4) | ((type) & 0xf)))
 
+#endif
+
+#ifndef PT_DYNAMIC
+#define PT_DYNAMIC 2
+#endif
+
+#ifndef PT_PHDR
+#define PT_PHDR 6
+#endif
+
+#ifndef ET_DYN
+#define ET_DYN 3
 #endif

@@ -210,6 +210,35 @@ void x86_movs_store_base(struct code *c, int base, int disp, int xmm,
     modrm_base(c, xmm, base, disp);
 }
 
+/* movaps [base+disp], xmm and back (0f 29 / 0f 28): Win64's saves of the
+ * callee-saved xmm6-15, whose slots are 16-aligned */
+void x86_movaps_store(struct code *c, int base, int disp, int xmm)
+{
+    int rex = 0x40 | ((xmm & 8) ? 4 : 0) | ((base & 8) ? 1 : 0);
+    if (rex != 0x40) code_byte(c, rex);
+    code_byte(c, 0x0f); code_byte(c, 0x29);
+    modrm_base(c, xmm, base, disp);
+}
+
+/* movdqu [base+disp], xmm (f3 0f 7f): a 128-bit result out of xmm0 into
+ * a slot that may not be 16-aligned */
+void x86_movdqu_store(struct code *c, int base, int disp, int xmm)
+{
+    code_byte(c, 0xf3);
+    int rex = 0x40 | ((xmm & 8) ? 4 : 0) | ((base & 8) ? 1 : 0);
+    if (rex != 0x40) code_byte(c, rex);
+    code_byte(c, 0x0f); code_byte(c, 0x7f);
+    modrm_base(c, xmm, base, disp);
+}
+
+void x86_movaps_load(struct code *c, int xmm, int base, int disp)
+{
+    int rex = 0x40 | ((xmm & 8) ? 4 : 0) | ((base & 8) ? 1 : 0);
+    if (rex != 0x40) code_byte(c, rex);
+    code_byte(c, 0x0f); code_byte(c, 0x28);
+    modrm_base(c, xmm, base, disp);
+}
+
 void x86_lea_reg_slot(struct code *c, int dst, int disp)
 {
     rex_rb(c, 1, dst, REG_RBP);
@@ -1098,6 +1127,17 @@ int x86_lea_reg_rip(struct code *c, int reg)
     return off;
 }
 
+/* movq disp32(%rip), reg: the disp32's offset (Darwin's TLVP load) */
+int x86_mov_reg_rip(struct code *c, int reg)
+{
+    code_byte(c, 0x48 | ((reg & 8) ? 4 : 0));    /* REX.W (+REX.R) */
+    code_byte(c, 0x8b);
+    code_byte(c, 0x05 | ((reg & 7) << 3));        /* mod=00 reg rm=101 = RIP */
+    int off = c->len;
+    code_u32(c, 0);
+    return off;
+}
+
 /* ---- local-exec thread-local storage -------------------------------------
  *
  * Two instructions. The first asks the CPU where THIS thread's block
@@ -1124,6 +1164,18 @@ void x86_mov_reg_fsbase(struct code *c, int reg)
     code_byte(c, 0x64);                          /* FS prefix */
     code_byte(c, 0x48 | ((reg & 8) ? 4 : 0));    /* REX.W (+REX.R) */
     code_byte(c, 0x8b);
+    code_byte(c, 0x04 | ((reg & 7) << 3));       /* mod=00 rm=100 (SIB) */
+    code_byte(c, 0x25);                          /* base=101 idx=100: disp32 */
+    code_u32(c, 0);
+}
+
+/* `add %fs:0, reg`: the thread pointer added to an offset already in
+ * reg (initial-exec TLS). */
+void x86_add_reg_fsbase(struct code *c, int reg)
+{
+    code_byte(c, 0x64);                          /* FS prefix */
+    code_byte(c, 0x48 | ((reg & 8) ? 4 : 0));    /* REX.W (+REX.R) */
+    code_byte(c, 0x03);
     code_byte(c, 0x04 | ((reg & 7) << 3));       /* mod=00 rm=100 (SIB) */
     code_byte(c, 0x25);                          /* base=101 idx=100: disp32 */
     code_u32(c, 0);
@@ -1737,6 +1789,12 @@ void x86_jmp_rcx_reg8(struct code *c, int reg)
     if (reg >= 8) code_byte(c, 0x42);
     code_byte(c, 0xff); code_byte(c, 0x24);
     code_byte(c, 0xc0 | ((reg & 7) << 3) | 1);
+}
+
+void x86_endbr64(struct code *c)
+{
+    code_byte(c, 0xf3); code_byte(c, 0x0f); code_byte(c, 0x1e);
+    code_byte(c, 0xfa);
 }
 
 void x86_jmp_reg(struct code *c, int reg)

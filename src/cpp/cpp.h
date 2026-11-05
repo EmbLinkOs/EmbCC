@@ -28,12 +28,17 @@ void cpp_set_cxx(int (*has_builtin)(const char *name), int exceptions);
 /* -fgnuc-version=: define __GNUC__ and its family in C units (0: not). */
 void cpp_set_gnuc_version(int major, int minor, int patch);
 void cpp_set_cxx_std(int year, int strict);
+/* C++20 modules: the directories an import looks in (after "."), and the
+ * interface an `export module` unit makes (NULL when it is not one). */
+void cpp_set_module_dirs(const char **dirs, int n);
+const char *cpp_module_interface(const char **name);
 void cpp_set_cxx_char8(int on);             /* -fchar8_t */
 /* -DNAME[=VALUE] (undef 0) or -UNAME (undef 1), before cpp_process */
 void cpp_cmdline_define(const char *text, int undef);
 /* -dM: cpp_process returns the macros defined at the end of the file, a
  * #define each, instead of the preprocessed text (GCC's -E -dM) */
 void cpp_set_dump_macros(int on);
+void cpp_set_hosted(int on);       /* -ffreestanding: __STDC_HOSTED__ 0 */
 /* Compiling C (not -E): bracket what a system header's macro expands to
  * with LEX_SYS_ON/OFF, so -pedantic stays quiet about it (lex.h). Text
  * for anything but the C lexer -- the assembler's -- must not have them.

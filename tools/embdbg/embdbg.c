@@ -77,6 +77,32 @@
 #define DW_FORM_ref4            0x13
 #define DW_FORM_sec_offset      0x17
 #define DW_FORM_exprloc         0x18
+/* DWARF 5's, and the older ones a producer other than EmbCC writes */
+#define DW_FORM_block2          0x03
+#define DW_FORM_block4          0x04
+#define DW_FORM_data8           0x07
+#define DW_FORM_block           0x09
+#define DW_FORM_flag            0x0c
+#define DW_FORM_sdata           0x0d
+#define DW_FORM_strp            0x0e
+#define DW_FORM_udata           0x0f
+#define DW_FORM_ref1            0x11
+#define DW_FORM_ref2            0x12
+#define DW_FORM_ref_udata       0x15
+#define DW_FORM_flag_present    0x19
+#define DW_FORM_strx            0x1a
+#define DW_FORM_addrx           0x1b
+#define DW_FORM_data16          0x1e
+#define DW_FORM_line_strp       0x1f
+#define DW_FORM_implicit_const  0x21
+#define DW_FORM_loclistx        0x22
+#define DW_FORM_rnglistx        0x23
+#define DW_FORM_strx1           0x25
+#define DW_FORM_strx2           0x26
+#define DW_FORM_strx4           0x28
+#define DW_FORM_addrx1          0x29
+#define DW_FORM_addrx2          0x2a
+#define DW_FORM_addrx4          0x2c
 #define DW_OP_fbreg             0x91
 #define DW_OP_addr              0x03
 #define DW_OP_reg0              0x50
@@ -383,7 +409,9 @@ static void decode_lines(struct img *m)
         int unit_end = unit_start + 4 + (int)ulen;
         if (ulen == 0 || unit_end > n) break;
         unsigned ver = (unsigned)u16(p + i); i += 2;
-        if (ver < 2 || ver > 4) { i = unit_end; continue; }  /* DWARF 5: not ours */
+        if (ver < 2 || ver > 5) { i = unit_end; continue; }
+        if (ver >= 5)
+            i += 2;                        /* address_size, seg_selector_size */
         unsigned long hlen = u32(p + i); i += 4;
         int prog = i + (int)hlen;
         unsigned min_inst = p[i++];
@@ -394,19 +422,67 @@ static void decode_lines(struct img *m)
         unsigned opcode_base = p[i++];
         const unsigned char *std_len = p + i;
         i += (int)opcode_base - 1;
-        while (p[i]) {                     /* include_directories */
-            while (p[i]) i++;
+        int fbase;
+        if (ver >= 5) {
+            /* DWARF 5: each table says its entries' contents and forms;
+             * the files count from 0, and this unit's file k is fbase + k */
+            for (int tab = 0; tab < 2; tab++) {
+                int nfmt = p[i++], ct[8], fm[8];
+                for (int k = 0; k < nfmt; k++) {
+                    int c = (int)uleb(p, &i), f = (int)uleb(p, &i);
+                    if (k < 8) { ct[k] = c; fm[k] = f; }
+                }
+                unsigned long cnt = uleb(p, &i);
+                if (tab == 1)
+                    fbase = m->nfiles;
+                for (unsigned long e = 0; e < cnt && i < prog; e++) {
+                    const char *name = NULL;
+                    for (int k = 0; k < nfmt && k < 8; k++) {
+                        switch (fm[k]) {
+                        case DW_FORM_string:
+                            if (ct[k] == 1) name = (const char *)(p + i);
+                            while (p[i]) i++;
+                            i++;
+                            break;
+                        case DW_FORM_line_strp: case DW_FORM_strp: {
+                            unsigned long o = u32(p + i);
+                            i += 4;
+                            struct sec *ss = find_sec(m, fm[k] == DW_FORM_strp
+                                                         ? ".debug_str" : ".debug_line_str");
+                            if (ct[k] == 1 && ss && o < ss->size)
+                                name = (const char *)ss->data + o;
+                            break; }
+                        case DW_FORM_udata: (void)uleb(p, &i); break;
+                        case DW_FORM_data1: i += 1; break;
+                        case DW_FORM_data2: i += 2; break;
+                        case DW_FORM_data4: i += 4; break;
+                        case DW_FORM_data8: i += 8; break;
+                        case DW_FORM_data16: i += 16; break;  /* an MD5 */
+                        case DW_FORM_block: i += (int)uleb(p, &i); break;
+                        default: i = prog; break;
+                        }
+                    }
+                    if (tab == 1) {
+                        m->files = realloc(m->files, (size_t)(m->nfiles + 1) * sizeof(char *));
+                        m->files[m->nfiles++] = (char *)(name ? name : "?");
+                    }
+                }
+            }
+        } else {
+            while (p[i]) {                 /* include_directories */
+                while (p[i]) i++;
+                i++;
+            }
             i++;
-        }
-        i++;
-        int fbase = m->nfiles - 1;         /* this unit's file 1 is fbase + 1 */
-        while (p[i]) {
-            const char *name = (const char *)(p + i);
-            while (p[i]) i++;
-            i++;
-            (void)uleb(p, &i); (void)uleb(p, &i); (void)uleb(p, &i); /* dir,mtime,size */
-            m->files = realloc(m->files, (size_t)(m->nfiles + 1) * sizeof(char *));
-            m->files[m->nfiles++] = (char *)name;
+            fbase = m->nfiles - 1;         /* this unit's file 1 is fbase + 1 */
+            while (p[i]) {
+                const char *name = (const char *)(p + i);
+                while (p[i]) i++;
+                i++;
+                (void)uleb(p, &i); (void)uleb(p, &i); (void)uleb(p, &i); /* dir,mtime,size */
+                m->files = realloc(m->files, (size_t)(m->nfiles + 1) * sizeof(char *));
+                m->files[m->nfiles++] = (char *)name;
+            }
         }
         i = prog;
 
@@ -456,7 +532,7 @@ static void decode_lines(struct img *m)
  * forms the emitter writes, over EVERY unit in the section (a linked image
  * has one per object): each unit's abbreviations are its own, and a
  * DW_FORM_ref4 counts from the start of its unit. --- */
-struct abbrev { int tag, children; int at[24], form[24]; int n; };
+struct abbrev { int tag, children; int at[24], form[24]; long ic[24]; int n; };
 
 static void read_abbrevs(const struct sec *as, unsigned long at, struct abbrev *ab)
 {
@@ -472,9 +548,11 @@ static void read_abbrevs(const struct sec *as, unsigned long at, struct abbrev *
         for (;;) {
             int at2 = (int)uleb(p, &i), form = (int)uleb(p, &i);
             if (at2 == 0 && form == 0) break;
+            long ic = form == DW_FORM_implicit_const ? sleb(p, &i) : 0;
             if (ab[code].n < 24) {
                 ab[code].at[ab[code].n] = at2;
                 ab[code].form[ab[code].n] = form;
+                ab[code].ic[ab[code].n] = ic;
                 ab[code].n++;
             }
         }
@@ -496,15 +574,25 @@ static void decode_info(struct img *m)
         int end = cu + 4 + (int)ulen;
         unsigned ver = (unsigned)u16(p + cu + 4);
         if (ulen == 0 || end > n) break;
-        if (ver < 2 || ver > 4) { cu = end; continue; }   /* DWARF 5: not ours */
+        if (ver < 2 || ver > 5) { cu = end; continue; }
+        /* v2-4: version, abbrev_offset, address_size; v5: version,
+         * unit_type, address_size, abbrev_offset (and a skeleton's or a
+         * split unit's 8-byte id); a type unit describes no code */
+        int hdr = 11, aat = cu + 6, asz = p[cu + 10];
+        if (ver == 5) {
+            int ut = p[cu + 6];
+            if (ut != 1 && ut != 4 && ut != 5) { cu = end; continue; }
+            asz = p[cu + 7];
+            aat = cu + 8;
+            hdr = ut == 1 ? 12 : 20;
+        }
         int found;
         unsigned long aoff = reloc_lookup(m, ".rela.debug_info",
-                                          (unsigned long)(cu + 6), &found);
-        if (!found) aoff = u32(p + cu + 6);
-        int asz = p[cu + 10];
+                                          (unsigned long)aat, &found);
+        if (!found) aoff = u32(p + aat);
         read_abbrevs(as, aoff, ab);
 
-        int i = cu + 11, depth = 0;
+        int i = cu + hdr, depth = 0;
         struct dfunc *cur = NULL;
         while (i < end) {
             int die_off = i;               /* a ref4 is cu + its value */
@@ -582,6 +670,46 @@ static void decode_info(struct img *m)
                     i = st + len;
                     break; }
                 case DW_FORM_block1: { int len = p[i++]; i += len; break; }
+                case DW_FORM_block2: { int len = (int)u16(p + i); i += 2 + len; break; }
+                case DW_FORM_block4: { int len = (int)u32(p + i); i += 4 + len; break; }
+                case DW_FORM_block: { int len = (int)uleb(p, &i); i += len; break; }
+                case DW_FORM_data8:                    i += 8; break;
+                case DW_FORM_data16:                   i += 16; break;
+                case DW_FORM_flag: case DW_FORM_ref1:
+                case DW_FORM_strx1: case DW_FORM_addrx1: i += 1; break;
+                case DW_FORM_ref2: case DW_FORM_strx2: case DW_FORM_addrx2: i += 2; break;
+                case DW_FORM_strx4: case DW_FORM_addrx4: i += 4; break;
+                case DW_FORM_flag_present:             break;
+                case DW_FORM_implicit_const: {
+                    long v = a->ic[k];
+                    if (at == DW_AT_byte_size) size = (int)v;
+                    else if (at == DW_AT_encoding) enc = (int)v;
+                    break; }
+                case DW_FORM_udata: {
+                    unsigned long v = uleb(p, &i);
+                    if (at == DW_AT_byte_size) size = (int)v;
+                    else if (at == DW_AT_encoding) enc = (int)v;
+                    else if (at == DW_AT_high_pc) high = v;
+                    break; }
+                case DW_FORM_sdata:                    (void)sleb(p, &i); break;
+                case DW_FORM_ref_udata: {
+                    unsigned long v = uleb(p, &i);
+                    if (at == DW_AT_type) tref = (unsigned long)cu + v;
+                    break; }
+                case DW_FORM_strx: case DW_FORM_addrx:
+                case DW_FORM_loclistx: case DW_FORM_rnglistx:
+                    (void)uleb(p, &i); break;
+                case DW_FORM_strp: case DW_FORM_line_strp: {
+                    /* the name in .debug_str / .debug_line_str */
+                    int fnd;
+                    unsigned long o = reloc_lookup(m, ".rela.debug_info", secoff, &fnd);
+                    if (!fnd) o = u32(p + i);
+                    i += 4;
+                    struct sec *ss = find_sec(m, form == DW_FORM_strp ? ".debug_str"
+                                                                  : ".debug_line_str");
+                    if (at == DW_AT_name && ss && o < ss->size)
+                        name = (const char *)ss->data + o;
+                    break; }
                 default: i = end; break;   /* unknown form: cannot size safely */
                 }
             }
