@@ -69,8 +69,9 @@ EmbCC keeps GCC's form exactly:
 - **One dialect per language.** `--std=` (and `-std=`) sets the standard's
   macros. EmbCC reads C11 with the GNU extensions, and C++20, whichever
   standard is named ([C language](c-language.md)).
-- **`-O3` is `-O2`, and `-Oz` is `-Os`.** EmbCC has one speed goal and one
-  size goal ([Optimization](optimization.md)).
+- **`-Oz` is `-Os`.** EmbCC has one size goal. `-O3` is its own level:
+  `-O2` plus loop unswitching, constant parameters and inlining by
+  optimized size ([Optimization](optimization.md#--optmax)).
 - **Signed overflow wraps.** EmbCC compiles as GCC does with `-fwrapv`,
   always: no optimization assumes overflow cannot happen.
 - **Some GCC flags are refused** rather than ignored, when EmbCC cannot do

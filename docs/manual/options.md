@@ -102,7 +102,7 @@ EmbCC's own spellings come first. Where GCC spells the same thing differently, i
 | `--opt=basic` | the passes that only remove work: never larger code | `-O1` |
 | `--opt=debug` | --opt=basic, with every variable kept where a debugger reads it | `-Og` |
 | `--opt=speed` | fast code: --opt=basic and the passes that trade size for speed | `-O2` |
-| `--opt=max` | the same as --opt=speed | `-O3` |
+| `--opt=max` | fastest code: --opt=speed, plus unswitching, constant parameters and wider inlining | `-O3` |
 | `--opt=size` | small code: no transform that grows it | `-Os` |
 | `--opt=min-size` | the same as --opt=size | `-Oz` |
 | `--pass=NAME` | turn one optimizer pass on | `-fNAME` |
@@ -115,6 +115,8 @@ EmbCC's own spellings come first. Where GCC spells the same thing differently, i
 | `--inline=auto` | inline what pays (the default from -O2) | `-finline-functions` |
 | `--unroll` | unroll loops | `-funroll-loops` |
 | `--no-unroll` | do not | `-fno-unroll-loops` |
+| `--unswitch` | a test a loop cannot change made once, before it (the default at -O3) | `-funswitch-loops` |
+| `--no-unswitch` | do not | `-fno-unswitch-loops` |
 | `--jump-tables` | a dense switch may be a table (the default) | `-fjump-tables` |
 | `--no-jump-tables` | no switch through a table of addresses | `-fno-jump-tables` |
 | `--frame-pointer` | keep a frame pointer in every function | `-fno-omit-frame-pointer` |

@@ -50,6 +50,8 @@ static struct passflag g_pass[] = {
     { "pre",       0, 0 },   /* compute it on the path that lacked it */
     { "switch-thread", 0, 0 }, /* a known state jumps straight to its case */
     { "licm-mem",  0, 0 },   /* loads out of loops, a location in a register */
+    { "unswitch",  0, 0 },   /* -O3: a test the loop does not change, made once */
+    { "ipcp",      0, 0 },   /* -O3: a parameter every call passes one constant */
 };
 #define NPASS ((int)(sizeof g_pass / sizeof g_pass[0]))
 #define P_MEM2REG 0
@@ -70,6 +72,8 @@ static struct passflag g_pass[] = {
 #define P_PRE      15
 #define P_SWTHREAD 16
 #define P_LICMMEM  17
+#define P_UNSWITCH 18
+#define P_IPCP     19
 
 int opt_set_pass(const char *name, int on)
 {
@@ -114,6 +118,7 @@ static void pass_default(int idx, int on)
 #define g_unroll   (g_pass[P_UNROLL].on)
 #define g_pre      (g_pass[P_PRE].on)
 #define g_swthread (g_pass[P_SWTHREAD].on)
+#define g_unswitch (g_pass[P_UNSWITCH].on)
 
 #define OPT_MAX_ROUNDS 64   /* rounds of the block-local passes per outer round */
 static void opt_no_fixpoint(struct ir_func *fn, int rounds)
@@ -368,6 +373,20 @@ static void opt_func(struct ir_func *fn)
             outer = 1;
         }
     }
+    /* Unswitching before if-conversion, which would make the invariant
+     * test a select the loop still runs every time; and before strength
+     * reduction, which walks one pointer for each copy's own accesses
+     * rather than one shared by both sides of the test. */
+    int unswitched = 0;
+    if (g_unswitch && edge_ok && pass_unswitch(fn)) {
+        /* each copy's other side, which nothing reaches now */
+        drop_unreachable(fn);
+        pass_copyprop_local(fn);
+        pass_dce(fn);
+        if (g_cfgclean)
+            pass_cfgclean(fn);
+        unswitched = 1;
+    }
     /* Strength reduction runs ONCE, after the loop passes have settled,
      * because it destroys the addressing shape the vectorizer matches
      * on: a loop already walking a pointer no longer looks like
@@ -392,7 +411,7 @@ static void opt_func(struct ir_func *fn)
      * are for. */
     /* Switch threading with it: what it copies is a path, not a loop,
      * and the same block-local work cleans up after both. */
-    int copied = 0;
+    int copied = unswitched;
     if (g_unroll && edge_ok && pass_unroll(fn))
         copied = 1;
     if (g_swthread && edge_ok && pass_swthread(fn))
@@ -519,11 +538,16 @@ static void opt_func(struct ir_func *fn)
  * Everything else -- folding, value numbering, dead code, loop
  * invariants, strength reduction -- makes code smaller as well as
  * faster, which is why -Os is level 2 and not level 1. */
+/* -O3: the passes that copy code for speed beyond what -O2 will
+ * (opt_int.h); never with -Os, and not in a cold function */
+int g_opt_max;
+
 void opt_run(struct ir_unit *iu, int level)
 {
     g_fold_unit = iu;
     int size = level == OPT_SIZE;
     g_opt_size = size;
+    g_opt_max = !size && level >= 3;
     if (size)
         level = 2;
     if (level < 1) {
@@ -585,7 +609,12 @@ void opt_run(struct ir_unit *iu, int level)
     /* The memory half of LICM: a load out of a loop, a location kept in
      * a register across one. Fewer instructions at any level. */
     pass_default(P_LICMMEM, level >= 1);
+    pass_default(P_UNSWITCH, level >= 3 && !size);
+    pass_default(P_IPCP, level >= 3 && !size);
     g_licm_mem = g_pass[P_LICMMEM].on;
+    /* the constants first, so a copy the inliner makes has them too */
+    if (g_pass[P_IPCP].on)
+        pass_ipcp(iu);
     if (g_pass[P_INLINE].on)      /* inline before the per-function passes clean up */
         inline_unit(iu);
     /* After inlining, so the bodies are the ones that will be compiled,
@@ -612,10 +641,13 @@ void opt_run(struct ir_unit *iu, int level)
         int cold = level >= 1 && sf &&
                    (sf->attr_cold || sf->prof_heat == IR_HEAT_COLD);
         int s_size = g_opt_size, s_vec = g_pass[P_VEC].on,
-            s_unroll = g_pass[P_UNROLL].on, s_sw = g_pass[P_SWTHREAD].on;
+            s_unroll = g_pass[P_UNROLL].on, s_sw = g_pass[P_SWTHREAD].on,
+            s_us = g_pass[P_UNSWITCH].on, s_max = g_opt_max;
         if (cold) {
             g_opt_size = 1;
+            g_opt_max = 0;
             g_pass[P_VEC].on = g_pass[P_UNROLL].on = g_pass[P_SWTHREAD].on = 0;
+            g_pass[P_UNSWITCH].on = 0;
         }
         opt_func(&iu->funcs[f]);
         pass_latch_copies(&iu->funcs[f]);
@@ -633,6 +665,8 @@ void opt_run(struct ir_unit *iu, int level)
             g_pass[P_VEC].on = s_vec;
             g_pass[P_UNROLL].on = s_unroll;
             g_pass[P_SWTHREAD].on = s_sw;
+            g_pass[P_UNSWITCH].on = s_us;
+            g_opt_max = s_max;
         }
         pass_x86_loadop(&iu->funcs[f]);     /* last: nothing reorders after */
     }

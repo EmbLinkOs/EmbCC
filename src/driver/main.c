@@ -7619,6 +7619,10 @@ static int embcc_main(int argc, char **argv)
                    strcmp(argv[i], "-fno-unroll-loops") == 0) {
             /* GCC's names for the unroll pass (-funroll, -fno-unroll) */
             opt_set_pass("unroll", argv[i][2] != 'n');
+        } else if (strcmp(argv[i], "-funswitch-loops") == 0 ||
+                   strcmp(argv[i], "-fno-unswitch-loops") == 0) {
+            /* GCC's names for the unswitch pass */
+            opt_set_pass("unswitch", argv[i][2] != 'n');
         } else if (strcmp(argv[i], "-fcommon") == 0 ||
                    strcmp(argv[i], "-fno-common") == 0) {
             /* -fno-common is the default: a tentative definition is a

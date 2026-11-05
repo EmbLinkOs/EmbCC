@@ -1070,7 +1070,12 @@ inlining, `gcse`, `pre`, `unroll`, `switch-thread`, `tail-recursion` and
 
 ### `--opt=max`, `-O3`
 
-The same as `--opt=speed`. The output is identical.
+Everything in `--opt=speed`, plus the passes that spend code size for
+speed beyond it: `unswitch` (a loop's invariant test made once, the loop
+copied for each answer) and `ipcp` (a parameter every call passes one
+constant becomes that constant), and an inliner that weighs a callee as
+it will be once optimized. See
+[Optimization](optimization.md#--optmax).
 
 ### `--opt=size`, `-Os`, `--opt=min-size`, `-Oz`
 
@@ -2053,9 +2058,9 @@ Accepted. EmbCC uses no temporary files between its stages.
 
 ### `-Ofast`
 
-The same as `-O3` (and so `-O2`). GCC's `-Ofast` adds `-ffast-math`,
-which EmbCC does not do (see [`--fast-math`](#--fast-math---no-math-errno)),
-so no result differs from `--opt=max`'s.
+The same as `-O3`. GCC's `-Ofast` adds `-ffast-math`, which EmbCC
+does not do (see [`--fast-math`](#--fast-math---no-math-errno)), so no
+result differs from `--opt=max`'s.
 
 Any other `-O` spelling (`-O4`, `-Ox`) is refused with
 `embcc: unknown optimization flag '-O4'`.

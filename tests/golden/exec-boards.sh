@@ -3,7 +3,8 @@
 #
 # Every tests/exec program that names its exit status (`// expect-exit:
 # N`) is compiled for the target, linked with EmbCC's own libc and
-# runtime, run on QEMU, and must exit N -- at -O0, -O1, -O2 and -Os, on:
+# runtime, run on QEMU, and must exit N -- at -O0, -O1, -O2, -O3 and -Os
+# (EMBCC_EXEC_LEVELS), on:
 #
 #   m4     thumbv7em-none-eabi on the Cortex-M4F board (mps2-an386)
 #   m4hf   thumbv7em-none-eabihf, the same board with the FPU and the
@@ -300,8 +301,10 @@ else
 fi
 EOT
 export SKIP32 SKIPM4 SKIPA7 QA Q32 Q64
+levels=${EMBCC_EXEC_LEVELS:--O0 -O1 -O2 -O3 -Os}
+nlevels=$(echo $levels | wc -w | tr -d ' ')
 for b in $boards; do
-    for opt in -O0 -O1 -O2 -Os; do
+    for opt in $levels; do
         for c in tests/exec/*.c; do
             if [ -n "${EMBCC_EXEC_ONLY:-}" ]; then
                 case " $EMBCC_EXEC_ONLY " in
@@ -315,7 +318,7 @@ for b in $boards; do
 done | xargs -P "${EMBCC_JOBS:-8}" -n 4 sh "$out/one.sh" > "$out/results.txt" 2>&1
 fail=0
 for b in $boards; do
-    for opt in -O0 -O1 -O2 -Os; do
+    for opt in $levels; do
         p=$(grep -c "^PASS .* $b $opt\$" "$out/results.txt")
         f=$(grep -c "^FAIL .* $b $opt:" "$out/results.txt")
         n=$(grep -c "^NA .* $b $opt:" "$out/results.txt")
@@ -327,7 +330,7 @@ grep '^FAIL' "$out/results.txt" | sort | head -40
 # a program that compiles at some levels and not others is the
 # compiler's failure, not the program's
 grep '^NA .*does not compile' "$out/results.txt" | awk '{print $2, $3}' |
-    sort | uniq -c | awk '$1 != 4 { print "FAIL (compiles at some levels only):", $2, $3; bad = 1 }
+    sort | uniq -c | awk -v n="$nlevels" '$1 != n { print "FAIL (compiles at some levels only):", $2, $3; bad = 1 }
                           END { exit bad }' || fail=1
 [ -n "${EMBCC_EXEC_ONLY:-}" ] ||
 [ "$(grep -c '^PASS' "$out/results.txt")" -ge 1000 ] || {

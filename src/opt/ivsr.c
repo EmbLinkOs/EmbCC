@@ -339,6 +339,28 @@ static int ivsr_one(struct ir_func *fn)
         }
         if (nback != 1 || bb[latch].end <= bb[latch].start)
             continue;
+        /* The pointers start in front of the header's label, so the loop
+         * must be entered only by falling into it: from the block before
+         * it, with no jump to the label from outside. A loop entered by
+         * a jump -- unswitching's copy is one -- would run its walk from
+         * whatever the pointer held. */
+        {
+            int entry_ok = h > 0 && !bb_dominates(bb, h, h - 1);
+            for (int q = 0; q < bb[h].npred && entry_ok; q++) {
+                int p = bb[h].pred[q];
+                if (p != latch && p != h - 1)
+                    entry_ok = 0;
+            }
+            if (entry_ok) {
+                const struct ir_ins *pl = &fn->ins[bb[h].start - 1];
+                if (pl->op == IR_JMP || pl->op == IR_RET || pl->op == IR_UD2 ||
+                    pl->op == IR_IGOTO || pl->op == IR_SWITCH ||
+                    ((pl->op == IR_BRZ || pl->op == IR_BRNZ) && pl->label == Lh))
+                    entry_ok = 0;
+            }
+            if (!entry_ok)
+                continue;
+        }
         struct ir_ins *br = &fn->ins[bb[latch].end - 1];
         if (br->op != IR_BRNZ || br->label != Lh)
             continue;
