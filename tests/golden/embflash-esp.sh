@@ -24,7 +24,14 @@
 #   - the ELF itself goes to flash as that image, at 0x1000;
 #   - --ram loads its pieces into RAM and starts it (MEM_BEGIN, MEM_DATA,
 #     MEM_END), and --console shows what it prints;
-#   - a piece in flash-mapped memory is refused: the ROM loads RAM only.
+#   - an ELF with code and data in flash-mapped memory: the image carries
+#     embflash's boot stub (tools/embflash/esp32boot.c) as its entry, with a
+#     table that maps each region from the flash page it was written to,
+#     and the regions land there; --ram refuses such a piece; the stub's
+#     bytes are the ones its source was built to, and it still builds.
+# And the ROM's sectors: two pieces at unaligned addresses in one 4 KiB
+# sector both land (the ROM refuses an erase off a sector, and a second
+# erase would wipe the first piece).
 set -u
 EMBFLASH=${EMBFLASH:-./embflash}
 [ -x "$EMBFLASH" ] || { echo "FAIL: $EMBFLASH is not built (make embflash)"; exit 1; }
@@ -179,12 +186,78 @@ PY
     [ -n "$entry" ] || fail "ram: MEM_END did not start the program: $(cat "$out/ram.dump")"
     grep -q "hello from RAM at $entry" "$out/ram.log" || fail "ram: --console showed: $(cat "$out/ram.log")"
 
+    # code and read-only data in flash-mapped memory (from 0x400D0020), the
+    # rest in DRAM
     "$EMBLD" -e entry -Ttext 0x400D0020 -Tdata 0x3FFB0000 "$out/app.o" -o "$out/irom.elf" ||
         fail "the flash-mapped program does not link"
-    "$EMBFLASH" "$out/irom.elf" --esp-image "$out/irom.img" > "$out/irom.log" 2>&1 &&
-        fail "a flash-mapped piece was made into a ROM image"
-    grep -q "flash-mapped memory" "$out/irom.log" || fail "flash-mapped: $(cat "$out/irom.log")"
+    "$EMBFLASH" "$out/irom.elf" --dry-run > "$out/irom.pieces"
+    "$EMBFLASH" "$out/irom.elf" --esp-image "$out/irom.img" > "$out/irom.log" 2>&1 ||
+        fail "flash-mapped: $(cat "$out/irom.log")"
+    grep -q "flash-mapped region" "$out/irom.log" || fail "flash-mapped: $(cat "$out/irom.log")"
+    python3 - "$out/irom.img" "$out/irom.elf" tools/embflash/esp32boot.inc <<'PY' || fail "flash-mapped: the image, its stub or its table is wrong"
+import re, struct, sys
+d, elf, inc = open(sys.argv[1], "rb").read(), open(sys.argv[2], "rb").read(), open(sys.argv[3]).read()
+stub = bytes(int(x, 16) for x in re.findall(r"0x([0-9a-f]{2}),", inc))
+entry_off = int(re.search(r"ESP32BOOT_ENTRY (0x[0-9a-f]+)", inc).group(1), 16)
+# the ELF's sections that are loaded, by address
+shoff, = struct.unpack_from("<I", elf, 32)
+shentsize, shnum = struct.unpack_from("<HH", elf, 46)
+pieces = []
+for i in range(shnum):
+    _, typ, flags, addr, off, size = struct.unpack_from("<IIIIII", elf, shoff + i * shentsize)[:6]
+    if flags & 2 and typ == 1 and size:
+        pieces.append((addr, elf[off:off + size]))
+mapped = lambda a: 0x3F400000 <= a < 0x3F800000 or 0x400D0000 <= a < 0x40400000
+assert any(mapped(a) for a, _ in pieces), pieces
+nseg, entry = d[1], struct.unpack_from("<I", d, 4)[0]
+assert entry == 0x400C0000 + entry_off, hex(entry)
+at, segs = 24, {}
+for _ in range(nseg):
+    a, n = struct.unpack_from("<II", d, at)
+    segs[a] = d[at + 8:at + 8 + n]
+    at += 8 + n
+s = segs[0x400C0000]
+assert s[:len(stub)] == stub, "the stub is not esp32boot.inc's bytes"
+t = struct.unpack_from("<2I", s, 0x200)
+elf_entry, = struct.unpack_from("<I", elf, 24)
+assert t[0] == elf_entry, (hex(t[0]), hex(elf_entry))
+maps = [struct.unpack_from("<3I", s, 0x208 + 12 * i) for i in range(t[1])]
+for a, b in pieces:
+    if not mapped(a):
+        assert segs.get(a, b"")[:len(b)] == b, f"the RAM piece at 0x{a:x}"
+        continue
+    v, p, n = next(m for m in maps if m[0] <= a < m[0] + m[2] * 0x10000)
+    assert p % 0x10000 == 0 and v % 0x10000 == 0 and p >= 0x1000 + at
+    at_flat = p + (a - v) - 0x1000
+    assert d[at_flat:at_flat + len(b)] == b, f"the piece at 0x{a:x} is not at flash 0x{p + a - v:x}"
+PY
+    flash xip "" "$out/irom.elf" --verify
+    [ $frc -eq 0 ] && [ $src -eq 0 ] || { cat "$out/xip.log" "$out/xip.srv"; fail "xip: embflash $frc, model $src"; }
+    region "$out/xip.dump" 0x1000 "$out/irom.img" || fail "xip: the flash from 0x1000 is not the image and its regions"
+    "$EMBFLASH" "$out/irom.elf" --esp serial:/dev/null --ram > "$out/iram.log" 2>&1 &&
+        fail "--ram took a flash-mapped piece"
+    grep -q "flash-mapped memory: --ram loads RAM only" "$out/iram.log" || fail "--ram: $(cat "$out/iram.log")"
+
+    # the stub: built from the source the include names, and it still builds
+    want=$(sed -n 's/^#define ESP32BOOT_SOURCE "\(.*\)"$/\1/p' tools/embflash/esp32boot.inc)
+    have=$(python3 -c "import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest())" tools/embflash/esp32boot.c)
+    [ "$want" = "$have" ] || fail "esp32boot.inc was built from another esp32boot.c: run tools/embflash/esp32boot.sh (and try it on a board)"
+    EMBCC=$EMBCC EMBLD=$EMBLD EMBFLASH=$EMBFLASH sh tools/embflash/esp32boot.sh "$out/esp32boot.inc" > "$out/stub.log" 2>&1 ||
+        fail "the boot stub does not build: $(cat "$out/stub.log")"
     echo "  an ELF: its ESP32 image, to flash at 0x1000, to RAM and run with its console"
 fi
+
+# two pieces off sector boundaries, in one sector
+python3 - "$out" <<'PY'
+import sys
+def rec(addr, data):
+    r = bytes([len(data), addr >> 8, addr & 0xFF, 0]) + data
+    return ":" + r.hex().upper() + "%02X" % ((-sum(r)) & 0xFF) + "\n"
+open(f"{sys.argv[1]}/sector.hex", "w").write(rec(0x2010, bytes(range(16))) + rec(0x2800, bytes(range(100, 116))) + ":00000001FF\n")
+PY
+flash sector "" "$out/sector.hex" --verify
+[ $frc -eq 0 ] && [ $src -eq 0 ] || { cat "$out/sector.log" "$out/sector.srv"; fail "sector: embflash $frc, model $src"; }
+python3 -c "import sys; d=open(sys.argv[1],'rb').read(); sys.exit(d[0x2010:0x2020] != bytes(range(16)) or d[0x2800:0x2810] != bytes(range(100,116)) or d[0x2000:0x2010] != b'\xff'*16)" \
+    "$out/sector.dump" || fail "sector: the two pieces did not both land"
 
 echo "PASS: embflash-esp"

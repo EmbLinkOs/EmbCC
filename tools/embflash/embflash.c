@@ -1443,10 +1443,6 @@ static void sha256(const unsigned char *msg, size_t len, unsigned char out[32])
 
 /* Is the address one the ESP32's cache maps from flash (IROM, DROM)? Such
  * a segment is the second-stage bootloader's to map, not the ROM's to load. */
-static int esp_flash_mapped(u64 a)
-{
-    return (a >= 0x400D0000u && a < 0x40400000u) || (a >= 0x3F400000u && a < 0x3F800000u);
-}
 
 /* The ESP32 image the ROM boots from flash, from the linked ELF's pieces,
  * as esptool's elf2image writes it (src: esptool/bin_image.py,
@@ -1457,27 +1453,22 @@ static int esp_flash_mapped(u64 a)
  * (0xEF xored with every segment byte) where the file is one byte short of
  * a 16-byte boundary, and the SHA-256 of all of it. The flash's mode, size
  * and frequency are this board family's: DIO, 4 MiB, 40 MHz. */
-static unsigned char *esp_image(const char *path, size_t *lenp)
+/* The image the ROM boots: a header, SEGS, the checksum byte one short of
+ * a 16-byte boundary, and the SHA-256 of everything before it (esptool's
+ * elf2image format) */
+static unsigned char *esp_build(const struct chunk *segs, int nseg, u64 entry, size_t *lenp)
 {
-    if (!g_have_entry)
-        die("%s: an ESP32 image needs the ELF's entry point", path);
-    size_t cap = 64;
-    for (int k = 0; k < g_nch; k++) {
-        if (esp_flash_mapped(g_ch[k].addr))
-            die("%s: a piece at 0x%llx is in flash-mapped memory, which a second-stage "
-                "bootloader maps; the ROM loads RAM segments only (IRAM, DRAM)", path,
-                g_ch[k].addr);
-        cap += 8 + g_ch[k].len + 4;
-    }
-    cap += 16 + 32;
+    size_t cap = 64 + 16 + 32;
+    for (int k = 0; k < nseg; k++)
+        cap += 8 + segs[k].len + 4;
     unsigned char *img = xmalloc(cap);
     memset(img, 0, cap);
     size_t n = 0;
     img[n++] = 0xE9;
-    img[n++] = (unsigned char)g_nch;
+    img[n++] = (unsigned char)nseg;
     img[n++] = 0x02;                    /* DIO */
     img[n++] = 0x20;                    /* 4 MiB, 40 MHz */
-    put32(img + n, (u32)g_entry); n += 4;
+    put32(img + n, (u32)entry); n += 4;
     img[n++] = 0xEE;                    /* no WP pin */
     n += 3;                             /* the SPI pins' drive strengths */
     n += 2;                             /* chip 0: the ESP32 */
@@ -1487,12 +1478,12 @@ static unsigned char *esp_image(const char *path, size_t *lenp)
     n += 4;                             /* reserved */
     img[n++] = 1;                       /* a SHA-256 follows */
     u32 sum = 0xEF;
-    for (int k = 0; k < g_nch; k++) {
-        size_t len = (g_ch[k].len + 3) & ~(size_t)3;
-        put32(img + n, (u32)g_ch[k].addr);
+    for (int k = 0; k < nseg; k++) {
+        size_t len = (segs[k].len + 3) & ~(size_t)3;
+        put32(img + n, (u32)segs[k].addr);
         put32(img + n + 4, (u32)len);
         n += 8;
-        memcpy(img + n, g_ch[k].b, g_ch[k].len);
+        memcpy(img + n, segs[k].b, segs[k].len);
         for (size_t i = 0; i < len; i++)
             sum ^= img[n + i];
         n += len;
@@ -1503,6 +1494,129 @@ static unsigned char *esp_image(const char *path, size_t *lenp)
     n += 32;
     *lenp = n;
     return img;
+}
+
+/* The boot stub (esp32boot.c), and where it and its table go */
+#include "esp32boot.inc"
+#define ESP_STUB_ADDR   0x400C0000u     /* RTC fast memory, instruction bus */
+#define ESP_STUB_DATA   0x3FF80000u     /* the same memory on the data bus */
+#define ESP_STUB_TABLE  0x200u
+#define ESP_PAGE        0x10000u        /* the cache MMU's page */
+
+static int g_esp_nseg, g_esp_nmap;      /* for the messages */
+
+/* 1 for flash-mapped data, 2 for flash-mapped code, 0 for RAM */
+static int esp_region(u64 a)
+{
+    return a >= 0x3F400000u && a < 0x3F800000u ? 1 : a >= 0x400D0000u && a < 0x40400000u ? 2 : 0;
+}
+
+/* The ESP32's flash from BASE for an ELF. Its RAM pieces are the image the
+ * ROM boots. Its flash-mapped pieces, if any, go after the image, each
+ * region (data, code) from the 64 KiB page its first piece is in, on flash
+ * pages of its own; the boot stub joins the image as its entry, maps them
+ * and calls the program's entry. g_ch becomes these pieces at their flash
+ * addresses, and the flash's bytes from BASE are returned, 0xff between
+ * (for --esp-image). */
+static unsigned char *esp_layout(const char *path, u64 base, size_t *lenp)
+{
+    if (!g_have_entry)
+        die("%s: an ESP32 image needs the ELF's entry point", path);
+    u64 lo[3] = { ~0ull, ~0ull, ~0ull }, hi[3] = { 0, 0, 0 };
+    static const u64 rend[3] = { 0, 0x3F800000u, 0x40400000u };
+    struct chunk *segs = xmalloc(((size_t)g_nch + 1) * sizeof *segs);
+    int nseg = 0;
+    for (int k = 0; k < g_nch; k++) {
+        const struct chunk *c = &g_ch[k];
+        int r = esp_region(c->addr);
+        if (!r) {
+            segs[nseg++] = *c;
+            continue;
+        }
+        if (c->addr + c->len > rend[r])
+            die("%s: the piece at 0x%llx runs past the end of flash-mapped memory", path, c->addr);
+        if (c->addr < lo[r]) lo[r] = c->addr;
+        if (c->addr + c->len > hi[r]) hi[r] = c->addr + c->len;
+    }
+    int nmap = 0;
+    u64 vpage[3] = { 0 }, ppage[3] = { 0 }, npages[3] = { 0 };
+    unsigned char *stub = NULL;
+    size_t stub_len = 0;
+    if (hi[1] || hi[2]) {
+        for (int k = 0; k < nseg; k++) {
+            u64 a = segs[k].addr, e = a + segs[k].len;
+            if ((a < ESP_STUB_ADDR + 0x2000 && e > ESP_STUB_ADDR) ||
+                (a < ESP_STUB_DATA + 0x2000 && e > ESP_STUB_DATA))
+                die("%s: the piece at 0x%llx is in RTC fast memory, where embflash's boot "
+                    "stub goes when there is flash-mapped memory to map", path, a);
+        }
+        nmap = !!hi[1] + !!hi[2];
+        stub_len = ESP_STUB_TABLE + 4 * (2 + 3 * (size_t)nmap);
+        stub = xmalloc(stub_len);
+        memset(stub, 0, stub_len);
+        memcpy(stub, g_esp32boot, sizeof g_esp32boot);
+        segs[nseg].addr = ESP_STUB_ADDR;
+        segs[nseg].len = stub_len;
+        segs[nseg].b = stub;
+        nseg++;
+    }
+    u64 entry = nmap ? ESP_STUB_ADDR + ESP32BOOT_ENTRY : g_entry;
+    size_t il;
+    unsigned char *img = esp_build(segs, nseg, entry, &il);
+    u64 end = base + il;
+    if (nmap) {
+        /* the table: the program's entry, the count, and per region its
+         * first virtual page, its flash page and its number of pages. Its
+         * size is fixed, so the image's length is already known. */
+        unsigned char *t = stub + ESP_STUB_TABLE;
+        put32(t, (u32)g_entry);
+        put32(t + 4, (u32)nmap);
+        int i = 0;
+        for (int r = 1; r <= 2; r++) {
+            if (!hi[r])
+                continue;
+            vpage[r] = lo[r] & ~(u64)(ESP_PAGE - 1);
+            ppage[r] = (end + ESP_PAGE - 1) & ~(u64)(ESP_PAGE - 1);
+            npages[r] = (hi[r] - vpage[r] + ESP_PAGE - 1) / ESP_PAGE;
+            end = ppage[r] + (hi[r] - vpage[r]);
+            put32(t + 8 + 12 * i, (u32)vpage[r]);
+            put32(t + 12 + 12 * i, (u32)ppage[r]);
+            put32(t + 16 + 12 * i, (u32)npages[r]);
+            i++;
+        }
+        free(img);
+        img = esp_build(segs, nseg, entry, &il);
+    }
+    unsigned char *flat = xmalloc((size_t)(end - base));
+    memset(flat, 0xFF, (size_t)(end - base));
+    memcpy(flat, img, il);
+    for (int k = 0; k < g_nch; k++) {
+        int r = esp_region(g_ch[k].addr);
+        if (r)
+            memcpy(flat + (ppage[r] + (g_ch[k].addr - vpage[r]) - base), g_ch[k].b, g_ch[k].len);
+    }
+    /* the pieces to write: the image, and each region whole from its first
+     * piece to its last (one erase each: two in one 4 KiB sector would
+     * erase each other) */
+    struct chunk *old = g_ch;
+    int nold = g_nch;
+    g_ch = NULL; g_nch = g_capch = 0;
+    add_bytes(base, img, il);
+    for (int r = 1; r <= 2; r++)
+        if (hi[r]) {
+            u64 from = ppage[r] + (lo[r] - vpage[r]);
+            add_bytes(from, flat + (from - base), (size_t)(hi[r] - lo[r]));
+        }
+    for (int k = 0; k < nold; k++)
+        free(old[k].b);
+    free(old);
+    free(img);
+    free(stub);
+    free(segs);
+    g_esp_nseg = nseg;
+    g_esp_nmap = nmap;
+    *lenp = (size_t)(end - base);
+    return flat;
 }
 
 #ifdef EMBFLASH_POSIX
@@ -1575,6 +1689,38 @@ static void esp_host_rom_baud(void)
     g_esp_baud = ESP_ROM_BAUD;
 }
 
+/* Each piece from the start of its 4 KiB sector, and pieces that share a
+ * sector as one. The ROM erases whole sectors and refuses an erase that
+ * does not start on one (error 0x06, seen on a D0WD-V3); a second erase in
+ * a sector would wipe the piece before it. The bytes of a sector the image
+ * does not give read 0xff, as erased. */
+static void esp_sectors(void)
+{
+    qsort(g_ch, (size_t)g_nch, sizeof *g_ch, chunk_cmp);
+    struct chunk *old = g_ch;
+    int nold = g_nch;
+    g_ch = NULL; g_nch = g_capch = 0;
+    for (int k = 0; k < nold; k++) {
+        u64 a = old[k].addr, from = a & ~(u64)0xFFF;
+        if (g_nch) {
+            u64 have = g_ch[g_nch - 1].addr + g_ch[g_nch - 1].len;
+            if (a < have)
+                die("two pieces of the image overlap at 0x%llx", a);
+            if (from < ((have + 0xFFF) & ~(u64)0xFFF))
+                from = have;            /* the sector the last piece ends in */
+        }
+        if (a > from) {
+            unsigned char *pad = xmalloc((size_t)(a - from));
+            memset(pad, 0xFF, (size_t)(a - from));
+            add_bytes(from, pad, (size_t)(a - from));
+            free(pad);
+        }
+        add_bytes(a, old[k].b, old[k].len);
+        free(old[k].b);
+    }
+    free(old);
+}
+
 /* Into RAM and run, as esptool's load-ram: each piece in 0x1800-byte
  * blocks (MEM_BEGIN, MEM_DATA), then MEM_END with the entry, which the ROM
  * jumps to; nothing is written to flash */
@@ -1582,7 +1728,7 @@ static void esp_ram(void)
 {
     for (int k = 0; k < g_nch; k++) {
         const struct chunk *c = &g_ch[k];
-        if (esp_flash_mapped(c->addr))
+        if (esp_region(c->addr))
             die("a piece at 0x%llx is in flash-mapped memory: --ram loads RAM only", c->addr);
         size_t len = (c->len + 3) & ~(size_t)3;
         u32 nblk = (u32)((len + ESP_RAM_BLOCK - 1) / ESP_RAM_BLOCK);
@@ -1669,6 +1815,8 @@ static void esp_flash(const char *target, int verify, int no_reset, int ram, int
         die("chip-detect value 0x%08x: not a chip this programmer knows", magic);
     if (want != ESP_ROM_BAUD)
         esp_baud(want);
+    if (!ram)
+        esp_sectors();
     for (int k = 0; k < g_nch && !ram; k++)
         if (g_ch[k].addr + g_ch[k].len > chip->flash_size)
             die("the image reaches 0x%llx, beyond the %s's %u MiB of flash",
@@ -1831,21 +1979,25 @@ int main(int argc, char **argv)
     if (esp_out && !esp_elf)
         die("--esp-image: %s is not an ELF image", image);
     load_image(image, have_base && !esp_elf, base);
+    for (int k = 0; k < g_nch && ram; k++)      /* before the board is touched */
+        if (esp_region(g_ch[k].addr))
+            die("a piece at 0x%llx is in flash-mapped memory: --ram loads RAM only", g_ch[k].addr);
     if (esp_elf && !ram) {
         size_t il;
-        unsigned char *img = esp_image(image, &il);
+        u64 at = have_base ? base : 0x1000;
+        unsigned char *img = esp_layout(image, at, &il);
         if (esp_out) {
             FILE *f = fopen(esp_out, "wb");
             if (!f || fwrite(img, 1, il, f) != il || fclose(f) != 0)
                 die("%s: %s", esp_out, strerror(errno));
             printf("embflash: wrote the ESP32 image %s, %zu bytes, %d segment%s, entry 0x%llx\n",
-                   esp_out, il, g_nch, g_nch == 1 ? "" : "s", g_entry);
+                   esp_out, il, g_esp_nseg, g_esp_nseg == 1 ? "" : "s", g_entry);
+            if (g_esp_nmap)
+                printf("embflash: with %d flash-mapped region%s after it, which the boot stub "
+                       "maps; the file is the flash from 0x%llx\n", g_esp_nmap,
+                       g_esp_nmap == 1 ? "" : "s", at);
             return 0;
         }
-        for (int k = 0; k < g_nch; k++)
-            free(g_ch[k].b);
-        g_nch = 0;
-        add_bytes(have_base ? base : 0x1000, img, il);
         free(img);
     }
     if ((stk500 || esp) && !dry) {

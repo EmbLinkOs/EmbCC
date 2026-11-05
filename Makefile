@@ -506,7 +506,7 @@ embpack: tools/embpack/embpack.c
 # (QEMU, OpenOCD, pyOCD, J-Link's GDB server, the Black Magic Probe):
 # flash erased and programmed by the server's algorithm, RAM written,
 # verified, run (tools/embflash). ISO C, POSIX sockets and termios.
-embflash: tools/embflash/embflash.c
+embflash: tools/embflash/embflash.c tools/embflash/esp32boot.inc
 	$(CC) $(CFLAGS) -o $@ tools/embflash/embflash.c
 
 # embtrace -- what a program built with -finstrument-functions did: calls,

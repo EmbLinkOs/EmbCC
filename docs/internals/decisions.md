@@ -584,9 +584,17 @@ SHA-256), and the ELF already carries what it needs. Reading the console
 through the same port is needed because reopening it pulses the
 auto-reset.
 
-**Status.** Current, tested on an ESP32-D0WD-V3 board as well as the model.
-The ESP32 only, 4 MiB of flash assumed, RAM segments only (a piece in
-flash-mapped memory needs a second-stage bootloader, which `embflash` does
-not write). The RAM-loaded flasher stub, compressed
+Code and data in flash-mapped memory are mapped by a boot stub of
+embflash's own (`tools/embflash/esp32boot.c`) rather than a second-stage
+bootloader and partition table. The ROM loads the stub with the image, it
+maps each region with the ROM's `cache_flash_mmu_set` and starts the
+program. That keeps one image at 0x1000, written in one run, and no ESP-IDF
+format to follow. The stub's bytes are carried in embflash (built by
+EmbCC, with the source's SHA-256 checked by the golden), so building
+embflash needs no Xtensa toolchain.
+
+**Status.** Current, tested on an ESP32-D0WD-V3 board as well as the model,
+including a program with 291 KiB of code in flash. The ESP32 only, 4 MiB of
+flash assumed. The RAM-loaded flasher stub, compressed
 writes, reading the flash back and other chips (the ESP32-C3's and S3's
 chip IDs) are not implemented.

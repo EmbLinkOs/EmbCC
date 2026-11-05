@@ -12,7 +12,8 @@ RAM loader (MEM_BEGIN, MEM_DATA, MEM_END), and CHANGE_BAUDRATE, after which
 every command must come at the new rate: the pseudo-terminal's rate, which
 the programmer sets, is checked against the ROM's on each one. FLASH_END is
 answered with error
-0x06, as an ESP32's ROM answers it. When the programmer hangs up after
+0x06, as an ESP32's ROM answers it, and so is a FLASH_BEGIN that does not
+start on a 4 KiB sector. When the programmer hangs up after
 writing, it writes the 4 MiB flash to DUMP and exits 0; on MEM_END it writes
 what was loaded to DUMP, one
 line per piece, `ADDRESS LENGTH SHA256`, and `entry ADDRESS`, then prints a
@@ -181,6 +182,9 @@ def main(argv):
             esize, nblk, bsize, off = struct.unpack("<IIII", data)
             if nblk * bsize < esize or off + esize > FLASH:
                 rule(f"FLASH_BEGIN {esize} bytes in {nblk} blocks of {bsize} at 0x{off:x}")
+            if off % 0x1000:  # the chip's answer: it erases whole sectors only
+                reply(cmd, status=(1, 6))
+                continue
             lo, hi = off & ~0xFFF, (off + esize + 0xFFF) & ~0xFFF  # whole sectors
             flash[lo:hi] = b"\xff" * (hi - lo)
             region = [off, esize, nblk, bsize, 0, lo, hi]

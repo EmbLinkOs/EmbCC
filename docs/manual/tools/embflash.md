@@ -127,10 +127,14 @@ esptool's default. `@921600` is faster where the USB adapter carries it;
 
 - **An ELF** is made into the image the ROM boots (as esptool's `elf2image`
   makes it) and written to flash at `--base`, 0x1000 by default, which is
-  where the ESP32's ROM boots from. `--esp-image FILE` writes that image to a
+  where the ESP32's ROM boots from. Its code and read-only data may be in
+  flash-mapped memory, as a program larger than the RAM needs: see [The
+  image](#the-image). `--esp-image FILE` writes the flash from `--base` to a
   file instead, with no board.
 - **A raw `.bin` or a HEX file** is written as it is: its bytes go to flash
-  at their addresses, a `.bin` at `--base`.
+  at their addresses, a `.bin` at `--base`. The ROM erases whole 4 KiB
+  sectors, so a piece is written from the start of its sector, and the
+  bytes of that sector the image does not give read `0xff`.
 - **`--ram`** loads an ELF's pieces into RAM and starts it, as esptool's
   `load-ram` does. Nothing is written to flash.
 - **`--console SECONDS`** prints what the program writes on the serial line
@@ -168,8 +172,8 @@ the flash, one 1024-byte block per answer.
 
 ### The image
 
-The image is esptool's format, byte for byte (`tests/golden/embflash-esp.sh`
-compares them when esptool is installed):
+For an ELF in RAM only, the image is esptool's format, byte for byte
+(`tests/golden/embflash-esp.sh` compares them when esptool is installed):
 
 - **Header.** `0xE9`, the segment count, the flash's mode, size and
   frequency (DIO, 4 MiB, 40 MHz), and the ELF's entry point.
@@ -179,12 +183,32 @@ compares them when esptool is installed):
 - **Trailer.** The checksum byte, 0xEF xored with every segment byte, one
   byte short of a 16-byte boundary, then the SHA-256 of everything before it.
 
-The ROM loads RAM segments only, into IRAM and DRAM. A piece in
-flash-mapped memory (0x400D0000-0x403FFFFF, 0x3F400000-0x3F7FFFFF) is
-refused: a second-stage bootloader maps those, and `embflash` does not
-write one. A program the ROM boots this way runs on the ROM's stack, with
-UART0 at 115200. The flash boot leaves the RTC and timer-group watchdogs
-running, so it turns them off or feeds them.
+The ROM loads RAM segments only, into IRAM and DRAM. Pieces in
+flash-mapped memory, code at 0x400D0000-0x403FFFFF and read-only data at
+0x3F400000-0x3F7FFFFF, are read through the cache once its MMU maps them,
+which ESP-IDF's second-stage bootloader does. `embflash` needs no second
+stage for that:
+
+- **The regions.** Each region (code, data) is written to flash after the
+  image, from the 64 KiB page its first piece is in, on pages of its own:
+  a piece at 0x400D0020 goes 0x20 into its flash page.
+- **The boot stub.** A stub of about 400 bytes
+  (`tools/embflash/esp32boot.c`, built by EmbCC) joins the image in RTC fast memory at 0x400C0000 as its
+  entry, with a table of the program's entry and each region's virtual
+  page, flash page and page count. It maps the regions with the ROM's own
+  `cache_flash_mmu_set`, enables the cache, and calls the program's entry.
+- **What it asks of the program.** Its entry is in IRAM, since the cache is
+  not mapped until the stub has run. RTC fast memory is free for the
+  program once it runs, but nothing may be loaded there: such a piece is
+  refused.
+
+On the ESP32-D0WD-V3 board a program with 291 KiB of code in flash (4000
+functions, more than twice the IRAM) ran from it, 302 KiB written in about
+7.5 s at 921600.
+
+A program the ROM boots this way runs on the ROM's stack, with UART0 at
+115200. The flash boot leaves the RTC and timer-group watchdogs running, so
+it turns them off or feeds them.
 
 ## Examples
 
@@ -249,9 +273,10 @@ with an error is reported with that error.
   and verified in 7 s.
 - `--stk500` knows the ATmega328 family only. STK500 version 2, which the
   Arduino Mega's bootloader speaks, is not implemented.
-- `--esp` knows the ESP32 only and assumes 4 MiB of flash. The flasher
-  stub, compression, reading the flash back, a second-stage bootloader and
-  partition table, and other chips (S2, S3, C3...) are not implemented.
+- `--esp` knows the ESP32 only and assumes 4 MiB of flash and DIO at
+  40 MHz. The flasher stub, compression, reading the flash back, ESP-IDF's
+  app images and partition table (an IDF program needs IDF's bootloader),
+  PSRAM, and other chips (S2, S3, C3...) are not implemented.
 - Option bytes, mass erase and read-out protection are server-specific.
   Reach them with `--monitor`.
 - The transports need POSIX sockets and termios. Elsewhere `embflash`
