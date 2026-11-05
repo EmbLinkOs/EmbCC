@@ -2,7 +2,7 @@
 """A model of Optiboot, the Arduino Uno's STK500v1 bootloader, on a pseudo-terminal.
 
     fakeoptiboot.py PORTFILE DUMP [--sig 1e950f] [--silent] [--ignore-syncs N]
-                    [--corrupt-read ADDR]
+                    [--corrupt-read ADDR] [--flash BYTES --page BYTES]
 
 Writes the pseudo-terminal's device path to PORTFILE, answers what Optiboot
 answers (sync, signature, enter/leave programming mode, load address, program
@@ -13,7 +13,9 @@ programmer breaks is reported on stderr with exit status 1: a page that is not
 whole or not page-aligned, a write with no address loaded, a command it does
 not know. --silent never answers; --ignore-syncs
 drops the first N sync requests, as a bootloader still starting does;
---corrupt-read flips a bit of the byte at ADDR when it is read back."""
+--corrupt-read flips a bit of the byte at ADDR when it is read back;
+--flash and --page give another part's flash and page (an ATmega1280's
+ATmegaBOOT: 131072 and 256)."""
 import os
 import pty
 import select
@@ -31,6 +33,9 @@ def main(argv):
     def opt(name, default=None):
         return opts[opts.index(name) + 1] if name in opts else default
 
+    global FLASH, PAGE
+    FLASH = int(opt("--flash", str(FLASH)))
+    PAGE = int(opt("--page", str(PAGE)))
     sig = bytes.fromhex(opt("--sig", "1e950f"))
     silent = "--silent" in opts
     ignore = int(opt("--ignore-syncs", "0"))

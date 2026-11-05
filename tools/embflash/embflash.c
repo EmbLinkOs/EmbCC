@@ -1066,7 +1066,29 @@ static const struct avr_part g_avr_parts[] = {
     { "ATmega328P",  { 0x1E, 0x95, 0x0F }, 32768, 128, 512 },
     { "ATmega328",   { 0x1E, 0x95, 0x14 }, 32768, 128, 512 },
     { "ATmega328PB", { 0x1E, 0x95, 0x16 }, 32768, 128, 512 },
+    /* the Arduino Megas': the 1280's ATmegaBOOT (STK500, 57600) and the
+     * 2560's stk500v2 bootloader reserve 4 and 8 KiB */
+    { "ATmega1280",  { 0x1E, 0x97, 0x03 }, 131072, 256, 4096 },
+    { "ATmega2560",  { 0x1E, 0x98, 0x01 }, 262144, 256, 8192 },
 };
+
+/* every page an image touches, padded with the erased 0xff: page N's
+ * bytes into page; 0 for a page it does not touch */
+static int image_page(const struct avr_part *part, u32 pg, unsigned char *page)
+{
+    u64 lo = (u64)pg * part->page, hi = lo + part->page;
+    int touched = 0;
+    memset(page, 0xFF, part->page);
+    for (int k = 0; k < g_nch; k++) {
+        u64 a = g_ch[k].addr, e = a + g_ch[k].len;
+        if (e <= lo || a >= hi)
+            continue;
+        u64 s = a > lo ? a : lo, t = e < hi ? e : hi;
+        memcpy(page + (s - lo), g_ch[k].b + (s - a), (size_t)(t - s));
+        touched = 1;
+    }
+    return touched;
+}
 
 /* the reply to a command: INSYNC, n bytes into out, OK; 0 when it is not */
 static int stk_reply(unsigned char *out, size_t n)
@@ -1171,6 +1193,181 @@ static const char *serial_auto(const char *target, int esp)
     return target;
 }
 
+/* ---- STK500 version 2 ----------------------------------------------------
+ *
+ * The Arduino Mega 2560's bootloader's protocol (Atmel's AVR068): a
+ * message is MESSAGE_START (0x1b), a sequence number, a 16-bit size (high
+ * byte first), TOKEN (0x0e), the body, and the xor of all of it; the
+ * answer echoes the number, its body the command and a status (0 OK)
+ * first. An address is a word address, high byte first, bit 31 set for
+ * one past 64K words, as avrdude sends it. */
+#define V2_START        0x1B
+#define V2_TOKEN        0x0E
+#define V2_SIGN_ON      0x01
+#define V2_LOAD_ADDRESS 0x06
+#define V2_ENTER_PROG   0x10
+#define V2_LEAVE_PROG   0x11
+#define V2_PROG_FLASH   0x13
+#define V2_READ_FLASH   0x14
+#define V2_READ_SIG     0x1B
+
+static unsigned char g_v2seq;
+
+/* the answer's body into out (at most cap): its length, or -1 when none
+ * comes, or a broken one */
+static long v2_msg(const unsigned char *body, size_t n, unsigned char *out, size_t cap)
+{
+    unsigned char hdr[5] = { V2_START, g_v2seq, (unsigned char)(n >> 8), (unsigned char)n,
+                             V2_TOKEN };
+    unsigned char sum = 0;
+    for (int i = 0; i < 5; i++)
+        sum ^= hdr[i];
+    for (size_t i = 0; i < n; i++)
+        sum ^= body[i];
+    tx((const char *)hdr, 5);
+    tx((const char *)body, n);
+    tx((const char *)&sum, 1);
+    long long until = now_ms() + g_timeout_ms;
+    for (;;) {
+        int c = rx_byte();
+        if (c < 0 || now_ms() > until)
+            return -1;
+        if (c != V2_START)
+            continue;                   /* a byte of something else */
+        int seq = rx_byte(), hi = rx_byte(), lo = rx_byte(), tok = rx_byte();
+        if (seq < 0 || hi < 0 || lo < 0 || tok < 0)
+            return -1;
+        if (seq != g_v2seq || tok != V2_TOKEN)
+            continue;
+        size_t len = (size_t)hi << 8 | (size_t)lo;
+        unsigned char x = (unsigned char)(V2_START ^ seq ^ hi ^ lo ^ tok);
+        for (size_t i = 0; i < len; i++) {
+            int d = rx_byte();
+            if (d < 0)
+                return -1;
+            x ^= (unsigned char)d;
+            if (i < cap)
+                out[i] = (unsigned char)d;
+        }
+        int ck = rx_byte();
+        if (ck < 0 || (unsigned char)ck != x)
+            return -1;
+        g_v2seq++;
+        return (long)len;
+    }
+}
+
+/* a command whose answer must be OK: its body (at most cap) into out */
+static long v2_cmd(const unsigned char *body, size_t n, unsigned char *out, size_t cap,
+                   const char *what)
+{
+    unsigned char a[320];
+    long len = v2_msg(body, n, a, sizeof a);
+    if (len < 0)
+        die("%s: the bootloader did not answer", what);
+    if (len < 2 || a[0] != body[0])
+        die("%s: the bootloader answered another command", what);
+    if (a[1] != 0)
+        die("%s: the bootloader answered status 0x%02x", what, a[1]);
+    if (out)
+        memcpy(out, a, (size_t)len < cap ? (size_t)len : cap);
+    return len;
+}
+
+static void v2_load(u64 byte_addr)
+{
+    u32 w = (u32)(byte_addr / 2);
+    if (w >= 0x10000)
+        w |= 0x80000000u;
+    unsigned char la[5] = { V2_LOAD_ADDRESS, (unsigned char)(w >> 24), (unsigned char)(w >> 16),
+                            (unsigned char)(w >> 8), (unsigned char)w };
+    v2_cmd(la, sizeof la, NULL, 0, "load address");
+}
+
+static void stk500v2_flash(const char *target, int verify, int no_reset, int console)
+{
+    if (strncmp(target, "serial:", 7) != 0)
+        die("--stk500v2 %s: the bootloader is reached on a serial line, serial:DEV[@BAUD]",
+            target);
+    open_target(target);
+    if (!no_reset)
+        stk_reset();
+    /* sign on, while the bootloader starts listening */
+    int saved = g_timeout_ms, on = 0;
+    g_timeout_ms = 300;
+    for (int attempt = 0; attempt < 10 && !on; attempt++) {
+        static const unsigned char so[] = { V2_SIGN_ON };
+        unsigned char a[32];
+        long n = v2_msg(so, 1, a, sizeof a);
+        on = n >= 2 && a[0] == V2_SIGN_ON && a[1] == 0;
+#ifdef EMBFLASH_POSIX
+        if (!on)
+            tcflush(g_fd, TCIFLUSH);
+#endif
+    }
+    g_timeout_ms = saved;
+    if (!on)
+        die("%s: no STK500v2 bootloader answered (is it the board's port, and at this "
+            "baud rate?)", target + 7);
+    unsigned char ep[12] = { V2_ENTER_PROG, 200, 100, 25, 32, 0, 0x53, 3, 0xAC, 0x53, 0, 0 };
+    v2_cmd(ep, sizeof ep, NULL, 0, "enter programming mode");
+    unsigned char sig[3];
+    for (int i = 0; i < 3; i++) {
+        unsigned char rs[6] = { V2_READ_SIG, 4, 0x30, 0, (unsigned char)i, 0 }, a[4];
+        v2_cmd(rs, sizeof rs, a, sizeof a, "the signature request");
+        sig[i] = a[2];
+    }
+    const struct avr_part *part = NULL;
+    for (size_t i = 0; i < sizeof g_avr_parts / sizeof g_avr_parts[0]; i++)
+        if (!memcmp(g_avr_parts[i].sig, sig, 3))
+            part = &g_avr_parts[i];
+    if (!part)
+        die("signature %02X %02X %02X: not a part this programmer knows", sig[0], sig[1], sig[2]);
+    u32 app = part->flash - part->boot;
+    for (int k = 0; k < g_nch; k++)
+        if (g_ch[k].addr + g_ch[k].len > app)
+            die("the image reaches 0x%llx; the %s's application flash ends at 0x%x, where "
+                "the bootloader begins", g_ch[k].addr + g_ch[k].len, part->name, app);
+    u32 npages = app / part->page, written = 0;
+    unsigned char *page = xmalloc(part->page), *msg = xmalloc(16 + part->page);
+    for (int pass = 0; pass < (verify ? 2 : 1); pass++)
+        for (u32 pg = 0; pg < npages; pg++) {
+            if (!image_page(part, pg, page))
+                continue;
+            u64 lo = (u64)pg * part->page;
+            v2_load(lo);
+            if (pass == 0) {
+                unsigned char h[10] = { V2_PROG_FLASH, (unsigned char)(part->page >> 8),
+                                        (unsigned char)part->page, 0xC1, 10, 0x40, 0x4C, 0x20,
+                                        0, 0 };
+                memcpy(msg, h, 10);
+                memcpy(msg + 10, page, part->page);
+                v2_cmd(msg, 10 + part->page, NULL, 0, "a page");
+                written++;
+            } else {
+                unsigned char rd[4] = { V2_READ_FLASH, (unsigned char)(part->page >> 8),
+                                        (unsigned char)part->page, 0x20 };
+                long n = v2_cmd(rd, sizeof rd, msg, 16 + part->page, "read page");
+                if (n < (long)part->page + 2)
+                    die("read page at 0x%llx: %ld bytes in the answer", lo, n);
+                for (u32 i = 0; i < part->page; i++)
+                    if (msg[2 + i] != page[i])
+                        die("verification failed at 0x%llx: 0x%02x read, 0x%02x written",
+                            lo + i, msg[2 + i], page[i]);
+            }
+        }
+    free(page);
+    free(msg);
+    static const unsigned char lv[3] = { V2_LEAVE_PROG, 1, 1 };
+    v2_cmd(lv, sizeof lv, NULL, 0, "leave programming mode");
+    printf("embflash: wrote %u page%s of %u bytes to the %s through its STK500v2 bootloader\n",
+           written, written == 1 ? "" : "s", part->page, part->name);
+    if (verify)
+        printf("embflash: verified\n");
+    if (console)                        /* the bootloader starts the program on leaving */
+        serial_console(console);
+}
+
 static void stk500_flash(const char *target, int verify, int no_reset, int console)
 {
     if (strncmp(target, "serial:", 7) != 0)
@@ -1220,18 +1417,8 @@ static void stk500_flash(const char *target, int verify, int no_reset, int conso
     unsigned char *back = xmalloc(part->page);
     for (int pass = 0; pass < (verify ? 2 : 1); pass++) {
         for (u32 pg = 0; pg < npages; pg++) {
-            u64 lo = (u64)pg * part->page, hi = lo + part->page;
-            int touched = 0;
-            memset(page, 0xFF, part->page);
-            for (int k = 0; k < g_nch; k++) {
-                u64 a = g_ch[k].addr, e = a + g_ch[k].len;
-                if (e <= lo || a >= hi)
-                    continue;
-                u64 s = a > lo ? a : lo, t = e < hi ? e : hi;
-                memcpy(page + (s - lo), g_ch[k].b + (s - a), (size_t)(t - s));
-                touched = 1;
-            }
-            if (!touched)
+            u64 lo = (u64)pg * part->page;
+            if (!image_page(part, pg, page))
                 continue;
             u32 word = (u32)(lo / 2);
             unsigned char la[4] = { STK_LOAD_ADDR, (unsigned char)(word & 0xFF),
@@ -2374,7 +2561,7 @@ static void usage(void)
         "usage: embflash IMAGE --gdb TARGET [--base ADDR] [--verify] [--run]\n"
         "                [--entry ADDR] [--vector-table ADDR] [--monitor CMD]...\n"
         "                [--dry-run] [--timeout SECONDS] [-v]\n"
-        "       embflash IMAGE --stk500 serial:DEV[@BAUD] [--verify] [--no-reset]\n"
+        "       embflash IMAGE --stk500 | --stk500v2 serial:DEV[@BAUD] [--verify] [--no-reset]\n"
         "                [--console SECONDS]\n"
         "       embflash IMAGE --esp serial:DEV[@BAUD] [--base ADDR] [--verify] [--no-reset]\n"
         "                [--ram] [--console SECONDS]\n"
@@ -2392,7 +2579,7 @@ static void usage(void)
 
 int main(int argc, char **argv)
 {
-    const char *image = NULL, *target = NULL, *stk500 = NULL, *esp = NULL;
+    const char *image = NULL, *target = NULL, *stk500 = NULL, *esp = NULL, *stk500v2 = NULL;
     const char *esp_out = NULL, *read_file = NULL, *board = NULL;
     int erase_all = 0, erase_region = 0;
     u64 erase_addr = 0, erase_size = 0;
@@ -2407,6 +2594,7 @@ int main(int argc, char **argv)
         const char *a = argv[i];
         if (!strcmp(a, "--gdb") && i + 1 < argc) target = argv[++i];
         else if (!strcmp(a, "--stk500") && i + 1 < argc) stk500 = argv[++i];
+        else if (!strcmp(a, "--stk500v2") && i + 1 < argc) stk500v2 = argv[++i];
         else if (!strcmp(a, "--esp") && i + 1 < argc) esp = argv[++i];
         else if (!strcmp(a, "--no-reset")) no_reset = 1;
         else if (!strcmp(a, "--ram")) ram = 1;
@@ -2457,14 +2645,19 @@ int main(int argc, char **argv)
     if (board) {
         if (!strcmp(board, "uno") || !strcmp(board, "nano")) {
             if (!stk500) stk500 = "serial:auto";
+        } else if (!strcmp(board, "mega2560")) {
+            if (!stk500v2) stk500v2 = "serial:auto";
         } else if (!strcmp(board, "esp32-devkit")) {
             if (!esp) esp = "serial:auto";
         } else {
-            die("--board=%s: not a board embflash knows (uno, nano, esp32-devkit)", board);
+            die("--board=%s: not a board embflash knows (uno, nano, mega2560, esp32-devkit)",
+                board);
         }
     }
     if (stk500)
         stk500 = serial_auto(stk500, 0);
+    if (stk500v2)
+        stk500v2 = serial_auto(stk500v2, 0);
     if (esp)
         esp = serial_auto(esp, 1);
     if (erase_all || erase_region) {
@@ -2483,12 +2676,19 @@ int main(int argc, char **argv)
     }
     /* an ELF, and no programmer named: the one its machine has, an AVR's
      * Optiboot or an ESP32's ROM, at the port found */
-    if (image && !target && !stk500 && !esp && !esp_out && !dry) {
+    if (image && !target && !stk500 && !stk500v2 && !esp && !esp_out && !dry) {
         size_t hl;
         unsigned char *h = slurp(image, &hl);
         unsigned mach = hl >= 20 && !memcmp(h, "\177ELF", 4) ? (unsigned)(h[18] | h[19] << 8) : 0;
+        unsigned core = hl >= 40 ? h[36] & 0x7f : 0;   /* e_flags: the AVR core */
         free(h);
-        if (mach == 83) {                       /* EM_AVR */
+        if (mach == 83 && core == 6) {          /* avr6: the ATmega2560, a Mega 2560 */
+            printf("embflash: an avr6 program: --stk500v2, the Mega 2560's bootloader\n");
+            stk500v2 = serial_auto("serial:auto", 0);
+        } else if (mach == 83 && core == 51) {  /* avr51: the 1280, ATmegaBOOT at 57600 */
+            printf("embflash: an avr51 program: --stk500, the Mega 1280's bootloader\n");
+            stk500 = serial_auto("serial:auto@57600", 0);
+        } else if (mach == 83) {                /* EM_AVR */
             printf("embflash: an AVR program: --stk500, Optiboot's\n");
             stk500 = serial_auto("serial:auto", 0);
         } else if (mach == 94) {                /* EM_XTENSA */
@@ -2496,13 +2696,13 @@ int main(int argc, char **argv)
             esp = serial_auto("serial:auto", 1);
         }
     }
-    if (!image || (!target && !stk500 && !esp && !esp_out && !dry) ||
-        (!!target + !!stk500 + !!esp + !!esp_out) > 1)
+    if (!image || (!target && !stk500 && !stk500v2 && !esp && !esp_out && !dry) ||
+        (!!target + !!stk500 + !!stk500v2 + !!esp + !!esp_out) > 1)
         usage();
     if (ram && !esp)
         die("--ram is --esp's");
-    if (console && !esp && !stk500)
-        die("--console reads a serial bootloader's port: --esp or --stk500");
+    if (console && !esp && !stk500 && !stk500v2)
+        die("--console reads a serial bootloader's port: --esp, --stk500 or --stk500v2");
     /* an ELF for the ESP32's ROM is laid out as its image, which goes to
      * flash at --base (0x1000, where the ROM boots from, by default) */
     int esp_elf = 0;
@@ -2536,13 +2736,15 @@ int main(int argc, char **argv)
         }
         free(img);
     }
-    if ((stk500 || esp) && !dry) {
+    if ((stk500 || stk500v2 || esp) && !dry) {
         if (run || nmon || have_entry_opt || have_vt)
             die("--%s: the %s starts the program itself; --run, --monitor, --entry and "
-                "--vector-table are for --gdb", stk500 ? "stk500" : "esp",
-                stk500 ? "bootloader" : "ROM");
+                "--vector-table are for --gdb",
+                stk500 ? "stk500" : stk500v2 ? "stk500v2" : "esp", esp ? "ROM" : "bootloader");
         if (stk500)
             stk500_flash(stk500, verify, no_reset, console);
+        else if (stk500v2)
+            stk500v2_flash(stk500v2, verify, no_reset, console);
         else
             esp_flash(esp, verify, no_reset, ram, console);
         return 0;

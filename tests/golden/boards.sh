@@ -25,7 +25,7 @@ fail() { echo "FAIL: $*"; exit 1; }
 
 # ---- the list, and what is refused ------------------------------------------
 "$EMBCC" --reference=boards > "$out/list.md" || fail "--reference=boards"
-for b in uno nano esp32-devkit; do
+for b in uno nano mega2560 esp32-devkit; do
     grep -q "^| \`$b\` |" "$out/list.md" || fail "--reference=boards has no $b"
 done
 printf 'int main(void) { return 0; }\n' > "$out/m.c"
@@ -72,6 +72,16 @@ if command -v qemu-system-avr > /dev/null 2>&1; then
     echo "  --board=uno: printf, .bss, the constructors and the clock, on QEMU's ATmega328P"
 else
     echo "  (no qemu-system-avr: the Uno program is built, not run)"
+fi
+"$EMBCC" --board=mega2560 -Os "$out/hello.c" -o "$out/mega.elf" > "$out/mega.log" 2>&1 ||
+    fail "--board=mega2560 does not build: $(head -3 "$out/mega.log") (make rt-embedded?)"
+if command -v qemu-system-avr > /dev/null 2>&1; then
+    EMBCC_AVR_MACHINE=mega2560 EMBCC_QEMU_UNTIL='<<END>>' EMBCC_QEMU_TIMEOUT=${EMBCC_QEMU_TIMEOUT:-30} \
+        sh tests/harness/avr/run.sh "$out/mega.elf" > "$out/mega.out" 2>/dev/null
+    grep -q "hello from Arduino Mega 2560: 42 ok beef, bss zero, ctor ran" "$out/mega.out" &&
+        grep -q "the clock ticks: yes" "$out/mega.out" ||
+        fail "the Mega 2560 program on QEMU: $(head -3 "$out/mega.out")"
+    echo "  --board=mega2560: the same, on QEMU's ATmega2560"
 fi
 "$EMBCC" --board=nano -E -dM "$out/m.c" | grep -q 'define BOARD_NANO 1' ||
     fail "--board=nano does not define BOARD_NANO"

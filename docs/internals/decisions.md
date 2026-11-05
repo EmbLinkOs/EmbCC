@@ -556,8 +556,10 @@ small, and a model of it can test every rule without a board. Refusing an
 unknown signature and an image over the bootloader keeps `embflash` from
 writing into a part whose layout it does not know.
 
-**Status.** Current. Other parts, STK500 version 2 (the Mega's bootloader),
-EEPROM and fuses are not implemented. Native USB probes (ST-LINK,
+**Status.** Current, tested on an Arduino Uno R3. STK500 version 2, the
+Mega 2560's bootloader's, is `--stk500v2`, against a model written from
+Atmel's AVR068 (no Mega on the bench); the ATmega1280's ATmegaBOOT is
+version 1. EEPROM and fuses are not implemented. Native USB probes (ST-LINK,
 CMSIS-DAP) are a separate, larger decision; until then they are reached
 through their GDB servers.
 

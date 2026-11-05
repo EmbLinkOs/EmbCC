@@ -1,5 +1,7 @@
 /* The Arduino Uno's runtime (embcc --board=uno links it after the
- * startup): the console on USART0, the pins by the board's numbers, and
+ * startup), and the Mega 2560's (--board=mega2560: lib/boards/mega2560
+ * builds this file for its part): the console on USART0, the pins by the
+ * board's numbers, and
  * Timer1 as a 1 kHz clock -- CTC at 16 MHz / 64 / 250, exactly. Timer1
  * and not Arduino's Timer0: QEMU's ATmega328P has the 16-bit timers only,
  * and the board is tested there too. */
@@ -52,21 +54,51 @@ int getchar(void)
     return c;
 }
 
-/* the port, its bit: 0-7 PORTD, 8-13 PORTB, 14-19 PORTC */
+/* Each pin's port and bit, (port << 3) | bit, the ports by the data
+ * address of their PIN register (DDR follows it, then PORT, on both
+ * parts). The Uno: 0-7 PORTD, 8-13 PORTB, 14-19 PORTC (A0-A5). The Mega
+ * 2560: the Arduino Mega's numbering (its pins_arduino.h), 0-53 the
+ * digital header, 54-69 A0-A15. */
+#if defined(__AVR_ATmega2560__)
+enum { PA_, PB_, PC_, PD_, PE_, PF_, PG_, PH_, PJ_, PK_, PL_ };
+static const unsigned short port_pin[] = { 0x20, 0x23, 0x26, 0x29, 0x2C, 0x2F, 0x32,
+                                           0x100, 0x103, 0x106, 0x109 };
+#define P(port, bit) ((port) << 3 | (bit))
+static const unsigned char pin_map[] = {
+    P(PE_, 0), P(PE_, 1), P(PE_, 4), P(PE_, 5), P(PG_, 5), P(PE_, 3), P(PH_, 3), P(PH_, 4),
+    P(PH_, 5), P(PH_, 6), P(PB_, 4), P(PB_, 5), P(PB_, 6), P(PB_, 7), P(PJ_, 1), P(PJ_, 0),
+    P(PH_, 1), P(PH_, 0), P(PD_, 3), P(PD_, 2), P(PD_, 1), P(PD_, 0), P(PA_, 0), P(PA_, 1),
+    P(PA_, 2), P(PA_, 3), P(PA_, 4), P(PA_, 5), P(PA_, 6), P(PA_, 7), P(PC_, 7), P(PC_, 6),
+    P(PC_, 5), P(PC_, 4), P(PC_, 3), P(PC_, 2), P(PC_, 1), P(PC_, 0), P(PD_, 7), P(PG_, 2),
+    P(PG_, 1), P(PG_, 0), P(PL_, 7), P(PL_, 6), P(PL_, 5), P(PL_, 4), P(PL_, 3), P(PL_, 2),
+    P(PL_, 1), P(PL_, 0), P(PB_, 3), P(PB_, 2), P(PB_, 1), P(PB_, 0),
+    P(PF_, 0), P(PF_, 1), P(PF_, 2), P(PF_, 3), P(PF_, 4), P(PF_, 5), P(PF_, 6), P(PF_, 7),
+    P(PK_, 0), P(PK_, 1), P(PK_, 2), P(PK_, 3), P(PK_, 4), P(PK_, 5), P(PK_, 6), P(PK_, 7),
+};
+#else
+enum { PB_, PC_, PD_ };
+static const unsigned short port_pin[] = { 0x23, 0x26, 0x29 };
+#define P(port, bit) ((port) << 3 | (bit))
+static const unsigned char pin_map[] = {
+    P(PD_, 0), P(PD_, 1), P(PD_, 2), P(PD_, 3), P(PD_, 4), P(PD_, 5), P(PD_, 6), P(PD_, 7),
+    P(PB_, 0), P(PB_, 1), P(PB_, 2), P(PB_, 3), P(PB_, 4), P(PB_, 5),
+    P(PC_, 0), P(PC_, 1), P(PC_, 2), P(PC_, 3), P(PC_, 4), P(PC_, 5),
+};
+#endif
+#define NPINS ((int)(sizeof pin_map / sizeof pin_map[0]))
+
+/* the pin's PIN (which 0), DDR (1) or PORT (2) register, and its bit */
 static volatile unsigned char *pin_reg(int pin, int which, unsigned char *bit)
 {
-    static volatile unsigned char *const regs[3][3] = {
-        { &PIND, &DDRD, &PORTD }, { &PINB, &DDRB, &PORTB }, { &PINC, &DDRC, &PORTC },
-    };
-    int port = pin < 8 ? 0 : pin < 14 ? 1 : 2;
-    *bit = (unsigned char)(1u << (pin < 8 ? pin : pin < 14 ? pin - 8 : pin - 14));
-    return regs[port][which];
+    unsigned char m = pin_map[pin];
+    *bit = (unsigned char)(1u << (m & 7));
+    return (volatile unsigned char *)(unsigned)(port_pin[m >> 3] + (unsigned)which);
 }
 
 void board_pin_mode(int pin, int mode)
 {
     unsigned char b;
-    if (pin < 0 || pin > 19)
+    if (pin < 0 || pin >= NPINS)
         return;
     volatile unsigned char *ddr = pin_reg(pin, 1, &b), *port = pin_reg(pin, 2, &b);
     unsigned char s = SREG;
@@ -86,7 +118,7 @@ void board_pin_mode(int pin, int mode)
 void board_pin_write(int pin, int high)
 {
     unsigned char b;
-    if (pin < 0 || pin > 19)
+    if (pin < 0 || pin >= NPINS)
         return;
     volatile unsigned char *port = pin_reg(pin, 2, &b);
     unsigned char s = SREG;
@@ -101,7 +133,7 @@ void board_pin_write(int pin, int high)
 int board_pin_read(int pin)
 {
     unsigned char b;
-    if (pin < 0 || pin > 19)
+    if (pin < 0 || pin >= NPINS)
         return 0;
     return (*pin_reg(pin, 0, &b) & b) != 0;
 }

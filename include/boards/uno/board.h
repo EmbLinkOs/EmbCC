@@ -6,9 +6,8 @@
  * printf, puts and putchar send to it with "\n" as "\r\n", getchar reads
  * it. Timer1 is the board's clock (board_millis, an interrupt every
  * millisecond, so interrupts are on before main); Timer0 and Timer2 are
- * free. The pins are the
- * board's numbers: 0 to 13 the digital header, 14 to 19 A0 to A5. The
- * same names are in every board's <board.h>. */
+ * free. The pins are the board's numbers: 0 to 13 the digital header, 14
+ * to 19 A0 to A5. The same names are in every board's <board.h>. */
 #ifndef EMBCC_BOARD_H
 #define EMBCC_BOARD_H
 

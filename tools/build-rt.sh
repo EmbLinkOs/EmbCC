@@ -174,10 +174,13 @@ fi
 # the order the table gives.
 case $triple in
     avr)
-        "$EMBCC" --target=avr -mmcu=atmega328p -DF_CPU=16000000UL -Os -Wall -Wextra -Werror \
-            -I"$here/include/boards/uno" -c "$here/lib/boards/uno/board.c" \
-            -o "$out/board-uno.o" || {
-            echo "build-rt: lib/boards/uno/board.c does not compile" >&2; exit 1; }
+        # the Uno's and Nano's beside avr5's library, the Mega 2560's in avr6's
+        b=uno part=atmega328p
+        case $flags in *atmega2560*) b=mega2560 part=atmega2560 ;; esac
+        "$EMBCC" --target=avr -mmcu=$part -DF_CPU=16000000UL -Os -Wall -Wextra -Werror \
+            -I"$here/include/boards/$b" -c "$here/lib/boards/$b/board.c" \
+            -o "$out/board-$b.o" || {
+            echo "build-rt: lib/boards/$b/board.c does not compile" >&2; exit 1; }
         ;;
     xtensa-none-elf)
         x="$EMBCC --target=xtensa-esp32-elf -O2 -mtext-section-literals -Wall -Wextra -Werror"

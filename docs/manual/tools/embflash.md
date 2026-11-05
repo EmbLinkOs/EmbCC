@@ -18,6 +18,8 @@ embflash IMAGE --gdb TARGET [--base ADDR] [--verify] [--run]
                [--dry-run] [--timeout SECONDS] [-v]
 embflash IMAGE --stk500 serial:DEV[@BAUD] [--base ADDR] [--verify]
                [--no-reset] [--console SECONDS] [--timeout SECONDS]
+embflash IMAGE --stk500v2 serial:DEV[@BAUD] [--base ADDR] [--verify]
+               [--no-reset] [--console SECONDS] [--timeout SECONDS]
 embflash IMAGE --esp serial:DEV[@BAUD] [--base ADDR] [--verify]
                [--no-reset] [--ram] [--console SECONDS] [--timeout SECONDS]
                [--no-stub] [--no-compress]
@@ -135,9 +137,13 @@ The baud rate is 115200 when left out; older Arduino bootloaders take 57600.
    | ATmega328P | `1E 95 0F` | 32 KiB | 128 B | 512 B |
    | ATmega328 | `1E 95 14` | 32 KiB | 128 B | 512 B |
    | ATmega328PB | `1E 95 16` | 32 KiB | 128 B | 512 B |
+   | ATmega1280 | `1E 97 03` | 128 KiB | 256 B | 4 KiB |
+   | ATmega2560 | `1E 98 01` | 256 KiB | 256 B | 8 KiB |
 
    Any other signature is refused. An image that reaches the bootloader
-   (0x7E00 on these parts) is refused before anything is written.
+   (0x7E00 on the 328 parts) is refused before anything is written. The
+   Arduino Mega 1280's ATmegaBOOT speaks version 1 at 57600; the Mega
+   2560's bootloader speaks version 2 ([below](#stk500-version-2---stk500v2)).
 4. **Pages.** Every page the image touches is written whole. The bytes of
    the page the image does not give are the erased `0xff`, and pages it
    does not touch keep their contents. `--verify` reads every written page
@@ -147,6 +153,24 @@ The baud rate is 115200 when left out; older Arduino bootloaders take 57600.
    open port: reopening the port resets an Uno and starts the program over.
    `--run`, `--monitor`, `--entry` and `--vector-table` belong to `--gdb`
    and are refused here.
+
+### STK500 version 2: --stk500v2
+
+`--stk500v2 serial:DEV[@BAUD]` is the same programming through the
+Arduino Mega 2560's bootloader, which speaks Atmel's AVR068: a message is
+`0x1b`, a sequence number, a 16-bit size, `0x0e`, the body and the xor of
+all of it, and the answer echoes the number. `embflash` signs on (up to
+ten times while the bootloader starts), enters programming mode, reads
+the signature byte by byte, and for every page the image touches loads
+its word address (bit 31 set past 64K words, as avrdude sends it) and
+programs it, 256 bytes; `--verify` reads them back. Leaving programming
+mode starts the program. 115200 baud when left out.
+
+An ELF whose `e_flags` name the avr6 core (an ATmega2560 program) goes to
+`--stk500v2` by itself, and an avr51 one (the ATmega1280) to `--stk500`
+at 57600; `--board=mega2560` is `--stk500v2`. It has been tested against
+`tests/golden/embflash/fakestk500v2.py`, a model written from AVR068, and
+not yet against a board.
 
 ## The Espressif ROM: --esp
 
@@ -355,8 +379,9 @@ with an error is reported with that error.
   board (revision v3.1, 4 MiB of flash, a CP2102 bridge): an ELF made into
   the image and booted from 0x1000, an ELF run from RAM, and 28 KiB written
   and verified in 7 s.
-- `--stk500` knows the ATmega328 family only. STK500 version 2, which the
-  Arduino Mega's bootloader speaks, is not implemented.
+- `--stk500` and `--stk500v2` know the ATmega328 family and the Mega's
+  ATmega1280 and ATmega2560. EEPROM, fuses and lock bits are not written.
+  `--stk500v2` has been tested against a model only.
 - `--esp` knows the ESP32 only and assumes 4 MiB of flash and DIO at
   40 MHz. ESP-IDF's app images and partition table (an IDF program needs
   IDF's bootloader), PSRAM, and other chips (S2, S3, C3...) are not

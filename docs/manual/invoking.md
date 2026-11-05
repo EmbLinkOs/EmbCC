@@ -1035,7 +1035,8 @@ architecture, ABI and part are selected by the
 `--float-abi=`). The RISC-V targets generate the C (compressed) extension
 and the integer multiply/divide instructions; the AVR target generates
 code for the avr5 architecture of the ATmega328P, and `--mcu=` names the
-part (atmega328p, atmega328, atmega168p or atmega168). See
+part (atmega328p, atmega328, atmega168p, atmega168, or the Mega's
+atmega1280 and atmega2560). See
 [Targets](targets.md).
 
 ## Optimization

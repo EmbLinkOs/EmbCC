@@ -14,16 +14,16 @@ embflash blink.elf --console 5
 
 ## What a board sets
 
-| | `--board=uno`, `--board=nano` | `--board=esp32-devkit` |
-|---|---|---|
-| Target | `avr`, `--mcu=atmega328p` | `xtensa-esp32-elf` |
-| Clock | `F_CPU=16000000UL` | the ROM's: CPU and APB at the crystal's 40 MHz |
-| Startup | the part's (`lib/avr/crt.S`) | `lib/esp32/crt0.S` and `start.c` |
-| Runtime | `lib/boards/uno/board.c` | `lib/boards/esp32-devkit/board.c` |
-| Linker script | the part's | `lib/esp32/esp32.ld` |
-| Console | USART0 at 115200 | UART0 at 115200 |
-| Clock for `board_millis` | Timer1, an interrupt each millisecond | timer group 0's 64-bit counter at 1 MHz, no interrupt |
-| Programmed by | Optiboot (`embflash --stk500`) | the ESP32's ROM (`embflash --esp`) |
+| | `--board=uno`, `--board=nano` | `--board=mega2560` | `--board=esp32-devkit` |
+|---|---|---|---|
+| Target | `avr`, `--mcu=atmega328p` | `avr`, `--mcu=atmega2560` | `xtensa-esp32-elf` |
+| Clock | `F_CPU=16000000UL` | `F_CPU=16000000UL` | the ROM's: CPU and APB at the crystal's 40 MHz |
+| Startup | the part's (`lib/avr/crt.S`) | the part's | `lib/esp32/crt0.S` and `start.c` |
+| Runtime | `lib/boards/uno/board.c` | the same, with the Mega's pin map | `lib/boards/esp32-devkit/board.c` |
+| Linker script | the part's (`avr5.ld`) | the part's (`avr6.ld`) | `lib/esp32/esp32.ld` |
+| Console | USART0 at 115200 | USART0 at 115200 | UART0 at 115200 |
+| Clock for `board_millis` | Timer1, an interrupt each millisecond | Timer1, the same | timer group 0's 64-bit counter at 1 MHz, no interrupt |
+| Programmed by | Optiboot (`embflash --stk500`) | its STK500v2 bootloader (`embflash --stk500v2`) | the ESP32's ROM (`embflash --esp`) |
 
 The runtimes are built with the target's library (`make rt-embedded`). Each
 board's runtime is linked as an object, ahead of the program, so its
@@ -91,6 +91,15 @@ constructor.
 - **The Nano** has the same part and pins. A Nano with the old bootloader
   takes `serial:auto@57600`.
 
+## The Arduino Mega 2560
+
+The Uno's runtime with the Mega's pin map: 0 to 53 on the digital header
+and 54 to 69 for A0 to A15, as the Arduino Mega numbers them (`BOARD_LED`
+is 13, PB7). Timer1 is the clock; Timer0, Timer2 and Timer3 to Timer5 are
+free. The program is built for the ATmega2560's 3-byte PC and runs on
+QEMU's `mega2560`; `embflash` programs it through `--stk500v2`, which has
+been tested against a model of the bootloader, not yet against a board.
+
 ## The ESP32 DevKit
 
 The ESP32-WROOM-32 boards: DevKitC, DOIT DevKit V1 and their kin. The ROM
@@ -125,4 +134,5 @@ boots the program from flash at 0x1000, with no second-stage bootloader.
 - `--board=esp32-devkit` programs are C. C++ needs a C++ library built for
   `xtensa-none-elf`, which is not built yet.
 - Tested on an Arduino Uno R3, and on an ESP32-D0WD-V3 DevKit (V3.1 silicon,
-  4 MiB of flash, a CP2102 bridge).
+  4 MiB of flash, a CP2102 bridge). The Mega 2560 on QEMU and against a
+  model of its bootloader.

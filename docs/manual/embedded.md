@@ -1269,7 +1269,8 @@ function the program overrides to reach its UART) for `mipsel-none-elf`.
 `--target=avr` generates code for the ATmega328P (`__AVR_ATmega328P__`,
 AVR architecture 5). `--mcu=atmega328p` names it, and `--mcu=atmega328`,
 `atmega168p` and `atmega168` the other parts of its family with the same
-core ([Targets](targets.md#avr) lists their memories); any other part is
+core, and `atmega1280` and `atmega2560` the Arduino Mega's
+([Targets](targets.md#avr) lists their memories); any other part is
 refused by name.
 
 | Type | Size |
