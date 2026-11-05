@@ -566,15 +566,26 @@ through their GDB servers.
 **Decision.** `embflash --esp serial:DEV[@BAUD]` programs an ESP32 through
 the serial download mode in its ROM, without esptool. It uses a
 development board's DTR/RTS auto-reset to enter the ROM, the chip-detect
-register to name the chip, flash begin, data and end in 1024-byte blocks,
-and the ROM's MD5 to verify, at the ROM's own baud rate. It makes no
-image: writing the bytes it is given at their addresses is its whole job.
+register to name the chip, flash begin and data in 1024-byte blocks, and
+the ROM's MD5 to verify, at the ROM's own baud rate. It sends no FLASH_END:
+the ROM answers it with error 0x06, and esptool sends none either. An ELF
+is made into the image the ROM boots, esptool's `elf2image` format byte for
+byte; `--ram` loads the ELF into RAM through MEM_BEGIN, MEM_DATA and
+MEM_END instead; `--console` reads the program's output through the same
+open port.
 
 **Why.** As with D-022, no GDB server reaches the ROM, and the protocol is
-small enough to model without the chip. Writing only what it is given keeps
-the boot image format, which differs between Espressif's chips, in the
-tool that knows the chip's memory map.
+small enough to model without the chip. The first version wrote only the
+bytes it was given and left the image to another tool. On a real board
+that tool was esptool, and the toolchain was meant to work without it.
+The ESP32's image is simple (a header, the RAM segments, a checksum and a
+SHA-256), and the ELF already carries what it needs. Reading the console
+through the same port is needed because reopening it pulses the
+auto-reset.
 
-**Status.** Current. The ESP32 only, 4 MiB of flash assumed. Faster baud
-rates, the RAM-loaded flasher stub, compressed writes and other chips
-(the ESP32-C3's and S3's chip IDs) are not implemented.
+**Status.** Current, tested on an ESP32-D0WD-V3 board as well as the model.
+The ESP32 only, 4 MiB of flash assumed, RAM segments only (a piece in
+flash-mapped memory needs a second-stage bootloader, which `embflash` does
+not write). Faster baud rates, the RAM-loaded flasher stub, compressed
+writes, reading the flash back and other chips (the ESP32-C3's and S3's
+chip IDs) are not implemented.

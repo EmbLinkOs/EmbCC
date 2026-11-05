@@ -12,6 +12,14 @@
 #   - a ROM that misses the first syncs is synced with all the same;
 #   - an unknown chip, a ROM that never answers, a wrong MD5 and an image
 #     beyond the flash are each refused with an error that names them.
+# And an ELF, where embcc and embld are built:
+#   - --esp-image writes the ESP32 image the ROM boots, its header, checksum
+#     and SHA-256 checked, and byte for byte esptool's elf2image where
+#     python's esptool is installed;
+#   - the ELF itself goes to flash as that image, at 0x1000;
+#   - --ram loads its pieces into RAM and starts it (MEM_BEGIN, MEM_DATA,
+#     MEM_END), and --console shows what it prints;
+#   - a piece in flash-mapped memory is refused: the ROM loads RAM only.
 set -u
 EMBFLASH=${EMBFLASH:-./embflash}
 [ -x "$EMBFLASH" ] || { echo "FAIL: $EMBFLASH is not built (make embflash)"; exit 1; }
@@ -95,5 +103,64 @@ flash md5 "--corrupt-md5" "$out/fw.bin" --base 0x1000 --verify
 
 flash big "" "$out/big.bin" --base 0x3FF800
 [ $frc -eq 2 ] && grep -q "beyond the ESP32's 4 MiB of flash" "$out/big.log" || fail "big: $(cat "$out/big.log")"
+
+EMBCC=${EMBCC:-./embcc}
+EMBLD=${EMBLD:-./embld}
+if [ -x "$EMBCC" ] && [ -x "$EMBLD" ]; then
+    printf 'static const char m[] = "abc";\nvolatile int sink;\nvoid entry(void) { for (const char *p = m; *p; p++) sink += *p; for (;;) ; }\n' > "$out/app.c"
+    "$EMBCC" --target=xtensa-esp32-elf -O1 -c "$out/app.c" -o "$out/app.o" &&
+        "$EMBLD" -e entry -Ttext 0x40080000 -Tdata 0x3FFB0000 "$out/app.o" -o "$out/app.elf" ||
+        fail "the ESP32 program does not build"
+    "$EMBFLASH" "$out/app.elf" --esp-image "$out/app.img" > "$out/img.log" 2>&1 ||
+        fail "--esp-image: $(cat "$out/img.log")"
+    python3 - "$out/app.img" <<'PY' || fail "--esp-image: not an ESP32 image"
+import hashlib, struct, sys
+d = open(sys.argv[1], "rb").read()
+magic, nseg, mode, sf, entry = struct.unpack_from("<BBBBI", d)
+assert magic == 0xE9 and mode == 2 and sf == 0x20, d[:8].hex()
+assert d[8] == 0xEE and d[23] == 1, d[8:24].hex()       # no WP pin; SHA-256 appended
+at, csum = 24, 0xEF
+for _ in range(nseg):
+    addr, n = struct.unpack_from("<II", d, at)
+    assert n % 4 == 0 and (0x3FF80000 <= addr < 0x40000000 or 0x40070000 <= addr < 0x400C0000)
+    for c in d[at + 8:at + 8 + n]:
+        csum ^= c
+    at += 8 + n
+at += 15 - at % 16
+assert d[at] == csum, (d[at], csum)
+assert d[at + 1:] == hashlib.sha256(d[:at + 1]).digest()
+PY
+    if python3 -c "import esptool" 2>/dev/null; then
+        python3 -m esptool --chip esp32 elf2image --flash-mode dio --flash-size 4MB \
+            --flash-freq 40m -o "$out/app.esptool.img" "$out/app.elf" > /dev/null 2>&1 &&
+            cmp -s "$out/app.img" "$out/app.esptool.img" ||
+            fail "--esp-image: not esptool elf2image's bytes"
+        echo "  --esp-image: esptool elf2image's bytes"
+    fi
+
+    flash elf "" "$out/app.elf" --verify
+    [ $frc -eq 0 ] && [ $src -eq 0 ] || { cat "$out/elf.log" "$out/elf.srv"; fail "elf: embflash $frc, model $src"; }
+    region "$out/elf.dump" 0x1000 "$out/app.img" || fail "elf: the flash at 0x1000 is not the image"
+
+    flash ram "" "$out/app.elf" --ram --console 1
+    [ $frc -eq 0 ] && [ $src -eq 0 ] || { cat "$out/ram.log" "$out/ram.srv"; fail "ram: embflash $frc, model $src"; }
+    "$EMBFLASH" "$out/app.elf" --dry-run > "$out/pieces.txt"
+    python3 - "$out/ram.dump" "$out/pieces.txt" <<'PY' || fail "ram: what the ROM loaded is not the ELF's pieces"
+import re, sys
+got = [l.split()[:2] for l in open(sys.argv[1]) if not l.startswith("entry")]
+want = re.findall(r"0x([0-9a-f]+)\s+(\d+) bytes", open(sys.argv[2]).read())
+assert [(int(a, 16), (int(n) + 3) & ~3) for a, n in want] == [(int(a, 16), int(n)) for a, n in got], (got, want)
+PY
+    entry=$(sed -n 's/^entry \(0x[0-9a-f]*\) stay 0$/\1/p' "$out/ram.dump")
+    [ -n "$entry" ] || fail "ram: MEM_END did not start the program: $(cat "$out/ram.dump")"
+    grep -q "hello from RAM at $entry" "$out/ram.log" || fail "ram: --console showed: $(cat "$out/ram.log")"
+
+    "$EMBLD" -e entry -Ttext 0x400D0020 -Tdata 0x3FFB0000 "$out/app.o" -o "$out/irom.elf" ||
+        fail "the flash-mapped program does not link"
+    "$EMBFLASH" "$out/irom.elf" --esp-image "$out/irom.img" > "$out/irom.log" 2>&1 &&
+        fail "a flash-mapped piece was made into a ROM image"
+    grep -q "flash-mapped memory" "$out/irom.log" || fail "flash-mapped: $(cat "$out/irom.log")"
+    echo "  an ELF: its ESP32 image, to flash at 0x1000, to RAM and run with its console"
+fi
 
 echo "PASS: embflash-esp"

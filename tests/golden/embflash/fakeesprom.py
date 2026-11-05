@@ -7,12 +7,18 @@
 Writes the pseudo-terminal's device path to PORTFILE and answers what the
 ESP32's ROM answers, in SLIP frames with its four status bytes: sync (several
 times over, as the ROM does), the chip-detect register, SPI attach and
-parameters, flash begin, data and end, and the MD5 of a flash range. On
-FLASH_END it writes the 4 MiB flash to DUMP and exits 0; when the programmer
+parameters, flash begin and data, the MD5 of a flash range, and the
+RAM loader (MEM_BEGIN, MEM_DATA, MEM_END). FLASH_END is answered with error
+0x06, as an ESP32's ROM answers it. When the programmer hangs up after
+writing, it writes the 4 MiB flash to DUMP and exits 0; on MEM_END it writes
+what was loaded to DUMP, one
+line per piece, `ADDRESS LENGTH SHA256`, and `entry ADDRESS`, then prints a
+line on the port as the program would, and exits 0; when the programmer
 hangs up first it exits 3. A rule a programmer breaks is reported on stderr
 with exit status 1: a block whose checksum is wrong, out of sequence, or
 outside the range FLASH_BEGIN erased, a write before the flash is attached,
-or a command the model does not know. --silent never answers; --ignore-syncs
+a RAM block that is not its load's next or overruns it, or a command the
+model does not know. --silent never answers; --ignore-syncs
 drops the first N syncs, as a chip still in reset does; --corrupt-md5 answers
 a wrong digest."""
 import hashlib
@@ -45,6 +51,7 @@ def main(argv):
     flash = bytearray(b"\xff" * FLASH)
     attached = False
     region = None  # (offset, size, blocks, block size, next sequence number)
+    ram = []  # [address, size, blocks, block size, next sequence, bytes]
     buf = bytearray()
     heard = False
     deadline = time.monotonic() + 60
@@ -52,6 +59,8 @@ def main(argv):
     def rule(msg):
         print(f"fakeesprom: {msg}", file=sys.stderr)
         sys.exit(1)
+
+    wrote = False
 
     def read_more():
         nonlocal heard
@@ -66,6 +75,10 @@ def main(argv):
             except OSError:
                 got = b""
             if not got:
+                if heard and wrote:
+                    with open(dump, "wb") as f:
+                        f.write(flash)
+                    sys.exit(0)
                 if heard:
                     sys.exit(3)
                 time.sleep(0.05)
@@ -168,6 +181,7 @@ def main(argv):
                 rule(f"block {seq} reaches 0x{at + n:x}, past the erased 0x{hi:x}")
             flash[at:at + n] = block
             region[4] += 1
+            wrote = True
             reply(cmd)
         elif cmd == 0x13:
             addr, n, _, _ = struct.unpack("<IIII", data)
@@ -175,12 +189,45 @@ def main(argv):
             if corrupt:
                 digest = digest[:-1] + ("0" if digest[-1] != "0" else "1")
             reply(cmd, data=digest.encode())
-        elif cmd == 0x04:
+        elif cmd == 0x05:
+            rsize, nblk, bsize, off = struct.unpack("<IIII", data)
+            if nblk * bsize < rsize or rsize % 4:
+                rule(f"MEM_BEGIN {rsize} bytes in {nblk} blocks of {bsize} at 0x{off:x}")
+            ram.append([off, rsize, nblk, bsize, 0, bytearray()])
             reply(cmd)
-            with open(dump, "wb") as f:
-                f.write(flash)
-            time.sleep(0.2)
+        elif cmd == 0x07:
+            if not ram:
+                rule("MEM_DATA before MEM_BEGIN")
+            n, seq, _, _ = struct.unpack_from("<IIII", data)
+            block = data[16:]
+            load = ram[-1]
+            if seq != load[4] or seq >= load[2] or len(block) != n:
+                rule(f"RAM block {seq} ({len(block)} bytes) where {load[4]} was due")
+            sm = 0xEF
+            for c in block:
+                sm ^= c
+            if sm != checksum & 0xFF:
+                rule(f"RAM block {seq}: checksum 0x{checksum:x}, the bytes give 0x{sm:02x}")
+            load[5] += block
+            load[4] += 1
+            if len(load[5]) > load[1]:
+                rule(f"RAM load at 0x{load[0]:x} overruns its {load[1]} bytes")
+            reply(cmd)
+        elif cmd == 0x06:
+            stay, entry = struct.unpack("<II", data)
+            for load in ram:
+                if len(load[5]) != load[1]:
+                    rule(f"RAM load at 0x{load[0]:x}: {len(load[5])} of {load[1]} bytes")
+            reply(cmd)
+            with open(dump, "w") as f:
+                for load in ram:
+                    f.write(f"0x{load[0]:08x} {load[1]} {hashlib.sha256(bytes(load[5])).hexdigest()}\n")
+                f.write(f"entry 0x{entry:08x} stay {stay}\n")
+            os.write(master, f"hello from RAM at 0x{entry:08x}\r\n".encode())
+            time.sleep(1.0)
             return 0
+        elif cmd == 0x04:
+            reply(cmd, status=(1, 6))  # the ROM's answer (it would leave the loader)
         else:
             rule(f"unknown command 0x{cmd:02x}")
 
