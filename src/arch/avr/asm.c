@@ -1195,8 +1195,14 @@ int avrasm_symform(const char *stmt, struct asm_symform *f)
         f->nsites = 1;
         return 1;
     }
-    /* ldi rd, lo8(sym) and its family. */
-    if (mnlen == 3 && strncmp(mn, "ldi", 3) == 0) {
+    /* ldi rd, lo8(sym) and its family -- and every instruction with
+     * ldi's Rd,K form, which the same relocations patch: subi and sbci
+     * add a constant as `subi r30, lo8(-(sym+2))`, the negated address
+     * (the _NEG relocations), and cpi, ori and andi take one too. */
+    if ((mnlen == 3 && (!strncmp(mn, "ldi", 3) || !strncmp(mn, "cpi", 3) ||
+                        !strncmp(mn, "ori", 3))) ||
+        (mnlen == 4 && (!strncmp(mn, "subi", 4) || !strncmp(mn, "sbci", 4) ||
+                        !strncmp(mn, "andi", 4)))) {
         static const struct { const char *fn; int data; int pm; } wrap[] = {
             { "pm_lo8", 0, 1 }, { "pm_hi8", 0, 2 },
             { "lo8", 1, 0 },    { "hi8", 2, 0 },
@@ -1224,6 +1230,12 @@ int avrasm_symform(const char *stmt, struct asm_symform *f)
             if (*r != '(')
                 continue;
             r = skipws(r + 1);
+            /* lo8(-(sym+K)): the negated address, -sym-K */
+            int neg = 0;
+            if (*r == '-' && *skipws(r + 1) == '(') {
+                neg = 1;
+                r = skipws(skipws(r + 1) + 1);
+            }
             /* lo8(gs(sym)): the assembler spelling for a function's word
              * address, which is what avr-gcc emits and what `icall` needs. */
             if (strncmp(r, "gs", 2) == 0) {
@@ -1239,23 +1251,25 @@ int avrasm_symform(const char *stmt, struct asm_symform *f)
                  * nothing. `lo8(buf+5)` used to be read as `lo8(buf)`. */
                 if (*end != ')') return 0;
                 end = skipws(end + 1);
-                if (gs) {
+                if (gs || neg) {
                     if (*end != ')') return 0;
                     end = skipws(end + 1);
                 }
                 if (*end) return 0;
             }
+            if (neg && (gs || wrap[i].pm))
+                return 0;
             if (gs || wrap[i].pm)
                 reloc = (wrap[i].data == 2 || wrap[i].pm == 2)
                         ? R_AVR_HI8_LDI_GS : R_AVR_LO8_LDI_GS;
             else if (wrap[i].data == 2)
-                reloc = R_AVR_HI8_LDI;
+                reloc = neg ? R_AVR_HI8_LDI_NEG : R_AVR_HI8_LDI;
             else if (wrap[i].data == 1)
-                reloc = R_AVR_LO8_LDI;
-            else
-                return 0;               /* hlo8/hh8: a 3-byte address space */
+                reloc = neg ? R_AVR_LO8_LDI_NEG : R_AVR_LO8_LDI;
+            else                    /* hlo8/hh8: the third byte (avr6) */
+                reloc = neg ? R_AVR_HH8_LDI_NEG : R_AVR_HH8_LDI;
             f->sym_at = (int)(r - stmt); f->sym_len = n;
-            snprintf(f->encode, sizeof f->encode, "ldi %s, 0", reg);
+            snprintf(f->encode, sizeof f->encode, "%.*s %s, 0", mnlen, mn, reg);
             f->site[0].off = 0; f->site[0].reloc = reloc;
             f->nsites = 1;
             return 1;
