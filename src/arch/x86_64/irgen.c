@@ -98,7 +98,10 @@ static int va_struct_sysv(struct ir_func *fn, struct expr *e, int ap,
 static int va_arg_win64(struct ir_func *fn, struct expr *e)
 {
     struct type *rt = e->ty;
-    struct type *ptr = ty_base(TY_LONG, 1);
+    /* the list and its slots are eight bytes: pointer-sized, which `long`
+     * is not on Windows (LLP64). A four-byte `ap` cut the stack's address
+     * to 32 bits, harmless only where the stack is below 4 GiB. */
+    struct type *ptr = ty_intptr(1);
     int apa = gen_addr(fn, e->lhs);
     int cur = emit_load(fn, apa, ptr);
     emit_store(fn, apa, emit_bin(fn, IR_ADD, cur, emit_const(fn, 8, 8), 8, 1),

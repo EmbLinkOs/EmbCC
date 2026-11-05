@@ -67,7 +67,12 @@ echo "labels, relaxation, PLT32/PC32/GOTPCRELX/32/32S/64: llvm-mc's bytes and re
 # ---- 3 and 4: run ----
 . tools/hostpaths.sh 2>/dev/null || true
 H=tests/harness/x86_64
-if [ -x "$H/link.sh" ] && [ -x "$H/run.sh" ]; then
+# the run links against the x86_64 newlib link.sh finds; a host without it
+# (CI's runners) checks the encodings only
+newlib=${EMBCC_X86_NEWLIB:-$HOME/cross/newlib-c99/x86_64-elf}
+if [ ! -d "$newlib/lib" ]; then
+    echo "  (the runs: no x86_64 newlib at $newlib, skipped)"
+elif [ -x "$H/link.sh" ] && [ -x "$H/run.sh" ]; then
     "$EMBCC" --target=x86_64-elf -c "$here/sum.s" -o "$out/sum.o" || fail "sum.s"
     "$EMBCC" --target=x86_64-elf -O2 -c "$here/main.c" -o "$out/main.o" || fail "main.c"
     "$H/link.sh" -o "$out/prog" "$out/main.o" "$out/sum.o" > "$out/link.err" 2>&1 ||
