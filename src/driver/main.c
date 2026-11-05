@@ -139,6 +139,11 @@ static void print_usage(FILE *out)
 static const char *lib_triple(void)
 {
     static char buf[128];
+#if FAMILY_BUILT(avr)
+    /* AVR's avr6 parts (the ATmega2560): a 3-byte PC, other frames */
+    if (target_avr_mcu() && target_avr_mcu()->pc_bytes == 3)
+        return "avr/avr6";
+#endif
     int abi = target_riscv_abi_flen(), noa = !target_riscv_atomics();
     if (!abi && !noa)
         return target_triple_now();
@@ -1306,7 +1311,7 @@ static int compile_and_link_(const char *in, const char *out)
             lo.script = avr_script;
         }
         if (!lo.data_base)
-            lo.data_base = 0x800100;     /* SRAM's start, every part here */
+            lo.data_base = 0x800000 + mcu->ramstart;     /* SRAM's start */
         if (!g_nostdlib && !g_nostartfiles) {
             snprintf(nm, sizeof nm, "crt%s.o", mcu->name);
             if (!paths_target_file(lib_triple(), nm, avr_crt,

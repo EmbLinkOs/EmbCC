@@ -546,6 +546,47 @@ static int avr_other_part(void)
 #endif
 }
 
+/* ...and for a part of another core, clang's answer for that part differs
+ * in these too: __AVR_ARCH__ (51, 6), the PC's size, and elpm (and eijmp
+ * and eicall on avr6) -- compared with clang -mmcu=atmega1280 and 2560 */
+static const struct avr_mcu *avr_core_part(void)
+{
+#if FAMILY_BUILT(avr)
+    const struct avr_mcu *m = target_avr_mcu();
+    return m && m->arch != 5 ? m : NULL;
+#else
+    return NULL;
+#endif
+}
+
+static int avr_core_drops(const char *name)
+{
+    const struct avr_mcu *m = avr_core_part();
+    return m && (strcmp(name, "__AVR_ARCH__") == 0 ||
+                 (m->pc_bytes == 3 && strcmp(name, "__AVR_2_BYTE_PC__") == 0));
+}
+
+static int avr_core_adds(struct predef_macro *out)
+{
+    const struct avr_mcu *m = avr_core_part();
+    int n = 0;
+    if (!m)
+        return 0;
+    out[n].name = "__AVR_ARCH__";
+    out[n++].value = m->arch == 6 ? "6" : "51";
+    out[n].name = "__AVR_HAVE_ELPM__";
+    out[n++].value = "1";
+    out[n].name = "__AVR_HAVE_ELPMX__";
+    out[n++].value = "1";
+    if (m->pc_bytes == 3) {
+        out[n].name = "__AVR_3_BYTE_PC__";
+        out[n++].value = "1";
+        out[n].name = "__AVR_HAVE_EIJMP_EICALL__";
+        out[n++].value = "1";
+    }
+    return n;
+}
+
 /* A PIC32 part (--mcu= on mipsel, src/arch/mips/options.c): the macros
  * XC32 defines for it, which the device pack's headers test -- the part's
  * own (__32MZ2048EFH100__ picks its header in <xc.h>), the family's, XC32's
@@ -670,7 +711,8 @@ static int contradicted(const char *name)
             strcmp(name, "__ARM_ARCH_7M__") == 0) ||
            (target_thumb_cmse() && strcmp(name, "__ARM_FEATURE_CMSE") == 0) ||
            (target_thumb_v81() && strcmp(name, "__ARM_ARCH_8M_MAIN__") == 0) ||
-           (avr_other_part() && strcmp(name, "__AVR_ATmega328P__") == 0);
+           (avr_other_part() && strcmp(name, "__AVR_ATmega328P__") == 0) ||
+           avr_core_drops(name);
 }
 
 const struct predef_macro *predef_table(int *count)
@@ -791,6 +833,7 @@ const struct predef_macro *predef_table(int *count)
         if (avr) {
             merged[nmerged].name = target_avr_mcu()->macro;
             merged[nmerged++].value = "1";
+            nmerged += avr_core_adds(merged + nmerged);
         }
 #endif
         if (pic32)

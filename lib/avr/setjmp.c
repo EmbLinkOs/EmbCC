@@ -1,4 +1,5 @@
-/* setjmp/longjmp for the AVR (avr5, a 2-byte PC: the ATmega328P's family).
+/* setjmp/longjmp for the AVR: avr5 and avr51 (a 2-byte PC: the ATmega328P's
+ * family, the ATmega1280), and avr6 (a 3-byte PC: the ATmega2560).
  *
  * The AVR GCC ABI, which EmbCC's AVR backend keeps: r2-r17 and Y
  * (r28:r29) are callee-saved, r1 is the zero register and r0 the scratch;
@@ -12,7 +13,12 @@
  * SREG's I flag as setjmp found it.
  *
  *   jmp_buf, in bytes: [0..15] = r2-r17, [16..17] = Y, [18..19] = SP,
- *                      [20] = SREG, [21..22] = the return address
+ *                      [20] = SREG, [21..22] = the return address,
+ *                      [23] = its bits 16-21 on avr6
+ *
+ * On avr6 a call pushes a 3-byte PC, bits 16-21 at the lowest address:
+ * setjmp pops that byte first, and longjmp returns with eijmp, EIND set
+ * from it, so a caller past 128 KiB of flash is returned to as well.
  *
  * longjmp(env, 0) makes setjmp return 1 (C11 7.13.2.1p4): val + carry
  * of val < 1, unsigned. */
@@ -25,8 +31,19 @@
 
 #if defined(__AVR__)
 
-#if !defined(__AVR_2_BYTE_PC__)
-#error "lib/avr's setjmp knows the 2-byte PC of an avr5 part"
+#if !defined(__AVR_2_BYTE_PC__) && !defined(__AVR_3_BYTE_PC__)
+#error "lib/avr's setjmp knows a 2-byte and a 3-byte PC"
+#endif
+#if defined(__AVR_3_BYTE_PC__)
+#define SJ_POP_EXT "    pop r21\n"        /* bits 16-21, at the lowest address */
+#define SJ_ST_EXT  "    st X+, r21\n"
+#define SJ_RET     "    out 0x3c, r21\n    eijmp\n"   /* EIND */
+#define SJ_LD_EXT  "    ld r21, X+\n"
+#else
+#define SJ_POP_EXT ""
+#define SJ_ST_EXT  ""
+#define SJ_RET     "    ijmp\n"
+#define SJ_LD_EXT  ""
 #endif
 
 #define SJ_AVR_REGS(op) \
@@ -42,6 +59,7 @@ __asm__(
  SJ_SETJMP ":\n"
 "    movw r26, r24\n"               /* X = env */
 SJ_AVR_REGS(SJ_AVR_ST)
+SJ_POP_EXT
 "    pop r31\n"                     /* Z = where to go back to */
 "    pop r30\n"
 "    in r24, 0x3d\n"                /* SPL */
@@ -52,9 +70,10 @@ SJ_AVR_REGS(SJ_AVR_ST)
 "    st X+, r24\n"
 "    st X+, r30\n"
 "    st X+, r31\n"
+SJ_ST_EXT
 "    clr r24\n"
 "    clr r25\n"
-"    ijmp\n"
+SJ_RET
 ".size " SJ_SETJMP ", .-" SJ_SETJMP "\n"
 
 ".globl " SJ_LONGJMP "\n"
@@ -75,7 +94,8 @@ SJ_AVR_REGS(SJ_AVR_LD)
 "    out 0x3d, r30\n"
 "    ld r30, X+\n"
 "    ld r31, X+\n"
-"    ijmp\n"
+SJ_LD_EXT
+SJ_RET
 ".size " SJ_LONGJMP ", .-" SJ_LONGJMP "\n"
 );
 

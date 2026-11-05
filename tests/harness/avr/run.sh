@@ -25,9 +25,9 @@ QEMU=${EMBCC_QEMU_AVR:-qemu-system-avr}
 # minutes. Without it the behaviour is exactly what it always was.
 if [ -n "${EMBCC_QEMU_UNTIL:-}" ]; then
     "$here/../qrun.sh" "${EMBCC_QEMU_TIMEOUT:-10}" --until "$EMBCC_QEMU_UNTIL" \
-        "$QEMU" -M uno -nographic -bios "$1"
+        "$QEMU" -M "${EMBCC_AVR_MACHINE:-uno}" -nographic -bios "$1"
 else
     "$here/../qrun.sh" "${EMBCC_QEMU_TIMEOUT:-10}" "$QEMU" \
-        -M uno -nographic -bios "$1"
+        -M "${EMBCC_AVR_MACHINE:-uno}" -nographic -bios "$1"
 fi
 exit 0
