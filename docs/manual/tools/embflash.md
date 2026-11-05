@@ -29,7 +29,7 @@ embflash ELF --esp-image FILE
 |---|---|
 | `HOST:PORT` | a TCP port: OpenOCD's `3333`, a J-Link GDB server's `2331`, pyOCD's `3333` |
 | `unix:PATH` | a Unix-domain socket, such as QEMU's `-gdb chardev:` |
-| `serial:DEV[@BAUD]` | a serial line at `BAUD` (default 115200), such as the Black Magic Probe's GDB port |
+| `serial:DEV[@BAUD]` | a serial line at `BAUD` (default 115200; a rate the host cannot set is refused), such as the Black Magic Probe's GDB port |
 
 ## Images
 
@@ -120,7 +120,10 @@ The baud rate is 115200 when left out; older Arduino bootloaders take 57600.
 ## The Espressif ROM: --esp
 
 `--esp serial:DEV[@BAUD]` programs an ESP32 through the serial download
-mode in its ROM, the protocol esptool speaks, at 115200 baud unless given.
+mode in its ROM, the protocol esptool speaks. It reaches the ROM at the
+ROM's 115200 baud, then asks it for `BAUD`: 460800 when not given, as
+esptool's default. `@921600` is faster where the USB adapter carries it;
+`@115200` keeps the ROM's rate.
 
 - **An ELF** is made into the image the ROM boots (as esptool's `elf2image`
   makes it) and written to flash at `--base`, 0x1000 by default, which is
@@ -139,19 +142,29 @@ mode in its ROM, the protocol esptool speaks, at 115200 baud unless given.
    holds EN low, pulls IO0 low, and releases EN, as esptool's classic reset
    does: the chip starts in download mode. On a board without the circuit,
    hold BOOT while pressing EN and pass `--no-reset`.
-2. **Sync.** The sync request is sent up to ten times. The ROM answers it
+2. **Sync.** The sync request is sent up to ten times, and the reset and
+   the syncs up to seven times over, as esptool's. The ROM answers it
    several times over, and the extra answers are drained.
 3. **The chip.** The chip-detect register (0x40001000) names it. The ESP32,
    `0x00f01d83`, is the one known, with 4 MiB of flash assumed. Any other
-   value is refused, and so is an image beyond the flash.
+   value is refused, and so is an image beyond the flash. Then the rate:
+   `CHANGE_BAUDRATE`, answered at the old rate, then the new one on both
+   ends. A ROM silent at the new rate is reported as an adapter that cannot
+   carry it.
 4. **Writing.** The flash is attached and its parameters given. Then each
    piece of the image is erased (`FLASH_BEGIN`) and written in blocks of
    1024 bytes, each with its checksum. `--verify` asks the ROM for the MD5
    of each piece as written and compares it with the image's.
-5. **Start.** `FLASH_END`, then an EN pulse with IO0 high, starts the
-   program from flash. `--no-reset` leaves the chip in the ROM.
+5. **Start.** An EN pulse with IO0 high starts the program from flash, at
+   115200 again, and `--console` reads it there. No `FLASH_END` is sent:
+   the ROM answers it with an error. `--no-reset` leaves the chip in the
+   ROM. A `--ram` load goes back to 115200 before `MEM_END`, so the program
+   starts at the rate a cold boot gives it.
 
-The ROM writes at 115200 baud, about 10 KiB/s.
+On an ESP32-D0WD-V3 board with a CP2102, 256 KiB went in 28.9 s at
+115200 (9 KiB/s), 9.4 s at 460800 (27 KiB/s) and 6.5 s at 921600
+(39 KiB/s), each verified. Past 460800 the time is mostly the ROM writing
+the flash, one 1024-byte block per answer.
 
 ### The image
 
@@ -236,9 +249,8 @@ with an error is reported with that error.
   and verified in 7 s.
 - `--stk500` knows the ATmega328 family only. STK500 version 2, which the
   Arduino Mega's bootloader speaks, is not implemented.
-- `--esp` knows the ESP32 only, assumes 4 MiB of flash and writes at the
-  ROM's 115200 baud. Faster rates (`CHANGE_BAUDRATE`), the flasher stub,
-  compression, reading the flash back, a second-stage bootloader and
+- `--esp` knows the ESP32 only and assumes 4 MiB of flash. The flasher
+  stub, compression, reading the flash back, a second-stage bootloader and
   partition table, and other chips (S2, S3, C3...) are not implemented.
 - Option bytes, mass erase and read-out protection are server-specific.
   Reach them with `--monitor`.

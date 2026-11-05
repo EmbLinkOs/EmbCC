@@ -127,7 +127,10 @@ def main(argv):
             reply()
             with open(dump, "wb") as f:
                 f.write(flash)
-            os.write(master, b"hello from the sketch\r\n")
+            try:  # a programmer with no console may have hung up already
+                os.write(master, b"hello from the sketch\r\n")
+            except OSError:
+                pass
             time.sleep(0.2)
             return 0
         else:

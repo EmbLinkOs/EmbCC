@@ -2,13 +2,16 @@
 """A model of the ESP32 ROM's serial download mode on a pseudo-terminal.
 
     fakeesprom.py PORTFILE DUMP [--magic 00f01d83] [--silent] [--ignore-syncs N]
-                  [--corrupt-md5]
+                  [--corrupt-md5] [--deaf-above BAUD]
 
 Writes the pseudo-terminal's device path to PORTFILE and answers what the
 ESP32's ROM answers, in SLIP frames with its four status bytes: sync (several
 times over, as the ROM does), the chip-detect register, SPI attach and
 parameters, flash begin and data, the MD5 of a flash range, and the
-RAM loader (MEM_BEGIN, MEM_DATA, MEM_END). FLASH_END is answered with error
+RAM loader (MEM_BEGIN, MEM_DATA, MEM_END), and CHANGE_BAUDRATE, after which
+every command must come at the new rate: the pseudo-terminal's rate, which
+the programmer sets, is checked against the ROM's on each one. FLASH_END is
+answered with error
 0x06, as an ESP32's ROM answers it. When the programmer hangs up after
 writing, it writes the 4 MiB flash to DUMP and exits 0; on MEM_END it writes
 what was loaded to DUMP, one
@@ -17,8 +20,11 @@ line on the port as the program would, and exits 0; when the programmer
 hangs up first it exits 3. A rule a programmer breaks is reported on stderr
 with exit status 1: a block whose checksum is wrong, out of sequence, or
 outside the range FLASH_BEGIN erased, a write before the flash is attached,
-a RAM block that is not its load's next or overruns it, or a command the
-model does not know. --silent never answers; --ignore-syncs
+a RAM block that is not its load's next or overruns it, a command at a rate
+the ROM is not at, a CHANGE_BAUDRATE with the stub's old-rate word, or a
+command the model does not know. --silent never answers; --deaf-above
+answers nothing once the rate is above BAUD, as an adapter that cannot carry
+it; --ignore-syncs
 drops the first N syncs, as a chip still in reset does; --corrupt-md5 answers
 a wrong digest."""
 import hashlib
@@ -27,6 +33,7 @@ import pty
 import select
 import struct
 import sys
+import termios
 import time
 
 FLASH = 4 << 20
@@ -43,6 +50,10 @@ def main(argv):
     silent = "--silent" in opts
     ignore = int(opt("--ignore-syncs", "0"))
     corrupt = "--corrupt-md5" in opts
+    deaf = int(opt("--deaf-above", "0"))
+    rate = 115200  # the ROM's, at reset
+    codes = {getattr(termios, f"B{r}"): r for r in (9600, 19200, 38400, 57600, 115200, 230400,
+                                                      460800, 921600) if hasattr(termios, f"B{r}")}
     master, slave = pty.openpty()
     path = os.ttyname(slave)
     os.close(slave)  # the programmer's open is the only one: its close is a hang-up
@@ -115,8 +126,12 @@ def main(argv):
                     continue
             buf += read_more()
 
+    def host_rate():  # the rate the programmer set on its end of the line
+        sp = termios.tcgetattr(master)[5]
+        return codes.get(sp, sp)
+
     def reply(cmd, value=0, data=b"", status=(0, 0)):
-        if silent:
+        if silent or (deaf and rate > deaf):
             return
         body = data + bytes([status[0], status[1], 0, 0])
         pkt = struct.pack("<BBHI", 1, cmd, len(body), value) + body
@@ -131,6 +146,8 @@ def main(argv):
         data = pkt[8:]
         if len(data) != size:
             rule(f"command 0x{cmd:02x}: size {size}, {len(data)} bytes")
+        if host_rate() != rate:
+            rule(f"command 0x{cmd:02x} sent at {host_rate()} baud; the ROM is at {rate}")
         if cmd == 0x08:
             if data != b"\x07\x07\x12\x20" + b"\x55" * 32:
                 rule("a sync with the wrong pattern")
@@ -139,6 +156,13 @@ def main(argv):
                 continue
             for _ in range(8):
                 reply(cmd)
+        elif cmd == 0x0F:
+            new, old = struct.unpack("<II", data)
+            if old != 0:
+                rule(f"CHANGE_BAUDRATE with old rate {old}: that word is the stub's; the ROM's is 0")
+            reply(cmd)  # at the old rate; the new one from here on
+            rate = new
+            print(f"fakeesprom: now at {rate} baud", file=sys.stderr)
         elif cmd == 0x0A:
             (addr,) = struct.unpack("<I", data)
             reply(cmd, magic if addr == 0x40001000 else 0)
@@ -223,7 +247,10 @@ def main(argv):
                 for load in ram:
                     f.write(f"0x{load[0]:08x} {load[1]} {hashlib.sha256(bytes(load[5])).hexdigest()}\n")
                 f.write(f"entry 0x{entry:08x} stay {stay}\n")
-            os.write(master, f"hello from RAM at 0x{entry:08x}\r\n".encode())
+            try:  # a programmer with no console may have hung up already
+                os.write(master, f"hello from RAM at 0x{entry:08x}\r\n".encode())
+            except OSError:
+                pass
             time.sleep(1.0)
             return 0
         elif cmd == 0x04:

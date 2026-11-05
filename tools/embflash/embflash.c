@@ -417,7 +417,49 @@ static int g_fd = -1;
 static int g_timeout_ms = 10000;
 static int g_detached;              /* D answered: the server may hang up */
 
+/* what has been read and not yet taken (a rate change drops it), and
+ * whether a hang-up ends the console rather than the run */
+static unsigned char g_rx[4096];
+static size_t g_rx_have, g_rx_at;
+static int g_hangup_ends;
+
 #ifdef EMBFLASH_POSIX
+/* The serial line's rate. A rate the host cannot set is an error: a
+ * quiet 115200 in its place talks to the part at the wrong speed. */
+static void line_rate(long baud)
+{
+    struct termios tio;
+    if (tcgetattr(g_fd, &tio) != 0)
+        die("cannot set the serial line's rate: %s", strerror(errno));
+    speed_t sp = B115200;
+#ifdef __APPLE__
+    sp = (speed_t)baud;                 /* Darwin's speed_t is the rate itself */
+#else
+    switch (baud) {
+    case 9600: sp = B9600; break;
+    case 19200: sp = B19200; break;
+    case 38400: sp = B38400; break;
+    case 57600: sp = B57600; break;
+    case 115200: sp = B115200; break;
+#ifdef B230400
+    case 230400: sp = B230400; break;
+#endif
+#ifdef B460800
+    case 460800: sp = B460800; break;
+#endif
+#ifdef B921600
+    case 921600: sp = B921600; break;
+#endif
+    default:
+        die("%ld baud: not a rate this host's serial driver is given (9600 to 921600)", baud);
+    }
+#endif
+    cfsetispeed(&tio, sp);
+    cfsetospeed(&tio, sp);
+    if (tcsetattr(g_fd, TCSANOW, &tio) != 0)
+        die("the serial line does not take %ld baud: %s", baud, strerror(errno));
+}
+
 static void open_target(const char *t)
 {
     /* a server that hangs up is reported (tx sees EPIPE), not a silent
@@ -442,7 +484,13 @@ static void open_target(const char *t)
         snprintf(dev, sizeof dev, "%s", t + 7);
         long baud = 115200;
         char *at = strrchr(dev, '@');
-        if (at) { *at = 0; baud = strtol(at + 1, NULL, 10); }
+        if (at) {
+            *at = 0;
+            char *end;
+            baud = strtol(at + 1, &end, 10);
+            if (*end || baud <= 0)
+                die("%s: the baud rate after @ is a number", t);
+        }
         g_fd = open(dev, O_RDWR | O_NOCTTY);
         if (g_fd < 0)
             die("cannot open %s: %s", dev, strerror(errno));
@@ -457,12 +505,8 @@ static void open_target(const char *t)
             tio.c_cflag |= CS8 | CREAD | CLOCAL;
             tio.c_cc[VMIN] = 1;
             tio.c_cc[VTIME] = 0;
-            speed_t sp = baud == 9600 ? B9600 : baud == 19200 ? B19200
-                       : baud == 38400 ? B38400 : baud == 57600 ? B57600
-                       : B115200;
-            cfsetispeed(&tio, sp);
-            cfsetospeed(&tio, sp);
             tcsetattr(g_fd, TCSANOW, &tio);
+            line_rate(baud);
         }
         return;
     }
@@ -509,27 +553,22 @@ static void tx(const char *p, size_t n)
     }
 }
 
-/* while the console reads: a hang-up ends it rather than the run */
-static int g_hangup_ends;
-
 /* one byte, or -1 after the timeout (-2 at a hang-up, under g_hangup_ends) */
 static int rx_byte(void)
 {
-    static unsigned char buf[4096];
-    static size_t have, at;
-    if (at < have)
-        return buf[at++];
+    if (g_rx_at < g_rx_have)
+        return g_rx[g_rx_at++];
     struct pollfd pf = { g_fd, POLLIN, 0 };
     int r = poll(&pf, 1, g_timeout_ms);
     if (r <= 0)
         return -1;
-    ssize_t n = read(g_fd, buf, sizeof buf);
+    ssize_t n = read(g_fd, g_rx, sizeof g_rx);
     if (n <= 0 && g_hangup_ends)
         return -2;
     if (n <= 0)
         die("the server closed the connection");
-    have = (size_t)n; at = 0;
-    return buf[at++];
+    g_rx_have = (size_t)n; g_rx_at = 0;
+    return g_rx[g_rx_at++];
 }
 #else
 static void open_target(const char *t)
@@ -1184,6 +1223,9 @@ static void stk500_flash(const char *target, int verify, int no_reset, int conso
 #define ESP_SPI_PARAMS  0x0B
 #define ESP_SPI_ATTACH  0x0D
 #define ESP_FLASH_MD5   0x13
+#define ESP_CHANGE_BAUD 0x0F
+#define ESP_ROM_BAUD    115200          /* the ROM's, at reset */
+#define ESP_FAST_BAUD   460800          /* esptool's default once connected */
 #define ESP_MEM_BEGIN   0x05
 #define ESP_MEM_END     0x06
 #define ESP_MEM_DATA    0x07
@@ -1495,6 +1537,44 @@ static void esp_enter_rom(void) {}
 static void esp_run(void) {}
 #endif
 
+/* The ROM's rate, asked of it: it answers at the old rate, then takes the
+ * new one; esptool waits 50 ms before it speaks again. The second word is
+ * 0 for the ROM (the flasher stub takes the old rate there). A rate the
+ * adapter cannot carry shows as silence, which is named. */
+static long g_esp_baud = ESP_ROM_BAUD;
+static void esp_baud(long baud)
+{
+    unsigned char b[8];
+    put32(b, (u32)baud); put32(b + 4, 0);
+    esp_cmd(ESP_CHANGE_BAUD, b, sizeof b, 0, NULL, NULL, NULL, "changing the baud rate", 0);
+#ifdef EMBFLASH_POSIX
+    tcdrain(g_fd);
+    line_rate(baud);
+    usleep(50 * 1000);
+    tcflush(g_fd, TCIFLUSH);
+#endif
+    g_rx_have = g_rx_at = 0;
+    g_esp_baud = baud;
+    unsigned char reg[4];
+    put32(reg, 0x40001000u);
+    if (!esp_cmd(ESP_READ_REG, reg, 4, 0, NULL, NULL, NULL, "the chip-detect register", 1))
+        die("the ROM did not answer at %ld baud: the adapter may not carry it "
+            "(serial:DEV@115200 keeps the ROM's rate)", baud);
+}
+
+/* The host's side back at the ROM's rate, after a reset put the chip there */
+static void esp_host_rom_baud(void)
+{
+    if (g_esp_baud == ESP_ROM_BAUD)
+        return;
+#ifdef EMBFLASH_POSIX
+    line_rate(ESP_ROM_BAUD);
+    tcflush(g_fd, TCIFLUSH);
+#endif
+    g_rx_have = g_rx_at = 0;
+    g_esp_baud = ESP_ROM_BAUD;
+}
+
 /* Into RAM and run, as esptool's load-ram: each piece in 0x1800-byte
  * blocks (MEM_BEGIN, MEM_DATA), then MEM_END with the entry, which the ROM
  * jumps to; nothing is written to flash */
@@ -1525,6 +1605,8 @@ static void esp_ram(void)
         }
         free(blk);
     }
+    if (g_esp_baud != ESP_ROM_BAUD)     /* the program starts at a cold boot's rate */
+        esp_baud(ESP_ROM_BAUD);
     unsigned char end[8];
     put32(end, g_entry == 0); put32(end + 4, (u32)g_entry);
     /* (the ROM may jump before it answers) */
@@ -1537,7 +1619,20 @@ static void esp_flash(const char *target, int verify, int no_reset, int ram, int
 {
     if (strncmp(target, "serial:", 7) != 0)
         die("--esp %s: the ROM is reached on a serial line, serial:DEV[@BAUD]", target);
-    open_target(target);
+    /* the ROM is reached at its own 115200; BAUD, 460800 when not given, is
+     * asked of it once it answers */
+    char dev[512];
+    long want = ESP_FAST_BAUD;
+    snprintf(dev, sizeof dev, "%s", target);
+    char *at = strrchr(dev, '@');
+    if (at) {
+        *at = 0;
+        char *end;
+        want = strtol(at + 1, &end, 10);
+        if (*end || want <= 0)
+            die("%s: the baud rate after @ is a number", target);
+    }
+    open_target(dev);
 
     /* sync: 0x07 0x07 0x12 0x20 and 32 times 0x55; the ROM answers it
      * several times, and the extra answers are drained. A reset that did
@@ -1572,6 +1667,8 @@ static void esp_flash(const char *target, int verify, int no_reset, int ram, int
             chip = &g_esp_chips[i];
     if (!chip)
         die("chip-detect value 0x%08x: not a chip this programmer knows", magic);
+    if (want != ESP_ROM_BAUD)
+        esp_baud(want);
     for (int k = 0; k < g_nch && !ram; k++)
         if (g_ch[k].addr + g_ch[k].len > chip->flash_size)
             die("the image reaches 0x%llx, beyond the %s's %u MiB of flash",
@@ -1637,10 +1734,13 @@ static void esp_flash(const char *target, int verify, int no_reset, int ram, int
      * D0WD-V3), and esptool sends it none either -- it would leave the
      * loader. Every block is written when its answer comes, so the reset
      * below starts the image. */
-    if (!no_reset)
+    long rate = g_esp_baud;
+    if (!no_reset) {
         esp_run();
-    printf("embflash: wrote %u block%s of %u bytes to the %s's flash\n", blocks_total,
-           blocks_total == 1 ? "" : "s", ESP_BLOCK, chip->name);
+        esp_host_rom_baud();
+    }
+    printf("embflash: wrote %u block%s of %u bytes to the %s's flash at %ld baud\n",
+           blocks_total, blocks_total == 1 ? "" : "s", ESP_BLOCK, chip->name, rate);
     if (verify)
         printf("embflash: verified (MD5)\n");
     if (console)

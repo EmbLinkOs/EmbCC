@@ -11,7 +11,12 @@
 #   - a HEX image with pieces at 0x1000 and 0x10000 lands the same way;
 #   - a ROM that misses the first syncs is synced with all the same;
 #   - an unknown chip, a ROM that never answers, a wrong MD5 and an image
-#     beyond the flash are each refused with an error that names them.
+#     beyond the flash are each refused with an error that names them;
+#   - the rate: 460800 is asked of the ROM by default (CHANGE_BAUDRATE),
+#     @921600 is asked for when given, @115200 keeps the ROM's; the model
+#     checks the line's rate on every command, so a programmer that does not
+#     follow its own change fails; an adapter that cannot carry the rate is
+#     named.
 # And an ELF, where embcc and embld are built:
 #   - --esp-image writes the ESP32 image the ROM boots, its header, checksum
 #     and SHA-256 checked, and byte for byte esptool's elf2image where
@@ -56,7 +61,8 @@ with open(f"{out}/big.bin", "wb") as f:
 EOF
 
 # flash NAME "MODEL OPTIONS" EMBFLASH ARGS...: a fresh model, embflash against
-# it; $frc and $src are the exit statuses, $out/NAME.log embflash's output
+# it at serial:PORT$rate; $frc and $src are the exit statuses, $out/NAME.log
+# embflash's output
 flash() {
     name=$1; mopts=$2; shift 2
     rm -f "$out/$name.port"
@@ -64,7 +70,7 @@ flash() {
     sp=$!
     i=0
     while [ ! -s "$out/$name.port" ] && [ $i -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
-    "$EMBFLASH" "$@" --esp "serial:$(cat "$out/$name.port")" --timeout 5 > "$out/$name.log" 2>&1
+    "$EMBFLASH" "$@" --esp "serial:$(cat "$out/$name.port")${rate:-}" --timeout 5 > "$out/$name.log" 2>&1
     frc=$?
     i=0
     while kill -0 $sp 2>/dev/null && [ $i -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
@@ -83,6 +89,24 @@ flash bin "" "$out/fw.bin" --base 0x1000 --verify
 region "$out/bin.dump" 0x1000 "$out/fw.bin" || fail "bin: the flash is not the image"
 grep -q "wrote 4 blocks of 1024 bytes to the ESP32's flash" "$out/bin.log" || fail "bin: $(cat "$out/bin.log")"
 grep -q "verified (MD5)" "$out/bin.log" || fail "bin: no MD5 verification"
+grep -q "at 460800 baud" "$out/bin.log" || fail "bin: not at 460800 by default: $(cat "$out/bin.log")"
+grep -q "now at 460800 baud" "$out/bin.srv" || fail "bin: the ROM was not asked for 460800"
+
+rate=@921600; flash r921 "" "$out/fw.bin" --base 0x1000 --verify
+[ $frc -eq 0 ] && [ $src -eq 0 ] || { cat "$out/r921.log" "$out/r921.srv"; fail "@921600: embflash $frc, model $src"; }
+grep -q "at 921600 baud" "$out/r921.log" || fail "@921600: $(cat "$out/r921.log")"
+
+rate=@115200; flash r115 "" "$out/fw.bin" --base 0x1000 --verify
+[ $frc -eq 0 ] && [ $src -eq 0 ] || { cat "$out/r115.log" "$out/r115.srv"; fail "@115200: embflash $frc, model $src"; }
+grep -q "now at" "$out/r115.srv" && fail "@115200: the rate was changed"
+grep -q "at 115200 baud" "$out/r115.log" || fail "@115200: $(cat "$out/r115.log")"
+
+rate=@921600; flash deaf "--deaf-above 460800" "$out/fw.bin" --base 0x1000
+[ $frc -eq 2 ] && grep -q "did not answer at 921600 baud" "$out/deaf.log" || fail "deaf: $(cat "$out/deaf.log")"
+rate=
+
+"$EMBFLASH" "$out/fw.bin" --base 0x1000 --esp serial:/dev/null@1234x > "$out/badrate.log" 2>&1
+[ $? -eq 2 ] && grep -q "the baud rate after @ is a number" "$out/badrate.log" || fail "badrate: $(cat "$out/badrate.log")"
 
 flash hex "" "$out/fw.hex" --verify
 [ $frc -eq 0 ] && [ $src -eq 0 ] || { cat "$out/hex.log" "$out/hex.srv"; fail "hex: embflash $frc, model $src"; }
