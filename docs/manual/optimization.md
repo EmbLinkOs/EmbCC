@@ -32,7 +32,7 @@ its stack slot.
 | `--opt=none` | No optimization. The default. |
 | `-O`, `--opt=basic` | Register allocation, and the passes that only remove work: promotion of locals to registers, constant propagation, dead stores, redundant loads, loop invariants, if-conversion, division by constants. |
 | `--opt=speed` | Everything in `--opt=basic`, plus inlining, global CSE, partial redundancy elimination, unrolling, vectorizing, and the other passes that trade size or compile time for speed. |
-| `--opt=max` | Identical to `--opt=speed`. |
+| `--opt=max` | Everything in `--opt=speed`, plus loop unswitching, constants propagated into the functions every call gives them to, and an inliner that weighs a callee as it will be once optimized. |
 | `--opt=size` | `--opt=speed` without the passes that trade size for speed, a smaller inlining budget, denser jump tables, and no function alignment padding. |
 | `--opt=min-size` | Identical to `--opt=size`. |
 
@@ -124,9 +124,29 @@ Optimize for speed. Enables everything in `--opt=basic`, and:
 
 GCC: `-O3`.
 
-Accepted, and identical to `--opt=speed`. No pass or code-generation decision in
-EmbCC tests for a level above 2, and objects built with `--opt=max` are byte
-for byte those built with `--opt=speed`.
+Optimize for speed, spending code size where `--opt=speed` will not.
+Enables everything in `--opt=speed`, and:
+
+- `unswitch`: a test a loop cannot change is made once, before the loop,
+  and picks one of two copies of it (see
+  [`--pass=unswitch`](#--passunswitch---no-passunswitch)).
+- `ipcp`: a parameter every call to a `static` function passes the same
+  constant is that constant inside the function (see
+  [`--pass=ipcp`](#--passipcp---no-passipcp)).
+- The inliner weighs a callee by an estimate of its size once optimized,
+  rather than as written (see [Inlining](#inlining)). The budgets are
+  `--opt=speed`'s.
+
+The code generators work as at `--opt=speed`. A function marked
+`__attribute__((cold))`, or one a profile never ran, is optimized for
+size at this level as at the others.
+
+What it buys depends on the code. On `tools/bench/workload.c` nothing
+changes: no kernel there has a loop with an invariant test, a helper
+called with a constant, or a callee the plain count refuses. On kernels
+that do (a pixel blend with a mode argument, an edge-mode filter, a
+tokenizer over `ctype`-style helpers), estimated cycles on the
+Cortex-M4 and RV32 fall by 17 to 37% against `--opt=speed`.
 
 ### `--opt=size`
 
@@ -236,22 +256,23 @@ target are the link's.
 
 ## What each level enables
 
-| | `--opt=none` | `--opt=basic` | `--opt=speed` | `--opt=size` |
-|---|---|---|---|---|
-| Local passes ([no switch](#passes-with-no-switch)) | | yes | yes | yes |
-| `cfg-clean` | | yes | yes | yes |
-| Unreachable `static` functions dropped after optimization | | yes | yes | yes |
-| `mem2reg`, `sroa`, `load-cse`, `sccp`, `dse` | | yes | yes | yes |
-| `licm` (rotation, invariant motion, strength reduction) | | yes | yes | yes |
-| Live-range splitting around loops (part of `licm`) | | yes | yes | |
-| `div-magic`, `if-convert` | | yes | yes | yes |
-| Attribute inference, read-only `static` propagation | | yes | yes | yes |
-| Register allocation, tail calls (code generator) | | yes | yes | yes |
-| `gcse`, `pre`, `tail-recursion`, `idiom` | | | yes | yes |
-| `inline` | `always_inline` only | single caller or `always_inline` | yes | yes, budget 6 |
-| `vectorize` | | | x86-64 only | |
-| `unroll`, `switch-thread` | | | yes | |
-| 16-byte function alignment (x86-64, AArch64) | yes | yes | yes | |
+| | `--opt=none` | `--opt=basic` | `--opt=speed` | `--opt=max` | `--opt=size` |
+|---|---|---|---|---|---|
+| Local passes ([no switch](#passes-with-no-switch)) | | yes | yes | yes | yes |
+| `cfg-clean` | | yes | yes | yes | yes |
+| Unreachable `static` functions dropped after optimization | | yes | yes | yes | yes |
+| `mem2reg`, `sroa`, `load-cse`, `sccp`, `dse` | | yes | yes | yes | yes |
+| `licm` (rotation, invariant motion, strength reduction) | | yes | yes | yes | yes |
+| Live-range splitting around loops (part of `licm`) | | yes | yes | yes | |
+| `div-magic`, `if-convert` | | yes | yes | yes | yes |
+| Attribute inference, read-only `static` propagation | | yes | yes | yes | yes |
+| Register allocation, tail calls (code generator) | | yes | yes | yes | yes |
+| `gcse`, `pre`, `tail-recursion`, `idiom` | | | yes | yes | yes |
+| `inline` | `always_inline` only | single caller or `always_inline` | yes | yes, sizes as optimized | yes, budget 6 |
+| `vectorize` | | | x86-64 only | x86-64 only | |
+| `unroll`, `switch-thread` | | | yes | yes | |
+| `unswitch`, `ipcp` | | | | yes | |
+| 16-byte function alignment (x86-64, AArch64) | yes | yes | yes | yes | |
 
 ## Controlling individual passes
 
@@ -260,7 +281,7 @@ target are the link's.
 GCC: `-fNAME`, `-fno-NAME`.
 
 Turn the optimizer pass `NAME` on or off. `NAME` is one of the
-eighteen names below. The level sets each pass's default, and an
+twenty names below. The level sets each pass's default, and an
 explicit option overrides the level wherever it appears on the command
 line.
 
@@ -278,7 +299,7 @@ else changes: the inlining budgets stay `--opt=basic`'s.
 A name that is not a pass is refused, with the list:
 
 ```text
-embcc: error: --pass=bogus: no optimizer pass has that name; the passes are mem2reg, gcse, load-cse, sccp, licm, vectorize, inline, dse, div-magic, if-convert, cfg-clean, tail-recursion, idiom, sroa, unroll, pre, switch-thread and licm-mem
+embcc: error: --pass=bogus: no optimizer pass has that name; the passes are mem2reg, gcse, load-cse, sccp, licm, vectorize, inline, dse, div-magic, if-convert, cfg-clean, tail-recursion, idiom, sroa, unroll, pre, switch-thread, licm-mem, unswitch and ipcp
 ```
 
 GCC's own names for some of these passes
@@ -316,6 +337,8 @@ The table lists every pass. The entries that follow describe each one.
 | `pre` | `--opt=speed`, `--opt=size` | Partial redundancy elimination |
 | `switch-thread` | `--opt=speed` | State machines jump straight to the next case |
 | `licm-mem` | `--opt=basic`, `--opt=speed`, `--opt=size` | Loads out of loops; a variable in memory kept in a register across one |
+| `unswitch` | `--opt=max` | A test a loop cannot change, made once before it |
+| `ipcp` | `--opt=max` | A parameter every call passes one constant becomes that constant |
 
 Two kinds of function get less than the full pipeline at any level:
 
@@ -658,6 +681,53 @@ a protocol parser or a hand-written state machine. At most 48 blocks are
 copied per switch and 400 IR instructions added per function. Default:
 on at `--opt=speed`; off at `--opt=size`.
 
+### `--pass=unswitch`, `--no-pass=unswitch`
+
+GCC: `-funswitch-loops`, `-fno-unswitch-loops`. Also `--unswitch`,
+`--no-unswitch`.
+
+When a loop tests a value it never changes, the test is made once,
+before the loop, and the loop is copied: one copy for each answer, with
+the test gone from both. The value may be a parameter, a local whose
+address is never taken, or any temporary the loop does not write; a
+`volatile`, a variable stored through a pointer, and a floating-point
+test are left in the loop.
+
+```c
+for (i = 0; i < n; i++)            if (mode)
+    if (mode) a[i] += 3;               for (i = 0; i < n; i++) a[i] += 3;
+    else      a[i] -= 1;           else
+                                       for (i = 0; i < n; i++) a[i] -= 1;
+```
+
+The outermost loop the test does not change is the one copied, so the
+test is made as rarely as possible. A loop of at most 48 IR instructions
+is copied, at most four per function and 160 instructions added in all;
+two invariant tests in one loop make four copies. A loop with a `switch`,
+inline `asm`, a computed `goto` or a C++ exception region is not copied.
+Default: on at `--opt=max`; off at `--opt=speed` and `--opt=size`.
+
+### `--pass=ipcp`, `--no-pass=ipcp`
+
+When every call to a `static` function passes the same integer or
+pointer constant for a parameter, the parameter is that constant inside
+the function, which is then optimized with it: a division by it becomes
+a shift or a mask, a loop it bounds has a known trip count, a branch on
+it disappears. The function is not copied, so it gets no larger; the
+calls still pass the argument.
+
+Only a function all of whose calls the unit shows is changed: one whose
+address is never taken (in code or in a static initializer), that no
+alias names, and that is not `weak`, `used`, a constructor or
+destructor, an interrupt handler, `naked` or variadic. With `--lto`, the
+unit is the whole program. `--remarks` names each parameter taken:
+
+```text
+filter.c:38: remark: propagated 'filt': parameter 1 is 128 on all 2 calls [ipcp/same-constant]
+```
+
+Default: on at `--opt=max`; off at `--opt=speed` and `--opt=size`.
+
 ## Passes with no switch
 
 These run whenever the IR optimizer runs (`--opt=basic` and above), and cannot
@@ -719,6 +789,13 @@ for any other call is `not-always_inline-at-O0`). At
 `always_inline` function (the reason code for any other call is
 `not-a-sole-callee-at-O1`). Sizes are counted in EmbIR instructions, as
 `embcc inspect ir` prints them, before the callee is optimized.
+
+At `--opt=max` the callee is weighed by an estimate of what it will be
+once optimized: labels, copies and constants are not counted, nor the
+loads and stores of a scalar local whose address is never taken, which
+`mem2reg` removes. The budgets are the same; a table lookup of 34
+instructions as written is 16 by this count, and is inlined. The remark
+says which count it used (`16 instructions as optimized`).
 
 | Limit | Value |
 |---|---|
@@ -1077,11 +1154,12 @@ the command line.
 |---|---|
 | `-O0`, `-O1`, `-O2`, `-Os` | `--opt=none`, `--opt=basic`, `--opt=speed`, `--opt=size` |
 | `-Og` | `--opt=debug`: `--opt=basic` with every source variable kept in its stack slot. |
-| `-O3`, `-Ofast` | Accepted, the same as `--opt=speed`. |
+| `-O3`, `-Ofast` | `--opt=max`. |
 | `-Oz` | `--opt=min-size`, the same as `--opt=size`. |
 | `-fNAME`, `-fno-NAME` for a pass `NAME` | `--pass=NAME`, `--no-pass=NAME`; `-finline`, `-fgcse` and the rest name EmbCC's passes. |
 | `-finline-functions`, `-fno-inline-functions` | `--inline=auto`, `--inline=declared`. |
 | `-funroll-loops`, `-fno-unroll-loops` | `--unroll`, `--no-unroll`. |
+| `-funswitch-loops`, `-fno-unswitch-loops` | `--unswitch`, `--no-unswitch`: the `unswitch` pass. |
 | `-ftree-vectorize`, `-fno-tree-vectorize` | Not accepted. Use `--pass=vectorize` / `--no-pass=vectorize`. |
 | `-fwrapv` | `--wrap-overflow`: accepted; always the behavior. |
 | `-fno-wrapv`, `-ftrapv` | Not accepted. |

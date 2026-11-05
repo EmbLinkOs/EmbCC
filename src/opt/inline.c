@@ -193,6 +193,44 @@ static struct ir_func *func_ir(struct ir_unit *iu, struct func *callee)
  * from a dozen places and every one of them meant something different; by
  * the time anyone asked why a function was not inlined, the twelve answers
  * had collapsed into one. `*why` is the stable code, `*detail` the fact. */
+/* -O3 measures a callee by what it will be, not by what irgen wrote.
+ *
+ * The callee is weighed before any pass has run on it (inline_unit runs
+ * ahead of the per-function passes), so its count is mostly the frame:
+ * `static unsigned short cls(int c) { return ... ? t[c + 1] : 0; }` is 34
+ * instructions as written and five once mem2reg and folding are done
+ * with it, and 24 refuses it. Across lib/libc, 700 calls that -O2 leaves
+ * are to a function of 16 instructions or fewer once optimized. So at -O3
+ * the count leaves out what the passes will take away: labels, copies
+ * and constants, and the loads and stores of a local mem2reg promotes (a
+ * scalar whose address is never taken). The budgets are -O2's, applied
+ * to that count; -O2 and -Os keep the plain count they were measured
+ * with. */
+static int inl_size(const struct ir_func *cf)
+{
+    if (!g_opt_max)
+        return cf->nins;
+    int nv = cf->nvars;
+    char *addr = xcalloc((size_t)(nv ? nv : 1), 1);
+    for (int i = 0; i < cf->nins; i++)
+        if (cf->ins[i].op == IR_ADDR && cf->ins[i].a >= 0 && cf->ins[i].a < nv)
+            addr[cf->ins[i].a] = 1;
+    int n = 0;
+    for (int i = 0; i < cf->nins; i++) {
+        const struct ir_ins *in = &cf->ins[i];
+        int v = in->op == IR_LDVAR ? in->a : in->op == IR_STVAR ? in->dst : -1;
+        if (in->op == IR_LABEL || in->op == IR_MOV || in->op == IR_CONST)
+            continue;
+        if (v >= 0 && v < nv && !addr[v] && cf->locals && !in->vol &&
+            !cf->locals[v].is_volatile &&
+            (cf->locals[v].is_scalar_int_or_ptr || cf->locals[v].is_scalar_float))
+            continue;
+        n++;
+    }
+    free(addr);
+    return n;
+}
+
 static int inlinable(struct ir_func *cf, int force, int sole, const char **why,
                      char *detail, size_t dcap)
 {
@@ -212,7 +250,8 @@ static int inlinable(struct ir_func *cf, int force, int sole, const char **why,
     int small = g_opt_size || g_site_size;
     int budget = small ? INLINE_SIZE_CALLEE
                : g_site_hot ? INLINE_HOT_CALLEE : INLINE_MAX_CALLEE;
-    if (!force && cf->nins > budget &&
+    int size = small ? cf->nins : inl_size(cf);
+    if (!force && size > budget &&
         !(sole == 1 && cf->nins <= INLINE_SOLE_CALLEE) &&
         !(sole == 2 && !g_opt_size && cf->nins <= INLINE_TWO_CALLEE)) {
         *why = "callee-too-large";
@@ -224,7 +263,8 @@ static int inlinable(struct ir_func *cf, int force, int sole, const char **why,
             budget = INLINE_TWO_CALLEE;
         if (detail)
             snprintf(detail, dcap, "%d instructions, budget %d%s",
-                     cf->nins, budget, g_opt_size ? " (-Os)" : "");
+                     size, budget, g_opt_size ? " (-Os)"
+                                 : size != cf->nins ? " (-O3: as optimized)" : "");
         return 0;
     }
     if (cf->neh)             { *why = "callee-has-exception-regions"; return 0; }
@@ -613,15 +653,19 @@ static void inline_unit_(struct ir_unit *iu)
                  * one: a sole caller's or one of two calls' is larger,
                  * and -Os's is smaller. */
                 int bud = g_opt_size ? INLINE_SIZE_CALLEE : INLINE_MAX_CALLEE;
-                if (cf->nins > bud && csole == 1)
+                int sz = g_opt_size ? cf->nins : inl_size(cf);
+                if (sz > bud && csole == 1)
                     bud = INLINE_SOLE_CALLEE;
-                else if (cf->nins > bud && csole == 2 && !g_opt_size)
+                else if (sz > bud && csole == 2 && !g_opt_size)
                     bud = INLINE_TWO_CALLEE;
+                if (sz > bud)
+                    sz = cf->nins;            /* admitted by a larger budget */
                 remark_add("inline", "inlined", cf->name,
                            fn->ins[ci].callee->attr_always_inline
                                ? "always_inline" : "small-enough",
                            fn->src ? fn->file : NULL, fn->ins[ci].line,
-                           "%d instructions into %s, budget %d", cf->nins,
+                           "%d instructions%s into %s, budget %d", sz,
+                           sz != cf->nins ? " as optimized" : "",
                            fn->src ? fn->name : "?", bud);
             }
             /* the counts: the caller's calls before and after */

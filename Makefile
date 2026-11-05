@@ -158,6 +158,7 @@ OPT_SRCS := src/opt/opt.c \
 	src/opt/ifconv.c \
 	src/opt/immfold.c \
 	src/opt/inline.c \
+	src/opt/ipcp.c \
 	src/opt/ivsr.c \
 	src/opt/joincopies.c \
 	src/opt/latch.c \
@@ -178,6 +179,7 @@ OPT_SRCS := src/opt/opt.c \
 	src/opt/tailmerge.c \
 	src/opt/tailrec.c \
 	src/opt/unroll.c \
+	src/opt/unswitch.c \
 	src/opt/util.c \
 	src/opt/vectorize.c \
 	src/opt/verify.c \
