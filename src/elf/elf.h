@@ -222,9 +222,7 @@ typedef struct {
 #define R_X86_64_GOTTPOFF     22
 #define R_X86_64_TPOFF32      23
 
-/* aarch64 (ELF for the Arm 64-bit Architecture, §4.6.3). Only the four
- * EmbCC emits are named: a `bl`'s 26-bit branch, the adrp/add pair that
- * materialises a symbol's address, and an absolute 64-bit data slot. */
+/* aarch64 (ELF for the Arm 64-bit Architecture, §4.6.3). */
 #define R_AARCH64_ABS64              257
 #define R_AARCH64_ABS32              258
 #define R_AARCH64_PREL32             261
@@ -247,6 +245,37 @@ typedef struct {
  * aarch64-elf-as emits for :tprel_hi12: and :tprel_lo12_nc:, read off
  * its own output rather than remembered. */
 #define R_AARCH64_TLSLE_ADD_TPREL_LO12_NC 551
+/* The rest of what an assembler writes for compiler output and what a
+ * static link applies, numbered as aarch64-elf-as's own objects carry
+ * them (read off `readelf -r`, tools/asm-audit). */
+#define R_AARCH64_ABS16                 259
+#define R_AARCH64_PREL64                260
+#define R_AARCH64_PREL16                262
+#define R_AARCH64_MOVW_UABS_G0          263
+#define R_AARCH64_MOVW_UABS_G0_NC       264
+#define R_AARCH64_MOVW_UABS_G1          265
+#define R_AARCH64_MOVW_UABS_G1_NC       266
+#define R_AARCH64_MOVW_UABS_G2          267
+#define R_AARCH64_MOVW_UABS_G2_NC       268
+#define R_AARCH64_MOVW_UABS_G3          269
+#define R_AARCH64_MOVW_SABS_G0          270
+#define R_AARCH64_MOVW_SABS_G1          271
+#define R_AARCH64_MOVW_SABS_G2          272
+#define R_AARCH64_LD_PREL_LO19          273
+#define R_AARCH64_ADR_PREL_LO21         274
+#define R_AARCH64_ADR_PREL_PG_HI21_NC   276
+#define R_AARCH64_LDST8_ABS_LO12_NC     278
+#define R_AARCH64_TSTBR14               279
+#define R_AARCH64_CONDBR19              280
+#define R_AARCH64_LDST16_ABS_LO12_NC    284
+#define R_AARCH64_LDST32_ABS_LO12_NC    285
+#define R_AARCH64_LDST64_ABS_LO12_NC    286
+#define R_AARCH64_LDST128_ABS_LO12_NC   299
+#define R_AARCH64_TLSLE_ADD_TPREL_LO12  550
+#define R_AARCH64_TLSDESC_ADR_PAGE21    562
+#define R_AARCH64_TLSDESC_LD64_LO12     563
+#define R_AARCH64_TLSDESC_ADD_LO12      564
+#define R_AARCH64_TLSDESC_CALL          569
 
 /* ARM 32-bit (ELF for the Arm Architecture, §4.6.1.2). Only the three
  * a Cortex-M object needs so far.

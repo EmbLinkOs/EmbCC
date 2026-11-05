@@ -671,9 +671,59 @@ static int decode_branch(const char *mn, struct br *b)
     return 1;
 }
 
-/* One statement. */
+static int stmt_body_(const char *stmt, int len, struct code *out, char *err,
+                      int errlen);
+
+/* One statement, and a conditional branch's prediction hint: `bne- cr0,
+ * L` is `bne cr0, L` with BO's "at" bits set, as llvm-mc and GNU as with
+ * the Power ISA 2.0 encoding write it. A test of a condition (BO 001zz,
+ * 011zz) gets at = 10 for `-`, 11 for `+`; a test of the count (BO
+ * 1a00t) a = 1, and t = 1 for `+`. A branch that tests both (BO 0000y,
+ * 0100y, bdnzt and its kin) has no "at" bits to set. */
 static int stmt_body(const char *stmt, int len, struct code *out, char *err,
                      int errlen)
+{
+    const char *p = stmt, *e = stmt + len;
+    while (p < e && isspace((unsigned char)*p)) p++;
+    const char *m = p;
+    while (m < e && !isspace((unsigned char)*m)) m++;
+    if (m - p > 2 && (m[-1] == '+' || m[-1] == '-') &&
+        (*p == 'b' || *p == 'B') && *p != '\001') {
+        int hint = m[-1];
+        char buf[256];
+        int n = len < (int)sizeof buf ? len : (int)sizeof buf - 1;
+        memcpy(buf, stmt, (size_t)n);
+        buf[n] = 0;
+        buf[(m - 1) - stmt] = ' ';
+        int at = out->len;
+        if (stmt_body_(buf, n, out, err, errlen))
+            return -1;
+        if (out->len != at + 4)
+            FAIL("%.*s: a prediction hint is for one conditional branch",
+                 (int)(m - p), p);
+        unsigned w = (unsigned)out->p[at] << 24 | (unsigned)out->p[at + 1] << 16 |
+                     (unsigned)out->p[at + 2] << 8 | out->p[at + 3];
+        unsigned op = w >> 26, bo = (w >> 21) & 31;
+        if (op != 16 && op != 19)
+            FAIL("%.*s: a prediction hint is for a conditional branch",
+                 (int)(m - p), p);
+        if ((bo & 0x14) == 0x04)            /* 001zz, 011zz: a condition */
+            bo = (bo & 0x1c) | (hint == '+' ? 3 : 2);
+        else if ((bo & 0x16) == 0x10)       /* 1a00t: the count */
+            bo = (bo & 0x16) | 0x08 | (hint == '+' ? 1 : 0);
+        else
+            FAIL("%.*s: this branch tests the condition and the count, and "
+                 "has no prediction bits", (int)(m - p), p);
+        w = (w & ~(31u << 21)) | bo << 21;
+        out->p[at] = (unsigned char)(w >> 24);
+        out->p[at + 1] = (unsigned char)(w >> 16);
+        return 0;
+    }
+    return stmt_body_(stmt, len, out, err, errlen);
+}
+
+static int stmt_body_(const char *stmt, int len, struct code *out, char *err,
+                      int errlen)
 {
     struct tok t[MAXTOK];
     int n, rt, ra, rb, rc = 0, oe = 0;
@@ -702,9 +752,6 @@ static int stmt_body(const char *stmt, int len, struct code *out, char *err,
     for (int i = 1; i < n; i++)
         if (t[i].len == 0)
             FAIL("%s: an empty operand", mn);
-    if (ml > 1 && (mn[ml - 1] == '+' || mn[ml - 1] == '-') && mn[0] == 'b')
-        FAIL("%s: a branch-prediction hint (+/-) is not supported: write "
-             "the branch without it", mn);
 #define IS(s) (strcmp(mn, s) == 0)
 #define NOPS(k, what) do { if (n != (k) + 1) \
         FAIL("%s takes %s", mn, what); } while (0)
@@ -1878,6 +1925,8 @@ void ppcasm_vocabulary(FILE *f)
                "bca 12, 2, 0x100@bta\nbcla 4, 6, 0x200@bfla\n"
                "bc 12, 4*cr7+eq, .+8@bt\n"
                "bclr 12, 2@bclr\nbclrl 4, 6@bclrl\nbcctr 4, 6@bcctr\n"
+               "bne- 0, .+8@bf-\nbne+ 0, .+8@bf+\nbeq- 1, .+8@bt-\n"
+               "bdnz+ .+8@bdnz+\nbdnz- .+8@bdnz-\n"
                "bcctrl 12, 0, 0@bcctrl\nbclr 20, 0@blr\nbcctr 20, 0@bctr\n"
                "bdnz .-8@bdnz\nbdz .+8@bdz\nbdnzl .+8@bdnzl\n"
                "bdzla 0x40@bdzla\nbdnzt 2, .+8@bdnzt\nbdnzf eq, .+8@bdnzf\n"

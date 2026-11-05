@@ -460,9 +460,17 @@ static int sec_is_nobits(struct gas *g, int k)
 
 static void emit_bytes(struct gas *g, const unsigned char *p, long n)
 {
+    /* A NOBITS section takes zeros, as GNU as lets it: `.word 0` is how
+     * clang and GCC write a zero-initialized variable in .bss. Anything
+     * else has nowhere to go. */
     if (sec_is_nobits(g, g->cur)) {
-        gerr(g, "%s holds no data (it is NOBITS); use .space",
-             g->secs[g->cur].name);
+        for (long i = 0; i < n; i++)
+            if (p[i]) {
+                gerr(g, "a non-zero value in %s, which is NOBITS (it holds "
+                        "no data, only its size)", g->secs[g->cur].name);
+                return;
+            }
+        g->secs[g->cur].size += n;
         return;
     }
     for (long i = 0; i < n; i++)
@@ -512,7 +520,7 @@ static int arm_a32(const struct gas *g)
 /* `$t`/`$d` where what this section holds changes from code to data. */
 static void map_mark(struct gas *g, char kind)
 {
-    if (g->tgt->machine != EM_ARM)
+    if (g->tgt->machine != EM_ARM && g->tgt->machine != EM_AARCH64)
         return;
     if (g->nmapst < g->nsecs) {
         g->mapst = xrealloc(g->mapst, (size_t)g->nsecs);
@@ -1859,6 +1867,8 @@ static void instruction(struct gas *g, char *stmt, int pass)
             return;
         map_mark(g, 't');
     }
+    if (g->tgt->machine == EM_AARCH64)
+        map_mark(g, 't');                 /* code: written $x below */
     if (g->tgt->machine == EM_XTENSA && xt_movi_literal(g, stmt, pass))
         return;
     const char *ps = pseudo_symbol(g, stmt);
@@ -3077,6 +3087,17 @@ static int directive(struct gas *g, char *p, int pass)
         DIR(".force_thumb") || DIR(".loc") || DIR(".cfi_sections") ||
         !strncmp(name, ".cfi_", 5))
         return 1;      /* accepted and carried no further */
+    /* clang 21's `.prefalign LOG2, END, nop`: an alignment the function
+     * would like, not one anything depends on -- the `.p2align` before
+     * it is the one that holds. And `.att_syntax [prefix]`, x86's syntax
+     * as this assembler reads it already. */
+    if (DIR(".prefalign") ||
+        (DIR(".att_syntax") && g->tgt->machine == EM_X86_64))
+        return 1;
+    if (DIR(".intel_syntax") && g->tgt->machine == EM_X86_64) {
+        gerr(g, ".intel_syntax: this assembler reads AT&T syntax only");
+        return 1;
+    }
     /* The ARM EHABI unwind directives describe how to unwind THROUGH this
      * code when a C++ exception does; they produce .ARM.exidx entries and
      * nothing that runs. A startup file marks its handlers with them.
@@ -3207,7 +3228,8 @@ static int directive(struct gas *g, char *p, int pass)
     }
     if (DIR(".byte") || DIR(".short") || DIR(".half") || DIR(".hword") ||
         DIR(".word") || DIR(".long") || DIR(".int") || DIR(".quad") ||
-        DIR(".dword") || DIR(".2byte") || DIR(".4byte") || DIR(".8byte")) {
+        DIR(".dword") || DIR(".2byte") || DIR(".4byte") || DIR(".8byte") ||
+        DIR(".xword")) {
         map_mark(g, 'd');
         /* `.word` is the MACHINE's word, which is two bytes on AVR and four
          * everywhere else here -- GNU as does the same, and a `.word` read
@@ -3216,7 +3238,8 @@ static int directive(struct gas *g, char *p, int pass)
         int width = DIR(".byte") ? 1
                   : (DIR(".short") || DIR(".half") || DIR(".hword") ||
                      DIR(".2byte")) ? 2
-                  : (DIR(".quad") || DIR(".dword") || DIR(".8byte")) ? 8
+                  : (DIR(".quad") || DIR(".dword") || DIR(".8byte") ||
+                     DIR(".xword")) ? 8
                   : DIR(".word") ? wordw : 4;
         const char *q = arg;
         while (*skip_ws((char *)q)) {
@@ -3253,6 +3276,11 @@ static int directive(struct gas *g, char *p, int pass)
                     gerr(g, "\"%s\" is %ld, which does not fit in %d byte%s",
                          one, gv.v, width, width == 1 ? "" : "s"), bad = 1;
             }
+            if (!bad && !gv.unknown && gv.sec != SEC_ABS &&
+                sec_is_nobits(g, g->cur))
+                gerr(g, "\"%s\" is an address, and %s is NOBITS: it holds "
+                        "no data to relocate", one, g->secs[g->cur].name),
+                    bad = 1;
             if (!bad && pm && gv.sec == SEC_ABS) {
                 emit_int(g, gv.v >> 1, width);
             } else if (bad || gv.sec == SEC_ABS || gv.unknown) {
@@ -3746,15 +3774,18 @@ static int write_object(struct gas *g, const char *out_path)
                                         (Elf64_Uchar)((STB_LOCAL << 4) |
                                                       STT_SECTION),
                                         (Elf64_Half)ndx[i]);
-    /* only in a section with code in it: data alone needs no map (and
-     * clang's assembler writes none there either) */
+    /* only in a section with code in it, or an executable one: data in
+     * .rodata needs no map, and clang's assembler writes none there; but
+     * words in .text -- an instruction written as `.word` -- are marked
+     * $d as clang marks them, so a disassembler shows them as data */
     char *hascode = xcalloc((size_t)g->nsecs, 1);
     for (i = 0; i < g->nmaps; i++)
-        if (g->maps[i].kind == 't')
+        if (g->maps[i].kind == 't' || (g->secs[g->maps[i].sec].flags & SHF_EXECINSTR))
             hascode[g->maps[i].sec] = 1;
     for (i = 0; i < g->nmaps; i++)
         if (ndx[g->maps[i].sec] && hascode[g->maps[i].sec])
             elfw_add_symbol(w, g->maps[i].kind != 't' ? "$d"
+                               : g->tgt->machine == EM_AARCH64 ? "$x"
                                : arm_a32(g) ? "$a" : "$t",
                             (Elf64_Addr)g->maps[i].off, 0,
                             (Elf64_Uchar)((STB_LOCAL << 4) | STT_NOTYPE),
@@ -3927,14 +3958,15 @@ static const struct gas_target A32_GAS = {
  * covers it once the machine is allowed through. */
 #if FAMILY_BUILT(aarch64)
 static const struct gas_target A64_GAS = {
-    EM_AARCH64, 0, a64asm_assemble, a64asm_gpr,
+    EM_AARCH64, 0, a64asm_assemble, a64asm_is_reg,
     R_AARCH64_CALL26, 0, 0,
     R_AARCH64_ABS32, R_AARCH64_ABS64,
-    /* no 16-bit pointer, `.word` is four bytes, and no symbol
-     * forms beyond the ones above; `#` is an immediate's prefix. */
-    0, 0, NULL, 0,
-    1, NULL, NULL, NULL, NULL,
-    0, NULL, NULL, NULL, NULL, NULL
+    /* no 16-bit pointer, `.word` is four bytes; the symbol forms --
+     * adrp, :lo12: and the other modifiers, the branches, a literal --
+     * are a64asm_symform's; `#` is an immediate's prefix. */
+    0, 0, a64asm_symform, 0,
+    1, a64asm_is_word, NULL, NULL, NULL,
+    0, NULL, NULL, NULL, a64asm_is_transfer, NULL
 };
 #endif
 
