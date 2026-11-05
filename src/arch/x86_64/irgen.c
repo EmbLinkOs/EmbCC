@@ -1333,14 +1333,15 @@ static const char *gpr_name(int r, int size, int hi)
     static const char *const n16[] = { "ax","cx","dx","bx","sp","bp","si","di" };
     static const char *const n8[] = { "al","cl","dl","bl","spl","bpl","sil","dil" };
     static const char *const nh[] = { "ah","ch","dh","bh" };
-    static char buf[8][8];
+    static char buf[8][16];
     static int k;
     char *b = buf[k++ & 7];
     if (hi && r < 4)
         return nh[r];
     if (r < 8)
         return size == 8 ? n64[r] : size == 4 ? n32[r] : size == 2 ? n16[r] : n8[r];
-    snprintf(b, 8, "r%d%s", r, size == 8 ? "" : size == 4 ? "d" : size == 2 ? "w" : "b");
+    snprintf(b, sizeof buf[0], "r%d%s", r,
+             size == 8 ? "" : size == 4 ? "d" : size == 2 ? "w" : "b");
     return b;
 }
 
