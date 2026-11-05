@@ -596,12 +596,19 @@ embflash needs no Xtensa toolchain.
 `--read` reads the flash back through the ROM's `READ_FLASH_SLOW`, 64
 bytes a request, checked against the ROM's MD5 of the range.
 
+A flasher stub of embflash's own (`tools/embflash/esp32stub.c`), loaded
+into RAM through the ROM, writes in 16 KiB blocks, LZ4-compressed, reads
+as a stream and computes its own MD5, and erases the chip or a region. It
+speaks the ROM's packets, so the programmer's code is the same for both,
+and `--no-stub` keeps the ROM's loader. LZ4's block format rather than
+esptool's deflate: both ends are ours, and its decoder is 40 lines a
+model can check with one of its own.
+
 **Status.** Current, tested on an ESP32-D0WD-V3 board as well as the model,
-including a program with 291 KiB of code in flash and the whole 4 MiB read
-back. The ESP32 only, 4 MiB of
-flash assumed. The RAM-loaded flasher stub, compressed
-writes, fast reads and other chips (the ESP32-C3's and S3's
-chip IDs) are not implemented.
+including a program with 291 KiB of code in flash, the whole 4 MiB read
+back through the ROM and through the stub, and the stub's writes, reads
+and erases. The ESP32 only, 4 MiB of flash assumed. Other chips (the
+ESP32-C3's and S3's chip IDs) are not implemented.
 
 ## D-024: embld lays out Xtensa images from linker scripts
 
