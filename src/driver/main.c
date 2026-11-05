@@ -1356,6 +1356,43 @@ static int compile_and_link_(const char *in, const char *out)
             have_pic32_crt = 1;
         }
     }
+    /* A board (--board=): its startup and runtime, after the part's, and its
+     * linker script when the link names none */
+    static char board_files[4][1024], board_script[1024];
+    int nboard_files = 0;
+    if (opts_board()) {
+        const struct embcc_board *bd = opts_board();
+        if (bd->script && !lo.script) {
+            if (!paths_target_file(lib_triple(), bd->script, board_script,
+                                   sizeof board_script)) {
+                fprintf(stderr, "embcc: error: no %s for --board=%s: the %s runtime is "
+                        "not built or not installed (make rt-embedded)\n", bd->script,
+                        bd->name, lib_triple());
+                return 1;
+            }
+            lo.script = board_script;
+        }
+        if (!g_nostdlib && !g_nostartfiles) {
+            const char *p = bd->startfiles;
+            while (*p && nboard_files < 4) {
+                const char *e = strchr(p, ' ');
+                size_t len = e ? (size_t)(e - p) : strlen(p);
+                char nm[64];
+                snprintf(nm, sizeof nm, "%.*s", (int)len, p);
+                if (!paths_target_file(lib_triple(), nm, board_files[nboard_files],
+                                       sizeof board_files[0])) {
+                    fprintf(stderr, "embcc: error: no %s for --board=%s: the %s runtime "
+                            "is not built or not installed (make rt-embedded)\n", nm,
+                            bd->name, lib_triple());
+                    return 1;
+                }
+                nboard_files++;
+                p += len;
+                while (*p == ' ')
+                    p++;
+            }
+        }
+    }
     lo.libdirs = g_libdirs;
     lo.nlibdirs = g_nlibdirs;
     lo.undefs = g_undefs;
@@ -1446,6 +1483,8 @@ static int compile_and_link_(const char *in, const char *out)
         inputs[n++] = pic32_crt;
     if (have_pic32_proc)
         inputs[n++] = pic32_proc;
+    for (int k = 0; k < nboard_files; k++)
+        inputs[n++] = board_files[k];
     if (in)
         inputs[n++] = obj;
     for (int k = 0; k < g_nlink_in; k++) {
@@ -2921,6 +2960,14 @@ static void incdirs_with_defaults(void)
             snprintf(avrinc, sizeof avrinc, "%s/avr", def[ndef - 1]);
             incdir_sys[nincdirs] = 1;
             incdirs[nincdirs++] = avrinc;
+        }
+        /* A board (--board=): its <board.h>, include/boards/DIR */
+        static char boardinc[1024];
+        if (opts_board() && ndef > 0 && nincdirs < MAX_INCDIRS) {
+            snprintf(boardinc, sizeof boardinc, "%s/boards/%s", def[ndef - 1],
+                     opts_board()->dir);
+            incdir_sys[nincdirs] = 1;
+            incdirs[nincdirs++] = boardinc;
         }
         /* A PIC32 part: EmbCC's XC32-compatible headers (<cp0defs.h>,
          * <sys/attribs.h>...), then the part's device pack, whose <xc.h>
@@ -6928,6 +6975,10 @@ static int embcc_main(int argc, char **argv)
         }
         if (strcmp(argv[i], "--reference=warnings") == 0)
             return diag_print_reference(stdout);
+        if (strcmp(argv[i], "--reference=boards") == 0) {
+            opts_print_boards(stdout);
+            return 0;
+        }
         if (strcmp(argv[i], "--reference=targets") == 0)
             return target_print_reference(stdout);
         if (strcmp(argv[i], "--reference=man") == 0) {

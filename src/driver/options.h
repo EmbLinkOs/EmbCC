@@ -16,4 +16,20 @@ void opts_print_spellings(FILE *out); /* --help=spellings: for the tests */
 /* --reference=man: embcc(1), in roff, for `make install` */
 void opts_print_man(FILE *out, const char *version, const char *date);
 
+/* A development board (--board=): what it sets, and what its link adds */
+struct embcc_board {
+    const char *name;       /* --board=NAME */
+    const char *title;
+    const char *target;     /* --target= */
+    const char *mcu;        /* -mmcu=, or NULL */
+    const char *flags;      /* the compile's: defines and the like */
+    const char *dir;        /* include/boards/DIR, lib/boards/DIR */
+    const char *startfiles; /* the runtime's objects, in the target's library directory */
+    const char *script;     /* the linker script there, or NULL for the part's */
+    const char *flash;      /* how embflash programs it */
+};
+/* the board --board= named, or NULL */
+const struct embcc_board *opts_board(void);
+void opts_print_boards(FILE *out);    /* --reference=boards */
+
 #endif

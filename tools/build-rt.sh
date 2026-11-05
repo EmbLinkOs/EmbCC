@@ -150,3 +150,26 @@ if [ "$triple" = avr ]; then
     rm -f "$out/libc.a"
     "$AR" rcs "$out/libc.a" "$out"/c/*.o
 fi
+
+# The boards' runtimes (--board=, src/driver/options.c's table), beside the
+# target's library: each lib/boards/DIR/board.c with its <board.h>, and the
+# ESP32's startup and linker script (lib/esp32), which a board links in
+# the order the table gives.
+case $triple in
+    avr)
+        "$EMBCC" --target=avr -mmcu=atmega328p -DF_CPU=16000000UL -Os -Wall -Wextra -Werror \
+            -I"$here/include/boards/uno" -c "$here/lib/boards/uno/board.c" \
+            -o "$out/board-uno.o" || {
+            echo "build-rt: lib/boards/uno/board.c does not compile" >&2; exit 1; }
+        ;;
+    xtensa-none-elf)
+        x="$EMBCC --target=xtensa-esp32-elf -O2 -mtext-section-literals -Wall -Wextra -Werror"
+        $x -c "$here/lib/esp32/crt0.S" -o "$out/esp32-crt0.o" &&
+            $x -c "$here/lib/esp32/start.c" -o "$out/esp32-start.o" &&
+            $x -I"$here/include/boards/esp32-devkit" -c "$here/lib/boards/esp32-devkit/board.c" \
+                -o "$out/board-esp32-devkit.o" || {
+            echo "build-rt: the ESP32 runtime (lib/esp32, lib/boards/esp32-devkit) does not build" >&2
+            exit 1; }
+        cp "$here/lib/esp32/esp32.ld" "$out/esp32.ld"
+        ;;
+esac
