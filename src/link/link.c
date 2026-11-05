@@ -4610,8 +4610,10 @@ static long pie_count(struct linker *l)
     return n;
 }
 
+#if FAMILY_BUILT(avr)
 static int avr_tramp_find(struct linker *l, struct object *o, Elf64_Word symi,
                           long long A);
+#endif
 
 static void apply_relocs(struct linker *l, struct object *o)
 {
@@ -7365,6 +7367,7 @@ static int sg_cmp(const void *pa, const void *pb)
 static int add_synth(struct linker *l, const char *name, long size, int align,
                      int osec, unsigned char *data);
 
+#if FAMILY_BUILT(avr)
 /* AVR avr6 (the ATmega2560): a function pointer is a 16-bit word address,
  * which reaches the first 128 KiB of its 256. As avr-ld does, a pointer
  * to a function past that goes through a trampoline: a `jmp` to it in low
@@ -7448,6 +7451,12 @@ static void avr_tramp_fill(struct linker *l)
                           (long)(S + (Elf64_Addr)l->tramps[k].addend));
     }
 }
+
+#else
+/* no AVR in this linker: add_object refused its objects */
+static void avr_tramp_scan(struct linker *l) { (void)l; }
+static void avr_tramp_fill(struct linker *l) { (void)l; }
+#endif
 
 static int add_synth(struct linker *l, const char *name, long size, int align,
                      int osec, unsigned char *data)

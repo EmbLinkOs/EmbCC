@@ -566,6 +566,7 @@ static int avr_core_drops(const char *name)
                  (m->pc_bytes == 3 && strcmp(name, "__AVR_2_BYTE_PC__") == 0));
 }
 
+#if FAMILY_BUILT(avr)
 static int avr_core_adds(struct predef_macro *out)
 {
     const struct avr_mcu *m = avr_core_part();
@@ -586,6 +587,7 @@ static int avr_core_adds(struct predef_macro *out)
     }
     return n;
 }
+#endif
 
 /* A PIC32 part (--mcu= on mipsel, src/arch/mips/options.c): the macros
  * XC32 defines for it, which the device pack's headers test -- the part's
