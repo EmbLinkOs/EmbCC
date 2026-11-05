@@ -1290,6 +1290,18 @@ static int rv_load_sym(const struct gas *g, const char *p)
     return 0;
 }
 
+/* A statement that carries a relocation keeps its full-width field:
+ * RISC-V's compressed forms have no room for what the linker writes. */
+static void reloc_encode(struct gas *g, int on)
+{
+#if FAMILY_BUILT(riscv)
+    if (g->tgt->machine == EM_RISCV)
+        rvasm_no_compress(on);
+#else
+    (void)g; (void)on;
+#endif
+}
+
 /* `call sym` and `la rd, sym`: the two forms that may name a symbol
  * this file does not define. Both are an auipc paired with a second
  * instruction, eight bytes, and both carry their relocation on the
@@ -1312,7 +1324,10 @@ static int extern_form(struct gas *g, const char *stmt, long pc, int pass,
             char err[256];
             if (g->tgt->at)
                 g->tgt->at(pc);
-            if (g->tgt->encode(f.encode, &tmp, err, sizeof err) != 0) {
+            reloc_encode(g, 1);
+            int erc2 = g->tgt->encode(f.encode, &tmp, err, sizeof err);
+            reloc_encode(g, 0);
+            if (erc2 != 0) {
                 gerr_enc(g, pass, "", err);
                 free(tmp.p);
                 return 1;
@@ -1407,7 +1422,10 @@ static int extern_form(struct gas *g, const char *stmt, long pc, int pass,
             struct code tmp = { 0 };
             char err[256];
             snprintf(buf, sizeof buf, "%.*s.+0", (int)(last - p), p);
-            if (g->tgt->encode(buf, &tmp, err, sizeof err) != 0) {
+            reloc_encode(g, 1);
+            int erc31 = g->tgt->encode(buf, &tmp, err, sizeof err);
+            reloc_encode(g, 0);
+            if (erc31 != 0) {
                 gerr(g, "%s", err);
             } else {
                 if (pass == 2)
@@ -1467,7 +1485,10 @@ static int extern_form(struct gas *g, const char *stmt, long pc, int pass,
             rd = rdbuf;
         }
         snprintf(buf, sizeof buf, "auipc %s, 0", rd);
-        if (g->tgt->encode(buf, &tmp, err, sizeof err) != 0) {
+        reloc_encode(g, 1);
+        int erc32 = g->tgt->encode(buf, &tmp, err, sizeof err);
+        reloc_encode(g, 0);
+        if (erc32 != 0) {
             gerr(g, "%s", err); free(tmp.p); return 1;
         }
         if (ld_len)
@@ -1476,7 +1497,10 @@ static int extern_form(struct gas *g, const char *stmt, long pc, int pass,
             snprintf(buf, sizeof buf, is_tail ? "jalr zero, 0(t1)"
                                     : is_call ? "jalr ra, 0(ra)"
                                               : "addi %s, %s, 0", rd, rd);
-        if (g->tgt->encode(buf, &tmp, err, sizeof err) != 0) {
+        reloc_encode(g, 1);
+        int erc33 = g->tgt->encode(buf, &tmp, err, sizeof err);
+        reloc_encode(g, 0);
+        if (erc33 != 0) {
             gerr(g, "%s", err); free(tmp.p); return 1;
         }
         emit_bytes(g, (const unsigned char *)tmp.p, tmp.len);
@@ -3116,6 +3140,13 @@ static int directive(struct gas *g, char *p, int pass)
              "an A- or R-profile one", DIR(".arm") ? ".arm" : ".code 32");
         return 1;
     }
+#if FAMILY_BUILT(riscv)
+    /* `.option rvc`/`norvc`/`push`/`pop`: whether the instructions that
+     * follow take their 16-bit forms (the others -- relax, pic, arch --
+     * are accepted below and change nothing here) */
+    if (DIR(".option") && g->tgt->machine == EM_RISCV && rvasm_option(arg))
+        return 1;
+#endif
     if (DIR(".file") || DIR(".ident") || DIR(".cfi_startproc") ||
         DIR(".cfi_endproc") || DIR(".syntax") || DIR(".thumb") ||
         DIR(".arm") ||
@@ -3736,6 +3767,10 @@ static void pass_over(struct gas *g, const struct gline *lines, int nlines,
     if (g->tgt->open && g->tgt->open())
         gerr(g, "an IT block is still owed instructions at the end of the "
                 "file");
+#if FAMILY_BUILT(riscv)
+    if (g->tgt->machine == EM_RISCV)
+        rvasm_gas_done();     /* inline asm after this file is not compressed */
+#endif
     if (g->tgt->machine == EM_XTENSA)
         xt_pool_check(g);
 }
@@ -3981,13 +4016,13 @@ static int write_object(struct gas *g, const char *out_path)
 #if FAMILY_BUILT(riscv)
 static const struct gas_target RISCV_GAS = {
     EM_RISCV, 0, rvasm_assemble, rvasm_gpr,
-    R_RISCV_CALL, R_RISCV_PCREL_HI20, R_RISCV_PCREL_LO12_I,
+    R_RISCV_CALL_PLT, R_RISCV_PCREL_HI20, R_RISCV_PCREL_LO12_I,
     R_RISCV_32, R_RISCV_64,
-    /* no 16-bit pointer, `.word` is four bytes, and no symbol
-     * forms beyond the ones above. */
-    0, 0, NULL, 0,
-    0, rvasm_is_word, NULL, NULL, NULL,
-    0, NULL, NULL, NULL, NULL, NULL
+    /* no 16-bit pointer, `.word` is four bytes; beyond call/la/tail, the
+     * % operators are rvasm_symform's */
+    0, 0, rvasm_symform, 0,
+    0, rvasm_is_word, rvasm_reset, NULL, NULL,
+    0, rvasm_set_level, rvasm_took_level, NULL, NULL, NULL
 };
 #endif
 

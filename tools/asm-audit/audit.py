@@ -123,9 +123,12 @@ def norm(dis):
     relocation applies to it -- then its operands are the linker's, and
     one assembler may have resolved what the other left to relocate."""
     ins = []
+    pair = False
     for l in dis.splitlines():
         if re.search(r":\s+R_[A-Z0-9_]+", l) and ins:
             ins[-1] = (ins[-1][0], True)
+            # a RISC-V call's relocation covers the jalr after its auipc
+            pair = bool(re.search(r"R_RISCV_CALL", l))
             continue
         m = re.match(r"^\s*[0-9a-f]+:\s+(?:[0-9a-f]{2,8}\s)*\s*(.*)$", l)
         if not m or not m[1].strip() or l.rstrip().endswith(">:"):
@@ -135,7 +138,8 @@ def norm(dis):
         op = t.split(" ")[0]
         if BR.match(op) or op.startswith(("b", "j")) and re.search(r"0x[0-9a-f]+|\.[+-]", t):
             t = re.sub(r"(0x)?[0-9a-f]+$|\.[+-]?\d+$|[+-]?\d+$", "T", t)
-        ins.append((t, False))
+        ins.append((t, pair))
+        pair = False
     return ins
 
 def same(a, b):
@@ -176,8 +180,11 @@ def audit(name, out, show):
             errs[re.sub(r'"[^"]*"', '"..."', first)[:110]] += 1
             continue
         ok += 1
-        de = run([objdump, "-dr", "--no-show-raw-insn", eo]).stdout
-        dr = run([objdump, "-dr", "--no-show-raw-insn", ro]).stdout
+        # RISC-V's compressed forms print as their 32-bit aliases unless
+        # asked not to, and a missed compression is a difference
+        na = ["-M", "no-aliases"] if name.startswith("rv") else []
+        de = run([objdump, "-dr", "--no-show-raw-insn"] + na + [eo]).stdout
+        dr = run([objdump, "-dr", "--no-show-raw-insn"] + na + [ro]).stdout
         ne, nr = norm(de), norm(dr)
         k = same(ne, nr)
         if k is not None:

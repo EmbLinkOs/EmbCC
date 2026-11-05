@@ -352,6 +352,12 @@ typedef struct {
 #define R_RISCV_GOT_HI20     20
 #define R_RISCV_PCREL_LO12_I 24
 #define R_RISCV_PCREL_LO12_S 25
+#define R_RISCV_TLS_GOT_HI20 21
+#define R_RISCV_TLS_GD_HI20  22
+#define R_RISCV_TPREL_HI20   29
+#define R_RISCV_TPREL_LO12_I 30
+#define R_RISCV_TPREL_LO12_S 31
+#define R_RISCV_TPREL_ADD    32
 #define R_RISCV_HI20     26
 #define R_RISCV_LO12_I   27
 #define R_RISCV_LO12_S   28
