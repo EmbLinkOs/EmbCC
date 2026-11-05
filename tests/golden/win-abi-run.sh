@@ -232,6 +232,36 @@ int main(void)
 E
 
 
+# va_list is a pointer, eight bytes, on Windows, where `long` is four: a
+# va_arg that loaded and stored it as a `long` cut the stack's address to
+# 32 bits. That crashes only where the stack is above 4 GiB (Linux, where
+# CI runs this natively; not the QEMU harness), so the width is checked in
+# the IR as well: every load and store through va_list's address is 8 wide.
+"$EMBCC" inspect ir --target=x86_64-windows-gnu -O0 "$out/callee.c" > "$out/ir.txt" 2>&1 ||
+    { echo "FAIL: inspect ir: $(head -3 "$out/ir.txt")"; exit 1; }
+python3 - "$out/ir.txt" <<'PY' || exit 1
+import re, sys
+bad, func = [], None
+addr_of, aps = {}, set()
+for line in open(sys.argv[1]):
+    m = re.match(r"func @(\w+)", line)
+    if m:
+        func, addr_of, aps = m.group(1), {}, set()
+        continue
+    m = re.match(r"\s*%(\d+) = addr (v\d+)", line)
+    if m:
+        addr_of[m.group(1)] = m.group(2)
+    m = re.match(r"\s*va_start \[%(\d+)\]", line)
+    if m and m.group(1) in addr_of:
+        aps.add(addr_of[m.group(1)])
+    m = re.match(r"\s*(?:%\d+ = )?(load\.\d+|store:\d+)\w* \[%(\d+)\]", line)
+    if m and addr_of.get(m.group(2)) in aps and not re.match(r"(load\.8|store:8)", m.group(1)):
+        bad.append(f"{func}: {line.strip()}")
+if bad:
+    print("FAIL: va_arg reads or writes the Windows va_list narrower than its 8 bytes:")
+    print("\n".join("      " + b for b in bad[:6]))
+    sys.exit(1)
+PY
 for opt in -O0 -O1 -O2; do
     b=$out/O${opt#-O}; mkdir -p "$b"
     "$EMBCC" --target=x86_64-windows-gnu $opt -c "$out/callee.c" \

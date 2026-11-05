@@ -386,9 +386,9 @@ static NOS void report(uptr addr, uptr size, int write, uptr pc,
             san_hex(c->free_pc);
             san_puts("\n");
         }
-        san_puts("allocated by thread T0 here:\n    #0 ");
-        san_hex(c->alloc_pc);
-        san_puts("\n");
+        san_puts("allocated by thread T0 here:\n");
+        uptr at[1] = { c->alloc_pc };   /* named, as the report's own frames */
+        san_print_stack(at, 1);
     }
     san_puts("SUMMARY: AddressSanitizer: ");
     san_puts(kind);
