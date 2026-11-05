@@ -47,7 +47,12 @@ rm -rf "${out:?}"; mkdir -p "$out"
 # The budget is CPU seconds, not the wall clock's: the suite runs a test
 # per core, and on a loaded CI runner a compile waiting for a core is not a
 # slow compiler (different cases here timed out on different runs). The
-# wall clock still stops a hang, at ten times the budget.
+# wall clock still stops a hang, at ten times the budget. And CPU time
+# itself grows on a slower or loaded machine (the Xtensa ladder took 10 s
+# of CPU on a Mac running the suite, and was killed at 8 on a CI runner):
+# the budgets are this machine's, now -- each scaled by how much longer a
+# reference compile takes here than where they were set. A compile that is
+# linear stays inside; one that turned quadratic is a hundred times over.
 limit() {
     _t=$1; shift
     ( ulimit -t "$_t" 2>/dev/null
@@ -97,13 +102,34 @@ w('funcs.c', ''.join('int f%d(int x) { return x * %d + 1; }\n' % (k, k)
                      for k in range(20000)))
 PYEOF
 
+# The reference: 10,000 one-line functions at x86-64 -O2, REF_CPU s of CPU
+# where the budgets were set (an M-series Mac, unloaded). The scale is
+# never below 1.
+REF_CPU=0.28
+python3 -c "open('$out/ref.c', 'w').write(''.join('int f%d(int x) { return x * %d + 1; }\\n' % (k, k) for k in range(10000)))"
+scale=$(python3 - "$EMBCC" "$out/ref.c" "$REF_CPU" <<'PYEOF'
+import resource, subprocess, sys
+best = None
+for _ in range(2):          # the faster of two: a moment's load is not the machine
+    r0 = resource.getrusage(resource.RUSAGE_CHILDREN)
+    subprocess.run([sys.argv[1], "--target=x86_64-elf", "-O2", "-w", "-c", sys.argv[2],
+                    "-o", "/dev/null"], check=True)
+    r1 = resource.getrusage(resource.RUSAGE_CHILDREN)
+    t = (r1.ru_utime + r1.ru_stime) - (r0.ru_utime + r0.ru_stime)
+    best = t if best is None else min(best, t)
+print("%.2f" % max(1.0, best / float(sys.argv[3])))
+PYEOF
+) || { echo "FAIL: the reference compile"; exit 1; }
+echo "  (the budgets x$scale: the reference compile against $REF_CPU s)"
+
 # in seconds of CPU or not at all: within SECONDS WHAT FILE OPTION...
 bad=0
 within() {
-    secs=$1; what=$2; src=$3; shift 3
+    secs=$(python3 -c "import math, sys; print(math.ceil(float(sys.argv[1]) * float(sys.argv[2])))" "$1" "$scale")
+    what=$2; src=$3; shift 3
     limit "$secs" "$EMBCC" "$@" -w -c "$out/$src" -o "$out/x.o" > "$out/x.log" 2>&1
     st=$?
-    if [ $st -eq 152 ]; then                    # SIGXCPU
+    if [ $st -eq 152 ] || [ $st -eq 137 ]; then # SIGXCPU; Linux's SIGKILL at the hard limit
         echo "FAIL: $what: more than $secs s of CPU"; bad=1
     elif [ $st -eq 142 ]; then                  # SIGALRM
         echo "FAIL: $what: no answer in $((secs * 10)) s"; bad=1

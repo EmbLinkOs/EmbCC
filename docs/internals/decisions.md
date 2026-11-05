@@ -561,6 +561,47 @@ EEPROM and fuses are not implemented. Native USB probes (ST-LINK,
 CMSIS-DAP) are a separate, larger decision; until then they are reached
 through their GDB servers.
 
+## D-023: embflash programs an ESP32 through its ROM
+
+**Decision.** `embflash --esp serial:DEV[@BAUD]` programs an ESP32 through
+the serial download mode in its ROM, without esptool. It uses a
+development board's DTR/RTS auto-reset to enter the ROM, the chip-detect
+register to name the chip, flash begin and data in 1024-byte blocks, and
+the ROM's MD5 to verify. It reaches the ROM at 115200 and asks it for
+460800 (CHANGE_BAUDRATE), or the rate given. It sends no FLASH_END:
+the ROM answers it with error 0x06, and esptool sends none either. An ELF
+is made into the image the ROM boots, esptool's `elf2image` format byte for
+byte; `--ram` loads the ELF into RAM through MEM_BEGIN, MEM_DATA and
+MEM_END instead; `--console` reads the program's output through the same
+open port.
+
+**Why.** As with D-022, no GDB server reaches the ROM, and the protocol is
+small enough to model without the chip. The first version wrote only the
+bytes it was given and left the image to another tool. On a real board
+that tool was esptool, and the toolchain was meant to work without it.
+The ESP32's image is simple (a header, the RAM segments, a checksum and a
+SHA-256), and the ELF already carries what it needs. Reading the console
+through the same port is needed because reopening it pulses the
+auto-reset.
+
+Code and data in flash-mapped memory are mapped by a boot stub of
+embflash's own (`tools/embflash/esp32boot.c`) rather than a second-stage
+bootloader and partition table. The ROM loads the stub with the image, it
+maps each region with the ROM's `cache_flash_mmu_set` and starts the
+program. That keeps one image at 0x1000, written in one run, and no ESP-IDF
+format to follow. The stub's bytes are carried in embflash (built by
+EmbCC, with the source's SHA-256 checked by the golden), so building
+embflash needs no Xtensa toolchain.
+
+`--read` reads the flash back through the ROM's `READ_FLASH_SLOW`, 64
+bytes a request, checked against the ROM's MD5 of the range.
+
+**Status.** Current, tested on an ESP32-D0WD-V3 board as well as the model,
+including a program with 291 KiB of code in flash and the whole 4 MiB read
+back. The ESP32 only, 4 MiB of
+flash assumed. The RAM-loaded flasher stub, compressed
+writes, fast reads and other chips (the ESP32-C3's and S3's
+chip IDs) are not implemented.
 ## D-024: embld lays out Xtensa images from linker scripts
 
 **Decision.** `-T` takes a linker script for Xtensa images, through the same layout engine as

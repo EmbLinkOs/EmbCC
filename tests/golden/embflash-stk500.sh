@@ -10,6 +10,8 @@
 #     it does not touch are left alone; --verify reads them back;
 #   - an ELF and a raw binary (--base) land the same way;
 #   - a bootloader that misses the first syncs is synced with all the same;
+#   - --console prints what the program writes once the bootloader starts it,
+#     and ends when the port hangs up;
 #   - an image that reaches the bootloader, a part it does not know, a
 #     bootloader that never answers and a byte that reads back wrong are each
 #     refused with an error that names them, exit status 2.
@@ -84,6 +86,10 @@ python3 -c "import sys; d=open(sys.argv[1],'rb').read(); w=open(sys.argv[2],'rb'
 
 flash slow "--ignore-syncs 3" "$out/fw.hex"
 [ $frc -eq 0 ] && [ $src -eq 0 ] || fail "a bootloader that misses three syncs: embflash $frc"
+
+flash console "" "$out/fw.hex" --console 5
+[ $frc -eq 0 ] && [ $src -eq 0 ] || { cat "$out/console.log"; fail "console: embflash $frc, model $src"; }
+grep -q "hello from the sketch" "$out/console.log" || fail "console: $(cat "$out/console.log")"
 
 flash boot "" "$out/boot.hex"
 [ $frc -eq 2 ] || fail "an image over the bootloader was not refused"
