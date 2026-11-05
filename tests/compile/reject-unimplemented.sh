@@ -361,38 +361,28 @@ for t in aarch64-elf thumbv7em-none-eabi riscv32-unknown-elf mipsel-none-elf \
 done
 echo "case nolink: a board image with no memory map, or an AArch64 one, is refused by name"
 
-# C++ follows the target's data model and C++ ABI on every 32-bit target
-# but AVR (tests/golden/cxx-embedded.sh runs it on ARM, RV32, MIPS, Xtensa,
-# TriCore and the rest); on AVR -- two-byte int and pointers, which the C++
-# lowering does not handle -- code generation is refused by name, except
-# for a check that writes nothing. Elsewhere exceptions are refused by
-# name: there are no unwind tables for them.
+# C++ follows the target's data model and C++ ABI on every target, AVR's
+# two-byte int and pointers included (tests/golden/cxx-embedded.sh runs
+# it on ARM, RV32, RV64, MIPS, Xtensa, TriCore, AVR and the rest), and
+# exceptions are thrown and caught on each of them but LoongArch, which
+# has no unwind tables yet and refuses a throwing unit by name.
 printf 'long f(long x) { return x + (long)sizeof(long); }\n' > "$out_dir/ilp.cpp"
-for t in avr; do
-    if err=$("$EMBCC" --target=$t -fno-exceptions -c "$out_dir/ilp.cpp" \
-             -o "$out_dir/ilp.o" 2>&1); then
-        echo "case cxx-not-lp64 $t: compiled C++ for an unchecked C++ ABI"; exit 1
-    fi
-    echo "$err" | grep -q "C++ is not yet supported for $t" || {
-        echo "case cxx-not-lp64 $t: wrong diagnostic:"; echo "$err"; exit 1; }
-done
-for t in thumbv7em-none-eabi riscv32-unknown-elf mipsel-none-elf \
+for t in avr thumbv7em-none-eabi riscv32-unknown-elf mipsel-none-elf \
          xtensa-none-elf tricore-none-elf; do
-    if err=$("$EMBCC" --target=$t -c "$out_dir/ilp.cpp" \
-             -o "$out_dir/ilp.o" 2>&1); then
-        echo "case cxx-not-lp64 $t: compiled C++ with exceptions"; exit 1
-    fi
-    echo "$err" | grep -q "C++ exceptions are not supported for $t" || {
-        echo "case cxx-not-lp64 $t: wrong diagnostic:"; echo "$err"; exit 1; }
-    "$EMBCC" --target=$t -fno-exceptions -c "$out_dir/ilp.cpp" \
-        -o "$out_dir/ilp.o" || {
-        echo "case cxx-not-lp64 $t: C++ with -fno-exceptions was refused"
-        exit 1; }
+    "$EMBCC" --target=$t -c "$out_dir/ilp.cpp" -o "$out_dir/ilp.o" || {
+        echo "case cxx-targets $t: C++ was refused"; exit 1; }
 done
-"$EMBCC" --target=avr -fsyntax-only "$out_dir/ilp.cpp" || {
-    echo "case cxx-not-lp64: -fsyntax-only, which writes nothing, was refused"
+if err=$("$EMBCC" --target=loongarch64-unknown-elf -c "$out_dir/ilp.cpp" \
+         -o "$out_dir/ilp.o" 2>&1); then
+    echo "case cxx-targets loongarch64: compiled C++ with exceptions"; exit 1
+fi
+echo "$err" | grep -q "C++ exceptions are not supported for loongarch64-unknown-elf" || {
+    echo "case cxx-targets loongarch64: wrong diagnostic:"; echo "$err"; exit 1; }
+"$EMBCC" --target=loongarch64-unknown-elf -fno-exceptions -c "$out_dir/ilp.cpp" \
+    -o "$out_dir/ilp.o" || {
+    echo "case cxx-targets loongarch64: C++ with -fno-exceptions was refused"
     exit 1; }
-echo "case cxx-not-lp64: C++ on AVR, and exceptions on the other 32-bit targets, are refused by name"
+echo "case cxx-targets: C++ on every target, exceptions refused by name on LoongArch only"
 
 # File-scope asm: Apple arm64's blocks are read by the x86-64
 # vocabulary's assembler (src/arch/x86_64/topasm.c), so an instruction in
@@ -461,15 +451,7 @@ check topasm-global-no-label \
     '__asm__(".global ghost\n  ret\n");
 int main(void) { return 0; }' \
     "has no label"
-check va-arg-struct-windows \
-    'typedef char *va_list;
-struct P { int x; int y; };
-int f(int n, ...) { va_list ap; __builtin_va_start(ap, n);
-     struct P p = __builtin_va_arg(ap, struct P); __builtin_va_end(ap);
-     return p.x; }
-int main(void) { return 0; }' \
-    "va_arg of a struct is not supported for a Windows target" \
-    --target=x86_64-windows-gnu
+# (va_arg of a struct on Windows is supported: tests/golden/win-coff-more.sh)
 check static-assert-false \
     '_Static_assert(sizeof(int) == 8, "int is not eight bytes");
 int main(void) { return 0; }' \
@@ -614,14 +596,15 @@ check pack-bad-value \
 struct s { char c; int i; };' \
     "wants 1, 2, 4, 8 or 16"
 
-# C23 constexpr takes an exactly representable integer constant; EmbCC
-# keeps integer ones, and says so for the rest.
+# C23 constexpr wants its initializer's value exactly in its type: an
+# integer that does not fit, and a floating value the type rounds, are
+# refused.
 check constexpr-not-exact \
     'constexpr unsigned char c = 300;' \
     "does not fit"
-check constexpr-floating \
-    'constexpr double d = 1.5;' \
-    "takes integer constants"
+check constexpr-floating-inexact \
+    'constexpr float f = 0.1;' \
+    "is not exactly a float"
 
 # A function in a section of its own is laid out apart from .text, and a
 # data object cannot share a section that holds code. (-g with one is
@@ -665,10 +648,8 @@ check enum-redeclares-function \
     'enum { g = 1 };
 int g(void) { return 0; }' \
     "different kind of symbol"
-check constexpr-shadows-enumerator \
-    'enum { A = 1 };
-int f(void) { constexpr int A = 2; return A; }' \
-    "already a named constant"
+# (a block's constexpr hides a file-scope enumerator of its name, as C
+# says: tests/golden/c23.sh runs it)
 
 # A const object, or one reached through a pointer to const, is not
 # assigned: C11 6.5.16p2 makes each of these a constraint violation.
@@ -702,13 +683,6 @@ check parameter-storage-class 'int f(static int x);' "no storage class but 'regi
 check parameter-storage-class-late 'int f(int extern x);' "no storage class but 'register'"
 check array-static-not-parameter \
     'void f(void) { int a[static 3]; (void)a; }' "expected an expression, got 'static'"
-
-# The COFF writer has no named data sections. A variable with one was
-# put at offset 0 of .data, on top of the first variable there.
-check coff-section-variable \
-    'int a = 1; int b __attribute__((section(".mydata"))) = 2;' \
-    "variable's section attribute is not supported for COFF" \
-    --target=x86_64-windows-gnu
 
 # The frame builtins above level 0 are refused by NAME where the code
 # keeps no frame chain (level 0 works everywhere: tests/exec/

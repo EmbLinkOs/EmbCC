@@ -77,6 +77,7 @@ const char *ir_opname(enum ir_op op)
         [IR_VSPLAT] = "vsplat", [IR_VREDADD] = "vredadd",
         [IR_VWIDEN] = "vwiden", [IR_SELECT] = "select",
         [IR_MULH] = "mulh",     [IR_MULW] = "mulw",
+        [IR_CLZ] = "clz",       [IR_CTZ] = "ctz",       [IR_POPCNT] = "popcnt",
     };
     if ((int)op < 0 || (int)op >= IR_OPCOUNT || !n[op])
         return "op?";
@@ -193,6 +194,7 @@ static void print_ins(struct outbuf *b, const struct ir_unit *u,
         ob_fmt(b, " %%%d, ", i->a); operand_b(b, i);
         break;
     case IR_NEG: case IR_BNOT: case IR_BSWAP: case IR_SQRT:
+    case IR_CLZ: case IR_CTZ: case IR_POPCNT:
         ob_fmt(b, "%%%d = %s", i->dst, ir_opname(i->op)); suffix(b, i, 1);
         ob_fmt(b, " %%%d", i->a);
         break;
@@ -445,6 +447,10 @@ void ir_print_unit(struct outbuf *b, const struct ir_unit *u)
             else if (ch == '\t') ob_str(b, "\\t");
             else if (ch == '"')  ob_str(b, "\\\"");
             else if (ch == '\\') ob_str(b, "\\\\");
+            else if ((unsigned char)ch < 0x20 || ch == 0x7f)
+                /* a NUL or another control byte: the text is lines,
+                 * and the parser stopped at a raw NUL ("PE\0\0") */
+                ob_fmt(b, "\\x%02x", (unsigned char)ch);
             else                 ob_ch(b, ch);
         }
         ob_str(b, "\"\n");

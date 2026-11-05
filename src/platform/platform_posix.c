@@ -105,6 +105,18 @@ int plat_run_on_stack(int (*fn)(int, char **), int argc, char **argv)
     return fn(argc, argv);
 }
 
+const char *plat_cwd(void)
+{
+    static char buf[4096];
+    static int tried;
+    if (!tried) {
+        tried = 1;
+        if (!getcwd(buf, sizeof buf))
+            buf[0] = 0;
+    }
+    return buf[0] ? buf : NULL;
+}
+
 const char *plat_self_path(void)
 {
     static char buf[4096];

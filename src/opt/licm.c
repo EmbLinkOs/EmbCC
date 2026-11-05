@@ -161,6 +161,7 @@ static int lmem_inert(enum ir_op op)
     case IR_ADDR: case IR_STRADDR: case IR_GADDR: case IR_FADDR:
     case IR_EXT: case IR_I2F: case IR_F2I: case IR_F2F: case IR_BITCAST:
     case IR_BSWAP: case IR_SQRT: case IR_SELECT:
+    case IR_CLZ: case IR_CTZ: case IR_POPCNT:
     case IR_LABEL: case IR_JMP: case IR_BRZ: case IR_BRNZ: case IR_RET:
     case IR_UD2: case IR_SWITCH: case IR_LABELADDR:
     case IR_VBIN: case IR_VSPLAT: case IR_VREDADD: case IR_VWIDEN:

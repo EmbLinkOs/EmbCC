@@ -137,15 +137,17 @@ thumbv7em-none-eabi|--isa=arm|-marm| is not supported
 x86_64-elf|--cpu=cortex-m4|-mcpu=cortex-m4| is an ARM option
 thumbv7em-none-eabi|--float-abi=hard|-mfloat-abi=hard| needs an FPU
 thumbv7em-none-eabi|--abi=apcs-gnu|-mabi=apcs-gnu| is not supported
-thumbv7em-none-eabi|--cpu=cortex-m55|-mcpu=cortex-m55| is not a part
-riscv32-unknown-elf|--isa=rv32imafcv|-march=rv32imafcv|: the 'v' extension
+thumbv7em-none-eabi|--cpu=cortex-r5|-mcpu=cortex-r5| is not a part
+riscv32-unknown-elf|--isa=rv32imafcv|-march=rv32imafcv|: V needs F and D
 riscv32-unknown-elf|--abi=ilp32e|-mabi=ilp32e| is not supported
 mipsel-none-elf|--cpu=mips32r6|-mcpu=mips32r6| is not a MIPS32
 mipsel-none-elf|--abi=n32|-mabi=n32| is not supported
 avr|--mcu=atmega8|-mmcu=atmega8| is not supported
 xtensa-none-elf|--abi=call0|-mabi=call0| is not supported
 xtensa-none-elf|--endian=big|-mbig-endian| is not supported
-x86_64-elf|--sanitize=address|-fsanitize=address| is not supported
+x86_64-elf|--sanitize=thread|-fsanitize=thread| is for a hosted target
+thumbv7em-none-eabi|--cf-protection=full|-fcf-protection=full| is x86-64's (CET)
+x86_64-linux-gnu|--branch-protection=bti|-mbranch-protection=bti| is AArch64's and ARMv8.1-M Mainline's here
 LIST
 : > "$out/said-bad.txt"
 while IFS="|" read -r t ours gcc rest; do

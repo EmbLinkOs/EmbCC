@@ -119,8 +119,9 @@ public:
 /* Where a polymorphic object keeps what the runtime needs. The vptr points
  * at the address point; the two words BELOW it are the offset back to the
  * most-derived object and that object's type_info. */
+/* (ptrdiff_t, as a vtable's slots are: a long is twice a pointer on AVR) */
 struct __vtable_prefix {
-    long __offset_to_top;
+    std::ptrdiff_t __offset_to_top;
     const type_info *__type_info;
 };
 

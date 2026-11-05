@@ -22,6 +22,8 @@ enum tok_kind {
     TOK_KW_LONG,
     TOK_KW_INT128,    /* GNU __int128 */
     TOK_KW_FLOAT128,  /* _Float128 / __float128 (IEEE binary128) */
+    TOK_KW_FLOAT64X,  /* _Float64x: long double, where it is wider than double */
+    TOK_KW_DECIMAL32, TOK_KW_DECIMAL64, TOK_KW_DECIMAL128,  /* C23 */
     TOK_KW_FLOAT16,   /* _Float16 (IEEE binary16) */
     TOK_KW_FP16,      /* __fp16: ARM's binary16, promoted to float */
     TOK_KW_BF16,      /* __bf16: bfloat16 */
@@ -198,8 +200,17 @@ struct token {
     int char_lit;  /* TOK_NUM from a character constant; str_prefix holds its
                     * encoding prefix (C++ types 'a' as char, not int) */
     int num_uns;   /* TOK_NUM: type is unsigned (U suffix or hex range) */
+    int num_spell; /* TOK_NUM: as written -- 1 octal (and not 0), 2 a
+                    * lowercase l in its suffix, 4 a u or U suffix
+                    * (MISRA 7.1-7.3, src/sema/rules.c) */
     int num_bitint; /* TOK_NUM with C23's wb suffix: its _BitInt's width */
+    unsigned long long *num_big; /* ...and when that is over 64 bits, the
+                                  * value's limbs, least significant first */
+    int num_nbig;
     double fnum;   /* TOK_FNUM */
+    int fnum_dec;  /* TOK_FNUM with C23's df/dd/dl: the decimal type's bytes,
+                    * and its BID encoding in dec_bits (low half first) */
+    unsigned long long dec_bits[2];
     int fnum_is_float; /* TOK_FNUM: an 'f' suffix -> float, else double */
     int num_is_imag;   /* TOK_NUM: GNU's integer imaginary constant, 2i:
                         * 0 + 2*i, a _Complex int */
@@ -249,6 +260,10 @@ struct lexer {
 /* whether -pedantic is quiet at the current token: __extension__, or a
  * system macro's text */
 int lex_quiet(const struct lexer *lx);
+/* A decimal floating constant's digits (no suffix) in the BID encoding of
+ * the _Decimal type of `bytes` bytes, rounded half to even: the low and
+ * high 64 bits. */
+void lex_decimal_encode(const char *text, int bytes, unsigned long long out[2]);
 
 /* The C standard a unit is read under (-std=): its year -- 1989, 1994,
  * 1999, 2011, 2017, 2023, or 2025 for C2y -- and whether GNU's
@@ -258,6 +273,8 @@ int lex_quiet(const struct lexer *lx);
  * modes (as GCC reads them). */
 void lex_set_c_std(int year, int gnu);
 int lex_c_year(void);
+void lex_set_permissive(int on);
+int lex_permissive(void);
 int lex_c_gnu(void);
 /* -pedantic (or -pedantic-errors): diagnose what the standard -std= names
  * does not have. It also takes away EmbCC's own extension of a GNU

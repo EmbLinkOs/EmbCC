@@ -67,10 +67,12 @@ template <typename... Ts> constexpr int count_args(Ts...) { return sizeof...(Ts)
 template <typename... Ts> constexpr long sum(Ts... xs) { return (0L + ... + xs); }
 
 namespace hw {
-// A register map: base addresses and bit fields, all compile-time.
-template <uintptr_t Base> struct Port {
-    static constexpr uintptr_t base = Base;
-    static constexpr uintptr_t reg(unsigned off) { return Base + off; }
+// A register map: base addresses and bit fields, all compile-time. The
+// addresses are a 32-bit part's, uint32_t on every board (AVR's uintptr_t
+// is 16 bits, and held 0x40020014 as 0x14).
+template <uint32_t Base> struct Port {
+    static constexpr uint32_t base = Base;
+    static constexpr uint32_t reg(unsigned off) { return Base + off; }
 };
 constexpr uint32_t bit(unsigned n) { return 1u << n; }
 constexpr uint32_t mask(unsigned lo, unsigned hi)
@@ -133,7 +135,7 @@ int main()
            count_args(1, 'c', 2.0, "s"), sum(1, 2L, 3, 40));
     printf("traits %s %s %s\n", Traits<int>::name, Traits<char *>::name,
            Traits<double>::name);
-    constexpr uintptr_t moder = hw::GpioA::reg(0x14);
+    constexpr uint32_t moder = hw::GpioA::reg(0x14);
     printf("reg %lx mask %lx\n", (unsigned long)moder,
            (unsigned long)hw::mask(4, 7));
 

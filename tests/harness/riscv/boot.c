@@ -45,6 +45,10 @@ void _start(void)
      * runs, since a constructor may compute in floating point too. */
     __asm__ volatile("csrs mstatus, %0" : : "r"(0x2000u));
 #endif
+#ifdef __riscv_vector
+    /* ...and the vector unit likewise, VS (bits 10:9) = Initial */
+    __asm__ volatile("csrs mstatus, %0" : : "r"(0x200u));
+#endif
     while (d < &__data_end)
         *d++ = *s++;
     for (d = &__bss_start; d < &__bss_end; )

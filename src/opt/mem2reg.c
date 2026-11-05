@@ -98,6 +98,23 @@ static void mem2reg_free(struct bb *bb, int nbb, int **df, int *ndf, int *l2b,
     free(bb); free(df); free(ndf); free(l2b); free(order);
 }
 
+/* -g: temp t holds local L's value (ir_func.vreg_var). The first tag
+ * wins: a temp stored to two variables is the first one's. */
+static void dbg_tag(struct ir_func *fn, int t, int L)
+{
+    if (!target_debug_info() || t < 0)
+        return;
+    if (t >= fn->nvreg_var) {
+        int n = fn->nvregs > t ? fn->nvregs : t + 1;
+        fn->vreg_var = xrealloc(fn->vreg_var, (size_t)n * sizeof *fn->vreg_var);
+        for (int v = fn->nvreg_var; v < n; v++)
+            fn->vreg_var[v] = 0;
+        fn->nvreg_var = n;
+    }
+    if (!fn->vreg_var[t])
+        fn->vreg_var[t] = L + 1;
+}
+
 /* The name a local was written with. irgen records these unconditionally
  * ("harmless when -g is off"), so a remark can name the variable the
  * programmer knows rather than a slot number. */
@@ -370,12 +387,17 @@ int pass_mem2reg(struct ir_func *fn)
     int **stk = xmalloc((size_t)nprom * sizeof *stk);
     int *sp = xcalloc((size_t)nprom, sizeof *sp);
     int *scap = xcalloc((size_t)nprom, sizeof *scap);
+    for (int b = 0; b < nbb; b++)
+        for (int k = 0; k < bb[b].nphi; k++)
+            dbg_tag(fn, bb[b].phi_res[k], bb[b].phi_local[k]);
     for (int p = 0; p < nprom; p++) {
         /* A parameter's entry version is its own vreg -- the prologue
          * put the incoming value there. Everything else starts at a
          * fresh temp defined to zero below, standing for a read of a
          * variable the program never wrote. */
         undef[p] = ploc[p] < nparams ? ploc[p] : fn->nvregs++;
+        if (ploc[p] < nparams)
+            dbg_tag(fn, ploc[p], ploc[p]);
         stk[p] = xmalloc(sizeof(int) * 8); scap[p] = 8;
         stk[p][sp[p]++] = undef[p];
     }
@@ -440,6 +462,7 @@ int pass_mem2reg(struct ir_func *fn)
                     }
                 } else if (in->op == IR_STVAR && in->dst >= 0 && in->dst < nvars && prom[in->dst] >= 0) {
                     int pidx = prom[in->dst];
+                    dbg_tag(fn, in->a, in->dst);  /* (-g: it is the variable now) */
                     if (sp[pidx] == scap[pidx]) { scap[pidx]*=2; stk[pidx]=xrealloc(stk[pidx],(size_t)scap[pidx]*sizeof(int)); }
                     stk[pidx][sp[pidx]++] = in->a;   /* the stored temp is the new version */
                     if (nplog == cplog) { cplog = cplog ? cplog * 2 : 64;
@@ -496,6 +519,15 @@ int pass_mem2reg(struct ir_func *fn)
         struct ir_ins *c = ib_push(&nb);
         c->op = IR_CONST; c->dst = undef[p]; c->imm = 0;
         c->w = fn->locals[ploc[p]].size == 8 ? 8 : 4;
+        /* -fsanitize=memory: the read of the slot itself, which nothing
+         * can fold and whose shadow says it was never written -- a
+         * zero would be a defined value, and the read would go unseen */
+        if (san_runtime() & SAN_MEMORY) {
+            c->op = IR_LDVAR;
+            c->a = ploc[p];
+            c->size = fn->locals[ploc[p]].size;
+            c->sign = 1;
+        }
         /* The seed for a variable read before it is written: it stands for
          * a value the program never produced, so it corresponds to no
          * source construct at all. The §9.1 exception, marked so the

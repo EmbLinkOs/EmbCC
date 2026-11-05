@@ -9,8 +9,27 @@
 #include "../driver/util.h"
 #include "../arch/target.h"
 #include "../sema/ldfloat.h"
+#include "../arch/predef.h"
 
-/* An identifier may hold the characters C11 Annex D lists, written in
+#include "xid.h"
+
+static int in_ranges(const unsigned int (*r)[2], int n, unsigned long c)
+{
+    int lo = 0, hi = n - 1;
+    while (lo <= hi) {
+        int mid = (lo + hi) / 2;
+        if (c < r[mid][0])
+            hi = mid - 1;
+        else if (c > r[mid][1])
+            lo = mid + 1;
+        else
+            return 1;
+    }
+    return 0;
+}
+
+/* An identifier may hold the characters C11 Annex D lists -- in C23, the
+ * Unicode XID_Start and XID_Continue ones (UAX #31, xid.h) -- written in
  * UTF-8 as gcc and clang read them: `int café;`. Returns the length of
  * the UTF-8 sequence at p when it encodes one of them -- and, for an
  * identifier's first character, not one D.2 rules out there (combining
@@ -58,6 +77,13 @@ int lex_ident_utf8(const char *p, int first)
     }
     if ((n == 3 && c < 0x800) || (n == 4 && (c < 0x10000 || c > 0x10FFFF)))
         return 0;
+    if (lex_c_year() >= 2023 && !predef_is_cxx()) {
+        if (first)
+            return in_ranges(xid_start, (int)(sizeof xid_start /
+                                              sizeof xid_start[0]), c) ? n : 0;
+        return in_ranges(xid_continue, (int)(sizeof xid_continue /
+                                             sizeof xid_continue[0]), c) ? n : 0;
+    }
     int ok = 0;
     if (c >= 0x10000)                 /* planes 1-14, less their last two */
         ok = c <= 0xEFFFD && (c & 0xFFFF) <= 0xFFFD;
@@ -167,6 +193,8 @@ static const struct {
     { "co_await", TOK_CX_CO_AWAIT }, { "co_yield", TOK_CX_CO_YIELD },
     { "co_return", TOK_CX_CO_RETURN }, { "export", TOK_CX_EXPORT },
     { "thread_local", TOK_CX_THREAD_LOCAL }, { "register", TOK_CX_REGISTER },
+    /* GNU's spelling, which g++ takes in C++ as thread_local */
+    { "__thread", TOK_CX_THREAD_LOCAL },
     { "static_assert", TOK_KW_STATIC_ASSERT }, { "alignof", TOK_KW_ALIGNOF },
     { "alignas", TOK_KW_ALIGNAS }, { "__restrict", TOK_KW_RESTRICT },
     { "__restrict__", TOK_KW_RESTRICT },
@@ -192,6 +220,11 @@ static const struct {
     { "_Float32", TOK_KW_FLOAT },
     { "_Float64", TOK_KW_DOUBLE },
     { "_Float128", TOK_KW_FLOAT128 },
+    { "_Float32x", TOK_KW_DOUBLE },
+    { "_Float64x", TOK_KW_FLOAT64X },
+    { "_Decimal32", TOK_KW_DECIMAL32 },
+    { "_Decimal64", TOK_KW_DECIMAL64 },
+    { "_Decimal128", TOK_KW_DECIMAL128 },
     { "__float128", TOK_KW_FLOAT128 },
     { "_Float16", TOK_KW_FLOAT16 },
     { "__fp16", TOK_KW_FP16 },
@@ -287,6 +320,11 @@ void lex_set_c_std(int year, int gnu)
     g_c_year = year;
     g_c_gnu = gnu;
 }
+
+/* -fpermissive: C89's implicit int and implicit declarations kept in
+ * every later standard, each warned about, as GCC 14 gives legacy code */
+void lex_set_permissive(int on) { diag_set_permissive(on); }
+int lex_permissive(void) { return diag_permissive(); }
 
 int lex_c_year(void) { return g_c_year; }
 int lex_c_gnu(void) { return g_c_gnu; }
@@ -472,6 +510,23 @@ static struct litch decode_escape(const char **p, const char *file, int line)
     case '?': (*p)++; c.v = '?'; return c;
     case 'x': {
         (*p)++;
+        if (**p == '{') {           /* C2y's (and C++23's) \x{...} */
+            (*p)++;
+            unsigned long v = 0;
+            int d, n = 0, big = 0;
+            while ((d = hex_val((unsigned char)**p)) >= 0) {
+                if (v >> 60)
+                    big = 1;
+                v = v * 16 + (unsigned long)d;
+                (*p)++;
+                n++;
+            }
+            if (!n || **p != '}')
+                diag_fatal(file, line, "\\x{...} needs hex digits and a closing '}'");
+            (*p)++;
+            c.v = big ? ~0UL : v;
+            return c;
+        }
         if (hex_val((unsigned char)**p) < 0)
             diag_fatal(file, line, "\\x used with no following hex digits");
         /* Every digit belongs to the escape, however many: the VALUE is
@@ -494,8 +549,20 @@ static struct litch decode_escape(const char **p, const char *file, int line)
          * code point, which is ENCODED at the literal's width. */
         int want = ch == 'u' ? 4 : 8;
         (*p)++;
-        unsigned long v;
-        if (!hex_digits(p, want, &v))
+        unsigned long v = 0;
+        if (ch == 'u' && **p == '{') {   /* \u{...}: any number of digits */
+            (*p)++;
+            int d, n = 0;
+            while ((d = hex_val((unsigned char)**p)) >= 0 && v <= 0x10FFFF) {
+                v = v * 16 + (unsigned long)d;
+                (*p)++;
+                n++;
+            }
+            if (!n || **p != '}')
+                diag_fatal(file, line, "\\u{...} needs hex digits and a closing '}'");
+            (*p)++;
+            want = 4;
+        } else if (!hex_digits(p, want, &v))
             diag_fatal(file, line, "\\%c needs %d hex digits", ch, want);
         if (v >= 0xD800 && v <= 0xDFFF)
             diag_fatal(file, line, "\\%c%0*lX is not a valid universal character "
@@ -507,6 +574,25 @@ static struct litch decode_escape(const char **p, const char *file, int line)
         c.raw = 0;
         return c;
     }
+    case 'o':                       /* C2y's \o{...}: octal, any length */
+        (*p)++;
+        if (**p == '{') {
+            (*p)++;
+            unsigned long v = 0;
+            int n = 0;
+            while (**p >= '0' && **p <= '7') {
+                v = v * 8 + (unsigned long)(**p - '0');
+                (*p)++;
+                n++;
+            }
+            if (!n || **p != '}')
+                diag_fatal(file, line, "\\o{...} needs octal digits and a closing '}'");
+            (*p)++;
+            c.v = v;
+            return c;
+        }
+        diag_fatal(file, line, "unknown escape '\\o' in a literal");
+        return c;
     default:
         if (ch >= '0' && ch <= '7') {     /* octal, at most three digits */
             unsigned long v = 0;
@@ -712,6 +798,40 @@ long lit_char_value(struct litch c, int pfx, int *uns, const char *file,
 /* C23's wb and uwb suffixes after an integer constant's digits, at *pp:
  * the constant is a _BitInt of the fewest bits that hold v (and its sign
  * bit, when signed). 1 when there was one, *pp past it. */
+/* The digits at p (radix 2, 8, 10 or 16, after its prefix), as limbs:
+ * how many limbs it took, 0 when it fits 64 bits. */
+static int big_digits(const char *p, const char *end, int radix,
+                      unsigned long long **out)
+{
+    int cap = 1024, n = 1;
+    unsigned long long *l = xcalloc((size_t)cap, sizeof *l);
+    for (; p < end; p++) {
+        int d = *p >= '0' && *p <= '9' ? *p - '0'
+              : *p >= 'a' && *p <= 'f' ? *p - 'a' + 10
+              : *p >= 'A' && *p <= 'F' ? *p - 'A' + 10 : -1;
+        if (d < 0 || d >= radix)
+            continue;                    /* a digit separator */
+        unsigned long long carry = (unsigned long long)d;
+        for (int i = 0; i < n; i++) {
+            /* l[i] * radix + carry, by 32-bit halves */
+            unsigned long long lo = (l[i] & 0xffffffffULL) * (unsigned long long)radix + carry;
+            unsigned long long hi = (l[i] >> 32) * (unsigned long long)radix + (lo >> 32);
+            l[i] = (hi << 32) | (lo & 0xffffffffULL);
+            carry = hi >> 32;
+        }
+        if (carry && n < cap)
+            l[n++] = carry;
+    }
+    while (n > 1 && !l[n - 1])
+        n--;
+    if (n == 1) {
+        free(l);
+        return 0;
+    }
+    *out = l;
+    return n;
+}
+
 static int bitint_suffix(struct lexer *lx, struct token *t, const char **pp,
                          unsigned long v, int has_u, int has_l)
 {
@@ -726,13 +846,47 @@ static int bitint_suffix(struct lexer *lx, struct token *t, const char **pp,
     if (has_l)
         diag_fatal(lx->file, lx->line, "a constant cannot be both long and "
                    "a _BitInt (wb)");
+    /* the digits again, as limbs, when they do not fit 64 bits */
+    t->num_big = NULL;
+    t->num_nbig = 0;
+    {
+        const char *d = lx->p;          /* the constant's first character */
+        if (d) {
+            int radix = 10;
+            if (d[0] == '0' && (d[1] == 'x' || d[1] == 'X'))
+                radix = 16, d += 2;
+            else if (d[0] == '0' && (d[1] == 'b' || d[1] == 'B'))
+                radix = 2, d += 2;
+            else if (d[0] == '0' && (d[1] == 'o' || d[1] == 'O'))
+                radix = 8, d += 2;
+            else if (d[0] == '0')
+                radix = 8;
+            const char *e = d;
+            while (isxdigit((unsigned char)*e) || *e == '\'')
+                e++;
+            if (radix == 10 || radix == 8)  /* no hex letters in these */
+                for (e = d; isdigit((unsigned char)*e) || *e == '\''; e++)
+                    ;
+            t->num_nbig = big_digits(d, e, radix, &t->num_big);
+        }
+    }
     int n = 0;
-    while (n < 64 && (v >> n))
-        n++;
+    if (t->num_nbig) {
+        unsigned long long top = t->num_big[t->num_nbig - 1];
+        n = 64 * (t->num_nbig - 1);
+        while (top) {
+            n++;
+            top >>= 1;
+        }
+        v = (unsigned long)t->num_big[0];
+    } else {
+        while (n < 64 && (v >> n))
+            n++;
+    }
     n = has_u ? (n ? n : 1) : n + 1 < 2 ? 2 : n + 1;
-    if (n > 64)
+    if (n > 65535)
         diag_fatal(lx->file, lx->line, "this constant needs a _BitInt(%d), "
-                   "wider than BITINT_MAXWIDTH, which is 64 here", n);
+                   "wider than BITINT_MAXWIDTH, which is 65535 here", n);
     lex_pedantic(lx->file, t->line, t->col, lex_quiet(lx), 2023,
                  "a _BitInt constant (wb)");
     t->kind = TOK_NUM;
@@ -958,6 +1112,12 @@ static int cxx_number(struct lexer *lx, struct token *t)
         int has_u = 0, has_l = 0;
         t->num_llong = 0;
         t->char_lit = 0;
+        t->num_spell = digits[0] == '0' && digits[1] >= '0' &&
+                       digits[1] <= '9' && v ? 1 : 0;
+        for (const char *s = suf; !ud && *s; s++) {
+            if (*s == 'l') t->num_spell |= 2;
+            if (*s == 'u' || *s == 'U') t->num_spell |= 4;
+        }
         if (!ud)
             for (const char *s = suf; *s; s++) {
                 if (*s == 'u' || *s == 'U')
@@ -1147,9 +1307,11 @@ static void lex_raw(struct lexer *lx)
         }
         if (adv) {
             lx->p += adv;
-            /* a u8 string is plain char in C, a u8 character unsigned
-             * char (C23); C++20 makes both char8_t. Marked '8'. */
-            pfx = adv == 1 ? q[0] : lx->cxx || q[2] == '\'' ? '8' : 0;
+            /* a u8 string is plain char in C17, and char8_t -- unsigned
+             * char -- in C23, as a u8 character is; C++20 makes both
+             * char8_t. Marked '8'. */
+            pfx = adv == 1 ? q[0]
+                : lx->cxx || q[2] == '\'' || lex_c_year() >= 2023 ? '8' : 0;
             if (*lx->p == '"') {
                 t->str_width = w;
                 t->str_prefix = (char)pfx;
@@ -1191,6 +1353,12 @@ static void lex_raw(struct lexer *lx)
         int has_u = 0, has_l = 0;
         t->num_llong = 0;
         t->char_lit = 0;
+        t->num_spell = 0;
+        for (const char *s = q; *s == 'u' || *s == 'U' || *s == 'l' ||
+                                *s == 'L'; s++) {
+            if (*s == 'l') t->num_spell |= 2;
+            if (*s == 'u' || *s == 'U') t->num_spell |= 4;
+        }
         while (*q == 'u' || *q == 'U' || *q == 'l' || *q == 'L') {
             if (*q == 'u' || *q == 'U')
                 has_u = 1;
@@ -1255,8 +1423,18 @@ static void lex_raw(struct lexer *lx)
             t->fnum_is_imag = 0;
             /* suffixes: at most one of f/l/f16, and a GNU imaginary i/j on
              * either side of it (1.0fi, 1.0if, 2.5i) */
+            t->fnum_dec = 0;
             for (;;) {
-                if ((*fend == 'i' || *fend == 'I' || *fend == 'j' ||
+                if (((fend[0] == 'd' || fend[0] == 'D') &&
+                     (fend[1] == 'f' || fend[1] == 'F' || fend[1] == 'd' ||
+                      fend[1] == 'D' || fend[1] == 'l' || fend[1] == 'L')) &&
+                    !t->fnum_is_float && !t->fnum_is_ld && !t->fnum_is_f16 &&
+                    !t->fnum_dec) {
+                    /* C23's df, dd and dl: _Decimal32, 64, 128 */
+                    int c = fend[1] | 32;
+                    t->fnum_dec = c == 'f' ? 4 : c == 'd' ? 8 : 16;
+                    fend += 1;
+                } else if ((*fend == 'i' || *fend == 'I' || *fend == 'j' ||
                      *fend == 'J') && !t->fnum_is_imag) {
                     t->fnum_is_imag = 1;
                 } else if ((*fend == 'f' || *fend == 'F') && fend[1] == '1' &&
@@ -1264,6 +1442,20 @@ static void lex_raw(struct lexer *lx)
                            !t->fnum_is_ld && !t->fnum_is_f16) {
                     t->fnum_is_f16 = 1;
                     fend += 2;
+                } else if ((*fend == 'f' || *fend == 'F') &&
+                           ((fend[1] == '3' && fend[2] == '2') ||
+                            (fend[1] == '6' && fend[2] == '4') ||
+                            (fend[1] == '1' && fend[2] == '2' && fend[3] == '8')) &&
+                           !t->fnum_is_float && !t->fnum_is_ld && !t->fnum_is_f16) {
+                    /* C23's f32 (float), f64 and f32x (double), f64x and
+                     * f128 (long double, where it is that wide) */
+                    int n128 = fend[1] == '1';
+                    int x = !n128 && (fend[3] == 'x' || fend[3] == 'X');
+                    if (fend[1] == '3' && !x)
+                        t->fnum_is_float = 1;
+                    else if (n128 || (fend[1] == '6' && x))
+                        t->fnum_is_ld = 1;
+                    fend += n128 ? 3 : 2 + x;
                 } else if (((fend[0] == 'b' && fend[1] == 'f') ||
                             (fend[0] == 'B' && fend[1] == 'F')) &&
                            fend[2] == '1' && fend[3] == '6' &&
@@ -1286,6 +1478,12 @@ static void lex_raw(struct lexer *lx)
             }
             t->text = xstrndup(lx->p, (size_t)(numend - lx->p));
             t->fnum = lit_value(t->text, t->fnum_is_float);
+            if (t->fnum_dec) {
+                if (t->text[0] == '0' && (t->text[1] == 'x' || t->text[1] == 'X'))
+                    diag_fatal(lx->file, lx->line, "a decimal floating constant "
+                               "cannot be hexadecimal");
+                lex_decimal_encode(t->text, t->fnum_dec, t->dec_bits);
+            }
             if (isalnum((unsigned char)*fend) || *fend == '.')
                 diag_fatal(lx->file, lx->line,
                            "malformed floating constant");
@@ -1303,6 +1501,14 @@ static void lex_raw(struct lexer *lx)
         t->num_llong = 0;
         t->char_lit = 0;
         t->num_is_imag = 0;
+        t->num_spell = lx->p[0] == '0' && lx->p[1] >= '0' && lx->p[1] <= '9'
+                       && v ? 1 : 0;
+        for (const char *s = end; *s == 'u' || *s == 'U' || *s == 'l' ||
+                                  *s == 'L' || *s == 'i' || *s == 'I' ||
+                                  *s == 'j' || *s == 'J'; s++) {
+            if (*s == 'l') t->num_spell |= 2;
+            if (*s == 'u' || *s == 'U') t->num_spell |= 4;
+        }
         while (*end == 'u' || *end == 'U' || *end == 'l' || *end == 'L' ||
                (!t->num_is_imag && (*end == 'i' || *end == 'I' ||
                                     *end == 'j' || *end == 'J'))) {
@@ -1419,6 +1625,7 @@ static void lex_raw(struct lexer *lx)
     case '?': t->kind = TOK_QUESTION; break;
     case ':':
         if (lx->cxx && lx->p[1] == ':') { t->kind = TOK_COLONCOLON; lx->p++; }
+        else if (lx->p[1] == '>') { t->kind = TOK_RBRACKET; lx->p++; }
         else t->kind = TOK_COLON;
         break;
     case '+':
@@ -1445,6 +1652,7 @@ static void lex_raw(struct lexer *lx)
         break;
     case '%':
         if (lx->p[1] == '=') { t->kind = TOK_PERCENTEQ; lx->p++; }
+        else if (lx->p[1] == '>') { t->kind = TOK_RBRACE; lx->p++; }
         else t->kind = TOK_PERCENT;
         break;
     case '^':
@@ -1470,7 +1678,16 @@ static void lex_raw(struct lexer *lx)
         else t->kind = TOK_PIPE;
         break;
     case '<':
-        if (lx->p[1] == '<' && lx->p[2] == '=') {
+        /* <: and <%; in C++ `<::` is < :: unless a : or > follows it
+         * (C++11 [lex.pptoken]), so std::vector<::T> still parses */
+        if (lx->p[1] == ':' &&
+            !(lx->cxx && lx->p[2] == ':' && lx->p[3] != ':' && lx->p[3] != '>')) {
+            t->kind = TOK_LBRACKET;
+            lx->p++;
+        } else if (lx->p[1] == '%') {
+            t->kind = TOK_LBRACE;
+            lx->p++;
+        } else if (lx->p[1] == '<' && lx->p[2] == '=') {
             t->kind = TOK_SHLEQ;
             lx->p += 2;
         } else if (lx->p[1] == '<') {
@@ -1742,4 +1959,149 @@ const char *tok_describe(const struct token *t)
         return buf;
     }
     return "?";
+}
+
+/* ---- decimal floating constants ---------------------------------------- */
+
+/* The BID encoding of the constant whose digits are text: its digits and
+ * exponent read exactly, then the first p significant ones kept, rounded
+ * half to even by the rest -- the quantum written (1.50dd keeps its two
+ * places), as GCC keeps it -- and fitted to the exponent range, past
+ * which it is an infinity or underflows. */
+void lex_decimal_encode(const char *text, int bytes, unsigned long long out[2])
+{
+    int p = bytes == 4 ? 7 : bytes == 8 ? 16 : 34;
+    int qmin = bytes == 4 ? -101 : bytes == 8 ? -398 : -6176;
+    int qmax = bytes == 4 ? 90 : bytes == 8 ? 369 : 6111;
+    int bias = -qmin;
+    char dig[128];
+    int nd = 0, dropped = 0, after = 0, seen_dot = 0, sticky = 0, rnd = -1;
+    long ex = 0;
+    const char *q = text;
+    for (; *q && *q != 'e' && *q != 'E'; q++) {
+        if (*q == '.') {
+            seen_dot = 1;
+            continue;
+        }
+        if (*q < '0' || *q > '9')
+            continue;                       /* a digit separator */
+        if (seen_dot)
+            after++;
+        if (nd == 0 && *q == '0')
+            continue;                       /* a leading zero */
+        if (nd < p)
+            dig[nd++] = *q;
+        else {
+            if (rnd < 0)
+                rnd = *q - '0';
+            else if (*q != '0')
+                sticky = 1;
+            dropped++;
+        }
+    }
+    if (*q == 'e' || *q == 'E')
+        ex = strtol(q + 1, NULL, 10);
+    long e = ex - after + dropped;
+    /* the coefficient, as two halves */
+    unsigned long long lo = 0, hi = 0;
+    for (int i = 0; i < nd; i++) {
+        /* (hi:lo) * 10 + d */
+        unsigned long long d = (unsigned long long)(dig[i] - '0');
+        unsigned long long l0 = (lo & 0xffffffffULL) * 10 + d;
+        unsigned long long l1 = (lo >> 32) * 10 + (l0 >> 32);
+        lo = (l1 << 32) | (l0 & 0xffffffffULL);
+        hi = hi * 10 + (l1 >> 32);
+    }
+    int ndig = nd;
+    /* below the smallest exponent: more digits go */
+    while (e < qmin && (lo || hi)) {
+        /* (hi:lo) / 10, the remainder the next round digit */
+        unsigned long long r = hi % 10;
+        hi /= 10;
+        unsigned long long x = (r << 32) | (lo >> 32);
+        unsigned long long qh = x / 10;
+        r = x % 10;
+        x = (r << 32) | (lo & 0xffffffffULL);
+        unsigned long long ql = x / 10;
+        r = x % 10;
+        lo = (qh << 32) | ql;
+        if (rnd > 0 || sticky)
+            sticky = 1;
+        if (rnd >= 0 && rnd != 0)
+            sticky = 1;
+        rnd = (int)r;
+        e++;
+        ndig--;
+    }
+    if (e < qmin)
+        e = qmin;
+    if (rnd > 5 || (rnd == 5 && (sticky || (lo & 1)))) {
+        /* + 1 */
+        lo++;
+        if (!lo)
+            hi++;
+        /* 10^p: one digit fewer, one more in the exponent */
+        int ten = 1;
+        unsigned long long tl = 1, th = 0;
+        for (int i = 0; i < p && ten; i++) {
+            unsigned long long l0 = (tl & 0xffffffffULL) * 10;
+            unsigned long long l1 = (tl >> 32) * 10 + (l0 >> 32);
+            tl = (l1 << 32) | (l0 & 0xffffffffULL);
+            th = th * 10 + (l1 >> 32);
+        }
+        if (tl == lo && th == hi) {
+            unsigned long long r = hi % 10;
+            hi /= 10;
+            unsigned long long x = (r << 32) | (lo >> 32);
+            unsigned long long qh = x / 10;
+            r = x % 10;
+            x = (r << 32) | (lo & 0xffffffffULL);
+            lo = (qh << 32) | (x / 10);
+            e++;
+        }
+    }
+    (void)ndig;
+    /* past the largest exponent: zeros padded on while they fit */
+    while (e > qmax && (lo || hi)) {
+        int digits = 0;
+        unsigned long long tl = lo, th = hi;
+        while (tl || th) {
+            unsigned long long r = th % 10;
+            th /= 10;
+            unsigned long long x = (r << 32) | (tl >> 32);
+            unsigned long long qh = x / 10;
+            r = x % 10;
+            x = (r << 32) | (tl & 0xffffffffULL);
+            tl = (qh << 32) | (x / 10);
+            digits++;
+        }
+        if (digits >= p)
+            break;
+        unsigned long long l0 = (lo & 0xffffffffULL) * 10;
+        unsigned long long l1 = (lo >> 32) * 10 + (l0 >> 32);
+        lo = (l1 << 32) | (l0 & 0xffffffffULL);
+        hi = hi * 10 + (l1 >> 32);
+        e--;
+    }
+    if (!lo && !hi && e > qmax)
+        e = qmax;
+    out[0] = out[1] = 0;
+    if (e > qmax) {                          /* an infinity */
+        if (bytes == 16)
+            out[1] = 0x1eULL << 58;
+        else
+            out[0] = 0x1eULL << (8 * bytes - 6);
+        return;
+    }
+    unsigned long long be = (unsigned long long)(e + bias);
+    if (bytes == 16) {
+        out[0] = lo;
+        out[1] = be << 49 | hi;
+        return;
+    }
+    int t = bytes == 4 ? 23 : 53, w = 8 * bytes;
+    if (lo >> t)
+        out[0] = 3ULL << (w - 3) | be << (t - 2) | (lo & ((1ULL << (t - 2)) - 1));
+    else
+        out[0] = be << t | lo;
 }

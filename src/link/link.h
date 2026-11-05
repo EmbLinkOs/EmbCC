@@ -100,6 +100,12 @@ struct link_opts {
      * also writes the import library a Non-secure image links against. */
     int cmse_implib;
     const char *out_implib;
+    /* -pie (also -static-pie): a position-independent executable, ET_DYN
+     * linked at 0x400000 and loadable anywhere. Every absolute pointer
+     * in it becomes an R_X86_64_RELATIVE in .rela.dyn, which PT_DYNAMIC
+     * names and the program's start code applies (lib/libc/os/linux/
+     * tls.c); a GOT load is relaxed to the address it reads. x86-64. */
+    int pie;
 };
 
 /* Links inputs[0..n) into an ET_EXEC at `out`. Inputs are object files

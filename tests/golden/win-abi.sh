@@ -183,40 +183,22 @@ echo "aggregates: eight bytes by value in the slot, other sizes by
 reference with a caller-made copy, and a memory return takes rcx with
 every real argument shifted one slot along"
 
-# ---- 5. what is refused rather than passed the System V way --------------
+# ---- 5. long double and __int128, MinGW's way -----------------------------
 #
-# Each of these has a Microsoft x64 answer EmbCC does not implement, and
-# the System V answer is not it. Refusing names the thing; passing it
-# would link and misbehave at the first call.
-refuses() {                       # refuses SOURCE EXPECTED
-    printf '%s\n' "$1" > "$out/r.c"
-    if "$EMBCC" --target=x86_64-windows-gnu -c "$out/r.c" -o /dev/null \
-           2> "$out/r.log"; then
-        echo "FAIL: accepted something it cannot pass correctly:"
-        echo "      $1"; exit 1
-    fi
-    grep -q "$2" "$out/r.log" || {
-        echo "FAIL: the refusal does not say what is wrong:"
-        cat "$out/r.log"; exit 1; }
-}
-#    __int128's arithmetic becomes libgcc helper calls whose arguments
-#    this backend places in System V's registers; on Windows those
-#    helpers take Microsoft's, so the CALL is wrong before the type is.
-refuses 'int t(__int128); int g(__int128 v){ return t(v); }' \
-        'libgcc helpers'
-#    long double is sixteen bytes on MinGW and travels by reference,
-#    returned through a hidden pointer like a large aggregate -- not on
-#    the stack by value, which is what EmbCC does.
-refuses 'int t(long double); int g(long double v){ return t(v); }' \
-        'travels by reference'
-#    ...and on the SIGNATURE, not only at a call: a function needs the
-#    convention its caller will use whether or not it contains a call.
-#    Checking call sites alone left this compiling silently.
-refuses 'long double g(long double x){ return x + 1.0L; }' \
-        'in the signature'
-refuses '__int128 h(__int128 a){ return a + 1; }' \
-        'in the signature'
-echo "the two types whose Windows answer is not a variation on System
-V's are refused -- at a call and in a signature -- each naming the
-reason that is actually true of it"
+# Both are sixteen bytes and travel by reference -- the caller's copy,
+# its address in the slot register -- at a call and in a signature (a
+# function needs the convention its caller uses whether or not it calls
+# anything). tests/golden/win-abi-run.sh runs them against MinGW's GCC.
+cat > "$out/wide.c" <<'WIDE'
+int t(long double);
+int g(long double v) { return t(v); }
+int t2(__int128);
+int g2(__int128 v) { return t2(v); }
+long double h(long double x) { return x + 1.0L; }
+__int128 h2(__int128 a) { return a + 1; }
+WIDE
+embcc_asm "$out/wide.c"
+want g 'lea .*%rcx' 'pass a long double by reference in rcx'
+want g2 'lea .*%rcx' 'pass an __int128 by reference in rcx'
+echo "long double and __int128: by reference, at a call and in a signature"
 

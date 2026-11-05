@@ -6218,6 +6218,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
         if (F.loc && fn->nvregs && fn->nins)
             a_homed_map(&F, &hl_off, &hl_v);
         F.zv = -1;
+        ra_debug_pc_begin(fn);
         for (i = 0; i < fn->nins; i++) {
             long at = t->len;
             int first = i;
@@ -6225,6 +6226,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
             if (target_debug_info())
                 a_line_row(fn, t->len, fn->ins[i].line);
             F.tdepth = 0;
+            if (fn->ins_pc)
+                fn->ins_pc[i] = t->len;
             gen_ins(&F, i);
             if (F.skip_next) {          /* the compare emitted its branch,
                                          * or sbi/cbi its or and store */
@@ -6322,6 +6325,27 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
             f->stack_bytes += (int)((g_isr_save >> r) & 1);
     }
     f->code_len = t->len - f->code_off;
+    if (fn->ins_pc) {
+        /* -g: r0-r31 are DWARF 0-31, a value's bytes in hw[v] registers
+         * from loc[v] up, low byte first; a slot is Y-relative, as the
+         * frame base is */
+        fn->ins_pc[fn->nins] = t->len;
+        struct ir_vhome *h = xcalloc((size_t)(fn->nvregs ? fn->nvregs : 1),
+                                     sizeof *h);
+        for (int v = 0; v < fn->nvregs; v++) {
+            if (F.loc && F.loc[v] >= 0 && F.hw && F.hw[v]) {
+                h[v].kind = IR_LOC_REGRUN;
+                h[v].val = F.loc[v];
+                h[v].val2 = F.hw[v];
+                h[v].piece = 1;
+            } else if (F.slot && F.slot[v] >= 0) {
+                h[v].kind = IR_LOC_FB;
+                h[v].val = (int)F.slot[v];
+            }
+        }
+        ra_debug_locs(fn, h);
+        free(h);
+    }
     if (F.rx) {
         struct avr_relax *rx = F.rx;
         if (F.njs > rx->cap) {

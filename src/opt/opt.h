@@ -62,4 +62,12 @@ int opt_pass_names(const char *const **names);
 struct outbuf;
 void opt_cfg_dump(struct outbuf *b, struct ir_func *fn);
 
+/* --stack-info's timing half (src/opt/wcet.c): fn's worst-case cycles
+ * from its code [code_lo, code_hi) (fn->ins_pc filled by its backend), or
+ * 0xffffffff with the line of a loop it found no bound for; mult[n] for
+ * each instruction, how often it can run per call. -1 without ins_pc. */
+int wcet_func(struct ir_func *fn, const unsigned char *code, int code_lo,
+              int code_hi, unsigned long *cycles, int *unbounded_line,
+              unsigned long *mult);
+
 #endif

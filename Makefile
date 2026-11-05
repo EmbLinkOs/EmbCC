@@ -141,6 +141,8 @@ endif
 # aarch64/ (src/arch/README.md; docs/manual/targets.md for what each supports).
 # The optimizer: the pass manager (opt.c) and one file per pass.
 OPT_SRCS := src/opt/opt.c \
+	src/opt/coldsink.c \
+	src/opt/wcet.c \
 	src/opt/alias.c \
 	src/opt/attrs.c \
 	src/opt/cfg.c \
@@ -192,6 +194,7 @@ FAMILY_SRCS_x86 := \
 	src/arch/x86_64/emit.c \
 	src/arch/x86_64/topasm.c \
 	src/arch/x86_64/as.c \
+	src/arch/x86_64/att.c \
 	src/arch/x86_64/disasm.c \
 	src/arch/x86_64/predef.c \
 	src/arch/x86_64/predef_cxx.c
@@ -326,6 +329,8 @@ SRCS := \
 	src/driver/iface.c \
 	src/driver/explain.c \
 	src/driver/options.c \
+	src/driver/stackinfo.c \
+	src/driver/sbom.c \
 	src/driver/paths.c \
 	src/link/link.c \
 	src/as/gas.c \
@@ -355,9 +360,13 @@ SRCS := \
 	src/sema/w128.c \
 	src/sema/uninit.c \
 	src/sema/format.c \
+	src/sema/rules.c \
+	src/sema/analyze.c \
 	src/ir/irgen.c \
 	src/ir/irprint.c \
 	src/ir/irparse.c \
+	src/ir/gcov.c \
+	src/ir/sanitize.c \
 	$(OPT_SRCS) \
 	src/debug/dwarf.c \
 	src/debug/eh.c \
@@ -541,7 +550,7 @@ reference: embcc
 
 # embsim -- a simulator (Cortex-M, RISC-V, AVR): runs an image on a model of the board
 # QEMU models, counting instructions and estimating cycles with the
-# table tools/bench uses (tools/bench/cost.h). ISO C and libm; the
+# table tools/bench uses (src/arch/cost.h). ISO C and libm; the
 # modules are tools/embsim/sim.h's (docs/internals/embsim.md). The GDB
 # server's connection is net-posix.c; net-none.c builds it without one.
 EMBSIM_NET ?= tools/embsim/net-posix.c
@@ -592,7 +601,7 @@ EMBSIM_SRCS := tools/embsim/main.c tools/embsim/run.c tools/embsim/bus.c \
                $(EMBSIM_NET)
 EMBSIM_HDRS := tools/embsim/sim.h tools/embsim/cortexm.h tools/embsim/riscv.h \
                tools/embsim/avr.h \
-               tools/embsim/devices.h tools/embsim/net.h tools/bench/cost.h \
+               tools/embsim/devices.h tools/embsim/net.h src/arch/cost.h \
                tools/embsim/svd-map.h tools/embsvd/svd.h \
                tools/embsim/image.h tools/embsim/analysis.h \
                tools/embsim/disasm.h tools/embsim/mips.h tools/embsim/pic32.h \
@@ -652,7 +661,7 @@ embld: tools/embld/embld.c tools/embld/doctor.c src/link/link.c \
 # process where it cannot continue and a server must not.
 EMBLS_SRCS = tools/embls/embls.c $(PLATFORM_SRCS) src/cpp/cpp.c src/lex/lex.c \
              src/parse/parse.c src/sema/type.c src/sema/ldfloat.c \
-             src/sema/w128.c src/sema/uninit.c src/sema/format.c \
+             src/sema/w128.c src/sema/uninit.c src/sema/format.c src/sema/rules.c src/sema/analyze.c \
              src/driver/util.c src/driver/diag.c src/driver/remark.c \
              src/driver/inspect.c src/driver/asmout.c src/driver/iface.c \
              src/driver/explain.c \
@@ -680,12 +689,14 @@ EMBLS_SRCS = tools/embls/embls.c $(PLATFORM_SRCS) src/cpp/cpp.c src/lex/lex.c \
              src/arch/thumbv8mbase/predef.c src/arch/thumbv8mbase/predef_cxx.c \
              src/arch/armv7a/predef.c src/arch/armv7a/predef_cxx.c \
              $(filter src/cxx/%,$(SRCS)) src/sema/sema.c src/ir/irgen.c \
-             src/ir/irprint.c src/ir/irparse.c \
+             src/ir/irprint.c src/ir/irparse.c src/ir/gcov.c src/ir/sanitize.c \
              $(OPT_SRCS) src/debug/dwarf.c src/debug/eh.c src/elf/write.c \
+             src/as/gas.c \
              src/arch/code.c src/arch/regalloc.c src/arch/common.c \
              src/arch/x86_64/irgen.c src/arch/x86_64/codegen.c \
              src/arch/x86_64/emit.c src/arch/x86_64/topasm.c \
-             src/arch/x86_64/as.c src/arch/x86_64/disasm.c src/arch/aarch64/irgen.c \
+             src/arch/x86_64/as.c src/arch/x86_64/att.c src/arch/x86_64/disasm.c \
+             src/arch/aarch64/irgen.c \
              src/arch/aarch64/codegen.c src/arch/aarch64/emit.c \
              src/arch/aarch64/asm.c src/arch/thumb/irgen.c src/arch/thumb/asm.c \
              src/arch/thumb/emit.c src/arch/thumb/a32.c src/arch/thumb/attrs.c \
@@ -893,6 +904,9 @@ libc-emblinkos: embcc embar
 	done
 	@rm -f $(ELOS_LIBC)/librt.a
 	@$${EMBCC_X86_AR:-./embar} rcs $(ELOS_LIBC)/librt.a $(ELOS_LIBC)/rt_*.o.x
+	@$(ELOS_CC) -c -O2 lib/gcov/gcov.c -o $(ELOS_LIBC)/gcov.o.x
+	@rm -f $(ELOS_LIBC)/libgcov.a
+	@$${EMBCC_X86_AR:-./embar} rcs $(ELOS_LIBC)/libgcov.a $(ELOS_LIBC)/gcov.o.x
 	@echo "libc: $(ELOS_LIBC)/libc.a (+ an empty libm.a, and librt.a)"
 
 # C++ on EmbLinkOS: lib/libcxx over this C library, compiled by EmbCC.
@@ -939,43 +953,67 @@ libc-linux-x86_64: embcc embar
 	@mkdir -p $(BUILD)/libc/linux-x86_64
 	@for f in $(LIBC_SRCS_LINUX); do \
 	    o=$(BUILD)/libc/linux-x86_64/$$(echo $$f | tr / _ | sed 's/\.c$$/.o/'); \
-	    ./embcc --target=x86_64-linux-gnu -c -O1 $(LIBC_INC) $$f -o $$o || exit 1; \
+	    ./embcc --target=x86_64-linux-gnu -c -O1 -fPIE $(LIBC_INC) $$f -o $$o || exit 1; \
 	done
 	@rm -f $(BUILD)/libc/linux-x86_64/libc.a
 	@$${EMBCC_X86_AR:-./embar} rcs $(BUILD)/libc/linux-x86_64/libc.a \
 	    $(BUILD)/libc/linux-x86_64/*.o
-	@./embcc --target=x86_64-linux-gnu -c -O1 $(LIBC_INC) \
+	@./embcc --target=x86_64-linux-gnu -c -O1 -fPIE $(LIBC_INC) \
 	    lib/libc/os/linux/start.c -o $(BUILD)/libc/linux-x86_64/crt1.o
 	@rm -rf $(BUILD)/libc/linux-x86_64/rt && mkdir -p $(BUILD)/libc/linux-x86_64/rt
 	@for f in $(RT_SRCS); do \
 	    o=$(BUILD)/libc/linux-x86_64/rt/$$(basename $$f .c).o; \
-	    ./embcc --target=x86_64-linux-gnu -c -O1 $$f -o $$o || exit 1; \
+	    ./embcc --target=x86_64-linux-gnu -c -O1 -fPIE $$f -o $$o || exit 1; \
 	done
 	@rm -f $(BUILD)/libc/linux-x86_64/librt.a
 	@$${EMBCC_X86_AR:-./embar} rcs $(BUILD)/libc/linux-x86_64/librt.a \
 	    $(BUILD)/libc/linux-x86_64/rt/*.o
-	@echo "libc: $(BUILD)/libc/linux-x86_64/libc.a + librt.a + crt1.o"
+	@./embcc --target=x86_64-linux-gnu -c -O1 -fPIE lib/gcov/gcov.c \
+	    -o $(BUILD)/libc/linux-x86_64/rt/gcov.o.x
+	@rm -f $(BUILD)/libc/linux-x86_64/libgcov.a
+	@$${EMBCC_X86_AR:-./embar} rcs $(BUILD)/libc/linux-x86_64/libgcov.a \
+	    $(BUILD)/libc/linux-x86_64/rt/gcov.o.x
+	@for s in asan tsan msan; do \
+	    ./embcc --target=x86_64-linux-gnu -c -O1 -fPIE lib/san/$$s.c \
+	        -o $(BUILD)/libc/linux-x86_64/rt/$$s.o.x || exit 1; \
+	    rm -f $(BUILD)/libc/linux-x86_64/lib$$s.a; \
+	    $${EMBCC_X86_AR:-./embar} rcs $(BUILD)/libc/linux-x86_64/lib$$s.a \
+	        $(BUILD)/libc/linux-x86_64/rt/$$s.o.x || exit 1; \
+	done
+	@echo "libc: $(BUILD)/libc/linux-x86_64/libc.a + librt.a + libgcov.a + lib{a,t,m}san.a + crt1.o"
 
 libc-linux-aarch64: embcc embar
 	@mkdir -p $(BUILD)/libc/linux-aarch64
 	@for f in $(LIBC_SRCS_LINUX); do \
 	    o=$(BUILD)/libc/linux-aarch64/$$(echo $$f | tr / _ | sed 's/\.c$$/.o/'); \
-	    ./embcc --target=aarch64-linux-gnu -c -O1 $(LIBC_INC) $$f -o $$o || exit 1; \
+	    ./embcc --target=aarch64-linux-gnu -c -O1 -fPIE $(LIBC_INC) $$f -o $$o || exit 1; \
 	done
 	@rm -f $(BUILD)/libc/linux-aarch64/libc.a
 	@$${EMBCC_AARCH64_AR:-./embar} rcs \
 	    $(BUILD)/libc/linux-aarch64/libc.a $(BUILD)/libc/linux-aarch64/*.o
-	@./embcc --target=aarch64-linux-gnu -c -O1 $(LIBC_INC) \
+	@./embcc --target=aarch64-linux-gnu -c -O1 -fPIE $(LIBC_INC) \
 	    lib/libc/os/linux/start.c -o $(BUILD)/libc/linux-aarch64/crt1.o
 	@rm -rf $(BUILD)/libc/linux-aarch64/rt && mkdir -p $(BUILD)/libc/linux-aarch64/rt
 	@for f in $(RT_SRCS); do \
 	    o=$(BUILD)/libc/linux-aarch64/rt/$$(basename $$f .c).o; \
-	    ./embcc --target=aarch64-linux-gnu -c -O1 $$f -o $$o || exit 1; \
+	    ./embcc --target=aarch64-linux-gnu -c -O1 -fPIE $$f -o $$o || exit 1; \
 	done
 	@rm -f $(BUILD)/libc/linux-aarch64/librt.a
 	@$${EMBCC_AARCH64_AR:-./embar} rcs \
 	    $(BUILD)/libc/linux-aarch64/librt.a $(BUILD)/libc/linux-aarch64/rt/*.o
-	@echo "libc: $(BUILD)/libc/linux-aarch64/libc.a + librt.a + crt1.o"
+	@./embcc --target=aarch64-linux-gnu -c -O1 -fPIE lib/gcov/gcov.c \
+	    -o $(BUILD)/libc/linux-aarch64/rt/gcov.o.x
+	@rm -f $(BUILD)/libc/linux-aarch64/libgcov.a
+	@$${EMBCC_AARCH64_AR:-./embar} rcs $(BUILD)/libc/linux-aarch64/libgcov.a \
+	    $(BUILD)/libc/linux-aarch64/rt/gcov.o.x
+	@for s in asan tsan msan; do \
+	    ./embcc --target=aarch64-linux-gnu -c -O1 -fPIE lib/san/$$s.c \
+	        -o $(BUILD)/libc/linux-aarch64/rt/$$s.o.x || exit 1; \
+	    rm -f $(BUILD)/libc/linux-aarch64/lib$$s.a; \
+	    $${EMBCC_AARCH64_AR:-./embar} rcs $(BUILD)/libc/linux-aarch64/lib$$s.a \
+	        $(BUILD)/libc/linux-aarch64/rt/$$s.o.x || exit 1; \
+	done
+	@echo "libc: $(BUILD)/libc/linux-aarch64/libc.a + librt.a + libgcov.a + lib{a,t,m}san.a + crt1.o"
 
 # The compiler runtime for each EMBEDDED target, as an archive per triple.
 # These had no rule at all: a firmware build for any of the four targets the
@@ -1128,7 +1166,7 @@ install-files:
 	             $(foreach t,$(RT_EMBEDDED),"$(t):$(t)"); do \
 	    triple=$${pair%%:*}; dir=$${pair#*:}; \
 	    mkdir -p $(LIBROOT)/$$triple; \
-	    for f in libc.a librt.a crt1.o; do \
+	    for f in libc.a librt.a libgcov.a libasan.a libtsan.a libmsan.a crt1.o; do \
 	        [ -f $(BUILD)/libc/$$dir/$$f ] && \
 	            cp $(BUILD)/libc/$$dir/$$f $(LIBROOT)/$$triple/$$f; \
 	    done; \

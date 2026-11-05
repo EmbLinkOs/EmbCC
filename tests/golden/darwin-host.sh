@@ -170,11 +170,19 @@ otool -L "$out/m" 2> /dev/null | grep -q CoreFoundation ||
     { cat "$out/p2.err"; fail "embcc linking prog.c"; }
 "$out/prog2" > "$out/got2.txt" && diff "$out/want.txt" "$out/got2.txt" ||
     fail "prog.c linked by EmbCC printed differently"
-# -g: a warning, no debug information, and the same code
+# -g: DWARF in the object's __DWARF segment, as clang writes it (lldb and
+# dsymutil read it there), and the same code
 "$EMBCC" -arch arm64 -O2 -g -c "$out/h.c" -o "$out/hg.o" 2> "$out/g.err" ||
     { cat "$out/g.err"; fail "-g stopped a Darwin compile"; }
-grep -q 'warning: -g: no debug information for aarch64-apple-darwin' "$out/g.err" ||
-    { cat "$out/g.err"; fail "-g on Darwin gave no warning"; }
+[ ! -s "$out/g.err" ] || { cat "$out/g.err"; fail "-g on Darwin warned"; }
+OD=$(command -v llvm-objdump || ls /opt/homebrew/opt/llvm/bin/llvm-objdump 2>/dev/null || true)
+if [ -n "$OD" ]; then
+    "$OD" -h "$out/hg.o" | grep -q '__debug_info' || fail "-g wrote no __debug_info"
+fi
 "$EMBCC" -arch arm64 -O2 -c "$out/h.c" -o "$out/h0.o"
-cmp -s "$out/hg.o" "$out/h0.o" || fail "-g changed a Darwin object"
-echo "darwin-host: EmbCC links Darwin programs (sources, -L/-l, -framework, --gc-sections, -Map); -g warns and changes nothing"
+if [ -n "$OD" ]; then
+    "$OD" -d --no-show-raw-insn "$out/hg.o" | tail -n +3 > "$out/hg.dis"
+    "$OD" -d --no-show-raw-insn "$out/h0.o" | tail -n +3 > "$out/h0.dis"
+    cmp -s "$out/hg.dis" "$out/h0.dis" || fail "-g changed a Darwin object's code"
+fi
+echo "darwin-host: EmbCC links Darwin programs (sources, -L/-l, -framework, --gc-sections, -Map); -g writes DWARF and changes no code"

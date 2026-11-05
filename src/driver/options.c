@@ -324,13 +324,24 @@ static void roff_put(FILE *out, const char *s)
  * line starting with '.' or '\'' would be a request. Markdown's `code`
  * becomes bold. A long text is broken at a space into several input
  * lines, which roff fills back into one paragraph. */
+/* The bytes the word at s takes on the line, escaped as roff() writes it */
+static int roff_word_len(const char *s, const char *arg)
+{
+    int n = 0;
+    for (; *s && *s != ' '; s++)
+        n += *s == '-' || *s == '\\' ? 2 : *s == '`' ? 3
+           : *s == '%' && arg ? (int)strlen(arg) + 8 : 1;
+    return n;
+}
+
 static void roff(FILE *out, const char *s, const char *arg)
 {
     int code = 0;
     if (*s == '.' || *s == '\'')
         roff_put(out, "\\&");
     for (; *s; s++) {
-        if (*s == ' ' && roff_col >= 64 && s[1]) {
+        if (*s == ' ' && s[1] &&
+            (roff_col >= 64 || roff_col + 1 + roff_word_len(s + 1, arg) > 79)) {
             fputc('\n', out);
             roff_col = 0;
             if (s[1] == '.' || s[1] == '\'')

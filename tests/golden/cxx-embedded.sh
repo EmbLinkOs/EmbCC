@@ -30,7 +30,8 @@ command -v "$HOSTCXX" >/dev/null 2>&1 || HOSTCXX=c++
 command -v "$HOSTCXX" >/dev/null 2>&1 || {
     echo "skipped: no host C++ compiler for the reference (EMBCC_HOST_CXX)"
     exit 0; }
-for q in arm riscv32 mipsel mips mips64 ppc sparc rx m68k xtensa tricore; do
+for q in arm riscv32 riscv64 mipsel mips mips64 mips64el ppc sparc rx m68k \
+         xtensa tricore avr; do
     command -v qemu-system-$q >/dev/null 2>&1 || {
         echo "skipped: qemu-system-$q is needed"; exit 0; }
 done
@@ -43,17 +44,16 @@ EMBLD=${EMBLD:-$PWD/embld}
 export EMBCC EMBLD
 
 # ---- what is refused, by name ----------------------------------------------
-# Exceptions want unwind tables -- EHABI's .ARM.exidx on ARM, .eh_frame on
-# RV32 -- and EmbCC writes neither for these machines: a unit with
-# exceptions on is refused, and so is an explicit request for the tables.
-# Without them a C++ unit writes no .eh_frame at all (it once got
+# Exceptions want unwind tables -- .eh_frame, and EHABI's .ARM.exidx on
+# ARM -- and EmbCC writes them for ARM, RISC-V, MIPS, Xtensa and TriCore
+# (each board below runs exceptions.cc). For the rest a unit with
+# exceptions on is refused by name, and so is an explicit request for the
+# tables; without them a C++ unit writes no .eh_frame at all (it once got
 # x86-64's CFI in a section typed SHT_ARM_EXIDX).
 printf 'struct A { virtual ~A(); int f(int); };\nA::~A() {}\nint A::f(int x) { return x; }\n' \
     > "$out/refuse.cc"
-for t in thumbv7m-none-eabi armv7a-none-eabi riscv32-unknown-elf \
-         mipsel-none-elf mips-none-elf mips64-none-elf powerpc-none-eabi \
-         sparc-none-elf rx-none-elf m68k-none-elf xtensa-none-elf \
-         tricore-none-elf; do
+for t in powerpc-none-eabi sparc-none-elf rx-none-elf m68k-none-elf \
+         loongarch64-unknown-elf; do
     if "$EMBCC" --target=$t -c "$out/refuse.cc" -o "$out/r.o" \
             2> "$out/r.err"; then
         echo "$t: C++ with exceptions was accepted"; exit 1
@@ -74,27 +74,22 @@ for t in thumbv7m-none-eabi armv7a-none-eabi riscv32-unknown-elf \
         echo "$t: a C++ unit without exceptions wrote an .eh_frame"; exit 1
     fi
 done
-# The 64-bit embedded targets compile C++ but write no unwind tables
-# either: with -fno-exceptions a unit has none (RV64 once got an x86-64
-# CIE in its .eh_frame, and MIPS64 refused every C++ unit for asking for
-# tables by default), and an explicit request is refused by name -- as it
-# is for C on AVR, which also once got the x86-64 CIE.
-for t in riscv64-unknown-elf mips64el-none-elf loongarch64-unknown-elf; do
-    "$EMBCC" --target=$t -fno-exceptions -c "$out/refuse.cc" -o "$out/r.o" \
-        2> "$out/r.err" || {
-        echo "$t: C++ with -fno-exceptions does not compile:"
+# ...and where they are written, a unit with exceptions has its tables
+printf 'void g(); int h() { try { g(); } catch (int) { return 1; } return 0; }\n' \
+    > "$out/eh.cc"
+for t in thumbv7m-none-eabi:ARM.exidx riscv32-unknown-elf:eh_frame \
+         riscv64-unknown-elf:eh_frame mipsel-none-elf:eh_frame \
+         mips64-none-elf:eh_frame xtensa-none-elf:eh_frame \
+         tricore-none-elf:eh_frame; do
+    "$EMBCC" --target=${t%%:*} -c "$out/eh.cc" -o "$out/r.o" 2> "$out/r.err" || {
+        echo "${t%%:*}: C++ with exceptions does not compile:"
         cat "$out/r.err"; exit 1; }
-    if "${READELF:-llvm-readelf}" -S "$out/r.o" | grep -q 'eh_frame'; then
-        echo "$t: a C++ unit without exceptions wrote an .eh_frame"; exit 1
-    fi
-    if "$EMBCC" --target=$t -fno-exceptions -funwind-tables \
-            -c "$out/refuse.cc" -o "$out/r.o" 2> "$out/r.err"; then
-        echo "$t: -funwind-tables was accepted"; exit 1
-    fi
-    grep -q "unwind tables are not supported for $t" "$out/r.err" || {
-        echo "$t: unwind tables refused, but not by name:"; cat "$out/r.err"
-        exit 1; }
+    "${READELF:-llvm-readelf}" -S "$out/r.o" | grep -q "${t#*:}" || {
+        echo "${t%%:*}: a unit with a handler has no .${t#*:}"; exit 1; }
 done
+# AVR: C++ without exceptions by default (no unwinder: avr-gcc ships none
+# and Arduino builds pass -fno-exceptions); asking is refused by name, as
+# unwind tables are for C
 printf 'int f(int a) { return a + 1; }\n' > "$out/plain.c"
 if "$EMBCC" --target=avr -funwind-tables -c "$out/plain.c" -o "$out/r.o" \
         2> "$out/r.err"; then
@@ -102,17 +97,17 @@ if "$EMBCC" --target=avr -funwind-tables -c "$out/plain.c" -o "$out/r.o" \
 fi
 grep -q "unwind tables are not supported for avr" "$out/r.err" || {
     echo "avr: unwind tables refused, but not by name:"; cat "$out/r.err"; exit 1; }
-for t in avr; do
-    if "$EMBCC" --target=$t -fno-exceptions -c "$out/refuse.cc" \
-            -o "$out/r.o" 2> "$out/r.err"; then
-        echo "$t: C++ was accepted for a C++ ABI nobody has checked"; exit 1
-    fi
-    grep -q "C++ is not yet supported for $t" "$out/r.err" || {
-        echo "$t: C++ refused, but not by name:"; cat "$out/r.err"; exit 1; }
-done
-echo "exceptions and unwind tables on ARM, RISC-V, MIPS, PowerPC, SPARC, RX,"
-echo "ColdFire, Xtensa, TriCore, LoongArch and AVR, and C++ on AVR, are refused"
-echo "by name"
+"$EMBCC" --target=avr -c "$out/refuse.cc" -o "$out/r.o" 2> "$out/r.err" || {
+    echo "avr: C++ does not compile:"; cat "$out/r.err"; exit 1; }
+if "$EMBCC" --target=avr -fexceptions -c "$out/refuse.cc" -o "$out/r.o" \
+        2> "$out/r.err"; then
+    echo "avr: C++ with -fexceptions was accepted"; exit 1
+fi
+grep -q "C++ exceptions are not supported for avr" "$out/r.err" || {
+    echo "avr: exceptions refused, but not by name:"; cat "$out/r.err"; exit 1; }
+echo "exceptions and unwind tables on PowerPC, SPARC, RX, ColdFire, LoongArch"
+echo "and AVR are refused by name; ARM, RISC-V, MIPS, Xtensa and TriCore"
+echo "write theirs"
 
 # ---- the reference: the host's own C++ compiler, run here ----------------
 progs=
@@ -125,6 +120,8 @@ for cc in tests/cxx-embedded/*.cc; do
         echo "$n: the host's $HOSTCXX does not build it"; exit 1; }
     "$out/host/$n" > "$out/host/$n.raw" 2>&1
     sed -n '1,/==END==/p' "$out/host/$n.raw" > "$out/host/$n.txt"
+    # AVR's printf has avr-libc's default formatter: a double prints "?"
+    sed -E 's/-?[0-9]+\.[0-9]+/?/g' "$out/host/$n.txt" > "$out/host/$n.avr.txt"
     grep -q '==END==' "$out/host/$n.txt" || {
         echo "$n: the host build does not reach ==END=="; exit 1; }
 done
@@ -141,7 +138,7 @@ boards="thumbv7m-none-eabi thumbv7em-none-eabihf thumbv6m-none-eabi
         thumbv8m.main-none-eabi armv7a-none-eabi riscv32-unknown-elf
         mipsel-none-elf mips-none-elf powerpc-none-eabi sparc-none-elf
         rx-none-elf m68k-none-elf xtensa-none-elf tricore-none-elf
-        mips64-none-elf"
+        mips64-none-elf riscv64-unknown-elf mips64el-none-elf avr"
 [ -n "${EMBCC_CXX_BOARDS:-}" ] && boards=$EMBCC_CXX_BOARDS
 # the harness: SRC (boot.c and io.c), H (link.sh and run.sh), its variable
 harness() {
@@ -151,7 +148,8 @@ harness() {
         thumbv6m*)  H=tests/harness/thumb-m0; hv=EMBCC_THUMB_M0_HARNESS ;;
         thumbv8m*)  H=tests/harness/thumb-m33; hv=EMBCC_M33_HARNESS ;;
         armv7a*)    H=tests/harness/arm-a32; hv=EMBCC_A32_HARNESS ;;
-        riscv32*)   H=tests/harness/riscv; hv=EMBCC_RISCV_HARNESS ;;
+        riscv*)     H=tests/harness/riscv; hv=EMBCC_RISCV_HARNESS ;;
+        avr)        H=tests/harness/avr; hv=EMBCC_AVR_HARNESS ;;
         mips64*)    H=tests/harness/mips64; hv=EMBCC_MIPS64_HARNESS ;;
         mips*)      H=tests/harness/mips; hv=EMBCC_MIPS_HARNESS ;;
         powerpc*)   H=tests/harness/ppc; hv=EMBCC_PPC_HARNESS ;;
@@ -170,24 +168,34 @@ for t in $boards; do
     flags=
     case $t in
         thumbv6m*) flags=-DSRAM_TOP=0x20010000u ;;
-        thumb*|armv7a*|riscv32*) ;;
+        thumb*|armv7a*|riscv*|avr) ;;
         *) flags="-O1 -DHARNESS_LIBC" ;;
     esac
-    { sh tools/build-rt.sh "$t" "$d" && sh tools/build-libc.sh "$t" "$d" &&
+    # (AVR's library is lib/avr's, which build-rt.sh makes beside the
+    # startup and the part's script)
+    { sh tools/build-rt.sh "$t" "$d" &&
+      { [ "$t" = avr ] || sh tools/build-libc.sh "$t" "$d"; } &&
       sh tools/build-libcxx.sh "$t" "$d"; } > "$d/build.log" 2>&1 || {
         echo "$t: the libraries do not build:"; tail -3 "$d/build.log"
         exit 1; }
-    "$EMBCC" --target="$t" $flags -c "$SRC/boot.c" -o "$d/boot.o" || exit 1
+    # (AVR links by -mmcu=: the startup is lib/avr's crt.S)
+    if [ "$t" != avr ]; then
+        "$EMBCC" --target="$t" $flags -c "$SRC/boot.c" -o "$d/boot.o" || exit 1
+    fi
     "$EMBCC" --target="$t" -O1 -c "$SRC/io.c" -o "$d/io.o" || exit 1
     # the M0 harness's io.c already sends write() to its UART, and so do
     # the exec suites' harnesses (a weak write)
     board=
     case $t in
         thumbv6m*) ;;
-        thumb*|armv7a*|riscv32*)
+        thumb*|armv7a*|riscv*)
             "$EMBCC" --target="$t" -c tests/cxx-embedded/board.c \
                 -o "$d/board.o" || exit 1
             board=$d/board.o ;;
+        avr)
+            "$EMBCC" --target=avr -mmcu=atmega328p -Os \
+                -c tests/cxx-embedded/board-avr.c -o "$d/board.o" || exit 1
+            board="$d/io.o $d/board.o" ;;
     esac
     echo "$H $hv $board" > "$d/harness"
 done
@@ -212,15 +220,32 @@ o=$d/$n$opt
 rm -f "$o.o" "$o.elf"
 # a program's own flags after the suite's (rtti.cc: -frtti)
 extra=$(sed -n 's|^// embedded-flags: *||p' "tests/cxx-embedded/$n.cc")
+# ...and what it needs: exceptions only where EmbCC writes the unwinder's
+# tables; a program a 16-bit int cannot hold skips AVR
+need=$(sed -n 's|^// embedded-needs: *||p' "tests/cxx-embedded/$n.cc")
+skip=$(sed -n 's|^// embedded-skip: *||p' "tests/cxx-embedded/$n.cc")
+case " $skip " in *" $t "*) echo "SKIP $t $opt $n: not for this board"; exit 0 ;; esac
+case "$need $t" in
+    "exceptions "powerpc*|"exceptions "sparc*|"exceptions "rx*|\
+    "exceptions "m68k*|"exceptions avr")
+        echo "SKIP $t $opt $n: no unwinder for this board"; exit 0 ;;
+esac
 if ! "$EMBCC" --target="$t" $opt -fno-exceptions -fno-rtti $extra \
         -Ilib/libc/include -c "tests/cxx-embedded/$n.cc" -o "$o.o" \
         > "$o.err" 2>&1; then
     echo "FAIL $t $opt $n: does not compile: $(head -1 "$o.err")"; exit 0
 fi
-if ! env "$hv=$d" sh "$H/link.sh" "$o.elf" "$o.o" $board "$d/libcxx.a" \
-        "$d/libc.a" "$d/librt.a" > "$o.err" 2>&1; then
-    echo "FAIL $t $opt $n: does not link: $(head -1 "$o.err")"; exit 0
-fi
+if [ "$t" = avr ]; then
+    # the part's own link (crt, script, lib/avr), the unused type_infos
+    # dropped: AVR's .rodata is RAM
+    "$EMBCC" --target=avr -mmcu=atmega328p -nostdlib -Wl,--gc-sections \
+        -T "$d/atmega328p.ld" "$d/crtatmega328p.o" "$o.o" $board \
+        "$d/libcxx.a" "$d/libc.a" "$d/librt.a" "$d/libc.a" \
+        -o "$o.elf" > "$o.err" 2>&1
+elif ! env "$hv=$d" sh "$H/link.sh" "$o.elf" "$o.o" $board "$d/libcxx.a" \
+        "$d/libc.a" "$d/librt.a" "$d/libc.a" > "$o.err" 2>&1; then
+    false
+fi || { echo "FAIL $t $opt $n: does not link: $(head -1 "$o.err")"; exit 0; }
 case $t in
     thumbv7m*)  set -- qemu-system-arm -M lm3s6965evb -cpu cortex-m3 ;;
     thumbv7em*) set -- qemu-system-arm -M mps2-an386 -cpu cortex-m4 ;;
@@ -230,6 +255,7 @@ case $t in
     armv7a*)    set -- qemu-system-arm -M virt -cpu cortex-a15 -m 128 \
                     -monitor none -semihosting ;;
     riscv32*)   set -- qemu-system-riscv32 -M virt -bios none -m 8 ;;
+    riscv64*)   set -- qemu-system-riscv64 -M virt -bios none -m 8 ;;
     *)          set -- ;;
 esac
 if [ $# -gt 0 ]; then
@@ -240,12 +266,15 @@ else
     # (after ==END==, once main has returned and exit() has run)
     img=$o.elf
     case $t in rx*) img=$o.bin ;; esac
+    EMBCC_QEMU_UNTIL='==END==' \
     EMBCC_QEMU_TIMEOUT=${EMBCC_QEMU_TIMEOUT:-30} sh "$H/run.sh" "$img" \
         > "$o.raw" 2>/dev/null
 fi
 # (a board's UART may end lines with CR LF)
-tr -d '\r' < "$o.raw" | sed -n '1,/==END==/p' > "$o.txt"
-if diff "$out/host/$n.txt" "$o.txt" > "$o.diff"; then
+LC_ALL=C tr -d '\r' < "$o.raw" | sed -n '1,/==END==/p' > "$o.txt"
+want=$out/host/$n.txt
+[ "$t" = avr ] && want=$out/host/$n.avr.txt
+if diff "$want" "$o.txt" > "$o.diff"; then
     echo "PASS $t $opt $n"
 else
     echo "FAIL $t $opt $n: output differs from the host's: $(sed -n 2,3p "$o.diff" | tr '\n' ' ')"
@@ -263,10 +292,12 @@ done | xargs -P "${EMBCC_JOBS:-8}" -n 4 sh "$out/one.sh" > "$out/results.txt"
 sort "$out/results.txt" | grep '^FAIL' | head -40
 pass=$(grep -c '^PASS' "$out/results.txt")
 fail=$(grep -c '^FAIL' "$out/results.txt")
+skip=$(grep -c '^SKIP' "$out/results.txt")
 nb=$(echo $boards | wc -w)
 np=$(echo $progs | wc -w)
-echo "$pass passed, $fail failed"
-[ "$fail" = 0 ] && [ "$pass" -ge $((nb * np * 4)) ] || exit 1
-echo "C++ runs on the Cortex-M, ARM, RV32, MIPS32 (both byte orders), MIPS64"
-echo "big-endian, PowerPC, SPARC, RX, ColdFire, Xtensa and TriCore boards as it"
-echo "does on the host"
+echo "$pass passed, $fail failed, $skip skipped (exceptions where no unwinder; layout on AVR)"
+[ "$fail" = 0 ] && [ $((pass + skip)) -ge $((nb * np * 4)) ] || exit 1
+echo "C++ runs on the Cortex-M, ARM, RV32, RV64, MIPS32 (both byte orders),"
+echo "MIPS64 (both), PowerPC, SPARC, RX, ColdFire, Xtensa, TriCore and AVR"
+echo "boards as it does on the host -- exceptions too, on ARM, RISC-V, MIPS,"
+echo "Xtensa and TriCore"

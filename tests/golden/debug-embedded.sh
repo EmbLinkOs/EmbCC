@@ -238,6 +238,26 @@ done
 #   * the first row is the function's own line at its entry, so a
 #     debugger takes the second as the end of the prologue.
 if command -v "$OBJDUMP" >/dev/null 2>&1; then
+
+# avr_loc NAME DUMP -> NAME's location: its fbreg offset, "empty", "list"
+# (a location list whose entries are registers, by address range), or
+# nothing when it has none
+avr_loc() {
+    awk -v n="DW_AT_name	(\"$1\")" '
+        index($0, n) { on = 1; k = 0; next }
+        on && /DW_AT_location/ {
+            if ($0 ~ /<empty>/) { print "empty"; exit }
+            if (match($0, /DW_OP_fbreg \+[0-9]+/)) {
+                print substr($0, RSTART + 13, RLENGTH - 13); exit }
+            list = 1; next }
+        on && list && /DW_OP_fbreg \+[0-9]+/ {
+            match($0, /DW_OP_fbreg \+[0-9]+/)
+            print substr($0, RSTART + 13, RLENGTH - 13); exit }
+        on && list && /^[[:space:]]*$/ { print "list"; exit }
+        on && /DW_TAG_|DW_AT_name/ && !list { exit }
+        on && ++k > 6 && !list { exit }' "$2"
+}
+
     for O in 0 g 2; do
         o="$out/avr-O$O.o"
         "$EMBCC" --target=avr -g -O$O -c "$out/p.c" -o "$o" 2>/dev/null || {
@@ -257,10 +277,8 @@ if command -v "$OBJDUMP" >/dev/null 2>&1; then
         [ "$first" = "0 2" ] || {
             echo "FAIL avr -O$O: the first row is '$first', not line 2 at the entry"
             fail=1; }
-        loc() {     # loc NAME -> its fbreg offset, or "empty", or nothing
-            grep -A2 "DW_AT_name	(\"$1\")" "$out/avr-O$O.di" |
-                sed -n -e 's/.*DW_OP_fbreg +\([0-9]*\).*/\1/p' \
-                       -e 's/.*DW_AT_location	(<empty>).*/empty/p' | head -1
+        loc() {     # loc NAME -> its fbreg offset, "empty", "list", or nothing
+            avr_loc "$1" "$out/avr-O$O.di"
         }
         stores_to() {   # stores_to OFF -> the addresses of `std Y+OFF, ...`
             grep -E "std[[:space:]]+Y\+$1, r[0-9]+\$" "$out/avr-O$O.dis" |
@@ -280,7 +298,7 @@ if command -v "$OBJDUMP" >/dev/null 2>&1; then
         for v in wide tall k; do
             off=$(loc $v)
             [ -n "$off" ] || { echo "FAIL avr -O$O: '$v' has no DW_AT_location"; fail=1; continue; }
-            [ "$off" = empty ] && continue
+            [ "$off" = empty ] || [ "$off" = list ] && continue
             [ -n "$(stores_to "$off")" ] || {
                 echo "FAIL avr -O$O: '$v' is at fbreg +$off and nothing stores to Y+$off"
                 fail=1; }
@@ -314,10 +332,8 @@ CEOF
         "$DWDUMP" --debug-info "$out/avr-as.o" > "$out/avr-as.di" 2>/dev/null
         "$OBJDUMP" -d "$out/avr-as.o" > "$out/avr-as.dis" 2>/dev/null
         for v in n m; do
-            off=$(grep -A2 "DW_AT_name	(\"$v\")" "$out/avr-as.di" |
-                  sed -n -e 's/.*DW_OP_fbreg +\([0-9]*\).*/\1/p' \
-                         -e 's/.*DW_AT_location	(<empty>).*/empty/p' | head -1)
-            [ "$off" = empty ] && continue
+            off=$(avr_loc "$v" "$out/avr-as.di")
+            [ "$off" = empty ] || [ "$off" = list ] && continue
             nst=$(grep -cE "std[[:space:]]+Y\+$off, r[0-9]+\$" "$out/avr-as.dis") || nst=0
             if [ $v = n ] && [ "$nst" -lt 2 ]; then
                 echo "FAIL avr -O2: the assigned parameter 'n' is at fbreg +$off, which only the prologue writes"

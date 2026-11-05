@@ -462,6 +462,17 @@ int target_arm_a32(void);
  * compute in single and double precision (target_thumb_fpu_dp). */
 int target_arm_vfp(int *d32);
 void target_set_arm_vfp(int version, int d32);
+void target_set_arm_neon(int on);
+int target_arm_neon(void);
+void target_set_thumb_v81(int on);
+int target_thumb_v81(void);
+/* ARMv8.1-M's PACBTI extension (-mcpu=cortex-m85, -march=...+pacbti):
+ * bxaut, and __ARM_FEATURE_PAUTH/BTI. Without it a v8.1-M part still
+ * takes pac, aut and bti, which are hints there. */
+void target_set_thumb_pacbti(int on);
+int target_thumb_pacbti(void);
+void target_set_thumb_mve(int level);
+int target_thumb_mve(void);
 /* The alignment a string literal of `width`-byte elements gets in .rodata.
  * Its element width: ARMv6-M reads L"..."[0] with LDR and MIPS with lw,
  * and a wide literal at an odd offset faults on both (a HardFault, an
@@ -571,6 +582,31 @@ int  target_keep_vars(void);
  * source variable lives (ir_func.lines, ir_func.var_off). */
 void target_set_debug_info(int on);
 int  target_debug_info(void);
+/* Position-independent code: 0 none, TARGET_PIE for an executable
+ * (-fPIE: what it defines is its own, what it does not is reached
+ * through the GOT), TARGET_PIC for a shared object (-fPIC: any symbol
+ * another module may define is reached through the GOT as well). */
+enum { TARGET_PIE = 1, TARGET_PIC = 2 };
+void target_set_pic(int mode);
+int  target_pic(void);
+/* Control-flow hardening: -fcf-protection (x86-64: CF_IBT, endbr64 where
+ * an indirect branch lands, notrack on a jump table's; CF_SHSTK, the
+ * shadow stack's note) and -mbranch-protection (AArch64: CF_BTI, bti c/j
+ * landing pads; CF_PAC, return addresses signed with paciasp/autiasp --
+ * CF_PAC_BKEY for the B key, CF_PAC_LEAF in a leaf too). Each says so in
+ * the object's .note.gnu.property. */
+enum { CF_IBT = 1, CF_SHSTK = 2, CF_BTI = 4, CF_PAC = 8, CF_PAC_LEAF = 16,
+       CF_PAC_BKEY = 32 };
+void target_set_cf(int mask);
+int  target_cf(void);
+/* --stack-info: every function's code offsets per instruction (ins_pc),
+ * which the timing bound reads, whether or not -g asks for them */
+void target_set_stack_info(int on);
+int  target_stack_info(void);
+/* Unwind tables (.eh_frame) will be written: the backends record their
+ * prologues' CFI as -g has them do, for eh_emit_cfi. */
+void target_set_unwind_tables(int on);
+int  target_unwind_tables(void);
 
 /* The other two dimensions. Both default to the freestanding ELF answer,
  * so a caller that has never heard of them reads the world exactly as it
@@ -707,6 +743,18 @@ enum reloc_kind {
     RK_ABS32,     /* an absolute 32-bit field (DWARF section offsets) */
     RK_DATA_PREL32, /* a 32-bit field holding target - its own address
                    * (unwind tables' pointers) */
+    RK_TLVP_PAGE, /* Darwin aarch64: adrp to a thread-local's descriptor slot */
+    RK_TLVP_LO12, /* ... and the paired ldr of the descriptor's address */
+    RK_TLVP,      /* Darwin x86-64: movq sym@TLVP(%rip), reg -- the same */
+    RK_GOTPC32,   /* x86-64: movq sym@GOTPCREL(%rip), reg -- an undefined
+                   * symbol's address on Darwin, which only the GOT has,
+                   * and a preemptible one under -fPIC/-fPIE */
+    RK_GOTTPOFF,  /* x86-64: movq sym@gottpoff(%rip), reg -- a thread-
+                   * local's offset from the thread pointer, from the GOT
+                   * (initial-exec, -fPIC/-fPIE) */
+    RK_TLSIE_PAGE,/* aarch64: adrp to a thread-local's GOT slot holding
+                   * its offset from the thread pointer (initial-exec) */
+    RK_TLSIE_LO12,/* ... and the paired ldr */
     RK_GOT_PAGE,  /* aarch64: adrp to the page of the symbol's GOT slot */
     RK_GOT_LO12,  /* aarch64: the paired ldr's offset in that page — a
                    * weak symbol's address (0 when it is undefined, which
@@ -755,6 +803,9 @@ enum reloc_kind {
      * is how an assembler's `.Lpcrel_hi0` label resolves too. */
     RK_RISCV_PCREL_HI20,
     RK_RISCV_PCREL_LO12_I,
+    /* -fPIC/-fPIE: `auipc` to the symbol's GOT slot, its LO12 half the
+     * PCREL_LO12_I of a load, which reads the address there */
+    RK_RISCV_GOT_HI20,
     /* AVR. Two things make this target's relocations unlike the others'.
      *
      * An address is materialised a BYTE at a time, because the registers
@@ -953,6 +1004,19 @@ int target_riscv_zifencei(void);
 int target_riscv_atomics(void);
 int target_atomic_rmw_libcall(int size);
 void target_set_riscv_isa(int a, int f, int d, int c, int zifencei);
+/* -march='s multi-letter extensions beyond Zicsr and Zifencei: Zba (shift
+ * and add), Zbb (basic bit manipulation), Zbs (single bits), Zfhmin and
+ * Zfh (half precision), and V (vectors); 0 on any other target */
+enum { RV_EXT_ZBA = 1, RV_EXT_ZBB = 2, RV_EXT_ZBS = 4, RV_EXT_ZFHMIN = 8,
+       RV_EXT_ZFH = 16, RV_EXT_V = 32,
+       /* Zicond (czero), Zbc/Zbkc (carry-less multiply), Zbkb (pack,
+        * brev8, zip), Zbkx (crossbar permutes), Zca (C without its
+        * floating-point loads), Zcb (more 16-bit forms), Zcmp (push/pop) */
+       RV_EXT_ZICOND = 64, RV_EXT_ZBC = 128, RV_EXT_ZBKB = 256,
+       RV_EXT_ZBKC = 512, RV_EXT_ZBKX = 1024, RV_EXT_ZCA = 2048,
+       RV_EXT_ZCB = 4096, RV_EXT_ZCMP = 8192 };
+void target_set_riscv_ext(unsigned mask);
+unsigned target_riscv_ext(void);
 void target_set_riscv_abi_flen(int flen);
 
 /* Does this target's object carry REL relocations -- the addend stored in

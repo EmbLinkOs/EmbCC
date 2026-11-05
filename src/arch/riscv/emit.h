@@ -116,6 +116,7 @@ void rv_patch_pcrel_pair(struct code *c, int at, int target);
 int rv_far_placeholder(struct code *c, int rd);  /* auipc rd; jalr x0, rd */
 void rv_set_compress(int on, int xlen);
 int  rv_compress_enabled(void);
+void rv_set_ext_source(unsigned (*hook)(void));   /* target_riscv_ext */
 
 /* ---- arithmetic and logic ------------------------------------------- */
 
@@ -145,6 +146,24 @@ void rv_shift_imm(struct code *c, int op, int rd, int rs1, int amt,
  * remw/remuw at RV64. mulh/mulhu/mulhsu have no word form. */
 enum { RV_MUL, RV_MULH, RV_MULHSU, RV_MULHU, RV_DIV, RV_DIVU, RV_REM, RV_REMU };
 void rv_muldiv(struct code *c, int op, int rd, int rs1, int rs2, int w);
+
+/* Zba, Zbb and Zbs (emit.c's table): two-register, unary and by-constant */
+enum rv_zb {
+    RV_ZB_ANDN, RV_ZB_ORN, RV_ZB_XNOR, RV_ZB_MIN, RV_ZB_MINU, RV_ZB_MAX,
+    RV_ZB_MAXU, RV_ZB_SH1ADD, RV_ZB_SH2ADD, RV_ZB_SH3ADD, RV_ZB_ADDUW,
+    RV_ZB_SH1ADDUW, RV_ZB_SH2ADDUW, RV_ZB_SH3ADDUW, RV_ZB_BCLR, RV_ZB_BEXT,
+    RV_ZB_BINV, RV_ZB_BSET, RV_ZB_ROL, RV_ZB_ROR, RV_ZB_ROLW, RV_ZB_RORW,
+    /* unary */
+    RV_ZB_CLZ, RV_ZB_CTZ, RV_ZB_CPOP, RV_ZB_SEXTB, RV_ZB_SEXTH, RV_ZB_REV8,
+    RV_ZB_ORCB, RV_ZB_ZEXTH,
+    /* by a constant */
+    RV_ZB_BCLRI, RV_ZB_BSETI, RV_ZB_BINVI, RV_ZB_BEXTI, RV_ZB_RORI,
+    RV_ZB_SLLIUW
+};
+void rv_zb_r(struct code *c, int which, int rd, int rs1, int rs2);
+void rv_czero(struct code *c, int nez, int rd, int rs1, int rs2);
+void rv_zb_unary(struct code *c, int which, int rd, int rs, int w32, int xlen);
+void rv_zb_imm(struct code *c, int which, int rd, int rs, int amt, int w32);
 
 /* ---- the A extension: atomics ----------------------------------------
  *
@@ -187,6 +206,7 @@ void rv_amo(struct code *c, enum rv_amo op, int rd, int rs1, int rs2,
  * register and has no unsigned form. The offset is a 12-bit signed field;
  * a frame deeper than 2047 bytes goes through a scratch in the codegen,
  * not here. */
+int rv_got_pair(struct code *c, int rd, int xlen);
 void rv_load(struct code *c, int rd, int rs1, int off, int size, int sign,
              int xlen);
 void rv_store(struct code *c, int rs2, int rs1, int off, int size, int xlen);

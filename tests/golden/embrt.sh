@@ -49,6 +49,11 @@ for c in lib/rt/*.c; do
         rtobjs="$rtobjs $o"
 done
 [ -n "$rtobjs" ] || fail "lib/rt does not compile for $T"
+# the link takes them as the archive a program links: only the members it
+# needs (the EHABI unwinder, which calls memcpy, only for a throw)
+rm -f "$out/librt.a"
+# shellcheck disable=SC2086
+"$(dirname "$EMBCC")/embar" rcs "$out/librt.a" $rtobjs || fail "the runtime archive"
 "$EMBCC" --target=$T -O2 -c tests/golden/embrt/paint.c -o "$out/paint.o" || fail paint.c
 "$EMBCC" --target=$T -O2 -c tests/harness/thumb/io.c -o "$out/io.o" || fail io.c
 
@@ -66,7 +71,7 @@ for c in tests/exec/*.c; do
     # $rtobjs is a list: let the shell split it
     # shellcheck disable=SC2086
     "$EMBLD" -T tests/golden/ldscript/stm32.ld "$out/paint.o" "$out/io.o" "$o" \
-        $rtobjs -o "$out/p/$n.elf" >/dev/null 2>&1 || { skipped=$((skipped + 1)); continue; }
+        "$out/librt.a" -o "$out/p/$n.elf" >/dev/null 2>&1 || { skipped=$((skipped + 1)); continue; }
     # shellcheck disable=SC2086
     "$EMBRT" "$o" $rtobjs --json > "$out/p/$n.json" 2> "$out/p/$n.err"
     st=$?

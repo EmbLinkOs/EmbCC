@@ -72,6 +72,13 @@
 #define INLINE_TWO_CALLEE  200   /* ...and for one of two calls to a static (-O2) */
 #define INLINE_MAX_CALLER 800    /* stop expanding a caller past this many ins */
 #define INLINE_MAX_PER_FUNC 64   /* and cap inlines per caller, for termination */
+/* A call site the profile says is hot (-fprofile-use: IR_HEAT_HOT) is
+ * where a copy pays: four times the budget. A cold one, or a call of a
+ * cold function, is not inlined at all, unless it is the callee's only
+ * call (which costs nothing) or always_inline. In a cold caller the
+ * budget is -Os's. */
+#define INLINE_HOT_CALLEE 96
+static int g_site_hot, g_site_size;
 
 /* -Os: a much smaller budget, and WHY it needed one.
  *
@@ -126,12 +133,57 @@ void remap_ins(struct ir_ins *in, struct rmp *r)
 }
 
 /* The ir_func for a callee, or NULL if not defined in this unit. */
+/* inline_unit's index of the unit's functions: sorted by their source
+ * node, with how many direct calls name each and whether its address is
+ * taken -- kept current as calls are inlined (inline_call). Without it
+ * each call site scanned the unit twice, which a whole program under
+ * -flto (thousands of functions) made the whole compile. */
+struct fent { struct func *src; int k; };
+static struct fent *g_fidx;
+static int g_nfidx;
+static int *g_ncalls;
+static char *g_addr_taken;
+
+static int fent_cmp(const void *a, const void *b)
+{
+    unsigned long x = (unsigned long)((const struct fent *)a)->src;
+    unsigned long y = (unsigned long)((const struct fent *)b)->src;
+    return x < y ? -1 : x > y;
+}
+
+/* the index of callee's body in the unit, or -1 */
+static int func_k(struct func *callee)
+{
+    int lo = 0, hi = g_nfidx - 1;
+    while (lo <= hi) {
+        int mid = (lo + hi) / 2;
+        if (g_fidx[mid].src == callee)
+            return g_fidx[mid].k;
+        if ((unsigned long)g_fidx[mid].src < (unsigned long)callee)
+            lo = mid + 1;
+        else
+            hi = mid - 1;
+    }
+    return -1;
+}
+
+static void count_calls(const struct ir_func *fn, int sign)
+{
+    for (int i = 0; i < fn->nins; i++) {
+        const struct ir_ins *in = &fn->ins[i];
+        int k;
+        if (in->op == IR_FADDR && (k = func_k(in->callee)) >= 0)
+            g_addr_taken[k] = 1;
+        else if (in->op == IR_CALL && !in->indirect &&
+                 (k = func_k(in->callee)) >= 0)
+            g_ncalls[k] += sign;
+    }
+}
+
 static struct ir_func *func_ir(struct ir_unit *iu, struct func *callee)
 {
-    for (int i = 0; i < iu->nfuncs; i++)
-        if (iu->funcs[i].src == callee)
-            return &iu->funcs[i];
-    return NULL;
+    int k = func_k(callee);
+    return k >= 0 ? &iu->funcs[k] : NULL;
 }
 
 /* Conservative eligibility: a real, small body; scalar-integer params and
@@ -157,7 +209,9 @@ static int inlinable(struct ir_func *cf, int force, int sole, const char **why,
      * would not inline the call, it would emit a wrong one. The remark
      * still names whichever test refused, so a function marked
      * always_inline that was not inlined says why. */
-    int budget = g_opt_size ? INLINE_SIZE_CALLEE : INLINE_MAX_CALLEE;
+    int small = g_opt_size || g_site_size;
+    int budget = small ? INLINE_SIZE_CALLEE
+               : g_site_hot ? INLINE_HOT_CALLEE : INLINE_MAX_CALLEE;
     if (!force && cf->nins > budget &&
         !(sole == 1 && cf->nins <= INLINE_SOLE_CALLEE) &&
         !(sole == 2 && !g_opt_size && cf->nins <= INLINE_TWO_CALLEE)) {
@@ -429,21 +483,15 @@ static void inline_call(struct ir_func *fn, int ci, struct ir_func *cf)
  * function, or one whose address is taken. */
 static int sole_static_caller(struct ir_unit *iu, struct func *c)
 {
+    (void)iu;
     if (!c || !c->is_static)
         return 0;
-    int calls = 0;
-    for (int f = 0; f < iu->nfuncs; f++) {
-        struct ir_func *fn = &iu->funcs[f];
-        for (int i = 0; i < fn->nins; i++) {
-            struct ir_ins *in = &fn->ins[i];
-            if (in->op == IR_FADDR && in->callee == c)
-                return 0;                 /* the address escapes */
-            if (in->op == IR_CALL && !in->indirect && in->callee == c &&
-                ++calls > 2)
-                return 0;
-        }
-    }
-    return calls;      /* 1: the sole caller; 2: one of two; 0: neither */
+    int k = func_k(c);
+    if (k < 0 || g_addr_taken[k])
+        return 0;                         /* the address escapes */
+    int calls = g_ncalls[k];
+    return calls >= 1 && calls <= 2 ? calls : 0;
+                       /* 1: the sole caller; 2: one of two; 0: neither */
 }
 
 /* -O1: inline only what makes the code smaller or was asked for -- an
@@ -469,7 +517,27 @@ void opt_set_inline_declared_only(int on) { g_inline_declared_only = on; }
 int g_inline_always_only;
 
 /* Inline eligible calls across the unit (a bounded fixpoint per caller). */
+static void inline_unit_(struct ir_unit *iu);
+
 void inline_unit(struct ir_unit *iu)
+{
+    g_nfidx = iu->nfuncs;
+    g_fidx = xmalloc((size_t)(g_nfidx ? g_nfidx : 1) * sizeof *g_fidx);
+    for (int k = 0; k < g_nfidx; k++) {
+        g_fidx[k].src = iu->funcs[k].src;
+        g_fidx[k].k = k;
+    }
+    qsort(g_fidx, (size_t)g_nfidx, sizeof *g_fidx, fent_cmp);
+    g_ncalls = xcalloc((size_t)(g_nfidx ? g_nfidx : 1), sizeof *g_ncalls);
+    g_addr_taken = xcalloc((size_t)(g_nfidx ? g_nfidx : 1), 1);
+    for (int k = 0; k < g_nfidx; k++)
+        count_calls(&iu->funcs[k], 1);
+    inline_unit_(iu);
+    free(g_fidx); free(g_ncalls); free(g_addr_taken);
+    g_fidx = NULL; g_ncalls = NULL; g_addr_taken = NULL; g_nfidx = 0;
+}
+
+static void inline_unit_(struct ir_unit *iu)
 {
     for (int f = 0; f < iu->nfuncs; f++) {
         struct ir_func *fn = &iu->funcs[f];
@@ -508,12 +576,24 @@ void inline_unit(struct ir_unit *iu)
                     why = "not-declared-inline";  /* -fno-inline-functions */
                 else {
                     sole = sole_static_caller(iu, in->callee);
+                    int fcold = fn->src && (fn->src->attr_cold ||
+                                            fn->src->prof_heat == IR_HEAT_COLD);
+                    int ccold = in->callee->attr_cold ||
+                                in->callee->prof_heat == IR_HEAT_COLD;
                     if (g_inline_o1 && !in->callee->attr_always_inline &&
                         sole != 1)
                         why = "not-a-sole-callee-at-O1";
-                    else
+                    else if ((in->heat == IR_HEAT_COLD || ccold) &&
+                             !in->callee->attr_always_inline && sole != 1)
+                        why = in->heat == IR_HEAT_COLD ? "cold-call-site"
+                                                       : "callee-is-cold";
+                    else {
+                        g_site_hot = in->heat == IR_HEAT_HOT && !fcold;
+                        g_site_size = fcold;
                         ok = inlinable(c, in->callee->attr_always_inline,
                                        sole, &why, detail, sizeof detail);
+                        g_site_hot = g_site_size = 0;
+                    }
                 }
                 if (!ok) {
                     remark_add("inline", "not-inlined", in->callee->name, why,
@@ -544,7 +624,10 @@ void inline_unit(struct ir_unit *iu)
                            "%d instructions into %s, budget %d", cf->nins,
                            fn->src ? fn->name : "?", bud);
             }
+            /* the counts: the caller's calls before and after */
+            count_calls(fn, -1);
             inline_call(fn, ci, cf);
+            count_calls(fn, 1);
             done++;
         }
     }

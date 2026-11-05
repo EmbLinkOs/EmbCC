@@ -21,6 +21,13 @@
 #          (lib/rt/atomic-riscv.c), linked with that variant's runtime and
 #          libc (build/libc/<triple>/noa); each image is checked to hold no
 #          A instruction
+#   rv32k, rv64k  the bit-manipulation and size extensions codegen uses
+#          (Zicond's selects, Zcb's 16-bit forms, Zba/Zbb/Zbs; and on
+#          rv32k Zcmp's cm.push/cm.popret in every prologue), on a virt CPU
+#          that has them
+#   m55pac thumbv8.1m.main with -mcpu=cortex-m55 -mbranch-protection=
+#          standard on mps3-an547: pac, aut and bti in every function
+#          (hints on the M55; the M85's bxaut is thumb-pacbti.sh's)
 #
 # EMBCC_BOARDS="rv32f rv64d" runs just those, and
 # EMBCC_EXEC_ONLY="setjmp-longjmp vla" just those programs.
@@ -56,9 +63,9 @@ EMBLD=${EMBLD:-$PWD/embld}
 export EMBCC EMBLD
 
 boards=
-command -v "$QA" >/dev/null 2>&1 && boards="$boards m4 m4hf a7"
-command -v "$Q32" >/dev/null 2>&1 && boards="$boards rv32 rv32f rv32d rv32noa"
-command -v "$Q64" >/dev/null 2>&1 && boards="$boards rv64 rv64d rv64noa"
+command -v "$QA" >/dev/null 2>&1 && boards="$boards m4 m4hf a7 m55pac"
+command -v "$Q32" >/dev/null 2>&1 && boards="$boards rv32 rv32f rv32d rv32noa rv32k"
+command -v "$Q64" >/dev/null 2>&1 && boards="$boards rv64 rv64d rv64noa rv64k"
 [ -n "${EMBCC_BOARDS:-}" ] && boards=" $EMBCC_BOARDS"
 [ -n "$boards" ] || { echo "SKIP: no qemu-system-arm or -riscv32/64"; exit 0; }
 
@@ -67,19 +74,28 @@ triple() {
         m4) echo thumbv7em-none-eabi ;;
         m4hf) echo thumbv7em-none-eabihf ;;
         a7) echo armv7a-none-eabi ;;
-        rv32|rv32f|rv32d|rv32noa) echo riscv32-unknown-elf ;;
-        rv64|rv64d|rv64noa) echo riscv64-unknown-elf ;;
+        m55pac) echo thumbv8.1m.main-none-eabi ;;
+        rv32|rv32f|rv32d|rv32noa|rv32k) echo riscv32-unknown-elf ;;
+        rv64|rv64d|rv64noa|rv64k) echo riscv64-unknown-elf ;;
     esac
 }
 # The -march/-mabi a board adds, and the runtime variant they link with
 # (tools/build-rt.sh: TRIPLE/ABI)
 flags() {
     case $1 in
+        # ARMv8.1-M branch protection in every function: pac/aut/bti
+        # are hints on the M55, so this runs what the M85 runs but bxaut
+        m55pac) echo "-mcpu=cortex-m55 -mbranch-protection=standard" ;;
         rv32f) echo "-march=rv32imafc -mabi=ilp32f" ;;
         rv32d) echo "-march=rv32imafdc -mabi=ilp32d" ;;
         rv64d) echo "-march=rv64gc -mabi=lp64d" ;;
         rv32noa) echo "-march=rv32imc" ;;
         rv64noa) echo "-march=rv64imc" ;;
+        # the bit-manipulation and size extensions codegen uses: Zicond's
+        # branchless selects, Zcb's 16-bit forms, Zba/Zbb/Zbs (and Zbc,
+        # Zbkb, which it does not, to have -march= take them)
+        rv32k) echo "-march=rv32imac_zicond_zcb_zcmp_zba_zbb_zbs_zbc_zbkb" ;;
+        rv64k) echo "-march=rv64imac_zicond_zcb_zba_zbb_zbs_zbc" ;;
     esac
 }
 variant() {
@@ -88,6 +104,7 @@ variant() {
         rv32d) echo riscv32-unknown-elf/ilp32d ;;
         rv64d) echo riscv64-unknown-elf/lp64d ;;
         rv32noa) echo riscv32-unknown-elf/noa ;;
+        m55pac) echo thumbv8m.main-none-eabi ;;
         rv64noa) echo riscv64-unknown-elf/noa ;;
         *) triple "$1" ;;
     esac
@@ -152,6 +169,11 @@ for b in $boards; do
                     echo "FAIL: the M4 harness"; exit 1; }
             done
             "$EMBCC" --target=$T -O1 -c "$out/drv-m4.c" -o "$L/drv.o" ;;
+        m55pac) for f in boot io; do
+                "$EMBCC" --target=$T $FL -O1 -c tests/harness/thumb-m55/$f.c \
+                    -o "$L/$f.o" || { echo "FAIL: the M55 harness"; exit 1; }
+            done
+            "$EMBCC" --target=$T $FL -O1 -c "$out/drv-m4.c" -o "$L/drv.o" ;;
         a7) for f in boot io; do
                 "$EMBCC" --target=$T -O1 -c tests/harness/arm-a32/$f.c \
                     -o "$L/$f.o" || { echo "FAIL: the ARMv7-A harness"; exit 1; }
@@ -180,7 +202,8 @@ done
 SKIP32=" atomics-reg attr-layout bit-builtins c-extras2 enum-wide-values
  ext-add global-aggregates globals gnu-attr-positions long-double longs
  sizeof-cast static-local-init strings structs u64-float "
-# On the M4 only: complex.c, which clang's build fails there too.
+# On the M4 (and the M55, the same soft-float runtime): complex.c, which
+# clang's build fails there too.
 SKIPM4=" complex "
 # On the A7 only: alloca.c checks that alloca is 16-aligned, where AAPCS
 # gives 8 -- it passes or not by where sp happens to be, and clang's
@@ -194,19 +217,20 @@ cat > "$out/one.sh" <<'EOT'
 c=$1; opt=$2; b=$3; out=$4
 name=$(basename "$c" .c)
 case $b in
-    m4|m4hf|a7|rv32*) case "$SKIP32" in *" $name "*) exit 0 ;; esac ;;
+    m4|m4hf|a7|m55pac|rv32*) case "$SKIP32" in *" $name "*) exit 0 ;; esac ;;
 esac
 case $b in
     a7) case "$SKIPA7" in *" $name "*) exit 0 ;; esac ;;
 esac
 case $b in
-    m4|m4hf) case "$SKIPM4" in *" $name "*) exit 0 ;; esac ;;
+    m4|m4hf|m55pac) case "$SKIPM4" in *" $name "*) exit 0 ;; esac ;;
 esac
 expect=$(sed -n 's|.*// expect-exit: *\([0-9][0-9]*\).*|\1|p' "$c" | head -1)
 [ -n "$expect" ] || exit 0
 case $b in
     m4) T=thumbv7em-none-eabi ;; m4hf) T=thumbv7em-none-eabihf ;;
     a7) T=armv7a-none-eabi ;;
+    m55pac) T="thumbv8.1m.main-none-eabi -mcpu=cortex-m55 -mbranch-protection=standard" ;;
     rv32) T=riscv32-unknown-elf ;;
     rv64) T=riscv64-unknown-elf ;;
     rv32f) T="riscv32-unknown-elf -march=rv32imafc -mabi=ilp32f" ;;
@@ -214,6 +238,8 @@ case $b in
     rv64d) T="riscv64-unknown-elf -march=rv64gc -mabi=lp64d" ;;
     rv32noa) T="riscv32-unknown-elf -march=rv32imc" ;;
     rv64noa) T="riscv64-unknown-elf -march=rv64imc" ;;
+    rv32k) T="riscv32-unknown-elf -march=rv32imac_zicond_zcb_zcmp_zba_zbb_zbs_zbc_zbkb" ;;
+    rv64k) T="riscv64-unknown-elf -march=rv64imac_zicond_zcb_zba_zbb_zbs_zbc" ;;
 esac
 L=$out/$b; o=$out/p/$name-$b$opt
 if ! "$EMBCC" --target=$T $opt -Dmain=prog_main -Ilib/libc/include \
@@ -223,6 +249,8 @@ if ! "$EMBCC" --target=$T $opt -Dmain=prog_main -Ilib/libc/include \
 fi
 case $b in
     m4|m4hf) EMBCC_THUMB_HARNESS=$L sh tests/harness/thumb-m4f/link.sh $o.elf \
+            $o.o $L/drv.o $L/libc.a $L/librt.a > $o.lerr 2>&1 ;;
+    m55pac) EMBCC_M55_HARNESS=$L sh tests/harness/thumb-m55/link.sh $o.elf \
             $o.o $L/drv.o $L/libc.a $L/librt.a > $o.lerr 2>&1 ;;
     a7) EMBCC_A32_HARNESS=$L sh tests/harness/arm-a32/link.sh $o.elf \
             $o.o $L/drv.o $L/libc.a $L/librt.a > $o.lerr 2>&1 ;;
@@ -242,15 +270,26 @@ case $b in
           fi ;;
 esac
 case $b in
-    m4|m4hf) sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-30}" "$QA" \
+    m4|m4hf) sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-60}" "$QA" \
             -M mps2-an386 -cpu cortex-m4 -semihosting -nographic \
             -kernel $o.elf > $o.txt 2>&1 ;;
-    a7) sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-30}" "$QA" \
+    m55pac) sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-60}" "$QA" \
+            -M mps3-an547 -cpu cortex-m55 -semihosting -nographic \
+            -kernel $o.elf > $o.txt 2>&1 ;;
+    a7) sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-60}" "$QA" \
             -M virt -cpu cortex-a15 -m 128 -semihosting -nographic \
             -monitor none -kernel $o.elf > $o.txt 2>&1 ;;
-    rv32*) sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-30}" "$Q32" \
+    rv32k) sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-120}" "$Q32" \
+            -M virt -cpu rv32,zicond=true,zcb=true,zcmp=true,zcd=false,zba=true,zbb=true,zbs=true,zbc=true,zbkb=true \
+            -bios none -nographic -m 8 -kernel $o.elf > $o.txt 2>&1 ;;
+    rv64k) sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-60}" "$Q64" \
+            -M virt -cpu rv64,zicond=true,zcb=true,zba=true,zbb=true,zbs=true,zbc=true \
+            -bios none -nographic -m 8 -kernel $o.elf > $o.txt 2>&1 ;;
+    # (RV32's soft-float math-special is the corpus's slowest program:
+    # three seconds alone, over sixty with the rest of make test beside it)
+    rv32*) sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-120}" "$Q32" \
             -M virt -bios none -nographic -m 8 -kernel $o.elf > $o.txt 2>&1 ;;
-    rv64*) sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-30}" "$Q64" \
+    rv64*) sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-60}" "$Q64" \
             -M virt -bios none -nographic -m 8 -kernel $o.elf > $o.txt 2>&1 ;;
 esac
 got=$?

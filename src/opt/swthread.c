@@ -422,6 +422,7 @@ static void swt_emit_copy(struct swt_emit *e, int g)
                 }
                 if (inv) {
                     q->op = o->op == IR_BRZ ? IR_BRNZ : IR_BRZ;
+                    q->prob = (short)ir_prob_flip(o->prob);
                     q->label = e->blabel[b + 1] >= 0 ? e->blabel[b + 1]
                                                      : e->zlabel[b + 1];
                 }

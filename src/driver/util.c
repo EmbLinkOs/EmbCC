@@ -166,3 +166,44 @@ const char *opt_said(const char *prefix, const char *value)
     return opt_ring(s);
 }
 
+
+/* ---- -ffile-prefix-map and its kin ----------------------------------
+ *
+ * GCC's path rewriting for reproducible builds: a path that begins with
+ * OLD is written as NEW followed by the rest -- in __FILE__ and
+ * __BASE_FILE__ (macro), the DWARF (debug), the gcov notes (profile).
+ * The last map given that matches wins, as GCC applies them. */
+struct pmap { const char *old, *neww; size_t oldn; int kinds; };
+static struct pmap *g_pmap;
+static int g_npmap;
+
+int pmap_add(const char *spec, int kinds)
+{
+    const char *eq = strchr(spec, '=');
+    if (!eq)
+        return -1;
+    g_pmap = xrealloc(g_pmap, (size_t)(g_npmap + 1) * sizeof *g_pmap);
+    g_pmap[g_npmap].old = xstrndup(spec, (size_t)(eq - spec));
+    g_pmap[g_npmap].oldn = (size_t)(eq - spec);
+    g_pmap[g_npmap].neww = eq + 1;
+    g_pmap[g_npmap].kinds = kinds;
+    g_npmap++;
+    return 0;
+}
+
+const char *pmap_apply(const char *path, int kind)
+{
+    if (!path)
+        return path;
+    for (int k = g_npmap - 1; k >= 0; k--) {
+        const struct pmap *m = &g_pmap[k];
+        if (!(m->kinds & kind) || strncmp(path, m->old, m->oldn))
+            continue;
+        const char *rest = path + m->oldn;
+        size_t n = strlen(m->neww) + strlen(rest) + 1;
+        char *r = xmalloc(n);
+        snprintf(r, n, "%s%s", m->neww, rest);
+        return r;
+    }
+    return path;
+}

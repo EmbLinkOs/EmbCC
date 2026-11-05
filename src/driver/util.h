@@ -164,6 +164,10 @@ int  diag_set_werror_for(const char *name, int on); /* -W[no-]error=NAME;
 void diag_set_no_warnings(int on);     /* -w: drop them */
 int  diag_error_count(void);           /* for the driver's exit status */
 void diag_set_parseable_fixits(int on); /* GCC's fix-it: lines */
+/* --permissive (lex_set_permissive sets it): C89's implicit int and
+ * implicit declarations are warnings, not errors */
+void diag_set_permissive(int on);
+int diag_permissive(void);
 /* --fix: do the edits the fix-its describe, in the files they name.
  * Returns how many were applied. */
 int diag_apply_fixits(void);
@@ -214,6 +218,12 @@ EMBCC_NORETURN void fatal_unwind(void);
  * a file, to stdout, or to a caller in memory without three code paths.
  */
 struct outbuf { char *p; size_t n, cap; };
+
+/* -ffile-prefix-map=OLD=NEW and -f{macro,debug,profile}-prefix-map: a
+ * path's OLD prefix written as NEW, in what each kind names */
+enum { PMAP_MACRO = 1, PMAP_DEBUG = 2, PMAP_PROFILE = 4 };
+int pmap_add(const char *spec, int kinds);     /* -1: no '=' */
+const char *pmap_apply(const char *path, int kind);
 
 void ob_add(struct outbuf *b, const char *s, size_t n);
 void ob_str(struct outbuf *b, const char *s);

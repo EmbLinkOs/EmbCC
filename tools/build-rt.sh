@@ -19,6 +19,8 @@
 #
 # -Os: this is firmware, and the runtime is linked into every image; a
 # section per function and object, as tools/build-libc.sh says why.
+# --stack-info: each routine's frame, calls and cycles, so that
+# `embcc --stack-report` follows a program into its helpers.
 set -eu
 triple=$1
 out=$2
@@ -58,14 +60,46 @@ rm -rf "$out/rt"
 mkdir -p "$out/rt"
 for f in "$here"/lib/rt/*.c; do
     b=$(basename "$f" .c)
+    # The unwinder, where it is built (RISC-V and the Linux targets: see
+    # lib/rt/unwind.c), with its own .eh_frame: a throw's walk begins in
+    # _Unwind_RaiseException and has to step out of it.
+    uw=
+    case $b/$triple in
+        unwind/riscv*|unwind/mips*|unwind/xtensa*|unwind/tricore*|unwind/*linux*) uw=--unwind-tables ;;
+    esac
     # shellcheck disable=SC2086
-    "$EMBCC" --target="$triple" $flags -fenum-size-neutral -Os \
+    "$EMBCC" --target="$triple" $flags $uw -fenum-size-neutral -Os --stack-info \
         --sections=functions,data -c "$f" -o "$out/rt/$b.o" || {
         echo "build-rt: lib/rt/$b.c does not compile for $triple" >&2
         exit 1; }
 done
 rm -f "$out/librt.a"
 "$AR" rcs "$out/librt.a" "$out"/rt/*.o
+
+# libgcov.a, beside it: what --coverage and -fprofile-generate link
+# (lib/gcov/gcov.c), never itself instrumented
+# shellcheck disable=SC2086
+"$EMBCC" --target="$triple" $flags -fenum-size-neutral -Os \
+    --sections=functions,data -c "$here/lib/gcov/gcov.c" -o "$out/rt/gcov.o.x" || {
+    echo "build-rt: lib/gcov/gcov.c does not compile for $triple" >&2
+    exit 1; }
+rm -f "$out/libgcov.a"
+"$AR" rcs "$out/libgcov.a" "$out/rt/gcov.o.x"
+
+# The sanitizers' runtimes (lib/san), never themselves instrumented:
+# libasan.a for every target, libtsan.a and libmsan.a where there are an
+# operating system's threads and mmap to build on
+sans=asan
+case $triple in *-apple-darwin*|*linux*) sans="asan tsan msan" ;; esac
+for s in $sans; do
+    # shellcheck disable=SC2086
+    "$EMBCC" --target="$triple" $flags -fenum-size-neutral -O1 \
+        --sections=functions,data -c "$here/lib/san/$s.c" -o "$out/rt/$s.o.x" || {
+        echo "build-rt: lib/san/$s.c does not compile for $triple" >&2
+        exit 1; }
+    rm -f "$out/lib$s.a"
+    "$AR" rcs "$out/lib$s.a" "$out/rt/$s.o.x"
+done
 
 # PIC32 (mipsel with --mcu=): EmbCC's startup, the same for every part;
 # the driver makes each part's linker script from its device pack.
@@ -107,7 +141,7 @@ if [ "$triple" = avr ]; then
     for f in "$here"/lib/avr/*.c; do
         b=$(basename "$f" .c)
         for n in $(sed -n 's/^#ifdef \(EMB_AVR_[A-Z0-9_]*\).*/\1/p' "$f"); do
-            "$EMBCC" --target=avr -mmcu=atmega328p -Os -Wall -Wextra -Werror \
+            "$EMBCC" --target=avr -mmcu=atmega328p -Os --stack-info -Wall -Wextra -Werror \
                 -D$n -c "$f" -o "$out/c/$b-$n.o" || {
                 echo "build-rt: lib/avr/$b.c ($n) does not compile" >&2
                 exit 1; }

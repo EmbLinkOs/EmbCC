@@ -464,6 +464,7 @@ int pass_cfgclean(struct ir_func *fn)
         {
             int l2 = j->label;       /* where the branch goes now */
             i->op = i->op == IR_BRZ ? IR_BRNZ : IR_BRZ;
+            i->prob = (short)ir_prob_flip(i->prob);
             j->label = i->label;     /* a jump to the fall-through */
             i->label = l2;
         }

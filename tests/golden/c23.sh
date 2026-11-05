@@ -118,9 +118,9 @@ no 'a non-constant constexpr' \
    'constant'
 no 'an enum with a non-integer underlying type' \
    'enum e : float { A };' 'integer'
-no '#embed with parameters' \
+no '#embed with a vendor parameter EmbCC does not have' \
    'static const unsigned char b[] = {
-#embed "blob.bin" limit(2)
-};' 'not supported'
+#embed "blob.bin" acme::thing(2)
+};' 'is not one EmbCC has'
 
 [ "$fail" -eq 0 ] || exit 1

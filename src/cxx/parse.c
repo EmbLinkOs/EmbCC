@@ -20,6 +20,12 @@
 struct cfunc *cx_curfn;
 struct cstmt *cx_curblk;
 int cx_extern_c;
+/* Inside a module the unit imports (cpp's __embcc_import_begin ...
+ * __embcc_import_end): its interface's object has its definitions, so
+ * here a function with external linkage is declared, not defined, and so
+ * is a variable -- what is inline, constexpr, a template or internal
+ * keeps its body, as each unit using it needs it. */
+static int cx_imported;
 struct cfunc *cx_funcs;
 static struct cfunc *funcs_tail;
 struct cvar **cx_gvars;
@@ -262,6 +268,9 @@ static void parse_attrs(struct attrs *a)
 
 /* `__asm__("symbol")` after a declarator: the name to use in the object. */
 /* A GNU asm statement's string: adjacent literals are one. */
+const char **cx_top_asm;
+int cx_ntop_asm;
+
 static const char *asm_string(const char *what)
 {
     if (cx_kind() != TOK_STR)
@@ -326,8 +335,8 @@ static struct cstmt *parse_asm_stmt(const struct ctok *at)
             a->is_volatile = 1;
         else if (cx_accept(TOK_KW_INLINE))
             a->is_inline = 1;
-        else if (cx_kind() == TOK_KW_GOTO)
-            cx_error(cx_cur(), "asm goto in C++ is not supported yet");
+        else if (cx_accept(TOK_KW_GOTO))
+            a->is_goto = 1;        /* GNU's asm goto: labels it may jump to */
         else
             break;
     }
@@ -341,9 +350,8 @@ static struct cstmt *parse_asm_stmt(const struct ctok *at)
             part += 1;
         else
             break;
-        if (part > 3)
-            cx_error(cx_cur(), "asm goto labels in C++ are not supported "
-                               "yet");
+        if (part > 4 || (part == 4 && !a->is_goto))
+            cx_error(cx_cur(), "a fourth asm section, labels, is asm goto's");
         if (part == 1 && cx_kind() != TOK_COLON &&
             cx_kind() != TOK_COLONCOLON)
             a->nout = asm_operands(&a->outs, 1);
@@ -355,6 +363,15 @@ static struct cstmt *parse_asm_stmt(const struct ctok *at)
                 a->clobs = xrealloc(a->clobs, (size_t)(a->nclob + 1) *
                                               sizeof *a->clobs);
                 a->clobs[a->nclob++] = asm_string("a clobber");
+                if (!cx_accept(TOK_COMMA))
+                    break;
+            }
+        else if (part == 4)
+            while (cx_kind() == TOK_IDENT) {
+                a->labels = xrealloc(a->labels, (size_t)(a->nlabel + 1) *
+                                                sizeof *a->labels);
+                a->labels[a->nlabel++] = cx_cur()->t.text;
+                cx_advance();
                 if (!cx_accept(TOK_COMMA))
                     break;
             }
@@ -2187,6 +2204,8 @@ static struct cfunc *declare_function(struct dspec *ds, struct declarator *d,
     f->name = d->name;
     f->type = ft;
     f->owner = target;
+    if (target->k == SC_NAMESPACE && !(ds->is_friend && !d->qual))
+        f->pos = cx_pos + 1;
     f->cls = cls;
     f->line = d->at ? d->at->t.line : 0;
     f->col = d->at ? d->at->t.col : 0;
@@ -3546,6 +3565,27 @@ static void declare_global_var(struct dspec *ds, struct declarator *d,
         v->is_constexpr = 1;
         v->type = t = ct_qual(t, CQ_CONST);
     }
+    if (cx_imported && !v->is_static && !v->is_inline &&
+        !ds->is_constexpr && !v->defined) {
+        /* an imported module's variable: its interface defines it */
+        if (cx_accept(TOK_ASSIGN)) {
+            int depth = 0;
+            while (cx_kind() != TOK_EOF &&
+                   !(depth == 0 && (cx_kind() == TOK_COMMA ||
+                                    cx_kind() == TOK_SEMI))) {
+                enum tok_kind k = cx_kind();
+                if (k == TOK_LPAREN || k == TOK_LBRACE || k == TOK_LBRACKET)
+                    depth++;
+                else if (k == TOK_RPAREN || k == TOK_RBRACE ||
+                         k == TOK_RBRACKET)
+                    depth--;
+                cx_advance();
+            }
+        } else if (cx_kind() == TOK_LBRACE || cx_kind() == TOK_LPAREN) {
+            cx_skip_balanced();
+        }
+        return;
+    }
     /* `extern "C" int x;` (the linkage-specification's one declaration)
      * declares, as if written extern; inside extern "C" { } it defines */
     int is_def = (ds->storage != SK_EXTERN && cx_extern_c != 1) ||
@@ -3692,9 +3732,29 @@ static void parse_bases(struct cclass *c)
     } while (cx_accept(TOK_COMMA));
 }
 
+/* Tokens [from, to) name a template parameter (not as a member's name
+ * after ::, . or ->): a base they specify is dependent. */
+static int names_tparam(int from, int to)
+{
+    for (int i = from; i < to; i++) {
+        if (cx_toks[i].t.kind != TOK_IDENT)
+            continue;
+        if (i > from) {
+            enum tok_kind k = cx_toks[i - 1].t.kind;
+            if (k == TOK_COLONCOLON || k == TOK_DOT || k == TOK_ARROW)
+                continue;
+        }
+        struct csym *y = lookup_raw(cx_scope, cx_toks[i].t.text);
+        if (y && y->scope && y->scope->k == SC_TEMPLATE)
+            return 1;
+    }
+    return 0;
+}
+
 static void add_base(struct cclass *c, const struct ctok *at, int virt,
                      int access, int *cap)
 {
+    int from = cx_pos;
     {
         struct cty *t;
         int n;
@@ -3729,6 +3789,7 @@ static void add_base(struct cclass *c, const struct ctok *at, int virt,
         cb->cls = b;
         cb->is_virtual = virt;
         cb->access = access;
+        cb->dep = names_tparam(from, cx_pos);
     }
 }
 
@@ -3904,6 +3965,8 @@ static struct cty *parse_class_body(struct cclass *c, enum tok_kind kw,
         inj->type = ct_class(c);
     }
     class_depth++;
+    int lbrace = cx_pos;
+    c->pack = cx_pack_at(lbrace);
     cx_expect(TOK_LBRACE, "'{'");
     int access = c->is_struct ? CA_PUBLIC : CA_PRIVATE;
     while (cx_kind() != TOK_RBRACE) {
@@ -3911,6 +3974,9 @@ static struct cty *parse_class_body(struct cclass *c, enum tok_kind kw,
             cx_error(at, "unterminated class '%s'", c->name ? c->name : "");
         parse_member(c, &access);
     }
+    if (cx_pack_between(lbrace, cx_pos + 1))
+        cx_error(at, "#pragma pack inside a class body is not supported: "
+                     "put it before the class");
     cx_advance();
     struct attrs ta;
     memset(&ta, 0, sizeof ta);
@@ -4876,7 +4942,8 @@ static void parse_linkage_spec(void)
 static int binding_follows(void);
 static struct cstmt *parse_structured_binding(struct cty *ds_type,
                                               struct cexpr *given,
-                                              const struct ctok *at);
+                                              const struct ctok *at,
+                                              const struct dspec *ds);
 static struct cstmt *decl_of(struct cvar *v, const struct ctok *at);
 
 static void parse_declaration(int toplevel, struct cstmt **out)
@@ -4930,11 +4997,67 @@ static void parse_declaration(int toplevel, struct cstmt **out)
         parse_template_decl(enclosing_class(cx_scope), CA_PUBLIC);
         return;
     case TOK_CX_EXPORT:
-        cx_error(at, "modules are not supported");
+        /* C++20: export a declaration, a { } of them, or the module */
+        if (!toplevel)
+            cx_error(at, "'export' belongs at namespace scope");
+        cx_need_std(at, 2020, "'export' (modules)");
+        cx_advance();
+        if (cx_kind() == TOK_IDENT && !strcmp(cx_cur()->t.text, "module")) {
+            while (cx_kind() != TOK_SEMI && cx_kind() != TOK_EOF)
+                cx_advance();
+            cx_accept(TOK_SEMI);
+            return;
+        }
+        if (cx_accept(TOK_LBRACE)) {
+            while (cx_kind() != TOK_RBRACE) {
+                if (cx_kind() == TOK_EOF)
+                    cx_error(at, "unterminated 'export {'");
+                parse_declaration(1, NULL);
+            }
+            cx_advance();
+            return;
+        }
+        parse_declaration(1, NULL);
         return;
+    case TOK_IDENT:
+        if (!toplevel)
+            break;
+        if (!strcmp(at->t.text, "__embcc_import_begin") ||
+            !strcmp(at->t.text, "__embcc_import_end")) {
+            /* (cpp's: an imported module's declarations between) */
+            cx_imported += at->t.text[15] == 'b' ? 1 : -1;
+            while (cx_kind() != TOK_SEMI && cx_kind() != TOK_EOF)
+                cx_advance();
+            cx_accept(TOK_SEMI);
+            return;
+        }
+        if (!strcmp(at->t.text, "module") &&
+            (cx_kind_at(1) == TOK_SEMI || cx_kind_at(1) == TOK_COLON ||
+             (cx_kind_at(1) == TOK_IDENT &&
+              (cx_kind_at(2) == TOK_SEMI || cx_kind_at(2) == TOK_DOT ||
+               cx_kind_at(2) == TOK_COLON)))) {
+            /* module; / module M; / module :private; (cpp read them) */
+            while (cx_kind() != TOK_SEMI && cx_kind() != TOK_EOF)
+                cx_advance();
+            cx_accept(TOK_SEMI);
+            return;
+        }
+        break;
     case TOK_KW_ASM:
-        if (toplevel)
-            cx_error(at, "file-scope asm in C++ is not supported yet");
+        if (toplevel) {
+            /* asm("...") at namespace scope: the block goes to the C
+             * output as it is (cx_emit_unit), where the C side assembles
+             * it as a C unit's */
+            cx_advance();
+            cx_expect(TOK_LPAREN, "'(' after asm");
+            const char *t = asm_string("the asm block");
+            cx_expect(TOK_RPAREN, "')' to close the asm block");
+            cx_expect(TOK_SEMI, "';' after the asm block");
+            cx_top_asm = xrealloc((void *)cx_top_asm,
+                                  (size_t)(cx_ntop_asm + 1) * sizeof *cx_top_asm);
+            cx_top_asm[cx_ntop_asm++] = t;
+            return;
+        }
         break;
     default:
         break;
@@ -4964,10 +5087,7 @@ static void parse_declaration(int toplevel, struct cstmt **out)
     }
     if (ds.type && ds.type->k == CT_AUTO && !ds.type->dauto &&
         binding_follows()) {
-        if (toplevel)
-            cx_error(at, "a structured binding at namespace scope is not "
-                         "supported yet");
-        struct cstmt *d = parse_structured_binding(ds.type, NULL, at);
+        struct cstmt *d = parse_structured_binding(ds.type, NULL, at, &ds);
         if (out)
             *out = d;
         cx_expect(TOK_SEMI, "';' after the declaration");
@@ -5049,6 +5169,17 @@ static void parse_declaration(int toplevel, struct cstmt **out)
                 (cx_kind() == TOK_LBRACE || cx_kind() == TOK_COLON)) {
                 /* replaying one member's definition: not this one */
                 skip_declaration();
+                if (d.saved)
+                    cx_scope = d.saved;
+                return;
+            }
+            if ((cx_kind() == TOK_LBRACE || cx_kind() == TOK_COLON ||
+                 cx_kind() == TOK_CX_TRY) && cx_imported && toplevel &&
+                !f->is_inline && !f->is_constexpr && !f->tmpl &&
+                !(f->is_static && !f->cls)) {
+                struct cfunc scratch;
+                memset(&scratch, 0, sizeof scratch);
+                skip_body(&scratch);     /* (the interface defines it) */
                 if (d.saved)
                     cx_scope = d.saved;
                 return;
@@ -5242,11 +5373,80 @@ static long tuple_size_of(struct cty *E, const struct ctok *at)
  * get<i>. The cursor at the `&` or `[`; ds_type: `auto` with its cv;
  * given: the initializer when a range-based for gives it (else it
  * follows). The declarations made, as a DECL chain. */
+/* Has c, or a base of it, a named non-static data member? */
+static int sb_has_fields(struct cclass *c)
+{
+    class_ensure(c);
+    for (int i = 0; i < c->nfields; i++)
+        if (c->fields[i]->name)
+            return 1;
+    for (int i = 0; i < c->nbases; i++)
+        if (sb_has_fields(c->bases[i].cls))
+            return 1;
+    return 0;
+}
+
+/* A structured binding's variable -- the hidden one, or a tuple-like
+ * name's reference: a local, a static or thread_local one in a function
+ * (C++20), or at namespace scope one of the unit's (internal: no other
+ * unit can name it), initialized in its order. NULL S_DECL for those. */
+static struct cvar *sb_new_var(const char *name, struct cty *t,
+                               const struct ctok *at, const struct dspec *ds,
+                               struct cstmt **decl)
+{
+    struct cvar *v;
+    *decl = NULL;
+    if (cx_curfn) {
+        v = new_local(name, t, at);
+        v->is_tls = ds && ds->is_thread_local;
+        v->is_static = v->is_tls || (ds && ds->storage == SK_STATIC);
+        if (v->is_static)
+            v->disc = static_disc(cx_curfn, name);
+        *decl = decl_of(v, at);
+        return v;
+    }
+    v = xcalloc(1, sizeof *v);
+    v->name = name;
+    v->type = t;
+    v->owner = cx_scope;
+    v->line = at->t.line;
+    v->col = at->t.col;
+    v->file = at->file;
+    v->is_static = 1;
+    v->defined = 1;
+    v->is_tls = ds && ds->is_thread_local;
+    v->cname = cx_scope == cx_global ? name : mangle_var(v, cx_scope);
+    gvar_register(v);
+    return v;
+}
+
+/* the S_DECL chain of a binding's variables (none at namespace scope) */
+static void sb_chain(struct cstmt **head, struct cstmt **tail,
+                     struct cstmt *d)
+{
+    if (!d)
+        return;
+    if (*tail)
+        (*tail)->more = d;
+    else
+        *head = d;
+    *tail = d;
+}
+
 static struct cstmt *parse_structured_binding(struct cty *ds_type,
                                               struct cexpr *given,
-                                              const struct ctok *at)
+                                              const struct ctok *at,
+                                              const struct dspec *ds)
 {
     cx_pedantic(at, 2017, "a structured binding");
+    if (ds && (ds->storage == SK_STATIC || ds->is_thread_local) && cx_curfn)
+        cx_pedantic(at, 2020, "a static or thread_local structured binding");
+    if (ds && (ds->storage == SK_EXTERN || ds->storage == SK_TYPEDEF ||
+               ds->is_inline || ds->is_constexpr))
+        cx_error(at, "a structured binding cannot be %s",
+                 ds->storage == SK_EXTERN ? "extern"
+                 : ds->storage == SK_TYPEDEF ? "a typedef"
+                 : ds->is_inline ? "inline" : "constexpr");
     struct cty *declared = ds_type;
     if (cx_accept(TOK_AMP))
         declared = ct_ref(ds_type, 0);
@@ -5279,28 +5479,20 @@ static struct cstmt *parse_structured_binding(struct cty *ds_type,
     if (na != 1)
         cx_error(at, "a structured binding is initialized by one value");
     /* the hidden variable */
-    struct cvar *e = new_local(cx_fmt("__cx_sb%d", cx_uid()), declared, at);
+    struct cstmt *head = NULL, *tail = NULL, *dd;
+    struct cvar *e = sb_new_var(cx_fmt("__cx_sb%d", cx_uid()), declared, at,
+                                ds, &dd);
     struct cexpr *src = args[0];
     if ((form == INIT_LIST || form == INIT_COPY_LIST) && src->na == 1)
         src = src->a[0];
     if (!ct_is_ref(declared) && src->t->k == CT_ARRAY) {
         /* an array: copied, element by element */
-        struct cty *el = src->t;
-        while (el->k == CT_ARRAY)
-            el = el->to;
-        if (el->k == CT_CLASS && !el->cls->trivial_copy)
-            cx_error(at, "copying an array of '%s' is not supported yet",
-                     ct_name(el));
         e->type = ct_qual(src->t, declared->q);
-        struct cexpr *cp = ex_new(E_CONSTRUCT, e->type, VC_PRVALUE);
-        cp->a = xmalloc(sizeof *cp->a);
-        cp->a[0] = src;
-        cp->na = 1;
-        e->ctor = cp;
+        e->ctor = array_copy(e->type, src, src->vc != VC_LVALUE);
     } else {
         init_variable_with(e, form, args, na, at);
     }
-    struct cstmt *head = decl_of(e, at), *tail = head;
+    sb_chain(&head, &tail, dd);
     struct cty *E = ct_strip_ref(e->type);
     long ts;
     if (E->k == CT_ARRAY) {
@@ -5350,47 +5542,75 @@ static struct cstmt *parse_structured_binding(struct cty *ds_type,
                 ? expr_call_named_targs(obj, "get", gi, 1, NULL, 0, ats[i])
                 : expr_call_named_targs(NULL, "get", gi, 1, &obj, 1, ats[i]);
             struct cty *rt = ct_ref(ty->type, g->vc != VC_LVALUE);
-            struct cvar *r = new_local(names[i], rt, ats[i]);
+            struct cvar *r = sb_new_var(names[i], rt, ats[i], ds, &dd);
             init_variable_with(r, INIT_COPY, &g, 1, ats[i]);
             struct csym *y = scope_add(cx_scope, CS_VAR, names[i]);
             y->var = r;
-            struct cstmt *d = decl_of(r, ats[i]);
-            tail->more = d;
-            tail = d;
+            sb_chain(&head, &tail, dd);
         }
         return head;
     }
     /* the names: parts of e */
     struct cfield *fls[64];
+    struct cclass *holder = NULL;
     if (E->k == CT_CLASS) {
+        /* the members are all of one class: E's, or the one base of it
+         * (at any depth) that has them (9.6/5) */
         struct cclass *c = E->cls;
         class_ensure(c);
+        holder = c;
+        for (;;) {
+            int own = 0;
+            for (int i = 0; i < holder->nfields; i++)
+                own |= holder->fields[i]->name != NULL;
+            struct cclass *next = NULL;
+            for (int i = 0; i < holder->nbases; i++) {
+                struct cclass *b = holder->bases[i].cls;
+                if (!sb_has_fields(b))
+                    continue;
+                if (own)
+                    cx_error(at, "cannot bind names to '%s': both '%s' and "
+                                 "its base '%s' have data members",
+                             ct_name(E), holder->name ? holder->name : "it",
+                             b->name ? b->name : "?");
+                if (next)
+                    cx_error(at, "cannot bind names to '%s': its data "
+                                 "members are in more than one base",
+                             ct_name(E));
+                next = b;
+            }
+            if (own || !next)
+                break;
+            holder = next;
+        }
         int k = 0;
-        for (int i = 0; i < c->nfields; i++) {
-            if (!c->fields[i]->name)
+        for (int i = 0; i < holder->nfields; i++) {
+            if (!holder->fields[i]->name)
                 continue;
             if (k < 64)
-                fls[k] = c->fields[i];
+                fls[k] = holder->fields[i];
             k++;
         }
-        if (!k)
-            for (int i = 0; i < c->nbases; i++)
-                if (c->bases[i].cls->nfields)
-                    cx_error(at, "binding the members of a base of '%s' is "
-                                 "not supported yet", ct_name(E));
         if (k != n)
             cx_error(at, "%d names bind '%s', which has %d members", n,
                      ct_name(E), k);
+        if (holder == c)
+            holder = NULL;
     }
     for (int i = 0; i < n; i++) {
         struct cvar *b = new_local(names[i], E->k == CT_ARRAY ? E->to
                                                               : fls[i]->type,
                                    ats[i]);
         b->sb_var = e;
-        if (E->k == CT_ARRAY)
+        /* (a name for part of a static object: nothing a lambda captures) */
+        b->is_local = e->is_local;
+        b->is_static = e->is_static;
+        if (E->k == CT_ARRAY) {
             b->sb_index = i;
-        else
+        } else {
             b->sb_field = fls[i];
+            b->sb_base = holder;
+        }
         struct csym *y = scope_add(cx_scope, CS_VAR, names[i]);
         y->var = b;
     }
@@ -5643,7 +5863,7 @@ static void parse_range_for(struct cstmt *s, const struct ctok *at,
     struct cstmt *dv;
     if (ds.type->k == CT_AUTO && !ds.type->dauto && binding_follows()) {
         struct cexpr *de = expr_deref(expr_var(bv));
-        dv = parse_structured_binding(ds.type, de, at);
+        dv = parse_structured_binding(ds.type, de, at, NULL);
         if (cx_kind() != TOK_COLON)
             cx_error(cx_cur(), "expected ':' in a range-based for");
     } else {
@@ -6229,8 +6449,14 @@ static struct cstmt *parse_stmt_or_none(void)
     case TOK_KW_GOTO:
         s = st_new(S_GOTO);
         cx_advance();
+        if (cx_accept(TOK_STAR)) {
+            /* GNU's computed goto: goto *expr; (a void *, &&label's) */
+            s->e = rvalue(expr_parse());
+            cx_expect(TOK_SEMI, "';' after goto");
+            return s;
+        }
         if (cx_kind() != TOK_IDENT)
-            cx_error(cx_cur(), "computed goto is not supported in C++");
+            cx_error(cx_cur(), "expected a label after goto");
         s->label = cx_cur()->t.text;
         cx_advance();
         cx_expect(TOK_SEMI, "';' after goto");
@@ -7867,6 +8093,22 @@ void parse_template_decl(struct cclass *cls, int access)
     template_decl_rest(cls, access, at, home, ps, np, req_s, req_e);
 }
 
+
+/* Two template heads that can declare one template: the same kinds of
+ * parameter, packs where packs are. `template<size_t N, class... T>
+ * get(variant<T...>&)` and `template<class U, class... T> get(variant<
+ * T...>&)` have the same function parameters and are two templates:
+ * compared by those alone, the second's body became the first's, and the
+ * first's own definition a third template. */
+static int same_tparam_kinds(const struct ctparam *a, const struct ctparam *b,
+                             int n)
+{
+    for (int i = 0; i < n; i++)
+        if (a[i].kind != b[i].kind || !a[i].pack != !b[i].pack)
+            return 0;
+    return 1;
+}
+
 static void template_decl_rest(struct cclass *cls, int access,
                                const struct ctok *at, struct cscope *home,
                                struct ctparam *ps, int np, int req_s,
@@ -8228,6 +8470,8 @@ static void template_decl_rest(struct cclass *cls, int access,
         f->type = t;
         f->tmpl = tm;
         f->owner = home;
+        if (home->k == SC_NAMESPACE && !ds.is_friend)
+            f->pos = cx_pos + 1;
         f->cls = ds.is_friend ? NULL : ocls;
         f->hidden_friend = ds.is_friend && !d.qual;
         f->is_ctor = d.kind == DN_CTOR;
@@ -8268,6 +8512,7 @@ static void template_decl_rest(struct cclass *cls, int access,
          * differ only where a pattern cannot compare them) */
         for (struct cfunc *g = *set; g; g = g->next)
             if (g->tmpl && g->tmpl->nparams == np &&
+                same_tparam_kinds(g->tmpl->params, ps, np) &&
                 same_signature(g->type, t) &&
                 (!has_body || !g->tmpl->has_body)) {
                 if (!ds.is_friend)
@@ -8404,6 +8649,20 @@ static void parse_explicit_instantiation(int is_extern)
     if (d.saved)
         cx_scope = d.saved;
     cx_expect(TOK_SEMI, "';'");
+    if (ft->k != CT_FUNC && d.vtmpl) {
+        /* template int v<int>; : a variable template's instance, defined
+         * here whether or not the unit uses it (extern: another unit's,
+         * though its weak copy may still be made for a use here) */
+        struct cvar *v = var_instance(d.vtmpl, d.targs, d.ntargs, at);
+        if (ft->k != CT_AUTO && !ct_same(ct_unqual(v->type), ct_unqual(ft)))
+            cx_error(at, "explicit instantiation of '%s' as %s, but it is %s",
+                     d.vtmpl->name, ct_name(ft), ct_name(v->type));
+        if (!is_extern) {
+            v->used = 1;
+            v->explicit_inst = 1;
+        }
+        return;
+    }
     if (ft->k != CT_FUNC) {
         /* template T A<X>::m; : a static data member of an instance —
          * defined here (its definition out of the class, replayed), or,
@@ -8411,8 +8670,9 @@ static void parse_explicit_instantiation(int is_extern)
         struct csym *y = d.qual && d.qual->k == SC_CLASS && d.name
                          ? scope_find_here(d.qual, d.name) : NULL;
         if (!y || y->k != CS_VAR)
-            cx_error(at, "explicit instantiation of a variable template is "
-                         "not supported yet");
+            cx_error(at, "'%s' is not a static data member of a class "
+                         "template's instance, or a variable template's",
+                     d.name ? d.name : "this");
         struct cvar *v = y->var;
         if (is_extern) {
             v->extern_inst = 1;

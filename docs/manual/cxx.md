@@ -11,8 +11,7 @@ also listed in [Invoking EmbCC](invoking.md).
 
 EmbCC parses C++20 with GNU extensions. Most of the core language of
 C++98 through C++20 is implemented, and several C++23 features are too.
-The largest gaps are modules, two-phase name lookup, and parts of
-constant evaluation. The [feature tables](#language-features) give the
+The largest gap is parts of constant evaluation. The [feature tables](#language-features) give the
 status of each feature and the exact diagnostic for each refusal.
 
 C++ is supported on the x86-64 and AArch64 ELF targets. There, objects
@@ -21,19 +20,17 @@ by g++ and with libstdc++, and exceptions propagate between the two. The
 headers and the sources of GCC's libstdc++ compile with EmbCC. EmbCC
 also ships its own C++ runtime and standard library (`lib/libcxx`).
 
-On the Darwin and Windows targets C++ works with restrictions. On the
-32-bit ARM targets (Cortex-M and ARM state) and on `riscv32-unknown-elf`
-C++ is supported without exceptions (`--no-exceptions`), with or without
-RTTI, following the ARM C++ ABI and the Itanium ABI's 32-bit form;
-objects link with clang++'s. The same holds on MIPS32 (both byte
-orders), big-endian MIPS64, PowerPC, SPARC, ColdFire, Xtensa, TriCore and
-RX, with the generic Itanium ABI laid out by each target's data model and
-byte order; on MIPS, SPARC and PowerPC objects link with clang++'s, and on
-Xtensa with g++'s. On `riscv64-unknown-elf`, `mips64el-none-elf` and
-`loongarch64-unknown-elf` C++ is not supported: a unit compiles when
-exceptions are turned off (`--no-exceptions`), and is not tested. With
-exceptions on it is refused, since EmbCC writes no unwind tables for these
-machines. On AVR EmbCC refuses to generate code for C++. See
+C++ is compiled for every target. Exceptions are thrown and caught on the
+x86-64 and AArch64 targets (ELF, Linux, macOS and Windows), on the 32-bit
+ARM targets (Cortex-M and ARM state, with ARM EHABI's `.ARM.exidx`
+tables), on RISC-V at both widths, on MIPS32 and MIPS64 in either byte
+order, on Xtensa (the windowed ABI's own unwinder) and on TriCore (an
+unwinder that walks the CSA chain). On PowerPC, SPARC, ColdFire, RX and
+LoongArch a unit with exceptions is refused by name, and compiles with
+`--no-exceptions`. On AVR, C++ compiles with exceptions off, its default
+there. Each target follows its C++ ABI (the ARM C++ ABI on ARM, the
+Itanium ABI's generic form laid out by the target's data model and byte
+order elsewhere), and objects link with clang++'s and g++'s. See
 [Targets](#targets).
 
 EmbCC compiles C++ by lowering it to C, which the C front end, the
@@ -50,6 +47,7 @@ A file is compiled as C++ when its name ends in one of these suffixes:
 | Suffix | |
 |---|---|
 | `.cc`, `.cpp`, `.cxx`, `.C`, `.c++`, `.cp`, `.CPP`, `.ii` | C++ source |
+| `.cppm`, `.ixx`, `.mpp`, `.ccm`, `.cxxm`, `.c++m` | C++ source, usually a module interface unit (see [Modules](#modules)) |
 
 The suffix test is case-sensitive: `.C` and `.CPP` are C++, `.c` is C. A
 `.ii` file is preprocessed again like any other C++ source.
@@ -223,14 +221,14 @@ this:
 |---|---|---|---|
 | `x86_64-elf`, `aarch64-elf`, `-emblink` | Supported | Supported | `libcxx.a`, or libsupc++/libstdc++; libgcc's unwinder |
 | `x86_64-linux-gnu`, `aarch64-linux-gnu` | Supported | Supported | `libcxx.a`; the unwinder in EmbCC's `librt.a` |
-| `arm64-apple-darwin` | Supported | Supported | the system's C++ runtime |
-| `x86_64-apple-darwin` | Supported | Objects do not link | the system's C++ runtime |
-| `x86_64-windows-gnu` | Restricted | Not supported | none |
-| `riscv64-unknown-elf`, `mips64el-none-elf`, `loongarch64-unknown-elf` | Not supported; compiles with `--no-exceptions`, untested | Refused | none |
-| 32-bit ARM: Cortex-M (`thumbv6m-none-eabi`, `thumbv7m-none-eabi`, `thumbv7em-none-eabi[hf]`, `thumbv8m.main-none-eabi[hf]`) and `armv7a-none-eabi[hf]` | Supported with `--no-exceptions` | Refused | the embedded `libcxx.a` (`make libcxx-embedded`) |
-| `riscv32-unknown-elf` | Supported with `--no-exceptions` | Refused | the embedded `libcxx.a` (`make libcxx-embedded`) |
-| `mipsel-none-elf`, `mips-none-elf`, `mips64-none-elf`, `powerpc-none-eabi`, `sparc-none-elf`, `m68k-none-elf`, `xtensa-none-elf`, `tricore-none-elf`, `rx-none-elf` | Supported with `--no-exceptions` | Refused | the embedded `libcxx.a` (`make libcxx-embedded`) |
-| `avr` | Refused | Not supported | none |
+| `arm64-apple-darwin`, `x86_64-apple-darwin` | Supported | Supported | the system's C++ runtime |
+| `x86_64-windows-gnu` | Supported | Supported: `.pdata`/`.xdata`, `__gxx_personality_seh0` | MinGW's libstdc++ (objects only: link with MinGW's toolchain) |
+| 32-bit ARM: Cortex-M (`thumbv6m-none-eabi`, `thumbv7m-none-eabi`, `thumbv7em-none-eabi[hf]`, `thumbv8m.main-none-eabi[hf]`) and `armv7a-none-eabi[hf]` | Supported | Supported: ARM EHABI | the embedded `libcxx.a` (`make libcxx-embedded`) |
+| `riscv32-unknown-elf`, `riscv64-unknown-elf` | Supported | Supported | the embedded `libcxx.a` |
+| `mipsel-none-elf`, `mips-none-elf`, `mips64el-none-elf`, `mips64-none-elf` | Supported | Supported | the embedded `libcxx.a` |
+| `xtensa-none-elf`, `tricore-none-elf` | Supported | Supported | the embedded `libcxx.a` |
+| `powerpc-none-eabi`, `sparc-none-elf`, `m68k-none-elf`, `rx-none-elf`, `loongarch64-unknown-elf` | Supported | Refused by name: `C++ exceptions are not supported for TARGET yet: EmbCC writes no ... .eh_frame; compile with --no-exceptions` | the embedded `libcxx.a` |
+| `avr` | Supported | Off by default | the embedded `libcxx.a`, linked with `--gc-sections` |
 
 **x86-64 and AArch64 ELF.** These are the C++ targets. `libcxx.a` is
 built for `x86_64-elf`, `aarch64-elf`, `x86_64-linux-gnu` and
@@ -381,45 +379,28 @@ each of these boards under QEMU (Malta for MIPS, `ppce500`, LEON3,
 `mcf5208evb`, the Xtensa `sim` board, the TriCore test board and RX's
 `gdbsim`) at `--opt=none`, `--opt=basic`, `--opt=speed` and `--opt=size`, and each prints what the host's
 clang++ build prints. The run-time library is the embedded `libcxx.a`, as
-above (without `__aeabi_atexit`'s caller, which is ARM's). Exceptions are
-refused by name, as on ARM, because EmbCC writes no unwind tables for
-these machines:
+above (without `__aeabi_atexit`'s caller, which is ARM's). It runs
+`tests/cxx-embedded/exceptions.cc` too, where the target has them: a
+throw caught by type and by base class, a rethrow, and the destructors
+of the objects the throw leaves, on ARM (EHABI), RISC-V, MIPS, Xtensa
+and TriCore. Where exceptions are not written yet, the unit
+is refused by name:
 
 ```text
-embcc: error: C++ exceptions are not supported for mips-none-elf yet: EmbCC writes no MIPS .eh_frame; compile with -fno-exceptions
+embcc: error: C++ exceptions are not supported for sparc-none-elf yet: EmbCC writes no SPARC .eh_frame; compile with --no-exceptions
 ```
 
-**AVR.** EmbCC refuses to generate code for a C++ unit there, whether with
-`-c`, `-S` or `--emit-c`. The front end lays classes out by AVR's sizes,
-but its lowering still assumes a 32-bit `int` (integral promotions,
-enumerations, literals), a member pointer's adjustment as wide as a
-`long`, and RTTI's base offsets one pointer wide; and no AVR C++ runtime
-is built.
+**AVR.** C++ follows AVR's two-byte `int` and pointers: `size_t` and
+`ptrdiff_t` are the target's, array cookies, member pointers, vtable
+slots and RTTI's base offsets are laid out by them, and literals have
+AVR's types. `lib/avr` gives the runtime what it needs (`malloc`,
+`stdout`, `atexit`, `abort`), and `libcxx.a` is built with a section per
+function, so a link with `--gc-sections` keeps only what a program uses
+of it. Exceptions are off by default; asked for, they are refused by
+name, as above.
 
-```text
-embcc: error: C++ is not yet supported for avr: the C++ lowering assumes a 32-bit int and 4-byte pointers (integral promotions, member pointers, RTTI), and this target's are 16 bits
-```
-
-`--syntax-only`, which writes nothing, is accepted.
-
-**`riscv64-unknown-elf`.** The front end's data model is the target's,
-and a C++ unit compiles, but C++ is not supported there:
-
-- No `libcxx.a` is built for the target.
-- Exceptions are not implemented. With exceptions on, any function that
-  needs a landing pad is refused, and that includes a function whose
-  local object has a destructor:
-
-  ```text
-  error: the RV64 backend cannot lower this operation yet (function F) [landing w=8 size=4]
-  ```
-
-- The `.eh_frame` section a C++ unit gets cannot be used by an unwinder;
-  `--no-unwind-tables` removes it.
-
-A unit compiled with `--no-exceptions --no-unwind-tables` (and
-`--no-rtti`, there being no runtime to supply `type_info`) produces an
-object, but EmbCC does not test C++ on this target.
+**`riscv64-unknown-elf`.** C++ is supported, with exceptions and RTTI,
+on the RV64 boards `tests/golden/cxx-embedded.sh` runs.
 
 ## Language features
 
@@ -449,9 +430,9 @@ refuses it, with the diagnostic shown. Diagnostics are quoted without the
 | Class, function and member templates | Supported | |
 | Explicit and partial specialization | Supported | The most specialized partial specialization is chosen. |
 | Template template parameters | Supported | |
-| Explicit instantiation | Supported | Not for variable templates (C++14 row). |
-| Two-phase name lookup | Not supported | Names in a template are looked up when it is instantiated; see [Name lookup in templates](#name-lookup-in-templates). |
-| `export` templates | Not supported | `modules are not supported` |
+| Explicit instantiation | Supported | Classes, functions, members, and variable templates (`template int v<int>;`). |
+| Two-phase name lookup | Partial | Functions are bound at the definition, plus argument-dependent lookup at instantiation; dependent bases are not searched unqualified. See [Name lookup in templates](#name-lookup-in-templates). |
+| `export` templates | Not supported | C++11 removed them; `export` is the C++20 module keyword |
 | `throw`, `try`, `catch`, function-try-blocks, `throw()` | Supported | On the targets in [Targets](#targets). |
 | `typeid`, `dynamic_cast`, `std::type_info` | Supported | Errors under `--no-rtti`. |
 | `static_cast`, `const_cast`, `reinterpret_cast` | Supported | |
@@ -460,8 +441,8 @@ refuses it, with the diagnostic shown. Diagnostics are quoted without the
 | Local classes; anonymous unions and structures in classes | Supported | |
 | Bit-fields, also in classes with bases or virtual functions | Supported | |
 | Function-local `static` objects | Supported | Initialization is guarded by `__cxa_guard_acquire` and `__cxa_guard_release`. |
-| Namespace-scope objects with constructors and destructors | Partial | Constructors run from `.init_array`, in definition order within a unit; destructors are registered with `__cxa_atexit`. An array of objects with destructors at namespace scope: `a namespace-scope array of objects with destructors is not supported yet` |
-| Copying or assigning a class whose member is an array of a class with a non-trivial copy or assignment | Not supported | `copying an array of 'S' is not supported yet`; `assigning an array of objects is not supported yet` |
+| Namespace-scope objects with constructors and destructors | Supported | Constructors run from `.init_array`, in definition order within a unit; destructors are registered with `__cxa_atexit`. An array of them is destroyed last element first; a `thread_local` array when its thread ends. |
+| Copying or assigning a class whose member is an array of a class with a non-trivial copy or assignment | Supported | Element by element, in order; the elements already copied are destroyed if a copy throws. |
 
 ### C++11
 
@@ -472,7 +453,7 @@ refuses it, with the diagnostic shown. Diagnostics are quoted without the
 | Lambdas | Supported | Captures by copy, by reference, `this`, capture defaults; conversion of a captureless lambda to a function pointer. |
 | Range-based `for` | Supported | Over arrays, `begin`/`end` members or functions found by ADL, and braced lists. |
 | `constexpr` | Supported | See [Constant evaluation](#constant-evaluation). |
-| `std::initializer_list`, list-initialization | Partial | Needs `<initializer_list>`; without it: `std::initializer_list is not declared (#include <initializer_list>)`. An initializer on array `new`: `an initializer for new[] is not supported yet`. Narrowing conversions are not diagnosed. |
+| `std::initializer_list`, list-initialization | Partial | Needs `<initializer_list>`; without it: `std::initializer_list is not declared (#include <initializer_list>)`. Array `new` takes a list (`new T[n]{a, b}`, `new T[]{a, b}`, C++20's `new T[n](a, b)`): the leading elements from it, with brace elision, the rest value-initialized; a run-time bound shorter than the list throws `std::bad_array_new_length` (traps without exceptions). Narrowing conversions are not diagnosed. |
 | `enum class`, fixed underlying types, opaque enum declarations | Supported | |
 | `static_assert` | Supported | `static assertion failed: MESSAGE` |
 | `nullptr`, `std::nullptr_t` | Supported | |
@@ -505,7 +486,7 @@ refuses it, with the diagnostic shown. Diagnostics are quoted without the
 | Init-captures | Supported | |
 | Return type deduction, `decltype(auto)` | Supported | |
 | Relaxed `constexpr` | Supported | Loops, local variables and assignment in constant evaluation. |
-| Variable templates | Partial | Explicit and partial specialization work. Explicit instantiation: `explicit instantiation of a variable template is not supported yet` |
+| Variable templates | Yes | Explicit and partial specialization, explicit instantiation (`template int v<int>;`, `extern template`). |
 | Binary literals, digit separators | Supported | |
 | `[[deprecated]]` | Partial | Accepted; no warning is issued. |
 | Sized deallocation | Supported | Deleting destructors call `operator delete(void *, std::size_t)`. |
@@ -515,7 +496,7 @@ refuses it, with the diagnostic shown. Diagnostics are quoted without the
 
 | Feature | Status | Notes |
 |---|---|---|
-| Structured bindings | Partial | Arrays, data members, tuple-like classes; in declarations and range-`for`; `static`; captured by lambdas. Members of a base class: `binding the members of a base of 'D' is not supported yet`. At namespace scope: `a structured binding at namespace scope is not supported yet` |
+| Structured bindings | Yes | Arrays, data members (the class's own, or of the one base that has them), tuple-like classes; in declarations and range-`for`, at namespace scope, `static` and `thread_local` in a function (C++20); captured by lambdas. |
 | `if constexpr` | Supported | The discarded branch is not instantiated. |
 | `if` with an initializer | Supported | |
 | `switch` with an initializer | Supported | `switch (init; cond)`, with a declaration in the condition too. |
@@ -547,7 +528,7 @@ refuses it, with the diagnostic shown. Diagnostics are quoted without the
 | `constinit` | Partial | Accepted and not checked. |
 | Designated initializers | Supported | Member designators in declaration order. |
 | Coroutines: `co_await`, `co_yield`, `co_return` | Supported | Symmetric transfer, `await_transform`, promise allocation functions. `co_await` in the initializer of a `static` local: `co_await here is not supported yet` |
-| Modules | Not supported | `export`: `modules are not supported`. `module` and `import`: `expected a declaration before 'module'`, `expected a declaration before 'import'` |
+| Modules | Supported | Named modules, partitions, implementation units, header units, `import std;`. See [Modules](#modules). |
 | `using enum` | Supported | |
 | Template parameter lists on lambdas; lambdas in unevaluated operands; default-constructible captureless lambdas; `[=, this]` | Supported | |
 | Pack expansion in an init-capture (`[...xs = a]`) | Not supported | `expected a capture` |
@@ -580,7 +561,7 @@ refuses it, with the diagnostic shown. Diagnostics are quoted without the
 | `z` and `uz` literal suffixes | Supported | |
 | `#elifdef`, `#elifndef` | Supported | |
 | `[[assume]]` | Accepted | |
-| Multidimensional subscript operator | Not supported | `'M' has no viable operator[]` |
+| Multidimensional subscript operator | Yes | `m[i, j]`, `m[]`, braced arguments, packs, a `static operator[]`; before C++23 `a[x, y]` is first read as a comma expression, as GCC does. |
 | `auto(x)`, `auto{x}` | Supported | A prvalue copy of `x`, of its decayed type. |
 
 ### C++26
@@ -599,12 +580,14 @@ for them, and `--pedantic` reports them before C++26.
 ### Name lookup in templates
 
 A template's tokens are kept, and each instantiation parses them again
-with the template arguments bound. Two-phase lookup is therefore not
-implemented:
+with the template arguments bound. Lookup follows the two phases of the
+standard:
 
-- A name that does not depend on a template parameter is looked up at
-  the point of instantiation, not at the template's definition. In this
-  program g++ calls `g(double)`; EmbCC calls `g(int)`:
+- Ordinary unqualified and qualified lookup of a function name in a
+  template sees the functions declared before the template's
+  definition. Functions declared later are found only by
+  argument-dependent lookup at the point of instantiation. In this
+  program both g++ and EmbCC call `g(double)`:
 
   ```cpp
   void g(double);
@@ -613,14 +596,65 @@ implemented:
   int x = f<int>();
   ```
 
-- An unqualified name is found in a dependent base class, where the
-  standard requires `this->`.
+- An unqualified name is not looked up in a base class whose specifier
+  names a template parameter. Write `this->m()` or `B<T>::m()` to reach
+  its members.
+
+Two differences remain:
+
+- Variables, types and namespaces are looked up at the point of
+  instantiation, not at the definition. A program sees a difference only
+  when such a name is declared after the template and also found before
+  it.
 - The body of a template that is never instantiated is not checked; an
   undeclared name in it is not diagnosed.
 
 Substitution failure (SFINAE), partial ordering of function templates,
 deduction through alias templates and constraint checking follow the
 standard.
+
+### Modules
+
+From `--std=c++20`, `module` and `import` lines are read by the
+preprocessor, as C++20 specifies. Compiling an interface unit, one that
+begins `export module NAME;`, writes `NAME.ebmi` beside its object, or
+into the directory `--module-dir=DIR` names. A partition `NAME:PART`
+writes `NAME-PART.ebmi`. `import NAME;` looks for the file in the
+current directory, in each `--module-dir`, in each
+`-fprebuilt-module-path=DIR`, and beside the object being compiled. Its
+interface unit is compiled first:
+
+```sh
+embcc --std=c++20 -c math.cppm -o math.o     # writes math.ebmi
+embcc --std=c++20 -c main.cpp -o main.o      # import math;
+embcc math.o main.o -o prog
+```
+
+An `.ebmi` file holds the global module fragment's directives as
+written, and the purview as preprocessed. An import reads the directives
+again, so a header that both units include is read once. It then reads
+the purview without expanding the importer's macros. Macros defined in
+the module are not visible to the importer.
+
+The interface unit's object holds its definitions. In the importer, a
+function or variable with external linkage is only declared. What every
+unit needs keeps its definition: templates, `inline` and `constexpr`
+functions, inline variables, and names with internal linkage.
+
+- An implementation unit, `module NAME;`, imports its interface.
+- `import :PART;` imports a partition of the unit's own module.
+- `export import` re-exports a module.
+- `module :private;` ends what the interface exports.
+- A header unit, `import <vector>;` or `import "x.h";`, includes the
+  header, and its macros are visible.
+- `import std;` and `import std.compat;` read every standard header the
+  library has.
+
+Two differences from the standard remain. Names a module does not export
+are visible to the importer, though the standard hides them. Entities
+attached to a module are mangled as if they were not, as g++ did before
+version 15, so two modules that define the same exported name collide
+at link time. `__cpp_modules` is not defined.
 
 ### Constant evaluation
 
@@ -703,10 +737,6 @@ These are refused in C++:
 
 | Extension | Diagnostic |
 |---|---|
-| `asm goto` | `asm goto in C++ is not supported yet` |
-| File-scope `asm` | `file-scope asm in C++ is not supported yet` |
-| Label addresses (`&&label`) | `label addresses are not supported in C++` |
-| Computed `goto` | `computed goto is not supported in C++` |
 | `_Atomic` | `_Atomic is not supported in C++` |
 | A variable-length array of class type | `a variable-length array of S is not supported` |
 | `sizeof` of a variable-length array | `sizeof a variable-length array is not supported` |

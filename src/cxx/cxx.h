@@ -31,6 +31,8 @@ extern int cx_ntoks;
 extern int cx_pos;            /* the parser's cursor */
 
 void cx_tokenize(const char *file, const char *src);
+int cx_pack_at(int pos);               /* #pragma pack in effect there */
+int cx_pack_between(int from, int to); /* ... changed in (from, to)? */
 static inline struct ctok *cx_cur(void) { return &cx_toks[cx_pos]; }
 static inline struct ctok *cx_peek(int k)
 {
@@ -233,6 +235,7 @@ struct cvar {
     /* thread_local: one object per thread. Lowered to C's __thread,
      * which is the same storage under the other language's name. */
     int is_tls;
+    int tls_wrapper_done;     /* its _ZTW wrapper (and _ZTH) is emitted */
     int is_member_static;     /* a static data member */
     int explicit_spec;        /* a static member of an instance given its
                                * own (template<> T A<X>::m ...;): not the
@@ -261,6 +264,7 @@ struct cvar {
                                * member sb_field of this hidden variable,
                                * or its element sb_index */
     struct cfield *sb_field;
+    struct cclass *sb_base;   /* ... of this base of it (its members') */
     int sb_index;
     int ce_state;             /* consteval.c: its object evaluated (2), being
                                * (1), only its address known (3) */
@@ -312,6 +316,9 @@ struct csym {
     int access;               /* in a class: CA_* */
     struct csym *next;        /* in the scope's list */
     struct csym *hnext;       /* in the lookup hash chain */
+    struct csym *vis;         /* FUNC: the overloads declared before a
+                               * replayed template's tokens, once made */
+    int nvis;                 /* ... how many */
 };
 
 enum { CA_PUBLIC, CA_PROTECTED, CA_PRIVATE };
@@ -629,6 +636,9 @@ struct cfunc {
     const char **pnames;      /* parameter names (np of them) */
     struct cexpr **defargs;   /* default arguments, per parameter (or NULL) */
     struct cscope *owner;     /* namespace or class scope */
+    int pos;                  /* a namespace's: cx_pos + 1 where declared;
+                               * a template replayed from earlier tokens
+                               * does not see it (0: seen everywhere) */
     struct cclass *cls;       /* a member function */
     int is_static;            /* static member, or internal linkage */
     int is_inline;            /* inline (incl. defined in a class body) */
@@ -668,6 +678,7 @@ struct cfunc {
     int fmt_kind, fmt_idx, fmt_first;
     const char *section;
     const char *asm_name;     /* `__asm__("name")`: the symbol instead */
+    const char *asm_cname;    /* the C name it has in the lowered C (fn_name) */
     const char **abi_tags;    /* __abi_tag__("...") (sorted) */
     int nabi_tags;
     int access;
@@ -719,6 +730,9 @@ struct cfunc {
 };
 
 extern struct cfunc *cx_funcs;       /* all functions, declaration order */
+/* file-scope asm blocks' templates, in order, for the C output */
+extern const char **cx_top_asm;
+extern int cx_ntop_asm;
 void func_register(struct cfunc *f); /* append to cx_funcs */
 
 enum {
@@ -761,6 +775,9 @@ struct cbase {
                                * its offset (bytes from the address point) */
     int claimed;              /* ... a subobject's primary base: at its
                                * address, taking no space of its own */
+    int dep;                  /* its specifier names a template parameter:
+                               * unqualified lookup does not search it
+                               * (13.8.3.2) */
 };
 
 /* A slot of a vtable: the final overrider it calls, and how to get there
@@ -827,6 +844,7 @@ struct cclass {
     int vtable_done, rtti_used, rtti_done;
     long align_attr;          /* __attribute__((aligned)) / alignas */
     int packed;
+    int pack;                 /* #pragma pack(N): members' alignment cap */
     int is_final;             /* declared `final` */
     int explicit_spec;        /* an instance given as template<> ... */
     struct ctarg *inst_bound; /* ... the partial specialization's own
@@ -938,9 +956,10 @@ enum cexpr_kind {
                    * what it returns: 0 void, 1 bool, 2 a handle (a[2] its
                    * address) — and the value a[3], await_resume(); coro
                    * 1 the initial suspend, 2 the final */
-    E_DEFARG      /* a member function's default argument, unread: its
+    E_DEFARG,     /* a member function's default argument, unread: its
                    * tokens at ival, read in dscope when a call first
                    * uses it (the class complete, 7.2.2); then a[0] */
+    E_LABADDR     /* GNU's &&label: text the label's name, type void * */
 };
 
 enum { VC_PRVALUE, VC_LVALUE, VC_XVALUE };
@@ -979,10 +998,17 @@ struct cexpr {
     struct cstmt *body;       /* E_STMTEXPR */
     struct cty *alloc_t;      /* E_NEW/E_DELETE: the object (element) type */
     struct cexpr *count;      /* E_NEW[]: the element count */
-    struct cexpr *init;       /* E_NEW: the object's initialization */
+    struct cexpr *init;       /* E_NEW: the object's initialization; of
+                               * new[]: each element's past `elems` */
+    struct cexpr **elems;     /* E_NEW[] with a list: the first elements' */
+    int nelems;
     long cookie;              /* E_NEW/E_DELETE[]: array cookie bytes */
     int is_array;             /* E_NEW/E_DELETE: [] form */
     int zero;                 /* E_CONSTRUCT: zero-initialize first */
+    int elemwise;             /* E_CONSTRUCT from array a[0], E_ASSIGN of
+                               * arrays: element by element, init doing
+                               * one (reading __cx_cs[__cx_ci], writing
+                               * __cx_cd[__cx_ci]) */
     int adl;                  /* E_OVL: an unqualified name — argument-
                                * dependent lookup adds candidates */
     int memptr;               /* E_OVL: written &C::f — to become a pointer
@@ -1015,6 +1041,8 @@ struct cexpr *ex_materialize(struct cexpr *e);   /* a prvalue's temporary */
 struct cexpr *ex_member(struct cexpr *obj, struct cfield *fl);
 /* `l op r` (op a TOK_ assignment operator), overloaded or built-in. */
 struct cexpr *expr_assign(int op, struct cexpr *l, struct cexpr *r);
+struct cexpr *array_copy(struct cty *t, struct cexpr *src, int move);
+struct cexpr *array_elem_var(const char *cname, struct cty *t);
 /* A class that is passed and returned through memory (Itanium: not
  * trivially copyable or destructible): by reference to a temporary, into
  * a return slot. */
@@ -1358,6 +1386,9 @@ struct casm {
     int nout, nin;
     const char **clobs;
     int nclob;
+    int is_goto;              /* asm goto: labels, the fourth section */
+    const char **labels;
+    int nlabel;
 };
 
 /* ---- coroutines (coro.c) ---- */

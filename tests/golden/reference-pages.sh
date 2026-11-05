@@ -41,7 +41,7 @@ done
 echo "reference-pages: the committed pages are what the compiler prints"
 
 # ---- warnings ---------------------------------------------------------------
-"$EMBCC" --help-warnings | sed -n 's/^  --warn=\([a-z0-9-]*\) .*/\1/p' > "$out/w.names"
+"$EMBCC" --help-warnings | sed -n 's/^  --warn=\([a-z0-9.-]*\) .*/\1/p' > "$out/w.names"
 nw=$(wc -l < "$out/w.names" | tr -d ' ')
 [ "$nw" -ge 30 ] || fail "--help-warnings listed only $nw warnings"
 while read -r w; do

@@ -27,13 +27,15 @@ link="$EMBCC_ROOT/tests/harness/$ARCH/link.sh"
 for cc in tests/cxx/*.cc; do
     [ -e "$cc" ] || continue
     name=$(basename "$cc" .cc)
+    # (a `// std: c++23` line: the standard both compilers take; C++20 else)
+    std=$(sed -n 's|.*// std: *\(c++[0-9a-z]*\).*|\1|p' "$cc" | head -1)
     rm -f "$out_dir/$name".*
-    "$EMBCC" --target="$TARGET" -I"$NL/include" -c "$cc" \
+    "$EMBCC" --target="$TARGET" ${std:+-std=$std} -I"$NL/include" -c "$cc" \
         -o "$out_dir/$name.embcc.o" || { echo "$name: embcc failed"; exit 1; }
     EMBCC_REF_GXX=$REF "$link" --cxx -o "$out_dir/$name.embcc" \
         "$out_dir/$name.embcc.o" || { echo "$name: link failed"; exit 1; }
     # Strict ISO C++20 (not gnu++20): EmbCC's C++ must stay standard C++.
-    "$GXX" -std=c++20 -c "$cc" -o "$out_dir/$name.gxx.o" || {
+    "$GXX" -std=${std:-c++20} -c "$cc" -o "$out_dir/$name.gxx.o" || {
         echo "$name: not valid C++20 for g++"; exit 1; }
     EMBCC_REF_GXX=$REF "$link" --cxx -o "$out_dir/$name.gxx" \
         "$out_dir/$name.gxx.o" || { echo "$name: link of g++ object failed"; exit 1; }

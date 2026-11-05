@@ -15,7 +15,9 @@ typedef unsigned long _Unwind_Word;
 typedef long _Unwind_Sword;
 typedef unsigned long _Unwind_Ptr;
 typedef unsigned long _Unwind_Internal_Ptr;
-typedef unsigned long _Unwind_Exception_Class;
+/* eight bytes everywhere, as libgcc's: "GNUCC++\0" does not fit a
+ * 32-bit unsigned long */
+typedef unsigned long long _Unwind_Exception_Class;
 /* LEB128's decoded values (libgcc's unwind-pe.h reads them) */
 typedef unsigned long _uleb128_t;
 typedef long _sleb128_t;
@@ -30,9 +32,60 @@ typedef enum {
     _URC_END_OF_STACK = 5,
     _URC_HANDLER_FOUND = 6,
     _URC_INSTALL_CONTEXT = 7,
-    _URC_CONTINUE_UNWIND = 8
+    _URC_CONTINUE_UNWIND = 8,
+    _URC_FAILURE = 9                 /* EHABI's */
 } _Unwind_Reason_Code;
 
+#if defined(__ARM_EABI__) && !defined(__ARM_DWARF_EH__)
+/* ---- 32-bit ARM: the Exception Handling ABI for the ARM Architecture
+ * (EHABI), as lib/rt/unwind_arm.c implements it and GCC's libgcc does.
+ * The exception header is the unwinder control block; a personality
+ * routine is given a state, and unwinds its frame itself
+ * (__gnu_unwind_frame) when it does not stop there. */
+#define __EMBCC_ARM_EHABI 1
+typedef int _Unwind_State;
+#define _US_VIRTUAL_UNWIND_FRAME  0
+#define _US_UNWIND_FRAME_STARTING 1
+#define _US_UNWIND_FRAME_RESUME   2
+#define _US_ACTION_MASK           3
+#define _US_FORCE_UNWIND          8
+#define _US_END_OF_STACK          16
+typedef unsigned _uw;
+struct _Unwind_Control_Block;
+typedef struct _Unwind_Control_Block _Unwind_Control_Block;
+struct _Unwind_Control_Block {
+    char exception_class[8];
+    void (*exception_cleanup)(_Unwind_Reason_Code, _Unwind_Control_Block *);
+    struct { _uw reserved1, reserved2, reserved3, reserved4, reserved5; }
+        unwinder_cache;
+    struct { _uw sp; _uw bitpattern[5]; } barrier_cache;
+    struct { _uw bitpattern[4]; } cleanup_cache;
+    struct { _uw fnstart; _uw *ehtp; _uw additional; _uw reserved1; }
+        pr_cache;
+    long long int : 0;
+} __attribute__((__aligned__(8)));
+#define _Unwind_Exception _Unwind_Control_Block
+typedef void (*_Unwind_Exception_Cleanup_Fn)(_Unwind_Reason_Code,
+                                             _Unwind_Control_Block *);
+typedef enum { _UVRSC_CORE = 0, _UVRSC_VFP = 1 } _Unwind_VRS_RegClass;
+typedef enum { _UVRSD_UINT32 = 0, _UVRSD_VFPX = 1, _UVRSD_DOUBLE = 5 }
+    _Unwind_VRS_DataRepresentation;
+typedef enum { _UVRSR_OK = 0, _UVRSR_NOT_IMPLEMENTED = 1,
+               _UVRSR_FAILED = 2 } _Unwind_VRS_Result;
+struct _Unwind_Context;
+typedef struct _Unwind_Context _Unwind_Context;
+_Unwind_VRS_Result _Unwind_VRS_Get(_Unwind_Context *, _Unwind_VRS_RegClass,
+                                   _uw, _Unwind_VRS_DataRepresentation,
+                                   void *);
+_Unwind_VRS_Result _Unwind_VRS_Set(_Unwind_Context *, _Unwind_VRS_RegClass,
+                                   _uw, _Unwind_VRS_DataRepresentation,
+                                   void *);
+_Unwind_VRS_Result _Unwind_VRS_Pop(_Unwind_Context *, _Unwind_VRS_RegClass,
+                                   _uw, _Unwind_VRS_DataRepresentation);
+_Unwind_Reason_Code __gnu_unwind_frame(_Unwind_Control_Block *,
+                                       _Unwind_Context *);
+void _Unwind_Complete(_Unwind_Control_Block *);
+#else
 struct _Unwind_Exception;
 
 typedef void (*_Unwind_Exception_Cleanup_Fn)(_Unwind_Reason_Code,
@@ -46,6 +99,7 @@ struct _Unwind_Exception {
     _Unwind_Word private_1;
     _Unwind_Word private_2;
 } __attribute__((__aligned__));
+#endif
 
 typedef int _Unwind_Action;
 

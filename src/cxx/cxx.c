@@ -20,6 +20,7 @@ void cxx_set_rtti(int on)
 char *cxx_translate(const char *file, const char *src)
 {
     scope_init();
+    cx_ntop_asm = 0;
     cx_tokenize(file, src);
     cx_parse_unit();
     return cx_emit_unit();

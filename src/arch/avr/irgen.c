@@ -38,6 +38,7 @@
  * caller -- and silently, because the asm itself would work. The message
  * names the register.
  */
+#include "../../as/gas.h"
 #include "../../ir/irgen_int.h"
 
 #include "../target.h"
@@ -389,7 +390,7 @@ void irg_asm_avr(struct ir_func *fn, struct stmt *s)
                            names, nops);
     struct code c = { 0 };
     char err[512];
-    if (avrasm_assemble(text, &c, err, sizeof err) != 0 ||
+    if (GAS_INLINE(avrasm_assemble, file, s->line, text, &c, err, sizeof err) != 0 ||
         code_asm_settle(&c, 2, CODE_FILL_ZERO, err, sizeof err) < 0)
         diag_fatal(file, s->line, "%s (assembling \"%s\")", err, text);
     free(text);

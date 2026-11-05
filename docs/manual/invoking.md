@@ -18,8 +18,7 @@ Each option is one of three kinds, and its entry says which:
   behaves the way it asks, or because doing nothing is harmless. Each such
   entry says which.
 - **Refused.** The option names a promise about the generated code that
-  EmbCC cannot keep (position independence, stack protection, profiling,
-  link-time optimization, and so on). The driver stops with an error that
+  EmbCC cannot keep (stack-clash protection, profiling, and so on). The driver stops with an error that
   names the option, so a build never receives an object that silently
   lacks what it asked for.
 
@@ -727,9 +726,7 @@ name is what `--print-target`, `--version` and diagnostics print.
 
 The ARM sub-architecture also follows from `--cpu=` and the float ABI, so
 `--target=thumbv7m-none-eabi --cpu=cortex-m4` reports itself as
-`thumbv7em-none-eabi`. Every compile for `x86_64-windows-gnu` prints the
-`--warn=windows-abi` warning, because the Windows calling convention is not yet
-complete. What each target supports is in [Targets](targets.md).
+`thumbv7em-none-eabi`. What each target supports is in [Targets](targets.md).
 
 ### The default target
 
@@ -1449,23 +1446,22 @@ status.
 
 ### `-g`, `--debug`
 
-Emit DWARF version 4 debug information (`.debug_info`, `.debug_abbrev`,
-`.debug_line`) on every ELF target. See [Debugging](debugging.md).
+Emit DWARF version 5 debug information (`.debug_info`, `.debug_abbrev`,
+`.debug_line`, and `.debug_loclists` for the variables the optimizer
+keeps in registers) on every ELF target. See [Debugging](debugging.md).
 
-`-g1`, `-g2`, `-g3`, `-ggdb`, `-gdwarf`, `-gdwarf-2`, `-gdwarf-3` and
-`-gdwarf-4` are all accepted and mean `-g`: EmbCC emits one kind of debug
-information, so a level or version that asks for no more than DWARF 4
-gets exactly that.
+`-g1`, `-g2`, `-g3`, `-ggdb` and `-gdwarf` mean `-g`. `-gdwarf-4` (and
+`-gdwarf-2`, `-gdwarf-3`) writes DWARF 4, and `-gdwarf-5` DWARF 5.
+`-gsplit-dwarf` puts most of it in `FILE.dwo`, and `-gz` compresses the
+debug sections with zlib.
 
 `-g` can change the code generated. On some targets it keeps a frame and
 a stack home for each variable, and it disables tail calls on ARMv7-M, so
 that the debugger can find every variable. Build with the same `-g`
 setting you ship with if you compare code size.
 
-`-g` is refused in three situations, each with an error naming the cause:
+`-g` is refused in two situations, each with an error naming the cause:
 
-- for the `-apple-darwin` targets (`-g is not supported for a Darwin
-  target yet: its DWARF goes in a __DWARF segment this does not write ...`);
 - for `x86_64-windows-gnu` (`-g is not supported for a Windows target
   yet: its debug information goes in CodeView records this does not
   write ...`);
@@ -1475,16 +1471,16 @@ setting you ship with if you compare code size.
 
 ### Refused debugging options
 
-A DWARF version EmbCC does not emit, split DWARF and compressed debug
-sections are refused rather than downgraded:
+A DWARF version EmbCC does not write, and a compression format other
+than zlib, are refused rather than replaced:
 
 ```text
-embcc: error: -gdwarf-5 is not supported; EmbCC emits DWARF 4, uncompressed and in one piece
+embcc: error: -gdwarf-6: EmbCC writes DWARF 4 or 5
+embcc: error: -gz=zstd: EmbCC compresses debug sections with zlib (-gz=zlib) or not at all (-gz=none)
 ```
 
-The same message is given for `-gsplit-dwarf` and `-gz`. `-g0` and
-`-gline-tables-only` are not accepted (unknown argument); to compile
-without debug information, omit `-g`.
+`-g0` and `-gline-tables-only` are not accepted (unknown argument); to
+compile without debug information, omit `-g`.
 
 ### `--stack-usage`
 
@@ -1666,7 +1662,10 @@ when a header is deleted.
 ### Assembly input
 
 A `.s` or `.S` file is assembled by EmbCC's built-in GNU-syntax assembler
-for the selected target: AArch64, ARM (Thumb), RISC-V, MIPS32 or AVR. A `.S` file
+for the selected target: AArch64, ARM (Thumb), RISC-V, MIPS32, AVR, the
+other embedded families, or x86-64 in AT&T syntax for an ELF target
+(`x86_64-elf`, `x86_64-linux-gnu`; not Mach-O or COFF, which the
+assembler does not write). A `.S` file
 is preprocessed first; `-D` and `-U` apply, but the `-I` and `--system-include`
 directories are not searched (a `#include "file"` beside the source is
 found). The inline-assembly vocabulary of each target is listed in
@@ -1882,8 +1881,8 @@ options:
 | `FILE.so`, `FILE.so.N` | a shared object, linked with `--libc=system`; otherwise refused: `embcc: error: x.so is a shared object, which EmbLD does not link; --libc=system links a Linux program against the system's` |
 | `-specs=FILE`, `--specs=FILE` | accepted: `nano.specs` and `nosys.specs` choose GCC's newlib and its system-call stubs, and EmbCC links its own C library and runtime; a link notes once `embcc: note: -specs=nano.specs is ignored: EmbCC links its own C library and runtime, not newlib`, and a compile says nothing |
 | `-pthread` | with `--libc=system`, `_REENTRANT` and `-lpthread`; otherwise nothing (EmbCC's C library has no threads, macOS's libSystem has them) |
-| `-rdynamic`, `-no-pie` | unknown argument |
-| `-shared`, `-static-pie` | refused: `embcc: error: -shared needs position-independent code, which EmbCC does not emit` |
+| `-rdynamic` | unknown argument |
+| `-shared`, `-pie`, `-static-pie`, `-no-pie` | see [`-shared`, `-pie`, `-static-pie`, `-no-pie`](#-shared--pie--static-pie--no-pie) |
 
 ## Asking EmbCC
 
@@ -2156,9 +2155,9 @@ across units, and EmbCC does not.
 
 ### `-fno-isolate-erroneous-paths-dereference`, `-fno-move-loop-invariants`, `-fno-ipa-sra`, `-fno-lto`
 
-Accepted and without effect. EmbCC turns no null dereference into a
-trap, and has no passes under the other three names; `-fno-lto` is the
-default (`-flto` is [refused](#refused-options)). EmbCC's loop-invariant
+Accepted. EmbCC turns no null dereference into a trap and has no passes
+under the next two names; `-fno-lto` turns off `-flto` (see
+[Link-time optimization](optimization.md#link-time-optimization)). EmbCC's loop-invariant
 motion is the `licm` pass, turned off with `--no-pass=licm`.
 
 ### `-fsanitize-trap`, `-fsanitize-trap=LIST`, `-fsanitize-undefined-trap-on-error`
@@ -2185,14 +2184,62 @@ embcc: '-fstack-protector-strong' is not supported (EmbCC emits no stack protect
 Accepted. EmbCC does not generate code that calls through a procedure
 linkage table.
 
-### `-fno-pic`, `-fno-pie`
+### `-fPIC`, `-fpic`, `-fPIE`, `-fpie`, `-fno-pic`, `-fno-pie`
 
-Accepted, with `-fno-PIC` and `-fno-PIE`. EmbCC's code is not position
-independent (`-fPIC` is [refused](#refused-options)): an x86-64 jump
-table holds absolute addresses, a Cortex-M address is a `movw`/`movt`
-pair, and `embld` links no position-independent executable. The Darwin
-targets' code is PC-relative because Mach-O requires it, and links the
-same way either way.
+Position-independent code, on the x86-64, AArch64 and RISC-V ELF
+targets. Another target refuses it, naming itself:
+
+```text
+embcc: error: position-independent code (-fPIC, -fPIE, -shared, -pie) is written for x86-64, AArch64 and RISC-V; thumbv7em-none-eabi's is not yet
+```
+
+- `-fPIE` (for an executable) reaches what the unit defines
+  PC-relatively, and an undefined function's or variable's address
+  through the GOT (`R_X86_64_GOTPCREL`, `R_AARCH64_ADR_GOT_PAGE` with
+  `R_AARCH64_LD64_GOT_LO12_NC`, `R_RISCV_GOT_HI20`). A hidden undefined
+  symbol is PC-relative, because the module defines it.
+- `-fPIC` (for a shared object) reaches any symbol another module may
+  define through the GOT. That is every global that is neither `static`
+  nor hidden or protected, defined here or not. A call to a function
+  defined in the unit is direct, as with GCC's
+  `-fno-semantic-interposition`. A call elsewhere is `R_X86_64_PLT32` or
+  `R_AARCH64_CALL26`, and the linker makes the PLT entry.
+- Thread-locals use the initial-exec model under `-fPIC`, and for one
+  another module defines under `-fPIE`: the offset from the thread
+  pointer comes from the GOT (`R_X86_64_GOTTPOFF`,
+  `R_AARCH64_TLSIE_*`). A shared object using them must be loaded at
+  program start, or fit in the static TLS space glibc keeps for
+  `dlopen`. The general-dynamic model (`__tls_get_addr`) is not written.
+- An x86-64 `switch` dispatches through a table of offsets, not of
+  addresses, and a `const` object that holds an address goes in `.data`
+  rather than `.rodata`, so that no relocation lands in read-only
+  memory.
+
+`-fno-pic`, `-fno-PIC`, `-fno-pie` and `-fno-PIE` turn it off again.
+The Darwin targets' code is PC-relative because Mach-O requires it,
+whichever is given.
+
+### `-shared`, `-pie`, `-static-pie`, `-no-pie`
+
+What the link makes. In the same command, each also selects `-fPIC`
+(`-shared`) or `-fPIE` (the others) for the sources it compiles, unless
+a `-f[no-]pic` option says otherwise.
+
+- With `--libc=system`, the system's linker makes each one: `-shared` a
+  shared object, `-pie` an executable starting from glibc's `Scrt1.o`,
+  and `-static-pie` one starting from `rcrt1.o`.
+- With EmbCC's own C library, EmbLD makes `-pie` and `-static-pie`
+  executables on x86-64. Both are `ET_DYN` images linked at `0x400000`
+  with `PT_PHDR` and `PT_DYNAMIC`, and every absolute pointer is an
+  `R_X86_64_RELATIVE` in `.rela.dyn`. The C library's start code
+  applies those relocations before anything else runs, wherever the
+  kernel loaded the image. A GOT load in such an image is relaxed to
+  the address it would read (`lea`, or `mov $0` for an undefined weak
+  symbol), as ld relaxes it. EmbLD does not write shared objects yet:
+
+```text
+embcc: error: -shared: EmbLD does not write shared objects yet; with --libc=system the system's linker (--linker=) makes them
+```
 
 ### `-fno-zero-initialized-in-bss`
 
@@ -2258,15 +2305,13 @@ what EmbCC's spellings get.
 
 | Option | Message |
 |---|---|
-| `-fPIC`, `-fpic`, `-fPIE`, `-fpie` | `embcc: error: -fPIC is not supported; EmbCC would emit ordinary code and the flag's promise would not hold` |
-| `-flto` | (same form) |
 | `-fprofile-*`, `--coverage`, `-fcoverage-mapping`, `-pg` | (same form) |
 | `-fstack-clash-protection`, `-fcf-protection`, `-fcf-protection=...` | (same form) |
 | `-fsanitize*` other than the forms in [`--sanitize`](#--sanitizelist---no-sanitizelist) | (same form) |
 | `--sanitize=NAME` for a check EmbCC does not have | `--sanitize=NAME is not supported: EmbCC's sanitizer inserts checks that TRAP ...` |
 | `-fstack-protector`, `-fstack-protector-all`, `-fstack-protector-strong`, `-fstack-protector-explicit` | `embcc: '-fstack-protector...' is not supported (EmbCC emits no stack protection); -fno-stack-protector is` |
-| `-shared`, `-static-pie` | `embcc: error: -shared needs position-independent code, which EmbCC does not emit` |
-| `-gdwarf-5` (any version but 2 to 4), `-gsplit-dwarf`, `-gz` | `embcc: error: -gdwarf-5 is not supported; EmbCC emits DWARF 4, uncompressed and in one piece` |
+| `-gdwarf-N` for a version other than 2 to 5 | `embcc: error: -gdwarf-6: EmbCC writes DWARF 4 or 5` |
+| `-gz=FORMAT` other than `zlib` and `none` | `embcc: error: -gz=zstd: EmbCC compresses debug sections with zlib (-gz=zlib) or not at all (-gz=none)` |
 | `--isa=arm` | `--isa=arm is not supported: a Cortex-M has no ARM instruction set, only Thumb` |
 | `--no-unaligned-access` (ARM) | `--no-unaligned-access is not supported: EmbCC's ARMv7-M code uses word and halfword loads and stores at unaligned addresses ...` |
 | `--abi=apcs-gnu`, `--abi=atpcs`, `--abi=iwmmxt` (ARM) | `--abi=apcs-gnu is not supported: EmbCC emits the AAPCS ...` |

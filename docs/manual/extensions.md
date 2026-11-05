@@ -424,16 +424,23 @@ embcc: attr.c:1: warning: attribute 'frobnicate' is not one EmbCC knows, and is 
 | `aligned(N)`, `aligned` | The function's first instruction is at an address that is a multiple of `N` (16 with no argument). It counts on any declaration, and the strictest wins. `__alignof__` of the function gives `N`, or without the attribute the instruction set's own boundary: 1 on x86-64, AVR and RX, 2 on Thumb, ColdFire, TriCore and RISC-V with compressed instructions, and 4 elsewhere, as GCC answers |
 | `alias("target")` | The function or variable is another name for `target`, which must be a function, or a variable, defined in the same file and not itself an alias. The declaration with `alias` cannot have a body or an initializer, and a variable alias has no storage of its own: inside the file it is `target`, to the optimizer as well. Combine with `weak` for a weak alias. ELF only; see [Object formats](#object-formats) |
 | `always_inline` | Lifts the inliner's size limit for calls to this function, at every level including `--opt=none`; see [Inlining](optimization.md#inlining) |
+| `cold`, `hot` | A `cold` function goes to `.text.unlikely` and is compiled for size, and a path that calls it is moved out of the way; a `hot` one goes to `.text.hot`. See [Profile-guided optimization](coverage-and-profiles.md#without-a-profile) |
 | `constructor`, `destructor` | The function's address is placed in `.init_array` or `.fini_array`, for the startup code to call before `main` or at exit. On a bare-metal target the program's own startup code walks the tables; see [Startup code](embedded.md#startup-code-and-the-linkers-symbols). A `static` one is kept although nothing calls it. ELF only |
+| `counted_by(member)`, `counted_by_or_null(member)`, `sized_by(member)`, `sized_by_or_null(member)` | On a flexible array member or a pointer member: `member` holds its length, in elements (`sized_by`: bytes). [`--bounds-safety`](runtime-checks.md#bounds-safety) checks every subscript against it, and `__builtin_dynamic_object_size` answers with it |
 | `deprecated`, `deprecated("message")` | A call, a read, or taking the address warns under [`--warn=deprecated-declarations`](diagnostics.md#--warndeprecated-declarations), on by default. The message text is not printed |
 | `embcc_sret` | EmbCC's own. On the first parameter, before its type, it marks that parameter as the address of the returned aggregate, passed where the target's ABI passes it. EmbCC's C++ lowering writes it; hand-written C has no need of it |
 | `format(archetype, string-index, first-to-check)` | Calls are checked under [`--warn=format`](diagnostics.md#--warnformat), which `--warn=all` enables. The archetypes checked are `printf`, `gnu_printf`, `scanf` and `gnu_scanf`; any other (`strftime`, `strfmon`) is accepted and not checked. Both indexes are 1-based; `first-to-check` is 0 for a function that takes a `va_list` |
 | `gnu_inline` | GNU89 `inline` semantics for this function: a definition that says `extern inline` is used only for inlining and never emitted, and one that says `inline` alone is an external definition. See [Inline functions](c-language.md#inline-functions) |
+| `nocf_check` | x86-64 `--cf-protection=branch`: no `endbr64` at the function's entry, so an indirect call to it faults. For a function only ever called directly |
 | `noinline` | The function is never inlined |
+| `no_profile_instrument_function` | `--coverage` and `--profile-generate` leave the function uncounted |
+| `no_sanitize("KIND", ...)`, `no_sanitize_address`, `no_address_safety_analysis`, `no_sanitize_thread`, `no_sanitize_memory`, `no_sanitize_undefined`, `disable_sanitizer_instrumentation` | The named sanitizer leaves the function alone. See [Sanitizers](runtime-checks.md#turning-a-check-off-for-one-function) |
+| `no_stack_protector` | `--stack-protector` never protects the function |
 | `no_instrument_function` | `--instrument-functions` leaves the function alone. It counts on any declaration: a plain prototype followed by a definition with it works |
 | `noreturn`, `_Noreturn`, `[[noreturn]]` | The function does not return. A call to it ends a path for EmbCC's check that every path through a non-`void` function returns a value ([E0008](diagnostics.md#diagnostic-ids)). EmbCC does not check that the function itself never returns |
 | `nothrow` | The function throws no C++ exception: a call to it inside a C++ `try` region gets no landing pad |
 | `pcs("aapcs")`, `pcs("aapcs-vfp")` | ARM only. See [`pcs`](#pcs) |
+| `stack_protect` | The function is protected as `--stack-protector=strong` protects one (as `=all` does, when that is given), whatever the command line says; under `--stack-protector=explicit` only such functions are |
 | `section("name")` | The function's code is placed in section `name`. See [`section`](#section) |
 | `unused` | Suppresses [`--warn=unused-function`](diagnostics.md#--warnunused-function) for this function |
 | `used` | The function is emitted even if nothing in the translation unit refers to it, as for a handler reached only from a table or from assembly |
@@ -629,10 +636,9 @@ records for each.
 | Attribute | Why it has no effect |
 |---|---|
 | `access` | It describes pointer-argument accesses for warnings EmbCC does not issue |
-| `alloc_align`, `alloc_size`, `counted_by` | EmbCC has no object-size checking |
+| `alloc_align`, `alloc_size` | EmbCC has no object-size checking of allocations |
 | `artificial` | It marks a function for a debugger's stepping |
 | `assume_aligned` (attribute) | It promises a returned pointer's alignment, which only a pass that widens accesses could use |
-| `cold`, `hot` | EmbCC does not reorder code by frequency |
 | `const`, `pure` | EmbCC does not eliminate repeated calls; it infers whether a function reads or writes memory by itself |
 | `copy` | The attributes worth copying are recorded on the declaration itself |
 | `designated_init` | It asks for a warning; the layout is unaffected |
@@ -642,7 +648,6 @@ records for each.
 | `leaf` | Nothing in EmbCC reasons across a call this way |
 | `malloc` | It says the result aliases nothing, which only an alias analysis could use |
 | `may_alias` | EmbCC does no type-based alias analysis |
-| `no_sanitize`, `no_sanitize_address`, `no_sanitize_undefined` | EmbCC has no sanitizers of these kinds |
 | `noclone` | EmbCC never clones a function |
 | `noipa` | The only interprocedural pass is the inliner, which `always_inline` and `noinline` control |
 | `nonnull`, `returns_nonnull` | EmbCC does not track or check null pointers |
@@ -705,7 +710,7 @@ Some attributes need support from the object-file writer.
 | `section` on a variable | Supported | The object goes in segment `__DATA`, in a section with the name as written. A `"segment,section"` name is not split | `'b': a variable's section attribute is not supported for COFF output` |
 | `section` on a function | Supported | `a function's section attribute is not supported for Mach-O output` | `a function's section attribute is not supported for COFF output` |
 | `alias` | Supported | `alias attribute on 'f' is not supported for Mach-O output` | `alias attribute on 'f' is not supported for COFF output` |
-| `constructor`, `destructor` | `.init_array`, `.fini_array` | `__attribute__((constructor)) is not supported for a Darwin target yet: it needs a __DATA,__mod_init_func section this Mach-O writer does not emit` | `__attribute__((constructor)) is not supported for a Windows target yet: it needs the .ctors/.dtors sections this COFF writer does not emit` |
+| `constructor`, `destructor` | `.init_array`, `.fini_array` | `__DATA,__mod_init_func`, ordered by priority. Destructors are listed in `__DATA,__embcc_dtors` and registered with `__cxa_atexit` when the image starts, as clang does, because dyld no longer runs `__mod_term_func` | `__attribute__((constructor)) is not supported for a Windows target yet: it needs the .ctors/.dtors sections this COFF writer does not emit` |
 | `weak` | Supported | Supported | Accepted with no effect |
 | `visibility` | Supported | Accepted with no effect | Accepted with no effect |
 
@@ -1498,6 +1503,10 @@ definition starts, including a definition inside a function. `_Pragma("pack(1)")
 is the same as `#pragma pack(1)`. The argument is not macro-expanded, as
 in GCC on ELF targets.
 
+In C++ the limit also caps the alignment of a class's bases and of its
+vptr, as in GCC and Clang; a class template's instances take the limit in
+effect where the template is defined, not where it is used.
+
 | Refused | Diagnostic |
 |---|---|
 | A value other than 0, 1, 2, 4, 8 or 16, or a macro name | `#pragma pack wants 1, 2, 4, 8 or 16` |
@@ -1505,9 +1514,8 @@ in GCC on ELF targets.
 | `pack(pop, ...)` with arguments | `#pragma pack(pop, ...) with a name or count is not supported` |
 | `pack(pop)` with nothing saved | `#pragma pack(pop) without a matching push` |
 | More than 32 nested pushes | `#pragma pack(push) nested too deeply` |
-| Inside a structure body | `#pragma pack inside a struct body is not supported: put it before the struct` |
+| Inside a structure body | `#pragma pack inside a struct body is not supported: put it before the struct` (C++: `... inside a class body ...: put it before the class`) |
 | Without parentheses, `#pragma pack 1` | `#pragma pack needs its arguments in parentheses` |
-| In C++ | `#pragma pack is not supported in C++: it would change the layout and EmbCC would ignore it. Use __attribute__((packed)) on the struct` |
 
 ### `#pragma once`
 

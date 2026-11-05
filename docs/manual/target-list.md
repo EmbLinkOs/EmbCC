@@ -35,11 +35,11 @@ Every target `--target=` accepts, generated from EmbCC's target database (`src/t
 | `thumbv7em-none-eabi` | bare metal, ARMv7E-M (Cortex-M4, M7) | ELF | `thumbv7em`, `armv7em-none-eabi` |
 | `thumbv6m-none-eabi` | bare metal, ARMv6-M (Cortex-M0, M0+) | ELF | `thumbv6m`, `armv6m-none-eabi` |
 | `thumbv8m.base-none-eabi` | bare metal, ARMv8-M Baseline (Cortex-M23) | ELF | `thumbv8m.base`, `armv8m.base-none-eabi` |
-| `thumbv8m.main-none-eabi` | bare metal, ARMv8-M Mainline (Cortex-M33, M55) | ELF | `thumbv8m.main`, `thumbv8m-none-eabi`, `armv8m.main-none-eabi` |
+| `thumbv8m.main-none-eabi` | bare metal, ARMv8-M Mainline (Cortex-M33, M55) | ELF | `thumbv8m.main`, `thumbv8m-none-eabi`, `armv8m.main-none-eabi`, `thumbv8.1m.main-none-eabi`, `thumbv8.1m.main`, `armv8.1m.main-none-eabi` |
 | `thumbv7em-none-eabihf` | bare metal, ARMv7E-M (Cortex-M4, M7), hardware float | ELF |  |
 | `armv7a-none-eabi` | bare metal, ARMv7-A in ARM state | ELF | `armv7a`, `armv7-none-eabi`, `armv7a-unknown-none-eabi` |
 | `armv7a-none-eabihf` | bare metal, ARMv7-A in ARM state, hardware float | ELF | `armv7a-unknown-none-eabihf` |
-| `thumbv8m.main-none-eabihf` | bare metal, ARMv8-M Mainline (Cortex-M33, M55), hardware float | ELF |  |
+| `thumbv8m.main-none-eabihf` | bare metal, ARMv8-M Mainline (Cortex-M33, M55), hardware float | ELF | `thumbv8.1m.main-none-eabihf` |
 
 ## RISC-V, 32-bit
 

@@ -21,6 +21,7 @@
  * A `float` arrives as a double. A struct is its own bytes, by value; a
  * _Complex is its two parts, each taken as an argument of its own.
  */
+#include "../../as/gas.h"
 #include "../../ir/irgen_int.h"
 #include "asm.h"
 #include "emit.h"
@@ -437,7 +438,7 @@ void irg_asm_xtensa(struct ir_func *fn, struct stmt *s)
     struct code c = { 0 };
     char err[512];
     xtasm_set_pc(-1);
-    if (xtasm_assemble(text, &c, err, sizeof err) != 0)
+    if (GAS_INLINE(xtasm_assemble, file, s->line, text, &c, err, sizeof err) != 0)
         diag_fatal(file, s->line, "%s", err);
     free(text);
 

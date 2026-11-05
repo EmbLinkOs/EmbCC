@@ -3808,7 +3808,10 @@ static void gen_ins(struct t_fn *F, int n)
         gen_atomic(F, n);
         return;
     case IR_LANDING:
-        v6_refuse(fn, i, "an exception landing pad");
+        /* r0 the exception, r1 the selector (EHABI); into slots */
+        if (i->b >= 0)
+            v_wr(F, i->b, 1);
+        v_wr(F, i->dst, 0);
         return;
     case IR_LABELADDR: {
         if (cg_label_mark(i))       /* static data's marker: no code */
@@ -4169,6 +4172,7 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     F.fn = fn; F.t = t; F.st = st;
     F.keep_vars = keep_vars;
     fn->nlines = 0;                 /* -g: this attempt's rows only */
+    fn->ncsites = 0;
     F.wide = tcg_wide64_map(fn);
     tcg_frame_addr_map(&F);
     F.nshr = ra_narrow_hishift(fn);
@@ -4179,7 +4183,7 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     F.scr_save = SCR_SET;
     F.fb = T_SP;
     g6_s0 = 6; g6_s1 = 7;
-    if (tcg_regalloc()) {
+    if (tcg_regalloc() && !fn->neh) {
         /* -g, and -O0: every source variable in its slot (codegen.c's
          * g_t_o0), the temporaries in registers */
         char *pin = keep_vars || tcg_o0() ? ra_debug_pin_vars(fn)
@@ -4325,6 +4329,7 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         t->ndrange = nd0;
         g6_nfar = 0;
         fn->nlines = nl0;
+        fn->ncsites = 0;            /* (this pass's calls) */
         st->ncall = sc0; st->next = se0; st->nstr = ss0; st->ng = sg0;
         st->nf = sf0;
         F.nfix = 0;
@@ -4502,8 +4507,11 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         }
 
         /* ---- body ---- */
+        ra_debug_pc_begin(fn);
         for (i = 0; i < fn->nins; i++) {
             pool_point(&F, v6_est(&F, i), 1);
+            if (fn->ins_pc)
+                fn->ins_pc[i] = t->len;
             unsigned rpush = 0;
             F.ins_mask = 0;
             ra_each_use(&fn->ins[i], ins_mask_of, &F);
@@ -4522,7 +4530,12 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
             g6_fdead_ins = v6_flagless_ins(&fn->ins[i]);
             g6_role_n = 0;
             g6_cur = &fn->ins[i];
+            int call_at = t->len;
             gen_ins(&F, i);
+            if (fn->neh && fn->ins[i].op == IR_CALL)   /* an LSDA call site */
+                ir_add_csite(fn, (int)(call_at - f->code_off),
+                             (int)(t->len - f->code_off),
+                             fn->ins[i].eh_region - 1);
             if (rpush) {
                 t1_pop(t, rpush);
                 for (unsigned b = rpush; b; b &= b - 1)
@@ -4806,8 +4819,14 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     }
     v6_scan(&F, f->code_off);
     f->code_len = t->len - f->code_off;
-    if (target_debug_info())
+    if (target_debug_info() || target_unwind_tables())
         v6_record_cfi(&F, f->code_off);
+    for (int r = 0; r < fn->neh; r++)       /* where each landing pad is */
+        fn->eh[r].lp_off = (int)(F.label_off[fn->eh[r].lp_label] -
+                                 f->code_off);
+    /* -g: r0-r7 are DWARF 0-7; slots are frame-base relative; a pair is
+     * two registers in a row */
+    ra_debug_finish(fn, t->len, F.loc, NULL, 0, F.slot, -1, F.wide, 1, 4);
     /* ...and the variadic register save area pushed before it */
     f->stack_bytes = (F.nopush ? 0 : (int)(F.frame +
                                            mask_bytes(save_mask6(&F, F.scr_save)))) +

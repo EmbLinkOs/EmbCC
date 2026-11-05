@@ -39,8 +39,11 @@ enum {
  * Cortex-M0/M0+/M1 has the OS extension (SVC and the process stack). */
 /* ARMv8-M Baseline is 16 and, like Mainline, THUMB_ISA_use 3 (clang for
  * thumbv8m.base -mcpu=cortex-m23). */
+/* ARMv8.1-M Mainline is 21 (clang for thumbv8.1m.main), the same
+ * THUMB_ISA_use 3. */
 enum { CPU_ARCH_V6S_M = 12, CPU_ARCH_V7 = 10, CPU_ARCH_V7E_M = 13,
-       CPU_ARCH_V8M_BASE = 16, CPU_ARCH_V8M_MAIN = 17 };
+       CPU_ARCH_V8M_BASE = 16, CPU_ARCH_V8M_MAIN = 17,
+       CPU_ARCH_V81M_MAIN = 21 };
 
 struct buf {
     unsigned char *p;
@@ -108,9 +111,11 @@ unsigned char *arm_build_attributes(size_t *len)
     /* The ARCHITECTURE's name, not a part number: EmbCC emits the same
      * code for every part of a profile, and naming one it was not told
      * about would be a claim it cannot support. */
-    bstr(&attrs, a32 ? "7-A" : v8 ? "8-M.MAIN" : v8b ? "8-M.BASE"
-                 : v6 ? "6S-M" : em ? "7E-M" : "7-M");
+    int v81 = target_thumb_v81();
+    bstr(&attrs, a32 ? "7-A" : v81 ? "8.1-M.MAIN" : v8 ? "8-M.MAIN"
+                 : v8b ? "8-M.BASE" : v6 ? "6S-M" : em ? "7E-M" : "7-M");
     btag(&attrs, Tag_CPU_arch, a32 ? CPU_ARCH_V7
+                             : v81 ? CPU_ARCH_V81M_MAIN
                              : v8 ? CPU_ARCH_V8M_MAIN
                              : v8b ? CPU_ARCH_V8M_BASE
                              : v6 ? CPU_ARCH_V6S_M
