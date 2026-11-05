@@ -353,6 +353,255 @@ static const struct { const char *name; int op; } am_tab[] = {
     { "amxor_db", LA_AMXOR }, { NULL, 0 }
 };
 
+
+/* ---- floating point (F and D) ---------------------------------------------
+ *
+ * The base opcodes are llvm-mc's own, read off its encoding of each
+ * instruction with every register field zero (tools/asm-audit referees
+ * the result over clang's lp64d output); the formats are the manual's,
+ * checked the same way with every field non-zero. */
+enum { LF_F3, LF_F2, LF_FR, LF_RF, LF_CSRR, LF_RCSR, LF_CF, LF_FC, LF_CR,
+       LF_RC, LF_F4, LF_FSEL, LF_FMEM, LF_FMEMX, LF_BC, LF_I16, LF_UD };
+static const struct { const char *name; unsigned long op; int fmt; } lf_tab[] = {
+    { "fadd.s", 0x01008000, LF_F3 },
+    { "fadd.d", 0x01010000, LF_F3 },
+    { "fsub.s", 0x01028000, LF_F3 },
+    { "fsub.d", 0x01030000, LF_F3 },
+    { "fmul.s", 0x01048000, LF_F3 },
+    { "fmul.d", 0x01050000, LF_F3 },
+    { "fdiv.s", 0x01068000, LF_F3 },
+    { "fdiv.d", 0x01070000, LF_F3 },
+    { "fmax.s", 0x01088000, LF_F3 },
+    { "fmax.d", 0x01090000, LF_F3 },
+    { "fmin.s", 0x010A8000, LF_F3 },
+    { "fmin.d", 0x010B0000, LF_F3 },
+    { "fmaxa.s", 0x010C8000, LF_F3 },
+    { "fmaxa.d", 0x010D0000, LF_F3 },
+    { "fmina.s", 0x010E8000, LF_F3 },
+    { "fmina.d", 0x010F0000, LF_F3 },
+    { "fscaleb.s", 0x01108000, LF_F3 },
+    { "fscaleb.d", 0x01110000, LF_F3 },
+    { "fcopysign.s", 0x01128000, LF_F3 },
+    { "fcopysign.d", 0x01130000, LF_F3 },
+    { "fabs.s", 0x01140400, LF_F2 },
+    { "fabs.d", 0x01140800, LF_F2 },
+    { "fneg.s", 0x01141400, LF_F2 },
+    { "fneg.d", 0x01141800, LF_F2 },
+    { "flogb.s", 0x01142400, LF_F2 },
+    { "flogb.d", 0x01142800, LF_F2 },
+    { "fclass.s", 0x01143400, LF_F2 },
+    { "fclass.d", 0x01143800, LF_F2 },
+    { "fsqrt.s", 0x01144400, LF_F2 },
+    { "fsqrt.d", 0x01144800, LF_F2 },
+    { "frecip.s", 0x01145400, LF_F2 },
+    { "frecip.d", 0x01145800, LF_F2 },
+    { "frsqrt.s", 0x01146400, LF_F2 },
+    { "frsqrt.d", 0x01146800, LF_F2 },
+    { "fmov.s", 0x01149400, LF_F2 },
+    { "fmov.d", 0x01149800, LF_F2 },
+    { "movgr2fr.w", 0x0114A400, LF_FR },
+    { "movgr2fr.d", 0x0114A800, LF_FR },
+    { "movgr2frh.w", 0x0114AC00, LF_FR },
+    { "movfr2gr.s", 0x0114B400, LF_RF },
+    { "movfr2gr.d", 0x0114B800, LF_RF },
+    { "movfrh2gr.s", 0x0114BC00, LF_RF },
+    { "movgr2fcsr", 0x0114C000, LF_CSRR },
+    { "movfcsr2gr", 0x0114C800, LF_RCSR },
+    { "movfr2cf", 0x0114D000, LF_CF },
+    { "movcf2fr", 0x0114D400, LF_FC },
+    { "movgr2cf", 0x0114D800, LF_CR },
+    { "movcf2gr", 0x0114DC00, LF_RC },
+    { "fcvt.s.d", 0x01191800, LF_F2 },
+    { "fcvt.d.s", 0x01192400, LF_F2 },
+    { "ftintrm.w.s", 0x011A0400, LF_F2 },
+    { "ftintrm.w.d", 0x011A0800, LF_F2 },
+    { "ftintrm.l.s", 0x011A2400, LF_F2 },
+    { "ftintrm.l.d", 0x011A2800, LF_F2 },
+    { "ftintrp.w.s", 0x011A4400, LF_F2 },
+    { "ftintrp.w.d", 0x011A4800, LF_F2 },
+    { "ftintrp.l.s", 0x011A6400, LF_F2 },
+    { "ftintrp.l.d", 0x011A6800, LF_F2 },
+    { "ftintrz.w.s", 0x011A8400, LF_F2 },
+    { "ftintrz.w.d", 0x011A8800, LF_F2 },
+    { "ftintrz.l.s", 0x011AA400, LF_F2 },
+    { "ftintrz.l.d", 0x011AA800, LF_F2 },
+    { "ftintrne.w.s", 0x011AC400, LF_F2 },
+    { "ftintrne.w.d", 0x011AC800, LF_F2 },
+    { "ftintrne.l.s", 0x011AE400, LF_F2 },
+    { "ftintrne.l.d", 0x011AE800, LF_F2 },
+    { "ftint.w.s", 0x011B0400, LF_F2 },
+    { "ftint.w.d", 0x011B0800, LF_F2 },
+    { "ftint.l.s", 0x011B2400, LF_F2 },
+    { "ftint.l.d", 0x011B2800, LF_F2 },
+    { "ffint.s.w", 0x011D1000, LF_F2 },
+    { "ffint.s.l", 0x011D1800, LF_F2 },
+    { "ffint.d.w", 0x011D2000, LF_F2 },
+    { "ffint.d.l", 0x011D2800, LF_F2 },
+    { "frint.s", 0x011E4400, LF_F2 },
+    { "frint.d", 0x011E4800, LF_F2 },
+    { "fmadd.s", 0x08100000, LF_F4 },
+    { "fmadd.d", 0x08200000, LF_F4 },
+    { "fmsub.s", 0x08500000, LF_F4 },
+    { "fmsub.d", 0x08600000, LF_F4 },
+    { "fnmadd.s", 0x08900000, LF_F4 },
+    { "fnmadd.d", 0x08A00000, LF_F4 },
+    { "fnmsub.s", 0x08D00000, LF_F4 },
+    { "fnmsub.d", 0x08E00000, LF_F4 },
+    { "fsel", 0x0D000000, LF_FSEL },
+    { "fld.s", 0x2B000000, LF_FMEM },
+    { "fld.d", 0x2B800000, LF_FMEM },
+    { "fst.s", 0x2B400000, LF_FMEM },
+    { "fst.d", 0x2BC00000, LF_FMEM },
+    { "fldx.s", 0x38300000, LF_FMEMX },
+    { "fldx.d", 0x38340000, LF_FMEMX },
+    { "fstx.s", 0x38380000, LF_FMEMX },
+    { "fstx.d", 0x383C0000, LF_FMEMX },
+    { "fldgt.s", 0x38740000, LF_FMEMX },
+    { "fldgt.d", 0x38748000, LF_FMEMX },
+    { "fldle.s", 0x38750000, LF_FMEMX },
+    { "fldle.d", 0x38758000, LF_FMEMX },
+    { "fstgt.s", 0x38760000, LF_FMEMX },
+    { "fstgt.d", 0x38768000, LF_FMEMX },
+    { "fstle.s", 0x38770000, LF_FMEMX },
+    { "fstle.d", 0x38778000, LF_FMEMX },
+    { "bceqz", 0x48000000, LF_BC },
+    { "bcnez", 0x48000100, LF_BC },
+    { "addu16i.d", 0x10000000, LF_I16 },
+    { "ud", 0x38600400, LF_UD },
+
+};
+
+/* $f0..$f31, and the ABI's $fa0-7 (f0-7), $ft0-15 (f8-23), $fs0-7
+ * (f24-31), $fv0/$fv1 (fa0/fa1) */
+static int tok_fpr(const struct tok *t)
+{
+    const char *s = t->s;
+    int n = t->len;
+    if (n < 3 || s[0] != '$' || s[1] != 'f')
+        return -1;
+    int base = 0, lim = 32, k = 2;
+    if (s[2] == 'a') { base = 0; lim = 8; k = 3; }
+    else if (s[2] == 't') { base = 8; lim = 16; k = 3; }
+    else if (s[2] == 's') { base = 24; lim = 8; k = 3; }
+    else if (s[2] == 'v') { base = 0; lim = 2; k = 3; }
+    if (k >= n) return -1;
+    int v = 0;
+    for (int i = k; i < n; i++) {
+        if (!isdigit((unsigned char)s[i])) return -1;
+        v = v * 10 + (s[i] - '0');
+    }
+    return v < lim ? base + v : -1;
+}
+
+/* $fcc0..$fcc7, $fcsr0..$fcsr3 */
+static int tok_named(const struct tok *t, const char *pre, int lim)
+{
+    size_t l = strlen(pre);
+    if ((size_t)t->len <= l || strncmp(t->s, pre, l))
+        return -1;
+    int v = 0;
+    for (int i = (int)l; i < t->len; i++) {
+        if (!isdigit((unsigned char)t->s[i])) return -1;
+        v = v * 10 + (t->s[i] - '0');
+    }
+    return v < lim ? v : -1;
+}
+
+static const struct { const char *c; int v; } lf_cond[] = {
+    { "caf", 0x0 }, { "saf", 0x1 }, { "clt", 0x2 }, { "slt", 0x3 }, { "ceq", 0x4 },
+    { "seq", 0x5 }, { "cle", 0x6 }, { "sle", 0x7 }, { "cun", 0x8 }, { "sun", 0x9 },
+    { "cult", 0xa }, { "sult", 0xb }, { "cueq", 0xc }, { "sueq", 0xd }, { "cule", 0xe },
+    { "sule", 0xf }, { "cne", 0x10 }, { "sne", 0x11 }, { "cor", 0x14 }, { "sor", 0x15 },
+    { "cune", 0x18 }, { "sune", 0x19 },
+};
+
+/* 1 when the statement was a floating-point one (assembled, or *bad set
+ * with err written), 0 when it is none */
+static int lf_stmt(const struct tok *t, int n, struct code *out, char *err,
+                   int errlen, int *bad)
+{
+    char mn[24];
+    if (t[0].len >= (int)sizeof mn) return 0;
+    memcpy(mn, t[0].s, (size_t)t[0].len);
+    mn[t[0].len] = 0;
+#define LFAIL(...) do { snprintf(err, (size_t)errlen, __VA_ARGS__); *bad = 1; return 1; } while (0)
+    if (!strncmp(mn, "fcmp.", 5)) {
+        char *dot = strrchr(mn, '.');
+        if (!dot || dot == mn + 4 || (strcmp(dot, ".s") && strcmp(dot, ".d")))
+            return 0;
+        *dot = 0;
+        for (unsigned k = 0; k < sizeof lf_cond / sizeof lf_cond[0]; k++)
+            if (!strcmp(mn + 5, lf_cond[k].c)) {
+                int cd = n == 4 ? tok_named(&t[1], "$fcc", 8) : -1;
+                int fj = n == 4 ? tok_fpr(&t[2]) : -1, fk = n == 4 ? tok_fpr(&t[3]) : -1;
+                if (cd < 0 || fj < 0 || fk < 0)
+                    LFAIL("%.*s takes $fccN and two floating-point registers", t[0].len, t[0].s);
+                la_w(out, (dot[1] == 'd' ? 0x0C200000UL : 0x0C100000UL) |
+                          (unsigned long)lf_cond[k].v << 15 | (unsigned long)fk << 10 |
+                          (unsigned long)fj << 5 | (unsigned long)cd);
+                return 1;
+            }
+        LFAIL("%.*s: not a floating-point comparison's condition", t[0].len, t[0].s);
+    }
+    for (unsigned i = 0; i < sizeof lf_tab / sizeof lf_tab[0]; i++) {
+        if (strcmp(mn, lf_tab[i].name))
+            continue;
+        unsigned long w = lf_tab[i].op;
+        int a, b, c, d;
+        long long v;
+        switch (lf_tab[i].fmt) {
+        case LF_F3: case LF_F4: case LF_FSEL:
+            if (n != (lf_tab[i].fmt == LF_F3 ? 4 : 5)) break;
+            a = tok_fpr(&t[1]); b = tok_fpr(&t[2]); c = tok_fpr(&t[3]);
+            d = lf_tab[i].fmt == LF_F4 ? tok_fpr(&t[4]) : lf_tab[i].fmt == LF_FSEL ? tok_named(&t[4], "$fcc", 8) : 0;
+            if (a < 0 || b < 0 || c < 0 || d < 0) break;
+            la_w(out, w | (unsigned long)d << 15 | (unsigned long)c << 10 | (unsigned long)b << 5 | (unsigned long)a);
+            return 1;
+        case LF_F2: case LF_FR: case LF_RF: case LF_CSRR: case LF_RCSR:
+        case LF_CF: case LF_FC: case LF_CR: case LF_RC: {
+            if (n != 3) break;
+            int f = lf_tab[i].fmt;
+            a = f == LF_F2 || f == LF_FR || f == LF_FC ? tok_fpr(&t[1])
+              : f == LF_RF || f == LF_RCSR || f == LF_RC ? tok_reg(&t[1])
+              : f == LF_CSRR ? tok_named(&t[1], "$fcsr", 4) : tok_named(&t[1], "$fcc", 8);
+            b = f == LF_F2 || f == LF_RF || f == LF_CF ? tok_fpr(&t[2])
+              : f == LF_FR || f == LF_CSRR || f == LF_CR ? tok_reg(&t[2])
+              : f == LF_RCSR ? tok_named(&t[2], "$fcsr", 4) : tok_named(&t[2], "$fcc", 8);
+            if (a < 0 || b < 0) break;
+            la_w(out, w | (unsigned long)b << 5 | (unsigned long)a);
+            return 1;
+        }
+        case LF_FMEM:
+            if (n != 4 || (a = tok_fpr(&t[1])) < 0 || (b = tok_reg(&t[2])) < 0 || !tok_imm(&t[3], &v)) break;
+            if (v < -2048 || v > 2047) LFAIL("%s offset %lld is not -2048..2047", mn, v);
+            la_w(out, w | ((unsigned long)v & 0xfff) << 10 | (unsigned long)b << 5 | (unsigned long)a);
+            return 1;
+        case LF_FMEMX:
+            if (n != 4 || (a = tok_fpr(&t[1])) < 0 || (b = tok_reg(&t[2])) < 0 || (c = tok_reg(&t[3])) < 0) break;
+            la_w(out, w | (unsigned long)c << 10 | (unsigned long)b << 5 | (unsigned long)a);
+            return 1;
+        case LF_BC:
+            if (n != 3 || (a = tok_named(&t[1], "$fcc", 8)) < 0 || !tok_disp(&t[2], &v)) break;
+            if (v & 3 || v < -(1LL << 22) || v >= (1LL << 22)) LFAIL("%s offset %lld is not a multiple of 4 within 4 MiB", mn, v);
+            v >>= 2;
+            la_w(out, w | ((unsigned long)v & 0xffff) << 10 | (unsigned long)a << 5 | (((unsigned long)v >> 16) & 0x1f));
+            return 1;
+        case LF_I16:
+            if (n != 4 || (a = tok_reg(&t[1])) < 0 || (b = tok_reg(&t[2])) < 0 || !tok_imm(&t[3], &v)) break;
+            if (v < -32768 || v > 32767) LFAIL("%s takes a 16-bit signed immediate", mn);
+            la_w(out, w | ((unsigned long)v & 0xffff) << 10 | (unsigned long)b << 5 | (unsigned long)a);
+            return 1;
+        case LF_UD:
+            if (n != 2 || !tok_imm(&t[1], &v) || v < 0 || v > 31) LFAIL("ud takes 0 to 31");
+            la_w(out, (w & ~0x3ffUL) | (unsigned long)v << 5 | (unsigned long)v);
+            return 1;
+        }
+        LFAIL("%s: these are not its operands", mn);
+    }
+    return 0;
+#undef LFAIL
+}
+
 #define FAIL(...)  do { snprintf(err, (size_t)errlen, __VA_ARGS__); \
                         return -1; } while (0)
 
@@ -715,6 +964,11 @@ static int stmt_body(const char *stmt, int len, struct code *out,
         }
         }
     }
+    {
+        int bad = 0;
+        if (lf_stmt(t, n, out, err, errlen, &bad))
+            return bad ? -1 : 0;
+    }
     FAIL("asm instruction \"%.*s\" is not in the LoongArch vocabulary",
          (int)(t[n - 1].s + t[n - 1].len - t[0].s), t[0].s);
 }
@@ -992,7 +1246,8 @@ int laasm_symform(const char *stmt, struct asm_symform *f)
             if (!ops[k].insn) {
                 static const char *const lo[] = {
                     "addi.d", "ld.b", "ld.bu", "ld.h", "ld.hu", "ld.w",
-                    "ld.wu", "ld.d", "st.b", "st.h", "st.w", "st.d", NULL
+                    "ld.wu", "ld.d", "st.b", "st.h", "st.w", "st.d",
+                    "fld.s", "fld.d", "fst.s", "fst.d", NULL
                 };
                 int ok = 0;
                 for (int j = 0; lo[j]; j++)
