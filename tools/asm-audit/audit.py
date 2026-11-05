@@ -118,10 +118,15 @@ BR = re.compile(r"\b(b|bl|blx|bx|j|jal|jmp|call|beq|bne|blt|bge|bltu|bgeu|bnez|b
                 r"cbz|cbnz|b\.\w+|br\w*|rjmp|rcall|bra|bsr|jl|loop\w*|bc\w*|bdnz\w*)\b")
 
 def norm(dis):
-    """The instructions of a disassembly, without addresses, raw bytes,
-    branch targets or the relaxation width."""
+    """The instructions of a disassembly (objdump -dr), without addresses,
+    raw bytes, branch targets or the relaxation width; each with whether a
+    relocation applies to it -- then its operands are the linker's, and
+    one assembler may have resolved what the other left to relocate."""
     ins = []
     for l in dis.splitlines():
+        if re.search(r":\s+R_[A-Z0-9_]+", l) and ins:
+            ins[-1] = (ins[-1][0], True)
+            continue
         m = re.match(r"^\s*[0-9a-f]+:\s+(?:[0-9a-f]{2,8}\s)*\s*(.*)$", l)
         if not m or not m[1].strip() or l.rstrip().endswith(">:"):
             continue
@@ -130,8 +135,23 @@ def norm(dis):
         op = t.split(" ")[0]
         if BR.match(op) or op.startswith(("b", "j")) and re.search(r"0x[0-9a-f]+|\.[+-]", t):
             t = re.sub(r"(0x)?[0-9a-f]+$|\.[+-]?\d+$|[+-]?\d+$", "T", t)
-        ins.append(t)
+        ins.append((t, False))
     return ins
+
+def same(a, b):
+    """Two normalized instruction lists agree: equal, or where either has
+    a relocation, equal in mnemonic and in their register operands."""
+    if len(a) != len(b):
+        return -1
+    for k, ((x, rx), (y, ry)) in enumerate(zip(a, b)):
+        if x == y:
+            continue
+        if (rx or ry) and x.split(" ")[0] == y.split(" ")[0]:
+            regs = lambda t: re.findall(r"%?\$?\b[a-z]+[0-9]+\b", t)
+            if regs(x) == regs(y):
+                continue
+        return k
+    return None
 
 def audit(name, out, show):
     etgt, cc, _, refas, objdump, _ = T[name]
@@ -156,17 +176,19 @@ def audit(name, out, show):
             errs[re.sub(r'"[^"]*"', '"..."', first)[:110]] += 1
             continue
         ok += 1
-        de = run([objdump, "-d", "--no-show-raw-insn", eo]).stdout
-        dr = run([objdump, "-d", "--no-show-raw-insn", ro]).stdout
+        de = run([objdump, "-dr", "--no-show-raw-insn", eo]).stdout
+        dr = run([objdump, "-dr", "--no-show-raw-insn", ro]).stdout
         ne, nr = norm(de), norm(dr)
-        if ne != nr:
+        k = same(ne, nr)
+        if k is not None:
             differ += 1
-            for k, (x, y) in enumerate(zip(ne, nr)):
-                if x != y:
-                    diffs.append("%s: embcc '%s', reference '%s'" % (os.path.basename(a), x, y))
-                    break
+            if k < 0:
+                kk = next((i for i, (x, y) in enumerate(zip(ne, nr)) if x[0] != y[0]), min(len(ne), len(nr)))
+                diffs.append("%s: %d instructions, reference %d (first apart: %s / %s)" % (
+                    os.path.basename(a), len(ne), len(nr),
+                    ne[kk][0] if kk < len(ne) else "-", nr[kk][0] if kk < len(nr) else "-"))
             else:
-                diffs.append("%s: %d instructions, reference %d" % (os.path.basename(a), len(ne), len(nr)))
+                diffs.append("%s: embcc '%s', reference '%s'" % (os.path.basename(a), ne[k][0], nr[k][0]))
     print("%-8s %4d/%-4d files assembled, %3d whose code differs" % (name, ok, ref, differ))
     for k, n in errs.most_common(show):
         print("           %4d  %s" % (n, k))

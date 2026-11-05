@@ -134,6 +134,8 @@ struct gas {
     /* Relaxation: a statement assembled wide once stays wide, so the
      * passes settle (see gas_assemble). Indexed by statement. */
     char *wide;
+    long *prefstart;        /* per line: where a .prefalign's function began,
+                             * the pass before (-1 not yet) */
     int nwide, li, grew;
     /* ARM mapping symbols: `$t` where Thumb code starts, `$d` where data
      * does, which is how a disassembler or debugger tells them apart. */
@@ -559,8 +561,44 @@ static void do_align(struct gas *g, long boundary)
                 g->tgt->fill(c, boundary - off % boundary);
             return;
         }
+        /* x86: llvm-mc's long nops, a piece of up to fifteen bytes at a
+         * time -- the ten-byte `nopw %cs:0(%rax,%rax)` with 0x66 prefixes
+         * before it for eleven to fifteen -- so an object's padding is the
+         * one clang's assembler writes */
+        if (m == EM_X86_64) {
+            static const unsigned char nops[11][10] = {
+                { 0 }, { 0x90 }, { 0x66, 0x90 }, { 0x0f, 0x1f, 0x00 },
+                { 0x0f, 0x1f, 0x40, 0x00 }, { 0x0f, 0x1f, 0x44, 0x00, 0x00 },
+                { 0x66, 0x0f, 0x1f, 0x44, 0x00, 0x00 },
+                { 0x0f, 0x1f, 0x80, 0x00, 0x00, 0x00, 0x00 },
+                { 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00 },
+                { 0x66, 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00 },
+                { 0x66, 0x2e, 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00 },
+            };
+            long left = (boundary - off % boundary) % boundary;
+            while (left > 0) {
+                long k = left > 15 ? 15 : left, base = k > 10 ? 10 : k;
+                for (long p = 0; p < k - base; p++)
+                    code_byte(c, 0x66);
+                for (long b = 0; b < base; b++)
+                    code_byte(c, nops[base][b]);
+                left -= k;
+            }
+            return;
+        }
         while (off % boundary) {
             long left = boundary - off % boundary;
+            if (m == EM_LOONGARCH && !(off & 3) && left >= 4) {
+                code_byte(c, 0x00); code_byte(c, 0x00); code_byte(c, 0x40);
+                code_byte(c, 0x03);                              /* andi $zero */
+                off += 4;
+                continue;
+            }
+            if (m == EM_68K && !(off & 1) && left >= 2) {
+                code_byte(c, 0x4e); code_byte(c, 0x71);          /* nop */
+                off += 2;
+                continue;
+            }
             if (m == EM_ARM && t_isa_a32 && !(off & 3) && left >= 4) {
                 code_byte(c, 0x00); code_byte(c, 0xf0); code_byte(c, 0x20);
                 code_byte(c, 0xe3);                              /* nop */
@@ -3091,9 +3129,40 @@ static int directive(struct gas *g, char *p, int pass)
      * would like, not one anything depends on -- the `.p2align` before
      * it is the one that holds. And `.att_syntax [prefix]`, x86's syntax
      * as this assembler reads it already. */
-    if (DIR(".prefalign") ||
-        (DIR(".att_syntax") && g->tgt->machine == EM_X86_64))
+    if (DIR(".att_syntax") && g->tgt->machine == EM_X86_64)
         return 1;
+    /* clang 21's `.prefalign LOG2, END, FILL`: the function from here to
+     * END is aligned to 2^LOG2, or to its own size rounded up to a power
+     * of two when that is less -- a five-byte function is not given
+     * eleven bytes of padding. Its size is the pass before's (the passes
+     * repeat until the layout settles); the first pass takes the full
+     * alignment. FILL is `nop`, the machine's, or a byte. */
+    if (DIR(".prefalign")) {
+        long lg;
+        const char *q = arg;
+        if (!gx_abs_now(g, &q, pass, &lg, "the alignment"))
+            return 1;
+        if (lg < 0 || lg > 16) {
+            gerr(g, ".prefalign %ld: the exponent must be 0..16", lg);
+            return 1;
+        }
+        long want = 1L << lg;
+        q = skip_ws((char *)q);
+        if (*q == ',') {
+            const char *e = skip_ws((char *)q + 1), *ee = e;
+            while (*ee && is_symc((unsigned char)*ee)) ee++;
+            struct sym *end = ee > e ? sym_find(g, e, (size_t)(ee - e)) : NULL;
+            long st = g->prefstart[g->li];
+            if (pass == 2 && end && end->sec == g->cur && st >= 0) {
+                long size = end->value - st, p2 = 1;
+                while (p2 < size && p2 < want) p2 *= 2;
+                if (size >= 1 && p2 < want) want = p2;
+            }
+        }
+        if (want > 1) do_align(g, want);
+        g->prefstart[g->li] = cur_off(g);
+        return 1;
+    }
     if (DIR(".intel_syntax") && g->tgt->machine == EM_X86_64) {
         gerr(g, ".intel_syntax: this assembler reads AT&T syntax only");
         return 1;
@@ -4235,6 +4304,9 @@ static void gas_run(struct gas *g, struct gexp *gx, const char *text,
         free(copy);
     }
     g->wide = xcalloc((size_t)gx->nout + 1, 1);
+    g->prefstart = xmalloc(((size_t)gx->nout + 1) * sizeof *g->prefstart);
+    for (int k = 0; k <= gx->nout; k++)
+        g->prefstart[k] = -1;
     g->nwide = gx->nout;
     /* Xtensa: a function's pool goes before the labels its `entry` has,
      * as GNU as's --text-section-literals places it */
