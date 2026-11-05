@@ -881,7 +881,7 @@ static int insn(struct ib *x, const char *mn, struct opnd *o, int n)
 
     /* ---- setcc, cmovcc ---- */
     if (!strncmp(mn, "set", 3) && n == 1) {
-        char c[8];
+        char c[32];                     /* (the mnemonic's size) */
         snprintf(c, sizeof c, "%s", mn + 3);
         size_t cl = strlen(c);
         if (cl > 1 && c[cl - 1] == 'b' && cond_of(c) < 0) c[cl - 1] = 0;
@@ -893,7 +893,7 @@ static int insn(struct ib *x, const char *mn, struct opnd *o, int n)
         }
     }
     if (!strncmp(mn, "cmov", 4) && n == 2) {
-        char c[8];
+        char c[32];                     /* (the mnemonic's size) */
         snprintf(c, sizeof c, "%s", mn + 4);
         size_t cl = strlen(c);
         int sfx = 0, cc = cond_of(c);
@@ -1356,7 +1356,8 @@ int x86att_symform(const char *stmt, struct asm_symform *f)
     g_err = err; g_errlen = (int)sizeof err;
     if (x86att_assemble(f->encode, &c, err, (int)sizeof err) != 0) {
         free(c.p);
-        snprintf(f->encode, sizeof f->encode, "\001%s", err);
+        snprintf(f->encode, sizeof f->encode, "\001%.*s",
+                 (int)sizeof f->encode - 2, err);
         return 1;
     }
     unsigned char c_first[16] = { 0 };

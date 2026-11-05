@@ -117,9 +117,11 @@ grep -q czero.eqz "$out/sel.dis" && grep -q czero.nez "$out/sel.dis" ||
     fail "a select is not czero under Zicond: $(cat "$out/sel.dis")"
 ! grep -qE '[[:space:]](beq|bne|beqz|bnez)[[:space:]]' "$out/sel.dis" ||
     fail "the select still branches: $(cat "$out/sel.dis")"
-grep -E '^ *[0-9a-f]+: [0-9a-f]{4}[[:space:]]+lbu' "$out/g.dis" > /dev/null ||
+# a 16-bit instruction's bytes: `814c` (LLVM 23) or `4c 81` (LLVM 18)
+half='^ *[0-9a-f]+: ([0-9a-f]{4}|[0-9a-f]{2} [0-9a-f]{2})[[:space:]]+'
+grep -E "${half}lbu" "$out/g.dis" > /dev/null ||
     fail "no 16-bit lbu (c.lbu) under Zcb: $(cat "$out/g.dis")"
-grep -E '^ *[0-9a-f]+: [0-9a-f]{4}[[:space:]]+zext.h' "$out/g.dis" > /dev/null ||
+grep -E "${half}zext.h" "$out/g.dis" > /dev/null ||
     fail "no 16-bit zext.h (c.zext.h) under Zcb: $(cat "$out/g.dis")"
 echo "codegen: a select is czero.eqz/czero.nez with no branch; Zcb's 16-bit forms are used"
 

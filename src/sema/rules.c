@@ -819,14 +819,10 @@ static int loop_exits(const struct stmt *s, int depth)
             n += loop_exits(s->els, depth);
         } else if (inner) {
             /* a goto inside still leaves this loop; a break does not */
-            n += loop_exits(s->body, depth + 1) -
-                 0;
+            n += loop_exits(s->body, depth + 1);
         } else if (s->kind == STMT_LABEL) {
             n += loop_exits(s->body, depth);
         }
-        if (s->kind == STMT_IF || s->kind == STMT_BLOCK || inner ||
-            s->kind == STMT_LABEL)
-            ;
     }
     return n;
 }
