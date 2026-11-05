@@ -2548,8 +2548,8 @@ static int gen_bitint(struct ir_func *fn, struct expr *e)
                 int vals[3] = { d, dv, bi_bits(fn, to) };
                 libatomic_call(fn, "__embcc_bi_from_double", ty_base(TY_VOID, 0), 3, vals,
                                tys, e->line);
-            } else if (from->kind == TY_PTR) {
-                bi_from_int(fn, d, v, ty_base(TY_LONG, 1), to, e->line);
+            } else if (from->kind == TY_PTR) {   /* pointer-sized: not `long` on LLP64 */
+                bi_from_int(fn, d, v, ty_intptr(1), to, e->line);
             } else {
                 bi_from_int(fn, d, v, from, to, e->line);
             }
