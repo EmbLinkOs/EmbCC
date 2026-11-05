@@ -207,8 +207,8 @@ refuse() {          # refuse WHAT PATTERN SOURCE
     grep -q -- "$2" "$out/bad.err" || {
         echo "$1 was refused, but not by name:"; cat "$out/bad.err"; exit 1; }
 }
-refuse "an instruction outside the vocabulary" '"madd' \
-    'void f(int a, int b){ __asm__("madd %0, %1" :: "r"(a), "r"(b)); }'
+refuse "an instruction outside the vocabulary" '"addu.qb' \
+    'void f(int a, int b){ __asm__("addu.qb %0, %1, %1" :: "r"(a), "r"(b)); }'
 # neg is gas's TRAPPING sub; div rs, rt with two registers is its macro
 # with a divide-by-zero trap. Neither is what the bare encoding means.
 refuse "neg, an assembler alias for the trapping sub" '"neg' \
