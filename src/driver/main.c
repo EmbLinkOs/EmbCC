@@ -127,7 +127,7 @@ static void print_usage(FILE *out)
             " [--link-script=FILE] -o IMAGE   (link)\n"
             "       embcc inspect STAGE SOURCE        (what each stage made)\n"
             "       embcc --version | --help[=gcc] | --explain=ID"
-            " | --reference=options|warnings|targets|man\n");
+            " | --reference=options|warnings|targets|boards|man\n");
 }
 
 /* Where this target's runtime and C library live, under the library

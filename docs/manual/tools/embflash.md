@@ -22,6 +22,7 @@ embflash IMAGE --esp serial:DEV[@BAUD] [--base ADDR] [--verify]
                [--no-reset] [--ram] [--console SECONDS] [--timeout SECONDS]
 embflash ELF --esp-image FILE
 embflash --esp serial:DEV[@BAUD] --read ADDR SIZE|all FILE
+embflash ELF [--board=BOARD] [--verify] [--console SECONDS]
 ```
 
 `TARGET` is where the server listens:
@@ -85,6 +86,33 @@ name** in the server's target description (`qXfer:features:read`), so
   S-records carry an entry in their start records.
 
 Without `--run`, `embflash` detaches (`D`) and leaves the target halted.
+
+## The port
+
+A serial target's device may be left to `embflash`: `serial:auto`, or
+`serial:` with no device (`serial:@57600` keeps a rate). The port is the
+board's USB serial port, found in `/dev` by the names its bridge takes. The
+names are tried in tiers, and a tier with a single port is the answer:
+
+| Programmer | First | Then |
+|---|---|---|
+| `--stk500` | an Arduino's ATmega16U2: `cu.usbmodem*`, `ttyACM*` | a clone's CH340 or CP210x: `cu.wchusbserial*`, `cu.usbserial*`, `cu.SLAB_USBtoUART*`, `ttyUSB*` |
+| `--esp` | a CP210x or CH340: `cu.usbserial*`, `cu.SLAB_USBtoUART*`, `cu.wchusbserial*`, `ttyUSB*` | a native USB port: `cu.usbmodem*`, `ttyACM*` |
+
+Two ports in one tier are named, and nothing is written: the device has
+to be given. So an Uno and an ESP32 board plugged in together are each
+found, but two of either are not.
+
+An ELF with no programmer named takes its machine's: an AVR program goes
+through Optiboot (`--stk500 serial:auto`), an Xtensa one through the
+ESP32's ROM (`--esp serial:auto`). `--board=BOARD` names it the same way:
+`uno` and `nano` for Optiboot, `esp32-devkit` for the ROM
+([Boards](../boards.md)).
+
+```sh
+embcc --board=uno blink.c -o blink.elf
+embflash blink.elf --verify --console 5      # Optiboot, at the Uno's port
+```
 
 ## A serial bootloader: --stk500
 

@@ -546,6 +546,7 @@ reference: embcc
 	./embcc --reference=options > docs/manual/options.md
 	./embcc --reference=warnings > docs/manual/warnings.md
 	./embcc --reference=targets > docs/manual/target-list.md
+	./embcc --reference=boards > docs/manual/board-list.md
 .PHONY: reference
 
 # embsim -- a simulator (Cortex-M, RISC-V, AVR): runs an image on a model of the board
@@ -1172,6 +1173,9 @@ install-files:
 	    done; \
 	    [ -f $(BUILD)/libcxx/$$dir/libcxx.a ] && \
 	        cp $(BUILD)/libcxx/$$dir/libcxx.a $(LIBROOT)/$$triple/libcxx.a; \
+	    for f in $(BUILD)/libc/$$dir/board-*.o $(BUILD)/libc/$$dir/esp32-*.o \
+	             $(BUILD)/libc/$$dir/esp32.ld; do \
+	        [ -f $$f ] && cp $$f $(LIBROOT)/$$triple/; done; \
 	    case $$triple in *-linux-gnu) \
 	        cp lib/libc/os/linux/link.ld $(LIBROOT)/$$triple/link.ld ;; \
 	    avr) for f in $(BUILD)/libc/avr/crt*.o $(BUILD)/libc/avr/*.ld; do \

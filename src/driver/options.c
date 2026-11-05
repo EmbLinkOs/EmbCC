@@ -70,6 +70,10 @@ const struct embcc_board *opts_board(void) { return g_board; }
 
 void opts_print_boards(FILE *out)
 {
+    fprintf(out, "# Board reference\n\nEvery board `--board=` accepts, generated from EmbCC's "
+                 "board table (`src/driver/options.c`) by `embcc --reference=boards`. "
+                 "[Boards](boards.md) is the guide: what a board's program gets, `<board.h>`, "
+                 "and putting it on the board.\n\n");
     fprintf(out, "| Board | What it is | Target | Programmed with |\n|---|---|---|---|\n");
     for (int k = 0; k < NBOARDS; k++)
         fprintf(out, "| `%s` | %s | `%s`%s%s%s | `embflash %s` |\n", boards[k].name,

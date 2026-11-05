@@ -75,6 +75,7 @@
 #include <netdb.h>
 #include <termios.h>
 #include <time.h>
+#include <dirent.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <netinet/in.h>
@@ -1109,6 +1110,67 @@ static void stk_reset(void)
 static void stk_reset(void) {}
 #endif
 
+/* serial:auto, or serial: with no device (serial:@BAUD too): the board's
+ * USB serial port, found in /dev by the names its bridge takes. The tiers
+ * are tried in order, and one with a single port is the answer: for an
+ * STK500 bootloader, an Arduino's ATmega16U2 (usbmodem, ttyACM) before the
+ * CH340 and CP210x of the clones; for an ESP32's ROM, those bridges before
+ * a native USB port. Two in one tier are named, not guessed between. */
+static const char *serial_auto(const char *target, int esp)
+{
+    if (strncmp(target, "serial:", 7) != 0)
+        return target;
+    const char *dev = target + 7, *at = strchr(dev, '@');
+    size_t dn = at ? (size_t)(at - dev) : strlen(dev);
+    if (!(dn == 0 || (dn == 4 && !strncmp(dev, "auto", 4))))
+        return target;
+#ifdef EMBFLASH_POSIX
+    static const char *const stk[] = { "cu.usbmodem", "ttyACM", NULL,
+                                       "cu.wchusbserial", "cu.usbserial", "cu.SLAB_USBtoUART",
+                                       "ttyUSB", NULL, NULL };
+    static const char *const espt[] = { "cu.usbserial", "cu.SLAB_USBtoUART", "cu.wchusbserial",
+                                        "ttyUSB", NULL, "cu.usbmodem", "ttyACM", NULL, NULL };
+    const char *const *tier = esp ? espt : stk;
+    char seen[2048] = "";
+    const char *dir = getenv("EMBFLASH_DEV");     /* the tests' stand-in for /dev */
+    if (!dir || !*dir)
+        dir = "/dev";
+    while (*tier) {
+        char found[8][600];                 /* a directory of 300, a name of 255 */
+        int n = 0;
+        DIR *d = opendir(dir);
+        struct dirent *e;
+        while (d && (e = readdir(d)) != NULL)
+            for (const char *const *t = tier; *t; t++)
+                if (!strncmp(e->d_name, *t, strlen(*t)) && n < 8)
+                    snprintf(found[n++], sizeof found[0], "%.300s/%.255s", dir, e->d_name);
+        if (d)
+            closedir(d);
+        if (n == 1) {
+            static char out[680];
+            snprintf(out, sizeof out, "serial:%s%.64s", found[0], at ? at : "");
+            printf("embflash: the board's port: %s\n", found[0]);
+            return out;
+        }
+        for (int k = 0; k < n; k++) {      /* the names, for the message */
+            size_t l = strlen(seen), m = strlen(found[k]);
+            if (l + m + 2 <= sizeof seen) {
+                seen[l] = ' ';
+                memcpy(seen + l + 1, found[k], m + 1);
+            }
+        }
+        if (n > 1)
+            die("%s: %d ports could be the board's (%s): name it, serial:DEV", target, n, seen + 1);
+        while (*tier)
+            tier++;
+        tier++;
+    }
+    die("%s: no USB serial port found in %s: is the board plugged in? (or name it, "
+        "serial:DEV)", target, dir);
+#endif
+    return target;
+}
+
 static void stk500_flash(const char *target, int verify, int no_reset, int console)
 {
     if (strncmp(target, "serial:", 7) != 0)
@@ -2048,6 +2110,8 @@ static void usage(void)
         "                [--ram] [--console SECONDS]\n"
         "       embflash ELF --esp-image FILE\n"
         "       embflash --esp serial:DEV[@BAUD] --read ADDR SIZE|all FILE\n"
+        "       embflash ELF [--board=uno|nano|esp32-devkit] [--verify] [--console SECONDS]\n"
+        "  serial:auto (or serial:@BAUD) finds the board's USB serial port\n"
         "  TARGET: HOST:PORT | unix:PATH | serial:DEV[@BAUD]\n"
         "  IMAGE:  ELF, Intel HEX (.hex), S-records (.srec .s19 .s37 .mot),\n"
         "          or raw bytes (.bin with --base)\n");
@@ -2057,7 +2121,7 @@ static void usage(void)
 int main(int argc, char **argv)
 {
     const char *image = NULL, *target = NULL, *stk500 = NULL, *esp = NULL;
-    const char *esp_out = NULL, *read_file = NULL;
+    const char *esp_out = NULL, *read_file = NULL, *board = NULL;
     u64 read_addr = 0, read_len = 0;
     int read_all = 0;
     int no_reset = 0, ram = 0, console = 0;
@@ -2073,6 +2137,8 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "--no-reset")) no_reset = 1;
         else if (!strcmp(a, "--ram")) ram = 1;
         else if (!strcmp(a, "--esp-image") && i + 1 < argc) esp_out = argv[++i];
+        else if (!strncmp(a, "--board=", 8)) board = a + 8;
+        else if (!strcmp(a, "--board") && i + 1 < argc) board = argv[++i];
         else if (!strcmp(a, "--read") && i + 3 < argc) {
             read_addr = parse_num(argv[++i], "--read ADDR");
             const char *n = argv[++i];
@@ -2104,12 +2170,42 @@ int main(int argc, char **argv)
         else if (!image) image = a;
         else die("one image at a time (%s and %s)", image, a);
     }
+    /* a board names its programmer: --board=uno and nano are Optiboot's,
+     * esp32-devkit the ESP32 ROM's, at the port found */
+    if (board) {
+        if (!strcmp(board, "uno") || !strcmp(board, "nano")) {
+            if (!stk500) stk500 = "serial:auto";
+        } else if (!strcmp(board, "esp32-devkit")) {
+            if (!esp) esp = "serial:auto";
+        } else {
+            die("--board=%s: not a board embflash knows (uno, nano, esp32-devkit)", board);
+        }
+    }
+    if (stk500)
+        stk500 = serial_auto(stk500, 0);
+    if (esp)
+        esp = serial_auto(esp, 1);
     if (read_file) {
         if (!esp || image || ram || esp_out || console || verify || have_base || dry)
             die("--read ADDR SIZE FILE reads an ESP32's flash: with --esp serial:DEV, and no "
                 "image (--verify is always done: the ROM's MD5 of the range)");
         esp_read(esp, no_reset, read_addr, read_len, read_all, read_file);
         return 0;
+    }
+    /* an ELF, and no programmer named: the one its machine has, an AVR's
+     * Optiboot or an ESP32's ROM, at the port found */
+    if (image && !target && !stk500 && !esp && !esp_out && !dry) {
+        size_t hl;
+        unsigned char *h = slurp(image, &hl);
+        unsigned mach = hl >= 20 && !memcmp(h, "\177ELF", 4) ? (unsigned)(h[18] | h[19] << 8) : 0;
+        free(h);
+        if (mach == 83) {                       /* EM_AVR */
+            printf("embflash: an AVR program: --stk500, Optiboot's\n");
+            stk500 = serial_auto("serial:auto", 0);
+        } else if (mach == 94) {                /* EM_XTENSA */
+            printf("embflash: an Xtensa program: --esp, the ESP32's ROM\n");
+            esp = serial_auto("serial:auto", 1);
+        }
     }
     if (!image || (!target && !stk500 && !esp && !esp_out && !dry) ||
         (!!target + !!stk500 + !!esp + !!esp_out) > 1)
