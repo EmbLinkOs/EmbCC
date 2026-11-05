@@ -44,7 +44,15 @@ fi
 command -v python3 > /dev/null 2>&1 || { echo "big-functions: no python3, skipped"; exit 0; }
 out=tests/golden/out/big-functions
 rm -rf "${out:?}"; mkdir -p "$out"
-limit() { perl -e '$t = shift; alarm $t; exec @ARGV' "$@"; }
+# The budget is CPU seconds, not the wall clock's: the suite runs a test
+# per core, and on a loaded CI runner a compile waiting for a core is not a
+# slow compiler (different cases here timed out on different runs). The
+# wall clock still stops a hang, at ten times the budget.
+limit() {
+    _t=$1; shift
+    ( ulimit -t "$_t" 2>/dev/null
+      exec perl -e '$t = shift; alarm $t; exec @ARGV' $((_t * 10)) "$@" )
+}
 
 python3 - "$out" <<'PYEOF'
 import sys
@@ -89,14 +97,16 @@ w('funcs.c', ''.join('int f%d(int x) { return x * %d + 1; }\n' % (k, k)
                      for k in range(20000)))
 PYEOF
 
-# in seconds or not at all: within SECONDS WHAT FILE OPTION...
+# in seconds of CPU or not at all: within SECONDS WHAT FILE OPTION...
 bad=0
 within() {
     secs=$1; what=$2; src=$3; shift 3
     limit "$secs" "$EMBCC" "$@" -w -c "$out/$src" -o "$out/x.o" > "$out/x.log" 2>&1
     st=$?
-    if [ $st -eq 142 ]; then
-        echo "FAIL: $what: no answer in $secs s"; bad=1
+    if [ $st -eq 152 ]; then                    # SIGXCPU
+        echo "FAIL: $what: more than $secs s of CPU"; bad=1
+    elif [ $st -eq 142 ]; then                  # SIGALRM
+        echo "FAIL: $what: no answer in $((secs * 10)) s"; bad=1
     elif [ $st -ne 0 ]; then
         head -3 "$out/x.log"; echo "FAIL: $what: exit $st"; bad=1
     elif grep -q 'did not converge' "$out/x.log"; then
