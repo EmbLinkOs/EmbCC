@@ -199,6 +199,7 @@ struct symbol {
      * how a program asks for f only if something else brought it in. */
     int weak_refs_only;
     int required;              /* the entry, -u, EXTERN(): always pulled */
+    int got_slot;              /* ARM initial-exec TLS: its slot + 1 (tls_got) */
 };
 
 /* A static archive (.a) is a pool of member objects; a member is pulled
@@ -238,6 +239,12 @@ struct linker {
     Elf64_Xword tls_size;
     Elf64_Xword tls_align;     /* AArch64: the block follows the 16-byte
                                 * TCB at this alignment */
+    /* ARM initial-exec TLS (tls_got): the linker's .got, a word per
+     * variable holding its thread-pointer offset; each slot's variable by
+     * the object and symbol a reference named */
+    int got_sec;               /* insecs index + 1, 0 = none */
+    struct { struct object *o; Elf64_Word symi; } *got;
+    int ngot;
     struct object **objs;
     int nobj, capobj;
     struct insec *insecs;
@@ -3693,6 +3700,116 @@ static void merge_notes(struct linker *l)
     h->align = (Elf64_Xword)addr;
 }
 
+
+static int add_synth(struct linker *l, const char *name, long size, int align,
+                     int osec, unsigned char *data);
+static void ls_push_list(struct ls_stmt *s, int v);
+static Elf64_Addr reloc_symval(struct linker *l, struct object *o,
+                               Elf64_Word symidx, int *is_undef_weak);
+
+/* ---- ARM initial-exec TLS: a GOT of thread-pointer offsets ------------
+ *
+ * GCC's and clang's initial-exec access on ARM loads the variable's offset
+ * from the thread pointer out of a GOT slot (R_ARM_TLS_IE32: the slot's
+ * address, pc-relative), and adds __aeabi_read_tp's value. A static image
+ * knows every offset, so the slots are constants: one word per variable,
+ * in a read-only .got beside .rodata, filled once the layout is known
+ * (tls_got_fill) -- what GNU ld and lld write there too. */
+static int tls_got_slot(struct linker *l, struct object *o, Elf64_Word symi)
+{
+    Elf64_Sym *sy = &o->syms[symi];
+    if (ELF64_ST_BIND(sy->st_info) != STB_LOCAL) {
+        struct symbol *g = sym_find(l, o->symstr + sy->st_name);
+        if (g)
+            return g->got_slot - 1;
+    }
+    for (int k = 0; k < l->ngot; k++)
+        if (l->got[k].o == o && l->got[k].symi == symi)
+            return k;
+    return -1;
+}
+
+static void tls_got_init(struct linker *l)
+{
+    if (l->machine != EM_ARM)
+        return;
+    for (int k = 0; k < l->nobj; k++) {
+        struct object *o = l->objs[k];
+        struct merge_rel r;
+        int sec = 0, j = 0;
+        while (merge_rel_next(o, &sec, &j, &r)) {
+            if (r.type != R_ARM_TLS_IE32 || r.target >= o->nsh ||
+                o->sec_out[r.target] < 0 ||
+                l->insecs[o->sec_out[r.target]].discarded)
+                continue;
+            if (tls_got_slot(l, o, r.symi) >= 0)
+                continue;
+            Elf64_Sym *sy = &o->syms[r.symi];
+            l->got = xrealloc(l->got, (size_t)(l->ngot + 1) * sizeof *l->got);
+            l->got[l->ngot].o = o;
+            l->got[l->ngot].symi = r.symi;
+            if (ELF64_ST_BIND(sy->st_info) != STB_LOCAL) {
+                struct symbol *g = sym_find(l, o->symstr + sy->st_name);
+                if (g)
+                    g->got_slot = l->ngot + 1;
+            }
+            l->ngot++;
+        }
+    }
+    if (!l->ngot)
+        return;
+    int si = add_synth(l, ".got", 4L * l->ngot, 4, OSEC_RODATA,
+                       xcalloc((size_t)l->ngot, 4));
+    struct insec *gs = &l->insecs[si];
+    gs->shflags = SHF_ALLOC;
+    gs->keep = gs->live = 1;
+    l->got_sec = si + 1;
+    if (l->sc) {
+        /* into the script's section that holds .rodata (else .text's) */
+        int key = -1;
+        for (int i = 0; i < l->nsec && key < 0; i++)
+            if (l->insecs[i].obj && l->insecs[i].sosec >= 0 &&
+                !strncmp(l->insecs[i].name, ".rodata", 7))
+                key = l->insecs[i].sosec;
+        for (int i = 0; i < l->nsec && key < 0; i++)
+            if (l->insecs[i].obj && l->insecs[i].sosec >= 0 &&
+                (l->insecs[i].shflags & SHF_EXECINSTR))
+                key = l->insecs[i].sosec;
+        if (key < 0)
+            die("ARM initial-exec TLS needs a .got, and the linker script "
+                "places no .rodata or .text to put it beside");
+        struct ls_osec *os = &l->sc->osecs[key];
+        int b;
+        for (b = os->nbody - 1; b >= 0 && os->body[b].kind != LS_INPUT; b--)
+            ;
+        if (b < 0) {
+            LS_PUSH(os->body, os->nbody, os->capbody);
+            memset(&os->body[os->nbody], 0, sizeof os->body[0]);
+            os->body[os->nbody].kind = LS_INPUT;
+            b = os->nbody++;
+        }
+        l->insecs[si].sosec = key;
+        ls_push_list(&os->body[b], si);
+    }
+}
+
+/* After layout: each slot's offset, past the 8-byte control block. */
+static void tls_got_fill(struct linker *l)
+{
+    if (!l->got_sec)
+        return;
+    struct insec *gs = &l->insecs[l->got_sec - 1];
+    long long tcb = (long long)align_up(8, l->tls_align ? l->tls_align : 1);
+    if (!l->tls_size)
+        die("R_ARM_TLS_IE32: the image has no thread block (.tdata/.tbss)");
+    for (int k = 0; k < l->ngot; k++) {
+        int uw;
+        Elf64_Addr S = reloc_symval(l, l->got[k].o, l->got[k].symi, &uw);
+        put32((unsigned char *)gs->data + 4 * k,
+              (unsigned int)((long long)S - (long long)l->tls_start + tcb));
+    }
+}
+
 static void layout(struct linker *l, struct osec_bound *b,
                    Elf64_Addr *text_start, Elf64_Xword *text_size,
                    Elf64_Addr *data_start, Elf64_Xword *data_filesz,
@@ -6242,6 +6359,8 @@ static void apply_relocs(struct linker *l, struct object *o)
                     case R_ARM_ABS32:
                     case R_ARM_TARGET1:
                     case R_ARM_REL32:
+                    case R_ARM_TLS_LE32:
+                    case R_ARM_TLS_IE32:
                         A = (int)get32loc(loc);
                         break;
                     case R_ARM_PREL31:
@@ -6306,6 +6425,18 @@ static void apply_relocs(struct linker *l, struct object *o)
                     put32(loc, (unsigned int)(long)((long long)S + A -
                                                     (long long)P));
                     break;
+                case R_ARM_TLS_IE32: {
+                    /* the variable's GOT slot, pc-relative (tls_got) */
+                    int k = tls_got_slot(l, o, symi);
+                    if (k < 0 || !l->got_sec)
+                        internal_error("%s: R_ARM_TLS_IE32 against '%s' has "
+                                       "no GOT slot", o->name,
+                                       l->rel_sym ? l->rel_sym : "?");
+                    put32(loc, (unsigned int)((long long)
+                          (l->insecs[l->got_sec - 1].vaddr + 4 * (Elf64_Addr)k) +
+                          A - (long long)P));
+                    break;
+                }
                 case R_ARM_TLS_LE32:
                     /* local-exec: tp (__aeabi_read_tp) points at an
                      * 8-byte control block, the thread block after it
@@ -8049,6 +8180,7 @@ static void ls_layout(struct linker *l, struct ls_script *sc, int orphan_mode)
     merge_sections(l);
     merge_eh(l);
     merge_notes(l);
+    tls_got_init(l);
     /* Settled; then the ARM veneers these addresses call for, which move
      * what follows them: settled again, until no branch wants a new one. */
     for (int round = 0;; round++) {
@@ -9462,6 +9594,7 @@ int embld_link(const char **inputs, int ninputs, const char *out,
             }
         }
         merge_eh_fix(&l);
+        tls_got_fill(&l);
         for (int i = 0; i < l.nobj; i++)
             apply_relocs(&l, l.objs[i]);
         if (opts->map_file)
@@ -9496,6 +9629,7 @@ int embld_link(const char **inputs, int ninputs, const char *out,
     merge_sections(&l);
     merge_eh(&l);
     merge_notes(&l);
+    tls_got_init(&l);
     if (opts && opts->have_stack) {
         /* ARM: for an A-profile core (armv7a-none-eabi), which starts in
          * ARM state with no stack; the stub is A32. A Cortex-M image
@@ -9600,6 +9734,7 @@ int embld_link(const char **inputs, int ninputs, const char *out,
         fill_entry_stub(&l, e->value);
 
     merge_eh_fix(&l);
+    tls_got_fill(&l);
     for (int i = 0; i < l.nobj; i++)
         apply_relocs(&l, l.objs[i]);
     if (l.pie) {
