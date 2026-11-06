@@ -1,9 +1,9 @@
 /* The TriCore assembler: every instruction of TC1.6.2, from a table.
  *
- * isa.inc holds the instruction set as data -- 912 forms, each a mnemonic,
- * the shape of its operands (`D,[A]N`: a data register, then an address
- * register with an offset), its length, its opcode bits, and where each
- * operand's bits go. The table was not copied from a manual or another
+ * isa.inc (read through isa.h) holds the instruction set as data -- 832
+ * forms, each a mnemonic, the shape of its operands (`D,[A]N`: a data
+ * register, then an address register with an offset), its length, its
+ * opcode bits, and where each operand's bits go. The table was not copied from a manual or another
  * assembler: tools/tricore-isa learned it from GNU objdump and GNU as,
  * used as oracles -- every 16-bit word and a sample of the 32-bit space
  * decoded, each bit flipped to see whether it is opcode, operand or
@@ -52,6 +52,7 @@
  * over a `j SYM`, as one out of reach is. A field GNU takes no symbol in
  * is refused, by name. */
 #include "asm.h"
+#include "isa.h"
 #include "../asmexpr.h"
 #include "../../elf/elf.h"
 
@@ -60,59 +61,13 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ---- the table ---------------------------------------------------------- */
+/* ---- the table (isa.h) ------------------------------------------------- */
 
-struct tc_fbit { unsigned char pos, shift, neg; };
-/* kind: D A E (a register), N (a number), L (a PC-relative target, in
- * bytes), S (a core special function register), M (another field's value
- * again). rule: 0 any value, 1
- * even only, 2 only the nok values at tc_oks[ok]. */
-struct tc_field {
-    char kind;
-    unsigned char nb;
-    unsigned short fb;
-    int v0;
-    unsigned char rule;
-    unsigned short ok, nok;
-};
-struct tc_insn {
-    const char *mnem, *shape;
-    unsigned char len;
-    unsigned int base;
-    unsigned short f, nf;
-};
-/* A symbol in field `field` with operator `op` (sym, hi:, lo:, sm:, up:,
- * a label in another section): the form GNU takes (an index into
- * tc_insns; -1 the long branch; -2 refused), the relocation and where it
- * sits; for the long branch `extra` is the sequence's length. */
-struct tc_symrule {
-    const char *mnem, *shape;
-    int field, op, entry, rel, reloff, extra;
-    /* when GNU writes another form (`add d0, sym` as `add d0, d0, sym`),
-     * the statement's operand each of that form's fields takes */
-    const char *map;
-};
-struct tc_narrow { const char *mnem, *shape; int a, b; };
-
-#include "isa.inc"
-
-#define NINSN ((int)(sizeof tc_insns / sizeof tc_insns[0]))
-#define NSYMR ((int)(sizeof tc_symrules / sizeof tc_symrules[0]))
-#define NNARROW ((int)(sizeof tc_narrows / sizeof tc_narrows[0]))
-
-/* The first entry of a mnemonic, or -1. */
-static int first_of(const char *mn)
-{
-    int lo = 0, hi = NINSN;
-    while (lo < hi) {
-        int mid = (lo + hi) / 2;
-        if (strcmp(tc_insns[mid].mnem, mn) < 0)
-            lo = mid + 1;
-        else
-            hi = mid;
-    }
-    return lo < NINSN && !strcmp(tc_insns[lo].mnem, mn) ? lo : -1;
-}
+#define NINSN tc_ninsn
+#define NSYMR tc_nsymrules
+#define NNARROW tc_nnarrows
+#define first_of tc_first_of
+#define fit_field tc_fit_field
 
 /* ---- registers and names ------------------------------------------------ */
 
@@ -190,7 +145,8 @@ static int is_sfr_mnem(const char *mn)
 #define MAXAT 8
 struct atom {
     char kind;                  /* D A E N S */
-    char tgt;                   /* N: written `.`, `.+K` or `.-K` */
+    char tgt;                   /* N: 1 written `.`, `.+K` or `.-K`; 2 a
+                                 * symbol (symform's); 3 a number's half */
     long long v;
     const char *p;              /* its text, for symform */
     int n;
@@ -242,10 +198,11 @@ static int value(const char *p, const char *e, long long *v, char *tgt)
             return 0;
         switch (op) {
         case 1: *v = ((*v + 0x8000) >> 16) & 0xffff; break;
-        case 2: *v = (short)(*v & 0xffff); break;
+        case 2: *v = *v & 0xffff; break;
         case 4: *v = (*v >> 16) & 0xffff; break;
         default: return 0;              /* sm: is an offset from a base */
         }
+        *tgt = 3;                       /* 16 bits, whatever their sign */
         return 1;
     }
     if (*p == '.' && (e - p == 1 || p[1] == '+' || p[1] == '-')) {
@@ -411,38 +368,6 @@ static int parse(const char *p, const char *e, struct stmt *s, int syms,
 
 /* ---- encoding ----------------------------------------------------------- */
 
-/* Field f holding v: its bits ORed into *w, or 0 when v does not fit or
- * is not one GNU takes there. */
-static int fit_field(const struct tc_field *f, long long v, unsigned *w)
-{
-    long long x = v - f->v0;
-    unsigned bits = 0;
-    const struct tc_fbit *b = &tc_fbits[f->fb];
-    if (f->rule == 1 && (v & 1))
-        return 0;
-    if (f->rule == 2) {
-        int ok = 0;
-        for (int k = 0; k < f->nok && !ok; k++)
-            ok = tc_oks[f->ok + k] == v;
-        if (!ok)
-            return 0;
-    }
-    for (int k = 0; k < f->nb; k++)
-        if (b[k].neg && x < 0) {
-            x += 1LL << b[k].shift;
-            bits |= 1u << b[k].pos;
-        }
-    for (int k = 0; k < f->nb; k++)
-        if (!b[k].neg && x > 0 && ((x >> b[k].shift) & 1)) {
-            x -= 1LL << b[k].shift;
-            bits |= 1u << b[k].pos;
-        }
-    if (x != 0)
-        return 0;
-    *w |= bits;
-    return 1;
-}
-
 /* Entry i holding atoms at[0..n): its word, or 0 (and *ok 0). */
 static int fit_insn(int i, const struct atom *at, int n, unsigned *word)
 {
@@ -467,7 +392,10 @@ static int fit_insn(int i, const struct atom *at, int n, unsigned *word)
             return 0;
         if ((f->kind == 'L') != (at[k].tgt == 1))
             return 0;
-        if (!fit_field(f, at[k].v, &w))
+        /* (a half is a 16-bit pattern: in a signed field, 0xd000 is
+         * -0x3000, as the relocation would have put it) */
+        if (!fit_field(f, at[k].v, &w) &&
+            !(at[k].tgt == 3 && fit_field(f, at[k].v - 0x10000, &w)))
             return 0;
     }
     *word = w;

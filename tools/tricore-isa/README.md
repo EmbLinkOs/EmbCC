@@ -43,11 +43,16 @@ by the others; `formsel.py` the field solver (`fit`).
   `sub.a sp, 8`).
 * `symtest.py EMBCC` -- every symbol statement GNU takes, both assemblers:
   bytes and relocations (offset, type, symbol, addend).
+* `linktest.py EMBLD` -- every symbol statement GNU takes, its symbol given
+  a value its field holds, linked by tricore-elf-ld and by embld with one
+  script: the same bytes. `LT_AS=EMBCC` has EmbCC assemble the object,
+  and also compares the image with GNU as's.
 * `tools/asm-audit/audit.py tricore` -- GCC's TriCore output for EmbCC's
   libc and runtime, both assemblers, disassembly compared.
 
 At the time of writing: 47,478 random statements, 1,281 symbol
-statements and the 114 files of the audit, with no difference.
+statements, 748 linked relocations (734 from EmbCC's objects) and the
+114 files of the audit, with no difference.
 
 ## What GNU does that the table cannot say
 

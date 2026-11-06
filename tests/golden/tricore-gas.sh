@@ -52,7 +52,7 @@ elif why=$(qemu_too_old "$QEMU" 10.1 "its translator spells TCG's ops otherwise 
 elif command -v "$QEMU" >/dev/null 2>&1; then
     cc -std=c99 -Wall -Wextra -o "$out/tricorecheck" \
        tools/tricorecheck/tricorecheck.c src/arch/tricore/emit.c \
-       src/arch/tricore/asm.c src/arch/code.c src/driver/util.c \
+       src/arch/tricore/asm.c src/arch/tricore/isa.c src/arch/code.c src/driver/util.c \
        src/driver/diag.c src/arch/target.c src/sema/type.c src/sema/ldfloat.c \
        src/platform/platform_common.c src/platform/platform_posix.c || {
         echo "tricorecheck did not build"; exit 1; }

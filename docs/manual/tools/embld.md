@@ -282,10 +282,9 @@ On ARM, the entry symbol's Thumb bit is kept in the ELF entry point.
 
 ### Linker scripts
 
-`-T SCRIPT` lays the image out by a GNU ld linker script instead, for ARM,
-AArch64, x86-64, RISC-V, LoongArch, MIPS, PowerPC, SPARC, ColdFire, AVR and Xtensa images (TriCore and RX are refused: `embld: -T:
-a linker script is supported for ARM, AArch64, x86-64, RISC-V, LoongArch, MIPS, PowerPC,
-SPARC, ColdFire, AVR and Xtensa images (this one is machine 44)`): the script a CMSIS, STM32CubeMX, vendor SDK, avr-libc or
+`-T SCRIPT` lays the image out by a GNU ld linker script instead, for every
+machine EmbLD links -- ARM, AArch64, x86-64, RISC-V, LoongArch, MIPS,
+PowerPC, SPARC, ColdFire, TriCore, RX, AVR and Xtensa: the script a CMSIS, STM32CubeMX, vendor SDK, avr-libc or
 RTOS project already has. `.tdata` and `.tbss` that the script does not
 place go after the data and after the zeroed data, where a single-thread
 image uses them in place; the image gets a `PT_TLS` segment either way. It replaces `-Tstack` and `--lma-offset`,

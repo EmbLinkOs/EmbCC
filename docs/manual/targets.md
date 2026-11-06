@@ -1784,9 +1784,22 @@ fails. `__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1`, `_2` and `_4` are defined.
 ### Object format and linking
 
 ELF32, little-endian, `EM_TRICORE` (44), RELA relocations, `e_flags`
-`0x00200000`. `embld` links these objects, applying `R_TRICORE_32ABS`,
-`R_TRICORE_24REL`, `R_TRICORE_HIADJ`, `R_TRICORE_LO` and `R_TRICORE_LO2`,
-and refuses the small-data relocations by name. `-Tstack ADDR --csa
+`0x00200000`. `embld` links these objects -- EmbCC's and GNU as's -- and
+applies every TriCore relocation type GNU writes: the data words (`32ABS`,
+`32REL`) and each instruction field, found and packed with the
+assembler's own table (`src/arch/tricore/isa.h`), so the two cannot
+disagree about a field: `24REL`, `15REL`, `24ABS`, `18ABS`, `18ABS_14`,
+`HIADJ`, `HI`, `LO`, `LO2`, `16CONST`, `9SCONST`, `9ZCONST`, `10OFF`,
+`16OFF`, the bit positions (`1BIT`, `3POS`, `5POS`, `5POS2`) and the
+`BRCC`/`BRCZ`/`BRNN`/`RRN` constants; the small-data `16SM`, `10SM` and
+`16SM2` from the base their address register holds (`_SMALL_DATA_` for
+a0, `_LITERAL_DATA_` for a1, `_A8_DATA_`, `_A9_DATA_`, which the script
+defines, as GNU ld's do). GNU as's own resolved branches, which it keeps
+relocated against symbol 0 for its relaxing linker, are taken at their
+distance; `RELAX` marks are ignored. tools/tricore-isa/linktest.py links
+every symbol statement GNU takes with tricore-elf-ld and with embld, from
+either assembler: the images are the same bytes. `-T SCRIPT` takes a GNU
+ld script. `-Tstack ADDR --csa
 START:END` makes it emit an entry stub that sets `A10`, links the
 context-save areas in [START, END) into the free list every `CALL` draws
 from, turns call-depth counting off and jumps to the entry symbol; the

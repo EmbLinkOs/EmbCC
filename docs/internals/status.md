@@ -122,13 +122,7 @@ use it.
 There is no position-independent code, no shared library and no dynamic
 linking. `-fPIC`, `-shared` and the related options are refused (see
 [Options](#options)). EmbLD reads GNU ld linker scripts (`embld -T`) for
-ARM, RISC-V, AVR, Xtensa and MIPS32 images, not yet for the other targets:
-
-```text
-embld: -T: a linker script is supported for ARM, RISC-V, AVR, Xtensa and MIPS32 images only (this one is machine 62)
-```
-
-Where it reads one, the driver links firmware
+every machine it links. The driver links firmware
 with them (`embcc -T board.ld a.o b.o -o fw.elf`). `--gc-sections` drops
 the sections nothing reaches, on every machine, for objects built with
 `-ffunction-sections -fdata-sections`; `-Map` and

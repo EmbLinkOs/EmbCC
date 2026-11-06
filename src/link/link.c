@@ -28,6 +28,7 @@
 #include "../arch/mips/emit.h"
 #include "../arch/thumb/a32.h"
 #include "../arch/tricore/emit.h"
+#include "../arch/tricore/isa.h"
 #include "../arch/xtensa/emit.h"
 #include "../arch/ppc/emit.h"
 #include "../arch/rx/emit.h"
@@ -4226,6 +4227,11 @@ static Elf64_Addr reloc_symval(struct linker *l, struct object *o,
     const char *name = o->symstr + sy->st_name;
     *is_undef_weak = 0;
 
+    /* STN_UNDEF: "the relocation uses 0 as the symbol value" (the ELF
+     * spec) -- GNU as's TriCore branches it resolved itself, kept for its
+     * relaxing linker with the displacement in the addend */
+    if (symidx == 0)
+        return 0;
     if (ELF64_ST_BIND(sy->st_info) == STB_LOCAL) {
         /* a local symbol: resolve within this object directly */
         if (sy->st_shndx == SHN_ABS)
@@ -5438,26 +5444,91 @@ static void apply_mips(struct linker *l, struct object *o, unsigned type,
 
 /* ---- TriCore -------------------------------------------------------------
  *
- * RELA, the addend in the relocation (docs/internals/tricore-plan.md).
- * An address is two halves in two instruction formats: HIADJ in an RLC
- * const16 (MOVH, MOVH.A), rounded by 0x8000 because the low half is
- * sign-extended where it is added; LO in an RLC const16 (ADDI); LO2 in a
- * BOL long offset (LEA, a load, a store), whose 16 bits are scattered in
- * three pieces. 24REL is CALL's and J's halfword displacement. Every
- * field is rebuilt by src/arch/tricore/emit.c's format packers from the
- * instruction's own other fields, so no layout is written down here. The
- * small-data and other types are refused by name. */
+ * RELA, the addend in the relocation. Beyond the two data words (32ABS,
+ * and 32REL for .eh_frame) every type fills one field of one instruction,
+ * and which field -- and where each of its bits lies, scattered as
+ * TriCore's formats scatter them -- is what src/arch/tricore/isa.h knows:
+ * the form whose opcode bits the instruction has, and the field GNU as
+ * writes that relocation for in it (tools/tricore-isa measured both). So
+ * the linker decodes the instruction with the assembler's own table and
+ * packs the value with its packer; nothing about a format is written down
+ * here twice.
+ *
+ * The value: S + A, less P for the PC-relative 24REL and 15REL (a byte
+ * distance; the field's weights make it halfwords); the high half of S +
+ * A rounded by 0x8000 for HIADJ (the low half is sign-extended where it is
+ * added), the plain high half for HI, the low half for LO and LO2; and for
+ * the small-data 16SM, 10SM and 16SM2, the distance from the base its
+ * address register holds -- _SMALL_DATA_ for a0, _LITERAL_DATA_ for a1,
+ * _A8_DATA_ and _A9_DATA_ for a8 and a9, as GNU ld's scripts define them
+ * (a script or an object must). An absolute 18ABS or 24ABS is the address
+ * itself: the field's weights are the format's mapping (bits 31:28 to the
+ * top, 13:0 or 20:1 below). RELAX, GNU's mark for its relaxing linker, is
+ * nothing to do. */
 #if FAMILY_BUILT(tricore)
+static const char *tc_reloc_name(unsigned type)
+{
+    static const struct { unsigned t; const char *n; } names[] = {
+        { 1, "32REL" }, { 2, "32ABS" }, { 3, "24REL" }, { 4, "24ABS" },
+        { 5, "16SM" }, { 6, "HIADJ" }, { 7, "LO" }, { 8, "LO2" },
+        { 9, "18ABS" }, { 10, "10SM" }, { 11, "15REL" }, { 12, "HI" },
+        { 13, "16CONST" }, { 14, "9ZCONST" }, { 15, "9SCONST" },
+        { 18, "10OFF" }, { 19, "16OFF" }, { 22, "1BIT" }, { 23, "3POS" },
+        { 24, "5POS" }, { 30, "5POS2" }, { 31, "BRCC" }, { 32, "BRCZ" },
+        { 33, "BRNN" }, { 34, "RRN" }, { 48, "16SM2" }, { 81, "18ABS_14" },
+        { 82, "RELAX" },
+    };
+    for (unsigned k = 0; k < sizeof names / sizeof names[0]; k++)
+        if (names[k].t == type)
+            return names[k].n;
+    return NULL;
+}
+
+/* The small-data base an instruction's address register holds. */
+static Elf64_Addr tc_sda_base(struct linker *l, struct object *o,
+                              unsigned type, int e, unsigned long w)
+{
+    const struct tc_insn *in = &tc_insns[e];
+    const char *p = strchr(in->shape, '[');
+    int k = 0, reg = -1;
+    /* the address register is the atom right after `[` */
+    for (const char *q = in->shape; p && q < p; q++)
+        if (*q == 'D' || *q == 'A' || *q == 'E' || *q == 'N' || *q == 'S')
+            k++;
+    if (p && k < in->nf) {
+        const struct tc_field *f = &tc_fields[in->f + k];
+        reg = f->v0;
+        for (int j = 0; j < f->nb; j++)
+            if ((w >> tc_fbits[f->fb + j].pos) & 1)
+                reg += 1 << tc_fbits[f->fb + j].shift;
+    }
+    {
+        const char *nm = reg == 0 ? "_SMALL_DATA_" : reg == 1 ? "_LITERAL_DATA_" :
+                         reg == 8 ? "_A8_DATA_" : reg == 9 ? "_A9_DATA_" : NULL;
+        struct symbol *b = nm ? sym_find(l, nm) : NULL;
+        if (!nm)
+            die("%s: relocation R_TRICORE_%s on an instruction whose base is "
+                "a%d: small data is addressed from a0, a1, a8 or a9", o->name,
+                tc_reloc_name(type), reg);
+        if (!b || !b->defined)
+            die("%s: relocation R_TRICORE_%s: small data addressed from a%d, "
+                "whose base %s neither the link script nor an object "
+                "defines (GNU ld's scripts put it 32 KiB into .sdata)",
+                o->name, tc_reloc_name(type), reg, nm);
+        return b->value;
+    }
+}
+
 static void apply_tricore(struct linker *l, struct object *o, unsigned type,
                           unsigned char *loc, Elf64_Addr S, long long A,
                           Elf64_Addr P)
 {
-    unsigned long w = get32loc(loc);
-    int op1 = (int)(w & 0xff), s1 = (int)((w >> 8) & 15),
-        s2 = (int)((w >> 12) & 15), d = (int)((w >> 28) & 15);
     long long V = (long long)S + A;
+    int len, e, k;
+    unsigned long w;
     switch (type) {
     case R_TRICORE_NONE:
+    case R_TRICORE_RELAX:
         return;
     case R_TRICORE_32ABS:
         need_range(l, o, "R_TRICORE_32ABS", V, I32_MIN, 0xffffffffLL);
@@ -5468,39 +5539,60 @@ static void apply_tricore(struct linker *l, struct object *o, unsigned type,
         need_range(l, o, "R_TRICORE_32REL", V, I32_MIN, I32_MAX);
         put32(loc, (unsigned int)V);
         return;
-    case R_TRICORE_24REL: {
-        long long dd = V - (long long)P;
-        if (op1 != 0x1d && op1 != 0x6d && op1 != 0x5d)
-            die("%s: R_TRICORE_24REL on 0x%08lx, which is not a J, CALL or "
-                "JL", o->name, w);
-        if (dd & 1)
-            die("%s: a call or jump to the odd address 0x%llx ('%s')",
-                o->name, (unsigned long long)V, l->rel_sym ? l->rel_sym : "?");
-        need_range(l, o, "R_TRICORE_24REL", dd, -16777216LL, 16777214LL);
-        put32(loc, (unsigned int)tc_enc_b(op1, (unsigned long)(dd / 2) &
-                                               0xffffffUL));
-        return;
-    }
-    case R_TRICORE_HIADJ:
-        put32(loc, (unsigned int)tc_enc_rlc(op1, d, s1,
-                                            tc_hi_adj((unsigned long)V)));
-        return;
-    case R_TRICORE_LO:
-        put32(loc, (unsigned int)tc_enc_rlc(op1, d, s1,
-                                            (unsigned)(V & 0xffff)));
-        return;
-    case R_TRICORE_LO2:
-        put32(loc, (unsigned int)tc_enc_bol(op1, s1, s2,
-                                            (unsigned)(V & 0xffff)));
-        return;
-    case R_TRICORE_16SM: case R_TRICORE_10SM:
-        die("%s: relocation %s: small-data (A0-relative) addressing, which "
-            "this linker does not lay out", o->name,
-            type == R_TRICORE_16SM ? "R_TRICORE_16SM" : "R_TRICORE_10SM");
-        return;
     default:
-        die("%s: unsupported TriCore relocation type %u (this is the next "
-            "linker increment, not a bug in your program)", o->name, type);
+        break;
+    }
+    if (!tc_reloc_name(type))
+        die("%s: relocation type %u is not a TriCore one", o->name, type);
+    /* bit 0 of an instruction's first byte: 32-bit */
+    len = loc[0] & 1 ? 4 : 2;
+    w = len == 4 ? get32loc(loc) : get16(loc);
+    if (tc_reloc_site(w, len, (int)type, &e, &k) < 0)
+        die("%s: relocation R_TRICORE_%s on 0x%0*lx, which is no TriCore "
+            "instruction with a field for it", o->name, tc_reloc_name(type),
+            len * 2, w);
+    switch (type) {
+    case R_TRICORE_24REL: case R_TRICORE_15REL:
+        V -= (long long)P;
+        break;
+    case R_TRICORE_HIADJ:
+        V = ((V + 0x8000) >> 16) & 0xffff;
+        break;
+    case R_TRICORE_HI:
+        V = (V >> 16) & 0xffff;
+        break;
+    case R_TRICORE_LO: case R_TRICORE_LO2:
+        V &= 0xffff;
+        break;
+    case R_TRICORE_16SM: case R_TRICORE_10SM: case R_TRICORE_16SM2:
+        V -= (long long)tc_sda_base(l, o, type, e, w);
+        break;
+    default:
+        break;
+    }
+    {
+        const struct tc_field *f = &tc_fields[tc_insns[e].f + k];
+        long long lo, hi, step;
+        unsigned nw;
+        tc_field_range(f, &lo, &hi, &step);
+        /* a half is the field's 16 bits, whatever their sign */
+        if ((type == R_TRICORE_HIADJ || type == R_TRICORE_HI ||
+             type == R_TRICORE_LO || type == R_TRICORE_LO2) && V > hi)
+            V -= 0x10000;
+        nw = (unsigned)w & ~tc_field_mask(f);
+        if (!tc_fit_field(f, V, &nw)) {
+            if (step > 1 && V % step)
+                die("%s: relocation R_TRICORE_%s in '%s': %lld (from '%s') is "
+                    "not a multiple of %lld", o->name, tc_reloc_name(type),
+                    tc_insns[e].mnem, V, l->rel_sym ? l->rel_sym : "?", step);
+            die("%s: relocation R_TRICORE_%s in '%s': %lld (from '%s') does "
+                "not fit its field (%lld..%lld)", o->name, tc_reloc_name(type),
+                tc_insns[e].mnem, V, l->rel_sym ? l->rel_sym : "?", lo, hi);
+        }
+        if (len == 4)
+            put32(loc, nw);
+        else
+            put16(loc, nw);
     }
 }
 #endif
@@ -6326,6 +6418,11 @@ static void apply_relocs(struct linker *l, struct object *o)
 #endif
 #if FAMILY_BUILT(tricore)
             if (o->machine == EM_TRICORE) {
+                /* (against symbol 0 a branch's addend is its distance:
+                 * GNU as's, which resolved it and kept it relocated) */
+                if (symi == 0 && (type == R_TRICORE_24REL ||
+                                  type == R_TRICORE_15REL))
+                    S = P;
                 apply_tricore(l, o, type, loc, S, A, P);
                 continue;
             }
@@ -8172,10 +8269,11 @@ static void ls_layout(struct linker *l, struct ls_script *sc, int orphan_mode)
         l->machine != EM_AARCH64 && l->machine != EM_X86_64 &&
         l->machine != EM_LOONGARCH && l->machine != EM_MIPS &&
         l->machine != EM_PPC && l->machine != EM_SPARC &&
-        l->machine != EM_68K)
+        l->machine != EM_68K && l->machine != EM_TRICORE &&
+        l->machine != EM_RX)
         die("-T: a linker script is supported for ARM, AArch64, x86-64, "
-            "RISC-V, LoongArch, MIPS, PowerPC, SPARC, ColdFire, AVR and "
-            "Xtensa images (this one is machine %u)",
+            "RISC-V, LoongArch, MIPS, PowerPC, SPARC, ColdFire, TriCore, RX, "
+            "AVR and Xtensa images (this one is machine %u)",
             (unsigned)l->machine);
     /* A region every output section names must exist, whether or not
      * anything ends up in the section: a typo in `> RAM` is a typo. */

@@ -275,6 +275,7 @@ FAMILY_SRCS_tricore := \
 	src/arch/tricore/codegen.c \
 	src/arch/tricore/irgen.c \
 	src/arch/tricore/asm.c \
+	src/arch/tricore/isa.c \
 	src/arch/tricore/predef.c \
 	src/arch/tricore/predef_cxx.c
 FAMILY_SRCS_xtensa := \
@@ -638,7 +639,7 @@ embld: tools/embld/embld.c tools/embld/doctor.c src/link/link.c \
        src/driver/util.c src/driver/diag.c src/driver/explain.c \
        src/arch/riscv/emit.c src/arch/avr/emit.c src/arch/mips/emit.c \
        src/arch/loongarch/emit.c src/arch/thumb/a32.c src/arch/thumb/a32.h \
-       src/arch/tricore/emit.c src/arch/xtensa/emit.c src/arch/ppc/emit.c src/arch/rx/emit.c src/arch/sparc/emit.c src/arch/code.c \
+       src/arch/tricore/emit.c src/arch/tricore/isa.c src/arch/xtensa/emit.c src/arch/ppc/emit.c src/arch/rx/emit.c src/arch/sparc/emit.c src/arch/code.c \
        src/link/link.h src/link/ldscript.h src/elf/elf.h src/embx/embx.c src/embx/embx.h \
        tools/embdbg/embdbg.c tools/embdbg/embdbg_core.h \
        $(PLATFORM_SRCS) src/platform/platform.h
@@ -647,7 +648,7 @@ embld: tools/embld/embld.c tools/embld/doctor.c src/link/link.c \
 	    src/driver/util.c src/driver/diag.c src/driver/explain.c \
 	    src/embx/embx.c tools/embdbg/embdbg.c $(PLATFORM_SRCS) \
 	    src/arch/x86_64/disasm.c src/arch/riscv/emit.c src/arch/avr/emit.c \
-	    src/arch/mips/emit.c src/arch/loongarch/emit.c src/arch/thumb/a32.c src/arch/tricore/emit.c src/arch/xtensa/emit.c src/arch/ppc/emit.c src/arch/rx/emit.c src/arch/sparc/emit.c src/arch/code.c
+	    src/arch/mips/emit.c src/arch/loongarch/emit.c src/arch/thumb/a32.c src/arch/tricore/emit.c src/arch/tricore/isa.c src/arch/xtensa/emit.c src/arch/ppc/emit.c src/arch/rx/emit.c src/arch/sparc/emit.c src/arch/code.c
 
 # NOTE: this list is HAND-MAINTAINED and `make check` does not build embls, so
 # a backend file added without a line here breaks only `make test` -- and
@@ -709,7 +710,7 @@ EMBLS_SRCS = tools/embls/embls.c $(PLATFORM_SRCS) src/cpp/cpp.c src/lex/lex.c \
              src/arch/loongarch/irgen.c src/arch/loongarch/emit.c \
              src/arch/loongarch/asm.c \
              src/arch/tricore/irgen.c src/arch/tricore/asm.c \
-             src/arch/tricore/emit.c \
+             src/arch/tricore/emit.c src/arch/tricore/isa.c \
              src/arch/xtensa/irgen.c src/arch/xtensa/emit.c \
              src/arch/xtensa/asm.c \
              src/arch/ppc/irgen.c src/arch/ppc/emit.c \
