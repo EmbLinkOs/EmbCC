@@ -100,11 +100,29 @@ int x86att_is_reg(const char *name, int len)
     return reg_lookup(name, len, &r) ? r.num : -1;
 }
 
+/* (intel.c's: a register name's class and size in bytes) */
+int x86att_reg_class(const char *name, int len, int *size)
+{
+    struct reg r;
+    if (!reg_lookup(name, len, &r) || (r.kind == K_REG && r.num == 16))
+        return X86R_NONE;
+    *size = r.size;
+    switch (r.kind) {
+    case K_REG: return X86R_GPR;
+    case K_XMM: return X86R_VEC;
+    case K_SEG: return X86R_SEG;
+    case K_CR: case K_DR: return X86R_CTL;
+    case K_KREG: return X86R_MASK;
+    }
+    return X86R_NONE;
+}
+
 static int is_prefix(const char *s, int n)
 {
     static const char *const pf[] = { "lock", "rep", "repe", "repz", "repne",
                                       "repnz", "rex64", "near", "{disp32}",
-                                      "{disp8}", "{imm32}" };
+                                      "{disp8}", "{imm32}", "{nasm}", "data16", "data32", "addr16",
+                                      "addr32" };
     for (unsigned k = 0; k < sizeof pf / sizeof *pf; k++)
         if ((int)strlen(pf[k]) == n && !strncmp(pf[k], s, (size_t)n))
             return 1;
@@ -140,8 +158,8 @@ int x86att_is_word(const char *stmt, const char *w, int len)
     }
     if (len >= 1 && w[0] == '$' && (len == 1 || !asm_sym0((unsigned char)w[1])))
         return 1;                      /* `$8`: an immediate, not a name */
-    if (w == after_prefixes(stmt))
-        return 1;
+    if (w <= after_prefixes(stmt))
+        return 1;                      /* the mnemonic, and a prefix before it */
     for (unsigned k = 0; k < sizeof ops / sizeof *ops; k++)
         if ((int)strlen(ops[k]) == len && !strncmp(ops[k], w, (size_t)len))
             return 1;
@@ -185,6 +203,10 @@ static int g_disp_force;
 /* {imm32}, EmbCC's own: an immediate keeps its 32-bit field -- a symbol's
  * value is the linker's, and the 0 written for it fits a byte */
 static int g_imm_wide;
+/* {nasm}: the statement is NASM's (src/as/nasm.c), and takes the forms
+ * NASM picks where they and llvm-mc's differ -- mov r64, imm as mov r32's
+ * zero-extending form when the value fits it, movabs for a symbol's */
+static int g_nasm;
 /* the code's size: 64, or 32 and 16 after .code32/.code16 (NASM's bits) --
  * the operand and address sizes an instruction has without a prefix */
 static int g_mode = 64;
@@ -343,8 +365,24 @@ static int parse_opnd(const char *s, int n, struct opnd *o)
             return fail("'%.*s' is not an x86-64 register", n, s);
         return 0;
     }
-    /* memory: disp(base, index, scale), any part optional */
-    const char *lp = memchr(s, '(', (size_t)n);
+    /* memory: disp(base, index, scale), any part optional -- the group
+     * of registers is the last parenthesis, when it names a register or
+     * starts with a comma; before it (or without one) the displacement,
+     * which may have parentheses of its own: (4*8)(%ebx), 4*(1+1) */
+    const char *lp = NULL;
+    if (s[n - 1] == ')') {
+        int depth = 0;
+        for (const char *q = s + n - 1; q >= s; q--) {
+            if (*q == ')') depth++;
+            else if (*q == '(' && --depth == 0) { lp = q; break; }
+        }
+        if (lp) {
+            const char *in = lp + 1;
+            while (isspace((unsigned char)*in)) in++;
+            if (*in != '%' && *in != ',')
+                lp = NULL;
+        }
+    }
     o->k = K_MEM;
     const char *dend = lp ? lp : s + n;
     int dn = (int)(dend - s);
@@ -1337,7 +1375,7 @@ static int avx(struct ib *x, const char *mn, const struct opnd *o, int n)
                 if (is_v(&o[1]) && is_vm(&o[0])) {
                     if (o[0].k == K_XMM && vlen(&o[0]) != vlen(&o[1]))
                         return fail("'%s' moves between registers of one size", mn);
-                    if (o[0].k == K_XMM && o[0].reg >= 8 && o[1].reg < 8)
+                    if (o[0].k == K_XMM && o[0].reg >= 8 && o[1].reg < 8 && !g_nasm)
                         return emit_vex(x, mv[k].pp, M_0F, 0, vlen(&o[1]), 0, mv[k].st,
                                         o[0].reg, &o[1]);
                     return emit_vex(x, mv[k].pp, M_0F, 0, vlen(&o[1]), 0, mv[k].ld,
@@ -1817,16 +1855,20 @@ static int insn(struct ib *x, const char *mn, struct opnd *o, int n)
         }
         for (unsigned k = 0; k < sizeof plain / sizeof *plain; k++)
             if (!strcmp(mn, plain[k].n)) {
-                if (seg) put(x, (unsigned)seg);
                 /* (a string's registers of another size than the mode's
-                 * addresses: 67) */
+                 * addresses: 67 -- before the segment, as llvm-mc writes
+                 * a string's, after it as NASM does) */
+                int a67 = 0;
                 for (int j = 0; j < n; j++)
                     if (o[j].k == K_MEM && addr_size(&o[j]) != mode_bytes()) {
                         if (g_mode == 64 && addr_size(&o[j]) == 2)
                             return fail("16-bit addressing is not in 64-bit code");
-                        put(x, 0x67);
+                        a67 = 1;
                         break;
                     }
+                if (a67 && !g_nasm) put(x, 0x67);
+                if (seg) put(x, (unsigned)seg);
+                if (a67 && g_nasm) put(x, 0x67);
                 {
                     int i = 0;
                     if (plain[k].b[0] == 0x48 && g_mode != 64)
@@ -1989,7 +2031,7 @@ static int insn(struct ib *x, const char *mn, struct opnd *o, int n)
             unsigned char op = dst->k == K_SEG ? 0x8e : 0x8c;
             struct opnd *sg = dst->k == K_SEG ? dst : src, *r = dst->k == K_SEG ? src : dst;
             int w = r->k == K_REG && r->size == 8 && dst->k != K_SEG;
-            return emit_rm(x, r->k == K_REG && r->size == 2 && op == 0x8c ? P66 : 0,
+            return emit_rm(x, r->k == K_REG && op == 0x8c && r->size != 8 ? pfx_of(r->size) : 0,
                            w, &op, 1, sg->reg, NULL, r);
         }
         if (dst->k == K_CR || src->k == K_CR || dst->k == K_DR || src->k == K_DR) {
@@ -2022,6 +2064,23 @@ static int insn(struct ib *x, const char *mn, struct opnd *o, int n)
         }
         if (src->k == K_IMM) {
             long long v = src->imm;
+            if (dst->k == K_REG && g_nasm && sz == 8 && is_reg_sz(dst, 8)) {
+                /* NASM's: a symbol's address in 64 bits, a number by the
+                 * shortest form that holds it */
+                unsigned char op = 0xb8;
+                if (g_imm_wide || (!fits32(v) && (v < 0 || v > 0xffffffffLL))) {
+                    if (emit_oreg(x, 0, 1, &op, 1, dst) < 0) return -1;
+                    imm_put(x, v, 8);
+                } else if (v >= 0) {
+                    if (emit_oreg(x, 0, 0, &op, 1, dst) < 0) return -1;
+                    imm_put(x, v, 4);
+                } else {
+                    op = 0xc7;
+                    if (emit_rm(x, 0, 1, &op, 1, 0, NULL, dst) < 0) return -1;
+                    imm_put(x, v, 4);
+                }
+                return 0;
+            }
             if (dst->k == K_REG) {
                 if (!is_reg_sz(dst, sz)) return fail("a register's size is not the operation's");
                 if (sz == 8 && fits32(v)) {
@@ -2336,7 +2395,7 @@ static int insn(struct ib *x, const char *mn, struct opnd *o, int n)
     if ((s = sized(mn, "bswap")) >= 0 && n == 1 && o[0].k == K_REG &&
         (o[0].size == 4 || o[0].size == 8)) {
         unsigned char op[2] = { 0x0f, 0xc8 };
-        return emit_oreg(x, 0, o[0].size == 8, op, 2, &o[0]);
+        return emit_oreg(x, pfx_of(o[0].size), o[0].size == 8, op, 2, &o[0]);
     }
     {
         static const struct { const char *n; unsigned op; } xa[] = { {"cmpxchg",0xb0}, {"xadd",0xc0} };
@@ -2378,7 +2437,8 @@ static int insn(struct ib *x, const char *mn, struct opnd *o, int n)
             if ((s = sized(mn, pr[k].n)) >= 0 && n == 1 &&
                 (o[0].k == K_MEM || o[0].k == K_REG)) {
                 unsigned char op[2] = { 0x0f, pr[k].op1 };
-                int st = !strcmp(pr[k].n, "smsw") && o[0].k == K_REG;
+                int st = !strcmp(pr[k].n, "smsw") && o[0].k == K_REG &&
+                         !(g_nasm && o[0].size == 2);
                 return emit_rm(x, st ? pfx_of(o[0].size) : 0, st && o[0].size == 8,
                                op, 2, pr[k].ext, NULL, &o[0]);
             }
@@ -2798,8 +2858,10 @@ static int one(const char *s, int len, struct code *out)
     memset(&x, 0, sizeof x);
     x.disp_at = x.imm_at = -1;
     int force_near = 0;
+    unsigned char lr = 0;              /* lock (F0) or rep (F2/F3), placed below */
     g_disp_force = 0;
     g_imm_wide = 0;
+    g_nasm = 0;
     for (;;) {
         while (i < len && isspace((unsigned char)s[i])) i++;
         int st = i;
@@ -2808,6 +2870,7 @@ static int one(const char *s, int len, struct code *out)
         int ml = i - st;
         if (ml == 0) {
             /* prefixes alone, as a statement of their own (`rep;movsq`) */
+            if (lr) put(&x, lr);
             for (int k = 0; k < x.n; k++)
                 code_byte(out, x.b[k]);
             g_last_len = x.n;
@@ -2818,14 +2881,18 @@ static int one(const char *s, int len, struct code *out)
             mn[k] = (char)tolower((unsigned char)s[st + k]);
         mn[ml] = 0;
         /* prefixes, on the same line or as statements of their own */
-        if (!strcmp(mn, "lock")) { put(&x, 0xf0); continue; }
-        if (!strcmp(mn, "rep") || !strcmp(mn, "repe") || !strcmp(mn, "repz")) { put(&x, 0xf3); continue; }
-        if (!strcmp(mn, "repne") || !strcmp(mn, "repnz")) { put(&x, 0xf2); continue; }
+        if (!strcmp(mn, "lock")) { if (lr) put(&x, lr); lr = 0xf0; continue; }
+        if (!strcmp(mn, "rep") || !strcmp(mn, "repe") || !strcmp(mn, "repz")) { if (lr) put(&x, lr); lr = 0xf3; continue; }
+        if (!strcmp(mn, "repne") || !strcmp(mn, "repnz")) { if (lr) put(&x, lr); lr = 0xf2; continue; }
         if (!strcmp(mn, "rex64")) { put(&x, 0x48); continue; }
+        /* (GNU as's: the other operand or address size, by hand) */
+        if (!strcmp(mn, "data16") || !strcmp(mn, "data32")) { put(&x, 0x66); continue; }
+        if (!strcmp(mn, "addr16") || !strcmp(mn, "addr32")) { put(&x, 0x67); continue; }
         if (!strcmp(mn, "near")) { force_near = 1; continue; }   /* (symform's) */
         if (!strcmp(mn, "{disp32}")) { g_disp_force = 32; continue; }
         if (!strcmp(mn, "{disp8}")) { g_disp_force = 8; continue; }
         if (!strcmp(mn, "{imm32}")) { g_imm_wide = 1; continue; }
+        if (!strcmp(mn, "{nasm}")) { g_nasm = 1; continue; }
         break;
     }
     struct opnd o[6];          /* (AVX-512's: $imm, {sae}, and three registers) */
@@ -2847,9 +2914,41 @@ static int one(const char *s, int len, struct code *out)
     int save = g_level;
     if (force_near) g_level = 1;
     int r = insn(&x, mn, o, n);
+    /* where lock or rep goes among the prefixes: llvm-mc writes rep first
+     * and lock after the segment, 67 and 66; NASM the segment and 67,
+     * then lock or rep, then 66 -- a string instruction's rep after its
+     * 66 too (the bytes mean the same; the referees' objects are matched
+     * byte for byte) */
+    if (r >= 0 && lr) {
+        int at = 0;
+        int str = !strncmp(mn, "movs", 4) || !strncmp(mn, "stos", 4) ||
+                  !strncmp(mn, "lods", 4) || !strncmp(mn, "cmps", 4) ||
+                  !strncmp(mn, "scas", 4) || !strncmp(mn, "ins", 3) ||
+                  !strncmp(mn, "outs", 4);
+        if (lr == 0xf0 || g_nasm) {
+            while (at < x.n) {
+                unsigned b = x.b[at];
+                int seg = b == 0x26 || b == 0x2e || b == 0x36 || b == 0x3e ||
+                          b == 0x64 || b == 0x65;
+                if (seg || b == 0x67 ||
+                    (b == 0x66 && (!g_nasm || str)))
+                    at++;
+                else
+                    break;
+            }
+        }
+        if (x.n < (int)sizeof x.b) {
+            memmove(x.b + at + 1, x.b + at, (size_t)(x.n - at));
+            x.b[at] = lr;
+            x.n++;
+            if (x.disp_at >= at) x.disp_at++;
+            if (x.imm_at >= at) x.imm_at++;
+        }
+    }
     g_level = save;
     g_disp_force = 0;
     g_imm_wide = 0;
+    g_nasm = 0;
     if (r < 0)
         return -1;
     if (x.dotrip) {                     /* rip-relative: from the end */
@@ -2965,6 +3064,54 @@ static int x86_next_sym(const char *stmt, const char *q, struct x86sym *y)
     return 0;
 }
 
+/* `jmp 0x7e00`, `call 0x5678`: a branch to an ADDRESS, not a distance --
+ * the near form with a relocation against no symbol (*ABS*), as llvm-mc
+ * and GNU as write it: 1 and the form in f, the address in *target */
+int x86att_abs_branch(const char *stmt, struct asm_symform *f, long long *target)
+{
+    memset(f, 0, sizeof *f);
+    const char *p = after_prefixes(stmt);
+    const char *m = p;
+    while (*p && !isspace((unsigned char)*p)) p++;
+    int ml = (int)(p - m);
+    char mn[16];
+    if (ml >= (int)sizeof mn) return 0;
+    snprintf(mn, sizeof mn, "%.*s", ml, m);
+    int jcc = mn[0] == 'j' && cond_of(mn + 1) >= 0;
+    if (!jcc && strcmp(mn, "jmp") && strcmp(mn, "call") && strcmp(mn, "jmpq") &&
+        strcmp(mn, "callq") && strcmp(mn, "jmpw") && strcmp(mn, "callw") &&
+        strcmp(mn, "jmpl") && strcmp(mn, "calll"))
+        return 0;
+    while (*p && isspace((unsigned char)*p)) p++;
+    const char *e = p + strlen(p);
+    while (e > p && isspace((unsigned char)e[-1])) e--;
+    if (e == p || *p == '.' || *p == '*' || *p == '$')
+        return 0;
+    for (const char *q = p; q < e; q++)
+        if (*q == '%' || *q == ',')
+            return 0;
+    long long v;
+    if (!asm_const_expr(p, (int)(e - p), &v))
+        return 0;
+    int fl = g_mode == 16 ? 2 : 4;
+    snprintf(f->encode, sizeof f->encode, "near %.*s .+%d", ml, m,
+             jcc ? 2 + fl : 1 + fl);
+    char err[256];
+    struct code c = { 0 };
+    g_err = err; g_errlen = (int)sizeof err;
+    if (x86att_assemble(f->encode, &c, err, (int)sizeof err) != 0) {
+        free(c.p);
+        return 0;
+    }
+    free(c.p);
+    f->nsites = 1;
+    f->site[0].off = g_last_len - fl;
+    f->site[0].reloc = fl == 2 ? R_X86_64_PC16 : R_X86_64_PC32;
+    f->addend = -fl;
+    *target = v;
+    return 1;
+}
+
 /* `call sym`, `jmp sym`, `jcc sym`, `sym(%rip)`, `$sym`, an absolute
  * `sym(%reg)`: the statement with a zero there, and where its relocation
  * goes -- and a second symbol, when an immediate and an address both name
@@ -3046,8 +3193,11 @@ int x86att_symform(const char *stmt, struct asm_symform *f)
         f->site[0].off = g_last_len - fl;
         /* a call or a jump to a function: PLT32, as GNU as writes it; a
          * conditional jump: PC32; 16-bit code's: PC16 */
+        /* (NASM's: PC32, unless `wrt ..plt` asked for the PLT) */
+        int nasm = strstr(stmt, "{nasm}") != NULL;
         f->site[0].reloc = fl == 2 ? R_X86_64_PC16
-                         : mn[0] == 'c' || !strncmp(mn, "jmp", 3)
+                         : (mn[0] == 'c' || !strncmp(mn, "jmp", 3)) &&
+                               (!nasm || y[0].kind == 1)
                                ? R_X86_64_PLT32 : R_X86_64_PC32;
         f->addend = y[0].addend - fl;
         return 1;
@@ -3077,12 +3227,17 @@ int x86att_symform(const char *stmt, struct asm_symform *f)
             if (!strncmp(mn, "ljmp", 4) || !strncmp(mn, "lcall", 5))
                 ilen = ilen - 2;
             st->off = g_last_imm_at;
+            /* (a 64-bit operation's immediate is sign-extended: 32S --
+             * REX.W says so, whatever the mnemonic's spelling) */
+            int rexw = 0;
+            for (int j = 0; j < g_last_imm_at && j < 16; j++)
+                if ((c_first[j] & 0xf8) == 0x48) rexw = 1;
             st->reloc = ilen == 8 ? R_X86_64_64
                       : ilen == 2 ? R_X86_64_16
                       : ilen == 1 ? R_X86_64_8
                       : g_mode != 64 ? R_X86_64_32
-                      : (!strncmp(mn, "movq", 4) || mn[strlen(mn) - 1] == 'q') ? R_X86_64_32S
-                      : R_X86_64_32;
+                      : rexw || !strncmp(mn, "movq", 4) || mn[strlen(mn) - 1] == 'q'
+                            ? R_X86_64_32S : R_X86_64_32;
         } else {
             if (g_last_disp_at < 0) return 0;      /* an absolute address */
             st->off = g_last_disp_at;

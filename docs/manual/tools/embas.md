@@ -1,238 +1,194 @@
-# embas — the EmbCC NASM-syntax assembler
+# embas — the EmbCC assembler
 
-This page is the reference for `embas`, EmbCC's standalone assembler for
-x86-64 source in NASM (Intel) syntax. It is for people who assemble
-hand-written `.asm` files, such as an operating-system kernel's entry and
-interrupt code, without NASM. It lists the syntax, directives and
-instructions `embas` accepts and what it does with anything else. Assembly
-in GNU syntax (`.s`, `.S`) is handled by `embcc` itself; see
-[GNU-syntax assembly](#gnu-syntax-assembly) at the end of this page.
+This page is the reference for `embas`, EmbCC's assembler. It assembles
+for every target EmbCC compiles for: GNU syntax for the target you name,
+as that target's `as` reads it, and NASM syntax for x86. It is for people
+who assemble hand-written assembly -- a Cortex-M startup file, an RTOS
+port's context switch, a boot sector, an operating-system kernel's entry
+code -- without binutils or NASM.
 
 ## NAME
 
-`embas` — assemble NASM-syntax x86-64 source into an ELF64 object
+`embas` — assemble GNU-syntax source for any target, or NASM-syntax x86
+source, into an ELF object or a flat binary
 
 ## SYNOPSIS
 
 ```text
-embas [-f elf64|bin] [-o FILE] INPUT.asm
+embas [--target=TRIPLE] [-mcpu=...|-march=...|-mmcu=...] [-o FILE] [-I DIR] [-D NAME[=VALUE]] FILE.s|FILE.S
+embas [-f elf64|bin] [-o FILE] [-I DIR] [-D NAME[=VALUE]] [-U NAME] [-E] FILE.asm
 ```
 
 ## DESCRIPTION
 
-`embas` reads one source file in NASM syntax, expands its macros,
-assembles it for 64-bit mode, and writes an x86-64 ELF64 relocatable
-object. Short jumps are relaxed as NASM relaxes them: a jump to a label
-in the same section uses an 8-bit displacement when the target is in
-range and a 32-bit one otherwise. A local label (one whose name begins
-with `.`) belongs to the most recent non-local label, and is written to
-the symbol table as `GLOBAL.local`, as NASM does.
+The file's name says its syntax:
 
-`embas` accepts a subset of NASM: the directives and instructions listed
-below. A mnemonic it does not know is an error, not a guess. The same
-assembler runs when `embcc` is given a `.asm` file:
+- **`.s` and `.S`: GNU syntax**, for the target `--target` names (the
+  default is `x86_64-elf`), with that target's options (`-mcpu=`,
+  `-march=`, `-mmcu=`, `-mfloat-abi=`, `-mthumb`...). A `.S` file is read
+  by the C preprocessor first, with `-I`, `-D` and `-U`. The object is the
+  one `embcc -c FILE` makes; the syntax each target takes is described in
+  [GNU-syntax assembly](#gnu-syntax-assembly) below.
+- **`.asm` (or `-f`, or `--syntax=nasm`): NASM syntax**, x86's: NASM's
+  preprocessor, its directives and Intel-syntax instructions, in 16-, 32-
+  and 64-bit code, written to an x86-64 ELF64 object (`-f elf64`) or a
+  flat image (`-f bin`), with the forms, prefixes and relocations NASM
+  writes. EmbLinkOS's boot stages, AP trampoline and kernel entry code come
+  out of it as NASM 3 makes them, and `tests/golden/nasm-asm.sh` compares a
+  boot sector and a preprocessor fixture with `nasm` on every run.
+  `--syntax=gnu` reads a file of another name as GNU syntax.
 
-```sh
-embcc -c entry.asm -o entry.o
-```
+`embas` is `embcc` called by another name: both syntaxes reach the same
+assembler and the same encoder for each target as `embcc -c` and inline
+`__asm__` do, so an instruction one takes the others take. `embcc -c
+FILE.asm` is the NASM assembler too.
 
-With `embcc`, the output name defaults to the input name with `.asm`
-replaced by `.o`, and `-E` is refused with
-`embcc: error: -E does not apply to assembly`.
+The output is named as `as` and NASM name it: the input's name with `.o`,
+or for `-f bin` without its extension.
 
 ## OPTIONS
 
-### `-f FORMAT`
+For a GNU-syntax file:
 
-Select the output format. `FORMAT` is `elf64` (the default) or `bin`.
-
-`-f bin` (a flat binary) is accepted on the command line but not
-implemented: the file is assembled and then refused with
-`embas: -f bin not yet implemented`, exit status 1.
-
-Any other format is refused with `embas: unknown format 'FORMAT'`, exit
-status 2. Without an argument: `embas: -f needs a format`, exit status 2.
-
-### `-o FILE`
-
-Write the object to `FILE`. The default is `a.out`. Without an argument:
-`embas: -o needs a file`, exit status 2.
-
-Any other argument beginning with `-` is refused with
-`embas: unknown option 'ARG'`, exit status 2. There is no `--help`.
-
-## INPUT
-
-One source file. If several file names are given, only the last is
-assembled.
-
-### Lines, comments and labels
-
-- A `;` begins a comment that runs to the end of the line, except inside
-  a quoted string.
-- A label is a name followed by a colon: `entry:`. The colon is required;
-  a name alone on a line is read as an instruction. Names consist of
-  letters, digits, `_`, `.` and `$`. Several labels may precede one
-  statement.
-- A label beginning with `.` is local to the preceding non-local label.
-  References to it (`jne .loop`) are resolved in the same scope.
-- Mnemonics and directive names are case-insensitive; register names and
-  symbol names are case-sensitive and registers must be written in lower
-  case.
-
-### Operands
-
-| Form | Meaning |
+| Option | Meaning |
 |---|---|
-| `rax` ... `r15`, `eax` ... `r15d` | a 64-bit or 32-bit general register; 16-bit and 8-bit registers are not supported |
-| `123`, `0x7f`, `-8`, `~0xFF` | an integer: decimal, `0x` hexadecimal, or octal with a leading `0`, optionally with unary `-`, `+` or `~` |
-| `[reg]`, `[reg+disp]`, `[reg-disp]` | memory at a base register plus a constant displacement |
-| `[gs:disp]`, `[fs:disp]`, `[gs:reg+disp]` | memory with a segment override; a bare displacement is an absolute address |
-| `[rel symbol]` | RIP-relative memory; supported by `mov` only (see below) |
-| `symbol` | a label or external symbol |
-| `byte`, `word`, `dword`, `qword`, `oword`, `tword`, `yword` | a size keyword before an operand; accepted and ignored |
+| `--target=TRIPLE` | the target, any [EmbCC target](../target-list.md); `x86_64-elf` by default |
+| `-m...` | the target's options, as `embcc` takes them |
+| `-g` | debug information for the assembly |
+| `-I DIR`, `-D NAME[=VALUE]`, `-U NAME` | the C preprocessor's, for a `.S` file |
+| `-o FILE` | the object |
+| `-E` | the preprocessed source |
 
-Arithmetic between symbols or constants (`label+4`, `2*8`) is not
-supported. NASM's `0FFh` and `$`-prefixed hexadecimal forms are not
-recognized.
+For a NASM-syntax file:
+
+| Option | Meaning |
+|---|---|
+| `-f elf64` | an x86-64 ELF64 relocatable object (the default) |
+| `-f bin` | a flat binary: the sections placed from `org`, every reference resolved |
+| `-o FILE` | the output; by default the input's name with `.o` (elf64) or without its extension (bin), as NASM names it |
+| `-I DIR`, `-IDIR` | a directory `%include` and `incbin` search, after the current directory and the including file's |
+| `-D NAME[=VALUE]` | `%define NAME VALUE` before the source |
+| `-U NAME` | `%undef NAME` before the source |
+| `-E` | write the preprocessed source instead of assembling it |
+| `-O...`, `-w...` | accepted and ignored (`embas` always optimizes as NASM's `-Ox`) |
+
+`-f elf32`, `win64`, `macho64` and NASM's other formats, listings (`-l`)
+and dependency files (`-M`) are refused by name.
+
+## THE PREPROCESSOR
+
+| Directive | Meaning |
+|---|---|
+| `%define NAME BODY`, `%define NAME(a, b) BODY` | a single-line macro, expanded where it is used; `%idefine` case-blind |
+| `%xdefine NAME BODY` | the body expanded now, where it is defined |
+| `%undef NAME` | |
+| `%assign NAME EXPR` | the value of a constant expression |
+| `%strlen NAME 'string'` | |
+| `%macro NAME N[-M][+] [defaults]` ... `%endmacro` | a multi-line macro: `%1`..`%N`, `%{N}`, `%{-1}`, `%0` (the count), `%00` (the label before the call), `%%name` (a label of its own per call), `%+` (concatenation), `%?` (its name); `+` takes the rest of the line into the last parameter; `%rotate N` |
+| `%rep N` ... `%endrep`, `%exitrep` | |
+| `%if EXPR`, `%ifdef`, `%ifndef`, `%ifidn`, `%ifidni`, `%ifnum`, `%ifstr`, `%ifid`, `%ifmacro`, `%ifempty`, their `%elif...` and `%ifn...` forms, `%else`, `%endif` | |
+| `%include "FILE"` | |
+| `%error`, `%fatal`, `%warning` | |
+
+A constant expression has NASM's operators: `/` and `%` unsigned, `//`
+and `%%` signed, `<<` `>>` `>>>`, `&` `|` `^`, comparisons, `&&` `||`
+`^^`, `!` `~`. Numbers in NASM's spellings: `0x1F`, `1Fh`, `$1F`, `0b101`,
+`101b`, `17o`, `17q`, `1_000`, and characters `'ab'`, `"ab"`, `` `\n` ``.
 
 ## DIRECTIVES
 
-| Directive | Effect |
+| Directive | Meaning |
 |---|---|
-| `section NAME`, `segment NAME` | switch to section `NAME`, one of `.text`, `.rodata`, `.data`, `.bss`; any other name is an error (`unknown section NAME`) |
-| `global NAME`, `globl NAME` | export `NAME`; one name per directive |
-| `extern NAME` | declare an external symbol; one name per directive |
-| `db`, `dw`, `dd`, `dq` | emit bytes, words, doublewords or quadwords: comma-separated integers, quoted strings (bytes, no escape sequences), or symbol names |
-| `resb N`, `resw N`, `resd N`, `resq N` | reserve `N` units of uninitialized space (in `.bss`) |
-| `align N` | pad the current section with zero bytes to a multiple of `N` |
-| `incbin "PATH"` | insert the contents of a file; `PATH` is relative to the current working directory |
-| `[BITS 64]`, `bits 64`, `default ...`, `cpu ...` | accepted and ignored; `embas` always assembles 64-bit code. Any other line beginning with `[` is ignored too |
-| `%macro NAME N` ... `%endmacro` | define a macro; `%1` through `%9` in its body are replaced by the arguments of an invocation |
+| `bits 16`, `bits 32`, `bits 64`, `use16/32/64`, `[bits N]` | the size of the code that follows; `-f bin` starts in 16-bit code, `-f elf64` in 64-bit |
+| `org ADDR` | `-f bin` only: where the image is loaded |
+| `section NAME [attrs]`, `segment` | NASM's defaults by name (`.text` exec, align 16; `.data`, `.rodata`, `.bss` align 4; others align 1); attributes `alloc`, `noalloc`, `exec`, `noexec`, `write`, `nowrite`, `progbits`, `nobits`, `note`, `tls`, `align=N`. In `-f bin`, sections other than `.text` are aligned to 4; `start=`, `vstart=` and `follows=` are refused |
+| `global NAME[:function|data [SIZE]] [hidden]` | |
+| `extern NAME`, `common NAME SIZE[:ALIGN]` | `common` is an ELF COMMON symbol |
+| `default rel`, `default abs` | `[x]` RIP-relative or absolute in 64-bit code; `[rel x]`, `[abs x]` choose for one operand |
+| `NAME equ EXPR` | |
+| `db dw dd dq dt do dy dz` | numbers, expressions, strings (padded to the item size), `?`; floats in `dd` and `dq` |
+| `resb resw resd resq rest reso resy resz N` | |
+| `times N STATEMENT` | `N` may depend on `$`: `times 510-($-$$) db 0` |
+| `incbin "FILE"[, SKIP[, COUNT]]` | |
+| `align N[, nop | db V]`, `alignb N` | padding with `nop` (0x90) or the byte given; the section's alignment grows to `N`, as NASM's `sectalign on` |
+| `absolute ADDR`, `struc NAME` ... `endstruc`, `istruc NAME` / `at FIELD, ...` / `iend` | `struc` defines `NAME.field` and `NAME_size` |
+| `cpu`, `float`, `sectalign`, `[warning]`, `[list]` | accepted and ignored |
 
-A macro is invoked by writing its name as the first word of a line,
-followed by comma-separated arguments. The expanded lines are scanned
-again, so a macro may invoke another. Expansion more than 32 levels deep
-stops with `embas: macro 'NAME' nests more than 32 deep (does it invoke
-itself?)`.
-
-A symbol name in `dd` or `dq` produces an absolute relocation
-(`R_X86_64_32` or `R_X86_64_64`). This is correct only in `.text`: in any
-other section the relocation is recorded against `.text` and the object is
-wrong. In `db` and `dw`, symbol names are not supported.
-
-Not supported: `equ`, `times`, `%define`, `%include`, `%if` and the rest
-of the NASM preprocessor except `%macro`, `struc`, and section attributes.
-They are reported as unknown instructions, for example
-`unsupported instruction times`.
+`$` is the current place and `$$` the start of the current section.
+A label is `name:`, or a name alone or before a data directive, `equ` or
+`times`; a label beginning with `.` belongs to the last other label
+(`main.loop`).
 
 ## INSTRUCTIONS
 
-| Mnemonics | Operand forms |
-|---|---|
-| `cli`, `sti`, `hlt`, `nop`, `ret`, `leave`, `pushfq`, `popfq`, `cpuid`, `rdtsc`, `rdmsr`, `wrmsr`, `syscall`, `sysret`, `swapgs`, `iretd` | none |
-| `iret`, `iretq` | none; both assemble as `iretq` (`48 cf`), as NASM does in 64-bit mode |
-| `o64 sysret` | none; the 64-bit `sysret` (`48 0f 07`) |
-| `push` | register, immediate (8-bit or 32-bit form chosen by value), memory |
-| `pop` | register |
-| `mov` | register to register; memory to register; register to memory; immediate to register; `symbol` to register (as `movabs` with `R_X86_64_64`); `[rel symbol]` to register and register to `[rel symbol]` (with `R_X86_64_PC32`) |
-| `lea` | memory to register |
-| `add`, `or`, `and`, `sub`, `xor`, `cmp` | register and register; register and immediate |
-| `test` | register and register |
-| `imul` | register and register (two-operand form) |
-| `shl`, `sal`, `shr`, `sar` | register and immediate (`D1` form for a count of 1) |
-| `call`, `jmp` | register (indirect) or symbol |
-| `jo`, `jno`, `jb`, `jae`, `je`, `jz`, `jne`, `jnz`, `jbe`, `ja`, `js`, `jns`, `jl`, `jge`, `jle`, `jg` | symbol |
-| `fxsave`, `fxrstor`, `lgdt`, `lidt` | memory |
-
-A move of an immediate to a 64-bit register uses the shortest form NASM
-uses: a 32-bit `mov` when the value fits in 32 bits unsigned, a
-sign-extended 32-bit immediate when it fits signed, and a 64-bit
-immediate otherwise.
-
-A form not in this table is refused, for example
-`assembler error: bad ALU operand add` for `add rax, [rbx]` or
-`assembler error: bad mov` for `mov al, 1`. A mnemonic not in the table
-gives `assembler error: unsupported instruction MNEMONIC`, with the
-mnemonic in lower case.
-
-Some invalid forms are not detected and produce wrong code. Do not use
-them:
-
-- an index register or scale in a memory operand: `[rax+rbx*8]`
-  assembles as `[rax]`;
-- `[rel symbol]` with any instruction other than `mov`: `lea rax,
-  [rel sym]` assembles as `lea rax, [rbp]`;
-- a reference to a symbol that is neither defined in the file nor
-  declared with `extern`: the assembler terminates abnormally instead of
-  reporting it. Declare every external symbol with `extern`.
+Intel syntax, as NASM writes it: the destination first, a size keyword
+(`byte`, `word`, `dword`, `qword`, `tword`, `oword`, `yword`, `zword`)
+where no register gives the size, `[base + index*scale + disp]` with an
+optional segment (`[es:di]`), `strict`, `short`, `near`, `far`,
+`jmp SEL:OFF`, the prefixes `lock`, `rep...`, `o16`, `o32`, `o64`, `a16`,
+`a32`, and AVX-512's `{k1}`, `{z}`, `{1to16}` and `{rn-sae}`. Where NASM
+and GNU as pick different encodings of one instruction, `embas` picks
+NASM's: `mov r64, imm` is the five-byte `mov r32, imm` when the value fits
+it and `movabs` for a symbol, a VEX register move keeps its load form, and
+the prefixes are in NASM's order.
 
 ## OUTPUT
 
-An x86-64 ELF64 relocatable object. It has the sections `.text`,
-`.rodata`, `.data` and `.bss` that received content, in the order in
-which the source first used them. Its symbol table holds an `STT_FILE`
-symbol naming the input, a section symbol per section, the labels
-(non-exported labels as local symbols), and the `extern` symbols as
-undefined globals. A reference to a symbol defined in the same object is
-relocated against its section symbol plus an offset; a reference to an
-external symbol is relocated against the symbol.
+`-f elf64`: an ELF64 relocatable object laid out as NASM lays it out --
+the sections in the order the source names them, a `STT_FILE` symbol, a
+section symbol per section, then the labels and the `extern` symbols that
+are used in the order they were defined or declared. A reference to a
+symbol defined in the object is relocated against its section; `call
+symbol` is `R_X86_64_PC32` (`wrt ..plt` makes it `R_X86_64_PLT32`, `wrt
+..gotpcrel` `R_X86_64_GOTPCREL`).
 
-| Construct | Relocation |
-|---|---|
-| `call symbol` (external or in another section), `mov reg, [rel symbol]`, `mov [rel symbol], reg` | `R_X86_64_PC32`, addend −4 |
-| `mov reg, symbol`, `dq symbol` | `R_X86_64_64` |
-| `dd symbol` | `R_X86_64_32` |
-
-A `call` or jump to a label in the same section is resolved in the
-object and needs no relocation.
+`-f bin`: `.text` at `org`, then the other sections with contents at their
+alignment, then the `nobits` ones (not written). A name the file does not
+define is refused, since there is no linker to find it.
 
 ## DIAGNOSTICS
 
-Errors have the form:
-
 ```text
-FILE:LINE: assembler error: MESSAGE
+FILE:LINE: error: MESSAGE
 ```
 
-`embas` stops at the first error. The line number counts the lines
-after comments and blank lines are removed and macros are expanded, so it
-can be smaller than the line's number in the source file.
+`FILE` and `LINE` are the source line's, in an `%include`d file or a
+macro's definition as well. An instruction `embas` cannot encode is named
+with the reason.
 
 ## EXIT STATUS
 
 | Status | Meaning |
 |---|---|
-| 0 | the object was written |
-| 1 | the source could not be read (`embas: cannot open FILE`) or did not assemble, or `-f bin` was requested |
-| 2 | a usage error: no input, unknown option or format, missing option argument |
-
-If the output file cannot be written, `embas` prints
-`embcc: cannot write 'FILE'` and exits with a nonzero status.
-
-## ENVIRONMENT
-
-`embas` reads no environment variables.
+| 0 | the output was written |
+| 1 | the source could not be read or did not assemble |
+| 2 | a usage error: no input, an unknown option or format, a missing option argument |
 
 ## EXAMPLES
 
-A system-call stub:
+A boot sector:
 
 ```asm
-; exit.asm -- void sys_exit(int code)
-[BITS 64]
-section .text
-global sys_exit
-sys_exit:
-    mov rax, 60
-    syscall
-.hang:
-    hlt
-    jmp .hang
+[BITS 16]
+[ORG 0x7C00]
+start:
+    xor ax, ax
+    mov ds, ax
+    mov si, msg
+.print:
+    lodsb
+    or al, al
+    jz $
+    mov ah, 0x0E
+    int 0x10
+    jmp .print
+msg db `Hello\r\n`, 0
+times 510 - ($ - $$) db 0
+dw 0xAA55
 ```
 
 ```sh
-embas -f elf64 exit.asm -o exit.o
+embas -f bin boot.asm -o boot.bin
 ```
 
 An interrupt stub built from a macro:
@@ -248,8 +204,11 @@ isr%1:
 
 section .text
 extern isr_dispatch
-STUB 0
-STUB 1
+%assign n 0
+%rep 32
+STUB n
+%assign n n + 1
+%endrep
 isr_common:
     call isr_dispatch
     iretq
@@ -257,17 +216,17 @@ isr_common:
 
 ## GNU-SYNTAX ASSEMBLY
 
-`embas` reads NASM syntax for x86-64 only. Assembly in GNU syntax is
-assembled by `embcc` itself, for the ARM (Thumb), AArch64, RISC-V, MIPS32,
-LoongArch64, Xtensa, TriCore, SPARC, PowerPC, RX, ColdFire and AVR
-targets:
+`embas` reads NASM syntax. Assembly in GNU syntax is assembled by `embcc`
+itself, for every target: x86-64 (AT&T syntax, and Intel syntax after
+`.intel_syntax noprefix`; 16- and 32-bit code after `.code16` and
+`.code32`), ARM (Thumb and A32), AArch64, RISC-V, MIPS, LoongArch64,
+Xtensa, TriCore, SPARC, PowerPC, RX, ColdFire and AVR:
 
 ```sh
 embcc --target=thumbv7m-none-eabi -c startup.S -o startup.o
 ```
 
-A `.S` file is preprocessed first; a `.s` file is not. GNU-syntax files
-for x86-64 are refused. Instructions are encoded by the same per-target
+A `.S` file is preprocessed first; a `.s` file is not. Instructions are encoded by the same per-target
 assembler that inline `__asm__` uses, so the accepted instructions are the
 inline-assembly vocabulary listed in [Inline assembly](../inline-asm.md);
 driver behavior and output naming are described in

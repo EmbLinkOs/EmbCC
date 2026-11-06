@@ -237,6 +237,16 @@ void elfw_symbol_visibility(struct elfw *w, int sym, int stv)
     tab[sym].st_other = (Elf64_Uchar)(stv & 3);
 }
 
+/* a COMMON symbol: SHN_COMMON, its value the alignment (gABI) */
+void elfw_symbol_common(struct elfw *w, int sym, long align)
+{
+    if (sym <= 0 || sym >= w->nsym)
+        return;
+    Elf64_Sym *tab = (Elf64_Sym *)w->symtab.p;
+    tab[sym].st_shndx = SHN_COMMON;
+    tab[sym].st_value = (Elf64_Addr)align;
+}
+
 int elfw_add_symbol(struct elfw *w, const char *name, Elf64_Addr value,
                     Elf64_Xword size, Elf64_Uchar info, Elf64_Half shndx)
 {

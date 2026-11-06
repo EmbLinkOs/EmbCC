@@ -130,6 +130,22 @@ struct gas_target {
  * `.S` file's #include as by C's; NULL with 0 for none. */
 int gas_assemble(const char *in_path, const char *out_path, int preprocess,
                  const char **incdirs, int nincdirs);
+/* Text another front end wrote (NASM's, src/as/nasm.c): `locs[k]` is
+ * where the text's line k+1 came from, for the diagnostics. `flat`
+ * writes the image NASM's -f bin does instead of an object: the sections
+ * placed from `org` (.text first, the others' bytes after it at their
+ * alignment, the nobits ones last and not written), every relocation
+ * applied, and a name nothing defines refused. */
+struct gas_loc { const char *file; int line; };
+struct gas_text_opts {
+    const struct gas_loc *locs;
+    int nlocs;
+    int flat;
+    long long org;
+    int nasm;               /* NASM's object conventions (see gas.c) */
+};
+int gas_assemble_text(const char *text, const char *path, const char *out_path,
+                      const struct gas_text_opts *o);
 /* the target's ELF notes (ARM's attributes, RISC-V's ISA string), which
  * the object gas_assemble writes carries; set before it */
 struct elfw;

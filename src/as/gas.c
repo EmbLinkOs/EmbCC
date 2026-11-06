@@ -29,6 +29,7 @@
 #include "../arch/sparc/asm.h"
 #include "../arch/ppc/asm.h"
 #include "../arch/x86_64/att.h"
+#include "../arch/x86_64/intel.h"
 #include "../arch/backend.h"
 #include "../parse/ast.h"
 
@@ -84,6 +85,7 @@ struct gsec {
     long size;              /* a NOBITS section's size */
     long align;             /* the largest alignment asked of it */
     int ndx;                /* its index in the object, at write */
+    int ord;                /* NASM's order: its first .section directive */
 };
 
 struct sym {
@@ -107,6 +109,9 @@ struct sym {
     long alias_add;
     int stamp;              /* the pass that last placed it (gas.stamp) */
     int local_decl;         /* named by .local: a .comm of it stays local */
+    int ord;                /* NASM's order: when defined, or declared extern */
+    int ext_decl;           /* .emb_extern: NASM's extern */
+    long common_align;      /* .emb_common: a COMMON symbol, this aligned */
 };
 
 struct fixup {
@@ -141,6 +146,18 @@ struct gas {
     int cur;                /* current section */
     int npcrel;             /* .Lpcrel_hiN counter */
     int line;               /* for diagnostics */
+    /* NASM's front end (src/as/nasm.c): each line's own file and line,
+     * by the line of the text it wrote; NULL for a source of our own */
+    const struct gas_loc *locs;
+    int nlocs;
+    long times_rep;         /* .emb_times: the next statement this often */
+    /* NASM's object conventions (src/as/nasm.c's text): every relocation
+     * against a name this file defines is its section's, no empty .text,
+     * a section's alignment the one asked */
+    int nasm;
+    int ordc, secordc;      /* (NASM's orders' counters) */
+    int intel;              /* x86 .intel_syntax: 1 noprefix, 2 prefix */
+    int times_set;
     int line_base;          /* a block's own first line, less one: its
                              * statements are numbered from 1 within it */
     int errors;
@@ -213,6 +230,18 @@ struct gas {
     int ndeferr, capdeferr;
 };
 
+/* where a message points: the file and line the statement came from */
+static const char *where_file(const struct gas *g)
+{
+    int l = g->line + g->line_base;
+    return g->locs && l >= 1 && l <= g->nlocs ? g->locs[l - 1].file : g->path;
+}
+static int where_line(const struct gas *g)
+{
+    int l = g->line + g->line_base;
+    return g->locs && l >= 1 && l <= g->nlocs ? g->locs[l - 1].line : l;
+}
+
 static void gerr(struct gas *g, const char *fmt, ...)
 {
     va_list ap;
@@ -222,7 +251,7 @@ static void gerr(struct gas *g, const char *fmt, ...)
         g->errors++;
         return;
     }
-    fprintf(stderr, "%s:%d: error: ", g->path, g->line + g->line_base);
+    fprintf(stderr, "%s:%d: error: ", where_file(g), where_line(g));
     va_start(ap, fmt);
     vfprintf(stderr, fmt, ap);
     va_end(ap);
@@ -276,8 +305,8 @@ static void gerr_enc(struct gas *g, int pass, const char *what,
     if (n < 0)
         n = late ? 3 : min_insn(g);
     g->lfail = 1;
-    snprintf(buf, sizeof buf, "%s:%d: error: %s%s", g->path,
-             g->line + g->line_base, what, msg);
+    snprintf(buf, sizeof buf, "%s:%d: error: %s%s", where_file(g),
+             where_line(g), what, msg);
     if (g->ndeferr == g->capdeferr) {
         g->capdeferr = g->capdeferr ? g->capdeferr * 2 : 8;
         g->deferr = xrealloc(g->deferr,
@@ -1313,7 +1342,8 @@ static char *substitute(struct gas *g, const char *stmt, long pc,
          * run. Without that test the `x` of `0x80800000` started one,
          * "x80800000" was not a register or a known label, and the
          * constant came out as `0.+0`. */
-        int mid = p > stmt && (is_symc((unsigned char)p[-1]));
+        int mid = p > stmt && (is_symc((unsigned char)p[-1])) &&
+                  !(p[-1] == '$' && g->tgt->machine == EM_X86_64);
         /* A numeric local reference starts with a DIGIT, so the identifier
          * scanner below would never see it: `2f` was read as the number 2
          * followed by a stray `f`. Recognised here, and only when the digits
@@ -1326,7 +1356,10 @@ static char *substitute(struct gas *g, const char *stmt, long pc,
             if ((*d == 'f' || *d == 'b') && !is_symc((unsigned char)d[1]))
                 lref = 1;
         }
-        if ((!is_sym0((unsigned char)*p) || mid) && !lref) {
+        /* (x86's `$` is an immediate's mark, not a name's first letter:
+         * `$p3_table` names p3_table) */
+        int dollar = *p == '$' && g->tgt->machine == EM_X86_64;
+        if ((!is_sym0((unsigned char)*p) || mid || dollar) && !lref) {
             if (len + 2 >= cap) { cap *= 2; out = xrealloc(out, cap); }
             out[len++] = *p++;
             continue;
@@ -1850,6 +1883,16 @@ static const char *pseudo_symbol(struct gas *g, const char *stmt)
                 if (*fo == '(') fo++;
                 if (ls && ls->sec == g->cur && !ls->is_weak && fo == stmt + f.sym_at &&
                     labs(ls->value - cur_off(g)) < 32000)
+                    return NULL;
+            }
+            /* x86: sym(%rip) naming a label of this section is a distance
+             * the assembler knows -- llvm-mc resolves it for a local
+             * label, NASM for any -- and substitution writes it */
+            if (g->tgt->machine == EM_X86_64 && f.nsites == 1 && !f.sym2_len &&
+                f.site[0].reloc == R_X86_64_PC32) {
+                struct sym *ls = sym_find(g, stmt + f.sym_at, (size_t)f.sym_len);
+                if (ls && ls->sec == g->cur && ls->sec >= 0 && !ls->is_weak &&
+                    !ls->alias && (!ls->is_global || g->nasm))
                     return NULL;
             }
             /* (an `.equ` constant is not an address: substitution writes
@@ -2500,6 +2543,17 @@ static const char *after_labels(const char *q)
 static void instruction(struct gas *g, char *stmt, int pass)
 {
     long pc = cur_off(g);
+    char intel_att[1024];
+    if (g->intel && g->tgt->machine == EM_X86_64) {
+        struct x86intel_opts io = { X86I_GNU, x86att_mode(), 0, g->intel == 2 };
+        char err[256];
+        if (x86intel_to_att(stmt, &io, intel_att, (int)sizeof intel_att, err,
+                            (int)sizeof err) < 0) {
+            gerr(g, "\"%s\": %s", stmt, err);
+            return;
+        }
+        stmt = intel_att;
+    }
     if (g->tgt->machine == EM_RISCV) {
         /* `lla`: the pc-relative pair always -- which `la` is here, the
          * code being position-dependent */
@@ -2534,6 +2588,26 @@ static void instruction(struct gas *g, char *stmt, int pass)
         text = a64_fold_imms(g, text, pass);
     struct code tmp = { 0 };
     char err[256];
+    /* x86: a branch to a number is to that ADDRESS (`jmp 0x7e00`), the
+     * linker's to reach: a relocation against no symbol, as llvm-mc and
+     * GNU as write it (a flat image places it itself) */
+    if (g->tgt->machine == EM_X86_64 && !ext) {
+        struct asm_symform f;
+        long long target;
+        if (x86att_abs_branch(text, &f, &target) &&
+            g->tgt->encode(f.encode, &tmp, err, sizeof err) == 0) {
+            long at = cur_off(g);
+            emit_bytes(g, (const unsigned char *)tmp.p, tmp.len);
+            fix_add(g, g->cur, at + f.site[0].off, "", f.site[0].reloc,
+                    (long)(target + f.addend));
+            free(tmp.p);
+            free(text);
+            return;
+        }
+        free(tmp.p);
+        tmp.p = NULL;
+        tmp.len = tmp.cap = 0;
+    }
 
     /* x86-64, pass one, a name not placed yet in anything but a jump: the
      * size is the relocated form's -- `buf(%rax)` keeps a 32-bit field
@@ -3611,7 +3685,7 @@ static int directive(struct gas *g, char *p, int pass)
             if (pass == 1 && !g->errors_muted)
                 fprintf(stderr, "%s:%d: warning: section %s declared again with "
                         "other flags; the first declaration's are kept\n",
-                        g->path, g->line + g->line_base, g->secs[k].name);
+                        where_file(g), where_line(g), g->secs[k].name);
         }
         if (DIR(".pushsection")) {
             if (g->nstack == 32) { gerr(g, ".pushsection nests too deep"); return 1; }
@@ -3619,6 +3693,8 @@ static int directive(struct gas *g, char *p, int pass)
         }
         g->prev = g->cur;
         g->cur = k;
+        if (!g->secs[k].ord)
+            g->secs[k].ord = ++g->secordc;
         return 1;
     }
     /* .extern: GNU as accepts and ignores it -- every symbol a file uses
@@ -3783,6 +3859,8 @@ static int directive(struct gas *g, char *p, int pass)
         sy = &g->syms[syi];      /* `.` in the value may have moved the table */
         sy->alias = NULL;
         sy->alias_add = 0;
+        if (!sy->ord)
+            sy->ord = ++g->ordc;
         if (gv.sec == SEC_ABS) {
             sy->sec = SEC_ABS;
             sy->value = gv.v;
@@ -3870,8 +3948,10 @@ static int directive(struct gas *g, char *p, int pass)
      * would like, not one anything depends on -- the `.p2align` before
      * it is the one that holds. And `.att_syntax [prefix]`, x86's syntax
      * as this assembler reads it already. */
-    if (DIR(".att_syntax") && g->tgt->machine == EM_X86_64)
+    if (DIR(".att_syntax") && g->tgt->machine == EM_X86_64) {
+        g->intel = 0;
         return 1;
+    }
     /* clang 21's `.prefalign LOG2, END, FILL`: the function from here to
      * END is aligned to 2^LOG2, or to its own size rounded up to a power
      * of two when that is less -- a five-byte function is not given
@@ -3909,8 +3989,10 @@ static int directive(struct gas *g, char *p, int pass)
         g->prefstart[g->li] = cur_off(g);
         return 1;
     }
+    /* `.intel_syntax noprefix` (or `prefix`: %eax): the instructions that
+     * follow in Intel syntax, read by intel.c into the AT&T att.c takes */
     if (DIR(".intel_syntax") && g->tgt->machine == EM_X86_64) {
-        gerr(g, ".intel_syntax: this assembler reads AT&T syntax only");
+        g->intel = !strncmp(skip_ws(arg), "prefix", 6) ? 2 : 1;
         return 1;
     }
     /* The ARM EHABI unwind directives describe how to unwind THROUGH this
@@ -3939,7 +4021,7 @@ static int directive(struct gas *g, char *p, int pass)
         buf[n] = 0;
         if (pass == 1) {
             if (DIR(".error")) gerr(g, ".error: %s", buf);
-            else fprintf(stderr, "%s:%d: %s%s\n", g->path, g->line,
+            else fprintf(stderr, "%s:%d: %s%s\n", where_file(g), where_line(g),
                          DIR(".warning") ? "warning: " : "", buf);
         }
         return 1;
@@ -4224,6 +4306,110 @@ static int directive(struct gas *g, char *p, int pass)
     }
     /* .fill REPEAT[, SIZE[, VALUE]]: REPEAT copies of VALUE, SIZE bytes
      * each (at most 8), little-endian. */
+    /* .emb_common NAME, SIZE, ALIGN: NASM's common, a COMMON symbol (the
+     * linker merges them; GNU's .comm is placed in .bss here instead) */
+    if (DIR(".emb_common")) {
+        char *e = arg;
+        const char *v;
+        long sz, al = 1;
+        while (*e && is_symc((unsigned char)*e)) e++;
+        v = skip_ws(e);
+        if (e == arg || *v != ',') { gerr(g, "common wants NAME SIZE"); return 1; }
+        v++;
+        if (!gx_abs_now(g, &v, pass, &sz, "a size")) return 1;
+        v = skip_ws((char *)v);
+        if (*v == ',') {
+            v++;
+            if (!gx_abs_now(g, &v, pass, &al, "an alignment")) return 1;
+        }
+        struct sym *sy = sym_get(g, arg, (size_t)(e - arg));
+        if (!sy->ord) sy->ord = ++g->ordc;
+        sy->common_align = al > 0 ? al : 1;
+        sy->size = sz;
+        sy->is_global = 1;
+        return 1;
+    }
+    /* .emb_extern NAME: NASM's extern -- its place in NASM's order */
+    if (DIR(".emb_extern")) {
+        const char *e = arg;
+        while (*e && is_symc((unsigned char)*e)) e++;
+        struct sym *sy = sym_get(g, arg, (size_t)(e - arg));
+        if (!sy->ord) sy->ord = ++g->ordc;
+        sy->ext_decl = 1;
+        return 1;
+    }
+    /* .emb_secalign N: the section's alignment, N exactly (NASM's
+     * defaults, which are not GNU as's) */
+    if (DIR(".emb_secalign")) {
+        const char *q = arg;
+        long v;
+        if (gx_abs_now(g, &q, pass, &v, "the alignment") && v >= 1)
+            g->secs[g->cur].align = v;
+        return 1;
+    }
+    /* .emb_times N: the next statement N times, N known where it stands
+     * (NASM's `times`, which src/as/nasm.c writes so: `times 510-($-$$)
+     * db 0` counts from the place it pads) */
+    if (DIR(".emb_times")) {
+        const char *q = arg;
+        long n;
+        if (!gx_abs_now(g, &q, pass, &n, "the repeat count"))
+            n = 0;
+        else if (n < 0) {
+            gerr(g, "the repeat count %ld is negative", n);
+            n = 0;
+        }
+        g->times_rep = n;
+        g->times_set = 1;
+        return 1;
+    }
+    /* .incbin "FILE"[, SKIP[, COUNT]]: the file's bytes (a font, a
+     * firmware blob), from SKIP, COUNT of them or to its end */
+    if (DIR(".incbin")) {
+        unsigned char nm[1024];
+        long nl = parse_string(g, arg, nm, (long)sizeof nm - 1);
+        if (nl < 0) return 1;
+        nm[nl] = 0;
+        const char *q = arg;
+        while (*q && *q != ',') q++;
+        long skip = 0, count = -1, len = 0;
+        if (*q == ',') {
+            q++;
+            if (!gx_abs_now(g, &q, pass, &skip, "the bytes skipped")) return 1;
+            q = skip_ws((char *)q);
+            if (*q == ',') {
+                q++;
+                if (!gx_abs_now(g, &q, pass, &count, "the count")) return 1;
+            }
+        }
+        char *data = plat_read_file((const char *)nm, &len);
+        if (!data) {
+            /* (beside the source, as GNU as looks too) */
+            const char *sl = strrchr(g->path, '/');
+            if (sl && nm[0] != '/') {
+                char full[2048];
+                snprintf(full, sizeof full, "%.*s/%s", (int)(sl - g->path), g->path,
+                         (const char *)nm);
+                data = plat_read_file(full, &len);
+            }
+        }
+        if (!data) {
+            gerr(g, ".incbin: cannot read '%s'", (const char *)nm);
+            return 1;
+        }
+        if (skip < 0 || skip > len) {
+            gerr(g, ".incbin: '%s' is %ld bytes; %ld cannot be skipped",
+                 (const char *)nm, len, skip);
+            free(data);
+            return 1;
+        }
+        if (count < 0 || count > len - skip)
+            count = len - skip;
+        map_mark(g, 'd');
+        emit_bytes(g, (const unsigned char *)data + skip, count);
+        free(data);
+        return 1;
+    }
     if (DIR(".fill")) {
         map_mark(g, 'd');
         const char *q = arg;
@@ -4332,17 +4518,27 @@ static int directive(struct gas *g, char *p, int pass)
         const char *q = arg;
         if (!gx_abs_now(g, &q, pass, &v, "the alignment"))
             return 1;
-        /* a fill value is accepted only for data, where GNU as uses it;
-         * code is padded with nops whatever it says */
+        /* `, FILL[, MAX]`: what the padding is, in code too (llvm-mc's
+         * and GNU as's: a fill given is written as it is, the machine's
+         * nops only where none is), and the most it may skip -- a
+         * padding longer than MAX is not written at all */
+        int has_fill = 0;
+        long fill = 0, maxskip = -1;
+        int fw = (DIR(".balignw") || DIR(".p2alignw")) ? 2
+               : (DIR(".balignl") || DIR(".p2alignl")) ? 4 : 1;
         q = skip_ws((char *)q);
-        if (*q == ',' && !(g->secs[g->cur].flags & SHF_EXECINSTR)) {
-            long fill;
+        if (*q == ',') {
             const char *f = skip_ws((char *)q + 1);
-            if (*f && *f != ',' && gx_abs_now(g, &f, pass, &fill, "the fill") &&
-                fill) {
-                gerr(g, "%.*s with a nonzero fill is not supported",
-                     (int)nlen, name);
-                return 1;
+            if (*f && *f != ',') {
+                if (!gx_abs_now(g, &f, pass, &fill, "the fill"))
+                    return 1;
+                has_fill = 1;
+            }
+            f = skip_ws((char *)f);
+            if (*f == ',') {
+                f = skip_ws((char *)f + 1);
+                if (*f && !gx_abs_now(g, &f, pass, &maxskip, "the most skipped"))
+                    return 1;
             }
         }
         /* .balign takes a byte count. .p2align takes an exponent, and so
@@ -4352,39 +4548,58 @@ static int directive(struct gas *g, char *p, int pass)
          * `.align 2` before a RISC-V trap vector gave two-byte alignment
          * where mtvec needs four, and a Cortex-M vector table's `.align 7`
          * asked for a multiple of seven. */
+        long b;
         if (DIR(".balign") || DIR(".balignw") || DIR(".balignl")) {
             if (v > 0 && (v & (v - 1))) {          /* as GNU as refuses it */
                 gerr(g, "%.*s %ld: the alignment is not a power of 2",
                      (int)nlen, name, v);
                 return 1;
             }
-            if (v > 0) do_align(g, v);
+            b = v > 0 ? v : 1;
         } else if (DIR(".align") && (g->tgt->machine == EM_XTENSA ||
                                      g->tgt->machine == EM_RX ||
                                      g->tgt->machine == EM_68K ||
-                                     g->tgt->machine == EM_SPARC)) {
-            /* ...and on Xtensa, RX, m68k and SPARC it is the byte count, a
-             * power of two, as GNU as reads it there: `.align 4` before a
-             * function */
+                                     g->tgt->machine == EM_SPARC ||
+                                     g->tgt->machine == EM_X86_64)) {
+            /* ...and on Xtensa, RX, m68k, SPARC and x86 it is the byte
+             * count, a power of two, as GNU as reads it there: `.align 4`
+             * before a function */
             if (v <= 0 || (v & (v - 1))) {
                 gerr(g, ".align %ld: %s's .align is a byte count, a "
                         "power of two", v,
                      g->tgt->machine == EM_RX ? "RX"
                      : g->tgt->machine == EM_68K ? "ColdFire"
-                     : g->tgt->machine == EM_SPARC ? "SPARC" : "Xtensa");
+                     : g->tgt->machine == EM_SPARC ? "SPARC"
+                     : g->tgt->machine == EM_X86_64 ? "x86" : "Xtensa");
                 return 1;
             }
-            do_align(g, v);
+            b = v;
         } else {
-            long b = 1;
             if (v < 0 || v > 16) {
                 gerr(g, "%.*s %ld: the exponent must be 0..16", (int)nlen,
                      name, v);
                 return 1;
             }
+            b = 1;
             while (v-- > 0) b *= 2;
-            do_align(g, b);
         }
+        if (b <= 1)
+            return 1;
+        long off = cur_off(g), pad = (b - off % b) % b;
+        if (maxskip >= 0 && pad > maxskip)
+            return 1;
+        if (!has_fill) {
+            do_align(g, b);
+            return 1;
+        }
+        if (b > g->secs[g->cur].align)
+            g->secs[g->cur].align = b;
+        if (sec_is_nobits(g, g->cur)) {
+            advance(g, pad);
+            return 1;
+        }
+        for (long k = 0; k < pad; k++)
+            emit_int(g, (fill >> (8 * (k % fw))) & 0xff, 1);
         return 1;
     }
     gerr(g, "directive \"%.*s\" is not one this assembler knows",
@@ -4411,6 +4626,8 @@ static void pass_over(struct gas *g, const struct gline *lines, int nlines,
         g->tgt->reset();
     g->cur = SEC_TEXT;
     g->line = 0;
+    g->times_set = 0;
+    g->intel = 0;
     for (int i = 0; i < g->nsecs; i++) {
         free(g->secs[i].c.p);
         memset(&g->secs[i].c, 0, sizeof g->secs[i].c);
@@ -4530,6 +4747,8 @@ static void pass_over(struct gas *g, const struct gline *lines, int nlines,
                 s->sec = g->cur;
                 s->value = cur_off(g);
                 s->stamp = g->stamp;
+                if (!s->ord)
+                    s->ord = ++g->ordc;
                 if (g->thumb_func_next) {
                     s->is_func = 1;
                     g->thumb_func_next = 0;
@@ -4562,11 +4781,20 @@ static void pass_over(struct gas *g, const struct gline *lines, int nlines,
             free(line);
             break;                        /* the rest of the file is ignored */
         }
-        if (*q == '.' && (is_sym0((unsigned char)q[1]) ||
-                          isdigit((unsigned char)q[1])))   /* .4byte */
-            directive(g, q, pass);
-        else if (*q)
-            instruction(g, q, pass);
+        {
+            long reps = 1;
+            if (g->times_set && !(*q == '.' && !strncmp(q, ".emb_times", 10))) {
+                reps = g->times_rep;
+                g->times_set = 0;
+            }
+            for (long r = 0; r < reps; r++) {
+                if (*q == '.' && (is_sym0((unsigned char)q[1]) ||
+                                  isdigit((unsigned char)q[1])))   /* .4byte */
+                    directive(g, q, pass);
+                else if (*q)
+                    instruction(g, q, pass);
+            }
+        }
 
         free(line);
     }
@@ -4608,6 +4836,16 @@ static void pass_over(struct gas *g, const struct gline *lines, int nlines,
 static void (*g_elf_notes)(struct elfw *w);
 void gas_set_elf_notes(void (*notes)(struct elfw *w)) { g_elf_notes = notes; }
 
+/* (NASM's symbol order: qsort's comparison, by ord, an unordered one last) */
+static const struct sym *g_ord_syms;
+static int by_sym_ord(const void *a, const void *b)
+{
+    int x = *(const int *)a, y = *(const int *)b;
+    int ox = g_ord_syms[x].ord ? g_ord_syms[x].ord : 1 << 30;
+    int oy = g_ord_syms[y].ord ? g_ord_syms[y].ord : 1 << 30;
+    return ox != oy ? (ox < oy ? -1 : 1) : (x < y ? -1 : x > y);
+}
+
 static int write_object(struct gas *g, const char *out_path)
 {
     struct elfw *w = elfw_new(g->tgt->machine);
@@ -4621,14 +4859,16 @@ static int write_object(struct gas *g, const char *out_path)
     /* A section goes into the object when it has bytes, or a symbol or a
      * relocation in it -- `.section .vectors` holding only a label still
      * names the place. .text always, as it always has. */
-    used[SEC_TEXT] = 1;
+    if (!g->nasm)
+        used[SEC_TEXT] = 1;
     if (g->tgt->machine == EM_RX)
         used[SEC_DATA] = used[SEC_BSS] = 1;
     for (i = 0; i < g->nsecs; i++)
         if (g->secs[i].c.len || g->secs[i].size)
             used[i] = 1;
     for (i = 0; i < g->nsyms; i++)
-        if (g->syms[i].sec >= 0)
+        if (g->syms[i].sec >= 0 &&
+            !(g->nasm && !strncmp(g->syms[i].name, ".L", 2)))  /* (NASM's $$) */
             used[g->syms[i].sec] = 1;
     for (i = 0; i < g->nfix; i++)
         used[g->fix[i].sec] = 1;
@@ -4662,10 +4902,21 @@ static int write_object(struct gas *g, const char *out_path)
                 ((unsigned char *)sc->c.p)[f->off + b] =
                     (unsigned char)(v >> (8 * b));
         }
+    /* (NASM's: by each section's first .section, one never named last) */
+    int *nord = xmalloc(((size_t)g->nsecs + 1) * sizeof *nord);
+    for (i = 0; i < g->nsecs; i++) nord[i] = i;
+    if (g->nasm)
+        for (i = 1; i < g->nsecs; i++)
+            for (int j = i; j > 0; j--) {
+                int a = g->secs[nord[j - 1]].ord ? g->secs[nord[j - 1]].ord : 1 << 30;
+                int b = g->secs[nord[j]].ord ? g->secs[nord[j]].ord : 1 << 30;
+                if (a <= b) break;
+                int t = nord[j]; nord[j] = nord[j - 1]; nord[j - 1] = t;
+            }
     for (int oi = 0; oi < g->nsecs; oi++) {
         /* (RX: P, D_1, B_1 first, then the others, as GNU as orders them) */
         int rxo = g->tgt->machine == EM_RX;
-        i = !rxo ? oi : oi == 0 ? SEC_TEXT : oi == 1 ? SEC_DATA :
+        i = g->nasm ? nord[oi] : !rxo ? oi : oi == 0 ? SEC_TEXT : oi == 1 ? SEC_DATA :
             oi == 2 ? SEC_BSS : oi == 3 ? SEC_RODATA : oi;
         struct gsec *sc = &g->secs[i];
         long al = sc->align;
@@ -4673,7 +4924,7 @@ static int write_object(struct gas *g, const char *out_path)
             continue;
         /* the alignment these four always had, at least (RX's are GNU
          * as's: what the file asks for) */
-        if ((i == SEC_DATA || i == SEC_RODATA || i == SEC_BSS) && !rxo)
+        if ((i == SEC_DATA || i == SEC_RODATA || i == SEC_BSS) && !rxo && !g->nasm)
             al = al > 8 ? al : 8;
         ndx[i] = elfw_add_section(w, sc->name, sc->type, sc->flags,
                                   sc->type == SHT_NOBITS ? NULL : sc->c.p,
@@ -4723,20 +4974,42 @@ static int write_object(struct gas *g, const char *out_path)
     for (i = 0; i < g->nfix; i++) {
         struct sym *s = sym_find(g, g->fix[i].sym, strlen(g->fix[i].sym));
         if (!s) continue;
-        if (!s->is_global && s->sec >= 0 && !s->is_func &&
-            DATA_RELOC(&g->fix[i]) && !MERGE_KEEPS(&g->fix[i], s))
+        if (s->sec >= 0 && (g->nasm || (!s->is_global && !s->is_func &&
+            DATA_RELOC(&g->fix[i]) && !MERGE_KEEPS(&g->fix[i], s))))
             secsym[s->sec] = -1;            /* wanted; index below */
         else
             keep[s - g->syms] = 1;
     }
+    /* (NASM's: the file's name, and every section's symbol) */
+    if (g->nasm) {
+        elfw_add_symbol(w, g->path, 0, 0, (Elf64_Uchar)((STB_LOCAL << 4) | STT_FILE),
+                        SHN_ABS);
+        for (i = 0; i < g->nsecs; i++)
+            if (ndx[i]) secsym[i] = -1;
+    }
     /* Locals before globals: the gABI orders a symbol table that way
      * and the writer refuses rather than reordering behind our back. */
-    for (i = 0; i < g->nsecs; i++)
+    for (int oi = 0; oi < g->nsecs; oi++) {
+        i = nord[oi];
         if (secsym[i] == -1 && ndx[i])
             secsym[i] = elfw_add_symbol(w, "", 0, 0,
                                         (Elf64_Uchar)((STB_LOCAL << 4) |
                                                       STT_SECTION),
                                         (Elf64_Half)ndx[i]);
+    }
+    free(nord);
+    /* (NASM's: the symbols by when each was defined, or declared extern,
+     * an extern only if something names it) */
+    int *sord = xmalloc(((size_t)g->nsyms + 1) * sizeof *sord);
+    for (i = 0; i < g->nsyms; i++) sord[i] = i;
+    if (g->nasm) {
+        for (i = 0; i < g->nfix; i++) {
+            struct sym *u = sym_find(g, g->fix[i].sym, strlen(g->fix[i].sym));
+            if (u && u->ext_decl && u->sec == SEC_UNDEF) u->is_global = 1;
+        }
+        g_ord_syms = g->syms;
+        qsort(sord, (size_t)g->nsyms, sizeof *sord, by_sym_ord);
+    }
     /* only in a section with code in it, or an executable one: data in
      * .rodata needs no map, and clang's assembler writes none there; but
      * words in .text -- an instruction written as `.word` -- are marked
@@ -4756,7 +5029,8 @@ static int write_object(struct gas *g, const char *out_path)
                             (Elf64_Uchar)((STB_LOCAL << 4) | STT_NOTYPE),
                             (Elf64_Half)ndx[g->maps[i].sec]);
     for (int pass = 0; pass < 2; pass++)
-        for (i = 0; i < g->nsyms; i++) {
+        for (int si = 0; si < g->nsyms; si++) {
+            i = sord[si];
             struct sym *s = &g->syms[i];
             int want_global = pass == 1;
             if (!!s->is_global != want_global) continue;
@@ -4790,6 +5064,8 @@ static int write_object(struct gas *g, const char *out_path)
                                          (Elf64_Half)(s->sec >= 0 ? ndx[s->sec]
                                                       : s->sec == SEC_ABS
                                                       ? SHN_ABS : SHN_UNDEF));
+            if (s->common_align && s->sec == SEC_UNDEF)
+                elfw_symbol_common(w, s->elf_ndx, s->common_align);
             /* .hidden and its siblings: read, and then never written --
              * a hidden symbol came out default, exported from a shared
              * object it was meant to stay inside */
@@ -4802,6 +5078,8 @@ static int write_object(struct gas *g, const char *out_path)
      * (above), and an undefined `.Lx` beside that was a symbol no other
      * object can define. */
     for (i = 0; i < g->nfix; i++) {
+        if (!g->fix[i].sym[0])
+            continue;                   /* (no symbol: an address, *ABS*) */
         struct sym *s = sym_find(g, g->fix[i].sym, strlen(g->fix[i].sym));
         if (s && !s->elf_ndx && s->sec < 0) {
             s->elf_ndx = elfw_add_symbol(w, s->name, 0, 0,
@@ -4815,9 +5093,14 @@ static int write_object(struct gas *g, const char *out_path)
     }
     for (i = 0; i < g->nfix; i++) {
         struct fixup *f = &g->fix[i];
+        if (!f->sym[0]) {
+            elfw_add_rela(w, ndx[f->sec], (Elf64_Addr)f->off, 0, f->type, f->addend);
+            continue;
+        }
         struct sym *s = sym_find(g, f->sym, strlen(f->sym));
-        if (s && !s->is_global && s->sec >= 0 && !s->is_func &&
-            secsym[s->sec] > 0 && DATA_RELOC(f) && !MERGE_KEEPS(f, s)) {
+        if (s && s->sec >= 0 && secsym[s->sec] > 0 &&
+            (g->nasm || (!s->is_global && !s->is_func && DATA_RELOC(f) &&
+                         !MERGE_KEEPS(f, s)))) {
             elfw_add_rela(w, ndx[f->sec], (Elf64_Addr)f->off, secsym[s->sec],
                           f->type, f->addend + s->value);
             continue;
@@ -4831,6 +5114,7 @@ static int write_object(struct gas *g, const char *out_path)
         elfw_add_rela(w, ndx[f->sec], (Elf64_Addr)f->off, s->elf_ndx,
                       f->type, f->addend);
     }
+    free(sord);
     free(secsym);
     free(keep);
     free(hascode);
@@ -5329,6 +5613,144 @@ static void gas_free(struct gas *g, struct gexp *gx)
     free(g->syms); free(g->fix);
     free(g->xsp); free(g->pxsp); free(g->xl); free(g->pxl);
     free(g->xcur); free(g->xstarted); free(g->xentry);
+}
+
+/* -f bin: the sections at their places from `org`, the relocations
+ * applied, the progbits ones' bytes written (see gas.h) */
+static long long flat_value(struct gas *g, const char *name, const long long *base,
+                            int *ok)
+{
+    if (!name[0]) { *ok = 1; return 0; }          /* (*ABS*) */
+    struct sym *s = sym_find(g, name, strlen(name));
+    long long add = 0;
+    int hops = 0;
+    *ok = 0;
+    while (s && s->alias && hops++ < 64) {
+        add += s->alias_add;
+        s = s->alias;
+    }
+    if (!s) return 0;
+    if (s->sec == SEC_ABS) { *ok = 1; return s->value + add; }
+    if (s->sec >= 0) { *ok = 1; return base[s->sec] + s->value + add; }
+    return 0;
+}
+
+static int write_flat(struct gas *g, const char *out_path, long long org)
+{
+    int n = g->nsecs;
+    long long *base = xcalloc((size_t)n + 1, sizeof *base);
+    int *order = xmalloc(((size_t)n + 1) * sizeof *order), no = 0;
+    order[no++] = SEC_TEXT;
+    for (int k = 0; k < n; k++)
+        if (k != SEC_TEXT && !sec_is_nobits(g, k) && (g->secs[k].flags & SHF_ALLOC))
+            order[no++] = k;
+    int nprog = no;
+    for (int k = 0; k < n; k++)
+        if (k != SEC_TEXT && sec_is_nobits(g, k))
+            order[no++] = k;
+    long long at = org;
+    for (int j = 0; j < no; j++) {
+        struct gsec *sc = &g->secs[order[j]];
+        long a = sc->align > 1 ? sc->align : 1;
+        if (j) at = (at + a - 1) / a * a;
+        base[order[j]] = at;
+        at += sec_is_nobits(g, order[j]) ? sc->size : (long long)sc->c.len;
+    }
+    for (int i = 0; i < g->nfix; i++) {
+        struct fixup *f = &g->fix[i];
+        int ok;
+        long long S = flat_value(g, f->sym, base, &ok);
+        if (!ok) {
+            fprintf(stderr, "%s: error: '%s' is not defined here, and a flat "
+                            "binary (-f bin) has no linker to find it\n",
+                    g->path, f->sym);
+            g->errors++;
+            continue;
+        }
+        long long P = base[f->sec] + f->off, v;
+        int w, pc = 0;
+        switch (f->type) {
+        case R_X86_64_8: w = 1; break;
+        case R_X86_64_16: w = 2; break;
+        case R_X86_64_32: case R_X86_64_32S: w = 4; break;
+        case R_X86_64_64: w = 8; break;
+        case R_X86_64_PC8: w = 1; pc = 1; break;
+        case R_X86_64_PC16: w = 2; pc = 1; break;
+        case R_X86_64_PC32: case R_X86_64_PLT32: w = 4; pc = 1; break;
+        default:
+            fprintf(stderr, "%s: error: '%s': relocation %d in a flat binary\n",
+                    g->path, f->sym, f->type);
+            g->errors++;
+            continue;
+        }
+        v = S + f->addend - (pc ? P : 0);
+        if (w < 8) {
+            long long lo = pc || f->type == R_X86_64_32S ? -(1LL << (w * 8 - 1)) : -(1LL << (w * 8 - 1));
+            long long hi = pc || f->type == R_X86_64_32S ? (1LL << (w * 8 - 1)) - 1 : (1LL << (w * 8)) - 1;
+            if (v < lo || v > hi) {
+                fprintf(stderr, "%s: error: '%s' is at 0x%llx, which a %d-bit field "
+                                "at 0x%llx does not hold\n", g->path, f->sym,
+                        (unsigned long long)S, w * 8, (unsigned long long)P);
+                g->errors++;
+                continue;
+            }
+        }
+        struct code *c = &g->secs[f->sec].c;
+        for (int b = 0; b < w && f->off + b < c->len; b++)
+            c->p[f->off + b] = (unsigned char)((unsigned long long)v >> (8 * b));
+    }
+    int rc = 1;
+    if (!g->errors) {
+        long long end = org;
+        for (int j = 0; j < nprog; j++) {
+            long long e = base[order[j]] + g->secs[order[j]].c.len;
+            if (g->secs[order[j]].c.len && e > end) end = e;
+        }
+        size_t len = (size_t)(end - org);
+        unsigned char *img = xcalloc(len + 1, 1);
+        for (int j = 0; j < nprog; j++) {
+            struct code *c = &g->secs[order[j]].c;
+            if (c->len)
+                memcpy(img + (base[order[j]] - org), c->p, (size_t)c->len);
+        }
+        FILE *f = fopen(out_path, "wb");
+        if (!f || fwrite(img, 1, len, f) != len) {
+            fprintf(stderr, "%s: error: cannot write '%s'\n", g->path, out_path);
+        } else
+            rc = 0;
+        if (f) fclose(f);
+        free(img);
+    }
+    free(base);
+    free(order);
+    return rc;
+}
+
+int gas_assemble_text(const char *text, const char *path, const char *out_path,
+                      const struct gas_text_opts *o)
+{
+    struct gas g;
+    struct gexp gx;
+    const struct gas_target *t = target_for();
+    if (!t) {
+        fprintf(stderr, "embcc: error: no assembly-file support for %s yet\n",
+                target_triple_now());
+        return 1;
+    }
+    memset(&g, 0, sizeof g);
+    g.path = path;
+    g.tgt = t;
+    g.locs = o ? o->locs : NULL;
+    g.nlocs = o ? o->nlocs : 0;
+    g.nasm = o ? o->nasm : 0;
+    sec_init(&g);
+    gas_run(&g, &gx, text, path);
+    if (t->reset)
+        t->reset();
+    int rc = g.errors ? 1 : o && o->flat ? write_flat(&g, out_path, o->org)
+                                         : write_object(&g, out_path);
+    gas_free(&g, &gx);
+    return rc;
 }
 
 int gas_assemble(const char *in_path, const char *out_path, int preprocess,

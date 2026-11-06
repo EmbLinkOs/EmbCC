@@ -51,6 +51,7 @@ int elfw_add_section(struct elfw *w, const char *name, Elf64_Word type,
  * elfw_add_symbol returned. Separate from the add so that the common
  * case -- every symbol EmbCC has ever emitted -- keeps one call. */
 void elfw_symbol_visibility(struct elfw *w, int sym, int stv);
+void elfw_symbol_common(struct elfw *w, int sym, long align);
 
 int elfw_add_symbol(struct elfw *w, const char *name, Elf64_Addr value,
                     Elf64_Xword size, Elf64_Uchar info, Elf64_Half shndx);

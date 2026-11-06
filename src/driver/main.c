@@ -19,7 +19,7 @@
 #include "../debug/dwarf.h"
 #include "../debug/eh.h"
 #include "../arch/predef.h"
-#include "../arch/x86_64/as.h"
+#include "../as/nasm.h"
 #include "../elf/write.h"
 #include "../macho/write.h"
 #include "../coff/write.h"
@@ -6846,8 +6846,19 @@ static int expand_wp(int *argcp, char ***argvp)
 }
 
 /* the compiler proper, on the stack plat_run_on_stack gives it */
+static int embcc_main(int argc, char **argv);
 static int embcc_main(int argc, char **argv)
 {
+#if FAMILY_BUILT(x86)
+    /* called as embas: the NASM-syntax assembler's command line */
+    if (argc > 0) {
+        const char *b = argv[0], *sl;
+        for (sl = b; *sl; sl++)
+            if (*sl == '/' || *sl == '\\') b = sl + 1;
+        if (!strncmp(b, "embas", 5) && (!b[5] || b[5] == '.' || b[5] == '-'))
+            return embas_main(argc, argv, embcc_main);
+    }
+#endif
     /* the deep recursions measure from here */
     stack_note_base(&argc, plat_stack_size());
     plat_set_argv0(argc > 0 ? argv[0] : NULL);   /* where this program is */
@@ -8956,8 +8967,14 @@ static int embcc_main(int argc, char **argv)
             return 1;
         }
 #if FAMILY_BUILT(x86)
-        return as_assemble(input, output ? output : default_output(input),
-                           AS_ELF64);
+        {
+            struct nasm_opts no;
+            memset(&no, 0, sizeof no);
+            no.format = NASM_ELF64;
+            no.incdirs = (const char **)incdirs;
+            no.nincdirs = nincdirs;
+            return nasm_assemble(input, output ? output : default_output(input), &no);
+        }
 #else
         return 1;           /* refused above: there is no x86-64 here */
 #endif

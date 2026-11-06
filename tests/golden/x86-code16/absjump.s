@@ -1,0 +1,8 @@
+	.text
+	nop
+	jmp 0x1234
+	call 0x5678
+	jne 0x100
+	.code16
+	jmp 0x7e00
+	call 0x8000

@@ -35,6 +35,23 @@ diff "$out/m.ref.rel" "$out/m.rel" > "$out/rel.diff" ||
 [ "$(grep -c R_X86_64_16 "$out/m.rel")" -ge 4 ] || fail "no R_X86_64_16 read"
 echo "$(wc -c < "$out/m.bin" | tr -d ' ') bytes of 16-, 32- and 64-bit code as llvm-mc writes them"
 
+# lock and rep among the other prefixes, in llvm-mc's order; a branch to
+# an address (*ABS*); alignment fills in code and data
+for f in prefixes absjump align riprel intel; do
+    "$EMBCC" --target=x86_64-elf -c "$here/$f.s" -o "$out/$f.o" 2> "$out/$f.err" ||
+        fail "EmbCC refused $f.s: $(head -3 "$out/$f.err")"
+    "$MC" -triple=x86_64 -mattr=+avx512f -filetype=obj "$here/$f.s" -o "$out/$f.ref.o" || fail "llvm-mc refused $f.s"
+    for o in $f $f.ref; do
+        llvm-objdump -s -j .text -j .data "$out/$o.o" | grep -v 'file format' > "$out/$o.dump"
+        llvm-readelf -r "$out/$o.o" | grep R_X86 | awk '{print $1, $3, $NF}' > "$out/$o.rel"
+    done
+    cmp -s "$out/$f.dump" "$out/$f.ref.dump" ||
+        fail "$f.s: the bytes differ from llvm-mc's: $(diff "$out/$f.ref.dump" "$out/$f.dump" | head -6)"
+    cmp -s "$out/$f.rel" "$out/$f.ref.rel" ||
+        fail "$f.s: the relocations differ: $(diff "$out/$f.ref.rel" "$out/$f.rel" | head -6)"
+done
+echo "lock/rep placement, branches to an address, alignment fills, rip-relative labels, .intel_syntax: llvm-mc's bytes"
+
 refs() {
     printf '\t.code16\n\t%s\n' "$2" > "$out/bad.s"
     if "$EMBCC" --target=x86_64-elf -c "$out/bad.s" -o "$out/bad.o" 2> "$out/bad.err"; then
