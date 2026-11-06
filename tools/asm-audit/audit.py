@@ -121,7 +121,8 @@ def corpus(name, out):
     return files
 
 BR = re.compile(r"\b(b|bl|blx|bx|j|jal|jmp|call|beq|bne|blt|bge|bltu|bgeu|bnez|beqz|"
-                r"cbz|cbnz|b\.\w+|br\w*|rjmp|rcall|bra|bsr|jl|loop\w*|bc\w*|bdnz\w*)\b")
+                r"cbz|cbnz|b\.\w+|br\w*|rjmp|rcall|bra|bsr|jl|loop\w*|bc\w*|bdnz\w*|"
+                r"bgtu|bleu|bgt|ble|bpz|bn|bo|bno|bnc|bz|bnz)\b")
 
 PADDING = False
 BAREHEX = False      # TriCore's objdump prints a target as bare hex too
@@ -193,7 +194,8 @@ def sized(dis):
             continue
         op = t.split(" ")[0]
         if BR.match(op) or op.startswith("j"):
-            t = op
+            # (RX writes a branch's width as its suffix: beq.s, .b, .w, .a)
+            t = re.sub(r"\.(s|b|w|a)$", "", op)
         r.append((len(m[1].split()), t))
     return r
 

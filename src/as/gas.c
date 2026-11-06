@@ -512,11 +512,17 @@ static int sec_add(struct gas *g, const char *name, size_t n,
 /* The four every file starts with, at their fixed indices. */
 static void sec_init(struct gas *g)
 {
+    /* RX: GNU as's code, data and zeroed data are P, D_1 and B_1 -- what
+     * .text, .data and .bss select there, and in every object, empty or
+     * not; `.section .text` is then a section of its own */
+    static const char *const rx_name[NSEC] = { "P", "D_1", ".rodata", "B_1" };
+    int rx = g->tgt && g->tgt->machine == EM_RX;
     for (int i = 0; i < NSEC; i++) {
         Elf64_Word ty;
         Elf64_Xword fl;
         sec_defaults(sec_name[i], &ty, &fl);
-        sec_add(g, sec_name[i], strlen(sec_name[i]), ty, fl);
+        sec_add(g, rx ? rx_name[i] : sec_name[i],
+                strlen(rx ? rx_name[i] : sec_name[i]), ty, fl);
     }
     /* code gets four, as it always has here, and data eight -- except on
      * RX, whose code is a byte stream: one, as GNU as gives it, so that
@@ -3563,6 +3569,12 @@ static int directive(struct gas *g, char *p, int pass)
             }
         }
         k = sec_find(g, nm, nn);
+        /* RX: `.text` is not the code section there (P is) but a section
+         * of its own -- and as one of ELF's special names it keeps its
+         * flags whatever the directive says, as GNU as gives it AX for
+         * GCC's `.section .text,"a"` */
+        if (k < 0 && g->tgt->machine == EM_RX && nn == 5 && !strncmp(nm, ".text", 5))
+            fl |= SHF_ALLOC | SHF_EXECINSTR;
         if (k < 0) {
             k = sec_add(g, nm, nn, ty, fl);
             if (fl & SHF_MERGE)
@@ -4570,6 +4582,8 @@ static int write_object(struct gas *g, const char *out_path)
      * relocation in it -- `.section .vectors` holding only a label still
      * names the place. .text always, as it always has. */
     used[SEC_TEXT] = 1;
+    if (g->tgt->machine == EM_RX)
+        used[SEC_DATA] = used[SEC_BSS] = 1;
     for (i = 0; i < g->nsecs; i++)
         if (g->secs[i].c.len || g->secs[i].size)
             used[i] = 1;
@@ -4581,13 +4595,36 @@ static int write_object(struct gas *g, const char *out_path)
     /* (Xtensa's R_XTENSA_32 keeps its addend in the relocation, as
      * EmbCC's compiled objects do; GNU as writes it into the word, and
      * embld and GNU ld both add the word and the addend, so either links) */
-    for (i = 0; i < g->nsecs; i++) {
+    /* RX: GNU as writes a LOCAL symbol's value plus the addend into an
+     * R_RX_DIR32 field as well as relocating it (RELA, so a linker takes
+     * the addend and overwrites the field); a global's or an external's
+     * field holds 0. So does this, to be GNU's object byte for byte. */
+    if (g->tgt->machine == EM_RX)
+        for (i = 0; i < g->nfix; i++) {
+            struct fixup *f = &g->fix[i];
+            struct sym *s = sym_find(g, f->sym, strlen(f->sym));
+            struct gsec *sc = &g->secs[f->sec];
+            unsigned long v;
+            if (f->type != R_RX_DIR32 || !s || s->is_global || s->sec < 0 ||
+                sc->type == SHT_NOBITS || f->off < 0 || f->off + 4 > sc->c.len)
+                continue;
+            v = (unsigned long)(s->value + f->addend);
+            for (int b = 0; b < 4; b++)
+                ((unsigned char *)sc->c.p)[f->off + b] =
+                    (unsigned char)(v >> (8 * b));
+        }
+    for (int oi = 0; oi < g->nsecs; oi++) {
+        /* (RX: P, D_1, B_1 first, then the others, as GNU as orders them) */
+        int rxo = g->tgt->machine == EM_RX;
+        i = !rxo ? oi : oi == 0 ? SEC_TEXT : oi == 1 ? SEC_DATA :
+            oi == 2 ? SEC_BSS : oi == 3 ? SEC_RODATA : oi;
         struct gsec *sc = &g->secs[i];
         long al = sc->align;
         if (!used[i])
             continue;
-        /* the alignment these four always had, at least */
-        if (i == SEC_DATA || i == SEC_RODATA || i == SEC_BSS)
+        /* the alignment these four always had, at least (RX's are GNU
+         * as's: what the file asks for) */
+        if ((i == SEC_DATA || i == SEC_RODATA || i == SEC_BSS) && !rxo)
             al = al > 8 ? al : 8;
         ndx[i] = elfw_add_section(w, sc->name, sc->type, sc->flags,
                                   sc->type == SHT_NOBITS ? NULL : sc->c.p,

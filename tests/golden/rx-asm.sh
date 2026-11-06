@@ -74,12 +74,13 @@ n=$(wc -l < "$out/v.txt" | tr -d ' ')
     echo "EmbCC's .s assembler refused the vocabulary:"; head -3 "$out/vs.err"
     exit 1; }
 if [ -n "$GAS" ]; then
-    "$GAS" -muse-conventional-section-names "$out/v.s" -o "$out/vg.o" \
+    # (GNU as's own section names, as GCC has it: .text selects P)
+    "$GAS" "$out/v.s" -o "$out/vg.o" \
         2> "$out/vg.err" || {
         echo "GNU as rejected the vocabulary -- an entry claims a form it"
         echo "does not have:"; grep -i error "$out/vg.err" | head -5; exit 1; }
-    "$GOBJCOPY" -O binary -j .text "$out/v.o" "$out/e.bin"
-    "$GOBJCOPY" -O binary -j .text "$out/vg.o" "$out/g.bin"
+    "$GOBJCOPY" -O binary -j P "$out/v.o" "$out/e.bin"
+    "$GOBJCOPY" -O binary -j P "$out/vg.o" "$out/g.bin"
     perl -e '
       my ($v, $e, $g) = @ARGV;
       open V, $v or die; my @L = <V>; close V;
@@ -156,7 +157,7 @@ printf 'int ext_data[4] = { 1, 2, 3, 4 };\nvoid ext_fn(void) { }\nvoid ext_tail(
 "$EMBCC" --target=$T -c "$d/layout.S" -o "$out/layout.o" || {
     echo "layout.S does not assemble"; exit 1; }
 if [ -n "$GAS" ]; then
-    "$GCC" -c -Wa,-muse-conventional-section-names "$d/layout.S" \
+    "$GCC" -c "$d/layout.S" \
         -o "$out/layout-gnu.o" 2> "$out/layout-gnu.err" || {
         echo "GNU as: layout.S"; cat "$out/layout-gnu.err"; exit 1; }
     for a in layout layout-gnu; do
@@ -191,7 +192,7 @@ if command -v "$QEMU" >/dev/null 2>&1; then
     [ -n "$GAS" ] && asms="embcc gnu"
     for as in $asms; do
         if [ $as = gnu ]; then
-            "$GCC" -c -Wa,-muse-conventional-section-names "$d/forms.S" \
+            "$GCC" -c "$d/forms.S" \
                 -o "$out/forms-$as.o" || { echo "GNU as: forms.S"; exit 1; }
         else
             "$EMBCC" --target=$T -c "$d/forms.S" -o "$out/forms-$as.o" || {
