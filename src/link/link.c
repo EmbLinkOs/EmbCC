@@ -4445,6 +4445,25 @@ static void apply_riscv(struct linker *l, struct object *o, unsigned type,
     }
     case R_RISCV_TPREL_ADD:
         return;
+    case R_RISCV_TLS_GOT_HI20: {
+        /* Initial-exec: auipc to a GOT slot holding the variable's tp
+         * offset, a load of it, an add of tp. A static image has no GOT
+         * and knows the offset: `lui rd, %tprel_hi`, its low half's load
+         * an addi of %tprel_lo (marked here, got 2), and the add stays --
+         * local-exec, as lld relaxes it. */
+        long long tp = V - (long long)l->tls_start;
+        if (!l->tls_size)
+            die("%s: a thread-local relocation against '%s', but the image "
+                "has no thread block (.tdata/.tbss)", o->name,
+                l->rel_sym ? l->rel_sym : "?");
+        need_range(l, o, "R_RISCV_TLS_GOT_HI20", tp, I32_MIN - 0x800,
+                   I32_MAX - 0x800);
+        put32(loc, (get32loc(loc) & 0xf80U) | 0x37U);     /* lui rd */
+        rv_put_u(loc, rv_hi20(tp));
+        note_pcrel_hi(l, P, tp);
+        l->pcrel[l->npcrel - 1].got = 2;
+        return;
+    }
     case R_RISCV_HI20:
         /* lui sign-extends at RV64, so the pair reaches a sign-extended
          * 32-bit address; at RV32 every address is one */
@@ -4497,7 +4516,8 @@ static void apply_riscv(struct linker *l, struct object *o, unsigned type,
         int got = 0;
         long long d = find_pcrel_hi(l, o, (Elf64_Addr)V, &got);
         if (got) {
-            /* lw/ld rd, %pcrel_lo(slot)(rs) -> addi rd, rs, %pcrel_lo(sym) */
+            /* lw/ld rd, %pcrel_lo(slot)(rs) -> addi rd, rs, %pcrel_lo(sym)
+             * (got 2: of the tp offset the lui built) */
             unsigned int w = get32loc(loc);
             if (type != R_RISCV_PCREL_LO12_I || (w & 0x7f) != 0x03 ||
                 (((w >> 12) & 7) != 2 && ((w >> 12) & 7) != 3))
