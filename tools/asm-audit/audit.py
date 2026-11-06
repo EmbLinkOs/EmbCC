@@ -216,6 +216,24 @@ def relaxed_only(objdump, eo, ro):
             return False
     return True
 
+def lengths_differ(objdump, eo, ro):
+    """None when every instruction has the reference's length, "branch"
+    when only branches differ, else the index of the first that does."""
+    a = sized(run([objdump, "-d", eo]).stdout)
+    b = sized(run([objdump, "-d", ro]).stdout)
+    if len(a) != len(b):
+        return None          # (the text compare already passed: padding)
+    br = False
+    for k, ((la, ta), (lb, tb)) in enumerate(zip(a, b)):
+        if la == lb:
+            continue
+        op = ta.split(" ")[0]
+        if BR.match(op) or op.startswith(("j", "b")):
+            br = True
+            continue
+        return k
+    return "branch" if br else None
+
 def audit(name, out, show):
     etgt, cc, _, refas, objdump, _ = T[name]
     if not have(cc) or not have(refas.split()[0]):
@@ -248,6 +266,20 @@ def audit(name, out, show):
         PADDING = name == "xtensa"
         ne, nr = norm(de), norm(dr)
         k = same(ne, nr)
+        # the text agrees, but a 16- and a 32-bit form can print alike
+        # (TriCore's mov.aa, Thumb's add after .w is stripped): the lengths
+        # must agree too, every instruction's but a branch's
+        if k is None:
+            r = lengths_differ(objdump, eo, ro)
+            if r == "branch":
+                relaxed += 1
+                continue
+            if r is not None:
+                differ += 1
+                a_, b_ = sized(run([objdump, "-d", eo]).stdout), sized(run([objdump, "-d", ro]).stdout)
+                diffs.append("%s: '%s' is %d bytes, the reference's %d" % (
+                    os.path.basename(a), a_[r][1], a_[r][0], b_[r][0]))
+                continue
         if k is not None and relaxed_only(objdump, eo, ro):
             relaxed += 1
             continue
