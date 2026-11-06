@@ -709,8 +709,11 @@ static int stmt_body(const char *stmt, int len, struct code *out, char *err,
                  (int)(m - p), p);
         if ((bo & 0x14) == 0x04)            /* 001zz, 011zz: a condition */
             bo = (bo & 0x1c) | (hint == '+' ? 3 : 2);
-        else if ((bo & 0x16) == 0x10)       /* 1a00t: the count */
-            bo = (bo & 0x16) | 0x08 | (hint == '+' ? 1 : 0);
+        else if ((bo & 0x14) == 0x10)       /* 1a0zt: the count (bdnz, bdz) */
+            bo = (bo & 0x12) | 0x08 | (hint == '+' ? 1 : 0);
+        else if ((bo & 0x14) == 0x14)       /* 1z1zz: always */
+            FAIL("%.*s: this branch is always taken, and has no prediction "
+                 "bits", (int)(m - p), p);
         else
             FAIL("%.*s: this branch tests the condition and the count, and "
                  "has no prediction bits", (int)(m - p), p);
@@ -1926,7 +1929,8 @@ void ppcasm_vocabulary(FILE *f)
                "bc 12, 4*cr7+eq, .+8@bt\n"
                "bclr 12, 2@bclr\nbclrl 4, 6@bclrl\nbcctr 4, 6@bcctr\n"
                "bne- 0, .+8@bf-\nbne+ 0, .+8@bf+\nbeq- 1, .+8@bt-\n"
-               "bdnz+ .+8@bdnz+\nbdnz- .+8@bdnz-\n"
+               "bdnz+ .+8@bdnz+\nbdnz- .+8@bdnz-\nbdz+ .+8@bdz+\nbdz- .+8@bdz-\n"
+               "bdnzlr+@bdnzlr+\n"
                "bcctrl 12, 0, 0@bcctrl\nbclr 20, 0@blr\nbcctr 20, 0@bctr\n"
                "bdnz .-8@bdnz\nbdz .+8@bdz\nbdnzl .+8@bdnzl\n"
                "bdzla 0x40@bdzla\nbdnzt 2, .+8@bdnzt\nbdnzf eq, .+8@bdnzf\n"

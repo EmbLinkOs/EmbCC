@@ -108,7 +108,10 @@ if [ -n "$have_llvm" ]; then
         grep -E '^ *[0-9a-f]+:' |
         sed 's/^[^:]*:[[:space:]]*//; s/[[:space:]][[:space:]]*/ /g; s/ $//' \
         > "$out/dis.txt"
-    awk -F'|' '{ k = split($1, e, "+"); for (i = 1; i <= k; i++) print e[i] "|" $3 }' \
+    # ('+' joins an expansion's instructions; a trailing one is a branch
+    # hint, which llvm-objdump prints since LLVM 23.1.5: `bf+`)
+    awk -F'|' '{ if ($1 ~ /[+-]$/) { k = 1; e[1] = $1 } else k = split($1, e, "+")
+                 for (i = 1; i <= k; i++) print e[i] "|" $3 }' \
         "$out/v.txt" > "$out/exp.txt"
     [ "$(wc -l < "$out/exp.txt")" = "$(wc -l < "$out/dis.txt")" ] || {
         echo "llvm-objdump read $(wc -l < "$out/dis.txt" | tr -d ' ') instructions, not $(wc -l < "$out/exp.txt" | tr -d ' ')"
@@ -258,7 +261,7 @@ fi
 
 # ---- 5. the refusals ----------------------------------------------------------------
 printf '%s\n' 'fadd 1, 2, 3' 'lfd 1, 0(3)' 'vaddubm 1, 2, 3' 'evaddw 3, 4, 5' \
-    'ld 3, 0(4)' 'lswi 3, 4, 8' 'mcrxr 3' 'beq+ .+8' 'bne- cr1, .+8' \
+    'ld 3, 0(4)' 'lswi 3, 4, 8' 'mcrxr 3' 'ba+ 8' 'bla- 8' \
     'addi 3, 4, 32768' 'ori 3, 4, -1' 'li 3, 32768' 'lis 3, 65536' \
     'lwz 3, 32768(4)' 'lwzu 3, 4(3)' 'stwu 3, 4(0)' 'lmw 3, 4(5)' \
     'slwi 3, 4, 32' 'rlwinm 3, 4, 32, 0, 31' 'cmpwi cr8, 3, 0' \
