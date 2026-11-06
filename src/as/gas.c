@@ -115,7 +115,6 @@ struct fixup {
     char *sym;              /* the symbol named */
     int type;               /* ELF relocation type */
     long addend;
-    int inword;             /* Xtensa: the offset went into the word */
 };
 
 /* a line of the expanded source, and where it came from */
@@ -328,7 +327,6 @@ static void fix_add(struct gas *g, int sec, long off, const char *sym,
     f->sym = xstrndup(sym, strlen(sym));
     f->type = type;
     f->addend = addend;
-    f->inword = 0;
 }
 
 /* ---- lexing a line -------------------------------------------------- */
@@ -4613,31 +4611,6 @@ static int write_object(struct gas *g, const char *out_path)
      * the string before. GNU as and llvm-mc keep the label then, and so
      * does EmbCC's -c (str_reloc), so either assembles -S into its object. */
 #define MERGE_KEEPS(f, s) ((g->secs[(s)->sec].flags & SHF_MERGE) && (f)->addend)
-    /* Xtensa: a word relocated against its section (a local label's)
-     * holds the label's offset itself, the relocation's addend 0 -- GNU
-     * as's object, byte for byte; against a named symbol the addend stays
-     * in the relocation, as GNU's does. (Either links: embld and GNU ld
-     * add the word and the addend.) */
-    if (g->tgt->machine == EM_XTENSA)
-        for (i = 0; i < g->nfix; i++) {
-            struct fixup *f = &g->fix[i];
-            struct sym *s = sym_find(g, f->sym, strlen(f->sym));
-            struct gsec *sc = &g->secs[f->sec];
-            unsigned long v;
-            if (f->type != R_XTENSA_32 || !s || s->is_global || s->sec < 0 ||
-                s->is_func || !DATA_RELOC(f) || MERGE_KEEPS(f, s) ||
-                sc->type == SHT_NOBITS || f->off < 0 || f->off + 4 > sc->c.len)
-                continue;
-            {
-                unsigned char *q = (unsigned char *)sc->c.p + f->off;
-                v = (unsigned long)q[0] | (unsigned long)q[1] << 8 |
-                    (unsigned long)q[2] << 16 | (unsigned long)q[3] << 24;
-                v += (unsigned long)(s->value + f->addend);
-                for (int b = 0; b < 4; b++)
-                    q[b] = (unsigned char)(v >> (8 * b));
-            }
-            f->inword = 1;
-        }
     /* RX: GNU as writes a LOCAL symbol's value plus the addend into an
      * R_RX_DIR32 field as well as relocating it (RELA, so a linker takes
      * the addend and overwrites the field); a global's or an external's
@@ -4813,7 +4786,7 @@ static int write_object(struct gas *g, const char *out_path)
         if (s && !s->is_global && s->sec >= 0 && !s->is_func &&
             secsym[s->sec] > 0 && DATA_RELOC(f) && !MERGE_KEEPS(f, s)) {
             elfw_add_rela(w, ndx[f->sec], (Elf64_Addr)f->off, secsym[s->sec],
-                          f->type, f->inword ? 0 : f->addend + s->value);
+                          f->type, f->addend + s->value);
             continue;
         }
         if (!s || !s->elf_ndx) {

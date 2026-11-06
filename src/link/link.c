@@ -173,7 +173,6 @@ struct veneer_sec { int key, sec, n; };
  * contiguously, the way `KEEP(*(.embk_exports))` places them, and its
  * bounds become bracket symbols (define_orphan_brackets). Read-only
  * orphans follow .rodata; writable ones follow .data. */
-#define MAX_ORPHANS 1024
 struct orphan { const char *name; int writable; };
 
 struct symbol {
@@ -302,8 +301,9 @@ struct linker {
      * different registers. And which object named it, for the message. */
     int mips_fp_abi;
     const char *mips_fp_from;
-    struct orphan orphans[MAX_ORPHANS];
-    int norphan;
+    struct orphan *orphans;    /* (as many as the inputs name: -ffunction-
+                                * sections' .literal.f are one each) */
+    int norphan, caporphan;
     struct ls_script *sc;      /* -T: the layout comes from here */
     /* ARMv8-M CMSE: the secure gateway veneers (cmse_scan) -- their
      * section's insecs index or -1, and for each the symbols it joins:
@@ -1022,16 +1022,6 @@ static struct object *parse_object(const char *name, unsigned char *buf,
         if (!big && e32->e_machine == EM_68K)
             die("%s: a little-endian m68k object; the m68k is big-endian",
                 name);
-        /* ColdFire: the ISA in e_flags' low nibble -- a 68000-family
-         * object (68020, CPU32, ...) or one built for an FPU is not one
-         * this linker's ColdFire images can run */
-        if (e32->e_machine == EM_68K &&
-            ((e32->e_flags & 0x0fUL) == 0 ||
-             (e32->e_flags & 0x40UL) != 0))
-            die("%s: an m68k object that is not soft-float ColdFire "
-                "(e_flags 0x%lx); this linker links ColdFire ISA_A..C "
-                "objects without the FPU", name,
-                (unsigned long)e32->e_flags);
         o->machine = e32->e_machine;
         o->eflags = e32->e_flags;
         o->nsh = e32->e_shnum;
@@ -1057,6 +1047,23 @@ static struct object *parse_object(const char *name, unsigned char *buf,
                 o->shdrs[i].sh_addralign = s32[i].sh_addralign;
                 o->shdrs[i].sh_entsize   = s32[i].sh_entsize;
             }
+        }
+        /* ColdFire: the ISA in e_flags' low nibble -- a 68000-family
+         * object (68020, CPU32, ...) or one built for an FPU is not one
+         * this linker's ColdFire images can run. An object with no code
+         * names no ISA (GNU as leaves e_flags 0 for an empty file), and
+         * is any core's. */
+        if (e32->e_machine == EM_68K &&
+            ((e32->e_flags & 0x0fUL) == 0 || (e32->e_flags & 0x40UL) != 0)) {
+            int code = 0;
+            for (int i = 0; i < o->nsh; i++)
+                if ((o->shdrs[i].sh_flags & SHF_EXECINSTR) && o->shdrs[i].sh_size)
+                    code = 1;
+            if (code || (e32->e_flags & 0x40UL))
+                die("%s: an m68k object that is not soft-float ColdFire "
+                    "(e_flags 0x%lx); this linker links ColdFire ISA_A..C "
+                    "objects without the FPU", name,
+                    (unsigned long)e32->e_flags);
         }
     } else {
         if (eh->e_type != ET_REL)
@@ -1215,9 +1222,11 @@ static int orphan_osec(struct linker *l, const char *name, int writable)
     for (int i = 0; i < l->norphan; i++)
         if (strcmp(l->orphans[i].name, name) == 0)
             return OSEC_COUNT + i;
-    if (l->norphan == MAX_ORPHANS)
-        die("more than %d distinct orphan sections (at '%s')",
-            MAX_ORPHANS, name);
+    if (l->norphan == l->caporphan) {
+        l->caporphan = l->caporphan ? l->caporphan * 2 : 64;
+        l->orphans = xrealloc(l->orphans,
+                              (size_t)l->caporphan * sizeof *l->orphans);
+    }
     l->orphans[l->norphan].name = name;
     l->orphans[l->norphan].writable = writable;
     return OSEC_COUNT + l->norphan++;
@@ -6065,7 +6074,7 @@ static void patch_thm_mov(unsigned char *loc, unsigned int h)
  * field 0). SLOT0_OP names the instruction's one PC-relative operand, so
  * the opcode at the site says which field and which reach: a call's word
  * offset from (P & ~3) + 4, a j's, a branch's or a zero-test's byte
- * offset from P + 4, a loop's forward eight bits to its end (GCC uses the
+ * offset from P + 4 (bf/bt's too), a loop's forward eight bits to its end (GCC uses the
  * zero-overhead loops on a core that has them), a density beqz.n/bnez.n's
  * forward six bits, an l32r's
  * backward word offset from (P + 3) & ~3. ASM_EXPAND marks a call an
@@ -6121,7 +6130,9 @@ static void apply_xtensa(struct linker *l, struct object *o, unsigned type,
                 what = "a zero-test branch reaches 2 KiB";
             else
                 w = (w & 0xfffUL) | (((unsigned long)d & 0xfffUL) << 12);
-        } else if (op0 == 7 || (op0 == 6 && (n == 2 || (n == 3 && m >= 2)))) {
+        } else if (op0 == 7 || (op0 == 6 && (n == 2 || (n == 3 && m >= 2))) ||
+                   (op0 == 6 && n == 3 && m == 1 && ((w >> 12) & 15) <= 1)) {
+            /* (and bf/bt, the boolean branches an FPU compare feeds) */
             if (d < -128 || d > 127)
                 what = "a branch reaches 128 bytes";
             else
@@ -9918,8 +9929,8 @@ int embld_link(const char **inputs, int ninputs, const char *out,
 
     Elf64_Addr text_start, data_start;
     Elf64_Xword text_size, data_filesz, data_memsz;
-    struct osec_bound bounds[OSEC_COUNT + MAX_ORPHANS];
-    memset(bounds, 0, sizeof bounds);
+    struct osec_bound *bounds = xcalloc((size_t)(OSEC_COUNT + l.norphan + 64),
+                                        sizeof *bounds);
     Elf64_Addr tls_start = 0;
     Elf64_Xword tls_filesz = 0, tls_memsz = 0, tls_align = 1;
     layout(&l, bounds, &text_start, &text_size, &data_start, &data_filesz,
