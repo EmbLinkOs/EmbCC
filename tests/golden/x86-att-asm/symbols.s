@@ -38,3 +38,4 @@ table:
 	.quad	f
 	.quad	ext + 8
 	.long	back
+	.word	7, back

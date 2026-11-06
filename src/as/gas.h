@@ -51,9 +51,9 @@ struct gas_target {
     int r_abs16;                    /* AVR: a pointer is TWO bytes, so a
                                      * symbol's address fits in a `.word`
                                      * there and nowhere else. 0 elsewhere. */
-    /* How wide `.word` is. GNU as makes it the machine's word: TWO bytes on
-     * AVR and four everywhere else here. 0 means four. Getting it wrong
-     * silently doubles every table in an AVR source. */
+    /* How wide `.word` is: two bytes on AVR, m68k, x86-64 and PowerPC (as
+     * GNU as and llvm-mc make it there), four everywhere else. 0 means
+     * four. Getting it wrong silently doubles every table in a source. */
     int word_bytes;
     /* Statements whose operand is a SYMBOL rather than a number, for a
      * target whose forms are not RISC-V's `call`/`la` or ARM's `bl`.

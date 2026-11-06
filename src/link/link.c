@@ -6756,6 +6756,26 @@ static void apply_relocs(struct linker *l, struct object *o)
                            0xffffffffLL);
                 put32(loc, (unsigned int)(S + A));
                 break;
+            case R_X86_64_16:
+                /* (a .word: either signedness, as ld and lld take it) */
+                need_range(l, o, "R_X86_64_16", (long long)S + A, -32768, 65535);
+                loc[0] = (unsigned char)(S + A);
+                loc[1] = (unsigned char)((S + A) >> 8);
+                break;
+            case R_X86_64_8:
+                need_range(l, o, "R_X86_64_8", (long long)S + A, -128, 255);
+                loc[0] = (unsigned char)(S + A);
+                break;
+            case R_X86_64_PC16:
+            case R_X86_64_PC8: {
+                long long v = (long long)S + A - (long long)P;
+                int w2 = type == R_X86_64_PC16;
+                need_range(l, o, w2 ? "R_X86_64_PC16" : "R_X86_64_PC8", v,
+                           w2 ? -32768 : -128, w2 ? 32767 : 127);
+                loc[0] = (unsigned char)v;
+                if (w2) loc[1] = (unsigned char)(v >> 8);
+                break;
+            }
             case R_X86_64_32S:
                 if (l->pie && ts)
                     die("%s: R_X86_64_32S against '%s' in a position-"

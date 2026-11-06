@@ -4050,9 +4050,8 @@ static int directive(struct gas *g, char *p, int pass)
         DIR(".dword") || DIR(".2byte") || DIR(".4byte") || DIR(".8byte") ||
         DIR(".xword")) {
         map_mark(g, 'd');
-        /* `.word` is the MACHINE's word, which is two bytes on AVR and four
-         * everywhere else here -- GNU as does the same, and a `.word` read
-         * as four bytes silently doubles every table in an AVR source. */
+        /* `.word` is GNU as's: two bytes on AVR, m68k, x86-64 and PowerPC,
+         * four elsewhere (the target's word_bytes) */
         int wordw = g->tgt->word_bytes ? g->tgt->word_bytes : 4;
         int width = DIR(".byte") ? 1
                   : (DIR(".short") || DIR(".half") || DIR(".hword") ||
@@ -5046,7 +5045,7 @@ static const struct gas_target X86_GAS = {
     EM_X86_64, 0, x86att_assemble, x86att_is_reg,
     0, 0, 0,
     R_X86_64_32, R_X86_64_64,
-    0, 0, x86att_symform, 0,
+    R_X86_64_16, 2, x86att_symform, 0,
     0, x86att_is_word, NULL, NULL, NULL,
     0, x86att_set_level, x86att_took_level, NULL,
     x86att_is_transfer, NULL
@@ -5126,7 +5125,7 @@ static const struct gas_target PPC_GAS = {
     EM_PPC, 1, ppcasm_assemble, ppcasm_is_reg,
     0, 0, 0,
     R_PPC_ADDR32, 0,
-    0, 0, ppcasm_symform, 0,
+    R_PPC_ADDR16, 2, ppcasm_symform, 0,
     0, ppcasm_is_word, NULL, NULL, NULL,
     0, NULL, NULL, NULL, NULL,
     ppcasm_symform_abs

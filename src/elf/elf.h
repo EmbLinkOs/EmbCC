@@ -212,6 +212,10 @@ typedef struct {
 #define R_X86_64_RELATIVE      8
 #define R_X86_64_32           10
 #define R_X86_64_32S          11
+#define R_X86_64_16           12
+#define R_X86_64_PC16         13
+#define R_X86_64_8            14
+#define R_X86_64_PC8          15
 #define R_X86_64_PC64         24
 #define R_X86_64_GOTPCRELX    41
 #define R_X86_64_REX_GOTPCRELX 42
