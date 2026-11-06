@@ -1192,6 +1192,12 @@ int target_atomic_rmw_libcall(int size)
 }
 void target_set_riscv_abi_flen(int flen) { g_rv_abi_flen = flen; }
 
+/* the AVR part's core for e_flags, which -mmcu= sets (src/arch/avr/
+ * options.c): a variable here, so that what links target.c alone (the
+ * test tools) needs nothing of the AVR backend's */
+static int g_avr_arch = EF_AVR_ARCH_AVR5;
+void target_avr_set_arch(int arch) { g_avr_arch = arch; }
+
 unsigned long target_elf_flags(enum target_arch a)
 {
     switch (a) {
@@ -1201,7 +1207,9 @@ unsigned long target_elf_flags(enum target_arch a)
                                 (g_rv_abi_flen == 64 ? EF_RISCV_FLOAT_ABI_DOUBLE
                                  : g_rv_abi_flen == 32 ? EF_RISCV_FLOAT_ABI_SINGLE
                                  : EF_RISCV_FLOAT_ABI_SOFT);
-    case TARGET_AVR:     return EF_AVR_ARCH_AVR5;
+    case TARGET_AVR:     /* the part's core: avr5, avr51 or avr6, which a
+                          * loader (QEMU's) checks against the machine */
+        return (unsigned long)g_avr_arch;
     /* What clang writes for -mcpu=mips32r2 -mno-abicalls: the delay
      * slots are filled (with nops), the code is not abicalls/PIC. */
     case TARGET_MIPS32:  return EF_MIPS_ARCH_32R2 | EF_MIPS_ABI_O32 |

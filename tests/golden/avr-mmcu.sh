@@ -59,15 +59,37 @@ for p in atmega88 atmega48pa; do
     grep -q "the $p is an avr4 part, with no jmp or call" "$out/$p.err" ||
         { cat "$out/$p.err"; fail "-mmcu=$p is not refused for being avr4"; }
 done
-"$EMBCC" --target=avr -mmcu=atmega2560 -c "$out/e.c" -o "$out/x.o" 2> "$out/2560.err" &&
-    fail "-mmcu=atmega2560 was taken"
-grep -q 'mmcu=atmega2560 is not supported: .*atmega328p, atmega328, atmega168p and atmega168 alone' \
-    "$out/2560.err" || { cat "$out/2560.err"; fail "an unknown part is not refused by name"; }
+"$EMBCC" --target=avr -mmcu=atmega32u4 -c "$out/e.c" -o "$out/x.o" 2> "$out/32u4.err" &&
+    fail "-mmcu=atmega32u4 was taken"
+grep -q 'mmcu=atmega32u4 is not supported: .*atmega168, atmega1280 and atmega2560 alone' \
+    "$out/32u4.err" || { cat "$out/32u4.err"; fail "an unknown part is not refused by name"; }
 "$EMBCC" --target=thumbv7m-none-eabi -mmcu=atmega328p -c "$out/e.c" -o "$out/x.o" \
     2> "$out/arm.err" && fail "-mmcu= was taken for ARM"
 grep -q 'mmcu=atmega328p is an AVR option, and the target is thumbv7m' "$out/arm.err" ||
     { cat "$out/arm.err"; fail "-mmcu= off AVR is not refused by name"; }
 echo "  avr4 parts, an unknown part and -mmcu= off AVR are refused by name"
+
+# 3. the Arduino Mega's parts: their core in the predefines (clang's for
+# them: __AVR_ARCH__, the PC's size, elpm, and eijmp/eicall on avr6) and
+# in an object's e_flags
+for pa in atmega1280:51:2 atmega2560:6:3; do
+    p=${pa%%:*} rest=${pa#*:} a=${rest%%:*} pc=${rest#*:}
+    "$EMBCC" --target=avr -mmcu=$p -E -dM "$out/e.c" | sort > "$out/$p.txt" || fail "-mmcu=$p is refused"
+    for m in "__AVR_ARCH__ $a" "__AVR_${pc}_BYTE_PC__ 1" "__AVR_HAVE_ELPM__ 1" "__AVR_HAVE_ELPMX__ 1"; do
+        grep -q "^#define $m\$" "$out/$p.txt" || fail "-mmcu=$p does not define $m"
+    done
+    [ "$(grep -c '_BYTE_PC__' "$out/$p.txt")" = 1 ] || fail "-mmcu=$p defines two PC sizes"
+    [ "$(grep -c '^#define __AVR_ATmega' "$out/$p.txt")" = 1 ] || fail "-mmcu=$p defines more than one part macro"
+    if [ $pc = 3 ]; then
+        grep -q '^#define __AVR_HAVE_EIJMP_EICALL__ 1$' "$out/$p.txt" || fail "-mmcu=$p has no eijmp"
+    else
+        grep -q '__AVR_HAVE_EIJMP_EICALL__' "$out/$p.txt" && fail "-mmcu=$p has eijmp"
+    fi
+    "$EMBCC" --target=avr -mmcu=$p -c "$out/e.c" -o "$out/$p.o" || fail "-mmcu=$p does not compile"
+    flags=$(od -An -tu4 -j36 -N4 "$out/$p.o" | tr -d ' ')
+    [ "$flags" = "$a" ] || fail "-mmcu=$p: e_flags $flags, not the core's $a"
+done
+echo "  atmega1280 (avr51) and atmega2560 (avr6): their core in the predefines and in e_flags"
 
 # 3. the other -m options
 cat > "$out/f.c" <<'EOF'

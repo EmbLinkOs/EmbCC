@@ -7,7 +7,8 @@ Black Magic Probe all speak it. The server runs the part's flash algorithm.
 `embflash` reads the image, erases and writes the flash, verifies it, and
 can start the program. A part with an STK500 serial bootloader, such as an
 Arduino Uno with Optiboot, needs no server: `--stk500` programs it
-directly. This page is the command reference.
+directly. Neither does an ESP32, through its ROM: `--esp`. This page is the
+command reference.
 
 ## Synopsis
 
@@ -16,7 +17,16 @@ embflash IMAGE --gdb TARGET [--base ADDR] [--verify] [--run]
                [--entry ADDR] [--vector-table ADDR] [--monitor CMD]...
                [--dry-run] [--timeout SECONDS] [-v]
 embflash IMAGE --stk500 serial:DEV[@BAUD] [--base ADDR] [--verify]
-               [--no-reset] [--timeout SECONDS]
+               [--no-reset] [--console SECONDS] [--timeout SECONDS]
+embflash IMAGE --stk500v2 serial:DEV[@BAUD] [--base ADDR] [--verify]
+               [--no-reset] [--console SECONDS] [--timeout SECONDS]
+embflash IMAGE --esp serial:DEV[@BAUD] [--base ADDR] [--verify]
+               [--no-reset] [--ram] [--console SECONDS] [--timeout SECONDS]
+               [--no-stub] [--no-compress]
+embflash ELF --esp-image FILE
+embflash --esp serial:DEV[@BAUD] --read ADDR SIZE|all FILE
+embflash --esp serial:DEV[@BAUD] --erase-flash | --erase-region ADDR SIZE
+embflash ELF [--board=BOARD] [--verify] [--console SECONDS]
 ```
 
 `TARGET` is where the server listens:
@@ -25,7 +35,7 @@ embflash IMAGE --stk500 serial:DEV[@BAUD] [--base ADDR] [--verify]
 |---|---|
 | `HOST:PORT` | a TCP port: OpenOCD's `3333`, a J-Link GDB server's `2331`, pyOCD's `3333` |
 | `unix:PATH` | a Unix-domain socket, such as QEMU's `-gdb chardev:` |
-| `serial:DEV[@BAUD]` | a serial line at `BAUD` (default 115200), such as the Black Magic Probe's GDB port |
+| `serial:DEV[@BAUD]` | a serial line at `BAUD` (default 115200; a rate the host cannot set is refused), such as the Black Magic Probe's GDB port |
 
 ## Images
 
@@ -81,6 +91,33 @@ name** in the server's target description (`qXfer:features:read`), so
 
 Without `--run`, `embflash` detaches (`D`) and leaves the target halted.
 
+## The port
+
+A serial target's device may be left to `embflash`: `serial:auto`, or
+`serial:` with no device (`serial:@57600` keeps a rate). The port is the
+board's USB serial port, found in `/dev` by the names its bridge takes. The
+names are tried in tiers, and a tier with a single port is the answer:
+
+| Programmer | First | Then |
+|---|---|---|
+| `--stk500` | an Arduino's ATmega16U2: `cu.usbmodem*`, `ttyACM*` | a clone's CH340 or CP210x: `cu.wchusbserial*`, `cu.usbserial*`, `cu.SLAB_USBtoUART*`, `ttyUSB*` |
+| `--esp` | a CP210x or CH340: `cu.usbserial*`, `cu.SLAB_USBtoUART*`, `cu.wchusbserial*`, `ttyUSB*` | a native USB port: `cu.usbmodem*`, `ttyACM*` |
+
+Two ports in one tier are named, and nothing is written: the device has
+to be given. So an Uno and an ESP32 board plugged in together are each
+found, but two of either are not.
+
+An ELF with no programmer named takes its machine's: an AVR program goes
+through Optiboot (`--stk500 serial:auto`), an Xtensa one through the
+ESP32's ROM (`--esp serial:auto`). `--board=BOARD` names it the same way:
+`uno` and `nano` for Optiboot, `esp32-devkit` for the ROM
+([Boards](../boards.md)).
+
+```sh
+embcc --board=uno blink.c -o blink.elf
+embflash blink.elf --verify --console 5      # Optiboot, at the Uno's port
+```
+
 ## A serial bootloader: --stk500
 
 `--stk500 serial:DEV[@BAUD]` takes `--gdb`'s place for an AVR part with a
@@ -100,16 +137,186 @@ The baud rate is 115200 when left out; older Arduino bootloaders take 57600.
    | ATmega328P | `1E 95 0F` | 32 KiB | 128 B | 512 B |
    | ATmega328 | `1E 95 14` | 32 KiB | 128 B | 512 B |
    | ATmega328PB | `1E 95 16` | 32 KiB | 128 B | 512 B |
+   | ATmega1280 | `1E 97 03` | 128 KiB | 256 B | 4 KiB |
+   | ATmega2560 | `1E 98 01` | 256 KiB | 256 B | 8 KiB |
 
    Any other signature is refused. An image that reaches the bootloader
-   (0x7E00 on these parts) is refused before anything is written.
+   (0x7E00 on the 328 parts) is refused before anything is written. The
+   Arduino Mega 1280's ATmegaBOOT speaks version 1 at 57600; the Mega
+   2560's bootloader speaks version 2 ([below](#stk500-version-2---stk500v2)).
 4. **Pages.** Every page the image touches is written whole. The bytes of
    the page the image does not give are the erased `0xff`, and pages it
    does not touch keep their contents. `--verify` reads every written page
    back and names the first byte that differs.
-5. **Start.** Leaving programming mode starts the program. `--run`,
-   `--monitor`, `--entry` and `--vector-table` belong to `--gdb` and are
-   refused here.
+5. **Start.** Leaving programming mode starts the program. `--console
+   SECONDS` then prints what it writes on the serial line, through the same
+   open port: reopening the port resets an Uno and starts the program over.
+   `--run`, `--monitor`, `--entry` and `--vector-table` belong to `--gdb`
+   and are refused here.
+
+### STK500 version 2: --stk500v2
+
+`--stk500v2 serial:DEV[@BAUD]` is the same programming through the
+Arduino Mega 2560's bootloader, which speaks Atmel's AVR068: a message is
+`0x1b`, a sequence number, a 16-bit size, `0x0e`, the body and the xor of
+all of it, and the answer echoes the number. `embflash` signs on (up to
+ten times while the bootloader starts), enters programming mode, reads
+the signature byte by byte, and for every page the image touches loads
+its word address (bit 31 set past 64K words, as avrdude sends it) and
+programs it, 256 bytes; `--verify` reads them back. Leaving programming
+mode starts the program. 115200 baud when left out.
+
+An ELF whose `e_flags` name the avr6 core (an ATmega2560 program) goes to
+`--stk500v2` by itself, and an avr51 one (the ATmega1280) to `--stk500`
+at 57600; `--board=mega2560` is `--stk500v2`. It has been tested against
+`tests/golden/embflash/fakestk500v2.py`, a model written from AVR068, and
+not yet against a board.
+
+## The Espressif ROM: --esp
+
+`--esp serial:DEV[@BAUD]` programs an ESP32 through the serial download
+mode in its ROM, the protocol esptool speaks. It reaches the ROM at the
+ROM's 115200 baud, then asks it for `BAUD`: 460800 when not given, as
+esptool's default. `@921600` is faster where the USB adapter carries it;
+`@115200` keeps the ROM's rate.
+
+- **An ELF** is made into the image the ROM boots (as esptool's `elf2image`
+  makes it) and written to flash at `--base`, 0x1000 by default, which is
+  where the ESP32's ROM boots from. Its code and read-only data may be in
+  flash-mapped memory, as a program larger than the RAM needs: see [The
+  image](#the-image). `--esp-image FILE` writes the flash from `--base` to a
+  file instead, with no board.
+- **A raw `.bin` or a HEX file** is written as it is: its bytes go to flash
+  at their addresses, a `.bin` at `--base`. The ROM erases whole 4 KiB
+  sectors, so a piece is written from the start of its sector, and the
+  bytes of that sector the image does not give read `0xff`.
+- **`--ram`** loads an ELF's pieces into RAM and starts it, as esptool's
+  `load-ram` does. Nothing is written to flash.
+- **`--console SECONDS`** prints what the program writes on the serial line
+  for that long after it starts, through the same open port. Reopening the
+  port would pulse the board's auto-reset and start the chip over.
+
+1. **Into the ROM.** A development board's auto-reset circuit ties DTR to
+   IO0 and RTS to EN, each through an inverting transistor. `embflash`
+   holds EN low, pulls IO0 low, and releases EN, as esptool's classic reset
+   does: the chip starts in download mode. On a board without the circuit,
+   hold BOOT while pressing EN and pass `--no-reset`.
+2. **Sync.** The sync request is sent up to ten times, and the reset and
+   the syncs up to seven times over, as esptool's. The ROM answers it
+   several times over, and the extra answers are drained.
+3. **The chip.** The chip-detect register (0x40001000) names it. The ESP32,
+   `0x00f01d83`, is the one known, with 4 MiB of flash assumed. Any other
+   value is refused, and so is an image beyond the flash. Then the rate:
+   `CHANGE_BAUDRATE`, answered at the old rate, then the new one on both
+   ends. A ROM silent at the new rate is reported as an adapter that cannot
+   carry it.
+4. **Writing.** The flash is attached and its parameters given. Then each
+   piece of the image is erased (`FLASH_BEGIN`) and written in blocks of
+   1024 bytes, each with its checksum. `--verify` asks the ROM for the MD5
+   of each piece as written and compares it with the image's.
+5. **Start.** An EN pulse with IO0 high starts the program from flash, at
+   115200 again, and `--console` reads it there. No `FLASH_END` is sent:
+   the ROM answers it with an error. `--no-reset` leaves the chip in the
+   ROM. A `--ram` load goes back to 115200 before `MEM_END`, so the program
+   starts at the rate a cold boot gives it.
+
+Steps 4 and 5 go through embflash's flasher stub unless `--no-stub` is
+given ([below](#the-flasher-stub)). Through the ROM alone, on an
+ESP32-D0WD-V3 board with a CP2102, 256 KiB went in 28.9 s at 115200
+(9 KiB/s), 9.4 s at 460800 (27 KiB/s) and 6.5 s at 921600 (39 KiB/s),
+each verified. Past 460800 the time is mostly the ROM writing the flash,
+one 1024-byte block per answer.
+
+### The flasher stub
+
+A program of 3.5 KiB, `tools/embflash/esp32stub.c`, built by EmbCC and
+carried in `embflash` as bytes, is loaded into RAM through the ROM (after
+the flash is attached and the rate set) and takes the line over. Its
+packets are the ROM's, and it adds:
+
+- **16 KiB blocks**, so a block's answer is waited for a sixteenth as often.
+- **Compressed blocks**, each in LZ4's block format on its own.
+  `--no-compress` sends them as they are.
+- **A streamed read**: 4 KiB frames, eight in flight, each acknowledged,
+  then the stub's MD5 of them, a piece of 256 KiB at a time. A piece with a
+  short frame or a different MD5 is read again, up to three times.
+- **Its own MD5** of a range, for `--verify`.
+- **Erasing**: `--erase-flash` erases the whole chip and `--erase-region
+  ADDR SIZE` whole 4 KiB sectors, waiting for the flash to finish.
+
+The flash is written with the ROM's own routines, the ones its loader
+uses, at addresses read off the chip. On the board, at 921600:
+
+| | The ROM | The stub |
+|---|---|---|
+| 256 KiB of random bytes | 6.5 s | 5.9 s |
+| 1 MiB of text | 27 s or so | 11.9 s, 98 KiB sent |
+| 300 KiB of program, 4000 functions | 7.5 s | 5.8 s, 214 KiB sent |
+| the whole 4 MiB read back | 91 s | 58 s (70 KiB/s) |
+
+`--no-stub` keeps the ROM's loader for all of it: the stub is the newer
+path, and the ROM's is the one esptool's `--no-stub` takes.
+
+### Reading the flash: --read
+
+`--read ADDR SIZE FILE` reads the ESP32's flash into `FILE` instead of
+writing it, as esptool's `read-flash` does. `SIZE` is a number of bytes,
+with `K` or `M` for KiB and MiB, or `all` for the rest of the flash from
+`ADDR`.
+
+- **The reads.** Through the stub, the streamed read above. With
+  `--no-stub`, `READ_FLASH_SLOW`, the ROM's own read, 64 bytes a request;
+  a reply the line loses is asked again after half a second.
+- **The check.** Each piece against the stub's MD5 of what it sent, and
+  then the whole range against the MD5 of the flash, read again. A
+  difference fails the run and no file is written.
+- **The speed.** At 921600, 70 KiB/s through the stub (the line's rate,
+  about), 45 KiB/s through the ROM: all 4 MiB in 58 s or 91 s.
+
+```sh
+# the whole flash, as a backup before the first write
+embflash --esp serial:/dev/cu.usbserial-0001@921600 --read 0 all backup.bin
+```
+
+### The image
+
+For an ELF in RAM only, the image is esptool's format, byte for byte
+(`tests/golden/embflash-esp.sh` compares them when esptool is installed):
+
+- **Header.** `0xE9`, the segment count, the flash's mode, size and
+  frequency (DIO, 4 MiB, 40 MHz), and the ELF's entry point.
+- **Extended header.** No write-protect pin, chip 0 (the ESP32), any
+  revision, and a SHA-256 appended.
+- **Segments.** Each ELF piece at its load address, padded to a word.
+- **Trailer.** The checksum byte, 0xEF xored with every segment byte, one
+  byte short of a 16-byte boundary, then the SHA-256 of everything before it.
+
+The ROM loads RAM segments only, into IRAM and DRAM. Pieces in
+flash-mapped memory, code at 0x400D0000-0x403FFFFF and read-only data at
+0x3F400000-0x3F7FFFFF, are read through the cache once its MMU maps them,
+which ESP-IDF's second-stage bootloader does. `embflash` needs no second
+stage for that:
+
+- **The regions.** Each region (code, data) is written to flash after the
+  image, from the 64 KiB page its first piece is in, on pages of its own:
+  a piece at 0x400D0020 goes 0x20 into its flash page.
+- **The boot stub.** A stub of about 400 bytes
+  (`tools/embflash/esp32boot.c`, built by EmbCC) joins the image in RTC fast memory at 0x400C0000 as its
+  entry, with a table of the program's entry and each region's virtual
+  page, flash page and page count. It maps the regions with the ROM's own
+  `cache_flash_mmu_set`, enables the cache, and calls the program's entry.
+- **What it asks of the program.** Its entry is in IRAM, since the cache is
+  not mapped until the stub has run. RTC fast memory is free for the
+  program once it runs, but nothing may be loaded there: such a piece is
+  refused.
+
+On the ESP32-D0WD-V3 board a program with 291 KiB of code in flash (4000
+functions, more than twice the IRAM) ran from it, 302 KiB written in about
+7.5 s at 921600.
+
+A program the ROM boots this way runs on the ROM's stack, with UART0 at
+115200. The flash boot leaves the RTC and timer-group watchdogs running, so
+it turns them off or feeds them.
 
 ## Examples
 
@@ -126,8 +333,19 @@ embflash fw.hex --gdb localhost:3333 --monitor "reset halt" --verify
 # a Black Magic Probe
 embflash fw.elf --gdb serial:/dev/ttyACM0 --verify --run
 
-# an Arduino Uno through Optiboot, on the ATmega16U2's USB serial port
-embflash fw.hex --stk500 serial:/dev/cu.usbmodem1101 --verify
+# an Arduino Uno through Optiboot, on the ATmega16U2's USB serial port,
+# then what the program prints
+embcc --target=avr -mmcu=atmega328p -Os blink.c -o blink.elf
+embflash blink.elf --stk500 serial:/dev/cu.usbmodem1101 --verify --console 5
+
+# an ESP32 development board: the ELF, as the image the ROM boots, with its output
+embflash app.elf --esp serial:/dev/cu.usbserial-0001 --verify --console 5
+
+# the same program run from RAM, the flash untouched
+embflash app.elf --esp serial:/dev/cu.usbserial-0001 --ram --console 5
+
+# the image alone, as esptool elf2image writes it
+embflash app.elf --esp-image app.bin
 
 # what would be written, with no target
 embflash fw.bin --base 0x08000000 --dry-run
@@ -155,10 +373,20 @@ with an error is reported with that error.
 
 - `embflash` has been tested against QEMU and against a server that models
   a part's flash. It has **not yet** been tested against real probes. The
-  STK500 path has been tested against a model of Optiboot, not yet against
-  a board.
-- `--stk500` knows the ATmega328 family only. STK500 version 2, which the
-  Arduino Mega's bootloader speaks, is not implemented.
+  `--stk500` path has been tested on an Arduino Uno R3 (an ATmega328P
+  behind an ATmega16U2): 1.7 KiB written and read back in 1.2 s. The
+  `--esp` path has been tested on an ESP32-D0WD-V3 development
+  board (revision v3.1, 4 MiB of flash, a CP2102 bridge): an ELF made into
+  the image and booted from 0x1000, an ELF run from RAM, and 28 KiB written
+  and verified in 7 s.
+- `--stk500` and `--stk500v2` know the ATmega328 family and the Mega's
+  ATmega1280 and ATmega2560. EEPROM, fuses and lock bits are not written.
+  `--stk500v2` has been tested against a model only.
+- `--esp` knows the ESP32 only and assumes 4 MiB of flash and DIO at
+  40 MHz. ESP-IDF's app images and partition table (an IDF program needs
+  IDF's bootloader), PSRAM, and other chips (S2, S3, C3...) are not
+  implemented. The stub runs at the rate the ROM was set to: a CP2102
+  carries 921600 at most.
 - Option bytes, mass erase and read-out protection are server-specific.
   Reach them with `--monitor`.
 - The transports need POSIX sockets and termios. Elsewhere `embflash`
@@ -209,3 +437,25 @@ with no address loaded, and a command Optiboot does not know. The checks:
 - an image over the bootloader, an unknown signature, a bootloader that
   never answers, a byte that reads back wrong, and `--run` are each
   refused with exit status 2.
+
+`tests/golden/embflash-esp.sh` runs against
+`tests/golden/embflash/fakeesprom.py`. That model of the ESP32 ROM runs on a
+pseudo-terminal and reports:
+
+- a block with a wrong checksum, out of sequence, or outside the erased
+  range;
+- an unescaped SLIP frame;
+- a write before the flash is attached;
+- a RAM block out of sequence or beyond its load.
+
+FLASH_END is answered with error 0x06, as the chip answers it, so a
+programmer that sends it fails here as it fails on the board.
+
+The checks:
+
+- a binary holding every byte value lands byte for byte at 0x1000, and the
+  ROM's MD5 matches;
+- a HEX image in two pieces lands the same way;
+- a ROM that misses three syncs is still synced;
+- an unknown chip, a ROM that never answers, a wrong MD5 and an image beyond
+  the flash are each refused with exit status 2.

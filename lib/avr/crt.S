@@ -119,6 +119,103 @@ __vectors:
 	.weak	__vector_25
 	.set	__vector_25, __bad_interrupt
 	jmp	__vector_25
+#if _VECTORS_SIZE > 104
+	; the ATmega1280's and 2560's: 57 vectors (their datasheet's
+	; "Interrupts", <avr/iomxx0_1.h>)
+	.weak	__vector_26
+	.set	__vector_26, __bad_interrupt
+	jmp	__vector_26
+	.weak	__vector_27
+	.set	__vector_27, __bad_interrupt
+	jmp	__vector_27
+	.weak	__vector_28
+	.set	__vector_28, __bad_interrupt
+	jmp	__vector_28
+	.weak	__vector_29
+	.set	__vector_29, __bad_interrupt
+	jmp	__vector_29
+	.weak	__vector_30
+	.set	__vector_30, __bad_interrupt
+	jmp	__vector_30
+	.weak	__vector_31
+	.set	__vector_31, __bad_interrupt
+	jmp	__vector_31
+	.weak	__vector_32
+	.set	__vector_32, __bad_interrupt
+	jmp	__vector_32
+	.weak	__vector_33
+	.set	__vector_33, __bad_interrupt
+	jmp	__vector_33
+	.weak	__vector_34
+	.set	__vector_34, __bad_interrupt
+	jmp	__vector_34
+	.weak	__vector_35
+	.set	__vector_35, __bad_interrupt
+	jmp	__vector_35
+	.weak	__vector_36
+	.set	__vector_36, __bad_interrupt
+	jmp	__vector_36
+	.weak	__vector_37
+	.set	__vector_37, __bad_interrupt
+	jmp	__vector_37
+	.weak	__vector_38
+	.set	__vector_38, __bad_interrupt
+	jmp	__vector_38
+	.weak	__vector_39
+	.set	__vector_39, __bad_interrupt
+	jmp	__vector_39
+	.weak	__vector_40
+	.set	__vector_40, __bad_interrupt
+	jmp	__vector_40
+	.weak	__vector_41
+	.set	__vector_41, __bad_interrupt
+	jmp	__vector_41
+	.weak	__vector_42
+	.set	__vector_42, __bad_interrupt
+	jmp	__vector_42
+	.weak	__vector_43
+	.set	__vector_43, __bad_interrupt
+	jmp	__vector_43
+	.weak	__vector_44
+	.set	__vector_44, __bad_interrupt
+	jmp	__vector_44
+	.weak	__vector_45
+	.set	__vector_45, __bad_interrupt
+	jmp	__vector_45
+	.weak	__vector_46
+	.set	__vector_46, __bad_interrupt
+	jmp	__vector_46
+	.weak	__vector_47
+	.set	__vector_47, __bad_interrupt
+	jmp	__vector_47
+	.weak	__vector_48
+	.set	__vector_48, __bad_interrupt
+	jmp	__vector_48
+	.weak	__vector_49
+	.set	__vector_49, __bad_interrupt
+	jmp	__vector_49
+	.weak	__vector_50
+	.set	__vector_50, __bad_interrupt
+	jmp	__vector_50
+	.weak	__vector_51
+	.set	__vector_51, __bad_interrupt
+	jmp	__vector_51
+	.weak	__vector_52
+	.set	__vector_52, __bad_interrupt
+	jmp	__vector_52
+	.weak	__vector_53
+	.set	__vector_53, __bad_interrupt
+	jmp	__vector_53
+	.weak	__vector_54
+	.set	__vector_54, __bad_interrupt
+	jmp	__vector_54
+	.weak	__vector_55
+	.set	__vector_55, __bad_interrupt
+	jmp	__vector_55
+	.weak	__vector_56
+	.set	__vector_56, __bad_interrupt
+	jmp	__vector_56
+#endif
 
 	.text
 	.globl	__bad_interrupt

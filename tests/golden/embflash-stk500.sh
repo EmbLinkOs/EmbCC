@@ -10,6 +10,8 @@
 #     it does not touch are left alone; --verify reads them back;
 #   - an ELF and a raw binary (--base) land the same way;
 #   - a bootloader that misses the first syncs is synced with all the same;
+#   - --console prints what the program writes once the bootloader starts it,
+#     and ends when the port hangs up;
 #   - an image that reaches the bootloader, a part it does not know, a
 #     bootloader that never answers and a byte that reads back wrong are each
 #     refused with an error that names them, exit status 2.
@@ -85,12 +87,23 @@ python3 -c "import sys; d=open(sys.argv[1],'rb').read(); w=open(sys.argv[2],'rb'
 flash slow "--ignore-syncs 3" "$out/fw.hex"
 [ $frc -eq 0 ] && [ $src -eq 0 ] || fail "a bootloader that misses three syncs: embflash $frc"
 
+flash console "" "$out/fw.hex" --console 5
+[ $frc -eq 0 ] && [ $src -eq 0 ] || { cat "$out/console.log"; fail "console: embflash $frc, model $src"; }
+grep -q "hello from the sketch" "$out/console.log" || fail "console: $(cat "$out/console.log")"
+
 flash boot "" "$out/boot.hex"
 [ $frc -eq 2 ] || fail "an image over the bootloader was not refused"
 grep -q "where the bootloader begins" "$out/boot.log" || fail "boot: $(cat "$out/boot.log")"
 
-flash sig "--sig 1e9801" "$out/fw.hex"
-[ $frc -eq 2 ] && grep -q "signature 1E 98 01: not a part" "$out/sig.log" || fail "unknown part: $(cat "$out/sig.log")"
+# an ATmega1280 (the Mega 1280's ATmegaBOOT): 256-byte pages
+flash m1280 "--sig 1e9703 --flash 131072 --page 256" "$out/fw.hex" --verify
+[ $frc -eq 0 ] && [ $src -eq 0 ] || { cat "$out/m1280.log" "$out/m1280.srv"; fail "the 1280: embflash $frc, model $src"; }
+grep -q "wrote 2 pages of 256 bytes to the ATmega1280" "$out/m1280.log" || fail "the 1280: $(cat "$out/m1280.log")"
+python3 -c "import sys; d=open(sys.argv[1],'rb').read(); w=open(sys.argv[2],'rb').read(); sys.exit(d[:0x8000] != w)" \
+    "$out/m1280.dump" "$out/want" || fail "the 1280: the flash is not the image"
+
+flash sig "--sig 1e9502" "$out/fw.hex"
+[ $frc -eq 2 ] && grep -q "signature 1E 95 02: not a part" "$out/sig.log" || fail "unknown part: $(cat "$out/sig.log")"
 
 flash silent "--silent" "$out/fw.hex"
 [ $frc -eq 2 ] && grep -q "no STK500 bootloader answered" "$out/silent.log" || fail "silent: $(cat "$out/silent.log")"

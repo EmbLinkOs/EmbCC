@@ -26,8 +26,19 @@
 #define E2END        0x01FF
 #define E2PAGESIZE   4
 #define SPM_PAGESIZE 128
+#elif defined(__AVR_ATmega2560__) || defined(__AVR_ATmega1280__)
+#if defined(__AVR_ATmega2560__)
+#define FLASHEND     0x3FFFF
 #else
-#error "<avr/io.h>: EmbCC has the registers of atmega328p, atmega328, atmega168p and atmega168 (-mmcu=)"
+#define FLASHEND     0x1FFFF
+#endif
+#define RAMSTART     0x0200
+#define RAMEND       0x21FF
+#define E2END        0x0FFF
+#define E2PAGESIZE   8
+#define SPM_PAGESIZE 256
+#else
+#error "<avr/io.h>: EmbCC has the registers of atmega328p, atmega328, atmega168p, atmega168, atmega1280 and atmega2560 (-mmcu=)"
 #endif
 #define XRAMSIZE 0
 #define XRAMEND  RAMEND
@@ -43,12 +54,22 @@
 #elif defined(__AVR_ATmega168P__)
 #define SIGNATURE_1 0x94
 #define SIGNATURE_2 0x0B
+#elif defined(__AVR_ATmega2560__)
+#define SIGNATURE_1 0x98
+#define SIGNATURE_2 0x01
+#elif defined(__AVR_ATmega1280__)
+#define SIGNATURE_1 0x97
+#define SIGNATURE_2 0x03
 #else
 #define SIGNATURE_1 0x94
 #define SIGNATURE_2 0x06
 #endif
 
+#if defined(__AVR_ATmega2560__) || defined(__AVR_ATmega1280__)
+#include <avr/iomxx0_1.h>
+#else
 #include <avr/iomx8.h>
+#endif
 #include <avr/common.h>
 
 #endif /* _AVR_IO_H_ */

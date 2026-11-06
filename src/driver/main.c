@@ -127,7 +127,7 @@ static void print_usage(FILE *out)
             " [--link-script=FILE] -o IMAGE   (link)\n"
             "       embcc inspect STAGE SOURCE        (what each stage made)\n"
             "       embcc --version | --help[=gcc] | --explain=ID"
-            " | --reference=options|warnings|targets|man\n");
+            " | --reference=options|warnings|targets|boards|man\n");
 }
 
 /* Where this target's runtime and C library live, under the library
@@ -139,6 +139,11 @@ static void print_usage(FILE *out)
 static const char *lib_triple(void)
 {
     static char buf[128];
+#if FAMILY_BUILT(avr)
+    /* AVR's avr6 parts (the ATmega2560): a 3-byte PC, other frames */
+    if (target_avr_mcu() && target_avr_mcu()->pc_bytes == 3)
+        return "avr/avr6";
+#endif
     int abi = target_riscv_abi_flen(), noa = !target_riscv_atomics();
     if (!abi && !noa)
         return target_triple_now();
@@ -1348,7 +1353,7 @@ static int compile_and_link_(const char *in, const char *out)
             lo.script = avr_script;
         }
         if (!lo.data_base)
-            lo.data_base = 0x800100;     /* SRAM's start, every part here */
+            lo.data_base = 0x800000 + mcu->ramstart;     /* SRAM's start */
         if (!g_nostdlib && !g_nostartfiles) {
             snprintf(nm, sizeof nm, "crt%s.o", mcu->name);
             if (!paths_target_file(lib_triple(), nm, avr_crt,
@@ -1396,6 +1401,43 @@ static int compile_and_link_(const char *in, const char *out)
                 return 1;
             }
             have_pic32_crt = 1;
+        }
+    }
+    /* A board (--board=): its startup and runtime, after the part's, and its
+     * linker script when the link names none */
+    static char board_files[4][1024], board_script[1024];
+    int nboard_files = 0;
+    if (opts_board()) {
+        const struct embcc_board *bd = opts_board();
+        if (bd->script && !lo.script) {
+            if (!paths_target_file(lib_triple(), bd->script, board_script,
+                                   sizeof board_script)) {
+                fprintf(stderr, "embcc: error: no %s for --board=%s: the %s runtime is "
+                        "not built or not installed (make rt-embedded)\n", bd->script,
+                        bd->name, lib_triple());
+                return 1;
+            }
+            lo.script = board_script;
+        }
+        if (!g_nostdlib && !g_nostartfiles) {
+            const char *p = bd->startfiles;
+            while (*p && nboard_files < 4) {
+                const char *e = strchr(p, ' ');
+                size_t len = e ? (size_t)(e - p) : strlen(p);
+                char nm[64];
+                snprintf(nm, sizeof nm, "%.*s", (int)len, p);
+                if (!paths_target_file(lib_triple(), nm, board_files[nboard_files],
+                                       sizeof board_files[0])) {
+                    fprintf(stderr, "embcc: error: no %s for --board=%s: the %s runtime "
+                            "is not built or not installed (make rt-embedded)\n", nm,
+                            bd->name, lib_triple());
+                    return 1;
+                }
+                nboard_files++;
+                p += len;
+                while (*p == ' ')
+                    p++;
+            }
         }
     }
     lo.libdirs = g_libdirs;
@@ -1488,6 +1530,8 @@ static int compile_and_link_(const char *in, const char *out)
         inputs[n++] = pic32_crt;
     if (have_pic32_proc)
         inputs[n++] = pic32_proc;
+    for (int k = 0; k < nboard_files; k++)
+        inputs[n++] = board_files[k];
     if (in)
         inputs[n++] = obj;
     for (int k = 0; k < g_nlink_in; k++) {
@@ -2963,6 +3007,14 @@ static void incdirs_with_defaults(void)
             snprintf(avrinc, sizeof avrinc, "%s/avr", def[ndef - 1]);
             incdir_sys[nincdirs] = 1;
             incdirs[nincdirs++] = avrinc;
+        }
+        /* A board (--board=): its <board.h>, include/boards/DIR */
+        static char boardinc[1024];
+        if (opts_board() && ndef > 0 && nincdirs < MAX_INCDIRS) {
+            snprintf(boardinc, sizeof boardinc, "%s/boards/%s", def[ndef - 1],
+                     opts_board()->dir);
+            incdir_sys[nincdirs] = 1;
+            incdirs[nincdirs++] = boardinc;
         }
         /* A PIC32 part: EmbCC's XC32-compatible headers (<cp0defs.h>,
          * <sys/attribs.h>...), then the part's device pack, whose <xc.h>
@@ -7091,6 +7143,10 @@ static int embcc_main(int argc, char **argv)
         }
         if (strcmp(argv[i], "--reference=warnings") == 0)
             return diag_print_reference(stdout);
+        if (strcmp(argv[i], "--reference=boards") == 0) {
+            opts_print_boards(stdout);
+            return 0;
+        }
         if (strcmp(argv[i], "--reference=targets") == 0)
             return target_print_reference(stdout);
         if (strcmp(argv[i], "--reference=man") == 0) {
@@ -7782,6 +7838,10 @@ static int embcc_main(int argc, char **argv)
                    strcmp(argv[i], "-fno-unroll-loops") == 0) {
             /* GCC's names for the unroll pass (-funroll, -fno-unroll) */
             opt_set_pass("unroll", argv[i][2] != 'n');
+        } else if (strcmp(argv[i], "-funswitch-loops") == 0 ||
+                   strcmp(argv[i], "-fno-unswitch-loops") == 0) {
+            /* GCC's names for the unswitch pass */
+            opt_set_pass("unswitch", argv[i][2] != 'n');
         } else if (strcmp(argv[i], "-fcommon") == 0 ||
                    strcmp(argv[i], "-fno-common") == 0) {
             /* -fno-common is the default: a tentative definition is a

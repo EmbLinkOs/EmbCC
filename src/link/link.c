@@ -264,6 +264,12 @@ struct linker {
     Elf64_Addr stack_top;      /* RISC-V: the entry stub's sp, 0 = no stub */
     unsigned long csa_start, csa_end;   /* TriCore: the stub's CSA list */
     int stub_sec;              /* the stub's insecs index, or -1 */
+    /* AVR's avr6 trampolines (avr_tramp_scan): a `jmp` each, in low flash,
+     * for the functions a pointer names, which a 16-bit word address
+     * reaches only below 128 KiB */
+    struct tramp { struct object *o; const char *name; Elf64_Word symi;
+                   long long addend; } *tramps;
+    int ntramp, tramp_sec;
     unsigned char *stub;       /* its bytes, written after layout */
     long stub_size;
     Elf64_Addr lma_offset;     /* L2: p_paddr = p_vaddr - this (0 = paddr==vaddr) */
@@ -2056,6 +2062,15 @@ static void add_object(struct linker *l, struct object *o)
         l->eflags = l->eflags ? l->eflags : o->eflags;
     else if (o->machine == EM_AVR && !(l->eflags & EF_AVR_ARCH_MASK))
         l->eflags = o->eflags & EF_AVR_ARCH_MASK;
+    else if (o->machine == EM_AVR &&
+             ((l->eflags & EF_AVR_ARCH_MASK) == 6) != ((o->eflags & EF_AVR_ARCH_MASK) == 6))
+        /* avr6's calls push a 3-byte PC, the others' two: the two place a
+         * function's incoming arguments a byte apart */
+        die("%s: an AVR object for %s beside objects for %s: an avr6 part's "
+            "(ATmega2560's) frames differ from the others', build them all with "
+            "the same -mmcu=", o->name,
+            (o->eflags & EF_AVR_ARCH_MASK) == 6 ? "avr6" : "an avr5 core",
+            (l->eflags & EF_AVR_ARCH_MASK) == 6 ? "avr6" : "an avr5 core");
     else if (o->machine == EM_LOONGARCH)
         l->eflags = EF_LOONGARCH_ABI_SOFT_FLOAT | EF_LOONGARCH_OBJABI_V1;
     else if (o->machine == EM_TRICORE && !(l->eflags & EF_TRICORE_CORE_MASK))
@@ -6130,6 +6145,11 @@ static long pie_count(struct linker *l)
     return n;
 }
 
+#if FAMILY_BUILT(avr)
+static int avr_tramp_find(struct linker *l, struct object *o, Elf64_Word symi,
+                          long long A);
+#endif
+
 static void apply_relocs(struct linker *l, struct object *o)
 {
     for (int i = 0; i < o->nsh; i++) {
@@ -6285,6 +6305,21 @@ static void apply_relocs(struct linker *l, struct object *o)
 #endif
 #if FAMILY_BUILT(avr)
             if (o->machine == EM_AVR) {
+                if (l->tramp_sec >= 0 && S + (Elf64_Addr)A >= 0x20000 &&
+                    (type == R_AVR_16_PM || type == R_AVR_LO8_LDI_GS ||
+                     type == R_AVR_HI8_LDI_GS)) {
+                    int k = avr_tramp_find(l, o, symi, A);
+                    if (k < 0)
+                        internal_error("%s: a function pointer past 128 KiB with no "
+                                       "trampoline", o->name);
+                    S = l->insecs[l->tramp_sec].vaddr + 4 * (Elf64_Addr)k;
+                    A = 0;
+                    if (S + 4 > 0x20000)
+                        die("the trampolines end at 0x%llx, past the 128 KiB a "
+                            "function pointer reaches: the vectors and .data's "
+                            "stored image before them are too large",
+                            (unsigned long long)(S + 4));
+                }
                 apply_avr(l, o, type, loc, S, A, P);
                 continue;
             }
@@ -8955,6 +8990,100 @@ static int sg_cmp(const void *pa, const void *pb)
 
 /* A section of the linker's own, with no object behind it. */
 static int add_synth(struct linker *l, const char *name, long size, int align,
+                     int osec, unsigned char *data);
+
+#if FAMILY_BUILT(avr)
+/* AVR avr6 (the ATmega2560): a function pointer is a 16-bit word address,
+ * which reaches the first 128 KiB of its 256. As avr-ld does, a pointer
+ * to a function past that goes through a trampoline: a `jmp` to it in low
+ * flash (.trampolines, after the vectors). Before layout every function a
+ * pointer names -- R_AVR_16_PM in data, the _GS ldi pair in code -- gets
+ * one, since where each lands is not known yet; after it, the pointers to
+ * functions below 128 KiB stay direct. */
+static int avr_tramp_find(struct linker *l, struct object *o, Elf64_Word symi,
+                          long long A)
+{
+    Elf64_Sym *sy = &o->syms[symi];
+    const char *name = ELF64_ST_BIND(sy->st_info) == STB_LOCAL ? NULL
+                                                               : o->symstr + sy->st_name;
+    for (int k = 0; k < l->ntramp; k++) {
+        struct tramp *t = &l->tramps[k];
+        if (t->addend == A && (name ? t->name && !strcmp(t->name, name)
+                                    : !t->name && t->o == o && t->symi == symi))
+            return k;
+    }
+    return -1;
+}
+
+static void avr_tramp_scan(struct linker *l)
+{
+    if (l->machine != EM_AVR || (l->eflags & EF_AVR_ARCH_MASK) != 6)
+        return;
+    int cap = 0;
+    for (int i = 0; i < l->nobj; i++) {
+        struct object *o = l->objs[i];
+        for (int k = 0; k < o->nsh; k++) {
+            Elf64_Shdr *rsh = sh_at(o, k);
+            if (rsh->sh_type != SHT_RELA)
+                continue;
+            int target = (int)rsh->sh_info;
+            if (target <= 0 || target >= o->nsh || o->sec_out[target] < 0)
+                continue;
+            const unsigned char *rb = o->buf + rsh->sh_offset;
+            long m = (long)(rsh->sh_size / sizeof(Elf32_Rela));
+            for (long j = 0; j < m; j++) {
+                const Elf32_Rela *r = (const Elf32_Rela *)(rb + j * (long)sizeof(Elf32_Rela));
+                Elf64_Word type = r->r_info & 0xff, symi = r->r_info >> 8;
+                if (type != R_AVR_16_PM && type != R_AVR_LO8_LDI_GS &&
+                    type != R_AVR_HI8_LDI_GS)
+                    continue;
+                if (avr_tramp_find(l, o, symi, r->r_addend) >= 0)
+                    continue;
+                if (l->ntramp == cap)
+                    l->tramps = xrealloc(l->tramps, (size_t)(cap = cap ? 2 * cap : 16) *
+                                                    sizeof *l->tramps);
+                Elf64_Sym *sy = &o->syms[symi];
+                struct tramp *t = &l->tramps[l->ntramp++];
+                t->o = o;
+                t->symi = symi;
+                t->addend = r->r_addend;
+                t->name = ELF64_ST_BIND(sy->st_info) == STB_LOCAL ? NULL
+                                                                  : o->symstr + sy->st_name;
+            }
+        }
+    }
+    if (!l->ntramp)
+        return;
+    unsigned char *b = xcalloc((size_t)l->ntramp, 4);
+    for (int k = 0; k < l->ntramp; k++) {
+        b[4 * k] = 0x0c;                /* jmp: 0x940c, the address after layout */
+        b[4 * k + 1] = 0x94;
+    }
+    l->tramp_sec = add_synth(l, ".trampolines", 4L * l->ntramp, 2, OSEC_VECTORS, b);
+}
+
+/* After layout: each trampoline's jmp, and S + A of a pointer through one
+ * when its function is past what a word address reaches */
+static void avr_tramp_fill(struct linker *l)
+{
+    if (l->tramp_sec < 0)
+        return;
+    struct insec *ts = &l->insecs[l->tramp_sec];
+    for (int k = 0; k < l->ntramp; k++) {
+        int uw;
+        Elf64_Addr S = reloc_symval(l, l->tramps[k].o, l->tramps[k].symi, &uw);
+        avr_patch_call_at((unsigned char *)ts->data + 4 * k,
+                          (long)(S + (Elf64_Addr)l->tramps[k].addend));
+    }
+}
+
+#else
+/* no AVR in this linker: add_object refused its objects */
+static void avr_tramp_scan(struct linker *l) { (void)l; }
+static void avr_tramp_fill(struct linker *l) { (void)l; }
+#endif
+
+static int add_synth(struct linker *l, const char *name, long size, int align,
                      int osec, unsigned char *data)
 {
     struct insec *s;
@@ -9459,6 +9588,7 @@ int embld_link(const char **inputs, int ninputs, const char *out,
     l.have_base = opts && opts->have_base;
     l.stack_top = (opts && opts->have_stack) ? opts->stack_top : 0;
     l.stub_sec = -1;
+    l.tramp_sec = -1;
     l.gc_sections = opts && opts->gc_sections;
     l.print_gc = opts && opts->print_gc_sections;
     if (opts) {
@@ -9532,6 +9662,7 @@ int embld_link(const char **inputs, int ninputs, const char *out,
             "collected to print");
 
     if (sc) {
+        avr_tramp_scan(&l);         /* before layout: they take room */
         ls_layout(&l, sc, opts->orphan_mode);
         finalize_symbols(&l);
         cmse_fill(&l);
@@ -9596,6 +9727,7 @@ int embld_link(const char **inputs, int ninputs, const char *out,
         }
         merge_eh_fix(&l);
         tls_got_fill(&l);
+        avr_tramp_fill(&l);
         for (int i = 0; i < l.nobj; i++)
             apply_relocs(&l, l.objs[i]);
         if (opts->map_file)
@@ -9666,6 +9798,7 @@ int embld_link(const char **inputs, int ninputs, const char *out,
         }
         add_entry_stub(&l);
     }
+    avr_tramp_scan(&l);
 
     if (l.pie) {
         /* -pie: room for every RELATIVE the inputs may need, and the
@@ -9733,6 +9866,7 @@ int embld_link(const char **inputs, int ninputs, const char *out,
 
     if (l.stub_sec >= 0)
         fill_entry_stub(&l, e->value);
+    avr_tramp_fill(&l);
 
     merge_eh_fix(&l);
     tls_got_fill(&l);

@@ -35,6 +35,7 @@ extern struct opt_did g_did;
 /* Whether opt_run was asked for size. A global in the style of g_pass: the
  * inliner's decision is three call levels below opt_run. */
 extern int g_opt_size;
+extern int g_opt_max;       /* -O3 (opt.c), and not in a cold function */
 
 struct retarget { int from, to; };
 
@@ -355,6 +356,12 @@ int pass_ivsr(struct ir_func *fn);
 
 /* unroll.c */
 int pass_unroll(struct ir_func *fn);
+
+/* unswitch.c */
+int pass_unswitch(struct ir_func *fn);
+
+/* ipcp.c */
+int pass_ipcp(struct ir_unit *iu);
 
 /* swthread.c */
 int pass_swthread(struct ir_func *fn);

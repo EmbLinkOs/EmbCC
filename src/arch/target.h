@@ -1041,8 +1041,13 @@ struct avr_mcu {
     const char *name, *macro;
     unsigned flash, ramend, eeprom;
     int vectors;
+    unsigned ramstart;      /* SRAM's first address: 0x100, or 0x200 past
+                             * the extended I/O of the larger parts */
+    int pc_bytes;           /* what a call pushes: 2, or 3 on avr6 */
+    int arch;               /* __AVR_ARCH__: 5, 51 or 6 */
 };
 const struct avr_mcu *target_avr_mcu(void);
+void target_avr_set_arch(int arch);     /* e_flags' core: 5, 51 or 6 */
 
 /* The PIC32 part (--mcu= on mipsel), as XC32 names it (32MZ2048EFH100),
  * and the device pack named for it (--dfp=); NULL when none. */

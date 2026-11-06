@@ -2304,7 +2304,10 @@ startup, as BCC's provides.
 | `avr` | `avr-none-elf`, `avr-elf`, `avr-unknown-none` |
 
 The code is for the ATmega328P's core (the AVR5 architecture, as on
-the Arduino Uno), and without `--mcu=` the part is the ATmega328P.
+the Arduino Uno), and without `--mcu=` the part is the ATmega328P. The
+Arduino Mega's parts are the same core with more of everything: the
+ATmega1280 (avr51) and the ATmega2560 (avr6, whose calls push a 3-byte
+PC).
 
 ### Options
 
@@ -2312,7 +2315,8 @@ the Arduino Uno), and without `--mcu=` the part is the ATmega328P.
 |---|---|
 | `--mcu=atmega328p`, `atmega328`, `atmega168p`, `atmega168` | Selects the part: its predefined macro (`__AVR_ATmega168__` and so on) replaces `__AVR_ATmega328P__`. These four are the avr5 parts of the ATmega328P's datasheet family; they differ only in their memories. |
 | `--mcu=atmega48`, `atmega88` and their `a`, `p`, `pa` forms | Refused: `--mcu=atmega88 is not supported: the atmega88 is an avr4 part, with no jmp or call instruction, and EmbCC's AVR code calls with `call` ...` |
-| `--mcu=` any other part | Refused: `--mcu=atmega2560 is not supported: EmbCC's AVR backend generates code for the ATmega328P's avr5 core, and knows the memories and vectors of atmega328p, atmega328, atmega168p and atmega168 alone` |
+| `--mcu=atmega1280`, `atmega2560` | The Arduino Mega's parts: clang's predefines for them (`__AVR_ARCH__` 51 and 6, `__AVR_HAVE_ELPM__`, and on the 2560 `__AVR_3_BYTE_PC__` and `__AVR_HAVE_EIJMP_EICALL__`), their registers (`<avr/iomxx0_1.h>`), 57 vectors, and the core in each object's `e_flags`. The 2560's code and library are built for its 3-byte PC (`avr/avr6`): avr-gcc's code and EmbCC's call each other on it. |
+| `--mcu=` any other part | Refused: `--mcu=atmega32u4 is not supported: EmbCC's AVR backend knows the memories and vectors of atmega328p, atmega328, atmega168p, atmega168, atmega1280 and atmega2560 alone` |
 | `-mrelax`, `-mno-relax` | Accepted, and declined: EmbLD does not shorten `call` and `jmp` to `rcall` and `rjmp`, so the image is the same program, larger than avr-gcc's relaxed one. |
 | `-mcall-prologues`, `-mno-call-prologues` | Accepted, and declined: every prologue and epilogue is written in its function rather than shared through `__prologue_saves__`. The calling convention is the same either way. |
 | `-mdouble=32`, `-mlong-double=32` | Accepted: what EmbCC does. |
@@ -2323,6 +2327,16 @@ the Arduino Uno), and without `--mcu=` the part is the ATmega328P.
 |---|---|---|---|---|
 | ATmega328P, ATmega328 | 32 KB | 2 KB, `0x0100`-`0x08FF` | 1 KB | 26 |
 | ATmega168P, ATmega168 | 16 KB | 1 KB, `0x0100`-`0x04FF` | 512 bytes | 26 |
+| ATmega1280 | 128 KB | 8 KB, `0x0200`-`0x21FF` | 4 KB | 57 |
+| ATmega2560 | 256 KB | 8 KB, `0x0200`-`0x21FF` | 4 KB | 57 |
+
+On the ATmega2560 a function pointer is a 16-bit word address, which
+reaches the first 128 KiB of flash. A pointer to a function past that goes
+through a trampoline, a `jmp` that `embld` puts in `.trampolines` after the
+vectors, as avr-ld does. The Mega parts' linker script stores `.data`'s
+image right after the vectors, so the startup's `lpm` reaches it however
+large the program is. `pgm_read_byte` reaches the first 64 KiB, as
+avr-libc's does, and PROGMEM is placed there.
 
 `--mcu=` on another target is refused: `-mmcu=atmega328p is an AVR
 option, and the target is x86_64-elf (--target=avr)`.

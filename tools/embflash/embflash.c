@@ -44,6 +44,13 @@
  * (never over the bootloader), --verify reads every page back, and leaving
  * programming mode starts the program.
  *
+ * --esp serial:DEV[@BAUD] programs an Espressif part through its ROM's
+ * serial download mode, the protocol esptool speaks: a development board's
+ * DTR and RTS put the chip into the ROM (IO0 low through a reset), the chip
+ * is named by its magic register, the image's bytes go to flash at their
+ * addresses (a raw .bin at --base, the offset the ROM boots from), each
+ * written range is checked by the ROM's MD5, and an EN pulse starts it.
+ *
  * ISO C for everything but the transports, which are POSIX sockets and
  * termios; docs/manual/tools/embflash.md is the reference. Real probes are
  * reached through their GDB servers -- this program has been tested against
@@ -67,6 +74,8 @@
 #include <unistd.h>
 #include <netdb.h>
 #include <termios.h>
+#include <time.h>
+#include <dirent.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <netinet/in.h>
@@ -409,7 +418,49 @@ static int g_fd = -1;
 static int g_timeout_ms = 10000;
 static int g_detached;              /* D answered: the server may hang up */
 
+/* what has been read and not yet taken (a rate change drops it), and
+ * whether a hang-up ends the console rather than the run */
+static unsigned char g_rx[4096];
+static size_t g_rx_have, g_rx_at;
+static int g_hangup_ends;
+
 #ifdef EMBFLASH_POSIX
+/* The serial line's rate. A rate the host cannot set is an error: a
+ * quiet 115200 in its place talks to the part at the wrong speed. */
+static void line_rate(long baud)
+{
+    struct termios tio;
+    if (tcgetattr(g_fd, &tio) != 0)
+        die("cannot set the serial line's rate: %s", strerror(errno));
+    speed_t sp = B115200;
+#ifdef __APPLE__
+    sp = (speed_t)baud;                 /* Darwin's speed_t is the rate itself */
+#else
+    switch (baud) {
+    case 9600: sp = B9600; break;
+    case 19200: sp = B19200; break;
+    case 38400: sp = B38400; break;
+    case 57600: sp = B57600; break;
+    case 115200: sp = B115200; break;
+#ifdef B230400
+    case 230400: sp = B230400; break;
+#endif
+#ifdef B460800
+    case 460800: sp = B460800; break;
+#endif
+#ifdef B921600
+    case 921600: sp = B921600; break;
+#endif
+    default:
+        die("%ld baud: not a rate this host's serial driver is given (9600 to 921600)", baud);
+    }
+#endif
+    cfsetispeed(&tio, sp);
+    cfsetospeed(&tio, sp);
+    if (tcsetattr(g_fd, TCSANOW, &tio) != 0)
+        die("the serial line does not take %ld baud: %s", baud, strerror(errno));
+}
+
 static void open_target(const char *t)
 {
     /* a server that hangs up is reported (tx sees EPIPE), not a silent
@@ -434,7 +485,13 @@ static void open_target(const char *t)
         snprintf(dev, sizeof dev, "%s", t + 7);
         long baud = 115200;
         char *at = strrchr(dev, '@');
-        if (at) { *at = 0; baud = strtol(at + 1, NULL, 10); }
+        if (at) {
+            *at = 0;
+            char *end;
+            baud = strtol(at + 1, &end, 10);
+            if (*end || baud <= 0)
+                die("%s: the baud rate after @ is a number", t);
+        }
         g_fd = open(dev, O_RDWR | O_NOCTTY);
         if (g_fd < 0)
             die("cannot open %s: %s", dev, strerror(errno));
@@ -449,12 +506,8 @@ static void open_target(const char *t)
             tio.c_cflag |= CS8 | CREAD | CLOCAL;
             tio.c_cc[VMIN] = 1;
             tio.c_cc[VTIME] = 0;
-            speed_t sp = baud == 9600 ? B9600 : baud == 19200 ? B19200
-                       : baud == 38400 ? B38400 : baud == 57600 ? B57600
-                       : B115200;
-            cfsetispeed(&tio, sp);
-            cfsetospeed(&tio, sp);
             tcsetattr(g_fd, TCSANOW, &tio);
+            line_rate(baud);
         }
         return;
     }
@@ -501,22 +554,22 @@ static void tx(const char *p, size_t n)
     }
 }
 
-/* one byte, or -1 after the timeout */
+/* one byte, or -1 after the timeout (-2 at a hang-up, under g_hangup_ends) */
 static int rx_byte(void)
 {
-    static unsigned char buf[4096];
-    static size_t have, at;
-    if (at < have)
-        return buf[at++];
+    if (g_rx_at < g_rx_have)
+        return g_rx[g_rx_at++];
     struct pollfd pf = { g_fd, POLLIN, 0 };
     int r = poll(&pf, 1, g_timeout_ms);
     if (r <= 0)
         return -1;
-    ssize_t n = read(g_fd, buf, sizeof buf);
+    ssize_t n = read(g_fd, g_rx, sizeof g_rx);
+    if (n <= 0 && g_hangup_ends)
+        return -2;
     if (n <= 0)
         die("the server closed the connection");
-    have = (size_t)n; at = 0;
-    return buf[at++];
+    g_rx_have = (size_t)n; g_rx_at = 0;
+    return g_rx[g_rx_at++];
 }
 #else
 static void open_target(const char *t)
@@ -526,6 +579,44 @@ static void open_target(const char *t)
 static void tx(const char *p, size_t n) { (void)p; (void)n; }
 static int rx_byte(void) { return -1; }
 #endif
+
+/* milliseconds on a clock that only goes forward */
+static long long now_ms(void)
+{
+#ifdef EMBFLASH_POSIX
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+#else
+    return 0;
+#endif
+}
+
+/* What the program prints, read through the same open port for SECONDS:
+ * reopening it would pulse the board's auto-reset and start the chip over.
+ * A port that hangs up ends it. */
+static void serial_console(int seconds)
+{
+    int saved = g_timeout_ms;
+    g_timeout_ms = 200;
+    g_hangup_ends = 1;
+    printf("embflash: the console, %d s\n", seconds);
+    fflush(stdout);
+    for (long long until = now_ms() + (long long)seconds * 1000; now_ms() < until; ) {
+        int c = rx_byte();
+        if (c == -2)
+            break;
+        if (c < 0)
+            continue;
+        putchar(c);
+        if (c == '\n')
+            fflush(stdout);
+    }
+    fflush(stdout);
+    g_hangup_ends = 0;
+    g_timeout_ms = saved;
+}
+
 
 /* ==== the GDB remote serial protocol ======================================
  *
@@ -975,7 +1066,29 @@ static const struct avr_part g_avr_parts[] = {
     { "ATmega328P",  { 0x1E, 0x95, 0x0F }, 32768, 128, 512 },
     { "ATmega328",   { 0x1E, 0x95, 0x14 }, 32768, 128, 512 },
     { "ATmega328PB", { 0x1E, 0x95, 0x16 }, 32768, 128, 512 },
+    /* the Arduino Megas': the 1280's ATmegaBOOT (STK500, 57600) and the
+     * 2560's stk500v2 bootloader reserve 4 and 8 KiB */
+    { "ATmega1280",  { 0x1E, 0x97, 0x03 }, 131072, 256, 4096 },
+    { "ATmega2560",  { 0x1E, 0x98, 0x01 }, 262144, 256, 8192 },
 };
+
+/* every page an image touches, padded with the erased 0xff: page N's
+ * bytes into page; 0 for a page it does not touch */
+static int image_page(const struct avr_part *part, u32 pg, unsigned char *page)
+{
+    u64 lo = (u64)pg * part->page, hi = lo + part->page;
+    int touched = 0;
+    memset(page, 0xFF, part->page);
+    for (int k = 0; k < g_nch; k++) {
+        u64 a = g_ch[k].addr, e = a + g_ch[k].len;
+        if (e <= lo || a >= hi)
+            continue;
+        u64 s = a > lo ? a : lo, t = e < hi ? e : hi;
+        memcpy(page + (s - lo), g_ch[k].b + (s - a), (size_t)(t - s));
+        touched = 1;
+    }
+    return touched;
+}
 
 /* the reply to a command: INSYNC, n bytes into out, OK; 0 when it is not */
 static int stk_reply(unsigned char *out, size_t n)
@@ -1019,7 +1132,243 @@ static void stk_reset(void)
 static void stk_reset(void) {}
 #endif
 
-static void stk500_flash(const char *target, int verify, int no_reset)
+/* serial:auto, or serial: with no device (serial:@BAUD too): the board's
+ * USB serial port, found in /dev by the names its bridge takes. The tiers
+ * are tried in order, and one with a single port is the answer: for an
+ * STK500 bootloader, an Arduino's ATmega16U2 (usbmodem, ttyACM) before the
+ * CH340 and CP210x of the clones; for an ESP32's ROM, those bridges before
+ * a native USB port. Two in one tier are named, not guessed between. */
+static const char *serial_auto(const char *target, int esp)
+{
+    if (strncmp(target, "serial:", 7) != 0)
+        return target;
+    const char *dev = target + 7, *at = strchr(dev, '@');
+    size_t dn = at ? (size_t)(at - dev) : strlen(dev);
+    if (!(dn == 0 || (dn == 4 && !strncmp(dev, "auto", 4))))
+        return target;
+#ifdef EMBFLASH_POSIX
+    static const char *const stk[] = { "cu.usbmodem", "ttyACM", NULL,
+                                       "cu.wchusbserial", "cu.usbserial", "cu.SLAB_USBtoUART",
+                                       "ttyUSB", NULL, NULL };
+    static const char *const espt[] = { "cu.usbserial", "cu.SLAB_USBtoUART", "cu.wchusbserial",
+                                        "ttyUSB", NULL, "cu.usbmodem", "ttyACM", NULL, NULL };
+    const char *const *tier = esp ? espt : stk;
+    char seen[2048] = "";
+    const char *dir = getenv("EMBFLASH_DEV");     /* the tests' stand-in for /dev */
+    if (!dir || !*dir)
+        dir = "/dev";
+    while (*tier) {
+        char found[8][600];                 /* a directory of 300, a name of 255 */
+        int n = 0;
+        DIR *d = opendir(dir);
+        struct dirent *e;
+        while (d && (e = readdir(d)) != NULL)
+            for (const char *const *t = tier; *t; t++)
+                if (!strncmp(e->d_name, *t, strlen(*t)) && n < 8)
+                    snprintf(found[n++], sizeof found[0], "%.300s/%.255s", dir, e->d_name);
+        if (d)
+            closedir(d);
+        if (n == 1) {
+            static char out[680];
+            snprintf(out, sizeof out, "serial:%s%.64s", found[0], at ? at : "");
+            printf("embflash: the board's port: %s\n", found[0]);
+            return out;
+        }
+        for (int k = 0; k < n; k++) {      /* the names, for the message */
+            size_t l = strlen(seen), m = strlen(found[k]);
+            if (l + m + 2 <= sizeof seen) {
+                seen[l] = ' ';
+                memcpy(seen + l + 1, found[k], m + 1);
+            }
+        }
+        if (n > 1)
+            die("%s: %d ports could be the board's (%s): name it, serial:DEV", target, n, seen + 1);
+        while (*tier)
+            tier++;
+        tier++;
+    }
+    die("%s: no USB serial port found in %s: is the board plugged in? (or name it, "
+        "serial:DEV)", target, dir);
+#endif
+    return target;
+}
+
+/* ---- STK500 version 2 ----------------------------------------------------
+ *
+ * The Arduino Mega 2560's bootloader's protocol (Atmel's AVR068): a
+ * message is MESSAGE_START (0x1b), a sequence number, a 16-bit size (high
+ * byte first), TOKEN (0x0e), the body, and the xor of all of it; the
+ * answer echoes the number, its body the command and a status (0 OK)
+ * first. An address is a word address, high byte first, bit 31 set for
+ * one past 64K words, as avrdude sends it. */
+#define V2_START        0x1B
+#define V2_TOKEN        0x0E
+#define V2_SIGN_ON      0x01
+#define V2_LOAD_ADDRESS 0x06
+#define V2_ENTER_PROG   0x10
+#define V2_LEAVE_PROG   0x11
+#define V2_PROG_FLASH   0x13
+#define V2_READ_FLASH   0x14
+#define V2_READ_SIG     0x1B
+
+static unsigned char g_v2seq;
+
+/* the answer's body into out (at most cap): its length, or -1 when none
+ * comes, or a broken one */
+static long v2_msg(const unsigned char *body, size_t n, unsigned char *out, size_t cap)
+{
+    unsigned char hdr[5] = { V2_START, g_v2seq, (unsigned char)(n >> 8), (unsigned char)n,
+                             V2_TOKEN };
+    unsigned char sum = 0;
+    for (int i = 0; i < 5; i++)
+        sum ^= hdr[i];
+    for (size_t i = 0; i < n; i++)
+        sum ^= body[i];
+    tx((const char *)hdr, 5);
+    tx((const char *)body, n);
+    tx((const char *)&sum, 1);
+    long long until = now_ms() + g_timeout_ms;
+    for (;;) {
+        int c = rx_byte();
+        if (c < 0 || now_ms() > until)
+            return -1;
+        if (c != V2_START)
+            continue;                   /* a byte of something else */
+        int seq = rx_byte(), hi = rx_byte(), lo = rx_byte(), tok = rx_byte();
+        if (seq < 0 || hi < 0 || lo < 0 || tok < 0)
+            return -1;
+        if (seq != g_v2seq || tok != V2_TOKEN)
+            continue;
+        size_t len = (size_t)hi << 8 | (size_t)lo;
+        unsigned char x = (unsigned char)(V2_START ^ seq ^ hi ^ lo ^ tok);
+        for (size_t i = 0; i < len; i++) {
+            int d = rx_byte();
+            if (d < 0)
+                return -1;
+            x ^= (unsigned char)d;
+            if (i < cap)
+                out[i] = (unsigned char)d;
+        }
+        int ck = rx_byte();
+        if (ck < 0 || (unsigned char)ck != x)
+            return -1;
+        g_v2seq++;
+        return (long)len;
+    }
+}
+
+/* a command whose answer must be OK: its body (at most cap) into out */
+static long v2_cmd(const unsigned char *body, size_t n, unsigned char *out, size_t cap,
+                   const char *what)
+{
+    unsigned char a[320];
+    long len = v2_msg(body, n, a, sizeof a);
+    if (len < 0)
+        die("%s: the bootloader did not answer", what);
+    if (len < 2 || a[0] != body[0])
+        die("%s: the bootloader answered another command", what);
+    if (a[1] != 0)
+        die("%s: the bootloader answered status 0x%02x", what, a[1]);
+    if (out)
+        memcpy(out, a, (size_t)len < cap ? (size_t)len : cap);
+    return len;
+}
+
+static void v2_load(u64 byte_addr)
+{
+    u32 w = (u32)(byte_addr / 2);
+    if (w >= 0x10000)
+        w |= 0x80000000u;
+    unsigned char la[5] = { V2_LOAD_ADDRESS, (unsigned char)(w >> 24), (unsigned char)(w >> 16),
+                            (unsigned char)(w >> 8), (unsigned char)w };
+    v2_cmd(la, sizeof la, NULL, 0, "load address");
+}
+
+static void stk500v2_flash(const char *target, int verify, int no_reset, int console)
+{
+    if (strncmp(target, "serial:", 7) != 0)
+        die("--stk500v2 %s: the bootloader is reached on a serial line, serial:DEV[@BAUD]",
+            target);
+    open_target(target);
+    if (!no_reset)
+        stk_reset();
+    /* sign on, while the bootloader starts listening */
+    int saved = g_timeout_ms, on = 0;
+    g_timeout_ms = 300;
+    for (int attempt = 0; attempt < 10 && !on; attempt++) {
+        static const unsigned char so[] = { V2_SIGN_ON };
+        unsigned char a[32];
+        long n = v2_msg(so, 1, a, sizeof a);
+        on = n >= 2 && a[0] == V2_SIGN_ON && a[1] == 0;
+#ifdef EMBFLASH_POSIX
+        if (!on)
+            tcflush(g_fd, TCIFLUSH);
+#endif
+    }
+    g_timeout_ms = saved;
+    if (!on)
+        die("%s: no STK500v2 bootloader answered (is it the board's port, and at this "
+            "baud rate?)", target + 7);
+    unsigned char ep[12] = { V2_ENTER_PROG, 200, 100, 25, 32, 0, 0x53, 3, 0xAC, 0x53, 0, 0 };
+    v2_cmd(ep, sizeof ep, NULL, 0, "enter programming mode");
+    unsigned char sig[3];
+    for (int i = 0; i < 3; i++) {
+        unsigned char rs[6] = { V2_READ_SIG, 4, 0x30, 0, (unsigned char)i, 0 }, a[4];
+        v2_cmd(rs, sizeof rs, a, sizeof a, "the signature request");
+        sig[i] = a[2];
+    }
+    const struct avr_part *part = NULL;
+    for (size_t i = 0; i < sizeof g_avr_parts / sizeof g_avr_parts[0]; i++)
+        if (!memcmp(g_avr_parts[i].sig, sig, 3))
+            part = &g_avr_parts[i];
+    if (!part)
+        die("signature %02X %02X %02X: not a part this programmer knows", sig[0], sig[1], sig[2]);
+    u32 app = part->flash - part->boot;
+    for (int k = 0; k < g_nch; k++)
+        if (g_ch[k].addr + g_ch[k].len > app)
+            die("the image reaches 0x%llx; the %s's application flash ends at 0x%x, where "
+                "the bootloader begins", g_ch[k].addr + g_ch[k].len, part->name, app);
+    u32 npages = app / part->page, written = 0;
+    unsigned char *page = xmalloc(part->page), *msg = xmalloc(16 + part->page);
+    for (int pass = 0; pass < (verify ? 2 : 1); pass++)
+        for (u32 pg = 0; pg < npages; pg++) {
+            if (!image_page(part, pg, page))
+                continue;
+            u64 lo = (u64)pg * part->page;
+            v2_load(lo);
+            if (pass == 0) {
+                unsigned char h[10] = { V2_PROG_FLASH, (unsigned char)(part->page >> 8),
+                                        (unsigned char)part->page, 0xC1, 10, 0x40, 0x4C, 0x20,
+                                        0, 0 };
+                memcpy(msg, h, 10);
+                memcpy(msg + 10, page, part->page);
+                v2_cmd(msg, 10 + part->page, NULL, 0, "a page");
+                written++;
+            } else {
+                unsigned char rd[4] = { V2_READ_FLASH, (unsigned char)(part->page >> 8),
+                                        (unsigned char)part->page, 0x20 };
+                long n = v2_cmd(rd, sizeof rd, msg, 16 + part->page, "read page");
+                if (n < (long)part->page + 2)
+                    die("read page at 0x%llx: %ld bytes in the answer", lo, n);
+                for (u32 i = 0; i < part->page; i++)
+                    if (msg[2 + i] != page[i])
+                        die("verification failed at 0x%llx: 0x%02x read, 0x%02x written",
+                            lo + i, msg[2 + i], page[i]);
+            }
+        }
+    free(page);
+    free(msg);
+    static const unsigned char lv[3] = { V2_LEAVE_PROG, 1, 1 };
+    v2_cmd(lv, sizeof lv, NULL, 0, "leave programming mode");
+    printf("embflash: wrote %u page%s of %u bytes to the %s through its STK500v2 bootloader\n",
+           written, written == 1 ? "" : "s", part->page, part->name);
+    if (verify)
+        printf("embflash: verified\n");
+    if (console)                        /* the bootloader starts the program on leaving */
+        serial_console(console);
+}
+
+static void stk500_flash(const char *target, int verify, int no_reset, int console)
 {
     if (strncmp(target, "serial:", 7) != 0)
         die("--stk500 %s: the bootloader is reached on a serial line, serial:DEV[@BAUD]", target);
@@ -1068,18 +1417,8 @@ static void stk500_flash(const char *target, int verify, int no_reset)
     unsigned char *back = xmalloc(part->page);
     for (int pass = 0; pass < (verify ? 2 : 1); pass++) {
         for (u32 pg = 0; pg < npages; pg++) {
-            u64 lo = (u64)pg * part->page, hi = lo + part->page;
-            int touched = 0;
-            memset(page, 0xFF, part->page);
-            for (int k = 0; k < g_nch; k++) {
-                u64 a = g_ch[k].addr, e = a + g_ch[k].len;
-                if (e <= lo || a >= hi)
-                    continue;
-                u64 s = a > lo ? a : lo, t = e < hi ? e : hi;
-                memcpy(page + (s - lo), g_ch[k].b + (s - a), (size_t)(t - s));
-                touched = 1;
-            }
-            if (!touched)
+            u64 lo = (u64)pg * part->page;
+            if (!image_page(part, pg, page))
                 continue;
             u32 word = (u32)(lo / 2);
             unsigned char la[4] = { STK_LOAD_ADDR, (unsigned char)(word & 0xFF),
@@ -1114,6 +1453,1083 @@ static void stk500_flash(const char *target, int verify, int no_reset)
            written == 1 ? "" : "s", part->page, part->name);
     if (verify)
         printf("embflash: verified\n");
+    if (console)                        /* Optiboot starts the program on leaving */
+        serial_console(console);
+}
+
+/* ==== the Espressif ROM's serial download mode ============================
+ *
+ * SLIP frames (0xC0 ends one; 0xDB 0xDC and 0xDB 0xDD escape 0xC0 and 0xDB)
+ * carry a request { 0, cmd, u16 size, u32 checksum, data } and a reply { 1,
+ * cmd, u16 size, u32 value, data, status }; the ESP32 ROM's status is four
+ * bytes, the first 0 for success, the second the error. Every field is
+ * little-endian. Flash is written in blocks of 0x400 bytes after an erase of
+ * the range (FLASH_BEGIN); a block's checksum is 0xEF xored with its bytes. */
+#define ESP_FLASH_BEGIN 0x02
+#define ESP_FLASH_DATA  0x03
+#define ESP_SYNC        0x08
+#define ESP_READ_REG    0x0A
+#define ESP_SPI_PARAMS  0x0B
+#define ESP_SPI_ATTACH  0x0D
+#define ESP_FLASH_MD5   0x13
+#define ESP_CHANGE_BAUD 0x0F
+#define ESP_READ_FLASH_SLOW 0x0E
+#define ESP_READ_BLOCK  64              /* the ROM's most per READ_FLASH_SLOW */
+#define ESP_ROM_BAUD    115200          /* the ROM's, at reset */
+#define ESP_FAST_BAUD   460800          /* esptool's default once connected */
+#define ESP_MEM_BEGIN   0x05
+#define ESP_MEM_END     0x06
+#define ESP_MEM_DATA    0x07
+#define ESP_BLOCK       0x400
+#define ESP_RAM_BLOCK   0x1800          /* esptool's, the ROM's buffer */
+
+struct esp_chip { const char *name; u32 magic; u32 flash_size; };
+static const struct esp_chip g_esp_chips[] = {
+    /* the value of the chip-detect register, 0x40001000 */
+    { "ESP32", 0x00f01d83u, 4u << 20 },
+};
+
+static void esp_send(int cmd, const unsigned char *data, size_t n, u32 checksum)
+{
+    unsigned char hdr[8] = { 0, (unsigned char)cmd, (unsigned char)(n & 0xFF),
+                             (unsigned char)(n >> 8), (unsigned char)(checksum & 0xFF),
+                             (unsigned char)(checksum >> 8), (unsigned char)(checksum >> 16),
+                             (unsigned char)(checksum >> 24) };
+    unsigned char *out = xmalloc(2 * (n + 8) + 2);
+    size_t k = 0;
+    out[k++] = 0xC0;
+    for (size_t i = 0; i < n + 8; i++) {
+        unsigned char c = i < 8 ? hdr[i] : data[i - 8];
+        if (c == 0xC0) { out[k++] = 0xDB; out[k++] = 0xDC; }
+        else if (c == 0xDB) { out[k++] = 0xDB; out[k++] = 0xDD; }
+        else out[k++] = c;
+    }
+    out[k++] = 0xC0;
+    tx((const char *)out, k);
+    free(out);
+}
+
+/* the next frame's bytes, unescaped, into buf (at most cap); its length, or
+ * -1 when none arrives within the timeout -- the whole frame's, not each
+ * byte's: a program that prints without pause, as one does when the reset
+ * into the ROM did not take, never lets a byte time out */
+static long esp_frame(unsigned char *buf, size_t cap)
+{
+    int c;
+    long long until = now_ms() + g_timeout_ms;
+    do {
+        c = rx_byte();
+        if (c < 0 || now_ms() > until)
+            return -1;
+    } while (c != 0xC0);
+    size_t n = 0;
+    for (;;) {
+        c = rx_byte();
+        if (c < 0 || now_ms() > until)
+            return -1;
+        if (c == 0xC0) {
+            if (n == 0)
+                continue;               /* back-to-back delimiters */
+            return (long)n;
+        }
+        if (c == 0xDB) {
+            c = rx_byte();
+            c = c == 0xDC ? 0xC0 : c == 0xDD ? 0xDB : -2;
+            if (c == -2)
+                return 0;               /* a broken escape: no reply */
+        }
+        if (n < cap)
+            buf[n++] = (unsigned char)c;
+    }
+}
+
+/* a request and its reply: the reply's value, its data in *data (n bytes,
+ * status excluded); dies on a ROM error unless the caller allows a miss */
+static int esp_cmd(int cmd, const unsigned char *data, size_t n, u32 checksum, u32 *value,
+                   unsigned char *rdata, size_t *rn, const char *what, int may_miss)
+{
+    static unsigned char buf[2048];
+    esp_send(cmd, data, n, checksum);
+    for (int tries = 0; tries < 8; tries++) {
+        long len = esp_frame(buf, sizeof buf);
+        if (len < 0)
+            break;
+        if (len < 12 || buf[0] != 1 || buf[1] != cmd)
+            continue;                   /* another command's late reply */
+        size_t size = (size_t)buf[2] | (size_t)buf[3] << 8;
+        if (size < 4 || 8 + size > (size_t)len)
+            continue;
+        const unsigned char *st = buf + 8 + size - 4;
+        if (st[0] != 0) {
+            if (may_miss)
+                return 0;
+            die("%s: the ROM answered error 0x%02x", what, st[1]);
+        }
+        if (value)
+            *value = (u32)buf[4] | (u32)buf[5] << 8 | (u32)buf[6] << 16 | (u32)buf[7] << 24;
+        if (rdata && rn) {
+            *rn = size - 4 < *rn ? size - 4 : *rn;
+            memcpy(rdata, buf + 8, *rn);
+        }
+        return 1;
+    }
+    if (may_miss)
+        return 0;
+    die("%s: the ROM did not answer", what);
+    return 0;
+}
+
+static void put32(unsigned char *p, u32 v)
+{
+    p[0] = (unsigned char)v; p[1] = (unsigned char)(v >> 8);
+    p[2] = (unsigned char)(v >> 16); p[3] = (unsigned char)(v >> 24);
+}
+
+/* RFC 1321's MD5, for the ROM's check of what it wrote */
+static void md5(const unsigned char *msg, size_t len, unsigned char out[16])
+{
+    static const u32 k[64] = {
+        0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee, 0xf57c0faf, 0x4787c62a, 0xa8304613, 0xfd469501,
+        0x698098d8, 0x8b44f7af, 0xffff5bb1, 0x895cd7be, 0x6b901122, 0xfd987193, 0xa679438e, 0x49b40821,
+        0xf61e2562, 0xc040b340, 0x265e5a51, 0xe9b6c7aa, 0xd62f105d, 0x02441453, 0xd8a1e681, 0xe7d3fbc8,
+        0x21e1cde6, 0xc33707d6, 0xf4d50d87, 0x455a14ed, 0xa9e3e905, 0xfcefa3f8, 0x676f02d9, 0x8d2a4c8a,
+        0xfffa3942, 0x8771f681, 0x6d9d6122, 0xfde5380c, 0xa4beea44, 0x4bdecfa9, 0xf6bb4b60, 0xbebfbc70,
+        0x289b7ec6, 0xeaa127fa, 0xd4ef3085, 0x04881d05, 0xd9d4d039, 0xe6db99e5, 0x1fa27cf8, 0xc4ac5665,
+        0xf4292244, 0x432aff97, 0xab9423a7, 0xfc93a039, 0x655b59c3, 0x8f0ccc92, 0xffeff47d, 0x85845dd1,
+        0x6fa87e4f, 0xfe2ce6e0, 0xa3014314, 0x4e0811a1, 0xf7537e82, 0xbd3af235, 0x2ad7d2bb, 0xeb86d391 };
+    static const unsigned char r[64] = {
+        7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20,
+        5, 9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
+        6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21 };
+    u32 h[4] = { 0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476 };
+    size_t total = ((len + 8) / 64 + 1) * 64;
+    unsigned char *m = xmalloc(total);
+    memset(m, 0, total);
+    memcpy(m, msg, len);
+    m[len] = 0x80;
+    u64 bits = (u64)len * 8;
+    for (int i = 0; i < 8; i++)
+        m[total - 8 + i] = (unsigned char)(bits >> (8 * i));
+    for (size_t off = 0; off < total; off += 64) {
+        u32 w[16], a = h[0], b = h[1], c = h[2], d = h[3];
+        for (int i = 0; i < 16; i++)
+            w[i] = (u32)m[off + 4 * i] | (u32)m[off + 4 * i + 1] << 8 |
+                   (u32)m[off + 4 * i + 2] << 16 | (u32)m[off + 4 * i + 3] << 24;
+        for (int i = 0; i < 64; i++) {
+            u32 f;
+            int g;
+            if (i < 16) { f = (b & c) | (~b & d); g = i; }
+            else if (i < 32) { f = (d & b) | (~d & c); g = (5 * i + 1) % 16; }
+            else if (i < 48) { f = b ^ c ^ d; g = (3 * i + 5) % 16; }
+            else { f = c ^ (b | ~d); g = (7 * i) % 16; }
+            u32 t = d;
+            d = c;
+            c = b;
+            u32 x = a + f + k[i] + w[g];
+            b = b + ((x << r[i]) | (x >> (32 - r[i])));
+            a = t;
+        }
+        h[0] += a; h[1] += b; h[2] += c; h[3] += d;
+    }
+    free(m);
+    for (int i = 0; i < 4; i++)
+        put32(out + 4 * i, h[i]);
+}
+
+/* FIPS 180-4's SHA-256: the digest an ESP32 image ends with */
+static void sha256(const unsigned char *msg, size_t len, unsigned char out[32])
+{
+    static const u32 k[64] = {
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
+        0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+        0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
+        0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
+        0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+        0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
+        0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+        0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2 };
+    u32 h[8] = { 0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+                 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19 };
+    size_t total = ((len + 9 + 63) / 64) * 64;
+    unsigned char *m = xmalloc(total);
+    memset(m, 0, total);
+    memcpy(m, msg, len);
+    m[len] = 0x80;
+    unsigned long long bits = (unsigned long long)len * 8;
+    for (int i = 0; i < 8; i++)
+        m[total - 1 - i] = (unsigned char)(bits >> (8 * i));
+#define ROR(x, n) (((x) >> (n)) | ((x) << (32 - (n))))
+    for (size_t blk = 0; blk < total; blk += 64) {
+        u32 w[64];
+        for (int i = 0; i < 16; i++)
+            w[i] = (u32)m[blk + 4 * i] << 24 | (u32)m[blk + 4 * i + 1] << 16 |
+                   (u32)m[blk + 4 * i + 2] << 8 | m[blk + 4 * i + 3];
+        for (int i = 16; i < 64; i++) {
+            u32 s0 = ROR(w[i - 15], 7) ^ ROR(w[i - 15], 18) ^ (w[i - 15] >> 3);
+            u32 s1 = ROR(w[i - 2], 17) ^ ROR(w[i - 2], 19) ^ (w[i - 2] >> 10);
+            w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+        }
+        u32 a = h[0], b = h[1], c = h[2], d = h[3], e = h[4], f = h[5], g = h[6], hh = h[7];
+        for (int i = 0; i < 64; i++) {
+            u32 t1 = hh + (ROR(e, 6) ^ ROR(e, 11) ^ ROR(e, 25)) + ((e & f) ^ (~e & g)) +
+                     k[i] + w[i];
+            u32 t2 = (ROR(a, 2) ^ ROR(a, 13) ^ ROR(a, 22)) + ((a & b) ^ (a & c) ^ (b & c));
+            hh = g; g = f; f = e; e = d + t1; d = c; c = b; b = a; a = t1 + t2;
+        }
+        h[0] += a; h[1] += b; h[2] += c; h[3] += d;
+        h[4] += e; h[5] += f; h[6] += g; h[7] += hh;
+    }
+#undef ROR
+    for (int i = 0; i < 8; i++) {
+        out[4 * i] = (unsigned char)(h[i] >> 24);
+        out[4 * i + 1] = (unsigned char)(h[i] >> 16);
+        out[4 * i + 2] = (unsigned char)(h[i] >> 8);
+        out[4 * i + 3] = (unsigned char)h[i];
+    }
+    free(m);
+}
+
+/* Is the address one the ESP32's cache maps from flash (IROM, DROM)? Such
+ * a segment is the second-stage bootloader's to map, not the ROM's to load. */
+
+/* The ESP32 image the ROM boots from flash, from the linked ELF's pieces,
+ * as esptool's elf2image writes it (src: esptool/bin_image.py,
+ * ESP32FirmwareImage.save): the common header { 0xE9, segments, SPI mode,
+ * size << 4 | frequency, entry }, the extended one { WP pin 0xEE (none),
+ * drive strengths 0, chip 0, revisions 0..0xFFFF, a SHA-256 appended },
+ * each segment { address, length, bytes } padded to a word, the checksum
+ * (0xEF xored with every segment byte) where the file is one byte short of
+ * a 16-byte boundary, and the SHA-256 of all of it. The flash's mode, size
+ * and frequency are this board family's: DIO, 4 MiB, 40 MHz. */
+/* The image the ROM boots: a header, SEGS, the checksum byte one short of
+ * a 16-byte boundary, and the SHA-256 of everything before it (esptool's
+ * elf2image format) */
+static unsigned char *esp_build(const struct chunk *segs, int nseg, u64 entry, size_t *lenp)
+{
+    size_t cap = 64 + 16 + 32;
+    for (int k = 0; k < nseg; k++)
+        cap += 8 + segs[k].len + 4;
+    unsigned char *img = xmalloc(cap);
+    memset(img, 0, cap);
+    size_t n = 0;
+    img[n++] = 0xE9;
+    img[n++] = (unsigned char)nseg;
+    img[n++] = 0x02;                    /* DIO */
+    img[n++] = 0x20;                    /* 4 MiB, 40 MHz */
+    put32(img + n, (u32)entry); n += 4;
+    img[n++] = 0xEE;                    /* no WP pin */
+    n += 3;                             /* the SPI pins' drive strengths */
+    n += 2;                             /* chip 0: the ESP32 */
+    n += 1;                             /* minimum revision */
+    n += 2;                             /* minimum full revision */
+    img[n++] = 0xFF; img[n++] = 0xFF;   /* any maximum */
+    n += 4;                             /* reserved */
+    img[n++] = 1;                       /* a SHA-256 follows */
+    u32 sum = 0xEF;
+    for (int k = 0; k < nseg; k++) {
+        size_t len = (segs[k].len + 3) & ~(size_t)3;
+        put32(img + n, (u32)segs[k].addr);
+        put32(img + n + 4, (u32)len);
+        n += 8;
+        memcpy(img + n, segs[k].b, segs[k].len);
+        for (size_t i = 0; i < len; i++)
+            sum ^= img[n + i];
+        n += len;
+    }
+    n += 15 - n % 16;                   /* to one short of the boundary */
+    img[n++] = (unsigned char)sum;
+    sha256(img, n, img + n);
+    n += 32;
+    *lenp = n;
+    return img;
+}
+
+/* The boot stub (esp32boot.c), and where it and its table go */
+#include "esp32boot.inc"
+#define ESP_STUB_ADDR   0x400C0000u     /* RTC fast memory, instruction bus */
+#define ESP_STUB_DATA   0x3FF80000u     /* the same memory on the data bus */
+#define ESP_STUB_TABLE  0x200u
+#define ESP_PAGE        0x10000u        /* the cache MMU's page */
+
+static int g_esp_nseg, g_esp_nmap;      /* for the messages */
+
+/* 1 for flash-mapped data, 2 for flash-mapped code, 0 for RAM */
+static int esp_region(u64 a)
+{
+    return a >= 0x3F400000u && a < 0x3F800000u ? 1 : a >= 0x400D0000u && a < 0x40400000u ? 2 : 0;
+}
+
+/* The ESP32's flash from BASE for an ELF. Its RAM pieces are the image the
+ * ROM boots. Its flash-mapped pieces, if any, go after the image, each
+ * region (data, code) from the 64 KiB page its first piece is in, on flash
+ * pages of its own; the boot stub joins the image as its entry, maps them
+ * and calls the program's entry. g_ch becomes these pieces at their flash
+ * addresses, and the flash's bytes from BASE are returned, 0xff between
+ * (for --esp-image). */
+static unsigned char *esp_layout(const char *path, u64 base, size_t *lenp)
+{
+    if (!g_have_entry)
+        die("%s: an ESP32 image needs the ELF's entry point", path);
+    u64 lo[3] = { ~0ull, ~0ull, ~0ull }, hi[3] = { 0, 0, 0 };
+    static const u64 rend[3] = { 0, 0x3F800000u, 0x40400000u };
+    struct chunk *segs = xmalloc(((size_t)g_nch + 1) * sizeof *segs);
+    int nseg = 0;
+    for (int k = 0; k < g_nch; k++) {
+        const struct chunk *c = &g_ch[k];
+        int r = esp_region(c->addr);
+        if (!r) {
+            segs[nseg++] = *c;
+            continue;
+        }
+        if (c->addr + c->len > rend[r])
+            die("%s: the piece at 0x%llx runs past the end of flash-mapped memory", path, c->addr);
+        if (c->addr < lo[r]) lo[r] = c->addr;
+        if (c->addr + c->len > hi[r]) hi[r] = c->addr + c->len;
+    }
+    int nmap = 0;
+    u64 vpage[3] = { 0 }, ppage[3] = { 0 }, npages[3] = { 0 };
+    unsigned char *stub = NULL;
+    size_t stub_len = 0;
+    if (hi[1] || hi[2]) {
+        for (int k = 0; k < nseg; k++) {
+            u64 a = segs[k].addr, e = a + segs[k].len;
+            if ((a < ESP_STUB_ADDR + 0x2000 && e > ESP_STUB_ADDR) ||
+                (a < ESP_STUB_DATA + 0x2000 && e > ESP_STUB_DATA))
+                die("%s: the piece at 0x%llx is in RTC fast memory, where embflash's boot "
+                    "stub goes when there is flash-mapped memory to map", path, a);
+        }
+        nmap = !!hi[1] + !!hi[2];
+        stub_len = ESP_STUB_TABLE + 4 * (2 + 3 * (size_t)nmap);
+        stub = xmalloc(stub_len);
+        memset(stub, 0, stub_len);
+        memcpy(stub, g_esp32boot, sizeof g_esp32boot);
+        segs[nseg].addr = ESP_STUB_ADDR;
+        segs[nseg].len = stub_len;
+        segs[nseg].b = stub;
+        nseg++;
+    }
+    u64 entry = nmap ? ESP_STUB_ADDR + ESP32BOOT_ENTRY : g_entry;
+    size_t il;
+    unsigned char *img = esp_build(segs, nseg, entry, &il);
+    u64 end = base + il;
+    if (nmap) {
+        /* the table: the program's entry, the count, and per region its
+         * first virtual page, its flash page and its number of pages. Its
+         * size is fixed, so the image's length is already known. */
+        unsigned char *t = stub + ESP_STUB_TABLE;
+        put32(t, (u32)g_entry);
+        put32(t + 4, (u32)nmap);
+        int i = 0;
+        for (int r = 1; r <= 2; r++) {
+            if (!hi[r])
+                continue;
+            vpage[r] = lo[r] & ~(u64)(ESP_PAGE - 1);
+            ppage[r] = (end + ESP_PAGE - 1) & ~(u64)(ESP_PAGE - 1);
+            npages[r] = (hi[r] - vpage[r] + ESP_PAGE - 1) / ESP_PAGE;
+            end = ppage[r] + (hi[r] - vpage[r]);
+            put32(t + 8 + 12 * i, (u32)vpage[r]);
+            put32(t + 12 + 12 * i, (u32)ppage[r]);
+            put32(t + 16 + 12 * i, (u32)npages[r]);
+            i++;
+        }
+        free(img);
+        img = esp_build(segs, nseg, entry, &il);
+    }
+    unsigned char *flat = xmalloc((size_t)(end - base));
+    memset(flat, 0xFF, (size_t)(end - base));
+    memcpy(flat, img, il);
+    for (int k = 0; k < g_nch; k++) {
+        int r = esp_region(g_ch[k].addr);
+        if (r)
+            memcpy(flat + (ppage[r] + (g_ch[k].addr - vpage[r]) - base), g_ch[k].b, g_ch[k].len);
+    }
+    /* the pieces to write: the image, and each region whole from its first
+     * piece to its last (one erase each: two in one 4 KiB sector would
+     * erase each other) */
+    struct chunk *old = g_ch;
+    int nold = g_nch;
+    g_ch = NULL; g_nch = g_capch = 0;
+    add_bytes(base, img, il);
+    for (int r = 1; r <= 2; r++)
+        if (hi[r]) {
+            u64 from = ppage[r] + (lo[r] - vpage[r]);
+            add_bytes(from, flat + (from - base), (size_t)(hi[r] - lo[r]));
+        }
+    for (int k = 0; k < nold; k++)
+        free(old[k].b);
+    free(old);
+    free(img);
+    free(stub);
+    free(segs);
+    g_esp_nseg = nseg;
+    g_esp_nmap = nmap;
+    *lenp = (size_t)(end - base);
+    return flat;
+}
+
+#ifdef EMBFLASH_POSIX
+static void lines_set(int lines, int on)
+{
+    ioctl(g_fd, on ? TIOCMBIS : TIOCMBIC, &lines);
+}
+
+/* a development board's auto-reset: DTR drives IO0 and RTS drives EN, each
+ * through an inverting transistor, as esptool's classic reset */
+static void esp_enter_rom(void)
+{
+    lines_set(TIOCM_DTR, 0);            /* IO0 high */
+    lines_set(TIOCM_RTS, 1);            /* EN low: in reset */
+    usleep(100 * 1000);
+    lines_set(TIOCM_DTR, 1);            /* IO0 low */
+    lines_set(TIOCM_RTS, 0);            /* EN high: out of reset, into the ROM */
+    usleep(50 * 1000);
+    lines_set(TIOCM_DTR, 0);            /* IO0 released */
+    tcflush(g_fd, TCIFLUSH);
+}
+
+static void esp_run(void)
+{
+    lines_set(TIOCM_DTR, 0);            /* IO0 high: boot from flash */
+    lines_set(TIOCM_RTS, 1);
+    usleep(100 * 1000);
+    lines_set(TIOCM_RTS, 0);
+}
+#else
+static void esp_enter_rom(void) {}
+static void esp_run(void) {}
+#endif
+
+/* The ROM's rate, asked of it: it answers at the old rate, then takes the
+ * new one; esptool waits 50 ms before it speaks again. The second word is
+ * 0 for the ROM (the flasher stub takes the old rate there). A rate the
+ * adapter cannot carry shows as silence, which is named. */
+static long g_esp_baud = ESP_ROM_BAUD, g_esp_baud_used = ESP_ROM_BAUD;
+static void esp_baud(long baud)
+{
+    unsigned char b[8];
+    put32(b, (u32)baud); put32(b + 4, 0);
+    esp_cmd(ESP_CHANGE_BAUD, b, sizeof b, 0, NULL, NULL, NULL, "changing the baud rate", 0);
+#ifdef EMBFLASH_POSIX
+    tcdrain(g_fd);
+    line_rate(baud);
+    usleep(50 * 1000);
+    tcflush(g_fd, TCIFLUSH);
+#endif
+    g_rx_have = g_rx_at = 0;
+    g_esp_baud = g_esp_baud_used = baud;
+    unsigned char reg[4];
+    put32(reg, 0x40001000u);
+    if (!esp_cmd(ESP_READ_REG, reg, 4, 0, NULL, NULL, NULL, "the chip-detect register", 1))
+        die("the ROM did not answer at %ld baud: the adapter may not carry it "
+            "(serial:DEV@115200 keeps the ROM's rate)", baud);
+}
+
+/* The host's side back at the ROM's rate, after a reset put the chip there */
+static void esp_host_rom_baud(void)
+{
+    if (g_esp_baud == ESP_ROM_BAUD)
+        return;
+#ifdef EMBFLASH_POSIX
+    line_rate(ESP_ROM_BAUD);
+    tcflush(g_fd, TCIFLUSH);
+#endif
+    g_rx_have = g_rx_at = 0;
+    g_esp_baud = ESP_ROM_BAUD;
+}
+
+/* Each piece from the start of its 4 KiB sector, and pieces that share a
+ * sector as one. The ROM erases whole sectors and refuses an erase that
+ * does not start on one (error 0x06, seen on a D0WD-V3); a second erase in
+ * a sector would wipe the piece before it. The bytes of a sector the image
+ * does not give read 0xff, as erased. */
+static void esp_sectors(void)
+{
+    qsort(g_ch, (size_t)g_nch, sizeof *g_ch, chunk_cmp);
+    struct chunk *old = g_ch;
+    int nold = g_nch;
+    g_ch = NULL; g_nch = g_capch = 0;
+    for (int k = 0; k < nold; k++) {
+        u64 a = old[k].addr, from = a & ~(u64)0xFFF;
+        if (g_nch) {
+            u64 have = g_ch[g_nch - 1].addr + g_ch[g_nch - 1].len;
+            if (a < have)
+                die("two pieces of the image overlap at 0x%llx", a);
+            if (from < ((have + 0xFFF) & ~(u64)0xFFF))
+                from = have;            /* the sector the last piece ends in */
+        }
+        if (a > from) {
+            unsigned char *pad = xmalloc((size_t)(a - from));
+            memset(pad, 0xFF, (size_t)(a - from));
+            add_bytes(from, pad, (size_t)(a - from));
+            free(pad);
+        }
+        add_bytes(a, old[k].b, old[k].len);
+        free(old[k].b);
+    }
+    free(old);
+}
+
+/* N bytes at ADDR into RAM through the ROM: MEM_BEGIN, then 0x1800-byte
+ * blocks (MEM_DATA), the length a whole number of words */
+static void esp_mem_load(u32 addr, const unsigned char *b, size_t n)
+{
+    size_t len = (n + 3) & ~(size_t)3;
+    u32 nblk = (u32)((len + ESP_RAM_BLOCK - 1) / ESP_RAM_BLOCK);
+    unsigned char beg[16];
+    put32(beg, (u32)len); put32(beg + 4, nblk); put32(beg + 8, ESP_RAM_BLOCK);
+    put32(beg + 12, addr);
+    esp_cmd(ESP_MEM_BEGIN, beg, sizeof beg, 0, NULL, NULL, NULL, "starting a RAM load", 0);
+    unsigned char *blk = xmalloc(16 + ESP_RAM_BLOCK);
+    for (u32 k = 0; k < nblk; k++) {
+        size_t off = (size_t)k * ESP_RAM_BLOCK;
+        size_t m = len - off < ESP_RAM_BLOCK ? len - off : ESP_RAM_BLOCK;
+        memset(blk + 16, 0, m);
+        if (off < n)
+            memcpy(blk + 16, b + off, n - off < m ? n - off : m);
+        put32(blk, (u32)m); put32(blk + 4, k); put32(blk + 8, 0); put32(blk + 12, 0);
+        u32 sum = 0xEF;
+        for (size_t i = 0; i < m; i++)
+            sum ^= blk[16 + i];
+        esp_cmd(ESP_MEM_DATA, blk, 16 + m, sum, NULL, NULL, NULL, "a RAM block", 0);
+    }
+    free(blk);
+}
+
+/* ---- embflash's flasher stub (esp32stub.c) ----------------------------
+ *
+ * Loaded into RAM through the ROM and started, it answers the same
+ * packets, with blocks of 16 KiB, LZ4-compressed blocks, a streamed read
+ * and its own MD5. --no-stub keeps the ROM's loader. */
+#include "esp32stub.inc"
+#define ESP_STUB_BLOCK      16384u
+#define ESP_ERASE_FLASH     0xD0
+#define ESP_ERASE_REGION    0xD1
+#define ESP_READ_FLASH      0xD2
+#define ESP_FLASH_LZ_BEGIN  0xE0
+#define ESP_FLASH_LZ_DATA   0xE1
+static int g_no_stub, g_no_compress, g_stub;
+
+static void esp_stub_start(void)
+{
+    for (int k = 0; k < ESP32STUB_NSEG; k++)
+        esp_mem_load(g_esp32stub[k].addr, g_esp32stub[k].b, g_esp32stub[k].len);
+    unsigned char end[8];
+    put32(end, 0); put32(end + 4, ESP32STUB_ENTRY);
+    /* sent, not waited on: esp_cmd would take the stub's greeting for a
+     * late answer and drop it */
+    esp_send(ESP_MEM_END, end, sizeof end, 0);
+    /* its greeting, a frame "EMBS" (the MEM_END answer may come first) */
+    int saved = g_timeout_ms;
+    g_timeout_ms = 1000;
+    unsigned char f[64];
+    long n;
+    while ((n = esp_frame(f, sizeof f)) >= 0)
+        if (n == 4 && !memcmp(f, "EMBS", 4))
+            break;
+    g_timeout_ms = saved;
+    if (n < 0)
+        die("embflash's flasher stub did not start (--no-stub keeps the ROM's loader)");
+    g_stub = 1;
+    if (g_verbose)
+        printf("embflash: the flasher stub is running\n");
+}
+
+/* A raw SLIP frame: the stub's read acknowledgements */
+static void esp_send_frame(const unsigned char *b, size_t n)
+{
+    unsigned char *out = xmalloc(2 * n + 2);
+    size_t k = 0;
+    out[k++] = 0xC0;
+    for (size_t i = 0; i < n; i++) {
+        if (b[i] == 0xC0) { out[k++] = 0xDB; out[k++] = 0xDC; }
+        else if (b[i] == 0xDB) { out[k++] = 0xDB; out[k++] = 0xDD; }
+        else out[k++] = b[i];
+    }
+    out[k++] = 0xC0;
+    tx((const char *)out, k);
+    free(out);
+}
+
+/* LZ4's block format, greedy, with a 4096-entry hash of the next four
+ * bytes; its end rules (the last five bytes literals, no match starting in
+ * the last twelve) as the format asks. OUT holds n + n / 255 + 16. */
+static size_t lz4_encode(const unsigned char *in, size_t n, unsigned char *out)
+{
+    static int tab[4096];
+    for (int i = 0; i < 4096; i++)
+        tab[i] = -1;
+    size_t o = 0, anchor = 0, i = 0;
+#define RD32(p) ((u32)(p)[0] | (u32)(p)[1] << 8 | (u32)(p)[2] << 16 | (u32)(p)[3] << 24)
+    while (n >= 13 && i + 12 <= n) {
+        u32 v = RD32(in + i);
+        unsigned h = (unsigned)((v * 2654435761u) >> 20);
+        int c = tab[h];
+        tab[h] = (int)i;
+        if (c < 0 || i - (size_t)c > 65535 || RD32(in + c) != v) {
+            i++;
+            continue;
+        }
+        size_t ml = 4;
+        while (i + ml < n - 5 && in[c + ml] == in[i + ml])
+            ml++;
+        size_t lit = i - anchor;
+        unsigned char *tok = &out[o++];
+        *tok = (unsigned char)((lit < 15 ? lit : 15) << 4 | (ml - 4 < 15 ? ml - 4 : 15));
+        if (lit >= 15) {
+            size_t r = lit - 15;
+            for (; r >= 255; r -= 255)
+                out[o++] = 255;
+            out[o++] = (unsigned char)r;
+        }
+        memcpy(out + o, in + anchor, lit);
+        o += lit;
+        size_t off = i - (size_t)c;
+        out[o++] = (unsigned char)off;
+        out[o++] = (unsigned char)(off >> 8);
+        if (ml - 4 >= 15) {
+            size_t r = ml - 4 - 15;
+            for (; r >= 255; r -= 255)
+                out[o++] = 255;
+            out[o++] = (unsigned char)r;
+        }
+        i += ml;
+        anchor = i;
+    }
+#undef RD32
+    size_t lit = n - anchor;
+    out[o++] = (unsigned char)((lit < 15 ? lit : 15) << 4);
+    if (lit >= 15) {
+        size_t r = lit - 15;
+        for (; r >= 255; r -= 255)
+            out[o++] = 255;
+        out[o++] = (unsigned char)r;
+    }
+    memcpy(out + o, in + anchor, lit);
+    return o + lit;
+}
+
+/* Into RAM and run, as esptool's load-ram: each piece in 0x1800-byte
+ * blocks (MEM_BEGIN, MEM_DATA), then MEM_END with the entry, which the ROM
+ * jumps to; nothing is written to flash */
+static void esp_ram(void)
+{
+    for (int k = 0; k < g_nch; k++) {
+        const struct chunk *c = &g_ch[k];
+        if (esp_region(c->addr))
+            die("a piece at 0x%llx is in flash-mapped memory: --ram loads RAM only", c->addr);
+        esp_mem_load((u32)c->addr, c->b, c->len);
+    }
+    if (g_esp_baud != ESP_ROM_BAUD)     /* the program starts at a cold boot's rate */
+        esp_baud(ESP_ROM_BAUD);
+    unsigned char end[8];
+    put32(end, g_entry == 0); put32(end + 4, (u32)g_entry);
+    /* (the ROM may jump before it answers) */
+    esp_cmd(ESP_MEM_END, end, sizeof end, 0, NULL, NULL, NULL, "starting the program", 1);
+    printf("embflash: loaded %d piece%s into RAM, running at 0x%llx\n", g_nch,
+           g_nch == 1 ? "" : "s", g_entry);
+}
+
+/* The ROM, reached: the port at the ROM's 115200, the reset into it
+ * (unless no_reset), the sync, the chip named, then BAUD asked of it
+ * (460800 when the target gives none) */
+static const struct esp_chip *esp_connect(const char *target, int no_reset)
+{
+    if (strncmp(target, "serial:", 7) != 0)
+        die("--esp %s: the ROM is reached on a serial line, serial:DEV[@BAUD]", target);
+    /* the ROM is reached at its own 115200; BAUD, 460800 when not given, is
+     * asked of it once it answers */
+    char dev[512];
+    long want = ESP_FAST_BAUD;
+    snprintf(dev, sizeof dev, "%s", target);
+    char *at = strrchr(dev, '@');
+    if (at) {
+        *at = 0;
+        char *end;
+        want = strtol(at + 1, &end, 10);
+        if (*end || want <= 0)
+            die("%s: the baud rate after @ is a number", target);
+    }
+    open_target(dev);
+
+    /* sync: 0x07 0x07 0x12 0x20 and 32 times 0x55; the ROM answers it
+     * several times, and the extra answers are drained. A reset that did
+     * not take, or a ROM not yet listening, gets the reset again: seven
+     * attempts, as esptool's */
+    unsigned char sync[36] = { 0x07, 0x07, 0x12, 0x20 };
+    memset(sync + 4, 0x55, 32);
+    int saved = g_timeout_ms, synced = 0;
+    g_timeout_ms = 100;
+    for (int tries = 0; tries < (no_reset ? 1 : 7) && !synced; tries++) {
+        if (!no_reset)
+            esp_enter_rom();
+        for (int attempt = 0; attempt < 10 && !synced; attempt++)
+            synced = esp_cmd(ESP_SYNC, sync, sizeof sync, 0, NULL, NULL, NULL, "sync", 1);
+    }
+    if (synced) {
+        unsigned char junk[64];
+        while (esp_frame(junk, sizeof junk) >= 0) {}
+    }
+    g_timeout_ms = saved;
+    if (!synced)
+        die("%s: no Espressif ROM answered (is it the board's port? hold BOOT while pressing "
+            "EN if the board has no auto-reset)", target + 7);
+
+    unsigned char reg[4];
+    u32 magic = 0;
+    put32(reg, 0x40001000u);
+    esp_cmd(ESP_READ_REG, reg, 4, 0, &magic, NULL, NULL, "the chip-detect register", 0);
+    const struct esp_chip *chip = NULL;
+    for (size_t i = 0; i < sizeof g_esp_chips / sizeof g_esp_chips[0]; i++)
+        if (g_esp_chips[i].magic == magic)
+            chip = &g_esp_chips[i];
+    if (!chip)
+        die("chip-detect value 0x%08x: not a chip this programmer knows", magic);
+    if (want != ESP_ROM_BAUD)
+        esp_baud(want);
+    return chip;
+}
+
+/* The flash attached on the default SPI pins, and its parameters */
+static void esp_attach(const struct esp_chip *chip)
+{
+    unsigned char att[8] = { 0 };       /* the default SPI pins; the ESP32 ROM wants 8 bytes */
+    esp_cmd(ESP_SPI_ATTACH, att, sizeof att, 0, NULL, NULL, NULL, "attaching the flash", 0);
+    unsigned char par[24];
+    put32(par, 0); put32(par + 4, chip->flash_size); put32(par + 8, 0x10000);
+    put32(par + 12, 0x1000); put32(par + 16, 0x100); put32(par + 20, 0xFFFF);
+    esp_cmd(ESP_SPI_PARAMS, par, sizeof par, 0, NULL, NULL, NULL, "the flash parameters", 0);
+}
+
+/* The ROM's MD5 of LEN bytes of flash at ADDR, as 16 bytes */
+static void esp_md5(u64 addr, u64 len, unsigned char out[16])
+{
+    unsigned char q[16], got[32];
+    size_t gn = sizeof got;
+    put32(q, (u32)addr); put32(q + 4, (u32)len); put32(q + 8, 0); put32(q + 12, 0);
+    int saved = g_timeout_ms;
+    g_timeout_ms = 3000 + (int)(len / 1024) * 10;
+    esp_cmd(ESP_FLASH_MD5, q, sizeof q, 0, NULL, got, &gn, "the MD5 of the flash", 0);
+    g_timeout_ms = saved;
+    if (gn == 16) {                     /* a stub answers 16 raw bytes */
+        memcpy(out, got, 16);
+        return;
+    }
+    if (gn != 32)                       /* the ROM 32 hex digits */
+        die("the MD5 of the flash: %zu bytes in the answer", gn);
+    for (int k = 0; k < 16; k++) {
+        unsigned v = 0;
+        for (int h = 0; h < 2; h++) {
+            int c = got[2 * k + h];
+            v = v * 16 + (unsigned)(c <= '9' ? c - '0' : (c | 0x20) - 'a' + 10);
+        }
+        out[k] = (unsigned char)v;
+    }
+}
+
+/* LEN bytes of flash at ADDR into FILE, 64 at a time (READ_FLASH_SLOW: the
+ * ROM's most per command), then checked against the ROM's MD5 of the range:
+ * a byte lost on the line shows as a different digest */
+static void esp_read(const char *target, int no_reset, u64 addr, u64 len, int all,
+                     const char *file)
+{
+    const struct esp_chip *chip = esp_connect(target, no_reset);
+    if (all) {
+        if (addr >= chip->flash_size)
+            die("--read 0x%llx: beyond the %s's %u MiB of flash", addr, chip->name,
+                chip->flash_size >> 20);
+        len = chip->flash_size - addr;
+    }
+    if (len == 0 || addr + len > chip->flash_size)
+        die("--read 0x%llx %llu: beyond the %s's %u MiB of flash", addr, len, chip->name,
+            chip->flash_size >> 20);
+    esp_attach(chip);
+    if (!g_no_stub)
+        esp_stub_start();
+    unsigned char *buf = xmalloc((size_t)len);
+    long long t0 = now_ms();
+#ifdef EMBFLASH_POSIX
+    int tty = isatty(2);
+#else
+    int tty = 0;
+#endif
+    int retried = 0;
+    if (g_stub) {
+        /* READ_FLASH, a piece of 256 KiB at a time: 4 KiB frames, eight in
+         * flight, each acknowledged with the count received, then the
+         * stub's MD5 of the piece. A frame short of its 4 KiB (the line
+         * lost bytes) or a piece whose MD5 differs is read again, up to
+         * three times; the line is drained first, and the stub takes the
+         * next request for the end of the last. */
+        unsigned char *f = xmalloc(4096 + 64);
+        for (u64 at = 0; at < len; ) {
+            u64 plen = len - at < 0x40000 ? len - at : 0x40000;
+            int ok = 0;
+            for (int tries = 0; tries < 4 && !ok; tries++) {
+                if (tries) {
+                    retried++;
+                    int saved = g_timeout_ms;
+                    g_timeout_ms = 300;
+                    while (esp_frame(f, 4096 + 64) >= 0) {}
+                    g_timeout_ms = saved;
+                }
+                unsigned char q[16];
+                put32(q, (u32)(addr + at)); put32(q + 4, (u32)plen); put32(q + 8, 4096);
+                put32(q + 12, 8);
+                if (!esp_cmd(ESP_READ_FLASH, q, sizeof q, 0, NULL, NULL, NULL,
+                             "reading the flash", 1))
+                    continue;
+                u64 got = 0;
+                int bad = 0;
+                while (got < plen && !bad) {
+                    long n = esp_frame(f, 4096 + 64);
+                    u64 due = plen - got < 4096 ? plen - got : 4096;
+                    if (n < 0 || (u64)n != due) {
+                        bad = 1;
+                        break;
+                    }
+                    memcpy(buf + at + got, f, (size_t)n);
+                    got += (u64)n;
+                    unsigned char ack[4];
+                    put32(ack, (u32)got);
+                    esp_send_frame(ack, 4);
+                }
+                if (bad)
+                    continue;
+                long n = esp_frame(f, 64);
+                unsigned char have[16];
+                md5(buf + at, (size_t)plen, have);
+                ok = n == 16 && memcmp(f, have, 16) == 0;
+            }
+            if (!ok)
+                die("the bytes read from 0x%llx do not have the stub's MD5 of them, four times: "
+                    "the line loses or changes some (try a slower rate, serial:DEV@460800)",
+                    addr + at);
+            at += plen;
+            if (tty)
+                fprintf(stderr, "\rembflash: %llu of %llu KiB", at >> 10, len >> 10);
+        }
+        free(f);
+    }
+    for (u64 off = 0; off < len && !g_stub; ) {
+        u32 n = len - off < ESP_READ_BLOCK ? (u32)(len - off) : ESP_READ_BLOCK;
+        unsigned char q[8], got[ESP_READ_BLOCK];
+        size_t gn = sizeof got;
+        put32(q, (u32)(addr + off)); put32(q + 4, n);
+        /* a read can be asked again: a reply the line lost costs half a
+         * second, not the run */
+        int ok = 0, saved = g_timeout_ms;
+        g_timeout_ms = 500;
+        for (int tries = 0; tries < 4 && !ok; tries++) {
+            gn = sizeof got;
+            ok = esp_cmd(ESP_READ_FLASH_SLOW, q, sizeof q, 0, NULL, got, &gn, "reading the flash", 1);
+            if (!ok) {
+                /* a reply only late would answer the next request: the
+                 * reply names no address, so the line is drained first */
+                unsigned char junk[128];
+                while (esp_frame(junk, sizeof junk) >= 0) {}
+                retried++;
+            }
+        }
+        g_timeout_ms = saved;
+        if (!ok)
+            die("reading the flash at 0x%llx: four requests, no answer", addr + off);
+        if (gn < n)
+            die("reading the flash at 0x%llx: %zu bytes in the answer, %u asked", addr + off, gn, n);
+        memcpy(buf + off, got, n);
+        off += n;
+        if (tty && (off % 0x4000 == 0 || off == len))
+            fprintf(stderr, "\rembflash: %llu of %llu KiB", off >> 10, len >> 10);
+    }
+    if (tty)
+        fprintf(stderr, "\n");
+    double secs = (double)(now_ms() - t0) / 1000.0;
+    unsigned char want[16], have[16];
+    esp_md5(addr, len, want);               /* the flash's own, read again */
+    md5(buf, (size_t)len, have);
+    if (memcmp(want, have, 16) != 0)
+        die("the bytes read from 0x%llx do not have the flash's MD5: the line lost or changed "
+            "some (try a slower rate, serial:DEV@115200)", addr);
+    FILE *f = fopen(file, "wb");
+    if (!f || fwrite(buf, 1, (size_t)len, f) != (size_t)len || fclose(f) != 0)
+        die("%s: %s", file, strerror(errno));
+    free(buf);
+    if (!no_reset) {
+        esp_run();
+        esp_host_rom_baud();
+    }
+    printf("embflash: read %llu bytes of the %s's flash from 0x%llx into %s at %ld baud, "
+           "%.1f s (%.1f KiB/s)\n", len, chip->name, addr, file, g_esp_baud_used, secs,
+           secs > 0 ? (double)len / 1024.0 / secs : 0.0);
+    if (retried)
+        printf("embflash: %d request%s asked again (a reply lost on the line)\n", retried,
+               retried == 1 ? "" : "s");
+    printf("embflash: verified (MD5)\n");
+}
+
+/* --erase-flash, --erase-region ADDR SIZE: through the stub */
+static void esp_erase(const char *target, int no_reset, int all, u64 addr, u64 size)
+{
+    if (!all && (addr % 4096 || size % 4096 || size == 0))     /* before the board */
+        die("--erase-region 0x%llx 0x%llx: whole 4 KiB sectors", addr, size);
+    const struct esp_chip *chip = esp_connect(target, no_reset);
+    if (!all && addr + size > chip->flash_size)
+        die("--erase-region 0x%llx 0x%llx: whole 4 KiB sectors within the %s's %u MiB",
+            addr, size, chip->name, chip->flash_size >> 20);
+    if (g_no_stub)
+        die("--erase-flash and --erase-region need embflash's flasher stub");
+    esp_attach(chip);
+    esp_stub_start();
+    long long t0 = now_ms();
+    int saved = g_timeout_ms;
+    if (all) {
+        g_timeout_ms = 180000;
+        esp_cmd(ESP_ERASE_FLASH, NULL, 0, 0, NULL, NULL, NULL, "erasing the chip", 0);
+    } else {
+        unsigned char q[8];
+        put32(q, (u32)addr); put32(q + 4, (u32)size);
+        g_timeout_ms = 3000 + (int)(size / 1024) * 30;
+        esp_cmd(ESP_ERASE_REGION, q, sizeof q, 0, NULL, NULL, NULL, "erasing the region", 0);
+    }
+    g_timeout_ms = saved;
+    double secs = (double)(now_ms() - t0) / 1000.0;
+    if (!no_reset) {
+        esp_run();
+        esp_host_rom_baud();
+    }
+    if (all)
+        printf("embflash: erased the %s's flash, %u MiB, %.0f ms\n", chip->name,
+               chip->flash_size >> 20, secs * 1000);
+    else
+        printf("embflash: erased 0x%llx bytes of the %s's flash from 0x%llx, %.0f ms\n", size,
+               chip->name, addr, secs * 1000);
+}
+
+static void esp_flash(const char *target, int verify, int no_reset, int ram, int console)
+{
+    const struct esp_chip *chip = esp_connect(target, no_reset);
+    if (!ram)
+        esp_sectors();
+    for (int k = 0; k < g_nch && !ram; k++)
+        if (g_ch[k].addr + g_ch[k].len > chip->flash_size)
+            die("the image reaches 0x%llx, beyond the %s's %u MiB of flash",
+                g_ch[k].addr + g_ch[k].len, chip->name, chip->flash_size >> 20);
+
+    if (ram) {
+        esp_ram();
+        if (console)
+            serial_console(console);
+        return;
+    }
+    esp_attach(chip);
+    if (!g_no_stub)
+        esp_stub_start();
+
+    u32 blocks_total = 0;
+    u64 sent_total = 0, bytes_total = 0;
+    long long t0 = now_ms();
+    for (int k = 0; k < g_nch && g_stub; k++) {
+        /* through the stub: 16 KiB blocks, each LZ4-compressed unless
+         * --no-compress (FLASH_LZ_BEGIN, FLASH_LZ_DATA) */
+        const struct chunk *c = &g_ch[k];
+        u32 nblk = (u32)((c->len + ESP_STUB_BLOCK - 1) / ESP_STUB_BLOCK);
+        int lz = !g_no_compress;
+        unsigned char beg[16];
+        put32(beg, (u32)c->len); put32(beg + 4, nblk); put32(beg + 8, ESP_STUB_BLOCK);
+        put32(beg + 12, (u32)c->addr);
+        int saved = g_timeout_ms;
+        g_timeout_ms = 3000 + (int)(c->len / 1024) * 30;   /* the erase */
+        esp_cmd(lz ? ESP_FLASH_LZ_BEGIN : ESP_FLASH_BEGIN, beg, sizeof beg, 0, NULL, NULL, NULL,
+                "erasing the flash", 0);
+        g_timeout_ms = saved;
+        unsigned char *blk = xmalloc(16 + ESP_STUB_BLOCK + ESP_STUB_BLOCK / 255 + 16);
+        for (u32 b = 0; b < nblk; b++) {
+            size_t off = (size_t)b * ESP_STUB_BLOCK;
+            size_t n = c->len - off < ESP_STUB_BLOCK ? c->len - off : ESP_STUB_BLOCK;
+            size_t m = n;
+            if (lz)
+                m = lz4_encode(c->b + off, n, blk + 16);
+            else
+                memcpy(blk + 16, c->b + off, n);
+            put32(blk, (u32)m); put32(blk + 4, b); put32(blk + 8, (u32)n); put32(blk + 12, 0);
+            u32 sum = 0xEF;
+            for (size_t i = 0; i < m; i++)
+                sum ^= blk[16 + i];
+            esp_cmd(lz ? ESP_FLASH_LZ_DATA : ESP_FLASH_DATA, blk, 16 + m, sum, NULL, NULL, NULL,
+                    "writing a block", 0);
+            sent_total += m;
+        }
+        free(blk);
+        blocks_total += nblk;
+        bytes_total += c->len;
+        if (verify) {
+            unsigned char got[16], want[16];
+            esp_md5(c->addr, c->len, got);
+            md5(c->b, c->len, want);
+            if (memcmp(got, want, 16) != 0)
+                die("verification failed: the flash at 0x%llx does not have the image's MD5",
+                    c->addr);
+        }
+    }
+    for (int k = 0; k < g_nch && !g_stub; k++) {
+        const struct chunk *c = &g_ch[k];
+        u32 nblk = (u32)((c->len + ESP_BLOCK - 1) / ESP_BLOCK);
+        unsigned char beg[16];
+        put32(beg, (u32)c->len); put32(beg + 4, nblk); put32(beg + 8, ESP_BLOCK);
+        put32(beg + 12, (u32)c->addr);
+        int saved = g_timeout_ms;
+        g_timeout_ms = 3000 + (int)(c->len / 1024) * 30;   /* the erase */
+        esp_cmd(ESP_FLASH_BEGIN, beg, sizeof beg, 0, NULL, NULL, NULL, "erasing the flash", 0);
+        g_timeout_ms = saved;
+        unsigned char *blk = xmalloc(16 + ESP_BLOCK);
+        for (u32 b = 0; b < nblk; b++) {
+            size_t off = (size_t)b * ESP_BLOCK, n = c->len - off < ESP_BLOCK ? c->len - off : ESP_BLOCK;
+            memset(blk + 16, 0xFF, ESP_BLOCK);
+            memcpy(blk + 16, c->b + off, n);
+            put32(blk, ESP_BLOCK); put32(blk + 4, b); put32(blk + 8, 0); put32(blk + 12, 0);
+            u32 sum = 0xEF;
+            for (u32 i = 0; i < ESP_BLOCK; i++)
+                sum ^= blk[16 + i];
+            esp_cmd(ESP_FLASH_DATA, blk, 16 + ESP_BLOCK, sum, NULL, NULL, NULL, "writing a block", 0);
+        }
+        free(blk);
+        blocks_total += nblk;
+        if (verify) {
+            unsigned char got[16], want[16];
+            esp_md5(c->addr, c->len, got);
+            md5(c->b, c->len, want);
+            if (memcmp(got, want, 16) != 0) {
+                char hex[33];
+                for (int i = 0; i < 16; i++)
+                    sprintf(hex + 2 * i, "%02x", want[i]);
+                die("verification failed: the flash at 0x%llx does not have the image's MD5 %s",
+                    c->addr, hex);
+            }
+        }
+    }
+    /* No FLASH_END: the ESP32's ROM answers it with error 0x06 (seen on a
+     * D0WD-V3), and esptool sends it none either -- it would leave the
+     * loader. Every block is written when its answer comes, so the reset
+     * below starts the image. */
+    long rate = g_esp_baud;
+    double secs = (double)(now_ms() - t0) / 1000.0;
+    if (!no_reset) {
+        esp_run();
+        esp_host_rom_baud();
+    }
+    if (g_stub)
+        printf("embflash: wrote %llu bytes to the %s's flash through the stub at %ld baud, "
+               "%llu sent%s, %.1f s\n", bytes_total, chip->name, rate, sent_total,
+               g_no_compress ? "" : " compressed", secs);
+    else
+        printf("embflash: wrote %u block%s of %u bytes to the %s's flash at %ld baud\n",
+               blocks_total, blocks_total == 1 ? "" : "s", ESP_BLOCK, chip->name, rate);
+    if (verify)
+        printf("embflash: verified (MD5)\n");
+    if (console)
+        serial_console(console);
 }
 
 static u64 parse_num(const char *s, const char *what)
@@ -1125,13 +2541,36 @@ static u64 parse_num(const char *s, const char *what)
     return v;
 }
 
+/* a number of bytes, with K or M for KiB and MiB */
+static u64 parse_size(const char *s, const char *what)
+{
+    char *e;
+    u64 v = strtoull(s, &e, 0);
+    if (e != s && (*e == 'K' || *e == 'k') && !e[1])
+        return v << 10;
+    if (e != s && (*e == 'M' || *e == 'm') && !e[1])
+        return v << 20;
+    if (e == s || *e)
+        die("%s: not a size: %s (a number, with K or M, or all)", what, s);
+    return v;
+}
+
 static void usage(void)
 {
     fprintf(stderr,
         "usage: embflash IMAGE --gdb TARGET [--base ADDR] [--verify] [--run]\n"
         "                [--entry ADDR] [--vector-table ADDR] [--monitor CMD]...\n"
         "                [--dry-run] [--timeout SECONDS] [-v]\n"
-        "       embflash IMAGE --stk500 serial:DEV[@BAUD] [--verify] [--no-reset]\n"
+        "       embflash IMAGE --stk500 | --stk500v2 serial:DEV[@BAUD] [--verify] [--no-reset]\n"
+        "                [--console SECONDS]\n"
+        "       embflash IMAGE --esp serial:DEV[@BAUD] [--base ADDR] [--verify] [--no-reset]\n"
+        "                [--ram] [--console SECONDS]\n"
+        "       embflash ELF --esp-image FILE\n"
+        "       embflash --esp serial:DEV[@BAUD] --read ADDR SIZE|all FILE\n"
+        "       embflash --esp serial:DEV[@BAUD] --erase-flash | --erase-region ADDR SIZE\n"
+        "  --esp: [--no-stub] (the ROM's loader only) [--no-compress]\n"
+        "       embflash ELF [--board=uno|nano|esp32-devkit] [--verify] [--console SECONDS]\n"
+        "  serial:auto (or serial:@BAUD) finds the board's USB serial port\n"
         "  TARGET: HOST:PORT | unix:PATH | serial:DEV[@BAUD]\n"
         "  IMAGE:  ELF, Intel HEX (.hex), S-records (.srec .s19 .s37 .mot),\n"
         "          or raw bytes (.bin with --base)\n");
@@ -1140,8 +2579,13 @@ static void usage(void)
 
 int main(int argc, char **argv)
 {
-    const char *image = NULL, *target = NULL, *stk500 = NULL;
-    int no_reset = 0;
+    const char *image = NULL, *target = NULL, *stk500 = NULL, *esp = NULL, *stk500v2 = NULL;
+    const char *esp_out = NULL, *read_file = NULL, *board = NULL;
+    int erase_all = 0, erase_region = 0;
+    u64 erase_addr = 0, erase_size = 0;
+    u64 read_addr = 0, read_len = 0;
+    int read_all = 0;
+    int no_reset = 0, ram = 0, console = 0;
     const char *monitor[16];
     int nmon = 0, verify = 0, run = 0, dry = 0, have_base = 0;
     int have_entry_opt = 0, have_vt = 0;
@@ -1150,7 +2594,32 @@ int main(int argc, char **argv)
         const char *a = argv[i];
         if (!strcmp(a, "--gdb") && i + 1 < argc) target = argv[++i];
         else if (!strcmp(a, "--stk500") && i + 1 < argc) stk500 = argv[++i];
+        else if (!strcmp(a, "--stk500v2") && i + 1 < argc) stk500v2 = argv[++i];
+        else if (!strcmp(a, "--esp") && i + 1 < argc) esp = argv[++i];
         else if (!strcmp(a, "--no-reset")) no_reset = 1;
+        else if (!strcmp(a, "--ram")) ram = 1;
+        else if (!strcmp(a, "--esp-image") && i + 1 < argc) esp_out = argv[++i];
+        else if (!strncmp(a, "--board=", 8)) board = a + 8;
+        else if (!strcmp(a, "--no-stub")) g_no_stub = 1;
+        else if (!strcmp(a, "--no-compress")) g_no_compress = 1;
+        else if (!strcmp(a, "--erase-flash")) erase_all = 1;
+        else if (!strcmp(a, "--erase-region") && i + 2 < argc) {
+            erase_addr = parse_num(argv[++i], "--erase-region ADDR");
+            erase_size = parse_size(argv[++i], "--erase-region SIZE");
+            erase_region = 1;
+        }
+        else if (!strcmp(a, "--board") && i + 1 < argc) board = argv[++i];
+        else if (!strcmp(a, "--read") && i + 3 < argc) {
+            read_addr = parse_num(argv[++i], "--read ADDR");
+            const char *n = argv[++i];
+            if (!strcmp(n, "all"))
+                read_all = 1;
+            else
+                read_len = parse_size(n, "--read SIZE");
+            read_file = argv[++i];
+        }
+        else if (!strcmp(a, "--console") && i + 1 < argc)
+            console = (int)parse_num(argv[++i], "--console");
         else if (!strcmp(a, "--base") && i + 1 < argc) {
             base = parse_num(argv[++i], "--base"); have_base = 1;
         } else if (!strcmp(a, "--entry") && i + 1 < argc) {
@@ -1171,14 +2640,113 @@ int main(int argc, char **argv)
         else if (!image) image = a;
         else die("one image at a time (%s and %s)", image, a);
     }
-    if (!image || (!target && !stk500 && !dry) || (target && stk500))
+    /* a board names its programmer: --board=uno and nano are Optiboot's,
+     * esp32-devkit the ESP32 ROM's, at the port found */
+    if (board) {
+        if (!strcmp(board, "uno") || !strcmp(board, "nano")) {
+            if (!stk500) stk500 = "serial:auto";
+        } else if (!strcmp(board, "mega2560")) {
+            if (!stk500v2) stk500v2 = "serial:auto";
+        } else if (!strcmp(board, "esp32-devkit")) {
+            if (!esp) esp = "serial:auto";
+        } else {
+            die("--board=%s: not a board embflash knows (uno, nano, mega2560, esp32-devkit)",
+                board);
+        }
+    }
+    if (stk500)
+        stk500 = serial_auto(stk500, 0);
+    if (stk500v2)
+        stk500v2 = serial_auto(stk500v2, 0);
+    if (esp)
+        esp = serial_auto(esp, 1);
+    if (erase_all || erase_region) {
+        if (!esp || image || ram || esp_out || read_file || (erase_all && erase_region))
+            die("--erase-flash and --erase-region ADDR SIZE erase an ESP32's flash: with --esp "
+                "serial:DEV, and no image");
+        esp_erase(esp, no_reset, erase_all, erase_addr, erase_size);
+        return 0;
+    }
+    if (read_file) {
+        if (!esp || image || ram || esp_out || console || verify || have_base || dry)
+            die("--read ADDR SIZE FILE reads an ESP32's flash: with --esp serial:DEV, and no "
+                "image (--verify is always done: the ROM's MD5 of the range)");
+        esp_read(esp, no_reset, read_addr, read_len, read_all, read_file);
+        return 0;
+    }
+    /* an ELF, and no programmer named: the one its machine has, an AVR's
+     * Optiboot or an ESP32's ROM, at the port found */
+    if (image && !target && !stk500 && !stk500v2 && !esp && !esp_out && !dry) {
+        size_t hl;
+        unsigned char *h = slurp(image, &hl);
+        unsigned mach = hl >= 20 && !memcmp(h, "\177ELF", 4) ? (unsigned)(h[18] | h[19] << 8) : 0;
+        unsigned core = hl >= 40 ? h[36] & 0x7f : 0;   /* e_flags: the AVR core */
+        free(h);
+        if (mach == 83 && core == 6) {          /* avr6: the ATmega2560, a Mega 2560 */
+            printf("embflash: an avr6 program: --stk500v2, the Mega 2560's bootloader\n");
+            stk500v2 = serial_auto("serial:auto", 0);
+        } else if (mach == 83 && core == 51) {  /* avr51: the 1280, ATmegaBOOT at 57600 */
+            printf("embflash: an avr51 program: --stk500, the Mega 1280's bootloader\n");
+            stk500 = serial_auto("serial:auto@57600", 0);
+        } else if (mach == 83) {                /* EM_AVR */
+            printf("embflash: an AVR program: --stk500, Optiboot's\n");
+            stk500 = serial_auto("serial:auto", 0);
+        } else if (mach == 94) {                /* EM_XTENSA */
+            printf("embflash: an Xtensa program: --esp, the ESP32's ROM\n");
+            esp = serial_auto("serial:auto", 1);
+        }
+    }
+    if (!image || (!target && !stk500 && !stk500v2 && !esp && !esp_out && !dry) ||
+        (!!target + !!stk500 + !!stk500v2 + !!esp + !!esp_out) > 1)
         usage();
-    load_image(image, have_base, base);
-    if (stk500 && !dry) {
+    if (ram && !esp)
+        die("--ram is --esp's");
+    if (console && !esp && !stk500 && !stk500v2)
+        die("--console reads a serial bootloader's port: --esp, --stk500 or --stk500v2");
+    /* an ELF for the ESP32's ROM is laid out as its image, which goes to
+     * flash at --base (0x1000, where the ROM boots from, by default) */
+    int esp_elf = 0;
+    if (esp || esp_out) {
+        size_t hl;
+        unsigned char *h = slurp(image, &hl);
+        esp_elf = hl >= 4 && memcmp(h, "\177ELF", 4) == 0;
+        free(h);
+    }
+    if (esp_out && !esp_elf)
+        die("--esp-image: %s is not an ELF image", image);
+    load_image(image, have_base && !esp_elf, base);
+    for (int k = 0; k < g_nch && ram; k++)      /* before the board is touched */
+        if (esp_region(g_ch[k].addr))
+            die("a piece at 0x%llx is in flash-mapped memory: --ram loads RAM only", g_ch[k].addr);
+    if (esp_elf && !ram) {
+        size_t il;
+        u64 at = have_base ? base : 0x1000;
+        unsigned char *img = esp_layout(image, at, &il);
+        if (esp_out) {
+            FILE *f = fopen(esp_out, "wb");
+            if (!f || fwrite(img, 1, il, f) != il || fclose(f) != 0)
+                die("%s: %s", esp_out, strerror(errno));
+            printf("embflash: wrote the ESP32 image %s, %zu bytes, %d segment%s, entry 0x%llx\n",
+                   esp_out, il, g_esp_nseg, g_esp_nseg == 1 ? "" : "s", g_entry);
+            if (g_esp_nmap)
+                printf("embflash: with %d flash-mapped region%s after it, which the boot stub "
+                       "maps; the file is the flash from 0x%llx\n", g_esp_nmap,
+                       g_esp_nmap == 1 ? "" : "s", at);
+            return 0;
+        }
+        free(img);
+    }
+    if ((stk500 || stk500v2 || esp) && !dry) {
         if (run || nmon || have_entry_opt || have_vt)
-            die("--stk500: the bootloader starts the program itself; --run, --monitor, --entry "
-                "and --vector-table are for --gdb");
-        stk500_flash(stk500, verify, no_reset);
+            die("--%s: the %s starts the program itself; --run, --monitor, --entry and "
+                "--vector-table are for --gdb",
+                stk500 ? "stk500" : stk500v2 ? "stk500v2" : "esp", esp ? "ROM" : "bootloader");
+        if (stk500)
+            stk500_flash(stk500, verify, no_reset, console);
+        else if (stk500v2)
+            stk500v2_flash(stk500v2, verify, no_reset, console);
+        else
+            esp_flash(esp, verify, no_reset, ram, console);
         return 0;
     }
 

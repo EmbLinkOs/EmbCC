@@ -45,6 +45,9 @@ case $triple in
              ilp32d-noa) flags="-march=rv32imfdc -mabi=ilp32d" ;;
              lp64f-noa)  flags="-march=rv64imfc -mabi=lp64f" ;;
              lp64d-noa)  flags="-march=rv64imfdc -mabi=lp64d" ;;
+             # AVR's avr6 core (the ATmega2560): a call pushes a 3-byte PC,
+             # so every frame's offsets differ from avr5's
+             avr6) flags="-mmcu=atmega2560" ;;
              *) echo "$0: no library variant '$abi' for $triple" >&2; exit 1 ;;
          esac ;;
 esac
@@ -114,7 +117,12 @@ fi
 # crt<part>.o from lib/avr/crt.S, and <part>.ld from lib/avr/avr5.ld with
 # the part's memories, read from <avr/io.h> for that part.
 if [ "$triple" = avr ]; then
-    for part in atmega328p atmega328 atmega168p atmega168; do
+    # (avr/avr6 holds the 2560's alone; avr the rest, the 1280's among
+    # them: its PC is two bytes, and avr5's library is its)
+    parts="atmega328p atmega328 atmega168p atmega168 atmega1280"
+    avrpart=atmega328p
+    case $flags in *atmega2560*) parts=atmega2560 avrpart=atmega2560 ;; esac
+    for part in $parts; do
         "$EMBCC" --target=avr -mmcu=$part -c "$here/lib/avr/crt.S" \
             -o "$out/crt$part.o" || {
             echo "build-rt: lib/avr/crt.S does not assemble for $part" >&2
@@ -126,9 +134,11 @@ if [ "$triple" = avr ]; then
         fe=$(val FLASHEND) rs=$(val RAMSTART) re=$(val RAMEND) ee=$(val E2END)
         [ -n "$fe" ] && [ -n "$rs" ] && [ -n "$re" ] && [ -n "$ee" ] || {
             echo "build-rt: <avr/io.h> has no memories for $part" >&2; exit 1; }
+        ld=avr5.ld
+        case $part in atmega1280|atmega2560) ld=avr6.ld ;; esac
         sed -e "s/@FLASH@/$((fe + 1))/" -e "s/@RAMSTART@/$((rs))/" \
             -e "s/@RAM@/$((re + 1 - rs))/" -e "s/@EEPROM@/$((ee + 1))/" \
-            "$here/lib/avr/avr5.ld" > "$out/$part.ld"
+            "$here/lib/avr/$ld" > "$out/$part.ld"
         rm -f "$out/rt/io-$part.c" "$out/rt/io-$part.h"
     done
     # ...and the AVR library, libc.a: lib/avr's avr-libc functions (the
@@ -140,9 +150,16 @@ if [ "$triple" = avr ]; then
     mkdir -p "$out/c"
     for f in "$here"/lib/avr/*.c; do
         b=$(basename "$f" .c)
-        for n in $(sed -n 's/^#ifdef \(EMB_AVR_[A-Z0-9_]*\).*/\1/p' "$f"); do
-            "$EMBCC" --target=avr -mmcu=atmega328p -Os --stack-info -Wall -Wextra -Werror \
-                -D$n -c "$f" -o "$out/c/$b-$n.o" || {
+        names=$(sed -n 's/^#ifdef \(EMB_AVR_[A-Z0-9_]*\).*/\1/p' "$f")
+        # a file with no such names is one object, whole (setjmp.c: the
+        # pair has to come together; it was left out of libc.a for that)
+        [ -n "$names" ] || names=WHOLE
+        for n in $names; do
+            d=-D$n
+            [ "$n" = WHOLE ] && d=
+            # shellcheck disable=SC2086
+            "$EMBCC" --target=avr -mmcu=$avrpart -Os --stack-info -Wall -Wextra -Werror \
+                $d -c "$f" -o "$out/c/$b-$n.o" || {
                 echo "build-rt: lib/avr/$b.c ($n) does not compile" >&2
                 exit 1; }
         done
@@ -150,3 +167,29 @@ if [ "$triple" = avr ]; then
     rm -f "$out/libc.a"
     "$AR" rcs "$out/libc.a" "$out"/c/*.o
 fi
+
+# The boards' runtimes (--board=, src/driver/options.c's table), beside the
+# target's library: each lib/boards/DIR/board.c with its <board.h>, and the
+# ESP32's startup and linker script (lib/esp32), which a board links in
+# the order the table gives.
+case $triple in
+    avr)
+        # the Uno's and Nano's beside avr5's library, the Mega 2560's in avr6's
+        b=uno part=atmega328p
+        case $flags in *atmega2560*) b=mega2560 part=atmega2560 ;; esac
+        "$EMBCC" --target=avr -mmcu=$part -DF_CPU=16000000UL -Os -Wall -Wextra -Werror \
+            -I"$here/include/boards/$b" -c "$here/lib/boards/$b/board.c" \
+            -o "$out/board-$b.o" || {
+            echo "build-rt: lib/boards/$b/board.c does not compile" >&2; exit 1; }
+        ;;
+    xtensa-none-elf)
+        x="$EMBCC --target=xtensa-esp32-elf -O2 -mtext-section-literals -Wall -Wextra -Werror"
+        $x -c "$here/lib/esp32/crt0.S" -o "$out/esp32-crt0.o" &&
+            $x -c "$here/lib/esp32/start.c" -o "$out/esp32-start.o" &&
+            $x -I"$here/include/boards/esp32-devkit" -c "$here/lib/boards/esp32-devkit/board.c" \
+                -o "$out/board-esp32-devkit.o" || {
+            echo "build-rt: the ESP32 runtime (lib/esp32, lib/boards/esp32-devkit) does not build" >&2
+            exit 1; }
+        cp "$here/lib/esp32/esp32.ld" "$out/esp32.ld"
+        ;;
+esac
