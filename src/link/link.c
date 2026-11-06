@@ -7982,11 +7982,12 @@ static void ls_layout(struct linker *l, struct ls_script *sc, int orphan_mode)
     if (l->machine != EM_ARM && l->machine != EM_RISCV &&
         l->machine != EM_AVR && l->machine != EM_XTENSA &&
         l->machine != EM_AARCH64 && l->machine != EM_X86_64 &&
-        l->machine != EM_LOONGARCH &&
-        !(l->machine == EM_MIPS && l->elf32))
+        l->machine != EM_LOONGARCH && l->machine != EM_MIPS &&
+        l->machine != EM_PPC && l->machine != EM_SPARC &&
+        l->machine != EM_68K)
         die("-T: a linker script is supported for ARM, AArch64, x86-64, "
-            "RISC-V, LoongArch, AVR, Xtensa and MIPS32 images only (this one "
-            "is machine %u)",
+            "RISC-V, LoongArch, MIPS, PowerPC, SPARC, ColdFire, AVR and "
+            "Xtensa images (this one is machine %u)",
             (unsigned)l->machine);
     /* A region every output section names must exist, whether or not
      * anything ends up in the section: a typo in `> RAM` is a typo. */

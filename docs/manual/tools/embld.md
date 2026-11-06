@@ -44,7 +44,7 @@ runs in-process when it links a program itself; see
 shared libraries, does not produce position-independent executables, and
 emits no PLT and no dynamic sections. Without a linker script the layout
 is fixed (see [Image layout](#image-layout)) and the options below adjust
-it; with one (`-T`: ARM, AArch64, x86-64, RISC-V, LoongArch, AVR, Xtensa and MIPS32) the script lays the image out (see
+it; with one (`-T`: every machine but TriCore and RX) the script lays the image out (see
 [Linker scripts](#linker-scripts)).
 
 ### Supported machines
@@ -283,8 +283,8 @@ On ARM, the entry symbol's Thumb bit is kept in the ELF entry point.
 ### Linker scripts
 
 `-T SCRIPT` lays the image out by a GNU ld linker script instead, for ARM,
-AArch64, x86-64, RISC-V, LoongArch, AVR, Xtensa and MIPS32 images (another machine is refused: `embld: -T:
-a linker script is supported for ARM, AArch64, x86-64, RISC-V, LoongArch, AVR, Xtensa and MIPS32
+AArch64, x86-64, RISC-V, LoongArch, MIPS, PowerPC, SPARC, ColdFire, AVR and Xtensa images (TriCore and RX are refused: `embld: -T:
+a linker script is supported for ARM, AArch64, x86-64, RISC-V, LoongArch, MIPS, PowerPC, SPARC, ColdFire, AVR and Xtensa
 images only (this one is machine 62)`): the script a CMSIS, STM32CubeMX, vendor SDK, avr-libc or
 RTOS project already has. `.tdata` and `.tbss` that the script does not
 place go after the data and after the zeroed data, where a single-thread
