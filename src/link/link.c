@@ -3110,6 +3110,7 @@ static void merge_group(struct linker *l, int *mem, int nmem, Elf64_Xword es,
         struct insec *s = &l->insecs[mem[k]];
         s->size = 0;
         s->data = out;
+        s->align = 1;           /* empty: nothing to pad the layout for */
     }
     h->data = out;
     h->size = size;
@@ -3658,6 +3659,7 @@ static void merge_notes(struct linker *l)
             at = (end + (Elf64_Addr)addr - 1) & ~((Elf64_Addr)addr - 1);
         }
         s->size = 0;
+        s->align = 1;
     }
     if (first < 0)
         return;
@@ -3687,6 +3689,7 @@ static void merge_notes(struct linker *l)
     }
     h->data = out;
     h->size = 16 + dsz;
+    h->align = (Elf64_Xword)addr;
 }
 
 static void layout(struct linker *l, struct osec_bound *b,
