@@ -1795,32 +1795,49 @@ segment.
 
 ### Assembly
 
-Inline `asm` is assembled by EmbCC's TriCore vocabulary
-(`src/arch/tricore/asm.c`): the system instructions (`mtcr`/`mfcr` with
-core registers by name or number, `isync`, `dsync`, `syscall`,
-`enable`, ...), the moves, the ALU forms, the loads and stores,
-`swap.w`, `cmpswap.w` and the indirect jumps and calls. Constraints:
-`d`/`r` a data register, `a` an address register, `m` an address register
-holding the operand's address (written `[%0]`), `i` a constant; register
-variables bound to `d0`-`d7` or `a2`-`a7`.
+EmbCC's TriCore assembler (`src/arch/tricore/asm.c`) has the whole
+TC1.6.2 instruction set: 832 forms, from a table
+(`src/arch/tricore/isa.inc`) that `tools/tricore-isa` measures from GNU
+binutils for TriCore -- objdump decoding every 16-bit word and fifteen
+million 32-bit ones, GNU as telling which operand values each field takes
+and which relocation a symbol gets there. It writes the bytes
+`tricore-elf-as -mtc162` writes from the same source, and is checked
+against it statement by statement (see that directory's README): the
+shortest form the operands fit, GNU's choice between forms of one length,
+`add d1, d1, d2` as the 16-bit `add d1, d2`, `sel d1, d15, d9, d1` as
+`cmov d1, d15, d9`, `lea sp, [sp]-8` as `sub.a sp, 8`, and `.code16` or
+`.code32` before an instruction forcing its width.
 
-The same vocabulary has the control transfers: `j`, `jl` and `call` (+-16
-MiB), the conditional branches `jeq`, `jne`, `jlt`, `jlt.u`, `jge`,
-`jge.u` against a register or a 4-bit constant, `jz`/`jnz` (jeq/jne
-against 0), `jeq.a`, `jne.a`, `jz.a`, `jnz.a` and `loop` (+-32 KiB), each
-to `.+N`/`.-N` or, in a template, a numeric label (`1:`, `1b`, `1f`).
-`embcc -c` assembles `.s` and `.S` files, and file-scope `asm` blocks and
-`__attribute__((naked))` functions are assembled the same way, in GNU
-syntax with optional `%` on registers; there `j`/`jl`/`call sym` carry
-`R_TRICORE_24REL`, an address is `movh`/`movh.a` with `hi:sym` or
-`%hi(sym)` (`R_TRICORE_HIADJ`) and `addi` with `lo:sym` or `%lo(sym)`
-(`R_TRICORE_LO`) or `lea`, a load or a store with `[aB]lo:sym`
-(`R_TRICORE_LO2`), and `.word sym` is `R_TRICORE_32ABS`. A conditional
-branch or `loop` reaches only a label of its own section (`embld` does not
-apply `R_TRICORE_15REL`), and is refused by name with a symbol defined
-elsewhere. `tests/golden/tricore-gas.sh` runs every transfer, assembled
-from its text, through QEMU's TriCore translator (tricore-encoding.sh's
-referee), and a `.S` file with C on the board.
+The syntax is GNU's, with or without `%` on registers and in either case
+(GCC writes `%SP`): `d0`-`d15`, `a0`-`a15` (`sp` is `a10`), the pairs
+`e0`-`e14`, a data register's half `d3l`/`d3u`/`d3ll`..., memory as
+`[a2]off`, `[a2+]off`, `[+a2]off`, `[a2+c]off`, `[a2+r]` and `[a2+i]`, a
+core special function register by number (`0xfe2c`), `$` and a number, or
+name (`psw`, `$icr`). A branch's target is a label, `.+N`/`.-N`, or in a
+template a numeric label of its own (`1:`, `1b`, `1f`). A branch to a
+label is its 32-bit form (`jz d2, L` is `jeq d2, 0, L`); one out of reach
+(±32 KiB) is the inverse over a `j` (±16 MiB), and `loop`, `jned` and
+`jnei` branch to a `j` placed just past a 16-bit `j` over it -- the
+sequences GNU as writes. A refusal names the operand and what its field
+holds: `16 does not fit operand 2 of 'jge.u D,N,N': its 4 bits hold
+0..15`.
+
+Inline `asm` takes the same instructions. Constraints: `d`/`r` a data
+register, `a` an address register, `m` an address register holding the
+operand's address (written `[%0]`), `i` a constant; register variables
+bound to `d0`-`d7` or `a2`-`a7`. `embcc -c` assembles `.s` and `.S` files,
+and file-scope `asm` blocks and `__attribute__((naked))` functions are
+assembled the same way. A symbol may stand in any numeric field where GNU
+as takes one, with GNU's relocation: `R_TRICORE_24REL` for `j`/`jl`/`call
+sym` (and for the `j` of a conditional branch or `loop` to a symbol,
+which is the long form above), `hi:sym` or `%hi(sym)` `R_TRICORE_HIADJ`,
+`up:sym` `R_TRICORE_HI`, `lo:sym` or `%lo(sym)` `R_TRICORE_LO` (`LO2` in
+`[a2]lo:sym`), `sm:sym` the small-data `16SM`/`10SM`/`16SM2`, an absolute
+address `R_TRICORE_18ABS`, a constant field `16CONST`, `9SCONST` or
+`9ZCONST`; `.word sym` is `R_TRICORE_32ABS`. `tests/golden/tricore-gas.sh`
+runs every transfer, assembled from its text, through QEMU's TriCore
+translator (tricore-encoding.sh's referee), and a `.S` file with C on the
+board.
 
 ### Predefined macros
 
@@ -1854,7 +1871,6 @@ that keeps a value in every lower-context register.
 |---|---|
 | `__builtin_frame_address(N)` or `__builtin_return_address(N)` with N above 0 (level 0 is supported; see [Extensions](extensions.md)) | `__builtin_return_address(1) is not supported on tricore-none-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found` |
 | `__int128` | `__int128 does not exist on this target ...` |
-| a conditional branch or `loop` to a symbol defined elsewhere (`.s`, `.S`, file-scope `asm`) | `a conditional branch or loop reaches only a label of its own section: its 15-bit displacement (R_TRICORE_15REL) is not one embld applies; branch over a j` |
 | `--unwind-tables`, `-fasynchronous-unwind-tables`, `--exceptions` | `unwind tables are not supported for tricore-none-elf yet ...` |
 | C++ with exceptions (on by default) | `C++ exceptions are not supported for tricore-none-elf yet: EmbCC writes no TriCore .eh_frame; compile with --no-exceptions`. C++ itself compiles with `--no-exceptions`; see [C++](cxx.md#targets) |
 

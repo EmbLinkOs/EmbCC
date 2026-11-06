@@ -762,7 +762,7 @@ $(OBJDIR)/%.o: src/%.c
 
 # The tree is small; every object depending on every header is honest
 # enough and cannot go stale (CONTRIBUTING lie #1).
-$(OBJS): $(wildcard src/*/*.h src/arch/*/*.h)
+$(OBJS): $(wildcard src/*/*.h src/arch/*/*.h src/arch/*/*.inc)
 
 # The libc and libcxx goldens run against the BUILT archives, so the suite
 # depends on them: without this a stale archive is silently what gets

@@ -132,13 +132,25 @@ refs() {            # refs WHAT PATTERN SOURCE: a .s file
     grep -q -- "$2" "$out/bad.err" || {
         echo "$1 was refused, but not by name:"; cat "$out/bad.err"; exit 1; }
 }
-refs "a conditional branch to a symbol" "R_TRICORE_15REL" '	jne d2, 3, elsewhere'
-refs "a loop to a symbol" "R_TRICORE_15REL" '	loop a2, elsewhere'
-refs "hi: on addi" "is movh's or movh.a's operand" '	addi d2, d2, hi:x'
-refs "lo: on movh" "is addi's" '	movh d2, lo:x'
-refs "lo: on swap.w" "belongs to lea or a load or store" '	swap.w [a2]lo:x, d2'
+refs "lo: on swap.w" "takes no lo:SYM in this operand" '	swap.w [a2]lo:x, d2'
 refs "an odd target" "not an even distance" '	j .+3'
-refs "a branch out of reach" "not an even distance" '	jeq d2, d3, .+32768'
-refs "a constant out of range" "does not fit its 4 bits" '	jge.u d2, 16, .+8'
+refs "a jump out of reach" "beyond its reach" '	j .+0x2000000'
+refs "a constant out of range" "16 does not fit operand 2" '	jge.u d2, 16, .+8'
+refs "a shift GNU as refuses" "is 0 or 1 here, not 2" '	madd.h e2, e4, d1, d2ll, 2'
+refs "a number for a target" "takes a label" '	jeq d2, d3, 4'
 refs "an unknown instruction" "is not an instruction" '	frob d2'
-echo "nine statements that cannot be encoded or relocated are refused by name"
+echo "seven statements that cannot be encoded or relocated are refused by name"
+
+# ---- 5. a conditional branch or a loop to a symbol: the inverse over a j ---------
+# (GNU as's long form: `jne d2, 3, sym` is `jeq d2, 3, .+6; j sym`, the j
+# relocated R_TRICORE_24REL; a loop is `loop a2, .+6; j .+6; j sym`)
+printf '\tjne d2, 3, elsewhere\n\tloop a2, elsewhere\n\tjeq d2, d3, .+40000\n' > "$out/far.s"
+"$EMBCC" --target=$T -c "$out/far.s" -o "$out/far.o" 2> "$out/far.err" || {
+    echo "a conditional branch to a symbol was refused:"; cat "$out/far.err"; exit 1; }
+if command -v "$RE" >/dev/null 2>&1; then
+    n=$("$RE" -r "$out/far.o" | awk 'NF >= 5 && $2 ~ /03$/ && $5 == "elsewhere"' | wc -l)
+    [ "$n" -eq 2 ] || { echo "the long branches lack their R_TRICORE_24REL:"
+        "$RE" -r "$out/far.o"; exit 1; }
+fi
+echo "a conditional branch and a loop to a symbol, and one out of reach,"
+echo "are the long forms GNU as writes"

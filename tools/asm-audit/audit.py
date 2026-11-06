@@ -89,7 +89,7 @@ T = {
   "m68k":  ("--target=m68k-none-elf", "m68k-elf-gcc", "-mcpu=5208",
             "m68k-elf-as -mcpu=5208 {src} -o {obj}", "m68k-elf-objdump", "|"),
   "tricore": ("--target=tricore-none-elf", HOME + "/cross/tricore/bin/tricore-elf-gcc", "",
-            HOME + "/cross/tricore/bin/tricore-elf-as {src} -o {obj}",
+            HOME + "/cross/tricore/bin/tricore-elf-as -mtc162 {src} -o {obj}",
             HOME + "/cross/tricore/bin/tricore-elf-objdump", "#"),
 }
 
@@ -124,6 +124,7 @@ BR = re.compile(r"\b(b|bl|blx|bx|j|jal|jmp|call|beq|bne|blt|bge|bltu|bgeu|bnez|b
                 r"cbz|cbnz|b\.\w+|br\w*|rjmp|rcall|bra|bsr|jl|loop\w*|bc\w*|bdnz\w*)\b")
 
 PADDING = False
+BAREHEX = False      # TriCore's objdump prints a target as bare hex too
 
 def norm(dis):
     """The instructions of a disassembly (objdump -dr), without addresses,
@@ -153,6 +154,9 @@ def norm(dis):
         # (Xtensa's objdump prints a target as bare hex: call8 ad0)
         elif PADDING and re.match(r"^(b\w*|j|call\d+|loop\w*)$", op) and \
                 re.search(r"\s[0-9a-f]+$", t):
+            t = re.sub(r"[0-9a-f]+$", "T", t)
+        elif BAREHEX and re.match(r"^(j\w*(\.\w+)?|loop\w*|f?call)$", op) and \
+                not re.match(r"^(ji|jli|ja|jla)$", op) and re.search(r"[\s,][0-9a-f]+$", t):
             t = re.sub(r"[0-9a-f]+$", "T", t)
         ins.append((t, pair))
         pair = False
@@ -264,6 +268,8 @@ def audit(name, out, show):
         dr = run([objdump, "-dr", "--no-show-raw-insn"] + na + [ro]).stdout
         global PADDING
         PADDING = name == "xtensa"
+        global BAREHEX
+        BAREHEX = name == "tricore"
         ne, nr = norm(de), norm(dr)
         k = same(ne, nr)
         # the text agrees, but a 16- and a 32-bit form can print alike

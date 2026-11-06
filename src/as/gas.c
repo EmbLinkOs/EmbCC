@@ -3789,6 +3789,14 @@ static int directive(struct gas *g, char *p, int pass)
              "an A- or R-profile one", DIR(".arm") ? ".arm" : ".code 32");
         return 1;
     }
+#if FAMILY_BUILT(tricore)
+    /* `.code16`/`.code32`: GCC's way to make the next instruction take a
+     * form of that width (`.code32` then `j .L5`) */
+    if (g->tgt->machine == EM_TRICORE && (DIR(".code16") || DIR(".code32"))) {
+        tcasm_width(name[5] == '1' ? 16 : 32);
+        return 1;
+    }
+#endif
 #if FAMILY_BUILT(riscv)
     /* `.option rvc`/`norvc`/`push`/`pop`: whether the instructions that
      * follow take their 16-bit forms (the others -- relax, pic, arch --
@@ -4943,20 +4951,20 @@ static const struct gas_target XT_GAS = {
 };
 #endif
 
-/* TriCore 1.6.1. `j`/`jl`/`call sym` carry R_TRICORE_24REL; an address
- * is movh/movh.a with hi:sym (R_TRICORE_HIADJ) and addi with lo:sym
- * (R_TRICORE_LO) or lea, a load or a store with [aB]lo:sym
- * (R_TRICORE_LO2) -- tcasm_symform's, as are GNU's %hi()/%lo() spellings;
- * `.word sym` is R_TRICORE_32ABS. `hi`, `lo` and a core register's name
- * are operand words. */
+/* TriCore 1.6.2 (src/arch/tricore/asm.c, from a learned table). A symbol
+ * in any numeric field takes the relocation GNU as gives it there --
+ * tcasm_symform's, hi:/lo:/up:/sm: and %hi()/%lo() included; `.word sym`
+ * is R_TRICORE_32ABS. A branch to a label of this section is a
+ * displacement, relaxed to the long form when out of reach. `hi`, `lo`,
+ * `up`, `sm` and a core register's name are operand words. */
 #if FAMILY_BUILT(tricore)
 static const struct gas_target TRICORE_GAS = {
     EM_TRICORE, 1, tcasm_encode, tcasm_is_reg,
     0, 0, 0,
     R_TRICORE_32ABS, 0,
     0, 0, tcasm_symform, 0,
-    0, tcasm_is_word, NULL, NULL, NULL,
-    0, NULL, NULL, NULL, NULL, NULL
+    0, tcasm_is_word, tcasm_reset, NULL, NULL,
+    0, tcasm_set_level, tcasm_took_level, NULL, tcasm_is_transfer, NULL
 };
 #endif
 

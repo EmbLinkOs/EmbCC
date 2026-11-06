@@ -42,9 +42,9 @@ accs() {            # accs WHAT SYMBOL SOURCE: a template naming SYMBOL is
 }
 refc "an unknown mnemonic" "'frob' is not an instruction" \
     'void f(void){ __asm__ volatile("frob d2"); }'
-refc "a form with the wrong operands" "'ld.w' with these operands" \
+refc "a form with the wrong operands" "'ld.w' takes no operands shaped" \
     'void f(void){ __asm__ volatile("ld.w d2, d3"); }'
-refc "an immediate out of range" "'add' with these operands" \
+refc "an immediate out of range" "300 does not fit operand 3 of 'add" \
     'void f(void){ __asm__ volatile("add d2, d3, 300"); }'
 refc "a template naming the stack pointer" "keeps for itself" \
     'void f(void){ __asm__ volatile("mov.aa sp, a2"); }'
@@ -64,7 +64,7 @@ printf '%s\n' 'void f(void){ __asm__ volatile("x: j x"); }' > "$out/nlab.c"
     { echo "a named label in a template was refused"; exit 1; }
 ${EMBCC_LLVM_READELF:-llvm-readelf} -rW "$out/nlab.o" | grep -q "[[:space:]]x$" &&
     { echo "a template's own label went out as a relocation"; exit 1; }
-refc "a branch constant out of range" "does not fit its 4 bits" \
+refc "a branch constant out of range" "10 does not fit operand 2 of 'jne" \
     'void f(int x){ __asm__ volatile("jne %0, 10, .+4" :: "d"(x)); }'
 echo "unknown mnemonics, wrong operands, reserved registers, foreign"
 echo "constraints and modifiers, symbols and named labels in a template are"
