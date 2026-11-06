@@ -233,11 +233,11 @@ echo "inline asm computes correctly at -O0, -O1, -O2 and -Os"
 
 # An instruction outside the vocabulary fails by NAME, never with a
 # guessed encoding.
-printf 'void f(void){ __asm__("vldr s0, [r0]"); }\n' > "$out/bad.c"
+printf 'void f(void){ __asm__("vqadd.s8 d0, d1, d2"); }\n' > "$out/bad.c"
 if "$EMBCC" --target=$T -c "$out/bad.c" -o /dev/null 2> "$out/bad.err"; then
     echo "an unknown instruction was accepted"; exit 1
 fi
-grep -q "vldr" "$out/bad.err" || {
+grep -q "vqadd" "$out/bad.err" || {
     echo "the refusal does not name the instruction:"; cat "$out/bad.err"
     exit 1; }
 # And a callee-saved register is refused rather than silently corrupted:

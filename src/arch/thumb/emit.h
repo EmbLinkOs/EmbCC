@@ -379,6 +379,11 @@ int t_tst_imm(struct code *c, int rn, long imm);
 int t_ldm_stm(struct code *c, int rn, unsigned mask, int wback, int before,
               int load);
 
+/* VLDM/VSTM rn{!}, {s<first>-s<first+n-1>}: `before` is DB (which needs
+ * writeback), else IA. 0 when it is not encodable. */
+int t_vldm_vstm(struct code *c, int rn, int first, int n, int wback,
+                int before, int load);
+
 /* LDR rt, [pc, #off], `off` from Align(pc, 4), always the 32-bit form so
  * its length never depends on the offset. 0 when |off| > 4095. */
 int t_ldr_lit(struct code *c, int rt, long off);

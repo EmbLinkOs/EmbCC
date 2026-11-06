@@ -1313,7 +1313,10 @@ static int t2_dp(const struct tok *t0, int n0, struct code *out, char *err, int 
     if ((e->kind != 'c' && d < 0) || (e->kind != 'm' && rn < 0))
         FAIL("%.*s wants registers", t[0].len, t[0].s);
     if (k0 >= n) FAIL("%.*s wants an operand", t[0].len, t[0].s);
-    if (t[k0].len && t[k0].s[0] == '#') {
+    /* an immediate, with its `#` or without (as inline asm's "I"
+     * operands and GNU as both allow: `adds r0, r1, 9`) */
+    if (t[k0].len && (t[k0].s[0] == '#' ||
+                      (tok_reg(&t[k0]) < 0 && tok_imm(&t[k0], &imm)))) {
         if (!tok_imm(&t[k0], &imm)) FAIL("\"%.*s\" is not an immediate", t[k0].len, t[k0].s);
         isimm = 1;
         if (k0 + 1 < n) FAIL("an immediate takes no shift");
@@ -1585,7 +1588,8 @@ static int t2_misc(const struct tok *t, int n, struct code *out, char *err, int 
         if (n != 3 && n != 4) FAIL("%.*s takes rd, rm and a shift", t[0].len, t[0].s);
         d = tok_reg(&t[1]);
         a = n == 4 ? tok_reg(&t[2]) : d;
-        isimm = t[n - 1].len && t[n - 1].s[0] == '#';
+        isimm = t[n - 1].len && (t[n - 1].s[0] == '#' ||
+                                 (tok_reg(&t[n - 1]) < 0 && tok_imm(&t[n - 1], &v)));
         if (isimm) { if (!tok_imm(&t[n - 1], &v)) FAIL("bad shift"); }
         else b = tok_reg(&t[n - 1]);
         if (d < 0 || a < 0 || (!isimm && b < 0)) FAIL("%.*s wants registers", t[0].len, t[0].s);
