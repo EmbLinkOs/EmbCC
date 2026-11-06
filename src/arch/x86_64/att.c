@@ -974,8 +974,6 @@ static int evex(struct ib *x, const char *mn, const struct opnd *o, int n)
             reg = f->regext;
         if (mask)
             aaa = mask - 1;
-        if (mo && mo->dot)
-            ;                                   /* (rip: one() fixes it up) */
         {
             int R = (reg >> 3) & 1, Rp = (reg >> 4) & 1, B, X, Vp = (v >> 4) & 1;
             if (mo) {
