@@ -32,7 +32,7 @@ T = {
   "rv32": ("--target=riscv32-unknown-elf -march=rv32imac -mabi=ilp32 -mno-relax", 0x80000000),
   "rv64": ("--target=riscv64-unknown-elf -march=rv64gc -mabi=lp64d -mno-relax -mcmodel=medany", 0x80000000),
   "mips": ("--target=mipsel-none-elf -mips32r2 -msoft-float -mno-abicalls -G0 -fno-pic", 0x80000000),
-  "la64": ("--target=loongarch64-unknown-elf -mno-lsx -mno-lasx -mabi=lp64s", 0x80000000),
+  "la64": ("--target=loongarch64-unknown-elf -mno-lsx -mno-lasx -mabi=lp64s -mno-relax", 0x80000000),
   "ppc":  ("--target=powerpc-none-eabi -msoft-float", 0x00100000),
 }
 
