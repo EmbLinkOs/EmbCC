@@ -88,7 +88,7 @@ static const struct backend_desc g_backends[] = {
         .op_calls_helper = a64_op_calls_helper,
         .unwind_unwritten = NULL,
         .cxx_exceptions = BACKEND_CXX_EXC_OK,
-        .firmware = 0, .ld_scripts = 0,
+        .firmware = 1, .ld_scripts = 1,
         .call_insn = "bl", .call_delay_slot = 0, .sym_prefix = "",
         .imm_prefixed = 0, .text_p2align = 2,
         .no_asm_text = NULL },

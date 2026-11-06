@@ -278,7 +278,7 @@ struct backend_desc {
     /* The driver links firmware for it with embld, from a memory map the
      * build gives (-T, or -Wl,-Ttext=...); and a file-scope asm block or
      * a naked function is read by the .s file assembler (src/as/gas.c).
-     * 0 for x86-64 and AArch64. */
+     * 0 for x86-64 (aarch64-elf links firmware with embld too). */
     int firmware;
     /* embld lays out a GNU linker script for it (-T). */
     int ld_scripts;

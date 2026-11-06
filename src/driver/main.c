@@ -1206,8 +1206,11 @@ static int find_lib(const char *name, char *out, size_t cap, int *own)
  * memory map the build supplies (-T, or -Wl,-Ttext...). */
 static int firmware_target(void)
 {
+    /* (a hosted AArch64 target -- aarch64-linux-gnu -- is a Linux
+     * program, which embld does not yet link for that machine) */
     return target_fmt_get() == TGT_FMT_ELF &&
-           backend_get(target_get())->firmware;
+           backend_get(target_get())->firmware &&
+           !(target_get() == TARGET_AARCH64 && target_is_hosted());
 }
 
 /* `embcc [prog.c] [a.o b.a -lfoo...] -o OUT`: compile the source if there
@@ -1339,8 +1342,10 @@ static int compile_and_link_(const char *in, const char *out)
                     target_triple_now(), target_fmt_name(target_fmt_get()));
         else
             fprintf(stderr,
-                    "embcc: error: cannot link for %s: embld does not read "
-                    "AArch64 objects\n", target_triple_now());
+                    "embcc: error: cannot link for %s: embld links AArch64 "
+                    "firmware (aarch64-elf), not yet a Linux program; "
+                    "--libc=system links one with the system's linker\n",
+                    target_triple_now());
         fprintf(stderr,
                 "embcc: compile with -c, then link with %s\n",
                 target_fmt_get() == TGT_FMT_ELF
