@@ -320,6 +320,99 @@ static int want_callgraph, callgraph_su;
  * them, so a linker's --gc-sections can drop what nothing reaches. ELF
  * output only; the others have no sections to split into. */
 static int func_sections, data_sections;
+/* --merge-strings (the default) / --no-merge-strings: see str_place */
+static int g_merge_strings = 1;
+
+/* Where each string literal goes in an ELF object. One with no NUL but
+ * its last byte -- a C string, nothing a reader could walk past -- goes
+ * to a mergeable section, .rodata.str1.ALIGN (SHF_MERGE|SHF_STRINGS,
+ * entries of one byte), and the linker keeps one copy of it for the
+ * whole image, inside another string where it is that one's tail. The
+ * rest (a wide string, one holding a NUL) stay in .rodata, packed. Every
+ * reference to a mergeable one goes through a symbol of its own (.LCn):
+ * the linker moves each string on its own, and a section-relative
+ * reference with a bias in it -- x86's rel32 is -4 -- would land in the
+ * one before. Without merging (other formats, --no-merge-strings) each
+ * string stays where irgen put it. */
+void str_place(struct ir_unit *iu, int merge)
+{
+    int ro = 0;
+    iu->nmsecs = 0;
+    for (int i = 0; i < iu->nstrs; i++) {
+        struct ir_str *st = &iu->strs[i];
+        int a = st->align > 1 ? st->align : 1;
+        st->msec = 0;
+        if (!merge) {
+            st->moff = st->off;
+            continue;
+        }
+        if (st->len > 0 && !st->bytes[st->len - 1] &&
+            !memchr(st->bytes, 0, (size_t)(st->len - 1)) && a <= 64) {
+            int k = 0;
+            while (k < iu->nmsecs && iu->msecs[k].align != a)
+                k++;
+            if (k == iu->nmsecs && k < 8) {
+                iu->msecs[k].align = a;
+                iu->msecs[k].len = 0;
+                iu->nmsecs++;
+            }
+            if (k < iu->nmsecs) {
+                int *len = &iu->msecs[k].len;
+                *len = (*len + a - 1) / a * a;
+                st->msec = k + 1;
+                st->moff = *len;
+                *len += st->len;
+                continue;
+            }
+        }
+        ro = (ro + a - 1) / a * a;
+        st->moff = ro;
+        ro += st->len;
+    }
+    iu->rodata_strs_len = merge ? ro : iu->rodata_len;
+}
+
+/* What a reference to old .rodata offset `off` is made against: the
+ * string's own symbol when it went to a mergeable section, .rodata's
+ * section symbol at its new place otherwise; *add the offset from it. */
+static int str_reloc(const struct ir_unit *iu, long off, int rodata_sym,
+                     const int *str_sym, long *add);
+
+/* The string an old .rodata offset (irgen's, which the reference sites
+ * hold) falls in, and how far into it; -1 for none. */
+int str_at(const struct ir_unit *iu, long off, long *delta)
+{
+    int lo = 0, hi = iu->nstrs - 1, at = -1;
+    while (lo <= hi) {
+        int m = (lo + hi) / 2;
+        if (iu->strs[m].off <= off) {
+            at = m;
+            lo = m + 1;
+        } else
+            hi = m - 1;
+    }
+    if (at < 0 || off > iu->strs[at].off + iu->strs[at].len)
+        return -1;
+    *delta = off - iu->strs[at].off;
+    return at;
+}
+
+static int str_reloc(const struct ir_unit *iu, long off, int rodata_sym,
+                     const int *str_sym, long *add)
+{
+    long d;
+    int i = str_at(iu, off, &d);
+    if (i < 0) {
+        *add = off;
+        return rodata_sym;
+    }
+    if (iu->strs[i].msec) {
+        *add = d;
+        return str_sym[i];
+    }
+    *add = iu->strs[i].moff + d;
+    return rodata_sym;
+}
 
 /* PFX followed by NAME, allocated */
 static char *sec_named(const char *pfx, const char *name)
@@ -4095,9 +4188,10 @@ lto_backend:
         }
     }
 
-    /* .rodata: the string literals, at the offsets irgen assigned, then
+    /* .rodata: the string literals (those str_place leaves there), then
      * the const objects, each at its alignment. */
-    int rodata_len = iu->rodata_len, rodata_align = target_section_align(0);
+    str_place(iu, g_merge_strings && target_fmt_get() == TGT_FMT_ELF);
+    int rodata_len = iu->rodata_strs_len, rodata_align = target_section_align(0);
     for (struct global *g = u->globals; g; g = g->next) {
         if (g->absorbed || !g->defined || !g->in_rodata)
             continue;
@@ -4116,8 +4210,9 @@ lto_backend:
     if (rodata_len) {
         rodata = xcalloc(1, (size_t)rodata_len);
         for (int i = 0; i < iu->nstrs; i++)
-            memcpy(rodata + iu->strs[i].off, iu->strs[i].bytes,
-                   (size_t)iu->strs[i].len);
+            if (!iu->strs[i].msec)
+                memcpy(rodata + iu->strs[i].moff, iu->strs[i].bytes,
+                       (size_t)iu->strs[i].len);
         for (struct global *g = u->globals; g; g = g->next) {
             if (g->absorbed || !g->defined || !g->in_rodata)
                 continue;
@@ -5715,6 +5810,24 @@ lto_backend:
                                       SHF_ALLOC, rodata,
                                       (Elf64_Xword)rodata_len,
                                       (Elf64_Xword)rodata_align);
+    /* the mergeable string sections (str_place) */
+    int msec_ndx[8] = { 0 };
+    for (int k = 0; k < iu->nmsecs; k++) {
+        int ml = iu->msecs[k].len;
+        unsigned char *mb = xcalloc((size_t)(ml ? ml : 1), 1);
+        char mn[32];
+        for (int i = 0; i < iu->nstrs; i++)
+            if (iu->strs[i].msec == k + 1)
+                memcpy(mb + iu->strs[i].moff, iu->strs[i].bytes,
+                       (size_t)iu->strs[i].len);
+        snprintf(mn, sizeof mn, ".rodata.str1.%d", iu->msecs[k].align);
+        msec_ndx[k] = elfw_add_section(w, mn, SHT_PROGBITS,
+                                       SHF_ALLOC | SHF_MERGE | SHF_STRINGS,
+                                       mb, (Elf64_Xword)ml,
+                                       (Elf64_Xword)iu->msecs[k].align);
+        elfw_set_entsize(w, msec_ndx[k], 1);
+        free(mb);
+    }
     int data_ndx = 0, bss_ndx = 0;
     /* MIPS: .data and .bss at 16 at least, as clang's and GNU as's MIPS
      * objects have them -- so an object -S reassembled lays out as -c's */
@@ -5924,6 +6037,19 @@ lto_backend:
                                      ELF64_ST_INFO(STB_LOCAL,
                                                    STT_SECTION),
                                      (Elf64_Half)rodata_ndx);
+    /* each mergeable string's own symbol, what its references name */
+    int *str_sym = xcalloc((size_t)(iu->nstrs ? iu->nstrs : 1),
+                           sizeof *str_sym);
+    for (int i = 0; i < iu->nstrs; i++)
+        if (iu->strs[i].msec) {
+            char sn[24];
+            snprintf(sn, sizeof sn, ".LC%d", i);
+            str_sym[i] = elfw_add_symbol(
+                w, sn, (Elf64_Addr)iu->strs[i].moff,
+                (Elf64_Xword)iu->strs[i].len,
+                ELF64_ST_INFO(STB_LOCAL, STT_OBJECT),
+                (Elf64_Half)msec_ndx[iu->strs[i].msec - 1]);
+        }
     /* -g: STT_SECTION symbols for the debug sections, so the line/info
      * fields can relocate against them (DWTGT_ABBREV/DWTGT_LINE). Added here
      * in the local block — the writer refuses a local after any global. */
@@ -6307,8 +6433,9 @@ lto_backend:
                  strs[i].kind == RK_XTENSA_TEXT32;
         /* (the auipc, or the jump's label, is in the same function as
          * the site, so in the same section) */
-        int ssym = rodata_sym;
-        long sadd = target_reloc_addend(ta, strs[i].kind, strs[i].str_off);
+        long soff;
+        int ssym = str_reloc(iu, strs[i].str_off, rodata_sym, str_sym, &soff);
+        long sadd = target_reloc_addend(ta, strs[i].kind, soff);
         if (lo)
             sadd = code_ref(strs[i].patch_off - 4, text_sym, &ssym);
         else if (tx)
@@ -6360,8 +6487,10 @@ lto_backend:
                 sym = g->relocs[i].gtarget->sym_ndx;
                 add = g->relocs[i].addend;
             } else {
-                sym = rodata_sym;
-                add = g->relocs[i].str_off + g->relocs[i].addend;
+                long so;
+                sym = str_reloc(iu, g->relocs[i].str_off, rodata_sym,
+                                str_sym, &so);
+                add = so + g->relocs[i].addend;
             }
             /* A pointer in .data is as wide as a pointer: eight bytes
              * on LP64 and four on ARMv7-M, where asking for ABS64 would
@@ -7667,7 +7796,6 @@ static int embcc_main(int argc, char **argv)
                    strcmp(argv[i], "-fno-PIC") == 0 ||
                    strcmp(argv[i], "-fno-pie") == 0 ||
                    strcmp(argv[i], "-fno-PIE") == 0 ||
-                   strcmp(argv[i], "-fmerge-constants") == 0 ||
                    strcmp(argv[i], "-fno-strict-overflow") == 0 ||
                    strcmp(argv[i], "-fno-delete-null-pointer-checks") == 0 ||
                    strcmp(argv[i], "-fno-tree-loop-distribute-patterns") == 0 ||
@@ -7829,6 +7957,10 @@ static int embcc_main(int argc, char **argv)
             }
             cpp_set_gnuc_version(v[0], v[1], v[2]);
             g_gnuc_given = 1;
+        } else if (strcmp(argv[i], "-fmerge-constants") == 0) {
+            g_merge_strings = 1;
+        } else if (strcmp(argv[i], "-fno-merge-constants") == 0) {
+            g_merge_strings = 0;
         } else if (strcmp(argv[i], "-ffunction-sections") == 0) {
             func_sections = 1;
         } else if (strcmp(argv[i], "-fno-function-sections") == 0) {

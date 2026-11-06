@@ -29,6 +29,8 @@ void elfw_set_sym_prefix(struct elfw *w, const char *prefix);
 void elfw_set_flags(struct elfw *w, unsigned long flags);
 void elfw_free(struct elfw *w);
 void elfw_set_link(struct elfw *w, int sec, int link);
+/* A SHF_MERGE section's entry size (1 for a string table of chars). */
+void elfw_set_entsize(struct elfw *w, int sec, unsigned long entsize);
 int elfw_rela_count(struct elfw *w, int target_ndx);
 void elfw_rela_at(struct elfw *w, int target_ndx, int k, unsigned long *off,
                   int *sym, int *type);

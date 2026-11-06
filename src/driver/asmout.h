@@ -19,4 +19,9 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
                    struct gsite *gs, int ngs,
                    struct fsite *fs, int nfs);
 
+/* main.c: where each string literal goes (.rodata or a mergeable string
+ * section), and the string an old .rodata offset falls in */
+void str_place(struct ir_unit *iu, int merge);
+int str_at(const struct ir_unit *iu, long off, long *delta);
+
 #endif

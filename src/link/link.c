@@ -3316,6 +3316,40 @@ static int eh_rels(struct object *o, int shndx, Elf64_Addr at,
     return n;
 }
 
+/* The bytes an FDE's length must keep (from its CIE pointer on): its
+ * pointers, its augmentation, and its instructions up to the last that
+ * is not DW_CFA_nop, rounded up to 4; -1 when it is not an FDE this can
+ * read. The rest is padding. */
+static long eh_fde_need(const struct insec *s, const unsigned char *rec,
+                        Elf64_Addr old, int be, int addr)
+{
+    unsigned rl = merge_rd32(rec, be), id = merge_rd32(rec + 4, be);
+    if (!id || rl < 8 || old + 4 < id)
+        return -1;
+    /* its CIE, in this input's original bytes (`old`: where the record
+     * was there) */
+    Elf64_Addr cie = old + 4 - id;
+    const unsigned char *orig = s->obj->buf + sh_at(s->obj, s->shndx)->sh_offset;
+    Elf64_Xword osize = sh_at(s->obj, s->shndx)->sh_size;
+    if (cie + 12 > osize)
+        return -1;
+    int enc = eh_cie_fde_enc(orig + cie, orig + osize, addr);
+    int sz = enc < 0 ? 0 : eh_enc_size(enc, addr);
+    if (!sz)
+        return -1;
+    long hdr = 4 + 2L * sz;
+    if (orig[cie + 9] == 'z') {
+        const unsigned char *q = rec + 4 + hdr, *e = rec + 4 + rl;
+        unsigned long al = eh_uleb(&q, e);
+        hdr = (long)(q - (rec + 4)) + (long)al;
+    }
+    long end = hdr;
+    for (long k = hdr; k < (long)rl; k++)
+        if (rec[4 + k])
+            end = k + 1;
+    return (end + 3) & ~3L;
+}
+
 static void merge_eh(struct linker *l)
 {
     /* the last .eh_frame input of each output section: the only one whose
@@ -3450,6 +3484,24 @@ static void merge_eh(struct linker *l)
                 merge_wr32(out + lastrec, merge_rd32(out + lastrec, be) +
                            (unsigned)pad, be);
                 w += pad;
+            }
+        }
+        /* the section's last input ends where the section does: a last
+         * record padded (DW_CFA_nop, zeros) for its own object's alignment
+         * gives the padding back, as ld does */
+        if (i == last_eh && s->align > 1 && w % s->align &&
+            lastrec != (Elf64_Addr)-1 && lastrec + 4 <= w) {
+            Elf64_Addr cut = w % s->align;
+            unsigned rl = merge_rd32(out + lastrec, be);
+            long need = -1;
+            for (int q = 0; q < s->nmp; q++)
+                if (s->mp[q].nw == (long long)lastrec)
+                    need = eh_fde_need(s, out + lastrec, s->mp[q].old, be,
+                                       addr);
+            if (need >= 0 && lastrec + 4 + rl == w && cut % 4 == 0 &&
+                (long)rl - (long)cut >= need) {
+                merge_wr32(out + lastrec, rl - (unsigned)cut, be);
+                w -= cut;
             }
         }
         s->data = out;

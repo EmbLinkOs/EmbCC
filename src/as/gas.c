@@ -3420,7 +3420,7 @@ static int directive(struct gas *g, char *p, int pass)
         char *e = arg, *nm = arg;
         size_t nn;
         Elf64_Word ty;
-        Elf64_Xword fl;
+        Elf64_Xword fl, entsize = 0;
         int k, explicit_flags = 0, explicit_type = 0;
         if (*arg == '"') {
             nm = ++arg;
@@ -3524,7 +3524,7 @@ static int directive(struct gas *g, char *p, int pass)
                                *eend != ',')
                             eend++;
                         if (parse_num(ee, eend, &es) && es > 0)
-                            (void)es;
+                            entsize = (Elf64_Xword)es;
                     }
                 }
             }
@@ -3532,6 +3532,8 @@ static int directive(struct gas *g, char *p, int pass)
         k = sec_find(g, nm, nn);
         if (k < 0) {
             k = sec_add(g, nm, nn, ty, fl);
+            if (fl & SHF_MERGE)
+                g->secs[k].entsize = entsize;
         } else if ((explicit_flags && g->secs[k].flags != fl) ||
                    (explicit_type && g->secs[k].type != ty)) {
             /* GNU as warns and keeps the first declaration's, and GCC
@@ -4537,6 +4539,8 @@ static int write_object(struct gas *g, const char *out_path)
                                   (Elf64_Xword)(sc->type == SHT_NOBITS
                                                 ? sc->size : sc->c.len),
                                   (Elf64_Xword)al);
+        if (sc->entsize)
+            elfw_set_entsize(w, ndx[i], (unsigned long)sc->entsize);
     }
 
     /* `.set a, b` / `.thumb_set a, b`: a takes b's place, now that b has
@@ -4582,11 +4586,17 @@ static int write_object(struct gas *g, const char *out_path)
                        (f)->type == g->tgt->r_abs64 || \
                        ((f)->type == g->tgt->r_abs16 && g->tgt->r_abs16) || \
                        (g->tgt->machine == EM_X86_64 && x86_secsym_reloc((f)->type))))
+    /* ...but never in a SHF_MERGE section: the linker moves each string
+     * on its own, so a reference names the string's label -- `.LC3-4`
+     * read as section+offset-4 would be the string before. (GNU as
+     * keeps the label only when there is an addend; keeping it always
+     * is what EmbCC's -c writes, so -S assembles into the same object.) */
+#define MERGE_KEEPS(f, s) ((void)(f), (g->secs[(s)->sec].flags & SHF_MERGE) != 0)
     for (i = 0; i < g->nfix; i++) {
         struct sym *s = sym_find(g, g->fix[i].sym, strlen(g->fix[i].sym));
         if (!s) continue;
         if (!s->is_global && s->sec >= 0 && !s->is_func &&
-            DATA_RELOC(&g->fix[i]))
+            DATA_RELOC(&g->fix[i]) && !MERGE_KEEPS(&g->fix[i], s))
             secsym[s->sec] = -1;            /* wanted; index below */
         else
             keep[s - g->syms] = 1;
@@ -4679,7 +4689,7 @@ static int write_object(struct gas *g, const char *out_path)
         struct fixup *f = &g->fix[i];
         struct sym *s = sym_find(g, f->sym, strlen(f->sym));
         if (s && !s->is_global && s->sec >= 0 && !s->is_func &&
-            secsym[s->sec] > 0 && DATA_RELOC(f)) {
+            secsym[s->sec] > 0 && DATA_RELOC(f) && !MERGE_KEEPS(f, s)) {
             elfw_add_rela(w, ndx[f->sec], (Elf64_Addr)f->off, secsym[s->sec],
                           f->type, f->addend + s->value);
             continue;

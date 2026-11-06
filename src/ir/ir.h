@@ -643,6 +643,10 @@ struct ir_str {
     int off;                 /* offset inside .rodata */
     int align;               /* what `off` is a multiple of (0: nothing
                               * asked); .rodata itself is 16-aligned */
+    /* Where the object writer put it (str_place): msec 0 is .rodata, at
+     * moff; k > 0 is the unit's k-th mergeable string section
+     * (.rodata.str1.ALIGN), at moff there. */
+    int msec, moff;
 };
 
 /* A symbol EmbIR refers to, by NAME rather than by a pointer into the AST
@@ -668,6 +672,10 @@ struct ir_unit {
     struct ir_str *strs;
     int nstrs, capstrs;
     int rodata_len;
+    /* str_place's: the mergeable string sections (alignment, length) and
+     * the end of the strings left in .rodata */
+    struct { int align, len; } msecs[8];
+    int nmsecs, rodata_strs_len;
     /* open-addressed indexes (entry: index + 1) over syms and strs, so
      * interning is not a scan: a whole program under -flto has hundreds
      * of thousands of each */

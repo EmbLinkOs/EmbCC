@@ -151,12 +151,44 @@ static void blocks_emit(struct outbuf *b, struct unit *u,
  * section below defines. */
 static void str_label(char *out, size_t cap, const struct ir_unit *iu, int off)
 {
-    for (int i = 0; i < iu->nstrs; i++)
-        if (iu->strs[i].off == off) {
-            snprintf(out, cap, ".LC%d", i);
-            return;
-        }
-    snprintf(out, cap, ".LC_at_%d", off);
+    long d;
+    int i = str_at(iu, off, &d);
+    if (i < 0)
+        snprintf(out, cap, ".LC_at_%d", off);
+    else if (d)
+        snprintf(out, cap, ".LC%d+%ld", i, d);
+    else
+        snprintf(out, cap, ".LC%d", i);
+}
+
+/* The strings of one section (.rodata: msec 0; a mergeable one: k),
+ * each under its label at the offset the object gives it. */
+static const char *type_sigil(void);
+
+static void strs_emit(struct outbuf *b, const struct ir_unit *iu, int msec)
+{
+    long cur = 0;
+    for (int i = 0; i < iu->nstrs; i++) {
+        const struct ir_str *st = &iu->strs[i];
+        if (st->msec != msec)
+            continue;
+        if (st->moff < cur)
+            internal_error("-S: string %d at +%d overlaps the one before it",
+                           i, st->moff);
+        if (st->moff > cur)
+            ob_fmt(b, "\t.zero\t%ld\n", st->moff - cur);
+        if (st->align > 1)
+            ob_fmt(b, "\t.balign\t%d\n", st->align);
+        cur = st->moff + st->len;
+        if (msec)               /* a symbol in the object, as -c makes it */
+            ob_fmt(b, "\t.type\t.LC%d, %sobject\n\t.size\t.LC%d, %d\n",
+                   i, type_sigil(), i, st->len);
+        ob_fmt(b, ".LC%d:\n", i);
+        ob_str(b, "\t.byte\t");
+        for (int k = 0; k < st->len; k++)
+            ob_fmt(b, "%s%d", k ? "," : "", (int)(unsigned char)st->bytes[k]);
+        ob_str(b, "\n");
+    }
 }
 
 /* A relocation against a place in this object's own code -- an Xtensa
@@ -1171,30 +1203,25 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
 
     /* .rodata: the string literals, each under the label the code refers
      * to. Emitted as bytes, because a string may hold anything. */
-    if (rodata && iu->rodata_len > 0) {
+    long rodata_end = 0;
+    for (int i = 0; i < iu->nstrs; i++)
+        if (!iu->strs[i].msec &&
+            iu->strs[i].moff + iu->strs[i].len > rodata_end)
+            rodata_end = iu->strs[i].moff + iu->strs[i].len;
+    if (rodata && rodata_end > 0) {
         ob_str(b, "\n\t.section\t.rodata\n");
         /* the object's .rodata is aligned as main.c aligns it
          * (target_section_align); an assembler's starts at 1 unless told */
         ob_fmt(b, "\t.balign\t%d\n", target_section_align(0));
-        long cur = 0;
-        for (int i = 0; i < iu->nstrs; i++) {
-            /* the same gap irgen left, as zeros, so each string is at
-             * the offset the code's relocations were computed for */
-            if (iu->strs[i].off < cur)
-                internal_error("-S: string %d at .rodata+%d overlaps the "
-                               "one before it", i, iu->strs[i].off);
-            if (iu->strs[i].off > cur)
-                ob_fmt(b, "\t.zero\t%ld\n", iu->strs[i].off - cur);
-            if (iu->strs[i].align > 1)
-                ob_fmt(b, "\t.balign\t%d\n", iu->strs[i].align);
-            cur = iu->strs[i].off + iu->strs[i].len;
-            ob_fmt(b, ".LC%d:\n", i);
-            ob_str(b, "\t.byte\t");
-            for (int k = 0; k < iu->strs[i].len; k++)
-                ob_fmt(b, "%s%d", k ? "," : "",
-                       (int)(unsigned char)iu->strs[i].bytes[k]);
-            ob_str(b, "\n");
-        }
+        strs_emit(b, iu, 0);
+    }
+    /* the mergeable ones, in the sections main.c gives them */
+    for (int k = 0; k < iu->nmsecs; k++) {
+        ob_fmt(b, "\n\t.section\t.rodata.str1.%d,\"aMS\",%sprogbits,1\n",
+               iu->msecs[k].align, type_sigil());
+        if (iu->msecs[k].align > 1)
+            ob_fmt(b, "\t.balign\t%d\n", iu->msecs[k].align);
+        strs_emit(b, iu, k + 1);
     }
 
     /* Globals defined here, where the object put them. main.c laid out
@@ -1204,14 +1231,10 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
      * deriving one of its own. The one it derived was the -S of another
      * object: _Alignas(64) and a section attribute dropped, an empty
      * struct left undefined, a TLS object put in .data. */
-    long rodata_end = 0;
-    for (int i = 0; i < iu->nstrs; i++)
-        if (iu->strs[i].off + iu->strs[i].len > rodata_end)
-            rodata_end = iu->strs[i].off + iu->strs[i].len;
     globals_emit(b, u, iu, GS_DATA, 0, NULL, 0);
     globals_emit(b, u, iu, GS_BSS, 0, NULL, 0);
     globals_emit(b, u, iu, GS_RODATA, 0, NULL,
-                 rodata && iu->rodata_len > 0 ? rodata_end : -1);
+                 rodata && rodata_end > 0 ? rodata_end : -1);
     globals_emit(b, u, iu, GS_TDATA, 0, NULL, 0);
     globals_emit(b, u, iu, GS_TBSS, 0, NULL, 0);
     for (int k = 1; ; k++) {

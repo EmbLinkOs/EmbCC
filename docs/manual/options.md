@@ -111,6 +111,8 @@ EmbCC's own spellings come first. Where GCC spells the same thing differently, i
 | `--sections=data` | each object in its own section | `-fdata-sections` |
 | `--sections=functions,data` | both | `-ffunction-sections -fdata-sections` |
 | `--sections=data,functions` | both | `-ffunction-sections -fdata-sections` |
+| `--merge-strings` | string literals in mergeable sections, kept once per image by the linker (the default) | `-fmerge-constants` |
+| `--no-merge-strings` | string literals in .rodata, each object's its own | `-fno-merge-constants` |
 | `--inline=declared` | inline only what is declared inline | `-fno-inline-functions` |
 | `--inline=auto` | inline what pays (the default from -O2) | `-finline-functions` |
 | `--unroll` | unroll loops | `-funroll-loops` |
@@ -304,7 +306,6 @@ GCC flags EmbCC reads, either because they change nothing here or so as to refus
 | `-ffinite-math-only` | part of --fast-math |
 | `-fassociative-math` | part of --fast-math |
 | `-freciprocal-math` | part of --fast-math |
-| `-fmerge-constants` | accepted |
 | `-fno-strict-overflow` | accepted: overflow wraps |
 | `-fno-delete-null-pointer-checks` | accepted |
 | `-fno-tree-loop-distribute-patterns` | accepted |
