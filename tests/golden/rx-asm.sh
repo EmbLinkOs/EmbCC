@@ -289,7 +289,7 @@ while IFS='@' read -r stmt msg; do
     nr=$((nr + 1))
     [ "$msg" = ACCEPTED ] && { echo "'$stmt' was accepted"; exit 1; }
     case $msg in
-    *"is not in the RX vocabulary"*|*"FPU or RXv2"*|*" is not "*|\
+    *"is not in the RX vocabulary"*|*"FPU or RXv2"*|*"is an FPU instruction"*|*"RXv2 or RXv3"*|*" is not "*|\
     *"does not fit"*|*"out of reach"*|*"out of range"*|*"too many operands"*|\
     *"takes "*|*"these operands"*|*"the size is"*|*"memory-to-memory"*|\
     *"inline asm cannot"*|*"cannot be written"*|*"cannot be it"*|\
@@ -341,7 +341,7 @@ refs() {            # refs WHAT PATTERN SOURCE: a .s file
         echo "$1 was refused, but not by name:"; cat "$out/bad.err"; exit 1; }
 }
 refs "a .s branch to a symbol elsewhere" "carries no relocation" '	bra.s _f'
-refs "a symbol where none relocates" "cannot relocate" '	add #_f, r1'
+refs "a symbol where none relocates" "cannot relocate" '	shll #_f, r1'
 refs ".align 3" "a byte count, a power of two" '	.align 3'
 refs "a .s branch out of reach" "out of reach" '	bra.s 1f
 	.space 20

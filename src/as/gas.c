@@ -1351,13 +1351,13 @@ static char *substitute(struct gas *g, const char *stmt, long pc,
              * two sections land is the linker's business. Nor is a weak
              * symbol, whose definition the link may replace. Both go to
              * the relocating forms, as an external symbol does. */
-            /* (and on ARM and x86-64 a GLOBAL label of this section, for a
+            /* (and on ARM, x86-64 and RX a GLOBAL label of this section, for a
              * branch: llvm-mc and GNU as leave its call and jump to the
              * linker, which may put a veneer or another definition there) */
             int arm_glob = sy && sy->sec == g->cur && sy->is_global &&
                            ((g->tgt->machine == EM_ARM && arm_branch_stmt(stmt)) ||
-                            (g->tgt->machine == EM_X86_64 && g->tgt->is_transfer &&
-                             g->tgt->is_transfer(stmt)));
+                            ((g->tgt->machine == EM_X86_64 || g->tgt->machine == EM_RX) &&
+                             g->tgt->is_transfer && g->tgt->is_transfer(stmt)));
             if (sy && sy->sec >= 0 && (sy->sec != g->cur || sy->is_weak || arm_glob) &&
                 pass == 2) {
                 if (!*ext)
@@ -4330,6 +4330,20 @@ static int write_object(struct gas *g, const char *out_path)
      * and embld's): GNU as writes the addend into the word and 0 in the
      * relocation -- against a local's section, the label's offset too --
      * and so does this, before the sections are copied out */
+    /* RX: GNU as writes a label of this file's offset (and the addend)
+     * into an R_RX_DIR32 field as well as relocating it against the
+     * label; the linker overwrites it, and an object reads the same */
+    if (g->tgt->machine == EM_RX)
+        for (int k = 0; k < g->nfix; k++) {
+            struct fixup *f = &g->fix[k];
+            struct sym *s = sym_find(g, f->sym, strlen(f->sym));
+            if (f->type != R_RX_DIR32 || !s || s->sec < 0 || s->is_global ||
+                sec_is_nobits(g, f->sec) ||
+                f->off + 4 > g->secs[f->sec].c.len)
+                continue;
+            code_patch32(&g->secs[f->sec].c, (int)f->off,
+                         (unsigned long)(s->value + f->addend) & 0xffffffffUL);
+        }
     if (g->tgt->machine == EM_XTENSA)
         for (int k = 0; k < g->nfix; k++) {
             struct fixup *f = &g->fix[k];
@@ -4399,10 +4413,11 @@ static int write_object(struct gas *g, const char *out_path)
     char *keep = xcalloc((size_t)(g->nsyms ? g->nsyms : 1), 1);
     /* (only a DATA word: a branch or a call names the label itself, as
      * clang's and GNU's assemblers do) */
-#define DATA_RELOC(f) ((f)->type == g->tgt->r_abs32 || \
+#define DATA_RELOC(f) (g->tgt->machine != EM_RX && /* (RX names the label) */ \
+                       ((f)->type == g->tgt->r_abs32 || \
                        (f)->type == g->tgt->r_abs64 || \
                        ((f)->type == g->tgt->r_abs16 && g->tgt->r_abs16) || \
-                       (g->tgt->machine == EM_X86_64 && x86_secsym_reloc((f)->type)))
+                       (g->tgt->machine == EM_X86_64 && x86_secsym_reloc((f)->type))))
     for (i = 0; i < g->nfix; i++) {
         struct sym *s = sym_find(g, g->fix[i].sym, strlen(g->fix[i].sym));
         if (!s) continue;

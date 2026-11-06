@@ -83,7 +83,7 @@ T = {
             "-mlongcalls -mtext-section-literals",
             HOME + "/cross/xtensa/xtensa-esp-elf/bin/xtensa-esp32-elf-as --longcalls --text-section-literals --no-target-align {src} -o {obj}",
             HOME + "/cross/xtensa/xtensa-esp-elf/bin/xtensa-esp32-elf-objdump", "#"),
-  "rx":    ("--target=rx-none-elf", HOME + "/cross/rx-elf/bin/rx-elf-gcc", "",
+  "rx":    ("--target=rx-none-elf -fpu", HOME + "/cross/rx-elf/bin/rx-elf-gcc", "",
             HOME + "/cross/rx-elf/bin/rx-elf-as {src} -o {obj}",
             HOME + "/cross/rx-elf/bin/rx-elf-objdump", ";"),
   "m68k":  ("--target=m68k-none-elf", "m68k-elf-gcc", "-mcpu=5208",
