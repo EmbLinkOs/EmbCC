@@ -945,6 +945,8 @@ static int zc_stmt(const char *stmt, int len, struct tok *t, int n,
  * backend measures some of its own sequences in bytes. */
 static int s_gas;          /* assembling for gas.c */
 static int s_rvc;          /* ...with the C extension, as .option says */
+static int s_rvc_any;      /* ...and it was turned on (EF_RISCV_RVC) */
+int rvasm_rvc_used(void) { return s_rvc_any; }
 static int s_rvc_stack[16], s_nrvc;
 static int s_lvl, s_took;
 static int s_nocomp;       /* this statement carries a relocation */
@@ -957,6 +959,7 @@ void rvasm_reset(void)
 {
     s_gas = 1;
     s_rvc = target_riscv_rvc();
+    s_rvc_any |= s_rvc;
     s_nrvc = 0;
 }
 void rvasm_gas_done(void) { s_gas = 0; s_rvc = 0; }
@@ -966,7 +969,7 @@ int rvasm_option(const char *arg)
 {
     while (*arg == ' ' || *arg == '\t') arg++;
     if (!strncmp(arg, "norvc", 5)) { s_rvc = 0; return 1; }
-    if (!strncmp(arg, "rvc", 3)) { s_rvc = 1; return 1; }
+    if (!strncmp(arg, "rvc", 3)) { s_rvc = 1; s_rvc_any = 1; return 1; }
     if (!strncmp(arg, "push", 4)) {
         if (s_nrvc < 16) s_rvc_stack[s_nrvc++] = s_rvc;
         return 1;

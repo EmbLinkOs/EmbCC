@@ -22,6 +22,10 @@ static int g_took;
 static int g_raw;
 #define RELOC_MARK 0x7e5a3c1fUL
 
+/* an ISA_A+ instruction was assembled: the object's e_flags say A+ */
+static int g_isa_aplus;
+int cfasm_isa_aplus(void) { return g_isa_aplus; }
+
 void cfasm_set_level(int level)
 {
     g_level = level;
@@ -302,8 +306,11 @@ static int paren_ea(const char *what, const char *dsp, int dl,
     }
     if (d < -32768 || d > 32767)
         FAIL("%s: displacement %lld does not fit 16 bits", what, d);
-    if (d == 0 && !hasd) {
+    /* (a zero displacement, written or not, is (An): GNU as shortens
+     * 0(%sp) to (%sp) too) */
+    if (d == 0) {
         o->ea.mode = CFM_IND;
+        (void)hasd;
         return 0;
     }
     o->ea.mode = CFM_DISP;
@@ -512,6 +519,23 @@ static int parse_opd(const char *s, int len, struct opd *o, const char *what,
             }
         }
     }
+    /* `2.w`, `0x400.l`: an absolute address with its size, as GNU as
+     * writes one without the parentheses */
+    if (len > 2 && s[len - 2] == '.' && (tolower((unsigned char)s[len - 1]) == 'w' ||
+                                        tolower((unsigned char)s[len - 1]) == 'l')) {
+        long long a;
+        if (asm_const_expr(s, len - 2, &a)) {
+            if (tolower((unsigned char)s[len - 1]) == 'w') {
+                if (a < -32768 || a > 32767)
+                    FAIL("%s: %lld.w is not a 16-bit address", what, a);
+                o->ea.mode = CFM_ABSW;
+            } else
+                o->ea.mode = CFM_ABSL;
+            o->ea.disp = (long)a;
+            o->ea.xscale = 1;
+            return 0;
+        }
+    }
     /* a bare number: an absolute long address */
     {
         long long a;
@@ -541,7 +565,23 @@ struct stmt {
     char sfx;            /* 'b' 'w' 'l' 's', or 0 */
     struct opd o[MAXOPD];
     int n;
+    int pseudo;          /* jra/jbsr/jCC, GNU's: sized by reach */
+    int jbsr;            /* ...jbsr: its 16-bit form is jsr (d16,%pc) */
 };
+
+/* GNU as's relaxable pseudo-branches: jra is bra, jbsr bsr, jCC bCC --
+ * the size chosen as for an unsized bra (and a jbsr or jra to a symbol
+ * elsewhere a jsr or jmp, as cfasm_symform makes of bra and bsr) */
+static int pseudo_branch(char *mn)
+{
+    if (!strcmp(mn, "jra")) { strcpy(mn, "bra"); return 1; }
+    if (!strcmp(mn, "jbsr")) { strcpy(mn, "bsr"); return 2; }
+    if (mn[0] == 'j' && strcmp(mn, "jmp") && strcmp(mn, "jsr") && cond_of(mn + 1) >= 0) {
+        mn[0] = 'b';
+        return 1;
+    }
+    return 0;
+}
 
 static int split_stmt(const char *s, int len, struct stmt *st, char *err,
                       int errlen)
@@ -568,6 +608,8 @@ static int split_stmt(const char *s, int len, struct stmt *st, char *err,
             *dot = 0;
         }
     }
+    st->pseudo = pseudo_branch(st->mn);
+    st->jbsr = st->pseudo == 2;
     ml = i;
     while (ml < len && st->n < MAXOPD) {
         int depth = 0, b;
@@ -581,14 +623,52 @@ static int split_stmt(const char *s, int len, struct stmt *st, char *err,
             else if (s[ml] == ')') depth--;
             ml++;
         }
+        /* `jra (label)`: GNU reads the parenthesized target as the label;
+         * and `(.+N)` / `(.+N).l`, a label of this section gas.c wrote,
+         * is that label wherever it stands */
+        {
+            const char *ps = s + b;
+            int pl = ml - b;
+            while (pl > 0 && isspace((unsigned char)ps[pl - 1])) pl--;
+            while (pl > 0 && isspace((unsigned char)*ps)) { ps++; pl--; }
+            if (pl > 4 && ps[pl - 2] == '.' && (ps[pl - 1] == 'l' || ps[pl - 1] == 'L') &&
+                ps[pl - 3] == ')' && ps[1] == '.' && (ps[2] == '+' || ps[2] == '-'))
+                pl -= 2;
+            if (pl > 2 && ps[0] == '(' && ps[pl - 1] == ')' && !memchr(ps, '%', (size_t)pl) &&
+                !memchr(ps, ',', (size_t)pl) &&
+                (st->pseudo || (ps[1] == '.' && (ps[2] == '+' || ps[2] == '-')))) {
+                if (parse_opd(ps + 1, pl - 2, &st->o[st->n], st->full, err, errlen))
+                    return -1;
+                st->n++;
+                goto next_opd;
+            }
+        }
         if (parse_opd(s + b, ml - b, &st->o[st->n], st->full, err, errlen))
             return -1;
         st->n++;
+next_opd:
         if (ml < len)
             ml++;
     }
     if (ml < len)
         FAIL("%s: too many operands", st->full);
+    /* `jsr .+N`, `lea .+N, %a0`, `move.l .+N, %d0`: a label of this
+     * section read as an address -- gas.c leaves one in reach that way --
+     * is (d16,%pc), from the extension word after the opcode word, as GNU
+     * as makes it; a branch's .+N stays its target */
+    if (st->n >= 1 && st->o[0].k == K_TGT &&
+        !(st->mn[0] == 'b' && (!strcmp(st->mn, "bra") || !strcmp(st->mn, "bsr") ||
+                               cond_of(st->mn + 1) >= 0)) &&
+        strncmp(st->mn, "db", 2)) {
+        long long d = st->o[0].v - 2;
+        if (d < -32768 || d > 32767)
+            FAIL("%s: the label is %lld bytes away, beyond (d16,%%pc)", st->full,
+                 st->o[0].v);
+        st->o[0].k = K_EA;
+        st->o[0].ea.mode = CFM_PCDISP;
+        st->o[0].ea.disp = (long)d;
+        st->o[0].ea.xscale = 1;
+    }
     return 0;
 }
 
@@ -857,7 +937,10 @@ static void br_emit(struct code *out, int bsr, int cond, int kind,
         if (bsr) cf_bsr_b(out, (long)d);
         else     cf_bcc_b(out, cond, (long)d);
     } else {
-        if (bsr) cf_bsr_w(out, (long)d);
+        /* jbsr's 16-bit form is jsr (d16,%pc), as GNU as relaxes it (the
+         * displacement from the extension word, as bsr.w's) */
+        if (bsr == 2) { cf_w(out, 0x4ebau); cf_w(out, (unsigned)d & 0xffffu); }
+        else if (bsr) cf_bsr_w(out, (long)d);
         else     cf_bcc_w(out, cond, (long)d);
     }
 }
@@ -894,6 +977,19 @@ static int do_branch(struct stmt *st, struct code *out, int bsr, int cond,
         br_emit(out, bsr, cond, kind, g_raw ? 0 : d);
         return 0;
     }
+    /* (a written, unsized bra, bsr or bCC is .w, as GNU as takes it --
+     * only GNU's j-forms, jra jbsr jCC, relax -- in inline asm too, which
+     * GCC sends through GNU as) */
+    if (!st->pseudo) {
+        if (!g_raw && g_level >= 0 && !br_reaches(1, d))
+            FAIL("%s: the target is %lld bytes away, out of reach of a branch "
+                 "(+-32 KiB; the MCF5208 has no 32-bit one): jmp to it",
+                 st->full, a->v);
+        br_emit(out, bsr, cond, 1, d);
+        return 0;
+    }
+    if (bsr && st->jbsr)
+        bsr = 2;
     if (g_level < 0) {
         kind = 0;
     } else {
@@ -1115,12 +1211,27 @@ static int stmt_body(const char *s, int len, struct code *out, char *err,
                 return 0;
             }
     }
+    /* ISA_A+'s bit scans and reversals on a data register */
+    if ((is(&st, "ff1") || is(&st, "bitrev") || is(&st, "byterev")) && !st.sfx) {
+        if (need_n(&st, 1, err, errlen))
+            return -1;
+        if (!is_d(&st.o[0]))
+            FAIL("%s: \"%.*s\" is not a data register", st.full, st.o[0].len,
+                 st.o[0].s);
+        cf_w(out, (is(&st, "ff1") ? 0x04c0u : is(&st, "bitrev") ? 0x00c0u : 0x02c0u) |
+                  (unsigned)(st.o[0].ea.reg & 7));
+        g_isa_aplus = 1;
+        return 0;
+    }
     if (is(&st, "clr") || is(&st, "tst")) {
         if (need_n(&st, 1, err, errlen) ||
             need_size(&st, 2, 7, &size, err, errlen))
             return -1;
+        /* (tst.w and tst.l of an address register: ISA_A+'s, as GNU as
+         * takes it for the MCF5208) */
         if (st.o[0].k != K_EA ||
-            (!is_d(&st.o[0]) && !cf_ea_is_mem_alterable(&st.o[0].ea)))
+            (!is_d(&st.o[0]) && !cf_ea_is_mem_alterable(&st.o[0].ea) &&
+             !(is(&st, "tst") && size != 1 && st.o[0].ea.mode == CFM_A)))
             FAIL("%s: \"%.*s\" is not a data register or memory", st.full,
                  st.o[0].len, st.o[0].s);
         if (is(&st, "clr")) cf_clr(out, size, st.o[0].ea);
@@ -1278,9 +1389,16 @@ static int stmt_body(const char *s, int len, struct code *out, char *err,
         if (need_n(&st, 2, err, errlen) ||
             need_size(&st, 4, 4, &size, err, errlen))
             FAIL("movem: ColdFire's form is movem.l");
-        l = a->k == K_LIST || (a->k == K_EA && cf_ea_is_reg(&a->ea)) ? a : b;
+        /* the list: registers, or `#mask` as GCC writes it (bit 0 d0
+         * ... bit 15 a7, the order movem's own mask has) */
+        l = a->k == K_LIST || (a->k == K_EA && cf_ea_is_reg(&a->ea)) ||
+            (a->k == K_EA && a->ea.mode == CFM_IMM) ? a : b;
         m = l == a ? b : a;
-        if (l->k == K_EA)
+        if (l->k == K_EA && l->ea.mode == CFM_IMM) {
+            if (l->v < 1 || l->v > 0xffff)
+                FAIL("movem: the mask #%lld is not a register list (1..0xffff)", l->v);
+            l->mask = (unsigned)l->v;
+        } else if (l->k == K_EA)
             l->mask = 1u << l->ea.reg;
         if (m->k != K_EA || (m->ea.mode != CFM_IND && m->ea.mode != CFM_DISP))
             FAIL("movem: the memory operand is (An) or (d16,An) on ColdFire "
@@ -1536,6 +1654,7 @@ static int mnemonic(const char *p, char *mn, int cap, char *sfx)
             *dot = 0;
         }
     }
+    pseudo_branch(mn);
     return n;
 }
 
@@ -1614,8 +1733,18 @@ int cfasm_symform(const char *stmt, struct asm_symform *f)
     memset(f, 0, sizeof *f);
     o = skip_sp(p + ml);
     if (cfasm_is_transfer(stmt)) {
+        const char *po = o;
         n = sym_operand(o, &slen, &add);
-        if (!n || *skip_sp(o + n))
+        /* `jra (ext)`: the parenthesized target of a pseudo-branch */
+        if (!n && *o == '(' && p[0] == 'j') {
+            n = sym_operand(o + 1, &slen, &add);
+            if (n && *skip_sp(o + 1 + n) == ')' && !*skip_sp(skip_sp(o + 1 + n) + 1)) {
+                o = o + 1;
+                po = NULL;
+            } else
+                n = 0;
+        }
+        if (!n || (po && *skip_sp(o + n)))
             return 0;
         if (sfx && sfx != 'w') {
             f->sym_at = (int)(o - stmt);
@@ -1658,6 +1787,81 @@ int cfasm_symform(const char *stmt, struct asm_symform *f)
             b++;
         }
         n = sym_operand(b, &slen, &add);
+        /* `sym+K.l`: the absolute long address with its size written */
+        if (n && b[n] == '.' && (b[n + 1] == 'l' || b[n + 1] == 'L') &&
+            !asm_symc((unsigned char)b[n + 2])) {
+            const char *z = b + n + 2;
+            if (skip_sp(z) >= q) {
+                char text[128];
+                struct code c = { 0 };
+                char err[160];
+                int at = -1;
+                int tl = snprintf(text, sizeof text, "%.*s(0x%lx).l%s",
+                                  (int)(b - stmt), stmt, RELOC_MARK, q);
+                if (tl < 0 || (size_t)tl >= sizeof text)
+                    return 0;
+                if (cfasm_encode(text, &c, err, (int)sizeof err) == 0)
+                    for (int j = 0; j + 4 <= c.len; j += 2)
+                        if (cf_rdw(&c, j) == (RELOC_MARK >> 16) &&
+                            cf_rdw(&c, j + 2) == (RELOC_MARK & 0xffff)) {
+                            at = j;
+                            break;
+                        }
+                free(c.p);
+                if (at < 0)
+                    return 0;
+                f->sym_at = (int)(b - stmt);
+                f->sym_len = slen;
+                f->addend = add;
+                if ((size_t)snprintf(f->encode, sizeof f->encode, "\003%s", text) >=
+                    sizeof f->encode)
+                    return 0;
+                f->site[0].off = at;
+                f->site[0].reloc = R_68K_32;
+                f->nsites = 1;
+                return 1;
+            }
+        }
+        /* `(sym)` and `(sym).l`: the same absolute address, parenthesized */
+        if (!n && !imm && *b == '(') {
+            int k = sym_operand(b + 1, &slen, &add);
+            const char *e = k ? skip_sp(b + 1 + k) : NULL;
+            if (e && *e == ')') {
+                const char *z = e + 1;
+                if (z[0] == '.' && (z[1] == 'l' || z[1] == 'L'))
+                    z += 2;
+                if (skip_sp(z) >= q) {
+                    char text[128];
+                    struct code c = { 0 };
+                    char err[160];
+                    int at = -1;
+                    int tl = snprintf(text, sizeof text, "%.*s(0x%lx).l%s",
+                                      (int)(b - stmt), stmt, RELOC_MARK, q);
+                    if (tl < 0 || (size_t)tl >= sizeof text)
+                        return 0;
+                    if (cfasm_encode(text, &c, err, (int)sizeof err) == 0)
+                        for (int j = 0; j + 4 <= c.len; j += 2)
+                            if (cf_rdw(&c, j) == (RELOC_MARK >> 16) &&
+                                cf_rdw(&c, j + 2) == (RELOC_MARK & 0xffff)) {
+                                at = j;
+                                break;
+                            }
+                    free(c.p);
+                    if (at < 0)
+                        return 0;
+                    f->sym_at = (int)(b + 1 - stmt);
+                    f->sym_len = slen;
+                    f->addend = add;
+                    if ((size_t)snprintf(f->encode, sizeof f->encode, "\003%s", text) >=
+                        sizeof f->encode)
+                        return 0;
+                    f->site[0].off = at;
+                    f->site[0].reloc = R_68K_32;
+                    f->nsites = 1;
+                    return 1;
+                }
+            }
+        }
         if (n && skip_sp(b + n) >= q) {
             char text[128];
             struct code c = { 0 };
@@ -1948,8 +2152,13 @@ void cfasm_vocabulary(FILE *f)
 
     /* movem: every register's bit, both ways, lists and ranges */
     for (int r = 0; r < 16; r++) {
-        fprintf(f, "movem.l %s,(%d,%%sp)`moveml %%%s,%%sp@(%d)\n", v_reg(r, 0),
-                4 * r, cf_reg_name(r), 4 * r);
+        /* (a zero displacement is (An), as GNU as shortens it) */
+        if (r == 0)
+            fprintf(f, "movem.l %s,(0,%%sp)`moveml %%%s,%%sp@\n", v_reg(r, 0),
+                    cf_reg_name(r));
+        else
+            fprintf(f, "movem.l %s,(%d,%%sp)`moveml %%%s,%%sp@(%d)\n", v_reg(r, 0),
+                    4 * r, cf_reg_name(r), 4 * r);
         fprintf(f, "movem.l %d(%%fp),%s`moveml %%fp@(%d),%%%s\n", -4 * r - 4,
                 v_reg(r, r & 1), -4 * r - 4, cf_reg_name(r));
     }
@@ -2114,15 +2323,18 @@ void cfasm_vocabulary(FILE *f)
             fprintf(f, "b%s.w .%+ld`b%sw {+%ld}\n", cn, wd[k], cn, wd[k]);
             fprintf(f, "b%s.s .%+ld`b%ss {+%ld}\n", cn, sd[k], cn, sd[k]);
         }
-        /* no size: the shortest that reaches */
-        fprintf(f, "b%s .+100`b%ss {+100}\nb%s .-200`b%sw {+-200}\n", cn, cn,
+        /* no size: .w, as GNU as writes it; GNU's jCC is the shortest
+         * that reaches */
+        fprintf(f, "b%s .+100`b%sw {+100}\nb%s .-200`b%sw {+-200}\n", cn, cn,
+                cn, cn);
+        fprintf(f, "j%s .+100`b%ss {+100}\nj%s .-200`b%sw {+-200}\n", cn, cn,
                 cn, cn);
         fprintf(f, "b%s .+2`b%sw {+2}\nb%s .+32769`b%sw {+32769}\n", cn,
                 cn, cn, cn);
     }
     fprintf(f, "bhs.s .+8`bccs {+8}\nblo.w .+8`bcsw {+8}\n");
     fprintf(f, "bsr.s .+20`bsrs {+20}\nbsr.w .-1000`bsrw {+-1000}\n");
-    fprintf(f, "bsr .+20`bsrs {+20}\n");
+    fprintf(f, "bsr .+20`bsrw {+20}\n");
     fprintf(f, "bsr .+1000`bsrw {+1000}\n");
 
     /* the rest */

@@ -97,7 +97,7 @@ else
     echo "SKIP the QEMU half: $QEMU not found"
 fi
 # a numeric label in a template is the distance it names
-printf '1: subq.l #1,%%d0|bne 1b\nsubq.l #1,%%d0|bne .-2\nbeq 2f|nop|nop|2: rts\nbeq .+6|nop|nop|rts\nbra 3f|nop|3: rts\nbra .+4|nop|rts\n' |
+printf '1: subq.l #1,%%d0|bne 1b\nsubq.l #1,%%d0|bne .-2\nbeq 2f|nop|nop|2: rts\nbeq .+8|nop|nop|rts\nbra 3f|nop|3: rts\nbra .+6|nop|rts\n' |
     "$out/cfasmcheck" --bytes > "$out/lab.txt" 2> "$out/lab.err" || {
     echo "a template with labels was refused:"; cat "$out/lab.err"; exit 1; }
 awk -F'@' 'NR % 2 == 1 { a = $2; next } $2 != a { bad = 1 } END { exit bad }' \

@@ -51,6 +51,10 @@
 #if !FAMILY_BUILT(xtensa)
 #define xtasm_movi_operand(st, x, len) ((void)(st), (void)(x), (void)(len), -1)
 #define xtasm_is_entry(st) ((void)(st), 0)
+#define xtasm_call_operand(st, x, len) ((void)(st), (void)(x), (void)(len), -1)
+#define xtasm_longcalls() 0
+#define xtasm_set_longcalls(on) ((void)(on))
+#define xtasm_set_transform(on) ((void)(on))
 #endif
 
 /* ---- the pieces of a file ------------------------------------------ */
@@ -1760,6 +1764,20 @@ static const char *pseudo_symbol(struct gas *g, const char *stmt)
         int (*form)(const char *, struct asm_symform *) =
             g->tgt->symform_abs ? g->tgt->symform_abs : g->tgt->symform;
         if (form(stmt, &f)) {
+            /* m68k: a non-weak label of this section, read as the first
+             * operand (jsr, jmp, lea, pea, a move's or a compare's source),
+             * is (d16,%pc) when in reach -- GNU as makes it so, and the
+             * object needs no relocation: substitute() writes .+N */
+            if (g->tgt->machine == EM_68K) {
+                struct sym *ls = sym_find(g, stmt + f.sym_at, (size_t)f.sym_len);
+                const char *fo = skip_ws((char *)p);
+                while (*fo && !isspace((unsigned char)*fo)) fo++;
+                fo = skip_ws((char *)fo);
+                if (*fo == '(') fo++;
+                if (ls && ls->sec == g->cur && !ls->is_weak && fo == stmt + f.sym_at &&
+                    labs(ls->value - cur_off(g)) < 32000)
+                    return NULL;
+            }
             /* (an `.equ` constant is not an address: substitution writes
              * its value, which the statement assembler computes with) */
             struct sym *cs = g->tgt->symform_abs || g->tgt->is_transfer
@@ -3987,6 +4005,32 @@ static int directive(struct gas *g, char *p, int pass)
         xt_literal_dir(g, arg, pass);
         return 1;
     }
+    /* m68k's .swbeg: a switch table's mark for SVR4 COFF tools, nothing
+     * in ELF -- GNU as writes no bytes for it either */
+    if (g->tgt->machine == EM_68K && DIR(".swbeg"))
+        return 1;
+    /* .base64 "...": the bytes it encodes (GNU as 2.43's) */
+    if (DIR(".base64")) {
+        static const char tab[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        const char *q = skip_ws(arg);
+        unsigned long acc = 0;
+        int bits = 0;
+        if (*q != '"') { gerr(g, ".base64 takes a quoted string"); return 1; }
+        map_mark(g, 'd');
+        for (q++; *q && *q != '"'; q++) {
+            const char *c = strchr(tab, *q);
+            if (*q == '=')
+                break;
+            if (!c) { gerr(g, ".base64: '%c' is not base64", *q); return 1; }
+            acc = acc << 6 | (unsigned long)(c - tab);
+            bits += 6;
+            if (bits >= 8) {
+                bits -= 8;
+                emit_int(g, (long)(acc >> bits & 0xff), 1);
+            }
+        }
+        return 1;
+    }
     if (g->tgt->machine == EM_XTENSA && (DIR(".begin") || DIR(".end"))) {
         static const char *const ok[] = {
             "literal_prefix", "no-transform", "transform", "no-longcalls",
@@ -4326,40 +4370,9 @@ static int write_object(struct gas *g, const char *out_path)
             used[g->syms[i].sec] = 1;
     for (i = 0; i < g->nfix; i++)
         used[g->fix[i].sec] = 1;
-    /* Xtensa's R_XTENSA_32 is applied in place (BFD's partial_inplace,
-     * and embld's): GNU as writes the addend into the word and 0 in the
-     * relocation -- against a local's section, the label's offset too --
-     * and so does this, before the sections are copied out */
-    /* RX: GNU as writes a label of this file's offset (and the addend)
-     * into an R_RX_DIR32 field as well as relocating it against the
-     * label; the linker overwrites it, and an object reads the same */
-    if (g->tgt->machine == EM_RX)
-        for (int k = 0; k < g->nfix; k++) {
-            struct fixup *f = &g->fix[k];
-            struct sym *s = sym_find(g, f->sym, strlen(f->sym));
-            if (f->type != R_RX_DIR32 || !s || s->sec < 0 || s->is_global ||
-                sec_is_nobits(g, f->sec) ||
-                f->off + 4 > g->secs[f->sec].c.len)
-                continue;
-            code_patch32(&g->secs[f->sec].c, (int)f->off,
-                         (unsigned long)(s->value + f->addend) & 0xffffffffUL);
-        }
-    if (g->tgt->machine == EM_XTENSA)
-        for (int k = 0; k < g->nfix; k++) {
-            struct fixup *f = &g->fix[k];
-            struct sym *s = sym_find(g, f->sym, strlen(f->sym));
-            long a = f->addend;
-            int tosec;
-            if (f->type != R_XTENSA_32 || sec_is_nobits(g, f->sec) ||
-                f->off + 4 > g->secs[f->sec].c.len)
-                continue;
-            tosec = s && !s->is_global && s->sec >= 0 && !s->is_func;
-            if (tosec)
-                a += s->value;
-            code_patch32(&g->secs[f->sec].c, (int)f->off,
-                         (unsigned long)a & 0xffffffffUL);
-            f->addend = tosec ? -s->value : 0;
-        }
+    /* (Xtensa's R_XTENSA_32 keeps its addend in the relocation, as
+     * EmbCC's compiled objects do; GNU as writes it into the word, and
+     * embld and GNU ld both add the word and the addend, so either links) */
     for (i = 0; i < g->nsecs; i++) {
         struct gsec *sc = &g->secs[i];
         long al = sc->align;
@@ -4545,15 +4558,25 @@ static int write_object(struct gas *g, const char *out_path)
      * disassembler took a .S object for avr0, which has no lds or sts */
     if (g->tgt->machine == EM_LOONGARCH || g->tgt->machine == EM_XTENSA ||
         g->tgt->machine == EM_TRICORE || g->tgt->machine == EM_RX ||
-        g->tgt->machine == EM_68K || g->tgt->machine == EM_AVR)
+        g->tgt->machine == EM_AVR)
         elfw_set_flags(w, target_elf_flags(target_get()));
+    /* ColdFire: ISA_A, as compiled code is, unless the file uses an ISA_A+
+     * instruction -- then A+, so a disassembler and EmbLD know */
+#if FAMILY_BUILT(m68k)
+    if (g->tgt->machine == EM_68K)
+        elfw_set_flags(w, cfasm_isa_aplus()
+                          ? (target_elf_flags(target_get()) & ~0x0fUL) | 0x03UL
+                          : target_elf_flags(target_get()));
+#endif
     /* RISC-V: the float ABI -mabi= names, as GNU as records it. Without
      * it a .S built for ilp32f/lp64d was a soft-float object, and EmbLD
-     * refused to link it with the C it was written for. (Not RVC: this
-     * assembler does not compress.) */
+     * refused to link it with the C it was written for. RVC when the C
+     * extension was on (the -march, or a .option rvc), as GNU as marks it */
+#if FAMILY_BUILT(riscv)
     if (g->tgt->machine == EM_RISCV)
-        elfw_set_flags(w, target_elf_flags(target_get()) &
-                          EF_RISCV_FLOAT_ABI_MASK);
+        elfw_set_flags(w, (target_elf_flags(target_get()) & EF_RISCV_FLOAT_ABI_MASK) |
+                          (rvasm_rvc_used() ? EF_RISCV_RVC : 0));
+#endif
     if (g->tgt->machine == EM_MIPS)
         elfw_set_flags(w, target_elf_flags(target_get()));
     /* ...and what the object says about itself, as a compiled one does

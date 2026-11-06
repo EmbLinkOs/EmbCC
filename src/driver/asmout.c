@@ -829,6 +829,11 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
      * a slot, nor expand a macro through $at. */
     if (target_is_mips())
         ob_str(b, "\t.set\tnoreorder\n\t.set\tnoat\n\t.set\tnomacro\n");
+    /* Xtensa: the code is the compiler's, 24-bit instruction for
+     * instruction, laid out with no density forms -- an assembler that
+     * narrows (GNU as, EmbCC's) must leave it as written */
+    if (target_get() == TARGET_XTENSA)
+        ob_str(b, "\t.begin\tno-transform\n");
     ob_str(b, "\t.text\n");
     /* the section on the strictest start of its functions, where one asks
      * more than the sixteen an assembler gives .text (aligned(N)) */
@@ -1302,6 +1307,8 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
                     (pass == 0 ? f->ctor_prio : f->dtor_prio) == prio)
                     ptr_slot(b, csym(f->name), 0, 1);
         }
+    if (target_get() == TARGET_XTENSA)
+        ob_str(b, "\t.end\tno-transform\n");
 }
 
 /* ---- asm blocks and naked functions: Thumb, RISC-V and AVR ------------

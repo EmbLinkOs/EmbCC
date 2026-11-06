@@ -63,6 +63,8 @@ int rvasm_symform(const char *stmt, struct asm_symform *f);
 void rvasm_set_level(int level);
 int rvasm_took_level(void);
 void rvasm_reset(void);
+/* the C extension was on somewhere in the file: the object is RVC */
+int rvasm_rvc_used(void);
 void rvasm_gas_done(void);
 int rvasm_option(const char *arg);
 void rvasm_no_compress(int on);   /* the next encode carries a relocation */
