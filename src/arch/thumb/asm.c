@@ -1681,7 +1681,10 @@ static int t2_misc(const struct tok *t, int n, struct code *out, char *err, int 
                 if (tok_is(&t[1], bo[k].name)) crm = bo[k].crm;
             if (crm < 0 && (!tok_imm(&t[1], &crm) || crm < 0 || crm > 15))
                 FAIL("\"%.*s\" is not a barrier option", t[1].len, t[1].s);
-            if (mn[0] == 'i' && crm != 15) FAIL("isb has only the sy option");
+            if (mn[0] == 'i' && crm != 15 && t[1].s[0] != '#')
+                FAIL("isb has only the sy option");
+            if (t[1].s[0] != '#' && (crm & 3) == 1 && !arch_v8m())
+                FAIL("\"%.*s\" is an ARMv8 barrier option", t[1].len, t[1].s);
         } else if (n != 1) FAIL("%s takes a barrier option", mn);
         t32(out, 0xF3BFu, 0x8F00u | (mn[0] == 'i' ? 0x60u : mn[1] == 's' ? 0x40u : 0x50u) | (unsigned)crm);
         return 0;
@@ -2380,6 +2383,432 @@ static int arm_adr(const struct tok *t, int n, struct code *out, char *err,
     return 0;
 }
 
+/* ---- ARM state: data processing, loads and stores, multiples ----------
+ *
+ * As LLVM chooses them, refereed form by form against llvm-mc
+ * -triple=armv7a (tests/golden/arm-a32-asm.sh). The condition is not seen
+ * here: a conditional mnemonic falls through to one_stmt's suffix path,
+ * which queues the condition and calls back with the bare mnemonic --
+ * a32_raw_word takes it from the queue. */
+
+/* rm, or rm with a shift: operand 2's register form as bits 11:0 (bit 4
+ * set for a shift by a register, which `mem` -- an address's index --
+ * cannot have). t[i] is rm. Returns the tokens used, 0 when t[i] is not
+ * one, -1 with *why for a bad shift. */
+static int a32_regop(const struct tok *t, int i, int n, unsigned long *bits,
+                     int mem, const char **why)
+{
+    static const char *const nm[] = { "lsl", "lsr", "asr", "ror" };
+    int rm = tok_reg(&t[i]);
+    if (rm < 0) return 0;
+    *bits = (unsigned long)rm;
+    if (i + 1 >= n) return 1;
+    if (tok_is(&t[i + 1], "rrx")) { *bits |= 0x60u; return 2; }
+    for (int k = 0; k < 4; k++) {
+        long v;
+        int rs;
+        if (!tok_is(&t[i + 1], nm[k])) continue;
+        if (i + 2 >= n) { *why = "a shift needs an amount"; return -1; }
+        if ((rs = tok_reg(&t[i + 2])) >= 0) {
+            if (mem) { *why = "an address's index shifts by a constant"; return -1; }
+            if (rs == 15 || rm == 15) {
+                *why = "pc cannot take part in a register-controlled shift";
+                return -1;
+            }
+            *bits |= (unsigned long)rs << 8 | (unsigned long)k << 5 | 0x10u;
+            return 3;
+        }
+        if (!tok_imm(&t[i + 2], &v)) { *why = "a shift amount is #0..#32"; return -1; }
+        if (k == 0 ? v < 0 || v > 31 : k == 3 ? v < 1 || v > 31 : v < 1 || v > 32) {
+            *why = k == 0 ? "lsl shifts by 0..31" : k == 3 ? "ror rotates by 1..31"
+                          : "lsr and asr shift by 1..32";
+            return -1;
+        }
+        if (k == 0 && v == 0) return 3;            /* lsl #0 is rm itself */
+        *bits |= (unsigned long)(v & 31) << 7 | (unsigned long)k << 5;
+        return 3;
+    }
+    return 0;
+}
+
+struct a32_dpop { const char *name; int opc, kind; };
+/* kind 3: rd, rn, op2; 1: rn, op2 (a compare: S always, no rd); 2: rd, op2 */
+static const struct a32_dpop a32_dps[] = {
+    { "and", 0, 3 }, { "eor", 1, 3 }, { "sub", 2, 3 }, { "rsb", 3, 3 },
+    { "add", 4, 3 }, { "adc", 5, 3 }, { "sbc", 6, 3 }, { "rsc", 7, 3 },
+    { "tst", 8, 1 }, { "teq", 9, 1 }, { "cmp", 10, 1 }, { "cmn", 11, 1 },
+    { "orr", 12, 3 }, { "mov", 13, 2 }, { "bic", 14, 3 }, { "mvn", 15, 2 },
+    { NULL, 0, 0 }
+};
+
+/* the opcode that holds `v` when this one cannot: add/sub and cmp/cmn by
+ * negating, adc/sbc, and/bic and mov/mvn by inverting -- LLVM's aliases */
+static int a32_twin(int opc, unsigned long v, unsigned long *tv)
+{
+    switch (opc) {
+    case 2: case 4: case 10: case 11:
+        *tv = (0UL - v) & 0xffffffffUL;
+        return opc == 2 ? 4 : opc == 4 ? 2 : opc == 10 ? 11 : 10;
+    case 5: case 6: case 0: case 14: case 13: case 15:
+        *tv = ~v & 0xffffffffUL;
+        return opc == 5 ? 6 : opc == 6 ? 5 : opc == 0 ? 14 : opc == 14 ? 0
+             : opc == 13 ? 15 : 13;
+    }
+    return -1;
+}
+
+static int a32_dp(const struct tok *t, int n, struct code *out, char *err,
+                  int errlen)
+{
+    char mn[12];
+    int s = 0, rd = 0, rn = 0, at, opc = -1, kind = 0, used;
+    unsigned long op2 = 0, w;
+    const char *why = NULL;
+    if (t[0].len >= (int)sizeof mn) return 1;
+    for (int i = 0; i < t[0].len; i++) mn[i] = (char)tolower((unsigned char)t[0].s[i]);
+    mn[t[0].len] = 0;
+
+    /* the shifts are mov with a shift: lsl rd, rm, #n | rs */
+    {
+        static const char *const sh[] = { "lsl", "lsr", "asr", "ror", "rrx" };
+        for (int k = 0; k < 5; k++) {
+            size_t l = strlen(sh[k]);
+            if (strncmp(mn, sh[k], l) || (mn[l] && strcmp(mn + l, "s"))) continue;
+            s = mn[l] == 's';
+            if (k == 4) {
+                if (n != 3 || (rd = tok_reg(&t[1])) < 0 || (rn = tok_reg(&t[2])) < 0)
+                    FAIL("rrx takes two registers");
+                a32_raw_word(out, 0x01A00060UL | (unsigned long)s << 20 |
+                                  (unsigned long)rd << 12 | (unsigned long)rn);
+                return 0;
+            }
+            if (n != 3 && n != 4) FAIL("%s takes rd, rm, and #n or rs", sh[k]);
+            if ((rd = tok_reg(&t[1])) < 0) FAIL("%s takes rd, rm, and #n or rs", sh[k]);
+            {
+                struct tok m[3];
+                long v;
+                m[0] = t[n == 4 ? 2 : 1];
+                m[1].s = sh[k]; m[1].len = 3;
+                m[2] = t[n - 1];
+                /* `lsl r0, r1, #0` is mov; `lsr #0`, which is not a
+                 * shift, is mov too */
+                if (tok_imm(&m[2], &v) && v == 0) {
+                    if ((rn = tok_reg(&m[0])) < 0) FAIL("%s takes a register", sh[k]);
+                    a32_raw_word(out, 0x01A00000UL | (unsigned long)s << 20 |
+                                      (unsigned long)rd << 12 | (unsigned long)rn);
+                    return 0;
+                }
+                used = a32_regop(m, 0, 3, &op2, 0, &why);
+                if (used != 3) FAIL("%s: %s", sh[k], why ? why : "takes rd, rm, and #n or rs");
+                if ((op2 & 0x10u) && rd == 15)
+                    FAIL("%s: pc cannot take part in a register-controlled shift", sh[k]);
+            }
+            a32_raw_word(out, 0x01A00000UL | (unsigned long)s << 20 |
+                              (unsigned long)rd << 12 | op2);
+            return 0;
+        }
+    }
+    /* neg rd, rm is rsb rd, rm, #0 */
+    if (!strcmp(mn, "neg") || !strcmp(mn, "negs")) {
+        if (n != 3 || (rd = tok_reg(&t[1])) < 0 || (rn = tok_reg(&t[2])) < 0)
+            FAIL("neg takes two registers");
+        a32_raw_word(out, 0x02600000UL | (unsigned long)(mn[3] == 's') << 20 |
+                          (unsigned long)rn << 16 | (unsigned long)rd << 12);
+        return 0;
+    }
+    for (int k = 0; a32_dps[k].name; k++)
+        if (!strncmp(mn, a32_dps[k].name, 3) &&
+            (!mn[3] || (!strcmp(mn + 3, "s") && a32_dps[k].kind != 1))) {
+            opc = a32_dps[k].opc;
+            kind = a32_dps[k].kind;
+            s = mn[3] == 's' || kind == 1;
+        }
+    if (opc < 0) return 1;
+
+    /* the operands: rd and rn by kind; `add r0, r1` is add r0, r0, r1 */
+    if (n < 3) FAIL("%s takes %s", mn, kind == 3 ? "rd, rn and an operand" : "two operands");
+    if (kind == 1) {
+        rn = tok_reg(&t[1]);
+        at = 2;
+        if (rn < 0) FAIL("%s's first operand is a register", mn);
+    } else if (kind == 2) {
+        rd = tok_reg(&t[1]);
+        at = 2;
+        if (rd < 0) FAIL("%s's destination is a register", mn);
+    } else {
+        int two;
+        rd = tok_reg(&t[1]);
+        if (rd < 0) FAIL("%s's destination is a register", mn);
+        two = n == 3 || (n >= 4 && (tok_is(&t[3], "lsl") || tok_is(&t[3], "lsr") ||
+                                    tok_is(&t[3], "asr") || tok_is(&t[3], "ror") ||
+                                    tok_is(&t[3], "rrx")));
+        if (two) { rn = rd; at = 2; }
+        else {
+            rn = tok_reg(&t[2]);
+            if (rn < 0) FAIL("%s's first source is a register", mn);
+            at = 3;
+        }
+    }
+    if (at >= n) FAIL("%s needs an operand", mn);
+    if (t[at].s[0] == '#' || tok_reg(&t[at]) < 0) {
+        long v;
+        int imm;
+        if (at + 1 != n || !tok_imm(&t[at], &v))
+            FAIL("\"%.*s\" is not a register or a constant", t[at].len, t[at].s);
+        imm = a32_encode_imm((unsigned long)v & 0xffffffffUL);
+        if (imm < 0) {
+            unsigned long tv;
+            int topc = a32_twin(opc, (unsigned long)v & 0xffffffffUL, &tv);
+            int ti = topc >= 0 ? a32_encode_imm(tv) : -1;
+            if (ti >= 0) {
+                opc = topc;
+                imm = ti;
+            } else if (opc == 13 && !s && v >= 0 && v <= 0xffff) {
+                /* mov rd, #imm16: movw */
+                a32_raw_word(out, 0x03000000UL | ((unsigned long)v >> 12) << 16 |
+                                  (unsigned long)rd << 12 | ((unsigned long)v & 0xfff));
+                return 0;
+            } else
+                FAIL("%s: %ld is not an 8-bit constant rotated by an even "
+                     "amount%s", mn, v, topc >= 0 ? ", nor is its twin's" : "");
+        }
+        w = 0x02000000UL | (unsigned long)imm;
+    } else {
+        used = a32_regop(t, at, n, &op2, 0, &why);
+        if (used < 0) FAIL("%s: %s", mn, why);
+        if (used == 0 || at + used != n)
+            FAIL("\"%.*s\" is not an operand %s takes", t[at].len, t[at].s, mn);
+        if ((op2 & 0x10u) && ((kind != 1 && rd == 15) || (kind != 2 && rn == 15)))
+            FAIL("%s: pc cannot take part in a register-controlled shift", mn);
+        w = op2;
+    }
+    w |= (unsigned long)opc << 21 | (unsigned long)s << 20 |
+         (unsigned long)(kind == 2 ? 0 : rn) << 16 |
+         (unsigned long)(kind == 1 ? 0 : rd) << 12;
+    a32_raw_word(out, w);
+    return 0;
+}
+
+/* ---- loads and stores ---- */
+
+struct a32_memop { const char *name; int fam, load, b, t; unsigned long bits; };
+/* fam 0: word/byte (imm12, shifted index); 1: halfword, signed, dual
+ * (imm8, plain index), `bits` the S H pair at 6:5; t: the unprivileged
+ * (post-indexed only) form */
+static const struct a32_memop a32_mems[] = {
+    { "ldr", 0, 1, 0, 0, 0 }, { "str", 0, 0, 0, 0, 0 },
+    { "ldrb", 0, 1, 1, 0, 0 }, { "strb", 0, 0, 1, 0, 0 },
+    { "ldrt", 0, 1, 0, 1, 0 }, { "strt", 0, 0, 0, 1, 0 },
+    { "ldrbt", 0, 1, 1, 1, 0 }, { "strbt", 0, 0, 1, 1, 0 },
+    { "ldrh", 1, 1, 0, 0, 0x20 }, { "strh", 1, 0, 0, 0, 0x20 },
+    { "ldrsb", 1, 1, 0, 0, 0x40 }, { "ldrsh", 1, 1, 0, 0, 0x60 },
+    { "ldrd", 1, 0, 0, 0, 0x40 }, { "strd", 1, 0, 0, 0, 0x60 },
+    { "ldrht", 1, 1, 0, 1, 0x20 }, { "strht", 1, 0, 0, 1, 0x20 },
+    { "ldrsbt", 1, 1, 0, 1, 0x40 }, { "ldrsht", 1, 1, 0, 1, 0x60 },
+    { NULL, 0, 0, 0, 0, 0 }
+};
+
+/* `#-0`: a negative zero, which the U bit keeps */
+static int tok_negzero(const struct tok *t)
+{
+    int i = t->s[0] == '#';
+    return t->len == i + 2 && t->s[i] == '-' && t->s[i + 1] == '0';
+}
+
+static int a32_mem(const struct tok *t, int n, struct code *out, char *err,
+                   int errlen)
+{
+    char mn[12];
+    const struct a32_memop *e = NULL;
+    int rt, rt2 = -1, rn, at, p = 1, wb = 0, u = 1, reg = 0, dual;
+    unsigned long off = 0, w;
+    const char *why = NULL;
+    if (t[0].len >= (int)sizeof mn) return 1;
+    for (int i = 0; i < t[0].len; i++) mn[i] = (char)tolower((unsigned char)t[0].s[i]);
+    mn[t[0].len] = 0;
+    for (int k = 0; a32_mems[k].name; k++)
+        if (!strcmp(mn, a32_mems[k].name)) e = &a32_mems[k];
+    if (!e) return 1;
+    dual = !strcmp(mn, "ldrd") || !strcmp(mn, "strd");
+    if (n < 3 || (rt = tok_reg(&t[1])) < 0) FAIL("%s takes a register and an address", mn);
+    at = 2;
+    if (dual) {
+        if ((rt2 = tok_reg(&t[2])) >= 0) at = 3;
+        else rt2 = rt + 1;
+        if ((rt & 1) || rt == 14 || rt2 != rt + 1)
+            FAIL("%s: in ARM state the pair is an even register and the "
+                 "next (r0, r1), not lr", mn);
+    }
+    if (at >= n || t[at].s[0] != '[')
+        return 1;               /* `ldr r0, =value`, and the like: not here */
+    {
+        const struct tok *a = &t[at];
+        int len = a->len, nin;
+        struct tok in[6];
+        if (a->s[len - 1] == '!') { wb = 1; len--; }
+        if (a->s[len - 1] != ']') FAIL("\"%.*s\" is not an address", a->len, a->s);
+        nin = split(a->s + 1, len - 2, in, 6);
+        if (nin < 1 || (rn = tok_reg(&in[0])) < 0)
+            FAIL("\"%.*s\" is not an address", a->len, a->s);
+        if (at + 1 < n) {
+            /* post-indexed: [rn], #off | [rn], +-rm{, shift} */
+            if (nin != 1 || wb || n - at - 1 > 4)
+                FAIL("\"%.*s\": a post-indexed address is [rn], then the offset",
+                     a->len, a->s);
+            p = 0;
+            memcpy(in + 1, t + at + 1, (size_t)(n - at - 1) * sizeof *in);
+            nin = 1 + n - at - 1;
+        } else if (e->t) {
+            p = 0;      /* ldrt r0, [r1]: post-indexed by nothing */
+            if (nin != 1 || wb) FAIL("%s's address is post-indexed: [rn], #off", mn);
+        }
+        if (nin == 1 && e->fam == 1)
+            off = 0x400000u;    /* [rn]: the immediate form, offset 0 */
+        if (nin > 1) {
+            struct tok x = in[1];
+            if (x.s[0] == '#') {
+                long v;
+                if (nin != 2 || !tok_imm(&x, &v))
+                    FAIL("\"%.*s\" is not an offset", x.len, x.s);
+                if (v < 0 || tok_negzero(&x)) { u = 0; v = -v; }
+                if (e->fam == 0 ? v > 4095 : v > 255)
+                    FAIL("%s's offset is within +-%d", mn, e->fam == 0 ? 4095 : 255);
+                off = e->fam == 0 ? (unsigned long)v
+                    : ((unsigned long)v & 0xf0u) << 4 | ((unsigned long)v & 15u) | 0x400000u;
+            } else {
+                int used;
+                if (x.s[0] == '-' || x.s[0] == '+') {
+                    u = x.s[0] == '+';
+                    x.s++; x.len--;
+                    in[1] = x;
+                }
+                used = a32_regop(in, 1, nin, &off, 1, &why);
+                if (used < 0) FAIL("%s: %s", mn, why);
+                if (used == 0 || 1 + used != nin)
+                    FAIL("\"%.*s\" is not an index", in[1].len, in[1].s);
+                if (e->fam == 1 && (off & ~15UL))
+                    FAIL("%s's index register takes no shift", mn);
+                if ((off & 15) == 15) FAIL("%s: pc cannot be the index", mn);
+                reg = 1;
+            }
+        }
+    }
+    if ((wb || !p) && rn == 15) FAIL("%s cannot write back to pc", mn);
+    if (rt == 15 && (e->b || e->fam == 1))
+        FAIL("%s cannot transfer pc", mn);
+    if ((wb || !p) && (rn == rt || rn == rt2))
+        FAIL("%s: the base written back cannot be the register %s", mn,
+             e->load ? "loaded" : "stored");
+    if (e->fam == 0)
+        w = 0x04000000UL | (unsigned long)reg << 25 | (unsigned long)p << 24 |
+            (unsigned long)u << 23 | (unsigned long)e->b << 22 |
+            (unsigned long)(wb || e->t) << 21 | (unsigned long)e->load << 20 | off;
+    else
+        w = 0x00000090UL | (unsigned long)p << 24 | (unsigned long)u << 23 |
+            (unsigned long)(wb || e->t) << 21 | (unsigned long)e->load << 20 |
+            e->bits | off;
+    w |= (unsigned long)rn << 16 | (unsigned long)rt << 12;
+    a32_raw_word(out, w);
+    return 0;
+}
+
+/* ldm/stm, every mode, writeback and ^; push and pop */
+static int a32_multi(const struct tok *t, int n, struct code *out, char *err,
+                     int errlen)
+{
+    static const struct { const char *name; int load, p, u; } mm[] = {
+        { "ldm", 1, 0, 1 }, { "ldmia", 1, 0, 1 }, { "ldmfd", 1, 0, 1 },
+        { "ldmib", 1, 1, 1 }, { "ldmed", 1, 1, 1 },
+        { "ldmda", 1, 0, 0 }, { "ldmfa", 1, 0, 0 },
+        { "ldmdb", 1, 1, 0 }, { "ldmea", 1, 1, 0 },
+        { "stm", 0, 0, 1 }, { "stmia", 0, 0, 1 }, { "stmea", 0, 0, 1 },
+        { "stmib", 0, 1, 1 }, { "stmfa", 0, 1, 1 },
+        { "stmda", 0, 0, 0 }, { "stmed", 0, 0, 0 },
+        { "stmdb", 0, 1, 0 }, { "stmfd", 0, 1, 0 },
+        { "push", 0, 1, 0 }, { "pop", 1, 0, 1 }, { NULL, 0, 0, 0 }
+    };
+    char mn[8];
+    int k, rn = 13, wb = 1, user = 0;
+    unsigned mask;
+    struct tok lt;
+    if (t[0].len >= (int)sizeof mn) return 1;
+    for (int i = 0; i < t[0].len; i++) mn[i] = (char)tolower((unsigned char)t[0].s[i]);
+    mn[t[0].len] = 0;
+    for (k = 0; mm[k].name && strcmp(mm[k].name, mn); k++) {}
+    if (!mm[k].name) return 1;
+    if (mn[0] == 'p') {
+        if (n != 2) FAIL("%s takes a register list", mn);
+        lt = t[1];
+    } else {
+        if (n != 3) FAIL("%s takes a base register and a list", mn);
+        wb = t[1].len > 1 && t[1].s[t[1].len - 1] == '!';
+        rn = tasm_gpr(t[1].s, t[1].len - wb);
+        if (rn < 0 || rn == 15) FAIL("%s takes a base register (not pc) and a list", mn);
+        lt = t[2];
+    }
+    if (lt.len > 1 && lt.s[lt.len - 1] == '^') { user = 1; lt.len--; }
+    if (!tok_reglist(&lt, &mask))
+        FAIL("%s takes a register list: {r4-r11, lr}", mn);
+    if (user && mn[0] == 'p') FAIL("%s takes no ^", mn);
+    /* one register: push and pop are a str/ldr with writeback, as LLVM
+     * writes them */
+    if (mn[0] == 'p' && !(mask & (mask - 1))) {
+        int r = 0;
+        while (!(mask & (1u << r))) r++;
+        if (r == 13) FAIL("%s cannot transfer sp", mn);
+        a32_raw_word(out, mm[k].load ? 0x049D0004UL | (unsigned long)r << 12
+                                     : 0x052D0004UL | (unsigned long)r << 12);
+        return 0;
+    }
+    if (user && wb && !(mm[k].load && (mask & 0x8000u)))
+        FAIL("%s: the user registers (^) are transferred without writeback", mn);
+    if (wb && (mask & (1u << rn)) && mm[k].load)
+        FAIL("%s cannot load its base when it writes it back", mn);
+    a32_raw_word(out, 0x08000000UL | (unsigned long)mm[k].p << 24 |
+                      (unsigned long)mm[k].u << 23 | (unsigned long)user << 22 |
+                      (unsigned long)wb << 21 | (unsigned long)mm[k].load << 20 |
+                      (unsigned long)rn << 16 | mask);
+    return 0;
+}
+
+/* dmb, dsb and isb with an option; never conditional */
+static int a32_bar_stmt(const struct tok *t, int n, struct code *out, char *err,
+                       int errlen)
+{
+    unsigned long base;
+    long crm = 15;
+    if (tok_is(&t[0], "dmb")) base = 0xF57FF050UL;
+    else if (tok_is(&t[0], "dsb")) base = 0xF57FF040UL;
+    else if (tok_is(&t[0], "isb")) base = 0xF57FF060UL;
+    else return 1;
+    if (n == 2) {
+        crm = -1;
+        for (int k = 0; t_baropt[k].name; k++)
+            if (tok_is(&t[1], t_baropt[k].name)) crm = t_baropt[k].crm;
+        if (crm < 0 && (!tok_imm(&t[1], &crm) || crm < 0 || crm > 15))
+            FAIL("\"%.*s\" is not a barrier option", t[1].len, t[1].s);
+        if (base == 0xF57FF060UL && crm != 15 && t[1].s[0] != '#')
+            FAIL("isb has only the sy option");
+        if (t[1].s[0] != '#' && (crm & 3) == 1)
+            FAIL("\"%.*s\" is an ARMv8 barrier option", t[1].len, t[1].s);
+    } else if (n != 1)
+        FAIL("%.*s takes a barrier option", t[0].len, t[0].s);
+    if (a32_it_open())
+        FAIL("%.*s cannot be conditional", t[0].len, t[0].s);
+    code_u32(out, base | (unsigned long)crm);
+    return 0;
+}
+
+static int a32_stmt(const struct tok *t, int n, struct code *out, char *err,
+                    int errlen)
+{
+    int r = a32_dp(t, n, out, err, errlen);
+    if (r == 1) r = a32_mem(t, n, out, err, errlen);
+    if (r == 1) r = a32_multi(t, n, out, err, errlen);
+    if (r == 1) r = a32_bar_stmt(t, n, out, err, errlen);
+    return r;
+}
+
 static int one_stmt(const char *stmt, int len, struct code *out,
                     char *err, int errlen)
 {
@@ -2486,6 +2915,12 @@ static int one_stmt(const char *stmt, int len, struct code *out,
         if (r != 1)
             return r;
     }
+    /* ...and in ARM state, A32's own (a32_stmt) */
+    if (t_isa_a32) {
+        int r = a32_stmt(t, n, out, err, errlen);
+        if (r != 1)
+            return r;
+    }
     {
         int r = vfp_stmt(t, n, out, err, errlen);
         if (r == 1)
@@ -2514,6 +2949,8 @@ static int one_stmt(const char *stmt, int len, struct code *out,
         if (mnemonic_is(&t[0], "dmb")) { t_barrier(out, T_BAR_DMB); return 0; }
         if (mnemonic_is(&t[0], "isb")) { t_barrier(out, T_BAR_ISB); return 0; }
         if (mnemonic_is(&t[0], "bx"))  FAIL("bx needs a register");
+        if (t_isa_a32)
+            goto a32_cond;      /* `nopvc`: a condition, in ARM state */
         FAIL("asm instruction \"%.*s\" is not in the ARMv7-M vocabulary",
              t[0].len, t[0].s);
     }
@@ -3076,6 +3513,7 @@ static int one_stmt(const char *stmt, int len, struct code *out,
      * vocabulary's own, so `bics` stays BIC with S rather than becoming
      * `bi` under CS. The condition goes through the same queue an IT
      * block fills (a32_it). */
+a32_cond:
     if (t_isa_a32 && t[0].len > 2 && !tasm_open()) {
         int mlen = t[0].len, wlen = 0, c;
         {
@@ -3083,7 +3521,7 @@ static int one_stmt(const char *stmt, int len, struct code *out,
             if (dot) { wlen = (int)(t[0].s + mlen - dot); mlen -= wlen; }
         }
         c = mlen > 2 ? cond_num(t[0].s + mlen - 2, 2) : -1;
-        if (c >= 0 && c != 14 && mlen > 2) {
+        if (c >= 0 && mlen > 2) {
             char buf[256];
             struct code probe = { 0 };
             int r;

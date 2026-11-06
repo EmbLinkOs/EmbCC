@@ -183,6 +183,8 @@ refc "an M-profile special register in asm" 'the M-profile special registers do 
 refc "cbz in asm" 'cbz is a Thumb instruction' \
     'int f(int x){ __asm__ volatile("cbz %0, .+8" : : "r"(x)); return x; }'
 refc "a condition on a two-instruction statement" 'a condition cannot cover them' \
+    'int f(int x){ __asm__ volatile("ldreq %0, =0x12345678" : "+r"(x)); return x; }'
+refc "a constant no rotation holds" 'is not an 8-bit constant rotated' \
     'int f(int x){ __asm__ volatile("addeq %0, %0, #0x101" : "+r"(x)); return x; }'
 refc ".thumb_func in file-scope asm" '.thumb_func: EmbCC assembles ARM (A32) code' \
     '__asm__(".thumb_func\nfoo:\n bx lr\n");'
