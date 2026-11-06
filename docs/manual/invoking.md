@@ -1677,6 +1677,16 @@ directories are not searched (a `#include "file"` beside the source is
 found). The inline-assembly vocabulary of each target is listed in
 [Inline assembly](inline-asm.md).
 
+The vector instruction sets are whole: on x86-64, SSE through AVX2 and
+all of AVX-512 -- zmm and the registers past 15, masks and `{z}`,
+broadcasts (`(%rax){1to16}`), `{rn-sae}` and `{sae}`, gathers and
+scatters, the opmask instructions -- with the displacement scaling
+(disp8*N) and the choice of the VEX form where no operand needs EVEX
+that llvm-mc makes; on ARMv7-A, all of NEON. Both are tables learned
+from llvm-mc (`tools/evex-isa`, `tools/neon-isa`) and checked against it
+statement by statement, and against clang's vectorized code
+(`-march=x86-64-v4`, `-mfpu=neon`).
+
 The assembler follows GNU as for each target:
 
 - **Comments.** `/* ... */` anywhere; `#` starts a comment, except on

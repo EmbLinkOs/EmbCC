@@ -15,7 +15,8 @@
 
 /* ---- registers ---------------------------------------------------------- */
 
-enum { K_NONE, K_REG, K_XMM, K_MEM, K_IMM, K_CR, K_DR, K_SEG, K_ST };
+enum { K_NONE, K_REG, K_XMM, K_MEM, K_IMM, K_CR, K_DR, K_SEG, K_ST,
+       K_KREG, K_RC, K_SAE };   /* (AVX-512's: %k0-%k7, {rn-sae}, {sae}) */
 
 struct reg { const char *n; int num, size, hi8, rex8, kind; };
 
@@ -62,9 +63,11 @@ static int reg_lookup(const char *s, int n, struct reg *out)
         out->n = "r"; out->num = v; out->size = size; out->kind = K_REG;
         return 1;
     }
-    const char *pfx[] = { "xmm", "cr", "dr", "ymm" };
-    int kinds[] = { K_XMM, K_CR, K_DR, K_XMM };
-    for (int p = 0; p < 4; p++) {
+    /* (xmm16-31, ymm16-31 and the zmm are AVX-512's, EVEX alone: insn()
+     * sends them nowhere else) */
+    const char *pfx[] = { "xmm", "cr", "dr", "ymm", "zmm" };
+    int kinds[] = { K_XMM, K_CR, K_DR, K_XMM, K_XMM };
+    for (int p = 0; p < 5; p++) {
         int pl = (int)strlen(pfx[p]);
         if (n > pl && !strncmp(s, pfx[p], (size_t)pl)) {
             int v = 0;
@@ -72,11 +75,16 @@ static int reg_lookup(const char *s, int n, struct reg *out)
                 if (!isdigit((unsigned char)s[i])) return 0;
                 v = v * 10 + (s[i] - '0');
             }
-            if (v > 15) return 0;
-            out->n = pfx[p]; out->num = v; out->size = p == 0 ? 16 : p == 3 ? 32 : 8;
+            if (v > (kinds[p] == K_XMM ? 31 : 15)) return 0;
+            out->n = pfx[p]; out->num = v;
+            out->size = p == 0 ? 16 : p == 3 ? 32 : p == 4 ? 64 : 8;
             out->kind = kinds[p];
             return 1;
         }
+    }
+    if (n == 2 && s[0] == 'k' && s[1] >= '0' && s[1] <= '7') {
+        out->n = "k"; out->num = s[1] - '0'; out->size = 8; out->kind = K_KREG;
+        return 1;
     }
     if (n == 3 && !strncmp(s, "rip", 3)) {
         out->n = "rip"; out->num = 16; out->size = 8; out->kind = K_REG;
@@ -123,6 +131,13 @@ int x86att_is_word(const char *stmt, const char *w, int len)
                                        "TPOFF", "GOTTPOFF", "TLSGD", "near" };
     if (w > stmt && w[-1] == '%')
         return 1;                      /* %anything is a register's */
+    /* inside braces: AVX-512's decorations, {z}, {1to16}, {rn-sae} */
+    for (const char *q = w - 1; q >= stmt; q--) {
+        if (*q == '{')
+            return 1;
+        if (*q == '}' || *q == ',' || *q == '(' || *q == ' ')
+            break;
+    }
     if (len >= 1 && w[0] == '$' && (len == 1 || !asm_sym0((unsigned char)w[1])))
         return 1;                      /* `$8`: an immediate, not a name */
     if (w == after_prefixes(stmt))
@@ -142,8 +157,11 @@ struct opnd {
     long long disp;
     int dot;                           /* rip disp is .+N (from the start) */
     int seg;                           /* segment override prefix, 0 none */
-    long long imm;                     /* K_IMM */
+    long long imm;                     /* K_IMM; K_RC: the rounding mode */
     int star;                          /* `*target` */
+    /* AVX-512's decorations: {%kN} (mask, 1 + N), {z}, {1toN}; a vector
+     * index (VSIB): its size, 16, 32 or 64 */
+    int mask, zero, bcast, vindex;
 };
 
 struct ib {
@@ -235,6 +253,54 @@ static int parse_opnd(const char *s, int n, struct opnd *o)
     while (n > 0 && isspace((unsigned char)s[n - 1])) n--;
     if (n == 0)
         return fail("an empty operand");
+    /* AVX-512: {rn-sae} and {sae} are operands of their own; {%k1}, {z}
+     * and {1to16} are decorations after one */
+    if (s[0] == '{' && s[n - 1] == '}') {
+        static const char *const rc[] = { "rn-sae", "rd-sae", "ru-sae", "rz-sae" };
+        for (int k = 0; k < 4; k++)
+            if (n - 2 == 6 && !strncmp(s + 1, rc[k], 6)) {
+                o->k = K_RC;
+                o->imm = k;
+                return 0;
+            }
+        if (n == 5 && !strncmp(s + 1, "sae", 3)) {
+            o->k = K_SAE;
+            return 0;
+        }
+        return fail("'%.*s' is not a rounding control ({rn-sae}, {rd-sae}, "
+                    "{ru-sae}, {rz-sae}, {sae})", n, s);
+    }
+    {
+        int mask = 0, zero = 0, bcast = 0;
+        while (n > 0 && s[n - 1] == '}') {
+            int b = n - 1;
+            while (b > 0 && s[b] != '{') b--;
+            if (s[b] != '{')
+                return fail("'%.*s': a '}' with no '{'", n, s);
+            const char *d = s + b + 1;
+            int dl = n - 1 - b - 1;
+            if (dl == 3 && d[0] == '%' && d[1] == 'k' && d[2] >= '0' && d[2] <= '7')
+                mask = 1 + (d[2] - '0');
+            else if (dl == 1 && d[0] == 'z')
+                zero = 1;
+            else if (dl > 3 && !strncmp(d, "1to", 3)) {
+                bcast = atoi(d + 3);
+                if (bcast != 2 && bcast != 4 && bcast != 8 && bcast != 16 && bcast != 32)
+                    return fail("'{%.*s}' is not a broadcast (1to2 .. 1to32)", dl, d);
+            } else
+                return fail("'{%.*s}' is not a decoration AVX-512 has ({%%k1}, "
+                            "{z}, {1to16})", dl, d);
+            n = b;
+            while (n > 0 && isspace((unsigned char)s[n - 1])) n--;
+        }
+        if (mask || zero || bcast) {
+            int r = parse_opnd(s, n, o);
+            o->mask = mask;
+            o->zero = zero;
+            o->bcast = bcast;
+            return r;
+        }
+    }
     if (*s == '*') { o->star = 1; s++; n--; }
     if (*s == '$') {
         o->k = K_IMM;
@@ -312,12 +378,18 @@ static int parse_opnd(const char *s, int n, struct opnd *o)
     }
     if (np >= 2 && plen[1]) {
         struct opnd r;
-        if (!parse_reg(parts[1], plen[1], &r) || r.k != K_REG || r.size != 8 ||
-            r.reg == 16)
-            return fail("'%.*s' is not a 64-bit index register", plen[1], parts[1]);
-        if (r.reg == 4)
-            return fail("%%rsp cannot be an index");
-        o->index = r.reg;
+        /* (a vector register: a gather's or a scatter's index, VSIB) */
+        if (parse_reg(parts[1], plen[1], &r) && r.k == K_XMM) {
+            o->index = r.reg;
+            o->vindex = r.size;
+        } else {
+            if (!parse_reg(parts[1], plen[1], &r) || r.k != K_REG || r.size != 8 ||
+                r.reg == 16)
+                return fail("'%.*s' is not a 64-bit index register", plen[1], parts[1]);
+            if (r.reg == 4)
+                return fail("%%rsp cannot be an index");
+            o->index = r.reg;
+        }
     }
     if (np >= 3 && plen[2]) {
         long long sc;
@@ -740,6 +812,220 @@ static int emit_vex(struct ib *x, int pp, int map, int w, int l, int vvvv,
     }
     put(x, op);
     return modrm(x, regf, rm);
+}
+
+/* ---- AVX-512 (EVEX) and the opmask instructions, from a learned table ----
+ *
+ * evex.inc is tools/evex-isa's: every EVEX form llvm-mc decodes (a sweep
+ * of the maps, prefixes, W, vector lengths and opcodes), each assembled
+ * back by llvm-mc with a distinct register in every operand to see which
+ * field holds which -- ModRM reg (r) or rm (m), vvvv (v), aaa (a) -- its
+ * displacement scale (disp8*N) probed, and whether it takes a mask and
+ * {z}; and the opmask instructions' VEX forms the same way. The prefix
+ * is built here, field by field as the architecture lays it out. */
+struct ev_form {
+    const char *mnem, *shape;
+    unsigned char vex, map, pp, W, LL, b, op;
+    signed char regext;
+    unsigned char imm;
+    short fixed;                /* an immediate the shape does not show */
+    unsigned char mem, N, mask; /* mask: 0 none, 1 merging, 2 and {z} */
+    const char *roles;
+};
+#include "evex.inc"
+#define NEV ((int)(sizeof ev_forms / sizeof ev_forms[0]))
+
+/* Does an operand need EVEX: a zmm, a vector register past 15, a mask
+ * register, a decoration, a rounding control? */
+static int ev_need(const struct opnd *o, int n)
+{
+    for (int k = 0; k < n; k++)
+        if ((o[k].k == K_XMM && (o[k].size == 64 || o[k].reg >= 16)) ||
+            o[k].k == K_RC || o[k].k == K_SAE ||
+            o[k].mask || o[k].zero || o[k].bcast ||
+            (o[k].vindex && o[k].index >= 16))
+            return 1;
+    return 0;
+}
+
+/* ...or a mask register, which only the table's forms name (VEX ones, the
+ * opmask instructions', or EVEX) */
+static int ev_only(const struct opnd *o, int n)
+{
+    for (int k = 0; k < n; k++)
+        if (o[k].k == K_KREG || o[k].vindex)
+            return 1;
+    return ev_need(o, n);
+}
+
+static int ev_shape(const struct opnd *o, int n, char *sh, int cap)
+{
+    int at = 0;
+    sh[0] = 0;
+    for (int k = 0; k < n; k++) {
+        const char *t;
+        char b[16];
+        switch (o[k].k) {
+        case K_XMM: t = o[k].size == 64 ? "Z" : o[k].size == 32 ? "Y" : "X"; break;
+        case K_KREG: t = "K"; break;
+        case K_REG: t = o[k].size == 8 ? "Q" : o[k].size == 4 ? "D" : o[k].size == 2 ? "W" : "B"; break;
+        case K_IMM: t = "I"; break;
+        case K_RC: t = "{RC}"; break;
+        case K_SAE: t = "{sae}"; break;
+        case K_MEM:
+            if (o[k].bcast) { snprintf(b, sizeof b, "M{1to%d}", o[k].bcast); t = b; }
+            else if (o[k].vindex) t = o[k].vindex == 64 ? "MZ" : o[k].vindex == 32 ? "MY" : "MX";
+            else t = "M";
+            break;
+        default: return 0;
+        }
+        at += snprintf(sh + at, (size_t)(cap - at), "%s%s", k ? "," : "", t);
+        if (at >= cap) return 0;
+    }
+    return 1;
+}
+
+/* ModRM, SIB and displacement, an EVEX displacement scaled by N */
+static int ev_modrm(struct ib *x, int regf, const struct opnd *rm, int N)
+{
+    int r3 = regf & 7;
+    if (rm->k != K_MEM) {
+        put(x, 0xc0u | (unsigned)r3 << 3 | (unsigned)(rm->reg & 7));
+        return 0;
+    }
+    if (rm->base == 16 || rm->base < 0 || N <= 1)
+        return modrm(x, regf, rm);
+    int b3 = rm->base & 7;
+    long long d = rm->disp;
+    int mod = d == 0 && b3 != 5 ? 0 : (d % N == 0 && fits8(d / N)) ? 1 : 2;
+    if (g_disp_force == 32) mod = 2;
+    else if (g_disp_force == 8 && mod == 0) mod = 1;
+    if (!fits32(d)) return fail("the displacement does not fit 32 bits");
+    if (rm->index >= 0 || b3 == 4) {
+        int sc = rm->scale == 8 ? 3 : rm->scale == 4 ? 2 : rm->scale == 2 ? 1 : 0;
+        put(x, (unsigned)mod << 6 | (unsigned)r3 << 3 | 4);
+        put(x, (unsigned)sc << 6 | (unsigned)((rm->index >= 0 ? rm->index : 4) & 7) << 3 |
+               (unsigned)b3);
+    } else {
+        put(x, (unsigned)mod << 6 | (unsigned)r3 << 3 | (unsigned)b3);
+    }
+    if (mod == 1) {
+        if (d % N || !fits8(d / N)) {   /* {disp8} asked of a disp that is not */
+            mod = 2;
+            return fail("the displacement %lld is not a multiple of %d in a byte, "
+                        "as {disp8} asks", d, N);
+        }
+        x->disp_at = x->n; x->disp_len = 1; put_n(x, d / N, 1);
+    }
+    if (mod == 2) { x->disp_at = x->n; x->disp_len = 4; put_n(x, d, 4); }
+    return 0;
+}
+
+/* 0 encoded, 1 not a form the table has, -1 an error */
+static int evex(struct ib *x, const char *mn, const struct opnd *o, int n)
+{
+    char sh[96];
+    int lo = 0, hi = NEV, mask = 0, zero = 0, seen = 0, need = ev_need(o, n);
+    const char *why = NULL;
+    if (!ev_shape(o, n, sh, sizeof sh))
+        return 1;
+    for (int k = 0; k < n; k++) {
+        if (o[k].mask) mask = o[k].mask;
+        if (o[k].zero) zero = 1;
+    }
+    while (lo < hi) {
+        int mid = (lo + hi) / 2;
+        if (strcmp(ev_forms[mid].mnem, mn) < 0) lo = mid + 1; else hi = mid;
+    }
+    for (int i = lo; i < NEV && !strcmp(ev_forms[i].mnem, mn); i++) {
+        const struct ev_form *f = &ev_forms[i];
+        int reg = 0, rm = 0, v = 0, aaa = 0, rc = -1, ri = 0;
+        const struct opnd *mo = NULL, *rmo = NULL;
+        long long imm = 0;
+        if (strcmp(f->shape, sh))
+            continue;
+        if (f->vex && need)
+            continue;                       /* (its EVEX form follows) */
+        seen = 1;
+        if ((mask && !f->mask) || (zero && f->mask != 2)) {
+            why = zero ? "zeroing ({z})" : "a mask ({%k1})";
+            continue;
+        }
+        if (f->mask == 3 && !mask)
+            return fail("'%s' wants a mask: {%%k1} (not %%k0) on its destination", mn);
+        if (zero && !mask)
+            return fail("{z} wants a mask: {%%k1} {z}");
+        for (int k = 0; k < n; k++) {
+            const struct opnd *q = &o[k];
+            if (q->k == K_RC) { rc = (int)q->imm; continue; }
+            if (q->k == K_SAE) continue;
+            if (q->k == K_IMM) { imm = q->imm; continue; }
+            if (q->k == K_MEM) { mo = q; continue; }
+            switch (f->roles[ri++]) {
+            case 'r': reg = q->reg; break;
+            case 'm': rm = q->reg; rmo = q; break;
+            case 'v': v = q->reg; break;
+            case 'a': aaa = q->reg; break;
+            }
+        }
+        if (!mo && !rmo && !f->mem && strchr(f->roles, 'm'))
+            return fail("'%s': no operand for ModRM rm", mn);
+        if (f->regext >= 0)
+            reg = f->regext;
+        if (mask)
+            aaa = mask - 1;
+        if (mo && mo->dot)
+            ;                                   /* (rip: one() fixes it up) */
+        {
+            int R = (reg >> 3) & 1, Rp = (reg >> 4) & 1, B, X, Vp = (v >> 4) & 1;
+            if (mo) {
+                B = mo->base >= 0 && mo->base != 16 ? (mo->base >> 3) & 1 : 0;
+                X = mo->index >= 0 ? (mo->index >> 3) & 1 : 0;
+                if (mo->vindex) Vp = (mo->index >> 4) & 1;   /* VSIB: V' extends it */
+            } else {
+                B = (rm >> 3) & 1;
+                X = (rm >> 4) & 1;
+            }
+            if (f->vex) {
+                if (f->map == 1 && !f->W && !X && !B) {
+                    put(x, 0xc5);
+                    put(x, (unsigned)(!R) << 7 | (unsigned)(~v & 15) << 3 |
+                           (unsigned)f->LL << 2 | f->pp);
+                } else {
+                    put(x, 0xc4);
+                    put(x, (unsigned)(!R) << 7 | (unsigned)(!X) << 6 | (unsigned)(!B) << 5 | f->map);
+                    put(x, (unsigned)f->W << 7 | (unsigned)(~v & 15) << 3 |
+                           (unsigned)f->LL << 2 | f->pp);
+                }
+            } else {
+                put(x, 0x62);
+                put(x, (unsigned)(!R) << 7 | (unsigned)(!X) << 6 | (unsigned)(!B) << 5 |
+                       (unsigned)(!Rp) << 4 | f->map);
+                put(x, (unsigned)f->W << 7 | (unsigned)(~v & 15) << 3 | 4u | f->pp);
+                put(x, (unsigned)zero << 7 | (unsigned)(rc >= 0 ? rc : f->LL) << 5 |
+                       (unsigned)f->b << 4 | (unsigned)(!Vp) << 3 | (unsigned)(aaa & 7));
+            }
+        }
+        put(x, f->op);
+        if (mo) {
+            if (ev_modrm(x, reg, mo, f->vex ? 1 : f->N) < 0)
+                return -1;
+        } else {
+            put(x, 0xc0u | (unsigned)(reg & 7) << 3 | (unsigned)(rm & 7));
+        }
+        if (f->imm) {
+            x->imm_at = x->n;
+            imm_put(x, imm, 1);
+        } else if (f->fixed >= 0) {
+            put(x, (unsigned)f->fixed);
+        }
+        return 0;
+    }
+    if (seen && why)
+        return fail("'%s' takes no %s", mn, why);
+    if (seen)
+        return -1;
+    return 1;
 }
 
 static int is_v(const struct opnd *o) { return o->k == K_XMM; }
@@ -1295,9 +1581,39 @@ static int bmi(struct ib *x, const char *mn, const struct opnd *o, int n)
 static int insn(struct ib *x, const char *mn, struct opnd *o, int n)
 {
     int s;
+    /* AVX-512: what only EVEX encodes goes nowhere else (a VEX or legacy
+     * encoder would take xmm17 for xmm1); an AVX-512 mnemonic with xmm
+     * operands, or a VEX one's AVX-512 form, after the VEX encoder
+     * declines it; the opmask instructions */
+    if (ev_only(o, n) || mn[0] == 'k') {
+        int r = evex(x, mn, o, n);
+        if (r == 1)
+            return fail("'%s' with these operands is not an AVX-512 form this "
+                        "assembler knows", mn);
+        return r;
+    }
     if (mn[0] == 'v') {
-        int r = avx(x, mn, o, n);
-        if (r != 1) return r;
+        char keep[256];
+        int at = x->n, r;
+        snprintf(keep, sizeof keep, "%s", g_err ? g_err : "");
+        r = avx(x, mn, o, n);
+        if (r == 0) return 0;
+        x->n = at;
+        {
+            char err1[256];
+            snprintf(err1, sizeof err1, "%s", g_err ? g_err : "");
+            int e = evex(x, mn, o, n);
+            if (e == 0) {
+                if (g_err) snprintf(g_err, (size_t)g_errlen, "%s", keep);
+                return 0;
+            }
+            x->n = at;
+            if (r < 0) {
+                if (g_err) snprintf(g_err, (size_t)g_errlen, "%s", err1);
+                return -1;
+            }
+            if (e < 0) return -1;
+        }
     }
     {
         int r = bmi(x, mn, o, n);
@@ -2196,7 +2512,7 @@ static int one(const char *s, int len, struct code *out)
         if (!strcmp(mn, "{imm32}")) { g_imm_wide = 1; continue; }
         break;
     }
-    struct opnd o[4];
+    struct opnd o[6];          /* (AVX-512's: $imm, {sae}, and three registers) */
     int n = 0, depth = 0, st = i;
     while (i < len && isspace((unsigned char)s[i])) i++;
     st = i;
@@ -2205,7 +2521,7 @@ static int one(const char *s, int len, struct code *out)
             if (k < len && s[k] == '(') depth++;
             if (k < len && s[k] == ')') depth--;
             if (k == len || (s[k] == ',' && depth == 0)) {
-                if (n == 4) return fail("too many operands");
+                if (n == 6) return fail("too many operands");
                 if (parse_opnd(s + st, k - st, &o[n]) < 0) return -1;
                 n++;
                 st = k + 1;
@@ -2292,6 +2608,10 @@ static int x86_next_sym(const char *stmt, const char *q, struct x86sym *y)
         if (*q == '%') {                 /* a register: skip it */
             q++;
             while (asm_symc((unsigned char)*q)) q++;
+            continue;
+        }
+        if (*q == '{') {                 /* AVX-512's decorations: {z}, {1to8} */
+            while (*q && *q != '}') q++;
             continue;
         }
         if (asm_sym0((unsigned char)*q) && !(*q == '.' && (q[1] == '+' || q[1] == '-' || !asm_symc((unsigned char)q[1])))) {
