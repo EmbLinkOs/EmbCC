@@ -55,6 +55,8 @@
 #define xtasm_longcalls() 0
 #define xtasm_set_longcalls(on) ((void)(on))
 #define xtasm_set_transform(on) ((void)(on))
+#define xtasm_set_density(on) ((void)(on))
+#define xtasm_density() 0
 #endif
 
 /* ---- the pieces of a file ------------------------------------------ */
@@ -5348,7 +5350,14 @@ static int inline_run(const char *file, int line, const char *text,
     g.tgt = t;
     g.quiet = quiet;
     sec_init(&g);
+    /* Xtensa: a template's instructions are three bytes each, as the
+     * function's code around it is -- no density form, written or made */
+    int dens = t->machine == EM_XTENSA ? xtasm_density() : 0;
+    if (t->machine == EM_XTENSA)
+        xtasm_set_density(0);
     gas_run(&g, &gx, text, file);
+    if (t->machine == EM_XTENSA)
+        xtasm_set_density(dens);
     for (int i = 0; i < g.nsecs && !g.errors; i++)
         if (i != SEC_TEXT && (g.secs[i].c.len || g.secs[i].size))
             snprintf(err, (size_t)errlen, "an asm template that puts bytes "

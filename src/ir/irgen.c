@@ -404,15 +404,54 @@ static void bounds_check(struct ir_func *fn, struct expr *pe, int p, int idx,
 
 /* An arm of an `if` that calls a noreturn or cold function -- abort(),
  * an error path -- is the unlikely one, as GCC predicts it. */
+/* (by a count of cold calls before each instruction, extended as the
+ * function grows: an `else if` ladder asks this of every rung's whole
+ * remaining chain, and scanning it each time was quadratic -- 20,000
+ * rungs took four seconds at -O0, tests/golden/big-functions.sh) */
+static const struct ir_func *g_cold_fn;
+static const char *g_cold_name;
+static int *g_cold_pre;             /* [n]: cold calls among ins[0..n) */
+static int g_cold_n, g_cold_cap;
+
+static int is_cold_call(const struct ir_ins *i)
+{
+    return i->op == IR_CALL && !i->indirect && i->callee &&
+           (i->callee->is_noreturn || i->callee->attr_cold);
+}
+
 static int arm_calls_cold(const struct ir_func *fn, int lo, int hi)
 {
-    for (int n = lo; n < hi; n++) {
-        const struct ir_ins *i = &fn->ins[n];
-        if (i->op == IR_CALL && !i->indirect && i->callee &&
-            (i->callee->is_noreturn || i->callee->attr_cold))
-            return 1;
+    /* (another function -- or this one's place reused, or its code
+     * taken back -- starts the counts again) */
+    if (g_cold_fn != fn || g_cold_name != fn->name || fn->nins < g_cold_n - 1) {
+        g_cold_fn = fn;
+        g_cold_name = fn->name;
+        g_cold_n = 0;
     }
-    return 0;
+    if (hi > fn->nins)
+        hi = fn->nins;
+    if (lo >= hi)
+        return 0;
+    if (g_cold_n == 0) {
+        if (g_cold_cap < 1) {
+            g_cold_cap = 64;
+            g_cold_pre = xrealloc(g_cold_pre, (size_t)g_cold_cap * sizeof *g_cold_pre);
+        }
+        g_cold_pre[0] = 0;
+        g_cold_n = 1;
+    }
+    /* instructions are appended, never rewritten, while irgen runs: the
+     * counts already made stay true */
+    while (g_cold_n <= hi) {
+        if (g_cold_n == g_cold_cap) {
+            g_cold_cap *= 2;
+            g_cold_pre = xrealloc(g_cold_pre, (size_t)g_cold_cap * sizeof *g_cold_pre);
+        }
+        g_cold_pre[g_cold_n] = g_cold_pre[g_cold_n - 1] +
+                               is_cold_call(&fn->ins[g_cold_n - 1]);
+        g_cold_n++;
+    }
+    return g_cold_pre[hi] - g_cold_pre[lo] > 0;
 }
 
 static void heat_cold(struct ir_func *fn, int lo, int hi)

@@ -38,6 +38,7 @@ static int g_density = 1, g_level = -1, g_took;
 
 static int g_transform = 1, g_longcalls;
 void xtasm_set_density(int on) { g_density = on; }
+int xtasm_density(void) { return g_density; }
 void xtasm_set_transform(int on) { g_transform = on; }
 void xtasm_set_longcalls(int on) { g_longcalls = on; }
 int xtasm_longcalls(void) { return g_longcalls; }

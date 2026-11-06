@@ -41,12 +41,17 @@ static long local(void)
 #elif defined(__thumb__)
 __asm__(".text\n.global answer\n.type answer, %function\n.thumb_func\n"
         "answer:\n movs r0, #42\n bx lr\n");
+#if __ARM_ARCH_ISA_THUMB >= 2
 static long addr(void)
 {
     long r;
     __asm__("movw %0, #:lower16:g\n movt %0, #:upper16:g" : "=r"(r));
     return r;
 }
+#else
+/* (ARMv6-M has no movw/movt, and a literal pool is refused: the call) */
+static long addr(void) { return (long)&g; }
+#endif
 __attribute__((noinline)) static int call(void)
 {
     register int r __asm__("r0");
@@ -108,7 +113,13 @@ __asm__(".text\n.set noreorder\n.global answer\n.type answer, @function\n"
 static long addr(void)
 {
     long r;
+#if defined(__mips64)
+    __asm__("lui %0, %%highest(g)\n daddiu %0, %0, %%higher(g)\n"
+            " dsll %0, %0, 16\n daddiu %0, %0, %%hi(g)\n"
+            " dsll %0, %0, 16\n daddiu %0, %0, %%lo(g)" : "=r"(r));
+#else
     __asm__("la %0, g" : "=r"(r));
+#endif
     return r;
 }
 __attribute__((noinline)) static int call(void)

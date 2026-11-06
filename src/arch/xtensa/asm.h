@@ -54,6 +54,7 @@ void xtasm_set_pc(long pc);
 void xtasm_set_level(int level);
 int xtasm_took_level(void);
 void xtasm_set_density(int on);
+int xtasm_density(void);
 /* `.begin no-transform`: as written, nothing narrowed */
 void xtasm_set_transform(int on);
 /* -mlongcalls (and `.begin longcalls`): a call to a function this file
