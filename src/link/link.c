@@ -172,7 +172,7 @@ struct veneer_sec { int key, sec, n; };
  * contiguously, the way `KEEP(*(.embk_exports))` places them, and its
  * bounds become bracket symbols (define_orphan_brackets). Read-only
  * orphans follow .rodata; writable ones follow .data. */
-#define MAX_ORPHANS 64
+#define MAX_ORPHANS 1024
 struct orphan { const char *name; int writable; };
 
 struct symbol {
@@ -252,7 +252,7 @@ struct linker {
     const char *entry;
     /* RISC-V: what each PCREL_HI20 computed, keyed by the auipc's
      * address, for the low half that pairs with it. */
-    struct { Elf64_Addr at; long long val; } *pcrel;
+    struct { Elf64_Addr at; long long val; int got; } *pcrel;
     int npcrel, cappcrel;
     Elf64_Addr stack_top;      /* RISC-V: the entry stub's sp, 0 = no stub */
     unsigned long csa_start, csa_end;   /* TriCore: the stub's CSA list */
@@ -1191,6 +1191,13 @@ static int classify_osec(const char *name, int writable, int is_bss)
  * sight. First-seen order is layout order, as with any input. */
 static int orphan_osec(struct linker *l, const char *name, int writable)
 {
+    /* -ffunction-sections' unwind tables are one table: every
+     * .ARM.exidx.text.f in .ARM.exidx, every .ARM.extab.text.f in
+     * .ARM.extab, as ld and lld gather them */
+    if (!strncmp(name, ".ARM.exidx.", 11))
+        name = ".ARM.exidx";
+    else if (!strncmp(name, ".ARM.extab.", 11))
+        name = ".ARM.extab";
     for (int i = 0; i < l->norphan; i++)
         if (strcmp(l->orphans[i].name, name) == 0)
             return OSEC_COUNT + i;
@@ -2949,6 +2956,9 @@ static void merge_group(struct linker *l, int *mem, int nmem, Elf64_Xword es,
                         int strings)
 {
     struct insec *h = &l->insecs[mem[0]];
+    for (int k = 1; k < nmem; k++)
+        if (l->insecs[mem[k]].align > h->align)
+            h->align = l->insecs[mem[k]].align;
     Elf64_Xword align = h->align;
     /* every string may be another's tail; an aligned one only where it
      * lands aligned */
@@ -3175,10 +3185,13 @@ static void merge_sections(struct linker *l)
         Elf64_Xword total = 0;
         for (int j = i; j < n; j++) {
             struct insec *b = &l->insecs[j];
+            /* (as lld groups them: the name does not matter, and only
+             * strings need one alignment -- a tail lands where its
+             * container's alignment allows; entries take the largest) */
             if (!cand[j] || b->sosec != a->sosec || b->osec != a->osec ||
-                b->align != a->align || strcmp(b->name, a->name) ||
+                b->shflags != a->shflags ||
                 sh_at(b->obj, b->shndx)->sh_entsize != es ||
-                (b->shflags & SHF_STRINGS) != (a->shflags & SHF_STRINGS))
+                ((a->shflags & SHF_STRINGS) && b->align != a->align))
                 continue;
             cand[j] = 0;
             mem[nm++] = j;
@@ -4297,15 +4310,19 @@ static void note_pcrel_hi(struct linker *l, Elf64_Addr at, long long val)
     }
     l->pcrel[l->npcrel].at = at;
     l->pcrel[l->npcrel].val = val;
+    l->pcrel[l->npcrel].got = 0;
     l->npcrel++;
 }
 
 static long long find_pcrel_hi(struct linker *l, struct object *o,
-                               Elf64_Addr at)
+                               Elf64_Addr at, int *got)
 {
     for (int i = l->npcrel - 1; i >= 0; i--)
-        if (l->pcrel[i].at == at)
+        if (l->pcrel[i].at == at) {
+            if (got)
+                *got = l->pcrel[i].got;
             return l->pcrel[i].val;
+        }
     die("%s: a RISC-V PCREL_LO12 relocation names 0x%llx, where no "
         "PCREL_HI20 was relocated; the two halves of an address must be "
         "emitted as a pair", o->name, (unsigned long long)at);
@@ -4438,7 +4455,12 @@ static void apply_riscv(struct linker *l, struct object *o, unsigned type,
     case R_RISCV_LO12_S:
         rv_put_s(loc, rv_lo12(V));
         return;
+    case R_RISCV_GOT_HI20:
     case R_RISCV_PCREL_HI20:
+        /* R_RISCV_GOT_HI20: the address of a GOT slot holding the
+         * symbol's. A static image has no GOT: the auipc reaches the
+         * symbol itself, and its low half (marked here) turns its load
+         * from the slot into an addi of the address, as lld relaxes it. */
         /* An undefined weak symbol is 0, and an auipc in an image at
          * 0x80000000 cannot name 0: `&f == 0` for a weak f the program
          * does not define failed to link. The auipc becomes `lui rd, 0`
@@ -4449,6 +4471,7 @@ static void apply_riscv(struct linker *l, struct object *o, unsigned type,
              V - (long long)P > I32_MAX - 0x800)) {
             put32(loc, (get32loc(loc) & 0xf80U) | 0x37U);
             note_pcrel_hi(l, P, 0);
+            l->pcrel[l->npcrel - 1].got = type == R_RISCV_GOT_HI20;
             return;
         }
         /* Recorded as well as written: the low half that pairs with it
@@ -4459,6 +4482,7 @@ static void apply_riscv(struct linker *l, struct object *o, unsigned type,
             need_range(l, o, "R_RISCV_PCREL_HI20", V - (long long)P,
                        I32_MIN - 0x800, I32_MAX - 0x800);
         note_pcrel_hi(l, P, V - (long long)P);
+        l->pcrel[l->npcrel - 1].got = type == R_RISCV_GOT_HI20;
         rv_put_u(loc, rv_hi20(V - (long long)P));
         return;
     case R_RISCV_PCREL_LO12_I:
@@ -4466,7 +4490,18 @@ static void apply_riscv(struct linker *l, struct object *o, unsigned type,
         /* S + A is the address of the AUIPC, not of the target: the
          * psABI resolves this relocation by looking up the high half's
          * own relocation there. */
-        long long d = find_pcrel_hi(l, o, (Elf64_Addr)V);
+        int got = 0;
+        long long d = find_pcrel_hi(l, o, (Elf64_Addr)V, &got);
+        if (got) {
+            /* lw/ld rd, %pcrel_lo(slot)(rs) -> addi rd, rs, %pcrel_lo(sym) */
+            unsigned int w = get32loc(loc);
+            if (type != R_RISCV_PCREL_LO12_I || (w & 0x7f) != 0x03 ||
+                (((w >> 12) & 7) != 2 && ((w >> 12) & 7) != 3))
+                die("%s: the low half of a GOT_HI20 against '%s' is not a "
+                    "lw or ld of the slot (0x%08x)", o->name,
+                    l->rel_sym ? l->rel_sym : "?", w);
+            put32(loc, (w & ~0x707fU) | 0x13U);
+        }
         if (type == R_RISCV_PCREL_LO12_I) rv_put_i(loc, rv_lo12(d));
         else                              rv_put_s(loc, rv_lo12(d));
         return;
