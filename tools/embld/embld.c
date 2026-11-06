@@ -117,6 +117,18 @@ int main(int argc, char **argv)
             if (!v) { fprintf(stderr, "embld: -L needs a directory\n"); return 2; }
             if (nlibdirs == 64) { fprintf(stderr, "embld: too many -L\n"); return 2; }
             libdirs[nlibdirs++] = v;
+        } else if (strncmp(argv[i], "-l", 2) == 0) {
+            /* -lNAME, -l NAME, -l:FILE: found below in the -L directories
+             * (every one, wherever it was given, as ld searches them) */
+            const char *v = argv[i][2] ? argv[i] + 2
+                                       : (++i < argc ? argv[i] : NULL);
+            if (!v || !*v) { fprintf(stderr, "embld: -l needs a library\n"); return 2; }
+            if (ninputs == 256) { fprintf(stderr, "embld: too many inputs\n"); return 2; }
+            char *t = malloc(strlen(v) + 3);
+            if (!t) { fprintf(stderr, "embld: out of memory\n"); return 2; }
+            t[0] = '-'; t[1] = 'l';
+            strcpy(t + 2, v);
+            inputs[ninputs++] = t;
         } else if (strcmp(argv[i], "-u") == 0 ||
                    strncmp(argv[i], "--undefined", 11) == 0) {
             const char *v = argv[i][1] == 'u'
@@ -189,6 +201,37 @@ int main(int argc, char **argv)
                         "       embld --doctor INPUT.o|INPUT.a ...   "
                         "(why the link fails)\n");
         return 2;
+    }
+    /* each -l, now that every -L is known: libNAME.a (or, for -l:FILE,
+     * FILE) in the first directory that has it */
+    for (int k = 0; k < ninputs; k++) {
+        if (strncmp(inputs[k], "-l", 2))
+            continue;
+        const char *nm = inputs[k] + 2;
+        int found = 0;
+        for (int d = 0; d < nlibdirs && !found; d++) {
+            size_t len = strlen(libdirs[d]) + strlen(nm) + 8;
+            char *path = malloc(len);
+            FILE *f;
+            if (!path) { fprintf(stderr, "embld: out of memory\n"); return 2; }
+            if (nm[0] == ':')
+                snprintf(path, len, "%s/%s", libdirs[d], nm + 1);
+            else
+                snprintf(path, len, "%s/lib%s.a", libdirs[d], nm);
+            f = fopen(path, "rb");
+            if (f) {
+                fclose(f);
+                inputs[k] = path;
+                found = 1;
+            } else
+                free(path);
+        }
+        if (!found) {
+            fprintf(stderr, "embld: -l%s: no %s%s%s in any -L directory%s\n",
+                    nm, nm[0] == ':' ? "" : "lib", nm[0] == ':' ? nm + 1 : nm,
+                    nm[0] == ':' ? "" : ".a", nlibdirs ? "" : " (none given)");
+            return 2;
+        }
     }
     opts.libdirs = libdirs;
     opts.nlibdirs = nlibdirs;

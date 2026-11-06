@@ -178,10 +178,10 @@ struct gas {
     /* Literal pools: `ldr rd, =EXPR` loads a word placed at the next
      * .ltorg or at the section's end. Identical entries in one pool are
      * one word. */
-    struct glit { int sec, pool, is_sym; long v; struct sym *sym; } *lits;
+    struct glit { int sec, pool, is_sym, size; long v; struct sym *sym; } *lits;
     int nlits, caplits;
     int *poolno, npoolno;
-    struct gpool { int sec, pool; long base; } *pools, *ppools;
+    struct gpool { int sec, pool; long base, base8; } *pools, *ppools;
     int npools, cappools, nppools;
     /* Xtensa's literal pools come BEFORE the code that loads from them --
      * l32r reaches only backwards -- at the places GNU as's
@@ -1226,6 +1226,65 @@ static int arm_branch_stmt(const char *stmt)
     return 0;
 }
 
+/* AArch64: `#(3 << 20)`, `#4*2`, `#-(1+1)` -- an immediate that is an
+ * arithmetic of numbers, as GNU as reads it -- folded to the number the
+ * instruction encoder reads. Only digits, operators and parentheses: a
+ * relocation operator (`#:lo12:x`), a float (`#1.5`) or anything naming
+ * a symbol is left for the encoder. Takes and returns a malloc'd line. */
+static char *a64_fold_imms(struct gas *g, char *text, int pass)
+{
+    for (char *h = strchr(text, '#'); h; h = strchr(h + 1, '#')) {
+        char *e = h + 1;
+        int depth = 0, op = 0;
+        while (*e && !(depth == 0 && (*e == ',' || *e == ']' || *e == '!'))) {
+            if (*e == '(') depth++;
+            else if (*e == ')') depth--;
+            if (strchr("()*/%<>&|^~+", *e) || (*e == '-' && e > h + 1))
+                op = 1;
+            else if (!isalnum((unsigned char)*e) && !isspace((unsigned char)*e) &&
+                     *e != '-')
+                break;
+            e++;
+        }
+        if (!op || depth || (*e && *e != ',' && *e != ']' && *e != '!'))
+            continue;
+        /* digits only: an identifier other than a C number is a symbol */
+        int sym = 0;
+        for (char *q = h + 1; q < e; q++)
+            if (isalpha((unsigned char)*q) || *q == '_') {
+                if (q > h + 1 && q[-1] == '0' && (*q == 'x' || *q == 'X') &&
+                    (q - 1 == h + 1 || !isalnum((unsigned char)q[-2]))) {
+                    while (q + 1 < e && isxdigit((unsigned char)q[1])) q++;
+                    continue;
+                }
+                sym = 1;
+                break;
+            }
+        if (sym)
+            continue;
+        char save = *e;
+        *e = '\0';
+        const char *pe = h + 1;
+        int bad = 0;
+        struct gval v = gx_eval(g, &pe, pass, &bad);
+        int ok = !bad && v.sec == SEC_ABS && !v.unknown && !*skip_ws((char *)pe);
+        *e = save;
+        if (!ok)
+            continue;
+        char num[32];
+        int k = snprintf(num, sizeof num, "%ld", v.v);
+        size_t pre = (size_t)(h + 1 - text), rest = strlen(e);
+        char *out = xmalloc(pre + (size_t)k + rest + 1);
+        memcpy(out, text, pre);
+        memcpy(out + pre, num, (size_t)k);
+        memcpy(out + pre + (size_t)k, e, rest + 1);
+        free(text);
+        text = out;
+        h = text + pre;
+    }
+    return text;
+}
+
 static char *substitute(struct gas *g, const char *stmt, long pc,
                         int pass, char **ext, int *placeheld)
 {
@@ -1821,6 +1880,9 @@ static const char *pseudo_symbol(struct gas *g, const char *stmt)
 
 static int pool_entry(struct gas *g, int is_sym, long v, struct sym *sy);
 static long pool_base_prev(struct gas *g);
+static int pool_entry_sz(struct gas *g, int is_sym, long v, struct sym *sy,
+                         int size);
+static long pool_base_prev_sz(struct gas *g, int size);
 
 /* ARM's `ldr rd, =EXPR`: a constant that a move can make is that move
  * (t_ldr_const, as GNU as and LLVM choose it); anything else is a word
@@ -1894,6 +1956,63 @@ static int ldr_literal(struct gas *g, const char *stmt, int pass)
     else
         emit_bytes(g, (const unsigned char *)tmp.p, tmp.len);
     free(tmp.p);
+    return 1;
+}
+
+/* AArch64's `ldr Xt, =EXPR` / `ldr Wt, =EXPR`: always a literal -- a
+ * doubleword for an X register, a word for a W -- loaded pc-relative
+ * (LDR literal, +-1 MiB), as GNU as writes it; the pool comes at the
+ * next .ltorg or the section's end. Returns 1 when the statement was one. */
+static int ldr_literal_a64(struct gas *g, const char *stmt, int pass)
+{
+    const char *p = skip_ws((char *)stmt), *r, *e;
+    int bad, k, x, rt;
+    if (strncmp(p, "ldr", 3) || !isspace((unsigned char)p[3]))
+        return 0;
+    p = skip_ws((char *)p + 3);
+    r = p;
+    while (is_symc((unsigned char)*p)) p++;
+    if ((r[0] != 'x' && r[0] != 'w' && r[0] != 'X' && r[0] != 'W') ||
+        p - r < 2 || p - r > 3)
+        return 0;
+    x = r[0] == 'x' || r[0] == 'X';
+    if (!isdigit((unsigned char)r[1]) ||
+        (p - r == 3 && !isdigit((unsigned char)r[2])))
+        return 0;
+    rt = atoi(r + 1);
+    if (rt > 30)
+        return 0;
+    p = skip_ws((char *)p);
+    if (*p != ',')
+        return 0;
+    p = skip_ws((char *)p + 1);
+    if (*p != '=')
+        return 0;
+    p++;
+    long pc = cur_off(g);
+    e = p;
+    struct gval v = gx_eval(g, &e, pass, &bad);
+    if (bad)
+        return 1;
+    if (*skip_ws((char *)e)) {
+        gerr(g, "\"%s\" is not one expression", p);
+        return 1;
+    }
+    map_mark(g, 't');
+    if (v.sec == SEC_ABS && !v.unknown)
+        k = pool_entry_sz(g, 0, v.v, NULL, x ? 8 : 4);
+    else if (v.sec >= 0)
+        k = pool_entry_sz(g, 1, v.v - v.base->value, v.base, x ? 8 : 4);
+    else
+        k = pool_entry_sz(g, 1, v.v, v.base, x ? 8 : 4);
+    long base = pool_base_prev_sz(g, x ? 8 : 4);
+    long off = base < 0 ? 0 : base + (x ? 8L : 4L) * k - pc;
+    if (off < -(1L << 20) || off >= (1L << 20))
+        gerr(g, "the literal pool is %ld bytes away, beyond ldr's reach "
+                "(1 MiB): put a .ltorg nearer", off);
+    unsigned w = (x ? 0x58000000u : 0x18000000u) |
+                 (unsigned)((off >> 2) & 0x7ffff) << 5 | (unsigned)rt;
+    emit_int(g, (long)w, 4);
     return 1;
 }
 
@@ -2357,6 +2476,8 @@ static void instruction(struct gas *g, char *stmt, int pass)
             return;
         map_mark(g, 't');
     }
+    if (g->tgt->machine == EM_AARCH64 && ldr_literal_a64(g, stmt, pass))
+        return;
     if (g->tgt->machine == EM_AARCH64)
         map_mark(g, 't');                 /* code: written $x below */
     if (g->tgt->machine == EM_XTENSA && xt_call_literal(g, stmt, pass))
@@ -2370,6 +2491,8 @@ static void instruction(struct gas *g, char *stmt, int pass)
         return;
     }
     text = substitute(g, stmt, pc, pass, &ext, &placeheld);
+    if (g->tgt->machine == EM_AARCH64)
+        text = a64_fold_imms(g, text, pass);
     struct code tmp = { 0 };
     char err[256];
 
@@ -3158,12 +3281,13 @@ static int pool_cur(struct gas *g)
 
 /* The entry for a value in the current pool of the current section: its
  * index there, shared with an identical one already in it. */
-static int pool_entry(struct gas *g, int is_sym, long v, struct sym *sy)
+static int pool_entry_sz(struct gas *g, int is_sym, long v, struct sym *sy,
+                         int size)
 {
     int pool = pool_cur(g), k = 0;
     for (int i = 0; i < g->nlits; i++) {
         struct glit *l = &g->lits[i];
-        if (l->sec != g->cur || l->pool != pool)
+        if (l->sec != g->cur || l->pool != pool || l->size != size)
             continue;
         if (l->is_sym == is_sym && l->v == v && l->sym == sy)
             return k;
@@ -3178,19 +3302,30 @@ static int pool_entry(struct gas *g, int is_sym, long v, struct sym *sy)
     g->lits[g->nlits].is_sym = is_sym;
     g->lits[g->nlits].v = v;
     g->lits[g->nlits].sym = sy;
+    g->lits[g->nlits].size = size;
     g->nlits++;
     return k;
 }
 
+static int pool_entry(struct gas *g, int is_sym, long v, struct sym *sy)
+{
+    return pool_entry_sz(g, is_sym, v, sy, 4);
+}
+
 /* Where the current pool of the current section starts, as the last pass
  * placed it; -1 before it has been placed once. */
-static long pool_base_prev(struct gas *g)
+static long pool_base_prev_sz(struct gas *g, int size)
 {
     int pool = pool_cur(g);
     for (int i = 0; i < g->nppools; i++)
         if (g->ppools[i].sec == g->cur && g->ppools[i].pool == pool)
-            return g->ppools[i].base;
+            return size == 8 ? g->ppools[i].base8 : g->ppools[i].base;
     return -1;
+}
+
+static long pool_base_prev(struct gas *g)
+{
+    return pool_base_prev_sz(g, 4);
 }
 
 /* Writes the current pool here: word-aligned with zeros (it is data),
@@ -3209,19 +3344,35 @@ static void pool_dump(struct gas *g, int pass)
         g->cappools = g->cappools ? g->cappools * 2 : 8;
         g->pools = xrealloc(g->pools, (size_t)g->cappools * sizeof *g->pools);
     }
-    g->pools[g->npools].sec = g->cur;
-    g->pools[g->npools].pool = pool;
-    g->pools[g->npools].base = cur_off(g);
-    g->npools++;
+    struct gpool *gp = &g->pools[g->npools++];
+    gp->sec = g->cur;
+    gp->pool = pool;
+    gp->base = cur_off(g);
+    gp->base8 = -1;
     if (g->secs[g->cur].align < 4)
         g->secs[g->cur].align = 4;
-    for (int i = 0; i < g->nlits; i++) {
-        struct glit *l = &g->lits[i];
-        if (l->sec != g->cur || l->pool != pool)
-            continue;
-        if (l->is_sym && pass == 2)
-            fix_add(g, g->cur, cur_off(g), l->sym->name, g->tgt->r_abs32, l->v);
-        emit_int(g, l->is_sym ? 0 : l->v, 4);
+    /* the words, then (AArch64's `ldr xN, =`) the doublewords, aligned:
+     * the order GNU as writes its two pools in */
+    for (int size = 4; size <= 8; size += 4) {
+        int first = 1;
+        for (int i = 0; i < g->nlits; i++) {
+            struct glit *l = &g->lits[i];
+            if (l->sec != g->cur || l->pool != pool || l->size != size)
+                continue;
+            if (first && size == 8) {
+                while (cur_off(g) & 7)
+                    advance(g, 1);
+                gp = &g->pools[g->npools - 1];
+                gp->base8 = cur_off(g);
+                if (g->secs[g->cur].align < 8)
+                    g->secs[g->cur].align = 8;
+            }
+            first = 0;
+            if (l->is_sym && pass == 2)
+                fix_add(g, g->cur, cur_off(g), l->sym->name,
+                        size == 8 ? g->tgt->r_abs64 : g->tgt->r_abs32, l->v);
+            emit_int(g, l->is_sym ? 0 : l->v, size);
+        }
     }
     g->poolno[g->cur]++;
 }
@@ -3680,7 +3831,7 @@ static int directive(struct gas *g, char *p, int pass)
         return 1;
     /* the literal pool so far, here (`ldr rd, =EXPR`) */
     if (DIR(".ltorg") || DIR(".pool")) {
-        if (g->tgt->machine == EM_ARM)
+        if (g->tgt->machine == EM_ARM || g->tgt->machine == EM_AARCH64)
             pool_dump(g, pass);
         return 1;
     }
@@ -4311,7 +4462,7 @@ static void pass_over(struct gas *g, const struct gline *lines, int nlines,
         free(line);
     }
     /* each section's last pool, at its end */
-    if (g->tgt->machine == EM_ARM) {
+    if (g->tgt->machine == EM_ARM || g->tgt->machine == EM_AARCH64) {
         int save = g->cur;
         for (int k = 0; k < g->nsecs; k++) {
             g->cur = k;

@@ -187,6 +187,11 @@ struct symbol {
     /* The first object that referred to it: what an archive member was
      * pulled for, as the map file reports. */
     struct object *ref;
+    /* Only weak references to it (and at least one): an archive member
+     * is not pulled for it, as ld and lld do not -- `if (&f) f();` is
+     * how a program asks for f only if something else brought it in. */
+    int weak_refs_only;
+    int required;              /* the entry, -u, EXTERN(): always pulled */
 };
 
 /* A static archive (.a) is a pool of member objects; a member is pulled
@@ -224,6 +229,8 @@ struct linker {
      * thread pointer. */
     Elf64_Addr tls_start;
     Elf64_Xword tls_size;
+    Elf64_Xword tls_align;     /* AArch64: the block follows the 16-byte
+                                * TCB at this alignment */
     struct object **objs;
     int nobj, capobj;
     struct insec *insecs;
@@ -1034,9 +1041,10 @@ static struct object *parse_object(const char *name, unsigned char *buf,
         if (eh->e_type != ET_REL)
             die("%s: not a relocatable object (ET_REL)", name);
         if (eh->e_machine != EM_X86_64 && eh->e_machine != EM_RISCV &&
-            eh->e_machine != EM_LOONGARCH && eh->e_machine != EM_MIPS)
-            die("%s: a 64-bit object for machine %u; only x86-64, RV64 "
-                "(EM_RISCV), LoongArch64 (EM_LOONGARCH) and MIPS64 "
+            eh->e_machine != EM_LOONGARCH && eh->e_machine != EM_MIPS &&
+            eh->e_machine != EM_AARCH64)
+            die("%s: a 64-bit object for machine %u; only x86-64, AArch64, "
+                "RV64 (EM_RISCV), LoongArch64 (EM_LOONGARCH) and MIPS64 "
                 "(EM_MIPS) are supported", name, (unsigned)eh->e_machine);
         if (big && eh->e_machine != EM_MIPS)
             die("%s: a big-endian 64-bit object for machine %u; big-endian "
@@ -1690,7 +1698,8 @@ static void add_entry_stub(struct linker *l)
               : l->machine == EM_PPC ? 32
               : l->machine == EM_RX ? 14
               : l->machine == EM_SPARC ? 20
-              : l->machine == EM_68K ? 12 : 0;
+              : l->machine == EM_68K ? 12
+              : l->machine == EM_AARCH64 ? 40 : 0;
 #if FAMILY_BUILT(mips)
     if (l->machine == EM_MIPS)
         size = mips_li_len((long long)l->stack_top) + 16;
@@ -1852,6 +1861,35 @@ static void fill_entry_stub(struct linker *l, Elf64_Addr entry)
         p[6] = 0x4e; p[7] = 0xf9;
         p[8] = (unsigned char)(e >> 24);   p[9] = (unsigned char)(e >> 16);
         p[10] = (unsigned char)(e >> 8);   p[11] = (unsigned char)e;
+        return;
+    }
+#endif
+#if FAMILY_BUILT(aarch64)
+    if (l->machine == EM_AARCH64) {
+        /* An A-profile core leaves reset at EL1/EL2 with sp unset:
+         * movz/movk x16 = top, mov sp, x16; movz/movk x17 = entry, br x17.
+         * Ten words whatever the addresses. */
+        unsigned char *p = l->stub;
+        unsigned long long v[2];
+        unsigned w[10];
+        int k = 0, r, h;
+        (void)c;
+        v[0] = (unsigned long long)l->stack_top;
+        v[1] = (unsigned long long)entry;
+        for (r = 0; r < 2; r++) {
+            for (h = 0; h < 4; h++)
+                w[k++] = (h ? 0xf2800000u : 0xd2800000u) | (unsigned)h << 21 |
+                         (unsigned)((v[r] >> (16 * h)) & 0xffff) << 5 |
+                         (unsigned)(16 + r);
+            w[k++] = r ? 0xd61f0220u          /* br x17 */
+                       : 0x9100021fu;         /* mov sp, x16 */
+        }
+        for (k = 0; k < 10; k++) {
+            p[4 * k] = (unsigned char)w[k];
+            p[4 * k + 1] = (unsigned char)(w[k] >> 8);
+            p[4 * k + 2] = (unsigned char)(w[k] >> 16);
+            p[4 * k + 3] = (unsigned char)(w[k] >> 24);
+        }
         return;
     }
 #endif
@@ -2129,7 +2167,7 @@ static struct symbol *defines_needed(struct linker *l, struct object *o)
         if (!*nm)
             continue;
         struct symbol *g = sym_find(l, nm);
-        if (g && !g->defined)
+        if (g && !g->defined && !g->weak_refs_only)
             return g;
     }
     return NULL;
@@ -2184,8 +2222,11 @@ static void add_symbols(struct linker *l, struct object *o)
         struct symbol *g = sym_intern(l, name);
 
         if (sy->st_shndx == SHN_UNDEF) {
-            if (!g->ref)
+            if (!g->ref) {
                 g->ref = o;
+                g->weak_refs_only = weak && !g->required;
+            } else if (!weak)
+                g->weak_refs_only = 0;
             continue; /* a reference; may be satisfied by a later object */
         }
 
@@ -3574,6 +3615,293 @@ static void la_put(unsigned char *loc, int lo, int width, unsigned long long v)
 }
 #endif
 
+/* ---- AArch64 ---------------------------------------------------------------
+ *
+ * RELA. Every relocation a static image needs from GCC's, clang's and
+ * EmbCC's objects: the data words (ABS, PREL), the page and low-12 pairs
+ * (ADRP with ADD or a load or store, the low 12 bits scaled by the
+ * access's size), the branches (26-bit B/BL, 19-bit B.cond/CBZ/LDR
+ * literal, 14-bit TBZ), the MOVZ/MOVK groups. A GOT reference is relaxed
+ * to the address itself (an image without a dynamic linker has no GOT:
+ * ADRP to the GOT page is ADRP to the symbol's, and the LDR from the slot
+ * becomes the ADD of its low bits, as lld relaxes them), and so are the
+ * TLS initial-exec and descriptor sequences to local-exec, whose offset
+ * from the thread pointer is the variable's in the block after the
+ * 16-byte TCB (variant 1, the block aligned to its own alignment). */
+#if FAMILY_BUILT(aarch64)
+static unsigned a64_get(const unsigned char *p)
+{
+    return (unsigned)p[0] | (unsigned)p[1] << 8 | (unsigned)p[2] << 16 |
+           (unsigned)p[3] << 24;
+}
+
+static void a64_imm12(struct linker *l, struct object *o, const char *rel,
+                      unsigned char *loc, long long v, int scale)
+{
+    unsigned w = a64_get(loc);
+    long long lo = v & 0xfff;
+    if (lo % (1LL << scale))
+        die("%s: %s against '%s': the address 0x%llx is not %d-byte aligned, "
+            "and the load or store's offset is scaled by it", o->name, rel,
+            l->rel_sym ? l->rel_sym : "?", (unsigned long long)v, 1 << scale);
+    w = (w & ~(0xfffu << 10)) | (unsigned)(lo >> scale) << 10;
+    put32(loc, w);
+}
+
+/* ADR/ADRP's 21-bit immediate, immlo in 30:29 and immhi in 23:5 */
+static void a64_adr(unsigned char *loc, long long imm21)
+{
+    unsigned w = a64_get(loc);
+    w = (w & 0x9f00001fu) | (unsigned)(imm21 & 3) << 29 |
+        (unsigned)((imm21 >> 2) & 0x7ffff) << 5;
+    put32(loc, w);
+}
+
+static void a64_movw(unsigned char *loc, long long v, int shift, int sign)
+{
+    unsigned w = a64_get(loc);
+    long long part = v >> shift;
+    if (sign) {
+        /* MOVZ for a value >= 0, MOVN of its complement for one < 0 */
+        w &= ~(3u << 29);
+        if (v < 0) {
+            part = ~v >> shift;
+            w |= 0u << 29;                  /* movn */
+        } else
+            w |= 2u << 29;                  /* movz */
+    }
+    w = (w & ~(0xffffu << 5)) | (unsigned)(part & 0xffff) << 5;
+    put32(loc, w);
+}
+
+static long long a64_page(long long a) { return a & ~0xfffLL; }
+
+static void apply_aarch64(struct linker *l, struct object *o, unsigned type,
+                          unsigned char *loc, Elf64_Addr S, long long A,
+                          Elf64_Addr P)
+{
+    long long V = (long long)S + A, d = V - (long long)P;
+    /* the thread-pointer offset of a TLS variable: past the TCB, aligned */
+    long long tcb = (long long)align_up(16, l->tls_align ? l->tls_align : 1);
+    long long tp = V - (long long)l->tls_start + tcb;
+    /* An undefined weak symbol (its value 0): a branch to it goes to the
+     * next instruction, and a pc-relative field other than ADRP's page
+     * measures from the place itself -- what lld resolves them to, so
+     * `if (&f) f();` links wherever the image is. */
+    if (l->rel_uw)
+        switch (type) {
+        case R_AARCH64_CALL26: case R_AARCH64_JUMP26:
+        case R_AARCH64_CONDBR19: case R_AARCH64_TSTBR14:
+            d = 4 + A;
+            break;
+        case R_AARCH64_PREL64: case R_AARCH64_PREL32: case R_AARCH64_PREL16:
+        case R_AARCH64_LD_PREL_LO19: case R_AARCH64_ADR_PREL_LO21:
+            d = A;
+            break;
+        default:
+            break;
+        }
+    switch (type) {
+    case R_AARCH64_NONE:
+    case 256:                       /* R_AARCH64_NONE's withdrawn number */
+        return;
+    case R_AARCH64_ABS64:
+        put64(loc, (unsigned long long)V);
+        return;
+    case R_AARCH64_ABS32:
+        need_range(l, o, "R_AARCH64_ABS32", V, I32_MIN, 0xffffffffLL);
+        put32(loc, (unsigned int)V);
+        return;
+    case R_AARCH64_ABS16:
+        need_range(l, o, "R_AARCH64_ABS16", V, -32768, 0xffff);
+        put16(loc, (unsigned)V);
+        return;
+    case R_AARCH64_PREL64:
+        put64(loc, (unsigned long long)d);
+        return;
+    case R_AARCH64_PREL32:
+        need_range(l, o, "R_AARCH64_PREL32", d, I32_MIN, 0xffffffffLL);
+        put32(loc, (unsigned int)d);
+        return;
+    case R_AARCH64_PREL16:
+        need_range(l, o, "R_AARCH64_PREL16", d, -32768, 0xffff);
+        put16(loc, (unsigned)d);
+        return;
+    case R_AARCH64_ADR_PREL_PG_HI21:
+    case R_AARCH64_ADR_PREL_PG_HI21_NC:
+    case R_AARCH64_ADR_GOT_PAGE:               /* (relaxed: the symbol's page) */
+    {
+        long long pg = (a64_page(V) - a64_page((long long)P)) >> 12;
+        if (type != R_AARCH64_ADR_PREL_PG_HI21_NC)
+            need_range(l, o, "R_AARCH64_ADR_PREL_PG_HI21", pg, -(1LL << 20),
+                       (1LL << 20) - 1);
+        a64_adr(loc, pg);
+        return;
+    }
+    case R_AARCH64_ADR_PREL_LO21:
+        need_range(l, o, "R_AARCH64_ADR_PREL_LO21", d, -(1LL << 20),
+                   (1LL << 20) - 1);
+        a64_adr(loc, d);
+        return;
+    case R_AARCH64_ADD_ABS_LO12_NC:
+        a64_imm12(l, o, "R_AARCH64_ADD_ABS_LO12_NC", loc, V, 0);
+        return;
+    case R_AARCH64_LDST8_ABS_LO12_NC:
+        a64_imm12(l, o, "R_AARCH64_LDST8_ABS_LO12_NC", loc, V, 0);
+        return;
+    case R_AARCH64_LDST16_ABS_LO12_NC:
+        a64_imm12(l, o, "R_AARCH64_LDST16_ABS_LO12_NC", loc, V, 1);
+        return;
+    case R_AARCH64_LDST32_ABS_LO12_NC:
+        a64_imm12(l, o, "R_AARCH64_LDST32_ABS_LO12_NC", loc, V, 2);
+        return;
+    case R_AARCH64_LDST64_ABS_LO12_NC:
+        a64_imm12(l, o, "R_AARCH64_LDST64_ABS_LO12_NC", loc, V, 3);
+        return;
+    case R_AARCH64_LDST128_ABS_LO12_NC:
+        a64_imm12(l, o, "R_AARCH64_LDST128_ABS_LO12_NC", loc, V, 4);
+        return;
+    case R_AARCH64_LD64_GOT_LO12_NC: {
+        /* ldr xT, [xN, :got_lo12:sym] -> add xT, xN, :lo12:sym */
+        unsigned w = a64_get(loc);
+        if ((w & 0xffc00000u) != 0xf9400000u)
+            die("%s: R_AARCH64_LD64_GOT_LO12_NC against '%s' is not on an "
+                "ldr xT, [xN, #imm]", o->name, l->rel_sym ? l->rel_sym : "?");
+        put32(loc, 0x91000000u | (unsigned)(V & 0xfff) << 10 | (w & 0x3ffu));
+        return;
+    }
+    case R_AARCH64_JUMP26:
+    case R_AARCH64_CALL26:
+        if (d & 3)
+            die("%s: a branch to '%s' at an address not 4-aligned", o->name,
+                l->rel_sym ? l->rel_sym : "?");
+        need_range(l, o, type == R_AARCH64_CALL26 ? "R_AARCH64_CALL26"
+                                                  : "R_AARCH64_JUMP26",
+                   d, -(1LL << 27), (1LL << 27) - 4);
+        put32(loc, (a64_get(loc) & 0xfc000000u) | (unsigned)((d >> 2) & 0x3ffffff));
+        return;
+    case R_AARCH64_CONDBR19:
+    case R_AARCH64_LD_PREL_LO19:
+        need_range(l, o, type == R_AARCH64_CONDBR19 ? "R_AARCH64_CONDBR19"
+                                                    : "R_AARCH64_LD_PREL_LO19",
+                   d, -(1LL << 20), (1LL << 20) - 4);
+        put32(loc, (a64_get(loc) & 0xff00001fu) | (unsigned)((d >> 2) & 0x7ffff) << 5);
+        return;
+    case R_AARCH64_TSTBR14:
+        need_range(l, o, "R_AARCH64_TSTBR14", d, -(1LL << 15), (1LL << 15) - 4);
+        put32(loc, (a64_get(loc) & 0xfff8001fu) | (unsigned)((d >> 2) & 0x3fff) << 5);
+        return;
+    case R_AARCH64_MOVW_UABS_G0:
+        need_range(l, o, "R_AARCH64_MOVW_UABS_G0", V, 0, 0xffff);
+        /* fall through */
+    case R_AARCH64_MOVW_UABS_G0_NC:
+        a64_movw(loc, V, 0, 0);
+        return;
+    case R_AARCH64_MOVW_UABS_G1:
+        need_range(l, o, "R_AARCH64_MOVW_UABS_G1", V, 0, 0xffffffffLL);
+        /* fall through */
+    case R_AARCH64_MOVW_UABS_G1_NC:
+        a64_movw(loc, V, 16, 0);
+        return;
+    case R_AARCH64_MOVW_UABS_G2:
+        need_range(l, o, "R_AARCH64_MOVW_UABS_G2", V, 0, 0xffffffffffffLL);
+        /* fall through */
+    case R_AARCH64_MOVW_UABS_G2_NC:
+        a64_movw(loc, V, 32, 0);
+        return;
+    case R_AARCH64_MOVW_UABS_G3:
+        a64_movw(loc, V, 48, 0);
+        return;
+    case R_AARCH64_MOVW_SABS_G0:
+        need_range(l, o, "R_AARCH64_MOVW_SABS_G0", V, -65536, 65535);
+        a64_movw(loc, V, 0, 1);
+        return;
+    case R_AARCH64_MOVW_SABS_G1:
+        need_range(l, o, "R_AARCH64_MOVW_SABS_G1", V, -(1LL << 32), (1LL << 32) - 1);
+        a64_movw(loc, V, 16, 1);
+        return;
+    case R_AARCH64_MOVW_SABS_G2:
+        need_range(l, o, "R_AARCH64_MOVW_SABS_G2", V, -(1LL << 48), (1LL << 48) - 1);
+        a64_movw(loc, V, 32, 1);
+        return;
+    /* ---- TLS, local-exec: the offset from the thread pointer ---- */
+    case R_AARCH64_TLSLE_ADD_TPREL_HI12:
+        need_range(l, o, "R_AARCH64_TLSLE_ADD_TPREL_HI12", tp, 0, 0xffffff);
+        put32(loc, (a64_get(loc) & ~(0xfffu << 10)) | (unsigned)((tp >> 12) & 0xfff) << 10);
+        return;
+    case R_AARCH64_TLSLE_ADD_TPREL_LO12:
+        need_range(l, o, "R_AARCH64_TLSLE_ADD_TPREL_LO12", tp, 0, 0xfff);
+        /* fall through */
+    case R_AARCH64_TLSLE_ADD_TPREL_LO12_NC:
+        put32(loc, (a64_get(loc) & ~(0xfffu << 10)) | (unsigned)(tp & 0xfff) << 10);
+        return;
+    case R_AARCH64_TLSLE_MOVW_TPREL_G2:
+        a64_movw(loc, tp, 32, 1);
+        return;
+    case R_AARCH64_TLSLE_MOVW_TPREL_G1:
+        a64_movw(loc, tp, 16, 1);
+        return;
+    case R_AARCH64_TLSLE_MOVW_TPREL_G1_NC:
+        a64_movw(loc, tp, 16, 0);
+        return;
+    case R_AARCH64_TLSLE_MOVW_TPREL_G0:
+        a64_movw(loc, tp, 0, 1);
+        return;
+    case R_AARCH64_TLSLE_MOVW_TPREL_G0_NC:
+        a64_movw(loc, tp, 0, 0);
+        return;
+    case R_AARCH64_TLSLE_LDST8_TPREL_LO12:
+    case R_AARCH64_TLSLE_LDST8_TPREL_LO12_NC:
+        a64_imm12(l, o, "R_AARCH64_TLSLE_LDST8_TPREL_LO12", loc, tp, 0);
+        return;
+    case R_AARCH64_TLSLE_LDST16_TPREL_LO12:
+    case R_AARCH64_TLSLE_LDST16_TPREL_LO12_NC:
+        a64_imm12(l, o, "R_AARCH64_TLSLE_LDST16_TPREL_LO12", loc, tp, 1);
+        return;
+    case R_AARCH64_TLSLE_LDST32_TPREL_LO12:
+    case R_AARCH64_TLSLE_LDST32_TPREL_LO12_NC:
+        a64_imm12(l, o, "R_AARCH64_TLSLE_LDST32_TPREL_LO12", loc, tp, 2);
+        return;
+    case R_AARCH64_TLSLE_LDST64_TPREL_LO12:
+    case R_AARCH64_TLSLE_LDST64_TPREL_LO12_NC:
+        a64_imm12(l, o, "R_AARCH64_TLSLE_LDST64_TPREL_LO12", loc, tp, 3);
+        return;
+    /* ---- initial-exec, relaxed: adrp xT -> movz xT, #tp:g1; the slot's
+     * ldr -> movk xT, #tp:g0 ---- */
+    case R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21: {
+        unsigned rt = a64_get(loc) & 31u;
+        need_range(l, o, "R_AARCH64_TLSIE (relaxed to local-exec)", tp, 0,
+                   0xffffffffLL);
+        put32(loc, 0xd2a00000u | (unsigned)((tp >> 16) & 0xffff) << 5 | rt);
+        return;
+    }
+    case R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC: {
+        unsigned rt = a64_get(loc) & 31u;
+        put32(loc, 0xf2800000u | (unsigned)(tp & 0xffff) << 5 | rt);
+        return;
+    }
+    /* ---- descriptors, relaxed to local-exec: adrp and the ldr become
+     * nops, the add movz x0 and the blr movk x0 ---- */
+    case R_AARCH64_TLSDESC_ADR_PAGE21:
+    case R_AARCH64_TLSDESC_LD64_LO12:
+        put32(loc, 0xd503201fu);
+        return;
+    case R_AARCH64_TLSDESC_ADD_LO12:
+        need_range(l, o, "R_AARCH64_TLSDESC (relaxed to local-exec)", tp, 0,
+                   0xffffffffLL);
+        put32(loc, 0xd2a00000u | (unsigned)((tp >> 16) & 0xffff) << 5);
+        return;
+    case R_AARCH64_TLSDESC_CALL:
+        put32(loc, 0xf2800000u | (unsigned)(tp & 0xffff) << 5);
+        return;
+    default:
+        die("%s: AArch64 relocation type %u is not one embld applies (against "
+            "'%s')", o->name, type, l->rel_sym ? l->rel_sym : "?");
+    }
+}
+#endif
+
+
 #if FAMILY_BUILT(loongarch)
 static void apply_loongarch(struct linker *l, struct object *o, unsigned type,
                             unsigned char *loc, Elf64_Addr S, long long A,
@@ -4729,6 +5057,12 @@ static void apply_relocs(struct linker *l, struct object *o)
 #if FAMILY_BUILT(loongarch)
             if (o->machine == EM_LOONGARCH) {
                 apply_loongarch(l, o, type, loc, S, A, P);
+                continue;
+            }
+#endif
+#if FAMILY_BUILT(aarch64)
+            if (o->machine == EM_AARCH64) {
+                apply_aarch64(l, o, type, loc, S, A, P);
                 continue;
             }
 #endif
@@ -6201,9 +6535,11 @@ static void ls_orphans(struct linker *l, struct ls_script *sc, int mode)
         struct insec *is = &l->insecs[si];
         if (is->sosec != -1 || is->discarded)
             continue;
-        if (is->osec == OSEC_TDATA || is->osec == OSEC_TBSS)
-            die("%s: thread-local section %s in a linker-script link is "
-                "not supported", is->obj ? is->obj->name : "?", is->name);
+        /* .tdata and .tbss a script does not name go where their kind
+         * goes, after the data and after the zeroed data: a static image's
+         * one thread uses them where they lie (the block runs from the
+         * first to the end of the last; see tls_start), and .tbss sits in
+         * memory the startup zeroes -- where ld's would overlap .bss */
         int k = -1;
         for (int j = 0; j < sc->nosec; j++)
             if (sc->osecs[j].orphan && !strcmp(sc->osecs[j].name, is->name))
@@ -6555,9 +6891,10 @@ static void ls_layout(struct linker *l, struct ls_script *sc, int orphan_mode)
      * of its 256 KiB, is refused where it is applied, naming the fix. */
     if (l->machine != EM_ARM && l->machine != EM_RISCV &&
         l->machine != EM_AVR && l->machine != EM_XTENSA &&
+        l->machine != EM_AARCH64 &&
         !(l->machine == EM_MIPS && l->elf32))
-        die("-T: a linker script is supported for ARM, RISC-V, AVR, Xtensa and "
-            "MIPS32 images only (this one is machine %u)",
+        die("-T: a linker script is supported for ARM, AArch64, RISC-V, AVR, "
+            "Xtensa and MIPS32 images only (this one is machine %u)",
             (unsigned)l->machine);
     /* A region every output section names must exist, whether or not
      * anything ends up in the section: a typo in `> RAM` is a typo. */
@@ -6795,7 +7132,10 @@ static void write_exec_script(struct linker *l, struct ls_script *sc,
     Elf64_Off phsz = l->elf32 ? sizeof(Elf32_Phdr) : sizeof(Elf64_Phdr);
     Elf64_Xword shentsz = l->elf32 ? sizeof(Elf32_Shdr) : sizeof(Elf64_Shdr);
     Elf64_Xword symentsz = l->elf32 ? sizeof(Elf32_Sym) : sizeof(Elf64_Sym);
-    Elf64_Off off = ehsz + (Elf64_Off)nem * phsz;
+    /* PT_TLS, after the loads, when there is a thread block: where its
+     * template is, as a runtime that starts threads finds it */
+    int tlsph = l->tls_size > 0;
+    Elf64_Off off = ehsz + (Elf64_Off)(nem + tlsph) * phsz;
     Elf64_Off *fo = xmalloc((size_t)(nem + 1) * sizeof *fo);
     for (int k = 0; k < nem; k++) {
         struct ls_osec *o = &sc->osecs[em[k]];
@@ -6913,11 +7253,11 @@ static void write_exec_script(struct linker *l, struct ls_script *sc,
     eh.e_version = EV_CURRENT;
     eh.e_entry = entry;
     eh.e_flags = l->machine == EM_ARM ? EF_ARM_EABI_VER5 : l->eflags;
-    eh.e_phoff = nem ? ehsz : 0;
+    eh.e_phoff = nem + tlsph ? ehsz : 0;
     eh.e_shoff = sh_off;
     eh.e_ehsize = (Elf64_Half)ehsz;
     eh.e_phentsize = (Elf64_Half)phsz;
-    eh.e_phnum = (Elf64_Half)nem;
+    eh.e_phnum = (Elf64_Half)(nem + tlsph);
     eh.e_shentsize = (Elf64_Half)shentsz;
     eh.e_shnum = (Elf64_Half)nsh;
     eh.e_shstrndx = (Elf64_Half)sh_shstr;
@@ -6941,6 +7281,30 @@ static void write_exec_script(struct linker *l, struct ls_script *sc,
         ph.p_align = 4;
         ls_put_phdr(img + ehsz + (Elf64_Off)k * phsz, l, &ph);
     }
+    if (tlsph) {
+        Elf64_Phdr ph;
+        Elf64_Addr tdata_end = l->tls_start;
+        memset(&ph, 0, sizeof ph);
+        for (int i = 0; i < l->nsec; i++) {
+            const struct insec *is = &l->insecs[i];
+            if ((is->shflags & SHF_TLS) && !is->is_bss && !is->discarded &&
+                is->sosec != -2 && is->vaddr + is->size > tdata_end)
+                tdata_end = is->vaddr + is->size;
+        }
+        ph.p_type = PT_TLS;
+        ph.p_flags = PF_R;
+        for (int k = 0; k < nem; k++) {
+            const struct ls_osec *o = &sc->osecs[em[k]];
+            if ((Elf64_Addr)o->vma <= l->tls_start &&
+                l->tls_start < (Elf64_Addr)(o->vma + o->size))
+                ph.p_offset = fo[k] + (l->tls_start - (Elf64_Addr)o->vma);
+        }
+        ph.p_vaddr = ph.p_paddr = l->tls_start;
+        ph.p_filesz = tdata_end - l->tls_start;
+        ph.p_memsz = l->tls_size;
+        ph.p_align = l->tls_align;
+        ls_put_phdr(img + ehsz + (Elf64_Off)nem * phsz, l, &ph);
+    }
 
     Elf64_Shdr sh;
     for (int k = 0; k < nem; k++) {
@@ -6950,6 +7314,17 @@ static void write_exec_script(struct linker *l, struct ls_script *sc,
         sh.sh_type = o->nobits ? SHT_NOBITS : SHT_PROGBITS;
         sh.sh_flags = SHF_ALLOC | (o->exec ? SHF_EXECINSTR : 0) |
                       (o->write ? SHF_WRITE : 0);
+        {
+            /* thread-local when everything in it is */
+            int tls = 0, other = 0;
+            for (int b = 0; b < o->nbody; b++)
+                for (int j = 0; j < o->body[b].nlist; j++) {
+                    if (l->insecs[o->body[b].list[j]].shflags & SHF_TLS) tls = 1;
+                    else other = 1;
+                }
+            if (tls && !other)
+                sh.sh_flags |= SHF_TLS;
+        }
         /* The inputs' own type when they all have one, as ld keeps it:
          * .init_array stays INIT_ARRAY, and .ARM.exidx stays ARM_EXIDX
          * and links to where its functions went -- which is what
@@ -7865,9 +8240,9 @@ int embld_link(const char **inputs, int ninputs, const char *out,
         /* An entry the link was told about is a reference: the archive
          * member that defines Reset_Handler is pulled for it, as ld does. */
         if (opts->entry || sc->entry)
-            sym_intern(&l, l.entry);
+            sym_intern(&l, l.entry)->required = 1;
         for (int k = 0; k < sc->nextern; k++)
-            sym_intern(&l, sc->externs[k]);
+            sym_intern(&l, sc->externs[k])->required = 1;
         if (sc->ninputs) {
             all = xmalloc((size_t)(ninputs + sc->ninputs) * sizeof *all);
             for (int k = 0; k < ninputs; k++)
@@ -7877,7 +8252,7 @@ int embld_link(const char **inputs, int ninputs, const char *out,
         }
     }
     for (int k = 0; opts && k < opts->nundefs; k++)
-        sym_intern(&l, opts->undefs[k]);
+        sym_intern(&l, opts->undefs[k])->required = 1;
 
     /* Explicit objects are always linked; archives are stashed and their
      * members pulled on demand (left-to-right, as a linker does — so an
@@ -7948,6 +8323,27 @@ int embld_link(const char **inputs, int ninputs, const char *out,
                     "_start; the entry is 0x%llx, where the code starts\n",
                     (unsigned long long)ev);
         }
+        /* the thread block, where the script put .tdata and .tbss: from
+         * the first SHF_TLS input to the last one's end, at the largest
+         * alignment among them (the TP-relative relocations' base) */
+        {
+            Elf64_Addr lo = 0, hi = 0;
+            int any = 0;
+            l.tls_align = 1;
+            for (int i = 0; i < l.nsec; i++) {
+                const struct insec *is = &l.insecs[i];
+                if (!(is->shflags & SHF_TLS) || is->discarded || is->sosec == -2)
+                    continue;
+                if (!any || is->vaddr < lo) lo = is->vaddr;
+                if (!any || is->vaddr + is->size > hi) hi = is->vaddr + is->size;
+                if (is->align > l.tls_align) l.tls_align = is->align;
+                any = 1;
+            }
+            if (any) {
+                l.tls_start = lo;
+                l.tls_size = align_up(hi - lo, l.tls_align);
+            }
+        }
         for (int i = 0; i < l.nobj; i++)
             apply_relocs(&l, l.objs[i]);
         if (opts->map_file)
@@ -7988,8 +8384,9 @@ int embld_link(const char **inputs, int ninputs, const char *out,
             l.machine != EM_LOONGARCH && l.machine != EM_ARM &&
             l.machine != EM_TRICORE && l.machine != EM_XTENSA &&
             l.machine != EM_PPC && l.machine != EM_RX &&
-            l.machine != EM_SPARC && l.machine != EM_68K)
-            die("-Tstack is a RISC-V, MIPS, LoongArch, ARMv7-A, TriCore, Xtensa, "
+            l.machine != EM_SPARC && l.machine != EM_68K &&
+            l.machine != EM_AARCH64)
+            die("-Tstack is a RISC-V, MIPS, LoongArch, AArch64, ARMv7-A, TriCore, Xtensa, "
                 "PowerPC, RX, SPARC and ColdFire "
                 "option: "
                 "every other target here starts with a stack pointer already "
@@ -8059,6 +8456,7 @@ int embld_link(const char **inputs, int ninputs, const char *out,
      * the whole block and every access reads past its own variable. */
     l.tls_start = tls_start;
     l.tls_size = align_up(tls_memsz, tls_align);
+    l.tls_align = tls_align;
     finalize_symbols(&l);
     cmse_fill(&l);
     define_brackets(&l, bounds);

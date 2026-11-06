@@ -2315,6 +2315,25 @@ static void assemble_stmt(struct actx *a, char *st)
         return;
     }
 
+    /* hlt (semihosting's trap: `hlt #0xf000`) and the debug-state
+     * exceptions, whose immediate is optional */
+    if (strcmp(mn, "hlt") == 0 || strcmp(mn, "dcps1") == 0 ||
+        strcmp(mn, "dcps2") == 0 || strcmp(mn, "dcps3") == 0) {
+        long v = 0;
+        if (n > 1 || (n == 0 && mn[0] == 'h')) {
+            fail(a, "'%s' takes one immediate", mn);
+            return;
+        }
+        if (n == 1)
+            v = imm(a, ops[0]);
+        if (v < 0 || v > 0xffff) { fail(a, "'%s' immediate out of range", mn); return; }
+        if (!a->failed)
+            a64_word(a->out, (mn[0] == 'h' ? 0xD4400000UL
+                              : 0xD4A00000UL | (unsigned long)(mn[4] - '0')) |
+                             (unsigned long)v << 5);
+        return;
+    }
+
     if (strcmp(mn, ".inst") == 0) {
         if (n < 1) { fail(a, "'.inst' needs a value"); return; }
         for (int i = 0; i < n && !a->failed; i++) {

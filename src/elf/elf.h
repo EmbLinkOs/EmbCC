@@ -276,6 +276,22 @@ typedef struct {
 #define R_AARCH64_TLSDESC_LD64_LO12     563
 #define R_AARCH64_TLSDESC_ADD_LO12      564
 #define R_AARCH64_TLSDESC_CALL          569
+/* What embld applies for a static image beyond those: local-exec TLS
+ * in its MOVW and load/store forms. */
+#define R_AARCH64_NONE                  0
+#define R_AARCH64_TLSLE_MOVW_TPREL_G2   544
+#define R_AARCH64_TLSLE_MOVW_TPREL_G1   545
+#define R_AARCH64_TLSLE_MOVW_TPREL_G1_NC 546
+#define R_AARCH64_TLSLE_MOVW_TPREL_G0   547
+#define R_AARCH64_TLSLE_MOVW_TPREL_G0_NC 548
+#define R_AARCH64_TLSLE_LDST8_TPREL_LO12     552
+#define R_AARCH64_TLSLE_LDST8_TPREL_LO12_NC  553
+#define R_AARCH64_TLSLE_LDST16_TPREL_LO12    554
+#define R_AARCH64_TLSLE_LDST16_TPREL_LO12_NC 555
+#define R_AARCH64_TLSLE_LDST32_TPREL_LO12    556
+#define R_AARCH64_TLSLE_LDST32_TPREL_LO12_NC 557
+#define R_AARCH64_TLSLE_LDST64_TPREL_LO12    558
+#define R_AARCH64_TLSLE_LDST64_TPREL_LO12_NC 559
 
 /* ARM 32-bit (ELF for the Arm Architecture, §4.6.1.2). Only the three
  * a Cortex-M object needs so far.
