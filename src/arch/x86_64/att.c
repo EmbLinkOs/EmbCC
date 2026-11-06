@@ -62,9 +62,9 @@ static int reg_lookup(const char *s, int n, struct reg *out)
         out->n = "r"; out->num = v; out->size = size; out->kind = K_REG;
         return 1;
     }
-    const char *pfx[] = { "xmm", "cr", "dr" };
-    int kinds[] = { K_XMM, K_CR, K_DR };
-    for (int p = 0; p < 3; p++) {
+    const char *pfx[] = { "xmm", "cr", "dr", "ymm" };
+    int kinds[] = { K_XMM, K_CR, K_DR, K_XMM };
+    for (int p = 0; p < 4; p++) {
         int pl = (int)strlen(pfx[p]);
         if (n > pl && !strncmp(s, pfx[p], (size_t)pl)) {
             int v = 0;
@@ -73,7 +73,7 @@ static int reg_lookup(const char *s, int n, struct reg *out)
                 v = v * 10 + (s[i] - '0');
             }
             if (v > 15) return 0;
-            out->n = pfx[p]; out->num = v; out->size = p == 0 ? 16 : 8;
+            out->n = pfx[p]; out->num = v; out->size = p == 0 ? 16 : p == 3 ? 32 : 8;
             out->kind = kinds[p];
             return 1;
         }
@@ -341,6 +341,8 @@ enum { P66 = 1, PF2 = 2, PF3 = 4 };
  * (register or memory) and a reg field `regf` (a register's number when
  * reg_is_reg, else the /digit); `w` is REX.W; `byte_regs` says the
  * registers named are byte ones (spl..dil need a REX, ah..bh refuse it) */
+static int modrm(struct ib *x, int regf, const struct opnd *rm);
+
 static int emit_rm(struct ib *x, int pfx, int w, const unsigned char *op,
                    int nop, int regf, const struct opnd *regop,
                    const struct opnd *rm)
@@ -373,6 +375,12 @@ static int emit_rm(struct ib *x, int pfx, int w, const unsigned char *op,
     }
     for (int i = 0; i < nop; i++)
         put(x, op[i]);
+    return modrm(x, regf, rm);
+}
+
+/* ModRM, SIB and displacement: what follows the opcode, legacy or VEX */
+static int modrm(struct ib *x, int regf, const struct opnd *rm)
+{
     int r3 = regf & 7;
     if (rm->k != K_MEM) {
         put(x, 0xc0u | (unsigned)r3 << 3 | (unsigned)(rm->reg & 7));
@@ -697,9 +705,604 @@ static int x87(struct ib *x, const char *mn, const struct opnd *o, int n)
     return 1;
 }
 
+/* ---- VEX: AVX, AVX2, FMA, F16C, BMI1/2 -------------------------------------
+ *
+ * The VEX prefix carries the legacy prefix (pp), the opcode map (0F, 0F38,
+ * 0F3A), W, the vector length L and a second source register (vvvv,
+ * inverted). The two-byte form C5 when the map is 0F, W is 0 and neither
+ * X nor B is needed, as llvm-mc and GNU as choose. AT&T writes the
+ * operands backwards: `vaddps %ymm2, %ymm1, %ymm0` is ymm0 = ymm1 + ymm2,
+ * ModRM.rm the first, vvvv the second, ModRM.reg the last. Checked against
+ * llvm-mc form by form (tests/golden/x86-avx.sh). */
+
+enum { V_66 = 1, V_F3 = 2, V_F2 = 3 };
+enum { M_0F = 1, M_38 = 2, M_3A = 3 };
+
+static int emit_vex(struct ib *x, int pp, int map, int w, int l, int vvvv,
+                    unsigned op, int regf, const struct opnd *rm)
+{
+    int r = regf >= 8, xb = 0, b = 0;
+    if (rm->k == K_MEM) {
+        if (rm->dot && rm->base != 16)
+            return fail("'.+N' is an address only (%%rip)-relative");
+        if (rm->base >= 8 && rm->base != 16) b = 1;
+        if (rm->index >= 8) xb = 1;
+        if (rm->seg) put(x, (unsigned)rm->seg);
+    } else if (rm->reg >= 8)
+        b = 1;
+    if (map == M_0F && !w && !xb && !b) {
+        put(x, 0xc5);
+        put(x, (unsigned)(!r << 7 | (~vvvv & 15) << 3 | l << 2 | pp));
+    } else {
+        put(x, 0xc4);
+        put(x, (unsigned)(!r << 7 | !xb << 6 | !b << 5 | map));
+        put(x, (unsigned)(w << 7 | (~vvvv & 15) << 3 | l << 2 | pp));
+    }
+    put(x, op);
+    return modrm(x, regf, rm);
+}
+
+static int is_v(const struct opnd *o) { return o->k == K_XMM; }
+static int is_vm(const struct opnd *o) { return o->k == K_XMM || o->k == K_MEM; }
+static int vlen(const struct opnd *o) { return o->k == K_XMM && o->size == 32; }
+
+/* form: N rm,vvvv,reg  n the same, xmm only  M rm,reg  m the same, xmm only
+ *       I imm,rm,vvvv,reg  J the same, xmm only  i imm,rm,reg  j the same, xmm
+ *       1 N with ymm only  2 I with ymm only */
+struct vop { const char *n; unsigned char pp, map, op, w; char form; };
+static const struct vop vops[] = {
+    /* arithmetic */
+    {"vaddps",0,M_0F,0x58,0,'N'},{"vaddpd",V_66,M_0F,0x58,0,'N'},{"vaddss",V_F3,M_0F,0x58,0,'n'},{"vaddsd",V_F2,M_0F,0x58,0,'n'},
+    {"vmulps",0,M_0F,0x59,0,'N'},{"vmulpd",V_66,M_0F,0x59,0,'N'},{"vmulss",V_F3,M_0F,0x59,0,'n'},{"vmulsd",V_F2,M_0F,0x59,0,'n'},
+    {"vsubps",0,M_0F,0x5c,0,'N'},{"vsubpd",V_66,M_0F,0x5c,0,'N'},{"vsubss",V_F3,M_0F,0x5c,0,'n'},{"vsubsd",V_F2,M_0F,0x5c,0,'n'},
+    {"vminps",0,M_0F,0x5d,0,'N'},{"vminpd",V_66,M_0F,0x5d,0,'N'},{"vminss",V_F3,M_0F,0x5d,0,'n'},{"vminsd",V_F2,M_0F,0x5d,0,'n'},
+    {"vdivps",0,M_0F,0x5e,0,'N'},{"vdivpd",V_66,M_0F,0x5e,0,'N'},{"vdivss",V_F3,M_0F,0x5e,0,'n'},{"vdivsd",V_F2,M_0F,0x5e,0,'n'},
+    {"vmaxps",0,M_0F,0x5f,0,'N'},{"vmaxpd",V_66,M_0F,0x5f,0,'N'},{"vmaxss",V_F3,M_0F,0x5f,0,'n'},{"vmaxsd",V_F2,M_0F,0x5f,0,'n'},
+    {"vsqrtps",0,M_0F,0x51,0,'M'},{"vsqrtpd",V_66,M_0F,0x51,0,'M'},{"vsqrtss",V_F3,M_0F,0x51,0,'n'},{"vsqrtsd",V_F2,M_0F,0x51,0,'n'},
+    {"vrcpps",0,M_0F,0x53,0,'M'},{"vrcpss",V_F3,M_0F,0x53,0,'n'},{"vrsqrtps",0,M_0F,0x52,0,'M'},{"vrsqrtss",V_F3,M_0F,0x52,0,'n'},
+    {"vandps",0,M_0F,0x54,0,'N'},{"vandpd",V_66,M_0F,0x54,0,'N'},{"vandnps",0,M_0F,0x55,0,'N'},{"vandnpd",V_66,M_0F,0x55,0,'N'},
+    {"vorps",0,M_0F,0x56,0,'N'},{"vorpd",V_66,M_0F,0x56,0,'N'},{"vxorps",0,M_0F,0x57,0,'N'},{"vxorpd",V_66,M_0F,0x57,0,'N'},
+    {"vunpcklps",0,M_0F,0x14,0,'N'},{"vunpckhps",0,M_0F,0x15,0,'N'},{"vunpcklpd",V_66,M_0F,0x14,0,'N'},{"vunpckhpd",V_66,M_0F,0x15,0,'N'},
+    {"vaddsubps",V_F2,M_0F,0xd0,0,'N'},{"vaddsubpd",V_66,M_0F,0xd0,0,'N'},{"vhaddps",V_F2,M_0F,0x7c,0,'N'},{"vhaddpd",V_66,M_0F,0x7c,0,'N'},
+    {"vhsubps",V_F2,M_0F,0x7d,0,'N'},{"vhsubpd",V_66,M_0F,0x7d,0,'N'},
+    {"vucomiss",0,M_0F,0x2e,0,'m'},{"vucomisd",V_66,M_0F,0x2e,0,'m'},{"vcomiss",0,M_0F,0x2f,0,'m'},{"vcomisd",V_66,M_0F,0x2f,0,'m'},
+    {"vcvtss2sd",V_F3,M_0F,0x5a,0,'n'},{"vcvtsd2ss",V_F2,M_0F,0x5a,0,'n'},
+    {"vcvtdq2ps",0,M_0F,0x5b,0,'M'},{"vcvtps2dq",V_66,M_0F,0x5b,0,'M'},{"vcvttps2dq",V_F3,M_0F,0x5b,0,'M'},
+    {"vmovshdup",V_F3,M_0F,0x16,0,'M'},{"vmovsldup",V_F3,M_0F,0x12,0,'M'},{"vmovddup",V_F2,M_0F,0x12,0,'M'},
+    {"vmovhlps",0,M_0F,0x12,0,'n'},{"vmovlhps",0,M_0F,0x16,0,'n'},
+    /* integer, 66 0F */
+    {"vpxor",V_66,M_0F,0xef,0,'N'},{"vpor",V_66,M_0F,0xeb,0,'N'},{"vpand",V_66,M_0F,0xdb,0,'N'},{"vpandn",V_66,M_0F,0xdf,0,'N'},
+    {"vpaddb",V_66,M_0F,0xfc,0,'N'},{"vpaddw",V_66,M_0F,0xfd,0,'N'},{"vpaddd",V_66,M_0F,0xfe,0,'N'},{"vpaddq",V_66,M_0F,0xd4,0,'N'},
+    {"vpsubb",V_66,M_0F,0xf8,0,'N'},{"vpsubw",V_66,M_0F,0xf9,0,'N'},{"vpsubd",V_66,M_0F,0xfa,0,'N'},{"vpsubq",V_66,M_0F,0xfb,0,'N'},
+    {"vpaddsb",V_66,M_0F,0xec,0,'N'},{"vpaddsw",V_66,M_0F,0xed,0,'N'},{"vpaddusb",V_66,M_0F,0xdc,0,'N'},{"vpaddusw",V_66,M_0F,0xdd,0,'N'},
+    {"vpsubsb",V_66,M_0F,0xe8,0,'N'},{"vpsubsw",V_66,M_0F,0xe9,0,'N'},{"vpsubusb",V_66,M_0F,0xd8,0,'N'},{"vpsubusw",V_66,M_0F,0xd9,0,'N'},
+    {"vpcmpeqb",V_66,M_0F,0x74,0,'N'},{"vpcmpeqw",V_66,M_0F,0x75,0,'N'},{"vpcmpeqd",V_66,M_0F,0x76,0,'N'},
+    {"vpcmpgtb",V_66,M_0F,0x64,0,'N'},{"vpcmpgtw",V_66,M_0F,0x65,0,'N'},{"vpcmpgtd",V_66,M_0F,0x66,0,'N'},
+    {"vpunpcklbw",V_66,M_0F,0x60,0,'N'},{"vpunpcklwd",V_66,M_0F,0x61,0,'N'},{"vpunpckldq",V_66,M_0F,0x62,0,'N'},
+    {"vpunpcklqdq",V_66,M_0F,0x6c,0,'N'},{"vpunpckhbw",V_66,M_0F,0x68,0,'N'},{"vpunpckhwd",V_66,M_0F,0x69,0,'N'},
+    {"vpunpckhdq",V_66,M_0F,0x6a,0,'N'},{"vpunpckhqdq",V_66,M_0F,0x6d,0,'N'},
+    {"vpacksswb",V_66,M_0F,0x63,0,'N'},{"vpackssdw",V_66,M_0F,0x6b,0,'N'},{"vpackuswb",V_66,M_0F,0x67,0,'N'},
+    {"vpmullw",V_66,M_0F,0xd5,0,'N'},{"vpmulhw",V_66,M_0F,0xe5,0,'N'},{"vpmulhuw",V_66,M_0F,0xe4,0,'N'},
+    {"vpmuludq",V_66,M_0F,0xf4,0,'N'},{"vpmaddwd",V_66,M_0F,0xf5,0,'N'},
+    {"vpminub",V_66,M_0F,0xda,0,'N'},{"vpmaxub",V_66,M_0F,0xde,0,'N'},{"vpminsw",V_66,M_0F,0xea,0,'N'},{"vpmaxsw",V_66,M_0F,0xee,0,'N'},
+    {"vpavgb",V_66,M_0F,0xe0,0,'N'},{"vpavgw",V_66,M_0F,0xe3,0,'N'},{"vpsadbw",V_66,M_0F,0xf6,0,'N'},
+    {"vpsllw",V_66,M_0F,0xf1,0,'N'},{"vpslld",V_66,M_0F,0xf2,0,'N'},{"vpsllq",V_66,M_0F,0xf3,0,'N'},
+    {"vpsrlw",V_66,M_0F,0xd1,0,'N'},{"vpsrld",V_66,M_0F,0xd2,0,'N'},{"vpsrlq",V_66,M_0F,0xd3,0,'N'},
+    {"vpsraw",V_66,M_0F,0xe1,0,'N'},{"vpsrad",V_66,M_0F,0xe2,0,'N'},
+    {"vpshufd",V_66,M_0F,0x70,0,'i'},{"vpshufhw",V_F3,M_0F,0x70,0,'i'},{"vpshuflw",V_F2,M_0F,0x70,0,'i'},
+    {"vshufps",0,M_0F,0xc6,0,'I'},{"vshufpd",V_66,M_0F,0xc6,0,'I'},
+    {"vcmpps",0,M_0F,0xc2,0,'I'},{"vcmppd",V_66,M_0F,0xc2,0,'I'},{"vcmpss",V_F3,M_0F,0xc2,0,'J'},{"vcmpsd",V_F2,M_0F,0xc2,0,'J'},
+    /* 66 0F38 */
+    {"vpshufb",V_66,M_38,0x00,0,'N'},{"vphaddw",V_66,M_38,0x01,0,'N'},{"vphaddd",V_66,M_38,0x02,0,'N'},
+    {"vphaddsw",V_66,M_38,0x03,0,'N'},{"vpmaddubsw",V_66,M_38,0x04,0,'N'},{"vphsubw",V_66,M_38,0x05,0,'N'},
+    {"vphsubd",V_66,M_38,0x06,0,'N'},{"vphsubsw",V_66,M_38,0x07,0,'N'},{"vpsignb",V_66,M_38,0x08,0,'N'},
+    {"vpsignw",V_66,M_38,0x09,0,'N'},{"vpsignd",V_66,M_38,0x0a,0,'N'},{"vpmulhrsw",V_66,M_38,0x0b,0,'N'},
+    {"vpermilps",V_66,M_38,0x0c,0,'N'},{"vpermilpd",V_66,M_38,0x0d,0,'N'},{"vtestps",V_66,M_38,0x0e,0,'M'},
+    {"vtestpd",V_66,M_38,0x0f,0,'M'},{"vpermps",V_66,M_38,0x16,0,'1'},{"vptest",V_66,M_38,0x17,0,'M'},
+    {"vpabsb",V_66,M_38,0x1c,0,'M'},{"vpabsw",V_66,M_38,0x1d,0,'M'},{"vpabsd",V_66,M_38,0x1e,0,'M'},
+    {"vpmuldq",V_66,M_38,0x28,0,'N'},{"vpcmpeqq",V_66,M_38,0x29,0,'N'},{"vpackusdw",V_66,M_38,0x2b,0,'N'},
+    {"vpermd",V_66,M_38,0x36,0,'1'},{"vpcmpgtq",V_66,M_38,0x37,0,'N'},
+    {"vpminsb",V_66,M_38,0x38,0,'N'},{"vpminsd",V_66,M_38,0x39,0,'N'},{"vpminuw",V_66,M_38,0x3a,0,'N'},
+    {"vpminud",V_66,M_38,0x3b,0,'N'},{"vpmaxsb",V_66,M_38,0x3c,0,'N'},{"vpmaxsd",V_66,M_38,0x3d,0,'N'},
+    {"vpmaxuw",V_66,M_38,0x3e,0,'N'},{"vpmaxud",V_66,M_38,0x3f,0,'N'},{"vpmulld",V_66,M_38,0x40,0,'N'},
+    {"vphminposuw",V_66,M_38,0x41,0,'m'},
+    {"vpsrlvd",V_66,M_38,0x45,0,'N'},{"vpsrlvq",V_66,M_38,0x45,1,'N'},{"vpsravd",V_66,M_38,0x46,0,'N'},
+    {"vpsllvd",V_66,M_38,0x47,0,'N'},{"vpsllvq",V_66,M_38,0x47,1,'N'},
+    {"vaesimc",V_66,M_38,0xdb,0,'m'},{"vaesenc",V_66,M_38,0xdc,0,'N'},{"vaesenclast",V_66,M_38,0xdd,0,'N'},
+    {"vaesdec",V_66,M_38,0xde,0,'N'},{"vaesdeclast",V_66,M_38,0xdf,0,'N'},
+    /* 66 0F3A, with an immediate */
+    {"vpermq",V_66,M_3A,0x00,1,'k'},{"vpermpd",V_66,M_3A,0x01,1,'k'},{"vpblendd",V_66,M_3A,0x02,0,'I'},
+    {"vpermilps",V_66,M_3A,0x04,0,'i'},{"vpermilpd",V_66,M_3A,0x05,0,'i'},{"vperm2f128",V_66,M_3A,0x06,0,'2'},
+    {"vroundps",V_66,M_3A,0x08,0,'i'},{"vroundpd",V_66,M_3A,0x09,0,'i'},{"vroundss",V_66,M_3A,0x0a,0,'J'},
+    {"vroundsd",V_66,M_3A,0x0b,0,'J'},{"vblendps",V_66,M_3A,0x0c,0,'I'},{"vblendpd",V_66,M_3A,0x0d,0,'I'},
+    {"vpblendw",V_66,M_3A,0x0e,0,'I'},{"vpalignr",V_66,M_3A,0x0f,0,'I'},{"vinsertps",V_66,M_3A,0x21,0,'J'},
+    {"vdpps",V_66,M_3A,0x40,0,'I'},{"vdppd",V_66,M_3A,0x41,0,'J'},{"vmpsadbw",V_66,M_3A,0x42,0,'I'},
+    {"vpclmulqdq",V_66,M_3A,0x44,0,'I'},{"vperm2i128",V_66,M_3A,0x46,0,'2'},
+    {"vpcmpestrm",V_66,M_3A,0x60,0,'j'},{"vpcmpestri",V_66,M_3A,0x61,0,'j'},
+    {"vpcmpistrm",V_66,M_3A,0x62,0,'j'},{"vpcmpistri",V_66,M_3A,0x63,0,'j'},
+    {"vaeskeygenassist",V_66,M_3A,0xdf,0,'j'},
+};
+
+/* the FMA family: 132, 213, 231 at op, op+0x10, op+0x20 */
+struct fma { const char *n; unsigned char op; int scalar; };
+static const struct fma fmas[] = {
+    {"vfmaddsub",0x96,0},{"vfmsubadd",0x97,0},{"vfmadd",0x98,0},{"vfmadd",0x99,1},
+    {"vfmsub",0x9a,0},{"vfmsub",0x9b,1},{"vfnmadd",0x9c,0},{"vfnmadd",0x9d,1},
+    {"vfnmsub",0x9e,0},{"vfnmsub",0x9f,1},
+};
+
+static int vex_commutes(const char *n, long long imm)
+{
+    static const char *const c[] = {
+        "vaddps", "vaddpd", "vmulps", "vmulpd", "vandps", "vandpd", "vorps", "vorpd",
+        "vxorps", "vxorpd", "vpaddb", "vpaddw", "vpaddd", "vpaddq", "vpaddsb", "vpaddsw",
+        "vpaddusb", "vpaddusw", "vpand", "vpor", "vpxor", "vpavgb", "vpavgw", "vpcmpeqb",
+        "vpcmpeqw", "vpcmpeqd", "vpmaddwd", "vpmaxsw", "vpmaxub", "vpminsw", "vpminub",
+        "vpmulhuw", "vpmulhw", "vpmullw", "vpmuludq", "vpsadbw", NULL
+    };
+    for (int k = 0; c[k]; k++)
+        if (!strcmp(n, c[k])) return 1;
+    /* eq, unord, neq, ord and their signalling and quiet twins */
+    if (!strcmp(n, "vcmpps") || !strcmp(n, "vcmppd"))
+        return (imm & 3) == 0 || (imm & 3) == 3;
+    return 0;
+}
+
+/* AT&T may suffix a vector operation whose operand size the registers do
+ * not say: vcvtpd2psx (%rax), vcvttpd2dqy ... -- 'x' or 'y' */
+static int avx(struct ib *x, const char *mn, const struct opnd *o, int n)
+{
+    /* vcmp<pred>{ps,pd,ss,sd}: vcmp with the predicate, AVX's 32 */
+    if (!strncmp(mn, "vcmp", 4) && strlen(mn) > 6 && n == 3) {
+        static const char *const pr[32] = {
+            "eq", "lt", "le", "unord", "neq", "nlt", "nle", "ord",
+            "eq_uq", "nge", "ngt", "false", "neq_oq", "ge", "gt", "true",
+            "eq_os", "lt_oq", "le_oq", "unord_s", "neq_us", "nlt_uq", "nle_uq", "ord_s",
+            "eq_us", "nge_uq", "ngt_uq", "false_os", "neq_os", "ge_oq", "gt_oq", "true_us"
+        };
+        size_t ml = strlen(mn);
+        const char *ty = mn + ml - 2;
+        if (!strcmp(ty, "ps") || !strcmp(ty, "pd") || !strcmp(ty, "ss") || !strcmp(ty, "sd"))
+            for (int p = 0; p < 32; p++)
+                if (ml - 6 == strlen(pr[p]) && !strncmp(mn + 4, pr[p], ml - 6)) {
+                    char base[8];
+                    struct opnd q[4];
+                    snprintf(base, sizeof base, "vcmp%s", ty);
+                    memset(&q[0], 0, sizeof q[0]);
+                    q[0].k = K_IMM;
+                    q[0].imm = p;
+                    q[0].base = q[0].index = -1;
+                    q[1] = o[0]; q[2] = o[1]; q[3] = o[2];
+                    return avx(x, base, q, 4);
+                }
+    }
+    /* the table */
+    for (unsigned k = 0; k < sizeof vops / sizeof *vops; k++) {
+        const struct vop *e = &vops[k];
+        if (strcmp(mn, e->n)) continue;
+        int imm = e->form == 'I' || e->form == 'J' || e->form == 'i' ||
+                  e->form == 'j' || e->form == '2' || e->form == 'k';
+        int at = imm;
+        int three = e->form == 'N' || e->form == 'n' || e->form == 'I' ||
+                    e->form == 'J' || e->form == '1' || e->form == '2';
+        if (n != (three ? 3 : 2) + imm || (imm && o[0].k != K_IMM)) continue;
+        const struct opnd *rm = &o[at], *vv = three ? &o[at + 1] : NULL,
+                          *rg = &o[n - 1];
+        if (!is_vm(rm) || !is_v(rg) || (vv && !is_v(vv))) continue;
+        if (rm->k == K_MEM && (!strcmp(e->n, "vmovhlps") || !strcmp(e->n, "vmovlhps")))
+            continue;
+        int l = vlen(rg);
+        int xonly = e->form == 'n' || e->form == 'm' || e->form == 'J' || e->form == 'j';
+        if (xonly && (l || (rm->k == K_XMM && vlen(rm)) || (vv && vlen(vv)))) continue;
+        if ((e->form == '1' || e->form == '2' || e->form == 'k') && !l) continue;
+        /* the shifts by a count: always an xmm, vpsllw %xmm1, %ymm2, %ymm3 */
+        int count = e->map == M_0F && (e->op == 0xd1 || e->op == 0xd2 || e->op == 0xd3 ||
+                                        e->op == 0xe1 || e->op == 0xe2 || e->op == 0xf1 ||
+                                        e->op == 0xf2 || e->op == 0xf3);
+        if (count && rm->k == K_XMM && vlen(rm)) continue;
+        if (!xonly && ((rm->k == K_XMM && vlen(rm) != l && !count) ||
+                       (vv && vlen(vv) != l)))
+            continue;
+        /* a commutative operation whose rm needs VEX.B takes its sources
+         * the other way round when that fits the 2-byte VEX, as llvm-mc
+         * does (vcmp when the predicate is symmetric) */
+        if (vv && rm->k == K_XMM && rm->reg >= 8 && vv->reg < 8 && e->map == M_0F &&
+            !e->w && vex_commutes(e->n, imm ? o[0].imm : 0)) {
+            const struct opnd *t = rm; rm = vv; vv = t;
+        }
+        if (emit_vex(x, e->pp, e->map, e->w, xonly ? 0 : l, vv ? vv->reg : 0,
+                     e->op, rg->reg, rm) < 0)
+            return -1;
+        if (imm) imm_put(x, o[0].imm, 1);
+        return 0;
+    }
+    /* FMA: vfmadd231ps */
+    for (unsigned k = 0; k < sizeof fmas / sizeof *fmas; k++) {
+        size_t bl = strlen(fmas[k].n);
+        if (strncmp(mn, fmas[k].n, bl) || strlen(mn) != bl + 5) continue;
+        const char *ord = mn + bl, *ty = mn + bl + 3;
+        int row = !strncmp(ord, "132", 3) ? 0 : !strncmp(ord, "213", 3) ? 1
+                : !strncmp(ord, "231", 3) ? 2 : -1;
+        int sc = !strcmp(ty, "ss") || !strcmp(ty, "sd");
+        int pk = !strcmp(ty, "ps") || !strcmp(ty, "pd");
+        if (row < 0 || (!sc && !pk) || sc != fmas[k].scalar) continue;
+        if (n != 3 || !is_vm(&o[0]) || !is_v(&o[1]) || !is_v(&o[2]))
+            return fail("'%s' takes xmm/ymm/memory and two registers", mn);
+        int l = vlen(&o[2]);
+        if (sc && l) return fail("'%s' is scalar: xmm registers", mn);
+        if (vlen(&o[1]) != l || (o[0].k == K_XMM && vlen(&o[0]) != l))
+            return fail("'%s': the registers are all xmm or all ymm", mn);
+        return emit_vex(x, V_66, M_38, ty[1] == 'd', l, o[1].reg,
+                        (unsigned)(fmas[k].op + 0x10 * row), o[2].reg, &o[0]);
+    }
+    /* the moves: load (rm -> reg) and store (reg -> rm) */
+    {
+        static const struct { const char *n; int pp; unsigned ld, st; } mv[] = {
+            {"vmovaps",0,0x28,0x29},{"vmovapd",V_66,0x28,0x29},{"vmovups",0,0x10,0x11},
+            {"vmovupd",V_66,0x10,0x11},{"vmovdqa",V_66,0x6f,0x7f},{"vmovdqu",V_F3,0x6f,0x7f},
+        };
+        for (unsigned k = 0; k < sizeof mv / sizeof *mv; k++)
+            if (!strcmp(mn, mv[k].n) && n == 2) {
+                /* register to register: the load form, as llvm-mc writes it
+                 * -- unless only the store form needs no 3-byte VEX */
+                if (is_v(&o[1]) && is_vm(&o[0])) {
+                    if (o[0].k == K_XMM && vlen(&o[0]) != vlen(&o[1]))
+                        return fail("'%s' moves between registers of one size", mn);
+                    if (o[0].k == K_XMM && o[0].reg >= 8 && o[1].reg < 8)
+                        return emit_vex(x, mv[k].pp, M_0F, 0, vlen(&o[1]), 0, mv[k].st,
+                                        o[0].reg, &o[1]);
+                    return emit_vex(x, mv[k].pp, M_0F, 0, vlen(&o[1]), 0, mv[k].ld,
+                                    o[1].reg, &o[0]);
+                }
+                if (is_v(&o[0]) && o[1].k == K_MEM)
+                    return emit_vex(x, mv[k].pp, M_0F, 0, vlen(&o[0]), 0, mv[k].st,
+                                    o[0].reg, &o[1]);
+                return fail("'%s' takes a register and a register or memory", mn);
+            }
+        static const struct { const char *n; int pp, map; unsigned op; } nt[] = {
+            {"vmovntps",0,M_0F,0x2b},{"vmovntpd",V_66,M_0F,0x2b},{"vmovntdq",V_66,M_0F,0xe7},
+        };
+        for (unsigned k = 0; k < 3; k++)
+            if (!strcmp(mn, nt[k].n) && n == 2 && is_v(&o[0]) && o[1].k == K_MEM)
+                return emit_vex(x, nt[k].pp, nt[k].map, 0, vlen(&o[0]), 0, nt[k].op,
+                                o[0].reg, &o[1]);
+        if (!strcmp(mn, "vmovntdqa") && n == 2 && o[0].k == K_MEM && is_v(&o[1]))
+            return emit_vex(x, V_66, M_38, 0, vlen(&o[1]), 0, 0x2a, o[1].reg, &o[0]);
+        if (!strcmp(mn, "vlddqu") && n == 2 && o[0].k == K_MEM && is_v(&o[1]))
+            return emit_vex(x, V_F2, M_0F, 0, vlen(&o[1]), 0, 0xf0, o[1].reg, &o[0]);
+        /* vmovss/vmovsd: memory, or three registers */
+        if ((!strcmp(mn, "vmovss") || !strcmp(mn, "vmovsd"))) {
+            int pp = mn[5] == 's' ? V_F3 : V_F2;
+            if (n == 2 && o[0].k == K_MEM && is_v(&o[1]) && !vlen(&o[1]))
+                return emit_vex(x, pp, M_0F, 0, 0, 0, 0x10, o[1].reg, &o[0]);
+            if (n == 2 && is_v(&o[0]) && !vlen(&o[0]) && o[1].k == K_MEM)
+                return emit_vex(x, pp, M_0F, 0, 0, 0, 0x11, o[0].reg, &o[1]);
+            if (n == 3 && is_v(&o[0]) && is_v(&o[1]) && is_v(&o[2]) &&
+                !vlen(&o[0]) && !vlen(&o[1]) && !vlen(&o[2])) {
+                if (o[0].reg >= 8 && o[2].reg < 8)    /* the 2-byte VEX when it can */
+                    return emit_vex(x, pp, M_0F, 0, 0, o[1].reg, 0x11, o[0].reg, &o[2]);
+                return emit_vex(x, pp, M_0F, 0, 0, o[1].reg, 0x10, o[2].reg, &o[0]);
+            }
+            return fail("'%s' takes memory and xmm, or three xmm registers", mn);
+        }
+        /* vmovlps & co: load with a merge source, or store */
+        static const struct { const char *n; int pp; unsigned op; } lh[] = {
+            {"vmovlps",0,0x12},{"vmovhps",0,0x16},{"vmovlpd",V_66,0x12},{"vmovhpd",V_66,0x16},
+        };
+        for (unsigned k = 0; k < 4; k++)
+            if (!strcmp(mn, lh[k].n)) {
+                if (n == 3 && o[0].k == K_MEM && is_v(&o[1]) && is_v(&o[2]))
+                    return emit_vex(x, lh[k].pp, M_0F, 0, 0, o[1].reg, lh[k].op, o[2].reg, &o[0]);
+                if (n == 2 && is_v(&o[0]) && o[1].k == K_MEM)
+                    return emit_vex(x, lh[k].pp, M_0F, 0, 0, 0, lh[k].op + 1, o[0].reg, &o[1]);
+                return fail("'%s' loads memory merged into xmm, or stores", mn);
+            }
+    }
+    /* vmovd / vmovq */
+    if (!strcmp(mn, "vmovd") || !strcmp(mn, "vmovq")) {
+        int q = mn[4] == 'q';
+        for (int k = 0; k < n; k++)
+            /* (vmovd of a 64-bit register is vmovq, as llvm-mc takes it) */
+            if (o[k].k == K_REG && o[k].size != 8 && (q || o[k].size != 4))
+                return fail("'%s' moves a %s-bit register", mn, q ? "64" : "32- or 64");
+        if (n == 2 && is_v(&o[1]) && !vlen(&o[1]) &&
+            (o[0].k == K_REG || (o[0].k == K_MEM && !q)))
+            return emit_vex(x, V_66, M_0F, o[0].k == K_REG && o[0].size == 8, 0, 0, 0x6e,
+                            o[1].reg, &o[0]);
+        if (n == 2 && is_v(&o[0]) && !vlen(&o[0]) &&
+            (o[1].k == K_REG || (o[1].k == K_MEM && !q)))
+            return emit_vex(x, V_66, M_0F, o[1].k == K_REG && o[1].size == 8, 0, 0, 0x7e,
+                            o[0].reg, &o[1]);
+        if (q && n == 2 && is_v(&o[1]) && !vlen(&o[1]) && is_vm(&o[0]) &&
+            !(o[0].k == K_XMM && vlen(&o[0]))) {
+            if (o[0].k == K_XMM && o[0].reg >= 8 && o[1].reg < 8)
+                return emit_vex(x, V_66, M_0F, 0, 0, 0, 0xd6, o[0].reg, &o[1]);
+            return emit_vex(x, V_F3, M_0F, 0, 0, 0, 0x7e, o[1].reg, &o[0]);
+        }
+        if (q && n == 2 && is_v(&o[0]) && o[1].k == K_MEM)
+            return emit_vex(x, V_66, M_0F, 0, 0, 0, 0xd6, o[0].reg, &o[1]);
+        return fail("'%s': these operands", mn);
+    }
+    /* the shifts by a constant: vvvv is the destination */
+    {
+        static const struct { const char *n; unsigned op; int ext; } sh[] = {
+            {"vpsrlw",0x71,2},{"vpsraw",0x71,4},{"vpsllw",0x71,6},{"vpsrld",0x72,2},
+            {"vpsrad",0x72,4},{"vpslld",0x72,6},{"vpsrlq",0x73,2},{"vpsrldq",0x73,3},
+            {"vpsllq",0x73,6},{"vpslldq",0x73,7},
+        };
+        for (unsigned k = 0; k < sizeof sh / sizeof *sh; k++)
+            if (!strcmp(mn, sh[k].n) && n == 3 && o[0].k == K_IMM && is_v(&o[1]) &&
+                is_v(&o[2]) && vlen(&o[1]) == vlen(&o[2])) {
+                if (emit_vex(x, V_66, M_0F, 0, vlen(&o[2]), o[2].reg, sh[k].op, sh[k].ext,
+                             &o[1]) < 0) return -1;
+                imm_put(x, o[0].imm, 1);
+                return 0;
+            }
+    }
+    /* conversions whose two sides differ in width */
+    {
+        /* narrowing (ymm or xmm source, xmm destination): L from the
+         * source, or from the x/y suffix for memory */
+        static const struct { const char *n; int pp, map; unsigned op; } nw[] = {
+            {"vcvtpd2ps",V_66,M_0F,0x5a},{"vcvtpd2dq",V_F2,M_0F,0xe6},{"vcvttpd2dq",V_66,M_0F,0xe6},
+        };
+        for (unsigned k = 0; k < 3; k++) {
+            size_t bl = strlen(nw[k].n);
+            if (strncmp(mn, nw[k].n, bl) || (mn[bl] && (mn[bl] != 'x' && mn[bl] != 'y'))) continue;
+            if (n != 2 || !is_vm(&o[0]) || !is_v(&o[1]) || vlen(&o[1]))
+                return fail("'%s' converts into an xmm register", mn);
+            int l = o[0].k == K_XMM ? vlen(&o[0]) : mn[bl] == 'y';
+            if (o[0].k == K_MEM && !mn[bl])
+                return fail("'%s' of memory: say its size, %sx or %sy", mn, mn, mn);
+            return emit_vex(x, nw[k].pp, nw[k].map, 0, l, 0, nw[k].op, o[1].reg, &o[0]);
+        }
+        /* widening (xmm source, ymm or xmm destination): L from the destination */
+        static const struct { const char *n; int pp, map; unsigned op; } wd[] = {
+            {"vcvtps2pd",0,M_0F,0x5a},{"vcvtdq2pd",V_F3,M_0F,0xe6},{"vcvtph2ps",V_66,M_38,0x13},
+            {"vpmovsxbw",V_66,M_38,0x20},{"vpmovsxbd",V_66,M_38,0x21},{"vpmovsxbq",V_66,M_38,0x22},
+            {"vpmovsxwd",V_66,M_38,0x23},{"vpmovsxwq",V_66,M_38,0x24},{"vpmovsxdq",V_66,M_38,0x25},
+            {"vpmovzxbw",V_66,M_38,0x30},{"vpmovzxbd",V_66,M_38,0x31},{"vpmovzxbq",V_66,M_38,0x32},
+            {"vpmovzxwd",V_66,M_38,0x33},{"vpmovzxwq",V_66,M_38,0x34},{"vpmovzxdq",V_66,M_38,0x35},
+            {"vbroadcastss",V_66,M_38,0x18},{"vbroadcastsd",V_66,M_38,0x19},
+            {"vbroadcastf128",V_66,M_38,0x1a},{"vbroadcasti128",V_66,M_38,0x5a},
+            {"vpbroadcastd",V_66,M_38,0x58},{"vpbroadcastq",V_66,M_38,0x59},
+            {"vpbroadcastb",V_66,M_38,0x78},{"vpbroadcastw",V_66,M_38,0x79},
+        };
+        for (unsigned k = 0; k < sizeof wd / sizeof *wd; k++)
+            if (!strcmp(mn, wd[k].n)) {
+                if (n != 2 || !is_vm(&o[0]) || !is_v(&o[1]) || (o[0].k == K_XMM && vlen(&o[0])))
+                    return fail("'%s' takes xmm or memory, and a register", mn);
+                if (wd[k].map == M_38 && (wd[k].op == 0x19 || wd[k].op == 0x1a ||
+                                          wd[k].op == 0x5a) && !vlen(&o[1]))
+                    return fail("'%s' writes a ymm register", mn);
+                if ((wd[k].op == 0x1a || (wd[k].op == 0x5a && wd[k].map == M_38)) && o[0].k != K_MEM)
+                    return fail("'%s' loads from memory", mn);
+                return emit_vex(x, wd[k].pp, wd[k].map, 0, vlen(&o[1]), 0, wd[k].op,
+                                o[1].reg, &o[0]);
+            }
+        /* vcvtps2ph: imm, register, xmm or memory */
+        if (!strcmp(mn, "vcvtps2ph") && n == 3 && o[0].k == K_IMM && is_v(&o[1]) &&
+            is_vm(&o[2]) && !(o[2].k == K_XMM && vlen(&o[2]))) {
+            if (emit_vex(x, V_66, M_3A, 0, vlen(&o[1]), 0, 0x1d, o[1].reg, &o[2]) < 0) return -1;
+            imm_put(x, o[0].imm, 1);
+            return 0;
+        }
+    }
+    /* 128-bit lanes in and out of a ymm register */
+    {
+        static const struct { const char *n; unsigned op; int ins; } ln[] = {
+            {"vinsertf128",0x18,1},{"vextractf128",0x19,0},
+            {"vinserti128",0x38,1},{"vextracti128",0x39,0},
+        };
+        for (unsigned k = 0; k < 4; k++)
+            if (!strcmp(mn, ln[k].n)) {
+                if (ln[k].ins) {
+                    if (n != 4 || o[0].k != K_IMM || !is_vm(&o[1]) || (o[1].k == K_XMM && vlen(&o[1])) ||
+                        !is_v(&o[2]) || !vlen(&o[2]) || !is_v(&o[3]) || !vlen(&o[3]))
+                        return fail("'%s' takes an immediate, xmm or memory, and two ymm", mn);
+                    if (emit_vex(x, V_66, M_3A, 0, 1, o[2].reg, ln[k].op, o[3].reg, &o[1]) < 0)
+                        return -1;
+                } else {
+                    if (n != 3 || o[0].k != K_IMM || !is_v(&o[1]) || !vlen(&o[1]) ||
+                        !is_vm(&o[2]) || (o[2].k == K_XMM && vlen(&o[2])))
+                        return fail("'%s' takes an immediate, ymm, and xmm or memory", mn);
+                    if (emit_vex(x, V_66, M_3A, 0, 1, 0, ln[k].op, o[1].reg, &o[2]) < 0)
+                        return -1;
+                }
+                imm_put(x, o[0].imm, 1);
+                return 0;
+            }
+    }
+    /* the variable blends: a fourth register in the immediate's top half */
+    {
+        static const struct { const char *n; unsigned op; } bv[] = {
+            {"vblendvps",0x4a},{"vblendvpd",0x4b},{"vpblendvb",0x4c},
+        };
+        for (unsigned k = 0; k < 3; k++)
+            if (!strcmp(mn, bv[k].n)) {
+                if (n != 4 || !is_v(&o[0]) || !is_vm(&o[1]) || !is_v(&o[2]) || !is_v(&o[3]))
+                    return fail("'%s' takes a mask register, a source, and two registers", mn);
+                if (emit_vex(x, V_66, M_3A, 0, vlen(&o[3]), o[2].reg, bv[k].op, o[3].reg,
+                             &o[1]) < 0) return -1;
+                imm_put(x, (long long)(o[0].reg << 4), 1);
+                return 0;
+            }
+    }
+    /* masked moves: load (mem, mask, reg) or store (reg, mask, mem) */
+    {
+        static const struct { const char *n; unsigned ld, st; int w; } mm[] = {
+            {"vmaskmovps",0x2c,0x2e,0},{"vmaskmovpd",0x2d,0x2f,0},
+            {"vpmaskmovd",0x8c,0x8e,0},{"vpmaskmovq",0x8c,0x8e,1},
+        };
+        for (unsigned k = 0; k < 4; k++)
+            if (!strcmp(mn, mm[k].n) && n == 3 && is_v(&o[1])) {
+                if (o[0].k == K_MEM && is_v(&o[2]))
+                    return emit_vex(x, V_66, M_38, mm[k].w, vlen(&o[2]), o[1].reg, mm[k].ld,
+                                    o[2].reg, &o[0]);
+                if (is_v(&o[0]) && o[2].k == K_MEM)
+                    return emit_vex(x, V_66, M_38, mm[k].w, vlen(&o[0]), o[1].reg, mm[k].st,
+                                    o[0].reg, &o[2]);
+            }
+    }
+    /* to and from the general registers */
+    {
+        /* vcvtsi2ss{l,q} / vcvtsi2sd{l,q}: gpr or memory, xmm, xmm */
+        static const struct { const char *n; int pp; } cs[] = {
+            {"vcvtsi2ss",V_F3},{"vcvtsi2sd",V_F2},
+        };
+        for (unsigned k = 0; k < 2; k++) {
+            size_t bl = strlen(cs[k].n);
+            if (strncmp(mn, cs[k].n, bl) || (mn[bl] && mn[bl] != 'l' && mn[bl] != 'q') ||
+                (mn[bl] && mn[bl + 1])) continue;
+            if (n != 3 || (o[0].k != K_REG && o[0].k != K_MEM) || !is_v(&o[1]) || !is_v(&o[2]))
+                return fail("'%s' takes a register or memory, and two xmm", mn);
+            if (o[0].k == K_MEM && !mn[bl])
+                return fail("'%s' of memory: say its size, %sl or %sq", mn, mn, mn);
+            int w = o[0].k == K_REG ? o[0].size == 8 : mn[bl] == 'q';
+            return emit_vex(x, cs[k].pp, M_0F, w, 0, o[1].reg, 0x2a, o[2].reg, &o[0]);
+        }
+        static const struct { const char *n; int pp; unsigned op; } ci[] = {
+            {"vcvttss2si",V_F3,0x2c},{"vcvttsd2si",V_F2,0x2c},{"vcvtss2si",V_F3,0x2d},
+            {"vcvtsd2si",V_F2,0x2d},
+        };
+        for (unsigned k = 0; k < 4; k++) {
+            size_t bl = strlen(ci[k].n);
+            if (strncmp(mn, ci[k].n, bl) || (mn[bl] && mn[bl] != 'l' && mn[bl] != 'q') ||
+                (mn[bl] && mn[bl + 1])) continue;
+            if (n != 2 || !is_vm(&o[0]) || o[1].k != K_REG || (o[1].size != 4 && o[1].size != 8))
+                return fail("'%s' takes xmm or memory, and a 32- or 64-bit register", mn);
+            return emit_vex(x, ci[k].pp, M_0F, o[1].size == 8, 0, 0, ci[k].op, o[1].reg, &o[0]);
+        }
+        static const struct { const char *n; int pp; unsigned op; } mk[] = {
+            {"vmovmskps",0,0x50},{"vmovmskpd",V_66,0x50},{"vpmovmskb",V_66,0xd7},
+        };
+        for (unsigned k = 0; k < 3; k++)
+            if (!strcmp(mn, mk[k].n) && n == 2 && is_v(&o[0]) && o[1].k == K_REG &&
+                (o[1].size == 4 || o[1].size == 8))
+                return emit_vex(x, mk[k].pp, M_0F, 0, vlen(&o[0]), 0, mk[k].op, o[1].reg, &o[0]);
+        /* extracts and inserts */
+        static const struct { const char *n; int ins, w; unsigned op; } ei[] = {
+            {"vpextrb",0,0,0x14},{"vpextrd",0,0,0x16},{"vpextrq",0,1,0x16},
+            {"vextractps",0,0,0x17},{"vpinsrb",1,0,0x20},{"vpinsrd",1,0,0x22},
+            {"vpinsrq",1,1,0x22},
+        };
+        for (unsigned k = 0; k < sizeof ei / sizeof *ei; k++)
+            if (!strcmp(mn, ei[k].n)) {
+                if (ei[k].ins) {
+                    if (n != 4 || o[0].k != K_IMM || (o[1].k != K_REG && o[1].k != K_MEM) ||
+                        !is_v(&o[2]) || !is_v(&o[3]))
+                        return fail("'%s' takes an immediate, a register or memory, and two xmm", mn);
+                    if (emit_vex(x, V_66, M_3A, ei[k].w, 0, o[2].reg, ei[k].op, o[3].reg, &o[1]) < 0)
+                        return -1;
+                } else {
+                    if (n != 3 || o[0].k != K_IMM || !is_v(&o[1]) ||
+                        (o[2].k != K_REG && o[2].k != K_MEM))
+                        return fail("'%s' takes an immediate, xmm, and a register or memory", mn);
+                    if (emit_vex(x, V_66, M_3A, ei[k].w, 0, 0, ei[k].op, o[1].reg, &o[2]) < 0)
+                        return -1;
+                }
+                imm_put(x, o[0].imm, 1);
+                return 0;
+            }
+        if (!strcmp(mn, "vpextrw") && n == 3 && o[0].k == K_IMM && is_v(&o[1])) {
+            if (o[2].k == K_REG) {
+                if (emit_vex(x, V_66, M_0F, 0, 0, 0, 0xc5, o[2].reg, &o[1]) < 0) return -1;
+            } else if (o[2].k == K_MEM) {
+                if (emit_vex(x, V_66, M_3A, 0, 0, 0, 0x15, o[1].reg, &o[2]) < 0) return -1;
+            } else return fail("vpextrw stores to a register or memory");
+            imm_put(x, o[0].imm, 1);
+            return 0;
+        }
+        if (!strcmp(mn, "vpinsrw") && n == 4 && o[0].k == K_IMM &&
+            (o[1].k == K_REG || o[1].k == K_MEM) && is_v(&o[2]) && is_v(&o[3])) {
+            if (emit_vex(x, V_66, M_0F, 0, 0, o[2].reg, 0xc4, o[3].reg, &o[1]) < 0) return -1;
+            imm_put(x, o[0].imm, 1);
+            return 0;
+        }
+    }
+    if (!strcmp(mn, "vzeroall") && n == 0) { put(x, 0xc5); put(x, 0xfc); put(x, 0x77); return 0; }
+    if (!strcmp(mn, "vldmxcsr") && n == 1 && o[0].k == K_MEM)
+        return emit_vex(x, 0, M_0F, 0, 0, 0, 0xae, 2, &o[0]);
+    if (!strcmp(mn, "vstmxcsr") && n == 1 && o[0].k == K_MEM)
+        return emit_vex(x, 0, M_0F, 0, 0, 0, 0xae, 3, &o[0]);
+    return 1;
+}
+
+/* BMI1, BMI2 and MOVBE: general registers, VEX for all but movbe; the
+ * size from the suffix or the registers */
+static int bmi(struct ib *x, const char *mn, const struct opnd *o, int n)
+{
+    /* reg = dst, rm and vvvv as each one has them */
+    static const struct { const char *n; int pp, map; unsigned op; char kind; int ext; } bm[] = {
+        {"andn",0,M_38,0xf2,'A',0},   /* andn rm, vvvv, reg */
+        {"bextr",0,M_38,0xf7,'B',0},  /* bextr vvvv, rm, reg */
+        {"bzhi",0,M_38,0xf5,'B',0},
+        {"sarx",V_F3,M_38,0xf7,'B',0},{"shlx",V_66,M_38,0xf7,'B',0},{"shrx",V_F2,M_38,0xf7,'B',0},
+        {"pdep",V_F2,M_38,0xf5,'A',0},{"pext",V_F3,M_38,0xf5,'A',0},
+        {"mulx",V_F2,M_38,0xf6,'A',0},
+        {"blsr",0,M_38,0xf3,'V',1},{"blsmsk",0,M_38,0xf3,'V',2},{"blsi",0,M_38,0xf3,'V',3},
+        {"rorx",V_F2,M_3A,0xf0,'R',0},
+    };
+    for (unsigned k = 0; k < sizeof bm / sizeof *bm; k++) {
+        int s = sized(mn, bm[k].n);
+        if (s < 0) continue;
+        if (s && s != 4 && s != 8) return fail("'%s' is 32 or 64 bits", mn);
+        int nn = bm[k].kind == 'V' ? 2 : 3;
+        if (n != nn) return fail("'%s' takes %d operands", mn, nn);
+        const struct opnd *d = &o[n - 1];
+        if (d->k != K_REG || (d->size != 4 && d->size != 8))
+            return fail("'%s' writes a 32- or 64-bit register", mn);
+        int sz = s ? s : d->size, w = sz == 8;
+        if (d->size != sz) return fail("'%s': the registers are %d-bit", mn, sz * 8);
+        switch (bm[k].kind) {
+        case 'A':   /* rm, vvvv, reg */
+            if (o[1].k != K_REG || o[1].size != sz || (o[0].k != K_REG && o[0].k != K_MEM) ||
+                (o[0].k == K_REG && o[0].size != sz))
+                return fail("'%s': these operands", mn);
+            return emit_vex(x, bm[k].pp, bm[k].map, w, 0, o[1].reg, bm[k].op, d->reg, &o[0]);
+        case 'B':   /* vvvv, rm, reg */
+            if (o[0].k != K_REG || o[0].size != sz || (o[1].k != K_REG && o[1].k != K_MEM) ||
+                (o[1].k == K_REG && o[1].size != sz))
+                return fail("'%s': these operands", mn);
+            return emit_vex(x, bm[k].pp, bm[k].map, w, 0, o[0].reg, bm[k].op, d->reg, &o[1]);
+        case 'V':   /* rm -> vvvv */
+            if ((o[0].k != K_REG && o[0].k != K_MEM) || (o[0].k == K_REG && o[0].size != sz))
+                return fail("'%s': these operands", mn);
+            return emit_vex(x, bm[k].pp, bm[k].map, w, 0, d->reg, bm[k].op, bm[k].ext, &o[0]);
+        case 'R':   /* rorx imm, rm, reg */
+            if (o[0].k != K_IMM || (o[1].k != K_REG && o[1].k != K_MEM) ||
+                (o[1].k == K_REG && o[1].size != sz))
+                return fail("'%s': these operands", mn);
+            if (emit_vex(x, bm[k].pp, bm[k].map, w, 0, 0, bm[k].op, d->reg, &o[1]) < 0) return -1;
+            imm_put(x, o[0].imm, 1);
+            return 0;
+        }
+    }
+    {
+        int s = sized(mn, "movbe");
+        if (s >= 0 && n == 2) {
+            int load = o[0].k == K_MEM && o[1].k == K_REG;
+            const struct opnd *r = load ? &o[1] : &o[0], *m = load ? &o[0] : &o[1];
+            if (r->k != K_REG || m->k != K_MEM || r->size == 1 || (s && s != r->size))
+                return fail("movbe moves between a 16-, 32- or 64-bit register and memory");
+            unsigned char op[3] = { 0x0f, 0x38, (unsigned char)(load ? 0xf0 : 0xf1) };
+            return emit_rm(x, pfx_of(r->size), r->size == 8, op, 3, r->reg, NULL, m);
+        }
+    }
+    return 1;
+}
+
 static int insn(struct ib *x, const char *mn, struct opnd *o, int n)
 {
     int s;
+    if (mn[0] == 'v') {
+        int r = avx(x, mn, o, n);
+        if (r != 1) return r;
+    }
+    {
+        int r = bmi(x, mn, o, n);
+        if (r != 1) return r;
+    }
     if (mn[0] == 'f') {
         int r = x87(x, mn, o, n);
         if (r != 1) return r;
@@ -1228,7 +1831,11 @@ static int insn(struct ib *x, const char *mn, struct opnd *o, int n)
             }
     }
 
-    /* ---- SSE ---- */
+    /* ---- SSE ---- (legacy encodings: xmm only; a ymm is AVX's, above) */
+    for (int k = 0; k < n && mn[0] != 'v'; k++)
+        if (o[k].k == K_XMM && o[k].size == 32)
+            return fail("'%s' with a ymm register is not an instruction: AVX's is "
+                        "v%s", mn, mn);
     {
         /* load direction: op src(xmm/mem), dst(xmm) */
         static const struct { const char *n; int pfx; unsigned op; } sl[] = {

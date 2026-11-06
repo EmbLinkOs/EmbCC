@@ -28,6 +28,9 @@ HOME = os.path.expanduser("~")
 T = {
   "x86":   ("--target=x86_64-elf", "clang", "--target=x86_64-elf",
             "llvm-mc -filetype=obj -triple=x86_64 {src} -o {obj}", "llvm-objdump", "#"),
+  # x86-64-v3: AVX2, FMA, BMI1/2, MOVBE -- what -march=haswell and later emit
+  "x86v3": ("--target=x86_64-elf", "clang", "--target=x86_64-elf -march=x86-64-v3",
+            "llvm-mc -filetype=obj -triple=x86_64 {src} -o {obj}", "llvm-objdump", "#"),
   "a64":   ("--target=aarch64-elf", "clang", "--target=aarch64-none-elf",
             "llvm-mc -filetype=obj -triple=aarch64 {src} -o {obj}", "llvm-objdump", "//"),
   "m4":    ("--target=thumbv7em-none-eabi", "clang",
