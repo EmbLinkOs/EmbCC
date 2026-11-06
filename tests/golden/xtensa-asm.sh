@@ -195,7 +195,8 @@ fi
 
 # ---- 4. the refusals ---------------------------------------------------------------
 "$out/xtasmcheck" --refuse > "$out/ref.txt" <<'REF'
-add.s f0, f1, f2
+add.s f0, f1, a2
+mul.dd.ll m2, m0
 mov.n a2, a3
 ret.n
 addi a2, a3, 128
@@ -203,7 +204,7 @@ addi a2, a3, -129
 addmi a2, a3, 300
 movi a2, 2048
 slli a2, a3, 0
-srli a2, a3, 16
+srli a2, a3, 32
 extui a2, a3, 0, 17
 l32i a2, a3, 1022
 l16si a2, a3, 1
@@ -229,7 +230,7 @@ add a2, a3, a16
 beqz a2, 8
 foo: nop
 1: beqz a2, 2b
-ssa8b a2
+ssa8b f2
 REF
 nr=0
 while IFS='@' read -r stmt msg; do
@@ -285,7 +286,17 @@ refs() {            # refs WHAT PATTERN SOURCE: a .s file
     grep -q -- "$2" "$out/bad.err" || {
         echo "$1 was refused, but not by name:"; cat "$out/bad.err"; exit 1; }
 }
-refs "a long-call block" "longcalls is not supported" '	.begin longcalls'
+# a long-call block: a call to a function the file does not have is an
+# l32r from the pool and a callx8, as GNU as --longcalls makes it
+printf '\t.literal_position\n\t.begin longcalls\n\tcall8 elsewhere\n\t.end longcalls\n\tcall8 elsewhere\n' > "$out/lc.s"
+"$EMBCC" --target=$T -c "$out/lc.s" -o "$out/lc.o" 2> "$out/lc.err" ||
+    { cat "$out/lc.err"; echo "a long-call block was refused"; exit 1; }
+# (the code's bytes, low byte first: l32r a8 is 81 xx xx, callx8 a8 e0 08 00)
+llvm-objcopy -O binary --only-section=.text "$out/lc.o" "$out/lc.bin" 2>/dev/null ||
+    cp "$out/lc.o" "$out/lc.bin"
+od -An -tx1 -v "$out/lc.bin" | tr -s ' \n' ' ' > "$out/lc.hex"
+grep -q '81 [0-9a-f][0-9a-f] [0-9a-f][0-9a-f] e0 08 00' "$out/lc.hex" ||
+    { cat "$out/lc.hex"; echo "a long-call block did not become l32r and callx8"; exit 1; }
 refs "_movi of a symbol" "_movi takes a constant" '	_movi a2, foo'
 refs "a symbol where none relocates" "cannot relocate" '	addi a2, a3, foo'
 refs ".align 3" "a power of two" '	.align 3'

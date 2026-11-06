@@ -76,9 +76,12 @@ T = {
             "--target=loongarch64-unknown-elf -mno-lsx -mno-lasx",
             "llvm-mc -filetype=obj -triple=loongarch64 {src} -o {obj}", "llvm-objdump", "#"),
   # where LLVM has no backend, a GCC is the referee (tools: ~/cross, brew)
-  "xtensa": ("--target=xtensa-esp32-elf", HOME + "/cross/xtensa/xtensa-esp-elf/bin/xtensa-esp32-elf-gcc",
-            "-mlongcalls",
-            HOME + "/cross/xtensa/xtensa-esp-elf/bin/xtensa-esp32-elf-as --longcalls {src} -o {obj}",
+  # (literals in .text before each function, EmbCC's Xtensa convention:
+  # GNU as's --text-section-literals)
+  "xtensa": ("--target=xtensa-esp32-elf -mlongcalls -mtext-section-literals",
+            HOME + "/cross/xtensa/xtensa-esp-elf/bin/xtensa-esp32-elf-gcc",
+            "-mlongcalls -mtext-section-literals",
+            HOME + "/cross/xtensa/xtensa-esp-elf/bin/xtensa-esp32-elf-as --longcalls --text-section-literals --no-target-align {src} -o {obj}",
             HOME + "/cross/xtensa/xtensa-esp-elf/bin/xtensa-esp32-elf-objdump", "#"),
   "rx":    ("--target=rx-none-elf", HOME + "/cross/rx-elf/bin/rx-elf-gcc", "",
             HOME + "/cross/rx-elf/bin/rx-elf-as {src} -o {obj}",
@@ -120,6 +123,8 @@ def corpus(name, out):
 BR = re.compile(r"\b(b|bl|blx|bx|j|jal|jmp|call|beq|bne|blt|bge|bltu|bgeu|bnez|beqz|"
                 r"cbz|cbnz|b\.\w+|br\w*|rjmp|rcall|bra|bsr|jl|loop\w*|bc\w*|bdnz\w*)\b")
 
+PADDING = False
+
 def norm(dis):
     """The instructions of a disassembly (objdump -dr), without addresses,
     raw bytes, branch targets or the relaxation width; each with whether a
@@ -138,9 +143,17 @@ def norm(dis):
             continue
         t = re.sub(r"\s+", " ", m[1].split("<")[0].split("//")[0].split("@ ")[0]).strip()
         t = re.sub(r"\.(n|w)\b", "", t)
+        # zero padding: GNU as's Xtensa property tables (.xt.prop) tell
+        # objdump it is data (.byte 00), and without them it reads as ill
+        if PADDING and re.match(r"^(ill|\.byte 0x?0+|0+)$", t):
+            continue
         op = t.split(" ")[0]
         if BR.match(op) or op.startswith(("b", "j")) and re.search(r"0x[0-9a-f]+|\.[+-]", t):
             t = re.sub(r"(0x)?[0-9a-f]+$|\.[+-]?\d+$|[+-]?\d+$", "T", t)
+        # (Xtensa's objdump prints a target as bare hex: call8 ad0)
+        elif PADDING and re.match(r"^(b\w*|j|call\d+|loop\w*)$", op) and \
+                re.search(r"\s[0-9a-f]+$", t):
+            t = re.sub(r"[0-9a-f]+$", "T", t)
         ins.append((t, pair))
         pair = False
     return ins
@@ -231,6 +244,8 @@ def audit(name, out, show):
         na = ["-M", "no-aliases"] if name.startswith("rv") else []
         de = run([objdump, "-dr", "--no-show-raw-insn"] + na + [eo]).stdout
         dr = run([objdump, "-dr", "--no-show-raw-insn"] + na + [ro]).stdout
+        global PADDING
+        PADDING = name == "xtensa"
         ne, nr = norm(de), norm(dr)
         k = same(ne, nr)
         if k is not None and relaxed_only(objdump, eo, ro):

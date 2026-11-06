@@ -6,6 +6,7 @@
  * driver's argument loop. */
 #include "../backend.h"
 #include "../target.h"
+#include "asm.h"
 #include "../../driver/util.h"
 
 #include <stdlib.h>
@@ -61,6 +62,10 @@ int xtensa_target_option(const char *arg)
     if (!strncmp(arg, "-mdynconfig=", 12) &&
         (strstr(arg, "esp32.so") || strstr(arg, "esp32s3.so")))
         good = 1;
+    /* -mlongcalls also tells the assembler: a call to a function it
+     * cannot see is an l32r and a callx (xtasm_set_longcalls) */
+    if (!strcmp(arg, "-mlongcalls")) xtasm_set_longcalls(1);
+    if (!strcmp(arg, "-mno-longcalls")) xtasm_set_longcalls(0);
     if (!good) {
         if (!strncmp(arg, "-mabi=", 6) &&
             strcmp(arg, "-mabi=call0"))

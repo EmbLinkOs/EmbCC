@@ -20,6 +20,56 @@ void xtasm_set_pc(long pc)
     g_pc = pc;
 }
 
+/* ---- the density option, and relaxation ----------------------------------
+ *
+ * Every ESP32 core has the density option, and GNU as assembling a file
+ * for one narrows each instruction that has a 16-bit form and fits it:
+ * mov, movi, add, addi, l32i, s32i, ret, retw, nop, and beqz/bnez to a
+ * target 4..67 bytes ahead -- unless written with GNU's `_` prefix, which
+ * says "as written". A branch out of reach becomes the inverted branch
+ * over a `j`, as GNU as relaxes it. Inline asm keeps every instruction
+ * at three bytes: its template's label arithmetic counts on that.
+ *
+ * gas.c's relaxation level for a branch: 0 the narrowest that reaches,
+ * 1 the 24-bit form, 2 the inverted branch and a jump; -1, pass one's,
+ * the narrowest form whatever it reaches (a layout that starts small and
+ * grows settles small). */
+static int g_density = 1, g_level = -1, g_took;
+
+static int g_transform = 1, g_longcalls;
+void xtasm_set_density(int on) { g_density = on; }
+void xtasm_set_transform(int on) { g_transform = on; }
+void xtasm_set_longcalls(int on) { g_longcalls = on; }
+int xtasm_longcalls(void) { return g_longcalls; }
+
+/* `callN sym`: N, or -1 when the statement is no direct call */
+int xtasm_call_operand(const char *stmt, const char **x, int *xlen)
+{
+    const char *p = stmt;
+    int inc;
+    while (isspace((unsigned char)*p)) p++;
+    if (strncmp(p, "call", 4)) return -1;
+    p += 4;
+    inc = p[0] == '0' ? 0 : p[0] == '4' ? 4 : p[0] == '8' ? 8
+        : (p[0] == '1' && p[1] == '2') ? 12 : -1;
+    if (inc < 0) return -1;
+    p += inc == 12 ? 2 : 1;
+    if (!isspace((unsigned char)*p)) return -1;
+    while (isspace((unsigned char)*p)) p++;
+    *x = p;
+    *xlen = (int)strlen(p);
+    while (*xlen && isspace((unsigned char)p[*xlen - 1])) (*xlen)--;
+    return inc;
+}
+void xtasm_set_level(int level) { g_level = level; g_took = 0; }
+int xtasm_took_level(void) { return g_took; }
+
+static void xt_h(struct code *c, unsigned h)
+{
+    code_byte(c, (int)(h & 0xff));
+    code_byte(c, (int)(h >> 8 & 0xff));
+}
+
 /* ---- registers ------------------------------------------------------------ */
 
 int xtasm_gpr(const char *name, int len)
@@ -42,6 +92,18 @@ int xtasm_gpr(const char *name, int len)
 int xtasm_is_reg(const char *name, int len)
 {
     return xtasm_gpr(name, len);
+}
+
+/* fN, the FPU's registers, and bN, the boolean ones: 0..15, or -1 */
+static int xt_rnum(const char *name, int len, char kind)
+{
+    int v = 0;
+    if (len < 2 || len > 3 || name[0] != kind) return -1;
+    for (int i = 1; i < len; i++) {
+        if (!isdigit((unsigned char)name[i])) return -1;
+        v = v * 10 + (name[i] - '0');
+    }
+    return v <= 15 ? v : -1;
 }
 
 /* The special registers of the ESP32 (an LX6), by the names GNU as gives
@@ -102,6 +164,7 @@ static const struct sr_ent sr_tab[] = {
  * thread pointer in. */
 static const struct sr_ent ur_tab[] = {
     { "threadptr", XT_UR_THREADPTR, R | W, 0 },
+    { "fcr", 232, R | W, 0 }, { "fsr", 233, R | W, 0 },
     { NULL, 0, 0, 0 }
 };
 
@@ -333,6 +396,66 @@ static const char *b4_list(int unsigned_)
 
 /* One statement; `pc` its position in its section, or -1. */
 static int stmt_body(const char *stmt, int len, struct code *out, long pc,
+                     char *err, int errlen);
+
+/* The form a conditional branch takes (see g_level): 0 the narrow one
+ * (beqz.n/bnez.n), 1 the 24-bit one, 2 the inverted branch over a j. */
+static int br_form(long pc, int raw, int can_narrow, long off, int reach24)
+{
+    int f;
+    if (pc < 0 || raw)
+        return 1;
+    if (can_narrow && g_level <= 0 && (g_level < 0 || (off >= 0 && off <= 63)))
+        f = 0;
+    else if (g_level < 0 || (g_level <= 1 && reach24))
+        f = 1;
+    else
+        f = 2;
+    if (f > g_took)
+        g_took = f;
+    return f;
+}
+
+/* `beqi a2, 5, far`: bnei a2, 5 over a `j far`, as GNU as relaxes a branch
+ * that does not reach -- the inverted branch narrow when it can be */
+static int br_relax(const char *inv, const struct tok *t, int n, long rel,
+                    int narrow_inv, struct code *out, long pc, char *err,
+                    int errlen)
+{
+    char buf[200];
+    int k, il = narrow_inv ? 2 : 3, lv = g_level, tk = g_took, rc;
+    k = snprintf(buf, sizeof buf, "%s%s%s", narrow_inv ? "" : "_", inv,
+                 narrow_inv ? ".n" : "");
+    for (int i = 1; i < n - 1; i++)
+        k += snprintf(buf + k, sizeof buf - (size_t)k, "%s %.*s", i > 1 ? "," : "",
+                      t[i].len, t[i].s);
+    k += snprintf(buf + k, sizeof buf - (size_t)k, ", .+%d", il + 3);
+    g_level = 0;
+    rc = stmt_body(buf, k, out, pc, err, errlen);
+    if (rc == 0) {
+        k = snprintf(buf, sizeof buf, "j .%+ld", rel - il);
+        rc = stmt_body(buf, k, out, pc + il, err, errlen);
+    }
+    g_level = lv;
+    g_took = tk;
+    return rc;
+}
+
+static const char *br_inverse(const char *mn)
+{
+    static const char *const pr[][2] = {
+        { "beq", "bne" }, { "blt", "bge" }, { "bltu", "bgeu" }, { "bany", "bnone" },
+        { "ball", "bnall" }, { "bbc", "bbs" }, { "beqi", "bnei" }, { "blti", "bgei" },
+        { "bltui", "bgeui" }, { "bbci", "bbsi" }, { "beqz", "bnez" }, { "bltz", "bgez" },
+    };
+    for (unsigned k = 0; k < sizeof pr / sizeof *pr; k++) {
+        if (!strcmp(mn, pr[k][0])) return pr[k][1];
+        if (!strcmp(mn, pr[k][1])) return pr[k][0];
+    }
+    return NULL;
+}
+
+static int stmt_body(const char *stmt, int len, struct code *out, long pc,
                      char *err, int errlen)
 {
     struct tok t[MAXTOK];
@@ -360,11 +483,13 @@ static int stmt_body(const char *stmt, int len, struct code *out, long pc,
     /* the mnemonic, lower-case: GNU's `_` (do not transform) changes
      * nothing here, where nothing is transformed */
     ml = t[0].len;
+    int notrans = 0, want_n = 0;
     {
         const char *m = t[0].s;
         if (ml > 1 && m[0] == '_') {
             m++;
             ml--;
+            notrans = 1;
         }
         if (ml >= (int)sizeof mn)
             FAIL("asm instruction \"%.*s\" is not in the Xtensa vocabulary",
@@ -373,15 +498,47 @@ static int stmt_body(const char *stmt, int len, struct code *out, long pc,
             mn[i] = (char)tolower((unsigned char)m[i]);
         mn[ml] = 0;
     }
-    if (ml > 2 && mn[ml - 2] == '.' && mn[ml - 1] == 'n')
-        FAIL("%s is a 16-bit instruction of the density option, which this "
-             "assembler does not emit: write %.*s, its 24-bit form", mn,
-             ml - 2, mn);
+    /* `mov.n`: the density option's form, which only it may take; in a
+     * file every instruction that fits takes it anyway */
+    if (ml > 2 && mn[ml - 2] == '.' && mn[ml - 1] == 'n') {
+        if (!g_density)
+            FAIL("%s is a 16-bit instruction of the density option, which "
+                 "this core does not have: write %.*s", mn, ml - 2, mn);
+        if (pc < 0)
+            FAIL("%s is a 16-bit instruction of the density option, and an "
+                 "inline asm template's instructions are three bytes each: "
+                 "write %.*s", mn, ml - 2, mn);
+        mn[ml -= 2] = 0;
+        want_n = 1;
+    }
+    /* (a line gas.c has widened -- to align a loop after it -- stays at
+     * 24 bits, written .n or not, as GNU as widens one) */
+    int narrow = (want_n || (g_density && g_transform && pc >= 0 && !notrans)) &&
+                 !(pc >= 0 && g_level >= 1);
+    if (pc >= 0 && g_level >= 1)
+        want_n = 0;
     if (!strcmp(mn, "bbci.l") || !strcmp(mn, "bbsi.l")) {
         mn[4] = 0;                   /* little-endian bit numbering: the same */
         ml = 4;
     }
 #define IS(s) (strcmp(mn, s) == 0)
+
+    /* ---- no operands: ret, retw, nop narrow ---- */
+    if (narrow && n == 1 && (IS("ret") || IS("retw") || IS("nop"))) {
+        xt_h(out, IS("ret") ? 0xf00du : IS("retw") ? 0xf01du : 0xf03du);
+        return 0;
+    }
+    if (want_n && IS("ill") && n == 1) { xt_h(out, 0xf06du); return 0; }
+    if (want_n && IS("break")) {
+        if (n != 2 || need_imm(&t[1], &v, mn, err, errlen) || v < 0 || v > 15)
+            FAIL("break.n takes a code 0..15");
+        xt_h(out, 0xf02du | (unsigned)v << 8);
+        return 0;
+    }
+    if (want_n && !IS("ret") && !IS("retw") && !IS("nop") && !IS("mov") &&
+        !IS("movi") && !IS("add") && !IS("addi") && !IS("l32i") && !IS("s32i") &&
+        !IS("beqz") && !IS("bnez"))
+        FAIL("%s.n is not a density instruction", mn);
 
     /* ---- no operands ---- */
     for (int k = 0; op0_tab[k].name; k++)
@@ -400,6 +557,14 @@ static int stmt_body(const char *stmt, int len, struct code *out, long pc,
             FAIL("%s takes three registers", mn);
         if (need_regs(t, 1, 3, r, mn, err, errlen))
             return -1;
+        if (narrow && IS("add")) {
+            xt_h(out, (unsigned)r[0] << 12 | (unsigned)r[1] << 8 | (unsigned)r[2] << 4 | 0xa);
+            return 0;
+        }
+        if (narrow && !want_n && IS("or") && r[1] == r[2]) {   /* mov */
+            xt_h(out, (unsigned)r[1] << 8 | (unsigned)r[0] << 4 | 0xd);
+            return 0;
+        }
         xt_alu(out, e->op, r[0], r[1], r[2]);
         return 0;
     }
@@ -411,6 +576,10 @@ static int stmt_body(const char *stmt, int len, struct code *out, long pc,
             FAIL("%s takes two registers", mn);
         if (need_regs(t, 1, 2, r, mn, err, errlen))
             return -1;
+        if (IS("mov") && narrow) {
+            xt_h(out, (unsigned)r[1] << 8 | (unsigned)r[0] << 4 | 0xd);
+            return 0;
+        }
         if (IS("mov")) xt_mov(out, r[0], r[1]);
         else if (IS("neg")) xt_neg(out, r[0], r[1]);
         else if (IS("abs")) xt_abs(out, r[0], r[1]);
@@ -447,6 +616,13 @@ static int stmt_body(const char *stmt, int len, struct code *out, long pc,
         /* 0xfffff800 is -2048 as a 32-bit word */
         if (v >= 0xfffff800LL && v <= 0xffffffffLL)
             v -= 0x100000000LL;
+        if (narrow && v >= -32 && v <= 95) {
+            unsigned i7 = (unsigned)v & 0x7f;
+            xt_h(out, (i7 & 15) << 12 | (unsigned)r[0] << 8 | (i7 >> 4) << 4 | 0xc);
+            return 0;
+        }
+        if (want_n)
+            FAIL("movi.n constant %lld is not -32..95", v);
         if (!xt_movi_ok(v))
             FAIL("movi constant %lld does not fit its signed 12 bits "
                  "(-2048..2047); a larger one is a literal, which a .S file "
@@ -459,6 +635,17 @@ static int stmt_body(const char *stmt, int len, struct code *out, long pc,
             FAIL("%s takes two registers and a constant", mn);
         if (need_imm(&t[3], &v, mn, err, errlen))
             return -1;
+        if (IS("addi") && narrow && (v == -1 || (v >= 1 && v <= 15))) {
+            xt_h(out, (unsigned)r[0] << 12 | (unsigned)r[1] << 8 |
+                      (unsigned)(v == -1 ? 0 : v) << 4 | 0xb);
+            return 0;
+        }
+        if (IS("addi") && narrow && !want_n && v == 0) {      /* mov.n */
+            xt_h(out, (unsigned)r[1] << 8 | (unsigned)r[0] << 4 | 0xd);
+            return 0;
+        }
+        if (want_n)
+            FAIL("addi.n constant %lld is not -1 or 1..15", v);
         if (IS("addi")) {
             if (v < -128 || v > 127)
                 FAIL("addi constant %lld is not -128..127", v);
@@ -479,6 +666,11 @@ static int stmt_body(const char *stmt, int len, struct code *out, long pc,
             FAIL("%s takes two registers and an amount", mn);
         if (need_imm(&t[3], &v, mn, err, errlen))
             return -1;
+        /* srli by 16..31 has no encoding: GNU as makes it extui */
+        if (IS("srli") && v >= 16 && v <= 31) {
+            xt_extui(out, r[0], r[1], (int)v, (int)(32 - v));
+            return 0;
+        }
         if (v < lo || v > hi)
             FAIL("%s amount %lld is not %d..%d%s", mn, v, lo, hi,
                  IS("srli") ? " (a longer logical shift is extui)"
@@ -528,6 +720,13 @@ static int stmt_body(const char *stmt, int len, struct code *out, long pc,
             FAIL("%s takes a register, a base register and an offset", mn);
         if (need_imm(&t[3], &v, mn, err, errlen))
             return -1;
+        if (narrow && e->size == 4 && v >= 0 && v <= 60 && !(v & 3)) {
+            xt_h(out, (unsigned)(v / 4) << 12 | (unsigned)r[1] << 8 |
+                      (unsigned)r[0] << 4 | (e->store ? 0x9u : 0x8u));
+            return 0;
+        }
+        if (want_n)
+            FAIL("%s.n offset %lld is not a multiple of 4 in 0..60", mn, v);
         if (!xt_mem_ok((long)v, e->size) || v != (long)v)
             FAIL("%s offset %lld is not %s", mn, v,
                  e->size == 1 ? "0..255" : e->size == 2
@@ -589,7 +788,11 @@ static int stmt_body(const char *stmt, int len, struct code *out, long pc,
             FAIL("%s takes two registers and a target", mn);
         if (need_target(&t[3], raw, &rel, mn, err, errlen))
             return -1;
+        if (br_form(pc, raw, 0, (long)rel - 4, xt_b_reaches((long)rel - 4)) == 2)
+            return br_relax(br_inverse(mn), t, n, (long)rel, 0, out, pc, err, errlen);
         rel = raw ? 0 : rel - 4;
+        if (!xt_b_reaches((long)rel) && pc >= 0 && g_level < 0)
+            rel = 0;                 /* pass one: the size is all it needs */
         if (!xt_b_reaches((long)rel))
             FAIL("%s target %+lld bytes away is out of reach (-124..131 "
                  "from the branch)", mn, rel + 4);
@@ -603,7 +806,26 @@ static int stmt_body(const char *stmt, int len, struct code *out, long pc,
             FAIL("%s takes a register and a target", mn);
         if (need_target(&t[2], raw, &rel, mn, err, errlen))
             return -1;
+        {
+            int nb = k < 2 && narrow;       /* beqz.n, bnez.n */
+            /* (an explicit .n is a preference, as GNU as reads one: GCC
+             * writes bnez.n to a target behind it) */
+            int f = br_form(pc, raw, nb, (long)rel - 4, xt_bz_reaches((long)rel - 4));
+            if (f == 2)
+                return br_relax(br_inverse(mn), t, n, (long)rel,
+                                k < 2 && g_density && !notrans, out, pc, err, errlen);
+            if (f == 0) {
+                long o6 = (long)rel - 4;
+                if (o6 < 0 || o6 > 63)
+                    o6 = 0;          /* pass one: the size is all it needs */
+                xt_h(out, (unsigned)(o6 & 15) << 12 | (unsigned)r[0] << 8 |
+                          (unsigned)((k ? 0xc : 0x8) | (o6 >> 4)) << 4 | 0xc);
+                return 0;
+            }
+        }
         rel = raw ? 0 : rel - 4;
+        if (!xt_bz_reaches((long)rel) && pc >= 0 && g_level < 0)
+            rel = 0;
         if (!xt_bz_reaches((long)rel))
             FAIL("%s target %+lld bytes away is out of reach (-2044..2051 "
                  "from the branch)", mn, rel + 4);
@@ -621,7 +843,11 @@ static int stmt_body(const char *stmt, int len, struct code *out, long pc,
         if (!xt_bi_ok(k, v))
             FAIL("%s cannot test %lld: the constants it can are %s", mn, v,
                  b4_list(k >= XT_BLTUI));
+        if (br_form(pc, raw, 0, (long)rel - 4, xt_b_reaches((long)rel - 4)) == 2)
+            return br_relax(br_inverse(mn), t, n, (long)rel, 0, out, pc, err, errlen);
         rel = raw ? 0 : rel - 4;
+        if (!xt_b_reaches((long)rel) && pc >= 0 && g_level < 0)
+            rel = 0;
         if (!xt_b_reaches((long)rel))
             FAIL("%s target %+lld bytes away is out of reach (-124..131 "
                  "from the branch)", mn, rel + 4);
@@ -636,7 +862,11 @@ static int stmt_body(const char *stmt, int len, struct code *out, long pc,
             return -1;
         if (v < 0 || v > 31)
             FAIL("%s bit %lld is not 0..31", mn, v);
+        if (br_form(pc, raw, 0, (long)rel - 4, xt_b_reaches((long)rel - 4)) == 2)
+            return br_relax(br_inverse(mn), t, n, (long)rel, 0, out, pc, err, errlen);
         rel = raw ? 0 : rel - 4;
+        if (!xt_b_reaches((long)rel) && pc >= 0 && g_level < 0)
+            rel = 0;
         if (!xt_b_reaches((long)rel))
             FAIL("%s target %+lld bytes away is out of reach (-124..131 "
                  "from the branch)", mn, rel + 4);
@@ -789,6 +1019,258 @@ static int stmt_body(const char *stmt, int len, struct code *out, long pc,
         }
         return 0;
     }
+    /* ---- MAC16: (umul|mul|mula|muls).(aa|ad|da|dd).(ll|hl|lh|hh)
+     * [.lddec|.ldinc], and lddec/ldinc. m0/m1 are x (r bit 2), m2/m3 y
+     * (t bit 2), an ld*'s target any m (r bits 1:0) ---- */
+    if ((IS("lddec") || IS("ldinc")) && n == 3) {
+        int m = xt_rnum(t[1].s, t[1].len, 'm'), a = xtasm_gpr(t[2].s, t[2].len);
+        if (m < 0 || m > 3 || a < 0) FAIL("%s takes m0-m3 and an a register", mn);
+        xt_w(out, (IS("lddec") ? 0x900004UL : 0x800004UL) | (unsigned long)m << 12 |
+                  (unsigned long)a << 8);
+        return 0;
+    }
+    {
+        static const char *const ops[] = { "umul", "mul", "mula", "muls" };
+        static const char *const halves[] = { "ll", "hl", "lh", "hh" };
+        char base[8], kind[4], half[4], ld[8];
+        int nf = sscanf(mn, "%7[a-z].%3[a-z].%3[a-z].%7[a-z]", base, kind, half, ld);
+        int op = -1, hf = -1;
+        if (nf >= 3) {
+            for (int k = 0; k < 4; k++) if (!strcmp(base, ops[k])) op = k;
+            for (int k = 0; k < 4; k++) if (!strcmp(half, halves[k])) hf = k;
+        }
+        if (op >= 0 && hf >= 0) {
+            int lo = nf == 4, dec = lo && !strcmp(ld, "lddec");
+            unsigned op1 = (unsigned)(op * 4 + hf), op2;
+            int w = 0, a = 0, x = 0, y = 0, at = 1;
+            if (lo && strcmp(ld, "lddec") && strcmp(ld, "ldinc"))
+                FAIL("asm instruction \"%s\" is not in the Xtensa vocabulary", mn);
+            if (lo && (op != 2 || (strcmp(kind, "da") && strcmp(kind, "dd"))))
+                FAIL("%s: only mula.da and mula.dd load as they go", mn);
+            if (op == 0 && strcmp(kind, "aa"))
+                FAIL("umul is umul.aa only");
+            if (lo) {                       /* mw, as first */
+                w = xt_rnum(t[1].s, t[1].len, 'm');
+                a = xtasm_gpr(t[2].s, t[2].len);
+                if (n != 5 || w < 0 || w > 3 || a < 0)
+                    FAIL("%s takes m0-m3, an a register and two sources", mn);
+                at = 3;
+            } else if (n != 3)
+                FAIL("%s takes two sources", mn);
+#define MREG(i, lo2) (xt_rnum(t[i].s, t[i].len, 'm') - (lo2))
+            if (!strcmp(kind, "aa")) {
+                int s1 = xtasm_gpr(t[at].s, t[at].len), s2 = xtasm_gpr(t[at + 1].s, t[at + 1].len);
+                if (s1 < 0 || s2 < 0) FAIL("%s takes two a registers", mn);
+                xt_w(out, 0x700004UL | (unsigned long)op1 << 16 | (unsigned long)s1 << 8 |
+                          (unsigned long)s2 << 4);
+                return 0;
+            }
+            if (!strcmp(kind, "ad")) {
+                int s1 = xtasm_gpr(t[at].s, t[at].len);
+                y = MREG(at + 1, 2);
+                if (s1 < 0)
+                    FAIL("%s: %.*s is not an a register", mn, t[at].len, t[at].s);
+                if (y < 0 || y > 1)
+                    FAIL("%s: %.*s is not m2 or m3", mn, t[at + 1].len, t[at + 1].s);
+                xt_w(out, 0x300004UL | (unsigned long)op1 << 16 | (unsigned long)s1 << 8 |
+                          (unsigned long)y << 6);
+                return 0;
+            }
+            if (!strcmp(kind, "da")) {
+                int s2 = xtasm_gpr(t[at + 1].s, t[at + 1].len);
+                x = MREG(at, 0);
+                if (x < 0 || x > 1)
+                    FAIL("%s: %.*s is not m0 or m1", mn, t[at].len, t[at].s);
+                if (s2 < 0)
+                    FAIL("%s: %.*s is not an a register", mn, t[at + 1].len, t[at + 1].s);
+                op2 = lo ? (dec ? 5u : 4u) : 6u;
+                xt_w(out, (unsigned long)op2 << 20 | (unsigned long)op1 << 16 |
+                          (unsigned long)(x << 2 | w) << 12 | (unsigned long)a << 8 |
+                          (unsigned long)s2 << 4 | 4);
+                return 0;
+            }
+            if (!strcmp(kind, "dd")) {
+                x = MREG(at, 0);
+                y = MREG(at + 1, 2);
+                if (x < 0 || x > 1)
+                    FAIL("%s: %.*s is not m0 or m1", mn, t[at].len, t[at].s);
+                if (y < 0 || y > 1)
+                    FAIL("%s: %.*s is not m2 or m3", mn, t[at + 1].len, t[at + 1].s);
+                op2 = lo ? (dec ? 1u : 0u) : 2u;
+                xt_w(out, (unsigned long)op2 << 20 | (unsigned long)op1 << 16 |
+                          (unsigned long)(x << 2 | w) << 12 | (unsigned long)a << 8 |
+                          (unsigned long)y << 6 | 4);
+                return 0;
+            }
+#undef MREG
+        }
+    }
+
+    /* ---- muluh, mulsh, ssa8b ---- */
+    if ((IS("muluh") || IS("mulsh")) && n == 4) {
+        if (need_regs(t, 1, 3, r, mn, err, errlen)) return -1;
+        xt_w(out, (IS("muluh") ? 0xa20000UL : 0xb20000UL) | (unsigned long)r[0] << 12 |
+                  (unsigned long)r[1] << 8 | (unsigned long)r[2] << 4);
+        return 0;
+    }
+    if (IS("ssa8b") && n == 2) {
+        if (need_regs(t, 1, 1, r, mn, err, errlen)) return -1;
+        xt_w(out, 0x403000UL | (unsigned long)r[0] << 8);
+        return 0;
+    }
+
+    /* ---- the floating-point coprocessor (the ESP32's) ----
+     * RRR with op1 0xA (FP0) or 0xB (FP1); r the result, s and t the
+     * sources; op2 0xF in FP0 is the one-operand group, t its selector */
+    {
+        static const struct { const char *n; unsigned op1, op2; char form; int sel; } fp[] = {
+            /* form: F f,f,f  U f,f (sel)  C f,f,a  K b,f,f  I f,a,imm  T a,f,imm
+             *       W f,a  R a,f  B f,f,b  Q f,imm */
+            {"add.s",0xa,0x0,'F',0},{"sub.s",0xa,0x1,'F',0},{"mul.s",0xa,0x2,'F',0},
+            {"madd.s",0xa,0x4,'F',0},{"msub.s",0xa,0x5,'F',0},{"maddn.s",0xa,0x6,'F',0},
+            {"divn.s",0xa,0x7,'F',0},
+            {"round.s",0xa,0x8,'T',0},{"trunc.s",0xa,0x9,'T',0},{"floor.s",0xa,0xa,'T',0},
+            {"ceil.s",0xa,0xb,'T',0},{"float.s",0xa,0xc,'I',0},{"ufloat.s",0xa,0xd,'I',0},
+            {"utrunc.s",0xa,0xe,'T',0},
+            {"mov.s",0xa,0xf,'U',0},{"abs.s",0xa,0xf,'U',1},{"const.s",0xa,0xf,'Q',3},
+            {"rfr",0xa,0xf,'R',4},{"wfr",0xa,0xf,'W',5},{"neg.s",0xa,0xf,'U',6},
+            {"div0.s",0xa,0xf,'U',7},{"recip0.s",0xa,0xf,'U',8},{"sqrt0.s",0xa,0xf,'U',9},
+            {"rsqrt0.s",0xa,0xf,'U',10},{"nexp01.s",0xa,0xf,'U',11},{"mksadj.s",0xa,0xf,'U',12},
+            {"mkdadj.s",0xa,0xf,'U',13},{"addexp.s",0xa,0xf,'U',14},{"addexpm.s",0xa,0xf,'U',15},
+            {"un.s",0xb,0x1,'K',0},{"oeq.s",0xb,0x2,'K',0},{"ueq.s",0xb,0x3,'K',0},
+            {"olt.s",0xb,0x4,'K',0},{"ult.s",0xb,0x5,'K',0},{"ole.s",0xb,0x6,'K',0},
+            {"ule.s",0xb,0x7,'K',0},
+            {"moveqz.s",0xb,0x8,'C',0},{"movnez.s",0xb,0x9,'C',0},{"movltz.s",0xb,0xa,'C',0},
+            {"movgez.s",0xb,0xb,'C',0},{"movf.s",0xb,0xc,'B',0},{"movt.s",0xb,0xd,'B',0},
+            {NULL,0,0,0,0}
+        };
+        for (int k = 0; fp[k].n; k++) {
+            int a = -1, b = -1, c = -1, nn;
+            long long im = 0;
+            if (!IS(fp[k].n)) continue;
+            nn = fp[k].form == 'F' || fp[k].form == 'K' || fp[k].form == 'C' ||
+                 fp[k].form == 'B' || fp[k].form == 'I' || fp[k].form == 'T' ? 4 : 3;
+            if (n != nn) FAIL("%s takes %d operands", mn, nn - 1);
+#define FR(i) xt_rnum(t[i].s, t[i].len, 'f')
+#define AR(i) xtasm_gpr(t[i].s, t[i].len)
+#define BR(i) xt_rnum(t[i].s, t[i].len, 'b')
+            switch (fp[k].form) {
+            case 'F': a = FR(1); b = FR(2); c = FR(3); break;
+            case 'K': a = BR(1); b = FR(2); c = FR(3); break;
+            case 'C': a = FR(1); b = FR(2); c = AR(3); break;
+            case 'B': a = FR(1); b = FR(2); c = BR(3); break;
+            case 'U': a = FR(1); b = FR(2); c = fp[k].sel; break;
+            case 'W': a = FR(1); b = AR(2); c = fp[k].sel; break;
+            case 'R': a = AR(1); b = FR(2); c = fp[k].sel; break;
+            case 'I': a = FR(1); b = AR(2); c = 0; break;
+            case 'T': a = AR(1); b = FR(2); c = 0; break;
+            case 'Q': a = FR(1); b = 0; c = fp[k].sel; break;
+            }
+#undef FR
+#undef AR
+#undef BR
+            if (a < 0 || b < 0 || c < 0) {
+                /* name the operand, and what it should have been */
+                static const char *const want[][3] = {
+                    ['F'] = { "f", "f", "f" }, ['K'] = { "b", "f", "f" },
+                    ['C'] = { "f", "f", "a" }, ['B'] = { "f", "f", "b" },
+                    ['U'] = { "f", "f", "" }, ['W'] = { "f", "a", "" },
+                    ['R'] = { "a", "f", "" }, ['I'] = { "f", "a", "" },
+                    ['T'] = { "a", "f", "" }, ['Q'] = { "f", "", "" },
+                };
+                int bad = a < 0 ? 0 : b < 0 ? 1 : 2;
+                FAIL("%s: %.*s is not %s %s register", mn, t[bad + 1].len, t[bad + 1].s,
+                     want[(int)fp[k].form][bad][0] == 'a' ? "an" : "a",
+                     want[(int)fp[k].form][bad]);
+            }
+            if (fp[k].form == 'I' || fp[k].form == 'T') {
+                if (need_imm(&t[3], &im, mn, err, errlen)) return -1;
+                if (im < 0 || im > 15) FAIL("%s scale %lld is not 0..15", mn, im);
+                c = (int)im;
+            }
+            if (fp[k].form == 'Q') {
+                if (need_imm(&t[2], &im, mn, err, errlen)) return -1;
+                if (im < 0 || im > 15) FAIL("const.s %lld is not 0..15", im);
+                b = (int)im;
+            }
+            xt_w(out, (unsigned long)fp[k].op2 << 20 | (unsigned long)fp[k].op1 << 16 |
+                      (unsigned long)a << 12 | (unsigned long)b << 8 | (unsigned long)c << 4);
+            return 0;
+        }
+    }
+    /* lsi/ssi f, a, offset (0..1020, 4-aligned); lsx/ssx f, a, a */
+    if ((IS("lsi") || IS("ssi") || IS("lsiu") || IS("ssiu")) && n == 4) {
+        int f = xt_rnum(t[1].s, t[1].len, 'f'), a = xtasm_gpr(t[2].s, t[2].len);
+        if (f < 0 || a < 0 || need_imm(&t[3], &v, mn, err, errlen))
+            FAIL("%s takes an f register, an a register and an offset", mn);
+        if (v < 0 || v > 1020 || (v & 3))
+            FAIL("%s offset %lld is not a multiple of 4 in 0..1020", mn, v);
+        xt_w(out, (unsigned long)(v / 4) << 16 |
+                  (unsigned long)(IS("lsi") ? 0 : IS("ssi") ? 4 : IS("lsiu") ? 8 : 12) << 12 |
+                  (unsigned long)a << 8 | (unsigned long)f << 4 | 3);
+        return 0;
+    }
+    if ((IS("lsx") || IS("ssx") || IS("lsxu") || IS("ssxu")) && n == 4) {
+        int f = xt_rnum(t[1].s, t[1].len, 'f'), a = xtasm_gpr(t[2].s, t[2].len),
+            b = xtasm_gpr(t[3].s, t[3].len);
+        if (f < 0 || a < 0 || b < 0)
+            FAIL("%s takes an f register and two a registers", mn);
+        xt_w(out, (unsigned long)(IS("lsx") ? 0 : IS("ssx") ? 4 : IS("lsxu") ? 1 : 5) << 20 |
+                  0x80000UL | (unsigned long)f << 12 | (unsigned long)a << 8 |
+                  (unsigned long)b << 4);
+        return 0;
+    }
+    /* the boolean registers */
+    {
+        static const struct { const char *n; unsigned op2; } bo[] = {
+            {"andb",0},{"andbc",1},{"orb",2},{"orbc",3},{"xorb",4},{NULL,0}
+        };
+        for (int k = 0; bo[k].n; k++)
+            if (IS(bo[k].n)) {
+                int a, b, c;
+                if (n != 4) FAIL("%s takes three b registers", mn);
+                a = xt_rnum(t[1].s, t[1].len, 'b'); b = xt_rnum(t[2].s, t[2].len, 'b');
+                c = xt_rnum(t[3].s, t[3].len, 'b');
+                if (a < 0 || b < 0 || c < 0) FAIL("%s takes three b registers", mn);
+                xt_w(out, (unsigned long)bo[k].op2 << 20 | 0x20000UL | (unsigned long)a << 12 |
+                          (unsigned long)b << 8 | (unsigned long)c << 4);
+                return 0;
+            }
+        if ((IS("any4") || IS("all4") || IS("any8") || IS("all8")) && n == 3) {
+            int d = xt_rnum(t[1].s, t[1].len, 'b'), sb = xt_rnum(t[2].s, t[2].len, 'b');
+            int w8 = mn[3] == '8', al = mn[1] == 'l';
+            if (d < 0 || sb < 0 || (sb & (w8 ? 7 : 3)))
+                FAIL("%s takes a b register and the first of %d aligned b registers",
+                     mn, w8 ? 8 : 4);
+            xt_w(out, (unsigned long)(8 + al + 2 * w8) << 12 | (unsigned long)sb << 8 |
+                      (unsigned long)d << 4);
+            return 0;
+        }
+        if ((IS("movf") || IS("movt")) && n == 4) {
+            if (need_regs(t, 1, 2, r, mn, err, errlen)) return -1;
+            int b = xt_rnum(t[3].s, t[3].len, 'b');
+            if (b < 0) FAIL("%s takes two a registers and a b register", mn);
+            xt_w(out, (IS("movf") ? 0xc30000UL : 0xd30000UL) | (unsigned long)r[0] << 12 |
+                      (unsigned long)r[1] << 8 | (unsigned long)b << 4);
+            return 0;
+        }
+        if ((IS("bf") || IS("bt")) && n == 3) {
+            int b = xt_rnum(t[1].s, t[1].len, 'b');
+            if (b < 0) FAIL("%s takes a b register and a target", mn);
+            if (need_target(&t[2], raw, &rel, mn, err, errlen))
+                return -1;
+            if (br_form(pc, raw, 0, (long)rel - 4, xt_b_reaches((long)rel - 4)) == 2)
+                return br_relax(IS("bf") ? "bt" : "bf", t, n, (long)rel, 0, out, pc, err, errlen);
+            rel = raw ? 0 : rel - 4;
+            if (!xt_b_reaches((long)rel) && pc >= 0 && g_level < 0)
+                rel = 0;
+            if (!xt_b_reaches((long)rel))
+                FAIL("%s target %+lld bytes away is out of reach (-124..131 "
+                     "from the branch)", mn, rel + 4);
+            xt_w(out, xt_enc_rri8(6, IS("bt"), b, 7, (unsigned)rel & 0xff));
+            return 0;
+        }
+    }
 #undef IS
     FAIL("asm instruction \"%.*s\" is not in the Xtensa vocabulary",
          (int)(t[n - 1].s + t[n - 1].len - t[0].s), t[0].s);
@@ -940,6 +1422,8 @@ int xtasm_assemble(const char *text, struct code *out, char *err, int errlen)
         int before = out->len;
         rc = stmt_body(buf, len, out, pc < 0 ? -1 : pc + st[k].off, err,
                        errlen);
+        if (pc >= 0)
+            continue;               /* a file's statement: any length */
         if (rc == 0 && out->len - before != 3 && out->len != before)
             FAIL("internal: a statement of %d bytes", out->len - before);
         if (rc == 0 && out->len - start != st[k].off + 3)
@@ -980,7 +1464,8 @@ int xtasm_is_word(const char *stmt, const char *w, int len)
         return reg_lookup(sr_tab, w, len) != NULL;
     if (!strcmp(mn, "rur") || !strcmp(mn, "wur"))
         return reg_lookup(ur_tab, w, len) != NULL;
-    return 0;
+    return xt_rnum(w, len, 'f') >= 0 || xt_rnum(w, len, 'b') >= 0 ||
+           (xt_rnum(w, len, 'm') >= 0 && xt_rnum(w, len, 'm') <= 3);
 }
 
 int xtasm_is_entry(const char *stmt)

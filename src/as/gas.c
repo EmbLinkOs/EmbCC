@@ -100,6 +100,7 @@ struct sym {
     struct sym *alias;
     long alias_add;
     int stamp;              /* the pass that last placed it (gas.stamp) */
+    int local_decl;         /* named by .local: a .comm of it stays local */
 };
 
 struct fixup {
@@ -108,6 +109,12 @@ struct fixup {
     char *sym;              /* the symbol named */
     int type;               /* ELF relocation type */
     long addend;
+};
+
+/* a line of the expanded source, and where it came from */
+struct gline {
+    char *text;
+    int line;
 };
 
 struct gas {
@@ -150,6 +157,11 @@ struct gas {
      * short by all they grew (llvm-mc measures within one layout too) */
     int stamp;
     long *lpc, prev_pc;
+    int xlong_saved;        /* Xtensa: -mlongcalls outside a .begin longcalls */
+    struct xpad { int sec; long off, len; } *xpad;  /* Xtensa: fill in code */
+    int nxpad, capxpad;
+    long *xgap;             /* Xtensa, per line: unreachable fill after it */
+    const struct gline *lines;  /* the pass's lines (pass_over's) */
     long *prefstart;        /* per line: where a .prefalign's function began,
                              * the pass before (-1 not yet) */
     int nwide, li, grew;
@@ -614,11 +626,28 @@ static void map_mark(struct gas *g, char kind)
     g->nmaps++;
 }
 
+static void xt_pad_note(struct gas *g, long off, long len)
+{
+    if (g->tgt->machine != EM_XTENSA || len <= 0 ||
+        !(g->secs[g->cur].flags & SHF_EXECINSTR))
+        return;
+    if (g->nxpad == g->capxpad) {
+        g->capxpad = g->capxpad ? g->capxpad * 2 : 16;
+        g->xpad = xrealloc(g->xpad, (size_t)g->capxpad * sizeof *g->xpad);
+    }
+    g->xpad[g->nxpad].sec = g->cur;
+    g->xpad[g->nxpad].off = off;
+    g->xpad[g->nxpad].len = len;
+    g->nxpad++;
+}
+
 static void do_align(struct gas *g, long boundary)
 {
     long off = cur_off(g);
     if (boundary <= 1)
         return;
+    if (off % boundary)
+        xt_pad_note(g, off, boundary - off % boundary);
     if (boundary > g->secs[g->cur].align)
         g->secs[g->cur].align = boundary;
     /* In code the padding may be EXECUTED -- straight-line code that runs
@@ -1881,6 +1910,7 @@ static void xt_spot(struct gas *g, int key, int pass)
     for (int i = 0; i < g->npxl; i++)
         n += g->pxl[i].key == key;
     if (n) {
+        xt_pad_note(g, cur_off(g), (4 - (cur_off(g) & 3)) & 3);
         while (cur_off(g) & 3)       /* zeros: nothing runs into a pool */
             advance(g, 1);
         if (g->secs[g->cur].align < 4)
@@ -1953,6 +1983,214 @@ static int xt_pool_settled(struct gas *g, long off)
 {
     const struct xspot *sp = &g->xsp[g->xcur[g->cur]];
     return off / 4 < sp->n;
+}
+
+/* Xtensa: the first instruction of a zero-overhead loop's body must not
+ * cross a 4-byte fetch boundary, and GNU as gets it there even with
+ * --no-target-align: with fill after the nearest jump before the loop
+ * that nothing falls through (j, jx, ret, retw), or else by widening the
+ * narrow instructions just before the `loop`, a byte each. `lbeg` is
+ * where the body starts this pass; what is widened or filled stays so,
+ * and the passes settle again. */
+static int xt_no_fallthrough(const char *t)
+{
+    static const char *const j[] = { "j", "jx", "ret", "ret.n", "retw", "retw.n",
+                                     "rfe", "rfi", NULL };
+    const char *p = skip_ws((char *)t);
+    size_t n = 0;
+    if (*p == '_') p++;
+    while (p[n] && !isspace((unsigned char)p[n])) n++;
+    for (int k = 0; j[k]; k++)
+        if (strlen(j[k]) == n && !strncmp(p, j[k], n))
+            return 1;
+    return 0;
+}
+
+static void xt_align_loop(struct gas *g, const struct gline *lines,
+                          const char *text, long lbeg)
+{
+    const char *p = skip_ws((char *)text);
+    long size = 3, need = 0;
+    int k;
+    if (strncmp(p, "loop", 4) || !(p[4] == ' ' || p[4] == '\t' ||
+                                   !strncmp(p + 4, "nez", 3) || !strncmp(p + 4, "gtz", 3)))
+        return;
+    /* the body's first instruction: its size last pass, or three */
+    for (k = g->li + 1; k < g->nwide; k++)
+        if (g->lsize[k] > 0) { size = g->lsize[k]; break; }
+    while ((lbeg + need) % 4 + size > 4 && need < 4)
+        need++;
+    if (!need)
+        return;
+    /* fill after a jump nothing falls through, within the function */
+    for (k = g->li - 1; k >= 0 && k > g->li - 200; k--) {
+        const char *t = skip_ws((char *)lines[k].text);
+        if (!strncmp(t, ".type", 5) || !strncmp(t, ".align", 6) ||
+            !strncmp(t, ".p2align", 8) || !strncmp(t, ".section", 8) ||
+            !strncmp(t, ".literal_position", 17))
+            break;
+        if (g->lsize[k] > 0 && xt_no_fallthrough(t)) {
+            if (g->xgap[k] + need > 3)
+                break;              /* (absorbed elsewhere: widen instead) */
+            g->xgap[k] += need;
+            g->grew = 1;
+            return;
+        }
+    }
+    for (k = g->li - 1; k >= 0 && need > 0; k--) {
+        if (g->lsize[k] < 0)
+            continue;
+        if (g->lsize[k] == 2 && !g->wide[k]) {
+            g->wide[k] = 1;
+            g->grew = 1;
+            need--;
+        } else if (g->lsize[k] != 3 && g->lsize[k] != 0)
+            break;                  /* data, or a pool: no further back */
+    }
+}
+
+/* GNU as's .xt.lit: where each literal pool is, an (address, size) pair
+ * per pool, the address relocated -- what objdump reads to show a pool as
+ * data, and GNU ld's relaxation to find literals. One table per code
+ * section: .xt.lit for .text, .xt.lit.NAME for .text.NAME. */
+static void xt_lit_table(struct gas *g)
+{
+    for (int k = 0; k < g->nxsp; k++) {
+        const struct xspot *sp = &g->xsp[k];
+        char nm[256], lab[64];
+        const char *sn = g->secs[sp->sec].name;
+        int t;
+        struct sym *s;
+        if (sp->n <= 0)
+            continue;
+        snprintf(nm, sizeof nm, ".xt.lit%s", !strncmp(sn, ".text.", 6) ? sn + 5 : "");
+        t = sec_find(g, nm, strlen(nm));
+        if (t < 0)
+            t = sec_add(g, nm, strlen(nm), SHT_PROGBITS, 0);
+        snprintf(lab, sizeof lab, ".Lxtlit\001%d", k);
+        s = sym_get(g, lab, strlen(lab));
+        s->sec = sp->sec;
+        s->value = sp->base;
+        fix_add(g, t, g->secs[t].c.len, lab, R_XTENSA_32, 0);
+        code_u32(&g->secs[t].c, 0);
+        code_u32(&g->secs[t].c, (unsigned long)sp->n * 4);
+    }
+    /* .xt.prop: each code section cut into instructions (2), literals (1)
+     * and fill (4, data) -- (address, size, flags) triples, as GNU as
+     * writes them and objdump reads them to show fill as data */
+    for (int sc = 0; sc < g->nsecs; sc++) {
+        long len = g->secs[sc].c.len, at = 0;
+        char nm[256], lab[64];
+        int t = -1, any = 0;
+        const char *sn = g->secs[sc].name;
+        if (!(g->secs[sc].flags & SHF_EXECINSTR) || !len)
+            continue;
+        for (int k = 0; k < g->nxsp; k++) any |= g->xsp[k].sec == sc && g->xsp[k].n > 0;
+        for (int k = 0; k < g->nxpad; k++) any |= g->xpad[k].sec == sc;
+        if (!any)
+            continue;
+        snprintf(nm, sizeof nm, ".xt.prop%s", !strncmp(sn, ".text.", 6) ? sn + 5 : "");
+        t = sec_find(g, nm, strlen(nm));
+        if (t < 0)
+            t = sec_add(g, nm, strlen(nm), SHT_PROGBITS, 0);
+        snprintf(lab, sizeof lab, ".Lxtprop\001%d", sc);
+        {
+            struct sym *s = sym_get(g, lab, strlen(lab));
+            s->sec = sc;
+            s->value = 0;
+        }
+        while (at < len) {
+            long end = len, kind = 2;
+            /* the region starting here, and where the next one starts */
+            for (int k = 0; k < g->nxsp; k++) {
+                const struct xspot *sp = &g->xsp[k];
+                long b = sp->base, e = sp->base + 4L * sp->n;
+                if (sp->sec != sc || sp->n <= 0) continue;
+                if (b <= at && at < e) { kind = 1; end = e; break; }
+                if (b > at && b < end) end = b;
+            }
+            if (kind == 2)
+                for (int k = 0; k < g->nxpad; k++) {
+                    const struct xpad *p = &g->xpad[k];
+                    if (p->sec != sc) continue;
+                    if (p->off <= at && at < p->off + p->len) {
+                        kind = 4;
+                        end = p->off + p->len;
+                        break;
+                    }
+                    if (p->off > at && p->off < end) end = p->off;
+                }
+            fix_add(g, t, g->secs[t].c.len, lab, R_XTENSA_32, at);
+            code_u32(&g->secs[t].c, 0);
+            code_u32(&g->secs[t].c, (unsigned long)(end - at));
+            code_u32(&g->secs[t].c, (unsigned long)kind);
+            at = end;
+        }
+    }
+}
+
+/* A long call (-mlongcalls): `call8 sym` to a function not placed in this
+ * section is `l32r a8, literal` and `callx8 a8`, the literal in the pool,
+ * as GNU as --longcalls expands it -- with R_XTENSA_ASM_EXPAND on the
+ * l32r, the linker's leave to make it a direct call again. */
+static int xt_call_literal(struct gas *g, const char *stmt, int pass)
+{
+    const char *x, *e;
+    int xlen, bad, inc;
+    char *buf, t[64], err[256];
+    struct gval v;
+    long off, pc = cur_off(g), lit;
+    struct code tmp = { 0 };
+    if (!xtasm_longcalls() || (inc = xtasm_call_operand(stmt, &x, &xlen)) < 0)
+        return 0;
+    buf = xstrndup(x, (size_t)xlen);
+    e = buf;
+    v = gx_eval(g, &e, pass, &bad);
+    if (bad || *skip_ws((char *)e)) {
+        free(buf);
+        return 0;                   /* the plain path reports it */
+    }
+    free(buf);
+    /* a function in this section: the direct call (pass one sees a label
+     * ahead as not placed yet, so it asks again in pass two) */
+    {
+        struct sym *s = v.base;
+        if (s && s->sec == g->cur && !s->is_weak)
+            return 0;               /* (a weak one: the link may replace it) */
+        if (pass == 1 && s && s->sec == SEC_UNDEF) {
+            /* maybe a label further down this section: the pool holds a
+             * word for it either way, so pass two's layout is the same */
+        }
+    }
+    if (v.sec == SEC_ABS && !v.unknown)
+        return 0;
+    off = xt_lit_val(g, v, 0);
+    lit = g->xsp[g->xcur[g->cur]].base + off;
+    if (!xt_pool_settled(g, off)) {
+        advance(g, 6);              /* the pool fills in the next pass */
+        return 1;
+    }
+    snprintf(t, sizeof t, "l32r a%d, .%+ld", inc, lit - pc);
+    g->tgt->at(pc);
+    if (g->tgt->encode(t, &tmp, err, sizeof err) != 0) {
+        gerr_enc(g, pass, "a long call's literal: ", err);
+        free(tmp.p);
+        return 1;
+    }
+    if (pass == 2 && v.base)
+        fix_add(g, g->cur, pc, v.base->name, R_XTENSA_ASM_EXPAND,
+                v.sec >= 0 ? v.v - v.base->value : v.v);
+    emit_bytes(g, tmp.p, tmp.len);
+    free(tmp.p);
+    tmp.p = NULL; tmp.len = tmp.cap = 0;
+    snprintf(t, sizeof t, "callx%d a%d", inc, inc);
+    g->tgt->at(pc + 3);
+    if (g->tgt->encode(t, &tmp, err, sizeof err) != 0)
+        gerr_enc(g, pass, "", err);
+    else
+        emit_bytes(g, tmp.p, tmp.len);
+    free(tmp.p);
+    return 1;
 }
 
 static int xt_movi_literal(struct gas *g, const char *stmt, int pass)
@@ -2103,6 +2341,8 @@ static void instruction(struct gas *g, char *stmt, int pass)
     }
     if (g->tgt->machine == EM_AARCH64)
         map_mark(g, 't');                 /* code: written $x below */
+    if (g->tgt->machine == EM_XTENSA && xt_call_literal(g, stmt, pass))
+        return;
     if (g->tgt->machine == EM_XTENSA && xt_movi_literal(g, stmt, pass))
         return;
     const char *ps = pseudo_symbol(g, stmt);
@@ -2199,6 +2439,8 @@ static void instruction(struct gas *g, char *stmt, int pass)
         }
         g->tgt->set_level(0);
     }
+    if (g->tgt->machine == EM_XTENSA && pass == 2 && erc == 0)
+        xt_align_loop(g, g->lines, text, pc + tmp.len);
     if (g->tgt->machine == EM_ARM) {
         if (tasm_took_wide() && erc == 0 && !g->wide[g->li]) {
             if (g->grow_ok)
@@ -2242,11 +2484,6 @@ static void instruction(struct gas *g, char *stmt, int pass)
  * and the .equ/.set values seen so far. A label's address is not known
  * until the passes run, so an .if that depends on one is refused rather
  * than guessed. */
-
-struct gline {
-    char *text;
-    int line;
-};
 
 struct gmacro {
     char *name;
@@ -3128,11 +3365,20 @@ static int directive(struct gas *g, char *p, int pass)
             k = sec_add(g, nm, nn, ty, fl);
         } else if ((explicit_flags && g->secs[k].flags != fl) ||
                    (explicit_type && g->secs[k].type != ty)) {
-            /* GNU as warns and keeps the first; a section whose bytes
-             * would be read under two meanings is refused instead */
-            gerr(g, "section %s is declared again with other flags or type",
-                 g->secs[k].name);
-            return 1;
+            /* GNU as warns and keeps the first declaration's, and GCC
+             * relies on it (an object it places in .text with "a"); a
+             * type that changes PROGBITS to NOBITS is refused, since the
+             * bytes already there would be dropped */
+            if (explicit_type && g->secs[k].type != ty &&
+                (ty == SHT_NOBITS || g->secs[k].type == SHT_NOBITS)) {
+                gerr(g, "section %s is declared again as %s", g->secs[k].name,
+                     ty == SHT_NOBITS ? "@nobits" : "@progbits");
+                return 1;
+            }
+            if (pass == 1 && !g->errors_muted)
+                fprintf(stderr, "%s:%d: warning: section %s declared again with "
+                        "other flags; the first declaration's are kept\n",
+                        g->path, g->line + g->line_base, g->secs[k].name);
         }
         if (DIR(".pushsection")) {
             if (g->nstack == 32) { gerr(g, ".pushsection nests too deep"); return 1; }
@@ -3176,6 +3422,7 @@ static int directive(struct gas *g, char *p, int pass)
                 sy->is_global = 1;       /* a weak symbol is a global one */
             } else if (DIR(".local")) {
                 sy->is_global = 0;
+                sy->local_decl = 1;
             } else {
                 sy->vis = DIR(".hidden") ? 2 : DIR(".internal") ? 1 : 3;
             }
@@ -3460,7 +3707,8 @@ static int directive(struct gas *g, char *p, int pass)
         sy->stamp = g->stamp;
         sy->size = sz;
         sy->is_object = 1;
-        if (DIR(".comm")) sy->is_global = 1;
+        /* (`.local x` then `.comm x`: a local in .bss, as GNU as makes it) */
+        if (DIR(".comm") && !sy->local_decl) sy->is_global = 1;
         advance(g, sz);
         g->cur = save;
         return 1;
@@ -3746,22 +3994,35 @@ static int directive(struct gas *g, char *p, int pass)
             "no-absolute-literals", "no-target-align", "target-align", NULL
         };
         size_t wl = 0;
-        int k;
+        int k, continue_ok = 0;
         while (arg[wl] && !isspace((unsigned char)arg[wl]))
             wl++;
         for (k = 0; ok[k]; k++)
             if (strlen(ok[k]) == wl && !strncmp(arg, ok[k], wl))
                 break;
-        if (!ok[k])
+        /* the ones that change what the statements become, as a region */
+        {
+            int beg = DIR(".begin");
+            if (wl == 12 && !strncmp(arg, "no-transform", 12))
+                xtasm_set_transform(!beg);
+            else if (wl == 9 && !strncmp(arg, "transform", 9))
+                xtasm_set_transform(beg);
+            else if (wl == 9 && !strncmp(arg, "longcalls", 9)) {
+                if (beg) g->xlong_saved = xtasm_longcalls();
+                xtasm_set_longcalls(beg ? 1 : g->xlong_saved);
+                continue_ok = 1;
+            } else if (wl == 12 && !strncmp(arg, "no-longcalls", 12)) {
+                if (beg) g->xlong_saved = xtasm_longcalls();
+                xtasm_set_longcalls(beg ? 0 : g->xlong_saved);
+            }
+        }
+        if (!ok[k] && !continue_ok)
             gerr(g, "%.*s %.*s is not supported: %s", (int)nlen, name,
                  (int)wl, arg,
-                 !strncmp(arg, "longcalls", 9)
-                 ? "a long call is an l32r and a callx, which this "
-                   "assembler does not make of a call; write them"
-                 : !strncmp(arg, "absolute-literals", 17)
+                 !strncmp(arg, "absolute-literals", 17)
                  ? "literals are PC-relative (l32r) here"
                  : "this assembler knows literal_prefix, (no-)transform, "
-                   "no-longcalls, (no-)schedule, (no-)density and "
+                   "(no-)longcalls, (no-)schedule, (no-)density and "
                    "(no-)target-align");
         return 1;
     }
@@ -3839,7 +4100,9 @@ static void pass_over(struct gas *g, const struct gline *lines, int nlines,
      * makes every forward reference in pass two pick the instance after the
      * last one in the file, which is a jump to nowhere. */
     memset(g->local_n, 0, sizeof g->local_n);
+    g->lines = lines;
     g->stamp++;
+    g->nxpad = 0;
     if (g->tgt->reset)
         g->tgt->reset();
     g->cur = SEC_TEXT;
@@ -3893,6 +4156,11 @@ static void pass_over(struct gas *g, const struct gline *lines, int nlines,
         if (li > 0 && g->lsize && li - 1 < g->nwide && !g->lfail)
             g->lsize[li - 1] = g->cur == lsec ? cur_off(g) - lstart : -1;
         g->lfail = 0;
+        /* Xtensa: the fill a loop's alignment put after a jump (never run) */
+        if (li > 0 && g->xgap && li - 1 < g->nwide && g->xgap[li - 1]) {
+            xt_pad_note(g, cur_off(g), g->xgap[li - 1]);
+            advance(g, g->xgap[li - 1]);
+        }
         if (li == nlines)
             break;
         lsec = g->cur;
@@ -4058,6 +4326,26 @@ static int write_object(struct gas *g, const char *out_path)
             used[g->syms[i].sec] = 1;
     for (i = 0; i < g->nfix; i++)
         used[g->fix[i].sec] = 1;
+    /* Xtensa's R_XTENSA_32 is applied in place (BFD's partial_inplace,
+     * and embld's): GNU as writes the addend into the word and 0 in the
+     * relocation -- against a local's section, the label's offset too --
+     * and so does this, before the sections are copied out */
+    if (g->tgt->machine == EM_XTENSA)
+        for (int k = 0; k < g->nfix; k++) {
+            struct fixup *f = &g->fix[k];
+            struct sym *s = sym_find(g, f->sym, strlen(f->sym));
+            long a = f->addend;
+            int tosec;
+            if (f->type != R_XTENSA_32 || sec_is_nobits(g, f->sec) ||
+                f->off + 4 > g->secs[f->sec].c.len)
+                continue;
+            tosec = s && !s->is_global && s->sec >= 0 && !s->is_func;
+            if (tosec)
+                a += s->value;
+            code_patch32(&g->secs[f->sec].c, (int)f->off,
+                         (unsigned long)a & 0xffffffffUL);
+            f->addend = tosec ? -s->value : 0;
+        }
     for (i = 0; i < g->nsecs; i++) {
         struct gsec *sc = &g->secs[i];
         long al = sc->align;
@@ -4406,7 +4694,7 @@ static const struct gas_target XT_GAS = {
     R_XTENSA_32, 0,
     0, 0, xtasm_symform, 0,
     0, xtasm_is_word, NULL, NULL, xtasm_set_pc,
-    0, NULL, NULL, NULL, NULL, NULL
+    0, xtasm_set_level, xtasm_took_level, NULL, NULL, NULL
 };
 #endif
 
@@ -4603,6 +4891,7 @@ static void gas_run(struct gas *g, struct gexp *gx, const char *text,
     g->prefstart = xmalloc(((size_t)gx->nout + 1) * sizeof *g->prefstart);
     g->lsize = xmalloc(((size_t)gx->nout + 1) * sizeof *g->lsize);
     g->lpc = xmalloc(((size_t)gx->nout + 1) * sizeof *g->lpc);
+    g->xgap = xcalloc((size_t)gx->nout + 1, sizeof *g->xgap);
     for (int k = 0; k <= gx->nout; k++)
         g->prefstart[k] = g->lsize[k] = g->lpc[k] = -1;
     g->nwide = gx->nout;
@@ -4754,6 +5043,8 @@ int gas_assemble(const char *in_path, const char *out_path, int preprocess,
     g.tgt = t;
     sec_init(&g);
     gas_run(&g, &gx, text, in_path);
+    if (!g.errors && t->machine == EM_XTENSA)
+        xt_lit_table(&g);
     rc = g.errors ? 1 : write_object(&g, out_path);
     gas_free(&g, &gx);
     if (text != src) free(text);
