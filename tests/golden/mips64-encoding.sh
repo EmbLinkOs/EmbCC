@@ -135,6 +135,22 @@ for bo in el be; do
 done
 echo "the assembler's $na MIPS64 statements assemble as llvm-mc's, in both byte orders"
 
+# dla: a 64-bit address in six instructions with $at, or in its own
+# register under .set noat; the four relocations where llvm-mc puts them
+printf ' .text\n dla $4, sym\n dla $4, sym+8\n .set noat\n dla $5, sym\n .set at\n dla $6, 12($7)\n' \
+    > "$out/dla.s"
+"$EMBCC" --target=mips64el-none-elf -c "$out/dla.s" -o "$out/dla.o" || {
+    echo "dla was refused"; exit 1; }
+"$MC" -triple=mips64el -mcpu=mips64r2 -target-abi=n64 -filetype=obj \
+    "$out/dla.s" -o "$out/dla.ref.o" || { echo "llvm-mc refused dla"; exit 1; }
+for f in dla dla.ref; do
+    "${EMBCC_LLVM_OBJDUMP:-llvm-objdump}" -dr "$out/$f.o" | sed 1,3d > "$out/$f.txt"
+done
+cmp -s "$out/dla.txt" "$out/dla.ref.txt" || {
+    echo "dla assembles otherwise than llvm-mc's:"; diff "$out/dla.txt" "$out/dla.ref.txt" | head
+    exit 1; }
+echo "dla: instructions and relocations as llvm-mc's, with \$at and under .set noat"
+
 echo "all $n MIPS64r2 encodings agree with llvm-mc in both byte orders,"
 echo "every register in every field and both ends of every immediate;"
 echo "$(cat "$out/li.txt"); and $k encoder range checks each refuse"

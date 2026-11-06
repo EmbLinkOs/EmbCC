@@ -93,7 +93,7 @@ struct asm_symform {
     /* the statement with a zero operand -- or "\001" and a refusal,
      * whose sentences run to 160 characters: at 128 they were cut short */
     char encode[256];
-    struct asm_symsite site[2];
+    struct asm_symsite site[4];  /* (MIPS64's dla: four relocated halves) */
     int nsites;
     /* when sym2_len is set, site[1] is a second symbol's, with its own
      * addend: x86's `movq $a, b+8(%rip)` names two */
