@@ -42,7 +42,7 @@ T = {
             "--target=thumbv6m-none-eabi -mcpu=cortex-m0",
             "llvm-mc -filetype=obj -triple=thumbv6m-none-eabi -mcpu=cortex-m0 {src} -o {obj}",
             "llvm-objdump", "@"),
-  "m33":   ("--target=thumbv8m.main-none-eabi", "clang",
+  "m33":   ("--target=thumbv8m.main-none-eabi -mcpu=cortex-m33", "clang",
             "--target=thumbv8m.main-none-eabi -mcpu=cortex-m33 -mfloat-abi=soft",
             "llvm-mc -filetype=obj -triple=thumbv8m.main-none-eabi -mcpu=cortex-m33 {src} -o {obj}",
             "llvm-objdump", "@"),

@@ -367,42 +367,6 @@ static int sreg(const char *s, int len)
     return v <= 31 ? v : -1;
 }
 
-/* `{s16-s31}` or `{s0, s1, s2}` -- consecutive single-precision registers,
- * which is all VLDM/VSTM/VPUSH/VPOP can name -- as its first and count. */
-static int tok_sreglist(const struct tok *t, int *first, int *count)
-{
-    const char *p = t->s, *end = t->s + t->len;
-    int next = -1;
-    *first = -1; *count = 0;
-    if (t->len < 3 || p[0] != '{' || end[-1] != '}') return 0;
-    p++; end--;
-    while (p < end) {
-        const char *a;
-        int r1, r2;
-        while (p < end && (isspace((unsigned char)*p) || *p == ',')) p++;
-        if (p >= end) break;
-        a = p;
-        while (p < end && !isspace((unsigned char)*p) && *p != ',' && *p != '-')
-            p++;
-        r1 = sreg(a, (int)(p - a));
-        if (r1 < 0) return 0;
-        r2 = r1;
-        while (p < end && isspace((unsigned char)*p)) p++;
-        if (p < end && *p == '-') {
-            p++;
-            while (p < end && isspace((unsigned char)*p)) p++;
-            a = p;
-            while (p < end && !isspace((unsigned char)*p) && *p != ',') p++;
-            r2 = sreg(a, (int)(p - a));
-            if (r2 < r1) return 0;
-        }
-        if (next >= 0 && r1 != next) return 0;      /* not consecutive */
-        if (*first < 0) *first = r1;
-        next = r2 + 1;
-        *count += r2 - r1 + 1;
-    }
-    return *count > 0;
-}
 
 /* ---- conditions and IT blocks ------------------------------------------
  *
@@ -478,9 +442,13 @@ static int t_branch_relaxed(struct code *out, int cond, long v, int want,
             return 0;
         }
         free(probe.p);
-        if (want == 'n') {
+        /* ARMv6-M (and v8-M Baseline's conditional branch) has only the
+         * 16-bit form: nothing to widen to */
+        if (want == 'n' || (arch_thumb1() && (cond >= 0 || g_arch == 6))) {
             snprintf(err, (size_t)errlen, "the branch is %ld bytes away, "
-                     "beyond the narrow form's reach", v);
+                     "beyond the %s form's reach (%s)", v,
+                     want == 'n' ? "narrow" : "only",
+                     cond >= 0 ? "-256..254" : "-2048..2046");
             return -1;
         }
     }
@@ -1194,6 +1162,1220 @@ static int more_stmt(const struct tok *t, int n, struct code *out,
     return 0;
 }
 
+/* ---- Thumb-2 data processing, as an assembler chooses it ---------------
+ *
+ * The emitters in emit.c choose encodings for the code generator; an
+ * assembler has to choose them as GNU as and llvm-mc do, or a .s file
+ * assembles to other bytes than theirs. The rules, refereed instruction
+ * by instruction against llvm-mc (tools/asm-audit, and the matrix in
+ * tests/golden/thumb-dp.sh):
+ *
+ *   - `.w` is the 32-bit encoding, `.n` the 16-bit one or a refusal;
+ *     neither is the shortest that means the same thing.
+ *   - A 16-bit data-processing encoding sets the flags outside an IT
+ *     block and leaves them inside one, so outside it is the form of
+ *     `adds`, and inside of `add`. The compares always set them; the
+ *     high-register add, mov and cmp and the SP forms never do.
+ *   - An immediate is a modified immediate (ThumbExpandImm); when it is
+ *     not one, the instruction with the inverted or negated immediate is
+ *     (add/sub, adc/sbc, and/bic, orr/orn, mov/mvn, cmp/cmn); then the
+ *     plain twelve-bit addw/subw, and movw for a mov.
+ *   - SP is an operand of add, sub, mov and cmp only; PC of none here.
+ */
+static int g_in_it;       /* assembling an instruction an IT block holds */
+
+static void t16(struct code *o, unsigned h) { code_u16(o, h & 0xffff); }
+static void t32(struct code *o, unsigned a, unsigned b)
+{
+    code_u16(o, a & 0xffff);
+    code_u16(o, b & 0xffff);
+}
+
+/* ThumbExpandImm's inverse: the twelve bits i:imm3:imm8, or -1 */
+static int t_modimm(unsigned long v)
+{
+    v &= 0xffffffffUL;
+    if (v < 256)
+        return (int)v;
+    unsigned b = (unsigned)(v & 0xff), b1 = (unsigned)((v >> 8) & 0xff);
+    if (b && v == ((unsigned long)b | (unsigned long)b << 16))
+        return 0x100 | (int)b;
+    if (b1 && v == ((unsigned long)b1 << 8 | (unsigned long)b1 << 24))
+        return 0x200 | (int)b1;
+    if (b && v == ((unsigned long)b * 0x01010101UL))
+        return 0x300 | (int)b;
+    for (int rot = 8; rot < 32; rot++) {
+        unsigned long u = ((v << rot) | (v >> (32 - rot))) & 0xffffffffUL;
+        if (u >= 0x80 && u < 0x100)
+            return rot << 7 | (int)(u & 0x7f);
+    }
+    return -1;
+}
+
+static unsigned mi_hw1(int imm12) { return (unsigned)(imm12 >> 11) << 10; }
+static unsigned mi_hw2(int imm12) { return (unsigned)((imm12 >> 8) & 7) << 12 | (unsigned)(imm12 & 0xff); }
+
+/* the op of a data-processing mnemonic: its T32 op, its 16-bit register
+ * group op (-1 none), and its shape: 3 rd/rn/op2, c a compare (rn/op2),
+ * m a move (rd/op2) */
+struct t2op { const char *m; int op, op16, kind, comm; };
+static const struct t2op t2ops[] = {
+    { "and", 0, 0, '3', 1 }, { "bic", 1, 14, '3', 0 }, { "orr", 2, 12, '3', 1 },
+    { "orn", 3, -1, '3', 0 }, { "eor", 4, 1, '3', 1 }, { "add", 8, -1, '3', 1 },
+    { "adc", 10, 5, '3', 1 }, { "sbc", 11, 6, '3', 0 }, { "sub", 13, -1, '3', 0 },
+    { "rsb", 14, -1, '3', 0 }, { "tst", 0, 8, 'c', 0 }, { "teq", 4, -1, 'c', 0 },
+    { "cmn", 8, 11, 'c', 0 }, { "cmp", 13, 10, 'c', 0 }, { "mov", 2, -1, 'm', 0 },
+    { "mvn", 3, 15, 'm', 0 },
+};
+
+/* a shift operand, `lsl #3` / `rrx`: type 0..3, amount; 0 when it is not one */
+static int t2_shift_tok(const struct tok *t, int *type, int *amt)
+{
+    static const char *const nm[] = { "lsl", "lsr", "asr", "ror" };
+    if (t->len == 3 && same_nocase(t->s, "rrx", 3)) { *type = 3; *amt = 0; return 2; }
+    for (int k = 0; k < 4; k++)
+        if (t->len > 3 && same_nocase(t->s, nm[k], 3) &&
+            (t->s[3] == ' ' || t->s[3] == '\t' || t->s[3] == '#')) {
+            struct tok n;
+            long v;
+            n.s = t->s + 3; n.len = t->len - 3;
+            while (n.len && (*n.s == ' ' || *n.s == '\t')) { n.s++; n.len--; }
+            if (!tok_imm(&n, &v)) return 0;
+            *type = k; *amt = (int)v;
+            return 1;
+        }
+    return 0;
+}
+
+/* the splitter breaks at spaces: `lsl #3` is two tokens, joined here
+ * into one, as the text they came from is one operand */
+static int join_shifts(const struct tok *t, int n, struct tok *m)
+{
+    int k = 0;
+    for (int i = 0; i < n; i++) {
+        m[k] = t[i];
+        if (i + 1 < n && t[i].len == 3 && t[i + 1].len && t[i + 1].s[0] == '#' &&
+            (same_nocase(t[i].s, "lsl", 3) || same_nocase(t[i].s, "lsr", 3) ||
+             same_nocase(t[i].s, "asr", 3) || same_nocase(t[i].s, "ror", 3))) {
+            m[k].len = (int)(t[i + 1].s + t[i + 1].len - t[i].s);
+            i++;
+        }
+        k++;
+    }
+    return k;
+}
+
+/* 1 when the mnemonic is none of these; else 0, or -1 with err set */
+static int t2_dp(const struct tok *t0, int n0, struct code *out, char *err, int errlen)
+{
+    struct tok t[MAXTOK];
+    int n = join_shifts(t0, n0, t);
+    char mn[16];
+    if (t[0].len >= (int)sizeof mn) return 1;
+    for (int i = 0; i < t[0].len; i++) mn[i] = (char)tolower((unsigned char)t[0].s[i]);
+    mn[t[0].len] = 0;
+    int width = 0;                       /* 'w', 'n' */
+    size_t ml = strlen(mn);
+    if (ml > 2 && mn[ml - 2] == '.' && (mn[ml - 1] == 'w' || mn[ml - 1] == 'n')) {
+        width = mn[ml - 1];
+        mn[ml -= 2] = 0;
+    }
+    const struct t2op *e = NULL;
+    int s = 0;
+    for (unsigned k = 0; k < sizeof t2ops / sizeof t2ops[0]; k++) {
+        size_t l = strlen(t2ops[k].m);
+        if (strncmp(mn, t2ops[k].m, l)) continue;
+        if (!mn[l]) { e = &t2ops[k]; s = 0; break; }
+        if (mn[l] == 's' && !mn[l + 1] && t2ops[k].kind != 'c') { e = &t2ops[k]; s = 1; break; }
+    }
+    if (!e) return 1;
+    if (e->kind == 'c') s = 1;
+    /* the operands: d, n, and op2 = m {, shift} | #imm */
+    int d = -1, rn = -1, rm = -1, k0, isimm = 0, sht = 0, sha = 0, hasshift = 0;
+    long imm = 0;
+    int nops = n - 1;
+    int written3 = 0;               /* rd, rn, op2 written out, not rd, op2 */
+    if (e->kind == 'c' || e->kind == 'm') {
+        if (nops < 2 || nops > 3) FAIL("%s takes two operands%s", t[0].len ? mn : "", "");
+        if (e->kind == 'c') rn = tok_reg(&t[1]); else d = tok_reg(&t[1]);
+        k0 = 2;
+    } else {
+        if (nops < 2 || nops > 4) FAIL("%.*s takes rd, rn and an operand", t[0].len, t[0].s);
+        d = tok_reg(&t[1]);
+        /* `and rd, op2` is `and rd, rd, op2` */
+        if (nops == 2 || (nops == 3 && t2_shift_tok(&t[3], &sht, &sha))) {
+            rn = d; k0 = 2;
+        } else {
+            rn = tok_reg(&t[2]); k0 = 3;
+            written3 = 1;
+        }
+    }
+    if ((e->kind != 'c' && d < 0) || (e->kind != 'm' && rn < 0))
+        FAIL("%.*s wants registers", t[0].len, t[0].s);
+    if (k0 >= n) FAIL("%.*s wants an operand", t[0].len, t[0].s);
+    if (t[k0].len && t[k0].s[0] == '#') {
+        if (!tok_imm(&t[k0], &imm)) FAIL("\"%.*s\" is not an immediate", t[k0].len, t[k0].s);
+        isimm = 1;
+        if (k0 + 1 < n) FAIL("an immediate takes no shift");
+    } else {
+        rm = tok_reg(&t[k0]);
+        if (rm < 0) FAIL("\"%.*s\" is not a register", t[k0].len, t[k0].s);
+        if (k0 + 1 < n) {
+            if (!t2_shift_tok(&t[k0 + 1], &sht, &sha))
+                FAIL("\"%.*s\" is not a shift", t[k0 + 1].len, t[k0 + 1].s);
+            hasshift = 1;
+            if (k0 + 2 < n) FAIL("%.*s has one shift", t[0].len, t[0].s);
+        }
+    }
+    int op = e->op;
+    int flag16 = !g_in_it;              /* a 16-bit group form sets flags here */
+    int grp = e->kind == 'c' || s == flag16;   /* ...and is this instruction */
+    int lo = (d < 8) && (rn < 8) && (rm < 8);
+    int wide_ok = width != 'n', narrow_ok = width != 'w';
+    /* PC is no operand; SP only of add, sub, mov, cmp */
+    if (d == 15 || rn == 15 || rm == 15) {
+        /* the 16-bit high-register mov and add take pc */
+        if (!(narrow_ok && !s && !isimm && !hasshift &&
+              ((e->op == 2 && e->kind == 'm') || (e->op == 8 && e->kind == '3' && d == rn))))
+            FAIL("%.*s: pc is not an operand here", t[0].len, t[0].s);
+    }
+    int sp_ok = (e->op == 8 || e->op == 13) && e->kind != 'c';   /* add, sub */
+    if (e->kind == 'm' && e->op == 2) sp_ok = 1;                 /* mov */
+    if (e->kind == 'c' && (e->op == 13 || e->op == 8))
+        sp_ok = rm != 13;                                        /* cmp/cmn sp, ... */
+    if ((d == 13 || rn == 13 || rm == 13) && !sp_ok)
+        FAIL("%.*s: sp is not an operand of %s", t[0].len, t[0].s, e->m);
+    /* a move with sp is the plain register one, mov sp, rm or mov rd, sp:
+     * an immediate, a shift or the flags with sp are UNPREDICTABLE */
+    if (e->kind == 'm' && (d == 13 || rm == 13) && (s || isimm || hasshift || width == 'w'))
+        FAIL("%.*s: sp moves only as `mov sp, rm` or `mov rd, sp`", t[0].len, t[0].s);
+    if (rm == 13 && e->kind == '3' && !(e->op == 8 && !hasshift && d == rn))
+        FAIL("%.*s: sp is not a second operand here", t[0].len, t[0].s);
+
+    /* ---- register forms ---- */
+    if (!isimm) {
+        if (hasshift) {
+            int lim = sht == 0 ? 31 : sht == 3 ? 31 : 32;
+            if (sha < (sht == 0 || (sht == 3 && t[k0 + 1].s[0] == 'r' && t[k0 + 1].len == 3) ? 0 : 1) || sha > lim)
+                FAIL("shift %d is outside %s's range", sha, sht == 0 ? "lsl" : sht == 1 ? "lsr" : sht == 2 ? "asr" : "ror");
+        }
+        int a5 = sha & 31;
+        if (narrow_ok && !hasshift) {
+            /* add rdn, rm: any registers, no flags -- llvm-mc's choice for
+             * a flagless add whose destination is a source, in an IT block
+             * or out of one */
+            if (e->op == 8 && e->kind == '3' && !s && (d == rn || d == rm) &&
+                !(g_in_it && written3 && lo)) {
+                int other = d == rn ? rm : rn;
+                if (!(d == 13 && other == 13)) {
+                    t16(out, 0x4400u | (unsigned)(d >> 3) << 7 | (unsigned)other << 3 | (unsigned)(d & 7));
+                    return 0;
+                }
+            }
+            /* add/sub rd, rn, rm (low): the three-register form */
+            if ((e->op == 8 || e->op == 13) && e->kind == '3' && grp && lo) {
+                t16(out, (e->op == 8 ? 0x1800u : 0x1A00u) | (unsigned)rm << 6 | (unsigned)rn << 3 | (unsigned)d);
+                return 0;
+            }
+            /* mov rd, rm: any registers, no flags; movs (low) is lsls #0 */
+            if (e->kind == 'm' && e->op == 2) {
+                if (!s) {
+                    t16(out, 0x4600u | (unsigned)(d >> 3) << 7 | (unsigned)rm << 3 | (unsigned)(d & 7));
+                    return 0;
+                }
+                if (grp && lo) {
+                    t16(out, (unsigned)rm << 3 | (unsigned)d);
+                    return 0;
+                }
+            }
+            /* cmp rn, rm: low, or the high-register form */
+            if (e->kind == 'c' && e->op == 13) {
+                if (rn < 8 && rm < 8) t16(out, 0x4280u | (unsigned)rm << 3 | (unsigned)rn);
+                else t16(out, 0x4500u | (unsigned)(rn >> 3) << 7 | (unsigned)rm << 3 | (unsigned)(rn & 7));
+                return 0;
+            }
+            /* the two-register group: rdn, rm (and rm, rdn when the op commutes) */
+            if (e->op16 >= 0 && grp && lo) {
+                int src = -1, dn = e->kind == 'c' ? rn : d;
+                if (e->kind == 'c' || e->kind == 'm') src = rm;
+                else if (d == rn) src = rm;
+                else if (e->comm && d == rm) src = rn;
+                if (src >= 0) {
+                    t16(out, 0x4000u | (unsigned)e->op16 << 6 | (unsigned)src << 3 | (unsigned)dn);
+                    return 0;
+                }
+            }
+        }
+        /* a move with a shift is the shift itself, 16-bit when it can be */
+        if (narrow_ok && hasshift && e->kind == 'm' && e->op == 2 && grp && lo &&
+            sht < 3 && !(sht == 0 && sha == 0)) {
+            t16(out, (unsigned)sht << 11 | (unsigned)a5 << 6 | (unsigned)rm << 3 | (unsigned)d);
+            return 0;
+        }
+        if (!wide_ok) FAIL("%.*s: no 16-bit encoding takes these operands", t[0].len, t[0].s);
+        if (e->kind == 'm' && e->op == 2 && !hasshift && s == 0 && 0) { }
+        int Rd = e->kind == 'c' ? 15 : d, Rn = e->kind == 'm' ? 15 : rn;
+        t32(out, 0xEA00u | (unsigned)op << 5 | (unsigned)s << 4 | (unsigned)Rn,
+            (unsigned)(a5 >> 2) << 12 | (unsigned)Rd << 8 | (unsigned)(a5 & 3) << 6 |
+            (unsigned)sht << 4 | (unsigned)rm);
+        return 0;
+    }
+
+    /* ---- immediate forms ---- */
+    if (narrow_ok) {
+        unsigned long u = (unsigned long)imm & 0xffffffffUL;
+        /* SP: add sp, sp, #imm7*4; sub sp; add rd, sp, #imm8*4 */
+        if (!s && (e->op == 8 || e->op == 13) && e->kind == '3' && d == 13 && rn == 13) {
+            long v = imm;
+            int sub = e->op == 13;
+            if (v < 0) { v = -v; sub = !sub; }
+            if (v % 4 == 0 && v <= 508) {
+                t16(out, (sub ? 0xB080u : 0xB000u) | (unsigned)(v / 4));
+                return 0;
+            }
+        }
+        if (!s && e->op == 8 && e->kind == '3' && rn == 13 && d < 8 && imm >= 0 &&
+            imm % 4 == 0 && imm <= 1020) {
+            t16(out, 0xA800u | (unsigned)d << 8 | (unsigned)(imm / 4));
+            return 0;
+        }
+        if ((e->op == 8 || e->op == 13) && e->kind == '3' && grp && d < 8 && rn < 8) {
+            long v = imm;
+            int sub = e->op == 13;
+            if (v < 0 && v > -256) { v = -v; sub = !sub; }
+            /* `adds rdn, #imm` is rdn's eight bits; `adds rd, rn, #imm`
+             * the three-bit form for 0..7, whatever the registers, and
+             * then the eight bits when rd is rn -- as llvm-mc picks them */
+            if (!written3 && d == rn && v >= 0 && v < 256) {
+                t16(out, (sub ? 0x3800u : 0x3000u) | (unsigned)d << 8 | (unsigned)v);
+                return 0;
+            }
+            if (v >= 0 && v < 8) {
+                t16(out, (sub ? 0x1E00u : 0x1C00u) | (unsigned)v << 6 | (unsigned)rn << 3 | (unsigned)d);
+                return 0;
+            }
+            if (d == rn && v >= 0 && v < 256) {
+                t16(out, (sub ? 0x3800u : 0x3000u) | (unsigned)d << 8 | (unsigned)v);
+                return 0;
+            }
+        }
+        if (e->kind == 'm' && e->op == 2 && grp && d < 8 && u < 256) {
+            t16(out, 0x2000u | (unsigned)d << 8 | (unsigned)u);
+            return 0;
+        }
+        /* mvn rd, #~x is mov rd, #x, in sixteen bits when x is a byte */
+        if (e->kind == 'm' && e->op == 3 && grp && d < 8 && (~u & 0xffffffffUL) < 256 &&
+            t_modimm(u) < 0) {
+            t16(out, 0x2000u | (unsigned)d << 8 | (unsigned)(~u & 0xff));
+            return 0;
+        }
+        if (e->kind == 'c' && e->op == 13 && rn < 8 && u < 256) {
+            t16(out, 0x2800u | (unsigned)rn << 8 | (unsigned)u);
+            return 0;
+        }
+        /* rsbs rd, rn, #0: neg */
+        if (e->op == 14 && grp && d < 8 && rn < 8 && imm == 0) {
+            t16(out, 0x4240u | (unsigned)rn << 3 | (unsigned)d);
+            return 0;
+        }
+    }
+    if (!wide_ok) FAIL("%.*s: no 16-bit encoding takes these operands", t[0].len, t[0].s);
+    int Rd = e->kind == 'c' ? 15 : d, Rn = e->kind == 'm' ? 15 : rn;
+    /* a negative immediate is its twin's positive one where llvm-mc
+     * makes it so: a flagless add or sub with no .w (add #-1 is sub #1);
+     * adds, add.w, cmp and cmn keep the modified immediate of the
+     * negative value */
+    if (imm < 0 && e->kind == '3' && (e->op == 8 || e->op == 13) && !s && width != 'w') {
+        int top = e->op == 8 ? 13 : 8, a12 = t_modimm((unsigned long)-imm);
+        if (a12 >= 0) {
+            t32(out, 0xF000u | mi_hw1(a12) | (unsigned)top << 5 | (unsigned)s << 4 | (unsigned)Rn,
+                mi_hw2(a12) | (unsigned)Rd << 8);
+            return 0;
+        }
+    }
+    /* mov rd, #256..65535 is movw, as llvm-mc writes it, unless .w asks
+     * for the modified immediate */
+    if (!s && e->kind == 'm' && e->op == 2 && width != 'w' && imm >= 256 && imm <= 0xffff) {
+        t32(out, 0xF240u | (unsigned)(imm >> 11 & 1) << 10 | (unsigned)(imm >> 12),
+            (unsigned)((imm >> 8) & 7) << 12 | (unsigned)d << 8 | (unsigned)(imm & 0xff));
+        return 0;
+    }
+    int m12 = t_modimm((unsigned long)imm);
+    if (m12 >= 0) {
+        t32(out, 0xF000u | mi_hw1(m12) | (unsigned)op << 5 | (unsigned)s << 4 | (unsigned)Rn,
+            mi_hw2(m12) | (unsigned)Rd << 8);
+        return 0;
+    }
+    /* the twin with the inverted or negated immediate */
+    {
+        int top = -1;
+        unsigned long alt = 0;
+        switch (e->op) {
+        case 8: top = 13; alt = (unsigned long)-imm; break;   /* add <-> sub */
+        case 13: top = 8; alt = (unsigned long)-imm; break;
+        case 10: top = 11; alt = ~(unsigned long)imm; break;  /* adc <-> sbc */
+        case 11: top = 10; alt = ~(unsigned long)imm; break;
+        case 0: if (e->kind == '3') { top = 1; alt = ~(unsigned long)imm; } break;
+        case 1: top = 0; alt = ~(unsigned long)imm; break;    /* and <-> bic */
+        case 2: top = 3; alt = ~(unsigned long)imm; break;    /* orr <-> orn, mov <-> mvn */
+        case 3: top = 2; alt = ~(unsigned long)imm; break;
+        }
+        if (e->kind == 'c' && e->op == 13) { top = 8; alt = (unsigned long)-imm; }   /* cmp <-> cmn */
+        else if (e->kind == 'c' && e->op == 8) { top = 13; alt = (unsigned long)-imm; }
+        int a12 = top >= 0 ? t_modimm(alt) : -1;
+        if (a12 >= 0) {
+            t32(out, 0xF000u | mi_hw1(a12) | (unsigned)top << 5 | (unsigned)s << 4 | (unsigned)Rn,
+                mi_hw2(a12) | (unsigned)Rd << 8);
+            return 0;
+        }
+    }
+    /* addw/subw, movw */
+    if (!s && (e->op == 8 || e->op == 13) && e->kind == '3') {
+        long v = imm;
+        int sub = e->op == 13;
+        if (v < 0) { v = -v; sub = !sub; }
+        if (v <= 4095) {
+            t32(out, (sub ? 0xF2A0u : 0xF200u) | (unsigned)(v >> 11) << 10 | (unsigned)rn,
+                (unsigned)((v >> 8) & 7) << 12 | (unsigned)d << 8 | (unsigned)(v & 0xff));
+            return 0;
+        }
+    }
+    if (!s && e->kind == 'm' && e->op == 2 && imm >= 0 && imm <= 0xffff) {
+        t32(out, 0xF240u | (unsigned)(imm >> 11 & 1) << 10 | (unsigned)(imm >> 12),
+            (unsigned)((imm >> 8) & 7) << 12 | (unsigned)d << 8 | (unsigned)(imm & 0xff));
+        return 0;
+    }
+    FAIL("%ld is not an immediate %.*s can encode", imm, t[0].len, t[0].s);
+}
+
+/* a barrier's option: `dmb ish` */
+struct baropt { const char *name; int crm; };
+static const struct baropt t_baropt[] = {
+    { "sy", 15 }, { "st", 14 }, { "ld", 13 }, { "ish", 11 }, { "ishst", 10 },
+    { "ishld", 9 }, { "nsh", 7 }, { "nshst", 6 }, { "nshld", 5 }, { "osh", 3 },
+    { "oshst", 2 }, { "oshld", 1 }, { "un", 7 }, { "unst", 6 }, { NULL, 0 },
+};
+
+/* shifts, addw/subw, mul, neg, tbb/tbh, and the barriers' options */
+static int t2_misc(const struct tok *t, int n, struct code *out, char *err, int errlen)
+{
+    char mn[16];
+    if (t[0].len >= (int)sizeof mn) return 1;
+    for (int i = 0; i < t[0].len; i++) mn[i] = (char)tolower((unsigned char)t[0].s[i]);
+    mn[t[0].len] = 0;
+    int width = 0;
+    size_t ml = strlen(mn);
+    if (ml > 2 && mn[ml - 2] == '.' && (mn[ml - 1] == 'w' || mn[ml - 1] == 'n')) {
+        width = mn[ml - 1];
+        mn[ml -= 2] = 0;
+    }
+    int narrow_ok = width != 'w', wide_ok = width != 'n';
+    int flag16 = !g_in_it;
+    static const char *const shn[] = { "lsl", "lsr", "asr", "ror" };
+    for (int k = 0; k < 4; k++) {
+        size_t l = 3;
+        int s;
+        if (strncmp(mn, shn[k], l)) continue;
+        if (!mn[l]) s = 0;
+        else if (mn[l] == 's' && !mn[l + 1]) s = 1;
+        else continue;
+        int d, a, b = -1;
+        long v = 0;
+        int isimm;
+        if (n != 3 && n != 4) FAIL("%.*s takes rd, rm and a shift", t[0].len, t[0].s);
+        d = tok_reg(&t[1]);
+        a = n == 4 ? tok_reg(&t[2]) : d;
+        isimm = t[n - 1].len && t[n - 1].s[0] == '#';
+        if (isimm) { if (!tok_imm(&t[n - 1], &v)) FAIL("bad shift"); }
+        else b = tok_reg(&t[n - 1]);
+        if (d < 0 || a < 0 || (!isimm && b < 0)) FAIL("%.*s wants registers", t[0].len, t[0].s);
+        if (d == 13 || d == 15 || a == 13 || a == 15 || (!isimm && (b == 13 || b == 15)))
+            FAIL("%.*s: sp and pc are no operands here", t[0].len, t[0].s);
+        int grp = s == flag16;
+        if (isimm) {
+            int lim = k == 0 ? 31 : k == 3 ? 31 : 32;
+            if (v < (k == 0 ? 0 : 1) || v > lim) FAIL("shift %ld is outside %s's range", v, shn[k]);
+            if (narrow_ok && grp && d < 8 && a < 8 && k < 3 && !(k == 0 && v == 0 && 0)) {
+                t16(out, (unsigned)k << 11 | (unsigned)(v & 31) << 6 | (unsigned)a << 3 | (unsigned)d);
+                return 0;
+            }
+            if (!wide_ok) FAIL("%.*s: no 16-bit encoding takes these operands", t[0].len, t[0].s);
+            int a5 = (int)(v & 31);
+            t32(out, 0xEA4Fu | (unsigned)s << 4,
+                (unsigned)(a5 >> 2) << 12 | (unsigned)d << 8 | (unsigned)(a5 & 3) << 6 | (unsigned)k << 4 | (unsigned)a);
+            return 0;
+        }
+        static const int g16[] = { 2, 3, 4, 7 };
+        if (narrow_ok && grp && d < 8 && b < 8 && d == a) {
+            t16(out, 0x4000u | (unsigned)g16[k] << 6 | (unsigned)b << 3 | (unsigned)d);
+            return 0;
+        }
+        if (!wide_ok) FAIL("%.*s: no 16-bit encoding takes these operands", t[0].len, t[0].s);
+        t32(out, 0xFA00u | (unsigned)k << 5 | (unsigned)s << 4 | (unsigned)a, 0xF000u | (unsigned)d << 8 | (unsigned)b);
+        return 0;
+    }
+    if (!strcmp(mn, "addw") || !strcmp(mn, "subw")) {
+        long v;
+        if (n != 4 && n != 3) FAIL("%s takes rd, rn and a 12-bit immediate", mn);
+        int d = tok_reg(&t[1]), r = n == 4 ? tok_reg(&t[2]) : d;
+        if (d < 0 || r < 0 || !tok_imm(&t[n - 1], &v)) FAIL("%s wants rd, rn, #imm", mn);
+        if (v < 0 || v > 4095) FAIL("%s takes 0 to 4095", mn);
+        if (d == 15 || (d == 13 && r != 13)) FAIL("%s: that destination is not allowed", mn);
+        t32(out, (mn[0] == 's' ? 0xF2A0u : 0xF200u) | (unsigned)(v >> 11) << 10 | (unsigned)r,
+            (unsigned)((v >> 8) & 7) << 12 | (unsigned)d << 8 | (unsigned)(v & 0xff));
+        return 0;
+    }
+    if (!strcmp(mn, "mul") || !strcmp(mn, "muls")) {
+        int s = mn[3] == 's';
+        if (n != 3 && n != 4) FAIL("%s takes rd, rn, rm", mn);
+        int d = tok_reg(&t[1]), a = tok_reg(&t[2]), b = n == 4 ? tok_reg(&t[3]) : d;
+        if (d < 0 || a < 0 || b < 0) FAIL("%s wants registers", mn);
+        if (d == 13 || d == 15 || a == 13 || a == 15 || b == 13 || b == 15) FAIL("%s: sp and pc are no operands here", mn);
+        if (narrow_ok && s == flag16 && d < 8 && a < 8 && b < 8 && (d == b || d == a)) {
+            t16(out, 0x4340u | (unsigned)(d == b ? a : b) << 3 | (unsigned)d);
+            return 0;
+        }
+        if (s) FAIL("muls is a 16-bit instruction: rd is one of the low registers it multiplies%s",
+                    g_in_it ? ", and an IT block makes it mul" : "");
+        if (!wide_ok) FAIL("%s: no 16-bit encoding takes these operands", mn);
+        t32(out, 0xFB00u | (unsigned)a, 0xF000u | (unsigned)d << 8 | (unsigned)b);
+        return 0;
+    }
+    if ((!strcmp(mn, "sdiv") || !strcmp(mn, "udiv")) && n == 3) {     /* rd, rm: rd /= rm */
+        int d = tok_reg(&t[1]), m = tok_reg(&t[2]);
+        if (d < 0 || m < 0 || d == 13 || d == 15 || m == 13 || m == 15) FAIL("%s wants registers, not sp or pc", mn);
+        t32(out, (mn[0] == 's' ? 0xFB90u : 0xFBB0u) | (unsigned)d, 0xF0F0u | (unsigned)d << 8 | (unsigned)m);
+        return 0;
+    }
+    if (!strcmp(mn, "neg") || !strcmp(mn, "negs")) {
+        int s = mn[3] == 's';
+        if (n != 3) FAIL("%s takes rd, rm", mn);
+        int d = tok_reg(&t[1]), a = tok_reg(&t[2]);
+        if (d < 0 || a < 0 || d == 13 || d == 15 || a == 13 || a == 15) FAIL("%s wants low or high registers, not sp or pc", mn);
+        if (narrow_ok && s == flag16 && d < 8 && a < 8) {
+            t16(out, 0x4240u | (unsigned)a << 3 | (unsigned)d);
+            return 0;
+        }
+        if (!wide_ok) FAIL("%s: no 16-bit encoding takes these operands", mn);
+        t32(out, 0xF1C0u | (unsigned)s << 4 | (unsigned)a, (unsigned)d << 8);
+        return 0;
+    }
+    if (!strcmp(mn, "tbb") || !strcmp(mn, "tbh")) {
+        int h = mn[2] == 'h', rn, rm, sh = 0;
+        if (n != 2 || !tok_mem_reg(&t[1], &rn, &rm, &sh)) FAIL("%s takes [rn, rm%s]", mn, h ? ", lsl #1" : "");
+        if (sh != (h ? 1 : 0)) FAIL("%s's index is %s", mn, h ? "shifted left by one" : "not shifted");
+        if (g_in_it && 0) {}
+        t32(out, 0xE8D0u | (unsigned)rn, 0xF000u | (unsigned)h << 4 | (unsigned)rm);
+        return 0;
+    }
+    if (!strcmp(mn, "dsb") || !strcmp(mn, "dmb") || !strcmp(mn, "isb")) {
+        const struct baropt *bo = t_baropt;
+        long crm = 15;
+        if (n == 2) {
+            crm = -1;
+            for (unsigned k = 0; bo[k].name; k++)
+                if (tok_is(&t[1], bo[k].name)) crm = bo[k].crm;
+            if (crm < 0 && (!tok_imm(&t[1], &crm) || crm < 0 || crm > 15))
+                FAIL("\"%.*s\" is not a barrier option", t[1].len, t[1].s);
+            if (mn[0] == 'i' && crm != 15) FAIL("isb has only the sy option");
+        } else if (n != 1) FAIL("%s takes a barrier option", mn);
+        t32(out, 0xF3BFu, 0x8F00u | (mn[0] == 'i' ? 0x60u : mn[1] == 's' ? 0x40u : 0x50u) | (unsigned)crm);
+        return 0;
+    }
+    return 1;
+}
+
+/* ---- the floating-point extension (VFP) ---------------------------------
+ *
+ * Everything FPv4-SP and FPv5 (ARMv7-M, ARMv8-M) and VFPv3/VFPv4 (ARMv7-A)
+ * have, with ARMv8's additions (vsel, vmaxnm/vminnm, vrint, vcvt with a
+ * rounding mode) and the half-precision forms of FP16. One word per
+ * instruction, laid out as A32 has it: the condition 1110 -- or 1111 for
+ * ARMv8's, which no condition reaches -- then the bits. In Thumb state the
+ * same word is the two halfwords. llvm-mc is the referee (the Thumb matrix
+ * in tests/golden/thumb-vfp-asm.sh).
+ *
+ * A register field is split, its low or high bit apart: a single register
+ * sN is (N >> 1, N & 1), a double dN is (N & 15, N >> 4). The size field
+ * (bits 9:8) is 01 half, 10 single, 11 double. */
+
+static int g_fpu = 0;       /* 0 no FPU named (anything goes: a context
+                             * switch tests the FPU at run time), 1 single
+                             * precision, 2 double */
+static int g_fpu_d32 = 0;   /* d16-d31 exist (VFPv3/v4 without -d16) */
+
+void tasm_set_fpu(int level, int d32)
+{
+    g_fpu = level;
+    g_fpu_d32 = d32;
+}
+
+/* `s7` / `d12`: its number, with *dbl saying which file. -1 otherwise. */
+static int vreg(const struct tok *t, int *dbl)
+{
+    int v = 0;
+    char c;
+    if (t->len < 2 || t->len > 3) return -1;
+    c = (char)tolower((unsigned char)t->s[0]);
+    if (c != 's' && c != 'd') return -1;
+    for (int i = 1; i < t->len; i++) {
+        if (!isdigit((unsigned char)t->s[i])) return -1;
+        v = v * 10 + (t->s[i] - '0');
+    }
+    if (v > 31) return -1;
+    *dbl = c == 'd';
+    return v;
+}
+
+/* the field a register goes in: 'd' (bits 15:12 and 22), 'n' (19:16 and
+ * 7) or 'm' (3:0 and 5) */
+static unsigned long vf(int r, int dbl, int pos)
+{
+    unsigned long v = dbl ? (unsigned)(r & 15) : (unsigned)(r >> 1);
+    unsigned long b = dbl ? (unsigned)(r >> 4) & 1u : (unsigned)r & 1u;
+    if (pos == 'd') return v << 12 | b << 22;
+    if (pos == 'n') return v << 16 | b << 7;
+    return v | b << 5;
+}
+
+/* the data type suffixes: `.f32`, `.s32.f64`. 'f' 16/32/64, 's'/'u'
+ * 16/32, and the bare `.32`/`.64` vmov and vldr take. */
+struct vty { char k; int bits; };
+
+static int vty_parse(const char *s, int len, struct vty *ty, int max)
+{
+    int n = 0, i = 0;
+    while (i < len) {
+        int b = 0, j;
+        char k = 0;
+        if (s[i] != '.' || n == max) return -1;
+        i++;
+        if (i < len && isalpha((unsigned char)s[i]))
+            k = (char)tolower((unsigned char)s[i++]);
+        for (j = i; j < len && isdigit((unsigned char)s[j]); j++)
+            b = b * 10 + (s[j] - '0');
+        if (j == i) return -1;
+        i = j;
+        if (k && k != 'f' && k != 's' && k != 'u' && k != 'i') return -1;
+        ty[n].k = k;
+        ty[n].bits = b;
+        n++;
+    }
+    return n;
+}
+
+/* size bits 9:8 for a float type, 0 when it is none */
+static unsigned long vsz(const struct vty *t)
+{
+    if (t->k != 'f' && t->k != 0) return 0;
+    return t->bits == 16 ? 0x900u : t->bits == 32 ? 0xA00u
+         : t->bits == 64 ? 0xB00u : 0;
+}
+
+static int v_emit(struct code *out, unsigned long w, const struct tok *t0,
+                  char *err, int errlen)
+{
+    if ((w >> 28) == 0xF) {
+        if (g_in_it || (t_isa_a32 && a32_it_open()))
+            FAIL("\"%.*s\" is an ARMv8 instruction that cannot be "
+                 "conditional", t0->len, t0->s);
+        if (t_isa_a32) code_u32(out, w);
+        else t32(out, (unsigned)(w >> 16), (unsigned)(w & 0xffff));
+        return 0;
+    }
+    /* (the table's words leave the condition 0: 1110 is the Thumb
+     * prefix, and a32_vfp_word puts the condition there in ARM state) */
+    w |= 0xE0000000UL;
+    if (t_isa_a32)
+        a32_vfp_word(out, (unsigned)(w >> 16), (unsigned)(w & 0xffff));
+    else
+        t32(out, (unsigned)(w >> 16), (unsigned)(w & 0xffff));
+    return 0;
+}
+
+/* VFPExpandImm's inverse: the 8 bits a constant packs into, or -1 */
+static int vfp_imm8(const struct tok *t, int bits)
+{
+    char buf[64], *e;
+    int i = 0;
+    double d;
+    if (t->len >= (int)sizeof buf) return -1;
+    if (t->s[0] == '#') i = 1;
+    memcpy(buf, t->s + i, (size_t)(t->len - i));
+    buf[t->len - i] = 0;
+    d = strtod(buf, &e);
+    if (e == buf || *e) return -1;
+    if (bits == 64) {
+        unsigned long long u;
+        memcpy(&u, &d, 8);
+        if (u & 0xffffffffffffULL) return -1;
+        unsigned b = (unsigned)(u >> 54) & 1u;
+        if (((u >> 54) & 0xff) != (b ? 0xffu : 0u)) return -1;
+        if (((u >> 62) & 1u) == b) return -1;
+        return (int)((u >> 56) & 0x80u) | (int)((u >> 48) & 0x7fu);
+    }
+    if (bits == 32) {
+        float f = (float)d;
+        unsigned u;
+        if ((double)f != d) return -1;
+        memcpy(&u, &f, 4);
+        if (u & 0x7ffffu) return -1;
+        unsigned b = (u >> 25) & 1u;
+        if (((u >> 25) & 0x1f) != (b ? 0x1fu : 0u)) return -1;
+        if (((u >> 30) & 1u) == b) return -1;
+        return (int)((u >> 24) & 0x80u) | (int)((u >> 19) & 0x7fu);
+    }
+    /* half: a NOT(b) bb cdefgh 000000 -- the same values as the single
+     * form, which an exponent of -3..4 always fits */
+    return vfp_imm8(t, 32);
+}
+
+/* `{d8-d15}`, `{s16, s17}`: consecutive registers of one file */
+static int vreglist(const struct tok *t, int *first, int *count, int *dbl)
+{
+    const char *p = t->s, *end = t->s + t->len;
+    int next = -1, d0 = -1;
+    *first = -1;
+    *count = 0;
+    if (t->len < 3 || p[0] != '{' || end[-1] != '}') return 0;
+    p++;
+    end--;
+    while (p < end) {
+        struct tok a, b;
+        int lo, hi, da, db;
+        while (p < end && (isspace((unsigned char)*p) || *p == ',')) p++;
+        if (p >= end) break;
+        a.s = p;
+        while (p < end && isalnum((unsigned char)*p)) p++;
+        a.len = (int)(p - a.s);
+        lo = vreg(&a, &da);
+        if (lo < 0) return 0;
+        hi = lo;
+        db = da;
+        while (p < end && isspace((unsigned char)*p)) p++;
+        if (p < end && *p == '-') {
+            p++;
+            while (p < end && isspace((unsigned char)*p)) p++;
+            b.s = p;
+            while (p < end && isalnum((unsigned char)*p)) p++;
+            b.len = (int)(p - b.s);
+            hi = vreg(&b, &db);
+            if (hi < lo) return 0;
+        }
+        if (da != db || (d0 >= 0 && da != d0)) return 0;
+        d0 = da;
+        if (next >= 0 && lo != next) return 0;
+        if (*first < 0) *first = lo;
+        *count += hi - lo + 1;
+        next = hi + 1;
+    }
+    *dbl = d0;
+    return *first >= 0;
+}
+
+/* vmrs/vmsr's system registers */
+static int vsysreg(const struct tok *t)
+{
+    static const struct { const char *n; int r; } sr[] = {
+        { "fpsid", 0 }, { "fpscr", 1 }, { "fpscr_nzcvqc", 2 }, { "mvfr2", 5 },
+        { "mvfr1", 6 }, { "mvfr0", 7 }, { "fpexc", 8 }, { "fpinst", 9 },
+        { "fpinst2", 10 }, { "vpr", 12 }, { "p0", 13 }, { "fpcxtns", 14 },
+        { "fpcxts", 15 }, { NULL, 0 }
+    };
+    for (int k = 0; sr[k].n; k++)
+        if (tok_is(t, sr[k].n)) return sr[k].r;
+    return -1;
+}
+
+static int vfp_word(const char *w, int wlen)
+{
+    struct tok t = { w, wlen };
+    int d;
+    if (vreg(&t, &d) >= 0 || vsysreg(&t) >= 0 || tok_is(&t, "apsr_nzcv"))
+        return 1;
+    /* a scalar's register: `d0[1]` is split at the bracket */
+    return 0;
+}
+
+/* d16-d31 and double-precision arithmetic, where the FPU is known */
+static int vfp_check(const struct tok *t0, int n, const struct tok *t,
+                     int dp_math, char *err, int errlen)
+{
+    if (dp_math && g_fpu == 1)
+        FAIL("\"%.*s\" is double-precision arithmetic, and this FPU is "
+             "single precision (--fpu=fpv5-d16 or vfpv4-d16 has it)",
+             t0->len, t0->s);
+    for (int k = 1; k < n; k++) {
+        int d, r = vreg(&t[k], &d);
+        if (r >= 16 && d && (!t_isa_a32 || (g_fpu && !g_fpu_d32)))
+            FAIL("%.*s: this FPU has d0-d15 only", t[k].len, t[k].s);
+    }
+    return 0;
+}
+
+static int vfp_stmt(const struct tok *t, int n, struct code *out,
+                    char *err, int errlen)
+{
+    char mn[24];
+    struct vty ty[3];
+    int ml = 0, nty;
+    unsigned long w;
+    while (ml < t[0].len && t[0].s[ml] != '.') ml++;
+    if (ml >= (int)sizeof mn || t[0].len < 2 ||
+        tolower((unsigned char)t[0].s[0]) != 'v')
+        return 1;
+    for (int i = 0; i < ml; i++) mn[i] = (char)tolower((unsigned char)t[0].s[i]);
+    mn[ml] = 0;
+    nty = vty_parse(t[0].s + ml, t[0].len - ml, ty, 3);
+    if (nty < 0) return 1;
+#define V_IS(s) (!strcmp(mn, s))
+#define VOPS(k) (n == (k) + 1)
+
+    /* ---- the arithmetic: d = n op m ---- */
+    {
+        static const struct { const char *name; unsigned long op; int v8; } dp[] = {
+            { "vmla", 0x0E000000, 0 }, { "vmls", 0x0E000040, 0 },
+            { "vnmls", 0x0E100000, 0 }, { "vnmla", 0x0E100040, 0 },
+            { "vmul", 0x0E200000, 0 }, { "vnmul", 0x0E200040, 0 },
+            { "vadd", 0x0E300000, 0 }, { "vsub", 0x0E300040, 0 },
+            { "vdiv", 0x0E800000, 0 }, { "vfnms", 0x0E900000, 0 },
+            { "vfnma", 0x0E900040, 0 }, { "vfma", 0x0EA00000, 0 },
+            { "vfms", 0x0EA00040, 0 },
+            { "vmaxnm", 0xFE800000, 1 }, { "vminnm", 0xFE800040, 1 },
+            { "vseleq", 0xFE000000, 1 }, { "vselvs", 0xFE100000, 1 },
+            { "vselge", 0xFE200000, 1 }, { "vselgt", 0xFE300000, 1 },
+            { NULL, 0, 0 }
+        };
+        for (int k = 0; dp[k].name; k++) {
+            int rd, rn, rm, dd, dn, dm;
+            if (!V_IS(dp[k].name)) continue;
+            if (nty != 1 || !vsz(&ty[0]))
+                FAIL("%s takes a .f16, .f32 or .f64 type", dp[k].name);
+            /* `vadd.f32 s0, s1` is s0 += s1, for the plain arithmetic */
+            int two = V_IS("vadd") || V_IS("vsub") || V_IS("vmul") ||
+                      V_IS("vnmul") || V_IS("vdiv");
+            if (!VOPS(3) && !(VOPS(2) && two))
+                FAIL("%s takes three registers", dp[k].name);
+            rd = vreg(&t[1], &dd);
+            rn = VOPS(3) ? vreg(&t[2], &dn) : rd;
+            if (!VOPS(3)) dn = dd;
+            rm = vreg(&t[n - 1], &dm);
+            if (rd < 0 || rn < 0 || rm < 0 || dd != dn || dd != dm ||
+                dd != (ty[0].bits == 64))
+                FAIL("%.*s takes %s registers", t[0].len, t[0].s,
+                     ty[0].bits == 64 ? "double (d)" : "single (s)");
+            if (vfp_check(&t[0], n, t, ty[0].bits == 64, err, errlen)) return -1;
+            w = dp[k].op | vsz(&ty[0]) | vf(rd, dd, 'd') | vf(rn, dd, 'n') |
+                vf(rm, dd, 'm');
+            return v_emit(out, w, &t[0], err, errlen);
+        }
+    }
+
+    /* ---- one source: d = op m ---- */
+    {
+        static const struct { const char *name; unsigned long op; } un[] = {
+            { "vabs", 0x0EB000C0 }, { "vneg", 0x0EB10040 },
+            { "vsqrt", 0x0EB100C0 }, { "vrintr", 0x0EB60040 },
+            { "vrintz", 0x0EB600C0 }, { "vrintx", 0x0EB70040 },
+            { "vrinta", 0xFEB80040 }, { "vrintn", 0xFEB90040 },
+            { "vrintp", 0xFEBA0040 }, { "vrintm", 0xFEBB0040 },
+            { NULL, 0 }
+        };
+        for (int k = 0; un[k].name; k++) {
+            int rd, rm, dd, dm;
+            if (!V_IS(un[k].name)) continue;
+            if (nty != 1 || !vsz(&ty[0]))
+                FAIL("%s takes a .f16, .f32 or .f64 type", un[k].name);
+            if (!VOPS(2)) FAIL("%s takes two registers", un[k].name);
+            rd = vreg(&t[1], &dd);
+            rm = vreg(&t[2], &dm);
+            if (rd < 0 || rm < 0 || dd != dm || dd != (ty[0].bits == 64))
+                FAIL("%.*s takes %s registers", t[0].len, t[0].s,
+                     ty[0].bits == 64 ? "double (d)" : "single (s)");
+            if (vfp_check(&t[0], n, t, ty[0].bits == 64, err, errlen)) return -1;
+            w = un[k].op | vsz(&ty[0]) | vf(rd, dd, 'd') | vf(rm, dd, 'm');
+            return v_emit(out, w, &t[0], err, errlen);
+        }
+    }
+
+    /* ---- compares: vcmp{e} d, m | d, #0 ---- */
+    if (V_IS("vcmp") || V_IS("vcmpe")) {
+        int rd, rm, dd, dm;
+        unsigned long e = V_IS("vcmpe") ? 0x80u : 0;
+        if (nty != 1 || !vsz(&ty[0]) || !VOPS(2))
+            FAIL("%s takes a .f16, .f32 or .f64 type and two operands", mn);
+        rd = vreg(&t[1], &dd);
+        if (rd < 0 || dd != (ty[0].bits == 64))
+            FAIL("%.*s compares %s registers", t[0].len, t[0].s,
+                 ty[0].bits == 64 ? "double (d)" : "single (s)");
+        if (vfp_check(&t[0], n, t, ty[0].bits == 64, err, errlen)) return -1;
+        rm = vreg(&t[2], &dm);
+        if (rm < 0) {
+            char buf[16], *ep;
+            snprintf(buf, sizeof buf, "%.*s", t[2].len - 1, t[2].s + 1);
+            if (t[2].s[0] != '#' || strtod(buf, &ep) != 0.0 || ep == buf || *ep)
+                FAIL("%.*s compares with a register or #0", t[0].len, t[0].s);
+            w = 0x0EB50040 | e | vsz(&ty[0]) | vf(rd, dd, 'd');
+            return v_emit(out, w, &t[0], err, errlen);
+        }
+        if (dm != dd)
+            FAIL("%.*s compares two registers of one size", t[0].len, t[0].s);
+        w = 0x0EB40040 | e | vsz(&ty[0]) | vf(rd, dd, 'd') | vf(rm, dd, 'm');
+        return v_emit(out, w, &t[0], err, errlen);
+    }
+
+    /* ---- conversions ---- */
+    if (V_IS("vcvt") || V_IS("vcvtr") || V_IS("vcvtb") || V_IS("vcvtt") ||
+        V_IS("vcvta") || V_IS("vcvtn") || V_IS("vcvtp") || V_IS("vcvtm")) {
+        int rd, rm, dd, dm;
+        char x = mn[4];
+        if (nty != 2)
+            FAIL("%s takes a destination and a source type: %s.f32.s32", mn, mn);
+        struct vty to = ty[0], from = ty[1];
+        rd = vreg(&t[1], &dd);
+        rm = VOPS(2) || VOPS(3) ? vreg(&t[2], &dm) : -1;
+        if (rd < 0 || rm < 0)
+            FAIL("%.*s takes two registers", t[0].len, t[0].s);
+        /* half <-> single/double, the bottom or top half */
+        if (x == 'b' || x == 't') {
+            unsigned long tt = x == 't' ? 0x80u : 0;
+            if (!VOPS(2)) FAIL("%s takes two registers", mn);
+            if (to.k == 'f' && from.k == 'f' && from.bits == 16 &&
+                (to.bits == 32 || to.bits == 64) && !dm && dd == (to.bits == 64))
+                w = 0x0EB20040 | tt | (to.bits == 64 ? 0xB00u : 0xA00u) |
+                    vf(rd, dd, 'd') | vf(rm, 0, 'm');
+            else if (to.k == 'f' && from.k == 'f' && to.bits == 16 &&
+                     (from.bits == 32 || from.bits == 64) && !dd &&
+                     dm == (from.bits == 64))
+                w = 0x0EB30040 | tt | (from.bits == 64 ? 0xB00u : 0xA00u) |
+                    vf(rd, 0, 'd') | vf(rm, dm, 'm');
+            else
+                FAIL("%.*s converts between .f16 and .f32 or .f64",
+                     t[0].len, t[0].s);
+            if (vfp_check(&t[0], n, t, 0, err, errlen)) return -1;
+            return v_emit(out, w, &t[0], err, errlen);
+        }
+        /* to an integer with a rounding mode of its own (ARMv8) */
+        if (x == 'a' || x == 'n' || x == 'p' || x == 'm') {
+            unsigned long rmode = x == 'a' ? 0 : x == 'n' ? 1 : x == 'p' ? 2 : 3;
+            if (!VOPS(2) || (to.k != 's' && to.k != 'u') || to.bits != 32 ||
+                !vsz(&from) || dd || dm != (from.bits == 64))
+                FAIL("%s converts .f16, .f32 or .f64 to .s32 or .u32: "
+                     "%s.s32.f32 s0, s1", mn, mn);
+            w = 0xFEBC0040 | rmode << 16 | (to.k == 's' ? 0x80u : 0) |
+                vsz(&from) | vf(rd, 0, 'd') | vf(rm, dm, 'm');
+            if (vfp_check(&t[0], n, t, 0, err, errlen)) return -1;
+            return v_emit(out, w, &t[0], err, errlen);
+        }
+        /* fixed point, in place: vcvt.f32.s16 s0, s0, #8 */
+        if (VOPS(3)) {
+            long fb;
+            int tofix = to.k == 's' || to.k == 'u';
+            struct vty fl = tofix ? from : to, fx = tofix ? to : from;
+            if (x == 'r' || !vsz(&fl) || (fx.k != 's' && fx.k != 'u') ||
+                (fx.bits != 16 && fx.bits != 32))
+                FAIL("%s's fixed-point form converts .f16/.f32/.f64 and "
+                     ".s16/.u16/.s32/.u32", mn);
+            if (rd != rm || dd != dm || dd != (fl.bits == 64))
+                FAIL("%.*s converts a register in place", t[0].len, t[0].s);
+            if (!tok_imm(&t[3], &fb) || fb < (fx.bits == 16 ? 0 : 1) ||
+                fb > fx.bits)
+                FAIL("%.*s: %d-bit fixed point has %d..%d fraction bits",
+                     t[0].len, t[0].s, fx.bits, fx.bits == 16 ? 0 : 1,
+                     fx.bits);
+            unsigned imm5 = (unsigned)(fx.bits - fb);
+            w = 0x0EBA0040 | (tofix ? 0x40000u : 0) |
+                (fx.k == 'u' ? 0x10000u : 0) | (fx.bits == 32 ? 0x80u : 0) |
+                vsz(&fl) | vf(rd, dd, 'd') | (imm5 & 1u) << 5 | imm5 >> 1;
+            if (vfp_check(&t[0], n, t, fl.bits == 64, err, errlen)) return -1;
+            return v_emit(out, w, &t[0], err, errlen);
+        }
+        if (!VOPS(2)) FAIL("%s takes two registers", mn);
+        /* between single and double */
+        if (to.k == 'f' && from.k == 'f' && x != 'r') {
+            if (to.bits == 64 && from.bits == 32 && dd && !dm)
+                w = 0x0EB700C0 | 0xA00u | vf(rd, 1, 'd') | vf(rm, 0, 'm');
+            else if (to.bits == 32 && from.bits == 64 && !dd && dm)
+                w = 0x0EB700C0 | 0xB00u | vf(rd, 0, 'd') | vf(rm, 1, 'm');
+            else
+                FAIL("%.*s converts between an s and a d register "
+                     "(.f64.f32 or .f32.f64)", t[0].len, t[0].s);
+            if (vfp_check(&t[0], n, t, 1, err, errlen)) return -1;
+            return v_emit(out, w, &t[0], err, errlen);
+        }
+        /* from an integer */
+        if (vsz(&to) && to.k == 'f' && (from.k == 's' || from.k == 'u') &&
+            from.bits == 32 && x != 'r') {
+            if (dd != (to.bits == 64) || dm)
+                FAIL("%.*s converts an s register to %s", t[0].len, t[0].s,
+                     to.bits == 64 ? "a d register" : "an s register");
+            w = 0x0EB80040 | (from.k == 's' ? 0x80u : 0) | vsz(&to) |
+                vf(rd, dd, 'd') | vf(rm, 0, 'm');
+            if (vfp_check(&t[0], n, t, to.bits == 64, err, errlen)) return -1;
+            return v_emit(out, w, &t[0], err, errlen);
+        }
+        /* to an integer: vcvt rounds towards zero, vcvtr as FPSCR says */
+        if ((to.k == 's' || to.k == 'u') && to.bits == 32 && vsz(&from) &&
+            from.k == 'f') {
+            if (dd || dm != (from.bits == 64))
+                FAIL("%.*s converts %s to an s register", t[0].len, t[0].s,
+                     from.bits == 64 ? "a d register" : "an s register");
+            w = 0x0EBC0040 | (to.k == 's' ? 0x10000u : 0) |
+                (x == 'r' ? 0 : 0x80u) | vsz(&from) | vf(rd, 0, 'd') |
+                vf(rm, dm, 'm');
+            if (vfp_check(&t[0], n, t, from.bits == 64, err, errlen)) return -1;
+            return v_emit(out, w, &t[0], err, errlen);
+        }
+        FAIL("%.*s is not a conversion this FPU has", t[0].len, t[0].s);
+    }
+
+    /* ---- moves ---- */
+    if (V_IS("vmov")) {
+        int r1, r2, d1, d2;
+        int f = nty == 1 ? (int)vsz(&ty[0]) : 0;
+        if (nty > 1) FAIL("vmov takes one type");
+        r1 = vreg(&t[1], &d1);
+        /* a constant: vmov.f32 s0, #1.0 */
+        if (VOPS(2) && r1 >= 0 && f && t[2].s[0] == '#') {
+            int imm = vfp_imm8(&t[2], ty[0].bits);
+            if (d1 != (ty[0].bits == 64))
+                FAIL("vmov.f%d takes %s register", ty[0].bits,
+                     ty[0].bits == 64 ? "a d" : "an s");
+            if (imm < 0)
+                FAIL("%.*s is not a constant vmov can hold: +-(16..31)/16 "
+                     "times a power of two from 2^-3 to 2^4", t[2].len, t[2].s);
+            w = 0x0EB00000 | (unsigned long)f | (unsigned long)(imm >> 4) << 16 |
+                (unsigned long)(imm & 15) | vf(r1, d1, 'd');
+            if (vfp_check(&t[0], n, t, 0, err, errlen)) return -1;
+            return v_emit(out, w, &t[0], err, errlen);
+        }
+        /* register to register: a d register's copy is .f64 (a bare
+         * `vmov d0, d1` is Advanced SIMD's vorr) */
+        if (VOPS(2) && r1 >= 0 && (r2 = vreg(&t[2], &d2)) >= 0) {
+            if (d1 != d2 || (nty && ty[0].bits != (d1 ? 64 : 32)))
+                FAIL("vmov copies between registers of one size: .f32 for "
+                     "s registers, .f64 for d");
+            if (d1 && !nty)
+                FAIL("vmov of a d register is vmov.f64 d0, d1");
+            w = 0x0EB00040 | (d1 ? 0xB00u : 0xA00u) | vf(r1, d1, 'd') |
+                vf(r2, d1, 'm');
+            if (vfp_check(&t[0], n, t, 0, err, errlen)) return -1;
+            return v_emit(out, w, &t[0], err, errlen);
+        }
+        /* a core register and an s register (or a d register's half) */
+        if (VOPS(2)) {
+            int to_fp = tok_reg(&t[1]) < 0, rt, rs, ds, lane = -1;
+            const struct tok *vt = to_fp ? &t[1] : &t[2];
+            struct tok base = *vt;
+            if (base.len > 3 && base.s[base.len - 1] == ']') {
+                const char *lb = memchr(base.s, '[', (size_t)base.len);
+                if (lb && lb[1] >= '0' && lb[1] <= '1' && lb[2] == ']') {
+                    lane = lb[1] - '0';
+                    base.len = (int)(lb - base.s);
+                }
+            }
+            rs = vreg(&base, &ds);
+            rt = tok_reg(to_fp ? &t[2] : &t[1]);
+            if (rs < 0 || rt < 0 || (lane >= 0) != ds)
+                FAIL("vmov moves between a core register and an s register, "
+                     "or a d register's half (d0[1])");
+            if (rt == 15 || (rt == 13 && !t_isa_a32))
+                FAIL("vmov: %s is not a register vmov can move",
+                     rt == 15 ? "pc" : "sp");
+            if (lane >= 0) {
+                if (nty && !(ty[0].k == 0 && ty[0].bits == 32))
+                    FAIL("vmov of a d register's half is .32");
+                w = (to_fp ? 0x0E000B10u : 0x0E100B10u) |
+                    (unsigned long)lane << 21 | vf(rs, 1, 'n') |
+                    (unsigned long)rt << 12;
+            } else {
+                if (nty && ty[0].bits != 16 && !(ty[0].k == 'f' && ty[0].bits == 32))
+                    FAIL("vmov between a core and an s register takes no type");
+                w = (nty && ty[0].bits == 16 ? 0x0E000910u : 0x0E000A10u) |
+                    (to_fp ? 0 : 0x100000u) | vf(rs, 0, 'n') |
+                    (unsigned long)rt << 12;
+            }
+            if (vfp_check(&t[0], n, t, 0, err, errlen)) return -1;
+            return v_emit(out, w, &t[0], err, errlen);
+        }
+        /* two core registers and a d register, or two s registers */
+        if (VOPS(3) || VOPS(4)) {
+            int to_fp = r1 >= 0, rt, rt2, rs, ds, rs2 = -1, ds2 = 0;
+            int nv = VOPS(4) ? 2 : 1;
+            const struct tok *v0 = to_fp ? &t[1] : &t[3];
+            if (nty) FAIL("vmov of a core register pair takes no type");
+            rs = vreg(v0, &ds);
+            if (nv == 2) rs2 = vreg(v0 + 1, &ds2);
+            rt = tok_reg(to_fp ? &t[1 + nv] : &t[1]);
+            rt2 = tok_reg(to_fp ? &t[2 + nv] : &t[2]);
+            if (rs < 0 || rt < 0 || rt2 < 0 ||
+                (nv == 1 && !ds) || (nv == 2 && (ds || ds2 || rs2 != rs + 1)))
+                FAIL("vmov moves two core registers to or from a d register, "
+                     "or two consecutive s registers");
+            if (rt == 15 || rt2 == 15 || (!t_isa_a32 && (rt == 13 || rt2 == 13)))
+                FAIL("vmov: sp and pc are not registers vmov can move");
+            if (!to_fp && rt == rt2)
+                FAIL("vmov cannot load one register twice");
+            w = (to_fp ? 0x0C400010u : 0x0C500010u) | (ds ? 0xB00u : 0xA00u) |
+                (unsigned long)rt2 << 16 | (unsigned long)rt << 12 |
+                vf(rs, ds, 'm');
+            if (vfp_check(&t[0], n, t, 0, err, errlen)) return -1;
+            return v_emit(out, w, &t[0], err, errlen);
+        }
+        FAIL("vmov takes two, three or four operands");
+    }
+
+    /* ---- the system registers ---- */
+    if ((V_IS("vmrs") || V_IS("vmsr")) && VOPS(2) && !nty) {
+        int to_core = V_IS("vmrs");
+        int sr = vsysreg(&t[to_core ? 2 : 1]);
+        int rt = tok_reg(&t[to_core ? 1 : 2]);
+        if (to_core && tok_is(&t[1], "apsr_nzcv")) {
+            if (sr != 1) FAIL("only fpscr's flags go to apsr_nzcv");
+            rt = 16;
+        }
+        /* ARMv8.1-M's (MVE's vpr and p0, the security extension's
+         * fpcxt), and the identification registers read only */
+        if (sr == 2 || sr >= 12)
+            FAIL("%.*s is an ARMv8.1-M register, which this target lacks",
+                 t[to_core ? 2 : 1].len, t[to_core ? 2 : 1].s);
+        if (!to_core && sr >= 5 && sr <= 7)
+            FAIL("%.*s is read only", t[1].len, t[1].s);
+        if (sr < 0 || rt < 0 || rt == 15 || (rt == 13 && !t_isa_a32))
+            FAIL("%s moves between a core register and fpscr, fpexc, "
+                 "fpsid, mvfr0-2 (vmrs apsr_nzcv, fpscr for the flags)", mn);
+        w = (to_core ? 0x0EF00A10u : 0x0EE00A10u) | (unsigned long)sr << 16 |
+            (unsigned long)(rt == 16 ? 15 : rt) << 12;
+        return v_emit(out, w, &t[0], err, errlen);
+    }
+
+    /* ---- loads and stores ---- */
+    if ((V_IS("vldr") || V_IS("vstr")) && VOPS(2)) {
+        int rd, dd, rn;
+        long off;
+        int h = nty == 1 && ty[0].bits == 16;
+        rd = vreg(&t[1], &dd);
+        if (rd < 0) FAIL("%s takes an s or d register", mn);
+        if (nty > 1 || (nty == 1 && ty[0].bits != (dd ? 64 : 32) && !h))
+            FAIL("%.*s does not match its register", t[0].len, t[0].s);
+        if (!tok_mem(&t[2], &rn, &off))
+            FAIL("%s takes a [reg, #off] address", mn);
+        if (rn == 15 && V_IS("vstr") && !t_isa_a32)
+            FAIL("vstr cannot store pc-relative in Thumb state");
+        long a = off < 0 ? -off : off;
+        int sc = h ? 2 : 4;
+        if (a % sc || a / sc > 255)
+            FAIL("%s's offset is a multiple of %d within +-%d", mn, sc, sc * 255);
+        int neg = off < 0 || (t[2].len > 3 && strstr(t[2].s, "#-") &&
+                              strstr(t[2].s, "#-") < t[2].s + t[2].len);
+        w = (V_IS("vldr") ? 0x0D100000u : 0x0D000000u) |
+            (h ? 0x900u : dd ? 0xB00u : 0xA00u) | (neg ? 0 : 0x800000u) |
+            (unsigned long)rn << 16 | vf(rd, dd, 'd') | (unsigned long)(a / sc);
+        if (vfp_check(&t[0], n, t, 0, err, errlen)) return -1;
+        return v_emit(out, w, &t[0], err, errlen);
+    }
+    {
+        static const struct { const char *name; int load, db, sp; } vm[] = {
+            { "vldm", 1, 0, 0 }, { "vldmia", 1, 0, 0 }, { "vldmdb", 1, 1, 0 },
+            { "vstm", 0, 0, 0 }, { "vstmia", 0, 0, 0 }, { "vstmdb", 0, 1, 0 },
+            { "vpush", 0, 1, 1 }, { "vpop", 1, 0, 1 }, { NULL, 0, 0, 0 }
+        };
+        for (int k = 0; vm[k].name; k++) {
+            int rn = 13, wb = 1, first, count, dbl;
+            const struct tok *lt;
+            if (!V_IS(vm[k].name)) continue;
+            if (nty > 1 || (nty == 1 && ty[0].k != 0 && ty[0].k != 'f'))
+                FAIL("%.*s takes .32 or .64", t[0].len, t[0].s);
+            if (vm[k].sp) {
+                if (!VOPS(1)) FAIL("%s takes a register list", mn);
+                lt = &t[1];
+            } else {
+                if (!VOPS(2)) FAIL("%s takes a base register and a list", mn);
+                wb = t[1].len > 1 && t[1].s[t[1].len - 1] == '!';
+                rn = tasm_gpr(t[1].s, t[1].len - wb);
+                lt = &t[2];
+                if (rn < 0) FAIL("%s takes a base register and a list", mn);
+                if (vm[k].db && !wb) FAIL("%s needs writeback (rn!)", mn);
+                if (rn == 15 && (wb || !t_isa_a32))
+                    FAIL("%s cannot use pc as its base", mn);
+            }
+            if (!vreglist(lt, &first, &count, &dbl))
+                FAIL("%s takes consecutive s or d registers: {d8-d15}", mn);
+            if (nty == 1 && ty[0].bits != (dbl ? 64 : 32))
+                FAIL("%.*s does not match its registers", t[0].len, t[0].s);
+            if (dbl ? count > 16 : first + count > 32)
+                FAIL("%s transfers at most 16 d registers", mn);
+            if (dbl && first + count > 32)
+                FAIL("%s: the list runs past d31", mn);
+            w = 0x0C000000u | (dbl ? 0xB00u : 0xA00u) |
+                (vm[k].db ? 0x1000000u : 0x800000u) | (wb ? 0x200000u : 0) |
+                (vm[k].load ? 0x100000u : 0) | (unsigned long)rn << 16 |
+                vf(first, dbl, 'd') | (unsigned long)(dbl ? 2 * count : count);
+            {
+                struct tok fake[2];
+                char nm[8];
+                fake[0] = t[0];
+                snprintf(nm, sizeof nm, "%c%d", dbl ? 'd' : 's', first + count - 1);
+                fake[1].s = nm;
+                fake[1].len = (int)strlen(nm);
+                if (vfp_check(&t[0], 2, fake, 0, err, errlen)) return -1;
+            }
+            return v_emit(out, w, &t[0], err, errlen);
+        }
+    }
+#undef V_IS
+#undef VOPS
+    return 1;
+}
+
+/* adr rd, #off: the address `off` from Align(pc, 4) in Thumb state (pc +
+ * 8 in ARM state) -- gas.c turns a label into it. Thumb takes the 16-bit
+ * form where it reaches (r0-r7, a word 0..1020 ahead) unless .w, else
+ * addw/subw rd, pc (T3/T2); ARM state add/sub rd, pc, #const. */
+static int arm_adr(const struct tok *t, int n, struct code *out, char *err,
+                   int errlen)
+{
+    int want = 0, rd;
+    long off;
+    if (mnemonic_is(&t[0], "adr")) {
+        if (t[0].len == 5) want = t[0].s[4];
+    } else
+        return 1;
+    if (n != 3 || (rd = tok_reg(&t[1])) < 0 || !tok_imm(&t[2], &off))
+        FAIL("adr takes a register and a label");
+    if (t_isa_a32) {
+        long m = off < 0 ? -off : off;
+        int imm = a32_encode_imm((unsigned long)m);
+        if (want) FAIL("adr has no .n or .w in ARM state");
+        if (imm < 0)
+            FAIL("adr: %ld bytes from pc+8 is not a rotated 8-bit constant", off);
+        {
+            unsigned long w = (off < 0 ? 0x024F0000UL : 0x028F0000UL) |
+                              (unsigned long)rd << 12 | (unsigned long)imm;
+            a32_raw_word(out, w);
+        }
+        return 0;
+    }
+    if (rd == 13 || rd == 15) FAIL("adr cannot write sp or pc");
+    if (want != 'w' && (!g_force_wide || arch_thumb1() || want == 'n')) {
+        if (rd < 8 && off >= 0 && off <= 1020 && !(off & 3)) {
+            t16(out, 0xA000u | (unsigned)rd << 8 | (unsigned)off >> 2);
+            return 0;
+        }
+        if (arch_thumb1() || want == 'n')
+            FAIL("adr reaches r0-r7 and a word 0..1020 bytes ahead%s",
+                 arch_thumb1() ? " on this core" : " in its 16-bit form");
+        if (!g_force_wide) g_went_wide = 1;
+    }
+    {
+        long m = off < 0 ? -off : off;
+        if (m > 4095) FAIL("adr reaches 4095 bytes either way; this is %ld", off);
+        t32(out, (off < 0 ? 0xF2AFu : 0xF20Fu) | ((unsigned)m >> 11 & 1u) << 10,
+            ((unsigned)m >> 8 & 7u) << 12 | (unsigned)rd << 8 | ((unsigned)m & 0xffu));
+    }
+    return 0;
+}
+
 static int one_stmt(const char *stmt, int len, struct code *out,
                     char *err, int errlen)
 {
@@ -1237,18 +2419,22 @@ static int one_stmt(const char *stmt, int len, struct code *out,
         int slot = g_it.at++;
         int want = g_it.cond[slot], mlen = t[0].len, wlen = 0, c, r;
         char buf[256];
-        /* the width suffix follows the condition: `addeq.w` */
-        if (mlen > 2 && t[0].s[mlen - 2] == '.') { wlen = 2; mlen -= 2; }
+        /* the suffixes follow the condition: `addeq.w`, `vmoveq.f32` */
+        {
+            const char *dot = memchr(t[0].s, '.', (size_t)mlen);
+            if (dot) { wlen = (int)(t[0].s + mlen - dot); mlen -= wlen; }
+        }
         c = mlen > 2 ? cond_num(t[0].s + mlen - 2, 2) : -1;
         if (c != want)
             FAIL("inside an IT block, \"%.*s\" must carry the condition `%s`",
                  t[0].len, t[0].s, cond_name(want));
         mlen -= 2;
         {
+            /* (a flag-setting data-processing instruction takes its
+             * 32-bit form here, t2_dp's choice: inside a block the 16-bit
+             * one sets no flags) */
             static const char *const refused[] = {
-                "adds", "subs", "ands", "orrs", "eors", "bics", "adcs",
-                "sbcs", "rsbs", "lsls", "lsrs", "asrs", "rors", "movs",
-                "mvns", "muls", "b", "bl", "cbz", "cbnz", NULL
+                "b", "bl", "cbz", "cbnz", NULL
             };
             /* B<c> and BL<c> may END an IT block: the condition is the
              * block's, and the branch takes its unconditional encoding --
@@ -1275,16 +2461,34 @@ static int one_stmt(const char *stmt, int len, struct code *out,
         {
             int save_n = g_it.n, save_at = g_it.at;
             g_it.n = g_it.at = 0;       /* the inner call is outside it */
+            g_in_it = 1;                /* ...but chooses encodings as in it */
             /* (the block has moved on whether this one assembled or not,
              * so one bad instruction is reported once, not again as the
              * wrong condition on every instruction after it) */
             r = one_stmt(buf, (int)strlen(buf), out, err, errlen);
+            g_in_it = 0;
             g_it.n = save_n;
             g_it.at = save_at;
         }
         return r;
     }
 
+    /* data processing, shifts, multiplies, table branches, barriers --
+     * chosen as an assembler chooses them (t2_dp) -- in Thumb state */
+    if (!t_isa_a32) {
+        int r = t2_dp(t, n, out, err, errlen);
+        if (r == 1)
+            r = t2_misc(t, n, out, err, errlen);
+        if (r != 1)
+            return r;
+    }
+    {
+        int r = vfp_stmt(t, n, out, err, errlen);
+        if (r == 1)
+            r = arm_adr(t, n, out, err, errlen);
+        if (r != 1)
+            return r;
+    }
     {
         int r = v8m_stmt(t, n, out, err, errlen);
         if (r == 1)
@@ -1531,8 +2735,19 @@ static int one_stmt(const char *stmt, int len, struct code *out,
             /* [pc, #off]: a literal, from Align(pc, 4) as the
              * architecture reads it. Words only. */
             if (base == 15) {
+                int dotw = t[0].len > 2 && t[0].s[t[0].len - 2] == '.' &&
+                           t[0].s[t[0].len - 1] == 'w';
                 if (e->size != 4 || e->store)
                     FAIL("only ldr reads a pc-relative literal");
+                /* the 16-bit form when it reaches -- r0-r7, a word
+                 * 0..1020 ahead -- as the file assembler relaxes */
+                if (!t_isa_a32 && !dotw && !g_force_wide) {
+                    if (rd < 8 && off >= 0 && off <= 1020 && !(off & 3)) {
+                        t16(out, 0x4800u | (unsigned)rd << 8 | (unsigned)off >> 2);
+                        return 0;
+                    }
+                    g_went_wide = 1;
+                }
                 if (!t_ldr_lit(out, rd, off))
                     FAIL("literal offset %ld is out of reach", off);
                 return 0;
@@ -1748,14 +2963,6 @@ static int one_stmt(const char *stmt, int len, struct code *out,
         else                          t_blx(out, r);
         return 0;
     }
-    /* vmov between a core register and a single-precision one. */
-    if (mnemonic_is(&t[0], "vmov") && n == 3) {
-        int r1 = tok_reg(&t[1]), r2 = tok_reg(&t[2]);
-        int s1 = sreg(t[1].s, t[1].len), s2 = sreg(t[2].s, t[2].len);
-        if (s1 >= 0 && r2 >= 0 && r2 < 13) { t_vmov_core(out, s1, r2, 1); return 0; }
-        if (r1 >= 0 && r1 < 13 && s2 >= 0) { t_vmov_core(out, s2, r1, 0); return 0; }
-        FAIL("vmov takes a core register and a single-precision register");
-    }
     if ((mnemonic_is(&t[0], "push") || mnemonic_is(&t[0], "pop")) && n >= 2) {
         /* `{r4-r7, lr}` is one token: the splitter keeps a braced group
          * together, and ranges count. The braces were once refused and a
@@ -1805,39 +3012,6 @@ static int one_stmt(const char *stmt, int len, struct code *out,
                      "never sp, no pc in a store, not pc and lr together in "
                      "a load, and not the base when it is written back",
                      lm[k].name);
-            return 0;
-        }
-    }
-    /* ...and the floating-point half of a context, on a part with an FPU:
-     * `vstmdb r0!, {s16-s31}`. Single-precision registers only. */
-    {
-        static const struct { const char *name; int load, before; } vm[] = {
-            { "vldm", 1, 0 }, { "vldmia", 1, 0 }, { "vldmdb", 1, 1 },
-            { "vstm", 0, 0 }, { "vstmia", 0, 0 }, { "vstmdb", 0, 1 }
-        };
-        int first, count;
-        if ((mnemonic_is(&t[0], "vpush") || mnemonic_is(&t[0], "vpop")) &&
-            n == 2) {
-            if (!tok_sreglist(&t[1], &first, &count))
-                FAIL("%.*s wants consecutive single-precision registers, "
-                     "{s16-s31}", t[0].len, t[0].s);
-            t_vpush_s(out, first, count, mnemonic_is(&t[0], "vpop"));
-            return 0;
-        }
-        for (unsigned k = 0; k < sizeof vm / sizeof vm[0]; k++) {
-            int rn, wb;
-            if (!mnemonic_is(&t[0], vm[k].name))
-                continue;
-            if (n != 3) FAIL("%s wants a base register and a list", vm[k].name);
-            wb = t[1].len > 1 && t[1].s[t[1].len - 1] == '!';
-            rn = tasm_gpr(t[1].s, t[1].len - wb);
-            if (rn < 0 || !tok_sreglist(&t[2], &first, &count))
-                FAIL("%s wants a base register and consecutive "
-                     "single-precision registers", vm[k].name);
-            if (!t_vldm_vstm(out, rn, first, count, wb, vm[k].before,
-                             vm[k].load))
-                FAIL("%s cannot transfer that list%s", vm[k].name,
-                     vm[k].before && !wb ? ": DB needs writeback (rn!)" : "");
             return 0;
         }
     }
@@ -1900,8 +3074,11 @@ static int one_stmt(const char *stmt, int len, struct code *out,
      * block fills (a32_it). */
     if (t_isa_a32 && t[0].len > 2 && !tasm_open()) {
         int mlen = t[0].len, wlen = 0, c;
-        if (mlen > 4 && t[0].s[mlen - 2] == '.') { wlen = 2; mlen -= 2; }
-        c = cond_num(t[0].s + mlen - 2, 2);
+        {
+            const char *dot = memchr(t[0].s, '.', (size_t)mlen);
+            if (dot) { wlen = (int)(t[0].s + mlen - dot); mlen -= wlen; }
+        }
+        c = mlen > 2 ? cond_num(t[0].s + mlen - 2, 2) : -1;
         if (c >= 0 && c != 14 && mlen > 2) {
             char buf[256];
             struct code probe = { 0 };
@@ -2108,7 +3285,7 @@ int tasm_is_word(const char *stmt, const char *w, int wlen)
     int mlen;
     while (isspace((unsigned char)*m)) m++;
     for (mlen = 0; m[mlen] && !isspace((unsigned char)m[mlen]); mlen++) {}
-    if (sreg(w, wlen) >= 0 || (wlen == 5 && same_nocase(w, "fpscr", 5)))
+    if (sreg(w, wlen) >= 0 || vfp_word(w, wlen))
         return 1;
     /* a shift inside an operand: `[r1, r2, lsl #2]`, `r3, lsr #4` */
     if ((wlen == 3 && (same_nocase(w, "lsl", 3) || same_nocase(w, "lsr", 3) ||
@@ -2145,10 +3322,14 @@ int tasm_is_word(const char *stmt, const char *w, int wlen)
     if (mlen >= 2 && mlen <= 5 && m[0] == 'i' && m[1] == 't' &&
         cond_num(w, wlen) >= 0)
         return 1;
-    if (mlen == 3 && (strncmp(m, "dsb", 3) == 0 || strncmp(m, "dmb", 3) == 0 ||
-                      strncmp(m, "isb", 3) == 0) &&
-        wlen == 2 && strncmp(w, "sy", 2) == 0)
-        return 1;
+    /* `dmb ish`, and inside an IT block `dmbeq sy` */
+    if ((mlen == 3 || (mlen == 5 && cond_num(m + 3, 2) >= 0)) &&
+        (strncmp(m, "dsb", 3) == 0 || strncmp(m, "dmb", 3) == 0 ||
+         strncmp(m, "isb", 3) == 0))
+        for (int k = 0; t_baropt[k].name; k++)
+            if ((int)strlen(t_baropt[k].name) == wlen &&
+                same_nocase(w, t_baropt[k].name, wlen))
+                return 1;
     return 0;
 }
 
@@ -2215,14 +3396,18 @@ int tasm_symform(const char *stmt, struct asm_symform *f)
         f->nsites = 2;
         return 1;
     }
-    if (mnlen == 4 && (strncmp(mn, "movw", 4) == 0 || strncmp(mn, "movt", 4) == 0)) {
+    /* inside an IT block the pair is conditional: `movweq r0, :lower16:x` */
+    if ((mnlen == 4 || (mnlen == 6 && cond_num(mn + 4, 2) >= 0)) &&
+        (strncmp(mn, "movw", 4) == 0 || strncmp(mn, "movt", 4) == 0)) {
         int top = mn[3] == 't';
-        const char *want = top ? "#:upper16:" : "#:lower16:";
-        if (strncmp(q, want, 10) != 0) return 0;
-        q += 10;
+        /* `#:lower16:sym`, or clang's `:lower16:sym` without the hash */
+        const char *want = top ? ":upper16:" : ":lower16:";
+        if (*q == '#') q++;
+        if (strncmp(q, want, 9) != 0) return 0;
+        q += 9;
         if (!(n = sym_operand(q, &f->addend, &end)) || *end) return 0;
         f->sym_at = (int)(q - stmt); f->sym_len = n;
-        snprintf(f->encode, sizeof f->encode, "%.4s %.*s, #0", mn, rdlen, rd);
+        snprintf(f->encode, sizeof f->encode, "%.*s %.*s, #0", mnlen, mn, rdlen, rd);
         f->site[0].off = 0;
         f->site[0].reloc = t_isa_a32
             ? (top ? R_ARM_MOVT_ABS : R_ARM_MOVW_ABS_NC)

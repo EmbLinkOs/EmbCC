@@ -1041,6 +1041,11 @@ void a32_strex(struct code *c, int rd, int rt, int rn, int size)
                        (unsigned long)rt);
 }
 
+void a32_raw_word(struct code *c, unsigned long bits)
+{
+    word(c, cc_take(), bits);
+}
+
 void a32_vfp_word(struct code *c, unsigned h1, unsigned h2)
 {
     if ((h1 >> 12) != 0xEu)

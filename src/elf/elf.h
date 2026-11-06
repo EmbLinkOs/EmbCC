@@ -303,9 +303,25 @@ typedef struct {
 /* The same field as THM_CALL in a `b.w` rather than a `bl`; an
  * assembler emits it for a tail branch to another section. */
 #define R_ARM_THM_JUMP24      30
+/* a conditional branch's 32-bit encoding (T3, b<c>.w: +-1 MiB), and the
+ * 16-bit b's eleven bits and b<c>'s eight, which an assembler writes
+ * when it cannot resolve them itself */
+#define R_ARM_THM_JUMP19      51
+#define R_ARM_THM_JUMP11      102
+#define R_ARM_THM_JUMP8       103
 /* The exception index table's self-relative pointer: 31 bits of signed
  * offset, the top bit reserved to say what the entry holds. */
 #define R_ARM_PREL31          42
+#define R_ARM_SBREL32          9
+#define R_ARM_GOTOFF32        24
+#define R_ARM_GOT_BREL        26
+#define R_ARM_TARGET2         41
+#define R_ARM_GOT_PREL        96
+#define R_ARM_TLS_GD32       104
+#define R_ARM_TLS_LDM32      105
+#define R_ARM_TLS_LDO32      106
+#define R_ARM_TLS_IE32       107
+#define R_ARM_TLS_LE32       108
 /* ARM (A32) state, armv7a-none-eabi: `bl` and `b`/`b<c>` with a 24-bit
  * word offset from the instruction + 8, and the movw/movt pair whose
  * 16-bit immediate is split imm4:imm12 -- different bits from the Thumb

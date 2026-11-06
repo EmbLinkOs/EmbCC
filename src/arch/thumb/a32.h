@@ -153,5 +153,7 @@ void a32_strex(struct code *c, int rd, int rt, int rn, int size);
 /* A Thumb-2 VFP/coprocessor instruction's two halfwords (1110 xxxx...):
  * the A32 word is the same 28 bits under a condition field. */
 void a32_vfp_word(struct code *c, unsigned h1, unsigned h2);
+/* One instruction's bits 27:0, under the queued condition (or AL). */
+void a32_raw_word(struct code *c, unsigned long bits);
 
 #endif

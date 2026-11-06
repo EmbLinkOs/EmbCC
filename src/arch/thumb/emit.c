@@ -1570,24 +1570,6 @@ int t_ldm_stm(struct code *c, int rn, unsigned mask, int wback, int before,
 
 static void vsplit(int r, int dbl, unsigned *field, unsigned *flag);
 
-/* VLDM/VSTM, single precision (T2): 1110 110P UDWL Rn | Vd 1010 imm8,
- * the words t_vpush_s writes with Rn = sp. DB is P=1 U=0 and must write
- * back (P=1 W=0 is VSTR/VLDR); IA is P=0 U=1. */
-int t_vldm_vstm(struct code *c, int rn, int first, int n, int wback,
-                int before, int load)
-{
-    unsigned f, fl;
-    if (n < 1 || first < 0 || first + n > 32 || rn < 0 || rn > 14 ||
-        (before && !wback))
-        return 0;
-    vsplit(first, 0, &f, &fl);
-    vhw2(c, 0xec00u | ((unsigned)before << 8) | ((unsigned)!before << 7) |
-           (fl << 6) | ((unsigned)wback << 5) | ((unsigned)load << 4) |
-           (unsigned)rn,
-        (f << 12) | 0x0a00u | ((unsigned)n & 0xffu));
-    return 1;
-}
-
 /* LDR (literal) T2: 1111 1000 U101 1111 | Rt imm12 -- the 32-bit form
  * t_ldst_imm writes for a positive offset with Rn = pc, with U for the
  * sign. */
