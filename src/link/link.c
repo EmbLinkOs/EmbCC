@@ -4400,6 +4400,30 @@ static void apply_riscv(struct linker *l, struct object *o, unsigned type,
     case R_RISCV_64:
         put64(loc, (unsigned long long)V);
         return;
+    /* Local-exec TLS (GCC's and clang's __thread; EmbCC's own embedded
+     * code has one thread and none): tp points at the thread block
+     * itself, the psABI's variant 1 with no TCB, so the offset is the
+     * variable's place in the block. %tprel_add only marks the add. */
+    case R_RISCV_TPREL_HI20:
+    case R_RISCV_TPREL_LO12_I:
+    case R_RISCV_TPREL_LO12_S: {
+        long long tp = V - (long long)l->tls_start;
+        if (!l->tls_size)
+            die("%s: a thread-local relocation against '%s', but the image "
+                "has no thread block (.tdata/.tbss)", o->name,
+                l->rel_sym ? l->rel_sym : "?");
+        if (type == R_RISCV_TPREL_HI20) {
+            need_range(l, o, "R_RISCV_TPREL_HI20", tp, I32_MIN - 0x800,
+                       I32_MAX - 0x800);
+            rv_put_u(loc, rv_hi20(tp));
+        } else if (type == R_RISCV_TPREL_LO12_I)
+            rv_put_i(loc, rv_lo12(tp));
+        else
+            rv_put_s(loc, rv_lo12(tp));
+        return;
+    }
+    case R_RISCV_TPREL_ADD:
+        return;
     case R_RISCV_HI20:
         /* lui sign-extends at RV64, so the pair reaches a sign-extended
          * 32-bit address; at RV32 every address is one */
@@ -6222,6 +6246,18 @@ static void apply_relocs(struct linker *l, struct object *o)
                 case R_ARM_REL32:
                     put32(loc, (unsigned int)(long)((long long)S + A -
                                                     (long long)P));
+                    break;
+                case R_ARM_TLS_LE32:
+                    /* local-exec: tp (__aeabi_read_tp) points at an
+                     * 8-byte control block, the thread block after it
+                     * at its alignment (variant 1) */
+                    if (!l->tls_size)
+                        die("%s: R_ARM_TLS_LE32 against '%s', but the image "
+                            "has no thread block (.tdata/.tbss)", o->name,
+                            l->rel_sym ? l->rel_sym : "?");
+                    put32(loc, (unsigned int)((long long)S + A -
+                          (long long)l->tls_start +
+                          (long long)align_up(8, l->tls_align ? l->tls_align : 1)));
                     break;
                 case R_ARM_THM_CALL:
                 case R_ARM_THM_JUMP24: {
