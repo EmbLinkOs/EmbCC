@@ -52,6 +52,11 @@ T = {
   "a7":    ("--target=armv7a-none-eabi", "clang",
             "--target=armv7a-none-eabi -marm -mfloat-abi=soft",
             "llvm-mc -filetype=obj -triple=armv7a-none-eabi {src} -o {obj}", "llvm-objdump", "@"),
+  # Cortex-A with NEON: clang vectorizes the corpus's loops
+  "a7neon": ("--target=armv7a-none-eabihf -mfpu=neon-vfpv4", "clang",
+            "--target=armv7a-none-eabihf -marm -mfpu=neon-vfpv4 -mfloat-abi=hard",
+            "llvm-mc -filetype=obj -triple=armv7a-none-eabihf -mattr=+neon,+vfp4 {src} -o {obj}",
+            "llvm-objdump", "@"),
   "rv32":  ("--target=riscv32-unknown-elf -march=rv32imac -mabi=ilp32", "clang",
             "--target=riscv32-unknown-elf -march=rv32imac -mabi=ilp32 -mno-relax",
             "llvm-mc -filetype=obj -triple=riscv32 -mattr=+m,+a,+c,-relax {src} -o {obj}",

@@ -1000,7 +1000,7 @@ writing A32 encodings; the design notes are in
 | `--isa=arm` | (no value) | `--isa=thumb is not supported on armv7a-none-eabi: EmbCC emits ARM (A32) code for a Cortex-A` |
 | `--cpu=CPU` | `cortex-a5`, `cortex-a7`, `cortex-a8`, `cortex-a9`, `cortex-a12`, `cortex-a15`, `cortex-a17`, `generic` | `--cpu=cortex-r5 is not supported on armv7a-none-eabi` (a Cortex-M or Cortex-R core) |
 | `--float-abi=ABI` | `soft`, `softfp`, `hard` (the last two with an `--fpu=`) | `--float-abi=hard needs an FPU to use: add --fpu=vfpv3-d16 (or vfpv3, vfpv4-d16, vfpv4)` |
-| `--fpu=FPU` | `vfpv3-d16`, `vfpv3`, `vfpv4-d16`, `vfpv4`, `none` | `--fpu=neon is not supported on armv7a-none-eabi: EmbCC emits VFPv3 or VFPv4 ... and no NEON (Advanced SIMD) instruction` |
+| `--fpu=FPU` | `vfpv3-d16`, `vfpv3`, `vfpv4-d16`, `vfpv4`, `neon`, `neon-vfpv4`, `none` | an FPU no ARMv7-A core has (`fpv5-d16`, a Cortex-M one) |
 | `--abi=ABI` | `aapcs`, `aapcs-linux` | as for Cortex-M |
 | `--unaligned-access`, `-mthumb-interwork` | (no value) | `--no-unaligned-access is not supported` |
 
@@ -1011,8 +1011,29 @@ No divide instruction is used, so the code runs on every ARMv7-A core:
 floating point travels in the core registers, as with `soft`. Either way
 the code is the Cortex-M7's single- and double-precision VFP on `d0`–`d15`
 (`s16`–`s31`/`d8`–`d15` preserved); with `--float-abi=soft` no VFP
-instruction is emitted even with an `-mfpu=`, as GCC reads it. No NEON
-instruction is ever emitted.
+instruction is emitted even with an `-mfpu=`, as GCC reads it. The code
+generator emits no NEON instruction; `--fpu=neon` defines `__ARM_NEON` and
+gives `<arm_neon.h>` (its intrinsics lane by lane) and the assembler's
+NEON.
+
+### Assembly: NEON
+
+`.s`/`.S` files, file-scope `asm` and inline templates take the whole of
+A32 Advanced SIMD and the VFP forms beside it: 3,029 forms in a table
+(`src/arch/thumb/neon.c`) that `tools/neon-isa` learns from llvm-mc --
+every word of the NEON encoding space decoded, every operand bit
+weighed, every field's values offered back to llvm-mc's assembler -- in
+llvm-mc's syntax and with the type spellings it takes for one another
+(`vadd.s32` is `vadd.i32`): Q, D and S registers and scalars (`d2[1]`),
+register lists (`{d0-d3}`, spaced `{d0, d2}`, all lanes `{d0[], d1[]}`,
+one lane), alignment and writeback (`[r0:128]!`, `[r0], r2`), every
+modified-immediate class (`vmov.i32 q0, #0xff00`, `vmov.i64 q0,
+#0xff00ff0000ff00ff`, `vmov.f32 d0, #-2.5`). `.fpu neon` (or
+`--fpu=neon`) gives d16-d31. The bytes are llvm-mc's: the table's
+differential test and clang's vectorized libc (`asm-audit a7neon`,
+306/306 files) show no difference. A form refused names the operand: `vshr.u32 q0, q1,
+#33: operand 3, an immediate (33), is not one any form of vshr.u32
+Q,Q,#N holds`.
 
 ### Calling convention: AAPCS, soft float
 
@@ -1074,7 +1095,7 @@ semihosting exit.
 
 ### Limitations
 
-Refused by name: NEON (`--fpu=neon`), the Cortex-M FPUs, Thumb state (`--isa=thumb`, `.thumb` and `.thumb_func`), `__builtin_frame_address` and
+Refused by name: the Cortex-M FPUs, Thumb state (`--isa=thumb`, `.thumb` and `.thumb_func`), `__builtin_frame_address` and
 `__builtin_return_address` above level 0, an interrupt handler built
 for an FPU (its VFP registers would not be saved), a scalar local aligned
 past 8, and C++ exceptions and unwind tables (C++ compiles with

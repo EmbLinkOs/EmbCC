@@ -12,6 +12,7 @@
 
 #include "emit.h"
 #include "a32.h"
+#include "neon.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -3696,6 +3697,20 @@ int tasm_assemble(const char *text, struct code *out, char *err, int errlen)
                     p++;
                 continue;
             }
+            /* A32: NEON and the VFP forms beside it, from the learned
+             * table (neon.c), when it has the statement's form */
+            if (t_isa_a32) {
+                unsigned long nw;
+                r = neon_encode(st, len, &nw, err, errlen);
+                if (r < 0)
+                    return -1;
+                if (r > 0) {
+                    code_u32(out, nw);
+                    if (*p)
+                        p++;
+                    continue;
+                }
+            }
             r = one_stmt(st, len, out, err, errlen);
             if (r != 0)
                 return -1;
@@ -3729,6 +3744,15 @@ int tasm_is_word(const char *stmt, const char *w, int wlen)
     for (mlen = 0; m[mlen] && !isspace((unsigned char)m[mlen]); mlen++) {}
     if (sreg(w, wlen) >= 0 || vfp_word(w, wlen))
         return 1;
+    /* A32 NEON: the quadword registers q0-q15 and every d0-d31 */
+    if (t_isa_a32 && wlen >= 2 && wlen <= 3 &&
+        (w[0] == 'q' || w[0] == 'Q' || w[0] == 'd' || w[0] == 'D') &&
+        isdigit((unsigned char)w[1]) && (wlen == 2 || isdigit((unsigned char)w[2]))) {
+        /* (d32 too: a register, if one that is not there, which the
+         * encoder names -- never a symbol) */
+        if (!(wlen == 3 && w[1] == '0'))
+            return 1;
+    }
     /* a shift inside an operand: `[r1, r2, lsl #2]`, `r3, lsr #4` */
     if ((wlen == 3 && (same_nocase(w, "lsl", 3) || same_nocase(w, "lsr", 3) ||
                        same_nocase(w, "asr", 3) || same_nocase(w, "ror", 3) ||

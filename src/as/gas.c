@@ -3425,6 +3425,16 @@ static void pool_dump(struct gas *g, int pass)
 
 /* ---- directives, continued: the ones that read expressions ----------- */
 
+/* Is t (NUL-terminated) within the n characters at a? */
+static int has_sub(const char *a, size_t n, const char *t)
+{
+    size_t m = strlen(t);
+    for (size_t i = 0; i + m <= n; i++)
+        if (!strncmp(a + i, t, m))
+            return 1;
+    return 0;
+}
+
 /* Returns 1 when the line was a directive. */
 static int directive(struct gas *g, char *p, int pass)
 {
@@ -3823,6 +3833,23 @@ static int directive(struct gas *g, char *p, int pass)
     if (DIR(".option") && g->tgt->machine == EM_RISCV && rvasm_option(arg))
         return 1;
 #endif
+    /* ARM `.fpu NAME`: the unit the file is for, as GNU as takes it --
+     * NEON and VFPv3/v4 without -d16 have d0-d31; -d16 and fpv4/fpv5
+     * sixteen; the -sp ones single precision only; softvfp none */
+    if (g->tgt->machine == EM_ARM && DIR(".fpu")) {
+        const char *a = skip_ws((char *)arg);
+        size_t n = 0;
+        while (a[n] && !isspace((unsigned char)a[n])) n++;
+        if (n && !(n == 7 && !strncmp(a, "softvfp", 7)) &&
+            !(n == 4 && !strncmp(a, "none", 4))) {
+            int d16 = has_sub(a, n, "d16") || !strncmp(a, "fpv4", 4) ||
+                      !strncmp(a, "fpv5", 4) || !strncmp(a, "vfpv2", 5) ||
+                      (n == 3 && !strncmp(a, "vfp", 3));
+            int sp = has_sub(a, n, "-sp");
+            tasm_set_fpu(sp ? 1 : 2, !d16);
+        }
+        return 1;
+    }
     if (DIR(".file") || DIR(".ident") || DIR(".cfi_startproc") ||
         DIR(".cfi_endproc") || DIR(".syntax") || DIR(".thumb") ||
         DIR(".arm") ||

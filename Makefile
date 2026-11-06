@@ -217,6 +217,7 @@ FAMILY_SRCS_arm := \
 	src/arch/thumb/codegen.c \
 	src/arch/thumb/v6m.c \
 	src/arch/thumb/asm.c \
+	src/arch/thumb/neon.c \
 	src/arch/thumb/predef.c \
 	src/arch/thumb/predef_cxx.c \
 	src/arch/thumbv8m/predef.c \
@@ -702,7 +703,7 @@ EMBLS_SRCS = tools/embls/embls.c $(PLATFORM_SRCS) src/cpp/cpp.c src/lex/lex.c \
              src/arch/x86_64/as.c src/arch/x86_64/att.c src/arch/x86_64/disasm.c \
              src/arch/aarch64/irgen.c \
              src/arch/aarch64/codegen.c src/arch/aarch64/emit.c \
-             src/arch/aarch64/asm.c src/arch/thumb/irgen.c src/arch/thumb/asm.c \
+             src/arch/aarch64/asm.c src/arch/thumb/irgen.c src/arch/thumb/asm.c src/arch/thumb/neon.c \
              src/arch/thumb/emit.c src/arch/thumb/a32.c src/arch/thumb/attrs.c \
              src/arch/riscv/irgen.c src/arch/riscv/attrs.c \
              src/arch/riscv/asm.c src/arch/riscv/emit.c \
