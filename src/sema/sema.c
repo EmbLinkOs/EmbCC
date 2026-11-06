@@ -10086,8 +10086,8 @@ static void check_func(struct unit *u, struct func *f)
     }
     /* `int a[n][m]` arrives as int (*)[m]: its row size is computed at
      * entry from the parameters before it */
-    for (int i = 0; i < f->nparams; i++) {
-        struct expr *b = i < MAX_PARAMS ? f->param_bound[i] : NULL;
+    for (int i = 0; i < f->nparams && i < MAX_PARAMS; i++) {
+        struct expr *b = f->param_bound[i];
         if (ty_is_vm(f->param_tys[i])) {
             vla_prepare(u, f, &sc, f->param_tys[i]);
             f->has_vm_params = 1;

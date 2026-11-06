@@ -2320,7 +2320,7 @@ static int vfp_stmt(const struct tok *t, int n, struct code *out,
                 vf(first, dbl, 'd') | (unsigned long)(dbl ? 2 * count : count);
             {
                 struct tok fake[2];
-                char nm[8];
+                char nm[16];
                 fake[0] = t[0];
                 snprintf(nm, sizeof nm, "%c%d", dbl ? 'd' : 's', first + count - 1);
                 fake[1].s = nm;
