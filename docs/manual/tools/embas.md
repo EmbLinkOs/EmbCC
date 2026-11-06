@@ -375,10 +375,14 @@ state), subsections (`.text 1`), `.weakref`, and any other directive
   `bra.a`, any other condition `.b` and then the inverse over a `bra.w`
   or `bra.a`. A form only ever lengthens, so the passes settle; a written
   size is kept, and refused if it does not reach.
-- **Sections** are `.text`, `.data`, `.bss` and so on, as GNU as names them
-  with `-muse-conventional-section-names` (its default is Renesas's `P`,
-  `D_1`, `B_1`), and each is padded to its alignment at its end, as GNU as
-  pads it. `.word` is four bytes, as GNU as makes it here.
+- **Sections** are GNU as's defaults, as GCC runs it: `.text`, `.data`
+  and `.bss` select Renesas's `P`, `D_1` and `B_1`, which every object
+  holds, first, even empty; `.section .text` is a section of its own
+  (code, whatever its flags say). Each is aligned as the file asks and
+  padded to its alignment at its end, as GNU as pads it. A local
+  symbol's value plus the addend is written into an `R_RX_DIR32` field
+  as well as into the relocation, as GNU as writes it. `.word` is four
+  bytes, as GNU as makes it here.
 
 ### ColdFire specifics
 
