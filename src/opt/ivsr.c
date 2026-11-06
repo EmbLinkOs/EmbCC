@@ -75,13 +75,26 @@ static int scaled_iv(struct ir_func *fn, struct defs *d, int lo, int hi,
     return 1;
 }
 
-/* Defined once, and outside [lo, hi): a value the loop cannot change. */
+/* Defined nowhere in [lo, hi): a value the loop cannot change. Defined
+ * once, or more than once all outside it -- an enclosing loop's counter,
+ * set before that loop and stepped at its end, is a constant to the loop
+ * nested in it (`i * 37 + r` in a loop over i inside one over r). */
 static int invariant_vreg(struct ir_func *fn, struct defs *d, int lo, int hi, int v)
 {
-    if (v < 0 || v >= fn->nvregs || d->cnt[v] != 1)
+    if (v < 0 || v >= fn->nvregs || d->cnt[v] < 1)
         return 0;
-    int bd = d->ins[v];
-    return !(bd >= lo && bd < hi);
+    if (d->cnt[v] == 1) {
+        int bd = d->ins[v];
+        return !(bd >= lo && bd < hi);
+    }
+    defs_lists(fn, d);
+    int seen = 0;
+    for (int n = d->first[v]; n >= 0; n = d->next[n]) {
+        if (n >= lo && n < hi)
+            return 0;
+        seen++;
+    }
+    return seen == d->cnt[v];      /* (a landing pad's are not listed) */
 }
 static int is_const_vreg(struct ir_func *fn, struct defs *d, int v)
 {
