@@ -25,3 +25,5 @@
 	sqshl r3, #1
 	uqrshl r4, r5
 	sqrshr r6, r7
+	lsll lr, r1, r5
+	lsll lr, r3, #8

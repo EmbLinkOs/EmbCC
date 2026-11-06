@@ -318,6 +318,15 @@ state), subsections (`.text 1`), `.weakref`, and any other directive
   `.thumb_func`, `.type NAME, %function` and `.thumb_set` make a symbol a
   Thumb function, which carries the interworking bit. `.L` labels stay
   out of the symbol table.
+- **ARMv8.1-M** (`-mcpu=cortex-m55`, `m85`): the conditional selects
+  (`csel`, `csinc`, `csinv`, `csneg`, and `cset`, `csetm`, `cinc`, `cinv`,
+  `cneg`), the low-overhead loops (`dls`, `dlstp`, `wls`, `wlstp`, `le`,
+  `letp`, `lctp`), `clrm` and `vscclrm`; and MVE (Helium) -- its vector
+  instructions from a table learned from llvm-mc (`tools/mve-isa`), a
+  statement predicated in a VPT block (`vaddt.i32`), `vpt` and `vpst`
+  with their masks, `vctp`, the scalar shifts (`lsll`, `asrl`, `uqshl`...)
+  and `vmrs`/`vmsr` of `vpr` and `p0`. On an earlier core each is refused
+  by name.
 - **The object** has `$t`/`$d` mapping symbols in sections that contain
   code, and the same `.ARM.attributes` the compiler writes for the target,
   so a disassembler decodes it and the linker can check it.

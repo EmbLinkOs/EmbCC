@@ -38,10 +38,58 @@ struct nn_insn {
 };
 struct nn_syn { const char *spelling, *canon; };
 
+/* the two learned tables, each under its own names: A32 NEON's and MVE's
+ * (tools/mve-isa), read by the same encoder */
+#define nn_fbits neon_fbits
+#define nn_oks neon_oks
+#define nn_fields neon_fields
+#define nn_insns neon_insns
+#define nn_syns neon_syns
 #include "neon.inc"
+#undef nn_fbits
+#undef nn_oks
+#undef nn_fields
+#undef nn_insns
+#undef nn_syns
+#define nn_fbits mve_fbits
+#define nn_oks mve_oks
+#define nn_fields mve_fields
+#define nn_insns mve_insns
+#define nn_syns mve_syns
+#include "mve.inc"
+#undef nn_fbits
+#undef nn_oks
+#undef nn_fields
+#undef nn_insns
+#undef nn_syns
 
-#define NINSN ((int)(sizeof nn_insns / sizeof nn_insns[0]))
-#define NSYN ((int)(sizeof nn_syns / sizeof nn_syns[0]))
+struct nn_tab {
+    const struct nn_fbit *fbits;
+    const int *oks;
+    const struct nn_field *fields;
+    const struct nn_insn *insns;
+    int ninsn;
+    const struct nn_syn *syns;
+    int nsyn;
+};
+static const struct nn_tab NEON_TAB = {
+    neon_fbits, neon_oks, neon_fields, neon_insns,
+    (int)(sizeof neon_insns / sizeof neon_insns[0]),
+    neon_syns, (int)(sizeof neon_syns / sizeof neon_syns[0]),
+};
+static const struct nn_tab MVE_TAB = {
+    mve_fbits, mve_oks, mve_fields, mve_insns,
+    (int)(sizeof mve_insns / sizeof mve_insns[0]),
+    mve_syns, (int)(sizeof mve_syns / sizeof mve_syns[0]),
+};
+static const struct nn_tab *T = &NEON_TAB;   /* (the call's table) */
+#define nn_fbits (T->fbits)
+#define nn_oks (T->oks)
+#define nn_fields (T->fields)
+#define nn_insns (T->insns)
+#define nn_syns (T->syns)
+#define NINSN (T->ninsn)
+#define NSYN (T->nsyn)
 
 static int first_of(const char *mn)
 {
@@ -330,8 +378,28 @@ static int parse(const char *mn, const char *p, struct st *s)
             continue;
         }
         {
+            /* MVE's: a comparison's condition (`vcmp.i32 eq, q0, q1`) */
+            static const char *const cc[] = { "eq", "ne", "cs", "cc", "mi", "pl",
+                "vs", "vc", "hi", "ls", "ge", "lt", "gt", "le", NULL };
+            int j;
+            for (j = 0; cc[j]; j++)
+                if (!strncmp(p, cc[j], 2) && !isalnum((unsigned char)p[2]) && p[2] != '_')
+                    break;
+            if (!cc[j] && (!strncmp(p, "hs", 2) || !strncmp(p, "lo", 2)) &&
+                !isalnum((unsigned char)p[2]))
+                j = p[0] == 'h' ? 2 : 3;
+            if (cc[j] || j == 2 || j == 3) {
+                put(s, "C");
+                if (!atom(s, 'C', j))
+                    return 0;
+                p += 2;
+                continue;
+            }
+        }
+        {
             static const char *const sys[] = { "apsr_nzcv", "fpscr", "fpexc",
-                "fpsid", "mvfr0", "mvfr1", "mvfr2", "fpinst2", "fpinst", NULL };
+                "fpsid", "mvfr0", "mvfr1", "mvfr2", "fpinst2", "fpinst", "uxtw",
+                "zr", NULL };
             int j;
             for (j = 0; sys[j]; j++)
                 if (!strncmp(p, sys[j], strlen(sys[j]))) {
@@ -389,8 +457,8 @@ static int fit_field(const struct nn_field *f, long long v, unsigned *w)
     return 1;
 }
 
-int neon_encode(const char *stmt, int len, unsigned long *word, char *err,
-                int errlen)
+static int tab_encode(const char *stmt, int len, unsigned long *word, char *err,
+                      int errlen)
 {
     char mn[32];
     const char *cm, *p = stmt, *e = stmt + len;
@@ -404,6 +472,33 @@ int neon_encode(const char *stmt, int len, unsigned long *word, char *err,
     if (mn[0] != 'v')
         return 0;
     cm = canonical(mn);
+    if (!cm && T == &MVE_TAB) {
+        /* MVE: the reductions' "dav" names, which llvm-mc takes and prints
+         * as its own (vmlaldav.s32 is vmlalv.s32) */
+        static const struct { const char *a, *c; } al[] = {
+            {"vmladava", "vmlava"}, {"vmladav", "vmlav"}, {"vmlaldava", "vmlalva"},
+            {"vmlaldav", "vmlalv"}, {"vrmlaldavha", "vrmlalvha"}, {"vrmlaldavh", "vrmlalvh"},
+        };
+        static char am[32];
+        const char *dot = strchr(mn, '.');
+        size_t bl = dot ? (size_t)(dot - mn) : strlen(mn);
+        for (unsigned j = 0; j < sizeof al / sizeof al[0] && !cm; j++)
+            if (strlen(al[j].a) == bl && !strncmp(mn, al[j].a, bl)) {
+                snprintf(am, sizeof am, "%s%s", al[j].c, dot ? dot : "");
+                cm = canonical(am);
+            }
+    }
+    if (!cm && T == &MVE_TAB) {
+        /* MVE: an instruction predicated in a VPT block is written with
+         * `t` or `e` after its name (vaddt.i32), and encoded as it is */
+        static char pm[32];
+        const char *dot = strchr(mn, '.');
+        size_t bl = dot ? (size_t)(dot - mn) : strlen(mn);
+        if (bl > 2 && (mn[bl - 1] == 't' || mn[bl - 1] == 'e')) {
+            snprintf(pm, sizeof pm, "%.*s%s", (int)bl - 1, mn, dot ? dot : "");
+            cm = canonical(pm);
+        }
+    }
     if (!cm)
         return 0;
     if (e - p >= (long)sizeof ops)
@@ -424,11 +519,15 @@ int neon_encode(const char *stmt, int len, unsigned long *word, char *err,
         }
         return 0;
     }
+    /* (MVE's vmov of two lanes: the assembler's own, asm.c) */
+    if (T == &MVE_TAB && (!strcmp(s.shape, "R,R,Q[N],Q[N]") ||
+                          !strcmp(s.shape, "Q[N],Q[N],R,R")))
+        return 0;
     /* vext's immediate counts elements of the size written; llvm-mc's
      * table (as its disassembler prints) names the largest element that
      * divides the byte offset and has a form of this shape: `vext.8 q0,
      * q1, q2, #8` is vext.64 #1 */
-    if (!strncmp(cm, "vext.", 5) && s.n == 4 && s.kind[3] == 'N') {
+    if (T == &NEON_TAB && !strncmp(cm, "vext.", 5) && s.n == 4 && s.kind[3] == 'N') {
         static char vx[16];
         int esz = atoi(cm + 5) / 8;
         long long bytes = s.v[3] * (esz > 0 ? esz : 1);
@@ -514,4 +613,21 @@ int neon_encode(const char *stmt, int len, unsigned long *word, char *err,
     snprintf(err, (size_t)errlen, "%.*s: no form of %s %s takes these "
              "operands", len, stmt, cm, s.shape);
     return -1;
+}
+
+int neon_encode(const char *stmt, int len, unsigned long *word, char *err,
+                int errlen)
+{
+    T = &NEON_TAB;
+    return tab_encode(stmt, len, word, err, errlen);
+}
+
+/* MVE's: the word is a Thumb one, its first halfword in the high bits */
+int mve_encode(const char *stmt, int len, unsigned long *word, char *err,
+               int errlen)
+{
+    T = &MVE_TAB;
+    int r = tab_encode(stmt, len, word, err, errlen);
+    T = &NEON_TAB;
+    return r;
 }

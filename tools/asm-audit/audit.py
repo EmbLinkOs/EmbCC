@@ -47,6 +47,12 @@ T = {
             "--target=thumbv6m-none-eabi -mcpu=cortex-m0",
             "llvm-mc -filetype=obj -triple=thumbv6m-none-eabi -mcpu=cortex-m0 {src} -o {obj}",
             "llvm-objdump", "@"),
+  # ARMv8.1-M with MVE (Helium): clang vectorizes with it, and uses the
+  # low-overhead loops and csel
+  "m55":   ("--target=thumbv8m.main-none-eabihf -mcpu=cortex-m55", "clang",
+            "--target=thumbv8.1m.main-none-eabihf -mcpu=cortex-m55 -mfloat-abi=hard",
+            "llvm-mc -filetype=obj -triple=thumbv8.1m.main-none-eabi -mattr=+mve.fp,+fp64,+lob {src} -o {obj}",
+            "llvm-objdump", "@"),
   "m33":   ("--target=thumbv8m.main-none-eabi -mcpu=cortex-m33", "clang",
             "--target=thumbv8m.main-none-eabi -mcpu=cortex-m33 -mfloat-abi=soft",
             "llvm-mc -filetype=obj -triple=thumbv8m.main-none-eabi -mcpu=cortex-m33 {src} -o {obj}",
@@ -241,14 +247,16 @@ def xt_relaxed(ins):
         k += 1
     return out
 
+ODX = []
+
 def relaxed_only(objdump, eo, ro):
     """The two objects differ only where a branch took another width (and
     the alignment padding after it moved): every instruction the same,
     its length too unless it is a relative branch. llvm-mc keeps some
     branches long that reach short -- a layout settled from a bigger
     start; EmbCC's settles from the smallest (gas.c)."""
-    a = sized(run([objdump, "-d", eo]).stdout)
-    b = sized(run([objdump, "-d", ro]).stdout)
+    a = sized(run([objdump] + ODX + ["-d", eo]).stdout)
+    b = sized(run([objdump] + ODX + ["-d", ro]).stdout)
     if PADDING:
         a, b = xt_relaxed(a), xt_relaxed(b)
     if len(a) != len(b):
@@ -269,8 +277,8 @@ def relaxed_only(objdump, eo, ro):
 def lengths_differ(objdump, eo, ro):
     """None when every instruction has the reference's length, "branch"
     when only branches differ, else the index of the first that does."""
-    a = sized(run([objdump, "-d", eo]).stdout)
-    b = sized(run([objdump, "-d", ro]).stdout)
+    a = sized(run([objdump] + ODX + ["-d", eo]).stdout)
+    b = sized(run([objdump] + ODX + ["-d", ro]).stdout)
     if PADDING:
         a, b = xt_relaxed(a), xt_relaxed(b)
     if len(a) != len(b):
@@ -312,8 +320,11 @@ def audit(name, out, show):
         # RISC-V's compressed forms print as their 32-bit aliases unless
         # asked not to, and a missed compression is a difference
         na = ["-M", "no-aliases"] if name.startswith("rv") else []
-        de = run([objdump, "-dr", "--no-show-raw-insn"] + na + [eo]).stdout
-        dr = run([objdump, "-dr", "--no-show-raw-insn"] + na + [ro]).stdout
+        # (MVE's instructions disassemble only with the extension asked)
+        global ODX
+        ODX = ["--mattr=+mve.fp,+lob"] if name == "m55" else []
+        de = run([objdump] + ODX + ["-dr", "--no-show-raw-insn"] + na + [eo]).stdout
+        dr = run([objdump] + ODX + ["-dr", "--no-show-raw-insn"] + na + [ro]).stdout
         global PADDING
         PADDING = name == "xtensa"
         global BAREHEX
@@ -330,7 +341,7 @@ def audit(name, out, show):
                 continue
             if r is not None:
                 differ += 1
-                a_, b_ = sized(run([objdump, "-d", eo]).stdout), sized(run([objdump, "-d", ro]).stdout)
+                a_, b_ = sized(run([objdump] + ODX + ["-d", eo]).stdout), sized(run([objdump] + ODX + ["-d", ro]).stdout)
                 if PADDING:
                     a_, b_ = xt_relaxed(a_), xt_relaxed(b_)
                 diffs.append("%s: '%s' is %d bytes, the reference's %d" % (

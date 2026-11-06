@@ -664,8 +664,9 @@ static int mve_shift_stmt(const struct tok *t, int n, struct code *out,
     long v = 0;
     if (kind <= 2) {
         int lo = n >= 3 ? tok_reg(&t[1]) : -1, hi = n >= 3 ? tok_reg(&t[2]) : -1;
-        if (lo < 0 || hi < 0 || (lo & 1) || !(hi & 1) || lo > 12 || hi > 11)
-            FAIL("%s's pair is an even register and an odd one, r0..r11", sh[k].n);
+        if (lo < 0 || hi < 0 || (lo & 1) || !(hi & 1) || hi > 11)
+            FAIL("%s's pair is an even register (r0..lr) and an odd one (r1..r11)",
+                 sh[k].n);
         unsigned h1 = 0xea50u | (unsigned)lo | (unsigned)sh[k].sat;
         unsigned base = (unsigned)(hi >> 1) << 9 | 0x100u | (unsigned)sh[k].op << 4;
         if (kind == 2 || (kind == 0 && n == 4 && tok_reg(&t[3]) >= 0)) {
@@ -712,6 +713,62 @@ static int v81_stmt(const struct tok *t, int n, struct code *out,
     {
         int r = mve_shift_stmt(t, n, out, err, errlen);
         if (r != 1) return r;
+    }
+    /* MVE's vctp.SIZE rn (the tail predicate) and vpst's block: one bit a
+     * further instruction, set where its t/e is not the one before's,
+     * then a closing one -- the mask's top bit in the first halfword */
+    if (t[0].len > 5 && same_nocase(t[0].s, "vctp.", 5)) {
+        const char *z = t[0].s + 5;
+        int zl = t[0].len - 5;
+        int sz = zl == 1 && z[0] == '8' ? 0 : zl == 2 && !strncmp(z, "16", 2) ? 1
+               : zl == 2 && !strncmp(z, "32", 2) ? 2 : zl == 2 && !strncmp(z, "64", 2) ? 3 : -1;
+        int rn = n == 2 ? tok_reg(&t[1]) : -1;
+        if (!target_thumb_mve()) FAIL("vctp is an MVE instruction");
+        if (sz < 0 || rn < 0 || rn == 13 || rn == 15)
+            FAIL("vctp.8/16/32/64 takes a register other than sp and pc");
+        t32(out, 0xf000u | (unsigned)sz << 4 | (unsigned)rn, 0xe801u);
+        return 0;
+    }
+    /* MVE's vmov of two lanes (2 and 0, or 3 and 1) and two core
+     * registers, either way: one register named twice, which a learned
+     * table holds badly */
+    if (n == 5 && (mnemonic_is(&t[0], "vmov") || mnemonic_is(&t[0], "vmovt") ||
+                   mnemonic_is(&t[0], "vmove"))) {
+        int to_core = tok_reg(&t[1]) >= 0;
+        const struct tok *qa = &t[to_core ? 3 : 1], *qb = &t[to_core ? 4 : 2];
+        int ra = tok_reg(&t[to_core ? 1 : 3]), rb = tok_reg(&t[to_core ? 2 : 4]);
+        int q1, q2, l1, l2;
+        if (ra >= 0 && rb >= 0 && qa->len == 5 && qb->len == 5 &&
+            (qa->s[0] == 'q' || qa->s[0] == 'Q') && (qb->s[0] == 'q' || qb->s[0] == 'Q') &&
+            qa->s[2] == '[' && qa->s[4] == ']' && qb->s[2] == '[' && qb->s[4] == ']') {
+            q1 = qa->s[1] - '0'; q2 = qb->s[1] - '0';
+            l1 = qa->s[3] - '0'; l2 = qb->s[3] - '0';
+            if (!target_thumb_mve()) FAIL("vmov of q-register lanes is an MVE instruction");
+            if (q1 != q2 || q1 < 0 || q1 > 7 || !((l1 == 2 && l2 == 0) || (l1 == 3 && l2 == 1)))
+                FAIL("vmov moves lanes 2 and 0, or 3 and 1, of one q register (q0-q7)");
+            if (ra == 13 || ra == 15 || rb == 13 || rb == 15 || (to_core && ra == rb))
+                FAIL("vmov's core registers are two others than sp and pc");
+            t32(out, 0xec00u | (unsigned)!to_core << 4 | (unsigned)rb,
+                (unsigned)q1 << 13 | 0x0f00u | (unsigned)(l1 == 3) << 4 | (unsigned)ra);
+            return 0;
+        }
+    }
+    if (t[0].len >= 4 && t[0].len <= 7 && same_nocase(t[0].s, "vpst", 4) && n == 1) {
+        unsigned mask = 0;
+        int k, nb = t[0].len - 4;
+        char prev = 't';
+        for (k = 0; k < nb; k++) {
+            char c = (char)tolower((unsigned char)t[0].s[4 + k]);
+            if (c != 't' && c != 'e') break;
+            mask |= (unsigned)(c != prev) << (3 - k);
+            prev = c;
+        }
+        if (k == nb) {
+            if (!target_thumb_mve()) FAIL("vpst is an MVE instruction");
+            mask |= 1u << (3 - nb);
+            t32(out, 0xfe31u | (mask >> 3 & 1) << 6, 0x0f4du | (mask & 7) << 13);
+            return 0;
+        }
     }
     static const struct { const char *n; int op, alias; } cs[] = {
         /* alias: 0 the base form, 1 rd,c (cset/csetm), 2 rd,rn,c (cinc...) */
@@ -3178,6 +3235,12 @@ static int one_stmt(const char *stmt, int len, struct code *out,
         if (r != 1)
             return r;
     }
+    /* (MVE's vmov of two lanes before VFP's vmov of two registers) */
+    if (target_thumb_mve()) {
+        int r = v81_stmt(t, n, out, err, errlen);
+        if (r != 1)
+            return r;
+    }
     {
         int r = vfp_stmt(t, n, out, err, errlen);
         if (r == 1)
@@ -3955,6 +4018,54 @@ int tasm_assemble(const char *text, struct code *out, char *err, int errlen)
                     p++;
                 continue;
             }
+            /* MVE (ARMv8.1-M): its vector instructions from the learned
+             * table (neon.c's encoder, tools/mve-isa's table) -- a Thumb
+             * word, the first halfword high */
+            if (!t_isa_a32 && target_thumb_mve()) {
+                unsigned long nw;
+                /* vpt[t|e]{0,3}.TYPE: vcmp's word with the block's mask --
+                 * one bit a further instruction, set where its t/e is not
+                 * the one before's, then a closing one -- as vpst writes it */
+                char vbuf[256];
+                unsigned vmask = 0;
+                {
+                    const char *q = st;
+                    while (q < st + len && isspace((unsigned char)*q)) q++;
+                    if (st + len - q > 4 && same_nocase(q, "vpt", 3)) {
+                        int k = 3;
+                        char prev = 't';
+                        unsigned m = 0;
+                        while (k < 7 && (q[k] == 't' || q[k] == 'e' || q[k] == 'T' || q[k] == 'E')) {
+                            char c = (char)tolower((unsigned char)q[k]);
+                            m |= (unsigned)(c != prev) << (3 - (k - 3));
+                            prev = c;
+                            k++;
+                        }
+                        if (q[k] == '.') {
+                            m |= 1u << (3 - (k - 3));
+                            int rest = (int)(st + len - (q + k));
+                            if (rest < (int)sizeof vbuf - 8) {
+                                snprintf(vbuf, sizeof vbuf, "vcmp%.*s", rest, q + k);
+                                vmask = m;
+                            }
+                        }
+                    }
+                }
+                if (vmask)
+                    r = mve_encode(vbuf, (int)strlen(vbuf), &nw, err, errlen);
+                else
+                    r = mve_encode(st, len, &nw, err, errlen);
+                if (r > 0 && vmask)
+                    nw |= (unsigned long)(vmask >> 3 & 1) << 22 | (unsigned long)(vmask & 7) << 13;
+                if (r < 0)
+                    return -1;
+                if (r > 0) {
+                    t32(out, (unsigned)(nw >> 16), (unsigned)(nw & 0xffff));
+                    if (*p)
+                        p++;
+                    continue;
+                }
+            }
             /* A32: NEON and the VFP forms beside it, from the learned
              * table (neon.c), when it has the statement's form */
             if (t_isa_a32) {
@@ -4001,6 +4112,13 @@ int tasm_is_word(const char *stmt, const char *w, int wlen)
     while (isspace((unsigned char)*m)) m++;
     for (mlen = 0; m[mlen] && !isspace((unsigned char)m[mlen]); mlen++) {}
     if (sreg(w, wlen) >= 0 || vfp_word(w, wlen))
+        return 1;
+    /* MVE's vector registers q0-q7, and `uxtw` in a gather's address */
+    if (!t_isa_a32 && target_thumb_mve() &&
+        ((wlen == 2 && (w[0] == 'q' || w[0] == 'Q') && w[1] >= '0' && w[1] <= '9') ||
+         (wlen == 4 && same_nocase(w, "uxtw", 4)) ||
+         (mlen >= 3 && (same_nocase(m, "vcmp", 4) || same_nocase(m, "vpt", 3)) &&
+          cond_num(w, wlen) >= 0)))
         return 1;
     /* A32 NEON: the quadword registers q0-q15 and every d0-d31 */
     if (t_isa_a32 && wlen >= 2 && wlen <= 3 &&

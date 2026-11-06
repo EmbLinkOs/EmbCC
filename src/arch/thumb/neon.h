@@ -8,4 +8,9 @@
 int neon_encode(const char *stmt, int len, unsigned long *word, char *err,
                 int errlen);
 
+/* MVE (ARMv8.1-M's vector extension), from tools/mve-isa's table: as
+ * neon_encode, the word's first halfword in its high 16 bits */
+int mve_encode(const char *stmt, int len, unsigned long *word, char *err,
+               int errlen);
+
 #endif

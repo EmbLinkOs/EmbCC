@@ -588,14 +588,18 @@ Select the architecture variant by core. `cortex-m0`, `cortex-m0plus`
 and `cortex-m1` select ARMv6-M on any ARM triple, as
 `thumbv6m-none-eabi` does, and `cortex-m23` selects ARMv8-M Baseline, as
 `thumbv8m.base-none-eabi` does. `cortex-m3` selects ARMv7-M; `cortex-m4`,
-`cortex-m7` and `cortex-m33` select ARMv7E-M. Otherwise the option does
-not change the architecture level: `--target=thumbv7m-none-eabi
--mcpu=cortex-m33` is `thumbv7em-none-eabi`, and ARMv8-M is selected only
-by a `thumbv8m.main` triple. On a `thumbv6m` triple, an ARMv7-M or
-ARMv8-M part raises the level. Any other value is an error:
+`cortex-m7` and `cortex-m33` select ARMv7E-M, and `cortex-m55` and
+`cortex-m85` ARMv8.1-M Mainline with MVE (Helium) and its floating point
+(`cortex-m85` with PACBTI too) -- the assembler then takes ARMv8.1-M's own
+instructions and MVE's (see [embas](tools/embas.md#arm-specifics)).
+Otherwise the option does not change the architecture level:
+`--target=thumbv7m-none-eabi -mcpu=cortex-m33` is `thumbv7em-none-eabi`,
+and ARMv8-M is selected only by a `thumbv8m.main` triple. On a `thumbv6m`
+triple, an ARMv7-M or ARMv8-M part raises the level. Any other value is
+an error:
 
 ```text
-embcc: error: -mcpu=cortex-m55 is not a part EmbCC knows: it emits ARMv6-M (cortex-m0, m0plus, m1), ARMv8-M Baseline (cortex-m23), ARMv7-M and ARMv7E-M (cortex-m3, m4, m7) and ARMv8-M Mainline (cortex-m33)
+embcc: error: -mcpu=cortex-m99 is not a part EmbCC knows: it emits ARMv6-M (cortex-m0, m0plus, m1), ARMv8-M Baseline (cortex-m23), ARMv7-M and ARMv7E-M (cortex-m3, m4, m7), ARMv8-M Mainline (cortex-m33) and ARMv8.1-M Mainline (cortex-m55, m85)
 ```
 
 #### `--fpu=FPU`
