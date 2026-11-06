@@ -58,25 +58,40 @@ int pass_latch_copies(struct ir_func *fn)
     int *cand_br = xmalloc((size_t)N * sizeof *cand_br);
     int ncand = 0;
     char *in_cand = xcalloc((size_t)N, 1);
+    /* pair[p]: the branch after p goes to the same copy block. `if (a &&
+     * !b) n++` -- `brz %a -> L; brnz %b -> L; n = n + 1` with L the copy
+     * `n = n0` -- is the same block entered from two branches in a row,
+     * one after the other with nothing between: the copies go above the
+     * first and both branches go on to where the block went. */
+    char *pair = xcalloc((size_t)N, 1);
     for (int p = 0; p + 1 < N; p++) {
         const struct ir_ins *br = &fn->ins[p];
         if ((br->op != IR_BRZ && br->op != IR_BRNZ) || br->label < 0 ||
-            br->label >= nl || refs[br->label] != 1)
+            br->label >= nl)
+            continue;
+        const struct ir_ins *br2 = &fn->ins[p + 1];
+        int two = refs[br->label] == 2 &&
+                  (br2->op == IR_BRZ || br2->op == IR_BRNZ) &&
+                  br2->label == br->label;
+        if (refs[br->label] != 1 && !two)
             continue;
         int b = lpos[br->label];
-        if (b <= 0 || b == p + 1 || lc_falls_through(fn->ins[b - 1].op))
+        if (b <= 0 || b == p + 1 + two ||
+            lc_falls_through(fn->ins[b - 1].op))
             continue;
         int e = b + 1;
         while (e < N && fn->ins[e].op == IR_MOV && !fn->ins[e].vol &&
                fn->ins[e].dst >= fn->nvars && fn->ins[e].dst < nv &&
-               fn->ins[e].dst != br->a)
+               fn->ins[e].dst != br->a && (!two || fn->ins[e].dst != br2->a))
             e++;
         if (e == b + 1 || e >= N || fn->ins[e].op != IR_JMP)
             continue;
-        if (in_cand[p] || in_cand[b])
+        if (in_cand[p] || in_cand[b] || (two && in_cand[p + 1]))
             continue;
         cand_br[ncand++] = p;
         in_cand[p] = 1;
+        if (two)
+            in_cand[p + 1] = pair[p] = 1;
         for (int k = b; k <= e; k++)
             in_cand[k] = 1;
     }
@@ -89,6 +104,7 @@ int pass_latch_copies(struct ir_func *fn)
         char *take = xcalloc((size_t)N, 1);    /* br index: rewrite it */
         char *above = xcalloc((size_t)N, 1);   /* ...with copies above p-1 */
         char *drop = xcalloc((size_t)N, 1);    /* the copy block's ins */
+        char *retarget = xcalloc((size_t)N, 1);/* a pair's second branch */
         for (int c = 0; c < ncand && any_live; c++) {
             int p = cand_br[c], b = lpos[fn->ins[p].label], e = b + 1;
             const struct ir_ins *cmp = p > 0 ? &fn->ins[p - 1] : NULL;
@@ -97,7 +113,7 @@ int pass_latch_copies(struct ir_func *fn)
             int ok = 1;
             while (fn->ins[e].op == IR_MOV) {
                 int d = fn->ins[e].dst;
-                if (ra_live_in_at(lv, fn, p + 1, d))
+                if (ra_live_in_at(lv, fn, p + 1 + pair[p], d))
                     ok = 0;
                 if (fused && (d == cmp->a || (!cmp->imm_b && d == cmp->b)))
                     ok = 0;
@@ -106,6 +122,7 @@ int pass_latch_copies(struct ir_func *fn)
             if (!ok)
                 continue;
             take[p] = 1;
+            retarget[p + 1] = pair[p];
             above[p] = (char)fused;
             for (int k = b; k <= e; k++)
                 drop[k] = 1;
@@ -128,7 +145,7 @@ int pass_latch_copies(struct ir_func *fn)
                 g_did.latch++;
             }
             *ib_push(&nb) = fn->ins[n];
-            if (take[n]) {
+            if (take[n] || retarget[n]) {
                 int k = lpos[fn->ins[n].label] + 1;
                 while (fn->ins[k].op == IR_MOV)
                     k++;
@@ -143,10 +160,10 @@ int pass_latch_copies(struct ir_func *fn)
         } else {
             free(nb.p);
         }
-        free(newpos); free(take); free(above); free(drop);
+        free(newpos); free(take); free(above); free(drop); free(retarget);
         free(first); free(last); ra_live_free(lv);
     }
-    free(refs); free(lpos); free(cand_br); free(in_cand);
+    free(refs); free(lpos); free(cand_br); free(in_cand); free(pair);
     return changed;
 }
 
