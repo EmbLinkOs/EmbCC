@@ -495,7 +495,12 @@ static void globals_emit(struct outbuf *b, struct unit *u,
                 ob_fmt(b, "\n\t.section\t%s,\"a%s%s\",%s%s\n", asym(name),
                        g->sec_flags & SHF_WRITE ? "w" : "",
                        g->sec_flags & SHF_EXECINSTR ? "x" : "", type_sigil(),
-                       nobits ? "nobits" : "progbits");
+                       nobits ? "nobits"
+                       : !strncmp(name, ".note", 5) ? "note"
+                       : !strncmp(name, ".init_array", 11) ? "init_array"
+                       : !strncmp(name, ".fini_array", 11) ? "fini_array"
+                       : !strncmp(name, ".preinit_array", 14) ? "preinit_array"
+                       : "progbits");
                 break;
             }
             open = 1;

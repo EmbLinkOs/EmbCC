@@ -5871,9 +5871,18 @@ lto_backend:
                                     SHF_ALLOC | SHF_WRITE | SHF_TLS,
                                     NULL, (Elf64_Xword)tbss_len,
                                     (Elf64_Xword)tbss_align);
+    /* (a section named for notes or constructors is of their type, as
+     * clang and GCC write it: a link gathers .init_array's by type, and
+     * a note read as data is loaded) */
     for (int k = 0; k < nnamed; k++)
         named[k].ndx = elfw_add_section(
-            w, named[k].name, named[k].nobits ? SHT_NOBITS : SHT_PROGBITS,
+            w, named[k].name,
+            named[k].nobits ? SHT_NOBITS
+            : !strncmp(named[k].name, ".note", 5) ? SHT_NOTE
+            : !strncmp(named[k].name, ".init_array", 11) ? SHT_INIT_ARRAY
+            : !strncmp(named[k].name, ".fini_array", 11) ? SHT_FINI_ARRAY
+            : !strncmp(named[k].name, ".preinit_array", 14) ? SHT_PREINIT_ARRAY
+            : SHT_PROGBITS,
             (Elf64_Xword)named[k].flags, named[k].buf,
             (Elf64_Xword)named[k].len, (Elf64_Xword)named[k].align);
 

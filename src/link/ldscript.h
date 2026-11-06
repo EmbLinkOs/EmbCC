@@ -107,6 +107,20 @@ struct ls_osec {
     long long vma, lma, size, al, fillv;  /* al: the alignment used */
     int nobits, exec, write, has_input, laid, region;
     int shndx;                  /* in the output, 0 if it is not written */
+    /* PHDRS: the program headers `:name` named, -1 ended; nphdr -1 when
+     * the section named none (it takes the previous section's) */
+    const char *phdr_name[8];
+    int nphdr;
+    int phdr[8], nph;           /* (resolved: indexes into sc->phdrs) */
+};
+
+/* PHDRS { name TYPE [FILEHDR] [PHDRS] [AT (addr)] [FLAGS (n)] ; } */
+struct ls_phdr {
+    const char *name;
+    unsigned type;
+    int filehdr, phdrs, has_at, has_flags;
+    long long at;
+    unsigned flags;
 };
 
 struct ls_region {
@@ -136,6 +150,8 @@ struct ls_script {
     const char **externs;       /* EXTERN */
     int nextern, capextern;
     int has_common;             /* some description says COMMON */
+    struct ls_phdr *phdrs;      /* PHDRS: the program headers, in order */
+    int nphdrs, capphdrs;
 };
 
 /* ---- the parser ---------------------------------------------------- */
@@ -883,9 +899,15 @@ static void lp_output_section(struct lp *p, const char *name)
             if (!o->lregion)
                 lp_die(p, "'AT>' needs a memory region");
         } else if (lp_peek(p) == ':' ) {
-            lp_die(p, "output section %s is assigned to a program header; "
-                   "PHDRS is not supported (embld makes one segment per "
-                   "output section)", name);
+            lp_accept(p, ':');
+            const char *ph = lp_ident(p);
+            if (!ph)
+                lp_die(p, "':' after output section %s needs a program header's "
+                       "name", name);
+            if (o->nphdr < 0) o->nphdr = 0;
+            if (o->nphdr == 8)
+                lp_die(p, "output section %s is in more than 8 program headers", name);
+            o->phdr_name[o->nphdr++] = ph;
         } else if (lp_accept(p, '=')) {
             o->fill = lp_expr(p);
         } else {
@@ -1134,8 +1156,53 @@ static void lp_top(struct lp *p)
                    lp_kw(p, "NOCROSSREFS_TO")) {
             if (lp_peek(p) == '(')
                 lp_file_list(p, 0);
+        } else if (lp_kw(p, "PHDRS")) {
+            /* the program headers, as ld writes them from this */
+            lp_expect(p, '{');
+            while (!lp_accept(p, '}')) {
+                const char *nm = lp_ident(p);
+                if (!nm)
+                    lp_die(p, "PHDRS: a program header needs a name");
+                static const struct { const char *n; unsigned t; } ty[] = {
+                    {"PT_NULL",0},{"PT_LOAD",1},{"PT_DYNAMIC",2},{"PT_INTERP",3},
+                    {"PT_NOTE",4},{"PT_SHLIB",5},{"PT_PHDR",6},{"PT_TLS",7},
+                    {"PT_GNU_EH_FRAME",0x6474e550},{"PT_GNU_STACK",0x6474e551},
+                    {"PT_GNU_RELRO",0x6474e552},{"PT_GNU_PROPERTY",0x6474e553},
+                };
+                LS_PUSH(sc->phdrs, sc->nphdrs, sc->capphdrs);
+                struct ls_phdr *h = &sc->phdrs[sc->nphdrs];
+                memset(h, 0, sizeof *h);
+                h->name = nm;
+                int found = 0;
+                for (unsigned k = 0; k < sizeof ty / sizeof *ty; k++)
+                    if (lp_kw(p, ty[k].n)) { h->type = ty[k].t; found = 1; break; }
+                if (!found) {
+                    if (lp_peek(p) >= '0' && lp_peek(p) <= '9')
+                        h->type = (unsigned)lp_number(p);
+                    else
+                        lp_die(p, "PHDRS: %s's type is PT_LOAD, PT_TLS, PT_NOTE... "
+                               "or a number", nm);
+                }
+                for (;;) {
+                    if (lp_kw(p, "FILEHDR")) h->filehdr = 1;
+                    else if (lp_kw(p, "PHDRS")) h->phdrs = 1;
+                    else if (lp_kw(p, "AT")) {
+                        lp_expect(p, '(');
+                        h->at = lp_number(p);
+                        h->has_at = 1;
+                        lp_expect(p, ')');
+                    } else if (lp_kw(p, "FLAGS")) {
+                        lp_expect(p, '(');
+                        h->flags = (unsigned)lp_number(p);
+                        h->has_flags = 1;
+                        lp_expect(p, ')');
+                    } else break;
+                }
+                lp_expect(p, ';');
+                sc->nphdrs++;
+            }
         } else if (lp_kw(p, "NOCROSSREFS") || lp_kw(p, "INSERT") ||
-                   lp_kw(p, "PHDRS") || lp_kw(p, "OVERLAY") ||
+                   lp_kw(p, "OVERLAY") ||
                    lp_kw(p, "VERSION")) {
             const char *e = p->p, *b = e;
             while (b > p->src && is_sym_char((unsigned char)b[-1]))

@@ -7516,6 +7516,8 @@ static unsigned char *read_file(const char *path, long *len)
 
 #define LS_MAX_PASSES 8
 
+static int ls_osec_tls(const struct linker *l, const struct ls_osec *o);
+
 struct ls_state {
     struct linker *l;
     struct ls_script *sc;
@@ -7716,7 +7718,12 @@ static long long ls_eval(struct ls_state *st, const struct lx *e, int *rel)
             return 0x1000;
         ls_die(st, "CONSTANT(%s) is not a constant embld knows", e->name);
         return 0;
-    default:                        /* SIZEOF_HEADERS: none are loaded */
+    default:
+        /* SIZEOF_HEADERS: the ELF header and the script's program headers
+         * when PHDRS gives them (a segment may load them); none are
+         * loaded otherwise */
+        if (st->sc->nphdrs)
+            return st->l->elf32 ? 52 + 32 * st->sc->nphdrs : 64 + 56 * st->sc->nphdrs;
         return 0;
     }
 }
@@ -8206,6 +8213,13 @@ static void ls_layout_osec(struct ls_state *st, int k)
         sc->reg[lr].cur = lma + o->size;
     }
     st->dot = start + o->size;
+    /* .tbss takes no address space where it is: each thread's copy is
+     * elsewhere, and what follows starts where it does (as ld lays it) */
+    if (o->nobits && ls_osec_tls(st->l, o)) {
+        st->dot = start;
+        if (vr >= 0 && sc->reg[vr].cur == start + o->size)
+            sc->reg[vr].cur = start;
+    }
 }
 
 static void ls_layout_pass(struct linker *l, struct ls_script *sc, int final)
@@ -8530,6 +8544,18 @@ static void ls_put_sym(unsigned char *at, const struct linker *l,
     }
 }
 
+/* an output section that is thread data: all its inputs are */
+static int ls_osec_tls(const struct linker *l, const struct ls_osec *o)
+{
+    int tls = 0, other = 0;
+    for (int b = 0; b < o->nbody; b++)
+        for (int j = 0; j < o->body[b].nlist; j++) {
+            if (l->insecs[o->body[b].list[j]].shflags & SHF_TLS) tls = 1;
+            else other = 1;
+        }
+    return tls && !other;
+}
+
 static void write_exec_script(struct linker *l, struct ls_script *sc,
                               const char *out, Elf64_Addr entry)
 {
@@ -8549,18 +8575,76 @@ static void write_exec_script(struct linker *l, struct ls_script *sc,
     /* PT_TLS, after the loads, when there is a thread block: where its
      * template is, as a runtime that starts threads finds it */
     int tlsph = l->tls_size > 0;
-    Elf64_Off off = ehsz + (Elf64_Off)(nem + tlsph) * phsz;
+    /* PHDRS: the script's program headers, each section in the ones `:name`
+     * put it in (or the section before's, as ld has it); a PT_LOAD's
+     * sections in the file as in memory, at offsets congruent to their
+     * addresses modulo the page */
+    int nph = sc->nphdrs ? sc->nphdrs : nem + tlsph;
+    Elf64_Off page = l->machine == EM_X86_64 || l->machine == EM_AARCH64 ? 0x1000 : 4;
+    if (sc->nphdrs) {
+        int cur[8], ncur = 0;
+        for (int k = 0; k < nem; k++) {
+            struct ls_osec *o = &sc->osecs[em[k]];
+            if (o->nphdr > 0) {
+                ncur = 0;
+                for (int j = 0; j < o->nphdr; j++) {
+                    if (!strcmp(o->phdr_name[j], "NONE"))
+                        continue;
+                    int f = -1;
+                    for (int h = 0; h < sc->nphdrs; h++)
+                        if (!strcmp(sc->phdrs[h].name, o->phdr_name[j])) f = h;
+                    if (f < 0)
+                        die("output section %s is in program header '%s', which "
+                            "PHDRS does not declare", o->name, o->phdr_name[j]);
+                    cur[ncur++] = f;
+                }
+            }
+            o->nph = ncur;
+            memcpy(o->phdr, cur, sizeof cur);
+        }
+    }
+    Elf64_Off off = ehsz + (Elf64_Off)nph * phsz;
     Elf64_Off *fo = xmalloc((size_t)(nem + 1) * sizeof *fo);
+    Elf64_Off *seg_off = xcalloc((size_t)sc->nphdrs + 1, sizeof *seg_off);
+    long long *seg_vma = xcalloc((size_t)sc->nphdrs + 1, sizeof *seg_vma);
+    int *seg_set = xcalloc((size_t)sc->nphdrs + 1, sizeof *seg_set);
     for (int k = 0; k < nem; k++) {
         struct ls_osec *o = &sc->osecs[em[k]];
-        /* the file offset congruent to the address modulo 4, which is
-         * all a PT_LOAD aligned to 4 asks */
-        off = align_up(off, 4) + ((Elf64_Off)o->vma & 3);
+        int load = -1;
+        if (sc->nphdrs)
+            for (int j = 0; j < o->nph; j++)
+                if (sc->phdrs[o->phdr[j]].type == PT_LOAD && load < 0)
+                    load = o->phdr[j];
+        if (load >= 0 && seg_set[load]) {
+            /* in its segment, where its address says */
+            Elf64_Off want = seg_off[load] + (Elf64_Off)(o->vma - seg_vma[load]);
+            if (o->vma < seg_vma[load] || want < off) {
+                if (o->nobits)
+                    want = off;
+                else
+                    die("output section %s is in segment '%s' at 0x%llx, before "
+                        "or among what that segment already holds", o->name,
+                        sc->phdrs[load].name, (unsigned long long)o->vma);
+            }
+            off = want;
+        } else {
+            /* the file offset congruent to the address modulo the page (a
+             * PT_LOAD of the script's) or 4, which is all one aligned to 4
+             * asks */
+            Elf64_Off a = load >= 0 ? page : 4;
+            off += ((Elf64_Off)o->vma - off) & (a - 1);
+            if (load >= 0) {
+                seg_set[load] = 1;
+                seg_off[load] = off;
+                seg_vma[load] = o->vma;
+            }
+        }
         fo[k] = off;
         o->shndx = 1 + k;
         if (!o->nobits)
             off += (Elf64_Off)o->size;
     }
+    free(seg_off); free(seg_vma); free(seg_set);
     /* section headers: [0] null, the output sections, the DWARF, then
      * .symtab .strtab .shstrtab */
     int sh_dbg0 = 1 + nem, sh_symtab = sh_dbg0 + l->ndbg;
@@ -8667,17 +8751,101 @@ static void write_exec_script(struct linker *l, struct ls_script *sc,
     eh.e_version = EV_CURRENT;
     eh.e_entry = entry;
     eh.e_flags = l->machine == EM_ARM ? EF_ARM_EABI_VER5 : l->eflags;
-    eh.e_phoff = nem + tlsph ? ehsz : 0;
+    eh.e_phoff = nph ? ehsz : 0;
     eh.e_shoff = sh_off;
     eh.e_ehsize = (Elf64_Half)ehsz;
     eh.e_phentsize = (Elf64_Half)phsz;
-    eh.e_phnum = (Elf64_Half)(nem + tlsph);
+    eh.e_phnum = (Elf64_Half)nph;
     eh.e_shentsize = (Elf64_Half)shentsz;
     eh.e_shnum = (Elf64_Half)nsh;
     eh.e_shstrndx = (Elf64_Half)sh_shstr;
     ls_put_ehdr(img, l, &eh);
 
-    for (int k = 0; k < nem; k++) {
+    for (int h = 0; h < sc->nphdrs; h++) {
+        /* the script's: what its sections span */
+        const struct ls_phdr *hd = &sc->phdrs[h];
+        Elf64_Phdr ph;
+        memset(&ph, 0, sizeof ph);
+        ph.p_type = hd->type;
+        int first = -1, x = 0, w = 0;
+        Elf64_Off fend = 0;
+        long long mend = 0, al = 1;
+        for (int k = 0; k < nem; k++) {
+            struct ls_osec *o = &sc->osecs[em[k]];
+            int in = 0;
+            for (int j = 0; j < o->nph; j++)
+                if (o->phdr[j] == h) in = 1;
+            if (!in)
+                continue;
+            if (first < 0) {
+                first = k;
+                ph.p_offset = fo[k];
+                ph.p_vaddr = (Elf64_Addr)o->vma;
+                ph.p_paddr = (Elf64_Addr)(o->nobits ? o->vma : o->lma);
+            }
+            if (!o->nobits && fo[k] + (Elf64_Off)o->size > fend)
+                fend = fo[k] + (Elf64_Off)o->size;
+            /* (.tbss takes no room in a PT_LOAD: each thread's copy does) */
+            int tbss = o->nobits && ls_osec_tls(l, o);
+            if (o->vma + o->size > mend && !(tbss && hd->type == PT_LOAD))
+                mend = o->vma + o->size;
+            if (o->al > al) al = o->al;
+            x |= o->exec;
+            w |= o->write;
+        }
+        if (first >= 0) {
+            ph.p_filesz = fend > ph.p_offset ? fend - ph.p_offset : 0;
+            ph.p_memsz = mend > (long long)ph.p_vaddr
+                       ? (Elf64_Xword)(mend - (long long)ph.p_vaddr) : 0;
+            if (ph.p_memsz < ph.p_filesz) ph.p_memsz = ph.p_filesz;
+        }
+        if (hd->type == PT_PHDR) {
+            /* the program headers themselves, where the segment that
+             * loads the file's start puts them */
+            ph.p_offset = ehsz;
+            ph.p_filesz = ph.p_memsz = (Elf64_Xword)nph * phsz;
+            for (int g = 0; g < sc->nphdrs; g++) {
+                const struct ls_phdr *lh = &sc->phdrs[g];
+                if (lh->type != PT_LOAD || !(lh->filehdr || lh->phdrs))
+                    continue;
+                for (int k = 0; k < nem; k++) {
+                    const struct ls_osec *o = &sc->osecs[em[k]];
+                    int in = 0;
+                    for (int j = 0; j < o->nph; j++) if (o->phdr[j] == g) in = 1;
+                    if (in) {
+                        ph.p_vaddr = (Elf64_Addr)o->vma - fo[k] + ehsz;
+                        ph.p_paddr = (Elf64_Addr)(o->nobits ? o->vma : o->lma) - fo[k] + ehsz;
+                        break;
+                    }
+                }
+                break;
+            }
+            al = l->elf32 ? 4 : 8;
+            x = w = 0;
+        }
+        if (hd->has_at) ph.p_paddr = (Elf64_Addr)hd->at;
+        if ((hd->filehdr || hd->phdrs) && first >= 0) {
+            /* the headers in the segment: from the file's start */
+            Elf64_Off back = ph.p_offset;
+            if ((Elf64_Off)ph.p_vaddr < back)
+                die("PHDRS: segment '%s' at 0x%llx cannot also hold the "
+                    "headers before it", hd->name, (unsigned long long)ph.p_vaddr);
+            ph.p_offset = 0;
+            ph.p_vaddr -= back;
+            ph.p_paddr -= back;
+            ph.p_filesz += back;
+            ph.p_memsz += back;
+        }
+        ph.p_flags = hd->has_flags ? hd->flags : PF_R | (x ? PF_X : 0) | (w ? PF_W : 0);
+        ph.p_align = hd->type == PT_LOAD ? page
+                   : hd->type == PT_TLS ? (Elf64_Xword)(l->tls_align ? l->tls_align : al)
+                   : first < 0 ? (Elf64_Xword)(l->elf32 ? 4 : 8)
+                   : (Elf64_Xword)al;
+        if (hd->type == PT_TLS && first >= 0 && l->tls_size)
+            ph.p_memsz = l->tls_size;
+        ls_put_phdr(img + ehsz + (Elf64_Off)h * phsz, l, &ph);
+    }
+    for (int k = 0; k < nem && !sc->nphdrs; k++) {
         struct ls_osec *o = &sc->osecs[em[k]];
         Elf64_Phdr ph;
         memset(&ph, 0, sizeof ph);
@@ -8695,7 +8863,7 @@ static void write_exec_script(struct linker *l, struct ls_script *sc,
         ph.p_align = 4;
         ls_put_phdr(img + ehsz + (Elf64_Off)k * phsz, l, &ph);
     }
-    if (tlsph) {
+    if (tlsph && !sc->nphdrs) {
         Elf64_Phdr ph;
         Elf64_Addr tdata_end = l->tls_start;
         memset(&ph, 0, sizeof ph);
