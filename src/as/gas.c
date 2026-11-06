@@ -3826,6 +3826,13 @@ static int directive(struct gas *g, char *p, int pass)
         return 1;
     }
 #endif
+    /* x86: `.code16`, `.code32`, `.code64` -- the size of the code that
+     * follows (a boot sector's, a protected-mode stub's) */
+    if (g->tgt->machine == EM_X86_64 &&
+        (DIR(".code16") || DIR(".code32") || DIR(".code64"))) {
+        x86att_set_mode(name[5] == '1' ? 16 : name[5] == '3' ? 32 : 64);
+        return 1;
+    }
 #if FAMILY_BUILT(riscv)
     /* `.option rvc`/`norvc`/`push`/`pop`: whether the instructions that
      * follow take their 16-bit forms (the others -- relax, pic, arch --
@@ -5046,7 +5053,7 @@ static const struct gas_target X86_GAS = {
     0, 0, 0,
     R_X86_64_32, R_X86_64_64,
     R_X86_64_16, 2, x86att_symform, 0,
-    0, x86att_is_word, NULL, NULL, NULL,
+    0, x86att_is_word, x86att_reset, NULL, NULL,
     0, x86att_set_level, x86att_took_level, NULL,
     x86att_is_transfer, NULL
 };
@@ -5364,6 +5371,8 @@ int gas_assemble(const char *in_path, const char *out_path, int preprocess,
     g.tgt = t;
     sec_init(&g);
     gas_run(&g, &gx, text, in_path);
+    if (t->reset)
+        t->reset();                     /* (no mode left for what follows) */
     if (!g.errors && t->machine == EM_XTENSA)
         xt_lit_table(&g);
     rc = g.errors ? 1 : write_object(&g, out_path);

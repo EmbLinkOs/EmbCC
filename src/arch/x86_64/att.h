@@ -24,5 +24,10 @@ int x86att_is_transfer(const char *stmt);
  * its two-byte form where it reaches; 1 makes it the four-byte one. */
 void x86att_set_level(int level);
 int x86att_took_level(void);
+/* the code's size, 64 (the default), 32 or 16: .code32/.code16, NASM's
+ * bits -- the operand and address sizes without a prefix */
+void x86att_set_mode(int bits);
+void x86att_reset(void);            /* (64-bit code again: each pass's start) */
+int x86att_mode(void);
 
 #endif

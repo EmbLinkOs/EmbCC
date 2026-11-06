@@ -154,6 +154,7 @@ struct opnd {
     int k;
     int reg, size, hi8, rex8;          /* K_REG/K_XMM/K_CR/K_DR/K_SEG */
     int base, index, scale;            /* K_MEM: -1 none, 16 rip */
+    int asz;                           /* K_MEM: its registers' size, 0 none */
     long long disp;
     int dot;                           /* rip disp is .+N (from the start) */
     int seg;                           /* segment override prefix, 0 none */
@@ -177,13 +178,20 @@ static char *g_err;
 static int g_errlen;
 static int g_level = -1, g_took;
 /* (x86att_symform's: where the last statement's fields were) */
-static int g_last_disp_at = -1, g_last_imm_at = -1, g_last_len;
+static int g_last_disp_at = -1, g_last_imm_at = -1, g_last_len, g_last_disp_len;
 /* GNU as's {disp32} / {disp8}: the displacement's width, whatever its
  * value -- {disp32} is also how a relocated one keeps its field */
 static int g_disp_force;
 /* {imm32}, EmbCC's own: an immediate keeps its 32-bit field -- a symbol's
  * value is the linker's, and the 0 written for it fits a byte */
 static int g_imm_wide;
+/* the code's size: 64, or 32 and 16 after .code32/.code16 (NASM's bits) --
+ * the operand and address sizes an instruction has without a prefix */
+static int g_mode = 64;
+void x86att_set_mode(int bits) { g_mode = bits; }
+void x86att_reset(void) { g_mode = 64; }
+int x86att_mode(void) { return g_mode; }
+static int mode_bytes(void) { return g_mode / 8; }
 
 /* the relaxation level: 0 the short jump when it reaches, 1 the near one;
  * -2, pass one's, the short one always -- a layout that starts as small as
@@ -372,9 +380,11 @@ static int parse_opnd(const char *s, int n, struct opnd *o)
     }
     if (np >= 1 && plen[0]) {
         struct opnd r;
-        if (!parse_reg(parts[0], plen[0], &r) || r.k != K_REG || r.size != 8)
-            return fail("'%.*s' is not a 64-bit base register", plen[0], parts[0]);
+        if (!parse_reg(parts[0], plen[0], &r) || r.k != K_REG || r.size == 1 ||
+            (r.size == 2 && r.reg != 3 && r.reg != 5 && r.reg != 6 && r.reg != 7))
+            return fail("'%.*s' is not a base register", plen[0], parts[0]);
         o->base = r.reg;
+        o->asz = r.reg == 16 ? 8 : r.size;
     }
     if (np >= 2 && plen[1]) {
         struct opnd r;
@@ -383,12 +393,16 @@ static int parse_opnd(const char *s, int n, struct opnd *o)
             o->index = r.reg;
             o->vindex = r.size;
         } else {
-            if (!parse_reg(parts[1], plen[1], &r) || r.k != K_REG || r.size != 8 ||
-                r.reg == 16)
-                return fail("'%.*s' is not a 64-bit index register", plen[1], parts[1]);
-            if (r.reg == 4)
+            if (!parse_reg(parts[1], plen[1], &r) || r.k != K_REG || r.size == 1 ||
+                r.reg == 16 || (r.size == 2 && r.reg != 6 && r.reg != 7 &&
+                                r.reg != 3 && r.reg != 5))
+                return fail("'%.*s' is not an index register", plen[1], parts[1]);
+            if (r.reg == 4 && r.size != 2)
                 return fail("%%rsp cannot be an index");
+            if (o->asz && o->asz != r.size)
+                return fail("the base and the index are registers of one size");
             o->index = r.reg;
+            o->asz = r.size;
         }
     }
     if (np >= 3 && plen[2]) {
@@ -402,6 +416,20 @@ static int parse_opnd(const char *s, int n, struct opnd *o)
         return fail("'.+N' is an address only (%%rip)-relative");
     if (o->base == 16 && o->index >= 0)
         return fail("(%%rip) takes no index");
+    if (o->asz == 2) {                 /* 8086 addressing: bx/bp + si/di */
+        int b = o->base, i = o->index;
+        if (b == 6 || b == 7) {        /* (%si,%bx) is (%bx,%si) */
+            if (i >= 0 && i != 3 && i != 5)
+                return fail("16-bit addressing is %%bx or %%bp, plus %%si or %%di");
+            o->base = i; o->index = b;
+            b = o->base; i = o->index;
+        }
+        if (i >= 0 && ((b >= 0 && b != 3 && b != 5) || (i != 6 && i != 7 && b >= 0)))
+            return fail("16-bit addressing is %%bx or %%bp, plus %%si or %%di");
+        if (i >= 0 && o->scale != 1)
+            return fail("16-bit addressing has no scale");
+        if (b < 0 && i >= 0) { o->base = i; o->index = -1; }
+    }
     return 0;
 }
 
@@ -414,6 +442,41 @@ enum { P66 = 1, PF2 = 2, PF3 = 4 };
  * reg_is_reg, else the /digit); `w` is REX.W; `byte_regs` says the
  * registers named are byte ones (spl..dil need a REX, ah..bh refuse it) */
 static int modrm(struct ib *x, int regf, const struct opnd *rm);
+
+/* a memory operand's address size: its registers', else the mode's */
+static int addr_size(const struct opnd *m)
+{
+    return m->asz ? m->asz : mode_bytes();
+}
+
+/* a memory operand's segment override, then 67 when its address size is
+ * not the mode's (llvm-mc's and NASM's order) */
+static int mem_pfx(struct ib *x, const struct opnd *rm)
+{
+    if (rm->k != K_MEM)
+        return 0;
+    if (rm->seg) put(x, (unsigned)rm->seg);
+    int a = addr_size(rm);
+    if (g_mode == 64 && a == 2)
+        return fail("16-bit addressing is not in 64-bit code");
+    if (g_mode != 64 && a == 8)
+        return fail("a 64-bit address is only in 64-bit code");
+    if (a != mode_bytes() && !(g_mode == 64 && rm->base == 16 && a == 8))
+        put(x, 0x67);
+    return 0;
+}
+
+/* the operand-size prefix and REX.W for a general operation of `sz`
+ * bytes, written by the forms that have no ModRM */
+static int osz_pfx(struct ib *x, int sz)
+{
+    if (sz == 8 && g_mode != 64)
+        return fail("a 64-bit operand is only in 64-bit code");
+    if ((sz == 2) != (g_mode == 16) && sz != 1 && sz != 8)
+        put(x, 0x66);
+    if (sz == 8) put(x, 0x48);
+    return 0;
+}
 
 static int emit_rm(struct ib *x, int pfx, int w, const unsigned char *op,
                    int nop, int regf, const struct opnd *regop,
@@ -435,11 +498,14 @@ static int emit_rm(struct ib *x, int pfx, int w, const unsigned char *op,
     }
     if (rm->k == K_MEM && rm->dot && rm->base != 16)
         return fail("'.+N' is an address only (%%rip)-relative");
-    if (rm->k == K_MEM && rm->seg) put(x, (unsigned)rm->seg);
+    if (mem_pfx(x, rm) < 0) return -1;
     if (pfx & P66) put(x, 0x66);
     if (pfx & PF2) put(x, 0xf2);
     if (pfx & PF3) put(x, 0xf3);
     if (rex || need) {
+        if (g_mode != 64)
+            return fail("a 64-bit operand, r8-r15 or spl..dil are only in "
+                        "64-bit code");
         if (hi)
             return fail("%%ah, %%bh, %%ch and %%dh cannot be used with a REX "
                         "prefix (a 64-bit operand or r8-r15)");
@@ -456,6 +522,36 @@ static int modrm(struct ib *x, int regf, const struct opnd *rm)
     int r3 = regf & 7;
     if (rm->k != K_MEM) {
         put(x, 0xc0u | (unsigned)r3 << 3 | (unsigned)(rm->reg & 7));
+        return 0;
+    }
+    if (addr_size(rm) == 2) {                   /* 8086 addressing */
+        int b = rm->base, i = rm->index, c;
+        if (b < 0) {                            /* disp16 alone */
+            put(x, (unsigned)r3 << 3 | 6);
+            if (rm->disp < -32768 || rm->disp > 65535)
+                return fail("the displacement does not fit 16 bits");
+            x->disp_at = x->n; x->disp_len = 2;
+            put_n(x, rm->disp, 2);
+            return 0;
+        }
+        if (i >= 0) c = (b == 5 ? 2 : 0) + (i == 7);
+        else c = b == 6 ? 4 : b == 7 ? 5 : b == 5 ? 6 : 7;
+        int mod = rm->disp == 0 && c != 6 ? 0 : fits8(rm->disp) ? 1 : 2;
+        if (g_disp_force == 32) mod = 2;
+        else if (g_disp_force == 8 && mod == 0) mod = 1;
+        if (rm->disp < -32768 || rm->disp > 65535)
+            return fail("the displacement does not fit 16 bits");
+        put(x, (unsigned)mod << 6 | (unsigned)r3 << 3 | (unsigned)c);
+        if (mod == 1) { x->disp_at = x->n; x->disp_len = 1; put_n(x, rm->disp, 1); }
+        if (mod == 2) { x->disp_at = x->n; x->disp_len = 2; put_n(x, rm->disp, 2); }
+        return 0;
+    }
+    if (rm->base < 0 && rm->index < 0 && g_mode != 64) {   /* disp32 alone */
+        put(x, (unsigned)r3 << 3 | 5);
+        if (rm->disp < -2147483648LL || rm->disp > 4294967295LL)
+            return fail("the displacement does not fit 32 bits");
+        x->disp_at = x->n; x->disp_len = 4;
+        put_n(x, rm->disp, 4);
         return 0;
     }
     if (rm->base == 16) {                       /* rip-relative */
@@ -512,6 +608,9 @@ static int emit_oreg(struct ib *x, int pfx, int w, const unsigned char *op,
     if (pfx & P66) put(x, 0x66);
     if (pfx & PF3) put(x, 0xf3);
     if (rex || r->rex8) {
+        if (g_mode != 64)
+            return fail("a 64-bit operand, r8-r15 or spl..dil are only in "
+                        "64-bit code");
         if (r->hi8) return fail("%%ah..%%bh cannot take a REX prefix");
         put(x, 0x40u | (unsigned)rex);
     }
@@ -584,7 +683,12 @@ static int is_rm(const struct opnd *o, int sz)
     return o->k == K_MEM || is_reg_sz(o, sz);
 }
 
-static int pfx_of(int sz) { return sz == 2 ? P66 : 0; }
+/* the operand-size prefix: a 16-bit operation's outside 16-bit code, a
+ * 32-bit one's in it */
+static int pfx_of(int sz)
+{
+    return (sz == 2 && g_mode != 16) || (sz == 4 && g_mode == 16) ? P66 : 0;
+}
 
 /* r/m + reg ALU ops: add or adc sbb and sub xor cmp (ext 0-7) */
 static int alu(struct ib *x, int ext, int sz, const struct opnd *src,
@@ -618,8 +722,8 @@ static int alu(struct ib *x, int ext, int sz, const struct opnd *src,
         /* (the accumulator's short form, but not for a symbol's value:
          * llvm-mc and GNU as write that as 81 /n) */
         if (dst->k == K_REG && dst->reg == 0 && !g_imm_wide) {
-            if (p) put(x, 0x66);
-            if (w) put(x, 0x48);
+            (void)p;
+            if (osz_pfx(x, sz) < 0) return -1;
             put(x, (unsigned)(5 + 8 * ext));
             imm_put(x, sv, sz == 2 ? 2 : 4);
             return 0;
@@ -799,7 +903,7 @@ static int emit_vex(struct ib *x, int pp, int map, int w, int l, int vvvv,
             return fail("'.+N' is an address only (%%rip)-relative");
         if (rm->base >= 8 && rm->base != 16) b = 1;
         if (rm->index >= 8) xb = 1;
-        if (rm->seg) put(x, (unsigned)rm->seg);
+        if (mem_pfx(x, rm) < 0) return -1;
     } else if (rm->reg >= 8)
         b = 1;
     if (map == M_0F && !w && !xb && !b) {
@@ -984,6 +1088,7 @@ static int evex(struct ib *x, const char *mn, const struct opnd *o, int n)
                 B = (rm >> 3) & 1;
                 X = (rm >> 4) & 1;
             }
+            if (mo && mem_pfx(x, mo) < 0) return -1;
             if (f->vex) {
                 if (f->map == 1 && !f->W && !X && !B) {
                     put(x, 0xc5);
@@ -1579,6 +1684,19 @@ static int bmi(struct ib *x, const char *mn, const struct opnd *o, int n)
 static int insn(struct ib *x, const char *mn, struct opnd *o, int n)
 {
     int s;
+    /* 16- and 32-bit code: eight registers of each kind, none of 64 bits,
+     * no %rip */
+    if (g_mode != 64)
+        for (int k = 0; k < n; k++) {
+            const struct opnd *q = &o[k];
+            if (((q->k == K_REG || q->k == K_XMM || q->k == K_CR || q->k == K_DR ||
+                  q->k == K_KREG) && q->reg >= 8) ||
+                (q->k == K_REG && (q->size == 8 || q->rex8)) ||
+                (q->k == K_MEM && (q->base >= 8 || q->index >= 8)))
+                return fail("'%s': a 64-bit register, r8-r15, spl..dil, a "
+                            "vector register past 7 or %%rip is only in "
+                            "64-bit code (this is %d-bit code)", mn, g_mode);
+        }
     /* AVX-512: what only EVEX encodes goes nowhere else (a VEX or legacy
      * encoder would take xmm17 for xmm1); an AVX-512 mnemonic with xmm
      * operands, or a VEX one's AVX-512 form, after the VEX encoder
@@ -1632,7 +1750,6 @@ static int insn(struct ib *x, const char *mn, struct opnd *o, int n)
         {"syscall",{0x0f,0x05},2}, {"sysretq",{0x48,0x0f,0x07},3},
         {"sysretl",{0x0f,0x07},2}, {"swapgs",{0x0f,0x01,0xf8},3},
         {"iretq",{0x48,0xcf},2}, {"iret",{0xcf},1}, {"iretl",{0xcf},1},
-        {"lret",{0xcb},1}, {"lretq",{0x48,0xcb},2},
         {"mfence",{0x0f,0xae,0xf0},3}, {"lfence",{0x0f,0xae,0xe8},3},
         {"sfence",{0x0f,0xae,0xf8},3}, {"wbinvd",{0x0f,0x09},2},
         {"invd",{0x0f,0x08},2}, {"pushfq",{0x9c},1}, {"popfq",{0x9d},1},
@@ -1654,7 +1771,35 @@ static int insn(struct ib *x, const char *mn, struct opnd *o, int n)
         {"cmpsb",{0xa6},1}, {"cmpsw",{0x66,0xa7},2}, {"cmpsl",{0xa7},1},
         {"cmpsq",{0x48,0xa7},2}, {"scasb",{0xae},1}, {"scasw",{0x66,0xaf},2},
         {"scasl",{0xaf},1}, {"scasq",{0x48,0xaf},2},
+        {"pushfw",{0x66,0x9c},2}, {"popfw",{0x66,0x9d},2},
+        {"pushfl",{0x9c},1}, {"popfl",{0x9d},1},
+        {"pusha",{0x60},1}, {"pushaw",{0x66,0x60},2}, {"pushal",{0x60},1},
+        {"popa",{0x61},1}, {"popaw",{0x66,0x61},2}, {"popal",{0x61},1},
+        {"iretw",{0x66,0xcf},2},
+        {"daa",{0x27},1}, {"das",{0x2f},1}, {"aaa",{0x37},1}, {"aas",{0x3f},1},
+        {"into",{0xce},1}, {"salc",{0xd6},1}, {"xlat",{0xd7},1}, {"xlatb",{0xd7},1},
+        {"int1",{0xf1},1}, {"icebp",{0xf1},1}, {"rsm",{0x0f,0xaa},2},
+        {"clts",{0x0f,0x06},2}, {"sysenter",{0x0f,0x34},2},
+        {"sysexit",{0x0f,0x35},2}, {"insb",{0x6c},1}, {"insw",{0x66,0x6d},2},
+        {"insl",{0x6d},1}, {"outsb",{0x6e},1}, {"outsw",{0x66,0x6f},2},
+        {"outsl",{0x6f},1}, {"aam",{0xd4,0x0a},2}, {"aad",{0xd5,0x0a},2},
+        {"cwde",{0x98},1}, {"cbw",{0x66,0x98},2}, {"cwd",{0x66,0x99},2},
+        {"endbr32",{0xf3,0x0f,0x1e,0xfb},4}, {"ud0",{0x0f,0xff},2},
     };
+    /* the size each form's operation has when it has one: 0x66 first is a
+     * 16-bit one's prefix (none in 16-bit code), these are the 32-bit ones
+     * (0x66 there), REX.W the 64-bit ones (64-bit code only), and these
+     * the 8086's that 64-bit code lost */
+    static const char *const plain32[] = {
+        "cwtl", "cltd", "cdq", "cwde", "movsl", "stosl", "lodsl", "cmpsl",
+        "scasl", "iretl", "sysretl", "pushfl", "popfl", "pushal", "popal",
+        "insl", "outsl", NULL };
+    static const char *const only64[] = {
+        "pushfq", "popfq", "swapgs", "syscall", "sysretl", "sysretq", NULL };
+    static const char *const not64[] = {
+        "pushfl", "popfl", "pusha", "pushaw", "pushal", "popa", "popaw",
+        "popal", "daa", "das", "aaa", "aas", "into", "salc", "aam", "aad",
+        NULL };
     /* a string instruction with its operands written: `movsq (%rsi),
      * %es:(%rdi)`, the implicit ones named -- a segment override other
      * than the source's default is the only thing they can add */
@@ -1673,23 +1818,68 @@ static int insn(struct ib *x, const char *mn, struct opnd *o, int n)
         for (unsigned k = 0; k < sizeof plain / sizeof *plain; k++)
             if (!strcmp(mn, plain[k].n)) {
                 if (seg) put(x, (unsigned)seg);
-                for (int i = 0; i < plain[k].len; i++)
-                    put(x, plain[k].b[i]);
+                /* (a string's registers of another size than the mode's
+                 * addresses: 67) */
+                for (int j = 0; j < n; j++)
+                    if (o[j].k == K_MEM && addr_size(&o[j]) != mode_bytes()) {
+                        if (g_mode == 64 && addr_size(&o[j]) == 2)
+                            return fail("16-bit addressing is not in 64-bit code");
+                        put(x, 0x67);
+                        break;
+                    }
+                {
+                    int i = 0;
+                    if (plain[k].b[0] == 0x48 && g_mode != 64)
+                        return fail("'%s' is only in 64-bit code", mn);
+                    if (plain[k].b[0] == 0x66 && g_mode == 16) i = 1;
+                    for (int j = 0; plain32[j]; j++)
+                        if (!strcmp(mn, plain32[j]) && g_mode == 16) put(x, 0x66);
+                    for (; i < plain[k].len; i++)
+                        put(x, plain[k].b[i]);
+                }
                 return 0;
             }
+    }
+    for (int j = 0; only64[j]; j++)
+        if (!strcmp(mn, only64[j]) && g_mode != 64)
+            return fail("'%s' is only in 64-bit code", mn);
+    for (int j = 0; not64[j]; j++)
+        if (!strcmp(mn, not64[j]) && g_mode == 64)
+            return fail("'%s' is not in 64-bit code", mn);
+    if ((!strcmp(mn, "aam") || !strcmp(mn, "aad")) && n == 1 && o[0].k == K_IMM) {
+        put(x, mn[2] == 'm' ? 0xd4 : 0xd5); imm_put(x, o[0].imm, 1);
+        return 0;
     }
     if (n == 0) {
         for (unsigned k = 0; k < sizeof plain / sizeof *plain; k++)
             if (!strcmp(mn, plain[k].n)) {
-                for (int i = 0; i < plain[k].len; i++)
+                int i = 0;
+                if (plain[k].b[0] == 0x48 && g_mode != 64)
+                    return fail("'%s' is only in 64-bit code", mn);
+                if (plain[k].b[0] == 0x66 && g_mode == 16) i = 1;
+                for (int j = 0; plain32[j]; j++)
+                    if (!strcmp(mn, plain32[j]) && g_mode == 16) put(x, 0x66);
+                for (; i < plain[k].len; i++)
                     put(x, plain[k].b[i]);
                 return 0;
             }
-        if (!strcmp(mn, "ret") || !strcmp(mn, "retq")) { put(x, 0xc3); return 0; }
     }
-    if ((!strcmp(mn, "ret") || !strcmp(mn, "retq")) && n == 1 && o[0].k == K_IMM) {
-        put(x, 0xc2); imm_put(x, o[0].imm, 2);
-        return 0;
+    /* ret and lret: the mode's size, another with 66 (or REX.W) */
+    {
+        int far = !strncmp(mn, "lret", 4);
+        if ((s = sized(mn, far ? "lret" : "ret")) >= 0 &&
+            (n == 0 || (n == 1 && o[0].k == K_IMM))) {
+            int def = g_mode == 16 ? 2 : g_mode == 32 || far ? 4 : 8;
+            if (s == 1 || (s == 8 && g_mode != 64) || (!far && s == 4 && g_mode == 64))
+                return fail("'%s' is not a return of this code's sizes", mn);
+            if (s && s != def) {
+                if (s == 8) put(x, 0x48);
+                else put(x, 0x66);
+            }
+            put(x, (far ? 0xca : 0xc2) + (n == 0));
+            if (n) imm_put(x, o[0].imm, 2);
+            return 0;
+        }
     }
     if (!strcmp(mn, "int") && n == 1 && o[0].k == K_IMM) {
         put(x, 0xcd); imm_put(x, o[0].imm, 1);
@@ -1702,17 +1892,21 @@ static int insn(struct ib *x, const char *mn, struct opnd *o, int n)
         int call = mn[0] == 'c';
         if (o[0].star) {
             unsigned char op = 0xff;
-            if (o[0].k == K_REG && o[0].size != 8)
-                return fail("an indirect target is a 64-bit register");
-            return emit_rm(x, 0, 0, &op, 1, call ? 2 : 4, NULL, &o[0]);
+            int def = mode_bytes();
+            if (o[0].k == K_REG && o[0].size != def &&
+                !(g_mode != 64 && (o[0].size == 2 || o[0].size == 4)))
+                return fail("an indirect target is a %d-bit register", def * 8);
+            return emit_rm(x, o[0].k == K_REG && o[0].size != def ? P66 : 0, 0,
+                           &op, 1, call ? 2 : 4, NULL, &o[0]);
         }
         long long v;
         if (o[0].k == K_MEM && o[0].base < 0 && o[0].index < 0)
             v = o[0].disp;                      /* `.+N` or a number */
         else
             return fail("'%s' takes a label, or `*` and a register or memory", mn);
+        int nl = g_mode == 16 ? 2 : 4;          /* rel16 in 16-bit code */
         if (call) {
-            put(x, 0xe8); imm_put(x, v - 5, 4);
+            put(x, 0xe8); imm_put(x, v - 1 - nl, nl);
             return 0;
         }
         if (g_level < 1 && (fits8(v - 2) || g_level == -2)) {
@@ -1720,7 +1914,7 @@ static int insn(struct ib *x, const char *mn, struct opnd *o, int n)
             return 0;
         }
         g_took = 1;
-        put(x, 0xe9); imm_put(x, v - 5, 4);
+        put(x, 0xe9); imm_put(x, v - 1 - nl, nl);
         return 0;
     }
     if (mn[0] == 'j' && n == 1 && cond_of(mn + 1) >= 0) {
@@ -1733,12 +1927,58 @@ static int insn(struct ib *x, const char *mn, struct opnd *o, int n)
             return 0;
         }
         g_took = 1;
-        put(x, 0x0f); put(x, 0x80u + (unsigned)c); imm_put(x, v - 6, 4);
+        int nl = g_mode == 16 ? 2 : 4;
+        put(x, 0x0f); put(x, 0x80u + (unsigned)c); imm_put(x, v - 2 - nl, nl);
         return 0;
     }
-    if (!strcmp(mn, "jrcxz") && n == 1) {
-        put(x, 0xe3); imm_put(x, o[0].disp - 2, 1);
-        return 0;
+    /* the loops and the count-register jumps: a byte's reach only; 67 when
+     * the count register's size is not the mode's address size */
+    {
+        static const struct { const char *n; unsigned op; int asz; } lp[] = {
+            {"loop",0xe2,0},{"loope",0xe1,0},{"loopz",0xe1,0},{"loopne",0xe0,0},
+            {"loopnz",0xe0,0},{"jcxz",0xe3,2},{"jecxz",0xe3,4},{"jrcxz",0xe3,8},
+        };
+        for (unsigned k = 0; k < sizeof lp / sizeof *lp; k++)
+            if (!strcmp(mn, lp[k].n) && n == 1) {
+                if (o[0].k != K_MEM || o[0].base >= 0 || o[0].index >= 0)
+                    return fail("'%s' takes a label", mn);
+                int a = lp[k].asz;
+                if (a && ((a == 8) != (g_mode == 64) || (a == 2 && g_mode == 64)))
+                    return fail("'%s' is not in %d-bit code", mn, g_mode);
+                if (a && a != mode_bytes()) put(x, 0x67);
+                int len = x->n + 2;
+                put(x, lp[k].op);
+                long long d = o[0].disp - len;
+                if (!fits8(d))
+                    return fail("'%s' reaches 128 bytes either way; the label is "
+                                "%lld away", mn, d);
+                imm_put(x, d, 1);
+                return 0;
+            }
+    }
+    /* far jumps and calls: ljmp $selector, $offset, or through memory */
+    {
+        int call = !strncmp(mn, "lcall", 5);
+        if (((s = sized(mn, call ? "lcall" : "ljmp")) >= 0)) {
+            int def = g_mode == 16 ? 2 : 4;
+            if (n == 2 && o[0].k == K_IMM && o[1].k == K_IMM) {
+                if (g_mode == 64)
+                    return fail("'%s $sel, $off' is not in 64-bit code", mn);
+                int sz = s ? s : def;
+                if (sz != 2 && sz != 4) return fail("'%s': a 16- or 32-bit offset", mn);
+                if (sz != def) put(x, 0x66);
+                put(x, call ? 0x9a : 0xea);
+                imm_put(x, o[1].imm, sz);
+                put_n(x, o[0].imm, 2);
+                return 0;
+            }
+            if (n == 1 && o[0].star && o[0].k == K_MEM) {
+                unsigned char op = 0xff;
+                if (s == 1 || (s == 8 && g_mode != 64)) return fail("'%s': these sizes", mn);
+                return emit_rm(x, s == 2 || s == 4 ? pfx_of(s) : 0, s == 8, &op, 1,
+                               call ? 3 : 5, NULL, &o[0]);
+            }
+        }
     }
 
     /* ---- mov ---- */
@@ -1756,13 +1996,30 @@ static int insn(struct ib *x, const char *mn, struct opnd *o, int n)
             int to = dst->k == K_CR || dst->k == K_DR;
             struct opnd *sp = to ? dst : src, *r = to ? src : dst;
             unsigned char op[2] = { 0x0f, (unsigned char)((sp->k == K_DR ? 0x21 : 0x20) + (to ? 2 : 0)) };
-            if (r->k != K_REG || r->size != 8)
-                return fail("a control or debug register moves to or from a 64-bit register");
+            if (r->k != K_REG || r->size != (g_mode == 64 ? 8 : 4))
+                return fail("a control or debug register moves to or from a %d-bit "
+                            "register", g_mode == 64 ? 64 : 32);
             return emit_rm(x, 0, 0, op, 2, sp->reg, NULL, r);
         }
         int sz = opsize(s, o, 2);
         if (need_size(sz, mn) < 0) return -1;
         int w = sz == 8, p = pfx_of(sz);
+        /* 16- and 32-bit code: the accumulator and an absolute address,
+         * A0-A3 (moffs), as llvm-mc and NASM write it */
+        if (g_mode != 64 && src->k != K_IMM) {
+            struct opnd *acc = is_reg_sz(dst, sz) && dst->reg == 0 && !dst->hi8 ? dst
+                             : is_reg_sz(src, sz) && src->reg == 0 && !src->hi8 ? src : NULL;
+            struct opnd *mo = acc == dst ? src : dst;
+            if (acc && mo->k == K_MEM && mo->base < 0 && mo->index < 0 && !mo->dot) {
+                if (mem_pfx(x, mo) < 0) return -1;
+                if (p) put(x, 0x66);
+                put(x, (acc == dst ? 0xa0u : 0xa2u) + (sz != 1));
+                int a = addr_size(mo);
+                x->disp_at = x->n; x->disp_len = a;
+                put_n(x, mo->disp, a);
+                return 0;
+            }
+        }
         if (src->k == K_IMM) {
             long long v = src->imm;
             if (dst->k == K_REG) {
@@ -1855,8 +2112,7 @@ static int insn(struct ib *x, const char *mn, struct opnd *o, int n)
         int p = pfx_of(sz), w = sz == 8;
         if (o[0].k == K_IMM) {
             if (o[1].k == K_REG && o[1].reg == 0 && !o[1].hi8) {
-                if (p) put(x, 0x66);
-                if (w) put(x, 0x48);
+                if (osz_pfx(x, sz) < 0) return -1;
                 put(x, sz == 1 ? 0xa8 : 0xa9);
                 imm_put(x, o[0].imm, sz == 1 ? 1 : sz == 2 ? 2 : 4);
                 return 0;
@@ -1894,6 +2150,10 @@ static int insn(struct ib *x, const char *mn, struct opnd *o, int n)
                 int sz = opsize(s, o, 1);
                 if (need_size(sz, mn) < 0) return -1;
                 if (!is_rm(&o[0], sz)) return fail("'%s' takes a register or memory", mn);
+                if (k >= 6 && g_mode != 64 && o[0].k == K_REG && sz != 1) {
+                    unsigned char op = (unsigned char)(k == 6 ? 0x40 : 0x48);
+                    return emit_oreg(x, pfx_of(sz), 0, &op, 1, &o[0]);
+                }
                 unsigned char op = (unsigned char)(sz == 1 ? un[k].op8 : un[k].op);
                 return emit_rm(x, pfx_of(sz), sz == 8, &op, 1, un[k].ext, NULL, &o[0]);
             }
@@ -1961,28 +2221,46 @@ static int insn(struct ib *x, const char *mn, struct opnd *o, int n)
             }
     }
 
-    /* ---- push / pop ---- */
+    /* ---- push / pop ---- the mode's size, the other with 66 */
     if (((s = sized(mn, "push")) >= 0 || (s = sized(mn, "pop")) >= 0) && n == 1) {
         int push = mn[1] == 'u';
-        if (s && s != 8 && s != 2) return fail("'%s': push and pop are 16 or 64 bits", mn);
+        int def = mode_bytes();
+        if (s == 1 || (s == 8 && g_mode != 64) || (s == 4 && g_mode == 64))
+            return fail("'%s': push and pop are %s bits", mn,
+                        g_mode == 64 ? "16 or 64" : "16 or 32");
         if (push && o[0].k == K_IMM) {
+            int sz = s ? s : def;
+            if (sz != def && !(g_mode == 64 && sz == 8)) put(x, 0x66);
             if (imm8_ok(o[0].imm)) { put(x, 0x6a); imm_put(x, o[0].imm, 1); }
-            else { put(x, 0x68); imm_put(x, o[0].imm, 4); }
+            else { put(x, 0x68); imm_put(x, o[0].imm, sz == 2 ? 2 : 4); }
             return 0;
         }
         if (o[0].k == K_REG) {
-            if (o[0].size != 8 && o[0].size != 2) return fail("'%s' takes a 64-bit register", mn);
+            int sz = o[0].size;
+            if (sz == 1 || (g_mode == 64 && sz == 4) || (g_mode != 64 && sz == 8))
+                return fail("'%s' takes a %s-bit register", mn,
+                            g_mode == 64 ? "16- or 64" : "16- or 32");
             unsigned char op = push ? 0x50 : 0x58;
-            return emit_oreg(x, o[0].size == 2 ? P66 : 0, 0, &op, 1, &o[0]);
+            return emit_oreg(x, sz != def ? P66 : 0, 0, &op, 1, &o[0]);
         }
-        if (o[0].k == K_SEG && o[0].reg >= 4) {         /* fs, gs */
-            put(x, 0x0f);
-            put(x, (o[0].reg == 4 ? 0xa0u : 0xa8u) + (push ? 0 : 1));
+        if (o[0].k == K_SEG) {
+            int r = o[0].reg;
+            if (s && s != def) put(x, 0x66);
+            if (r >= 4) {                               /* fs, gs */
+                put(x, 0x0f);
+                put(x, (r == 4 ? 0xa0u : 0xa8u) + (push ? 0 : 1));
+                return 0;
+            }
+            if (g_mode == 64)
+                return fail("'%s' of %%es, %%cs, %%ss or %%ds is not in 64-bit code", mn);
+            if (!push && r == 1)
+                return fail("%%cs cannot be popped");
+            put(x, (unsigned)(r * 8 + 6 + !push));
             return 0;
         }
         if (o[0].k != K_MEM) return fail("'%s' takes a register, memory or $imm", mn);
         unsigned char op = push ? 0xff : 0x8f;
-        return emit_rm(x, s == 2 ? P66 : 0, 0, &op, 1, push ? 6 : 0, NULL, &o[0]);
+        return emit_rm(x, s && s != def ? P66 : 0, 0, &op, 1, push ? 6 : 0, NULL, &o[0]);
     }
 
     /* ---- setcc, cmovcc ---- */
@@ -2076,11 +2354,51 @@ static int insn(struct ib *x, const char *mn, struct opnd *o, int n)
         return emit_rm(x, 0, mn[7] == '1', op, 2, 1, NULL, &o[0]);
     }
 
+    /* ---- the far-pointer loads, enter, and the protection checks ---- */
+    {
+        static const struct { const char *n; unsigned char op[2]; int nop, legacy; } fp[] = {
+            {"les",{0xc4},1,1},{"lds",{0xc5},1,1},{"lss",{0x0f,0xb2},2,0},
+            {"lfs",{0x0f,0xb4},2,0},{"lgs",{0x0f,0xb5},2,0},
+            {"lar",{0x0f,0x02},2,0},{"lsl",{0x0f,0x03},2,0},
+        };
+        for (unsigned k = 0; k < sizeof fp / sizeof *fp; k++)
+            if ((s = sized(mn, fp[k].n)) >= 0 && n == 2 && o[1].k == K_REG) {
+                int sz = o[1].size;
+                if (fp[k].legacy && g_mode == 64)
+                    return fail("'%s' is not in 64-bit code", mn);
+                if (sz == 1 || (fp[k].op[1] != 0x02 && fp[k].op[1] != 0x03 && o[0].k != K_MEM))
+                    return fail("'%s' loads a 16-, 32- or 64-bit register from memory", mn);
+                return emit_rm(x, pfx_of(sz), sz == 8, fp[k].op, fp[k].nop, o[1].reg,
+                               &o[1], &o[0]);
+            }
+        static const struct { const char *n; unsigned char op1; int ext; } pr[] = {
+            {"verr",0x00,4},{"verw",0x00,5},{"smsw",0x01,4},{"lmsw",0x01,6},
+        };
+        for (unsigned k = 0; k < sizeof pr / sizeof *pr; k++)
+            if ((s = sized(mn, pr[k].n)) >= 0 && n == 1 &&
+                (o[0].k == K_MEM || o[0].k == K_REG)) {
+                unsigned char op[2] = { 0x0f, pr[k].op1 };
+                int st = !strcmp(pr[k].n, "smsw") && o[0].k == K_REG;
+                return emit_rm(x, st ? pfx_of(o[0].size) : 0, st && o[0].size == 8,
+                               op, 2, pr[k].ext, NULL, &o[0]);
+            }
+        if ((s = sized(mn, "enter")) >= 0 && n == 2 && o[0].k == K_IMM && o[1].k == K_IMM) {
+            if (s && s != (g_mode == 64 ? 8 : mode_bytes())) put(x, 0x66);
+            put(x, 0xc8); imm_put(x, o[0].imm, 2); put_n(x, o[1].imm, 1);
+            return 0;
+        }
+        if (!strcmp(mn, "arpl") && n == 2 && o[0].k == K_REG && o[0].size == 2) {
+            unsigned char op = 0x63;
+            if (g_mode == 64) return fail("arpl is not in 64-bit code");
+            return emit_rm(x, 0, 0, &op, 1, o[0].reg, &o[0], &o[1]);
+        }
+    }
+
     /* ---- port I/O ---- */
     if ((s = sized(mn, "in")) >= 0 && n == 2 && o[1].k == K_REG && o[1].reg == 0) {
         int sz = o[1].size;
         if (sz == 8) return fail("in reads 8, 16 or 32 bits");
-        if (sz == 2) put(x, 0x66);
+        if (osz_pfx(x, sz) < 0) return -1;
         if (o[0].k == K_IMM) { put(x, sz == 1 ? 0xe4 : 0xe5); imm_put(x, o[0].imm, 1); return 0; }
         if (o[0].k == K_REG && o[0].reg == 2 && o[0].size == 2) { put(x, sz == 1 ? 0xec : 0xed); return 0; }
         return fail("in's port is $N or %%dx");
@@ -2088,7 +2406,7 @@ static int insn(struct ib *x, const char *mn, struct opnd *o, int n)
     if ((s = sized(mn, "out")) >= 0 && n == 2 && o[0].k == K_REG && o[0].reg == 0) {
         int sz = o[0].size;
         if (sz == 8) return fail("out writes 8, 16 or 32 bits");
-        if (sz == 2) put(x, 0x66);
+        if (osz_pfx(x, sz) < 0) return -1;
         if (o[1].k == K_IMM) { put(x, sz == 1 ? 0xe6 : 0xe7); imm_put(x, o[1].imm, 1); return 0; }
         if (o[1].k == K_REG && o[1].reg == 2 && o[1].size == 2) { put(x, sz == 1 ? 0xee : 0xef); return 0; }
         return fail("out's port is $N or %%dx");
@@ -2121,7 +2439,7 @@ static int insn(struct ib *x, const char *mn, struct opnd *o, int n)
                  * %ax, REX.W for %rax); the loads read 16 bits whatever */
                 int st = !sy[k].mem && o[0].k == K_REG &&
                          (!strcmp(mn, "str") || !strcmp(mn, "sldt"));
-                return emit_rm(x, st && o[0].size == 2 ? P66 : 0,
+                return emit_rm(x, st ? pfx_of(o[0].size) : 0,
                                sy[k].w || (st && o[0].size == 8), sy[k].op,
                                sy[k].nop, sy[k].ext, NULL, &o[0]);
             }
@@ -2540,6 +2858,7 @@ static int one(const char *s, int len, struct code *out)
             x.b[x.disp_at + k] = (unsigned char)((unsigned long long)d >> (8 * k));
     }
     g_last_disp_at = x.disp_at;
+    g_last_disp_len = x.disp_len;
     g_last_imm_at = x.imm_at;
     g_last_len = x.n;
     for (int k = 0; k < x.n; k++)
@@ -2591,7 +2910,8 @@ int x86att_is_transfer(const char *stmt)
     }
     mn[k] = 0;
     if (!strcmp(mn, "jmp") || !strcmp(mn, "call") || !strcmp(mn, "jmpq") ||
-        !strcmp(mn, "callq") || !strcmp(mn, "jrcxz"))
+        !strcmp(mn, "callq") || !strcmp(mn, "jrcxz") || !strcmp(mn, "jecxz") ||
+        !strcmp(mn, "jcxz") || !strncmp(mn, "loop", 4))
         return stmt[k] && !strchr(stmt + k, '*');
     return mn[0] == 'j' && cond_of(mn + 1) >= 0;
 }
@@ -2696,9 +3016,12 @@ int x86att_symform(const char *stmt, struct asm_symform *f)
         n += (size_t)snprintf(o + n, cap - n, "%s%s%s", transfer ? "near " : "",
                               abs_mem ? "{disp32} " : "", imm ? "{imm32} " : "");
         const char *from = stmt;
+        /* (the near form's length: rel16 in 16-bit code) */
+        const char *near = g_mode == 16 ? (jcc ? ".+4" : ".+3")
+                                        : (jcc ? ".+6" : ".+5");
         for (int k = 0; k < ns && n < cap; k++) {
             n += (size_t)snprintf(o + n, cap - n, "%.*s%s", (int)(y[k].at - from),
-                                  from, transfer ? (jcc ? ".+6" : ".+5") : "0");
+                                  from, transfer ? near : "0");
             from = y[k].end;
         }
         if (n < cap) snprintf(o + n, cap - n, "%s", from);
@@ -2718,13 +3041,15 @@ int x86att_symform(const char *stmt, struct asm_symform *f)
         c_first[k] = c.p[k];
     free(c.p);
     if (transfer) {
+        int fl = g_mode == 16 ? 2 : 4;
         f->nsites = 1;
-        f->site[0].off = g_last_len - 4;
+        f->site[0].off = g_last_len - fl;
         /* a call or a jump to a function: PLT32, as GNU as writes it; a
-         * conditional jump: PC32 */
-        f->site[0].reloc = mn[0] == 'c' || !strncmp(mn, "jmp", 3)
+         * conditional jump: PC32; 16-bit code's: PC16 */
+        f->site[0].reloc = fl == 2 ? R_X86_64_PC16
+                         : mn[0] == 'c' || !strncmp(mn, "jmp", 3)
                                ? R_X86_64_PLT32 : R_X86_64_PC32;
-        f->addend = y[0].addend - 4;
+        f->addend = y[0].addend - fl;
         return 1;
     }
     for (int k = 0; k < ns; k++) {
@@ -2748,14 +3073,21 @@ int x86att_symform(const char *stmt, struct asm_symform *f)
             /* (an immediate before a rip-relative address: the field runs
              * to the end, so its length is the encoding's tail) */
             if (g_last_disp_at > g_last_imm_at) ilen = g_last_disp_at - g_last_imm_at;
+            /* (a far jump's offset: the selector after it is not its) */
+            if (!strncmp(mn, "ljmp", 4) || !strncmp(mn, "lcall", 5))
+                ilen = ilen - 2;
             st->off = g_last_imm_at;
             st->reloc = ilen == 8 ? R_X86_64_64
+                      : ilen == 2 ? R_X86_64_16
+                      : ilen == 1 ? R_X86_64_8
+                      : g_mode != 64 ? R_X86_64_32
                       : (!strncmp(mn, "movq", 4) || mn[strlen(mn) - 1] == 'q') ? R_X86_64_32S
                       : R_X86_64_32;
         } else {
             if (g_last_disp_at < 0) return 0;      /* an absolute address */
             st->off = g_last_disp_at;
-            st->reloc = R_X86_64_32S;
+            st->reloc = g_last_disp_len == 2 ? R_X86_64_16
+                      : g_mode != 64 ? R_X86_64_32 : R_X86_64_32S;
         }
         if (k == 0) f->addend = (long)ad;
         else {
