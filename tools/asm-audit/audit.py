@@ -157,6 +157,49 @@ def same(a, b):
         return k
     return None
 
+NOP = re.compile(r"^(nop\w*|data16|cs|xchg %ax, ?%ax|mov r8, r8)\b")
+
+def sized(dis):
+    """(bytes, normalized text) of each instruction but the padding nops,
+    from a disassembly with raw bytes"""
+    r = []
+    for l in dis.splitlines():
+        m = re.match(r"^\s*[0-9a-f]+:\s+((?:[0-9a-f]{2} )+)\s*(.*)$", l)
+        if not m or l.rstrip().endswith(">:"):
+            continue
+        t = re.sub(r"\s+", " ", m[2].split("<")[0].split("#")[0]).strip()
+        t = re.sub(r"^([0-9a-f]{2} ?)+(?= |$)", "", t).strip()   # (a long nop's wrapped bytes)
+        if not t or NOP.match(t):
+            continue
+        op = t.split(" ")[0]
+        if BR.match(op) or op.startswith("j"):
+            t = op
+        r.append((len(m[1].split()), t))
+    return r
+
+def relaxed_only(objdump, eo, ro):
+    """The two objects differ only where a branch took another width (and
+    the alignment padding after it moved): every instruction the same,
+    its length too unless it is a relative branch. llvm-mc keeps some
+    branches long that reach short -- a layout settled from a bigger
+    start; EmbCC's settles from the smallest (gas.c)."""
+    a = sized(run([objdump, "-d", eo]).stdout)
+    b = sized(run([objdump, "-d", ro]).stdout)
+    if len(a) != len(b):
+        return False
+    for (la, ta), (lb, tb) in zip(a, b):
+        if ta != tb:
+            if not re.search(r"\bR_", ta) and ta.split(" ")[0] == tb.split(" ")[0] and \
+               (BR.match(ta.split(" ")[0]) or ta.startswith("j")):
+                continue
+            # operands that name an address move with the layout
+            if re.sub(r"0x[0-9a-f]+", "A", ta) == re.sub(r"0x[0-9a-f]+", "A", tb):
+                continue
+            return False
+        if la != lb and not (BR.match(ta.split(" ")[0]) or ta.startswith("j")):
+            return False
+    return True
+
 def audit(name, out, show):
     etgt, cc, _, refas, objdump, _ = T[name]
     if not have(cc) or not have(refas.split()[0]):
@@ -164,7 +207,7 @@ def audit(name, out, show):
         return
     os.makedirs(out, exist_ok=True)
     files = corpus(name, out)
-    ok = ref = differ = 0
+    ok = ref = differ = relaxed = 0
     errs = collections.Counter()
     diffs = []
     for a in files:
@@ -187,6 +230,9 @@ def audit(name, out, show):
         dr = run([objdump, "-dr", "--no-show-raw-insn"] + na + [ro]).stdout
         ne, nr = norm(de), norm(dr)
         k = same(ne, nr)
+        if k is not None and relaxed_only(objdump, eo, ro):
+            relaxed += 1
+            continue
         if k is not None:
             differ += 1
             if k < 0:
@@ -196,7 +242,8 @@ def audit(name, out, show):
                     ne[kk][0] if kk < len(ne) else "-", nr[kk][0] if kk < len(nr) else "-"))
             else:
                 diffs.append("%s: embcc '%s', reference '%s'" % (os.path.basename(a), ne[k][0], nr[k][0]))
-    print("%-8s %4d/%-4d files assembled, %3d whose code differs" % (name, ok, ref, differ))
+    print("%-8s %4d/%-4d files assembled, %3d whose code differs%s" % (name, ok, ref, differ,
+          ", %d more only in a branch's width" % relaxed if relaxed else ""))
     for k, n in errs.most_common(show):
         print("           %4d  %s" % (n, k))
     for d in diffs[:show]:

@@ -99,6 +99,7 @@ struct sym {
      * resolved when the object is written. */
     struct sym *alias;
     long alias_add;
+    int stamp;              /* the pass that last placed it (gas.stamp) */
 };
 
 struct fixup {
@@ -142,6 +143,13 @@ struct gas {
                              * assembled (-1 never), what a deferred
                              * error reserves */
     int lfail;              /* the line being assembled failed */
+    /* A label ahead of the line being assembled holds its place from the
+     * pass before, and so does this line in lpc: a displacement forward
+     * is measured within that one layout, not from where this pass has
+     * put the line -- earlier lines that grew this pass would make it
+     * short by all they grew (llvm-mc measures within one layout too) */
+    int stamp;
+    long *lpc, prev_pc;
     long *prefstart;        /* per line: where a .prefalign's function began,
                              * the pass before (-1 not yet) */
     int nwide, li, grew;
@@ -198,6 +206,16 @@ static void gerr(struct gas *g, const char *fmt, ...)
 }
 
 static void advance(struct gas *g, long n);
+
+/* x86-64: an address in an instruction (32S, PC32, 32, ...) is made
+ * against a local label's section, as llvm-mc and GNU as make it; a call
+ * through the PLT or the GOT names the symbol */
+static int x86_secsym_reloc(int type)
+{
+    return type != R_X86_64_PLT32 && type != R_X86_64_GOTPCREL &&
+           type != R_X86_64_GOTPCRELX && type != R_X86_64_REX_GOTPCRELX &&
+           type != R_X86_64_GOTTPOFF && type != R_X86_64_TPOFF32;
+}
 
 static int arm_a32(const struct gas *g);
 
@@ -849,6 +867,7 @@ static struct gval gx_here(struct gx *x)
     s = sym_get(g, nm, strlen(nm));
     s->sec = g->cur;
     s->value = cur_off(g);
+    s->stamp = g->stamp;
     r.v = cur_off(g);
     r.sec = g->cur;
     r.base = s;
@@ -1255,7 +1274,9 @@ static char *substitute(struct gas *g, const char *stmt, long pc,
                 struct sym *ly = sym_find(g, nm, strlen(nm));
                 if (ly && ly->sec >= 0) {
                     char rep[32];
-                    long disp = ly->value - pc - dot_bias(g);
+                    long disp = (ly->stamp != g->stamp && g->prev_pc >= 0
+                                 ? ly->value - g->prev_pc : ly->value - pc) -
+                                dot_bias(g);
                     int k = snprintf(rep, sizeof rep, ".%+ld", disp);
                     if (len + (size_t)k + 2 >= cap) {
                         cap = cap * 2 + (size_t)k; out = xrealloc(out, cap);
@@ -1301,11 +1322,13 @@ static char *substitute(struct gas *g, const char *stmt, long pc,
              * two sections land is the linker's business. Nor is a weak
              * symbol, whose definition the link may replace. Both go to
              * the relocating forms, as an external symbol does. */
-            /* (and on ARM a GLOBAL label of this section, for a branch:
-             * llvm-mc and GNU as leave its call and jump to the linker,
-             * which may put a veneer or another definition there) */
+            /* (and on ARM and x86-64 a GLOBAL label of this section, for a
+             * branch: llvm-mc and GNU as leave its call and jump to the
+             * linker, which may put a veneer or another definition there) */
             int arm_glob = sy && sy->sec == g->cur && sy->is_global &&
-                           g->tgt->machine == EM_ARM && arm_branch_stmt(stmt);
+                           ((g->tgt->machine == EM_ARM && arm_branch_stmt(stmt)) ||
+                            (g->tgt->machine == EM_X86_64 && g->tgt->is_transfer &&
+                             g->tgt->is_transfer(stmt)));
             if (sy && sy->sec >= 0 && (sy->sec != g->cur || sy->is_weak || arm_glob) &&
                 pass == 2) {
                 if (!*ext)
@@ -1325,7 +1348,9 @@ static char *substitute(struct gas *g, const char *stmt, long pc,
             }
             if (sy && sy->sec >= 0) {          /* a label in this file */
                 char rep[32];
-                long disp = sy->value - pc - dot_bias(g);
+                long disp = (sy->stamp != g->stamp && g->prev_pc >= 0
+                             ? sy->value - g->prev_pc : sy->value - pc) -
+                            dot_bias(g);
                 int k = snprintf(rep, sizeof rep, ".%+ld", disp);
                 if (len + (size_t)k + 2 >= cap) { cap = cap * 2 + (size_t)k;
                                                   out = xrealloc(out, cap); }
@@ -1434,9 +1459,17 @@ static int extern_form(struct gas *g, const char *stmt, long pc, int pass,
                 return 1;
             }
             if (pass == 2)
-                for (int k = 0; k < f.nsites; k++)
-                    fix_add(g, g->cur, pc + f.site[k].off, ext,
-                            f.site[k].reloc, f.addend);
+                for (int k = 0; k < f.nsites; k++) {
+                    if (k == 1 && f.sym2_len) {
+                        char *n2 = xstrndup(stmt + f.sym2_at, (size_t)f.sym2_len);
+                        (void)sym_get(g, n2, strlen(n2));   /* UNDEF if never defined */
+                        fix_add(g, g->cur, pc + f.site[k].off, n2,
+                                f.site[k].reloc, f.addend2);
+                        free(n2);
+                    } else
+                        fix_add(g, g->cur, pc + f.site[k].off, ext,
+                                f.site[k].reloc, f.addend);
+                }
             emit_bytes(g, (const unsigned char *)tmp.p, tmp.len);
             free(tmp.p);
             return 1;
@@ -2082,6 +2115,26 @@ static void instruction(struct gas *g, char *stmt, int pass)
     struct code tmp = { 0 };
     char err[256];
 
+    /* x86-64, pass one, a name not placed yet in anything but a jump: the
+     * size is the relocated form's -- `buf(%rax)` keeps a 32-bit field
+     * whatever `.+0` would shrink to -- or every label after it is placed
+     * short of where pass two puts it, and branches relax against the
+     * wrong layout */
+    if (pass == 1 && placeheld && g->tgt->machine == EM_X86_64 &&
+        g->tgt->symform && !(g->tgt->is_transfer && g->tgt->is_transfer(stmt))) {
+        struct asm_symform f;
+        if (g->tgt->symform(stmt, &f) && f.encode[0] != '\001' &&
+            g->tgt->encode(f.encode, &tmp, err, sizeof err) == 0) {
+            emit_bytes(g, (const unsigned char *)tmp.p, tmp.len);
+            free(tmp.p);
+            free(text);
+            return;
+        }
+        free(tmp.p);
+        tmp.p = NULL;
+        tmp.len = tmp.cap = 0;
+    }
+
     /* ARM's `ldr rd, label`: a word loaded from a literal this file
      * defines, PC-relative from Align(pc, 4) -- which only this layer can
      * compute, since only it knows where the instruction is. The label
@@ -2134,7 +2187,8 @@ static void instruction(struct gas *g, char *stmt, int pass)
     if (g->tgt->at)
         g->tgt->at(pc);
     if (g->tgt->set_level)
-        g->tgt->set_level(pass == 1 ? -1 : g->wide[g->li]);
+        g->tgt->set_level(pass == 1 ? (g->tgt->machine == EM_X86_64 ? -2 : -1)
+                                    : g->wide[g->li]);
     int erc = g->tgt->encode(text, &tmp, err, sizeof err);
     if (g->tgt->set_level) {
         int took = g->tgt->took_level();
@@ -3403,6 +3457,7 @@ static int directive(struct gas *g, char *p, int pass)
         do_align(g, al > 0 ? al : 1);
         sy->sec = SEC_BSS;
         sy->value = cur_off(g);
+        sy->stamp = g->stamp;
         sy->size = sz;
         sy->is_object = 1;
         if (DIR(".comm")) sy->is_global = 1;
@@ -3784,6 +3839,7 @@ static void pass_over(struct gas *g, const struct gline *lines, int nlines,
      * makes every forward reference in pass two pick the instance after the
      * last one in the file, which is a jump to nowhere. */
     memset(g->local_n, 0, sizeof g->local_n);
+    g->stamp++;
     if (g->tgt->reset)
         g->tgt->reset();
     g->cur = SEC_TEXT;
@@ -3841,6 +3897,11 @@ static void pass_over(struct gas *g, const struct gline *lines, int nlines,
             break;
         lsec = g->cur;
         lstart = cur_off(g);
+        if (g->lpc && li < g->nwide) {
+            g->prev_pc = g->lpc[li];
+            g->lpc[li] = lstart;
+        } else
+            g->prev_pc = -1;
         char *line = xstrndup(lines[li].text, strlen(lines[li].text));
         g->line = lines[li].line;
         g->li = li;
@@ -3887,6 +3948,7 @@ static void pass_over(struct gas *g, const struct gline *lines, int nlines,
                     s = sym_get(g, nm, strlen(nm));
                     s->sec = g->cur;
                     s->value = cur_off(g);
+                    s->stamp = g->stamp;
                     q = skip_ws(c + 1);
                     continue;
                 }
@@ -3895,6 +3957,7 @@ static void pass_over(struct gas *g, const struct gline *lines, int nlines,
                     gerr(g, "label '%s' is defined twice", s->name);
                 s->sec = g->cur;
                 s->value = cur_off(g);
+                s->stamp = g->stamp;
                 if (g->thumb_func_next) {
                     s->is_func = 1;
                     g->thumb_func_next = 0;
@@ -4050,7 +4113,8 @@ static int write_object(struct gas *g, const char *out_path)
      * clang's and GNU's assemblers do) */
 #define DATA_RELOC(f) ((f)->type == g->tgt->r_abs32 || \
                        (f)->type == g->tgt->r_abs64 || \
-                       ((f)->type == g->tgt->r_abs16 && g->tgt->r_abs16))
+                       ((f)->type == g->tgt->r_abs16 && g->tgt->r_abs16) || \
+                       (g->tgt->machine == EM_X86_64 && x86_secsym_reloc((f)->type)))
     for (i = 0; i < g->nfix; i++) {
         struct sym *s = sym_find(g, g->fix[i].sym, strlen(g->fix[i].sym));
         if (!s) continue;
@@ -4074,7 +4138,9 @@ static int write_object(struct gas *g, const char *out_path)
      * $d as clang marks them, so a disassembler shows them as data */
     char *hascode = xcalloc((size_t)g->nsecs, 1);
     for (i = 0; i < g->nmaps; i++)
-        if (g->maps[i].kind == 't' || (g->secs[g->maps[i].sec].flags & SHF_EXECINSTR))
+        if (g->maps[i].kind == 't' ||
+            (g->tgt->machine == EM_AARCH64 &&     /* (llvm-mc's AArch64 marks those) */
+             (g->secs[g->maps[i].sec].flags & SHF_EXECINSTR)))
             hascode[g->maps[i].sec] = 1;
     for (i = 0; i < g->nmaps; i++)
         if (ndx[g->maps[i].sec] && hascode[g->maps[i].sec])
@@ -4536,8 +4602,9 @@ static void gas_run(struct gas *g, struct gexp *gx, const char *text,
     g->wide = xcalloc((size_t)gx->nout + 1, 1);
     g->prefstart = xmalloc(((size_t)gx->nout + 1) * sizeof *g->prefstart);
     g->lsize = xmalloc(((size_t)gx->nout + 1) * sizeof *g->lsize);
+    g->lpc = xmalloc(((size_t)gx->nout + 1) * sizeof *g->lpc);
     for (int k = 0; k <= gx->nout; k++)
-        g->prefstart[k] = g->lsize[k] = -1;
+        g->prefstart[k] = g->lsize[k] = g->lpc[k] = -1;
     g->nwide = gx->nout;
     /* Xtensa: a function's pool goes before the labels its `entry` has,
      * as GNU as's --text-section-literals places it */

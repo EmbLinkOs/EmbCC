@@ -71,6 +71,10 @@ struct asm_symform {
     char encode[256];
     struct asm_symsite site[2];
     int nsites;
+    /* when sym2_len is set, site[1] is a second symbol's, with its own
+     * addend: x86's `movq $a, b+8(%rip)` names two */
+    int sym2_at, sym2_len;
+    long addend2;
 };
 
 void code_byte(struct code *c, int b);
