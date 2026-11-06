@@ -140,7 +140,10 @@ def norm(dis):
             # a RISC-V call's relocation covers the jalr after its auipc
             pair = bool(re.search(r"R_RISCV_CALL", l))
             continue
-        m = re.match(r"^\s*[0-9a-f]+:\s+(?:[0-9a-f]{2,8}\s)*\s*(.*)$", l)
+        # (GNU objdump: the raw bytes, when shown, end at a tab -- an
+        # instruction's own text may start with hex letters: `add`)
+        m = re.match(r"^\s*[0-9a-f]+:\t(?:(?:[0-9a-f]{2,8} ?)+ +\t)?(.*)$", l) or \
+            re.match(r"^\s*[0-9a-f]+:\s+(?:[0-9a-f]{2,8}\s)*\s*(.*)$", l)
         if not m or not m[1].strip() or l.rstrip().endswith(">:"):
             continue
         t = re.sub(r"\s+", " ", m[1].split("<")[0].split("//")[0].split("@ ")[0]).strip()
@@ -185,9 +188,13 @@ def sized(dis):
     from a disassembly with raw bytes"""
     r = []
     for l in dis.splitlines():
-        m = re.match(r"^\s*[0-9a-f]+:\s+((?:[0-9a-f]{2} )+)\s*(.*)$", l)
+        # llvm-objdump's bytes are pairs (`01 02 03`), GNU's a run per
+        # word (`046136`), ended by a tab
+        g = re.match(r"^\s*[0-9a-f]+:\t((?:[0-9a-f]{2,8} ?)+) *\t(.*)$", l)
+        m = g or re.match(r"^\s*[0-9a-f]+:\s+((?:[0-9a-f]{2} )+)\s*(.*)$", l)
         if not m or l.rstrip().endswith(">:"):
             continue
+        nbytes = len(m[1].replace(" ", "")) // 2
         t = re.sub(r"\s+", " ", m[2].split("<")[0].split("#")[0]).strip()
         t = re.sub(r"^([0-9a-f]{2} ?)+(?= |$)", "", t).strip()   # (a long nop's wrapped bytes)
         if not t or NOP.match(t):
@@ -196,8 +203,36 @@ def sized(dis):
         if BR.match(op) or op.startswith("j"):
             # (RX writes a branch's width as its suffix: beq.s, .b, .w, .a)
             t = re.sub(r"\.(s|b|w|a)$", "", op)
-        r.append((len(m[1].split()), t))
+        r.append((nbytes, t))
     return r
+
+def xt_relaxed(ins):
+    """Xtensa's relaxation choices, written one way: a long call (l32r aN
+    and callxN aN) is the call it may become, and a narrow move (mov.n,
+    printed mov) and an instruction widened to align a loop or a target
+    (or aR, aS, aS; add.n as add) are the same instruction"""
+    out, k = [], 0
+    while k < len(ins):
+        n, t = ins[k]
+        t = re.sub(r"\.n\b", "", t)
+        if re.match(r"^(\.byte 0+|ill)$", t):       # zero padding
+            k += 1
+            continue
+        if t.startswith("l32r ") and k + 1 < len(ins) and \
+                re.match(r"^callx(4|8|12) ", ins[k + 1][1]):
+            out.append((3, "call" + ins[k + 1][1][5:].split(" ")[0]))
+            k += 2
+            continue
+        op = t.split(" ")[0]
+        if (op.startswith(("b", "call", "loop", "j")) and op != "break") or \
+                op in ("l32r",):
+            t = op                          # (a target moves with the layout)
+        m = re.match(r"^or (a\d+), (a\d+), (a\d+)$", t)
+        if m and m[2] == m[3]:
+            t = "mov %s, %s" % (m[1], m[2])
+        out.append((3 if re.match(r"^(mov|add|addi|l32i|s32i|movi|beqz|bnez|ret|retw|nop) ", t + " ") else n, t))
+        k += 1
+    return out
 
 def relaxed_only(objdump, eo, ro):
     """The two objects differ only where a branch took another width (and
@@ -207,6 +242,8 @@ def relaxed_only(objdump, eo, ro):
     start; EmbCC's settles from the smallest (gas.c)."""
     a = sized(run([objdump, "-d", eo]).stdout)
     b = sized(run([objdump, "-d", ro]).stdout)
+    if PADDING:
+        a, b = xt_relaxed(a), xt_relaxed(b)
     if len(a) != len(b):
         return False
     for (la, ta), (lb, tb) in zip(a, b):
@@ -227,6 +264,8 @@ def lengths_differ(objdump, eo, ro):
     when only branches differ, else the index of the first that does."""
     a = sized(run([objdump, "-d", eo]).stdout)
     b = sized(run([objdump, "-d", ro]).stdout)
+    if PADDING:
+        a, b = xt_relaxed(a), xt_relaxed(b)
     if len(a) != len(b):
         return None          # (the text compare already passed: padding)
     br = False
@@ -285,6 +324,8 @@ def audit(name, out, show):
             if r is not None:
                 differ += 1
                 a_, b_ = sized(run([objdump, "-d", eo]).stdout), sized(run([objdump, "-d", ro]).stdout)
+                if PADDING:
+                    a_, b_ = xt_relaxed(a_), xt_relaxed(b_)
                 diffs.append("%s: '%s' is %d bytes, the reference's %d" % (
                     os.path.basename(a), a_[r][1], a_[r][0], b_[r][0]))
                 continue
