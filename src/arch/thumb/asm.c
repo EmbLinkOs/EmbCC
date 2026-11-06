@@ -108,6 +108,13 @@ static int g_dsp;
 void tasm_set_dsp(int on) { g_dsp = on ? 1 : 0; }
 static int dsp_ok(void) { return g_dsp && (g_arch == 7 || g_arch == 8); }
 
+/* ARMv8.1-M Mainline, and its MVE (1 integer, 3 with floating point):
+ * told by the caller as the level is */
+static int g_v81, g_mve;
+void tasm_set_v81(int v81, int mve) { g_v81 = v81 ? 1 : 0; g_mve = mve; }
+static int target_thumb_v81(void) { return g_v81 && g_arch == 8; }
+static int target_thumb_mve(void) { return g_v81 && g_arch == 8 && g_mve; }
+
 /* Either ARMv8-M profile: the security extension, the acquire/release
  * forms and the stack-limit registers. */
 static int arch_v8m(void) { return g_arch == 8 || g_arch == TASM_V8M_BASE; }
@@ -612,6 +619,253 @@ static int a32_one_stmt(struct tok *t, int n, struct code *out, char *err,
         FAIL("%.*s is a Thumb instruction; ARM state has none", t[0].len,
              t[0].s);
     return 1;
+}
+
+/* ---- ARMv8.1-M Mainline's own (Cortex-M55, M85) ----
+ *
+ * The conditional selects -- csel, csinc, csinv, csneg and their aliases
+ * cset, csetm, cinc, cinv, cneg (zr is register 15) -- the low-overhead
+ * loops -- dls/dlstp, wls/wlstp, le/letp, lctp, whose offset is in
+ * halfwords, bit 11 of the second halfword the lowest -- and the security
+ * extension's clrm and vscclrm. On another level each is refused by name.
+ * 1 when the statement is none of them. */
+static void t32(struct code *o, unsigned a, unsigned b);
+
+static int v81_csel_cond(const struct tok *t)
+{
+    return cond_num(t->s, t->len);
+}
+
+/* MVE's scalar shifts: of a register pair (lsll, asrl, lsrl, the
+ * saturating uqshll...) or of one register (uqshl...), by an immediate or
+ * a register. 1 when the statement is none of them. */
+static int mve_shift_stmt(const struct tok *t, int n, struct code *out,
+                          char *err, int errlen)
+{
+    /* kind: 0 a pair by #imm or reg (lsll, asrl), 1 a pair by #imm (lsrl,
+     * and the saturating ones), 2 a pair by reg with #48/#64, 3 one by
+     * #imm, 4 one by reg; sat: hw1's bit 0 */
+    static const struct { const char *n; int kind, sat, op; } sh[] = {
+        {"lsll",0,0,0},{"asrl",0,0,2},{"lsrl",1,0,1},
+        {"uqshll",1,1,0},{"urshrl",1,1,1},{"srshrl",1,1,2},{"sqshll",1,1,3},
+        {"uqrshll",2,1,0},{"sqrshrl",2,1,2},
+        {"uqshl",3,0,0},{"urshr",3,0,1},{"srshr",3,0,2},{"sqshl",3,0,3},
+        {"uqrshl",4,0,0},{"sqrshr",4,0,2},
+    };
+    int k;
+    for (k = 0; k < (int)(sizeof sh / sizeof *sh); k++)
+        if (mnemonic_is(&t[0], sh[k].n)) break;
+    if (k == (int)(sizeof sh / sizeof *sh))
+        return 1;
+    if (!target_thumb_mve())
+        FAIL("%s is an MVE instruction (-mcpu=cortex-m55, or "
+             "-march=armv8.1-m.main+mve)", sh[k].n);
+    int kind = sh[k].kind;
+    long v = 0;
+    if (kind <= 2) {
+        int lo = n >= 3 ? tok_reg(&t[1]) : -1, hi = n >= 3 ? tok_reg(&t[2]) : -1;
+        if (lo < 0 || hi < 0 || (lo & 1) || !(hi & 1) || lo > 12 || hi > 11)
+            FAIL("%s's pair is an even register and an odd one, r0..r11", sh[k].n);
+        unsigned h1 = 0xea50u | (unsigned)lo | (unsigned)sh[k].sat;
+        unsigned base = (unsigned)(hi >> 1) << 9 | 0x100u | (unsigned)sh[k].op << 4;
+        if (kind == 2 || (kind == 0 && n == 4 && tok_reg(&t[3]) >= 0)) {
+            int rm = kind == 2 ? (n == 5 ? tok_reg(&t[4]) : -1) : tok_reg(&t[3]);
+            int sat = 0;
+            if (kind == 2) {
+                if (!tok_imm(&t[3], &v) || (v != 48 && v != 64))
+                    FAIL("%s saturates at #48 or #64", sh[k].n);
+                sat = v == 48;
+            }
+            if (rm < 0 || rm == 13 || rm == 15 || rm == lo || rm == hi)
+                FAIL("%s's shift is a register other than the pair, sp and pc", sh[k].n);
+            t32(out, h1, (unsigned)rm << 12 | base | (unsigned)sat << 7 | 0xdu);
+            return 0;
+        }
+        if (n != 4 || !tok_imm(&t[3], &v) || v < 1 || v > 32)
+            FAIL("%s shifts by #1..#32%s", sh[k].n, kind == 0 ? " or a register" : "");
+        unsigned im = (unsigned)v & 31;
+        t32(out, h1, (im >> 2) << 12 | base | (im & 3) << 6 | 0xfu);
+        return 0;
+    }
+    int rda = n >= 2 ? tok_reg(&t[1]) : -1;
+    if (rda < 0 || rda == 13 || rda == 15)
+        FAIL("%s shifts a register other than sp and pc", sh[k].n);
+    if (kind == 4) {
+        int rm = n == 3 ? tok_reg(&t[2]) : -1;
+        if (rm < 0 || rm == 13 || rm == 15 || rm == rda)
+            FAIL("%s's shift is another register, not sp or pc", sh[k].n);
+        t32(out, 0xea50u | (unsigned)rda, (unsigned)rm << 12 | 0x0f00u |
+                                         (unsigned)sh[k].op << 4 | 0xdu);
+        return 0;
+    }
+    if (n != 3 || !tok_imm(&t[2], &v) || v < 1 || v > 32)
+        FAIL("%s shifts by #1..#32", sh[k].n);
+    unsigned im = (unsigned)v & 31;
+    t32(out, 0xea50u | (unsigned)rda, (im >> 2) << 12 | 0x0f00u | (im & 3) << 6 |
+                                     (unsigned)sh[k].op << 4 | 0xfu);
+    return 0;
+}
+
+static int v81_stmt(const struct tok *t, int n, struct code *out,
+                    char *err, int errlen)
+{
+    {
+        int r = mve_shift_stmt(t, n, out, err, errlen);
+        if (r != 1) return r;
+    }
+    static const struct { const char *n; int op, alias; } cs[] = {
+        /* alias: 0 the base form, 1 rd,c (cset/csetm), 2 rd,rn,c (cinc...) */
+        {"csel",0,0},{"csinc",1,0},{"csinv",2,0},{"csneg",3,0},
+        {"cset",1,1},{"csetm",2,1},{"cinc",1,2},{"cinv",2,2},{"cneg",3,2},
+    };
+    static const char *const lob[] = {
+        "dls", "dlstp", "wls", "wlstp", "le", "letp", "lctp", "clrm", "vscclrm", NULL };
+    int k;
+    for (k = 0; k < (int)(sizeof cs / sizeof *cs); k++)
+        if (mnemonic_is(&t[0], cs[k].n))
+            break;
+    int is_cs = k < (int)(sizeof cs / sizeof *cs), is_lob = 0;
+    /* (dlstp.32, wlstp.8: the element size in the mnemonic) */
+    int mlen = t[0].len, esz = -1;
+    for (int d = 0; d < mlen; d++)
+        if (t[0].s[d] == '.') {
+            const char *sz = t[0].s + d + 1;
+            int sl = mlen - d - 1;
+            esz = sl == 1 && sz[0] == '8' ? 0 : sl == 2 && !strncmp(sz, "16", 2) ? 1
+                : sl == 2 && !strncmp(sz, "32", 2) ? 2 : sl == 2 && !strncmp(sz, "64", 2) ? 3 : -2;
+            mlen = d;
+            break;
+        }
+    for (int j = 0; lob[j] && !is_cs; j++)
+        if ((int)strlen(lob[j]) == mlen && same_nocase(t[0].s, lob[j], mlen))
+            is_lob = j + 1;
+    if (!is_cs && !is_lob)
+        return 1;
+    if (!target_thumb_v81())
+        FAIL("%.*s is an ARMv8.1-M instruction, and this is not an ARMv8.1-M "
+             "target (-mcpu=cortex-m55, or -march=armv8.1-m.main)", t[0].len, t[0].s);
+    if (is_cs) {
+        int need = cs[k].alias == 0 ? 5 : cs[k].alias == 1 ? 3 : 4;
+        if (n != need)
+            FAIL("%s takes %s", cs[k].n, cs[k].alias == 0 ? "rd, rn, rm and a condition"
+                 : cs[k].alias == 1 ? "rd and a condition" : "rd, rn and a condition");
+        int rd = tok_reg(&t[1]);
+        int rn = cs[k].alias == 1 ? 15 : tok_is(&t[2], "zr") ? 15 : tok_reg(&t[2]);
+        int rm = cs[k].alias == 0 ? (tok_is(&t[3], "zr") ? 15 : tok_reg(&t[3])) : rn;
+        int c = v81_csel_cond(&t[n - 1]);
+        if (rd < 0 || rn < 0 || rm < 0 || c < 0 || c >= 14)
+            FAIL("%s: registers and a condition (eq..le)", cs[k].n);
+        if (rd == 13 || rd == 15 || rn == 13 || rm == 13 ||
+            (cs[k].alias != 1 && (rn == 15 && !tok_is(&t[2], "zr"))))
+            FAIL("%s: sp and pc are not its registers (zr is)", cs[k].n);
+        if (cs[k].alias) {
+            if (cs[k].alias == 2 && rn == 15)
+                FAIL("%s's source is a register", cs[k].n);
+            c ^= 1;                        /* (the aliases test the inverse) */
+        }
+        t32(out, 0xea50u | (unsigned)rn,
+            0x8000u | (unsigned)cs[k].op << 12 | (unsigned)rd << 8 |
+            (unsigned)c << 4 | (unsigned)rm);
+        return 0;
+    }
+    const char *nm = lob[is_lob - 1];
+    if ((is_lob == 2 || is_lob == 4) ? esz < 0 : esz != -1)
+        FAIL("%.*s: %s", t[0].len, t[0].s, is_lob == 2 || is_lob == 4
+             ? "the element size is .8, .16, .32 or .64" : "takes no size");
+    if (is_lob == 7) {                     /* lctp */
+        if (n != 1) FAIL("lctp takes no operand");
+        t32(out, 0xf00fu, 0xe001u);
+        return 0;
+    }
+    if (is_lob == 8 || is_lob == 9) {      /* clrm, vscclrm */
+        if (n != 2) FAIL("%s takes a register list", nm);
+        const char *p = t[1].s, *end = t[1].s + t[1].len;
+        while (p < end && isspace((unsigned char)*p)) p++;
+        if (p >= end || *p != '{' || end[-1] != '}')
+            FAIL("%s takes a register list in braces", nm);
+        p++; end--;
+        unsigned mask = 0;
+        int first = -1, cnt = 0, dbl = -1;
+        while (p < end) {
+            while (p < end && (isspace((unsigned char)*p) || *p == ',')) p++;
+            if (p >= end) break;
+            const char *a = p;
+            while (p < end && !isspace((unsigned char)*p) && *p != ',' && *p != '-') p++;
+            int al = (int)(p - a);
+            while (p < end && isspace((unsigned char)*p)) p++;
+            const char *b = NULL;
+            int bl = 0;
+            if (p < end && *p == '-') {
+                p++;
+                while (p < end && isspace((unsigned char)*p)) p++;
+                b = p;
+                while (p < end && !isspace((unsigned char)*p) && *p != ',') p++;
+                bl = (int)(p - b);
+            }
+            if (is_lob == 8) {
+                if (al == 4 && same_nocase(a, "apsr", 4) && !b) { mask |= 0x8000; continue; }
+                int r1 = tasm_gpr(a, al), r2 = b ? tasm_gpr(b, bl) : r1;
+                if (r1 < 0 || r2 < r1 || r2 == 13 || r2 == 15 || (r1 <= 13 && r2 >= 13))
+                    FAIL("clrm clears r0-r12, lr and apsr");
+                for (int r = r1; r <= r2; r++) mask |= 1u << r;
+                continue;
+            }
+            if (al == 3 && same_nocase(a, "vpr", 3) && !b) continue;
+            int d = a[0] == 'd' || a[0] == 'D';
+            if (!d && a[0] != 's' && a[0] != 'S')
+                FAIL("vscclrm clears s or d registers and vpr");
+            int r1 = atoi(a + 1), r2 = b ? atoi(b + 1) : r1;
+            if (dbl >= 0 && dbl != d) FAIL("vscclrm's registers are all s or all d");
+            dbl = d;
+            if (first < 0) first = r1;
+            else if (r1 != first + cnt) FAIL("vscclrm's registers are consecutive");
+            cnt += r2 - r1 + 1;
+        }
+        if (is_lob == 8) {
+            if (!mask) FAIL("clrm wants a register");
+            t32(out, 0xe89fu, mask);
+            return 0;
+        }
+        if (first < 0) first = 0;
+        if (dbl < 0) dbl = 0;
+        unsigned vd = dbl ? (unsigned)first & 15 : (unsigned)first >> 1;
+        unsigned D = dbl ? (unsigned)first >> 4 : (unsigned)first & 1;
+        t32(out, 0xec9fu | D << 6, vd << 12 | (dbl ? 0x0b00u : 0x0a00u) |
+                                   (unsigned)(dbl ? cnt * 2 : cnt));
+        return 0;
+    }
+    /* dls/dlstp lr, rn; wls/wlstp lr, rn, label; le/letp [lr,] label */
+    int at = 1;
+    if (is_lob == 5 && n == 2) at = 0;        /* `le label`: no lr */
+    else if (n < 2 || tok_reg(&t[1]) != 14)
+        FAIL("%.*s's loop counter is lr", t[0].len, t[0].s);
+    if (is_lob <= 2) {
+        int rn = n == 3 ? tok_reg(&t[2]) : -1;
+        if (rn < 0 || rn == 13 || rn == 15) FAIL("%s wants lr and a register", nm);
+        t32(out, 0xf000u | (unsigned)(is_lob == 1 ? 4 : esz) << 4 | (unsigned)rn, 0xe001u);
+        return 0;
+    }
+    long v;
+    int rn = -1;
+    if (is_lob <= 4) {
+        rn = n == 4 ? tok_reg(&t[2]) : -1;
+        if (rn < 0 || rn == 13 || rn == 15 || !tok_imm(&t[3], &v))
+            FAIL("%s wants lr, a register and a label", nm);
+    } else if (n != 2 + at || !tok_imm(&t[1 + at], &v)) {
+        FAIL("%s wants %sa label", nm, at ? "lr and " : "");
+    }
+    /* the distance from the pc (the instruction's address plus 4): ahead
+     * for wls, behind for le, in halfwords */
+    long dist = is_lob <= 4 ? v - 4 : 4 - v;
+    if (dist < 0 || dist > 4094 || (dist & 1))
+        FAIL("%s reaches 0..4094 bytes %s; this label is %ld bytes away", nm,
+             is_lob <= 4 ? "ahead" : "behind", is_lob <= 4 ? v : -v);
+    unsigned h2 = 0xc001u | (unsigned)((dist >> 2) & 0x3ff) << 1 | (unsigned)((dist >> 1) & 1) << 11;
+    if (is_lob <= 4)
+        t32(out, 0xf000u | (unsigned)(is_lob == 3 ? 4 : esz) << 4 | (unsigned)rn, h2);
+    else
+        t32(out, is_lob == 6 ? 0xf01fu : at ? 0xf00fu : 0xf02fu, h2);
+    return 0;
 }
 
 /* ---- the exclusives' byte and halfword forms, and ARMv8-M's own ----
@@ -2244,9 +2498,11 @@ static int vfp_stmt(const struct tok *t, int n, struct code *out,
         }
         /* ARMv8.1-M's (MVE's vpr and p0, the security extension's
          * fpcxt), and the identification registers read only */
-        if (sr == 2 || sr >= 12)
-            FAIL("%.*s is an ARMv8.1-M register, which this target lacks",
-                 t[to_core ? 2 : 1].len, t[to_core ? 2 : 1].s);
+        if (((sr == 2 || sr >= 14) && !target_thumb_v81()) ||
+            ((sr == 12 || sr == 13) && !target_thumb_mve()))
+            FAIL("%.*s is an ARMv8.1-M register%s, which this target lacks",
+                 t[to_core ? 2 : 1].len, t[to_core ? 2 : 1].s,
+                 sr == 12 || sr == 13 ? " (MVE's)" : "");
         if (!to_core && sr >= 5 && sr <= 7)
             FAIL("%.*s is read only", t[1].len, t[1].s);
         if (sr < 0 || rt < 0 || rt == 15 || (rt == 13 && !t_isa_a32))
@@ -2930,7 +3186,9 @@ static int one_stmt(const char *stmt, int len, struct code *out,
             return r;
     }
     {
-        int r = v8m_stmt(t, n, out, err, errlen);
+        int r = v81_stmt(t, n, out, err, errlen);
+        if (r == 1)
+            r = v8m_stmt(t, n, out, err, errlen);
         if (r == 1)
             r = dsp_stmt(t, n, out, err, errlen);
         if (r == 1)
@@ -3753,6 +4011,14 @@ int tasm_is_word(const char *stmt, const char *w, int wlen)
         if (!(wlen == 3 && w[1] == '0'))
             return 1;
     }
+    /* ARMv8.1-M: csel's condition (`cset r0, eq`), zr, and clrm's apsr and
+     * vscclrm's vpr */
+    if (mlen >= 2 && (m[0] == 'c' || m[0] == 'C') && cond_num(w, wlen) >= 0 &&
+        (strncmp(m, "cs", 2) == 0 || strncmp(m, "ci", 2) == 0 || strncmp(m, "cn", 2) == 0))
+        return 1;
+    if ((wlen == 2 && same_nocase(w, "zr", 2)) || (wlen == 3 && same_nocase(w, "vpr", 3)) ||
+        (wlen == 4 && same_nocase(w, "apsr", 4)))
+        return 1;
     /* a shift inside an operand: `[r1, r2, lsl #2]`, `r3, lsr #4` */
     if ((wlen == 3 && (same_nocase(w, "lsl", 3) || same_nocase(w, "lsr", 3) ||
                        same_nocase(w, "asr", 3) || same_nocase(w, "ror", 3) ||

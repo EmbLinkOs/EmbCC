@@ -47,6 +47,7 @@
 #define tasm_took_wide() 0
 #define tasm_set_arch(a) ((void)(a))
 #define tasm_set_dsp(on) ((void)(on))
+#define tasm_set_v81(v, m) ((void)(v), (void)(m))
 #define tasm_set_fpu(l, d) ((void)(l), (void)(d))
 #endif
 #if !FAMILY_BUILT(xtensa)
@@ -4329,6 +4330,12 @@ static int directive(struct gas *g, char *p, int pass)
         sy->is_global = 1;
         return 1;
     }
+    /* clang's .addrsig / .addrsig_sym: the address-significance table a
+     * linker's identical-code folding reads. It only lets a link fold
+     * more; without it every function's address counts, which is what
+     * GNU as's objects say too. Accepted, and not written. */
+    if (DIR(".addrsig") || DIR(".addrsig_sym"))
+        return 1;
     /* .emb_extern NAME: NASM's extern -- its place in NASM's order */
     if (DIR(".emb_extern")) {
         const char *e = arg;
@@ -5481,6 +5488,7 @@ static void gas_run(struct gas *g, struct gexp *gx, const char *text,
         tasm_set_arch(target_thumb_v8m_base() ? TASM_V8M_BASE
                                               : target_thumb_arch());
         tasm_set_dsp(target_thumb_em());
+        tasm_set_v81(target_thumb_v81(), target_thumb_mve());
         {
             int d32 = 0, vfp = target_arm_vfp(&d32);
             tasm_set_fpu(!target_thumb_fpu() && !vfp ? 0
