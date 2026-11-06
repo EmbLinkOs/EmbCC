@@ -195,14 +195,18 @@ static NOSH int san_backtrace(uptr *pcs, int max, uptr first_pc)
 
 #if SAN_HOSTED
 /* dladdr's answer: the same four fields first in glibc's and libSystem's
- * Dl_info. Weak: a static C library without it leaves the frames bare. */
+ * Dl_info. Every hosted C library has dladdr -- EmbCC's own reads the
+ * program's .symtab (lib/libc/src/posix/dl.c) -- and the reference is
+ * strong: a weak one does not pull an archive member, as ld and lld (and
+ * now embld) have it, so EmbCC's static libc's dladdr was never linked
+ * and every frame of a report was a bare address. */
 struct san_dlinfo {
     const char *fname;
     void *fbase;
     const char *sname;
     void *saddr;
 };
-int dladdr(const void *, struct san_dlinfo *) WEAK;
+int dladdr(const void *, struct san_dlinfo *);
 #endif
 
 /* Each frame as LLVM's runtimes print it before symbolizing:
@@ -222,7 +226,7 @@ static NOSH void san_print_stack(const uptr *pcs, int n)
         struct san_dlinfo di;
         di.fname = di.sname = 0;
         di.fbase = di.saddr = 0;
-        if (dladdr && dladdr((const void *)(pcs[i] - (i ? 1 : 0)), &di)) {
+        if (dladdr((const void *)(pcs[i] - (i ? 1 : 0)), &di)) {
             if (di.sname && di.saddr) {
                 san_puts(" in ");
                 san_puts(di.sname);
