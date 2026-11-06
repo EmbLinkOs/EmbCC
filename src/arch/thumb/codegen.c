@@ -5116,8 +5116,20 @@ static void gen_ins(struct t_fn *F, int n)
             /* ...and a select on it: `tst a, #k; ite ne` -- `(i & 31) == 0
              * ? a : b`, where the and and a compare with 0 were two
              * instructions and a register. The arms are where an IT
-             * block's moves take them (in registers, or immediates). */
-            if (k == n + 1 && t_select_it_ok(F, bx) && bx->a == i->dst &&
+             * block's moves take them (in registers, or immediates). A
+             * constant between the two that only the select reads as an
+             * immediate makes no instruction, so it may come between
+             * (the state machine's `if ((i & 31) == 0) b = 0x7e`). */
+            int ks = n + 1;
+            while (k == n + 1 && ks < fn->nins && ks - n <= 3 &&
+                   fn->ins[ks].op == IR_CONST && t_sel_imm(F, fn->ins[ks].dst))
+                ks++;
+            if (k == n + 1 && ks > n + 1 && ks < fn->nins &&
+                fn->ins[ks].op == IR_SELECT) {
+                bx = &fn->ins[ks];
+                k = ks;
+            }
+            if (k == ks && t_select_it_ok(F, bx) && bx->a == i->dst &&
                 (in_reg(F, bx->b) || t_sel_imm(F, bx->b)) &&
                 (in_reg(F, bx->c) || t_sel_imm(F, bx->c)) &&
                 (!i->imm_b ? in_reg(F, i->b) : t_imm_ok(i->imm))) {
@@ -5129,7 +5141,7 @@ static void gen_ins(struct t_fn *F, int n)
                 else
                     t_tst_reg(t, ra_, F->loc[i->b]);
                 t_select_cc(F, bx, T_NE, rb, rc);
-                F->skip_next = 1;
+                F->skip_next = ks - n;
                 return;
             }
             if ((bx->op == IR_BRZ || bx->op == IR_BRNZ) &&
