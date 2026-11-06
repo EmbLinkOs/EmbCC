@@ -83,3 +83,19 @@ cmp -s "$out/v.bin" "$out/v.ref" || {
     exit 1; }
 echo "all $n instructions from $enc encoders encode as llvm-mc's thumbv6m does"
 echo "$(cat "$out/refuse.txt")"
+
+# literal loads to labels not placed yet (from GCC-like code, reduced):
+# pass one's `.+0` must not make one the wide form, which this core lacks
+# (they were refused: "ldr r1, [pc, #22]" ... a 32-bit Thumb-2 form)
+printf ' .syntax unified\n .thumb\n .text\n adds r7, r6, r7\n movs r0, #0\n add sp, #20\n pop {r4, r5, r6, r7, pc}\n ldr r1, .LCPI2_6\n stm r3!, {r1, r4}\n ldr r5, .LCPI2_9\n adds r5, r6, r5\n mov r1, r6\n movs r6, #65\n lsls r6, r6, #4\n ldr r6, [r1, r6]\n str r6, [r0]\n str r5, [r0, #4]\n str r2, [r0, #8]\n ldr r1, [sp]\n.LCPI2_6:\n.LCPI2_9:\n' \
+    > "$out/lit.s"
+"${EMBCC:-./embcc}" --target=thumbv6m-none-eabi -c "$out/lit.s" -o "$out/lit.o" 2> "$out/lit.err" || {
+    echo "a forward literal load was refused:"; cat "$out/lit.err"; exit 1; }
+"$MC" -triple=thumbv6m-none-eabi -filetype=obj "$out/lit.s" -o "$out/lit.ref.o"
+for f in lit lit.ref; do
+    ${EMBCC_LLVM_OBJDUMP:-llvm-objdump} -d "$out/$f.o" | grep -E '^ +[0-9a-f]+:' > "$out/$f.txt"
+done
+cmp -s "$out/lit.txt" "$out/lit.ref.txt" || {
+    echo "forward literal loads encode otherwise than llvm-mc's:"
+    diff "$out/lit.txt" "$out/lit.ref.txt"; exit 1; }
+echo "forward literal loads take the 16-bit form, as llvm-mc's do"

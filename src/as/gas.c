@@ -2579,6 +2579,13 @@ static void instruction(struct gas *g, char *stmt, int pass)
                 char buf[96];
                 long off = arm_a32(g) ? disp - 8
                          : (pc + disp) - ((pc + 4) & ~3L);
+                /* a label not placed yet (pass one's `.+0`) is ahead: the
+                 * 16-bit form is assumed to reach it, as a branch's short
+                 * form is -- `.+0` read as a distance is behind the pc,
+                 * which only the wide form reaches, and a width once
+                 * taken is kept (and ARMv6-M has no wide one) */
+                if (placeheld && !arm_a32(g))
+                    off = 0;
                 snprintf(buf, sizeof buf, adr ? "%.*s %.*s, #%ld"
                                                : "%.*s %.*s, [pc, #%ld]",
                          ml, q, (int)(c - r), r, off);
