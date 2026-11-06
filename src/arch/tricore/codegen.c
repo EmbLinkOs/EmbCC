@@ -2668,6 +2668,7 @@ static void gen_ins(struct tc_fn *F, int n)
                     tc_refuse(F, i, "an \"m\" asm operand in a data register");
                 rda(F, ia->out[k].temp, ia->out[k].reg - 16);
             }
+        code_asm_rels(t, ia, t->len, ia->rel, ia->nrel);   /* its relocations */
         for (int k = 0; k < ia->codelen; k++)
             code_byte(t, ia->code[k]);
         for (int k = 0; k < ia->nout; k++) {

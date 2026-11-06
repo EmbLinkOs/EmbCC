@@ -343,17 +343,14 @@ for t in aarch64-elf thumbv7em-none-eabi riscv32-unknown-elf mipsel-none-elf \
         echo "case nolink $t: linked in one step without a memory map"
         exit 1
     fi
-    # a board image needs the board's memory map, which has no default;
-    # an AArch64 object is one embld does not read
+    # a board image needs the board's memory map, which has no default
     want="linking a $t image needs its memory map"
-    [ "$t" = aarch64-elf ] &&
-        want="cannot link for $t: embld does not read AArch64 objects"
     echo "$err" | grep -q "$want" || {
         echo "case nolink $t: wrong diagnostic:"; echo "$err"; exit 1; }
-    # a script is offered where embld lays one out -- ARM, RISC-V, AVR
-    # and MIPS32 (a PIC32's) -- and not where it does not (PowerPC)
-    if [ "$t" = powerpc-none-eabi ] && echo "$err" | grep -q 'linker script'; then
-        echo "case nolink $t: offered a linker script embld refuses:"; echo "$err"; exit 1
+    # a script is offered where embld lays one out: every target here but
+    # TriCore and RX
+    if [ "$t" = powerpc-none-eabi ] && ! echo "$err" | grep -q 'linker script'; then
+        echo "case nolink $t: no linker script offered:"; echo "$err"; exit 1
     fi
     if [ "$t" = mipsel-none-elf ] && ! echo "$err" | grep -q 'linker script'; then
         echo "case nolink $t: no linker script offered:"; echo "$err"; exit 1
@@ -433,7 +430,7 @@ check asm-bad-constraint \
     'int main(void) { int x; __asm__("int $0x80" : "=t"(x)); return x; }' \
     "is not supported"
 check asm-bad-template \
-    'int main(void) { __asm__("vzeroall"); return 0; }' \
+    'int main(void) { __asm__("frobnicate %eax"); return 0; }' \
     "not supported"
 check asm-out-not-lvalue \
     'int main(void) { __asm__("int $0x80" : "=a"(1 + 2)); return 0; }' \

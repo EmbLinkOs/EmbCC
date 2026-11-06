@@ -414,6 +414,28 @@ static int asm_pad(long pos, int boundary, int max)
     return max && p > max ? 0 : p;
 }
 
+void code_asm_rels(struct code *c, const void *key, int base,
+                   const struct code_rel *r, int n)
+{
+    int k = 0;
+    for (int i = 0; i < c->nrel; i++)
+        if (c->rel[i].key != key)
+            c->rel[k++] = c->rel[i];
+    c->nrel = k;
+    for (int i = 0; i < n; i++) {
+        if (c->nrel == c->caprel) {
+            c->caprel = c->caprel ? c->caprel * 2 : 8;
+            c->rel = xrealloc(c->rel, (size_t)c->caprel * sizeof *c->rel);
+        }
+        c->rel[c->nrel] = r[i];
+        c->rel[c->nrel].off += base;
+        if (!r[i].sym)
+            c->rel[c->nrel].addend += base;
+        c->rel[c->nrel].key = key;
+        c->nrel++;
+    }
+}
+
 void code_put_asm(struct code *c, const unsigned char *b, int len,
                   const int *dr, int ndr, const int *ar, int nar, int fill)
 {

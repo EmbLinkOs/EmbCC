@@ -5922,6 +5922,7 @@ static void gen_ins(struct rv_fn *F, int n)
             }
         }
         /* the bytes, padded at each alignment for where they land */
+        code_asm_rels(t, ia, t->len, ia->rel, ia->nrel);   /* its relocations */
         code_put_asm(t, ia->code, ia->codelen, ia->drange, ia->ndrange,
                      ia->arange, ia->narange, CODE_FILL_RISCV);
         /* Out, through an address: the address is live across the asm

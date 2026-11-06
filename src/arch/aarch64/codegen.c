@@ -3651,6 +3651,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                 ld_slot(t, sd, ia->in[k].temp, ia->in[k].reg, 8, 0, 8);
             /* the bytes, padded at each alignment for where they land,
              * and their data marked: the $d and $x mapping symbols */
+            code_asm_rels(t, ia, t->len, ia->rel, ia->nrel);   /* its relocations */
             code_put_asm(t, ia->code, ia->codelen, ia->drange, ia->ndrange,
                          ia->arange, ia->narange, CODE_FILL_A64);
             for (int k = 0; k < ia->nout; k++) {

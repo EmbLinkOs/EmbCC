@@ -243,6 +243,11 @@ struct ir_asm {
      * there are none, or on a target whose backend does not. */
     const int *arange;
     int narange;
+    /* Its relocations, offsets into code: a symbol the template names
+     * (`bl f`, `adrp x0, g`), or a label of its own a field holds. The
+     * backend hands them on with code_asm_rels where it splices code. */
+    const struct code_rel *rel;
+    int nrel;
     struct ir_asm_op *in;
     int nin;
     struct ir_asm_op *out;

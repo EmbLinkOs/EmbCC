@@ -304,7 +304,9 @@ EOF
     #    constant is still at a multiple of sixteen.
     RE=${EMBCC_LLVM_READELF:-llvm-readelf}
     if command -v "$RE" >/dev/null 2>&1; then
-        printf '%s\n' 'const char *s(void) { return "ab"; }' \
+        # (a string holding a NUL, which stays in .rodata where the
+        # constant is; a C string would go to .rodata.str1.1)
+        printf '%s\n' 'const char *s(void) { return "a\\0b"; }' \
             'long double c(long double x) { return x * 1.5L; }' > "$out/al.c"
         "$EMBCC" --target=$T $EF -O2 -c "$out/al.c" -o "$out/al$x.o" || {
             echo "$RV: a long double constant does not compile"; exit 1; }

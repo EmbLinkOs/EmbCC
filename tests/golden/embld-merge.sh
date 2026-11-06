@@ -49,8 +49,8 @@ for t in thumbv7m-none-eabi riscv64-unknown-elf; do
         { bad "$t: does not compile"; continue; }
     llvm-readelf -SW "$out/b-$t.o" | grep -q '\.rodata\.str1\.[0-9]* .* AMS ' ||
         bad "$t: no .rodata.str1.N (AMS) section in the object"
-    llvm-readelf -rW "$out/a-$t.o" | grep -q '\.LC[0-9]' ||
-        bad "$t: no relocation names a string's .LCn symbol"
+    llvm-readelf -rW "$out/a-$t.o" | grep -qE '\.LC[0-9]|\.rodata\.str' ||
+        bad "$t: no relocation reaches a string in its mergeable section"
     case $t in
         thumb*) base=0x08000000 ;;
         *)      base=0x80000000 ;;

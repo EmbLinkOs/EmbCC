@@ -144,6 +144,9 @@ struct gas {
     int errors;
     int thumb_func_next;    /* .thumb_func: the next label is a function */
     int errors_muted;       /* the expander's own look at an .equ */
+    int quiet;              /* errors counted, not printed: an inline
+                             * template tried here after its target's own
+                             * assembler refused it (gas_inline_retry) */
     /* Relaxation: a statement assembled wide once stays wide, so the
      * passes settle (see gas_assemble). Indexed by statement. */
     char *wide;
@@ -213,6 +216,10 @@ static void gerr(struct gas *g, const char *fmt, ...)
     va_list ap;
     if (g->errors_muted)
         return;
+    if (g->quiet) {
+        g->errors++;
+        return;
+    }
     fprintf(stderr, "%s:%d: error: ", g->path, g->line + g->line_base);
     va_start(ap, fmt);
     vfprintf(stderr, fmt, ap);
@@ -1875,6 +1882,23 @@ static const char *pseudo_symbol(struct gas *g, const char *stmt)
     n = 0;
     while (q[n] && is_symc((unsigned char)q[n])) n++;
     if (!n) return NULL;
+    {
+        /* `la a0, 1f`: the numeric local's generated name, as substitute()
+         * reads it (1f the next definition, 1b the last) -- the operand
+         * was once relocated against an undefined "1f" */
+        int fwd, d = local_ref(q, (size_t)n, &fwd);
+        if (d >= 0) {
+            char nm[32];
+            int inst = fwd ? g->local_n[d] : g->local_n[d] - 1;
+            if (inst < 0) {
+                gerr(g, "'%.*s' refers backwards and there is no earlier "
+                        "'%d:'", (int)n, q, d);
+                inst = 0;
+            }
+            local_name(nm, sizeof nm, d, inst);
+            return sym_get(g, nm, strlen(nm))->name;
+        }
+    }
     return sym_get(g, q, n)->name;
 }
 
@@ -2468,6 +2492,13 @@ static const char *after_labels(const char *q)
 static void instruction(struct gas *g, char *stmt, int pass)
 {
     long pc = cur_off(g);
+    if (g->tgt->machine == EM_RISCV) {
+        /* `lla`: the pc-relative pair always -- which `la` is here, the
+         * code being position-dependent */
+        char *lp = skip_ws(stmt);
+        if (!strncmp(lp, "lla", 3) && isspace((unsigned char)lp[3]))
+            *lp = ' ';
+    }
     char *ext = NULL;
     char *text;
     int placeheld = 0;
@@ -4586,12 +4617,11 @@ static int write_object(struct gas *g, const char *out_path)
                        (f)->type == g->tgt->r_abs64 || \
                        ((f)->type == g->tgt->r_abs16 && g->tgt->r_abs16) || \
                        (g->tgt->machine == EM_X86_64 && x86_secsym_reloc((f)->type))))
-    /* ...but never in a SHF_MERGE section: the linker moves each string
-     * on its own, so a reference names the string's label -- `.LC3-4`
-     * read as section+offset-4 would be the string before. (GNU as
-     * keeps the label only when there is an addend; keeping it always
-     * is what EmbCC's -c writes, so -S assembles into the same object.) */
-#define MERGE_KEEPS(f, s) ((void)(f), (g->secs[(s)->sec].flags & SHF_MERGE) != 0)
+    /* ...but not in a SHF_MERGE section with an addend: the linker moves
+     * each string on its own, and `.LC3-4` read as section+offset-4 is
+     * the string before. GNU as and llvm-mc keep the label then, and so
+     * does EmbCC's -c (str_reloc), so either assembles -S into its object. */
+#define MERGE_KEEPS(f, s) ((g->secs[(s)->sec].flags & SHF_MERGE) && (f)->addend)
     for (i = 0; i < g->nfix; i++) {
         struct sym *s = sym_find(g, g->fix[i].sym, strlen(g->fix[i].sym));
         if (!s) continue;
@@ -5156,7 +5186,8 @@ static void gas_run(struct gas *g, struct gexp *gx, const char *text,
             if (it > 0 && !g->grew && h == prev) {
                 /* the layout settled: what failed in this pass failed */
                 for (int k = 0; k < g->ndeferr; k++) {
-                    fprintf(stderr, "%s\n", g->deferr[k]);
+                    if (!g->quiet)
+                        fprintf(stderr, "%s\n", g->deferr[k]);
                     g->errors++;
                 }
                 break;
@@ -5283,8 +5314,10 @@ int gas_template_has_labels(const char *text)
     return 0;
 }
 
-int gas_assemble_inline(const char *file, int line, const char *text,
-                        struct code *out, char *err, int errlen)
+static char *block_name(const struct gas_target *t, const char *name);
+
+static int inline_run(const char *file, int line, const char *text,
+                      struct code *out, char *err, int errlen, int quiet)
 {
     struct gas g;
     struct gexp gx;
@@ -5299,17 +5332,53 @@ int gas_assemble_inline(const char *file, int line, const char *text,
     g.path = file;
     g.line_base = line > 0 ? line - 1 : 0;
     g.tgt = t;
+    g.quiet = quiet;
     sec_init(&g);
     gas_run(&g, &gx, text, file);
     for (int i = 0; i < g.nsecs && !g.errors; i++)
         if (i != SEC_TEXT && (g.secs[i].c.len || g.secs[i].size))
-            snprintf(err, (size_t)errlen, "an asm template with labels that "
-                     "puts bytes in section %s is not supported: its bytes "
-                     "are the function's", g.secs[i].name);
-    if (!err[0] && !g.errors && g.nfix)
-        snprintf(err, (size_t)errlen, "an asm template with labels that "
-                 "names the symbol '%s' is not supported: only its own "
-                 "labels; pass an address in an operand", g.fix[0].sym);
+            snprintf(err, (size_t)errlen, "an asm template that puts bytes "
+                     "in section %s is not supported: its bytes are the "
+                     "function's", g.secs[i].name);
+    /* A literal pool would land right after the template's last
+     * instruction, where the function goes on running: GNU as puts one
+     * after the function, which this cannot */
+    if (!err[0] && !g.errors && g.nlits)
+        snprintf(err, (size_t)errlen, "a literal pool (`ldr rd, =VALUE`) in "
+                 "an asm template is not supported: its words would follow "
+                 "the template inside the function; load the address with "
+                 "movw/movt (adrp/add on AArch64), or pass it in an operand");
+        /* The relocations, for the object writer: a symbol it names, or a
+     * label of its own (the template's start plus the label's offset,
+     * code_asm_rels then making that the function's text) */
+    for (int i = 0; !err[0] && !g.errors && i < g.nfix; i++) {
+        const struct fixup *f = &g.fix[i];
+        const struct sym *sy = sym_find(&g, f->sym, strlen(f->sym));
+        struct code_rel r;
+        memset(&r, 0, sizeof r);
+        r.off = (int)f->off;
+        r.type = (int)f->type;
+        r.addend = f->addend;
+        if (f->sec != SEC_TEXT) {
+            snprintf(err, (size_t)errlen, "an asm template's relocation "
+                     "outside its code is not supported");
+            break;
+        }
+        if (sy && sy->sec == SEC_TEXT) {
+            r.sym = NULL;
+            r.addend += sy->value;
+        } else if (sy && sy->sec >= 0) {
+            snprintf(err, (size_t)errlen, "'%s' is in another section of "
+                     "the asm template, which is not supported", f->sym);
+            break;
+        } else
+            r.sym = block_name(t, f->sym);
+        if (out->nrel == out->caprel) {
+            out->caprel = out->caprel ? out->caprel * 2 : 8;
+            out->rel = xrealloc(out->rel, (size_t)out->caprel * sizeof *out->rel);
+        }
+        out->rel[out->nrel++] = r;
+    }
     if (!err[0] && !g.errors && g.secs[SEC_TEXT].align > 4)
         snprintf(err, (size_t)errlen, "an alignment of %ld in an asm "
                  "template with labels is not supported: where the "
@@ -5336,6 +5405,44 @@ int gas_assemble_inline(const char *file, int line, const char *text,
     }
     gas_free(&g, &gx);
     return err[0] ? -1 : 0;
+}
+
+int gas_assemble_inline(const char *file, int line, const char *text,
+                        struct code *out, char *err, int errlen)
+{
+    return inline_run(file, line, text, out, err, errlen, 0);
+}
+
+/* A template the target's own assembler refused (rc != 0): assembled by
+ * this one instead, quietly -- a symbol operand (`bl f`, `adrp x0, g`,
+ * `ldr r0, =g`), an expression, a directive the instruction encoder has
+ * no word for. When this one refuses it too, the first refusal stands:
+ * it names the instruction. */
+int gas_inline_retry(int rc, const char *file, int line, const char *text,
+                     struct code *c, char *err, int errlen)
+{
+    struct code t;
+    char e2[512];
+    if (rc == 0 || !target_for_inline())
+        return rc;
+    memset(&t, 0, sizeof t);
+    if (inline_run(file, line, text, &t, e2, (int)sizeof e2, 1) != 0) {
+        free(t.p);
+        free(t.drange);
+        free(t.rel);
+        /* a refusal of this mode's own (a literal pool, another section)
+         * says more than the instruction encoder's */
+        if (strncmp(e2, "the asm template above does not", 31))
+            snprintf(err, (size_t)errlen, "%s", e2);
+        return rc;
+    }
+    free(c->p);
+    free(c->drange);
+    free(c->arange);
+    free(c->rel);
+    *c = t;
+    err[0] = 0;
+    return 0;
 }
 
 /* A name the block uses, as the driver knows names: on RX a C symbol is

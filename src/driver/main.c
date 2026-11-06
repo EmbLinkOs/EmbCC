@@ -327,10 +327,12 @@ static int g_merge_strings = 1;
  * string's own symbol when it went to a mergeable section, .rodata's
  * section symbol at its new place otherwise; *add the offset from it. */
 static int str_reloc(const struct ir_unit *iu, long off, int rodata_sym,
-                     const int *str_sym, long *add);
+                     const int *str_sym, const int *msec_sym, long bias,
+                     long *add);
 
 static int str_reloc(const struct ir_unit *iu, long off, int rodata_sym,
-                     const int *str_sym, long *add)
+                     const int *str_sym, const int *msec_sym, long bias,
+                     long *add)
 {
     long d;
     int i = str_at(iu, off, &d);
@@ -338,9 +340,19 @@ static int str_reloc(const struct ir_unit *iu, long off, int rodata_sym,
         *add = off;
         return rodata_sym;
     }
+    /* In a mergeable section, as GNU as and llvm-mc write it: the
+     * string's symbol when the relocation has an addend (`.LC3-4`, a
+     * rel32 -- read against the section it would be the string before),
+     * the section's at the string's offset when it has none. -S then
+     * reassembles into this object with either of them. `bias` is what
+     * the relocation adds of its own (target_reloc_addend's -4). */
     if (iu->strs[i].msec) {
-        *add = d;
-        return str_sym[i];
+        if (d + bias != 0) {
+            *add = d;
+            return str_sym[i];
+        }
+        *add = iu->strs[i].moff + d;
+        return msec_sym[iu->strs[i].msec - 1];
     }
     *add = iu->strs[i].moff + d;
     return rodata_sym;
@@ -3737,6 +3749,15 @@ lto_backend:
                     (bd->ra_at_o0 && !getenv("EMBCC_O0_NORA")));
     }
     time_mark("code generation");
+    /* An inline asm template's relocations (`bl f` in one) are written by
+     * the ELF writer; -S, a listing and the other formats cannot spell
+     * them yet, and an object without them would be another program. */
+    if (text.nrel && target_fmt_get() != TGT_FMT_ELF)
+        diag_fatal(in, 0, "an asm template here names a symbol ('%s'), "
+                   "which this object format cannot write yet; compile for "
+                   "an ELF target", text.rel[0].sym ? text.rel[0].sym
+                                                    : "a label");
+    asmout_set_asm_rels(text.rel, text.nrel);       /* for -S */
     resolve_label_data(u);
 
     /* The groups, as codegen laid them out (the sort above). */
@@ -5974,11 +5995,44 @@ lto_backend:
                                      ELF64_ST_INFO(STB_LOCAL,
                                                    STT_SECTION),
                                      (Elf64_Half)rodata_ndx);
-    /* each mergeable string's own symbol, what its references name */
+    /* each mergeable string section's symbol, and each string's own:
+     * what its references name (str_reloc) */
+    int msec_sym[8] = { 0 };
+    for (int k = 0; k < iu->nmsecs; k++)
+        msec_sym[k] = elfw_add_symbol(w, "", 0, 0,
+                                      ELF64_ST_INFO(STB_LOCAL, STT_SECTION),
+                                      (Elf64_Half)msec_ndx[k]);
     int *str_sym = xcalloc((size_t)(iu->nstrs ? iu->nstrs : 1),
                            sizeof *str_sym);
+    /* (only the strings a reference with an addend names: str_reloc's
+     * rule, applied ahead because locals come before globals) */
+    char *str_named = xcalloc((size_t)(iu->nstrs ? iu->nstrs : 1), 1);
+    for (int i = 0; i < nstrs; i++) {
+        long d;
+        int k;
+        if (strs[i].kind == RK_RISCV_PCREL_LO12_I ||   /* (not strings) */
+            strs[i].kind == RK_AVR_TEXT_CALL || strs[i].kind == RK_MIPS_TEXT26 ||
+            strs[i].kind == RK_XTENSA_TEXT32)
+            continue;
+        k = str_at(iu, strs[i].str_off, &d);
+        if (k >= 0 && d + target_reloc_addend(ta, strs[i].kind, 0) != 0)
+            str_named[k] = 1;
+    }
+    for (struct global *g = u->globals; g; g = g->next) {
+        if (g->absorbed || !g->defined || g->in_bss)
+            continue;
+        for (int r = 0; r < g->nrelocs; r++) {
+            long d;
+            int k;
+            if (g->relocs[r].ftarget || g->relocs[r].gtarget)
+                continue;
+            k = str_at(iu, g->relocs[r].str_off, &d);
+            if (k >= 0 && d + g->relocs[r].addend != 0)
+                str_named[k] = 1;
+        }
+    }
     for (int i = 0; i < iu->nstrs; i++)
-        if (iu->strs[i].msec) {
+        if (iu->strs[i].msec && str_named[i]) {
             char sn[24];
             snprintf(sn, sizeof sn, ".LC%d", i);
             str_sym[i] = elfw_add_symbol(
@@ -6341,6 +6395,46 @@ lto_backend:
                       etype ? etype : target_reloc_type(target_get(), rk),
                       addend);
         }
+    /* Inline asm templates' relocations (struct code_rel): against the
+     * symbol the template names -- this unit's function or object, or an
+     * undefined one, one per name with the blocks' -- or, for a label of
+     * its own, the function's text. */
+    for (int i = 0; i < text.nrel; i++) {
+        const struct code_rel *cr = &text.rel[i];
+        int sym = 0;
+        long addend = cr->addend;
+        const char *tn = cr->sym;
+        if (!tn) {
+            addend = code_ref(cr->addend, text_sym, &sym);
+            code_rela(w, text_ndx, cr->off, sym, cr->type, addend);
+            continue;
+        }
+        for (struct func *f = u->funcs; f && !sym; f = f->next)
+            if (!f->absorbed && f->sym_ndx && strcmp(f->name, tn) == 0)
+                sym = f->sym_ndx;
+        for (struct global *g = u->globals; g && !sym; g = g->next)
+            if (!g->absorbed && g->sym_ndx && strcmp(g->name, tn) == 0)
+                sym = g->sym_ndx;
+        for (struct topasm *lb = u->topasm; lb && !sym; lb = lb->next)
+            for (int k = 0; k < lb->nsyms && !sym; k++)
+                if (strcmp(lb->syms[k].name, tn) == 0)
+                    addend += block_ref(lb, lb->syms[k].off, text_sym, &sym);
+        for (int k = 0; k < nundef && !sym; k++)
+            if (strcmp(undef_name[k], tn) == 0)
+                sym = undef_sym[k];
+        if (!sym) {
+            sym = elfw_add_symbol(w, tn, 0, 0,
+                                  ELF64_ST_INFO(STB_GLOBAL, STT_NOTYPE),
+                                  SHN_UNDEF);
+            undef_name = xrealloc(undef_name,
+                                  (size_t)(nundef + 1) * sizeof *undef_name);
+            undef_sym = xrealloc(undef_sym,
+                                 (size_t)(nundef + 1) * sizeof *undef_sym);
+            undef_name[nundef] = tn;
+            undef_sym[nundef++] = sym;
+        }
+        code_rela(w, text_ndx, cr->off, sym, cr->type, addend);
+    }
     free(undef_name);
     free(undef_sym);
 
@@ -6371,7 +6465,9 @@ lto_backend:
         /* (the auipc, or the jump's label, is in the same function as
          * the site, so in the same section) */
         long soff;
-        int ssym = str_reloc(iu, strs[i].str_off, rodata_sym, str_sym, &soff);
+        int ssym = str_reloc(iu, strs[i].str_off, rodata_sym, str_sym,
+                             msec_sym, target_reloc_addend(ta, strs[i].kind, 0),
+                             &soff);
         long sadd = target_reloc_addend(ta, strs[i].kind, soff);
         if (lo)
             sadd = code_ref(strs[i].patch_off - 4, text_sym, &ssym);
@@ -6383,6 +6479,7 @@ lto_backend:
                   target_reloc_type(ta, strs[i].kind), sadd);
     }
     free(strs);
+    free(str_named);
 
     /* Global-variable addresses: PC32 against the global's own symbol
      * (defined or UNDEF alike — the linker fills in either way). */
@@ -6426,7 +6523,7 @@ lto_backend:
             } else {
                 long so;
                 sym = str_reloc(iu, g->relocs[i].str_off, rodata_sym,
-                                str_sym, &so);
+                                str_sym, msec_sym, g->relocs[i].addend, &so);
                 add = so + g->relocs[i].addend;
             }
             /* A pointer in .data is as wide as a pointer: eight bytes

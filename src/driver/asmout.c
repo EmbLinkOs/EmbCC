@@ -121,10 +121,24 @@ struct site {
     int off;                 /* the relocated field's offset in .text */
     const char *name;        /* the symbol, or NULL for a .rodata string */
     int str_off;             /* when name is NULL: offset inside .rodata */
-    int kind;                /* enum reloc_kind */
+    int kind;                /* enum reloc_kind, or SITE_ASM* */
+    int etype;               /* SITE_ASM*: the ELF relocation type */
     int done;                /* -S wrote its .reloc */
     int labeled;             /* a text site: its target's label is written */
 };
+
+/* An inline asm template's relocation (struct code_rel): against the
+ * symbol it names, or a label of its own (a text site, at str_off) */
+#define SITE_ASM      (-100)
+#define SITE_ASM_TEXT (-101)
+static const struct code_rel *g_asm_rel;
+static int g_asm_nrel;
+
+void asmout_set_asm_rels(const struct code_rel *r, int n)
+{
+    g_asm_rel = r;
+    g_asm_nrel = n;
+}
 
 static int site_cmp(const void *a, const void *b)
 {
@@ -266,7 +280,8 @@ static void strs_emit(struct outbuf *b, const struct ir_unit *iu, int msec)
  * relocates the same way. */
 static int text_site(int kind)
 {
-    return kind == RK_XTENSA_TEXT32 || kind == RK_AVR_TEXT_CALL;
+    return kind == RK_XTENSA_TEXT32 || kind == RK_AVR_TEXT_CALL ||
+           kind == SITE_ASM_TEXT;
 }
 
 static void text_label(char *out, size_t cap, int off)
@@ -887,8 +902,21 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
                    struct fsite *fs, int nfs)
 {
     /* every relocation site, in .text order */
-    int nsite = next + nstrs + ngs + nfs, ns = 0;
+    int nsite = next + nstrs + ngs + nfs + g_asm_nrel, ns = 0;
     struct site *site = xcalloc((size_t)(nsite ? nsite : 1), sizeof *site);
+    for (int i = 0; i < g_asm_nrel; i++) {
+        const struct code_rel *r = &g_asm_rel[i];
+        site[ns].off = r->off;
+        site[ns].etype = r->type;
+        if (r->sym) {
+            site[ns].name = r->sym;
+            site[ns].addend = r->addend;
+            site[ns++].kind = SITE_ASM;
+        } else {
+            site[ns].str_off = (int)r->addend;
+            site[ns++].kind = SITE_ASM_TEXT;
+        }
+    }
     for (int i = 0; i < next; i++) {
         site[ns].off = ext[i].patch_off;
         site[ns].name = ext[i].callee ? csym(ext[i].callee->name) : "?";
@@ -1091,7 +1119,9 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
              * Each of these has exactly one encoding, so the assembler has
              * nothing to choose, and a REL assembler stores the addend in
              * the field as EmbCC's object writer does. */
-            if (st && target_is_mips() && len == 4) {
+            /* (a template's relocation goes by .reloc below, by name) */
+            if (st && target_is_mips() && len == 4 && st->kind != SITE_ASM &&
+                st->kind != SITE_ASM_TEXT) {
                 unsigned long w = (unsigned long)target_get_uint(text + pc,
                                                                  4);
                 int op = (int)(w >> 26), rs = (int)(w >> 21) & 31,
@@ -1160,7 +1190,19 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
                     text_label(sym, sizeof sym, st->str_off);
                 else
                     str_label(sym, sizeof sym, iu, st->str_off);
-                const char *rt = reloc_name(st->kind);
+                const char *rt = st->kind == SITE_ASM ||
+                                 st->kind == SITE_ASM_TEXT
+                    ? target_reloc_name(target_get(), st->etype)
+                    : reloc_name(st->kind);
+                /* an ARM .reloc keeps no addend: the instruction holds it */
+                if (st->kind == SITE_ASM && st->addend &&
+                    target_get() == TARGET_THUMB &&
+                    st->etype != R_ARM_ABS32)
+                    diag_fatal(srcname, 0, "-S cannot write an asm "
+                               "template's %s against %s%+ld: an ARM "
+                               "assembler takes the addend from the "
+                               "instruction", rt ? rt : "relocation",
+                               st->name, st->addend);
                 if (st->kind == RK_RISCV_PCREL_LO12_I) {
                     if (!*hi_label)
                         diag_fatal(srcname, 0,
@@ -1187,8 +1229,10 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
                 long tail = len - field - (st->kind == RK_ABS64 ? 8 : 4);
                 ob_fmt(b, "\t.reloc\t.-%ld, %s, %s%+ld\n",
                        len - field, rt, sym,
-                       st->kind == RK_RISCV_PCREL_LO12_I
-                           ? 0L : addend_for(st->kind) + st->addend);
+                       st->kind == RK_RISCV_PCREL_LO12_I ||
+                       st->kind == SITE_ASM_TEXT ? 0L
+                       : st->kind == SITE_ASM ? st->addend
+                       : addend_for(st->kind) + st->addend);
                 (void)tail;
                 st->done = 1;
             }

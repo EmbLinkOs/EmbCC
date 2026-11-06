@@ -6547,6 +6547,7 @@ static void gen_ins(struct t_fn *F, int n)
         }
         /* the bytes, padded at each alignment for where they land, and
          * their data marked: ARM's $d and $t mapping symbols */
+        code_asm_rels(t, ia, t->len, ia->rel, ia->nrel);   /* its relocations */
         code_put_asm(t, ia->code, ia->codelen, ia->drange, ia->ndrange,
                      ia->arange, ia->narange,
                      t_isa_a32 ? CODE_FILL_A32 : CODE_FILL_THUMB2);

@@ -299,7 +299,9 @@ void irg_asm_mips(struct ir_func *fn, struct stmt *s)
     }
     for (int i = 0; i < a->nclob; i++) {
         int r = mipsasm_gpr(a->clob[i], (int)strlen(a->clob[i]));
-        if (r >= 0 && callee_owned(r))
+        /* ($31 may go: a function holding an asm is no leaf and saves ra,
+         * so a template's jal leaves the return address kept) */
+        if (r >= 0 && callee_owned(r) && r != 31)
             diag_fatal(file, s->line, "MIPS asm clobbers register '%s', "
                                       "which EmbCC does not save around an "
                                       "asm", a->clob[i]);
@@ -347,6 +349,8 @@ void irg_asm_mips(struct ir_func *fn, struct stmt *s)
     struct ir_asm *ia = xcalloc(1, sizeof *ia);
     ia->code = c.p;
     ia->codelen = c.len;
+    ia->rel = c.rel;            /* (code_asm_rels where it is spliced) */
+    ia->nrel = c.nrel;
     ia->drange = c.drange;
     ia->ndrange = c.ndrange;
     ia->out = xcalloc((size_t)(a->nout ? a->nout : 1), sizeof *ia->out);

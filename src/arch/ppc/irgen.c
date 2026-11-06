@@ -454,6 +454,8 @@ void irg_asm_ppc(struct ir_func *fn, struct stmt *s)
     struct ir_asm *ia = xcalloc(1, sizeof *ia);
     ia->code = c.p;
     ia->codelen = c.len;
+    ia->rel = c.rel;            /* (code_asm_rels where it is spliced) */
+    ia->nrel = c.nrel;
     ia->calls = links;
     ia->out = xcalloc((size_t)(a->nout ? a->nout : 1), sizeof *ia->out);
     ia->in = xcalloc((size_t)(a->nin ? a->nin : 1), sizeof *ia->in);

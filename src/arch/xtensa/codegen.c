@@ -2954,6 +2954,7 @@ static void gen_ins(struct xt_fn *F, int n)
                     xt_load(t, o->reg, o->reg, 0, o->size, 0);
             }
         }
+        code_asm_rels(t, ia, t->len, ia->rel, ia->nrel);   /* its relocations */
         for (int k = 0; k < ia->codelen; k++)
             code_byte(t, ia->code[k]);
         /* Out, through an address: the address is live across the asm

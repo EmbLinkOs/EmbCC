@@ -3544,6 +3544,7 @@ static void gen_ins(struct sparc_fn *F, int n)
                     sparc_load(t, o->reg, o->reg, 0, o->size, 0);
             }
         }
+        code_asm_rels(t, ia, t->len, ia->rel, ia->nrel);   /* its relocations */
         for (int k = 0; k < ia->codelen; k++)
             code_byte(t, ia->code[k]);
         F->barrier = t->len;
