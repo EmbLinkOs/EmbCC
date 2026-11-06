@@ -3706,6 +3706,7 @@ static int add_synth(struct linker *l, const char *name, long size, int align,
 static void ls_push_list(struct ls_stmt *s, int v);
 static Elf64_Addr reloc_symval(struct linker *l, struct object *o,
                                Elf64_Word symidx, int *is_undef_weak);
+static void put32(unsigned char *p, unsigned int v);
 
 /* ---- ARM initial-exec TLS: a GOT of thread-pointer offsets ------------
  *
