@@ -3980,6 +3980,15 @@ static int directive(struct gas *g, char *p, int pass)
         advance(g, to - cur_off(g));
         return 1;
     }
+    /* .half is RISC-V's, SPARC's and MIPS's; GNU as knows no such
+     * directive on ARM, AArch64 or x86-64 (.hword, .short there) */
+    if (DIR(".half") && (g->tgt->machine == EM_ARM ||
+                         g->tgt->machine == EM_AARCH64 ||
+                         g->tgt->machine == EM_X86_64)) {
+        gerr(g, "unknown directive .half: this target's halfword is .hword "
+                "or .short");
+        return 1;
+    }
     if (DIR(".byte") || DIR(".short") || DIR(".half") || DIR(".hword") ||
         DIR(".word") || DIR(".long") || DIR(".int") || DIR(".quad") ||
         DIR(".dword") || DIR(".2byte") || DIR(".4byte") || DIR(".8byte") ||
@@ -4282,6 +4291,11 @@ static int directive(struct gas *g, char *p, int pass)
          * where mtvec needs four, and a Cortex-M vector table's `.align 7`
          * asked for a multiple of seven. */
         if (DIR(".balign") || DIR(".balignw") || DIR(".balignl")) {
+            if (v > 0 && (v & (v - 1))) {          /* as GNU as refuses it */
+                gerr(g, "%.*s %ld: the alignment is not a power of 2",
+                     (int)nlen, name, v);
+                return 1;
+            }
             if (v > 0) do_align(g, v);
         } else if (DIR(".align") && (g->tgt->machine == EM_XTENSA ||
                                      g->tgt->machine == EM_RX ||
@@ -5348,6 +5362,12 @@ static int inline_run(const char *file, int line, const char *text,
                  "an asm template is not supported: its words would follow "
                  "the template inside the function; load the address with "
                  "movw/movt (adrp/add on AArch64), or pass it in an operand");
+    /* ...and Xtensa's, before it: a wide movi or a call through a literal */
+    if (!err[0] && !g.errors && g.nxl)
+        snprintf(err, (size_t)errlen, "a literal in an asm template (a movi "
+                 "of more than 12 bits, an l32r, a long call) is not "
+                 "supported: its word would sit inside the function; pass "
+                 "the value in an operand");
         /* The relocations, for the object writer: a symbol it names, or a
      * label of its own (the template's start plus the label's offset,
      * code_asm_rels then making that the function's text) */
@@ -5430,9 +5450,9 @@ int gas_inline_retry(int rc, const char *file, int line, const char *text,
         free(t.p);
         free(t.drange);
         free(t.rel);
-        /* a refusal of this mode's own (a literal pool, another section)
-         * says more than the instruction encoder's */
-        if (strncmp(e2, "the asm template above does not", 31))
+        /* a literal it would have placed inside the function says more
+         * than the instruction encoder's refusal of the statement */
+        if (!strncmp(e2, "a literal", 9))
             snprintf(err, (size_t)errlen, "%s", e2);
         return rc;
     }

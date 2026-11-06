@@ -254,6 +254,15 @@ refc() {            # refc WHAT PATTERN SOURCE
     grep -q -- "$2" "$out/bad.err" || {
         echo "$1 was refused, but not by name:"; cat "$out/bad.err"; exit 1; }
 }
+accs() {            # accs WHAT SYMBOL SOURCE: a template naming SYMBOL is
+                    # assembled, and the object relocates against it
+    printf '%s\n' "$3" > "$out/acc.c"
+    "$EMBCC" --target=$T -c "$out/acc.c" -o "$out/acc.o" 2> "$out/acc.err" ||
+        { echo "$1 was refused:"; cat "$out/acc.err"; exit 1; }
+    ${EMBCC_LLVM_READELF:-llvm-readelf} -rW "$out/acc.o" |
+        grep -qE "[[:space:]]_?$2([[:space:]]|$)" ||
+        { echo "$1: no relocation against $2"; exit 1; }
+}
 refc "a call0 in a template" "callx0 in Xtensa asm writes a0" \
     'void f(void){ __asm__ volatile("callx0 a8"); }'
 refc "a0 clobbered" "clobbers 'a0', which holds" \
@@ -262,7 +271,7 @@ refc "sp clobbered" "clobbers 'a1', which holds" \
     'void f(void){ __asm__ volatile("nop" ::: "a1"); }'
 refc "an unknown clobber" "is not an Xtensa register" \
     'void f(void){ __asm__ volatile("nop" ::: "eax"); }'
-refc "a symbol in a template" "inline asm cannot reach one" \
+accs "a symbol in a template" g \
     'void g(void); void f(void){ __asm__ volatile("call8 g"); }'
 # (a named label: the template is assembled whole, labels and all)
 printf '%s\n' 'void f(void){ __asm__ volatile("x: j x"); }' > "$out/nl.c"
@@ -276,7 +285,7 @@ refc "a register variable in a7" "is not supported for Xtensa asm" \
     'int f(void){ register int r __asm__("a7") = 1; __asm__("nop" :: "r"(r)); return r; }'
 refc "a modifier" "modifier '%x' is not supported" \
     'int f(int x){ __asm__("nop # %x0" :: "r"(x)); return x; }'
-refc "a wide movi in a template" "does not fit its signed 12 bits" \
+refc "a wide movi in a template" "a literal in an asm template" \
     'int f(void){ int r; __asm__("movi %0, 5000" : "=r"(r)); return r; }'
 refs() {            # refs WHAT PATTERN SOURCE: a .s file
     printf '%s\n' "$3" > "$out/bad.s"

@@ -322,15 +322,24 @@ refc() {            # refc WHAT PATTERN SOURCE
     grep -q -- "$2" "$out/bad.err" || {
         echo "$1 was refused, but not by name:"; cat "$out/bad.err"; exit 1; }
 }
+accs() {            # accs WHAT SYMBOL SOURCE: a template naming SYMBOL is
+                    # assembled, and the object relocates against it
+    printf '%s\n' "$3" > "$out/acc.c"
+    "$EMBCC" --target=$T -c "$out/acc.c" -o "$out/acc.o" 2> "$out/acc.err" ||
+        { echo "$1 was refused:"; cat "$out/acc.err"; exit 1; }
+    ${EMBCC_LLVM_READELF:-llvm-readelf} -rW "$out/acc.o" |
+        grep -qE "[[:space:]]_?$2([[:space:]]|$)" ||
+        { echo "$1: no relocation against $2"; exit 1; }
+}
 refc "the stack pointer clobbered" "clobbers 'sp', the stack pointer" \
     'void f(void){ __asm__ volatile("nop" ::: "sp"); }'
 refc "the frame pointer clobbered" "clobbers 'a6', the frame pointer" \
     'void f(void){ __asm__ volatile("nop" ::: "a6"); }'
 refc "an unknown clobber" "is not a ColdFire register" \
     'void f(void){ __asm__ volatile("nop" ::: "eax"); }'
-refc "a symbol in a template" "inline asm cannot reach one" \
+accs "a symbol in a template" g \
     'void g(void); void f(void){ __asm__ volatile("jsr g"); }'
-refc "a branch to a symbol in a template" "inline asm cannot reach one" \
+accs "a branch to a symbol in a template" g \
     'void g(void); void f(void){ __asm__ volatile("bsr g"); }'
 # (a named label: the template is assembled whole, labels and all)
 printf '%s\n' 'void f(void){ __asm__ volatile("x: bra x"); }' > "$out/nl.c"

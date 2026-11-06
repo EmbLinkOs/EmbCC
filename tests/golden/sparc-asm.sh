@@ -301,6 +301,15 @@ refc() {            # refc WHAT PATTERN SOURCE
     grep -q -- "$2" "$out/bad.err" || {
         echo "$1 was refused, but not by name:"; cat "$out/bad.err"; exit 1; }
 }
+accs() {            # accs WHAT SYMBOL SOURCE: a template naming SYMBOL is
+                    # assembled, and the object relocates against it
+    printf '%s\n' "$3" > "$out/acc.c"
+    "$EMBCC" --target=$T -c "$out/acc.c" -o "$out/acc.o" 2> "$out/acc.err" ||
+        { echo "$1 was refused:"; cat "$out/acc.err"; exit 1; }
+    ${EMBCC_LLVM_READELF:-llvm-readelf} -rW "$out/acc.o" |
+        grep -qE "[[:space:]]_?$2([[:space:]]|$)" ||
+        { echo "$1: no relocation against $2"; exit 1; }
+}
 refc "%sp clobbered" "clobbers 'sp', which holds" \
     'void f(void){ __asm__ volatile("nop" ::: "sp"); }'
 refc "%fp clobbered" "clobbers '%fp', which holds" \
@@ -309,7 +318,7 @@ refc "%i7 clobbered" "clobbers 'i7', which holds" \
     'void f(void){ __asm__ volatile("nop" ::: "i7"); }'
 refc "an unknown clobber" "is not a SPARC register" \
     'void f(void){ __asm__ volatile("nop" ::: "eax"); }'
-refc "a symbol in a template" "inline asm cannot reach one" \
+accs "a symbol in a template" g \
     'void g(void); void f(void){ __asm__ volatile("call g\n nop"); }'
 # (a named label: the template is assembled whole, labels and all)
 printf '%s\n' 'void f(void){ __asm__ volatile("x: ba x\n nop"); }' > "$out/nl.c"
