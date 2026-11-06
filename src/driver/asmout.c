@@ -147,6 +147,74 @@ static int blocks_by_reloc(void);
 static void blocks_emit(struct outbuf *b, struct unit *u,
                         const unsigned char *text, long from, long textlen);
 
+/* Where each string literal goes in an ELF object. One with no NUL but
+ * its last byte -- a C string, nothing a reader could walk past -- goes
+ * to a mergeable section, .rodata.str1.ALIGN (SHF_MERGE|SHF_STRINGS,
+ * entries of one byte), and the linker keeps one copy of it for the
+ * whole image, inside another string where it is that one's tail. The
+ * rest (a wide string, one holding a NUL) stay in .rodata, packed. Every
+ * reference to a mergeable one goes through a symbol of its own (.LCn):
+ * the linker moves each string on its own, and a section-relative
+ * reference with a bias in it -- x86's rel32 is -4 -- would land in the
+ * one before. Without merging (other formats, --no-merge-strings) each
+ * string stays where irgen put it. */
+void str_place(struct ir_unit *iu, int merge)
+{
+    int ro = 0;
+    iu->nmsecs = 0;
+    for (int i = 0; i < iu->nstrs; i++) {
+        struct ir_str *st = &iu->strs[i];
+        int a = st->align > 1 ? st->align : 1;
+        st->msec = 0;
+        if (!merge) {
+            st->moff = st->off;
+            continue;
+        }
+        if (st->len > 0 && !st->bytes[st->len - 1] &&
+            !memchr(st->bytes, 0, (size_t)(st->len - 1)) && a <= 64) {
+            int k = 0;
+            while (k < iu->nmsecs && iu->msecs[k].align != a)
+                k++;
+            if (k == iu->nmsecs && k < 8) {
+                iu->msecs[k].align = a;
+                iu->msecs[k].len = 0;
+                iu->nmsecs++;
+            }
+            if (k < iu->nmsecs) {
+                int *len = &iu->msecs[k].len;
+                *len = (*len + a - 1) / a * a;
+                st->msec = k + 1;
+                st->moff = *len;
+                *len += st->len;
+                continue;
+            }
+        }
+        ro = (ro + a - 1) / a * a;
+        st->moff = ro;
+        ro += st->len;
+    }
+    iu->rodata_strs_len = merge ? ro : iu->rodata_len;
+}
+
+/* The string an old .rodata offset (irgen's, which the reference sites
+ * hold) falls in, and how far into it; -1 for none. */
+int str_at(const struct ir_unit *iu, long off, long *delta)
+{
+    int lo = 0, hi = iu->nstrs - 1, at = -1;
+    while (lo <= hi) {
+        int m = (lo + hi) / 2;
+        if (iu->strs[m].off <= off) {
+            at = m;
+            lo = m + 1;
+        } else
+            hi = m - 1;
+    }
+    if (at < 0 || off > iu->strs[at].off + iu->strs[at].len)
+        return -1;
+    *delta = off - iu->strs[at].off;
+    return at;
+}
+
 /* `.LC<n>` for the string at that .rodata offset — the label the data
  * section below defines. */
 static void str_label(char *out, size_t cap, const struct ir_unit *iu, int off)
