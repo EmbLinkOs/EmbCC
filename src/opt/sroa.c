@@ -693,9 +693,10 @@ static void sroa_sync(struct ir_func *fn, const struct sroa_bnds *bl,
 int pass_sroa(struct ir_func *fn, int report_refusals)
 {
     int nvars = fn->nvars, nparams = fn->nparams, nvr = fn->nvregs;
-    static int no_bnd = -1;
-    if (no_bnd < 0)
-        no_bnd = getenv("EMBCC_NO_SROAB") != NULL;
+    /* boundaries only where struct returns travel as their units
+     * (target_has_ret_units); asked each time, as the target can change
+     * between units */
+    int no_bnd = getenv("EMBCC_NO_SROAB") != NULL || !target_has_ret_units();
     /* p0: the first slot considered -- the parameters too, with the
      * boundaries below */
     int p0 = no_bnd ? nparams : 0;

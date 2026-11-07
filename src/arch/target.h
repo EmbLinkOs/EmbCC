@@ -340,6 +340,7 @@ int target_switch_table_min_os(void);
 struct ir_func;
 int target_ret_units(const struct ir_func *fn, int *off, int *size, int *fp,
                      int max);
+int target_has_ret_units(void);
 void target_set_ret_units(int (*f)(const struct ir_func *, int *, int *,
                                    int *, int));
 /* Does the current backend lower this op to a CALL of a runtime helper

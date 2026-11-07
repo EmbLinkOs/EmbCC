@@ -629,6 +629,21 @@ void target_set_ret_units(int (*f)(const struct ir_func *, int *, int *,
 {
     g_ret_units = f;
 }
+/* Does the target return a struct as its register units at all? What
+ * makes splitting an object read or written whole pay (pass_sroa): with
+ * the units the return costs nothing; without them the syncing at every
+ * boundary is the whole of it, and on ARMv6-M and SPARC it grew libc. */
+int target_has_ret_units(void)
+{
+    if (!g_ret_units)
+        return 0;
+#if FAMILY_BUILT(arm)
+    if (target_get() == TARGET_THUMB && target_thumb_arch() == 6)
+        return 0;
+#endif
+    return 1;
+}
+
 int target_ret_units(const struct ir_func *fn, int *off, int *size, int *fp,
                      int max)
 {
