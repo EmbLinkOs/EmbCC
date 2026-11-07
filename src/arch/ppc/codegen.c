@@ -1619,6 +1619,23 @@ static void pack_word(struct ppc_fn *F, int r, int base, long off, long n)
     }
 }
 
+/* A struct return's register units (target_ret_units): r3 and r4 take a
+ * composite of 8 bytes as its two words, one of 4 as its word (shorter
+ * ones are right-justified, and stay on the memory path). */
+int ppc_ret_units(const struct ir_func *fn, int *off, int *size, int *fp,
+                  int max)
+{
+    if (!fn->ret_abi.is_struct || fn_sret(fn) || getenv("EMBCC_NO_RETPARTS"))
+        return 0;
+    long sz = fn->ret_abi.size;
+    if ((sz != 4 && sz != 8) || sz / 4 > max)
+        return 0;
+    for (int q = 0; q * 4 < sz; q++) {
+        off[q] = q * 4; size[q] = 4; fp[q] = 0;
+    }
+    return (int)(sz / 4);
+}
+
 static void pack_small(struct ppc_fn *F, int base, long size, int rhi,
                        int rlo)
 {
@@ -2295,7 +2312,17 @@ static void gen_ins(struct ppc_fn *F, int n)
         return;
 
     case IR_RET:
-        if (i->a >= 0) {
+        if (i->nrp) {
+            /* a struct as its words (pass_sroa): r3, r4 -- the first
+             * through a scratch when the second sits in r3 */
+            int part[2] = { i->b, i->c };
+            int clash = i->nrp == 2 && in_reg(F, part[1]) &&
+                        F->loc[part[1]] == PPC_R3;
+            for (int q = 0; q < i->nrp; q++)
+                rd(F, part[q], q == 0 && clash ? SCR : PPC_R3 + q);
+            if (clash)
+                ppc_mr(t, PPC_R3, SCR);
+        } else if (i->a >= 0) {
             if (fn->ret_abi.is_struct) {
                 if (fn_sret(fn)) {
                     /* through the caller's buffer, whose address the

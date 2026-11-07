@@ -224,6 +224,7 @@ static const struct backend_desc g_backends[] = {
     [TARGET_PPC32] = {
         .family = "PowerPC", .codegen = codegen_unit_ppc, .ra_at_o0 = 0,
         .op_calls_helper = ppc_op_calls_helper,
+        .ret_units = ppc_ret_units,
         .unwind_unwritten = "PowerPC .eh_frame",
         .cxx_exceptions = BACKEND_CXX_EXC_NONE,
         .firmware = 1, .ld_scripts = 1,
