@@ -459,6 +459,12 @@ static int ifconv_arith(struct ir_func *fn)
         if ((br->op != IR_BRZ && br->op != IR_BRNZ) || br->a < 0 ||
             br->label < 0 || (br->w != 4 && br->w != pw))
             continue;
+        /* a float comparison's 0 or 1 is not one instruction where float
+         * is soft (a helper's result, then sltz) -- the branch on the
+         * helper's result is what tests/golden/riscv-inplace.sh asks for */
+        if (br->a < fn->nvregs && d.cnt[br->a] == 1 && d.ins[br->a] >= 0 &&
+            fn->ins[d.ins[br->a]].op == IR_CMP && fn->ins[d.ins[br->a]].flt)
+            continue;
         int thn = b + 1, els = l2b[br->label];
         struct ar_arm T, E;
         if (els < 0 || els == thn ||
