@@ -416,6 +416,10 @@ static void opt_func(struct ir_func *fn)
         copied = 1;
     if (g_swthread && edge_ok && pass_swthread(fn))
         copied = 1;
+    /* an int index's extension past the add that cannot wrap, which the
+     * fixpoint below then shares and folds into each load's offset */
+    if (g_licm && cfg_ok && pass_ivext(fn))
+        copied = 1;
     if (copied) {
         int changed = 1, g2 = 0;
         while (changed && g2++ < 100) {
@@ -428,6 +432,8 @@ static void opt_func(struct ir_func *fn)
             /* ...and an unrolled filter's x[i - 1], x[i - 2], ...: the
              * offsets into the loads, the base shared */
             changed |= pass_idxoff(fn);
+            if (g_licm && cfg_ok)
+                changed |= pass_ivext(fn);
             changed |= pass_copyprop(fn);
             changed |= pass_copyprop_local(fn);
             changed |= pass_dce(fn);
@@ -445,6 +451,20 @@ static void opt_func(struct ir_func *fn)
              * `mov $1; test; je` on every outer trip. */
             if (g_sccp && cfg_ok)
                 changed |= pass_sccp(fn);
+        }
+    }
+    /* And the int index once more, now that the copies' leftovers are
+     * folded: an unrolled filter's first tap reads `i - k` with k the
+     * 0 a reassigned name held, which only folding makes `i`. */
+    if (g_licm && cfg_ok && pass_ivext(fn)) {
+        int ch = 1, g4 = 0;
+        while (ch && g4++ < 8) {
+            ch = pass_fold(fn);
+            ch |= pass_reassoc(fn);
+            ch |= pass_lvn(fn);
+            ch |= pass_idxoff(fn);
+            ch |= pass_copyprop(fn);
+            ch |= pass_dce(fn);
         }
     }
     /* After the fixpoint: fold constant operands into immediates, then DCE the
