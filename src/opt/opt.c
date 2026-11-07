@@ -434,6 +434,10 @@ static void opt_func(struct ir_func *fn)
             changed |= pass_idxoff(fn);
             if (g_licm && cfg_ok)
                 changed |= pass_ivext(fn);
+            /* a fully unrolled table fill's constants, into the loads of
+             * the table after it */
+            if (cfg_ok)
+                changed |= pass_gstorefwd(fn);
             changed |= pass_copyprop(fn);
             changed |= pass_copyprop_local(fn);
             changed |= pass_dce(fn);

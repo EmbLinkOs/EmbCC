@@ -44,7 +44,7 @@
  * instructions, and its register file is what runs out first. */
 int t_imm_ok(long imm);                 /* arch/thumb/emit.c */
 int a64_bitmask_ok(long imm, int w);    /* arch/aarch64/emit.c */
-static int const_is_expensive(const struct ir_ins *i)
+int const_is_expensive(const struct ir_ins *i)
 {
     enum target_arch ta = target_get();
     /* RX: any constant or address is one `mov.l #imm, rd` */

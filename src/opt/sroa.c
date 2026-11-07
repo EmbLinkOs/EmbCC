@@ -648,7 +648,7 @@ static void sroa_sync(struct ir_func *fn, const struct sroa_bnds *bl,
             if (b->n != n || !b->ret || !cand[b->L])
                 continue;
             /* the pieces as values, in the units' order */
-            int uo[2], us[2], uf[2], tv[2];
+            int uo[2], us[2], uf[2], tv[2] = { -1, -1 };
             int nu = target_ret_units(fn, uo, us, uf, 2);
             for (int q = 0; q < nu; q++) {
                 const struct sroa_fld *F = NULL;

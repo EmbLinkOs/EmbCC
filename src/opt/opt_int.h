@@ -256,6 +256,8 @@ int pass_dce(struct ir_func *fn);
 int pass_deaddefs(struct ir_func *fn);
 int pass_switchrange(struct ir_func *fn);
 int pass_ivext(struct ir_func *fn);
+int pass_gstorefwd(struct ir_func *fn);
+int const_is_expensive(const struct ir_ins *i);   /* immfold.c */
 int pass_ifident(struct ir_func *fn);
 
 /* mem2reg.c */

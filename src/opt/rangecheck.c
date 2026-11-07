@@ -389,6 +389,20 @@ int pass_rangecheck(struct ir_func *fn)
  * EMBCC_NO_SWITCHRANGE=1 turns it off. */
 struct sr_walk { int *mark, gen, budget; };
 
+/* An instruction's constant right operand: an immediate, or a temp only a
+ * CONST defines. */
+static int sr_const_b(struct ir_func *fn, struct defs *d,
+                      const struct ir_ins *i, long *c)
+{
+    if (i->imm_b) { *c = norm(i->imm, i->w); return 1; }
+    int b = i->b;
+    if (b < 0 || b >= fn->nvregs || d->cnt[b] != 1 || d->first[b] < 0 ||
+        fn->ins[d->first[b]].op != IR_CONST)
+        return 0;
+    *c = norm(fn->ins[d->first[b]].imm, fn->ins[d->first[b]].w);
+    return 1;
+}
+
 static int sr_in(struct ir_func *fn, struct defs *d, int v, long lo, long hi,
                  struct sr_walk *s)
 {
@@ -419,6 +433,39 @@ static int sr_in(struct ir_func *fn, struct defs *d, int v, long lo, long hi,
                 !sr_in(fn, d, i->c, lo, hi, s))
                 return 0;
             break;
+        /* What arithmetic if-conversion makes of `st = len ? 2 : 0`
+         * (ifconv_arith): a comparison, shifted, offset. Each narrows the
+         * range asked of its operand; none wraps, the bounds being a
+         * switch table's. */
+        case IR_CMP:                    /* 0 or 1 */
+            if (lo > 0 || hi < 1)
+                return 0;
+            break;
+        case IR_AND: {                  /* within [0, mask] */
+            long m;
+            if (i->flt || !sr_const_b(fn, d, i, &m) || m < 0 || lo > 0 ||
+                m > hi)
+                return 0;
+            break;
+        }
+        case IR_SHL: {
+            long k;
+            if (i->flt || !sr_const_b(fn, d, i, &k) || k < 0 || k > 16 ||
+                lo < 0 ||
+                !sr_in(fn, d, i->a, (lo + (1L << k) - 1) >> k, hi >> k, s))
+                return 0;
+            break;
+        }
+        case IR_ADD: case IR_SUB: {
+            long c;
+            if (i->flt || !sr_const_b(fn, d, i, &c) || c < -65536 ||
+                c > 65536)
+                return 0;
+            if (i->op == IR_SUB) c = -c;
+            if (!sr_in(fn, d, i->a, lo - c, hi - c, s))
+                return 0;
+            break;
+        }
         default:
             return 0;
         }

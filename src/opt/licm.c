@@ -732,6 +732,12 @@ static int lp_cmp_int(const void *a, const void *b)
  * invariant leave the loop. Per register class, all or none -- by what
  * the loop already keeps live across it against target_loop_regs -- and
  * then only those loads and what computes their addresses. */
+/* What the late run moves: a load, or a constant that takes more than one
+ * instruction to make -- a coefficient forwarded from the table it was
+ * stored in (pass_gstorefwd) is a `lui` and an `fmv` a trip where the load
+ * it replaced had been hoisted. */
+#define LATE_VALUE(i) ((i)->op == IR_LOAD || \
+                       ((i)->op == IR_CONST && const_is_expensive(i)))
 static void licm_late_budget(struct ir_func *fn, const struct defs *d,
                              const int *lins, int nlins, const char *inl_ins,
                              char *inv)
@@ -785,7 +791,7 @@ static void licm_late_budget(struct ir_func *fn, const struct defs *d,
     for (int q = 0; q < nlins; q++) {
         int n = lins[q];
         struct ir_ins *i = &fn->ins[n];
-        if (!inv[n] || i->op != IR_LOAD)
+        if (!inv[n] || !LATE_VALUE(i))
             continue;
         int v = def_target(i), c = v >= 0 && v < nv && fl[v] ? 1 : 0;
         if (use[c] - hl[c] >= cap[c])
@@ -797,7 +803,7 @@ static void licm_late_budget(struct ir_func *fn, const struct defs *d,
     {
         char *need = xcalloc((size_t)(fn->nins ? fn->nins : 1), 1);
         for (int q = 0; q < nlins; q++)
-            if (inv[lins[q]] && fn->ins[lins[q]].op == IR_LOAD)
+            if (inv[lins[q]] && LATE_VALUE(&fn->ins[lins[q]]))
                 need[lins[q]] = 1;
         for (int grew = 1; grew; ) {
             grew = 0;
