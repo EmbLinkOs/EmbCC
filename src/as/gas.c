@@ -2544,6 +2544,7 @@ static const char *after_labels(const char *q)
 static void instruction(struct gas *g, char *stmt, int pass)
 {
     long pc = cur_off(g);
+#if FAMILY_BUILT(x86)
     char intel_att[1024];
     if (g->intel && g->tgt->machine == EM_X86_64) {
         struct x86intel_opts io = { X86I_GNU, x86att_mode(), 0, g->intel == 2 };
@@ -2555,6 +2556,7 @@ static void instruction(struct gas *g, char *stmt, int pass)
         }
         stmt = intel_att;
     }
+#endif
     if (g->tgt->machine == EM_RISCV) {
         /* `lla`: the pc-relative pair always -- which `la` is here, the
          * code being position-dependent */
@@ -2592,6 +2594,7 @@ static void instruction(struct gas *g, char *stmt, int pass)
     /* x86: a branch to a number is to that ADDRESS (`jmp 0x7e00`), the
      * linker's to reach: a relocation against no symbol, as llvm-mc and
      * GNU as write it (a flat image places it itself) */
+#if FAMILY_BUILT(x86)
     if (g->tgt->machine == EM_X86_64 && !ext) {
         struct asm_symform f;
         long long target;
@@ -2609,6 +2612,7 @@ static void instruction(struct gas *g, char *stmt, int pass)
         tmp.p = NULL;
         tmp.len = tmp.cap = 0;
     }
+#endif
 
     /* x86-64, pass one, a name not placed yet in anything but a jump: the
      * size is the relocated form's -- `buf(%rax)` keeps a 32-bit field
@@ -3907,11 +3911,13 @@ static int directive(struct gas *g, char *p, int pass)
 #endif
     /* x86: `.code16`, `.code32`, `.code64` -- the size of the code that
      * follows (a boot sector's, a protected-mode stub's) */
+#if FAMILY_BUILT(x86)
     if (g->tgt->machine == EM_X86_64 &&
         (DIR(".code16") || DIR(".code32") || DIR(".code64"))) {
         x86att_set_mode(name[5] == '1' ? 16 : name[5] == '3' ? 32 : 64);
         return 1;
     }
+#endif
 #if FAMILY_BUILT(riscv)
     /* `.option rvc`/`norvc`/`push`/`pop`: whether the instructions that
      * follow take their 16-bit forms (the others -- relax, pic, arch --
