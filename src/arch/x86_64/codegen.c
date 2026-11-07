@@ -433,6 +433,29 @@ static char *g_wide;
 static char *g_flt;
 static int *g_floc;
 static int in_freg(int v) { return g_floc && v >= 0 && g_floc[v] >= 0; }
+
+/* A struct return's register units (target_ret_units): its eightbytes,
+ * each in the next register of its class (SSE: xmm0, xmm1; INTEGER: rax,
+ * rdx) -- whole eightbytes of one class only, not MEMORY or x87. */
+int x86_ret_units(const struct ir_func *fn, int *off, int *size, int *fp,
+                  int max)
+{
+    const struct type *rt = fn->ret_abi.ty;
+    if (!fn->ret_abi.is_struct || !rt || getenv("EMBCC_NO_RETPARTS") ||
+        target_win64_abi() || ty_x87_ret((struct type *)rt))
+        return 0;
+    enum arg_class rc[2];
+    int rn = ty_classify((struct type *)rt, rc);
+    long sz = fn->ret_abi.size;
+    if (rn < 1 || rn > max || sz % 8 || sz / 8 != rn)
+        return 0;
+    for (int q = 0; q < rn; q++) {
+        if (rc[q] != CLASS_SSE && rc[q] != CLASS_INTEGER)
+            return 0;
+        off[q] = q * 8; size[q] = 8; fp[q] = rc[q] == CLASS_SSE;
+    }
+    return rn;
+}
 static int is_flt(int v)  { return g_flt && v >= 0 && g_flt[v]; }
 
 /* Is this instruction a 16-byte (long double) one, lowered by gen_x87? */
@@ -5883,7 +5906,42 @@ static void gen_func(struct ir_func *fn, struct code *text,
             break;
         case IR_RET:
             cg_reset();
-            if (i->a >= 0 && f->ret_ty->kind == TY_STRUCT) {
+            if (i->nrp) {
+                /* a struct as its eightbytes (pass_sroa): each part into
+                 * its register -- rax then rdx, xmm0 then xmm1 -- the
+                 * first through a scratch (rcx, xmm7) when the second
+                 * already sits where it must go */
+                int off[2], sz[2], fpu[2], part[2] = { i->b, i->c };
+                int nu = x86_ret_units(fn, off, sz, fpu, 2);
+                if (nu != i->nrp)
+                    internal_error("x86_64: a struct returned as %d units "
+                                   "the convention does not have", i->nrp);
+                int dst[2], nf = 0, ng = 0;
+                for (int q = 0; q < nu; q++)
+                    dst[q] = fpu[q] ? nf++ : ng++ == 0 ? REG_RAX : REG_RDX;
+                int clash = nu == 2 && part[1] >= 0 &&
+                            (fpu[0] ? in_freg(part[1]) &&
+                                      g_floc[part[1]] == dst[0]
+                                    : in_reg(part[1]) &&
+                                      g_loc[part[1]] == dst[0]);
+                for (int q = 0; q < nu; q++) {
+                    int to = q == 0 && clash ? (fpu[0] ? X86_FSCR : REG_RCX)
+                                             : dst[q];
+                    int v = part[q];
+                    if (fpu[q])
+                        x86_fld(text, sd, v, to, 8);
+                    else if (in_reg(v)) {
+                        if (g_loc[v] != to) x86_mov_rr_w(text, to, g_loc[v], 8);
+                    } else if (in_freg(v))
+                        x86_movq_gpr_xmm(text, to, g_floc[v], 8);
+                    else
+                        x86_load_reg_mem(text, to, REG_RBP, sd[v], 8);
+                }
+                if (clash) {
+                    if (fpu[0]) x86_movs_reg(text, dst[0], X86_FSCR);
+                    else x86_mov_rr_w(text, dst[0], REG_RCX, 8);
+                }
+            } else if (i->a >= 0 && f->ret_ty->kind == TY_STRUCT) {
                 enum arg_class rc[2];
                 int rn = ty_classify(f->ret_ty, rc);
                 int sz = ty_size(f->ret_ty);
