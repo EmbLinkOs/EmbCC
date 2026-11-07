@@ -373,3 +373,104 @@ int pass_rangecheck(struct ir_func *fn)
     free_defs(&d);
     return changed;
 }
+
+/* ==== a switch whose index cannot be out of range ==========================
+ *
+ * A state machine's switch tests its index against the table on every
+ * trip -- `cmp r5, #4; bhs default` -- although the state is only ever
+ * one of its cases: every assignment to it is a case constant. When
+ * every definition of the index, followed through copies and selects, is
+ * a constant inside the table, the switch is marked (`sign`, printed
+ * `switch.4s`) and the backends that read the mark leave the bound out.
+ * The index is often `st - lo`; then st's constants are asked for
+ * [lo, lo + n). A value with a definition that is no instruction (a
+ * parameter) or one this cannot read (inline asm writes outside
+ * def_target's view) is not known, and the switch keeps its test.
+ * EMBCC_NO_SWITCHRANGE=1 turns it off. */
+struct sr_walk { int *mark, gen, budget; };
+
+static int sr_in(struct ir_func *fn, struct defs *d, int v, long lo, long hi,
+                 struct sr_walk *s)
+{
+    if (v < 0 || v >= fn->nvregs || v < fn->nparams)
+        return 0;
+    if (s->mark[v] == s->gen)
+        return 1;                       /* on the way already: a cycle */
+    s->mark[v] = s->gen;
+    int listed = 0;
+    for (int n = d->first[v]; n >= 0; n = d->next[n]) {
+        if (--s->budget < 0)
+            return 0;
+        listed++;
+        const struct ir_ins *i = &fn->ins[n];
+        switch (i->op) {
+        case IR_CONST: {
+            long k = norm(i->imm, i->w);
+            if (i->flt || k < lo || k > hi)
+                return 0;
+            break;
+        }
+        case IR_MOV:
+            if (!sr_in(fn, d, i->a, lo, hi, s))
+                return 0;
+            break;
+        case IR_SELECT:
+            if (i->flt || !sr_in(fn, d, i->b, lo, hi, s) ||
+                !sr_in(fn, d, i->c, lo, hi, s))
+                return 0;
+            break;
+        default:
+            return 0;
+        }
+    }
+    return listed > 0 && listed == d->cnt[v];
+}
+
+int pass_switchrange(struct ir_func *fn)
+{
+    if (getenv("EMBCC_NO_SWITCHRANGE"))
+        return 0;
+    int nsw = 0, asm_ = 0;
+    for (int n = 0; n < fn->nins; n++) {
+        asm_ |= fn->ins[n].op == IR_ASM;
+        if (fn->ins[n].op == IR_SWITCH) {
+            fn->ins[n].sign = 0;        /* this pass's answer, made anew */
+            nsw++;
+        }
+    }
+    if (asm_)
+        return 0;
+    if (!nsw)
+        return 0;
+    struct defs d;
+    compute_defs(fn, &d);
+    defs_lists(fn, &d);
+    struct sr_walk s = { xcalloc((size_t)fn->nvregs + 1, sizeof *s.mark), 0, 0 };
+    int changed = 0;
+    for (int n = 0; n < fn->nins; n++) {
+        struct ir_ins *i = &fn->ins[n];
+        if (i->op != IR_SWITCH || i->a < 0)
+            continue;
+        long cnt = fn->jt[i->jt].n, lo = 0, k;
+        int v = i->a;
+        /* `st - lo`: st's own values, shifted */
+        if (v < fn->nvregs && d.cnt[v] == 1 && d.ins[v] >= 0) {
+            const struct ir_ins *x = &fn->ins[d.ins[v]];
+            if ((x->op == IR_SUB || x->op == IR_ADD) && !x->flt &&
+                x->w == i->w &&
+                (x->imm_b ? (k = x->imm, 1) : get_const(fn, &d, x->b, &k))) {
+                lo = x->op == IR_SUB ? k : -k;
+                v = x->a;
+            }
+        }
+        s.gen++;
+        s.budget = 256;
+        if (sr_in(fn, &d, v, lo, lo + cnt - 1, &s)) {
+            i->sign = 1;
+            changed = 1;
+        }
+    }
+    free(s.mark);
+    free_defs(&d);
+    return changed;
+}

@@ -258,9 +258,11 @@ Known gaps, in the order they matter:
    interrupt functions are made since, svlcx ... rslcx, rfe, and
    tests/golden/tricore-isr.sh traps into them; `.s`/`.S` files,
    file-scope asm and naked functions are assembled since
-   src/arch/tricore/asm.c gained the control transfers and symbols;
-   tests/golden/tricore-gas.sh), a
-   conditional branch to an external symbol (R_TRICORE_15REL), atomics
+   src/arch/tricore/asm.c gained the control transfers and symbols --
+   it is now the whole TC1.6.2 set from a learned table
+   (tools/tricore-isa), a conditional branch to an external symbol the
+   inverse over a j, and embld applies every relocation type GNU writes;
+   tests/golden/tricore-gas.sh), atomics
    wider than a word, computed
    goto, `__builtin_frame_address`/`__builtin_return_address`, C++.
 4. The TC3xx FPU is not used (soft float everywhere).

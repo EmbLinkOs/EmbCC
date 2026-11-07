@@ -450,6 +450,14 @@ static void opt_func(struct ir_func *fn)
     /* After the fixpoint: fold constant operands into immediates, then DCE the
      * CONSTs that leaves unreferenced. Kept out of the fixpoint so the earlier
      * passes never reason about the imm_b form. */
+    /* A definition of a temp that has others, read by nothing: what
+     * unrolling leaves of a loop counter (pass_deaddefs). Its copy of a
+     * value may then be a temp's only definition, which copy
+     * propagation can see through. */
+    if (cfg_ok && pass_deaddefs(fn)) {
+        pass_copyprop_local(fn);
+        pass_dce(fn);
+    }
     /* the 64-bit product of two 32-bit values: one widening multiply */
     if (pass_mulwiden(fn))
         pass_dce(fn);
@@ -669,5 +677,12 @@ void opt_run(struct ir_unit *iu, int level)
             g_opt_max = s_max;
         }
         pass_x86_loadop(&iu->funcs[f]);     /* last: nothing reorders after */
+        /* ...and a state machine's switch on a state that is only ever
+         * a case, asked of the code as it will be emitted: the passes
+         * above still rename and copy, and an answer from before them
+         * described values the index no longer has (printf's switches
+         * were marked, and jumped through the table on a flag char) */
+        if (level >= 1)
+            pass_switchrange(&iu->funcs[f]);
     }
 }

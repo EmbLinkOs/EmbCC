@@ -246,13 +246,15 @@ static const struct ra_target A64_RA = {
     a64_pool_for,
     a64_callee_saved,
     a64_ldvar_plain,
-    1, 1, 0,       /* a scalar-integer call argument is moved into its
+    1, 1, 1,       /* a scalar-integer call argument is moved into its
                     * argument register from wherever it lives, as part
                     * of the parallel move above. A scalar return goes
                     * out through ld_slot, which
-                    * takes it from a register when it has one. A
-                    * memcpy's addresses are still read from their
-                    * slots, so those values have to stay there. */
+                    * takes it from a register when it has one -- and
+                    * so do a memcpy's and a memzero's addresses, into
+                    * x11 and x12, which no value lives in. Kept in
+                    * their slots, an address one copy used was loaded
+                    * from the frame at every other use of it. */
     a64_op_calls_helper,
     0,             /* three-operand ALU: `fadd d, a, b` needs no move,
                     * so forcing d and a together only constrains the

@@ -195,8 +195,9 @@ FAMILY_SRCS_x86 := \
 	src/arch/x86_64/codegen.c \
 	src/arch/x86_64/emit.c \
 	src/arch/x86_64/topasm.c \
-	src/arch/x86_64/as.c \
+	src/arch/x86_64/intel.c \
 	src/arch/x86_64/att.c \
+	src/as/nasm.c \
 	src/arch/x86_64/disasm.c \
 	src/arch/x86_64/predef.c \
 	src/arch/x86_64/predef_cxx.c
@@ -217,6 +218,7 @@ FAMILY_SRCS_arm := \
 	src/arch/thumb/codegen.c \
 	src/arch/thumb/v6m.c \
 	src/arch/thumb/asm.c \
+	src/arch/thumb/neon.c \
 	src/arch/thumb/predef.c \
 	src/arch/thumb/predef_cxx.c \
 	src/arch/thumbv8m/predef.c \
@@ -275,6 +277,7 @@ FAMILY_SRCS_tricore := \
 	src/arch/tricore/codegen.c \
 	src/arch/tricore/irgen.c \
 	src/arch/tricore/asm.c \
+	src/arch/tricore/isa.c \
 	src/arch/tricore/predef.c \
 	src/arch/tricore/predef_cxx.c
 FAMILY_SRCS_xtensa := \
@@ -469,17 +472,13 @@ embcc: $(OBJS) $(EMBDBG_CORE) $(PLATFORM_CHANGED)
 $(BUILD)/embcc: $(OBJS) $(EMBDBG_CORE) $(PLATFORM_CHANGED)
 	$(CC) $(CFLAGS) -o $@ $(OBJS) $(EMBDBG_CORE) $(PLATFORM_LIBS)
 
-# embas — the standalone NASM/Intel-syntax assembler (A1, ARCHITECTURE §4). Reads
-# the kernel's hand-written .asm and emits ELF objects the same writer (src/elf)
-# the compiler uses produces, so the toolchain owns the whole build (drops nasm).
-# src/arch/target.c and the two sema files it needs joined this list
-# because src/elf/write.c asks target_ptr_size() to choose ELF32 vs
-# ELF64 -- which it has done since the RISC-V backend landed, leaving
-# `embas` unlinkable and `make all` failing. Nothing noticed, because
-# no test builds embas: `make test` depends on embcc, embread, embld,
-# embdbg and embls, and the assembler is only reached through the
-# kernel build. tests/golden/tools-build.sh now builds every tool in
-# `all`, which is the cheapest guard against the next one.
+# embas — EmbCC's NASM-syntax assembler (src/as/nasm.c), for a kernel's or a
+# boot sector's hand-written .asm: elf64 objects and flat -f bin images, 16-,
+# 32- and 64-bit code. It is embcc itself, called by that name (main()
+# dispatches on it), linked from the same objects: a GNU-syntax file goes to
+# the driver for its target, and NASM's language is read into the text the
+# GNU-syntax assembler (src/as/gas.c) assembles. tests/golden/tools-build.sh builds every
+# tool in `all`.
 # embar -- the static-library archiver (tools/embar). ISO C and standalone,
 # so the libraries below need no binutils `ar` on a host without GCC.
 embar: tools/embar/embar.c
@@ -619,14 +618,8 @@ EMBSIM_OPT ?= -O2
 embsim: $(EMBSIM_SRCS) $(EMBSIM_HDRS) Makefile
 	$(CC) $(CFLAGS) $(EMBSIM_OPT) -o $@ $(EMBSIM_SRCS) -lm
 
-embas: tools/embas/embas.c src/arch/x86_64/as.c src/arch/x86_64/as.h \
-       src/elf/write.c src/elf/elf.h src/driver/util.c src/driver/diag.c \
-       src/arch/target.c src/sema/type.c src/sema/ldfloat.c \
-       $(PLATFORM_SRCS) src/platform/platform.h
-	$(CC) $(CFLAGS) -o $@ tools/embas/embas.c src/arch/x86_64/as.c \
-	    src/elf/write.c src/driver/util.c src/driver/diag.c \
-	    src/arch/target.c src/sema/type.c src/sema/ldfloat.c \
-	    $(PLATFORM_SRCS)
+embas: $(OBJS) $(EMBDBG_CORE) $(PLATFORM_CHANGED)
+	$(CC) $(CFLAGS) -o $@ $(OBJS) $(EMBDBG_CORE) $(PLATFORM_LIBS)
 
 # embld — the integrated linker (ARCHITECTURE §6, WORKPLAN stream B), as
 # a standalone tool for host development. The link library also gets
@@ -638,7 +631,7 @@ embld: tools/embld/embld.c tools/embld/doctor.c src/link/link.c \
        src/driver/util.c src/driver/diag.c src/driver/explain.c \
        src/arch/riscv/emit.c src/arch/avr/emit.c src/arch/mips/emit.c \
        src/arch/loongarch/emit.c src/arch/thumb/a32.c src/arch/thumb/a32.h \
-       src/arch/tricore/emit.c src/arch/xtensa/emit.c src/arch/ppc/emit.c src/arch/rx/emit.c src/arch/sparc/emit.c src/arch/code.c \
+       src/arch/tricore/emit.c src/arch/tricore/isa.c src/arch/xtensa/emit.c src/arch/ppc/emit.c src/arch/rx/emit.c src/arch/sparc/emit.c src/arch/code.c \
        src/link/link.h src/link/ldscript.h src/elf/elf.h src/embx/embx.c src/embx/embx.h \
        tools/embdbg/embdbg.c tools/embdbg/embdbg_core.h \
        $(PLATFORM_SRCS) src/platform/platform.h
@@ -647,7 +640,7 @@ embld: tools/embld/embld.c tools/embld/doctor.c src/link/link.c \
 	    src/driver/util.c src/driver/diag.c src/driver/explain.c \
 	    src/embx/embx.c tools/embdbg/embdbg.c $(PLATFORM_SRCS) \
 	    src/arch/x86_64/disasm.c src/arch/riscv/emit.c src/arch/avr/emit.c \
-	    src/arch/mips/emit.c src/arch/loongarch/emit.c src/arch/thumb/a32.c src/arch/tricore/emit.c src/arch/xtensa/emit.c src/arch/ppc/emit.c src/arch/rx/emit.c src/arch/sparc/emit.c src/arch/code.c
+	    src/arch/mips/emit.c src/arch/loongarch/emit.c src/arch/thumb/a32.c src/arch/tricore/emit.c src/arch/tricore/isa.c src/arch/xtensa/emit.c src/arch/ppc/emit.c src/arch/rx/emit.c src/arch/sparc/emit.c src/arch/code.c
 
 # NOTE: this list is HAND-MAINTAINED and `make check` does not build embls, so
 # a backend file added without a line here breaks only `make test` -- and
@@ -698,10 +691,10 @@ EMBLS_SRCS = tools/embls/embls.c $(PLATFORM_SRCS) src/cpp/cpp.c src/lex/lex.c \
              src/arch/code.c src/arch/regalloc.c src/arch/common.c \
              src/arch/x86_64/irgen.c src/arch/x86_64/codegen.c \
              src/arch/x86_64/emit.c src/arch/x86_64/topasm.c \
-             src/arch/x86_64/as.c src/arch/x86_64/att.c src/arch/x86_64/disasm.c \
+             src/arch/x86_64/intel.c src/arch/x86_64/att.c src/arch/x86_64/disasm.c \
              src/arch/aarch64/irgen.c \
              src/arch/aarch64/codegen.c src/arch/aarch64/emit.c \
-             src/arch/aarch64/asm.c src/arch/thumb/irgen.c src/arch/thumb/asm.c \
+             src/arch/aarch64/asm.c src/arch/thumb/irgen.c src/arch/thumb/asm.c src/arch/thumb/neon.c \
              src/arch/thumb/emit.c src/arch/thumb/a32.c src/arch/thumb/attrs.c \
              src/arch/riscv/irgen.c src/arch/riscv/attrs.c \
              src/arch/riscv/asm.c src/arch/riscv/emit.c \
@@ -709,7 +702,7 @@ EMBLS_SRCS = tools/embls/embls.c $(PLATFORM_SRCS) src/cpp/cpp.c src/lex/lex.c \
              src/arch/loongarch/irgen.c src/arch/loongarch/emit.c \
              src/arch/loongarch/asm.c \
              src/arch/tricore/irgen.c src/arch/tricore/asm.c \
-             src/arch/tricore/emit.c \
+             src/arch/tricore/emit.c src/arch/tricore/isa.c \
              src/arch/xtensa/irgen.c src/arch/xtensa/emit.c \
              src/arch/xtensa/asm.c \
              src/arch/ppc/irgen.c src/arch/ppc/emit.c \
@@ -762,7 +755,7 @@ $(OBJDIR)/%.o: src/%.c
 
 # The tree is small; every object depending on every header is honest
 # enough and cannot go stale (CONTRIBUTING lie #1).
-$(OBJS): $(wildcard src/*/*.h src/arch/*/*.h)
+$(OBJS): $(wildcard src/*/*.h src/arch/*/*.h src/arch/*/*.inc)
 
 # The libc and libcxx goldens run against the BUILT archives, so the suite
 # depends on them: without this a stale archive is silently what gets

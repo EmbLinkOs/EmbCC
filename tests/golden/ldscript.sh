@@ -160,8 +160,8 @@ sed 's/_Min_Stack_Size = 0x400;/_Min_Stack_Size = 0x40000;/' "$d/stm32.ld" > "$o
 must_refuse heapstack "region RAM overflowed by" "$out/stack.ld" $O
 printf 'SECTIONS { .text : { *(.text*) } /DISCARD/ : { *(.rodata*) } }\n' > "$out/disc.ld"
 must_refuse discard "discards that section" "$out/disc.ld" "$out/prog.o" "$out/io.o"
-printf 'PHDRS { text PT_LOAD; }\nSECTIONS { .text : { *(.text) } }\n' > "$out/phdrs.ld"
-must_refuse phdrs "PHDRS is not supported" "$out/phdrs.ld" "$out/io.o"
+printf 'PHDRS { text PT_LOAD; }\nSECTIONS { .text : { *(.text) } :code }\n' > "$out/phdrs.ld"
+must_refuse phdrs "which PHDRS does not declare" "$out/phdrs.ld" "$out/io.o"
 printf 'SECTIONS {\n  .text : { *(.text) }\n  .data : { *(.data) } > NOWHERE\n}\n' > "$out/noreg.ld"
 must_refuse noregion "there is no memory region NOWHERE" "$out/noreg.ld" "$out/io.o"
 printf 'SECTIONS {\n  .text : { *(.text) \n' > "$out/open.ld"
@@ -181,7 +181,7 @@ if command -v clang >/dev/null 2>&1; then
     printf 'SECTIONS { .text : { *(.text*) } .bss : { *(.bss*) } }\n' > "$out/nocommon.ld" &&
     must_refuse common "places no" "$out/nocommon.ld" "$out/common.o"
 fi
-echo "and refused: region overflow, a discarded section in use, PHDRS, a missing region, an unclosed block, a failed ASSERT, an orphan under error, COMMON with nowhere to go"
+echo "and refused: region overflow, a discarded section in use, an undeclared program header, a missing region, an unclosed block, a failed ASSERT, an orphan under error, COMMON with nowhere to go"
 
 # ---- const tables in sections of their own -------------------------------
 # A const-only named section is read-only, so a script's orphan rule puts

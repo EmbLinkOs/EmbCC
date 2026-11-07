@@ -50,6 +50,20 @@
 #include "../sema/type.h"
 #include "../../tools/embdbg/embdbg_core.h"
 
+/* "\n\t.text\n" and its kin: the directive for a section the object
+ * names .text, .data or .bss. On RX GNU as's .text is P (and .data D_1,
+ * .bss B_1), sections of other names, so the section is named there:
+ * the -S output reassembles into the object -c writes. */
+static const char *sec_dir(const char *name)
+{
+    if (target_get() == TARGET_RX)
+        return !strcmp(name, ".text") ? "\n\t.section\t.text,\"ax\",@progbits\n"
+             : !strcmp(name, ".data") ? "\n\t.section\t.data,\"aw\",@progbits\n"
+             : "\n\t.section\t.bss,\"aw\",@nobits\n";
+    return !strcmp(name, ".text") ? "\n\t.text\n"
+         : !strcmp(name, ".data") ? "\n\t.data\n" : "\n\t.bss\n";
+}
+
 /* A symbol as an assembler reads it. C lets an identifier hold UTF-8
  * letters (`größe`), and a name with any byte outside [A-Za-z0-9_.$] is
  * written in quotes, as clang writes it; the object file carries the
@@ -466,8 +480,8 @@ static void globals_emit(struct outbuf *b, struct unit *u,
         int nobits = g->in_bss;
         if (!open) {
             switch (k) {
-            case GS_DATA:   ob_str(b, "\n\t.data\n"); break;
-            case GS_BSS:    ob_str(b, "\n\t.bss\n"); break;
+            case GS_DATA:   ob_str(b, sec_dir(".data")); break;
+            case GS_BSS:    ob_str(b, sec_dir(".bss")); break;
             case GS_RODATA: ob_str(b, "\n\t.section\t.rodata\n"); break;
             case GS_TDATA:
                 ob_fmt(b, "\n\t.section\t.tdata,\"awT\",%sprogbits\n",
@@ -481,7 +495,12 @@ static void globals_emit(struct outbuf *b, struct unit *u,
                 ob_fmt(b, "\n\t.section\t%s,\"a%s%s\",%s%s\n", asym(name),
                        g->sec_flags & SHF_WRITE ? "w" : "",
                        g->sec_flags & SHF_EXECINSTR ? "x" : "", type_sigil(),
-                       nobits ? "nobits" : "progbits");
+                       nobits ? "nobits"
+                       : !strncmp(name, ".note", 5) ? "note"
+                       : !strncmp(name, ".init_array", 11) ? "init_array"
+                       : !strncmp(name, ".fini_array", 11) ? "fini_array"
+                       : !strncmp(name, ".preinit_array", 14) ? "preinit_array"
+                       : "progbits");
                 break;
             }
             open = 1;
@@ -780,7 +799,7 @@ static void block_section(struct outbuf *b, const struct topasm *ta, int in)
         ob_fmt(b, "\t.section\t%s,\"ax\",%sprogbits\n\t.balign\t%d\n",
                asym(ta->section), type_sigil(), al);
     } else {
-        ob_str(b, "\t.text\n");
+        ob_str(b, sec_dir(".text") + 1);
     }
 }
 
@@ -962,7 +981,7 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
      * narrows (GNU as, EmbCC's) must leave it as written */
     if (target_get() == TARGET_XTENSA)
         ob_str(b, "\t.begin\tno-transform\n");
-    ob_str(b, "\t.text\n");
+    ob_str(b, sec_dir(".text") + 1);
     /* the section on the strictest start of its functions, where one asks
      * more than the sixteen an assembler gives .text (aligned(N)) */
     {
@@ -1004,7 +1023,7 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
                 ob_fmt(b, "\n\t.section\t%s,\"ax\",%sprogbits\n",
                        asym(sec), type_sigil());
             else
-                ob_str(b, "\n\t.text\n");
+                ob_str(b, sec_dir(".text"));
             cursec = sec;
         }
         ob_str(b, "\n");
@@ -1256,7 +1275,7 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
      * their labels and relocations, where the targets below have them. */
     if (blocks_by_reloc() && u->topasm) {
         if (cursec) {
-            ob_str(b, "\n\t.text\n");
+            ob_str(b, sec_dir(".text"));
             cursec = NULL;
         }
         blocks_emit(b, u, text, prev_end, textlen);
@@ -1265,7 +1284,7 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
     /* .text may end with padding too, and the file-scope asm after it --
      * in .text, whatever section the last function was in. */
     if (cursec)
-        ob_str(b, "\n\t.text\n");
+        ob_str(b, sec_dir(".text"));
     if (target_is_mips() && u->topasm) {
         mips_emit_blocks(b, srcname, u, text, prev_end, textlen);
         prev_end = textlen;

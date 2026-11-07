@@ -6343,6 +6343,7 @@ static void switch_table(struct ir_func *fn, int v, int w, int sign,
     s->op = IR_SWITCH;
     s->a = idx;
     s->w = w;
+    s->sign = 0;        /* not known in range: emit's default 1 would say it is */
     s->label = dflt;
     s->jt = t;
 }

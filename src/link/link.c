@@ -28,6 +28,7 @@
 #include "../arch/mips/emit.h"
 #include "../arch/thumb/a32.h"
 #include "../arch/tricore/emit.h"
+#include "../arch/tricore/isa.h"
 #include "../arch/xtensa/emit.h"
 #include "../arch/ppc/emit.h"
 #include "../arch/rx/emit.h"
@@ -172,7 +173,6 @@ struct veneer_sec { int key, sec, n; };
  * contiguously, the way `KEEP(*(.embk_exports))` places them, and its
  * bounds become bracket symbols (define_orphan_brackets). Read-only
  * orphans follow .rodata; writable ones follow .data. */
-#define MAX_ORPHANS 1024
 struct orphan { const char *name; int writable; };
 
 struct symbol {
@@ -301,8 +301,9 @@ struct linker {
      * different registers. And which object named it, for the message. */
     int mips_fp_abi;
     const char *mips_fp_from;
-    struct orphan orphans[MAX_ORPHANS];
-    int norphan;
+    struct orphan *orphans;    /* (as many as the inputs name: -ffunction-
+                                * sections' .literal.f are one each) */
+    int norphan, caporphan;
     struct ls_script *sc;      /* -T: the layout comes from here */
     /* ARMv8-M CMSE: the secure gateway veneers (cmse_scan) -- their
      * section's insecs index or -1, and for each the symbols it joins:
@@ -1021,16 +1022,6 @@ static struct object *parse_object(const char *name, unsigned char *buf,
         if (!big && e32->e_machine == EM_68K)
             die("%s: a little-endian m68k object; the m68k is big-endian",
                 name);
-        /* ColdFire: the ISA in e_flags' low nibble -- a 68000-family
-         * object (68020, CPU32, ...) or one built for an FPU is not one
-         * this linker's ColdFire images can run */
-        if (e32->e_machine == EM_68K &&
-            ((e32->e_flags & 0x0fUL) == 0 ||
-             (e32->e_flags & 0x40UL) != 0))
-            die("%s: an m68k object that is not soft-float ColdFire "
-                "(e_flags 0x%lx); this linker links ColdFire ISA_A..C "
-                "objects without the FPU", name,
-                (unsigned long)e32->e_flags);
         o->machine = e32->e_machine;
         o->eflags = e32->e_flags;
         o->nsh = e32->e_shnum;
@@ -1056,6 +1047,23 @@ static struct object *parse_object(const char *name, unsigned char *buf,
                 o->shdrs[i].sh_addralign = s32[i].sh_addralign;
                 o->shdrs[i].sh_entsize   = s32[i].sh_entsize;
             }
+        }
+        /* ColdFire: the ISA in e_flags' low nibble -- a 68000-family
+         * object (68020, CPU32, ...) or one built for an FPU is not one
+         * this linker's ColdFire images can run. An object with no code
+         * names no ISA (GNU as leaves e_flags 0 for an empty file), and
+         * is any core's. */
+        if (e32->e_machine == EM_68K &&
+            ((e32->e_flags & 0x0fUL) == 0 || (e32->e_flags & 0x40UL) != 0)) {
+            int code = 0;
+            for (int i = 0; i < o->nsh; i++)
+                if ((o->shdrs[i].sh_flags & SHF_EXECINSTR) && o->shdrs[i].sh_size)
+                    code = 1;
+            if (code || (e32->e_flags & 0x40UL))
+                die("%s: an m68k object that is not soft-float ColdFire "
+                    "(e_flags 0x%lx); this linker links ColdFire ISA_A..C "
+                    "objects without the FPU", name,
+                    (unsigned long)e32->e_flags);
         }
     } else {
         if (eh->e_type != ET_REL)
@@ -1214,9 +1222,11 @@ static int orphan_osec(struct linker *l, const char *name, int writable)
     for (int i = 0; i < l->norphan; i++)
         if (strcmp(l->orphans[i].name, name) == 0)
             return OSEC_COUNT + i;
-    if (l->norphan == MAX_ORPHANS)
-        die("more than %d distinct orphan sections (at '%s')",
-            MAX_ORPHANS, name);
+    if (l->norphan == l->caporphan) {
+        l->caporphan = l->caporphan ? l->caporphan * 2 : 64;
+        l->orphans = xrealloc(l->orphans,
+                              (size_t)l->caporphan * sizeof *l->orphans);
+    }
     l->orphans[l->norphan].name = name;
     l->orphans[l->norphan].writable = writable;
     return OSEC_COUNT + l->norphan++;
@@ -4226,6 +4236,11 @@ static Elf64_Addr reloc_symval(struct linker *l, struct object *o,
     const char *name = o->symstr + sy->st_name;
     *is_undef_weak = 0;
 
+    /* STN_UNDEF: "the relocation uses 0 as the symbol value" (the ELF
+     * spec) -- GNU as's TriCore branches it resolved itself, kept for its
+     * relaxing linker with the displacement in the addend */
+    if (symidx == 0)
+        return 0;
     if (ELF64_ST_BIND(sy->st_info) == STB_LOCAL) {
         /* a local symbol: resolve within this object directly */
         if (sy->st_shndx == SHN_ABS)
@@ -5438,26 +5453,91 @@ static void apply_mips(struct linker *l, struct object *o, unsigned type,
 
 /* ---- TriCore -------------------------------------------------------------
  *
- * RELA, the addend in the relocation (docs/internals/tricore-plan.md).
- * An address is two halves in two instruction formats: HIADJ in an RLC
- * const16 (MOVH, MOVH.A), rounded by 0x8000 because the low half is
- * sign-extended where it is added; LO in an RLC const16 (ADDI); LO2 in a
- * BOL long offset (LEA, a load, a store), whose 16 bits are scattered in
- * three pieces. 24REL is CALL's and J's halfword displacement. Every
- * field is rebuilt by src/arch/tricore/emit.c's format packers from the
- * instruction's own other fields, so no layout is written down here. The
- * small-data and other types are refused by name. */
+ * RELA, the addend in the relocation. Beyond the two data words (32ABS,
+ * and 32REL for .eh_frame) every type fills one field of one instruction,
+ * and which field -- and where each of its bits lies, scattered as
+ * TriCore's formats scatter them -- is what src/arch/tricore/isa.h knows:
+ * the form whose opcode bits the instruction has, and the field GNU as
+ * writes that relocation for in it (tools/tricore-isa measured both). So
+ * the linker decodes the instruction with the assembler's own table and
+ * packs the value with its packer; nothing about a format is written down
+ * here twice.
+ *
+ * The value: S + A, less P for the PC-relative 24REL and 15REL (a byte
+ * distance; the field's weights make it halfwords); the high half of S +
+ * A rounded by 0x8000 for HIADJ (the low half is sign-extended where it is
+ * added), the plain high half for HI, the low half for LO and LO2; and for
+ * the small-data 16SM, 10SM and 16SM2, the distance from the base its
+ * address register holds -- _SMALL_DATA_ for a0, _LITERAL_DATA_ for a1,
+ * _A8_DATA_ and _A9_DATA_ for a8 and a9, as GNU ld's scripts define them
+ * (a script or an object must). An absolute 18ABS or 24ABS is the address
+ * itself: the field's weights are the format's mapping (bits 31:28 to the
+ * top, 13:0 or 20:1 below). RELAX, GNU's mark for its relaxing linker, is
+ * nothing to do. */
 #if FAMILY_BUILT(tricore)
+static const char *tc_reloc_name(unsigned type)
+{
+    static const struct { unsigned t; const char *n; } names[] = {
+        { 1, "32REL" }, { 2, "32ABS" }, { 3, "24REL" }, { 4, "24ABS" },
+        { 5, "16SM" }, { 6, "HIADJ" }, { 7, "LO" }, { 8, "LO2" },
+        { 9, "18ABS" }, { 10, "10SM" }, { 11, "15REL" }, { 12, "HI" },
+        { 13, "16CONST" }, { 14, "9ZCONST" }, { 15, "9SCONST" },
+        { 18, "10OFF" }, { 19, "16OFF" }, { 22, "1BIT" }, { 23, "3POS" },
+        { 24, "5POS" }, { 30, "5POS2" }, { 31, "BRCC" }, { 32, "BRCZ" },
+        { 33, "BRNN" }, { 34, "RRN" }, { 48, "16SM2" }, { 81, "18ABS_14" },
+        { 82, "RELAX" },
+    };
+    for (unsigned k = 0; k < sizeof names / sizeof names[0]; k++)
+        if (names[k].t == type)
+            return names[k].n;
+    return NULL;
+}
+
+/* The small-data base an instruction's address register holds. */
+static Elf64_Addr tc_sda_base(struct linker *l, struct object *o,
+                              unsigned type, int e, unsigned long w)
+{
+    const struct tc_insn *in = &tc_insns[e];
+    const char *p = strchr(in->shape, '[');
+    int k = 0, reg = -1;
+    /* the address register is the atom right after `[` */
+    for (const char *q = in->shape; p && q < p; q++)
+        if (*q == 'D' || *q == 'A' || *q == 'E' || *q == 'N' || *q == 'S')
+            k++;
+    if (p && k < in->nf) {
+        const struct tc_field *f = &tc_fields[in->f + k];
+        reg = f->v0;
+        for (int j = 0; j < f->nb; j++)
+            if ((w >> tc_fbits[f->fb + j].pos) & 1)
+                reg += 1 << tc_fbits[f->fb + j].shift;
+    }
+    {
+        const char *nm = reg == 0 ? "_SMALL_DATA_" : reg == 1 ? "_LITERAL_DATA_" :
+                         reg == 8 ? "_A8_DATA_" : reg == 9 ? "_A9_DATA_" : NULL;
+        struct symbol *b = nm ? sym_find(l, nm) : NULL;
+        if (!nm)
+            die("%s: relocation R_TRICORE_%s on an instruction whose base is "
+                "a%d: small data is addressed from a0, a1, a8 or a9", o->name,
+                tc_reloc_name(type), reg);
+        if (!b || !b->defined)
+            die("%s: relocation R_TRICORE_%s: small data addressed from a%d, "
+                "whose base %s neither the link script nor an object "
+                "defines (GNU ld's scripts put it 32 KiB into .sdata)",
+                o->name, tc_reloc_name(type), reg, nm);
+        return b->value;
+    }
+}
+
 static void apply_tricore(struct linker *l, struct object *o, unsigned type,
                           unsigned char *loc, Elf64_Addr S, long long A,
                           Elf64_Addr P)
 {
-    unsigned long w = get32loc(loc);
-    int op1 = (int)(w & 0xff), s1 = (int)((w >> 8) & 15),
-        s2 = (int)((w >> 12) & 15), d = (int)((w >> 28) & 15);
     long long V = (long long)S + A;
+    int len, e, k;
+    unsigned long w;
     switch (type) {
     case R_TRICORE_NONE:
+    case R_TRICORE_RELAX:
         return;
     case R_TRICORE_32ABS:
         need_range(l, o, "R_TRICORE_32ABS", V, I32_MIN, 0xffffffffLL);
@@ -5468,39 +5548,60 @@ static void apply_tricore(struct linker *l, struct object *o, unsigned type,
         need_range(l, o, "R_TRICORE_32REL", V, I32_MIN, I32_MAX);
         put32(loc, (unsigned int)V);
         return;
-    case R_TRICORE_24REL: {
-        long long dd = V - (long long)P;
-        if (op1 != 0x1d && op1 != 0x6d && op1 != 0x5d)
-            die("%s: R_TRICORE_24REL on 0x%08lx, which is not a J, CALL or "
-                "JL", o->name, w);
-        if (dd & 1)
-            die("%s: a call or jump to the odd address 0x%llx ('%s')",
-                o->name, (unsigned long long)V, l->rel_sym ? l->rel_sym : "?");
-        need_range(l, o, "R_TRICORE_24REL", dd, -16777216LL, 16777214LL);
-        put32(loc, (unsigned int)tc_enc_b(op1, (unsigned long)(dd / 2) &
-                                               0xffffffUL));
-        return;
-    }
-    case R_TRICORE_HIADJ:
-        put32(loc, (unsigned int)tc_enc_rlc(op1, d, s1,
-                                            tc_hi_adj((unsigned long)V)));
-        return;
-    case R_TRICORE_LO:
-        put32(loc, (unsigned int)tc_enc_rlc(op1, d, s1,
-                                            (unsigned)(V & 0xffff)));
-        return;
-    case R_TRICORE_LO2:
-        put32(loc, (unsigned int)tc_enc_bol(op1, s1, s2,
-                                            (unsigned)(V & 0xffff)));
-        return;
-    case R_TRICORE_16SM: case R_TRICORE_10SM:
-        die("%s: relocation %s: small-data (A0-relative) addressing, which "
-            "this linker does not lay out", o->name,
-            type == R_TRICORE_16SM ? "R_TRICORE_16SM" : "R_TRICORE_10SM");
-        return;
     default:
-        die("%s: unsupported TriCore relocation type %u (this is the next "
-            "linker increment, not a bug in your program)", o->name, type);
+        break;
+    }
+    if (!tc_reloc_name(type))
+        die("%s: relocation type %u is not a TriCore one", o->name, type);
+    /* bit 0 of an instruction's first byte: 32-bit */
+    len = loc[0] & 1 ? 4 : 2;
+    w = len == 4 ? get32loc(loc) : get16(loc);
+    if (tc_reloc_site(w, len, (int)type, &e, &k) < 0)
+        die("%s: relocation R_TRICORE_%s on 0x%0*lx, which is no TriCore "
+            "instruction with a field for it", o->name, tc_reloc_name(type),
+            len * 2, w);
+    switch (type) {
+    case R_TRICORE_24REL: case R_TRICORE_15REL:
+        V -= (long long)P;
+        break;
+    case R_TRICORE_HIADJ:
+        V = ((V + 0x8000) >> 16) & 0xffff;
+        break;
+    case R_TRICORE_HI:
+        V = (V >> 16) & 0xffff;
+        break;
+    case R_TRICORE_LO: case R_TRICORE_LO2:
+        V &= 0xffff;
+        break;
+    case R_TRICORE_16SM: case R_TRICORE_10SM: case R_TRICORE_16SM2:
+        V -= (long long)tc_sda_base(l, o, type, e, w);
+        break;
+    default:
+        break;
+    }
+    {
+        const struct tc_field *f = &tc_fields[tc_insns[e].f + k];
+        long long lo, hi, step;
+        unsigned nw;
+        tc_field_range(f, &lo, &hi, &step);
+        /* a half is the field's 16 bits, whatever their sign */
+        if ((type == R_TRICORE_HIADJ || type == R_TRICORE_HI ||
+             type == R_TRICORE_LO || type == R_TRICORE_LO2) && V > hi)
+            V -= 0x10000;
+        nw = (unsigned)w & ~tc_field_mask(f);
+        if (!tc_fit_field(f, V, &nw)) {
+            if (step > 1 && V % step)
+                die("%s: relocation R_TRICORE_%s in '%s': %lld (from '%s') is "
+                    "not a multiple of %lld", o->name, tc_reloc_name(type),
+                    tc_insns[e].mnem, V, l->rel_sym ? l->rel_sym : "?", step);
+            die("%s: relocation R_TRICORE_%s in '%s': %lld (from '%s') does "
+                "not fit its field (%lld..%lld)", o->name, tc_reloc_name(type),
+                tc_insns[e].mnem, V, l->rel_sym ? l->rel_sym : "?", lo, hi);
+        }
+        if (len == 4)
+            put32(loc, nw);
+        else
+            put16(loc, nw);
     }
 }
 #endif
@@ -5973,7 +6074,7 @@ static void patch_thm_mov(unsigned char *loc, unsigned int h)
  * field 0). SLOT0_OP names the instruction's one PC-relative operand, so
  * the opcode at the site says which field and which reach: a call's word
  * offset from (P & ~3) + 4, a j's, a branch's or a zero-test's byte
- * offset from P + 4, a loop's forward eight bits to its end (GCC uses the
+ * offset from P + 4 (bf/bt's too), a loop's forward eight bits to its end (GCC uses the
  * zero-overhead loops on a core that has them), a density beqz.n/bnez.n's
  * forward six bits, an l32r's
  * backward word offset from (P + 3) & ~3. ASM_EXPAND marks a call an
@@ -6029,7 +6130,9 @@ static void apply_xtensa(struct linker *l, struct object *o, unsigned type,
                 what = "a zero-test branch reaches 2 KiB";
             else
                 w = (w & 0xfffUL) | (((unsigned long)d & 0xfffUL) << 12);
-        } else if (op0 == 7 || (op0 == 6 && (n == 2 || (n == 3 && m >= 2)))) {
+        } else if (op0 == 7 || (op0 == 6 && (n == 2 || (n == 3 && m >= 2))) ||
+                   (op0 == 6 && n == 3 && m == 1 && ((w >> 12) & 15) <= 1)) {
+            /* (and bf/bt, the boolean branches an FPU compare feeds) */
             if (d < -128 || d > 127)
                 what = "a branch reaches 128 bytes";
             else
@@ -6326,6 +6429,11 @@ static void apply_relocs(struct linker *l, struct object *o)
 #endif
 #if FAMILY_BUILT(tricore)
             if (o->machine == EM_TRICORE) {
+                /* (against symbol 0 a branch's addend is its distance:
+                 * GNU as's, which resolved it and kept it relocated) */
+                if (symi == 0 && (type == R_TRICORE_24REL ||
+                                  type == R_TRICORE_15REL))
+                    S = P;
                 apply_tricore(l, o, type, loc, S, A, P);
                 continue;
             }
@@ -6648,6 +6756,26 @@ static void apply_relocs(struct linker *l, struct object *o)
                            0xffffffffLL);
                 put32(loc, (unsigned int)(S + A));
                 break;
+            case R_X86_64_16:
+                /* (a .word: either signedness, as ld and lld take it) */
+                need_range(l, o, "R_X86_64_16", (long long)S + A, -32768, 65535);
+                loc[0] = (unsigned char)(S + A);
+                loc[1] = (unsigned char)((S + A) >> 8);
+                break;
+            case R_X86_64_8:
+                need_range(l, o, "R_X86_64_8", (long long)S + A, -128, 255);
+                loc[0] = (unsigned char)(S + A);
+                break;
+            case R_X86_64_PC16:
+            case R_X86_64_PC8: {
+                long long v = (long long)S + A - (long long)P;
+                int w2 = type == R_X86_64_PC16;
+                need_range(l, o, w2 ? "R_X86_64_PC16" : "R_X86_64_PC8", v,
+                           w2 ? -32768 : -128, w2 ? 32767 : 127);
+                loc[0] = (unsigned char)v;
+                if (w2) loc[1] = (unsigned char)(v >> 8);
+                break;
+            }
             case R_X86_64_32S:
                 if (l->pie && ts)
                     die("%s: R_X86_64_32S against '%s' in a position-"
@@ -7388,6 +7516,8 @@ static unsigned char *read_file(const char *path, long *len)
 
 #define LS_MAX_PASSES 8
 
+static int ls_osec_tls(const struct linker *l, const struct ls_osec *o);
+
 struct ls_state {
     struct linker *l;
     struct ls_script *sc;
@@ -7588,7 +7718,12 @@ static long long ls_eval(struct ls_state *st, const struct lx *e, int *rel)
             return 0x1000;
         ls_die(st, "CONSTANT(%s) is not a constant embld knows", e->name);
         return 0;
-    default:                        /* SIZEOF_HEADERS: none are loaded */
+    default:
+        /* SIZEOF_HEADERS: the ELF header and the script's program headers
+         * when PHDRS gives them (a segment may load them); none are
+         * loaded otherwise */
+        if (st->sc->nphdrs)
+            return st->l->elf32 ? 52 + 32 * st->sc->nphdrs : 64 + 56 * st->sc->nphdrs;
         return 0;
     }
 }
@@ -8078,6 +8213,13 @@ static void ls_layout_osec(struct ls_state *st, int k)
         sc->reg[lr].cur = lma + o->size;
     }
     st->dot = start + o->size;
+    /* .tbss takes no address space where it is: each thread's copy is
+     * elsewhere, and what follows starts where it does (as ld lays it) */
+    if (o->nobits && ls_osec_tls(st->l, o)) {
+        st->dot = start;
+        if (vr >= 0 && sc->reg[vr].cur == start + o->size)
+            sc->reg[vr].cur = start;
+    }
 }
 
 static void ls_layout_pass(struct linker *l, struct ls_script *sc, int final)
@@ -8172,10 +8314,11 @@ static void ls_layout(struct linker *l, struct ls_script *sc, int orphan_mode)
         l->machine != EM_AARCH64 && l->machine != EM_X86_64 &&
         l->machine != EM_LOONGARCH && l->machine != EM_MIPS &&
         l->machine != EM_PPC && l->machine != EM_SPARC &&
-        l->machine != EM_68K)
+        l->machine != EM_68K && l->machine != EM_TRICORE &&
+        l->machine != EM_RX)
         die("-T: a linker script is supported for ARM, AArch64, x86-64, "
-            "RISC-V, LoongArch, MIPS, PowerPC, SPARC, ColdFire, AVR and "
-            "Xtensa images (this one is machine %u)",
+            "RISC-V, LoongArch, MIPS, PowerPC, SPARC, ColdFire, TriCore, RX, "
+            "AVR and Xtensa images (this one is machine %u)",
             (unsigned)l->machine);
     /* A region every output section names must exist, whether or not
      * anything ends up in the section: a typo in `> RAM` is a typo. */
@@ -8401,6 +8544,18 @@ static void ls_put_sym(unsigned char *at, const struct linker *l,
     }
 }
 
+/* an output section that is thread data: all its inputs are */
+static int ls_osec_tls(const struct linker *l, const struct ls_osec *o)
+{
+    int tls = 0, other = 0;
+    for (int b = 0; b < o->nbody; b++)
+        for (int j = 0; j < o->body[b].nlist; j++) {
+            if (l->insecs[o->body[b].list[j]].shflags & SHF_TLS) tls = 1;
+            else other = 1;
+        }
+    return tls && !other;
+}
+
 static void write_exec_script(struct linker *l, struct ls_script *sc,
                               const char *out, Elf64_Addr entry)
 {
@@ -8420,18 +8575,76 @@ static void write_exec_script(struct linker *l, struct ls_script *sc,
     /* PT_TLS, after the loads, when there is a thread block: where its
      * template is, as a runtime that starts threads finds it */
     int tlsph = l->tls_size > 0;
-    Elf64_Off off = ehsz + (Elf64_Off)(nem + tlsph) * phsz;
+    /* PHDRS: the script's program headers, each section in the ones `:name`
+     * put it in (or the section before's, as ld has it); a PT_LOAD's
+     * sections in the file as in memory, at offsets congruent to their
+     * addresses modulo the page */
+    int nph = sc->nphdrs ? sc->nphdrs : nem + tlsph;
+    Elf64_Off page = l->machine == EM_X86_64 || l->machine == EM_AARCH64 ? 0x1000 : 4;
+    if (sc->nphdrs) {
+        int cur[8], ncur = 0;
+        for (int k = 0; k < nem; k++) {
+            struct ls_osec *o = &sc->osecs[em[k]];
+            if (o->nphdr > 0) {
+                ncur = 0;
+                for (int j = 0; j < o->nphdr; j++) {
+                    if (!strcmp(o->phdr_name[j], "NONE"))
+                        continue;
+                    int f = -1;
+                    for (int h = 0; h < sc->nphdrs; h++)
+                        if (!strcmp(sc->phdrs[h].name, o->phdr_name[j])) f = h;
+                    if (f < 0)
+                        die("output section %s is in program header '%s', which "
+                            "PHDRS does not declare", o->name, o->phdr_name[j]);
+                    cur[ncur++] = f;
+                }
+            }
+            o->nph = ncur;
+            memcpy(o->phdr, cur, sizeof cur);
+        }
+    }
+    Elf64_Off off = ehsz + (Elf64_Off)nph * phsz;
     Elf64_Off *fo = xmalloc((size_t)(nem + 1) * sizeof *fo);
+    Elf64_Off *seg_off = xcalloc((size_t)sc->nphdrs + 1, sizeof *seg_off);
+    long long *seg_vma = xcalloc((size_t)sc->nphdrs + 1, sizeof *seg_vma);
+    int *seg_set = xcalloc((size_t)sc->nphdrs + 1, sizeof *seg_set);
     for (int k = 0; k < nem; k++) {
         struct ls_osec *o = &sc->osecs[em[k]];
-        /* the file offset congruent to the address modulo 4, which is
-         * all a PT_LOAD aligned to 4 asks */
-        off = align_up(off, 4) + ((Elf64_Off)o->vma & 3);
+        int load = -1;
+        if (sc->nphdrs)
+            for (int j = 0; j < o->nph; j++)
+                if (sc->phdrs[o->phdr[j]].type == PT_LOAD && load < 0)
+                    load = o->phdr[j];
+        if (load >= 0 && seg_set[load]) {
+            /* in its segment, where its address says */
+            Elf64_Off want = seg_off[load] + (Elf64_Off)(o->vma - seg_vma[load]);
+            if (o->vma < seg_vma[load] || want < off) {
+                if (o->nobits)
+                    want = off;
+                else
+                    die("output section %s is in segment '%s' at 0x%llx, before "
+                        "or among what that segment already holds", o->name,
+                        sc->phdrs[load].name, (unsigned long long)o->vma);
+            }
+            off = want;
+        } else {
+            /* the file offset congruent to the address modulo the page (a
+             * PT_LOAD of the script's) or 4, which is all one aligned to 4
+             * asks */
+            Elf64_Off a = load >= 0 ? page : 4;
+            off += ((Elf64_Off)o->vma - off) & (a - 1);
+            if (load >= 0) {
+                seg_set[load] = 1;
+                seg_off[load] = off;
+                seg_vma[load] = o->vma;
+            }
+        }
         fo[k] = off;
         o->shndx = 1 + k;
         if (!o->nobits)
             off += (Elf64_Off)o->size;
     }
+    free(seg_off); free(seg_vma); free(seg_set);
     /* section headers: [0] null, the output sections, the DWARF, then
      * .symtab .strtab .shstrtab */
     int sh_dbg0 = 1 + nem, sh_symtab = sh_dbg0 + l->ndbg;
@@ -8538,17 +8751,102 @@ static void write_exec_script(struct linker *l, struct ls_script *sc,
     eh.e_version = EV_CURRENT;
     eh.e_entry = entry;
     eh.e_flags = l->machine == EM_ARM ? EF_ARM_EABI_VER5 : l->eflags;
-    eh.e_phoff = nem + tlsph ? ehsz : 0;
+    eh.e_phoff = nph ? ehsz : 0;
     eh.e_shoff = sh_off;
     eh.e_ehsize = (Elf64_Half)ehsz;
     eh.e_phentsize = (Elf64_Half)phsz;
-    eh.e_phnum = (Elf64_Half)(nem + tlsph);
+    eh.e_phnum = (Elf64_Half)nph;
     eh.e_shentsize = (Elf64_Half)shentsz;
     eh.e_shnum = (Elf64_Half)nsh;
     eh.e_shstrndx = (Elf64_Half)sh_shstr;
     ls_put_ehdr(img, l, &eh);
 
-    for (int k = 0; k < nem; k++) {
+    for (int h = 0; h < sc->nphdrs; h++) {
+        /* the script's: what its sections span */
+        const struct ls_phdr *hd = &sc->phdrs[h];
+        Elf64_Phdr ph;
+        memset(&ph, 0, sizeof ph);
+        ph.p_type = hd->type;
+        int first = -1, x = 0, w = 0;
+        Elf64_Off fend = 0;
+        long long mend = 0, al = 1;
+        for (int k = 0; k < nem; k++) {
+            struct ls_osec *o = &sc->osecs[em[k]];
+            int in = 0;
+            for (int j = 0; j < o->nph; j++)
+                if (o->phdr[j] == h) in = 1;
+            if (!in)
+                continue;
+            if (first < 0) {
+                first = k;
+                ph.p_offset = fo[k];
+                ph.p_vaddr = (Elf64_Addr)o->vma;
+                ph.p_paddr = (Elf64_Addr)(o->nobits ? o->vma : o->lma);
+            }
+            if (!o->nobits && fo[k] + (Elf64_Off)o->size > fend)
+                fend = fo[k] + (Elf64_Off)o->size;
+            /* (.tbss takes no room in a PT_LOAD: each thread's copy does) */
+            int tbss = o->nobits && ls_osec_tls(l, o);
+            if (o->vma + o->size > mend && !(tbss && hd->type == PT_LOAD))
+                mend = o->vma + o->size;
+            if (o->al > al) al = o->al;
+            x |= o->exec;
+            w |= o->write;
+        }
+        if (first >= 0) {
+            ph.p_filesz = fend > ph.p_offset ? fend - ph.p_offset : 0;
+            ph.p_memsz = mend > (long long)ph.p_vaddr
+                       ? (Elf64_Xword)(mend - (long long)ph.p_vaddr) : 0;
+            if (ph.p_memsz < ph.p_filesz) ph.p_memsz = ph.p_filesz;
+        }
+        if (hd->type == PT_PHDR) {
+            /* the program headers themselves, where the segment that
+             * loads the file's start puts them */
+            ph.p_offset = ehsz;
+            ph.p_filesz = ph.p_memsz = (Elf64_Xword)nph * phsz;
+            for (int g = 0; g < sc->nphdrs; g++) {
+                const struct ls_phdr *lh = &sc->phdrs[g];
+                if (lh->type != PT_LOAD || !(lh->filehdr || lh->phdrs))
+                    continue;
+                for (int k = 0; k < nem; k++) {
+                    const struct ls_osec *o = &sc->osecs[em[k]];
+                    int in = 0;
+                    for (int j = 0; j < o->nph; j++) if (o->phdr[j] == g) in = 1;
+                    if (in) {
+                        ph.p_vaddr = (Elf64_Addr)o->vma - fo[k] + ehsz;
+                        ph.p_paddr = (Elf64_Addr)(o->nobits ? o->vma : o->lma) - fo[k] + ehsz;
+                        break;
+                    }
+                }
+                break;
+            }
+            al = l->elf32 ? 4 : 8;
+            x = w = 0;
+        }
+        if (hd->has_at) ph.p_paddr = (Elf64_Addr)hd->at;
+        if ((hd->filehdr || hd->phdrs) && first >= 0) {
+            /* the headers in the segment: from the file's start */
+            Elf64_Off back = ph.p_offset;
+            if ((Elf64_Off)ph.p_vaddr < back)
+                die("PHDRS: segment '%s' at 0x%llx cannot also hold the "
+                    "headers before it", hd->name, (unsigned long long)ph.p_vaddr);
+            ph.p_offset = 0;
+            ph.p_vaddr -= back;
+            ph.p_paddr -= back;
+            ph.p_filesz += back;
+            ph.p_memsz += back;
+        }
+        ph.p_flags = hd->has_flags ? hd->flags : PF_R | (x ? PF_X : 0) | (w ? PF_W : 0);
+        ph.p_align = hd->type == PT_LOAD ? (Elf64_Xword)page
+                   : hd->type == PT_TLS ? (l->tls_align ? (Elf64_Xword)l->tls_align
+                                                        : (Elf64_Xword)al)
+                   : first < 0 ? (Elf64_Xword)(l->elf32 ? 4 : 8)
+                   : (Elf64_Xword)al;
+        if (hd->type == PT_TLS && first >= 0 && l->tls_size)
+            ph.p_memsz = l->tls_size;
+        ls_put_phdr(img + ehsz + (Elf64_Off)h * phsz, l, &ph);
+    }
+    for (int k = 0; k < nem && !sc->nphdrs; k++) {
         struct ls_osec *o = &sc->osecs[em[k]];
         Elf64_Phdr ph;
         memset(&ph, 0, sizeof ph);
@@ -8566,7 +8864,7 @@ static void write_exec_script(struct linker *l, struct ls_script *sc,
         ph.p_align = 4;
         ls_put_phdr(img + ehsz + (Elf64_Off)k * phsz, l, &ph);
     }
-    if (tlsph) {
+    if (tlsph && !sc->nphdrs) {
         Elf64_Phdr ph;
         Elf64_Addr tdata_end = l->tls_start;
         memset(&ph, 0, sizeof ph);
@@ -9820,8 +10118,8 @@ int embld_link(const char **inputs, int ninputs, const char *out,
 
     Elf64_Addr text_start, data_start;
     Elf64_Xword text_size, data_filesz, data_memsz;
-    struct osec_bound bounds[OSEC_COUNT + MAX_ORPHANS];
-    memset(bounds, 0, sizeof bounds);
+    struct osec_bound *bounds = xcalloc((size_t)(OSEC_COUNT + l.norphan + 64),
+                                        sizeof *bounds);
     Elf64_Addr tls_start = 0;
     Elf64_Xword tls_filesz = 0, tls_memsz = 0, tls_align = 1;
     layout(&l, bounds, &text_start, &text_size, &data_start, &data_filesz,

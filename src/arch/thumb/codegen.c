@@ -728,9 +728,14 @@ static const struct ra_target THUMB_RA = {
      * value into a slot, so every function used to end with `str` to a
      * slot and `ldr` back into r0.
      *
-     * A memcpy's addresses are still read from their slots, so those
-     * values must stay there. */
-    1, 1, 0,
+     * A memcpy's or memzero's addresses go through rd/rdr as well (and
+     * on ARMv6-M gen_block takes F->loc), and the scratch roles of the
+     * block loop are chosen from registers its operands are not in
+     * (t_busy). With the flag still 0 an address one of them used was
+     * kept in its slot for the whole function: `memset(hkeys, 0, ...)`
+     * put the table's address in the frame, and the probe loop after
+     * it loaded it back three times a trip. */
+    1, 1, 1,
     t_op_calls_helper,
     0,            /* Thumb-2's wide forms are three-operand */
     t_abi_hints,
@@ -5116,8 +5121,20 @@ static void gen_ins(struct t_fn *F, int n)
             /* ...and a select on it: `tst a, #k; ite ne` -- `(i & 31) == 0
              * ? a : b`, where the and and a compare with 0 were two
              * instructions and a register. The arms are where an IT
-             * block's moves take them (in registers, or immediates). */
-            if (k == n + 1 && t_select_it_ok(F, bx) && bx->a == i->dst &&
+             * block's moves take them (in registers, or immediates). A
+             * constant between the two that only the select reads as an
+             * immediate makes no instruction, so it may come between
+             * (the state machine's `if ((i & 31) == 0) b = 0x7e`). */
+            int ks = n + 1;
+            while (k == n + 1 && ks < fn->nins && ks - n <= 3 &&
+                   fn->ins[ks].op == IR_CONST && t_sel_imm(F, fn->ins[ks].dst))
+                ks++;
+            if (k == n + 1 && ks > n + 1 && ks < fn->nins &&
+                fn->ins[ks].op == IR_SELECT) {
+                bx = &fn->ins[ks];
+                k = ks;
+            }
+            if (k == ks && t_select_it_ok(F, bx) && bx->a == i->dst &&
                 (in_reg(F, bx->b) || t_sel_imm(F, bx->b)) &&
                 (in_reg(F, bx->c) || t_sel_imm(F, bx->c)) &&
                 (!i->imm_b ? in_reg(F, i->b) : t_imm_ok(i->imm))) {
@@ -5129,7 +5146,7 @@ static void gen_ins(struct t_fn *F, int n)
                 else
                     t_tst_reg(t, ra_, F->loc[i->b]);
                 t_select_cc(F, bx, T_NE, rb, rc);
-                F->skip_next = 1;
+                F->skip_next = ks - n;
                 return;
             }
             if ((bx->op == IR_BRZ || bx->op == IR_BRNZ) &&
@@ -6648,13 +6665,17 @@ static void gen_ins(struct t_fn *F, int n)
         int n_ins = (int)(i - fn->ins);   /* `n` is the entry count below */
         int n = fn->jt[i->jt].n;
         int ri = rdr(F, i->a, T_ACC);
-        if (t_imm_ok(n)) {
+        /* no bound to test when the index is known to be inside the
+         * table (pass_switchrange: a state that is only ever a case) */
+        if (i->sign) {
+        } else if (t_imm_ok(n)) {
             t_cmp_imm(t, ri, n);
         } else {
             t_mov_imm(t, T_TMP, n, 0);
             t_cmp_reg(t, ri, T_TMP);
         }
-        jump_if(F, T_CS, i->label);                  /* bhs: unsigned >= n */
+        if (!i->sign)
+            jump_if(F, T_CS, i->label);              /* bhs: unsigned >= n */
         /* ARM state: `add pc, pc, rI, lsl #2` over a table of branches.
          * pc reads as the add's address + 8, which is where the table
          * starts, one word on -- so the word between is never run. The

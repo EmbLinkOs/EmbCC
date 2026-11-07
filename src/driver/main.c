@@ -19,7 +19,7 @@
 #include "../debug/dwarf.h"
 #include "../debug/eh.h"
 #include "../arch/predef.h"
-#include "../arch/x86_64/as.h"
+#include "../as/nasm.h"
 #include "../elf/write.h"
 #include "../macho/write.h"
 #include "../coff/write.h"
@@ -5871,9 +5871,18 @@ lto_backend:
                                     SHF_ALLOC | SHF_WRITE | SHF_TLS,
                                     NULL, (Elf64_Xword)tbss_len,
                                     (Elf64_Xword)tbss_align);
+    /* (a section named for notes or constructors is of their type, as
+     * clang and GCC write it: a link gathers .init_array's by type, and
+     * a note read as data is loaded) */
     for (int k = 0; k < nnamed; k++)
         named[k].ndx = elfw_add_section(
-            w, named[k].name, named[k].nobits ? SHT_NOBITS : SHT_PROGBITS,
+            w, named[k].name,
+            named[k].nobits ? SHT_NOBITS
+            : !strncmp(named[k].name, ".note", 5) ? SHT_NOTE
+            : !strncmp(named[k].name, ".init_array", 11) ? SHT_INIT_ARRAY
+            : !strncmp(named[k].name, ".fini_array", 11) ? SHT_FINI_ARRAY
+            : !strncmp(named[k].name, ".preinit_array", 14) ? SHT_PREINIT_ARRAY
+            : SHT_PROGBITS,
             (Elf64_Xword)named[k].flags, named[k].buf,
             (Elf64_Xword)named[k].len, (Elf64_Xword)named[k].align);
 
@@ -6846,8 +6855,19 @@ static int expand_wp(int *argcp, char ***argvp)
 }
 
 /* the compiler proper, on the stack plat_run_on_stack gives it */
+static int embcc_main(int argc, char **argv);
 static int embcc_main(int argc, char **argv)
 {
+#if FAMILY_BUILT(x86)
+    /* called as embas: the NASM-syntax assembler's command line */
+    if (argc > 0) {
+        const char *b = argv[0], *sl;
+        for (sl = b; *sl; sl++)
+            if (*sl == '/' || *sl == '\\') b = sl + 1;
+        if (!strncmp(b, "embas", 5) && (!b[5] || b[5] == '.' || b[5] == '-'))
+            return embas_main(argc, argv, embcc_main);
+    }
+#endif
     /* the deep recursions measure from here */
     stack_note_base(&argc, plat_stack_size());
     plat_set_argv0(argc > 0 ? argv[0] : NULL);   /* where this program is */
@@ -8956,8 +8976,14 @@ static int embcc_main(int argc, char **argv)
             return 1;
         }
 #if FAMILY_BUILT(x86)
-        return as_assemble(input, output ? output : default_output(input),
-                           AS_ELF64);
+        {
+            struct nasm_opts no;
+            memset(&no, 0, sizeof no);
+            no.format = NASM_ELF64;
+            no.incdirs = (const char **)incdirs;
+            no.nincdirs = nincdirs;
+            return nasm_assemble(input, output ? output : default_output(input), &no);
+        }
 #else
         return 1;           /* refused above: there is no x86-64 here */
 #endif

@@ -15,7 +15,8 @@
 
 /* ---- registers ---------------------------------------------------------- */
 
-enum { K_NONE, K_REG, K_XMM, K_MEM, K_IMM, K_CR, K_DR, K_SEG, K_ST };
+enum { K_NONE, K_REG, K_XMM, K_MEM, K_IMM, K_CR, K_DR, K_SEG, K_ST,
+       K_KREG, K_RC, K_SAE };   /* (AVX-512's: %k0-%k7, {rn-sae}, {sae}) */
 
 struct reg { const char *n; int num, size, hi8, rex8, kind; };
 
@@ -62,9 +63,11 @@ static int reg_lookup(const char *s, int n, struct reg *out)
         out->n = "r"; out->num = v; out->size = size; out->kind = K_REG;
         return 1;
     }
-    const char *pfx[] = { "xmm", "cr", "dr", "ymm" };
-    int kinds[] = { K_XMM, K_CR, K_DR, K_XMM };
-    for (int p = 0; p < 4; p++) {
+    /* (xmm16-31, ymm16-31 and the zmm are AVX-512's, EVEX alone: insn()
+     * sends them nowhere else) */
+    const char *pfx[] = { "xmm", "cr", "dr", "ymm", "zmm" };
+    int kinds[] = { K_XMM, K_CR, K_DR, K_XMM, K_XMM };
+    for (int p = 0; p < 5; p++) {
         int pl = (int)strlen(pfx[p]);
         if (n > pl && !strncmp(s, pfx[p], (size_t)pl)) {
             int v = 0;
@@ -72,11 +75,16 @@ static int reg_lookup(const char *s, int n, struct reg *out)
                 if (!isdigit((unsigned char)s[i])) return 0;
                 v = v * 10 + (s[i] - '0');
             }
-            if (v > 15) return 0;
-            out->n = pfx[p]; out->num = v; out->size = p == 0 ? 16 : p == 3 ? 32 : 8;
+            if (v > (kinds[p] == K_XMM ? 31 : 15)) return 0;
+            out->n = pfx[p]; out->num = v;
+            out->size = p == 0 ? 16 : p == 3 ? 32 : p == 4 ? 64 : 8;
             out->kind = kinds[p];
             return 1;
         }
+    }
+    if (n == 2 && s[0] == 'k' && s[1] >= '0' && s[1] <= '7') {
+        out->n = "k"; out->num = s[1] - '0'; out->size = 8; out->kind = K_KREG;
+        return 1;
     }
     if (n == 3 && !strncmp(s, "rip", 3)) {
         out->n = "rip"; out->num = 16; out->size = 8; out->kind = K_REG;
@@ -92,11 +100,29 @@ int x86att_is_reg(const char *name, int len)
     return reg_lookup(name, len, &r) ? r.num : -1;
 }
 
+/* (intel.c's: a register name's class and size in bytes) */
+int x86att_reg_class(const char *name, int len, int *size)
+{
+    struct reg r;
+    if (!reg_lookup(name, len, &r) || (r.kind == K_REG && r.num == 16))
+        return X86R_NONE;
+    *size = r.size;
+    switch (r.kind) {
+    case K_REG: return X86R_GPR;
+    case K_XMM: return X86R_VEC;
+    case K_SEG: return X86R_SEG;
+    case K_CR: case K_DR: return X86R_CTL;
+    case K_KREG: return X86R_MASK;
+    }
+    return X86R_NONE;
+}
+
 static int is_prefix(const char *s, int n)
 {
     static const char *const pf[] = { "lock", "rep", "repe", "repz", "repne",
                                       "repnz", "rex64", "near", "{disp32}",
-                                      "{disp8}", "{imm32}" };
+                                      "{disp8}", "{imm32}", "{nasm}", "data16", "data32", "addr16",
+                                      "addr32" };
     for (unsigned k = 0; k < sizeof pf / sizeof *pf; k++)
         if ((int)strlen(pf[k]) == n && !strncmp(pf[k], s, (size_t)n))
             return 1;
@@ -123,10 +149,17 @@ int x86att_is_word(const char *stmt, const char *w, int len)
                                        "TPOFF", "GOTTPOFF", "TLSGD", "near" };
     if (w > stmt && w[-1] == '%')
         return 1;                      /* %anything is a register's */
+    /* inside braces: AVX-512's decorations, {z}, {1to16}, {rn-sae} */
+    for (const char *q = w - 1; q >= stmt; q--) {
+        if (*q == '{')
+            return 1;
+        if (*q == '}' || *q == ',' || *q == '(' || *q == ' ')
+            break;
+    }
     if (len >= 1 && w[0] == '$' && (len == 1 || !asm_sym0((unsigned char)w[1])))
         return 1;                      /* `$8`: an immediate, not a name */
-    if (w == after_prefixes(stmt))
-        return 1;
+    if (w <= after_prefixes(stmt))
+        return 1;                      /* the mnemonic, and a prefix before it */
     for (unsigned k = 0; k < sizeof ops / sizeof *ops; k++)
         if ((int)strlen(ops[k]) == len && !strncmp(ops[k], w, (size_t)len))
             return 1;
@@ -139,11 +172,15 @@ struct opnd {
     int k;
     int reg, size, hi8, rex8;          /* K_REG/K_XMM/K_CR/K_DR/K_SEG */
     int base, index, scale;            /* K_MEM: -1 none, 16 rip */
+    int asz;                           /* K_MEM: its registers' size, 0 none */
     long long disp;
     int dot;                           /* rip disp is .+N (from the start) */
     int seg;                           /* segment override prefix, 0 none */
-    long long imm;                     /* K_IMM */
+    long long imm;                     /* K_IMM; K_RC: the rounding mode */
     int star;                          /* `*target` */
+    /* AVX-512's decorations: {%kN} (mask, 1 + N), {z}, {1toN}; a vector
+     * index (VSIB): its size, 16, 32 or 64 */
+    int mask, zero, bcast, vindex;
 };
 
 struct ib {
@@ -159,13 +196,24 @@ static char *g_err;
 static int g_errlen;
 static int g_level = -1, g_took;
 /* (x86att_symform's: where the last statement's fields were) */
-static int g_last_disp_at = -1, g_last_imm_at = -1, g_last_len;
+static int g_last_disp_at = -1, g_last_imm_at = -1, g_last_len, g_last_disp_len;
 /* GNU as's {disp32} / {disp8}: the displacement's width, whatever its
  * value -- {disp32} is also how a relocated one keeps its field */
 static int g_disp_force;
 /* {imm32}, EmbCC's own: an immediate keeps its 32-bit field -- a symbol's
  * value is the linker's, and the 0 written for it fits a byte */
 static int g_imm_wide;
+/* {nasm}: the statement is NASM's (src/as/nasm.c), and takes the forms
+ * NASM picks where they and llvm-mc's differ -- mov r64, imm as mov r32's
+ * zero-extending form when the value fits it, movabs for a symbol's */
+static int g_nasm;
+/* the code's size: 64, or 32 and 16 after .code32/.code16 (NASM's bits) --
+ * the operand and address sizes an instruction has without a prefix */
+static int g_mode = 64;
+void x86att_set_mode(int bits) { g_mode = bits; }
+void x86att_reset(void) { g_mode = 64; }
+int x86att_mode(void) { return g_mode; }
+static int mode_bytes(void) { return g_mode / 8; }
 
 /* the relaxation level: 0 the short jump when it reaches, 1 the near one;
  * -2, pass one's, the short one always -- a layout that starts as small as
@@ -235,6 +283,54 @@ static int parse_opnd(const char *s, int n, struct opnd *o)
     while (n > 0 && isspace((unsigned char)s[n - 1])) n--;
     if (n == 0)
         return fail("an empty operand");
+    /* AVX-512: {rn-sae} and {sae} are operands of their own; {%k1}, {z}
+     * and {1to16} are decorations after one */
+    if (s[0] == '{' && s[n - 1] == '}') {
+        static const char *const rc[] = { "rn-sae", "rd-sae", "ru-sae", "rz-sae" };
+        for (int k = 0; k < 4; k++)
+            if (n - 2 == 6 && !strncmp(s + 1, rc[k], 6)) {
+                o->k = K_RC;
+                o->imm = k;
+                return 0;
+            }
+        if (n == 5 && !strncmp(s + 1, "sae", 3)) {
+            o->k = K_SAE;
+            return 0;
+        }
+        return fail("'%.*s' is not a rounding control ({rn-sae}, {rd-sae}, "
+                    "{ru-sae}, {rz-sae}, {sae})", n, s);
+    }
+    {
+        int mask = 0, zero = 0, bcast = 0;
+        while (n > 0 && s[n - 1] == '}') {
+            int b = n - 1;
+            while (b > 0 && s[b] != '{') b--;
+            if (s[b] != '{')
+                return fail("'%.*s': a '}' with no '{'", n, s);
+            const char *d = s + b + 1;
+            int dl = n - 1 - b - 1;
+            if (dl == 3 && d[0] == '%' && d[1] == 'k' && d[2] >= '0' && d[2] <= '7')
+                mask = 1 + (d[2] - '0');
+            else if (dl == 1 && d[0] == 'z')
+                zero = 1;
+            else if (dl > 3 && !strncmp(d, "1to", 3)) {
+                bcast = atoi(d + 3);
+                if (bcast != 2 && bcast != 4 && bcast != 8 && bcast != 16 && bcast != 32)
+                    return fail("'{%.*s}' is not a broadcast (1to2 .. 1to32)", dl, d);
+            } else
+                return fail("'{%.*s}' is not a decoration AVX-512 has ({%%k1}, "
+                            "{z}, {1to16})", dl, d);
+            n = b;
+            while (n > 0 && isspace((unsigned char)s[n - 1])) n--;
+        }
+        if (mask || zero || bcast) {
+            int r = parse_opnd(s, n, o);
+            o->mask = mask;
+            o->zero = zero;
+            o->bcast = bcast;
+            return r;
+        }
+    }
     if (*s == '*') { o->star = 1; s++; n--; }
     if (*s == '$') {
         o->k = K_IMM;
@@ -269,8 +365,24 @@ static int parse_opnd(const char *s, int n, struct opnd *o)
             return fail("'%.*s' is not an x86-64 register", n, s);
         return 0;
     }
-    /* memory: disp(base, index, scale), any part optional */
-    const char *lp = memchr(s, '(', (size_t)n);
+    /* memory: disp(base, index, scale), any part optional -- the group
+     * of registers is the last parenthesis, when it names a register or
+     * starts with a comma; before it (or without one) the displacement,
+     * which may have parentheses of its own: (4*8)(%ebx), 4*(1+1) */
+    const char *lp = NULL;
+    if (s[n - 1] == ')') {
+        int depth = 0;
+        for (const char *q = s + n - 1; q >= s; q--) {
+            if (*q == ')') depth++;
+            else if (*q == '(' && --depth == 0) { lp = q; break; }
+        }
+        if (lp) {
+            const char *in = lp + 1;
+            while (isspace((unsigned char)*in)) in++;
+            if (*in != '%' && *in != ',')
+                lp = NULL;
+        }
+    }
     o->k = K_MEM;
     const char *dend = lp ? lp : s + n;
     int dn = (int)(dend - s);
@@ -306,18 +418,30 @@ static int parse_opnd(const char *s, int n, struct opnd *o)
     }
     if (np >= 1 && plen[0]) {
         struct opnd r;
-        if (!parse_reg(parts[0], plen[0], &r) || r.k != K_REG || r.size != 8)
-            return fail("'%.*s' is not a 64-bit base register", plen[0], parts[0]);
+        if (!parse_reg(parts[0], plen[0], &r) || r.k != K_REG || r.size == 1 ||
+            (r.size == 2 && r.reg != 3 && r.reg != 5 && r.reg != 6 && r.reg != 7))
+            return fail("'%.*s' is not a base register", plen[0], parts[0]);
         o->base = r.reg;
+        o->asz = r.reg == 16 ? 8 : r.size;
     }
     if (np >= 2 && plen[1]) {
         struct opnd r;
-        if (!parse_reg(parts[1], plen[1], &r) || r.k != K_REG || r.size != 8 ||
-            r.reg == 16)
-            return fail("'%.*s' is not a 64-bit index register", plen[1], parts[1]);
-        if (r.reg == 4)
-            return fail("%%rsp cannot be an index");
-        o->index = r.reg;
+        /* (a vector register: a gather's or a scatter's index, VSIB) */
+        if (parse_reg(parts[1], plen[1], &r) && r.k == K_XMM) {
+            o->index = r.reg;
+            o->vindex = r.size;
+        } else {
+            if (!parse_reg(parts[1], plen[1], &r) || r.k != K_REG || r.size == 1 ||
+                r.reg == 16 || (r.size == 2 && r.reg != 6 && r.reg != 7 &&
+                                r.reg != 3 && r.reg != 5))
+                return fail("'%.*s' is not an index register", plen[1], parts[1]);
+            if (r.reg == 4 && r.size != 2)
+                return fail("%%rsp cannot be an index");
+            if (o->asz && o->asz != r.size)
+                return fail("the base and the index are registers of one size");
+            o->index = r.reg;
+            o->asz = r.size;
+        }
     }
     if (np >= 3 && plen[2]) {
         long long sc;
@@ -330,6 +454,20 @@ static int parse_opnd(const char *s, int n, struct opnd *o)
         return fail("'.+N' is an address only (%%rip)-relative");
     if (o->base == 16 && o->index >= 0)
         return fail("(%%rip) takes no index");
+    if (o->asz == 2) {                 /* 8086 addressing: bx/bp + si/di */
+        int b = o->base, i = o->index;
+        if (b == 6 || b == 7) {        /* (%si,%bx) is (%bx,%si) */
+            if (i >= 0 && i != 3 && i != 5)
+                return fail("16-bit addressing is %%bx or %%bp, plus %%si or %%di");
+            o->base = i; o->index = b;
+            b = o->base; i = o->index;
+        }
+        if (i >= 0 && ((b >= 0 && b != 3 && b != 5) || (i != 6 && i != 7 && b >= 0)))
+            return fail("16-bit addressing is %%bx or %%bp, plus %%si or %%di");
+        if (i >= 0 && o->scale != 1)
+            return fail("16-bit addressing has no scale");
+        if (b < 0 && i >= 0) { o->base = i; o->index = -1; }
+    }
     return 0;
 }
 
@@ -342,6 +480,41 @@ enum { P66 = 1, PF2 = 2, PF3 = 4 };
  * reg_is_reg, else the /digit); `w` is REX.W; `byte_regs` says the
  * registers named are byte ones (spl..dil need a REX, ah..bh refuse it) */
 static int modrm(struct ib *x, int regf, const struct opnd *rm);
+
+/* a memory operand's address size: its registers', else the mode's */
+static int addr_size(const struct opnd *m)
+{
+    return m->asz ? m->asz : mode_bytes();
+}
+
+/* a memory operand's segment override, then 67 when its address size is
+ * not the mode's (llvm-mc's and NASM's order) */
+static int mem_pfx(struct ib *x, const struct opnd *rm)
+{
+    if (rm->k != K_MEM)
+        return 0;
+    if (rm->seg) put(x, (unsigned)rm->seg);
+    int a = addr_size(rm);
+    if (g_mode == 64 && a == 2)
+        return fail("16-bit addressing is not in 64-bit code");
+    if (g_mode != 64 && a == 8)
+        return fail("a 64-bit address is only in 64-bit code");
+    if (a != mode_bytes() && !(g_mode == 64 && rm->base == 16 && a == 8))
+        put(x, 0x67);
+    return 0;
+}
+
+/* the operand-size prefix and REX.W for a general operation of `sz`
+ * bytes, written by the forms that have no ModRM */
+static int osz_pfx(struct ib *x, int sz)
+{
+    if (sz == 8 && g_mode != 64)
+        return fail("a 64-bit operand is only in 64-bit code");
+    if ((sz == 2) != (g_mode == 16) && sz != 1 && sz != 8)
+        put(x, 0x66);
+    if (sz == 8) put(x, 0x48);
+    return 0;
+}
 
 static int emit_rm(struct ib *x, int pfx, int w, const unsigned char *op,
                    int nop, int regf, const struct opnd *regop,
@@ -363,11 +536,14 @@ static int emit_rm(struct ib *x, int pfx, int w, const unsigned char *op,
     }
     if (rm->k == K_MEM && rm->dot && rm->base != 16)
         return fail("'.+N' is an address only (%%rip)-relative");
-    if (rm->k == K_MEM && rm->seg) put(x, (unsigned)rm->seg);
+    if (mem_pfx(x, rm) < 0) return -1;
     if (pfx & P66) put(x, 0x66);
     if (pfx & PF2) put(x, 0xf2);
     if (pfx & PF3) put(x, 0xf3);
     if (rex || need) {
+        if (g_mode != 64)
+            return fail("a 64-bit operand, r8-r15 or spl..dil are only in "
+                        "64-bit code");
         if (hi)
             return fail("%%ah, %%bh, %%ch and %%dh cannot be used with a REX "
                         "prefix (a 64-bit operand or r8-r15)");
@@ -384,6 +560,36 @@ static int modrm(struct ib *x, int regf, const struct opnd *rm)
     int r3 = regf & 7;
     if (rm->k != K_MEM) {
         put(x, 0xc0u | (unsigned)r3 << 3 | (unsigned)(rm->reg & 7));
+        return 0;
+    }
+    if (addr_size(rm) == 2) {                   /* 8086 addressing */
+        int b = rm->base, i = rm->index, c;
+        if (b < 0) {                            /* disp16 alone */
+            put(x, (unsigned)r3 << 3 | 6);
+            if (rm->disp < -32768 || rm->disp > 65535)
+                return fail("the displacement does not fit 16 bits");
+            x->disp_at = x->n; x->disp_len = 2;
+            put_n(x, rm->disp, 2);
+            return 0;
+        }
+        if (i >= 0) c = (b == 5 ? 2 : 0) + (i == 7);
+        else c = b == 6 ? 4 : b == 7 ? 5 : b == 5 ? 6 : 7;
+        int mod = rm->disp == 0 && c != 6 ? 0 : fits8(rm->disp) ? 1 : 2;
+        if (g_disp_force == 32) mod = 2;
+        else if (g_disp_force == 8 && mod == 0) mod = 1;
+        if (rm->disp < -32768 || rm->disp > 65535)
+            return fail("the displacement does not fit 16 bits");
+        put(x, (unsigned)mod << 6 | (unsigned)r3 << 3 | (unsigned)c);
+        if (mod == 1) { x->disp_at = x->n; x->disp_len = 1; put_n(x, rm->disp, 1); }
+        if (mod == 2) { x->disp_at = x->n; x->disp_len = 2; put_n(x, rm->disp, 2); }
+        return 0;
+    }
+    if (rm->base < 0 && rm->index < 0 && g_mode != 64) {   /* disp32 alone */
+        put(x, (unsigned)r3 << 3 | 5);
+        if (rm->disp < -2147483648LL || rm->disp > 4294967295LL)
+            return fail("the displacement does not fit 32 bits");
+        x->disp_at = x->n; x->disp_len = 4;
+        put_n(x, rm->disp, 4);
         return 0;
     }
     if (rm->base == 16) {                       /* rip-relative */
@@ -440,6 +646,9 @@ static int emit_oreg(struct ib *x, int pfx, int w, const unsigned char *op,
     if (pfx & P66) put(x, 0x66);
     if (pfx & PF3) put(x, 0xf3);
     if (rex || r->rex8) {
+        if (g_mode != 64)
+            return fail("a 64-bit operand, r8-r15 or spl..dil are only in "
+                        "64-bit code");
         if (r->hi8) return fail("%%ah..%%bh cannot take a REX prefix");
         put(x, 0x40u | (unsigned)rex);
     }
@@ -512,7 +721,12 @@ static int is_rm(const struct opnd *o, int sz)
     return o->k == K_MEM || is_reg_sz(o, sz);
 }
 
-static int pfx_of(int sz) { return sz == 2 ? P66 : 0; }
+/* the operand-size prefix: a 16-bit operation's outside 16-bit code, a
+ * 32-bit one's in it */
+static int pfx_of(int sz)
+{
+    return (sz == 2 && g_mode != 16) || (sz == 4 && g_mode == 16) ? P66 : 0;
+}
 
 /* r/m + reg ALU ops: add or adc sbb and sub xor cmp (ext 0-7) */
 static int alu(struct ib *x, int ext, int sz, const struct opnd *src,
@@ -546,8 +760,8 @@ static int alu(struct ib *x, int ext, int sz, const struct opnd *src,
         /* (the accumulator's short form, but not for a symbol's value:
          * llvm-mc and GNU as write that as 81 /n) */
         if (dst->k == K_REG && dst->reg == 0 && !g_imm_wide) {
-            if (p) put(x, 0x66);
-            if (w) put(x, 0x48);
+            (void)p;
+            if (osz_pfx(x, sz) < 0) return -1;
             put(x, (unsigned)(5 + 8 * ext));
             imm_put(x, sv, sz == 2 ? 2 : 4);
             return 0;
@@ -727,7 +941,7 @@ static int emit_vex(struct ib *x, int pp, int map, int w, int l, int vvvv,
             return fail("'.+N' is an address only (%%rip)-relative");
         if (rm->base >= 8 && rm->base != 16) b = 1;
         if (rm->index >= 8) xb = 1;
-        if (rm->seg) put(x, (unsigned)rm->seg);
+        if (mem_pfx(x, rm) < 0) return -1;
     } else if (rm->reg >= 8)
         b = 1;
     if (map == M_0F && !w && !xb && !b) {
@@ -740,6 +954,219 @@ static int emit_vex(struct ib *x, int pp, int map, int w, int l, int vvvv,
     }
     put(x, op);
     return modrm(x, regf, rm);
+}
+
+/* ---- AVX-512 (EVEX) and the opmask instructions, from a learned table ----
+ *
+ * evex.inc is tools/evex-isa's: every EVEX form llvm-mc decodes (a sweep
+ * of the maps, prefixes, W, vector lengths and opcodes), each assembled
+ * back by llvm-mc with a distinct register in every operand to see which
+ * field holds which -- ModRM reg (r) or rm (m), vvvv (v), aaa (a) -- its
+ * displacement scale (disp8*N) probed, and whether it takes a mask and
+ * {z}; and the opmask instructions' VEX forms the same way. The prefix
+ * is built here, field by field as the architecture lays it out. */
+struct ev_form {
+    const char *mnem, *shape;
+    unsigned char vex, map, pp, W, LL, b, op;
+    signed char regext;
+    unsigned char imm;
+    short fixed;                /* an immediate the shape does not show */
+    unsigned char mem, N, mask; /* mask: 0 none, 1 merging, 2 and {z} */
+    const char *roles;
+};
+#include "evex.inc"
+#define NEV ((int)(sizeof ev_forms / sizeof ev_forms[0]))
+
+/* Does an operand need EVEX: a zmm, a vector register past 15, a mask
+ * register, a decoration, a rounding control? */
+static int ev_need(const struct opnd *o, int n)
+{
+    for (int k = 0; k < n; k++)
+        if ((o[k].k == K_XMM && (o[k].size == 64 || o[k].reg >= 16)) ||
+            o[k].k == K_RC || o[k].k == K_SAE ||
+            o[k].mask || o[k].zero || o[k].bcast ||
+            (o[k].vindex && o[k].index >= 16))
+            return 1;
+    return 0;
+}
+
+/* ...or a mask register, which only the table's forms name (VEX ones, the
+ * opmask instructions', or EVEX) */
+static int ev_only(const struct opnd *o, int n)
+{
+    for (int k = 0; k < n; k++)
+        if (o[k].k == K_KREG || o[k].vindex)
+            return 1;
+    return ev_need(o, n);
+}
+
+static int ev_shape(const struct opnd *o, int n, char *sh, int cap)
+{
+    int at = 0;
+    sh[0] = 0;
+    for (int k = 0; k < n; k++) {
+        const char *t;
+        char b[16];
+        switch (o[k].k) {
+        case K_XMM: t = o[k].size == 64 ? "Z" : o[k].size == 32 ? "Y" : "X"; break;
+        case K_KREG: t = "K"; break;
+        case K_REG: t = o[k].size == 8 ? "Q" : o[k].size == 4 ? "D" : o[k].size == 2 ? "W" : "B"; break;
+        case K_IMM: t = "I"; break;
+        case K_RC: t = "{RC}"; break;
+        case K_SAE: t = "{sae}"; break;
+        case K_MEM:
+            if (o[k].bcast) { snprintf(b, sizeof b, "M{1to%d}", o[k].bcast); t = b; }
+            else if (o[k].vindex) t = o[k].vindex == 64 ? "MZ" : o[k].vindex == 32 ? "MY" : "MX";
+            else t = "M";
+            break;
+        default: return 0;
+        }
+        at += snprintf(sh + at, (size_t)(cap - at), "%s%s", k ? "," : "", t);
+        if (at >= cap) return 0;
+    }
+    return 1;
+}
+
+/* ModRM, SIB and displacement, an EVEX displacement scaled by N */
+static int ev_modrm(struct ib *x, int regf, const struct opnd *rm, int N)
+{
+    int r3 = regf & 7;
+    if (rm->k != K_MEM) {
+        put(x, 0xc0u | (unsigned)r3 << 3 | (unsigned)(rm->reg & 7));
+        return 0;
+    }
+    if (rm->base == 16 || rm->base < 0 || N <= 1)
+        return modrm(x, regf, rm);
+    int b3 = rm->base & 7;
+    long long d = rm->disp;
+    int mod = d == 0 && b3 != 5 ? 0 : (d % N == 0 && fits8(d / N)) ? 1 : 2;
+    if (g_disp_force == 32) mod = 2;
+    else if (g_disp_force == 8 && mod == 0) mod = 1;
+    if (!fits32(d)) return fail("the displacement does not fit 32 bits");
+    if (rm->index >= 0 || b3 == 4) {
+        int sc = rm->scale == 8 ? 3 : rm->scale == 4 ? 2 : rm->scale == 2 ? 1 : 0;
+        put(x, (unsigned)mod << 6 | (unsigned)r3 << 3 | 4);
+        put(x, (unsigned)sc << 6 | (unsigned)((rm->index >= 0 ? rm->index : 4) & 7) << 3 |
+               (unsigned)b3);
+    } else {
+        put(x, (unsigned)mod << 6 | (unsigned)r3 << 3 | (unsigned)b3);
+    }
+    if (mod == 1) {
+        if (d % N || !fits8(d / N)) {   /* {disp8} asked of a disp that is not */
+            mod = 2;
+            return fail("the displacement %lld is not a multiple of %d in a byte, "
+                        "as {disp8} asks", d, N);
+        }
+        x->disp_at = x->n; x->disp_len = 1; put_n(x, d / N, 1);
+    }
+    if (mod == 2) { x->disp_at = x->n; x->disp_len = 4; put_n(x, d, 4); }
+    return 0;
+}
+
+/* 0 encoded, 1 not a form the table has, -1 an error */
+static int evex(struct ib *x, const char *mn, const struct opnd *o, int n)
+{
+    char sh[96];
+    int lo = 0, hi = NEV, mask = 0, zero = 0, seen = 0, need = ev_need(o, n);
+    const char *why = NULL;
+    if (!ev_shape(o, n, sh, sizeof sh))
+        return 1;
+    for (int k = 0; k < n; k++) {
+        if (o[k].mask) mask = o[k].mask;
+        if (o[k].zero) zero = 1;
+    }
+    while (lo < hi) {
+        int mid = (lo + hi) / 2;
+        if (strcmp(ev_forms[mid].mnem, mn) < 0) lo = mid + 1; else hi = mid;
+    }
+    for (int i = lo; i < NEV && !strcmp(ev_forms[i].mnem, mn); i++) {
+        const struct ev_form *f = &ev_forms[i];
+        int reg = 0, rm = 0, v = 0, aaa = 0, rc = -1, ri = 0;
+        const struct opnd *mo = NULL, *rmo = NULL;
+        long long imm = 0;
+        if (strcmp(f->shape, sh))
+            continue;
+        if (f->vex && need)
+            continue;                       /* (its EVEX form follows) */
+        seen = 1;
+        if ((mask && !f->mask) || (zero && f->mask != 2)) {
+            why = zero ? "zeroing ({z})" : "a mask ({%k1})";
+            continue;
+        }
+        if (f->mask == 3 && !mask)
+            return fail("'%s' wants a mask: {%%k1} (not %%k0) on its destination", mn);
+        if (zero && !mask)
+            return fail("{z} wants a mask: {%%k1} {z}");
+        for (int k = 0; k < n; k++) {
+            const struct opnd *q = &o[k];
+            if (q->k == K_RC) { rc = (int)q->imm; continue; }
+            if (q->k == K_SAE) continue;
+            if (q->k == K_IMM) { imm = q->imm; continue; }
+            if (q->k == K_MEM) { mo = q; continue; }
+            switch (f->roles[ri++]) {
+            case 'r': reg = q->reg; break;
+            case 'm': rm = q->reg; rmo = q; break;
+            case 'v': v = q->reg; break;
+            case 'a': aaa = q->reg; break;
+            }
+        }
+        if (!mo && !rmo && !f->mem && strchr(f->roles, 'm'))
+            return fail("'%s': no operand for ModRM rm", mn);
+        if (f->regext >= 0)
+            reg = f->regext;
+        if (mask)
+            aaa = mask - 1;
+        {
+            int R = (reg >> 3) & 1, Rp = (reg >> 4) & 1, B, X, Vp = (v >> 4) & 1;
+            if (mo) {
+                B = mo->base >= 0 && mo->base != 16 ? (mo->base >> 3) & 1 : 0;
+                X = mo->index >= 0 ? (mo->index >> 3) & 1 : 0;
+                if (mo->vindex) Vp = (mo->index >> 4) & 1;   /* VSIB: V' extends it */
+            } else {
+                B = (rm >> 3) & 1;
+                X = (rm >> 4) & 1;
+            }
+            if (mo && mem_pfx(x, mo) < 0) return -1;
+            if (f->vex) {
+                if (f->map == 1 && !f->W && !X && !B) {
+                    put(x, 0xc5);
+                    put(x, (unsigned)(!R) << 7 | (unsigned)(~v & 15) << 3 |
+                           (unsigned)f->LL << 2 | f->pp);
+                } else {
+                    put(x, 0xc4);
+                    put(x, (unsigned)(!R) << 7 | (unsigned)(!X) << 6 | (unsigned)(!B) << 5 | f->map);
+                    put(x, (unsigned)f->W << 7 | (unsigned)(~v & 15) << 3 |
+                           (unsigned)f->LL << 2 | f->pp);
+                }
+            } else {
+                put(x, 0x62);
+                put(x, (unsigned)(!R) << 7 | (unsigned)(!X) << 6 | (unsigned)(!B) << 5 |
+                       (unsigned)(!Rp) << 4 | f->map);
+                put(x, (unsigned)f->W << 7 | (unsigned)(~v & 15) << 3 | 4u | f->pp);
+                put(x, (unsigned)zero << 7 | (unsigned)(rc >= 0 ? rc : f->LL) << 5 |
+                       (unsigned)f->b << 4 | (unsigned)(!Vp) << 3 | (unsigned)(aaa & 7));
+            }
+        }
+        put(x, f->op);
+        if (mo) {
+            if (ev_modrm(x, reg, mo, f->vex ? 1 : f->N) < 0)
+                return -1;
+        } else {
+            put(x, 0xc0u | (unsigned)(reg & 7) << 3 | (unsigned)(rm & 7));
+        }
+        if (f->imm) {
+            x->imm_at = x->n;
+            imm_put(x, imm, 1);
+        } else if (f->fixed >= 0) {
+            put(x, (unsigned)f->fixed);
+        }
+        return 0;
+    }
+    if (seen && why)
+        return fail("'%s' takes no %s", mn, why);
+    if (seen)
+        return -1;
+    return 1;
 }
 
 static int is_v(const struct opnd *o) { return o->k == K_XMM; }
@@ -948,7 +1375,7 @@ static int avx(struct ib *x, const char *mn, const struct opnd *o, int n)
                 if (is_v(&o[1]) && is_vm(&o[0])) {
                     if (o[0].k == K_XMM && vlen(&o[0]) != vlen(&o[1]))
                         return fail("'%s' moves between registers of one size", mn);
-                    if (o[0].k == K_XMM && o[0].reg >= 8 && o[1].reg < 8)
+                    if (o[0].k == K_XMM && o[0].reg >= 8 && o[1].reg < 8 && !g_nasm)
                         return emit_vex(x, mv[k].pp, M_0F, 0, vlen(&o[1]), 0, mv[k].st,
                                         o[0].reg, &o[1]);
                     return emit_vex(x, mv[k].pp, M_0F, 0, vlen(&o[1]), 0, mv[k].ld,
@@ -1295,9 +1722,52 @@ static int bmi(struct ib *x, const char *mn, const struct opnd *o, int n)
 static int insn(struct ib *x, const char *mn, struct opnd *o, int n)
 {
     int s;
+    /* 16- and 32-bit code: eight registers of each kind, none of 64 bits,
+     * no %rip */
+    if (g_mode != 64)
+        for (int k = 0; k < n; k++) {
+            const struct opnd *q = &o[k];
+            if (((q->k == K_REG || q->k == K_XMM || q->k == K_CR || q->k == K_DR ||
+                  q->k == K_KREG) && q->reg >= 8) ||
+                (q->k == K_REG && (q->size == 8 || q->rex8)) ||
+                (q->k == K_MEM && (q->base >= 8 || q->index >= 8)))
+                return fail("'%s': a 64-bit register, r8-r15, spl..dil, a "
+                            "vector register past 7 or %%rip is only in "
+                            "64-bit code (this is %d-bit code)", mn, g_mode);
+        }
+    /* AVX-512: what only EVEX encodes goes nowhere else (a VEX or legacy
+     * encoder would take xmm17 for xmm1); an AVX-512 mnemonic with xmm
+     * operands, or a VEX one's AVX-512 form, after the VEX encoder
+     * declines it; the opmask instructions */
+    if (ev_only(o, n) || mn[0] == 'k') {
+        int r = evex(x, mn, o, n);
+        if (r == 1)
+            return fail("'%s' with these operands is not an AVX-512 form this "
+                        "assembler knows", mn);
+        return r;
+    }
     if (mn[0] == 'v') {
-        int r = avx(x, mn, o, n);
-        if (r != 1) return r;
+        char keep[256];
+        int at = x->n, r;
+        snprintf(keep, sizeof keep, "%s", g_err ? g_err : "");
+        r = avx(x, mn, o, n);
+        if (r == 0) return 0;
+        x->n = at;
+        {
+            char err1[256];
+            snprintf(err1, sizeof err1, "%s", g_err ? g_err : "");
+            int e = evex(x, mn, o, n);
+            if (e == 0) {
+                if (g_err) snprintf(g_err, (size_t)g_errlen, "%s", keep);
+                return 0;
+            }
+            x->n = at;
+            if (r < 0) {
+                if (g_err) snprintf(g_err, (size_t)g_errlen, "%s", err1);
+                return -1;
+            }
+            if (e < 0) return -1;
+        }
     }
     {
         int r = bmi(x, mn, o, n);
@@ -1318,7 +1788,6 @@ static int insn(struct ib *x, const char *mn, struct opnd *o, int n)
         {"syscall",{0x0f,0x05},2}, {"sysretq",{0x48,0x0f,0x07},3},
         {"sysretl",{0x0f,0x07},2}, {"swapgs",{0x0f,0x01,0xf8},3},
         {"iretq",{0x48,0xcf},2}, {"iret",{0xcf},1}, {"iretl",{0xcf},1},
-        {"lret",{0xcb},1}, {"lretq",{0x48,0xcb},2},
         {"mfence",{0x0f,0xae,0xf0},3}, {"lfence",{0x0f,0xae,0xe8},3},
         {"sfence",{0x0f,0xae,0xf8},3}, {"wbinvd",{0x0f,0x09},2},
         {"invd",{0x0f,0x08},2}, {"pushfq",{0x9c},1}, {"popfq",{0x9d},1},
@@ -1340,7 +1809,35 @@ static int insn(struct ib *x, const char *mn, struct opnd *o, int n)
         {"cmpsb",{0xa6},1}, {"cmpsw",{0x66,0xa7},2}, {"cmpsl",{0xa7},1},
         {"cmpsq",{0x48,0xa7},2}, {"scasb",{0xae},1}, {"scasw",{0x66,0xaf},2},
         {"scasl",{0xaf},1}, {"scasq",{0x48,0xaf},2},
+        {"pushfw",{0x66,0x9c},2}, {"popfw",{0x66,0x9d},2},
+        {"pushfl",{0x9c},1}, {"popfl",{0x9d},1},
+        {"pusha",{0x60},1}, {"pushaw",{0x66,0x60},2}, {"pushal",{0x60},1},
+        {"popa",{0x61},1}, {"popaw",{0x66,0x61},2}, {"popal",{0x61},1},
+        {"iretw",{0x66,0xcf},2},
+        {"daa",{0x27},1}, {"das",{0x2f},1}, {"aaa",{0x37},1}, {"aas",{0x3f},1},
+        {"into",{0xce},1}, {"salc",{0xd6},1}, {"xlat",{0xd7},1}, {"xlatb",{0xd7},1},
+        {"int1",{0xf1},1}, {"icebp",{0xf1},1}, {"rsm",{0x0f,0xaa},2},
+        {"clts",{0x0f,0x06},2}, {"sysenter",{0x0f,0x34},2},
+        {"sysexit",{0x0f,0x35},2}, {"insb",{0x6c},1}, {"insw",{0x66,0x6d},2},
+        {"insl",{0x6d},1}, {"outsb",{0x6e},1}, {"outsw",{0x66,0x6f},2},
+        {"outsl",{0x6f},1}, {"aam",{0xd4,0x0a},2}, {"aad",{0xd5,0x0a},2},
+        {"cwde",{0x98},1}, {"cbw",{0x66,0x98},2}, {"cwd",{0x66,0x99},2},
+        {"endbr32",{0xf3,0x0f,0x1e,0xfb},4}, {"ud0",{0x0f,0xff},2},
     };
+    /* the size each form's operation has when it has one: 0x66 first is a
+     * 16-bit one's prefix (none in 16-bit code), these are the 32-bit ones
+     * (0x66 there), REX.W the 64-bit ones (64-bit code only), and these
+     * the 8086's that 64-bit code lost */
+    static const char *const plain32[] = {
+        "cwtl", "cltd", "cdq", "cwde", "movsl", "stosl", "lodsl", "cmpsl",
+        "scasl", "iretl", "sysretl", "pushfl", "popfl", "pushal", "popal",
+        "insl", "outsl", NULL };
+    static const char *const only64[] = {
+        "pushfq", "popfq", "swapgs", "syscall", "sysretl", "sysretq", NULL };
+    static const char *const not64[] = {
+        "pushfl", "popfl", "pusha", "pushaw", "pushal", "popa", "popaw",
+        "popal", "daa", "das", "aaa", "aas", "into", "salc", "aam", "aad",
+        NULL };
     /* a string instruction with its operands written: `movsq (%rsi),
      * %es:(%rdi)`, the implicit ones named -- a segment override other
      * than the source's default is the only thing they can add */
@@ -1358,24 +1855,73 @@ static int insn(struct ib *x, const char *mn, struct opnd *o, int n)
         }
         for (unsigned k = 0; k < sizeof plain / sizeof *plain; k++)
             if (!strcmp(mn, plain[k].n)) {
+                /* (a string's registers of another size than the mode's
+                 * addresses: 67 -- before the segment, as llvm-mc writes
+                 * a string's, after it as NASM does) */
+                int a67 = 0;
+                for (int j = 0; j < n; j++)
+                    if (o[j].k == K_MEM && addr_size(&o[j]) != mode_bytes()) {
+                        if (g_mode == 64 && addr_size(&o[j]) == 2)
+                            return fail("16-bit addressing is not in 64-bit code");
+                        a67 = 1;
+                        break;
+                    }
+                if (a67 && !g_nasm) put(x, 0x67);
                 if (seg) put(x, (unsigned)seg);
-                for (int i = 0; i < plain[k].len; i++)
-                    put(x, plain[k].b[i]);
+                if (a67 && g_nasm) put(x, 0x67);
+                {
+                    int i = 0;
+                    if (plain[k].b[0] == 0x48 && g_mode != 64)
+                        return fail("'%s' is only in 64-bit code", mn);
+                    if (plain[k].b[0] == 0x66 && g_mode == 16) i = 1;
+                    for (int j = 0; plain32[j]; j++)
+                        if (!strcmp(mn, plain32[j]) && g_mode == 16) put(x, 0x66);
+                    for (; i < plain[k].len; i++)
+                        put(x, plain[k].b[i]);
+                }
                 return 0;
             }
+    }
+    for (int j = 0; only64[j]; j++)
+        if (!strcmp(mn, only64[j]) && g_mode != 64)
+            return fail("'%s' is only in 64-bit code", mn);
+    for (int j = 0; not64[j]; j++)
+        if (!strcmp(mn, not64[j]) && g_mode == 64)
+            return fail("'%s' is not in 64-bit code", mn);
+    if ((!strcmp(mn, "aam") || !strcmp(mn, "aad")) && n == 1 && o[0].k == K_IMM) {
+        put(x, mn[2] == 'm' ? 0xd4 : 0xd5); imm_put(x, o[0].imm, 1);
+        return 0;
     }
     if (n == 0) {
         for (unsigned k = 0; k < sizeof plain / sizeof *plain; k++)
             if (!strcmp(mn, plain[k].n)) {
-                for (int i = 0; i < plain[k].len; i++)
+                int i = 0;
+                if (plain[k].b[0] == 0x48 && g_mode != 64)
+                    return fail("'%s' is only in 64-bit code", mn);
+                if (plain[k].b[0] == 0x66 && g_mode == 16) i = 1;
+                for (int j = 0; plain32[j]; j++)
+                    if (!strcmp(mn, plain32[j]) && g_mode == 16) put(x, 0x66);
+                for (; i < plain[k].len; i++)
                     put(x, plain[k].b[i]);
                 return 0;
             }
-        if (!strcmp(mn, "ret") || !strcmp(mn, "retq")) { put(x, 0xc3); return 0; }
     }
-    if ((!strcmp(mn, "ret") || !strcmp(mn, "retq")) && n == 1 && o[0].k == K_IMM) {
-        put(x, 0xc2); imm_put(x, o[0].imm, 2);
-        return 0;
+    /* ret and lret: the mode's size, another with 66 (or REX.W) */
+    {
+        int far = !strncmp(mn, "lret", 4);
+        if ((s = sized(mn, far ? "lret" : "ret")) >= 0 &&
+            (n == 0 || (n == 1 && o[0].k == K_IMM))) {
+            int def = g_mode == 16 ? 2 : g_mode == 32 || far ? 4 : 8;
+            if (s == 1 || (s == 8 && g_mode != 64) || (!far && s == 4 && g_mode == 64))
+                return fail("'%s' is not a return of this code's sizes", mn);
+            if (s && s != def) {
+                if (s == 8) put(x, 0x48);
+                else put(x, 0x66);
+            }
+            put(x, (far ? 0xca : 0xc2) + (n == 0));
+            if (n) imm_put(x, o[0].imm, 2);
+            return 0;
+        }
     }
     if (!strcmp(mn, "int") && n == 1 && o[0].k == K_IMM) {
         put(x, 0xcd); imm_put(x, o[0].imm, 1);
@@ -1388,17 +1934,21 @@ static int insn(struct ib *x, const char *mn, struct opnd *o, int n)
         int call = mn[0] == 'c';
         if (o[0].star) {
             unsigned char op = 0xff;
-            if (o[0].k == K_REG && o[0].size != 8)
-                return fail("an indirect target is a 64-bit register");
-            return emit_rm(x, 0, 0, &op, 1, call ? 2 : 4, NULL, &o[0]);
+            int def = mode_bytes();
+            if (o[0].k == K_REG && o[0].size != def &&
+                !(g_mode != 64 && (o[0].size == 2 || o[0].size == 4)))
+                return fail("an indirect target is a %d-bit register", def * 8);
+            return emit_rm(x, o[0].k == K_REG && o[0].size != def ? P66 : 0, 0,
+                           &op, 1, call ? 2 : 4, NULL, &o[0]);
         }
         long long v;
         if (o[0].k == K_MEM && o[0].base < 0 && o[0].index < 0)
             v = o[0].disp;                      /* `.+N` or a number */
         else
             return fail("'%s' takes a label, or `*` and a register or memory", mn);
+        int nl = g_mode == 16 ? 2 : 4;          /* rel16 in 16-bit code */
         if (call) {
-            put(x, 0xe8); imm_put(x, v - 5, 4);
+            put(x, 0xe8); imm_put(x, v - 1 - nl, nl);
             return 0;
         }
         if (g_level < 1 && (fits8(v - 2) || g_level == -2)) {
@@ -1406,7 +1956,7 @@ static int insn(struct ib *x, const char *mn, struct opnd *o, int n)
             return 0;
         }
         g_took = 1;
-        put(x, 0xe9); imm_put(x, v - 5, 4);
+        put(x, 0xe9); imm_put(x, v - 1 - nl, nl);
         return 0;
     }
     if (mn[0] == 'j' && n == 1 && cond_of(mn + 1) >= 0) {
@@ -1419,12 +1969,58 @@ static int insn(struct ib *x, const char *mn, struct opnd *o, int n)
             return 0;
         }
         g_took = 1;
-        put(x, 0x0f); put(x, 0x80u + (unsigned)c); imm_put(x, v - 6, 4);
+        int nl = g_mode == 16 ? 2 : 4;
+        put(x, 0x0f); put(x, 0x80u + (unsigned)c); imm_put(x, v - 2 - nl, nl);
         return 0;
     }
-    if (!strcmp(mn, "jrcxz") && n == 1) {
-        put(x, 0xe3); imm_put(x, o[0].disp - 2, 1);
-        return 0;
+    /* the loops and the count-register jumps: a byte's reach only; 67 when
+     * the count register's size is not the mode's address size */
+    {
+        static const struct { const char *n; unsigned op; int asz; } lp[] = {
+            {"loop",0xe2,0},{"loope",0xe1,0},{"loopz",0xe1,0},{"loopne",0xe0,0},
+            {"loopnz",0xe0,0},{"jcxz",0xe3,2},{"jecxz",0xe3,4},{"jrcxz",0xe3,8},
+        };
+        for (unsigned k = 0; k < sizeof lp / sizeof *lp; k++)
+            if (!strcmp(mn, lp[k].n) && n == 1) {
+                if (o[0].k != K_MEM || o[0].base >= 0 || o[0].index >= 0)
+                    return fail("'%s' takes a label", mn);
+                int a = lp[k].asz;
+                if (a && ((a == 8) != (g_mode == 64) || (a == 2 && g_mode == 64)))
+                    return fail("'%s' is not in %d-bit code", mn, g_mode);
+                if (a && a != mode_bytes()) put(x, 0x67);
+                int len = x->n + 2;
+                put(x, lp[k].op);
+                long long d = o[0].disp - len;
+                if (!fits8(d))
+                    return fail("'%s' reaches 128 bytes either way; the label is "
+                                "%lld away", mn, d);
+                imm_put(x, d, 1);
+                return 0;
+            }
+    }
+    /* far jumps and calls: ljmp $selector, $offset, or through memory */
+    {
+        int call = !strncmp(mn, "lcall", 5);
+        if (((s = sized(mn, call ? "lcall" : "ljmp")) >= 0)) {
+            int def = g_mode == 16 ? 2 : 4;
+            if (n == 2 && o[0].k == K_IMM && o[1].k == K_IMM) {
+                if (g_mode == 64)
+                    return fail("'%s $sel, $off' is not in 64-bit code", mn);
+                int sz = s ? s : def;
+                if (sz != 2 && sz != 4) return fail("'%s': a 16- or 32-bit offset", mn);
+                if (sz != def) put(x, 0x66);
+                put(x, call ? 0x9a : 0xea);
+                imm_put(x, o[1].imm, sz);
+                put_n(x, o[0].imm, 2);
+                return 0;
+            }
+            if (n == 1 && o[0].star && o[0].k == K_MEM) {
+                unsigned char op = 0xff;
+                if (s == 1 || (s == 8 && g_mode != 64)) return fail("'%s': these sizes", mn);
+                return emit_rm(x, s == 2 || s == 4 ? pfx_of(s) : 0, s == 8, &op, 1,
+                               call ? 3 : 5, NULL, &o[0]);
+            }
+        }
     }
 
     /* ---- mov ---- */
@@ -1435,22 +2031,56 @@ static int insn(struct ib *x, const char *mn, struct opnd *o, int n)
             unsigned char op = dst->k == K_SEG ? 0x8e : 0x8c;
             struct opnd *sg = dst->k == K_SEG ? dst : src, *r = dst->k == K_SEG ? src : dst;
             int w = r->k == K_REG && r->size == 8 && dst->k != K_SEG;
-            return emit_rm(x, r->k == K_REG && r->size == 2 && op == 0x8c ? P66 : 0,
+            return emit_rm(x, r->k == K_REG && op == 0x8c && r->size != 8 ? pfx_of(r->size) : 0,
                            w, &op, 1, sg->reg, NULL, r);
         }
         if (dst->k == K_CR || src->k == K_CR || dst->k == K_DR || src->k == K_DR) {
             int to = dst->k == K_CR || dst->k == K_DR;
             struct opnd *sp = to ? dst : src, *r = to ? src : dst;
             unsigned char op[2] = { 0x0f, (unsigned char)((sp->k == K_DR ? 0x21 : 0x20) + (to ? 2 : 0)) };
-            if (r->k != K_REG || r->size != 8)
-                return fail("a control or debug register moves to or from a 64-bit register");
+            if (r->k != K_REG || r->size != (g_mode == 64 ? 8 : 4))
+                return fail("a control or debug register moves to or from a %d-bit "
+                            "register", g_mode == 64 ? 64 : 32);
             return emit_rm(x, 0, 0, op, 2, sp->reg, NULL, r);
         }
         int sz = opsize(s, o, 2);
         if (need_size(sz, mn) < 0) return -1;
         int w = sz == 8, p = pfx_of(sz);
+        /* 16- and 32-bit code: the accumulator and an absolute address,
+         * A0-A3 (moffs), as llvm-mc and NASM write it */
+        if (g_mode != 64 && src->k != K_IMM) {
+            struct opnd *acc = is_reg_sz(dst, sz) && dst->reg == 0 && !dst->hi8 ? dst
+                             : is_reg_sz(src, sz) && src->reg == 0 && !src->hi8 ? src : NULL;
+            struct opnd *mo = acc == dst ? src : dst;
+            if (acc && mo->k == K_MEM && mo->base < 0 && mo->index < 0 && !mo->dot) {
+                if (mem_pfx(x, mo) < 0) return -1;
+                if (p) put(x, 0x66);
+                put(x, (acc == dst ? 0xa0u : 0xa2u) + (sz != 1));
+                int a = addr_size(mo);
+                x->disp_at = x->n; x->disp_len = a;
+                put_n(x, mo->disp, a);
+                return 0;
+            }
+        }
         if (src->k == K_IMM) {
             long long v = src->imm;
+            if (dst->k == K_REG && g_nasm && sz == 8 && is_reg_sz(dst, 8)) {
+                /* NASM's: a symbol's address in 64 bits, a number by the
+                 * shortest form that holds it */
+                unsigned char op = 0xb8;
+                if (g_imm_wide || (!fits32(v) && (v < 0 || v > 0xffffffffLL))) {
+                    if (emit_oreg(x, 0, 1, &op, 1, dst) < 0) return -1;
+                    imm_put(x, v, 8);
+                } else if (v >= 0) {
+                    if (emit_oreg(x, 0, 0, &op, 1, dst) < 0) return -1;
+                    imm_put(x, v, 4);
+                } else {
+                    op = 0xc7;
+                    if (emit_rm(x, 0, 1, &op, 1, 0, NULL, dst) < 0) return -1;
+                    imm_put(x, v, 4);
+                }
+                return 0;
+            }
             if (dst->k == K_REG) {
                 if (!is_reg_sz(dst, sz)) return fail("a register's size is not the operation's");
                 if (sz == 8 && fits32(v)) {
@@ -1541,8 +2171,7 @@ static int insn(struct ib *x, const char *mn, struct opnd *o, int n)
         int p = pfx_of(sz), w = sz == 8;
         if (o[0].k == K_IMM) {
             if (o[1].k == K_REG && o[1].reg == 0 && !o[1].hi8) {
-                if (p) put(x, 0x66);
-                if (w) put(x, 0x48);
+                if (osz_pfx(x, sz) < 0) return -1;
                 put(x, sz == 1 ? 0xa8 : 0xa9);
                 imm_put(x, o[0].imm, sz == 1 ? 1 : sz == 2 ? 2 : 4);
                 return 0;
@@ -1580,6 +2209,10 @@ static int insn(struct ib *x, const char *mn, struct opnd *o, int n)
                 int sz = opsize(s, o, 1);
                 if (need_size(sz, mn) < 0) return -1;
                 if (!is_rm(&o[0], sz)) return fail("'%s' takes a register or memory", mn);
+                if (k >= 6 && g_mode != 64 && o[0].k == K_REG && sz != 1) {
+                    unsigned char op = (unsigned char)(k == 6 ? 0x40 : 0x48);
+                    return emit_oreg(x, pfx_of(sz), 0, &op, 1, &o[0]);
+                }
                 unsigned char op = (unsigned char)(sz == 1 ? un[k].op8 : un[k].op);
                 return emit_rm(x, pfx_of(sz), sz == 8, &op, 1, un[k].ext, NULL, &o[0]);
             }
@@ -1647,28 +2280,46 @@ static int insn(struct ib *x, const char *mn, struct opnd *o, int n)
             }
     }
 
-    /* ---- push / pop ---- */
+    /* ---- push / pop ---- the mode's size, the other with 66 */
     if (((s = sized(mn, "push")) >= 0 || (s = sized(mn, "pop")) >= 0) && n == 1) {
         int push = mn[1] == 'u';
-        if (s && s != 8 && s != 2) return fail("'%s': push and pop are 16 or 64 bits", mn);
+        int def = mode_bytes();
+        if (s == 1 || (s == 8 && g_mode != 64) || (s == 4 && g_mode == 64))
+            return fail("'%s': push and pop are %s bits", mn,
+                        g_mode == 64 ? "16 or 64" : "16 or 32");
         if (push && o[0].k == K_IMM) {
+            int sz = s ? s : def;
+            if (sz != def && !(g_mode == 64 && sz == 8)) put(x, 0x66);
             if (imm8_ok(o[0].imm)) { put(x, 0x6a); imm_put(x, o[0].imm, 1); }
-            else { put(x, 0x68); imm_put(x, o[0].imm, 4); }
+            else { put(x, 0x68); imm_put(x, o[0].imm, sz == 2 ? 2 : 4); }
             return 0;
         }
         if (o[0].k == K_REG) {
-            if (o[0].size != 8 && o[0].size != 2) return fail("'%s' takes a 64-bit register", mn);
+            int sz = o[0].size;
+            if (sz == 1 || (g_mode == 64 && sz == 4) || (g_mode != 64 && sz == 8))
+                return fail("'%s' takes a %s-bit register", mn,
+                            g_mode == 64 ? "16- or 64" : "16- or 32");
             unsigned char op = push ? 0x50 : 0x58;
-            return emit_oreg(x, o[0].size == 2 ? P66 : 0, 0, &op, 1, &o[0]);
+            return emit_oreg(x, sz != def ? P66 : 0, 0, &op, 1, &o[0]);
         }
-        if (o[0].k == K_SEG && o[0].reg >= 4) {         /* fs, gs */
-            put(x, 0x0f);
-            put(x, (o[0].reg == 4 ? 0xa0u : 0xa8u) + (push ? 0 : 1));
+        if (o[0].k == K_SEG) {
+            int r = o[0].reg;
+            if (s && s != def) put(x, 0x66);
+            if (r >= 4) {                               /* fs, gs */
+                put(x, 0x0f);
+                put(x, (r == 4 ? 0xa0u : 0xa8u) + (push ? 0 : 1));
+                return 0;
+            }
+            if (g_mode == 64)
+                return fail("'%s' of %%es, %%cs, %%ss or %%ds is not in 64-bit code", mn);
+            if (!push && r == 1)
+                return fail("%%cs cannot be popped");
+            put(x, (unsigned)(r * 8 + 6 + !push));
             return 0;
         }
         if (o[0].k != K_MEM) return fail("'%s' takes a register, memory or $imm", mn);
         unsigned char op = push ? 0xff : 0x8f;
-        return emit_rm(x, s == 2 ? P66 : 0, 0, &op, 1, push ? 6 : 0, NULL, &o[0]);
+        return emit_rm(x, s && s != def ? P66 : 0, 0, &op, 1, push ? 6 : 0, NULL, &o[0]);
     }
 
     /* ---- setcc, cmovcc ---- */
@@ -1744,7 +2395,7 @@ static int insn(struct ib *x, const char *mn, struct opnd *o, int n)
     if ((s = sized(mn, "bswap")) >= 0 && n == 1 && o[0].k == K_REG &&
         (o[0].size == 4 || o[0].size == 8)) {
         unsigned char op[2] = { 0x0f, 0xc8 };
-        return emit_oreg(x, 0, o[0].size == 8, op, 2, &o[0]);
+        return emit_oreg(x, pfx_of(o[0].size), o[0].size == 8, op, 2, &o[0]);
     }
     {
         static const struct { const char *n; unsigned op; } xa[] = { {"cmpxchg",0xb0}, {"xadd",0xc0} };
@@ -1762,11 +2413,52 @@ static int insn(struct ib *x, const char *mn, struct opnd *o, int n)
         return emit_rm(x, 0, mn[7] == '1', op, 2, 1, NULL, &o[0]);
     }
 
+    /* ---- the far-pointer loads, enter, and the protection checks ---- */
+    {
+        static const struct { const char *n; unsigned char op[2]; int nop, legacy; } fp[] = {
+            {"les",{0xc4},1,1},{"lds",{0xc5},1,1},{"lss",{0x0f,0xb2},2,0},
+            {"lfs",{0x0f,0xb4},2,0},{"lgs",{0x0f,0xb5},2,0},
+            {"lar",{0x0f,0x02},2,0},{"lsl",{0x0f,0x03},2,0},
+        };
+        for (unsigned k = 0; k < sizeof fp / sizeof *fp; k++)
+            if ((s = sized(mn, fp[k].n)) >= 0 && n == 2 && o[1].k == K_REG) {
+                int sz = o[1].size;
+                if (fp[k].legacy && g_mode == 64)
+                    return fail("'%s' is not in 64-bit code", mn);
+                if (sz == 1 || (fp[k].op[1] != 0x02 && fp[k].op[1] != 0x03 && o[0].k != K_MEM))
+                    return fail("'%s' loads a 16-, 32- or 64-bit register from memory", mn);
+                return emit_rm(x, pfx_of(sz), sz == 8, fp[k].op, fp[k].nop, o[1].reg,
+                               &o[1], &o[0]);
+            }
+        static const struct { const char *n; unsigned char op1; int ext; } pr[] = {
+            {"verr",0x00,4},{"verw",0x00,5},{"smsw",0x01,4},{"lmsw",0x01,6},
+        };
+        for (unsigned k = 0; k < sizeof pr / sizeof *pr; k++)
+            if ((s = sized(mn, pr[k].n)) >= 0 && n == 1 &&
+                (o[0].k == K_MEM || o[0].k == K_REG)) {
+                unsigned char op[2] = { 0x0f, pr[k].op1 };
+                int st = !strcmp(pr[k].n, "smsw") && o[0].k == K_REG &&
+                         !(g_nasm && o[0].size == 2);
+                return emit_rm(x, st ? pfx_of(o[0].size) : 0, st && o[0].size == 8,
+                               op, 2, pr[k].ext, NULL, &o[0]);
+            }
+        if ((s = sized(mn, "enter")) >= 0 && n == 2 && o[0].k == K_IMM && o[1].k == K_IMM) {
+            if (s && s != (g_mode == 64 ? 8 : mode_bytes())) put(x, 0x66);
+            put(x, 0xc8); imm_put(x, o[0].imm, 2); put_n(x, o[1].imm, 1);
+            return 0;
+        }
+        if (!strcmp(mn, "arpl") && n == 2 && o[0].k == K_REG && o[0].size == 2) {
+            unsigned char op = 0x63;
+            if (g_mode == 64) return fail("arpl is not in 64-bit code");
+            return emit_rm(x, 0, 0, &op, 1, o[0].reg, &o[0], &o[1]);
+        }
+    }
+
     /* ---- port I/O ---- */
     if ((s = sized(mn, "in")) >= 0 && n == 2 && o[1].k == K_REG && o[1].reg == 0) {
         int sz = o[1].size;
         if (sz == 8) return fail("in reads 8, 16 or 32 bits");
-        if (sz == 2) put(x, 0x66);
+        if (osz_pfx(x, sz) < 0) return -1;
         if (o[0].k == K_IMM) { put(x, sz == 1 ? 0xe4 : 0xe5); imm_put(x, o[0].imm, 1); return 0; }
         if (o[0].k == K_REG && o[0].reg == 2 && o[0].size == 2) { put(x, sz == 1 ? 0xec : 0xed); return 0; }
         return fail("in's port is $N or %%dx");
@@ -1774,7 +2466,7 @@ static int insn(struct ib *x, const char *mn, struct opnd *o, int n)
     if ((s = sized(mn, "out")) >= 0 && n == 2 && o[0].k == K_REG && o[0].reg == 0) {
         int sz = o[0].size;
         if (sz == 8) return fail("out writes 8, 16 or 32 bits");
-        if (sz == 2) put(x, 0x66);
+        if (osz_pfx(x, sz) < 0) return -1;
         if (o[1].k == K_IMM) { put(x, sz == 1 ? 0xe6 : 0xe7); imm_put(x, o[1].imm, 1); return 0; }
         if (o[1].k == K_REG && o[1].reg == 2 && o[1].size == 2) { put(x, sz == 1 ? 0xee : 0xef); return 0; }
         return fail("out's port is $N or %%dx");
@@ -1807,7 +2499,7 @@ static int insn(struct ib *x, const char *mn, struct opnd *o, int n)
                  * %ax, REX.W for %rax); the loads read 16 bits whatever */
                 int st = !sy[k].mem && o[0].k == K_REG &&
                          (!strcmp(mn, "str") || !strcmp(mn, "sldt"));
-                return emit_rm(x, st && o[0].size == 2 ? P66 : 0,
+                return emit_rm(x, st ? pfx_of(o[0].size) : 0,
                                sy[k].w || (st && o[0].size == 8), sy[k].op,
                                sy[k].nop, sy[k].ext, NULL, &o[0]);
             }
@@ -2166,8 +2858,10 @@ static int one(const char *s, int len, struct code *out)
     memset(&x, 0, sizeof x);
     x.disp_at = x.imm_at = -1;
     int force_near = 0;
+    unsigned char lr = 0;              /* lock (F0) or rep (F2/F3), placed below */
     g_disp_force = 0;
     g_imm_wide = 0;
+    g_nasm = 0;
     for (;;) {
         while (i < len && isspace((unsigned char)s[i])) i++;
         int st = i;
@@ -2176,6 +2870,7 @@ static int one(const char *s, int len, struct code *out)
         int ml = i - st;
         if (ml == 0) {
             /* prefixes alone, as a statement of their own (`rep;movsq`) */
+            if (lr) put(&x, lr);
             for (int k = 0; k < x.n; k++)
                 code_byte(out, x.b[k]);
             g_last_len = x.n;
@@ -2186,17 +2881,21 @@ static int one(const char *s, int len, struct code *out)
             mn[k] = (char)tolower((unsigned char)s[st + k]);
         mn[ml] = 0;
         /* prefixes, on the same line or as statements of their own */
-        if (!strcmp(mn, "lock")) { put(&x, 0xf0); continue; }
-        if (!strcmp(mn, "rep") || !strcmp(mn, "repe") || !strcmp(mn, "repz")) { put(&x, 0xf3); continue; }
-        if (!strcmp(mn, "repne") || !strcmp(mn, "repnz")) { put(&x, 0xf2); continue; }
+        if (!strcmp(mn, "lock")) { if (lr) put(&x, lr); lr = 0xf0; continue; }
+        if (!strcmp(mn, "rep") || !strcmp(mn, "repe") || !strcmp(mn, "repz")) { if (lr) put(&x, lr); lr = 0xf3; continue; }
+        if (!strcmp(mn, "repne") || !strcmp(mn, "repnz")) { if (lr) put(&x, lr); lr = 0xf2; continue; }
         if (!strcmp(mn, "rex64")) { put(&x, 0x48); continue; }
+        /* (GNU as's: the other operand or address size, by hand) */
+        if (!strcmp(mn, "data16") || !strcmp(mn, "data32")) { put(&x, 0x66); continue; }
+        if (!strcmp(mn, "addr16") || !strcmp(mn, "addr32")) { put(&x, 0x67); continue; }
         if (!strcmp(mn, "near")) { force_near = 1; continue; }   /* (symform's) */
         if (!strcmp(mn, "{disp32}")) { g_disp_force = 32; continue; }
         if (!strcmp(mn, "{disp8}")) { g_disp_force = 8; continue; }
         if (!strcmp(mn, "{imm32}")) { g_imm_wide = 1; continue; }
+        if (!strcmp(mn, "{nasm}")) { g_nasm = 1; continue; }
         break;
     }
-    struct opnd o[4];
+    struct opnd o[6];          /* (AVX-512's: $imm, {sae}, and three registers) */
     int n = 0, depth = 0, st = i;
     while (i < len && isspace((unsigned char)s[i])) i++;
     st = i;
@@ -2205,7 +2904,7 @@ static int one(const char *s, int len, struct code *out)
             if (k < len && s[k] == '(') depth++;
             if (k < len && s[k] == ')') depth--;
             if (k == len || (s[k] == ',' && depth == 0)) {
-                if (n == 4) return fail("too many operands");
+                if (n == 6) return fail("too many operands");
                 if (parse_opnd(s + st, k - st, &o[n]) < 0) return -1;
                 n++;
                 st = k + 1;
@@ -2215,9 +2914,41 @@ static int one(const char *s, int len, struct code *out)
     int save = g_level;
     if (force_near) g_level = 1;
     int r = insn(&x, mn, o, n);
+    /* where lock or rep goes among the prefixes: llvm-mc writes rep first
+     * and lock after the segment, 67 and 66; NASM the segment and 67,
+     * then lock or rep, then 66 -- a string instruction's rep after its
+     * 66 too (the bytes mean the same; the referees' objects are matched
+     * byte for byte) */
+    if (r >= 0 && lr) {
+        int at = 0;
+        int str = !strncmp(mn, "movs", 4) || !strncmp(mn, "stos", 4) ||
+                  !strncmp(mn, "lods", 4) || !strncmp(mn, "cmps", 4) ||
+                  !strncmp(mn, "scas", 4) || !strncmp(mn, "ins", 3) ||
+                  !strncmp(mn, "outs", 4);
+        if (lr == 0xf0 || g_nasm) {
+            while (at < x.n) {
+                unsigned b = x.b[at];
+                int seg = b == 0x26 || b == 0x2e || b == 0x36 || b == 0x3e ||
+                          b == 0x64 || b == 0x65;
+                if (seg || b == 0x67 ||
+                    (b == 0x66 && (!g_nasm || str)))
+                    at++;
+                else
+                    break;
+            }
+        }
+        if (x.n < (int)sizeof x.b) {
+            memmove(x.b + at + 1, x.b + at, (size_t)(x.n - at));
+            x.b[at] = lr;
+            x.n++;
+            if (x.disp_at >= at) x.disp_at++;
+            if (x.imm_at >= at) x.imm_at++;
+        }
+    }
     g_level = save;
     g_disp_force = 0;
     g_imm_wide = 0;
+    g_nasm = 0;
     if (r < 0)
         return -1;
     if (x.dotrip) {                     /* rip-relative: from the end */
@@ -2226,6 +2957,7 @@ static int one(const char *s, int len, struct code *out)
             x.b[x.disp_at + k] = (unsigned char)((unsigned long long)d >> (8 * k));
     }
     g_last_disp_at = x.disp_at;
+    g_last_disp_len = x.disp_len;
     g_last_imm_at = x.imm_at;
     g_last_len = x.n;
     for (int k = 0; k < x.n; k++)
@@ -2277,7 +3009,8 @@ int x86att_is_transfer(const char *stmt)
     }
     mn[k] = 0;
     if (!strcmp(mn, "jmp") || !strcmp(mn, "call") || !strcmp(mn, "jmpq") ||
-        !strcmp(mn, "callq") || !strcmp(mn, "jrcxz"))
+        !strcmp(mn, "callq") || !strcmp(mn, "jrcxz") || !strcmp(mn, "jecxz") ||
+        !strcmp(mn, "jcxz") || !strncmp(mn, "loop", 4))
         return stmt[k] && !strchr(stmt + k, '*');
     return mn[0] == 'j' && cond_of(mn + 1) >= 0;
 }
@@ -2292,6 +3025,10 @@ static int x86_next_sym(const char *stmt, const char *q, struct x86sym *y)
         if (*q == '%') {                 /* a register: skip it */
             q++;
             while (asm_symc((unsigned char)*q)) q++;
+            continue;
+        }
+        if (*q == '{') {                 /* AVX-512's decorations: {z}, {1to8} */
+            while (*q && *q != '}') q++;
             continue;
         }
         if (asm_sym0((unsigned char)*q) && !(*q == '.' && (q[1] == '+' || q[1] == '-' || !asm_symc((unsigned char)q[1])))) {
@@ -2325,6 +3062,54 @@ static int x86_next_sym(const char *stmt, const char *q, struct x86sym *y)
         q++;
     }
     return 0;
+}
+
+/* `jmp 0x7e00`, `call 0x5678`: a branch to an ADDRESS, not a distance --
+ * the near form with a relocation against no symbol (*ABS*), as llvm-mc
+ * and GNU as write it: 1 and the form in f, the address in *target */
+int x86att_abs_branch(const char *stmt, struct asm_symform *f, long long *target)
+{
+    memset(f, 0, sizeof *f);
+    const char *p = after_prefixes(stmt);
+    const char *m = p;
+    while (*p && !isspace((unsigned char)*p)) p++;
+    int ml = (int)(p - m);
+    char mn[16];
+    if (ml >= (int)sizeof mn) return 0;
+    snprintf(mn, sizeof mn, "%.*s", ml, m);
+    int jcc = mn[0] == 'j' && cond_of(mn + 1) >= 0;
+    if (!jcc && strcmp(mn, "jmp") && strcmp(mn, "call") && strcmp(mn, "jmpq") &&
+        strcmp(mn, "callq") && strcmp(mn, "jmpw") && strcmp(mn, "callw") &&
+        strcmp(mn, "jmpl") && strcmp(mn, "calll"))
+        return 0;
+    while (*p && isspace((unsigned char)*p)) p++;
+    const char *e = p + strlen(p);
+    while (e > p && isspace((unsigned char)e[-1])) e--;
+    if (e == p || *p == '.' || *p == '*' || *p == '$')
+        return 0;
+    for (const char *q = p; q < e; q++)
+        if (*q == '%' || *q == ',')
+            return 0;
+    long long v;
+    if (!asm_const_expr(p, (int)(e - p), &v))
+        return 0;
+    int fl = g_mode == 16 ? 2 : 4;
+    snprintf(f->encode, sizeof f->encode, "near %.*s .+%d", ml, m,
+             jcc ? 2 + fl : 1 + fl);
+    char err[256];
+    struct code c = { 0 };
+    g_err = err; g_errlen = (int)sizeof err;
+    if (x86att_assemble(f->encode, &c, err, (int)sizeof err) != 0) {
+        free(c.p);
+        return 0;
+    }
+    free(c.p);
+    f->nsites = 1;
+    f->site[0].off = g_last_len - fl;
+    f->site[0].reloc = fl == 2 ? R_X86_64_PC16 : R_X86_64_PC32;
+    f->addend = -fl;
+    *target = v;
+    return 1;
 }
 
 /* `call sym`, `jmp sym`, `jcc sym`, `sym(%rip)`, `$sym`, an absolute
@@ -2378,9 +3163,12 @@ int x86att_symform(const char *stmt, struct asm_symform *f)
         n += (size_t)snprintf(o + n, cap - n, "%s%s%s", transfer ? "near " : "",
                               abs_mem ? "{disp32} " : "", imm ? "{imm32} " : "");
         const char *from = stmt;
+        /* (the near form's length: rel16 in 16-bit code) */
+        const char *near = g_mode == 16 ? (jcc ? ".+4" : ".+3")
+                                        : (jcc ? ".+6" : ".+5");
         for (int k = 0; k < ns && n < cap; k++) {
             n += (size_t)snprintf(o + n, cap - n, "%.*s%s", (int)(y[k].at - from),
-                                  from, transfer ? (jcc ? ".+6" : ".+5") : "0");
+                                  from, transfer ? near : "0");
             from = y[k].end;
         }
         if (n < cap) snprintf(o + n, cap - n, "%s", from);
@@ -2400,13 +3188,18 @@ int x86att_symform(const char *stmt, struct asm_symform *f)
         c_first[k] = c.p[k];
     free(c.p);
     if (transfer) {
+        int fl = g_mode == 16 ? 2 : 4;
         f->nsites = 1;
-        f->site[0].off = g_last_len - 4;
+        f->site[0].off = g_last_len - fl;
         /* a call or a jump to a function: PLT32, as GNU as writes it; a
-         * conditional jump: PC32 */
-        f->site[0].reloc = mn[0] == 'c' || !strncmp(mn, "jmp", 3)
+         * conditional jump: PC32; 16-bit code's: PC16 */
+        /* (NASM's: PC32, unless `wrt ..plt` asked for the PLT) */
+        int nasm = strstr(stmt, "{nasm}") != NULL;
+        f->site[0].reloc = fl == 2 ? R_X86_64_PC16
+                         : (mn[0] == 'c' || !strncmp(mn, "jmp", 3)) &&
+                               (!nasm || y[0].kind == 1)
                                ? R_X86_64_PLT32 : R_X86_64_PC32;
-        f->addend = y[0].addend - 4;
+        f->addend = y[0].addend - fl;
         return 1;
     }
     for (int k = 0; k < ns; k++) {
@@ -2430,14 +3223,26 @@ int x86att_symform(const char *stmt, struct asm_symform *f)
             /* (an immediate before a rip-relative address: the field runs
              * to the end, so its length is the encoding's tail) */
             if (g_last_disp_at > g_last_imm_at) ilen = g_last_disp_at - g_last_imm_at;
+            /* (a far jump's offset: the selector after it is not its) */
+            if (!strncmp(mn, "ljmp", 4) || !strncmp(mn, "lcall", 5))
+                ilen = ilen - 2;
             st->off = g_last_imm_at;
+            /* (a 64-bit operation's immediate is sign-extended: 32S --
+             * REX.W says so, whatever the mnemonic's spelling) */
+            int rexw = 0;
+            for (int j = 0; j < g_last_imm_at && j < 16; j++)
+                if ((c_first[j] & 0xf8) == 0x48) rexw = 1;
             st->reloc = ilen == 8 ? R_X86_64_64
-                      : (!strncmp(mn, "movq", 4) || mn[strlen(mn) - 1] == 'q') ? R_X86_64_32S
-                      : R_X86_64_32;
+                      : ilen == 2 ? R_X86_64_16
+                      : ilen == 1 ? R_X86_64_8
+                      : g_mode != 64 ? R_X86_64_32
+                      : rexw || !strncmp(mn, "movq", 4) || mn[strlen(mn) - 1] == 'q'
+                            ? R_X86_64_32S : R_X86_64_32;
         } else {
             if (g_last_disp_at < 0) return 0;      /* an absolute address */
             st->off = g_last_disp_at;
-            st->reloc = R_X86_64_32S;
+            st->reloc = g_last_disp_len == 2 ? R_X86_64_16
+                      : g_mode != 64 ? R_X86_64_32 : R_X86_64_32S;
         }
         if (k == 0) f->addend = (long)ad;
         else {

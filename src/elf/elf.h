@@ -212,6 +212,10 @@ typedef struct {
 #define R_X86_64_RELATIVE      8
 #define R_X86_64_32           10
 #define R_X86_64_32S          11
+#define R_X86_64_16           12
+#define R_X86_64_PC16         13
+#define R_X86_64_8            14
+#define R_X86_64_PC8          15
 #define R_X86_64_PC64         24
 #define R_X86_64_GOTPCRELX    41
 #define R_X86_64_REX_GOTPCRELX 42
@@ -605,12 +609,15 @@ typedef struct {
 #define EF_TRICORE_V1_6_1   0x00200000
 #define EF_TRICORE_CORE_MASK 0xfff00000
 
-/* The TriCore relocation types EmbCC writes and EmbLD applies, numbered
- * as the TriCore EABI's table is remembered (unverified, as above). All
+/* The TriCore relocation types, numbered as GNU binutils number them
+ * (tricore-elf-readelf names each; tools/tricore-isa/relnums.json). All
  * RELA. HIADJ is the high half of an address rounded by 0x8000, because
  * the low half (LO for an ADDI, LO2 for a LEA, load or store) is
- * sign-extended where it is added; 24REL is CALL's and J's halfword
- * displacement. The rest are named so EmbLD can refuse them by name. */
+ * sign-extended where it is added; HI the plain high half; 24REL is a
+ * call's or jump's halfword displacement, 15REL a conditional branch's;
+ * 16SM/10SM/16SM2 an offset from a small-data base (a0, a1, a8, a9);
+ * the CONST, POS and BR* types a symbol's value in a constant field.
+ * RELAX is GNU's mark for its relaxing linker, nothing to apply. */
 #define R_TRICORE_NONE      0
 #define R_TRICORE_32REL     1
 #define R_TRICORE_32ABS     2
@@ -623,6 +630,23 @@ typedef struct {
 #define R_TRICORE_18ABS     9
 #define R_TRICORE_10SM     10
 #define R_TRICORE_15REL    11
+#define R_TRICORE_HI       12
+#define R_TRICORE_16CONST  13
+#define R_TRICORE_9ZCONST  14
+#define R_TRICORE_9SCONST  15
+#define R_TRICORE_10OFF    18
+#define R_TRICORE_16OFF    19
+#define R_TRICORE_1BIT     22
+#define R_TRICORE_3POS     23
+#define R_TRICORE_5POS     24
+#define R_TRICORE_5POS2    30
+#define R_TRICORE_BRCC     31
+#define R_TRICORE_BRCZ     32
+#define R_TRICORE_BRNN     33
+#define R_TRICORE_RRN      34
+#define R_TRICORE_16SM2    48
+#define R_TRICORE_18ABS_14 81
+#define R_TRICORE_RELAX    82
 /* Xtensa, from the ELF machine registry, and the e_flags GNU as writes
  * for the ESP32's objects (binutils include/elf/xtensa.h): the code uses
  * the Xtensa instruction set (XT_INSN) and its literals (XT_LIT); the

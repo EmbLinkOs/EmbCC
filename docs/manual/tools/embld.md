@@ -282,10 +282,9 @@ On ARM, the entry symbol's Thumb bit is kept in the ELF entry point.
 
 ### Linker scripts
 
-`-T SCRIPT` lays the image out by a GNU ld linker script instead, for ARM,
-AArch64, x86-64, RISC-V, LoongArch, MIPS, PowerPC, SPARC, ColdFire, AVR and Xtensa images (TriCore and RX are refused: `embld: -T:
-a linker script is supported for ARM, AArch64, x86-64, RISC-V, LoongArch, MIPS, PowerPC,
-SPARC, ColdFire, AVR and Xtensa images (this one is machine 44)`): the script a CMSIS, STM32CubeMX, vendor SDK, avr-libc or
+`-T SCRIPT` lays the image out by a GNU ld linker script instead, for every
+machine EmbLD links -- ARM, AArch64, x86-64, RISC-V, LoongArch, MIPS,
+PowerPC, SPARC, ColdFire, TriCore, RX, AVR and Xtensa: the script a CMSIS, STM32CubeMX, vendor SDK, avr-libc or
 RTOS project already has. `.tdata` and `.tbss` that the script does not
 place go after the data and after the zeroed data, where a single-thread
 image uses them in place; the image gets a `PT_TLS` segment either way. It replaces `-Tstack` and `--lma-offset`,
@@ -357,7 +356,19 @@ image, and an `.ARM.exidx` output section links to the section its
 functions went to, as ld writes them, so `llvm-readelf -u` and a
 debugger find the unwind index.
 
-Refused by name: `PHDRS`, `OVERLAY`, `INSERT`, `NOCROSSREFS`,
+`PHDRS` declares the image's program headers, as ld writes them: the
+segments in the order declared (`PT_LOAD`, `PT_TLS`, `PT_NOTE`, `PT_PHDR`,
+`PT_GNU_STACK`... or a number, with `FILEHDR`, `PHDRS`, `AT (addr)` and
+`FLAGS (n)`), each output section in the ones its `:name` names -- and the
+sections after it in them too, until another `:name` (`:NONE` for none).
+A `PT_LOAD`'s sections are in the file as they are in memory, at offsets
+congruent to their addresses modulo the page (4 KiB on x86-64 and
+AArch64), and `SIZEOF_HEADERS` counts the ELF header and the script's
+program headers. Without `PHDRS` every output section that has bytes or
+size is a `PT_LOAD` of its own. A `.tbss` output section takes no address
+space, as in ld: what follows it starts where it does.
+
+Refused by name: `OVERLAY`, `INSERT`, `NOCROSSREFS`,
 `ONLY_IF_RO`/`ONLY_IF_RW`, `INPUT_SECTION_FLAGS`, output section types
 other than `NOLOAD`, and `DATA_SEGMENT_*`. A script that uses `/DISCARD/`
 on a section the program still refers to is refused with both sections

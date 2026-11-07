@@ -123,15 +123,12 @@ printf '__asm__("nop");\n__attribute__((naked)) void f(void){ __asm__("ret"); }\
     echo "file-scope asm or a naked function was refused:"; cat "$out/blk.err"
     exit 1; }
 printf '\tjeq d2, d3, elsewhere\n' > "$out/b.s"
-if "$EMBCC" --target=$T -c "$out/b.s" -o /dev/null 2> "$out/as.err"; then
-    echo "a conditional branch to an external symbol was accepted"; exit 1
-fi
-grep -q 'R_TRICORE_15REL' "$out/as.err" || {
-    echo "a conditional branch to a symbol was refused, but not by name:"
-    cat "$out/as.err"; exit 1; }
+"$EMBCC" --target=$T -c "$out/b.s" -o /dev/null 2> "$out/as.err" || {
+    echo "a conditional branch to an external symbol was refused (it is the"
+    echo "inverse over a j, as GNU as writes it):"; cat "$out/as.err"; exit 1; }
 echo "narrow atomics, the frame and return address above level 0,"
-echo "__int128, an over-aligned scalar, C++ exceptions and a"
-echo "conditional branch to an external symbol are each refused by name"
+echo "__int128, an over-aligned scalar and C++ exceptions are each refused"
+echo "by name; a conditional branch to an external symbol is assembled"
 
 # ---- the link -------------------------------------------------------------
 printf 'void _start(void){ for (;;) ; }\n' > "$out/s.c"

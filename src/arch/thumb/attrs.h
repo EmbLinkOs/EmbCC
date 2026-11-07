@@ -34,4 +34,13 @@
  * length in *len. */
 unsigned char *arm_build_attributes(size_t *len);
 
+/* An assembly file's `.fpu NAME`: the unit its hand-written instructions
+ * are for, which is what its object then claims (Tag_FP_arch, and
+ * Tag_Advanced_SIMD_arch for NEON -- the compiler never claims NEON, since
+ * it emits none). fp_arch is the tag's value, 0 for none; simd 0 for no
+ * NEON; hp 1 for the half-precision extension. arm_attrs_asm_fpu_clear()
+ * goes back to what the target says. */
+void arm_attrs_asm_fpu(int fp_arch, int simd, int hp);
+void arm_attrs_asm_fpu_clear(void);
+
 #endif

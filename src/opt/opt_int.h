@@ -253,6 +253,8 @@ int pass_copyprop_local(struct ir_func *fn);
 /* dce.c */
 void count_cb(int *p, void *ctx);
 int pass_dce(struct ir_func *fn);
+int pass_deaddefs(struct ir_func *fn);
+int pass_switchrange(struct ir_func *fn);
 
 /* mem2reg.c */
 int m2r_w(int size);
@@ -302,6 +304,7 @@ int pass_divmod(struct ir_func *fn);
 
 /* ifconv.c */
 int target_cheap_select(void);
+int target_setcc_cheap(void);
 int pass_ifconv(struct ir_func *fn);
 
 /* cfgclean.c */

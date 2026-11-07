@@ -588,14 +588,18 @@ Select the architecture variant by core. `cortex-m0`, `cortex-m0plus`
 and `cortex-m1` select ARMv6-M on any ARM triple, as
 `thumbv6m-none-eabi` does, and `cortex-m23` selects ARMv8-M Baseline, as
 `thumbv8m.base-none-eabi` does. `cortex-m3` selects ARMv7-M; `cortex-m4`,
-`cortex-m7` and `cortex-m33` select ARMv7E-M. Otherwise the option does
-not change the architecture level: `--target=thumbv7m-none-eabi
--mcpu=cortex-m33` is `thumbv7em-none-eabi`, and ARMv8-M is selected only
-by a `thumbv8m.main` triple. On a `thumbv6m` triple, an ARMv7-M or
-ARMv8-M part raises the level. Any other value is an error:
+`cortex-m7` and `cortex-m33` select ARMv7E-M, and `cortex-m55` and
+`cortex-m85` ARMv8.1-M Mainline with MVE (Helium) and its floating point
+(`cortex-m85` with PACBTI too) -- the assembler then takes ARMv8.1-M's own
+instructions and MVE's (see [embas](tools/embas.md#arm-specifics)).
+Otherwise the option does not change the architecture level:
+`--target=thumbv7m-none-eabi -mcpu=cortex-m33` is `thumbv7em-none-eabi`,
+and ARMv8-M is selected only by a `thumbv8m.main` triple. On a `thumbv6m`
+triple, an ARMv7-M or ARMv8-M part raises the level. Any other value is
+an error:
 
 ```text
-embcc: error: -mcpu=cortex-m55 is not a part EmbCC knows: it emits ARMv6-M (cortex-m0, m0plus, m1), ARMv8-M Baseline (cortex-m23), ARMv7-M and ARMv7E-M (cortex-m3, m4, m7) and ARMv8-M Mainline (cortex-m33)
+embcc: error: -mcpu=cortex-m99 is not a part EmbCC knows: it emits ARMv6-M (cortex-m0, m0plus, m1), ARMv8-M Baseline (cortex-m23), ARMv7-M and ARMv7E-M (cortex-m3, m4, m7), ARMv8-M Mainline (cortex-m33) and ARMv8.1-M Mainline (cortex-m55, m85)
 ```
 
 #### `--fpu=FPU`
@@ -1000,7 +1004,7 @@ writing A32 encodings; the design notes are in
 | `--isa=arm` | (no value) | `--isa=thumb is not supported on armv7a-none-eabi: EmbCC emits ARM (A32) code for a Cortex-A` |
 | `--cpu=CPU` | `cortex-a5`, `cortex-a7`, `cortex-a8`, `cortex-a9`, `cortex-a12`, `cortex-a15`, `cortex-a17`, `generic` | `--cpu=cortex-r5 is not supported on armv7a-none-eabi` (a Cortex-M or Cortex-R core) |
 | `--float-abi=ABI` | `soft`, `softfp`, `hard` (the last two with an `--fpu=`) | `--float-abi=hard needs an FPU to use: add --fpu=vfpv3-d16 (or vfpv3, vfpv4-d16, vfpv4)` |
-| `--fpu=FPU` | `vfpv3-d16`, `vfpv3`, `vfpv4-d16`, `vfpv4`, `none` | `--fpu=neon is not supported on armv7a-none-eabi: EmbCC emits VFPv3 or VFPv4 ... and no NEON (Advanced SIMD) instruction` |
+| `--fpu=FPU` | `vfpv3-d16`, `vfpv3`, `vfpv4-d16`, `vfpv4`, `neon`, `neon-vfpv4`, `none` | an FPU no ARMv7-A core has (`fpv5-d16`, a Cortex-M one) |
 | `--abi=ABI` | `aapcs`, `aapcs-linux` | as for Cortex-M |
 | `--unaligned-access`, `-mthumb-interwork` | (no value) | `--no-unaligned-access is not supported` |
 
@@ -1011,8 +1015,29 @@ No divide instruction is used, so the code runs on every ARMv7-A core:
 floating point travels in the core registers, as with `soft`. Either way
 the code is the Cortex-M7's single- and double-precision VFP on `d0`–`d15`
 (`s16`–`s31`/`d8`–`d15` preserved); with `--float-abi=soft` no VFP
-instruction is emitted even with an `-mfpu=`, as GCC reads it. No NEON
-instruction is ever emitted.
+instruction is emitted even with an `-mfpu=`, as GCC reads it. The code
+generator emits no NEON instruction; `--fpu=neon` defines `__ARM_NEON` and
+gives `<arm_neon.h>` (its intrinsics lane by lane) and the assembler's
+NEON.
+
+### Assembly: NEON
+
+`.s`/`.S` files, file-scope `asm` and inline templates take the whole of
+A32 Advanced SIMD and the VFP forms beside it: 3,029 forms in a table
+(`src/arch/thumb/neon.c`) that `tools/neon-isa` learns from llvm-mc --
+every word of the NEON encoding space decoded, every operand bit
+weighed, every field's values offered back to llvm-mc's assembler -- in
+llvm-mc's syntax and with the type spellings it takes for one another
+(`vadd.s32` is `vadd.i32`): Q, D and S registers and scalars (`d2[1]`),
+register lists (`{d0-d3}`, spaced `{d0, d2}`, all lanes `{d0[], d1[]}`,
+one lane), alignment and writeback (`[r0:128]!`, `[r0], r2`), every
+modified-immediate class (`vmov.i32 q0, #0xff00`, `vmov.i64 q0,
+#0xff00ff0000ff00ff`, `vmov.f32 d0, #-2.5`). `.fpu neon` (or
+`--fpu=neon`) gives d16-d31. The bytes are llvm-mc's: the table's
+differential test and clang's vectorized libc (`asm-audit a7neon`,
+306/306 files) show no difference. A form refused names the operand: `vshr.u32 q0, q1,
+#33: operand 3, an immediate (33), is not one any form of vshr.u32
+Q,Q,#N holds`.
 
 ### Calling convention: AAPCS, soft float
 
@@ -1074,7 +1099,7 @@ semihosting exit.
 
 ### Limitations
 
-Refused by name: NEON (`--fpu=neon`), the Cortex-M FPUs, Thumb state (`--isa=thumb`, `.thumb` and `.thumb_func`), `__builtin_frame_address` and
+Refused by name: the Cortex-M FPUs, Thumb state (`--isa=thumb`, `.thumb` and `.thumb_func`), `__builtin_frame_address` and
 `__builtin_return_address` above level 0, an interrupt handler built
 for an FPU (its VFP registers would not be saved), a scalar local aligned
 past 8, and C++ exceptions and unwind tables (C++ compiles with
@@ -1566,7 +1591,7 @@ the word. `__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1`, `_2`, `_4` and `_8` are defined.
 | a 16-byte atomic | `the MIPS64 backend cannot lower a 16-byte atomic (MIPS64's lld/scd are a doubleword; there is no 128-bit ll/sc) yet (function f) [cas16 w=16 size=16]` |
 | `__builtin_frame_address(N)` or `__builtin_return_address(N)` with N above 0 (level 0 is supported; see [Extensions](extensions.md)) | `__builtin_return_address(1) is not supported on mips64el-none-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found` |
 | a doubleword instruction in inline assembly (`daddu`, `ld`, ...) | `asm instruction "daddu $a4, $a5, $a5" is not in the MIPS vocabulary` |
-| `la` in a `.s` file or file-scope `asm` | `la loads a 32-bit address, and a MIPS64 address is 64 bits (nor are %highest and %higher assembled here): load it from a .dword holding the symbol` |
+| `la` in a `.s` file or file-scope `asm` (write `dla`, which builds the 64-bit address in six instructions -- with `$at`, or in its own register under `.set noat` -- as GNU as and llvm-mc do) | `la loads a 32-bit address, and a MIPS64 address is 64 bits: build it as lui %highest, daddiu %higher, dsll 16, daddiu %hi, dsll 16, daddiu %lo, or load it from a .dword holding the symbol` |
 | reading a packed bit-field over more than 8 bytes, big-endian | `a packed bit-field 'v' across 9 bytes is not supported on a big-endian target (mips64-none-elf)` |
 | `--unwind-tables`, `-fasynchronous-unwind-tables`, `--exceptions` | `unwind tables are not supported for mips64el-none-elf yet (...): EmbCC writes no MIPS .eh_frame` |
 | C++ with exceptions (on by default) | `C++ exceptions are not supported for mips64-none-elf yet: EmbCC writes no MIPS .eh_frame; compile with --no-exceptions`. C++ itself compiles with `--no-exceptions`; see [C++](cxx.md#targets) |
@@ -1784,9 +1809,22 @@ fails. `__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1`, `_2` and `_4` are defined.
 ### Object format and linking
 
 ELF32, little-endian, `EM_TRICORE` (44), RELA relocations, `e_flags`
-`0x00200000`. `embld` links these objects, applying `R_TRICORE_32ABS`,
-`R_TRICORE_24REL`, `R_TRICORE_HIADJ`, `R_TRICORE_LO` and `R_TRICORE_LO2`,
-and refuses the small-data relocations by name. `-Tstack ADDR --csa
+`0x00200000`. `embld` links these objects -- EmbCC's and GNU as's -- and
+applies every TriCore relocation type GNU writes: the data words (`32ABS`,
+`32REL`) and each instruction field, found and packed with the
+assembler's own table (`src/arch/tricore/isa.h`), so the two cannot
+disagree about a field: `24REL`, `15REL`, `24ABS`, `18ABS`, `18ABS_14`,
+`HIADJ`, `HI`, `LO`, `LO2`, `16CONST`, `9SCONST`, `9ZCONST`, `10OFF`,
+`16OFF`, the bit positions (`1BIT`, `3POS`, `5POS`, `5POS2`) and the
+`BRCC`/`BRCZ`/`BRNN`/`RRN` constants; the small-data `16SM`, `10SM` and
+`16SM2` from the base their address register holds (`_SMALL_DATA_` for
+a0, `_LITERAL_DATA_` for a1, `_A8_DATA_`, `_A9_DATA_`, which the script
+defines, as GNU ld's do). GNU as's own resolved branches, which it keeps
+relocated against symbol 0 for its relaxing linker, are taken at their
+distance; `RELAX` marks are ignored. tools/tricore-isa/linktest.py links
+every symbol statement GNU takes with tricore-elf-ld and with embld, from
+either assembler: the images are the same bytes. `-T SCRIPT` takes a GNU
+ld script. `-Tstack ADDR --csa
 START:END` makes it emit an entry stub that sets `A10`, links the
 context-save areas in [START, END) into the free list every `CALL` draws
 from, turns call-depth counting off and jumps to the entry symbol; the
@@ -1795,32 +1833,49 @@ segment.
 
 ### Assembly
 
-Inline `asm` is assembled by EmbCC's TriCore vocabulary
-(`src/arch/tricore/asm.c`): the system instructions (`mtcr`/`mfcr` with
-core registers by name or number, `isync`, `dsync`, `syscall`,
-`enable`, ...), the moves, the ALU forms, the loads and stores,
-`swap.w`, `cmpswap.w` and the indirect jumps and calls. Constraints:
-`d`/`r` a data register, `a` an address register, `m` an address register
-holding the operand's address (written `[%0]`), `i` a constant; register
-variables bound to `d0`-`d7` or `a2`-`a7`.
+EmbCC's TriCore assembler (`src/arch/tricore/asm.c`) has the whole
+TC1.6.2 instruction set: 832 forms, from a table
+(`src/arch/tricore/isa.inc`) that `tools/tricore-isa` measures from GNU
+binutils for TriCore -- objdump decoding every 16-bit word and fifteen
+million 32-bit ones, GNU as telling which operand values each field takes
+and which relocation a symbol gets there. It writes the bytes
+`tricore-elf-as -mtc162` writes from the same source, and is checked
+against it statement by statement (see that directory's README): the
+shortest form the operands fit, GNU's choice between forms of one length,
+`add d1, d1, d2` as the 16-bit `add d1, d2`, `sel d1, d15, d9, d1` as
+`cmov d1, d15, d9`, `lea sp, [sp]-8` as `sub.a sp, 8`, and `.code16` or
+`.code32` before an instruction forcing its width.
 
-The same vocabulary has the control transfers: `j`, `jl` and `call` (+-16
-MiB), the conditional branches `jeq`, `jne`, `jlt`, `jlt.u`, `jge`,
-`jge.u` against a register or a 4-bit constant, `jz`/`jnz` (jeq/jne
-against 0), `jeq.a`, `jne.a`, `jz.a`, `jnz.a` and `loop` (+-32 KiB), each
-to `.+N`/`.-N` or, in a template, a numeric label (`1:`, `1b`, `1f`).
-`embcc -c` assembles `.s` and `.S` files, and file-scope `asm` blocks and
-`__attribute__((naked))` functions are assembled the same way, in GNU
-syntax with optional `%` on registers; there `j`/`jl`/`call sym` carry
-`R_TRICORE_24REL`, an address is `movh`/`movh.a` with `hi:sym` or
-`%hi(sym)` (`R_TRICORE_HIADJ`) and `addi` with `lo:sym` or `%lo(sym)`
-(`R_TRICORE_LO`) or `lea`, a load or a store with `[aB]lo:sym`
-(`R_TRICORE_LO2`), and `.word sym` is `R_TRICORE_32ABS`. A conditional
-branch or `loop` reaches only a label of its own section (`embld` does not
-apply `R_TRICORE_15REL`), and is refused by name with a symbol defined
-elsewhere. `tests/golden/tricore-gas.sh` runs every transfer, assembled
-from its text, through QEMU's TriCore translator (tricore-encoding.sh's
-referee), and a `.S` file with C on the board.
+The syntax is GNU's, with or without `%` on registers and in either case
+(GCC writes `%SP`): `d0`-`d15`, `a0`-`a15` (`sp` is `a10`), the pairs
+`e0`-`e14`, a data register's half `d3l`/`d3u`/`d3ll`..., memory as
+`[a2]off`, `[a2+]off`, `[+a2]off`, `[a2+c]off`, `[a2+r]` and `[a2+i]`, a
+core special function register by number (`0xfe2c`), `$` and a number, or
+name (`psw`, `$icr`). A branch's target is a label, `.+N`/`.-N`, or in a
+template a numeric label of its own (`1:`, `1b`, `1f`). A branch to a
+label is its 32-bit form (`jz d2, L` is `jeq d2, 0, L`); one out of reach
+(±32 KiB) is the inverse over a `j` (±16 MiB), and `loop`, `jned` and
+`jnei` branch to a `j` placed just past a 16-bit `j` over it -- the
+sequences GNU as writes. A refusal names the operand and what its field
+holds: `16 does not fit operand 2 of 'jge.u D,N,N': its 4 bits hold
+0..15`.
+
+Inline `asm` takes the same instructions. Constraints: `d`/`r` a data
+register, `a` an address register, `m` an address register holding the
+operand's address (written `[%0]`), `i` a constant; register variables
+bound to `d0`-`d7` or `a2`-`a7`. `embcc -c` assembles `.s` and `.S` files,
+and file-scope `asm` blocks and `__attribute__((naked))` functions are
+assembled the same way. A symbol may stand in any numeric field where GNU
+as takes one, with GNU's relocation: `R_TRICORE_24REL` for `j`/`jl`/`call
+sym` (and for the `j` of a conditional branch or `loop` to a symbol,
+which is the long form above), `hi:sym` or `%hi(sym)` `R_TRICORE_HIADJ`,
+`up:sym` `R_TRICORE_HI`, `lo:sym` or `%lo(sym)` `R_TRICORE_LO` (`LO2` in
+`[a2]lo:sym`), `sm:sym` the small-data `16SM`/`10SM`/`16SM2`, an absolute
+address `R_TRICORE_18ABS`, a constant field `16CONST`, `9SCONST` or
+`9ZCONST`; `.word sym` is `R_TRICORE_32ABS`. `tests/golden/tricore-gas.sh`
+runs every transfer, assembled from its text, through QEMU's TriCore
+translator (tricore-encoding.sh's referee), and a `.S` file with C on the
+board.
 
 ### Predefined macros
 
@@ -1854,7 +1909,6 @@ that keeps a value in every lower-context register.
 |---|---|
 | `__builtin_frame_address(N)` or `__builtin_return_address(N)` with N above 0 (level 0 is supported; see [Extensions](extensions.md)) | `__builtin_return_address(1) is not supported on tricore-none-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found` |
 | `__int128` | `__int128 does not exist on this target ...` |
-| a conditional branch or `loop` to a symbol defined elsewhere (`.s`, `.S`, file-scope `asm`) | `a conditional branch or loop reaches only a label of its own section: its 15-bit displacement (R_TRICORE_15REL) is not one embld applies; branch over a j` |
 | `--unwind-tables`, `-fasynchronous-unwind-tables`, `--exceptions` | `unwind tables are not supported for tricore-none-elf yet ...` |
 | C++ with exceptions (on by default) | `C++ exceptions are not supported for tricore-none-elf yet: EmbCC writes no TriCore .eh_frame; compile with --no-exceptions`. C++ itself compiles with `--no-exceptions`; see [C++](cxx.md#targets) |
 

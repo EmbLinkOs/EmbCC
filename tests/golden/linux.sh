@@ -52,12 +52,11 @@ rm -rf "$out"; mkdir -p "$out"
 
 # ---- 1. the entry stub, decoded by something that is not us ---------------
 #
-# _start is written as .byte/.long in lib/libc/os/linux/start.c because
-# EmbCC has no general text assembler. Bytes with a comment claiming
-# what they mean are worth nothing on their own, so the comment is not
-# what is checked here: objdump decodes the bytes and its answer is
-# compared against what the kernel's entry protocol requires. If the
-# bytes were wrong, objdump would say something else.
+# _start is lib/libc/os/linux/start.c's file-scope asm -- partly .byte
+# on x86-64, mnemonics on aarch64. Whatever spells it, objdump decodes
+# the result and its answer is compared against what the kernel's entry
+# protocol requires. If the bytes were wrong, objdump would say
+# something else.
 "$OD" -dr "$LIBDIR/crt1.o" > "$out/crt1.txt"
 sed -n '/<_start>:/,/^$/p' "$out/crt1.txt" > "$out/entry.txt"
 [ -s "$out/entry.txt" ] || {

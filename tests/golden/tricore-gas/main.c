@@ -48,7 +48,9 @@ int main(void)
             "1: addi %0, %0, 100" : "+d"(v));
     putn(v);
     v = seed(3);
-    __asm__("jlt %0, 5, .+8\n"
+    /* (jlt to a target is 32-bit, `mov d, 0` 16-bit -- as GNU as has them
+     * -- so the addi is 6 bytes on) */
+    __asm__("jlt %0, 5, .+6\n"
             "   mov %0, 0\n"
             "   addi %0, %0, 100" : "+d"(v));
     putn(v);

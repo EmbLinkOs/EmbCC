@@ -374,11 +374,15 @@ static int tok_disp(const struct tok *t, long long *out)
  * instruction after a transfer is its slot, as Linux's and an RTOS's
  * hand-scheduled code writes it. */
 static int g_noreorder;
+/* `.set noat`: $1 is the program's, so a macro may not take it (dla's
+ * 64-bit address is then built in its own register alone) */
+static int g_noat;
 static int g_pushed[8], g_npushed;
 
 void mipsasm_reset(void)
 {
     g_noreorder = 0;
+    g_noat = 0;
     g_npushed = 0;
 }
 
@@ -451,17 +455,20 @@ static int set_option(const struct tok *o, char *err, int errlen)
     };
     if (tok_is(o, "reorder"))   { g_noreorder = 0; return 0; }
     if (tok_is(o, "noreorder")) { g_noreorder = 1; return 0; }
+    if (tok_is(o, "at"))        { g_noat = 0; return 0; }
+    if (tok_is(o, "noat"))      { g_noat = 1; return 0; }
     if (tok_is(o, "push")) {
         if (g_npushed == (int)(sizeof g_pushed / sizeof g_pushed[0]))
             FAIL(".set push nests deeper than %d",
                  (int)(sizeof g_pushed / sizeof g_pushed[0]));
-        g_pushed[g_npushed++] = g_noreorder;
+        g_pushed[g_npushed++] = g_noreorder | g_noat << 1;
         return 0;
     }
     if (tok_is(o, "pop")) {
         if (!g_npushed)
             FAIL(".set pop with no .set push before it");
-        g_noreorder = g_pushed[--g_npushed];
+        g_noreorder = g_pushed[--g_npushed] & 1;
+        g_noat = g_pushed[g_npushed] >> 1 & 1;
         return 0;
     }
     for (int k = 0; ok[k]; k++)
@@ -505,7 +512,7 @@ static int is_mips64_name(const struct tok *t)
 {
     static const char *const other[] = {
         "dmult", "dmultu", "ddiv", "ddivu", "dext", "dins", "dsbh", "dshd",
-        "dclz", "dclo", "dmfc0", "dmtc0", "dli", NULL
+        "dclz", "dclo", "dmfc0", "dmtc0", "dli", "dla", NULL
     };
     for (const struct r3_ent *e = r3_64; e->name; e++)
         if (tok_is(t, e->name))
@@ -643,6 +650,25 @@ static int mips64_form(const struct tok *t, int n, struct code *out,
         if (tok_is(&t[0], "dmfc0")) mips_dmfc0(out, r, c0, (int)sel);
         else                        mips_dmtc0(out, r, c0, (int)sel);
         return 0;
+    }
+    /* dla with a number is dli's; with off(base), a daddiu (as llvm-mc);
+     * with a symbol it is tcasm_symform's six instructions */
+    if (tok_is(&t[0], "dla") && n == 3 && mips_is_64()) {
+        int d = tok_reg(&t[1]), b;
+        long long off;
+        if (d >= 0 && tok_imm(&t[2], &v)) {
+            mips_li64(out, d, v);
+            return 0;
+        }
+        if (d >= 0 && tok_mem(&t[2], &b, &off)) {
+            if (!mips_alu_imm_ok(MIPS_DADDIU, off))
+                FAIL("dla's offset %lld does not fit daddiu's signed 16 "
+                     "bits", off);
+            mips_alu_imm(out, MIPS_DADDIU, d, b, off);
+            return 0;
+        }
+        FAIL("dla wants a register and an address: a symbol, a number or "
+             "offset(base)");
     }
     if (tok_is(&t[0], "dli") && n == 3) {
         int d = tok_reg(&t[1]);
@@ -1337,6 +1363,51 @@ int mipsasm_symform(const char *stmt, struct asm_symform *f)
         f->site[1].off = 4;
         f->site[1].reloc = R_MIPS_LO16;
         f->nsites = 2;
+        return 1;
+    }
+
+    /* dla rd, sym: MIPS64's 64-bit address, as llvm-mc and GNU as build
+     * it -- with $at, the high and low halves in parallel: lui rd
+     * %highest, lui $at %hi, daddiu %higher, daddiu %lo, dsll32, daddu;
+     * under .set noat, in rd alone, shifting 16 at a time */
+    if (mlen == 3 && !strncmp(m, "dla", 3) && mips_is_64()) {
+        const char *c = strchr(q, ',');
+        const char *o;
+        int n, rl;
+        if (!c)
+            return 0;
+        o = skip_sp(c + 1);
+        n = sym_operand(o, &slen, &add);
+        if (!n || *skip_sp(o + n))
+            return 0;
+        rl = (int)(c - q);
+        while (rl && isspace((unsigned char)q[rl - 1]))
+            rl--;
+        f->sym_at = (int)(o - stmt);
+        f->sym_len = slen;
+        f->addend = add;
+        if (!g_noat) {
+            snprintf(f->encode, sizeof f->encode,
+                     "lui %.*s, 0\nlui $1, 0\ndaddiu %.*s, %.*s, 0\n"
+                     "daddiu $1, $1, 0\ndsll32 %.*s, %.*s, 0\n"
+                     "daddu %.*s, %.*s, $1", rl, q, rl, q, rl, q, rl, q, rl, q,
+                     rl, q, rl, q);
+            f->site[0].off = 0;  f->site[0].reloc = R_MIPS_HIGHEST;
+            f->site[1].off = 4;  f->site[1].reloc = R_MIPS_HI16;
+            f->site[2].off = 8;  f->site[2].reloc = R_MIPS_HIGHER;
+            f->site[3].off = 12; f->site[3].reloc = R_MIPS_LO16;
+        } else {
+            snprintf(f->encode, sizeof f->encode,
+                     "lui %.*s, 0\ndaddiu %.*s, %.*s, 0\ndsll %.*s, %.*s, 16\n"
+                     "daddiu %.*s, %.*s, 0\ndsll %.*s, %.*s, 16\n"
+                     "daddiu %.*s, %.*s, 0", rl, q, rl, q, rl, q, rl, q, rl, q,
+                     rl, q, rl, q, rl, q, rl, q, rl, q, rl, q);
+            f->site[0].off = 0;  f->site[0].reloc = R_MIPS_HIGHEST;
+            f->site[1].off = 4;  f->site[1].reloc = R_MIPS_HIGHER;
+            f->site[2].off = 12; f->site[2].reloc = R_MIPS_HI16;
+            f->site[3].off = 20; f->site[3].reloc = R_MIPS_LO16;
+        }
+        f->nsites = 4;
         return 1;
     }
 

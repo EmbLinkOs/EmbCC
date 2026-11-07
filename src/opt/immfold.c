@@ -403,9 +403,11 @@ int pass_signtest(struct ir_func *fn)
  * ext.4:1s and store:1: a movsbl before every byte store on x86-64, a
  * shift pair on RV32. 45 of the 555 stores across lib/libc.
  *
- * Both values must be defined exactly once: a merge temp is written on
- * each path into it, and a source written again between
- * the extension and the store would be read at its new value. */
+ * The extension must be defined exactly once (a merge temp is written on
+ * each path into it), and its source must hold at the store what it held
+ * at the extension: defined once, or -- an induction variable, stored
+ * narrowed each trip -- not written between the two, which are in one
+ * block (no label or branch between them). */
 int pass_storenarrow(struct ir_func *fn)
 {
     struct defs d;
@@ -422,8 +424,21 @@ int pass_storenarrow(struct ir_func *fn)
         if (e->op != IR_EXT || e->flt || e->size < i->size || e->size > 8)
             continue;
         x = e->a;
-        if (x < 0 || x >= fn->nvregs || d.cnt[x] != 1)
+        if (x < 0 || x >= fn->nvregs || d.cnt[x] < 1)
             continue;
+        if (d.cnt[x] != 1) {
+            int ok = d.ins[v] < n;
+            for (int k = d.ins[v] + 1; ok && k < n; k++) {
+                const struct ir_ins *m = &fn->ins[k];
+                if (m->op == IR_LABEL || m->op == IR_JMP || m->op == IR_BRZ ||
+                    m->op == IR_BRNZ || m->op == IR_SWITCH || m->op == IR_IGOTO ||
+                    m->op == IR_RET || m->op == IR_UD2 || m->op == IR_ASM ||
+                    m->op == IR_LANDING || def_target(m) == x)
+                    ok = 0;
+            }
+            if (!ok)
+                continue;
+        }
         i->b = x;
         changed = 1;
     }

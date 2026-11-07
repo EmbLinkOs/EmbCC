@@ -325,6 +325,7 @@ void irg_asm_thumb(struct ir_func *fn, struct stmt *s)
     tasm_set_arch(target_thumb_v8m_base() ? TASM_V8M_BASE
                                               : target_thumb_arch());
     tasm_set_dsp(target_thumb_em());
+    tasm_set_v81(target_thumb_v81(), target_thumb_mve());
     if (GAS_INLINE(tasm_assemble, file, s->line, text, &c, err, sizeof err) != 0)
         diag_fatal(file, s->line, "%s", err);
     if (tasm_open())

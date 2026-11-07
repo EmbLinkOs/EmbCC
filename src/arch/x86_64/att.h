@@ -17,12 +17,23 @@
 
 int x86att_assemble(const char *text, struct code *out, char *err, int errlen);
 int x86att_is_reg(const char *name, int len);
+/* a register name's class and its size in bytes (intel.c's) */
+enum { X86R_NONE, X86R_GPR, X86R_VEC, X86R_SEG, X86R_CTL, X86R_MASK };
+int x86att_reg_class(const char *name, int len, int *size);
 int x86att_is_word(const char *stmt, const char *w, int len);
 int x86att_symform(const char *stmt, struct asm_symform *f);
 int x86att_is_transfer(const char *stmt);
+/* a branch to a number, an address (`jmp 0x7e00`): 1, the near form and
+ * its field in f (a relocation against no symbol), the address in *target */
+int x86att_abs_branch(const char *stmt, struct asm_symform *f, long long *target);
 /* jmp/jcc relaxation, gas.c's levels: -1 (pass 1) or 0 lets a branch be
  * its two-byte form where it reaches; 1 makes it the four-byte one. */
 void x86att_set_level(int level);
 int x86att_took_level(void);
+/* the code's size, 64 (the default), 32 or 16: .code32/.code16, NASM's
+ * bits -- the operand and address sizes without a prefix */
+void x86att_set_mode(int bits);
+void x86att_reset(void);            /* (64-bit code again: each pass's start) */
+int x86att_mode(void);
 
 #endif

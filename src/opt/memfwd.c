@@ -278,13 +278,80 @@ int pass_roload(struct ir_func *fn)
  * (reinterpret, shift by 32, truncate). A private local left with no load
  * loses its stores, and DCE the addresses.
  *
+ * And the other way: SET_HIGH_WORD stores the double, then one word over
+ * its high half, then loads the double back. When that word is the same
+ * half changed by a constant (pun_word_foldable) the store does not end
+ * the 8-byte value -- it makes a new one, the old value with that half
+ * replaced (mask, zero-extend, shift, or), which a later load forwards
+ * like any other and fold_word_insert then makes one operation. fabs
+ * and copysign were a store, a store and a load through the frame on
+ * every target but AVR; they are now an and, and an and and an or, of
+ * registers. Any other word stays a store: the general replacement is
+ * more code than the memory round trip it saves.
+ *
  * Not on AVR, whose 64-bit shift is a byte loop and whose double is four
  * bytes anyway. */
 struct pun_rec { int off, width, val, flt; };
 
+/* plan[n] == 2: the 4-byte store at n puts its word into the 8-byte
+ * value pm[n].old holds, making pm[n].newv; bits, when not -1, is that
+ * value's bits as an integer already (what the word was read from) */
+struct pun_merge { struct pun_rec old; int newv, bits; };
+
+/* Is the word a store puts into the high half of `old` that same half
+ * changed by a constant -- SET_HIGH_WORD(x, GET_HIGH_WORD(x) & c), and
+ * |, ^, + and - -- which fold_word_insert makes one 64-bit operation of
+ * x? Only then is the merge a gain: in general a mask, an extend, a
+ * shift and an or of 64-bit values (pairs, on a 32-bit machine) are more
+ * code than the store, the store and the load they replace -- libm grew
+ * 88 bytes on Cortex-M and 534 on x86-64 doing it every time. Returns
+ * the vreg the high half was read from (old's value, or its bits), or
+ * -1. */
+static int pun_word_foldable(const struct ir_func *fn, const struct defs *d,
+                             const struct pun_rec *old, int h)
+{
+    if (h < 0 || h >= fn->nvregs || d->cnt[h] != 1 || d->ins[h] < 0)
+        return -1;
+    const struct ir_ins *Y = &fn->ins[d->ins[h]];
+    long c;
+    int s;
+    if (Y->w != 4 || Y->flt ||
+        !(Y->op == IR_AND || Y->op == IR_OR || Y->op == IR_XOR ||
+          Y->op == IR_ADD || Y->op == IR_SUB))
+        return -1;
+    if (Y->imm_b || get_const((struct ir_func *)fn, (struct defs *)d,
+                              Y->b, &c))
+        s = Y->a;
+    else if (Y->op != IR_SUB &&
+             get_const((struct ir_func *)fn, (struct defs *)d, Y->a, &c))
+        s = Y->b;
+    else
+        return -1;
+    if (s < 0 || s >= fn->nvregs || d->cnt[s] != 1 || d->ins[s] < 0)
+        return -1;
+    const struct ir_ins *S = &fn->ins[d->ins[s]];
+    if (S->op != IR_SHR || S->w != 8 ||
+        !(S->imm_b ? S->imm == 32
+                   : get_const((struct ir_func *)fn, (struct defs *)d,
+                               S->b, &c) && c == 32))
+        return -1;
+    int x = S->a;
+    if (x == old->val)
+        return x;
+    /* the read side reinterpreted the double first: the same bits */
+    if (old->flt && x >= 0 && x < fn->nvregs && d->cnt[x] == 1 &&
+        d->ins[x] >= 0 && fn->ins[d->ins[x]].op == IR_BITCAST &&
+        fn->ins[d->ins[x]].a == old->val)
+        return x;
+    return -1;
+}
+
 int pass_punfwd(struct ir_func *fn)
 {
     int nv = fn->nvregs, nvars = fn->nvars, changed = 0;
+    /* EMBCC_NO_PUNMERGE=1: a word store ends the 8-byte value again, as
+     * before the merge, for bisecting a difference to it */
+    int g_no_punmerge = getenv("EMBCC_NO_PUNMERGE") != NULL;
     if (!nvars || !nv || target_get() == TARGET_AVR)
         return 0;
     for (int n = 0; n < fn->nins; n++)
@@ -355,6 +422,7 @@ int pass_punfwd(struct ir_func *fn)
     int *nrec = xcalloc((size_t)nvars, sizeof *nrec);
     int *plan = xmalloc((size_t)fn->nins * sizeof *plan);  /* rec index */
     struct pun_rec *pr = xmalloc((size_t)fn->nins * sizeof *pr);
+    struct pun_merge *pm = xmalloc((size_t)fn->nins * sizeof *pm);
     int any = 0;
     for (int n = 0; n < fn->nins; n++) {
         struct ir_ins *i = &fn->ins[n];
@@ -383,11 +451,31 @@ int pass_punfwd(struct ir_func *fn)
             continue;
         int L = base[i->a], off = (int)boff[i->a], wid = i->size;
         if (i->op == IR_STORE) {
-            int k = 0;
+            int k = 0, merge = 0;
+            struct pun_rec old;
             for (int j = 0; j < nrec[L]; j++) {      /* drop what it overlaps */
                 struct pun_rec *r = &rec[L][j];
                 if (r->off + r->width <= off || off + wid <= r->off)
                     rec[L][k++] = *r;
+                else if (!merge && r->width == 8 && wid == 4 && i->b >= 0 &&
+                         (off == r->off || off == r->off + 4)) {
+                    old = *r;                    /* ...or write a word of */
+                    merge = 1;
+                }
+            }
+            int fb = -1;
+            if (merge && k < 4 && !g_no_punmerge &&
+                ((off != old.off) != target_big_endian()) &&
+                (fb = pun_word_foldable(fn, &d, &old, i->b)) >= 0 &&
+                !i->flt) {
+                pm[n].old = old;
+                pm[n].bits = fb != old.val ? fb : -1;
+                pm[n].newv = fn->nvregs++;
+                plan[n] = 2;
+                any = 1;
+                rec[L][k].off = old.off; rec[L][k].width = 8;
+                rec[L][k].val = pm[n].newv; rec[L][k].flt = 0;
+                k++;
             }
             nrec[L] = k;
             if (k < 4 && (wid == 4 || wid == 8) && i->b >= 0) {
@@ -419,6 +507,63 @@ int pass_punfwd(struct ir_func *fn)
             newpos[n] = nb.n;
             if (!plan[n]) {
                 *ib_push(&nb) = in;
+                continue;
+            }
+            if (plan[n] == 2) {
+                /* the store stays (a later load past a join may read the
+                 * memory), and after it the value with its word put in */
+                *ib_push(&nb) = in;
+                const struct pun_merge *g = &pm[n];
+                int hi = ((int)boff[in.a] != g->old.off) != target_big_endian();
+                int x = g->old.val, h = in.b;
+                struct ir_ins t;
+                memset(&t, 0, sizeof t);
+                t.a = t.b = t.c = -1;
+                t.line = in.line; t.col = in.col;
+                if (g->bits >= 0)                /* read as bits already */
+                    x = g->bits;
+                else if (g->old.flt) {           /* the double's bits */
+                    struct ir_ins *b = ib_push(&nb);
+                    *b = t;
+                    b->op = IR_BITCAST; b->a = x; b->w = 8; b->size = 8;
+                    b->sign = 1;
+                    b->dst = x = fn->nvregs++;
+                }
+                if (in.flt) {                    /* the float's bits */
+                    struct ir_ins *b = ib_push(&nb);
+                    *b = t;
+                    b->op = IR_BITCAST; b->a = h; b->w = 4; b->size = 4;
+                    b->sign = 1;
+                    b->dst = h = fn->nvregs++;
+                }
+                struct ir_ins *k = ib_push(&nb);
+                *k = t;
+                k->op = IR_CONST; k->w = 8;
+                k->imm = hi ? 0xffffffffL : (long)(~0xffffffffUL);
+                int km = k->dst = fn->nvregs++;
+                struct ir_ins *an = ib_push(&nb);
+                *an = t;
+                an->op = IR_AND; an->a = x; an->b = km; an->w = 8;
+                int kept = an->dst = fn->nvregs++;
+                struct ir_ins *z = ib_push(&nb);
+                *z = t;
+                z->op = IR_EXT; z->a = h; z->size = 4; z->sign = 0; z->w = 8;
+                int word = z->dst = fn->nvregs++;
+                if (hi) {
+                    struct ir_ins *c = ib_push(&nb);
+                    *c = t;
+                    c->op = IR_CONST; c->imm = 32; c->w = 8;
+                    int k32 = c->dst = fn->nvregs++;
+                    struct ir_ins *sh = ib_push(&nb);
+                    *sh = t;
+                    sh->op = IR_SHL; sh->a = word; sh->b = k32; sh->w = 8;
+                    word = sh->dst = fn->nvregs++;
+                }
+                struct ir_ins *o = ib_push(&nb);
+                *o = t;
+                o->op = IR_OR; o->a = kept; o->b = word; o->w = 8;
+                o->dst = g->newv;
+                changed = 1;
                 continue;
             }
             const struct pun_rec *r = &pr[n];
@@ -504,7 +649,7 @@ int pass_punfwd(struct ir_func *fn)
         free(loaded);
     }
     free(base); free(boff); free(bad); free(rec); free(nrec);
-    free(plan); free(pr);
+    free(plan); free(pr); free(pm);
     free(d.cnt); free(d.ins);
     return changed;
 }

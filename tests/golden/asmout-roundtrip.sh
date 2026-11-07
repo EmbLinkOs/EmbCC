@@ -251,6 +251,11 @@ for t in aarch64-elf thumbv7m-none-eabi armv7a-none-eabi riscv32-unknown-elf \
                         [ "$t" = rx-elf ] && sz=-
                         echo "$nm $ty $sz $fl"
                     done | sort > "$d/$o.sec"
+                # (RX: GNU as's P, D_1 and B_1, in every object, empty
+                # where EmbCC's -S names its sections)
+                [ "$t" = rx-elf ] && [ $o = reasm ] &&
+                    grep -v '^\(P\|D_1\|B_1\) ' "$d/$o.sec" > "$d/$o.sec2" &&
+                    mv "$d/$o.sec2" "$d/$o.sec"
                 "$NM" "$d/$o.o" | grep -v ' \.L' | grep -v ' [tTdDbBrR] $' |
                     sort > "$d/$o.nm"
                 "$READELF" -s -W "$d/$o.o" |
@@ -281,6 +286,24 @@ for t in aarch64-elf thumbv7m-none-eabi armv7a-none-eabi riscv32-unknown-elf \
                         : > "$d/b2.bin"         # (head -c 0 is refused)
                     fi
                     mv "$d/b2.bin" "$d/b.bin"
+                fi
+                # (Xtensa: a literal naming a local symbol is its section
+                # plus an offset kept in the word, as GNU as writes it,
+                # where EmbCC's object names the symbol -- they link
+                # alike; the relocated words are the relocations' to
+                # compare, the rest byte for byte)
+                # (RX: GNU as writes a local DIR32's value into its word
+                # too, and EmbCC's -S assembles as GNU as does)
+                if [ "$t" = xtensa-esp32-elf ] || [ "$t" = rx-elf ]; then
+                    for o in a:direct b:reasm; do
+                        "$READELF" -r "$d/${o#*:}.o" |
+                            awk -v want=".rela$sec" '/^Relocation section/ { s = $3 }
+                                 (/R_XTENSA_32 / || $2 ~ /01$/) && s == "'"'"'" want "'"'"'" { print $1 }' |
+                            while read -r off; do
+                                printf '\000\000\000\000' | dd of="$d/${o%%:*}.bin" bs=1 \
+                                    seek=$((0x$off)) conv=notrunc 2>/dev/null
+                            done
+                    done
                 fi
                 cmp -s "$d/a.bin" "$d/b.bin" || bad="$bad $sec"
             done

@@ -8,7 +8,7 @@
 #      that are two bytes where they reach and five or six where they do
 #      not, calls and jumps to symbols elsewhere, sym(%rip), $sym, GOTPCREL
 #      and data words: the same bytes and the same relocation types at the
-#      same offsets (the symbol a relocation names may differ -- llvm-mc
+#      same offsets (`.word` two bytes, as GNU as makes it here; the symbol a relocation names may differ -- llvm-mc
 #      names .data+N where EmbCC names the label -- and both link alike);
 #   3. sum.s linked with C and run on the x86-64 harness;
 #   4. an inline template the original vocabulary does not cover --
@@ -53,13 +53,16 @@ echo "$n instructions as llvm-mc encodes them"
     fail "llvm-mc refused symbols.s"
 for o in sym sym.ref; do
     dis "$out/$o.o" | sed -e 's/ *#.*//' -e 's/\(R_X86_64_[A-Z0-9_]*\).*/\1/' > "$out/$o.dis"
-    "$OD" -r -j .data "$out/$o.o" | grep R_X86 | awk '{print $1, $2}' > "$out/$o.drel"
+    "$OD" -r "$out/$o.o" | sed -n '/\[\.data\]/,/^$/p' | grep R_X86 |
+        awk '{print $1, $2}' > "$out/$o.drel"
 done
 diff "$out/sym.ref.dis" "$out/sym.dis" > "$out/sym.diff" ||
     fail "symbols.s: bytes or relocations differ (< llvm-mc, > EmbCC):
 $(head -30 "$out/sym.diff")"
 diff "$out/sym.ref.drel" "$out/sym.drel" > "$out/drel.diff" ||
     fail "symbols.s: the data's relocations differ: $(cat "$out/drel.diff")"
+[ "$(grep -c . "$out/sym.drel")" -ge 4 ] ||
+    fail "symbols.s: the data's relocations were not read"
 grep -qE '^7[0-9a-f] ' "$out/sym.dis" && grep -qE '^0f 8[0-9a-f] ' "$out/sym.dis" ||
     fail "no two-byte and six-byte conditional jumps both: the relaxation"
 echo "labels, relaxation, PLT32/PC32/GOTPCRELX/32/32S/64: llvm-mc's bytes and relocations"

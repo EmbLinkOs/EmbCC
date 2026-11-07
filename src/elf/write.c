@@ -237,6 +237,16 @@ void elfw_symbol_visibility(struct elfw *w, int sym, int stv)
     tab[sym].st_other = (Elf64_Uchar)(stv & 3);
 }
 
+/* a COMMON symbol: SHN_COMMON, its value the alignment (gABI) */
+void elfw_symbol_common(struct elfw *w, int sym, long align)
+{
+    if (sym <= 0 || sym >= w->nsym)
+        return;
+    Elf64_Sym *tab = (Elf64_Sym *)w->symtab.p;
+    tab[sym].st_shndx = SHN_COMMON;
+    tab[sym].st_value = (Elf64_Addr)align;
+}
+
 int elfw_add_symbol(struct elfw *w, const char *name, Elf64_Addr value,
                     Elf64_Xword size, Elf64_Uchar info, Elf64_Half shndx)
 {
@@ -310,6 +320,28 @@ void elfw_add_rela(struct elfw *w, int target_ndx, Elf64_Addr offset,
         memset(gp, 0, sizeof *gp);
         gp->target = target_ndx;
         w->grp_of[target_ndx] = w->nrelagrp;
+    }
+    /* Xtensa: a word relocated against a SECTION symbol holds the offset
+     * itself, the addend 0, as GNU as writes it (R_XTENSA_32 is partial
+     * in place: GNU ld and EmbLD add the word); against a named symbol
+     * the addend stays in the relocation. One rule for the compiler's
+     * objects and the assembler's. */
+    /* (not into a SHF_MERGE section: a linker moves each of its strings,
+     * and finds the one meant by the addend, which must stay visible) */
+    const Elf64_Sym *rs = sym > 0 && (size_t)sym * sizeof(Elf64_Sym) < w->symtab.len
+                          ? &((const Elf64_Sym *)w->symtab.p)[sym] : NULL;
+    if (w->machine == EM_XTENSA && type == R_XTENSA_32 && addend && rs &&
+        ELF64_ST_TYPE(rs->st_info) == STT_SECTION &&
+        rs->st_shndx > 0 && rs->st_shndx < w->nsec &&
+        !(w->sec[rs->st_shndx].hdr.sh_flags & SHF_MERGE) &&
+        offset + 4 <= w->sec[target_ndx].data.len) {
+        unsigned char *q = (unsigned char *)w->sec[target_ndx].data.p + offset;
+        unsigned long v = (unsigned long)q[0] | (unsigned long)q[1] << 8 |
+                          (unsigned long)q[2] << 16 | (unsigned long)q[3] << 24;
+        v += (unsigned long)addend;
+        for (int b = 0; b < 4; b++)
+            q[b] = (unsigned char)(v >> (8 * b));
+        addend = 0;
     }
     Elf64_Rela r;
     r.r_offset = offset;

@@ -91,6 +91,9 @@ void tasm_set_arch(int level);
  * with it): sadd16, smlad, pkhbt and the rest are refused without it, as
  * llvm-mc refuses them. Off until a caller says otherwise. */
 void tasm_set_dsp(int on);
+/* ARMv8.1-M Mainline (csel, the low-overhead loops), and MVE: 0 none, 1
+ * integer, 3 with floating point */
+void tasm_set_v81(int v81, int mve);
 /* The FPU the file assembles for: 0 none named (every VFP instruction is
  * taken, as a context switch that tests for the FPU writes them), 1
  * single precision, 2 double; d32 when d16-d31 exist. */

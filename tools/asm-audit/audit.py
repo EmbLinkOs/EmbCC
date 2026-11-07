@@ -31,6 +31,8 @@ T = {
   # x86-64-v3: AVX2, FMA, BMI1/2, MOVBE -- what -march=haswell and later emit
   "x86v3": ("--target=x86_64-elf", "clang", "--target=x86_64-elf -march=x86-64-v3",
             "llvm-mc -filetype=obj -triple=x86_64 {src} -o {obj}", "llvm-objdump", "#"),
+  "x86v4": ("--target=x86_64-elf", "clang", "--target=x86_64-elf -march=x86-64-v4",
+            "llvm-mc -filetype=obj -triple=x86_64 {src} -o {obj}", "llvm-objdump", "#"),
   "a64":   ("--target=aarch64-elf", "clang", "--target=aarch64-none-elf",
             "llvm-mc -filetype=obj -triple=aarch64 {src} -o {obj}", "llvm-objdump", "//"),
   "m4":    ("--target=thumbv7em-none-eabi", "clang",
@@ -45,6 +47,12 @@ T = {
             "--target=thumbv6m-none-eabi -mcpu=cortex-m0",
             "llvm-mc -filetype=obj -triple=thumbv6m-none-eabi -mcpu=cortex-m0 {src} -o {obj}",
             "llvm-objdump", "@"),
+  # ARMv8.1-M with MVE (Helium): clang vectorizes with it, and uses the
+  # low-overhead loops and csel
+  "m55":   ("--target=thumbv8m.main-none-eabihf -mcpu=cortex-m55", "clang",
+            "--target=thumbv8.1m.main-none-eabihf -mcpu=cortex-m55 -mfloat-abi=hard",
+            "llvm-mc -filetype=obj -triple=thumbv8.1m.main-none-eabi -mattr=+mve.fp,+fp64,+lob {src} -o {obj}",
+            "llvm-objdump", "@"),
   "m33":   ("--target=thumbv8m.main-none-eabi -mcpu=cortex-m33", "clang",
             "--target=thumbv8m.main-none-eabi -mcpu=cortex-m33 -mfloat-abi=soft",
             "llvm-mc -filetype=obj -triple=thumbv8m.main-none-eabi -mcpu=cortex-m33 {src} -o {obj}",
@@ -52,6 +60,11 @@ T = {
   "a7":    ("--target=armv7a-none-eabi", "clang",
             "--target=armv7a-none-eabi -marm -mfloat-abi=soft",
             "llvm-mc -filetype=obj -triple=armv7a-none-eabi {src} -o {obj}", "llvm-objdump", "@"),
+  # Cortex-A with NEON: clang vectorizes the corpus's loops
+  "a7neon": ("--target=armv7a-none-eabihf -mfpu=neon-vfpv4", "clang",
+            "--target=armv7a-none-eabihf -marm -mfpu=neon-vfpv4 -mfloat-abi=hard",
+            "llvm-mc -filetype=obj -triple=armv7a-none-eabihf -mattr=+neon,+vfp4 {src} -o {obj}",
+            "llvm-objdump", "@"),
   "rv32":  ("--target=riscv32-unknown-elf -march=rv32imac -mabi=ilp32", "clang",
             "--target=riscv32-unknown-elf -march=rv32imac -mabi=ilp32 -mno-relax",
             "llvm-mc -filetype=obj -triple=riscv32 -mattr=+m,+a,+c,-relax {src} -o {obj}",
@@ -89,7 +102,7 @@ T = {
   "m68k":  ("--target=m68k-none-elf", "m68k-elf-gcc", "-mcpu=5208",
             "m68k-elf-as -mcpu=5208 {src} -o {obj}", "m68k-elf-objdump", "|"),
   "tricore": ("--target=tricore-none-elf", HOME + "/cross/tricore/bin/tricore-elf-gcc", "",
-            HOME + "/cross/tricore/bin/tricore-elf-as {src} -o {obj}",
+            HOME + "/cross/tricore/bin/tricore-elf-as -mtc162 {src} -o {obj}",
             HOME + "/cross/tricore/bin/tricore-elf-objdump", "#"),
 }
 
@@ -121,9 +134,11 @@ def corpus(name, out):
     return files
 
 BR = re.compile(r"\b(b|bl|blx|bx|j|jal|jmp|call|beq|bne|blt|bge|bltu|bgeu|bnez|beqz|"
-                r"cbz|cbnz|b\.\w+|br\w*|rjmp|rcall|bra|bsr|jl|loop\w*|bc\w*|bdnz\w*)\b")
+                r"cbz|cbnz|b\.\w+|br\w*|rjmp|rcall|bra|bsr|jl|loop\w*|bc\w*|bdnz\w*|"
+                r"bgtu|bleu|bgt|ble|bpz|bn|bo|bno|bnc|bz|bnz)\b")
 
 PADDING = False
+BAREHEX = False      # TriCore's objdump prints a target as bare hex too
 
 def norm(dis):
     """The instructions of a disassembly (objdump -dr), without addresses,
@@ -138,7 +153,10 @@ def norm(dis):
             # a RISC-V call's relocation covers the jalr after its auipc
             pair = bool(re.search(r"R_RISCV_CALL", l))
             continue
-        m = re.match(r"^\s*[0-9a-f]+:\s+(?:[0-9a-f]{2,8}\s)*\s*(.*)$", l)
+        # (GNU objdump: the raw bytes, when shown, end at a tab -- an
+        # instruction's own text may start with hex letters: `add`)
+        m = re.match(r"^\s*[0-9a-f]+:\t(?:(?:[0-9a-f]{2,8} ?)+ +\t)?(.*)$", l) or \
+            re.match(r"^\s*[0-9a-f]+:\s+(?:[0-9a-f]{2,8}\s)*\s*(.*)$", l)
         if not m or not m[1].strip() or l.rstrip().endswith(">:"):
             continue
         t = re.sub(r"\s+", " ", m[1].split("<")[0].split("//")[0].split("@ ")[0]).strip()
@@ -153,6 +171,9 @@ def norm(dis):
         # (Xtensa's objdump prints a target as bare hex: call8 ad0)
         elif PADDING and re.match(r"^(b\w*|j|call\d+|loop\w*)$", op) and \
                 re.search(r"\s[0-9a-f]+$", t):
+            t = re.sub(r"[0-9a-f]+$", "T", t)
+        elif BAREHEX and re.match(r"^(j\w*(\.\w+)?|loop\w*|f?call)$", op) and \
+                not re.match(r"^(ji|jli|ja|jla)$", op) and re.search(r"[\s,][0-9a-f]+$", t):
             t = re.sub(r"[0-9a-f]+$", "T", t)
         ins.append((t, pair))
         pair = False
@@ -180,18 +201,53 @@ def sized(dis):
     from a disassembly with raw bytes"""
     r = []
     for l in dis.splitlines():
-        m = re.match(r"^\s*[0-9a-f]+:\s+((?:[0-9a-f]{2} )+)\s*(.*)$", l)
+        # llvm-objdump's bytes are pairs (`01 02 03`), GNU's a run per
+        # word (`046136`), ended by a tab
+        g = re.match(r"^\s*[0-9a-f]+:\t((?:[0-9a-f]{2,8} ?)+) *\t(.*)$", l)
+        m = g or re.match(r"^\s*[0-9a-f]+:\s+((?:[0-9a-f]{2} )+)\s*(.*)$", l)
         if not m or l.rstrip().endswith(">:"):
             continue
+        nbytes = len(m[1].replace(" ", "")) // 2
         t = re.sub(r"\s+", " ", m[2].split("<")[0].split("#")[0]).strip()
         t = re.sub(r"^([0-9a-f]{2} ?)+(?= |$)", "", t).strip()   # (a long nop's wrapped bytes)
         if not t or NOP.match(t):
             continue
         op = t.split(" ")[0]
         if BR.match(op) or op.startswith("j"):
-            t = op
-        r.append((len(m[1].split()), t))
+            # (RX writes a branch's width as its suffix: beq.s, .b, .w, .a)
+            t = re.sub(r"\.(s|b|w|a)$", "", op)
+        r.append((nbytes, t))
     return r
+
+def xt_relaxed(ins):
+    """Xtensa's relaxation choices, written one way: a long call (l32r aN
+    and callxN aN) is the call it may become, and a narrow move (mov.n,
+    printed mov) and an instruction widened to align a loop or a target
+    (or aR, aS, aS; add.n as add) are the same instruction"""
+    out, k = [], 0
+    while k < len(ins):
+        n, t = ins[k]
+        t = re.sub(r"\.n\b", "", t)
+        if re.match(r"^(\.byte 0+|ill)$", t):       # zero padding
+            k += 1
+            continue
+        if t.startswith("l32r ") and k + 1 < len(ins) and \
+                re.match(r"^callx(4|8|12) ", ins[k + 1][1]):
+            out.append((3, "call" + ins[k + 1][1][5:].split(" ")[0]))
+            k += 2
+            continue
+        op = t.split(" ")[0]
+        if (op.startswith(("b", "call", "loop", "j")) and op != "break") or \
+                op in ("l32r",):
+            t = op                          # (a target moves with the layout)
+        m = re.match(r"^or (a\d+), (a\d+), (a\d+)$", t)
+        if m and m[2] == m[3]:
+            t = "mov %s, %s" % (m[1], m[2])
+        out.append((3 if re.match(r"^(mov|add|addi|l32i|s32i|movi|beqz|bnez|ret|retw|nop) ", t + " ") else n, t))
+        k += 1
+    return out
+
+ODX = []
 
 def relaxed_only(objdump, eo, ro):
     """The two objects differ only where a branch took another width (and
@@ -199,8 +255,10 @@ def relaxed_only(objdump, eo, ro):
     its length too unless it is a relative branch. llvm-mc keeps some
     branches long that reach short -- a layout settled from a bigger
     start; EmbCC's settles from the smallest (gas.c)."""
-    a = sized(run([objdump, "-d", eo]).stdout)
-    b = sized(run([objdump, "-d", ro]).stdout)
+    a = sized(run([objdump] + ODX + ["-d", eo]).stdout)
+    b = sized(run([objdump] + ODX + ["-d", ro]).stdout)
+    if PADDING:
+        a, b = xt_relaxed(a), xt_relaxed(b)
     if len(a) != len(b):
         return False
     for (la, ta), (lb, tb) in zip(a, b):
@@ -219,8 +277,10 @@ def relaxed_only(objdump, eo, ro):
 def lengths_differ(objdump, eo, ro):
     """None when every instruction has the reference's length, "branch"
     when only branches differ, else the index of the first that does."""
-    a = sized(run([objdump, "-d", eo]).stdout)
-    b = sized(run([objdump, "-d", ro]).stdout)
+    a = sized(run([objdump] + ODX + ["-d", eo]).stdout)
+    b = sized(run([objdump] + ODX + ["-d", ro]).stdout)
+    if PADDING:
+        a, b = xt_relaxed(a), xt_relaxed(b)
     if len(a) != len(b):
         return None          # (the text compare already passed: padding)
     br = False
@@ -260,10 +320,15 @@ def audit(name, out, show):
         # RISC-V's compressed forms print as their 32-bit aliases unless
         # asked not to, and a missed compression is a difference
         na = ["-M", "no-aliases"] if name.startswith("rv") else []
-        de = run([objdump, "-dr", "--no-show-raw-insn"] + na + [eo]).stdout
-        dr = run([objdump, "-dr", "--no-show-raw-insn"] + na + [ro]).stdout
+        # (MVE's instructions disassemble only with the extension asked)
+        global ODX
+        ODX = ["--mattr=+mve.fp,+lob"] if name == "m55" else []
+        de = run([objdump] + ODX + ["-dr", "--no-show-raw-insn"] + na + [eo]).stdout
+        dr = run([objdump] + ODX + ["-dr", "--no-show-raw-insn"] + na + [ro]).stdout
         global PADDING
         PADDING = name == "xtensa"
+        global BAREHEX
+        BAREHEX = name == "tricore"
         ne, nr = norm(de), norm(dr)
         k = same(ne, nr)
         # the text agrees, but a 16- and a 32-bit form can print alike
@@ -276,7 +341,9 @@ def audit(name, out, show):
                 continue
             if r is not None:
                 differ += 1
-                a_, b_ = sized(run([objdump, "-d", eo]).stdout), sized(run([objdump, "-d", ro]).stdout)
+                a_, b_ = sized(run([objdump] + ODX + ["-d", eo]).stdout), sized(run([objdump] + ODX + ["-d", ro]).stdout)
+                if PADDING:
+                    a_, b_ = xt_relaxed(a_), xt_relaxed(b_)
                 diffs.append("%s: '%s' is %d bytes, the reference's %d" % (
                     os.path.basename(a), a_[r][1], a_[r][0], b_[r][0]))
                 continue
