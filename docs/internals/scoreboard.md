@@ -87,6 +87,36 @@ AVR 1.527 / 1.385.
 **Limitations:** 110 backend refusals and 43 front-end and driver
 refusals.
 
+## 2026-11-07
+
+On asm2 (#180), against clang 23.1.5.
+
+**Speed** (`-O2` / `-Os`): Cortex-M4 1.041 / 1.072, RV32 1.021 / 1.092
+(from 1.064 / 1.094 and 1.035 / 1.103 at the round's start). What moved
+it: a copy block entered from two branches goes with them (text 1.14 ->
+1.06 on the M4), a memset's address may live in a register (hash 1.18 ->
+1.03), unrolling's dead counter definitions go (fixed 1.18 -> 1.12),
+choices between powers of two are arithmetic on RISC-V and MIPS (RV32
+text 0.99, ahead of clang), and a switch on a state that is only ever a
+case loses its bound. Furthest behind: the state machine at `-Os` (1.42
+M4, 1.40 RV32: its constants are built inside the loop, which `-Os`
+keeps because hoisting them costs code), fixed point on RV32 (1.29:
+clang keeps the coefficients in registers) and the matrix (1.19 M4:
+clang unrolls and jams).
+
+**Size**, per object (all / without math): Cortex-M4 1.061 / 1.017,
+Cortex-M0 1.106 / 1.071, RV32 1.175 / 1.053, RV64 1.185 / 1.051,
+x86-64 1.522 / 1.260, AArch64 1.347 / 1.156, MIPS32 1.167 / 1.091,
+PowerPC 1.172 / 1.058, SPARC 1.164 / 1.057, LoongArch64 1.066 / 1.011,
+AVR 1.358 / 1.269. x86-64's math is the largest gap left: a double read
+as an integer goes through its slot there (no `fp_reads_gpr`), and
+complex values stay in memory.
+
+**Compile speed:** `lib/libc` 0.29, `src/` 1.03.
+
+**Limitations:** 109 backend refusals and 42 front-end and driver
+refusals.
+
 ## Reading it
 
 - **Steer size by the per-object ratio.** EmbCC inlines a static function
