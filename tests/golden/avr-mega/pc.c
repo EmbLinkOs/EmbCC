@@ -16,7 +16,11 @@ __attribute__((constructor)) static void c0(void) { ctor = 7; }
 static const char table[] = "rodata copied";
 static int data_init = 1234;
 static volatile unsigned ticks;
-ISR(TIMER1_COMPA_vect) { ticks++; }
+/* The fifth tick turns the timer's interrupt off: counted by main and
+ * then stopped by cli(), a sixth could land between the last read and
+ * the cli -- QEMU's timer runs on the host's clock, and a slow runner
+ * printed 6. */
+ISR(TIMER1_COMPA_vect) { if (++ticks == 5) TIMSK1 = 0; }
 static void *ra(void) { return __builtin_return_address(0); }
 int main(void)
 {
