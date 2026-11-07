@@ -152,7 +152,21 @@ int pass_sinkconst(struct ir_func *fn)
     int *to = xmalloc((size_t)fn->nins * sizeof *to);
     for (int n = 0; n < fn->nins; n++) to[n] = -1;
     int *depth = sink_loop_depth(fn);
-    int any = 0;
+    /* At -Os a literal goes into the loop that reads it, since keeping
+     * it in a register across the loop may cost a callee-saved register
+     * and its save -- except in a function that calls nothing, whose
+     * caller-saved registers are free: there the `li` before the loop
+     * is the bytes the one inside would have been, and runs once. The
+     * state machine at -Os rebuilt seven constants a byte; clang's -Os
+     * keeps them. EMBCC_NO_OSHOIST turns it off. */
+    static int no_oshoist = -1;
+    if (no_oshoist < 0)
+        no_oshoist = getenv("EMBCC_NO_OSHOIST") != NULL;
+    int any = 0, leaf = 1;
+    for (int n = 0; n < fn->nins && leaf; n++)
+        if (fn->ins[n].op == IR_CALL || fn->ins[n].op == IR_ASM ||
+            target_op_calls_helper(&fn->ins[n]))
+            leaf = 0;
     for (int n = 0; n < fn->nins; n++) {
         struct ir_ins *i = &fn->ins[n];
         /* Every op here materialises a value out of nothing: a
@@ -191,7 +205,8 @@ int pass_sinkconst(struct ir_func *fn)
             fn->ins[u - 1].op == IR_CMP && fn->ins[u - 1].dst == fn->ins[u].a)
             u--;
         if (u > n + 1 &&
-            (depth[u] <= depth[n] || g_opt_size ||
+            (depth[u] <= depth[n] ||
+             (g_opt_size && !(leaf && !no_oshoist)) ||
              (!const_is_expensive(i) && !rv_cmp))) {
             to[n] = u;
             any = 1;
