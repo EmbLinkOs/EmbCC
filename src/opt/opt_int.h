@@ -305,6 +305,7 @@ int pass_divmod(struct ir_func *fn);
 /* ifconv.c */
 int target_cheap_select(void);
 int target_setcc_cheap(void);
+int target_loop_regs(int fp);
 int pass_ifconv(struct ir_func *fn);
 
 /* cfgclean.c */
@@ -327,6 +328,7 @@ int pass_loadcse(struct ir_func *fn);
 
 /* licm.c */
 extern int g_licm_mem;
+extern int g_licm_late;
 int pass_licm(struct ir_func *fn);
 
 /* pre.c */

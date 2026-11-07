@@ -458,6 +458,27 @@ static void opt_func(struct ir_func *fn)
         pass_copyprop_local(fn);
         pass_dce(fn);
     }
+    /* LICM again once the copies are settled: a fully unrolled inner
+     * loop's loads -- a FIR's h[0] ... h[15] -- are invariant in the
+     * loop around it, and before unrolling they were one load whose
+     * address moved. clang keeps all sixteen in registers; this is the
+     * pass that can see they may be. */
+    g_licm_late = 1;
+    int late = copied && g_licm && edge_ok && !getenv("EMBCC_NO_LICM2") &&
+               pass_licm(fn);
+    g_licm_late = 0;
+    if (late) {
+        /* what the hoisted literals expose to folding: the first
+         * tap's `i - 0` is the address the others share */
+        int changed = 1, g3 = 0;
+        pass_copyprop(fn);
+        while (changed && g3++ < 8) {
+            changed = pass_fold(fn);
+            changed |= pass_lvn(fn);
+            changed |= pass_copyprop(fn);
+            changed |= pass_dce(fn);
+        }
+    }
     /* the 64-bit product of two 32-bit values: one widening multiply */
     if (pass_mulwiden(fn))
         pass_dce(fn);

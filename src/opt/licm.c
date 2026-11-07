@@ -681,6 +681,36 @@ static int licm_promote(struct ir_func *fn, struct defs *d, struct bb *bb,
 
 /* -flicm-mem (opt_run sets it): the memory half of LICM above. */
 int g_licm_mem = 1;
+/* Set by opt.c around the run after unrolling (see the hoist list). */
+int g_licm_late;
+
+/* Registers a loop's values may live in, roughly: the allocatable file of
+ * each class less what codegen keeps for itself. fp 1 asks for the
+ * floating-point file, and 0 is the answer where floats live in the core
+ * registers (soft float). Only a budget for the late hoist, which must
+ * not bring in more than the loop can hold: a value it hoists and the
+ * allocator then spills is a load from the stack for a load from memory,
+ * and pushes the loop's own values out (a Cortex-M4's FIR, 16 taps on
+ * about 12 registers). */
+int target_loop_regs(int fp)
+{
+    switch (target_get()) {
+    case TARGET_THUMB:
+        return fp ? (target_thumb_fpu() ? 28 : 0) : 12;
+    case TARGET_RISCV32: case TARGET_RISCV64:
+        return fp ? (target_riscv_flen() ? 30 : 0) : 26;
+    case TARGET_AARCH64: case TARGET_LOONGARCH64:
+        return fp ? 30 : 26;
+    case TARGET_X86_64:
+        return fp ? 15 : 13;
+    case TARGET_MIPS32: case TARGET_MIPS64: case TARGET_PPC32:
+        return fp ? 0 : 22;
+    case TARGET_AVR:
+        return fp ? 0 : 6;
+    default:
+        return fp ? 0 : 10;
+    }
+}
 
 static int lp_cmp_int(const void *a, const void *b)
 {
@@ -698,6 +728,121 @@ static int lp_cmp_int(const void *a, const void *b)
  * would have hoisted after them. A loop that touches one -- the loop
  * around a chosen one, the next one in a nest -- waits for the next
  * call, which sees the rebuilt function as before. */
+/* The late run's choice (g_licm_late): which of the loads it found
+ * invariant leave the loop. Per register class, all or none -- by what
+ * the loop already keeps live across it against target_loop_regs -- and
+ * then only those loads and what computes their addresses. */
+static void licm_late_budget(struct ir_func *fn, const struct defs *d,
+                             const int *lins, int nlins, const char *inl_ins,
+                             char *inv)
+{
+    int nv = fn->nvregs;
+    char *fl = xcalloc((size_t)(nv ? nv : 1), 1);   /* a float operand */
+    char *live = xcalloc((size_t)(nv ? nv : 1), 1); /* counted already */
+    int fpregs = target_loop_regs(1);
+    for (int q = 0; q < nlins; q++) {
+        struct ir_ins *i = &fn->ins[lins[q]];
+        if (!i->flt || !fpregs)
+            continue;
+        struct opnds o;
+        value_opnds(i, &o);
+        for (int k = 0; k < o.n; k++)
+            if (o.v[k] >= 0 && o.v[k] < nv)
+                fl[o.v[k]] = 1;
+    }
+    int use[2] = { 0, 0 }, hl[2] = { 0, 0 };
+    /* What a non-hoisted instruction of the loop reads that lives across
+     * it: defined outside, a parameter, a name assigned more than once
+     * (carried round the loop), or a value the hoist takes out. */
+    for (int q = 0; q < nlins; q++) {
+        int n = lins[q];
+        if (inv[n])
+            continue;
+        struct opnds o;
+        value_opnds(&fn->ins[n], &o);
+        for (int k = 0; k < o.n; k++) {
+            int v = o.v[k];
+            if (v < 0 || v >= nv || live[v])
+                continue;
+            int def = d->cnt[v] == 1 ? d->ins[v] : -1;
+            if (d->cnt[v] == 1 && def >= 0 && inl_ins[def] && !inv[def])
+                continue;                       /* the loop's own temp */
+            live[v] = 1;
+            use[fl[v] ? 1 : 0]++;
+            if (d->cnt[v] == 1 && def >= 0 && inl_ins[def])
+                hl[fl[v] ? 1 : 0]++;            /* hoisted, read here */
+        }
+    }
+    /* a few for the body's own temps */
+    int cap[2] = { target_loop_regs(0) - 3, fpregs - 3 };
+    /* All or nothing, per class: a loop that already keeps more live
+     * than fits (cap) loses its own values to spills when more come in,
+     * and those are a store and a load on every trip; one with room
+     * takes every load, since one that is spilled after all costs a
+     * reload where it was a load (measured: the Cortex-M4's matrix row
+     * gains with 20 hoisted on 9 free registers, its FIR loses with 16
+     * on a loop of 13 already). */
+    for (int q = 0; q < nlins; q++) {
+        int n = lins[q];
+        struct ir_ins *i = &fn->ins[n];
+        if (!inv[n] || i->op != IR_LOAD)
+            continue;
+        int v = def_target(i), c = v >= 0 && v < nv && fl[v] ? 1 : 0;
+        if (use[c] - hl[c] >= cap[c])
+            inv[n] = 0;
+    }
+    /* Only the loads that go, and what computes their addresses: an
+     * address hoisted for a load that stays is one more register across
+     * the loop, where the backend folds it into the load's offset. */
+    {
+        char *need = xcalloc((size_t)(fn->nins ? fn->nins : 1), 1);
+        for (int q = 0; q < nlins; q++)
+            if (inv[lins[q]] && fn->ins[lins[q]].op == IR_LOAD)
+                need[lins[q]] = 1;
+        for (int grew = 1; grew; ) {
+            grew = 0;
+            for (int q = nlins - 1; q >= 0; q--) {
+                int n = lins[q];
+                if (!need[n])
+                    continue;
+                struct opnds o;
+                value_opnds(&fn->ins[n], &o);
+                for (int k = 0; k < o.n; k++) {
+                    int v = o.v[k];
+                    if (v >= 0 && v < nv && d->cnt[v] == 1 && d->ins[v] >= 0 &&
+                        inl_ins[d->ins[v]] && inv[d->ins[v]] &&
+                        !need[d->ins[v]]) {
+                        need[d->ins[v]] = 1; grew = 1;
+                    }
+                }
+            }
+        }
+        for (int q = 0; q < nlins; q++)
+            if (!need[lins[q]])
+                inv[lins[q]] = 0;
+        free(need);
+    }
+    /* whatever reads a value that stays, stays */
+    for (int grew = 1; grew; ) {
+        grew = 0;
+        for (int q = 0; q < nlins; q++) {
+            int n = lins[q];
+            if (!inv[n])
+                continue;
+            struct opnds o;
+            value_opnds(&fn->ins[n], &o);
+            for (int k = 0; k < o.n; k++) {
+                int v = o.v[k];
+                if (v >= 0 && v < nv && d->cnt[v] == 1 && d->ins[v] >= 0 &&
+                    inl_ins[d->ins[v]] && !inv[d->ins[v]]) {
+                    inv[n] = 0; grew = 1; break;
+                }
+            }
+        }
+    }
+    free(fl); free(live);
+}
+
 static int licm_one(struct ir_func *fn)
 {
     if (fn->nins == 0)
@@ -958,6 +1103,8 @@ static int licm_one(struct ir_func *fn)
             }
         }
 
+        if (g_licm_late)
+            licm_late_budget(fn, &d, lins, nlins, inl_ins, inv);
         int nh = 0;
         for (int q = 0; q < nlins; q++)
             if (inv[lins[q]])
@@ -966,7 +1113,7 @@ static int licm_one(struct ir_func *fn)
             /* Nothing left to hoist: the location the loop keeps going
              * back to memory for, if there is one -- alone, since it
              * rewrites the function there and then. */
-            if (!nbatch && !lm.barrier &&
+            if (!nbatch && !lm.barrier && !g_licm_late &&
                 licm_promote(fn, &d, bb, nbb, &L, inl_ins, h, &lm, addr_taken,
                              i2b, &gt))
                 done = 1;
