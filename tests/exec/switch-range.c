@@ -105,6 +105,94 @@ __attribute__((noinline)) u32 out_p(int st)
     return a;
 }
 
+/* States made by arithmetic, not constants -- `(x != 0) << 1`, an and, an
+ * offset (what arithmetic if-conversion leaves) -- inside the table, so
+ * the bound goes; and the same shapes reaching past it, `b & 7` against
+ * four cases and `(x != 0) << 2`, which must still find default. */
+__attribute__((noinline)) u32 arith_in(void)
+{
+    int st = 0; u32 a = 0;
+    for (int i = 0; i < N; i++) {
+        u32 b = in[i];
+        switch (st) {
+        case 0: a += 1; st = (b != '~') << 1; break;     /* 0 or 2 */
+        case 1: a += 3; st = (int)(b & 1) + 2; break;    /* 2 or 3 */
+        case 2: a += 5; st = (int)(b & 3); break;        /* 0..3 */
+        case 3: a += 7; st = 1; break;
+        default: a += 1000; break;
+        }
+    }
+    return a * 4 + (u32)st;
+}
+
+__attribute__((noinline)) u32 arith_out(void)
+{
+    int st = 0; u32 a = 0;
+    for (int i = 0; i < N; i++) {
+        u32 b = in[i];
+        switch (st) {
+        case 0: a += 1; st = (int)(b & 7); break;        /* up to 7 */
+        case 1: a += 3; st = 2; break;
+        case 2: a += 5; st = 3; break;
+        case 3: a += 7; st = 0; break;
+        default: a += 1000; st = 0; break;
+        }
+    }
+    return a * 4 + (u32)st;
+}
+
+__attribute__((noinline)) u32 arith_shl(void)
+{
+    int st = 0; u32 a = 0;
+    for (int i = 0; i < N; i++) {
+        u32 b = in[i];
+        switch (st) {
+        case 0: a += 1; st = (b == 'a' || b == '~') << 2; break;  /* 0 or 4 */
+        case 1: a += 3; st = 2; break;
+        case 2: a += 5; st = 3; break;
+        case 3: a += 7; st = 0; break;
+        default: a += 1000; st = 1; break;
+        }
+    }
+    return a * 4 + (u32)st;
+}
+
+static u32 arith_shl_ref(void)
+{
+    int st = 0; u32 a = 0;
+    for (int i = 0; i < N; i++) {
+        u32 b = in[i];
+        if (st == 0) { a += 1; st = (b == 'a' || b == '~') << 2; }
+        else if (st == 1) { a += 3; st = 2; }
+        else if (st == 2) { a += 5; st = 3; }
+        else if (st == 3) { a += 7; st = 0; }
+        else { a += 1000; st = 1; }
+    }
+    return a * 4 + (u32)st;
+}
+
+static u32 arith_ref(int out)
+{
+    int st = 0; u32 a = 0;
+    for (int i = 0; i < N; i++) {
+        u32 b = in[i];
+        if (!out) {
+            if (st == 0) { a += 1; st = (b != '~') << 1; }
+            else if (st == 1) { a += 3; st = (int)(b & 1) + 2; }
+            else if (st == 2) { a += 5; st = (int)(b & 3); }
+            else if (st == 3) { a += 7; st = 1; }
+            else a += 1000;
+        } else {
+            if (st == 0) { a += 1; st = (int)(b & 7); }
+            else if (st == 1) { a += 3; st = 2; }
+            else if (st == 2) { a += 5; st = 3; }
+            else if (st == 3) { a += 7; st = 0; }
+            else { a += 1000; st = 0; }
+        }
+    }
+    return a * 4 + (u32)st;
+}
+
 int main(void)
 {
     int bad = 0;
@@ -126,5 +214,8 @@ int main(void)
     if (out_p(7) != 100 + 1 + 2 + 4 + 8 + 1 || out_p(-1) != 116 ||
         out_p(2) != 4 + 8 + 1 + 2 + 4 + 8)
         bad |= 8;
+    if (arith_in() != arith_ref(0)) bad |= 16;
+    if (arith_out() != arith_ref(1)) bad |= 32;
+    if (arith_shl() != arith_shl_ref()) bad |= 64;
     return bad ? bad : 42;
 }

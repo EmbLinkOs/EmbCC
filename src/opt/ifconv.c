@@ -588,6 +588,170 @@ static int ifconv_arith(struct ir_func *fn)
     return done;
 }
 
+/* ---- a branch whose arm changes nothing when it is not taken ----------
+ *
+ *     if (val) { nums += val; val = 0; }
+ *
+ * is the same as doing both unconditionally: when val is 0, nums + 0 is
+ * nums and val = 0 is what val was. So the branch can go, and with it a
+ * compare-and-branch (taken half the time) for two ALU operations that
+ * run anyway. clang does this; it needs no conditional execution at all,
+ * so every target gains. In the IR the shape is phi destruction's:
+ *
+ *     d = mov x  ...  brz c -> L ;  d = op x, c  ...  L:
+ *
+ * -- the shape once the joins' copies are made (it runs late, from opt.c,
+ * for that reason) -- and each instruction of the arm must, with c == 0,
+ * give its
+ * destination exactly what it holds when the arm is skipped: `op(x, c)`
+ * for an op whose identity is 0 (add, or, xor; sub, shl, shr with c on
+ * the right), where d is x itself or was just copied from x; or 0 where d
+ * was just copied from c. EMBCC_NO_IFIDENT turns it off. */
+static int ifid_skip_copy(const struct ir_func *fn, int b, int d, int *src)
+{
+    /* the last definition of d in b's block, before the branch at b, and
+     * that nothing after it rewrites its source before b */
+    for (int n = b - 1; n >= 0; n--) {
+        const struct ir_ins *i = &fn->ins[n];
+        if (i->op == IR_LABEL || i->op == IR_JMP || i->op == IR_BRZ ||
+            i->op == IR_BRNZ || i->op == IR_SWITCH || i->op == IR_RET ||
+            i->op == IR_CALL || i->op == IR_ASM)
+            return 0;
+        if (def_target(i) != d)
+            continue;
+        if (i->op != IR_MOV || i->a < 0)
+            return 0;
+        for (int m = n + 1; m < b; m++)
+            if (def_target(&fn->ins[m]) == i->a)
+                return 0;
+        *src = i->a;
+        return 1;
+    }
+    return 0;
+}
+
+/* As ifid_skip_copy, for an edge block [eb, ee) of copies: d's last
+ * definition there, a copy, and its source not written after it in the
+ * block (nor, being copies of the branch-time values, before the block:
+ * the block runs straight from the branch). */
+static int ifid_edge_copy(const struct ir_func *fn, int eb, int ee, int d,
+                          int *src)
+{
+    for (int n = ee - 1; n > eb; n--) {
+        const struct ir_ins *i = &fn->ins[n];
+        if (def_target(i) != d)
+            continue;
+        if (i->op != IR_MOV || i->a < 0)
+            return 0;
+        for (int m = eb + 1; m < ee; m++)
+            if (def_target(&fn->ins[m]) == i->a)
+                return 0;
+        *src = i->a;
+        return 1;
+    }
+    return 0;
+}
+
+int pass_ifident(struct ir_func *fn)
+{
+    static int off = -1;
+    if (off < 0)
+        off = getenv("EMBCC_NO_IFIDENT") != NULL;
+    if (off)
+        return 0;
+    int changed = 0;
+    for (int b = 0; b < fn->nins; b++) {
+        struct ir_ins *br = &fn->ins[b];
+        if (br->op != IR_BRZ || br->a < 0 || br->a >= fn->nvregs)
+            continue;
+        int c = br->a, e = b + 1;
+        while (e < fn->nins && fn->ins[e].op != IR_LABEL)
+            e++;
+        /* the arm ends at a run of labels: the target is one of them, or
+         * an edge block of copies that jumps to one of them (the copies
+         * the not-taken path makes, before later passes hoist them) */
+        int hit = 0, eb = -1, ee = -1;
+        for (int l = e; l < fn->nins && fn->ins[l].op == IR_LABEL; l++)
+            if (fn->ins[l].label == br->label)
+                hit = 1;
+        if (!hit && e < fn->nins) {
+            for (int l = 0; l < fn->nins; l++)
+                if (fn->ins[l].op == IR_LABEL && fn->ins[l].label == br->label) {
+                    eb = l;
+                    break;
+                }
+            for (int l = eb + 1; eb >= 0 && l < fn->nins; l++) {
+                const struct ir_ins *t = &fn->ins[l];
+                if (t->op == IR_MOV || t->op == IR_CONST)
+                    continue;
+                if (t->op == IR_JMP)
+                    for (int j = e; j < fn->nins && fn->ins[j].op == IR_LABEL; j++)
+                        if (fn->ins[j].label == t->label) {
+                            ee = l;
+                            hit = 1;
+                        }
+                break;
+            }
+        }
+        if (e >= fn->nins || e == b + 1 || !hit || e - b - 1 > 4)
+            continue;
+        int ok = 1;
+        for (int n = b + 1; n < e && ok; n++) {
+            const struct ir_ins *i = &fn->ins[n];
+            int d = def_target(i);
+            if (d < 0 || i->flt || i->w > br->w || i->dst != d || d == c) {
+                ok = 0;
+                break;
+            }
+            /* nothing in the arm may feed another instruction of it, nor
+             * redefine c */
+            for (int m = b + 1; m < n; m++) {
+                int dm = def_target(&fn->ins[m]);
+                if (dm == i->a || (!i->imm_b && dm == i->b))
+                    ok = 0;
+            }
+            if (!ok)
+                break;
+            int src;
+#define SKIPCOPY(d_, s_) (ee >= 0 ? ifid_edge_copy(fn, eb, ee, d_, s_) \
+                                  : ifid_skip_copy(fn, b, d_, s_))
+            if (i->op == IR_CONST && i->imm == 0) {
+                ok = SKIPCOPY(d, &src) && src == c;
+            } else if (!i->imm_b &&
+                       (i->op == IR_ADD || i->op == IR_OR || i->op == IR_XOR ||
+                        i->op == IR_SUB || i->op == IR_SHL ||
+                        i->op == IR_SHR)) {
+                int comm = i->op == IR_ADD || i->op == IR_OR || i->op == IR_XOR;
+                int x = i->b == c ? i->a : comm && i->a == c ? i->b : -1;
+                ok = x >= 0 && x != c &&
+                     (x == d || (SKIPCOPY(d, &src) && src == x));
+            } else
+                ok = 0;
+        }
+#undef SKIPCOPY
+        /* with an edge block, every copy in it must be one of the arm's
+         * (a copy the arm does not make would be lost on the taken path) */
+        for (int l = eb + 1; ok && ee >= 0 && l < ee; l++) {
+            int dl = def_target(&fn->ins[l]), mine = 0;
+            for (int n = b + 1; n < e; n++)
+                if (def_target(&fn->ins[n]) == dl)
+                    mine = 1;
+            if (!mine)
+                ok = 0;
+        }
+        if (!ok)
+            continue;
+        /* the branch goes: a dead constant in its place */
+        int lab = br->label;
+        (void)lab;
+        memset(br, 0, sizeof *br);
+        br->op = IR_CONST; br->dst = fn->nvregs++; br->w = 4;
+        br->a = br->b = -1; br->synth = 1;
+        changed = 1;
+    }
+    return changed;
+}
+
 int pass_ifconv(struct ir_func *fn)
 {
     int changed = 0, guard = 0;

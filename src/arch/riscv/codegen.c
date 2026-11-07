@@ -248,6 +248,8 @@ struct rv_fn {
     char *nshr;          /* per vreg: a narrow high-word shift (narrow_shr) */
     char *sx;            /* per vreg, RV64 only: already the sign-extension
                           * of its low 32 bits (sext_map) */
+    char *nn;            /* per vreg, RV64: a 32-bit value in [0, 2^31),
+                          * its own zero-extension too (nn_map) */
     char *f4;            /* per vreg, RV64: a float whose slot fdone writes
                           * four bytes of (slot_bytes) */
     long *slot;          /* per-vreg byte offset from sp, -1 for none */
@@ -1087,6 +1089,39 @@ static long sret_bytes(int wb, int retsize)
 {
     return retsize > 2 * wb ? retsize : 0;
 }
+
+/* A struct return's register units (target_ret_units), as IR_RET below
+ * places them: the hardware-float convention's flattened fields, or the
+ * packed XLEN words of one that fits a0:a1 -- whole words only. */
+int rv_ret_units(const struct ir_func *fn, int *off, int *size, int *fp,
+                 int max)
+{
+    if (!fn->ret_abi.is_struct || getenv("EMBCC_NO_RETPARTS"))
+        return 0;
+    int w = target_ptr_size();
+    struct rv_flat rfl;
+    if (rv_ret_hf(1, fn->ret_abi.is_float, fn->ret_abi.size, fn->ret_abi.ty,
+                  &rfl)) {
+        if (rfl.n > max)
+            return 0;
+        for (int q = 0; q < rfl.n; q++) {
+            off[q] = (int)rfl.off[q];
+            size[q] = rfl.size[q];
+            fp[q] = rfl.fp[q];
+        }
+        return rfl.n;
+    }
+    long sz = fn->ret_abi.size;
+    if (sret_bytes(w, (int)sz) || sz % w || sz / w > max || sz <= 0)
+        return 0;
+    for (int q = 0; (long)q * w < sz; q++) {
+        off[q] = q * w;
+        size[q] = w;
+        fp[q] = 0;
+    }
+    return (int)(sz / w);
+}
+
 
 /* ...and so does a SCALAR wider than two registers, of which there is
  * one: RV32's long double, binary128 in four words. The psABI returns it
@@ -1929,8 +1964,9 @@ static int sext_def(const struct rv_fn *F, const struct ir_ins *i,
         return SX(i->a);
     case IR_CMP:
         return 1;                             /* 0 or 1 */
-    case IR_LOAD:
-        return i->size < 4 || (i->size == 4 && i->sign);
+    case IR_LOAD:                             /* lw for any 32-bit value */
+        return i->size < 4 || (i->size == 4 &&
+                               (i->sign || (i->w <= 4 && !getenv("EMBCC_NO_RVLW"))));
     case IR_LDVAR:
         /* A four-byte local in a register is read with a plain move
          * (rv_ldvar_plain): it holds what STVAR's sign extension, or the
@@ -1962,9 +1998,22 @@ static char *sext_map(const struct rv_fn *F)
     int nv = fn->nvregs, changed = 1;
     char *sx = xmalloc((size_t)(nv ? nv : 1));
     /* Optimistic, then cut down to a fixed point: a loop's accumulator
-     * is sign-extended if its entry value and its update both are. */
+     * is sign-extended if its entry value and its update both are.
+     *
+     * A four-byte integer local is too: a store to it in a register
+     * sign-extends (IR_STVAR), its slot is read with lw, and a parameter
+     * arrives extended -- the psABI's rule, unsigned included. Anything
+     * else that assigns one goes through sext_def below. `lo` and `hi`
+     * of a quicksort had every index derived from them re-extended. */
+    int asm_ = 0;
+    for (int n = 0; n < fn->nins; n++)
+        if (fn->ins[n].op == IR_ASM || fn->ins[n].op == IR_LANDING)
+            asm_ = 1;
     for (int v = 0; v < nv; v++)
-        sx[v] = v >= fn->nvars;               /* a local is not a value */
+        sx[v] = v >= fn->nvars ||
+                (!asm_ && !getenv("EMBCC_NO_RVSXVAR") &&
+                 fn->locals[v].size == 4 && fn->locals[v].is_int_or_ptr &&
+                 !fn->locals[v].is_scalar_float);
     while (changed) {
         changed = 0;
         for (int n = 0; n < fn->nins; n++) {
@@ -1979,6 +2028,83 @@ static char *sext_map(const struct rv_fn *F)
         }
     }
     return sx;
+}
+
+/* Which 32-bit values lie in [0, 2^31): sign-extended with bit 31 clear,
+ * so the register is the zero-extension as well, and `(unsigned long)u`
+ * of one is the register itself. `s & 511` indexing a table of u32 was
+ * shifted up 32 and back down before every probe. Every definition must
+ * say so, optimistic first as sext_map is. */
+static int nn_def(const struct rv_fn *F, const struct ir_ins *i,
+                  const char *nn)
+{
+    struct ir_func *fn = F->fn;
+    int nv = fn->nvregs;
+#define NN(v) ((v) >= 0 && (v) < nv && nn[v])
+    if (i->flt)
+        return 0;
+    switch (i->op) {
+    case IR_CONST: {
+        long long v = imm_val(F, i);
+        return i->w <= 4 && v >= 0 && v <= 0x7fffffffLL;
+    }
+    case IR_MOV:
+        return NN(i->a);
+    case IR_AND:
+        if (i->w > 4)
+            return 0;
+        if (i->imm_b)
+            return imm_val(F, i) >= 0 && imm_val(F, i) <= 0x7fffffffLL;
+        return NN(i->a) || NN(i->b);
+    case IR_OR: case IR_XOR:
+        if (i->w > 4)
+            return 0;
+        if (i->imm_b)
+            return NN(i->a) && imm_val(F, i) >= 0 &&
+                   imm_val(F, i) <= 0x7fffffffLL;
+        return NN(i->a) && NN(i->b);
+    case IR_SHR:                              /* srliw by 1 or more */
+        return i->w == 4 && !i->sign && i->imm_b && (i->imm & 31) >= 1;
+    case IR_LOAD:
+        return i->size < 4 && !i->sign;       /* lbu, lhu */
+    case IR_EXT:
+        return i->size < 4 && !i->sign;       /* zext.b, zext.h */
+    case IR_CMP:
+        return 1;
+    case IR_SELECT:
+        return i->w <= 4 && NN(i->b) && NN(i->c);
+    default:
+        return 0;
+    }
+#undef NN
+}
+
+static char *nn_map(const struct rv_fn *F)
+{
+    struct ir_func *fn = F->fn;
+    int nv = fn->nvregs, changed = 1;
+    char *nn = xmalloc((size_t)(nv ? nv : 1));
+    for (int v = 0; v < nv; v++)
+        nn[v] = v >= fn->nvars;
+    while (changed) {
+        changed = 0;
+        for (int n = 0; n < fn->nins; n++) {
+            const struct ir_ins *i = &fn->ins[n];
+            if (i->op == IR_STVAR || i->dst < 0 || i->dst >= nv || !nn[i->dst])
+                continue;
+            if (!nn_def(F, i, nn)) {
+                nn[i->dst] = 0;
+                changed = 1;
+            }
+        }
+    }
+    /* an asm or a landing pad writes temps def_target does not report */
+    for (int n = 0; n < fn->nins; n++)
+        if (fn->ins[n].op == IR_ASM || fn->ins[n].op == IR_LANDING) {
+            memset(nn, 0, (size_t)(nv ? nv : 1));
+            break;
+        }
+    return nn;
 }
 
 /* `v`, already in register `r`, as a 32-bit value a 64-bit instruction
@@ -5482,7 +5608,13 @@ static void gen_ins(struct rv_fn *F, int n)
         long off;
         int addr = mem_base(F, i->a, i->memoff, &off, ADDR);
         int d = wreg(F, i->dst, ACC);
-        rv_load(t, d, addr, (int)off, i->size, i->sign, F->xlen);
+        /* A u32 read as a 32-bit value is `lw` at RV64 too: the register
+         * then holds the sign-extension every 32-bit value is kept in,
+         * and its readers need no sext.w. `lwu` only for a load that
+         * makes a 64-bit value (w 8). */
+        int lsign = i->sign || (F->xlen == 64 && i->size == 4 && i->w <= 4 &&
+                                !getenv("EMBCC_NO_RVLW"));
+        rv_load(t, d, addr, (int)off, i->size, lsign, F->xlen);
         wrote(F, i->dst, d);
         return;
     }
@@ -5496,6 +5628,24 @@ static void gen_ins(struct rv_fn *F, int n)
     case IR_EXT: {
         int ra_ = rdr(F, i->a, ACC);
         int d = wreg(F, i->dst, ACC);
+        /* `(long)i` of an int the register already holds sign-extended
+         * (an addw's, a lw's, x & 3's -- sext_map): the register is the
+         * answer. Every array index of an int at RV64 had a sext.w. */
+        if (F->sx && i->size == 4 && i->sign && i->a >= 0 &&
+            i->a < fn->nvregs && F->sx[i->a] && !getenv("EMBCC_NO_RVSX")) {
+            if (d != ra_)
+                rv_mv(t, d, ra_);
+            wrote(F, i->dst, d);
+            return;
+        }
+        /* `(unsigned long)u` of a u32 in [0, 2^31): the same register */
+        if (F->nn && i->size == 4 && !i->sign && i->a >= 0 &&
+            i->a < fn->nvregs && F->nn[i->a]) {
+            if (d != ra_)
+                rv_mv(t, d, ra_);
+            wrote(F, i->dst, d);
+            return;
+        }
         ext_reg(F, d, ra_, i->size, i->sign);
         wrote(F, i->dst, d);
         return;
@@ -5580,7 +5730,39 @@ static void gen_ins(struct rv_fn *F, int n)
         return;
 
     case IR_RET:
-        if (i->a >= 0) {
+        if (i->nrp) {
+            /* The struct as its units (pass_sroa): each part straight
+             * into its register. The first goes through a scratch, so a
+             * part already in the other's register is not overwritten. */
+            int off[2], sz[2], fpu[2], part[2] = { i->b, i->c };
+            int n = rv_ret_units(fn, off, sz, fpu, 2);
+            if (n != i->nrp)
+                internal_error("riscv: a struct returned as %d units the "
+                               "convention does not have", i->nrp);
+            int nf = 0, ng = 0, dst[2];
+            for (int q = 0; q < n; q++)
+                dst[q] = fpu[q] ? RV_FA0 + nf++ : RV_A0 + ng++;
+            /* only when the second part sits where the first must go */
+            int clash = n == 2 && part[1] >= 0 &&
+                        ((fpu[0] && in_freg(F, part[1]) &&
+                          F->floc[part[1]] == dst[0]) ||
+                         (!fpu[0] && in_reg(F, part[1]) &&
+                          F->loc[part[1]] == dst[0]));
+            for (int q = 0; q < n; q++) {
+                int to = q == 0 && clash ? (fpu[0] ? RV_FT0 : SCR) : dst[q];
+                if (fpu[q])
+                    fload_v(F, part[q], to, sz[q] == 8);
+                else if (F->xlen == 64 && sz[q] == 4) {
+                    int r = rd32(F, part[q], to);
+                    if (r != to) rv_mv(t, to, r);
+                } else
+                    rd(F, part[q], to);
+            }
+            if (clash) {
+                if (fpu[0]) rv_fmv(t, dst[0], RV_FT0, sz[0] == 8);
+                else rv_mv(t, dst[0], SCR);
+            }
+        } else if (i->a >= 0) {
             struct rv_flat rfl;
             if (rv_ret_hf(fn->ret_abi.is_struct, fn->ret_abi.is_float,
                           fn->ret_abi.size, fn->ret_abi.ty, &rfl)) {
@@ -7052,6 +7234,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
                 F.tail[i] = 1;
             }
     F.sx = xlen == 64 ? sext_map(&F) : NULL;
+    F.nn = xlen == 64 && !getenv("EMBCC_NO_RVNN") ? nn_map(&F) : NULL;
     F.leaf = 1;
     for (i = 0; i < fn->nins; i++)
         if ((fn->ins[i].op == IR_CALL && !(F.tail && F.tail[i])) ||
@@ -7734,6 +7917,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
     free(F.wide);
     free(F.w16);
     free(F.sx);
+    free(F.nn);
     free(F.nshr);
     free(F.loc);
     free(F.floc);

@@ -7122,6 +7122,7 @@ static int embcc_main(int argc, char **argv)
         t_isa_a32 = target_arm_a32();
 #endif
         target_set_calls_helper(backend_get(a)->op_calls_helper);
+        target_set_ret_units(backend_get(a)->ret_units);
 #if FAMILY_BUILT(mips)
         /* the MIPS encoder's byte order, for the code generator and the
          * inline and file-scope assemblers alike */

@@ -618,6 +618,49 @@ int target_switch_table_min(void)
     return 4;
 }
 
+/* A function's struct return as the register units it travels in
+ * (pass_sroa's ret parts): each unit's byte offset and size, and whether
+ * it is a float register's. 0 where the target returns it otherwise, or
+ * has no such lowering (the backend must implement IR_RET's nrp). */
+static int (*g_ret_units)(const struct ir_func *fn, int *off, int *size,
+                          int *fp, int max);
+void target_set_ret_units(int (*f)(const struct ir_func *, int *, int *,
+                                   int *, int))
+{
+    g_ret_units = f;
+}
+/* Does the target return a struct as its register units at all? What
+ * makes splitting an object read or written whole pay (pass_sroa): with
+ * the units the return costs nothing; without them the syncing at every
+ * boundary is the whole of it, and on ARMv6-M and SPARC it grew libc. */
+int target_has_ret_units(void)
+{
+    if (!g_ret_units)
+        return 0;
+#if FAMILY_BUILT(arm)
+    if (target_get() == TARGET_THUMB && target_thumb_arch() == 6)
+        return 0;
+#endif
+    return 1;
+}
+
+/* Which whole-object uses pass_sroa may split across: 0 none, 1 only a
+ * return that becomes its units (free), 2 every boundary. Xtensa's syncing
+ * at the others cost more than it saved (+0.7% of lib/libc), where its
+ * returns as units saved 0.6%. */
+int target_sroa_boundaries(void)
+{
+    if (!target_has_ret_units())
+        return 0;
+    return target_get() == TARGET_XTENSA ? 1 : 2;
+}
+
+int target_ret_units(const struct ir_func *fn, int *off, int *size, int *fp,
+                     int max)
+{
+    return g_ret_units ? g_ret_units(fn, off, size, fp, max) : 0;
+}
+
 int target_switch_table_min_os(void)
 {
     return target_get() == TARGET_THUMB && target_thumb_arch() >= 7 ? 4 : 6;
@@ -1055,6 +1098,32 @@ int target_thumb_cmse(void) { return target_thumb_v8m() && g_thumb_cmse; }
 void target_set_thumb_cmse(int on) { g_thumb_cmse = on ? 1 : 0; }
 int target_thumb_fpu(void) { return g_thumb_fpu; }
 void target_set_thumb_fpu(int on) { g_thumb_fpu = on ? 1 : 0; }
+
+/* -mcpu='s value, as thumb/options.c read it: here, with the other target
+ * state, because .ARM.attributes (thumb/attrs.c) asks for it in tools
+ * that link no option parser (embls). */
+static const char *g_arm_cpu_name;
+void target_set_arm_cpu(const char *cpu) { g_arm_cpu_name = cpu; }
+
+/* The part -mcpu= named, when it is one of the Cortex-M parts this
+ * backend knows: what .ARM.attributes' Tag_CPU_name then says, as clang
+ * and GCC write it (llvm-objdump picks its decoder from that name, and
+ * read a Cortex-M7's FPv5 code as <unknown> under "7E-M"). NULL
+ * otherwise: the architecture is named instead, as nothing more was
+ * claimed. */
+const char *target_arm_cpu_name(void)
+{
+    static const char *const known[] = {
+        "cortex-m0", "cortex-m0plus", "cortex-m1", "cortex-m3", "cortex-m4",
+        "cortex-m7", "cortex-m23", "cortex-m33", "cortex-m35p",
+        "cortex-m52", "cortex-m55", "cortex-m85", NULL
+    };
+    for (int k = 0; g_arm_cpu_name && known[k]; k++)
+        if (strcmp(g_arm_cpu_name, known[k]) == 0)
+            return known[k];
+    return NULL;
+}
+
 int target_thumb_fpu_dp(void) { return g_thumb_fpu && g_thumb_fpu_dp; }
 void target_set_thumb_fpu_dp(int on) { g_thumb_fpu_dp = on ? 1 : 0; }
 int target_thumb_hard_abi(void) { return g_thumb_hard; }

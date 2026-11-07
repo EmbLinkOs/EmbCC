@@ -653,3 +653,406 @@ int pass_punfwd(struct ir_func *fn)
     free(d.cnt); free(d.ins);
     return changed;
 }
+
+/* ==== constants stored to a global, forwarded across blocks (-O2) =========
+ *
+ * A filter that fills its coefficient table at the top of the function --
+ * `for (i = 0; i < 16; i++) h[i] = ...;`, unrolled into sixteen stores of
+ * constants -- and reads it in the loop after had a load of h[k] at every
+ * tap, where clang multiplies by the constant. storefwd stops at a join
+ * and at a global. This is the global, across blocks: a forward
+ * must-available dataflow whose facts are "bytes [off, off+size) of
+ * global g hold the constant c", gen'd by a store of a constant to g at a
+ * constant offset and killed by
+ *
+ *   - a store to g at another or an unknown offset (its overlapping facts,
+ *     or all of g's), a memcpy or memzero into g, a vector store into g;
+ *   - a store through an address whose object is not known: everything;
+ *   - a call that may write memory, inline asm, an atomic: everything.
+ *
+ * An address's object is followed through its definitions -- gaddr, addr,
+ * a copy, an add of a value that is not itself an address -- and a name
+ * defined more than once (a walking pointer) has one only when every
+ * definition agrees. A load the facts cover exactly becomes the constant,
+ * truncated and extended as the load reads it. EMBCC_NO_GSTOREFWD turns
+ * it off. */
+struct gsf { const struct global *g; long off, val; int size; };
+/* Offsets in program order within a block: a name the block has defined
+ * by gaddr, a copy, or an add of a constant to an address it knows has
+ * that offset from here on -- a fully unrolled pointer walk reuses one
+ * name for every copy, which no single-definition map can follow. */
+struct gloc { long *off; int *st; int stamp; };
+struct gsfs { struct gsf *f; int n; };
+
+#define GSF_MAX 96
+#define GB_UNK  ((const struct global *)-1)    /* any object at all */
+#define GB_LOC  ((const struct global *)-2)    /* a frame object */
+
+static int gsf_find(const struct gsfs *s, const struct global *g, long off,
+                    int size)
+{
+    for (int k = 0; k < s->n; k++)
+        if (s->f[k].g == g && s->f[k].off == off && s->f[k].size == size)
+            return k;
+    return -1;
+}
+
+static void gsf_kill(struct gsfs *s, const struct global *g, long off,
+                     int size, int all)
+{
+    int j = 0;
+    for (int k = 0; k < s->n; k++) {
+        struct gsf *f = &s->f[k];
+        int hit = g == GB_UNK || (f->g == g &&
+                  (all || (f->off < off + size && off < f->off + f->size)));
+        if (!hit)
+            s->f[j++] = *f;
+    }
+    s->n = j;
+}
+
+/* One instruction's effect on the facts; with `rw`, a load they cover
+ * becomes its constant. Returns 1 when it rewrote. */
+static int gsf_off(const struct gloc *lc, const long *go, const char *gk,
+                   int v, long *off)
+{
+    if (lc->st[v] == lc->stamp) { *off = lc->off[v]; return 1; }
+    if (lc->st[v] == -lc->stamp) return 0;       /* redefined unknown here */
+    if (gk[v]) { *off = go[v]; return 1; }
+    return 0;
+}
+
+static void gsf_def(struct ir_func *fn, const struct defs *d,
+                    struct gloc *lc, const long *go, const char *gk,
+                    const struct ir_ins *i)
+{
+    int nv = fn->nvregs, t = def_target(i);
+    if (t < 0 || t >= nv)
+        return;
+    long o, c = 0;
+    if (i->op == IR_GADDR) { lc->off[t] = 0; lc->st[t] = lc->stamp; return; }
+    if (i->op == IR_MOV && i->a >= 0 && i->a < nv &&
+        gsf_off(lc, go, gk, i->a, &o)) {
+        lc->off[t] = o; lc->st[t] = lc->stamp; return;
+    }
+    if (i->op == IR_ADD && i->a >= 0 && i->a < nv &&
+        gsf_off(lc, go, gk, i->a, &o)) {
+        int have = 0;
+        if (i->imm_b) { c = i->imm; have = 1; }
+        else if (i->b >= 0 && i->b < nv && d->cnt[i->b] == 1 &&
+                 d->ins[i->b] >= 0 && fn->ins[d->ins[i->b]].op == IR_CONST) {
+            c = fn->ins[d->ins[i->b]].imm; have = 1;
+        }
+        if (have) { lc->off[t] = o + c; lc->st[t] = lc->stamp; return; }
+    }
+    lc->st[t] = -lc->stamp;
+}
+
+static int gsf_step(struct ir_func *fn, const struct defs *d,
+                    const struct global **gb, const long *go, const char *gk,
+                    struct gloc *lc, struct gsfs *s, struct ir_ins *i, int rw)
+{
+    int nv = fn->nvregs;
+#define BASE(v) ((v) >= 0 && (v) < nv ? gb[v] : GB_UNK)
+    switch (i->op) {
+    case IR_STORE: {
+        const struct global *g = BASE(i->a);
+        if (i->vol) { gsf_kill(s, GB_UNK, 0, 0, 1); return 0; }
+        if (g == GB_LOC) return 0;
+        if (!g || g == GB_UNK) { gsf_kill(s, GB_UNK, 0, 0, 1); return 0; }
+        long off;
+        if (!gsf_off(lc, go, gk, i->a, &off)) {
+            gsf_kill(s, g, 0, 0, 1);
+            return 0;
+        }
+        off += i->memoff > 0 ? i->memoff : 0;
+        gsf_kill(s, g, off, i->size, 0);
+        long c;
+        if (i->b >= 0 && i->b < nv && d->cnt[i->b] == 1 && d->ins[i->b] >= 0 &&
+            fn->ins[d->ins[i->b]].op == IR_CONST && s->n < GSF_MAX &&
+            i->size >= 1 && i->size <= 8) {
+            c = fn->ins[d->ins[i->b]].imm;
+            if (i->size < 8)
+                c = (long)((unsigned long)c & ((1UL << (8 * i->size)) - 1));
+            s->f[s->n].g = g; s->f[s->n].off = off; s->f[s->n].size = i->size;
+            s->f[s->n].val = c; s->n++;
+        }
+        return 0;
+    }
+    case IR_MEMCPY: case IR_MEMZERO: case IR_VSTORE: {
+        const struct global *g = BASE(i->a);
+        if (g == GB_LOC) return 0;
+        if (!g || g == GB_UNK || i->vol) gsf_kill(s, GB_UNK, 0, 0, 1);
+        else gsf_kill(s, g, 0, 0, 1);
+        return 0;
+    }
+    case IR_CALL:
+        if (!i->indirect && i->callee && i->callee->inf_no_write)
+            return 0;
+        gsf_kill(s, GB_UNK, 0, 0, 1);
+        return 0;
+    case IR_ASM: case IR_XCHG: case IR_XADD: case IR_ARMW: case IR_CAS:
+    case IR_CAS16: case IR_VA_START: case IR_LANDING:
+        gsf_kill(s, GB_UNK, 0, 0, 1);
+        return 0;
+    case IR_LOAD: {
+        if (!rw || i->vol || i->flash || i->dst < 0 || i->size < 1 ||
+            i->size > 8 || i->w > 8)
+            return 0;
+        const struct global *g = BASE(i->a);
+        long off;
+        if (!g || g == GB_UNK || g == GB_LOC || !gsf_off(lc, go, gk, i->a, &off))
+            return 0;
+        off += i->memoff > 0 ? i->memoff : 0;
+        int k = gsf_find(s, g, off, i->size);
+        if (k < 0)
+            return 0;
+        unsigned long v = (unsigned long)s->f[k].val;
+        if (i->size < 8 && i->sign && (v >> (8 * i->size - 1)) & 1)
+            v |= ~0UL << (8 * i->size);          /* sign-extended */
+        if (i->w == 4)
+            v &= 0xffffffffUL;
+        int dst = i->dst, w = i->w, line = i->line, col = i->col;
+        memset(i, 0, sizeof *i);
+        i->op = IR_CONST; i->dst = dst; i->w = w ? w : 4; i->imm = (long)v;
+        i->a = i->b = -1; i->line = line; i->col = col;
+        return 1;
+    }
+    default:
+        return 0;
+    }
+#undef BASE
+}
+
+int pass_gstorefwd(struct ir_func *fn)
+{
+    if (fn->nins == 0 || getenv("EMBCC_NO_GSTOREFWD"))
+        return 0;
+    int nv = fn->nvregs;
+    struct defs d;
+    compute_defs(fn, &d);
+    /* the object each address-valued vreg points into, and its constant
+     * offset when one definition chain fixes it */
+    const struct global **gb = xcalloc((size_t)(nv ? nv : 1), sizeof *gb);
+    long *go = xcalloc((size_t)(nv ? nv : 1), sizeof *go);
+    char *gk = xcalloc((size_t)(nv ? nv : 1), 1);
+    char *any = xcalloc((size_t)(nv ? nv : 1), 1);
+    int pw = target_ptr_size(), have = 0;
+    for (int round = 0, grew = 1; grew && round < 16; round++) {
+        grew = 0;
+        for (int n = 0; n < fn->nins; n++) {
+            const struct ir_ins *i = &fn->ins[n];
+            int t = def_target(i);
+            if (t < 0 || t >= nv || gb[t] == GB_UNK)
+                continue;
+            /* NULL: not an address as far as this knows (a constant, an
+             * index -- or a loaded pointer, which a store through then
+             * treats as unknown) */
+            const struct global *b = NULL;
+            if (i->op == IR_GADDR) {
+                b = i->glob && !i->glob->is_tls && i->glob->ty &&
+                    !i->glob->ty->is_volatile ? i->glob : GB_UNK;
+            } else if (i->op == IR_ADDR)
+                b = GB_LOC;
+            else if (i->op == IR_MOV && i->a >= 0 && i->a < nv)
+                b = any[i->a] ? gb[i->a] : NULL;
+            else if (i->op == IR_ADD && i->w == pw && !i->flt) {
+                const struct global *ba = i->a >= 0 && i->a < nv && any[i->a]
+                                          ? gb[i->a] : NULL;
+                const struct global *bb = !i->imm_b && i->b >= 0 &&
+                                          i->b < nv && any[i->b]
+                                          ? gb[i->b] : NULL;
+                if (ba && !bb) b = ba;
+                else if (bb && !ba) b = bb;
+                else if (ba && bb) b = GB_UNK;
+            }
+            if (b == NULL)
+                continue;                /* no address here (yet) */
+            if (!any[t]) {
+                any[t] = 1; gb[t] = b; grew = 1; have = 1;
+            } else if (gb[t] != b) {
+                gb[t] = GB_UNK; grew = 1;
+            }
+        }
+    }
+    /* Validation, to a fixed point: each definition of a vreg given an
+     * object must derive that same object from the final map -- a copy of
+     * an undecided value (a loaded pointer) does not. And a value computed
+     * from an address by anything but a copy or an add of a non-address
+     * is TAINTED: `&g + (x - (long)&g)` points wherever x does, so adding
+     * a tainted value gives no object. */
+    char *taint = xcalloc((size_t)(nv ? nv : 1), 1);
+    for (int round = 0, ch = 1; ch && round < 32; round++) {
+        ch = 0;
+        for (int n = 0; n < fn->nins; n++) {
+            struct ir_ins *i = &fn->ins[n];
+            int t = def_target(i);
+            if (t < 0 || t >= nv)
+                continue;
+            int addr_in = 0, taint_in = 0;
+            struct opnds o;
+            value_opnds(i, &o);
+            for (int q = 0; q < o.n; q++) {
+                int v = o.v[q];
+                if (v < 0 || v >= nv) continue;
+                if (any[v] && gb[v]) addr_in = 1;
+                if (taint[v]) taint_in = 1;
+            }
+            int keeps = i->op == IR_MOV || (i->op == IR_ADD && i->w == pw);
+            if (!keeps && (addr_in || taint_in) && !taint[t] &&
+                i->op != IR_LOAD) {
+                taint[t] = 1; ch = 1;
+            }
+            if (!any[t] || gb[t] == GB_UNK)
+                continue;
+            const struct global *bd = GB_UNK;
+            if (i->op == IR_GADDR && i->glob && !i->glob->is_tls &&
+                i->glob->ty && !i->glob->ty->is_volatile)
+                bd = i->glob;
+            else if (i->op == IR_ADDR)
+                bd = GB_LOC;
+            else if (i->op == IR_MOV && i->a >= 0 && i->a < nv && any[i->a])
+                bd = gb[i->a];
+            else if (i->op == IR_ADD && i->w == pw && !i->flt) {
+                int ia = i->a >= 0 && i->a < nv && any[i->a];
+                int ib = !i->imm_b && i->b >= 0 && i->b < nv && any[i->b];
+                int ta = i->a >= 0 && i->a < nv && taint[i->a];
+                int tb = !i->imm_b && i->b >= 0 && i->b < nv && taint[i->b];
+                if (ia && !ib && !tb) bd = gb[i->a];
+                else if (ib && !ia && !ta) bd = gb[i->b];
+            }
+            if (bd != gb[t]) {
+                gb[t] = GB_UNK; ch = 1;
+            }
+        }
+    }
+    free(taint);
+    /* any address-valued vreg nothing decided is unknown */
+    for (int v = 0; v < nv; v++)
+        if (!any[v])
+            gb[v] = NULL;
+    for (int v = 0; v < nv; v++) {
+        if (!gb[v] || gb[v] == GB_UNK || gb[v] == GB_LOC || d.cnt[v] != 1 ||
+            d.ins[v] < 0)
+            continue;
+        const struct ir_ins *i = &fn->ins[d.ins[v]];
+        if (i->op == IR_GADDR) { go[v] = 0; gk[v] = 1; }
+    }
+    for (int round = 0, grew = 1; grew && round < 8; round++) {
+        grew = 0;
+        for (int v = 0; v < nv; v++) {
+            if (gk[v] || !gb[v] || gb[v] == GB_UNK || gb[v] == GB_LOC ||
+                d.cnt[v] != 1 || d.ins[v] < 0)
+                continue;
+            const struct ir_ins *i = &fn->ins[d.ins[v]];
+            long c;
+            if (i->op == IR_MOV && i->a >= 0 && i->a < nv && gk[i->a]) {
+                go[v] = go[i->a]; gk[v] = 1; grew = 1;
+            } else if (i->op == IR_ADD && i->a >= 0 && i->a < nv && gk[i->a]) {
+                if (i->imm_b) c = i->imm;
+                else if (i->b >= 0 && i->b < nv && d.cnt[i->b] == 1 &&
+                         d.ins[i->b] >= 0 && fn->ins[d.ins[i->b]].op == IR_CONST)
+                    c = fn->ins[d.ins[i->b]].imm;
+                else
+                    continue;
+                go[v] = go[i->a] + c; gk[v] = 1; grew = 1;
+            }
+        }
+    }
+    int changed = 0;
+    if (!have) {
+        free(gb); free(go); free(gk); free(any); free_defs(&d);
+        return 0;
+    }
+    int nbb, *l2b;
+    struct bb *bb = build_cfg(fn, &nbb, &l2b);
+    int *order = xmalloc((size_t)nbb * sizeof *order), norder;
+    compute_rpo(bb, nbb, order, &norder);
+    struct gsfs *out = xcalloc((size_t)nbb, sizeof *out);
+    char *done = xcalloc((size_t)nbb, 1);
+    struct gsf *buf = xmalloc(GSF_MAX * sizeof *buf);
+    for (int b = 0; b < nbb; b++)
+        out[b].f = xmalloc(GSF_MAX * sizeof *out[b].f);
+    struct gloc lc = { xcalloc((size_t)(nv ? nv : 1), sizeof(long)),
+                       xcalloc((size_t)(nv ? nv : 1), sizeof(int)), 0 };
+    for (int iter = 0, again = 1; again && iter < 32; iter++) {
+        again = 0;
+        for (int oi = 0; oi < norder; oi++) {
+            int b = order[oi];
+            struct gsfs s = { buf, 0 };
+            int first = 1;
+            if (b != 0)
+                for (int q = 0; q < bb[b].npred; q++) {
+                    int p = bb[b].pred[q];
+                    if (!done[p])
+                        continue;             /* optimistic: not seen yet */
+                    if (first) {
+                        memcpy(s.f, out[p].f, (size_t)out[p].n * sizeof *s.f);
+                        s.n = out[p].n;
+                        first = 0;
+                        continue;
+                    }
+                    int j = 0;
+                    for (int k = 0; k < s.n; k++) {
+                        int h = gsf_find(&out[p], s.f[k].g, s.f[k].off,
+                                         s.f[k].size);
+                        if (h >= 0 && out[p].f[h].val == s.f[k].val)
+                            s.f[j++] = s.f[k];
+                    }
+                    s.n = j;
+                }
+            lc.stamp++;
+            for (int n = bb[b].start; n < bb[b].end; n++) {
+                gsf_step(fn, &d, gb, go, gk, &lc, &s, &fn->ins[n], 0);
+                gsf_def(fn, &d, &lc, go, gk, &fn->ins[n]);
+            }
+            int same = done[b] && out[b].n == s.n;
+            for (int k = 0; same && k < s.n; k++)
+                same = out[b].f[k].g == s.f[k].g && out[b].f[k].off == s.f[k].off &&
+                       out[b].f[k].size == s.f[k].size &&
+                       out[b].f[k].val == s.f[k].val;
+            if (!same) {
+                memcpy(out[b].f, s.f, (size_t)s.n * sizeof *s.f);
+                out[b].n = s.n;
+                done[b] = 1;
+                again = 1;
+            }
+        }
+    }
+    /* the rewrite, from each block's entry facts */
+    for (int oi = 0; oi < norder; oi++) {
+        int b = order[oi];
+        struct gsfs s = { buf, 0 };
+        int first = 1;
+        if (b != 0)
+            for (int q = 0; q < bb[b].npred; q++) {
+                int p = bb[b].pred[q];
+                if (!done[p]) { s.n = 0; first = 0; break; }
+                if (first) {
+                    memcpy(s.f, out[p].f, (size_t)out[p].n * sizeof *s.f);
+                    s.n = out[p].n;
+                    first = 0;
+                    continue;
+                }
+                int j = 0;
+                for (int k = 0; k < s.n; k++) {
+                    int h = gsf_find(&out[p], s.f[k].g, s.f[k].off, s.f[k].size);
+                    if (h >= 0 && out[p].f[h].val == s.f[k].val)
+                        s.f[j++] = s.f[k];
+                }
+                s.n = j;
+            }
+        lc.stamp++;
+        for (int n = bb[b].start; n < bb[b].end; n++) {
+            changed |= gsf_step(fn, &d, gb, go, gk, &lc, &s, &fn->ins[n], 1);
+            gsf_def(fn, &d, &lc, go, gk, &fn->ins[n]);
+        }
+    }
+    for (int b = 0; b < nbb; b++)
+        free(out[b].f);
+    free(out); free(done); free(buf); free(order); free(l2b);
+    free(lc.off); free(lc.st);
+    free_cfg(bb, nbb);
+    free(gb); free(go); free(gk); free(any); free_defs(&d);
+    return changed;
+}

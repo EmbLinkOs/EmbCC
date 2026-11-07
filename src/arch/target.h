@@ -337,6 +337,13 @@ void target_set_jump_tables(int on);   /* -f[no-]jump-tables */
 int target_switch_clusters(void);
 int target_switch_table_min(void);
 int target_switch_table_min_os(void);
+struct ir_func;
+int target_ret_units(const struct ir_func *fn, int *off, int *size, int *fp,
+                     int max);
+int target_has_ret_units(void);
+int target_sroa_boundaries(void);
+void target_set_ret_units(int (*f)(const struct ir_func *, int *, int *,
+                                   int *, int));
 /* Does the current backend lower this op to a CALL of a runtime helper
  * (soft-float arithmetic, a 64-bit divide, an __int128 op)? The
  * allocator already knows -- it is the backend's own predicate, handed
@@ -353,6 +360,26 @@ int target_op_calls_helper(const struct ir_ins *i);
 void target_set_calls_helper(int (*pred)(const struct ir_ins *i));
 int t_op_calls_helper(const struct ir_ins *i);      /* src/arch/thumb/codegen.c */
 int rv_op_calls_helper(const struct ir_ins *i);     /* src/arch/riscv/codegen.c */
+int rv_ret_units(const struct ir_func *fn, int *off, int *size, int *fp,
+                 int max);                          /* src/arch/riscv/codegen.c */
+int a64_ret_units(const struct ir_func *fn, int *off, int *size, int *fp,
+                  int max);                         /* src/arch/aarch64/codegen.c */
+int x86_ret_units(const struct ir_func *fn, int *off, int *size, int *fp,
+                  int max);                         /* src/arch/x86_64/codegen.c */
+int t_ret_units(const struct ir_func *fn, int *off, int *size, int *fp,
+                int max);                           /* src/arch/thumb/codegen.c */
+int la_ret_units(const struct ir_func *fn, int *off, int *size, int *fp,
+                 int max);                          /* src/arch/loongarch/codegen.c */
+int mips_ret_units(const struct ir_func *fn, int *off, int *size, int *fp,
+                   int max);                        /* src/arch/mips/codegen.c */
+int ppc_ret_units(const struct ir_func *fn, int *off, int *size, int *fp,
+                  int max);                         /* src/arch/ppc/codegen.c */
+int xt_ret_units(const struct ir_func *fn, int *off, int *size, int *fp,
+                 int max);                          /* src/arch/xtensa/codegen.c */
+int tc_ret_units(const struct ir_func *fn, int *off, int *size, int *fp,
+                 int max);                          /* src/arch/tricore/codegen.c */
+int rx_ret_units(const struct ir_func *fn, int *off, int *size, int *fp,
+                 int max);                          /* src/arch/rx/codegen.c */
 int a64_op_calls_helper(const struct ir_ins *i);    /* src/arch/aarch64/codegen.c */
 int mips_op_calls_helper(const struct ir_ins *i);   /* src/arch/mips/codegen.c */
 int la_op_calls_helper(const struct ir_ins *i);     /* src/arch/loongarch/codegen.c */
@@ -497,6 +524,8 @@ void target_set_thumb_em(int on);
  * object ends up claiming an ABI it does not implement. -mfpu= stays
  * refused until both halves are right. */
 int target_thumb_fpu(void);
+const char *target_arm_cpu_name(void);   /* -mcpu=, a known Cortex-M part, or NULL */
+void target_set_arm_cpu(const char *cpu);
 void target_set_thumb_fpu(int on);
 /* ...and whether that unit computes in DOUBLE precision as well:
  * FPv5-D16, the Cortex-M7's (-mfpu=fpv5-d16). Then `double` arithmetic,

@@ -335,7 +335,14 @@ int pass_lvn(struct ir_func *fn)
         enum ir_op op0 = i->op;
         if (op0 == IR_LABEL) { vntab_clear(&tb); continue; } /* block boundary */
         struct vn k;
-        if (i->dst >= 0 && vn_key(i, memver, &k)) {
+        /* A literal assigned to a name that is assigned again -- a loop's
+         * accumulator starting at 0 -- is not a value to share: a later
+         * `k = 0` made a copy of it would tie the index to the float
+         * accumulator's register and hide the 0 from folding. Each such
+         * literal stays a literal (a copy costs what it does). */
+        int lit_var = op0 == IR_CONST && i->dst >= 0 && i->dst < fn->nvregs &&
+                      d.cnt[i->dst] != 1 && !getenv("EMBCC_NO_LVNLIT");
+        if (i->dst >= 0 && !lit_var && vn_key(i, memver, &k)) {
             int hit = vntab_find(&tb, &k);
             if (hit >= 0 && hit != i->dst) {
                 vn_to_mov(i, hit);

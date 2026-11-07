@@ -286,6 +286,69 @@ static void unr_lbl_cb(int *p, void *ctx)
  *
  * A rotated loop runs its body before its first test, so the count is
  * exactly how many times the body runs on every entry. */
+/* How many of the body's instructions stay instructions in a full unroll
+ * (above): those not computed, purely, from the loop's counters and
+ * constants. A counter is a name defined once before the loop by a
+ * constant (or a copy of one) and once inside by itself plus a constant. */
+static int unr_unfolded(struct ir_func *fn, struct defs *d,
+                        const struct unrloop *L, int nbody)
+{
+    int nv = fn->nvregs;
+    char *k = xcalloc((size_t)(nv ? nv : 1), 1);
+    /* the counters */
+    for (int m = L->lo; m < L->hi; m++) {
+        const struct ir_ins *i = &fn->ins[m];
+        int t = def_target(i);
+        if (t < 0 || t >= nv || d->cnt[t] != 2)
+            continue;
+        const struct ir_ins *in = i;
+        if (i->op == IR_MOV && i->a >= 0 && i->a < nv && d->cnt[i->a] == 1 &&
+            d->ins[i->a] >= 0)
+            in = &fn->ins[d->ins[i->a]];
+        long c;
+        if (in->op != IR_ADD || in->a != t || !(in->imm_b ||
+            get_const(fn, d, in->b, &c)))
+            continue;
+        int ok = 0;
+        for (int q = 0; q < fn->nins; q++)
+            if ((q < L->lo || q >= L->hi) && def_target(&fn->ins[q]) == t) {
+                const struct ir_ins *o = &fn->ins[q];
+                long c0;
+                ok = o->op == IR_CONST || o->op == IR_GADDR ||
+                     (o->op == IR_MOV && (get_const(fn, d, o->a, &c0) ||
+                      (o->a >= 0 && o->a < nv && d->cnt[o->a] == 1 &&
+                       d->ins[o->a] >= 0 &&
+                       (fn->ins[d->ins[o->a]].op == IR_GADDR ||
+                        fn->ins[d->ins[o->a]].op == IR_ADDR))));
+            }
+        if (ok)
+            k[t] = 1;
+    }
+    int folded = 0;
+    for (int m = L->body_lo; m < L->cmp_ins; m++) {
+        struct ir_ins *i = &fn->ins[m];
+        int t = def_target(i);
+        if (t < 0 || t >= nv || !is_pure(i->op) || i->op == IR_LOAD)
+            continue;
+        if (i->op == IR_CONST) { k[t] = 1; folded++; continue; }
+        struct opnds o;
+        value_opnds(i, &o);
+        int all = !o.over && o.n > 0;
+        for (int q = 0; q < o.n && all; q++) {
+            int v = o.v[q];
+            long c;
+            all = v >= 0 && v < nv && (k[v] || get_const(fn, d, v, &c));
+        }
+        if (all) {
+            k[t] = 1;
+            folded++;
+        }
+    }
+    free(k);
+    int left = nbody - folded;
+    return left > 1 ? left : 1;
+}
+
 static long unr_trip(struct ir_func *fn, struct defs *d, const struct unrloop *L)
 {
     for (int m = 0; m < fn->nins; m++) {
@@ -450,7 +513,15 @@ static int unroll_one(struct ir_func *fn, char *seen, int nseen)
      * unr_trip). The compare must have no reader past the loop, since it
      * goes too. */
     long T = getenv("EMBCC_NO_FULLUNROLL") ? 0 : unr_trip(fn, &d, &L);
-    if (T < 2 || T > UNROLL_FULL_TRIP || T * nbody > UNROLL_FULL_BODY)
+    /* What a copy will cost once folded: an instruction computed only
+     * from the loop's counters and constants is a constant in every copy
+     * of a full unroll -- a table fill's `(i * 1234 % 8000) - 4000` is
+     * ten instructions, and sixteen copies of it are sixteen constants and
+     * sixteen stores. The budget is for what is left. */
+    int nleft = nbody;
+    if (T >= 2 && T <= UNROLL_FULL_TRIP && !getenv("EMBCC_NO_FOLDCOST"))
+        nleft = unr_unfolded(fn, &d, &L, nbody);
+    if (T < 2 || T > UNROLL_FULL_TRIP || T * nleft > UNROLL_FULL_BODY)
         T = 0;
     for (int m = 0; T && m < fn->nins; m++)
         if ((m < L.lo || m >= L.hi) &&

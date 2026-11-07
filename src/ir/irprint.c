@@ -263,6 +263,12 @@ static void print_ins(struct outbuf *b, const struct ir_unit *u,
         ob_str(b, "ret");
         if (i->a >= 0)
             ob_fmt(b, " %%%d", i->a);
+        if (i->nrp >= 1)
+            ob_fmt(b, " parts(%%%d", i->b);
+        if (i->nrp >= 2)
+            ob_fmt(b, ", %%%d", i->c);
+        if (i->nrp >= 1)
+            ob_str(b, ")");
         break;
     case IR_JMP:
         ob_fmt(b, "jmp L%d", i->label);
