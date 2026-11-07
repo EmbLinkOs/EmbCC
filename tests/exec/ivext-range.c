@@ -116,6 +116,34 @@ static i64 edge_ref(void)
     return s;
 }
 
+/* The object rule: an index into a declared array is not a counter at
+ * all -- an interpreter's pc, set from the data -- but x[pc + k] cannot
+ * wrap without leaving the array, so it reads from one base. Offsets
+ * both ways, at both ends of the array. */
+static const unsigned char code[] = { 3, 9, 0, 7, 1, 4, 2, 8, 6, 5, 0, 11 };
+
+__attribute__((noinline)) i64 objidx(void)
+{
+    i64 s = 0;
+    int pc = 2;
+    for (int n = 0; n < 40; n++) {
+        s += code[pc - 2] * 7 + code[pc - 1] * 3 + code[pc] + code[pc + 1] * 5;
+        pc = code[pc + 1] % 9 + 2;
+    }
+    return s;
+}
+
+static i64 objidx_ref(void)
+{
+    i64 s = 0;
+    long pc = 2;
+    for (int n = 0; n < 40; n++) {
+        s += code[pc - 2] * 7 + code[pc - 1] * 3 + code[pc] + code[pc + 1] * 5;
+        pc = code[pc + 1] % 9 + 2;
+    }
+    return s;
+}
+
 /* An inner loop entered again with what its last exit left in i: the
  * first entry runs i up to 100, and each later one once more, to 199 --
  * past what the constant before it says. i + INT_MAX - 150 wraps from
@@ -180,5 +208,6 @@ int main(void)
     if (top2() != top2_ref()) return 6;
     if (reent() != reent_ref()) return 7;
     if (edge() != edge_ref()) return 8;
+    if (objidx() != objidx_ref()) return 9;
     return 42;
 }

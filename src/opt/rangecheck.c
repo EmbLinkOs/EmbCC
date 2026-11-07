@@ -521,6 +521,97 @@ static int ivx_const_b(struct ir_func *fn, const struct defs *d,
     return 0;
 }
 
+/* The object rule (pass_ivext): `ext(x + c)` that only ever indexes a
+ * declared object -- `prog[pc + 1]` -- is `ext(x) + c` too. Were x + c to
+ * wrap, the index would be at least 2^31 - |c| elements from the object's
+ * start, and forming that pointer is undefined whatever -fwrapv says
+ * about the add: a program that runs as written never does it. So every
+ * use of the extension must be `base + ext` or `base + (ext << k)` (k <= 3)
+ * with base the address of a global or local of at most 1 GiB. The
+ * interpreter's three operand reads then share one base. */
+static int ivx_objbase(struct ir_func *fn, const struct defs *d, int b)
+{
+    if (b < 0 || b >= fn->nvregs || d->cnt[b] != 1 || d->ins[b] < 0)
+        return 0;
+    const struct ir_ins *i = &fn->ins[d->ins[b]];
+    long sz = -1;
+    if (i->op == IR_GADDR && i->glob && i->glob->ty &&
+        (i->glob->ty->kind == TY_ARRAY || i->glob->ty->complete))
+        sz = ty_size(i->glob->ty);      /* 0 for an array of unknown size */
+    else if (i->op == IR_ADDR && i->a >= 0 && i->a < fn->nvars)
+        sz = fn->locals[i->a].size;
+    return sz > 0 && sz <= (1L << 30);
+}
+
+static int ivx_objects(struct ir_func *fn, const struct defs *d,
+                       const int *uses, const int *user, char *eadd,
+                       long long *ec)
+{
+    int nv = fn->nvregs, changed = 0;
+    /* bad[v]: some read of v is not an object index (for a shift: of
+     * its result) */
+    char *bad = xcalloc((size_t)(nv ? nv : 1), 1);
+    char *shl = xcalloc((size_t)(nv ? nv : 1), 1);
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        long long k;
+        if (i->op == IR_SHL && i->w == 8 && i->a >= 0 && i->a < nv &&
+            i->dst >= 0 && i->dst < nv && d->cnt[i->dst] == 1 &&
+            ivx_const_b(fn, (struct defs *)d, i, &k) && k >= 0 && k <= 3)
+            shl[i->dst] = 1;
+    }
+    for (int n = 0; n < fn->nins; n++) {
+        struct ir_ins *i = &fn->ins[n];
+        struct opnds o;
+        value_opnds(i, &o);
+        for (int q = 0; q < o.n; q++) {
+            int v = o.v[q];
+            if (v < 0 || v >= nv)
+                continue;
+            int ok = 0;
+            if (i->op == IR_ADD && i->w == 8 && !i->flt && !i->imm_b &&
+                ((i->a == v && ivx_objbase(fn, d, i->b)) ||
+                 (i->b == v && ivx_objbase(fn, d, i->a))))
+                ok = 1;
+            else if (i->op == IR_SHL && i->a == v && i->dst >= 0 &&
+                     i->dst < nv && shl[i->dst])
+                ok = 2;                 /* if the shift's uses are */
+            if (!ok)
+                bad[v] = 1;
+        }
+    }
+    /* a shift is good when its own uses are */
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        if (i->op == IR_SHL && i->dst >= 0 && i->dst < nv && shl[i->dst] &&
+            bad[i->dst] && i->a >= 0 && i->a < nv)
+            bad[i->a] = 1;
+    }
+    for (int n = 0; n < fn->nins; n++) {
+        struct ir_ins *e = &fn->ins[n];
+        if (e->op != IR_EXT || e->size != 4 || !e->sign || e->w != 8 ||
+            e->dst < 0 || e->dst >= nv || bad[e->dst] || !uses[e->dst] ||
+            e->a < 0 || e->a >= nv || d->cnt[e->a] != 1 || d->ins[e->a] < 0 ||
+            uses[e->a] != 1 || user[e->a] != n)
+            continue;
+        struct ir_ins *x = &fn->ins[d->ins[e->a]];
+        long long c;
+        if ((x->op != IR_ADD && x->op != IR_SUB) || x->w != 4 || x->flt ||
+            x->a < 0 || x->a >= nv || !ivx_const_b(fn, (struct defs *)d, x, &c))
+            continue;
+        if (x->op == IR_SUB) c = -c;
+        if (c == 0 || c < -(1 << 20) || c > (1 << 20))
+            continue;
+        x->op = IR_EXT; x->size = 4; x->sign = 1; x->w = 8;
+        x->imm_b = 0; x->imm = 0; x->b = -1;
+        eadd[n] = 1;
+        ec[n] = c;
+        changed = 1;
+    }
+    free(bad); free(shl);
+    return changed;
+}
+
 int pass_ivext(struct ir_func *fn)
 {
     if (target_ptr_size() != 8 || fn->nins == 0 || getenv("EMBCC_NO_IVEXT"))
@@ -532,11 +623,11 @@ int pass_ivext(struct ir_func *fn)
     struct bb *bb = build_cfg(fn, &nbb, &l2b);
     int *order = xmalloc((size_t)nbb * sizeof *order), norder;
     compute_rpo(bb, nbb, order, &norder);
-    if (norder != nbb) {
-        free(order); free(l2b); free_cfg(bb, nbb);
-        return 0;
-    }
-    compute_idom(bb, order, norder);
+    /* unreachable blocks leave dominance partial: the loop rule needs it,
+     * the object rule does not */
+    int cfg_whole = norder == nbb;
+    if (cfg_whole)
+        compute_idom(bb, order, norder);
     struct defs d;
     compute_defs(fn, &d);
     int nv = fn->nvregs ? fn->nvregs : 1;
@@ -564,7 +655,8 @@ int pass_ivext(struct ir_func *fn)
     for (int b = 0; b < nbb; b++)
         for (int n = bb[b].start; n < bb[b].end; n++)
             i2b[n] = b;
-    for (int p = 0; p < nbb; p++) {
+    changed |= ivx_objects(fn, &d, uses, user, eadd, ec);
+    for (int p = 0; p < nbb && cfg_whole; p++) {
         if (bb[p].end <= bb[p].start)
             continue;
         struct ir_ins *br = &fn->ins[bb[p].end - 1];
