@@ -618,6 +618,29 @@ int target_switch_table_min(void)
     return 4;
 }
 
+/* A function's struct return as the register units it travels in
+ * (pass_sroa's ret parts): each unit's byte offset and size, and whether
+ * it is a float register's. 0 where the target returns it otherwise, or
+ * has no such lowering (the backend must implement IR_RET's nrp). */
+static int (*g_ret_units)(const struct ir_func *fn, int *off, int *size,
+                          int *fp, int max);
+void target_set_ret_units(int (*f)(const struct ir_func *, int *, int *,
+                                   int *, int))
+{
+    g_ret_units = f;
+}
+int target_ret_units(const struct ir_func *fn, int *off, int *size, int *fp,
+                     int max)
+{
+    if (g_ret_units)
+        return g_ret_units(fn, off, size, fp, max);
+#if FAMILY_BUILT(riscv)
+    if (target_get() == TARGET_RISCV32 || target_get() == TARGET_RISCV64)
+        return rv_ret_units(fn, off, size, fp, max);
+#endif
+    return 0;
+}
+
 int target_switch_table_min_os(void)
 {
     return target_get() == TARGET_THUMB && target_thumb_arch() >= 7 ? 4 : 6;

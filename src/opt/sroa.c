@@ -554,7 +554,7 @@ int pass_aggcopy(struct ir_func *fn)
 /* The places a split object is read or written whole (pass_sroa, step 3):
  * instruction n (-1: the function's entry), the slot, and whether the
  * pieces go to memory before it and come back after. */
-struct sroa_bnd { int n, L, before, after; };
+struct sroa_bnd { int n, L, before, after, ret; };
 struct sroa_bnds { struct sroa_bnd *e; int n, cap; };
 
 static void sroa_bnd_add(struct sroa_bnds *b, int n, int L, int before,
@@ -566,6 +566,7 @@ static void sroa_bnd_add(struct sroa_bnds *b, int n, int L, int before,
     }
     b->e[b->n].n = n; b->e[b->n].L = L;
     b->e[b->n].before = before; b->e[b->n].after = after;
+    b->e[b->n].ret = 0;
     b->n++;
 }
 
@@ -641,6 +642,30 @@ static void sroa_sync(struct ir_func *fn, const struct sroa_bnds *bl,
             for (int f = 0; f < nfld[b->L]; f++)
                 sroa_xfer(fn, &nb, b->L,
                           &fld[(size_t)b->L * SROA_MAX_FIELDS + f], 1, &at);
+        }
+        for (int k = 0; k < bl->n; k++) {
+            const struct sroa_bnd *b = &bl->e[k];
+            if (b->n != n || !b->ret || !cand[b->L])
+                continue;
+            /* the pieces as values, in the units' order */
+            int uo[2], us[2], uf[2], tv[2];
+            int nu = target_ret_units(fn, uo, us, uf, 2);
+            for (int q = 0; q < nu; q++) {
+                const struct sroa_fld *F = NULL;
+                for (int f = 0; f < nfld[b->L]; f++)
+                    if (fld[(size_t)b->L * SROA_MAX_FIELDS + f].off == uo[q])
+                        F = &fld[(size_t)b->L * SROA_MAX_FIELDS + f];
+                tv[q] = fn->nvregs++;
+                struct ir_ins *e = ib_push(&nb);
+                memset(e, 0, sizeof *e);
+                e->op = IR_LDVAR; e->dst = tv[q]; e->a = F->nl; e->b = -1;
+                e->size = F->size; e->w = F->size < 4 ? 4 : F->size;
+                e->line = at.line; e->synth = 1;
+            }
+            at.a = -1;
+            at.nrp = nu;
+            at.b = tv[0];
+            at.c = nu > 1 ? tv[1] : -1;
         }
         *ib_push(&nb) = at;
         for (int k = 0; k < bl->n; k++) {
@@ -916,6 +941,32 @@ int pass_sroa(struct ir_func *fn, int report_refusals)
      * and loaded after each whole write. An argument built for one call
      * -- two fields stored, the call -- was two stores before and is two
      * stores, an address and two loads after. */
+    /* A return whose register units (target_ret_units) are exactly the
+     * pieces costs nothing: the pieces go back as values, IR_RET's nrp,
+     * and the slot is not written for it at all. */
+    for (int k = 0; k < bl.n; k++) {
+        int L = bl.e[k].L, n = bl.e[k].n;
+        if (!cand[L] || n < 0 || fn->ins[n].op != IR_RET ||
+            getenv("EMBCC_NO_RETPARTS"))
+            continue;
+        int uo[2], us[2], uf[2];
+        int nu = target_ret_units(fn, uo, us, uf, 2);
+        if (nu < 1 || nu != nfld[L])
+            continue;
+        int all = 1;
+        for (int q = 0; q < nu && all; q++) {
+            int hit = 0;
+            for (int f = 0; f < nfld[L]; f++)
+                if (fld[(size_t)L * SROA_MAX_FIELDS + f].off == uo[q] &&
+                    fld[(size_t)L * SROA_MAX_FIELDS + f].size == us[q])
+                    hit = 1;
+            all = hit;
+        }
+        if (all) {
+            bl.e[k].ret = 1;
+            bl.e[k].before = 0;
+        }
+    }
     for (int k = 0; k < bl.n; k++) {
         int L = bl.e[k].L;
         if (cand[L])

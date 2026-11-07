@@ -1090,6 +1090,39 @@ static long sret_bytes(int wb, int retsize)
     return retsize > 2 * wb ? retsize : 0;
 }
 
+/* A struct return's register units (target_ret_units), as IR_RET below
+ * places them: the hardware-float convention's flattened fields, or the
+ * packed XLEN words of one that fits a0:a1 -- whole words only. */
+int rv_ret_units(const struct ir_func *fn, int *off, int *size, int *fp,
+                 int max)
+{
+    if (!fn->ret_abi.is_struct || getenv("EMBCC_NO_RETPARTS"))
+        return 0;
+    int w = target_ptr_size();
+    struct rv_flat rfl;
+    if (rv_ret_hf(1, fn->ret_abi.is_float, fn->ret_abi.size, fn->ret_abi.ty,
+                  &rfl)) {
+        if (rfl.n > max)
+            return 0;
+        for (int q = 0; q < rfl.n; q++) {
+            off[q] = (int)rfl.off[q];
+            size[q] = rfl.size[q];
+            fp[q] = rfl.fp[q];
+        }
+        return rfl.n;
+    }
+    long sz = fn->ret_abi.size;
+    if (sret_bytes(w, (int)sz) || sz % w || sz / w > max || sz <= 0)
+        return 0;
+    for (int q = 0; (long)q * w < sz; q++) {
+        off[q] = q * w;
+        size[q] = w;
+        fp[q] = 0;
+    }
+    return (int)(sz / w);
+}
+
+
 /* ...and so does a SCALAR wider than two registers, of which there is
  * one: RV32's long double, binary128 in four words. The psABI returns it
  * the way it would pass it as a first argument -- by reference -- so the
@@ -5697,7 +5730,39 @@ static void gen_ins(struct rv_fn *F, int n)
         return;
 
     case IR_RET:
-        if (i->a >= 0) {
+        if (i->nrp) {
+            /* The struct as its units (pass_sroa): each part straight
+             * into its register. The first goes through a scratch, so a
+             * part already in the other's register is not overwritten. */
+            int off[2], sz[2], fpu[2], part[2] = { i->b, i->c };
+            int n = rv_ret_units(fn, off, sz, fpu, 2);
+            if (n != i->nrp)
+                internal_error("riscv: a struct returned as %d units the "
+                               "convention does not have", i->nrp);
+            int nf = 0, ng = 0, dst[2];
+            for (int q = 0; q < n; q++)
+                dst[q] = fpu[q] ? RV_FA0 + nf++ : RV_A0 + ng++;
+            /* only when the second part sits where the first must go */
+            int clash = n == 2 && part[1] >= 0 &&
+                        ((fpu[0] && in_freg(F, part[1]) &&
+                          F->floc[part[1]] == dst[0]) ||
+                         (!fpu[0] && in_reg(F, part[1]) &&
+                          F->loc[part[1]] == dst[0]));
+            for (int q = 0; q < n; q++) {
+                int to = q == 0 && clash ? (fpu[0] ? RV_FT0 : SCR) : dst[q];
+                if (fpu[q])
+                    fload_v(F, part[q], to, sz[q] == 8);
+                else if (F->xlen == 64 && sz[q] == 4) {
+                    int r = rd32(F, part[q], to);
+                    if (r != to) rv_mv(t, to, r);
+                } else
+                    rd(F, part[q], to);
+            }
+            if (clash) {
+                if (fpu[0]) rv_fmv(t, dst[0], RV_FT0, sz[0] == 8);
+                else rv_mv(t, dst[0], SCR);
+            }
+        } else if (i->a >= 0) {
             struct rv_flat rfl;
             if (rv_ret_hf(fn->ret_abi.is_struct, fn->ret_abi.is_float,
                           fn->ret_abi.size, fn->ret_abi.ty, &rfl)) {

@@ -180,6 +180,10 @@ void each_read(struct ir_ins *i, void (*cb)(int *, void *), void *ctx)
     case IR_RET:
         if (i->a >= 0)
             cb(&i->a, ctx);
+        if (i->nrp >= 1)
+            cb(&i->b, ctx);
+        if (i->nrp >= 2)
+            cb(&i->c, ctx);
         break;
     case IR_CALL:
         if (i->indirect)

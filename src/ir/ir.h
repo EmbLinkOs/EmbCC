@@ -302,6 +302,11 @@ struct ir_ins {
     int synth;
     int dst, a, b;
     int c;                   /* IR_CMPXCHG: the third operand (desired value) */
+    int nrp;                 /* IR_RET of a struct as its register units
+                              * (target_ret_units): 1 or 2, the values in b
+                              * and c, `a` -1. 0 everywhere else. Only on a
+                              * target whose hook gives units, after the
+                              * inliner has run (pass_sroa). */
     int mo;                  /* IR_XCHG/XADD/ARMW/CAS/CMPXCHG: the memory
                               * order, IR_MO_*. 0 -- what every hand-built
                               * one has -- is seq_cst, the strongest; a

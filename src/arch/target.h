@@ -337,6 +337,11 @@ void target_set_jump_tables(int on);   /* -f[no-]jump-tables */
 int target_switch_clusters(void);
 int target_switch_table_min(void);
 int target_switch_table_min_os(void);
+struct ir_func;
+int target_ret_units(const struct ir_func *fn, int *off, int *size, int *fp,
+                     int max);
+void target_set_ret_units(int (*f)(const struct ir_func *, int *, int *,
+                                   int *, int));
 /* Does the current backend lower this op to a CALL of a runtime helper
  * (soft-float arithmetic, a 64-bit divide, an __int128 op)? The
  * allocator already knows -- it is the backend's own predicate, handed
@@ -353,6 +358,8 @@ int target_op_calls_helper(const struct ir_ins *i);
 void target_set_calls_helper(int (*pred)(const struct ir_ins *i));
 int t_op_calls_helper(const struct ir_ins *i);      /* src/arch/thumb/codegen.c */
 int rv_op_calls_helper(const struct ir_ins *i);     /* src/arch/riscv/codegen.c */
+int rv_ret_units(const struct ir_func *fn, int *off, int *size, int *fp,
+                 int max);                          /* src/arch/riscv/codegen.c */
 int a64_op_calls_helper(const struct ir_ins *i);    /* src/arch/aarch64/codegen.c */
 int mips_op_calls_helper(const struct ir_ins *i);   /* src/arch/mips/codegen.c */
 int la_op_calls_helper(const struct ir_ins *i);     /* src/arch/loongarch/codegen.c */
