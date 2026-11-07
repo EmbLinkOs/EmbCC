@@ -237,10 +237,22 @@ static const int T_POOL_VA_EXT[8] = { 4, 5, 6, 7, 8, 9, 10, 11 };
 static const int T_POOL_FB_EXT[] = { 0, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11 };
 static const int T_POOL_VA_FB_EXT[] = { 4, 5, 6, 8, 9, 10, 11 };
 
+/* ...and lr last of all (g_t_lr): the prologue saves it in every function
+ * that pushes anything, the return pops the saved copy into pc, and in
+ * between it is an ordinary high register that a call overwrites -- a
+ * thirteenth home, for a value no call crosses. clang's loops use it
+ * (the bench's state machine and FIR spill a value a trip without it).
+ * Not where this file uses lr itself: see t_lr_ok. */
+static const int T_POOL_EXT_LR[T_NPOOL_EXT + 1] = {
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 14
+};
+static const int T_POOL_FB_EXT_LR[] = { 0, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 14 };
+static int g_t_lr;
+
 /* Registers the pair pass (t_pair_alloc) took for the whole function,
  * withheld from the ordinary pool; bit r for rr. */
 static unsigned g_t_taken;
-static int g_t_pool[T_NPOOL_EXT];
+static int g_t_pool[T_NPOOL_EXT + 1];
 
 /* ARMv6-M (v6m.c): r0-r5. Only r0-r7 compute there, and r6/r7 are that
  * lowering's two scratch registers; r5 is the frame base of a function with
@@ -276,6 +288,14 @@ static const int *t_pool_base(const struct ir_func *fn, int *n)
         }
         *n = fn->is_varargs ? 2 : 6;
         return fn->is_varargs ? T6_POOL_VA : T6_POOL;
+    }
+    if (g_t_ext && g_t_lr && !fn->is_varargs) {
+        if (fn->has_alloca) {
+            *n = 12;
+            return T_POOL_FB_EXT_LR;
+        }
+        *n = T_NPOOL_EXT + 1;
+        return T_POOL_EXT_LR;
     }
     if (g_t_ext) {
         if (fn->has_alloca) {
@@ -708,6 +728,39 @@ static int t_call_target_ok(const struct ir_ins *i)
     if (off < 0)
         off = getenv("EMBCC_T_NOINDREG") != NULL;
     return !off && target_thumb_arch() != 6 && !i->call_cmse;
+}
+
+/* May a value of fn live in lr (g_t_lr)? Not where this file writes lr
+ * on its own account: an atomic's status register when none is free, an
+ * indirect call's target, __builtin_return_address, an interrupt
+ * handler's or a CMSE entry's return, branch protection's pac/aut, inline
+ * asm (which may name it), an unwinding landing pad; nor a variadic
+ * function, whose return goes through lr after the save area comes off;
+ * nor ARM state or ARMv6-M. EMBCC_NO_TLR turns it off. */
+static int t_lr_ok(const struct ir_func *fn)
+{
+    static int off = -1;
+    if (off < 0)
+        off = getenv("EMBCC_NO_TLR") != NULL;
+    if (off || t_isa_a32 || target_thumb_arch() == 6 || fn->is_varargs ||
+        fn->cmse_entry || (fn->src && fn->src->is_isr) ||
+        (target_cf() & (CF_PAC | CF_BTI)))
+        return 0;
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        switch (i->op) {
+        case IR_XCHG: case IR_XADD: case IR_ARMW: case IR_CAS: case IR_CAS16:
+        case IR_FRAMEADDR: case IR_ASM: case IR_LANDING:
+            return 0;
+        case IR_CALL:
+            if (i->indirect || i->call_cmse)
+                return 0;
+            break;
+        default:
+            break;
+        }
+    }
+    return 1;
 }
 
 static const struct ra_target THUMB_RA = {
@@ -7410,6 +7463,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         int pused[RA_MAXPOOL], npused = 0;
         int *pair = g_t_pairs ? t_pair_alloc(fn, F.wide, excl, pused, &npused)
                               : NULL;
+        g_t_lr = g_t_ext && t_lr_ok(fn);
         F.loc = ra_allocate(fn, &THUMB_RA, F.wide, excl,
                             F.used_callee, &F.nsave);
         g_t_taken = 0;
@@ -7740,6 +7794,10 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     F.nopush = F.leaf && !F.nsave && !F.nfsave && !F.frame &&
                !fn->is_varargs && !fn->has_alloca &&
                !(F.scr_save & T_SCR_ALL) && !F.isr;
+    /* a value in lr: the return must pop the saved copy into pc */
+    for (int v = 0; F.nopush && F.loc && v < fn->nvregs; v++)
+        if (F.loc[v] == T_LR)
+            F.nopush = 0;
     /* No IR_RET and no tail call is not enough: a void function's body
      * falls off its end into the epilogue, so its last instruction must
      * be a jump or a trap too. */
