@@ -75,6 +75,47 @@ static int rodata_load(const struct ir_func *fn, const int *dhead,
            i->size > 0 && i->memoff + i->size <= g_fold_unit->strs[lab].len;
 }
 
+/* ...and one of the function's own frame: `addr L`, or that plus a
+ * constant, reading inside L. A slot is mapped for as long as the
+ * function runs, so the read cannot fault, and one nothing uses is dead
+ * like any other value. (pass_sroa's loads after a whole-object write
+ * are often this.) */
+static int frame_load(const struct ir_func *fn, const int *dhead,
+                      const int *dnext, const struct ir_ins *i)
+{
+    if (i->op != IR_LOAD || i->vol || i->flash || def_target(i) < 0 ||
+        i->a < 0 || i->a >= fn->nvregs || getenv("EMBCC_NO_FRAMELOAD"))
+        return 0;
+    long off = i->memoff;
+    int v = i->a;
+    for (int hop = 0; hop < 2; hop++) {
+        int n = dhead[v];
+        if (n < 0 || dnext[n] >= 0)
+            return 0;
+        const struct ir_ins *d = &fn->ins[n];
+        if (d->op == IR_ADDR) {
+            int L = d->a;
+            return L >= 0 && L < fn->nvars && off >= 0 && i->size > 0 &&
+                   off + i->size <= fn->locals[L].size &&
+                   !fn->locals[L].is_volatile;
+        }
+        if (d->op != IR_ADD || d->flt || d->a < 0 || d->a >= fn->nvregs)
+            return 0;
+        long k;
+        if (d->imm_b)
+            k = d->imm;
+        else {
+            int c = d->b < 0 || d->b >= fn->nvregs ? -1 : dhead[d->b];
+            if (c < 0 || dnext[c] >= 0 || fn->ins[c].op != IR_CONST)
+                return 0;
+            k = fn->ins[c].imm;
+        }
+        off += k;
+        v = d->a;
+    }
+    return 0;
+}
+
 int pass_dce(struct ir_func *fn)
 {
     int nins = fn->nins, nvr = fn->nvregs;
@@ -125,7 +166,7 @@ int pass_dce(struct ir_func *fn)
          * `(void)v;` is a read the program asked for */
         if (is_pure(i->op) && def_target(i) >= 0 && !i->vol)
             continue;
-        if (rodata_load(fn, dhead, dnext, i))
+        if (rodata_load(fn, dhead, dnext, i) || frame_load(fn, dhead, dnext, i))
             continue;
         live_ins[n] = 1;
     }

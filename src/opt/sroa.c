@@ -165,7 +165,9 @@ static void sroa_report(struct ir_func *fn, int nparams, int nvars,
 {
     if (!remarks_on() || !fn->src)
         return;
-    for (int L = nparams; L < nvars; L++) {
+    for (int L = 0; L < nvars; L++) {
+        if (L < nparams && (!cand[L] || !nfld))
+            continue;               /* a parameter is reported when it splits */
         const struct ir_dbgvar *v = local_var(fn, L);
         if (!v || !v->name || v->name[0] == '<')  /* a compiler-invented name */
             continue;
@@ -549,10 +551,157 @@ int pass_aggcopy(struct ir_func *fn)
     return 1;
 }
 
+/* The places a split object is read or written whole (pass_sroa, step 3):
+ * instruction n (-1: the function's entry), the slot, and whether the
+ * pieces go to memory before it and come back after. */
+struct sroa_bnd { int n, L, before, after, ret; };
+struct sroa_bnds { struct sroa_bnd *e; int n, cap; };
+
+static void sroa_bnd_add(struct sroa_bnds *b, int n, int L, int before,
+                         int after)
+{
+    if (b->n == b->cap) {
+        b->cap = b->cap ? 2 * b->cap : 8;
+        b->e = xrealloc(b->e, (size_t)b->cap * sizeof *b->e);
+    }
+    b->e[b->n].n = n; b->e[b->n].L = L;
+    b->e[b->n].before = before; b->e[b->n].after = after;
+    b->e[b->n].ret = 0;
+    b->n++;
+}
+
+/* Emit one piece's transfer between its variable and the slot:
+ * `addr L (+ off)` and a load or a store of `size` bytes. */
+static void sroa_xfer(struct ir_func *fn, struct ibuf *nb, int L,
+                      const struct sroa_fld *F, int to_mem,
+                      const struct ir_ins *at)
+{
+    int pw = target_ptr_size();
+    int q = fn->nvregs++, t = fn->nvregs++;
+    struct ir_ins *e = ib_push(nb);
+    memset(e, 0, sizeof *e);
+    e->op = IR_ADDR; e->dst = q; e->a = L; e->b = -1; e->w = pw;
+    e->line = at ? at->line : fn->line; e->synth = 1;
+    if (F->off) {
+        int k = fn->nvregs++, q2 = fn->nvregs++;
+        e = ib_push(nb);
+        memset(e, 0, sizeof *e);
+        e->op = IR_CONST; e->dst = k; e->imm = F->off; e->w = pw; e->sign = 1;
+        e->a = e->b = -1; e->synth = 1;
+        e = ib_push(nb);
+        memset(e, 0, sizeof *e);
+        e->op = IR_ADD; e->dst = q2; e->a = q; e->b = k; e->w = pw; e->sign = 1;
+        e->synth = 1;
+        q = q2;
+    }
+    int w = F->size < 4 ? 4 : F->size;
+    if (to_mem) {
+        e = ib_push(nb);
+        memset(e, 0, sizeof *e);
+        e->op = IR_LDVAR; e->dst = t; e->a = F->nl; e->b = -1;
+        e->size = F->size; e->w = w; e->synth = 1;
+        e = ib_push(nb);
+        memset(e, 0, sizeof *e);
+        e->op = IR_STORE; e->dst = -1; e->a = q; e->b = t;
+        e->size = F->size; e->w = w; e->synth = 1;
+    } else {
+        e = ib_push(nb);
+        memset(e, 0, sizeof *e);
+        e->op = IR_LOAD; e->dst = t; e->a = q; e->b = -1;
+        e->size = F->size; e->w = w; e->synth = 1;
+        e = ib_push(nb);
+        memset(e, 0, sizeof *e);
+        e->op = IR_STVAR; e->dst = F->nl; e->a = t; e->b = -1;
+        e->size = F->size; e->w = w; e->synth = 1;
+    }
+}
+
+static void sroa_sync(struct ir_func *fn, const struct sroa_bnds *bl,
+                      const char *cand, const struct sroa_fld *fld,
+                      const int *nfld)
+{
+    struct ibuf nb = { 0, 0, 0 };
+    int *newpos = fn->var_scope_lo
+        ? xmalloc((size_t)(fn->nins + 1) * sizeof *newpos) : NULL;
+    /* the entry's loads: after the function's leading labels */
+    for (int k = 0; k < bl->n; k++) {
+        const struct sroa_bnd *b = &bl->e[k];
+        if (b->n >= 0 || !cand[b->L])
+            continue;
+        for (int f = 0; f < nfld[b->L]; f++)
+            sroa_xfer(fn, &nb, b->L, &fld[(size_t)b->L * SROA_MAX_FIELDS + f],
+                      0, NULL);
+    }
+    for (int n = 0; n < fn->nins; n++) {
+        if (newpos) newpos[n] = nb.n;
+        struct ir_ins at = fn->ins[n];
+        for (int k = 0; k < bl->n; k++) {
+            const struct sroa_bnd *b = &bl->e[k];
+            if (b->n != n || !b->before || !cand[b->L])
+                continue;
+            for (int f = 0; f < nfld[b->L]; f++)
+                sroa_xfer(fn, &nb, b->L,
+                          &fld[(size_t)b->L * SROA_MAX_FIELDS + f], 1, &at);
+        }
+        for (int k = 0; k < bl->n; k++) {
+            const struct sroa_bnd *b = &bl->e[k];
+            if (b->n != n || !b->ret || !cand[b->L])
+                continue;
+            /* the pieces as values, in the units' order */
+            int uo[2], us[2], uf[2], tv[2] = { -1, -1 };
+            int nu = target_ret_units(fn, uo, us, uf, 2);
+            for (int q = 0; q < nu; q++) {
+                const struct sroa_fld *F = NULL;
+                for (int f = 0; f < nfld[b->L]; f++)
+                    if (fld[(size_t)b->L * SROA_MAX_FIELDS + f].off == uo[q])
+                        F = &fld[(size_t)b->L * SROA_MAX_FIELDS + f];
+                tv[q] = fn->nvregs++;
+                struct ir_ins *e = ib_push(&nb);
+                memset(e, 0, sizeof *e);
+                e->op = IR_LDVAR; e->dst = tv[q]; e->a = F->nl; e->b = -1;
+                e->size = F->size; e->w = F->size < 4 ? 4 : F->size;
+                e->line = at.line; e->synth = 1;
+            }
+            at.a = -1;
+            at.nrp = nu;
+            at.b = tv[0];
+            at.c = nu > 1 ? tv[1] : -1;
+        }
+        *ib_push(&nb) = at;
+        for (int k = 0; k < bl->n; k++) {
+            const struct sroa_bnd *b = &bl->e[k];
+            if (b->n != n || !b->after || !cand[b->L])
+                continue;
+            for (int f = 0; f < nfld[b->L]; f++)
+                sroa_xfer(fn, &nb, b->L,
+                          &fld[(size_t)b->L * SROA_MAX_FIELDS + f], 0, &at);
+        }
+    }
+    if (newpos) {
+        newpos[fn->nins] = nb.n;
+        for (int v = 0; v < fn->nvars; v++) {
+            int lo = fn->var_scope_lo[v], hi = fn->var_scope_hi[v];
+            if (lo >= 0 && lo <= fn->nins) fn->var_scope_lo[v] = newpos[lo];
+            if (hi >= 0 && hi <= fn->nins) fn->var_scope_hi[v] = newpos[hi];
+        }
+        free(newpos);
+    }
+    free(fn->ins);
+    fn->ins = nb.p; fn->nins = nb.n; fn->cap = nb.cap;
+}
+
 int pass_sroa(struct ir_func *fn, int report_refusals)
 {
     int nvars = fn->nvars, nparams = fn->nparams, nvr = fn->nvregs;
-    if (nvars <= nparams || fn->nins == 0 || !fn->src || !fn->src->var_tys)
+    /* boundaries only where struct returns travel as their units
+     * (target_has_ret_units); asked each time, as the target can change
+     * between units */
+    int policy = getenv("EMBCC_NO_SROAB") ? 0 : target_sroa_boundaries();
+    int no_bnd = policy == 0;
+    /* p0: the first slot considered -- the parameters too, with the
+     * boundaries below */
+    int p0 = no_bnd ? nparams : 0;
+    if (nvars <= p0 || fn->nins == 0 || !fn->src || !fn->src->var_tys)
         return 0;
 
     struct defs d;
@@ -574,10 +723,10 @@ int pass_sroa(struct ir_func *fn, int report_refusals)
      * would put a line in the remarks for every variable in the
      * program. */
     for (int n = 0; n < fn->nins; n++)
-        if (fn->ins[n].op == IR_ADDR && fn->ins[n].a >= nparams &&
+        if (fn->ins[n].op == IR_ADDR && fn->ins[n].a >= p0 &&
             fn->ins[n].a < nvars)
             cand[fn->ins[n].a] = 1;
-    for (int L = nparams; L < nvars; L++) {
+    for (int L = p0; L < nvars; L++) {
         const struct ir_local *Li = &fn->locals[L];
         struct type *t = fn->src->var_tys[L];
         if (!cand[L])                                continue;
@@ -651,6 +800,8 @@ int pass_sroa(struct ir_func *fn, int report_refusals)
         xcalloc((size_t)nvars * SROA_MAX_FIELDS, sizeof *fld);
     int *nfld = xcalloc((size_t)nvars, sizeof *nfld);
     struct sroa_ctx sc = { cand, why, abase, nvr };
+    struct sroa_bnds bl = { 0, 0, 0 };
+    int *nacc = xcalloc((size_t)nvars, sizeof *nacc);
     for (int n = 0; n < fn->nins; n++) {
         struct ir_ins *in = &fn->ins[n];
         switch (in->op) {
@@ -713,6 +864,8 @@ int pass_sroa(struct ir_func *fn, int report_refusals)
                     break;
                 }
             }
+            if (cand[L])
+                nacc[L]++;
             if (!cand[L] || k < nfld[L])
                 break;
             if (nfld[L] == SROA_MAX_FIELDS) {
@@ -723,16 +876,124 @@ int pass_sroa(struct ir_func *fn, int report_refusals)
             nfld[L]++;
             break;
         }
+        /* The whole object read or written at once -- passed by value,
+         * returned, copied from or into, cleared: a BOUNDARY. The pieces
+         * are stored back before one and loaded again after it, so the
+         * slot is right exactly when something reads it as a whole. */
+        case IR_CALL:
+            if (no_bnd) { each_read(in, sroa_esc_cb, &sc); break; }
+            for (int k = 0; k < in->nargs; k++) {
+                int v = in->argv[k].vreg;
+                if (v < 0 || v >= nvr || abase[v] < 0 || !cand[abase[v]])
+                    continue;
+                int L = abase[v];
+                if ((in->argv[k].is_struct || (k == 0 && in->sret_first)) &&
+                    aoff[v] == 0 &&
+                    (in->sret_first && k == 0 ? 1
+                                              : in->argv[k].size == fn->locals[L].size))
+                    sroa_bnd_add(&bl, n, L, 1, 1);
+                else {
+                    cand[L] = 0; why[L] = "address-escapes";
+                }
+            }
+            if (in->indirect)
+                sroa_esc_cb(&in->a, &sc);
+            break;
+        case IR_RET:
+            if (in->a >= 0 && in->a < nvr && abase[in->a] >= 0 &&
+                cand[abase[in->a]]) {
+                int L = abase[in->a];
+                if (!no_bnd && fn->ret_abi.is_struct && aoff[in->a] == 0 &&
+                    fn->ret_abi.size == fn->locals[L].size)
+                    sroa_bnd_add(&bl, n, L, 1, 0);
+                else {
+                    cand[L] = 0; why[L] = "address-escapes";
+                }
+            }
+            break;
+        case IR_MEMCPY: case IR_MEMZERO: {
+            int sides = in->op == IR_MEMCPY ? 2 : 1;
+            for (int sd = 0; sd < sides; sd++) {
+                int v = sd ? in->b : in->a;
+                if (v < 0 || v >= nvr || abase[v] < 0 || !cand[abase[v]])
+                    continue;
+                int L = abase[v];
+                if (!no_bnd && aoff[v] == 0 && in->size == fn->locals[L].size &&
+                    !in->vol)
+                    sroa_bnd_add(&bl, n, L, sd == 1, sd == 0);
+                else {
+                    cand[L] = 0; why[L] = "address-escapes";
+                }
+            }
+            break;
+        }
         default:
             each_read(in, sroa_esc_cb, &sc);
             break;
         }
     }
+    /* a parameter's slot is written by the prologue: its pieces are
+     * loaded first of all */
+    for (int L = p0; L < nparams; L++)
+        if (cand[L])
+            sroa_bnd_add(&bl, -1, L, 0, 1);
+
+    /* Worth it only when the accesses split away outnumber what the
+     * boundaries then cost: a piece stored back before each whole read
+     * and loaded after each whole write. An argument built for one call
+     * -- two fields stored, the call -- was two stores before and is two
+     * stores, an address and two loads after. */
+    /* A return whose register units (target_ret_units) are exactly the
+     * pieces costs nothing: the pieces go back as values, IR_RET's nrp,
+     * and the slot is not written for it at all. */
+    for (int k = 0; k < bl.n; k++) {
+        int L = bl.e[k].L, n = bl.e[k].n;
+        if (!cand[L] || n < 0 || fn->ins[n].op != IR_RET ||
+            getenv("EMBCC_NO_RETPARTS"))
+            continue;
+        int uo[2], us[2], uf[2];
+        int nu = target_ret_units(fn, uo, us, uf, 2);
+        if (nu < 1 || nu != nfld[L])
+            continue;
+        int all = 1;
+        for (int q = 0; q < nu && all; q++) {
+            int hit = 0;
+            for (int f = 0; f < nfld[L]; f++)
+                if (fld[(size_t)L * SROA_MAX_FIELDS + f].off == uo[q] &&
+                    fld[(size_t)L * SROA_MAX_FIELDS + f].size == us[q])
+                    hit = 1;
+            all = hit;
+        }
+        if (all) {
+            bl.e[k].ret = 1;
+            bl.e[k].before = 0;
+        }
+    }
+    /* returns only (target_sroa_boundaries 1): any other boundary, or a
+     * return that cannot be units, keeps the local whole */
+    for (int k = 0; policy == 1 && k < bl.n; k++) {
+        int L = bl.e[k].L;
+        if (cand[L] && !bl.e[k].ret) {
+            cand[L] = 0; why[L] = "whole-object-uses-cost-more";
+        }
+    }
+    for (int k = 0; k < bl.n; k++) {
+        int L = bl.e[k].L;
+        if (cand[L])
+            nacc[L] -= nfld[L] * (bl.e[k].before + bl.e[k].after);
+    }
+    for (int k = 0; k < bl.n; k++) {
+        int L = bl.e[k].L;
+        if (cand[L] && nacc[L] <= 0) {
+            cand[L] = 0; why[L] = "whole-object-uses-cost-more";
+        }
+    }
+    free(nacc);
 
     /* 4. Number the new locals. A candidate nothing ever reached through
      * the chain has nothing to split. */
     int nnew = 0;
-    for (int L = nparams; L < nvars; L++) {
+    for (int L = p0; L < nvars; L++) {
         if (cand[L] && nfld[L] == 0)
             cand[L] = 0;          /* nothing ever reached it through the chain */
         if (cand[L])
@@ -741,11 +1002,11 @@ int pass_sroa(struct ir_func *fn, int report_refusals)
     sroa_report(fn, nparams, nvars, cand, nfld, why, report_refusals);
     if (!nnew) {
         free(cand); free(why); free(abase); free(aoff);
-        free(fld); free(nfld); free_defs(&d);
+        free(fld); free(nfld); free_defs(&d); free(bl.e);
         return 0;
     }
     int next = nvars;
-    for (int L = nparams; L < nvars; L++)
+    for (int L = p0; L < nvars; L++)
         if (cand[L])
             for (int k = 0; k < nfld[L]; k++)
                 fld[(size_t)L * SROA_MAX_FIELDS + k].nl = next++;
@@ -788,7 +1049,7 @@ int pass_sroa(struct ir_func *fn, int report_refusals)
         vt[k] = fn->src->var_tys[k];
         va[k] = fn->src->var_aligns ? fn->src->var_aligns[k] : 0;
     }
-    for (int L = nparams; L < nvars; L++) {
+    for (int L = p0; L < nvars; L++) {
         if (!cand[L])
             continue;
         struct sroa_fld *F = &fld[(size_t)L * SROA_MAX_FIELDS];
@@ -818,7 +1079,7 @@ int pass_sroa(struct ir_func *fn, int report_refusals)
         int *hi = xmalloc((size_t)nv * sizeof *hi);
         memcpy(lo, fn->var_scope_lo, (size_t)nvars * sizeof *lo);
         memcpy(hi, fn->var_scope_hi, (size_t)nvars * sizeof *hi);
-        for (int L = nparams; L < nvars; L++) {
+        for (int L = p0; L < nvars; L++) {
             if (!cand[L])
                 continue;
             struct sroa_fld *F = &fld[(size_t)L * SROA_MAX_FIELDS];
@@ -869,7 +1130,17 @@ int pass_sroa(struct ir_func *fn, int report_refusals)
     }
     g_did.sroa += nrw;
 
+    /* 8. The boundaries: each piece stored to the slot before a whole
+     * read, loaded from it after a whole write (the prologue's, for a
+     * parameter, is before everything). */
+    int nb = 0;
+    for (int k = 0; k < bl.n; k++)
+        if (cand[bl.e[k].L])
+            nb++;
+    if (nb)
+        sroa_sync(fn, &bl, cand, fld, nfld);
+
     free(rw); free(cand); free(why); free(abase); free(aoff);
-    free(fld); free(nfld); free_defs(&d);
+    free(fld); free(nfld); free_defs(&d); free(bl.e);
     return 1;
 }

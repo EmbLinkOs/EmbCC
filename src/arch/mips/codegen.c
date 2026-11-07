@@ -515,6 +515,7 @@ static int ret_word_reg(int q)
     return q < 2 ? MIPS_V0 + q : MIPS_A0 + (q - 2);
 }
 
+
 /* n64 soft float returns a binary128 -- a long double, or a structure of
  * one -- in v0 and A0, not v0:v1: its first doubleword in memory in v0
  * and its second in a0 (clang's RetCC_F128SoftFloat, which follows GCC).
@@ -602,6 +603,27 @@ static int ret_pieces(const struct type *t, long size, int *off, int *sz,
         }
         return n;
     }
+}
+
+/* A struct return's register units (target_ret_units): ret_pieces' pieces
+ * where each fills its register -- o32's words, n64's packed doublewords;
+ * a field narrower than the register, or n64's per-field rule, stays on
+ * the memory path. */
+int mips_ret_units(const struct ir_func *fn, int *off, int *size, int *fp,
+                   int max)
+{
+    if (!fn->ret_abi.is_struct || !fn->ret_abi.ty || getenv("EMBCC_NO_RETPARTS"))
+        return 0;
+    int roff[4], rsz[4], rfields;
+    int rw = ret_pieces(fn->ret_abi.ty, fn->ret_abi.size, roff, rsz, &rfields);
+    if (rw <= 0 || rw > max)
+        return 0;
+    for (int q = 0; q < rw; q++) {
+        if (g_m64 ? rsz[q] != 8 || rfields : rsz[q] != 4)
+            return 0;
+        off[q] = roff[q]; size[q] = rsz[q]; fp[q] = 0;
+    }
+    return rw;
 }
 
 static int ret_n(const struct type *t, long size)
@@ -3697,7 +3719,23 @@ static void gen_ins(struct mips_fn *F, int n)
         return;
 
     case IR_RET:
-        if (i->a >= 0) {
+        if (i->nrp) {
+            /* a struct as its words (pass_sroa): each into its register,
+             * the first through a scratch when the second sits there */
+            int roff[4], rsz[4], rfields, part[2] = { i->b, i->c };
+            int rw = ret_pieces(fn->ret_abi.ty, fn->ret_abi.size, roff, rsz,
+                                &rfields);
+            if (rw != i->nrp)
+                mips_refuse(F, i, "a struct returned as units it does not have");
+            int dst[2];
+            for (int q = 0; q < rw; q++)
+                dst[q] = rfields == 2 && q ? MIPS_A0 : ret_word_reg(q);
+            int clash = rw == 2 && in_reg(F, part[1]) && F->loc[part[1]] == dst[0];
+            for (int q = 0; q < rw; q++)
+                rd(F, part[q], q == 0 && clash ? SCR : dst[q]);
+            if (clash)
+                mips_mv(t, dst[0], SCR);
+        } else if (i->a >= 0) {
             if (fn->ret_abi.is_struct) {
                 int roff[4], rsz[4], rfields;
                 int rw = ret_pieces(fn->ret_abi.ty, fn->ret_abi.size, roff,

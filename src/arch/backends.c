@@ -75,6 +75,7 @@ static const struct backend_desc g_backends[] = {
     [TARGET_X86_64] = {
         .family = "x86-64", .codegen = codegen_unit, .ra_at_o0 = 0,
         .op_calls_helper = NULL,
+        .ret_units = x86_ret_units,
         .unwind_unwritten = NULL,
         .cxx_exceptions = BACKEND_CXX_EXC_OK,
         .firmware = 0, .ld_scripts = 0,
@@ -86,6 +87,7 @@ static const struct backend_desc g_backends[] = {
     [TARGET_AARCH64] = {
         .family = "AArch64", .codegen = codegen_unit_arm64, .ra_at_o0 = 0,
         .op_calls_helper = a64_op_calls_helper,
+        .ret_units = a64_ret_units,
         .unwind_unwritten = NULL,
         .cxx_exceptions = BACKEND_CXX_EXC_OK,
         .firmware = 1, .ld_scripts = 1,
@@ -97,6 +99,7 @@ static const struct backend_desc g_backends[] = {
     [TARGET_THUMB] = {
         .family = "ARM", .codegen = codegen_unit_thumb, .ra_at_o0 = 1,
         .op_calls_helper = t_op_calls_helper,
+        .ret_units = t_ret_units,
         .unwind_unwritten = NULL,          /* eh_emit_arm: EHABI */
         .cxx_exceptions = BACKEND_CXX_EXC_OK,
         .firmware = 1, .ld_scripts = 1,
@@ -112,6 +115,7 @@ static const struct backend_desc g_backends[] = {
     [TARGET_RISCV32] = {
         .family = "RISC-V", .codegen = codegen_unit_riscv, .ra_at_o0 = 1,
         .op_calls_helper = rv_op_calls_helper,
+        .ret_units = rv_ret_units,
         .unwind_unwritten = NULL,          /* eh_emit_cfi */
         .cxx_exceptions = BACKEND_CXX_EXC_OK,
         .firmware = 1, .ld_scripts = 1,
@@ -125,6 +129,7 @@ static const struct backend_desc g_backends[] = {
     [TARGET_RISCV64] = {
         .family = "RISC-V", .codegen = codegen_unit_riscv, .ra_at_o0 = 1,
         .op_calls_helper = rv_op_calls_helper,
+        .ret_units = rv_ret_units,
         .unwind_unwritten = NULL,          /* eh_emit_cfi */
         .cxx_exceptions = BACKEND_CXX_EXC_OK,
         .firmware = 1, .ld_scripts = 1,
@@ -153,6 +158,7 @@ static const struct backend_desc g_backends[] = {
         .family = "MIPS", .codegen = codegen_unit_mips, .ra_at_o0 = 0,
         .frame_sp = 29, .frame_ra = 31,     /* sp, ra */
         .op_calls_helper = mips_op_calls_helper,
+        .ret_units = mips_ret_units,
         .unwind_unwritten = NULL,
         .cxx_exceptions = BACKEND_CXX_EXC_OK,
         .firmware = 1, .ld_scripts = 1,
@@ -165,6 +171,7 @@ static const struct backend_desc g_backends[] = {
         .family = "MIPS", .codegen = codegen_unit_mips, .ra_at_o0 = 0,
         .frame_sp = 29, .frame_ra = 31,     /* sp, ra */
         .op_calls_helper = mips_op_calls_helper,
+        .ret_units = mips_ret_units,
         .unwind_unwritten = NULL,
         .cxx_exceptions = BACKEND_CXX_EXC_OK,
         .firmware = 1, .ld_scripts = 1,
@@ -178,6 +185,7 @@ static const struct backend_desc g_backends[] = {
     [TARGET_LOONGARCH64] = {
         .family = "LoongArch", .codegen = codegen_unit_loongarch, .ra_at_o0 = 1,
         .op_calls_helper = la_op_calls_helper,
+        .ret_units = la_ret_units,
         .unwind_unwritten = "LoongArch .eh_frame",
         .cxx_exceptions = BACKEND_CXX_EXC_NONE,
         .firmware = 1, .ld_scripts = 1,
@@ -191,6 +199,7 @@ static const struct backend_desc g_backends[] = {
         .family = "TriCore", .codegen = codegen_unit_tricore, .ra_at_o0 = 0,
         .frame_sp = 26, .frame_ra = 27,     /* a10, a11 (d0-d15 are 0-15) */
         .op_calls_helper = tc_op_calls_helper,
+        .ret_units = tc_ret_units,
         .unwind_unwritten = NULL,
         .cxx_exceptions = BACKEND_CXX_EXC_OK,
         .firmware = 1, .ld_scripts = 0,
@@ -204,6 +213,7 @@ static const struct backend_desc g_backends[] = {
         .family = "Xtensa", .codegen = codegen_unit_xtensa, .ra_at_o0 = 0,
         .frame_sp = 1, .frame_ra = 0,       /* a1, a0 */
         .op_calls_helper = xtensa_op_calls_helper,
+        .ret_units = xt_ret_units,
         .unwind_unwritten = NULL,
         .cxx_exceptions = BACKEND_CXX_EXC_OK,
         .firmware = 1, .ld_scripts = 1,
@@ -216,6 +226,7 @@ static const struct backend_desc g_backends[] = {
     [TARGET_PPC32] = {
         .family = "PowerPC", .codegen = codegen_unit_ppc, .ra_at_o0 = 0,
         .op_calls_helper = ppc_op_calls_helper,
+        .ret_units = ppc_ret_units,
         .unwind_unwritten = "PowerPC .eh_frame",
         .cxx_exceptions = BACKEND_CXX_EXC_NONE,
         .firmware = 1, .ld_scripts = 1,
@@ -252,6 +263,7 @@ static const struct backend_desc g_backends[] = {
     [TARGET_RX] = {
         .family = "RX", .codegen = codegen_unit_rx, .ra_at_o0 = 0,
         .op_calls_helper = rx_op_calls_helper,
+        .ret_units = rx_ret_units,
         .unwind_unwritten = "RX .eh_frame",
         .cxx_exceptions = BACKEND_CXX_EXC_NONE,
         .firmware = 1, .ld_scripts = 0,

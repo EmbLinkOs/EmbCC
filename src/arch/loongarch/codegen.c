@@ -469,6 +469,22 @@ static long sret_bytes(int wb, int retsize)
     return retsize > 2 * wb ? retsize : 0;
 }
 
+/* A struct return's register units (target_ret_units): the packed 8-byte
+ * words of one that fits a0:a1 -- whole words only. */
+int la_ret_units(const struct ir_func *fn, int *off, int *size, int *fp,
+                 int max)
+{
+    if (!fn->ret_abi.is_struct || getenv("EMBCC_NO_RETPARTS"))
+        return 0;
+    long sz = fn->ret_abi.size;
+    if (sz <= 0 || sret_bytes(8, (int)sz) || sz % 8 || sz / 8 > max)
+        return 0;
+    for (int q = 0; (long)q * 8 < sz; q++) {
+        off[q] = q * 8; size[q] = 8; fp[q] = 0;
+    }
+    return (int)(sz / 8);
+}
+
 /* ...and so does a SCALAR wider than two registers, of which there is
  * one: RV32's long double, binary128 in four words. The psABI returns it
  * the way it would pass it as a first argument -- by reference -- so the
@@ -2703,7 +2719,20 @@ static void gen_ins(struct la_fn *F, int n)
         return;
 
     case IR_RET:
-        if (i->a >= 0) {
+        if (i->nrp) {
+            /* a struct as its words (pass_sroa): each into a0, a1 -- the
+             * first through a scratch when the second sits in a0 */
+            int off[2], sz[2], fpu[2], part[2] = { i->b, i->c };
+            int nu = la_ret_units(fn, off, sz, fpu, 2);
+            if (nu != i->nrp)
+                la_refuse(F, i, "a struct returned as units it does not have");
+            int clash = nu == 2 && in_reg(F, part[1]) &&
+                        F->loc[part[1]] == LA_A0;
+            for (int q = 0; q < nu; q++)
+                rd(F, part[q], q == 0 && clash ? SCR : LA_A0 + q);
+            if (clash)
+                la_mv(t, LA_A0, SCR);
+        } else if (i->a >= 0) {
             if (fn->ret_abi.is_struct) {
                 long size = fn->ret_abi.size;
                 if (sret_bytes(F->w, (int)size)) {

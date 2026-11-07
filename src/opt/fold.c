@@ -946,6 +946,87 @@ static int fold_word_insert(struct ir_func *fn, struct defs *d,
     return 0;
 }
 
+/* Is v 0 or 1: a comparison, or an and/or of such values? */
+static int fold_is01(struct ir_func *fn, struct defs *d, int v, int depth)
+{
+    if (v < 0 || v >= fn->nvregs || d->cnt[v] != 1 || d->ins[v] < 0 ||
+        depth > 3)
+        return 0;
+    const struct ir_ins *i = &fn->ins[d->ins[v]];
+    if (i->flt && i->op != IR_CMP)
+        return 0;
+    switch (i->op) {
+    case IR_CMP:
+        return 1;
+    case IR_CONST:
+        return i->imm == 0 || i->imm == 1;
+    case IR_SHR: {                      /* the top bit, alone */
+        long k;
+        if (i->imm_b) k = i->imm;
+        else if (i->b >= 0 && i->b < fn->nvregs && d->cnt[i->b] == 1 &&
+                 d->ins[i->b] >= 0 && fn->ins[d->ins[i->b]].op == IR_CONST)
+            k = fn->ins[d->ins[i->b]].imm;
+        else
+            return 0;
+        return !i->sign && k == (long)i->w * 8 - 1;
+    }
+    case IR_AND: case IR_OR:
+        return !i->imm_b && fold_is01(fn, d, i->a, depth + 1) &&
+               fold_is01(fn, d, i->b, depth + 1);
+    default:
+        return 0;
+    }
+}
+
+/* `a - ((a & b) << 1)` with a and b each 0 or 1 is 1, -1 or 0, and 0
+ * exactly when a is: isinf_sign's shape (irgen's fb lowering, which
+ * math.h's isinf is, for glibc's -1 on -inf). Tested for truth -- a
+ * branch, or a compare with 0 -- only a matters, and the sign half of it
+ * is dead. EMBCC_NO_SIGNTRUTH turns it off. */
+static int fold_signed_truth(struct ir_func *fn, struct defs *d,
+                             struct ir_ins *i)
+{
+    int *slot;
+    if (i->op == IR_BRZ || i->op == IR_BRNZ)
+        slot = &i->a;
+    else if (i->op == IR_CMP && !i->flt &&
+             (i->pred == B_EQ || i->pred == B_NE) &&
+             ((i->imm_b && i->imm == 0) ||
+              (!i->imm_b && fold_is01(fn, d, i->b, 3) &&
+               fn->ins[d->ins[i->b]].op == IR_CONST &&
+               fn->ins[d->ins[i->b]].imm == 0)))
+        slot = &i->a;
+    else
+        return 0;
+    int v = *slot;
+    if (v < 0 || v >= fn->nvregs || d->cnt[v] != 1 || d->ins[v] < 0)
+        return 0;
+    const struct ir_ins *s = &fn->ins[d->ins[v]];
+    if (s->op != IR_SUB || s->flt || s->imm_b || s->a < 0 || s->b < 0 ||
+        s->b >= fn->nvregs || d->cnt[s->b] != 1 || d->ins[s->b] < 0)
+        return 0;
+    int a = s->a;
+    const struct ir_ins *sh = &fn->ins[d->ins[s->b]];
+    long k;
+    if (sh->op != IR_SHL || sh->flt || sh->a < 0 || sh->a >= fn->nvregs ||
+        d->cnt[sh->a] != 1 || d->ins[sh->a] < 0)
+        return 0;
+    if (sh->imm_b) k = sh->imm;
+    else if (sh->b >= 0 && sh->b < fn->nvregs && d->cnt[sh->b] == 1 &&
+             d->ins[sh->b] >= 0 && fn->ins[d->ins[sh->b]].op == IR_CONST)
+        k = fn->ins[d->ins[sh->b]].imm;
+    else
+        return 0;
+    const struct ir_ins *an = &fn->ins[d->ins[sh->a]];
+    if (k != 1 || an->op != IR_AND || an->imm_b ||
+        (an->a != a && an->b != a) || !fold_is01(fn, d, a, 0) ||
+        !fold_is01(fn, d, an->a == a ? an->b : an->a, 0) ||
+        getenv("EMBCC_NO_SIGNTRUTH"))
+        return 0;
+    *slot = a;
+    return 1;
+}
+
 int pass_fold(struct ir_func *fn)
 {
     struct defs d;
@@ -998,6 +1079,10 @@ int pass_fold(struct ir_func *fn)
             continue;
         }
         if (fold_word_insert(fn, &d, use, i)) {
+            changed = 1;
+            continue;
+        }
+        if (fold_signed_truth(fn, &d, i)) {
             changed = 1;
             continue;
         }

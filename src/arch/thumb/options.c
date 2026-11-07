@@ -19,6 +19,7 @@
 static const char *g_arm_fpu;
 static const char *g_arm_float_abi;
 static const char *g_arm_cpu;
+
 static int g_arm_cmse;             /* -mcmse was given */
 /* The unit -march='s +fp, +fp.dp or +nofp names: the FPU when -mfpu= is
  * not given (or is auto), as GCC takes the pair. */
@@ -285,6 +286,7 @@ int thumb_target_option(const char *arg)
                                "core's profile is not this one",
                                opt_said("-mcpu=", v), target_triple_now());
                 g_arm_cpu = v;
+                target_set_arm_cpu(v);
                 return 1;
             }
         }
@@ -452,6 +454,7 @@ int thumb_target_option(const char *arg)
             if (!strcmp(v, "cortex-m23")) {
                 target_set_thumb_v8m_base();
                 g_arm_cpu = v;
+                target_set_arm_cpu(v);
                 return 1;
             }
             if (!strcmp(v, "cortex-m0") || !strcmp(v, "cortex-m0plus") ||
@@ -459,6 +462,7 @@ int thumb_target_option(const char *arg)
                 target_set_thumb_arch(6);
                 target_set_thumb_em(0);
                 g_arm_cpu = v;
+                target_set_arm_cpu(v);
                 return 1;
             }
             /* The part has one architecture, whatever the triple
@@ -498,6 +502,7 @@ int thumb_target_option(const char *arg)
             /* Kept for thumb_options_done: which unit the part's
              * -eabihf name implies depends on which part it is. */
             g_arm_cpu = v;
+            target_set_arm_cpu(v);
             return 1;
         }
         /* The FPU and the float ABI are RECORDED here and resolved

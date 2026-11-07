@@ -82,7 +82,10 @@ void ra_each_use(const struct ir_ins *s, void (*cb)(int v, void *ctx),
     case IR_SWITCH:           /* the table index */
     case IR_VLOAD:            /* the ADDRESS read, an integer temp */
     case IR_VSPLAT: case IR_VREDADD: case IR_VWIDEN:
-        U(s->a); break;
+        U(s->a);
+        if (s->op == IR_RET && s->nrp >= 1) U(s->b);
+        if (s->op == IR_RET && s->nrp >= 2) U(s->c);
+        break;
     case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV: case IR_MOD:
     case IR_AND: case IR_OR: case IR_XOR: case IR_SHL: case IR_SHR:
     case IR_CMP: case IR_STORE: case IR_MEMCPY: case IR_MEMZERO:
@@ -1201,7 +1204,9 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
         case IR_RET:
             /* A struct or float return reads its slot raw on every
              * backend; a scalar one only where the backend can take it
-             * from a register. */
+             * from a register. (Returned as units, nrp, it reads values.) */
+            if (in->nrp)
+                break;
             if (fn->ret_abi.is_struct ? t->memcpy_addr_in_reg < 2
                 : in->flt && !t->float_in_gpr && !t->fp_reads_gpr
                      ? !fp : !t->ret_scalar_in_reg)
@@ -2501,7 +2506,7 @@ static int nhs_reader(const struct ir_func *fn, const struct ir_ins *i,
     case IR_STVAR:
         return i->size <= 4;
     case IR_RET:
-        return !fn->ret_abi.is_struct && fn->ret_abi.size <= 4;
+        return !i->nrp && !fn->ret_abi.is_struct && fn->ret_abi.size <= 4;
     case IR_CALL:
         if (i->a == v)
             return 0;

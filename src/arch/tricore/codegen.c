@@ -330,6 +330,24 @@ static int fn_sret(const struct ir_func *fn)
     return fn->ret_abi.is_struct && fn->ret_abi.size > 8;
 }
 
+/* A struct return's register units (target_ret_units): its two words, or
+ * its one, when it is exactly 8 or 4 bytes and comes back in registers
+ * (D2, D3); anything else keeps the memory path. */
+int tc_ret_units(const struct ir_func *fn, int *off, int *size, int *fp,
+                 int max)
+{
+    if (!fn->ret_abi.is_struct || fn_sret(fn) || getenv("EMBCC_NO_RETPARTS"))
+        return 0;
+    long sz = fn->ret_abi.size;
+    if ((sz != 4 && sz != 8) || sz / 4 > max)
+        return 0;
+    for (int q = 0; q * 4 < sz; q++) {
+        off[q] = q * 4; size[q] = 4; fp[q] = 0;
+    }
+    return (int)(sz / 4);
+}
+
+
 static int call_sret(const struct ir_ins *i)
 {
     return i->retsize > 8;
@@ -2520,7 +2538,15 @@ static void gen_ins(struct tc_fn *F, int n)
         return;
 
     case IR_RET:
-        if (i->a >= 0) {
+        if (i->nrp) {
+            int part[2] = { i->b, i->c };
+            int clash = i->nrp == 2 && in_reg(F, part[1]) &&
+                        F->loc[part[1]] == 2;
+            for (int q = 0; q < i->nrp; q++)
+                rd(F, part[q], q == 0 && clash ? SCR : 2 + q);
+            if (clash)
+                tc_mov(t, 2, SCR);
+        } else if (i->a >= 0) {
             if (fn->ret_abi.is_struct) {
                 if (fn_sret(fn)) {
                     /* through the caller's buffer, whose address the

@@ -416,6 +416,10 @@ static void opt_func(struct ir_func *fn)
         copied = 1;
     if (g_swthread && edge_ok && pass_swthread(fn))
         copied = 1;
+    /* an int index's extension past the add that cannot wrap, which the
+     * fixpoint below then shares and folds into each load's offset */
+    if (g_licm && cfg_ok && pass_ivext(fn))
+        copied = 1;
     if (copied) {
         int changed = 1, g2 = 0;
         while (changed && g2++ < 100) {
@@ -428,6 +432,12 @@ static void opt_func(struct ir_func *fn)
             /* ...and an unrolled filter's x[i - 1], x[i - 2], ...: the
              * offsets into the loads, the base shared */
             changed |= pass_idxoff(fn);
+            if (g_licm && cfg_ok)
+                changed |= pass_ivext(fn);
+            /* a fully unrolled table fill's constants, into the loads of
+             * the table after it */
+            if (cfg_ok)
+                changed |= pass_gstorefwd(fn);
             changed |= pass_copyprop(fn);
             changed |= pass_copyprop_local(fn);
             changed |= pass_dce(fn);
@@ -447,6 +457,20 @@ static void opt_func(struct ir_func *fn)
                 changed |= pass_sccp(fn);
         }
     }
+    /* And the int index once more, now that the copies' leftovers are
+     * folded: an unrolled filter's first tap reads `i - k` with k the
+     * 0 a reassigned name held, which only folding makes `i`. */
+    if (g_licm && cfg_ok && pass_ivext(fn)) {
+        int ch = 1, g4 = 0;
+        while (ch && g4++ < 8) {
+            ch = pass_fold(fn);
+            ch |= pass_reassoc(fn);
+            ch |= pass_lvn(fn);
+            ch |= pass_idxoff(fn);
+            ch |= pass_copyprop(fn);
+            ch |= pass_dce(fn);
+        }
+    }
     /* After the fixpoint: fold constant operands into immediates, then DCE the
      * CONSTs that leaves unreferenced. Kept out of the fixpoint so the earlier
      * passes never reason about the imm_b form. */
@@ -457,6 +481,27 @@ static void opt_func(struct ir_func *fn)
     if (cfg_ok && pass_deaddefs(fn)) {
         pass_copyprop_local(fn);
         pass_dce(fn);
+    }
+    /* LICM again once the copies are settled: a fully unrolled inner
+     * loop's loads -- a FIR's h[0] ... h[15] -- are invariant in the
+     * loop around it, and before unrolling they were one load whose
+     * address moved. clang keeps all sixteen in registers; this is the
+     * pass that can see they may be. */
+    g_licm_late = 1;
+    int late = copied && g_licm && edge_ok && !getenv("EMBCC_NO_LICM2") &&
+               pass_licm(fn);
+    g_licm_late = 0;
+    if (late) {
+        /* what the hoisted literals expose to folding: the first
+         * tap's `i - 0` is the address the others share */
+        int changed = 1, g3 = 0;
+        pass_copyprop(fn);
+        while (changed && g3++ < 8) {
+            changed = pass_fold(fn);
+            changed |= pass_lvn(fn);
+            changed |= pass_copyprop(fn);
+            changed |= pass_dce(fn);
+        }
     }
     /* the 64-bit product of two 32-bit values: one widening multiply */
     if (pass_mulwiden(fn))
@@ -478,6 +523,14 @@ static void opt_func(struct ir_func *fn)
      * constant written straight into the merged name is where it was. */
     if (cfg_ok && pass_joincopies(fn) && g_cfgclean)
         pass_cfgclean(fn);
+    /* a branch whose arm changes nothing when skipped (`if (v) n += v`):
+     * the shape the joins' copies leave */
+    if (cfg_ok && pass_ifident(fn)) {
+        drop_unreachable(fn);       /* the edge blocks it no longer enters */
+        pass_dce(fn);
+        if (g_cfgclean)
+            pass_cfgclean(fn);
+    }
     pass_sinkconst(fn);
     /* Last: the copies it adds must not be propagated away again.
      * EMBCC_NO_SPLITLOOPS=1 turns it off, for bisecting a difference. */

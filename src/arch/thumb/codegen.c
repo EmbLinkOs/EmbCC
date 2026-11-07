@@ -237,10 +237,22 @@ static const int T_POOL_VA_EXT[8] = { 4, 5, 6, 7, 8, 9, 10, 11 };
 static const int T_POOL_FB_EXT[] = { 0, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11 };
 static const int T_POOL_VA_FB_EXT[] = { 4, 5, 6, 8, 9, 10, 11 };
 
+/* ...and lr last of all (g_t_lr): the prologue saves it in every function
+ * that pushes anything, the return pops the saved copy into pc, and in
+ * between it is an ordinary high register that a call overwrites -- a
+ * thirteenth home, for a value no call crosses. clang's loops use it
+ * (the bench's state machine and FIR spill a value a trip without it).
+ * Not where this file uses lr itself: see t_lr_ok. */
+static const int T_POOL_EXT_LR[T_NPOOL_EXT + 1] = {
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 14
+};
+static const int T_POOL_FB_EXT_LR[] = { 0, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 14 };
+static int g_t_lr;
+
 /* Registers the pair pass (t_pair_alloc) took for the whole function,
  * withheld from the ordinary pool; bit r for rr. */
 static unsigned g_t_taken;
-static int g_t_pool[T_NPOOL_EXT];
+static int g_t_pool[T_NPOOL_EXT + 1];
 
 /* ARMv6-M (v6m.c): r0-r5. Only r0-r7 compute there, and r6/r7 are that
  * lowering's two scratch registers; r5 is the frame base of a function with
@@ -276,6 +288,14 @@ static const int *t_pool_base(const struct ir_func *fn, int *n)
         }
         *n = fn->is_varargs ? 2 : 6;
         return fn->is_varargs ? T6_POOL_VA : T6_POOL;
+    }
+    if (g_t_ext && g_t_lr && !fn->is_varargs) {
+        if (fn->has_alloca) {
+            *n = 12;
+            return T_POOL_FB_EXT_LR;
+        }
+        *n = T_NPOOL_EXT + 1;
+        return T_POOL_EXT_LR;
     }
     if (g_t_ext) {
         if (fn->has_alloca) {
@@ -710,6 +730,39 @@ static int t_call_target_ok(const struct ir_ins *i)
     return !off && target_thumb_arch() != 6 && !i->call_cmse;
 }
 
+/* May a value of fn live in lr (g_t_lr)? Not where this file writes lr
+ * on its own account: an atomic's status register when none is free, an
+ * indirect call's target, __builtin_return_address, an interrupt
+ * handler's or a CMSE entry's return, branch protection's pac/aut, inline
+ * asm (which may name it), an unwinding landing pad; nor a variadic
+ * function, whose return goes through lr after the save area comes off;
+ * nor ARM state or ARMv6-M. EMBCC_NO_TLR turns it off. */
+static int t_lr_ok(const struct ir_func *fn)
+{
+    static int off = -1;
+    if (off < 0)
+        off = getenv("EMBCC_NO_TLR") != NULL;
+    if (off || t_isa_a32 || target_thumb_arch() == 6 || fn->is_varargs ||
+        fn->cmse_entry || (fn->src && fn->src->is_isr) ||
+        (target_cf() & (CF_PAC | CF_BTI)))
+        return 0;
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        switch (i->op) {
+        case IR_XCHG: case IR_XADD: case IR_ARMW: case IR_CAS: case IR_CAS16:
+        case IR_FRAMEADDR: case IR_ASM: case IR_LANDING:
+            return 0;
+        case IR_CALL:
+            if (i->indirect || i->call_cmse)
+                return 0;
+            break;
+        default:
+            break;
+        }
+    }
+    return 1;
+}
+
 static const struct ra_target THUMB_RA = {
     t_pool_for,
     t_callee_saved,
@@ -1101,6 +1154,32 @@ static int fn_ret_vfp(const struct ir_func *fn, int *esz)
     *esz = r->is_struct ? r->hfa_size : r->size;
     return ret_vfp(fn->is_varargs, fn->pcs, r->is_struct, r->is_float, r->size,
                    r->hfa_n, r->hfa_size);
+}
+
+static int fn_sret_bytes(const struct ir_func *fn);
+
+/* A struct return's register units (target_ret_units): an HFA's members
+ * in s0, s1 or d0, d1 (-mfloat-abi=hard), or a four-byte composite in r0. */
+int t_ret_units(const struct ir_func *fn, int *off, int *size, int *fp,
+                int max)
+{
+    if (!fn->ret_abi.is_struct || getenv("EMBCC_NO_RETPARTS") || t_isa_a32 ||
+        target_thumb_arch() == 6)
+        return 0;
+    int esz, rv = fn_ret_vfp(fn, &esz);
+    if (rv) {
+        if (rv > max || (esz != 4 && esz != 8))
+            return 0;
+        for (int q = 0; q < rv; q++) {
+            off[q] = q * esz; size[q] = esz; fp[q] = 1;
+        }
+        return rv;
+    }
+    if (fn->ret_abi.size == 4 && !fn_sret_bytes(fn)) {
+        off[0] = 0; size[0] = 4; fp[0] = 0;
+        return 1;
+    }
+    return 0;
 }
 
 static int fn_sret_bytes(const struct ir_func *fn)
@@ -5925,9 +6004,13 @@ static void gen_ins(struct t_fn *F, int n)
             int d0 = LO(F, T_ACC), d1 = -1;
             /* (not in ARM state, where ldrd takes an even register and
              * the next, and these two are whatever LO answers) */
-            int pairs = dfa && (sfa || !copy) && doff % 4 == 0 &&
-                        (!copy || soff % 4 == 0) && size >= 8 &&
-                        !t_isa_a32;
+            /* a frame slot is word-aligned; an address irgen says is
+             * aligned to the type (natural, 4 or more) is too -- ldrd and
+             * strd fault on anything less on ARMv7-M, where ldr does not */
+            int al = i->natural >= 4 && !getenv("EMBCC_T_NOPAIRCOPY");
+            int pairs = (dfa || al) && (sfa || !copy || al) &&
+                        doff % 4 == 0 && (!copy || soff % 4 == 0) &&
+                        size >= 8 && !t_isa_a32;
             if (pairs)
                 d1 = LO(F, T_SCR);
             if (!copy) {
@@ -6052,6 +6135,22 @@ static void gen_ins(struct t_fn *F, int n)
                                        1, 0, 1);
                         }
                     } else {
+                        /* two whole words at once, when both ends allow */
+                        int d2 = base == T_TMP || dr == T_TMP ? -1 : T_TMP;
+                        long so = (fa ? fo : 0) + off;
+                        if (d2 >= 0 && !t_isa_a32 && q + 1 < pl[k].nstk &&
+                            off + 8 <= a->size && so % 4 == 0 &&
+                            (fa || (a->natural && a->align >= 4)) &&
+                            !getenv("EMBCC_T_NOARGPAIR") &&
+                            t_ldst_pair(t, dr, d2, fa ? F->fb : base, so, 0)) {
+                            if (!t_ldst_pair(t, dr, d2, T_SP,
+                                             pl[k].stk + (long)q * 4, 1)) {
+                                sp_st(F, dr, pl[k].stk + (long)q * 4);
+                                sp_st(F, d2, pl[k].stk + (long)q * 4 + 4);
+                            }
+                            q++;
+                            continue;
+                        }
                         if (fa) fb_ld(F, dr, fo + off, 4, 0);
                         else ldst_must(t, dr, base, off, 4, 0, 0);
                         ldst_must(t, dr, T_SP, pl[k].stk + (long)q * 4,
@@ -6144,9 +6243,35 @@ static void gen_ins(struct t_fn *F, int n)
             if (!a->is_struct && a->size <= 8 && in_reg(F, a->vreg))
                 continue;
             if (a->is_struct) {
-                rd(F, a->vreg, T_ADDR);
+                /* Straight from the frame when the struct is a local
+                 * (no address register), and two words to one ldrd when
+                 * they are word-aligned: a frame slot, or an address C
+                 * says is aligned to a type of 4 or more. */
+                long fo = 0;
+                int fa = faddr(F, a->vreg, &fo) && !getenv("EMBCC_T_NOARGPAIR");
+                int al = !getenv("EMBCC_T_NOARGPAIR") &&
+                         (fa || (a->natural && a->align >= 4)) && !t_isa_a32;
+                int base = fa ? F->fb : T_ADDR;
+                long bo = fa ? fo : 0;
+                if (!fa)
+                    rd(F, a->vreg, T_ADDR);
                 for (int q = 0; q < pl[k].nreg; q++) {
                     long off = (long)q * 4;
+                    if (al && q + 1 < pl[k].nreg && off + 8 <= a->size &&
+                        (bo + off) % 4 == 0 &&
+                        t_ldst_pair(t, pl[k].reg + q, pl[k].reg + q + 1,
+                                    base, bo + off, 0)) {
+                        q++;
+                        continue;
+                    }
+                    if (fa && !(off + 4 > a->size && (a->size & 3))) {
+                        fb_ld(F, pl[k].reg + q, fo + off, 4, 0);
+                        continue;
+                    }
+                    if (fa && base != T_ADDR) {     /* the byte tail below */
+                        fb_addr(F, T_ADDR, fo);
+                        base = T_ADDR; bo = 0; fa = 0;
+                    }
                     if (off + 4 > a->size && (a->size & 3)) {
                         /* The last, partial word: assembled byte by
                          * byte into its register. */
@@ -6250,6 +6375,45 @@ static void gen_ins(struct t_fn *F, int n)
     }
 
     case IR_RET: {
+        if (i->nrp) {
+            /* a struct as its units (pass_sroa): each part into its
+             * register -- s0/s1 or d0/d1 in order, or r0 -- the two FP
+             * ones ordered so neither overwrites the other, and through
+             * core registers when they sit exactly swapped */
+            int off[2], sz[2], fpu[2], part[2] = { i->b, i->c };
+            int nu = t_ret_units(fn, off, sz, fpu, 2);
+            if (nu != i->nrp)
+                internal_error("thumb: a struct returned as %d units the "
+                               "convention does not have", i->nrp);
+            if (!fpu[0]) {
+                rd(F, part[0], T_R0);
+                goto ret_epilogue;
+            }
+            int dbl = sz[0] == 8;
+#define T_RET_HOME(v) (in_freg(F, (v)) ? (dbl ? t_dreg(F, (v)) : F->floc[(v)]) : -1)
+#define T_RET_LOAD(v, r) (dbl ? vfp_load_d(F, (v), (r)) : vfp_load(F, (v), (r)))
+            if (nu == 1) {
+                T_RET_LOAD(part[0], 0);
+                goto ret_epilogue;
+            }
+            int h0 = T_RET_HOME(part[0]), h1 = T_RET_HOME(part[1]);
+            if (h1 == 0 && h0 == 1) {
+                if (dbl) t_vmov_core_pair(t, 1, T_ACC, T_TMP, 0);
+                else t_vmov_core(t, 1, T_ACC, 0);
+                T_RET_LOAD(part[1], 1);
+                if (dbl) t_vmov_core_pair(t, 0, T_ACC, T_TMP, 1);
+                else t_vmov_core(t, 0, T_ACC, 1);
+            } else if (h1 == 0) {
+                T_RET_LOAD(part[1], 1);
+                T_RET_LOAD(part[0], 0);
+            } else {
+                T_RET_LOAD(part[0], 0);
+                T_RET_LOAD(part[1], 1);
+            }
+#undef T_RET_HOME
+#undef T_RET_LOAD
+            goto ret_epilogue;
+        }
         int resz, rvfp = i->a >= 0 ? fn_ret_vfp(fn, &resz) : 0;
         if (rvfp) {
             /* Home in s0 / d0, or s0-s3 / d0-d3 for an aggregate whose
@@ -7410,6 +7574,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         int pused[RA_MAXPOOL], npused = 0;
         int *pair = g_t_pairs ? t_pair_alloc(fn, F.wide, excl, pused, &npused)
                               : NULL;
+        g_t_lr = g_t_ext && t_lr_ok(fn);
         F.loc = ra_allocate(fn, &THUMB_RA, F.wide, excl,
                             F.used_callee, &F.nsave);
         g_t_taken = 0;
@@ -7740,6 +7905,10 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     F.nopush = F.leaf && !F.nsave && !F.nfsave && !F.frame &&
                !fn->is_varargs && !fn->has_alloca &&
                !(F.scr_save & T_SCR_ALL) && !F.isr;
+    /* a value in lr: the return must pop the saved copy into pc */
+    for (int v = 0; F.nopush && F.loc && v < fn->nvregs; v++)
+        if (F.loc[v] == T_LR)
+            F.nopush = 0;
     /* No IR_RET and no tail call is not enough: a void function's body
      * falls off its end into the epilogue, so its last instruction must
      * be a jump or a trap too. */
@@ -7982,6 +8151,14 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
              * composite, so the words go straight into it. */
             for (int q = 0; q < pl.nreg; q++) {
                 long off = F.slot[i] + (long)q * 4;
+                /* two whole words to one strd */
+                if (q + 1 < pl.nreg && (long)(q + 2) * 4 <= a->size &&
+                    off % 4 == 0 && !t_isa_a32 &&
+                    !getenv("EMBCC_T_NOARGPAIR") &&
+                    t_ldst_pair(t, pl.reg + q, pl.reg + q + 1, F.fb, off, 1)) {
+                    q++;
+                    continue;
+                }
                 int wid = (long)(q + 1) * 4 > a->size ? (a->size & 3) : 4;
                 if (wid == 3) wid = 4;       /* a three-byte tail: store 4 */
                 if (!t_ldst_imm(t, pl.reg + q, F.fb, off, wid == 4 ? 4 : wid,
@@ -8005,6 +8182,19 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
                         !(F.used_callee[k] == 7 &&
                           (F.fb == 7 || fn->has_alloca)))
                         ds = F.used_callee[k];
+                if (ds != T_ACC && q + 1 < pl.nstk && !t_isa_a32 &&
+                    (long)(pl.nreg + q + 2) * 4 <= a->size &&
+                    src % 4 == 0 && dst % 4 == 0 &&
+                    !getenv("EMBCC_T_NOARGPAIR") &&
+                    t_ldst_pair(t, ds, T_ACC, F.fb, src, 0)) {
+                    if (!t_ldst_pair(t, ds, T_ACC, F.fb, dst, 1)) {
+                        fb_addr(&F, T_ADDR, dst);
+                        ldst_must(t, ds, T_ADDR, 0, 4, 0, 1);
+                        ldst_must(t, T_ACC, T_ADDR, 4, 4, 0, 1);
+                    }
+                    q++;
+                    continue;
+                }
                 fb_ld(&F, ds, src, 4, 0);
                 if (!t_ldst_imm(t, ds, F.fb, dst, 4, 0, 1)) {
                     fb_addr(&F, T_ADDR, dst);

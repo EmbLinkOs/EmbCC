@@ -580,9 +580,57 @@ static int ivsr_one(struct ir_func *fn)
             }
         }
 
-        /* ---- rewrite: a pointer per candidate ---- */
-        int ptr[16], delta[16], bsum[16];
+        /* ---- one pointer per base ----------------------------------------
+         *
+         * `pool[i].key`, `pool[i].val` and `&pool[i]` are base + i*12 plus
+         * 4, 8 and nothing: three candidates, and they were three pointers
+         * each stepped by 12 -- three registers and three adds a trip,
+         * where clang walks one and reaches the fields at displacements.
+         * Candidates of the same base and scale whose second base is a
+         * constant (or absent) share the first one's pointer; each other is
+         * that pointer plus the difference, which the backend folds into
+         * the access (ra_fold_memoff). EMBCC_NO_IVSHARE turns it off. */
+        int lead[16];
+        long coff[16];
+        static int no_share = -1;
+        if (no_share < 0)
+            no_share = getenv("EMBCC_NO_IVSHARE") != NULL;
         for (int k = 0; k < nc; k++) {
+            lead[k] = k;
+            coff[k] = 0;
+            int cst = cbase2[k] < 0;
+            if (!cst) {
+                long c;
+                if (cbase2[k] < fn->nvregs && d.cnt[cbase2[k]] == 1 &&
+                    d.ins[cbase2[k]] >= 0 &&
+                    fn->ins[d.ins[cbase2[k]]].op == IR_CONST) {
+                    c = fn->ins[d.ins[cbase2[k]]].imm;
+                    if (c >= -4096 && c <= 4096) { coff[k] = c; cst = 1; }
+                }
+            }
+            if (!cst || no_share)
+                continue;
+            for (int j = 0; j < k; j++)
+                if (lead[j] == j && cbase[j] == cbase[k] &&
+                    cscale[j] == cscale[k] &&
+                    (cbase2[j] < 0 || coff[j] || cbase2[j] == cbase2[k] ||
+                     (d.cnt[cbase2[j]] == 1 && d.ins[cbase2[j]] >= 0 &&
+                      fn->ins[d.ins[cbase2[j]]].op == IR_CONST))) {
+                    lead[k] = j;
+                    break;
+                }
+        }
+        /* ---- rewrite: a pointer per leading candidate ---- */
+        int ptr[16], delta[16], bsum[16], doff[16];
+        for (int k = 0; k < nc; k++) {
+            doff[k] = -1;
+            if (lead[k] != k) {
+                ptr[k] = ptr[lead[k]];
+                delta[k] = -1;
+                bsum[k] = -1;
+                doff[k] = fn->nvregs++;
+                continue;
+            }
             ptr[k] = fn->nvregs++;
             delta[k] = fn->nvregs++;
             bsum[k] = cbase2[k] >= 0 ? fn->nvregs++ : -1;
@@ -605,13 +653,20 @@ static int ivsr_one(struct ir_func *fn)
             if (imap) imap[v] = -1;
         }
         for (int k = 0; k < nc; k++)
-            cmap[cand[k]] = ptr[k];
+            if (lead[k] == k)
+                cmap[cand[k]] = ptr[k];
         if (imap)
             imap[iv] = lftr_iv;
         for (int n = 0; n < fn->nins; n++) {
             if (n == lo) {
                 /* a two-part base, summed once before the loop */
                 for (int k = 0; k < nc; k++) {
+                    if (doff[k] >= 0) {     /* a follower's difference */
+                        struct ir_ins *c = ib_push(&nb);
+                        c->op = IR_CONST; c->dst = doff[k]; c->w = PTRW;
+                        c->imm = coff[k] - coff[lead[k]];
+                        c->line = fn->ins[d.ins[cand[k]]].line; c->synth = 1;
+                    }
                     if (bsum[k] < 0)
                         continue;
                     struct ir_ins *a = ib_push(&nb);
@@ -621,6 +676,8 @@ static int ivsr_one(struct ir_func *fn)
                     cbase[k] = bsum[k];
                 }
                 for (int k = 0; k < nc; k++) {
+                    if (lead[k] != k)
+                        continue;
                     /* the line by value: `c` is not valid after the next
                      * ib_push, which may move the buffer -- reading it
                      * there faulted once the push landed on a growth */
@@ -652,6 +709,8 @@ static int ivsr_one(struct ir_func *fn)
             }
             if (n == inc_at) {          /* walk each pointer, after the copies */
                 for (int k = 0; k < nc; k++) {
+                    if (lead[k] != k)
+                        continue;
                     struct ir_ins *a2 = ib_push(&nb);
                     a2->op = IR_ADD; a2->dst = ptr[k]; a2->a = ptr[k];
                     a2->b = delta[k]; a2->w = PTRW;
@@ -662,8 +721,16 @@ static int ivsr_one(struct ir_func *fn)
             /* the chain's add disappears; its users read the pointer */
             int skip = 0;
             for (int k = 0; k < nc; k++)
-                if (def_target(&fn->ins[n]) == cand[k] && n >= lo && n < hi)
+                if (def_target(&fn->ins[n]) == cand[k] && n >= lo && n < hi) {
                     skip = 1;
+                    if (doff[k] >= 0) {     /* the leader's pointer, offset */
+                        struct ir_ins *a = ib_push(&nb);
+                        memset(a, 0, sizeof *a);
+                        a->op = IR_ADD; a->dst = cand[k];
+                        a->a = ptr[lead[k]]; a->b = doff[k]; a->w = PTRW;
+                        a->line = fn->ins[n].line; a->synth = 1;
+                    }
+                }
             if (skip)
                 continue;
             if (lftr_lim >= 0 && n == inc_at) {

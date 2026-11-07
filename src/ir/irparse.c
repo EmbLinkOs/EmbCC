@@ -572,8 +572,31 @@ static void parse_ins(struct p *p, char *first, const char *rest)
     }
     case IR_RET: {
         char *w = word(p);
-        if (w && *w == '%')
+        if (w && *w == '%') {
             in->a = vreg(p, w);
+            w = word(p);
+        }
+        /* `parts(%b, %c)` or `parts(%b)`: a struct returned as its
+         * register units (nrp), as irprint writes it */
+        if (w && !strncmp(w, "parts(", 6)) {
+            char *x = w + 6;
+            size_t n = strlen(x);
+            if (!n || (x[n - 1] != ',' && x[n - 1] != ')'))
+                perr(p, "'%%N,' or '%%N)' inside a return's parts");
+            int last = x[n - 1] == ')';
+            x[n - 1] = 0;
+            in->b = vreg(p, x);
+            in->nrp = 1;
+            if (!last) {
+                char *y = word(p);
+                n = y ? strlen(y) : 0;
+                if (!n || y[n - 1] != ')')
+                    perr(p, "a ')' closing a return's parts");
+                y[n - 1] = 0;
+                in->c = vreg(p, y);
+                in->nrp = 2;
+            }
+        }
         break;
     }
     case IR_JMP:

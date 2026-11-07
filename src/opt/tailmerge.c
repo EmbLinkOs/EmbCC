@@ -244,7 +244,7 @@ static int tm_match(struct ir_func *fn, const struct defs *d,
             if (x >= 0 && x < fn->nvregs && map[x] >= 0)
                 x = map[x];
             ok = x == a->a && a->w == b->w && a->size == b->size &&
-                 a->flt == b->flt;
+                 a->flt == b->flt && !a->nrp && !b->nrp;
         }
         /* a paired value the shared copy also reads where both runs read
          * it: renaming that read to the merge temp would hand the other
