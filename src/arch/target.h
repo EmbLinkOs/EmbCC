@@ -525,6 +525,7 @@ void target_set_thumb_em(int on);
  * refused until both halves are right. */
 int target_thumb_fpu(void);
 const char *target_arm_cpu_name(void);   /* -mcpu=, a known Cortex-M part, or NULL */
+void target_set_arm_cpu(const char *cpu);
 void target_set_thumb_fpu(int on);
 /* ...and whether that unit computes in DOUBLE precision as well:
  * FPv5-D16, the Cortex-M7's (-mfpu=fpv5-d16). Then `double` arithmetic,

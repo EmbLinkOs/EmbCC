@@ -20,24 +20,6 @@ static const char *g_arm_fpu;
 static const char *g_arm_float_abi;
 static const char *g_arm_cpu;
 
-/* The part -mcpu= named, when it is one of the Cortex-M parts this
- * backend knows: what .ARM.attributes' Tag_CPU_name then says, as clang
- * and GCC write it (llvm-objdump picks its decoder from that name, and
- * read a Cortex-M7's FPv5 code as <unknown> under "7E-M"). NULL
- * otherwise: the architecture is named instead, as nothing more was
- * claimed. */
-const char *target_arm_cpu_name(void)
-{
-    static const char *const known[] = {
-        "cortex-m0", "cortex-m0plus", "cortex-m1", "cortex-m3", "cortex-m4",
-        "cortex-m7", "cortex-m23", "cortex-m33", "cortex-m35p",
-        "cortex-m52", "cortex-m55", "cortex-m85", NULL
-    };
-    for (int k = 0; g_arm_cpu && known[k]; k++)
-        if (strcmp(g_arm_cpu, known[k]) == 0)
-            return known[k];
-    return NULL;
-}
 static int g_arm_cmse;             /* -mcmse was given */
 /* The unit -march='s +fp, +fp.dp or +nofp names: the FPU when -mfpu= is
  * not given (or is auto), as GCC takes the pair. */
@@ -304,6 +286,7 @@ int thumb_target_option(const char *arg)
                                "core's profile is not this one",
                                opt_said("-mcpu=", v), target_triple_now());
                 g_arm_cpu = v;
+                target_set_arm_cpu(v);
                 return 1;
             }
         }
@@ -471,6 +454,7 @@ int thumb_target_option(const char *arg)
             if (!strcmp(v, "cortex-m23")) {
                 target_set_thumb_v8m_base();
                 g_arm_cpu = v;
+                target_set_arm_cpu(v);
                 return 1;
             }
             if (!strcmp(v, "cortex-m0") || !strcmp(v, "cortex-m0plus") ||
@@ -478,6 +462,7 @@ int thumb_target_option(const char *arg)
                 target_set_thumb_arch(6);
                 target_set_thumb_em(0);
                 g_arm_cpu = v;
+                target_set_arm_cpu(v);
                 return 1;
             }
             /* The part has one architecture, whatever the triple
@@ -517,6 +502,7 @@ int thumb_target_option(const char *arg)
             /* Kept for thumb_options_done: which unit the part's
              * -eabihf name implies depends on which part it is. */
             g_arm_cpu = v;
+            target_set_arm_cpu(v);
             return 1;
         }
         /* The FPU and the float ABI are RECORDED here and resolved

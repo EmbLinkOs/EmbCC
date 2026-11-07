@@ -1098,6 +1098,32 @@ int target_thumb_cmse(void) { return target_thumb_v8m() && g_thumb_cmse; }
 void target_set_thumb_cmse(int on) { g_thumb_cmse = on ? 1 : 0; }
 int target_thumb_fpu(void) { return g_thumb_fpu; }
 void target_set_thumb_fpu(int on) { g_thumb_fpu = on ? 1 : 0; }
+
+/* -mcpu='s value, as thumb/options.c read it: here, with the other target
+ * state, because .ARM.attributes (thumb/attrs.c) asks for it in tools
+ * that link no option parser (embls). */
+static const char *g_arm_cpu_name;
+void target_set_arm_cpu(const char *cpu) { g_arm_cpu_name = cpu; }
+
+/* The part -mcpu= named, when it is one of the Cortex-M parts this
+ * backend knows: what .ARM.attributes' Tag_CPU_name then says, as clang
+ * and GCC write it (llvm-objdump picks its decoder from that name, and
+ * read a Cortex-M7's FPv5 code as <unknown> under "7E-M"). NULL
+ * otherwise: the architecture is named instead, as nothing more was
+ * claimed. */
+const char *target_arm_cpu_name(void)
+{
+    static const char *const known[] = {
+        "cortex-m0", "cortex-m0plus", "cortex-m1", "cortex-m3", "cortex-m4",
+        "cortex-m7", "cortex-m23", "cortex-m33", "cortex-m35p",
+        "cortex-m52", "cortex-m55", "cortex-m85", NULL
+    };
+    for (int k = 0; g_arm_cpu_name && known[k]; k++)
+        if (strcmp(g_arm_cpu_name, known[k]) == 0)
+            return known[k];
+    return NULL;
+}
+
 int target_thumb_fpu_dp(void) { return g_thumb_fpu && g_thumb_fpu_dp; }
 void target_set_thumb_fpu_dp(int on) { g_thumb_fpu_dp = on ? 1 : 0; }
 int target_thumb_hard_abi(void) { return g_thumb_hard; }
