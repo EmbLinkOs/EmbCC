@@ -303,6 +303,7 @@ int pass_divmod(struct ir_func *fn);
 
 /* ifconv.c */
 int target_cheap_select(void);
+int target_setcc_cheap(void);
 int pass_ifconv(struct ir_func *fn);
 
 /* cfgclean.c */

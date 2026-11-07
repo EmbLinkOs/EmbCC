@@ -347,10 +347,246 @@ static int ifconv_any(struct ir_func *fn)
     return done;
 }
 
+/* ---- a choice made with arithmetic -------------------------------------
+ *
+ * Where a select is a branch again (RISC-V, MIPS, LoongArch) but a
+ * comparison's 0 or 1 is one instruction (snez, seqz, sltu), two shapes
+ * of diamond are cheaper as arithmetic on that 0 or 1 than as branches:
+ *
+ *   st = len ? 2 : 0;          st = (len != 0) << 1
+ *   if (!len) errors++;        errors = errors + (len == 0)
+ *
+ * -- two constants that differ by a power of two, and a value against
+ * the same value plus a power of two (or minus one). clang does both;
+ * EmbCC had a branch, a jump and two loads of a constant on RISC-V, in
+ * the state machine of the bench. The 0 or 1 is the condition itself
+ * when it is a comparison already, at the right polarity. */
+int target_setcc_cheap(void)
+{
+    switch (target_get()) {
+    case TARGET_RISCV32: case TARGET_RISCV64:
+    case TARGET_MIPS32: case TARGET_MIPS64: case TARGET_LOONGARCH64:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+/* One arm of such a diamond: a block reached only from the branch at
+ * the end of `b`, which sets one name to a constant (kind 0), to a value
+ * (kind 1) or to a value plus a constant (kind 2), and goes on to *cont.
+ * Constants may come through a temp the arm defines. */
+struct ar_arm { int kind, x, v, w, s, e, jmp, cont; long k; };
+
+static int ar_arm_parse(struct ir_func *fn, struct defs *d, const struct bb *bb,
+                        int nbb, const int *l2b, int arm, int b,
+                        struct ar_arm *A)
+{
+    if (arm <= b || arm >= nbb || bb[arm].npred != 1 || bb[arm].pred[0] != b)
+        return 0;
+    int s = bb[arm].start, e = bb[arm].end;
+    if (s < e && fn->ins[s].op == IR_LABEL)
+        s++;
+    A->jmp = -1;
+    if (e - 1 > s && fn->ins[e - 1].op == IR_JMP) {
+        A->jmp = e - 1;
+        e--;
+    }
+    if (e - s < 1 || e - s > 3)
+        return 0;
+    A->s = s; A->e = e;
+    /* every instruction but the last defines a temp only it reads */
+    for (int k = s; k + 1 < e; k++) {
+        const struct ir_ins *m = &fn->ins[k];
+        if ((m->op != IR_CONST && m->op != IR_ADD && m->op != IR_SUB) ||
+            m->flt || m->vol || m->dst < fn->nvars || d->cnt[m->dst] != 1)
+            return 0;
+    }
+    const struct ir_ins *last = &fn->ins[e - 1];
+    if (last->dst < 0 || last->vol || last->flt)
+        return 0;
+    A->x = last->dst;
+    const struct ir_ins *m = last;
+    if (m->op == IR_MOV && m->a >= 0 && m->a < fn->nvregs &&
+        d->cnt[m->a] == 1 && d->ins[m->a] >= s && d->ins[m->a] < e - 1)
+        m = &fn->ins[d->ins[m->a]];     /* the value, through its temp */
+    else if (m->op == IR_MOV && e - s != 1)
+        return 0;
+    long k;
+    A->w = m->op == IR_CONST ? m->w : m->w ? m->w : 4;
+    if (m->op == IR_CONST) {
+        A->kind = 0; A->k = m->imm; A->v = -1;
+    } else if (m->op == IR_MOV && m->a >= 0) {
+        A->kind = 1; A->v = m->a; A->k = 0;
+    } else if ((m->op == IR_ADD || m->op == IR_SUB) && !m->flt &&
+               (m->imm_b ? (k = m->imm, 1) : get_const(fn, d, m->b, &k)) &&
+               m->a >= 0) {
+        A->kind = 2; A->v = m->a; A->k = m->op == IR_SUB ? -k : k;
+    } else {
+        return 0;
+    }
+    /* a value must come from before the branch, not from this arm */
+    if (A->v >= 0 && A->v < fn->nvregs && d->cnt[A->v] == 1 &&
+        d->ins[A->v] >= s && d->ins[A->v] < e)
+        return 0;
+    A->cont = A->jmp >= 0 ? l2b[fn->ins[A->jmp].label] : arm + 1;
+    return A->cont >= 0;
+}
+
+static int ar_log2(unsigned long v)
+{
+    if (!v || (v & (v - 1)))
+        return -1;
+    int n = 0;
+    while (v > 1) { v >>= 1; n++; }
+    return n;
+}
+
+static int ifconv_arith(struct ir_func *fn)
+{
+    if (fn->nins == 0 || !target_setcc_cheap() ||
+        getenv("EMBCC_NO_IFARITH"))
+        return 0;
+    int nbb, *l2b;
+    struct bb *bb = build_cfg(fn, &nbb, &l2b);
+    struct defs d;
+    compute_defs(fn, &d);
+    int done = 0, pw = target_ptr_size();
+    for (int b = 0; b + 1 < nbb && !done; b++) {
+        if (bb[b].end - bb[b].start < 1)
+            continue;
+        struct ir_ins *br = &fn->ins[bb[b].end - 1];
+        if ((br->op != IR_BRZ && br->op != IR_BRNZ) || br->a < 0 ||
+            br->label < 0 || (br->w != 4 && br->w != pw))
+            continue;
+        int thn = b + 1, els = l2b[br->label];
+        struct ar_arm T, E;
+        if (els < 0 || els == thn ||
+            !ar_arm_parse(fn, &d, bb, nbb, l2b, thn, b, &T) ||
+            !ar_arm_parse(fn, &d, bb, nbb, l2b, els, b, &E) ||
+            T.x != E.x || T.cont != E.cont || els == T.cont)
+            continue;
+        int w = T.w;
+        if (w != E.w || (w != 4 && w != pw))
+            continue;
+        /* then = the fall-through arm: it runs when brz's condition is
+         * not zero, brnz's when it is */
+        int then_nz = br->op == IR_BRZ;
+        /* the form: x = base + (cond ? delta : 0), cond the arm's own */
+        int base, use_then;
+        long kbase = 0, delta;
+        if (T.kind == 0 && E.kind == 0) {
+            base = -1;
+            if (E.k == 0 || T.k != 0) {
+                kbase = E.k; delta = T.k - E.k; use_then = 1;
+            } else {
+                kbase = T.k; delta = E.k - T.k; use_then = 0;
+            }
+        } else if (T.kind == 2 && E.kind == 1 && T.v == E.v) {
+            base = E.v; delta = T.k; use_then = 1;
+        } else if (E.kind == 2 && T.kind == 1 && T.v == E.v) {
+            base = T.v; delta = E.k; use_then = 0;
+        } else {
+            continue;
+        }
+        if (w == 4)
+            delta = (long)(int)delta;
+        int neg = delta < 0;
+        int sh = ar_log2(neg ? -(unsigned long)delta : (unsigned long)delta);
+        if (sh < 0 || sh > (w == 8 ? 62 : 30))
+            continue;
+        /* the condition as 0 or 1: `ne` when the chosen arm runs on a
+         * non-zero condition, `eq` when on zero */
+        int want_nz = use_then ? then_nz : !then_nz;
+        int x = T.x;
+        struct ibuf nb = { 0, 0, 0 };
+        int *newpos = xmalloc((size_t)(fn->nins + 1) * sizeof *newpos);
+        int ts = bb[thn].start, te = bb[thn].end;
+        int es = bb[els].start, ee = bb[els].end;
+        for (int n = 0; n < fn->nins; n++) {
+            newpos[n] = nb.n;
+            if (n == bb[b].end - 1) {
+                struct ir_ins t;
+                memset(&t, 0, sizeof t);
+                t.a = t.b = t.c = -1;
+                t.line = br->line; t.col = br->col;
+                int c = br->a, bit;
+                const struct ir_ins *cd =
+                    c < fn->nvregs && d.cnt[c] == 1 && d.ins[c] >= 0
+                        ? &fn->ins[d.ins[c]] : NULL;
+                if (cd && cd->op == IR_CMP && !cd->flt && want_nz) {
+                    bit = c;                    /* already 0 or 1 */
+                } else {
+                    struct ir_ins *z = ib_push(&nb);
+                    *z = t;
+                    z->op = IR_CONST; z->imm = 0; z->w = br->w;
+                    int zero = z->dst = fn->nvregs++;
+                    struct ir_ins *q = ib_push(&nb);
+                    *q = t;
+                    q->op = IR_CMP; q->pred = want_nz ? B_NE : B_EQ;
+                    q->a = c; q->b = zero; q->w = br->w;
+                    bit = q->dst = fn->nvregs++;
+                }
+                if (w == 8) {
+                    struct ir_ins *x8 = ib_push(&nb);
+                    *x8 = t;
+                    x8->op = IR_EXT; x8->a = bit; x8->size = 4; x8->w = 8;
+                    bit = x8->dst = fn->nvregs++;
+                }
+                if (sh > 0) {
+                    struct ir_ins *k = ib_push(&nb);
+                    *k = t;
+                    k->op = IR_CONST; k->imm = sh; k->w = w;
+                    int ks = k->dst = fn->nvregs++;
+                    struct ir_ins *sl = ib_push(&nb);
+                    *sl = t;
+                    sl->op = IR_SHL; sl->a = bit; sl->b = ks; sl->w = w;
+                    bit = sl->dst = fn->nvregs++;
+                }
+                if (base < 0 && kbase == 0 && !neg) {
+                    struct ir_ins *mv = ib_push(&nb);
+                    *mv = t;
+                    mv->op = IR_MOV; mv->a = bit; mv->w = w;
+                    mv->dst = x;
+                } else {
+                    if (base < 0) {
+                        struct ir_ins *k = ib_push(&nb);
+                        *k = t;
+                        k->op = IR_CONST; k->imm = kbase; k->w = w;
+                        base = k->dst = fn->nvregs++;
+                    }
+                    struct ir_ins *op = ib_push(&nb);
+                    *op = t;
+                    op->op = neg ? IR_SUB : IR_ADD;
+                    op->a = base; op->b = bit; op->w = w;
+                    op->dst = x;
+                }
+                continue;
+            }
+            if (n >= ts && n < te && n != T.jmp)
+                continue;                       /* the then arm */
+            if (n >= es && n < ee)
+                continue;                       /* the else arm */
+            *ib_push(&nb) = fn->ins[n];
+        }
+        newpos[fn->nins] = nb.n;
+        remap_scopes(fn, newpos, fn->nins);
+        free(newpos);
+        free(fn->ins);
+        fn->ins = nb.p; fn->nins = nb.n; fn->cap = nb.cap;
+        g_did.ifconv++;
+        done = 1;
+    }
+    free_defs(&d); free(l2b);
+    free_cfg(bb, nbb);
+    return done;
+}
+
 int pass_ifconv(struct ir_func *fn)
 {
     int changed = 0, guard = 0;
-    while (guard++ < 64 && (ifconv_one(fn) || ifconv_any(fn)))
+    while (guard++ < 64 &&
+           (ifconv_arith(fn) || ifconv_one(fn) || ifconv_any(fn)))
         changed = 1;
     return changed;
 }
