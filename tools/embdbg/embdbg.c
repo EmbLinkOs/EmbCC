@@ -1051,6 +1051,14 @@ static unsigned long crash_mem(struct crash *c, unsigned long a, int *ok)
     if (ok) *ok = 0;
     return 0;
 }
+/* src into a field of cap bytes, cut to fit and always terminated */
+static void copy_field(char *dst, size_t cap, const char *src)
+{
+    size_t n = strlen(src);
+    if (n > cap - 1) n = cap - 1;
+    memcpy(dst, src, n);
+    dst[n] = 0;
+}
 static void parse_crash(const char *path, struct crash *c)
 {
     memset(c, 0, sizeof *c);
@@ -1062,11 +1070,11 @@ static void parse_crash(const char *path, struct crash *c)
         int nf = sscanf(line, "%31s %63s %63s", k, a, b);
         if (nf < 1 || k[0] == '#') continue;
         if (strcmp(k, "exception") == 0 && nf >= 2) {
-            strncpy(c->exc, a, sizeof c->exc - 1);
+            copy_field(c->exc, sizeof c->exc, a);
         } else if (strcmp(k, "fault") == 0 && nf >= 2) {
             c->have_fault = 1; c->fault = strtoul(a, NULL, 0);
         } else if (strcmp(k, "reg") == 0 && nf >= 3 && c->nreg < 40) {
-            strncpy(c->rname[c->nreg], a, 7);
+            copy_field(c->rname[c->nreg], sizeof c->rname[0], a);
             c->rval[c->nreg++] = strtoul(b, NULL, 0);
         } else if (strcmp(k, "mem") == 0 && nf >= 3 && c->nmem < 256) {
             c->maddr[c->nmem] = strtoul(a, NULL, 0);
