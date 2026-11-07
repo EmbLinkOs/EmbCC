@@ -346,6 +346,33 @@ struct a64_sites {
  * questions while the types still exist -- an IR that carries the ANSWER
  * instead of the type is a step toward a self-contained EmbIR (§9.1). */
 #define a64_hfa(t, esz)  ty_hfa((t), (esz))
+
+/* A struct return's register units (target_ret_units), as IR_RET places
+ * them: an HFA one member per v register, anything else of 16 bytes or
+ * less in x0/x1 by eight -- whole words only. */
+int a64_ret_units(const struct ir_func *fn, int *off, int *size, int *fp,
+                  int max)
+{
+    if (!fn->ret_abi.is_struct || !fn->ret_abi.ty ||
+        getenv("EMBCC_NO_RETPARTS"))
+        return 0;
+    int esz, nh = a64_hfa((struct type *)fn->ret_abi.ty, &esz);
+    long sz = fn->ret_abi.size;
+    if (nh) {
+        if (nh > max)
+            return 0;
+        for (int q = 0; q < nh; q++) {
+            off[q] = q * esz; size[q] = esz; fp[q] = 1;
+        }
+        return nh;
+    }
+    if (sz <= 0 || sz > 16 || sz % 8 || sz / 8 > max)
+        return 0;
+    for (int q = 0; q * 8 < sz; q++) {
+        off[q] = q * 8; size[q] = 8; fp[q] = 0;
+    }
+    return (int)(sz / 8);
+}
 #define a64_byref(t)     ty_aapcs64_byref(t)
 
 /* Where one argument goes. The same classifier places a call's arguments and
@@ -3276,7 +3303,34 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
         }
 
         case IR_RET: {
-            if (i->a >= 0) {
+            if (i->nrp) {
+                /* a struct as its units (pass_sroa): each part into its
+                 * register, the first through a scratch only when the
+                 * second already sits where it must go */
+                int off[2], sz[2], fpu[2], part[2] = { i->b, i->c };
+                int nu = a64_ret_units(fn, off, sz, fpu, 2);
+                if (nu != i->nrp)
+                    internal_error("aarch64: a struct returned as %d units "
+                                   "the convention does not have", i->nrp);
+                int dst[2], nf = 0, ng = 0;
+                for (int q = 0; q < nu; q++)
+                    dst[q] = fpu[q] ? nf++ : ng++;
+                int clash = nu == 2 && part[1] >= 0 &&
+                            (fpu[0] ? a64_in_freg(part[1]) &&
+                                      g_a64_floc[part[1]] == dst[0]
+                                    : a64_in_reg(part[1]) &&
+                                      g_a64_loc[part[1]] == dst[0]);
+                for (int q = 0; q < nu; q++) {
+                    int to = q == 0 && clash ? (fpu[0] ? A64_FTMP : A64_SCR)
+                                             : dst[q];
+                    if (fpu[q]) fld_slot(t, sd, part[q], to, sz[q]);
+                    else ld_slot(t, sd, part[q], to, 8, 0, 8);
+                }
+                if (clash) {
+                    if (fpu[0]) a64_fmov_reg(t, dst[0], A64_FTMP, sz[0]);
+                    else a64_mov_reg(t, dst[0], A64_SCR, 8);
+                }
+            } else if (i->a >= 0) {
                 struct type *rt = f->ret_ty;
                 int esz, nh = a64_hfa(rt, &esz);
                 if (i->flt) {

@@ -638,6 +638,10 @@ int target_ret_units(const struct ir_func *fn, int *off, int *size, int *fp,
     if (target_get() == TARGET_RISCV32 || target_get() == TARGET_RISCV64)
         return rv_ret_units(fn, off, size, fp, max);
 #endif
+#if FAMILY_BUILT(aarch64)
+    if (target_get() == TARGET_AARCH64)
+        return a64_ret_units(fn, off, size, fp, max);
+#endif
     return 0;
 }
 
