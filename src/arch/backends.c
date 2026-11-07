@@ -158,6 +158,7 @@ static const struct backend_desc g_backends[] = {
         .family = "MIPS", .codegen = codegen_unit_mips, .ra_at_o0 = 0,
         .frame_sp = 29, .frame_ra = 31,     /* sp, ra */
         .op_calls_helper = mips_op_calls_helper,
+        .ret_units = mips_ret_units,
         .unwind_unwritten = NULL,
         .cxx_exceptions = BACKEND_CXX_EXC_OK,
         .firmware = 1, .ld_scripts = 1,
@@ -170,6 +171,7 @@ static const struct backend_desc g_backends[] = {
         .family = "MIPS", .codegen = codegen_unit_mips, .ra_at_o0 = 0,
         .frame_sp = 29, .frame_ra = 31,     /* sp, ra */
         .op_calls_helper = mips_op_calls_helper,
+        .ret_units = mips_ret_units,
         .unwind_unwritten = NULL,
         .cxx_exceptions = BACKEND_CXX_EXC_OK,
         .firmware = 1, .ld_scripts = 1,
