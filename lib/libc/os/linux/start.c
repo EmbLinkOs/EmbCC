@@ -31,19 +31,16 @@
  *
  * ---- why it is written as bytes -------------------------------------------
  *
- * EmbCC has no general text assembler (src/arch/x86_64/topasm.c says
- * so): a file-scope asm block may use labels, the data directives, and
- * a handful of x86-64 mnemonics. So the instructions that cannot be
- * spelled are written as .byte/.long with the disassembly beside them,
- * exactly as lib/libc/src/setjmp does -- and, exactly as there,
- * tests/golden/linux.sh feeds those comments to a REAL assembler and
- * checks that it produces these bytes. The bytes are what runs, so
- * nothing gets to assert they are right; an assembler has to agree.
+ * The x86-64 stub was written when EmbCC's file-scope asm took only a
+ * handful of mnemonics: the rest are .byte with the disassembly beside
+ * them, as lib/libc/src/setjmp's are, and tests/golden/linux.sh has
+ * objdump decode them. The AArch64 assembler is complete, so that stub
+ * is spelled -- a word written as .long is data, and objdump showed it
+ * as .word once embas marked it so ($d), as GNU as does.
  *
- * On aarch64 the branch to C goes through a `.quad __libc_start` rather
- * than a `bl`, because a block with no encodable instructions has no
- * way to carry a call relocation. The address is loaded from the word
- * after the code and branched through.
+ * On aarch64 the branch to C still goes through a `.quad __libc_start`,
+ * loaded from after the code and branched through: linux.sh checks
+ * that the .quad is a real relocation.
  */
 #include "../backend.h"
 
@@ -75,11 +72,12 @@ __asm__(
 __asm__(
     ".globl _start\n"
     "_start:\n"
-    ".long 0xd280001d\n"         /* mov  x29, #0      -- end of the chain */
-    ".long 0xd280001e\n"         /* mov  x30, #0      -- and no return addr */
-    ".long 0x910003e0\n"         /* mov  x0, sp       -- the block, as arg 1 */
-    ".long 0x58000041\n"         /* ldr  x1, #8       -- the .quad below */
-    ".long 0xd61f0020\n"         /* br   x1 */
+    "mov x29, #0\n"              /* end of the chain */
+    "mov x30, #0\n"              /* and no return address */
+    "mov x0, sp\n"               /* the block, as arg 1 */
+    "ldr x1, .Lstart_c\n"        /* the .quad below */
+    "br x1\n"
+    ".Lstart_c:\n"
     ".quad __libc_start\n"
 );
 
