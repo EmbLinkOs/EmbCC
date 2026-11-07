@@ -387,7 +387,13 @@ int pass_rangecheck(struct ir_func *fn)
  * parameter) or one this cannot read (inline asm writes outside
  * def_target's view) is not known, and the switch keeps its test.
  * EMBCC_NO_SWITCHRANGE=1 turns it off. */
-struct sr_walk { int *mark, gen, budget; };
+/* mark[v] == gen: v is being shown (or was shown) to lie in [lo[v], hi[v]].
+ * Met again, that assumption answers only a range that contains it: the
+ * arithmetic below shifts the range it asks of its operand, so a loop's
+ * `i = i + 1` asks of i a range one lower than the one i was entered
+ * with, and taking the cycle as proof would bound a counter that runs
+ * past the table. */
+struct sr_walk { int *mark, gen, budget; long *lo, *hi; };
 
 /* An instruction's constant right operand: an immediate, or a temp only a
  * CONST defines. */
@@ -408,9 +414,11 @@ static int sr_in(struct ir_func *fn, struct defs *d, int v, long lo, long hi,
 {
     if (v < 0 || v >= fn->nvregs || v < fn->nparams)
         return 0;
-    if (s->mark[v] == s->gen)
-        return 1;                       /* on the way already: a cycle */
+    if (s->mark[v] == s->gen)           /* met already: on a cycle, or shown */
+        return s->lo[v] >= lo && s->hi[v] <= hi;
     s->mark[v] = s->gen;
+    s->lo[v] = lo;
+    s->hi[v] = hi;
     int listed = 0;
     for (int n = d->first[v]; n >= 0; n = d->next[n]) {
         if (--s->budget < 0)
@@ -492,7 +500,9 @@ int pass_switchrange(struct ir_func *fn)
     struct defs d;
     compute_defs(fn, &d);
     defs_lists(fn, &d);
-    struct sr_walk s = { xcalloc((size_t)fn->nvregs + 1, sizeof *s.mark), 0, 0 };
+    struct sr_walk s = { xcalloc((size_t)fn->nvregs + 1, sizeof *s.mark), 0, 0,
+                         xcalloc((size_t)fn->nvregs + 1, sizeof *s.lo),
+                         xcalloc((size_t)fn->nvregs + 1, sizeof *s.hi) };
     int changed = 0;
     for (int n = 0; n < fn->nins; n++) {
         struct ir_ins *i = &fn->ins[n];
@@ -517,7 +527,7 @@ int pass_switchrange(struct ir_func *fn)
             changed = 1;
         }
     }
-    free(s.mark);
+    free(s.mark); free(s.lo); free(s.hi);
     free_defs(&d);
     return changed;
 }

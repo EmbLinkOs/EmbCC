@@ -171,6 +171,50 @@ static u32 arith_shl_ref(void)
     return a * 4 + (u32)st;
 }
 
+/* A state that steps itself: `st = st + 1`, a loop's counter. Each
+ * value comes from the one before, so the proof meets st again asking a
+ * range one lower than the one it started from -- which is no proof: the
+ * counter runs to the case past the table, and the step down from 0
+ * below it. Both must find default. */
+static volatile int lim = 40;
+__attribute__((noinline)) u32 step_up(void)
+{
+    u32 a = 0;
+    for (int op = 0; op < lim; op++) {
+        switch (op) {
+        case 0: a += 1; break;
+        case 1: a += 2; break;
+        case 2: a += 4; break;
+        case 3: a += 8; break;
+        case 4: a += 16; break;
+        case 5: a += 32; break;
+        case 6: a += 64; break;
+        case 7: a += 128; break;
+        default: a += 1000; break;
+        }
+    }
+    return a;
+}
+
+__attribute__((noinline)) u32 step_down(void)
+{
+    int st = 7; u32 a = 0;
+    for (int i = 0; i < lim; i++) {
+        switch (st) {
+        case 0: a += 1; st = st - 1; break;
+        case 1: a += 2; st = st - 1; break;
+        case 2: a += 4; st = st - 1; break;
+        case 3: a += 8; st = st - 1; break;
+        case 4: a += 16; st = st - 1; break;
+        case 5: a += 32; st = st - 1; break;
+        case 6: a += 64; st = st - 1; break;
+        case 7: a += 128; st = st - 1; break;
+        default: a += 100; break;
+        }
+    }
+    return a;
+}
+
 static u32 arith_ref(int out)
 {
     int st = 0; u32 a = 0;
@@ -217,5 +261,7 @@ int main(void)
     if (arith_in() != arith_ref(0)) bad |= 16;
     if (arith_out() != arith_ref(1)) bad |= 32;
     if (arith_shl() != arith_shl_ref()) bad |= 64;
+    if (step_up() != 255 + 32 * 1000) bad |= 128;
+    if (step_down() != 255 + 32 * 100) bad |= 128;
     return bad ? bad : 42;
 }
