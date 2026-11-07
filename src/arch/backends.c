@@ -183,6 +183,7 @@ static const struct backend_desc g_backends[] = {
     [TARGET_LOONGARCH64] = {
         .family = "LoongArch", .codegen = codegen_unit_loongarch, .ra_at_o0 = 1,
         .op_calls_helper = la_op_calls_helper,
+        .ret_units = la_ret_units,
         .unwind_unwritten = "LoongArch .eh_frame",
         .cxx_exceptions = BACKEND_CXX_EXC_NONE,
         .firmware = 1, .ld_scripts = 1,

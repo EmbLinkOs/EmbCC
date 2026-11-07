@@ -367,6 +367,8 @@ int x86_ret_units(const struct ir_func *fn, int *off, int *size, int *fp,
                   int max);                         /* src/arch/x86_64/codegen.c */
 int t_ret_units(const struct ir_func *fn, int *off, int *size, int *fp,
                 int max);                           /* src/arch/thumb/codegen.c */
+int la_ret_units(const struct ir_func *fn, int *off, int *size, int *fp,
+                 int max);                          /* src/arch/loongarch/codegen.c */
 int a64_op_calls_helper(const struct ir_ins *i);    /* src/arch/aarch64/codegen.c */
 int mips_op_calls_helper(const struct ir_ins *i);   /* src/arch/mips/codegen.c */
 int la_op_calls_helper(const struct ir_ins *i);     /* src/arch/loongarch/codegen.c */
