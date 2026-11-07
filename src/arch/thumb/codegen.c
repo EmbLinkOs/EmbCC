@@ -728,9 +728,14 @@ static const struct ra_target THUMB_RA = {
      * value into a slot, so every function used to end with `str` to a
      * slot and `ldr` back into r0.
      *
-     * A memcpy's addresses are still read from their slots, so those
-     * values must stay there. */
-    1, 1, 0,
+     * A memcpy's or memzero's addresses go through rd/rdr as well (and
+     * on ARMv6-M gen_block takes F->loc), and the scratch roles of the
+     * block loop are chosen from registers its operands are not in
+     * (t_busy). With the flag still 0 an address one of them used was
+     * kept in its slot for the whole function: `memset(hkeys, 0, ...)`
+     * put the table's address in the frame, and the probe loop after
+     * it loaded it back three times a trip. */
+    1, 1, 1,
     t_op_calls_helper,
     0,            /* Thumb-2's wide forms are three-operand */
     t_abi_hints,
