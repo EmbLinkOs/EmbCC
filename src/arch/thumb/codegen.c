@@ -5978,9 +5978,13 @@ static void gen_ins(struct t_fn *F, int n)
             int d0 = LO(F, T_ACC), d1 = -1;
             /* (not in ARM state, where ldrd takes an even register and
              * the next, and these two are whatever LO answers) */
-            int pairs = dfa && (sfa || !copy) && doff % 4 == 0 &&
-                        (!copy || soff % 4 == 0) && size >= 8 &&
-                        !t_isa_a32;
+            /* a frame slot is word-aligned; an address irgen says is
+             * aligned to the type (natural, 4 or more) is too -- ldrd and
+             * strd fault on anything less on ARMv7-M, where ldr does not */
+            int al = i->natural >= 4 && !getenv("EMBCC_T_NOPAIRCOPY");
+            int pairs = (dfa || al) && (sfa || !copy || al) &&
+                        doff % 4 == 0 && (!copy || soff % 4 == 0) &&
+                        size >= 8 && !t_isa_a32;
             if (pairs)
                 d1 = LO(F, T_SCR);
             if (!copy) {
