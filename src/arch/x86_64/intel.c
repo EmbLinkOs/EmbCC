@@ -137,12 +137,12 @@ static int parse_mem(const char *s, int n, const struct x86intel_opts *o,
         char rn[16];
         if (w == 2 && w < n && s[w] == ':' &&
             reg_of(s, w, o, &sz, &st, rn, sizeof rn) == X86R_SEG) {
-            snprintf(seg, sizeof seg, "%s", rn);
+            snprintf(seg, sizeof seg, "%.7s", rn);   /* es..gs: 3 */
             s += w + 1; n -= w + 1;
             trim(&s, &n);
         } else if (n > 3 && s[0] == '%' && s[3] == ':' &&
                    reg_of(s, 3, o, &sz, &st, rn, sizeof rn) == X86R_SEG) {
-            snprintf(seg, sizeof seg, "%s", rn);
+            snprintf(seg, sizeof seg, "%.7s", rn);   /* es..gs: 3 */
             s += 4; n -= 4;
             trim(&s, &n);
         }
@@ -391,14 +391,14 @@ static int parse_op(const char *s, int n, const struct x86intel_opts *o, int tra
         char d[64];
         snprintf(d, sizeof d, "%.*s", n - k - 2, s + k + 1);
         for (char *c = d; *c; c++) *c = (char)tolower((unsigned char)*c);
-        char t[160];
+        char t[200];       /* "{" d "}" and every decoration after it */
         if (d[0] == 'k' && d[1] >= '0' && d[1] <= '7' && !d[2])
             snprintf(t, sizeof t, " {%%%s}%s", d, dec);
         else if (!strncmp(d, "1to", 3))
             snprintf(t, sizeof t, "{%s}%s", d, dec);
         else
             snprintf(t, sizeof t, " {%s}%s", d, dec);
-        snprintf(dec, sizeof dec, "%s", t);
+        snprintf(dec, sizeof dec, "%.127s", t);
         n = k;
         while (n > 0 && isspace((unsigned char)s[n - 1])) n--;
     }

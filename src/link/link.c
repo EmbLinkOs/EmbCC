@@ -8837,8 +8837,9 @@ static void write_exec_script(struct linker *l, struct ls_script *sc,
             ph.p_memsz += back;
         }
         ph.p_flags = hd->has_flags ? hd->flags : PF_R | (x ? PF_X : 0) | (w ? PF_W : 0);
-        ph.p_align = hd->type == PT_LOAD ? page
-                   : hd->type == PT_TLS ? (Elf64_Xword)(l->tls_align ? l->tls_align : al)
+        ph.p_align = hd->type == PT_LOAD ? (Elf64_Xword)page
+                   : hd->type == PT_TLS ? (l->tls_align ? (Elf64_Xword)l->tls_align
+                                                        : (Elf64_Xword)al)
                    : first < 0 ? (Elf64_Xword)(l->elf32 ? 4 : 8)
                    : (Elf64_Xword)al;
         if (hd->type == PT_TLS && first >= 0 && l->tls_size)
