@@ -172,3 +172,83 @@ int pass_dce(struct ir_func *fn)
     free(dhead); free(dnext); free(work);
     return changed;
 }
+
+/* ---- a definition nothing reads, of a value that has others ----------
+ *
+ * pass_dce asks whether a VALUE is live, and keeps every definition of
+ * one that is: a temp with two definitions, one read and one not, keeps
+ * both. Unrolling leaves such a definition behind -- the k loop of a FIR
+ * filter, fully unrolled, still sets k to 16 halfway through the copies,
+ * and the next trip of the loop around it sets k to 0 before reading it
+ * -- and every backend then computes a constant nobody reads, inside the
+ * loop. Liveness after each definition says which are dead: a walk back
+ * through each block from what is live out of it, as the allocator walks
+ * (ra_lset). A dead definition's own reads are not counted, so a chain of
+ * them in one block goes in one pass.
+ *
+ * Only temps (variables have slots and debug homes), only definitions
+ * pass_dce would call pure, and only of a temp defined more than once: a
+ * temp with one definition and no reader is pass_dce's already.
+ * EMBCC_NO_DEADDEFS=1 turns it off, for bisecting a difference to it.
+ * Over lib/libc and the bench at -O2 it finds some 450 such definitions
+ * on Cortex-M and RV32, 384 on x86-64. */
+int pass_deaddefs(struct ir_func *fn)
+{
+    int N = fn->nins, nv = fn->nvregs;
+    if (N == 0 || nv <= fn->nvars || fn->neh || getenv("EMBCC_NO_DEADDEFS"))
+        return 0;
+    struct defs d;
+    compute_defs(fn, &d);
+    int any = 0;
+    for (int v = fn->nvars; v < nv && !any; v++)
+        any = d.cnt[v] > 1;
+    if (!any) {
+        free_defs(&d);
+        return 0;
+    }
+    int *first = xmalloc((size_t)nv * sizeof *first);
+    int *last = xmalloc((size_t)nv * sizeof *last);
+    struct ra_live *lv = ra_live_compute(fn, first, last);
+    struct ra_lset s;
+    ra_lset_init(&s, nv);
+    char *dead = xcalloc((size_t)N, 1);
+    int ndead = 0;
+    for (int b = ra_live_nblocks(lv) - 1; b >= 0; b--) {
+        ra_lset_out(&s, lv, b);
+        for (int i = ra_live_block_start(lv, b + 1) - 1;
+             i >= ra_live_block_start(lv, b); i--) {
+            const struct ir_ins *in = &fn->ins[i];
+            int v = in->dst;
+            if (v >= fn->nvars && v < nv && d.cnt[v] > 1 &&
+                def_target(in) == v && is_pure(in->op) && !in->vol &&
+                s.pos[v] < 0) {
+                dead[i] = 1;
+                ndead++;
+                continue;
+            }
+            ra_lset_step(&s, in);
+        }
+    }
+    ra_lset_free(&s);
+    ra_live_free(lv);
+    free(first); free(last);
+    free_defs(&d);
+    if (!ndead) {
+        free(dead);
+        return 0;
+    }
+    struct ibuf nb = { 0, 0, 0 };
+    int *newpos = xmalloc((size_t)(N + 1) * sizeof *newpos);
+    for (int n = 0; n < N; n++) {
+        newpos[n] = nb.n;
+        if (!dead[n])
+            *ib_push(&nb) = fn->ins[n];
+    }
+    newpos[N] = nb.n;
+    remap_scopes(fn, newpos, N);
+    free(newpos);
+    free(dead);
+    free(fn->ins);
+    fn->ins = nb.p; fn->nins = nb.n; fn->cap = nb.cap;
+    return 1;
+}

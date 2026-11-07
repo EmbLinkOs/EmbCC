@@ -450,6 +450,14 @@ static void opt_func(struct ir_func *fn)
     /* After the fixpoint: fold constant operands into immediates, then DCE the
      * CONSTs that leaves unreferenced. Kept out of the fixpoint so the earlier
      * passes never reason about the imm_b form. */
+    /* A definition of a temp that has others, read by nothing: what
+     * unrolling leaves of a loop counter (pass_deaddefs). Its copy of a
+     * value may then be a temp's only definition, which copy
+     * propagation can see through. */
+    if (cfg_ok && pass_deaddefs(fn)) {
+        pass_copyprop_local(fn);
+        pass_dce(fn);
+    }
     /* the 64-bit product of two 32-bit values: one widening multiply */
     if (pass_mulwiden(fn))
         pass_dce(fn);
