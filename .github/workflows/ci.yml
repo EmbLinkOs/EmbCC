@@ -170,18 +170,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Build the compiler
-        run: make -j"$(getconf _NPROCESSORS_ONLN)" embcc
-      - name: Compile the seed
+      - name: Install QEMU
         run: |
-          mkdir -p dbg
-          python3 verify/fuzz/gen2.py 152950 > dbg/p.c
-          for t in thumbv7em-none-eabi thumbv6m-none-eabi; do
-            for o in -O1 -O2 -Os; do
-              ./embcc --target=$t $o -Dmain=sw_main -Ilib/libc/include -S dbg/p.c -o dbg/p-$t$o.s
-            done
-          done
-          sha256sum dbg/*
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-arm
+      - name: Build the compiler, the linker and the runtimes
+        run: make -j"$(getconf _NPROCESSORS_ONLN)" embcc embld rt-embedded
+      - name: Run the seed with every mixed value printed
+        run: sh dbg152950.sh
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: debug-152950
