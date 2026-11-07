@@ -35,4 +35,17 @@ int a64asm_gpr(const char *name, int len);
  * tables themselves: an entry added here cannot escape the referee. */
 void a64asm_vocabulary(FILE *f);
 
+/* What the file assembler (src/as/gas.c) asks: is a name a register of
+ * any class (x/w, sp, b/h/s/d/q, v with an arrangement), or another word
+ * an operand may be (a condition, a shift, a system register, a prefetch
+ * or barrier operation, a relocation's modifier)? Is a statement a branch
+ * or a literal, whose label in this section is a displacement? And the
+ * statements that name a symbol: rewritten with a zero, and the
+ * relocation each carries (symform). */
+struct asm_symform;
+int a64asm_is_reg(const char *name, int len);
+int a64asm_is_word(const char *stmt, const char *w, int len);
+int a64asm_is_transfer(const char *stmt);
+int a64asm_symform(const char *stmt, struct asm_symform *f);
+
 #endif

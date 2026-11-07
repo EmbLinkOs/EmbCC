@@ -245,10 +245,14 @@ fi
     echo "cycleh was refused at RV32, where it does exist"; exit 1; }
 echo "an unknown instruction and an RV32-only CSR are each refused by name"
 
-# Inline data is constants, in range: a symbol would need a relocation
-# an inline asm cannot carry, and a value too wide for its directive is
-# an error in GNU as and llvm-mc alike rather than its low bytes.
-for d in ".word handler" ".byte 256" ".half -32769" ".word 0x100000000"; do
+# Inline data in range -- a value too wide for its directive is an error
+# in GNU as and llvm-mc alike rather than its low bytes -- and a symbol a
+# relocation, as a template carries one now.
+printf 'void handler(void); void f(void){ __asm__ volatile("j 1f\\n .word handler\\n1:"); }\n' > "$out/data.c"
+"$EMBCC" --target=riscv32-unknown-elf -c "$out/data.c" -o "$out/data.o" &&
+    llvm-readelf -rW "$out/data.o" | grep -q "R_RISCV_32 .* handler" || {
+    echo "inline asm's .word handler is not an R_RISCV_32 against handler"; exit 1; }
+for d in ".byte 256" ".half -32769" ".word 0x100000000"; do
     printf 'void f(void){ __asm__ volatile("%s"); }\n' "$d" > "$out/data.c"
     if "$EMBCC" --target=riscv32-unknown-elf -c "$out/data.c" -o /dev/null \
          2> "$out/data.err"; then

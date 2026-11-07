@@ -154,9 +154,12 @@ int gas_assemble_inline(const char *file, int line, const char *text,
                         struct code *out, char *err, int errlen);
 /* A backend's template assembly: its statement assembler `enc`, or this
  * one for a template with labels. */
+int gas_inline_retry(int rc, const char *file, int line, const char *text,
+                     struct code *c, char *err, int errlen);
 #define GAS_INLINE(enc, file, line, text, c, err, errlen)                    \
     (gas_template_has_labels(text)                                        \
          ? gas_assemble_inline(file, line, text, c, err, (int)(errlen))    \
-         : enc(text, c, err, errlen))
+         : gas_inline_retry(enc(text, c, err, errlen), file, line, text,   \
+                            c, err, (int)(errlen)))
 
 #endif

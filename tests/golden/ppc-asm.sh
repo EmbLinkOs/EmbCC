@@ -108,7 +108,10 @@ if [ -n "$have_llvm" ]; then
         grep -E '^ *[0-9a-f]+:' |
         sed 's/^[^:]*:[[:space:]]*//; s/[[:space:]][[:space:]]*/ /g; s/ $//' \
         > "$out/dis.txt"
-    awk -F'|' '{ k = split($1, e, "+"); for (i = 1; i <= k; i++) print e[i] "|" $3 }' \
+    # ('+' joins an expansion's instructions; a trailing one is a branch
+    # hint, which llvm-objdump prints since LLVM 23.1.5: `bf+`)
+    awk -F'|' '{ if ($1 ~ /[+-]$/) { k = 1; e[1] = $1 } else k = split($1, e, "+")
+                 for (i = 1; i <= k; i++) print e[i] "|" $3 }' \
         "$out/v.txt" > "$out/exp.txt"
     [ "$(wc -l < "$out/exp.txt")" = "$(wc -l < "$out/dis.txt")" ] || {
         echo "llvm-objdump read $(wc -l < "$out/dis.txt" | tr -d ' ') instructions, not $(wc -l < "$out/exp.txt" | tr -d ' ')"
@@ -258,7 +261,7 @@ fi
 
 # ---- 5. the refusals ----------------------------------------------------------------
 printf '%s\n' 'fadd 1, 2, 3' 'lfd 1, 0(3)' 'vaddubm 1, 2, 3' 'evaddw 3, 4, 5' \
-    'ld 3, 0(4)' 'lswi 3, 4, 8' 'mcrxr 3' 'beq+ .+8' 'bne- cr1, .+8' \
+    'ld 3, 0(4)' 'lswi 3, 4, 8' 'mcrxr 3' 'ba+ 8' 'bla- 8' \
     'addi 3, 4, 32768' 'ori 3, 4, -1' 'li 3, 32768' 'lis 3, 65536' \
     'lwz 3, 32768(4)' 'lwzu 3, 4(3)' 'stwu 3, 4(0)' 'lmw 3, 4(5)' \
     'slwi 3, 4, 32' 'rlwinm 3, 4, 32, 0, 31' 'cmpwi cr8, 3, 0' \
@@ -290,6 +293,15 @@ refc() {            # refc WHAT PATTERN SOURCE
     grep -q -- "$2" "$out/bad.err" || {
         echo "$1 was refused, but not by name:"; cat "$out/bad.err"; exit 1; }
 }
+accs() {            # accs WHAT SYMBOL SOURCE: a template naming SYMBOL is
+                    # assembled, and the object relocates against it
+    printf '%s\n' "$3" > "$out/acc.c"
+    "$EMBCC" --target=$T -c "$out/acc.c" -o "$out/acc.o" 2> "$out/acc.err" ||
+        { echo "$1 was refused:"; cat "$out/acc.err"; exit 1; }
+    ${EMBCC_LLVM_READELF:-llvm-readelf} -rW "$out/acc.o" |
+        grep -qE "[[:space:]]_?$2([[:space:]]|$)" ||
+        { echo "$1: no relocation against $2"; exit 1; }
+}
 refc "r1 clobbered" "clobbers 'r1', which holds the stack pointer" \
     'void f(void){ __asm__ volatile("nop" ::: "r1"); }'
 refc "r2 clobbered" "clobbers '2', which holds an EABI small-data anchor" \
@@ -298,10 +310,14 @@ refc "r13 clobbered" "clobbers 'r13'" \
     'void f(void){ __asm__ volatile("nop" ::: "r13"); }'
 refc "an unknown clobber" "is not a PowerPC register" \
     'void f(void){ __asm__ volatile("nop" ::: "eax"); }'
-refc "a symbol in a template" "inline asm cannot reach one" \
+accs "a symbol in a template" g \
     'void g(void); void f(void){ __asm__ volatile("bl g"); }'
-refc "a named label in a template" "are numeric" \
-    'void f(void){ __asm__ volatile("x: b x"); }'
+# a named label is the template's own: its branch needs no relocation
+printf '%s\n' 'void f(void){ __asm__ volatile("x: b x"); }' > "$out/nlab.c"
+"$EMBCC" --target=$T -c "$out/nlab.c" -o "$out/nlab.o" ||
+    { echo "a named label in a template was refused"; exit 1; }
+${EMBCC_LLVM_READELF:-llvm-readelf} -rW "$out/nlab.o" | grep -q "[[:space:]]x$" &&
+    { echo "a template's own label went out as a relocation"; exit 1; }
 refc "x86's constraint letters" 'is not valid for PowerPC' \
     'int f(int x){ int r; __asm__("mr %0, %1" : "=r"(r) : "a"(x)); return r; }'
 refc "a 64-bit operand" 'is 8 bytes' \

@@ -372,7 +372,9 @@ void irg_asm_arm64(struct ir_func *fn, struct stmt *s)
     }
     for (int i = 0; i < a->nclob; i++) {
         int r = a64asm_gpr(a->clob[i], (int)strlen(a->clob[i]));
-        if (r >= 19 && r < 31)
+        /* (x30 may go: a function holding an asm keeps its frame record,
+         * so a template's `bl` leaves the return address saved) */
+        if (r >= 19 && r < 30)
             diag_fatal(file, s->line, "aarch64 asm clobbers callee-saved "
                                       "register '%s', which EmbCC does not "
                                       "save around an asm", a->clob[i]);
@@ -410,6 +412,8 @@ void irg_asm_arm64(struct ir_func *fn, struct stmt *s)
     struct ir_asm *ia = xcalloc(1, sizeof *ia);
     ia->code = c.p;
     ia->codelen = c.len;
+    ia->rel = c.rel;            /* (code_asm_rels where it is spliced) */
+    ia->nrel = c.nrel;
     ia->drange = c.drange;
     ia->ndrange = c.ndrange;
     ia->arange = c.arange;

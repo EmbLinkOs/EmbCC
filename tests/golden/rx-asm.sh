@@ -289,7 +289,7 @@ while IFS='@' read -r stmt msg; do
     nr=$((nr + 1))
     [ "$msg" = ACCEPTED ] && { echo "'$stmt' was accepted"; exit 1; }
     case $msg in
-    *"is not in the RX vocabulary"*|*"FPU or RXv2"*|*" is not "*|\
+    *"is not in the RX vocabulary"*|*"FPU or RXv2"*|*"is an FPU instruction"*|*"RXv2 or RXv3"*|*" is not "*|\
     *"does not fit"*|*"out of reach"*|*"out of range"*|*"too many operands"*|\
     *"takes "*|*"these operands"*|*"the size is"*|*"memory-to-memory"*|\
     *"inline asm cannot"*|*"cannot be written"*|*"cannot be it"*|\
@@ -308,13 +308,22 @@ refc() {            # refc WHAT PATTERN SOURCE
     grep -q -- "$2" "$out/bad.err" || {
         echo "$1 was refused, but not by name:"; cat "$out/bad.err"; exit 1; }
 }
+accs() {            # accs WHAT SYMBOL SOURCE: a template naming SYMBOL is
+                    # assembled, and the object relocates against it
+    printf '%s\n' "$3" > "$out/acc.c"
+    "$EMBCC" --target=$T -c "$out/acc.c" -o "$out/acc.o" 2> "$out/acc.err" ||
+        { echo "$1 was refused:"; cat "$out/acc.err"; exit 1; }
+    ${EMBCC_LLVM_READELF:-llvm-readelf} -rW "$out/acc.o" |
+        grep -qE "[[:space:]]_?$2([[:space:]]|$)" ||
+        { echo "$1: no relocation against $2"; exit 1; }
+}
 refc "the stack pointer clobbered" "clobbers 'r0', the stack pointer" \
     'void f(void){ __asm__ volatile("nop" ::: "r0"); }'
 refc "an unknown clobber" "is not an RX register" \
     'void f(void){ __asm__ volatile("nop" ::: "eax"); }'
-refc "a symbol in a template" "inline asm cannot reach one" \
+accs "a symbol in a template" g \
     'void g(void); void f(void){ __asm__ volatile("bsr _g"); }'
-refc "a symbol as an immediate in a template" "inline asm cannot take one" \
+accs "a symbol as an immediate in a template" x \
     'int x; void f(void){ __asm__ volatile("mov.l #_x, r1" ::: "r1"); }'
 # (a named label: the template is assembled whole, labels and all)
 printf '%s\n' 'void f(void){ __asm__ volatile("x: bra x"); }' > "$out/nl.c"
@@ -341,7 +350,7 @@ refs() {            # refs WHAT PATTERN SOURCE: a .s file
         echo "$1 was refused, but not by name:"; cat "$out/bad.err"; exit 1; }
 }
 refs "a .s branch to a symbol elsewhere" "carries no relocation" '	bra.s _f'
-refs "a symbol where none relocates" "cannot relocate" '	add #_f, r1'
+refs "a symbol where none relocates" "cannot relocate" '	shll #_f, r1'
 refs ".align 3" "a byte count, a power of two" '	.align 3'
 refs "a .s branch out of reach" "out of reach" '	bra.s 1f
 	.space 20

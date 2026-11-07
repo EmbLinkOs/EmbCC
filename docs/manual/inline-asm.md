@@ -57,9 +57,26 @@ assembled by the same MIPS32 assembler that reads `.s` and `.S` files.
 A template that defines a label -- `1:` with `1b`/`1f`, or a named one
 -- is assembled whole by the file assembler on every target but x86-64,
 so it may branch within itself: a loop, a skip. Its labels are its own
-(two templates may both use `1:`); a branch to a symbol outside it, a
-second section, and an alignment wider than an instruction are refused,
-since its bytes land at an unknown place in the function.
+(two templates may both use `1:`); a second section and an alignment
+wider than an instruction are refused, since its bytes land at an unknown
+place in the function.
+
+A template may name a symbol, as GCC's may: a call to a function (`bl
+f`, `call f`, `jal f`), a global's address (`adrp %x0, g` with `add %x0,
+%x0, :lo12:g`; `movw %0, #:lower16:g` with `movt`; `la %0, g`;
+`pcalau12i`/`addi.d` with `%pc_hi20`/`%pc_lo12`; `leaq g(%%rip), %0`),
+or a word holding one. A template the target's instruction encoder does
+not take is assembled by the file assembler, and its relocations go into
+the object -- against the C function or object of that name, a label of
+a file-scope block, or an undefined symbol the linker resolves; a label
+of the template's own is addressed through the function's code. `-S`
+writes them as `.reloc` lines, and the result assembles into the same
+object. A call from a template changes the link register: name it in
+the clobbers (`"lr"`, `"x30"`, `"ra"`, `"$31"`), and the registers the
+callee may change too, as with GCC. A literal pool (`ldr r0, =g`) is
+refused, since its words would follow the template inside the function:
+`movw`/`movt`, or `adrp`/`add`, load the same address. On Mach-O and
+COFF targets a template naming a symbol is refused.
 
 A template is assembled only when its function is emitted. An `asm`
 statement in a function that is never emitted, such as an unused
@@ -281,8 +298,9 @@ as GNU `as` writes them:
 Strings take the escapes `\b`, `\f`, `\n`, `\r`, `\t`, `\"`, `\\`, an
 octal `\NNN` and a hex `\xHH`. A `;`, `#`, `@` or `//` inside a string is
 part of the string. A data value must be a constant that fits the
-directive's size, signed or unsigned; a symbol is refused, because an
-inline template cannot carry a relocation.
+directive's size, signed or unsigned, or a symbol where the target's
+address fits the directive (`.word g` on a 32-bit target, `.quad g` or
+`.xword g` on a 64-bit one), which is a relocation.
 
 The data directive's size follows the target's assembler: `.word` is two
 bytes on x86-64 and AVR and four elsewhere; `.half` and `.dword` exist on

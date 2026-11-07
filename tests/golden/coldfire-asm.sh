@@ -97,7 +97,7 @@ else
     echo "SKIP the QEMU half: $QEMU not found"
 fi
 # a numeric label in a template is the distance it names
-printf '1: subq.l #1,%%d0|bne 1b\nsubq.l #1,%%d0|bne .-2\nbeq 2f|nop|nop|2: rts\nbeq .+6|nop|nop|rts\nbra 3f|nop|3: rts\nbra .+4|nop|rts\n' |
+printf '1: subq.l #1,%%d0|bne 1b\nsubq.l #1,%%d0|bne .-2\nbeq 2f|nop|nop|2: rts\nbeq .+8|nop|nop|rts\nbra 3f|nop|3: rts\nbra .+6|nop|rts\n' |
     "$out/cfasmcheck" --bytes > "$out/lab.txt" 2> "$out/lab.err" || {
     echo "a template with labels was refused:"; cat "$out/lab.err"; exit 1; }
 awk -F'@' 'NR % 2 == 1 { a = $2; next } $2 != a { bad = 1 } END { exit bad }' \
@@ -322,15 +322,24 @@ refc() {            # refc WHAT PATTERN SOURCE
     grep -q -- "$2" "$out/bad.err" || {
         echo "$1 was refused, but not by name:"; cat "$out/bad.err"; exit 1; }
 }
+accs() {            # accs WHAT SYMBOL SOURCE: a template naming SYMBOL is
+                    # assembled, and the object relocates against it
+    printf '%s\n' "$3" > "$out/acc.c"
+    "$EMBCC" --target=$T -c "$out/acc.c" -o "$out/acc.o" 2> "$out/acc.err" ||
+        { echo "$1 was refused:"; cat "$out/acc.err"; exit 1; }
+    ${EMBCC_LLVM_READELF:-llvm-readelf} -rW "$out/acc.o" |
+        grep -qE "[[:space:]]_?$2([[:space:]]|$)" ||
+        { echo "$1: no relocation against $2"; exit 1; }
+}
 refc "the stack pointer clobbered" "clobbers 'sp', the stack pointer" \
     'void f(void){ __asm__ volatile("nop" ::: "sp"); }'
 refc "the frame pointer clobbered" "clobbers 'a6', the frame pointer" \
     'void f(void){ __asm__ volatile("nop" ::: "a6"); }'
 refc "an unknown clobber" "is not a ColdFire register" \
     'void f(void){ __asm__ volatile("nop" ::: "eax"); }'
-refc "a symbol in a template" "inline asm cannot reach one" \
+accs "a symbol in a template" g \
     'void g(void); void f(void){ __asm__ volatile("jsr g"); }'
-refc "a branch to a symbol in a template" "inline asm cannot reach one" \
+accs "a branch to a symbol in a template" g \
     'void g(void); void f(void){ __asm__ volatile("bsr g"); }'
 # (a named label: the template is assembled whole, labels and all)
 printf '%s\n' 'void f(void){ __asm__ volatile("x: bra x"); }' > "$out/nl.c"

@@ -384,10 +384,15 @@ void irg_asm_ppc(struct ir_func *fn, struct stmt *s)
      * collide with a register the template writes beside it). */
     if (a->is_basic) {
         struct code c0 = { 0 };
-        if (ppcasm_assemble(a->tmpl, &c0, err, sizeof err) != 0)
-            diag_fatal(file, s->line, "%s", err);
-        named = ppcasm_named();
-        links |= ppcasm_links();
+        if (ppcasm_assemble(a->tmpl, &c0, err, sizeof err) == 0) {
+            named = ppcasm_named();
+            links |= ppcasm_links();
+        } else {
+            /* (one the file assembler takes -- a `bl` to a symbol -- says
+             * what it names in its text, and may call: lr is saved) */
+            named = ppc_text_regs(a->tmpl);
+            links = 1;
+        }
         free(c0.p);
     } else {
         int ok = 0;
@@ -410,8 +415,10 @@ void irg_asm_ppc(struct ir_func *fn, struct stmt *s)
             free(t0);
             free(c0.p);
         }
-        if (!ok)
+        if (!ok) {
             named = ppc_text_regs(a->tmpl);
+            links = 1;              /* (as above: it may call) */
+        }
     }
     if (named & (1UL << 1 | 1UL << 2 | 1UL << 13))
         named &= ~(1UL << 1 | 1UL << 2 | 1UL << 13);   /* never allocated */
@@ -454,6 +461,8 @@ void irg_asm_ppc(struct ir_func *fn, struct stmt *s)
     struct ir_asm *ia = xcalloc(1, sizeof *ia);
     ia->code = c.p;
     ia->codelen = c.len;
+    ia->rel = c.rel;            /* (code_asm_rels where it is spliced) */
+    ia->nrel = c.nrel;
     ia->calls = links;
     ia->out = xcalloc((size_t)(a->nout ? a->nout : 1), sizeof *ia->out);
     ia->in = xcalloc((size_t)(a->nin ? a->nin : 1), sizeof *ia->in);

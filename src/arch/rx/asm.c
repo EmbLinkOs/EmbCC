@@ -20,6 +20,8 @@ static int g_took;
 /* The statement being encoded is rxasm_symform's: its field is a
  * relocation's, and holds zero. */
 static int g_raw;
+static int g_fpu;               /* -fpu: the RX600's FPU */
+void rxasm_set_fpu(int on) { g_fpu = on; }
 
 void rxasm_set_level(int level)
 {
@@ -743,8 +745,21 @@ static int cond_after(const char *mn, int skip)
     return lookup(cond_tab, mn + skip, (int)strlen(mn + skip));
 }
 
+static int stmt_body1(const char *s, int len, struct code *out, char *err,
+                      int errlen);
+
+/* (the wide immediates are this statement's alone: the compiler's own
+ * code is encoded through the same functions) */
 static int stmt_body(const char *s, int len, struct code *out, char *err,
                      int errlen)
+{
+    int r = stmt_body1(s, len, out, err, errlen);
+    rx_imm_wide = 0;
+    return r;
+}
+
+static int stmt_body1(const char *s, int len, struct code *out, char *err,
+                      int errlen)
 {
     struct stmt st;
     int raw = 0, c;
@@ -760,6 +775,7 @@ static int stmt_body(const char *s, int len, struct code *out, char *err,
         len--;
     }
     g_raw = raw;
+    rx_imm_wide = raw;
     if (len > 0 && s[0] == '\001')             /* a refusal it wrote */
         FAIL("%.*s", len - 1, s + 1);
     if (len == 0)
@@ -1046,10 +1062,77 @@ static int stmt_body(const char *s, int len, struct code *out, char *err,
         rx_mac(out, op, st.o[0].r, st.o[1].r);
         return 0;
     }
+    /* ---- the RXv1 FPU (RX600's): #imm32, a register, or memory.L ----
+     * with -fpu: a part without one (RX100, RX200) has none of these */
+    if (!g_fpu)
+        for (int k = 0; fpu_tab[k] && k < 8; k++)
+            if (is(&st, fpu_tab[k]))
+                FAIL("%s is an FPU instruction, and this RX has no FPU (-nofpu, "
+                     "EmbCC's default): the RX600's is -fpu", st.full);
+    {
+        static const struct { const char *n; int imm; unsigned base; } fpu[] = {
+            {"fsub",0,0x80},{"fcmp",1,0x84},{"fadd",2,0x88},{"fmul",3,0x8c},
+            {"fdiv",4,0x90},{"ftoi",-1,0x94},{"round",-1,0x98},{"itof",-1,0x44},
+            {NULL,0,0}
+        };
+        for (int k = 0; fpu[k].n; k++) {
+            const struct opd *a, *b;
+            long u = 0;
+            int ld;
+            if (!is(&st, fpu[k].n)) continue;
+            if (st.sfx || need_n(&st, 2, err, errlen) || need_reg(&st, 1, err, errlen))
+                return -1;
+            a = &st.o[0];
+            b = &st.o[1];
+            if (a->k == O_IMM) {
+                if (fpu[k].imm < 0)
+                    FAIL("%s takes a register or memory, not a constant", st.full);
+                code_byte(out, 0xfd);
+                code_byte(out, 0x72);
+                code_byte(out, fpu[k].imm << 4 | b->r);
+                code_u32(out, (unsigned long)a->v & 0xffffffffUL);
+                return 0;
+            }
+            if (a->k == O_REG) {
+                code_byte(out, 0xfc);
+                code_byte(out, (int)fpu[k].base | 3);
+                code_byte(out, a->r << 4 | b->r);
+                return 0;
+            }
+            if (a->k != O_MEM)
+                FAIL("%s takes #imm, a register or dsp[rs]", st.full);
+            /* itof of a byte or a word: the memex prefix 06 */
+            {
+                int msz = a->msz < 0 ? RX_L : a->msz, sign = a->msz < 0 ? 1 : a->msign;
+                int scale = msz == RX_B ? 1 : msz == RX_W ? 2 : 4;
+                if (fpu[k].base != 0x44 && msz != RX_L)
+                    FAIL("%s reads a longword (.L) from memory", st.full);
+                if (a->v < 0 || a->v % scale)
+                    FAIL("%s: the displacement is a multiple of %d, 0 or more", st.full, scale);
+                u = (long)(a->v / scale);
+                if (u > 65535) FAIL("%s: the displacement does not fit 16 bits", st.full);
+                ld = !a->hasd || u == 0 ? 0 : u <= 255 ? 1 : 2;
+                if (a->hasd && u == 0) ld = 0;
+                if (fpu[k].base == 0x44 && !(msz == RX_B && !sign)) {
+                    int mi = msz == RX_B ? 0 : msz == RX_W ? (sign ? 1 : 3) : 2;
+                    code_byte(out, 0x06);
+                    code_byte(out, mi << 6 | 0x20 | ld);
+                    code_byte(out, 0x11);
+                } else {
+                    code_byte(out, 0xfc);
+                    code_byte(out, (int)fpu[k].base | ld);
+                }
+                code_byte(out, a->r << 4 | b->r);
+                if (ld == 1) code_byte(out, (int)u);
+                if (ld == 2) { code_byte(out, (int)(u & 0xff)); code_byte(out, (int)(u >> 8)); }
+                return 0;
+            }
+        }
+    }
     for (int k = 0; fpu_tab[k]; k++)
         if (is(&st, fpu_tab[k]))
-            FAIL("%s is an FPU or RXv2 instruction, which is not in EmbCC's "
-                 "RX vocabulary (EmbCC's RX is RXv1, soft-float)", st.full);
+            FAIL("%s is an RXv2 or RXv3 instruction, which is not in EmbCC's "
+                 "RX vocabulary (EmbCC's RX is RXv1)", st.full);
     FAIL("asm instruction \"%s\" is not in the RX vocabulary", st.full);
 }
 
@@ -1361,13 +1444,13 @@ int rxasm_symform(const char *stmt, struct asm_symform *f)
             return 0;
         r = skip_sp(o + 1 + n);
         if (*r != ',')
-            return 0;
+            goto general;
         r = skip_sp(r + 1);
         while (isalnum((unsigned char)r[rl]))
             rl++;
         rn = rxasm_gpr(r, rl);
         if (rn < 0 || *skip_sp(r + rl))
-            return 0;
+            goto general;           /* mov.l #sym, dsp[rd]: below */
         f->sym_at = (int)(o + 1 - stmt);
         f->sym_len = slen;
         f->addend = add;
@@ -1376,6 +1459,34 @@ int rxasm_symform(const char *stmt, struct asm_symform *f)
         f->site[0].reloc = R_RX_DIR32;
         f->nsites = 1;
         return 1;
+    }
+general:
+    /* any other `#sym` (mov.l #sym, dsp[rd]; add/cmp/and/or/mul/stz/stnz
+     * #sym, ...): the four-byte li field, which is the instruction's last
+     * four bytes, and R_RX_DIR32, as GNU as writes it */
+    if (*o != 0 && mn[0] != 'b' && strchr(o, '#')) {
+        const char *h = strchr(o, '#');
+        struct code tmp = { 0 };
+        char err[256];
+        int len;
+        n = sym_operand(h + 1, &slen, &add);
+        if (n && !isdigit((unsigned char)h[1]) && (sfx == 'l' || !sfx)) {
+            f->sym_at = (int)(h + 1 - stmt);
+            f->sym_len = slen;
+            f->addend = add;
+            snprintf(f->encode, sizeof f->encode, "\003%.*s#0%s",
+                     (int)(h - stmt), stmt, h + 1 + n);
+            rx_imm_wide = 1;
+            len = rxasm_assemble(f->encode, &tmp, err, (int)sizeof err) == 0 ? tmp.len : -1;
+            rx_imm_wide = 0;
+            free(tmp.p);
+            if (len < 4)
+                return 0;
+            f->site[0].off = len - 4;
+            f->site[0].reloc = R_RX_DIR32;
+            f->nsites = 1;
+            return 1;
+        }
     }
     c = mn[0] == 'b' ? cond_after(mn, 1) : -1;
     if (!strcmp(mn, "bra"))

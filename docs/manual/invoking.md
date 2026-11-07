@@ -2154,10 +2154,19 @@ hand-written `memset` or `memcpy` cannot become a call to itself. No
 EmbCC object refers to `memset`, `memcpy` or `memmove` unless the source
 calls them.
 
-### `-fmerge-constants`
+### `--merge-strings`, `--no-merge-strings`
 
-Accepted and without effect: it permits merging identical constants
-across units, and EmbCC does not.
+GCC: `-fmerge-constants`, `-fno-merge-constants`. With `--merge-strings`,
+the default, each C string literal of an ELF object -- one with no NUL
+before its end -- goes to a mergeable section, `.rodata.str1.N`
+(`SHF_MERGE|SHF_STRINGS`, entries of one byte, `N` its alignment), under
+a local symbol of its own (`.LC3`) that every reference to it names. The
+linker then keeps one copy of each string for the whole image, and a
+string that ends another lives inside that one: embld does (see
+[Merging](tools/embld.md#merging)), and so do GNU ld and lld. Wide
+strings and ones holding a NUL stay in `.rodata`. `--no-merge-strings`
+puts every literal in `.rodata`, each object its own copy, as
+other formats (Mach-O, COFF) always have them.
 
 ### `-fno-isolate-erroneous-paths-dereference`, `-fno-move-loop-invariants`, `-fno-ipa-sra`, `-fno-lto`
 

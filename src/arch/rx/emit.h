@@ -251,5 +251,6 @@ void rx_mac(struct code *c, int op, int rs, int rs2);
 /* The shortest `mov.l #imm, rd`'s length, and the number of bytes an
  * immediate's li field takes (1..4). */
 int rx_li_bytes(long imm);
+extern int rx_imm_wide;   /* (see emit.c) */
 
 #endif

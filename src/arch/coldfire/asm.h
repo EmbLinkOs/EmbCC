@@ -46,6 +46,8 @@ int cfasm_assemble(const char *text, struct code *out, char *err, int errlen);
  * assembler has settled on for it (-1: the first pass's optimistic guess);
  * cfasm_took_level then says which form its branch took. */
 int cfasm_encode(const char *text, struct code *out, char *err, int errlen);
+/* an ISA_A+ instruction (ff1, bitrev, byterev) was assembled */
+int cfasm_isa_aplus(void);
 void cfasm_set_level(int level);
 int cfasm_took_level(void);
 

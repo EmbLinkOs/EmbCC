@@ -6,6 +6,7 @@
  * driver's argument loop. */
 #include "../backend.h"
 #include "../target.h"
+#include "asm.h"
 #include "../../driver/util.h"
 
 #include <stdlib.h>
@@ -48,9 +49,12 @@ int rx_target_option(const char *arg)
                    "(double is binary32), and a 64-bit double "
                    "changes the ABI of every double");
     } else if (!strcmp(a, "-fpu")) {
-        diag_fatal(NULL, 0, "-fpu is not supported: EmbCC's RX code "
-                   "is soft float (-nofpu); the RX600 FPU "
-                   "instructions are not emitted yet");
+        /* the core has the RX600 FPU: its instructions assemble (a .S
+         * file's, inline asm's); EmbCC's own code stays soft float,
+         * which the RX ABI makes no difference to */
+        rxasm_set_fpu(1);
+    } else if (!strcmp(a, "-nofpu") || !strcmp(a, "-mnofpu")) {
+        rxasm_set_fpu(0);
     } else if (!strcmp(a, "-mbig-endian-data")) {
         diag_fatal(NULL, 0, "-mbig-endian-data is not supported: the "
                    "RX target is little-endian only");

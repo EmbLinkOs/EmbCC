@@ -2929,6 +2929,7 @@ static void gen_asm(struct t_fn *F, int n)
          * slack when the code before it shrinks on a later pass: that
          * much, two bytes a pad, for a branch measured across it. */
         int base = t->len;
+        code_asm_rels(t, ia, t->len, ia->rel, ia->nrel);   /* its relocations */
         code_put_asm(t, ia->code, ia->codelen, ia->drange, ia->ndrange,
                      ia->arange, ia->narange, CODE_FILL_THUMB1);
         for (int k = code_asm_align_slack(ia->arange, ia->narange); k > 0;

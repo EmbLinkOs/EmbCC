@@ -54,7 +54,9 @@ EOF
     fail "the .S did not assemble (its -I header, .extern, or a form)"
 # llvm-mc gets the same text with the macros expanded by hand
 sed -e 's/CONTEXT/( 31 * 4 )/g; s/WORD/4/g' "$out/body.s" > "$out/ref.s"
-"$MC" -triple=riscv32 -mattr=-c -show-encoding "$out/ref.s" 2>&1 |
+# rv32imac, EmbCC's default: with C on, an assembler compresses what has a
+# 16-bit form, as llvm-mc does here and GNU as does
+"$MC" -triple=riscv32 -mattr=+m,+a,+c -show-encoding "$out/ref.s" 2>&1 |
     sed -n 's/.*encoding: \[\(.*\)\]/\1/p' | tr -d ' ,' |
     sed 's/0x//g' | awk '{ s = ""; for (i = length($0) - 1; i >= 1; i -= 2) s = s substr($0, i, 2); print s }' \
     > "$out/want.hex"
@@ -80,7 +82,7 @@ EOF
 for xl in 32 64; do
     "$EMBCC" --target=riscv$xl-unknown-elf -c "$out/ld.S" -o "$out/ld$xl.o" ||
         fail "rv$xl: lw rd, sym"
-    clang --target=riscv$xl-unknown-elf -march=rv${xl}ima -mno-relax \
+    clang --target=riscv$xl-unknown-elf -march=rv${xl}imac -mno-relax \
         -c "$out/ld.S" -o "$out/ldc$xl.o" 2>/dev/null ||
         { echo "SKIP: clang for riscv$xl"; continue; }
     for o in ld ldc; do
@@ -110,10 +112,10 @@ save_fpu:
 FPEOF
 "$EMBCC" --target=riscv64-unknown-elf -march=rv64gc -mabi=lp64d -c "$out/fp.S" \
     -o "$out/fp.o" || fail "an FPU context save did not assemble"
-"$MC" -triple=riscv64 -mattr=+m,+f,+d -filetype=obj "$out/fp.S" -o "$out/fpm.o" ||
+"$MC" -triple=riscv64 -mattr=+m,+a,+f,+d,+c -filetype=obj "$out/fp.S" -o "$out/fpm.o" ||
     fail "llvm-mc rejected fp.S"
 for o in fp fpm; do
-    "$OBJDUMP" -d --mattr=+f,+d "$out/$o.o" | sed -n '/<save_fpu>:/,$p' |
+    "$OBJDUMP" -d --mattr=+f,+d,+c "$out/$o.o" | sed -n '/<save_fpu>:/,$p' |
         awk -F'\t' 'NF >= 3 { print $2, $3 }' > "$out/$o.dis"
 done
 [ -s "$out/fpm.dis" ] || fail "llvm-mc's fp.S has no code"
@@ -155,7 +157,7 @@ g:      ret
 EOF2
 "$EMBCC" --target=riscv32-unknown-elf -c "$out/xs.S" -o "$out/xs.o" 2> "$out/xs.err" ||
     { cat "$out/xs.err"; fail "a jump to another section's label"; }
-clang --target=riscv32-unknown-elf -march=rv32i -mno-relax -c "$out/xs.S" -o "$out/xs-clang.o" ||
+clang --target=riscv32-unknown-elf -march=rv32imac -mno-relax -c "$out/xs.S" -o "$out/xs-clang.o" ||
     fail "clang rejected xs.S"
 rel() { "$OBJDUMP" -dr "$1" | sed -n '/<f>:/,/^$/p' | sed 's/^ *[0-9a-f]*: *//; s/<f+0x[0-9a-f]*>//; s/<f>//' |
         sed 's/R_RISCV_CALL_PLT/R_RISCV_CALL/' | awk -F'\t' '{ $1 = $1; print }'; }
@@ -172,7 +174,7 @@ printf '        .section .text.a, "ax"\nf:      beq a0, a1, g\n        bgtu a0, 
 printf 'f: bgt a0, a1, 1f\n ble a2, a3, 1f\n bgtu a4, a5, 1f\n bleu t0, t1, 1f\n1: ret\n' > "$out/sw.S"
 "$EMBCC" --target=riscv32-unknown-elf -c "$out/sw.S" -o "$out/sw.o" 2> "$out/sw.err" ||
     { cat "$out/sw.err"; fail "bgt/ble/bgtu/bleu"; }
-clang --target=riscv32-unknown-elf -march=rv32i -mno-relax -c "$out/sw.S" -o "$out/sw-clang.o" ||
+clang --target=riscv32-unknown-elf -march=rv32imac -mno-relax -c "$out/sw.S" -o "$out/sw-clang.o" ||
     fail "clang rejected sw.S"
 "$OBJDUMP" -d "$out/sw.o" | grep -E '^ +[0-9a-f]+:' > "$out/sw.dis"
 "$OBJDUMP" -d "$out/sw-clang.o" | grep -E '^ +[0-9a-f]+:' > "$out/sw-clang.dis"

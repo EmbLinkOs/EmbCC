@@ -4,6 +4,19 @@
 #ifndef EMBCC_ARCH_CODE_H
 #define EMBCC_ARCH_CODE_H
 
+/* A relocation an inline asm template asked for (src/as/gas.c's inline
+ * mode): at `off`, ELF type `type`, against `sym` -- or, with sym NULL,
+ * against the place `addend` bytes into this code (a label of the
+ * template's own, after code_asm_rels: into the function's text). `key`
+ * is the template it came from (code_asm_rels). */
+struct code_rel {
+    int off;
+    int type;
+    const char *sym;
+    long addend;
+    const void *key;
+};
+
 struct code {
     unsigned char *p;
     int len, cap;
@@ -22,7 +35,18 @@ struct code {
      * the target's nops) and the most padding allowed (0: any). */
     int *arange;
     int narange, caparange;
+    /* The relocations of the inline asm templates spliced into it, in the
+     * object writer's hands at the end (main.c) */
+    struct code_rel *rel;
+    int nrel, caprel;
 };
+/* A template's relocations, for its bytes spliced at `base`: what an
+ * earlier splice of the same template (`key`) put there is dropped first
+ * -- a backend that generates a function again (another allocation mode,
+ * a retry after relaxation) splices its templates again, and only the
+ * last splice's offsets are the code's. */
+void code_asm_rels(struct code *c, const void *key, int base,
+                   const struct code_rel *r, int n);
 void code_mark_data(struct code *c, int start, int end);
 
 /* ---- a statement that names a symbol ---------------------------------
@@ -71,6 +95,10 @@ struct asm_symform {
     char encode[256];
     struct asm_symsite site[2];
     int nsites;
+    /* when sym2_len is set, site[1] is a second symbol's, with its own
+     * addend: x86's `movq $a, b+8(%rip)` names two */
+    int sym2_at, sym2_len;
+    long addend2;
 };
 
 void code_byte(struct code *c, int b);

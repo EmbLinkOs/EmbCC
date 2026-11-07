@@ -222,9 +222,7 @@ typedef struct {
 #define R_X86_64_GOTTPOFF     22
 #define R_X86_64_TPOFF32      23
 
-/* aarch64 (ELF for the Arm 64-bit Architecture, §4.6.3). Only the four
- * EmbCC emits are named: a `bl`'s 26-bit branch, the adrp/add pair that
- * materialises a symbol's address, and an absolute 64-bit data slot. */
+/* aarch64 (ELF for the Arm 64-bit Architecture, §4.6.3). */
 #define R_AARCH64_ABS64              257
 #define R_AARCH64_ABS32              258
 #define R_AARCH64_PREL32             261
@@ -247,6 +245,53 @@ typedef struct {
  * aarch64-elf-as emits for :tprel_hi12: and :tprel_lo12_nc:, read off
  * its own output rather than remembered. */
 #define R_AARCH64_TLSLE_ADD_TPREL_LO12_NC 551
+/* The rest of what an assembler writes for compiler output and what a
+ * static link applies, numbered as aarch64-elf-as's own objects carry
+ * them (read off `readelf -r`, tools/asm-audit). */
+#define R_AARCH64_ABS16                 259
+#define R_AARCH64_PREL64                260
+#define R_AARCH64_PREL16                262
+#define R_AARCH64_MOVW_UABS_G0          263
+#define R_AARCH64_MOVW_UABS_G0_NC       264
+#define R_AARCH64_MOVW_UABS_G1          265
+#define R_AARCH64_MOVW_UABS_G1_NC       266
+#define R_AARCH64_MOVW_UABS_G2          267
+#define R_AARCH64_MOVW_UABS_G2_NC       268
+#define R_AARCH64_MOVW_UABS_G3          269
+#define R_AARCH64_MOVW_SABS_G0          270
+#define R_AARCH64_MOVW_SABS_G1          271
+#define R_AARCH64_MOVW_SABS_G2          272
+#define R_AARCH64_LD_PREL_LO19          273
+#define R_AARCH64_ADR_PREL_LO21         274
+#define R_AARCH64_ADR_PREL_PG_HI21_NC   276
+#define R_AARCH64_LDST8_ABS_LO12_NC     278
+#define R_AARCH64_TSTBR14               279
+#define R_AARCH64_CONDBR19              280
+#define R_AARCH64_LDST16_ABS_LO12_NC    284
+#define R_AARCH64_LDST32_ABS_LO12_NC    285
+#define R_AARCH64_LDST64_ABS_LO12_NC    286
+#define R_AARCH64_LDST128_ABS_LO12_NC   299
+#define R_AARCH64_TLSLE_ADD_TPREL_LO12  550
+#define R_AARCH64_TLSDESC_ADR_PAGE21    562
+#define R_AARCH64_TLSDESC_LD64_LO12     563
+#define R_AARCH64_TLSDESC_ADD_LO12      564
+#define R_AARCH64_TLSDESC_CALL          569
+/* What embld applies for a static image beyond those: local-exec TLS
+ * in its MOVW and load/store forms. */
+#define R_AARCH64_NONE                  0
+#define R_AARCH64_TLSLE_MOVW_TPREL_G2   544
+#define R_AARCH64_TLSLE_MOVW_TPREL_G1   545
+#define R_AARCH64_TLSLE_MOVW_TPREL_G1_NC 546
+#define R_AARCH64_TLSLE_MOVW_TPREL_G0   547
+#define R_AARCH64_TLSLE_MOVW_TPREL_G0_NC 548
+#define R_AARCH64_TLSLE_LDST8_TPREL_LO12     552
+#define R_AARCH64_TLSLE_LDST8_TPREL_LO12_NC  553
+#define R_AARCH64_TLSLE_LDST16_TPREL_LO12    554
+#define R_AARCH64_TLSLE_LDST16_TPREL_LO12_NC 555
+#define R_AARCH64_TLSLE_LDST32_TPREL_LO12    556
+#define R_AARCH64_TLSLE_LDST32_TPREL_LO12_NC 557
+#define R_AARCH64_TLSLE_LDST64_TPREL_LO12    558
+#define R_AARCH64_TLSLE_LDST64_TPREL_LO12_NC 559
 
 /* ARM 32-bit (ELF for the Arm Architecture, §4.6.1.2). Only the three
  * a Cortex-M object needs so far.
@@ -274,9 +319,25 @@ typedef struct {
 /* The same field as THM_CALL in a `b.w` rather than a `bl`; an
  * assembler emits it for a tail branch to another section. */
 #define R_ARM_THM_JUMP24      30
+/* a conditional branch's 32-bit encoding (T3, b<c>.w: +-1 MiB), and the
+ * 16-bit b's eleven bits and b<c>'s eight, which an assembler writes
+ * when it cannot resolve them itself */
+#define R_ARM_THM_JUMP19      51
+#define R_ARM_THM_JUMP11      102
+#define R_ARM_THM_JUMP8       103
 /* The exception index table's self-relative pointer: 31 bits of signed
  * offset, the top bit reserved to say what the entry holds. */
 #define R_ARM_PREL31          42
+#define R_ARM_SBREL32          9
+#define R_ARM_GOTOFF32        24
+#define R_ARM_GOT_BREL        26
+#define R_ARM_TARGET2         41
+#define R_ARM_GOT_PREL        96
+#define R_ARM_TLS_GD32       104
+#define R_ARM_TLS_LDM32      105
+#define R_ARM_TLS_LDO32      106
+#define R_ARM_TLS_IE32       107
+#define R_ARM_TLS_LE32       108
 /* ARM (A32) state, armv7a-none-eabi: `bl` and `b`/`b<c>` with a 24-bit
  * word offset from the instruction + 8, and the movw/movt pair whose
  * 16-bit immediate is split imm4:imm12 -- different bits from the Thumb
@@ -323,6 +384,12 @@ typedef struct {
 #define R_RISCV_GOT_HI20     20
 #define R_RISCV_PCREL_LO12_I 24
 #define R_RISCV_PCREL_LO12_S 25
+#define R_RISCV_TLS_GOT_HI20 21
+#define R_RISCV_TLS_GD_HI20  22
+#define R_RISCV_TPREL_HI20   29
+#define R_RISCV_TPREL_LO12_I 30
+#define R_RISCV_TPREL_LO12_S 31
+#define R_RISCV_TPREL_ADD    32
 #define R_RISCV_HI20     26
 #define R_RISCV_LO12_I   27
 #define R_RISCV_LO12_S   28

@@ -341,7 +341,7 @@ if "$EMBCC" --target=riscv32-unknown-elf -c "$out/csr.s" -o "$out/csr.o" \
      2> "$out/csr.err"; then
     if command -v llvm-mc > /dev/null 2>&1 &&
        command -v llvm-objcopy > /dev/null 2>&1; then
-        llvm-mc -triple=riscv32 -mattr=+zicsr,+zifencei -filetype=obj \
+        llvm-mc -triple=riscv32 -mattr=+zicsr,+zifencei,+c -filetype=obj \
             "$out/csr.s" -o "$out/csr-ref.o" 2>/dev/null &&
         llvm-objcopy -O binary --only-section=.text "$out/csr.o" "$out/csr.bin" &&
         llvm-objcopy -O binary --only-section=.text "$out/csr-ref.o" "$out/csr-ref.bin"

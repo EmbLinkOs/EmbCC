@@ -19,4 +19,12 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
                    struct gsite *gs, int ngs,
                    struct fsite *fs, int nfs);
 
+/* main.c: where each string literal goes (.rodata or a mergeable string
+ * section), and the string an old .rodata offset falls in */
+void str_place(struct ir_unit *iu, int merge);
+/* the inline asm templates' relocations of the code -S writes next */
+struct code_rel;
+void asmout_set_asm_rels(const struct code_rel *r, int n);
+int str_at(const struct ir_unit *iu, long off, long *delta);
+
 #endif

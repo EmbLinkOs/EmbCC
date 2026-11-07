@@ -89,6 +89,8 @@ static void one(const char *stmt, const char *expect, long pc,
 
 int main(int argc, char **argv)
 {
+    /* the 24-bit forms are what the referee is asked for: nothing narrowed */
+    xtasm_set_transform(0);
     char line[512], err[512];
     if (argc > 3 && !strcmp(argv[1], "--vocab")) {
         unsigned long base = strtoul(argv[2], NULL, 0);

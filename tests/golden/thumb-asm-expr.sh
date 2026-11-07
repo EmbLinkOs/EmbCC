@@ -51,14 +51,10 @@ EOF
     awk -F, '{ s = ""; for (i = 1; i <= NF; i += 2) { a = $(i); b = $(i + 1);
                gsub(/0x| /, "", a); gsub(/0x| /, "", b); s = s b a }
                print s }' > "$out/want.hex"
-# the mov: llvm-mc's mov.w against this assembler's movw of the same value
-sed '$d' "$out/want.hex" > "$out/want-cut.hex"
-sed -n '1,11p' "$out/got.hex" > "$out/got-cut.hex"
-[ "$(wc -l < "$out/want-cut.hex")" -eq 11 ] || { cat "$out/want.hex"; fail "llvm-mc did not assemble the reference"; }
-diff "$out/want-cut.hex" "$out/got-cut.hex" ||
+# every line, the mov too: `mov r2, #19` is mov.w, as llvm-mc writes it
+[ "$(wc -l < "$out/want.hex")" -eq 12 ] || { cat "$out/want.hex"; fail "llvm-mc did not assemble the reference"; }
+sed -n '1,12p' "$out/got.hex" | diff "$out/want.hex" - ||
     fail "an expression immediate assembled differently from llvm-mc"
-sed -n '12p' "$out/got.hex" | grep -qi '^f2400213$' ||
-    { sed -n '12p' "$out/got.hex"; fail "mov r2, #(1<<4)|3 is not movw r2, #19"; }
 cat > "$out/bad.c" <<'EOF'
 __attribute__((naked)) void bad(void) { __asm volatile("orr r1, r1, #(FOO << 2)\n"); }
 EOF

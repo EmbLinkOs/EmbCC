@@ -38,6 +38,31 @@ LD="${EMBCC_AARCH64_LD:-aarch64-elf-ld}"
     exit 1
 }
 
+# EMBCC_AARCH64_LINKER=embld: EmbCC's own toolchain end to end -- the
+# harness pieces compiled and assembled by embcc, the image linked by
+# embld (newlib and libgcc, built by GCC, are then a test of every
+# relocation GCC's objects carry).
+if [ "${EMBCC_AARCH64_LINKER:-}" = embld ]; then
+    root=$(cd "$here/../../.." && pwd)
+    EC=${EMBCC:-$root/embcc}
+    EL=${EMBLD:-$root/embld}
+    for part in start semihost crt rtsj; do
+        src=$here/$part.$( [ "$part" = start ] && echo S || echo c )
+        [ "$part" = crt ] && src=$here/../crt.c
+        [ "$part" = rtsj ] && src=$here/../../../lib/rt/builtin-setjmp.c
+        o=$work/harness-emb-$part.o
+        if [ ! -f "$o" ] || [ "$src" -nt "$o" ] || [ "$EC" -nt "$o" ]; then
+            "$EC" --target=aarch64-elf -ffreestanding -isystem "$NEWLIB/include" \
+                -c "$src" -o "$o.$$" && mv "$o.$$" "$o"
+        fi
+    done
+    LIBGCC=$(dirname "$($GCC -print-libgcc-file-name)")
+    exec "$EL" -T "$here/link.ld" -o "$out" \
+        "$work/harness-emb-start.o" "$@" "$work/harness-emb-semihost.o" \
+        "$work/harness-emb-crt.o" "$work/harness-emb-rtsj.o" $CXXLIBS \
+        "$NEWLIB/lib/libc.a" "$NEWLIB/lib/libm.a" "$LIBGCC/libgcc.a"
+fi
+
 # The harness objects are the same for every test; rebuild them only
 # when missing or stale. (rtsj: lib/rt's __embcc_setjmp/__embcc_longjmp,
 # what __builtin_setjmp and __builtin_longjmp call -- newlib and libgcc

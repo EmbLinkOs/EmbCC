@@ -607,14 +607,18 @@ static int mips64_form(const struct tok *t, int n, struct code *out,
         mips_muldiv(out, op, a, b);
         return 0;
     }
-    if (n == 5 && (tok_is(&t[0], "dext") || tok_is(&t[0], "dins"))) {
+    /* dextm/dextu, dinsm/dinsu: the size-above-32 and position-above-32
+     * encodings, which dext and dins already choose from the field */
+    if (n == 5 && (tok_is(&t[0], "dext") || tok_is(&t[0], "dins") ||
+                   tok_is(&t[0], "dextm") || tok_is(&t[0], "dextu") ||
+                   tok_is(&t[0], "dinsm") || tok_is(&t[0], "dinsu"))) {
         int d = tok_reg(&t[1]), s = tok_reg(&t[2]);
         long long pos, size;
         if (d < 0 || s < 0 || !tok_imm(&t[3], &pos) || !tok_imm(&t[4], &size) ||
             pos < 0 || pos > 63 || size < 1 || pos + size > 64)
             FAIL("%.*s wants two registers, a position and a size within "
                  "the doubleword", t[0].len, t[0].s);
-        if (tok_is(&t[0], "dext")) mips_dext(out, d, s, (int)pos, (int)size);
+        if (t[0].s[1] == 'e') mips_dext(out, d, s, (int)pos, (int)size);
         else                       mips_dins(out, d, s, (int)pos, (int)size);
         return 0;
     }
@@ -703,6 +707,13 @@ static int stmt_body(const char *stmt, int len, struct code *out,
     }
     if (n == 3 && tok_is(&t[0], "rdhwr")) {
         int r = tok_reg(&t[1]), hw = tok_reg(&t[2]);
+        /* the hardware registers by name */
+        static const struct { const char *n; int v; } hwr[] = {
+            { "$hwr_cpunum", 0 }, { "$hwr_synci_step", 1 }, { "$hwr_cc", 2 },
+            { "$hwr_ccres", 3 }, { "$hwr_ulr", 29 },
+        };
+        for (unsigned k = 0; hw < 0 && k < sizeof hwr / sizeof hwr[0]; k++)
+            if (tok_is(&t[2], hwr[k].n)) hw = hwr[k].v;
         if (r < 0 || hw < 0)
             FAIL("rdhwr wants a register and a hardware register $0..$31");
         mips_rdhwr(out, r, hw);
@@ -1089,6 +1100,22 @@ static int stmt_body(const char *stmt, int len, struct code *out,
         mips_li(out, d, v);
         return 0;
     }
+    /* the MIPS32 multiply-accumulate into HI/LO (SPECIAL2) */
+    if (n == 3 && (tok_is(&t[0], "madd") || tok_is(&t[0], "maddu") ||
+                   tok_is(&t[0], "msub") || tok_is(&t[0], "msubu"))) {
+        int a = tok_reg(&t[1]), b = tok_reg(&t[2]);
+        int fn = tok_is(&t[0], "madd") ? 0 : tok_is(&t[0], "maddu") ? 1
+               : tok_is(&t[0], "msub") ? 4 : 5;
+        if (a < 0 || b < 0) FAIL("%.*s wants two registers", t[0].len, t[0].s);
+        mips_w(out, mips_enc_r(0x1c, a, b, 0, 0, fn));
+        return 0;
+    }
+    if (n == 3 && tok_is(&t[0], "dnegu") && mips_is_64()) {
+        int d = tok_reg(&t[1]), s2 = tok_reg(&t[2]);
+        if (d < 0 || s2 < 0) FAIL("dnegu wants two registers");
+        mips_alu(out, MIPS_DSUBU, d, MIPS_ZERO, s2);
+        return 0;
+    }
     /* not neg: gas and llvm-mc spell `neg` as the TRAPPING sub */
     if ((tok_is(&t[0], "not") || tok_is(&t[0], "negu")) && n == 3) {
         int d = tok_reg(&t[1]), s = tok_reg(&t[2]);
@@ -1154,6 +1181,8 @@ int mipsasm_is_reg(const char *name, int len)
 {
     if (len < 2 || name[0] != '$')
         return -1;
+    if (len > 5 && !strncmp(name, "$hwr_", 5))
+        return 34;                        /* rdhwr's named registers */
     /* a floating-point register is a register too, not a symbol -- its
      * instructions are then refused by name, as instructions */
     if (len >= 3 && len <= 4 && name[1] == 'f' && isdigit((unsigned char)name[2]) &&
@@ -1182,9 +1211,16 @@ static int sym_operand(const char *p, int *slen, long *add)
     int n = 0;
     if (!(asm_sym0((unsigned char)p[0]) || p[0] == '$'))
         return 0;
-    if (p[0] == '$' || (p[0] == '.' && (p[1] == '+' || p[1] == '-' ||
-                                        !p[1] || p[1] == ')')))
-        return 0;                         /* a register, or `.` itself */
+    if (p[0] == '.' && (p[1] == '+' || p[1] == '-' || !p[1] || p[1] == ')'))
+        return 0;                         /* `.` itself */
+    if (p[0] == '$') {
+        /* a register -- or clang's local labels, `$.str`, `$JTI0_0`,
+         * `$BB1_2`, which are MIPS's `.L` and no register's name */
+        int k = 1;
+        while (asm_symc((unsigned char)p[k])) k++;
+        if (mipsasm_is_reg(p, k) >= 0 || k == 1)
+            return 0;
+    }
     while (asm_symc((unsigned char)p[n]))
         n++;
     *slen = n;
@@ -1371,7 +1407,8 @@ int mipsasm_symform(const char *stmt, struct asm_symform *f)
                 "lb", "lbu", "lh", "lhu", "lw", "sb", "sh", "sw", "ll", "sc",
                 "lwl", "lwr", "swl", "swr", NULL
             };
-            static const char *const ls64[] = { "ld", "sd", "lwu", NULL };
+            static const char *const ls64[] = { "ld", "sd", "lwu", "ldl", "ldr",
+                                                "sdl", "sdr", "lld", "scd", NULL };
             int okm = daddiu || (mlen == 5 && !strncmp(m, "addiu", 5));
             for (int k = 0; !okm && mips_is_64() && ls64[k]; k++)
                 okm = (int)strlen(ls64[k]) == mlen &&

@@ -168,6 +168,11 @@ void elfw_set_link(struct elfw *w, int sec, int link)
     w->sec[sec].hdr.sh_link = (Elf64_Word)link;
 }
 
+void elfw_set_entsize(struct elfw *w, int sec, unsigned long entsize)
+{
+    w->sec[sec].hdr.sh_entsize = (Elf64_Xword)entsize;
+}
+
 void elfw_free(struct elfw *w)
 {
     if (!w)

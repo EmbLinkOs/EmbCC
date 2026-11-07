@@ -31,6 +31,15 @@ refc() {            # refc WHAT PATTERN SOURCE
     grep -q -- "$2" "$out/bad.err" || {
         echo "$1 was refused, but not by name:"; cat "$out/bad.err"; exit 1; }
 }
+accs() {            # accs WHAT SYMBOL SOURCE: a template naming SYMBOL is
+                    # assembled, and the object relocates against it
+    printf '%s\n' "$3" > "$out/acc.c"
+    "$EMBCC" --target=$T -c "$out/acc.c" -o "$out/acc.o" 2> "$out/acc.err" ||
+        { echo "$1 was refused:"; cat "$out/acc.err"; exit 1; }
+    ${EMBCC_LLVM_READELF:-llvm-readelf} -rW "$out/acc.o" |
+        grep -qE "[[:space:]]_?$2([[:space:]]|$)" ||
+        { echo "$1: no relocation against $2"; exit 1; }
+}
 refc "an unknown mnemonic" "'frob' is not an instruction" \
     'void f(void){ __asm__ volatile("frob d2"); }'
 refc "a form with the wrong operands" "'ld.w' with these operands" \
@@ -47,10 +56,14 @@ refc "a modifier" "modifier '%w' is not supported" \
     'int f(void){ int x; __asm__ volatile("mov %w0, 1" : "=d"(x)); return x; }'
 refc "a register variable outside d0-d7/a2-a7" 'is not supported for TriCore asm' \
     'int f(void){ register int v __asm__("d9") = 1; __asm__ volatile("" : "+d"(v)); return v; }'
-refc "a symbol in a template" 'a symbol needs a relocation' \
+accs "a symbol in a template" g \
     'void g(void); void f(void){ __asm__ volatile("call g"); }'
-refc "a named label in a template (its branch a relocation)" "names the symbol 'x'" \
-    'void f(void){ __asm__ volatile("x: j x"); }'
+# a named label is the template's own: its branch needs no relocation
+printf '%s\n' 'void f(void){ __asm__ volatile("x: j x"); }' > "$out/nlab.c"
+"$EMBCC" --target=$T -c "$out/nlab.c" -o "$out/nlab.o" ||
+    { echo "a named label in a template was refused"; exit 1; }
+${EMBCC_LLVM_READELF:-llvm-readelf} -rW "$out/nlab.o" | grep -q "[[:space:]]x$" &&
+    { echo "a template's own label went out as a relocation"; exit 1; }
 refc "a branch constant out of range" "does not fit its 4 bits" \
     'void f(int x){ __asm__ volatile("jne %0, 10, .+4" :: "d"(x)); }'
 echo "unknown mnemonics, wrong operands, reserved registers, foreign"

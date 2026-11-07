@@ -56,4 +56,17 @@ const char *rv_reg_name(int reg);
  * added here cannot escape the referee. */
 void rvasm_vocabulary(FILE *f);
 
+struct asm_symform;
+int rvasm_symform(const char *stmt, struct asm_symform *f);
+/* src/as/gas.c's: relaxation levels, the start of a pass and the end of
+ * a file, and `.option rvc/norvc/push/pop` */
+void rvasm_set_level(int level);
+int rvasm_took_level(void);
+void rvasm_reset(void);
+/* the C extension was on somewhere in the file: the object is RVC */
+int rvasm_rvc_used(void);
+void rvasm_gas_done(void);
+int rvasm_option(const char *arg);
+void rvasm_no_compress(int on);   /* the next encode carries a relocation */
+
 #endif

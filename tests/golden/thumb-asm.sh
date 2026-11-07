@@ -233,11 +233,11 @@ echo "inline asm computes correctly at -O0, -O1, -O2 and -Os"
 
 # An instruction outside the vocabulary fails by NAME, never with a
 # guessed encoding.
-printf 'void f(void){ __asm__("vldr s0, [r0]"); }\n' > "$out/bad.c"
+printf 'void f(void){ __asm__("vqadd.s8 d0, d1, d2"); }\n' > "$out/bad.c"
 if "$EMBCC" --target=$T -c "$out/bad.c" -o /dev/null 2> "$out/bad.err"; then
     echo "an unknown instruction was accepted"; exit 1
 fi
-grep -q "vldr" "$out/bad.err" || {
+grep -q "vqadd" "$out/bad.err" || {
     echo "the refusal does not name the instruction:"; cat "$out/bad.err"
     exit 1; }
 # And a callee-saved register is refused rather than silently corrupted:
@@ -250,11 +250,15 @@ grep -q "callee-saved" "$out/cs.err" || {
     echo "the refusal does not say why:"; cat "$out/cs.err"; exit 1; }
 echo "an unknown instruction and a callee-saved clobber are refused by name"
 
-# Inline data is constants, in range: a symbol would need a relocation an
-# inline asm cannot carry, a value too wide for its directive is an error
+# Inline data in range -- a value too wide for its directive is an error
 # in GNU as and llvm-mc alike, RISC-V's .half is no ARM directive, and an
-# IT block's slots are for instructions.
-for d in ".word handler" ".byte 256" ".short -32769" ".word 0x100000000" \
+# IT block's slots are for instructions -- and a symbol a relocation, as a
+# template carries one now.
+printf 'void handler(void); void f(void){ __asm__ volatile("b 1f\\n .word handler\\n1:"); }\n' > "$out/data.c"
+"$EMBCC" --target=$T -c "$out/data.c" -o "$out/data.o" &&
+    llvm-readelf -rW "$out/data.o" | grep -q "R_ARM_ABS32 .* handler" || {
+    echo "inline asm's .word handler is not an R_ARM_ABS32 against handler"; exit 1; }
+for d in ".byte 256" ".short -32769" ".word 0x100000000" \
          ".half 1" "it eq; .short 0xbf00"; do
     printf 'void f(void){ __asm__ volatile("%s"); }\n' "$d" > "$out/data.c"
     if "$EMBCC" --target=$T -c "$out/data.c" -o /dev/null 2> "$out/data.err"; then
@@ -266,7 +270,7 @@ done
 printf 'void f(void){ __asm__ volatile(".byte -128, 255; .short -32768, 65535; .quad -1"); }\n' > "$out/data.c"
 "$EMBCC" --target=$T -c "$out/data.c" -o /dev/null || {
     echo "inline asm refused data at the ends of its range"; exit 1; }
-echo "inline data: a symbol, an out-of-range value, .half and data in an IT block are refused"
+echo "inline data: a symbol is a relocation; an out-of-range value, .half and data in an IT block are refused"
 
 # %c prints a constant, and a register operand is not one; a string or an
 # alignment is not an instruction an IT block's condition can apply to;
@@ -282,28 +286,27 @@ if "$EMBCC" --target=$T -c "$out/c.c" -o /dev/null 2> "$out/c.err"; then
 fi
 grep -q "inside an IT block" "$out/c.err" || {
     echo "the refusal of a string in an IT block does not say why:"; cat "$out/c.err"; exit 1; }
-# more than .text's sixteen, a byte count that is no power of two, an
-# escape no assembler reads, a string that is not one
+# more than .text's sixteen, a byte count that is no power of two, a
+# string that is not one. (An unknown escape, `"\q"`, is GNU as's `q`,
+# as the file assembler that reads a template now reads it -- llvm-mc
+# alone refuses it.)
 cat > "$out/c.c" <<'CEOF'
 void a(void) { __asm__ volatile(".p2align 5"); }
 CEOF
 cat > "$out/c2.c" <<'CEOF'
 void a(void) { __asm__ volatile(".balign 3"); }
 CEOF
-cat > "$out/c3.c" <<'CEOF'
-void a(void) { __asm__ volatile(".ascii \"\\q\""); }
-CEOF
 cat > "$out/c4.c" <<'CEOF'
 void a(void) { __asm__ volatile(".asciz 5"); }
 CEOF
-for c in c c2 c3 c4; do
+for c in c c2 c4; do
     if "$EMBCC" --target=$T -c "$out/$c.c" -o /dev/null 2> "$out/c.err"; then
         echo "inline asm accepted:"; cat "$out/$c.c"; exit 1
     fi
     grep -q 'at most 16\|not a power of two\|not an escape\|not a quoted string' "$out/c.err" || {
         echo "the refusal of $(cat "$out/$c.c") does not say why:"; cat "$out/c.err"; exit 1; }
 done
-echo "%c on a register, a string in an IT block, more than 16, a bad escape are refused"
+echo "%c on a register, a string in an IT block, more than 16, a stray byte count are refused"
 
 # x86's constraint letters mean nothing here: "S" pinned the operand to
 # x86 register 6, r6, which is callee-saved and was not saved; and a

@@ -49,6 +49,19 @@ int xtasm_assemble(const char *text, struct code *out, char *err, int errlen);
  * start of its section (4-aligned), for call and l32r targets; -1 when
  * that is not known. Forgotten after each xtasm_assemble. */
 void xtasm_set_pc(long pc);
+/* gas.c's relaxation (see asm.c), and whether the core has the density
+ * option (every ESP32 does) */
+void xtasm_set_level(int level);
+int xtasm_took_level(void);
+void xtasm_set_density(int on);
+int xtasm_density(void);
+/* `.begin no-transform`: as written, nothing narrowed */
+void xtasm_set_transform(int on);
+/* -mlongcalls (and `.begin longcalls`): a call to a function this file
+ * does not place in its own section is `l32r aN, literal; callxN aN` */
+void xtasm_set_longcalls(int on);
+int xtasm_longcalls(void);
+int xtasm_call_operand(const char *stmt, const char **x, int *xlen);
 
 /* The address register a name denotes -- "a0".."a15", or "sp" -- or -1. */
 int xtasm_gpr(const char *name, int len);

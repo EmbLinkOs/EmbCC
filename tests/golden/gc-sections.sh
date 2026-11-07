@@ -248,8 +248,10 @@ python3 "$d/fdes.py" "$out/eh.elf" > "$out/fdes.txt" || fail "x86-64: fdes.py"
 grep -v ' 0$' "$out/fdes.txt" | sort > "$out/live.txt"
 cmp -s "$out/fns.txt" "$out/live.txt" ||
     { cat "$out/fdes.txt"; fail "x86-64: the FDEs left are not the functions kept"; }
-[ "$(grep -c ' 0$' "$out/fdes.txt")" = 1 ] ||
-    { cat "$out/fdes.txt"; fail "x86-64: the collected function's FDE should cover nothing"; }
+# the collected function's FDE is gone, as ld drops it (it once stayed,
+# its range zeroed)
+[ "$(grep -c ' 0$' "$out/fdes.txt")" = 0 ] ||
+    { cat "$out/fdes.txt"; fail "x86-64: the collected function's FDE is still in .eh_frame"; }
 echo "x86-64: .eh_frame kept, its FDEs for kept functions exact, the other covering nothing"
 
 # ---- ARM EHABI: .ARM.exidx lives and dies with its function ---------------

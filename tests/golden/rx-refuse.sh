@@ -91,7 +91,10 @@ refopt() {          # refopt OPTION PATTERN
 }
 refopt -mcpu=rxv2 'not an RXv1 core'
 refopt -m64bit-doubles '-m64bit-doubles is not supported'
-refopt -fpu '-fpu is not supported'
+# -fpu: the core has the RX600 FPU, whose instructions then assemble
+printf 'void f(void){ __asm__("fadd r1, r2"); }\n' > "$out/fpu.c"
+"$EMBCC" --target=$T -fpu -c "$out/fpu.c" -o /dev/null 2> "$out/fpu.err" ||
+    { cat "$out/fpu.err"; echo "-fpu did not let an FPU instruction assemble"; exit 1; }
 refopt -mbig-endian-data 'little-endian only'
 refopt -mgcc-abi '-mgcc-abi is not supported'
 refopt -msmall-data-limit=8 'small-data area'
@@ -146,7 +149,7 @@ __asm__(".global _x\\n_x: .long 0");
 "$EMBCC" --target=$T -c "$out/asm.c" -o /dev/null 2> "$out/asm.err" || {
     echo "inline, naked or file-scope assembly was refused:"; cat "$out/asm.err"
     exit 1; }
-refc "an FPU instruction in a template" 'is an FPU or RXv2 instruction' \
+refc "an FPU instruction in a template" 'is an FPU instruction' \
     'void f(void){ __asm__("fadd r1, r2"); }'
 refc "a clobbered stack pointer" "clobbers 'r0', the stack pointer" \
     'void f(void){ __asm__ volatile("nop" ::: "r0"); }'

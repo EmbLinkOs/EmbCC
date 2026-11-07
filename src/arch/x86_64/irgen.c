@@ -1461,6 +1461,8 @@ static void asm_assemble_att(struct ir_func *fn, struct stmt *s,
     free(out);
     ia->code = c.p;
     ia->codelen = c.len;
+    ia->rel = c.rel;            /* (code_asm_rels where it is spliced) */
+    ia->nrel = c.nrel;
     ia->drange = c.drange;
     ia->ndrange = c.ndrange;
     ia->arange = c.arange;

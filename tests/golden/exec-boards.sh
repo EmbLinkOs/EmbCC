@@ -270,6 +270,12 @@ case $b in
               exit 0
           fi ;;
 esac
+# The RISC-V limits are a hang's, and math-special -- soft-float, the
+# corpus's slowest -- takes 2 s alone but outran 60 and 120 s of wall
+# clock beside the rest of make test (twice, with -O3's runs added): it
+# gets 240 there.
+rvt=""
+[ "$name" = math-special ] && rvt=240
 case $b in
     m4|m4hf) sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-60}" "$QA" \
             -M mps2-an386 -cpu cortex-m4 -semihosting -nographic \
@@ -280,17 +286,17 @@ case $b in
     a7) sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-60}" "$QA" \
             -M virt -cpu cortex-a15 -m 128 -semihosting -nographic \
             -monitor none -kernel $o.elf > $o.txt 2>&1 ;;
-    rv32k) sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-120}" "$Q32" \
+    rv32k) sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-${rvt:-120}}" "$Q32" \
             -M virt -cpu rv32,zicond=true,zcb=true,zcmp=true,zcd=false,zba=true,zbb=true,zbs=true,zbc=true,zbkb=true \
             -bios none -nographic -m 8 -kernel $o.elf > $o.txt 2>&1 ;;
-    rv64k) sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-60}" "$Q64" \
+    rv64k) sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-${rvt:-60}}" "$Q64" \
             -M virt -cpu rv64,zicond=true,zcb=true,zba=true,zbb=true,zbs=true,zbc=true \
             -bios none -nographic -m 8 -kernel $o.elf > $o.txt 2>&1 ;;
     # (RV32's soft-float math-special is the corpus's slowest program:
     # three seconds alone, over sixty with the rest of make test beside it)
-    rv32*) sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-120}" "$Q32" \
+    rv32*) sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-${rvt:-120}}" "$Q32" \
             -M virt -bios none -nographic -m 8 -kernel $o.elf > $o.txt 2>&1 ;;
-    rv64*) sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-60}" "$Q64" \
+    rv64*) sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-${rvt:-60}}" "$Q64" \
             -M virt -bios none -nographic -m 8 -kernel $o.elf > $o.txt 2>&1 ;;
 esac
 got=$?

@@ -5303,6 +5303,7 @@ static void gen_ins(struct a_fn *F, int n)
             }
         }
         /* the bytes, padded at each alignment for where they land */
+        code_asm_rels(t, ia, t->len, ia->rel, ia->nrel);   /* its relocations */
         code_put_asm(t, ia->code, ia->codelen, ia->drange, ia->ndrange,
                      ia->arange, ia->narange, CODE_FILL_ZERO);
         for (int k = 0; k < ia->nout; k++) {

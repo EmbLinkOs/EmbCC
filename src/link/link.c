@@ -136,6 +136,13 @@ struct insec {
     int sosec;
     Elf64_Xword shflags;
     int discarded;
+    /* Merging (merge_sections, merge_eh): where each piece of the input
+     * went, by old offset; for a SHF_MERGE input, the holder of the
+     * merged bytes plus one (0: not merged); for .eh_frame, eh_done and
+     * each record's CIE as (input, offset), for merge_eh_fix. */
+    struct mpiece *mp;
+    int nmp, merge_holder, eh_done;
+    struct { int sec; Elf64_Addr at; } *eh_cie;
     /* --gc-sections: claimed by a KEEP() in the script (a root), and
      * reached by the mark. One the mark did not reach is `discarded`
      * like a /DISCARD/ one, and `gc` says that is why. */
@@ -165,7 +172,7 @@ struct veneer_sec { int key, sec, n; };
  * contiguously, the way `KEEP(*(.embk_exports))` places them, and its
  * bounds become bracket symbols (define_orphan_brackets). Read-only
  * orphans follow .rodata; writable ones follow .data. */
-#define MAX_ORPHANS 64
+#define MAX_ORPHANS 1024
 struct orphan { const char *name; int writable; };
 
 struct symbol {
@@ -187,6 +194,12 @@ struct symbol {
     /* The first object that referred to it: what an archive member was
      * pulled for, as the map file reports. */
     struct object *ref;
+    /* Only weak references to it (and at least one): an archive member
+     * is not pulled for it, as ld and lld do not -- `if (&f) f();` is
+     * how a program asks for f only if something else brought it in. */
+    int weak_refs_only;
+    int required;              /* the entry, -u, EXTERN(): always pulled */
+    int got_slot;              /* ARM initial-exec TLS: its slot + 1 (tls_got) */
 };
 
 /* A static archive (.a) is a pool of member objects; a member is pulled
@@ -224,6 +237,14 @@ struct linker {
      * thread pointer. */
     Elf64_Addr tls_start;
     Elf64_Xword tls_size;
+    Elf64_Xword tls_align;     /* AArch64: the block follows the 16-byte
+                                * TCB at this alignment */
+    /* ARM initial-exec TLS (tls_got): the linker's .got, a word per
+     * variable holding its thread-pointer offset; each slot's variable by
+     * the object and symbol a reference named */
+    int got_sec;               /* insecs index + 1, 0 = none */
+    struct { struct object *o; Elf64_Word symi; } *got;
+    int ngot;
     struct object **objs;
     int nobj, capobj;
     struct insec *insecs;
@@ -238,7 +259,7 @@ struct linker {
     const char *entry;
     /* RISC-V: what each PCREL_HI20 computed, keyed by the auipc's
      * address, for the low half that pairs with it. */
-    struct { Elf64_Addr at; long long val; } *pcrel;
+    struct { Elf64_Addr at; long long val; int got; } *pcrel;
     int npcrel, cappcrel;
     Elf64_Addr stack_top;      /* RISC-V: the entry stub's sp, 0 = no stub */
     unsigned long csa_start, csa_end;   /* TriCore: the stub's CSA list */
@@ -1040,9 +1061,10 @@ static struct object *parse_object(const char *name, unsigned char *buf,
         if (eh->e_type != ET_REL)
             die("%s: not a relocatable object (ET_REL)", name);
         if (eh->e_machine != EM_X86_64 && eh->e_machine != EM_RISCV &&
-            eh->e_machine != EM_LOONGARCH && eh->e_machine != EM_MIPS)
-            die("%s: a 64-bit object for machine %u; only x86-64, RV64 "
-                "(EM_RISCV), LoongArch64 (EM_LOONGARCH) and MIPS64 "
+            eh->e_machine != EM_LOONGARCH && eh->e_machine != EM_MIPS &&
+            eh->e_machine != EM_AARCH64)
+            die("%s: a 64-bit object for machine %u; only x86-64, AArch64, "
+                "RV64 (EM_RISCV), LoongArch64 (EM_LOONGARCH) and MIPS64 "
                 "(EM_MIPS) are supported", name, (unsigned)eh->e_machine);
         if (big && eh->e_machine != EM_MIPS)
             die("%s: a big-endian 64-bit object for machine %u; big-endian "
@@ -1182,6 +1204,13 @@ static int classify_osec(const char *name, int writable, int is_bss)
  * sight. First-seen order is layout order, as with any input. */
 static int orphan_osec(struct linker *l, const char *name, int writable)
 {
+    /* -ffunction-sections' unwind tables are one table: every
+     * .ARM.exidx.text.f in .ARM.exidx, every .ARM.extab.text.f in
+     * .ARM.extab, as ld and lld gather them */
+    if (!strncmp(name, ".ARM.exidx.", 11))
+        name = ".ARM.exidx";
+    else if (!strncmp(name, ".ARM.extab.", 11))
+        name = ".ARM.extab";
     for (int i = 0; i < l->norphan; i++)
         if (strcmp(l->orphans[i].name, name) == 0)
             return OSEC_COUNT + i;
@@ -1696,7 +1725,8 @@ static void add_entry_stub(struct linker *l)
               : l->machine == EM_PPC ? 32
               : l->machine == EM_RX ? 14
               : l->machine == EM_SPARC ? 20
-              : l->machine == EM_68K ? 12 : 0;
+              : l->machine == EM_68K ? 12
+              : l->machine == EM_AARCH64 ? 40 : 0;
 #if FAMILY_BUILT(mips)
     if (l->machine == EM_MIPS)
         size = mips_li_len((long long)l->stack_top) + 16;
@@ -1733,7 +1763,8 @@ static void add_entry_stub(struct linker *l)
 
 static void fill_entry_stub(struct linker *l, Elf64_Addr entry)
 {
-    struct code c = { l->stub, 0, (int)l->stub_size, NULL, 0, 0, NULL, 0, 0 };
+    struct code c = { l->stub, 0, (int)l->stub_size, NULL, 0, 0, NULL, 0, 0,
+                      NULL, 0, 0 };
     struct insec *s = &l->insecs[l->stub_sec];
     int xlen = l->elf32 ? 32 : 64;
 #if FAMILY_BUILT(arm)
@@ -1858,6 +1889,35 @@ static void fill_entry_stub(struct linker *l, Elf64_Addr entry)
         p[6] = 0x4e; p[7] = 0xf9;
         p[8] = (unsigned char)(e >> 24);   p[9] = (unsigned char)(e >> 16);
         p[10] = (unsigned char)(e >> 8);   p[11] = (unsigned char)e;
+        return;
+    }
+#endif
+#if FAMILY_BUILT(aarch64)
+    if (l->machine == EM_AARCH64) {
+        /* An A-profile core leaves reset at EL1/EL2 with sp unset:
+         * movz/movk x16 = top, mov sp, x16; movz/movk x17 = entry, br x17.
+         * Ten words whatever the addresses. */
+        unsigned char *p = l->stub;
+        unsigned long long v[2];
+        unsigned w[10];
+        int k = 0, r, h;
+        (void)c;
+        v[0] = (unsigned long long)l->stack_top;
+        v[1] = (unsigned long long)entry;
+        for (r = 0; r < 2; r++) {
+            for (h = 0; h < 4; h++)
+                w[k++] = (h ? 0xf2800000u : 0xd2800000u) | (unsigned)h << 21 |
+                         (unsigned)((v[r] >> (16 * h)) & 0xffff) << 5 |
+                         (unsigned)(16 + r);
+            w[k++] = r ? 0xd61f0220u          /* br x17 */
+                       : 0x9100021fu;         /* mov sp, x16 */
+        }
+        for (k = 0; k < 10; k++) {
+            p[4 * k] = (unsigned char)w[k];
+            p[4 * k + 1] = (unsigned char)(w[k] >> 8);
+            p[4 * k + 2] = (unsigned char)(w[k] >> 16);
+            p[4 * k + 3] = (unsigned char)(w[k] >> 24);
+        }
         return;
     }
 #endif
@@ -2144,7 +2204,7 @@ static struct symbol *defines_needed(struct linker *l, struct object *o)
         if (!*nm)
             continue;
         struct symbol *g = sym_find(l, nm);
-        if (g && !g->defined)
+        if (g && !g->defined && !g->weak_refs_only)
             return g;
     }
     return NULL;
@@ -2199,8 +2259,11 @@ static void add_symbols(struct linker *l, struct object *o)
         struct symbol *g = sym_intern(l, name);
 
         if (sy->st_shndx == SHN_UNDEF) {
-            if (!g->ref)
+            if (!g->ref) {
                 g->ref = o;
+                g->weak_refs_only = weak && !g->required;
+            } else if (!weak)
+                g->weak_refs_only = 0;
             continue; /* a reference; may be satisfied by a later object */
         }
 
@@ -2649,6 +2712,1120 @@ static void place_osec(struct linker *l, int os, Elf64_Addr *va,
 /* Lay the output sections out in order into the two segments, recording
  * each group's bounds. COMMON (tentative) symbols are placed at the end
  * of .bss, since they have no input section of their own. */
+/* ---- merging: SHF_MERGE sections and .eh_frame's CIEs -----------------
+ *
+ * What ld and lld do to every link, and what a flash budget feels:
+ *
+ *  - The SHF_MERGE inputs of one output section, one entry size and one
+ *    alignment become one: identical strings (SHF_STRINGS) or identical
+ *    entries (.rodata.cst8 and the like) are kept once, and a string
+ *    that ends another ("lo\n" in "hello\n") is that one's tail when the
+ *    strings are not aligned past their character size. The first input
+ *    holds the merged bytes; every other is emptied, and what pointed
+ *    into any of them -- a symbol's value, a section symbol's addend --
+ *    is rewritten to where its bytes went. A section a relocation
+ *    patches is left alone, and so is one an implicit (REL) addend
+ *    reaches in a form this linker cannot rewrite.
+ *
+ *  - .eh_frame: a CIE that an earlier input already has, byte for byte
+ *    and relocation for relocation, is dropped and its FDEs point at the
+ *    first; an FDE for a function --gc-sections or /DISCARD/ removed is
+ *    dropped. The relocations of what remains are moved with it, and
+ *    each FDE's CIE pointer is written once the addresses are known
+ *    (merge_eh_fix). */
+
+struct mpiece { Elf64_Addr old, len; long long nw; };
+
+static void merge_relsecs(struct object *o)
+{
+    if (o->relsec)
+        return;
+    o->relsec = xmalloc((size_t)(o->nsh ? o->nsh : 1) * sizeof *o->relsec);
+    for (int k = 0; k < o->nsh; k++)
+        o->relsec[k] = -1;
+    for (int k = 0; k < o->nsh; k++) {
+        Elf64_Shdr *sh = sh_at(o, k);
+        if ((sh->sh_type == SHT_REL || sh->sh_type == SHT_RELA) &&
+            sh->sh_info < (Elf64_Word)o->nsh)
+            o->relsec[sh->sh_info] = k;
+    }
+}
+
+/* Where byte `off` of a merged or compacted input went: its new offset
+ * (in the holder, or in the compacted section), -1 if it was dropped. */
+static long long merge_map(const struct insec *s, Elf64_Addr off)
+{
+    int lo = 0, hi = s->nmp - 1;
+    while (lo <= hi) {
+        int m = (lo + hi) / 2;
+        const struct mpiece *p = &s->mp[m];
+        if (off < p->old)
+            hi = m - 1;
+        else if (off >= p->old + p->len)
+            lo = m + 1;
+        else
+            return p->nw < 0 ? -1 : p->nw + (long long)(off - p->old);
+    }
+    /* one past the end (a section's end symbol): past the last piece */
+    if (s->nmp && off == s->mp[s->nmp - 1].old + s->mp[s->nmp - 1].len &&
+        s->mp[s->nmp - 1].nw >= 0)
+        return s->mp[s->nmp - 1].nw + (long long)s->mp[s->nmp - 1].len;
+    return -1;
+}
+
+static unsigned merge_rd32(const unsigned char *p, int be)
+{
+    return be ? (unsigned)p[0] << 24 | (unsigned)p[1] << 16 |
+                (unsigned)p[2] << 8 | p[3]
+              : (unsigned)p[0] | (unsigned)p[1] << 8 |
+                (unsigned)p[2] << 16 | (unsigned)p[3] << 24;
+}
+
+static void merge_wr32(unsigned char *p, unsigned v, int be)
+{
+    for (int b = 0; b < 4; b++)
+        p[be ? 3 - b : b] = (unsigned char)(v >> (8 * b));
+}
+
+/* An implicit addend this linker reads and writes back: 0 = no, else
+ * which form (1 a word, 2 ARM MOVW/MOVT, 3 Thumb MOVW/MOVT). */
+static int merge_rel_form(int machine, unsigned type)
+{
+    if (machine == EM_ARM)
+        switch (type) {
+        case 2: case 3: case 38: return 1;      /* ABS32, REL32, TARGET1 */
+        case 43: case 44: return 2;             /* MOVW_ABS_NC, MOVT_ABS */
+        case 47: case 48: return 3;             /* THM_MOVW_ABS_NC, THM_MOVT_ABS */
+        default: return 0;
+        }
+    if (machine == EM_MIPS && type == 2)        /* R_MIPS_32 */
+        return 1;
+    return 0;
+}
+
+static long long merge_rel_get(const unsigned char *p, int form, int be)
+{
+    unsigned w;
+    if (form == 1)
+        return (long long)(int)merge_rd32(p, be);
+    if (form == 2) {
+        w = merge_rd32(p, be);
+        return (long long)(short)(((w >> 4) & 0xf000) | (w & 0xfff));
+    }
+    {
+        unsigned h1 = (unsigned)p[0] | (unsigned)p[1] << 8;
+        unsigned h2 = (unsigned)p[2] | (unsigned)p[3] << 8;
+        unsigned v = (h1 & 0xf) << 12 | ((h1 >> 10) & 1) << 11 |
+                     ((h2 >> 12) & 7) << 8 | (h2 & 0xff);
+        return (long long)(short)v;
+    }
+}
+
+static void merge_rel_put(unsigned char *p, int form, int be, long long a)
+{
+    unsigned v = (unsigned)a & 0xffff, w;
+    if (form == 1) {
+        merge_wr32(p, (unsigned)a, be);
+        return;
+    }
+    if (form == 2) {
+        w = merge_rd32(p, be);
+        w = (w & ~0x000f0fffu) | (v & 0xf000) << 4 | (v & 0xfff);
+        merge_wr32(p, w, be);
+        return;
+    }
+    {
+        unsigned h1 = (unsigned)p[0] | (unsigned)p[1] << 8;
+        unsigned h2 = (unsigned)p[2] | (unsigned)p[3] << 8;
+        h1 = (h1 & ~0x040fu) | (v >> 12) | ((v >> 11) & 1) << 10;
+        h2 = (h2 & ~0x70ffu) | ((v >> 8) & 7) << 12 | (v & 0xff);
+        p[0] = (unsigned char)h1; p[1] = (unsigned char)(h1 >> 8);
+        p[2] = (unsigned char)h2; p[3] = (unsigned char)(h2 >> 8);
+    }
+}
+
+/* Each relocation of object o: calls fn with its fields and where its
+ * addend is (RELA: the entry's; REL: the bytes at the site). */
+struct merge_rel {
+    struct object *o;
+    int isrel, target;
+    Elf64_Addr off;
+    unsigned type;
+    Elf64_Word symi;
+    unsigned char *ent;     /* the entry */
+};
+
+static int merge_rel_next(struct object *o, int *sec, int *j,
+                          struct merge_rel *r)
+{
+    for (; *sec < o->nsh; (*sec)++, *j = 0) {
+        Elf64_Shdr *rsh = sh_at(o, *sec);
+        int isrel = rsh->sh_type == SHT_REL;
+        if (rsh->sh_type != SHT_RELA && !isrel)
+            continue;
+        int relsz = o->elf32 ? (isrel ? (int)sizeof(Elf32_Rel)
+                                      : (int)sizeof(Elf32_Rela))
+                             : (isrel ? (int)sizeof(Elf64_Rel)
+                                      : (int)sizeof(Elf64_Rela));
+        int n = (int)(rsh->sh_size / (Elf64_Xword)relsz);
+        if (*j >= n)
+            continue;
+        unsigned char *e = o->buf + rsh->sh_offset + (long)(*j) * relsz;
+        (*j)++;
+        r->o = o;
+        r->isrel = isrel;
+        r->target = (int)rsh->sh_info;
+        r->ent = e;
+        if (o->elf32) {
+            const Elf32_Rel *q = (const Elf32_Rel *)e;
+            r->off = q->r_offset;
+            r->type = q->r_info & 0xff;
+            r->symi = q->r_info >> 8;
+        } else {
+            const Elf64_Rel *q = (const Elf64_Rel *)e;
+            r->off = q->r_offset;
+            r->type = (unsigned)ELF64_R_TYPE(q->r_info);
+            r->symi = (Elf64_Word)ELF64_R_SYM(q->r_info);
+        }
+        return 1;
+    }
+    return 0;
+}
+
+static long long merge_rela_addend(const struct merge_rel *r)
+{
+    return r->o->elf32 ? ((const Elf32_Rela *)r->ent)->r_addend
+                       : ((const Elf64_Rela *)r->ent)->r_addend;
+}
+
+static void merge_rela_set(const struct merge_rel *r, long long a)
+{
+    if (r->o->elf32)
+        ((Elf32_Rela *)r->ent)->r_addend = (int)a;
+    else
+        ((Elf64_Rela *)r->ent)->r_addend = a;
+}
+
+/* the bytes a relocation of r->target patches, or NULL (a section not
+ * in the object's buffer: NOBITS) */
+static unsigned char *merge_site(const struct merge_rel *r)
+{
+    Elf64_Shdr *t = sh_at(r->o, r->target);
+    if (t->sh_type == SHT_NOBITS || r->off + 4 > t->sh_size)
+        return NULL;
+    return r->o->buf + t->sh_offset + r->off;
+}
+
+/* the merged-input index a relocation's section symbol names, or -1 */
+static int merge_secsym(struct linker *l, struct object *o, Elf64_Word symi,
+                        int want_merged)
+{
+    if (symi >= (Elf64_Word)o->nsym)
+        return -1;
+    Elf64_Sym *sy = &o->syms[symi];
+    if (ELF64_ST_TYPE(sy->st_info) != STT_SECTION ||
+        sy->st_shndx == SHN_UNDEF || sy->st_shndx >= (unsigned)o->nsh)
+        return -1;
+    int s = o->sec_out[sy->st_shndx];
+    if (s < 0)
+        return -1;
+    if (want_merged && !l->insecs[s].merge_holder)
+        return -1;
+    return s;
+}
+
+/* FNV-1a, for the string table */
+static unsigned long merge_hash(const unsigned char *p, Elf64_Addr n)
+{
+    unsigned long h = 1469598103934665603UL;
+    while (n--)
+        h = (h ^ *p++) * 1099511628211UL;
+    return h;
+}
+
+/* a string or entry: its bytes, and the input it spans (a string's own
+ * padding to the next aligned one included) */
+struct mstr { const unsigned char *p; Elf64_Addr len, span; long long nw; int rep; };
+
+static int g_merge_cw;              /* the character width, for the sort */
+
+/* by their characters read backwards, so a string that ends another
+ * sorts just before it */
+static int merge_rcmp(const void *a, const void *b)
+{
+    const struct mstr *x = a, *y = b;
+    Elf64_Addr i = x->len, j = y->len;
+    int cw = g_merge_cw;
+    /* past the terminator */
+    i -= (Elf64_Addr)cw; j -= (Elf64_Addr)cw;
+    while (i && j) {
+        i -= (Elf64_Addr)cw; j -= (Elf64_Addr)cw;
+        int c = memcmp(x->p + i, y->p + j, (size_t)cw);
+        if (c)
+            return c;
+    }
+    return i ? 1 : j ? -1 : 0;
+}
+
+static const struct mstr *g_merge_u;
+
+static int merge_ocmp(const void *a, const void *b)
+{
+    int x = g_merge_u[*(const int *)a].rep, y = g_merge_u[*(const int *)b].rep;
+    return x < y ? -1 : x > y;
+}
+
+static void merge_group(struct linker *l, int *mem, int nmem, Elf64_Xword es,
+                        int strings)
+{
+    struct insec *h = &l->insecs[mem[0]];
+    for (int k = 1; k < nmem; k++)
+        if (l->insecs[mem[k]].align > h->align)
+            h->align = l->insecs[mem[k]].align;
+    Elf64_Xword align = h->align;
+    /* every string may be another's tail; an aligned one only where it
+     * lands aligned */
+    int tail = strings;
+    Elf64_Xword al = align > es ? align : es;
+    /* every piece of every member */
+    int cap = 64, n = 0;
+    struct mstr *v = xmalloc((size_t)cap * sizeof *v);
+    for (int k = 0; k < nmem; k++) {
+        struct insec *s = &l->insecs[mem[k]];
+        Elf64_Addr at = 0;
+        while (at < s->size) {
+            Elf64_Addr len = es;
+            if (strings) {
+                len = 0;
+                for (;;) {
+                    int z = 1;
+                    for (Elf64_Xword b = 0; b < es; b++)
+                        if (s->data[at + len + b]) z = 0;
+                    len += es;
+                    if (z || at + len >= s->size)
+                        break;
+                }
+            }
+            if (n == cap) {
+                cap *= 2;
+                v = xrealloc(v, (size_t)cap * sizeof *v);
+            }
+            Elf64_Addr span = len;
+            /* aligned strings: the zeros up to the next one are padding,
+             * not empty strings */
+            if (strings && align > es)
+                while (at + span < s->size && (at + span) % align) {
+                    int z = 1;
+                    for (Elf64_Xword b = 0; b < es; b++)
+                        if (s->data[at + span + b]) z = 0;
+                    if (!z)
+                        break;
+                    span += es;
+                }
+            v[n].p = s->data + at;
+            v[n].len = len;
+            v[n].span = span;
+            v[n].nw = -1;
+            v[n].rep = -1;
+            n++;
+            at += span;
+        }
+    }
+    /* identical ones: the first stands for the rest */
+    int hcap = 16;
+    while (hcap < 2 * n) hcap *= 2;
+    int *ht = xmalloc((size_t)hcap * sizeof *ht);
+    for (int k = 0; k < hcap; k++) ht[k] = -1;
+    for (int k = 0; k < n; k++) {
+        unsigned long hh = merge_hash(v[k].p, v[k].len) & (unsigned long)(hcap - 1);
+        while (ht[hh] >= 0 &&
+               !(v[ht[hh]].len == v[k].len &&
+                 !memcmp(v[ht[hh]].p, v[k].p, (size_t)v[k].len)))
+            hh = (hh + 1) & (unsigned long)(hcap - 1);
+        if (ht[hh] < 0)
+            ht[hh] = k;
+        v[k].rep = ht[hh];
+    }
+    free(ht);
+    /* the distinct ones, laid out; a tail goes inside the string it ends */
+    int nu = 0;
+    struct mstr *u = xmalloc((size_t)(n ? n : 1) * sizeof *u);
+    int *uidx = xmalloc((size_t)(n ? n : 1) * sizeof *uidx);
+    for (int k = 0; k < n; k++)
+        if (v[k].rep == k) {
+            u[nu] = v[k];
+            u[nu].rep = k;             /* back to v */
+            nu++;
+        }
+    if (tail) {
+        g_merge_cw = (int)es;
+        qsort(u, (size_t)nu, sizeof *u, merge_rcmp);
+    }
+    Elf64_Addr size = 0;
+    unsigned char *out;
+    /* The strings u[k] ends follow it in the reversed order: the first
+     * of them (within a few) it lands aligned in is its container. rel:
+     * where in its outermost container a string starts. */
+    Elf64_Addr *rel = xcalloc((size_t)(nu ? nu : 1), sizeof *rel);
+    for (int k = nu - 1; k >= 0; k--) {
+        uidx[k] = -1;
+        for (int j = k + 1; tail && j < nu && j <= k + 64; j++) {
+            if (u[j].len < u[k].len ||
+                memcmp(u[j].p + (u[j].len - u[k].len), u[k].p,
+                       (size_t)u[k].len))
+                break;
+            Elf64_Addr r = rel[j] + (u[j].len - u[k].len);
+            if (r % al == 0) {
+                uidx[k] = j;
+                rel[k] = r;
+                break;
+            }
+        }
+    }
+    /* place the containers in their original order of appearance */
+    int *ord = xmalloc((size_t)(nu ? nu : 1) * sizeof *ord), no = 0;
+    for (int k = 0; k < nu; k++)
+        if (uidx[k] < 0) ord[no++] = k;
+    /* (by first appearance, so a link with nothing to merge keeps its
+     * bytes in order) */
+    g_merge_u = u;
+    qsort(ord, (size_t)no, sizeof *ord, merge_ocmp);
+    for (int a = 0; a < no; a++) {
+        struct mstr *s = &u[ord[a]];
+        size = (size + al - 1) / al * al;
+        s->nw = (long long)size;
+        size += s->len;
+    }
+    for (int k = nu - 1; k >= 0; k--)
+        if (uidx[k] >= 0) {
+            int c = uidx[k];
+            while (uidx[c] >= 0) c = uidx[c];
+            u[k].nw = u[c].nw + (long long)rel[k];
+        }
+    out = xcalloc((size_t)(size ? size : 1), 1);
+    for (int a = 0; a < no; a++)
+        memcpy(out + u[ord[a]].nw, u[ord[a]].p, (size_t)u[ord[a]].len);
+    for (int k = 0; k < nu; k++)
+        v[u[k].rep].nw = u[k].nw;
+    /* each member's map */
+    int at = 0;
+    for (int k = 0; k < nmem; k++) {
+        struct insec *s = &l->insecs[mem[k]];
+        Elf64_Addr off = 0;
+        int first = at;
+        while (off < s->size) {
+            off += v[at].span;
+            at++;
+        }
+        s->nmp = at - first;
+        s->mp = xmalloc((size_t)(s->nmp ? s->nmp : 1) * sizeof *s->mp);
+        off = 0;
+        for (int q = 0; q < s->nmp; q++) {
+            const struct mstr *x = &v[first + q];
+            s->mp[q].old = off;
+            s->mp[q].len = x->span;
+            s->mp[q].nw = v[x->rep].nw;
+            off += x->span;
+        }
+        s->merge_holder = mem[0] + 1;
+    }
+    for (int k = 1; k < nmem; k++) {
+        struct insec *s = &l->insecs[mem[k]];
+        s->size = 0;
+        s->data = out;
+        s->align = 1;           /* empty: nothing to pad the layout for */
+    }
+    h->data = out;
+    h->size = size;
+    free(v);
+    free(u);
+    free(uidx);
+    free(rel);
+    free(ord);
+}
+
+static void merge_sections(struct linker *l)
+{
+    int n = l->nsec;
+    int *cand = xcalloc((size_t)(n ? n : 1), sizeof *cand);
+    int any = 0;
+    for (int i = 0; i < n; i++) {
+        struct insec *s = &l->insecs[i];
+        if (!s->obj || s->discarded || s->is_bss || !s->data || !s->size ||
+            !(s->shflags & SHF_MERGE) || !(s->shflags & SHF_ALLOC) ||
+            (s->shflags & SHF_WRITE))
+            continue;
+        Elf64_Xword es = sh_at(s->obj, s->shndx)->sh_entsize;
+        if (!es || es > 64 || s->size % es)
+            continue;
+        if ((s->shflags & SHF_STRINGS)) {
+            /* the last string ends in its terminator */
+            int z = 1;
+            for (Elf64_Xword b = 0; b < es; b++)
+                if (s->data[s->size - es + b]) z = 0;
+            if (!z)
+                continue;
+        }
+        merge_relsecs(s->obj);
+        if (s->obj->relsec[s->shndx] >= 0)
+            continue;               /* something patches it */
+        cand[i] = 1;
+        any = 1;
+    }
+    if (!any) {
+        free(cand);
+        return;
+    }
+    /* an implicit addend into a candidate in a form not rewritten here:
+     * that candidate stays as it is. MOVW/MOVT hold 16 signed bits, so
+     * one they reach is merged only within that much. */
+    int *movw = xcalloc((size_t)(n ? n : 1), sizeof *movw);
+    for (int k = 0; k < l->nobj; k++) {
+        struct object *o = l->objs[k];
+        struct merge_rel r;
+        int sec = 0, j = 0;
+        while (merge_rel_next(o, &sec, &j, &r)) {
+            if (!r.isrel)
+                continue;
+            int t = merge_secsym(l, o, r.symi, 0);
+            if (t < 0 || !cand[t])
+                continue;
+            int form = merge_rel_form(o->machine, r.type);
+            if (!form || !merge_site(&r))
+                cand[t] = 0;
+            else if (form > 1)
+                movw[t] = 1;
+        }
+    }
+    /* the groups: one output section (the script's rule, or the fixed
+     * layout's), one name, entry size, string-ness and alignment */
+    int *mem = xmalloc((size_t)n * sizeof *mem);
+    for (int i = 0; i < n; i++) {
+        if (!cand[i])
+            continue;
+        struct insec *a = &l->insecs[i];
+        Elf64_Xword es = sh_at(a->obj, a->shndx)->sh_entsize;
+        int nm = 0, mv = 0;
+        Elf64_Xword total = 0;
+        for (int j = i; j < n; j++) {
+            struct insec *b = &l->insecs[j];
+            /* (as lld groups them: the name does not matter, and only
+             * strings need one alignment -- a tail lands where its
+             * container's alignment allows; entries take the largest) */
+            if (!cand[j] || b->sosec != a->sosec || b->osec != a->osec ||
+                b->shflags != a->shflags ||
+                sh_at(b->obj, b->shndx)->sh_entsize != es ||
+                ((a->shflags & SHF_STRINGS) && b->align != a->align))
+                continue;
+            cand[j] = 0;
+            mem[nm++] = j;
+            mv |= movw[j];
+            total += b->size;
+        }
+        if (mv && total > 0x7fff) {
+            /* too large for a 16-bit addend: the ones MOVW reaches stay */
+            int k2 = 0;
+            for (int q = 0; q < nm; q++)
+                if (!movw[mem[q]]) mem[k2++] = mem[q];
+            nm = k2;
+        }
+        if (nm)
+            merge_group(l, mem, nm, es, !!(a->shflags & SHF_STRINGS));
+    }
+    free(mem);
+    free(movw);
+    free(cand);
+    /* what pointed into a member: symbols (their value, now in the
+     * holder) and section-symbol addends (likewise) */
+    for (int k = 0; k < l->nobj; k++) {
+        struct object *o = l->objs[k];
+        for (int i = 1; i < o->nsym; i++) {
+            Elf64_Sym *sy = &o->syms[i];
+            if (sy->st_shndx == SHN_UNDEF || sy->st_shndx >= (unsigned)o->nsh ||
+                ELF64_ST_TYPE(sy->st_info) == STT_SECTION)
+                continue;
+            int s = o->sec_out[sy->st_shndx];
+            if (s < 0 || !l->insecs[s].merge_holder)
+                continue;
+            long long nv = merge_map(&l->insecs[s], sy->st_value);
+            if (nv >= 0)
+                sy->st_value = (Elf64_Addr)nv;
+        }
+        struct merge_rel r;
+        int sec = 0, j = 0;
+        while (merge_rel_next(o, &sec, &j, &r)) {
+            int t = merge_secsym(l, o, r.symi, 1);
+            if (t < 0 || !l->insecs[t].merge_holder)
+                continue;
+            const struct insec *s = &l->insecs[t];
+            long long a, nv;
+            if (!r.isrel) {
+                a = merge_rela_addend(&r);
+                nv = merge_map(s, (Elf64_Addr)a);
+                if (nv >= 0)
+                    merge_rela_set(&r, nv);
+            } else {
+                int form = merge_rel_form(o->machine, r.type);
+                unsigned char *p = merge_site(&r);
+                a = merge_rel_get(p, form, o->big_endian);
+                nv = merge_map(s, (Elf64_Addr)a);
+                if (nv >= 0)
+                    merge_rel_put(p, form, o->big_endian, nv);
+            }
+        }
+    }
+    for (int i = 0; i < l->nsym; i++) {
+        struct symbol *g = &l->syms[i];
+        if (!g->defined || g->scripted || g->common || g->insec < 0)
+            continue;
+        struct insec *s = &l->insecs[g->insec];
+        if (!s->merge_holder)
+            continue;
+        long long nv = merge_map(s, g->value);
+        if (nv >= 0)
+            g->value = (Elf64_Addr)nv;
+        g->insec = s->merge_holder - 1;
+    }
+    /* and every member's section is the holder from here on */
+    for (int k = 0; k < l->nobj; k++) {
+        struct object *o = l->objs[k];
+        for (int i = 0; i < o->nsh; i++) {
+            int s = o->sec_out[i];
+            if (s >= 0 && l->insecs[s].merge_holder)
+                o->sec_out[i] = l->insecs[s].merge_holder - 1;
+        }
+    }
+}
+
+/* ---- .eh_frame ---- */
+
+static int eh_rel_cmp(struct linker *l, struct object *a, Elf64_Word sa,
+                      struct object *b, Elf64_Word sb)
+{
+    Elf64_Sym *x = &a->syms[sa], *y = &b->syms[sb];
+    if (ELF64_ST_BIND(x->st_info) == STB_LOCAL ||
+        ELF64_ST_BIND(y->st_info) == STB_LOCAL)
+        return a == b && sa == sb;
+    (void)l;
+    return !strcmp(a->symstr + x->st_name, b->symstr + y->st_name);
+}
+
+/* The relocations of [at, at+len) in section s, as (offset, type, symbol,
+ * addend), sorted by offset -- what two CIEs must also share. */
+struct ehrel { Elf64_Addr off; unsigned type; Elf64_Word symi; long long a; };
+
+static int eh_rels(struct object *o, int shndx, Elf64_Addr at,
+                   Elf64_Addr len, struct ehrel *out, int max)
+{
+    int rs = o->relsec[shndx], n = 0;
+    if (rs < 0)
+        return 0;
+    Elf64_Shdr *rsh = sh_at(o, rs);
+    int isrel = rsh->sh_type == SHT_REL;
+    int relsz = o->elf32 ? (isrel ? (int)sizeof(Elf32_Rel)
+                                  : (int)sizeof(Elf32_Rela))
+                         : (isrel ? (int)sizeof(Elf64_Rel)
+                                  : (int)sizeof(Elf64_Rela));
+    int nr = (int)(rsh->sh_size / (Elf64_Xword)relsz);
+    for (int j = 0; j < nr; j++) {
+        unsigned char *e = o->buf + rsh->sh_offset + (long)j * relsz;
+        struct ehrel r;
+        if (o->elf32) {
+            const Elf32_Rela *q = (const Elf32_Rela *)e;
+            r.off = q->r_offset;
+            r.type = q->r_info & 0xff;
+            r.symi = q->r_info >> 8;
+            r.a = isrel ? 0 : q->r_addend;
+        } else {
+            const Elf64_Rela *q = (const Elf64_Rela *)e;
+            r.off = q->r_offset;
+            r.type = (unsigned)ELF64_R_TYPE(q->r_info);
+            r.symi = (Elf64_Word)ELF64_R_SYM(q->r_info);
+            r.a = isrel ? 0 : q->r_addend;
+        }
+        if (r.off < at || r.off >= at + len)
+            continue;
+        if (n == max)
+            return -1;
+        r.off -= at;
+        out[n++] = r;
+    }
+    return n;
+}
+
+/* The bytes an FDE's length must keep (from its CIE pointer on): its
+ * pointers, its augmentation, and its instructions up to the last that
+ * is not DW_CFA_nop, rounded up to 4; -1 when it is not an FDE this can
+ * read. The rest is padding. */
+static long eh_fde_need(const struct insec *s, const unsigned char *rec,
+                        Elf64_Addr old, int be, int addr)
+{
+    unsigned rl = merge_rd32(rec, be), id = merge_rd32(rec + 4, be);
+    if (!id || rl < 8 || old + 4 < id)
+        return -1;
+    /* its CIE, in this input's original bytes (`old`: where the record
+     * was there) */
+    Elf64_Addr cie = old + 4 - id;
+    const unsigned char *orig = s->obj->buf + sh_at(s->obj, s->shndx)->sh_offset;
+    Elf64_Xword osize = sh_at(s->obj, s->shndx)->sh_size;
+    if (cie + 12 > osize)
+        return -1;
+    int enc = eh_cie_fde_enc(orig + cie, orig + osize, addr);
+    int sz = enc < 0 ? 0 : eh_enc_size(enc, addr);
+    if (!sz)
+        return -1;
+    long hdr = 4 + 2L * sz;
+    if (orig[cie + 9] == 'z') {
+        const unsigned char *q = rec + 4 + hdr, *e = rec + 4 + rl;
+        unsigned long al = eh_uleb(&q, e);
+        hdr = (long)(q - (rec + 4)) + (long)al;
+    }
+    long end = hdr;
+    for (long k = hdr; k < (long)rl; k++)
+        if (rec[4 + k])
+            end = k + 1;
+    return (end + 3) & ~3L;
+}
+
+static void merge_eh(struct linker *l)
+{
+    /* the last .eh_frame input of each output section: the only one whose
+     * zero terminator stays (crtend's), as one in the middle would end
+     * the unwinder's walk there */
+    int last_eh = -1;
+    for (int i = 0; i < l->nsec; i++) {
+        struct insec *s = &l->insecs[i];
+        if (s->obj && !s->discarded && s->data && s->size &&
+            !strcmp(s->name, ".eh_frame"))
+            last_eh = i;
+    }
+    /* the kept CIEs so far, per output section: (input, new offset) */
+    struct kcie { int sec; Elf64_Addr at, len; int sosec, osec; } *kc = NULL;
+    int nkc = 0, capkc = 0;
+    int addr;
+    for (int i = 0; i < l->nsec; i++) {
+        struct insec *s = &l->insecs[i];
+        if (!s->obj || s->discarded || !s->data || !s->size ||
+            strcmp(s->name, ".eh_frame"))
+            continue;
+        struct object *o = s->obj;
+        merge_relsecs(o);
+        addr = o->elf32 ? 4 : 8;
+        int be = o->big_endian;
+        /* the records: refuse to touch an input this does not read */
+        Elf64_Addr at = 0;
+        int nrec = 0, ok = 1;
+        while (at + 4 <= s->size) {
+            unsigned len = merge_rd32(s->data + at, be);
+            if (len == 0xffffffffu || at + 4 + len > s->size ||
+                (len && len < 4)) { ok = 0; break; }
+            nrec++;
+            if (!len) { at = s->size; break; }   /* a terminator: the rest as is */
+            at += 4 + len;
+        }
+        if (!ok || at != s->size || !nrec)
+            continue;
+        s->mp = xmalloc((size_t)(nrec + 1) * sizeof *s->mp);
+        s->nmp = 0;
+        unsigned char *out = xcalloc((size_t)s->size + 16, 1);
+        Elf64_Addr w = 0, lastrec = (Elf64_Addr)-1;
+        at = 0;
+        /* each record's new offset; a dropped CIE maps its FDEs to the
+         * kept one (cie_of), written after layout */
+        while (at < s->size) {
+            unsigned len = merge_rd32(s->data + at, be);
+            Elf64_Addr rl = len ? 4 + (Elf64_Addr)len : s->size - at;
+            unsigned id = len ? merge_rd32(s->data + at + 4, be) : 1;
+            long long nw = (long long)w;
+            if (!len && i != last_eh)
+                nw = -1;            /* a terminator mid-section */
+            if (len && id == 0) {
+                /* a CIE: the same one, kept earlier in this output? */
+                struct ehrel ra[8], rb[8];
+                int na = eh_rels(o, s->shndx, at, rl, ra, 8);
+                for (int k = 0; na >= 0 && k < nkc; k++) {
+                    struct insec *ks = &l->insecs[kc[k].sec];
+                    if (kc[k].sosec != s->sosec || kc[k].osec != s->osec ||
+                        kc[k].len != rl)
+                        continue;
+                    /* compare with the kept copy's ORIGINAL bytes */
+                    const unsigned char *kb = ks->obj->buf +
+                        sh_at(ks->obj, ks->shndx)->sh_offset;
+                    long long ko = -1;
+                    for (int q = 0; q < ks->nmp; q++)
+                        if (ks->mp[q].nw == (long long)kc[k].at) {
+                            ko = (long long)ks->mp[q].old;
+                            break;
+                        }
+                    if (ko < 0 || memcmp(kb + ko, s->data + at, (size_t)rl))
+                        continue;
+                    int nb = eh_rels(ks->obj, ks->shndx, (Elf64_Addr)ko, rl,
+                                     rb, 8);
+                    if (nb != na)
+                        continue;
+                    int same = 1;
+                    for (int q = 0; q < na && same; q++)
+                        same = ra[q].off == rb[q].off &&
+                               ra[q].type == rb[q].type && ra[q].a == rb[q].a &&
+                               eh_rel_cmp(l, o, ra[q].symi, ks->obj, rb[q].symi);
+                    if (!same)
+                        continue;
+                    /* a dropped CIE: nw encodes the kept one as -2 - k */
+                    nw = -2 - k;
+                    break;
+                }
+                if (nw >= 0) {
+                    if (nkc == capkc) {
+                        capkc = capkc ? capkc * 2 : 16;
+                        kc = xrealloc(kc, (size_t)capkc * sizeof *kc);
+                    }
+                    kc[nkc].sec = i;
+                    kc[nkc].at = w;
+                    kc[nkc].len = rl;
+                    kc[nkc].sosec = s->sosec;
+                    kc[nkc].osec = s->osec;
+                    nkc++;
+                }
+            } else if (len) {
+                /* an FDE for a removed function goes */
+                struct ehrel ra[16];
+                int na = eh_rels(o, s->shndx, at, rl, ra, 16);
+                for (int q = 0; q < na; q++)
+                    if (ra[q].off == 8) {
+                        int t = gc_target_insec(l, o, ra[q].symi);
+                        if (t >= 0 && l->insecs[t].discarded)
+                            nw = -1;
+                    }
+            }
+            s->mp[s->nmp].old = at;
+            s->mp[s->nmp].len = rl;
+            s->mp[s->nmp].nw = nw;
+            s->nmp++;
+            if (nw >= 0) {
+                memcpy(out + w, s->data + at, (size_t)rl);
+                if (len)
+                    lastrec = w;
+                w += rl;
+            }
+            at += rl;
+        }
+        /* the next input starts aligned: the gap is the last record's,
+         * its length grown over it, as ld does -- zeros between records
+         * would read as a terminator */
+        if (i != last_eh && s->align > 1 && w % s->align &&
+            lastrec != (Elf64_Addr)-1 &&
+            s->mp[s->nmp - 1].nw >= 0 && lastrec + 4 <= w) {
+            Elf64_Addr pad = s->align - w % s->align;
+            if (pad <= 16 && merge_rd32(out + lastrec, be) + pad < 0xfffffff0u &&
+                lastrec + 4 + merge_rd32(out + lastrec, be) == w) {
+                merge_wr32(out + lastrec, merge_rd32(out + lastrec, be) +
+                           (unsigned)pad, be);
+                w += pad;
+            }
+        }
+        /* the section's last input ends where the section does: a last
+         * record padded (DW_CFA_nop, zeros) for its own object's alignment
+         * gives the padding back, as ld does */
+        if (i == last_eh && s->align > 1 && w % s->align &&
+            lastrec != (Elf64_Addr)-1 && lastrec + 4 <= w) {
+            Elf64_Addr cut = w % s->align;
+            unsigned rl = merge_rd32(out + lastrec, be);
+            long need = -1;
+            for (int q = 0; q < s->nmp; q++)
+                if (s->mp[q].nw == (long long)lastrec)
+                    need = eh_fde_need(s, out + lastrec, s->mp[q].old, be,
+                                       addr);
+            if (need >= 0 && lastrec + 4 + rl == w && cut % 4 == 0 &&
+                (long)rl - (long)cut >= need) {
+                merge_wr32(out + lastrec, rl - (unsigned)cut, be);
+                w -= cut;
+            }
+        }
+        s->data = out;
+        s->size = w;
+        s->eh_done = 1;
+    }
+    /* each FDE's CIE, as (input, offset in its compacted bytes) */
+    for (int i = 0; i < l->nsec; i++) {
+        struct insec *s = &l->insecs[i];
+        if (!s->eh_done || !s->nmp)
+            continue;
+        s->eh_cie = xmalloc((size_t)s->nmp * sizeof *s->eh_cie);
+        int be = s->obj->big_endian;
+        const unsigned char *ob = s->obj->buf +
+            sh_at(s->obj, s->shndx)->sh_offset;
+        for (int q = 0; q < s->nmp; q++) {
+            const struct mpiece *p = &s->mp[q];
+            s->eh_cie[q].sec = -1;
+            s->eh_cie[q].at = 0;
+            if (p->nw < 0 || p->len < 8)
+                continue;
+            unsigned id = merge_rd32(ob + p->old + 4, be);
+            if (!id || merge_rd32(ob + p->old, be) == 0)
+                continue;
+            Elf64_Addr cie_old = p->old + 4 - id;
+            /* the CIE record in this input that starts there */
+            for (int c = 0; c < s->nmp; c++)
+                if (s->mp[c].old == cie_old) {
+                    long long cn = s->mp[c].nw;
+                    if (cn >= 0) {
+                        s->eh_cie[q].sec = i;
+                        s->eh_cie[q].at = (Elf64_Addr)cn;
+                    } else if (cn <= -2) {
+                        s->eh_cie[q].sec = kc[-2 - cn].sec;
+                        s->eh_cie[q].at = kc[-2 - cn].at;
+                    }
+                    break;
+                }
+        }
+    }
+    (void)addr;
+}
+
+/* After layout: each kept FDE's CIE pointer, from where both landed. */
+static void merge_eh_fix(struct linker *l)
+{
+    for (int i = 0; i < l->nsec; i++) {
+        struct insec *s = &l->insecs[i];
+        if (!s->eh_cie)
+            continue;
+        int be = s->obj->big_endian;
+        for (int q = 0; q < s->nmp; q++) {
+            const struct mpiece *p = &s->mp[q];
+            if (p->nw < 0 || s->eh_cie[q].sec < 0)
+                continue;
+            Elf64_Addr field = s->vaddr + (Elf64_Addr)p->nw + 4;
+            Elf64_Addr cie = l->insecs[s->eh_cie[q].sec].vaddr +
+                             s->eh_cie[q].at;
+            merge_wr32((unsigned char *)s->data + p->nw + 4,
+                       (unsigned)(field - cie), be);
+        }
+    }
+}
+
+
+/* ---- .note.gnu.property ----
+ *
+ * One note for the image, from every input's: a property in the AND
+ * range (AArch64's BTI/PAC bits, x86's IBT/SHSTK) holds for the image
+ * only when every object says so, and then the bits they all have; one
+ * in the OR range is what any of them needs. An object without the note
+ * says nothing -- so an AND property goes, and with nothing left the
+ * note does too (a BTI image that is not BTI throughout is not one). */
+static void merge_notes(struct linker *l)
+{
+    int nin = 0, nobj = 0, first = -1;
+    for (int k = 0; k < l->nobj; k++) {
+        struct object *o = l->objs[k];
+        int code = 0, has = 0;
+        for (int i = 0; i < o->nsh; i++) {
+            int si = o->sec_out[i];
+            if (si < 0)
+                continue;
+            struct insec *s = &l->insecs[si];
+            if (s->discarded)
+                continue;
+            if (!strcmp(s->name, ".note.gnu.property"))
+                has = 1;
+            else if (s->size)
+                code = 1;
+        }
+        if (code || has) {
+            nobj++;
+            nin += has;
+        }
+    }
+    struct { unsigned type, and_, val, n; } pr[32];
+    int npr = 0, addr = l->elf32 ? 4 : 8;
+    for (int i = 0; i < l->nsec; i++) {
+        struct insec *s = &l->insecs[i];
+        if (!s->obj || s->discarded || !s->data ||
+            strcmp(s->name, ".note.gnu.property"))
+            continue;
+        if (first < 0)
+            first = i;
+        int be = s->obj->big_endian;
+        Elf64_Addr at = 0;
+        while (at + 12 <= s->size) {
+            unsigned nsz = merge_rd32(s->data + at, be);
+            unsigned dsz = merge_rd32(s->data + at + 4, be);
+            unsigned ty = merge_rd32(s->data + at + 8, be);
+            Elf64_Addr d = at + 12 + ((nsz + 3) & ~3u);
+            Elf64_Addr end = d + dsz;
+            if (end > s->size)
+                break;
+            if (ty == 5 && nsz == 4 && !memcmp(s->data + at + 12, "GNU", 4))
+                for (Elf64_Addr q = d; q + 8 <= end;) {
+                    unsigned pt = merge_rd32(s->data + q, be);
+                    unsigned ps = merge_rd32(s->data + q + 4, be);
+                    unsigned v = ps >= 4 ? merge_rd32(s->data + q + 8, be) : 0;
+                    int and_ = pt >= 0xc0000000u && pt <= 0xc0007fffu;
+                    int or_ = pt >= 0xc0008000u && pt <= 0xc000ffffu;
+                    if ((and_ || or_) && ps == 4) {
+                        int f = -1;
+                        for (int k = 0; k < npr; k++)
+                            if (pr[k].type == pt) f = k;
+                        if (f < 0 && npr < 32) {
+                            f = npr++;
+                            pr[f].type = pt;
+                            pr[f].and_ = and_;
+                            pr[f].val = and_ ? 0xffffffffu : 0;
+                            pr[f].n = 0;
+                        }
+                        if (f >= 0) {
+                            pr[f].val = and_ ? pr[f].val & v : pr[f].val | v;
+                            pr[f].n++;
+                        }
+                    }
+                    q += 8 + ((ps + (unsigned)addr - 1) & ~((unsigned)addr - 1));
+                }
+            at = (end + (Elf64_Addr)addr - 1) & ~((Elf64_Addr)addr - 1);
+        }
+        s->size = 0;
+        s->align = 1;
+    }
+    if (first < 0)
+        return;
+    /* (an AND property counts once per note, so an object with two notes
+     * still counts once: notes per object are one in practice) */
+    int keep = 0;
+    for (int k = 0; k < npr; k++)
+        if (!pr[k].and_ || (pr[k].n >= (unsigned)nobj && pr[k].val && nin == nobj))
+            pr[keep++] = pr[k];
+        else if (!pr[k].and_)
+            pr[keep++] = pr[k];
+    if (!keep)
+        return;
+    struct insec *h = &l->insecs[first];
+    int be = h->obj->big_endian;
+    unsigned per = 8 + (unsigned)addr;            /* type, size, value padded */
+    unsigned dsz = per * (unsigned)keep;
+    unsigned char *out = xcalloc(16 + dsz, 1);
+    merge_wr32(out, 4, be);
+    merge_wr32(out + 4, dsz, be);
+    merge_wr32(out + 8, 5, be);
+    memcpy(out + 12, "GNU", 4);
+    for (int k = 0; k < keep; k++) {
+        merge_wr32(out + 16 + per * (unsigned)k, pr[k].type, be);
+        merge_wr32(out + 20 + per * (unsigned)k, 4, be);
+        merge_wr32(out + 24 + per * (unsigned)k, pr[k].val, be);
+    }
+    h->data = out;
+    h->size = 16 + dsz;
+    h->align = (Elf64_Xword)addr;
+}
+
+
+static int add_synth(struct linker *l, const char *name, long size, int align,
+                     int osec, unsigned char *data);
+static void ls_push_list(struct ls_stmt *s, int v);
+static Elf64_Addr reloc_symval(struct linker *l, struct object *o,
+                               Elf64_Word symidx, int *is_undef_weak);
+static void put32(unsigned char *p, unsigned int v);
+
+/* ---- ARM initial-exec TLS: a GOT of thread-pointer offsets ------------
+ *
+ * GCC's and clang's initial-exec access on ARM loads the variable's offset
+ * from the thread pointer out of a GOT slot (R_ARM_TLS_IE32: the slot's
+ * address, pc-relative), and adds __aeabi_read_tp's value. A static image
+ * knows every offset, so the slots are constants: one word per variable,
+ * in a read-only .got beside .rodata, filled once the layout is known
+ * (tls_got_fill) -- what GNU ld and lld write there too. */
+static int tls_got_slot(struct linker *l, struct object *o, Elf64_Word symi)
+{
+    Elf64_Sym *sy = &o->syms[symi];
+    if (ELF64_ST_BIND(sy->st_info) != STB_LOCAL) {
+        struct symbol *g = sym_find(l, o->symstr + sy->st_name);
+        if (g)
+            return g->got_slot - 1;
+    }
+    for (int k = 0; k < l->ngot; k++)
+        if (l->got[k].o == o && l->got[k].symi == symi)
+            return k;
+    return -1;
+}
+
+static void tls_got_init(struct linker *l)
+{
+    if (l->machine != EM_ARM)
+        return;
+    for (int k = 0; k < l->nobj; k++) {
+        struct object *o = l->objs[k];
+        struct merge_rel r;
+        int sec = 0, j = 0;
+        while (merge_rel_next(o, &sec, &j, &r)) {
+            if (r.type != R_ARM_TLS_IE32 || r.target >= o->nsh ||
+                o->sec_out[r.target] < 0 ||
+                l->insecs[o->sec_out[r.target]].discarded)
+                continue;
+            if (tls_got_slot(l, o, r.symi) >= 0)
+                continue;
+            Elf64_Sym *sy = &o->syms[r.symi];
+            l->got = xrealloc(l->got, (size_t)(l->ngot + 1) * sizeof *l->got);
+            l->got[l->ngot].o = o;
+            l->got[l->ngot].symi = r.symi;
+            if (ELF64_ST_BIND(sy->st_info) != STB_LOCAL) {
+                struct symbol *g = sym_find(l, o->symstr + sy->st_name);
+                if (g)
+                    g->got_slot = l->ngot + 1;
+            }
+            l->ngot++;
+        }
+    }
+    if (!l->ngot)
+        return;
+    int si = add_synth(l, ".got", 4L * l->ngot, 4, OSEC_RODATA,
+                       xcalloc((size_t)l->ngot, 4));
+    struct insec *gs = &l->insecs[si];
+    gs->shflags = SHF_ALLOC;
+    gs->keep = gs->live = 1;
+    l->got_sec = si + 1;
+    if (l->sc) {
+        /* into the script's section that holds .rodata (else .text's) */
+        int key = -1;
+        for (int i = 0; i < l->nsec && key < 0; i++)
+            if (l->insecs[i].obj && l->insecs[i].sosec >= 0 &&
+                !strncmp(l->insecs[i].name, ".rodata", 7))
+                key = l->insecs[i].sosec;
+        for (int i = 0; i < l->nsec && key < 0; i++)
+            if (l->insecs[i].obj && l->insecs[i].sosec >= 0 &&
+                (l->insecs[i].shflags & SHF_EXECINSTR))
+                key = l->insecs[i].sosec;
+        if (key < 0)
+            die("ARM initial-exec TLS needs a .got, and the linker script "
+                "places no .rodata or .text to put it beside");
+        struct ls_osec *os = &l->sc->osecs[key];
+        int b;
+        for (b = os->nbody - 1; b >= 0 && os->body[b].kind != LS_INPUT; b--)
+            ;
+        if (b < 0) {
+            LS_PUSH(os->body, os->nbody, os->capbody);
+            memset(&os->body[os->nbody], 0, sizeof os->body[0]);
+            os->body[os->nbody].kind = LS_INPUT;
+            b = os->nbody++;
+        }
+        l->insecs[si].sosec = key;
+        ls_push_list(&os->body[b], si);
+    }
+}
+
+/* After layout: each slot's offset, past the 8-byte control block. */
+static void tls_got_fill(struct linker *l)
+{
+    if (!l->got_sec)
+        return;
+    struct insec *gs = &l->insecs[l->got_sec - 1];
+    long long tcb = (long long)align_up(8, l->tls_align ? l->tls_align : 1);
+    if (!l->tls_size)
+        die("R_ARM_TLS_IE32: the image has no thread block (.tdata/.tbss)");
+    for (int k = 0; k < l->ngot; k++) {
+        int uw;
+        Elf64_Addr S = reloc_symval(l, l->got[k].o, l->got[k].symi, &uw);
+        put32((unsigned char *)gs->data + 4 * k,
+              (unsigned int)((long long)S - (long long)l->tls_start + tcb));
+    }
+}
+
 static void layout(struct linker *l, struct osec_bound *b,
                    Elf64_Addr *text_start, Elf64_Xword *text_size,
                    Elf64_Addr *data_start, Elf64_Xword *data_filesz,
@@ -3270,15 +4447,19 @@ static void note_pcrel_hi(struct linker *l, Elf64_Addr at, long long val)
     }
     l->pcrel[l->npcrel].at = at;
     l->pcrel[l->npcrel].val = val;
+    l->pcrel[l->npcrel].got = 0;
     l->npcrel++;
 }
 
 static long long find_pcrel_hi(struct linker *l, struct object *o,
-                               Elf64_Addr at)
+                               Elf64_Addr at, int *got)
 {
     for (int i = l->npcrel - 1; i >= 0; i--)
-        if (l->pcrel[i].at == at)
+        if (l->pcrel[i].at == at) {
+            if (got)
+                *got = l->pcrel[i].got;
             return l->pcrel[i].val;
+        }
     die("%s: a RISC-V PCREL_LO12 relocation names 0x%llx, where no "
         "PCREL_HI20 was relocated; the two halves of an address must be "
         "emitted as a pair", o->name, (unsigned long long)at);
@@ -3373,6 +4554,49 @@ static void apply_riscv(struct linker *l, struct object *o, unsigned type,
     case R_RISCV_64:
         put64(loc, (unsigned long long)V);
         return;
+    /* Local-exec TLS (GCC's and clang's __thread; EmbCC's own embedded
+     * code has one thread and none): tp points at the thread block
+     * itself, the psABI's variant 1 with no TCB, so the offset is the
+     * variable's place in the block. %tprel_add only marks the add. */
+    case R_RISCV_TPREL_HI20:
+    case R_RISCV_TPREL_LO12_I:
+    case R_RISCV_TPREL_LO12_S: {
+        long long tp = V - (long long)l->tls_start;
+        if (!l->tls_size)
+            die("%s: a thread-local relocation against '%s', but the image "
+                "has no thread block (.tdata/.tbss)", o->name,
+                l->rel_sym ? l->rel_sym : "?");
+        if (type == R_RISCV_TPREL_HI20) {
+            need_range(l, o, "R_RISCV_TPREL_HI20", tp, I32_MIN - 0x800,
+                       I32_MAX - 0x800);
+            rv_put_u(loc, rv_hi20(tp));
+        } else if (type == R_RISCV_TPREL_LO12_I)
+            rv_put_i(loc, rv_lo12(tp));
+        else
+            rv_put_s(loc, rv_lo12(tp));
+        return;
+    }
+    case R_RISCV_TPREL_ADD:
+        return;
+    case R_RISCV_TLS_GOT_HI20: {
+        /* Initial-exec: auipc to a GOT slot holding the variable's tp
+         * offset, a load of it, an add of tp. A static image has no GOT
+         * and knows the offset: `lui rd, %tprel_hi`, its low half's load
+         * an addi of %tprel_lo (marked here, got 2), and the add stays --
+         * local-exec, as lld relaxes it. */
+        long long tp = V - (long long)l->tls_start;
+        if (!l->tls_size)
+            die("%s: a thread-local relocation against '%s', but the image "
+                "has no thread block (.tdata/.tbss)", o->name,
+                l->rel_sym ? l->rel_sym : "?");
+        need_range(l, o, "R_RISCV_TLS_GOT_HI20", tp, I32_MIN - 0x800,
+                   I32_MAX - 0x800);
+        put32(loc, (get32loc(loc) & 0xf80U) | 0x37U);     /* lui rd */
+        rv_put_u(loc, rv_hi20(tp));
+        note_pcrel_hi(l, P, tp);
+        l->pcrel[l->npcrel - 1].got = 2;
+        return;
+    }
     case R_RISCV_HI20:
         /* lui sign-extends at RV64, so the pair reaches a sign-extended
          * 32-bit address; at RV32 every address is one */
@@ -3387,7 +4611,12 @@ static void apply_riscv(struct linker *l, struct object *o, unsigned type,
     case R_RISCV_LO12_S:
         rv_put_s(loc, rv_lo12(V));
         return;
+    case R_RISCV_GOT_HI20:
     case R_RISCV_PCREL_HI20:
+        /* R_RISCV_GOT_HI20: the address of a GOT slot holding the
+         * symbol's. A static image has no GOT: the auipc reaches the
+         * symbol itself, and its low half (marked here) turns its load
+         * from the slot into an addi of the address, as lld relaxes it. */
         /* An undefined weak symbol is 0, and an auipc in an image at
          * 0x80000000 cannot name 0: `&f == 0` for a weak f the program
          * does not define failed to link. The auipc becomes `lui rd, 0`
@@ -3398,6 +4627,7 @@ static void apply_riscv(struct linker *l, struct object *o, unsigned type,
              V - (long long)P > I32_MAX - 0x800)) {
             put32(loc, (get32loc(loc) & 0xf80U) | 0x37U);
             note_pcrel_hi(l, P, 0);
+            l->pcrel[l->npcrel - 1].got = type == R_RISCV_GOT_HI20;
             return;
         }
         /* Recorded as well as written: the low half that pairs with it
@@ -3408,6 +4638,7 @@ static void apply_riscv(struct linker *l, struct object *o, unsigned type,
             need_range(l, o, "R_RISCV_PCREL_HI20", V - (long long)P,
                        I32_MIN - 0x800, I32_MAX - 0x800);
         note_pcrel_hi(l, P, V - (long long)P);
+        l->pcrel[l->npcrel - 1].got = type == R_RISCV_GOT_HI20;
         rv_put_u(loc, rv_hi20(V - (long long)P));
         return;
     case R_RISCV_PCREL_LO12_I:
@@ -3415,7 +4646,19 @@ static void apply_riscv(struct linker *l, struct object *o, unsigned type,
         /* S + A is the address of the AUIPC, not of the target: the
          * psABI resolves this relocation by looking up the high half's
          * own relocation there. */
-        long long d = find_pcrel_hi(l, o, (Elf64_Addr)V);
+        int got = 0;
+        long long d = find_pcrel_hi(l, o, (Elf64_Addr)V, &got);
+        if (got) {
+            /* lw/ld rd, %pcrel_lo(slot)(rs) -> addi rd, rs, %pcrel_lo(sym)
+             * (got 2: of the tp offset the lui built) */
+            unsigned int w = get32loc(loc);
+            if (type != R_RISCV_PCREL_LO12_I || (w & 0x7f) != 0x03 ||
+                (((w >> 12) & 7) != 2 && ((w >> 12) & 7) != 3))
+                die("%s: the low half of a GOT_HI20 against '%s' is not a "
+                    "lw or ld of the slot (0x%08x)", o->name,
+                    l->rel_sym ? l->rel_sym : "?", w);
+            put32(loc, (w & ~0x707fU) | 0x13U);
+        }
         if (type == R_RISCV_PCREL_LO12_I) rv_put_i(loc, rv_lo12(d));
         else                              rv_put_s(loc, rv_lo12(d));
         return;
@@ -3588,6 +4831,298 @@ static void la_put(unsigned char *loc, int lo, int width, unsigned long long v)
                ((unsigned int)(v << lo) & m));
 }
 #endif
+
+/* ---- AArch64 ---------------------------------------------------------------
+ *
+ * RELA. Every relocation a static image needs from GCC's, clang's and
+ * EmbCC's objects: the data words (ABS, PREL), the page and low-12 pairs
+ * (ADRP with ADD or a load or store, the low 12 bits scaled by the
+ * access's size), the branches (26-bit B/BL, 19-bit B.cond/CBZ/LDR
+ * literal, 14-bit TBZ), the MOVZ/MOVK groups. A GOT reference is relaxed
+ * to the address itself (an image without a dynamic linker has no GOT:
+ * ADRP to the GOT page is ADRP to the symbol's, and the LDR from the slot
+ * becomes the ADD of its low bits, as lld relaxes them), and so are the
+ * TLS initial-exec and descriptor sequences to local-exec, whose offset
+ * from the thread pointer is the variable's in the block after the
+ * 16-byte TCB (variant 1, the block aligned to its own alignment). */
+#if FAMILY_BUILT(aarch64)
+static unsigned a64_get(const unsigned char *p)
+{
+    return (unsigned)p[0] | (unsigned)p[1] << 8 | (unsigned)p[2] << 16 |
+           (unsigned)p[3] << 24;
+}
+
+static void a64_imm12(struct linker *l, struct object *o, const char *rel,
+                      unsigned char *loc, long long v, int scale)
+{
+    unsigned w = a64_get(loc);
+    long long lo = v & 0xfff;
+    if (lo % (1LL << scale))
+        die("%s: %s against '%s': the address 0x%llx is not %d-byte aligned, "
+            "and the load or store's offset is scaled by it", o->name, rel,
+            l->rel_sym ? l->rel_sym : "?", (unsigned long long)v, 1 << scale);
+    w = (w & ~(0xfffu << 10)) | (unsigned)(lo >> scale) << 10;
+    put32(loc, w);
+}
+
+/* ADR/ADRP's 21-bit immediate, immlo in 30:29 and immhi in 23:5 */
+static void a64_adr(unsigned char *loc, long long imm21)
+{
+    unsigned w = a64_get(loc);
+    w = (w & 0x9f00001fu) | (unsigned)(imm21 & 3) << 29 |
+        (unsigned)((imm21 >> 2) & 0x7ffff) << 5;
+    put32(loc, w);
+}
+
+static void a64_movw(unsigned char *loc, long long v, int shift, int sign)
+{
+    unsigned w = a64_get(loc);
+    long long part = v >> shift;
+    if (sign) {
+        /* MOVZ for a value >= 0, MOVN of its complement for one < 0 */
+        w &= ~(3u << 29);
+        if (v < 0) {
+            part = ~v >> shift;
+            w |= 0u << 29;                  /* movn */
+        } else
+            w |= 2u << 29;                  /* movz */
+    }
+    w = (w & ~(0xffffu << 5)) | (unsigned)(part & 0xffff) << 5;
+    put32(loc, w);
+}
+
+static long long a64_page(long long a) { return a & ~0xfffLL; }
+
+static void apply_aarch64(struct linker *l, struct object *o, unsigned type,
+                          unsigned char *loc, Elf64_Addr S, long long A,
+                          Elf64_Addr P)
+{
+    long long V = (long long)S + A, d = V - (long long)P;
+    /* the thread-pointer offset of a TLS variable: past the TCB, aligned */
+    long long tcb = (long long)align_up(16, l->tls_align ? l->tls_align : 1);
+    long long tp = V - (long long)l->tls_start + tcb;
+    /* An undefined weak symbol (its value 0): a call or branch to it
+     * becomes a nop or goes to the next instruction, and a pc-relative
+     * field other than ADRP's page
+     * measures from the place itself -- what lld resolves them to, so
+     * `if (&f) f();` links wherever the image is. */
+    if (l->rel_uw)
+        switch (type) {
+        case R_AARCH64_CALL26: case R_AARCH64_JUMP26:
+            /* a call to nothing is no call: a nop, which leaves lr as
+             * it was (what ld writes) */
+            put32(loc, 0xd503201fu);
+            return;
+        case R_AARCH64_CONDBR19: case R_AARCH64_TSTBR14:
+            d = 4 + A;
+            break;
+        case R_AARCH64_PREL64: case R_AARCH64_PREL32: case R_AARCH64_PREL16:
+        case R_AARCH64_LD_PREL_LO19: case R_AARCH64_ADR_PREL_LO21:
+            d = A;
+            break;
+        default:
+            break;
+        }
+    switch (type) {
+    case R_AARCH64_NONE:
+    case 256:                       /* R_AARCH64_NONE's withdrawn number */
+        return;
+    case R_AARCH64_ABS64:
+        put64(loc, (unsigned long long)V);
+        return;
+    case R_AARCH64_ABS32:
+        need_range(l, o, "R_AARCH64_ABS32", V, I32_MIN, 0xffffffffLL);
+        put32(loc, (unsigned int)V);
+        return;
+    case R_AARCH64_ABS16:
+        need_range(l, o, "R_AARCH64_ABS16", V, -32768, 0xffff);
+        put16(loc, (unsigned)V);
+        return;
+    case R_AARCH64_PREL64:
+        put64(loc, (unsigned long long)d);
+        return;
+    case R_AARCH64_PREL32:
+        need_range(l, o, "R_AARCH64_PREL32", d, I32_MIN, 0xffffffffLL);
+        put32(loc, (unsigned int)d);
+        return;
+    case R_AARCH64_PREL16:
+        need_range(l, o, "R_AARCH64_PREL16", d, -32768, 0xffff);
+        put16(loc, (unsigned)d);
+        return;
+    case R_AARCH64_ADR_PREL_PG_HI21:
+    case R_AARCH64_ADR_PREL_PG_HI21_NC:
+    case R_AARCH64_ADR_GOT_PAGE:               /* (relaxed: the symbol's page) */
+    {
+        long long pg = (a64_page(V) - a64_page((long long)P)) >> 12;
+        if (type != R_AARCH64_ADR_PREL_PG_HI21_NC)
+            need_range(l, o, "R_AARCH64_ADR_PREL_PG_HI21", pg, -(1LL << 20),
+                       (1LL << 20) - 1);
+        a64_adr(loc, pg);
+        return;
+    }
+    case R_AARCH64_ADR_PREL_LO21:
+        need_range(l, o, "R_AARCH64_ADR_PREL_LO21", d, -(1LL << 20),
+                   (1LL << 20) - 1);
+        a64_adr(loc, d);
+        return;
+    case R_AARCH64_ADD_ABS_LO12_NC:
+        a64_imm12(l, o, "R_AARCH64_ADD_ABS_LO12_NC", loc, V, 0);
+        return;
+    case R_AARCH64_LDST8_ABS_LO12_NC:
+        a64_imm12(l, o, "R_AARCH64_LDST8_ABS_LO12_NC", loc, V, 0);
+        return;
+    case R_AARCH64_LDST16_ABS_LO12_NC:
+        a64_imm12(l, o, "R_AARCH64_LDST16_ABS_LO12_NC", loc, V, 1);
+        return;
+    case R_AARCH64_LDST32_ABS_LO12_NC:
+        a64_imm12(l, o, "R_AARCH64_LDST32_ABS_LO12_NC", loc, V, 2);
+        return;
+    case R_AARCH64_LDST64_ABS_LO12_NC:
+        a64_imm12(l, o, "R_AARCH64_LDST64_ABS_LO12_NC", loc, V, 3);
+        return;
+    case R_AARCH64_LDST128_ABS_LO12_NC:
+        a64_imm12(l, o, "R_AARCH64_LDST128_ABS_LO12_NC", loc, V, 4);
+        return;
+    case R_AARCH64_LD64_GOT_LO12_NC: {
+        /* ldr xT, [xN, :got_lo12:sym] -> add xT, xN, :lo12:sym */
+        unsigned w = a64_get(loc);
+        if ((w & 0xffc00000u) != 0xf9400000u)
+            die("%s: R_AARCH64_LD64_GOT_LO12_NC against '%s' is not on an "
+                "ldr xT, [xN, #imm]", o->name, l->rel_sym ? l->rel_sym : "?");
+        put32(loc, 0x91000000u | (unsigned)(V & 0xfff) << 10 | (w & 0x3ffu));
+        return;
+    }
+    case R_AARCH64_JUMP26:
+    case R_AARCH64_CALL26:
+        if (d & 3)
+            die("%s: a branch to '%s' at an address not 4-aligned", o->name,
+                l->rel_sym ? l->rel_sym : "?");
+        need_range(l, o, type == R_AARCH64_CALL26 ? "R_AARCH64_CALL26"
+                                                  : "R_AARCH64_JUMP26",
+                   d, -(1LL << 27), (1LL << 27) - 4);
+        put32(loc, (a64_get(loc) & 0xfc000000u) | (unsigned)((d >> 2) & 0x3ffffff));
+        return;
+    case R_AARCH64_CONDBR19:
+    case R_AARCH64_LD_PREL_LO19:
+        need_range(l, o, type == R_AARCH64_CONDBR19 ? "R_AARCH64_CONDBR19"
+                                                    : "R_AARCH64_LD_PREL_LO19",
+                   d, -(1LL << 20), (1LL << 20) - 4);
+        put32(loc, (a64_get(loc) & 0xff00001fu) | (unsigned)((d >> 2) & 0x7ffff) << 5);
+        return;
+    case R_AARCH64_TSTBR14:
+        need_range(l, o, "R_AARCH64_TSTBR14", d, -(1LL << 15), (1LL << 15) - 4);
+        put32(loc, (a64_get(loc) & 0xfff8001fu) | (unsigned)((d >> 2) & 0x3fff) << 5);
+        return;
+    case R_AARCH64_MOVW_UABS_G0:
+        need_range(l, o, "R_AARCH64_MOVW_UABS_G0", V, 0, 0xffff);
+        /* fall through */
+    case R_AARCH64_MOVW_UABS_G0_NC:
+        a64_movw(loc, V, 0, 0);
+        return;
+    case R_AARCH64_MOVW_UABS_G1:
+        need_range(l, o, "R_AARCH64_MOVW_UABS_G1", V, 0, 0xffffffffLL);
+        /* fall through */
+    case R_AARCH64_MOVW_UABS_G1_NC:
+        a64_movw(loc, V, 16, 0);
+        return;
+    case R_AARCH64_MOVW_UABS_G2:
+        need_range(l, o, "R_AARCH64_MOVW_UABS_G2", V, 0, 0xffffffffffffLL);
+        /* fall through */
+    case R_AARCH64_MOVW_UABS_G2_NC:
+        a64_movw(loc, V, 32, 0);
+        return;
+    case R_AARCH64_MOVW_UABS_G3:
+        a64_movw(loc, V, 48, 0);
+        return;
+    case R_AARCH64_MOVW_SABS_G0:
+        need_range(l, o, "R_AARCH64_MOVW_SABS_G0", V, -65536, 65535);
+        a64_movw(loc, V, 0, 1);
+        return;
+    case R_AARCH64_MOVW_SABS_G1:
+        need_range(l, o, "R_AARCH64_MOVW_SABS_G1", V, -(1LL << 32), (1LL << 32) - 1);
+        a64_movw(loc, V, 16, 1);
+        return;
+    case R_AARCH64_MOVW_SABS_G2:
+        need_range(l, o, "R_AARCH64_MOVW_SABS_G2", V, -(1LL << 48), (1LL << 48) - 1);
+        a64_movw(loc, V, 32, 1);
+        return;
+    /* ---- TLS, local-exec: the offset from the thread pointer ---- */
+    case R_AARCH64_TLSLE_ADD_TPREL_HI12:
+        need_range(l, o, "R_AARCH64_TLSLE_ADD_TPREL_HI12", tp, 0, 0xffffff);
+        put32(loc, (a64_get(loc) & ~(0xfffu << 10)) | (unsigned)((tp >> 12) & 0xfff) << 10);
+        return;
+    case R_AARCH64_TLSLE_ADD_TPREL_LO12:
+        need_range(l, o, "R_AARCH64_TLSLE_ADD_TPREL_LO12", tp, 0, 0xfff);
+        /* fall through */
+    case R_AARCH64_TLSLE_ADD_TPREL_LO12_NC:
+        put32(loc, (a64_get(loc) & ~(0xfffu << 10)) | (unsigned)(tp & 0xfff) << 10);
+        return;
+    case R_AARCH64_TLSLE_MOVW_TPREL_G2:
+        a64_movw(loc, tp, 32, 1);
+        return;
+    case R_AARCH64_TLSLE_MOVW_TPREL_G1:
+        a64_movw(loc, tp, 16, 1);
+        return;
+    case R_AARCH64_TLSLE_MOVW_TPREL_G1_NC:
+        a64_movw(loc, tp, 16, 0);
+        return;
+    case R_AARCH64_TLSLE_MOVW_TPREL_G0:
+        a64_movw(loc, tp, 0, 1);
+        return;
+    case R_AARCH64_TLSLE_MOVW_TPREL_G0_NC:
+        a64_movw(loc, tp, 0, 0);
+        return;
+    case R_AARCH64_TLSLE_LDST8_TPREL_LO12:
+    case R_AARCH64_TLSLE_LDST8_TPREL_LO12_NC:
+        a64_imm12(l, o, "R_AARCH64_TLSLE_LDST8_TPREL_LO12", loc, tp, 0);
+        return;
+    case R_AARCH64_TLSLE_LDST16_TPREL_LO12:
+    case R_AARCH64_TLSLE_LDST16_TPREL_LO12_NC:
+        a64_imm12(l, o, "R_AARCH64_TLSLE_LDST16_TPREL_LO12", loc, tp, 1);
+        return;
+    case R_AARCH64_TLSLE_LDST32_TPREL_LO12:
+    case R_AARCH64_TLSLE_LDST32_TPREL_LO12_NC:
+        a64_imm12(l, o, "R_AARCH64_TLSLE_LDST32_TPREL_LO12", loc, tp, 2);
+        return;
+    case R_AARCH64_TLSLE_LDST64_TPREL_LO12:
+    case R_AARCH64_TLSLE_LDST64_TPREL_LO12_NC:
+        a64_imm12(l, o, "R_AARCH64_TLSLE_LDST64_TPREL_LO12", loc, tp, 3);
+        return;
+    /* ---- initial-exec, relaxed: adrp xT -> movz xT, #tp:g1; the slot's
+     * ldr -> movk xT, #tp:g0 ---- */
+    case R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21: {
+        unsigned rt = a64_get(loc) & 31u;
+        need_range(l, o, "R_AARCH64_TLSIE (relaxed to local-exec)", tp, 0,
+                   0xffffffffLL);
+        put32(loc, 0xd2a00000u | (unsigned)((tp >> 16) & 0xffff) << 5 | rt);
+        return;
+    }
+    case R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC: {
+        unsigned rt = a64_get(loc) & 31u;
+        put32(loc, 0xf2800000u | (unsigned)(tp & 0xffff) << 5 | rt);
+        return;
+    }
+    /* ---- descriptors, relaxed to local-exec: adrp and the ldr become
+     * nops, the add movz x0 and the blr movk x0 ---- */
+    case R_AARCH64_TLSDESC_ADR_PAGE21:
+    case R_AARCH64_TLSDESC_LD64_LO12:
+        put32(loc, 0xd503201fu);
+        return;
+    case R_AARCH64_TLSDESC_ADD_LO12:
+        need_range(l, o, "R_AARCH64_TLSDESC (relaxed to local-exec)", tp, 0,
+                   0xffffffffLL);
+        put32(loc, 0xd2a00000u | (unsigned)((tp >> 16) & 0xffff) << 5);
+        return;
+    case R_AARCH64_TLSDESC_CALL:
+        put32(loc, 0xf2800000u | (unsigned)(tp & 0xffff) << 5);
+        return;
+    default:
+        die("%s: AArch64 relocation type %u is not one embld applies (against "
+            "'%s')", o->name, type, l->rel_sym ? l->rel_sym : "?");
+    }
+}
+#endif
+
 
 #if FAMILY_BUILT(loongarch)
 static void apply_loongarch(struct linker *l, struct object *o, unsigned type,
@@ -4648,6 +6183,10 @@ static void apply_relocs(struct linker *l, struct object *o)
         unsigned char *base = dtgt >= 0
             ? l->dbgsecs[dtgt].data + o->dbg_off[target]
             : o->buf + sh_at(o, target)->sh_offset;
+        /* a compacted .eh_frame: its bytes moved to a buffer of their
+         * own, each relocation with the record it is in (merge_eh) */
+        if (ts && ts->eh_done)
+            base = (unsigned char *)ts->data;
         unsigned char *rbytes = o->buf + rsh->sh_offset;
         int n = (int)(rsh->sh_size / (Elf64_Xword)relsz);
 
@@ -4677,6 +6216,12 @@ static void apply_relocs(struct linker *l, struct object *o)
              * R_RISCV_ALIGN is the same shape: it marks NOP padding that
              * a relaxing linker may shrink, and one that moves nothing
              * leaves the alignment the assembler already arranged. */
+            if (ts && ts->eh_done) {
+                long long nv = merge_map(ts, r_offset);
+                if (nv < 0)
+                    continue;       /* in a record merge_eh dropped */
+                r_offset = (Elf64_Addr)nv;
+            }
             if (o->machine == EM_RISCV &&
                 (type == R_RISCV_RELAX || type == R_RISCV_ALIGN))
                 continue;
@@ -4749,6 +6294,12 @@ static void apply_relocs(struct linker *l, struct object *o)
 #if FAMILY_BUILT(loongarch)
             if (o->machine == EM_LOONGARCH) {
                 apply_loongarch(l, o, type, loc, S, A, P);
+                continue;
+            }
+#endif
+#if FAMILY_BUILT(aarch64)
+            if (o->machine == EM_AARCH64) {
+                apply_aarch64(l, o, type, loc, S, A, P);
                 continue;
             }
 #endif
@@ -4844,6 +6395,8 @@ static void apply_relocs(struct linker *l, struct object *o)
                     case R_ARM_ABS32:
                     case R_ARM_TARGET1:
                     case R_ARM_REL32:
+                    case R_ARM_TLS_LE32:
+                    case R_ARM_TLS_IE32:
                         A = (int)get32loc(loc);
                         break;
                     case R_ARM_PREL31:
@@ -4907,6 +6460,30 @@ static void apply_relocs(struct linker *l, struct object *o)
                 case R_ARM_REL32:
                     put32(loc, (unsigned int)(long)((long long)S + A -
                                                     (long long)P));
+                    break;
+                case R_ARM_TLS_IE32: {
+                    /* the variable's GOT slot, pc-relative (tls_got) */
+                    int k = tls_got_slot(l, o, symi);
+                    if (k < 0 || !l->got_sec)
+                        internal_error("%s: R_ARM_TLS_IE32 against '%s' has "
+                                       "no GOT slot", o->name,
+                                       l->rel_sym ? l->rel_sym : "?");
+                    put32(loc, (unsigned int)((long long)
+                          (l->insecs[l->got_sec - 1].vaddr + 4 * (Elf64_Addr)k) +
+                          A - (long long)P));
+                    break;
+                }
+                case R_ARM_TLS_LE32:
+                    /* local-exec: tp (__aeabi_read_tp) points at an
+                     * 8-byte control block, the thread block after it
+                     * at its alignment (variant 1) */
+                    if (!l->tls_size)
+                        die("%s: R_ARM_TLS_LE32 against '%s', but the image "
+                            "has no thread block (.tdata/.tbss)", o->name,
+                            l->rel_sym ? l->rel_sym : "?");
+                    put32(loc, (unsigned int)((long long)S + A -
+                          (long long)l->tls_start +
+                          (long long)align_up(8, l->tls_align ? l->tls_align : 1)));
                     break;
                 case R_ARM_THM_CALL:
                 case R_ARM_THM_JUMP24: {
@@ -6236,9 +7813,11 @@ static void ls_orphans(struct linker *l, struct ls_script *sc, int mode)
         struct insec *is = &l->insecs[si];
         if (is->sosec != -1 || is->discarded)
             continue;
-        if (is->osec == OSEC_TDATA || is->osec == OSEC_TBSS)
-            die("%s: thread-local section %s in a linker-script link is "
-                "not supported", is->obj ? is->obj->name : "?", is->name);
+        /* .tdata and .tbss a script does not name go where their kind
+         * goes, after the data and after the zeroed data: a static image's
+         * one thread uses them where they lie (the block runs from the
+         * first to the end of the last; see tls_start), and .tbss sits in
+         * memory the startup zeroes -- where ld's would overlap .bss */
         int k = -1;
         for (int j = 0; j < sc->nosec; j++)
             if (sc->osecs[j].orphan && !strcmp(sc->osecs[j].name, is->name))
@@ -6590,9 +8169,13 @@ static void ls_layout(struct linker *l, struct ls_script *sc, int orphan_mode)
      * of its 256 KiB, is refused where it is applied, naming the fix. */
     if (l->machine != EM_ARM && l->machine != EM_RISCV &&
         l->machine != EM_AVR && l->machine != EM_XTENSA &&
-        !(l->machine == EM_MIPS && l->elf32))
-        die("-T: a linker script is supported for ARM, RISC-V, AVR, Xtensa and "
-            "MIPS32 images only (this one is machine %u)",
+        l->machine != EM_AARCH64 && l->machine != EM_X86_64 &&
+        l->machine != EM_LOONGARCH && l->machine != EM_MIPS &&
+        l->machine != EM_PPC && l->machine != EM_SPARC &&
+        l->machine != EM_68K)
+        die("-T: a linker script is supported for ARM, AArch64, x86-64, "
+            "RISC-V, LoongArch, MIPS, PowerPC, SPARC, ColdFire, AVR and "
+            "Xtensa images (this one is machine %u)",
             (unsigned)l->machine);
     /* A region every output section names must exist, whether or not
      * anything ends up in the section: a typo in `> RAM` is a typo. */
@@ -6630,6 +8213,10 @@ static void ls_layout(struct linker *l, struct ls_script *sc, int orphan_mode)
                 "startup code zeroes it", ncommon, ncommon == 1 ? "" : "s");
     }
     ls_orphans(l, sc, orphan_mode);
+    merge_sections(l);
+    merge_eh(l);
+    merge_notes(l);
+    tls_got_init(l);
     /* Settled; then the ARM veneers these addresses call for, which move
      * what follows them: settled again, until no branch wants a new one. */
     for (int round = 0;; round++) {
@@ -6830,7 +8417,10 @@ static void write_exec_script(struct linker *l, struct ls_script *sc,
     Elf64_Off phsz = l->elf32 ? sizeof(Elf32_Phdr) : sizeof(Elf64_Phdr);
     Elf64_Xword shentsz = l->elf32 ? sizeof(Elf32_Shdr) : sizeof(Elf64_Shdr);
     Elf64_Xword symentsz = l->elf32 ? sizeof(Elf32_Sym) : sizeof(Elf64_Sym);
-    Elf64_Off off = ehsz + (Elf64_Off)nem * phsz;
+    /* PT_TLS, after the loads, when there is a thread block: where its
+     * template is, as a runtime that starts threads finds it */
+    int tlsph = l->tls_size > 0;
+    Elf64_Off off = ehsz + (Elf64_Off)(nem + tlsph) * phsz;
     Elf64_Off *fo = xmalloc((size_t)(nem + 1) * sizeof *fo);
     for (int k = 0; k < nem; k++) {
         struct ls_osec *o = &sc->osecs[em[k]];
@@ -6948,11 +8538,11 @@ static void write_exec_script(struct linker *l, struct ls_script *sc,
     eh.e_version = EV_CURRENT;
     eh.e_entry = entry;
     eh.e_flags = l->machine == EM_ARM ? EF_ARM_EABI_VER5 : l->eflags;
-    eh.e_phoff = nem ? ehsz : 0;
+    eh.e_phoff = nem + tlsph ? ehsz : 0;
     eh.e_shoff = sh_off;
     eh.e_ehsize = (Elf64_Half)ehsz;
     eh.e_phentsize = (Elf64_Half)phsz;
-    eh.e_phnum = (Elf64_Half)nem;
+    eh.e_phnum = (Elf64_Half)(nem + tlsph);
     eh.e_shentsize = (Elf64_Half)shentsz;
     eh.e_shnum = (Elf64_Half)nsh;
     eh.e_shstrndx = (Elf64_Half)sh_shstr;
@@ -6976,6 +8566,30 @@ static void write_exec_script(struct linker *l, struct ls_script *sc,
         ph.p_align = 4;
         ls_put_phdr(img + ehsz + (Elf64_Off)k * phsz, l, &ph);
     }
+    if (tlsph) {
+        Elf64_Phdr ph;
+        Elf64_Addr tdata_end = l->tls_start;
+        memset(&ph, 0, sizeof ph);
+        for (int i = 0; i < l->nsec; i++) {
+            const struct insec *is = &l->insecs[i];
+            if ((is->shflags & SHF_TLS) && !is->is_bss && !is->discarded &&
+                is->sosec != -2 && is->vaddr + is->size > tdata_end)
+                tdata_end = is->vaddr + is->size;
+        }
+        ph.p_type = PT_TLS;
+        ph.p_flags = PF_R;
+        for (int k = 0; k < nem; k++) {
+            const struct ls_osec *o = &sc->osecs[em[k]];
+            if ((Elf64_Addr)o->vma <= l->tls_start &&
+                l->tls_start < (Elf64_Addr)(o->vma + o->size))
+                ph.p_offset = fo[k] + (l->tls_start - (Elf64_Addr)o->vma);
+        }
+        ph.p_vaddr = ph.p_paddr = l->tls_start;
+        ph.p_filesz = tdata_end - l->tls_start;
+        ph.p_memsz = l->tls_size;
+        ph.p_align = l->tls_align;
+        ls_put_phdr(img + ehsz + (Elf64_Off)nem * phsz, l, &ph);
+    }
 
     Elf64_Shdr sh;
     for (int k = 0; k < nem; k++) {
@@ -6985,6 +8599,17 @@ static void write_exec_script(struct linker *l, struct ls_script *sc,
         sh.sh_type = o->nobits ? SHT_NOBITS : SHT_PROGBITS;
         sh.sh_flags = SHF_ALLOC | (o->exec ? SHF_EXECINSTR : 0) |
                       (o->write ? SHF_WRITE : 0);
+        {
+            /* thread-local when everything in it is */
+            int tls = 0, other = 0;
+            for (int b = 0; b < o->nbody; b++)
+                for (int j = 0; j < o->body[b].nlist; j++) {
+                    if (l->insecs[o->body[b].list[j]].shflags & SHF_TLS) tls = 1;
+                    else other = 1;
+                }
+            if (tls && !other)
+                sh.sh_flags |= SHF_TLS;
+        }
         /* The inputs' own type when they all have one, as ld keeps it:
          * .init_array stays INIT_ARRAY, and .ARM.exidx stays ARM_EXIDX
          * and links to where its functions went -- which is what
@@ -7995,9 +9620,9 @@ int embld_link(const char **inputs, int ninputs, const char *out,
         /* An entry the link was told about is a reference: the archive
          * member that defines Reset_Handler is pulled for it, as ld does. */
         if (opts->entry || sc->entry)
-            sym_intern(&l, l.entry);
+            sym_intern(&l, l.entry)->required = 1;
         for (int k = 0; k < sc->nextern; k++)
-            sym_intern(&l, sc->externs[k]);
+            sym_intern(&l, sc->externs[k])->required = 1;
         if (sc->ninputs) {
             all = xmalloc((size_t)(ninputs + sc->ninputs) * sizeof *all);
             for (int k = 0; k < ninputs; k++)
@@ -8007,7 +9632,7 @@ int embld_link(const char **inputs, int ninputs, const char *out,
         }
     }
     for (int k = 0; opts && k < opts->nundefs; k++)
-        sym_intern(&l, opts->undefs[k]);
+        sym_intern(&l, opts->undefs[k])->required = 1;
 
     /* Explicit objects are always linked; archives are stashed and their
      * members pulled on demand (left-to-right, as a linker does — so an
@@ -8079,6 +9704,29 @@ int embld_link(const char **inputs, int ninputs, const char *out,
                     "_start; the entry is 0x%llx, where the code starts\n",
                     (unsigned long long)ev);
         }
+        /* the thread block, where the script put .tdata and .tbss: from
+         * the first SHF_TLS input to the last one's end, at the largest
+         * alignment among them (the TP-relative relocations' base) */
+        {
+            Elf64_Addr lo = 0, hi = 0;
+            int any = 0;
+            l.tls_align = 1;
+            for (int i = 0; i < l.nsec; i++) {
+                const struct insec *is = &l.insecs[i];
+                if (!(is->shflags & SHF_TLS) || is->discarded || is->sosec == -2)
+                    continue;
+                if (!any || is->vaddr < lo) lo = is->vaddr;
+                if (!any || is->vaddr + is->size > hi) hi = is->vaddr + is->size;
+                if (is->align > l.tls_align) l.tls_align = is->align;
+                any = 1;
+            }
+            if (any) {
+                l.tls_start = lo;
+                l.tls_size = align_up(hi - lo, l.tls_align);
+            }
+        }
+        merge_eh_fix(&l);
+        tls_got_fill(&l);
         avr_tramp_fill(&l);
         for (int i = 0; i < l.nobj; i++)
             apply_relocs(&l, l.objs[i]);
@@ -8111,6 +9759,10 @@ int embld_link(const char **inputs, int ninputs, const char *out,
     }
     if (l.gc_sections)
         gc_sections(&l, l.gc_undefs, l.gc_nundefs);
+    merge_sections(&l);
+    merge_eh(&l);
+    merge_notes(&l);
+    tls_got_init(&l);
     if (opts && opts->have_stack) {
         /* ARM: for an A-profile core (armv7a-none-eabi), which starts in
          * ARM state with no stack; the stub is A32. A Cortex-M image
@@ -8120,8 +9772,9 @@ int embld_link(const char **inputs, int ninputs, const char *out,
             l.machine != EM_LOONGARCH && l.machine != EM_ARM &&
             l.machine != EM_TRICORE && l.machine != EM_XTENSA &&
             l.machine != EM_PPC && l.machine != EM_RX &&
-            l.machine != EM_SPARC && l.machine != EM_68K)
-            die("-Tstack is a RISC-V, MIPS, LoongArch, ARMv7-A, TriCore, Xtensa, "
+            l.machine != EM_SPARC && l.machine != EM_68K &&
+            l.machine != EM_AARCH64)
+            die("-Tstack is a RISC-V, MIPS, LoongArch, AArch64, ARMv7-A, TriCore, Xtensa, "
                 "PowerPC, RX, SPARC and ColdFire "
                 "option: "
                 "every other target here starts with a stack pointer already "
@@ -8192,6 +9845,7 @@ int embld_link(const char **inputs, int ninputs, const char *out,
      * the whole block and every access reads past its own variable. */
     l.tls_start = tls_start;
     l.tls_size = align_up(tls_memsz, tls_align);
+    l.tls_align = tls_align;
     finalize_symbols(&l);
     cmse_fill(&l);
     define_brackets(&l, bounds);
@@ -8214,6 +9868,8 @@ int embld_link(const char **inputs, int ninputs, const char *out,
         fill_entry_stub(&l, e->value);
     avr_tramp_fill(&l);
 
+    merge_eh_fix(&l);
+    tls_got_fill(&l);
     for (int i = 0; i < l.nobj; i++)
         apply_relocs(&l, l.objs[i]);
     if (l.pie) {

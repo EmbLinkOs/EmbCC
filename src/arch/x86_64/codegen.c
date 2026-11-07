@@ -5820,6 +5820,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
                     x86_load_reg_mem(text, ia->out[k].reg, REG_RBP,
                                      sd[ia->out[k].temp], 8);
             /* the bytes, padded at each alignment for where they land */
+            code_asm_rels(text, ia, text->len, ia->rel, ia->nrel);   /* its relocations */
             code_put_asm(text, ia->code, ia->codelen, ia->drange,
                          ia->ndrange, ia->arange, ia->narange, CODE_FILL_X86);
             /* The address scratch must not be an OUTPUT register, or loading

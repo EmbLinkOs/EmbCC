@@ -482,7 +482,9 @@ void cf_clr(struct code *c, int size, struct cf_ea dst)
 
 void cf_tst(struct code *c, int size, struct cf_ea src)
 {
-    need_data_alterable(&src, "tst");
+    /* (an address register too, .w or .l: ISA_A+) */
+    if (!(src.mode == CFM_A && size != 1))
+        need_data_alterable(&src, "tst");
     op_ea(c, 0x4a00u | size_bits67(size), &src, size);
 }
 

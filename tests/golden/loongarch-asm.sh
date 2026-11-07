@@ -181,7 +181,7 @@ fi
 
 # ---- 4. the refusals -------------------------------------------------------------
 "$out/laasmcheck" --refuse > "$out/ref.txt" <<'REF'
-fadd.d $fa0, $fa1, $fa2
+fadd.d $fa0, $fa1, $r2
 vadd.b $vr0, $vr1, $vr2
 addi.d $a0, $a1, 2048
 andi $a0, $a1, -1
@@ -209,7 +209,7 @@ while IFS='@' read -r stmt msg; do
     *"is not in the LoongArch vocabulary"*|*"does not fit"*|*"is not 0.."*|\
     *"is not a multiple of 4"*|*"rd may not also be"*|*"may not be \$r0 or \$r1"*|\
     *"is not within"*|*"takes a symbol here"*|*"is not a register"*|\
-    *"for TLS, the extreme"*) ;;
+    *"for TLS, the extreme"*|*"these are not its operands"*) ;;
     *) echo "'$stmt' was refused, but not by name: $msg"; exit 1 ;;
     esac
 done < "$out/ref.txt"
@@ -233,7 +233,7 @@ refc "x86's constraint letters" 'is not valid for LoongArch' \
 refc "a callee-saved register variable" 'not supported for LoongArch asm' \
     'long f(void){ register long r __asm__("s3") = 1; __asm__("" : "+r"(r)); return r; }'
 refc "an instruction outside the vocabulary" 'is not in the LoongArch vocabulary' \
-    'void f(void){ __asm__ volatile("fadd.d $fa0, $fa0, $fa0"); }'
+    'void f(void){ __asm__ volatile("vadd.b $vr0, $vr0, $vr0"); }'
 refc "an immediate out of range" 'does not fit' \
     'void f(void){ __asm__ volatile("addi.d $t0, $t0, %0" :: "i"(5000)); }'
 refc "%c of a register operand" 'names a register operand' \

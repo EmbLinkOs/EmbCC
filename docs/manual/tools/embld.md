@@ -19,7 +19,7 @@ embld [-o FILE] [-e SYMBOL] [-Ttext ADDR] [-Tdata ADDR] [-Tstack ADDR]
       [--embx [--cap NAME]...]
       INPUT...
 
-embld -T SCRIPT [-L DIR]... [-u SYMBOL]... [--orphan-handling=MODE]
+embld -T SCRIPT [-L DIR]... [-lNAME]... [-u SYMBOL]... [--orphan-handling=MODE]
       [-o FILE] [-e SYMBOL] INPUT...
 
 embld ... [--gc-sections [--print-gc-sections]] [-Map FILE]
@@ -44,7 +44,7 @@ runs in-process when it links a program itself; see
 shared libraries, does not produce position-independent executables, and
 emits no PLT and no dynamic sections. Without a linker script the layout
 is fixed (see [Image layout](#image-layout)) and the options below adjust
-it; with one (`-T`: ARM, RISC-V, AVR, Xtensa and MIPS32) the script lays the image out (see
+it; with one (`-T`: every machine but TriCore and RX) the script lays the image out (see
 [Linker scripts](#linker-scripts)).
 
 ### Supported machines
@@ -56,6 +56,7 @@ decides which.
 | Machine | ELF class | Typical targets | Output |
 |---|---|---|---|
 | x86-64 (`EM_X86_64`) | ELF64 | `x86_64-elf`, `x86_64-linux-gnu`, EmbLinkOS | ELF64 executable, or EMBX |
+| AArch64, little-endian (`EM_AARCH64`) | ELF64 | `aarch64-elf`; GCC's and clang's objects, newlib, libgcc, libstdc++ | ELF64 executable |
 | RISC-V 64 (`EM_RISCV`) | ELF64 | `riscv64-unknown-elf` | ELF64 executable |
 | RISC-V 32 (`EM_RISCV`) | ELF32 | `riscv32-unknown-elf` | ELF32 executable |
 | ARM, Thumb (`EM_ARM`) | ELF32 | `thumbv7m-none-eabi`, `thumbv7em-*`, `thumbv8m.*` | ELF32 executable |
@@ -63,11 +64,13 @@ decides which.
 | AVR (`EM_AVR`) | ELF32 | `avr` | ELF32 executable |
 | Renesas RX, little-endian (`EM_RX`) | ELF32 | `rx-none-elf`; rx-elf-gcc's objects (sections `P`, `D_1`, `B_1`, ...) | ELF32 executable |
 
-AArch64 objects are not supported. Such an input is refused with:
-
-```text
-embld: FILE: a 64-bit object for machine 183; only x86-64 and RV64 (EM_RISCV) are supported
-```
+An AArch64 image needs no GOT and no PLT: a GOT load (`adrp` +
+`ldr :got_lo12:`) becomes the address itself (`adrp` + `add`), and the
+initial-exec and descriptor TLS sequences become local-exec ones, as lld
+rewrites them for a static link. A call to an undefined weak function
+becomes a `nop`. The thread pointer (`tpidr_el0`) points at a 16-byte
+control block with the thread block after it, at the block's alignment
+(variant 1); the start code sets it.
 
 Mixing machines is refused with
 `embld: FILE: an object for a different machine than the ones before it (N against M)`.
@@ -105,7 +108,10 @@ Inputs are processed in command-line order.
 - A common (tentative) definition yields to any real definition. Several
   common definitions of one name are merged, with the largest size and
   the strictest alignment, and placed at the end of `.bss`.
-- An undefined weak reference resolves to address 0.
+- An undefined weak reference resolves to address 0, and pulls no archive
+  member in: `if (&f) f();` calls `f` only if something else brought it
+  into the link (as GNU ld and lld do). The entry symbol, `-u` and a
+  script's `EXTERN` names are always pulled.
 - An undefined strong reference is an error. `embld` stops at the first
   one, naming the symbol and the object that refers to it:
 
@@ -277,10 +283,12 @@ On ARM, the entry symbol's Thumb bit is kept in the ELF entry point.
 ### Linker scripts
 
 `-T SCRIPT` lays the image out by a GNU ld linker script instead, for ARM,
-RISC-V, AVR, Xtensa and MIPS32 images (another machine is refused: `embld: -T:
-a linker script is supported for ARM, RISC-V, AVR, Xtensa and MIPS32 images
-only (this one is machine 62)`): the script a CMSIS, STM32CubeMX, vendor SDK, avr-libc or
-RTOS project already has. It replaces `-Tstack` and `--lma-offset`,
+AArch64, x86-64, RISC-V, LoongArch, MIPS, PowerPC, SPARC, ColdFire, AVR and Xtensa images (TriCore and RX are refused: `embld: -T:
+a linker script is supported for ARM, AArch64, x86-64, RISC-V, LoongArch, MIPS, PowerPC,
+SPARC, ColdFire, AVR and Xtensa images (this one is machine 44)`): the script a CMSIS, STM32CubeMX, vendor SDK, avr-libc or
+RTOS project already has. `.tdata` and `.tbss` that the script does not
+place go after the data and after the zeroed data, where a single-thread
+image uses them in place; the image gets a `PT_TLS` segment either way. It replaces `-Tstack` and `--lma-offset`,
 which are refused with it, and the linker defines no bracket symbols of
 its own except `__start_NAME` and `__stop_NAME` for an output section
 whose name is a C identifier. `-Ttext`, `-Tdata` and `--rom-limit` may
@@ -606,10 +614,11 @@ this way and runs them on QEMU's mps2-an505.
 | Machine | Relocation types applied |
 |---|---|
 | x86-64 | `R_X86_64_64`, `R_X86_64_32`, `R_X86_64_32S`, `R_X86_64_PC32`, `R_X86_64_PLT32` (as `PC32`; no PLT is created), `R_X86_64_PC64`, `R_X86_64_TPOFF32` (local-exec thread-local storage) |
-| ARM | `R_ARM_NONE`, `R_ARM_ABS32`, `R_ARM_TARGET1` (as `R_ARM_ABS32`), `R_ARM_REL32`, `R_ARM_PREL31`, `R_ARM_THM_CALL`, `R_ARM_THM_JUMP24`, `R_ARM_THM_MOVW_ABS_NC`, `R_ARM_THM_MOVT_ABS` |
-| RISC-V | `R_RISCV_32`, `R_RISCV_64`, `R_RISCV_HI20`, `R_RISCV_LO12_I`, `R_RISCV_LO12_S`, `R_RISCV_PCREL_HI20`, `R_RISCV_PCREL_LO12_I`, `R_RISCV_PCREL_LO12_S`, `R_RISCV_BRANCH`, `R_RISCV_JAL`, `R_RISCV_CALL`, `R_RISCV_CALL_PLT`; `R_RISCV_RELAX` and `R_RISCV_ALIGN` are accepted and ignored |
+| ARM | `R_ARM_NONE`, `R_ARM_ABS32`, `R_ARM_TARGET1` (as `R_ARM_ABS32`), `R_ARM_REL32`, `R_ARM_PREL31`, `R_ARM_THM_CALL`, `R_ARM_THM_JUMP24`, `R_ARM_THM_MOVW_ABS_NC`, `R_ARM_THM_MOVT_ABS`, `R_ARM_TLS_LE32` (local-exec: the thread block after `__aeabi_read_tp`'s 8-byte control block), `R_ARM_TLS_IE32` (initial-exec: a slot of a read-only `.got` beside `.rodata`, one word per variable holding its offset) |
+| RISC-V | `R_RISCV_32`, `R_RISCV_64`, `R_RISCV_HI20`, `R_RISCV_LO12_I`, `R_RISCV_LO12_S`, `R_RISCV_PCREL_HI20`, `R_RISCV_PCREL_LO12_I`, `R_RISCV_PCREL_LO12_S`, `R_RISCV_BRANCH`, `R_RISCV_JAL`, `R_RISCV_CALL`, `R_RISCV_CALL_PLT`, `R_RISCV_TPREL_HI20`, `R_RISCV_TPREL_LO12_I`, `R_RISCV_TPREL_LO12_S` (local-exec: `tp` at the thread block), `R_RISCV_TLS_GOT_HI20` (initial-exec, made local-exec: `lui`/`addi` of the offset), `R_RISCV_GOT_HI20` (the address itself: the slot's load becomes an `addi`); `R_RISCV_RELAX`, `R_RISCV_ALIGN` and `R_RISCV_TPREL_ADD` are accepted and ignored |
 | MIPS | `R_MIPS_NONE`, `R_MIPS_32`, `R_MIPS_26`, `R_MIPS_HI16`, `R_MIPS_LO16`, `R_MIPS_PC16`; `R_MIPS_JALR` is accepted and ignored |
 | AVR | `R_AVR_NONE`, `R_AVR_32`, `R_AVR_16`, `R_AVR_16_PM`, `R_AVR_LO8_LDI`, `R_AVR_HI8_LDI`, `R_AVR_LO8_LDI_GS`, `R_AVR_HI8_LDI_GS`, `R_AVR_CALL`, `R_AVR_13_PCREL`, `R_AVR_7_PCREL` |
+| AArch64 | `R_AARCH64_ABS64/32/16`, `R_AARCH64_PREL64/32/16`, `R_AARCH64_ADR_PREL_PG_HI21` (and `_NC`), `R_AARCH64_ADR_PREL_LO21`, `R_AARCH64_ADD_ABS_LO12_NC`, `R_AARCH64_LDST8/16/32/64/128_ABS_LO12_NC` (scaled by the access, and refused when the address is not aligned to it), `R_AARCH64_CALL26`, `R_AARCH64_JUMP26`, `R_AARCH64_CONDBR19`, `R_AARCH64_TSTBR14`, `R_AARCH64_LD_PREL_LO19`, `R_AARCH64_MOVW_UABS_G0..G3` (and `_NC`), `R_AARCH64_MOVW_SABS_G0..G2`, `R_AARCH64_ADR_GOT_PAGE` and `R_AARCH64_LD64_GOT_LO12_NC` (relaxed), the local-exec TLS family (`TLSLE_ADD_TPREL_HI12/LO12[_NC]`, `TLSLE_MOVW_TPREL_G0..G2`, `TLSLE_LDST8..64_TPREL_LO12[_NC]`), initial-exec (`TLSIE_ADR_GOTTPREL_PAGE21`, `TLSIE_LD64_GOTTPREL_LO12_NC`) and descriptors (`TLSDESC_ADR_PAGE21`, `TLSDESC_LD64_LO12`, `TLSDESC_ADD_LO12`, `TLSDESC_CALL`), relaxed to local-exec |
 
 Any other type stops the link with a message of this form (the machine
 name is omitted for x86-64):
@@ -666,6 +675,37 @@ relocation errors have messages of their own:
 
 The ARM `movw`/`movt` and word forms and the AVR data and `ldi` forms
 keep the low bits of the value without a check.
+
+### Merging
+
+What every link does, before the layout:
+
+- **Strings and constants.** The `SHF_MERGE` inputs of one output section,
+  with one entry size and one alignment, become one section: a string
+  (`SHF_STRINGS`) or entry that several objects carry is kept once, and a
+  string that ends another (`"lo\n"` in `"hello\n"`) is that one's tail
+  -- an aligned string only where its tail lands aligned. A string's own
+  alignment padding is padding, not empty strings. Symbols and
+  section-relative references into the merged inputs follow their bytes;
+  so do ARM's and MIPS's implicit addends in the forms embld rewrites
+  (`R_ARM_ABS32`, `R_ARM_REL32`, `R_ARM_TARGET1`, ARM and Thumb
+  `MOVW`/`MOVT` within 32 KiB, `R_MIPS_32`). An input reached in another
+  implicit form, or one that relocations patch, is left as it is. EmbCC
+  writes its string literals this way (see
+  [`--merge-strings`](../invoking.md#--merge-strings---no-merge-strings)),
+  as GCC and clang write theirs.
+- **`.eh_frame`.** A CIE that an earlier input of the output section
+  already has, byte for byte and relocation for relocation, is dropped,
+  and the FDEs that used it point at the first. The FDE of a function
+  `--gc-sections` or `/DISCARD/` removed is dropped. The alignment gap
+  between two inputs becomes part of the record before it, as GNU ld
+  makes it -- zeros there would read as a terminator and end an
+  unwinder's walk -- and a terminator inside the section is dropped
+  (the last input's, crtend's, stays).
+- **`.note.gnu.property`.** One note for the image: a property of the
+  AND kind (AArch64's BTI and PAC, x86's IBT and SHSTK) only when every
+  object has it, with the bits they all have; one of the OR kind is what
+  any of them needs. With nothing left the image has no such note.
 
 ### EMBX output
 
@@ -755,6 +795,13 @@ Lay the image out by the GNU ld linker script `SCRIPT`. See
 Look for the files a script names in `INPUT`, `GROUP`, `STARTUP` and
 `INCLUDE` in `DIR`, after the script's own `SEARCH_DIR`s and before the
 script's directory. `-lNAME` in a script is `libNAME.a` there.
+
+### `-lNAME`, `-l NAME`, `-l:FILE`
+
+Link `libNAME.a` (with `-l:FILE`, `FILE`) from the first `-L` directory
+that has it. Every `-L` counts, wherever it is on the command line, as
+for GNU ld; the library takes the place of the `-l` among the inputs.
+With none found: `embld: -lNAME: no libNAME.a in any -L directory`.
 
 ### `-u SYMBOL`, `--undefined=SYMBOL`
 

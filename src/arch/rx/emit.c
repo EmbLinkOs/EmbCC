@@ -31,9 +31,15 @@ static long s32(long v)
  * Two bits name how many bytes follow: 01 one, 10 two, 11 three, 00 four.
  * The value is sign-extended from what is stored, so the shortest field
  * is the one whose sign extension gives the 32-bit value back. */
+/* Set while the assembler encodes a statement whose immediate is a
+ * symbol's: every immediate takes the four-byte li field, never a short
+ * form, so the relocation has its 32 bits (as GNU as writes it). */
+int rx_imm_wide;
+
 int rx_li_bytes(long imm)
 {
     long v = s32(imm);
+    if (rx_imm_wide) return 4;
     if (v >= -128 && v <= 127) return 1;
     if (v >= -32768 && v <= 32767) return 2;
     if (v >= -8388608 && v <= 8388607) return 3;
@@ -293,15 +299,15 @@ int rx_ri_len(int op, long imm)
 {
     long v = s32(imm);
     unsigned long u = (unsigned long)v & 0xffffffffUL;
-    if (uimm4_op(op) >= 0 && u <= 15)
+    if (uimm4_op(op) >= 0 && u <= 15 && !rx_imm_wide)
         return 2;
     switch (op) {
     case RX_MOV:
-        if (u <= 255)
+        if (u <= 255 && !rx_imm_wide)
             return 3;                       /* mov.l #uimm8, rd */
         return 2 + rx_li_bytes(v);
     case RX_CMP:
-        if (u <= 255)
+        if (u <= 255 && !rx_imm_wide)
             return 3;                       /* cmp #uimm8, rd */
         return 2 + rx_li_bytes(v);
     case RX_ADD:
@@ -326,14 +332,14 @@ void rx_ri(struct code *c, int op, long imm, int rd)
     if ((op == RX_EMUL || op == RX_EMULU) && rd == 15)
         bad("emul destination pair r15:r16", rd);
     k = uimm4_op(op);
-    if (k >= 0 && u <= 15) {
+    if (k >= 0 && u <= 15 && !rx_imm_wide) {
         code_byte(c, k);
         code_byte(c, (int)u << 4 | rd);
         return;
     }
     switch (op) {
     case RX_MOV:
-        if (u <= 255) {                     /* 0111 0101 0100 rd imm8 */
+        if (u <= 255 && !rx_imm_wide) {     /* 0111 0101 0100 rd imm8 */
             code_byte(c, 0x75);
             code_byte(c, 0x40 | rd);
             code_byte(c, (int)u);
@@ -344,7 +350,7 @@ void rx_ri(struct code *c, int op, long imm, int rd)
         li_bytes(c, v);
         return;
     case RX_CMP:
-        if (u <= 255) {                     /* 0111 0101 0101 rs2 imm8 */
+        if (u <= 255 && !rx_imm_wide) {     /* 0111 0101 0101 rs2 imm8 */
             code_byte(c, 0x75);
             code_byte(c, 0x50 | rd);
             code_byte(c, (int)u);
@@ -413,7 +419,7 @@ void rx_rrr(struct code *c, int op, int rs, int rs2, int rd)
 int rx_add3_len(long imm, int rs, int rd)
 {
     long v = s32(imm);
-    if (rs == rd && v >= 0 && v <= 15)
+    if (rs == rd && v >= 0 && v <= 15 && !rx_imm_wide)
         return 2;
     return 2 + rx_li_bytes(v);
 }
@@ -578,7 +584,7 @@ void rx_store_imm_x(struct code *c, int size, long imm, long dsp, int rd,
                                         size == RX_W ? 0xffff :
                                         0xffffffffL)) <= 255 &&
                    (size == RX_B || v >= 0);
-    if (u >= !dsp0 && u <= 31 && rd < 8 && short_ok) {
+    if (u >= !dsp0 && u <= 31 && rd < 8 && short_ok && !rx_imm_wide) {
         /* mov.size #uimm8, dsp:5[rd]: 0011 11sz d rd dddd imm8 */
         code_byte(c, 0x3c | size);
         code_byte(c, (int)(u >> 4 & 1) << 7 | rd << 4 | (int)(u & 15));

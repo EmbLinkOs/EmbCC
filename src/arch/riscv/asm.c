@@ -13,6 +13,7 @@
 #include "emit.h"
 #include "../target.h"
 #include "../asmexpr.h"
+#include "../../elf/elf.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -930,6 +931,128 @@ static int zc_stmt(const char *stmt, int len, struct tok *t, int n,
     return 0;
 }
 
+
+/* ---- relaxation and compression, for the file assembler -----------------
+ *
+ * In a .s file, as GNU as and llvm-mc assemble one when the C extension
+ * is on: an instruction with a 16-bit form takes it, and a branch takes
+ * the shortest form that reaches -- c.beqz/c.bnez (256 bytes, x8-x15
+ * against zero), c.j and RV32's c.jal (2 KiB), the 32-bit forms (4 KiB
+ * for a branch), and past that the inverted branch over a `jal zero`.
+ * gas.c's levels drive the choice (the least form a line may take, which
+ * only rises, so the passes settle): 0 the 16-bit form, 1 the 32-bit, 2
+ * the long branch. Inline asm in a function is not compressed here: the
+ * backend measures some of its own sequences in bytes. */
+static int s_gas;          /* assembling for gas.c */
+static int s_rvc;          /* ...with the C extension, as .option says */
+static int s_rvc_any;      /* ...and it was turned on (EF_RISCV_RVC) */
+int rvasm_rvc_used(void) { return s_rvc_any; }
+static int s_rvc_stack[16], s_nrvc;
+static int s_lvl, s_took;
+static int s_nocomp;       /* this statement carries a relocation */
+
+void rvasm_no_compress(int on) { s_nocomp = on; }
+
+void rvasm_set_level(int level) { s_lvl = level; s_took = 0; }
+int rvasm_took_level(void) { return s_took; }
+void rvasm_reset(void)
+{
+    s_gas = 1;
+    s_rvc = target_riscv_rvc();
+    s_rvc_any |= s_rvc;
+    s_nrvc = 0;
+}
+void rvasm_gas_done(void) { s_gas = 0; s_rvc = 0; }
+
+/* `.option rvc`, `norvc`, `push`, `pop`: 1 when it was one of these */
+int rvasm_option(const char *arg)
+{
+    while (*arg == ' ' || *arg == '\t') arg++;
+    if (!strncmp(arg, "norvc", 5)) { s_rvc = 0; return 1; }
+    if (!strncmp(arg, "rvc", 3)) { s_rvc = 1; s_rvc_any = 1; return 1; }
+    if (!strncmp(arg, "push", 4)) {
+        if (s_nrvc < 16) s_rvc_stack[s_nrvc++] = s_rvc;
+        return 1;
+    }
+    if (!strncmp(arg, "pop", 3)) {
+        if (s_nrvc > 0) s_rvc = s_rvc_stack[--s_nrvc];
+        return 1;
+    }
+    return 0;
+}
+
+static unsigned c_b(int bnez, int rs1, long long v)
+{
+    unsigned u = (unsigned)v;
+    return 0x1u | (bnez ? 7u : 6u) << 13 | ((u >> 8) & 1) << 12 | ((u >> 3) & 3) << 10 |
+           (unsigned)(rs1 - 8) << 7 | ((u >> 6) & 3) << 5 | ((u >> 1) & 3) << 3 |
+           ((u >> 5) & 1) << 2;
+}
+
+static unsigned c_j(int jal, long long v)
+{
+    unsigned u = (unsigned)v;
+    return 0x1u | (jal ? 1u : 5u) << 13 | ((u >> 11) & 1) << 12 | ((u >> 4) & 1) << 11 |
+           ((u >> 8) & 3) << 9 | ((u >> 10) & 1) << 8 | ((u >> 6) & 1) << 7 |
+           ((u >> 7) & 1) << 6 | ((u >> 1) & 7) << 3 | ((u >> 5) & 1) << 2;
+}
+
+/* a conditional branch, f3 between rs1 and rs2, to `.+v`: the shortest
+ * form at or above the line's level. 0, or -1 with err written */
+static int emit_branch(struct code *out, int f3, int r1, int r2, long long v,
+                       char *err, int errlen, const char *name)
+{
+    int cz = s_rvc && !s_nocomp && (f3 == 0 || f3 == 1) && r2 == RV_ZERO && r1 >= 8 && r1 <= 15;
+    if (v & 1)
+        FAIL("%s offset %lld is odd", name, v);
+    if (!s_gas) {
+        if (!rv_fits(v, 13))
+            FAIL("%s offset %lld is odd or out of range", name, v);
+        code_u32(out, rv_enc_b(OP_BRANCH, f3, r1, r2, (int)v));
+        return 0;
+    }
+    int lvl = s_lvl < 0 ? 0 : s_lvl;
+    if (lvl <= 0 && cz && v >= -256 && v <= 254) {
+        code_u16(out, c_b(f3 == 1, r1, v));
+        s_took = 0;
+        return 0;
+    }
+    if (lvl <= 1 && rv_fits(v, 13)) {
+        code_u32(out, rv_enc_b(OP_BRANCH, f3, r1, r2, (int)v));
+        s_took = 1;
+        return 0;
+    }
+    /* the inverted branch over a jal to the target */
+    int inv = f3 ^ 1, skip = cz ? 6 : 8;
+    if (cz)
+        code_u16(out, c_b(inv == 1, r1, skip));
+    else
+        code_u32(out, rv_enc_b(OP_BRANCH, inv, r1, r2, skip));
+    long long jv = v - (cz ? 2 : 4);
+    if (!rv_fits(jv, 21))
+        FAIL("%s offset %lld is beyond a jal's 1 MiB", name, v);
+    code_u32(out, rv_enc_j(OP_JAL, RV_ZERO, (int)jv));
+    s_took = 2;
+    return 0;
+}
+
+/* jal rd, .+v (j is rd = zero): c.j, RV32's c.jal, or the 32-bit form */
+static int emit_jal(struct code *out, int rd, long long v, char *err, int errlen)
+{
+    if ((v & 1) || !rv_fits(v, 21))
+        FAIL("jal offset %lld is odd or out of range", v);
+    int lvl = s_lvl < 0 ? 0 : s_lvl;
+    if (s_gas && s_rvc && !s_nocomp && lvl <= 0 && v >= -2048 && v <= 2046 &&
+        (rd == RV_ZERO || (rd == RV_RA && target_xlen() == 32))) {
+        code_u16(out, c_j(rd == RV_RA, v));
+        s_took = 0;
+        return 0;
+    }
+    code_u32(out, rv_enc_j(OP_JAL, rd, (int)v));
+    s_took = 1;
+    return 0;
+}
+
 static int one_stmt(const char *stmt, int len, struct code *out,
                     char *err, int errlen)
 {
@@ -1395,11 +1518,8 @@ static int one_stmt(const char *stmt, int len, struct code *out,
                 if (r1 < 0 || r2 < 0) FAIL("%s wants two registers",
                                            br[k].name);
                 if (!tok_imm(&t[3], &v)) FAIL("%s wants an offset", br[k].name);
-                if ((v & 1) || !rv_fits(v, 13))
-                    FAIL("%s offset %lld is odd or out of range", br[k].name, v);
-                rv_w(out, rv_enc_b(OP_BRANCH, br[k].f3, br[k].swap ? r2 : r1,
-                                   br[k].swap ? r1 : r2, (int)v));
-                return 0;
+                return emit_branch(out, br[k].f3, br[k].swap ? r2 : r1,
+                                   br[k].swap ? r1 : r2, v, err, errlen, br[k].name);
             }
         for (unsigned k = 0; k < sizeof brz / sizeof brz[0]; k++)
             if (tok_is(&t[0], brz[k].name)) {
@@ -1410,21 +1530,15 @@ static int one_stmt(const char *stmt, int len, struct code *out,
                 r1 = tok_reg(&t[1]);
                 if (r1 < 0) FAIL("%s wants a register", brz[k].name);
                 if (!tok_imm(&t[2], &v)) FAIL("%s wants an offset", brz[k].name);
-                if ((v & 1) || !rv_fits(v, 13))
-                    FAIL("%s offset %lld is odd or out of range",
-                         brz[k].name, v);
-                rv_w(out, rv_enc_b(OP_BRANCH, brz[k].f3,
-                                   brz[k].zfirst ? RV_ZERO : r1,
-                                   brz[k].zfirst ? r1 : RV_ZERO, (int)v));
-                return 0;
+                return emit_branch(out, brz[k].f3, brz[k].zfirst ? RV_ZERO : r1,
+                                   brz[k].zfirst ? r1 : RV_ZERO, v, err, errlen,
+                                   brz[k].name);
             }
     }
     if (tok_is(&t[0], "j") && n == 2) {           /* jal zero, off */
         long long v;
         if (!tok_imm(&t[1], &v)) FAIL("j wants an offset");
-        if ((v & 1) || !rv_fits(v, 21)) FAIL("j offset %lld is out of range", v);
-        rv_w(out, rv_enc_j(OP_JAL, RV_ZERO, (int)v));
-        return 0;
+        return emit_jal(out, RV_ZERO, v, err, errlen);
     }
     if (tok_is(&t[0], "jal")) {
         long long v;
@@ -1433,9 +1547,7 @@ static int one_stmt(const char *stmt, int len, struct code *out,
                       if (rd < 0) FAIL("jal wants a register"); }
         else if (n != 2) FAIL("jal wants an offset");
         if (!tok_imm(&t[ai], &v)) FAIL("jal wants an offset");
-        if ((v & 1) || !rv_fits(v, 21)) FAIL("jal offset %lld is out of range", v);
-        rv_w(out, rv_enc_j(OP_JAL, rd, (int)v));
-        return 0;
+        return emit_jal(out, rd, v, err, errlen);
     }
     if (tok_is(&t[0], "jr") && n == 2) {
         int r = tok_reg(&t[1]);
@@ -1513,13 +1625,136 @@ static int one_stmt(const char *stmt, int len, struct code *out,
                         { rv_alu(out, RV_SLTU, rd, RV_ZERO, rs, 0); return 0; }
                     if (tok_is(&t[0], "sext.w"))
                         { rv_alu_imm(out, RV_ADD, rd, rs, 0, 1); return 0; }
+                    /* zext.b is andi 255; sgtz and sltz compare with zero */
+                    if (tok_is(&t[0], "zext.b"))
+                        { rv_alu_imm(out, RV_AND, rd, rs, 255, 0); return 0; }
+                    if (tok_is(&t[0], "sgtz"))
+                        { rv_alu(out, RV_SLT, rd, RV_ZERO, rs, 0); return 0; }
+                    if (tok_is(&t[0], "sltz"))
+                        { rv_alu(out, RV_SLT, rd, rs, RV_ZERO, 0); return 0; }
                 }
             }
         }
     }
 
+    /* ---- the A extension: lr, sc and the AMOs, with .aq, .rl, .aqrl */
+    {
+        static const struct { const char *m; unsigned f5; } amo[] = {
+            { "lr", 0x02 }, { "sc", 0x03 }, { "amoswap", 0x01 }, { "amoadd", 0x00 },
+            { "amoxor", 0x04 }, { "amoand", 0x0c }, { "amoor", 0x08 }, { "amomin", 0x10 },
+            { "amomax", 0x14 }, { "amominu", 0x18 }, { "amomaxu", 0x1c },
+        };
+        char mn[24];
+        if (t[0].len < (int)sizeof mn) {
+            memcpy(mn, t[0].s, (size_t)t[0].len);
+            mn[t[0].len] = 0;
+            char *dot = strchr(mn, '.');
+            if (dot) {
+                *dot = 0;
+                const char *w = dot + 1;
+                for (unsigned k = 0; k < sizeof amo / sizeof amo[0]; k++) {
+                    if (strcmp(mn, amo[k].m))
+                        continue;
+                    int d = w[0] == 'd' && (!w[1] || w[1] == '.');
+                    if (!d && !(w[0] == 'w' && (!w[1] || w[1] == '.')))
+                        FAIL("%.*s: an atomic is .w or .d", t[0].len, t[0].s);
+                    if (d && xlen != 64)
+                        FAIL("%.*s is an RV64 instruction and this is RV32", t[0].len, t[0].s);
+                    const char *o = w + 1;
+                    unsigned aq = 0, rl = 0;
+                    if (!strcmp(o, ".aq")) aq = 1;
+                    else if (!strcmp(o, ".rl")) rl = 1;
+                    else if (!strcmp(o, ".aqrl")) aq = rl = 1;
+                    else if (*o) FAIL("%.*s: the ordering is .aq, .rl or .aqrl", t[0].len, t[0].s);
+                    int lr = amo[k].f5 == 0x02, rd, rs2 = 0, base;
+                    long long off;
+                    if (n != (lr ? 3 : 4) || (rd = tok_reg(&t[1])) < 0 ||
+                        (!lr && (rs2 = tok_reg(&t[2])) < 0) ||
+                        !tok_mem(&t[n - 1], &base, &off) || off)
+                        FAIL("%.*s takes rd, %s(rs1)", t[0].len, t[0].s, lr ? "" : "rs2, ");
+                    code_u32(out, 0x2fUL | (unsigned long)rd << 7 | (d ? 3UL : 2UL) << 12 |
+                                  (unsigned long)base << 15 | (unsigned long)rs2 << 20 |
+                                  (unsigned long)rl << 25 | (unsigned long)aq << 26 |
+                                  (unsigned long)amo[k].f5 << 27);
+                    return 0;
+                }
+            }
+        }
+    }
     FAIL("asm instruction \"%.*s\" is not in the RISC-V vocabulary",
          t[0].len, t[0].s);
+}
+
+/* ---- the % operators, for src/as/gas.c ----------------------------------
+ *
+ * `lui rd, %hi(sym)`, `addi rd, rs, %lo(sym)`, a load's or store's
+ * `%lo(sym)(rs)`, `auipc rd, %pcrel_hi(sym)` and the `%pcrel_lo(label)`
+ * that pairs with it, the local-exec TLS forms (%tprel_hi, %tprel_lo,
+ * %tprel_add) and the GOT and TLS ones auipc takes: rewritten with a zero
+ * for rvasm_assemble, with the relocation GNU as writes for each. */
+int rvasm_symform(const char *stmt, struct asm_symform *f)
+{
+    const char *p = stmt;
+    while (*p == ' ' || *p == '\t') p++;
+    char mn[16];
+    int ml = 0;
+    while (p[ml] && p[ml] != ' ' && p[ml] != '\t' && ml < 15) { mn[ml] = p[ml]; ml++; }
+    mn[ml] = 0;
+    const char *pc = strchr(p + ml, '%');
+    if (!pc)
+        return 0;
+    static const struct { const char *op; int ri, rs; } ops[] = {
+        /* ri: in an I-type (or U-type) field; rs: in a store's S-type */
+        { "%hi(", R_RISCV_HI20, 0 }, { "%lo(", R_RISCV_LO12_I, R_RISCV_LO12_S },
+        { "%pcrel_hi(", R_RISCV_PCREL_HI20, 0 },
+        { "%pcrel_lo(", R_RISCV_PCREL_LO12_I, R_RISCV_PCREL_LO12_S },
+        { "%tprel_hi(", R_RISCV_TPREL_HI20, 0 },
+        { "%tprel_lo(", R_RISCV_TPREL_LO12_I, R_RISCV_TPREL_LO12_S },
+        { "%tprel_add(", R_RISCV_TPREL_ADD, 0 },
+        { "%got_pcrel_hi(", R_RISCV_GOT_HI20, 0 },
+        { "%tls_ie_pcrel_hi(", R_RISCV_TLS_GOT_HI20, 0 },
+        { "%tls_gd_pcrel_hi(", R_RISCV_TLS_GD_HI20, 0 },
+    };
+    for (unsigned k = 0; k < sizeof ops / sizeof ops[0]; k++) {
+        size_t l = strlen(ops[k].op);
+        if (strncmp(pc, ops[k].op, l))
+            continue;
+        const char *s = pc + l, *e = s;
+        while (*e == '_' || *e == '.' || *e == '$' || isalnum((unsigned char)*e)) e++;
+        if (e == s || isdigit((unsigned char)*s))
+            return 0;
+        long add = 0;
+        const char *q = e;
+        if (*q == '+' || *q == '-') {
+            char *ee;
+            long v = strtol(q + 1, &ee, 0);
+            if (ee == q + 1) return 0;
+            add = *q == '-' ? -v : v;
+            q = ee;
+        }
+        if (*q != ')')
+            return 0;
+        int store = mn[0] == 's' && (!strcmp(mn, "sb") || !strcmp(mn, "sh") ||
+                                     !strcmp(mn, "sw") || !strcmp(mn, "sd")) ;
+        store = store || !strcmp(mn, "fsw") || !strcmp(mn, "fsd") || !strcmp(mn, "fsh");
+        int reloc = store && ops[k].rs ? ops[k].rs : ops[k].ri;
+        memset(f, 0, sizeof *f);
+        f->sym_at = (int)(s - stmt);
+        f->sym_len = (int)(e - s);
+        f->addend = add;
+        if (reloc == R_RISCV_TPREL_ADD) {
+            /* add rd, rs, tp, %tprel_add(sym): the add itself */
+            const char *c = pc;
+            while (c > p && *c != ',') c--;
+            snprintf(f->encode, sizeof f->encode, "%.*s", (int)(c - stmt), stmt);
+        } else
+            snprintf(f->encode, sizeof f->encode, "%.*s0%s", (int)(pc - stmt), stmt, q + 1);
+        f->site[0].off = 0;
+        f->site[0].reloc = reloc;
+        f->nsites = 1;
+        return 1;
+    }
+    return 0;
 }
 
 /* src/as/gas.c takes every identifier in an operand for a symbol unless
@@ -1529,6 +1764,8 @@ static int one_stmt(const char *stmt, int len, struct code *out,
  * `j mie`. */
 int rvasm_is_word(const char *stmt, const char *w, int wlen)
 {
+    if (w > stmt && w[-1] == '%')
+        return 1;                       /* %hi, %lo, %pcrel_hi: operators */
     const char *m = stmt;
     int mlen;
     while (*m == ' ' || *m == '\t') m++;
@@ -1570,8 +1807,46 @@ int rvasm_assemble(const char *text, struct code *out, char *err, int errlen)
             static const struct asm_dirs dirs = { NULL, 0, 0 };
             r = code_asm_directive(start, len, out, &dirs, err, errlen);
         }
+        int at = out->len;
         if (r < 0 || (!r && one_stmt(start, len, out, err, errlen) != 0))
             return -1;
+        /* each 32-bit instruction's 16-bit form, in a .s file with C on --
+         * a pseudo's expansion too (li's lui and addi); the branches chose
+         * theirs above, and a statement that already holds a 16-bit form
+         * (a relaxed branch) is left as it is */
+        if (!r && s_gas && s_rvc && !s_nocomp && out->len > at) {
+            int all32 = (out->len - at) % 4 == 0;
+            for (int k = at; all32 && k < out->len; k += 4)
+                if ((out->p[k] & 3) != 3) all32 = 0;
+            if (all32) {
+                int nw = (out->len - at) / 4;
+                unsigned long ws[16];
+                if (nw > 16) nw = 0;
+                for (int k = 0; k < nw; k++) {
+                    const unsigned char *b = out->p + at + 4 * k;
+                    ws[k] = (unsigned long)b[0] | (unsigned long)b[1] << 8 |
+                            (unsigned long)b[2] << 16 | (unsigned long)b[3] << 24;
+                }
+                if (nw) out->len = at;
+                for (int k = 0; k < nw; k++) {
+                    unsigned long w = ws[k];
+                    unsigned op = (unsigned)(w & 0x7f);
+                    /* `addi rd, rd, 0` stays as it is written, as llvm-mc
+                     * leaves it (c.mv would say `mv rd, rd`) */
+                    int self_mv = op == 0x13 && ((w >> 12) & 7) == 0 && (w >> 20) == 0 &&
+                                  ((w >> 7) & 31) == ((w >> 15) & 31);
+                    unsigned c = 0;
+                    if (w == 0xc0001073UL) {          /* unimp: c.unimp, all zeros */
+                        code_u16(out, 0);
+                        continue;
+                    }
+                    if (op != 0x63 && op != 0x6f && !self_mv)
+                        c = rv_compress(w, target_xlen());
+                    if (c) code_u16(out, c);
+                    else code_u32(out, w);
+                }
+            }
+        }
         if (*p)
             p++;
     }

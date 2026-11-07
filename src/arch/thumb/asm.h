@@ -91,6 +91,10 @@ void tasm_set_arch(int level);
  * with it): sadd16, smlad, pkhbt and the rest are refused without it, as
  * llvm-mc refuses them. Off until a caller says otherwise. */
 void tasm_set_dsp(int on);
+/* The FPU the file assembles for: 0 none named (every VFP instruction is
+ * taken, as a context switch that tests for the FPU writes them), 1
+ * single precision, 2 double; d32 when d16-d31 exist. */
+void tasm_set_fpu(int level, int d32);
 /* The DSP extension's instructions, ssat/usat and the extends, across the
  * registers and immediates each field takes, for the referee
  * (tests/golden/thumb-dsp.sh): one line each. */

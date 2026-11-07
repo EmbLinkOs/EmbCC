@@ -815,6 +815,7 @@ static void vfp(void)
     I("a32_vfp_word", (t_vmrs_apsr(&C), 0), "vmrs APSR_nzcv, fpscr");
     I("a32_vfp_word", t_vldm_vstm(&C, 2, 4, 3, 1, 0, 1),
       "vldmia r2!, {s4, s5, s6}");
+    I("a32_raw_word", (a32_raw_word(&C, 0x01A00001UL), 0), "mov r0, r1");
 }
 
 /* ---- --refuse ---------------------------------------------------------- */

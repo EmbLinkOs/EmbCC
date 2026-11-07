@@ -46,10 +46,17 @@
 #define tasm_took_wide() 0
 #define tasm_set_arch(a) ((void)(a))
 #define tasm_set_dsp(on) ((void)(on))
+#define tasm_set_fpu(l, d) ((void)(l), (void)(d))
 #endif
 #if !FAMILY_BUILT(xtensa)
 #define xtasm_movi_operand(st, x, len) ((void)(st), (void)(x), (void)(len), -1)
 #define xtasm_is_entry(st) ((void)(st), 0)
+#define xtasm_call_operand(st, x, len) ((void)(st), (void)(x), (void)(len), -1)
+#define xtasm_longcalls() 0
+#define xtasm_set_longcalls(on) ((void)(on))
+#define xtasm_set_transform(on) ((void)(on))
+#define xtasm_set_density(on) ((void)(on))
+#define xtasm_density() 0
 #endif
 
 /* ---- the pieces of a file ------------------------------------------ */
@@ -98,6 +105,8 @@ struct sym {
      * resolved when the object is written. */
     struct sym *alias;
     long alias_add;
+    int stamp;              /* the pass that last placed it (gas.stamp) */
+    int local_decl;         /* named by .local: a .comm of it stays local */
 };
 
 struct fixup {
@@ -106,6 +115,12 @@ struct fixup {
     char *sym;              /* the symbol named */
     int type;               /* ELF relocation type */
     long addend;
+};
+
+/* a line of the expanded source, and where it came from */
+struct gline {
+    char *text;
+    int line;
 };
 
 struct gas {
@@ -131,9 +146,33 @@ struct gas {
     int errors;
     int thumb_func_next;    /* .thumb_func: the next label is a function */
     int errors_muted;       /* the expander's own look at an .equ */
+    int quiet;              /* errors counted, not printed: an inline
+                             * template tried here after its target's own
+                             * assembler refused it (gas_inline_retry) */
     /* Relaxation: a statement assembled wide once stays wide, so the
      * passes settle (see gas_assemble). Indexed by statement. */
     char *wide;
+    int grow_ok;            /* this pass may widen a line for good: not the
+                             * first of pass two, whose labels ahead are
+                             * still pass one's guesses */
+    long *lsize;            /* per line: the bytes it took when it last
+                             * assembled (-1 never), what a deferred
+                             * error reserves */
+    int lfail;              /* the line being assembled failed */
+    /* A label ahead of the line being assembled holds its place from the
+     * pass before, and so does this line in lpc: a displacement forward
+     * is measured within that one layout, not from where this pass has
+     * put the line -- earlier lines that grew this pass would make it
+     * short by all they grew (llvm-mc measures within one layout too) */
+    int stamp;
+    long *lpc, prev_pc;
+    int xlong_saved;        /* Xtensa: -mlongcalls outside a .begin longcalls */
+    struct xpad { int sec; long off, len; } *xpad;  /* Xtensa: fill in code */
+    int nxpad, capxpad;
+    long *xgap;             /* Xtensa, per line: unreachable fill after it */
+    const struct gline *lines;  /* the pass's lines (pass_over's) */
+    long *prefstart;        /* per line: where a .prefalign's function began,
+                             * the pass before (-1 not yet) */
     int nwide, li, grew;
     /* ARM mapping symbols: `$t` where Thumb code starts, `$d` where data
      * does, which is how a disassembler or debugger tells them apart. */
@@ -144,10 +183,10 @@ struct gas {
     /* Literal pools: `ldr rd, =EXPR` loads a word placed at the next
      * .ltorg or at the section's end. Identical entries in one pool are
      * one word. */
-    struct glit { int sec, pool, is_sym; long v; struct sym *sym; } *lits;
+    struct glit { int sec, pool, is_sym, size; long v; struct sym *sym; } *lits;
     int nlits, caplits;
     int *poolno, npoolno;
-    struct gpool { int sec, pool; long base; } *pools, *ppools;
+    struct gpool { int sec, pool; long base, base8; } *pools, *ppools;
     int npools, cappools, nppools;
     /* Xtensa's literal pools come BEFORE the code that loads from them --
      * l32r reaches only backwards -- at the places GNU as's
@@ -179,6 +218,10 @@ static void gerr(struct gas *g, const char *fmt, ...)
     va_list ap;
     if (g->errors_muted)
         return;
+    if (g->quiet) {
+        g->errors++;
+        return;
+    }
     fprintf(stderr, "%s:%d: error: ", g->path, g->line + g->line_base);
     va_start(ap, fmt);
     vfprintf(stderr, fmt, ap);
@@ -189,20 +232,50 @@ static void gerr(struct gas *g, const char *fmt, ...)
 
 static void advance(struct gas *g, long n);
 
-/* An encoding error (see deferr): on Xtensa and RX kept until the layout
- * is known to be final -- pass one's is never, since a label behind it may
- * still move (an RX branch's explicit size may not reach until its
- * neighbours have settled) -- and reported at once anywhere else. */
+/* x86-64: an address in an instruction (32S, PC32, 32, ...) is made
+ * against a local label's section, as llvm-mc and GNU as make it; a call
+ * through the PLT or the GOT names the symbol */
+static int x86_secsym_reloc(int type)
+{
+    return type != R_X86_64_PLT32 && type != R_X86_64_GOTPCREL &&
+           type != R_X86_64_GOTPCRELX && type != R_X86_64_REX_GOTPCRELX &&
+           type != R_X86_64_GOTTPOFF && type != R_X86_64_TPOFF32;
+}
+
+static int arm_a32(const struct gas *g);
+
+/* the narrowest instruction the target has */
+static long min_insn(const struct gas *g)
+{
+    switch (g->tgt->machine) {
+    case EM_X86_64: return 1;
+    case EM_ARM: return arm_a32(g) ? 4 : 2;
+    case EM_RISCV: case EM_AVR: case EM_68K: return 2;
+    default: return 4;
+    }
+}
+
+/* An encoding error (see deferr), kept until the layout is known to be
+ * final and reported only if the settled pass still makes it: a branch
+ * that does not reach may only be seeing a label at a place an earlier
+ * pass guessed (pass one's, which knows nothing ahead, or a pass two
+ * whose neighbours have not settled -- an RX branch's explicit size may
+ * not reach until they have). The statement keeps the width it had when
+ * it last assembled, so its neighbours do not move. */
 static void gerr_enc(struct gas *g, int pass, const char *what,
                      const char *msg)
 {
     char buf[512];
+    int late = g->tgt->machine == EM_XTENSA || g->tgt->machine == EM_RX ||
+               g->tgt->machine == EM_68K;
+    long n = g->lsize && g->li >= 0 && g->li < g->nwide ? g->lsize[g->li] : -1;
     (void)pass;
-    if (g->tgt->machine != EM_XTENSA && g->tgt->machine != EM_RX &&
-        g->tgt->machine != EM_68K) {
-        gerr(g, "%s%s", what, msg);
-        return;
-    }
+    /* never assembled yet: the smallest instruction there is, so a line
+     * that fails does not push its own target out of reach (a 16-bit
+     * branch reserving four bytes stays out of reach for good) */
+    if (n < 0)
+        n = late ? 3 : min_insn(g);
+    g->lfail = 1;
     snprintf(buf, sizeof buf, "%s:%d: error: %s%s", g->path,
              g->line + g->line_base, what, msg);
     if (g->ndeferr == g->capdeferr) {
@@ -211,7 +284,7 @@ static void gerr_enc(struct gas *g, int pass, const char *what,
                              (size_t)g->capdeferr * sizeof *g->deferr);
     }
     g->deferr[g->ndeferr++] = xstrndup(buf, strlen(buf));
-    advance(g, 3);
+    advance(g, n);
 }
 
 static struct sym *sym_find(struct gas *g, const char *name, size_t n)
@@ -460,9 +533,17 @@ static int sec_is_nobits(struct gas *g, int k)
 
 static void emit_bytes(struct gas *g, const unsigned char *p, long n)
 {
+    /* A NOBITS section takes zeros, as GNU as lets it: `.word 0` is how
+     * clang and GCC write a zero-initialized variable in .bss. Anything
+     * else has nowhere to go. */
     if (sec_is_nobits(g, g->cur)) {
-        gerr(g, "%s holds no data (it is NOBITS); use .space",
-             g->secs[g->cur].name);
+        for (long i = 0; i < n; i++)
+            if (p[i]) {
+                gerr(g, "a non-zero value in %s, which is NOBITS (it holds "
+                        "no data, only its size)", g->secs[g->cur].name);
+                return;
+            }
+        g->secs[g->cur].size += n;
         return;
     }
     for (long i = 0; i < n; i++)
@@ -499,6 +580,32 @@ static void advance(struct gas *g, long n)
     advance_fill(g, n, 0);
 }
 
+/* A load that may name a literal by its label: ldr or vldr, with a
+ * condition (inside an IT block, or in ARM state) and a width or type --
+ * `ldreq.w`, `vldr.64` -- or adr (*adr set), which takes the address
+ * itself. The mnemonic's length, or 0. */
+static int arm_literal_load(const char *q, int *adr)
+{
+    static const char *const cc[] = { "eq", "ne", "cs", "hs", "cc", "lo",
+        "mi", "pl", "vs", "vc", "hi", "ls", "ge", "lt", "gt", "le", "al", NULL };
+    int n = q[0] == 'v' ? 1 : 0;
+    *adr = !n && strncmp(q, "adr", 3) == 0;
+    if (strncmp(q + n, "ldr", 3) != 0 && !*adr)
+        return 0;
+    n += 3;
+    for (int k = 0; cc[k]; k++)
+        if (!strncmp(q + n, cc[k], 2) &&
+            (isspace((unsigned char)q[n + 2]) || q[n + 2] == '.')) {
+            n += 2;
+            break;
+        }
+    if (q[n] == '.') {
+        n++;
+        while (isalnum((unsigned char)q[n])) n++;
+    }
+    return isspace((unsigned char)q[n]) ? n : 0;
+}
+
 /* ARMv7-A (armv7a-none-eabi): an ARM file is A32 -- the statements are
  * encoded through the same tasm_assemble, which writes A32 when
  * t_isa_a32 is set -- and its functions carry no Thumb bit, its code is
@@ -512,7 +619,7 @@ static int arm_a32(const struct gas *g)
 /* `$t`/`$d` where what this section holds changes from code to data. */
 static void map_mark(struct gas *g, char kind)
 {
-    if (g->tgt->machine != EM_ARM)
+    if (g->tgt->machine != EM_ARM && g->tgt->machine != EM_AARCH64)
         return;
     if (g->nmapst < g->nsecs) {
         g->mapst = xrealloc(g->mapst, (size_t)g->nsecs);
@@ -532,11 +639,28 @@ static void map_mark(struct gas *g, char kind)
     g->nmaps++;
 }
 
+static void xt_pad_note(struct gas *g, long off, long len)
+{
+    if (g->tgt->machine != EM_XTENSA || len <= 0 ||
+        !(g->secs[g->cur].flags & SHF_EXECINSTR))
+        return;
+    if (g->nxpad == g->capxpad) {
+        g->capxpad = g->capxpad ? g->capxpad * 2 : 16;
+        g->xpad = xrealloc(g->xpad, (size_t)g->capxpad * sizeof *g->xpad);
+    }
+    g->xpad[g->nxpad].sec = g->cur;
+    g->xpad[g->nxpad].off = off;
+    g->xpad[g->nxpad].len = len;
+    g->nxpad++;
+}
+
 static void do_align(struct gas *g, long boundary)
 {
     long off = cur_off(g);
     if (boundary <= 1)
         return;
+    if (off % boundary)
+        xt_pad_note(g, off, boundary - off % boundary);
     if (boundary > g->secs[g->cur].align)
         g->secs[g->cur].align = boundary;
     /* In code the padding may be EXECUTED -- straight-line code that runs
@@ -551,14 +675,56 @@ static void do_align(struct gas *g, long boundary)
                 g->tgt->fill(c, boundary - off % boundary);
             return;
         }
+        /* x86: llvm-mc's long nops, a piece of up to fifteen bytes at a
+         * time -- the ten-byte `nopw %cs:0(%rax,%rax)` with 0x66 prefixes
+         * before it for eleven to fifteen -- so an object's padding is the
+         * one clang's assembler writes */
+        if (m == EM_X86_64) {
+            static const unsigned char nops[11][10] = {
+                { 0 }, { 0x90 }, { 0x66, 0x90 }, { 0x0f, 0x1f, 0x00 },
+                { 0x0f, 0x1f, 0x40, 0x00 }, { 0x0f, 0x1f, 0x44, 0x00, 0x00 },
+                { 0x66, 0x0f, 0x1f, 0x44, 0x00, 0x00 },
+                { 0x0f, 0x1f, 0x80, 0x00, 0x00, 0x00, 0x00 },
+                { 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00 },
+                { 0x66, 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00 },
+                { 0x66, 0x2e, 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00 },
+            };
+            long left = (boundary - off % boundary) % boundary;
+            while (left > 0) {
+                long k = left > 15 ? 15 : left, base = k > 10 ? 10 : k;
+                for (long p = 0; p < k - base; p++)
+                    code_byte(c, 0x66);
+                for (long b = 0; b < base; b++)
+                    code_byte(c, nops[base][b]);
+                left -= k;
+            }
+            return;
+        }
         while (off % boundary) {
             long left = boundary - off % boundary;
+            if (m == EM_LOONGARCH && !(off & 3) && left >= 4) {
+                code_byte(c, 0x00); code_byte(c, 0x00); code_byte(c, 0x40);
+                code_byte(c, 0x03);                              /* andi $zero */
+                off += 4;
+                continue;
+            }
+            if (m == EM_68K && !(off & 1) && left >= 2) {
+                code_byte(c, 0x4e); code_byte(c, 0x71);          /* nop */
+                off += 2;
+                continue;
+            }
             if (m == EM_ARM && t_isa_a32 && !(off & 3) && left >= 4) {
                 code_byte(c, 0x00); code_byte(c, 0xf0); code_byte(c, 0x20);
                 code_byte(c, 0xe3);                              /* nop */
                 off += 4;
             } else if (m == EM_ARM && !t_isa_a32 && !(off & 1) && left >= 2) {
-                code_byte(c, 0x00); code_byte(c, 0xbf);          /* nop */
+                /* ARMv6-M and v8-M Baseline pad with mov r8, r8, as
+                 * llvm-mc does: the nop hint is Thumb-2's */
+                if (target_thumb_arch() == 6 || target_thumb_v8m_base()) {
+                    code_byte(c, 0xc0); code_byte(c, 0x46);
+                } else {
+                    code_byte(c, 0x00); code_byte(c, 0xbf);      /* nop */
+                }
                 off += 2;
             } else if (m == EM_RISCV && !(off & 3) && left >= 4) {
                 code_byte(c, 0x13); code_byte(c, 0); code_byte(c, 0);
@@ -600,10 +766,28 @@ static long parse_string(struct gas *g, const char *p, unsigned char *buf,
             int e = *p++;
             switch (e) {
             case 'n': c = '\n'; break;  case 't': c = '\t'; break;
-            case 'r': c = '\r'; break;  case '0': c = '\0'; break;
+            case 'r': c = '\r'; break;
             case 'b': c = '\b'; break;  case 'f': c = '\f'; break;
             case '\\': c = '\\'; break; case '"': c = '"'; break;
-            default: c = e; break;
+            case 'x': case 'X':
+                /* GNU as: every hex digit that follows, the low byte kept */
+                c = 0;
+                while (isxdigit((unsigned char)*p)) {
+                    int d = *p++;
+                    c = (c << 4 | (isdigit(d) ? d - '0' : (tolower(d) - 'a' + 10))) & 0xff;
+                }
+                break;
+            default:
+                /* up to three digits, read as octal: "\034" is one byte
+                 * (GNU as takes 8 and 9 as digits too: "\08" is 8) */
+                if (e >= '0' && e <= '9') {
+                    c = e - '0';
+                    for (int k = 0; k < 2 && *p >= '0' && *p <= '9'; k++)
+                        c = c * 8 + (*p++ - '0');
+                    c &= 0xff;
+                } else
+                    c = e;
+                break;
             }
         }
         if (n >= cap) { gerr(g, "string is too long"); return -1; }
@@ -725,6 +909,7 @@ static struct gval gx_here(struct gx *x)
     s = sym_get(g, nm, strlen(nm));
     s->sec = g->cur;
     s->value = cur_off(g);
+    s->stamp = g->stamp;
     r.v = cur_off(g);
     r.sec = g->cur;
     r.base = s;
@@ -1032,6 +1217,83 @@ static long dot_bias(const struct gas *g)
     return g->tgt->machine == EM_AVR ? 2 : 0;
 }
 
+/* b, b.w, b<c>, b<c>.w, bl, bl<c>: an ARM branch statement */
+static int arm_branch_stmt(const char *stmt)
+{
+    const char *p = skip_ws((char *)stmt);
+    int ml = 0;
+    if (p[0] != 'b') return 0;
+    while (p[ml] && !isspace((unsigned char)p[ml])) ml++;
+    if (ml >= 2 && p[ml - 2] == '.' && (p[ml - 1] == 'w' || p[ml - 1] == 'n')) ml -= 2;
+    if (ml == 1 || (ml == 2 && p[1] == 'l')) return 1;
+    static const char *const cc[] = { "eq", "ne", "cs", "hs", "cc", "lo", "mi", "pl",
+        "vs", "vc", "hi", "ls", "ge", "lt", "gt", "le", NULL };
+    for (int k = 0; cc[k]; k++)
+        if ((ml == 3 && !strncmp(p + 1, cc[k], 2)) ||
+            (ml == 4 && p[1] == 'l' && !strncmp(p + 2, cc[k], 2)))
+            return 1;
+    return 0;
+}
+
+/* AArch64: `#(3 << 20)`, `#4*2`, `#-(1+1)` -- an immediate that is an
+ * arithmetic of numbers, as GNU as reads it -- folded to the number the
+ * instruction encoder reads. Only digits, operators and parentheses: a
+ * relocation operator (`#:lo12:x`), a float (`#1.5`) or anything naming
+ * a symbol is left for the encoder. Takes and returns a malloc'd line. */
+static char *a64_fold_imms(struct gas *g, char *text, int pass)
+{
+    for (char *h = strchr(text, '#'); h; h = strchr(h + 1, '#')) {
+        char *e = h + 1;
+        int depth = 0, op = 0;
+        while (*e && !(depth == 0 && (*e == ',' || *e == ']' || *e == '!'))) {
+            if (*e == '(') depth++;
+            else if (*e == ')') depth--;
+            if (strchr("()*/%<>&|^~+", *e) || (*e == '-' && e > h + 1))
+                op = 1;
+            else if (!isalnum((unsigned char)*e) && !isspace((unsigned char)*e) &&
+                     *e != '-')
+                break;
+            e++;
+        }
+        if (!op || depth || (*e && *e != ',' && *e != ']' && *e != '!'))
+            continue;
+        /* digits only: an identifier other than a C number is a symbol */
+        int sym = 0;
+        for (char *q = h + 1; q < e; q++)
+            if (isalpha((unsigned char)*q) || *q == '_') {
+                if (q > h + 1 && q[-1] == '0' && (*q == 'x' || *q == 'X') &&
+                    (q - 1 == h + 1 || !isalnum((unsigned char)q[-2]))) {
+                    while (q + 1 < e && isxdigit((unsigned char)q[1])) q++;
+                    continue;
+                }
+                sym = 1;
+                break;
+            }
+        if (sym)
+            continue;
+        char save = *e;
+        *e = '\0';
+        const char *pe = h + 1;
+        int bad = 0;
+        struct gval v = gx_eval(g, &pe, pass, &bad);
+        int ok = !bad && v.sec == SEC_ABS && !v.unknown && !*skip_ws((char *)pe);
+        *e = save;
+        if (!ok)
+            continue;
+        char num[32];
+        int k = snprintf(num, sizeof num, "%ld", v.v);
+        size_t pre = (size_t)(h + 1 - text), rest = strlen(e);
+        char *out = xmalloc(pre + (size_t)k + rest + 1);
+        memcpy(out, text, pre);
+        memcpy(out + pre, num, (size_t)k);
+        memcpy(out + pre + (size_t)k, e, rest + 1);
+        free(text);
+        text = out;
+        h = text + pre;
+    }
+    return text;
+}
+
 static char *substitute(struct gas *g, const char *stmt, long pc,
                         int pass, char **ext, int *placeheld)
 {
@@ -1113,7 +1375,9 @@ static char *substitute(struct gas *g, const char *stmt, long pc,
                 struct sym *ly = sym_find(g, nm, strlen(nm));
                 if (ly && ly->sec >= 0) {
                     char rep[32];
-                    long disp = ly->value - pc - dot_bias(g);
+                    long disp = (ly->stamp != g->stamp && g->prev_pc >= 0
+                                 ? ly->value - g->prev_pc : ly->value - pc) -
+                                dot_bias(g);
                     int k = snprintf(rep, sizeof rep, ".%+ld", disp);
                     if (len + (size_t)k + 2 >= cap) {
                         cap = cap * 2 + (size_t)k; out = xrealloc(out, cap);
@@ -1159,7 +1423,14 @@ static char *substitute(struct gas *g, const char *stmt, long pc,
              * two sections land is the linker's business. Nor is a weak
              * symbol, whose definition the link may replace. Both go to
              * the relocating forms, as an external symbol does. */
-            if (sy && sy->sec >= 0 && (sy->sec != g->cur || sy->is_weak) &&
+            /* (and on ARM, x86-64 and RX a GLOBAL label of this section, for a
+             * branch: llvm-mc and GNU as leave its call and jump to the
+             * linker, which may put a veneer or another definition there) */
+            int arm_glob = sy && sy->sec == g->cur && sy->is_global &&
+                           ((g->tgt->machine == EM_ARM && arm_branch_stmt(stmt)) ||
+                            ((g->tgt->machine == EM_X86_64 || g->tgt->machine == EM_RX) &&
+                             g->tgt->is_transfer && g->tgt->is_transfer(stmt)));
+            if (sy && sy->sec >= 0 && (sy->sec != g->cur || sy->is_weak || arm_glob) &&
                 pass == 2) {
                 if (!*ext)
                     *ext = sy->name;
@@ -1168,7 +1439,7 @@ static char *substitute(struct gas *g, const char *stmt, long pc,
                 len += n;
                 continue;
             }
-            if (sy && sy->sec >= 0 && (sy->sec != g->cur || sy->is_weak)) {
+            if (sy && sy->sec >= 0 && (sy->sec != g->cur || sy->is_weak || arm_glob)) {
                 /* pass 1: the size only, as for a forward label */
                 if (len + 4 >= cap) { cap = cap * 2 + 8; out = xrealloc(out, cap); }
                 memcpy(out + len, ".+0", 3);
@@ -1178,7 +1449,9 @@ static char *substitute(struct gas *g, const char *stmt, long pc,
             }
             if (sy && sy->sec >= 0) {          /* a label in this file */
                 char rep[32];
-                long disp = sy->value - pc - dot_bias(g);
+                long disp = (sy->stamp != g->stamp && g->prev_pc >= 0
+                             ? sy->value - g->prev_pc : sy->value - pc) -
+                            dot_bias(g);
                 int k = snprintf(rep, sizeof rep, ".%+ld", disp);
                 if (len + (size_t)k + 2 >= cap) { cap = cap * 2 + (size_t)k;
                                                   out = xrealloc(out, cap); }
@@ -1244,6 +1517,18 @@ static int rv_load_sym(const struct gas *g, const char *p)
     return 0;
 }
 
+/* A statement that carries a relocation keeps its full-width field:
+ * RISC-V's compressed forms have no room for what the linker writes. */
+static void reloc_encode(struct gas *g, int on)
+{
+#if FAMILY_BUILT(riscv)
+    if (g->tgt->machine == EM_RISCV)
+        rvasm_no_compress(on);
+#else
+    (void)g; (void)on;
+#endif
+}
+
 /* `call sym` and `la rd, sym`: the two forms that may name a symbol
  * this file does not define. Both are an auipc paired with a second
  * instruction, eight bytes, and both carry their relocation on the
@@ -1266,15 +1551,26 @@ static int extern_form(struct gas *g, const char *stmt, long pc, int pass,
             char err[256];
             if (g->tgt->at)
                 g->tgt->at(pc);
-            if (g->tgt->encode(f.encode, &tmp, err, sizeof err) != 0) {
+            reloc_encode(g, 1);
+            int erc2 = g->tgt->encode(f.encode, &tmp, err, sizeof err);
+            reloc_encode(g, 0);
+            if (erc2 != 0) {
                 gerr_enc(g, pass, "", err);
                 free(tmp.p);
                 return 1;
             }
             if (pass == 2)
-                for (int k = 0; k < f.nsites; k++)
-                    fix_add(g, g->cur, pc + f.site[k].off, ext,
-                            f.site[k].reloc, f.addend);
+                for (int k = 0; k < f.nsites; k++) {
+                    if (k == 1 && f.sym2_len) {
+                        char *n2 = xstrndup(stmt + f.sym2_at, (size_t)f.sym2_len);
+                        (void)sym_get(g, n2, strlen(n2));   /* UNDEF if never defined */
+                        fix_add(g, g->cur, pc + f.site[k].off, n2,
+                                f.site[k].reloc, f.addend2);
+                        free(n2);
+                    } else
+                        fix_add(g, g->cur, pc + f.site[k].off, ext,
+                                f.site[k].reloc, f.addend);
+                }
             emit_bytes(g, (const unsigned char *)tmp.p, tmp.len);
             free(tmp.p);
             return 1;
@@ -1325,6 +1621,44 @@ static int extern_form(struct gas *g, const char *stmt, long pc, int pass,
         free(tmp.p);
         return 1;
     }
+    /* A conditional branch to a symbol defined elsewhere, or global: in
+     * Thumb the 32-bit b<c>.w and R_ARM_THM_JUMP19 -- inside an IT block,
+     * whose condition it carries, the unconditional b.w and
+     * R_ARM_THM_JUMP24, and bl<c> a bl and R_ARM_THM_CALL; in ARM state
+     * the condition is the instruction's own and the relocation
+     * R_ARM_JUMP24. */
+    if (g->tgt->machine == EM_ARM && p[0] == 'b') {
+        int ml = 0;
+        while (p[ml] && !isspace((unsigned char)p[ml])) ml++;
+        int core = ml >= 2 && p[ml - 2] == '.' && p[ml - 1] == 'w' ? ml - 2 : ml;
+        static const char *const cc[] = { "eq", "ne", "cs", "hs", "cc", "lo",
+            "mi", "pl", "vs", "vc", "hi", "ls", "ge", "lt", "gt", "le", NULL };
+        int is_b = 0, is_bl = 0;
+        for (int k = 0; cc[k]; k++) {
+            if (core == 3 && !strncmp(p + 1, cc[k], 2)) is_b = 1;
+            if (core == 4 && p[1] == 'l' && !strncmp(p + 2, cc[k], 2)) is_bl = 1;
+        }
+        if ((is_b || is_bl) && isspace((unsigned char)p[ml])) {
+            struct code tmp = { 0 };
+            char err[256], buf[32];
+            int in_it = !arm_a32(g) && tasm_open();
+            int r = arm_a32(g) ? R_ARM_JUMP24
+                  : is_bl ? R_ARM_THM_CALL : in_it ? R_ARM_THM_JUMP24 : R_ARM_THM_JUMP19;
+            if (is_bl && !arm_a32(g) && !in_it) {
+                gerr(g, "'%.*s': a conditional bl is a bl in an IT block", ml, p);
+                return 1;
+            }
+            if (pass == 2)
+                fix_add(g, g->cur, pc, ext, r, 0);
+            snprintf(buf, sizeof buf, "%.*s%s .+0", core, p, is_bl || arm_a32(g) ? "" : ".w");
+            if (g->tgt->encode(buf, &tmp, err, sizeof err) != 0)
+                gerr(g, "%s", err);
+            else
+                emit_bytes(g, (const unsigned char *)tmp.p, tmp.len);
+            free(tmp.p);
+            return 1;
+        }
+    }
     /* ARM writes a call to a symbol as `bl sym`, one instruction
      * carrying one relocation -- there is no auipc pair to build. */
     if ((g->tgt->machine == EM_ARM || g->tgt->machine == EM_AARCH64) &&
@@ -1361,7 +1695,10 @@ static int extern_form(struct gas *g, const char *stmt, long pc, int pass,
             struct code tmp = { 0 };
             char err[256];
             snprintf(buf, sizeof buf, "%.*s.+0", (int)(last - p), p);
-            if (g->tgt->encode(buf, &tmp, err, sizeof err) != 0) {
+            reloc_encode(g, 1);
+            int erc31 = g->tgt->encode(buf, &tmp, err, sizeof err);
+            reloc_encode(g, 0);
+            if (erc31 != 0) {
                 gerr(g, "%s", err);
             } else {
                 if (pass == 2)
@@ -1421,7 +1758,10 @@ static int extern_form(struct gas *g, const char *stmt, long pc, int pass,
             rd = rdbuf;
         }
         snprintf(buf, sizeof buf, "auipc %s, 0", rd);
-        if (g->tgt->encode(buf, &tmp, err, sizeof err) != 0) {
+        reloc_encode(g, 1);
+        int erc32 = g->tgt->encode(buf, &tmp, err, sizeof err);
+        reloc_encode(g, 0);
+        if (erc32 != 0) {
             gerr(g, "%s", err); free(tmp.p); return 1;
         }
         if (ld_len)
@@ -1430,7 +1770,10 @@ static int extern_form(struct gas *g, const char *stmt, long pc, int pass,
             snprintf(buf, sizeof buf, is_tail ? "jalr zero, 0(t1)"
                                     : is_call ? "jalr ra, 0(ra)"
                                               : "addi %s, %s, 0", rd, rd);
-        if (g->tgt->encode(buf, &tmp, err, sizeof err) != 0) {
+        reloc_encode(g, 1);
+        int erc33 = g->tgt->encode(buf, &tmp, err, sizeof err);
+        reloc_encode(g, 0);
+        if (erc33 != 0) {
             gerr(g, "%s", err); free(tmp.p); return 1;
         }
         emit_bytes(g, (const unsigned char *)tmp.p, tmp.len);
@@ -1489,6 +1832,20 @@ static const char *pseudo_symbol(struct gas *g, const char *stmt)
         int (*form)(const char *, struct asm_symform *) =
             g->tgt->symform_abs ? g->tgt->symform_abs : g->tgt->symform;
         if (form(stmt, &f)) {
+            /* m68k: a non-weak label of this section, read as the first
+             * operand (jsr, jmp, lea, pea, a move's or a compare's source),
+             * is (d16,%pc) when in reach -- GNU as makes it so, and the
+             * object needs no relocation: substitute() writes .+N */
+            if (g->tgt->machine == EM_68K) {
+                struct sym *ls = sym_find(g, stmt + f.sym_at, (size_t)f.sym_len);
+                const char *fo = skip_ws((char *)p);
+                while (*fo && !isspace((unsigned char)*fo)) fo++;
+                fo = skip_ws((char *)fo);
+                if (*fo == '(') fo++;
+                if (ls && ls->sec == g->cur && !ls->is_weak && fo == stmt + f.sym_at &&
+                    labs(ls->value - cur_off(g)) < 32000)
+                    return NULL;
+            }
             /* (an `.equ` constant is not an address: substitution writes
              * its value, which the statement assembler computes with) */
             struct sym *cs = g->tgt->symform_abs || g->tgt->is_transfer
@@ -1527,11 +1884,31 @@ static const char *pseudo_symbol(struct gas *g, const char *stmt)
     n = 0;
     while (q[n] && is_symc((unsigned char)q[n])) n++;
     if (!n) return NULL;
+    {
+        /* `la a0, 1f`: the numeric local's generated name, as substitute()
+         * reads it (1f the next definition, 1b the last) -- the operand
+         * was once relocated against an undefined "1f" */
+        int fwd, d = local_ref(q, (size_t)n, &fwd);
+        if (d >= 0) {
+            char nm[32];
+            int inst = fwd ? g->local_n[d] : g->local_n[d] - 1;
+            if (inst < 0) {
+                gerr(g, "'%.*s' refers backwards and there is no earlier "
+                        "'%d:'", (int)n, q, d);
+                inst = 0;
+            }
+            local_name(nm, sizeof nm, d, inst);
+            return sym_get(g, nm, strlen(nm))->name;
+        }
+    }
     return sym_get(g, q, n)->name;
 }
 
 static int pool_entry(struct gas *g, int is_sym, long v, struct sym *sy);
 static long pool_base_prev(struct gas *g);
+static int pool_entry_sz(struct gas *g, int is_sym, long v, struct sym *sy,
+                         int size);
+static long pool_base_prev_sz(struct gas *g, int size);
 
 /* ARM's `ldr rd, =EXPR`: a constant that a move can make is that move
  * (t_ldr_const, as GNU as and LLVM choose it); anything else is a word
@@ -1608,6 +1985,63 @@ static int ldr_literal(struct gas *g, const char *stmt, int pass)
     return 1;
 }
 
+/* AArch64's `ldr Xt, =EXPR` / `ldr Wt, =EXPR`: always a literal -- a
+ * doubleword for an X register, a word for a W -- loaded pc-relative
+ * (LDR literal, +-1 MiB), as GNU as writes it; the pool comes at the
+ * next .ltorg or the section's end. Returns 1 when the statement was one. */
+static int ldr_literal_a64(struct gas *g, const char *stmt, int pass)
+{
+    const char *p = skip_ws((char *)stmt), *r, *e;
+    int bad, k, x, rt;
+    if (strncmp(p, "ldr", 3) || !isspace((unsigned char)p[3]))
+        return 0;
+    p = skip_ws((char *)p + 3);
+    r = p;
+    while (is_symc((unsigned char)*p)) p++;
+    if ((r[0] != 'x' && r[0] != 'w' && r[0] != 'X' && r[0] != 'W') ||
+        p - r < 2 || p - r > 3)
+        return 0;
+    x = r[0] == 'x' || r[0] == 'X';
+    if (!isdigit((unsigned char)r[1]) ||
+        (p - r == 3 && !isdigit((unsigned char)r[2])))
+        return 0;
+    rt = atoi(r + 1);
+    if (rt > 30)
+        return 0;
+    p = skip_ws((char *)p);
+    if (*p != ',')
+        return 0;
+    p = skip_ws((char *)p + 1);
+    if (*p != '=')
+        return 0;
+    p++;
+    long pc = cur_off(g);
+    e = p;
+    struct gval v = gx_eval(g, &e, pass, &bad);
+    if (bad)
+        return 1;
+    if (*skip_ws((char *)e)) {
+        gerr(g, "\"%s\" is not one expression", p);
+        return 1;
+    }
+    map_mark(g, 't');
+    if (v.sec == SEC_ABS && !v.unknown)
+        k = pool_entry_sz(g, 0, v.v, NULL, x ? 8 : 4);
+    else if (v.sec >= 0)
+        k = pool_entry_sz(g, 1, v.v - v.base->value, v.base, x ? 8 : 4);
+    else
+        k = pool_entry_sz(g, 1, v.v, v.base, x ? 8 : 4);
+    long base = pool_base_prev_sz(g, x ? 8 : 4);
+    long off = base < 0 ? 0 : base + (x ? 8L : 4L) * k - pc;
+    if (off < -(1L << 20) || off >= (1L << 20))
+        gerr(g, "the literal pool is %ld bytes away, beyond ldr's reach "
+                "(1 MiB): put a .ltorg nearer", off);
+    unsigned w = (x ? 0x58000000u : 0x18000000u) |
+                 (unsigned)((off >> 2) & 0x7ffff) << 5 | (unsigned)rt;
+    emit_int(g, (long)w, 4);
+    return 1;
+}
+
 /* ---- Xtensa's literal pools ------------------------------------------
  *
  * (See struct gas.) `movi aN, X` whose X is a symbol, or a constant movi's
@@ -1639,6 +2073,7 @@ static void xt_spot(struct gas *g, int key, int pass)
     for (int i = 0; i < g->npxl; i++)
         n += g->pxl[i].key == key;
     if (n) {
+        xt_pad_note(g, cur_off(g), (4 - (cur_off(g) & 3)) & 3);
         while (cur_off(g) & 3)       /* zeros: nothing runs into a pool */
             advance(g, 1);
         if (g->secs[g->cur].align < 4)
@@ -1711,6 +2146,214 @@ static int xt_pool_settled(struct gas *g, long off)
 {
     const struct xspot *sp = &g->xsp[g->xcur[g->cur]];
     return off / 4 < sp->n;
+}
+
+/* Xtensa: the first instruction of a zero-overhead loop's body must not
+ * cross a 4-byte fetch boundary, and GNU as gets it there even with
+ * --no-target-align: with fill after the nearest jump before the loop
+ * that nothing falls through (j, jx, ret, retw), or else by widening the
+ * narrow instructions just before the `loop`, a byte each. `lbeg` is
+ * where the body starts this pass; what is widened or filled stays so,
+ * and the passes settle again. */
+static int xt_no_fallthrough(const char *t)
+{
+    static const char *const j[] = { "j", "jx", "ret", "ret.n", "retw", "retw.n",
+                                     "rfe", "rfi", NULL };
+    const char *p = skip_ws((char *)t);
+    size_t n = 0;
+    if (*p == '_') p++;
+    while (p[n] && !isspace((unsigned char)p[n])) n++;
+    for (int k = 0; j[k]; k++)
+        if (strlen(j[k]) == n && !strncmp(p, j[k], n))
+            return 1;
+    return 0;
+}
+
+static void xt_align_loop(struct gas *g, const struct gline *lines,
+                          const char *text, long lbeg)
+{
+    const char *p = skip_ws((char *)text);
+    long size = 3, need = 0;
+    int k;
+    if (strncmp(p, "loop", 4) || !(p[4] == ' ' || p[4] == '\t' ||
+                                   !strncmp(p + 4, "nez", 3) || !strncmp(p + 4, "gtz", 3)))
+        return;
+    /* the body's first instruction: its size last pass, or three */
+    for (k = g->li + 1; k < g->nwide; k++)
+        if (g->lsize[k] > 0) { size = g->lsize[k]; break; }
+    while ((lbeg + need) % 4 + size > 4 && need < 4)
+        need++;
+    if (!need)
+        return;
+    /* fill after a jump nothing falls through, within the function */
+    for (k = g->li - 1; k >= 0 && k > g->li - 200; k--) {
+        const char *t = skip_ws((char *)lines[k].text);
+        if (!strncmp(t, ".type", 5) || !strncmp(t, ".align", 6) ||
+            !strncmp(t, ".p2align", 8) || !strncmp(t, ".section", 8) ||
+            !strncmp(t, ".literal_position", 17))
+            break;
+        if (g->lsize[k] > 0 && xt_no_fallthrough(t)) {
+            if (g->xgap[k] + need > 3)
+                break;              /* (absorbed elsewhere: widen instead) */
+            g->xgap[k] += need;
+            g->grew = 1;
+            return;
+        }
+    }
+    for (k = g->li - 1; k >= 0 && need > 0; k--) {
+        if (g->lsize[k] < 0)
+            continue;
+        if (g->lsize[k] == 2 && !g->wide[k]) {
+            g->wide[k] = 1;
+            g->grew = 1;
+            need--;
+        } else if (g->lsize[k] != 3 && g->lsize[k] != 0)
+            break;                  /* data, or a pool: no further back */
+    }
+}
+
+/* GNU as's .xt.lit: where each literal pool is, an (address, size) pair
+ * per pool, the address relocated -- what objdump reads to show a pool as
+ * data, and GNU ld's relaxation to find literals. One table per code
+ * section: .xt.lit for .text, .xt.lit.NAME for .text.NAME. */
+static void xt_lit_table(struct gas *g)
+{
+    for (int k = 0; k < g->nxsp; k++) {
+        const struct xspot *sp = &g->xsp[k];
+        char nm[256], lab[64];
+        const char *sn = g->secs[sp->sec].name;
+        int t;
+        struct sym *s;
+        if (sp->n <= 0)
+            continue;
+        snprintf(nm, sizeof nm, ".xt.lit%s", !strncmp(sn, ".text.", 6) ? sn + 5 : "");
+        t = sec_find(g, nm, strlen(nm));
+        if (t < 0)
+            t = sec_add(g, nm, strlen(nm), SHT_PROGBITS, 0);
+        snprintf(lab, sizeof lab, ".Lxtlit\001%d", k);
+        s = sym_get(g, lab, strlen(lab));
+        s->sec = sp->sec;
+        s->value = sp->base;
+        fix_add(g, t, g->secs[t].c.len, lab, R_XTENSA_32, 0);
+        code_u32(&g->secs[t].c, 0);
+        code_u32(&g->secs[t].c, (unsigned long)sp->n * 4);
+    }
+    /* .xt.prop: each code section cut into instructions (2), literals (1)
+     * and fill (4, data) -- (address, size, flags) triples, as GNU as
+     * writes them and objdump reads them to show fill as data */
+    for (int sc = 0; sc < g->nsecs; sc++) {
+        long len = g->secs[sc].c.len, at = 0;
+        char nm[256], lab[64];
+        int t = -1, any = 0;
+        const char *sn = g->secs[sc].name;
+        if (!(g->secs[sc].flags & SHF_EXECINSTR) || !len)
+            continue;
+        for (int k = 0; k < g->nxsp; k++) any |= g->xsp[k].sec == sc && g->xsp[k].n > 0;
+        for (int k = 0; k < g->nxpad; k++) any |= g->xpad[k].sec == sc;
+        if (!any)
+            continue;
+        snprintf(nm, sizeof nm, ".xt.prop%s", !strncmp(sn, ".text.", 6) ? sn + 5 : "");
+        t = sec_find(g, nm, strlen(nm));
+        if (t < 0)
+            t = sec_add(g, nm, strlen(nm), SHT_PROGBITS, 0);
+        snprintf(lab, sizeof lab, ".Lxtprop\001%d", sc);
+        {
+            struct sym *s = sym_get(g, lab, strlen(lab));
+            s->sec = sc;
+            s->value = 0;
+        }
+        while (at < len) {
+            long end = len, kind = 2;
+            /* the region starting here, and where the next one starts */
+            for (int k = 0; k < g->nxsp; k++) {
+                const struct xspot *sp = &g->xsp[k];
+                long b = sp->base, e = sp->base + 4L * sp->n;
+                if (sp->sec != sc || sp->n <= 0) continue;
+                if (b <= at && at < e) { kind = 1; end = e; break; }
+                if (b > at && b < end) end = b;
+            }
+            if (kind == 2)
+                for (int k = 0; k < g->nxpad; k++) {
+                    const struct xpad *p = &g->xpad[k];
+                    if (p->sec != sc) continue;
+                    if (p->off <= at && at < p->off + p->len) {
+                        kind = 4;
+                        end = p->off + p->len;
+                        break;
+                    }
+                    if (p->off > at && p->off < end) end = p->off;
+                }
+            fix_add(g, t, g->secs[t].c.len, lab, R_XTENSA_32, at);
+            code_u32(&g->secs[t].c, 0);
+            code_u32(&g->secs[t].c, (unsigned long)(end - at));
+            code_u32(&g->secs[t].c, (unsigned long)kind);
+            at = end;
+        }
+    }
+}
+
+/* A long call (-mlongcalls): `call8 sym` to a function not placed in this
+ * section is `l32r a8, literal` and `callx8 a8`, the literal in the pool,
+ * as GNU as --longcalls expands it -- with R_XTENSA_ASM_EXPAND on the
+ * l32r, the linker's leave to make it a direct call again. */
+static int xt_call_literal(struct gas *g, const char *stmt, int pass)
+{
+    const char *x, *e;
+    int xlen, bad, inc;
+    char *buf, t[64], err[256];
+    struct gval v;
+    long off, pc = cur_off(g), lit;
+    struct code tmp = { 0 };
+    if (!xtasm_longcalls() || (inc = xtasm_call_operand(stmt, &x, &xlen)) < 0)
+        return 0;
+    buf = xstrndup(x, (size_t)xlen);
+    e = buf;
+    v = gx_eval(g, &e, pass, &bad);
+    if (bad || *skip_ws((char *)e)) {
+        free(buf);
+        return 0;                   /* the plain path reports it */
+    }
+    free(buf);
+    /* a function in this section: the direct call (pass one sees a label
+     * ahead as not placed yet, so it asks again in pass two) */
+    {
+        struct sym *s = v.base;
+        if (s && s->sec == g->cur && !s->is_weak)
+            return 0;               /* (a weak one: the link may replace it) */
+        if (pass == 1 && s && s->sec == SEC_UNDEF) {
+            /* maybe a label further down this section: the pool holds a
+             * word for it either way, so pass two's layout is the same */
+        }
+    }
+    if (v.sec == SEC_ABS && !v.unknown)
+        return 0;
+    off = xt_lit_val(g, v, 0);
+    lit = g->xsp[g->xcur[g->cur]].base + off;
+    if (!xt_pool_settled(g, off)) {
+        advance(g, 6);              /* the pool fills in the next pass */
+        return 1;
+    }
+    snprintf(t, sizeof t, "l32r a%d, .%+ld", inc, lit - pc);
+    g->tgt->at(pc);
+    if (g->tgt->encode(t, &tmp, err, sizeof err) != 0) {
+        gerr_enc(g, pass, "a long call's literal: ", err);
+        free(tmp.p);
+        return 1;
+    }
+    if (pass == 2 && v.base)
+        fix_add(g, g->cur, pc, v.base->name, R_XTENSA_ASM_EXPAND,
+                v.sec >= 0 ? v.v - v.base->value : v.v);
+    emit_bytes(g, tmp.p, tmp.len);
+    free(tmp.p);
+    tmp.p = NULL; tmp.len = tmp.cap = 0;
+    snprintf(t, sizeof t, "callx%d a%d", inc, inc);
+    g->tgt->at(pc + 3);
+    if (g->tgt->encode(t, &tmp, err, sizeof err) != 0)
+        gerr_enc(g, pass, "", err);
+    else
+        emit_bytes(g, tmp.p, tmp.len);
+    free(tmp.p);
+    return 1;
 }
 
 static int xt_movi_literal(struct gas *g, const char *stmt, int pass)
@@ -1851,6 +2494,13 @@ static const char *after_labels(const char *q)
 static void instruction(struct gas *g, char *stmt, int pass)
 {
     long pc = cur_off(g);
+    if (g->tgt->machine == EM_RISCV) {
+        /* `lla`: the pc-relative pair always -- which `la` is here, the
+         * code being position-dependent */
+        char *lp = skip_ws(stmt);
+        if (!strncmp(lp, "lla", 3) && isspace((unsigned char)lp[3]))
+            *lp = ' ';
+    }
     char *ext = NULL;
     char *text;
     int placeheld = 0;
@@ -1859,6 +2509,12 @@ static void instruction(struct gas *g, char *stmt, int pass)
             return;
         map_mark(g, 't');
     }
+    if (g->tgt->machine == EM_AARCH64 && ldr_literal_a64(g, stmt, pass))
+        return;
+    if (g->tgt->machine == EM_AARCH64)
+        map_mark(g, 't');                 /* code: written $x below */
+    if (g->tgt->machine == EM_XTENSA && xt_call_literal(g, stmt, pass))
+        return;
     if (g->tgt->machine == EM_XTENSA && xt_movi_literal(g, stmt, pass))
         return;
     const char *ps = pseudo_symbol(g, stmt);
@@ -1868,19 +2524,43 @@ static void instruction(struct gas *g, char *stmt, int pass)
         return;
     }
     text = substitute(g, stmt, pc, pass, &ext, &placeheld);
+    if (g->tgt->machine == EM_AARCH64)
+        text = a64_fold_imms(g, text, pass);
     struct code tmp = { 0 };
     char err[256];
+
+    /* x86-64, pass one, a name not placed yet in anything but a jump: the
+     * size is the relocated form's -- `buf(%rax)` keeps a 32-bit field
+     * whatever `.+0` would shrink to -- or every label after it is placed
+     * short of where pass two puts it, and branches relax against the
+     * wrong layout */
+    if (pass == 1 && placeheld && g->tgt->machine == EM_X86_64 &&
+        g->tgt->symform && !(g->tgt->is_transfer && g->tgt->is_transfer(stmt))) {
+        struct asm_symform f;
+        if (g->tgt->symform(stmt, &f) && f.encode[0] != '\001' &&
+            g->tgt->encode(f.encode, &tmp, err, sizeof err) == 0) {
+            emit_bytes(g, (const unsigned char *)tmp.p, tmp.len);
+            free(tmp.p);
+            free(text);
+            return;
+        }
+        free(tmp.p);
+        tmp.p = NULL;
+        tmp.len = tmp.cap = 0;
+    }
 
     /* ARM's `ldr rd, label`: a word loaded from a literal this file
      * defines, PC-relative from Align(pc, 4) -- which only this layer can
      * compute, since only it knows where the instruction is. The label
-     * has become `.+N`; it becomes `[pc, #off]`. Always the 32-bit form,
-     * so the length is the same in both passes. */
+     * has become `.+N`; it becomes `[pc, #off]`, and the encoder takes the
+     * 16-bit form where it reaches (relaxed, as a branch is). Also vldr's
+     * literal, and either one conditional. */
     if (g->tgt->machine == EM_ARM && !ext) {
         const char *q = skip_ws(text);
-        int wide = strncmp(q, "ldr.w", 5) == 0 && isspace((unsigned char)q[5]);
-        if (wide || (strncmp(q, "ldr", 3) == 0 && isspace((unsigned char)q[3]))) {
-            const char *r = skip_ws((char *)(q + (wide ? 5 : 3)));
+        int adr;
+        int ml = arm_literal_load(q, &adr);
+        if (ml) {
+            const char *r = skip_ws((char *)(q + ml));
             const char *c = strchr(r, ',');
             const char *d = c ? skip_ws((char *)(c + 1)) : NULL;
             long disp = 0;
@@ -1891,8 +2571,9 @@ static void instruction(struct gas *g, char *stmt, int pass)
                 char buf[96];
                 long off = arm_a32(g) ? disp - 8
                          : (pc + disp) - ((pc + 4) & ~3L);
-                snprintf(buf, sizeof buf, "ldr %.*s, [pc, #%ld]",
-                         (int)(c - r), r, off);
+                snprintf(buf, sizeof buf, adr ? "%.*s %.*s, #%ld"
+                                               : "%.*s %.*s, [pc, #%ld]",
+                         ml, q, (int)(c - r), r, off);
                 free(text);
                 text = xmalloc(strlen(buf) + 1);
                 memcpy(text, buf, strlen(buf) + 1);
@@ -1920,19 +2601,24 @@ static void instruction(struct gas *g, char *stmt, int pass)
     if (g->tgt->at)
         g->tgt->at(pc);
     if (g->tgt->set_level)
-        g->tgt->set_level(pass == 1 ? -1 : g->wide[g->li]);
+        g->tgt->set_level(pass == 1 ? (g->tgt->machine == EM_X86_64 ? -2 : -1)
+                                    : g->wide[g->li]);
     int erc = g->tgt->encode(text, &tmp, err, sizeof err);
     if (g->tgt->set_level) {
         int took = g->tgt->took_level();
         if (pass == 2 && erc == 0 && took > g->wide[g->li]) {
-            g->wide[g->li] = (char)took;   /* never shorter again: passes settle */
+            if (g->grow_ok)
+                g->wide[g->li] = (char)took;   /* never shorter again: passes settle */
             g->grew = 1;
         }
         g->tgt->set_level(0);
     }
+    if (g->tgt->machine == EM_XTENSA && pass == 2 && erc == 0)
+        xt_align_loop(g, g->lines, text, pc + tmp.len);
     if (g->tgt->machine == EM_ARM) {
-        if (tasm_took_wide() && !g->wide[g->li]) {
-            g->wide[g->li] = 1;      /* wide from now on, so passes settle */
+        if (tasm_took_wide() && erc == 0 && !g->wide[g->li]) {
+            if (g->grow_ok)
+                g->wide[g->li] = 1;  /* wide from now on, so passes settle */
             g->grew = 1;
         }
         tasm_set_wide(1);
@@ -1972,11 +2658,6 @@ static void instruction(struct gas *g, char *stmt, int pass)
  * and the .equ/.set values seen so far. A label's address is not known
  * until the passes run, so an .if that depends on one is refused rather
  * than guessed. */
-
-struct gline {
-    char *text;
-    int line;
-};
 
 struct gmacro {
     char *name;
@@ -2633,12 +3314,13 @@ static int pool_cur(struct gas *g)
 
 /* The entry for a value in the current pool of the current section: its
  * index there, shared with an identical one already in it. */
-static int pool_entry(struct gas *g, int is_sym, long v, struct sym *sy)
+static int pool_entry_sz(struct gas *g, int is_sym, long v, struct sym *sy,
+                         int size)
 {
     int pool = pool_cur(g), k = 0;
     for (int i = 0; i < g->nlits; i++) {
         struct glit *l = &g->lits[i];
-        if (l->sec != g->cur || l->pool != pool)
+        if (l->sec != g->cur || l->pool != pool || l->size != size)
             continue;
         if (l->is_sym == is_sym && l->v == v && l->sym == sy)
             return k;
@@ -2653,19 +3335,30 @@ static int pool_entry(struct gas *g, int is_sym, long v, struct sym *sy)
     g->lits[g->nlits].is_sym = is_sym;
     g->lits[g->nlits].v = v;
     g->lits[g->nlits].sym = sy;
+    g->lits[g->nlits].size = size;
     g->nlits++;
     return k;
 }
 
+static int pool_entry(struct gas *g, int is_sym, long v, struct sym *sy)
+{
+    return pool_entry_sz(g, is_sym, v, sy, 4);
+}
+
 /* Where the current pool of the current section starts, as the last pass
  * placed it; -1 before it has been placed once. */
-static long pool_base_prev(struct gas *g)
+static long pool_base_prev_sz(struct gas *g, int size)
 {
     int pool = pool_cur(g);
     for (int i = 0; i < g->nppools; i++)
         if (g->ppools[i].sec == g->cur && g->ppools[i].pool == pool)
-            return g->ppools[i].base;
+            return size == 8 ? g->ppools[i].base8 : g->ppools[i].base;
     return -1;
+}
+
+static long pool_base_prev(struct gas *g)
+{
+    return pool_base_prev_sz(g, 4);
 }
 
 /* Writes the current pool here: word-aligned with zeros (it is data),
@@ -2684,19 +3377,35 @@ static void pool_dump(struct gas *g, int pass)
         g->cappools = g->cappools ? g->cappools * 2 : 8;
         g->pools = xrealloc(g->pools, (size_t)g->cappools * sizeof *g->pools);
     }
-    g->pools[g->npools].sec = g->cur;
-    g->pools[g->npools].pool = pool;
-    g->pools[g->npools].base = cur_off(g);
-    g->npools++;
+    struct gpool *gp = &g->pools[g->npools++];
+    gp->sec = g->cur;
+    gp->pool = pool;
+    gp->base = cur_off(g);
+    gp->base8 = -1;
     if (g->secs[g->cur].align < 4)
         g->secs[g->cur].align = 4;
-    for (int i = 0; i < g->nlits; i++) {
-        struct glit *l = &g->lits[i];
-        if (l->sec != g->cur || l->pool != pool)
-            continue;
-        if (l->is_sym && pass == 2)
-            fix_add(g, g->cur, cur_off(g), l->sym->name, g->tgt->r_abs32, l->v);
-        emit_int(g, l->is_sym ? 0 : l->v, 4);
+    /* the words, then (AArch64's `ldr xN, =`) the doublewords, aligned:
+     * the order GNU as writes its two pools in */
+    for (int size = 4; size <= 8; size += 4) {
+        int first = 1;
+        for (int i = 0; i < g->nlits; i++) {
+            struct glit *l = &g->lits[i];
+            if (l->sec != g->cur || l->pool != pool || l->size != size)
+                continue;
+            if (first && size == 8) {
+                while (cur_off(g) & 7)
+                    advance(g, 1);
+                gp = &g->pools[g->npools - 1];
+                gp->base8 = cur_off(g);
+                if (g->secs[g->cur].align < 8)
+                    g->secs[g->cur].align = 8;
+            }
+            first = 0;
+            if (l->is_sym && pass == 2)
+                fix_add(g, g->cur, cur_off(g), l->sym->name,
+                        size == 8 ? g->tgt->r_abs64 : g->tgt->r_abs32, l->v);
+            emit_int(g, l->is_sym ? 0 : l->v, size);
+        }
     }
     g->poolno[g->cur]++;
 }
@@ -2744,7 +3453,7 @@ static int directive(struct gas *g, char *p, int pass)
         char *e = arg, *nm = arg;
         size_t nn;
         Elf64_Word ty;
-        Elf64_Xword fl;
+        Elf64_Xword fl, entsize = 0;
         int k, explicit_flags = 0, explicit_type = 0;
         if (*arg == '"') {
             nm = ++arg;
@@ -2848,7 +3557,7 @@ static int directive(struct gas *g, char *p, int pass)
                                *eend != ',')
                             eend++;
                         if (parse_num(ee, eend, &es) && es > 0)
-                            (void)es;
+                            entsize = (Elf64_Xword)es;
                     }
                 }
             }
@@ -2856,13 +3565,24 @@ static int directive(struct gas *g, char *p, int pass)
         k = sec_find(g, nm, nn);
         if (k < 0) {
             k = sec_add(g, nm, nn, ty, fl);
+            if (fl & SHF_MERGE)
+                g->secs[k].entsize = entsize;
         } else if ((explicit_flags && g->secs[k].flags != fl) ||
                    (explicit_type && g->secs[k].type != ty)) {
-            /* GNU as warns and keeps the first; a section whose bytes
-             * would be read under two meanings is refused instead */
-            gerr(g, "section %s is declared again with other flags or type",
-                 g->secs[k].name);
-            return 1;
+            /* GNU as warns and keeps the first declaration's, and GCC
+             * relies on it (an object it places in .text with "a"); a
+             * type that changes PROGBITS to NOBITS is refused, since the
+             * bytes already there would be dropped */
+            if (explicit_type && g->secs[k].type != ty &&
+                (ty == SHT_NOBITS || g->secs[k].type == SHT_NOBITS)) {
+                gerr(g, "section %s is declared again as %s", g->secs[k].name,
+                     ty == SHT_NOBITS ? "@nobits" : "@progbits");
+                return 1;
+            }
+            if (pass == 1 && !g->errors_muted)
+                fprintf(stderr, "%s:%d: warning: section %s declared again with "
+                        "other flags; the first declaration's are kept\n",
+                        g->path, g->line + g->line_base, g->secs[k].name);
         }
         if (DIR(".pushsection")) {
             if (g->nstack == 32) { gerr(g, ".pushsection nests too deep"); return 1; }
@@ -2906,6 +3626,7 @@ static int directive(struct gas *g, char *p, int pass)
                 sy->is_global = 1;       /* a weak symbol is a global one */
             } else if (DIR(".local")) {
                 sy->is_global = 0;
+                sy->local_decl = 1;
             } else {
                 sy->vis = DIR(".hidden") ? 2 : DIR(".internal") ? 1 : 3;
             }
@@ -3068,6 +3789,13 @@ static int directive(struct gas *g, char *p, int pass)
              "an A- or R-profile one", DIR(".arm") ? ".arm" : ".code 32");
         return 1;
     }
+#if FAMILY_BUILT(riscv)
+    /* `.option rvc`/`norvc`/`push`/`pop`: whether the instructions that
+     * follow take their 16-bit forms (the others -- relax, pic, arch --
+     * are accepted below and change nothing here) */
+    if (DIR(".option") && g->tgt->machine == EM_RISCV && rvasm_option(arg))
+        return 1;
+#endif
     if (DIR(".file") || DIR(".ident") || DIR(".cfi_startproc") ||
         DIR(".cfi_endproc") || DIR(".syntax") || DIR(".thumb") ||
         DIR(".arm") ||
@@ -3077,6 +3805,53 @@ static int directive(struct gas *g, char *p, int pass)
         DIR(".force_thumb") || DIR(".loc") || DIR(".cfi_sections") ||
         !strncmp(name, ".cfi_", 5))
         return 1;      /* accepted and carried no further */
+    /* clang 21's `.prefalign LOG2, END, nop`: an alignment the function
+     * would like, not one anything depends on -- the `.p2align` before
+     * it is the one that holds. And `.att_syntax [prefix]`, x86's syntax
+     * as this assembler reads it already. */
+    if (DIR(".att_syntax") && g->tgt->machine == EM_X86_64)
+        return 1;
+    /* clang 21's `.prefalign LOG2, END, FILL`: the function from here to
+     * END is aligned to 2^LOG2, or to its own size rounded up to a power
+     * of two when that is less -- a five-byte function is not given
+     * eleven bytes of padding. Its size is the pass before's (the passes
+     * repeat until the layout settles); the first pass takes none, as it
+     * takes the short form of a branch. FILL is `nop`, the machine's, or
+     * a byte. */
+    if (DIR(".prefalign")) {
+        long lg;
+        const char *q = arg;
+        if (!gx_abs_now(g, &q, pass, &lg, "the alignment"))
+            return 1;
+        if (lg < 0 || lg > 16) {
+            gerr(g, ".prefalign %ld: the exponent must be 0..16", lg);
+            return 1;
+        }
+        long want = 1L << lg;
+        q = skip_ws((char *)q);
+        if (*q == ',') {
+            const char *e = skip_ws((char *)q + 1), *ee = e;
+            while (*ee && is_symc((unsigned char)*ee)) ee++;
+            struct sym *end = ee > e ? sym_find(g, e, (size_t)(ee - e)) : NULL;
+            long st = g->prefstart[g->li];
+            if (end && end->sec == g->cur && st >= 0) {
+                long size = end->value - st, p2 = 1;
+                while (p2 < size && p2 < want) p2 *= 2;
+                if (size >= 1 && p2 < want) want = p2;
+            } else {
+                /* the first look, with no size yet: optimistic, as a
+                 * branch is -- the passes repeat until the layout holds */
+                want = 1;
+            }
+        }
+        if (want > 1) do_align(g, want);
+        g->prefstart[g->li] = cur_off(g);
+        return 1;
+    }
+    if (DIR(".intel_syntax") && g->tgt->machine == EM_X86_64) {
+        gerr(g, ".intel_syntax: this assembler reads AT&T syntax only");
+        return 1;
+    }
     /* The ARM EHABI unwind directives describe how to unwind THROUGH this
      * code when a C++ exception does; they produce .ARM.exidx entries and
      * nothing that runs. A startup file marks its handlers with them.
@@ -3091,7 +3866,7 @@ static int directive(struct gas *g, char *p, int pass)
         return 1;
     /* the literal pool so far, here (`ldr rd, =EXPR`) */
     if (DIR(".ltorg") || DIR(".pool")) {
-        if (g->tgt->machine == EM_ARM)
+        if (g->tgt->machine == EM_ARM || g->tgt->machine == EM_AARCH64)
             pool_dump(g, pass);
         return 1;
     }
@@ -3133,9 +3908,11 @@ static int directive(struct gas *g, char *p, int pass)
         do_align(g, al > 0 ? al : 1);
         sy->sec = SEC_BSS;
         sy->value = cur_off(g);
+        sy->stamp = g->stamp;
         sy->size = sz;
         sy->is_object = 1;
-        if (DIR(".comm")) sy->is_global = 1;
+        /* (`.local x` then `.comm x`: a local in .bss, as GNU as makes it) */
+        if (DIR(".comm") && !sy->local_decl) sy->is_global = 1;
         advance(g, sz);
         g->cur = save;
         return 1;
@@ -3205,9 +3982,19 @@ static int directive(struct gas *g, char *p, int pass)
         advance(g, to - cur_off(g));
         return 1;
     }
+    /* .half is RISC-V's, SPARC's and MIPS's; GNU as knows no such
+     * directive on ARM, AArch64 or x86-64 (.hword, .short there) */
+    if (DIR(".half") && (g->tgt->machine == EM_ARM ||
+                         g->tgt->machine == EM_AARCH64 ||
+                         g->tgt->machine == EM_X86_64)) {
+        gerr(g, "unknown directive .half: this target's halfword is .hword "
+                "or .short");
+        return 1;
+    }
     if (DIR(".byte") || DIR(".short") || DIR(".half") || DIR(".hword") ||
         DIR(".word") || DIR(".long") || DIR(".int") || DIR(".quad") ||
-        DIR(".dword") || DIR(".2byte") || DIR(".4byte") || DIR(".8byte")) {
+        DIR(".dword") || DIR(".2byte") || DIR(".4byte") || DIR(".8byte") ||
+        DIR(".xword")) {
         map_mark(g, 'd');
         /* `.word` is the MACHINE's word, which is two bytes on AVR and four
          * everywhere else here -- GNU as does the same, and a `.word` read
@@ -3216,7 +4003,8 @@ static int directive(struct gas *g, char *p, int pass)
         int width = DIR(".byte") ? 1
                   : (DIR(".short") || DIR(".half") || DIR(".hword") ||
                      DIR(".2byte")) ? 2
-                  : (DIR(".quad") || DIR(".dword") || DIR(".8byte")) ? 8
+                  : (DIR(".quad") || DIR(".dword") || DIR(".8byte") ||
+                     DIR(".xword")) ? 8
                   : DIR(".word") ? wordw : 4;
         const char *q = arg;
         while (*skip_ws((char *)q)) {
@@ -3236,9 +4024,40 @@ static int directive(struct gas *g, char *p, int pass)
                     v = skip_ws((char *)w + 2);
                 }
             }
+            /* ARM's relocation operators on a data word: `sym(target1)`
+             * in .init_array, `sym(prel31)` in an unwind table */
+            int arm_rt = 0;
+            if (g->tgt->machine == EM_ARM && width == 4) {
+                static const struct { const char *n; int rt; } ops[] = {
+                    { "target1", R_ARM_TARGET1 }, { "target2", R_ARM_TARGET2 },
+                    { "prel31", R_ARM_PREL31 }, { "sbrel", R_ARM_SBREL32 },
+                    { "got", R_ARM_GOT_BREL }, { "gotoff", R_ARM_GOTOFF32 },
+                    { "got_prel", R_ARM_GOT_PREL }, { "tpoff", R_ARM_TLS_LE32 },
+                    { "gottpoff", R_ARM_TLS_IE32 }, { "tlsgd", R_ARM_TLS_GD32 },
+                    { "tlsldm", R_ARM_TLS_LDM32 }, { "tlsldo", R_ARM_TLS_LDO32 },
+                    { NULL, 0 }
+                };
+                size_t L = strlen(one);
+                while (L && isspace((unsigned char)one[L - 1])) L--;
+                char *lp = L && one[L - 1] == ')' ? strrchr(one, '(') : NULL;
+                for (int k = 0; lp && !arm_rt && ops[k].n; k++) {
+                    size_t n = strlen(ops[k].n), i = 0;
+                    if ((size_t)(one + L - 1 - (lp + 1)) != n)
+                        continue;
+                    while (i < n && tolower((unsigned char)lp[1 + i]) == ops[k].n[i])
+                        i++;
+                    if (i == n) {
+                        arm_rt = ops[k].rt;
+                        *lp = 0;
+                    }
+                }
+            }
             struct gval gv = gx_eval(g, &v, pass, &bad);
             if (!bad && *skip_ws((char *)v))
                 gerr(g, "\"%s\" is not one expression", one), bad = 1;
+            if (!bad && arm_rt && (gv.sec == SEC_ABS || gv.unknown) && !gv.unknown)
+                gerr(g, "\"%s\": a relocation operator needs a symbol", one),
+                    bad = 1;
             if (!bad && pm && width != 2)
                 gerr(g, "\"%s\": a program-memory address is two bytes",
                      one), bad = 1;
@@ -3253,6 +4072,11 @@ static int directive(struct gas *g, char *p, int pass)
                     gerr(g, "\"%s\" is %ld, which does not fit in %d byte%s",
                          one, gv.v, width, width == 1 ? "" : "s"), bad = 1;
             }
+            if (!bad && !gv.unknown && gv.sec != SEC_ABS &&
+                sec_is_nobits(g, g->cur))
+                gerr(g, "\"%s\" is an address, and %s is NOBITS: it holds "
+                        "no data to relocate", one, g->secs[g->cur].name),
+                    bad = 1;
             if (!bad && pm && gv.sec == SEC_ABS) {
                 emit_int(g, gv.v >> 1, width);
             } else if (bad || gv.sec == SEC_ABS || gv.unknown) {
@@ -3265,7 +4089,7 @@ static int directive(struct gas *g, char *p, int pass)
             } else {
                 /* An ADDRESS in a data word: a relocation, against the
                  * label it is relative to or the external symbol. */
-                int rt = width == 8 ? g->tgt->r_abs64
+                int rt = arm_rt ? arm_rt : width == 8 ? g->tgt->r_abs64
                        : width == 2 ? g->tgt->r_abs16 : g->tgt->r_abs32;
                 if (width != 2 && width != 4 && width != 8)
                     gerr(g, "a symbol address needs a 2-, 4- or 8-byte slot");
@@ -3376,6 +4200,32 @@ static int directive(struct gas *g, char *p, int pass)
         xt_literal_dir(g, arg, pass);
         return 1;
     }
+    /* m68k's .swbeg: a switch table's mark for SVR4 COFF tools, nothing
+     * in ELF -- GNU as writes no bytes for it either */
+    if (g->tgt->machine == EM_68K && DIR(".swbeg"))
+        return 1;
+    /* .base64 "...": the bytes it encodes (GNU as 2.43's) */
+    if (DIR(".base64")) {
+        static const char tab[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        const char *q = skip_ws(arg);
+        unsigned long acc = 0;
+        int bits = 0;
+        if (*q != '"') { gerr(g, ".base64 takes a quoted string"); return 1; }
+        map_mark(g, 'd');
+        for (q++; *q && *q != '"'; q++) {
+            const char *c = strchr(tab, *q);
+            if (*q == '=')
+                break;
+            if (!c) { gerr(g, ".base64: '%c' is not base64", *q); return 1; }
+            acc = acc << 6 | (unsigned long)(c - tab);
+            bits += 6;
+            if (bits >= 8) {
+                bits -= 8;
+                emit_int(g, (long)(acc >> bits & 0xff), 1);
+            }
+        }
+        return 1;
+    }
     if (g->tgt->machine == EM_XTENSA && (DIR(".begin") || DIR(".end"))) {
         static const char *const ok[] = {
             "literal_prefix", "no-transform", "transform", "no-longcalls",
@@ -3383,22 +4233,35 @@ static int directive(struct gas *g, char *p, int pass)
             "no-absolute-literals", "no-target-align", "target-align", NULL
         };
         size_t wl = 0;
-        int k;
+        int k, continue_ok = 0;
         while (arg[wl] && !isspace((unsigned char)arg[wl]))
             wl++;
         for (k = 0; ok[k]; k++)
             if (strlen(ok[k]) == wl && !strncmp(arg, ok[k], wl))
                 break;
-        if (!ok[k])
+        /* the ones that change what the statements become, as a region */
+        {
+            int beg = DIR(".begin");
+            if (wl == 12 && !strncmp(arg, "no-transform", 12))
+                xtasm_set_transform(!beg);
+            else if (wl == 9 && !strncmp(arg, "transform", 9))
+                xtasm_set_transform(beg);
+            else if (wl == 9 && !strncmp(arg, "longcalls", 9)) {
+                if (beg) g->xlong_saved = xtasm_longcalls();
+                xtasm_set_longcalls(beg ? 1 : g->xlong_saved);
+                continue_ok = 1;
+            } else if (wl == 12 && !strncmp(arg, "no-longcalls", 12)) {
+                if (beg) g->xlong_saved = xtasm_longcalls();
+                xtasm_set_longcalls(beg ? 0 : g->xlong_saved);
+            }
+        }
+        if (!ok[k] && !continue_ok)
             gerr(g, "%.*s %.*s is not supported: %s", (int)nlen, name,
                  (int)wl, arg,
-                 !strncmp(arg, "longcalls", 9)
-                 ? "a long call is an l32r and a callx, which this "
-                   "assembler does not make of a call; write them"
-                 : !strncmp(arg, "absolute-literals", 17)
+                 !strncmp(arg, "absolute-literals", 17)
                  ? "literals are PC-relative (l32r) here"
                  : "this assembler knows literal_prefix, (no-)transform, "
-                   "no-longcalls, (no-)schedule, (no-)density and "
+                   "(no-)longcalls, (no-)schedule, (no-)density and "
                    "(no-)target-align");
         return 1;
     }
@@ -3430,6 +4293,11 @@ static int directive(struct gas *g, char *p, int pass)
          * where mtvec needs four, and a Cortex-M vector table's `.align 7`
          * asked for a multiple of seven. */
         if (DIR(".balign") || DIR(".balignw") || DIR(".balignl")) {
+            if (v > 0 && (v & (v - 1))) {          /* as GNU as refuses it */
+                gerr(g, "%.*s %ld: the alignment is not a power of 2",
+                     (int)nlen, name, v);
+                return 1;
+            }
             if (v > 0) do_align(g, v);
         } else if (DIR(".align") && (g->tgt->machine == EM_XTENSA ||
                                      g->tgt->machine == EM_RX ||
@@ -3476,6 +4344,9 @@ static void pass_over(struct gas *g, const struct gline *lines, int nlines,
      * makes every forward reference in pass two pick the instance after the
      * last one in the file, which is a jump to nowhere. */
     memset(g->local_n, 0, sizeof g->local_n);
+    g->lines = lines;
+    g->stamp++;
+    g->nxpad = 0;
     if (g->tgt->reset)
         g->tgt->reset();
     g->cur = SEC_TEXT;
@@ -3522,7 +4393,27 @@ static void pass_over(struct gas *g, const struct gline *lines, int nlines,
         }
     }
 
-    for (int li = 0; li < nlines; li++) {
+    int lsec = -1;
+    long lstart = 0;
+    for (int li = 0; li <= nlines; li++) {
+        /* what the line before took, if it stayed in one section */
+        if (li > 0 && g->lsize && li - 1 < g->nwide && !g->lfail)
+            g->lsize[li - 1] = g->cur == lsec ? cur_off(g) - lstart : -1;
+        g->lfail = 0;
+        /* Xtensa: the fill a loop's alignment put after a jump (never run) */
+        if (li > 0 && g->xgap && li - 1 < g->nwide && g->xgap[li - 1]) {
+            xt_pad_note(g, cur_off(g), g->xgap[li - 1]);
+            advance(g, g->xgap[li - 1]);
+        }
+        if (li == nlines)
+            break;
+        lsec = g->cur;
+        lstart = cur_off(g);
+        if (g->lpc && li < g->nwide) {
+            g->prev_pc = g->lpc[li];
+            g->lpc[li] = lstart;
+        } else
+            g->prev_pc = -1;
         char *line = xstrndup(lines[li].text, strlen(lines[li].text));
         g->line = lines[li].line;
         g->li = li;
@@ -3569,6 +4460,7 @@ static void pass_over(struct gas *g, const struct gline *lines, int nlines,
                     s = sym_get(g, nm, strlen(nm));
                     s->sec = g->cur;
                     s->value = cur_off(g);
+                    s->stamp = g->stamp;
                     q = skip_ws(c + 1);
                     continue;
                 }
@@ -3577,6 +4469,7 @@ static void pass_over(struct gas *g, const struct gline *lines, int nlines,
                     gerr(g, "label '%s' is defined twice", s->name);
                 s->sec = g->cur;
                 s->value = cur_off(g);
+                s->stamp = g->stamp;
                 if (g->thumb_func_next) {
                     s->is_func = 1;
                     g->thumb_func_next = 0;
@@ -3618,7 +4511,7 @@ static void pass_over(struct gas *g, const struct gline *lines, int nlines,
         free(line);
     }
     /* each section's last pool, at its end */
-    if (g->tgt->machine == EM_ARM) {
+    if (g->tgt->machine == EM_ARM || g->tgt->machine == EM_AARCH64) {
         int save = g->cur;
         for (int k = 0; k < g->nsecs; k++) {
             g->cur = k;
@@ -3639,6 +4532,10 @@ static void pass_over(struct gas *g, const struct gline *lines, int nlines,
     if (g->tgt->open && g->tgt->open())
         gerr(g, "an IT block is still owed instructions at the end of the "
                 "file");
+#if FAMILY_BUILT(riscv)
+    if (g->tgt->machine == EM_RISCV)
+        rvasm_gas_done();     /* inline asm after this file is not compressed */
+#endif
     if (g->tgt->machine == EM_XTENSA)
         xt_pool_check(g);
 }
@@ -3673,6 +4570,9 @@ static int write_object(struct gas *g, const char *out_path)
             used[g->syms[i].sec] = 1;
     for (i = 0; i < g->nfix; i++)
         used[g->fix[i].sec] = 1;
+    /* (Xtensa's R_XTENSA_32 keeps its addend in the relocation, as
+     * EmbCC's compiled objects do; GNU as writes it into the word, and
+     * embld and GNU ld both add the word and the addend, so either links) */
     for (i = 0; i < g->nsecs; i++) {
         struct gsec *sc = &g->secs[i];
         long al = sc->align;
@@ -3686,6 +4586,8 @@ static int write_object(struct gas *g, const char *out_path)
                                   (Elf64_Xword)(sc->type == SHT_NOBITS
                                                 ? sc->size : sc->c.len),
                                   (Elf64_Xword)al);
+        if (sc->entsize)
+            elfw_set_entsize(w, ndx[i], (unsigned long)sc->entsize);
     }
 
     /* `.set a, b` / `.thumb_set a, b`: a takes b's place, now that b has
@@ -3726,14 +4628,21 @@ static int write_object(struct gas *g, const char *out_path)
     char *keep = xcalloc((size_t)(g->nsyms ? g->nsyms : 1), 1);
     /* (only a DATA word: a branch or a call names the label itself, as
      * clang's and GNU's assemblers do) */
-#define DATA_RELOC(f) ((f)->type == g->tgt->r_abs32 || \
+#define DATA_RELOC(f) (g->tgt->machine != EM_RX && /* (RX names the label) */ \
+                       ((f)->type == g->tgt->r_abs32 || \
                        (f)->type == g->tgt->r_abs64 || \
-                       ((f)->type == g->tgt->r_abs16 && g->tgt->r_abs16))
+                       ((f)->type == g->tgt->r_abs16 && g->tgt->r_abs16) || \
+                       (g->tgt->machine == EM_X86_64 && x86_secsym_reloc((f)->type))))
+    /* ...but not in a SHF_MERGE section with an addend: the linker moves
+     * each string on its own, and `.LC3-4` read as section+offset-4 is
+     * the string before. GNU as and llvm-mc keep the label then, and so
+     * does EmbCC's -c (str_reloc), so either assembles -S into its object. */
+#define MERGE_KEEPS(f, s) ((g->secs[(s)->sec].flags & SHF_MERGE) && (f)->addend)
     for (i = 0; i < g->nfix; i++) {
         struct sym *s = sym_find(g, g->fix[i].sym, strlen(g->fix[i].sym));
         if (!s) continue;
         if (!s->is_global && s->sec >= 0 && !s->is_func &&
-            DATA_RELOC(&g->fix[i]))
+            DATA_RELOC(&g->fix[i]) && !MERGE_KEEPS(&g->fix[i], s))
             secsym[s->sec] = -1;            /* wanted; index below */
         else
             keep[s - g->syms] = 1;
@@ -3746,15 +4655,20 @@ static int write_object(struct gas *g, const char *out_path)
                                         (Elf64_Uchar)((STB_LOCAL << 4) |
                                                       STT_SECTION),
                                         (Elf64_Half)ndx[i]);
-    /* only in a section with code in it: data alone needs no map (and
-     * clang's assembler writes none there either) */
+    /* only in a section with code in it, or an executable one: data in
+     * .rodata needs no map, and clang's assembler writes none there; but
+     * words in .text -- an instruction written as `.word` -- are marked
+     * $d as clang marks them, so a disassembler shows them as data */
     char *hascode = xcalloc((size_t)g->nsecs, 1);
     for (i = 0; i < g->nmaps; i++)
-        if (g->maps[i].kind == 't')
+        if (g->maps[i].kind == 't' ||
+            (g->tgt->machine == EM_AARCH64 &&     /* (llvm-mc's AArch64 marks those) */
+             (g->secs[g->maps[i].sec].flags & SHF_EXECINSTR)))
             hascode[g->maps[i].sec] = 1;
     for (i = 0; i < g->nmaps; i++)
         if (ndx[g->maps[i].sec] && hascode[g->maps[i].sec])
             elfw_add_symbol(w, g->maps[i].kind != 't' ? "$d"
+                               : g->tgt->machine == EM_AARCH64 ? "$x"
                                : arm_a32(g) ? "$a" : "$t",
                             (Elf64_Addr)g->maps[i].off, 0,
                             (Elf64_Uchar)((STB_LOCAL << 4) | STT_NOTYPE),
@@ -3821,7 +4735,7 @@ static int write_object(struct gas *g, const char *out_path)
         struct fixup *f = &g->fix[i];
         struct sym *s = sym_find(g, f->sym, strlen(f->sym));
         if (s && !s->is_global && s->sec >= 0 && !s->is_func &&
-            secsym[s->sec] > 0 && DATA_RELOC(f)) {
+            secsym[s->sec] > 0 && DATA_RELOC(f) && !MERGE_KEEPS(f, s)) {
             elfw_add_rela(w, ndx[f->sec], (Elf64_Addr)f->off, secsym[s->sec],
                           f->type, f->addend + s->value);
             continue;
@@ -3851,15 +4765,25 @@ static int write_object(struct gas *g, const char *out_path)
      * disassembler took a .S object for avr0, which has no lds or sts */
     if (g->tgt->machine == EM_LOONGARCH || g->tgt->machine == EM_XTENSA ||
         g->tgt->machine == EM_TRICORE || g->tgt->machine == EM_RX ||
-        g->tgt->machine == EM_68K || g->tgt->machine == EM_AVR)
+        g->tgt->machine == EM_AVR)
         elfw_set_flags(w, target_elf_flags(target_get()));
+    /* ColdFire: ISA_A, as compiled code is, unless the file uses an ISA_A+
+     * instruction -- then A+, so a disassembler and EmbLD know */
+#if FAMILY_BUILT(m68k)
+    if (g->tgt->machine == EM_68K)
+        elfw_set_flags(w, cfasm_isa_aplus()
+                          ? (target_elf_flags(target_get()) & ~0x0fUL) | 0x03UL
+                          : target_elf_flags(target_get()));
+#endif
     /* RISC-V: the float ABI -mabi= names, as GNU as records it. Without
      * it a .S built for ilp32f/lp64d was a soft-float object, and EmbLD
-     * refused to link it with the C it was written for. (Not RVC: this
-     * assembler does not compress.) */
+     * refused to link it with the C it was written for. RVC when the C
+     * extension was on (the -march, or a .option rvc), as GNU as marks it */
+#if FAMILY_BUILT(riscv)
     if (g->tgt->machine == EM_RISCV)
-        elfw_set_flags(w, target_elf_flags(target_get()) &
-                          EF_RISCV_FLOAT_ABI_MASK);
+        elfw_set_flags(w, (target_elf_flags(target_get()) & EF_RISCV_FLOAT_ABI_MASK) |
+                          (rvasm_rvc_used() ? EF_RISCV_RVC : 0));
+#endif
     if (g->tgt->machine == EM_MIPS)
         elfw_set_flags(w, target_elf_flags(target_get()));
     /* ...and what the object says about itself, as a compiled one does
@@ -3881,13 +4805,13 @@ static int write_object(struct gas *g, const char *out_path)
 #if FAMILY_BUILT(riscv)
 static const struct gas_target RISCV_GAS = {
     EM_RISCV, 0, rvasm_assemble, rvasm_gpr,
-    R_RISCV_CALL, R_RISCV_PCREL_HI20, R_RISCV_PCREL_LO12_I,
+    R_RISCV_CALL_PLT, R_RISCV_PCREL_HI20, R_RISCV_PCREL_LO12_I,
     R_RISCV_32, R_RISCV_64,
-    /* no 16-bit pointer, `.word` is four bytes, and no symbol
-     * forms beyond the ones above. */
-    0, 0, NULL, 0,
-    0, rvasm_is_word, NULL, NULL, NULL,
-    0, NULL, NULL, NULL, NULL, NULL
+    /* no 16-bit pointer, `.word` is four bytes; beyond call/la/tail, the
+     * % operators are rvasm_symform's */
+    0, 0, rvasm_symform, 0,
+    0, rvasm_is_word, rvasm_reset, NULL, NULL,
+    0, rvasm_set_level, rvasm_took_level, NULL, NULL, NULL
 };
 #endif
 
@@ -3927,14 +4851,15 @@ static const struct gas_target A32_GAS = {
  * covers it once the machine is allowed through. */
 #if FAMILY_BUILT(aarch64)
 static const struct gas_target A64_GAS = {
-    EM_AARCH64, 0, a64asm_assemble, a64asm_gpr,
+    EM_AARCH64, 0, a64asm_assemble, a64asm_is_reg,
     R_AARCH64_CALL26, 0, 0,
     R_AARCH64_ABS32, R_AARCH64_ABS64,
-    /* no 16-bit pointer, `.word` is four bytes, and no symbol
-     * forms beyond the ones above; `#` is an immediate's prefix. */
-    0, 0, NULL, 0,
-    1, NULL, NULL, NULL, NULL,
-    0, NULL, NULL, NULL, NULL, NULL
+    /* no 16-bit pointer, `.word` is four bytes; the symbol forms --
+     * adrp, :lo12: and the other modifiers, the branches, a literal --
+     * are a64asm_symform's; `#` is an immediate's prefix. */
+    0, 0, a64asm_symform, 0,
+    1, a64asm_is_word, NULL, NULL, NULL,
+    0, NULL, NULL, NULL, a64asm_is_transfer, NULL
 };
 #endif
 
@@ -4014,7 +4939,7 @@ static const struct gas_target XT_GAS = {
     R_XTENSA_32, 0,
     0, 0, xtasm_symform, 0,
     0, xtasm_is_word, NULL, NULL, xtasm_set_pc,
-    0, NULL, NULL, NULL, NULL, NULL
+    0, xtasm_set_level, xtasm_took_level, NULL, NULL, NULL
 };
 #endif
 
@@ -4190,6 +5115,11 @@ static void gas_run(struct gas *g, struct gexp *gx, const char *text,
         tasm_set_arch(target_thumb_v8m_base() ? TASM_V8M_BASE
                                               : target_thumb_arch());
         tasm_set_dsp(target_thumb_em());
+        {
+            int d32 = 0, vfp = target_arm_vfp(&d32);
+            tasm_set_fpu(!target_thumb_fpu() && !vfp ? 0
+                         : target_thumb_fpu_dp() || vfp ? 2 : 1, d32);
+        }
     }
     /* The macro language first, then pass 1 places the labels and pass 2
      * encodes with the displacements they give. Two passes and not one
@@ -4203,6 +5133,12 @@ static void gas_run(struct gas *g, struct gexp *gx, const char *text,
         free(copy);
     }
     g->wide = xcalloc((size_t)gx->nout + 1, 1);
+    g->prefstart = xmalloc(((size_t)gx->nout + 1) * sizeof *g->prefstart);
+    g->lsize = xmalloc(((size_t)gx->nout + 1) * sizeof *g->lsize);
+    g->lpc = xmalloc(((size_t)gx->nout + 1) * sizeof *g->lpc);
+    g->xgap = xcalloc((size_t)gx->nout + 1, sizeof *g->xgap);
+    for (int k = 0; k <= gx->nout; k++)
+        g->prefstart[k] = g->lsize[k] = g->lpc[k] = -1;
     g->nwide = gx->nout;
     /* Xtensa: a function's pool goes before the labels its `entry` has,
      * as GNU as's --text-section-literals places it */
@@ -4222,13 +5158,36 @@ static void gas_run(struct gas *g, struct gexp *gx, const char *text,
      * tried in its two-byte form and, if it does not reach, widened for
      * good; each pass uses the label positions the one before found. The
      * output is from a pass whose layout matched the one before it. */
-    if (!g->errors)
-        pass_over(g, gx->out, gx->nout, 1);
+    /* Pass one, until its labels stop moving: every branch at its short
+     * form and every alignment's padding computed on that layout (a
+     * function's start, and .prefalign's size, move the code after them).
+     * Pass two then widens only what does not reach in that layout, so
+     * the result is the least one -- the one llvm-mc and GNU as find. */
+    if (!g->errors) {
+        unsigned long long prev1 = 0;
+        for (int k = 0; k < 8 && !g->errors; k++) {
+            if (k)
+                g->errors_muted = 1;   /* pass one's errors are said once */
+            pass_over(g, gx->out, gx->nout, 1);
+            g->errors_muted = 0;
+            unsigned long long h1 = 1469598103934665603ULL;
+            for (int i = 0; i < g->nsyms; i++)
+                h1 = (h1 ^ (unsigned long long)g->syms[i].value) * 1099511628211ULL;
+            if (k && h1 == prev1)
+                break;
+            prev1 = h1;
+        }
+    }
     {
         unsigned long long prev = 0;
         int it;
         for (it = 0; it < 40 && !g->errors; it++) {
             g->grew = 0;
+            /* the first pass two lays out with pass one's labels ahead,
+             * which an alignment's padding may have put elsewhere: what
+             * does not reach there is widened only from the next pass on,
+             * once every label has a pass two place */
+            g->grow_ok = it > 0;
             for (int k = 0; k < g->ndeferr; k++)
                 free(g->deferr[k]);
             g->ndeferr = 0;
@@ -4243,7 +5202,8 @@ static void gas_run(struct gas *g, struct gexp *gx, const char *text,
             if (it > 0 && !g->grew && h == prev) {
                 /* the layout settled: what failed in this pass failed */
                 for (int k = 0; k < g->ndeferr; k++) {
-                    fprintf(stderr, "%s\n", g->deferr[k]);
+                    if (!g->quiet)
+                        fprintf(stderr, "%s\n", g->deferr[k]);
                     g->errors++;
                 }
                 break;
@@ -4329,6 +5289,8 @@ int gas_assemble(const char *in_path, const char *out_path, int preprocess,
     g.tgt = t;
     sec_init(&g);
     gas_run(&g, &gx, text, in_path);
+    if (!g.errors && t->machine == EM_XTENSA)
+        xt_lit_table(&g);
     rc = g.errors ? 1 : write_object(&g, out_path);
     gas_free(&g, &gx);
     if (text != src) free(text);
@@ -4368,8 +5330,10 @@ int gas_template_has_labels(const char *text)
     return 0;
 }
 
-int gas_assemble_inline(const char *file, int line, const char *text,
-                        struct code *out, char *err, int errlen)
+static char *block_name(const struct gas_target *t, const char *name);
+
+static int inline_run(const char *file, int line, const char *text,
+                      struct code *out, char *err, int errlen, int quiet)
 {
     struct gas g;
     struct gexp gx;
@@ -4384,17 +5348,66 @@ int gas_assemble_inline(const char *file, int line, const char *text,
     g.path = file;
     g.line_base = line > 0 ? line - 1 : 0;
     g.tgt = t;
+    g.quiet = quiet;
     sec_init(&g);
+    /* Xtensa: a template's instructions are three bytes each, as the
+     * function's code around it is -- no density form, written or made */
+    int dens = t->machine == EM_XTENSA ? xtasm_density() : 0;
+    if (t->machine == EM_XTENSA)
+        xtasm_set_density(0);
     gas_run(&g, &gx, text, file);
+    if (t->machine == EM_XTENSA)
+        xtasm_set_density(dens);
     for (int i = 0; i < g.nsecs && !g.errors; i++)
         if (i != SEC_TEXT && (g.secs[i].c.len || g.secs[i].size))
-            snprintf(err, (size_t)errlen, "an asm template with labels that "
-                     "puts bytes in section %s is not supported: its bytes "
-                     "are the function's", g.secs[i].name);
-    if (!err[0] && !g.errors && g.nfix)
-        snprintf(err, (size_t)errlen, "an asm template with labels that "
-                 "names the symbol '%s' is not supported: only its own "
-                 "labels; pass an address in an operand", g.fix[0].sym);
+            snprintf(err, (size_t)errlen, "an asm template that puts bytes "
+                     "in section %s is not supported: its bytes are the "
+                     "function's", g.secs[i].name);
+    /* A literal pool would land right after the template's last
+     * instruction, where the function goes on running: GNU as puts one
+     * after the function, which this cannot */
+    if (!err[0] && !g.errors && g.nlits)
+        snprintf(err, (size_t)errlen, "a literal pool (`ldr rd, =VALUE`) in "
+                 "an asm template is not supported: its words would follow "
+                 "the template inside the function; load the address with "
+                 "movw/movt (adrp/add on AArch64), or pass it in an operand");
+    /* ...and Xtensa's, before it: a wide movi or a call through a literal */
+    if (!err[0] && !g.errors && g.nxl)
+        snprintf(err, (size_t)errlen, "a literal in an asm template (a movi "
+                 "of more than 12 bits, an l32r, a long call) is not "
+                 "supported: its word would sit inside the function; pass "
+                 "the value in an operand");
+        /* The relocations, for the object writer: a symbol it names, or a
+     * label of its own (the template's start plus the label's offset,
+     * code_asm_rels then making that the function's text) */
+    for (int i = 0; !err[0] && !g.errors && i < g.nfix; i++) {
+        const struct fixup *f = &g.fix[i];
+        const struct sym *sy = sym_find(&g, f->sym, strlen(f->sym));
+        struct code_rel r;
+        memset(&r, 0, sizeof r);
+        r.off = (int)f->off;
+        r.type = (int)f->type;
+        r.addend = f->addend;
+        if (f->sec != SEC_TEXT) {
+            snprintf(err, (size_t)errlen, "an asm template's relocation "
+                     "outside its code is not supported");
+            break;
+        }
+        if (sy && sy->sec == SEC_TEXT) {
+            r.sym = NULL;
+            r.addend += sy->value;
+        } else if (sy && sy->sec >= 0) {
+            snprintf(err, (size_t)errlen, "'%s' is in another section of "
+                     "the asm template, which is not supported", f->sym);
+            break;
+        } else
+            r.sym = block_name(t, f->sym);
+        if (out->nrel == out->caprel) {
+            out->caprel = out->caprel ? out->caprel * 2 : 8;
+            out->rel = xrealloc(out->rel, (size_t)out->caprel * sizeof *out->rel);
+        }
+        out->rel[out->nrel++] = r;
+    }
     if (!err[0] && !g.errors && g.secs[SEC_TEXT].align > 4)
         snprintf(err, (size_t)errlen, "an alignment of %ld in an asm "
                  "template with labels is not supported: where the "
@@ -4421,6 +5434,44 @@ int gas_assemble_inline(const char *file, int line, const char *text,
     }
     gas_free(&g, &gx);
     return err[0] ? -1 : 0;
+}
+
+int gas_assemble_inline(const char *file, int line, const char *text,
+                        struct code *out, char *err, int errlen)
+{
+    return inline_run(file, line, text, out, err, errlen, 0);
+}
+
+/* A template the target's own assembler refused (rc != 0): assembled by
+ * this one instead, quietly -- a symbol operand (`bl f`, `adrp x0, g`,
+ * `ldr r0, =g`), an expression, a directive the instruction encoder has
+ * no word for. When this one refuses it too, the first refusal stands:
+ * it names the instruction. */
+int gas_inline_retry(int rc, const char *file, int line, const char *text,
+                     struct code *c, char *err, int errlen)
+{
+    struct code t;
+    char e2[512];
+    if (rc == 0 || !target_for_inline())
+        return rc;
+    memset(&t, 0, sizeof t);
+    if (inline_run(file, line, text, &t, e2, (int)sizeof e2, 1) != 0) {
+        free(t.p);
+        free(t.drange);
+        free(t.rel);
+        /* a literal it would have placed inside the function says more
+         * than the instruction encoder's refusal of the statement */
+        if (!strncmp(e2, "a literal", 9))
+            snprintf(err, (size_t)errlen, "%s", e2);
+        return rc;
+    }
+    free(c->p);
+    free(c->drange);
+    free(c->arange);
+    free(c->rel);
+    *c = t;
+    err[0] = 0;
+    return 0;
 }
 
 /* A name the block uses, as the driver knows names: on RX a C symbol is

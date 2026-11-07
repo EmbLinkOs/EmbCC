@@ -40,6 +40,8 @@
 
 /* Assembles a template -- statements, numeric labels -- appending to
  * `out`. Returns 0, or -1 with a message in err[0..errlen). */
+/* -fpu: the core has the RX600 FPU, whose instructions then assemble */
+void rxasm_set_fpu(int on);
 int rxasm_assemble(const char *text, struct code *out, char *err, int errlen);
 
 /* One statement, for src/as/gas.c, at the relaxation level the file
