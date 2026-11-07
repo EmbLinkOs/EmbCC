@@ -147,6 +147,9 @@ jobs:
           if grep -E '^seed [0-9]+: ' fuzz.log; then
             echo "::notice::some seeds were skipped: the host build failed or the generator read uninitialised memory"
           fi
+          if grep -E '^qemu: ' fuzz.log; then
+            echo "::notice::QEMU alone got some programs wrong: they pass translated an instruction at a time (fuzz.log)"
+          fi
           if grep -E '^seed [0-9]+ [a-z0-9]+ -O' fuzz.log; then
             echo "::error::the fuzzer found programs EmbCC gets wrong (fuzz.log, fuzz-out/)"
             exit 1
@@ -158,30 +161,6 @@ jobs:
           path: |
             fuzz.log
             fuzz-out
-
-  # TEMPORARY (removed before this pull request is ready): the nightly
-  # fuzz's seed 152950 failed on the M4 and M0 on Linux and passes on a
-  # Mac with the same commit; the assembly a Linux-built EmbCC makes of it,
-  # to compare.
-  debug-152950:
-    runs-on: ubuntu-26.04
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Install QEMU
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qemu-system-arm
-      - name: Build the compiler, the linker and the runtimes
-        run: make -j"$(getconf _NPROCESSORS_ONLN)" embcc embld rt-embedded
-      - name: Run the seed with every mixed value printed
-        run: sh dbg152950.sh
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: debug-152950
-          path: dbg
 
   # The suite in four shards, each a runner of its own (tests/run.sh,
   # EMBCC_SHARD=i/n): one runner took 80 minutes, four take about a

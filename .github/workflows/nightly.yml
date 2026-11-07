@@ -95,6 +95,9 @@ jobs:
           if grep -E '^seed [0-9]+: ' fuzz.log; then
             echo "::notice::some seeds were skipped: the host build failed or the generator read uninitialised memory"
           fi
+          if grep -E '^qemu: ' fuzz.log; then
+            echo "::notice::QEMU alone got some programs wrong: they pass translated an instruction at a time (fuzz.log)"
+          fi
           # a board that did not return 42 is EmbCC's
           if grep -E '^seed [0-9]+ [a-z0-9]+ -O' fuzz.log; then
             echo "::error::the fuzzer found programs EmbCC gets wrong (fuzz.log, fuzz-out/)"
