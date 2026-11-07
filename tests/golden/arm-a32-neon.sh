@@ -84,6 +84,21 @@ cmp -s "$out/n.txt" "$out/n.ref.txt" || {
 echo "$n NEON statements encode as llvm-mc's: registers, scalars, lists,"
 echo "alignment, every immediate class, vext's scaling, type synonyms"
 
+# ---- what the object claims ---------------------------------------------------
+# `.fpu neon-vfpv4` is VFPv4 and NEONv2 in the build attributes, as llvm-mc
+# writes them: a disassembler reads NEON's encodings only when the object
+# says it has NEON (LLVM 18's objdump printed <unknown> for every one).
+if command -v llvm-readelf >/dev/null 2>&1; then
+    for f in n n.ref; do
+        llvm-readelf -A "$out/$f.o" | grep -A1 -E 'TagName: (FP_arch|Advanced_SIMD_arch)$' |
+            grep Description > "$out/$f.attrs"
+    done
+    [ -s "$out/n.ref.attrs" ] && cmp -s "$out/n.attrs" "$out/n.ref.attrs" || {
+        echo "the build attributes for .fpu neon-vfpv4 are not llvm-mc's:"
+        diff "$out/n.ref.attrs" "$out/n.attrs"; exit 1; }
+    echo "and the object claims VFPv4 and NEONv2, as llvm-mc's does"
+fi
+
 # ---- refusals ------------------------------------------------------------------
 refs() {
     printf '\t.syntax unified\n\t.arm\n\t.fpu neon\n\t%s\n' "$2" > "$out/bad.s"

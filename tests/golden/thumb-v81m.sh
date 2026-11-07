@@ -17,6 +17,8 @@ rm -rf "$out"; mkdir -p "$out"
 fail() { echo "FAIL: $*"; exit 1; }
 MC=$(command -v llvm-mc || true)
 [ -n "$MC" ] || { echo "SKIP: no llvm-mc"; exit 0; }
+# LLVM 18 does not know `vscclrm {..., vpr}`
+skip_if_llvm_old "$MC"
 n=0
 for f in lob mve-scalar; do
     "$EMBCC" --target=thumbv8m.main-none-eabihf -mcpu=cortex-m55 -c "$here/$f.s" \

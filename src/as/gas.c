@@ -49,6 +49,8 @@
 #define tasm_set_dsp(on) ((void)(on))
 #define tasm_set_v81(v, m) ((void)(v), (void)(m))
 #define tasm_set_fpu(l, d) ((void)(l), (void)(d))
+#define arm_attrs_asm_fpu(f, s, h) ((void)(f), (void)(s), (void)(h))
+#define arm_attrs_asm_fpu_clear() ((void)0)
 #endif
 #if !FAMILY_BUILT(xtensa)
 #define xtasm_movi_operand(st, x, len) ((void)(st), (void)(x), (void)(len), -1)
@@ -3940,6 +3942,30 @@ static int directive(struct gas *g, char *p, int pass)
             int sp = has_sub(a, n, "-sp");
             tasm_set_fpu(sp ? 1 : 2, !d16);
         }
+        /* and what the object claims: Tag_FP_arch, Tag_Advanced_SIMD_arch
+         * and Tag_FP_HP_extension as llvm-mc writes them for each name
+         * (read off its objects, not the ABI's prose). Without it an
+         * object of NEON code said VFPv3-D16 and no NEON, and LLVM 18's
+         * objdump would not decode it. */
+        {
+            static const struct { const char *name; signed char fp, simd, hp; } u[] = {
+                { "vfp", 2, 0, 0 }, { "vfpv2", 2, 0, 0 },
+                { "vfpv3", 3, 0, 0 }, { "vfpv3-d16", 4, 0, 0 },
+                { "vfpv3-fp16", 3, 0, 1 }, { "vfpv3-d16-fp16", 4, 0, 1 },
+                { "vfpv3xd", 4, 0, 0 }, { "vfpv3xd-fp16", 4, 0, 1 },
+                { "vfpv4", 5, 0, 0 }, { "vfpv4-d16", 6, 0, 0 },
+                { "fpv4-sp-d16", 6, 0, 0 }, { "fpv5-d16", 8, 0, 0 },
+                { "fpv5-sp-d16", 8, 0, 0 }, { "fp-armv8", 7, 0, 0 },
+                { "neon", 3, 1, 0 }, { "neon-vfpv3", 3, 1, 0 },
+                { "neon-fp16", 3, 1, 1 }, { "neon-vfpv4", 5, 2, 0 },
+                { "neon-fp-armv8", 7, 0, 0 },
+                { "crypto-neon-fp-armv8", 7, 0, 0 },
+                { "softvfp", 0, 0, 0 }, { "none", 0, 0, 0 },
+            };
+            for (size_t k = 0; k < sizeof u / sizeof u[0]; k++)
+                if (strlen(u[k].name) == n && !strncmp(a, u[k].name, n))
+                    arm_attrs_asm_fpu(u[k].fp, u[k].simd, u[k].hp);
+        }
         return 1;
     }
     if (DIR(".file") || DIR(".ident") || DIR(".cfi_startproc") ||
@@ -5758,11 +5784,13 @@ int gas_assemble_text(const char *text, const char *path, const char *out_path,
     g.nlocs = o ? o->nlocs : 0;
     g.nasm = o ? o->nasm : 0;
     sec_init(&g);
+    arm_attrs_asm_fpu_clear();
     gas_run(&g, &gx, text, path);
     if (t->reset)
         t->reset();
     int rc = g.errors ? 1 : o && o->flat ? write_flat(&g, out_path, o->org)
                                          : write_object(&g, out_path);
+    arm_attrs_asm_fpu_clear();
     gas_free(&g, &gx);
     return rc;
 }
@@ -5806,12 +5834,14 @@ int gas_assemble(const char *in_path, const char *out_path, int preprocess,
     g.path = in_path;
     g.tgt = t;
     sec_init(&g);
+    arm_attrs_asm_fpu_clear();
     gas_run(&g, &gx, text, in_path);
     if (t->reset)
         t->reset();                     /* (no mode left for what follows) */
     if (!g.errors && t->machine == EM_XTENSA)
         xt_lit_table(&g);
     rc = g.errors ? 1 : write_object(&g, out_path);
+    arm_attrs_asm_fpu_clear();
     gas_free(&g, &gx);
     if (text != src) free(text);
     free(src);

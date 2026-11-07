@@ -38,6 +38,11 @@ echo "$(wc -c < "$out/m.bin" | tr -d ' ') bytes of 16-, 32- and 64-bit code as l
 # lock and rep among the other prefixes, in llvm-mc's order; a branch to
 # an address (*ABS*); alignment fills in code and data
 for f in prefixes absjump align riprel intel; do
+    # LLVM 18 pads `.balign 8, 0x90` in code with long nops instead of the
+    # fill asked for; EmbCC writes the fill, as LLVM 23 does
+    if [ "$f" = align ] && w=$(llvm_too_old "$MC"); then
+        echo "align.s skipped: $w"; continue
+    fi
     "$EMBCC" --target=x86_64-elf -c "$here/$f.s" -o "$out/$f.o" 2> "$out/$f.err" ||
         fail "EmbCC refused $f.s: $(head -3 "$out/$f.err")"
     "$MC" -triple=x86_64 -mattr=+avx512f -filetype=obj "$here/$f.s" -o "$out/$f.ref.o" || fail "llvm-mc refused $f.s"

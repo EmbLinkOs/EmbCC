@@ -18,6 +18,8 @@ enum {
     Tag_ABI_PCS_R9_use       = 14,
     Tag_ABI_PCS_GOT_use      = 17,
     Tag_FP_arch              = 10,
+    Tag_Advanced_SIMD_arch   = 12,
+    Tag_FP_HP_extension      = 36,
     Tag_ABI_PCS_wchar_t      = 18,
     Tag_ABI_FP_denormal      = 20,
     Tag_ABI_FP_exceptions    = 21,
@@ -92,6 +94,22 @@ static void bu32le(struct buf *b, unsigned long v)
     bput(b, (v >> 24) & 0xff);
 }
 
+/* -1: no `.fpu` seen, the target's unit stands */
+static int asm_fp_arch = -1, asm_simd, asm_hp;
+
+void arm_attrs_asm_fpu(int fp_arch, int simd, int hp)
+{
+    asm_fp_arch = fp_arch;
+    asm_simd = simd;
+    asm_hp = hp;
+}
+
+void arm_attrs_asm_fpu_clear(void)
+{
+    asm_fp_arch = -1;
+    asm_simd = asm_hp = 0;
+}
+
 unsigned char *arm_build_attributes(size_t *len)
 {
     struct buf attrs = { NULL, 0, 0 };
@@ -139,7 +157,13 @@ unsigned char *arm_build_attributes(size_t *len)
      * is Tag_ABI_HardFP_use's to say, below. */
     /* ARMv7-A: VFPv3 is 3 (D16: 4), VFPv4 5 (D16: 6), as clang writes
      * them for -mfpu=vfpv3 ... vfpv4-d16. */
-    if (target_thumb_fpu() && a32) {
+    if (asm_fp_arch >= 0) {
+        /* an assembly file's `.fpu` says it, as llvm-mc and GNU as read it */
+        if (asm_fp_arch)
+            btag(&attrs, Tag_FP_arch, (unsigned long)asm_fp_arch);
+        if (asm_simd)
+            btag(&attrs, Tag_Advanced_SIMD_arch, (unsigned long)asm_simd);
+    } else if (target_thumb_fpu() && a32) {
         int d32, ver = target_arm_vfp(&d32);
         btag(&attrs, Tag_FP_arch, ver == 4 ? (d32 ? 5 : 6) : (d32 ? 3 : 4));
     } else if (target_thumb_fpu())
@@ -174,6 +198,8 @@ unsigned char *arm_build_attributes(size_t *len)
      * code never makes one; the other levels permit them for LDR, STR and
      * LDRH. */
     btag(&attrs, Tag_CPU_unaligned_access, v6 ? 0 : 1);
+    if (asm_fp_arch >= 0 && asm_hp)
+        btag(&attrs, Tag_FP_HP_extension, 1);
 
     /* ---- wrap it: File sub-subsection, vendor subsection, version ----
      *
