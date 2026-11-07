@@ -6,6 +6,7 @@
 # each modified-immediate class, float immediates, shifts, vext's element
 # scaling) and the type spellings llvm-mc takes for one another (vadd.s32
 # is vadd.i32). And what no form takes is refused by name.
+echo "TEST-MARKER arm-a32-neon"
 EMBCC=${EMBCC:-./embcc}
 MC=${EMBCC_LLVM_MC:-llvm-mc}
 OBJDUMP=${EMBCC_LLVM_OBJDUMP:-llvm-objdump}

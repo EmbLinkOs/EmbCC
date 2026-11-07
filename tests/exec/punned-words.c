@@ -59,6 +59,8 @@ __attribute__((noinline)) double from_float(double d, float f)
 
 int main(void)
 {
+    if (sizeof(double) != 8)
+        return 42;      /* RX and AVR: a double is four bytes, no words */
     static const double in[] = { 0.0, -0.0, 1.0, -2.5, 3.141592653589793,
                                  1e-310, 1e300, -7e22 };
     int bad = 0;

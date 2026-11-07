@@ -7,6 +7,7 @@
 # index), comparisons whose predicate is in the mnemonic, the opmask
 # instructions, and an AVX-512 mnemonic's VEX form where no operand needs
 # EVEX (llvm-mc's choice). And a misuse is refused by name.
+echo "TEST-MARKER x86-avx512-asm"
 EMBCC=${EMBCC:-./embcc}
 MC=${EMBCC_LLVM_MC:-llvm-mc}
 OBJDUMP=${EMBCC_LLVM_OBJDUMP:-llvm-objdump}

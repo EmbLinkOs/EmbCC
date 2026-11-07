@@ -61,12 +61,13 @@ done
 
 # Targets LLVM has no disassembler for: the function's -S bytes, which
 # hold the instruction where a body without it does not.
-#   TriCore DEBUG, SYS format: op1 0x0d, op2 0x04 at bits 22-27 -> 0x0100000d
+#   TriCore DEBUG16, SR format -> 0xa000: the short form, which GNU as
+#     picks for `debug` as well (the 32-bit SYS word is 0x0100000d)
 #   Xtensa BREAK 1, 15, RRR: op0 0, t 15, s 1, r 4 -> f0 41 00
 #   RX BRK -> 00, then the RTS (02) that is all of an empty f
 #   ColdFire HALT -> 4a c8
 printf 'void f(void) { __builtin_debugtrap(); }\n' > "$out/one.c"
-for row in "tricore-none-elf 0x0d,0x00,0x00,0x01" "xtensa-esp32-elf 0xf0,0x41,0x00" \
+for row in "tricore-none-elf 0x00,0xa0" "xtensa-esp32-elf 0xf0,0x41,0x00" \
            "rx-elf ^0x00,0x02," "m68k-elf 0x4a,0xc8"; do
     t=${row%% *}; bytes=${row#* }
     "$EMBCC" --target=$t -O2 -S "$out/one.c" -o "$out/one-$t.s" || fail "$t: does not compile"
