@@ -199,6 +199,7 @@ static const struct backend_desc g_backends[] = {
         .family = "TriCore", .codegen = codegen_unit_tricore, .ra_at_o0 = 0,
         .frame_sp = 26, .frame_ra = 27,     /* a10, a11 (d0-d15 are 0-15) */
         .op_calls_helper = tc_op_calls_helper,
+        .ret_units = tc_ret_units,
         .unwind_unwritten = NULL,
         .cxx_exceptions = BACKEND_CXX_EXC_OK,
         .firmware = 1, .ld_scripts = 0,
@@ -212,6 +213,7 @@ static const struct backend_desc g_backends[] = {
         .family = "Xtensa", .codegen = codegen_unit_xtensa, .ra_at_o0 = 0,
         .frame_sp = 1, .frame_ra = 0,       /* a1, a0 */
         .op_calls_helper = xtensa_op_calls_helper,
+        .ret_units = xt_ret_units,
         .unwind_unwritten = NULL,
         .cxx_exceptions = BACKEND_CXX_EXC_OK,
         .firmware = 1, .ld_scripts = 1,
@@ -261,6 +263,7 @@ static const struct backend_desc g_backends[] = {
     [TARGET_RX] = {
         .family = "RX", .codegen = codegen_unit_rx, .ra_at_o0 = 0,
         .op_calls_helper = rx_op_calls_helper,
+        .ret_units = rx_ret_units,
         .unwind_unwritten = "RX .eh_frame",
         .cxx_exceptions = BACKEND_CXX_EXC_NONE,
         .firmware = 1, .ld_scripts = 0,

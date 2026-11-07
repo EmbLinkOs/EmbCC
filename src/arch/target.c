@@ -644,6 +644,17 @@ int target_has_ret_units(void)
     return 1;
 }
 
+/* Which whole-object uses pass_sroa may split across: 0 none, 1 only a
+ * return that becomes its units (free), 2 every boundary. Xtensa's syncing
+ * at the others cost more than it saved (+0.7% of lib/libc), where its
+ * returns as units saved 0.6%. */
+int target_sroa_boundaries(void)
+{
+    if (!target_has_ret_units())
+        return 0;
+    return target_get() == TARGET_XTENSA ? 1 : 2;
+}
+
 int target_ret_units(const struct ir_func *fn, int *off, int *size, int *fp,
                      int max)
 {

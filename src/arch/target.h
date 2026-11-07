@@ -341,6 +341,7 @@ struct ir_func;
 int target_ret_units(const struct ir_func *fn, int *off, int *size, int *fp,
                      int max);
 int target_has_ret_units(void);
+int target_sroa_boundaries(void);
 void target_set_ret_units(int (*f)(const struct ir_func *, int *, int *,
                                    int *, int));
 /* Does the current backend lower this op to a CALL of a runtime helper
@@ -373,6 +374,12 @@ int mips_ret_units(const struct ir_func *fn, int *off, int *size, int *fp,
                    int max);                        /* src/arch/mips/codegen.c */
 int ppc_ret_units(const struct ir_func *fn, int *off, int *size, int *fp,
                   int max);                         /* src/arch/ppc/codegen.c */
+int xt_ret_units(const struct ir_func *fn, int *off, int *size, int *fp,
+                 int max);                          /* src/arch/xtensa/codegen.c */
+int tc_ret_units(const struct ir_func *fn, int *off, int *size, int *fp,
+                 int max);                          /* src/arch/tricore/codegen.c */
+int rx_ret_units(const struct ir_func *fn, int *off, int *size, int *fp,
+                 int max);                          /* src/arch/rx/codegen.c */
 int a64_op_calls_helper(const struct ir_ins *i);    /* src/arch/aarch64/codegen.c */
 int mips_op_calls_helper(const struct ir_ins *i);   /* src/arch/mips/codegen.c */
 int la_op_calls_helper(const struct ir_ins *i);     /* src/arch/loongarch/codegen.c */

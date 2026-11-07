@@ -696,7 +696,8 @@ int pass_sroa(struct ir_func *fn, int report_refusals)
     /* boundaries only where struct returns travel as their units
      * (target_has_ret_units); asked each time, as the target can change
      * between units */
-    int no_bnd = getenv("EMBCC_NO_SROAB") != NULL || !target_has_ret_units();
+    int policy = getenv("EMBCC_NO_SROAB") ? 0 : target_sroa_boundaries();
+    int no_bnd = policy == 0;
     /* p0: the first slot considered -- the parameters too, with the
      * boundaries below */
     int p0 = no_bnd ? nparams : 0;
@@ -966,6 +967,14 @@ int pass_sroa(struct ir_func *fn, int report_refusals)
         if (all) {
             bl.e[k].ret = 1;
             bl.e[k].before = 0;
+        }
+    }
+    /* returns only (target_sroa_boundaries 1): any other boundary, or a
+     * return that cannot be units, keeps the local whole */
+    for (int k = 0; policy == 1 && k < bl.n; k++) {
+        int L = bl.e[k].L;
+        if (cand[L] && !bl.e[k].ret) {
+            cand[L] = 0; why[L] = "whole-object-uses-cost-more";
         }
     }
     for (int k = 0; k < bl.n; k++) {
