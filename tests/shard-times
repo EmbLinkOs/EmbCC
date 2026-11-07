@@ -1,0 +1,17 @@
+# seconds per .sh test, from tests/golden/out/shard-times.txt of a run:
+# tests/run.sh deals the suite's parts by these (EMBCC_SHARD)
+1701 tests/golden/embsim-esp32c3.sh
+1052 tests/golden/exec-boards.sh
+882 tests/golden/ibuf-move.sh
+638 tests/golden/embsim-riscv.sh
+503 tests/golden/thumb-hardfp.sh
+434 tests/golden/embsim-avr.sh
+405 tests/golden/embsim-arduino-zero.sh
+403 tests/golden/thumb-fpu.sh
+403 tests/golden/simd-intrinsics.sh
+382 tests/golden/ir-roundtrip.sh
+369 tests/golden/exec-Os.sh
+359 tests/golden/libc-embedded.sh
+331 tests/golden/embsim.sh
+323 tests/golden/regalloc-O2.sh
+309 tests/golden/cxx-embedded.sh

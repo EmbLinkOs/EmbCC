@@ -34,6 +34,7 @@ which tests a change must pass and how to add one.
 | `make check` | `embcc`, `libc-x86_64`, `libcxx-x86_64` (without the libraries when built without x86, `make TARGETS=`) | `tests/run.sh --exec-only`: the compiled-and-run corpus (`tests/exec/*.c`, `tests/exec/x86_64/*.c`, `tests/cxx/*.cc`) for `x86_64-elf`, or a skip when the compiler has no x86 | while working |
 | `make test` | `embcc`, `embread`, `embld`, `embdbg`, `embls`, `embas`, `libc-x86_64`, `libcxx-x86_64`, `libc-linux-x86_64`, `libcxx-linux-x86_64` | `tests/run.sh`: every shell test in `tests/exec`, `tests/compile`, `tests/golden` and `tests/golden/x86_64`, then the corpus, for `x86_64-elf` | before a commit |
 | `make test-arm64` | `embcc`, `libc-aarch64`, `libcxx-aarch64`, `libc-linux-aarch64`, `libcxx-linux-aarch64` | `tests/run.sh --target=aarch64-elf`: `tests/golden/*.sh`, `tests/golden/aarch64/*.sh`, and the corpus compiled for `aarch64-elf` | before a commit that can affect aarch64 or shared code |
+| `make check-self` | `embcc` | EmbCC compiles every one of its own sources (`SRCS`) with `-std=c99 -Wall -Wextra -Werror -O2` | before a commit that touches `src/`; CI runs it |
 | `make test-libstdcxx` | `embcc` | `tests/golden/cxx-libstdcxx-embcc.sh` for `x86_64-elf` and `aarch64-elf`, with `EMBCC_LIBSTDCXX=1` | opt-in; builds libstdc++ from GCC's sources and takes minutes |
 
 `make check` is not a unit-test suite. There is no separate unit-test
@@ -71,14 +72,34 @@ Two further checks are run by hand:
 ## The runner
 
 ```sh
-tests/run.sh [--target=x86_64-elf|aarch64-elf] [--exec-only] [--embcc=PATH]
+tests/run.sh [--target=x86_64-elf|aarch64-elf] [--exec-only] [--embcc=PATH] [--list]
 ```
 
 `tests/run.sh` must be run from a tree where `./embcc` is built; it exits
 with an error otherwise. The default target is `x86_64-elf`.
 `--exec-only` skips every shell test and runs only the corpus.
 `--embcc=PATH` tests another compiler than `./embcc`, such as one built
-into a different `BUILD` directory.
+into a different `BUILD` directory. `--list` prints the shell tests the run
+would start, and stops.
+
+`EMBCC_SHARD=i/n` runs the i-th of n parts of the suite; CI runs
+`make test` as four parts on four runners. The parts are disjoint and
+together the whole:
+
+- the shell tests are dealt out by duration, longest first, each to the
+  part with the least work so far. The durations are in
+  `tests/shard-times`, one `seconds path` line per test, from a CI run;
+  a test it does not list counts as the median. Every run writes the same
+  form to `tests/golden/out/shard-times.txt`, and each CI part uploads it
+  with its log, so the file is renewed from a run's artifacts when the
+  parts drift apart;
+- a test listed in `tests/shard-split` runs in every part and divides its
+  own work by `EMBCC_SHARD`: `exec-boards.sh` runs every n-th board from
+  the i-th;
+- the exec and C++ corpora are dealt one program at a time.
+
+Each run ends with the fifteen slowest shell tests (`TIME` lines): what
+bounds the wall time.
 
 A compiler built for some target families only (`make TARGETS=`; see
 [Getting started](../manual/getting-started.md#choosing-the-targets))

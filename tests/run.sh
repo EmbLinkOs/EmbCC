@@ -2,7 +2,18 @@
 # Test runner (ARCHITECTURE.md §7).
 #
 #   usage: tests/run.sh [--target=x86_64-elf|aarch64-elf] [--exec-only]
-#                       [--embcc=PATH]
+#                       [--embcc=PATH] [--list]
+#
+# --list prints the .sh tests this run (this part) would run, and stops.
+#
+# EMBCC_SHARD=i/n runs the i-th of n parts of the suite (CI runs four, a
+# runner each). The .sh tests are dealt out by how long each takes --
+# tests/shard-times, seconds per test from a CI run; a test it does not
+# list counts its median -- each to the part with the least so far, in
+# the same order everywhere, so the n parts are disjoint and together the
+# whole. A test named in tests/shard-split runs in every part and divides
+# its own work by EMBCC_SHARD (exec-boards: the boards). The exec and C++
+# corpora are dealt one program at a time.
 #
 # --exec-only skips the .sh tests and runs just the compiled-and-RUN corpus —
 # the quick loop while working on codegen. --embcc= tests another compiler
@@ -42,16 +53,30 @@ set -u
 
 TARGET=x86_64-elf
 EXEC_ONLY=0
+LIST=0
 EMBCC_ARG=
 for a in "$@"; do
     case "$a" in
         --target=*) TARGET=${a#--target=} ;;
         --exec-only) EXEC_ONLY=1 ;;
+        --list) LIST=1 ;;
         --embcc=*) EMBCC_ARG=${a#--embcc=}
                    case $EMBCC_ARG in /*) ;; *) EMBCC_ARG=$PWD/$EMBCC_ARG ;; esac ;;
         *) echo "run.sh: unknown argument '$a'" >&2; exit 1 ;;
     esac
 done
+
+SHARD=${EMBCC_SHARD:-1/1}
+shard_i=${SHARD%/*} shard_n=${SHARD#*/}
+case "$shard_i/$shard_n" in
+    *[!0-9/]*|/*|*/) echo "run.sh: EMBCC_SHARD='$SHARD' is not i/n" >&2; exit 1 ;;
+esac
+if [ "$shard_n" -lt 1 ] || [ "$shard_i" -lt 1 ] || [ "$shard_i" -gt "$shard_n" ]; then
+    echo "run.sh: EMBCC_SHARD='$SHARD' is not i/n with 1 <= i <= n" >&2; exit 1
+fi
+export EMBCC_SHARD="$shard_i/$shard_n"
+# the k-th program of a corpus (from 0) belongs to this part
+mine() { [ $(($1 % shard_n)) -eq $((shard_i - 1)) ]; }
 
 QEMU_TIMEOUT=${EMBCC_QEMU_TIMEOUT:-20}
 export EMBCC_QEMU_TIMEOUT=$QEMU_TIMEOUT
@@ -120,6 +145,45 @@ fi
 
 [ "$EXEC_ONLY" = 1 ] && sh_tests=""
 
+# This part's .sh tests: longest first, each to the part least loaded so
+# far (ties to the lowest), the self-dividing ones to every part.
+if [ "$shard_n" -gt 1 ] && [ -n "$sh_tests" ]; then
+    sh_tests=$(for t in $sh_tests; do [ -e "$t" ] && echo "$t"; done |
+        awk -v i="$shard_i" -v n="$shard_n" '
+            FILENAME == "tests/shard-times" { if ($1 !~ /^#/) w[$2] = $1; next }
+            FILENAME == "tests/shard-split" { if ($1 !~ /^#/) split_[$1] = 1; next }
+            { t[++m] = $0 }
+            END {
+                k = 0; for (x in w) v[++k] = w[x]
+                # the median of the listed times, for a test not listed
+                for (a = 1; a <= k; a++) for (b = a + 1; b <= k; b++)
+                    if (v[b] < v[a]) { y = v[a]; v[a] = v[b]; v[b] = y }
+                med = k ? v[int((k + 1) / 2)] : 1
+                for (j = 1; j <= m; j++) wt[j] = (t[j] in w) ? w[t[j]] : med
+                # longest first; equal times keep the list order
+                for (a = 1; a <= m; a++) o[a] = a
+                for (a = 2; a <= m; a++) {
+                    x = o[a]; b = a - 1
+                    while (b >= 1 && wt[o[b]] < wt[x]) { o[b + 1] = o[b]; b-- }
+                    o[b + 1] = x
+                }
+                for (p = 1; p <= n; p++) load[p] = 0
+                for (a = 1; a <= m; a++) {
+                    j = o[a]
+                    if (t[j] in split_) { mine[j] = 1; continue }
+                    best = 1
+                    for (p = 2; p <= n; p++) if (load[p] < load[best]) best = p
+                    load[best] += wt[j]
+                    if (best == i) mine[j] = 1
+                }
+                for (j = 1; j <= m; j++) if (mine[j]) print t[j]
+            }' tests/shard-times tests/shard-split -)
+fi
+if [ "$LIST" = 1 ]; then
+    for t in $sh_tests; do [ -e "$t" ] && echo "$t"; done
+    exit 0
+fi
+
 # The shell tests run CONCURRENTLY, and are reported in list order.
 #
 # Each one writes only into its own tests/golden/out/<name> directory,
@@ -152,7 +216,8 @@ done
 # most of the saving. xargs keeps every slot busy instead, so the wall
 # time is the longer of (total / jobs) and the single slowest test.
 [ "$n_sh" -gt 0 ] && xargs -P "$jobs" -n 2 sh -c \
-    'sh "$1" > "$EMBCC_RUN_DIR/$0.out" 2>&1; echo $? > "$EMBCC_RUN_DIR/$0.rc"' \
+    's=$(date +%s); sh "$1" > "$EMBCC_RUN_DIR/$0.out" 2>&1; echo $? > "$EMBCC_RUN_DIR/$0.rc"
+     echo $(($(date +%s) - s)) "$1" > "$EMBCC_RUN_DIR/$0.t"' \
     < "$run_dir/list"
 
 i=0
@@ -182,6 +247,14 @@ while [ $i -lt $n_sh ]; do
         bad "$t" "exit $status" "$out"
     fi
 done
+# The slowest, longest first: what bounds the wall time. Every test's
+# time goes to tests/golden/out/shard-times.txt, the form of
+# tests/shard-times, which a CI run's artifact renews it from.
+if [ "$n_sh" -gt 0 ]; then
+    mkdir -p tests/golden/out
+    cat "$run_dir"/*.t 2>/dev/null | sort -rn > tests/golden/out/shard-times.txt
+    head -15 tests/golden/out/shard-times.txt | sed 's/^/TIME /'
+fi
 rm -rf "$run_dir"
 
 # Where the corpus cannot run at all -- this host is not the target, and
@@ -205,8 +278,10 @@ if [ "$TARGET" != x86_64-elf ] || [ "$EMBCC_X86_RUNNER" != host ]; then
 fi
 
 # tests/exec/*.c run on every target; tests/exec/<arch>/*.c on that one only
+k=-1
 for c in tests/exec/*.c tests/exec/${TARGET%-elf}/*.c; do
     [ -e "$c" ] || continue
+    k=$((k + 1)); mine $k || continue
     name=$(basename "$c" .c)
     # `// target: TRIPLE` pins a test to one machine: an x86-64 inline-asm
     # test is not a program for aarch64 at all, so it is skipped there rather
@@ -298,8 +373,10 @@ if [ "$TARGET" = aarch64-elf ]; then
 else
     cxx_newlib=$X86_NEWLIB ref_gxx=$X86_REF_GXX
 fi
+k=-1
 for cc in tests/cxx/*.cc; do
     [ -e "$cc" ] || continue
+    k=$((k + 1)); mine $k || continue
     name=$(basename "$cc" .cc)
     if [ ! -f "$ref_gxx/$TARGET/lib/libstdc++.a" ]; then
         echo "SKIP $cc (no reference libstdc++ at $ref_gxx: tools/build-ref-gxx.sh $TARGET)"
@@ -353,6 +430,7 @@ if [ $total -eq 0 ]; then
     exit 1
 fi
 echo "-----"
+[ "$shard_n" -gt 1 ] && echo "part $shard_i of $shard_n (EMBCC_SHARD)"
 if [ "$skip" -gt 0 ]; then
     echo "$pass/$total passed ($skip skipped: see SKIP lines)"
 else

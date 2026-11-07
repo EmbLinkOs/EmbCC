@@ -1,0 +1,4 @@
+# Tests that run in every part of a sharded suite (tests/run.sh,
+# EMBCC_SHARD=i/n) and divide their own work by EMBCC_SHARD: each is too
+# long for one part to carry. One path per line.
+tests/golden/exec-boards.sh

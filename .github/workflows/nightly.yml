@@ -6,7 +6,7 @@
 #            against the baselines in verify/torture/expected/.
 #   fuzz     200 random programs (verify/fuzz/run.sh) on the x86-64 host
 #            and QEMU's Cortex-M4, Cortex-M0, RV32 and RV64 boards at
-#            -O0, -O1, -O2 and -Os, with new seeds each night.
+#            -O0, -O1, -O2, -O3 and -Os, with new seeds each night.
 #
 # A failed night opens an issue (or adds to the open one) with the run's
 # link; the results are the run's artifacts. Run by hand with `update`,
@@ -88,7 +88,7 @@ jobs:
           echo "seeds $first to $last"
           mkdir -p fuzz-out
           FUZZ_OUT=$PWD/fuzz-out EMBCC_QEMU_TIMEOUT=60 \
-            sh verify/fuzz/run.sh -b x86,m4,m0,rv32,rv64 -O "-O0 -O1 -O2 -Os" \
+            sh verify/fuzz/run.sh -b x86,m4,m0,rv32,rv64 -O "-O0 -O1 -O2 -O3 -Os" \
             "$first" "$last" > fuzz.log 2>&1 || true
           echo "$(grep -c '^seed [0-9]* done$' fuzz.log || true) seeds done"
           # a program the generator got wrong is its bug, said but not failed
