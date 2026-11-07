@@ -867,6 +867,85 @@ static int fold_narrow(struct ir_func *fn, struct defs *d, const int *use,
     return 0;
 }
 
+/* ---- a word of a 64-bit value changed in place ----
+ *
+ * fdlibm's SET_HIGH_WORD(x, GET_HIGH_WORD(x) & 0x7fffffff) -- fabs --
+ * comes out of pass_punfwd as the double's bits with the high word
+ * replaced:
+ *
+ *      or.8 (and.8 x, 0xffffffff), (shl.8 (ext.8:4 (and.4 (shr.8 x, 32),
+ *                                                          c)), 32)
+ *
+ * which is one operation on x: and.8 x, c << 32 | 0xffffffff. So are
+ * or, xor, add and sub of a constant (with c << 32): the low word is
+ * left as it was, and a carry out of the high word is lost either way.
+ * The `and` that kept x's low word becomes the new constant when the
+ * `or` is its only reader; what is left of the rest is DCE's. */
+static const struct ir_ins *fw_def(const struct ir_func *fn,
+                                   const struct defs *d, int v)
+{
+    if (v < 0 || v >= fn->nvregs || d->cnt[v] != 1 || d->ins[v] < 0)
+        return NULL;
+    return &fn->ins[d->ins[v]];
+}
+
+static int fold_word_insert(struct ir_func *fn, struct defs *d,
+                            const int *use, struct ir_ins *i)
+{
+    if (i->op != IR_OR || i->w != 8 || i->flt || i->imm_b)
+        return 0;
+    for (int side = 0; side < 2; side++) {
+        int lo = side ? i->b : i->a, hi = side ? i->a : i->b;
+        const struct ir_ins *A = fw_def(fn, d, lo);
+        const struct ir_ins *B = fw_def(fn, d, hi);
+        long k;
+        if (!A || !B || A->op != IR_AND || A->w != 8 || A->flt ||
+            A->imm_b || use[lo] != 1 ||
+            !get_const(fn, d, A->b, &k) || k != 0xffffffffL)
+            continue;
+        int x = A->a;
+        if (x < 0 || x >= fn->nvregs || d->cnt[x] != 1)
+            continue;
+        if (B->op != IR_SHL || B->w != 8 || B->imm_b ||
+            !get_const(fn, d, B->b, &k) || k != 32)
+            continue;
+        const struct ir_ins *Z = fw_def(fn, d, B->a);
+        if (!Z || Z->op != IR_EXT || Z->size != 4 || Z->sign || Z->w != 8)
+            continue;
+        const struct ir_ins *Y = fw_def(fn, d, Z->a);
+        if (!Y || Y->w != 4 || Y->flt || Y->imm_b)
+            continue;
+        int commut = Y->op == IR_AND || Y->op == IR_OR || Y->op == IR_XOR ||
+                     Y->op == IR_ADD;
+        if (!commut && Y->op != IR_SUB)
+            continue;
+        long c;
+        int s;
+        if (get_const(fn, d, Y->b, &c))
+            s = Y->a;
+        else if (commut && get_const(fn, d, Y->a, &c))
+            s = Y->b;
+        else
+            continue;
+        const struct ir_ins *S = fw_def(fn, d, s);
+        if (!S || S->op != IR_SHR || S->w != 8 || S->a != x || S->imm_b ||
+            !get_const(fn, d, S->b, &k) || k != 32)
+            continue;
+        unsigned long cw = (unsigned long)(c & 0xffffffffL) << 32;
+        if (Y->op == IR_AND)
+            cw |= 0xffffffffUL;
+        enum ir_op op = Y->op;
+        struct ir_ins *K = &fn->ins[d->ins[lo]];
+        int line = K->line, col = K->col;
+        ins_blank(K);
+        K->op = IR_CONST; K->dst = lo; K->imm = (long)cw; K->w = 8;
+        K->line = line; K->col = col;
+        i->op = op; i->a = x; i->b = lo; i->sign = 0;
+        return 1;
+    }
+    return 0;
+}
+
 int pass_fold(struct ir_func *fn)
 {
     struct defs d;
@@ -915,6 +994,10 @@ int pass_fold(struct ir_func *fn)
             continue;
         }
         if (fold_narrow(fn, &d, use, i)) {
+            changed = 1;
+            continue;
+        }
+        if (fold_word_insert(fn, &d, use, i)) {
             changed = 1;
             continue;
         }

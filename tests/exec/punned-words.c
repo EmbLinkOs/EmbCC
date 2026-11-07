@@ -4,7 +4,10 @@
  * double loaded back -- which the optimizer turns into the double's bits
  * with that half replaced. Each result is checked against the same bits
  * put together with shifts and memcpy, for both halves, after a read of
- * the other half, twice in a row, and with the word a float's bits. */
+ * the other half, twice in a row, and with the word a float's bits.
+ * SET_HIGH_WORD(x, GET_HIGH_WORD(x) OP c) is then one 64-bit OP of x
+ * (src/opt/fold.c, fold_word_insert): and, or, xor, add and sub, with
+ * the carry out of the high word lost as the 32-bit operation loses it. */
 // expect-exit: 42
 #include <string.h>
 
@@ -32,6 +35,18 @@ __attribute__((noinline)) double my_fabs(double d)
     shape u; u.v = d; u32 h = u.p.msw;
     shape w; w.v = d; w.p.msw = h & 0x7fffffffu; return w.v;
 }
+#define HIGH_OP(name, op)                                              \
+    __attribute__((noinline)) double name(double d)                    \
+    {                                                                  \
+        shape u; u.v = d; u32 h = u.p.msw;                             \
+        shape w; w.v = d; w.p.msw = h op; return w.v;                  \
+    }
+HIGH_OP(high_or, | 0x3ff00000u)
+HIGH_OP(high_xor, ^ 0x80000000u)
+HIGH_OP(high_add, + 0x00100000u)
+HIGH_OP(high_sub, - 0x7ff00001u)
+HIGH_OP(high_and, & 0x800fffffu)
+
 __attribute__((noinline)) double neg_low_twice(double d, u32 a, u32 b)
 {
     shape u; u.v = d; u.p.msw ^= 0x80000000u; u.p.lsw = a; u.p.lsw += b;
@@ -60,6 +75,14 @@ int main(void)
         if (bits(neg_low_twice(d, l, h)) !=
             (((b ^ 0x8000000000000000ull) & ~0xffffffffull) | (u32)(l + h)))
             bad |= 8;
+        u32 hb = (u32)(b >> 32);
+        u64 lw = b & 0xffffffffull;
+        if (bits(high_or(d)) != ((u64)(hb | 0x3ff00000u) << 32 | lw) ||
+            bits(high_xor(d)) != ((u64)(hb ^ 0x80000000u) << 32 | lw) ||
+            bits(high_add(d)) != ((u64)(hb + 0x00100000u) << 32 | lw) ||
+            bits(high_sub(d)) != ((u64)(hb - 0x7ff00001u) << 32 | lw) ||
+            bits(high_and(d)) != ((u64)(hb & 0x800fffffu) << 32 | lw))
+            bad |= 32;
         float f = (float)i * 0.5f;
         u32 fb;
         memcpy(&fb, &f, 4);
