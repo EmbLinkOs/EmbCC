@@ -677,5 +677,12 @@ void opt_run(struct ir_unit *iu, int level)
             g_opt_max = s_max;
         }
         pass_x86_loadop(&iu->funcs[f]);     /* last: nothing reorders after */
+        /* ...and a state machine's switch on a state that is only ever
+         * a case, asked of the code as it will be emitted: the passes
+         * above still rename and copy, and an answer from before them
+         * described values the index no longer has (printf's switches
+         * were marked, and jumped through the table on a flag char) */
+        if (level >= 1)
+            pass_switchrange(&iu->funcs[f]);
     }
 }

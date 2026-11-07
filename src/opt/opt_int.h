@@ -254,6 +254,7 @@ int pass_copyprop_local(struct ir_func *fn);
 void count_cb(int *p, void *ctx);
 int pass_dce(struct ir_func *fn);
 int pass_deaddefs(struct ir_func *fn);
+int pass_switchrange(struct ir_func *fn);
 
 /* mem2reg.c */
 int m2r_w(int size);

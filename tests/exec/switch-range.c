@@ -1,0 +1,130 @@
+/* A switch whose index is only ever one of its cases leaves the bound
+ * test out (src/opt/rangecheck.c, pass_switchrange): every assignment of
+ * the state is a case constant, a copy of one, or a choice between two.
+ * Checked both ways -- machines whose state stays inside the table (cases
+ * from 0, and from 10, so the index is `st - 10`), and machines where it
+ * can leave it (a constant past the last case, a state taken from the
+ * caller), which must still reach `default` -- each against the same
+ * machine written with if/else. */
+// expect-exit: 42
+typedef unsigned int u32;
+
+static const unsigned char in[] = "abc~de~~fghij~klmnopq~rs~tuv~wxyz~~0123~";
+#define N ((int)sizeof in - 1)
+
+__attribute__((noinline)) u32 m0(void)
+{
+    int st = 0; u32 a = 0;
+    for (int i = 0; i < N; i++) {
+        u32 b = in[i];
+        switch (st) {
+        case 0: a += 1; st = b == '~' ? 1 : 2; break;
+        case 1: a += 3; st = 3; break;
+        case 2: a += 5; st = b & 1 ? 0 : 3; break;
+        case 3: a += 7; st = 0; break;
+        default: a += 1000; break;
+        }
+    }
+    return a * 4 + (u32)st;
+}
+static u32 m0_ref(void)
+{
+    int st = 0; u32 a = 0;
+    for (int i = 0; i < N; i++) {
+        u32 b = in[i];
+        if (st == 0) { a += 1; st = b == '~' ? 1 : 2; }
+        else if (st == 1) { a += 3; st = 3; }
+        else if (st == 2) { a += 5; st = b & 1 ? 0 : 3; }
+        else if (st == 3) { a += 7; st = 0; }
+        else a += 1000;
+    }
+    return a * 4 + (u32)st;
+}
+
+__attribute__((noinline)) u32 m10(void)
+{
+    int st = 10; u32 a = 0;
+    for (int i = 0; i < N; i++) {
+        u32 b = in[i];
+        int nx = 13;
+        switch (st) {
+        case 10: a += 2; nx = b > 'm' ? 11 : 12; break;
+        case 11: a += 4; nx = 12; break;
+        case 12: a += 8; break;
+        case 13: a += 16; nx = 10; break;
+        default: a += 1000; break;
+        }
+        st = nx;
+    }
+    return a + (u32)st;
+}
+static u32 m10_ref(void)
+{
+    int st = 10; u32 a = 0;
+    for (int i = 0; i < N; i++) {
+        u32 b = in[i];
+        int nx = 13;
+        if (st == 10) { a += 2; nx = b > 'm' ? 11 : 12; }
+        else if (st == 11) { a += 4; nx = 12; }
+        else if (st == 12) a += 8;
+        else if (st == 13) { a += 16; nx = 10; }
+        else a += 1000;
+        st = nx;
+    }
+    return a + (u32)st;
+}
+
+/* past the table: a constant no case has */
+__attribute__((noinline)) u32 out_k(void)
+{
+    int st = 0; u32 a = 0;
+    for (int i = 0; i < N; i++) {
+        switch (st) {
+        case 0: a += 1; st = in[i] == '~' ? 99 : 1; break;
+        case 1: a += 2; st = 2; break;
+        case 2: a += 4; st = 0; break;
+        case 3: a += 8; st = 0; break;
+        default: a += 100; st = 0; break;
+        }
+    }
+    return a;
+}
+/* from the caller */
+__attribute__((noinline)) u32 out_p(int st)
+{
+    u32 a = 0;
+    for (int i = 0; i < 6; i++) {
+        switch (st) {
+        case 0: a += 1; st = 1; break;
+        case 1: a += 2; st = 2; break;
+        case 2: a += 4; st = 3; break;
+        case 3: a += 8; st = 0; break;
+        default: a += 100; st = 0; break;
+        }
+    }
+    return a;
+}
+
+int main(void)
+{
+    int bad = 0;
+    if (m0() != m0_ref()) bad |= 1;
+    if (m10() != m10_ref()) bad |= 2;
+    u32 k = 0;
+    {
+        int st = 0; u32 a = 0;
+        for (int i = 0; i < N; i++) {
+            if (st == 0) { a += 1; st = in[i] == '~' ? 99 : 1; }
+            else if (st == 1) { a += 2; st = 2; }
+            else if (st == 2) { a += 4; st = 0; }
+            else if (st == 3) { a += 8; st = 0; }
+            else { a += 100; st = 0; }
+        }
+        k = a;
+    }
+    if (out_k() != k) bad |= 4;
+    if (out_p(7) != 100 + 1 + 2 + 4 + 8 + 1 || out_p(-1) != 116 ||
+        out_p(2) != 4 + 8 + 1 + 2 + 4 + 8)
+        bad |= 8;
+    return bad ? bad : 42;
+}

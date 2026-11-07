@@ -6228,8 +6228,10 @@ static void gen_ins(struct rv_fn *F, int n)
          * any other value outside the range. */
         int n = fn->jt[i->jt].n;
         int ri = wordop ? rd32(F, i->a, ACC) : rdr(F, i->a, ACC);
-        rv_li(t, RV_T2, n, F->xlen);
-        branch_if(F, RV_BGEU, ri, RV_T2, i->label);
+        if (!i->sign) {      /* else known inside the table (switchrange) */
+            rv_li(t, RV_T2, n, F->xlen);
+            branch_if(F, RV_BGEU, ri, RV_T2, i->label);
+        }
         int on = rv_compress_enabled();
         rv_set_compress(0, F->xlen);
         int at = t->len;

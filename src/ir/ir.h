@@ -99,7 +99,9 @@ enum ir_op {
                 * lowest case subtracted, so the test is unsigned by
                 * construction. Every target is named, which is what lets
                 * the CFG, liveness and the allocator see through it where
-                * IR_IGOTO's unknown targets make them step aside. */
+                * IR_IGOTO's unknown targets make them step aside.
+                * `sign` set: a is known to be below jt[jt].n
+                * (pass_switchrange) and the bound need not be tested. */
     IR_ARMW,  /* dst = *(temp a); *(temp a) = dst OP b   (atomic; size, w).
                * OP is in `imm`: '&' '|' '^', or 'n' for nand = ~(dst & b);
                * on AVR only, 'L' for an atomic load wider than a byte:

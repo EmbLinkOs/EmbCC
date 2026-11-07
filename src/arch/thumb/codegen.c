@@ -6665,13 +6665,17 @@ static void gen_ins(struct t_fn *F, int n)
         int n_ins = (int)(i - fn->ins);   /* `n` is the entry count below */
         int n = fn->jt[i->jt].n;
         int ri = rdr(F, i->a, T_ACC);
-        if (t_imm_ok(n)) {
+        /* no bound to test when the index is known to be inside the
+         * table (pass_switchrange: a state that is only ever a case) */
+        if (i->sign) {
+        } else if (t_imm_ok(n)) {
             t_cmp_imm(t, ri, n);
         } else {
             t_mov_imm(t, T_TMP, n, 0);
             t_cmp_reg(t, ri, T_TMP);
         }
-        jump_if(F, T_CS, i->label);                  /* bhs: unsigned >= n */
+        if (!i->sign)
+            jump_if(F, T_CS, i->label);              /* bhs: unsigned >= n */
         /* ARM state: `add pc, pc, rI, lsl #2` over a table of branches.
          * pc reads as the add's address + 8, which is where the table
          * starts, one word on -- so the word between is never run. The
