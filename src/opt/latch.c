@@ -117,6 +117,13 @@ int pass_latch_copies(struct ir_func *fn)
                     ok = 0;
                 if (fused && (d == cmp->a || (!cmp->imm_b && d == cmp->b)))
                     ok = 0;
+                /* ...nor one that READS what the compare makes: above it,
+                 * the copy took the value from before. Arithmetic if-
+                 * conversion writes `r = (x != 0)` as a copy of the
+                 * compare (ifconv_arith), and `if (x) r |= 1` read r
+                 * from the iteration before -- float-truth.c at -O2. */
+                if (fused && fn->ins[e].a == cmp->dst)
+                    ok = 0;
                 e++;
             }
             if (!ok)
