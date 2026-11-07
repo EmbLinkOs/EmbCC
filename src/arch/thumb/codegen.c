@@ -6109,6 +6109,22 @@ static void gen_ins(struct t_fn *F, int n)
                                        1, 0, 1);
                         }
                     } else {
+                        /* two whole words at once, when both ends allow */
+                        int d2 = base == T_TMP || dr == T_TMP ? -1 : T_TMP;
+                        long so = (fa ? fo : 0) + off;
+                        if (d2 >= 0 && !t_isa_a32 && q + 1 < pl[k].nstk &&
+                            off + 8 <= a->size && so % 4 == 0 &&
+                            (fa || (a->natural && a->align >= 4)) &&
+                            !getenv("EMBCC_T_NOARGPAIR") &&
+                            t_ldst_pair(t, dr, d2, fa ? F->fb : base, so, 0)) {
+                            if (!t_ldst_pair(t, dr, d2, T_SP,
+                                             pl[k].stk + (long)q * 4, 1)) {
+                                sp_st(F, dr, pl[k].stk + (long)q * 4);
+                                sp_st(F, d2, pl[k].stk + (long)q * 4 + 4);
+                            }
+                            q++;
+                            continue;
+                        }
                         if (fa) fb_ld(F, dr, fo + off, 4, 0);
                         else ldst_must(t, dr, base, off, 4, 0, 0);
                         ldst_must(t, dr, T_SP, pl[k].stk + (long)q * 4,
@@ -6201,9 +6217,35 @@ static void gen_ins(struct t_fn *F, int n)
             if (!a->is_struct && a->size <= 8 && in_reg(F, a->vreg))
                 continue;
             if (a->is_struct) {
-                rd(F, a->vreg, T_ADDR);
+                /* Straight from the frame when the struct is a local
+                 * (no address register), and two words to one ldrd when
+                 * they are word-aligned: a frame slot, or an address C
+                 * says is aligned to a type of 4 or more. */
+                long fo = 0;
+                int fa = faddr(F, a->vreg, &fo) && !getenv("EMBCC_T_NOARGPAIR");
+                int al = !getenv("EMBCC_T_NOARGPAIR") &&
+                         (fa || (a->natural && a->align >= 4)) && !t_isa_a32;
+                int base = fa ? F->fb : T_ADDR;
+                long bo = fa ? fo : 0;
+                if (!fa)
+                    rd(F, a->vreg, T_ADDR);
                 for (int q = 0; q < pl[k].nreg; q++) {
                     long off = (long)q * 4;
+                    if (al && q + 1 < pl[k].nreg && off + 8 <= a->size &&
+                        (bo + off) % 4 == 0 &&
+                        t_ldst_pair(t, pl[k].reg + q, pl[k].reg + q + 1,
+                                    base, bo + off, 0)) {
+                        q++;
+                        continue;
+                    }
+                    if (fa && !(off + 4 > a->size && (a->size & 3))) {
+                        fb_ld(F, pl[k].reg + q, fo + off, 4, 0);
+                        continue;
+                    }
+                    if (fa && base != T_ADDR) {     /* the byte tail below */
+                        fb_addr(F, T_ADDR, fo);
+                        base = T_ADDR; bo = 0; fa = 0;
+                    }
                     if (off + 4 > a->size && (a->size & 3)) {
                         /* The last, partial word: assembled byte by
                          * byte into its register. */
@@ -8044,6 +8086,14 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
              * composite, so the words go straight into it. */
             for (int q = 0; q < pl.nreg; q++) {
                 long off = F.slot[i] + (long)q * 4;
+                /* two whole words to one strd */
+                if (q + 1 < pl.nreg && (long)(q + 2) * 4 <= a->size &&
+                    off % 4 == 0 && !t_isa_a32 &&
+                    !getenv("EMBCC_T_NOARGPAIR") &&
+                    t_ldst_pair(t, pl.reg + q, pl.reg + q + 1, F.fb, off, 1)) {
+                    q++;
+                    continue;
+                }
                 int wid = (long)(q + 1) * 4 > a->size ? (a->size & 3) : 4;
                 if (wid == 3) wid = 4;       /* a three-byte tail: store 4 */
                 if (!t_ldst_imm(t, pl.reg + q, F.fb, off, wid == 4 ? 4 : wid,
@@ -8067,6 +8117,19 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
                         !(F.used_callee[k] == 7 &&
                           (F.fb == 7 || fn->has_alloca)))
                         ds = F.used_callee[k];
+                if (ds != T_ACC && q + 1 < pl.nstk && !t_isa_a32 &&
+                    (long)(pl.nreg + q + 2) * 4 <= a->size &&
+                    src % 4 == 0 && dst % 4 == 0 &&
+                    !getenv("EMBCC_T_NOARGPAIR") &&
+                    t_ldst_pair(t, ds, T_ACC, F.fb, src, 0)) {
+                    if (!t_ldst_pair(t, ds, T_ACC, F.fb, dst, 1)) {
+                        fb_addr(&F, T_ADDR, dst);
+                        ldst_must(t, ds, T_ADDR, 0, 4, 0, 1);
+                        ldst_must(t, T_ACC, T_ADDR, 4, 4, 0, 1);
+                    }
+                    q++;
+                    continue;
+                }
                 fb_ld(&F, ds, src, 4, 0);
                 if (!t_ldst_imm(t, ds, F.fb, dst, 4, 0, 1)) {
                     fb_addr(&F, T_ADDR, dst);
