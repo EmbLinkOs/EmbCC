@@ -364,6 +364,8 @@ int a64_ret_units(const struct ir_func *fn, int *off, int *size, int *fp,
                   int max);                         /* src/arch/aarch64/codegen.c */
 int x86_ret_units(const struct ir_func *fn, int *off, int *size, int *fp,
                   int max);                         /* src/arch/x86_64/codegen.c */
+int t_ret_units(const struct ir_func *fn, int *off, int *size, int *fp,
+                int max);                           /* src/arch/thumb/codegen.c */
 int a64_op_calls_helper(const struct ir_ins *i);    /* src/arch/aarch64/codegen.c */
 int mips_op_calls_helper(const struct ir_ins *i);   /* src/arch/mips/codegen.c */
 int la_op_calls_helper(const struct ir_ins *i);     /* src/arch/loongarch/codegen.c */
@@ -508,6 +510,7 @@ void target_set_thumb_em(int on);
  * object ends up claiming an ABI it does not implement. -mfpu= stays
  * refused until both halves are right. */
 int target_thumb_fpu(void);
+const char *target_arm_cpu_name(void);   /* -mcpu=, a known Cortex-M part, or NULL */
 void target_set_thumb_fpu(int on);
 /* ...and whether that unit computes in DOUBLE precision as well:
  * FPv5-D16, the Cortex-M7's (-mfpu=fpv5-d16). Then `double` arithmetic,

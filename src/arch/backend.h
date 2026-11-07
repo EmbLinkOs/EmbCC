@@ -269,6 +269,9 @@ struct backend_desc {
      * optimizer asks, to keep values out of caller-saved registers across
      * one. NULL: none does (x86-64), or the backend answers otherwise. */
     int (*op_calls_helper)(const struct ir_ins *i);
+    /* a struct return's register units (target_ret_units), or NULL */
+    int (*ret_units)(const struct ir_func *fn, int *off, int *size, int *fp,
+                     int max);
     /* The unwind tables the target would need and EmbCC does not write,
      * as a refusal names them ("RISC-V .eh_frame"); NULL when eh_emit
      * writes them (x86-64, AArch64). */

@@ -75,6 +75,7 @@ static const struct backend_desc g_backends[] = {
     [TARGET_X86_64] = {
         .family = "x86-64", .codegen = codegen_unit, .ra_at_o0 = 0,
         .op_calls_helper = NULL,
+        .ret_units = x86_ret_units,
         .unwind_unwritten = NULL,
         .cxx_exceptions = BACKEND_CXX_EXC_OK,
         .firmware = 0, .ld_scripts = 0,
@@ -86,6 +87,7 @@ static const struct backend_desc g_backends[] = {
     [TARGET_AARCH64] = {
         .family = "AArch64", .codegen = codegen_unit_arm64, .ra_at_o0 = 0,
         .op_calls_helper = a64_op_calls_helper,
+        .ret_units = a64_ret_units,
         .unwind_unwritten = NULL,
         .cxx_exceptions = BACKEND_CXX_EXC_OK,
         .firmware = 1, .ld_scripts = 1,
@@ -97,6 +99,7 @@ static const struct backend_desc g_backends[] = {
     [TARGET_THUMB] = {
         .family = "ARM", .codegen = codegen_unit_thumb, .ra_at_o0 = 1,
         .op_calls_helper = t_op_calls_helper,
+        .ret_units = t_ret_units,
         .unwind_unwritten = NULL,          /* eh_emit_arm: EHABI */
         .cxx_exceptions = BACKEND_CXX_EXC_OK,
         .firmware = 1, .ld_scripts = 1,
@@ -112,6 +115,7 @@ static const struct backend_desc g_backends[] = {
     [TARGET_RISCV32] = {
         .family = "RISC-V", .codegen = codegen_unit_riscv, .ra_at_o0 = 1,
         .op_calls_helper = rv_op_calls_helper,
+        .ret_units = rv_ret_units,
         .unwind_unwritten = NULL,          /* eh_emit_cfi */
         .cxx_exceptions = BACKEND_CXX_EXC_OK,
         .firmware = 1, .ld_scripts = 1,
@@ -125,6 +129,7 @@ static const struct backend_desc g_backends[] = {
     [TARGET_RISCV64] = {
         .family = "RISC-V", .codegen = codegen_unit_riscv, .ra_at_o0 = 1,
         .op_calls_helper = rv_op_calls_helper,
+        .ret_units = rv_ret_units,
         .unwind_unwritten = NULL,          /* eh_emit_cfi */
         .cxx_exceptions = BACKEND_CXX_EXC_OK,
         .firmware = 1, .ld_scripts = 1,

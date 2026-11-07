@@ -442,7 +442,8 @@ int x86_ret_units(const struct ir_func *fn, int *off, int *size, int *fp,
 {
     const struct type *rt = fn->ret_abi.ty;
     if (!fn->ret_abi.is_struct || !rt || getenv("EMBCC_NO_RETPARTS") ||
-        target_win64_abi() || ty_x87_ret((struct type *)rt))
+        target_win64_abi() || target_fmt_get() != TGT_FMT_ELF ||
+        ty_x87_ret((struct type *)rt))
         return 0;
     enum arg_class rc[2];
     int rn = ty_classify((struct type *)rt, rc);

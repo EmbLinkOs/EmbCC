@@ -632,21 +632,7 @@ void target_set_ret_units(int (*f)(const struct ir_func *, int *, int *,
 int target_ret_units(const struct ir_func *fn, int *off, int *size, int *fp,
                      int max)
 {
-    if (g_ret_units)
-        return g_ret_units(fn, off, size, fp, max);
-#if FAMILY_BUILT(riscv)
-    if (target_get() == TARGET_RISCV32 || target_get() == TARGET_RISCV64)
-        return rv_ret_units(fn, off, size, fp, max);
-#endif
-#if FAMILY_BUILT(aarch64)
-    if (target_get() == TARGET_AARCH64)
-        return a64_ret_units(fn, off, size, fp, max);
-#endif
-#if FAMILY_BUILT(x86)
-    if (target_get() == TARGET_X86_64 && target_fmt_get() == TGT_FMT_ELF)
-        return x86_ret_units(fn, off, size, fp, max);
-#endif
-    return 0;
+    return g_ret_units ? g_ret_units(fn, off, size, fp, max) : 0;
 }
 
 int target_switch_table_min_os(void)

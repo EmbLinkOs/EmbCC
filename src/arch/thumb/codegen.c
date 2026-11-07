@@ -1156,6 +1156,32 @@ static int fn_ret_vfp(const struct ir_func *fn, int *esz)
                    r->hfa_n, r->hfa_size);
 }
 
+static int fn_sret_bytes(const struct ir_func *fn);
+
+/* A struct return's register units (target_ret_units): an HFA's members
+ * in s0, s1 or d0, d1 (-mfloat-abi=hard), or a four-byte composite in r0. */
+int t_ret_units(const struct ir_func *fn, int *off, int *size, int *fp,
+                int max)
+{
+    if (!fn->ret_abi.is_struct || getenv("EMBCC_NO_RETPARTS") || t_isa_a32 ||
+        target_thumb_arch() == 6)
+        return 0;
+    int esz, rv = fn_ret_vfp(fn, &esz);
+    if (rv) {
+        if (rv > max || (esz != 4 && esz != 8))
+            return 0;
+        for (int q = 0; q < rv; q++) {
+            off[q] = q * esz; size[q] = esz; fp[q] = 1;
+        }
+        return rv;
+    }
+    if (fn->ret_abi.size == 4 && !fn_sret_bytes(fn)) {
+        off[0] = 0; size[0] = 4; fp[0] = 0;
+        return 1;
+    }
+    return 0;
+}
+
 static int fn_sret_bytes(const struct ir_func *fn)
 {
     int esz;
@@ -6349,6 +6375,45 @@ static void gen_ins(struct t_fn *F, int n)
     }
 
     case IR_RET: {
+        if (i->nrp) {
+            /* a struct as its units (pass_sroa): each part into its
+             * register -- s0/s1 or d0/d1 in order, or r0 -- the two FP
+             * ones ordered so neither overwrites the other, and through
+             * core registers when they sit exactly swapped */
+            int off[2], sz[2], fpu[2], part[2] = { i->b, i->c };
+            int nu = t_ret_units(fn, off, sz, fpu, 2);
+            if (nu != i->nrp)
+                internal_error("thumb: a struct returned as %d units the "
+                               "convention does not have", i->nrp);
+            if (!fpu[0]) {
+                rd(F, part[0], T_R0);
+                goto ret_epilogue;
+            }
+            int dbl = sz[0] == 8;
+#define T_RET_HOME(v) (in_freg(F, (v)) ? (dbl ? t_dreg(F, (v)) : F->floc[(v)]) : -1)
+#define T_RET_LOAD(v, r) (dbl ? vfp_load_d(F, (v), (r)) : vfp_load(F, (v), (r)))
+            if (nu == 1) {
+                T_RET_LOAD(part[0], 0);
+                goto ret_epilogue;
+            }
+            int h0 = T_RET_HOME(part[0]), h1 = T_RET_HOME(part[1]);
+            if (h1 == 0 && h0 == 1) {
+                if (dbl) t_vmov_core_pair(t, 1, T_ACC, T_TMP, 0);
+                else t_vmov_core(t, 1, T_ACC, 0);
+                T_RET_LOAD(part[1], 1);
+                if (dbl) t_vmov_core_pair(t, 0, T_ACC, T_TMP, 1);
+                else t_vmov_core(t, 0, T_ACC, 1);
+            } else if (h1 == 0) {
+                T_RET_LOAD(part[1], 1);
+                T_RET_LOAD(part[0], 0);
+            } else {
+                T_RET_LOAD(part[0], 0);
+                T_RET_LOAD(part[1], 1);
+            }
+#undef T_RET_HOME
+#undef T_RET_LOAD
+            goto ret_epilogue;
+        }
         int resz, rvfp = i->a >= 0 ? fn_ret_vfp(fn, &resz) : 0;
         if (rvfp) {
             /* Home in s0 / d0, or s0-s3 / d0-d3 for an aggregate whose

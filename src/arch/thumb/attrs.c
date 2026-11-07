@@ -130,8 +130,10 @@ unsigned char *arm_build_attributes(size_t *len)
      * code for every part of a profile, and naming one it was not told
      * about would be a claim it cannot support. */
     int v81 = target_thumb_v81();
-    bstr(&attrs, a32 ? "7-A" : v81 ? "8.1-M.MAIN" : v8 ? "8-M.MAIN"
-                 : v8b ? "8-M.BASE" : v6 ? "6S-M" : em ? "7E-M" : "7-M");
+    const char *part = a32 ? NULL : target_arm_cpu_name();
+    bstr(&attrs, part ? part : a32 ? "7-A" : v81 ? "8.1-M.MAIN"
+                 : v8 ? "8-M.MAIN" : v8b ? "8-M.BASE" : v6 ? "6S-M"
+                 : em ? "7E-M" : "7-M");
     btag(&attrs, Tag_CPU_arch, a32 ? CPU_ARCH_V7
                              : v81 ? CPU_ARCH_V81M_MAIN
                              : v8 ? CPU_ARCH_V8M_MAIN
