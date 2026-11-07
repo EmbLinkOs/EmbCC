@@ -519,6 +519,14 @@ static void opt_func(struct ir_func *fn)
      * constant written straight into the merged name is where it was. */
     if (cfg_ok && pass_joincopies(fn) && g_cfgclean)
         pass_cfgclean(fn);
+    /* a branch whose arm changes nothing when skipped (`if (v) n += v`):
+     * the shape the joins' copies leave */
+    if (cfg_ok && pass_ifident(fn)) {
+        drop_unreachable(fn);       /* the edge blocks it no longer enters */
+        pass_dce(fn);
+        if (g_cfgclean)
+            pass_cfgclean(fn);
+    }
     pass_sinkconst(fn);
     /* Last: the copies it adds must not be propagated away again.
      * EMBCC_NO_SPLITLOOPS=1 turns it off, for bisecting a difference. */
