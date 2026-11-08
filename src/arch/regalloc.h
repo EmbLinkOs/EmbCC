@@ -243,7 +243,8 @@ char *ra_remat_map(const struct ir_func *fn,
  * the rebuilt value goes straight where the register's would have been
  * copied -- a call argument, the source of a move, a return value -- and,
  * for a local's address (IR_ADDR), the address of a load or a store,
- * which the backends fold into the access's offset from the frame base.
+ * which the backends fold into the access's offset from the frame base,
+ * and the address plus a constant, one add from the frame base.
  * Any other read is paid: it rebuilds into a scratch register first. A
  * value with at most `lim_addr` (an address) or `lim_const` (anything
  * else) paid reads is marked. A register for such a value bought nothing

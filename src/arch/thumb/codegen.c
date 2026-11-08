@@ -1585,10 +1585,16 @@ static void layout(struct t_fn *F)
          * and placed below. */
         int nv = fn->nvregs, npool = 0, has_cgoto = 0;
         int *loc2 = xmalloc((size_t)(nv ? nv : 1) * sizeof *loc2);
+        /* ...and no slot for a frame address with no register either:
+         * faddr makes it where it is read, and its slot was never
+         * written -- yet took four bytes, and moved every local it pushed
+         * past by eight (deep()'s 64-byte buffer to sp + 4) */
         for (int v = 0; v < nv; v++)
             loc2[v] = (F->loc && F->loc[v] >= 0) || F->wide[v] ||
                       (F->selimm && F->selimm[v]) ||
-                      (F->remat && F->remat[v]) ? 0 : -1;
+                      (F->remat && F->remat[v]) ||
+                      (F->fvar && (F->fvar[v] >= 0 || F->fscr[v] >= 0))
+                      ? 0 : -1;
         for (int n = 0; n < fn->nins; n++)
             if (fn->ins[n].op == IR_IGOTO || fn->ins[n].op == IR_LABELADDR)
                 has_cgoto = 1;
@@ -2228,8 +2234,11 @@ static void frame_addr_map(struct t_fn *F)
  * was `add r3, sp, #0; str r2, [r3, #4]`, and across a call r4, pushed
  * and popped for it -- and a constant whose reads are call arguments,
  * moves and returns, where `movs r1, #2` costs what `mov r1, r4` did. A
- * paid read rebuilds into a scratch register: an address may have two
- * (any number under -Os), a constant none. Only what gen_func rebuilds:
+ * paid read rebuilds into a scratch register, and Thumb's is r10 -- high,
+ * so four-byte instructions, and callee-saved, so pushed: `addw r10, sp,
+ * #0` for an indexed load cost a push.w where the allocator's low
+ * register had cost nothing. So none, for an address as for a constant
+ * (EMBCC_T_CHEAP_ADDR=N moves it). Only what gen_func rebuilds:
  * not an eight-byte value, nor the local returned in the caller's buffer
  * (its address is a load, t_nrvo_local). EMBCC_T_NOCHEAP=1 turns it off. */
 static int t_cheap_ok(const struct ir_ins *i)
@@ -2241,7 +2250,7 @@ static char *t_cheap_map(const struct t_fn *F)
     const struct ir_func *fn = F->fn;
     if (getenv("EMBCC_T_NOCHEAP") || !F->fvar)
         return NULL;
-    int lim_addr = target_opt_size() ? 1 << 30 : 2;
+    int lim_addr = 0;
     const char *e = getenv("EMBCC_T_CHEAP_ADDR");
     if (e)
         lim_addr = atoi(e);
@@ -2340,10 +2349,12 @@ static char *t_faddr_excl(const struct t_fn *F, const char *base)
 }
 char *tcg_faddr_excl(const struct t_fn *F, const char *base)
 {
-    /* and ra_cheap_remat's values (t_cheap_map): M0 libc 221,552 ->
-     * 221,334 bytes. EMBCC_T_NOV6CHEAP=1 leaves them out. */
+    /* ra_cheap_remat's values (t_cheap_map) only with EMBCC_T_V6CHEAP=1:
+     * ARMv6-M folds only a word access into sp's offset, and a byte or
+     * halfword one through a rebuilt address pays an `add` each time --
+     * M0 libc 296,612 -> 296,816 bytes, counting its weak functions. */
     char *x = t_faddr_excl(F, base);
-    char *c = getenv("EMBCC_T_NOV6CHEAP") || F->keep_vars || g_t_o0
+    char *c = !getenv("EMBCC_T_V6CHEAP") || F->keep_vars || g_t_o0
               ? NULL : t_cheap_map(F);
     if (c) {
         int nv = F->fn->nvregs;

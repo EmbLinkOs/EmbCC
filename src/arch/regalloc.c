@@ -675,6 +675,12 @@ static void ra_chp_cb(int v, void *ctx)
     case IR_STORE:
         free_ = c->isaddr[v] && i->a == v && i->b != v;
         break;
+    case IR_ADD: case IR_SUB:
+        /* a local's address plus a constant: one `add rd, sp, #k` (Thumb)
+         * or `addi rd, sp, k` (RISC-V) straight into its home, as the
+         * address alone would have been */
+        free_ = c->isaddr[v] && i->a == v && i->imm_b;
+        break;
     default:
         break;
     }
