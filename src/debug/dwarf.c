@@ -170,6 +170,8 @@
 #define AB_IPARAM_LL    34
 #define AB_IVAR         35
 #define AB_IVAR_LL      36
+#define AB_LEXBLOCK_R   37   /* lexical_block whose code is in pieces */
+#define AB_INLSUB_R     38   /* inlined_subroutine whose code is in pieces */
 
 static int dw_ver = 5;
 
@@ -501,6 +503,14 @@ static void emit_abbrev(struct dbuf *b)
     one_abbrev(b, AB_IPARAM_LL,  DW_TAG_formal_parameter, DW_CHILDREN_no, iv_ll, 2);
     one_abbrev(b, AB_IVAR,       DW_TAG_variable,         DW_CHILDREN_no, iv, 2);
     one_abbrev(b, AB_IVAR_LL,    DW_TAG_variable,         DW_CHILDREN_no, iv_ll, 2);
+    /* ...and both, where their code is not one run: DW_AT_ranges */
+    static const unsigned char lexb_r[] = { DW_AT_ranges, DW_FORM_sec_offset };
+    static const unsigned char inl_r[] = {
+        DW_AT_abstract_origin, DW_FORM_ref4, DW_AT_ranges, DW_FORM_sec_offset,
+        DW_AT_call_file, DW_FORM_data1, DW_AT_call_line, DW_FORM_udata,
+        DW_AT_call_column, DW_FORM_udata };
+    one_abbrev(b, AB_LEXBLOCK_R, DW_TAG_lexical_block,    DW_CHILDREN_yes, lexb_r, 1);
+    one_abbrev(b, AB_INLSUB_R,   DW_TAG_inlined_subroutine, DW_CHILDREN_yes, inl_r, 5);
     db_uleb(b, 0);                       /* end of the abbrev table */
 }
 
@@ -874,6 +884,60 @@ static int list_header(struct dbuf *b)
  * its DIE's offset, and its own variables' (by dbgvars index; -1 for one
  * that came from a call inlined into it). */
 struct absfn { const struct func *f; int off; int *voff; int nv; };
+
+/* The range lists of the blocks and inlined calls whose code is in more
+ * than one piece, appended to .debug_rnglists (.debug_ranges) after the
+ * unit's own list: dw_brg_base is where they start in that section. */
+static struct dbuf dw_brg;
+static long dw_brg_base;
+
+/* A scope's code, as the ranges [lo[k], hi[k]) in ascending order. */
+struct sranges { long *lo, *hi; int n, cap; };
+
+static void sr_add(struct sranges *r, long a, long z)
+{
+    if (r->n && r->hi[r->n - 1] >= a) {      /* touching or overlapping */
+        if (z > r->hi[r->n - 1]) r->hi[r->n - 1] = z;
+        return;
+    }
+    if (r->n == r->cap) {
+        r->cap = r->cap ? r->cap * 2 : 4;
+        r->lo = xrealloc(r->lo, (size_t)r->cap * sizeof *r->lo);
+        r->hi = xrealloc(r->hi, (size_t)r->cap * sizeof *r->hi);
+    }
+    r->lo[r->n] = a;
+    r->hi[r->n] = z;
+    r->n++;
+}
+
+/* A list of r's ranges in dw_brg; its offset in the section. DWARF 5:
+ * start_end entries, each address relocated; DWARF 4: a base address
+ * selection entry of 0, then the address pairs, then the end pair. */
+static long emit_brg(struct dwarf_out *out, const struct sranges *r)
+{
+    long at = dw_brg_base + dw_brg.len;
+    if (dw_ver < 5) {
+        db_addr(&dw_brg, addr_bytes() == 8 ? ~0UL : 0xffffffffUL);
+        db_addr(&dw_brg, 0);
+    }
+    for (int k = 0; k < r->n; k++) {
+        if (dw_ver >= 5)
+            db_u8(&dw_brg, DW_RLE_start_end);
+        reloc(out, DWSEC_RANGES, (int)(dw_brg_base + dw_brg.len), addr_bytes(),
+              DWTGT_TEXT, r->lo[k]);
+        db_addr(&dw_brg, 0);
+        reloc_end(out, DWSEC_RANGES, (int)(dw_brg_base + dw_brg.len), addr_bytes(),
+                  r->hi[k]);
+        db_addr(&dw_brg, 0);
+    }
+    if (dw_ver >= 5) {
+        db_u8(&dw_brg, DW_RLE_end_of_list);
+    } else {
+        db_addr(&dw_brg, 0);
+        db_addr(&dw_brg, 0);
+    }
+    return at;
+}
 static struct absfn *dw_abs;
 static int dw_nabs;
 
@@ -1018,16 +1082,22 @@ static long ins_start(const struct ir_func *fn, int k, long lo, long hi)
 /* One block's DIE, its variables, and the blocks nested in it. */
 static void emit_block(struct dwarf_out *out, struct dbuf *b, struct dbuf *loc,
                        struct typemap *tm, struct ir_func *fn, long lo,
-                       int s, const long *smin, const long *smax)
+                       int s, const long *smin, const long *smax,
+                       const struct sranges *sr)
 {
     const struct absfn *A = s > 0 && fn->scope_fn ? abs_of(fn->scope_fn[s]) : NULL;
+    /* in pieces (not in a .dwo, which keeps the extent): DW_AT_ranges */
+    int pieces = s > 0 && sr && sr[s].n > 1 && !dw_split;
     if (A) {
-        db_uleb(b, AB_INLSUB);
+        db_uleb(b, pieces ? AB_INLSUB_R : AB_INLSUB);
         db_u32(b, (unsigned long)A->off);
     } else if (s > 0) {
-        db_uleb(b, AB_LEXBLOCK);
+        db_uleb(b, pieces ? AB_LEXBLOCK_R : AB_LEXBLOCK);
     }
-    if (s > 0) {
+    if (pieces) {
+        reloc(out, DWSEC_INFO, b->len, 4, DWTGT_RANGES, emit_brg(out, &sr[s]));
+        db_u32(b, 0);
+    } else if (s > 0) {
         if (dw_split) {
             db_uleb(b, (unsigned long)addr_index(DWTGT_TEXT, smin[s], NULL, 0));
             db_u32(b, (unsigned long)(smax[s] - smin[s]));
@@ -1055,7 +1125,7 @@ static void emit_block(struct dwarf_out *out, struct dbuf *b, struct dbuf *loc,
     if (smin)
         for (int c = s + 1; c < fn->nscopes; c++)
             if (fn->scope_up[c] == s && smin[c] < smax[c])
-                emit_block(out, b, loc, tm, fn, lo, c, smin, smax);
+                emit_block(out, b, loc, tm, fn, lo, c, smin, smax, sr);
     if (s > 0)
         db_u8(b, 0);
 }
@@ -1080,12 +1150,13 @@ static void emit_scopes(struct dwarf_out *out, struct dbuf *b, struct dbuf *loc,
     if (fn->ndbgvars <= 0)
         return;
     if (!fn->ins_pc || fn->nscopes <= 1 || !fn->scope_up || fn->nins <= 0) {
-        emit_block(out, b, loc, tm, fn, lo, 0, NULL, NULL);
+        emit_block(out, b, loc, tm, fn, lo, 0, NULL, NULL, NULL);
         return;
     }
     int ns = fn->nscopes;
     long *smin = xmalloc((size_t)ns * sizeof *smin);
     long *smax = xmalloc((size_t)ns * sizeof *smax);
+    struct sranges *sr = xcalloc((size_t)ns, sizeof *sr);
     for (int s = 0; s < ns; s++) {
         smin[s] = hi;
         smax[s] = lo;
@@ -1097,6 +1168,7 @@ static void emit_scopes(struct dwarf_out *out, struct dbuf *b, struct dbuf *loc,
         for (int t = fn->ins[k].scope; t > 0 && t < ns; t = fn->scope_up[t]) {
             if (a < smin[t]) smin[t] = a;
             if (z > smax[t]) smax[t] = z;
+            sr_add(&sr[t], a, z);
         }
     }
     /* a variable of a block with no code: shown nowhere */
@@ -1105,7 +1177,12 @@ static void emit_scopes(struct dwarf_out *out, struct dbuf *b, struct dbuf *loc,
         if (vs > 0 && vs < ns && smin[vs] >= smax[vs])
             fn->dbgvars[v].scope = -1;
     }
-    emit_block(out, b, loc, tm, fn, lo, 0, smin, smax);
+    emit_block(out, b, loc, tm, fn, lo, 0, smin, smax, sr);
+    for (int s = 0; s < ns; s++) {
+        free(sr[s].lo);
+        free(sr[s].hi);
+    }
+    free(sr);
     free(smin);
     free(smax);
 }
@@ -1652,6 +1729,19 @@ static void emit_all(struct ir_unit *iu, const char *filename,
     int lc_empty = lc.len;
     emit_abbrev(&ab);
     emit_frame(out, &fr, iu);
+    /* the blocks' range lists start after the header and the unit's own
+     * list, whose size is known before any is written */
+    {
+        int nf = 0;
+        for (int n = 0; n < iu->nfuncs; n++)
+            if (iu->funcs[n].src->code_len > 0)
+                nf++;
+        long ab2 = 2L * addr_bytes();
+        dw_brg_base = dw_ver >= 5 ? 12 + (split ? nf * (1 + ab2) + 1 : 0)
+                                  : (split ? (nf + 1) * ab2 : 0);
+        free(dw_brg.p);
+        memset(&dw_brg, 0, sizeof dw_brg);
+    }
     emit_info(out, &in, &lc, iu, filename, lo, hi, split);
     emit_line(out, &ln, iu, filename);
     if (dw_split) {
@@ -1662,11 +1752,12 @@ static void emit_all(struct ir_unit *iu, const char *filename,
     } else if (lc_at >= 0) {
         db_patch_u32(&lc, lc_at, (unsigned long)(lc.len - lc_at - 4));
     }
-    if (split) {
+    if (split || dw_brg.len) {
         /* the ranges: [begin, end) per function, each relocated into the
          * function's own section -- .debug_rnglists' start_end entries
          * (DWARF 5), or .debug_ranges' address pairs ended by two zeros */
         int rg_at = dw_ver >= 5 ? list_header(&rg) : -1;
+        if (split) {
         for (int n = 0; n < iu->nfuncs; n++) {
             if (iu->funcs[n].src->code_len <= 0) continue;
             long f_lo = iu->funcs[n].src->code_off;
@@ -1680,11 +1771,19 @@ static void emit_all(struct ir_unit *iu, const char *filename,
         }
         if (dw_ver >= 5) {
             db_u8(&rg, DW_RLE_end_of_list);
-            db_patch_u32(&rg, rg_at, (unsigned long)(rg.len - rg_at - 4));
         } else {
             db_addr(&rg, 0);
             db_addr(&rg, 0);
         }
+        }
+        if (rg.len != dw_brg_base)
+            internal_error("dwarf: the unit's range list is %d bytes, not the "
+                           "%ld its blocks' lists were placed after", rg.len,
+                           dw_brg_base);
+        for (int k = 0; k < dw_brg.len; k++)
+            db_u8(&rg, dw_brg.p[k]);
+        if (dw_ver >= 5)
+            db_patch_u32(&rg, rg_at, (unsigned long)(rg.len - rg_at - 4));
     }
 
     out->sec[DWSEC_ABBREV] = ab.p; out->seclen[DWSEC_ABBREV] = ab.len;
