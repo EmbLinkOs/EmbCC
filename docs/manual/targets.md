@@ -725,8 +725,10 @@ built for the triple, and scans every object it builds.
 QEMU has no Cortex-M23, so that suite runs Baseline code on the
 mps2-an505's Cortex-M33 (`tests/harness/thumb-m23`), which executes every
 Baseline instruction, with CCR.UNALIGN_TRP set so that an unaligned
-access faults as on the M23. That the code contains nothing else is the
-scan's to show.
+access faults as on the M23. Each program that passes there runs again
+on a Cortex-M23: EmbSim's `mps2-an519` (ARM's M23 image of the same
+board), whose core has exactly Baseline's instructions and faults on any
+other, and it must exit the same. The scan covers code no run reaches.
 
 The object's build attributes are clang's: `Tag_CPU_arch` 16 (v8-M
 Baseline), `Tag_THUMB_ISA_use` 3, `Tag_CPU_unaligned_access` 0.

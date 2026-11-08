@@ -20,11 +20,12 @@
 #include "devices.h"
 
 static const struct cpu_model cpus[] = {
-    { "cortex-m0", ARCH_V6M, 0, FPU_NONE, 0x410CC200u },
-    { "cortex-m0plus", ARCH_V6M, 0, FPU_NONE, 0x410CC601u },
-    { "cortex-m3", ARCH_V7M, 0, FPU_NONE, 0x412FC231u },
-    { "cortex-m4", ARCH_V7M, 1, FPU_SP, 0x410FC241u },
-    { "cortex-m7", ARCH_V7M, 1, FPU_DP, 0x411FC272u },
+    { "cortex-m0", ARCH_V6M, 0, FPU_NONE, 0x410CC200u, 0 },
+    { "cortex-m0plus", ARCH_V6M, 0, FPU_NONE, 0x410CC601u, 0 },
+    { "cortex-m23", ARCH_V6M, 0, FPU_NONE, 0x410CD200u, 1 },
+    { "cortex-m3", ARCH_V7M, 0, FPU_NONE, 0x412FC231u, 0 },
+    { "cortex-m4", ARCH_V7M, 1, FPU_SP, 0x410FC241u, 0 },
+    { "cortex-m7", ARCH_V7M, 1, FPU_DP, 0x411FC272u, 0 },
 };
 
 /* the private peripheral bus: the core's own devices, then the rest of
