@@ -521,8 +521,25 @@ static void opt_func(struct ir_func *fn)
      * kept reporting a change, which put format.c at six minutes. */
     /* The joins' copies, before anything decides where literals go: a
      * constant written straight into the merged name is where it was. */
-    if (cfg_ok && pass_joincopies(fn) && g_cfgclean)
+    if (cfg_ok && pass_joincopies(fn) && g_cfgclean) {
+        /* ...whose merged names are what threading looks for: a list
+         * walk's `n = next ? next : NULL` was `%t = mov %m` before its
+         * loop test until now, and the constant arm went through the
+         * test it already knew the answer to (pass_thread) */
+        int g = 0, any = 0;
+        while (g++ < 8 && pass_thread(fn)) {
+            any = 1;
+            pass_dce(fn);
+            pass_cfgclean(fn);
+        }
+        /* a threaded arm's old way through the test, which nothing
+         * reaches now (SCCP's job inside the rounds) */
+        if (any) {
+            drop_unreachable(fn);
+            pass_dce(fn);
+        }
         pass_cfgclean(fn);
+    }
     /* a branch whose arm changes nothing when skipped (`if (v) n += v`):
      * the shape the joins' copies leave */
     if (cfg_ok && pass_ifident(fn)) {

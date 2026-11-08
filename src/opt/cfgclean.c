@@ -91,13 +91,35 @@ static int thread_arm_const(const struct ir_func *fn, const struct ir_ins *def,
     return 0;
 }
 
+/* A label and the branch on %t right after it. %t's only reader, or
+ * (shared) one of several: then an arm keeps its definition, for the
+ * other readers, and only its jump is threaded -- a list walk's `n =
+ * first ? first->next : NULL` read by the loop's test and its body. */
+static int thread_arm_const(const struct ir_func *fn, const struct ir_ins *def,
+                            const struct defs *d, long *v);
+
+/* An arm the loop below will change: any, for a merge the branch alone
+ * reads; for a shared one, a constant arm that jumps (one that falls in
+ * is left -- a label inserted for it would be deleted again unused, and
+ * the rounds would never settle). */
+static int thread_arm_used(const struct ir_func *fn, int k, int t, int L,
+                           const struct defs *d, const int *use)
+{
+    long kv;
+    if (!thread_arm(fn, k, t, L, d))
+        return 0;
+    return use[t] == 1 ||
+           (fn->ins[k + 1].op == IR_JMP && thread_arm_const(fn, &fn->ins[k], d, &kv));
+}
+
 static int thread_site(const struct ir_func *fn, int n, const int *use)
 {
     const struct ir_ins *lab = &fn->ins[n], *br = &fn->ins[n + 1];
     int t = br->a;
     return n + 2 < fn->nins && lab->op == IR_LABEL &&
            (br->op == IR_BRZ || br->op == IR_BRNZ) &&
-           t >= fn->nvars && t < fn->nvregs && use[t] == 1 && br->w <= 8;
+           t >= fn->nvars && t < fn->nvregs && use[t] >= 1 && br->w <= 8 &&
+           br->label != lab->label;
 }
 
 /* A branch on `%u = cmp ne %t, 0` is a branch on %t, and one on
@@ -177,7 +199,8 @@ int pass_thread(struct ir_func *fn)
                 nx->op == IR_JMP)
                 continue;
             for (int k = 0; k + 1 < fn->nins; k++)
-                if (thread_arm(fn, k, fn->ins[n + 1].a, fn->ins[n].label, &d)) {
+                if (thread_arm_used(fn, k, fn->ins[n + 1].a, fn->ins[n].label,
+                                    &d, use)) {
                     mark[n + 1] = 1;
                     need = 1;
                     break;
@@ -223,6 +246,20 @@ int pass_thread(struct ir_func *fn)
             long kv;
             if (!thread_arm(fn, k, t, L, &d))
                 continue;
+            if (use[t] != 1) {
+                /* shared: a constant arm that jumps goes on to where the
+                 * branch would send it, its definition kept */
+                if (go->op == IR_JMP && go->label == L &&
+                    thread_arm_const(fn, def, &d, &kv)) {
+                    unsigned long mask = br->w >= 8 ? ~0UL
+                                       : (1UL << (8 * (br->w > 0 ? br->w : 4))) - 1;
+                    int zero = ((unsigned long)kv & mask) == 0;
+                    int taken = br->op == IR_BRZ ? zero : !zero;
+                    go->label = taken ? Lx : Lafter;
+                    changed = 1;
+                }
+                continue;
+            }
             if (thread_arm_const(fn, def, &d, &kv)) {
                 unsigned long mask = br->w >= 8 ? ~0UL
                                    : (1UL << (8 * (br->w > 0 ? br->w : 4))) - 1;

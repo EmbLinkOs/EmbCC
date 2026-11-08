@@ -1207,6 +1207,19 @@ int pass_fold(struct ir_func *fn)
                 to_mov(i, i->a);
                 changed = 1;
             } else if (i->a >= 0 && i->a < fn->nvregs && d.cnt[i->a] == 1 &&
+                       d.ins[i->a] >= 0 && fn->ins[d.ins[i->a]].op == IR_CMP &&
+                       i->w == ir_result_w(&fn->ins[d.ins[i->a]]) &&
+                       !i->flt && i->size >= 1) {
+                /* An extension of a comparison's 0 or 1, which every
+                 * `_Bool` read makes: `bool r = a && b; if (r)` was
+                 * `ext.4:1 (cmp ne %t, 0)` between the merge and its
+                 * branch, and the branch was never seen to test the
+                 * merged truth value (pass_thread). Any extension of 0
+                 * or 1 from one byte up is that value: a copy, at the
+                 * comparison's own width. */
+                to_mov(i, i->a);
+                changed = 1;
+            } else if (i->a >= 0 && i->a < fn->nvregs && d.cnt[i->a] == 1 &&
                        d.ins[i->a] >= 0 &&
                        fn->ins[d.ins[i->a]].op == IR_EXT &&
                        !fn->ins[d.ins[i->a]].flt &&
