@@ -2981,8 +2981,10 @@ static void gen_ins(struct xt_fn *F, int n)
             }
         }
         code_asm_rels(t, ia, t->len, ia->rel, ia->nrel);   /* its relocations */
-        for (int k = 0; k < ia->codelen; k++)
-            code_byte(t, ia->code[k]);
+        /* the bytes, padded at each alignment for where they land: a
+         * directive's data is never run, and zeros pad it */
+        code_put_asm(t, ia->code, ia->codelen, ia->drange, ia->ndrange,
+                     ia->arange, ia->narange, CODE_FILL_ZERO);
         /* Out, through an address: the address is live across the asm
          * (regalloc.c counts it so), so it is still there. An "m" output
          * was written BY the template through the address its register

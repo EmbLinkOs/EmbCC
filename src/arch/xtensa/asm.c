@@ -2,6 +2,7 @@
  * parser: every range is checked HERE, before the encoder is called, so a
  * template's mistake is a diagnostic and not an internal error. */
 #include "asm.h"
+#include "../code.h"
 
 #include "emit.h"
 #include "../asmexpr.h"
@@ -1282,11 +1283,21 @@ static int stmt_body(const char *stmt, int len, struct code *out, long pc,
  * Its statements, with GCC's numeric labels resolved: `1:` defines the
  * next instance of label 1, `1b` is the latest one before and `1f` the
  * next one after. Every instruction is three bytes, so a label's place is
- * three bytes per instruction before it. */
+ * three bytes per instruction before it -- and a directive's own bytes:
+ * `.ascii`, `.asciz`/`.string` and the alignments (code_asm_directive),
+ * which an RTOS's layout probe writes in a function (`.ascii "->EMB_PROBE
+ * x %c0 %c1"` and `.p2align 2`); an alignment's padding is decided where
+ * the bytes land (code_put_asm). A template with labels is GNU-assembled
+ * whole (GAS_INLINE), so no branch here crosses one. */
 
 #define MAXSTMT 512
 
-struct stm { const char *s; int len; int lab[4]; int nlab; int off; };
+struct stm { const char *s; int len; int lab[4]; int nlab; int off;
+             int dir, size, align; };
+
+/* `.word`, `.short`, `.byte` as on any 32-bit target, and `.align N` in
+ * BYTES, as GNU as reads it for Xtensa */
+static const struct asm_dirs xt_dirs = { asm_data_w32, 1, 0 };
 
 /* The statements of `text`, comments stripped, labels split off. */
 static int stmts(const char *text, struct stm *st, int max, char *err,
@@ -1297,15 +1308,9 @@ static int stmts(const char *text, struct stm *st, int max, char *err,
     while (*p) {
         const char *start = p;
         int len;
-        while (*p && *p != ';' && *p != '\n')
-            p++;
-        len = (int)(p - start);
-        for (int i = 0; i < len; i++)
-            if (start[i] == '#' || (start[i] == '/' && i + 1 < len &&
-                                    start[i + 1] == '/')) {
-                len = i;
-                break;
-            }
+        /* (a `;` or `#` inside a .ascii string ends nothing) */
+        p += asm_stmt_len(p, ";");
+        len = asm_cut_comment(start, (int)(p - start), "#", 1);
         if (*p)
             p++;
         if (ns == max)
@@ -1337,14 +1342,37 @@ static int stmts(const char *text, struct stm *st, int max, char *err,
         st[ns].s = start;
         st[ns].len = len;
         st[ns].off = off;
+        st[ns].dir = st[ns].size = st[ns].align = 0;
         {
-            int any = 0;
-            for (int i = 0; i < len; i++)
-                any |= !isspace((unsigned char)start[i]);
-            if (any)
+            int any = 0, i = 0;
+            for (int q = 0; q < len; q++)
+                any |= !isspace((unsigned char)start[q]);
+            while (i < len && isspace((unsigned char)start[i]))
+                i++;
+            if (any && start[i] == '.') {     /* a directive: its bytes */
+                struct code tmp = { 0 };
+                int r = code_asm_directive(start, len, &tmp, &xt_dirs, err,
+                                           errlen);
+                if (r < 0)
+                    return -1;
+                if (r == 0)
+                    FAIL("directive \"%.*s\" is not one Xtensa inline asm "
+                         "takes (.ascii, .asciz, .string, .byte, .short, "
+                         ".word, .p2align, .balign, .align)", len - i,
+                         start + i);
+                st[ns].dir = 1;
+                st[ns].size = tmp.len;
+                st[ns].align = tmp.narange > 0;
+                off += tmp.len;
+                free(tmp.p);
+                free(tmp.drange);
+                free(tmp.arange);
+                free(tmp.rel);
+            } else if (any) {
                 off += 3;
-            else
+            } else {
                 st[ns].len = 0;
+            }
         }
         ns++;
     }
@@ -1421,6 +1449,14 @@ int xtasm_assemble(const char *text, struct code *out, char *err, int errlen)
         if (len < 0)
             return -1;
         int before = out->len;
+        if (st[k].dir && pc < 0) {           /* a template's directive */
+            if (code_asm_directive(buf, len, out, &xt_dirs, err, errlen) < 0)
+                return -1;
+            if (out->len - before != st[k].size)
+                FAIL("internal: a directive of %d bytes, sized %d",
+                     out->len - before, st[k].size);
+            continue;
+        }
         rc = stmt_body(buf, len, out, pc < 0 ? -1 : pc + st[k].off, err,
                        errlen);
         if (pc >= 0)
