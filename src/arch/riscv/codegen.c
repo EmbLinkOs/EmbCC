@@ -3148,18 +3148,21 @@ static int gen_ins64(struct rv_fn *F, int n)
          * pointer in a register was two moves and the loads and two
          * moves more. A destination whose low register IS the address
          * takes the high word first. */
-        int ra_ = rdr(F, i->a, ADDR), dl, dh;
+        /* A local's address with no register (fa) is the frame base and
+         * the slot: `lw a0, 8(sp)`, not the address made in ADDR first */
+        long o;
+        int ra_ = mem_base_span(F, i->a, i->memoff, 4, &o, ADDR), dl, dh;
         dst64(F, i->dst, &dl, &dh);
         if (i->size == 8) {
             if (dl == ra_) {
-                rv_load(t, dh, ra_, 4, 4, 1, F->xlen);
-                rv_load(t, dl, ra_, 0, 4, 1, F->xlen);
+                rv_load(t, dh, ra_, o + 4, 4, 1, F->xlen);
+                rv_load(t, dl, ra_, o, 4, 1, F->xlen);
             } else {
-                rv_load(t, dl, ra_, 0, 4, 1, F->xlen);
-                rv_load(t, dh, ra_, 4, 4, 1, F->xlen);
+                rv_load(t, dl, ra_, o, 4, 1, F->xlen);
+                rv_load(t, dh, ra_, o + 4, 4, 1, F->xlen);
             }
         } else {
-            rv_load(t, dl, ra_, 0, i->size, i->sign, F->xlen);
+            rv_load(t, dl, ra_, o, i->size, i->sign, F->xlen);
             if (i->sign) rv_shift_imm(t, RV_SRA, dh, dl, 31, 0, 32);
             else         rv_mv(t, dh, RV_ZERO);
         }
@@ -3167,11 +3170,12 @@ static int gen_ins64(struct rv_fn *F, int n)
         return 1;
     }
     case IR_STORE: {
-        int ra_ = rdr(F, i->a, ADDR), vl, vh;
+        long o;
+        int ra_ = mem_base_span(F, i->a, i->memoff, 4, &o, ADDR), vl, vh;
         src64(F, i->b, A_LO, A_HI, &vl, &vh);
-        rv_store(t, vl, ra_, 0, i->size == 8 ? 4 : i->size, F->xlen);
+        rv_store(t, vl, ra_, o, i->size == 8 ? 4 : i->size, F->xlen);
         if (i->size == 8)
-            rv_store(t, vh, ra_, 4, 4, F->xlen);
+            rv_store(t, vh, ra_, o + 4, 4, F->xlen);
         return 1;
     }
     case IR_SELECT: {
@@ -4267,10 +4271,11 @@ static void gen_ld32(struct rv_fn *F, struct ir_ins *i)
             copy16(F, F->slot[i->dst], sslot(F, i->a));
         return;
     case IR_LOAD: {
-        int ra_ = rdr(F, i->a, ADDR);
+        long o;
+        int ra_ = mem_base_span(F, i->a, i->memoff, 12, &o, ADDR);
         long d = tf_result(F, i->dst);
         for (int q = 0; q < 16; q += 4) {
-            rv_load(t, A_LO, ra_, q, 4, 0, 32);
+            rv_load(t, A_LO, ra_, o + q, 4, 0, 32);
             st_sp(F, A_LO, d + q, 4);
         }
         return;
@@ -4279,10 +4284,11 @@ static void gen_ld32(struct rv_fn *F, struct ir_ins *i)
         long s;
         need16(F, i->b);
         s = sslot(F, i->b);
-        int ra_ = rdr(F, i->a, ADDR);
+        long o;
+        int ra_ = mem_base_span(F, i->a, i->memoff, 12, &o, ADDR);
         for (int q = 0; q < 16; q += 4) {
             ld_sp(F, A_LO, s + q, 4, 1);
-            rv_store(t, A_LO, ra_, q, 4, 32);
+            rv_store(t, A_LO, ra_, o + q, 4, 32);
         }
         return;
     }
@@ -4418,11 +4424,12 @@ static void gen_ins128(struct rv_fn *F, struct ir_ins *i)
         /* Two doublewords. C has the address 16-aligned (a long double
          * constant included: irgen places it so); a packed member is
          * read the way the eight-byte path reads one. */
-        int ra_ = rdr(F, i->a, ADDR);
         if (!is16(F, i->dst) || i->memoff)
             rv_refuse(F, i, "a sixteen-byte load into a narrower value");
-        rv_load(t, A_LO, ra_, 0, 8, 0, 64);
-        rv_load(t, A_HI, ra_, 8, 8, 0, 64);
+        long o;
+        int ra_ = mem_base_span(F, i->a, 0, 8, &o, ADDR);
+        rv_load(t, A_LO, ra_, o, 8, 0, 64);
+        rv_load(t, A_HI, ra_, o + 8, 8, 0, 64);
         st128(F, i->dst, A_LO, A_HI);
         return;
     }
@@ -4430,9 +4437,10 @@ static void gen_ins128(struct rv_fn *F, struct ir_ins *i)
         if (!is16(F, i->b) || i->memoff)
             rv_refuse(F, i, "a sixteen-byte store of a narrower value");
         ld128(F, i->b, A_LO, A_HI);
-        int ra_ = rdr(F, i->a, ADDR);
-        rv_store(t, A_LO, ra_, 0, 8, 64);
-        rv_store(t, A_HI, ra_, 8, 8, 64);
+        long o;
+        int ra_ = mem_base_span(F, i->a, 0, 8, &o, ADDR);
+        rv_store(t, A_LO, ra_, o, 8, 64);
+        rv_store(t, A_HI, ra_, o + 8, 8, 64);
         return;
     }
 
@@ -5249,6 +5257,20 @@ static void gen_ins(struct rv_fn *F, int n)
             rv_zb_r(t, RV_ZB_XNOR, d, ra_, rb_);
             wrote(F, fn->ins[n + 1].dst, d);
             F->skip_next = 1;
+            return;
+        }
+        /* A local's address with no register (fa) plus a constant: one
+         * `addi rd, sp, slot + k`, where reading it first made it in
+         * ACC and added after (`mv t0, sp; addi a4, t0, 8`) */
+        if ((i->op == IR_ADD || i->op == IR_SUB) && i->imm_b &&
+            i->w == F->xlen / 8 && F->fa && i->a >= 0 &&
+            i->a < fn->nvregs && F->fa[i->a] >= 0 && F->remat[i->a] &&
+            !in_reg(F, i->a)) {
+            long long v = imm_val(F, i);
+            if (i->op == IR_SUB) v = -v;
+            int rd_ = wreg(F, i->dst, ACC);
+            addr_sp(F, rd_, sslot(F, F->fa[i->a]) + (long)v);
+            wrote(F, i->dst, rd_);
             return;
         }
         int ra_ = rdr(F, i->a, ACC);
@@ -6774,6 +6796,67 @@ static int *rv_int_uses(const struct ir_func *fn)
     return c.m;
 }
 
+/* Frame addresses no register should hold: an IR_ADDR whose every read
+ * is the address of a load or a store. Without a register it is
+ * rematerialised, and mem_base folds the local's slot into the access's
+ * offset -- `sw a2, 0x24(sp)` -- so it costs nothing at all; in a
+ * register it is an `addi`/`mv` at its definition, and across a call a
+ * callee-saved register saved and restored besides (a struct filled
+ * field by field and passed by address held s0 for it). A read as a
+ * value -- a call argument, arithmetic -- costs one `addi rd, sp, off`
+ * where it is, which a register would have cost once at the definition:
+ * so up to two such reads still leave it without a register (the struct
+ * passed by address: `mv a0, sp` at the call, where s0 cost a save, a
+ * restore and a move), more keep it eligible -- a register is cheaper by
+ * an instruction per read in a loop. Under -Os any number: the `addi`s
+ * are two bytes each where the register cost its save and restore (RV32
+ * libc 332,038 -> 328,750 bytes; limit 2 at -O2, cycles unchanged).
+ * EMBCC_RV_FAMEM_MAX=N moves the limit; EMBCC_RV_NOFAMEM=1 turns this
+ * off. NULL when there is none. */
+struct rv_fam { const struct ir_ins *in; int *nonmem; };
+static void rv_fam_cb(int v, void *ctx)
+{
+    struct rv_fam *m = ctx;
+    const struct ir_ins *i = m->in;
+    int addr_use = (i->op == IR_LOAD && v == i->a) ||
+                   (i->op == IR_STORE && v == i->a && v != i->b);
+    if (!addr_use)
+        m->nonmem[v]++;
+}
+static char *rv_fa_memonly(const struct ir_func *fn)
+{
+    if (getenv("EMBCC_RV_NOFAMEM") || getenv("EMBCC_RV_NOFAREMAT"))
+        return NULL;
+    int nv = fn->nvregs, any = 0, lim = target_opt_size() ? 1 << 30 : 2;
+    const char *e = getenv("EMBCC_RV_FAMEM_MAX");
+    if (e)
+        lim = atoi(e);
+    int *nonmem = xcalloc((size_t)(nv ? nv : 1), sizeof *nonmem);
+    int *defs = xcalloc((size_t)(nv ? nv : 1), sizeof *defs);
+    char *isaddr = xcalloc((size_t)(nv ? nv : 1), 1);
+    struct rv_fam m = { NULL, nonmem };
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        int d = ra_ins_def(i);
+        if (d >= 0 && d < nv) {
+            defs[d]++;
+            if (i->op == IR_ADDR)
+                isaddr[d] = 1;
+        }
+        m.in = i;
+        ra_each_use(i, rv_fam_cb, &m);
+    }
+    char *out = xcalloc((size_t)(nv ? nv : 1), 1);
+    for (int v = fn->nvars; v < nv; v++)
+        if (isaddr[v] && defs[v] == 1 && nonmem[v] <= lim) {
+            out[v] = 1;
+            any = 1;
+        }
+    free(nonmem); free(defs); free(isaddr);
+    if (!any) { free(out); return NULL; }
+    return out;
+}
+
 static char *rv_float_map(const struct rv_fn *F, char **fw_out, int debug)
 {
     const struct ir_func *fn = F->fn;
@@ -7128,11 +7211,14 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
         char *fwm = NULL;
         char *flt = rv_float_map(&F, &fwm, keep_vars || g_rv_o0);
         char *excl = pin;
-        if (flt) {
+        char *fam = g_rv_o0 || keep_vars ? NULL : rv_fa_memonly(fn);
+        if (flt || fam) {
             excl = xcalloc((size_t)fn->nvregs, 1);
             for (int v = 0; v < fn->nvregs; v++)
-                excl[v] = (char)(flt[v] || (pin && pin[v]));
+                excl[v] = (char)((flt && flt[v]) || (pin && pin[v]) ||
+                                 (fam && fam[v]));
         }
+        free(fam);
         int *pair = xlen == 32 && g_rv_pairs ? rv_pair_alloc(fn, &F, excl)
                                              : NULL;
         {
@@ -7173,9 +7259,10 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
                                     &F.nfsave);
             F.fw = fwm;
             fwm = NULL;
-            free(excl);
             free(flt);
         }
+        if (excl != pin)
+            free(excl);
         free(fwm);
         free(pin);
         /* Read counts for comparison/branch fusion, with the allocator
