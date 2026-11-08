@@ -5969,7 +5969,7 @@ static void gen_ins(struct t_fn *F, int n)
         /* The comparison reads its left operand where it already is;
          * only the 0/1 result needs a register of its own. */
         int sa = rdr(F, i->a, T_ACC);
-        if (i->imm_b && ((i->imm >= 0 && i->imm <= 255) || t_imm_ok(i->imm))) {
+        if (i->imm_b && t_cmp_imm_ok(i->imm)) {
             t_cmp_imm(t, sa, i->imm);
         } else if (!i->imm_b) {
             /* ...and its right one too: `cmp r2, r4`, not a copy of r4
