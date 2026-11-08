@@ -816,8 +816,7 @@ static int stmt_body(const char *stmt, int len, struct code *out, long pc,
                 long o6 = (long)rel - 4;
                 if (o6 < 0 || o6 > 63)
                     o6 = 0;          /* pass one: the size is all it needs */
-                xt_h(out, (unsigned)(o6 & 15) << 12 | (unsigned)r[0] << 8 |
-                          (unsigned)((k ? 0xc : 0x8) | (o6 >> 4)) << 4 | 0xc);
+                xt_h(out, xt_enc_bz_n(k, r[0], o6));
                 return 0;
             }
         }

@@ -100,6 +100,12 @@ void xt_n_addi(struct code *c, int t, int s, long v);
 int xt_n_mem_ok(long off, int size);                 /* a word, 0..60 */
 void xt_n_mem(struct code *c, int t, int base, long off, int store);
 void xt_n_ret(struct code *c, int windowed);
+int xt_narrow_on(void);                               /* xt_set_narrow's */
+/* beqz.n / bnez.n s, off: off = target - (branch + 4), 0..63 forward */
+unsigned xt_enc_bz_n(int nez, int s, long off);
+int xt_bz_n_reaches(long off);
+/* a narrow branch at `at` pointed at target; 0 when it does not reach */
+int xt_patch_bz_n(struct code *c, int at, int target);
 
 /* ---- moves and constants ------------------------------------------------ */
 

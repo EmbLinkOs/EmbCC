@@ -1,6 +1,7 @@
 #!/bin/sh
 # The Xtensa code generator uses the density option's 16-bit forms --
-# mov.n, movi.n, add.n, addi.n, l32i.n, s32i.n, retw.n -- where they fit,
+# mov.n, movi.n, add.n, addi.n, l32i.n, s32i.n, retw.n, beqz.n, bnez.n --
+# where they fit (a branch: tried narrow, three bytes when it did not reach),
 # as GNU as narrows GCC's code (src/arch/xtensa/emit.h, xt_set_narrow).
 # Every instruction was three bytes: lib/libc at -Os was 402507 bytes
 # of functions, 321869 with them. EMBCC_NO_DENSITY=1 keeps three. -S
@@ -17,6 +18,7 @@ cat > "$out/d.c" <<'EOC'
 struct node { struct node *next, *prev; int key; };
 int lt(int a, int b) { return a < b; }
 int add3(int x) { return x + 3; }
+int nz(const int *p) { if (!p) return 0; return *p + 1; }
 void unlink_node(struct node *n)
 {
     n->prev->next = n->next;
@@ -52,4 +54,8 @@ for f in 8:l32i.n 9:s32i.n a:add.n b:addi.n c:movi.n d:mov.n; do
         echo "FAIL: no $nm"; exit 1; }
 done
 grep -qE '^[[:space:]]+\.byte[[:space:]]+0x1d,0xf0$' "$out/n.s" || { echo "FAIL: no retw.n"; exit 1; }
+# beqz.n / bnez.n: op0 1100 with the t field's top bit set (movi.n has it
+# clear), relaxed to beqz when the target is out of its 0..63 bytes
+grep -qE '^[[:space:]]+\.byte[[:space:]]+0x[89a-f]c,0x[0-9a-f]+$' "$out/n.s" || {
+    echo "FAIL: no beqz.n/bnez.n"; exit 1; }
 echo "xtensa-density: $n2 of $((n2 + n3)) instructions narrow ($nb bytes, $wb without), every form; EMBCC_NO_DENSITY=1 none"

@@ -179,6 +179,36 @@ void xt_n_mem(struct code *c, int t, int base, long off, int store)
     rrrn(c, store ? 0x9 : 0x8, (int)(off / 4), base, t);
 }
 
+int xt_narrow_on(void) { return g_narrow; }
+
+int xt_bz_n_reaches(long off) { return off >= 0 && off <= 63; }
+
+/* RI6: op0 1100, then imm6[5:4] and 10 (beqz.n) or 11 (bnez.n) in the t
+ * field, s, imm6[3:0] */
+unsigned xt_enc_bz_n(int nez, int s, long off)
+{
+    need_reg(s);
+    if (!xt_bz_n_reaches(off))
+        internal_error("xtensa: beqz.n/bnez.n offset %ld is not 0..63", off);
+    return (unsigned)(off & 15) << 12 | (unsigned)s << 8 |
+           (unsigned)((nez ? 0xc : 0x8) | (off >> 4)) << 4 | 0xc;
+}
+
+int xt_patch_bz_n(struct code *c, int at, int target)
+{
+    unsigned h = (unsigned)c->p[at] | (unsigned)c->p[at + 1] << 8;
+    long off = (long)target - (long)(at + 4);
+    if ((h & 15) != 0xc || !(h >> 7 & 1))
+        internal_error("xtensa: the halfword at %d (0x%04x) is not a "
+                       "beqz.n/bnez.n", at, h);
+    if (!xt_bz_n_reaches(off))
+        return 0;
+    h = xt_enc_bz_n(h >> 6 & 1, (int)(h >> 8 & 15), off);
+    c->p[at] = (unsigned char)(h & 0xff);
+    c->p[at + 1] = (unsigned char)(h >> 8);
+    return 1;
+}
+
 void xt_n_ret(struct code *c, int windowed)
 {
     xt_h16(c, windowed ? 0xf01du : 0xf00du);

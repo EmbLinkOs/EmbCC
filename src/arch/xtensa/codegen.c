@@ -131,6 +131,9 @@ struct xt_fn {
      * address and a jx). */
     const char *longb;
     int nlongb;
+    /* per branch, as longb: a beqz.n/bnez.n that did not reach */
+    const char *wideb;
+    int nwideb;
     /* The literal pool: npool words reserved at pool_at, before the
      * function's entry; the body asked for nlit of them. */
     struct xt_lit *lit;
@@ -1217,7 +1220,7 @@ static void br_back(struct xt_fn *F, int at, int target)
                        "reach", F->fn->name);
 }
 
-enum { FX_B, FX_J, FX_FAR };
+enum { FX_B, FX_J, FX_FAR, FX_BN };
 
 static void want_label(struct xt_fn *F, int at, int label, int kind)
 {
@@ -1286,6 +1289,16 @@ static void branch_to(struct xt_fn *F, struct xtest x, int label)
         return;
     }
     at = F->t->len;
+    /* beqz/bnez as the density option's 16-bit form, 0..63 bytes on:
+     * tried for every one, and three bytes from the next attempt for
+     * one that did not reach (wideb) -- GNU as narrows GCC's so */
+    if (x.kind == T_Z && (x.cond == XT_BEQZ || x.cond == XT_BNEZ) &&
+        xt_narrow_on() &&
+        !(F->wideb && F->nfix < F->nwideb && F->wideb[F->nfix])) {
+        xt_h16(F->t, xt_enc_bz_n(x.cond == XT_BNEZ, x.s, 0));
+        want_label(F, at, label, FX_BN);
+        return;
+    }
     xt_w(F->t, enc_test(&x, 0));
     want_label(F, at, label, FX_B);
 }
@@ -3694,8 +3707,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct xt_sites *st,
     {
     int len0, nl0 = fn->nlines;
     int se0 = F.st->next, ss0 = F.st->nstr, sg0 = F.st->ng, sf0 = F.st->nf;
-    char *longb = NULL;
-    int nlongb = 0;
+    char *longb = NULL, *wideb = NULL;
+    int nlongb = 0, nwideb = 0;
     /* aligned(N), or an asm that aligns its own bytes: the ENTRY is on
      * it, after the pool, so the pad before the pool is sized per attempt */
     int fal = cg_fn_align(fn);
@@ -3718,6 +3731,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct xt_sites *st,
     F.fb = XT_SP;
     F.longb = longb;
     F.nlongb = nlongb;
+    F.wideb = wideb;
+    F.nwideb = nwideb;
     while (fal > 4 && (t->len + 4 * F.npool) % fal)
         code_byte(t, 0);
     if (fal > f->code_align)
@@ -3776,6 +3791,21 @@ static void gen_func(struct ir_func *fn, struct code *t, struct xt_sites *st,
                            F.fix[i].label, fn->name);
         if (F.fix[i].kind == FX_FAR)
             continue;               /* its literal is the label's address */
+        if (F.fix[i].kind == FX_BN) {
+            if (xt_patch_bz_n(t, F.fix[i].at, target))
+                continue;
+            if (nwideb < F.nfix) {
+                wideb = xrealloc(wideb, (size_t)F.nfix);
+                memset(wideb + nwideb, 0, (size_t)(F.nfix - nwideb));
+                nwideb = F.nfix;
+            }
+            if (wideb[i])
+                internal_error("xtensa: %s: a wide branch was patched as a "
+                               "narrow one", fn->name);
+            wideb[i] = 1;
+            nfail++;
+            continue;
+        }
         if (!xt_patch_branch(t, F.fix[i].at, target)) {
             if (nlongb < F.nfix) {
                 longb = xrealloc(longb, (size_t)F.nfix);
@@ -3799,6 +3829,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct xt_sites *st,
         break;
     }                                   /* the attempts */
     free(longb);
+    free(wideb);
     }
     fill_pool(&F);
     code_mark_data(t, F.pool_at, F.pool_at + 4 * F.npool);
