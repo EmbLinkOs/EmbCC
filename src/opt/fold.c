@@ -1191,6 +1191,25 @@ int pass_fold(struct ir_func *fn)
                 continue;
             }
         }
+        long B0;
+        /* `cmp ne %c, 0` of a comparison's 0 or 1 is that 0 or 1: the
+         * re-test a merged truth value leaves once threading has given
+         * it one definition (pass_thread). Read at the comparison's own
+         * width, which a 0/1 is (ir_result_w). */
+        if (i->op == IR_CMP && !i->flt && i->pred == B_NE && i->w == 4 &&
+            i->a >= 0 && i->a < fn->nvregs && d.cnt[i->a] == 1 &&
+            d.ins[i->a] >= 0 && fn->ins[d.ins[i->a]].op == IR_CMP &&
+            ((i->imm_b && i->imm == 0) ||
+             (!i->imm_b && i->b >= 0 && i->b < fn->nvregs &&
+              ((d.cnt[i->b] == 1 && d.ins[i->b] >= 0 &&
+                fn->ins[d.ins[i->b]].op == IR_CONST &&
+                fn->ins[d.ins[i->b]].imm == 0) ||
+               /* a 0 the block has just written into a shared name */
+               (lk_get(&lk, i->b, i->w, &B0) && B0 == 0))))) {
+            to_mov(i, i->a);
+            changed = 1;
+            continue;
+        }
         if (i->op == IR_EXT) {
             if (ka) {
                 to_const(i, fold_ext(A, i->size, i->sign, i->w));
@@ -1457,27 +1476,34 @@ int pass_fold(struct ir_func *fn)
             long v = A; A = B; B = v;
             changed = 1;
         }
-        /* one-operand algebraic identities (valid for any width/signedness) */
+        /* one-operand algebraic identities (valid for any width/signedness).
+         * "The other operand" is b's value, which for an immediate b is a
+         * constant: `0 + #16` became a copy of b, and b is no vreg (-1).
+         * Seen once threading ran fold after the joins' copies (opt.c),
+         * where the 0 is a constant name (tests/exec/switch.c on PowerPC,
+         * SPARC, ColdFire). */
+#define TO_B(i) ((i)->imm_b ? to_const((i), norm((i)->imm, (i)->w)) \
+                            : to_mov((i), (i)->b))
         switch (i->op) {
         case IR_ADD:
-            if (ka && A == 0) { to_mov(i, i->b); changed = 1; }
+            if (ka && A == 0) { TO_B(i); changed = 1; }
             else if (kb && B == 0) { to_mov(i, i->a); changed = 1; }
             break;
         case IR_SUB:
             if (kb && B == 0) { to_mov(i, i->a); changed = 1; }
             break;
         case IR_OR:
-            if (ka && A == 0) { to_mov(i, i->b); changed = 1; }
+            if (ka && A == 0) { TO_B(i); changed = 1; }
             else if (kb && B == 0) { to_mov(i, i->a); changed = 1; }
             break;
         case IR_XOR:
-            if (ka && A == 0) { to_mov(i, i->b); changed = 1; }
+            if (ka && A == 0) { TO_B(i); changed = 1; }
             else if (kb && B == 0) { to_mov(i, i->a); changed = 1; }
             break;
         case IR_MUL: {
             int sh;
             if ((ka && A == 0) || (kb && B == 0)) { to_const(i, 0); changed = 1; }
-            else if (ka && A == 1) { to_mov(i, i->b); changed = 1; }
+            else if (ka && A == 1) { TO_B(i); changed = 1; }
             else if (kb && B == 1) { to_mov(i, i->a); changed = 1; }
             /* x * 2^k -> x << k (retarget the literal to k). Handle either
              * operand being the constant, since MUL is commutative. */

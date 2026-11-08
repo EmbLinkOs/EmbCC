@@ -310,7 +310,15 @@ static void opt_func(struct ir_func *fn)
                                                   * one cannot touch */
             changed |= pass_dce(fn);
             if (g_cfgclean) {
-                changed |= pass_thread(fn);
+                /* a threaded arm leaves its constant definition of the
+                 * merged name where nothing reads it any more, which
+                 * keeps the name defined twice and folding off it */
+                int th = pass_thread(fn);
+                changed |= th;
+                if (th && cfg_ok) {
+                    pass_dce(fn);         /* the copies' dead tests first */
+                    changed |= pass_deaddefs(fn);
+                }
                 changed |= pass_cfgclean(fn);
                 if (cfg_ok)
                     changed |= pass_brdom(fn);
@@ -530,6 +538,14 @@ static void opt_func(struct ir_func *fn)
         while (g++ < 8 && pass_thread(fn)) {
             any = 1;
             pass_dce(fn);
+            if (pass_deaddefs(fn))
+                pass_dce(fn);
+            /* what the threaded arms leave a single definition of: the
+             * re-test of a truth value, folded (fold.c) */
+            if (pass_fold(fn)) {
+                pass_copyprop(fn);
+                pass_dce(fn);
+            }
             pass_cfgclean(fn);
         }
         /* a threaded arm's old way through the test, which nothing
@@ -578,6 +594,10 @@ static void opt_func(struct ir_func *fn)
     }
     if (edge_ok)
         pass_retdup(fn);     /* last: the tail merge would share them */
+    /* a comparison two branches share, issued again at the second, where
+     * a backend can fuse each with its branch (pass_cmpbranch) */
+    if (pass_cmpbranch(fn))
+        pass_dce(fn);
     if (verify) verify_func(fn, "opt");
 
     /* What the whole fixpoint came to, for this function. The per-pass
