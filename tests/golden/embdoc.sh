@@ -55,7 +55,7 @@ has 'mentions &lt;stdio.h&gt;, &lt;arch&gt; and &lt;b&gt;bold&lt;/b&gt;' "<stdio
 has '&lt;script&gt;alert(1)&lt;/script&gt;' "a script in prose"
 has '&lt;img src=x onerror=alert(1)&gt;' "an img in prose"
 hasnt '<script' "markup passed through"
-hasnt '<img' "markup passed through"
+hasnt '<img src=x' "markup passed through"
 hasnt '<b>' "markup passed through"
 hasnt 'hidden note' "an inline comment shown"
 hasnt 'UNVERIFIED' "a comment block shown"
@@ -76,6 +76,13 @@ has '<a href="https://example.com/a_b?x=1&amp;y=2" title="A title">An external p
 has '<a href="https://example.com/path_(x)">https://example.com/path_(x)</a>, in' "a bare URL"
 has '<a href="../../../docs/manual/optimization.html#-o-levels">Code in a link: <code>x &lt; y</code></a>' "code in a link"
 grep -q 'href="[^"]*\.md[#"]' "$out/fixture.html" && fail "an href still names a .md"
+
+# images: a repository file from its copy in the site (no leading dot: Pages
+# serves no hidden directory), an image inside a link, a script refused
+has '<img src="../../../github/assets/logo.svg" alt="The logo, drawn" title="The mark" />' "an image"
+has '<a href="https://example.com/ci"><img src="https://example.com/badge.svg?a=1&amp;b=2" alt="CI &lt;status&gt;" /></a>' "an image in a link"
+has 'and a script for a source: only its alt.' "a javascript: image"
+hasnt 'javascript:' "a javascript: image"
 "$EMBDOC" md "$fx" --repo-url https://example.org/r/ 2>/dev/null |
     grep -qF '<a href="https://example.org/r/blob/main/tests/run.sh">' ||
     fail "--repo-url is not used for repository files"
@@ -159,6 +166,12 @@ done
 pages=$(find "$site" -name '*.html' | wc -l | tr -d ' ')
 [ "$pages" -eq $((n + 1)) ] ||
     fail "$pages pages for $n documents (one per document and 404.html)"
+# the README's images, copied where its page points
+for img in $(grep -o '<img src="[^":]*"' "$site/index.html" | sed 's/<img src="//; s/"$//'); do
+    cmp -s "$site/$img" ".$img" || fail "index.html shows $img, which is not .$img copied"
+done
+grep -q '<img src="github/assets/banner.svg"' "$site/index.html" ||
+    fail "index.html does not show the banner"
 for f in search-index.json embdoc.css embdoc.js 404.html; do
     [ -s "$site/$f" ] || fail "the site has no $f"
 done

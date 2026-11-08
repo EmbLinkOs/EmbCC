@@ -530,7 +530,7 @@ embrt: tools/embrt/embrt.c
 # host.c, which lists and makes directories with POSIX's calls.
 EMBDOC_SRCS := tools/embdoc/embdoc.c tools/embdoc/md.c tools/embdoc/assets.c \
                tools/embdoc/host.c
-embdoc: $(EMBDOC_SRCS) tools/embdoc/embdoc.h
+embdoc: $(EMBDOC_SRCS) tools/embdoc/embdoc.h tools/embdoc/brand.h
 	$(CC) $(CFLAGS) -o $@ $(EMBDOC_SRCS)
 
 # The site itself, in build/site: never committed (.github/workflows/

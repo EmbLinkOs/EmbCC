@@ -48,6 +48,12 @@ are entities. A comment is not shown: <!-- hidden note --> here.
   URL, https://example.com/path_(x), in a sentence.
 - [Code in a link: `x < y`](../../../docs/manual/optimization.md#-o-levels).
 
+## Images
+
+![The *logo*, drawn](../../../.github/assets/logo.svg "The mark"), a
+badge [![CI <status>](https://example.com/badge.svg?a=1&b=2)](https://example.com/ci),
+and a script for a source: ![only its alt](javascript:alert(1)).
+
 ## Lists
 
 1. First, with a continuation

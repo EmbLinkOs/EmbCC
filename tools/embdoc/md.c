@@ -12,9 +12,14 @@
  * lazy continuation lines and blocks inside items; block quotes; thematic
  * breaks; GFM tables with column alignment and \| in cells.
  * Inlines: *em* and _em_, **strong** (CommonMark's delimiter rules, so
- * snake_case and 2 * 3 stay text); `code`; [text](dest "title"); <scheme:>
+ * snake_case and 2 * 3 stay text); `code`; [text](dest "title");
+ * ![alt](src "title") images, inside a link's text too (a badge); <scheme:>
  * autolinks and bare http(s) URLs; backslash escapes and hard breaks;
  * entity references.
+ *
+ * An image's source goes to the page's image callback, as a link's
+ * destination goes to its link callback; a source with a scheme other than
+ * http or https is no image, and its alt text is written instead.
  *
  * A heading's id is GitHub's slug of its text (lower case; letters,
  * digits, _ and - kept; each space a -), a repeat numbered -1, -2 ... as
@@ -27,7 +32,7 @@
  * an anchor <a id="NAME"></a> (or name=), which the docs put above
  * headings that other pages link to by a short id; <code>...</code>; and
  * <!-- comments -->, which are dropped, as GitHub does not show them
- * either. Not supported: images, reference-style links, footnotes, task
+ * either. Not supported: reference-style links, footnotes, task
  * lists, strikethrough, and HTML blocks of any other kind (they render as
  * text). */
 #include <ctype.h>
@@ -1193,8 +1198,47 @@ static char *unescape(const char *s, size_t n, size_t *out)
     return r;
 }
 
-/* [text](dest "title") at s[i]: its length, 0 when it is not a link. */
-static size_t try_link(struct inl *in, size_t i)
+/* ![alt](src "title"): <img>, its alt the text a browser would show for
+ * what is between the brackets. */
+static void image_tag(struct inl *in, const char *src, size_t sn,
+                      const char *title, size_t tn, size_t a, size_t e, int line)
+{
+    char *d = xstrndup(src, sn);
+    char *url = NULL;
+    size_t sc = scheme(d, sn);
+    if (!sc || (sc == 4 && !strncmp(d, "http", 4)) ||
+        (sc == 5 && !strncmp(d, "https", 5)))
+        url = in->pg->image ? in->pg->image(in->pg->arg, d, line) : xstrdup(d);
+    struct buf t = { 0 };
+    int vis = 0;
+    inline_html(in->pg, in->s + a, e - a, NULL, 0,
+                IN_LINK | (in->flags & IN_CELL), &t, &vis);
+    char *alt = html_text(t.p ? t.p : "", t.n);
+    if (url) {
+        puts_(in, "<img src=\"");
+        put_html(in, url, strlen(url));
+        puts_(in, "\" alt=\"");
+        put_html(in, alt, strlen(alt));
+        puts_(in, "\"");
+        if (title) {
+            puts_(in, " title=\"");
+            put_html(in, title, tn);
+            puts_(in, "\"");
+        }
+        puts_(in, " />");
+    } else {
+        put_html(in, alt, strlen(alt));
+    }
+    in->visible = 1;
+    free(alt);
+    buf_free(&t);
+    free(url);
+    free(d);
+}
+
+/* [text](dest "title") at s[i] -- or, with image, the ![alt](src) whose
+ * [ is at s[i]: its length, 0 when it is not one. */
+static size_t try_link(struct inl *in, size_t i, int image)
 {
     const char *s = in->s;
     size_t n = in->n, p = i + 1;
@@ -1278,9 +1322,13 @@ static size_t try_link(struct inl *in, size_t i)
     size_t dn, tn = 0;
     char *dest = unescape(s + da, de - da, &dn);
     char *title = has_title ? unescape(s + ta, tl, &tn) : NULL;
-    link_open(in, dest, dn, title, tn, line_at(in, i));
-    link_text(in, i + 1, te);
-    puts_(in, "</a>");
+    if (image) {
+        image_tag(in, dest, dn, title, tn, i + 1, te, line_at(in, i));
+    } else {
+        link_open(in, dest, dn, title, tn, line_at(in, i));
+        link_text(in, i + 1, te);
+        puts_(in, "</a>");
+    }
     free(dest);
     free(title);
     return r + 1 - i;
@@ -1500,8 +1548,13 @@ static size_t inline_step(struct inl *in, size_t i)
     }
     if (c == '*' || c == '_')
         return i + delim_run(in, i);
+    if (c == '!' && i + 1 < n && s[i + 1] == '[') {
+        k = try_link(in, i + 1, 1);
+        if (k)
+            return i + 1 + k;
+    }
     if (c == '[' && !(in->flags & IN_LINK)) {
-        k = try_link(in, i);
+        k = try_link(in, i, 0);
         if (k)
             return i + k;
     }

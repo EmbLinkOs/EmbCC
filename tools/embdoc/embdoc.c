@@ -25,6 +25,11 @@
  *   md     writes one file's rendered body to stdout, as the site would
  *          have it: what tests/golden/embdoc.sh reads.
  *
+ * An image in a document is checked as a link is. A repository file is
+ * copied into the site, at its path with each component's leading dots
+ * dropped (.github/assets/x.svg is github/assets/x.svg: GitHub Pages does
+ * not serve a hidden directory), and the page points at the copy.
+ *
  * A link to another document becomes a relative link to its page, its
  * #anchor kept; anchors are GitHub's heading slugs, so a link that works
  * on github.com works here and check proves both. A link to any other file
@@ -45,6 +50,7 @@
 #include <string.h>
 
 #include "embdoc.h"
+#include "brand.h"     /* drawn by .github/assets/brand.py */
 
 static const char *root = ".";
 static const char *repo_url = "https://github.com/EmbLinkOs/EmbCC";
@@ -445,6 +451,56 @@ static char *on_link(void *arg, const char *dest, int line)
     return h.p;
 }
 
+/* The repository files the pages show as images, and where the site
+ * keeps each. */
+static struct image {
+    char *path, *out;
+} *images;
+static int nimages, capimages;
+
+/* The site path of repository file rp, shown as an image: one copy each. */
+static const char *image_out(const char *rp)
+{
+    for (int k = 0; k < nimages; k++)
+        if (!strcmp(images[k].path, rp))
+            return images[k].out;
+    if (nimages == capimages) {
+        capimages = capimages ? capimages * 2 : 8;
+        images = xrealloc(images, (size_t)capimages * sizeof *images);
+    }
+    struct buf o = { 0 };
+    buf_add(&o, "", 0);
+    for (const char *c = rp; *c;) {
+        while (*c == '.')
+            c++;
+        size_t n = strcspn(c, "/");
+        buf_add(&o, c, n);
+        c += n;
+        if (*c == '/')
+            buf_putc(&o, *c++);
+    }
+    images[nimages].path = xstrdup(rp);
+    images[nimages].out = o.p;
+    return images[nimages++].out;
+}
+
+/* An image's source: checked as a link is; a repository file is copied
+ * into the site, and the page points at the copy. */
+static char *on_image(void *arg, const char *src, int line)
+{
+    struct page *pg = arg;
+    char *href = on_link(arg, src, line);
+    struct link *l = &pg->links[pg->nlinks - 1];
+    if (l->kind == L_PAGE || (l->kind == L_REPO && file_kind(l->path) != 1)) {
+        l->kind = L_BAD;
+        l->why = "an image that is not a file";
+    }
+    if (l->kind != L_REPO)
+        return href;
+    free(href);
+    return rel_href(pg->out, image_out(l->path));
+}
+
 /* ---- rendering -------------------------------------------------------- */
 
 static void render_page(int k)
@@ -459,6 +515,7 @@ static void render_page(int k)
         die("cannot read %s", path);
     free(path);
     p->md.link = on_link;
+    p->md.image = on_image;
     p->md.arg = p;
     md_render(&p->md, src, len);
     free(src);
@@ -620,22 +677,8 @@ static int cmd_check(void)
     "<svg viewBox=\"0 0 24 24\" width=\"20\" height=\"20\" aria-hidden=\"true\" " \
     "fill=\"none\" "
 
-static const char svg_chip[] =
-    SVG_OPEN
-    "stroke=\"currentColor\" stroke-width=\"1.6\" stroke-linecap=\"round\">"
-    "<rect x=\"6\" y=\"6\" width=\"12\" height=\"12\" rx=\"1.5\"/>"
-    "<path d=\"M9.5 2.5V6M14.5 2.5V6M9.5 18v3.5M14.5 18v3.5M2.5 9.5H6M2.5 "
-    "14.5H6M18 9.5h3.5M18 14.5h3.5\"/>"
-    "<circle cx=\"9\" cy=\"9\" r=\"1.1\" fill=\"currentColor\" stroke=\"none\"/>"
-    "</svg>";
-
-/* the same chip, as the tab's icon */
-static const char favicon[] =
-    "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' "
-    "viewBox='0 0 24 24' fill='none' stroke='%230a7552' stroke-width='2' "
-    "stroke-linecap='round'%3E%3Crect x='6' y='6' width='12' height='12' "
-    "rx='1.5'/%3E%3Cpath d='M9.5 2.5V6M14.5 2.5V6M9.5 18v3.5M14.5 18v3.5M2.5 "
-    "9.5H6M2.5 14.5H6M18 9.5h3.5M18 14.5h3.5'/%3E%3C/svg%3E";
+/* The EmbCC mark, in the bar and as the tab's icon, is brand.h's
+ * embdoc_brand_svg and embdoc_favicon. */
 
 static const char svg_menu[] =
     SVG_OPEN
@@ -674,7 +717,7 @@ static void page_head(struct buf *b, const char *title, const char *up)
                 "<meta name=\"generator\" content=\"embdoc\">\n<title>");
     put_esc(b, title);
     buf_puts(b, "</title>\n<link rel=\"icon\" href=\"");
-    buf_puts(b, favicon);
+    buf_puts(b, embdoc_favicon);
     buf_puts(b, "\">\n<link rel=\"stylesheet\" href=\"");
     put_esc(b, up);
     buf_puts(b, "embdoc.css\">\n<script>");
@@ -689,7 +732,7 @@ static void page_head(struct buf *b, const char *title, const char *up)
     buf_puts(b, "</button>\n<a class=\"brand\" href=\"");
     put_esc(b, up);
     buf_puts(b, "index.html\">");
-    buf_puts(b, svg_chip);
+    buf_puts(b, embdoc_brand_svg);
     buf_puts(b, "<span class=\"name\">EmbCC</span><span class=\"sub\">docs</span></a>\n"
                 "<div class=\"search\" role=\"search\">");
     buf_puts(b, svg_search);
@@ -970,6 +1013,18 @@ static int cmd_site(const char *dir)
     write_buf(dir, "404.html", &b);
     search_index(&b);
     write_buf(dir, "search-index.json", &b);
+    for (int k = 0; k < nimages; k++) {
+        size_t len;
+        char *path = in_root(images[k].path);
+        char *data = slurp(path, &len);
+        if (!data)
+            die("cannot read %s", path);
+        char *to = out_file(dir, images[k].out);
+        write_file(to, data, len);
+        free(to);
+        free(data);
+        free(path);
+    }
     write_parts(dir, "embdoc.css", embdoc_css);
     write_parts(dir, "embdoc.js", embdoc_js);
     fprintf(stderr, "embdoc: %d pages in %s", npages, dir);
@@ -999,6 +1054,7 @@ static int cmd_md(const char *file)
     if (!src)
         die("cannot read %s", file);
     p->md.link = on_link;
+    p->md.image = on_image;
     p->md.arg = p;
     md_render(&p->md, src, len);
     free(src);
