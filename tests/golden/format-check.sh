@@ -201,6 +201,23 @@ grep -q 'reads 4 bytes, but this argument is int, which is 2' "$out/sizes.err" |
     { cat "$out/sizes.err"; echo "FAIL: AVR's %ld is not 4 bytes against a 2-byte int"; exit 1; }
 echo "each target is judged by its own sizes: AVR's 2-byte int, the 32-bit targets' 4-byte long"
 
+# The three character types are named as GCC names them, whichever way
+# the target's plain char is signed: a string literal is `char *` on
+# Xtensa and ARM too (it was "unsigned char *" there), and an explicit
+# `signed char` is not called `char`.
+cat > "$out/chars.c" << 'EOF2'
+__attribute__((format(printf, 1, 2))) int pf(const char *, ...);
+void f(signed char sc, unsigned char uc) { pf("%d %d %d", "lit", &sc, &uc); }
+EOF2
+for t in xtensa-esp32-elf thumbv7em-none-eabi x86_64-elf; do
+    "$EMBCC" --target=$t -Wall -c "$out/chars.c" -o "$out/chars.o" 2> "$out/chars-$t.err" || true
+    for want in "is char \\*" "is signed char \\*" "is unsigned char \\*"; do
+        grep -q "$want \\[" "$out/chars-$t.err" ||
+            { cat "$out/chars-$t.err"; echo "FAIL: $t did not say '$want'"; exit 1; }
+    done
+done
+echo "char, signed char and unsigned char are named as GCC names them, on every target"
+
 echo "a format that disagrees with its arguments is caught where the call
 is written, and which functions to check comes from the declaration
 rather than from a list of names inside the compiler"

@@ -1269,7 +1269,13 @@ const char *ty_name(const struct type *t)
     } else switch (t->kind) {
     case TY_VOID: base = "void"; break;
     case TY_BOOL: base = "_Bool"; break;
-    case TY_CHAR: base = t->is_unsigned ? "unsigned char" : "char"; break;
+    /* plain char is `char` whichever its signedness (a string literal
+     * on Xtensa or ARM, where it is unsigned, was "unsigned char *");
+     * the other two are named, as GCC names them */
+    case TY_CHAR:
+        base = ty_is_plain_char(t) ? "char"
+             : t->is_unsigned ? "unsigned char" : "signed char";
+        break;
     case TY_SHORT: base = t->is_unsigned ? "unsigned short" : "short"; break;
     case TY_INT: base = t->is_unsigned ? "unsigned int" : "int"; break;
     case TY_LONG:
