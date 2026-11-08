@@ -1643,11 +1643,13 @@ cross toolchain; only the program under test comes from EmbCC.
 
 ## C++ on the embedded targets
 
-C++ is compiled without exceptions, with or without RTTI, for the 32-bit
-embedded targets: the Cortex-M triples and `armv7a-none-eabi`,
-`riscv32-unknown-elf`, MIPS, PowerPC, SPARC, ColdFire, Xtensa, TriCore
-and RX ([C++ targets](cxx.md#targets) has the exact list). A firmware
-build looks like this:
+C++ is compiled for every embedded target, with or without RTTI: the
+Cortex-M triples and `armv7a-none-eabi`, RISC-V at both widths, MIPS,
+PowerPC, SPARC, ColdFire, Xtensa, TriCore, RX and AVR. Exceptions are
+thrown and caught on ARM (EHABI's `.ARM.exidx`), RISC-V, MIPS, Xtensa and
+TriCore; elsewhere a unit with exceptions is refused by name and
+compiles with `--no-exceptions` ([C++ targets](cxx.md#targets) has the
+exact list). A firmware build looks like this:
 
 ```sh
 embcc --target=thumbv7em-none-eabihf --opt=size --no-exceptions --no-rtti \
@@ -1663,37 +1665,21 @@ and `__init_array_end` before `main`: that is where the constructors of
 namespace-scope objects are. `make libcxx-embedded` builds the C++
 runtime (`operator new` and `delete`, the guard functions,
 `__aeabi_atexit`, the RTTI classes and `__dynamic_cast`). On ARM the
-objects follow the ARM C++ ABI and link with clang++'s. Exceptions are refused by name, as there are no unwind tables
-for these machines:
+objects follow the ARM C++ ABI and link with clang++'s.
+
+On AVR, C++ follows the two-byte `int` and pointers: `size_t`, array
+cookies, member pointers, vtable slots and RTTI's offsets are laid out by
+them, and `lib/avr` gives the runtime `malloc`, `atexit` and `abort`.
+Asked for exceptions there, EmbCC refuses by name:
 
 ```text
-embcc: error: C++ exceptions are not supported for thumbv7m-none-eabi yet: EmbCC writes no ARM EHABI unwind tables (.ARM.exidx); compile with -fno-exceptions
+embcc: error: C++ exceptions are not supported for avr yet: EmbCC writes no AVR .eh_frame; compile with --no-exceptions
 ```
 
-On AVR EmbCC refuses to generate code for a C++ unit:
-
-```text
-embcc: error: C++ is not yet supported for avr: the C++ lowering assumes a 32-bit int and 4-byte pointers (integral promotions, member pointers, RTTI), and this target's are 16 bits
-```
-
-`--syntax-only`, `-E`, `-M` and `--deps-only` still accept C++ there. See
-[C++ targets](cxx.md#targets) for what the ABI is on each target.
-
-C++ compiles for `riscv64-unknown-elf`, but no C++ runtime is built for
-it. Code that needs a landing pad (a `try` block, or a local
-object whose destructor must run while an exception unwinds) does not
-compile:
-
-```text
-embcc: cx.cc:7: error: the RV64 backend cannot lower this operation yet (function _Z1gi) [landing w=8 size=4]
-```
-
-Compile with `--no-exceptions`, and with `--no-rtti` unless the program
-supplies the `__cxxabiv1` type-information vtables. The program must then
-define what the compiled code refers to: `operator new` and `operator
-delete` if it uses them, `__cxa_pure_virtual` for abstract classes, and
-`__cxa_atexit` and `__dso_handle` for static objects with destructors.
-See [C++](cxx.md).
+A program built without EmbCC's C++ runtime must define what the
+compiled code refers to: `operator new` and `operator delete` if it uses
+them, `__cxa_pure_virtual` for abstract classes, and `__cxa_atexit` and
+`__dso_handle` for static objects with destructors. See [C++](cxx.md).
 
 ## Eight-byte atomics on a 32-bit target
 

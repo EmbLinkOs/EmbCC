@@ -2542,7 +2542,7 @@ The stub's register layout, which EmbDBG uses: `r0`–`r31` one byte each,
 | an interrupt handler with parameters | `the AVR backend cannot lower an interrupt handler with parameters: the hardware calls it, so there is no caller to pass them and they would be read out of whatever the interrupted code left in those registers yet (function __vector_3)` |
 | an interrupt handler that returns a value | ``the AVR backend cannot lower an interrupt handler that returns a value: `reti` goes back to the interrupted instruction, and nothing is there to receive it yet (function __vector_3)`` |
 | `__int128` | `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |
-| any C++ translation unit, except with `--syntax-only`, `-E`, `-M` or `--deps-only` | `C++ is not yet supported for avr: the C++ lowering assumes a 32-bit int and 4-byte pointers (integral promotions, member pointers, RTTI), and this target's are 16 bits` |
+| a C++ unit with exceptions (`-fexceptions`) | `C++ exceptions are not supported for avr yet: EmbCC writes no AVR .eh_frame; compile with --no-exceptions` (C++ itself compiles, with exceptions off by default; see [C++](cxx.md#targets)) |
 
 Code compiled at `--opt=none` is large; an ordinary program may not fit the
 part's 32 KB of flash unless built with `--opt=basic` or above.
