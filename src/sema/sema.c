@@ -8801,13 +8801,14 @@ static int asm_resolve_reg_ilp32(struct unit *u, struct stmt *s,
                     riscv ? "a0-a7 or t0-t6" : "r0-r3 or r12");
         return r;
     }
-    int has_r = 0, has_i = 0;
+    int has_r = 0, has_i = 0, has_f = 0;
     for (const char *p = c; *p; p++) {
         if (*p == 'r' || *p == 'g' || *p == 'm') has_r = 1;
         /* ARM's register classes: l a low register (r0-r7, which every
          * 16-bit Thumb instruction wants), h a high one (r8-r15); irgen
          * picks one of the class (thumb/irgen.c) */
         if (!riscv && (*p == 'l' || *p == 'h')) has_r = 1;
+        if (riscv && *p == 'f') has_f = 1;   /* an f register */
         if (*p == 'i' || *p == 'n' ||
             (!riscv && (*p == 'I' || *p == 'J' || *p == 'K' || *p == 'L' ||
                         *p == 'M')))
@@ -8824,6 +8825,8 @@ static int asm_resolve_reg_ilp32(struct unit *u, struct stmt *s,
     }
     if (has_r)
         return -2;
+    if (has_f)                      /* irgen gives it an f register */
+        return -3;
     return ASM_REG_INVALID;
 }
 

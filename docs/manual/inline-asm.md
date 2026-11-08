@@ -1499,30 +1499,38 @@ This section applies to `riscv32-unknown-elf` and `riscv64-unknown-elf`.
 | Letter | Meaning |
 |---|---|
 | `r`, `q`, `g`, `R` | a general register chosen by EmbCC |
-| `i`, `n` | the constant, computed into a general register chosen by EmbCC |
+| `f` | an f register chosen by EmbCC, for a `float` (the F extension) or a `double` (the D extension) |
+| `i`, `n` | a constant, written into the template as a number (`addi %0, %1, %2` with `"i"(5)` reads `addi a0, a1, 5`); refused when the operand is not a constant |
 | `m` | a general register chosen by EmbCC, holding the address of the operand (inputs) |
 | `=`, `+`, `&` | see [Output operands](#output-operands) |
 
-Constraints are read by the same rules as on x86-64. As a result the
-x86-64 letters `a`, `b`, `c`, `d`, `S` and `D` are accepted and select
-x0 (`zero`), x3 (`gp`), x1 (`ra`), x2 (`sp`), x6 (`t1`) and x7 (`t2`)
-respectively. Do not use these letters. `x` is accepted and produces a
-template that does not assemble. RISC-V letters such as `f`, `I`, `J`,
-`K` and `A`, alone, are refused with
-`asm constraint "=f" is not supported (EmbCC handles a/b/c/d/S/D, 'r'/'q'/'g'/'m', 'x', and a register-asm variable)`.
+Any other letter alone -- the x86-64 ones, and RISC-V's `I`, `J`, `K`
+and `A` -- is refused with
+`asm constraint "=a" is not valid for RISC-V`.
 
-Because `i` gives a register, an instruction with an immediate field
-cannot take an `i` operand: `addi %0, %1, %2` with `"i"(5)` is refused
-with `addi wants an immediate`. Write `add %0, %1, %2`, or put the
-constant in the template text.
-
-A chosen register comes from `t0` to `t6`, then `a0` to `a7`, skipping
-registers listed as clobbers or named in the template. When none is left
-EmbCC reports `no free register for an asm operand`. An output wider
-than a register (an 8-byte type on RV32) is refused:
+A chosen general register comes from `t0` to `t6`, then `a0` to `a7`,
+skipping registers listed as clobbers or named in the template. When none
+is left EmbCC reports `no free register for an asm operand`. An output
+wider than a general register (an 8-byte integer on RV32) is refused:
 
 ```text
 the RV32 backend cannot lower an asm output wider than a register yet (function f)
+```
+
+An `f` operand's register comes from `ft0` to `ft7`, `fa0` to `fa7` and
+`ft8` to `ft11`, skipping f registers listed as clobbers or named in the
+template; it must be a `float` or `double` the target's extensions hold
+(`an "f" asm operand of 8 bytes needs the D extension (-march=...d)`).
+An f register the template writes or the clobber list names among
+`fs0`-`fs11` is saved by the prologue, as GCC saves it:
+
+```c
+float fma3(float a, float b, float c)
+{
+    float r;
+    __asm__("fmadd.s %0, %1, %2, %3" : "=f"(r) : "f"(a), "f"(b), "f"(c));
+    return r;
+}
 ```
 
 ### Modifiers

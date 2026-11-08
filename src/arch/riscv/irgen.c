@@ -291,6 +291,7 @@ void irg_asm_riscv(struct ir_func *fn, struct stmt *s)
     long imms[2 * MAX_PARAMS];
     const char *names[2 * MAX_PARAMS];
     int used[32] = { 0 };
+    int fused[32] = { 0 };      /* the f registers, for "f" operands */
 
     /* Operands are numbered outputs first, then inputs, as gcc does. */
     for (int i = 0; i < nops; i++) {
@@ -298,6 +299,18 @@ void irg_asm_riscv(struct ir_func *fn, struct stmt *s)
         if (op->reg == ASM_REG_INVALID)
             diag_fatal(file, s->line, "asm constraint \"%s\" is not valid for "
                                       "RISC-V", op->constraint);
+        /* "f": a float or double in an f register, which the F (and for
+         * a double the D) extension provides */
+        if (op->reg == -3) {
+            int sz = ty_size(op->expr->ty);
+            if (!ty_is_float(op->expr->ty) || sz > 8)
+                diag_fatal(file, s->line, "an \"f\" asm operand must be a "
+                           "float or a double");
+            if (target_riscv_flen() < sz * 8)
+                diag_fatal(file, s->line, "an \"f\" asm operand of %d bytes "
+                           "needs the %s extension (-march=...%s)", sz,
+                           sz == 8 ? "D" : "F", sz == 8 ? "d" : "f");
+        }
         if (op->reg == ASM_REG_IMM && i < a->nout)
             diag_fatal(file, s->line, "an asm output cannot be an immediate");
         regs[i] = op->reg;
@@ -312,8 +325,48 @@ void irg_asm_riscv(struct ir_func *fn, struct stmt *s)
         int r = rvasm_gpr(a->clob[i], (int)strlen(a->clob[i]));
         if (r >= 0)
             used[r] = 1;
+        int f = rvasm_fpr(a->clob[i], (int)strlen(a->clob[i]));
+        if (f >= 0)
+            fused[f] = 1;
     }
     rv_mark_template_regs(file, s->line, a->tmpl, used);
+    /* ...and the f registers it names */
+    for (const char *p = a->tmpl; *p; ) {
+        if (isalpha((unsigned char)*p) &&
+            (p == a->tmpl || !(isalnum((unsigned char)p[-1]) ||
+                               p[-1] == '_' || p[-1] == '%'))) {
+            int n = 1;
+            while (isalnum((unsigned char)p[n]) || p[n] == '_')
+                n++;
+            int f = rvasm_fpr(p, n);
+            if (f >= 0)
+                fused[f] = 1;
+            p += n;
+            continue;
+        }
+        p++;
+    }
+
+    /* "f" operands: a caller-saved f register -- ft0-ft7, fa0-fa7,
+     * ft8-ft11 -- numbered 32 + n. No value lives in an f register across
+     * an asm (regalloc.c keeps the FP class out of asm), so any of them
+     * is the asm's to take. */
+    for (int i = 0; i < nops; i++) {
+        static const int rv_fpool[] = { 0, 1, 2, 3, 4, 5, 6, 7, 10, 11, 12,
+                                        13, 14, 15, 16, 17, 28, 29, 30, 31 };
+        if (regs[i] != -3)
+            continue;
+        int f = -1;
+        for (unsigned k = 0; k < sizeof rv_fpool / sizeof *rv_fpool; k++)
+            if (!fused[rv_fpool[k]]) {
+                f = rv_fpool[k];
+                break;
+            }
+        if (f < 0)
+            diag_fatal(file, s->line, "no free f register for an asm operand");
+        fused[f] = 1;
+        regs[i] = 32 + f;
+    }
 
     for (int i = 0; i < nops; i++) {
         if (regs[i] != -2)
@@ -364,7 +417,8 @@ void irg_asm_riscv(struct ir_func *fn, struct stmt *s)
         o->mem = asm_constraint_mem_only(a->in[i].constraint);
         o->temp = o->mem ? gen_addr(fn, a->in[i].expr)
                          : gen_expr(fn, a->in[i].expr);
-        o->size = target_ptr_size();  /* a temp holds the promoted value */
+        /* a temp holds the promoted value; an f register's its width */
+        o->size = o->reg >= 32 ? sizes[a->nout + i] : target_ptr_size();
     }
     /* An "=r" output of an integer or a pointer is a VALUE: the asm's
      * dst, stored to its lvalue afterwards (irg_asm_out_store), so a
@@ -378,7 +432,8 @@ void irg_asm_riscv(struct ir_func *fn, struct stmt *s)
         struct expr *lv = a->out[i].expr;
         int inout = strchr(a->out[i].constraint, '+') != NULL;
         int mem = asm_constraint_mem_only(a->out[i].constraint);
-        if (!inout && !mem && irg_asm_val_ok(lv, target_ptr_size())) {
+        if (!inout && !mem && regs[i] < 32 &&
+            irg_asm_val_ok(lv, target_ptr_size())) {
             vaddr[nv] = irg_asm_out_addr(fn, lv);
             vk[nv++] = i;
             if (nv > 1)
@@ -420,6 +475,11 @@ void irg_asm_riscv(struct ir_func *fn, struct stmt *s)
     for (int r = 0; r < 32; r++)
         if (used[r])
             ia->clob |= 1UL << r;
+    /* the f registers it changes (ir_asm.fclob): fs0-fs11 among them are
+     * the prologue's to save; a call changes every caller-saved one */
+    for (int f = 0; f < 32; f++)
+        if (fused[f] || (calls && !(f == 8 || f == 9 || (f >= 18 && f <= 27))))
+            ia->fclob |= 1u << f;
     struct ir_ins *ins = emit(fn);
     ins->op = IR_ASM;
     ins->asm_ir = ia;

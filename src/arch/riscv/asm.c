@@ -54,6 +54,15 @@ int rvasm_gpr(const char *name, int len)
 
 const char *rv_reg_name(int reg)
 {
+    /* 32 + n: f register n, an "f" asm operand (riscv/irgen.c) */
+    static const char *const fname[32] = {
+        "ft0", "ft1", "ft2", "ft3", "ft4", "ft5", "ft6", "ft7",
+        "fs0", "fs1", "fa0", "fa1", "fa2", "fa3", "fa4", "fa5",
+        "fa6", "fa7", "fs2", "fs3", "fs4", "fs5", "fs6", "fs7",
+        "fs8", "fs9", "fs10", "fs11", "ft8", "ft9", "ft10", "ft11"
+    };
+    if (reg >= 32 && reg < 64)
+        return fname[reg - 32];
     return (reg >= 0 && reg < 32) ? abi_name[reg] : "?";
 }
 

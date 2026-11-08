@@ -6029,14 +6029,17 @@ static void gen_ins(struct rv_fn *F, int n)
         }
         int used[32] = { 0 };
         /* An address scratch that is no operand's register. t6 is left
-         * out because a far slot access borrows it internally. */
+         * out because a far slot access borrows it internally. (An "f"
+         * operand's register is 32 + n, outside these.) */
         static const int scr_pool[] = {
             RV_T0, RV_T1, RV_T2, RV_T3, RV_T4, RV_T5,
             RV_A0, RV_A1, RV_A2, RV_A3, RV_A4, RV_A5, RV_A6, RV_A7
         };
         int scr = -1;
-        for (int k = 0; k < ia->nin; k++) used[ia->in[k].reg] = 1;
-        for (int k = 0; k < ia->nout; k++) used[ia->out[k].reg] = 1;
+        for (int k = 0; k < ia->nin; k++)
+            if (ia->in[k].reg < 32) used[ia->in[k].reg] = 1;
+        for (int k = 0; k < ia->nout; k++)
+            if (ia->out[k].reg < 32) used[ia->out[k].reg] = 1;
         for (int k = 0; k < nval; k++) used[vreg_[k]] = 1;
         for (int r = 0; r < 32; r++)
             if (used[r] && (r == 8 || r == 9 || (r >= 18 && r <= 27)))
@@ -6059,8 +6062,15 @@ static void gen_ins(struct rv_fn *F, int n)
         if (scr < 0 && naddr > 0)
             rv_refuse(F, i, "an asm with no scratch register left around it");
         for (int k = 0; k < ia->nout; k++)
-            if (!ia->out[k].mem && ia->out[k].size > F->w)
+            if (!ia->out[k].mem && ia->out[k].reg < 32 &&
+                ia->out[k].size > F->w)
                 rv_refuse(F, i, "an asm output wider than a register");
+        /* "f" inputs first, into their f registers: fload_v may borrow
+         * SCR2, which a general operand may be about to hold */
+        for (int k = 0; k < ia->nin; k++)
+            if (ia->in[k].reg >= 32)
+                fload_v(F, ia->in[k].temp, ia->in[k].reg - 32,
+                        ia->in[k].size == 8);
         /* In: an input's value, an "m" output's address, and a "+"
          * output's address (its current value is loaded through it
          * below) -- the register-resident ones as one parallel move,
@@ -6068,12 +6078,12 @@ static void gen_ins(struct rv_fn *F, int n)
         {
             int pd[40], ps[40], npm = 0;
             for (int k = 0; k < ia->nin && npm < 40; k++)
-                if (in_reg(F, ia->in[k].temp)) {
+                if (ia->in[k].reg < 32 && in_reg(F, ia->in[k].temp)) {
                     pd[npm] = ia->in[k].reg;
                     ps[npm++] = F->loc[ia->in[k].temp];
                 }
             for (int k = 0; k < ia->nout && npm < 40; k++)
-                if (!ia->out[k].val &&
+                if (!ia->out[k].val && ia->out[k].reg < 32 &&
                     (ia->out[k].mem || ia->out[k].inout) &&
                     in_reg(F, ia->out[k].temp)) {
                     pd[npm] = ia->out[k].reg;
@@ -6090,12 +6100,17 @@ static void gen_ins(struct rv_fn *F, int n)
                     rv_mv(t, od[k], os[k]);
             }
             for (int k = 0; k < ia->nin; k++)
-                if (!in_reg(F, ia->in[k].temp))
+                if (ia->in[k].reg < 32 && !in_reg(F, ia->in[k].temp))
                     rd(F, ia->in[k].temp, ia->in[k].reg);
             for (int k = 0; k < ia->nout; k++) {
                 const struct ir_asm_op *o = &ia->out[k];
                 if (o->val || !(o->mem || o->inout))
                     continue;
+                if (o->reg >= 32) {      /* "+f": its value, through scr */
+                    rd(F, o->temp, scr);
+                    rv_fload(t, o->reg - 32, scr, 0, o->size == 8);
+                    continue;
+                }
                 if (!in_reg(F, o->temp))
                     rd(F, o->temp, o->reg);
                 /* A "+" output starts with the lvalue's CURRENT value. */
@@ -6116,7 +6131,10 @@ static void gen_ins(struct rv_fn *F, int n)
             if (o->mem || o->val)
                 continue;
             rd(F, o->temp, scr);
-            rv_store(t, o->reg, scr, 0, o->size, F->xlen);
+            if (o->reg >= 32)            /* an "f" output */
+                rv_fstore(t, o->reg - 32, scr, 0, o->size == 8);
+            else
+                rv_store(t, o->reg, scr, 0, o->size, F->xlen);
         }
         /* Out, as values: each to its home -- those in memory first,
          * while every operand register still holds what the asm left,
@@ -7231,6 +7249,20 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
                 have |= F.used_callee[k] == r;
             if (!have)
                 F.used_callee[F.nsave++] = r;
+        }
+        /* ...and fs0-fs11 one writes (ir_asm.fclob) */
+        unsigned fm = 0;
+        for (int q = 0; q < fn->nins; q++)
+            if (fn->ins[q].op == IR_ASM && fn->ins[q].asm_ir)
+                fm |= fn->ins[q].asm_ir->fclob;
+        for (int f = 8; f <= 27; f++) {
+            int have = 0;
+            if (!(fm >> f & 1) || (f > 9 && f < 18))
+                continue;
+            for (int k = 0; k < F.nfsave; k++)
+                have |= F.fused[k] == f;
+            if (!have)
+                F.fused[F.nfsave++] = f;
         }
     }
     /* A leaf: no call in the IR and none the lowering makes -- the same
