@@ -19,6 +19,7 @@
 #define DW_TAG_member           0x0d
 #define DW_TAG_subrange_type    0x21
 #define DW_TAG_lexical_block    0x0b
+#define DW_TAG_inlined_subroutine 0x1d
 #define DW_CHILDREN_no        0x00
 #define DW_CHILDREN_yes       0x01
 #define DW_AT_name            0x03
@@ -40,6 +41,11 @@
 #define DW_AT_data_bit_offset 0x6b
 #define DW_AT_decl_file       0x3a
 #define DW_AT_decl_line       0x3b
+#define DW_AT_inline          0x20
+#define DW_AT_abstract_origin 0x31
+#define DW_AT_call_column     0x57
+#define DW_AT_call_file       0x58
+#define DW_AT_call_line       0x59
 #define DW_FORM_addr          0x01
 #define DW_FORM_block1        0x0a
 #define DW_FORM_data1         0x0b
@@ -153,6 +159,17 @@
 #define AB_VAR_T_LL     23   /* variable, with type, location list */
 #define AB_VAR_LL       24
 #define AB_LEXBLOCK     25   /* lexical_block: a nested scope's code */
+#define AB_ABSFN        26   /* subprogram: an inlined function's abstract instance */
+#define AB_ABSFN_T      27   /* ...with a return type */
+#define AB_ABSPARAM_T   28   /* its parameter, with type, no location */
+#define AB_ABSPARAM     29
+#define AB_ABSVAR_T     30   /* its local */
+#define AB_ABSVAR       31
+#define AB_INLSUB       32   /* inlined_subroutine: one inlined call */
+#define AB_IPARAM       33   /* its parameter: the abstract one's, and where */
+#define AB_IPARAM_LL    34
+#define AB_IVAR         35
+#define AB_IVAR_LL      36
 
 static int dw_ver = 5;
 
@@ -445,6 +462,45 @@ static void emit_abbrev(struct dbuf *b)
         lexb[3] = DW_FORM_data4;
     }
     one_abbrev(b, AB_LEXBLOCK,   DW_TAG_lexical_block,    DW_CHILDREN_yes, lexb, 2);
+    /* an inlined function's abstract instance (3.3.8.1): its name, that
+     * it was inlined, and its parameters and locals without locations */
+    static const unsigned char absfn[] = {
+        DW_AT_name, DW_FORM_string, DW_AT_inline, DW_FORM_data1 };
+    static const unsigned char absfn_t[] = {
+        DW_AT_name, DW_FORM_string, DW_AT_type, DW_FORM_ref4,
+        DW_AT_inline, DW_FORM_data1 };
+    static const unsigned char absv_t[] = {
+        DW_AT_name, DW_FORM_string, DW_AT_decl_file, DW_FORM_data1,
+        DW_AT_decl_line, DW_FORM_udata, DW_AT_type, DW_FORM_ref4 };
+    static const unsigned char absv[] = {
+        DW_AT_name, DW_FORM_string, DW_AT_decl_file, DW_FORM_data1,
+        DW_AT_decl_line, DW_FORM_udata };
+    one_abbrev(b, AB_ABSFN,      DW_TAG_subprogram,       DW_CHILDREN_yes, absfn, 2);
+    one_abbrev(b, AB_ABSFN_T,    DW_TAG_subprogram,       DW_CHILDREN_yes, absfn_t, 3);
+    one_abbrev(b, AB_ABSPARAM_T, DW_TAG_formal_parameter, DW_CHILDREN_no, absv_t, 4);
+    one_abbrev(b, AB_ABSPARAM,   DW_TAG_formal_parameter, DW_CHILDREN_no, absv, 3);
+    one_abbrev(b, AB_ABSVAR_T,   DW_TAG_variable,         DW_CHILDREN_no, absv_t, 4);
+    one_abbrev(b, AB_ABSVAR,     DW_TAG_variable,         DW_CHILDREN_no, absv, 3);
+    /* one inlined call: what was inlined, its code, where it was called */
+    unsigned char inl[] = {
+        DW_AT_abstract_origin, DW_FORM_ref4, DW_AT_low_pc, DW_FORM_addr,
+        DW_AT_high_pc, DW_FORM_addr, DW_AT_call_file, DW_FORM_data1,
+        DW_AT_call_line, DW_FORM_udata, DW_AT_call_column, DW_FORM_udata };
+    if (dw_split) {
+        inl[3] = DW_FORM_addrx;
+        inl[5] = DW_FORM_data4;
+    }
+    one_abbrev(b, AB_INLSUB,     DW_TAG_inlined_subroutine, DW_CHILDREN_yes, inl, 6);
+    unsigned char iv[] = { DW_AT_abstract_origin, DW_FORM_ref4,
+                           DW_AT_location, DW_FORM_exprloc };
+    unsigned char iv_ll[] = { DW_AT_abstract_origin, DW_FORM_ref4,
+                              DW_AT_location, DW_FORM_sec_offset };
+    if (dw_split)
+        iv_ll[3] = DW_FORM_loclistx;
+    one_abbrev(b, AB_IPARAM,     DW_TAG_formal_parameter, DW_CHILDREN_no, iv, 2);
+    one_abbrev(b, AB_IPARAM_LL,  DW_TAG_formal_parameter, DW_CHILDREN_no, iv_ll, 2);
+    one_abbrev(b, AB_IVAR,       DW_TAG_variable,         DW_CHILDREN_no, iv, 2);
+    one_abbrev(b, AB_IVAR_LL,    DW_TAG_variable,         DW_CHILDREN_no, iv_ll, 2);
     db_uleb(b, 0);                       /* end of the abbrev table */
 }
 
@@ -814,6 +870,88 @@ static int list_header(struct dbuf *b)
     return at;
 }
 
+/* The abstract instance of each function inlined somewhere in the unit:
+ * its DIE's offset, and its own variables' (by dbgvars index; -1 for one
+ * that came from a call inlined into it). */
+struct absfn { const struct func *f; int off; int *voff; int nv; };
+static struct absfn *dw_abs;
+static int dw_nabs;
+
+static const struct absfn *abs_of(const struct func *f)
+{
+    for (int k = 0; k < dw_nabs; k++)
+        if (dw_abs[k].f == f)
+            return &dw_abs[k];
+    return NULL;
+}
+
+/* One abstract instance per function some call to it was inlined: a
+ * DW_TAG_subprogram with DW_AT_inline and its parameters and locals,
+ * none with a location. Each inlined call's DIE refers to it, so gdb
+ * names the call and shows its frame in a backtrace. CU children, before
+ * the subprograms, as the types are. */
+static void emit_abstracts(struct dbuf *b, struct typemap *tm,
+                           struct ir_unit *iu)
+{
+    free(dw_abs);
+    dw_abs = NULL;
+    dw_nabs = 0;
+    for (int n = 0; n < iu->nfuncs; n++) {
+        struct ir_func *fn = &iu->funcs[n];
+        if (!fn->scope_fn)
+            continue;
+        for (int s = 1; s < fn->nscopes; s++) {
+            const struct func *f = fn->scope_fn[s];
+            if (!f || abs_of(f))
+                continue;
+            /* the inlined function's own variables, from the copies of
+             * them its calls left in the callers (the function itself is
+             * often gone, every call inlined): by their index there */
+            int nv = 0;
+            for (int m = 0; m < iu->nfuncs; m++)
+                for (int v = 0; v < iu->funcs[m].ndbgvars; v++) {
+                    const struct ir_dbgvar *dv = &iu->funcs[m].dbgvars[v];
+                    if (dv->origin == f && dv->origin_idx >= nv)
+                        nv = dv->origin_idx + 1;
+                }
+            const struct ir_dbgvar **pick = xcalloc((size_t)(nv ? nv : 1), sizeof *pick);
+            for (int m = 0; m < iu->nfuncs; m++)
+                for (int v = 0; v < iu->funcs[m].ndbgvars; v++) {
+                    const struct ir_dbgvar *dv = &iu->funcs[m].dbgvars[v];
+                    if (dv->origin == f && dv->origin_idx >= 0 && !pick[dv->origin_idx])
+                        pick[dv->origin_idx] = dv;
+                }
+            dw_abs = xrealloc(dw_abs, (size_t)(dw_nabs + 1) * sizeof *dw_abs);
+            struct absfn *A = &dw_abs[dw_nabs++];
+            A->f = f;
+            A->off = b->len;
+            A->nv = nv;
+            A->voff = xmalloc((size_t)(nv ? nv : 1) * sizeof *A->voff);
+            int rt = type_lookup(tm, f->ret_ty);
+            db_uleb(b, rt >= 0 ? AB_ABSFN_T : AB_ABSFN);
+            db_str(b, f->name);
+            if (rt >= 0) db_u32(b, (unsigned long)rt);
+            db_u8(b, 1);                 /* DW_INL_inlined */
+            for (int v = 0; v < nv; v++) {
+                const struct ir_dbgvar *dv = pick[v];
+                A->voff[v] = -1;
+                if (!dv)
+                    continue;
+                int toff = type_lookup(tm, dv->ty);
+                A->voff[v] = b->len;
+                db_uleb(b, dv->is_param ? (toff >= 0 ? AB_ABSPARAM_T : AB_ABSPARAM)
+                                        : (toff >= 0 ? AB_ABSVAR_T : AB_ABSVAR));
+                db_str(b, dv->name);
+                db_u8(b, 1);
+                db_uleb(b, (unsigned long)(dv->line > 0 ? dv->line : 0));
+                if (toff >= 0) db_u32(b, (unsigned long)toff);
+            }
+            db_u8(b, 0);
+            free(pick);
+        }
+    }
+}
+
 /* One parameter's or local's DIE: its name, where it was declared, its
  * type, and its location -- a frame slot, or where the optimizer keeps it,
  * range by range (ra_debug_locs). */
@@ -824,6 +962,17 @@ static void emit_dbgvar(struct dwarf_out *out, struct dbuf *b, struct dbuf *loc,
     int toff = type_lookup(tm, dv->ty);
     int ll = fn->ndbglocs && fn->ndbglocs[v] > 0 &&
              (fn->var_off[dv->vreg] == IR_VAR_NO_LOC || dv->moved);
+    const struct absfn *A = dv->origin ? abs_of(dv->origin) : NULL;
+    int ao = A && dv->origin_idx >= 0 && dv->origin_idx < A->nv
+             ? A->voff[dv->origin_idx] : -1;
+    if (ao >= 0) {
+        /* an inlined call's: the abstract one's name and type, and where
+         * it is in this copy */
+        db_uleb(b, dv->is_param ? (ll ? AB_IPARAM_LL : AB_IPARAM)
+                                : (ll ? AB_IVAR_LL : AB_IVAR));
+        db_u32(b, (unsigned long)ao);
+        goto location;
+    }
     int code = dv->is_param
         ? (toff >= 0 ? (ll ? AB_PARAM_T_LL : AB_PARAM_T)
                      : (ll ? AB_PARAM_LL : AB_PARAM))
@@ -834,6 +983,7 @@ static void emit_dbgvar(struct dwarf_out *out, struct dbuf *b, struct dbuf *loc,
     db_u8(b, 1);                                     /* decl_file */
     db_uleb(b, (unsigned long)(dv->line > 0 ? dv->line : 0));
     if (toff >= 0) db_u32(b, (unsigned long)toff);
+location:
     if (ll && dw_split) {
         if (dw_nll == dw_capll) {
             dw_capll = dw_capll ? dw_capll * 2 : 16;
@@ -870,8 +1020,14 @@ static void emit_block(struct dwarf_out *out, struct dbuf *b, struct dbuf *loc,
                        struct typemap *tm, struct ir_func *fn, long lo,
                        int s, const long *smin, const long *smax)
 {
-    if (s > 0) {
+    const struct absfn *A = s > 0 && fn->scope_fn ? abs_of(fn->scope_fn[s]) : NULL;
+    if (A) {
+        db_uleb(b, AB_INLSUB);
+        db_u32(b, (unsigned long)A->off);
+    } else if (s > 0) {
         db_uleb(b, AB_LEXBLOCK);
+    }
+    if (s > 0) {
         if (dw_split) {
             db_uleb(b, (unsigned long)addr_index(DWTGT_TEXT, smin[s], NULL, 0));
             db_u32(b, (unsigned long)(smax[s] - smin[s]));
@@ -881,6 +1037,11 @@ static void emit_block(struct dwarf_out *out, struct dbuf *b, struct dbuf *loc,
             reloc_end(out, DWSEC_INFO, b->len, addr_bytes(), smax[s]);
             db_addr(b, 0);
         }
+    }
+    if (A) {
+        db_u8(b, 1);                                    /* call_file */
+        db_uleb(b, (unsigned long)(fn->scope_cline[s] > 0 ? fn->scope_cline[s] : 0));
+        db_uleb(b, (unsigned long)(fn->scope_ccol[s] > 0 ? fn->scope_ccol[s] : 0));
     }
     for (int v = 0; v < fn->ndbgvars; v++) {
         int vs = fn->dbgvars[v].scope;
@@ -1006,6 +1167,7 @@ static void emit_info(struct dwarf_out *out, struct dbuf *b,
             (void)ensure_type(b, &tm, iu->funcs[n].dbgvars[v].ty);
     }
     emit_globals(out, b, &tm, iu);
+    emit_abstracts(b, &tm, iu);
 
     for (int n = 0; n < iu->nfuncs; n++) {
         struct ir_func *fn = &iu->funcs[n];

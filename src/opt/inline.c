@@ -456,10 +456,44 @@ static void inline_call(struct ir_func *fn, int ci, struct ir_func *cf)
      * than left as an absent location the verifier cannot tell from a bug. */
     lb->synth = 1;
 
-    /* The callee's code is the call's, scope and all: its lexical scopes
-     * are the callee's own, which the caller has no record of (-g). */
+    /* -g: the callee's code is an inlined call, a scope of the caller's
+     * inside the call's, and the callee's own scopes inside that one --
+     * its blocks, and the calls inlined into it before -- renumbered from
+     * `base`. The DWARF writer makes it a DW_TAG_inlined_subroutine. */
+    int base = -1;
+    if (fn->scope_up && cf->scope_up && cf->nscopes > 0) {
+        base = fn->nscopes;
+        int ns = base + cf->nscopes;
+        int had = fn->scope_fn != NULL;
+        fn->scope_up = xrealloc(fn->scope_up, (size_t)ns * sizeof *fn->scope_up);
+        fn->scope_fn = xrealloc(fn->scope_fn, (size_t)ns * sizeof *fn->scope_fn);
+        fn->scope_cline = xrealloc(fn->scope_cline, (size_t)ns * sizeof *fn->scope_cline);
+        fn->scope_ccol = xrealloc(fn->scope_ccol, (size_t)ns * sizeof *fn->scope_ccol);
+        if (!had)
+            for (int t = 0; t < base; t++) {
+                fn->scope_fn[t] = NULL;
+                fn->scope_cline[t] = fn->scope_ccol[t] = 0;
+            }
+        for (int t = 0; t < cf->nscopes; t++) {
+            int id = base + t;
+            if (t == 0) {
+                fn->scope_up[id] = call.scope;
+                fn->scope_fn[id] = cf->src;
+                fn->scope_cline[id] = call.line;
+                fn->scope_ccol[id] = call.col;
+            } else {
+                fn->scope_up[id] = base + cf->scope_up[t];
+                fn->scope_fn[id] = cf->scope_fn ? cf->scope_fn[t] : NULL;
+                fn->scope_cline[id] = cf->scope_cline ? cf->scope_cline[t] : 0;
+                fn->scope_ccol[id] = cf->scope_ccol ? cf->scope_ccol[t] : 0;
+            }
+        }
+        fn->nscopes = ns;
+    }
     for (int k = 0; k < m; k++)
-        buf[k].scope = call.scope;
+        buf[k].scope = base < 0 ? call.scope
+                     : base + (buf[k].scope > 0 && buf[k].scope < cf->nscopes
+                               ? buf[k].scope : 0);
 
     /* 3. Splice buf over the call. */
     int newn = fn->nins - 1 + m;
@@ -515,6 +549,30 @@ static void inline_call(struct ir_func *fn, int ci, struct ir_func *cf)
         fn->var_scope_lo = lo; fn->var_scope_hi = hi;
     }
     fn->nvars = nv;
+
+    /* -g: the callee's parameters and locals are the caller's slots V + k
+     * now, so the caller's own mem2reg follows them (vreg_var) and they get
+     * location lists like any local; each in its inlined scope, its origin
+     * the callee's variable (or, inlined into the callee before, that
+     * one's own). */
+    if (base >= 0)
+        for (int d = 0; d < cf->ndbgvars; d++) {
+            struct ir_dbgvar x = cf->dbgvars[d];
+            if (x.vreg < 0 || x.vreg >= v)
+                continue;
+            x.vreg = V + x.vreg;
+            x.scope = base + (x.scope > 0 && x.scope < cf->nscopes ? x.scope : 0);
+            if (!x.origin) {
+                x.origin = cf->src;
+                x.origin_idx = d;
+            }
+            if (fn->ndbgvars == fn->dbgvarcap) {
+                fn->dbgvarcap = fn->dbgvarcap ? fn->dbgvarcap * 2 : 8;
+                fn->dbgvars = xrealloc(fn->dbgvars,
+                                       (size_t)fn->dbgvarcap * sizeof *fn->dbgvars);
+            }
+            fn->dbgvars[fn->ndbgvars++] = x;
+        }
 }
 
 /* How many calls in the whole unit name this function, and does its

@@ -542,6 +542,11 @@ struct ir_dbgvar {
     struct type *ty;
     int line, col;
     int scope;               /* its block's lexical scope (ir_ins.scope) */
+    /* A variable of an inlined call: the function it was declared in and
+     * its index among that function's dbgvars (the DWARF's abstract
+     * origin); NULL and -1 for the function's own. */
+    struct func *origin;
+    int origin_idx;
     /* mem2reg took this variable out of memory although something
      * assigned it: its slot no longer follows it. Its only reader is a
      * backend deciding whether the slot is a true DW_AT_location -- for a
@@ -649,6 +654,11 @@ struct ir_func {
      * code -- which, unlike var_scope_lo/hi, no reordering makes stale. */
     int *scope_up;
     int nscopes;
+    /* ...and where a scope is an inlined call (the inliner), the function
+     * inlined there and the call's line and column; NULL and 0 for a
+     * block. Each array nscopes long, or NULL while no call is inlined. */
+    struct func **scope_fn;
+    int *scope_cline, *scope_ccol;
     /* exception regions (C++'s lowering), the catch types their landing
      * pads' selectors number (1-based; NULL: catch-all), and — codegen —
      * every call's code */

@@ -7020,6 +7020,8 @@ static void add_dbgvar(struct ir_func *fn, const char *name, int vreg,
     v->col = col;
     v->moved = 0;
     v->scope = 0;
+    v->origin = NULL;
+    v->origin_idx = -1;
 }
 
 /* -g: walk the body for block-scope locals. Each STMT_DECL owns a var slot
