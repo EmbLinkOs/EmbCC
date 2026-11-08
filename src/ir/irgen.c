@@ -183,20 +183,15 @@ void ir_locals_fill(struct ir_func *fn, struct func *f, int nvars)
     }
 }
 
-/* -g: the lexical scope being generated (ir_ins.scope), and the blocks
- * collect_locals gave one: each STMT_BLOCK or STMT_FOR that declares a
- * local. */
+/* -g: the lexical scope being generated (ir_ins.scope). collect_locals
+ * gives each STMT_BLOCK or STMT_FOR that declares a local its scope, in
+ * the statement itself (dbg_scope): a lookup by pointer was a search, and
+ * 200,000 blocks in one function made it quadratic (many-declarations). */
 static int g_cur_scope;
-static struct stmt **g_scope_stmt;
-static int *g_scope_id;
-static int g_nscope_stmt, g_capscope_stmt;
 
 static int scope_of_stmt(const struct stmt *s)
 {
-    for (int k = 0; k < g_nscope_stmt; k++)
-        if (g_scope_stmt[k] == s)
-            return g_scope_id[k];
-    return -1;
+    return s->dbg_scope - 1;
 }
 
 struct ir_ins *emit(struct ir_func *fn)
@@ -7042,16 +7037,13 @@ static int declares_local(const struct stmt *s)
 /* A new lexical scope for block s, inside scope `up`. */
 static int new_scope(struct ir_func *fn, struct stmt *s, int up)
 {
-    int id = fn->nscopes++;
-    fn->scope_up = xrealloc(fn->scope_up, (size_t)fn->nscopes * sizeof *fn->scope_up);
-    fn->scope_up[id] = up;
-    if (g_nscope_stmt == g_capscope_stmt) {
-        g_capscope_stmt = g_capscope_stmt ? g_capscope_stmt * 2 : 16;
-        g_scope_stmt = xrealloc(g_scope_stmt, (size_t)g_capscope_stmt * sizeof *g_scope_stmt);
-        g_scope_id = xrealloc(g_scope_id, (size_t)g_capscope_stmt * sizeof *g_scope_id);
+    if (fn->nscopes == fn->scope_cap) {
+        fn->scope_cap = fn->scope_cap ? fn->scope_cap * 2 : 8;
+        fn->scope_up = xrealloc(fn->scope_up, (size_t)fn->scope_cap * sizeof *fn->scope_up);
     }
-    g_scope_stmt[g_nscope_stmt] = s;
-    g_scope_id[g_nscope_stmt++] = id;
+    int id = fn->nscopes++;
+    fn->scope_up[id] = up;
+    s->dbg_scope = id + 1;
     return id;
 }
 
@@ -7082,12 +7074,14 @@ static void collect_locals(struct ir_func *fn, struct stmt *s, int scope)
             break;
         case STMT_FOR: {
             /* `for (int i ...)`: i's scope is the for statement */
+            s->dbg_scope = 0;
             int in = declares_local(s->initdecl) ? new_scope(fn, s, scope) : scope;
             collect_locals(fn, s->initdecl, in);
             collect_locals(fn, s->body, in);
             break;
         }
         case STMT_BLOCK:
+            s->dbg_scope = 0;
             collect_locals(fn, s->body,
                            declares_local(s->body) ? new_scope(fn, s, scope) : scope);
             break;
@@ -7268,10 +7262,10 @@ static void gen_func_(struct ir_func *fn, struct func *f)
     for (int i = 0; i < f->nparams; i++)
         add_dbgvar(fn, f->params[i], i, 1, f->param_tys[i],
                    f->param_lines[i], f->param_cols[i]);
-    g_nscope_stmt = 0;
     g_cur_scope = 0;
     fn->nscopes = 1;
-    fn->scope_up = xmalloc(sizeof *fn->scope_up);
+    fn->scope_cap = 8;
+    fn->scope_up = xmalloc((size_t)fn->scope_cap * sizeof *fn->scope_up);
     fn->scope_up[0] = -1;
     collect_locals(fn, f->body, 0);
     /* Local scope ranges: default to the whole function ([0, +inf), narrowed to

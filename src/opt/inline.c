@@ -471,6 +471,7 @@ static void inline_call(struct ir_func *fn, int ci, struct ir_func *cf)
         int ns = base + cf->nscopes;
         int had = fn->scope_fn != NULL;
         fn->scope_up = xrealloc(fn->scope_up, (size_t)ns * sizeof *fn->scope_up);
+        fn->scope_cap = ns;
         fn->scope_fn = xrealloc(fn->scope_fn, (size_t)ns * sizeof *fn->scope_fn);
         fn->scope_cline = xrealloc(fn->scope_cline, (size_t)ns * sizeof *fn->scope_cline);
         fn->scope_ccol = xrealloc(fn->scope_ccol, (size_t)ns * sizeof *fn->scope_ccol);

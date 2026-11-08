@@ -1080,10 +1080,15 @@ static long ins_start(const struct ir_func *fn, int k, long lo, long hi)
 }
 
 /* One block's DIE, its variables, and the blocks nested in it. */
+/* Each scope's first child and next sibling, and its first variable and
+ * the next one in the same scope: built once, so a function of 200,000
+ * blocks is not 200,000 scans of them all. */
+struct stree { int *kid, *sib, *var, *vnext; };
+
 static void emit_block(struct dwarf_out *out, struct dbuf *b, struct dbuf *loc,
                        struct typemap *tm, struct ir_func *fn, long lo,
                        int s, const long *smin, const long *smax,
-                       const struct sranges *sr)
+                       const struct sranges *sr, const struct stree *st)
 {
     const struct absfn *A = s > 0 && fn->scope_fn ? abs_of(fn->scope_fn[s]) : NULL;
     /* in pieces (not in a .dwo, which keeps the extent): DW_AT_ranges */
@@ -1113,19 +1118,16 @@ static void emit_block(struct dwarf_out *out, struct dbuf *b, struct dbuf *loc,
         db_uleb(b, (unsigned long)(fn->scope_cline[s] > 0 ? fn->scope_cline[s] : 0));
         db_uleb(b, (unsigned long)(fn->scope_ccol[s] > 0 ? fn->scope_ccol[s] : 0));
     }
-    for (int v = 0; v < fn->ndbgvars; v++) {
-        int vs = fn->dbgvars[v].scope;
-        if (vs < 0 && smin != NULL)
-            continue;                    /* its block has no code */
-        if (vs < 0 || vs >= fn->nscopes || smin == NULL)
-            vs = 0;
-        if (vs == s)
+    if (!st) {
+        for (int v = 0; v < fn->ndbgvars; v++)
             emit_dbgvar(out, b, loc, tm, fn, v, lo);
+    } else {
+        for (int v = st->var[s]; v >= 0; v = st->vnext[v])
+            emit_dbgvar(out, b, loc, tm, fn, v, lo);
+        for (int c = st->kid[s]; c >= 0; c = st->sib[c])
+            if (smin[c] < smax[c])
+                emit_block(out, b, loc, tm, fn, lo, c, smin, smax, sr, st);
     }
-    if (smin)
-        for (int c = s + 1; c < fn->nscopes; c++)
-            if (fn->scope_up[c] == s && smin[c] < smax[c])
-                emit_block(out, b, loc, tm, fn, lo, c, smin, smax, sr);
     if (s > 0)
         db_u8(b, 0);
 }
@@ -1150,7 +1152,7 @@ static void emit_scopes(struct dwarf_out *out, struct dbuf *b, struct dbuf *loc,
     if (fn->ndbgvars <= 0)
         return;
     if (!fn->ins_pc || fn->nscopes <= 1 || !fn->scope_up || fn->nins <= 0) {
-        emit_block(out, b, loc, tm, fn, lo, 0, NULL, NULL, NULL);
+        emit_block(out, b, loc, tm, fn, lo, 0, NULL, NULL, NULL, NULL);
         return;
     }
     int ns = fn->nscopes;
@@ -1177,7 +1179,32 @@ static void emit_scopes(struct dwarf_out *out, struct dbuf *b, struct dbuf *loc,
         if (vs > 0 && vs < ns && smin[vs] >= smax[vs])
             fn->dbgvars[v].scope = -1;
     }
-    emit_block(out, b, loc, tm, fn, lo, 0, smin, smax, sr);
+    struct stree st;
+    st.kid = xmalloc((size_t)ns * sizeof *st.kid);
+    st.sib = xmalloc((size_t)ns * sizeof *st.sib);
+    st.var = xmalloc((size_t)ns * sizeof *st.var);
+    st.vnext = xmalloc((size_t)(fn->ndbgvars ? fn->ndbgvars : 1) * sizeof *st.vnext);
+    for (int s = 0; s < ns; s++)
+        st.kid[s] = st.sib[s] = st.var[s] = -1;
+    for (int c = ns - 1; c > 0; c--) {           /* in id order, each list */
+        int u = fn->scope_up[c];
+        if (u >= 0 && u < ns) {
+            st.sib[c] = st.kid[u];
+            st.kid[u] = c;
+        }
+    }
+    for (int v = fn->ndbgvars - 1; v >= 0; v--) {
+        int vs = fn->dbgvars[v].scope;
+        st.vnext[v] = -1;
+        if (vs < 0)
+            continue;                            /* its block has no code */
+        if (vs >= ns)
+            vs = 0;
+        st.vnext[v] = st.var[vs];
+        st.var[vs] = v;
+    }
+    emit_block(out, b, loc, tm, fn, lo, 0, smin, smax, sr, &st);
+    free(st.kid); free(st.sib); free(st.var); free(st.vnext);
     for (int s = 0; s < ns; s++) {
         free(sr[s].lo);
         free(sr[s].hi);

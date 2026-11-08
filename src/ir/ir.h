@@ -653,7 +653,7 @@ struct ir_func {
      * writer makes a DW_TAG_lexical_block of each from its instructions'
      * code -- which, unlike var_scope_lo/hi, no reordering makes stale. */
     int *scope_up;
-    int nscopes;
+    int nscopes, scope_cap;
     /* ...and where a scope is an inlined call (the inliner), the function
      * inlined there and the call's line and column; NULL and 0 for a
      * block. Each array nscopes long, or NULL while no call is inlined. */

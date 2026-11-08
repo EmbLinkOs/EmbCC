@@ -273,6 +273,9 @@ struct asm_stmt {
 
 struct stmt {
     enum stmt_kind kind;
+    /* -g: 1 + the lexical scope irgen gave this block or for statement
+     * (ir_func.scope_up), 0 when it declares no local of its own */
+    int dbg_scope;
     int line;
     int col;              /* 1-based column, for caret diagnostics (0 = unknown) */
     const char *name;     /* STMT_DECL */
