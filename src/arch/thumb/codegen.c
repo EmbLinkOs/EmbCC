@@ -1937,8 +1937,10 @@ static int rc_try(struct t_fn *F, int v)
     if (F->rc_reg[v] >= 0)
         return rc_hit(F, v);
     avail = F->lofree;
+    /* ...nor a volatile local: every read of one is a read of memory */
     if (!avail || F->rc_n == 8 || in_freg(F, v) || F->wide[v] ||
-        F->slot[v] < 0 || faddr(F, v, &fo) || fn->ins[n].dst == v)
+        F->slot[v] < 0 || faddr(F, v, &fo) || fn->ins[n].dst == v ||
+        (v < fn->nvars && fn->locals[v].is_volatile))
         return -1;
     int stop, end, k;
     for (m = n + 1; m < fn->nins && m <= n + RC_REACH; m++) {
@@ -2221,6 +2223,45 @@ static void frame_addr_map(struct t_fn *F)
     F->fscr = fs;
 }
 
+/* Values no register should hold (ra_cheap_remat): a local's address
+ * (fvar) whose reads are loads and stores -- `str r2, [sp, #4]` where it
+ * was `add r3, sp, #0; str r2, [r3, #4]`, and across a call r4, pushed
+ * and popped for it -- and a constant whose reads are call arguments,
+ * moves and returns, where `movs r1, #2` costs what `mov r1, r4` did. A
+ * paid read rebuilds into a scratch register: an address may have two
+ * (any number under -Os), a constant none. Only what gen_func rebuilds:
+ * not an eight-byte value, nor the local returned in the caller's buffer
+ * (its address is a load, t_nrvo_local). EMBCC_T_NOCHEAP=1 turns it off. */
+static int t_cheap_ok(const struct ir_ins *i)
+{
+    return i->op == IR_ADDR || t_remat_ok(i);
+}
+static char *t_cheap_map(const struct t_fn *F)
+{
+    const struct ir_func *fn = F->fn;
+    if (getenv("EMBCC_T_NOCHEAP") || !F->fvar)
+        return NULL;
+    int lim_addr = target_opt_size() ? 1 << 30 : 2;
+    const char *e = getenv("EMBCC_T_CHEAP_ADDR");
+    if (e)
+        lim_addr = atoi(e);
+    char *m = ra_cheap_remat(fn, t_cheap_ok, lim_addr, 0);
+    if (!m)
+        return NULL;
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        int d = ra_ins_def(i);
+        if (d < 0 || d >= fn->nvregs || !m[d])
+            continue;
+        if (i->op == IR_ADDR && (F->fvar[d] < 0 || i->a == F->nrvo))
+            m[d] = 0;
+    }
+    for (int v = 0; v < fn->nvregs; v++)
+        if (F->wide && F->wide[v])
+            m[v] = 0;
+    return m;
+}
+
 /* THE RETURNED LOCAL IN THE CALLER'S BUFFER. `div_t r; r.quot = ...;
  * r.rem = ...; return r;` built r on the frame and copied it to the
  * buffer the caller passed: 32 bytes for div where clang's 14 store
@@ -2299,7 +2340,23 @@ static char *t_faddr_excl(const struct t_fn *F, const char *base)
 }
 char *tcg_faddr_excl(const struct t_fn *F, const char *base)
 {
-    return t_faddr_excl(F, base);
+    /* and ra_cheap_remat's values (t_cheap_map): M0 libc 221,552 ->
+     * 221,334 bytes. EMBCC_T_NOV6CHEAP=1 leaves them out. */
+    char *x = t_faddr_excl(F, base);
+    char *c = getenv("EMBCC_T_NOV6CHEAP") || F->keep_vars || g_t_o0
+              ? NULL : t_cheap_map(F);
+    if (c) {
+        int nv = F->fn->nvregs;
+        if (!x) {
+            x = xcalloc((size_t)nv, 1);
+            for (int v = 0; v < nv; v++)
+                x[v] = base ? base[v] : 0;
+        }
+        for (int v = 0; v < nv; v++)
+            x[v] |= c[v];
+        free(c);
+    }
+    return x;
 }
 
 /* frame base + off, into `rd`: t_add_sp where the frame base is sp. */
@@ -7565,12 +7622,14 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
          * owns, and the -g pins are the same kind of "not here" -- so it
          * takes the union of the two. */
         char *excl = pin;
-        if (flt) {
+        char *cheap = keep_vars || g_t_o0 ? NULL : t_cheap_map(&F);
+        if (flt || cheap) {
             excl = xcalloc((size_t)fn->nvregs, 1);
             for (int v = 0; v < fn->nvregs; v++)
-                excl[v] = (char)(flt[v] || (dbl && dbl[v]) ||
-                                 (pin && pin[v]));
+                excl[v] = (char)((flt && flt[v]) || (dbl && dbl[v]) ||
+                                 (pin && pin[v]) || (cheap && cheap[v]));
         }
+        free(cheap);
         int pused[RA_MAXPOOL], npused = 0;
         int *pair = g_t_pairs ? t_pair_alloc(fn, F.wide, excl, pused, &npused)
                               : NULL;
@@ -7628,9 +7687,10 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
             /* vpush takes a RANGE, so s16 up to the highest one used,
              * rounded to an even count to keep sp eight-aligned. */
             F.nfsave = (top - 15 + 1) & ~1;
-            free(excl);
             free(flt);
         }
+        if (excl != pin)
+            free(excl);
         free(dbl);
         free(pin);
         /* Read counts for comparison/branch fusion. Only with the

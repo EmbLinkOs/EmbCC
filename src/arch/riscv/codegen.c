@@ -6796,65 +6796,35 @@ static int *rv_int_uses(const struct ir_func *fn)
     return c.m;
 }
 
-/* Frame addresses no register should hold: an IR_ADDR whose every read
- * is the address of a load or a store. Without a register it is
- * rematerialised, and mem_base folds the local's slot into the access's
- * offset -- `sw a2, 0x24(sp)` -- so it costs nothing at all; in a
- * register it is an `addi`/`mv` at its definition, and across a call a
- * callee-saved register saved and restored besides (a struct filled
- * field by field and passed by address held s0 for it). A read as a
- * value -- a call argument, arithmetic -- costs one `addi rd, sp, off`
- * where it is, which a register would have cost once at the definition:
- * so up to two such reads still leave it without a register (the struct
- * passed by address: `mv a0, sp` at the call, where s0 cost a save, a
- * restore and a move), more keep it eligible -- a register is cheaper by
- * an instruction per read in a loop. Under -Os any number: the `addi`s
- * are two bytes each where the register cost its save and restore (RV32
- * libc 332,038 -> 328,750 bytes; limit 2 at -O2, cycles unchanged).
- * EMBCC_RV_FAMEM_MAX=N moves the limit; EMBCC_RV_NOFAMEM=1 turns this
- * off. NULL when there is none. */
-struct rv_fam { const struct ir_ins *in; int *nonmem; };
-static void rv_fam_cb(int v, void *ctx)
+/* Values no register should hold (ra_cheap_remat): a local's address
+ * whose reads are loads and stores -- mem_base folds the slot into the
+ * offset, `sw a2, 0x24(sp)` -- and a constant whose reads are call
+ * arguments, moves and returns, where `li a1, 2` costs what `mv a1, s0`
+ * did without s0's save and restore. A paid read rebuilds into a scratch
+ * register (`addi`, `li`): an address may have two (any number under
+ * -Os), a constant none (EMBCC_RV_CHEAP_CONST=N under -Os). Only what
+ * gen_func then rematerialises: not a register pair's value at RV32, nor
+ * a sixteen-byte one. EMBCC_RV_NOFAMEM=1 turns it off. */
+static char *rv_cheap_map(const struct rv_fn *F)
 {
-    struct rv_fam *m = ctx;
-    const struct ir_ins *i = m->in;
-    int addr_use = (i->op == IR_LOAD && v == i->a) ||
-                   (i->op == IR_STORE && v == i->a && v != i->b);
-    if (!addr_use)
-        m->nonmem[v]++;
-}
-static char *rv_fa_memonly(const struct ir_func *fn)
-{
+    const struct ir_func *fn = F->fn;
     if (getenv("EMBCC_RV_NOFAMEM") || getenv("EMBCC_RV_NOFAREMAT"))
         return NULL;
-    int nv = fn->nvregs, any = 0, lim = target_opt_size() ? 1 << 30 : 2;
+    int os = target_opt_size();
+    int lim_addr = os ? 1 << 30 : 2, lim_const = 0;
     const char *e = getenv("EMBCC_RV_FAMEM_MAX");
     if (e)
-        lim = atoi(e);
-    int *nonmem = xcalloc((size_t)(nv ? nv : 1), sizeof *nonmem);
-    int *defs = xcalloc((size_t)(nv ? nv : 1), sizeof *defs);
-    char *isaddr = xcalloc((size_t)(nv ? nv : 1), 1);
-    struct rv_fam m = { NULL, nonmem };
-    for (int n = 0; n < fn->nins; n++) {
-        const struct ir_ins *i = &fn->ins[n];
-        int d = ra_ins_def(i);
-        if (d >= 0 && d < nv) {
-            defs[d]++;
-            if (i->op == IR_ADDR)
-                isaddr[d] = 1;
-        }
-        m.in = i;
-        ra_each_use(i, rv_fam_cb, &m);
-    }
-    char *out = xcalloc((size_t)(nv ? nv : 1), 1);
-    for (int v = fn->nvars; v < nv; v++)
-        if (isaddr[v] && defs[v] == 1 && nonmem[v] <= lim) {
-            out[v] = 1;
-            any = 1;
-        }
-    free(nonmem); free(defs); free(isaddr);
-    if (!any) { free(out); return NULL; }
-    return out;
+        lim_addr = atoi(e);
+    e = getenv("EMBCC_RV_CHEAP_CONST");
+    if (e && os)
+        lim_const = atoi(e);
+    char *m = ra_cheap_remat(fn, rv_remat_ok, lim_addr, lim_const);
+    if (!m)
+        return NULL;
+    for (int v = 0; v < fn->nvregs; v++)
+        if ((F->xlen == 32 && F->wide && F->wide[v]) || (F->w16 && F->w16[v]))
+            m[v] = 0;
+    return m;
 }
 
 static char *rv_float_map(const struct rv_fn *F, char **fw_out, int debug)
@@ -7211,7 +7181,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
         char *fwm = NULL;
         char *flt = rv_float_map(&F, &fwm, keep_vars || g_rv_o0);
         char *excl = pin;
-        char *fam = g_rv_o0 || keep_vars ? NULL : rv_fa_memonly(fn);
+        char *fam = g_rv_o0 || keep_vars ? NULL : rv_cheap_map(&F);
         if (flt || fam) {
             excl = xcalloc((size_t)fn->nvregs, 1);
             for (int v = 0; v < fn->nvregs; v++)

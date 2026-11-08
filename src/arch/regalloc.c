@@ -651,6 +651,72 @@ char *ra_remat_map(const struct ir_func *fn,
     return m;
 }
 
+struct ra_chp { const struct ir_ins *in; const char *isaddr; int *paid; int nv; };
+static void ra_chp_cb(int v, void *ctx)
+{
+    struct ra_chp *c = ctx;
+    const struct ir_ins *i = c->in;
+    if (v < 0 || v >= c->nv)
+        return;
+    int free_ = 0;
+    switch (i->op) {
+    case IR_CALL:                       /* an argument, not the target */
+        free_ = !(i->indirect && i->a == v);
+        break;
+    case IR_MOV:
+        free_ = i->a == v;
+        break;
+    case IR_RET:
+        free_ = 1;
+        break;
+    case IR_LOAD:
+        free_ = c->isaddr[v] && i->a == v;
+        break;
+    case IR_STORE:
+        free_ = c->isaddr[v] && i->a == v && i->b != v;
+        break;
+    default:
+        break;
+    }
+    if (!free_)
+        c->paid[v]++;
+}
+
+char *ra_cheap_remat(const struct ir_func *fn,
+                     int (*ok)(const struct ir_ins *def),
+                     int lim_addr, int lim_const)
+{
+    int nv = fn->nvregs, any = 0;
+    if (!nv || !ok)
+        return NULL;
+    char *rm = ra_remat_map(fn, ok);
+    char *isaddr = xcalloc((size_t)nv, 1);
+    int *paid = xcalloc((size_t)nv, sizeof *paid);
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *in = &fn->ins[n];
+        int d = ra_ins_def(in);
+        if (in->op == IR_ADDR && d >= 0 && d < nv)
+            isaddr[d] = 1;
+    }
+    struct ra_chp c = { NULL, isaddr, paid, nv };
+    for (int n = 0; n < fn->nins; n++) {
+        c.in = &fn->ins[n];
+        ra_each_use(c.in, ra_chp_cb, &c);
+    }
+    char *out = xcalloc((size_t)nv, 1);
+    for (int v = fn->nvars; v < nv; v++)
+        if (rm[v] && paid[v] <= (isaddr[v] ? lim_addr : lim_const)) {
+            out[v] = 1;
+            any = 1;
+        }
+    free(rm); free(isaddr); free(paid);
+    if (!any) {
+        free(out);
+        return NULL;
+    }
+    return out;
+}
+
 static void ra_cost_cb(int v, void *ctx)
 {
     struct ra_costacc *c = ctx;
