@@ -468,6 +468,12 @@ void target_set_thumb_arch(int lvl);
  * MOVW/MOVT, CBZ, B.W and the security extension. Every question about
  * level 6 that Baseline answers the same way keeps asking the level. */
 int target_thumb_v8m_base(void);
+/* Does a word access at a misaligned address trap on this target (or not
+ * exist)? ARMv6-M and v8-M Baseline, Xtensa, MIPS, SPARC and TriCore;
+ * not v7-M and later, ARMv7-A, RISC-V, x86-64, AArch64, PowerPC, RX,
+ * ColdFire, LoongArch, nor AVR, whose every object is byte-aligned.
+ * -Wcast-align warns on a cast that raises the alignment only here. */
+int target_strict_align(void);
 void target_set_thumb_v8m_base(void);
 /* Either ARMv8-M profile (Mainline or Baseline): the security extension's
  * instructions (SG, BXNS, BLXNS, TT) and the stack-limit registers. */

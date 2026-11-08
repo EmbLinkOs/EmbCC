@@ -7692,6 +7692,10 @@ static int embcc_main(int argc, char **argv)
         } else if (strcmp(argv[i], "-Wextra") == 0 ||
                    strcmp(argv[i], "-W") == 0) {
             diag_enable_group(0, 1);
+        } else if (strcmp(argv[i], "-Wcast-align=strict") == 0) {
+            /* GCC's: every target, not only one where it traps */
+            diag_enable_warning("cast-align", 1);
+            diag_enable_warning("cast-align-strict", 1);
         } else if (strncmp(argv[i], "-Wformat=", 9) == 0) {
             /* gcc's levels: 0 off, 1 -Wformat, 2 that and the checks of
              * a format that is not a literal */

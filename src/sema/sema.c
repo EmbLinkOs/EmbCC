@@ -4704,6 +4704,23 @@ static void check_expr_main(struct unit *u, struct func *f, struct scope *sc,
                 diag_warn_opt(diag_file(u), e->line, e->col, "cast-qual",
                               "cast discards '%s' qualifier from pointer "
                               "target type", q);
+            /* -Wcast-align: `(int *)c` of a `char *` promises an
+             * alignment the source did not have -- a fault on a target
+             * whose word access must be aligned. From `void *` is the
+             * way to say the address is known good, as with GCC; and a
+             * function or an incomplete type has no alignment to raise. */
+            if (fp->kind != TY_VOID && fp->kind != TY_FUNC &&
+                tp->kind != TY_VOID && tp->kind != TY_FUNC &&
+                (tp->kind != TY_STRUCT || tp->complete) &&
+                ty_align(tp) > ty_align(fp))
+                diag_warn_opt(diag_file(u), e->line, e->col,
+                              target_strict_align() &&
+                              diag_warning_enabled("cast-align")
+                                  ? "cast-align" : "cast-align-strict",
+                              "cast increases the required alignment from "
+                              "%d to %d bytes (%s to %s)", ty_align(fp),
+                              ty_align(tp), ty_name(e->rhs->ty),
+                              ty_name(e->cast_ty));
         }
         e->ty = e->cast_ty;
         break;
@@ -9878,15 +9895,47 @@ static int has_own_break(struct stmt *s)
  * recognized by name — sound because these genuinely never return, and
  * the worst case of a same-named user function is a missed diagnostic,
  * never a miscompile. diag_fatal is EmbCC's own, used at many tails. */
+/* A return, a goto or a label anywhere in the statements: the first is a
+ * way out, and the other two can carry control to the closing brace
+ * past what list_returns sees. */
+static int has_way_out(const struct stmt *s)
+{
+    for (; s; s = s->next) {
+        if (s->kind == STMT_RETURN || s->kind == STMT_GOTO ||
+            s->kind == STMT_LABEL || s->kind == STMT_EHREGION)
+            return 1;
+        if (has_way_out(s->thn) || has_way_out(s->els) ||
+            has_way_out(s->body) || has_way_out(s->initdecl))
+            return 1;
+    }
+    return 0;
+}
+
 int is_noreturn_call(const struct expr *e)
 {
     if (e->kind != EXPR_CALL || !e->name)
         return 0;
     if (e->callee && e->callee->is_noreturn)
         return 1;                       /* __attribute__((noreturn)) callee */
+    /* ...or one this file defines whose every path ends in such a call
+     * and that has no return: `static void cerr(...) { ...; diag_fatal(
+     * ...); }`, as GCC infers for a function it can see. The diagnostics
+     * alone ask (-Wreturn-type, -Wmaybe-uninitialized, -Wnull-dereference);
+     * nothing is compiled differently. */
+    if (e->callee && e->callee->body) {
+        struct func *cf = e->callee;
+        if (!cf->nr_inferred) {
+            cf->nr_inferred = 2;        /* a recursive call returns */
+            cf->nr_inferred = !has_way_out(cf->body) &&
+                              list_returns(cf->body) ? 1 : 3;
+        }
+        if (cf->nr_inferred == 1)
+            return 1;
+    }
     static const char *const nr[] = {
-        "exit", "abort", "_Exit", "diag_fatal",
+        "exit", "abort", "_Exit", "quick_exit", "diag_fatal",
         "__builtin_unreachable", "__builtin_trap", "__builtin_longjmp",
+        "longjmp", "_longjmp", "siglongjmp", "thrd_exit", "pthread_exit",
     };
     for (unsigned i = 0; i < sizeof nr / sizeof *nr; i++)
         if (strcmp(e->name, nr[i]) == 0)

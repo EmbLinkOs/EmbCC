@@ -16,6 +16,7 @@
 #ifndef EMBCC_CXX_CXX_H
 #define EMBCC_CXX_CXX_H
 
+#include "../driver/util.h"   /* EMBCC_NORETURN */
 #include "../lex/lex.h"
 #include "translate.h"
 
@@ -54,8 +55,9 @@ void cx_expect(enum tok_kind k, const char *what);
 int cx_is_ident(const char *name);   /* current token is this identifier */
 void cx_skip_balanced(void);         /* past a ( [ { group and its close */
 
-/* diagnostics at a token (exit) */
-void cx_error(const struct ctok *at, const char *fmt, ...);
+/* diagnostics at a token: never returns -- a substitution failure or a
+ * recovery point is longjmp'd to, else the unit stops (fatal_unwind) */
+EMBCC_NORETURN void cx_error(const struct ctok *at, const char *fmt, ...);
 /* The C++ standard the code at t is read under: -std='s (lex_cxx_year),
  * or all of EmbCC's in a system header (lex.h). cx_need_std: `what` is
  * C++YEAR's, an error at t under an earlier standard, as GCC has it. */

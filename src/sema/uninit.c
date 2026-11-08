@@ -19,6 +19,18 @@
  * touches. A false "may be used uninitialized" costs the reader more than
  * a missed one, because the missed one is still a bug they can find and
  * the false one is a bug they cannot.
+ *
+ * -Wnull-dereference is the same walk asking a different question of each
+ * pointer slot (`nullmode`): is it null here -- on every path (NL_NULL),
+ * on some (NL_MAYBE), on none that we know of (NL_NON: it was pointed at
+ * something, or dereferenced already), or unknown (NL_UNK: a parameter, a
+ * call's result). Assignments set it from what they store; `if (p)`,
+ * `p == 0`, `p && ...` and a loop's condition split it by outcome. A
+ * dereference of a slot that is NL_NULL is "null pointer dereference", of
+ * one that is NL_MAYBE "potential null pointer dereference", as GCC words
+ * them -- GCC finds them after optimizing, and only where address 0 is no
+ * object; this finds them on every target, at every level, but never in a
+ * volatile access, which is how a Cortex-M reads its vector table at 0.
  */
 #include "uninit.h"
 
@@ -31,6 +43,8 @@
 
 /* What a slot holds at a program point. */
 enum { U_NO, U_YES, U_MAYBE };
+/* ...and in nullmode, what a pointer slot is */
+enum { NL_UNK, NL_NULL, NL_NON, NL_MAYBE };
 
 struct state {
     unsigned char *v;
@@ -55,6 +69,7 @@ struct ctx {
     unsigned char *backedge;  /* slots a loop's back edge alone made MAYBE */
     int cond_depth;           /* inside an if/case arm */
     int quiet;                /* a pre-pass: compute, do not report */
+    int nullmode;             /* -Wnull-dereference's question, not ours */
     struct func *f;
 };
 
@@ -88,8 +103,14 @@ static void st_join(struct ctx *c, struct state *a, const struct state *b)
         return;
     }
     for (int i = 0; i < c->nvars; i++)
-        if (a->v[i] != b->v[i])
-            a->v[i] = U_MAYBE;
+        if (a->v[i] != b->v[i]) {
+            if (!c->nullmode)
+                a->v[i] = U_MAYBE;
+            else            /* null on one side: null on some paths */
+                a->v[i] = a->v[i] == NL_NULL || a->v[i] == NL_MAYBE ||
+                          b->v[i] == NL_NULL || b->v[i] == NL_MAYBE
+                          ? NL_MAYBE : NL_UNK;
+        }
 }
 
 static int st_same(struct ctx *c, const struct state *a, const struct state *b)
@@ -210,6 +231,14 @@ static void report(struct ctx *c, struct expr *e, int slot, int maybe)
         return;
     c->warned[slot] = 1;
     const struct uninit_var *v = &c->vars[slot];
+    if (c->nullmode) {
+        diag_warn_opt(c->file, e->line, e->col, "null-dereference",
+                      maybe ? "potential null pointer dereference: '%s' is "
+                              "null on some path to here"
+                            : "null pointer dereference: '%s' is null here",
+                      v->name);
+        return;
+    }
     diag_warn_opt(c->file, e->line, e->col,
                   maybe ? "maybe-uninitialized" : "uninitialized",
                   maybe ? "'%s' may be used uninitialized"
@@ -242,7 +271,7 @@ static int slot_of(struct ctx *c, struct expr *e)
 static void read_var(struct ctx *c, struct state *st, struct expr *e)
 {
     int s = slot_of(c, e);
-    if (s < 0 || !st->reach)
+    if (s < 0 || !st->reach || c->nullmode)
         return;
     if (st->v[s] == U_NO)
         report(c, e, s, 0);
@@ -254,7 +283,124 @@ static void write_var(struct ctx *c, struct state *st, struct expr *e)
 {
     int s = slot_of(c, e);
     if (s >= 0)
-        st->v[s] = U_YES;
+        st->v[s] = c->nullmode ? NL_UNK : U_YES;
+}
+
+static void refine(struct ctx *c, struct state *st, struct expr *e, int truth);
+
+/* nullmode: what storing e makes a pointer -- a null pointer constant
+ * (`0`, `(void *)0`, NULL), an address (`&x`, a string, an array or a
+ * function's name), another tracked pointer's state, or unknown */
+static int null_of(struct ctx *c, struct state *st, struct expr *e)
+{
+    while (e && (e->kind == EXPR_CAST || e->kind == EXPR_COMMA ||
+                 e->kind == EXPR_ASSIGN))
+        e = e->rhs;
+    if (!e)
+        return NL_UNK;
+    if (e->kind == EXPR_NUM)
+        return e->num == 0 ? NL_NULL : NL_UNK;
+    if (e->kind == EXPR_ADDR || e->kind == EXPR_STR)
+        return NL_NON;
+    if (e->kind == EXPR_COND) {         /* `c ? q : 0`: as its arms join */
+        /* each arm as its outcome of the condition left it: in
+         * `v ? v : m->body`, v is not null where it is chosen */
+        struct state t = st_copy(c, st), f = st_copy(c, st);
+        refine(c, &t, e->args[0], 1);
+        refine(c, &f, e->args[0], 0);
+        int a = null_of(c, &t, e->lhs), b = null_of(c, &f, e->rhs);
+        st_free(&t);
+        st_free(&f);
+        if (a == b)
+            return a;
+        return a == NL_NULL || a == NL_MAYBE || b == NL_NULL ||
+               b == NL_MAYBE ? NL_MAYBE : NL_UNK;
+    }
+    if (e->kind == EXPR_VAR) {
+        if (e->fref || (e->ty && (e->ty->kind == TY_ARRAY ||
+                                  e->ty->kind == TY_FUNC)))
+            return NL_NON;
+        int s = slot_of(c, e);
+        return s >= 0 ? st->v[s] : NL_UNK;
+    }
+    return NL_UNK;
+}
+
+/* nullmode: a decision -- an `if`, a loop's test, an operand of `&&` --
+ * may be correlated with how a pointer came to be null on some paths:
+ * `nx = n < k ? &a[n] : 0; int fuse = nx && ...; if (fuse) use(nx->x)`
+ * never reads it null, and only the condition knows. So "null on some
+ * path" lasts until the next decision; a test of the pointer itself
+ * (refine) still says what it is, and "null on every path" stays. Over
+ * EmbCC's own sources the analysis without this reported 158 such reads,
+ * every one of them guarded. */
+static void forget(struct ctx *c, struct state *st)
+{
+    if (!c->nullmode)
+        return;
+    for (int i = 0; i < c->nvars; i++)
+        if (st->v[i] == NL_MAYBE)
+            st->v[i] = NL_UNK;
+}
+
+/* nullmode: the state where condition e had the outcome `truth` -- for a
+ * pointer tested bare (`if (p)`, `!p`) or against a null constant */
+static void refine(struct ctx *c, struct state *st, struct expr *e, int truth)
+{
+    if (!c->nullmode || !st->reach)
+        return;
+    while (e && e->kind == EXPR_CAST)
+        e = e->rhs;
+    if (e && e->kind == EXPR_NOT) {
+        refine(c, st, e->rhs, !truth);
+        return;
+    }
+    if (e && e->kind == EXPR_BINOP && (e->op == B_EQ || e->op == B_NE)) {
+        struct expr *v = e->lhs, *k = e->rhs;
+        while (v && v->kind == EXPR_CAST)
+            v = v->rhs;
+        while (k && k->kind == EXPR_CAST)
+            k = k->rhs;
+        if (v && v->kind == EXPR_NUM) {       /* 0 == p */
+            struct expr *t = v;
+            v = k;
+            k = t;
+        }
+        if (!k || k->kind != EXPR_NUM || k->num != 0)
+            return;
+        int s = slot_of(c, v);
+        if (s >= 0)          /* p == 0 true, or p != 0 false: null */
+            st->v[s] = (e->op == B_EQ) == !!truth ? NL_NULL : NL_NON;
+        return;
+    }
+    int s = slot_of(c, e);
+    if (s >= 0)
+        st->v[s] = truth ? NL_NON : NL_NULL;
+}
+
+/* nullmode: a dereference of the pointer e (the operand of `*`, the base
+ * of `->`, `p + i` under either): reported if it is null here; after it,
+ * the pointer is not -- it was used, so it pointed at something. */
+static void deref(struct ctx *c, struct state *st, struct expr *e, int vol)
+{
+    while (e && e->kind == EXPR_CAST)
+        e = e->rhs;
+    if (e && e->kind == EXPR_BINOP && (e->op == B_ADD || e->op == B_SUB)) {
+        struct expr *l = e->lhs;
+        while (l && l->kind == EXPR_CAST)
+            l = l->rhs;
+        e = l && l->ty && l->ty->kind == TY_PTR ? l : e->rhs;
+        while (e && e->kind == EXPR_CAST)
+            e = e->rhs;
+    }
+    int s = slot_of(c, e);
+    if (s < 0 || !st->reach)
+        return;
+    if (!vol && st->v[s] == NL_NULL)
+        report(c, e, s, 0);
+    else if (!vol && st->v[s] == NL_MAYBE)
+        report(c, e, s, 1);
+    st->v[s] = NL_NON;
 }
 
 /* `a && b && c` short-circuits, but not independently: c runs only if b
@@ -284,6 +430,9 @@ static void chain(struct ctx *c, struct state *st, struct expr *e)
     c->cond_depth++;
     for (int i = n - 2; i >= 0; i--) {
         st_join(c, &any, st);           /* the chain could have stopped here */
+        /* the next operand runs where this one was true (&&) or false */
+        forget(c, st);
+        refine(c, st, ops[i + 1], op == B_LAND);
         ex(c, st, ops[i]);
     }
     c->cond_depth--;
@@ -331,8 +480,11 @@ static void cond2(struct ctx *c, struct state *st, struct expr *e,
         return;
     }
     ex(c, st, e);
+    forget(c, st);
     *t = st_copy(c, st);
     *f = st_copy(c, st);
+    refine(c, t, e, 1);
+    refine(c, f, e, 0);
 }
 
 static void ex(struct ctx *c, struct state *st, struct expr *e)
@@ -354,13 +506,40 @@ static void ex(struct ctx *c, struct state *st, struct expr *e)
             return;
         break;
     case EXPR_ADDR:
+        /* &p->m and &a[i] compute an address: nothing is read through
+         * the pointer (offsetof's idiom is `&((T *)0)->m`) */
+        if (c->nullmode) {
+            struct expr *r = e->rhs;
+            while (r && (r->kind == EXPR_MEMBER || r->kind == EXPR_DEREF))
+                r = r->kind == EXPR_MEMBER ? r->lhs : r->rhs;
+            if (r && r != e->rhs)
+                ex(c, st, r);
+        }
         return;                         /* the slot is untracked already */
+    case EXPR_DEREF:
+        if (c->nullmode) {
+            ex(c, st, e->rhs);
+            deref(c, st, e->rhs, e->ty && e->ty->is_volatile);
+            return;
+        }
+        break;
+    case EXPR_MEMBER:
+        if (c->nullmode && e->is_arrow) {
+            ex(c, st, e->lhs);
+            deref(c, st, e->lhs, e->lhs && e->lhs->ty &&
+                  e->lhs->ty->pointee && e->lhs->ty->pointee->is_volatile);
+            return;
+        }
+        break;
     case EXPR_ASSIGN:
         ex(c, st, e->rhs);
-        if (slot_of(c, e->lhs) >= 0)
+        if (slot_of(c, e->lhs) >= 0) {
             write_var(c, st, e->lhs);
-        else
+            if (c->nullmode)
+                st->v[slot_of(c, e->lhs)] = (unsigned char)null_of(c, st, e->rhs);
+        } else {
             ex(c, st, e->lhs);          /* *p = , a.b = : the base is read */
+        }
         return;
     case EXPR_COMPOUND:                 /* x op= y reads x, then writes it */
         ex(c, st, e->lhs);
@@ -460,6 +639,9 @@ static void loop_body(struct ctx *c, struct state *st, struct stmt *body,
         if (pass == 0)
             c->quiet++;
         struct state cur = st_copy(c, st);
+        forget(c, &cur);                /* the loop's test is a decision */
+        if (!at_least_once && cond)
+            refine(c, &cur, cond, 1);   /* the body runs where it held */
         stm(c, &cur, body);
         st_join(c, &cur, &t.cont);
         ex(c, &cur, step);
@@ -517,7 +699,7 @@ static void stm(struct ctx *c, struct state *st, struct stmt *s)
         switch (s->kind) {
         case STMT_DECL:
             if (s->var_index >= 0 && s->var_index < c->nvars &&
-                c->track[s->var_index]) {
+                c->track[s->var_index] && !c->nullmode) {
                 if (s->expr || s->ninits)
                     st->v[s->var_index] = U_YES;
                 else
@@ -526,6 +708,10 @@ static void stm(struct ctx *c, struct state *st, struct stmt *s)
             ex(c, st, s->expr);
             for (int i = 0; i < s->ninits; i++)
                 ex(c, st, s->inits[i].e);
+            if (c->nullmode && s->var_index >= 0 &&
+                s->var_index < c->nvars && c->track[s->var_index])
+                st->v[s->var_index] = (unsigned char)
+                    (s->expr ? null_of(c, st, s->expr) : NL_UNK);
             break;
         case STMT_EXPR:
             ex(c, st, s->expr);
@@ -563,6 +749,7 @@ static void stm(struct ctx *c, struct state *st, struct stmt *s)
             break;
         case STMT_SWITCH: {
             ex(c, st, s->cond);
+            forget(c, st);
             struct state head = st_copy(c, st);
             struct target t;
             t.brk = st_new(c, 0);
@@ -624,11 +811,16 @@ static void stm(struct ctx *c, struct state *st, struct stmt *s)
     }
 }
 
+static void null_check(const char *file, struct func *f,
+                       const struct uninit_var *vars, int nvars);
+
 void uninit_check(const char *file, struct func *f,
                   const struct uninit_var *vars, int nvars)
 {
     if (!f->body || nvars <= 0)
         return;
+    if (diag_warning_enabled("null-dereference"))
+        null_check(file, f, vars, nvars);
     if (!diag_warning_enabled("uninitialized") &&
         !diag_warning_enabled("maybe-uninitialized"))
         return;
@@ -660,6 +852,35 @@ void uninit_check(const char *file, struct func *f,
             st.v[i] = U_YES;
     stm(&c, &st, f->body);
     st_free(&st);
+    free(c.track);
+    free(c.warned);
+}
+
+/* -Wnull-dereference: the same walk in nullmode, over every pointer slot
+ * -- parameters too, which arrive unknown -- that nothing takes the
+ * address of. */
+static void null_check(const char *file, struct func *f,
+                       const struct uninit_var *vars, int nvars)
+{
+    struct ctx c;
+    memset(&c, 0, sizeof c);
+    c.file = file;
+    c.vars = vars;
+    c.nvars = nvars;
+    c.f = f;
+    c.nullmode = 1;
+    c.track = xmalloc((size_t)nvars);
+    c.warned = xcalloc((size_t)nvars, 1);
+    for (int i = 0; i < nvars; i++)
+        c.track[i] = (unsigned char)(!vars[i].is_static && !ours(vars[i].name) &&
+                                     vars[i].ty && vars[i].ty->kind == TY_PTR);
+    int off = 0;
+    scan_stmt(&c, f->body, &off);
+    if (!off) {
+        struct state st = st_new(&c, 1);   /* NL_UNK everywhere */
+        stm(&c, &st, f->body);
+        st_free(&st);
+    }
     free(c.track);
     free(c.warned);
 }

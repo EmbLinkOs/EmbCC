@@ -1051,6 +1051,19 @@ int target_thumb_v81(void)
 void target_set_thumb_mve(int level) { g_thumb_mve = level; }
 int target_thumb_mve(void) { return target_thumb_v81() ? g_thumb_mve : 0; }
 int target_thumb_arch(void) { return g_thumb_arch; }
+int target_strict_align(void)
+{
+    switch (g_arch) {
+    case TARGET_THUMB:
+        return !target_arm_a32() &&
+               (g_thumb_arch == 6 || target_thumb_v8m_base());
+    case TARGET_XTENSA: case TARGET_MIPS32: case TARGET_MIPS64:
+    case TARGET_SPARC32: case TARGET_TRICORE:
+        return 1;
+    default:
+        return 0;
+    }
+}
 int target_object_align(int is_array, long size, int align)
 {
     if (g_arch == TARGET_THUMB && g_thumb_arch == 6 && is_array &&
