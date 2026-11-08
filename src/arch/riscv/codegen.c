@@ -269,6 +269,7 @@ struct rv_fn {
      * the first (rv_split_frame): by frame - split, the saves made at
      * small offsets from there, then by split. 0: one step. */
     long split;
+    long tfa_low;        /* tfa placed low (layout), or -1 */
     int cfi_split_end;   /* -g: where the first step ends, or -1 */
     long scratch_at;     /* where fn->scratch_bytes begins */
     long byref_at;       /* where the by-reference argument copies go */
@@ -1282,6 +1283,16 @@ static void layout(struct rv_fn *F)
 
     F->byref_at = off;
     off += byref_area(F);
+    /* RV32's long double operands first of the frame's own: every helper
+     * call copies each operand into these 48 bytes, four lw/sw pairs a
+     * side, and below 252 bytes from sp each is a two-byte c.lwsp or
+     * c.swsp. EMBCC_RV_TFAHIGH=1: where they were, after the slots. */
+    F->tfa_low = -1;
+    if (F->xlen == 32 && F->w16 && !getenv("EMBCC_RV_TFAHIGH")) {
+        off = (off + 15) & ~15L;
+        F->tfa = F->tfa_low = off;
+        off += 48;
+    }
 
     F->slot = xmalloc((size_t)(fn->nvregs ? fn->nvregs : 1) * sizeof *F->slot);
     for (int v = 0; v < fn->nvregs; v++)
@@ -1415,12 +1426,15 @@ static void layout(struct rv_fn *F)
         F->fsave_at = off;
         off += (long)F->nfsave * 8;
     }
-    /* RV32's long double helpers' by-reference operands (gen_ld32) */
-    F->tfa = -1;
-    if (F->xlen == 32 && F->w16) {
-        off = (off + 15) & ~15L;
-        F->tfa = off;
-        off += 48;
+    /* RV32's long double helpers' by-reference operands (gen_ld32):
+     * placed with the outgoing area below (rv_tfa_low), else here */
+    if (F->tfa_low < 0) {
+        F->tfa = -1;
+        if (F->xlen == 32 && F->w16) {
+            off = (off + 15) & ~15L;
+            F->tfa = off;
+            off += 48;
+        }
     }
     F->scratch_at = (off + 15) & ~15L;
     off = F->scratch_at + fn->scratch_bytes;
@@ -4333,6 +4347,51 @@ static void tf_operand(struct rv_fn *F, int v, long at, int reg)
     addr_sp(F, reg, F->tfa + at);
 }
 
+/* Is v a temp this instruction (n) reads for the last time, made earlier
+ * in the same block? Then its slot holds nothing anyone reads after the
+ * call, and the helper may have it -- no copy. One read in all, and its
+ * one definition before n with no label between: in a loop each read
+ * follows its own definition, so a slot the helper wrote is never read
+ * again. Not when the slot is `x` or `y` (the result's, the other
+ * operand's): the helper's arguments are its own objects, and two that
+ * shared memory would see each other's writes. */
+static int tf_dead_temp(struct rv_fn *F, int n, int v, long x, long y)
+{
+    const struct ir_func *fn = F->fn;
+    if (!F->usecnt || v < fn->nvars || v >= fn->nvregs ||
+        F->usecnt[v] != 1 || F->slot[v] < 0 || getenv("EMBCC_RV_TFCOPY"))
+        return 0;
+    long s = F->slot[v];
+    if (s == x || s == y)
+        return 0;
+    int defs = 0, before = 0;
+    for (int k = 0; k < fn->nins; k++)
+        if (ra_ins_def(&fn->ins[k]) == v)
+            defs++;
+    for (int k = n - 1; k >= 0; k--) {
+        if (fn->ins[k].op == IR_LABEL)
+            break;
+        if (ra_ins_def(&fn->ins[k]) == v) {
+            before = 1;
+            break;
+        }
+    }
+    return defs == 1 && before;
+}
+
+/* tf_operand, or the operand's own slot when nothing reads it after
+ * (tf_dead_temp): four lw/sw pairs fewer for each such operand. */
+static void tf_operand_n(struct rv_fn *F, int n, int v, long at, int reg,
+                         long x, long y)
+{
+    need16(F, v);
+    if (tf_dead_temp(F, n, v, x, y)) {
+        addr_sp(F, reg, sslot(F, v));
+        return;
+    }
+    tf_operand(F, v, at, reg);
+}
+
 static void gen_ld32(struct rv_fn *F, struct ir_ins *i)
 {
     struct code *t = F->t;
@@ -4396,17 +4455,38 @@ static void gen_ld32(struct rv_fn *F, struct ir_ins *i)
     }
     if (i->flt && (i->op == IR_ADD || i->op == IR_SUB || i->op == IR_MUL ||
                    i->op == IR_DIV)) {
-        tf_operand(F, i->a, 0, RV_A1);
-        tf_operand(F, i->b, 16, RV_A2);
-        addr_sp(F, RV_A0, tf_result(F, i->dst));
+        {
+            int n = (int)(i - F->fn->ins);
+            long r = tf_result(F, i->dst);
+            long sa = i->a >= 0 ? F->slot[i->a] : -2;
+            long sb = i->b >= 0 ? F->slot[i->b] : -2;
+            if (i->a == i->b) {                   /* a copy each, distinct */
+                tf_operand(F, i->a, 0, RV_A1);
+                tf_operand(F, i->b, 16, RV_A2);
+            } else {
+                tf_operand_n(F, n, i->a, 0, RV_A1, r, sb);
+                tf_operand_n(F, n, i->b, 16, RV_A2, r, sa);
+            }
+            addr_sp(F, RV_A0, r);
+        }
         call_helper(F, i->op == IR_ADD ? "__addtf3"
                        : i->op == IR_SUB ? "__subtf3"
                        : i->op == IR_MUL ? "__multf3" : "__divtf3");
         return;
     }
     if (i->flt && i->op == IR_CMP) {
-        tf_operand(F, i->a, 0, RV_A0);
-        tf_operand(F, i->b, 16, RV_A1);
+        {
+            int n = (int)(i - F->fn->ins);
+            long sa = i->a >= 0 ? F->slot[i->a] : -2;
+            long sb = i->b >= 0 ? F->slot[i->b] : -2;
+            if (i->a == i->b) {
+                tf_operand(F, i->a, 0, RV_A0);
+                tf_operand(F, i->b, 16, RV_A1);
+            } else {
+                tf_operand_n(F, n, i->a, 0, RV_A0, -2, sb);
+                tf_operand_n(F, n, i->b, 16, RV_A1, -2, sa);
+            }
+        }
         call_helper(F, tf_cmp_name(i->pred));
         {
             int d = wreg(F, i->dst, ACC);
@@ -4445,7 +4525,7 @@ static void gen_ld32(struct rv_fn *F, struct ir_ins *i)
         if (sw == 16) {
             /* from long double: the operand by reference in a0, the
              * result in a0 (a pair at eight bytes) */
-            tf_operand(F, i->a, 0, RV_A0);
+            tf_operand_n(F, (int)(i - F->fn->ins), i->a, 0, RV_A0, -2, -2);
             if (i->op == IR_F2F)
                 name = dw == 8 ? "__trunctfdf2" : "__trunctfsf2";
             else
