@@ -101,6 +101,9 @@ struct xt_fn {
      * kval[v] (an argument already extended needs no extui), or NULL */
     char *kdef;
     long *kval;
+    /* per vreg: what its one definition already extended it from -- a
+     * narrow load or an extension: size * 2 + sign, 0 for nothing known */
+    unsigned char *kext;
     int skip_next;       /* the instruction after this one is already out */
     int keep_vars;
     struct ir_func *fn;
@@ -2108,6 +2111,19 @@ static void gen_call(struct xt_fn *F, int n)
                 if (kv >= lo && kv <= hi)
                     continue;
             }
+            /* ...and a narrow load or extension that already made it:
+             * `trace(t->prio)` from l8ui was extended again */
+            if (F->kext && a->vreg >= 0 && a->vreg < F->fn->nvregs &&
+                F->kext[a->vreg] != 0 && F->kext[a->vreg] != 255) {
+                int ks = F->kext[a->vreg] / 2, kg = F->kext[a->vreg] & 1;
+                int sg = a->ty ? ty_signed_int(a->ty) : 1;
+                /* zero-extended from ks bytes: in range for an unsigned
+                 * argument as wide, or any argument wider; sign-extended:
+                 * for a signed argument at least as wide */
+                if ((!kg && ks <= a->size && (!sg || ks < a->size)) ||
+                    (kg && sg && ks <= a->size))
+                    continue;
+            }
             ext_reg(F, OUT_ARG(pc->reg), OUT_ARG(pc->reg), a->size,
                     a->ty ? ty_signed_int(a->ty) : 1);
         }
@@ -3586,6 +3602,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct xt_sites *st,
             F.usecnt = xmalloc((size_t)fn->nvregs * sizeof *F.usecnt);
             F.kdef = xcalloc((size_t)fn->nvregs, 1);
             F.kval = xcalloc((size_t)fn->nvregs, sizeof *F.kval);
+            F.kext = xcalloc((size_t)fn->nvregs, 1);
             for (int q = 0; q < fn->nins; q++) {
                 const struct ir_ins *in = &fn->ins[q];
                 int dv = in->dst;
@@ -3598,6 +3615,13 @@ static void gen_func(struct ir_func *fn, struct code *t, struct xt_sites *st,
                 } else {
                     F.kdef[dv] = 2;      /* written twice, or not a constant */
                 }
+                if (F.kext[dv] == 0 && !in->flt && in->w == 4 &&
+                    (in->op == IR_LOAD || in->op == IR_EXT) &&
+                    (in->size == 1 || in->size == 2) && F.kdef[dv] == 2 &&
+                    !(in->op == IR_LOAD && in->sign && in->size == 1))
+                    F.kext[dv] = (unsigned char)(in->size * 2 + !!in->sign);
+                else
+                    F.kext[dv] = 255;     /* written twice, or not one */
             }
             ra_count_vreg_uses(fn, F.usecnt);
         }
@@ -3762,6 +3786,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct xt_sites *st,
     free(F.usecnt);
     free(F.kdef);
     free(F.kval);
+    free(F.kext);
     free(F.slot);
     cg_note_labels(fn, F.label_off);
     free(F.label_off);
