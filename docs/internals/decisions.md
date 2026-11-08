@@ -523,8 +523,10 @@ r4-r11 and clear the rest before BLXNS, and `<arm_cmse.h>` provides the
 TT intrinsics and the pointer checks. `embld` makes the secure gateway
 veneers from the `__acle_se_` symbols, writes the import library, and
 adds a long-branch veneer for a Thumb call to an absolute symbol out of
-reach -- the first veneers it makes. The floating-point state is not
-handled: `-mcmse` is refused with an FPU.
+reach -- the first veneers it makes. With an FPU (since #184), an entry
+function also clears s0-s15 but its result's and FPSCR's flags where a
+Secure FP context is active, and a call carries FP arguments and the
+result across VLSTM/VLLDM -- clang's sequences, checked on the board.
 
 **Why.** The security extension is useless without the linker half, and
 both halves have exactly one correct shape, which clang and GNU ld

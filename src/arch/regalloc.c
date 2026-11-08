@@ -2807,3 +2807,12 @@ int ra_fold_memoff(struct ir_func *fn, long lo, long hi, int w_addr,
     free(ahead); free(anext);
     return changed;
 }
+
+unsigned long ra_asm_clobbers(const struct ir_func *fn)
+{
+    unsigned long m = 0;
+    for (int n = 0; n < fn->nins; n++)
+        if (fn->ins[n].op == IR_ASM && fn->ins[n].asm_ir)
+            m |= fn->ins[n].asm_ir->clob | fn->ins[n].asm_ir->saves;
+    return m;
+}

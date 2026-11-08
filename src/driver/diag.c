@@ -732,6 +732,14 @@ static struct warn_opt g_warns[] = {
     { "switch-default",       0,  0,    0 },
     /* a cast that drops const or volatile from what a pointer points at */
     { "cast-qual",            0,  0,    0 },
+    /* a pointer cast to a type with stricter alignment, on a target
+     * whose misaligned word access traps (target_strict_align); with
+     * -Wcast-align=strict (cast-align-strict) on every target */
+    { "cast-align",           0,  0,    0 },
+    /* a pointer dereferenced where it is null on every path, or on some
+     * (src/sema/uninit.c's nullmode); not in -Wall, as in GCC */
+    { "null-dereference",     0,  0,    0 },
+    { "cast-align-strict",    0,  0,    0 },
     /* a float quietly widened to double: on a single-precision FPU
      * (Cortex-M4F) that is a call to a soft-float helper */
     { "double-promotion",     0,  0,    0 },
@@ -1087,6 +1095,9 @@ static const struct { const char *name, *implied, *what; } g_warn_doc[] = {
     { "address", NULL, "a function name tested in an `if` condition, or compared with a null pointer constant" },
     { "arith-conversion", NULL, "as `--warn=conversion`, also for arithmetic whose operands each fit the target type" },
     { "attributes", NULL, "an attribute EmbCC does not know, or one it accepts but does not implement" },
+    { "cast-align", NULL, "a pointer cast to a type with a stricter alignment (`(int *)` of a `char *`) on a target where a misaligned access traps: ARMv6-M, v8-M Baseline, Xtensa, MIPS, SPARC, TriCore" },
+    { "cast-align-strict", NULL, "as `--warn=cast-align`, on every target (`-Wcast-align=strict`)" },
+    { "null-dereference", NULL, "a pointer dereferenced where it is null on every path (`int *p = 0; *p`), or on some (`p = c ? q : 0; *p`); not a volatile access" },
     { "cast-qual", NULL, "a cast that removes `const` or `volatile` from the type a pointer points to" },
     { "conversion", NULL, "an implicit conversion that may change an integer's value, or an integer converted to a floating type that cannot hold all its values" },
     { "coverage-mismatch", NULL, "`-fprofile-use` and a function that is not the one the profile was taken from: its source or its options changed; its profile is ignored" },

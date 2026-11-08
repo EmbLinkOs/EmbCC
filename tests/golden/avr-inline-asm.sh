@@ -39,9 +39,23 @@ refuses "clobbering the frame pointer" "frame pointer" \
     'void f(void) { __asm__ volatile("clr r28" ::: "r28"); }'
 refuses "naming the frame pointer" "frame pointer" \
     'void f(void) { __asm__ volatile("mov r28, r18"); }'
-# A callee-saved register: EmbCC saves nothing around an asm.
-refuses "clobbering a callee-saved register" "callee-saved" \
-    'void f(void) { __asm__ volatile("clr r5" ::: "r5"); }'
+# A callee-saved register is the function's to save, as avr-gcc saves
+# it: clobbered (r5) or named in the template (r16), it is pushed and
+# popped -- r5 with r4, the pair the prologue saves.
+printf 'void f(void) { __asm__ volatile("clr r5" ::: "r5"); }\nvoid g(void) { __asm__ volatile("clr r16"); }\n' > "$out/cs.c"
+"$EMBCC" --target=avr -O2 -c "$out/cs.c" -o "$out/cs.o" 2> "$out/cs.err" || {
+    echo "a callee-saved clobber does not compile:"; cat "$out/cs.err"; exit 1; }
+# by their encodings, which every llvm-objdump agrees on (an older one
+# prints push and pop as <unknown>): push Rr is 1001 001r rrrr 1111 and
+# pop 1001 000r rrrr 1111, low byte first -- r5 5f 92 / 5f 90, r16 0f 93
+# / 0f 91
+llvm-objcopy -O binary --only-section=.text "$out/cs.o" "$out/cs.bin"
+od -An -tx1 -v "$out/cs.bin" | tr -s ' \n' ' ' > "$out/cs.hex"
+for rp in "r5:5f 92:5f 90" "r16:0f 93:0f 91"; do
+    r=${rp%%:*} pp=${rp#*:}; pu=${pp%%:*} po=${pp#*:}
+    grep -q "$pu" "$out/cs.hex" && grep -q "$po" "$out/cs.hex" || {
+        echo "the asm's $r is not saved:"; cat "$out/cs.hex"; exit 1; }
+done
 # An unknown instruction reaches the assembler's refusal, not a guess.
 refuses "an instruction that does not exist" "not an AVR instruction" \
     'void f(void) { __asm__ volatile("frobnicate r18, r19"); }'

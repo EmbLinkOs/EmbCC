@@ -64,7 +64,9 @@ placed at their addresses on EmbSim's bus.
 ## The boards
 
 Each board has the memory and UART of QEMU's model of it, so an image
-built for QEMU runs unchanged.
+built for QEMU runs unchanged; `mps2-an519`, which QEMU does not have,
+has those of its `mps2-an505`, so an image built for that board's
+Cortex-M33 runs on a Cortex-M23.
 
 | Board | Core | Memory | UART |
 |---|---|---|---|
@@ -72,6 +74,7 @@ built for QEMU runs unchanged.
 | `mps2-an385` | Cortex-M3 | 4 MiB at 0, 4 MiB at `0x20000000`, 16 MiB at `0x60000000` | CMSDK at `0x40004000` |
 | `mps2-an386` | Cortex-M4 with FPv4-SP | as `mps2-an385` | CMSDK |
 | `mps2-an500` | Cortex-M7 with FPv5 (double) | as `mps2-an385` | CMSDK |
+| `mps2-an519` | Cortex-M23 (ARMv8-M Baseline; no TrustZone: the core stays Secure) | 4 MiB at `0x10000000` (and at 0, where the vector table is read), 4 MiB at `0x28000000` and at `0x38000000` | CMSDK at `0x40200000` |
 | `microbit` | Cortex-M0 | 256 KiB flash at 0, 16 KiB SRAM at `0x20000000` | nRF51 at `0x40002000` |
 | `stm32f405` | Cortex-M4 with FPv4-SP | 1 MiB flash at `0x08000000` (and at 0), 128 KiB SRAM at `0x20000000`, 64 KiB CCM at `0x10000000` | the USARTs of its SVD ([below](#the-stm32f405)) |
 | `bluepill` | STM32F103C8: Cortex-M3 | 64 KiB flash at `0x08000000` (and at 0), 20 KiB SRAM at `0x20000000` | the USARTs of ST's SVD ([below](#the-blue-pill-stm32f103c8)), and the board's LED |
@@ -105,7 +108,8 @@ memory where the part has it; a 64-pin part has the ports and pins of
 its EDC or ATDF, so a test that drives RA0 needs a 100-pin one.
 
 - `--cpu` runs another core on the board: `cortex-m0`, `cortex-m0plus`,
-  `cortex-m3`, `cortex-m4` or `cortex-m7` on the Cortex-M boards (the
+  `cortex-m23`, `cortex-m3`, `cortex-m4` or `cortex-m7` on the Cortex-M
+  boards (the
   Pico's is `cortex-m0plus`); `rv32`
   or `rv64` on `virt`, which otherwise takes the image's width (an
   ELFCLASS64 image is RV64); `atmega328p` on `uno`; `24kc` on `malta`;

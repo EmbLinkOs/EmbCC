@@ -349,6 +349,7 @@ GCC flags EmbCC reads, either because they change nothing here or so as to refus
 | `-Wa,*` | --assembler-arg= (comma-separated) |
 | `-Werror-implicit-function-declaration` | --error=implicit-function-declaration |
 | `-Wformat=*` | the format warnings' level |
+| `-Wcast-align=strict` | --warn=cast-align-strict |
 | `-fdiagnostics-color` | --color=always |
 | `-fno-diagnostics-color` | --color=never |
 | `-fdiagnostics-parseable-fixits` | fix-its for an IDE to apply |

@@ -222,10 +222,16 @@ refc() {            # refc WHAT PATTERN SOURCE
     grep -q -- "$2" "$out/bad.err" || {
         echo "$1 was refused, but not by name:"; cat "$out/bad.err"; exit 1; }
 }
-refc "a callee-saved register in a template" "callee-saved register '\$s0'" \
-    'void f(void){ __asm__ volatile("move $s0, $zero"); }'
-refc "a callee-saved clobber" "clobbers callee-saved register" \
-    'void f(void){ __asm__ volatile("nop" ::: "$fp"); }'
+# a callee-saved register named in a template, or clobbered, is the
+# function's to save, as GCC saves it
+printf 'void f(void){ __asm__ volatile("move $s0, $zero"); }\nvoid g(void){ __asm__ volatile("nop" ::: "$fp"); }\n' > "$out/cs.c"
+"$EMBCC" --target=$T -O2 -c "$out/cs.c" -o "$out/cs.o" 2> "$out/cs.err" || {
+    echo "a callee-saved register in an asm does not compile:"; cat "$out/cs.err"; exit 1; }
+llvm-objdump -d "$out/cs.o" > "$out/cs.s"
+for r in s0 fp; do
+    grep -q "st\.d[[:space:]]*\$$r, \$sp" "$out/cs.s" && grep -q "ld\.d[[:space:]]*\$$r, \$sp" "$out/cs.s" || {
+        echo "the asm's \$$r is not saved:"; cat "$out/cs.s"; exit 1; }
+done
 refc "a reserved register" "which the psABI reserves" \
     'void f(void){ __asm__ volatile("move $r21, $zero"); }'
 refc "x86's constraint letters" 'is not valid for LoongArch' \

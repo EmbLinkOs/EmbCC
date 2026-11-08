@@ -112,7 +112,13 @@ Refused on 20 of the 25 targets.
 
 ## `_Thread_local`
 
-Compiles on every target.
+Refused on 12 of the 25 targets.
+
+- Refused on `avr`, `mipsel-none-elf`, `mips-none-elf`, `mips64el-none-elf`, `mips64-none-elf`, `loongarch64-unknown-elf`, `xtensa-none-elf`, `tricore-none-elf`, `rx-none-elf`, `powerpc-none-eabi`, `sparc-none-elf`, `m68k-none-elf`:
+
+  ```text
+  't' is thread-local, which TARGET has no thread pointer for: EmbCC would make it one object every thread shares (_Thread_local is supported on ARM, RISC-V, AArch64 and x86-64)
+  ```
 
 ## variable-length arrays
 
@@ -298,18 +304,18 @@ Refused on 6 of the 25 targets.
 | `armv7a-none-eabi` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | yes | yes |
 | `riscv32-unknown-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | yes | yes |
 | `riscv64-unknown-elf` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | yes | yes |
-| `avr` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | no |
-| `mipsel-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | yes | yes |
-| `mips-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | yes | yes |
-| `mips64el-none-elf` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | yes | yes |
-| `mips64-none-elf` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | yes | yes |
-| `loongarch64-unknown-elf` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | yes | no | no | yes | yes | yes | yes | no | yes | no |
-| `xtensa-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | yes | no | no | yes | yes | yes | yes | yes | yes | yes |
-| `tricore-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | yes | yes |
-| `rx-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | no |
-| `powerpc-none-eabi` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | yes | no | no | yes | yes | yes | yes | no | yes | no |
-| `sparc-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | no | yes | yes | yes | no | no | yes | yes | yes | yes | no | yes | no |
-| `m68k-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | no |
+| `avr` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | no | yes | yes | yes | no | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | no |
+| `mipsel-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | no | yes | yes | yes | no | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | yes | yes |
+| `mips-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | no | yes | yes | yes | no | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | yes | yes |
+| `mips64el-none-elf` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | no | yes | yes | yes | no | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | yes | yes |
+| `mips64-none-elf` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | no | yes | yes | yes | no | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | yes | yes |
+| `loongarch64-unknown-elf` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | no | yes | yes | yes | no | yes | yes | yes | no | no | yes | yes | yes | yes | no | yes | no |
+| `xtensa-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | no | yes | yes | yes | no | yes | yes | yes | no | no | yes | yes | yes | yes | yes | yes | yes |
+| `tricore-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | no | yes | yes | yes | no | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | yes | yes |
+| `rx-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | no | yes | yes | yes | no | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | no |
+| `powerpc-none-eabi` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | no | yes | yes | yes | no | yes | yes | yes | no | no | yes | yes | yes | yes | no | yes | no |
+| `sparc-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | no | yes | yes | yes | no | yes | yes | yes | no | no | yes | yes | yes | yes | no | yes | no |
+| `m68k-none-elf` | no | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | no | yes | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | no | yes | no |
 | `x86_64-elf` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | no | no | no | yes | yes | yes | yes | yes | yes |
 | `aarch64-elf` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | no | no | yes | yes | yes | yes | yes | yes | yes |
 | `x86_64-linux-gnu` | yes | yes | yes | yes | yes | yes | no | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | no | no | no | yes | yes | yes | yes | yes | yes |

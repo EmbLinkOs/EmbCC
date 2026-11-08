@@ -23,6 +23,11 @@ struct cpu_model {
     const char *name;
     int arch, dsp, fpu;
     u32 cpuid;
+    /* ARMv8-M Baseline (the Cortex-M23): ARCH_V6M's exception model and
+     * instructions, and the ones Baseline adds -- CBZ/CBNZ, B.W, MOVW/MOVT,
+     * SDIV/UDIV, the exclusives and CLREX, load-acquire/store-release --
+     * and an unprivileged Thread mode */
+    int v8mb;
 };
 
 /* exception numbers */

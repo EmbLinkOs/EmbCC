@@ -161,7 +161,10 @@ if [ $selftest = 1 ]; then
     exit $bad
 fi
 
-for seed in $(seq "$1" "$2"); do
+# a counter, not seq: macOS seq writes 1064066492 as 1.06407e+09
+seed=$(( $1 - 1 ))
+while [ "$seed" -lt "$2" ]; do
+    seed=$((seed + 1))
     python3 "$F/gen$gen.py" "$seed" > "$W/p.c"
     ck=$(host_ck "$W/p.c" "") || { echo "seed $seed: host build failed"; continue; }
     ckp=$(host_ck "$W/p.c" "-ftrivial-auto-var-init=pattern")

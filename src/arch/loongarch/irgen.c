@@ -70,7 +70,7 @@ static const int la_asm_pool[] = {
     LA_A0, LA_A1, LA_A2, LA_A3, LA_A4, LA_A5, LA_A6, LA_A7
 };
 
-static int la_callee_saved_reg(int r) { return r >= LA_FP && r <= LA_S8; }
+
 
 /* A register the template NAMES outright is off limits to allocation, and
  * one that is callee-saved is refused: EmbCC saves nothing around an asm,
@@ -87,11 +87,7 @@ static void la_mark_template_regs(const char *file, int line,
             n++;
         int r = laasm_gpr(p, n);
         if (r >= 0) {
-            if (la_callee_saved_reg(r))
-                diag_fatal(file, line,
-                           "LoongArch asm names callee-saved register "
-                           "'%.*s', which EmbCC does not save around an "
-                           "asm", n, p);
+            /* fp and s0-s8 are the function's to save (ra_asm_clobbers) */
             if (r == LA_TP || r == LA_R21)
                 diag_fatal(file, line,
                            "LoongArch asm names '%.*s', which the psABI "
@@ -225,10 +221,6 @@ void irg_asm_loongarch(struct ir_func *fn, struct stmt *s)
     }
     for (int i = 0; i < a->nclob; i++) {
         int r = laasm_gpr(a->clob[i], (int)strlen(a->clob[i]));
-        if (r >= 0 && la_callee_saved_reg(r))
-            diag_fatal(file, s->line, "LoongArch asm clobbers callee-saved "
-                                      "register '%s', which EmbCC does not "
-                                      "save around an asm", a->clob[i]);
         if (r >= 0)
             used[r] = 1;
     }

@@ -91,13 +91,35 @@ static int thread_arm_const(const struct ir_func *fn, const struct ir_ins *def,
     return 0;
 }
 
+/* A label and the branch on %t right after it. %t's only reader, or
+ * (shared) one of several: then an arm keeps its definition, for the
+ * other readers, and only its jump is threaded -- a list walk's `n =
+ * first ? first->next : NULL` read by the loop's test and its body. */
+static int thread_arm_const(const struct ir_func *fn, const struct ir_ins *def,
+                            const struct defs *d, long *v);
+
+/* An arm the loop below will change: any, for a merge the branch alone
+ * reads; for a shared one, a constant arm that jumps (one that falls in
+ * is left -- a label inserted for it would be deleted again unused, and
+ * the rounds would never settle). */
+static int thread_arm_used(const struct ir_func *fn, int k, int t, int L,
+                           const struct defs *d, const int *use)
+{
+    long kv;
+    if (!thread_arm(fn, k, t, L, d))
+        return 0;
+    return use[t] == 1 ||
+           (fn->ins[k + 1].op == IR_JMP && thread_arm_const(fn, &fn->ins[k], d, &kv));
+}
+
 static int thread_site(const struct ir_func *fn, int n, const int *use)
 {
     const struct ir_ins *lab = &fn->ins[n], *br = &fn->ins[n + 1];
     int t = br->a;
     return n + 2 < fn->nins && lab->op == IR_LABEL &&
            (br->op == IR_BRZ || br->op == IR_BRNZ) &&
-           t >= fn->nvars && t < fn->nvregs && use[t] == 1 && br->w <= 8;
+           t >= fn->nvars && t < fn->nvregs && use[t] >= 1 && br->w <= 8 &&
+           br->label != lab->label;
 }
 
 /* A branch on `%u = cmp ne %t, 0` is a branch on %t, and one on
@@ -150,6 +172,302 @@ static int branch_on_cmp0(struct ir_func *fn, const int *use,
     return changed;
 }
 
+/* ---- threading through a path -------------------------------------
+ *
+ * The shape above wants the branch right after its label. An RTOS's
+ * scheduler writes something in between:
+ *
+ *       bool runnable = cur != idle && thread_runnable(cur);
+ *       cpu.reschedule_pending = 0;        <- a store between
+ *       if (runnable) ...
+ *
+ * so an arm that knows the truth value (`%t = const 0`) still went
+ * through the store and the test. GCC copies the path. So does this:
+ * from an arm that sets a merged name to a constant, the straight-line
+ * code it goes on to -- through jumps and labels, up to PT_MAX_PATH
+ * instructions, no calls -- is evaluated with that constant, and when
+ * the first conditional branch on the way is decided, the path is
+ * copied after the arm, which then jumps to where the branch would
+ * have gone. The original path stays for the other arms.
+ *
+ * The copy keeps every name it defines, so each way on reads what the
+ * path would have left -- including a loop the path enters, whose back
+ * edge reads a name the path set once its original is gone (renaming a
+ * name "only the path reads" left that read with no definition:
+ * tests/exec/many-labels.c). What the copy defines and nothing reads
+ * goes to pass_deaddefs. */
+#define PT_MAX_PATH  6
+#define PT_SIZE_PATH 1
+#define PT_MAX_HOPS  6
+#define PT_MAX_ADDED 64
+
+static int pt_copyable(const struct ir_ins *i)
+{
+    if (i->op == IR_LOAD || i->op == IR_STORE || i->op == IR_STVAR)
+        return 1;
+    return is_pure(i->op) && i->op != IR_LABELADDR;
+}
+
+/* the value instruction i leaves, from what is known */
+static int pt_eval(const struct ir_ins *i, const char *kn, const long *kv,
+                   int nv, long *out)
+{
+    long A, B;
+    if (i->flt)
+        return 0;
+    if (i->op == IR_CONST) {
+        *out = norm(i->imm, i->w > 0 ? i->w : 4);
+        return 1;
+    }
+    if (i->a < 0 || i->a >= nv || !kn[i->a])
+        return 0;
+    A = kv[i->a];
+    switch (i->op) {
+    case IR_MOV:
+        *out = A;
+        return 1;
+    case IR_EXT:
+        *out = fold_ext(A, i->size, i->sign, i->w);
+        return 1;
+    case IR_ADD: case IR_SUB: case IR_AND: case IR_OR: case IR_XOR:
+    case IR_SHL: case IR_SHR: case IR_CMP:
+        if (i->w != 4 && i->w != 8)
+            return 0;
+        if (i->imm_b)
+            B = i->imm;
+        else if (i->b >= 0 && i->b < nv && kn[i->b])
+            B = kv[i->b];
+        else
+            return 0;
+        return fold_bin(i->op, A, B, i->w, i->sign, i->pred, out);
+    default:
+        return 0;
+    }
+}
+
+struct pt_arm {
+    int k, jumps;            /* the arm's definition, and whether a jmp follows */
+    int path[PT_MAX_PATH], np;
+    int br;                  /* the branch it decides */
+    int target;              /* the label it goes to (-1: the new one at br) */
+};
+
+static int thread_paths(struct ir_func *fn, const struct defs *d)
+{
+    int nv = fn->nvregs, nl = fn->nlabels, narm = 0, added = 0;
+    /* -Os: a copy no larger than the test and jump it saves. Measured
+     * over lib/libc at -Os (2026-11-08), limits 0 to 4: 1 is the
+     * smallest on Cortex-M4, RV32 and Xtensa, and smaller than no copy
+     * on AVR too; 2 already grows the 32-bit ones past no copy, and 4
+     * (which threads the RTOS scheduler's store) grows them 0.1%.
+     * EMBCC_NO_PATHTHREAD=1 turns path threading off. */
+    int pt_max = g_opt_size ? PT_SIZE_PATH : PT_MAX_PATH;
+    if (fn->neh || !nv || !nl)
+        return 0;
+    int *lpos = xmalloc((size_t)nl * sizeof *lpos);
+    for (int l = 0; l < nl; l++)
+        lpos[l] = -1;
+    for (int n = 0; n < fn->nins; n++)
+        if (fn->ins[n].op == IR_LABEL && fn->ins[n].label >= 0 &&
+            fn->ins[n].label < nl)
+            lpos[fn->ins[n].label] = n;
+    /* a loop's header: a label something after it branches back to. A
+     * path stops there -- an entry arm (`i = 0`) knows the first test,
+     * and going past it entered the loop in its body, which no loop pass
+     * then recognised (tests/golden/loopopt.sh: no rotation, no
+     * strength reduction) */
+    char *header = xcalloc((size_t)nl, 1);
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *in = &fn->ins[n];
+        if ((in->op == IR_JMP || in->op == IR_BRZ || in->op == IR_BRNZ) &&
+            in->label >= 0 && in->label < nl && lpos[in->label] >= 0 &&
+            lpos[in->label] < n)
+            header[in->label] = 1;
+    }
+    char *kn = xcalloc((size_t)nv, 1);
+    long *kv = xcalloc((size_t)nv, sizeof *kv);
+    /* the names that hold a local's address, or one computed from it: a
+     * copy defines its names a second time, and the passes that follow a
+     * local's accesses through the one definition of its address
+     * (pass_punfwd) then miss them -- the union init of
+     * tests/exec/gnu-union-cast.c was deleted as never read. None is
+     * copied. (A global's address is not followed that way.) */
+    char *isaddr = xcalloc((size_t)nv, 1);
+    for (int again = 1, guard = 0; again && guard < 16; guard++) {
+        again = 0;
+        for (int n = 0; n < fn->nins; n++) {
+            const struct ir_ins *in = &fn->ins[n];
+            int dv = def_target(in);
+            if (dv < fn->nvars || dv >= nv || isaddr[dv])
+                continue;
+            if (in->op == IR_ADDR ||
+                (is_pure(in->op) &&
+                 ((in->a >= 0 && in->a < nv && isaddr[in->a]) ||
+                  (!in->imm_b && in->b >= 0 && in->b < nv && isaddr[in->b])))) {
+                isaddr[dv] = 1;
+                again = 1;
+            }
+        }
+    }
+    int *newlab = xmalloc((size_t)fn->nins * sizeof *newlab);   /* after a branch */
+    for (int n = 0; n < fn->nins; n++)
+        newlab[n] = -1;
+    struct pt_arm *arms = xmalloc((size_t)fn->nins * sizeof *arms);
+    int *touched = xmalloc((size_t)(PT_MAX_PATH + 2) * sizeof *touched);
+
+    for (int k = 0; k + 1 < fn->nins && added < PT_MAX_ADDED; k++) {
+        const struct ir_ins *def = &fn->ins[k], *go = &fn->ins[k + 1];
+        int t = def->dst, p, hops = 0, nt = 0, ok = 0;
+        long val;
+        struct pt_arm a;
+        if (def->op != IR_CONST && def->op != IR_MOV)
+            continue;
+        if (t < fn->nvars || t >= nv || d->cnt[t] < 2 ||
+            !thread_arm_const(fn, def, d, &val))
+            continue;
+        /* from right after the arm: what follows it there is reached
+         * only through it, and is copied with the rest */
+        (void)go;
+        p = k + 1;
+        a.jumps = 0;
+        a.k = k;
+        a.np = 0;
+        kn[t] = 1;
+        kv[t] = norm(val, def->w > 0 ? def->w : 4);
+        touched[nt++] = t;
+        while (p < fn->nins) {
+            const struct ir_ins *i = &fn->ins[p];
+            if (i->op == IR_LABEL) {
+                if (i->label >= 0 && i->label < nl && header[i->label])
+                    break;
+                p++;
+                continue;
+            }
+            if (i->op == IR_JMP) {
+                /* forward only: through a loop's back edge, every round
+                 * would thread one more trip around it, for ever */
+                if (++hops > PT_MAX_HOPS || i->label < 0 || i->label >= nl ||
+                    lpos[i->label] <= p)
+                    break;
+                p = lpos[i->label] + 1;
+                continue;
+            }
+            if (i->op == IR_BRZ || i->op == IR_BRNZ) {
+                if (i->a >= 0 && i->a < nv && kn[i->a]) {
+                    unsigned long mask = i->w >= 8 ? ~0UL
+                                       : (1UL << (8 * (i->w > 0 ? i->w : 4))) - 1;
+                    int zero = ((unsigned long)kv[i->a] & mask) == 0;
+                    int taken = i->op == IR_BRZ ? zero : !zero;
+                    a.br = p;
+                    if (taken)
+                        a.target = i->label;
+                    else if (p + 1 < fn->nins && fn->ins[p + 1].op == IR_LABEL)
+                        a.target = fn->ins[p + 1].label;
+                    else if (p + 1 < fn->nins && fn->ins[p + 1].op == IR_JMP)
+                        a.target = fn->ins[p + 1].label;
+                    else
+                        a.target = -1;
+                    ok = 1;
+                }
+                break;
+            }
+            if (!pt_copyable(i) || a.np == pt_max || i->op == IR_ADDR ||
+                (def_target(i) >= 0 && def_target(i) < nv &&
+                 isaddr[def_target(i)]))
+                break;
+            a.path[a.np++] = p;
+            {
+                int dv = def_target(i);
+                long r;
+                if (dv >= 0 && dv < nv) {
+                    if (pt_eval(i, kn, kv, nv, &r)) {
+                        kn[dv] = 1;
+                        kv[dv] = r;
+                    } else {
+                        kn[dv] = 0;
+                    }
+                    if (nt < PT_MAX_PATH + 2)
+                        touched[nt++] = dv;
+                    else
+                        break;
+                }
+            }
+            p++;
+        }
+        for (int q = 0; q < nt; q++)
+            kn[touched[q]] = 0;
+        if (!ok)
+            continue;
+        if (a.target < 0) {
+            if (newlab[a.br] < 0)
+                newlab[a.br] = fn->nlabels++;
+            a.target = newlab[a.br];
+        }
+        arms[narm++] = a;
+        added += a.np + 1;
+    }
+
+    int changed = narm > 0;
+    if (changed) {
+        int *armat = xmalloc((size_t)fn->nins * sizeof *armat);
+        for (int n = 0; n < fn->nins; n++)
+            armat[n] = -1;
+        for (int q = 0; q < narm; q++)
+            armat[arms[q].k] = q;
+        struct ibuf nb = { 0, 0, 0 };
+        int *newpos = xmalloc((size_t)(fn->nins + 1) * sizeof *newpos);
+        int skip = -1;
+        for (int n = 0; n < fn->nins; n++) {
+            newpos[n] = nb.n;
+            if (n == skip)
+                continue;                        /* the arm's old jmp */
+            *ib_push(&nb) = fn->ins[n];
+            if (armat[n] >= 0) {
+                const struct pt_arm *a = &arms[armat[n]];
+                for (int q = 0; q < a->np; q++) {
+                    struct ir_ins c = fn->ins[a->path[q]];
+                    c.synth = 1;
+                    *ib_push(&nb) = c;
+                }
+                struct ir_ins j;
+                memset(&j, 0, sizeof j);
+                j.op = IR_JMP;
+                j.label = a->target;
+                j.dst = j.a = j.b = -1;
+                j.line = fn->ins[n].line;
+                j.col = fn->ins[n].col;
+                j.synth = 1;
+                *ib_push(&nb) = j;
+                if (a->jumps)
+                    skip = n + 1;
+            }
+            if (newlab[n] >= 0) {
+                struct ir_ins l;
+                memset(&l, 0, sizeof l);
+                l.op = IR_LABEL;
+                l.label = newlab[n];
+                l.dst = l.a = l.b = -1;
+                l.line = fn->ins[n].line;
+                l.col = fn->ins[n].col;
+                l.synth = 1;
+                *ib_push(&nb) = l;
+            }
+        }
+        newpos[fn->nins] = nb.n;
+        remap_scopes(fn, newpos, fn->nins);
+        free(newpos);
+        free(armat);
+        free(fn->ins);
+        fn->ins = nb.p; fn->nins = nb.n; fn->cap = nb.cap;
+        /* the arm's old way on, which only it reached */
+        drop_unreachable(fn);
+    }
+    free(lpos); free(kn); free(kv); free(newlab); free(arms); free(touched);
+    free(isaddr);
+    free(header);
+    return changed;
+}
+
 int pass_thread(struct ir_func *fn)
 {
     int changed = 0, nv = fn->nvregs;
@@ -177,7 +495,8 @@ int pass_thread(struct ir_func *fn)
                 nx->op == IR_JMP)
                 continue;
             for (int k = 0; k + 1 < fn->nins; k++)
-                if (thread_arm(fn, k, fn->ins[n + 1].a, fn->ins[n].label, &d)) {
+                if (thread_arm_used(fn, k, fn->ins[n + 1].a, fn->ins[n].label,
+                                    &d, use)) {
                     mark[n + 1] = 1;
                     need = 1;
                     break;
@@ -223,6 +542,20 @@ int pass_thread(struct ir_func *fn)
             long kv;
             if (!thread_arm(fn, k, t, L, &d))
                 continue;
+            if (use[t] != 1) {
+                /* shared: a constant arm that jumps goes on to where the
+                 * branch would send it, its definition kept */
+                if (go->op == IR_JMP && go->label == L &&
+                    thread_arm_const(fn, def, &d, &kv)) {
+                    unsigned long mask = br->w >= 8 ? ~0UL
+                                       : (1UL << (8 * (br->w > 0 ? br->w : 4))) - 1;
+                    int zero = ((unsigned long)kv & mask) == 0;
+                    int taken = br->op == IR_BRZ ? zero : !zero;
+                    go->label = taken ? Lx : Lafter;
+                    changed = 1;
+                }
+                continue;
+            }
             if (thread_arm_const(fn, def, &d, &kv)) {
                 unsigned long mask = br->w >= 8 ? ~0UL
                                    : (1UL << (8 * (br->w > 0 ? br->w : 4))) - 1;
@@ -250,6 +583,8 @@ int pass_thread(struct ir_func *fn)
             }
         }
     }
+    if (!changed && !getenv("EMBCC_NO_PATHTHREAD"))
+        changed = thread_paths(fn, &d);
     free(use);
     free(d.cnt); free(d.ins);
     return changed;
@@ -672,4 +1007,94 @@ int pass_brdom(struct ir_func *fn)
     }
     free(dead); free(order); free(l2b); free_cfg(bb, nbb); free_defs(&d);
     return changed;
+}
+
+/* ---- a comparison at each branch that tests it --------------------------
+ *
+ * Value numbering shares a comparison between two branches that test the
+ * same thing -- an RTOS's `cur != idle` at the top of the scheduler and
+ * again further down -- and the result then has two readers, so no
+ * backend can fuse it into either branch: it builds the 0/1, keeps it
+ * live, and tests it twice (on Xtensa, `movi 1; bne; movi 0; beqz`).
+ * GCC compares again at the second branch. So does this, last, where
+ * nothing will merge them back: a comparison read only by branches, of
+ * operands that cannot change (constants, or temps with one definition,
+ * which dominates the comparison and so every branch it reaches), is
+ * issued again right before each branch that does not follow it -- with
+ * ONE such branch too, which scheduling had moved a load in front of
+ * (RV32: `xor; seqz; lbu; beqz` where GCC has one bne): the original is
+ * then DCE's. Measured over lib/libc at -Os: smaller on AVR, Cortex-M4,
+ * RV32 and Xtensa.
+ * EMBCC_NO_CMPBRANCH=1 turns it off. */
+int pass_cmpbranch(struct ir_func *fn)
+{
+    int nv = fn->nvregs, N = fn->nins;
+    if (!N || !nv || getenv("EMBCC_NO_CMPBRANCH"))
+        return 0;
+    int *use = xcalloc((size_t)nv, sizeof *use);
+    int *bruse = xcalloc((size_t)nv, sizeof *bruse);
+    struct ucount uc = { use, nv };
+    struct defs d;
+    for (int n = 0; n < N; n++) {
+        const struct ir_ins *in = &fn->ins[n];
+        each_read(&fn->ins[n], count_cb, &uc);
+        if ((in->op == IR_BRZ || in->op == IR_BRNZ) && in->a >= 0 && in->a < nv)
+            bruse[in->a]++;
+    }
+    compute_defs(fn, &d);
+    /* the comparison to issue again before instruction m, or -1 */
+    int *again = xmalloc((size_t)N * sizeof *again);
+    int any = 0;
+    for (int m = 0; m < N; m++) {
+        const struct ir_ins *br = &fn->ins[m];
+        int x = br->a, c;
+        again[m] = -1;
+        if ((br->op != IR_BRZ && br->op != IR_BRNZ) || x < fn->nvars ||
+            x >= nv || d.cnt[x] != 1 || (c = d.ins[x]) < 0 || c + 1 == m ||
+            bruse[x] != use[x])
+            continue;
+        const struct ir_ins *cmp = &fn->ins[c];
+        if (cmp->op != IR_CMP || cmp->flt || cmp->vol)
+            continue;
+        int ok = 1;
+        int ops[2] = { cmp->a, cmp->imm_b ? -1 : cmp->b };
+        /* a temp, or a parameter, with its one definition (a parameter's
+         * is the call; a local is written by stores) */
+        for (int k = 0; k < 2 && ok; k++)
+            if (ops[k] >= 0)
+                ok = ops[k] < nv && d.cnt[ops[k]] == 1 &&
+                     (ops[k] >= fn->nvars || ops[k] < fn->nparams);
+        if (!ok)
+            continue;
+        again[m] = c;
+        any = 1;
+    }
+    if (any) {
+        struct ibuf nb = { 0, 0, 0 };
+        int *newpos = xmalloc((size_t)(N + 1) * sizeof *newpos);
+        for (int n = 0; n < N; n++) {
+            newpos[n] = nb.n;
+            if (again[n] >= 0) {
+                struct ir_ins c = fn->ins[again[n]];
+                c.dst = fn->nvregs++;
+                c.line = fn->ins[n].line;
+                c.col = fn->ins[n].col;
+                c.synth = 1;
+                *ib_push(&nb) = c;
+                struct ir_ins b = fn->ins[n];
+                b.a = c.dst;
+                *ib_push(&nb) = b;
+                continue;
+            }
+            *ib_push(&nb) = fn->ins[n];
+        }
+        newpos[N] = nb.n;
+        remap_scopes(fn, newpos, N);
+        free(newpos);
+        free(fn->ins);
+        fn->ins = nb.p; fn->nins = nb.n; fn->cap = nb.cap;
+    }
+    free(again); free(use); free(bruse);
+    free(d.cnt); free(d.ins);
+    return any;
 }

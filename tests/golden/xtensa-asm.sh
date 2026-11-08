@@ -29,7 +29,8 @@
 #  4. An instruction outside the vocabulary, an operand out of range, a
 #     density form, an inline template's call0, a0/a1 clobbers, a symbol
 #     in a template, and the directives that would change code are each
-#     refused by name.
+#     refused by name; a template's strings, data and alignments are
+#     assembled (an RTOS's layout probe).
 set -u
 echo "TEST-MARKER xtensa-asm"
 . "$(dirname "$0")/../lib.sh"
@@ -287,6 +288,44 @@ refc "a modifier" "modifier '%x' is not supported" \
     'int f(int x){ __asm__("nop # %x0" :: "r"(x)); return x; }'
 refc "a wide movi in a template" "a literal in an asm template" \
     'int f(void){ int r; __asm__("movi %0, 5000" : "=r"(r)); return r; }'
+# Directives in a template: the strings, data and alignments the other
+# targets' inline assemblers take -- an RTOS's layout probe writes
+# `.ascii "->EMB_PROBE x %c0 %c1"` and `.p2align 2` in a function, and
+# EmbCC refused both here ("not in the Xtensa vocabulary"). The text is
+# what Xtensa GCC puts in the object; a `;` inside the string does not
+# end the statement; `.word` is four bytes; a numeric label after them is
+# where they end (that template, with a label, is GNU-assembled whole).
+cat > "$out/dir.c" << 'EOF2'
+struct tcb { int a; long long b; char c; };
+void probe(void)
+{
+    __asm__ volatile("\n.ascii \"->EMB_PROBE tcb %c0 %c1\"\n.p2align 2\n"
+                     : : "i"(sizeof(struct tcb)), "i"(_Alignof(struct tcb)));
+}
+void semi(void) { __asm__ volatile(".ascii \"a;b#c\"\n.p2align 2"); }
+unsigned word(void) { __asm__ volatile("j 1f\n.word 0x12345678\n1:"); return 0; }
+EOF2
+"$EMBCC" --target=$T -O2 -c "$out/dir.c" -o "$out/dir.o" 2> "$out/dir.err" ||
+    { cat "$out/dir.err"; echo "a template's directives were refused"; exit 1; }
+strings "$out/dir.o" | grep -qx -- '->EMB_PROBE tcb 24 8' ||
+    { strings "$out/dir.o"; echo "the probe's text is not GCC's"; exit 1; }
+strings "$out/dir.o" | grep -q 'a;b#c' ||
+    { echo "a ';' inside .ascii ended the statement"; exit 1; }
+od -An -tx1 -v "$out/dir.o" | tr -s ' \n' ' ' | grep -q '78 56 34 12' ||
+    { echo ".word did not put its four bytes"; exit 1; }
+
+# ...and an alignment lands where the template does: after `entry` and a
+# nop (six bytes) and five of text, `.p2align 2` pads one byte and the
+# `.word` is on a word. The code generator copied the template's bytes
+# and dropped its alignments, so the word was at offset 11.
+printf 'void f(void) { __asm__ volatile("nop\\n.ascii \\"abcde\\"\\n.p2align 2\\n.word 0x11223344"); }\n' > "$out/al.c"
+"$EMBCC" --target=$T -O2 -c "$out/al.c" -o "$out/al.o" ||
+    { echo "a template's .p2align was refused"; exit 1; }
+llvm-objcopy -O binary --only-section=.text "$out/al.o" "$out/al.bin"
+od -An -tx1 -v "$out/al.bin" | tr -s ' \n' ' ' | grep -q '61 62 63 64 65 00 44 33 22 11' ||
+    { od -An -tx1 -v "$out/al.bin"; echo "the template's .p2align did not align its .word"; exit 1; }
+echo "a template's strings, data and alignments are assembled, aligned where it lands"
+
 refs() {            # refs WHAT PATTERN SOURCE: a .s file
     printf '%s\n' "$3" > "$out/bad.s"
     if "$EMBCC" --target=$T -c "$out/bad.s" -o /dev/null 2> "$out/bad.err"; then

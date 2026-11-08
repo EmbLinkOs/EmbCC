@@ -334,10 +334,17 @@ for c in tests/exec/*.c tests/exec/${TARGET%-elf}/*.c; do
             cc -c lib/rt/builtin-setjmp.c -o "$rtsj_host" || {
                 bad "$c" "lib/rt/builtin-setjmp.c does not build for the host" ""
                 continue; }
+            # and lib/rt's generic __atomic_load and friends, which an
+            # _Atomic object one instruction does not move calls
+            # (tests/exec/atomic-float-struct.c): libatomic's, which a host
+            # need not have
+            cc -c lib/rt/atomic-generic.c -o "$out_dir/rtag-host.o" || {
+                bad "$c" "lib/rt/atomic-generic.c does not build for the host" ""
+                continue; }
             rtsj_built=1
         fi
         if ! msg=$(cc -no-pie -Wl,-z,noexecstack -o "$exe" "$obj" \
-                       "$rtsj_host" -lm 2>&1); then
+                       "$rtsj_host" "$out_dir/rtag-host.o" -lm 2>&1); then
             bad "$c" "host link failed" "$msg"
             continue
         fi

@@ -43,16 +43,40 @@ typedef unsigned long long u64;
 /* ---- the interrupt mask, per architecture ------------------------------ */
 
 #if defined(__ARM_ARCH_PROFILE) && __ARM_ARCH_PROFILE == 'M'
-/* PRIMASK: 1 masks every interrupt of configurable priority */
+/* PRIMASK: 1 masks every interrupt of configurable priority -- but not in
+ * unprivileged Thread mode (an RTOS's task with CONTROL.nPRIV set), where
+ * CPSID and a write to PRIMASK are ignored and these would run
+ * unprotected. There they call __embcc_atomic_lock() and
+ * __embcc_atomic_unlock(), which the RTOS defines with its own critical
+ * section; undefined, the lock traps rather than lose an update. lib/rt's
+ * armv6m.c defines the defaults on ARMv6-M, this file elsewhere. */
+#if !defined(__ARM_ARCH_6M__)
+__attribute__((weak)) void __embcc_atomic_lock(void) { __builtin_trap(); }
+__attribute__((weak)) void __embcc_atomic_unlock(void) { }
+#else
+void __embcc_atomic_lock(void);
+void __embcc_atomic_unlock(void);
+#endif
+#define UNPRIV 0x80000000u           /* irq_off's mark: the hooks were used */
 static u32 irq_off(void)
 {
-    u32 m;
+    u32 m, c, x;
+    __asm__ volatile ("mrs %0, control" : "=r"(c));
+    __asm__ volatile ("mrs %0, ipsr" : "=r"(x));
+    if ((c & 1) && !x) {
+        __embcc_atomic_lock();
+        return UNPRIV;
+    }
     __asm__ volatile ("mrs %0, primask" : "=r"(m));
     __asm__ volatile ("cpsid i" ::: "memory");
     return m;
 }
 static void irq_restore(u32 m)
 {
+    if (m & UNPRIV) {
+        __embcc_atomic_unlock();
+        return;
+    }
     __asm__ volatile ("msr primask, %0" : : "r"(m) : "memory");
 }
 

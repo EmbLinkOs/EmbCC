@@ -246,7 +246,8 @@ Known gaps, each refused by name rather than miscompiled: inline and
 file-scope assembly (and so naked functions), jump tables (a dense
 switch is a decision tree), unwind tables, computed goto, the frame and
 return address builtins, atomics other than a word, interrupt
-attributes, C++. Code size: no density (16-bit) instructions, no zero-
+attributes, C++. Code size: the density option's 16-bit forms since #184
+(emit.h, xt_set_narrow; EMBCC_NO_DENSITY=1 turns them off), no zero-
 overhead loops, no MUL32_HIGH (the ESP32 has it, the de212 does not), and
 the 64-bit operations go through scratch registers; GCC -Os code is
 smaller. A struct argument or return value is read with l32i only where

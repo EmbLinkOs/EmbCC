@@ -163,12 +163,31 @@ WEAK void __aeabi_memclr4(void *dst, unsigned long n)
  * exclude, so a sequence with PRIMASK set is atomic. PRIMASK is saved and
  * restored rather than cleared, so these nest inside a critical section.
  *
- * Weak, because masking interrupts is a policy: an RTOS whose tasks run
- * unprivileged (where CPSID is ignored) or a part with a second bus master
- * defines its own and replaces these. */
+ * Weak, because masking interrupts is a policy: a part with a second bus
+ * master defines its own and replaces these.
+ *
+ * Unprivileged Thread mode -- an RTOS's task with CONTROL.nPRIV set --
+ * cannot mask interrupts: CPSID and a write to PRIMASK are ignored there,
+ * so these routines would have run unprotected and called it atomic. In
+ * that mode they call __embcc_atomic_lock() before and
+ * __embcc_atomic_unlock() after, which the RTOS defines with its own
+ * critical section (an SVC, a scheduler lock). Undefined, the lock traps
+ * (UDF): a fault in the task that asked, not a lost update in two. In a
+ * handler or privileged code PRIMASK is set as before. */
+WEAK void __embcc_atomic_lock(void) { __builtin_trap(); }
+WEAK void __embcc_atomic_unlock(void) { }
+
+#define UNPRIV 0x80000000u           /* irq_off's mark: the hooks were used */
+
 static u32 irq_off(void)
 {
-    u32 m;
+    u32 m, c, x;
+    __asm__ volatile ("mrs %0, control" : "=r"(c));
+    __asm__ volatile ("mrs %0, ipsr" : "=r"(x));
+    if ((c & 1) && !x) {
+        __embcc_atomic_lock();
+        return UNPRIV;
+    }
     __asm__ volatile ("mrs %0, primask" : "=r"(m));
     __asm__ volatile ("cpsid i" ::: "memory");
     return m;
@@ -176,6 +195,10 @@ static u32 irq_off(void)
 
 static void irq_restore(u32 m)
 {
+    if (m & UNPRIV) {
+        __embcc_atomic_unlock();
+        return;
+    }
     __asm__ volatile ("msr primask, %0" : : "r"(m) : "memory");
 }
 

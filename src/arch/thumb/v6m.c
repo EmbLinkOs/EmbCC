@@ -609,7 +609,9 @@ static void tmp_put(struct t_fn *F, int r)
 
 /* LIT_LREL: &&label's word, (label | 1) - pc at its `add rD, pc`; v
  * is its index in F->lrel, so no two share a word. */
-enum { LIT_K, LIT_STR, LIT_GLOB, LIT_FN, LIT_LREL };
+/* LIT_TLS: a thread-local's offset from the thread pointer
+ * (R_ARM_TLS_LE32), which irgen adds __aeabi_read_tp()'s result to. */
+enum { LIT_K, LIT_STR, LIT_GLOB, LIT_FN, LIT_LREL, LIT_TLS };
 struct v6_lit { int kind; unsigned long v; const void *p; };
 struct v6_lsite { int at, k; };
 
@@ -678,6 +680,11 @@ static void pool_dump(struct t_fn *F, int branch)
             break;
         case LIT_GLOB:
             tcg_note_glob(F->st, t->len, (struct global *)l->p, RK_ABS32);
+            code_u32(t, 0);
+            break;
+        case LIT_TLS:
+            tcg_note_glob(F->st, t->len, (struct global *)l->p,
+                          RK_ARM_TLS_LE32);
             code_u32(t, 0);
             break;
         case LIT_FN:
@@ -936,7 +943,7 @@ static void remat_rd(struct t_fn *F, int v, int reg)
         lit_load(F, reg, LIT_STR, (unsigned long)di->label, NULL);
         break;
     case IR_GADDR:
-        lit_load(F, reg, LIT_GLOB, 0, di->glob);
+        lit_load(F, reg, di->glob->is_tls ? LIT_TLS : LIT_GLOB, 0, di->glob);
         break;
     case IR_FADDR:
         lit_load(F, reg, LIT_FN, 0, di->callee);
@@ -2796,10 +2803,11 @@ static unsigned asm_regs(const struct ir_func *fn, int n)
 {
     const struct ir_asm *ia = fn->ins[n].asm_ir;
     unsigned m = 0;
-    for (int k = 0; k < ia->nin; k++)
-        m |= 1u << ia->in[k].reg;
+    for (int k = 0; k < ia->nin; k++)        /* a pair is two */
+        m |= (ia->in[k].size == 8 ? 3u : 1u) << ia->in[k].reg;
     for (int k = 0; k < ia->nout; k++)
-        m |= 1u << ia->out[k].reg;
+        m |= (!ia->out[k].mem && ia->out[k].size == 8 ? 3u : 1u)
+             << ia->out[k].reg;
     return m;
 }
 
@@ -2888,8 +2896,8 @@ static void gen_asm(struct t_fn *F, int n)
         opm |= asm_regs(fn, q);
     }
     for (int k = 0; k < ia->nout; k++)
-        if (!ia->out[k].mem && ia->out[k].size > 4)
-            v6_refuse(fn, i, "an asm output wider than a register");
+        if (!ia->out[k].mem && ia->out[k].size > 8)
+            v6_refuse(fn, i, "an asm output wider than a register pair");
     /* A cycle in a move is broken through a register no operand is in. */
     for (int k = 0; k < 3 && brk < 0; k++)
         if (!(opm >> brks[k] & 1))
@@ -2901,10 +2909,14 @@ static void gen_asm(struct t_fn *F, int n)
      * address (its current value is loaded through it below). */
     {
         int pd[48], ps[48], npm = 0;
-        for (int k = 0; k < ia->nin; k++)
+        for (int k = 0; k < ia->nin && npm < 47; k++)
             if (in_reg6(F, ia->in[k].temp)) {
                 pd[npm] = ia->in[k].reg;
                 ps[npm++] = F->loc[ia->in[k].temp];
+                if (ia->in[k].size == 8) {       /* a pair: both words */
+                    pd[npm] = ia->in[k].reg + 1;
+                    ps[npm++] = F->loc[ia->in[k].temp] + 1;
+                }
             }
         for (int k = 0; k < ia->nout; k++)
             if (!ia->out[k].val && (ia->out[k].mem || ia->out[k].inout) &&
@@ -2914,16 +2926,27 @@ static void gen_asm(struct t_fn *F, int n)
             }
         asm_moves(F, pd, ps, npm, brk, "operands");
         for (int k = 0; k < ia->nin; k++)
-            if (!in_reg6(F, ia->in[k].temp))
-                asm_in(F, ia->in[k].temp, ia->in[k].reg, opm);
+            if (!in_reg6(F, ia->in[k].temp)) {
+                if (ia->in[k].size == 8)        /* a pair: r0:r1 or r2:r3 */
+                    v_rd64(F, ia->in[k].temp, ia->in[k].reg,
+                           ia->in[k].reg + 1);
+                else
+                    asm_in(F, ia->in[k].temp, ia->in[k].reg, opm);
+            }
         for (int k = 0; k < ia->nout; k++) {
             const struct ir_asm_op *o = &ia->out[k];
             if (o->val || !(o->mem || o->inout))
                 continue;
             if (!in_reg6(F, o->temp))
                 asm_in(F, o->temp, o->reg, opm);
-            if (o->inout && !o->mem)
+            if (o->inout && !o->mem && o->size == 8) {
+                /* a pair's high word first, while the low register
+                 * still holds the address */
+                mem_ld(F, o->reg + 1, o->reg, 4, 4, 0, 1);
+                mem_ld(F, o->reg, o->reg, 0, 4, 0, 1);
+            } else if (o->inout && !o->mem) {
                 asm_cur(F, o->reg, o->size, opm);
+            }
         }
     }
     {
@@ -2965,7 +2988,12 @@ static void gen_asm(struct t_fn *F, int n)
             v_rd(F, o->temp, xa);
             base = xa;
         }
-        mem_st(F, rv, base, 0, o->size, 1, hold);
+        if (o->size == 8) {                  /* a pair, both words */
+            mem_st(F, rv, base, 0, 4, 1, hold);
+            mem_st(F, o->reg + 1, base, 4, 4, 1, hold);
+        } else {
+            mem_st(F, rv, base, 0, o->size, 1, hold);
+        }
         if (xa >= 0)
             tmp_put(F, xa);
         if (xv >= 0)
@@ -3686,7 +3714,7 @@ static void gen_ins(struct t_fn *F, int n)
         if (i->op == IR_STRADDR)
             lit_load(F, d, LIT_STR, (unsigned long)i->label, NULL);
         else if (i->op == IR_GADDR)
-            lit_load(F, d, LIT_GLOB, 0, i->glob);
+            lit_load(F, d, i->glob->is_tls ? LIT_TLS : LIT_GLOB, 0, i->glob);
         else
             lit_load(F, d, LIT_FN, 0, i->callee);
         v_wr(F, i->dst, d);
@@ -4008,6 +4036,34 @@ static long mask_bytes(unsigned m)
     return n;
 }
 
+/* the r4-r7 that carry r8-r11 (F->hsave) to and from the stack: one per
+ * high register, in pairs */
+static unsigned hsave_low6(const struct t_fn *F)
+{
+    long n = mask_bytes(F->hsave) / 4;
+    return ((1u << ((n + 1) & ~1)) - 1) << 4;
+}
+
+/* everything the prologue pushes: the low registers and lr, then r8-r11 */
+static long push_bytes6(const struct t_fn *F)
+{
+    return mask_bytes(save_mask6(F, F->scr_save)) + mask_bytes(hsave_low6(F));
+}
+
+/* move r8-r11 into (to = 0) or out of (to = 1) their carriers */
+static void hsave_moves6(struct t_fn *F, int out)
+{
+    int lo = 4;
+    for (int r = 8; r <= 11; r++)
+        if (F->hsave >> r & 1) {
+            if (out)
+                t_mov_reg(F->t, r, lo);
+            else
+                t_mov_reg(F->t, lo, r);
+            lo++;
+        }
+}
+
 /* sp -= frame (sub) or += frame, at most 508 a step; a long frame through
  * r6, which such a function always saves (see v6_gen_func). */
 static void sp_frame(struct t_fn *F, long frame, int sub)
@@ -4157,6 +4213,15 @@ static void v6_record_cfi(struct t_fn *F, long code_off)
             if ((F->cfi_push_mask >> r) & 1)
                 ir_cfi_add(fn, at, IR_CFI_SAVED, r, -cfa + 4L * k++);
     }
+    if (F->cfi_hpush_end >= 0) {
+        /* r8-r11 went out through r4..., at the push's lowest addresses */
+        int at = (int)(F->cfi_hpush_end - code_off), k = 0;
+        cfa += mask_bytes(hsave_low6(F));
+        ir_cfi_add(fn, at, IR_CFI_CFA_OFFSET, 0, cfa);
+        for (int r = 8; r <= 11; r++)
+            if (F->hsave >> r & 1)
+                ir_cfi_add(fn, at, IR_CFI_SAVED, r, -cfa + 4L * k++);
+    }
     if (F->cfi_frame_end >= 0) {
         cfa += F->frame;
         ir_cfi_add(fn, (int)(F->cfi_frame_end - code_off), IR_CFI_CFA_OFFSET, 0, cfa);
@@ -4218,6 +4283,35 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     }
     if (fn->has_alloca)
         F.used_callee[F.nsave++] = FB6;
+    /* r4-r7 an asm clobbers or names: saved by the push (r8-r11 below) */
+    {
+        unsigned am = (unsigned)(ra_asm_clobbers(fn) & 0x0ff0u);
+        if (fn->has_alloca && (am >> FB6 & 1))
+            v6_refuse(fn, NULL, "an asm that writes the register this "
+                      "function's frame is addressed from (it has a "
+                      "variable-length array or alloca)");
+        /* r8-r11: push does not reach them, so they go through r4-r7,
+         * as GCC saves them -- `mov r4, r8 ...; push {r4...}` after the
+         * first push, which saved the low ones; in pairs, so sp stays
+         * eight-aligned */
+        F.hsave = am & 0x0f00u;
+        if (F.hsave) {
+            int nh = 0;
+            for (unsigned b = F.hsave; b; b &= b - 1)
+                nh++;
+            for (int r = 4; r < 4 + ((nh + 1) & ~1); r++)
+                am |= 1u << r;
+        }
+        for (int r = 4; r <= 7; r++) {
+            int have = 0;
+            if (!(am >> r & 1))
+                continue;
+            for (int k = 0; k < F.nsave; k++)
+                have |= F.used_callee[k] == r;
+            if (!have)
+                F.used_callee[F.nsave++] = r;
+        }
+    }
     if (fn->cmse_entry)
         tcg_cmse_check_entry(fn);
     /* A leaf: nothing calls, the lowering's own calls included. An asm
@@ -4405,7 +4499,7 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         F.nopush = F.leaf && !F.nsave && !F.frame && !fn->is_varargs &&
                    !fn->has_alloca && !(F.scr_save & SCR_SET);
         F.cfi_va_end = F.cfi_push_end = F.cfi_vsave_end = -1;
-        F.cfi_frame_end = F.cfi_fp_end = -1;
+        F.cfi_frame_end = F.cfi_fp_end = F.cfi_hpush_end = -1;
         if (fn->is_varargs) {
             t1_push(t, 0xfu);
             F.cfi_va_end = t->len;
@@ -4414,6 +4508,11 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
             F.cfi_push_mask = save_mask6(&F, F.scr_save);
             t1_push(t, F.cfi_push_mask);
             F.cfi_push_end = t->len;
+            if (F.hsave) {
+                hsave_moves6(&F, 0);
+                t1_push(t, hsave_low6(&F));
+                F.cfi_hpush_end = t->len;
+            }
         }
         if (F.frame) {
             sp_frame(&F, F.frame, 1);
@@ -4424,7 +4523,7 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
             F.fb = FB6;
             F.cfi_fp_end = t->len;
         }
-        frame_push = F.nopush ? 0 : F.frame + mask_bytes(save_mask6(&F, F.scr_save));
+        frame_push = F.nopush ? 0 : F.frame + push_bytes6(&F);
         {
             struct argplace pl;
             struct abi_walk w;
@@ -4566,6 +4665,10 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         if (fn->has_alloca)
             t_mov_reg(t, T_SP, FB6);
         sp_frame(&F, F.frame, 0);
+        if (F.hsave && !F.nopush) {
+            t1_pop(t, hsave_low6(&F));
+            hsave_moves6(&F, 1);
+        }
         if (fn->cmse_entry) {
             /* CMSE: back to the Non-secure state (codegen.c's
              * cmse_entry_return). POP cannot name lr here, so the return
@@ -4834,8 +4937,7 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
      * two registers in a row */
     ra_debug_finish(fn, t->len, F.loc, NULL, 0, F.slot, -1, F.wide, 1, 4);
     /* ...and the variadic register save area pushed before it */
-    f->stack_bytes = (F.nopush ? 0 : (int)(F.frame +
-                                           mask_bytes(save_mask6(&F, F.scr_save)))) +
+    f->stack_bytes = (F.nopush ? 0 : (int)(F.frame + push_bytes6(&F))) +
                      (fn->is_varargs ? 16 : 0);
     free(cls);
     free(F.usecnt);

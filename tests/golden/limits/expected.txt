@@ -251,7 +251,7 @@ avr vector yes
 avr atomic1 yes
 avr atomic8 yes
 avr atomic16 no: __int128 does not exist on this target (it needs 64-bit registers; use long long)
-avr tls yes
+avr tls no: 't' is thread-local, which avr has no thread pointer for: EmbCC would make it one object every thread shares (_Thread_local is supported on ARM, RISC-V, AArch64 and x86-64)
 avr vla yes
 avr align32 yes
 avr frameaddr yes
@@ -281,7 +281,7 @@ mipsel-none-elf vector yes
 mipsel-none-elf atomic1 yes
 mipsel-none-elf atomic8 yes
 mipsel-none-elf atomic16 no: __int128 does not exist on this target (it needs 64-bit registers; use long long)
-mipsel-none-elf tls yes
+mipsel-none-elf tls no: 't' is thread-local, which mipsel-none-elf has no thread pointer for: EmbCC would make it one object every thread shares (_Thread_local is supported on ARM, RISC-V, AArch64 and x86-64)
 mipsel-none-elf vla yes
 mipsel-none-elf align32 yes
 mipsel-none-elf frameaddr yes
@@ -311,7 +311,7 @@ mips-none-elf vector yes
 mips-none-elf atomic1 yes
 mips-none-elf atomic8 yes
 mips-none-elf atomic16 no: __int128 does not exist on this target (it needs 64-bit registers; use long long)
-mips-none-elf tls yes
+mips-none-elf tls no: 't' is thread-local, which mips-none-elf has no thread pointer for: EmbCC would make it one object every thread shares (_Thread_local is supported on ARM, RISC-V, AArch64 and x86-64)
 mips-none-elf vla yes
 mips-none-elf align32 yes
 mips-none-elf frameaddr yes
@@ -341,7 +341,7 @@ mips64el-none-elf vector yes
 mips64el-none-elf atomic1 yes
 mips64el-none-elf atomic8 yes
 mips64el-none-elf atomic16 no: the MIPS64 backend cannot lower a 16-byte atomic (MIPS64's lld/scd are a doubleword; there is no 128-bit ll/sc) yet (function f) [cas16 w=16 size=16]
-mips64el-none-elf tls yes
+mips64el-none-elf tls no: 't' is thread-local, which mips64el-none-elf has no thread pointer for: EmbCC would make it one object every thread shares (_Thread_local is supported on ARM, RISC-V, AArch64 and x86-64)
 mips64el-none-elf vla yes
 mips64el-none-elf align32 yes
 mips64el-none-elf frameaddr yes
@@ -371,7 +371,7 @@ mips64-none-elf vector yes
 mips64-none-elf atomic1 yes
 mips64-none-elf atomic8 yes
 mips64-none-elf atomic16 no: the MIPS64 backend cannot lower a 16-byte atomic (MIPS64's lld/scd are a doubleword; there is no 128-bit ll/sc) yet (function f) [cas16 w=16 size=16]
-mips64-none-elf tls yes
+mips64-none-elf tls no: 't' is thread-local, which mips64-none-elf has no thread pointer for: EmbCC would make it one object every thread shares (_Thread_local is supported on ARM, RISC-V, AArch64 and x86-64)
 mips64-none-elf vla yes
 mips64-none-elf align32 yes
 mips64-none-elf frameaddr yes
@@ -401,7 +401,7 @@ loongarch64-unknown-elf vector yes
 loongarch64-unknown-elf atomic1 yes
 loongarch64-unknown-elf atomic8 yes
 loongarch64-unknown-elf atomic16 no: the LoongArch64 backend cannot lower a sixteen-byte atomic (the LA64 base ISA has no 128-bit ll/sc or am* instruction) yet (function f) [cas16 w=16 size=16]
-loongarch64-unknown-elf tls yes
+loongarch64-unknown-elf tls no: 't' is thread-local, which loongarch64-unknown-elf has no thread pointer for: EmbCC would make it one object every thread shares (_Thread_local is supported on ARM, RISC-V, AArch64 and x86-64)
 loongarch64-unknown-elf vla yes
 loongarch64-unknown-elf align32 yes
 loongarch64-unknown-elf frameaddr yes
@@ -431,7 +431,7 @@ xtensa-none-elf vector yes
 xtensa-none-elf atomic1 yes
 xtensa-none-elf atomic8 yes
 xtensa-none-elf atomic16 no: __int128 does not exist on this target (it needs 64-bit registers; use long long)
-xtensa-none-elf tls yes
+xtensa-none-elf tls no: 't' is thread-local, which xtensa-none-elf has no thread pointer for: EmbCC would make it one object every thread shares (_Thread_local is supported on ARM, RISC-V, AArch64 and x86-64)
 xtensa-none-elf vla yes
 xtensa-none-elf align32 yes
 xtensa-none-elf frameaddr yes
@@ -461,7 +461,7 @@ tricore-none-elf vector yes
 tricore-none-elf atomic1 yes
 tricore-none-elf atomic8 yes
 tricore-none-elf atomic16 no: __int128 does not exist on this target (it needs 64-bit registers; use long long)
-tricore-none-elf tls yes
+tricore-none-elf tls no: 't' is thread-local, which tricore-none-elf has no thread pointer for: EmbCC would make it one object every thread shares (_Thread_local is supported on ARM, RISC-V, AArch64 and x86-64)
 tricore-none-elf vla yes
 tricore-none-elf align32 yes
 tricore-none-elf frameaddr yes
@@ -491,7 +491,7 @@ rx-none-elf vector yes
 rx-none-elf atomic1 yes
 rx-none-elf atomic8 yes
 rx-none-elf atomic16 no: __int128 does not exist on this target (it needs 64-bit registers; use long long)
-rx-none-elf tls yes
+rx-none-elf tls no: 't' is thread-local, which rx-none-elf has no thread pointer for: EmbCC would make it one object every thread shares (_Thread_local is supported on ARM, RISC-V, AArch64 and x86-64)
 rx-none-elf vla yes
 rx-none-elf align32 yes
 rx-none-elf frameaddr yes
@@ -521,7 +521,7 @@ powerpc-none-eabi vector yes
 powerpc-none-eabi atomic1 yes
 powerpc-none-eabi atomic8 yes
 powerpc-none-eabi atomic16 no: __int128 does not exist on this target (it needs 64-bit registers; use long long)
-powerpc-none-eabi tls yes
+powerpc-none-eabi tls no: 't' is thread-local, which powerpc-none-eabi has no thread pointer for: EmbCC would make it one object every thread shares (_Thread_local is supported on ARM, RISC-V, AArch64 and x86-64)
 powerpc-none-eabi vla yes
 powerpc-none-eabi align32 yes
 powerpc-none-eabi frameaddr yes
@@ -551,7 +551,7 @@ sparc-none-elf vector yes
 sparc-none-elf atomic1 yes
 sparc-none-elf atomic8 yes
 sparc-none-elf atomic16 no: __int128 does not exist on this target (it needs 64-bit registers; use long long)
-sparc-none-elf tls yes
+sparc-none-elf tls no: 't' is thread-local, which sparc-none-elf has no thread pointer for: EmbCC would make it one object every thread shares (_Thread_local is supported on ARM, RISC-V, AArch64 and x86-64)
 sparc-none-elf vla yes
 sparc-none-elf align32 yes
 sparc-none-elf frameaddr yes
@@ -581,7 +581,7 @@ m68k-none-elf vector yes
 m68k-none-elf atomic1 yes
 m68k-none-elf atomic8 yes
 m68k-none-elf atomic16 no: __int128 does not exist on this target (it needs 64-bit registers; use long long)
-m68k-none-elf tls yes
+m68k-none-elf tls no: 't' is thread-local, which m68k-none-elf has no thread pointer for: EmbCC would make it one object every thread shares (_Thread_local is supported on ARM, RISC-V, AArch64 and x86-64)
 m68k-none-elf vla yes
 m68k-none-elf align32 yes
 m68k-none-elf frameaddr yes

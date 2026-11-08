@@ -655,6 +655,9 @@ static void sroa_sync(struct ir_func *fn, const struct sroa_bnds *bl,
                 for (int f = 0; f < nfld[b->L]; f++)
                     if (fld[(size_t)b->L * SROA_MAX_FIELDS + f].off == uo[q])
                         F = &fld[(size_t)b->L * SROA_MAX_FIELDS + f];
+                if (!F)      /* .ret was set only where every unit matched */
+                    internal_error("sroa: %s: no field at a return unit's "
+                                   "offset %d", fn->name, uo[q]);
                 tv[q] = fn->nvregs++;
                 struct ir_ins *e = ib_push(&nb);
                 memset(e, 0, sizeof *e);

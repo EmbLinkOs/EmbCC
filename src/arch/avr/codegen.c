@@ -6019,6 +6019,20 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
         if (!have)
             F.used_callee[F.nsave++] = r;
     }
+    /* r2-r17 an asm clobbers or names: the function's to save, a pair at
+     * a time as the rest of its saves are */
+    {
+        unsigned long am = ra_asm_clobbers(fn);
+        for (int r = 2; r <= 16; r += 2) {
+            int have = 0;
+            if (!(am >> r & 3))
+                continue;
+            for (i = 0; i < F.nsave; i++)
+                if (F.used_callee[i] == r) have = 1;
+            if (!have)
+                F.used_callee[F.nsave++] = r;
+        }
+    }
     layout(&F);
 
     F.label_off = xmalloc((size_t)(fn->nlabels + 1) * sizeof *F.label_off);
@@ -6072,11 +6086,31 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
      * function, so the frame arithmetic below is the same either way --
      * and the distance from Y to the incoming stack arguments stays
      * exact, because a handler has none. */
+    /* -g: the prologue as call frame information, as avr-gcc writes it
+     * (src/debug/dwarf.c has the CIE: CFA = SP + the return address).
+     * Each push moves the CFA one further from SP and leaves the register
+     * just above it; setting Y from SP makes Y (r28) the CFA's base, and
+     * taking the frame off Y moves it by that much. An interrupt
+     * handler's own prologue is left without an FDE, not a wrong one. */
+    int cfa = avr_pc_bytes(), dbg = target_debug_info();
+    if (dbg)
+        fn->ncfi = f->is_isr ? -1 : 0;
+#define AVR_CFI_PUSH(r)                                                     \
+    do {                                                                    \
+        avr_push(t, (r));                                                   \
+        if (dbg && !f->is_isr) {                                            \
+            cfa++;                                                          \
+            ir_cfi_add(fn, (int)(t->len - f->code_off), IR_CFI_CFA_OFFSET,  \
+                       0, cfa);                                             \
+            ir_cfi_add(fn, (int)(t->len - f->code_off), IR_CFI_SAVED,       \
+                       (r), -(cfa - 1));                                    \
+        }                                                                   \
+    } while (0)
     /* The pairs the allocator took, BEFORE Y: then the distance from Y
      * to the incoming stack arguments grows by exactly what was pushed. */
     for (i = 0; i < F.nsave; i++) {
-        avr_push(t, F.used_callee[i]);
-        avr_push(t, F.used_callee[i] + 1);
+        AVR_CFI_PUSH(F.used_callee[i]);
+        AVR_CFI_PUSH(F.used_callee[i] + 1);
     }
     F.in_at = INCOMING_AT + 2L * F.nsave;
     /* Y is the frame pointer, and a function with no frame -- no slot, no
@@ -6102,15 +6136,22 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
         }
     }
     if (F.use_y) {
-        avr_push(t, 28);
-        avr_push(t, 29);
+        AVR_CFI_PUSH(28);
+        AVR_CFI_PUSH(29);
     }
+#undef AVR_CFI_PUSH
     if (F.use_y) {
         avr_in(t, 28, IO_SPL);
         avr_in(t, 29, IO_SPH);
+        if (dbg && !f->is_isr)                 /* the CFA from Y now */
+            ir_cfi_add(fn, (int)(t->len - f->code_off), IR_CFI_CFA_REG,
+                       28, cfa);
     }
     if (F.frame) {
         add_const16(&F, AVR_Y, -F.frame);
+        if (dbg && !f->is_isr && F.use_y)
+            ir_cfi_add(fn, (int)(t->len - f->code_off), IR_CFI_CFA_OFFSET,
+                       0, cfa + F.frame);
         set_sp_from_y(t);
     }
 

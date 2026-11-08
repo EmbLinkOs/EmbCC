@@ -127,12 +127,9 @@ As with GCC, a default output is written in the current directory, not
 next to the input: `embcc -c src/foo.c` writes `foo.o`, and
 `embcc -S src/foo.c` writes `foo.s`.
 
-A C++ input is compiled for every target but AVR: with exceptions on
-x86-64 and AArch64, and with `--no-exceptions` on the embedded targets
-(see [C++ targets](cxx.md#targets)). For AVR, every mode but `-E`, `-M`,
-`--deps-only` and `--syntax-only` stops with `embcc: error: C++ is not
-yet supported for avr: the C++ lowering assumes a 32-bit int and 4-byte
-pointers ...`.
+A C++ input is compiled for every target, AVR included. Which targets
+throw and catch exceptions, and which compile C++ only with
+`--no-exceptions`, is listed in [C++ targets](cxx.md#targets).
 
 When several mode options are given, `-E` takes precedence over the
 others, then `--syntax-only`, then `-S`, then `-c`.

@@ -449,6 +449,10 @@ void irg_asm_xtensa(struct ir_func *fn, struct stmt *s)
     ia->codelen = c.len;
     ia->rel = c.rel;            /* (code_asm_rels where it is spliced) */
     ia->nrel = c.nrel;
+    ia->drange = c.drange;      /* a directive's data, and its alignments */
+    ia->ndrange = c.ndrange;
+    ia->arange = c.arange;
+    ia->narange = c.narange;
     ia->out = xcalloc((size_t)(a->nout ? a->nout : 1), sizeof *ia->out);
     ia->in = xcalloc((size_t)(a->nin ? a->nin : 1), sizeof *ia->in);
     for (int i = 0; i < a->nin; i++) {

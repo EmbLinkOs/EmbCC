@@ -27,11 +27,9 @@ int variadic(int n, ...)
     va_end(ap);
     return r;
 }
-/* A float callee is inlined now, so the third refusal here is a
- * parameter an ABI does not pass as a value: the inliner binds one with
- * `stvar local, argvreg`, and for a struct that vreg is an ADDRESS. */
-struct pair { long a, b; };
-long aggregate(struct pair p) { return p.a + p.b; }
+/* A float callee is inlined now, and so is one taking or returning a
+ * struct, so the third refusal here is the author's own: noinline. */
+__attribute__((noinline)) int kept(int n) { return n * 3; }
 int big(int n)
 {
     int t = 0;
@@ -41,8 +39,7 @@ int big(int n)
 }
 int caller(int n)
 {
-    struct pair pr = { n, 1 };
-    return small(n, 1) + variadic(n, 2) + (int)aggregate(pr) + big(n);
+    return small(n, 1) + variadic(n, 2) + kept(n) + big(n);
 }
 EOF
 
@@ -50,7 +47,7 @@ EOF
 "$EMBCC" why not-inlined "$out/p.c" -O2 > "$out/why.txt" 2>&1
 sed "s|$out/||" "$out/why.txt"
 for pair in "variadic:callee-is-varargs" \
-            "aggregate:parameter-is-not-a-simple-scalar" \
+            "kept:callee-is-noinline" \
             "big:callee-too-large"; do
     fn=${pair%%:*}; reason=${pair#*:}
     grep -q "^$fn " "$out/why.txt" || { echo "FAIL: no remark for $fn"; exit 1; }
@@ -116,6 +113,38 @@ grep -q "because callee-too-large .*budget 6" "$out/two2s.txt" ||
 grep -q "because callee-too-large .*budget 200\$" "$out/big2.txt" ||
     { cat "$out/big2.txt"; echo "FAIL: big2() over 200 should be refused, naming budget 200"; exit 1; }
 echo "a static function with two callers is inlined up to 200 at -O2 ($n here), and not past it, with three or at -Os"
+
+# ---- -Os and the inline keyword -------------------------------------------
+# A function DECLARED inline is weighed as optimized against 12 at -Os
+# (INLINE_SIZE_DECLARED), as GCC honours the keyword there: an RTOS's
+# `static inline` list unlink, four loads and four stores with three
+# callers, was refused at 24 raw instructions against 6 (12 as
+# optimized on a 32-bit target, which the budget was measured on). The same
+# function not declared inline keeps the plain rule.
+for kw in "static inline" "static"; do
+    tag=$(echo "$kw" | tr ' ' _)
+    cat > "$out/os-$tag.c" <<EOC
+struct node { struct node *next, *prev; };
+$kw void unlink_node(struct node *n)
+{
+    n->prev->next = n->next;
+    n->next->prev = n->prev;
+    n->next = 0;
+    n->prev = 0;
+}
+void a(struct node *n) { unlink_node(n); }
+void b(struct node *n) { unlink_node(n); }
+void c(struct node *n) { unlink_node(n); }
+EOC
+done
+"$EMBCC" why inlined unlink_node "$out/os-static_inline.c" -Os --target=riscv32-none-elf > "$out/os-in.txt" 2>&1
+[ "$(grep -c "^unlink_node .*: inlined" "$out/os-in.txt")" = 3 ] &&
+    grep -q "as optimized into .*, budget 12\$" "$out/os-in.txt" ||
+    { cat "$out/os-in.txt"; echo "FAIL: -Os should inline a declared-inline unlink into all three callers, budget 12"; exit 1; }
+"$EMBCC" why not-inlined unlink_node "$out/os-static.c" -Os --target=riscv32-none-elf > "$out/os-not.txt" 2>&1
+grep -q "because callee-too-large .*budget 6 (-Os)" "$out/os-not.txt" ||
+    { cat "$out/os-not.txt"; echo "FAIL: -Os should keep budget 6 for a function not declared inline"; exit 1; }
+echo "at -Os a function declared inline is weighed as optimized against 12; one that is not keeps 6"
 
 # ---- the subject filter ---------------------------------------------------
 "$EMBCC" why not-inlined big "$out/p.c" -O2 > "$out/one.txt" 2>&1

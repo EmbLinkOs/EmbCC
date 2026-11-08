@@ -42,6 +42,7 @@
  * the frame and return address, a function too large for its branches or
  * its literal pool, and __int128 (which does not exist on ILP32). THE RULE.
  */
+#include "asm.h"
 #include "emit.h"
 
 #include "../backend.h"
@@ -96,6 +97,17 @@ struct xt_lit {
 struct xt_fn {
     long cfi_frame_end, cfi_fp_end; /* the prologue's steps, for the CFI */
     int *usecnt;         /* per vreg: how many reads (fusion), or NULL */
+    /* per vreg: 1 when its one definition is a constant, which is then
+     * kval[v] (an argument already extended needs no extui), or NULL */
+    char *kdef;
+    long *kval;
+    /* per vreg: what its one definition already extended it from -- a
+     * narrow load or an extension: size * 2 + sign, 0 for nothing known */
+    unsigned char *kext;
+    /* per instruction: a shift by 1..3 left out (its only reader is an
+     * add, made addx2/4/8 of its source), or that add: the shift's index
+     * + 1; 0 for neither */
+    int *addx;
     int skip_next;       /* the instruction after this one is already out */
     int keep_vars;
     struct ir_func *fn;
@@ -123,6 +135,9 @@ struct xt_fn {
      * address and a jx). */
     const char *longb;
     int nlongb;
+    /* per branch, as longb: a beqz.n/bnez.n that did not reach */
+    const char *wideb;
+    int nwideb;
     /* The literal pool: npool words reserved at pool_at, before the
      * function's entry; the body asked for nlit of them. */
     struct xt_lit *lit;
@@ -473,7 +488,13 @@ static void xt_abi_hints(const struct ir_func *fn, int *hint)
             const struct ir_arg *a = &i->argv[k];
             place_arg(a, &words, &stk, &pl);
             if (pl.np == 1 && pl.p[0].nw == 1 && pl.p[0].reg >= 0 &&
-                !a->is_struct && a->vreg >= 0 && a->vreg < fn->nvregs)
+                !a->is_struct && a->vreg >= 0 && a->vreg < fn->nvregs &&
+                /* not a parameter's: one that is also a call's argument
+                 * kept the call's a10-a15 as its hint, which it cannot
+                 * have when it lives across an earlier call -- it then
+                 * took any register, and the entry shuffled the
+                 * parameters (sigprocmask: three movs) */
+                a->vreg >= fn->nparams)
                 hint[a->vreg] = OUT_ARG(pl.p[0].reg);
         }
     }
@@ -792,6 +813,22 @@ static long sslot(const struct xt_fn *F, int v)
 
 /* rd: v into exactly `reg`. rdr: where v IS (its register, or `scratch`
  * after a load). wreg: where to compute v. wrote: commit it. */
+/* A vreg from its slot. A char or short parameter's slot holds only its
+ * own bytes (place_params), so it is loaded at that size and extended by
+ * its type -- as its caller passed it, which the optimizer relies on
+ * (target_args_extended): a word load read three bytes nobody wrote. */
+static void ld_vreg(struct xt_fn *F, int reg, int v, long plus)
+{
+    const struct ir_func *fn = F->fn;
+    if (v >= 0 && v < fn->nparams && fn->param_abi &&
+        !fn->param_abi[v].is_struct && fn->param_abi[v].size < 4 && !plus) {
+        ld_sp(F, reg, sslot(F, v), fn->param_abi[v].size,
+              fn->param_abi[v].ty ? ty_signed_int(fn->param_abi[v].ty) : 1);
+        return;
+    }
+    ld_sp(F, reg, sslot(F, v) + plus, 4, 0);
+}
+
 static void rd(struct xt_fn *F, int v, int reg)
 {
     if (in_reg(F, v)) {
@@ -799,14 +836,14 @@ static void rd(struct xt_fn *F, int v, int reg)
             xt_mov(F->t, reg, F->loc[v]);
         return;
     }
-    ld_sp(F, reg, sslot(F, v), 4, 0);
+    ld_vreg(F, reg, v, 0);
 }
 
 static int rdr(struct xt_fn *F, int v, int scratch)
 {
     if (in_reg(F, v))
         return F->loc[v];
-    ld_sp(F, scratch, sslot(F, v), 4, 0);
+    ld_vreg(F, scratch, v, 0);
     return scratch;
 }
 
@@ -1203,7 +1240,7 @@ static void br_back(struct xt_fn *F, int at, int target)
                        "reach", F->fn->name);
 }
 
-enum { FX_B, FX_J, FX_FAR };
+enum { FX_B, FX_J, FX_FAR, FX_BN };
 
 static void want_label(struct xt_fn *F, int at, int label, int kind)
 {
@@ -1263,8 +1300,8 @@ static void branch_to(struct xt_fn *F, struct xtest x, int label)
     }
     if (lv) {
         struct xtest inv = invert(x);
-        /* over the j: the branch is 3 bytes, the j 3, so 2 from the
-         * instruction after the branch's own fourth byte */
+        /* over the j: the branch is 3 bytes, the j 3 (neither has a
+         * density form here), so 2 from the branch's own fourth byte */
         xt_w(F->t, enc_test(&inv, 2));
         at = F->t->len;
         xt_w(F->t, xt_enc_j(0));
@@ -1272,6 +1309,16 @@ static void branch_to(struct xt_fn *F, struct xtest x, int label)
         return;
     }
     at = F->t->len;
+    /* beqz/bnez as the density option's 16-bit form, 0..63 bytes on:
+     * tried for every one, and three bytes from the next attempt for
+     * one that did not reach (wideb) -- GNU as narrows GCC's so */
+    if (x.kind == T_Z && (x.cond == XT_BEQZ || x.cond == XT_BNEZ) &&
+        xt_narrow_on() &&
+        !(F->wideb && F->nfix < F->nwideb && F->wideb[F->nfix])) {
+        xt_h16(F->t, xt_enc_bz_n(x.cond == XT_BNEZ, x.s, 0));
+        want_label(F, at, label, FX_BN);
+        return;
+    }
     xt_w(F->t, enc_test(&x, 0));
     want_label(F, at, label, FX_B);
 }
@@ -1301,8 +1348,14 @@ static void emit_bool(struct xt_fn *F, struct xtest x, int dst)
             }
     }
     xt_movi(t, d, 1);
-    xt_w(t, enc_test(&x, 2));       /* over the movi d, 0 */
-    xt_movi(t, d, 0);
+    {
+        /* over the movi d, 0 -- two bytes or three (movi.n): the offset
+         * is from the branch's fourth byte, so it is written after */
+        int at = t->len;
+        xt_w(t, enc_test(&x, 0));
+        xt_movi(t, d, 0);
+        xt_put(t, at, enc_test(&x, (long)t->len - (at + 4)));
+    }
     if (d != dst)
         xt_mov(t, dst, d);
 }
@@ -1451,8 +1504,7 @@ static void set_args_half(struct xt_fn *F, const int *dstreg,
     }
     for (int k = 0; k < n; k++)
         if (!in_reg(F, vreg[k]))
-            ld_sp(F, dstreg[k],
-                  sslot(F, vreg[k]) + (half ? 4L * half[k] : 0), 4, 0);
+            ld_vreg(F, dstreg[k], vreg[k], half ? 4L * half[k] : 0);
 }
 
 static void set_args(struct xt_fn *F, const int *dstreg, const int *vreg,
@@ -1507,6 +1559,62 @@ static void src64(struct xt_fn *F, int v, int slo, int shi, int *lo, int *hi)
     rd64(F, v, slo, shi);
     *lo = slo;
     *hi = shi;
+}
+
+/* "this half differs from k": the register test, or one against an
+ * immediate when k is zero or one a branch can name; else k into
+ * `scratch` first */
+static struct xtest half_ne(struct xt_fn *F, int reg, long long k, int scratch)
+{
+    if (k == 0)
+        return test_z(XT_BNEZ, reg);
+    if (xt_bi_ok(XT_BNEI, k))
+        return test_i(XT_BNEI, reg, k);
+    li(F, scratch, k);
+    return test_rr(XT_BNE, reg, scratch);
+}
+
+/* A 64-bit (in)equality and the branch on it, as one: GCC's `bnei a2,
+ * -1; beqi a3, -1`, where this built the 0/1 and tested it (an RTOS's
+ * `timeout == EMB_TICK_MAX`, #184). Returns 0 when it does not apply. */
+static int cmp64_branch(struct xt_fn *F, const struct ir_ins *i,
+                        const struct ir_ins *br)
+{
+    int al, ah, bl = -1, bh = -1, kb = 0;
+    long long kv = 0;
+    struct xtest lo, hi;
+    if (i->pred != B_EQ && i->pred != B_NE)
+        return 0;
+    src64(F, i->a, A_LO, A_HI, &al, &ah);
+    if (i->imm_b) {
+        kb = 1;
+        kv = i->imm;
+    } else if (F->kdef && i->b >= 0 && i->b < F->fn->nvregs &&
+               F->kdef[i->b] == 1) {
+        kb = 1;
+        kv = F->kval[i->b];
+    } else {
+        src64(F, i->b, B_LO, B_HI, &bl, &bh);
+    }
+    /* both tests built (and any constant loaded) before either branch */
+    if (kb) {
+        lo = half_ne(F, al, (long long)(int)(unsigned)((unsigned long long)kv & 0xffffffffu), B_LO);
+        hi = half_ne(F, ah, (long long)(int)((unsigned long long)kv >> 32), B_HI);
+    } else {
+        lo = test_rr(XT_BNE, al, bl);
+        hi = test_rr(XT_BNE, ah, bh);
+    }
+    if ((i->pred == B_EQ) != (br->op == IR_BRNZ)) {
+        /* to the label when they differ */
+        branch_to(F, lo, br->label);
+        branch_to(F, hi, br->label);
+    } else {
+        /* to the label when they are equal */
+        int skip = br_place(F, lo);
+        branch_to(F, invert(hi), br->label);
+        br_land(F, skip);
+    }
+    return 1;
 }
 
 /* A 64-bit comparison into `dst`: the high words decide unless they are
@@ -1668,6 +1776,13 @@ static void logic_half(struct xt_fn *F, int op, int d, int s, unsigned long c,
     xt_alu(F->t, op, d, s, tmp);
 }
 
+/* May a result pair starting at d be written while the pair at s is still
+ * being read? When they are the same pair or share no register. */
+static int pair_fits(int d, int s)
+{
+    return d == s || d - s >= 2 || s - d >= 2;
+}
+
 /* Every 64-bit operation that is not a call. Returns 0 for one this does
  * not handle, which the caller refuses by name. */
 static int gen_ins64(struct xt_fn *F, int n)
@@ -1678,6 +1793,11 @@ static int gen_ins64(struct xt_fn *F, int n)
 
     switch (i->op) {
     case IR_CONST:
+        if (in_reg(F, i->dst)) {             /* straight into its pair */
+            li(F, F->loc[i->dst], (long long)(i->imm & 0xffffffffL));
+            li(F, F->loc[i->dst] + 1, (long long)((i->imm >> 32) & 0xffffffffL));
+            return 1;
+        }
         li(F, A_LO, (long long)(i->imm & 0xffffffffL));
         li(F, A_HI, (long long)((i->imm >> 32) & 0xffffffffL));
         wr64(F, i->dst, A_LO, A_HI);
@@ -1698,6 +1818,42 @@ static int gen_ins64(struct xt_fn *F, int n)
          * below an addend (unsigned), the borrow the minuend being below
          * the subtrahend -- each a branch over the +-1. */
         int skip;
+        /* In the pairs themselves where they allow it -- the result's
+         * pair the same as each operand's or apart from it -- instead
+         * of through A and B and back (four copies in, two out, around
+         * a four-instruction add) */
+        if (in_reg(F, i->dst) && in_reg(F, i->a) &&
+            (i->imm_b || in_reg(F, i->b))) {
+            int dl = F->loc[i->dst], dh = dl + 1;
+            int al = F->loc[i->a], ah = al + 1, bl, bh;
+            if (i->imm_b) {
+                operand_b64(F, i, B_LO, B_HI);
+                bl = B_LO; bh = B_HI;
+            } else {
+                bl = F->loc[i->b]; bh = bl + 1;
+            }
+            int ok = (dl == al || dl - al >= 2 || al - dl >= 2) &&
+                     (dl == bl || dl - bl >= 2 || bl - dl >= 2) &&
+                     !(dl == al && dl == bl);
+            if (ok && i->op == IR_ADD) {
+                /* the carry: the low sum below an addend still intact */
+                int kept = dl != bl ? bl : al;
+                xt_alu(t, XT_ADD, dl, al, bl);
+                xt_alu(t, XT_ADD, dh, ah, bh);
+                skip = br_place(F, test_rr(XT_BGEU, dl, kept));
+                xt_addi(t, dh, dh, 1);
+                br_land(F, skip);
+                return 1;
+            }
+            if (ok && i->op == IR_SUB) {
+                xt_alu(t, XT_SUB, dh, ah, bh);
+                skip = br_place(F, test_rr(XT_BGEU, al, bl));
+                xt_addi(t, dh, dh, -1);
+                br_land(F, skip);
+                xt_alu(t, XT_SUB, dl, al, bl);
+                return 1;
+            }
+        }
         rd64(F, i->a, A_LO, A_HI);
         operand_b64(F, i, B_LO, B_HI);
         if (i->op == IR_ADD) {
@@ -1720,42 +1876,59 @@ static int gen_ins64(struct xt_fn *F, int n)
     }
     case IR_AND: case IR_OR: case IR_XOR: {
         int op = i->op == IR_AND ? XT_AND : i->op == IR_OR ? XT_OR : XT_XOR;
-        int al, ah, bl, bh;
+        int al, ah, bl, bh, dl = A_LO, dh = A_HI, direct = 0;
         src64(F, i->a, A_LO, A_HI, &al, &ah);
-        if (i->imm_b) {
-            logic_half(F, op, A_LO, al, (unsigned long)i->imm, B_LO);
-            logic_half(F, op, A_HI, ah, (unsigned long)i->imm >> 32, B_LO);
-            wr64(F, i->dst, A_LO, A_HI);
-            return 1;
+        if (!i->imm_b)
+            src64(F, i->b, B_LO, B_HI, &bl, &bh);
+        else
+            bl = bh = -1;
+        /* straight into the result's pair when it is each operand's or
+         * apart from it (as add and sub) */
+        if (in_reg(F, i->dst)) {
+            int r = F->loc[i->dst];
+            direct = (r == al || r - al >= 2 || al - r >= 2) &&
+                     (bl < 0 || r == bl || r - bl >= 2 || bl - r >= 2);
+            if (direct) { dl = r; dh = r + 1; }
         }
-        src64(F, i->b, B_LO, B_HI, &bl, &bh);
-        xt_alu(t, op, A_LO, al, bl);
-        xt_alu(t, op, A_HI, ah, bh);
-        wr64(F, i->dst, A_LO, A_HI);
+        if (i->imm_b) {
+            logic_half(F, op, dl, al, (unsigned long)i->imm, B_LO);
+            logic_half(F, op, dh, ah, (unsigned long)i->imm >> 32, B_LO);
+        } else {
+            xt_alu(t, op, dl, al, bl);
+            xt_alu(t, op, dh, ah, bh);
+        }
+        if (!direct)
+            wr64(F, i->dst, A_LO, A_HI);
         return 1;
     }
     case IR_NEG: {
         /* 0 - x: the low word negated, the high word negated less a
          * borrow when the low word was not 0 */
-        int al, ah, skip;
+        int al, ah, skip, dl = A_LO, dh = A_HI, direct;
         src64(F, i->a, A_LO, A_HI, &al, &ah);
-        xt_neg(t, A_HI, ah);
-        xt_neg(t, A_LO, al);
-        skip = br_place(F, test_z(XT_BEQZ, A_LO));
-        xt_addi(t, A_HI, A_HI, -1);
+        direct = in_reg(F, i->dst) && pair_fits(F->loc[i->dst], al);
+        if (direct) { dl = F->loc[i->dst]; dh = dl + 1; }
+        xt_neg(t, dh, ah);
+        xt_neg(t, dl, al);
+        skip = br_place(F, test_z(XT_BEQZ, dl));
+        xt_addi(t, dh, dh, -1);
         br_land(F, skip);
-        wr64(F, i->dst, A_LO, A_HI);
+        if (!direct)
+            wr64(F, i->dst, A_LO, A_HI);
         return 1;
     }
     case IR_BNOT: {
         /* ~x = -x - 1, a word at a time */
-        int al, ah;
+        int al, ah, dl = A_LO, dh = A_HI, direct;
         src64(F, i->a, A_LO, A_HI, &al, &ah);
-        xt_neg(t, A_LO, al);
-        xt_addi(t, A_LO, A_LO, -1);
-        xt_neg(t, A_HI, ah);
-        xt_addi(t, A_HI, A_HI, -1);
-        wr64(F, i->dst, A_LO, A_HI);
+        direct = in_reg(F, i->dst) && pair_fits(F->loc[i->dst], al);
+        if (direct) { dl = F->loc[i->dst]; dh = dl + 1; }
+        xt_neg(t, dl, al);
+        xt_addi(t, dl, dl, -1);
+        xt_neg(t, dh, ah);
+        xt_addi(t, dh, dh, -1);
+        if (!direct)
+            wr64(F, i->dst, A_LO, A_HI);
         return 1;
     }
     case IR_SHL: case IR_SHR: {
@@ -1812,6 +1985,22 @@ static int gen_ins64(struct xt_fn *F, int n)
         int addr = rdr(F, i->a, ADDR);
         if (i->vol)
             xt_memw(t);
+        if (i->size == 8 && in_reg(F, i->dst) &&
+            (i->natural || (F->loc[i->dst] != addr &&
+                            F->loc[i->dst] + 1 != addr))) {
+            /* straight into its pair; the half holding the address last
+             * (a misaligned load assembles in scratches of its own, and
+             * needs one free when it overwrites its base: not then) */
+            int dl = F->loc[i->dst], dh = dl + 1;
+            if (dl == addr) {
+                ld_any(F, dh, addr, i->memoff + 4, 4, 0, i->natural, SCR, -1);
+                ld_any(F, dl, addr, i->memoff, 4, 0, i->natural, SCR, -1);
+            } else {
+                ld_any(F, dl, addr, i->memoff, 4, 0, i->natural, SCR, -1);
+                ld_any(F, dh, addr, i->memoff + 4, 4, 0, i->natural, SCR, -1);
+            }
+            return 1;
+        }
         if (i->size == 8) {
             ld_any(F, A_LO, addr, i->memoff, 4, 0, i->natural, SCR, -1);
             ld_any(F, A_HI, addr, i->memoff + 4, 4, 0, i->natural, SCR, -1);
@@ -1825,14 +2014,15 @@ static int gen_ins64(struct xt_fn *F, int n)
         return 1;
     }
     case IR_STORE: {
-        int addr = rdr(F, i->a, ADDR);
-        rd64(F, i->b, A_LO, A_HI);
+        int addr = rdr(F, i->a, ADDR), vl, vh;
+        /* from the value's own pair, not a copy of it */
+        src64(F, i->b, A_LO, A_HI, &vl, &vh);
         if (i->vol)
             xt_memw(t);
-        st_any(F, A_LO, addr, i->memoff, i->size == 8 ? 4 : i->size,
+        st_any(F, vl, addr, i->memoff, i->size == 8 ? 4 : i->size,
                i->natural, SCR);
         if (i->size == 8)
-            st_any(F, A_HI, addr, i->memoff + 4, 4, i->natural, SCR);
+            st_any(F, vh, addr, i->memoff + 4, 4, i->natural, SCR);
         return 1;
     }
     case IR_SELECT: {
@@ -1976,12 +2166,37 @@ static void gen_call(struct xt_fn *F, int n)
         }
         if (ns_)
             set_args_half(F, sd_, sv_, sh_, ns_);
-        /* narrower than a word: extended, as GCC's callers do */
+        /* narrower than a word: extended, as GCC's callers do -- but a
+         * constant whose value is already its own extension (`trace(6,
+         * 105, 0)` into unsigned char and short) was written as that */
         for (int k = 0; k < i->nargs; k++) {
             struct ir_arg *a = &i->argv[k];
             struct xpiece *pc = &pl[k].p[0];
             if (a->is_struct || pc->reg < 0 || a->size >= 4)
                 continue;
+            if (F->kdef && a->vreg >= 0 && a->vreg < F->fn->nvregs &&
+                F->kdef[a->vreg] == 1) {
+                long kv = F->kval[a->vreg];
+                int sg = a->ty ? ty_signed_int(a->ty) : 1;
+                long lo = sg ? -(1L << (8 * a->size - 1)) : 0;
+                long hi = sg ? (1L << (8 * a->size - 1)) - 1
+                             : (1L << (8 * a->size)) - 1;
+                if (kv >= lo && kv <= hi)
+                    continue;
+            }
+            /* ...and a narrow load or extension that already made it:
+             * `trace(t->prio)` from l8ui was extended again */
+            if (F->kext && a->vreg >= 0 && a->vreg < F->fn->nvregs &&
+                F->kext[a->vreg] != 0 && F->kext[a->vreg] != 255) {
+                int ks = F->kext[a->vreg] / 2, kg = F->kext[a->vreg] & 1;
+                int sg = a->ty ? ty_signed_int(a->ty) : 1;
+                /* zero-extended from ks bytes: in range for an unsigned
+                 * argument as wide, or any argument wider; sign-extended:
+                 * for a signed argument at least as wide */
+                if ((!kg && ks <= a->size && (!sg || ks < a->size)) ||
+                    (kg && sg && ks <= a->size))
+                    continue;
+            }
             ext_reg(F, OUT_ARG(pc->reg), OUT_ARG(pc->reg), a->size,
                     a->ty ? ty_signed_int(a->ty) : 1);
         }
@@ -2483,6 +2698,18 @@ static void gen_ins(struct xt_fn *F, int n)
 
     case IR_ADD: case IR_SUB: case IR_MUL:
     case IR_AND: case IR_OR:  case IR_XOR: {
+        if (F->addx && F->addx[n] > 0) {
+            const struct ir_ins *sh = &fn->ins[F->addx[n] - 1];
+            int other = i->a == sh->dst ? i->b : i->a;
+            int rs = rdr(F, sh->a, ACC);
+            int ro = rdr(F, other, rs == ACC ? TMP : ACC);
+            int d = wreg(F, i->dst, ACC);
+            xt_alu(t, sh->imm == 1 ? XT_ADDX2 : sh->imm == 2 ? XT_ADDX4
+                                                             : XT_ADDX8,
+                   d, rs, ro);
+            wrote(F, i->dst, d);
+            return;
+        }
         int op = i->op == IR_ADD ? XT_ADD
                : i->op == IR_SUB ? XT_SUB
                : i->op == IR_AND ? XT_AND
@@ -2533,6 +2760,8 @@ static void gen_ins(struct xt_fn *F, int n)
         return;
     }
     case IR_SHL: case IR_SHR: {
+        if (F->addx && F->addx[n] < 0)
+            return;                     /* its add is an addx (plan_addx) */
         int ra_ = rdr(F, i->a, ACC);
         int d = wreg(F, i->dst, ACC);
         if (i->imm_b) {
@@ -2602,6 +2831,10 @@ static void gen_ins(struct xt_fn *F, int n)
                 if (nx->op == IR_BRZ)
                     x = invert(x);
                 branch_to(F, x, nx->label);
+                F->skip_next = 1;
+                return;
+            }
+            if (fuse && cmp64_branch(F, i, nx)) {
                 F->skip_next = 1;
                 return;
             }
@@ -2981,8 +3214,10 @@ static void gen_ins(struct xt_fn *F, int n)
             }
         }
         code_asm_rels(t, ia, t->len, ia->rel, ia->nrel);   /* its relocations */
-        for (int k = 0; k < ia->codelen; k++)
-            code_byte(t, ia->code[k]);
+        /* the bytes, padded at each alignment for where they land: a
+         * directive's data is never run, and zeros pad it */
+        code_put_asm(t, ia->code, ia->codelen, ia->drange, ia->ndrange,
+                     ia->arange, ia->narange, CODE_FILL_ZERO);
         /* Out, through an address: the address is live across the asm
          * (regalloc.c counts it so), so it is still there. An "m" output
          * was written BY the template through the address its register
@@ -3420,6 +3655,83 @@ static void fill_pool(struct xt_fn *F)
     }
 }
 
+/* `(s << k) + o`, k 1..3, as addx2/4/8 (GCC's array indexing): the
+ * shift is left out and the add reads s itself, when the shift's result
+ * has that add as its only reader, in the same straight run with no call,
+ * s is a temp or parameter nothing redefines in between, and the add is
+ * the next instruction or s is read at or after it -- so its register (or
+ * slot) still holds it there. */
+struct lu_ctx { int *last; int n, at; };
+static void lu_cb(int v, void *ctx)
+{
+    struct lu_ctx *c = ctx;
+    if (v >= 0 && v < c->n && c->last[v] < c->at)
+        c->last[v] = c->at;
+}
+struct rd_ctx { int v, hit; };
+static void rd_cb(int v, void *ctx)
+{
+    struct rd_ctx *c = ctx;
+    if (v == c->v)
+        c->hit = 1;
+}
+
+static void plan_addx(struct xt_fn *F)
+{
+    struct ir_func *fn = F->fn;
+    int nv = fn->nvregs, *last;
+    if (!F->usecnt || getenv("EMBCC_NO_ADDX"))
+        return;
+    F->addx = xcalloc((size_t)(fn->nins ? fn->nins : 1), sizeof *F->addx);
+    last = xmalloc((size_t)(nv ? nv : 1) * sizeof *last);
+    for (int v = 0; v < nv; v++)
+        last[v] = -1;
+    for (int n = 0; n < fn->nins; n++) {
+        struct lu_ctx c = { last, nv, n };
+        ra_each_use(&fn->ins[n], lu_cb, &c);
+    }
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *sh = &fn->ins[n];
+        int x = sh->dst, s = sh->a, j;
+        if (sh->op != IR_SHL || !sh->imm_b || sh->w != 4 || sh->flt ||
+            sh->imm < 1 || sh->imm > 3 || x < fn->nvars || x >= nv ||
+            F->usecnt[x] != 1 || s < 0 || s >= nv || s == x ||
+            (s < fn->nvars && s >= fn->nparams))
+            continue;
+        for (j = n + 1; j < fn->nins; j++) {
+            const struct ir_ins *q = &fn->ins[j];
+            if (q->op == IR_LABEL || q->op == IR_JMP || q->op == IR_BRZ ||
+                q->op == IR_BRNZ || q->op == IR_CALL || q->op == IR_RET ||
+                q->op == IR_ASM || q->op == IR_SWITCH || q->dst == s) {
+                j = fn->nins;
+                break;
+            }
+            {
+                struct rd_ctx rc = { x, 0 };
+                ra_each_use(q, rd_cb, &rc);
+                if (rc.hit)
+                    break;
+            }
+        }
+        if (j >= fn->nins)
+            continue;
+        {
+            const struct ir_ins *ad = &fn->ins[j];
+            if (ad->op != IR_ADD || ad->w != 4 || ad->flt || ad->imm_b ||
+                (ad->a == x) == (ad->b == x) ||
+                /* right after the shift nothing can have reused s's
+                 * register (the shift itself is left out); further on,
+                 * s must still be live */
+                (j > n + 1 && last[s] < j) ||
+                F->addx[n] || F->addx[j])
+                continue;
+            F->addx[n] = -1;
+            F->addx[j] = n + 1;
+        }
+    }
+    free(last);
+}
+
 static void gen_func(struct ir_func *fn, struct code *t, struct xt_sites *st,
                      int keep_vars)
 {
@@ -3452,7 +3764,31 @@ static void gen_func(struct ir_func *fn, struct code *t, struct xt_sites *st,
         free(pin);
         if (fn->nvregs) {
             F.usecnt = xmalloc((size_t)fn->nvregs * sizeof *F.usecnt);
+            F.kdef = xcalloc((size_t)fn->nvregs, 1);
+            F.kval = xcalloc((size_t)fn->nvregs, sizeof *F.kval);
+            F.kext = xcalloc((size_t)fn->nvregs, 1);
+            for (int q = 0; q < fn->nins; q++) {
+                const struct ir_ins *in = &fn->ins[q];
+                int dv = in->dst;
+                if (dv < 0 || dv >= fn->nvregs || in->op == IR_STVAR)
+                    continue;
+                if (F.kdef[dv] == 0 && in->op == IR_CONST && !in->flt &&
+                    in->w <= 8) {
+                    F.kdef[dv] = 1;
+                    F.kval[dv] = in->imm;
+                } else {
+                    F.kdef[dv] = 2;      /* written twice, or not a constant */
+                }
+                if (F.kext[dv] == 0 && !in->flt && in->w == 4 &&
+                    (in->op == IR_LOAD || in->op == IR_EXT) &&
+                    (in->size == 1 || in->size == 2) && F.kdef[dv] == 2 &&
+                    !(in->op == IR_LOAD && in->sign && in->size == 1))
+                    F.kext[dv] = (unsigned char)(in->size * 2 + !!in->sign);
+                else
+                    F.kext[dv] = 255;     /* written twice, or not one */
+            }
             ra_count_vreg_uses(fn, F.usecnt);
+            plan_addx(&F);          /* after the counts it reads */
         }
         /* EMBCC_XT_RA_MAX=N leaves only the first N vregs in registers --
          * always correct -- so a miscompile that comes and goes with N
@@ -3482,8 +3818,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct xt_sites *st,
     {
     int len0, nl0 = fn->nlines;
     int se0 = F.st->next, ss0 = F.st->nstr, sg0 = F.st->ng, sf0 = F.st->nf;
-    char *longb = NULL;
-    int nlongb = 0;
+    char *longb = NULL, *wideb = NULL;
+    int nlongb = 0, nwideb = 0;
     /* aligned(N), or an asm that aligns its own bytes: the ENTRY is on
      * it, after the pool, so the pad before the pool is sized per attempt */
     int fal = cg_fn_align(fn);
@@ -3506,6 +3842,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct xt_sites *st,
     F.fb = XT_SP;
     F.longb = longb;
     F.nlongb = nlongb;
+    F.wideb = wideb;
+    F.nwideb = nwideb;
     while (fal > 4 && (t->len + 4 * F.npool) % fal)
         code_byte(t, 0);
     if (fal > f->code_align)
@@ -3564,6 +3902,21 @@ static void gen_func(struct ir_func *fn, struct code *t, struct xt_sites *st,
                            F.fix[i].label, fn->name);
         if (F.fix[i].kind == FX_FAR)
             continue;               /* its literal is the label's address */
+        if (F.fix[i].kind == FX_BN) {
+            if (xt_patch_bz_n(t, F.fix[i].at, target))
+                continue;
+            if (nwideb < F.nfix) {
+                wideb = xrealloc(wideb, (size_t)F.nfix);
+                memset(wideb + nwideb, 0, (size_t)(F.nfix - nwideb));
+                nwideb = F.nfix;
+            }
+            if (wideb[i])
+                internal_error("xtensa: %s: a wide branch was patched as a "
+                               "narrow one", fn->name);
+            wideb[i] = 1;
+            nfail++;
+            continue;
+        }
         if (!xt_patch_branch(t, F.fix[i].at, target)) {
             if (nlongb < F.nfix) {
                 longb = xrealloc(longb, (size_t)F.nfix);
@@ -3587,6 +3940,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct xt_sites *st,
         break;
     }                                   /* the attempts */
     free(longb);
+    free(wideb);
     }
     fill_pool(&F);
     code_mark_data(t, F.pool_at, F.pool_at + 4 * F.npool);
@@ -3613,6 +3967,10 @@ static void gen_func(struct ir_func *fn, struct code *t, struct xt_sites *st,
     ra_debug_finish(fn, t->len, F.loc, NULL, 0, F.slot, -1, F.wide, 1, 4);
     f->stack_bytes = (int)F.frame;
     free(F.usecnt);
+    free(F.kdef);
+    free(F.kval);
+    free(F.kext);
+    free(F.addx);
     free(F.slot);
     cg_note_labels(fn, F.label_off);
     free(F.label_off);
@@ -3628,8 +3986,23 @@ static void gen_func(struct ir_func *fn, struct code *t, struct xt_sites *st,
 
 /* With the allocator on, a function is generated with the pair pass and
  * without it, and the shorter is kept (the RV32 and MIPS arrangement). */
+static void gen_func_best1(struct ir_func *fn, struct code *t,
+                           struct xt_sites *st, int keep_vars);
+
+/* The density option's 16-bit forms (emit.h, xt_set_narrow) for the
+ * code generator's own instructions, as GNU as narrows GCC's: a third
+ * off a function's size, and fewer fetches. EMBCC_NO_DENSITY=1 keeps
+ * every instruction at three bytes. */
 static void gen_func_best(struct ir_func *fn, struct code *t,
                           struct xt_sites *st, int keep_vars)
+{
+    int was = xt_set_narrow(xtasm_density() && !getenv("EMBCC_NO_DENSITY"));
+    gen_func_best1(fn, t, st, keep_vars);
+    xt_set_narrow(was);
+}
+
+static void gen_func_best1(struct ir_func *fn, struct code *t,
+                           struct xt_sites *st, int keep_vars)
 {
     int at = t->len, next = st->next, nstr = st->nstr, ng = st->ng,
         nf = st->nf, with;

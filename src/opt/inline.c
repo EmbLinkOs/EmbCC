@@ -104,6 +104,18 @@ static int g_site_hot, g_site_size;
  * speed measurement moves; -Os is the level that asked for size.
  */
 #define INLINE_SIZE_CALLEE 6
+/* ...and a function DECLARED inline gets more at -Os, counted as it will
+ * be once copied (inl_size: no parameter slots, moves or constants), as
+ * GCC honours the keyword there. An RTOS's list helpers -- four loads and
+ * stores, `static inline` in a header -- were 24 raw instructions, so
+ * every call stayed a call, and on Xtensa's windowed ABI each one an
+ * entry, a retw and a call8 (#184: GCC inlines them all). Measured over
+ * lib/libc at -Os against the plain rule (2026-11-08), budgets 10 to 20:
+ * 12 is the smallest on every target tried -- AVR -0.21%, Cortex-M4
+ * -0.16%, Xtensa -0.10%, RV32 -0.06% -- and admits the list unlink (12
+ * as optimized); 13 grows RV32, Cortex-M4 and Xtensa, 20 all four.
+ * Raising the plain budget instead grew lib/libc 1-3% everywhere. */
+#define INLINE_SIZE_DECLARED 12
 
 static int vmap(const struct rmp *r, int x)
 {
@@ -251,6 +263,13 @@ static int inlinable(struct ir_func *cf, int force, int sole, const char **why,
     int budget = small ? INLINE_SIZE_CALLEE
                : g_site_hot ? INLINE_HOT_CALLEE : INLINE_MAX_CALLEE;
     int size = small ? cf->nins : inl_size(cf);
+    if (small && c->def_inline) {
+        int keep = g_opt_max;
+        g_opt_max = 1;                  /* inl_size's optimized count */
+        size = inl_size(cf);
+        g_opt_max = keep;
+        budget = INLINE_SIZE_DECLARED;
+    }
     if (!force && size > budget &&
         !(sole == 1 && cf->nins <= INLINE_SOLE_CALLEE) &&
         !(sole == 2 && !g_opt_size && cf->nins <= INLINE_TWO_CALLEE)) {
@@ -268,7 +287,12 @@ static int inlinable(struct ir_func *cf, int force, int sole, const char **why,
         return 0;
     }
     if (cf->neh)             { *why = "callee-has-exception-regions"; return 0; }
-    if (c->ret_ty->kind == TY_STRUCT) { *why = "returns-a-struct"; return 0; }
+    /* A struct (or _Complex) result used to be refused here, and an
+     * RTOS wrote its time constructors as macros for it. It comes back
+     * as the address of the value (IR_RET's `a`, `size` bytes), and the
+     * call's result is the address of a buffer -- so inlined, the value
+     * is copied into a local of the caller's, or, where every return
+     * names the same local, that local IS the result (inline_call). */
     /* FLOATS used to be refused here too -- a float return and a float
      * local, 82 and 117 call sites across lib/libc and lib/libcxx
      * against the 218 that were inlined. The reason was that a float
@@ -297,16 +321,20 @@ static int inlinable(struct ir_func *cf, int force, int sole, const char **why,
      * descriptors, and SROA looks at it in the caller exactly as it
      * would have in the callee -- which is what lets is_inf_d's
      * `union { double d; u64 u; }` come across. */
+    /* A struct or _Complex parameter is bound by copying from the address
+     * its argument vreg holds (inline_call; args_match checks the call
+     * passes it so). */
     for (int k = 0; k < cf->nparams && k < cf->nvars; k++) {
         struct type *pt = c->var_tys[k];
+        if (pt && pt->kind == TY_STRUCT && pt->complete)
+            continue;
         if (!pt || ty_size(pt) > 8 || ty_is_complex(pt) ||
             !(ty_is_integer(pt) || pt->kind == TY_PTR || ty_is_float(pt))) {
             *why = "parameter-is-not-a-simple-scalar";
             return 0;
         }
     }
-    if (ty_is_complex(c->ret_ty) || c->ret_ty->kind == TY_LDOUBLE ||
-        c->ret_ty->kind == TY_INT128) {
+    if (c->ret_ty->kind == TY_LDOUBLE || c->ret_ty->kind == TY_INT128) {
         *why = "returns-a-value-wider-than-a-vreg";
         return 0;
     }
@@ -332,12 +360,55 @@ static int inlinable(struct ir_func *cf, int force, int sole, const char **why,
             *why = "callee-uses-a-computed-goto";
             return 0;
         }
-        if (in->op == IR_CALL && in->retsize) {
-            *why = "callee-calls-a-struct-returning-function";
-            return 0;
-        }
+        /* A struct-returning call in the body comes across with its
+         * result buffer moved past the caller's (inline_call). */
     }
     return 1;
+}
+
+/* Does this call pass each parameter as the callee binds it: a struct or
+ * _Complex as the address of the value, anything else as the value? */
+static int args_match(const struct ir_ins *call, const struct ir_func *cf)
+{
+    if (call->nargs < cf->nparams || call->ret_x87 || call->ret_ldref)
+        return 0;
+    for (int k = 0; k < cf->nparams && k < cf->nvars; k++) {
+        const struct type *pt = cf->src->var_tys[k];
+        /* a one-member struct passed as the integer it holds (sema's
+         * param_scalar) is bound as a scalar is */
+        int agg = pt && pt->kind == TY_STRUCT &&
+                  !(k < MAX_PARAMS && cf->src->param_scalar[k]);
+        if (agg != !!call->argv[k].is_struct)
+            return 0;
+    }
+    return 1;
+}
+
+/* The local every `return` of a struct-returning callee names, when
+ * there is one: `T t = {...}; return t;` -- each IR_RET's `a` made by
+ * `addr` of the same local, and nothing else defines it. Then the
+ * result needs no copy: it is that local, in the caller. -1 if not. */
+static int ret_local(const struct ir_func *cf)
+{
+    int k = -1;
+    for (int i = 0; i < cf->nins; i++) {
+        const struct ir_ins *r = &cf->ins[i];
+        if (r->op != IR_RET)
+            continue;
+        if (r->a < cf->nvars || r->a >= cf->nvregs)
+            return -1;
+        int def = -1, ndef = 0;
+        for (int j = 0; j < cf->nins; j++)
+            if (def_target(&cf->ins[j]) == r->a) {
+                def = j;
+                ndef++;
+            }
+        if (ndef != 1 || cf->ins[def].op != IR_ADDR ||
+            (k >= 0 && cf->ins[def].a != k))
+            return -1;
+        k = cf->ins[def].a;
+    }
+    return k;
 }
 
 /* Splice the body of cf in place of the call at fn->ins[ci]. */
@@ -345,18 +416,32 @@ static void inline_call(struct ir_func *fn, int ci, struct ir_func *cf)
 {
     int V = fn->nvars, N = fn->nvregs, L = fn->nlabels;
     int v = cf->nvars, n = cf->nvregs, nparams = cf->nparams;
+    /* A struct result: the local the callee returns (ret_local), else a
+     * new local of the caller's -- `res`, one past the callee's -- that
+     * each return copies into. The call's result is its address. */
+    /* (A one-member struct the ABI returns as the integer it holds --
+     * ret_scalar -- is a scalar result to both sides, and takes the
+     * ordinary path.) */
+    int sret = cf->src->ret_ty->kind == TY_STRUCT && !cf->src->ret_scalar;
+    int direct = sret ? ret_local(cf) : -1;
+    int xl = sret && direct < 0 ? 1 : 0;        /* the extra local, res */
+    int res = V + v;
 
     /* 1. Open room: shift the caller's temps up by v (locals stay put). */
-    struct rmp shift = { 0, V, v, 0, 0 };
+    struct rmp shift = { 0, V, v + xl, 0, 0 };
     for (int i = 0; i < fn->nins; i++)
         remap_ins(&fn->ins[i], &shift);
 
     struct ir_ins call = fn->ins[ci];    /* the (now-shifted) call */
     int dst = call.dst;
     int after = L + cf->nlabels;
+    int X = N + xl + n;                  /* temps this splice invents */
+    /* the callee's struct-returning calls' buffers, past the caller's */
+    int sbase = (fn->scratch_bytes + 15) & ~15;
 
     /* 2. Build param stores + the remapped body + one exit label. */
-    struct ir_ins *buf = xmalloc((size_t)(nparams + 2 * cf->nins + 2) * sizeof *buf);
+    struct ir_ins *buf = xmalloc((size_t)(2 * nparams + 4 * cf->nins + 4) *
+                                 sizeof *buf);
     int m = 0;
     /* Every instruction the inliner INVENTS still has a source location:
      * the call it replaces (R3). A pass that builds an instruction from
@@ -364,6 +449,18 @@ static void inline_call(struct ir_func *fn, int ci, struct ir_func *cf)
      * downstream notices -- which is exactly what the verifier's location
      * check now catches, and what it caught here. */
     for (int k = 0; k < nparams; k++) {
+        if (call.argv[k].is_struct) {    /* the value at that address */
+            struct ir_ins *ad = &buf[m++];
+            ins_blank(ad);
+            ad->op = IR_ADDR; ad->dst = X++; ad->a = V + k;
+            ad->line = call.line; ad->col = call.col;
+            struct ir_ins *cp = &buf[m++];
+            ins_blank(cp);
+            cp->op = IR_MEMCPY; cp->a = ad->dst; cp->b = call.argv[k].vreg;
+            cp->size = cf->locals[k].size;
+            cp->line = call.line; cp->col = call.col;
+            continue;
+        }
         struct ir_ins *s = &buf[m++];
         memset(s, 0, sizeof *s);
         s->op = IR_STVAR;
@@ -373,7 +470,7 @@ static void inline_call(struct ir_func *fn, int ci, struct ir_func *cf)
         s->line = call.line;             /* the argument was written there */
         s->col = call.col;
     }
-    struct rmp cm = { 1, V, N, v, L };
+    struct rmp cm = { 1, V, N + xl, v, L };
     for (int i = 0; i < cf->nins; i++) {
         struct ir_ins in = cf->ins[i];
         /* An asm's operands are renamed in place through each_read, and
@@ -394,10 +491,37 @@ static void inline_call(struct ir_func *fn, int ci, struct ir_func *cf)
         if (in.op == IR_CALL && in.argv) {
             in.argv = ir_args_copy(in.argv, in.nargs);
         }
+        if (in.op == IR_CALL) {          /* its buffers, past the caller's */
+            if (in.retsize || in.ret_ldref)
+                in.scratch += sbase;
+            for (int k = 0; k < in.nargs; k++)
+                if (in.argv[k].byref && target_win64_abi())
+                    in.argv[k].copy_off += sbase;
+        }
         remap_ins(&in, &cm);
         if (in.op == IR_SWITCH)          /* its table, renumbered like its default */
             in.jt = ir_jt_clone(fn, cf, in.jt, L);
-        if (in.op == IR_RET) {
+        if (in.op == IR_RET && sret) {
+            if (in.a >= 0 && dst >= 0 && direct < 0) {
+                struct ir_ins *ad = &buf[m++];
+                ins_blank(ad);
+                ad->op = IR_ADDR; ad->dst = X++; ad->a = res;
+                ad->line = in.line; ad->col = in.col;
+                struct ir_ins *cp = &buf[m++];
+                ins_blank(cp);
+                cp->op = IR_MEMCPY; cp->a = ad->dst; cp->b = in.a;
+                cp->size = in.size;
+                cp->natural = in.natural;
+                cp->line = in.line; cp->col = in.col;
+            }
+            if (i != cf->nins - 1) {
+                struct ir_ins *jp = &buf[m++];
+                ins_blank(jp);
+                jp->op = IR_JMP; jp->label = after;
+                jp->line = in.line;
+                jp->col = in.col;
+            }
+        } else if (in.op == IR_RET) {
             if (in.a >= 0 && dst >= 0) {
                 struct ir_ins *mv = &buf[m++];
                 ins_blank(mv);
@@ -436,7 +560,7 @@ static void inline_call(struct ir_func *fn, int ci, struct ir_func *cf)
      * up"). So the path writes 0, as irgen's own falling-off return of
      * an integer does: the result has a definition wherever it is read,
      * and the value is the same every time. */
-    if (dst >= 0 && cf->nins > 0) {
+    if (dst >= 0 && cf->nins > 0 && !sret) {
         enum ir_op last = cf->ins[cf->nins - 1].op;
         if (last != IR_RET && last != IR_JMP && last != IR_UD2 &&
             last != IR_SWITCH && last != IR_IGOTO) {
@@ -455,6 +579,13 @@ static void inline_call(struct ir_func *fn, int ci, struct ir_func *cf)
      * the body was spliced in. This is the §9.1 exception, marked rather
      * than left as an absent location the verifier cannot tell from a bug. */
     lb->synth = 1;
+    if (sret && dst >= 0) {              /* the result: where the value is */
+        struct ir_ins *ad = &buf[m++];
+        ins_blank(ad);
+        ad->op = IR_ADDR; ad->dst = dst;
+        ad->a = direct >= 0 ? V + direct : res;
+        ad->line = call.line; ad->col = call.col;
+    }
 
     /* 3. Splice buf over the call. */
     int newn = fn->nins - 1 + m;
@@ -467,7 +598,7 @@ static void inline_call(struct ir_func *fn, int ci, struct ir_func *cf)
     fn->ins = ni; fn->nins = newn; fn->cap = newn;
 
     /* 4. Grow vreg/label space and the caller's var metadata. */
-    fn->nvregs = N + n;
+    fn->nvregs = X;
     fn->nlabels = L + cf->nlabels + 1;
     /* ...and the stack-argument area: the callee's calls are the
      * caller's now. x86-64 sizes the frame from it, and a caller that
@@ -477,13 +608,21 @@ static void inline_call(struct ir_func *fn, int ci, struct ir_func *cf)
      * first). */
     if (cf->outgoing_bytes > fn->outgoing_bytes)
         fn->outgoing_bytes = cf->outgoing_bytes;
-    if (cf->scratch_bytes > fn->scratch_bytes)
-        fn->scratch_bytes = cf->scratch_bytes;
-    int nv = V + v;
+    /* The callee's scratch -- its struct-returning calls' buffers, a
+     * Win64 byref argument's copy -- is moved past the caller's (above):
+     * shared, a struct the caller still held could be overwritten by an
+     * inlined call's result. */
+    if (cf->scratch_bytes)
+        fn->scratch_bytes = sbase + cf->scratch_bytes;
+    int nv = V + v + xl;
     struct type **vt = xmalloc((size_t)(nv ? nv : 1) * sizeof *vt);
     int *va = xmalloc((size_t)(nv ? nv : 1) * sizeof *va);
     for (int k = 0; k < V; k++) { vt[k] = fn->src->var_tys[k]; va[k] = fn->src->var_aligns[k]; }
     for (int k = 0; k < v; k++) { vt[V + k] = cf->src->var_tys[k]; va[V + k] = cf->src->var_aligns[k]; }
+    if (xl) {
+        vt[res] = cf->src->ret_ty;
+        va[res] = ty_align(cf->src->ret_ty);
+    }
     fn->src->var_tys = vt;
     fn->src->var_aligns = va;
     /* Both representations grow together: the IR's per-slot descriptors are
@@ -505,7 +644,13 @@ static void inline_call(struct ir_func *fn, int ci, struct ir_func *cf)
             lo[k] = a <= ci ? a : a + d;
             hi[k] = b <= ci ? b : b + d;
         }
-        for (int k = 0; k < v; k++) { lo[V + k] = ci; hi[V + k] = ci + m; }
+        for (int k = 0; k < v + xl; k++) { lo[V + k] = ci; hi[V + k] = ci + m; }
+        /* the result's local is read through the call's result after the
+         * spliced region: it lives to the end of the function */
+        if (sret) {
+            int r = direct >= 0 ? V + direct : res;
+            hi[r] = newn;
+        }
         free(fn->var_scope_lo); free(fn->var_scope_hi);
         fn->var_scope_lo = lo; fn->var_scope_hi = hi;
     }
@@ -590,8 +735,7 @@ static void inline_unit_(struct ir_unit *iu)
             struct ir_func *cf = NULL;
             for (int i = 0; i < fn->nins; i++) {
                 struct ir_ins *in = &fn->ins[i];
-                if (in->op != IR_CALL || in->indirect || !in->callee ||
-                    in->retsize)
+                if (in->op != IR_CALL || in->indirect || !in->callee)
                     continue;
                 struct ir_func *c = func_ir(iu, in->callee);
                 const char *why = NULL;
@@ -605,6 +749,8 @@ static void inline_unit_(struct ir_unit *iu)
                     why = "callee-computes-in-__int128";
                 else if (in->callee->attr_noinline)
                     why = "callee-is-noinline";
+                else if (!args_match(in, c))
+                    why = "argument-passed-another-way";
                 else if (g_inline_always_only &&
                          !in->callee->attr_always_inline)
                     why = "not-always_inline-at-O0";
@@ -654,6 +800,13 @@ static void inline_unit_(struct ir_unit *iu)
                  * and -Os's is smaller. */
                 int bud = g_opt_size ? INLINE_SIZE_CALLEE : INLINE_MAX_CALLEE;
                 int sz = g_opt_size ? cf->nins : inl_size(cf);
+                if (g_opt_size && cf->src && cf->src->def_inline) {
+                    int keep = g_opt_max;
+                    g_opt_max = 1;
+                    sz = inl_size(cf);
+                    g_opt_max = keep;
+                    bud = INLINE_SIZE_DECLARED;
+                }
                 if (sz > bud && csole == 1)
                     bud = INLINE_SOLE_CALLEE;
                 else if (sz > bud && csole == 2 && !g_opt_size)

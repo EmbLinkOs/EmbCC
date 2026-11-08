@@ -4119,6 +4119,13 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
 {
     check_expr_main(u, f, sc, e);
     bitint_slot(sc, e);
+    /* An _Atomic struct named as a value is read whole, atomically, into
+     * a local of its own (irgen's atomic_read): the value is that copy */
+    if (sc && e->ty && e->ty->is_atomic && e->ty->kind == TY_STRUCT &&
+        !e->res_local && (e->kind == EXPR_VAR || e->kind == EXPR_DEREF ||
+                          e->kind == EXPR_MEMBER))
+        e->res_local = 1 + scope_add(sc, "<atomic value>",
+                                     ty_unqual(e->ty), NULL);
     if (sc) {
         bitint_slot_casts(sc, e->lhs);
         bitint_slot_casts(sc, e->rhs);
@@ -4399,6 +4406,12 @@ static void check_expr_main(struct unit *u, struct func *f, struct scope *sc,
         need_modifiable(u, e->lhs, e->line, e->col,
                         e->delta > 0 ? "increment" : "decrement");
         e->ty = e->lhs->ty;      /* qualified: see EXPR_ASSIGN */
+        /* an _Atomic float's ++: a compare-and-swap loop on its bits,
+         * whose expected value is kept in a local (irgen's
+         * atomic_float_rmw) */
+        if (sc && e->ty->is_atomic && ty_is_float(e->ty) && !e->res_local)
+            e->res_local = 1 + scope_add(sc, "<atomic expected>",
+                                         ty_unqual(e->ty), NULL);
         if (ty_is_complex(e->ty) && cx_lowering()) {   /* z += 1 */
             struct expr *one = cx_node(EXPR_NUM, e->line, ty_base(TY_INT, 0));
             one->num = 1;
@@ -4704,6 +4717,23 @@ static void check_expr_main(struct unit *u, struct func *f, struct scope *sc,
                 diag_warn_opt(diag_file(u), e->line, e->col, "cast-qual",
                               "cast discards '%s' qualifier from pointer "
                               "target type", q);
+            /* -Wcast-align: `(int *)c` of a `char *` promises an
+             * alignment the source did not have -- a fault on a target
+             * whose word access must be aligned. From `void *` is the
+             * way to say the address is known good, as with GCC; and a
+             * function or an incomplete type has no alignment to raise. */
+            if (fp->kind != TY_VOID && fp->kind != TY_FUNC &&
+                tp->kind != TY_VOID && tp->kind != TY_FUNC &&
+                (tp->kind != TY_STRUCT || tp->complete) &&
+                ty_align(tp) > ty_align(fp))
+                diag_warn_opt(diag_file(u), e->line, e->col,
+                              target_strict_align() &&
+                              diag_warning_enabled("cast-align")
+                                  ? "cast-align" : "cast-align-strict",
+                              "cast increases the required alignment from "
+                              "%d to %d bytes (%s to %s)", ty_align(fp),
+                              ty_align(tp), ty_name(e->rhs->ty),
+                              ty_name(e->cast_ty));
         }
         e->ty = e->cast_ty;
         break;
@@ -4793,6 +4823,11 @@ static void check_expr_main(struct unit *u, struct func *f, struct scope *sc,
             target_atomic_rmw_libcall(ty_size(e->lhs->ty)))
             e->var_index = scope_add(sc, "<atomic expected>",
                                      e->lhs->ty, NULL);
+        /* ...and an _Atomic float's, always (atomic_float_rmw) */
+        if (e->lhs->ty->is_atomic && ty_is_float(e->lhs->ty) &&
+            !e->res_local)
+            e->res_local = 1 + scope_add(sc, "<atomic expected>",
+                                         ty_unqual(e->lhs->ty), NULL);
         if ((ty_is_complex(e->lhs->ty) || ty_is_complex(e->rhs->ty)) &&
             cx_lowering()) {
             *e = *cx_update(u, e->lhs, e->op, e->rhs, 0);
@@ -8784,9 +8819,14 @@ static int asm_resolve_reg_ilp32(struct unit *u, struct stmt *s,
                     riscv ? "a0-a7 or t0-t6" : "r0-r3 or r12");
         return r;
     }
-    int has_r = 0, has_i = 0;
+    int has_r = 0, has_i = 0, has_f = 0;
     for (const char *p = c; *p; p++) {
         if (*p == 'r' || *p == 'g' || *p == 'm') has_r = 1;
+        /* ARM's register classes: l a low register (r0-r7, which every
+         * 16-bit Thumb instruction wants), h a high one (r8-r15); irgen
+         * picks one of the class (thumb/irgen.c) */
+        if (!riscv && (*p == 'l' || *p == 'h')) has_r = 1;
+        if (riscv && *p == 'f') has_f = 1;   /* an f register */
         if (*p == 'i' || *p == 'n' ||
             (!riscv && (*p == 'I' || *p == 'J' || *p == 'K' || *p == 'L' ||
                         *p == 'M')))
@@ -8803,6 +8843,8 @@ static int asm_resolve_reg_ilp32(struct unit *u, struct stmt *s,
     }
     if (has_r)
         return -2;
+    if (has_f)                      /* irgen gives it an f register */
+        return -3;
     return ASM_REG_INVALID;
 }
 
@@ -9878,15 +9920,47 @@ static int has_own_break(struct stmt *s)
  * recognized by name — sound because these genuinely never return, and
  * the worst case of a same-named user function is a missed diagnostic,
  * never a miscompile. diag_fatal is EmbCC's own, used at many tails. */
+/* A return, a goto or a label anywhere in the statements: the first is a
+ * way out, and the other two can carry control to the closing brace
+ * past what list_returns sees. */
+static int has_way_out(const struct stmt *s)
+{
+    for (; s; s = s->next) {
+        if (s->kind == STMT_RETURN || s->kind == STMT_GOTO ||
+            s->kind == STMT_LABEL || s->kind == STMT_EHREGION)
+            return 1;
+        if (has_way_out(s->thn) || has_way_out(s->els) ||
+            has_way_out(s->body) || has_way_out(s->initdecl))
+            return 1;
+    }
+    return 0;
+}
+
 int is_noreturn_call(const struct expr *e)
 {
     if (e->kind != EXPR_CALL || !e->name)
         return 0;
     if (e->callee && e->callee->is_noreturn)
         return 1;                       /* __attribute__((noreturn)) callee */
+    /* ...or one this file defines whose every path ends in such a call
+     * and that has no return: `static void cerr(...) { ...; diag_fatal(
+     * ...); }`, as GCC infers for a function it can see. The diagnostics
+     * alone ask (-Wreturn-type, -Wmaybe-uninitialized, -Wnull-dereference);
+     * nothing is compiled differently. */
+    if (e->callee && e->callee->body) {
+        struct func *cf = e->callee;
+        if (!cf->nr_inferred) {
+            cf->nr_inferred = 2;        /* a recursive call returns */
+            cf->nr_inferred = !has_way_out(cf->body) &&
+                              list_returns(cf->body) ? 1 : 3;
+        }
+        if (cf->nr_inferred == 1)
+            return 1;
+    }
     static const char *const nr[] = {
-        "exit", "abort", "_Exit", "diag_fatal",
+        "exit", "abort", "_Exit", "quick_exit", "diag_fatal",
         "__builtin_unreachable", "__builtin_trap", "__builtin_longjmp",
+        "longjmp", "_longjmp", "siglongjmp", "thrd_exit", "pthread_exit",
     };
     for (unsigned i = 0; i < sizeof nr / sizeof *nr; i++)
         if (strcmp(e->name, nr[i]) == 0)
@@ -10799,11 +10873,13 @@ void sema_check(struct unit *u)
              * and exit: being in .init_array is its use (GCC says
              * nothing of one either) */
             !f->is_ctor && !f->is_dtor &&
-            /* A `static inline` in a header is a helper offered to every
-             * unit that includes it, most of which use some of them --
-             * clang does not report one, and GCC no inline one at all. */
-            !(f->def_inline && f->file && u->file &&
-              strcmp(f->file, u->file) != 0) &&
+            /* A `static inline` is not reported, as GCC reports none:
+             * in a header it is a helper offered to every unit that
+             * includes it, and in a .c file one kept for a build
+             * configuration (an RTOS's trace hooks) -- clang reports the
+             * second, and the RTOS marked three such helpers unused
+             * for EmbCC alone. */
+            !f->def_inline &&
             f->name && strcmp(f->name, "main") != 0)
             diag_warn_opt(f->file ? f->file : u->file, f->line, 0,
                           "unused-function", "unused function '%s'", f->name);

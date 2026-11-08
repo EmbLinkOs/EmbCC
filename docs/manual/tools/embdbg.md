@@ -299,11 +299,14 @@ global's DWARF address already includes it. Give `mem` the `0x800000`
 form too.
 
 `bt` on x86-64 follows the frame-pointer chain in target memory. On the
-other machines EmbCC's code keeps no frame pointer and `-g` emits no
-`.debug_frame`, so `bt` shows frame `#0` and, as frame `#1`, the address
-in the return-address register (`lr` or `ra`), which is the caller only
-until the function's prologue has saved it. AVR has no return-address
-register, and `bt` there shows frame `#0` only.
+embedded machines it unwinds by the image's `.debug_frame` (written by
+`-g`, EmbCC's or GCC's): for each frame, where the caller's frame is and
+where the return address and the saved registers are, read back from
+target memory frame by frame. On AVR the return address is the two (or
+three) bytes the call pushed, big-endian and in words, above the saved
+registers and `Y`. Without `.debug_frame`, `bt` shows frame `#0` and, on
+ARM and RISC-V, as frame `#1` the address in the return-address register
+(`lr` or `ra`), which is the caller only until the prologue has saved it.
 
 The breakpoint length given to the stub is 1 byte on x86-64, 2 on ARM
 and AVR, and 4 on the other machines. When `continue` or `step` starts
@@ -433,10 +436,11 @@ zero  0000000000000000  ra    00000000800003c2  sp    00000000807ffec0  gp    00
 ...
 pc    0000000080000326
   #0  0x80000326  compute+0x6  fw.c:4
-  #1  0x800003c2  main+0x46  fw.c:5   (from the return-address register)
-  (no deeper: this backend keeps no frame pointer and -g
-   emits no .debug_frame for it yet)
+  #1  0x800003c2  main+0x46  fw.c:5
 ```
+
+(Output shortened; the backtrace goes on to the startup code, as far as
+`.debug_frame` covers.)
 
 (Output shortened.) `stopped at 0x1000` is QEMU's reset code, before the
 image runs.

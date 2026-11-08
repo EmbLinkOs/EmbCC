@@ -73,11 +73,24 @@ if [ -n "$until_text" ]; then
     qpid=$!
     # Five polls a second, for `timeout` seconds. The kill -0 is what makes a
     # guest that exits on its own (a hosted binary, not a board) cost nothing.
+    # TEXT counts once the line it is on is finished. QEMU writes a UART's
+    # bytes as the guest sends them, so a poll can land between the
+    # sentinel and its newline: that run's output ended in "==END==" with
+    # no newline, and cxx-embedded's guards test, comparing lines, failed
+    # on a CI runner (#185). Found on the unfinished last line only, TEXT
+    # gets up to five more polls (a second) for the rest of its line, and
+    # is taken then anyway, for a guest that never ends it.
     i=0
     lim=$((timeout * 5))
+    early=0
     while [ "$i" -lt "$lim" ]; do
         kill -0 "$qpid" 2>/dev/null || break
-        grep -q -- "$until_text" "$tmp" 2>/dev/null && break
+        if grep -q -- "$until_text" "$tmp" 2>/dev/null; then
+            [ -z "$(tail -c 1 "$tmp")" ] && break         # ends in a newline
+            sed '$d' "$tmp" | grep -q -- "$until_text" && break
+            [ "$early" -ge 5 ] && break
+            early=$((early + 1))
+        fi
         sleep 0.2
         i=$((i + 1))
     done

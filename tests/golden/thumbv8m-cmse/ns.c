@@ -17,6 +17,40 @@ int s_call_raw(int (*cb)(int, int));
 
 void probe(unsigned *out);
 int ns_cb(int a, int b);
+#ifdef __ARM_FP
+float s_fsecret(float x);
+float s_fcall(float (*cb)(float), float a);
+
+/* s0-s15 and FPSCR as s_fsecret leaves them, read at once (s0 = 1.5f in) */
+__attribute__((naked)) void fprobe(unsigned *out)
+{
+    __asm__ volatile("push {r4, lr}\n\t"
+                     "mov r4, r0\n\t"
+                     "ldr r1, =0x3fc00000\n\t"
+                     "vmov s0, r1\n\t"
+                     "bl s_fsecret\n\t"
+                     "vmov r1, s0\n\tstr r1, [r4]\n\t"
+                     "vmov r1, s1\n\tstr r1, [r4, #4]\n\t"
+                     "vmov r1, s2\n\tstr r1, [r4, #8]\n\t"
+                     "vmov r1, s3\n\tstr r1, [r4, #12]\n\t"
+                     "vmov r1, s4\n\tstr r1, [r4, #16]\n\t"
+                     "vmov r1, s5\n\tstr r1, [r4, #20]\n\t"
+                     "vmov r1, s6\n\tstr r1, [r4, #24]\n\t"
+                     "vmov r1, s7\n\tstr r1, [r4, #28]\n\t"
+                     "vmov r1, s8\n\tstr r1, [r4, #32]\n\t"
+                     "vmov r1, s9\n\tstr r1, [r4, #36]\n\t"
+                     "vmov r1, s10\n\tstr r1, [r4, #40]\n\t"
+                     "vmov r1, s11\n\tstr r1, [r4, #44]\n\t"
+                     "vmov r1, s12\n\tstr r1, [r4, #48]\n\t"
+                     "vmov r1, s13\n\tstr r1, [r4, #52]\n\t"
+                     "vmov r1, s14\n\tstr r1, [r4, #56]\n\t"
+                     "vmov r1, s15\n\tstr r1, [r4, #60]\n\t"
+                     "vmrs r1, fpscr\n\tstr r1, [r4, #64]\n\t"
+                     "pop {r4, pc}");
+}
+
+static float ns_fcb(float a) { return a * 4.0f; }
+#endif
 
 /* What ns_cb saw on entry: APSR, r8-r12, then r0-r7. */
 unsigned ns_seen[14];
@@ -116,6 +150,25 @@ int main(void)
     /* a Non-secure function pointer with its Thumb bit, called as is */
     v = s_call_raw(ns_cb);
     check(12, v == 11, (unsigned)v);
+#ifdef __ARM_FP
+    {
+        /* an entry function's FP state: the result in s0, no secret in
+         * s1-s15, FPSCR's exception bits and flags clear */
+        unsigned f[17];
+        union { float f; unsigned u; } three = { 3.0f };
+        fprobe(f);
+        check(13, f[0] == three.u, f[0]);
+        bad = 0;
+        for (int k = 1; k <= 15; k++)
+            bad |= f[k] == SECRET;
+        check(14, !bad, f[1]);
+        check(15, (f[16] & 0xf000009fu) == 0, f[16]);
+        /* a float to a Non-secure callee and a float back */
+        float r = s_fcall(ns_fcb, 2.5f);
+        union { float f; unsigned u; } ru = { r };
+        check(16, r == 11.0f, ru.u);
+    }
+#endif
     s_done(fails);
     return 0;
 }

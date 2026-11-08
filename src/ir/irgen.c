@@ -671,9 +671,49 @@ static void emit_stvar(struct ir_func *fn, int v, int val,
 
 static int tlv_call(struct ir_func *fn, int desc);
 static int emutls_call(struct ir_func *fn, int ctrl);
+static int libatomic_call(struct ir_func *fn, const char *name,
+                          struct type *ret, int n, const int *vals,
+                          struct type *const *tys, int line);
+
+/* Can this target address a thread-local? x86-64 and AArch64 everywhere,
+ * ARM (__aeabi_read_tp) and RISC-V (tp) local-exec -- the rest have no
+ * thread pointer EmbCC uses yet, and a _Thread_local there would be one
+ * shared object, silently. */
+static int tls_supported(void)
+{
+    switch (target_get()) {
+    case TARGET_X86_64: case TARGET_AARCH64: case TARGET_THUMB:
+    case TARGET_RISCV32: case TARGET_RISCV64:
+        return 1;
+    default:
+        return 0;
+    }
+}
 
 static int emit_gaddr(struct ir_func *fn, struct global *g)
 {
+    if (g->is_tls && !tls_supported())
+        diag_fatal(fn->file, g_cur_line, "'%s' is thread-local, which %s "
+                   "has no thread pointer for: EmbCC would make it one "
+                   "object every thread shares (_Thread_local is "
+                   "supported on ARM, RISC-V, AArch64 and x86-64)",
+                   g->name, target_triple_now());
+    /* ARM, local-exec as GCC makes it: the thread pointer, which the RTOS
+     * gives through __aeabi_read_tp() (the run-time ABI's: it changes r0
+     * alone), plus the variable's offset from it (the backend's literal
+     * word with R_ARM_TLS_LE32). The call first, so the offset is not
+     * live across it. */
+    if (g->is_tls && target_get() == TARGET_THUMB) {
+        struct type *vp = ty_ptr(ty_base(TY_VOID, 0));
+        int tp = libatomic_call(fn, "__aeabi_read_tp", vp, 0, NULL, NULL,
+                                g_cur_line);
+        struct ir_ins *o = emit(fn);
+        o->op = IR_GADDR;
+        o->glob = g;
+        o->glob_sym = ir_sym_global(cur_unit, g);
+        o->dst = new_temp(fn);
+        return emit_bin(fn, IR_ADD, tp, o->dst, AW, 0);
+    }
     struct ir_ins *i = emit(fn);
     i->op = IR_GADDR;
     i->glob = g;
@@ -695,6 +735,8 @@ static int emit_gaddr(struct ir_func *fn, struct global *g)
  * to be? A member is under-aligned when its offset, or the alignment of
  * the struct it sits in, is less than its type asks for; and a member is
  * only as aligned as the object it is a member of. */
+static int struct_val_natural(const struct expr *e);
+
 static int lv_natural(const struct expr *e)
 {
     /* through a typedef aligned BELOW its type's own alignment --
@@ -713,7 +755,18 @@ static int lv_natural(const struct expr *e)
         if (!st || e->memb->is_bitfield || ty_align(st) < ma ||
             e->memb->off % ma)
             return 0;
-        return e->is_arrow ? 1 : lv_natural(e->lhs);
+        if (e->is_arrow)
+            return 1;
+        switch (e->lhs->kind) {
+        case EXPR_VAR: case EXPR_DEREF: case EXPR_MEMBER:
+            return lv_natural(e->lhs);
+        default:
+            /* a member of a call's result (`now().ticks`), a compound
+             * literal's or a va_arg's: in a slot of irgen's own, aligned
+             * as its type up to the 8 a frame promises. Unmarked, a
+             * strict-alignment backend read it a byte at a time. */
+            return ma <= 8 && struct_val_natural(e->lhs);
+        }
     }
     default:
         return 0;
@@ -3386,11 +3439,15 @@ void irg_asm_out_store(struct ir_func *fn, struct expr *lv, int addr,
 static void atomic_scalar_ok(struct ir_func *fn, const struct expr *lv,
                              const char *what)
 {
-    if ((!ty_is_integer(lv->ty) && lv->ty->kind != TY_PTR) ||
+    /* a float or double is atomic as the integer of its bits (atomic_float) */
+    int flt = lv->ty->kind == TY_FLOAT || lv->ty->kind == TY_DOUBLE ||
+              (lv->ty->kind == TY_LDOUBLE && ty_size(lv->ty) <= 8);
+    if ((!ty_is_integer(lv->ty) && lv->ty->kind != TY_PTR && !flt) ||
         expr_is_bitfield(lv))
         diag_fatal(fn->file, lv->line,
                    "%s an _Atomic %s is not supported: EmbCC makes the "
-                   "operators atomic for integers and pointers only",
+                   "operators atomic for integers, pointers, floating "
+                   "types of up to 8 bytes and structs",
                    what, ty_name(lv->ty));
     if (lv->ty->kind == TY_PTR && ty_is_vla(lv->ty->pointee))
         diag_fatal(fn->file, lv->line,
@@ -3399,10 +3456,151 @@ static void atomic_scalar_ok(struct ir_func *fn, const struct expr *lv,
     atomic_width_ok(fn, lv->ty, lv->line);
 }
 
+/* ---- _Atomic floating types and structs ----------------------------
+ *
+ * GCC and clang do each through the integer of its size where one access
+ * moves it: a float's or double's BITS are loaded, stored and swapped as
+ * an integer and reinterpreted (IR_BITCAST), and `x += 1.0` is a
+ * compare-and-swap loop on them; a struct whose size is a power of two
+ * up to what one access moves -- and which _Atomic aligns to its size,
+ * as GCC lays it out (type.c atomic_align) -- is that integer too. A
+ * struct of any other size is libatomic's generic __atomic_load /
+ * __atomic_store with the size first (lib/rt's atomic8.c, which masks
+ * interrupts). */
+static struct type *atomic_bits_ty(const struct type *t)
+{
+    return ty_int_of_size(ty_size(t), 1);
+}
+
+static int atomic_is_float(const struct type *t)
+{
+    return t->kind == TY_FLOAT || t->kind == TY_DOUBLE ||
+           (t->kind == TY_LDOUBLE && ty_size(t) <= 8);
+}
+
+/* the bits of a float value, as an integer of its size */
+static int fb_int(struct ir_func *fn, int v, int w)
+{
+    struct ir_ins *i = emit(fn);
+    i->op = fb_op();
+    i->a = v;
+    i->size = w;
+    i->w = w;
+    i->sign = 1;                      /* an integer comes out */
+    i->dst = new_temp(fn);
+    return i->dst;
+}
+
+/* Is the struct one access: a power-of-two size the target moves at once,
+ * at an address aligned to it? */
+static int atomic_struct_lockfree(const struct type *t)
+{
+    long n = ty_size(t);
+    int max = target_get() == TARGET_AVR ? 8 : target_ptr_size();
+    if (n == 8 && target_atomic8_libcall())
+        max = 8;
+    return n >= 1 && n <= max && !(n & (n - 1)) &&
+           (ty_align(t) >= n || target_get() == TARGET_AVR);
+}
+
+static void atomic_generic(struct ir_func *fn, const char *name, int size,
+                           int obj, int buf, int line)
+{
+    int v[4] = { emit_const(fn, size, target_ptr_size()), obj, buf,
+                 lib_order(fn, -1) };
+    struct type *t[4] = { ty_size_t(), lib_ptr(), lib_ptr(), lib_int() };
+    (void)libatomic_call(fn, name, ty_base(TY_VOID, 0), 4, v, t, line);
+}
+
+/* an _Atomic struct's value: read whole into the local sema gave it */
+static int atomic_struct_read(struct ir_func *fn, struct expr *e)
+{
+    int addr = gen_addr(fn, e);
+    if (!e->res_local)
+        internal_error("irgen: an _Atomic struct read has no local");
+    int tmp = local_addr(fn, e->res_local - 1);
+    if (atomic_struct_lockfree(e->ty)) {
+        struct type *it = atomic_bits_ty(e->ty);
+        int v = atomic_load(fn, addr, it, e->line, -1);
+        emit_store(fn, tmp, v, it);
+    } else {
+        atomic_generic(fn, "__atomic_load", ty_size(e->ty), addr, tmp,
+                       e->line);
+    }
+    return tmp;
+}
+
+/* an _Atomic struct written whole from the value at `src` */
+static void atomic_struct_write(struct ir_func *fn, int addr, int src,
+                                const struct type *t, int line)
+{
+    if (atomic_struct_lockfree(t)) {
+        struct type *it = atomic_bits_ty(t);
+        atomic_store(fn, addr, emit_load(fn, src, it), it, line, -1);
+    } else {
+        atomic_generic(fn, "__atomic_store", ty_size(t), addr, src, line);
+    }
+}
+
 static int atomic_read(struct ir_func *fn, struct expr *e)
 {
+    if (e->ty->kind == TY_STRUCT)
+        return atomic_struct_read(fn, e);
     atomic_scalar_ok(fn, e, "reading");
+    if (atomic_is_float(e->ty))
+        return fb_float(fn, atomic_load(fn, gen_addr(fn, e),
+                                        atomic_bits_ty(e->ty), e->line, -1),
+                        ty_size(e->ty));
     return atomic_load(fn, gen_addr(fn, e), e->ty, e->line, -1);
+}
+
+static int compound_value(struct ir_func *fn, struct expr *e, int cur,
+                          int rv);
+
+/* An _Atomic float's read-modify-write, as GCC and clang make it: a
+ * compare-and-swap loop on its bits. The expected bits are in the local
+ * sema gave the expression (res_local), which a failed compare-exchange
+ * refreshes -- libatomic's does so itself. The new value is the
+ * compound operator's (e is the EXPR_COMPOUND) or the step's (`step`,
+ * for ++ and --); returns the new value, and *cur the one it replaced. */
+static int atomic_float_rmw(struct ir_func *fn, struct expr *e, int addr,
+                            const struct type *t, int rv, double step,
+                            int compound, int *curp)
+{
+    struct type *it = atomic_bits_ty(t);
+    int w = ty_size(t);
+    if (!e->res_local)
+        internal_error("irgen: an _Atomic float's update has no local");
+    int x = local_addr(fn, e->res_local - 1);
+    emit_store(fn, x, atomic_load(fn, addr, it, e->line, -1), it);
+    int top = new_label(fn);
+    emit_label(fn, top);
+    int cur = emit_load(fn, x, t);
+    int res = compound ? compound_value(fn, e, cur, rv)
+                       : emit_fbin(fn, IR_ADD, cur, emit_fconst(fn, step, w),
+                                   w);
+    int resb = fb_int(fn, res, w);
+    int ok;
+    if (atomic_lib_rmw(it) || atomic8_lib(it)) {
+        ok = lib_cmpxchg(fn, addr, x, resb, -1, -1, e->line, w);
+    } else {
+        int exp = emit_load(fn, x, it);
+        struct ir_ins *c = emit(fn);
+        c->op = IR_CAS;
+        c->a = addr;
+        c->b = exp;
+        c->c = resb;
+        c->size = w;
+        c->w = w;
+        c->dst = new_temp(fn);
+        int seen = c->dst;
+        ok = emit_cmp(fn, B_EQ, seen, exp, w, 0);
+        emit_store(fn, x, seen, it);
+    }
+    emit_brz(fn, ok, 4, top);
+    if (curp)
+        *curp = cur;
+    return res;
 }
 
 /* x++, x--, ++x, --x: one fetch-and-add of the step */
@@ -3410,6 +3608,11 @@ static int atomic_incdec(struct ir_func *fn, struct expr *e)
 {
     struct type *t = e->lhs->ty;
     atomic_scalar_ok(fn, e->lhs, "incrementing");
+    if (atomic_is_float(t)) {
+        int old, nv = atomic_float_rmw(fn, e, gen_addr(fn, e->lhs), t, -1,
+                                       (double)e->delta, 0, &old);
+        return e->is_post ? old : nv;
+    }
     int w = ty_w(t);
     long step = (long)e->delta * (t->kind == TY_PTR ? ty_size(t->pointee) : 1);
     int addr = gen_addr(fn, e->lhs);
@@ -3427,9 +3630,6 @@ static int atomic_incdec(struct ir_func *fn, struct expr *e)
     return e->is_post ? old : nv;
 }
 
-static int compound_value(struct ir_func *fn, struct expr *e, int cur,
-                          int rv);
-
 /* x op= v: one atomic read-modify-write for + - & | ^ (and a pointer's
  * += -=); for the others, the value is computed as the plain operator
  * computes it and swapped in only if the object still holds what it was
@@ -3440,6 +3640,8 @@ static int atomic_compound(struct ir_func *fn, struct expr *e)
     atomic_scalar_ok(fn, e->lhs, "a compound assignment to");
     int addr = gen_addr(fn, e->lhs);
     int rv = gen_expr(fn, e->rhs);
+    if (atomic_is_float(lt))
+        return atomic_float_rmw(fn, e, addr, lt, rv, 0, 1, NULL);
     int w = ty_w(lt), sign = ty_signed_int(lt);
     int opc = e->op == B_AND ? '&' : e->op == B_OR ? '|'
             : e->op == B_XOR ? '^' : 0;
@@ -5137,11 +5339,21 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
         return emit_load(fn, addr, e->ty);
     }
     case EXPR_ASSIGN: {
+        if (atomic_lv(e->lhs) && e->lhs->ty->kind == TY_STRUCT) {
+            int addr = gen_addr(fn, e->lhs);
+            int src = gen_expr(fn, e->rhs);     /* a struct IS its address */
+            atomic_struct_write(fn, addr, src, e->lhs->ty, e->line);
+            return src;
+        }
         if (atomic_lv(e->lhs)) {
             atomic_scalar_ok(fn, e->lhs, "assigning to");
             int addr = gen_addr(fn, e->lhs);
             int v = gen_expr(fn, e->rhs);
-            atomic_store(fn, addr, v, e->lhs->ty, e->line, -1);
+            if (atomic_is_float(e->lhs->ty))
+                atomic_store(fn, addr, fb_int(fn, v, ty_size(e->lhs->ty)),
+                             atomic_bits_ty(e->lhs->ty), e->line, -1);
+            else
+                atomic_store(fn, addr, v, e->lhs->ty, e->line, -1);
             return v;
         }
         if (e->ty->kind == TY_STRUCT) {
