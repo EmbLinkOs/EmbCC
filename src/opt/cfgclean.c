@@ -1020,7 +1020,11 @@ int pass_brdom(struct ir_func *fn)
  * nothing will merge them back: a comparison read only by branches, of
  * operands that cannot change (constants, or temps with one definition,
  * which dominates the comparison and so every branch it reaches), is
- * issued again right before each branch that does not follow it.
+ * issued again right before each branch that does not follow it -- with
+ * ONE such branch too, which scheduling had moved a load in front of
+ * (RV32: `xor; seqz; lbu; beqz` where GCC has one bne): the original is
+ * then DCE's. Measured over lib/libc at -Os: smaller on AVR, Cortex-M4,
+ * RV32 and Xtensa.
  * EMBCC_NO_CMPBRANCH=1 turns it off. */
 int pass_cmpbranch(struct ir_func *fn)
 {
@@ -1047,7 +1051,7 @@ int pass_cmpbranch(struct ir_func *fn)
         again[m] = -1;
         if ((br->op != IR_BRZ && br->op != IR_BRNZ) || x < fn->nvars ||
             x >= nv || d.cnt[x] != 1 || (c = d.ins[x]) < 0 || c + 1 == m ||
-            use[x] < 2 || bruse[x] != use[x])
+            bruse[x] != use[x])
             continue;
         const struct ir_ins *cmp = &fn->ins[c];
         if (cmp->op != IR_CMP || cmp->flt || cmp->vol)
