@@ -29,6 +29,23 @@
 typedef __SIZE_TYPE__ rt_size;
 typedef volatile unsigned char vbyte;
 
+/* Their names are builtins to the compiler, so they are defined under
+ * internal ones: named by alias (as in atomic8.c), or, in Mach-O, which
+ * has no aliases, by asm label (the symbol itself, with its underscore). */
+#if defined(__APPLE__)
+#define RT_GEN
+void gen_load(rt_size, const volatile void *, void *, int)
+    __asm__("___atomic_load") __attribute__((weak));
+void gen_store(rt_size, volatile void *, void *, int)
+    __asm__("___atomic_store") __attribute__((weak));
+void gen_exchange(rt_size, volatile void *, void *, void *, int)
+    __asm__("___atomic_exchange") __attribute__((weak));
+_Bool gen_cmpxchg(rt_size, volatile void *, void *, void *, int, int)
+    __asm__("___atomic_compare_exchange") __attribute__((weak));
+#else
+#define RT_GEN static
+#endif
+
 static volatile unsigned char g_locks[64];
 
 static volatile unsigned char *lock_for(const volatile void *p)
@@ -49,7 +66,7 @@ static void unlock(volatile unsigned char *l)
     __atomic_clear(l, __ATOMIC_RELEASE);
 }
 
-static void gen_load(rt_size n, const volatile void *p, void *ret, int order)
+RT_GEN void gen_load(rt_size n, const volatile void *p, void *ret, int order)
 {
     const vbyte *s = (const vbyte *)p;
     vbyte *d = (vbyte *)ret;
@@ -61,7 +78,7 @@ static void gen_load(rt_size n, const volatile void *p, void *ret, int order)
     unlock(l);
 }
 
-static void gen_store(rt_size n, volatile void *p, void *val, int order)
+RT_GEN void gen_store(rt_size n, volatile void *p, void *val, int order)
 {
     vbyte *d = (vbyte *)p;
     const vbyte *s = (const vbyte *)val;
@@ -74,7 +91,7 @@ static void gen_store(rt_size n, volatile void *p, void *val, int order)
 }
 
 /* byte by byte, so `ret` may be `val` */
-static void gen_exchange(rt_size n, volatile void *p, void *val, void *ret,
+RT_GEN void gen_exchange(rt_size n, volatile void *p, void *val, void *ret,
                          int order)
 {
     vbyte *q = (vbyte *)p, *v = (vbyte *)val, *r = (vbyte *)ret;
@@ -89,7 +106,7 @@ static void gen_exchange(rt_size n, volatile void *p, void *val, void *ret,
     unlock(l);
 }
 
-static _Bool gen_cmpxchg(rt_size n, volatile void *p, void *expected,
+RT_GEN _Bool gen_cmpxchg(rt_size n, volatile void *p, void *expected,
                          void *desired, int success, int failure)
 {
     vbyte *q = (vbyte *)p, *e = (vbyte *)expected, *d = (vbyte *)desired;
@@ -111,8 +128,7 @@ static _Bool gen_cmpxchg(rt_size n, volatile void *p, void *expected,
     return ok;
 }
 
-/* Their names are builtins to the compiler, so they are defined under
- * internal ones and named by alias, as in atomic8.c. */
+#if !defined(__APPLE__)
 void __atomic_load(rt_size n, const volatile void *p, void *ret, int order)
     __attribute__((weak, alias("gen_load")));
 void __atomic_store(rt_size n, volatile void *p, void *val, int order)
@@ -122,5 +138,6 @@ void __atomic_exchange(rt_size n, volatile void *p, void *val, void *ret,
 _Bool __atomic_compare_exchange(rt_size n, volatile void *p, void *expected,
                                 void *desired, int success, int failure)
     __attribute__((weak, alias("gen_cmpxchg")));
+#endif
 
 #endif /* __SIZEOF_POINTER__ == 8 */
