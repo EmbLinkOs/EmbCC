@@ -334,19 +334,17 @@ for c in tests/exec/*.c tests/exec/${TARGET%-elf}/*.c; do
             cc -c lib/rt/builtin-setjmp.c -o "$rtsj_host" || {
                 bad "$c" "lib/rt/builtin-setjmp.c does not build for the host" ""
                 continue; }
+            # and lib/rt's generic __atomic_load and friends, which an
+            # _Atomic object one instruction does not move calls
+            # (tests/exec/atomic-float-struct.c): libatomic's, which a host
+            # need not have
+            cc -c lib/rt/atomic-generic.c -o "$out_dir/rtag-host.o" || {
+                bad "$c" "lib/rt/atomic-generic.c does not build for the host" ""
+                continue; }
             rtsj_built=1
-            # -latomic: libatomic's generic __atomic_load and friends,
-            # which an _Atomic object one instruction does not move calls
-            # (tests/exec/atomic-float-struct.c), as GCC's own code does;
-            # glibc systems have it beside GCC
-            host_atomic=
-            printf 'int main(void){return 0;}\n' > "$out_dir/la.c"
-            cc "$out_dir/la.c" -latomic -o "$out_dir/la" 2>/dev/null &&
-                host_atomic=-latomic
         fi
-        # shellcheck disable=SC2086
         if ! msg=$(cc -no-pie -Wl,-z,noexecstack -o "$exe" "$obj" \
-                       "$rtsj_host" -lm $host_atomic 2>&1); then
+                       "$rtsj_host" "$out_dir/rtag-host.o" -lm 2>&1); then
             bad "$c" "host link failed" "$msg"
             continue
         fi

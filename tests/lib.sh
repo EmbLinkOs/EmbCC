@@ -61,7 +61,14 @@ x86_link() {
         if [ ! -f "$_rtsj" ] || [ "$_rtsrc" -nt "$_rtsj" ]; then
             cc -c "$_rtsrc" -o "$_rtsj.$$" && mv -f "$_rtsj.$$" "$_rtsj" || return 1
         fi
-        cc -no-pie -Wl,-z,noexecstack -o "$exe" "$@" "$_rtsj" -lm
+        # and its generic __atomic_load and friends (atomic-generic.c),
+        # libatomic's, which a host need not have
+        _rtag=$(dirname "$exe")/rtag-host.o
+        _agsrc=$EMBCC_ROOT/lib/rt/atomic-generic.c
+        if [ ! -f "$_rtag" ] || [ "$_agsrc" -nt "$_rtag" ]; then
+            cc -c "$_agsrc" -o "$_rtag.$$" && mv -f "$_rtag.$$" "$_rtag" || return 1
+        fi
+        cc -no-pie -Wl,-z,noexecstack -o "$exe" "$@" "$_rtsj" "$_rtag" -lm
     else
         "$EMBCC_ROOT/tests/harness/x86_64/link.sh" -o "$exe" "$@"
     fi

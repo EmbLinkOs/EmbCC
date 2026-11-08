@@ -254,7 +254,14 @@ static void once_fn(void) { g_once_runs++; }
 /* errno and this are each thread's own, and this one starts as the
  * program wrote it: a new thread's block is a copy of the template, not
  * of whatever thread made it */
+#if defined(__x86_64__) || defined(__aarch64__) || defined(__riscv) || \
+    defined(__linux__) || (defined(__arm__) && defined(__linux__))
 static __thread int t_mine = 5;
+#else
+/* a bare-metal target EmbCC has no thread pointer for refuses a
+ * thread-local; where there are no threads, one is what it would be */
+static int t_mine = 5;
+#endif
 static int g_own_bad;
 
 static void *crowd(void *arg)

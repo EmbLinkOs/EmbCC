@@ -1017,6 +1017,18 @@ static void frame_pad(struct dbuf *b, int start)
     db_patch_u32(b, start, (unsigned long)(b->len - start - 4));
 }
 
+/* AVR's return address size: 2 bytes, 3 on avr6 (a compiler built
+ * without AVR has no part to ask) */
+static int avr_pc_bytes(void)
+{
+#if FAMILY_BUILT(avr)
+    const struct avr_mcu *m = target_avr_mcu();
+    return m ? m->pc_bytes : 2;
+#else
+    return 2;
+#endif
+}
+
 static void emit_frame(struct dwarf_out *out, struct dbuf *b,
                        struct ir_unit *iu)
 {
@@ -1036,8 +1048,7 @@ static void emit_frame(struct dwarf_out *out, struct dbuf *b,
          * many and the return address is in memory just below it --
          * column 36 at CFA - (size - 1), its high byte at the lowest
          * address. Y (r28) is the CFA's base once the prologue sets it. */
-        const struct avr_mcu *m = target_avr_mcu();
-        int pc = m ? m->pc_bytes : 2;
+        int pc = avr_pc_bytes();
         db_u8(b, DW_CFA_def_cfa);
         db_uleb(b, (unsigned long)out->frame_sp);
         db_uleb(b, (unsigned long)pc);
@@ -1067,8 +1078,7 @@ static void emit_frame(struct dwarf_out *out, struct dbuf *b,
         db_addr(b, (unsigned long)(f->code_len - f->code_entry));
         long at = 0, cfa_reg = out->frame_sp, cfa = 0;
         if (target_get() == TARGET_AVR) {      /* the CIE's CFA, SP + pc */
-            const struct avr_mcu *m = target_avr_mcu();
-            cfa = m ? m->pc_bytes : 2;
+            cfa = avr_pc_bytes();
         }
         for (int k = 0; k < fn->ncfi; k++) {
             const struct ir_cfi *c = &fn->cfi[k];
