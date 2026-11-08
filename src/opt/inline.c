@@ -240,6 +240,11 @@ static int inlinable(struct ir_func *cf, int force, int sole, const char **why,
         detail[0] = 0;
 
     if (c->is_varargs)       { *why = "callee-is-varargs";  return 0; }
+    /* main stays a frame of its own, as GCC keeps it: called once, from a
+     * reset handler or crt0, it gains nothing inlined, and inlined it is
+     * an inline frame of its caller -- gdb's backtrace then runs past the
+     * entry function into 0x0, and `break main` stops in reset's code */
+    if (cf->name && !strcmp(cf->name, "main")) { *why = "callee-is-main"; return 0; }
     if (cf->nins == 0)       { *why = "callee-not-defined-here"; return 0; }
     /* __attribute__((always_inline)) overrides the SIZE budget and
      * nothing else. Every other test below is a thing this inliner
