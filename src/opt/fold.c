@@ -1225,6 +1225,19 @@ int pass_fold(struct ir_func *fn)
                  * backend was already folding into its addressing. */
                 to_mov(i, i->a);
                 changed = 1;
+            } else if (i->a >= 0 && i->a < fn->nparams && d.cnt[i->a] == 1 &&
+                       target_args_extended() && fn->param_abi &&
+                       !fn->param_abi[i->a].is_struct &&
+                       fn->param_abi[i->a].size == i->size &&
+                       fn->param_abi[i->a].ty &&
+                       !!ty_signed_int(fn->param_abi[i->a].ty) == !!i->sign &&
+                       !i->flt && i->size < 4) {
+                /* A char or short parameter its caller has extended by its
+                 * type (target_args_extended): extending it again by the
+                 * same is a copy. RV32's `zext.b a3, s2` on a uint8_t
+                 * parameter, which GCC's code does not have. */
+                to_mov(i, i->a);
+                changed = 1;
             } else if (i->a >= 0 && i->a < fn->nvregs && d.cnt[i->a] == 1 &&
                        d.ins[i->a] >= 0 && fn->ins[d.ins[i->a]].op == IR_CMP &&
                        i->w == ir_result_w(&fn->ins[d.ins[i->a]]) &&

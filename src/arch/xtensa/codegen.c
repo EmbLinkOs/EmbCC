@@ -813,6 +813,22 @@ static long sslot(const struct xt_fn *F, int v)
 
 /* rd: v into exactly `reg`. rdr: where v IS (its register, or `scratch`
  * after a load). wreg: where to compute v. wrote: commit it. */
+/* A vreg from its slot. A char or short parameter's slot holds only its
+ * own bytes (place_params), so it is loaded at that size and extended by
+ * its type -- as its caller passed it, which the optimizer relies on
+ * (target_args_extended): a word load read three bytes nobody wrote. */
+static void ld_vreg(struct xt_fn *F, int reg, int v, long plus)
+{
+    const struct ir_func *fn = F->fn;
+    if (v >= 0 && v < fn->nparams && fn->param_abi &&
+        !fn->param_abi[v].is_struct && fn->param_abi[v].size < 4 && !plus) {
+        ld_sp(F, reg, sslot(F, v), fn->param_abi[v].size,
+              fn->param_abi[v].ty ? ty_signed_int(fn->param_abi[v].ty) : 1);
+        return;
+    }
+    ld_sp(F, reg, sslot(F, v) + plus, 4, 0);
+}
+
 static void rd(struct xt_fn *F, int v, int reg)
 {
     if (in_reg(F, v)) {
@@ -820,14 +836,14 @@ static void rd(struct xt_fn *F, int v, int reg)
             xt_mov(F->t, reg, F->loc[v]);
         return;
     }
-    ld_sp(F, reg, sslot(F, v), 4, 0);
+    ld_vreg(F, reg, v, 0);
 }
 
 static int rdr(struct xt_fn *F, int v, int scratch)
 {
     if (in_reg(F, v))
         return F->loc[v];
-    ld_sp(F, scratch, sslot(F, v), 4, 0);
+    ld_vreg(F, scratch, v, 0);
     return scratch;
 }
 
@@ -1488,8 +1504,7 @@ static void set_args_half(struct xt_fn *F, const int *dstreg,
     }
     for (int k = 0; k < n; k++)
         if (!in_reg(F, vreg[k]))
-            ld_sp(F, dstreg[k],
-                  sslot(F, vreg[k]) + (half ? 4L * half[k] : 0), 4, 0);
+            ld_vreg(F, dstreg[k], vreg[k], half ? 4L * half[k] : 0);
 }
 
 static void set_args(struct xt_fn *F, const int *dstreg, const int *vreg,

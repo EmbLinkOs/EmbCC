@@ -388,6 +388,12 @@ int target_is_mips(void)
     return g_arch == TARGET_MIPS32 || g_arch == TARGET_MIPS64;
 }
 
+int target_args_extended(void)
+{
+    return g_arch == TARGET_RISCV32 || g_arch == TARGET_RISCV64 ||
+           g_arch == TARGET_XTENSA;
+}
+
 const char *target_sym_prefix(void)
 {
     return g_arch == TARGET_RX ? "_" : NULL;

@@ -179,6 +179,11 @@ int target_arch_built(enum target_arch a);
 
 /* Either MIPS: the one backend, the one encoder, the one assembler. */
 int target_is_mips(void);
+/* Does the caller extend a char or short argument to the register, by
+ * its type, so the callee may rely on it? The RISC-V psABI says so, and
+ * GCC's Xtensa code relies on it (PROMOTE_PROTOTYPES); EmbCC's callers
+ * extend on every target. */
+int target_args_extended(void);
 
 /* What the object's symbol for a C name puts first: "_" on RX, whose ABI
  * prefixes C names, NULL elsewhere (the ELF writer and an -S file both) */
