@@ -92,7 +92,11 @@ board m0   thumbv6m-none-eabi  thumb-m0 EMBCC_THUMB_M0_HARNESS armv6-m \
     "-mcpu=cortex-m0 -mfloat-abi=soft" qemu-system-arm -M microbit
 board rv32 riscv32-unknown-elf riscv    EMBCC_RISCV_HARNESS    riscv:rv32 \
     "-march=rv32imac -mabi=ilp32 -mno-relax" qemu-system-riscv32 -M virt -bios none -m 8
-# (not MIPS yet: gdb 17 maps no address of clang's MIPS image to a line,
-# though llvm-dwarfdump reads the table, so there is no reference there)
+# clang's reference for MIPS is DWARF 4: gdb 17 maps no address of a
+# linked MIPS image whose unit's start is a DWARF 5 .debug_addr entry
+# (DW_FORM_addrx, which it does not sign-extend as it does the line
+# table's KSEG0 addresses), so clang's DWARF 5 image has no lines to it
+board mips mipsel-none-elf     mips     EMBCC_MIPS_HARNESS     mips:isa32r2 \
+    "-mcpu=mips32r2 -msoft-float -gdwarf-4" qemu-system-mipsel -M malta -cpu 24Kc
 [ $fail = 0 ] || { echo "FAIL: debug-optimized"; exit 1; }
 echo "debug-optimized: every value EmbCC's DWARF gives at -O0, -O2 and -Os is clang's -O0 build's"

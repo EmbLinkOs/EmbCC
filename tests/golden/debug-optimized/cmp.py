@@ -59,6 +59,10 @@ for key, j in b.items():
         decl = (ref or {}).get("decl", {}).get(name) or j.get("decl", {}).get(name) or 0
         if decl and line <= decl:
             continue
+        # where the reference's own gdb cannot read it (an older gdb, at
+        # clang's epilogue), there is nothing to compare with
+        if ref is not None and str(ref["vals"].get(name, "")).startswith("ERR"):
+            continue
         total += 1
         if s is None: continue
         avail += 1

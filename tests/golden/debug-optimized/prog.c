@@ -86,7 +86,7 @@ static const int sorted[] = { 2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31 };
 int main(void)
 {
     struct acc a = { 0, 0, 0 };
-    unsigned c = crc8(msg, (int)sizeof msg - 1);
+    unsigned c = crc8(msg, 6);         /* (each byte is 8 rounds of stops) */
     for (int i = 0; i < 5; i++)
         add(&a, (int)c - i * 40);
     long long m = mix(0x123456789LL, a.sum, (short)a.n);
