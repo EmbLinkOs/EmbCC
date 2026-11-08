@@ -1,5 +1,8 @@
 blank_issues_enabled: true
 contact_links:
+  - name: Questions and ideas
+    url: https://github.com/EmbLinkOs/EmbCC/discussions
+    about: Ask how to do something, or discuss a change before writing it.
   - name: The manual
     url: https://github.com/EmbLinkOs/EmbCC/blob/main/docs/README.md
     about: Every option, target and tool, and the known limitations.

@@ -132,6 +132,7 @@ const char *const embdoc_css[] = {
     ".side a[aria-current='page'] { color: var(--accent-ink); font-weight: 600;\n",
     "  border-left-color: var(--accent); background: var(--accent-soft); }\n",
     "main { grid-area: main; min-width: 0; padding: 26px 52px 72px; }\n",
+    "main img { max-width: 100%; height: auto; vertical-align: middle; }\n",
     ".toc { grid-area: toc; position: sticky; top: var(--bar); align-self: start;\n",
     "  max-height: calc(100vh - var(--bar)); overflow-y: auto; padding: 30px 20px 40px 6px;\n",
     "  font-size: 13px; }\n",

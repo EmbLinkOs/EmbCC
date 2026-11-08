@@ -52,6 +52,8 @@ struct md_page {
      * undone) and its line; it returns the malloc'd href to write. NULL
      * writes every destination as it is. */
     char *(*link)(void *arg, const char *dest, int line);
+    /* in: the same for each image's source; NULL writes it as it is */
+    char *(*image)(void *arg, const char *src, int line);
     void *arg;
 
     /* out */

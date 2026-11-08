@@ -1,0 +1,4 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 200 200">
+  <!-- Drawn by .github/assets/brand.py; edit the script, not this file -->
+  <rect width="200" height="200" rx="46" fill="#0b1220"/><path d="M140.79 61.36A52 52 0 1 0 140.79 138.64" fill="none" stroke="#5eead4" stroke-width="24" stroke-linecap="round"/><circle cx="140.79" cy="61.36" r="18" fill="#f8fafc"/><circle cx="140.79" cy="61.36" r="6.5" fill="#0b1220"/><circle cx="140.79" cy="138.64" r="18" fill="#f8fafc"/><circle cx="140.79" cy="138.64" r="6.5" fill="#0b1220"/>
+</svg>
