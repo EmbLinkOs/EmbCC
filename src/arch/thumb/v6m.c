@@ -2791,10 +2791,11 @@ static unsigned asm_regs(const struct ir_func *fn, int n)
 {
     const struct ir_asm *ia = fn->ins[n].asm_ir;
     unsigned m = 0;
-    for (int k = 0; k < ia->nin; k++)
-        m |= 1u << ia->in[k].reg;
+    for (int k = 0; k < ia->nin; k++)        /* a pair is two */
+        m |= (ia->in[k].size == 8 ? 3u : 1u) << ia->in[k].reg;
     for (int k = 0; k < ia->nout; k++)
-        m |= 1u << ia->out[k].reg;
+        m |= (!ia->out[k].mem && ia->out[k].size == 8 ? 3u : 1u)
+             << ia->out[k].reg;
     return m;
 }
 
@@ -2883,8 +2884,8 @@ static void gen_asm(struct t_fn *F, int n)
         opm |= asm_regs(fn, q);
     }
     for (int k = 0; k < ia->nout; k++)
-        if (!ia->out[k].mem && ia->out[k].size > 4)
-            v6_refuse(fn, i, "an asm output wider than a register");
+        if (!ia->out[k].mem && ia->out[k].size > 8)
+            v6_refuse(fn, i, "an asm output wider than a register pair");
     /* A cycle in a move is broken through a register no operand is in. */
     for (int k = 0; k < 3 && brk < 0; k++)
         if (!(opm >> brks[k] & 1))
@@ -2896,10 +2897,14 @@ static void gen_asm(struct t_fn *F, int n)
      * address (its current value is loaded through it below). */
     {
         int pd[48], ps[48], npm = 0;
-        for (int k = 0; k < ia->nin; k++)
+        for (int k = 0; k < ia->nin && npm < 47; k++)
             if (in_reg6(F, ia->in[k].temp)) {
                 pd[npm] = ia->in[k].reg;
                 ps[npm++] = F->loc[ia->in[k].temp];
+                if (ia->in[k].size == 8) {       /* a pair: both words */
+                    pd[npm] = ia->in[k].reg + 1;
+                    ps[npm++] = F->loc[ia->in[k].temp] + 1;
+                }
             }
         for (int k = 0; k < ia->nout; k++)
             if (!ia->out[k].val && (ia->out[k].mem || ia->out[k].inout) &&
@@ -2909,16 +2914,27 @@ static void gen_asm(struct t_fn *F, int n)
             }
         asm_moves(F, pd, ps, npm, brk, "operands");
         for (int k = 0; k < ia->nin; k++)
-            if (!in_reg6(F, ia->in[k].temp))
-                asm_in(F, ia->in[k].temp, ia->in[k].reg, opm);
+            if (!in_reg6(F, ia->in[k].temp)) {
+                if (ia->in[k].size == 8)        /* a pair: r0:r1 or r2:r3 */
+                    v_rd64(F, ia->in[k].temp, ia->in[k].reg,
+                           ia->in[k].reg + 1);
+                else
+                    asm_in(F, ia->in[k].temp, ia->in[k].reg, opm);
+            }
         for (int k = 0; k < ia->nout; k++) {
             const struct ir_asm_op *o = &ia->out[k];
             if (o->val || !(o->mem || o->inout))
                 continue;
             if (!in_reg6(F, o->temp))
                 asm_in(F, o->temp, o->reg, opm);
-            if (o->inout && !o->mem)
+            if (o->inout && !o->mem && o->size == 8) {
+                /* a pair's high word first, while the low register
+                 * still holds the address */
+                mem_ld(F, o->reg + 1, o->reg, 4, 4, 0, 1);
+                mem_ld(F, o->reg, o->reg, 0, 4, 0, 1);
+            } else if (o->inout && !o->mem) {
                 asm_cur(F, o->reg, o->size, opm);
+            }
         }
     }
     {
@@ -2960,7 +2976,12 @@ static void gen_asm(struct t_fn *F, int n)
             v_rd(F, o->temp, xa);
             base = xa;
         }
-        mem_st(F, rv, base, 0, o->size, 1, hold);
+        if (o->size == 8) {                  /* a pair, both words */
+            mem_st(F, rv, base, 0, 4, 1, hold);
+            mem_st(F, o->reg + 1, base, 4, 4, 1, hold);
+        } else {
+            mem_st(F, rv, base, 0, o->size, 1, hold);
+        }
         if (xa >= 0)
             tmp_put(F, xa);
         if (xv >= 0)

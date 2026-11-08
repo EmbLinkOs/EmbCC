@@ -6682,18 +6682,22 @@ static void gen_ins(struct t_fn *F, int n)
         if (scr < 0 && naddr > 0)
             t_refuse(fn, i, "an asm with no scratch register left around it");
         for (int k = 0; k < ia->nout; k++)
-            if (!ia->out[k].mem && ia->out[k].size > 4)
-                t_refuse(fn, i, "an asm output wider than a register");
+            if (!ia->out[k].mem && ia->out[k].size > 8)
+                t_refuse(fn, i, "an asm output wider than a register pair");
         /* In: an input's value, an "m" output's address, and a "+"
          * output's address (its current value is loaded through it
          * below) -- the register-resident ones as one parallel move,
          * then the rest from wherever they are. */
         {
             int pd[24], ps[24], npm = 0;
-            for (int k = 0; k < ia->nin && npm < 24; k++)
+            for (int k = 0; k < ia->nin && npm < 23; k++)
                 if (in_reg(F, ia->in[k].temp)) {
                     pd[npm] = ia->in[k].reg;
                     ps[npm++] = F->loc[ia->in[k].temp];
+                    if (ia->in[k].size == 8) {   /* a pair: both words */
+                        pd[npm] = ia->in[k].reg + 1;
+                        ps[npm++] = F->loc[ia->in[k].temp] + 1;
+                    }
                 }
             for (int k = 0; k < ia->nout && npm < 24; k++)
                 if (!ia->out[k].val &&
@@ -6713,17 +6717,28 @@ static void gen_ins(struct t_fn *F, int n)
                     t_mov_reg(t, pm_reg(od[k]), pm_reg(os[k]));
             }
             for (int k = 0; k < ia->nin; k++)
-                if (!in_reg(F, ia->in[k].temp))
-                    rd(F, ia->in[k].temp, ia->in[k].reg);
+                if (!in_reg(F, ia->in[k].temp)) {
+                    if (ia->in[k].size == 8)
+                        rd64(F, ia->in[k].temp, ia->in[k].reg,
+                             ia->in[k].reg + 1);
+                    else
+                        rd(F, ia->in[k].temp, ia->in[k].reg);
+                }
             for (int k = 0; k < ia->nout; k++) {
                 const struct ir_asm_op *o = &ia->out[k];
                 if (o->val || !(o->mem || o->inout))
                     continue;
                 if (!in_reg(F, o->temp))
                     rd(F, o->temp, o->reg);
-                /* A "+" output starts with the lvalue's CURRENT value. */
-                if (o->inout && !o->mem)
+                /* A "+" output starts with the lvalue's CURRENT value --
+                 * a pair's high word first, while the address is still
+                 * in the low register */
+                if (o->inout && !o->mem && o->size == 8) {
+                    ldst_must(t, o->reg + 1, o->reg, 4, 4, 0, 0);
+                    ldst_must(t, o->reg, o->reg, 0, 4, 0, 0);
+                } else if (o->inout && !o->mem) {
                     ldst_must(t, o->reg, o->reg, 0, o->size, 0, 0);
+                }
             }
         }
         /* the bytes, padded at each alignment for where they land, and
@@ -6741,7 +6756,12 @@ static void gen_ins(struct t_fn *F, int n)
             if (o->mem || o->val)
                 continue;
             rd(F, o->temp, scr);
-            ldst_must(t, o->reg, scr, 0, o->size, 0, 1);
+            if (o->size == 8) {
+                ldst_must(t, o->reg, scr, 0, 4, 0, 1);
+                ldst_must(t, o->reg + 1, scr, 4, 4, 0, 1);
+            } else {
+                ldst_must(t, o->reg, scr, 0, o->size, 0, 1);
+            }
         }
         /* Out, as values: each to its home. Those in memory first, while
          * every operand register still holds what the asm left; then

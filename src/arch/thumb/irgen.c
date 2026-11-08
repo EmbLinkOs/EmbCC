@@ -157,7 +157,7 @@ static void t_mark_template_regs(const char *file, int line,
 
 static char *t_subst(const char *file, int line, const char *tmpl,
                       const int *regs, const long *imms, const int *isimm,
-                      const char *const *names, int nops)
+                      const char *const *names, const int *sizes, int nops)
 {
     size_t cap = strlen(tmpl) * 2 + 64, len = 0;
     char *out = xmalloc(cap);
@@ -183,6 +183,14 @@ static char *t_subst(const char *file, int line, const char *tmpl,
             bare = 1;
             p++;
         }
+        /* GCC's halves of a 64-bit operand, which sits in a register
+         * pair: %Q the low word's register, %R the high word's, %H the
+         * second register of the pair (the same, little-endian) --
+         * `umull %Q0, %R0, %1, %2`, `ldrd %0, %H0, [%1]` */
+        int half = 0;
+        if ((*p == 'Q' || *p == 'R' || *p == 'H') &&
+            (p[1] == '[' || isdigit((unsigned char)p[1])))
+            half = *p++;
         int k = -1;
         if (*p == '[') {
             const char *e = strchr(p, ']');
@@ -211,6 +219,15 @@ static char *t_subst(const char *file, int line, const char *tmpl,
             diag_fatal(file, line, "%%c%d names a register operand; %%c "
                        "prints a constant, and wants an \"i\" or \"n\" "
                        "operand", k);
+        if (half && (isimm[k] || sizes[k] != 8))
+            diag_fatal(file, line, "%%%c%d names half of a 64-bit register "
+                       "operand, and operand %d is %s", half, k, k,
+                       isimm[k] ? "a constant" : "one register");
+        if (half) {
+            len += (size_t)snprintf(out + len, cap - len, "%s",
+                                    t_reg_name(regs[k] + (half != 'Q')));
+            continue;
+        }
         if (isimm[k])
             len += (size_t)snprintf(out + len, cap - len, "%ld", imms[k]);
         else
@@ -277,8 +294,11 @@ void irg_asm_thumb(struct ir_func *fn, struct stmt *s)
         imms[i] = op->imm;
         sizes[i] = ty_size(op->expr->ty);
         names[i] = op->name;
-        if (op->reg >= 0)
+        if (op->reg >= 0) {
             used[op->reg] = 1;
+            if (sizes[i] == 8 && op->reg < 15)
+                used[op->reg + 1] = 1;
+        }
     }
     for (int i = 0; i < a->nclob; i++) {
         int r = tasm_gpr(a->clob[i], (int)strlen(a->clob[i]));
@@ -291,13 +311,39 @@ void irg_asm_thumb(struct ir_func *fn, struct stmt *s)
         if (regs[i] != -2)
             continue;
         int r = -1;
-        for (unsigned k = 0; k < sizeof t_asm_pool / sizeof t_asm_pool[0]; k++)
-            if (!used[t_asm_pool[k]]) {
-                r = t_asm_pool[k];
+        if (sizes[i] > 8)
+            diag_fatal(file, s->line, "an asm operand of %d bytes does not "
+                       "fit a register or a register pair", sizes[i]);
+        if (sizes[i] == 8) {             /* a pair: r0:r1 or r2:r3 */
+            for (int b = 0; b <= 2 && r < 0; b += 2)
+                if (!used[b] && !used[b + 1])
+                    r = b;
+            if (r < 0)
+                diag_fatal(file, s->line, "no free register pair for a "
+                           "64-bit asm operand");
+            used[r] = used[r + 1] = 1;
+            regs[i] = r;
+            continue;
+        }
+        /* "l": r0-r7 only; "h": r8-r15 -- r12, else r8-r11, which the
+         * prologue then saves (ra_asm_clobbers); anything else the pool */
+        const char *cs = i < a->nout ? a->out[i].constraint
+                                     : a->in[i - a->nout].constraint;
+        int low = strchr(cs, 'l') && !strchr(cs, 'r') && !strchr(cs, 'g');
+        int high = strchr(cs, 'h') && !strchr(cs, 'r') && !strchr(cs, 'g');
+        static const int t_asm_high[] = { 12, 8, 9, 10, 11 };
+        const int *pool = high ? t_asm_high : t_asm_pool;
+        unsigned np = high ? sizeof t_asm_high / sizeof *t_asm_high
+                           : sizeof t_asm_pool / sizeof t_asm_pool[0];
+        for (unsigned k = 0; k < np; k++)
+            if (!used[pool[k]] && !(low && pool[k] > 7)) {
+                r = pool[k];
                 break;
             }
         if (r < 0)
-            diag_fatal(file, s->line, "no free register for an asm operand");
+            diag_fatal(file, s->line, "no free register for an asm operand%s",
+                       low ? " in r0-r7 (\"l\")" : high ? " in r8-r12 (\"h\")"
+                                                     : "");
         used[r] = 1;
         regs[i] = r;
     }
@@ -305,8 +351,11 @@ void irg_asm_thumb(struct ir_func *fn, struct stmt *s)
     for (int i = a->nout; i < nops; i++)
         if (regs[i] == ASM_REG_TIED)
             regs[i] = regs[a->in[i - a->nout].imm];
+    for (int i = a->nout; i < nops; i++)   /* a tied pair's high half */
+        if (sizes[i] == 8 && regs[i] >= 0)
+            used[regs[i] + 1] = 1;
     char *text = t_subst(file, s->line, a->tmpl, regs, imms, isimm,
-                          names, nops);
+                          names, sizes, nops);
     struct code c = { 0 };
     char err[512];
     /* An IT block is one template's own business: it may not reach into
@@ -360,7 +409,9 @@ void irg_asm_thumb(struct ir_func *fn, struct stmt *s)
         o->mem = asm_constraint_mem_only(a->in[i].constraint);
         o->temp = o->mem ? gen_addr(fn, a->in[i].expr)
                          : gen_expr(fn, a->in[i].expr);
-        o->size = 4;                  /* a temp holds the promoted value */
+        /* a temp holds the promoted value: four bytes, or eight in a
+         * register pair */
+        o->size = !o->mem && sizes[a->nout + i] == 8 ? 8 : 4;
     }
     /* An "=r" output of an integer or a pointer is a VALUE: the asm's
      * dst, stored to its lvalue afterwards (irg_asm_out_store), so a

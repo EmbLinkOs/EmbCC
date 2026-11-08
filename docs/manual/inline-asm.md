@@ -264,6 +264,8 @@ The modifiers each target accepts between `%` and the operand are:
 | `%cN`, `%c[NAME]` | the value of a constant (`"i"`, `"n"`) operand alone, with no `#` or `$`: `-5` | every target; refused for a register operand (`%c0 names a register operand`) |
 | `%wN`, `%w[NAME]` | the 32-bit name of the register (`w9`) | AArch64 |
 | `%xN`, `%x[NAME]` | the 64-bit name of the register (`x9`) | AArch64 |
+| `%QN`, `%RN` | the register of the low word, the high word, of a 64-bit operand in a register pair (`umull %Q0, %R0, %1, %2`) | ARM |
+| `%HN` | the second register of a 64-bit operand's pair (`ldrd %0, %H0, [%1]`) | ARM |
 | `%AN` .. `%DN` | byte 0 to 3 of a multi-register operand | AVR |
 | `%aN` | the operand as a pointer register: `X`, `Y` or `Z` | AVR |
 
@@ -1133,6 +1135,8 @@ does not have, and the ARMv8-M levels add the instructions in
 | Letter | Meaning |
 |---|---|
 | `r`, `q`, `g`, `R` | a general register chosen by EmbCC |
+| `l` | a low register, r0 to r7, as a 16-bit Thumb instruction needs |
+| `h` | a high register: r12, else r8 to r11 (saved by the prologue) |
 | `i`, `n`, `I`, `J`, `K`, `L`, `M` | a constant, written into the template as a number (`ssat %0, %1, %2` with `"I"(8)` reads `ssat r0, 8, r1`); refused when the operand is not a constant |
 | `m` | a general register chosen by EmbCC, holding the address of the operand (inputs) |
 | `0`, `1`, ... (inputs) | the output of that number: the pair is taken as one `+r` operand, as CMSIS's `__SMLALD` writes its accumulator, through a temporary when the input is another value (see [Constraint strings](#constraint-strings)) |
@@ -1144,11 +1148,11 @@ r0, r3, r1, r2, r6 and r7 respectively; r6 and r7 are callee-saved, so a
 function that uses `S` or `D` saves them and keeps no other value there
 (and `D` is refused in a function with a variable-length array, whose
 frame r7 addresses). Do not use these letters. `x` is accepted and produces a
-template that does not assemble. ARM letters such as `l`, `h`, `Q`, `t`
-and `w`, alone, are refused:
+template that does not assemble. The ARM letters `Q`, `t` and `w`, alone,
+are refused:
 
 ```text
-asm constraint "=l" is not supported (EmbCC handles a/b/c/d/S/D, 'r'/'q'/'g'/'m', 'x', and a register-asm variable)
+asm constraint "=t" is not valid for ARMv7-M
 ```
 
 A combination with `r`, such as `"Ir"`, is a register.
@@ -1162,16 +1166,31 @@ registers must also stay free for EmbCC to store the outputs; otherwise:
 the ARMv7-M backend cannot lower an asm with no scratch register left around it yet (function f)
 ```
 
-An output wider than 4 bytes is refused:
-
-```text
-the ARMv7-M backend cannot lower an asm output wider than a register yet (function f)
-```
+A 64-bit operand (`long long`, a soft-float `double`) is given a register
+pair, r0:r1 or r2:r3, low word first; `%N` prints its first register and
+`%QN`, `%RN` and `%HN` its halves (see [Modifiers](#modifiers-1)). When
+no pair is free EmbCC reports `no free register pair for a 64-bit asm
+operand`; an operand wider than 8 bytes is refused.
 
 ### Modifiers
 
-None. `%N` prints the register name (`r0` to `r12`, `sp`, `lr`, `pc`).
-Any modifier is refused with
+`%N` prints the register name (`r0` to `r12`, `sp`, `lr`, `pc`), or the
+first register of a 64-bit operand's pair. `%QN` prints the register of
+its low word, `%RN` that of its high word, and `%HN` the pair's second
+register, as GCC prints them:
+
+```c
+unsigned long long mul(unsigned a, unsigned b)
+{
+    unsigned long long r;
+    __asm__("umull %Q0, %R0, %1, %2" : "=r"(r) : "r"(a), "r"(b));
+    return r;
+}
+```
+
+`%Q`, `%R` or `%H` of an operand that is not 64 bits is refused
+(`%R1 names half of a 64-bit register operand, and operand 1 is one
+register`); any other modifier with
 `asm template modifier '%w' is not supported for ARMv7-M`.
 
 ### Template syntax
