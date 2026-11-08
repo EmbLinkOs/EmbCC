@@ -1730,10 +1730,24 @@ atomic on ONE core with no other bus master writing the object:
   part (the RP2040, the ESP32's two cores, an AURIX with several TriCore
   CPUs) needs a lock that both cores honour.
 - The instructions are privileged: machine mode on RISC-V, supervisor
-  mode on SPARC, PowerPC, ColdFire and RX, privileged mode on Cortex-M
-  (CPSID is ignored in unprivileged thread mode, so the operation is not
-  atomic there), kernel mode on MIPS. Code running in user mode traps or
-  silently loses atomicity.
+  mode on SPARC, PowerPC, ColdFire and RX, privileged mode on Cortex-M,
+  kernel mode on MIPS. On Cortex-M, where CPSID is ignored in
+  unprivileged Thread mode, the routines see that mode (CONTROL.nPRIV
+  set, no exception active) and call `__embcc_atomic_lock()` before the
+  operation and `__embcc_atomic_unlock()` after it instead -- functions
+  an RTOS defines with its own critical section (an SVC, a scheduler
+  lock):
+
+  ```c
+  void __embcc_atomic_lock(void)   { emb_svc_enter_critical(); }
+  void __embcc_atomic_unlock(void) { emb_svc_leave_critical(); }
+  ```
+
+  Without them the default lock executes `udf`: the task that asked
+  faults, rather than two tasks losing an update. This covers ARMv6-M's
+  atomics of every width and the eight-byte ones on every Cortex-M
+  (`tests/golden/thumb-atomic-unpriv.sh`). On the other architectures
+  code running in user mode traps or silently loses atomicity.
 - An interrupt of a priority that masking does not reach -- a Cortex-M
   fault or NMI, a SPARC level-15 interrupt -- can still run in the
   middle.
