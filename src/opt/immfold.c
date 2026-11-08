@@ -536,9 +536,18 @@ int pass_immfold(struct ir_func *fn)
         int cmp64 = target_get() == TARGET_THUMB && i->op == IR_CMP &&
                     i->w == 8 && target_thumb_arch() >= 7 &&
                     !getenv("EMBCC_T_NOCMP64IMM");
+        /* Xtensa: a 64-bit compare takes any constant, half by half --
+         * against zero or a value bnei/beqi name, a branch on each half
+         * (codegen.c, cmp64_branch); else built where it is compared.
+         * `timeout == EMB_TICK_MAX` had -1 in a register pair, copied. */
+        int xt64 = target_get() == TARGET_XTENSA && i->op == IR_CMP &&
+                   i->w == 8;
         int p64;
         long lo64, hi64;
-        if (cmp64 ? get_const(fn, &d, i->b, &B) &&
+        if (xt64 && get_const(fn, &d, i->b, &B)) {
+            i->imm = B; i->imm_b = 1; i->b = -1;
+            changed = 1;
+        } else if (cmp64 ? get_const(fn, &d, i->b, &B) &&
                     cmp64_imm(i->pred, i->sign, B, &p64, &lo64, &hi64)
                   : get_const(fn, &d, i->b, &B) && (fits_imm32(B) || wide_ok) &&
                     target_imm_foldable(i->op, B, i->w)) {

@@ -1520,6 +1520,62 @@ static void src64(struct xt_fn *F, int v, int slo, int shi, int *lo, int *hi)
     *hi = shi;
 }
 
+/* "this half differs from k": the register test, or one against an
+ * immediate when k is zero or one a branch can name; else k into
+ * `scratch` first */
+static struct xtest half_ne(struct xt_fn *F, int reg, long long k, int scratch)
+{
+    if (k == 0)
+        return test_z(XT_BNEZ, reg);
+    if (xt_bi_ok(XT_BNEI, k))
+        return test_i(XT_BNEI, reg, k);
+    li(F, scratch, k);
+    return test_rr(XT_BNE, reg, scratch);
+}
+
+/* A 64-bit (in)equality and the branch on it, as one: GCC's `bnei a2,
+ * -1; beqi a3, -1`, where this built the 0/1 and tested it (an RTOS's
+ * `timeout == EMB_TICK_MAX`, #184). Returns 0 when it does not apply. */
+static int cmp64_branch(struct xt_fn *F, const struct ir_ins *i,
+                        const struct ir_ins *br)
+{
+    int al, ah, bl = -1, bh = -1, kb = 0;
+    long long kv = 0;
+    struct xtest lo, hi;
+    if (i->pred != B_EQ && i->pred != B_NE)
+        return 0;
+    src64(F, i->a, A_LO, A_HI, &al, &ah);
+    if (i->imm_b) {
+        kb = 1;
+        kv = i->imm;
+    } else if (F->kdef && i->b >= 0 && i->b < F->fn->nvregs &&
+               F->kdef[i->b] == 1) {
+        kb = 1;
+        kv = F->kval[i->b];
+    } else {
+        src64(F, i->b, B_LO, B_HI, &bl, &bh);
+    }
+    /* both tests built (and any constant loaded) before either branch */
+    if (kb) {
+        lo = half_ne(F, al, (long long)(int)(unsigned)((unsigned long long)kv & 0xffffffffu), B_LO);
+        hi = half_ne(F, ah, (long long)(int)((unsigned long long)kv >> 32), B_HI);
+    } else {
+        lo = test_rr(XT_BNE, al, bl);
+        hi = test_rr(XT_BNE, ah, bh);
+    }
+    if ((i->pred == B_EQ) != (br->op == IR_BRNZ)) {
+        /* to the label when they differ */
+        branch_to(F, lo, br->label);
+        branch_to(F, hi, br->label);
+    } else {
+        /* to the label when they are equal */
+        int skip = br_place(F, lo);
+        branch_to(F, invert(hi), br->label);
+        br_land(F, skip);
+    }
+    return 1;
+}
+
 /* A 64-bit comparison into `dst`: the high words decide unless they are
  * equal, and then the low words, compared UNSIGNED. The branches read
  * every operand before dst is written, so dst may be any of them. */
@@ -1709,6 +1765,42 @@ static int gen_ins64(struct xt_fn *F, int n)
          * below an addend (unsigned), the borrow the minuend being below
          * the subtrahend -- each a branch over the +-1. */
         int skip;
+        /* In the pairs themselves where they allow it -- the result's
+         * pair the same as each operand's or apart from it -- instead
+         * of through A and B and back (four copies in, two out, around
+         * a four-instruction add) */
+        if (in_reg(F, i->dst) && in_reg(F, i->a) &&
+            (i->imm_b || in_reg(F, i->b))) {
+            int dl = F->loc[i->dst], dh = dl + 1;
+            int al = F->loc[i->a], ah = al + 1, bl, bh;
+            if (i->imm_b) {
+                operand_b64(F, i, B_LO, B_HI);
+                bl = B_LO; bh = B_HI;
+            } else {
+                bl = F->loc[i->b]; bh = bl + 1;
+            }
+            int ok = (dl == al || dl - al >= 2 || al - dl >= 2) &&
+                     (dl == bl || dl - bl >= 2 || bl - dl >= 2) &&
+                     !(dl == al && dl == bl);
+            if (ok && i->op == IR_ADD) {
+                /* the carry: the low sum below an addend still intact */
+                int kept = dl != bl ? bl : al;
+                xt_alu(t, XT_ADD, dl, al, bl);
+                xt_alu(t, XT_ADD, dh, ah, bh);
+                skip = br_place(F, test_rr(XT_BGEU, dl, kept));
+                xt_addi(t, dh, dh, 1);
+                br_land(F, skip);
+                return 1;
+            }
+            if (ok && i->op == IR_SUB) {
+                xt_alu(t, XT_SUB, dh, ah, bh);
+                skip = br_place(F, test_rr(XT_BGEU, al, bl));
+                xt_addi(t, dh, dh, -1);
+                br_land(F, skip);
+                xt_alu(t, XT_SUB, dl, al, bl);
+                return 1;
+            }
+        }
         rd64(F, i->a, A_LO, A_HI);
         operand_b64(F, i, B_LO, B_HI);
         if (i->op == IR_ADD) {
@@ -1731,18 +1823,29 @@ static int gen_ins64(struct xt_fn *F, int n)
     }
     case IR_AND: case IR_OR: case IR_XOR: {
         int op = i->op == IR_AND ? XT_AND : i->op == IR_OR ? XT_OR : XT_XOR;
-        int al, ah, bl, bh;
+        int al, ah, bl, bh, dl = A_LO, dh = A_HI, direct = 0;
         src64(F, i->a, A_LO, A_HI, &al, &ah);
-        if (i->imm_b) {
-            logic_half(F, op, A_LO, al, (unsigned long)i->imm, B_LO);
-            logic_half(F, op, A_HI, ah, (unsigned long)i->imm >> 32, B_LO);
-            wr64(F, i->dst, A_LO, A_HI);
-            return 1;
+        if (!i->imm_b)
+            src64(F, i->b, B_LO, B_HI, &bl, &bh);
+        else
+            bl = bh = -1;
+        /* straight into the result's pair when it is each operand's or
+         * apart from it (as add and sub) */
+        if (in_reg(F, i->dst)) {
+            int r = F->loc[i->dst];
+            direct = (r == al || r - al >= 2 || al - r >= 2) &&
+                     (bl < 0 || r == bl || r - bl >= 2 || bl - r >= 2);
+            if (direct) { dl = r; dh = r + 1; }
         }
-        src64(F, i->b, B_LO, B_HI, &bl, &bh);
-        xt_alu(t, op, A_LO, al, bl);
-        xt_alu(t, op, A_HI, ah, bh);
-        wr64(F, i->dst, A_LO, A_HI);
+        if (i->imm_b) {
+            logic_half(F, op, dl, al, (unsigned long)i->imm, B_LO);
+            logic_half(F, op, dh, ah, (unsigned long)i->imm >> 32, B_LO);
+        } else {
+            xt_alu(t, op, dl, al, bl);
+            xt_alu(t, op, dh, ah, bh);
+        }
+        if (!direct)
+            wr64(F, i->dst, A_LO, A_HI);
         return 1;
     }
     case IR_NEG: {
@@ -2628,6 +2731,10 @@ static void gen_ins(struct xt_fn *F, int n)
                 F->skip_next = 1;
                 return;
             }
+            if (fuse && cmp64_branch(F, i, nx)) {
+                F->skip_next = 1;
+                return;
+            }
             d = wreg(F, i->dst, ACC);
             cmp64(F, i, d);
             wrote(F, i->dst, d);
@@ -3485,7 +3592,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct xt_sites *st,
                 if (dv < 0 || dv >= fn->nvregs || in->op == IR_STVAR)
                     continue;
                 if (F.kdef[dv] == 0 && in->op == IR_CONST && !in->flt &&
-                    in->w <= 4) {
+                    in->w <= 8) {
                     F.kdef[dv] = 1;
                     F.kval[dv] = in->imm;
                 } else {
