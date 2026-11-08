@@ -1585,10 +1585,16 @@ static void layout(struct t_fn *F)
          * and placed below. */
         int nv = fn->nvregs, npool = 0, has_cgoto = 0;
         int *loc2 = xmalloc((size_t)(nv ? nv : 1) * sizeof *loc2);
+        /* ...and no slot for a frame address with no register either:
+         * faddr makes it where it is read, and its slot was never
+         * written -- yet took four bytes, and moved every local it pushed
+         * past by eight (deep()'s 64-byte buffer to sp + 4) */
         for (int v = 0; v < nv; v++)
             loc2[v] = (F->loc && F->loc[v] >= 0) || F->wide[v] ||
                       (F->selimm && F->selimm[v]) ||
-                      (F->remat && F->remat[v]) ? 0 : -1;
+                      (F->remat && F->remat[v]) ||
+                      (F->fvar && (F->fvar[v] >= 0 || F->fscr[v] >= 0))
+                      ? 0 : -1;
         for (int n = 0; n < fn->nins; n++)
             if (fn->ins[n].op == IR_IGOTO || fn->ins[n].op == IR_LABELADDR)
                 has_cgoto = 1;
@@ -1937,8 +1943,10 @@ static int rc_try(struct t_fn *F, int v)
     if (F->rc_reg[v] >= 0)
         return rc_hit(F, v);
     avail = F->lofree;
+    /* ...nor a volatile local: every read of one is a read of memory */
     if (!avail || F->rc_n == 8 || in_freg(F, v) || F->wide[v] ||
-        F->slot[v] < 0 || faddr(F, v, &fo) || fn->ins[n].dst == v)
+        F->slot[v] < 0 || faddr(F, v, &fo) || fn->ins[n].dst == v ||
+        (v < fn->nvars && fn->locals[v].is_volatile))
         return -1;
     int stop, end, k;
     for (m = n + 1; m < fn->nins && m <= n + RC_REACH; m++) {
@@ -2221,6 +2229,48 @@ static void frame_addr_map(struct t_fn *F)
     F->fscr = fs;
 }
 
+/* Values no register should hold (ra_cheap_remat): a local's address
+ * (fvar) whose reads are loads and stores -- `str r2, [sp, #4]` where it
+ * was `add r3, sp, #0; str r2, [r3, #4]`, and across a call r4, pushed
+ * and popped for it -- and a constant whose reads are call arguments,
+ * moves and returns, where `movs r1, #2` costs what `mov r1, r4` did. A
+ * paid read rebuilds into a scratch register, and Thumb's is r10 -- high,
+ * so four-byte instructions, and callee-saved, so pushed: `addw r10, sp,
+ * #0` for an indexed load cost a push.w where the allocator's low
+ * register had cost nothing. So none, for an address as for a constant
+ * (EMBCC_T_CHEAP_ADDR=N moves it). Only what gen_func rebuilds:
+ * not an eight-byte value, nor the local returned in the caller's buffer
+ * (its address is a load, t_nrvo_local). EMBCC_T_NOCHEAP=1 turns it off. */
+static int t_cheap_ok(const struct ir_ins *i)
+{
+    return i->op == IR_ADDR || t_remat_ok(i);
+}
+static char *t_cheap_map(const struct t_fn *F)
+{
+    const struct ir_func *fn = F->fn;
+    if (getenv("EMBCC_T_NOCHEAP") || !F->fvar)
+        return NULL;
+    int lim_addr = 0;
+    const char *e = getenv("EMBCC_T_CHEAP_ADDR");
+    if (e)
+        lim_addr = atoi(e);
+    char *m = ra_cheap_remat(fn, t_cheap_ok, lim_addr, 0);
+    if (!m)
+        return NULL;
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        int d = ra_ins_def(i);
+        if (d < 0 || d >= fn->nvregs || !m[d])
+            continue;
+        if (i->op == IR_ADDR && (F->fvar[d] < 0 || i->a == F->nrvo))
+            m[d] = 0;
+    }
+    for (int v = 0; v < fn->nvregs; v++)
+        if (F->wide && F->wide[v])
+            m[v] = 0;
+    return m;
+}
+
 /* THE RETURNED LOCAL IN THE CALLER'S BUFFER. `div_t r; r.quot = ...;
  * r.rem = ...; return r;` built r on the frame and copied it to the
  * buffer the caller passed: 32 bytes for div where clang's 14 store
@@ -2299,7 +2349,25 @@ static char *t_faddr_excl(const struct t_fn *F, const char *base)
 }
 char *tcg_faddr_excl(const struct t_fn *F, const char *base)
 {
-    return t_faddr_excl(F, base);
+    /* ra_cheap_remat's values (t_cheap_map) only with EMBCC_T_V6CHEAP=1:
+     * ARMv6-M folds only a word access into sp's offset, and a byte or
+     * halfword one through a rebuilt address pays an `add` each time --
+     * M0 libc 296,612 -> 296,816 bytes, counting its weak functions. */
+    char *x = t_faddr_excl(F, base);
+    char *c = !getenv("EMBCC_T_V6CHEAP") || F->keep_vars || g_t_o0
+              ? NULL : t_cheap_map(F);
+    if (c) {
+        int nv = F->fn->nvregs;
+        if (!x) {
+            x = xcalloc((size_t)nv, 1);
+            for (int v = 0; v < nv; v++)
+                x[v] = base ? base[v] : 0;
+        }
+        for (int v = 0; v < nv; v++)
+            x[v] |= c[v];
+        free(c);
+    }
+    return x;
 }
 
 /* frame base + off, into `rd`: t_add_sp where the frame base is sp. */
@@ -3372,6 +3440,116 @@ static int t_lit64_flush(struct t_fn *F, int pass)
             t_lit64_fit(F, pool);
     }
     return ok;
+}
+
+/* ---- the address pool -------------------------------------------------
+ *
+ * A symbol's address was always `movw rd, #:lower16:sym; movt rd,
+ * #:upper16:sym` -- eight bytes for every use, 1,230 pairs over the
+ * Cortex-M4 libc, where GCC loads it from a word after the function:
+ * `ldr rd, [pc, #off]`, two bytes from r0-r7 within 1020 bytes ahead,
+ * four from any register within 4095, and the word itself shared by
+ * every use in the function. Under -Os that is what this does: each use
+ * a load (the four-byte form on a first pass, measured there, the
+ * two-byte one on the next where it reaches), the words after the 64-bit
+ * pool (t_lit64), each with an R_ARM_ABS32. A load the four-byte form
+ * does not reach -- a function past 4 KB -- turns the pool off for the
+ * function and makes the first pass again, movw/movt throughout.
+ * EMBCC_T_NOPOOL32=1 keeps movw/movt. Thumb state only. */
+enum { T_L32_STR, T_L32_GLOB, T_L32_FN, T_L32_K };
+
+static void t_lit32_load(struct t_fn *F, int rd, int kind, unsigned long v,
+                         const void *p)
+{
+    int k;
+    for (k = 0; k < F->l32_n; k++)
+        if (F->l32[k].kind == kind && F->l32[k].v == v && F->l32[k].p == p)
+            break;
+    if (k == F->l32_n) {
+        if (F->l32_n == F->l32_cap) {
+            F->l32_cap = F->l32_cap ? F->l32_cap * 2 : 8;
+            F->l32 = xrealloc(F->l32, (size_t)F->l32_cap * sizeof *F->l32);
+        }
+        F->l32[k].kind = kind;
+        F->l32[k].v = v;
+        F->l32[k].p = p;
+        F->l32_n++;
+    }
+    if (F->l32_ns == F->l32_caps) {
+        F->l32_caps = F->l32_caps ? F->l32_caps * 2 : 8;
+        F->l32s = xrealloc(F->l32s, (size_t)F->l32_caps * sizeof *F->l32s);
+    }
+    int ord = F->l32_ns;
+    struct t_l32site *s = &F->l32s[F->l32_ns++];
+    s->at = F->t->len;
+    s->idx = k;
+    s->rt = rd;
+    s->wide = !(F->l32_short && ord < F->l32_nshort && F->l32_short[ord] &&
+                rd <= 7);
+    if (!s->wide ? !t_ldr_lit16(F->t, rd, 0) : !t_ldr_lit(F->t, rd, 0))
+        internal_error("thumb: %s: an address load into r%d", F->fn->name,
+                       rd);
+}
+
+/* The words after everything else, and every load patched to its word.
+ * 0 on a first pass one does not reach: the pool is off for the function
+ * and the caller makes the pass again. A first pass also writes its
+ * verdicts (l32_meas): the two-byte form where the register is low and
+ * the word is within 1016 bytes -- 1020 less the two bytes a load's
+ * word-rounded base can move by when the code before it shrinks. */
+static int t_lit32_flush(struct t_fn *F, int pass)
+{
+    struct code *t = F->t;
+    if (!F->l32_ns)
+        return 1;
+    while (t->len & 3)
+        t_nop(t);
+    int base = t->len;
+    for (int k = 0; k < F->l32_n; k++) {
+        const struct t_l32 *l = &F->l32[k];
+        if (l->kind == T_L32_STR)
+            note_str(F->st, t->len, (int)l->v, RK_ABS32);
+        else if (l->kind == T_L32_GLOB)
+            note_glob(F->st, t->len, (struct global *)l->p, RK_ABS32);
+        else if (l->kind == T_L32_FN)
+            note_fn(F->st, t->len, (struct func *)l->p, RK_ABS32);
+        code_u32(t, l->kind == T_L32_K ? l->v : 0);
+    }
+    code_mark_data(t, base, t->len);
+    if (pass == 0) {
+        free(F->l32_meas);
+        F->l32_meas = xcalloc((size_t)F->l32_ns, 1);
+    }
+    for (int k = 0; k < F->l32_ns; k++) {
+        const struct t_l32site *s = &F->l32s[k];
+        int word = base + 4 * s->idx;
+        long off = (long)word - ((s->at + 4) & ~3L);
+        if (pass == 0 && s->rt <= 7 && off >= 0 &&
+            off <= 1016 - F->l32_slack)
+            F->l32_meas[k] = 1;
+        if (!s->wide) {
+            if (!t1_patch_ldr_lit(t, s->at, word))
+                internal_error("thumb: %s: a two-byte address load no "
+                               "longer reaches its word", F->fn->name);
+            continue;
+        }
+        struct code c;
+        memset(&c, 0, sizeof c);
+        int ok = t_ldr_lit(&c, s->rt, off);
+        if (ok)
+            memcpy(t->p + s->at, c.p, 4);
+        free(c.p);
+        free(c.drange);
+        if (!ok) {
+            if (pass == 0) {
+                F->l32_on = 0;          /* past 4 KB: movw/movt, again */
+                return 0;
+            }
+            internal_error("thumb: %s: an address load no longer reaches "
+                           "its word", F->fn->name);
+        }
+    }
+    return 1;
 }
 
 static int gen_ins64(struct t_fn *F, int n)
@@ -5083,6 +5261,23 @@ static void gen_ins(struct t_fn *F, int n)
          * instructions on the commonest operation there is, and the
          * copy out of a high scratch cannot use a 16-bit encoding. */
         int d = wreg(F, i->dst, T_ACC);
+        /* ...and under -Os a constant that takes movw and movt, eight
+         * bytes, from the address pool instead (t_lit32): 1,648 such
+         * pairs over the Cortex-M4 libc once the addresses were loads */
+        if (F->l32_on) {
+            struct code c;
+            memset(&c, 0, sizeof c);
+            t_mov_imm_dead_flags(&c, d, (long)i->imm);
+            int len = c.len;
+            free(c.p);
+            free(c.drange);
+            if (len >= 8) {
+                t_lit32_load(F, d, T_L32_K,
+                             (unsigned long)i->imm & 0xffffffffUL, NULL);
+                wrote(F, i->dst, d);
+                return;
+            }
+        }
         t_mov_imm_dead_flags(t, d, (long)i->imm);
         wrote(F, i->dst, d);
         return;
@@ -5955,6 +6150,11 @@ static void gen_ins(struct t_fn *F, int n)
     }
     case IR_STRADDR: {
         int d = wreg(F, i->dst, T_ACC);   /* straight into its home */
+        if (F->l32_on) {
+            t_lit32_load(F, d, T_L32_STR, (unsigned long)i->label, NULL);
+            wrote(F, i->dst, d);
+            return;
+        }
         note_str(F->st, t_mov_addr(t, d, 0), i->label, RK_THM_MOVW);
         note_str(F->st, t->len - 4, i->label, RK_THM_MOVT);
         wrote(F, i->dst, d);
@@ -5991,6 +6191,11 @@ static void gen_ins(struct t_fn *F, int n)
             wrote(F, i->dst, d);
             return;
         }
+        if (F->l32_on) {
+            t_lit32_load(F, d, T_L32_GLOB, 0, i->glob);
+            wrote(F, i->dst, d);
+            return;
+        }
         note_glob(F->st, t_mov_addr(t, d, 0), i->glob, RK_THM_MOVW);
         note_glob(F->st, t->len - 4, i->glob, RK_THM_MOVT);
         wrote(F, i->dst, d);
@@ -5998,6 +6203,11 @@ static void gen_ins(struct t_fn *F, int n)
     }
     case IR_FADDR: {
         int d = wreg(F, i->dst, T_ACC);   /* straight into its home */
+        if (F->l32_on) {
+            t_lit32_load(F, d, T_L32_FN, 0, i->callee);
+            wrote(F, i->dst, d);
+            return;
+        }
         note_fn(F->st, t_mov_addr(t, d, 0), i->callee, RK_THM_MOVW);
         note_fn(F->st, t->len - 4, i->callee, RK_THM_MOVT);
         wrote(F, i->dst, d);
@@ -7615,12 +7825,14 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
          * owns, and the -g pins are the same kind of "not here" -- so it
          * takes the union of the two. */
         char *excl = pin;
-        if (flt) {
+        char *cheap = keep_vars || g_t_o0 ? NULL : t_cheap_map(&F);
+        if (flt || cheap) {
             excl = xcalloc((size_t)fn->nvregs, 1);
             for (int v = 0; v < fn->nvregs; v++)
-                excl[v] = (char)(flt[v] || (dbl && dbl[v]) ||
-                                 (pin && pin[v]));
+                excl[v] = (char)((flt && flt[v]) || (dbl && dbl[v]) ||
+                                 (pin && pin[v]) || (cheap && cheap[v]));
         }
+        free(cheap);
         int pused[RA_MAXPOOL], npused = 0;
         int *pair = g_t_pairs ? t_pair_alloc(fn, F.wide, excl, pused, &npused)
                               : NULL;
@@ -7678,9 +7890,10 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
             /* vpush takes a RANGE, so s16 up to the highest one used,
              * rounded to an even count to keep sp eight-aligned. */
             F.nfsave = (top - 15 + 1) & ~1;
-            free(excl);
             free(flt);
         }
+        if (excl != pin)
+            free(excl);
         free(dbl);
         free(pin);
         /* Read counts for comparison/branch fusion. Only with the
@@ -7855,6 +8068,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         sg0 = F.st->ng, sf0 = F.st->nf;
     char *shortb = NULL;
     int nshortb = 0;
+    int l32_meas_n = 0;         /* sites the first pass measured */
     F.no_tbh = xcalloc((size_t)fn->nins + 1, 1);
     int restarted = 0;           /* a first pass made again: reset as for a later one */
     /* An asm that aligns its bytes (`.p2align 3`) pads by where it lands,
@@ -7869,11 +8083,17 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         else if (fn->ins[i].op == IR_GADDR && fn->ins[i].glob &&
                  fn->ins[i].glob->is_tls)
             asm_sl += 2;          /* a thread-local's word: its padding */
+    F.l32_on = target_opt_size() && !t_isa_a32 &&
+               !getenv("EMBCC_T_NOPOOL32");
+    F.l32_slack = asm_sl;
     for (int pass = 0; pass < 3; pass++) {
     int redo0 = 0;
     if (!F.lp_planned)
         F.lp_n = 0;              /* else the planned order (t_lit64_fit) */
     F.lp_nsite = 0;
+    F.l32_n = F.l32_ns = 0;
+    F.l32_short = pass ? F.l32_meas : NULL;
+    F.l32_nshort = pass && F.l32_meas ? l32_meas_n : 0;
     g_t_scr_used = 0;
     t_roles_from(0);            /* r9-r11, or all three free */
     F.fb = T_SP;                 /* until the prologue sets r7 */
@@ -7922,8 +8142,16 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
      * nothing branches there, but it makes every disassembly of the gap
      * between two functions look like a condition block. */
     /* An A32 function is word-aligned, as every A32 instruction is. */
+    /* The 32-bit pool (t_lit32_load) likewise: its ldr reads from
+     * Align(pc, 4) too. Whether it has a word is known only once pass 0
+     * has made the code, so pass 0 starts on four whenever the pool is
+     * on, and a later pass when pass 0 put anything in it -- every pass
+     * makes the same loads. At two, `--gc-sections` put printf's
+     * function on a halfword and every pool load read the word beside
+     * the one it meant: the image printed nothing. */
     {
-        int al = t_isa_a32 || F.lp_use ? 3 : 1;
+        int al = t_isa_a32 || F.lp_use ||
+                 (F.l32_on && (pass == 0 || l32_meas_n)) ? 3 : 1;
         /* ...and one that reads a thread-local's offset from a literal
          * word in its code (IR_GADDR) */
         for (int k = 0; k < fn->nins; k++)
@@ -8436,6 +8664,10 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
 
     if (!t_lit64_flush(&F, pass))
         redo0 = 1;                  /* a constant out of reach: again */
+    if (!t_lit32_flush(&F, pass))
+        redo0 = 1;                  /* an address out of reach: again */
+    if (pass == 0)
+        l32_meas_n = F.l32_ns;
     for (i = 0; i < F.nfix; i++) {
         int target = F.label_off[F.fix[i].label];
         if (target < 0) {
@@ -8573,6 +8805,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
             any |= shortb[i];
             any |= shortb[i];
         }
+        for (i = 0; F.l32_meas && i < F.l32_ns; i++)
+            any |= F.l32_meas[i];
         /* ...and which scratch registers it touched: only those need
          * saving. An asm cannot touch them: irgen refuses a template or
          * clobber naming r4-r11, and what its lowering uses goes through
@@ -8672,6 +8906,12 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     free(F.lp_use);
     free(F.lp_val);
     free(F.lp_site);
+    if (F.l32_ns && f->code_align < 4)
+        internal_error("thumb: %s has a literal pool and starts on a "
+                       "halfword", fn->name);
+    free(F.l32);
+    free(F.l32s);
+    free(F.l32_meas);
 }
 
 /* With the allocator on and no FPU, a function is generated with the pair

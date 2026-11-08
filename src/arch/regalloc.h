@@ -236,6 +236,26 @@ struct ra_target {
 char *ra_remat_map(const struct ir_func *fn,
                    int (*ok)(const struct ir_ins *def));
 
+/* Per vreg, 1 for a value no register should hold, because rebuilding it
+ * where it is read costs no more than the register would: a temp with
+ * one definition that `ok` says can be rebuilt (a constant, a local's
+ * address), whose reads are all free ones, or nearly. A read is free when
+ * the rebuilt value goes straight where the register's would have been
+ * copied -- a call argument, the source of a move, a return value -- and,
+ * for a local's address (IR_ADDR), the address of a load or a store,
+ * which the backends fold into the access's offset from the frame base,
+ * and the address plus a constant, one add from the frame base.
+ * Any other read is paid: it rebuilds into a scratch register first. A
+ * value with at most `lim_addr` (an address) or `lim_const` (anything
+ * else) paid reads is marked. A register for such a value bought nothing
+ * but its definition, and across a call a callee-saved register saved
+ * and restored besides; Chaitin-Briggs spills only under pressure, so
+ * while registers were free it gave them one anyway. NULL when none is
+ * marked; xcalloc'd, nvregs long, otherwise. */
+char *ra_cheap_remat(const struct ir_func *fn,
+                     int (*ok)(const struct ir_ins *def),
+                     int lim_addr, int lim_const);
+
 /* Assign a register to every eligible vreg of `fn`, or -1 for one that
  * stays in memory. `wide` (may be NULL) marks vregs holding a value too
  * large for a register -- a long double -- which are never eligible.

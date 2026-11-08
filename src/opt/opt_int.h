@@ -352,6 +352,8 @@ void tm_sweep(struct ir_func *fn);
 int pass_tailmerge(struct ir_func *fn);
 int pass_retdup(struct ir_func *fn);
 int pass_coldsink(struct ir_func *fn);      /* cold blocks to the end */
+int pass_demand(struct ir_func *fn);        /* the bytes readers want */
+int pass_layout(struct ir_func *fn);        /* a jump's target after it */
 
 /* vectorize.c */
 int addr_of_iv(struct ir_func *fn, struct defs *d, struct vecloop *L,

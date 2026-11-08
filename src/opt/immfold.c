@@ -461,6 +461,217 @@ int pass_storenarrow(struct ir_func *fn)
     return changed;
 }
 
+/* ---- the bytes a value's readers want ---------------------------------
+ *
+ * `(key_t)((st.st_ino & 0xffff) | (st.st_dev & 0xff) << 16 | id << 24)`
+ * with a two-byte key_t wants the low two bytes of it all: the shifts
+ * put nothing there and the 64-bit loads only their first two bytes.
+ * avr-gcc made it one ldd pair; EmbCC loaded both eight-byte fields and
+ * did the whole of it in four bytes and more -- 222 bytes against 66.
+ *
+ * DEMAND: for each temp, how many low bytes its readers use. An add,
+ * subtract, multiply, and, or, xor, negation, complement, move, and a
+ * shift left's shifted operand make their low N bytes from their
+ * operands' low N bytes, so they pass on what is asked of them; an
+ * extension reads its source's `size` bytes and a store its `size`;
+ * every other read (a comparison, a shift right, a division, a call, a
+ * return, an address) is the whole value. A temp with one definition,
+ * made by one of the first kind (a shift by a constant only) or by a
+ * non-volatile load whose size is its width, is then NARROWED to the
+ * smallest of 1, 2, 4 and 8 bytes that holds its demand -- but never
+ * below the machine's register (a byte on AVR, four on a 32-bit target;
+ * a two-byte add is no cheaper on RV32 than a four-byte one, and a
+ * 64-bit target is left alone). A shift that moves every wanted bit out
+ * becomes 0; an and whose mask keeps every wanted byte, a move. A load
+ * narrows only on a little-endian target, where the low bytes are first.
+ *
+ * Every read of a narrowed temp must fit in what it now holds: an
+ * operation reads its operands at its own width, so a reader not
+ * narrowed as far makes the temp it reads wider again, until nothing
+ * reads a byte that was not made. EMBCC_NO_DEMAND=1 turns it off. */
+struct dm_rd { const struct ir_ins *in; int *dem; const unsigned char *nw;
+               const char *cand; int nv; };
+
+static int dm_lowop(enum ir_op op)
+{
+    return op == IR_ADD || op == IR_SUB || op == IR_MUL || op == IR_AND ||
+           op == IR_OR || op == IR_XOR || op == IR_NEG || op == IR_BNOT ||
+           op == IR_MOV || op == IR_SHL;
+}
+
+/* how many low bytes of operand *p instruction `in` reads */
+static int dm_reads(const struct ir_ins *in, const int *p, const int *dem,
+                    const char *cand)
+{
+    int full = 8;
+    if (in->op == IR_EXT && p == &in->a)
+        return in->size;
+    if (in->op == IR_STORE && p == &in->b)
+        return in->size;
+    if (dm_lowop(in->op) && !in->flt && in->dst >= 0 && cand[in->dst] &&
+        (p == &in->a || (p == &in->b && in->op != IR_SHL))) {
+        int d = dem[in->dst];
+        return d < in->w ? d : in->w;
+    }
+    return full;
+}
+
+static void dm_cb(int *p, void *ctx)
+{
+    struct dm_rd *r = ctx;
+    int v = *p;
+    if (v < 0 || v >= r->nv)
+        return;
+    int k = dm_reads(r->in, p, r->dem, r->cand);
+    if (k > r->dem[v])
+        r->dem[v] = k;
+}
+
+/* the width an operation reads operand *p at, once narrowed */
+struct dm_fit { const struct ir_ins *in; unsigned char *nw; const char *cand;
+                int nv, changed; };
+static void dm_fit_cb(int *p, void *ctx)
+{
+    struct dm_fit *f = ctx;
+    int v = *p;
+    if (v < 0 || v >= f->nv || !f->cand[v])
+        return;
+    const struct ir_ins *in = f->in;
+    int rw;
+    if (in->op == IR_EXT && p == &in->a)
+        rw = in->size;
+    else if (in->op == IR_STORE && p == &in->b)
+        rw = in->size;
+    else if (dm_lowop(in->op) && !in->flt && in->dst >= 0 &&
+             f->cand[in->dst] && (p == &in->a || p == &in->b))
+        rw = f->nw[in->dst];
+    else
+        rw = in->w > 0 ? in->w : 8;
+    /* a read wider than any candidate (a sixteen-byte long double's
+     * operation, a store of one) wants all of it: eight. Compared at
+     * eight too, or 16 > 8 is a change on every round, for ever --
+     * complex.c's RV32 compile never ended. */
+    if (rw > 8)
+        rw = 8;
+    if (rw > f->nw[v]) {
+        f->nw[v] = (unsigned char)rw;
+        f->changed = 1;
+    }
+}
+
+int pass_demand(struct ir_func *fn)
+{
+    int nv = fn->nvregs, changed = 0;
+    if (!nv || getenv("EMBCC_NO_DEMAND"))
+        return 0;
+    int regw = target_get() == TARGET_AVR ? 1 : target_ptr_size();
+    if (regw >= 8)
+        return 0;
+    int le = !target_big_endian();
+    struct defs d;
+    compute_defs(fn, &d);
+    char *cand = xcalloc((size_t)nv, 1);
+    int any = 0;
+    for (int v = fn->nvars; v < nv; v++) {
+        if (d.cnt[v] != 1 || d.ins[v] < 0)
+            continue;
+        const struct ir_ins *i = &fn->ins[d.ins[v]];
+        if (i->flt || i->w <= regw || i->w > 8)
+            continue;
+        if (dm_lowop(i->op)) {
+            if (i->op == IR_SHL && !i->imm_b)
+                continue;
+            cand[v] = 1;
+            any = 1;
+        } else if (i->op == IR_LOAD && le && !i->vol && !i->flash &&
+                   i->size == i->w) {
+            cand[v] = 1;
+            any = 1;
+        }
+    }
+    if (!any) {
+        free(cand);
+        free_defs(&d);
+        return 0;
+    }
+    /* demand, to a fixpoint (it only grows) */
+    int *dem = xcalloc((size_t)nv, sizeof *dem);
+    for (int again = 1; again; ) {
+        again = 0;
+        for (int n = fn->nins - 1; n >= 0; n--) {
+            struct ir_ins *in = &fn->ins[n];
+            int before[3] = { in->a >= 0 && in->a < nv ? dem[in->a] : 0,
+                              in->b >= 0 && in->b < nv ? dem[in->b] : 0,
+                              in->c >= 0 && in->c < nv ? dem[in->c] : 0 };
+            struct dm_rd r = { in, dem, NULL, cand, nv };
+            each_read(in, dm_cb, &r);
+            if ((in->a >= 0 && in->a < nv && dem[in->a] != before[0]) ||
+                (in->b >= 0 && in->b < nv && dem[in->b] != before[1]) ||
+                (in->c >= 0 && in->c < nv && dem[in->c] != before[2]))
+                again = 1;
+        }
+    }
+    /* the widths: what holds the demand, then wide enough for every read */
+    unsigned char *nw = xcalloc((size_t)nv, 1);
+    for (int v = 0; v < nv; v++) {
+        if (!cand[v])
+            continue;
+        int w = fn->ins[d.ins[v]].w, k = dem[v] < 1 ? 1 : dem[v], p = 1;
+        while (p < k)
+            p *= 2;
+        if (p < regw)
+            p = regw;
+        nw[v] = (unsigned char)(p < w ? p : w);
+    }
+    for (int again = 1; again; ) {
+        struct dm_fit f = { NULL, nw, cand, nv, 0 };
+        for (int n = 0; n < fn->nins; n++) {
+            f.in = &fn->ins[n];
+            each_read(&fn->ins[n], dm_fit_cb, &f);
+        }
+        again = f.changed;
+    }
+    /* rewrite */
+    for (int v = 0; v < nv; v++) {
+        if (!cand[v])
+            continue;
+        struct ir_ins *i = &fn->ins[d.ins[v]];
+        int w = nw[v];
+        if (w >= i->w)
+            continue;
+        unsigned long mask = w >= 8 ? ~0UL : (1UL << (8 * w)) - 1;
+        if (i->op == IR_LOAD) {
+            i->size = w;
+            i->w = w;
+        } else if (i->op == IR_SHL && i->imm >= 8L * w) {
+            int dst = i->dst, line = i->line, col = i->col;
+            memset(i, 0, sizeof *i);
+            i->op = IR_CONST; i->dst = dst; i->w = w; i->imm = 0;
+            i->a = i->b = i->c = -1; i->label = -1;
+            i->callee_sym = i->glob_sym = -1;
+            i->line = line; i->col = col; i->synth = 1;
+        } else if (i->op == IR_AND && i->imm_b &&
+                   ((unsigned long)i->imm & mask) == mask) {
+            i->op = IR_MOV; i->imm_b = 0; i->b = -1; i->imm = 0;
+            i->w = w;
+        } else {
+            if (i->imm_b && i->op != IR_SHL) {
+                long x = (long)((unsigned long)i->imm & mask);
+                if (w < 8 && (x & (1L << (8 * w - 1))))
+                    x -= (long)1 << (8 * w);   /* sign-extended, as irgen */
+                i->imm = x;
+            }
+            i->w = w;
+        }
+        changed = 1;
+    }
+    free(nw);
+    free(dem);
+    free(cand);
+    free_defs(&d);
+    return changed;
+}
+
 /* Thumb's mla and mls take the product's operands in registers -- the
  * backend fuses `p = a * b; d = c +- p` into one when p's only reader is
  * the instruction right after it. A constant folded into the multiply
