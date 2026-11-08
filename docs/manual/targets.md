@@ -750,6 +750,12 @@ state may call:
   `msr apsr_nzcvq, lr` (`apsr_nzcvqg` on Mainline, whose DSP extension
   has the GE bits; `apsr` on Baseline). `r4`-`r11` hold the caller's
   values again after the epilogue. This is clang's soft-float sequence.
+  With an FPU (`thumbv8m.main-none-eabihf`, `--fpu=`), it also tests
+  CONTROL.SFPA -- whether the Secure state has a floating-point context
+  active -- and if so overwrites `s0`-`s15` with `lr`, but the result's
+  (`s0` for a `float`, `d0` for a `double`), and clears FPSCR's exception
+  bits and flags; a result in an FP register occupies no core register,
+  so `r0`-`r3` are all overwritten. This is clang's hard-float sequence.
 - it is kept and not inlined, has no tail calls, and must have external
   linkage.
 
@@ -771,12 +777,18 @@ int call_ns(void *p)
 The call saves `r4`-`r11`, clears bit 0 of the target, overwrites every
 register that holds no argument with it, and the flags, branches with
 `blxns`, and restores `r4`-`r11`; on Mainline it also saves and clears
-the floating-point context with `vlstm`/`vlldm`, as clang does. A
-narrow result is extended again after the call, since the Non-secure
-callee is not trusted to have done it. `tests/golden/thumbv8m-cmse.sh`
-compares these sequences with clang's and runs a Secure and a
-Non-secure image on the mps2-an505, reading the registers on the other
-side of every crossing.
+the floating-point context with `vlstm`/`vlldm`, as clang does. With an
+FPU, floating-point arguments (the hard-float convention's, in
+`s0`-`s15`) are carried across the `vlstm` in `r11` downward and FPSCR is
+given the saved one with its flags cleared, a floating-point result is
+carried across the `vlldm` the same way, and the `vlldm` is preceded by
+clang's `it ne; vmovne.f32 s0, s0` under CONTROL.SFPA. More than eight
+FP argument or result registers are refused by name. A narrow result is
+extended again after the call, since the Non-secure callee is not
+trusted to have done it. `tests/golden/thumbv8m-cmse.sh` compares these
+sequences with clang's and runs a Secure and a Non-secure image on the
+mps2-an505 -- with and without the FPU -- reading the registers on the
+other side of every crossing.
 
 `<arm_cmse.h>` provides `cmse_address_info_t`, `cmse_TT`, `cmse_TTT`,
 `cmse_TTA`, `cmse_TTAT` and their `_fptr` forms,
@@ -791,7 +803,6 @@ and GCC do: `__attribute__((cmse_nonsecure_entry)) is ignored without
 | Construct | Diagnostic |
 |---|---|
 | `--cmse` below ARMv8-M | `--cmse is the Secure side of ARMv8-M's security extension, and thumbv7m-none-eabi is not ARMv8-M: use thumbv8m.main-none-eabi or thumbv8m.base-none-eabi` |
-| `--cmse` with an FPU | `--cmse with an FPU (--fpu=, --float-abi=softfp or hard, or an -eabihf triple) is not supported: EmbCC does not clear the floating-point registers a cmse_nonsecure_entry function must clear; build the Secure side with --float-abi=soft` |
 | an entry function with stack arguments | `cmse_nonsecure_entry function 'f' requires arguments on the stack, which is the Non-secure caller's (CMSE allows r0-r3 only)` |
 | an entry function returning through memory | `cmse_nonsecure_entry function 'f' would return its value through memory the Non-secure caller owns (CMSE allows a result in r0-r3 only)` |
 | a static entry function | `cmse_nonsecure_entry function 'f' has internal linkage: the Non-secure state enters it through a veneer the linker makes from its global symbol` |

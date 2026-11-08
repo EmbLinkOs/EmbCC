@@ -37,7 +37,7 @@
 #     it fails.
 #  4. THE REFUSALS, by name: what CMSE forbids (arguments on the stack, a
 #     result through memory, a static or variadic entry function), what
-#     EmbCC does not do (an FPU with -mcmse, --in-implib,
+#     EmbCC does not do (--in-implib,
 #     cmse_nonsecure_caller), and -mcmse below ARMv8-M.
 set -u
 echo "TEST-MARKER thumbv8m-cmse"
@@ -82,6 +82,7 @@ fi
 # ---- 2 and 3. two images on the board, and the link --------------------------
 build() {          # build PROFILE OPT -> $out/PROFILE$OPT/{secure,ns}.elf
     T=thumbv8m.$1-none-eabi; b=$out/$1$2; mkdir -p "$b"
+    [ $1 = mainhf ] && T=thumbv8m.main-none-eabihf
     "$EMBCC" --target=$T -mcmse $2 -c $D/secure.c -o "$b/secure.o" &&
     "$EMBCC" --target=$T -mcmse $2 -c $D/s_boot.c -o "$b/s_boot.o" &&
     "$EMBLD" -T $D/secure.ld --cmse-implib --out-implib="$b/implib.o" \
@@ -99,10 +100,11 @@ run() {            # run PROFILE OPT
         "$QEMU" -M mps2-an505 -cpu cortex-m33 -nographic \
         -kernel "$b/secure.elf" -device loader,file="$b/ns.elf" \
         > "$b/run.txt" 2>&1
+    n=12; [ $1 = mainhf ] && n=16      # and the FP state's four
     grep -q '^==EXIT 0==' "$b/run.txt" &&
-    [ "$(grep -c '^ok ' "$b/run.txt")" = 12 ]
+    [ "$(grep -c '^ok ' "$b/run.txt")" = $n ]
 }
-for p in main base; do
+for p in main base mainhf; do
     for O in -O0 -O1 -O2 -Os; do
         build $p $O 2> "$out/build.err" || {
             echo "$p $O: the two images do not build:"; head -4 "$out/build.err"
@@ -188,8 +190,6 @@ refuse "Non-secure call with stack arguments" "passes arguments on the stack" \
 printf 'int __attribute__((cmse_nonsecure_call)) x;\n' > "$out/misplaced.c"
 refuse "cmse_nonsecure_call on an int" "applies to a function type" \
     "$EMBCC" --target=$M -mcmse -c "$out/misplaced.c" -o "$out/x.o"
-refuse "-mcmse with an FPU" "with an FPU" \
-    "$EMBCC" --target=thumbv8m.main-none-eabihf -mcmse -c "$out/va.c" -o "$out/x.o"
 refuse "-mcmse on ARMv7-M" "is not ARMv8-M" \
     "$EMBCC" --target=thumbv7m-none-eabi -mcmse -c "$out/va.c" -o "$out/x.o"
 printf '#include <arm_cmse.h>\nint g(void) { return cmse_nonsecure_caller(); }\n' > "$out/caller.c"

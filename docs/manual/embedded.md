@@ -384,7 +384,7 @@ table above, region by region. The details are in
 | Cortex-M4, M7 without FPU use | `thumbv7em-none-eabi` | soft-float |
 | Cortex-M4F | `thumbv7em-none-eabihf`, or `thumbv7em-none-eabi --fpu=fpv4-sp-d16 --float-abi=hard` | single-precision FPU, hard-float convention |
 | Cortex-M7 | `thumbv7em-none-eabihf --cpu=cortex-m7`, or `thumbv7em-none-eabi --fpu=fpv5-d16 --float-abi=hard` | double-precision FPU (FPv5-D16), hard-float convention |
-| Cortex-M33 | `thumbv8m.main-none-eabi`; `thumbv8m.main-none-eabihf` for the FPU | FPv5-SP-D16; TrustZone with `--cmse` (soft float) |
+| Cortex-M33 | `thumbv8m.main-none-eabi`; `thumbv8m.main-none-eabihf` for the FPU | FPv5-SP-D16; TrustZone with `--cmse`, with or without the FPU |
 
 `--cpu=cortex-m0`, `cortex-m0plus`, `cortex-m1`, `cortex-m23`,
 `cortex-m3`, `cortex-m4`, `cortex-m7` and `cortex-m33` select the
