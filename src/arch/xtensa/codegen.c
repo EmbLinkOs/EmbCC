@@ -104,6 +104,10 @@ struct xt_fn {
     /* per vreg: what its one definition already extended it from -- a
      * narrow load or an extension: size * 2 + sign, 0 for nothing known */
     unsigned char *kext;
+    /* per instruction: a shift by 1..3 left out (its only reader is an
+     * add, made addx2/4/8 of its source), or that add: the shift's index
+     * + 1; 0 for neither */
+    int *addx;
     int skip_next;       /* the instruction after this one is already out */
     int keep_vars;
     struct ir_func *fn;
@@ -2679,6 +2683,18 @@ static void gen_ins(struct xt_fn *F, int n)
 
     case IR_ADD: case IR_SUB: case IR_MUL:
     case IR_AND: case IR_OR:  case IR_XOR: {
+        if (F->addx && F->addx[n] > 0) {
+            const struct ir_ins *sh = &fn->ins[F->addx[n] - 1];
+            int other = i->a == sh->dst ? i->b : i->a;
+            int rs = rdr(F, sh->a, ACC);
+            int ro = rdr(F, other, rs == ACC ? TMP : ACC);
+            int d = wreg(F, i->dst, ACC);
+            xt_alu(t, sh->imm == 1 ? XT_ADDX2 : sh->imm == 2 ? XT_ADDX4
+                                                             : XT_ADDX8,
+                   d, rs, ro);
+            wrote(F, i->dst, d);
+            return;
+        }
         int op = i->op == IR_ADD ? XT_ADD
                : i->op == IR_SUB ? XT_SUB
                : i->op == IR_AND ? XT_AND
@@ -2729,6 +2745,8 @@ static void gen_ins(struct xt_fn *F, int n)
         return;
     }
     case IR_SHL: case IR_SHR: {
+        if (F->addx && F->addx[n] < 0)
+            return;                     /* its add is an addx (plan_addx) */
         int ra_ = rdr(F, i->a, ACC);
         int d = wreg(F, i->dst, ACC);
         if (i->imm_b) {
@@ -3622,6 +3640,83 @@ static void fill_pool(struct xt_fn *F)
     }
 }
 
+/* `(s << k) + o`, k 1..3, as addx2/4/8 (GCC's array indexing): the
+ * shift is left out and the add reads s itself, when the shift's result
+ * has that add as its only reader, in the same straight run with no call,
+ * s is a temp or parameter nothing redefines in between, and the add is
+ * the next instruction or s is read at or after it -- so its register (or
+ * slot) still holds it there. */
+struct lu_ctx { int *last; int n, at; };
+static void lu_cb(int v, void *ctx)
+{
+    struct lu_ctx *c = ctx;
+    if (v >= 0 && v < c->n && c->last[v] < c->at)
+        c->last[v] = c->at;
+}
+struct rd_ctx { int v, hit; };
+static void rd_cb(int v, void *ctx)
+{
+    struct rd_ctx *c = ctx;
+    if (v == c->v)
+        c->hit = 1;
+}
+
+static void plan_addx(struct xt_fn *F)
+{
+    struct ir_func *fn = F->fn;
+    int nv = fn->nvregs, *last;
+    if (!F->usecnt || getenv("EMBCC_NO_ADDX"))
+        return;
+    F->addx = xcalloc((size_t)(fn->nins ? fn->nins : 1), sizeof *F->addx);
+    last = xmalloc((size_t)(nv ? nv : 1) * sizeof *last);
+    for (int v = 0; v < nv; v++)
+        last[v] = -1;
+    for (int n = 0; n < fn->nins; n++) {
+        struct lu_ctx c = { last, nv, n };
+        ra_each_use(&fn->ins[n], lu_cb, &c);
+    }
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *sh = &fn->ins[n];
+        int x = sh->dst, s = sh->a, j;
+        if (sh->op != IR_SHL || !sh->imm_b || sh->w != 4 || sh->flt ||
+            sh->imm < 1 || sh->imm > 3 || x < fn->nvars || x >= nv ||
+            F->usecnt[x] != 1 || s < 0 || s >= nv || s == x ||
+            (s < fn->nvars && s >= fn->nparams))
+            continue;
+        for (j = n + 1; j < fn->nins; j++) {
+            const struct ir_ins *q = &fn->ins[j];
+            if (q->op == IR_LABEL || q->op == IR_JMP || q->op == IR_BRZ ||
+                q->op == IR_BRNZ || q->op == IR_CALL || q->op == IR_RET ||
+                q->op == IR_ASM || q->op == IR_SWITCH || q->dst == s) {
+                j = fn->nins;
+                break;
+            }
+            {
+                struct rd_ctx rc = { x, 0 };
+                ra_each_use(q, rd_cb, &rc);
+                if (rc.hit)
+                    break;
+            }
+        }
+        if (j >= fn->nins)
+            continue;
+        {
+            const struct ir_ins *ad = &fn->ins[j];
+            if (ad->op != IR_ADD || ad->w != 4 || ad->flt || ad->imm_b ||
+                (ad->a == x) == (ad->b == x) ||
+                /* right after the shift nothing can have reused s's
+                 * register (the shift itself is left out); further on,
+                 * s must still be live */
+                (j > n + 1 && last[s] < j) ||
+                F->addx[n] || F->addx[j])
+                continue;
+            F->addx[n] = -1;
+            F->addx[j] = n + 1;
+        }
+    }
+    free(last);
+}
+
 static void gen_func(struct ir_func *fn, struct code *t, struct xt_sites *st,
                      int keep_vars)
 {
@@ -3678,6 +3773,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct xt_sites *st,
                     F.kext[dv] = 255;     /* written twice, or not one */
             }
             ra_count_vreg_uses(fn, F.usecnt);
+            plan_addx(&F);          /* after the counts it reads */
         }
         /* EMBCC_XT_RA_MAX=N leaves only the first N vregs in registers --
          * always correct -- so a miscompile that comes and goes with N
@@ -3859,6 +3955,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct xt_sites *st,
     free(F.kdef);
     free(F.kval);
     free(F.kext);
+    free(F.addx);
     free(F.slot);
     cg_note_labels(fn, F.label_off);
     free(F.label_off);
