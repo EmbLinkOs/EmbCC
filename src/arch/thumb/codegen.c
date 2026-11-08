@@ -7668,11 +7668,15 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     if (fn->has_alloca)
         F.used_callee[F.nsave++] = 7;
     {
-        unsigned am = t_asm_saved_regs(fn);
+        /* ...and what an asm clobbers or names of r4-r11: the function's
+         * to save, as GCC saves it */
+        unsigned am = t_asm_saved_regs(fn) |
+                      (unsigned)(ra_asm_clobbers(fn) & 0x0ff0u);
         if (fn->has_alloca && (am >> 7 & 1))
-            t_refuse(fn, NULL, "an asm operand in r7 (the letter D) in a "
-                               "function whose frame r7 addresses");
-        for (int r = 4; r <= 8; r++) {
+            t_refuse(fn, NULL, "an asm that writes r7 in a function whose "
+                               "frame r7 addresses (it has a variable-length "
+                               "array or alloca)");
+        for (int r = 4; r <= 11; r++) {
             int have = 0;
             if (!(am >> r & 1))
                 continue;

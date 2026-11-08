@@ -129,12 +129,15 @@ int irg_va_arg_thumb(struct ir_func *fn, struct expr *e)
  * something, and running out is reported rather than worked around. */
 static const int t_asm_pool[] = { 0, 1, 2, 3, 12 };
 
-/* A register the template NAMES outright is off limits to allocation, and
- * one that is callee-saved is refused: EmbCC saves nothing around an asm,
- * so writing s0-s11 would corrupt the caller. */
+/* A register the template NAMES outright is off limits to allocation; one
+ * that is callee-saved (r4-r11) is the function's to save, as one an
+ * operand or the clobber list names is (ra_asm_clobbers): the prologue
+ * pushes it. sp, lr and pc are not an asm's to take by name. */
 static void t_mark_template_regs(const char *file, int line,
                                   const char *tmpl, int *used)
 {
+    (void)file;
+    (void)line;
     for (const char *p = tmpl; *p; ) {
         if (isalpha((unsigned char)*p) &&
             (p == tmpl || !(isalnum((unsigned char)p[-1]) || p[-1] == '_' ||
@@ -143,16 +146,8 @@ static void t_mark_template_regs(const char *file, int line,
             while (isalnum((unsigned char)p[n]) || p[n] == '_')
                 n++;
             int r = tasm_gpr(p, n);
-            if (r >= 0) {
-                /* r4-r11 are callee-saved, and sp/lr/pc are not an
-                 * asm's to take. */
-                if (r >= 4 && r <= 11)
-                    diag_fatal(file, line,
-                               "ARMv7-M asm names callee-saved register "
-                               "'%.*s', which EmbCC does not save around an "
-                               "asm", n, p);
+            if (r >= 0)
                 used[r] = 1;
-            }
             p += n;
             continue;
         }
@@ -287,10 +282,6 @@ void irg_asm_thumb(struct ir_func *fn, struct stmt *s)
     }
     for (int i = 0; i < a->nclob; i++) {
         int r = tasm_gpr(a->clob[i], (int)strlen(a->clob[i]));
-        if (r >= 4 && r <= 11)
-            diag_fatal(file, s->line, "ARMv7-M asm clobbers callee-saved "
-                                      "register '%s', which EmbCC does not "
-                                      "save around an asm", a->clob[i]);
         if (r >= 0)
             used[r] = 1;
     }

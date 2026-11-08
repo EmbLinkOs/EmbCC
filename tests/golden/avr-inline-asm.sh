@@ -39,9 +39,17 @@ refuses "clobbering the frame pointer" "frame pointer" \
     'void f(void) { __asm__ volatile("clr r28" ::: "r28"); }'
 refuses "naming the frame pointer" "frame pointer" \
     'void f(void) { __asm__ volatile("mov r28, r18"); }'
-# A callee-saved register: EmbCC saves nothing around an asm.
-refuses "clobbering a callee-saved register" "callee-saved" \
-    'void f(void) { __asm__ volatile("clr r5" ::: "r5"); }'
+# A callee-saved register is the function's to save, as avr-gcc saves
+# it: clobbered (r5) or named in the template (r16), it is pushed and
+# popped -- r5 with r4, the pair the prologue saves.
+printf 'void f(void) { __asm__ volatile("clr r5" ::: "r5"); }\nvoid g(void) { __asm__ volatile("clr r16"); }\n' > "$out/cs.c"
+"$EMBCC" --target=avr -O2 -c "$out/cs.c" -o "$out/cs.o" 2> "$out/cs.err" || {
+    echo "a callee-saved clobber does not compile:"; cat "$out/cs.err"; exit 1; }
+llvm-objdump -d "$out/cs.o" > "$out/cs.s"
+for r in r5 r16; do
+    grep -q "push[[:space:]]*$r\$" "$out/cs.s" && grep -q "pop[[:space:]]*$r\$" "$out/cs.s" || {
+        echo "the asm's $r is not saved:"; cat "$out/cs.s"; exit 1; }
+done
 # An unknown instruction reaches the assembler's refusal, not a guess.
 refuses "an instruction that does not exist" "not an AVR instruction" \
     'void f(void) { __asm__ volatile("frobnicate r18, r19"); }'

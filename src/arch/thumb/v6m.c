@@ -4213,6 +4213,27 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     }
     if (fn->has_alloca)
         F.used_callee[F.nsave++] = FB6;
+    /* r4-r7 an asm clobbers or names: saved by the push (r8-r11 below) */
+    {
+        unsigned am = (unsigned)(ra_asm_clobbers(fn) & 0x0ff0u);
+        if (fn->has_alloca && (am >> FB6 & 1))
+            v6_refuse(fn, NULL, "an asm that writes the register this "
+                      "function's frame is addressed from (it has a "
+                      "variable-length array or alloca)");
+        if (am & 0x0f00u)
+            v6_refuse(fn, NULL, "an asm that clobbers r8-r11 (ARMv6-M's "
+                      "push does not reach them; this backend does not yet "
+                      "save them through a low register)");
+        for (int r = 4; r <= 7; r++) {
+            int have = 0;
+            if (!(am >> r & 1))
+                continue;
+            for (int k = 0; k < F.nsave; k++)
+                have |= F.used_callee[k] == r;
+            if (!have)
+                F.used_callee[F.nsave++] = r;
+        }
+    }
     if (fn->cmse_entry)
         tcg_cmse_check_entry(fn);
     /* A leaf: nothing calls, the lowering's own calls included. An asm

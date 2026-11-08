@@ -165,6 +165,8 @@ static const int rv_asm_pool[] = {
 static void rv_mark_template_regs(const char *file, int line,
                                   const char *tmpl, int *used)
 {
+    (void)file;
+    (void)line;
     for (const char *p = tmpl; *p; ) {
         if (isalpha((unsigned char)*p) &&
             (p == tmpl || !(isalnum((unsigned char)p[-1]) || p[-1] == '_' ||
@@ -173,15 +175,10 @@ static void rv_mark_template_regs(const char *file, int line,
             while (isalnum((unsigned char)p[n]) || p[n] == '_')
                 n++;
             int r = rvasm_gpr(p, n);
-            if (r >= 0) {
-                /* s0-s11: x8, x9 and x18-x27. */
-                if (r == 8 || r == 9 || (r >= 18 && r <= 27))
-                    diag_fatal(file, line,
-                               "RISC-V asm names callee-saved register "
-                               "'%.*s', which EmbCC does not save around an "
-                               "asm", n, p);
+            /* s0-s11 (x8, x9, x18-x27) are the function's to save,
+             * which the prologue does (ra_asm_clobbers) */
+            if (r >= 0)
                 used[r] = 1;
-            }
             p += n;
             continue;
         }
@@ -313,10 +310,6 @@ void irg_asm_riscv(struct ir_func *fn, struct stmt *s)
     }
     for (int i = 0; i < a->nclob; i++) {
         int r = rvasm_gpr(a->clob[i], (int)strlen(a->clob[i]));
-        if (r == 8 || r == 9 || (r >= 18 && r <= 27))
-            diag_fatal(file, s->line, "RISC-V asm clobbers callee-saved "
-                                      "register '%s', which EmbCC does not "
-                                      "save around an asm", a->clob[i]);
         if (r >= 0)
             used[r] = 1;
     }

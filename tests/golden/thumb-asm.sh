@@ -240,14 +240,26 @@ fi
 grep -q "vqadd" "$out/bad.err" || {
     echo "the refusal does not name the instruction:"; cat "$out/bad.err"
     exit 1; }
-# And a callee-saved register is refused rather than silently corrupted:
-# EmbCC saves nothing around an asm.
-printf 'void f(void){ __asm__("mov r5, r0" ::: "r5"); }\n' > "$out/cs.c"
-if "$EMBCC" --target=$T -c "$out/cs.c" -o /dev/null 2> "$out/cs.err"; then
-    echo "a callee-saved clobber was accepted"; exit 1
-fi
-grep -q "callee-saved" "$out/cs.err" || {
-    echo "the refusal does not say why:"; cat "$out/cs.err"; exit 1; }
+# And a callee-saved register an asm clobbers or names is saved by the
+# prologue, as GCC saves it -- r5 by the clobber list, r9 by name; on
+# ARMv6-M r4-r7, and r8-r11 refused by name (its push does not reach
+# them).
+printf 'void f(void){ __asm__("mov r5, r0" ::: "r5"); }\nvoid g(void){ __asm__ volatile("mov r9, r0"); }\n' > "$out/cs.c"
+"$EMBCC" --target=$T -O2 -c "$out/cs.c" -o "$out/cs.o" 2> "$out/cs.err" || {
+    echo "a callee-saved clobber does not compile:"; cat "$out/cs.err"; exit 1; }
+llvm-objdump -d --triple=thumbv7m "$out/cs.o" > "$out/cs.s"
+for r in r5 r9; do
+    grep -qE "push(\.w)?[[:space:]]*\{.*$r" "$out/cs.s" && grep -qE "pop(\.w)?[[:space:]]*\{.*$r" "$out/cs.s" || {
+        echo "the asm's $r is not saved:"; cat "$out/cs.s"; exit 1; }
+done
+printf 'void f(void){ __asm__("movs r6, #0" ::: "r6"); }\nvoid g(void){ __asm__ volatile("mov r8, r0" ::: "r8"); }\n' > "$out/c6.c"
+"$EMBCC" --target=thumbv6m-none-eabi -O2 -c "$out/c6.c" -o "$out/c6.o" 2> "$out/c6.err" &&
+    { echo "ARMv6-M accepted an r8 clobber it cannot save"; exit 1; }
+grep -q "r8-r11" "$out/c6.err" || { echo "ARMv6-M's r8 refusal:"; cat "$out/c6.err"; exit 1; }
+printf 'void f(void){ __asm__("movs r6, #0" ::: "r6"); }\n' > "$out/c6.c"
+"$EMBCC" --target=thumbv6m-none-eabi -O2 -c "$out/c6.c" -o "$out/c6.o" &&
+    llvm-objdump -d --triple=thumbv6m "$out/c6.o" | grep -qE 'push[[:space:]]*\{.*r6' || {
+        echo "ARMv6-M does not save the asm's r6"; exit 1; }
 echo "an unknown instruction and a callee-saved clobber are refused by name"
 
 # Inline data in range -- a value too wide for its directive is an error

@@ -2081,6 +2081,20 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
             (void)nfsave;
         }
     }
+    /* x19-x28 an asm clobbers or names: the function's to save, as GCC
+     * saves them */
+    {
+        unsigned long am = ra_asm_clobbers(fn);
+        for (int r = 19; r <= 28; r++) {
+            int have = 0;
+            if (!(am >> r & 1))
+                continue;
+            for (int k = 0; k < nsave; k++)
+                have |= used_callee[k] == r;
+            if (!have)
+                used_callee[nsave++] = r;
+        }
+    }
     long *sd = layout_frame(fn, &fr, keep_vars);
     g_a64_afold = a64_afold_build(fn, sd);
     /* Room for the callee-saved registers the allocator took. Eight

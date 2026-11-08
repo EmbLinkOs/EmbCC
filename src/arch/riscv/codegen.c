@@ -7214,6 +7214,25 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
      * other callee-saved register. */
     if (fn->has_alloca)
         F.used_callee[F.nsave++] = RV_FP;
+    /* s0-s11 an asm clobbers or names: the function's own use of them,
+     * saved by the prologue as GCC saves them. Not s0 where it addresses
+     * the frame. */
+    {
+        unsigned long am = ra_asm_clobbers(fn);
+        if (fn->has_alloca && (am >> RV_FP & 1))
+            rv_refuse(&F, NULL, "an asm that writes s0 in a function whose "
+                      "frame s0 addresses (it has a variable-length array "
+                      "or alloca)");
+        for (int r = 8; r <= 27; r++) {
+            int have = 0;
+            if (!(am >> r & 1) || (r > 9 && r < 18))
+                continue;
+            for (int k = 0; k < F.nsave; k++)
+                have |= F.used_callee[k] == r;
+            if (!have)
+                F.used_callee[F.nsave++] = r;
+        }
+    }
     /* A leaf: no call in the IR and none the lowering makes -- the same
      * rv_op_calls_helper the allocator trusts for which values survive a
      * call, so the two cannot disagree. Inline asm might call anything,

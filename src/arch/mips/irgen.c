@@ -165,13 +165,9 @@ static const int mips_asm_pool[] = {
     MIPS_A0, MIPS_A1, MIPS_A2, MIPS_A3
 };
 
-/* s0-s7, fp, gp, sp, ra and the kernel's k0/k1: EmbCC saves nothing
- * around an asm, so a template may not write them. at is allowed: the
- * code around an asm keeps nothing in it. */
-static int callee_owned(int r)
-{
-    return (r >= 16 && r <= 23) || r >= 26;
-}
+/* (s0-s7 and fp an asm writes are saved by the prologue; gp, sp and the
+ * kernel's k0/k1 are not an asm's to take. at is allowed: the code around
+ * an asm keeps nothing in it.) */
 
 static void mark_template_regs(const char *file, int line, const char *tmpl,
                                int *used)
@@ -185,13 +181,14 @@ static void mark_template_regs(const char *file, int line, const char *tmpl,
             n++;
         {
             int r = mipsasm_gpr(p, n);
-            if (r >= 0) {
-                if (callee_owned(r) && r != MIPS_SP)
-                    diag_fatal(file, line,
-                               "MIPS asm names register '%.*s', which EmbCC "
-                               "does not save around an asm", n, p);
+            /* s0-s7 and s8 are the function's to save (ra_asm_clobbers);
+             * k0, k1 and gp are not an asm's to take */
+            if (r >= 26 && r <= 28)
+                diag_fatal(file, line, "MIPS asm names register '%.*s', "
+                                       "which is the kernel's or the global "
+                                       "pointer", n, p);
+            if (r >= 0)
                 used[r] = 1;
-            }
         }
         p += n - 1;
     }
@@ -301,10 +298,11 @@ void irg_asm_mips(struct ir_func *fn, struct stmt *s)
         int r = mipsasm_gpr(a->clob[i], (int)strlen(a->clob[i]));
         /* ($31 may go: a function holding an asm is no leaf and saves ra,
          * so a template's jal leaves the return address kept) */
-        if (r >= 0 && callee_owned(r) && r != 31)
+        if (r >= 26 && r <= 29)
             diag_fatal(file, s->line, "MIPS asm clobbers register '%s', "
-                                      "which EmbCC does not save around an "
-                                      "asm", a->clob[i]);
+                                      "which is the kernel's, the global "
+                                      "pointer or the stack pointer",
+                       a->clob[i]);
         if (r >= 0)
             used[r] = 1;
     }
@@ -347,6 +345,9 @@ void irg_asm_mips(struct ir_func *fn, struct stmt *s)
     free(text);
 
     struct ir_asm *ia = xcalloc(1, sizeof *ia);
+    for (int r = 16; r <= 30; r++)       /* s0-s7, s8: the prologue's */
+        if (used[r] && (r <= 23 || r == 30))
+            ia->saves |= 1UL << r;
     ia->code = c.p;
     ia->codelen = c.len;
     ia->rel = c.rel;            /* (code_asm_rels where it is spliced) */

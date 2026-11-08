@@ -241,8 +241,8 @@ A clobber that does not name a general-purpose register of the target
 (a floating-point or vector register, or an unknown name) is accepted and
 ignored.
 
-A callee-saved register in the clobber list is refused on AArch64, ARM
-Cortex-M, RISC-V, MIPS32 and AVR, and accepted without being saved on x86-64; see
+A callee-saved register in the clobber list is saved by the function's
+prologue and restored by its epilogue, as GCC does; see
 [Callee-saved registers](#callee-saved-registers).
 
 ### Referring to operands in the template
@@ -406,17 +406,24 @@ after it.
 
 ### Callee-saved registers
 
-EmbCC does not save callee-saved registers around an `asm` statement.
-Each target handles a template that would change one as follows:
+A callee-saved register that an `asm` statement changes -- one in its
+clobber list, one its template names, or one an operand is placed in --
+is the function's own use of it: the prologue saves it and the
+epilogue restores it, at every optimization level, as GCC does. A value
+the function keeps across the `asm` is never in a register the `asm`
+changes. What is still refused is the frame pointer of a function that
+needs one, and the registers each ABI reserves:
 
-| Target | Callee-saved register named in the template or the clobbers | Operand placed in a callee-saved register |
+| Target | Saved when an `asm` changes it | Refused |
 |---|---|---|
-| x86-64 | accepted; not saved | saved by the prologue at `--opt=speed` and `--opt=size` only |
-| AArch64 | refused (x19 to x30) | cannot happen: neither the allocator nor a register variable uses one |
-| ARM Cortex-M | refused (r4 to r11) | never chosen by the allocator; possible through the letters `S` and `D` (see [ARM Cortex-M](#arm-cortex-m)), and then saved by the prologue and given no other value in that function |
-| RISC-V | refused (s0 to s11) | never chosen by the allocator; see [Register variables](#register-variables) |
-| MIPS32 | refused (s0 to s7, and gp, sp, fp, ra, k0, k1) | cannot happen: neither the allocator nor a register variable uses one |
-| AVR | refused (r2 to r17, and r28 and r29) | refused |
+| x86-64 | `rbx`, `r12` to `r15`; on Windows also `rsi`, `rdi` | |
+| AArch64 | x19 to x28 | x29, the frame pointer |
+| ARM Cortex-M (ARMv7-M, ARMv8-M Mainline), ARMv7-A | r4 to r11 | r7 in a function with a variable-length array (its frame base) |
+| ARMv6-M, ARMv8-M Baseline | r4 to r7 | r8 to r11: `push` does not reach them, and this backend does not yet save them through a low register |
+| RISC-V | s0 to s11 | s0 in a function with a variable-length array |
+| MIPS32, MIPS64 | s0 to s7, s8 (`$fp`) | k0, k1, gp, sp; `$fp` in a function with a variable-length array |
+| LoongArch64 | `$fp`, `$s0` to `$s8` | `$tp`, `$r21`; `$fp` in a function with a variable-length array |
+| AVR | r2 to r17, as pairs | r28, r29 (Y, the frame pointer) |
 
 The details and the diagnostics are under each target.
 
@@ -440,7 +447,7 @@ same way.
 | ARM Cortex-M | not supported (see below) | |
 | RISC-V | not supported (see below) | |
 | MIPS32 | `v0`, `v1`, `a0` to `a3`, `t0` to `t9`, with or without `$`, and their numbers `$2` to `$15`, `$24`, `$25` | refused |
-| AVR | `r0`, `r1`, `r18` to `r27`, `r30`, `r31`, `XL`, `XH`, `ZL`, `ZH`, `X`, `Z`, `__tmp_reg__`, `__zero_reg__` | refused |
+| AVR | `r0` to `r27`, `r30`, `r31`, `XL`, `XH`, `ZL`, `ZH`, `X`, `Z`, `__tmp_reg__`, `__zero_reg__` (one of `r2` to `r17` is saved by the prologue) | refused |
 
 On x86-64 a fixed-register constraint letter (`a`, `b`, `c`, `d`, `S`,
 `D`) takes precedence over the variable's register. Only the 64-bit
@@ -456,9 +463,10 @@ On MIPS32 any other name is refused with
 `register variable bound to '$s0' is not supported for MIPS asm (use v0-v1, a0-a3 or t0-t9)`.
 
 On AVR a name that is not a register is refused with
-`register variable bound to 'foo' is not an AVR register`, and a
-callee-saved register or half of the frame pointer with
-`an asm operand is pinned to 'r5', which is callee-saved, and EmbCC saves nothing around an asm`.
+`register variable bound to 'foo' is not an AVR register`, and half of
+the frame pointer with
+`an asm operand is pinned to 'r28', which is half of Y, the frame pointer this function reaches its own locals through`.
+A callee-saved register (`r2` to `r17`) binds, and the prologue saves it.
 
 On ARM Cortex-M and RISC-V register variables are not supported, and
 EmbCC does not diagnose them. It looks the name up among the x86-64
@@ -960,10 +968,10 @@ gets `rbx` when `rax`, `rcx` and `rdx` are taken). At `--opt=none` nothing is
 saved.
 
 A callee-saved register that the template writes by name or that the
-clobber list names is not saved at any level, and EmbCC gives no
-diagnostic. On `x86_64-windows-gnu`, where `rsi` and `rdi` are also
-callee-saved, an operand placed in either is not saved. In these cases
-the template must preserve the register itself.
+clobber list names is saved too, at every level -- and on
+`x86_64-windows-gnu` `rsi` and `rdi` with them. (EmbCC once accepted
+such a clobber and saved nothing, and the caller's `rbx` came back
+changed.)
 
 ## AArch64
 
@@ -1074,14 +1082,12 @@ Other assembler diagnostics name the statement, for example
 
 ### Callee-saved registers on AArch64
 
-A template that names x19 to x30 (including `x29` and `x30`) is refused:
-
-```text
-aarch64 asm names callee-saved register 'x19', which EmbCC does not save around an asm
-```
-
-and the same registers in the clobber list with
-`aarch64 asm clobbers callee-saved register 'x20', which EmbCC does not save around an asm`.
+x19 to x28, named in a template or in the clobber list, are saved by
+the prologue (`stp x19, x20, [sp, ...]`) and restored by the epilogue.
+x29 is the frame pointer, and an asm that names it is refused:
+`aarch64 asm clobbers x29, the frame pointer`. x30 may be clobbered: a
+function holding an asm keeps its frame record, so a template's `bl`
+leaves the return address saved.
 
 ### Example
 
@@ -1431,14 +1437,16 @@ The ARMv7-M triples have no stack-limit registers, and refuse the names:
 
 ### Callee-saved registers on ARM Cortex-M
 
-A template that names r4 to r11 (or `fp`) is refused:
+r4 to r11, named in a template or in the clobber list, are pushed by the
+prologue and popped by the epilogue (`push {r4, r8, r10, lr}`). In a
+function with a variable-length array r7 addresses the frame, and an asm
+that writes it there is refused. On ARMv6-M and ARMv8-M Baseline r4 to
+r7 are saved the same way; r8 to r11 are refused, because `push` does
+not reach them:
 
 ```text
-ARMv7-M asm names callee-saved register 'r4', which EmbCC does not save around an asm
+the ARMv7-M backend cannot lower an asm that clobbers r8-r11 (ARMv6-M's push does not reach them; this backend does not yet save them through a low register) yet
 ```
-
-and the same registers in the clobber list with
-`ARMv7-M asm clobbers callee-saved register 'r5', which EmbCC does not save around an asm`.
 
 ### Example
 
@@ -1601,14 +1609,10 @@ instructions written explicitly (`c.*`), no `la`, `call` or `tail`, no `rdcycle`
 
 ### Callee-saved registers on RISC-V
 
-A template that names s0 to s11 (or `fp`) is refused:
-
-```text
-RISC-V asm names callee-saved register 's1', which EmbCC does not save around an asm
-```
-
-and the same registers in the clobber list with
-`RISC-V asm clobbers callee-saved register 's2', which EmbCC does not save around an asm`.
+s0 to s11, named in a template or in the clobber list, are stored by the
+prologue and loaded back by the epilogue (`sw s1, 4(sp)`). In a function
+with a variable-length array s0 addresses the frame, and an asm that
+writes it there is refused.
 
 ### Example
 
@@ -1773,13 +1777,11 @@ instruction`.
 
 ### Callee-saved registers on MIPS32
 
-A template that names s0 to s7, gp, fp, ra, k0 or k1 is refused, and so
-is the same register in the clobber list:
-
-```text
-MIPS asm names register '$s1', which EmbCC does not save around an asm
-MIPS asm clobbers register 's2', which EmbCC does not save around an asm
-```
+s0 to s7 (`$16` to `$23`) and s8 (`$fp`), named in a template or in the
+clobber list, are saved by the prologue and restored by the epilogue.
+k0, k1 and gp are refused (`MIPS asm names register '$k0', which is the
+kernel's or the global pointer`), and `$fp` in a function with a
+variable-length array, whose frame it addresses.
 
 `$sp` may be named, for a template that reads it. `$at` may be named and
 changed: no value is kept in it across an `asm`.
@@ -1882,10 +1884,11 @@ the LoongArch vocabulary`.
 
 ### Callee-saved registers on LoongArch64
 
-EmbCC saves nothing around an asm, so a template or clobber list naming
-`$fp` or `$s0`-`$s8` is refused (`LoongArch asm names callee-saved
-register '$s0', which EmbCC does not save around an asm`), and one naming
-`$tp` or `$r21`, which the psABI reserves, likewise. A template that
+`$fp` and `$s0`-`$s8`, named in a template or a clobber list, are saved
+by the prologue (`st.d $s0, $sp, 0`) and restored by the epilogue; `$fp`
+is refused in a function with a variable-length array, whose frame it
+addresses. A template naming `$tp` or `$r21`, which the psABI reserves,
+is refused. A template that
 calls (`bl`, `jirl`, `syscall`, ...) clobbers `ra`, `a0`-`a7` and
 `t0`-`t8`, whatever its clobber list says.
 
@@ -2682,12 +2685,13 @@ does not implement them all. The XMEGA instructions `xch`, `las`, `lac`,
 
 ### Reserved registers on AVR
 
-A template, a clobber or an operand that names r2 to r17 (callee-saved)
-or r28, r29 or `Y` (the frame pointer) is refused:
+r2 to r17 (callee-saved), named in a template or a clobber list or
+pinned to an operand, are pushed by the prologue and popped by the
+epilogue, a pair at a time (`push r4`, `push r5`), as avr-gcc saves
+them. r28, r29 or `Y` (the frame pointer) is refused:
 
 ```text
 AVR asm names register 'r28', which is half of Y, the frame pointer this function reaches its own locals through
-AVR asm clobbers register 'r5', which is callee-saved, and EmbCC saves nothing around an asm
 ```
 
 r0 and r1 may be used. r1 is the zero register: a template that changes
@@ -2756,8 +2760,5 @@ In summary, compared with GCC:
 - File-scope asm accepts data and a few directives on every target, and
   four instructions on x86-64 only. Every block is in `.text`, so other
   sections are refused.
-- On x86-64, a callee-saved register that a template changes is saved
-  only when it holds an operand and the optimization level is `--opt=speed` or
-  `--opt=size`.
 - Every `asm` statement is volatile, a memory barrier, and prevents
   inlining of its function.

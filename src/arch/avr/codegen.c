@@ -6019,6 +6019,20 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
         if (!have)
             F.used_callee[F.nsave++] = r;
     }
+    /* r2-r17 an asm clobbers or names: the function's to save, a pair at
+     * a time as the rest of its saves are */
+    {
+        unsigned long am = ra_asm_clobbers(fn);
+        for (int r = 2; r <= 16; r += 2) {
+            int have = 0;
+            if (!(am >> r & 3))
+                continue;
+            for (i = 0; i < F.nsave; i++)
+                if (F.used_callee[i] == r) have = 1;
+            if (!have)
+                F.used_callee[F.nsave++] = r;
+        }
+    }
     layout(&F);
 
     F.label_off = xmalloc((size_t)(fn->nlabels + 1) * sizeof *F.label_off);

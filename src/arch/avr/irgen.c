@@ -68,9 +68,10 @@ static const int avr_asm_pool4[] = {
     22, 18, 26, 30, 24, 20
 };
 
-/* Is this register one EmbCC does not save around an asm? r2-r17 are
- * callee-saved and nothing here preserves them; r1 is the zero register and
- * r28/r29 are the frame pointer. */
+/* Is this register one an asm may not take? r28/r29, the frame pointer.
+ * r2-r17 are callee-saved and the function's to save, which the prologue
+ * does for one an asm names or clobbers (ra_asm_clobbers), as avr-gcc
+ * does; an operand is still not given one unasked (avr_asm_pool). */
 static const char *avr_reg_forbidden(int r)
 {
     /* r1 is NOT forbidden, and that is deliberate. It is the zero register,
@@ -84,8 +85,6 @@ static const char *avr_reg_forbidden(int r)
     if (r == 28 || r == 29)
         return "half of Y, the frame pointer this function reaches its own "
                "locals through";
-    if (r >= 2 && r <= 17)
-        return "callee-saved, and EmbCC saves nothing around an asm";
     return NULL;
 }
 
