@@ -104,6 +104,18 @@ static int g_site_hot, g_site_size;
  * speed measurement moves; -Os is the level that asked for size.
  */
 #define INLINE_SIZE_CALLEE 6
+/* ...and a function DECLARED inline gets more at -Os, counted as it will
+ * be once copied (inl_size: no parameter slots, moves or constants), as
+ * GCC honours the keyword there. An RTOS's list helpers -- four loads and
+ * stores, `static inline` in a header -- were 24 raw instructions, so
+ * every call stayed a call, and on Xtensa's windowed ABI each one an
+ * entry, a retw and a call8 (#184: GCC inlines them all). Measured over
+ * lib/libc at -Os against the plain rule (2026-11-08), budgets 10 to 20:
+ * 12 is the smallest on every target tried -- AVR -0.21%, Cortex-M4
+ * -0.16%, Xtensa -0.10%, RV32 -0.06% -- and admits the list unlink (12
+ * as optimized); 13 grows RV32, Cortex-M4 and Xtensa, 20 all four.
+ * Raising the plain budget instead grew lib/libc 1-3% everywhere. */
+#define INLINE_SIZE_DECLARED 12
 
 static int vmap(const struct rmp *r, int x)
 {
@@ -251,6 +263,13 @@ static int inlinable(struct ir_func *cf, int force, int sole, const char **why,
     int budget = small ? INLINE_SIZE_CALLEE
                : g_site_hot ? INLINE_HOT_CALLEE : INLINE_MAX_CALLEE;
     int size = small ? cf->nins : inl_size(cf);
+    if (small && c->def_inline) {
+        int keep = g_opt_max;
+        g_opt_max = 1;                  /* inl_size's optimized count */
+        size = inl_size(cf);
+        g_opt_max = keep;
+        budget = INLINE_SIZE_DECLARED;
+    }
     if (!force && size > budget &&
         !(sole == 1 && cf->nins <= INLINE_SOLE_CALLEE) &&
         !(sole == 2 && !g_opt_size && cf->nins <= INLINE_TWO_CALLEE)) {
@@ -781,6 +800,13 @@ static void inline_unit_(struct ir_unit *iu)
                  * and -Os's is smaller. */
                 int bud = g_opt_size ? INLINE_SIZE_CALLEE : INLINE_MAX_CALLEE;
                 int sz = g_opt_size ? cf->nins : inl_size(cf);
+                if (g_opt_size && cf->src && cf->src->def_inline) {
+                    int keep = g_opt_max;
+                    g_opt_max = 1;
+                    sz = inl_size(cf);
+                    g_opt_max = keep;
+                    bud = INLINE_SIZE_DECLARED;
+                }
                 if (sz > bud && csole == 1)
                     bud = INLINE_SOLE_CALLEE;
                 else if (sz > bud && csole == 2 && !g_opt_size)
