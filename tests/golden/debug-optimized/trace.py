@@ -79,6 +79,20 @@ for n in range(mx):
         if blk.function is not None:
             break
         blk = blk.superblock
+    # the call stack, outermost first: which invocation a stop is in
+    stack = []
+    inl = []
+    g = f
+    while g is not None and len(stack) < 16:
+        stack.append(g.name() or "?")
+        inl.append(g.type() == gdb.INLINE_FRAME)
+        try:
+            g = g.older()
+        except gdb.error:
+            break
+    stack.reverse()
+    inl.reverse()
     out.write(json.dumps({"key": key, "line": sal.line, "k": k, "pc": int(f.pc()),
-                         "vals": vals, "decl": decl}) + "\n")
+                         "vals": vals, "decl": decl, "stack": stack,
+                         "inl": inl}) + "\n")
 out.close()

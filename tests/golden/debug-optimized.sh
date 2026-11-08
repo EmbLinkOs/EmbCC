@@ -4,7 +4,10 @@
 # QEMU's boards under gdb, which stops on every line and reads every
 # parameter and local in scope (debug-optimized/trace.py). Every value
 # EmbCC's DWARF gives must be the one clang's -O0 build shows at the same
-# visit of the same line (debug-optimized/cmp.py): a location list that
+# stop -- the same call of each function on the stack, the same line, the
+# same visit of it within that call (debug-optimized/cmp.py). A call
+# EmbCC inlined is a frame of its own to gdb (DW_TAG_inlined_subroutine),
+# so its stops pair with clang's real call. A location list that
 # names the wrong register, a value that went stale, or a variable shown
 # outside its block -- the second of two `for (int i ...)` loops showing
 # the first's i, a block's `s` hiding the function's own after the block
@@ -12,8 +15,9 @@
 # out> and counts as unavailable, not wrong; the share available is
 # printed. A local is not compared up to its declaration's line (the
 # DWARF scope is its block, C's starts at the declarator), and a line
-# visited a different number of times in the two builds (a rotated loop's
-# test) is not compared at all.
+# visited a different number of times within one call (a rotated loop's
+# test, which the optimized line table gives several addresses) is not
+# compared in that call.
 #
 # clang's -O0 is the reference because a build of EmbCC's own can be
 # wrong the same way at every level: before lexical blocks, -O0 and -O2
@@ -75,9 +79,9 @@ board() {   # NAME TRIPLE HARNESS HARNESS-VAR GDB-ARCH "CLANG-FLAGS" QEMU...
         [ -s "$d/clang.jsonl" ] && [ -s "$d/$o.jsonl" ] ||
             { echo "  $b $o: no trace"; fail=1; continue; }
         r=$(python3 "$here/cmp.py" "$d/clang.jsonl" "$d/$o.jsonl")
-        echo "  $b $o: $(echo "$r" | head -1 | sed 's/^[0-9]* stops at -O2, //')"
+        echo "  $b $o: $(echo "$r" | head -1)"
         case $(echo "$r" | head -1) in
-            *", 0 DISAGREE;"*) ;;
+            *", 0 DISAGREE") ;;
             *) echo "$r" | sed -n '2,12p'; fail=1 ;;
         esac
     done

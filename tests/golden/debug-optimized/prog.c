@@ -69,6 +69,17 @@ __attribute__((noinline)) static int shadow(int n)
     return s + n;
 }
 
+/* small enough to inline at -O2: its calls are inlined frames */
+static int clamp(int v, int lo, int hi)
+{
+    int r = v;
+    if (r < lo)
+        r = lo;
+    if (r > hi)
+        r = hi;
+    return r;
+}
+
 static const unsigned char msg[] = "hello, location lists";
 static const int sorted[] = { 2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31 };
 
@@ -82,11 +93,15 @@ int main(void)
     int where = search(sorted, 11, 19);
     int none = search(sorted, 11, 4);
     int sh = shadow(6);
+    int cl = 0;
+    for (int j = -3; j < 9; j += 2)
+        cl += clamp(j * (int)(c % 7), 0, 4);
     putn((long)c);
     putn(a.sum);
     putn((long)(m & 0xffff));
     putn(where + none);
     putn(sh);
+    putn(cl);
     puts_("\n==END==\n");
     return 0;
 }
