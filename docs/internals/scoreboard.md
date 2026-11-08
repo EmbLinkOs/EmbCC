@@ -117,6 +117,30 @@ complex values stay in memory.
 **Limitations:** 109 backend refusals and 42 front-end and driver
 refusals.
 
+## 2026-11-08
+
+On main at f5bde5bd (after #183), against clang 23.1.5. The outputs are
+kept as printed in `tools/bench/results/2026-11-08.txt` (the bench) and
+`tools/bench/results/2026-11-08-scoreboard.md` (sections 2 to 4), and
+the README's chart is drawn from them.
+
+**Speed** (`-O2` / `-Os`): Cortex-M4 1.019 / 1.057, RV32 0.990 / 1.058.
+Furthest behind: fixed point at `-Os` (1.24 M4, 1.31 RV32), the state
+machine (1.21 RV32 `-O2`, 1.18 M4 `-Os`) and sort on RV32 at `-Os`
+(1.21). Ahead on crc (0.75) and the list walk (0.77) on RV32, and sort
+on the M4 (0.86).
+
+**Size**, per object (all / without math): Cortex-M4 1.035 / 0.991,
+Cortex-M0 1.103 / 1.068, RV32 1.121 / 0.998, RV64 1.149 / 0.995,
+x86-64 1.491 / 1.255, AArch64 1.319 / 1.153, MIPS32 1.156 / 1.086,
+PowerPC 1.163 / 1.054, SPARC 1.161 / 1.053, LoongArch64 1.057 / 1.008,
+AVR 1.346 / 1.261.
+
+**Compile speed:** `lib/libc` 0.31, `src/` 1.08.
+
+**Limitations:** 110 backend refusals and 42 front-end and driver
+refusals.
+
 ## Reading it
 
 - **Steer size by the per-object ratio.** EmbCC inlines a static function
