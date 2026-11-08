@@ -226,7 +226,7 @@ supported. This section lists what is not.
 | `_BitInt(N)` wider than 64 bits | `_BitInt(65) is wider than BITINT_MAXWIDTH, which is 64 here` |
 | `_Decimal32`, `_Decimal64`, `_Decimal128` | `expected a type before '_Decimal32'` |
 | `_Imaginary` | `expected a type before '_Imaginary'` |
-| `_Atomic` on anything but an integer or a pointer | `reading an _Atomic struct s is not supported: EmbCC makes the operators atomic for integers and pointers only` (the first words name the operation) |
+| `_Atomic long double` wider than 8 bytes | `reading an _Atomic long double is not supported: EmbCC makes the operators atomic for integers, pointers, floating types of up to 8 bytes and structs` (the first words name the operation) |
 | C23 `constexpr` of a non-integer type | `constexpr 'd' of type double is not supported: EmbCC takes integer constants` |
 
 `_Float128` is accepted where `long double` is binary128 (AArch64 ELF,

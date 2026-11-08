@@ -397,6 +397,29 @@ struct type *ty_flash(struct type *t)
     return c;
 }
 
+/* GCC's layout of an _Atomic struct: one whose size is a power of two,
+ * up to 16 bytes, is aligned to that size, so that it can be read and
+ * written in one access -- `_Atomic struct { char a, b, c, d; }` is
+ * 4-aligned, `_Atomic struct { short h[4]; }` 8-aligned -- or to the most
+ * the target aligns anything to, where that is less (4 on RX, 2 on
+ * ColdFire, 1 on AVR, as their GCCs do). Clang does otherwise; an object
+ * shared with GCC's code must be laid out as GCC's. Re-asked when the
+ * struct is completed after the qualifier. */
+static void atomic_align(struct type *a)
+{
+    if (!a->is_atomic || a->kind != TY_STRUCT || !a->complete ||
+        a->is_complex)
+        return;
+    long n = a->size;
+    int cap = target_max_scalar_align();
+    if (n < 2 || n > 16 || (n & (n - 1)))
+        return;
+    if (cap && n > cap)
+        n = cap;
+    if (n > ty_align(a))
+        a->align_ovr = (int)n;
+}
+
 /* `_Atomic T`: volatile as well (never merged or removed), and every
  * access goes through the atomic paths in irgen. */
 struct type *ty_atomic(struct type *t)
@@ -411,6 +434,7 @@ struct type *ty_atomic(struct type *t)
         note_qcopy(a);
     }
     a->is_atomic = 1;
+    atomic_align(a);
     return a;
 }
 
@@ -653,6 +677,7 @@ void ty_struct_layout(struct type *t, struct member *members, int n,
             q->canon = keep.canon;
             q->qnext = keep.qnext;
             q->qcopies = NULL;
+            atomic_align(q);
         }
         return;
     }
@@ -765,6 +790,7 @@ void ty_struct_layout(struct type *t, struct member *members, int n,
         q->canon = keep.canon;
         q->qnext = keep.qnext;
         q->qcopies = NULL;
+        atomic_align(q);
     }
 }
 

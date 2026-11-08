@@ -4119,6 +4119,13 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
 {
     check_expr_main(u, f, sc, e);
     bitint_slot(sc, e);
+    /* An _Atomic struct named as a value is read whole, atomically, into
+     * a local of its own (irgen's atomic_read): the value is that copy */
+    if (sc && e->ty && e->ty->is_atomic && e->ty->kind == TY_STRUCT &&
+        !e->res_local && (e->kind == EXPR_VAR || e->kind == EXPR_DEREF ||
+                          e->kind == EXPR_MEMBER))
+        e->res_local = 1 + scope_add(sc, "<atomic value>",
+                                     ty_unqual(e->ty), NULL);
     if (sc) {
         bitint_slot_casts(sc, e->lhs);
         bitint_slot_casts(sc, e->rhs);
@@ -4399,6 +4406,12 @@ static void check_expr_main(struct unit *u, struct func *f, struct scope *sc,
         need_modifiable(u, e->lhs, e->line, e->col,
                         e->delta > 0 ? "increment" : "decrement");
         e->ty = e->lhs->ty;      /* qualified: see EXPR_ASSIGN */
+        /* an _Atomic float's ++: a compare-and-swap loop on its bits,
+         * whose expected value is kept in a local (irgen's
+         * atomic_float_rmw) */
+        if (sc && e->ty->is_atomic && ty_is_float(e->ty) && !e->res_local)
+            e->res_local = 1 + scope_add(sc, "<atomic expected>",
+                                         ty_unqual(e->ty), NULL);
         if (ty_is_complex(e->ty) && cx_lowering()) {   /* z += 1 */
             struct expr *one = cx_node(EXPR_NUM, e->line, ty_base(TY_INT, 0));
             one->num = 1;
@@ -4810,6 +4823,11 @@ static void check_expr_main(struct unit *u, struct func *f, struct scope *sc,
             target_atomic_rmw_libcall(ty_size(e->lhs->ty)))
             e->var_index = scope_add(sc, "<atomic expected>",
                                      e->lhs->ty, NULL);
+        /* ...and an _Atomic float's, always (atomic_float_rmw) */
+        if (e->lhs->ty->is_atomic && ty_is_float(e->lhs->ty) &&
+            !e->res_local)
+            e->res_local = 1 + scope_add(sc, "<atomic expected>",
+                                         ty_unqual(e->lhs->ty), NULL);
         if ((ty_is_complex(e->lhs->ty) || ty_is_complex(e->rhs->ty)) &&
             cx_lowering()) {
             *e = *cx_update(u, e->lhs, e->op, e->rhs, 0);

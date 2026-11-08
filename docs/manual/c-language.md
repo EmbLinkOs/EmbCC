@@ -739,13 +739,29 @@ error: more than one _Generic association matches type int: two associations nam
 ### Atomic types
 
 The operators on an `_Atomic` object (load, store, `++`, `--` and the
-compound assignments) are atomic for integer and pointer types. Other
-types are refused, with one of:
+compound assignments) are atomic for integer and pointer types, for
+`float`, `double` and an 8-byte `long double`, and for structs, as GCC
+and clang make them:
+
+- A floating object is loaded, stored and exchanged as the integer of its
+  bits; `+=`, `*=`, `/=`, `++` and the rest are a compare-and-swap loop on
+  them.
+- A struct whose size is a power of two that one access moves is that
+  integer. `_Atomic` aligns such a struct to its size -- or to the most
+  the target aligns anything to, if that is less -- as GCC lays it out:
+  `_Atomic struct { char a, b, c, d; }` is 4-aligned.
+- A struct of any other size is read and written whole through
+  libatomic's generic `__atomic_load` and `__atomic_store`, which take
+  the size first. lib/rt provides them (interrupts masked on a 32-bit
+  target; a lock per object's address on a 64-bit one), weak, so an SDK
+  or RTOS can replace them.
+
+A struct's value is a copy: reading an `_Atomic struct` gives a snapshot,
+and writing to a member of the copy leaves the object as it was. A
+`long double` wider than 8 bytes is refused:
 
 ```text
-error: reading an _Atomic double is not supported: EmbCC makes the operators atomic for integers and pointers only
-error: assigning to an _Atomic struct s is not supported: EmbCC makes the operators atomic for integers and pointers only
-error: a compound assignment to an _Atomic double is not supported: EmbCC makes the operators atomic for integers and pointers only
+error: a compound assignment to an _Atomic long double is not supported: EmbCC makes the operators atomic for integers, pointers, floating types of up to 8 bytes and structs
 ```
 
 The sizes each target supports are in
