@@ -8,6 +8,7 @@
  * __atomic_load and __atomic_store. A struct's value is a copy: writing
  * the copy leaves the object as it was. */
 // expect-exit: 42
+// no-gcc-reference: GCC calls libatomic for these (__atomic_feraiseexcept, the generic __atomic_load), and the references link none
 #include <stdatomic.h>
 #include <stddef.h>
 
