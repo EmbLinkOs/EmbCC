@@ -481,7 +481,13 @@ static void xt_abi_hints(const struct ir_func *fn, int *hint)
             const struct ir_arg *a = &i->argv[k];
             place_arg(a, &words, &stk, &pl);
             if (pl.np == 1 && pl.p[0].nw == 1 && pl.p[0].reg >= 0 &&
-                !a->is_struct && a->vreg >= 0 && a->vreg < fn->nvregs)
+                !a->is_struct && a->vreg >= 0 && a->vreg < fn->nvregs &&
+                /* not a parameter's: one that is also a call's argument
+                 * kept the call's a10-a15 as its hint, which it cannot
+                 * have when it lives across an earlier call -- it then
+                 * took any register, and the entry shuffled the
+                 * parameters (sigprocmask: three movs) */
+                a->vreg >= fn->nparams)
                 hint[a->vreg] = OUT_ARG(pl.p[0].reg);
         }
     }
