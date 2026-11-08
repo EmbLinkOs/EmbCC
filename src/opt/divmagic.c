@@ -654,11 +654,16 @@ int pass_divtest(struct ir_func *fn)
          * instruction (RISC-V's M, the Cortex-M3 and up): `y % 100 != 0`
          * became five instructions and two 32-bit constants where GCC
          * keeps `li a4, 100; rem a4, a0, a4`. As pass_divmagic does. */
+        /* ...nor where the multiply is itself a call (AVR: __mulsi3, and
+         * the rotate after it a chain of lsl/rol a bit at a time -- 330
+         * bytes for is_leap where avr-gcc calls __modsi3) */
         if (g_opt_size) {
             struct ir_ins probe;
             memset(&probe, 0, sizeof probe);
             probe.op = IR_MOD; probe.w = 4; probe.sign = src->sign;
-            if (!target_op_calls_helper(&probe)) {
+            int mod_call = target_op_calls_helper(&probe);
+            probe.op = IR_MUL;
+            if (!mod_call || target_op_calls_helper(&probe)) {
                 *ib_push(&nb) = *src;
                 continue;
             }
