@@ -206,11 +206,19 @@ int sw(int x)
     case 4: return 2; case 5: return 13; case 6: return 17; default: return -1;
     }
 }
+/* a thread-local's relocations where the target addresses one; elsewhere
+ * a use is refused by name (its .tdata/.tbss are still written) */
+#if defined(__arm__) || defined(__riscv) || defined(__x86_64__) || \
+    defined(__aarch64__)
+#define TLS_USE (tl + tlz)
+#else
+#define TLS_USE 0
+#endif
 int use(void)
 {
     if (hook)
         hook();
-    return (&weakvar ? weakvar : 0) + tl + tlz + magic + placed + zeroed +
+    return (&weakvar ? weakvar : 0) + TLS_USE + magic + placed + zeroed +
            after_nothing + hext(1) + hfn(2);
 }
 CEOF

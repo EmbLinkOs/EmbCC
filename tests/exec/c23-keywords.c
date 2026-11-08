@@ -11,7 +11,12 @@ static_assert(sizeof(int) >= 2);
 static_assert(1, "with a message");
 alignas(16) static int g = 1;
 static thread_local int t = 1;     /* declared only: the bare-metal harness has no thread pointer */
+/* (its address only where a thread-local can be addressed: elsewhere a
+ * use is refused by name, src/ir/irgen.c tls_supported) */
+#if defined(__arm__) || defined(__riscv) || defined(__x86_64__) || \
+    defined(__aarch64__)
 int *tls_addr(void) { return &t; }
+#endif
 struct s { alignas(8) char c; };
 static int seen;
 void f(int x)
