@@ -423,6 +423,9 @@ struct func {
     const char *section;  /* __attribute__((section("s"))): its code goes
                            * to section s rather than .text */
     int is_noreturn;      /* __attribute__((noreturn)) / _Noreturn */
+    int nr_inferred;      /* sema, diagnostics only: 0 not asked, 1 never
+                           * returns (is_noreturn_call), 2 being asked,
+                           * 3 returns */
     int falls_off;        /* sema: returns a value, and control can reach
                            * its closing brace (--warn=return-type) */
     int is_nothrow;       /* __attribute__((nothrow)): no exception leaves it

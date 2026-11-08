@@ -2957,6 +2957,93 @@ static void shift64_var(struct t_fn *F, int op, int sign)
     t_patch_b(t, done, t->len);
 }
 
+/* A 64-bit shift by a register, with no branch (ARMv7-M on): a register
+ * shift by 32 or more gives 0 (its amount is the register's low byte, so
+ * a negative 32 - n or n - 32 is 224 or more), so both arms' terms can
+ * be ORed in whatever n is. For a logical right shift by n in 0..63:
+ *
+ *     lo = lo >> n | hi << (32 - n) | hi >> (n - 32);    hi = hi >> n
+ *
+ * and the mirror image for a left shift. An arithmetic shift fills with
+ * the sign at 32 or more, so its hi >> (n - 32) term is ORed in only
+ * where n - 32 is not negative, under one IT each (subs sets N). Each
+ * half is read where it is and the result written to its own pair, as
+ * GCC does it: 8 instructions and one scratch register, where the
+ * branching form took 13 and three pushed ones (r9-r11), and moved the
+ * operands in and out of them. EMBCC_T_NOSHIFT64VAR=1: the old form.
+ * 0 when no scratch register is free (the caller uses the old form). */
+static void src64(struct t_fn *F, int v, int slo, int shi, int *lo, int *hi);
+static void dst64(struct t_fn *F, int v, int *lo, int *hi);
+static int shift64_var_to(struct t_fn *F, const struct ir_ins *i)
+{
+    static int off = -1;
+    if (off < 0)
+        off = getenv("EMBCC_T_NOSHIFT64VAR") != NULL;
+    if (off)
+        return 0;
+    struct code *t = F->t;
+    int lsl = i->op == IR_SHL, sign = !lsl && i->sign;
+    int op = lsl ? T_SH_LSL : sign ? T_SH_ASR : T_SH_LSR;
+    int al, ah, dl, dh, n, tt = -1, k;
+    int c[4] = { 12, B_LO_N, B_HI_N, A_HI_N };
+    src64(F, i->a, A_LO, R_TMP, &al, &ah);
+    dst64(F, i->dst, &dl, &dh);
+    /* the amount: where it is, or in a scratch none of the halves uses */
+    if (in_reg(F, i->b)) {
+        n = F->loc[i->b];
+    } else {
+        for (k = 0; k < 4 && (c[k] == al || c[k] == ah || c[k] == dl ||
+                              c[k] == dh || c[k] < 0); k++)
+            ;
+        if (k == 4)
+            return 0;
+        n = c[k] == 12 ? 12 : t_scr(c[k]);
+        rd(F, i->b, n);
+    }
+    /* the amount is read after the result's first half is written: it
+     * must not be in the result's pair */
+    if (n == dl || n == dh) {
+        int m = -1;
+        for (k = 0; k < 4 && m < 0; k++)
+            if (c[k] >= 0 && c[k] != al && c[k] != ah && c[k] != dl &&
+                c[k] != dh)
+                m = c[k] == 12 ? 12 : t_scr(c[k]);
+        if (m < 0)
+            return 0;
+        t_mov_reg(t, m, n);
+        n = m;
+    }
+    for (k = 0; k < 4 && tt < 0; k++)
+        if (c[k] >= 0 && c[k] != al && c[k] != ah && c[k] != dl &&
+            c[k] != dh && c[k] != n)
+            tt = c[k] == 12 ? 12 : t_scr(c[k]);
+    if (tt < 0)
+        return 0;
+    /* the half that receives the cross terms is written last but one:
+     * the other source half is read by both terms first */
+    int sl = lsl ? ah : al, sx = lsl ? al : ah;   /* same side, cross */
+    int ds = lsl ? dh : dl, dx = lsl ? dl : dh;
+    int near = lsl ? T_SH_LSR : T_SH_LSL;   /* sx's bits into ds: 32 - n */
+    int far = lsl ? T_SH_LSL : (sign ? T_SH_ASR : T_SH_LSR); /* n - 32 */
+    t_alu_imm(t, T_OP_RSB, tt, n, 32, 0);
+    t_shift_reg(t, near, tt, sx, tt, 0);           /* sx << or >> 32 - n */
+    t_shift_reg(t, lsl ? T_SH_LSL : T_SH_LSR, ds, sl, n, 0);
+    t_alu_reg(t, T_OP_ORR, ds, ds, tt, 0);
+    t_alu_imm(t, T_OP_SUB, tt, n, 32, sign);
+    if (sign) {
+        t_it(t, T_PL, "");
+        t_shift_reg(t, far, tt, sx, tt, 0);
+        t_it(t, T_PL, "");
+        t_alu_reg(t, T_OP_ORR, ds, ds, tt, 0);
+    } else {
+        t_shift_reg(t, far, tt, sx, tt, 0);
+        t_alu_reg(t, T_OP_ORR, ds, ds, tt, 0);
+    }
+    t_shift_reg(t, op, dx, sx, n, 0);
+    wr64(F, i->dst, dl, dh);
+    return 1;
+}
+
 /* The same by a constant, where which arm applies is already known. */
 static void shift64_imm(struct t_fn *F, int op, int sign, long n)
 {
@@ -3821,6 +3908,8 @@ static int gen_ins64(struct t_fn *F, int n)
             wr64(F, i->dst, dl, dh);
             return 1;
         }
+        if (!i->imm_b && target_thumb_arch() >= 7 && shift64_var_to(F, i))
+            return 1;
         rd64(F, i->a, A_LO, A_HI);
         if (i->imm_b)
             shift64_imm(F, op, i->sign, (long)i->imm);
@@ -4416,7 +4505,8 @@ static int fp_vfp_arith(struct t_fn *F, const struct ir_ins *i)
  * pair on ARMv7-M and is refused. */
 static void set_cc(struct t_fn *F, int dst, int cond);
 static void cmse_entry_return(struct t_fn *F);
-static void cmse_call(struct t_fn *F, int ncrn);
+static void cmse_call(struct t_fn *F, const struct abi_walk *w,
+                      const struct ir_ins *i);
 
 static int t_is_atomic(const struct ir_ins *i)
 {
@@ -5880,7 +5970,7 @@ static void gen_ins(struct t_fn *F, int n)
         /* The comparison reads its left operand where it already is;
          * only the 0/1 result needs a register of its own. */
         int sa = rdr(F, i->a, T_ACC);
-        if (i->imm_b && ((i->imm >= 0 && i->imm <= 255) || t_imm_ok(i->imm))) {
+        if (i->imm_b && t_cmp_imm_ok(i->imm)) {
             t_cmp_imm(t, sa, i->imm);
         } else if (!i->imm_b) {
             /* ...and its right one too: `cmp r2, r4`, not a copy of r4
@@ -6161,6 +6251,35 @@ static void gen_ins(struct t_fn *F, int n)
     }
     case IR_GADDR: {
         int d = wreg(F, i->dst, T_ACC);   /* straight into its home */
+        if (i->glob->is_tls) {
+            /* A thread-local's OFFSET from the thread pointer, local-exec
+             * as GCC makes it (irgen adds __aeabi_read_tp()'s result): a
+             * literal word with R_ARM_TLS_LE32, read pc-relative and
+             * branched over, so no pool is needed. The function starts
+             * on a word (the alignment below), so the buffer offset is
+             * the address mod 4. */
+            if (t_isa_a32) {               /* ldr d,[pc]; b +4; .word */
+                code_u32(t, 0xe59f0000ul | (unsigned long)d << 12);
+                code_u32(t, 0xea000000ul);
+            } else {
+                if (t->len & 2)
+                    t_nop(t);              /* the word lands on four */
+                if (d < 8) {               /* ldr d, [pc, #0]; b.n +4 */
+                    code_u16(t, 0x4800u | (unsigned)d << 8);
+                    code_u16(t, 0xe001u);
+                } else {                   /* ldr.w d, [pc, #4]; nop; b.n */
+                    code_u16(t, 0xf8dfu);
+                    code_u16(t, (unsigned)d << 12 | 4u);
+                    t_nop(t);
+                    code_u16(t, 0xe001u);
+                }
+            }
+            note_glob(F->st, t->len, i->glob, RK_ARM_TLS_LE32);
+            code_mark_data(t, t->len, t->len + 4);
+            code_u32(t, 0);
+            wrote(F, i->dst, d);
+            return;
+        }
         if (F->l32_on) {
             t_lit32_load(F, d, T_L32_GLOB, 0, i->glob);
             wrote(F, i->dst, d);
@@ -6531,7 +6650,7 @@ static void gen_ins(struct t_fn *F, int n)
         if (i->indirect && i->call_cmse) {
             tcg_cmse_check_call(fn, i, &w, sret);
             rd(F, i->a, T_ACC);
-            cmse_call(F, w.ncrn);
+            cmse_call(F, &w, i);
             /* the Non-secure callee is not trusted to have extended a
              * narrow result as the AAPCS asks */
             if (i->dst >= 0 && !i->retsize &&
@@ -6892,18 +7011,22 @@ static void gen_ins(struct t_fn *F, int n)
         if (scr < 0 && naddr > 0)
             t_refuse(fn, i, "an asm with no scratch register left around it");
         for (int k = 0; k < ia->nout; k++)
-            if (!ia->out[k].mem && ia->out[k].size > 4)
-                t_refuse(fn, i, "an asm output wider than a register");
+            if (!ia->out[k].mem && ia->out[k].size > 8)
+                t_refuse(fn, i, "an asm output wider than a register pair");
         /* In: an input's value, an "m" output's address, and a "+"
          * output's address (its current value is loaded through it
          * below) -- the register-resident ones as one parallel move,
          * then the rest from wherever they are. */
         {
             int pd[24], ps[24], npm = 0;
-            for (int k = 0; k < ia->nin && npm < 24; k++)
+            for (int k = 0; k < ia->nin && npm < 23; k++)
                 if (in_reg(F, ia->in[k].temp)) {
                     pd[npm] = ia->in[k].reg;
                     ps[npm++] = F->loc[ia->in[k].temp];
+                    if (ia->in[k].size == 8) {   /* a pair: both words */
+                        pd[npm] = ia->in[k].reg + 1;
+                        ps[npm++] = F->loc[ia->in[k].temp] + 1;
+                    }
                 }
             for (int k = 0; k < ia->nout && npm < 24; k++)
                 if (!ia->out[k].val &&
@@ -6923,17 +7046,28 @@ static void gen_ins(struct t_fn *F, int n)
                     t_mov_reg(t, pm_reg(od[k]), pm_reg(os[k]));
             }
             for (int k = 0; k < ia->nin; k++)
-                if (!in_reg(F, ia->in[k].temp))
-                    rd(F, ia->in[k].temp, ia->in[k].reg);
+                if (!in_reg(F, ia->in[k].temp)) {
+                    if (ia->in[k].size == 8)
+                        rd64(F, ia->in[k].temp, ia->in[k].reg,
+                             ia->in[k].reg + 1);
+                    else
+                        rd(F, ia->in[k].temp, ia->in[k].reg);
+                }
             for (int k = 0; k < ia->nout; k++) {
                 const struct ir_asm_op *o = &ia->out[k];
                 if (o->val || !(o->mem || o->inout))
                     continue;
                 if (!in_reg(F, o->temp))
                     rd(F, o->temp, o->reg);
-                /* A "+" output starts with the lvalue's CURRENT value. */
-                if (o->inout && !o->mem)
+                /* A "+" output starts with the lvalue's CURRENT value --
+                 * a pair's high word first, while the address is still
+                 * in the low register */
+                if (o->inout && !o->mem && o->size == 8) {
+                    ldst_must(t, o->reg + 1, o->reg, 4, 4, 0, 0);
+                    ldst_must(t, o->reg, o->reg, 0, 4, 0, 0);
+                } else if (o->inout && !o->mem) {
                     ldst_must(t, o->reg, o->reg, 0, o->size, 0, 0);
+                }
             }
         }
         /* the bytes, padded at each alignment for where they land, and
@@ -6951,7 +7085,12 @@ static void gen_ins(struct t_fn *F, int n)
             if (o->mem || o->val)
                 continue;
             rd(F, o->temp, scr);
-            ldst_must(t, o->reg, scr, 0, o->size, 0, 1);
+            if (o->size == 8) {
+                ldst_must(t, o->reg, scr, 0, 4, 0, 1);
+                ldst_must(t, o->reg + 1, scr, 4, 4, 0, 1);
+            } else {
+                ldst_must(t, o->reg, scr, 0, o->size, 0, 1);
+            }
         }
         /* Out, as values: each to its home. Those in memory first, while
          * every operand register still holds what the asm left; then
@@ -7881,11 +8020,15 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     if (fn->has_alloca)
         F.used_callee[F.nsave++] = 7;
     {
-        unsigned am = t_asm_saved_regs(fn);
+        /* ...and what an asm clobbers or names of r4-r11: the function's
+         * to save, as GCC saves it */
+        unsigned am = t_asm_saved_regs(fn) |
+                      (unsigned)(ra_asm_clobbers(fn) & 0x0ff0u);
         if (fn->has_alloca && (am >> 7 & 1))
-            t_refuse(fn, NULL, "an asm operand in r7 (the letter D) in a "
-                               "function whose frame r7 addresses");
-        for (int r = 4; r <= 8; r++) {
+            t_refuse(fn, NULL, "an asm that writes r7 in a function whose "
+                               "frame r7 addresses (it has a variable-length "
+                               "array or alloca)");
+        for (int r = 4; r <= 11; r++) {
             int have = 0;
             if (!(am >> r & 1))
                 continue;
@@ -7893,6 +8036,19 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
                 have |= F.used_callee[k] == r;
             if (!have)
                 F.used_callee[F.nsave++] = r;
+        }
+        /* ...and s16-s31 an asm changes: the vpush range reaches them */
+        if (target_thumb_fpu()) {
+            unsigned fm = 0;
+            int top = -1;
+            for (int q = 0; q < fn->nins; q++)
+                if (fn->ins[q].op == IR_ASM && fn->ins[q].asm_ir)
+                    fm |= fn->ins[q].asm_ir->fclob;
+            for (int r = 16; r < 32; r++)
+                if (fm >> r & 1)
+                    top = r;
+            if (top >= 16 && ((top - 15 + 1) & ~1) > F.nfsave)
+                F.nfsave = (top - 15 + 1) & ~1;
         }
     }
     /* A leaf: no call in the IR and none the lowering makes -- the
@@ -8013,6 +8169,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         if (fn->ins[i].op == IR_ASM && fn->ins[i].asm_ir)
             asm_sl += code_asm_align_slack(fn->ins[i].asm_ir->arange,
                                            fn->ins[i].asm_ir->narange);
+        else if (fn->ins[i].op == IR_GADDR && fn->ins[i].glob &&
+                 fn->ins[i].glob->is_tls)
+            asm_sl += 2;          /* a thread-local's word: its padding */
     F.l32_on = target_opt_size() && !t_isa_a32 &&
                !getenv("EMBCC_T_NOPOOL32");
     F.l32_slack = asm_sl;
@@ -8082,6 +8241,12 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     {
         int al = t_isa_a32 || F.lp_use ||
                  (F.l32_on && (pass == 0 || l32_meas_n)) ? 3 : 1;
+        /* ...and one that reads a thread-local's offset from a literal
+         * word in its code (IR_GADDR) */
+        for (int k = 0; k < fn->nins; k++)
+            if (fn->ins[k].op == IR_GADDR && fn->ins[k].glob &&
+                fn->ins[k].glob->is_tls)
+                al |= 3;
         for (int k = 0; k < fn->nins; k++)
             if (fn->ins[k].op == IR_ASM || fn->ins[k].op == IR_SWITCH)
                 al |= 3;
@@ -9100,9 +9265,10 @@ int tcg_fn_sret_bytes(const struct ir_func *fn) { return fn_sret_bytes(fn); }
  * already), and so are the flags, with an MSR of lr into APSR: a secret
  * the body computed must not be readable there. r4-r11 hold the caller's
  * values again after the epilogue's pop. This is clang's sequence for a
- * soft-float build. The floating-point state is not cleared: -mcmse is
- * refused with an FPU (src/driver), so Secure code built here never puts
- * anything in it.
+ * soft-float build. With an FPU the floating-point state is cleared too,
+ * where the Secure side has one active (CONTROL.SFPA): s0-s15 but the
+ * result's are overwritten with lr, and FPSCR's flags and exception bits
+ * are cleared (cmse_clear_fp, clang's sequence).
  *
  * A call through a cmse_nonsecure_call pointer saves r4-r11, clears the
  * target's bit 0 (a Non-secure address: BLXNS to an odd one would stay
@@ -9111,7 +9277,12 @@ int tcg_fn_sret_bytes(const struct ir_func *fn) { return fn_sret_bytes(fn); }
  * comes back in r0 (r0:r1), and r4-r11 are restored -- the Non-secure
  * callee is not trusted to preserve them. Mainline also saves and clears
  * the floating-point context around the call with VLSTM/VLLDM, as clang
- * does, which is a no-op where no Secure FP context is active.
+ * does, which is a no-op where no Secure FP context is active. With an
+ * FPU, FP arguments (s0-s15 under the hard-float convention) are carried
+ * across the VLSTM in r11 down, FPSCR is given the saved one with its
+ * flags cleared, an FP result is carried across the VLLDM likewise, and
+ * the VLLDM is preceded by clang's `it ne; vmovne.f32 s0, s0` under
+ * CONTROL.SFPA.
  *
  * What CMSE forbids is refused by name, as clang refuses it: an entry
  * function with arguments on the stack or a result returned through
@@ -9159,13 +9330,67 @@ void tcg_cmse_check_call(const struct ir_func *fn, const struct ir_ins *i,
                                   : "passes arguments on the stack");
 }
 
+/* `tst.w r12, #8`: CONTROL.SFPA, a Secure floating-point context is
+ * active (after `mrs r12, control`) */
+static void cmse_sfpa_test(struct code *t)
+{
+    t_mrs(t, 12, 0x14);                       /* mrs r12, control */
+    code_u16(t, 0xf01cu);                     /* tst.w r12, #8 */
+    code_u16(t, 0x0f08u);
+}
+
+/* FPSCR's cumulative exception bits (0x9f) and NZCV cleared, in r */
+static void cmse_fpscr_clean(struct code *t, int r)
+{
+    if (!t_alu_imm(t, T_OP_BIC, r, r, 0x9f, 0) ||
+        !t_alu_imm(t, T_OP_BIC, r, r, (long)0xf0000000L, 0))
+        internal_error("thumb: bic of FPSCR's bits does not encode");
+}
+
+/* An entry function's FP state, with an FPU: where a Secure FP context is
+ * active, s0-s15 but the `keep` holding the result are overwritten with lr,
+ * and FPSCR's exception bits and flags are cleared -- clang's sequence. */
+static void cmse_clear_fp(struct t_fn *F)
+{
+    struct code *t = F->t;
+    int esz, n = fn_ret_vfp(F->fn, &esz);
+    int keep = n ? n * esz / 4 : 0;
+    cmse_sfpa_test(t);
+    int at = t->len;
+    code_u16(t, 0xd000u);                     /* beq: patched below */
+    code_u16(t, 0xeef1u);                     /* vmrs r12, fpscr */
+    code_u16(t, 0x0a10u | 12u << 12);
+    cmse_fpscr_clean(t, 12);
+    for (int s = keep; s < 16; ) {
+        if (s & 1) {                          /* an odd one alone */
+            t_vmov_core(t, s, T_LR, 1);
+            s++;
+        } else {
+            t_vmov_core_pair(t, s / 2, T_LR, T_LR, 1);
+            s += 2;
+        }
+    }
+    code_u16(t, 0xeee1u);                     /* vmsr fpscr, r12 */
+    code_u16(t, 0x0a10u | 12u << 12);
+    long off = t->len - (at + 4);
+    if (off < 0 || off > 254 || (off & 1))
+        internal_error("thumb: the FP clearing is %ld bytes", off);
+    t->p[at] = (unsigned char)(off / 2);      /* beq's imm8 */
+}
+
 /* ARMv8-M Mainline: an entry function's way out, after the pop that put
  * the caller's registers and lr back (or none, in a function that pushed
  * nothing). */
 static void cmse_entry_return(struct t_fn *F)
 {
     struct code *t = F->t;
-    for (int r = tcg_cmse_ret_regs(F->fn); r < 4; r++)
+    int esz;
+    if (target_thumb_fpu())
+        cmse_clear_fp(F);
+    /* a result in s0/d0 (the hard-float convention) is in no core
+     * register: r0-r3 are all cleared then */
+    for (int r = fn_ret_vfp(F->fn, &esz) ? 0 : tcg_cmse_ret_regs(F->fn);
+         r < 4; r++)
         t_mov_reg(t, r, T_LR);
     t_mov_reg(t, 12, T_LR);
     /* APSR_nzcvqg where the part has the DSP extension's GE bits, which
@@ -9175,20 +9400,63 @@ static void cmse_entry_return(struct t_fn *F)
     t_bxns(t, T_LR, 0);
 }
 
-/* ARMv8-M Mainline: the target in T_ACC, the arguments in r0..r(ncrn-1). */
-static void cmse_call(struct t_fn *F, int ncrn)
+/* ARMv8-M Mainline: the target in T_ACC, the arguments in r0..r(ncrn-1),
+ * FP ones (the hard-float convention) in the s registers w did not leave
+ * free. */
+static void cmse_call(struct t_fn *F, const struct abi_walk *w,
+                      const struct ir_ins *i)
 {
     struct code *t = F->t;
+    int ncrn = w->ncrn, fpu = target_thumb_fpu();
+    unsigned fargs = fpu && w->vfp ? ~w->vfree & 0xffffu : 0;
+    int esz, rn = fpu ? call_ret_vfp(i, &esz) : 0;
+    int fres = rn ? rn * esz / 4 : 0;          /* the result's s registers */
+    int nfa = 0;
+    for (int s = 0; s < 16; s++)
+        nfa += fargs >> s & 1;
+    if (nfa > 8 || fres > 8)
+        diag_fatal(F->fn->file, i->line ? i->line : F->fn->line,
+                   "a call through a cmse_nonsecure_call pointer in '%s' "
+                   "with more than 8 floating-point argument or result "
+                   "registers is not supported: they are carried across "
+                   "the FP context's save in r4-r11", F->fn->name);
     t_push(t, 0x0ff0u);                            /* r4-r11 */
     if (!t_alu_imm(t, T_OP_BIC, T_ACC, T_ACC, 1, 0))
         internal_error("thumb: bic #1 does not encode");
     t_sp_adjust(t, 136, 1);
+    /* FP arguments across the VLSTM, in r11 down (r12 is the target) */
+    int k = 0;
+    for (int s = 0; s < 16; s++)
+        if (fargs >> s & 1)
+            t_vmov_core(t, s, 11 - k++, 0);
     t_vlstm(t, T_SP, 0);
+    k = 0;
+    for (int s = 0; s < 16; s++)
+        if (fargs >> s & 1)
+            t_vmov_core(t, s, 11 - k++, 1);
+    if (fargs) {                     /* the saved FPSCR, flags cleared */
+        if (!t_ldst_imm(t, 4, T_SP, 64, 4, 0, 0))
+            internal_error("thumb: ldr r4, [sp, #64] does not encode");
+        cmse_fpscr_clean(t, 4);
+        code_u16(t, 0xeee1u);                      /* vmsr fpscr, r4 */
+        code_u16(t, 0x0a10u | 4u << 12);
+    }
     for (int r = ncrn; r < 12; r++)
         t_mov_reg(t, r, T_ACC);
     t_msr_apsr(t, T_ACC, target_thumb_em());
     t_bxns(t, T_ACC, 1);
+    /* an FP result across the VLLDM, in r11 down; and clang's guard */
+    for (int s = 0; s < fres; s++)
+        t_vmov_core(t, s, 11 - s, 0);
+    if (fpu) {
+        cmse_sfpa_test(t);
+        t_it(t, T_NE, "");
+        code_u16(t, 0xeeb0u);                      /* vmovne.f32 s0, s0 */
+        code_u16(t, 0x0a40u);
+    }
     t_vlstm(t, T_SP, 1);
+    for (int s = 0; s < fres; s++)
+        t_vmov_core(t, s, 11 - s, 1);
     t_sp_adjust(t, 136, 0);
     t_pop(t, 0x0ff0u);
 }

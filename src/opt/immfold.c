@@ -245,6 +245,20 @@ static int fits_imm32(long v)
     return v >= -2147483647L - 1 && v <= 2147483647L;
 }
 
+/* A constant as a 32-bit operation reads it. Thumb's immediates are 32-bit
+ * patterns, and a const.4 of 4294967103 -- the unsigned 0xffffff3f, a mask
+ * that clears two bits -- is -193 to them, which `bic #0xc0` takes. Read as
+ * the wider number it failed fits_imm32 and stayed a mvn into a register. */
+static int get_const_w(struct ir_func *fn, struct defs *d, int v, long *out,
+                       int w)
+{
+    if (!get_const(fn, d, v, out))
+        return 0;
+    if (w <= 4 && target_get() == TARGET_THUMB)
+        *out = (long)(int)(unsigned)((unsigned long)*out & 0xffffffffUL);
+    return 1;
+}
+
 /* The predicate when a comparison's operands are swapped: `a < b` becomes
  * `b > a`, so folding a constant `a` into `cmp b, imm` flips the direction. */
 enum binop swap_pred(enum binop p)
@@ -747,11 +761,21 @@ int pass_immfold(struct ir_func *fn)
         int cmp64 = target_get() == TARGET_THUMB && i->op == IR_CMP &&
                     i->w == 8 && target_thumb_arch() >= 7 &&
                     !getenv("EMBCC_T_NOCMP64IMM");
+        /* Xtensa: a 64-bit compare takes any constant, half by half --
+         * against zero or a value bnei/beqi name, a branch on each half
+         * (codegen.c, cmp64_branch); else built where it is compared.
+         * `timeout == EMB_TICK_MAX` had -1 in a register pair, copied. */
+        int xt64 = target_get() == TARGET_XTENSA && i->op == IR_CMP &&
+                   i->w == 8;
         int p64;
         long lo64, hi64;
-        if (cmp64 ? get_const(fn, &d, i->b, &B) &&
+        if (xt64 && get_const(fn, &d, i->b, &B)) {
+            i->imm = B; i->imm_b = 1; i->b = -1;
+            changed = 1;
+        } else if (cmp64 ? get_const(fn, &d, i->b, &B) &&
                     cmp64_imm(i->pred, i->sign, B, &p64, &lo64, &hi64)
-                  : get_const(fn, &d, i->b, &B) && (fits_imm32(B) || wide_ok) &&
+                  : get_const_w(fn, &d, i->b, &B, i->w) &&
+                    (fits_imm32(B) || wide_ok) &&
                     target_imm_foldable(i->op, B, i->w)) {
             i->imm = B; i->imm_b = 1; i->b = -1;    /* op a, imm */
             changed = 1;
@@ -759,7 +783,7 @@ int pass_immfold(struct ir_func *fn)
                            cmp64_imm(swap_pred(i->pred), i->sign, A,
                                      &p64, &lo64, &hi64)
                          : (commutative || i->op == IR_CMP) &&
-                           get_const(fn, &d, i->a, &A) &&
+                           get_const_w(fn, &d, i->a, &A, i->w) &&
                            (fits_imm32(A) || wide_ok) &&
                            target_imm_foldable(i->op, A, i->w)) {
             /* Constant in the first operand: move it to the immediate, keeping

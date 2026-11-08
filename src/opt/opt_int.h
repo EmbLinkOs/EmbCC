@@ -304,6 +304,7 @@ int lvn_mem_kill(struct ir_func *fn, struct defs *d, const char *taken,
 int pass_divmagic(struct ir_func *fn);
 int pass_mulwiden(struct ir_func *fn);
 int pass_divtest(struct ir_func *fn);
+int pass_bittest(struct ir_func *fn);
 int pass_divmod(struct ir_func *fn);
 
 /* ifconv.c */
@@ -315,6 +316,7 @@ int pass_ifconv(struct ir_func *fn);
 /* cfgclean.c */
 void remap_scopes(struct ir_func *fn, const int *newpos, int oldn);
 int pass_thread(struct ir_func *fn);
+int pass_cmpbranch(struct ir_func *fn);    /* cfgclean.c */
 int pass_cfgclean(struct ir_func *fn);
 int pass_brdom(struct ir_func *fn);    /* a branch a dominating one decided */
 

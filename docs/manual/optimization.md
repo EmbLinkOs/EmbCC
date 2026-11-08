@@ -157,7 +157,9 @@ Optimize for size. Enables everything in `--opt=speed` except:
 - `vectorize`, `unroll` and `switch-thread` are off, and so is live-range
   splitting around loops. Each of these adds code.
 - The inlining budget for a callee that is copied is 6 IR instructions
-  instead of 24, and a `static` function with two callers gets no larger
+  instead of 24 -- 12, counted as it will be once optimized, for a
+  function declared `inline`, as GCC honours the keyword at `-Os` (an
+  RTOS's `static inline` list helpers) -- and a `static` function with two callers gets no larger
   budget (200 at `--opt=speed`). A `static` function with a single caller is
   still inlined up to 2000 IR instructions, because moving it deletes
   the original (see [Inlining](#inlining)).
@@ -268,7 +270,7 @@ target are the link's.
 | Attribute inference, read-only `static` propagation | | yes | yes | yes | yes |
 | Register allocation, tail calls (code generator) | | yes | yes | yes | yes |
 | `gcse`, `pre`, `tail-recursion`, `idiom` | | | yes | yes | yes |
-| `inline` | `always_inline` only | single caller or `always_inline` | yes | yes, sizes as optimized | yes, budget 6 |
+| `inline` | `always_inline` only | single caller or `always_inline` | yes | yes, sizes as optimized | yes, budget 6 (12 as optimized when declared `inline`) |
 | `vectorize` | | | x86-64 only | x86-64 only | |
 | `unroll`, `switch-thread` | | | yes | yes | |
 | `unswitch`, `ipcp` | | | | yes | |

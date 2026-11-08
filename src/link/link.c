@@ -4053,6 +4053,23 @@ static void define_brackets(struct linker *l, const struct osec_bound *b)
     define_linker_symbol(l, "__ctors_end", b[OSEC_CTORS].end);
     define_linker_symbol(l, "__dtors_start", b[OSEC_DTORS].start);
     define_linker_symbol(l, "__dtors_end", b[OSEC_DTORS].end);
+    /* The thread block's template, under picolibc's names, for the RTOS
+     * that makes each thread's copy: __tdata_size bytes of .tdata's
+     * initial values, then __tbss_size of zeros -- __tls_size in all,
+     * aligned to __tls_align. Where the thread pointer goes for that copy
+     * is the ABI's: on ARM 8 bytes (the control block, rounded up to
+     * __tls_align) before it, as __aeabi_read_tp returns it; on RISC-V at
+     * it. Defined only when something refers to them. */
+    define_linker_symbol(l, "__tdata_start", b[OSEC_TDATA].start);
+    define_linker_symbol(l, "__tdata_end", b[OSEC_TDATA].end);
+    define_linker_symbol(l, "__tdata_size",
+                         b[OSEC_TDATA].end - b[OSEC_TDATA].start);
+    define_linker_symbol(l, "__tbss_start", b[OSEC_TBSS].start);
+    define_linker_symbol(l, "__tbss_end", b[OSEC_TBSS].end);
+    define_linker_symbol(l, "__tbss_size",
+                         b[OSEC_TBSS].end - b[OSEC_TBSS].start);
+    define_linker_symbol(l, "__tls_size", l->tls_size);
+    define_linker_symbol(l, "__tls_align", l->tls_align ? l->tls_align : 1);
 }
 
 static int is_c_ident(const char *s)

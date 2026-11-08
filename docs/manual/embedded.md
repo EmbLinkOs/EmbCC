@@ -384,7 +384,7 @@ table above, region by region. The details are in
 | Cortex-M4, M7 without FPU use | `thumbv7em-none-eabi` | soft-float |
 | Cortex-M4F | `thumbv7em-none-eabihf`, or `thumbv7em-none-eabi --fpu=fpv4-sp-d16 --float-abi=hard` | single-precision FPU, hard-float convention |
 | Cortex-M7 | `thumbv7em-none-eabihf --cpu=cortex-m7`, or `thumbv7em-none-eabi --fpu=fpv5-d16 --float-abi=hard` | double-precision FPU (FPv5-D16), hard-float convention |
-| Cortex-M33 | `thumbv8m.main-none-eabi`; `thumbv8m.main-none-eabihf` for the FPU | FPv5-SP-D16; TrustZone with `--cmse` (soft float) |
+| Cortex-M33 | `thumbv8m.main-none-eabi`; `thumbv8m.main-none-eabihf` for the FPU | FPv5-SP-D16; TrustZone with `--cmse`, with or without the FPU |
 
 `--cpu=cortex-m0`, `cortex-m0plus`, `cortex-m1`, `cortex-m23`,
 `cortex-m3`, `cortex-m4`, `cortex-m7` and `cortex-m33` select the
@@ -1643,11 +1643,13 @@ cross toolchain; only the program under test comes from EmbCC.
 
 ## C++ on the embedded targets
 
-C++ is compiled without exceptions, with or without RTTI, for the 32-bit
-embedded targets: the Cortex-M triples and `armv7a-none-eabi`,
-`riscv32-unknown-elf`, MIPS, PowerPC, SPARC, ColdFire, Xtensa, TriCore
-and RX ([C++ targets](cxx.md#targets) has the exact list). A firmware
-build looks like this:
+C++ is compiled for every embedded target, with or without RTTI: the
+Cortex-M triples and `armv7a-none-eabi`, RISC-V at both widths, MIPS,
+PowerPC, SPARC, ColdFire, Xtensa, TriCore, RX and AVR. Exceptions are
+thrown and caught on ARM (EHABI's `.ARM.exidx`), RISC-V, MIPS, Xtensa and
+TriCore; elsewhere a unit with exceptions is refused by name and
+compiles with `--no-exceptions` ([C++ targets](cxx.md#targets) has the
+exact list). A firmware build looks like this:
 
 ```sh
 embcc --target=thumbv7em-none-eabihf --opt=size --no-exceptions --no-rtti \
@@ -1663,37 +1665,21 @@ and `__init_array_end` before `main`: that is where the constructors of
 namespace-scope objects are. `make libcxx-embedded` builds the C++
 runtime (`operator new` and `delete`, the guard functions,
 `__aeabi_atexit`, the RTTI classes and `__dynamic_cast`). On ARM the
-objects follow the ARM C++ ABI and link with clang++'s. Exceptions are refused by name, as there are no unwind tables
-for these machines:
+objects follow the ARM C++ ABI and link with clang++'s.
+
+On AVR, C++ follows the two-byte `int` and pointers: `size_t`, array
+cookies, member pointers, vtable slots and RTTI's offsets are laid out by
+them, and `lib/avr` gives the runtime `malloc`, `atexit` and `abort`.
+Asked for exceptions there, EmbCC refuses by name:
 
 ```text
-embcc: error: C++ exceptions are not supported for thumbv7m-none-eabi yet: EmbCC writes no ARM EHABI unwind tables (.ARM.exidx); compile with -fno-exceptions
+embcc: error: C++ exceptions are not supported for avr yet: EmbCC writes no AVR .eh_frame; compile with --no-exceptions
 ```
 
-On AVR EmbCC refuses to generate code for a C++ unit:
-
-```text
-embcc: error: C++ is not yet supported for avr: the C++ lowering assumes a 32-bit int and 4-byte pointers (integral promotions, member pointers, RTTI), and this target's are 16 bits
-```
-
-`--syntax-only`, `-E`, `-M` and `--deps-only` still accept C++ there. See
-[C++ targets](cxx.md#targets) for what the ABI is on each target.
-
-C++ compiles for `riscv64-unknown-elf`, but no C++ runtime is built for
-it. Code that needs a landing pad (a `try` block, or a local
-object whose destructor must run while an exception unwinds) does not
-compile:
-
-```text
-embcc: cx.cc:7: error: the RV64 backend cannot lower this operation yet (function _Z1gi) [landing w=8 size=4]
-```
-
-Compile with `--no-exceptions`, and with `--no-rtti` unless the program
-supplies the `__cxxabiv1` type-information vtables. The program must then
-define what the compiled code refers to: `operator new` and `operator
-delete` if it uses them, `__cxa_pure_virtual` for abstract classes, and
-`__cxa_atexit` and `__dso_handle` for static objects with destructors.
-See [C++](cxx.md).
+A program built without EmbCC's C++ runtime must define what the
+compiled code refers to: `operator new` and `operator delete` if it uses
+them, `__cxa_pure_virtual` for abstract classes, and `__cxa_atexit` and
+`__dso_handle` for static objects with destructors. See [C++](cxx.md).
 
 ## Eight-byte atomics on a 32-bit target
 
@@ -1744,10 +1730,24 @@ atomic on ONE core with no other bus master writing the object:
   part (the RP2040, the ESP32's two cores, an AURIX with several TriCore
   CPUs) needs a lock that both cores honour.
 - The instructions are privileged: machine mode on RISC-V, supervisor
-  mode on SPARC, PowerPC, ColdFire and RX, privileged mode on Cortex-M
-  (CPSID is ignored in unprivileged thread mode, so the operation is not
-  atomic there), kernel mode on MIPS. Code running in user mode traps or
-  silently loses atomicity.
+  mode on SPARC, PowerPC, ColdFire and RX, privileged mode on Cortex-M,
+  kernel mode on MIPS. On Cortex-M, where CPSID is ignored in
+  unprivileged Thread mode, the routines see that mode (CONTROL.nPRIV
+  set, no exception active) and call `__embcc_atomic_lock()` before the
+  operation and `__embcc_atomic_unlock()` after it instead -- functions
+  an RTOS defines with its own critical section (an SVC, a scheduler
+  lock):
+
+  ```c
+  void __embcc_atomic_lock(void)   { emb_svc_enter_critical(); }
+  void __embcc_atomic_unlock(void) { emb_svc_leave_critical(); }
+  ```
+
+  Without them the default lock executes `udf`: the task that asked
+  faults, rather than two tasks losing an update. This covers ARMv6-M's
+  atomics of every width and the eight-byte ones on every Cortex-M
+  (`tests/golden/thumb-atomic-unpriv.sh`). On the other architectures
+  code running in user mode traps or silently loses atomicity.
 - An interrupt of a priority that masking does not reach -- a Cortex-M
   fault or NMI, a SPARC level-15 interrupt -- can still run in the
   middle.
@@ -1759,6 +1759,57 @@ unprivileged defines them with its own critical section. Define all the
 routines you use, with the signatures in
 [Extensions](extensions.md#eight-bytes-on-a-32-bit-target);
 `tests/golden/atomic8/order.c` is an example that replaces every one.
+
+## Thread-local storage
+
+On ARM (every Cortex-M level and ARM state) and RISC-V, `_Thread_local`
+and `__thread` give each thread its own object, local-exec as GCC makes
+it: the variable's offset from the thread pointer is fixed at link time,
+and the code adds the thread pointer --
+
+- on ARM, the result of `__aeabi_read_tp()` (the ARM run-time ABI's: it
+  may change r0 alone), which the RTOS defines;
+- on RISC-V, the `tp` register, which the RTOS sets at each context
+  switch (`lui`, `add tp`, `addi`, with `R_RISCV_TPREL_*`).
+
+Each thread's copy is made from the template the linker lays out:
+`__tdata_size` bytes of `.tdata`'s initial values from `__tdata_start`,
+then `__tbss_size` bytes of zeros -- `__tls_size` in all, aligned to
+`__tls_align` (picolibc's names; embld defines them when they are
+referred to). Where the thread pointer goes for that copy is the ABI's:
+
+| Target | The thread pointer |
+|---|---|
+| ARM | 8 bytes (a control block, rounded up to `__tls_align`) before the copy |
+| RISC-V | at the copy |
+
+```c
+extern char __tdata_start[], __tdata_size[], __tbss_size[], __tls_align[];
+
+void *thread_tls_init(unsigned char *area)    /* area: __tls_size + 8 + __tls_align bytes */
+{
+    unsigned long al = (unsigned long)__tls_align;
+    unsigned long n = (unsigned long)__tdata_size, z = (unsigned long)__tbss_size;
+    unsigned char *copy = (unsigned char *)(((unsigned long)area + 8 + al - 1) & ~(al - 1));
+    memcpy(copy, __tdata_start, n);
+    memset(copy + n, 0, z);
+    return copy - ((8 + al - 1) & ~(al - 1));  /* ARM: what __aeabi_read_tp returns */
+}
+```
+
+Within one function the thread pointer is taken to be fixed, as GCC
+takes it: switch threads at a context switch, not in the middle of a
+function that uses a thread-local. `tests/exec/tls-threads.c` makes two
+blocks and checks each keeps its own values on every ARM and RISC-V
+board.
+
+The other embedded targets have no thread pointer EmbCC uses, and a use
+of a thread-local is refused by name rather than made one object every
+thread shares:
+
+```text
+embcc: t.c:2: error: 't' is thread-local, which mipsel-none-elf has no thread pointer for: EmbCC would make it one object every thread shares (_Thread_local is supported on ARM, RISC-V, AArch64 and x86-64)
+```
 
 ## Running images under QEMU
 

@@ -84,11 +84,20 @@ calls thumbv7m-none-eabi 'long long y; long long f(void) { return __atomic_load_
        __atomic_load_8
 refuse x86_64-elf '_Atomic __int128 y; __int128 f(void) { return y; }' \
        "not one access"
-refuse x86_64-elf '_Atomic double d; void f(void) { d += 1.0; }' \
-       "integers and pointers only"
+# a struct no single access moves is libatomic's generic call (size
+# first), on a 32-bit target and a 64-bit one; a long double that is
+# not one integer is refused by name
+struct3='struct s { char a, b, c; }; _Atomic struct s v; struct s r; void f(void) { r = v; }'
+calls thumbv7m-none-eabi "$struct3" __atomic_load
+calls riscv64-unknown-elf "$struct3" __atomic_load
+calls thumbv7m-none-eabi 'struct s { int a, b, c; }; _Atomic struct s v; void f(struct s x) { v = x; }' \
+       __atomic_store
+refuse x86_64-elf '_Atomic long double d; void f(void) { d += 1.0L; }' \
+       "floating types of up to 8 bytes"
 [ "$fail" -eq 0 ] || exit 1
 echo "x++, x += v and x |= v on an _Atomic int are one atomic
 read-modify-write, x *= v a compare-and-swap, and a seq_cst load and
 store carry their barriers, on Thumb, RISC-V, aarch64 and x86-64 at -O0,
--O2 and -Os; an 8-byte one on a 32-bit core is a libatomic call, and an
-access a target cannot make in one go is refused"
+-O2 and -Os; an 8-byte one on a 32-bit core is a libatomic call, a
+struct no access moves is libatomic's generic one, and an access a
+target cannot make in one go is refused"

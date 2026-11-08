@@ -388,6 +388,12 @@ int target_is_mips(void)
     return g_arch == TARGET_MIPS32 || g_arch == TARGET_MIPS64;
 }
 
+int target_args_extended(void)
+{
+    return g_arch == TARGET_RISCV32 || g_arch == TARGET_RISCV64 ||
+           g_arch == TARGET_XTENSA;
+}
+
 const char *target_sym_prefix(void)
 {
     return g_arch == TARGET_RX ? "_" : NULL;
@@ -1051,6 +1057,19 @@ int target_thumb_v81(void)
 void target_set_thumb_mve(int level) { g_thumb_mve = level; }
 int target_thumb_mve(void) { return target_thumb_v81() ? g_thumb_mve : 0; }
 int target_thumb_arch(void) { return g_thumb_arch; }
+int target_strict_align(void)
+{
+    switch (g_arch) {
+    case TARGET_THUMB:
+        return !target_arm_a32() &&
+               (g_thumb_arch == 6 || target_thumb_v8m_base());
+    case TARGET_XTENSA: case TARGET_MIPS32: case TARGET_MIPS64:
+    case TARGET_SPARC32: case TARGET_TRICORE:
+        return 1;
+    default:
+        return 0;
+    }
+}
 int target_object_align(int is_array, long size, int align)
 {
     if (g_arch == TARGET_THUMB && g_thumb_arch == 6 && is_array &&
@@ -1374,6 +1393,7 @@ int target_reloc_type(enum target_arch a, enum reloc_kind k)
         case RK_DATA_PREL32: return R_ARM_REL32;
         case RK_THM_MOVW:    return g_arm_a32 ? R_ARM_MOVW_ABS_NC
                                               : R_ARM_THM_MOVW_ABS_NC;
+        case RK_ARM_TLS_LE32: return R_ARM_TLS_LE32;
         case RK_THM_MOVT:    return g_arm_a32 ? R_ARM_MOVT_ABS
                                               : R_ARM_THM_MOVT_ABS;
         /* No ABS64: a 32-bit target has no 64-bit address to relocate,
@@ -1391,6 +1411,9 @@ int target_reloc_type(enum target_arch a, enum reloc_kind k)
         case RK_CALL:        return R_RISCV_CALL_PLT;
         case RK_RISCV_PCREL_HI20:   return R_RISCV_PCREL_HI20;
         case RK_RISCV_GOT_HI20:     return R_RISCV_GOT_HI20;
+        case RK_RISCV_TPREL_HI20:   return R_RISCV_TPREL_HI20;
+        case RK_RISCV_TPREL_ADD:    return R_RISCV_TPREL_ADD;
+        case RK_RISCV_TPREL_LO12_I: return R_RISCV_TPREL_LO12_I;
         case RK_RISCV_PCREL_LO12_I: return R_RISCV_PCREL_LO12_I;
         case RK_ABS32:       return R_RISCV_32;
         case RK_DATA_PREL32: return R_RISCV_32_PCREL;   /* .eh_frame's */
@@ -1697,6 +1720,7 @@ static const struct reloc_spelling {
     { EM_ARM,   R_ARM_TARGET1,         "R_ARM_TARGET1" },
     { EM_ARM,   R_ARM_PREL31,          "R_ARM_PREL31" },
     { EM_ARM,   R_ARM_THM_MOVW_ABS_NC, "R_ARM_THM_MOVW_ABS_NC" },
+    { EM_ARM,   R_ARM_TLS_LE32,        "R_ARM_TLS_LE32" },
     { EM_ARM,   R_ARM_THM_MOVT_ABS,    "R_ARM_THM_MOVT_ABS" },
     { EM_ARM,   R_ARM_CALL,            "R_ARM_CALL" },
     { EM_ARM,   R_ARM_JUMP24,          "R_ARM_JUMP24" },
@@ -1741,6 +1765,9 @@ static const struct reloc_spelling {
     { EM_RISCV, R_RISCV_CALL,          "R_RISCV_CALL" },
     { EM_RISCV, R_RISCV_CALL_PLT,      "R_RISCV_CALL_PLT" },
     { EM_RISCV, R_RISCV_PCREL_HI20,    "R_RISCV_PCREL_HI20" },
+    { EM_RISCV, R_RISCV_TPREL_HI20,    "R_RISCV_TPREL_HI20" },
+    { EM_RISCV, R_RISCV_TPREL_ADD,     "R_RISCV_TPREL_ADD" },
+    { EM_RISCV, R_RISCV_TPREL_LO12_I,  "R_RISCV_TPREL_LO12_I" },
     { EM_RISCV, R_RISCV_PCREL_LO12_I,  "R_RISCV_PCREL_LO12_I" },
     { EM_RISCV, R_RISCV_PCREL_LO12_S,  "R_RISCV_PCREL_LO12_S" },
     { EM_RISCV, R_RISCV_HI20,          "R_RISCV_HI20" },

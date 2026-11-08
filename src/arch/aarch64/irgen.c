@@ -254,13 +254,13 @@ static void a64_mark_template_regs(const char *file, int line,
             while (isalnum((unsigned char)p[n]) || p[n] == '_')
                 n++;
             int r = a64asm_gpr(p, n);
-            if (r >= 0 && r < 31) {
-                if (r >= 19)
-                    diag_fatal(file, line,
-                               "aarch64 asm names callee-saved register '%.*s', "
-                               "which EmbCC does not save around an asm", n, p);
+            /* x19-x28 are the function's to save (ra_asm_clobbers);
+             * x29 is its frame pointer */
+            if (r == 29)
+                diag_fatal(file, line, "aarch64 asm names x29, the frame "
+                                       "pointer");
+            if (r >= 0 && r < 31)
                 used[r] = 1;
-            }
             p += n;
             continue;
         }
@@ -374,10 +374,9 @@ void irg_asm_arm64(struct ir_func *fn, struct stmt *s)
         int r = a64asm_gpr(a->clob[i], (int)strlen(a->clob[i]));
         /* (x30 may go: a function holding an asm keeps its frame record,
          * so a template's `bl` leaves the return address saved) */
-        if (r >= 19 && r < 30)
-            diag_fatal(file, s->line, "aarch64 asm clobbers callee-saved "
-                                      "register '%s', which EmbCC does not "
-                                      "save around an asm", a->clob[i]);
+        if (r == 29)
+            diag_fatal(file, s->line, "aarch64 asm clobbers x29, the frame "
+                                      "pointer");
         if (r >= 0 && r < 31)
             used[r] = 1;
     }
@@ -410,6 +409,9 @@ void irg_asm_arm64(struct ir_func *fn, struct stmt *s)
     /* Immediates were consumed by the template and carry no run-time value,
      * so only register operands become IR operands. */
     struct ir_asm *ia = xcalloc(1, sizeof *ia);
+    for (int r = 19; r <= 28; r++)       /* x19-x28: the prologue's */
+        if (used[r])
+            ia->saves |= 1UL << r;
     ia->code = c.p;
     ia->codelen = c.len;
     ia->rel = c.rel;            /* (code_asm_rels where it is spliced) */

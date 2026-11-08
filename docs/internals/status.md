@@ -162,11 +162,12 @@ clang: the assembler puts a `nop` in each delay slot unless the code says
 ### Thread-local storage
 
 `__thread` and `_Thread_local` use the local-exec model on x86-64 and
-AArch64 ELF (`R_X86_64_TPOFF32`, `R_AARCH64_TLSLE_*`). On the
-embedded targets a thread-local object is placed in `.tbss` or `.tdata`
-but addressed with ordinary absolute or PC-relative relocations, so
-there is one instance, not one per thread. On Darwin and Windows it is
-refused (see [ABI limitations](#abi-limitations)).
+AArch64 ELF (`R_X86_64_TPOFF32`, `R_AARCH64_TLSLE_*`), and on ARM and
+RISC-V bare metal (`__aeabi_read_tp()` plus `R_ARM_TLS_LE32`; `tp` plus
+`R_RISCV_TPREL_*`), the thread pointer the RTOS's to set; embld gives the
+template's bounds under picolibc's names. On the other embedded targets
+a use is refused by name (it was one instance every thread shared).
+Darwin and Windows: see [ABI limitations](#abi-limitations).
 
 ### Target-specific refusals
 
@@ -226,7 +227,7 @@ supported. This section lists what is not.
 | `_BitInt(N)` wider than 64 bits | `_BitInt(65) is wider than BITINT_MAXWIDTH, which is 64 here` |
 | `_Decimal32`, `_Decimal64`, `_Decimal128` | `expected a type before '_Decimal32'` |
 | `_Imaginary` | `expected a type before '_Imaginary'` |
-| `_Atomic` on anything but an integer or a pointer | `reading an _Atomic struct s is not supported: EmbCC makes the operators atomic for integers and pointers only` (the first words name the operation) |
+| `_Atomic long double` wider than 8 bytes | `reading an _Atomic long double is not supported: EmbCC makes the operators atomic for integers, pointers, floating types of up to 8 bytes and structs` (the first words name the operation) |
 | C23 `constexpr` of a non-integer type | `constexpr 'd' of type double is not supported: EmbCC takes integer constants` |
 
 `_Float128` is accepted where `long double` is binary128 (AArch64 ELF,

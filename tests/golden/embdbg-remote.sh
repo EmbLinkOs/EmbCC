@@ -207,7 +207,7 @@ CEOF
     while [ $i -lt 50 ]; do
         printf '%s\n' "break *$entry" "break fwa.c:6" continue regs \
             "set r24 7" regs continue "print t" "print a" "print b" \
-            "print acc" step "print acc" quit |
+            "print acc" bt step "print acc" quit |
             "$EMBDBG" "$d/fwa.elf" remote "localhost:$port" \
             > "$d/session.txt" 2>&1
         grep -q '^connected to' "$d/session.txt" && break
@@ -242,6 +242,12 @@ CEOF
             echo "avr: wanted '$want' at line 6:"; sed -n '/fwa.c:6/,$p' "$s" | head -24 |
                 sed 's/^/     | /'; return 1; }
     done
+    # the backtrace from line 6: compute's caller, main, found by the
+    # .debug_frame -g writes (the return address above the pushes and the
+    # frame, read off Y) -- it stopped at frame 0 when there was none
+    grep -qE '^  #1  0x[0-9a-f]+  main' "$s" || {
+        echo "avr: bt does not reach main from compute:"; sed -n '/^  #0/,/^stopped/p' "$s" |
+            sed 's/^/     | /'; return 1; }
     grep -q "^stopped at .*compute.*fwa.c:7" "$s" || {
         echo "avr: 'step' did not reach line 7:"; show; return 1; }
     sed -n '/fwa.c:7/,$p' "$s" | grep -qx "acc = 133" || {
@@ -251,7 +257,7 @@ CEOF
     grep -q "34 26 36" "$d/qemu.txt" || {
         echo "avr: the program printed '$(head -c 80 "$d/qemu.txt")', not 34 26 36"
         return 1; }
-    echo "avr: registers, a write, a break at fwa.c:6, t/a/b/acc by name, a step to line 7"
+    echo "avr: registers, a write, a break at fwa.c:6, t/a/b/acc by name, a backtrace to main, a step to line 7"
 
     # The same image under a real gdb, where one is installed with AVR in
     # it: an independent reading of the same DWARF (breg28, DW_OP_addr).

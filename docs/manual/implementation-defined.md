@@ -547,8 +547,10 @@ embcc: f.c:1:7: error: 'register' is not supported yet (see docs/manual/c-langua
 *The extent to which suggestions made by using the `inline` function
 specifier are effective (C17 6.7.4).*
 
-None. Inlining is decided by the optimizer from the size of the callee,
-at `--opt=speed` and `--opt=size`; the `inline` keyword has no influence. Use
+Inlining is decided by the optimizer from the size of the callee, at
+`--opt=speed` and `--opt=size`. The `inline` keyword counts only at
+`--opt=size`, where a function declared `inline` is weighed as optimized
+against a larger budget (see [Optimization](optimization.md#inlining)). Use
 `__attribute__((always_inline))` or `__attribute__((noinline))` to
 direct it (see [Optimization](optimization.md#inlining)).
 

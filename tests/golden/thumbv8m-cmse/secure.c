@@ -169,6 +169,38 @@ unsigned __attribute__((cmse_nonsecure_entry)) s_tta(void *p)
     return cmse_TTA(p).value;
 }
 
+#ifdef __ARM_FP
+/* With an FPU (thumbv8m.main-none-eabihf): leaves a secret in s1-s15 and
+ * exception flags in FPSCR, as Secure floating-point code would; the
+ * return must clear them where a Secure FP context is active, and keep
+ * the result in s0 (ns.c fprobe). */
+float __attribute__((cmse_nonsecure_entry)) s_fsecret(float x)
+{
+    volatile float r = x * 2.0f;
+    __asm__ volatile("ldr r1, =0x5ec1e7e1\n\t"
+                     "vmov s1, r1\n\tvmov s2, r1\n\tvmov s3, r1\n\t"
+                     "vmov s4, r1\n\tvmov s5, r1\n\tvmov s6, r1\n\t"
+                     "vmov s7, r1\n\tvmov s8, r1\n\tvmov s9, r1\n\t"
+                     "vmov s10, r1\n\tvmov s11, r1\n\tvmov s12, r1\n\t"
+                     "vmov s13, r1\n\tvmov s14, r1\n\tvmov s15, r1\n\t"
+                     "vmrs r1, fpscr\n\t"
+                     "orr r1, r1, #0x13\n\t"
+                     "vmsr fpscr, r1"
+                     ::: "r1", "memory");
+    return r;
+}
+
+/* A float through a cmse_nonsecure_call pointer and a float back: carried
+ * across the FP context's save and restore (VLSTM/VLLDM) */
+typedef float __attribute__((cmse_nonsecure_call)) ns_fcb_t(float);
+float __attribute__((cmse_nonsecure_entry)) s_fcall(float (*cb)(float),
+                                                    float a)
+{
+    ns_fcb_t *f = cmse_nsfptr_create((ns_fcb_t *)cb);
+    return f(a) + 1.0f;
+}
+#endif
+
 /* ---- the boot ----------------------------------------------------------- */
 
 typedef void __attribute__((cmse_nonsecure_call)) ns_entry_t(void);
@@ -178,6 +210,15 @@ void s_main(void)
     unsigned bs, *nsvec = (unsigned *)NS_BASE;
     for (unsigned char *d = __bss_start; d < __bss_end; d++)
         *d = 0;
+#ifdef __ARM_FP
+    /* the FPU for both states: CP10 and CP11 in CPACR, the Non-secure
+     * state's access in NSACR and its own CPACR (through the SCB's
+     * Non-secure alias) */
+    *(volatile unsigned *)0xE000ED88u |= 0xfu << 20;
+    *(volatile unsigned *)0xE000ED8Cu |= 3u << 10;
+    *(volatile unsigned *)0xE002ED88u |= 0xfu << 20;
+    __asm__ volatile("dsb\n\tisb" ::: "memory");
+#endif
     puts_("S: boot\n");
     /* SSRAM1's upper 2 MiB to the Non-secure state, in the MPC: one bit a
      * block, 32 blocks a word of the look-up table */

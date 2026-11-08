@@ -1662,6 +1662,21 @@ void irg_asm_x86(struct ir_func *fn, struct stmt *s)
         ia->out[i].inout = strchr(a->out[i].constraint, '+') != NULL;
         ia->out[i].mem = asm_constraint_mem_only(a->out[i].constraint);
     }
+    /* The callee-saved registers the asm writes -- a clobber, a register
+     * the template names, an operand pinned to one: rbx and r12-r15, and
+     * Win64's rsi and rdi too. The prologue saves them (ra_asm_clobbers),
+     * as GCC does; they were simply written, and the caller's rbx with
+     * them. (rbp is the frame pointer the prologue saves anyway.) */
+    {
+        static const int xcs[] = { 3, 12, 13, 14, 15 };
+        for (unsigned k = 0; k < sizeof xcs / sizeof *xcs; k++)
+            if (used[xcs[k]])
+                ia->saves |= 1UL << xcs[k];
+        if (target_win64_abi()) {
+            if (used[6]) ia->saves |= 1UL << 6;      /* rsi */
+            if (used[7]) ia->saves |= 1UL << 7;      /* rdi */
+        }
+    }
     struct ir_ins *ins = emit(fn);
     ins->op = IR_ASM;
     ins->asm_ir = ia;

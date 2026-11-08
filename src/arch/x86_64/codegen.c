@@ -3044,6 +3044,19 @@ static void gen_func(struct ir_func *fn, struct code *text,
     /* Win64: rsi and rdi join the pushes, and below them (after a pad
      * that keeps the area 16-aligned) go the xmm registers -- all of it
      * the save area at the top of the frame, so nothing else moves */
+    /* ...and the callee-saved registers an asm writes (ir_asm.saves) */
+    {
+        unsigned long am = ra_asm_clobbers(fn);
+        for (int r = 3; r <= 15; r++) {
+            int have = 0;
+            if (!(am >> r & 1) || r == REG_RSP || r == REG_RBP)
+                continue;
+            for (int k = 0; k < nsave; k++)
+                have |= used_callee[k] == r;
+            if (!have)
+                used_callee[nsave++] = r;
+        }
+    }
     int win_pad = 0, win_slots = 0;
     g_win_nx = 0;
     if (target_win64_abi()) {

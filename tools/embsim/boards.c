@@ -225,6 +225,19 @@ const struct board_desc boards[] = {
       { { "cmsdk-uart", 0x40004000u, 0x1000 }, PERIPHERALS }, BITBAND, 0, 0, 0 },
     { "mps2-an500", "cortex-m", "cortex-m7", 3, MPS2_MEM,
       { { "cmsdk-uart", 0x40004000u, 0x1000 }, PERIPHERALS }, BITBAND, 0, 0, 0 },
+    /* ARM's MPS2+ AN519, its FPGA image of a Cortex-M23 (which QEMU does
+     * not model; its AN505 is the M33's): the ZBT SSRAM1's 4 MiB at the
+     * Secure alias 0x10000000, where an image built for the core's
+     * Secure reset lives, and again at 0, where the core reads its vector
+     * table; SSRAM2/3 at 0x28000000 and 0x38000000; UART0 (CMSDK) at
+     * 0x40200000. No TrustZone: the core runs as if always Secure */
+    { "mps2-an519", "cortex-m", "cortex-m23", 2,
+      { { 0x10000000u, MB(4), MEM_RAM, 1, 0, 0 },
+        { 0, MB(4), MEM_ALIAS, 0, 0x10000000u, 0 },
+        { 0x28000000u, MB(4), MEM_RAM, 0, 0, 0 },
+        { 0x38000000u, MB(4), MEM_RAM, 0, 0, 0 } },
+      { { "cmsdk-uart", 0x40200000u, 0x1000 }, PERIPHERALS }, { { 0, 0, 0 } },
+      0, 0, 0 },
     { "microbit", "cortex-m", "cortex-m0", 2,
       { { 0, KB(256), MEM_FLASH, 0, 0, 0 }, { 0x20000000u, KB(16), MEM_RAM, 1, 0, 0 } },
       { { "nrf51-uart", 0x40002000u, 0x1000 }, PERIPHERALS },

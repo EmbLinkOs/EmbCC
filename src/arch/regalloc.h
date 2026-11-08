@@ -517,4 +517,9 @@ char *ra_narrow_hishift(const struct ir_func *fn);
 int ra_fold_memoff(struct ir_func *fn, long lo, long hi, int w_addr,
                    int max_size, const char *wide, int regoff, int short_k);
 
+/* Every register an inline asm of fn may change (each IR_ASM's clob, bit
+ * r for register r): the callee-saved ones among them are the prologue's
+ * to save, as GCC saves them -- an asm that clobbers s1 or r4 is the
+ * function's own use of it. */
+unsigned long ra_asm_clobbers(const struct ir_func *fn);
 #endif

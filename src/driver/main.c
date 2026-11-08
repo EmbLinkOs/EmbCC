@@ -3068,7 +3068,37 @@ static int assemble_file(const char *in, const char *out)
         cpp_cmdline_define("__LANGUAGE_ASSEMBLY=1", 0);
     }
     gas_set_elf_notes(backend_get(target_get())->elf_notes);
-    int rc = gas_assemble(in, out, kind == 2, incdirs, nincdirs);
+    int rc;
+    /* -M/-MM: the make rule is the output, as for C -- the file is
+     * preprocessed as the assembler would have it (cpp_set_asm) and not
+     * assembled. -MD/-MMD: the rule beside the object, once it is made.
+     * A .s has no preprocessor, so its rule names the file alone. Both
+     * once wrote nothing: CMake's `-MD -MT -MF` for an RTOS's vectors.S
+     * left ninja no dependency on the header that set its tick rate, and
+     * a stale configuration survived a rebuild. */
+    if (dep_mode && dep_only) {
+        rc = 0;
+        if (kind == 2) {
+            char *src = read_file(in);
+            if (!src) {
+                fprintf(stderr, "embcc: error: cannot read '%s'\n", in);
+                rc = 1;
+            } else {
+                int mark = cpp_set_mark_system(0);
+                cpp_set_asm(1);
+                free(cpp_process(in, src, incdirs, nincdirs));
+                cpp_set_asm(0);
+                cpp_set_mark_system(mark);
+                rc = diag_error_count() > 0;
+            }
+        }
+        if (rc == 0)
+            write_deps(in, out);
+    } else {
+        rc = gas_assemble(in, out, kind == 2, incdirs, nincdirs);
+        if (rc == 0 && dep_mode)
+            write_deps(in, out);
+    }
     if (kind == 2)
         cpp_cmdline_define("__ASSEMBLER__", 1);
     if (pic32) {
@@ -7662,6 +7692,10 @@ static int embcc_main(int argc, char **argv)
         } else if (strcmp(argv[i], "-Wextra") == 0 ||
                    strcmp(argv[i], "-W") == 0) {
             diag_enable_group(0, 1);
+        } else if (strcmp(argv[i], "-Wcast-align=strict") == 0) {
+            /* GCC's: every target, not only one where it traps */
+            diag_enable_warning("cast-align", 1);
+            diag_enable_warning("cast-align-strict", 1);
         } else if (strncmp(argv[i], "-Wformat=", 9) == 0) {
             /* gcc's levels: 0 off, 1 -Wformat, 2 that and the checks of
              * a format that is not a literal */
@@ -8957,6 +8991,8 @@ static int embcc_main(int argc, char **argv)
         /* Without -c a .s/.S is assembled AND linked, as gcc does it:
          * `embcc start.S main.o -T fw.ld -o fw.elf`. It used to write the
          * object under the output's name, an "image" no loader reads. */
+        if (dep_mode && dep_only)         /* -M/-MM: the rule, no link */
+            return done(assemble_file(input, output));
         if (!compile_mode && !syntax_only && !want_asm && !want_iface)
             return done(compile_and_link(input, output));
         return assemble_file(input, output ? output : default_output(input));

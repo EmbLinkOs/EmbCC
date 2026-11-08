@@ -5,8 +5,10 @@
 # QEMU models no Cortex-M23. The images run on the Cortex-M33 of QEMU's
 # mps2-an505 (tests/harness/thumb-m23), which executes every Baseline
 # instruction -- Baseline is a subset of Mainline -- with unaligned accesses
-# made to fault as they do on an M23. What the M33 cannot show is an
-# instruction the M23 lacks, which is what part 3 is for.
+# made to fault as they do on an M23; then each that passed runs again on
+# a Cortex-M23, EmbSim's mps2-an519, which faults on any instruction
+# Baseline lacks, and must exit the same. Part 3 checks that statically
+# too, for code no run reaches.
 #
 #  1. The exec corpus. Every tests/exec/*.c program, compiled at -O0, -O1,
 #     -O2 and -Os, linked with lib/libc and lib/rt built for the triple, and
@@ -28,7 +30,8 @@
 #     two mapping symbols at one address make the data there read as code.
 #     And the divides and the exclusives must be THERE: an sdiv, a udiv, an
 #     ldrex and a strex in the corpus, and no call to __aeabi_idiv,
-#     __aeabi_uidiv[mod] or __atomic_* from any of it.
+#     __aeabi_uidiv[mod] or a 1-, 2- or 4-byte __atomic_*/__sync_* from
+#     any of it.
 set -u
 echo "TEST-MARKER thumbv8mbase-exec"
 . "$(dirname "$0")/../lib.sh"
@@ -90,7 +93,18 @@ if ! EMBCC_M23_HARNESS=$out/lb sh $H/link.sh $o.elf $o.o \
 fi
 sh $H/run.sh $o.elf > $o.txt 2>&1
 got=$?
-[ "$got" = "$expect" ] && { echo "PASS $name $opt"; exit 0; }
+if [ "$got" = "$expect" ]; then
+    # ...and on a Cortex-M23 (EmbSim's), which faults where the M33 ran
+    # an instruction Baseline lacks
+    if [ -x ./embsim ]; then
+        EMBCC_M23_RUNNER=embsim sh $H/run.sh $o.elf > $o.m23.txt 2>&1
+        g23=$?
+        [ "$g23" = "$expect" ] || {
+            echo "FAIL $name $opt: exit $g23 on the Cortex-M23, $expect on the M33 $(grep -m1 FAULT $o.m23.txt)"
+            exit 0; }
+    fi
+    echo "PASS $name $opt"; exit 0
+fi
 gm=none
 if [ "$refm" = 1 ] &&
    "$EMBCC" --target=$M $opt -Ilib/libc/include -c "$c" -o $o.m.o \
@@ -127,6 +141,30 @@ grep '^FAIL' "$out/results.txt" | head -20
 [ "$(grep -c '^PASS' "$out/results.txt")" -ge 600 ] || {
     echo "fewer than 600 corpus runs passed -- the harness, not the programs"
     fail=1; }
+
+# ---- 1b. the M23 is one ----------------------------------------------------
+# Every Baseline addition, run on both cores; and an instruction only
+# Mainline has, on which EmbSim's M23 must fault (else its runs above show
+# nothing the M33's do not).
+if [ -x ./embsim ]; then
+    for m in base main; do
+        d=; [ $m = main ] && d=-DMAINLINE
+        o=$out/isa-$m.o; [ $m = main ] && o=$out/isa.m.o   # part 3 skips it
+        "$EMBCC" --target=thumbv8m.$m-none-eabi -O2 $d \
+            -c tests/golden/thumbv8mbase-isa.c -o "$o" &&
+        EMBCC_M23_HARNESS=$out/lb sh $H/link.sh "$out/isa-$m.elf" \
+            "$o" || { echo "thumbv8mbase-isa.c does not build"; fail=1; }
+    done
+    sh $H/run.sh "$out/isa-base.elf" > "$out/isa-q.txt" 2>&1; q=$?
+    EMBCC_M23_RUNNER=embsim sh $H/run.sh "$out/isa-base.elf" > "$out/isa-s.txt" 2>&1; s=$?
+    EMBCC_M23_RUNNER=embsim sh $H/run.sh "$out/isa-main.elf" > "$out/isa-f.txt" 2>&1; f=$?
+    if [ "$q" = 42 ] && [ "$s" = 42 ] && [ "$f" = 125 ]; then
+        echo "Baseline's instructions run alike on the M33 and the M23, and the M23 faults on ADD.W"
+    else
+        echo "thumbv8mbase-isa.c: M33 $q, M23 $s (want 42, 42); Mainline on the M23 $f (want 125, a fault)"
+        fail=1
+    fi
+fi
 
 # ---- 2. the golden programs ------------------------------------------------
 gold() {             # gold TAG OBJ... -> $out/TAG.txt, up to ==END==
@@ -180,7 +218,9 @@ if command -v "$OD" >/dev/null 2>&1; then
         "$OD" -dr --triple=thumbv8m.base "$o" 2>/dev/null |
         awk -v obj="$o" -v mn="$out/mn.txt" '
             /R_ARM_THM_(CALL|JUMP24)/ {
-                if ($NF ~ /^(__aeabi_u?idiv(mod)?|__atomic_|__sync_)/)
+                # (an 8-byte or larger atomic is a call: Baseline has no
+                # 64-bit exclusive)
+                if ($NF ~ /^(__aeabi_u?idiv(mod)?$|__(atomic|sync)_.*_[124]$)/)
                     print obj ": a call to " $NF " on a core that has the instruction"
                 next
             }
@@ -198,7 +238,7 @@ if command -v "$OD" >/dev/null 2>&1; then
                 if (rest ~ /<unknown>/) { print obj ": " $0; next }
                 if (m ~ /^it/) { print obj ": " $0; next }
                 if (enc ~ /^[0-9a-f][0-9a-f][0-9a-f][0-9a-f] [0-9a-f][0-9a-f][0-9a-f][0-9a-f]$/ &&
-                    m !~ /^(bl|b\.w|mrs|msr|dmb|dsb|isb|sdiv|udiv|movw|movt|clrex|sg|ldrexb?h?|strexb?h?|ldaex?[bh]?|stlex?[bh]?|ttt?a?t?)$/)
+                    m !~ /^(bl|b\.w|mrs|msr|dmb|dsb|isb|sdiv|udiv|movw|movt|clrex|sg|ldrexb?h?|strexb?h?|lda(ex)?[bh]?|stl(ex)?[bh]?|ttt?a?t?)$/)
                     print obj ": " $0
             }
             END { print "COUNT " n > "/dev/stderr" }' >> "$out/scan.txt" \

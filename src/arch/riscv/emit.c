@@ -1078,6 +1078,18 @@ int rv_pcrel_pair(struct code *c, int rd)
     return at;
 }
 
+int rv_tprel_triple(struct code *c, int rd)
+{
+    int save_rvc = g_rvc;
+    int at = c->len;
+    g_rvc = 0;
+    rv_lui(c, rd, 0);
+    rv_alu(c, RV_ADD, rd, rd, RV_TP, 0);
+    rv_alu_imm(c, RV_ADD, rd, rd, 0, 0);
+    g_rvc = save_rvc;
+    return at;
+}
+
 void rv_patch_pcrel_pair(struct code *c, int at, int target)
 {
     long d = (long)target - at;

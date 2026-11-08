@@ -14,8 +14,19 @@ QEMU=${EMBCC_QEMU_ARM:-qemu-system-arm}
 # byte at a time, and stopping at '==EXIT ' killed QEMU before the status
 # now and then -- an empty status, 124, for a program that had passed
 # (thumbv8mbase-exec on CI, three of 1256 runs; tests/harness/mips/run.sh)
+#
+# EMBCC_M23_RUNNER=embsim runs it on a Cortex-M23 instead: EmbSim's
+# mps2-an519 (ARM's M23 image of the same board), whose core faults on
+# every instruction Baseline does not have. The run ends at _exit's idle
+# loop.
+if [ "${EMBCC_M23_RUNNER:-qemu}" = embsim ]; then
+    root=$(cd "$here/../../.." && pwd)
+    o=$("${EMBSIM:-$root/embsim}" "$1" --board mps2-an519 \
+        --max-insns "${EMBCC_M23_MAX_INSNS:-400000000}" 2>/dev/null)
+else
 o=$("$here/../qrun.sh" "${EMBCC_QEMU_TIMEOUT:-10}" --until '==EXIT -*[0-9][0-9]*==' \
     "$QEMU" -M mps2-an505 -cpu cortex-m33 -nographic -kernel "$1" 2>/dev/null)
+fi
 printf '%s\n' "$o" | sed '/^==EXIT /d'
 code=$(printf '%s\n' "$o" | sed -n 's/^==EXIT \(-*[0-9]*\)==.*/\1/p' | tail -1)
 [ -n "$code" ] || exit 124

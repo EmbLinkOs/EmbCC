@@ -14,6 +14,8 @@ Every warning EmbCC has, generated from the compiler's own table by `embcc --ref
 | `--warn=analyzer-use-after-free` | Memory used after it was freed | `--warn=analyze` |
 | `--warn=arith-conversion` | As `--warn=conversion`, also for arithmetic whose operands each fit the target type | neither set |
 | `--warn=attributes` | An attribute EmbCC does not know, or one it accepts but does not implement | on by default |
+| `--warn=cast-align` | A pointer cast to a type with a stricter alignment (`(int *)` of a `char *`) on a target where a misaligned access traps: ARMv6-M, v8-M Baseline, Xtensa, MIPS, SPARC, TriCore | neither set |
+| `--warn=cast-align-strict` | As `--warn=cast-align`, on every target (`-Wcast-align=strict`) | neither set |
 | `--warn=cast-qual` | A cast that removes `const` or `volatile` from the type a pointer points to | neither set |
 | `--warn=cert-arr30` | CERT C ARR30-C (high): an array subscript a constant out of the array's bounds | `--warn=cert` |
 | `--warn=cert-dcl30` | CERT C DCL30-C (high): the address of an automatic object returned | `--warn=cert` |
@@ -122,6 +124,7 @@ Every warning EmbCC has, generated from the compiler's own table by `embcc --ref
 | `--warn=missing-prototypes` | A function with external linkage defined with no prototype before it | neither set |
 | `--warn=multichar` | A character constant of more than one character, `'ab'` | on by default |
 | `--warn=nested-externs` | An `extern` declaration inside a function body | neither set |
+| `--warn=null-dereference` | A pointer dereferenced where it is null on every path (`int *p = 0; *p`), or on some (`p = c ? q : 0; *p`); not a volatile access | neither set |
 | `--warn=old-style-declaration` | A storage class or `inline` after the type specifiers: `const static int t[]`, `int static n` | `--warn=extra` |
 | `--warn=overflow` | An integer constant converted to a type that cannot hold it as a signed or as an unsigned value: `unsigned char c = 300;` | on by default |
 | `--warn=parentheses` | A comparison as an unparenthesized operand of `&`, `\|` or `^`: `reg & MASK == 0` | `--warn=all` |

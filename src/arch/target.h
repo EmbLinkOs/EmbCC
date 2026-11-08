@@ -179,6 +179,11 @@ int target_arch_built(enum target_arch a);
 
 /* Either MIPS: the one backend, the one encoder, the one assembler. */
 int target_is_mips(void);
+/* Does the caller extend a char or short argument to the register, by
+ * its type, so the callee may rely on it? The RISC-V psABI says so, and
+ * GCC's Xtensa code relies on it (PROMOTE_PROTOTYPES); EmbCC's callers
+ * extend on every target. */
+int target_args_extended(void);
 
 /* What the object's symbol for a C name puts first: "_" on RX, whose ABI
  * prefixes C names, NULL elsewhere (the ELF writer and an -S file both) */
@@ -468,6 +473,12 @@ void target_set_thumb_arch(int lvl);
  * MOVW/MOVT, CBZ, B.W and the security extension. Every question about
  * level 6 that Baseline answers the same way keeps asking the level. */
 int target_thumb_v8m_base(void);
+/* Does a word access at a misaligned address trap on this target (or not
+ * exist)? ARMv6-M and v8-M Baseline, Xtensa, MIPS, SPARC and TriCore;
+ * not v7-M and later, ARMv7-A, RISC-V, x86-64, AArch64, PowerPC, RX,
+ * ColdFire, LoongArch, nor AVR, whose every object is byte-aligned.
+ * -Wcast-align warns on a cast that raises the alignment only here. */
+int target_strict_align(void);
 void target_set_thumb_v8m_base(void);
 /* Either ARMv8-M profile (Mainline or Baseline): the security extension's
  * instructions (SG, BXNS, BLXNS, TT) and the stack-limit registers. */
@@ -804,6 +815,10 @@ enum reloc_kind {
      * legitimately drops the bits the high half carries, so a checked
      * form would reject every address above 65535. */
     RK_THM_MOVW,
+    /* ARM: a thread-local's offset from the thread pointer, local-exec --
+     * a literal word (R_ARM_TLS_LE32) the code adds __aeabi_read_tp()'s
+     * result to */
+    RK_ARM_TLS_LE32,
     RK_THM_MOVT,
     /* RISC-V takes a symbol's address in two halves as well, and the
      * split is arithmetic rather than bitwise: `auipc` supplies bits
@@ -835,6 +850,12 @@ enum reloc_kind {
     /* -fPIC/-fPIE: `auipc` to the symbol's GOT slot, its LO12 half the
      * PCREL_LO12_I of a load, which reads the address there */
     RK_RISCV_GOT_HI20,
+    /* a thread-local's offset from tp, local-exec: `lui rd, %tprel_hi(x)`,
+     * `add rd, rd, tp, %tprel_add(x)` (a marker for the linker's
+     * relaxation, nothing patched) and `addi rd, rd, %tprel_lo(x)` */
+    RK_RISCV_TPREL_HI20,
+    RK_RISCV_TPREL_ADD,
+    RK_RISCV_TPREL_LO12_I,
     /* AVR. Two things make this target's relocations unlike the others'.
      *
      * An address is materialised a BYTE at a time, because the registers

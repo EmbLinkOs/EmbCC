@@ -693,6 +693,34 @@ embcc: attr.c:1: warning: attribute 'frobnicate' is not one EmbCC knows, and is 
   int odd(void) __attribute__((frobnicate));
 ```
 
+#### `--warn=cast-align`
+
+Warn about a pointer cast to a type that needs a stricter alignment than
+the type it points to, `(int *)` of a `char *`, on a target where a
+misaligned word access traps: ARMv6-M, ARMv8-M Baseline, Xtensa, MIPS,
+SPARC and TriCore. A cast from `void *` is not reported, as with GCC:
+it is how a program says the address is known to be aligned. The GCC
+spelling is `-Wcast-align`; neither set turns it on.
+
+```c
+int f(char *c)
+{
+    return *(int *)c;
+}
+```
+
+```text
+embcc: align.c:3:20: warning: cast increases the required alignment from 1 to 4 bytes (char * to int *) [--warn=cast-align]
+      return *(int *)c;
+                     ^
+```
+
+#### `--warn=cast-align-strict`
+
+As `--warn=cast-align`, on every target, including those where a
+misaligned access works but is slower. The GCC spelling is
+`-Wcast-align=strict`, which turns on both.
+
 #### `--warn=conversion`
 
 Warn about an implicit conversion that may change a value. The checked
@@ -915,6 +943,38 @@ earlier in it on the next iteration) is not reported when the read is
 under a test inside that loop, because such a test is usually the guard
 that makes the read safe.
 
+#### `--warn=null-dereference`
+
+Warn when a pointer is dereferenced (`*p`, `p->m`, `p[i]`) at a point
+where it is null on every path (`null pointer dereference`) or on some
+(`potential null pointer dereference`), as GCC words them. The analysis
+is the one `--warn=uninitialized` uses, asking of each pointer local and
+parameter whose address is not taken: what was stored in it (`0`,
+`NULL`, an address, another pointer), and what `if (p)`, `p == NULL`,
+`p && ...` and a loop's condition say about it. "Null on some path"
+lasts until the next decision -- an `if` or loop test not about the
+pointer may be the reason it is safe -- and a call to a function that
+never returns (`abort`, `exit`, `longjmp`, a `noreturn` function, or one
+in this file whose every path ends in one) ends the path. A volatile
+access is never reported: that is how a Cortex-M reads its vector table
+at address 0. The GCC spelling is `-Wnull-dereference`; neither set
+turns it on. GCC reports these only after optimizing and only on targets
+where address 0 is no object; EmbCC reports them on every target.
+
+```c
+int g(int k, int *q)
+{
+    int *p = k ? q : 0;
+    return *p;
+}
+```
+
+```text
+embcc: null.c:4:13: warning: potential null pointer dereference: 'p' is null on some path to here [--warn=null-dereference]
+      return *p;
+              ^
+```
+
 #### `--warn=parentheses`
 
 Warn when a comparison (`==`, `!=`, `<`, `<=`, `>`, `>=`) is an operand
@@ -1071,7 +1131,8 @@ Warn about a `static` function that is defined and never called or
 referred to. A non-`static` function is never reported, because another
 translation unit may call it, and neither is `main`. A function declared
 `__attribute__((unused))` or `__attribute__((used))` is exempt, and so is
-a `static inline` function defined in a header, as with Clang. Enabled by
+any `static inline` function, in a header or in the file itself, as with
+GCC. Enabled by
 `--warn=all`. The location has a line but no column.
 
 ```c

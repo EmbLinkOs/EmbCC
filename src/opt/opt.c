@@ -310,7 +310,15 @@ static void opt_func(struct ir_func *fn)
                                                   * one cannot touch */
             changed |= pass_dce(fn);
             if (g_cfgclean) {
-                changed |= pass_thread(fn);
+                /* a threaded arm leaves its constant definition of the
+                 * merged name where nothing reads it any more, which
+                 * keeps the name defined twice and folding off it */
+                int th = pass_thread(fn);
+                changed |= th;
+                if (th && cfg_ok) {
+                    pass_dce(fn);         /* the copies' dead tests first */
+                    changed |= pass_deaddefs(fn);
+                }
                 changed |= pass_cfgclean(fn);
                 if (cfg_ok)
                     changed |= pass_brdom(fn);
@@ -318,6 +326,16 @@ static void opt_func(struct ir_func *fn)
             if (g_dse && cfg_ok)
                 changed |= pass_dse(fn);
             changed |= pass_rangecheck(fn);
+        }
+        /* x & (1 << n): x >> n & 1. Once the rounds have settled, so a
+         * mask the code builds more than once -- `if (p & BIT(s)) p &=
+         * ~BIT(s)`, in different blocks -- is one value with several
+         * readers by then (GCSE), and stays: rewritten in the first
+         * round, each test shifted x and the mask was built anyway. */
+        if (pass_bittest(fn)) {
+            pass_copyprop(fn);
+            pass_dce(fn);
+            outer = 1;
         }
         if (pass_punfwd(fn)) {         /* a union's words, without the union */
             pass_copyprop(fn);
@@ -529,8 +547,33 @@ static void opt_func(struct ir_func *fn)
      * kept reporting a change, which put format.c at six minutes. */
     /* The joins' copies, before anything decides where literals go: a
      * constant written straight into the merged name is where it was. */
-    if (cfg_ok && pass_joincopies(fn) && g_cfgclean)
+    if (cfg_ok && pass_joincopies(fn) && g_cfgclean) {
+        /* ...whose merged names are what threading looks for: a list
+         * walk's `n = next ? next : NULL` was `%t = mov %m` before its
+         * loop test until now, and the constant arm went through the
+         * test it already knew the answer to (pass_thread) */
+        int g = 0, any = 0;
+        while (g++ < 8 && pass_thread(fn)) {
+            any = 1;
+            pass_dce(fn);
+            if (pass_deaddefs(fn))
+                pass_dce(fn);
+            /* what the threaded arms leave a single definition of: the
+             * re-test of a truth value, folded (fold.c) */
+            if (pass_fold(fn)) {
+                pass_copyprop(fn);
+                pass_dce(fn);
+            }
+            pass_cfgclean(fn);
+        }
+        /* a threaded arm's old way through the test, which nothing
+         * reaches now (SCCP's job inside the rounds) */
+        if (any) {
+            drop_unreachable(fn);
+            pass_dce(fn);
+        }
         pass_cfgclean(fn);
+    }
     /* a branch whose arm changes nothing when skipped (`if (v) n += v`):
      * the shape the joins' copies leave */
     if (cfg_ok && pass_ifident(fn)) {
@@ -569,6 +612,10 @@ static void opt_func(struct ir_func *fn)
     }
     if (edge_ok)
         pass_retdup(fn);     /* last: the tail merge would share them */
+    /* a comparison two branches share, issued again at the second, where
+     * a backend can fuse each with its branch (pass_cmpbranch) */
+    if (pass_cmpbranch(fn))
+        pass_dce(fn);
     if (verify) verify_func(fn, "opt");
 
     /* What the whole fixpoint came to, for this function. The per-pass

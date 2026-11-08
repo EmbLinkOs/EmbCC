@@ -44,25 +44,27 @@ little-endian but the big-endian MIPS ones, `mips-none-elf` and
 | x86-64 Windows | Objects only | SSE2 | Refused | 1, 2, 4, 8, 16 bytes | Refused | Refused |
 | AArch64 ELF, EmbLinkOS, Linux | Supported | FP/SIMD; `long double` in software | DWARF | 1, 2, 4, 8, 16 bytes | Local-exec TLS | Yes, with exceptions |
 | Apple arm64 | Objects for the system linker | FP/SIMD | Refused | 1, 2, 4, 8, 16 bytes | Refused | Yes, with exceptions |
-| Cortex-M, soft float | Bare metal | Software | DWARF | 1, 2, 4 bytes | One shared instance | Without exceptions |
-| Cortex-M, FPU | Bare metal | Single-precision VFP; `double` in software | DWARF | 1, 2, 4 bytes | One shared instance | Without exceptions |
-| ARMv7-A (A32), soft float | Bare metal | Software | DWARF | 1, 2, 4 bytes | One shared instance | Without exceptions |
-| ARMv7-A (A32), VFP | Bare metal | VFPv3/VFPv4, single and double | DWARF | 1, 2, 4 bytes | One shared instance | Without exceptions |
-| RV32 | Bare metal | Software | DWARF | 1, 2, 4 bytes | One shared instance | Without exceptions |
-| RV64 | Bare metal | Software | DWARF | 1, 2, 4, 8 bytes | One shared instance | Without exceptions |
-| AVR (ATmega328P) | Bare metal | Software, 4-byte `double` | DWARF, 4-byte addresses | 1, 2, 4, 8 bytes (interrupts masked) | One shared instance | Refused |
-| MIPS32r2 (PIC32-class) | Bare metal | Software | DWARF | 4 bytes | One shared instance | Without exceptions |
-| MIPS64r2 | Bare metal | Software | DWARF | 4, 8 bytes | One shared instance | Without exceptions (little-endian untested) |
-| LoongArch64 | Bare metal | Software | DWARF | 1, 2, 4, 8 bytes | One shared instance | Without exceptions |
-| TriCore 1.6.1 (AURIX) | Bare metal | Software | DWARF | 4 bytes | One shared instance | Without exceptions |
-| Xtensa (ESP32, ESP32-S3) | Bare metal | Software | DWARF | 4 bytes | One shared instance | Without exceptions |
-| Renesas RX (RXv1) | Bare metal | Software, 4-byte `double` | DWARF | 1, 2, 4 bytes (interrupts masked) | One shared instance | Without exceptions |
-| SPARC V8 (LEON3) | Bare metal | Software; `long double` binary128 | DWARF | 4 bytes | One shared instance | Without exceptions |
-| ColdFire ISA_A (MCF5208-class) | Bare metal | Software | DWARF | 1, 2, 4 bytes (interrupts masked; supervisor mode) | One shared instance | Without exceptions |
+| Cortex-M, soft float | Bare metal | Software | DWARF | 1, 2, 4 bytes | Local-exec TLS (`__aeabi_read_tp`) | Without exceptions |
+| Cortex-M, FPU | Bare metal | Single-precision VFP; `double` in software | DWARF | 1, 2, 4 bytes | Local-exec TLS (`__aeabi_read_tp`) | Without exceptions |
+| ARMv7-A (A32), soft float | Bare metal | Software | DWARF | 1, 2, 4 bytes | Local-exec TLS (`__aeabi_read_tp`) | Without exceptions |
+| ARMv7-A (A32), VFP | Bare metal | VFPv3/VFPv4, single and double | DWARF | 1, 2, 4 bytes | Local-exec TLS (`__aeabi_read_tp`) | Without exceptions |
+| RV32 | Bare metal | Software | DWARF | 1, 2, 4 bytes | Local-exec TLS (`tp`) | Without exceptions |
+| RV64 | Bare metal | Software | DWARF | 1, 2, 4, 8 bytes | Local-exec TLS (`tp`) | Without exceptions |
+| AVR (ATmega328P) | Bare metal | Software, 4-byte `double` | DWARF, 4-byte addresses | 1, 2, 4, 8 bytes (interrupts masked) | Refused | Refused |
+| MIPS32r2 (PIC32-class) | Bare metal | Software | DWARF | 4 bytes | Refused | Without exceptions |
+| MIPS64r2 | Bare metal | Software | DWARF | 4, 8 bytes | Refused | Without exceptions (little-endian untested) |
+| LoongArch64 | Bare metal | Software | DWARF | 1, 2, 4, 8 bytes | Refused | Without exceptions |
+| TriCore 1.6.1 (AURIX) | Bare metal | Software | DWARF | 4 bytes | Refused | Without exceptions |
+| Xtensa (ESP32, ESP32-S3) | Bare metal | Software | DWARF | 4 bytes | Refused | Without exceptions |
+| Renesas RX (RXv1) | Bare metal | Software, 4-byte `double` | DWARF | 1, 2, 4 bytes (interrupts masked) | Refused | Without exceptions |
+| SPARC V8 (LEON3) | Bare metal | Software; `long double` binary128 | DWARF | 4 bytes | Refused | Without exceptions |
+| ColdFire ISA_A (MCF5208-class) | Bare metal | Software | DWARF | 1, 2, 4 bytes (interrupts masked; supervisor mode) | Refused | Without exceptions |
 
-"One shared instance" means the object is placed in `.tbss` but
-addressed as an ordinary static object: there is one copy, not one per
-thread. "Refused" under C++ means a C++ unit is not compiled for that
+Local-exec TLS on ARM and RISC-V bare metal addresses a thread-local
+from the thread pointer the RTOS sets for each thread; see
+[Thread-local storage](embedded.md#thread-local-storage). "Refused" under
+`__thread` means a use of a thread-local is refused by name, where it
+used to be one object every thread shared. "Refused" under C++ means a C++ unit is not compiled for that
 target (`--syntax-only` still checks it); the diagnostic is in the
 target's Limitations. "Without exceptions" means C++ is compiled with
 `--no-exceptions`; see [C++](cxx.md#targets). With exceptions on, the
@@ -723,8 +725,10 @@ built for the triple, and scans every object it builds.
 QEMU has no Cortex-M23, so that suite runs Baseline code on the
 mps2-an505's Cortex-M33 (`tests/harness/thumb-m23`), which executes every
 Baseline instruction, with CCR.UNALIGN_TRP set so that an unaligned
-access faults as on the M23. That the code contains nothing else is the
-scan's to show.
+access faults as on the M23. Each program that passes there runs again
+on a Cortex-M23: EmbSim's `mps2-an519` (ARM's M23 image of the same
+board), whose core has exactly Baseline's instructions and faults on any
+other, and it must exit the same. The scan covers code no run reaches.
 
 The object's build attributes are clang's: `Tag_CPU_arch` 16 (v8-M
 Baseline), `Tag_THUMB_ISA_use` 3, `Tag_CPU_unaligned_access` 0.
@@ -748,6 +752,12 @@ state may call:
   `msr apsr_nzcvq, lr` (`apsr_nzcvqg` on Mainline, whose DSP extension
   has the GE bits; `apsr` on Baseline). `r4`-`r11` hold the caller's
   values again after the epilogue. This is clang's soft-float sequence.
+  With an FPU (`thumbv8m.main-none-eabihf`, `--fpu=`), it also tests
+  CONTROL.SFPA -- whether the Secure state has a floating-point context
+  active -- and if so overwrites `s0`-`s15` with `lr`, but the result's
+  (`s0` for a `float`, `d0` for a `double`), and clears FPSCR's exception
+  bits and flags; a result in an FP register occupies no core register,
+  so `r0`-`r3` are all overwritten. This is clang's hard-float sequence.
 - it is kept and not inlined, has no tail calls, and must have external
   linkage.
 
@@ -769,12 +779,18 @@ int call_ns(void *p)
 The call saves `r4`-`r11`, clears bit 0 of the target, overwrites every
 register that holds no argument with it, and the flags, branches with
 `blxns`, and restores `r4`-`r11`; on Mainline it also saves and clears
-the floating-point context with `vlstm`/`vlldm`, as clang does. A
-narrow result is extended again after the call, since the Non-secure
-callee is not trusted to have done it. `tests/golden/thumbv8m-cmse.sh`
-compares these sequences with clang's and runs a Secure and a
-Non-secure image on the mps2-an505, reading the registers on the other
-side of every crossing.
+the floating-point context with `vlstm`/`vlldm`, as clang does. With an
+FPU, floating-point arguments (the hard-float convention's, in
+`s0`-`s15`) are carried across the `vlstm` in `r11` downward and FPSCR is
+given the saved one with its flags cleared, a floating-point result is
+carried across the `vlldm` the same way, and the `vlldm` is preceded by
+clang's `it ne; vmovne.f32 s0, s0` under CONTROL.SFPA. More than eight
+FP argument or result registers are refused by name. A narrow result is
+extended again after the call, since the Non-secure callee is not
+trusted to have done it. `tests/golden/thumbv8m-cmse.sh` compares these
+sequences with clang's and runs a Secure and a Non-secure image on the
+mps2-an505 -- with and without the FPU -- reading the registers on the
+other side of every crossing.
 
 `<arm_cmse.h>` provides `cmse_address_info_t`, `cmse_TT`, `cmse_TTT`,
 `cmse_TTA`, `cmse_TTAT` and their `_fptr` forms,
@@ -789,7 +805,6 @@ and GCC do: `__attribute__((cmse_nonsecure_entry)) is ignored without
 | Construct | Diagnostic |
 |---|---|
 | `--cmse` below ARMv8-M | `--cmse is the Secure side of ARMv8-M's security extension, and thumbv7m-none-eabi is not ARMv8-M: use thumbv8m.main-none-eabi or thumbv8m.base-none-eabi` |
-| `--cmse` with an FPU | `--cmse with an FPU (--fpu=, --float-abi=softfp or hard, or an -eabihf triple) is not supported: EmbCC does not clear the floating-point registers a cmse_nonsecure_entry function must clear; build the Secure side with --float-abi=soft` |
 | an entry function with stack arguments | `cmse_nonsecure_entry function 'f' requires arguments on the stack, which is the Non-secure caller's (CMSE allows r0-r3 only)` |
 | an entry function returning through memory | `cmse_nonsecure_entry function 'f' would return its value through memory the Non-secure caller owns (CMSE allows a result in r0-r3 only)` |
 | a static entry function | `cmse_nonsecure_entry function 'f' has internal linkage: the Non-secure state enters it through a veneer the linker makes from its global symbol` |
@@ -2045,9 +2060,11 @@ GCC's own placement and costs, are accepted; the rest are refused by name.
 The code uses the core instruction set with windowed registers, MUL32
 (`mull`), DIV32 (`quos`, `quou`, `rems`, `remu`), MINMAX, SEXT, NSA, ABS,
 ADDX and L32R, and S32C1I for atomics -- what the ESP32, the ESP32-S3 and
-QEMU's de212 core share. It does not use the FPU, MUL32_HIGH, the loop
-instructions, MAC16, the boolean registers or the density option's
-16-bit instructions. The ESP32-S2 has no S32C1I, so an atomic
+QEMU's de212 core share, and the density option's 16-bit forms
+(`mov.n`, `movi.n`, `add.n`, `addi.n`, `l32i.n`, `s32i.n`, `ret.n`,
+`retw.n`) wherever one fits, as GNU as narrows GCC's code -- a fifth off
+`lib/libc` at `-Os`. It does not use the FPU, MUL32_HIGH, the loop
+instructions, MAC16 or the boolean registers. The ESP32-S2 has no S32C1I, so an atomic
 read-modify-write is not for it.
 
 ### Atomics
@@ -2522,8 +2539,9 @@ and above:
 
 `-g` turns off this backend's register allocation at `--opt=basic` and above, so
 that every variable stays in its slot; `--opt=speed -g` code can be about twice
-the size of `--opt=speed` code. There is no `.debug_frame`: gdb finds a caller by
-analyzing the prologue, and EmbDBG's backtrace stops at frame `#0`.
+the size of `--opt=speed` code. `.debug_frame` follows avr-gcc's (CFA = `SP` + the
+return address, then `Y`; the return address in column 36), so EmbDBG and gdb
+find each caller ([Debugging](debugging.md#call-frames-and-unwinding)).
 
 QEMU's arduino-uno has a gdb stub:
 
@@ -2542,7 +2560,7 @@ The stub's register layout, which EmbDBG uses: `r0`–`r31` one byte each,
 | an interrupt handler with parameters | `the AVR backend cannot lower an interrupt handler with parameters: the hardware calls it, so there is no caller to pass them and they would be read out of whatever the interrupted code left in those registers yet (function __vector_3)` |
 | an interrupt handler that returns a value | ``the AVR backend cannot lower an interrupt handler that returns a value: `reti` goes back to the interrupted instruction, and nothing is there to receive it yet (function __vector_3)`` |
 | `__int128` | `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |
-| any C++ translation unit, except with `--syntax-only`, `-E`, `-M` or `--deps-only` | `C++ is not yet supported for avr: the C++ lowering assumes a 32-bit int and 4-byte pointers (integral promotions, member pointers, RTTI), and this target's are 16 bits` |
+| a C++ unit with exceptions (`-fexceptions`) | `C++ exceptions are not supported for avr yet: EmbCC writes no AVR .eh_frame; compile with --no-exceptions` (C++ itself compiles, with exceptions off by default; see [C++](cxx.md#targets)) |
 
 Code compiled at `--opt=none` is large; an ordinary program may not fit the
 part's 32 KB of flash unless built with `--opt=basic` or above.

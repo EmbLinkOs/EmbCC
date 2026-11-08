@@ -151,6 +151,9 @@ static const struct backend_desc g_backends[] = {
         .call_insn = "call", .call_delay_slot = 0, .sym_prefix = "",
         .imm_prefixed = 0, .text_p2align = 1,
         .no_asm_text = NULL,
+        /* avr-gcc's .debug_frame numbering: SP is register 32 (SPL),
+         * the return address column 36 (src/debug/dwarf.c's AVR CIE) */
+        .frame_sp = 32, .frame_ra = 36,
         .option = avr_target_option },
 #endif
 #if FAMILY_BUILT(mips)

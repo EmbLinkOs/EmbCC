@@ -353,7 +353,7 @@ void cm_exec16(u32 h)
             return;
         }
         if ((h & 0xf500) == 0xb100) {   /* CBZ, CBNZ */
-            if (cs->model->arch == ARCH_V6M) {
+            if (cs->model->arch == ARCH_V6M && !cs->model->v8mb) {
                 cm_undef();
                 return;
             }
@@ -650,8 +650,8 @@ static void msr(u32 h1, u32 h2)
         return;
     case 20:
         cs->control = (cs->control & ~1u) | (v & 1);
-        if (cs->model->arch == ARCH_V6M)
-            cs->control &= ~1u;
+        if (cs->model->arch == ARCH_V6M && !cs->model->v8mb)
+            cs->control &= ~1u;         /* an M23 has unprivileged mode */
         if (!cs->ipsr) {
             cs->control = (cs->control & ~2u) | (v & 2);
             cm_use_psp((cs->control & 2) != 0);
@@ -694,7 +694,7 @@ static void branch_misc(u32 h1, u32 h2)
     u32 op1 = h2 >> 12 & 5;
     u32 S_ = h1 >> 10 & 1, J1 = h2 >> 13 & 1, J2 = h2 >> 11 & 1;
     if (op1 == 5 || op1 == 1) {         /* BL, B.W */
-        if (cs->model->arch == ARCH_V6M && op1 == 1) {
+        if (cs->model->arch == ARCH_V6M && op1 == 1 && !cs->model->v8mb) {
             cm_undef();
             return;
         }
@@ -748,7 +748,7 @@ static void branch_misc(u32 h1, u32 h2)
         return;
     case 0x3b:                          /* CLREX, DSB, DMB, ISB */
         if ((h2 >> 4 & 15) == 2) {
-            if (cs->model->arch == ARCH_V6M) {
+            if (cs->model->arch == ARCH_V6M && !cs->model->v8mb) {
                 cm_undef();
                 return;
             }
@@ -871,6 +871,10 @@ static void ldst_dual_excl(u32 h1, u32 h2)
             cs->excl_addr = a;
         } else {                        /* STREX: Rd is bits 11:8 */
             int ok = cs->excl_valid && cs->excl_addr == a;
+            if (rt2 == rt || rt2 == rn) {   /* UNPREDICTABLE: as QEMU */
+                cm_undef();
+                return;
+            }
             if (!cm_aligned_ok(a, 4, 1))
                 return;
             if (ok)
@@ -903,6 +907,44 @@ static void ldst_dual_excl(u32 h1, u32 h2)
             cs->excl_addr = a;
         } else {
             int ok = cs->excl_valid && cs->excl_addr == a;
+            if (rd == rt || rd == rn) {
+                cm_undef();
+                return;
+            }
+            if (!cm_aligned_ok(a, n, 1))
+                return;
+            if (ok)
+                cm_st(a, n, cs->R[rt]);
+            if (cs->fault_exc)
+                return;
+            cs->excl_valid = 0;
+            cm_set_reg(rd, ok ? 0 : 1);
+        }
+        return;
+    }
+    if (cs->model->v8mb && op2 <= 1 && op3 >= 8 && op3 != 11 && op3 != 15) {
+        /* ARMv8-M's load-acquire and store-release: LDA[B/H], STL[B/H]
+         * (op3 8-10) and their exclusive forms (12-14). One core, every
+         * access in order: the ordering is the plain access's. */
+        int n = (op3 & 3) == 0 ? 1 : (op3 & 3) == 1 ? 2 : 4;
+        u32 a = cs->R[rn];
+        if (op2 == 1) {
+            u32 v = cm_mem_ld(a, n, 1);
+            if (cs->fault_exc)
+                return;
+            cm_set_reg(rt, v);
+            if (op3 >= 12) {
+                cs->excl_valid = 1;
+                cs->excl_addr = a;
+            }
+        } else if (op3 < 12) {
+            cm_mem_st(a, n, cs->R[rt], 1);
+        } else {
+            int ok = cs->excl_valid && cs->excl_addr == a;
+            if (rd == rt || rd == rn) {
+                cm_undef();
+                return;
+            }
             if (!cm_aligned_ok(a, n, 1))
                 return;
             if (ok)
@@ -1132,6 +1174,34 @@ static void long_mul_div(u32 h1, u32 h2)
 void cm_exec32(u32 h1, u32 h2)
 {
     u32 op1 = h1 >> 11 & 3;
+    if (cs->model->arch == ARCH_V6M && cs->model->v8mb) {
+        /* ARMv8-M Baseline: ARMv6-M's, and B.W, CLREX (branch_misc),
+         * MOVW/MOVT, SDIV/UDIV, the exclusives and acquire/release --
+         * nothing else of Thumb-2 */
+        if (op1 == 2 && (h2 & 0x8000)) {
+            branch_misc(h1, h2);
+            return;
+        }
+        if (op1 == 2 && (h1 & 0xfb70) == 0xf240 && !(h2 & 0x8000)) {
+            plain_imm(h1, h2);          /* MOVW (0xf24x), MOVT (0xf2cx) */
+            return;
+        }
+        if (op1 == 3 && ((h1 & 0xfff0) == 0xfb90 || (h1 & 0xfff0) == 0xfbb0) &&
+            (h2 & 0xf0f0) == 0xf0f0) {
+            long_mul_div(h1, h2);       /* SDIV, UDIV */
+            return;
+        }
+        if (op1 == 1 && (h1 & 0xffe0) == 0xe840) {
+            ldst_dual_excl(h1, h2);     /* LDREX, STREX */
+            return;
+        }
+        if (op1 == 1 && (h1 & 0xffe0) == 0xe8c0 && (h2 >> 4 & 15) >= 4) {
+            ldst_dual_excl(h1, h2);     /* byte/half exclusives, LDA/STL */
+            return;
+        }
+        cm_undef();
+        return;
+    }
     if (cs->model->arch == ARCH_V6M) {
         /* BL, MSR, MRS, the barriers and UDF.W are all ARMv6-M has */
         if (op1 != 2 || !(h2 & 0x8000)) {

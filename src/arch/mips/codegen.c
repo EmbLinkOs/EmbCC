@@ -4460,6 +4460,23 @@ static void gen_func(struct ir_func *fn, struct code *t, struct mips_sites *st,
     /* fp is the frame base under alloca: saved like any callee-saved one */
     if (fn->has_alloca)
         F.used_callee[F.nsave++] = MIPS_FP;
+    /* s0-s7 and s8 an asm clobbers or names: the function's to save */
+    {
+        unsigned long am = ra_asm_clobbers(fn);
+        if (fn->has_alloca && (am >> MIPS_FP & 1))
+            mips_refuse(&F, NULL, "an asm that writes $fp in a function "
+                        "whose frame $fp addresses (it has a variable-length "
+                        "array or alloca)");
+        for (int r = 16; r <= 30; r++) {
+            int have = 0;
+            if (!(am >> r & 1) || (r > 23 && r < 30))
+                continue;
+            for (int k = 0; k < F.nsave; k++)
+                have |= F.used_callee[k] == r;
+            if (!have)
+                F.used_callee[F.nsave++] = r;
+        }
+    }
     F.tail = NULL;
     F.sx = g_m64 ? sext_map(&F) : NULL;
     /* an interrupt handler returns with eret: no tail call, whose callee

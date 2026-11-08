@@ -219,8 +219,13 @@ refuse "x86's \"=a\" constraint" 'asm constraint "=a" is not valid for MIPS' \
     'int f(int x){ int r; __asm__("move %0, %1" : "=a"(r) : "r"(x)); return r; }'
 refuse "a register variable on callee-saved s0" 'not supported for MIPS asm' \
     'int f(int x){ register int y __asm__("$s0") = x; int r; __asm__("move %0, %1" : "=r"(r) : "r"(y)); return r; }'
-refuse "a template that writes callee-saved s1" "register '\$s1'" \
-    'void f(void){ __asm__ volatile("move $s1, $zero"); }'
+# a template that writes callee-saved s1 ($17): the function's to save
+printf 'void f(void){ __asm__ volatile("move $s1, $zero"); }\n' > "$out/cs.c"
+"$EMBCC" --target=mipsel-none-elf -O2 -c "$out/cs.c" -o "$out/cs.o" 2> "$out/cs.err" || {
+    echo "a template writing s1 does not compile:"; cat "$out/cs.err"; exit 1; }
+llvm-objdump -d "$out/cs.o" > "$out/cs.s"
+grep -q 'sw[[:space:]]*\$17, ' "$out/cs.s" && grep -q 'lw[[:space:]]*\$17, ' "$out/cs.s" || {
+    echo "s1 is not saved around the asm:"; cat "$out/cs.s"; exit 1; }
 refuse "an addiu immediate beyond 16 bits" 'does not fit' \
     'int f(int a){ int r; __asm__("addiu %0, %1, 40000" : "=r"(r) : "r"(a)); return r; }'
 refuse "%c of a register operand" 'names a register operand' \

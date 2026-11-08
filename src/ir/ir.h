@@ -267,6 +267,17 @@ struct ir_asm {
      * and only these (regalloc.c, asm_in_reg); 0 means unknown, and the
      * asm is then treated as a call. */
     unsigned long clob;
+    /* The callee-saved registers the asm writes (its clobber list, the
+     * template's names, a pinned operand), bit r for register r, for a
+     * backend whose `clob` stays 0: the prologue saves them
+     * (ra_asm_clobbers reads both). */
+    unsigned long saves;
+    /* RISC-V: the f registers the asm changes, bit n for fn ("f"
+     * operands, f-register clobbers and names; every caller-saved one if
+     * it calls). The callee-saved fs0-fs11 among them are the prologue's
+     * to save. Apart from clob, whose bits stop at 31 on a host whose
+     * long is 32 bits. */
+    unsigned fclob;
     int scr;     /* the scratch the lowering stores outputs through, or -1 */
     /* The template calls -- or otherwise writes the link register -- so
      * the function holding it is not a leaf: PowerPC's LR must be saved

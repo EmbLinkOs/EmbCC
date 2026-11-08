@@ -184,18 +184,11 @@ void thumb_options_done(void)
     target_set_thumb_hard_abi(!strcmp(abi, "hard"));
     target_set_thumb_fpu(1);
     target_set_thumb_fpu_dp(strcmp(g_arm_fpu, "fpv5-d16") == 0);
-    /* -mcmse with the FPU in use: an entry function would have to clear
-     * s0-s15 and FPSCR when the Secure state's FP context is active
-     * (CONTROL_S.SFPA), and a call to the Non-secure state would have to
-     * hand the hard-float convention's arguments over in VFP registers.
-     * Neither is emitted, so the combination is refused rather than
-     * leaking a Secure float into the Non-secure state. */
-    if (g_arm_cmse && target_thumb_fpu())
-        diag_fatal(NULL, 0, "%s with an FPU (--fpu=, --float-abi=softfp "
-                   "or hard, or an -eabihf target) is not supported: EmbCC "
-                   "does not clear the floating-point registers a "
-                   "cmse_nonsecure_entry function must clear; build the "
-                   "Secure side with --float-abi=soft", opt_typed("-mcmse"));
+    /* -mcmse with the FPU in use: an entry function clears s0-s15 and
+     * FPSCR where the Secure state's FP context is active (CONTROL.SFPA),
+     * and a call to the Non-secure state carries the hard-float
+     * convention's FP arguments and result across the context's save
+     * (thumb/codegen.c cmse_clear_fp, cmse_call) -- clang's sequences. */
 }
 
 int thumb_target_option(const char *arg)

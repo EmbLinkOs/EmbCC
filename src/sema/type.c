@@ -1,5 +1,6 @@
 #include "type.h"
 
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -331,7 +332,9 @@ struct type *ty_enum(struct type *t)
  * struct), and a member with no float in it (hard-float ABIs return a
  * float member in a float register). tests/golden/struct-handle-abi.sh
  * mixes EmbCC's objects with clang's to prove the bits the same. */
-struct type *ty_scalar_struct_ret(struct type *t)
+/* The integer or pointer a struct of one member (and nested ones of one
+ * member) holds, filling it; NULL for any other struct. */
+static struct type *scalar_leaf(struct type *t)
 {
     struct type *leaf = NULL;
     for (int hop = 0; hop < 8 && t; hop++) {
@@ -354,6 +357,12 @@ struct type *ty_scalar_struct_ret(struct type *t)
             return NULL;
         t = only->ty;
     }
+    return leaf;
+}
+
+struct type *ty_scalar_struct_ret(struct type *t)
+{
+    struct type *leaf = scalar_leaf(t);
     if (!leaf)
         return NULL;
     int n = ty_size(leaf);
@@ -367,6 +376,37 @@ struct type *ty_scalar_struct_ret(struct type *t)
     default:
         /* x86-64 and AArch64 return the same bits, but their backends
          * lower a return from the function's C type, not ret_abi */
+        return NULL;
+    }
+}
+
+/* A struct PARAMETER (and the argument for one) that travels as the
+ * integer it holds: every one ty_scalar_struct_ret takes, and on the
+ * 32-bit ABIs that pass an 8-byte, 8-aligned aggregate exactly where they
+ * pass a long long -- a register pair, aligned to an even register the
+ * same way, split between a register and the stack the same way (RISC-V)
+ * or never (AAPCS: the pair starts even), and 8 aligned bytes of stack --
+ * a struct holding one 8-byte integer: `struct { uint64_t ticks; }`, the
+ * RTOS's time. As a struct it arrived in its slot, written by the
+ * prologue outside the IR, and every use loaded it from there; as the
+ * integer it is the register pair it came in. Not for a RESULT: AAPCS
+ * returns an 8-byte composite through memory and a long long in r0:r1.
+ * Only where the struct's size and alignment are the integer's (no
+ * aligned or packed attribute). tests/golden/struct-handle-abi.sh links
+ * EmbCC's objects with clang's both ways. */
+struct type *ty_scalar_struct_param(struct type *t)
+{
+    struct type *r = ty_scalar_struct_ret(t);
+    if (r)
+        return r;
+    struct type *leaf = scalar_leaf(t);
+    if (!leaf || ty_size(leaf) != 8 || ty_size(t) != 8 ||
+        ty_own_align(t) != 8 || ty_own_align(leaf) != 8)
+        return NULL;
+    switch (target_get()) {
+    case TARGET_THUMB: case TARGET_RISCV32: case TARGET_XTENSA:
+        return getenv("EMBCC_NO_STRUCT8_PARAM") ? NULL : leaf;
+    default:
         return NULL;
     }
 }
@@ -397,6 +437,29 @@ struct type *ty_flash(struct type *t)
     return c;
 }
 
+/* GCC's layout of an _Atomic struct: one whose size is a power of two,
+ * up to 16 bytes, is aligned to that size, so that it can be read and
+ * written in one access -- `_Atomic struct { char a, b, c, d; }` is
+ * 4-aligned, `_Atomic struct { short h[4]; }` 8-aligned -- or to the most
+ * the target aligns anything to, where that is less (4 on RX, 2 on
+ * ColdFire, 1 on AVR, as their GCCs do). Clang does otherwise; an object
+ * shared with GCC's code must be laid out as GCC's. Re-asked when the
+ * struct is completed after the qualifier. */
+static void atomic_align(struct type *a)
+{
+    if (!a->is_atomic || a->kind != TY_STRUCT || !a->complete ||
+        a->is_complex)
+        return;
+    long n = a->size;
+    int cap = target_max_scalar_align();
+    if (n < 2 || n > 16 || (n & (n - 1)))
+        return;
+    if (cap && n > cap)
+        n = cap;
+    if (n > ty_align(a))
+        a->align_ovr = (int)n;
+}
+
 /* `_Atomic T`: volatile as well (never merged or removed), and every
  * access goes through the atomic paths in irgen. */
 struct type *ty_atomic(struct type *t)
@@ -411,6 +474,7 @@ struct type *ty_atomic(struct type *t)
         note_qcopy(a);
     }
     a->is_atomic = 1;
+    atomic_align(a);
     return a;
 }
 
@@ -653,6 +717,7 @@ void ty_struct_layout(struct type *t, struct member *members, int n,
             q->canon = keep.canon;
             q->qnext = keep.qnext;
             q->qcopies = NULL;
+            atomic_align(q);
         }
         return;
     }
@@ -765,6 +830,7 @@ void ty_struct_layout(struct type *t, struct member *members, int n,
         q->canon = keep.canon;
         q->qnext = keep.qnext;
         q->qcopies = NULL;
+        atomic_align(q);
     }
 }
 
@@ -1269,7 +1335,13 @@ const char *ty_name(const struct type *t)
     } else switch (t->kind) {
     case TY_VOID: base = "void"; break;
     case TY_BOOL: base = "_Bool"; break;
-    case TY_CHAR: base = t->is_unsigned ? "unsigned char" : "char"; break;
+    /* plain char is `char` whichever its signedness (a string literal
+     * on Xtensa or ARM, where it is unsigned, was "unsigned char *");
+     * the other two are named, as GCC names them */
+    case TY_CHAR:
+        base = ty_is_plain_char(t) ? "char"
+             : t->is_unsigned ? "unsigned char" : "signed char";
+        break;
     case TY_SHORT: base = t->is_unsigned ? "unsigned short" : "short"; break;
     case TY_INT: base = t->is_unsigned ? "unsigned int" : "int"; break;
     case TY_LONG:

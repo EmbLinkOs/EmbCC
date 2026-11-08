@@ -119,6 +119,101 @@ enum { LSAI_L8UI = 0, LSAI_L16UI = 1, LSAI_L32I = 2, LSAI_S8I = 4,
        LSAI_L32AI = 11, LSAI_ADDI = 12, LSAI_ADDMI = 13, LSAI_S32C1I = 14,
        LSAI_S32RI = 15 };
 
+/* ---- the density option (emit.h) ------------------------------------------ */
+
+static int g_narrow;
+
+int xt_set_narrow(int on)
+{
+    int old = g_narrow;
+    g_narrow = on;
+    return old;
+}
+
+void xt_h16(struct code *c, unsigned h)
+{
+    code_byte(c, (int)(h & 0xff));
+    code_byte(c, (int)(h >> 8 & 0xff));
+}
+
+/* RRRN: op0 in bits 3:0, t 7:4, s 11:8, r 15:12 */
+static void rrrn(struct code *c, int op0, int r, int s, int t)
+{
+    need_reg(r); need_reg(s); need_reg(t);
+    xt_h16(c, (unsigned)r << 12 | (unsigned)s << 8 | (unsigned)t << 4 |
+              (unsigned)op0);
+}
+
+void xt_n_mov(struct code *c, int d, int s) { rrrn(c, 0xd, 0, s, d); }
+
+int xt_n_movi_ok(long long v) { return v >= -32 && v <= 95; }
+
+void xt_n_movi(struct code *c, int t, long v)
+{
+    unsigned i7 = (unsigned)v & 0x7f;
+    need_reg(t);
+    need_field(v, -32, 95, "movi.n immediate");
+    xt_h16(c, (i7 & 15) << 12 | (unsigned)t << 8 | (i7 >> 4) << 4 | 0xc);
+}
+
+void xt_n_add(struct code *c, int r, int s, int t) { rrrn(c, 0xa, r, s, t); }
+
+int xt_n_addi_ok(long long v) { return v == -1 || (v >= 1 && v <= 15); }
+
+void xt_n_addi(struct code *c, int t, int s, long v)
+{
+    if (!xt_n_addi_ok(v))
+        internal_error("xtensa: addi.n immediate %ld is not -1 or 1..15", v);
+    rrrn(c, 0xb, t, s, v == -1 ? 0 : (int)v);
+}
+
+int xt_n_mem_ok(long off, int size)
+{
+    return size == 4 && off >= 0 && off <= 60 && !(off & 3);
+}
+
+void xt_n_mem(struct code *c, int t, int base, long off, int store)
+{
+    if (!xt_n_mem_ok(off, 4))
+        internal_error("xtensa: l32i.n/s32i.n offset %ld", off);
+    rrrn(c, store ? 0x9 : 0x8, (int)(off / 4), base, t);
+}
+
+int xt_narrow_on(void) { return g_narrow; }
+
+int xt_bz_n_reaches(long off) { return off >= 0 && off <= 63; }
+
+/* RI6: op0 1100, then imm6[5:4] and 10 (beqz.n) or 11 (bnez.n) in the t
+ * field, s, imm6[3:0] */
+unsigned xt_enc_bz_n(int nez, int s, long off)
+{
+    need_reg(s);
+    if (!xt_bz_n_reaches(off))
+        internal_error("xtensa: beqz.n/bnez.n offset %ld is not 0..63", off);
+    return (unsigned)(off & 15) << 12 | (unsigned)s << 8 |
+           (unsigned)((nez ? 0xc : 0x8) | (off >> 4)) << 4 | 0xc;
+}
+
+int xt_patch_bz_n(struct code *c, int at, int target)
+{
+    unsigned h = (unsigned)c->p[at] | (unsigned)c->p[at + 1] << 8;
+    long off = (long)target - (long)(at + 4);
+    if ((h & 15) != 0xc || !(h >> 7 & 1))
+        internal_error("xtensa: the halfword at %d (0x%04x) is not a "
+                       "beqz.n/bnez.n", at, h);
+    if (!xt_bz_n_reaches(off))
+        return 0;
+    h = xt_enc_bz_n(h >> 6 & 1, (int)(h >> 8 & 15), off);
+    c->p[at] = (unsigned char)(h & 0xff);
+    c->p[at + 1] = (unsigned char)(h >> 8);
+    return 1;
+}
+
+void xt_n_ret(struct code *c, int windowed)
+{
+    xt_h16(c, windowed ? 0xf01du : 0xf00du);
+}
+
 /* An RST0/ST0 instruction: op0 = op1 = op2 = 0, distinguished by r, s, t. */
 static void st0(struct code *c, int r, int s, int t)
 {
@@ -130,6 +225,10 @@ static void st0(struct code *c, int r, int s, int t)
 void xt_mov(struct code *c, int d, int s)
 {
     need_reg(d); need_reg(s);
+    if (g_narrow) {
+        xt_n_mov(c, d, s);
+        return;
+    }
     xt_w(c, xt_enc_rrr(OP0_QRST, OP1_RST0, 2, d, s, s));
 }
 
@@ -143,6 +242,10 @@ void xt_movi(struct code *c, int t, long imm)
     unsigned long f;
     need_reg(t);
     need_field(imm, -2048, 2047, "movi immediate");
+    if (g_narrow && xt_n_movi_ok(imm)) {
+        xt_n_movi(c, t, imm);
+        return;
+    }
     f = (unsigned long)imm & 0xfff;
     xt_w(c, xt_enc_rri8(OP0_LSAI, LSAI_MOVI, (int)(f >> 8), t,
                         (unsigned)(f & 0xff)));
@@ -220,6 +323,14 @@ void xt_alu(struct code *c, int op, int r, int s, int t)
 {
     int op1, op2;
     need_reg(r); need_reg(s); need_reg(t);
+    if (g_narrow && op == XT_ADD) {
+        xt_n_add(c, r, s, t);
+        return;
+    }
+    if (g_narrow && op == XT_OR && s == t) {
+        xt_n_mov(c, r, s);
+        return;
+    }
     switch (op) {
     case XT_AND:    op1 = OP1_RST0; op2 = 1; break;
     case XT_OR:     op1 = OP1_RST0; op2 = 2; break;
@@ -271,6 +382,14 @@ void xt_addi(struct code *c, int t, int s, long imm)
 {
     need_reg(t); need_reg(s);
     need_field(imm, -128, 127, "addi immediate");
+    if (g_narrow && xt_n_addi_ok(imm)) {
+        xt_n_addi(c, t, s, imm);
+        return;
+    }
+    if (g_narrow && imm == 0) {
+        xt_n_mov(c, t, s);
+        return;
+    }
     xt_w(c, xt_enc_rri8(OP0_LSAI, LSAI_ADDI, s, t, (unsigned)imm & 0xff));
 }
 
@@ -443,6 +562,10 @@ void xt_load(struct code *c, int t, int base, long off, int size, int sign)
     f = mem_field(off, size, "load");
     if (size == 1 && sign)
         internal_error("xtensa: there is no sign-extending byte load");
+    if (g_narrow && xt_n_mem_ok(off, size)) {
+        xt_n_mem(c, t, base, off, 0);
+        return;
+    }
     r = size == 1 ? LSAI_L8UI : size == 2 ? (sign ? LSAI_L16SI : LSAI_L16UI)
                                           : LSAI_L32I;
     xt_w(c, xt_enc_rri8(OP0_LSAI, r, base, t, f));
@@ -453,6 +576,10 @@ void xt_store(struct code *c, int t, int base, long off, int size)
     unsigned f;
     need_reg(t); need_reg(base);
     f = mem_field(off, size, "store");
+    if (g_narrow && xt_n_mem_ok(off, size)) {
+        xt_n_mem(c, t, base, off, 1);
+        return;
+    }
     xt_w(c, xt_enc_rri8(OP0_LSAI, size == 1 ? LSAI_S8I
                                   : size == 2 ? LSAI_S16I : LSAI_S32I,
                         base, t, f));
@@ -675,8 +802,14 @@ void xt_jx(struct code *c, int s)
     st0(c, 0, s, 10);                       /* m = 2, n = 2 */
 }
 
-void xt_ret(struct code *c) { st0(c, 0, 0, 8); }
-void xt_retw(struct code *c) { st0(c, 0, 0, 9); }
+void xt_ret(struct code *c)
+{
+    if (g_narrow) xt_n_ret(c, 0); else st0(c, 0, 0, 8);
+}
+void xt_retw(struct code *c)
+{
+    if (g_narrow) xt_n_ret(c, 1); else st0(c, 0, 0, 9);
+}
 
 void xt_entry(struct code *c, int s, long frame)
 {

@@ -95,6 +95,36 @@ fi
 grep -q "not declared" "$out/bad.log" || { echo "no diagnostic:"; cat "$out/bad.log"; exit 1; }
 echo "-fsyntax-only: no object, and errors still reported"
 
+# 5b. Assembly: a .S is preprocessed, so its rule names what it included
+#     -- -MD -MT -MF as CMake's rule passes them, -MMD -MP, and -M, which
+#     prints the rule and neither assembles nor links; a .s has no
+#     preprocessor and its rule names it alone. All four once wrote
+#     nothing (or, for -M, tried to link), and a header a vectors.S
+#     included never rebuilt it.
+printf '#include "a.h"\n.text\n.global g\ng: .word A + B\n' > "$out/v.S"
+printf '.text\nnop\n' > "$out/p.s"
+rm -f "$out/v.o" "$out/v.dep"
+"$EMBCC" --target="$TARGET" -MD -MT v.o -MF "$out/v.dep" -I "$out/inc" \
+    -c "$out/v.S" -o "$out/v.o"
+[ -f "$out/v.o" ] || { echo ".S -MD did not assemble"; exit 1; }
+for h in a.h b.h; do
+    grep -q "$h" "$out/v.dep" 2>/dev/null || {
+        echo ".S -MD: no $h in the rule:"; cat "$out/v.dep" 2>&1; exit 1; }
+done
+grep -q "^v.o:" "$out/v.dep" || { echo ".S: -MT did not set the target"; exit 1; }
+"$EMBCC" --target="$TARGET" -MMD -MP -I "$out/inc" -c "$out/v.S" -o "$out/w.o"
+grep -q "^$out/inc/a.h:$" "$out/w.d" 2>/dev/null || {
+    echo ".S -MMD -MP: no bare rule beside the object"; cat "$out/w.d" 2>&1; exit 1; }
+"$EMBCC" --target="$TARGET" -M -I "$out/inc" "$out/v.S" > "$out/vm.d" 2> "$out/vm.err" || {
+    echo ".S -M failed:"; cat "$out/vm.err"; exit 1; }
+tr -d '\\\n' < "$out/vm.d" | grep -q "^v.o: .*v.S .*a.h" || {
+    echo ".S -M:"; cat "$out/vm.d"; exit 1; }
+rm -f "$out/p.d"
+"$EMBCC" --target="$TARGET" -MD -c "$out/p.s" -o "$out/p.o"
+grep -q "^$out/p.o: $out/p.s\$" "$out/p.d" 2>/dev/null || {
+    echo ".s -MD:"; cat "$out/p.d" 2>&1; exit 1; }
+echo "assembly: .S rules name its headers (-MD, -MMD -MP, -M); a .s names itself"
+
 # 6. -dumpmachine names the target that --target chose; --help lists what
 #    the driver takes.
 [ "$("$EMBCC" --target="$TARGET" -dumpmachine)" = "$TARGET" ] || {

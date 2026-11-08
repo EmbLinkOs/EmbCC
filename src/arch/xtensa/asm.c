@@ -2,6 +2,7 @@
  * parser: every range is checked HERE, before the encoder is called, so a
  * template's mistake is a diagnostic and not an internal error. */
 #include "asm.h"
+#include "../code.h"
 
 #include "emit.h"
 #include "../asmexpr.h"
@@ -65,11 +66,7 @@ int xtasm_call_operand(const char *stmt, const char **x, int *xlen)
 void xtasm_set_level(int level) { g_level = level; g_took = 0; }
 int xtasm_took_level(void) { return g_took; }
 
-static void xt_h(struct code *c, unsigned h)
-{
-    code_byte(c, (int)(h & 0xff));
-    code_byte(c, (int)(h >> 8 & 0xff));
-}
+static void xt_h(struct code *c, unsigned h) { xt_h16(c, h); }
 
 /* ---- registers ------------------------------------------------------------ */
 
@@ -526,7 +523,10 @@ static int stmt_body(const char *stmt, int len, struct code *out, long pc,
 
     /* ---- no operands: ret, retw, nop narrow ---- */
     if (narrow && n == 1 && (IS("ret") || IS("retw") || IS("nop"))) {
-        xt_h(out, IS("ret") ? 0xf00du : IS("retw") ? 0xf01du : 0xf03du);
+        if (IS("nop"))
+            xt_h(out, 0xf03du);
+        else
+            xt_n_ret(out, IS("retw"));
         return 0;
     }
     if (want_n && IS("ill") && n == 1) { xt_h(out, 0xf06du); return 0; }
@@ -559,11 +559,11 @@ static int stmt_body(const char *stmt, int len, struct code *out, long pc,
         if (need_regs(t, 1, 3, r, mn, err, errlen))
             return -1;
         if (narrow && IS("add")) {
-            xt_h(out, (unsigned)r[0] << 12 | (unsigned)r[1] << 8 | (unsigned)r[2] << 4 | 0xa);
+            xt_n_add(out, r[0], r[1], r[2]);
             return 0;
         }
         if (narrow && !want_n && IS("or") && r[1] == r[2]) {   /* mov */
-            xt_h(out, (unsigned)r[1] << 8 | (unsigned)r[0] << 4 | 0xd);
+            xt_n_mov(out, r[0], r[1]);
             return 0;
         }
         xt_alu(out, e->op, r[0], r[1], r[2]);
@@ -578,7 +578,7 @@ static int stmt_body(const char *stmt, int len, struct code *out, long pc,
         if (need_regs(t, 1, 2, r, mn, err, errlen))
             return -1;
         if (IS("mov") && narrow) {
-            xt_h(out, (unsigned)r[1] << 8 | (unsigned)r[0] << 4 | 0xd);
+            xt_n_mov(out, r[0], r[1]);
             return 0;
         }
         if (IS("mov")) xt_mov(out, r[0], r[1]);
@@ -617,9 +617,8 @@ static int stmt_body(const char *stmt, int len, struct code *out, long pc,
         /* 0xfffff800 is -2048 as a 32-bit word */
         if (v >= 0xfffff800LL && v <= 0xffffffffLL)
             v -= 0x100000000LL;
-        if (narrow && v >= -32 && v <= 95) {
-            unsigned i7 = (unsigned)v & 0x7f;
-            xt_h(out, (i7 & 15) << 12 | (unsigned)r[0] << 8 | (i7 >> 4) << 4 | 0xc);
+        if (narrow && xt_n_movi_ok(v)) {
+            xt_n_movi(out, r[0], (long)v);
             return 0;
         }
         if (want_n)
@@ -636,13 +635,12 @@ static int stmt_body(const char *stmt, int len, struct code *out, long pc,
             FAIL("%s takes two registers and a constant", mn);
         if (need_imm(&t[3], &v, mn, err, errlen))
             return -1;
-        if (IS("addi") && narrow && (v == -1 || (v >= 1 && v <= 15))) {
-            xt_h(out, (unsigned)r[0] << 12 | (unsigned)r[1] << 8 |
-                      (unsigned)(v == -1 ? 0 : v) << 4 | 0xb);
+        if (IS("addi") && narrow && xt_n_addi_ok(v)) {
+            xt_n_addi(out, r[0], r[1], (long)v);
             return 0;
         }
         if (IS("addi") && narrow && !want_n && v == 0) {      /* mov.n */
-            xt_h(out, (unsigned)r[1] << 8 | (unsigned)r[0] << 4 | 0xd);
+            xt_n_mov(out, r[0], r[1]);
             return 0;
         }
         if (want_n)
@@ -721,9 +719,8 @@ static int stmt_body(const char *stmt, int len, struct code *out, long pc,
             FAIL("%s takes a register, a base register and an offset", mn);
         if (need_imm(&t[3], &v, mn, err, errlen))
             return -1;
-        if (narrow && e->size == 4 && v >= 0 && v <= 60 && !(v & 3)) {
-            xt_h(out, (unsigned)(v / 4) << 12 | (unsigned)r[1] << 8 |
-                      (unsigned)r[0] << 4 | (e->store ? 0x9u : 0x8u));
+        if (narrow && xt_n_mem_ok((long)v, e->size)) {
+            xt_n_mem(out, r[0], r[1], (long)v, e->store);
             return 0;
         }
         if (want_n)
@@ -819,8 +816,7 @@ static int stmt_body(const char *stmt, int len, struct code *out, long pc,
                 long o6 = (long)rel - 4;
                 if (o6 < 0 || o6 > 63)
                     o6 = 0;          /* pass one: the size is all it needs */
-                xt_h(out, (unsigned)(o6 & 15) << 12 | (unsigned)r[0] << 8 |
-                          (unsigned)((k ? 0xc : 0x8) | (o6 >> 4)) << 4 | 0xc);
+                xt_h(out, xt_enc_bz_n(k, r[0], o6));
                 return 0;
             }
         }
@@ -1282,11 +1278,21 @@ static int stmt_body(const char *stmt, int len, struct code *out, long pc,
  * Its statements, with GCC's numeric labels resolved: `1:` defines the
  * next instance of label 1, `1b` is the latest one before and `1f` the
  * next one after. Every instruction is three bytes, so a label's place is
- * three bytes per instruction before it. */
+ * three bytes per instruction before it -- and a directive's own bytes:
+ * `.ascii`, `.asciz`/`.string` and the alignments (code_asm_directive),
+ * which an RTOS's layout probe writes in a function (`.ascii "->EMB_PROBE
+ * x %c0 %c1"` and `.p2align 2`); an alignment's padding is decided where
+ * the bytes land (code_put_asm). A template with labels is GNU-assembled
+ * whole (GAS_INLINE), so no branch here crosses one. */
 
 #define MAXSTMT 512
 
-struct stm { const char *s; int len; int lab[4]; int nlab; int off; };
+struct stm { const char *s; int len; int lab[4]; int nlab; int off;
+             int dir, size, align; };
+
+/* `.word`, `.short`, `.byte` as on any 32-bit target, and `.align N` in
+ * BYTES, as GNU as reads it for Xtensa */
+static const struct asm_dirs xt_dirs = { asm_data_w32, 1, 0 };
 
 /* The statements of `text`, comments stripped, labels split off. */
 static int stmts(const char *text, struct stm *st, int max, char *err,
@@ -1297,15 +1303,9 @@ static int stmts(const char *text, struct stm *st, int max, char *err,
     while (*p) {
         const char *start = p;
         int len;
-        while (*p && *p != ';' && *p != '\n')
-            p++;
-        len = (int)(p - start);
-        for (int i = 0; i < len; i++)
-            if (start[i] == '#' || (start[i] == '/' && i + 1 < len &&
-                                    start[i + 1] == '/')) {
-                len = i;
-                break;
-            }
+        /* (a `;` or `#` inside a .ascii string ends nothing) */
+        p += asm_stmt_len(p, ";");
+        len = asm_cut_comment(start, (int)(p - start), "#", 1);
         if (*p)
             p++;
         if (ns == max)
@@ -1337,14 +1337,37 @@ static int stmts(const char *text, struct stm *st, int max, char *err,
         st[ns].s = start;
         st[ns].len = len;
         st[ns].off = off;
+        st[ns].dir = st[ns].size = st[ns].align = 0;
         {
-            int any = 0;
-            for (int i = 0; i < len; i++)
-                any |= !isspace((unsigned char)start[i]);
-            if (any)
+            int any = 0, i = 0;
+            for (int q = 0; q < len; q++)
+                any |= !isspace((unsigned char)start[q]);
+            while (i < len && isspace((unsigned char)start[i]))
+                i++;
+            if (any && start[i] == '.') {     /* a directive: its bytes */
+                struct code tmp = { 0 };
+                int r = code_asm_directive(start, len, &tmp, &xt_dirs, err,
+                                           errlen);
+                if (r < 0)
+                    return -1;
+                if (r == 0)
+                    FAIL("directive \"%.*s\" is not one Xtensa inline asm "
+                         "takes (.ascii, .asciz, .string, .byte, .short, "
+                         ".word, .p2align, .balign, .align)", len - i,
+                         start + i);
+                st[ns].dir = 1;
+                st[ns].size = tmp.len;
+                st[ns].align = tmp.narange > 0;
+                off += tmp.len;
+                free(tmp.p);
+                free(tmp.drange);
+                free(tmp.arange);
+                free(tmp.rel);
+            } else if (any) {
                 off += 3;
-            else
+            } else {
                 st[ns].len = 0;
+            }
         }
         ns++;
     }
@@ -1403,7 +1426,19 @@ static int resolve_labels(const struct stm *st, int ns, int k, char *buf,
     return o;
 }
 
+static int assemble(const char *text, struct code *out, char *err, int errlen);
+
+/* The code generator's narrowing (xt_set_narrow) is off here: an asm
+ * statement is assembled as asm.c's own rules say -- a template's three
+ * bytes each, a file's as GNU as narrows. */
 int xtasm_assemble(const char *text, struct code *out, char *err, int errlen)
+{
+    int was = xt_set_narrow(0), rc = assemble(text, out, err, errlen);
+    xt_set_narrow(was);
+    return rc;
+}
+
+static int assemble(const char *text, struct code *out, char *err, int errlen)
 {
     static struct stm st[MAXSTMT];
     long pc = g_pc;
@@ -1421,6 +1456,14 @@ int xtasm_assemble(const char *text, struct code *out, char *err, int errlen)
         if (len < 0)
             return -1;
         int before = out->len;
+        if (st[k].dir && pc < 0) {           /* a template's directive */
+            if (code_asm_directive(buf, len, out, &xt_dirs, err, errlen) < 0)
+                return -1;
+            if (out->len - before != st[k].size)
+                FAIL("internal: a directive of %d bytes, sized %d",
+                     out->len - before, st[k].size);
+            continue;
+        }
         rc = stmt_body(buf, len, out, pc < 0 ? -1 : pc + st[k].off, err,
                        errlen);
         if (pc >= 0)
