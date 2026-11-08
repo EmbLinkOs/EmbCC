@@ -721,6 +721,10 @@ void opt_run(struct ir_unit *iu, int level)
         /* the cold blocks to the end, once nothing else will move code */
         if (level >= 1 && !cold)
             pass_coldsink(&iu->funcs[f]);
+        /* ...and each chain of blocks after the jump to it (pass_layout):
+         * last but the backends' own, so no pass after puts a jump back */
+        if (level >= 1)
+            pass_layout(&iu->funcs[f]);
         if (cold) {
             g_opt_size = s_size;
             g_pass[P_VEC].on = s_vec;
