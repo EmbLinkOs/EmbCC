@@ -162,11 +162,12 @@ clang: the assembler puts a `nop` in each delay slot unless the code says
 ### Thread-local storage
 
 `__thread` and `_Thread_local` use the local-exec model on x86-64 and
-AArch64 ELF (`R_X86_64_TPOFF32`, `R_AARCH64_TLSLE_*`). On the
-embedded targets a thread-local object is placed in `.tbss` or `.tdata`
-but addressed with ordinary absolute or PC-relative relocations, so
-there is one instance, not one per thread. On Darwin and Windows it is
-refused (see [ABI limitations](#abi-limitations)).
+AArch64 ELF (`R_X86_64_TPOFF32`, `R_AARCH64_TLSLE_*`), and on ARM and
+RISC-V bare metal (`__aeabi_read_tp()` plus `R_ARM_TLS_LE32`; `tp` plus
+`R_RISCV_TPREL_*`), the thread pointer the RTOS's to set; embld gives the
+template's bounds under picolibc's names. On the other embedded targets
+a use is refused by name (it was one instance every thread shared).
+Darwin and Windows: see [ABI limitations](#abi-limitations).
 
 ### Target-specific refusals
 

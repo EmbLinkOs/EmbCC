@@ -44,25 +44,27 @@ little-endian but the big-endian MIPS ones, `mips-none-elf` and
 | x86-64 Windows | Objects only | SSE2 | Refused | 1, 2, 4, 8, 16 bytes | Refused | Refused |
 | AArch64 ELF, EmbLinkOS, Linux | Supported | FP/SIMD; `long double` in software | DWARF | 1, 2, 4, 8, 16 bytes | Local-exec TLS | Yes, with exceptions |
 | Apple arm64 | Objects for the system linker | FP/SIMD | Refused | 1, 2, 4, 8, 16 bytes | Refused | Yes, with exceptions |
-| Cortex-M, soft float | Bare metal | Software | DWARF | 1, 2, 4 bytes | One shared instance | Without exceptions |
-| Cortex-M, FPU | Bare metal | Single-precision VFP; `double` in software | DWARF | 1, 2, 4 bytes | One shared instance | Without exceptions |
-| ARMv7-A (A32), soft float | Bare metal | Software | DWARF | 1, 2, 4 bytes | One shared instance | Without exceptions |
-| ARMv7-A (A32), VFP | Bare metal | VFPv3/VFPv4, single and double | DWARF | 1, 2, 4 bytes | One shared instance | Without exceptions |
-| RV32 | Bare metal | Software | DWARF | 1, 2, 4 bytes | One shared instance | Without exceptions |
-| RV64 | Bare metal | Software | DWARF | 1, 2, 4, 8 bytes | One shared instance | Without exceptions |
-| AVR (ATmega328P) | Bare metal | Software, 4-byte `double` | DWARF, 4-byte addresses | 1, 2, 4, 8 bytes (interrupts masked) | One shared instance | Refused |
-| MIPS32r2 (PIC32-class) | Bare metal | Software | DWARF | 4 bytes | One shared instance | Without exceptions |
-| MIPS64r2 | Bare metal | Software | DWARF | 4, 8 bytes | One shared instance | Without exceptions (little-endian untested) |
-| LoongArch64 | Bare metal | Software | DWARF | 1, 2, 4, 8 bytes | One shared instance | Without exceptions |
-| TriCore 1.6.1 (AURIX) | Bare metal | Software | DWARF | 4 bytes | One shared instance | Without exceptions |
-| Xtensa (ESP32, ESP32-S3) | Bare metal | Software | DWARF | 4 bytes | One shared instance | Without exceptions |
-| Renesas RX (RXv1) | Bare metal | Software, 4-byte `double` | DWARF | 1, 2, 4 bytes (interrupts masked) | One shared instance | Without exceptions |
-| SPARC V8 (LEON3) | Bare metal | Software; `long double` binary128 | DWARF | 4 bytes | One shared instance | Without exceptions |
-| ColdFire ISA_A (MCF5208-class) | Bare metal | Software | DWARF | 1, 2, 4 bytes (interrupts masked; supervisor mode) | One shared instance | Without exceptions |
+| Cortex-M, soft float | Bare metal | Software | DWARF | 1, 2, 4 bytes | Local-exec TLS (`__aeabi_read_tp`) | Without exceptions |
+| Cortex-M, FPU | Bare metal | Single-precision VFP; `double` in software | DWARF | 1, 2, 4 bytes | Local-exec TLS (`__aeabi_read_tp`) | Without exceptions |
+| ARMv7-A (A32), soft float | Bare metal | Software | DWARF | 1, 2, 4 bytes | Local-exec TLS (`__aeabi_read_tp`) | Without exceptions |
+| ARMv7-A (A32), VFP | Bare metal | VFPv3/VFPv4, single and double | DWARF | 1, 2, 4 bytes | Local-exec TLS (`__aeabi_read_tp`) | Without exceptions |
+| RV32 | Bare metal | Software | DWARF | 1, 2, 4 bytes | Local-exec TLS (`tp`) | Without exceptions |
+| RV64 | Bare metal | Software | DWARF | 1, 2, 4, 8 bytes | Local-exec TLS (`tp`) | Without exceptions |
+| AVR (ATmega328P) | Bare metal | Software, 4-byte `double` | DWARF, 4-byte addresses | 1, 2, 4, 8 bytes (interrupts masked) | Refused | Refused |
+| MIPS32r2 (PIC32-class) | Bare metal | Software | DWARF | 4 bytes | Refused | Without exceptions |
+| MIPS64r2 | Bare metal | Software | DWARF | 4, 8 bytes | Refused | Without exceptions (little-endian untested) |
+| LoongArch64 | Bare metal | Software | DWARF | 1, 2, 4, 8 bytes | Refused | Without exceptions |
+| TriCore 1.6.1 (AURIX) | Bare metal | Software | DWARF | 4 bytes | Refused | Without exceptions |
+| Xtensa (ESP32, ESP32-S3) | Bare metal | Software | DWARF | 4 bytes | Refused | Without exceptions |
+| Renesas RX (RXv1) | Bare metal | Software, 4-byte `double` | DWARF | 1, 2, 4 bytes (interrupts masked) | Refused | Without exceptions |
+| SPARC V8 (LEON3) | Bare metal | Software; `long double` binary128 | DWARF | 4 bytes | Refused | Without exceptions |
+| ColdFire ISA_A (MCF5208-class) | Bare metal | Software | DWARF | 1, 2, 4 bytes (interrupts masked; supervisor mode) | Refused | Without exceptions |
 
-"One shared instance" means the object is placed in `.tbss` but
-addressed as an ordinary static object: there is one copy, not one per
-thread. "Refused" under C++ means a C++ unit is not compiled for that
+Local-exec TLS on ARM and RISC-V bare metal addresses a thread-local
+from the thread pointer the RTOS sets for each thread; see
+[Thread-local storage](embedded.md#thread-local-storage). "Refused" under
+`__thread` means a use of a thread-local is refused by name, where it
+used to be one object every thread shared. "Refused" under C++ means a C++ unit is not compiled for that
 target (`--syntax-only` still checks it); the diagnostic is in the
 target's Limitations. "Without exceptions" means C++ is compiled with
 `--no-exceptions`; see [C++](cxx.md#targets). With exceptions on, the

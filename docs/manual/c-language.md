@@ -225,7 +225,7 @@ define `__GNUC__` when compiling C.
 | `_Generic` | Supported | See [Generic selection](#generic-selection). With no matching association and no `default`: `no _Generic association matches type double`. |
 | `_Atomic` qualifier and `_Atomic(T)` specifier | Partial | Integer and pointer types only; sizes depend on the target. See [Atomic types](#atomic-types). |
 | `<stdatomic.h>` | Supported | See [Atomic types](#atomic-types). |
-| `_Thread_local` | Partial | Per-thread storage on the x86-64 and AArch64 ELF, EmbLinkOS, Linux, macOS and Windows (emulated TLS, as MinGW's) targets; one shared instance on Cortex-M, RISC-V, MIPS32 and AVR. See [Target-dependent features](#target-dependent-features). At block scope without `static` or `extern`: `a block-scope __thread object must also be static: an automatic one is already private to the call`. |
+| `_Thread_local` | Partial | Per-thread storage on the x86-64 and AArch64 ELF, EmbLinkOS, Linux, macOS and Windows (emulated TLS, as MinGW's) targets, and on ARM and RISC-V bare metal (local-exec, the thread pointer the RTOS's: see [Embedded](embedded.md#thread-local-storage)); refused on the other embedded targets. See [Target-dependent features](#target-dependent-features). At block scope without `static` or `extern`: `a block-scope __thread object must also be static: an automatic one is already private to the call`. |
 | Anonymous structures and unions | Supported | |
 | `char16_t`, `char32_t`, `u"..."`, `U"..."`, `u'x'`, `U'x'`, `u8"..."` | Supported | `<uchar.h>` is provided by the C library. |
 | `max_align_t` | Supported | Aligned as `long double` or `long long`, whichever is stricter: 16 bytes on x86-64, AArch64 and RISC-V, 8 on Cortex-M and MIPS32, 1 on AVR. |
@@ -322,10 +322,10 @@ Linux triples, and "Cortex-M" covers every `thumb*` triple.
 | `__int128` | Yes | Yes | Not in a function signature | Yes | Yes | No | No | Declarations and `sizeof` only | No |
 | `_Float128` | No | No | No | Yes | No | No | Declarations and `sizeof` only | Declarations and `sizeof` only | No |
 | `_Atomic` operators | 1 to 8 bytes | 1 to 8 bytes | 1 to 8 bytes | 1 to 8 bytes | 1 to 8 bytes | 1 to 8 bytes; 8 by a `lib/rt` call | 1 to 8 bytes; 8 by a `lib/rt` call | 1 to 8 bytes | 1 to 8 bytes, with interrupts masked |
-| `_Thread_local` | Per thread | Per thread | Per thread (emutls) | Per thread | Per thread | One shared instance | One shared instance | One shared instance | One shared instance |
+| `_Thread_local` | Per thread | Per thread | Per thread (emutls) | Per thread | Per thread | Per thread (`__aeabi_read_tp`) | Per thread (`tp`) | Per thread (`tp`) | Refused |
 
-"One shared instance" means the object is placed in `.tbss` but addressed
-as an ordinary static object; see [Targets](targets.md#summary).
+On ARM and RISC-V bare metal the thread pointer is the RTOS's to set; see
+[Thread-local storage](embedded.md#thread-local-storage).
 
 The errors for the "No" entries:
 

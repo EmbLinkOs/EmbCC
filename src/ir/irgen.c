@@ -671,9 +671,49 @@ static void emit_stvar(struct ir_func *fn, int v, int val,
 
 static int tlv_call(struct ir_func *fn, int desc);
 static int emutls_call(struct ir_func *fn, int ctrl);
+static int libatomic_call(struct ir_func *fn, const char *name,
+                          struct type *ret, int n, const int *vals,
+                          struct type *const *tys, int line);
+
+/* Can this target address a thread-local? x86-64 and AArch64 everywhere,
+ * ARM (__aeabi_read_tp) and RISC-V (tp) local-exec -- the rest have no
+ * thread pointer EmbCC uses yet, and a _Thread_local there would be one
+ * shared object, silently. */
+static int tls_supported(void)
+{
+    switch (target_get()) {
+    case TARGET_X86_64: case TARGET_AARCH64: case TARGET_THUMB:
+    case TARGET_RISCV32: case TARGET_RISCV64:
+        return 1;
+    default:
+        return 0;
+    }
+}
 
 static int emit_gaddr(struct ir_func *fn, struct global *g)
 {
+    if (g->is_tls && !tls_supported())
+        diag_fatal(fn->file, g_cur_line, "'%s' is thread-local, which %s "
+                   "has no thread pointer for: EmbCC would make it one "
+                   "object every thread shares (_Thread_local is "
+                   "supported on ARM, RISC-V, AArch64 and x86-64)",
+                   g->name, target_triple_now());
+    /* ARM, local-exec as GCC makes it: the thread pointer, which the RTOS
+     * gives through __aeabi_read_tp() (the run-time ABI's: it changes r0
+     * alone), plus the variable's offset from it (the backend's literal
+     * word with R_ARM_TLS_LE32). The call first, so the offset is not
+     * live across it. */
+    if (g->is_tls && target_get() == TARGET_THUMB) {
+        struct type *vp = ty_ptr(ty_base(TY_VOID, 0));
+        int tp = libatomic_call(fn, "__aeabi_read_tp", vp, 0, NULL, NULL,
+                                g_cur_line);
+        struct ir_ins *o = emit(fn);
+        o->op = IR_GADDR;
+        o->glob = g;
+        o->glob_sym = ir_sym_global(cur_unit, g);
+        o->dst = new_temp(fn);
+        return emit_bin(fn, IR_ADD, tp, o->dst, AW, 0);
+    }
     struct ir_ins *i = emit(fn);
     i->op = IR_GADDR;
     i->glob = g;

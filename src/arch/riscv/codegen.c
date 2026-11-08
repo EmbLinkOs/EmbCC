@@ -5680,6 +5680,18 @@ static void gen_ins(struct rv_fn *F, int n)
         }
         return;
     case IR_GADDR:
+        if (i->glob->is_tls) {
+            /* A thread-local, local-exec as GCC makes it: its offset in
+             * the thread block from tp, which the RTOS points at each
+             * thread's copy. Three 32-bit forms, each relocated. */
+            int d = wreg(F, i->dst, ACC);
+            int at = rv_tprel_triple(t, d);
+            note_glob(F->st, at, i->glob, RK_RISCV_TPREL_HI20);
+            note_glob(F->st, at + 4, i->glob, RK_RISCV_TPREL_ADD);
+            note_glob(F->st, at + 8, i->glob, RK_RISCV_TPREL_LO12_I);
+            wrote(F, i->dst, d);
+            return;
+        }
         {
         int d = wreg(F, i->dst, ACC);     /* straight into its home */
         int got = cg_global_via_got(i->glob);

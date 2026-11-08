@@ -635,6 +635,7 @@ static const char *reloc_name(int kind)
             case RK_CALL:        return "R_ARM_CALL";
             case RK_TAIL:        return "R_ARM_JUMP24";
             case RK_THM_MOVW:    return "R_ARM_MOVW_ABS_NC";
+            case RK_ARM_TLS_LE32: return "R_ARM_TLS_LE32";
             case RK_THM_MOVT:    return "R_ARM_MOVT_ABS";
             case RK_ABS32:       return "R_ARM_ABS32";
             case RK_DATA_PREL32: return "R_ARM_REL32";
@@ -644,6 +645,7 @@ static const char *reloc_name(int kind)
         case RK_CALL:        return "R_ARM_THM_CALL";
         case RK_TAIL:        return "R_ARM_THM_JUMP24";
         case RK_THM_MOVW:    return "R_ARM_THM_MOVW_ABS_NC";
+        case RK_ARM_TLS_LE32: return "R_ARM_TLS_LE32";
         case RK_THM_MOVT:    return "R_ARM_THM_MOVT_ABS";
         case RK_ABS32:       return "R_ARM_ABS32";
         case RK_DATA_PREL32: return "R_ARM_REL32";
@@ -658,6 +660,9 @@ static const char *reloc_name(int kind)
         case RK_ABS32:            return "R_RISCV_32";
         case RK_DATA_PREL32:      return "R_RISCV_32_PCREL";
         case RK_RISCV_PCREL_LO12_I: return "R_RISCV_PCREL_LO12_I";
+        case RK_RISCV_TPREL_HI20:   return "R_RISCV_TPREL_HI20";
+        case RK_RISCV_TPREL_ADD:    return "R_RISCV_TPREL_ADD";
+        case RK_RISCV_TPREL_LO12_I: return "R_RISCV_TPREL_LO12_I";
         default:                  return NULL;
         }
     case TARGET_LOONGARCH64:

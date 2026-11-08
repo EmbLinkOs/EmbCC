@@ -1387,6 +1387,7 @@ int target_reloc_type(enum target_arch a, enum reloc_kind k)
         case RK_DATA_PREL32: return R_ARM_REL32;
         case RK_THM_MOVW:    return g_arm_a32 ? R_ARM_MOVW_ABS_NC
                                               : R_ARM_THM_MOVW_ABS_NC;
+        case RK_ARM_TLS_LE32: return R_ARM_TLS_LE32;
         case RK_THM_MOVT:    return g_arm_a32 ? R_ARM_MOVT_ABS
                                               : R_ARM_THM_MOVT_ABS;
         /* No ABS64: a 32-bit target has no 64-bit address to relocate,
@@ -1404,6 +1405,9 @@ int target_reloc_type(enum target_arch a, enum reloc_kind k)
         case RK_CALL:        return R_RISCV_CALL_PLT;
         case RK_RISCV_PCREL_HI20:   return R_RISCV_PCREL_HI20;
         case RK_RISCV_GOT_HI20:     return R_RISCV_GOT_HI20;
+        case RK_RISCV_TPREL_HI20:   return R_RISCV_TPREL_HI20;
+        case RK_RISCV_TPREL_ADD:    return R_RISCV_TPREL_ADD;
+        case RK_RISCV_TPREL_LO12_I: return R_RISCV_TPREL_LO12_I;
         case RK_RISCV_PCREL_LO12_I: return R_RISCV_PCREL_LO12_I;
         case RK_ABS32:       return R_RISCV_32;
         case RK_DATA_PREL32: return R_RISCV_32_PCREL;   /* .eh_frame's */
@@ -1710,6 +1714,7 @@ static const struct reloc_spelling {
     { EM_ARM,   R_ARM_TARGET1,         "R_ARM_TARGET1" },
     { EM_ARM,   R_ARM_PREL31,          "R_ARM_PREL31" },
     { EM_ARM,   R_ARM_THM_MOVW_ABS_NC, "R_ARM_THM_MOVW_ABS_NC" },
+    { EM_ARM,   R_ARM_TLS_LE32,        "R_ARM_TLS_LE32" },
     { EM_ARM,   R_ARM_THM_MOVT_ABS,    "R_ARM_THM_MOVT_ABS" },
     { EM_ARM,   R_ARM_CALL,            "R_ARM_CALL" },
     { EM_ARM,   R_ARM_JUMP24,          "R_ARM_JUMP24" },
@@ -1754,6 +1759,9 @@ static const struct reloc_spelling {
     { EM_RISCV, R_RISCV_CALL,          "R_RISCV_CALL" },
     { EM_RISCV, R_RISCV_CALL_PLT,      "R_RISCV_CALL_PLT" },
     { EM_RISCV, R_RISCV_PCREL_HI20,    "R_RISCV_PCREL_HI20" },
+    { EM_RISCV, R_RISCV_TPREL_HI20,    "R_RISCV_TPREL_HI20" },
+    { EM_RISCV, R_RISCV_TPREL_ADD,     "R_RISCV_TPREL_ADD" },
+    { EM_RISCV, R_RISCV_TPREL_LO12_I,  "R_RISCV_TPREL_LO12_I" },
     { EM_RISCV, R_RISCV_PCREL_LO12_I,  "R_RISCV_PCREL_LO12_I" },
     { EM_RISCV, R_RISCV_PCREL_LO12_S,  "R_RISCV_PCREL_LO12_S" },
     { EM_RISCV, R_RISCV_HI20,          "R_RISCV_HI20" },

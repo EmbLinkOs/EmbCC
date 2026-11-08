@@ -810,6 +810,10 @@ enum reloc_kind {
      * legitimately drops the bits the high half carries, so a checked
      * form would reject every address above 65535. */
     RK_THM_MOVW,
+    /* ARM: a thread-local's offset from the thread pointer, local-exec --
+     * a literal word (R_ARM_TLS_LE32) the code adds __aeabi_read_tp()'s
+     * result to */
+    RK_ARM_TLS_LE32,
     RK_THM_MOVT,
     /* RISC-V takes a symbol's address in two halves as well, and the
      * split is arithmetic rather than bitwise: `auipc` supplies bits
@@ -841,6 +845,12 @@ enum reloc_kind {
     /* -fPIC/-fPIE: `auipc` to the symbol's GOT slot, its LO12 half the
      * PCREL_LO12_I of a load, which reads the address there */
     RK_RISCV_GOT_HI20,
+    /* a thread-local's offset from tp, local-exec: `lui rd, %tprel_hi(x)`,
+     * `add rd, rd, tp, %tprel_add(x)` (a marker for the linker's
+     * relaxation, nothing patched) and `addi rd, rd, %tprel_lo(x)` */
+    RK_RISCV_TPREL_HI20,
+    RK_RISCV_TPREL_ADD,
+    RK_RISCV_TPREL_LO12_I,
     /* AVR. Two things make this target's relocations unlike the others'.
      *
      * An address is materialised a BYTE at a time, because the registers

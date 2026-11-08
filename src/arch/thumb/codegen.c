@@ -5961,6 +5961,35 @@ static void gen_ins(struct t_fn *F, int n)
     }
     case IR_GADDR: {
         int d = wreg(F, i->dst, T_ACC);   /* straight into its home */
+        if (i->glob->is_tls) {
+            /* A thread-local's OFFSET from the thread pointer, local-exec
+             * as GCC makes it (irgen adds __aeabi_read_tp()'s result): a
+             * literal word with R_ARM_TLS_LE32, read pc-relative and
+             * branched over, so no pool is needed. The function starts
+             * on a word (the alignment below), so the buffer offset is
+             * the address mod 4. */
+            if (t_isa_a32) {               /* ldr d,[pc]; b +4; .word */
+                code_u32(t, 0xe59f0000ul | (unsigned long)d << 12);
+                code_u32(t, 0xea000000ul);
+            } else {
+                if (t->len & 2)
+                    t_nop(t);              /* the word lands on four */
+                if (d < 8) {               /* ldr d, [pc, #0]; b.n +4 */
+                    code_u16(t, 0x4800u | (unsigned)d << 8);
+                    code_u16(t, 0xe001u);
+                } else {                   /* ldr.w d, [pc, #4]; nop; b.n */
+                    code_u16(t, 0xf8dfu);
+                    code_u16(t, (unsigned)d << 12 | 4u);
+                    t_nop(t);
+                    code_u16(t, 0xe001u);
+                }
+            }
+            note_glob(F->st, t->len, i->glob, RK_ARM_TLS_LE32);
+            code_mark_data(t, t->len, t->len + 4);
+            code_u32(t, 0);
+            wrote(F, i->dst, d);
+            return;
+        }
         note_glob(F->st, t_mov_addr(t, d, 0), i->glob, RK_THM_MOVW);
         note_glob(F->st, t->len - 4, i->glob, RK_THM_MOVT);
         wrote(F, i->dst, d);
@@ -7823,6 +7852,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         if (fn->ins[i].op == IR_ASM && fn->ins[i].asm_ir)
             asm_sl += code_asm_align_slack(fn->ins[i].asm_ir->arange,
                                            fn->ins[i].asm_ir->narange);
+        else if (fn->ins[i].op == IR_GADDR && fn->ins[i].glob &&
+                 fn->ins[i].glob->is_tls)
+            asm_sl += 2;          /* a thread-local's word: its padding */
     for (int pass = 0; pass < 3; pass++) {
     int redo0 = 0;
     if (!F.lp_planned)
@@ -7878,6 +7910,12 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     /* An A32 function is word-aligned, as every A32 instruction is. */
     {
         int al = t_isa_a32 || F.lp_use ? 3 : 1;
+        /* ...and one that reads a thread-local's offset from a literal
+         * word in its code (IR_GADDR) */
+        for (int k = 0; k < fn->nins; k++)
+            if (fn->ins[k].op == IR_GADDR && fn->ins[k].glob &&
+                fn->ins[k].glob->is_tls)
+                al |= 3;
         for (int k = 0; k < fn->nins; k++)
             if (fn->ins[k].op == IR_ASM || fn->ins[k].op == IR_SWITCH)
                 al |= 3;

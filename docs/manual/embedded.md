@@ -1760,6 +1760,57 @@ routines you use, with the signatures in
 [Extensions](extensions.md#eight-bytes-on-a-32-bit-target);
 `tests/golden/atomic8/order.c` is an example that replaces every one.
 
+## Thread-local storage
+
+On ARM (every Cortex-M level and ARM state) and RISC-V, `_Thread_local`
+and `__thread` give each thread its own object, local-exec as GCC makes
+it: the variable's offset from the thread pointer is fixed at link time,
+and the code adds the thread pointer --
+
+- on ARM, the result of `__aeabi_read_tp()` (the ARM run-time ABI's: it
+  may change r0 alone), which the RTOS defines;
+- on RISC-V, the `tp` register, which the RTOS sets at each context
+  switch (`lui`, `add tp`, `addi`, with `R_RISCV_TPREL_*`).
+
+Each thread's copy is made from the template the linker lays out:
+`__tdata_size` bytes of `.tdata`'s initial values from `__tdata_start`,
+then `__tbss_size` bytes of zeros -- `__tls_size` in all, aligned to
+`__tls_align` (picolibc's names; embld defines them when they are
+referred to). Where the thread pointer goes for that copy is the ABI's:
+
+| Target | The thread pointer |
+|---|---|
+| ARM | 8 bytes (a control block, rounded up to `__tls_align`) before the copy |
+| RISC-V | at the copy |
+
+```c
+extern char __tdata_start[], __tdata_size[], __tbss_size[], __tls_align[];
+
+void *thread_tls_init(unsigned char *area)    /* area: __tls_size + 8 + __tls_align bytes */
+{
+    unsigned long al = (unsigned long)__tls_align;
+    unsigned long n = (unsigned long)__tdata_size, z = (unsigned long)__tbss_size;
+    unsigned char *copy = (unsigned char *)(((unsigned long)area + 8 + al - 1) & ~(al - 1));
+    memcpy(copy, __tdata_start, n);
+    memset(copy + n, 0, z);
+    return copy - ((8 + al - 1) & ~(al - 1));  /* ARM: what __aeabi_read_tp returns */
+}
+```
+
+Within one function the thread pointer is taken to be fixed, as GCC
+takes it: switch threads at a context switch, not in the middle of a
+function that uses a thread-local. `tests/exec/tls-threads.c` makes two
+blocks and checks each keeps its own values on every ARM and RISC-V
+board.
+
+The other embedded targets have no thread pointer EmbCC uses, and a use
+of a thread-local is refused by name rather than made one object every
+thread shares:
+
+```text
+embcc: t.c:2: error: 't' is thread-local, which mipsel-none-elf has no thread pointer for: EmbCC would make it one object every thread shares (_Thread_local is supported on ARM, RISC-V, AArch64 and x86-64)
+```
+
 ## Running images under QEMU
 
 EmbCC's tests run every embedded image on QEMU. The harnesses under

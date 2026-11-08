@@ -109,6 +109,10 @@ void rv_cunimp(struct code *c);   /* two bytes, and it traps */
  * both left for relocation, and never compressed (addi rd,rd,0 is
  * c.mv). Returns the auipc's offset; the addi is at +4. */
 int rv_pcrel_pair(struct code *c, int rd);
+/* `lui rd, 0; add rd, rd, tp; addi rd, rd, 0`, uncompressed, for a
+ * thread-local's TPREL_HI20 / TPREL_ADD / TPREL_LO12_I relocations at
+ * the returned offset, +4 and +8 */
+int rv_tprel_triple(struct code *c, int rd);
 /* ...and one whose target is in this same buffer, patched here once its
  * place is known: `auipc rd, %pcrel_hi; addi rd, rd, %pcrel_lo` with no
  * relocation (a computed goto's &&label). */

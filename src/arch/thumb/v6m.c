@@ -604,7 +604,9 @@ static void tmp_put(struct t_fn *F, int r)
 
 /* LIT_LREL: &&label's word, (label | 1) - pc at its `add rD, pc`; v
  * is its index in F->lrel, so no two share a word. */
-enum { LIT_K, LIT_STR, LIT_GLOB, LIT_FN, LIT_LREL };
+/* LIT_TLS: a thread-local's offset from the thread pointer
+ * (R_ARM_TLS_LE32), which irgen adds __aeabi_read_tp()'s result to. */
+enum { LIT_K, LIT_STR, LIT_GLOB, LIT_FN, LIT_LREL, LIT_TLS };
 struct v6_lit { int kind; unsigned long v; const void *p; };
 struct v6_lsite { int at, k; };
 
@@ -673,6 +675,11 @@ static void pool_dump(struct t_fn *F, int branch)
             break;
         case LIT_GLOB:
             tcg_note_glob(F->st, t->len, (struct global *)l->p, RK_ABS32);
+            code_u32(t, 0);
+            break;
+        case LIT_TLS:
+            tcg_note_glob(F->st, t->len, (struct global *)l->p,
+                          RK_ARM_TLS_LE32);
             code_u32(t, 0);
             break;
         case LIT_FN:
@@ -931,7 +938,7 @@ static void remat_rd(struct t_fn *F, int v, int reg)
         lit_load(F, reg, LIT_STR, (unsigned long)di->label, NULL);
         break;
     case IR_GADDR:
-        lit_load(F, reg, LIT_GLOB, 0, di->glob);
+        lit_load(F, reg, di->glob->is_tls ? LIT_TLS : LIT_GLOB, 0, di->glob);
         break;
     case IR_FADDR:
         lit_load(F, reg, LIT_FN, 0, di->callee);
@@ -3702,7 +3709,7 @@ static void gen_ins(struct t_fn *F, int n)
         if (i->op == IR_STRADDR)
             lit_load(F, d, LIT_STR, (unsigned long)i->label, NULL);
         else if (i->op == IR_GADDR)
-            lit_load(F, d, LIT_GLOB, 0, i->glob);
+            lit_load(F, d, i->glob->is_tls ? LIT_TLS : LIT_GLOB, 0, i->glob);
         else
             lit_load(F, d, LIT_FN, 0, i->callee);
         v_wr(F, i->dst, d);
