@@ -511,6 +511,14 @@ static void opt_func(struct ir_func *fn)
     pass_signtest(fn);       /* `if (x >> 63)` is `if (x < 0)` */
     if (pass_storenarrow(fn))
         pass_dce(fn);
+    /* ...and every value made in the bytes its readers want (pass_demand):
+     * a shift that leaves nothing there is 0, an and that keeps it all a
+     * move -- which the fold after takes the rest of the way */
+    if (pass_demand(fn)) {
+        pass_fold(fn);
+        pass_copyprop(fn);
+        pass_dce(fn);
+    }
     /* ...and only now put each surviving literal where it is wanted.
      *
      * AFTER the fixpoint, not inside it, for the same reason immfold is:
