@@ -71,6 +71,14 @@ w=$(warns -Wunused-parameter -Wall)
 echo "$w" | grep -qx "unused-parameter" || { echo "-Wunused-parameter before -Wall was lost"; exit 1; }
 echo "a warning named on its own wins over its group, before or after it"
 
+# 3b. An unused `static inline` is not reported, in a header or in the
+#     file itself, as GCC reports none; a plain static still is.
+printf 'static inline int hook(void) { return 1; }\nstatic int plain(void) { return 2; }\nint main(void) { return 0; }\n' > "$out/inl.c"
+"$EMBCC" --target="$TARGET" -Wall -c "$out/inl.c" -o "$out/inl.o" 2> "$out/inl.log"
+grep -q "'hook'" "$out/inl.log" && { echo "an unused static inline was reported:"; cat "$out/inl.log"; exit 1; }
+grep -q "unused function 'plain'" "$out/inl.log" || { echo "an unused static was not:"; cat "$out/inl.log"; exit 1; }
+echo "an unused static inline is quiet, an unused static is not"
+
 # 4. The name is in the message, and -Werror makes it fatal.
 "$EMBCC" --target="$TARGET" -Wall -c "$out/w.c" -o "$out/w.o" 2>&1 |
     grep -q "unused variable 'unused_one' \[--warn=unused-variable\]" || {

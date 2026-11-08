@@ -1071,7 +1071,8 @@ Warn about a `static` function that is defined and never called or
 referred to. A non-`static` function is never reported, because another
 translation unit may call it, and neither is `main`. A function declared
 `__attribute__((unused))` or `__attribute__((used))` is exempt, and so is
-a `static inline` function defined in a header, as with Clang. Enabled by
+any `static inline` function, in a header or in the file itself, as with
+GCC. Enabled by
 `--warn=all`. The location has a line but no column.
 
 ```c

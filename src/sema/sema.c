@@ -10799,11 +10799,13 @@ void sema_check(struct unit *u)
              * and exit: being in .init_array is its use (GCC says
              * nothing of one either) */
             !f->is_ctor && !f->is_dtor &&
-            /* A `static inline` in a header is a helper offered to every
-             * unit that includes it, most of which use some of them --
-             * clang does not report one, and GCC no inline one at all. */
-            !(f->def_inline && f->file && u->file &&
-              strcmp(f->file, u->file) != 0) &&
+            /* A `static inline` is not reported, as GCC reports none:
+             * in a header it is a helper offered to every unit that
+             * includes it, and in a .c file one kept for a build
+             * configuration (an RTOS's trace hooks) -- clang reports the
+             * second, and the RTOS marked three such helpers unused
+             * for EmbCC alone. */
+            !f->def_inline &&
             f->name && strcmp(f->name, "main") != 0)
             diag_warn_opt(f->file ? f->file : u->file, f->line, 0,
                           "unused-function", "unused function '%s'", f->name);
