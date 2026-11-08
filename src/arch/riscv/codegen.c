@@ -265,6 +265,11 @@ struct rv_fn {
      * constant one; NULL for none. */
     int *fa;
     long frame;          /* total bytes sp moves down by */
+    /* A frame past addi's reach moves sp in two steps when the saves fit
+     * the first (rv_split_frame): by frame - split, the saves made at
+     * small offsets from there, then by split. 0: one step. */
+    long split;
+    int cfi_split_end;   /* -g: where the first step ends, or -1 */
     long scratch_at;     /* where fn->scratch_bytes begins */
     long byref_at;       /* where the by-reference argument copies go */
     long sret_slot;      /* where the hidden result pointer is kept, or -1 */
@@ -2208,7 +2213,14 @@ enum { FX_J, FX_CJ, FX_LONG, FX_B, FX_CB,
         * where the measure says a shorter one reaches). t6 holds nothing
         * at a jump to a label: a scratch's value never crosses a block,
         * and the branch has read its operands before the auipc writes. */
-       FX_FAR, FX_FARB };
+       FX_FAR, FX_FARB,
+       /* A jump the first pass placed just before its own label: on the
+        * second, nothing at all. The IR's jump went to the next block,
+        * and what lay between -- a move the allocator made a no-op, a
+        * block of copies into registers they were already in -- emitted
+        * nothing (`j 0x12` at 0x10: 1,800 more jumps than GCC over RV32
+        * libc). EMBCC_RV_NOJNEXT=1 keeps them. */
+       FX_NONE };
 
 static void want_label(struct rv_fn *F, int at, int label, int kind,
                        int cond, int rs1, int rs2, int bat)
@@ -2233,10 +2245,14 @@ static int relaxed_form(const struct rv_fn *F)
     return F->relax && F->nfix < F->nrelax ? F->relax[F->nfix] : -1;
 }
 
+static int g_rv_nobrover = -1;
+
 static void jump_to(struct rv_fn *F, int label)
 {
     int form = relaxed_form(F);
-    if (form == FX_CJ)
+    if (form == FX_NONE)
+        want_label(F, F->t->len, label, FX_NONE, 0, 0, 0, 0);
+    else if (form == FX_CJ)
         want_label(F, rv_c_placeholder(F->t), label, FX_CJ, 0, 0, 0, 0);
     else if (form == FX_FAR || (form < 0 && F->far))
         want_label(F, rv_far_placeholder(F->t, FAR), label, FX_FAR,
@@ -3374,6 +3390,51 @@ static void zcmp_op(struct rv_fn *F, unsigned base)
     code_u16(F->t, base | (unsigned)F->zcmp_rlist << 4 | (unsigned)spimm << 2);
 }
 
+/* sp += k, through t0 where addi does not reach it: t0 holds nothing at
+ * a prologue (no argument is in it) nor at an epilogue (the result is
+ * in a0/a1, fa0/fa1). */
+static void rv_sp_add(struct rv_fn *F, long k)
+{
+    if (!k)
+        return;
+    if (rv_fits(k, 12)) {
+        rv_alu_imm(F->t, RV_ADD, RV_SP, RV_SP, (int)k, 0);
+    } else {
+        rv_li(F->t, RV_T0, k, F->xlen);
+        rv_alu(F->t, RV_ADD, RV_SP, RV_SP, RV_T0, 0);
+    }
+}
+
+/* A frame addi cannot move sp by in one (> 2047 bytes) put each save at
+ * `lui t6; addi t6; add t6, sp, t6; sw` -- four instructions where
+ * `c.swsp` is one, for each register in the prologue and again in the
+ * epilogue: 439 of them over RV32 libc, in 25 functions. GCC moves sp
+ * twice, as this does: first by the top of the frame that holds the
+ * saves (ra, s0-s11, a variadic function's a0-a7 -- layout() puts them
+ * there), rounded to sixteen and within addi's reach, the saves made at
+ * small offsets from there; then by the rest. Not an interrupt handler
+ * (its own prologue) nor Zcmp's cm.push. EMBCC_RV_NOSPLIT=1: one step. */
+static void rv_split_frame(struct rv_fn *F)
+{
+    struct ir_func *fn = F->fn;
+    F->split = 0;
+    if (F->isr || F->zcmp || F->frame <= 2047 || getenv("EMBCC_RV_NOSPLIT"))
+        return;
+    long lo = F->frame;
+    if (!F->leaf)
+        lo = F->ra_slot < lo ? F->ra_slot : lo;
+    if (F->nsave)
+        lo = F->save_at < lo ? F->save_at : lo;
+    if (fn->is_varargs && F->va_regsave >= 0)
+        lo = F->va_regsave < lo ? F->va_regsave : lo;
+    if (lo == F->frame)
+        return;                         /* nothing saved: one step */
+    long top = (F->frame - lo + 15) & ~15L;
+    if (top > 2032 || top >= F->frame)
+        return;
+    F->split = F->frame - top;
+}
+
 static void rv_restore_ex(struct rv_fn *F, int ret);
 
 static void rv_restore(struct rv_fn *F)
@@ -3402,6 +3463,22 @@ static void rv_restore_ex(struct rv_fn *F, int ret)
     if (ret) {
         rv_restore_ex(F, 0);
         rv_ret(t);
+        return;
+    }
+    if (F->split) {
+        /* the prologue's two steps backwards: the f registers (saved low
+         * in the frame) from here, sp up by split, the rest at small
+         * offsets, sp up by what is left */
+        for (int k = 0; k < F->nfsave; k++)
+            fld_sp(F, F->fused[k], F->fsave_at + (long)k * 8,
+                   target_riscv_abi_flen() == 64);
+        rv_sp_add(F, F->split);
+        for (int k = 0; k < F->nsave; k++)
+            ld_sp(F, F->used_callee[k],
+                  F->save_at + (long)k * F->w - F->split, F->w, 1);
+        if (!F->leaf)
+            ld_sp(F, RV_RA, F->ra_slot - F->split, F->w, 1);
+        rv_sp_add(F, F->frame - F->split);
         return;
     }
     for (int k = 0; k < F->nsave; k++)
@@ -5583,8 +5660,26 @@ static void gen_ins(struct rv_fn *F, int n)
         } else {
             r = wordop ? rd32(F, i->a, A_LO) : rdr(F, i->a, A_LO);
         }
-        branch_if(F, i->op == IR_BRZ ? RV_BEQ : RV_BNE, r, RV_ZERO,
-                  i->label);
+        /* `brnz c -> L; jmp M; L:` is `brz c -> M`, and so is `brnz c ->
+         * L; ret; L:` with M the epilogue, a void return being a jump to
+         * it: `bnez a2, L; j epi; L:` was the early return of every
+         * function with a frame. EMBCC_RV_NOBROVER=1 keeps the pair. */
+        int cond = i->op == IR_BRZ ? RV_BEQ : RV_BNE, to = i->label;
+        if (n + 2 < fn->nins && fn->ins[n + 2].op == IR_LABEL &&
+            fn->ins[n + 2].label == i->label && !g_rv_nobrover) {
+            const struct ir_ins *j = &fn->ins[n + 1];
+            int over = -1;
+            if (j->op == IR_JMP)
+                over = j->label;
+            else if (j->op == IR_RET && j->a < 0 && !j->nrp)
+                over = fn->nlabels;
+            if (over >= 0) {
+                cond = cond == RV_BEQ ? RV_BNE : RV_BEQ;
+                to = over;
+                F->skip_next = 1;
+            }
+        }
+        branch_if(F, cond, r, RV_ZERO, to);
         return;
     }
 
@@ -6484,11 +6579,29 @@ static void gen_ins(struct rv_fn *F, int n)
  * that walks both pointers with the end in SCR2 -- `long long a[300] =
  * {0}` and a 2403-byte struct returned by value were internal errors at
  * every -O level. TMP and ADDR are scratch and may be moved. */
+/* Straight-line, or the loop below? Under -Os a block past six words
+ * zeroed or four copied is the loop -- its sixteen to twenty bytes
+ * against four for each word zeroed and eight for each copied: a struct
+ * of 64 words cleared field by field was 256 bytes of `sw zero` where
+ * GCC calls memset (EMBCC_RV_UNROLL_BLOCKS=1 straight-line to 2040 bytes
+ * as at -O2). Past 2040 bytes an offset no longer fits either way. */
+static int rv_block_straight(long size, int step, int copy)
+{
+    static int unroll = -1;
+    if (unroll < 0)
+        unroll = getenv("EMBCC_RV_UNROLL_BLOCKS") != NULL;
+    if (size > 2040)
+        return 0;
+    if (!target_opt_size() || unroll)
+        return 1;
+    return size / step <= (copy ? 4 : 6);
+}
+
 static void copy_block(struct rv_fn *F, int copy, long size, int step)
 {
     struct code *t = F->t;
     long k;
-    if (size <= 2040) {
+    if (rv_block_straight(size, step, copy)) {
         for (k = 0; k + step <= size; k += step) {
             if (copy) rv_load(t, SCR, TMP, (int)k, step, 0, F->xlen);
             rv_store(t, copy ? SCR : RV_ZERO, ADDR, (int)k, step, F->xlen);
@@ -6529,7 +6642,8 @@ static void copy_block_at(struct rv_fn *F, int copy, long size, int step,
                           int sreg, long soff, int dreg, long doff)
 {
     struct code *t = F->t;
-    if (size <= 2040 && rv_fits(doff, 12) && rv_fits(doff + size, 12) &&
+    if (rv_block_straight(size, step, copy) && rv_fits(doff, 12) &&
+        rv_fits(doff + size, 12) &&
         (!copy || (rv_fits(soff, 12) && rv_fits(soff + size, 12)))) {
         /* the data register: SCR, unless a base is (param_reg's is) */
         int dr = sreg == SCR || dreg == SCR ? SCR2 : SCR;
@@ -7093,7 +7207,10 @@ static void rv_record_cfi(struct rv_fn *F, long code_off)
         fn->ncfi = -1;
         return;
     }
-    if (F->cfi_frame_end >= 0)
+    if (F->split && F->cfi_split_end >= 0)
+        ir_cfi_add(fn, (int)(F->cfi_split_end - code_off),
+                   IR_CFI_CFA_OFFSET, 0, F->frame - F->split);
+    if (!F->split && F->cfi_frame_end >= 0)
         ir_cfi_add(fn, (int)(F->cfi_frame_end - code_off),
                    IR_CFI_CFA_OFFSET, 0, F->frame);
     if (F->cfi_saves_end >= 0) {
@@ -7107,6 +7224,9 @@ static void rv_record_cfi(struct rv_fn *F, long code_off)
             ir_cfi_add(fn, at, IR_CFI_SAVED, 32 + F->fused[i],
                        F->fsave_at + (long)i * 8 - F->frame);
     }
+    if (F->split && F->cfi_frame_end >= 0)
+        ir_cfi_add(fn, (int)(F->cfi_frame_end - code_off),
+                   IR_CFI_CFA_OFFSET, 0, F->frame);
     if (F->cfi_fp_end >= 0)
         ir_cfi_add(fn, (int)(F->cfi_fp_end - code_off), IR_CFI_CFA_REG,
                    RV_FP, F->frame);
@@ -7125,6 +7245,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
      * paths is a segfault at -O0 -- which is exactly what the ARMv7-M
      * version of this change did before the memset went in. */
     memset(&F, 0, sizeof F);
+    if (g_rv_nobrover < 0)
+        g_rv_nobrover = getenv("EMBCC_RV_NOBROVER") != NULL;
     F.fn = fn; F.t = t; F.st = st;
     F.keep_vars = keep_vars;
     fn->nlines = 0;                 /* -g: this attempt's rows only */
@@ -7474,6 +7596,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
      * frame builds the constant first, and t0 is free to do it in because
      * no argument has been touched yet. */
     F.cfi_frame_end = F.cfi_saves_end = F.cfi_fp_end = -1;
+    F.cfi_split_end = -1;
+    rv_split_frame(&F);
     if (F.isr) {
         rv_isr_prologue(&F);
     } else if (F.zcmp) {
@@ -7486,6 +7610,22 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
             rv_alu(t, RV_ADD, RV_SP, RV_SP, RV_T0, 0);
         }
         F.cfi_frame_end = t->len;
+    } else if (F.split) {
+        /* rv_split_frame: the top of the frame first, the saves, and
+         * the variadic spill there; then the rest */
+        rv_sp_add(&F, -(F.frame - F.split));
+        F.cfi_split_end = t->len;
+        if (!F.leaf)
+            st_sp(&F, RV_RA, F.ra_slot - F.split, F.w);
+        for (i = 0; i < F.nsave; i++)
+            st_sp(&F, F.used_callee[i],
+                  F.save_at + (long)i * F.w - F.split, F.w);
+        if (fn->is_varargs)
+            for (int k = 0; k < RV_NARGREG; k++)
+                st_sp(&F, argreg(k), F.va_regsave - F.split + (long)k * F.w,
+                      F.w);
+        rv_sp_add(&F, -F.split);
+        F.cfi_frame_end = t->len;
     } else if (F.frame) {
         if (rv_fits(-F.frame, 12)) {
             rv_alu_imm(t, RV_ADD, RV_SP, RV_SP, (int)-F.frame, 0);
@@ -7495,9 +7635,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
         }
         F.cfi_frame_end = t->len;
     }
-    if (!F.leaf && !F.isr && !F.zcmp)
+    if (!F.leaf && !F.isr && !F.zcmp && !F.split)
         st_sp(&F, RV_RA, F.ra_slot, F.w);
-    for (i = 0; i < F.nsave && !F.zcmp; i++)
+    for (i = 0; i < F.nsave && !F.zcmp && !F.split; i++)
         st_sp(&F, F.used_callee[i], F.save_at + (long)i * F.w, F.w);
     /* the callee-saved f registers, as wide as the ABI preserves them */
     for (i = 0; i < F.nfsave; i++)
@@ -7513,7 +7653,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
     /* A variadic function spills EVERY argument register, named ones
      * included: the named ones are read out of the spill below, and the
      * unnamed ones have to be there for va_arg to walk into. */
-    if (fn->is_varargs)
+    if (fn->is_varargs && !F.split)
         for (int k = 0; k < RV_NARGREG; k++)
             st_sp(&F, argreg(k), F.va_regsave + (long)k * F.w, F.w);
 
@@ -7866,6 +8006,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
         case FX_ADDR:
             rv_patch_pcrel_pair(t, F.fix[i].at, target);
             break;
+        case FX_NONE:                 /* it must land where it was left out */
+            ok = target == F.fix[i].at;
+            break;
         default:                                    /* FX_CB */
             ok = rv_patch_cb(t, F.fix[i].at, F.fix[i].cond == RV_BNE,
                              F.fix[i].rs1, target);
@@ -7895,6 +8038,13 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
             long jd = tgt - (F.fix[i].kind == FX_FARB ? F.fix[i].bat + 4
                                                       : F.fix[i].at);
             int jal = jd >= -(1L << 20) + asm_sl && jd <= (1L << 20) - 2 - asm_sl;
+            if ((F.fix[i].kind == FX_J || F.fix[i].kind == FX_FAR) &&
+                tgt == F.fix[i].at + (F.fix[i].kind == FX_FAR ? 8 : 4) &&
+                !asm_sl && !getenv("EMBCC_RV_NOJNEXT")) {
+                relax[i] = FX_NONE;
+                any = 1;
+                continue;
+            }
             if (F.fix[i].kind == FX_J || F.fix[i].kind == FX_FAR) {
                 long d = tgt - F.fix[i].at;
                 relax[i] = d >= -2048 + asm_sl && d <= 2046 - asm_sl
