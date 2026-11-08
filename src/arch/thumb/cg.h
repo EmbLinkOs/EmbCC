@@ -218,6 +218,21 @@ struct t_fn {
     struct t_lsite { int at, ins, idx, rt, rt2; } *lp_site;
     int lp_nsite, lp_capsite;
 
+    /* ---- the address pool (t_lit32 in codegen.c), -Os ---------------- */
+    /* A symbol's address as `ldr rd, [pc, #off]` from a word after the
+     * function, where it was movw/movt: on for this function's passes
+     * until one does not reach. The words (kind, v, p), the loads, and
+     * the first pass's verdict per load: 1, the two-byte form reaches. */
+    int l32_on;
+    struct t_l32 { int kind; unsigned long v; const void *p; } *l32;
+    int l32_n, l32_cap;
+    struct t_l32site { int at, idx, rt, wide; } *l32s;
+    int l32_ns, l32_caps;
+    signed char *l32_short;     /* the first pass's verdicts, or NULL */
+    int l32_nshort;
+    signed char *l32_meas;      /* this (first) pass's, made at its flush */
+    int l32_slack;              /* what an aligning asm may grow by */
+
     /* ---- ARMv6-M only (v6m.c); zero at the other levels ---------------- */
     /* The literal pool being collected, and the LDRs waiting for it. */
     struct v6_lit *lit;
