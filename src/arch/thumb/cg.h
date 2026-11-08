@@ -168,6 +168,8 @@ struct t_fn {
      * (t_record_cfi); -1 when the function has no such step */
     int cfi_va_end, cfi_push_end, cfi_vsave_end, cfi_frame_end, cfi_fp_end;
     unsigned cfi_push_mask;     /* ARMv6-M: the registers its push saved */
+    unsigned hsave;             /* ARMv6-M: r8-r11 saved through r4-r7 */
+    int cfi_hpush_end;
     /* Per instruction: an IR_CALL made as a TAIL call (t_tail_ok). NULL
      * when there are none. */
     char *tail;

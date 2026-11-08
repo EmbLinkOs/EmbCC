@@ -421,7 +421,7 @@ needs one, and the registers each ABI reserves:
 | x86-64 | `rbx`, `r12` to `r15`; on Windows also `rsi`, `rdi` | |
 | AArch64 | x19 to x28 | x29, the frame pointer |
 | ARM Cortex-M (ARMv7-M, ARMv8-M Mainline), ARMv7-A | r4 to r11; with an FPU, s16 to s31 (d8 to d15), by `vpush` | r7 in a function with a variable-length array (its frame base) |
-| ARMv6-M, ARMv8-M Baseline | r4 to r7 | r8 to r11: `push` does not reach them, and this backend does not yet save them through a low register |
+| ARMv6-M, ARMv8-M Baseline | r4 to r7; r8 to r11 through r4 to r7, which `push` does reach | |
 | RISC-V | s0 to s11 | s0 in a function with a variable-length array |
 | MIPS32, MIPS64 | s0 to s7, s8 (`$fp`) | k0, k1, gp, sp; `$fp` in a function with a variable-length array |
 | LoongArch64 | `$fp`, `$s0` to `$s8` | `$tp`, `$r21`; `$fp` in a function with a variable-length array |
@@ -1460,11 +1460,18 @@ r4 to r11, named in a template or in the clobber list, are pushed by the
 prologue and popped by the epilogue (`push {r4, r8, r10, lr}`). In a
 function with a variable-length array r7 addresses the frame, and an asm
 that writes it there is refused. On ARMv6-M and ARMv8-M Baseline r4 to
-r7 are saved the same way; r8 to r11 are refused, because `push` does
-not reach them:
+r7 are saved the same way. `push` does not reach r8 to r11, so, as GCC
+does, the prologue copies them into low registers it has just saved and
+pushes those, and the epilogue reverses it:
 
 ```text
-the ARMv7-M backend cannot lower an asm that clobbers r8-r11 (ARMv6-M's push does not reach them; this backend does not yet save them through a low register) yet
+push {r3, r4, r5, lr}
+mov  r4, r8
+push {r4, r5}          @ in pairs: sp stays eight-aligned
+...
+pop  {r4, r5}
+mov  r8, r4
+pop  {r3, r4, r5, pc}
 ```
 
 ### Example

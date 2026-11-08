@@ -4,6 +4,8 @@
  * not save around an asm"), and on x86-64 accepted it and saved nothing,
  * so the caller's rbx and r12 came back destroyed. Here the callee
  * clobbers every callee-saved register the target lets an asm take
+ * (ARMv6-M's r8-r11 too, which its push does not reach: EmbCC refused
+ * them, GCC saves them through r4-r7)
  * (not the frame pointer, which GCC keeps at -O0), by the clobber list
  * and by naming one in the template; the caller keeps twelve values
  * alive across the calls, which an allocator puts in exactly those
@@ -20,8 +22,9 @@
     "mov x27, #0\n\tmov x28, #0" ::: "x19", "x20", "x21", "x22", "x23", \
     "x24", "x25", "x26", "x27", "x28")
 #elif defined(__arm__) && (defined(__ARM_ARCH_6M__) || defined(__ARM_ARCH_8M_BASE__))
-#define CLOBBER() __asm__ volatile("movs r4, #0\n\tmovs r5, #0\n\tmovs r6, #0" \
-    ::: "r4", "r5", "r6")
+#define CLOBBER() __asm__ volatile("movs r4, #0\n\tmovs r5, #0\n\tmovs r6, #0\n\t" \
+    "mov r8, r4\n\tmov r9, r4\n\tmov r11, r4" \
+    ::: "r4", "r5", "r6", "r8", "r9", "r11")
 #elif defined(__arm__)
 #define CLOBBER() __asm__ volatile("mov r4, #0\n\tmov r5, #0\n\tmov r6, #0\n\t" \
     "mov r8, #0\n\tmov r9, #0\n\tmov r10, #0" \
@@ -67,6 +70,22 @@ __attribute__((noinline)) static int seed(int k) { return k * 3 + 1; }
  * an asm that changed s17 or d9 left the caller's value destroyed. The
  * caller sets s16-s19 by asm (and so saves them itself), calls the
  * victim, and reads them back. */
+/* The caller's r8-r11 must survive: on ARMv6-M no allocator value is
+ * there, so the caller puts one there itself by asm. */
+#if defined(__arm__)
+__attribute__((noinline)) static int hi_keep(unsigned v)
+{
+    unsigned a, b, c, d;
+    __asm__ volatile("mov r8, %0\n\tmov r9, %0\n\tmov r10, %0\n\tmov r11, %0"
+                     :: "l"(v) : "r8", "r9", "r10", "r11");
+    (void)victim(1);
+    __asm__ volatile("mov %0, r8\n\tmov %1, r9\n\tmov %2, r10\n\tmov %3, r11"
+                     : "=l"(a), "=l"(b), "=l"(c), "=l"(d) :: "r8", "r9",
+                     "r10", "r11");
+    return a == v && b == v && c == v && d == v;
+}
+#endif
+
 #if defined(__arm__) && defined(__ARM_FP) && !defined(__SOFTFP__)
 #define FP_TEST 1
 __attribute__((noinline)) static void fp_victim(void)
@@ -101,6 +120,10 @@ int main(void)
         return 1;
     if (s != 6 + 5 + 8)
         return 2;
+#if defined(__arm__)
+    if (!hi_keep(0x5a5a1234u))
+        return 4;
+#endif
 #ifdef FP_TEST
     if (!fp_keep(0x3fc00000u))
         return 3;
