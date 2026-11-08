@@ -46,7 +46,10 @@ __attribute__((noinline)) int outer(int n)
     return s + k;
 }
 
-int main(void)
+/* noinline: main's asm clobbers fs0 (s16), a callee-saved register, so
+ * whatever holds it saves it in its prologue -- inlined into reset, that
+ * was reset's prologue, an FP store before reset turns the FPU on */
+__attribute__((noinline)) int main(void)
 {
     /* A callee-saved float register holds pi in main's frame: whoever
      * saves it below says where in its CFI, so a debugger in leaf reads

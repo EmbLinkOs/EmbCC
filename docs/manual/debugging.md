@@ -268,11 +268,16 @@ the target:
   `-fno-asynchronous-unwind-tables` turn them off. They describe frames
   correctly only on x86-64 and AArch64 (see
   [Known problems](#known-problems)).
-- **The other embedded targets.** No `.debug_frame` yet; the debugger
+- **AVR: `.debug_frame`, as avr-gcc writes it.** The CIE says the call
+  pushed the return address -- the CFA is `SP + 2` (`+ 3` on an avr6 part
+  such as the ATmega2560), and the return address (column 36) is just
+  below it, big-endian and in words. Each `push` of the prologue moves
+  the CFA and records the register; setting `Y` from `SP` makes `Y`
+  (register 28) the CFA's base, and the frame taken off it moves the
+  offset. An interrupt handler has no entry. EmbDBG and gdb unwind by it.
+- **MIPS, Xtensa and TriCore** have `.debug_frame` too; **PowerPC,
+  SPARC, ColdFire, RX and LoongArch** have none yet, and a debugger
   analyzes the function's prologue.
-- **AVR.** `Y` is a frame pointer, but nothing records where the return
-  address is above it; gdb analyzes the prologue, which follows
-  avr-gcc's.
 
 ## Frame pointers
 

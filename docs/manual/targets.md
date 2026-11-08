@@ -2535,8 +2535,9 @@ and above:
 
 `-g` turns off this backend's register allocation at `--opt=basic` and above, so
 that every variable stays in its slot; `--opt=speed -g` code can be about twice
-the size of `--opt=speed` code. There is no `.debug_frame`: gdb finds a caller by
-analyzing the prologue, and EmbDBG's backtrace stops at frame `#0`.
+the size of `--opt=speed` code. `.debug_frame` follows avr-gcc's (CFA = `SP` + the
+return address, then `Y`; the return address in column 36), so EmbDBG and gdb
+find each caller ([Debugging](debugging.md#call-frames-and-unwinding)).
 
 QEMU's arduino-uno has a gdb stub:
 

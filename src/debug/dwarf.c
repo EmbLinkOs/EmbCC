@@ -1030,9 +1030,24 @@ static void emit_frame(struct dwarf_out *out, struct dbuf *b,
     db_uleb(b, 1);                       /* code_alignment_factor */
     db_sleb(b, -1);                      /* data_alignment_factor */
     db_u8(b, (unsigned)out->frame_ra);   /* return_address_register */
-    db_u8(b, DW_CFA_def_cfa);            /* at entry: CFA = sp + 0 */
-    db_uleb(b, (unsigned long)out->frame_sp);
-    db_uleb(b, 0);
+    if (target_get() == TARGET_AVR) {
+        /* AVR, as avr-gcc writes it: a call has PUSHED the return
+         * address (2 bytes, 3 on avr6), so at entry the CFA is SP + that
+         * many and the return address is in memory just below it --
+         * column 36 at CFA - (size - 1), its high byte at the lowest
+         * address. Y (r28) is the CFA's base once the prologue sets it. */
+        const struct avr_mcu *m = target_avr_mcu();
+        int pc = m ? m->pc_bytes : 2;
+        db_u8(b, DW_CFA_def_cfa);
+        db_uleb(b, (unsigned long)out->frame_sp);
+        db_uleb(b, (unsigned long)pc);
+        db_u8(b, 0x80 | (unsigned)out->frame_ra);    /* DW_CFA_offset */
+        db_uleb(b, (unsigned long)(pc - 1));
+    } else {
+        db_u8(b, DW_CFA_def_cfa);        /* at entry: CFA = sp + 0 */
+        db_uleb(b, (unsigned long)out->frame_sp);
+        db_uleb(b, 0);
+    }
     frame_pad(b, cie);
 
     for (int n = 0; n < iu->nfuncs; n++) {
@@ -1051,6 +1066,10 @@ static void emit_frame(struct dwarf_out *out, struct dbuf *b,
         db_addr(b, 0);                   /* initial_location */
         db_addr(b, (unsigned long)(f->code_len - f->code_entry));
         long at = 0, cfa_reg = out->frame_sp, cfa = 0;
+        if (target_get() == TARGET_AVR) {      /* the CIE's CFA, SP + pc */
+            const struct avr_mcu *m = target_avr_mcu();
+            cfa = m ? m->pc_bytes : 2;
+        }
         for (int k = 0; k < fn->ncfi; k++) {
             const struct ir_cfi *c = &fn->cfi[k];
             long to = c->off - f->code_entry, d = to - at;

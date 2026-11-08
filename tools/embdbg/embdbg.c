@@ -2273,6 +2273,235 @@ static void live_regs(struct live *L)
     if (col % per) printf("\n");
 }
 
+/* ---- unwinding by .debug_frame ------------------------------------------
+ *
+ * The call frame information the compiler wrote (EmbCC's, GCC's): for a
+ * pc, where the caller's frame is -- the CFA, a register plus an offset --
+ * and where each register the function saved is, an offset from the CFA.
+ * Read from the image's .debug_frame: the CIE's initial rules, then the
+ * FDE's that cover the pc, run up to it. The rules are what EmbCC and GCC
+ * write (advance, def_cfa and its parts, offset, restore, remember and
+ * restore state, nop); an entry with any other is not used. */
+#define CFI_NREG 64
+struct cfi_rules {
+    int cfa_reg;
+    long cfa_off;
+    unsigned char saved[CFI_NREG];      /* 1: at CFA + off[] */
+    long off[CFI_NREG];
+    int ra;                             /* the return address's column */
+};
+
+static int cfi_run(const unsigned char *p, int len, unsigned long loc,
+                   unsigned long pc, long caf, long daf, int abytes,
+                   struct cfi_rules *R, const struct cfi_rules *init)
+{
+    struct cfi_rules stack[4];
+    int sp = 0, i = 0;
+    while (i < len) {
+        unsigned op = p[i++], lo = op & 0x3f;
+        unsigned long reg;
+        long d;
+        switch (op & 0xc0) {
+        case 0x40:                                  /* advance_loc */
+            loc += lo * (unsigned long)caf;
+            if (loc > pc) return 0;
+            continue;
+        case 0x80:                                  /* offset */
+            d = (long)uleb(p, &i) * daf;
+            if (lo < CFI_NREG) { R->saved[lo] = 1; R->off[lo] = d; }
+            continue;
+        case 0xc0:                                  /* restore */
+            if (lo < CFI_NREG && init) { R->saved[lo] = init->saved[lo];
+                                         R->off[lo] = init->off[lo]; }
+            continue;
+        }
+        switch (op) {
+        case 0x00: break;                           /* nop */
+        case 0x01:                                  /* set_loc */
+            loc = abytes == 8 ? u64(p + i) : u32(p + i);
+            i += abytes;
+            if (loc > pc) return 0;
+            break;
+        case 0x02: loc += p[i++] * (unsigned long)caf; if (loc > pc) return 0; break;
+        case 0x03: loc += u16(p + i) * (unsigned long)caf; i += 2; if (loc > pc) return 0; break;
+        case 0x04: loc += u32(p + i) * (unsigned long)caf; i += 4; if (loc > pc) return 0; break;
+        case 0x05: case 0x11:                       /* offset_extended(_sf) */
+            reg = uleb(p, &i);
+            d = (op == 0x05 ? (long)uleb(p, &i) : sleb(p, &i)) * daf;
+            if (reg < CFI_NREG) { R->saved[reg] = 1; R->off[reg] = d; }
+            break;
+        case 0x06: case 0x07: case 0x08:            /* restore/undefined/same */
+            reg = uleb(p, &i);
+            if (reg < CFI_NREG) R->saved[reg] = op == 0x06 && init ? init->saved[reg] : 0;
+            break;
+        case 0x09: (void)uleb(p, &i); (void)uleb(p, &i); break;   /* register */
+        case 0x0a: if (sp < 4) stack[sp++] = *R; break;           /* remember */
+        case 0x0b: if (sp > 0) *R = stack[--sp]; break;           /* restore */
+        case 0x0c:                                  /* def_cfa */
+            R->cfa_reg = (int)uleb(p, &i);
+            R->cfa_off = (long)uleb(p, &i);
+            break;
+        case 0x0d: R->cfa_reg = (int)uleb(p, &i); break;
+        case 0x0e: R->cfa_off = (long)uleb(p, &i); break;
+        case 0x12:                                  /* def_cfa_sf */
+            R->cfa_reg = (int)uleb(p, &i);
+            R->cfa_off = sleb(p, &i) * daf;
+            break;
+        case 0x13: R->cfa_off = sleb(p, &i) * daf; break;
+        case 0x2e: (void)uleb(p, &i); break;        /* GNU_args_size */
+        default: return -1;
+        }
+    }
+    return 0;
+}
+
+/* The rules at pc, from the image's .debug_frame: 0, or -1 with none. */
+static int cfi_rules_at(struct img *m, unsigned long pc, struct cfi_rules *R)
+{
+    struct sec *s = find_sec(m, ".debug_frame");
+    int abytes = img_is32(m) ? 4 : 8;
+    if (!s || !s->data) return -1;
+    const unsigned char *b = s->data;
+    unsigned long n = s->size, at = 0;
+    while (at + 8 <= n) {
+        unsigned long len = u32(b + at), id;
+        if (len == 0xffffffffUL || len < 4 || at + 4 + len > n) return -1;
+        id = u32(b + at + 4);
+        if (id != 0xffffffffUL) {                   /* an FDE */
+            const unsigned char *f = b + at + 8;
+            unsigned long lo = abytes == 8 ? u64(f) : u32(f);
+            unsigned long range = abytes == 8 ? u64(f + 8) : u32(f + 4);
+            if (pc >= lo && pc < lo + range && id + 8 <= n) {
+                /* its CIE */
+                const unsigned char *c = b + id;
+                unsigned long clen = u32(c);
+                int i = 8, ver = c[i++];
+                long caf, daf;
+                while (c[i]) i++;                   /* augmentation */
+                i++;
+                if (ver >= 4) i += 2;               /* address, segment size */
+                caf = (long)uleb(c, &i);
+                daf = sleb(c, &i);
+                memset(R, 0, sizeof *R);
+                R->ra = ver == 1 ? c[i++] : (int)uleb(c, &i);
+                if (cfi_run(c + i, (int)(clen + 4 - i), lo, pc, caf, daf,
+                            abytes, R, NULL) < 0)
+                    return -1;
+                struct cfi_rules init = *R;
+                int fi = 8 + 2 * abytes;
+                if (cfi_run(b + at + fi, (int)(len + 4 - fi), lo, pc, caf,
+                            daf, abytes, R, &init) < 0)
+                    return -1;
+                return 0;
+            }
+        }
+        at += 4 + len;
+    }
+    return -1;
+}
+
+/* The caller of the frame described by regs[] (valid[]): its pc and its
+ * registers, the saved ones read back from where the rules say. 0, or -1
+ * when there is nothing to say. AVR's registers are bytes, SP is DWARF
+ * register 32 and Y (r28:r29) the CFA's base once a prologue sets it; its
+ * return address is big-endian and in words. */
+static int cfi_step(struct live *L, unsigned long *pc, unsigned long *regs,
+                    unsigned char *valid)
+{
+    struct cfi_rules R;
+    int avr = strcmp(L->arch, "avr") == 0;
+    int wb = avr ? 1 : L->wb, pcb = 2;
+    unsigned long cfa, base;
+    unsigned char w[8];
+    if (cfi_rules_at(L->m, *pc, &R) < 0) return -1;
+    if (avr) {
+        Elf64_Ehdr *e = (Elf64_Ehdr *)L->m->b;
+        pcb = (e->e_flags & 0x7f) == 6 ? 3 : 2;      /* avr6: a 3-byte PC */
+        if (R.cfa_reg == 32) {
+            if (!valid[32]) return -1;
+            base = regs[32];
+        } else {
+            if (R.cfa_reg < 0 || R.cfa_reg > 30 || !valid[R.cfa_reg] ||
+                !valid[R.cfa_reg + 1]) return -1;
+            base = regs[R.cfa_reg] | regs[R.cfa_reg + 1] << 8;
+        }
+    } else {
+        if (R.cfa_reg < 0 || R.cfa_reg >= CFI_NREG || !valid[R.cfa_reg])
+            return -1;
+        base = regs[R.cfa_reg];
+    }
+    cfa = base + (unsigned long)R.cfa_off;
+    unsigned long ret = 0;
+    if (R.ra < CFI_NREG && R.saved[R.ra]) {
+        int nb = avr ? pcb : wb;
+        if (rsp_read_mem(&L->r, live_data_addr(L, cfa + (unsigned long)R.off[R.ra]),
+                         w, nb) < nb) return -1;
+        for (int k = 0; k < nb; k++)
+            ret = avr ? ret << 8 | w[k] : ret | (unsigned long)w[k] << 8 * k;
+        if (avr) ret *= 2;                           /* words to bytes */
+    } else if (R.ra < CFI_NREG && valid[R.ra]) {
+        ret = regs[R.ra];                            /* still in lr / ra */
+    } else {
+        return -1;
+    }
+    for (int k = 0; k < CFI_NREG; k++) {
+        if (!R.saved[k] || k == R.ra) continue;
+        if (rsp_read_mem(&L->r, live_data_addr(L, cfa + (unsigned long)R.off[k]),
+                         w, wb) < wb) return -1;
+        unsigned long v = 0;
+        for (int q = 0; q < wb; q++) v |= (unsigned long)w[q] << 8 * q;
+        regs[k] = v;
+        valid[k] = 1;
+    }
+    /* the caller's stack pointer is the CFA */
+    if (avr) { regs[32] = cfa; valid[32] = 1; }
+    else {
+        int spn = !strcmp(L->arch, "arm") ? 13 : !strcmp(L->arch, "aarch64") ? 31 : 2;
+        regs[spn] = cfa; valid[spn] = 1;
+    }
+    if (!strcmp(L->arch, "arm")) ret &= ~1UL;       /* the Thumb bit */
+    if (!ret || ret == *pc) return -1;
+    *pc = ret;
+    return 0;
+}
+
+/* The registers the unwinder starts from, by DWARF number. */
+static void cfi_regs_now(struct live *L, unsigned long *regs, unsigned char *valid)
+{
+    memset(valid, 0, CFI_NREG);
+    if (!strcmp(L->arch, "avr")) {
+        unsigned long long v;
+        char nm[8];
+        for (int k = 0; k < 32; k++) {
+            snprintf(nm, sizeof nm, "r%d", k);
+            if (rsp_reg(&L->r, L->tab, nm, &v) == 0) { regs[k] = (unsigned long)v; valid[k] = 1; }
+        }
+        if (rsp_reg(&L->r, L->tab, "sp", &v) == 0) { regs[32] = (unsigned long)v; valid[32] = 1; }
+        return;
+    }
+    int lim = !strcmp(L->arch, "arm") ? 16 : !strcmp(L->arch, "aarch64") ? 32 : 32;
+    for (int k = 0; k < lim; k++) {
+        unsigned long v;
+        if (live_dwreg(L, k, &v) == 0) { regs[k] = v; valid[k] = 1; }
+    }
+}
+
+/* Frames past #0 by the call frame information; how many were printed. */
+static int cfi_backtrace(struct live *L, unsigned long pc)
+{
+    unsigned long regs[CFI_NREG];
+    unsigned char valid[CFI_NREG];
+    int n;
+    cfi_regs_now(L, regs, valid);
+    for (n = 1; n < 32; n++) {
+        if (cfi_step(L, &pc, regs, valid) < 0) break;
+        printf("  #%-2d 0x%lx  ", n, pc);
+        print_loc(L->m, pc);
+        printf("\n");
+    }
+    return n - 1;
+}
+
 /* A backtrace, as far as this target honestly allows.
  *
  * Frame 0 is always the pc. Beyond it, x86-64 has a frame-pointer chain
@@ -2289,12 +2518,16 @@ static void live_bt(struct live *L)
     if (live_pc(L, &pc) < 0) return;
     printf("  #0  0x%lx  ", pc); print_loc(L->m, pc); printf("\n");
 
+    /* The embedded targets keep no frame pointer: their callers are
+     * found by the .debug_frame -g writes (EmbCC's and GCC's alike). */
+    if (strcmp(L->arch, "x86_64") != 0 && find_sec(L->m, ".debug_frame")) {
+        if (cfi_backtrace(L, pc) == 0)
+            printf("  (no deeper: no call frame information covers 0x%lx)\n",
+                   pc);
+        return;
+    }
     if (strcmp(L->arch, "avr") == 0) {
-        /* The return address is on the stack above the frame, the saved
-         * registers and Y -- at a distance only the frame's size gives,
-         * and nothing in the DWARF says it. */
-        printf("  (no deeper: -g emits no .debug_frame for AVR yet, so where\n"
-               "   the return address sits above Y is not recorded)\n");
+        printf("  (no deeper: the image has no .debug_frame -- build with -g)\n");
         return;
     }
     if (strcmp(L->arch, "x86_64") != 0) {
