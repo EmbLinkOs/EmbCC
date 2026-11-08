@@ -8072,8 +8072,16 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
      * nothing branches there, but it makes every disassembly of the gap
      * between two functions look like a condition block. */
     /* An A32 function is word-aligned, as every A32 instruction is. */
+    /* The 32-bit pool (t_lit32_load) likewise: its ldr reads from
+     * Align(pc, 4) too. Whether it has a word is known only once pass 0
+     * has made the code, so pass 0 starts on four whenever the pool is
+     * on, and a later pass when pass 0 put anything in it -- every pass
+     * makes the same loads. At two, `--gc-sections` put printf's
+     * function on a halfword and every pool load read the word beside
+     * the one it meant: the image printed nothing. */
     {
-        int al = t_isa_a32 || F.lp_use ? 3 : 1;
+        int al = t_isa_a32 || F.lp_use ||
+                 (F.l32_on && (pass == 0 || l32_meas_n)) ? 3 : 1;
         for (int k = 0; k < fn->nins; k++)
             if (fn->ins[k].op == IR_ASM || fn->ins[k].op == IR_SWITCH)
                 al |= 3;
@@ -8822,6 +8830,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     free(F.lp_use);
     free(F.lp_val);
     free(F.lp_site);
+    if (F.l32_ns && f->code_align < 4)
+        internal_error("thumb: %s has a literal pool and starts on a "
+                       "halfword", fn->name);
     free(F.l32);
     free(F.l32s);
     free(F.l32_meas);

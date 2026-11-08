@@ -75,7 +75,8 @@ void f_lstore(void) { volatile int v; v = 1; v = 2; v = 3; }
 CEOF
 
 # target, objdump flags, and a pattern for a load / a store from
-# something other than the frame
+# something other than the frame (nor a literal pool: `ldr r2, [pc, #12]`
+# loads the object's ADDRESS under -Os, it is not an access to it)
 check() {
     T=$1 ODF=$2 LD=$3 ST=$4 SRC=${5:-v}
     FNS=${6:-"f_deref f_index f_arrow f_global f_cast f_store f_post f_spost"}
@@ -87,7 +88,7 @@ check() {
         for f in $FNS; do
             pat=$LD; case $f in *store) pat=$ST ;; esac
             n=$(sed -n "/<$f>:/,/^\$/p" "$out/v.s" | grep -E "$pat" |
-                grep -vcE 'sp[],)]|\[x29|\(%rsp|\(%rbp|\(s0\)|\(fp\)')
+                grep -vcE 'sp[],)]|\[pc[],]|\[x29|\(%rsp|\(%rbp|\(s0\)|\(fp\)')
             [ "$n" = 3 ] || {
                 echo "$T $opt $f: $n accesses to a volatile object, not 3"
                 sed -n "/<$f>:/,/^\$/p" "$out/v.s"; exit 1; }
