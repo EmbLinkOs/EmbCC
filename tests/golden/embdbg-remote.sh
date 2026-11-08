@@ -191,7 +191,7 @@ CEOF
     if command -v llvm-dwarfdump >/dev/null 2>&1 && command -v llvm-nm >/dev/null 2>&1; then
         sym=$(llvm-nm "$d/fwa.elf" | awk '$3 == "acc" { print $1 }')
         dw=$(llvm-dwarfdump --debug-info "$d/fwa.elf" |
-             grep -A3 'DW_AT_name	("acc")' | sed -n 's/.*DW_OP_addr 0x\([0-9a-f]*\).*/\1/p')
+             grep -A5 'DW_AT_name	("acc")' | sed -n 's/.*DW_OP_addr 0x\([0-9a-f]*\).*/\1/p')
         [ -n "$sym" ] && [ -n "$dw" ] &&
             [ $((0x$dw)) -eq $((0x800000 + 0x$sym)) ] || {
             printf "avr: acc's DW_OP_addr is 0x%s; it is at 0x%x in SRAM, so 0x%x\n" "$dw" $((0x$sym)) $((0x800000 + 0x$sym))

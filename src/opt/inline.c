@@ -456,6 +456,11 @@ static void inline_call(struct ir_func *fn, int ci, struct ir_func *cf)
      * than left as an absent location the verifier cannot tell from a bug. */
     lb->synth = 1;
 
+    /* The callee's code is the call's, scope and all: its lexical scopes
+     * are the callee's own, which the caller has no record of (-g). */
+    for (int k = 0; k < m; k++)
+        buf[k].scope = call.scope;
+
     /* 3. Splice buf over the call. */
     int newn = fn->nins - 1 + m;
     struct ir_ins *ni = xmalloc((size_t)newn * sizeof *ni);

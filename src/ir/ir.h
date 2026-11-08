@@ -300,6 +300,11 @@ struct ir_ins {
     int line;
     int col;
     int synth;
+    /* -g: the lexical scope the instruction's code belongs to -- 0 the
+     * function's own, else an index into ir_func.scope_up (irgen). Copied
+     * with the instruction, as its line is; an instruction a pass invents
+     * reads 0, which leaves its code outside any nested block. */
+    int scope;
     int dst, a, b;
     int c;                   /* IR_CMPXCHG: the third operand (desired value) */
     int nrp;                 /* IR_RET of a struct as its register units
@@ -536,6 +541,7 @@ struct ir_dbgvar {
     int is_param;
     struct type *ty;
     int line, col;
+    int scope;               /* its block's lexical scope (ir_ins.scope) */
     /* mem2reg took this variable out of memory although something
      * assigned it: its slot no longer follows it. Its only reader is a
      * backend deciding whether the slot is a true DW_AT_location -- for a
@@ -636,6 +642,13 @@ struct ir_func {
      * function-level locals span the whole function; only nested-block locals get
      * a narrower range. Length nvars; unused (NULL) when there are no locals. */
     int *var_scope_lo, *var_scope_hi;
+    /* -g: the lexical scopes of the blocks that declare locals, 1 to
+     * nscopes - 1 (0 is the function's own): scope_up[s] the one it is
+     * nested in. Instructions name theirs (ir_ins.scope), and the DWARF
+     * writer makes a DW_TAG_lexical_block of each from its instructions'
+     * code -- which, unlike var_scope_lo/hi, no reordering makes stale. */
+    int *scope_up;
+    int nscopes;
     /* exception regions (C++'s lowering), the catch types their landing
      * pads' selectors number (1-based; NULL: catch-all), and — codegen —
      * every call's code */

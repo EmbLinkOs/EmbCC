@@ -2487,12 +2487,19 @@ void ra_debug_locs(struct ir_func *fn, const struct ir_vhome *home)
 
 /* -g: room for each instruction's code offset (ir_func.ins_pc), when the
  * function has a variable mem2reg followed; NULL otherwise. */
+/* -g: does a local live in a nested block? Its DW_TAG_lexical_block needs
+ * its instructions' code, so ins_pc (dwarf.c, emit_scopes). */
+static int has_block_locals(const struct ir_func *fn)
+{
+    return fn->nscopes > 1 && fn->scope_up;
+}
+
 void ra_debug_pc_begin(struct ir_func *fn)
 {
     free(fn->ins_pc);
     fn->ins_pc = NULL;
-    if (((target_debug_info() && fn->vreg_var) || target_stack_info()) &&
-        fn->nins) {
+    if (((target_debug_info() && (fn->vreg_var || has_block_locals(fn))) ||
+         target_stack_info()) && fn->nins) {
         fn->ins_pc = xmalloc(((size_t)fn->nins + 1) * sizeof *fn->ins_pc);
         for (int k = 0; k <= fn->nins; k++)
             fn->ins_pc[k] = -1;

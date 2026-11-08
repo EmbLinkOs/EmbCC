@@ -183,6 +183,22 @@ void ir_locals_fill(struct ir_func *fn, struct func *f, int nvars)
     }
 }
 
+/* -g: the lexical scope being generated (ir_ins.scope), and the blocks
+ * collect_locals gave one: each STMT_BLOCK or STMT_FOR that declares a
+ * local. */
+static int g_cur_scope;
+static struct stmt **g_scope_stmt;
+static int *g_scope_id;
+static int g_nscope_stmt, g_capscope_stmt;
+
+static int scope_of_stmt(const struct stmt *s)
+{
+    for (int k = 0; k < g_nscope_stmt; k++)
+        if (g_scope_stmt[k] == s)
+            return g_scope_id[k];
+    return -1;
+}
+
 struct ir_ins *emit(struct ir_func *fn)
 {
     if (fn->nins == fn->cap) {
@@ -200,6 +216,7 @@ struct ir_ins *emit(struct ir_func *fn)
     i->line = g_cur_line;
     i->col = g_cur_col;
     i->synth = g_synth;
+    i->scope = g_cur_scope;
     i->dst = i->a = i->b = -1;
     i->w = 4;
     i->size = 4;
@@ -6871,6 +6888,10 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
             lc.cont = new_label(fn);
             lc.brk = new_label(fn);
             int for_vla = g_nvla;
+            int for_lo = fn->nins;
+            int for_scope = g_cur_scope, fs = scope_of_stmt(s);
+            if (fs >= 0)
+                g_cur_scope = fs;
             lc.brk_vla = lc.cont_vla = g_nvla;
             if (s->initdecl)
                 gen_stmt(fn, s->initdecl, &lc);
@@ -6893,6 +6914,17 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
             emit_label(fn, lc.brk);
             vla_release(fn, for_vla);
             g_nvla = for_vla;
+            /* `for (int i = 0; ...)`: i's scope is the for statement
+             * (C11 6.8.5p5), as a block's local's is its block -- so two
+             * loops' i are two variables a debugger tells apart, and may
+             * share a slot */
+            for (struct stmt *c = s->initdecl; c; c = c->next)
+                if (c->kind == STMT_DECL && !c->is_extern && !c->sglob &&
+                    c->var_index >= 0 && c->var_index < fn->nvars) {
+                    fn->var_scope_lo[c->var_index] = for_lo;
+                    fn->var_scope_hi[c->var_index] = fn->nins;
+                }
+            g_cur_scope = for_scope;
             break;
         }
         case STMT_BLOCK: {
@@ -6902,7 +6934,11 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
              * (codegen). Static/extern decls have no frame slot — skip them. */
             int lo = fn->nins;
             int depth = g_nvla;
+            int up_scope = g_cur_scope, bs = scope_of_stmt(s);
+            if (bs >= 0)
+                g_cur_scope = bs;
             gen_stmt(fn, s->body, loop);
+            g_cur_scope = up_scope;
             vla_release(fn, depth);   /* the block's VLAs end with it */
             g_nvla = depth;
             int hi = fn->nins;
@@ -6983,42 +7019,78 @@ static void add_dbgvar(struct ir_func *fn, const char *name, int vreg,
     v->line = line;
     v->col = col;
     v->moved = 0;
+    v->scope = 0;
 }
 
 /* -g: walk the body for block-scope locals. Each STMT_DECL owns a var slot
  * (var_index); a static local became a global (sglob) and has no frame slot,
  * so it is skipped. Flattened into the subprogram — lexical-block scoping is a
  * later refinement, not needed to print a local by name. */
-static void collect_locals(struct ir_func *fn, struct stmt *s)
+/* Does this list of statements declare a local of its own (a slot, not an
+ * extern or a static)? */
+static int declares_local(const struct stmt *s)
+{
+    for (; s; s = s->next)
+        if (s->kind == STMT_DECL && !s->is_extern && !s->is_vm_typedef &&
+            !s->sglob)
+            return 1;
+    return 0;
+}
+
+/* A new lexical scope for block s, inside scope `up`. */
+static int new_scope(struct ir_func *fn, struct stmt *s, int up)
+{
+    int id = fn->nscopes++;
+    fn->scope_up = xrealloc(fn->scope_up, (size_t)fn->nscopes * sizeof *fn->scope_up);
+    fn->scope_up[id] = up;
+    if (g_nscope_stmt == g_capscope_stmt) {
+        g_capscope_stmt = g_capscope_stmt ? g_capscope_stmt * 2 : 16;
+        g_scope_stmt = xrealloc(g_scope_stmt, (size_t)g_capscope_stmt * sizeof *g_scope_stmt);
+        g_scope_id = xrealloc(g_scope_id, (size_t)g_capscope_stmt * sizeof *g_scope_id);
+    }
+    g_scope_stmt[g_nscope_stmt] = s;
+    g_scope_id[g_nscope_stmt++] = id;
+    return id;
+}
+
+static void collect_locals(struct ir_func *fn, struct stmt *s, int scope)
 {
     for (; s; s = s->next) {
         switch (s->kind) {
         case STMT_DECL:
             if (s->is_extern || s->is_vm_typedef)  /* no local slot at all */
                 break;
-            if (!s->sglob)
+            if (!s->sglob) {
                 add_dbgvar(fn, s->name, s->var_index, 0,
                            fn->src->var_tys[s->var_index], s->line, s->col);
+                fn->dbgvars[fn->ndbgvars - 1].scope = scope;
+            }
             break;
         case STMT_IF:
-            collect_locals(fn, s->thn);
-            collect_locals(fn, s->els);
+            collect_locals(fn, s->thn, scope);
+            collect_locals(fn, s->els, scope);
             break;
         case STMT_EHREGION:
-            collect_locals(fn, s->body);
-            collect_locals(fn, s->thn);
+            collect_locals(fn, s->body, scope);
+            collect_locals(fn, s->thn, scope);
             break;
         case STMT_WHILE:
         case STMT_DO:
-            collect_locals(fn, s->body);
+            collect_locals(fn, s->body, scope);
             break;
-        case STMT_FOR:
-            collect_locals(fn, s->initdecl);
-            collect_locals(fn, s->body);
+        case STMT_FOR: {
+            /* `for (int i ...)`: i's scope is the for statement */
+            int in = declares_local(s->initdecl) ? new_scope(fn, s, scope) : scope;
+            collect_locals(fn, s->initdecl, in);
+            collect_locals(fn, s->body, in);
             break;
+        }
         case STMT_BLOCK:
+            collect_locals(fn, s->body,
+                           declares_local(s->body) ? new_scope(fn, s, scope) : scope);
+            break;
         case STMT_SWITCH:
-            collect_locals(fn, s->body);
+            collect_locals(fn, s->body, scope);
             break;
         default:
             break;
@@ -7194,7 +7266,12 @@ static void gen_func_(struct ir_func *fn, struct func *f)
     for (int i = 0; i < f->nparams; i++)
         add_dbgvar(fn, f->params[i], i, 1, f->param_tys[i],
                    f->param_lines[i], f->param_cols[i]);
-    collect_locals(fn, f->body);
+    g_nscope_stmt = 0;
+    g_cur_scope = 0;
+    fn->nscopes = 1;
+    fn->scope_up = xmalloc(sizeof *fn->scope_up);
+    fn->scope_up[0] = -1;
+    collect_locals(fn, f->body, 0);
     /* Local scope ranges: default to the whole function ([0, +inf), narrowed to
      * the real end below) so any local not inside a nested block never coalesces
      * — the safe default. gen_stmt's STMT_BLOCK case narrows nested-block locals. */

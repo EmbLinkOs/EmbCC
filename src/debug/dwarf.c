@@ -18,6 +18,7 @@
 #define DW_TAG_union_type       0x17
 #define DW_TAG_member           0x0d
 #define DW_TAG_subrange_type    0x21
+#define DW_TAG_lexical_block    0x0b
 #define DW_CHILDREN_no        0x00
 #define DW_CHILDREN_yes       0x01
 #define DW_AT_name            0x03
@@ -37,6 +38,8 @@
 #define DW_AT_upper_bound     0x2f
 #define DW_AT_data_member_location 0x38
 #define DW_AT_data_bit_offset 0x6b
+#define DW_AT_decl_file       0x3a
+#define DW_AT_decl_line       0x3b
 #define DW_FORM_addr          0x01
 #define DW_FORM_block1        0x0a
 #define DW_FORM_data1         0x0b
@@ -149,6 +152,7 @@
 #define AB_PARAM_LL     22
 #define AB_VAR_T_LL     23   /* variable, with type, location list */
 #define AB_VAR_LL       24
+#define AB_LEXBLOCK     25   /* lexical_block: a nested scope's code */
 
 static int dw_ver = 5;
 
@@ -370,11 +374,15 @@ static void emit_abbrev(struct dbuf *b)
         sub[3] = sub_t[5] = DW_FORM_addrx;
         sub[5] = sub_t[7] = DW_FORM_data4;
     }
+    /* (each with the file and line it was declared at: the line table's
+     * one file, 1) */
     static const unsigned char param_t[] = {
-        DW_AT_name, DW_FORM_string, DW_AT_type, DW_FORM_ref4,
+        DW_AT_name, DW_FORM_string, DW_AT_decl_file, DW_FORM_data1,
+        DW_AT_decl_line, DW_FORM_udata, DW_AT_type, DW_FORM_ref4,
         DW_AT_location, DW_FORM_exprloc };
     static const unsigned char param[] = {
-        DW_AT_name, DW_FORM_string, DW_AT_location, DW_FORM_exprloc };
+        DW_AT_name, DW_FORM_string, DW_AT_decl_file, DW_FORM_data1,
+        DW_AT_decl_line, DW_FORM_udata, DW_AT_location, DW_FORM_exprloc };
     static const unsigned char base[] = {
         DW_AT_name, DW_FORM_string, DW_AT_encoding, DW_FORM_data1,
         DW_AT_byte_size, DW_FORM_data1 };
@@ -398,10 +406,10 @@ static void emit_abbrev(struct dbuf *b)
     one_abbrev(b, AB_CU,         DW_TAG_compile_unit,     DW_CHILDREN_yes, cu,
                dw_split ? 4 : 7);   /* (split: its pc and lines the skeleton's) */
     one_abbrev(b, AB_SUBPROGRAM, DW_TAG_subprogram,       DW_CHILDREN_yes, sub, 4);
-    one_abbrev(b, AB_PARAM_T,    DW_TAG_formal_parameter, DW_CHILDREN_no, param_t, 3);
-    one_abbrev(b, AB_PARAM,      DW_TAG_formal_parameter, DW_CHILDREN_no, param, 2);
-    one_abbrev(b, AB_VAR_T,      DW_TAG_variable,         DW_CHILDREN_no, param_t, 3);
-    one_abbrev(b, AB_VAR,        DW_TAG_variable,         DW_CHILDREN_no, param, 2);
+    one_abbrev(b, AB_PARAM_T,    DW_TAG_formal_parameter, DW_CHILDREN_no, param_t, 5);
+    one_abbrev(b, AB_PARAM,      DW_TAG_formal_parameter, DW_CHILDREN_no, param, 4);
+    one_abbrev(b, AB_VAR_T,      DW_TAG_variable,         DW_CHILDREN_no, param_t, 5);
+    one_abbrev(b, AB_VAR,        DW_TAG_variable,         DW_CHILDREN_no, param, 4);
     one_abbrev(b, AB_BASE,       DW_TAG_base_type,        DW_CHILDREN_no, base, 3);
     one_abbrev(b, AB_PTR_T,      DW_TAG_pointer_type,     DW_CHILDREN_no, ptr_t, 2);
     one_abbrev(b, AB_PTR,        DW_TAG_pointer_type,     DW_CHILDREN_no, ptr, 1);
@@ -417,16 +425,26 @@ static void emit_abbrev(struct dbuf *b)
     one_abbrev(b, AB_SUBRANGE_NB, DW_TAG_subrange_type,  DW_CHILDREN_no, subrange, 0);
     one_abbrev(b, AB_CU_RANGES,   DW_TAG_compile_unit,   DW_CHILDREN_yes, cu_ranges, 7);
     unsigned char param_t_ll[] = {
-        DW_AT_name, DW_FORM_string, DW_AT_type, DW_FORM_ref4,
+        DW_AT_name, DW_FORM_string, DW_AT_decl_file, DW_FORM_data1,
+        DW_AT_decl_line, DW_FORM_udata, DW_AT_type, DW_FORM_ref4,
         DW_AT_location, DW_FORM_sec_offset };
     unsigned char param_ll[] = {
-        DW_AT_name, DW_FORM_string, DW_AT_location, DW_FORM_sec_offset };
+        DW_AT_name, DW_FORM_string, DW_AT_decl_file, DW_FORM_data1,
+        DW_AT_decl_line, DW_FORM_udata, DW_AT_location, DW_FORM_sec_offset };
     if (dw_split)
-        param_t_ll[5] = param_ll[3] = DW_FORM_loclistx;
-    one_abbrev(b, AB_PARAM_T_LL, DW_TAG_formal_parameter, DW_CHILDREN_no, param_t_ll, 3);
-    one_abbrev(b, AB_PARAM_LL,   DW_TAG_formal_parameter, DW_CHILDREN_no, param_ll, 2);
-    one_abbrev(b, AB_VAR_T_LL,   DW_TAG_variable,         DW_CHILDREN_no, param_t_ll, 3);
-    one_abbrev(b, AB_VAR_LL,     DW_TAG_variable,         DW_CHILDREN_no, param_ll, 2);
+        param_t_ll[9] = param_ll[7] = DW_FORM_loclistx;
+    one_abbrev(b, AB_PARAM_T_LL, DW_TAG_formal_parameter, DW_CHILDREN_no, param_t_ll, 5);
+    one_abbrev(b, AB_PARAM_LL,   DW_TAG_formal_parameter, DW_CHILDREN_no, param_ll, 4);
+    one_abbrev(b, AB_VAR_T_LL,   DW_TAG_variable,         DW_CHILDREN_no, param_t_ll, 5);
+    one_abbrev(b, AB_VAR_LL,     DW_TAG_variable,         DW_CHILDREN_no, param_ll, 4);
+    /* a nested block's scope: where its code is, its variables inside */
+    unsigned char lexb[] = {
+        DW_AT_low_pc, DW_FORM_addr, DW_AT_high_pc, DW_FORM_addr };
+    if (dw_split) {
+        lexb[1] = DW_FORM_addrx;
+        lexb[3] = DW_FORM_data4;
+    }
+    one_abbrev(b, AB_LEXBLOCK,   DW_TAG_lexical_block,    DW_CHILDREN_yes, lexb, 2);
     db_uleb(b, 0);                       /* end of the abbrev table */
 }
 
@@ -670,6 +688,9 @@ static void emit_globals(struct dwarf_out *out, struct dbuf *b,
             continue;
         db_uleb(b, AB_VAR_T);
         db_str(b, g->name);
+        db_u8(b, 1);                                 /* decl_file */
+        db_uleb(b, (unsigned long)(g->name_line > 0 ? g->name_line
+                                   : g->line > 0 ? g->line : 0));
         db_u32(b, (unsigned long)toff);
         long dsp = target_get() == TARGET_AVR ? AVR_DATA_SPACE : 0;
         if (dw_split) {
@@ -791,6 +812,141 @@ static int list_header(struct dbuf *b)
     db_u8(b, 0);
     db_u32(b, 0);
     return at;
+}
+
+/* One parameter's or local's DIE: its name, where it was declared, its
+ * type, and its location -- a frame slot, or where the optimizer keeps it,
+ * range by range (ra_debug_locs). */
+static void emit_dbgvar(struct dwarf_out *out, struct dbuf *b, struct dbuf *loc,
+                        struct typemap *tm, struct ir_func *fn, int v, long lo)
+{
+    struct ir_dbgvar *dv = &fn->dbgvars[v];
+    int toff = type_lookup(tm, dv->ty);
+    int ll = fn->ndbglocs && fn->ndbglocs[v] > 0 &&
+             (fn->var_off[dv->vreg] == IR_VAR_NO_LOC || dv->moved);
+    int code = dv->is_param
+        ? (toff >= 0 ? (ll ? AB_PARAM_T_LL : AB_PARAM_T)
+                     : (ll ? AB_PARAM_LL : AB_PARAM))
+        : (toff >= 0 ? (ll ? AB_VAR_T_LL : AB_VAR_T)
+                     : (ll ? AB_VAR_LL : AB_VAR));
+    db_uleb(b, code);
+    db_str(b, dv->name);
+    db_u8(b, 1);                                     /* decl_file */
+    db_uleb(b, (unsigned long)(dv->line > 0 ? dv->line : 0));
+    if (toff >= 0) db_u32(b, (unsigned long)toff);
+    if (ll && dw_split) {
+        if (dw_nll == dw_capll) {
+            dw_capll = dw_capll ? dw_capll * 2 : 16;
+            dw_lloff = xrealloc(dw_lloff, (size_t)dw_capll * sizeof *dw_lloff);
+        }
+        dw_lloff[dw_nll] = loc->len;
+        db_uleb(b, (unsigned long)dw_nll++);
+        emit_loclist(out, loc, fn->dbglocs[v], fn->ndbglocs[v], lo);
+    } else if (ll) {
+        reloc(out, DWSEC_INFO, b->len, 4, DWTGT_LOC, loc->len);
+        db_u32(b, 0);
+        emit_loclist(out, loc, fn->dbglocs[v], fn->ndbglocs[v], lo);
+    } else {
+        loc_fbreg(b, fn->var_off[dv->vreg]);
+    }
+}
+
+/* Where instruction k's code starts: its ins_pc, or for one fused into
+ * the instruction before it (no offset of its own), where the next one's
+ * does; within the function. */
+static long ins_start(const struct ir_func *fn, int k, long lo, long hi)
+{
+    for (; k < fn->nins; k++)
+        if (fn->ins_pc[k] >= 0)
+            break;
+    long pc = fn->ins_pc[k < fn->nins ? k : fn->nins];
+    if (pc < 0)
+        pc = hi;
+    return pc < lo ? lo : pc > hi ? hi : pc;
+}
+
+/* One block's DIE, its variables, and the blocks nested in it. */
+static void emit_block(struct dwarf_out *out, struct dbuf *b, struct dbuf *loc,
+                       struct typemap *tm, struct ir_func *fn, long lo,
+                       int s, const long *smin, const long *smax)
+{
+    if (s > 0) {
+        db_uleb(b, AB_LEXBLOCK);
+        if (dw_split) {
+            db_uleb(b, (unsigned long)addr_index(DWTGT_TEXT, smin[s], NULL, 0));
+            db_u32(b, (unsigned long)(smax[s] - smin[s]));
+        } else {
+            reloc(out, DWSEC_INFO, b->len, addr_bytes(), DWTGT_TEXT, smin[s]);
+            db_addr(b, 0);
+            reloc_end(out, DWSEC_INFO, b->len, addr_bytes(), smax[s]);
+            db_addr(b, 0);
+        }
+    }
+    for (int v = 0; v < fn->ndbgvars; v++) {
+        int vs = fn->dbgvars[v].scope;
+        if (vs < 0 && smin != NULL)
+            continue;                    /* its block has no code */
+        if (vs < 0 || vs >= fn->nscopes || smin == NULL)
+            vs = 0;
+        if (vs == s)
+            emit_dbgvar(out, b, loc, tm, fn, v, lo);
+    }
+    if (smin)
+        for (int c = s + 1; c < fn->nscopes; c++)
+            if (fn->scope_up[c] == s && smin[c] < smax[c])
+                emit_block(out, b, loc, tm, fn, lo, c, smin, smax);
+    if (s > 0)
+        db_u8(b, 0);
+}
+
+/* A function's parameters and locals, each in its scope. A local declared
+ * in a nested block -- or in a for statement's first clause -- lives in a
+ * DW_TAG_lexical_block over its block's code, so `for (int i ...)` twice
+ * is two variables a debugger shows one at a time, and an inner `s` hides
+ * the outer one only inside its block. They were all the function's, and
+ * gdb printed the first `i` in the second loop -- at -O0, from its own,
+ * stale, slot. A block's code is that of every instruction irgen made in
+ * it or in a block inside it (ir_ins.scope, which instructions keep
+ * through every pass), its extent from the first to the last. A block the
+ * optimizer left with no code has no DIE, nor do its variables: nothing
+ * can stop inside it, and at the function's level its variable would
+ * shadow the function's own of that name. Where the backend recorded no
+ * ins_pc, every variable is the function's, as before. */
+static void emit_scopes(struct dwarf_out *out, struct dbuf *b, struct dbuf *loc,
+                        struct typemap *tm, struct ir_func *fn, long lo,
+                        long hi)
+{
+    if (fn->ndbgvars <= 0)
+        return;
+    if (!fn->ins_pc || fn->nscopes <= 1 || !fn->scope_up || fn->nins <= 0) {
+        emit_block(out, b, loc, tm, fn, lo, 0, NULL, NULL);
+        return;
+    }
+    int ns = fn->nscopes;
+    long *smin = xmalloc((size_t)ns * sizeof *smin);
+    long *smax = xmalloc((size_t)ns * sizeof *smax);
+    for (int s = 0; s < ns; s++) {
+        smin[s] = hi;
+        smax[s] = lo;
+    }
+    for (int k = 0; k < fn->nins; k++) {
+        long a = ins_start(fn, k, lo, hi), z = ins_start(fn, k + 1, lo, hi);
+        if (z <= a)
+            continue;
+        for (int t = fn->ins[k].scope; t > 0 && t < ns; t = fn->scope_up[t]) {
+            if (a < smin[t]) smin[t] = a;
+            if (z > smax[t]) smax[t] = z;
+        }
+    }
+    /* a variable of a block with no code: shown nowhere */
+    for (int v = 0; v < fn->ndbgvars; v++) {
+        int vs = fn->dbgvars[v].scope;
+        if (vs > 0 && vs < ns && smin[vs] >= smax[vs])
+            fn->dbgvars[v].scope = -1;
+    }
+    emit_block(out, b, loc, tm, fn, lo, 0, smin, smax);
+    free(smin);
+    free(smax);
 }
 
 static void emit_info(struct dwarf_out *out, struct dbuf *b,
@@ -944,38 +1100,7 @@ static void emit_info(struct dwarf_out *out, struct dbuf *b,
             }
         }
 
-        for (int v = 0; v < fn->ndbgvars; v++) {
-            struct ir_dbgvar *dv = &fn->dbgvars[v];
-            int toff = type_lookup(&tm, dv->ty);
-            /* a variable the optimizer took out of memory: where it is,
-             * range by range (ra_debug_locs) */
-            int ll = fn->ndbglocs && fn->ndbglocs[v] > 0 &&
-                     (fn->var_off[dv->vreg] == IR_VAR_NO_LOC || dv->moved);
-            int code = dv->is_param
-                ? (toff >= 0 ? (ll ? AB_PARAM_T_LL : AB_PARAM_T)
-                             : (ll ? AB_PARAM_LL : AB_PARAM))
-                : (toff >= 0 ? (ll ? AB_VAR_T_LL : AB_VAR_T)
-                             : (ll ? AB_VAR_LL : AB_VAR));
-            db_uleb(b, code);
-            db_str(b, dv->name);
-            if (toff >= 0) db_u32(b, (unsigned long)toff);
-            if (ll && dw_split) {
-                if (dw_nll == dw_capll) {
-                    dw_capll = dw_capll ? dw_capll * 2 : 16;
-                    dw_lloff = xrealloc(dw_lloff,
-                                        (size_t)dw_capll * sizeof *dw_lloff);
-                }
-                dw_lloff[dw_nll] = loc->len;
-                db_uleb(b, (unsigned long)dw_nll++);
-                emit_loclist(out, loc, fn->dbglocs[v], fn->ndbglocs[v], lo);
-            } else if (ll) {
-                reloc(out, DWSEC_INFO, b->len, 4, DWTGT_LOC, loc->len);
-                db_u32(b, 0);
-                emit_loclist(out, loc, fn->dbglocs[v], fn->ndbglocs[v], lo);
-            } else {
-                loc_fbreg(b, fn->var_off[dv->vreg]);
-            }
-        }
+        emit_scopes(out, b, loc, &tm, fn, lo, hi);
         db_u8(b, 0);                     /* end of this subprogram's children */
     }
     db_u8(b, 0);                         /* end of the CU's children */

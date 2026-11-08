@@ -323,7 +323,7 @@ if command -v llvm-dwarfdump > /dev/null 2>&1; then
         llvm-dwarfdump "$out/g.o" > "$out/g.dw" 2>&1
         for v in a b s; do
             # (a location list's entries are on the lines after it)
-            loc=$(grep -A4 "DW_AT_name	(\"$v\")" "$out/g.dw" |
+            loc=$(grep -A6 "DW_AT_name	(\"$v\")" "$out/g.dw" |
                   sed -n '/DW_AT_location/,$p' | tr -s ' \n' ' ')
             case $o,$loc in
             -Og,*DW_OP_fbreg*) ;;
