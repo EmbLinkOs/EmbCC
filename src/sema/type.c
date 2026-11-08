@@ -1,5 +1,6 @@
 #include "type.h"
 
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -331,7 +332,9 @@ struct type *ty_enum(struct type *t)
  * struct), and a member with no float in it (hard-float ABIs return a
  * float member in a float register). tests/golden/struct-handle-abi.sh
  * mixes EmbCC's objects with clang's to prove the bits the same. */
-struct type *ty_scalar_struct_ret(struct type *t)
+/* The integer or pointer a struct of one member (and nested ones of one
+ * member) holds, filling it; NULL for any other struct. */
+static struct type *scalar_leaf(struct type *t)
 {
     struct type *leaf = NULL;
     for (int hop = 0; hop < 8 && t; hop++) {
@@ -354,6 +357,12 @@ struct type *ty_scalar_struct_ret(struct type *t)
             return NULL;
         t = only->ty;
     }
+    return leaf;
+}
+
+struct type *ty_scalar_struct_ret(struct type *t)
+{
+    struct type *leaf = scalar_leaf(t);
     if (!leaf)
         return NULL;
     int n = ty_size(leaf);
@@ -367,6 +376,37 @@ struct type *ty_scalar_struct_ret(struct type *t)
     default:
         /* x86-64 and AArch64 return the same bits, but their backends
          * lower a return from the function's C type, not ret_abi */
+        return NULL;
+    }
+}
+
+/* A struct PARAMETER (and the argument for one) that travels as the
+ * integer it holds: every one ty_scalar_struct_ret takes, and on the
+ * 32-bit ABIs that pass an 8-byte, 8-aligned aggregate exactly where they
+ * pass a long long -- a register pair, aligned to an even register the
+ * same way, split between a register and the stack the same way (RISC-V)
+ * or never (AAPCS: the pair starts even), and 8 aligned bytes of stack --
+ * a struct holding one 8-byte integer: `struct { uint64_t ticks; }`, the
+ * RTOS's time. As a struct it arrived in its slot, written by the
+ * prologue outside the IR, and every use loaded it from there; as the
+ * integer it is the register pair it came in. Not for a RESULT: AAPCS
+ * returns an 8-byte composite through memory and a long long in r0:r1.
+ * Only where the struct's size and alignment are the integer's (no
+ * aligned or packed attribute). tests/golden/struct-handle-abi.sh links
+ * EmbCC's objects with clang's both ways. */
+struct type *ty_scalar_struct_param(struct type *t)
+{
+    struct type *r = ty_scalar_struct_ret(t);
+    if (r)
+        return r;
+    struct type *leaf = scalar_leaf(t);
+    if (!leaf || ty_size(leaf) != 8 || ty_size(t) != 8 ||
+        ty_own_align(t) != 8 || ty_own_align(leaf) != 8)
+        return NULL;
+    switch (target_get()) {
+    case TARGET_THUMB: case TARGET_RISCV32: case TARGET_XTENSA:
+        return getenv("EMBCC_NO_STRUCT8_PARAM") ? NULL : leaf;
+    default:
         return NULL;
     }
 }

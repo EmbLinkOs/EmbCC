@@ -2957,6 +2957,93 @@ static void shift64_var(struct t_fn *F, int op, int sign)
     t_patch_b(t, done, t->len);
 }
 
+/* A 64-bit shift by a register, with no branch (ARMv7-M on): a register
+ * shift by 32 or more gives 0 (its amount is the register's low byte, so
+ * a negative 32 - n or n - 32 is 224 or more), so both arms' terms can
+ * be ORed in whatever n is. For a logical right shift by n in 0..63:
+ *
+ *     lo = lo >> n | hi << (32 - n) | hi >> (n - 32);    hi = hi >> n
+ *
+ * and the mirror image for a left shift. An arithmetic shift fills with
+ * the sign at 32 or more, so its hi >> (n - 32) term is ORed in only
+ * where n - 32 is not negative, under one IT each (subs sets N). Each
+ * half is read where it is and the result written to its own pair, as
+ * GCC does it: 8 instructions and one scratch register, where the
+ * branching form took 13 and three pushed ones (r9-r11), and moved the
+ * operands in and out of them. EMBCC_T_NOSHIFT64VAR=1: the old form.
+ * 0 when no scratch register is free (the caller uses the old form). */
+static void src64(struct t_fn *F, int v, int slo, int shi, int *lo, int *hi);
+static void dst64(struct t_fn *F, int v, int *lo, int *hi);
+static int shift64_var_to(struct t_fn *F, const struct ir_ins *i)
+{
+    static int off = -1;
+    if (off < 0)
+        off = getenv("EMBCC_T_NOSHIFT64VAR") != NULL;
+    if (off)
+        return 0;
+    struct code *t = F->t;
+    int lsl = i->op == IR_SHL, sign = !lsl && i->sign;
+    int op = lsl ? T_SH_LSL : sign ? T_SH_ASR : T_SH_LSR;
+    int al, ah, dl, dh, n, tt = -1, k;
+    int c[4] = { 12, B_LO_N, B_HI_N, A_HI_N };
+    src64(F, i->a, A_LO, R_TMP, &al, &ah);
+    dst64(F, i->dst, &dl, &dh);
+    /* the amount: where it is, or in a scratch none of the halves uses */
+    if (in_reg(F, i->b)) {
+        n = F->loc[i->b];
+    } else {
+        for (k = 0; k < 4 && (c[k] == al || c[k] == ah || c[k] == dl ||
+                              c[k] == dh || c[k] < 0); k++)
+            ;
+        if (k == 4)
+            return 0;
+        n = c[k] == 12 ? 12 : t_scr(c[k]);
+        rd(F, i->b, n);
+    }
+    /* the amount is read after the result's first half is written: it
+     * must not be in the result's pair */
+    if (n == dl || n == dh) {
+        int m = -1;
+        for (k = 0; k < 4 && m < 0; k++)
+            if (c[k] >= 0 && c[k] != al && c[k] != ah && c[k] != dl &&
+                c[k] != dh)
+                m = c[k] == 12 ? 12 : t_scr(c[k]);
+        if (m < 0)
+            return 0;
+        t_mov_reg(t, m, n);
+        n = m;
+    }
+    for (k = 0; k < 4 && tt < 0; k++)
+        if (c[k] >= 0 && c[k] != al && c[k] != ah && c[k] != dl &&
+            c[k] != dh && c[k] != n)
+            tt = c[k] == 12 ? 12 : t_scr(c[k]);
+    if (tt < 0)
+        return 0;
+    /* the half that receives the cross terms is written last but one:
+     * the other source half is read by both terms first */
+    int sl = lsl ? ah : al, sx = lsl ? al : ah;   /* same side, cross */
+    int ds = lsl ? dh : dl, dx = lsl ? dl : dh;
+    int near = lsl ? T_SH_LSR : T_SH_LSL;   /* sx's bits into ds: 32 - n */
+    int far = lsl ? T_SH_LSL : (sign ? T_SH_ASR : T_SH_LSR); /* n - 32 */
+    t_alu_imm(t, T_OP_RSB, tt, n, 32, 0);
+    t_shift_reg(t, near, tt, sx, tt, 0);           /* sx << or >> 32 - n */
+    t_shift_reg(t, lsl ? T_SH_LSL : T_SH_LSR, ds, sl, n, 0);
+    t_alu_reg(t, T_OP_ORR, ds, ds, tt, 0);
+    t_alu_imm(t, T_OP_SUB, tt, n, 32, sign);
+    if (sign) {
+        t_it(t, T_PL, "");
+        t_shift_reg(t, far, tt, sx, tt, 0);
+        t_it(t, T_PL, "");
+        t_alu_reg(t, T_OP_ORR, ds, ds, tt, 0);
+    } else {
+        t_shift_reg(t, far, tt, sx, tt, 0);
+        t_alu_reg(t, T_OP_ORR, ds, ds, tt, 0);
+    }
+    t_shift_reg(t, op, dx, sx, n, 0);
+    wr64(F, i->dst, dl, dh);
+    return 1;
+}
+
 /* The same by a constant, where which arm applies is already known. */
 static void shift64_imm(struct t_fn *F, int op, int sign, long n)
 {
@@ -3821,6 +3908,8 @@ static int gen_ins64(struct t_fn *F, int n)
             wr64(F, i->dst, dl, dh);
             return 1;
         }
+        if (!i->imm_b && target_thumb_arch() >= 7 && shift64_var_to(F, i))
+            return 1;
         rd64(F, i->a, A_LO, A_HI);
         if (i->imm_b)
             shift64_imm(F, op, i->sign, (long)i->imm);
@@ -5881,7 +5970,7 @@ static void gen_ins(struct t_fn *F, int n)
         /* The comparison reads its left operand where it already is;
          * only the 0/1 result needs a register of its own. */
         int sa = rdr(F, i->a, T_ACC);
-        if (i->imm_b && ((i->imm >= 0 && i->imm <= 255) || t_imm_ok(i->imm))) {
+        if (i->imm_b && t_cmp_imm_ok(i->imm)) {
             t_cmp_imm(t, sa, i->imm);
         } else if (!i->imm_b) {
             /* ...and its right one too: `cmp r2, r4`, not a copy of r4

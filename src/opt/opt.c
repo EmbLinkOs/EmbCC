@@ -327,6 +327,16 @@ static void opt_func(struct ir_func *fn)
                 changed |= pass_dse(fn);
             changed |= pass_rangecheck(fn);
         }
+        /* x & (1 << n): x >> n & 1. Once the rounds have settled, so a
+         * mask the code builds more than once -- `if (p & BIT(s)) p &=
+         * ~BIT(s)`, in different blocks -- is one value with several
+         * readers by then (GCSE), and stays: rewritten in the first
+         * round, each test shifted x and the mask was built anyway. */
+        if (pass_bittest(fn)) {
+            pass_copyprop(fn);
+            pass_dce(fn);
+            outer = 1;
+        }
         if (pass_punfwd(fn)) {         /* a union's words, without the union */
             pass_copyprop(fn);
             pass_dce(fn);

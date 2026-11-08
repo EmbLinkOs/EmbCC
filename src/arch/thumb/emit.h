@@ -160,7 +160,9 @@ void t_umaal(struct code *c, int rdlo, int rdhi, int rn, int rm);
 void t_smmul(struct code *c, int rd, int rn, int rm);
 
 void t_cmp_reg(struct code *c, int rn, int rm);
-void t_cmp_imm(struct code *c, int rn, long imm);   /* t_imm_ok(imm) */
+void t_cmp_imm(struct code *c, int rn, long imm);   /* t_cmp_imm_ok(imm) */
+/* CMP's immediate, or CMN's of -imm */
+int t_cmp_imm_ok(long imm);
 void t_tst_reg(struct code *c, int rn, int rm);
 
 /* rd = extend(rm), size 1 or 2, `sign` for the signed forms. */

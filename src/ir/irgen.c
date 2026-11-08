@@ -4966,7 +4966,7 @@ static int emit_call(struct ir_func *fn, struct expr *e, const int *args,
     for (int k = 0; k < e->nargs; k++) {
         struct type *at = e->args[k]->ty;
         if (k < 64 && (e->scalar_args >> k & 1))
-            at = ty_scalar_struct_ret(at);
+            at = ty_scalar_struct_param(at);
         struct ir_arg *ar = &i->argv[k];
         ar->vreg = args[k];
         ar->ty = at;
@@ -6128,7 +6128,7 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             args[k] = gen_expr(fn, e->args[k]);
             if (k < 64 && (e->scalar_args >> k & 1))  /* the integer it holds */
                 args[k] = emit_load(fn, args[k],
-                                    ty_scalar_struct_ret(e->args[k]->ty));
+                                    ty_scalar_struct_param(e->args[k]->ty));
         }
         return emit_call(fn, e, args, fptemp);
     }
@@ -7382,7 +7382,7 @@ static void gen_func_(struct ir_func *fn, struct func *f)
         for (int k = 0; k < f->nparams; k++) {
             struct type *pt = f->param_tys[k];
             if (k < MAX_PARAMS && f->param_scalar[k])  /* as the integer */
-                pt = ty_scalar_struct_ret(pt);
+                pt = ty_scalar_struct_param(pt);
             struct ir_arg *a = &fn->param_abi[k];
             a->vreg = k;
             a->size = pt ? ty_size(pt) : 0;
@@ -7564,7 +7564,7 @@ static void gen_func_(struct ir_func *fn, struct func *f)
      * body uses (sema's param_scalar) */
     for (int k = 0; k < f->nparams && k < MAX_PARAMS; k++)
         if (f->param_scalar[k]) {
-            struct type *lt = ty_scalar_struct_ret(f->param_tys[k]);
+            struct type *lt = ty_scalar_struct_param(f->param_tys[k]);
             struct ir_ins *ld = emit(fn), *ad;
             ld->op = IR_LDVAR;
             ld->a = k;

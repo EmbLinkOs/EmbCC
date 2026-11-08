@@ -8,7 +8,11 @@
 # Cortex-M3, RV32 and RV64 -- and on x86-64 and (where this runs on one)
 # AArch64 macOS, which keep returning the struct as a struct. The
 # 8- and 16-bit ones and the two-field ones stay structs and are here too,
-# with values whose upper bits would show an extension gone wrong.
+# with values whose upper bits would show an extension gone wrong. A
+# struct of one 8-byte integer is PASSED as that integer on the 32-bit
+# targets (ty_scalar_struct_param): after an int (an even register pair
+# on ARM), after three (on ARM's stack), after seven (split between a7
+# and the stack on RV32), and first and last at once.
 set -u
 echo "TEST-MARKER struct-handle-abi"
 . "$(dirname "$0")/../lib.sh"
@@ -42,6 +46,11 @@ unsigned long long get64(h64 h);
 h16 mk16(unsigned short v);
 h8 mk8(unsigned char v);
 hpair mkpair(unsigned short lo, unsigned short hi);
+unsigned long long p1(int x, h64 h);
+unsigned long long p3(int x, int y, int z, h64 h);
+unsigned long long p7(int a, int b, int c, int d, int e, int f, int g, h64 h);
+unsigned long long p8(h64 k, int a, int b, int c, int d, int e, int f, h64 h);
+h64 inc64(h64 h, unsigned d);
 extern h32 (*fp32)(unsigned);
 int run(void);
 E
@@ -64,6 +73,20 @@ unsigned long long get64(h64 h) { return h.raw; }
 h16 mk16(unsigned short v) { h16 h = { (unsigned short)(v ^ 0x8001u) }; return h; }
 h8 mk8(unsigned char v) { h8 h = { (unsigned char)(v ^ 0x81u) }; return h; }
 hpair mkpair(unsigned short lo, unsigned short hi) { hpair p = { lo, hi }; return p; }
+unsigned long long p1(int x, h64 h) { return h.raw * 3u + (unsigned)x; }
+unsigned long long p3(int x, int y, int z, h64 h)
+{
+    return h.raw ^ ((unsigned long long)(unsigned)x << 40 | (unsigned)(y * z));
+}
+unsigned long long p7(int a, int b, int c, int d, int e, int f, int g, h64 h)
+{
+    return h.raw + (unsigned)(a + 2 * b + 3 * c + 4 * d + 5 * e + 6 * f + 7 * g);
+}
+unsigned long long p8(h64 k, int a, int b, int c, int d, int e, int f, h64 h)
+{
+    return k.raw - h.raw + (unsigned)(a * b * c + d + e + f);
+}
+h64 inc64(h64 h, unsigned d) { h.raw += d; return h; }
 h32 (*fp32)(unsigned) = mk32;
 E
 
@@ -97,6 +120,12 @@ int run(void)
     CHECK(mk8(0x7e).raw == 0xffu);
     hpair p = mkpair(0xfffe, 0x8001);
     CHECK(p.lo == 0xfffe && p.hi == 0x8001);
+    h64 w = { 0x8000000500000003ull + vk }, x = { 0x7ffffffbfffffff9ull };
+    CHECK(p1(-2, w) == w.raw * 3u + 0xfffffffeu);
+    CHECK(p3(5, 6, 7, w) == (w.raw ^ (5ull << 40 | 42u)));
+    CHECK(p7(1, 2, 3, 4, 5, 6, 7, w) == w.raw + 140u);
+    CHECK(p8(w, 2, 3, 4, 5, 6, 7, x) == w.raw - x.raw + 42u);
+    CHECK(inc64(x, 9).raw == x.raw + 9u);
     return 0;
 }
 E

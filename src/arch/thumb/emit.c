@@ -467,6 +467,15 @@ int t_alu_imm(struct code *c, int op, int rd, int rn, long imm, int s)
         return 1;
     }
     e = encode_imm((unsigned long)imm);
+    /* x & K where ~K is the modified immediate and K is not -- 0xffffff3f,
+     * a mask that clears two bits -- is `bic x, #0xc0`, and x | K `orn`:
+     * four bytes where the constant's mvn and the operation were six. Not
+     * when the flags are wanted: the carry a modified immediate leaves is
+     * its own top bit, which is not the same of K and of ~K. */
+    if (e < 0 && !s && (op == T_OP_AND || op == T_OP_ORR)) {
+        e = encode_imm(~(unsigned long)imm & 0xffffffffUL);
+        op = op == T_OP_AND ? T_OP_BIC : T_OP_ORN;
+    }
     if (e < 0)
         return 0;
     hw2(c, 0xf000u | (imm_i(e) << 10) | (unsigned)(op << 5) |
@@ -604,9 +613,29 @@ void t_cmp_imm(struct code *c, int rn, long imm)
         return;
     }
     e = encode_imm((unsigned long)imm);
-    /* CMP is SUB with S set and rd = PC; the caller checked t_imm_ok. */
+    if (e < 0) {
+        /* CMN with -imm, which t_cmp_imm_ok allowed: ADD with S set and
+         * rd = PC */
+        e = encode_imm((0UL - (unsigned long)imm) & 0xffffffffUL);
+        hw2(c, 0xf110u | (imm_i(e) << 10) | (unsigned)rn,
+               (imm_hi3(e) << 12) | 0x0f00u | imm_lo8(e));
+        return;
+    }
+    /* CMP is SUB with S set and rd = PC; the caller checked t_cmp_imm_ok. */
     hw2(c, 0xf1b0u | (imm_i(e) << 10) | (unsigned)rn,
            (imm_hi3(e) << 12) | 0x0f00u | imm_lo8(e));
+}
+
+/* A compare with K takes K as CMP's immediate, or -K as CMN's: `cmn r5,
+ * #60` sets N, Z, C and V as `cmp r5, #-60` would, for every K but 0
+ * (which CMP takes) and INT32_MIN (whose negation is itself). GCC writes
+ * them; EmbCC built -60 with mvn first. */
+int t_cmp_imm_ok(long imm)
+{
+    long k = (long)(int)(unsigned)((unsigned long)imm & 0xffffffffUL);
+    if ((k >= 0 && k <= 255) || t_imm_ok(k))
+        return 1;
+    return k < 0 && k != -2147483647L - 1 && t_imm_ok(-k);
 }
 
 void t_tst_reg(struct code *c, int rn, int rm)
