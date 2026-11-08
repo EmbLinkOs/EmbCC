@@ -97,6 +97,10 @@ struct xt_lit {
 struct xt_fn {
     long cfi_frame_end, cfi_fp_end; /* the prologue's steps, for the CFI */
     int *usecnt;         /* per vreg: how many reads (fusion), or NULL */
+    /* per vreg: 1 when its one definition is a constant, which is then
+     * kval[v] (an argument already extended needs no extui), or NULL */
+    char *kdef;
+    long *kval;
     int skip_next;       /* the instruction after this one is already out */
     int keep_vars;
     struct ir_func *fn;
@@ -1983,12 +1987,24 @@ static void gen_call(struct xt_fn *F, int n)
         }
         if (ns_)
             set_args_half(F, sd_, sv_, sh_, ns_);
-        /* narrower than a word: extended, as GCC's callers do */
+        /* narrower than a word: extended, as GCC's callers do -- but a
+         * constant whose value is already its own extension (`trace(6,
+         * 105, 0)` into unsigned char and short) was written as that */
         for (int k = 0; k < i->nargs; k++) {
             struct ir_arg *a = &i->argv[k];
             struct xpiece *pc = &pl[k].p[0];
             if (a->is_struct || pc->reg < 0 || a->size >= 4)
                 continue;
+            if (F->kdef && a->vreg >= 0 && a->vreg < F->fn->nvregs &&
+                F->kdef[a->vreg] == 1) {
+                long kv = F->kval[a->vreg];
+                int sg = a->ty ? ty_signed_int(a->ty) : 1;
+                long lo = sg ? -(1L << (8 * a->size - 1)) : 0;
+                long hi = sg ? (1L << (8 * a->size - 1)) - 1
+                             : (1L << (8 * a->size)) - 1;
+                if (kv >= lo && kv <= hi)
+                    continue;
+            }
             ext_reg(F, OUT_ARG(pc->reg), OUT_ARG(pc->reg), a->size,
                     a->ty ? ty_signed_int(a->ty) : 1);
         }
@@ -3461,6 +3477,21 @@ static void gen_func(struct ir_func *fn, struct code *t, struct xt_sites *st,
         free(pin);
         if (fn->nvregs) {
             F.usecnt = xmalloc((size_t)fn->nvregs * sizeof *F.usecnt);
+            F.kdef = xcalloc((size_t)fn->nvregs, 1);
+            F.kval = xcalloc((size_t)fn->nvregs, sizeof *F.kval);
+            for (int q = 0; q < fn->nins; q++) {
+                const struct ir_ins *in = &fn->ins[q];
+                int dv = in->dst;
+                if (dv < 0 || dv >= fn->nvregs || in->op == IR_STVAR)
+                    continue;
+                if (F.kdef[dv] == 0 && in->op == IR_CONST && !in->flt &&
+                    in->w <= 4) {
+                    F.kdef[dv] = 1;
+                    F.kval[dv] = in->imm;
+                } else {
+                    F.kdef[dv] = 2;      /* written twice, or not a constant */
+                }
+            }
             ra_count_vreg_uses(fn, F.usecnt);
         }
         /* EMBCC_XT_RA_MAX=N leaves only the first N vregs in registers --
@@ -3622,6 +3653,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct xt_sites *st,
     ra_debug_finish(fn, t->len, F.loc, NULL, 0, F.slot, -1, F.wide, 1, 4);
     f->stack_bytes = (int)F.frame;
     free(F.usecnt);
+    free(F.kdef);
+    free(F.kval);
     free(F.slot);
     cg_note_labels(fn, F.label_off);
     free(F.label_off);
