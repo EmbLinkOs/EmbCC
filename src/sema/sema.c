@@ -5974,7 +5974,7 @@ static void check_expr_main(struct unit *u, struct func *f, struct scope *sc,
                         k < (int)(8 * sizeof e->scalar_args); k++)
             if (!predef_is_cxx() && e->args[k]->ty &&
                 e->args[k]->ty->kind == TY_STRUCT &&
-                ty_scalar_struct_ret(e->args[k]->ty))
+                ty_scalar_struct_param(e->args[k]->ty))
                 e->scalar_args |= 1UL << k;
         break;
     }
@@ -10060,13 +10060,13 @@ static void check_func(struct unit *u, struct func *f)
         f->param_scalar[i] = 0;
         if (f->is_naked || predef_is_cxx() || !f->params[i] ||
             !f->param_tys[i] || f->param_tys[i]->kind != TY_STRUCT ||
-            !ty_scalar_struct_ret(f->param_tys[i]))
+            !ty_scalar_struct_param(f->param_tys[i]))
             continue;
         int c = scope_add(&sc, "<param copy>", f->param_tys[i], NULL);
         sc.vars[i].alias = c + 1;
         /* the slot holds the integer and nothing else reads it, so it is
          * that integer's: mem2reg then takes it as the register it came in */
-        sc.vars[i].ty = ty_scalar_struct_ret(f->param_tys[i]);
+        sc.vars[i].ty = ty_scalar_struct_param(f->param_tys[i]);
         f->param_scalar[i] = c + 1;
     }
     /* A binary16 parameter arrives as its carrier (half_signature); the

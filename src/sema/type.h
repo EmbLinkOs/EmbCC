@@ -268,6 +268,7 @@ struct type *ty_enum(struct type *t);    /* an enumerated type over t */
  * target returns it in a register exactly as that integer: the integer's
  * type, else NULL. */
 struct type *ty_scalar_struct_ret(struct type *t);
+struct type *ty_scalar_struct_param(struct type *t);
 /* `t` without its own qualifiers (const, volatile, _Atomic): the
  * original a qualified copy points at. A pointee's stay. */
 struct type *ty_unqual(struct type *t);
