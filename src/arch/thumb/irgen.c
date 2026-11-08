@@ -306,6 +306,31 @@ void irg_asm_thumb(struct ir_func *fn, struct stmt *s)
             used[r] = 1;
     }
     t_mark_template_regs(file, s->line, a->tmpl, used);
+    /* The FP registers it changes -- sN and dN in the clobber list or
+     * the template: s16-s31 (d8-d15) are callee-saved, the prologue's to
+     * vpush (ir_asm.fclob), as GCC saves them */
+    unsigned fclob = 0;
+    for (int i = 0; i <= a->nclob; i++) {
+        const char *p = i < a->nclob ? a->clob[i] : a->tmpl;
+        for (; *p; p++) {
+            if ((*p != 's' && *p != 'd') ||
+                (p > (i < a->nclob ? a->clob[i] : a->tmpl) &&
+                 (isalnum((unsigned char)p[-1]) || p[-1] == '_' ||
+                  p[-1] == '%' || p[-1] == '.')))
+                continue;
+            int n = 0, k = 1;
+            if (!isdigit((unsigned char)p[1]))
+                continue;
+            while (isdigit((unsigned char)p[k]))
+                n = n * 10 + (p[k++] - '0');
+            if (isalnum((unsigned char)p[k]) || p[k] == '_')
+                continue;
+            if (*p == 's' && n < 32)
+                fclob |= 1u << n;
+            else if (*p == 'd' && n < 16)
+                fclob |= 3u << (2 * n);
+        }
+    }
 
     for (int i = 0; i < nops; i++) {
         if (regs[i] != -2)
@@ -465,6 +490,7 @@ void irg_asm_thumb(struct ir_func *fn, struct stmt *s)
     for (int r = 0; r < 16; r++)
         if (used[r])
             ia->clob |= 1UL << r;
+    ia->fclob = fclob;
     struct ir_ins *ins = emit(fn);
     ins->op = IR_ASM;
     ins->asm_ir = ia;

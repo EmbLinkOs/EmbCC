@@ -420,7 +420,7 @@ needs one, and the registers each ABI reserves:
 |---|---|---|
 | x86-64 | `rbx`, `r12` to `r15`; on Windows also `rsi`, `rdi` | |
 | AArch64 | x19 to x28 | x29, the frame pointer |
-| ARM Cortex-M (ARMv7-M, ARMv8-M Mainline), ARMv7-A | r4 to r11 | r7 in a function with a variable-length array (its frame base) |
+| ARM Cortex-M (ARMv7-M, ARMv8-M Mainline), ARMv7-A | r4 to r11; with an FPU, s16 to s31 (d8 to d15), by `vpush` | r7 in a function with a variable-length array (its frame base) |
 | ARMv6-M, ARMv8-M Baseline | r4 to r7 | r8 to r11: `push` does not reach them, and this backend does not yet save them through a low register |
 | RISC-V | s0 to s11 | s0 in a function with a variable-length array |
 | MIPS32, MIPS64 | s0 to s7, s8 (`$fp`) | k0, k1, gp, sp; `$fp` in a function with a variable-length array |

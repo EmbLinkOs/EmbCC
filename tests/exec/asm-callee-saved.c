@@ -62,6 +62,31 @@ __attribute__((noinline)) static int victim(int x)
 
 __attribute__((noinline)) static int seed(int k) { return k * 3 + 1; }
 
+/* The FPU's callee-saved registers too: s16-s31 on an ARM with an FPU,
+ * which EmbCC's vpush covered only for the values it allocated there --
+ * an asm that changed s17 or d9 left the caller's value destroyed. The
+ * caller sets s16-s19 by asm (and so saves them itself), calls the
+ * victim, and reads them back. */
+#if defined(__arm__) && defined(__ARM_FP) && !defined(__SOFTFP__)
+#define FP_TEST 1
+__attribute__((noinline)) static void fp_victim(void)
+{
+    __asm__ volatile("vmov s17, %0" :: "r"(0) : "s17");
+    __asm__ volatile("vsub.f32 s18, s18, s18\n\tvsub.f32 s19, s19, s19" ::: "d9");
+}
+
+__attribute__((noinline)) static int fp_keep(unsigned v)
+{
+    unsigned a, b, c;
+    __asm__ volatile("vmov s17, %0\n\tvmov s18, %0\n\tvmov s19, %0"
+                     :: "r"(v) : "s17", "s18", "s19");
+    fp_victim();
+    __asm__ volatile("vmov %0, s17\n\tvmov %1, s18\n\tvmov %2, s19"
+                     : "=r"(a), "=r"(b), "=r"(c) :: "s17", "s18", "s19");
+    return a == v && b == v && c == v;
+}
+#endif
+
 int main(void)
 {
     int a = seed(1), b = seed(2), c = seed(3), d = seed(4), e = seed(5),
@@ -76,5 +101,9 @@ int main(void)
         return 1;
     if (s != 6 + 5 + 8)
         return 2;
+#ifdef FP_TEST
+    if (!fp_keep(0x3fc00000u))
+        return 3;
+#endif
     return 42 + (a + b + c + d + e + f + g + h + i + j + k + l) - 246;
 }

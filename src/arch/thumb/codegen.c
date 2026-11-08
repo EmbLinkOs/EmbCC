@@ -7735,6 +7735,19 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
             if (!have)
                 F.used_callee[F.nsave++] = r;
         }
+        /* ...and s16-s31 an asm changes: the vpush range reaches them */
+        if (target_thumb_fpu()) {
+            unsigned fm = 0;
+            int top = -1;
+            for (int q = 0; q < fn->nins; q++)
+                if (fn->ins[q].op == IR_ASM && fn->ins[q].asm_ir)
+                    fm |= fn->ins[q].asm_ir->fclob;
+            for (int r = 16; r < 32; r++)
+                if (fm >> r & 1)
+                    top = r;
+            if (top >= 16 && ((top - 15 + 1) & ~1) > F.nfsave)
+                F.nfsave = (top - 15 + 1) & ~1;
+        }
     }
     /* A leaf: no call in the IR and none the lowering makes -- the
      * t_op_calls_helper the allocator already trusts -- and no inline asm,
