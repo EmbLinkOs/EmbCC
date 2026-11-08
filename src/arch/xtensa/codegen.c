@@ -1738,6 +1738,13 @@ static void logic_half(struct xt_fn *F, int op, int d, int s, unsigned long c,
     xt_alu(F->t, op, d, s, tmp);
 }
 
+/* May a result pair starting at d be written while the pair at s is still
+ * being read? When they are the same pair or share no register. */
+static int pair_fits(int d, int s)
+{
+    return d == s || d - s >= 2 || s - d >= 2;
+}
+
 /* Every 64-bit operation that is not a call. Returns 0 for one this does
  * not handle, which the caller refuses by name. */
 static int gen_ins64(struct xt_fn *F, int n)
@@ -1748,6 +1755,11 @@ static int gen_ins64(struct xt_fn *F, int n)
 
     switch (i->op) {
     case IR_CONST:
+        if (in_reg(F, i->dst)) {             /* straight into its pair */
+            li(F, F->loc[i->dst], (long long)(i->imm & 0xffffffffL));
+            li(F, F->loc[i->dst] + 1, (long long)((i->imm >> 32) & 0xffffffffL));
+            return 1;
+        }
         li(F, A_LO, (long long)(i->imm & 0xffffffffL));
         li(F, A_HI, (long long)((i->imm >> 32) & 0xffffffffL));
         wr64(F, i->dst, A_LO, A_HI);
@@ -1854,25 +1866,31 @@ static int gen_ins64(struct xt_fn *F, int n)
     case IR_NEG: {
         /* 0 - x: the low word negated, the high word negated less a
          * borrow when the low word was not 0 */
-        int al, ah, skip;
+        int al, ah, skip, dl = A_LO, dh = A_HI, direct;
         src64(F, i->a, A_LO, A_HI, &al, &ah);
-        xt_neg(t, A_HI, ah);
-        xt_neg(t, A_LO, al);
-        skip = br_place(F, test_z(XT_BEQZ, A_LO));
-        xt_addi(t, A_HI, A_HI, -1);
+        direct = in_reg(F, i->dst) && pair_fits(F->loc[i->dst], al);
+        if (direct) { dl = F->loc[i->dst]; dh = dl + 1; }
+        xt_neg(t, dh, ah);
+        xt_neg(t, dl, al);
+        skip = br_place(F, test_z(XT_BEQZ, dl));
+        xt_addi(t, dh, dh, -1);
         br_land(F, skip);
-        wr64(F, i->dst, A_LO, A_HI);
+        if (!direct)
+            wr64(F, i->dst, A_LO, A_HI);
         return 1;
     }
     case IR_BNOT: {
         /* ~x = -x - 1, a word at a time */
-        int al, ah;
+        int al, ah, dl = A_LO, dh = A_HI, direct;
         src64(F, i->a, A_LO, A_HI, &al, &ah);
-        xt_neg(t, A_LO, al);
-        xt_addi(t, A_LO, A_LO, -1);
-        xt_neg(t, A_HI, ah);
-        xt_addi(t, A_HI, A_HI, -1);
-        wr64(F, i->dst, A_LO, A_HI);
+        direct = in_reg(F, i->dst) && pair_fits(F->loc[i->dst], al);
+        if (direct) { dl = F->loc[i->dst]; dh = dl + 1; }
+        xt_neg(t, dl, al);
+        xt_addi(t, dl, dl, -1);
+        xt_neg(t, dh, ah);
+        xt_addi(t, dh, dh, -1);
+        if (!direct)
+            wr64(F, i->dst, A_LO, A_HI);
         return 1;
     }
     case IR_SHL: case IR_SHR: {
@@ -1929,6 +1947,22 @@ static int gen_ins64(struct xt_fn *F, int n)
         int addr = rdr(F, i->a, ADDR);
         if (i->vol)
             xt_memw(t);
+        if (i->size == 8 && in_reg(F, i->dst) &&
+            (i->natural || (F->loc[i->dst] != addr &&
+                            F->loc[i->dst] + 1 != addr))) {
+            /* straight into its pair; the half holding the address last
+             * (a misaligned load assembles in scratches of its own, and
+             * needs one free when it overwrites its base: not then) */
+            int dl = F->loc[i->dst], dh = dl + 1;
+            if (dl == addr) {
+                ld_any(F, dh, addr, i->memoff + 4, 4, 0, i->natural, SCR, -1);
+                ld_any(F, dl, addr, i->memoff, 4, 0, i->natural, SCR, -1);
+            } else {
+                ld_any(F, dl, addr, i->memoff, 4, 0, i->natural, SCR, -1);
+                ld_any(F, dh, addr, i->memoff + 4, 4, 0, i->natural, SCR, -1);
+            }
+            return 1;
+        }
         if (i->size == 8) {
             ld_any(F, A_LO, addr, i->memoff, 4, 0, i->natural, SCR, -1);
             ld_any(F, A_HI, addr, i->memoff + 4, 4, 0, i->natural, SCR, -1);
@@ -1942,14 +1976,15 @@ static int gen_ins64(struct xt_fn *F, int n)
         return 1;
     }
     case IR_STORE: {
-        int addr = rdr(F, i->a, ADDR);
-        rd64(F, i->b, A_LO, A_HI);
+        int addr = rdr(F, i->a, ADDR), vl, vh;
+        /* from the value's own pair, not a copy of it */
+        src64(F, i->b, A_LO, A_HI, &vl, &vh);
         if (i->vol)
             xt_memw(t);
-        st_any(F, A_LO, addr, i->memoff, i->size == 8 ? 4 : i->size,
+        st_any(F, vl, addr, i->memoff, i->size == 8 ? 4 : i->size,
                i->natural, SCR);
         if (i->size == 8)
-            st_any(F, A_HI, addr, i->memoff + 4, 4, i->natural, SCR);
+            st_any(F, vh, addr, i->memoff + 4, 4, i->natural, SCR);
         return 1;
     }
     case IR_SELECT: {

@@ -6,7 +6,9 @@
 # through two scratch pairs and back -- and an (in)equality with its
 # branch is one test per half, against an immediate where bnei/beqi name
 # it (`a == ~0ull`: bnei a2, -1; bnei a3, -1) -- not a 0/1 built and
-# tested. Sizes in bytes, from the object (before: 26, 28, 15, 36, 27);
+# tested. A 64-bit load, store, constant, negation and complement go
+# straight into or out of the value's pair too. Sizes in bytes, from the
+# object (before: 26, 28, 15, 36, 27, 35, 28);
 # that the code is right is xtensa-exec's (its corpus computes in 64
 # bits).
 set -u
@@ -23,11 +25,13 @@ u64 sub64(u64 a, u64 b) { return a - b; }
 u64 xor64(u64 a, u64 b) { return a ^ b; }
 int ismax(u64 a) { return a == ~0ull ? 3 : 5; }
 int iseq(u64 a, u64 b) { if (a == b) return 3; return 5; }
+void cpor(u64 *d, const u64 *s) { *d = *s | *d; }
+void negst(u64 *d, u64 a) { *d = -a; }
 EOC
 "$EMBCC" --target=xtensa-esp32-elf -Os -c "$out/i.c" -o "$out/i.o" || exit 1
 "$OD" -S --radix=d "$out/i.o" | awk '{print $4, $2 + 0}' > "$out/sizes.txt"
 fail=0
-for want in add64:16 sub64:18 xor64:12 ismax:20 iseq:19; do
+for want in add64:16 sub64:18 xor64:12 ismax:20 iseq:19 cpor:25 negst:22; do
     f=${want%%:*}; max=${want#*:}
     got=$(awk -v f="$f" '$1 == f {print $2}' "$out/sizes.txt")
     [ -n "$got" ] && [ "$got" -le "$max" ] || {
