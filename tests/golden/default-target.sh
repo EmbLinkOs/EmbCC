@@ -1,5 +1,6 @@
 #!/bin/sh
-# The CONFIGURED default target: `embcc main.c` compiles for the board.
+# The default target: the machine EmbCC runs on, as with GCC and clang,
+# and the CONFIGURED one, with which `embcc main.c` compiles for the board.
 #
 # A person whose work is one machine should not type --target= a hundred
 # times a day, and a Makefile that inherited no environment should still
@@ -41,9 +42,18 @@ fail() { echo "$@"; exit 1; }
 mach() { "$EMBCC" "$@" -dumpmachine 2>&1; }
 
 # ---- 1. the order -----------------------------------------------------
+# With nothing configured, the machine this runs on, as GCC and clang
+# build for it (`embcc hello.c -o hello` makes a program for here)
+case "$(uname -s)-$(uname -m)" in
+    Darwin-arm64)   host=aarch64-apple-darwin ;;
+    Darwin-x86_64)  host=x86_64-apple-darwin ;;
+    Linux-x86_64)   host=x86_64-linux-gnu ;;
+    Linux-aarch64)  host=aarch64-linux-gnu ;;
+    *)              host=x86_64-elf ;;
+esac
 got=$(mach)
-[ "$got" = x86_64-elf ] ||
-    fail "with nothing configured the default is '$got', not x86_64-elf"
+[ "$got" = "$host" ] ||
+    fail "with nothing configured the default is '$got', not this host's $host"
 
 got=$(EMBCC_DEFAULT_TARGET=riscv32-unknown-elf mach)
 [ "$got" = riscv32-unknown-elf ] ||
@@ -52,7 +62,7 @@ got=$(EMBCC_DEFAULT_TARGET=riscv32-unknown-elf mach)
 got=$(EMBCC_DEFAULT_TARGET=riscv32-unknown-elf mach --target=aarch64-elf)
 [ "$got" = aarch64-elf ] ||
     fail "--target= did not override the environment: got '$got'"
-echo "  --target= > EMBCC_DEFAULT_TARGET > x86_64-elf"
+echo "  --target= > EMBCC_DEFAULT_TARGET > the host ($host)"
 
 # ---- 2. the refusal ---------------------------------------------------
 # In a subshell: `VAR=val func` leaves VAR set in the CALLING shell when
@@ -130,7 +140,7 @@ echo "  and a default makes the code --target= makes"
 # now, around this very script, so if the driver ever reads it the suite
 # retargets itself.
 got=$(EMBCC_TARGET=riscv64-unknown-elf mach)
-[ "$got" = x86_64-elf ] ||
+[ "$got" = "$host" ] ||
     fail "the driver read EMBCC_TARGET (got '$got') -- that name belongs to
        tests/lib.sh, and honouring it retargets the whole suite"
 echo "  EMBCC_TARGET is the harness's, and the driver leaves it alone"

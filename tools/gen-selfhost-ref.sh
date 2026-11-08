@@ -16,7 +16,7 @@ SRCS=$(make -pn 2>/dev/null | sed -n 's/^SRCS := //p' | head -1)
 [ -n "$SRCS" ] || { echo "gen-selfhost-ref: cannot read SRCS from the Makefile" >&2; exit 1; }
 rm -rf ref; mkdir -p ref
 for f in $SRCS; do
-    ./embcc -c "$f" $INCS -o "ref/$(echo "${f#src/}" | tr / _ | sed 's/\.c$//').o"
+    ./embcc --target=x86_64-elf -c "$f" $INCS -o "ref/$(echo "${f#src/}" | tr / _ | sed 's/\.c$//').o"
 done
 echo "wrote $(ls ref/*.o | wc -l) reference objects"
 ./embld -o "$OS_BUILD/embcc.elf" "$OS_BUILD/crt0.o" "$OS_BUILD/syscalls.o" \

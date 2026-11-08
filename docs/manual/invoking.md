@@ -733,9 +733,19 @@ With no `--target=`, the target is chosen in this order:
 2. the `DEFAULT_TARGET` the compiler was built with
    (`make DEFAULT_TARGET=riscv32-unknown-elf`; see
    [Getting started](getting-started.md#choosing-the-default-target));
-3. `x86_64-elf`, or in a compiler built without x86 (`make TARGETS=`; see
-   [Choosing the targets](getting-started.md#choosing-the-targets)) the
-   first family it has: `thumbv7m-none-eabi` for `TARGETS=arm`.
+3. the machine the compiler runs on, as GCC and clang do:
+   `aarch64-apple-darwin` on an arm64 Mac, `x86_64-apple-darwin` on an
+   Intel one, `x86_64-linux-gnu` or `aarch64-linux-gnu` on Linux,
+   `x86_64-windows-gnu` on Windows, `x86_64-emblink` on EmbLinkOS. So
+   `embcc hello.c -o hello` builds a program that runs here;
+4. where the compiler was built without that machine's family
+   (`make TARGETS=`; see
+   [Choosing the targets](getting-started.md#choosing-the-targets)) or
+   on a system it has no hosted target for, `x86_64-elf`, or without x86
+   the first family it has: `thumbv7m-none-eabi` for `TARGETS=arm`.
+
+A build that compiles for a board or a kernel says so with `--target=`,
+as it would with clang.
 
 `--target=` on the command line overrides both. A default that is not an
 accepted triple stops every invocation, naming where it came from:

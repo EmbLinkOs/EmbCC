@@ -119,8 +119,44 @@ const char *target_default_name(void)
     return t && *t ? t : NULL;
 }
 
+/* The machine this compiler runs on, as a target: what GCC and clang
+ * build for when no --target= is given. Read from the compiler that built
+ * this one, so a compiler built on an arm64 Mac targets arm64 macOS and
+ * one built on Linux targets Linux, and a compiler EmbCC builds for
+ * EmbLinkOS targets EmbLinkOS. NULL for a host EmbCC has no hosted target
+ * for, which then falls back as before. */
+static const char *host_triple(void)
+{
+#if defined(__emblink__) || defined(__EmbLinkOS__)
+#  if defined(__aarch64__)
+    return "aarch64-emblink";
+#  else
+    return "x86_64-emblink";
+#  endif
+#elif defined(__APPLE__) && defined(__aarch64__)
+    return "aarch64-apple-darwin";
+#elif defined(__APPLE__) && defined(__x86_64__)
+    return "x86_64-apple-darwin";
+#elif defined(__linux__) && defined(__x86_64__)
+    return "x86_64-linux-gnu";
+#elif defined(__linux__) && defined(__aarch64__)
+    return "aarch64-linux-gnu";
+#elif defined(_WIN32) && (defined(__x86_64__) || defined(_M_X64))
+    return "x86_64-windows-gnu";
+#else
+    return NULL;
+#endif
+}
+
 const char *target_builtin_default(void)
 {
+    /* the host, where its family is built in (make TARGETS=) */
+    const char *h = host_triple();
+    enum target_arch a;
+    enum target_os os;
+    enum target_fmt fmt;
+    if (h && target_from_triple(h, &a, &os, &fmt) && target_arch_built(a))
+        return h;
     if (FAMILY_BUILT(x86))
         return "x86_64-elf";
     for (int i = 0; i < target_family_count(); i++)
@@ -240,10 +276,8 @@ int target_apply_default(const char **bad)
     enum target_os os;
     enum target_fmt fmt;
 
-    /* the built-in default stands -- x86_64-elf, unless this compiler was
-     * built without x86 (make TARGETS=), and then its first family's */
-    if (!t && FAMILY_BUILT(x86))
-        return 1;
+    /* else the built-in default: the machine this compiler runs on, as
+     * GCC and clang build for it (target_builtin_default) */
     if (!t)
         t = target_builtin_default();
     if (!target_from_triple(t, &a, &os, &fmt)) {

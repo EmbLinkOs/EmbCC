@@ -93,6 +93,12 @@ fi
 cd "$(dirname "$0")/.."
 EMBCC=${EMBCC_ARG:-$PWD/embcc}
 export EMBCC
+# The suite's tests were written against x86_64-elf as the target nothing
+# names, and name every other one: they compile for it on any host. The
+# compiler's own default is the machine it runs on (default-target.sh,
+# which unsets this, tests that), and a person's EMBCC_DEFAULT_TARGET for
+# a board must not retarget the suite.
+export EMBCC_DEFAULT_TARGET=x86_64-elf
 
 # Turn on the optimizer's IR verifier for the whole suite: every -O1/-O2 compile
 # (optimizer.sh, regalloc-O2.sh, the on-metal kernel build) then checks that no

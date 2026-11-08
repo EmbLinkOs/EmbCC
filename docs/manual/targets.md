@@ -93,9 +93,10 @@ embcc:   x86_64
 ...
 ```
 
-With no `--target=`, EmbCC compiles for `x86_64-elf`, unless the compiler
-was built with `make DEFAULT_TARGET=TRIPLE` or the environment sets
-`EMBCC_DEFAULT_TARGET`.
+With no `--target=`, EmbCC compiles for the machine it runs on, as GCC
+and clang do, unless the compiler was built with `make
+DEFAULT_TARGET=TRIPLE` or the environment sets `EMBCC_DEFAULT_TARGET`
+([The default target](invoking.md#the-default-target)).
 
 ### `EMBCC_DEFAULT_TARGET`
 

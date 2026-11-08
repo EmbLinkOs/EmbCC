@@ -1576,8 +1576,9 @@ instruction. Fences compile to nothing.
 
 ## x86-64 kernels and EmbLinkOS
 
-`x86_64-elf` is the freestanding x86-64 target and the default when no
-`--target=` is given. `x86_64-emblink` is the same code generator with
+`x86_64-elf` is the freestanding x86-64 target; name it with
+`--target=x86_64-elf`, since the default is the machine EmbCC runs on.
+`x86_64-emblink` is the same code generator with
 `__EmbLinkOS__`, `__emblink__` and `__emblink` predefined, for EmbLinkOS
 userland.
 

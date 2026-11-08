@@ -786,7 +786,7 @@ check: embcc $(if $(call built,x86),libc-x86_64 libcxx-x86_64)
 .PHONY: check-self
 check-self: embcc
 	@n=0; bad=0; for f in $(SRCS); do n=$$((n + 1)); \
-	    ./embcc -std=c99 -Wall -Wextra -Werror -O2 -Isrc -c -o /dev/null $$f || \
+	    ./embcc --target=x86_64-elf -std=c99 -Wall -Wextra -Werror -O2 -Isrc -c -o /dev/null $$f || \
 	    { echo "check-self: $$f"; bad=$$((bad + 1)); }; done; \
 	echo "check-self: EmbCC compiles $$((n - bad)) of its $$n sources"; [ $$bad -eq 0 ]
 
@@ -1246,7 +1246,7 @@ libcxx-x86_64: embcc embar
 	@mkdir -p $(BUILD)/libcxx/x86_64
 	@for f in $(LIBCXX_SRCS); do \
 	    o=$(BUILD)/libcxx/x86_64/$$(basename $$f .cc).o; \
-	    ./embcc -c -O2 -x c++ $(LIBCXX_INC) $$f -o $$o || exit 1; \
+	    ./embcc --target=x86_64-elf -c -O2 -x c++ $(LIBCXX_INC) $$f -o $$o || exit 1; \
 	done
 	@rm -f $(BUILD)/libcxx/x86_64/libcxx.a
 	@$${EMBCC_X86_AR:-./embar} rcs $(BUILD)/libcxx/x86_64/libcxx.a \
