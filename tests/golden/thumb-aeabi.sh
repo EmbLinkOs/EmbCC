@@ -60,7 +60,7 @@ for cfg in "thumbv7em-none-eabi -mcpu=cortex-m4 -mfloat-abi=soft" \
             echo "FAIL: $T $opt: does not link: $(head -1 $o.lerr)"; fail=1; continue; }
         sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-30}" --until '==END==' \
             "$QEMU" -M mps2-an386 -cpu cortex-m4 -nographic -kernel $o.elf \
-            > $o.txt 2>/dev/null
+            2>/dev/null | sed '/^==EXIT==$/d' > $o.txt  # (boot.c's end)
         if diff -u "$out/ref.txt" $o.txt > $o.diff; then
             echo "$T $opt: clang's object calls $n helpers and agrees with the host"
         else

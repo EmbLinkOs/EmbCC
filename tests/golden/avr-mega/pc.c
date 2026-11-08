@@ -16,11 +16,17 @@ __attribute__((constructor)) static void c0(void) { ctor = 7; }
 static const char table[] = "rodata copied";
 static int data_init = 1234;
 static volatile unsigned ticks;
-/* The fifth tick turns the timer's interrupt off: counted by main and
- * then stopped by cli(), a sixth could land between the last read and
- * the cli -- QEMU's timer runs on the host's clock, and a slow runner
- * printed 6. */
-ISR(TIMER1_COMPA_vect) { if (++ticks == 5) TIMSK1 = 0; }
+/* Five ticks, then the count stops, whatever else arrives. QEMU's timer
+ * runs on the host's clock and catches up on a slow runner: counted by
+ * main and stopped by cli(), a sixth landed before the cli; stopped by
+ * clearing TIMSK1 in the fifth, a compare match already pending in QEMU
+ * was still taken after it (6 again, on Ubuntu 26.04). The handler
+ * running five times is what the test is for. */
+ISR(TIMER1_COMPA_vect)
+{
+    if (ticks < 5) ticks++;
+    if (ticks == 5) TIMSK1 = 0;
+}
 static void *ra(void) { return __builtin_return_address(0); }
 int main(void)
 {
