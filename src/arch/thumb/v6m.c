@@ -445,12 +445,17 @@ static unsigned v6_writes(const struct t_fn *F, int from, int to, int *br)
     return m;
 }
 
-/* May v's slot be cached: a value in memory, its address never taken. */
+/* May v's slot be cached: a value in memory, its address never taken --
+ * and not a volatile local, every read of which is a read of memory. A
+ * cached one read back the register last stored to it: `volatile int
+ * changed = 0; if (__builtin_setjmp(b) == 0) { changed = 1; ... }` read
+ * `changed` after the jump back as `mov r0, r4`, the 0 still in r4. */
 static int v6_rc_ok(const struct t_fn *F, int v)
 {
     long fo;
     return v >= 0 && !(F->loc && F->loc[v] >= 0) && F->slot[v] >= 0 &&
-           !(g6_atk && g6_atk[v]) && !tcg_faddr(F, v, &fo);
+           !(g6_atk && g6_atk[v]) && !tcg_faddr(F, v, &fo) &&
+           !(v < F->fn->nvars && F->fn->locals[v].is_volatile);
 }
 
 /* A store wrote [off, off + size) of the frame. */
