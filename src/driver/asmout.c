@@ -981,9 +981,9 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
      * a slot, nor expand a macro through $at. */
     if (target_is_mips())
         ob_str(b, "\t.set\tnoreorder\n\t.set\tnoat\n\t.set\tnomacro\n");
-    /* Xtensa: the code is the compiler's, 24-bit instruction for
-     * instruction, laid out with no density forms -- an assembler that
-     * narrows (GNU as, EmbCC's) must leave it as written */
+    /* Xtensa: the code is the compiler's, instruction for instruction,
+     * its density forms already chosen -- an assembler that narrows or
+     * relaxes (GNU as, EmbCC's) must leave it as written */
     if (target_get() == TARGET_XTENSA)
         ob_str(b, "\t.begin\tno-transform\n");
     ob_str(b, sec_dir(".text") + 1);

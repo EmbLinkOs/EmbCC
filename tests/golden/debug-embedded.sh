@@ -182,7 +182,7 @@ if [ -x "$XOBJDUMP" ]; then
           grep -A2 'DW_AT_name	("p")' | grep -oE 'fbreg [+-][0-9]+' |
           grep -oE '[+-][0-9]+' | head -1)
     if [ -n "$off" ] && "$XOBJDUMP" -d "$o" 2>/dev/null |
-         grep -qE "s32i[[:space:]]+a2, a1, $(printf '%d' "$off")\$"; then
+         grep -qE "s32i(\.n)?[[:space:]]+a2, a1, $(printf '%d' "$off")\$"; then
         echo "  xtensa-none-elf: 'p' at fbreg $off is the slot the prologue writes"
     else
         echo "FAIL xtensa-none-elf: 'p' is at fbreg '$off' but nothing stores a2 there"

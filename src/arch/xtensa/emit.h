@@ -80,6 +80,27 @@ void xt_w(struct code *c, unsigned long w);
 unsigned long xt_get(const struct code *c, int at);
 void xt_put(struct code *c, int at, unsigned long w);
 
+/* ---- the density option's 16-bit forms ------------------------------------
+ *
+ * mov.n, movi.n, add.n, addi.n, l32i.n, s32i.n, ret.n, retw.n: the
+ * encoders the assembler (asm.c) and the code generator share. While
+ * xt_set_narrow(1) is in force -- the code generator's own instructions,
+ * on a core with the option -- xt_mov, xt_movi, xt_alu's add, xt_addi,
+ * xt_load/xt_store of a word and xt_ret/xt_retw take the 16-bit form
+ * where it fits, as GNU as narrows them. xt_nop never does: it is the
+ * placeholder of a three-byte l32r. Returns the old setting. */
+int xt_set_narrow(int on);
+void xt_h16(struct code *c, unsigned h);
+void xt_n_mov(struct code *c, int d, int s);
+int xt_n_movi_ok(long long v);                       /* -32..95 */
+void xt_n_movi(struct code *c, int t, long v);
+void xt_n_add(struct code *c, int r, int s, int t);
+int xt_n_addi_ok(long long v);                       /* -1, 1..15 */
+void xt_n_addi(struct code *c, int t, int s, long v);
+int xt_n_mem_ok(long off, int size);                 /* a word, 0..60 */
+void xt_n_mem(struct code *c, int t, int base, long off, int store);
+void xt_n_ret(struct code *c, int windowed);
+
 /* ---- moves and constants ------------------------------------------------ */
 
 void xt_mov(struct code *c, int d, int s);           /* or d, s, s */

@@ -42,6 +42,7 @@
  * the frame and return address, a function too large for its branches or
  * its literal pool, and __int128 (which does not exist on ILP32). THE RULE.
  */
+#include "asm.h"
 #include "emit.h"
 
 #include "../backend.h"
@@ -1263,8 +1264,8 @@ static void branch_to(struct xt_fn *F, struct xtest x, int label)
     }
     if (lv) {
         struct xtest inv = invert(x);
-        /* over the j: the branch is 3 bytes, the j 3, so 2 from the
-         * instruction after the branch's own fourth byte */
+        /* over the j: the branch is 3 bytes, the j 3 (neither has a
+         * density form here), so 2 from the branch's own fourth byte */
         xt_w(F->t, enc_test(&inv, 2));
         at = F->t->len;
         xt_w(F->t, xt_enc_j(0));
@@ -1301,8 +1302,14 @@ static void emit_bool(struct xt_fn *F, struct xtest x, int dst)
             }
     }
     xt_movi(t, d, 1);
-    xt_w(t, enc_test(&x, 2));       /* over the movi d, 0 */
-    xt_movi(t, d, 0);
+    {
+        /* over the movi d, 0 -- two bytes or three (movi.n): the offset
+         * is from the branch's fourth byte, so it is written after */
+        int at = t->len;
+        xt_w(t, enc_test(&x, 0));
+        xt_movi(t, d, 0);
+        xt_put(t, at, enc_test(&x, (long)t->len - (at + 4)));
+    }
     if (d != dst)
         xt_mov(t, dst, d);
 }
@@ -3630,8 +3637,23 @@ static void gen_func(struct ir_func *fn, struct code *t, struct xt_sites *st,
 
 /* With the allocator on, a function is generated with the pair pass and
  * without it, and the shorter is kept (the RV32 and MIPS arrangement). */
+static void gen_func_best1(struct ir_func *fn, struct code *t,
+                           struct xt_sites *st, int keep_vars);
+
+/* The density option's 16-bit forms (emit.h, xt_set_narrow) for the
+ * code generator's own instructions, as GNU as narrows GCC's: a third
+ * off a function's size, and fewer fetches. EMBCC_NO_DENSITY=1 keeps
+ * every instruction at three bytes. */
 static void gen_func_best(struct ir_func *fn, struct code *t,
                           struct xt_sites *st, int keep_vars)
+{
+    int was = xt_set_narrow(xtasm_density() && !getenv("EMBCC_NO_DENSITY"));
+    gen_func_best1(fn, t, st, keep_vars);
+    xt_set_narrow(was);
+}
+
+static void gen_func_best1(struct ir_func *fn, struct code *t,
+                           struct xt_sites *st, int keep_vars)
 {
     int at = t->len, next = st->next, nstr = st->nstr, ng = st->ng,
         nf = st->nf, with;

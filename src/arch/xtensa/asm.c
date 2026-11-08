@@ -66,11 +66,7 @@ int xtasm_call_operand(const char *stmt, const char **x, int *xlen)
 void xtasm_set_level(int level) { g_level = level; g_took = 0; }
 int xtasm_took_level(void) { return g_took; }
 
-static void xt_h(struct code *c, unsigned h)
-{
-    code_byte(c, (int)(h & 0xff));
-    code_byte(c, (int)(h >> 8 & 0xff));
-}
+static void xt_h(struct code *c, unsigned h) { xt_h16(c, h); }
 
 /* ---- registers ------------------------------------------------------------ */
 
@@ -527,7 +523,10 @@ static int stmt_body(const char *stmt, int len, struct code *out, long pc,
 
     /* ---- no operands: ret, retw, nop narrow ---- */
     if (narrow && n == 1 && (IS("ret") || IS("retw") || IS("nop"))) {
-        xt_h(out, IS("ret") ? 0xf00du : IS("retw") ? 0xf01du : 0xf03du);
+        if (IS("nop"))
+            xt_h(out, 0xf03du);
+        else
+            xt_n_ret(out, IS("retw"));
         return 0;
     }
     if (want_n && IS("ill") && n == 1) { xt_h(out, 0xf06du); return 0; }
@@ -560,11 +559,11 @@ static int stmt_body(const char *stmt, int len, struct code *out, long pc,
         if (need_regs(t, 1, 3, r, mn, err, errlen))
             return -1;
         if (narrow && IS("add")) {
-            xt_h(out, (unsigned)r[0] << 12 | (unsigned)r[1] << 8 | (unsigned)r[2] << 4 | 0xa);
+            xt_n_add(out, r[0], r[1], r[2]);
             return 0;
         }
         if (narrow && !want_n && IS("or") && r[1] == r[2]) {   /* mov */
-            xt_h(out, (unsigned)r[1] << 8 | (unsigned)r[0] << 4 | 0xd);
+            xt_n_mov(out, r[0], r[1]);
             return 0;
         }
         xt_alu(out, e->op, r[0], r[1], r[2]);
@@ -579,7 +578,7 @@ static int stmt_body(const char *stmt, int len, struct code *out, long pc,
         if (need_regs(t, 1, 2, r, mn, err, errlen))
             return -1;
         if (IS("mov") && narrow) {
-            xt_h(out, (unsigned)r[1] << 8 | (unsigned)r[0] << 4 | 0xd);
+            xt_n_mov(out, r[0], r[1]);
             return 0;
         }
         if (IS("mov")) xt_mov(out, r[0], r[1]);
@@ -618,9 +617,8 @@ static int stmt_body(const char *stmt, int len, struct code *out, long pc,
         /* 0xfffff800 is -2048 as a 32-bit word */
         if (v >= 0xfffff800LL && v <= 0xffffffffLL)
             v -= 0x100000000LL;
-        if (narrow && v >= -32 && v <= 95) {
-            unsigned i7 = (unsigned)v & 0x7f;
-            xt_h(out, (i7 & 15) << 12 | (unsigned)r[0] << 8 | (i7 >> 4) << 4 | 0xc);
+        if (narrow && xt_n_movi_ok(v)) {
+            xt_n_movi(out, r[0], (long)v);
             return 0;
         }
         if (want_n)
@@ -637,13 +635,12 @@ static int stmt_body(const char *stmt, int len, struct code *out, long pc,
             FAIL("%s takes two registers and a constant", mn);
         if (need_imm(&t[3], &v, mn, err, errlen))
             return -1;
-        if (IS("addi") && narrow && (v == -1 || (v >= 1 && v <= 15))) {
-            xt_h(out, (unsigned)r[0] << 12 | (unsigned)r[1] << 8 |
-                      (unsigned)(v == -1 ? 0 : v) << 4 | 0xb);
+        if (IS("addi") && narrow && xt_n_addi_ok(v)) {
+            xt_n_addi(out, r[0], r[1], (long)v);
             return 0;
         }
         if (IS("addi") && narrow && !want_n && v == 0) {      /* mov.n */
-            xt_h(out, (unsigned)r[1] << 8 | (unsigned)r[0] << 4 | 0xd);
+            xt_n_mov(out, r[0], r[1]);
             return 0;
         }
         if (want_n)
@@ -722,9 +719,8 @@ static int stmt_body(const char *stmt, int len, struct code *out, long pc,
             FAIL("%s takes a register, a base register and an offset", mn);
         if (need_imm(&t[3], &v, mn, err, errlen))
             return -1;
-        if (narrow && e->size == 4 && v >= 0 && v <= 60 && !(v & 3)) {
-            xt_h(out, (unsigned)(v / 4) << 12 | (unsigned)r[1] << 8 |
-                      (unsigned)r[0] << 4 | (e->store ? 0x9u : 0x8u));
+        if (narrow && xt_n_mem_ok((long)v, e->size)) {
+            xt_n_mem(out, r[0], r[1], (long)v, e->store);
             return 0;
         }
         if (want_n)
@@ -1431,7 +1427,19 @@ static int resolve_labels(const struct stm *st, int ns, int k, char *buf,
     return o;
 }
 
+static int assemble(const char *text, struct code *out, char *err, int errlen);
+
+/* The code generator's narrowing (xt_set_narrow) is off here: an asm
+ * statement is assembled as asm.c's own rules say -- a template's three
+ * bytes each, a file's as GNU as narrows. */
 int xtasm_assemble(const char *text, struct code *out, char *err, int errlen)
+{
+    int was = xt_set_narrow(0), rc = assemble(text, out, err, errlen);
+    xt_set_narrow(was);
+    return rc;
+}
+
+static int assemble(const char *text, struct code *out, char *err, int errlen)
 {
     static struct stm st[MAXSTMT];
     long pc = g_pc;

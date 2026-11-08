@@ -2060,9 +2060,11 @@ GCC's own placement and costs, are accepted; the rest are refused by name.
 The code uses the core instruction set with windowed registers, MUL32
 (`mull`), DIV32 (`quos`, `quou`, `rems`, `remu`), MINMAX, SEXT, NSA, ABS,
 ADDX and L32R, and S32C1I for atomics -- what the ESP32, the ESP32-S3 and
-QEMU's de212 core share. It does not use the FPU, MUL32_HIGH, the loop
-instructions, MAC16, the boolean registers or the density option's
-16-bit instructions. The ESP32-S2 has no S32C1I, so an atomic
+QEMU's de212 core share, and the density option's 16-bit forms
+(`mov.n`, `movi.n`, `add.n`, `addi.n`, `l32i.n`, `s32i.n`, `ret.n`,
+`retw.n`) wherever one fits, as GNU as narrows GCC's code -- a fifth off
+`lib/libc` at `-Os`. It does not use the FPU, MUL32_HIGH, the loop
+instructions, MAC16 or the boolean registers. The ESP32-S2 has no S32C1I, so an atomic
 read-modify-write is not for it.
 
 ### Atomics
