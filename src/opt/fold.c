@@ -1231,11 +1231,15 @@ int pass_fold(struct ir_func *fn)
                        fn->param_abi[i->a].size == i->size &&
                        fn->param_abi[i->a].ty &&
                        !!ty_signed_int(fn->param_abi[i->a].ty) == !!i->sign &&
-                       !i->flt && i->size < 4) {
+                       !i->flt && i->size < 4 && i->w <= 4) {
                 /* A char or short parameter its caller has extended by its
                  * type (target_args_extended): extending it again by the
                  * same is a copy. RV32's `zext.b a3, s2` on a uint8_t
-                 * parameter, which GCC's code does not have. */
+                 * parameter, which GCC's code does not have. Only up to 32
+                 * bits: that is what the caller extended. A short widened to
+                 * a long long on RV32 still needs its high word -- as a copy
+                 * it read the register beside the parameter (fuzz seed
+                 * 1064066492). */
                 to_mov(i, i->a);
                 changed = 1;
             } else if (i->a >= 0 && i->a < fn->nvregs && d.cnt[i->a] == 1 &&
