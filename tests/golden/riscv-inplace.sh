@@ -34,15 +34,24 @@ for O in -O2 -Os; do
         fail "$O: compile"
     "$OBJDUMP" -d --no-show-raw-insn "$out/f$O.o" > "$out/f$O.dis"
     fn() { sed -n "/<$1>:/,/^\$/p" "$out/f$O.dis"; }
-    for f in ld_first ld_second ld_idx st_pair st_idx cp_blk add_ext sub_pair; do
+    # cp_blk copies seven words: straight-line at -O2, the bases where
+    # they are; under -Os a loop (copy_block, rv_block_straight), which
+    # walks its own pointers in t1/t2 -- shorter than seven loads and
+    # stores, so there it must be a loop instead
+    blk=cp_blk
+    [ "$O" = -Os ] && blk=
+    for f in ld_first ld_second ld_idx st_pair st_idx $blk add_ext sub_pair; do
         fn $f > "$out/$f$O.dis"
         [ -s "$out/$f$O.dis" ] || fail "$O: no $f"
         if grep -qE '	mv	t[0-3], ' "$out/$f$O.dis"; then
             cat "$out/$f$O.dis"; fail "$O $f: an operand moved into a scratch register"
         fi
     done
-    if fn cp_blk | grep -qE 'addi	t[0-6], '; then
+    if [ "$O" = -O2 ] && fn cp_blk | grep -qE 'addi	t[0-6], '; then
         fn cp_blk; fail "$O cp_blk: a block copy's base moved into a scratch register"
+    fi
+    if [ "$O" = -Os ] && ! fn cp_blk | grep -qE '	bne	t[0-6], t[0-6], '; then
+        fn cp_blk; fail "$O cp_blk: a seven-word copy is not a loop under -Os"
     fi
     for f in dbr fbr dnot fnot; do
         fn $f > "$out/$f$O.dis"

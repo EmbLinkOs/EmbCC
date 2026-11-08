@@ -8340,11 +8340,16 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
     const char *only = getenv("EMBCC_RV_PAIRS_ONLY");
 
     /* A field's constant offset into its load or store (lw r, k(rn)) --
-     * once, before any attempt, and before allocation. */
+     * once, before any attempt, and before allocation. At RV32 the
+     * eight-byte accesses too: their path takes memoff (mem_base_span),
+     * so a double field is `lw s6, 0x178(sp)` where it was `addi a0,
+     * sp, 0x178; lw s6, 0(a0)`. EMBCC_RV_MEMOFF4=1: four bytes only, as
+     * before. Sixteen-byte ones never (gen_ld32 refuses a memoff). */
     if (g_rv_regalloc && !keep_vars && !g_rv_o0 &&
         !getenv("EMBCC_NO_MEMOFF")) {
-        char *w = xlen == 32 ? wide_map(fn) : NULL;
-        ra_fold_memoff(fn, -2048, 2047, xlen / 8, xlen / 8, w, 0, 0);
+        int four = xlen == 32 && getenv("EMBCC_RV_MEMOFF4");
+        char *w = four ? wide_map(fn) : NULL;
+        ra_fold_memoff(fn, -2048, 2047, xlen / 8, four ? 4 : 8, w, 0, 0);
         free(w);
     }
     const char *lr = getenv("EMBCC_RV_LOWREGS");
