@@ -735,6 +735,8 @@ static int emit_gaddr(struct ir_func *fn, struct global *g)
  * to be? A member is under-aligned when its offset, or the alignment of
  * the struct it sits in, is less than its type asks for; and a member is
  * only as aligned as the object it is a member of. */
+static int struct_val_natural(const struct expr *e);
+
 static int lv_natural(const struct expr *e)
 {
     /* through a typedef aligned BELOW its type's own alignment --
@@ -753,7 +755,18 @@ static int lv_natural(const struct expr *e)
         if (!st || e->memb->is_bitfield || ty_align(st) < ma ||
             e->memb->off % ma)
             return 0;
-        return e->is_arrow ? 1 : lv_natural(e->lhs);
+        if (e->is_arrow)
+            return 1;
+        switch (e->lhs->kind) {
+        case EXPR_VAR: case EXPR_DEREF: case EXPR_MEMBER:
+            return lv_natural(e->lhs);
+        default:
+            /* a member of a call's result (`now().ticks`), a compound
+             * literal's or a va_arg's: in a slot of irgen's own, aligned
+             * as its type up to the 8 a frame promises. Unmarked, a
+             * strict-alignment backend read it a byte at a time. */
+            return ma <= 8 && struct_val_natural(e->lhs);
+        }
     }
     default:
         return 0;
