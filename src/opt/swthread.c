@@ -356,7 +356,7 @@ static void swt_emit_copy(struct swt_emit *e, int g)
     while (g >= 0 && !c->grp[g].emitted) {
         struct swt_grp *G = &c->grp[g];
         G->emitted = 1;
-        int run[64], nrun = 0;
+        int run[64] = { 0 }, nrun = 0;  /* (one block at least: GCC cannot see it) */
         if (G->blk >= 0) {
             run[nrun++] = G->blk;
         } else {

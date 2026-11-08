@@ -779,7 +779,9 @@ static void index_build(struct doc *d)
     if (pid == 0) {
         close(fds[0]);
         FILE *out = fdopen(fds[1], "w");
-        freopen("/dev/null", "w", stderr);
+        /* the indexer's diagnostics are noise here; if /dev/null will not
+         * open, stderr stays as it was, which costs nothing but noise */
+        if (!freopen("/dev/null", "w", stderr)) { /* keep stderr */ }
         const char *incs[64];
         int ninc = 0;
         char selfdir[4096] = ".";

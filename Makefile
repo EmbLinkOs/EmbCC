@@ -780,6 +780,16 @@ $(OBJS): $(wildcard src/*/*.h src/arch/*/*.h src/arch/*/*.inc)
 check: embcc $(if $(call built,x86),libc-x86_64 libcxx-x86_64)
 	tests/run.sh --exec-only
 
+# EmbCC compiles every one of its own sources, at -O2 with -Wall -Wextra
+# -Werror: src/ stays inside the subset it accepts, and clean under its
+# own warnings (-Wmaybe-uninitialized among them), on any host.
+.PHONY: check-self
+check-self: embcc
+	@n=0; bad=0; for f in $(SRCS); do n=$$((n + 1)); \
+	    ./embcc -std=c99 -Wall -Wextra -Werror -O2 -Isrc -c -o /dev/null $$f || \
+	    { echo "check-self: $$f"; bad=$$((bad + 1)); }; done; \
+	echo "check-self: EmbCC compiles $$((n - bad)) of its $$n sources"; [ $$bad -eq 0 ]
+
 # embas belongs here too: tests/golden/x86_64/assembler.sh runs it, and
 # without it in this list the suite passes from a dirty tree and fails
 # from a clean one -- which is the wrong way round.

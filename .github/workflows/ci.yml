@@ -12,12 +12,18 @@
 #   check   `make check` on Linux x86-64, where the host is the target:
 #           every tests/exec and tests/cxx program compiled by EmbCC and
 #           run natively.
+#           And `make check-self`: EmbCC compiles all of its own sources
+#           at -O2 -Werror.
+#   fuzz    150 random programs on x86-64 and QEMU's M4, M0, RV32 and
+#           RV64 at -O2, -O3 and -Os, new seeds each run.
 #   suite   the whole test suite, `make test`, with QEMU and the LLVM tools
-#           installed: on Ubuntu 26.04 with LLVM 23 (the referees'
-#           release), and on 24.04 (the oldest tools a contributor is
-#           likely to have, where what they cannot referee is a SKIP). A
-#           failure on 26.04 fails the workflow; 24.04 only reports, since
-#           an old QEMU or LLVM there is no reason to hold a change back.
+#           installed, in four parts on four runners (EMBCC_SHARD): on
+#           Ubuntu 26.04 with LLVM 23 (the referees' release), and on
+#           24.04 (the oldest tools a contributor is likely to have, where
+#           what they cannot referee is a SKIP). A failure on 26.04 fails
+#           the workflow; 24.04 only reports, since an old QEMU or LLVM
+#           there is no reason to hold a change back. Each part uploads
+#           its tests' times; tests/shard-times is renewed from them.
 name: ci
 
 on:
@@ -48,6 +54,11 @@ jobs:
           - { name: ubuntu-24.04 clang, runner: ubuntu-24.04, cc: clang }
           - { name: ubuntu-24.04-arm gcc, runner: ubuntu-24.04-arm, cc: gcc }
           - { name: macos-15 clang, runner: macos-15, cc: clang }
+          # optimized: GCC warns of what only its optimizer sees
+          # (-Wmaybe-uninitialized, -Wformat-truncation, -Wstringop-*)
+          # only at -O1 and up, and the default build is -g
+          - { name: ubuntu-24.04 gcc-14 -O2, runner: ubuntu-24.04, cc: gcc-14,
+              cflags: -std=c99 -Wall -Wextra -Werror -O2 }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -55,7 +66,14 @@ jobs:
       - name: The compiler
         run: ${{ matrix.cc }} --version
       - name: Build every program
-        run: make -j"$(getconf _NPROCESSORS_ONLN)" CC=${{ matrix.cc }} all embdbg embdoc
+        env:
+          XCFLAGS: ${{ matrix.cflags }}
+        # CFLAGS through the environment, so the Makefile's own additions
+        # still apply; only when the entry sets it (an empty CFLAGS would
+        # drop -Werror)
+        run: |
+          if [ -n "$XCFLAGS" ]; then export CFLAGS="$XCFLAGS"; fi
+          make -j"$(getconf _NPROCESSORS_ONLN)" CC=${{ matrix.cc }} all embdbg embdoc
 
   iso:
     name: build (PLATFORM=iso)
@@ -86,11 +104,72 @@ jobs:
         run: make -j"$(getconf _NPROCESSORS_ONLN)" embcc libc-x86_64 libcxx-x86_64
       - name: make check
         run: make check
+      # src/ must stay in the subset EmbCC compiles, warning-free with its
+      # own -Wall -Wextra at -O2 (tests/golden/x86_64/self-host.sh links
+      # the stage-1 compiler only where the EmbLinkOS runtime is)
+      - name: EmbCC compiles itself
+        run: make check-self
 
+  # Random programs (verify/fuzz/run.sh) on x86-64 and QEMU's Cortex-M4,
+  # Cortex-M0, RV32 and RV64 at -O2, -O3 and -Os: 150 seeds a run, from
+  # the run's id, so each push tries new programs. The nightly job tries
+  # 200 more on main; this is what a pull request is held to.
+  fuzz:
+    name: fuzz (150 seeds)
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install QEMU and clang
+        run: |
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key |
+            sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
+          echo "deb http://apt.llvm.org/resolute/ llvm-toolchain-resolute-23 main" |
+            sudo tee /etc/apt/sources.list.d/llvm.list
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-arm qemu-system-riscv clang-23 llvm-23 lld-23
+          echo "/usr/lib/llvm-23/bin" >> "$GITHUB_PATH"
+      - name: Build the compiler, the linker and the runtimes
+        run: make -j"$(getconf _NPROCESSORS_ONLN)" embcc embld rt-embedded
+      - name: Fuzz
+        run: |
+          first=$(( 1000000000 + ${{ github.run_id }} % 1000000 * 150 ))
+          last=$(( first + 149 ))
+          echo "seeds $first to $last"
+          mkdir -p fuzz-out
+          FUZZ_OUT=$PWD/fuzz-out EMBCC_QEMU_TIMEOUT=60 \
+            sh verify/fuzz/run.sh -b x86,m4,m0,rv32,rv64 -O "-O2 -O3 -Os" \
+            "$first" "$last" > fuzz.log 2>&1 || true
+          echo "$(grep -c '^seed [0-9]* done$' fuzz.log || true) seeds done"
+          if grep -E '^seed [0-9]+: ' fuzz.log; then
+            echo "::notice::some seeds were skipped: the host build failed or the generator read uninitialised memory"
+          fi
+          if grep -E '^qemu: ' fuzz.log; then
+            echo "::notice::QEMU alone got some programs wrong: they pass translated an instruction at a time (fuzz.log)"
+          fi
+          if grep -E '^seed [0-9]+ [a-z0-9]+ -O' fuzz.log; then
+            echo "::error::the fuzzer found programs EmbCC gets wrong (fuzz.log, fuzz-out/)"
+            exit 1
+          fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: fuzz
+          path: |
+            fuzz.log
+            fuzz-out
+
+  # The suite in four shards, each a runner of its own (tests/run.sh,
+  # EMBCC_SHARD=i/n): one runner took 80 minutes, four take about a
+  # quarter of that. The shards split the .sh tests, the exec corpus, and
+  # inside exec-boards the boards.
   suite:
-    name: suite (${{ matrix.name }})
+    name: suite (${{ matrix.name }} ${{ matrix.shard }}/4)
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 180
+    timeout-minutes: 90
     continue-on-error: ${{ matrix.optional }}
     env:
       # A QEMU run's wall-clock bound (tests/run.sh's default is 20 s).
@@ -98,9 +177,12 @@ jobs:
       # each: on a four-core runner a program that takes a second alone
       # has run out the 20 s (switch-thread and neg-index on the M23).
       EMBCC_QEMU_TIMEOUT: 60
+      EMBCC_SHARD: ${{ matrix.shard }}/4
     strategy:
       fail-fast: false
       matrix:
+        name: [ubuntu-26.04, ubuntu-24.04]
+        shard: [1, 2, 3, 4]
         include:
           # Ubuntu 26.04: QEMU 10.2 and GCC 15, and LLVM 23 from
           # apt.llvm.org -- the LLVM the referees and the generated
@@ -170,10 +252,12 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
-          name: test-log-${{ matrix.name }}
-          path: test.log
+          name: test-log-${{ matrix.name }}-${{ matrix.shard }}
+          path: |
+            test.log
+            tests/golden/out/shard-times.txt
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: failure()
         with:
-          name: failed-outs-${{ matrix.name }}
+          name: failed-outs-${{ matrix.name }}-${{ matrix.shard }}
           path: failed-outs.tgz

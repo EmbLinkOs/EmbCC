@@ -21,7 +21,7 @@ sram=
 # now and then -- an empty status, 124, for a program that had passed
 # (thumbv8mbase-exec on CI, three of 1256 runs; tests/harness/mips/run.sh)
 o=$("$here/../qrun.sh" "${EMBCC_QEMU_TIMEOUT:-10}" --until '==EXIT -*[0-9][0-9]*==' \
-    "$QEMU" -M microbit $sram -nographic -kernel "$1" 2>/dev/null)
+    "$QEMU" -M microbit $sram -nographic ${EMBCC_QEMU_EXTRA:-} -kernel "$1" 2>/dev/null)
 printf '%s\n' "$o" | sed '/^==EXIT /d'
 code=$(printf '%s\n' "$o" | sed -n 's/^==EXIT \(-*[0-9]*\)==.*/\1/p' | tail -1)
 [ -n "$code" ] || exit 124

@@ -112,7 +112,8 @@ board() {   # board NAME OPT FILE
         EMBCC_THUMB_HARNESS=$d sh tests/harness/thumb-m4f/link.sh "$d/p.elf" "$d/p.o" \
             "$d/drv.o" build/libc/$T/librt.a > /dev/null 2>&1 || { echo "link failed"; return; }
         sh tests/harness/qrun.sh 60 qemu-system-arm -M mps2-an386 -cpu cortex-m4 \
-            -semihosting -nographic -kernel "$d/p.elf" > /dev/null 2>&1; echo "exit $?" ;;
+            -semihosting -nographic ${EMBCC_QEMU_EXTRA:-} -kernel "$d/p.elf" > /dev/null 2>&1
+        echo "exit $?" ;;
     m0)
         T=thumbv6m-none-eabi
         [ -f "$d/boot.o" ] || {
@@ -136,7 +137,7 @@ board() {   # board NAME OPT FILE
         EMBCC_RISCV_HARNESS=$d sh tests/harness/riscv/link.sh "$d/p.elf" "$d/p.o" \
             build/libc/$T/librt.a > /dev/null 2>&1 || { echo "link failed"; return; }
         sh tests/harness/qrun.sh 60 qemu-system-riscv$X -M virt -bios none -nographic \
-            -m 8 -kernel "$d/p.elf" > /dev/null 2>&1; echo "exit $?" ;;
+            -m 8 ${EMBCC_QEMU_EXTRA:-} -kernel "$d/p.elf" > /dev/null 2>&1; echo "exit $?" ;;
     *) echo "unknown board $b" ;;
     esac
 }
@@ -169,7 +170,22 @@ for seed in $(seq "$1" "$2"); do
     for o in $opts; do
         for b in $boards; do
             r=$(board $b $o "$W/e.c" 2>&1 | tail -1)
-            if [ "$r" != "exit 42" ]; then
+            [ "$r" = "exit 42" ] && continue
+            # Again with QEMU translating one instruction at a time: an
+            # answer that changes is the emulator's -- the architecture's
+            # results do not depend on how QEMU groups instructions.
+            # Ubuntu 26.04's QEMU 10.2 computes a value of seed 152950 on
+            # the M4 and M0 wrongly this way; its trace, an instruction
+            # at a time, matches QEMU 11.1's register for register.
+            case $b in
+                x86|a64) r1= ;;
+                *) r1=$(EMBCC_QEMU_EXTRA="-accel tcg,one-insn-per-tb=on" \
+                        board $b $o "$W/e.c" 2>&1 | tail -1) ;;
+            esac
+            if [ "$r1" = "exit 42" ]; then
+                echo "qemu: seed $seed $b $o: $r, and exit 42 an instruction at a time"
+                cp "$W/e.c" "$OUT/q$gen-$seed.c"
+            else
                 echo "seed $seed $b $o: $r"
                 cp "$W/e.c" "$OUT/e$gen-$seed.c"
             fi

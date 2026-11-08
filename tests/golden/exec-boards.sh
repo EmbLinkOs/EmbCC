@@ -68,6 +68,18 @@ command -v "$QA" >/dev/null 2>&1 && boards="$boards m4 m4hf a7 m55pac"
 command -v "$Q32" >/dev/null 2>&1 && boards="$boards rv32 rv32f rv32d rv32noa rv32k"
 command -v "$Q64" >/dev/null 2>&1 && boards="$boards rv64 rv64d rv64noa rv64k"
 [ -n "${EMBCC_BOARDS:-}" ] && boards=" $EMBCC_BOARDS"
+# a part of the suite (tests/run.sh's EMBCC_SHARD=i/n) runs every n-th
+# board from the i-th: tests/shard-split lists this test
+case ${EMBCC_SHARD:-1/1} in
+    1/1) ;;
+    *) sh_si=${EMBCC_SHARD%/*} sh_sn=${EMBCC_SHARD#*/} sh_k=0 mine_b=
+       for b in $boards; do
+           [ $((sh_k % sh_sn)) -eq $((sh_si - 1)) ] && mine_b="$mine_b $b"
+           sh_k=$((sh_k + 1))
+       done
+       boards=$mine_b
+       echo "boards for part $EMBCC_SHARD:${boards:- none}" ;;
+esac
 [ -n "$boards" ] || { echo "SKIP: no qemu-system-arm or -riscv32/64"; exit 0; }
 
 triple() {

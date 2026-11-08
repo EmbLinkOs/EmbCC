@@ -35,7 +35,12 @@ pid_t wait(int *status);
 pid_t waitpid(pid_t pid, int *status, int options);
 pid_t wait3(int *status, int options, struct rusage *ru);
 pid_t wait4(pid_t pid, int *status, int options, struct rusage *ru);
+/* siginfo_t is POSIX's, which <signal.h> keeps from a strict ISO C
+ * program (-std=c99 alone): there waitid is not declared either, as
+ * glibc leaves it out */
+#if defined(__EMB_POSIX)
 int   waitid(idtype_t idtype, id_t id, siginfo_t *info, int options);
+#endif
 
 #ifdef __cplusplus
 }

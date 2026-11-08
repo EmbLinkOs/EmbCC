@@ -68,6 +68,13 @@ void reset(void)
     for (initfn *f = __init_array_start; f < __init_array_end; f++)
         (*f)();
     main();
+    /* The end, said on the UART (its transmitter enabled here, as io.c
+     * does on its first byte): run.sh stops QEMU when it reads this,
+     * instead of waiting out the timeout, and leaves it out of the
+     * output (as tests/harness/thumb-m4f does). */
+    *(volatile unsigned *)0x40200008u = 1u;
+    for (const char *p = "==EXIT==\n"; *p; p++)
+        *(volatile unsigned *)0x40200000u = (unsigned char)*p;
     for (;;)
         ;
 }
