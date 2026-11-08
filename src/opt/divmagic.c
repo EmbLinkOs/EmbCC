@@ -859,3 +859,137 @@ int pass_divmod(struct ir_func *fn)
     fn->ins = nb.p; fn->nins = nb.n; fn->cap = nb.cap;
     return 1;
 }
+
+/* ---- a bit tested by its number: (x & (1 << n)) != 0 ----------------
+ *
+ * The mask is a shift of 1 that the test then ANDs with x -- and for a
+ * 64-bit x on a 32-bit machine, a 64-bit shift of 1, two ANDs and an OR
+ * of the halves for the compare. Shifting x instead brings the bit to
+ * bit 0, and the test is of one bit of one word:
+ *
+ *     (x & (1 << n)) != 0    ->    ((x >> n) & 1) != 0
+ *
+ * the same for == 0. sigismember's `(*s & (1ULL << (sig - 1))) != 0` was
+ * 21 instructions on a Cortex-M4 and GCC's is 9; an RTOS's ready-mask
+ * test of a priority, `ready & (1u << prio)`, is the 32-bit form. The
+ * shift is logical whatever x's type: bit n comes to bit 0 either way,
+ * and n is below x's width or the C was undefined. Only where the AND
+ * and the mask each have that one reader, so nothing else saw the mask;
+ * the shift of 1 is then dead. EMBCC_NO_BITTEST=1 turns it off. */
+struct bt_uses { int *n; int nv; };
+
+static void bt_count(int *p, void *ctx)
+{
+    struct bt_uses *u = ctx;
+    if (*p >= 0 && *p < u->nv)
+        u->n[*p]++;
+}
+
+int pass_bittest(struct ir_func *fn)
+{
+    static int off = -1;
+    if (off < 0)
+        off = getenv("EMBCC_NO_BITTEST") != NULL;
+    if (off || fn->nins == 0)
+        return 0;
+    struct defs d;
+    compute_defs(fn, &d);
+    int nv = fn->nvregs;
+    int *uses = xcalloc((size_t)nv + 1, sizeof *uses);
+    struct bt_uses ctx = { uses, nv };
+    for (int n = 0; n < fn->nins; n++)
+        each_read(&fn->ins[n], bt_count, &ctx);
+    /* per AND to rewrite: the x it tests and the n it shifts by */
+    int *bx = NULL, *bn = NULL, found = 0;
+    for (int n = 0; n < fn->nins; n++) {
+        struct ir_ins *c = &fn->ins[n];
+        long z;
+        int br = c->op == IR_BRZ || c->op == IR_BRNZ;
+        if (!br && (c->op != IR_CMP || c->flt ||
+                    (c->pred != B_EQ && c->pred != B_NE) ||
+                    !(c->imm_b ? c->imm == 0
+                               : get_const(fn, &d, c->b, &z) && z == 0)))
+            continue;
+        int a = c->a;
+        if (a < 0 || a >= nv || d.cnt[a] != 1 || d.ins[a] < 0 || uses[a] != 1)
+            continue;
+        int ka = d.ins[a];
+        struct ir_ins *an = &fn->ins[ka];
+        if (an->op != IR_AND || an->imm_b || an->flt || an->w != c->w)
+            continue;
+        int x = -1, nsh = -1;
+        for (int side = 0; side < 2 && nsh < 0; side++) {
+            int m = side ? an->b : an->a, o = side ? an->a : an->b;
+            long one;
+            if (m < 0 || m >= nv || d.cnt[m] != 1 || d.ins[m] < 0 ||
+                uses[m] != 1)
+                continue;
+            struct ir_ins *s = &fn->ins[d.ins[m]];
+            if (s->op != IR_SHL || s->imm_b || s->w != an->w || s->b < 0 ||
+                !get_const(fn, &d, s->a, &one) || one != 1)
+                continue;
+            x = o;
+            nsh = s->b;
+        }
+        if (nsh < 0 || x < 0)
+            continue;
+        if (!bx) {
+            bx = xmalloc((size_t)fn->nins * sizeof *bx);
+            bn = xmalloc((size_t)fn->nins * sizeof *bn);
+            for (int k = 0; k < fn->nins; k++)
+                bx[k] = -1;
+        }
+        bx[ka] = x;
+        bn[ka] = nsh;
+        /* one bit of one word: the AND, and so the test, at 32 bits or
+         * the value's own width below that */
+        if (c->w > 4)
+            c->w = 4;
+        /* ...and a 0 or 1 that a comparison with 0 asks about is its
+         * own answer: != 0 is the bit, == 0 the bit flipped (a
+         * comparison's result is 32 bits, so only where the bit is) */
+        if (!br && c->w == 4) {
+            if (c->pred == B_NE) {
+                c->op = IR_MOV;
+            } else {
+                c->op = IR_XOR;
+                c->imm_b = 1;
+                c->imm = 1;
+            }
+            if (c->op == IR_MOV) {
+                c->imm_b = 0;
+                c->imm = 0;
+            }
+            c->b = -1;
+            c->pred = 0;
+            c->sign = 0;
+        }
+        found = 1;
+    }
+    free(uses);
+    free_defs(&d);
+    if (!found)
+        return 0;
+    struct ibuf nb = { 0, 0, 0 };
+    for (int k = 0; k < fn->nins; k++) {
+        if (!bx || bx[k] < 0) {
+            *ib_push(&nb) = fn->ins[k];
+            continue;
+        }
+        struct ir_ins an = fn->ins[k];
+        int t = dm_op(&nb, fn, IR_SHR, bx[k], bn[k], an.w, 0, 0, &an);
+        struct ir_ins *q = ib_push(&nb);
+        *q = an;
+        q->a = t;
+        q->b = -1;
+        q->imm_b = 1;
+        q->imm = 1;
+        if (q->w > 4)
+            q->w = 4;
+    }
+    free(bx);
+    free(bn);
+    free(fn->ins);
+    fn->ins = nb.p; fn->nins = nb.n; fn->cap = nb.cap;
+    return 1;
+}

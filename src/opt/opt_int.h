@@ -304,6 +304,7 @@ int lvn_mem_kill(struct ir_func *fn, struct defs *d, const char *taken,
 int pass_divmagic(struct ir_func *fn);
 int pass_mulwiden(struct ir_func *fn);
 int pass_divtest(struct ir_func *fn);
+int pass_bittest(struct ir_func *fn);
 int pass_divmod(struct ir_func *fn);
 
 /* ifconv.c */
