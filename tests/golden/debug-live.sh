@@ -70,6 +70,11 @@ if [ "$ARCH" = aarch64 ]; then
     image="$out/live.elf"; symbols="$out/live.elf"
     qargs="-M virt -cpu cortex-a72 -semihosting -nographic -kernel $image"
 else
+    # the QEMU harness links with newlib, whatever runs the corpus (a CI
+    # runner has no newlib; until it had gdb, this skipped for that)
+    [ -d "$X86_NEWLIB/lib" ] || {
+        echo "skipped: no x86_64 newlib at $X86_NEWLIB for the QEMU harness (set EMBCC_X86_NEWLIB)"
+        exit 0; }
     EMBCC_HARNESS_KEEP64=1 sh "$EMBCC_ROOT/tests/harness/x86_64/link.sh" \
         -o "$out/live.elf" "$out/live.o" || { echo "harness link failed"; exit 1; }
     # QEMU boots the ELF32 Multiboot relabel; gdb reads the 64-bit original

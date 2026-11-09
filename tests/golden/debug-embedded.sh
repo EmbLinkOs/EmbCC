@@ -104,7 +104,7 @@ if command -v "$OBJDUMP" >/dev/null 2>&1; then
         # p is the first parameter: fbreg +0, and the prologue stores
         # the first argument register there.
         off=$("$DWDUMP" --debug-info "$o" 2>/dev/null |
-              grep -A2 'DW_AT_name	("p")' | grep -oE 'fbreg [+-][0-9]+' |
+              grep -A4 'DW_AT_name	("p")' | grep -oE 'fbreg [+-][0-9]+' |
               grep -oE '[+-][0-9]+' | head -1)
         [ -n "$off" ] || { echo "FAIL $t: no location for 'p'"; fail=1; continue; }
         n=$(printf '%d' "$off")
@@ -123,7 +123,7 @@ if command -v "$OBJDUMP" >/dev/null 2>&1; then
     # ...and MIPS, whose frame base is $sp too: p arrives in $4 (a0)
     o="$out/mipsel-none-elf.o"
     off=$("$DWDUMP" --debug-info "$o" 2>/dev/null |
-          grep -A2 'DW_AT_name	("p")' | grep -oE 'fbreg [+-][0-9]+' |
+          grep -A4 'DW_AT_name	("p")' | grep -oE 'fbreg [+-][0-9]+' |
           grep -oE '[+-][0-9]+' | head -1)
     if [ -n "$off" ] && "$OBJDUMP" -d "$o" 2>/dev/null |
          grep -qE "sw[[:space:]]+\\\$4,[[:space:]]*0x$(printf '%x' "$(printf '%d' "$off")")\(\\\$sp\)"; then
@@ -135,7 +135,7 @@ if command -v "$OBJDUMP" >/dev/null 2>&1; then
     # ...and LoongArch64, whose frame base is $sp (r3): p arrives in a0
     o="$out/loongarch64-unknown-elf.o"
     off=$("$DWDUMP" --debug-info "$o" 2>/dev/null |
-          grep -A2 'DW_AT_name	("p")' | grep -oE 'fbreg [+-][0-9]+' |
+          grep -A4 'DW_AT_name	("p")' | grep -oE 'fbreg [+-][0-9]+' |
           grep -oE '[+-][0-9]+' | head -1)
     if [ -n "$off" ] && "$OBJDUMP" -d "$o" 2>/dev/null |
          grep -qE "st\.d[[:space:]]+\\\$a0, \\\$sp, $(printf '%d' "$off")\$"; then
@@ -147,7 +147,7 @@ if command -v "$OBJDUMP" >/dev/null 2>&1; then
     # ...and PowerPC, whose frame base is r1: p arrives in r3
     o="$out/powerpc-none-eabi.o"
     off=$("$DWDUMP" --debug-info "$o" 2>/dev/null |
-          grep -A2 'DW_AT_name	("p")' | grep -oE 'fbreg [+-][0-9]+' |
+          grep -A4 'DW_AT_name	("p")' | grep -oE 'fbreg [+-][0-9]+' |
           grep -oE '[+-][0-9]+' | head -1)
     if [ -n "$off" ] && "$OBJDUMP" -d "$o" 2>/dev/null |
          grep -qE "stw[[:space:]]+3,[[:space:]]*$(printf '%d' "$off")\(1\)"; then
@@ -160,7 +160,7 @@ if command -v "$OBJDUMP" >/dev/null 2>&1; then
     # or not: p arrives in %i0 and the prologue stores it at %fp - n
     o="$out/sparc-none-elf.o"
     off=$("$DWDUMP" --debug-info "$o" 2>/dev/null |
-          grep -A2 'DW_AT_name	("p")' | grep -oE 'fbreg [+-][0-9]+' |
+          grep -A4 'DW_AT_name	("p")' | grep -oE 'fbreg [+-][0-9]+' |
           grep -oE '[+-][0-9]+' | head -1)
     # (LLVM 18's llvm-objdump prints the 13-bit offset unsigned: %fp+8172
     # for %fp+-0x14)
@@ -179,7 +179,7 @@ XOBJDUMP=$XTENSA_REF_DIR/bin/xtensa-esp-elf-objdump
 if [ -x "$XOBJDUMP" ]; then
     o="$out/xtensa-none-elf.o"
     off=$("$DWDUMP" --debug-info "$o" 2>/dev/null |
-          grep -A2 'DW_AT_name	("p")' | grep -oE 'fbreg [+-][0-9]+' |
+          grep -A4 'DW_AT_name	("p")' | grep -oE 'fbreg [+-][0-9]+' |
           grep -oE '[+-][0-9]+' | head -1)
     if [ -n "$off" ] && "$XOBJDUMP" -d "$o" 2>/dev/null |
          grep -qE "s32i(\.n)?[[:space:]]+a2, a1, $(printf '%d' "$off")\$"; then
@@ -377,7 +377,7 @@ for t in thumbv7m-none-eabi riscv32-unknown-elf mipsel-none-elf \
     grep -q "DW_AT_frame_base.*DW_OP_$dw" "$out/al-$t.dw" || {
         echo "FAIL $t: an alloca function's frame base is not $reg:"
         grep frame_base "$out/al-$t.dw"; fail=1; continue; }
-    off=$(grep -A3 'DW_AT_name.*"n"' "$out/al-$t.dw" |
+    off=$(grep -A5 'DW_AT_name.*"n"' "$out/al-$t.dw" |
           sed -n 's/.*DW_OP_fbreg +\([0-9]*\).*/\1/p' | head -1)
     hex=$(printf '0x%x' "$off")
     # (a zero offset disassembles as `[r7]` and `0(s0)`; LoongArch's is
@@ -400,7 +400,7 @@ done
 t=powerpc-none-eabi
 if "$EMBCC" --target=$t -g -O0 -c "$out/al.c" -o "$out/al-$t.o" 2>/dev/null; then
     "$DWDUMP" --debug-info "$out/al-$t.o" > "$out/al-$t.dw" 2>/dev/null
-    off=$(grep -A3 'DW_AT_name.*"n"' "$out/al-$t.dw" |
+    off=$(grep -A5 'DW_AT_name.*"n"' "$out/al-$t.dw" |
           sed -n 's/.*DW_OP_fbreg +\([0-9]*\).*/\1/p' | head -1)
     grep -q "DW_AT_frame_base.*DW_OP_breg31" "$out/al-$t.dw" &&
     "$OBJDUMP" -d "$out/al-$t.o" 2>/dev/null |

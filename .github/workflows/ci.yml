@@ -212,7 +212,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             qemu-system-arm qemu-system-misc qemu-system-mips \
             qemu-system-ppc qemu-system-sparc qemu-system-x86 \
-            ${{ matrix.qemu-riscv }} libglib2.0-dev \
+            ${{ matrix.qemu-riscv }} libglib2.0-dev gdb-multiarch \
             clang-${{ matrix.llvm }} llvm-${{ matrix.llvm }} lld-${{ matrix.llvm }}
           echo "/usr/lib/llvm-${{ matrix.llvm }}/bin" >> "$GITHUB_PATH"
       # The TriCore harness's output and the instruction counts are QEMU

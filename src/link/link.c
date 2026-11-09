@@ -1538,7 +1538,12 @@ static void collect_sections(struct linker *l, struct object *o)
              * Concatenated per name; the offset this object's piece
              * landed at is what its relocations resolve against. */
             const char *nm = o->shstr + sh->sh_name;
-            if (l->keep_debug && sh->sh_type == SHT_PROGBITS &&
+            /* (MIPS objects from GCC and clang type theirs
+             * SHT_MIPS_DWARF, 0x7000001e, not PROGBITS: GNU ld keeps
+             * them, and this dropped every one, so a clang-built MIPS
+             * image had no debug info at all) */
+            if (l->keep_debug && (sh->sh_type == SHT_PROGBITS ||
+                                  sh->sh_type == 0x7000001eu) &&
                 strncmp(nm, ".debug_", 7) == 0 && sh->sh_size &&
                 !(sh->sh_flags & 0x80000000u /* SHF_EXCLUDE */)) {
                 int d = dbgsec_for(l, nm);
