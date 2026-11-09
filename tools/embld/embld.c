@@ -25,6 +25,19 @@
 #include "doctor.h"
 #include "../../src/embx/embx.h"
 
+/* The usage text, printed to stdout for --help and to stderr when there
+ * is nothing to link. */
+static void usage(FILE *f)
+{
+    fprintf(f, "usage: embld [-o OUT] [-e ENTRY] [-Ttext ADDR] [-Tstack ADDR]\n"
+               "             [-T SCRIPT [-L DIR]... [--orphan-handling=place|warn|error]]\n"
+               "             [--gc-sections [--print-gc-sections]] [-Map FILE]\n"
+               "             [--print-memory-usage] [--cmse-implib [--out-implib=FILE]]\n"
+               "             [--embx [--cap NAME]...] INPUT.o|INPUT.a ...\n"
+               "       embld --doctor INPUT.o|INPUT.a ...   "
+               "(why the link fails)\n");
+}
+
 int main(int argc, char **argv)
 {
     const char *out = "a.out";
@@ -184,6 +197,9 @@ int main(int argc, char **argv)
             return 2;
         } else if (strcmp(argv[i], "--doctor") == 0) {
             doctor = 1;
+        } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            usage(stdout);             /* asked for, so stdout and success */
+            return 0;
         } else if (argv[i][0] == '-') {
             fprintf(stderr, "embld: unknown option '%s'\n", argv[i]);
             return 2;
@@ -193,13 +209,7 @@ int main(int argc, char **argv)
         }
     }
     if (!ninputs) {
-        fprintf(stderr, "usage: embld [-o OUT] [-e ENTRY] [-Ttext ADDR] [-Tstack ADDR]\n"
-                        "             [-T SCRIPT [-L DIR]... [--orphan-handling=place|warn|error]]\n"
-                        "             [--gc-sections [--print-gc-sections]] [-Map FILE]\n"
-                        "             [--print-memory-usage] [--cmse-implib [--out-implib=FILE]]\n"
-                        "             [--embx [--cap NAME]...] INPUT.o|INPUT.a ...\n"
-                        "       embld --doctor INPUT.o|INPUT.a ...   "
-                        "(why the link fails)\n");
+        usage(stderr);                 /* a bare invocation is a mistake */
         return 2;
     }
     /* each -l, now that every -L is known: libNAME.a (or, for -l:FILE,
