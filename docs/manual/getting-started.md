@@ -248,15 +248,15 @@ it prints the line to add to the shell's startup file. It needs `curl` or
 `wget`, `tar`, and `sha256sum` or `shasum`, and runs under any POSIX
 shell.
 
-GitHub never counts a pre-release as the latest release, so while every
-release is one (0.0.1-beta is the first), the script needs
-`--version v0.0.1-beta`, as in the example below.
+GitHub never counts a pre-release (a version with a suffix, such as
+0.0.1-beta) as the latest release, so the script installs one only when
+it is named with `--version`.
 
 Options follow `sh -s --`:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/EmbLinkOs/EmbCC/main/install.sh |
-    sh -s -- --prefix /opt/embcc --version v0.0.1-beta
+    sh -s -- --prefix /opt/embcc --version v0.1.0
 ```
 
 | Option | Meaning |
@@ -352,7 +352,7 @@ PREFIX/share/man/man1/embcc.1
 PREFIX/share/embcc/cmake/embcc.cmake
 ```
 
-`VERSION` is the version `embcc --version` prints (`0.0.1-beta`).
+`VERSION` is the version `embcc --version` prints (`0.1.0`).
 Nothing in the binary refers to `PREFIX`: the compiler finds this
 directory relative to its own location, so an installation can be moved
 or unpacked anywhere. Check what a compiler found with:

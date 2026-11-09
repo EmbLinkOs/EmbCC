@@ -663,7 +663,7 @@ executable, so a build tree and an installation both work without `-I`:
 3. Otherwise, if `BINDIR/../lib/embcc/VERSION/include/stdio.h` exists,
    that installation is used.
 
-`VERSION` is the string `--version` prints (`0.0.1-beta`). The
+`VERSION` is the string `--version` prints (`0.1.0`). The
 executable's own path is read from the operating system on macOS and
 Linux; on other hosts none of the steps after the first can apply, and
 every header needs an explicit `-I`. `--print-search-dirs` shows the
@@ -1940,7 +1940,7 @@ status 0. Recognized anywhere on the command line; a `--target=` on the
 same command line changes the target it reports:
 
 ```text
-EmbCC 0.0.1-beta (the Emb toolchain's C and C++ compiler, for embedded systems and operating systems)
+EmbCC 0.1.0 (the Emb toolchain's C and C++ compiler, for embedded systems and operating systems)
 Target: x86_64-elf
 Default target: x86_64-elf
 Targets (every family; make TARGETS= builds fewer):
@@ -2125,9 +2125,9 @@ header it includes, to standard output (or to the `-MF` file). Use it with
 ```sh
 $ embcc -M -c m.c
 m.o: m.c \
-  /opt/embcc/lib/embcc/0.0.1-beta/include/stdio.h \
-  /opt/embcc/lib/embcc/0.0.1-beta/freestanding/stddef.h \
-  /opt/embcc/lib/embcc/0.0.1-beta/freestanding/stdarg.h \
+  /opt/embcc/lib/embcc/0.1.0/include/stdio.h \
+  /opt/embcc/lib/embcc/0.1.0/freestanding/stddef.h \
+  /opt/embcc/lib/embcc/0.1.0/freestanding/stdarg.h \
   loc.h
 $ embcc --deps-only -c m.c
 m.o: m.c loc.h

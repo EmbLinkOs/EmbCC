@@ -11,11 +11,10 @@ and a flash programmer.** One `embcc` binary targets every chip in the
 table below, from an 8-bit AVR to a 64-bit RISC-V, and it preprocesses,
 compiles, assembles and links without starting any other program.
 
-> **Status: beta.** The one release so far, 0.0.1-beta (October 2026), is
-> a pre-release, and `main` has moved well past it. Every change is tested
-> on QEMU and EmbSim; no real board is part of CI yet. What 1.0 will
-> promise, and how far each promise is today, is in the
-> [roadmap](docs/roadmap.md).
+> **Status: beta.** The current release is 0.1.0 (November 2026). CI
+> builds and tests every pull request on QEMU and EmbSim; no real board is
+> part of CI yet. What 1.0 will promise, and how far each promise is
+> today, is in the [roadmap](docs/roadmap.md).
 
 ## Why EmbCC
 
@@ -180,16 +179,14 @@ unknown `--target=` lists every triple EmbCC accepts. EmbSim's boards
 
 ## Building and installing
 
-A release installs on Linux and macOS, x86-64 and arm64. The first one,
-0.0.1-beta, is a pre-release, so name it:
+A release installs on Linux and macOS, x86-64 and arm64:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/EmbLinkOs/EmbCC/main/install.sh | sh -s -- --version v0.0.1-beta
+curl -fsSL https://raw.githubusercontent.com/EmbLinkOs/EmbCC/main/install.sh | sh
 ```
 
-The script installs into `~/.local` (`/usr/local` as root), after
-checking the download's SHA-256. Once a release without a suffix is out,
-`| sh` alone installs the latest one. The `.deb` packages and the
+The script installs the latest release into `~/.local` (`/usr/local` as
+root), after checking the download's SHA-256. The `.deb` packages and the
 script's options are described in
 [Installing](docs/manual/getting-started.md#installing); the Homebrew tap
 is not published yet.

@@ -10,6 +10,6 @@
 #ifndef EMBCC_DRIVER_VERSION_H
 #define EMBCC_DRIVER_VERSION_H
 
-#define EMBCC_VERSION "0.0.1-beta"
+#define EMBCC_VERSION "0.1.0"
 
 #endif
