@@ -32,8 +32,10 @@
  * An archive of Mach-O objects is written in the BSD format Apple's ld
  * reads instead, which refuses the GNU one: each name inline after its
  * header ("#1/N", padded so the object starts on eight bytes) and a
- * "__.SYMDEF" table of ranlib entries -- every external symbol a member
- * defines, from its LC_SYMTAB. Both formats are read back.
+ * "__.SYMDEF SORTED" table of ranlib entries -- every external symbol a
+ * member defines, from its LC_SYMTAB, in the order of their names. The
+ * layout is Apple's ar's, byte for byte (see write_bsd). Both formats are
+ * read back.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -250,7 +252,8 @@ static void index_macho(int mi)
     }
 }
 
-static void put_hdr(FILE *f, const char *name, long size)
+static void put_hdr_mode(FILE *f, const char *name, long size,
+                         const char *mode)
 {
     /* The size field is ten characters: a member that does not fit would
      * push the header's closing "`\n" out of place, and every member
@@ -260,8 +263,13 @@ static void put_hdr(FILE *f, const char *name, long size)
         die("%s is larger than an archive member can be (9999999999 bytes)",
             name);
     snprintf(h, sizeof h, "%-16.16s%-12s%-6s%-6s%-8s%-10.10s`\n", name, "0",
-             "0", "0", "644", sz);
+             "0", "0", mode, sz);
     fwrite(h, 1, 60, f);
+}
+
+static void put_hdr(FILE *f, const char *name, long size)
+{
+    put_hdr_mode(f, name, size, "644");
 }
 
 static void be32(FILE *f, unsigned long v)
@@ -276,42 +284,72 @@ static void le32(FILE *f, unsigned long v)
     fputc((int)(v >> 16) & 255, f); fputc((int)(v >> 24) & 255, f);
 }
 
-/* A member's inline BSD name: the name and NULs to a length that puts its
- * data, after the 60-byte header at `at`, on a multiple of eight. */
+/* A member's inline BSD name: the name and NULs, as Apple's ar sizes
+ * them -- the name's length rounded up to eight, and four more, which
+ * puts the data on a multiple of eight after a header that starts on one
+ * (every header does). The loop is for a header that would not. */
 static long bsd_namelen(const char *name, long at)
 {
-    long n = (long)strlen(name) + 1;
+    long n = ((long)strlen(name) + 7) / 8 * 8 + 4;
     while ((at + 60 + n) % 8)
         n++;
     return n;
 }
 
-static void put_bsd(FILE *f, const char *name, long nl, long size)
+static void put_bsd(FILE *f, const char *name, long nl, long size,
+                    const char *mode)
 {
     char nm[32];
     long len = (long)strlen(name);
     snprintf(nm, sizeof nm, "#1/%ld", nl);
-    put_hdr(f, nm, nl + size);
+    put_hdr_mode(f, nm, nl + size, mode);
     fwrite(name, 1, (size_t)len, f);
     for (long k = len; k < nl; k++)
         fputc(0, f);
 }
 
-/* The BSD format, for Mach-O members (see the top of the file) */
+/* The ranlib entries of "__.SYMDEF SORTED" go in the order of their
+ * names; equal names keep the order in which the members define them.
+ * Sorts indices into g_sym. */
+static int sym_order(const void *a, const void *b)
+{
+    int x = *(const int *)a, y = *(const int *)b;
+    int c = strcmp(g_sym[x].name, g_sym[y].name);
+    if (c) return c;
+    return x < y ? -1 : x > y;
+}
+
+/* The BSD format, for Mach-O members (see the top of the file). Laid out
+ * as Apple's ar lays it out: every header on eight bytes -- a member's
+ * data is padded with newlines to a multiple of eight, counted in its
+ * size -- because the ranlib offsets point at headers, and the ld of
+ * Xcode 16 refuses an archive whose offsets are not multiples of eight
+ * ("archive member invalid control bits"). */
 static void write_bsd(const char *path, int want_index)
 {
     long *at = xmalloc((size_t)(g_nmem + 1) * sizeof *at);
     long *nl = xmalloc((size_t)(g_nmem + 1) * sizeof *nl);
+    long *pad = xmalloc((size_t)(g_nmem + 1) * sizeof *pad);
+    long *so;
+    int *ord;
     long strsz = 0, symsz = 0, symnl = 0, off;
-    static const char symdef[] = "__.SYMDEF";
+    static const char symdef[] = "__.SYMDEF SORTED";
     FILE *f;
     g_nsym = 0;
     if (want_index)
         for (int i = 0; i < g_nmem; i++)
             if (is_macho(i))
                 index_macho(i);
-    for (int s = 0; s < g_nsym; s++)
+    /* the strings in the order the members define them; the entries
+     * sorted by name, each naming its string's offset */
+    so = xmalloc((size_t)(g_nsym + 1) * sizeof *so);
+    ord = xmalloc((size_t)(g_nsym + 1) * sizeof *ord);
+    for (int s = 0; s < g_nsym; s++) {
+        so[s] = strsz;
         strsz += (long)strlen(g_sym[s].name) + 1;
+        ord[s] = s;
+    }
+    qsort(ord, (size_t)g_nsym, sizeof *ord, sym_order);
     while (strsz % 8)
         strsz++;
     off = 8;
@@ -324,33 +362,34 @@ static void write_bsd(const char *path, int want_index)
         long sz;
         at[i] = off;
         nl[i] = bsd_namelen(g_mem[i].name, off);
-        sz = nl[i] + g_mem[i].size;
-        off += 60 + sz + (sz & 1);
+        pad[i] = (8 - g_mem[i].size % 8) % 8;
+        sz = nl[i] + g_mem[i].size + pad[i];
+        off += 60 + sz;
     }
     f = fopen(path, "wb");
     if (!f) die("cannot write %s", path);
     fwrite("!<arch>\n", 1, 8, f);
     if (want_index) {
-        long so = 0;
-        put_bsd(f, symdef, symnl, symsz);
+        long w = 0;
+        put_bsd(f, symdef, symnl, symsz, "100644");
         le32(f, 8UL * (unsigned long)g_nsym);
         for (int s = 0; s < g_nsym; s++) {
-            le32(f, (unsigned long)so);
-            le32(f, (unsigned long)at[g_sym[s].member]);
-            so += (long)strlen(g_sym[s].name) + 1;
+            le32(f, (unsigned long)so[ord[s]]);
+            le32(f, (unsigned long)at[g_sym[ord[s]].member]);
         }
         le32(f, (unsigned long)strsz);
-        for (int s = 0; s < g_nsym; s++)
+        for (int s = 0; s < g_nsym; s++) {
             fwrite(g_sym[s].name, 1, strlen(g_sym[s].name) + 1, f);
-        for (; so < strsz; so++)
+            w += (long)strlen(g_sym[s].name) + 1;
+        }
+        for (; w < strsz; w++)
             fputc(0, f);
-        if ((symnl + symsz) & 1) fputc('\n', f);
     }
     for (int i = 0; i < g_nmem; i++) {
-        long sz = nl[i] + g_mem[i].size;
-        put_bsd(f, g_mem[i].name, nl[i], g_mem[i].size);
+        put_bsd(f, g_mem[i].name, nl[i], g_mem[i].size + pad[i], "644");
         if (g_mem[i].size) fwrite(g_mem[i].data, 1, (size_t)g_mem[i].size, f);
-        if (sz & 1) fputc('\n', f);
+        for (long k = 0; k < pad[i]; k++)
+            fputc('\n', f);
     }
     if (fclose(f) != 0) die("cannot write %s", path);
 }
