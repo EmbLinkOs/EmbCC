@@ -1670,13 +1670,17 @@ static void copy16(struct code *text, int dbase, int doff, int sbase, int soff)
 }
 
 /* The address held by vreg v, in a register other than rax: its own if
- * register-resident, else loaded into rcx. */
+ * register-resident, else loaded into rcx -- straight from its slot.
+ * Through rax (load, then `mov %rax,%rcx`) it overwrote rax behind the
+ * residency cache's back: the cache still named the value rax held
+ * before, and the next instruction that wanted that value used rax as
+ * it was. A float load's base clobbered rax, and the 16-bit load after
+ * it read from the float's address (fuzz seed 1038932645, x86-64 -O2). */
 static int addr_reg(struct code *text, const int *sd, int v)
 {
     if (in_reg(v))
         return g_loc[v];
-    x86_load_slot(text, sd[v], 8, 0, 8);
-    x86_mov_reg_reg(text, REG_RCX, REG_RAX);
+    x86_load_reg_mem(text, REG_RCX, REG_RBP, sd[v], 8);
     return REG_RCX;
 }
 
