@@ -128,6 +128,20 @@ if ! why=$("$EMBCC" --target="$TARGET" --print-target 2>&1 >/dev/null) &&
     exit 0
 fi
 
+# The families this compiler lacks ("Not built:" in --version; none for a
+# full build). A test that stops on one of them is a skip. A test that
+# names a family this compiler HAS was refused by a compiler the test
+# built itself -- target-select's TARGETS=arm one says exactly these words
+# on purpose -- and its failure is a failure: counted as a skip, it hid
+# target-select failing in CI from #198 on.
+NOT_BUILT=$("$EMBCC" --version 2>/dev/null | sed -n 's/^Not built://p')
+unbuilt_skip() {    # unbuilt_skip OUTPUT: stopped on a family it lacks?
+    for fam in $(printf '%s\n' "$1" | grep -o "$UNBUILT" | awk '{print $7}'); do
+        case " $NOT_BUILT " in *" $fam "*) return 0 ;; esac
+    done
+    return 1
+}
+
 pass=0
 fail=0
 skip=0
@@ -243,7 +257,7 @@ while [ $i -lt $n_sh ]; do
         ok "$t"
     elif [ "$status" -eq 0 ]; then
         bad "$t" "exit 0 but marker 'TEST-MARKER $name' missing — did it run?" "$out"
-    elif printf '%s\n' "$out" | grep -q "$UNBUILT"; then
+    elif unbuilt_skip "$out"; then
         # stopped on a target this compiler was built without (make
         # TARGETS=): not run, so neither a pass nor a failure
         echo "SKIP $t ($(printf '%s\n' "$out" | grep -m1 "$UNBUILT" |
