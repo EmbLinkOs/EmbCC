@@ -60,7 +60,7 @@ ELF="$OUT/$NAME.elf"
 rm -f "$OBJ" "$ELF"
 
 echo "embcc  -c $SRC -o $OBJ"
-./embcc -c "$SRC" -o "$OBJ"
+./embcc --target=x86_64-elf -c "$SRC" -o "$OBJ"
 
 # -nostartfiles: crt0.o provides _start, there are no crtX files here.
 # -static: the kernel binds a shared libembk.so only for UI apps; an M1 program

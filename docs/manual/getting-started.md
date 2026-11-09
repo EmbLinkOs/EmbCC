@@ -460,7 +460,7 @@ a warning and no debug information for the Darwin targets. See
 
 ### Bare-metal x86-64 and EmbLinkOS
 
-`x86_64-elf` (the default target) and `x86_64-emblink` are freestanding:
+`x86_64-elf` and `x86_64-emblink` are freestanding:
 `embcc` links them only when the program defines its own `_start`.
 Normally you compile with `-c` and link with [`embld`](tools/embld.md)
 together with your start-up code, as described in

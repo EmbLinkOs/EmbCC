@@ -215,15 +215,16 @@ described in [Getting started](docs/manual/getting-started.md).
 
 EmbCC is also a compiler for operating systems and hosted programs:
 x86-64 and AArch64 kernels (EmbLinkOS among them), and Linux, macOS and
-Windows objects. On Linux x86-64, `make libc-linux-x86_64` builds the C
-library, and `./embcc --target=x86_64-linux-gnu -O2 hello.c -o hello`
-compiles and links a static executable. On macOS, EmbCC writes Mach-O
-objects for the system linker:
+Windows objects. With no `--target=`, it compiles for the machine it
+runs on, as GCC and clang do:
 
 ```sh
-./embcc --target=aarch64-apple-darwin --opt=speed -c hello.c -o hello.o
-cc hello.o -o hello
+./embcc -O2 hello.c -o hello && ./hello
 ```
+
+On Linux that is a static executable against EmbCC's own C library,
+which `make` builds. On macOS it is a Mach-O program linked by the
+system linker. A board or a kernel is always named with `--target=`.
 
 `x86_64-elf` and `aarch64-elf` build freestanding kernels; `embld
 --embx` writes EmbLinkOS images.

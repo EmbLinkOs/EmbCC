@@ -24,7 +24,7 @@ feeling. "Today" is the state at 0.0.1-beta (October 2026).
 | Coverage | Every construct EmbCC refuses is either implemented or listed in the manual as permanent, with the reason and a workaround. At least 99% of the GCC torture files that GCC accepts are accepted. | 110 distinct backend refusals and 134 front-end and driver refusals in the source. 95.4% of the torture files GCC accepts are accepted. |
 | Code size | `-Os`, object by object against clang: at most 1.10 on Cortex-M and RISC-V, 1.25 on AVR. | Cortex-M4 1.14, Cortex-M0 1.17, RV32 1.28, RV64 1.28, AVR 1.53, x86-64 1.70, AArch64 1.49; without math, Cortex-M4 1.08 and RISC-V 1.12 (`tools/scoreboard.sh`, 2026-10-24). |
 | Debugging | `-g` changes no code (already true). A variable held in a register is shown by the debugger, not reported as optimized out. Breakpoints, stepping and locals are checked through GDB on every board family EmbSim or QEMU runs. | `-g` changes no code on any target. No location lists yet, so register-held variables show as `<optimized out>`. `-g` is refused for Windows. |
-| Stable interface | EmbCC's own option names are final. GCC spellings are accepted by one compatibility layer. Removing anything follows the deprecation policy below. The default target is settled. | EmbCC's own option vocabulary is in place. The GCC compatibility layer is still spread through the driver. The default target is `x86_64-elf`. |
+| Stable interface | EmbCC's own option names are final. GCC spellings are accepted by one compatibility layer. Removing anything follows the deprecation policy below. The default target is settled. | EmbCC's own option vocabulary is in place. The GCC compatibility layer is still spread through the driver. The default target is the machine EmbCC runs on, as with GCC and clang (decided November 2026). |
 | Real hardware | Programs built by EmbCC verified on at least one real board per major family: Cortex-M0+, Cortex-M3/M4, AVR, RISC-V, PIC32. `embflash` checked with a real probe. | Verified on QEMU and EmbSim only. |
 | Installing | Linux and macOS (x86-64 and arm64) packages from every release, a Homebrew tap, and `install.sh` with no arguments installing the latest release. A Windows host build. | Linux and macOS tarballs and `.deb` files from the release workflow. No Homebrew tap repository yet. No Windows host build. |
 | Documentation | The manual and the status page are re-audited against the compiler before each release. A getting-started page for each EmbSim board. Migration guides from `arm-none-eabi-gcc`, `avr-gcc` and XC32. | The manual is complete, but the status page has drifted (it still lists C++ as refused on Cortex-M). The general [Migrating from GCC](manual/migrating-from-gcc.md) page exists; none yet for a particular board toolchain. |
@@ -80,9 +80,8 @@ not at all.
 - The GCC compatibility layer: the driver reads options by identity
   from one table; every GCC spelling is an alias in one module,
   documented on a migration page.
-- The default target: decide whether `embcc` with no `--target` builds
-  for the host (as clang does) or stays `x86_64-elf`, and ship the
-  decision with a warning period.
+- The default target: done. `embcc` with no `--target` builds for the
+  machine it runs on, as clang does.
 - The source layout: the planned move to `compiler/`, `targets/`,
   `runtime/`, `sim/`, `tools/` happens now or is dropped. Either way,
   the build and install interface (`make`, `./embcc`, `embld`) stays.
@@ -175,7 +174,7 @@ Each of these changes the plan, and none can be made by code alone:
 
 | Decision | Needed by | Options |
 |---|---|---|
-| The default target | 0.2.0 | The host, as clang does; or `x86_64-elf`, as now. EmbLinkOS's build relies on today's default and would need `--target=x86_64-elf` first. |
+| The default target | done | The host, as clang does (November 2026). A build for a board or a kernel names its target. EmbLinkOS's `mathself` recipe relied on the old default and needs `--target=x86_64-elf`. |
 | The source layout | 0.2.0 | Move to the planned layout before 1.0, or keep `src/`. |
 | Which refusals are permanent | 0.5.0 | Nested functions, C++ on AVR, GCC options for other compilers' ABIs (`-mabicalls`, RX `-m64bit-doubles`, ...). |
 | Hardware for validation | 0.9.0 | The six boards above and a debug probe (a CMSIS-DAP or J-Link, and a PICkit or MPLAB Snap for PIC32). |
