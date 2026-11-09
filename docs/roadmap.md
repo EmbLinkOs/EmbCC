@@ -73,8 +73,9 @@ three nightly runs in a row are clean.
 **At the release** (2026-11-09, [notes](releases/0.1.0.md)): CI on
 every pull request, the nightly torture and fuzz runs, the target tables
 checked by a test, the issue forms, the security policy and the
-contributor guide are in place. Not yet: `main` does not require the
-checks to pass before a merge.
+contributor guide are in place, and `main` requires the 17 CI checks to
+pass before a pull request merges. Not yet: three nightly runs in a row
+clean (the one on 2026-11-08 was).
 
 ### 0.2.0: a stable interface
 
