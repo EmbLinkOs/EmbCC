@@ -74,6 +74,10 @@ rxref() {
     case $1 in
     attr-layout|c-extras2|cmp-copy-width|complex|fp-bits|long-double|stdc-version|structs|union-pun-params)
         echo 1 ;;
+    # a fuzz program (2026-11-09) whose checksum mixes doubles: with a
+    # binary32 double it is another number, and the program returns 1, as
+    # cmp-copy-width does -- the same at -O0 and every other level
+    x86-addr-reg-cache) echo 1 ;;
     frontend-gaps|gnu-attr-positions) echo 2 ;;
     float-truth|static-local-init|u64-float) echo 3 ;;
     atomics-reg|globals|strings|vla) echo 4 ;;
