@@ -27,6 +27,10 @@
 set -u
 echo "TEST-MARKER target-select"
 . "$(dirname "$0")/../lib.sh"
+# The compilers built here choose their own default; the suite's
+# x86_64-elf (tests/run.sh, tests/lib.sh) is one a TARGETS=arm compiler
+# lacks, and it refused even --version. As default-target.sh does.
+unset EMBCC_DEFAULT_TARGET
 
 EMBCC=${EMBCC:-$EMBCC_ROOT/embcc}
 out=$EMBCC_ROOT/tests/golden/out/target-select

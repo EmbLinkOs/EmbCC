@@ -21,6 +21,13 @@ fi
 . "$EMBCC_ROOT/tools/hostpaths.sh"
 NEWLIB_INC=$X86_NEWLIB/include
 
+# The target nothing names, as tests/run.sh sets it: the tests were written
+# against x86_64-elf and name every other target. Since embcc compiles for
+# the host by default (#198), a test run by hand on a Mac built Mach-O
+# objects without this, and embld-doctor failed for a contributor although
+# the suite passed (#201). default-target.sh unsets it to test the default.
+export EMBCC_DEFAULT_TARGET=x86_64-elf
+
 # READELF / OBJDUMP / OBJCOPY come from tools/hostpaths.sh too.
 
 # An x86-64 program is run natively only where the host IS x86-64 Linux; any
