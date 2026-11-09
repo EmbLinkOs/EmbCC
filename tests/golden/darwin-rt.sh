@@ -11,7 +11,13 @@
 #
 #  1. embar archives Mach-O members in the BSD format ld64 reads -- it
 #     refuses the GNU one ("archive member '//' not a mach-o file") -- with
-#     a __.SYMDEF table, and still writes the GNU one for ELF.
+#     a __.SYMDEF table, and still writes the GNU one for ELF. Laid out as
+#     Apple's ar lays it out: every member header, which is what the
+#     table's offsets name, on a multiple of eight. Xcode 16's ld refused
+#     the runtime of the 0.1.0 dry run, whose members had odd sizes
+#     ("archive member invalid control bits"); a newer ld accepted it, so
+#     linking on this Mac proves nothing. On a Mac the archive must be
+#     byte for byte what `ZERO_AR_DATE=1 ar rcs` writes.
 #  2. On an arm64 Mac: complex division, 128-bit shifts, multiply and
 #     compares link and print what clang's build prints, at -O0 and -O2.
 #  3. An object's LC_BUILD_VERSION says the macOS the link says: 10.13 for
@@ -45,6 +51,51 @@ llvm-nm --print-armap "$out/macho.a" 2>/dev/null | grep -q '_a_long_member_name_
     ! grep -q '__\.SYMDEF' "$out/elf.a" ||
     fail "an ELF archive is no longer GNU-format (a / index first)"
 echo "darwin-rt: embar writes Mach-O archives in the BSD format with __.SYMDEF, ELF ones in the GNU one"
+
+# three members of odd sizes, with names of 3, 10 and 17 characters
+names="abc.o aeabidiv.o aeabi_divmod_ab.o"
+n=0
+for m in $names; do
+    n=$((n + 1))
+    printf 'int f%d(int x) { return x * %d; }\n' $n $n > "$out/l.c"
+    k=0
+    while [ $k -lt $((n * 3)) ]; do
+        printf 'int g%d_%d(int y) { return y ^ %d; }\n' $n $k $k >> "$out/l.c"
+        k=$((k + 1))
+    done
+    "$EMBCC" --target=aarch64-apple-darwin -c "$out/l.c" -o "$out/$m" || fail "darwin: $m"
+done
+rm -f "$out/layout.a"
+embar_abs=$(cd "$(dirname "$EMBAR")" && pwd)/$(basename "$EMBAR")
+(cd "$out" && "$embar_abs" rcs layout.a $names) || fail "embar (layout)"
+python3 - "$out/layout.a" << 'EOF' || fail "a Mach-O archive's headers are not on multiples of eight"
+import struct, sys
+d = open(sys.argv[1], 'rb').read()
+off, heads = 8, []
+while off < len(d):
+    h = d[off:off + 60]
+    heads.append(off)
+    off += 60 + int(h[48:58])
+    off += off & 1          # an odd-sized member is followed by a newline
+assert off == len(d), 'members overrun the file'
+odd = [o for o in heads if o % 8]
+# the table: its size, then (string, header offset) pairs
+base = heads[0] + 60 + int(d[heads[0] + 3:heads[0] + 16])
+n = struct.unpack('<I', d[base:base + 4])[0] // 8
+targets = {struct.unpack('<I', d[base + 8 + 8 * i:base + 12 + 8 * i])[0] for i in range(n)}
+bad = sorted(t for t in targets if t % 8 or t not in heads)
+if odd or bad or n < 3:
+    print('headers off eight:', odd, 'table offsets wrong:', bad, 'entries:', n)
+    sys.exit(1)
+EOF
+echo "darwin-rt: every member header, and every offset the __.SYMDEF table names, is on a multiple of eight"
+if [ "$(uname -s)" = Darwin ] && [ -x /usr/bin/ar ]; then
+    rm -f "$out/apple.a"
+    (cd "$out" && ZERO_AR_DATE=1 /usr/bin/ar rcs apple.a $names) 2> /dev/null &&
+        cmp -s "$out/layout.a" "$out/apple.a" ||
+        fail "embar's archive is not byte for byte Apple ar's (cmp $out/layout.a $out/apple.a)"
+    echo "darwin-rt: the archive is byte for byte what Apple's ar writes"
+fi
 
 # ---- 3. the minimum macOS (any host: otool or llvm-objdump reads it) ------
 "$EMBCC" --target=x86_64-apple-darwin -c "$out/m.c" -o "$out/x.o" || fail "x86-64 darwin"
