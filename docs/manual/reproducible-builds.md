@@ -87,7 +87,7 @@ carries it in `.debug_embcc_sbom`.
 {
   "spdxVersion": "SPDX-2.3",
   "name": "fw.elf",
-  "creationInfo": { "created": "2023-11-14T22:13:20Z", "creators": ["Tool: EmbCC-0.0.1-beta"] },
+  "creationInfo": { "created": "2023-11-14T22:13:20Z", "creators": ["Tool: EmbCC-0.1.0"] },
   "files": [
     { "fileName": "/src/motor.c", "checksums": [{"algorithm": "SHA256", "checksumValue": "..."}],
       "licenseInfoInFiles": ["MIT"] },

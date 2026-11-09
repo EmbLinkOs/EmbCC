@@ -12,7 +12,7 @@ body:
     attributes:
       label: embcc --version
       description: The first line it prints.
-      placeholder: EmbCC 0.0.1-beta (the Emb toolchain's C and C++ compiler, ...)
+      placeholder: EmbCC 0.1.0 (the Emb toolchain's C and C++ compiler, ...)
     validations:
       required: true
   - type: input

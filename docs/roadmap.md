@@ -1,6 +1,6 @@
 # Road to EmbCC 1.0
 
-EmbCC 0.0.1-beta is the first public release. This page says what
+EmbCC 0.1.0 is the current release; 0.0.1-beta was the first. This page says what
 1.0.0 will promise, how far EmbCC is from each promise today, and the
 releases that close the distance, in order. It is for people trying the
 beta who want to know what is coming, and for contributors choosing
@@ -69,6 +69,12 @@ depending on one developer's machine.
 
 **Done when:** a pull request cannot merge with a failing check, and
 three nightly runs in a row are clean.
+
+**At the release** (2026-11-09, [notes](releases/0.1.0.md)): CI on
+every pull request, the nightly torture and fuzz runs, the target tables
+checked by a test, the issue forms, the security policy and the
+contributor guide are in place. Not yet: `main` does not require the
+checks to pass before a merge.
 
 ### 0.2.0: a stable interface
 
