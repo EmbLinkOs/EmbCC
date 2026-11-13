@@ -30,6 +30,7 @@ done
 ${CC:-cc} -w -I$D $D/host.c -o "$out/host" || fail "the host program"
 "$out/host" > "$out/host.txt" || fail "the host program does not run"
 { cat <<'EOF'
+errno 34
 byte 22 fe word 1234 beef
 dword 89abcdef qword 102030405060708 float 5
 ptr world

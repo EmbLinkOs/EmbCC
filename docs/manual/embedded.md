@@ -1530,6 +1530,7 @@ what it calls:
   string in flash. A floating-point conversion prints `?`, as avr-libc's
   does without `-lprintf_flt`; EmbCC has no `printf_flt`;
 - the `<avr/eeprom.h>` functions;
+- `errno`, with one value for the program (AVR has no threads of its own);
 - `setjmp` and `longjmp`, with a 24-byte `jmp_buf`: r2-r17, Y, the stack
   pointer, SREG and the return address.
 

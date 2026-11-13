@@ -2,6 +2,7 @@
  * and the _P functions, and the printf family, on QEMU's ATmega328P. */
 #include <avr/io.h>
 #include <avr/pgmspace.h>
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -32,6 +33,9 @@ int main(void)
     UBRR0 = 8;
     UCSR0B = _BV(TXEN0);
     UCSR0C = _BV(UCSZ01) | _BV(UCSZ00);
+
+    errno = ERANGE;
+    SHOW("errno %d", errno);
 
     /* pgm_read_* */
     SHOW("byte %x %x word %x %x", pgm_read_byte(&bytes[1]), pgm_read_byte(&bytes[3]),
