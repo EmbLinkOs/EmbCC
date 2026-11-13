@@ -188,8 +188,22 @@ static long io_name(const char *s, int len)
  * inline asm statement does. */
 int avrasm_is_word(const char *stmt, const char *w, int len)
 {
+    static const char *const op[] = {
+        "lo8", "hi8", "hlo8", "hh8",
+        "pm_lo8", "pm_hi8", "pm_hh8", "gs"
+    };
     (void)stmt;
-    return io_name(w, len) >= 0;
+    if (io_name(w, len) >= 0)
+        return 1;
+    /* These are expression operators, not symbols. Without naming them
+     * here, gas.c records (for example) `lo8` as the first undefined symbol
+     * in a multi-statement inline template, then cannot relocate the real
+     * `call` or `jmp` symbol that follows it. */
+    for (unsigned i = 0; i < sizeof op / sizeof op[0]; i++)
+        if ((int)strlen(op[i]) == len &&
+            strncmp(w, op[i], (size_t)len) == 0)
+            return 1;
+    return 0;
 }
 
 static long expr_prim(const char **p, struct expr_ctx *x)
