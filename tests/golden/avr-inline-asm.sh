@@ -74,6 +74,29 @@ printf 'unsigned int f(unsigned char a, unsigned char b)\n'\
     with 'clr r1' is the idiom -- refusing it forbids using mul at all:"
     head -4 "$out/m.err"; exit 1; }
 
+# A constant byte-selection expression in one statement must not change how
+# the following statement's symbol is scanned. The 18-character names are
+# the two EmbLinkRTOS AVR entry points that exposed the cut at 16 characters.
+cat > "$out/long-symbol.c" <<'EOF'
+void emb_arch_switch_to(void);
+void embk_thread_launch(void);
+void f(void)
+{
+    __asm__ volatile("ldi r18, lo8(2303)\n\t"
+                     "call emb_arch_switch_to\n\t"
+                     "jmp embk_thread_launch" ::: "r18");
+}
+EOF
+"$EMBCC" --target=avr -Os -c "$out/long-symbol.c" \
+    -o "$out/long-symbol.o" 2> "$out/long-symbol.err" || {
+    echo "lo8() made a following long symbol fail to assemble:"
+    cat "$out/long-symbol.err"; exit 1; }
+for s in emb_arch_switch_to embk_thread_launch; do
+    llvm-readelf -r "$out/long-symbol.o" | grep -q "$s" || {
+        echo "the inline asm's long symbol was cut: $s"
+        llvm-readelf -r "$out/long-symbol.o"; exit 1; }
+done
+
 QEMU=${EMBCC_QEMU_AVR:-qemu-system-avr}
 command -v "$QEMU" >/dev/null 2>&1 || {
     echo "the refusals hold (SKIP: no $QEMU to run the rest)"; exit 0; }
